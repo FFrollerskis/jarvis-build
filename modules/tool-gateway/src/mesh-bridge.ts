@@ -1,4 +1,5 @@
 import type { ToolCallRequest, ToolDefinition as MeshToolDefinition, ToolResultMessage } from "@jarvis/provider-adapters";
+import { zodToJsonSchema } from "zod-to-json-schema";
 import type { ToolGateway } from "./gateway.ts";
 
 /**
@@ -71,8 +72,9 @@ const MESH_TOOLS: MeshToolMapping[] = [
     def: {
       name: "check_my_capabilities",
       description:
-        "Sjekk hvilke verktøy du FAKTISK har tilgang til i denne samtalen akkurat nå, og siste kjente " +
-        "helsetilstand for tilkoblede systemer. Bruk DETTE FØR du sier noe om egne evner eller tilkoblinger " +
+        "Sjekk hvilke verktøy du FAKTISK har tilgang til i denne samtalen akkurat nå, hvilken modell/" +
+        "leverandør som FAKTISK genererer dette svaret, og siste kjente helsetilstand for tilkoblede " +
+        "systemer. Bruk DETTE FØR du sier noe om egne evner, tilkoblinger eller hvilken modell du er " +
         "- gjett ALDRI.",
       input_schema: { type: "object", properties: {}, required: [], additionalProperties: false }
     },
@@ -138,6 +140,55 @@ export function meshToolDefinitions(tools: MeshToolMapping[] = MESH_TOOLS): Mesh
 }
 
 /**
+ * D-289 (Tobias direkte i chat, 2026-09-26: "vil ha alt at han har full
+ * kontroll" - eksplisitt retningsvalg på D-288 sitt funn om at
+ * samtaleflaten strukturelt KUN kunne kalle de 5 kuraterte `MESH_TOOLS`,
+ * mens `ToolGateway` hadde ~28 fullt registrerte `tool_id`-er).
+ *
+ * Genererer ÉN mesh-mapping PER FAKTISK REGISTRERT `tool_id:action`-par
+ * (`gateway.list()`) i stedet for en håndskrevet, kuratert liste - samtalen
+ * (chat OG tale, BEGGE via `/chat`) kan derfor be Charlie om AKKURAT det
+ * dashbordet allerede kan gjøre, ingen mer og ingen mindre. `input_schema`
+ * konverteres fra den REGISTRERTE Zod-typen (`zod-to-json-schema`) - modellen
+ * ser ALLTID nøyaktig det samme skjemaet `ToolGateway.execute()` selv
+ * validerer mot (`input_schema.safeParse()`, `gateway.ts`), ALDRI en egen,
+ * potensielt avvikende kopi (samme "aldri en egen avvikende liste"-disiplin
+ * som `getCapabilityStatus()` allerede fulgte for de 5 - se D-209/D-237).
+ *
+ * INGEN ny godkjenningssperre lagt til for klasse C/D her - undersøkt FØR
+ * bygging (D-41-disiplin): `ua1-p1a-dclass-mesh.test.ts` beviser allerede at
+ * et klasse D-mesh-kall for SOVEREIGN-eieren kjører hele D-pipelinen
+ * (preflight → execute → readback → before/after-evidens → audit) UTEN et
+ * eksplisitt godkjenningsobjekt, PRESIST slik D-41 (CLAUDE.md regel 12)
+ * krever ("ingen kunstig godkjenningssperre for eier" for klasse D) - en NY
+ * to-turns bekreftelsesmekanisme for samtaleflaten alene ville vært
+ * nettopp den kunstige sperren regelen forbyr, OG en inkonsistens mellom
+ * dashbord (utfører umiddelbart) og samtale (venter på bekreftelse) for
+ * IDENTISK handling. Autorisasjon/D-pipeline/audit håndheves UENDRET,
+ * UANSETT kallende flate - `MeshToolExecutor` går gjennom SAMME
+ * `toolGateway.execute()` som dashbordets egne transportlag (§17).
+ *
+ * Verktøynavn er `${tool_id}__${action}` (dobbel understreking - `tool_id`
+ * kan selv inneholde enkel understreking, f.eks. `finance_stripe`) - unikt
+ * per konstruksjon (samme `Map`-nøkkel-invariant som `ToolGateway.register()`
+ * selv bruker, `${tool_id}:${action}`). INGEN `parameters`-bygger-closure her
+ * (i motsetning til `MESH_TOOLS`) - modellens rå argumenter går RETT til
+ * `gateway.execute()`, validert DETERMINISTISK av `input_schema.safeParse()`
+ * der (§17, CLAUDE.md regel 2 - aldri kun promptregler).
+ */
+export function allMeshTools(gateway: ToolGateway): MeshToolMapping[] {
+  return gateway.list().map((definition) => ({
+    def: {
+      name: `${definition.tool_id}__${definition.action}`,
+      description: `[klasse ${definition.capability_class}] ${definition.description}`,
+      input_schema: zodToJsonSchema(definition.input_schema, { target: "openApi3" }) as Record<string, unknown>
+    },
+    tool_id: definition.tool_id,
+    action: definition.action
+  }));
+}
+
+/**
  * Strukturelt kompatibel med ModelGateway.ToolExecutor. Resultatet trimmes før
  * det går tilbake til modellen - aldri credentials/intern metadata (§22).
  */
@@ -172,7 +223,11 @@ export class MeshToolExecutor {
       action: mapped.action,
       // Trusted parameterbygging når mappingen definerer den - ellers model-args.
       parameters: (mapped.parameters ? mapped.parameters(call.arguments) : call.arguments) as never,
-      idempotency_key: ctx.idempotency_key
+      idempotency_key: ctx.idempotency_key,
+      // D-317: `call.provider`/`.model` er stemplet av selve adapteren som genererte
+      // DENNE turen (se ToolCallRequest sitt filhode i provider-adapters) - ALDRI fra
+      // modell-oppgitte argumenter, SAMME trusted-lag-kanal som identity/approval.
+      servingModel: { provider: call.provider, model: call.model }
     });
     if (!result.ok) {
       return {

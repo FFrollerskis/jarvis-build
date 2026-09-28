@@ -195,16 +195,19 @@ services:
 
   voice-gateway:
     # D-212 (task #120): egen prosess (CLAUDE.md ufravikelig regel 5) - IKKE
-    # en rute i `api`. Samme runtime-image som api/worker/migrate
-    # (api.Dockerfile kopierer HELE workspacet inkl. apps/voice-gateway) -
-    # kun `command` skiller den ut, samme mønster som `migrate`/`worker` over.
-    # `JARVIS_CORE_URL` peker på `api`-tjenestens container-interne adresse -
-    # UTEN dette faller gatewayen tilbake til sin egen default
-    # (`http://127.0.0.1:3010`), som er FEIL inne i compose-nettverket.
+    # en rute i `api`. `JARVIS_CORE_URL` peker på `api`-tjenestens
+    # container-interne adresse - UTEN dette faller gatewayen tilbake til
+    # sin egen default (`http://127.0.0.1:3010`), som er FEIL inne i
+    # compose-nettverket.
+    #
+    # D-253: EGET image (voice-gateway.Dockerfile), IKKE lenger det delte
+    # api.Dockerfile-imaget api/worker/migrate bruker - lokal whisper.cpp/
+    # piper (bygd/hentet i imaget) trenger et glibc-baseimage + en C/C++-
+    # toolchain, som ville blåst opp de tre andre, rent Node-baserte
+    # tjenestene helt unødvendig. Se D-253 i DECISIONS_AND_ASSUMPTIONS.md.
     build:
       context: ../..
-      dockerfile: infra/local/api.Dockerfile
-    command: ["node", "--experimental-transform-types", "apps/voice-gateway/src/main.ts"]
+      dockerfile: infra/local/voice-gateway.Dockerfile
     environment:
       JARVIS_VOICE_PORT: "${JARVIS_VOICE_PORT:-3020}"
       JARVIS_CORE_URL: "http://api:${JARVIS_API_PORT:-3010}"
@@ -214,6 +217,21 @@ services:
       # space (D-23) og klient-oppgitte, ikke server-verifiserte spaces
       # (D-123) forblir strukturelt avvist - se docs/OPEN_QUESTIONS.md.
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      # D-280 (rettelse av D-279 sitt LIVE-funn: `JARVIS_VOICE_DEBUG_DUMP_DIR`
+      # ble satt som en bar shell-variabel/i `.env`, men NÅDDE ALDRI
+      # containeren - `docker compose` videresender KUN variabler eksplisitt
+      # listet her i `environment:`-blokken, ALDRI automatisk alt i `.env`).
+      # Fast container-intern verdi (`/voice-debug`) i stedet for en
+      # vilkårlig operatør-valgt sti - kombinert med volumet under gir dette
+      # Tobias filen RETT PÅ NAS-filsystemet uten `docker cp`, og fjerner
+      # denne hele klassen konfigurasjonsfeil (compose-passthrough MÅ
+      # eksplisitt listes for HVER variabel, ikke bare `.env`-filen).
+      JARVIS_VOICE_DEBUG_DUMP_DIR: "${JARVIS_VOICE_DEBUG_DUMP_DIR:-}"
+    volumes:
+      # D-280: ALLTID montert (harmløst når JARVIS_VOICE_DEBUG_DUMP_DIR er
+      # usatt - ingenting skriver dit) - se `debug-audio-dump.ts` (D-279).
+      # `.gitignore`-ført slik at et dumpet klipp aldri kan havne i git.
+      - ./voice-debug-dumps:/voice-debug
     ports:
       - "${JARVIS_VOICE_PORT:-3020}:${JARVIS_VOICE_PORT:-3020}"
     healthcheck:

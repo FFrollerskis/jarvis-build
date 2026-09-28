@@ -127,6 +127,108 @@ export class OpenAiTts implements TtsAdapter {
 }
 
 /**
+ * D-319 (harder-tier tale-backlog, Tobias direkte i chat: "Bygg videre" - D-64-
+ * stil sjekk mot `SpeechAdapter`-arkitekturen gjort FØR bygging, som lovet i
+ * PROJECT_STATUS.md): FØRSTE tale-backlog-punkt (`elevenlabs`) løftet ut av
+ * `connector-registry.ts` sin backlog og bygget som en NY `TtsAdapter`-
+ * implementasjon her - IKKE en `ToolGateway`-connector. `elevenlabs` sto
+ * opprinnelig i `connector-registry.ts` under §4.7 "Tale/video/media-AI"
+ * sammen med de andre backlog-punktene, men CLAUDE.md regel 3 (alle
+ * leverandører bak adaptere, `SpeechAdapter` eksplisitt navngitt) og D-122
+ * sin `PROCESSOR_REGION_MATRIX.md`-port gjelder ALLE STT/TTS-leverandører,
+ * uansett hvor de opprinnelig ble listet - en `ElevenLabsTransport` i
+ * `live-transports.ts` ville vært STRUKTURELT FEIL (samme domenegrense-feil
+ * D-64 finnes for å forhindre, bare på tale-siden i stedet for CRM/tickets).
+ *
+ * `processor.processor_terms_status` er BEVISST `"NOT_VERIFIED"`
+ * (fail-closed default, ALDRI utledet av Jarvis selv - se `speech.ts` sin
+ * egen doc-kommentar) - IKKE `"VERIFIED"` slik OpenAI (D-226) er, fordi DEN
+ * statusen krever en EKTE eier-/juridisk handling (Tobias sin egen gjennomgang
+ * av leverandørens Data controls-side, SAMME Q-32-mønster som OpenAI) som
+ * ALDRI har skjedd for ElevenLabs. `evaluateSpeechRouting()` avviser derfor
+ * denne behandleren for ALLE memory spaces inntil Tobias selv gjør den
+ * gjennomgangen og `PROCESSOR_REGION_MATRIX.md` sin nye ElevenLabs-rad
+ * oppdateres til `VERIFIED` - EKSAKT samme "kode finnes, gated til eier
+ * handler"-disiplin som `PENDING_CREDENTIALS`-mønsteret i
+ * `connector-registry.ts`, bare håndhevet av en ANNEN port (`speech.ts`,
+ * ikke `ToolGateway`).
+ *
+ * BEVISST IKKE wiret inn i `main.ts` sin aktive adapter-utvelgelse i denne
+ * sliceen: Tobias sin lokale piper-installasjon er ALLEREDE host-verifisert
+ * fungerende (D-223) - å legge `ElevenLabsTts` inn i utvelgelseskjeden ville
+ * risikert å FORTRENGE en allerede fungerende, ren lokal løsning med en
+ * behandler `evaluateSpeechRouting()` uansett avviser (routingen har INGEN
+ * stille fallback til neste adapter når en aktiv adapter blir avvist - D-122
+ * sin "fail-closed, aldri stille sky-fallback"-disiplin, samme regelform som
+ * `isSensitivityEligible()`). Wiring inn i den aktive kjeden er en EGEN,
+ * senere beslutning Tobias selv tar når/hvis kontovilkårene er gjennomgått.
+ *
+ * API-formen (`POST /v1/text-to-speech/{voice_id}`, `xi-api-key`-header,
+ * `output_format=pcm_16000`-query-parameter for RÅ PCM S16LE 16kHz - SAMME
+ * samplerate som resten av tale-pipelinen bruker internt, IKKE OpenAI sin
+ * 24kHz-respons sitt kjente re-samplings-gap) er ElevenLabs sin langvarig
+ * dokumenterte, stabile REST-API-konvensjon - SAMME D-297-ærlighetsforbehold
+ * som resten av denne økten: trent kunnskap, IKKE denne-økten-verifisert mot
+ * live dokumentasjon (nettverksegress til `elevenlabs.io`/doc-domener
+ * blokkert denne økten, forsøkt og bekreftet FØR denne sliceen ble valgt).
+ */
+export class ElevenLabsTts implements TtsAdapter {
+  readonly name = "elevenlabs-tts";
+  /** EKSTERN databehandler - se klassekommentaren for D-319/Q-32-status. */
+  readonly processor: SpeechProcessorDeclaration = {
+    processor_id: "elevenlabs-text-to-speech",
+    locality: "external",
+    processor_row_declared: true,
+    processor_terms_status: "NOT_VERIFIED"
+  };
+  constructor(
+    private readonly apiKey: string | undefined = process.env["JARVIS_ELEVENLABS_API_KEY"],
+    /** Påkrevd i selve URL-stien - ElevenLabs har intet "standard stemme"-endepunkt. */
+    private readonly voiceId: string | undefined = process.env["JARVIS_ELEVENLABS_VOICE_ID"],
+    private readonly modelId: string = "eleven_multilingual_v2"
+  ) {}
+
+  /** Stemme-ID-en er like påkrevd som nøkkelen - ElevenLabs kan strukturelt ikke kalles uten den. */
+  available(): boolean {
+    return Boolean(this.apiKey) && Boolean(this.voiceId);
+  }
+
+  synthesize(text: string): TtsPlayback {
+    if (!this.apiKey || !this.voiceId) {
+      throw new Error("elevenlabs_tts_not_configured");
+    }
+    const { apiKey, voiceId, modelId } = this;
+    let cancelled = false;
+    async function* generate(): AsyncIterable<Buffer> {
+      const response = await fetch(
+        `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=pcm_16000`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "xi-api-key": apiKey },
+          body: JSON.stringify({ text, model_id: modelId })
+        }
+      );
+      if (!response.ok || !response.body) {
+        throw new Error(`elevenlabs_tts_error_${response.status}`);
+      }
+      const reader = response.body.getReader();
+      for (;;) {
+        if (cancelled) {
+          await reader.cancel();
+          return;
+        }
+        const { done, value } = await reader.read();
+        if (done) {
+          return;
+        }
+        yield Buffer.from(value);
+      }
+    }
+    return { frames: generate(), cancel: () => (cancelled = true) };
+  }
+}
+
+/**
  * Task #125 (D-217): lokal TTS via piper-binæren i `JARVIS_PIPER_BIN` +
  * stemmemodellen i `JARVIS_PIPER_MODEL` (`--model`-flagget piper krever).
  * I MOTSETNING til `LocalWhisperStt` (batch) ER piper EKTE strømmende: teksten
@@ -194,8 +296,18 @@ export class LocalPiperTts implements TtsAdapter {
       });
       child = proc;
       let stderr = "";
+      let stdinError: Error | null = null;
       proc.stderr.on("data", (d: Buffer) => {
         stderr += d.toString("utf8");
+      });
+      // D-256: SAMME bug-klasse som `LocalWhisperStt.end()` (se stt.ts sin
+      // kommentar) - avslutter/lukker piper sin egen stdin FØR `.end(text)`
+      // er ferdigskrevet, feiler skrivingen med EPIPE. Uten en egen lytter
+      // her ville det vært en UHÅNDTERT "error"-hendelse på understrømmen
+      // `proc.stdin`, ALDRI fanget av `proc.once("close", ...)` under - Node
+      // kaster/krasjer HELE voice-gateway-prosessen på nøyaktig samme måte.
+      proc.stdin.on("error", (err: Error) => {
+        stdinError = err;
       });
       proc.stdin.end(text);
       const exitCode = new Promise<number | null>((resolve) => proc.once("close", resolve));
@@ -211,7 +323,10 @@ export class LocalPiperTts implements TtsAdapter {
       }
       const code = await exitCode;
       if (!cancelled && code !== 0) {
-        throw new Error(`local_piper_process_failed:${code ?? "unknown"}:${stderr.slice(0, 200)}`);
+        const detail = stdinError
+          ? `${stderr.slice(0, 150)} (stdin write: ${(stdinError as Error).message})`
+          : stderr.slice(0, 200);
+        throw new Error(`local_piper_process_failed:${code ?? "unknown"}:${detail}`);
       }
     }
     return {

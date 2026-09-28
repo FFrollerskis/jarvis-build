@@ -35,7 +35,7 @@ function allConfiguredGateway(execute: (request: { tool_id: string; action: stri
 }
 
 describe("A: runConnectorHealthSweep() - kun konfigurerte live_test-connectorer testes", () => {
-  it("alle 11 live_test-connectorer sjekkes når ALLE credentials er konfigurert og hvert kall lykkes", async () => {
+  it("alle live_test-connectorer (dynamisk, LIVE_TEST_IDS - se D-301 til D-309-serien for antallets vekst) sjekkes når ALLE credentials er konfigurert og hvert kall lykkes", async () => {
     const { gateway, executeCalls } = allConfiguredGateway(async () => ({ ok: true, data: null, output_trust: "untrusted", deduplicated: false }));
     const result = await runConnectorHealthSweep(gateway, IDENTITY);
     expect(result.checked.slice().sort()).toEqual(LIVE_TEST_IDS);
@@ -45,10 +45,16 @@ describe("A: runConnectorHealthSweep() - kun konfigurerte live_test-connectorer 
     expect(executeCalls).toHaveLength(LIVE_TEST_IDS.length);
   });
 
+  // D-309-fiks: tidligere hardkodet "notion" som eksempel på en connector UTEN
+  // live_test - D-308 ga notion sin egen live_test, som gjorde denne
+  // assertionen falsk (CI-rødt på D-308/D-309 sin PR). Sjekker nå MOT den
+  // dynamiske NO_LIVE_TEST_IDS-listen i stedet for et hardkodet navn - kan
+  // aldri gå ut av synk med registeret igjen, uansett hvilken connector som
+  // bygges neste.
   it("en connector UTEN live_test blir ALDRI kalt (gateway.execute() ser den aldri)", async () => {
     const { gateway, executeCalls } = allConfiguredGateway(async () => ({ ok: true, data: null, output_trust: "untrusted", deduplicated: false }));
     await runConnectorHealthSweep(gateway, IDENTITY);
-    expect(executeCalls.some((c) => c.tool_id === "notion" || c.tool_id === "anthropic")).toBe(false);
+    expect(executeCalls.some((c) => NO_LIVE_TEST_IDS.includes(c.tool_id))).toBe(false);
   });
 
   it("en ikke-konfigurert live_test-connector hoppes over FØR noe gateway.execute()-kall - havner i skipped_not_configured", async () => {

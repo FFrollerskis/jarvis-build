@@ -169,7 +169,10 @@ async function runVoiceTurn(session: VoiceSession): Promise<void> {
   let t = 1000;
   session.pushAudio(speech(), t);
   session.pushAudio(speech(), (t += 50));
-  session.pushAudio(silence(), (t += 400)); // > hangover → end_of_turn
+  // D-275: hangover økt fra 300 til 700 - margenen her økt fra +400 til +800
+  // for å forbli sikkert over den nye standardverdien (samme +100ms-margen
+  // som tidligere, EnergyVad() sin nye default brukes uendret her).
+  session.pushAudio(silence(), (t += 800)); // > hangover → end_of_turn
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 
@@ -304,7 +307,7 @@ describe("Barge-in (§15-§17): stopp lyd, tøm kø, abort generering, aldri sta
     let t = 10_000;
     session.pushAudio(speech(), t);
     session.pushAudio(speech(), (t += 50));
-    session.pushAudio(silence(), (t += 400));
+    session.pushAudio(silence(), (t += 800)); // D-275: > ny hangover (700)
     // Vent til NY tur er fullført (svar levert) - først da er alt observerbart:
     await waitUntil(() => ev.replies.some((r) => r.reply === "Nytt kort svar."), 6000, "ny tur ferdig");
     await settle(session, 5000);
@@ -354,6 +357,7 @@ describe("Feilbaner (§35-§36): STT-/TTS-feil er trygge og normaliserte", () =>
     };
     const ev = events();
     const health = new VoiceHealth();
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const session = new VoiceSession(
       identity, core, fixedStt("", true), taggedTts().adapter, ev.handlers,
       new UtteranceJournal(), undefined, undefined, undefined, undefined, health
@@ -363,6 +367,15 @@ describe("Feilbaner (§35-§36): STT-/TTS-feil er trygge og normaliserte", () =>
     expect(ev.errors).toContain("stt_error");
     expect(coreCalled).toBe(false);
     expect(health.state("stt", true)).toBe("DEGRADED");
+    // D-254: den tekniske detaljen bak "stt_error" ble tidligere kun holdt i
+    // minnet, aldri logget eller eksponert - praktisk udiagnostiserbar live.
+    // Bevis nå at den faktiske feilmeldingen BÅDE logges server-side OG er
+    // lesbar via health.snapshot() (det /status leser).
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      JSON.stringify({ msg: "voice_stt_error", error: "stt_provider_500" })
+    );
+    expect(health.snapshot({ stt: true })["stt"]?.last_error).toBe("stt_provider_500");
+    consoleErrorSpy.mockRestore();
   });
 
   it("tom transkript (støy/ingen tale) → ingen modellkjøring (§35)", async () => {
@@ -423,9 +436,9 @@ describe("Feilbaner (§35-§36): STT-/TTS-feil er trygge og normaliserte", () =>
     const session = new VoiceSession(identity, core, stt, taggedTts().adapter, ev.handlers);
     let t = 1000;
     session.pushAudio(speech(), t);
-    session.pushAudio(silence(), (t += 100)); // kort pause < hangover (300ms)
+    session.pushAudio(silence(), (t += 100)); // kort pause < hangover (D-275: 700ms)
     session.pushAudio(speech(), (t += 100)); // fortsetter samme tur
-    session.pushAudio(silence(), (t += 400)); // nå avsluttes turen
+    session.pushAudio(silence(), (t += 800)); // nå avsluttes turen (D-275: > 700ms)
     await waitUntil(() => ev.replies.length === 1, 4000, "tur ferdig");
     await waitUntil(() => ev.metrics.length >= 1, 4000, "metrics levert");
     expect(ev.metrics).toHaveLength(1); // ÉN tur, ikke to
@@ -666,6 +679,15 @@ describe("Personvern (§22): rå lyd persisteres aldri", () => {
   it("ingen filskriving i talekjedens runtime-moduler", async () => {
     // Strukturelt vern: selve lydkjeden (session/stt/tts/chunker/vad/audio/
     // server/health) skal aldri skrive til disk. Kun benchmark leser manifest.
+    //
+    // D-279: `stt.ts` kaller nå `debug-audio-dump.ts` sin
+    // `maybeDumpAudioForDebug()` (Tobias sitt eksplisitte, opt-in-only
+    // samtykke for ÉN diagnostikk-undersøkelse) - selve filskrive-API-en
+    // lever BEVISST i DEN separate filen, IKKE her, så denne listen (og
+    // dermed selve invarianten for HVER fil den faktisk dekker) forblir
+    // uendret. Se `debug-audio-dump.test.ts` for kontrakten til unntaket
+    // selv (av som standard, skriver kun når Tobias eksplisitt setter
+    // JARVIS_VOICE_DEBUG_DUMP_DIR).
     for (const file of ["session.ts", "stt.ts", "tts.ts", "chunker.ts", "vad.ts", "audio.ts", "server.ts", "health.ts"]) {
       const source = await readFile(join(__dirname, "..", "src", file), "utf8");
       expect(source.includes("writeFile"), file).toBe(false);

@@ -35,12 +35,19 @@ import {
   ResolvingSelfModificationGithubClient, SelfModificationService, SelfModificationTransport,
   selfModificationToolDefinitions
 } from "@jarvis/self-modification";
-import { LocalHashEmbedding, MemoryRetriever } from "@jarvis/memory";
+import {
+  LlmExtractionAdapter,
+  LocalHashEmbedding,
+  MemoryRetriever,
+  MemoryWriter,
+  SummaryService,
+  runMemoryRetentionSweepForAllTenants
+} from "@jarvis/memory";
 import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
-  meshToolDefinitions, PgGithubRateLimitStore,
-  TelegramCommandPoller, TelegramTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
+  allMeshTools, PgGithubRateLimitStore,
+  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
 import {
@@ -74,7 +81,7 @@ import {
 } from "@jarvis/finance";
 import { ConsentEnforcementService, ConsentService, ConsentTransport } from "@jarvis/consent";
 import {
-  GoogleAdsTransport, GrowthService, GrowthTransport, marketingMemoryBriefSource, runActionRecommendationSweepForAllTenants
+  GoogleAdsTransport, GrowthService, GrowthTransport, MetaAdsTransport, marketingMemoryBriefSource, runActionRecommendationSweepForAllTenants
 } from "@jarvis/growth";
 import { OwnerControls } from "@jarvis/policy";
 import {
@@ -489,7 +496,34 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // `memory.search`-verktøyet i `additionalTools` under OG gjenbrukes av
   // `ConversationEngine` sin egen bakgrunns-kontekst (`conversationEngine`
   // under) - IKKE to separate `MemoryRetriever`-instanser mot samme pool.
-  const memoryRetriever = new MemoryRetriever(pool, new LocalHashEmbedding());
+  const memoryEmbedding = new LocalHashEmbedding();
+  const memoryRetriever = new MemoryRetriever(pool, memoryEmbedding);
+  // D-283 (Tobias direkte i chat, "ja bygg minne-skrivingen", ETTER at D-282
+  // sin live-samtale avdekket at minnet var en HELT PASSIV lesestruktur -
+  // `MemoryWriter`/ekstraksjon var bygget og enhetstestet, men ALDRI kalt fra
+  // noe produksjonssted, se D-283 i DECISIONS_AND_ASSUMPTIONS.md): SAMME
+  // delte `memoryEmbedding`-instans som `memoryRetriever` over
+  // (deterministisk/lokal - ingen grunn til to separate objekter).
+  // D-300 (Tobias direkte i chat, "husker han ingenting... vi trodde det
+  // fungerte fungerte det ikke" - live telefon-testing avslørte at D-287 sin
+  // regelbaserte extractor i praksis var for streng til reell samtale, kun
+  // fire snevre signalord-mønstre): `LlmExtractionAdapter` (`extraction.ts`)
+  // er nå den WIRED-INN implementasjonen - `gateway` (konstruert over) sendes
+  // rett inn, den strukturelt-minimale `MemoryExtractionCompleter` den
+  // faktisk krever er allerede oppfylt av en ekte `ModelGateway`.
+  // `RuleBasedExtractor` forblir en deterministisk test-/referanse-
+  // implementasjon, IKKE lenger wired inn her. Brukt KUN av
+  // `conversationEngine` sin `memory.ingest()` under - ALDRI av
+  // `IngestionService.ingestExternal()` (den forblir den separate,
+  // Ingestion Zone-karantene-veien for EKSTERNT/ubetrodd innhold - e-post/
+  // web/verktøyoutput - som er en helt annen tillitsklasse enn eierens egne
+  // ord i en samtale, se `ingest`-kommentaren ved `conversationEngine` under).
+  const memoryWriter = new MemoryWriter(pool, memoryEmbedding, new LlmExtractionAdapter(gateway), policy);
+  // D-286 (Tobias "alle" - se retention-sweep.ts sitt filhode for full
+  // begrunnelse): `SummaryService` FANTES fra før, men ble ALDRI konstruert
+  // eller kalt fra noe produksjonssted (D-286 sitt eget funn) - kun
+  // `memory-retention-sweep`-jobben under bruker den.
+  const memorySummaries = new SummaryService(pool);
   // D-102: ÉN delt `TaskService`-instans - gjenbrukes UENDRET av `ConversationEngine`
   // (eksisterende `tasks.create`-goal-only-vei), den nye `/tasks/submit`-HTTP-ruten
   // (full `JobContract`, inkl. `agent_profile: "coding"`), OG (task #123, D-214)
@@ -570,6 +604,151 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // slås opp på nytt ved hvert `notify`-kall i stedet for å fryses fra
     // `process.env` ved oppstart (samme bug-klasse/fiks som D-246).
     telegram: new TelegramTransport(() => readSecretProvider.get("JARVIS_TELEGRAM_CHAT_ID")),
+    // D-292: SlackTransport tar boten sin egen token direkte per kall (via
+    // ToolGateway.execute() sin vanlige credential-oppslag, SAMME mønster som
+    // GmailTransport/GithubTransport over) - ingen resolver-closure nødvendig
+    // her, i motsetning til Telegram sin `chat_id` (Slack sender `channel`
+    // som et vanlig model-/trusted-lag-parameter, ALDRI en fast bot-config).
+    slack: new SlackTransport(),
+    // D-294: samme mønster som Slack over - Discord sender `channel_id` som
+    // et vanlig handlingsparameter per kall, ingen resolver-closure nødvendig.
+    discord: new DiscordTransport(),
+    // D-295: Twilio krever TO faste konfigurasjonsverdier utover selve
+    // credential-en (`AccountSid`/`From`-nummer) - SAMME resolver-mot-
+    // readSecretProvider-mønster som Telegram sin `chat_id` (D-247) over,
+    // slått opp PÅ NYTT ved hvert kall, ikke frosset ved oppstart.
+    twilio: new TwilioTransport(
+      () => readSecretProvider.get("JARVIS_TWILIO_ACCOUNT_SID"),
+      () => readSecretProvider.get("JARVIS_TWILIO_FROM_NUMBER")
+    ),
+    // D-296: ren tom-konstruktør, samme mønster som Slack/Discord over -
+    // Brave Search sender `query` som et vanlig handlingsparameter per kall,
+    // ingen resolver-closure nødvendig (ingen ekstra fast kontokonfigurasjon
+    // slik Twilio krevde).
+    brave_search: new BraveSearchTransport(),
+    // D-297: Sentry krever ÉN fast konfigurasjonsverdi utover selve
+    // credential-en (organisasjons-slug, URL-sti-parameter for ALLE fire
+    // handlinger) - SAMME resolver-mot-readSecretProvider-mønster som Twilio
+    // sin AccountSid (D-295) over, slått opp PÅ NYTT ved hvert kall.
+    sentry: new SentryTransport(() => readSecretProvider.get("JARVIS_SENTRY_ORG_SLUG")),
+    // D-298: ren tom-konstruktør, samme mønster som Slack/Discord/Brave
+    // Search over - Google Maps sender `address`/`latlng` som et vanlig
+    // handlingsparameter per kall, ingen resolver-closure nødvendig.
+    google_maps: new GoogleMapsTransport(),
+    // D-299: ren tom-konstruktør - `GoogleSheetsTransport` slår selv opp
+    // `googleAccessToken()` internt per kall (samme mønster som Gmail/
+    // Calendar/Drive sine transporter over, som ALLE også har tomme
+    // konstruktører - access-token-utvekslingen skjer per `invoke()`-kall,
+    // ikke ved konstruksjon).
+    google_sheets: new GoogleSheetsTransport(),
+    // D-301: ren tom-konstruktør, samme mønster som Brave Search over -
+    // Tavily sender `query`/`api_key` som vanlige handlingsparametere per
+    // kall, ingen resolver-closure nødvendig.
+    tavily: new TavilyTransport(),
+    // D-302: ren tom-konstruktør, samme mønster som Tavily over - Exa
+    // sender `query`/`url` som vanlige handlingsparametere per kall, ingen
+    // resolver-closure nødvendig.
+    exa: new ExaTransport(),
+    // D-303: ren tom-konstruktør, samme mønster som Google Maps over - Google
+    // Places sender `query`/`place_id` som vanlige handlingsparametere per
+    // kall, ingen resolver-closure nødvendig.
+    google_places: new GooglePlacesTransport(),
+    // D-304: ren tom-konstruktør, samme mønster som Google Maps/Google Places
+    // over - Google Routes sender `origin`/`destination`/`origins`/
+    // `destinations` som vanlige handlingsparametere per kall, ingen
+    // resolver-closure nødvendig.
+    google_routes: new GoogleRoutesTransport(),
+    // D-305: Grafana krever ÉN fast konfigurasjonsverdi utover selve
+    // credential-en (base-URL, siden Grafana typisk er selv-hostet uten et
+    // fast SaaS-domene) - SAMME resolver-mot-readSecretProvider-mønster som
+    // Sentry sin org-slug (D-297), slått opp PÅ NYTT ved hvert kall.
+    grafana: new GrafanaTransport(() => readSecretProvider.get("JARVIS_GRAFANA_API_BASE_URL")),
+    // D-306: SAMME resolver-mot-readSecretProvider-mønster som Grafana over
+    // - Prometheus krever også en fast base-URL utover selve credential-en,
+    // siden Prometheus også er typisk selv-hostet.
+    prometheus: new PrometheusTransport(() => readSecretProvider.get("JARVIS_PROMETHEUS_API_BASE_URL")),
+    // D-307: ren tom-konstruktør, samme mønster som Brave Search/Tavily/Exa
+    // over - Dropbox sender `path` som et vanlig handlingsparameter per
+    // kall, ingen resolver-closure nødvendig (ETT fast access-token, INGEN
+    // OAuth-refresh-flyt som Google-familien).
+    dropbox: new DropboxTransport(),
+    // D-308: ren tom-konstruktør, samme mønster som Dropbox over - Notion
+    // sender `Notion-Version` som en FAST header inni transporten selv
+    // (ingen resolver-closure nødvendig, ETT fast integrasjonstoken).
+    notion: new NotionTransport(),
+    // D-309: ren tom-konstruktør, samme mønster som Dropbox/Notion over -
+    // OneDrive sender `path`/`name` som vanlige handlingsparametere per
+    // kall, ingen resolver-closure nødvendig.
+    onedrive: new OneDriveTransport(),
+    // D-310: ren tom-konstruktør, samme mønster som OneDrive over -
+    // Microsoft Outlook sender parametere per handling, ingen
+    // resolver-closure nødvendig.
+    microsoft_outlook: new MicrosoftOutlookTransport(),
+    // D-311: SAMME resolver-mot-readSecretProvider-mønster som Grafana/
+    // Prometheus - n8n er også typisk selv-hostet.
+    n8n: new N8nTransport(() => readSecretProvider.get("JARVIS_N8N_API_BASE_URL")),
+    // D-313: tom konstruktør - `client_id`/`client_secret` leses direkte fra
+    // env inne i `spotifyAccessToken()` (delt app-konfig, ikke en resolver).
+    spotify: new SpotifyTransport(),
+    // D-314: `phone_number_id` er Jarvis sin egen avsenderidentitet - SAMME
+    // resolver-mot-readSecretProvider-mønster som Telegram sin chat_id.
+    whatsapp: new WhatsAppTransport(() => readSecretProvider.get("JARVIS_WHATSAPP_PHONE_NUMBER_ID")),
+    // D-315: SAMME resolver-mot-readSecretProvider-mønster som n8n - Make
+    // sin API-base-URL er zone-spesifikk (brukerens kontosone).
+    make: new MakeTransport(() => readSecretProvider.get("JARVIS_MAKE_API_BASE_URL")),
+    // D-316: tom konstruktør - INGEN base-URL/org-slug nødvendig (fast
+    // OpenAI-vertsnavn, kun Bearer-token).
+    openai_images: new OpenAIImagesTransport(),
+    // D-321: `from`-nummeret er Jarvis sin egen avsenderidentitet - SAMME
+    // resolver-mot-readSecretProvider-mønster som Twilio (D-295).
+    telnyx: new TelnyxTransport(() => readSecretProvider.get("JARVIS_TELNYX_FROM_NUMBER")),
+    // D-322: tom konstruktør - fast Runway-vertsnavn, kun Bearer-token +
+    // en fast X-Runway-Version-header (satt inni transporten selv).
+    runway: new RunwayTransport(),
+    // D-323: Kling krever ÉN fast konfigurasjonsverdi utover selve
+    // credential-en (Access Key, brukt som JWT `iss`-claim) - SAMME
+    // resolver-mot-readSecretProvider-mønster som Telnyx/Twilio over.
+    // Secret Key (credential_ref) brukes til JWT-signering inni
+    // transporten selv, ALDRI sendt uendret som header-verdi.
+    kling: new KlingTransport(() => readSecretProvider.get("JARVIS_KLING_ACCESS_KEY")),
+    // D-324: tom konstruktør - fast Gemini API-vertsnavn, kun
+    // x-goog-api-key-header (SAMME auth-form som `gemini` sin EKSISTERENDE
+    // model_provider-oppføring, se GoogleVeoTransport sin doc-kommentar).
+    google_veo: new GoogleVeoTransport(),
+    // D-327: Higgsfield krever ÉN fast konfigurasjonsverdi utover selve
+    // credential-en (Key ID, brukt sammen med Key Secret i ETT
+    // Authorization-header-felt) - SAMME resolver-mot-readSecretProvider-
+    // mønster som Telnyx/Twilio/Kling over.
+    higgsfield: new HiggsfieldTransport(() => readSecretProvider.get("JARVIS_HIGGSFIELD_KEY_ID")),
+    // D-329: Todoist krever KUN selve credential-en (bearer-token, ingen
+    // ekstra fast konfigurasjonsverdi) - samme tomme-konstruktør-mønster
+    // som Discord/Notion over.
+    todoist: new TodoistTransport(),
+    // D-330: Trello krever ÉN fast konfigurasjonsverdi utover selve
+    // credential-en (API-nøkkel, brukt sammen med token som query-
+    // parametere) - SAMME resolver-mot-readSecretProvider-mønster som
+    // Telnyx/Twilio/Kling/Higgsfield over.
+    trello: new TrelloTransport(() => readSecretProvider.get("JARVIS_TRELLO_API_KEY")),
+    // D-331: Jira Cloud er PER-TENANT - krever TO faste konfigurasjons-
+    // verdier utover selve credential-en (base-URL + e-post), SAMME
+    // resolver-mot-readSecretProvider-mønster som Twilio (D-295) sin
+    // to-resolver-form.
+    jira: new JiraTransport(
+      () => readSecretProvider.get("JARVIS_JIRA_BASE_URL"),
+      () => readSecretProvider.get("JARVIS_JIRA_EMAIL")
+    ),
+    // D-332: Linear krever KUN selve credential-en (rå API-nøkkel i
+    // Authorization-headeren, ingen ekstra fast konfigurasjonsverdi) -
+    // samme tomme-konstruktør-mønster som Discord/Notion/Todoist over.
+    linear: new LinearTransport(),
+    // D-333: HubSpot krever KUN selve credential-en (Bearer private
+    // app-token, ingen ekstra fast konfigurasjonsverdi) - samme
+    // tomme-konstruktør-mønster som Discord/Notion/Todoist/Linear over.
+    hubspot: new HubSpotTransport(),
+    // D-334: Pipedrive er PER-TENANT (samme mønster som Jira sin base-URL-
+    // resolver, D-331) - krever ÉN fast konfigurasjonsverdi utover selve
+    // credential-en.
+    pipedrive: new PipedriveTransport(() => readSecretProvider.get("JARVIS_PIPEDRIVE_BASE_URL")),
     // D-242/D-248: `vercel` hadde en `live_test` siden D-213, men ALDRI en
     // ekte transport her - falt gjennom til `UnconfiguredHttpTransport`
     // (ubetinget `vercel_not_configured`), uansett credential-tilstand (se
@@ -602,6 +781,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // GrowthTransport over - INGEN toolGateway/ToolInvocationContext (ingen
     // nøstet klasse D-handling i denne sliceen).
     googleads: new GoogleAdsTransport(growthService),
+    // D-335 (UA-4 Meta Ads-slice): SAMME lat/enkel-avhengighet-mønster som
+    // GoogleAdsTransport over - INGEN toolGateway/ToolInvocationContext.
+    metaads: new MetaAdsTransport(growthService),
     // UA-6 Finance & Spend Integrity Gateway (D-107): SAMME lat/enkel-
     // avhengighet-mønster som GrowthTransport/GoogleAdsTransport over -
     // INGEN toolGateway/ToolInvocationContext (ingen nøstet klasse D-
@@ -698,6 +880,16 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       ...selfModificationToolDefinitions(new SelfModificationTransport(selfModificationService))
     ]
   })) toolGateway.register(tool);
+  // D-289 (Tobias direkte i chat: "vil ha alt at han har full kontroll" -
+  // retningsvalg på D-288): beregnet ÉN gang, RETT ETTER at hele
+  // registreringsløkken over er ferdig (samtlige `tool_id`-er - inkl.
+  // situations/executive/owner_controls/governance/memory/self_modification
+  // - er FAKTISK registrert i akkurat dette punktet, se løkken over) -
+  // ALDRI per samtaletur. Gjenbrukt UENDRET av BÅDE `conversationEngine`
+  // sine `tools` (samtale-/tale-flaten, se under) OG `executive`-worker-
+  // jobbhandleren (BO-11.1 §9, se lenger ned) - SAMME liste, ALDRI to
+  // potensielt avvikende kopier av "hva Charlie/executive-jobber kan kalle".
+  const fullMeshTools = allMeshTools(toolGateway);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
   // registrert med Gmail/Calendar over) - ingen ny transport-vei.
   const businessEventSyncService = new BusinessEventSyncService(toolGateway, businessService, openLoopService);
@@ -719,7 +911,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     "executive",
     executiveHandler({
       gateway,
-      tools: { definitions: meshToolDefinitions(), executor: new MeshToolExecutor(toolGateway, ownerIdentity) }
+      tools: {
+        definitions: fullMeshTools.map((t) => t.def),
+        executor: new MeshToolExecutor(toolGateway, ownerIdentity, 4000, fullMeshTools)
+      }
     })
   );
 
@@ -765,14 +960,34 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     tasks: taskService,
     worker,
     trace,
-    memory: memoryRetriever,
+    memory: {
+      contextFor: (identity, userText) => memoryRetriever.contextFor(identity, userText),
+      // D-283: eierens EGNE ord i denne samtalen (chat OG tale - BEGGE går
+      // via SAMME `/chat`, se D-30-kommentaren ved `tools` under) skrives nå
+      // faktisk til minnet, IKKE lenger en ren lesestruktur. `trust:
+      // "trusted"` - eieren som snakker DIREKTE til Jarvis er den høyeste
+      // tillitskilden i systemet, STRUKTURELT forskjellig fra §7 sin
+      // Ingestion Zone-karantene (den gjelder UBETRODD/EKSTERNT innhold -
+      // e-post/web/verktøyoutput/MCP - ALDRI eierens egne ytringer til
+      // Jarvis selv). `ref: identity.session_id` tagger kilden med
+      // sesjonen (rule 4: "kilde og task_id/session_id"). Feil her
+      // SVELGES av kalleren (`conversation.ts` sin `.catch()`) - en
+      // minnefeil skal ALDRI ødelegge selve samtalesvaret.
+      ingest: (identity, text) =>
+        memoryWriter.ingestText(identity, { kind: "conversation", ref: identity.session_id, trust: "trusted" }, text)
+    },
     council: aiCouncil,
     // D-30 live-funn: samtalebanen (tekst + voice via /chat) får mesh-verktøyene.
     // Executor bindes til samtalens RESOLVED identity - aldri ownerIdentity -
     // slik at tenant/delegation/authority følger den som faktisk snakker.
+    // D-289 ("vil ha alt at han har full kontroll"): `fullMeshTools` (ALLE
+    // registrerte tool_id:action-par), ikke lenger de 5 kuraterte
+    // `MESH_TOOLS` - se `fullMeshTools` sitt filhode over for hvorfor ingen
+    // ny godkjenningssperre er lagt til (D-41: sovereign owner-modus for
+    // klasse D er uendret).
     tools: {
-      definitions: meshToolDefinitions(),
-      executorFor: (identity) => new MeshToolExecutor(toolGateway, identity)
+      definitions: fullMeshTools.map((t) => t.def),
+      executorFor: (identity) => new MeshToolExecutor(toolGateway, identity, 4000, fullMeshTools)
     },
     // Task #121 (D-214): kosmetisk personlighetslag, se conversation.ts sin
     // `buildSystemPrompt()`/`loadPersonality()`.
@@ -1143,6 +1358,20 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "vision-retention-sweep", Number(process.env["JARVIS_VISION_RETENTION_SWEEP_HOUR"] ?? 2)
   ).start(() => runVisionRetentionSweepForAllTenants(pool, visionService).then(() => undefined));
+  // D-286 (Tobias direkte i chat, "alle" - alle tre foreslåtte tilnærminger
+  // til ubegrenset minnevekst): periodisk konsolidering av gamle EPISODISKE
+  // samtale-minner til dagssammendrag - SAMME reboot-durable
+  // DailyScheduler-mekanisme/mønster som location/health/vision sine
+  // retensjons-sveip over. Se `retention-sweep.ts` sitt filhode for full
+  // begrunnelse (bevisst snever scope - rører ALDRI preference/decision/
+  // relation/semantic-typer, KUN episodic samtale-minner).
+  new DailyScheduler(
+    pool, "memory-retention-sweep", Number(process.env["JARVIS_MEMORY_RETENTION_SWEEP_HOUR"] ?? 2)
+  ).start(() =>
+    runMemoryRetentionSweepForAllTenants(
+      pool, memoryWriter, memorySummaries, Number(process.env["JARVIS_MEMORY_RETENTION_DAYS"] ?? 60)
+    ).then(() => undefined)
+  );
   // D-242 (Tobias direkte chat-instruks: "du skal bygge det for absolutt
   // alle som tester en gang om dagen så vi vet om credentials fungerer
   // eller ikke hele tiden"): daglig `ConnectorHealthSweep` - SAMME

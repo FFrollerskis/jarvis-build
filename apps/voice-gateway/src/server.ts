@@ -152,6 +152,14 @@ export class HttpCoreClient implements CoreClient {
               onEvent({ type: "tool", tool_name: payload["tool_name"] });
             } else if (eventName === "done") {
               done = payload as unknown as CoreReply;
+            } else if (eventName === "error") {
+              // D-251: Core sender nå et eksplisitt `error`-event FØR den lukker
+              // streamen ved en feil etter at headers allerede er sendt - kast
+              // med Core sin egen melding i stedet for å falle gjennom til den
+              // generiske `core_stream_no_done` under (som var det ENESTE
+              // signalet før D-251, og ga ingen nyttig detalj).
+              const message = typeof payload["message"] === "string" ? payload["message"] : "core_stream_error";
+              throw new Error(message);
             }
           }
         }

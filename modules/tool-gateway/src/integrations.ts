@@ -1274,6 +1274,36 @@ export function firstWaveTools(
       timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_GOOGLE_ADS_REFRESH_TOKEN",
       output_trust: "internal", transport: transport("googleads")
     },
+    // D-335 (UA-4 Meta Ads-slice): SAMME Growth Core-adapter-arkitektur som
+    // googleads.* over (D-64-korrekt - marketing_campaigns/spend_events
+    // forblir JARVIS_CANONICAL, Meta er EXTERNAL_CANONICAL fakta-kilde).
+    // access_token som QUERY-PARAMETER (ikke en Bearer-header) - se
+    // MetaAdsTransport sin doc-kommentar for full D-41-begrunnelse.
+    // sync_tracking_tags (fbclid) er BEVISST IKKE registrert her (D-41
+    // DEFERRED - ingen bekreftet spørrbar fbclid-ressurs funnet).
+    {
+      tool_id: "metaads", action: "list_campaigns", description: "Les kampanjeliste direkte fra Meta Ads (Graph API, ingen Jarvis-DB-skriving - ren leverandør-speiling)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), ad_account_id: z.string().optional() }),
+      capability_class: "A", scopes: ["metaads.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 20_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_META_ADS_ACCESS_TOKEN",
+      output_trust: "internal", transport: transport("metaads")
+    },
+    {
+      tool_id: "metaads", action: "sync_campaigns", description: "Synk kampanjeliste fra Meta Ads inn i Growth Core (idempotent upsert via external_campaign_id, ingen ny domenemodell)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), ad_account_id: z.string().optional() }),
+      capability_class: "B", scopes: ["metaads.read", "growth.write"], reversible: true,
+      rollback_procedure: "ingen direkte fjerning - kampanjerader er historiske Growth Core-fakta, samme som growth.create_campaign", idempotent_external: true,
+      timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_META_ADS_ACCESS_TOKEN",
+      output_trust: "internal", transport: transport("metaads")
+    },
+    {
+      tool_id: "metaads", action: "sync_spend", description: "Synk daglig utgift/klikk/visning per kampanje fra Meta Ads Insights inn i marketing_spend_events (source_type=provider_sync, idempotent per kampanje+dato)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), ad_account_id: z.string().optional(), start_date: z.string(), end_date: z.string() }),
+      capability_class: "B", scopes: ["metaads.read", "growth.write"], reversible: true,
+      rollback_procedure: "nytt sync_spend-kall overskriver SAMME (kampanje, dato, provider_sync)-rad ved korrigert kilde-tall", idempotent_external: true,
+      timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_META_ADS_ACCESS_TOKEN",
+      output_trust: "internal", transport: transport("metaads")
+    },
     // D-91 (UA-4 NESTE SLICE): Consent / Cookie / Data-Processing Governance
     // Core - provider-nøytralt `consent.*`-namespace. `record_decision`
     // appender EN NY, permanent rad i en append-only-logg (ALDRI en UPDATE)
@@ -2760,6 +2790,1101 @@ export function firstWaveTools(
       reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_TELEGRAM_TOKEN",
       output_trust: "untrusted", transport: transport("telegram")
+    },
+    /**
+     * D-292 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+     * fullføres" - første konkrete slice av den brede ordren). SAMME mønster
+     * som `telegram` over (D-125/D-213) - `notify`/`get_bot_info` identisk
+     * begrunnelse, pluss to lese-handlinger for D-41 sin "maksimal nyttig
+     * kapabilitet"-plikt (Slack Web API sitt eget dokumenterte scope-sett,
+     * IKKE gjettet: `chat:write` for postMessage, `channels:read` for
+     * conversations.list, `channels:history` for conversations.history).
+     * Lagt til på SLUTTEN av arrayet, samme posisjonelle test-disiplin som
+     * telegram/vercel/read_repo_meta over.
+     */
+    {
+      tool_id: "slack", action: "notify", description: "Send melding til en Slack-kanal (chat.postMessage)",
+      input_schema: record({ channel: z.string(), message: z.string().max(4000) }), capability_class: "B",
+      scopes: ["chat:write"], reversible: true, rollback_procedure: "send korreksjonsmelding",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_SLACK_BOT_TOKEN", output_trust: "internal", transport: transport("slack")
+    },
+    {
+      tool_id: "slack", action: "get_bot_info", description: "Les botens egen identitet (Slack Web API auth.test) - brukes som tilkoblingstest, ALDRI en ekte meldingsutsendelse",
+      // Slack sin auth.test krever INGEN scope utover en gyldig token - `bot:read` er samme
+      // logiske plassholder-konvensjon som Telegrams get_bot_info over (getMe har heller ingen
+      // ekte OAuth-scope), IKKE en faktisk Slack-dokumentert scope-streng.
+      input_schema: empty, capability_class: "A", scopes: ["bot:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_SLACK_BOT_TOKEN",
+      output_trust: "untrusted", transport: transport("slack")
+    },
+    {
+      tool_id: "slack", action: "list_channels", description: "List kanaler boten kan se (conversations.list, untrusted ingestion)",
+      input_schema: empty, capability_class: "A", scopes: ["channels:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_SLACK_BOT_TOKEN",
+      output_trust: "untrusted", transport: transport("slack")
+    },
+    {
+      tool_id: "slack", action: "read_channel_history", description: "Les nylige meldinger i en kanal (conversations.history, untrusted ingestion)",
+      input_schema: record({ channel: z.string(), limit: z.number().int().min(1).max(200).optional() }),
+      capability_class: "A", scopes: ["channels:history"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_SLACK_BOT_TOKEN", output_trust: "untrusted", transport: transport("slack")
+    },
+    /**
+     * D-294 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+     * fullføres" - andre slice). SAMME "notify er ekte utsendelse (klasse B),
+     * get_bot_info er trygg tilkoblingstest (klasse A)"-mønster som Telegram/
+     * Slack over. Discord sitt eget dokumenterte permission-bitfield-navn
+     * brukes for `scopes` (IKKE gjettet: `SEND_MESSAGES`/`VIEW_CHANNEL`/
+     * `READ_MESSAGE_HISTORY`, discord.com/developers/docs/topics/permissions).
+     * Lagt til på SLUTTEN av arrayet, samme posisjonelle test-disiplin som
+     * telegram/vercel/slack over.
+     */
+    {
+      tool_id: "discord", action: "notify", description: "Send melding til en Discord-kanal (POST /channels/{id}/messages)",
+      input_schema: record({ channel_id: z.string(), message: z.string().max(2000) }), capability_class: "B",
+      scopes: ["SEND_MESSAGES"], reversible: true, rollback_procedure: "send korreksjonsmelding",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_DISCORD_BOT_TOKEN", output_trust: "internal", transport: transport("discord")
+    },
+    {
+      tool_id: "discord", action: "get_bot_info", description: "Les botens egen identitet (GET /users/@me) - brukes som tilkoblingstest, ALDRI en ekte meldingsutsendelse",
+      input_schema: empty, capability_class: "A", scopes: ["identify"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_DISCORD_BOT_TOKEN",
+      output_trust: "untrusted", transport: transport("discord")
+    },
+    {
+      tool_id: "discord", action: "list_channels", description: "List kanaler i en server (GET /guilds/{id}/channels, untrusted ingestion)",
+      input_schema: record({ guild_id: z.string() }), capability_class: "A", scopes: ["VIEW_CHANNEL"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_DISCORD_BOT_TOKEN",
+      output_trust: "untrusted", transport: transport("discord")
+    },
+    {
+      tool_id: "discord", action: "read_channel_history", description: "Les nylige meldinger i en kanal (GET /channels/{id}/messages, untrusted ingestion)",
+      input_schema: record({ channel_id: z.string(), limit: z.number().int().min(1).max(100).optional() }),
+      capability_class: "A", scopes: ["READ_MESSAGE_HISTORY"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_DISCORD_BOT_TOKEN", output_trust: "untrusted", transport: transport("discord")
+    },
+    /**
+     * D-295 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+     * fullføres" - tredje slice). SAMME "notify er ekte utsendelse (klasse
+     * B), get_account_info er trygg tilkoblingstest (klasse A)"-mønster som
+     * Telegram/Slack/Discord over. Twilio sin klassiske AccountSid/AuthToken-
+     * modell har INGEN OAuth-scope-konsept (full kontotilgang alltid) - derfor
+     * er `sms:send`/`sms:read` interne Jarvis-plassholdere, SAMME konvensjon
+     * som Telegrams `bot:read` (IKKE en faktisk Twilio-dokumentert scope-
+     * streng).
+     */
+    {
+      tool_id: "twilio", action: "notify", description: "Send SMS (POST /Messages.json)",
+      input_schema: record({ to: z.string(), message: z.string().max(1600) }), capability_class: "B",
+      scopes: ["sms:send"], reversible: true, rollback_procedure: "send korreksjonsmelding",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TWILIO_AUTH_TOKEN", output_trust: "internal", transport: transport("twilio")
+    },
+    {
+      tool_id: "twilio", action: "get_account_info", description: "Les kontoens egen identitet (GET /Accounts/{sid}.json) - brukes som tilkoblingstest, ALDRI en ekte SMS-utsendelse",
+      input_schema: empty, capability_class: "A", scopes: ["sms:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_TWILIO_AUTH_TOKEN",
+      output_trust: "untrusted", transport: transport("twilio")
+    },
+    {
+      tool_id: "twilio", action: "read_messages", description: "List nylige SMS-meldinger på kontoen (GET /Messages.json, untrusted ingestion)",
+      input_schema: record({ limit: z.number().int().min(1).max(1000).optional() }),
+      capability_class: "A", scopes: ["sms:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TWILIO_AUTH_TOKEN", output_trust: "untrusted", transport: transport("twilio")
+    },
+    /**
+     * D-296 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+     * fullføres" - fjerde slice). STRUKTURELT ULIK Telegram/Slack/Discord/
+     * Twilio: INGEN klasse B/C/D-handling finnes for denne connectoren i
+     * det hele tatt - Brave Search sitt REST-API tilbyr genuint bare lesing,
+     * så D-41 sitt "read-only kun når leverandøren faktisk ikke tilbyr mer"-
+     * unntak er ÆRLIG oppfylt her (ikke en snarvei). `live_test` (se
+     * `connector-registry.ts`) bruker `web_search` DIREKTE - ingen egen
+     * "get_account_info"-handling trengs siden ALT allerede er sideeffekt-
+     * fritt, og Brave har uansett intet kontoidentitets-endepunkt.
+     */
+    {
+      tool_id: "brave_search", action: "web_search", description: "Websøk (GET /res/v1/web/search, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(400), count: z.number().int().min(1).max(20).optional() }),
+      capability_class: "A", scopes: ["search:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_BRAVE_SEARCH_API_KEY", output_trust: "untrusted", transport: transport("brave_search")
+    },
+    {
+      tool_id: "brave_search", action: "news_search", description: "Nyhetssøk (GET /res/v1/news/search, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(400), count: z.number().int().min(1).max(20).optional() }),
+      capability_class: "A", scopes: ["search:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_BRAVE_SEARCH_API_KEY", output_trust: "untrusted", transport: transport("brave_search")
+    },
+    /**
+     * D-297 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+     * fullføres" - femte slice). Sentry sitt organisasjonsscopede REST-API v0
+     * (`sentry.io/api/0/organizations/{org_slug}/...`), `Authorization:
+     * Bearer <token>`. **IKKE denne-økten-verifisert mot en live hentet kopi
+     * av offisiell dokumentasjon** (nettverksegress blokkert i dette miljøet,
+     * se `SentryTransport` sin doc-kommentar i `live-transports.ts` og D-297 i
+     * DECISIONS_AND_ASSUMPTIONS.md for full begrunnelse) - basert på trent
+     * kunnskap om et offentlig, år-stabilt API-mønster, IKKE gjettet fra
+     * forrige connectors mønster. `update_issue` er FØRSTE skrivehandling i
+     * denne rekken som er en REN TILSTANDSENDRING (issue-status), ikke en
+     * utgående melding til en tredjepart - reversibel OG idempotent, ULIKT
+     * Slack/Discord/Twilio sin `notify`.
+     */
+    {
+      tool_id: "sentry", action: "list_projects", description: "List prosjekter i organisasjonen (GET /organizations/{org}/projects/, untrusted ingestion)",
+      input_schema: empty, capability_class: "A", scopes: ["project:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_SENTRY_API_TOKEN",
+      output_trust: "untrusted", transport: transport("sentry")
+    },
+    {
+      tool_id: "sentry", action: "list_issues", description: "List issues i organisasjonen (GET /organizations/{org}/issues/, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(200).optional() }),
+      capability_class: "A", scopes: ["project:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_SENTRY_API_TOKEN", output_trust: "untrusted", transport: transport("sentry")
+    },
+    {
+      tool_id: "sentry", action: "get_issue", description: "Les ett issue (GET /organizations/{org}/issues/{id}/, untrusted ingestion)",
+      input_schema: record({ issue_id: z.string() }),
+      capability_class: "A", scopes: ["project:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_SENTRY_API_TOKEN", output_trust: "untrusted", transport: transport("sentry")
+    },
+    {
+      tool_id: "sentry", action: "update_issue", description: "Endre issue-status (PUT /organizations/{org}/issues/{id}/, f.eks. resolved/ignored/unresolved)",
+      input_schema: record({ issue_id: z.string(), status: z.enum(["resolved", "ignored", "unresolved"]) }),
+      capability_class: "B", scopes: ["event:write"], reversible: true,
+      rollback_procedure: "ny update_issue-kalling med forrige status", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_SENTRY_API_TOKEN",
+      output_trust: "internal", transport: transport("sentry")
+    },
+    /**
+     * D-298 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+     * fullføres" - sjette slice). Google Maps Platform sitt Geocoding-API
+     * (`maps.googleapis.com/maps/api/geocode/json`) - API-nøkkel som `key`-
+     * query-parameter. BEVISST AVGRENSET til KUN Geocoding - `google_places`/
+     * `google_routes` er separate, fortsatt ubygde backlog-id-er. INGEN
+     * skrivehandling finnes for denne connectoren i det hele tatt (samme
+     * D-41 read-only-unntak som Brave Search).
+     */
+    {
+      tool_id: "google_maps", action: "geocode", description: "Adresse -> koordinater (GET /maps/api/geocode/json?address=..., untrusted ingestion)",
+      input_schema: record({ address: z.string().max(400) }),
+      capability_class: "A", scopes: ["maps:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_MAPS_API_KEY", output_trust: "untrusted", transport: transport("google_maps")
+    },
+    {
+      tool_id: "google_maps", action: "reverse_geocode", description: "Koordinater -> adresse (GET /maps/api/geocode/json?latlng=..., untrusted ingestion)",
+      input_schema: record({ latlng: z.string().max(60) }),
+      capability_class: "A", scopes: ["maps:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_MAPS_API_KEY", output_trust: "untrusted", transport: transport("google_maps")
+    },
+    /**
+     * D-299 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+     * fullføres" - syvende slice). Google Sheets API v4 - gjenbruker
+     * `googleAccessToken()` OAuth-refresh-token-utveksleren, MEN med sin EGEN
+     * `credential_ref` (`JARVIS_GOOGLE_SHEETS_TOKEN`, IKKE `JARVIS_GOOGLE_
+     * TOKEN` - Sheets krever den dedikerte `spreadsheets`-scopen, som Drive
+     * sin bredere `auth/drive`-scope ikke dekker). D-41 sitt "maksimal
+     * nyttig kapabilitet"-prinsipp: `update_range`/`append_row` er EKTE
+     * skrivehandlinger (klasse B), ikke kunstig innsnevret til read-only.
+     */
+    {
+      tool_id: "google_sheets", action: "list_sheets", description: "List faner i et regneark (GET /v4/spreadsheets/{id}, untrusted ingestion)",
+      input_schema: record({ spreadsheet_id: z.string() }),
+      capability_class: "A", scopes: ["https://www.googleapis.com/auth/spreadsheets"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_SHEETS_TOKEN", output_trust: "untrusted", transport: transport("google_sheets")
+    },
+    {
+      tool_id: "google_sheets", action: "read_range", description: "Les celleverdier fra et område (GET /v4/spreadsheets/{id}/values/{range}, untrusted ingestion)",
+      input_schema: record({ spreadsheet_id: z.string(), range: z.string().max(200) }),
+      capability_class: "A", scopes: ["https://www.googleapis.com/auth/spreadsheets"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_SHEETS_TOKEN", output_trust: "untrusted", transport: transport("google_sheets")
+    },
+    {
+      tool_id: "google_sheets", action: "update_range", description: "Overskriv celleverdier i et område (PUT /v4/spreadsheets/{id}/values/{range})",
+      input_schema: record({ spreadsheet_id: z.string(), range: z.string().max(200), values: z.array(z.array(z.union([z.string(), z.number(), z.boolean()]))) }),
+      capability_class: "B", scopes: ["https://www.googleapis.com/auth/spreadsheets"], reversible: true,
+      rollback_procedure: "ny update_range-kalling med forrige verdier", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GOOGLE_SHEETS_TOKEN",
+      output_trust: "internal", transport: transport("google_sheets")
+    },
+    {
+      tool_id: "google_sheets", action: "append_row", description: "Legg til en NY rad nederst i et område (POST /v4/spreadsheets/{id}/values/{range}:append)",
+      input_schema: record({ spreadsheet_id: z.string(), range: z.string().max(200), row: z.array(z.union([z.string(), z.number(), z.boolean()])) }),
+      capability_class: "B", scopes: ["https://www.googleapis.com/auth/spreadsheets"], reversible: false,
+      rollback_procedure: "slett raden manuelt i regnearket (ingen radidentifikator returneres av API-et)", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GOOGLE_SHEETS_TOKEN",
+      output_trust: "internal", transport: transport("google_sheets")
+    },
+    /**
+     * D-301 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+     * fullføres" - åttende slice). STRUKTURELT LIK Brave Search (D-296):
+     * INGEN klasse B/C/D-handling finnes - Tavily sitt API tilbyr genuint
+     * bare lesing, D-41 sitt read-only-unntak ærlig oppfylt. **IKKE denne-
+     * økten-verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om ETT kjent endepunkt (`POST /search`),
+     * `web_search`/`news_search` differensiert kun via `topic`-felt i
+     * request-body, se `TavilyTransport` sin doc-kommentar i
+     * `live-transports.ts`.
+     */
+    {
+      tool_id: "tavily", action: "web_search", description: "Websøk (POST /search, topic=general, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(400), max_results: z.number().int().min(1).max(20).optional() }),
+      capability_class: "A", scopes: ["search:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TAVILY_API_KEY", output_trust: "untrusted", transport: transport("tavily")
+    },
+    {
+      tool_id: "tavily", action: "news_search", description: "Nyhetssøk (POST /search, topic=news, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(400), max_results: z.number().int().min(1).max(20).optional() }),
+      capability_class: "A", scopes: ["search:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TAVILY_API_KEY", output_trust: "untrusted", transport: transport("tavily")
+    },
+    /**
+     * D-302 (Tobias direkte i chat: "fortsett og jobbe ikke vent på ci" -
+     * niende slice). STRUKTURELT LIK Brave Search/Tavily: INGEN klasse
+     * B/C/D-handling finnes - Exa sitt nevrale søke-API tilbyr genuint bare
+     * lesing, D-41 sitt read-only-unntak ærlig oppfylt. **IKKE denne-økten-
+     * verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om Exa sitt offentlige API. TO separate,
+     * EGNE endepunkter (`POST /search`/`POST /findSimilar`), ULIK Tavily
+     * sitt delte endepunkt, se `ExaTransport` sin doc-kommentar i
+     * `live-transports.ts`.
+     */
+    {
+      tool_id: "exa", action: "web_search", description: "Nevralt websøk (POST /search, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(400), num_results: z.number().int().min(1).max(20).optional() }),
+      capability_class: "A", scopes: ["search:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_EXA_API_KEY", output_trust: "untrusted", transport: transport("exa")
+    },
+    {
+      tool_id: "exa", action: "find_similar", description: "Finn sider som ligner en gitt URL (POST /findSimilar, untrusted ingestion)",
+      input_schema: record({ url: z.string().max(2000), num_results: z.number().int().min(1).max(20).optional() }),
+      capability_class: "A", scopes: ["search:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_EXA_API_KEY", output_trust: "untrusted", transport: transport("exa")
+    },
+    /**
+     * D-303 (bygget parallelt mens D-302 sin CI kjørte - tiende slice).
+     * SAMME D-64-domenevurdering som Google Maps (D-298): stateless
+     * tredjeparts-stedoppslag, IKKE eierens egen posisjon/geofence. STRUKTURELT
+     * LIK Google Maps: INGEN klasse B/C/D-handling finnes - Places-API-et
+     * tilbyr genuint bare lesing, D-41 sitt read-only-unntak ærlig oppfylt.
+     * **IKKE denne-økten-verifisert mot en live hentet kopi av offisiell
+     * dokumentasjon** (nettverksegress blokkert i dette miljøet, samme
+     * D-297-forbehold) - basert på trent kunnskap om det ELDRE, stabile
+     * Places-API-et, se `GooglePlacesTransport` sin doc-kommentar i
+     * `live-transports.ts`.
+     */
+    {
+      tool_id: "google_places", action: "search_places", description: "Tekstsøk etter steder (GET /place/textsearch/json, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(400) }),
+      capability_class: "A", scopes: ["places:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_PLACES_API_KEY", output_trust: "untrusted", transport: transport("google_places")
+    },
+    {
+      tool_id: "google_places", action: "get_place_details", description: "Les detaljer om ett sted (GET /place/details/json, untrusted ingestion)",
+      input_schema: record({ place_id: z.string().max(400) }),
+      capability_class: "A", scopes: ["places:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_PLACES_API_KEY", output_trust: "untrusted", transport: transport("google_places")
+    },
+    /**
+     * D-304 (bygget parallelt mens D-303 sin CI kjørte - ellevte slice).
+     * SAMME D-64-domenevurdering som Google Maps/Google Places: stateless
+     * tredjeparts-rute-oppslag, IKKE eierens egen posisjon/geofence.
+     * STRUKTURELT LIK Google Maps/Google Places: INGEN klasse B/C/D-handling
+     * finnes - Directions-/Distance Matrix-API-et tilbyr genuint bare
+     * lesing, D-41 sitt read-only-unntak ærlig oppfylt. **IKKE denne-økten-
+     * verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om det ELDRE, stabile Directions-/Distance
+     * Matrix-API-et, se `GoogleRoutesTransport` sin doc-kommentar i
+     * `live-transports.ts`.
+     */
+    {
+      tool_id: "google_routes", action: "get_directions", description: "Rutebeskrivelse mellom to punkter (GET /directions/json, untrusted ingestion)",
+      input_schema: record({ origin: z.string().max(400), destination: z.string().max(400) }),
+      capability_class: "A", scopes: ["routes:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_ROUTES_API_KEY", output_trust: "untrusted", transport: transport("google_routes")
+    },
+    {
+      tool_id: "google_routes", action: "get_distance_matrix", description: "Reisetid/avstand mellom flere opprinnelser/destinasjoner (GET /distancematrix/json, untrusted ingestion)",
+      input_schema: record({ origins: z.string().max(800), destinations: z.string().max(800) }),
+      capability_class: "A", scopes: ["routes:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_ROUTES_API_KEY", output_trust: "untrusted", transport: transport("google_routes")
+    },
+    /**
+     * D-305 (bygget parallelt mens D-304 sin CI kjørte - tolvte slice).
+     * STRUKTURELT LIK Google Maps/Places/Routes/Brave Search/Tavily/Exa:
+     * INGEN klasse B/C/D-handling finnes - Grafana sitt HTTP-API tilbyr her
+     * kun lesing, D-41 sitt read-only-unntak ærlig oppfylt. **IKKE denne-
+     * økten-verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om Grafana sitt HTTP-API, se
+     * `GrafanaTransport` sin doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "grafana", action: "search_dashboards", description: "Søk etter dashboards/mapper (GET /api/search, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(400).optional() }),
+      capability_class: "A", scopes: ["dashboards:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GRAFANA_API_KEY", output_trust: "untrusted", transport: transport("grafana")
+    },
+    {
+      tool_id: "grafana", action: "get_dashboard", description: "Les ett dashboard ved uid (GET /api/dashboards/uid/{uid}, untrusted ingestion)",
+      input_schema: record({ uid: z.string().max(200) }),
+      capability_class: "A", scopes: ["dashboards:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GRAFANA_API_KEY", output_trust: "untrusted", transport: transport("grafana")
+    },
+    /**
+     * D-306 (bygget parallelt mens D-305 sin CI kjørte - trettende slice).
+     * STRUKTURELT LIK Grafana/Google-familien/Brave Search/Tavily/Exa: INGEN
+     * klasse B/C/D-handling finnes - Prometheus sitt HTTP-API tilbyr genuint
+     * bare lesing, D-41 sitt read-only-unntak ærlig oppfylt. **IKKE denne-
+     * økten-verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om Prometheus sitt HTTP-API, se
+     * `PrometheusTransport` sin doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "prometheus", action: "query", description: "PromQL instant-spørring (GET /api/v1/query, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(1000) }),
+      capability_class: "A", scopes: ["metrics:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_PROMETHEUS_TOKEN", output_trust: "untrusted", transport: transport("prometheus")
+    },
+    {
+      tool_id: "prometheus", action: "query_range", description: "PromQL rekke-spørring over tid (GET /api/v1/query_range, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(1000), start: z.string().max(64), end: z.string().max(64), step: z.string().max(32) }),
+      capability_class: "A", scopes: ["metrics:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_PROMETHEUS_TOKEN", output_trust: "untrusted", transport: transport("prometheus")
+    },
+    /**
+     * D-307 (bygget parallelt mens D-306 sin CI kjørte - fjortende slice).
+     * D-41 sitt "maksimal nyttig kapabilitet"-prinsipp fulgt - EKTE
+     * skrivehandling (`create_folder`), ikke kunstig innsnevret til
+     * read-only (samme disiplin som Drive/Sheets). **IKKE denne-økten-
+     * verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om Dropbox API v2, se `DropboxTransport` sin
+     * doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "dropbox", action: "list_folder", description: "List innhold i en mappe (POST /2/files/list_folder, untrusted ingestion)",
+      input_schema: record({ path: z.string().max(1000).optional() }),
+      capability_class: "A", scopes: ["files.metadata.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_DROPBOX_TOKEN", output_trust: "untrusted", transport: transport("dropbox")
+    },
+    {
+      tool_id: "dropbox", action: "create_folder", description: "Opprett en NY, tom mappe (POST /2/files/create_folder_v2)",
+      input_schema: record({ path: z.string().max(1000) }),
+      capability_class: "B", scopes: ["files.content.write"], reversible: true,
+      rollback_procedure: "slett den nyopprettede mappen manuelt", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_DROPBOX_TOKEN",
+      output_trust: "internal", transport: transport("dropbox")
+    },
+    /**
+     * D-308 (bygget parallelt mens D-307 sin CI kjørte - femtende slice,
+     * Tobias direkte i chat gjentatt, niende gang: "fortsett og jobbe ikke
+     * vent på ci"). `Authorization: Bearer`-header + fast `Notion-Version`-
+     * header mot Notion sitt REST-API. D-41: `create_page` er en EKTE
+     * skrivehandling (ikke kunstig innsnevret til read-only) - reversibel
+     * via arkivering i Notion sitt UI (ingen dedikert arkiver-endepunkt
+     * bygget her ennå). **IKKE denne-økten-verifisert mot en live hentet
+     * kopi av offisiell dokumentasjon** (nettverksegress blokkert i dette
+     * miljøet, samme D-297-forbehold) - basert på trent kunnskap om Notion
+     * API v1 (2022-06-28), se `NotionTransport` sin doc-kommentar i
+     * `live-transports.ts`.
+     */
+    {
+      tool_id: "notion", action: "search", description: "Søk på tvers av sider/databaser eieren har delt med integrasjonen (POST /v1/search, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(2000).optional() }),
+      capability_class: "A", scopes: ["read_content"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_NOTION_API_KEY", output_trust: "untrusted", transport: transport("notion")
+    },
+    {
+      tool_id: "notion", action: "create_page", description: "Opprett en NY side under en gitt parent (POST /v1/pages)",
+      input_schema: record({
+        parent: z.record(z.string(), z.unknown()), properties: z.record(z.string(), z.unknown())
+      }),
+      capability_class: "B", scopes: ["insert_content"], reversible: true,
+      rollback_procedure: "arkiver siden manuelt i Notion", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_NOTION_API_KEY",
+      output_trust: "internal", transport: transport("notion")
+    },
+    /**
+     * D-309 (bygget parallelt mens D-308 sin CI kjørte - sekstende slice,
+     * Tobias direkte i chat gjentatt, tiende gang: "fortsett og jobbe ikke
+     * vent på ci"). `Authorization: Bearer`-header mot Microsoft Graph
+     * v1.0. D-41: `create_folder` er en EKTE skrivehandling (ikke kunstig
+     * innsnevret til read-only). **IKKE denne-økten-verifisert mot en live
+     * hentet kopi av offisiell dokumentasjon** (nettverksegress blokkert i
+     * dette miljøet, samme D-297-forbehold) - basert på trent kunnskap om
+     * Microsoft Graph Drive API, se `OneDriveTransport` sin doc-kommentar i
+     * `live-transports.ts`.
+     */
+    {
+      tool_id: "onedrive", action: "list_folder", description: "List innhold i en mappe (GET /me/drive/root/children eller .../root:/{path}:/children, untrusted ingestion)",
+      input_schema: record({ path: z.string().max(1000).optional() }),
+      capability_class: "A", scopes: ["Files.Read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_ONEDRIVE_TOKEN", output_trust: "untrusted", transport: transport("onedrive")
+    },
+    {
+      tool_id: "onedrive", action: "create_folder", description: "Opprett en NY mappe under rot (POST /me/drive/root/children)",
+      input_schema: record({ name: z.string().max(255) }),
+      capability_class: "B", scopes: ["Files.ReadWrite"], reversible: true,
+      rollback_procedure: "slett den nyopprettede mappen manuelt", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_ONEDRIVE_TOKEN",
+      output_trust: "internal", transport: transport("onedrive")
+    },
+    /**
+     * D-310 (syttende slice, FØRSTE etter D-192-merge av PR #190 - tilbake
+     * til ett-connector-per-PR-mønsteret). `Authorization: Bearer`-header
+     * mot Microsoft Graph v1.0 (SAMME familie som OneDrive D-309).
+     * `list_messages` er klasse A (lesing). `send_mail` er BEVISST klasse D
+     * - SAMME klassifisering som `email.send` (Gmail) lenger opp i denne
+     * filen: sending av e-post er ikke reverserbar, derfor klasse D (D-192-
+     * strekpunktene/CLAUDE.md regel 2 - kritiske handlinger håndheves i
+     * deterministisk kode, ALDRI kun promptregler - `PolicyGateway`/
+     * `ToolGateway.execute()` sin generiske klasse D-håndtering, IKKE egen
+     * per-connector-kode, dekker denne handlingen identisk til `email.send`
+     * uten ekstra arbeid her). **IKKE denne-økten-verifisert mot en live
+     * hentet kopi av offisiell dokumentasjon** (nettverksegress blokkert i
+     * dette miljøet, samme D-297-forbehold) - basert på trent kunnskap om
+     * Microsoft Graph Mail API, se `MicrosoftOutlookTransport` sin
+     * doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "microsoft_outlook", action: "list_messages", description: "List nylige e-poster (GET /me/messages, untrusted ingestion)",
+      input_schema: record({ max: z.number().int().min(1).max(50).optional() }),
+      capability_class: "A", scopes: ["Mail.Read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_OUTLOOK_TOKEN", output_trust: "untrusted", transport: transport("microsoft_outlook")
+    },
+    {
+      // Sending av e-post er klasse D, SAMME begrunnelse som email.send over.
+      tool_id: "microsoft_outlook", action: "send_mail", description: "Send e-post via Outlook (POST /me/sendMail, krever signert godkjenning)",
+      input_schema: record({ to: z.string(), subject: z.string(), body: z.string() }),
+      capability_class: "D", scopes: ["Mail.Send"], reversible: false,
+      rollback_procedure: "ikke reverserbar - derfor klasse D", idempotent_external: false,
+      timeout_ms: 15_000, rate_limit_per_minute: 5, credential_ref: "JARVIS_OUTLOOK_TOKEN",
+      output_trust: "internal", transport: transport("microsoft_outlook")
+    },
+    /**
+     * D-311 (attende slice, Tobias direkte i chat gjentatt, ellevte gang:
+     * "fortsett og jobbe ikke vent på ci"). `X-N8N-API-KEY`-header (IKKE
+     * `Authorization: Bearer` - n8n sitt eget API-nøkkel-headernavn) mot
+     * n8n sitt REST-API v1. n8n er TYPISK selv-hostet (SAMME
+     * "typisk selv-hostet"-mønster som Grafana D-305/Prometheus D-306) -
+     * base-URL-en må konfigureres via `JARVIS_N8N_API_BASE_URL`,
+     * resolver-closure. `activate_workflow` er en EKTE klasse B-
+     * skrivehandling (D-41), reversibel via `deactivate_workflow`
+     * (IKKE bygget her ennå - bevisst DEFERRED, samme disiplin som
+     * Dropbox/Notion sine deferred handlinger). **IKKE denne-økten-
+     * verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om n8n sitt Public REST API, se
+     * `N8nTransport` sin doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "n8n", action: "list_workflows", description: "List workflows (GET /api/v1/workflows, untrusted ingestion)",
+      input_schema: empty,
+      capability_class: "A", scopes: ["workflow:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_N8N_API_KEY", output_trust: "untrusted", transport: transport("n8n")
+    },
+    {
+      tool_id: "n8n", action: "activate_workflow", description: "Aktiver en workflow (POST /api/v1/workflows/{id}/activate)",
+      input_schema: record({ id: z.string() }),
+      capability_class: "B", scopes: ["workflow:write"], reversible: true,
+      rollback_procedure: "deaktiver workflowen manuelt i n8n sitt UI (deactivate_workflow ikke bygget ennå)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_N8N_API_KEY", output_trust: "internal", transport: transport("n8n")
+    },
+    /**
+     * D-313 (bygget, flyttet ut av backlog): Spotify Web API. `credential_ref`
+     * peker på REFRESH-tokenet (den faktiske, roterte secreten) - `client_id`/
+     * `client_secret` er DELT app-konfig lest direkte fra env inne i
+     * `spotifyAccessToken()`, SAMME mønster som `googleAccessToken()`
+     * (Google Sheets D-299 bruker identisk oppdeling).
+     * Nettverksegress blokkert i dette miljøet denne økten (D-297-forbehold) -
+     * basert på trent kunnskap om Spotify sitt Web API/Accounts-API, se
+     * `SpotifyTransport` sin doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "spotify", action: "get_currently_playing", description: "Hent nåværende avspilling (GET /v1/me/player/currently-playing, untrusted ingestion)",
+      input_schema: empty,
+      capability_class: "A", scopes: ["user-read-playback-state"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_SPOTIFY_REFRESH_TOKEN", output_trust: "untrusted", transport: transport("spotify")
+    },
+    {
+      tool_id: "spotify", action: "add_to_queue", description: "Legg en sang til i avspillingskøen (POST /v1/me/player/queue)",
+      input_schema: record({ uri: z.string() }),
+      capability_class: "B", scopes: ["user-modify-playback-state"], reversible: true,
+      rollback_procedure: "hopp over sangen manuelt via skip_to_next (Spotify har ikke et dedikert fjern-fra-kø endepunkt)",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_SPOTIFY_REFRESH_TOKEN", output_trust: "internal", transport: transport("spotify")
+    },
+    /**
+     * D-314 (bygget, flyttet ut av backlog): WhatsApp Business Cloud API
+     * (Meta Graph API). `phone_number_id` er Jarvis sin EGEN
+     * avsender-identitet (SAMME rolle som Telegram sin `chat_id`),
+     * injisert som en resolver-closure. `notify` navngitt IDENTISK med
+     * Slack/Discord/Telegram sin send-melding-handling.
+     * Nettverksegress blokkert i dette miljøet denne økten (D-297-forbehold) -
+     * basert på trent kunnskap om Meta Graph API/WhatsApp Business Cloud
+     * API, se `WhatsAppTransport` sin doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "whatsapp", action: "get_phone_number_info", description: "Les avsendernummerets metadata (GET /{phone_number_id}, untrusted ingestion)",
+      input_schema: empty,
+      capability_class: "A", scopes: ["whatsapp_business_management"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_WHATSAPP_TOKEN", output_trust: "untrusted", transport: transport("whatsapp")
+    },
+    {
+      tool_id: "whatsapp", action: "notify", description: "Send melding via WhatsApp (POST /{phone_number_id}/messages)",
+      input_schema: record({ to: z.string(), message: z.string().max(4096) }),
+      capability_class: "B", scopes: ["whatsapp_business_messaging"], reversible: true,
+      rollback_procedure: "send korreksjonsmelding", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_WHATSAPP_TOKEN", output_trust: "internal", transport: transport("whatsapp")
+    },
+    /**
+     * D-315 (bygget, flyttet ut av backlog): Make (tidligere Integromat).
+     * `Authorization: Token <token>` (IKKE Bearer) mot Make sitt API v2 -
+     * zone-spesifikk base-URL, resolver-closure, SAMME mønster som n8n.
+     * Nettverksegress blokkert i dette miljøet denne økten (D-297-forbehold) -
+     * basert på trent kunnskap om Make sitt API v2, se `MakeTransport` sin
+     * doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "make", action: "get_current_user", description: "Les egen brukeridentitet (GET /api/v2/users/me) - brukes som tilkoblingstest, ALDRI en ekte kjøring",
+      input_schema: empty,
+      capability_class: "A", scopes: ["user:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_MAKE_API_KEY", output_trust: "untrusted", transport: transport("make")
+    },
+    {
+      tool_id: "make", action: "run_scenario", description: "Kjør en scenario (POST /api/v2/scenarios/{id}/run)",
+      input_schema: record({ scenario_id: z.string() }),
+      capability_class: "B", scopes: ["scenarios:run"], reversible: true,
+      rollback_procedure: "ingen generell angrehandling - avhenger av hva scenarioet faktisk gjør, vurderes per scenario",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_MAKE_API_KEY", output_trust: "internal", transport: transport("make")
+    },
+    /**
+     * D-316 (bygget, flyttet ut av backlog): OpenAI Images API. Egen
+     * `tool_id` fra `openai` sin model_provider-oppføring (ModelGateway) -
+     * strukturelt ulik kapabilitet (bildegenerering, ikke tekst-fullføring).
+     * `list_models` er en GRATIS/sideeffekt-fri tilkoblingstest -
+     * `generate_image` har EKTE kostnad per kall (ALDRI brukt som live_test).
+     * Nettverksegress blokkert i dette miljøet denne økten (D-297-forbehold) -
+     * basert på trent kunnskap om OpenAI sitt Images API, se
+     * `OpenAIImagesTransport` sin doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "openai_images", action: "list_models", description: "List tilgjengelige modeller (GET /v1/models, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: empty,
+      capability_class: "A", scopes: ["models:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_OPENAI_IMAGES_API_KEY", output_trust: "untrusted", transport: transport("openai_images")
+    },
+    {
+      tool_id: "openai_images", action: "generate_image", description: "Generer et bilde fra en tekstbeskrivelse (POST /v1/images/generations, EKTE kostnad per kall)",
+      input_schema: record({ prompt: z.string().max(4000), n: z.number().min(1).max(10).optional(), size: z.string().optional() }),
+      capability_class: "B", scopes: ["images:generate"], reversible: true,
+      rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kvote/kostnad, kan ikke og trenger ikke reverseres)",
+      idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 10,
+      credential_ref: "JARVIS_OPENAI_IMAGES_API_KEY", output_trust: "internal", transport: transport("openai_images")
+    },
+    /**
+     * D-321. SAMME "notify er ekte utsendelse (klasse B), get_account_info er
+     * trygg tilkoblingstest (klasse A)"-mønster som Telegram/Slack/Discord/
+     * Twilio (D-295) - Telnyx er en ordinær `ToolGateway`-meldingsleverandør-
+     * connector, IKKE en `SpeechAdapter` (D-64-vurdering FØR bygging, se
+     * `TelnyxTransport` sin doc-kommentar i `live-transports.ts`). ETT enkelt
+     * Bearer-API-nøkkel (IKKE Twilio sin to-delte AccountSid/AuthToken-modell)
+     * - `telnyx:send`/`telnyx:read` er interne Jarvis-plassholder-scopes,
+     * SAMME konvensjon som Twilio sin `sms:send`/`sms:read`.
+     */
+    {
+      tool_id: "telnyx", action: "notify", description: "Send SMS (POST /v2/messages)",
+      input_schema: record({ to: z.string(), message: z.string().max(1600) }), capability_class: "B",
+      scopes: ["telnyx:send"], reversible: true, rollback_procedure: "send korreksjonsmelding",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TELNYX_API_KEY", output_trust: "internal", transport: transport("telnyx")
+    },
+    {
+      tool_id: "telnyx", action: "get_account_info", description: "Les kontoens gjeldende saldo (GET /v2/balance) - brukes som tilkoblingstest, ALDRI en ekte SMS-utsendelse",
+      input_schema: empty, capability_class: "A", scopes: ["telnyx:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_TELNYX_API_KEY",
+      output_trust: "untrusted", transport: transport("telnyx")
+    },
+    /**
+     * D-322. Runway sitt REST-API v1 (`api.dev.runwayml.com`) - BEKREFTET via
+     * `WebSearch` denne økten (flere uavhengige kilder krysset), se
+     * `RunwayTransport` sin doc-kommentar i `live-transports.ts` for full
+     * evidens-kategorisering. `get_account_info` er GRATIS/sideeffekt-fri
+     * (brukes som `live_test` NETTOPP fordi `generate_video` har reell
+     * kostnad per kall, SAMME disiplin som OpenAI Images D-316).
+     * `get_task_status` er også gratis lesing - asynkron generering krever
+     * polling for å faktisk få resultatet.
+     */
+    {
+      tool_id: "runway", action: "get_account_info", description: "Les organisasjonens kredittbalanse/tier (GET /v1/organization, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: empty, capability_class: "A", scopes: ["video:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_RUNWAY_API_KEY",
+      output_trust: "untrusted", transport: transport("runway")
+    },
+    {
+      tool_id: "runway", action: "generate_video", description: "Generer en video fra et bilde + tekstbeskrivelse (POST /v1/image_to_video, EKTE kostnad per kall, asynkron - returnerer en task-id, poll get_task_status for resultat)",
+      input_schema: record({
+        promptImage: z.string(), promptText: z.string().max(1000).optional(),
+        model: z.string().optional(), ratio: z.string().optional(), duration: z.number().min(1).max(60).optional()
+      }),
+      capability_class: "B", scopes: ["video:generate"], reversible: true,
+      rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kreditt/kostnad, kan ikke og trenger ikke reverseres)",
+      idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 5,
+      credential_ref: "JARVIS_RUNWAY_API_KEY", output_trust: "internal", transport: transport("runway")
+    },
+    {
+      tool_id: "runway", action: "get_task_status", description: "Sjekk status/resultat for en tidligere generering (GET /v1/tasks/{id}, gratis/sideeffekt-fritt, untrusted ingestion - PÅKREVD for å faktisk hente ut ferdig video siden generate_video kun returnerer en task-id)",
+      input_schema: record({ task_id: z.string() }), capability_class: "A", scopes: ["video:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_RUNWAY_API_KEY",
+      output_trust: "untrusted", transport: transport("runway")
+    },
+    /**
+     * D-323. Kling sitt REST-API (`api.klingai.com`) - autentisering er en
+     * selv-generert JWT (HS256, Access Key/Secret Key), IKKE en statisk
+     * Bearer-token, se `KlingTransport` sin doc-kommentar i
+     * `live-transports.ts` for full evidens-kategorisering.
+     * `credential_ref` her er Secret Key (brukt til signering) - Access
+     * Key injiseres separat som resolver-closure i main.ts/worker-main.ts
+     * (SAMME "fast konfigurasjonsverdi utover credential"-mønster som
+     * Twilio sin accountSid, D-295). BEVISST INGEN klasse A-handling her -
+     * ingen verifisert gratis/parameterløst kontoendepunkt funnet denne
+     * økten (D-41 DEFERRED), derfor heller ingen `live_test` i
+     * connector-registry.ts.
+     */
+    {
+      tool_id: "kling", action: "generate_video", description: "Generer en video fra et bilde + tekstbeskrivelse (POST /v1/videos/image2video, EKTE kostnad per kall, asynkron - returnerer en task-id, poll get_task_status for resultat)",
+      input_schema: record({
+        image_url: z.string(), prompt: z.string().max(1000).optional(),
+        duration: z.string().optional(), aspect_ratio: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["video:generate"], reversible: true,
+      rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kreditt/kostnad, kan ikke og trenger ikke reverseres)",
+      idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 5,
+      credential_ref: "JARVIS_KLING_SECRET_KEY", output_trust: "internal", transport: transport("kling")
+    },
+    {
+      tool_id: "kling", action: "get_task_status", description: "Sjekk status/resultat for en tidligere generering (GET /v1/videos/image2video/{task_id}, gratis/sideeffekt-fritt, untrusted ingestion - PÅKREVD for å faktisk hente ut ferdig video siden generate_video kun returnerer en task-id)",
+      input_schema: record({ task_id: z.string() }), capability_class: "A", scopes: ["video:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_KLING_SECRET_KEY",
+      output_trust: "untrusted", transport: transport("kling")
+    },
+    /**
+     * D-324. Google Veo kjøres over den SAMME Gemini API-vert/auth-form som
+     * `gemini` sin model_provider-oppføring (`x-goog-api-key`), men
+     * `predictLongRunning` er en strukturelt ulik kapabilitet
+     * (videogenerering, ikke tekst-fullføring) - egen `tool_id` her, se
+     * `GoogleVeoTransport` sin doc-kommentar i `live-transports.ts` for full
+     * evidens-kategorisering.
+     */
+    {
+      tool_id: "google_veo", action: "list_models", description: "List tilgjengelige Gemini/Veo-modeller (GET /v1beta/models, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: empty, capability_class: "A", scopes: ["video:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GOOGLE_VEO_API_KEY",
+      output_trust: "untrusted", transport: transport("google_veo")
+    },
+    {
+      tool_id: "google_veo", action: "generate_video", description: "Generer en video fra en tekstbeskrivelse (POST /v1beta/models/{model}:predictLongRunning, EKTE kostnad per kall, asynkron - returnerer et operation-navn, poll get_task_status for resultat)",
+      input_schema: record({
+        prompt: z.string(), model: z.string().optional(), aspect_ratio: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["video:generate"], reversible: true,
+      rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kreditt/kostnad, kan ikke og trenger ikke reverseres)",
+      idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 5,
+      credential_ref: "JARVIS_GOOGLE_VEO_API_KEY", output_trust: "internal", transport: transport("google_veo")
+    },
+    {
+      tool_id: "google_veo", action: "get_task_status", description: "Sjekk status/resultat for en tidligere generering (GET /v1beta/{operation_name}, gratis/sideeffekt-fritt, untrusted ingestion - PÅKREVD for å faktisk hente ut ferdig video siden generate_video kun returnerer et operation-navn)",
+      input_schema: record({ operation_name: z.string() }), capability_class: "A", scopes: ["video:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_GOOGLE_VEO_API_KEY",
+      output_trust: "untrusted", transport: transport("google_veo")
+    },
+    /**
+     * D-327. Higgsfield sitt REST-API (`api.higgsfield.ai`) er en MULTI-
+     * MODELL-markedsplass (proxyer tredjeparts-modeller under vertsnavnet,
+     * f.eks. `bytedance/seedance-2.0`) - `model_path` er derfor et
+     * PÅKREVD parameter fra kalleren (INGEN hardkodet default-modell), se
+     * `HiggsfieldTransport` sin doc-kommentar i `live-transports.ts` for
+     * full D-64-begrunnelse. `credential_ref` her er Key Secret - Key ID
+     * injiseres separat som resolver-closure i main.ts/worker-main.ts.
+     * BEVISST INGEN klasse A-handling/`live_test` - ingen verifisert
+     * gratis/parameterløst kontoendepunkt funnet (D-41 DEFERRED).
+     */
+    {
+      tool_id: "higgsfield", action: "generate_video", description: "Generer en video fra en tekstbeskrivelse via en NAVNGITT Higgsfield-modellsti (POST /{model_path}/text-to-video, EKTE kostnad per kall, asynkron - returnerer en request_id, poll get_task_status for resultat). model_path er PÅKREVD - Higgsfield er en multi-modell-markedsplass, ingen default-modell er valgt på forhånd",
+      input_schema: record({ model_path: z.string(), prompt: z.string() }),
+      capability_class: "B", scopes: ["video:generate"], reversible: true,
+      rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kreditt/kostnad, kan ikke og trenger ikke reverseres)",
+      idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 5,
+      credential_ref: "JARVIS_HIGGSFIELD_KEY_SECRET", output_trust: "internal", transport: transport("higgsfield")
+    },
+    {
+      tool_id: "higgsfield", action: "get_task_status", description: "Sjekk status/resultat for en tidligere generering (GET /requests/{request_id}/status, gratis/sideeffekt-fritt, untrusted ingestion - PÅKREVD for å faktisk hente ut ferdig video siden generate_video kun returnerer en request_id)",
+      input_schema: record({ request_id: z.string() }), capability_class: "A", scopes: ["video:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_HIGGSFIELD_KEY_SECRET",
+      output_trust: "untrusted", transport: transport("higgsfield")
+    },
+    /**
+     * D-329. Todoist - FØRSTE av de seks D-64-port-krevende CRM-/
+     * prosjektstyrings-leverandørene som faktisk er bygget (D-291 stengte
+     * porten selv; dette er transport-laget). API-formen (unifisert
+     * `/api/v1/`, IKKE den pensjonerte `/rest/v2/`-veien) er BEVISST
+     * verifisert via WebSearch denne økten, se TodoistTransport sin doc-
+     * kommentar i live-transports.ts. `delete_task` er BEVISST UTELATT
+     * (D-41 DEFERRED) - ingen sekundærkilde bekreftet eksakt HTTP-metode/
+     * status for slette-endepunktet i dette søket.
+     */
+    {
+      tool_id: "todoist", action: "list_tasks", description: "List alle aktive oppgaver (GET /tasks, gratis/sideeffekt-fritt, untrusted ingestion - kun aktive/uferdige oppgaver returneres, lukkede er ikke tilgjengelig via dette endepunktet)",
+      input_schema: empty, capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_TODOIST_API_TOKEN",
+      output_trust: "untrusted", transport: transport("todoist")
+    },
+    {
+      tool_id: "todoist", action: "get_task", description: "Hent én oppgave (GET /tasks/{task_id}, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ task_id: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_TODOIST_API_TOKEN",
+      output_trust: "untrusted", transport: transport("todoist")
+    },
+    {
+      tool_id: "todoist", action: "create_task", description: "Opprett en ny oppgave (POST /tasks, EKTE ekstern tilstand skapes)",
+      input_schema: record({
+        content: z.string(), project_id: z.string().optional(), description: z.string().optional(),
+        due_string: z.string().optional(), priority: z.number().optional()
+      }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "close_task eller manuell sletting i Todoist",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TODOIST_API_TOKEN", output_trust: "internal", transport: transport("todoist")
+    },
+    {
+      tool_id: "todoist", action: "update_task", description: "Oppdater felter på en eksisterende oppgave (POST /tasks/{task_id}, delvis oppdatering)",
+      input_schema: record({
+        task_id: z.string(), content: z.string().optional(), description: z.string().optional(),
+        due_string: z.string().optional(), priority: z.number().optional()
+      }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "ny update_task med forrige verdier",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TODOIST_API_TOKEN", output_trust: "internal", transport: transport("todoist")
+    },
+    {
+      tool_id: "todoist", action: "close_task", description: "Fullfør (lukk) en oppgave (POST /tasks/{task_id}/close, returnerer 204)",
+      input_schema: record({ task_id: z.string() }), capability_class: "B", scopes: ["tasks:write"],
+      reversible: true, rollback_procedure: "reopen_task med samme task_id",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TODOIST_API_TOKEN", output_trust: "internal", transport: transport("todoist")
+    },
+    {
+      tool_id: "todoist", action: "reopen_task", description: "Gjenåpne en tidligere lukket oppgave, samme id (POST /tasks/{task_id}/reopen, returnerer 204)",
+      input_schema: record({ task_id: z.string() }), capability_class: "B", scopes: ["tasks:write"],
+      reversible: true, rollback_procedure: "close_task med samme task_id",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TODOIST_API_TOKEN", output_trust: "internal", transport: transport("todoist")
+    },
+    /**
+     * D-330. Trello - ANDRE av de seks D-64-port-krevende faktisk bygget
+     * (D-291 stengte porten; D-329 bygget Todoist FØRST). `key`/`token`
+     * som query-parametere (IKKE en Authorization-header), se
+     * TrelloTransport sin doc-kommentar i live-transports.ts.
+     */
+    {
+      tool_id: "trello", action: "list_boards", description: "List alle boards eieren har tilgang til (GET /members/me/boards, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: empty, capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_TRELLO_TOKEN",
+      output_trust: "untrusted", transport: transport("trello")
+    },
+    {
+      tool_id: "trello", action: "list_cards", description: "List alle kort på et board (GET /boards/{board_id}/cards, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ board_id: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_TRELLO_TOKEN",
+      output_trust: "untrusted", transport: transport("trello")
+    },
+    {
+      tool_id: "trello", action: "get_card", description: "Hent ett kort (GET /cards/{card_id}, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ card_id: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_TRELLO_TOKEN",
+      output_trust: "untrusted", transport: transport("trello")
+    },
+    {
+      tool_id: "trello", action: "create_card", description: "Opprett et nytt kort på en liste (POST /cards, EKTE ekstern tilstand skapes)",
+      input_schema: record({ list_id: z.string(), name: z.string(), desc: z.string().optional() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "close_card eller manuell sletting i Trello",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TRELLO_TOKEN", output_trust: "internal", transport: transport("trello")
+    },
+    {
+      tool_id: "trello", action: "update_card", description: "Oppdater felter på et eksisterende kort (PUT /cards/{card_id}, delvis oppdatering)",
+      input_schema: record({ card_id: z.string(), name: z.string().optional(), desc: z.string().optional(), list_id: z.string().optional() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "ny update_card med forrige verdier",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TRELLO_TOKEN", output_trust: "internal", transport: transport("trello")
+    },
+    {
+      tool_id: "trello", action: "close_card", description: "Arkiver (lukk) et kort (PUT /cards/{card_id} {closed:true})",
+      input_schema: record({ card_id: z.string() }), capability_class: "B", scopes: ["tasks:write"],
+      reversible: true, rollback_procedure: "reopen_card med samme card_id",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TRELLO_TOKEN", output_trust: "internal", transport: transport("trello")
+    },
+    {
+      tool_id: "trello", action: "reopen_card", description: "Gjenåpne et tidligere arkivert kort, samme id (PUT /cards/{card_id} {closed:false})",
+      input_schema: record({ card_id: z.string() }), capability_class: "B", scopes: ["tasks:write"],
+      reversible: true, rollback_procedure: "close_card med samme card_id",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TRELLO_TOKEN", output_trust: "internal", transport: transport("trello")
+    },
+    /**
+     * D-331. Jira - TREDJE av de seks D-64-port-krevende faktisk bygget
+     * (D-291 stengte porten; D-329/D-330 bygget Todoist/Trello først).
+     * `/rest/api/3/search/jql` (IKKE den fjernede `/search`-veien), Basic
+     * auth (`email:api_token`), base-URL er per-tenant - se JiraTransport
+     * sin doc-kommentar i live-transports.ts.
+     */
+    {
+      tool_id: "jira", action: "search_issues", description: "Søk etter issues med JQL (GET /rest/api/3/search/jql, gratis/sideeffekt-fritt, untrusted ingestion - den gamle /search-veien er HELT FJERNET fra Jira Cloud)",
+      input_schema: record({ jql: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_JIRA_API_TOKEN",
+      output_trust: "untrusted", transport: transport("jira")
+    },
+    {
+      tool_id: "jira", action: "get_issue", description: "Hent én issue (GET /rest/api/3/issue/{issue_key}, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ issue_key: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_JIRA_API_TOKEN",
+      output_trust: "untrusted", transport: transport("jira")
+    },
+    {
+      tool_id: "jira", action: "list_transitions", description: "List tilgjengelige status-overganger for en issue (GET /rest/api/3/issue/{issue_key}/transitions, gratis/sideeffekt-fritt - PÅKREVD for å finne riktig transition_id FØR transition_issue)",
+      input_schema: record({ issue_key: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_JIRA_API_TOKEN",
+      output_trust: "untrusted", transport: transport("jira")
+    },
+    {
+      tool_id: "jira", action: "create_issue", description: "Opprett en ny issue (POST /rest/api/3/issue, EKTE ekstern tilstand skapes - description konverteres internt til Atlassian Document Format)",
+      input_schema: record({ project_key: z.string(), summary: z.string(), issue_type: z.string(), description: z.string().optional() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "manuell sletting/arkivering i Jira",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_JIRA_API_TOKEN", output_trust: "internal", transport: transport("jira")
+    },
+    {
+      tool_id: "jira", action: "update_issue", description: "Oppdater felter på en eksisterende issue (PUT /rest/api/3/issue/{issue_key}, delvis oppdatering)",
+      input_schema: record({ issue_key: z.string(), summary: z.string().optional(), description: z.string().optional() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "ny update_issue med forrige verdier",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_JIRA_API_TOKEN", output_trust: "internal", transport: transport("jira")
+    },
+    {
+      tool_id: "jira", action: "transition_issue", description: "Flytt en issue til en ny status (POST /rest/api/3/issue/{issue_key}/transitions {transition:{id}} - transition_id må hentes via list_transitions FØRST)",
+      input_schema: record({ issue_key: z.string(), transition_id: z.string() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: false,
+      rollback_procedure: "ny transition_issue til en tilbake-transition, hvis en slik finnes i workflowen (IKKE garantert reversibel)",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_JIRA_API_TOKEN", output_trust: "internal", transport: transport("jira")
+    },
+    /**
+     * D-332. Linear - FJERDE av de seks D-64-port-krevende faktisk bygget
+     * (D-291 stengte porten; D-329/D-330/D-331 bygget Todoist/Trello/Jira
+     * først). ETT GraphQL-endepunkt, INGEN REST-API - se LinearTransport
+     * sin doc-kommentar i live-transports.ts. Rå API-nøkkel i
+     * Authorization-headeren, BEKREFTET UTEN Bearer-prefiks.
+     */
+    {
+      tool_id: "linear", action: "list_teams", description: "List alle team eieren har tilgang til (GraphQL query, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: empty, capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_LINEAR_API_KEY",
+      output_trust: "untrusted", transport: transport("linear")
+    },
+    {
+      tool_id: "linear", action: "list_issues", description: "List issues, valgfritt filtrert på team_id (GraphQL query, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ team_id: z.string().optional() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_LINEAR_API_KEY",
+      output_trust: "untrusted", transport: transport("linear")
+    },
+    {
+      tool_id: "linear", action: "get_issue", description: "Hent én issue (GraphQL query, gratis/sideeffekt-fritt, untrusted ingestion - issue_id kan være UUID eller identifier som 'ENG-123')",
+      input_schema: record({ issue_id: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_LINEAR_API_KEY",
+      output_trust: "untrusted", transport: transport("linear")
+    },
+    {
+      tool_id: "linear", action: "create_issue", description: "Opprett en ny issue (GraphQL mutation issueCreate, EKTE ekstern tilstand skapes)",
+      input_schema: record({ team_id: z.string(), title: z.string(), description: z.string().optional() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "manuell arkivering/sletting i Linear",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_LINEAR_API_KEY", output_trust: "internal", transport: transport("linear")
+    },
+    {
+      tool_id: "linear", action: "update_issue", description: "Oppdater felter på en eksisterende issue, inkl. status via state_id (GraphQL mutation issueUpdate, delvis oppdatering)",
+      input_schema: record({ issue_id: z.string(), title: z.string().optional(), description: z.string().optional(), state_id: z.string().optional() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "ny update_issue med forrige verdier",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_LINEAR_API_KEY", output_trust: "internal", transport: transport("linear")
+    },
+    /**
+     * D-333. HubSpot - FEMTE av de seks D-64-port-krevende faktisk bygget
+     * (D-291 stengte porten; D-329/D-330/D-331/D-332 bygget Todoist/Trello/
+     * Jira/Linear først). `/crm/v3/objects/{objectType}` - `object_type`
+     * er PÅKREVD fra kalleren (contacts/companies/deals deler EKSAKT
+     * samme URL-mønster), se HubSpotTransport sin doc-kommentar i
+     * live-transports.ts.
+     */
+    {
+      tool_id: "hubspot", action: "list_objects", description: "List objekter av en gitt type (GET /crm/v3/objects/{object_type}, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ object_type: z.enum(["contacts", "companies", "deals"]), limit: z.number().optional() }),
+      capability_class: "A", scopes: ["crm:read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_HUBSPOT_API_KEY",
+      output_trust: "untrusted", transport: transport("hubspot")
+    },
+    {
+      tool_id: "hubspot", action: "get_object", description: "Hent ett objekt (GET /crm/v3/objects/{object_type}/{id}, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ object_type: z.enum(["contacts", "companies", "deals"]), id: z.string() }),
+      capability_class: "A", scopes: ["crm:read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_HUBSPOT_API_KEY",
+      output_trust: "untrusted", transport: transport("hubspot")
+    },
+    {
+      tool_id: "hubspot", action: "search_objects", description: "Søk etter objekter med HubSpot sin filterGroups-syntaks (POST /crm/v3/objects/{object_type}/search, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ object_type: z.enum(["contacts", "companies", "deals"]), filter_groups: z.array(z.record(z.string(), z.unknown())).optional(), limit: z.number().optional() }),
+      capability_class: "A", scopes: ["crm:read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_HUBSPOT_API_KEY",
+      output_trust: "untrusted", transport: transport("hubspot")
+    },
+    {
+      tool_id: "hubspot", action: "create_object", description: "Opprett et nytt objekt (POST /crm/v3/objects/{object_type} {properties}, EKTE ekstern tilstand skapes)",
+      input_schema: record({ object_type: z.enum(["contacts", "companies", "deals"]), properties: z.record(z.string(), z.unknown()) }),
+      capability_class: "B", scopes: ["crm:write"], reversible: true,
+      rollback_procedure: "manuell arkivering/sletting i HubSpot",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_HUBSPOT_API_KEY", output_trust: "internal", transport: transport("hubspot")
+    },
+    {
+      tool_id: "hubspot", action: "update_object", description: "Oppdater felter på et eksisterende objekt (PATCH /crm/v3/objects/{object_type}/{id} {properties}, delvis oppdatering)",
+      input_schema: record({ object_type: z.enum(["contacts", "companies", "deals"]), id: z.string(), properties: z.record(z.string(), z.unknown()) }),
+      capability_class: "B", scopes: ["crm:write"], reversible: true,
+      rollback_procedure: "ny update_object med forrige verdier",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_HUBSPOT_API_KEY", output_trust: "internal", transport: transport("hubspot")
+    },
+    /**
+     * D-334. Pipedrive - SJETTE og SISTE av de seks D-64-port-krevende
+     * faktisk bygget (D-291 stengte porten; D-329 til D-333 bygget
+     * Todoist/Trello/Jira/Linear/HubSpot først). `/api/v2/{objectType}` -
+     * `object_type` er PÅKREVD fra kalleren (persons/organizations/deals
+     * deler EKSAKT samme URL-mønster), se PipedriveTransport sin doc-
+     * kommentar i live-transports.ts.
+     */
+    {
+      tool_id: "pipedrive", action: "list_objects", description: "List objekter av en gitt type (GET /api/v2/{object_type}, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ object_type: z.enum(["persons", "organizations", "deals"]), limit: z.number().optional() }),
+      capability_class: "A", scopes: ["crm:read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_PIPEDRIVE_API_KEY",
+      output_trust: "untrusted", transport: transport("pipedrive")
+    },
+    {
+      tool_id: "pipedrive", action: "get_object", description: "Hent ett objekt (GET /api/v2/{object_type}/{id}, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ object_type: z.enum(["persons", "organizations", "deals"]), id: z.string() }),
+      capability_class: "A", scopes: ["crm:read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_PIPEDRIVE_API_KEY",
+      output_trust: "untrusted", transport: transport("pipedrive")
+    },
+    {
+      tool_id: "pipedrive", action: "search_objects", description: "Søk etter objekter med et fritekst-søkeord (GET /api/v2/{object_type}/search?term=..., gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ object_type: z.enum(["persons", "organizations", "deals"]), term: z.string() }),
+      capability_class: "A", scopes: ["crm:read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_PIPEDRIVE_API_KEY",
+      output_trust: "untrusted", transport: transport("pipedrive")
+    },
+    {
+      tool_id: "pipedrive", action: "create_object", description: "Opprett et nytt objekt (POST /api/v2/{object_type} {properties}, EKTE ekstern tilstand skapes)",
+      input_schema: record({ object_type: z.enum(["persons", "organizations", "deals"]), properties: z.record(z.string(), z.unknown()) }),
+      capability_class: "B", scopes: ["crm:write"], reversible: true,
+      rollback_procedure: "manuell arkivering/sletting i Pipedrive",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_PIPEDRIVE_API_KEY", output_trust: "internal", transport: transport("pipedrive")
+    },
+    {
+      tool_id: "pipedrive", action: "update_object", description: "Oppdater felter på et eksisterende objekt (PATCH /api/v2/{object_type}/{id} {properties}, delvis oppdatering)",
+      input_schema: record({ object_type: z.enum(["persons", "organizations", "deals"]), id: z.string(), properties: z.record(z.string(), z.unknown()) }),
+      capability_class: "B", scopes: ["crm:write"], reversible: true,
+      rollback_procedure: "ny update_object med forrige verdier",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_PIPEDRIVE_API_KEY", output_trust: "internal", transport: transport("pipedrive")
     },
     ...(config.additionalTools ?? [])
   ];

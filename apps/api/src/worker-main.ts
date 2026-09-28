@@ -5,7 +5,7 @@ import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@j
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport, GmailTransport,
-  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, VercelTransport, MeshToolExecutor, meshToolDefinitions, PgGithubRateLimitStore,
+  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, MeshToolExecutor, allMeshTools, PgGithubRateLimitStore,
   ToolGateway, driveTransportsIfConfigured, firstWaveTools, parseDockerMutationTargets
 } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
@@ -23,7 +23,7 @@ import {
   type VippsCredentials, type VippsCredentialsProvider
 } from "@jarvis/finance";
 import { ConsentEnforcementService, ConsentService, ConsentTransport } from "@jarvis/consent";
-import { GoogleAdsTransport, GrowthService, GrowthTransport, marketingMemoryBriefSource } from "@jarvis/growth";
+import { GoogleAdsTransport, GrowthService, GrowthTransport, MetaAdsTransport, marketingMemoryBriefSource } from "@jarvis/growth";
 import { executiveHandler } from "./executive.ts";
 import {
   AnthropicAdapter,
@@ -301,6 +301,79 @@ const telegramTransport = new TelegramTransport(() => toolSecretProvider.get("JA
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
   github: new GithubTransport(githubRateLimitController), telegram: telegramTransport,
+  // D-292: samme "ren token per kall, ingen resolver-closure"-mønster som
+  // main.ts sin egen SlackTransport-wiring.
+  slack: new SlackTransport(),
+  // D-294: identisk wiring-mønster som apps/api/src/main.ts sin DiscordTransport.
+  discord: new DiscordTransport(),
+  // D-295: identisk wiring-mønster som apps/api/src/main.ts sin TwilioTransport.
+  twilio: new TwilioTransport(
+    () => toolSecretProvider.get("JARVIS_TWILIO_ACCOUNT_SID"),
+    () => toolSecretProvider.get("JARVIS_TWILIO_FROM_NUMBER")
+  ),
+  // D-296: identisk wiring-mønster som apps/api/src/main.ts sin BraveSearchTransport.
+  brave_search: new BraveSearchTransport(),
+  // D-297: identisk wiring-mønster som apps/api/src/main.ts sin SentryTransport.
+  sentry: new SentryTransport(() => toolSecretProvider.get("JARVIS_SENTRY_ORG_SLUG")),
+  // D-298: identisk wiring-mønster som apps/api/src/main.ts sin GoogleMapsTransport.
+  google_maps: new GoogleMapsTransport(),
+  // D-299: identisk wiring-mønster som apps/api/src/main.ts sin GoogleSheetsTransport.
+  google_sheets: new GoogleSheetsTransport(),
+  // D-301: identisk wiring-mønster som apps/api/src/main.ts sin TavilyTransport.
+  tavily: new TavilyTransport(),
+  // D-302: identisk wiring-mønster som apps/api/src/main.ts sin ExaTransport.
+  exa: new ExaTransport(),
+  // D-303: identisk wiring-mønster som apps/api/src/main.ts sin GooglePlacesTransport.
+  google_places: new GooglePlacesTransport(),
+  // D-304: identisk wiring-mønster som apps/api/src/main.ts sin GoogleRoutesTransport.
+  google_routes: new GoogleRoutesTransport(),
+  // D-305: identisk wiring-mønster som apps/api/src/main.ts sin GrafanaTransport.
+  grafana: new GrafanaTransport(() => toolSecretProvider.get("JARVIS_GRAFANA_API_BASE_URL")),
+  // D-306: identisk wiring-mønster som apps/api/src/main.ts sin PrometheusTransport.
+  prometheus: new PrometheusTransport(() => toolSecretProvider.get("JARVIS_PROMETHEUS_API_BASE_URL")),
+  // D-307: identisk wiring-mønster som apps/api/src/main.ts sin DropboxTransport.
+  dropbox: new DropboxTransport(),
+  // D-308: identisk wiring-mønster som apps/api/src/main.ts sin NotionTransport.
+  notion: new NotionTransport(),
+  // D-309: identisk wiring-mønster som apps/api/src/main.ts sin OneDriveTransport.
+  onedrive: new OneDriveTransport(),
+  // D-310: identisk wiring-mønster som apps/api/src/main.ts sin MicrosoftOutlookTransport.
+  microsoft_outlook: new MicrosoftOutlookTransport(),
+  // D-311: identisk wiring-mønster som apps/api/src/main.ts sin N8nTransport.
+  n8n: new N8nTransport(() => toolSecretProvider.get("JARVIS_N8N_API_BASE_URL")),
+  // D-313: identisk wiring-mønster som apps/api/src/main.ts sin SpotifyTransport.
+  spotify: new SpotifyTransport(),
+  // D-314: identisk wiring-mønster som apps/api/src/main.ts sin WhatsAppTransport.
+  whatsapp: new WhatsAppTransport(() => toolSecretProvider.get("JARVIS_WHATSAPP_PHONE_NUMBER_ID")),
+  // D-315: identisk wiring-mønster som apps/api/src/main.ts sin MakeTransport.
+  make: new MakeTransport(() => toolSecretProvider.get("JARVIS_MAKE_API_BASE_URL")),
+  // D-316: identisk wiring-mønster som apps/api/src/main.ts sin OpenAIImagesTransport.
+  openai_images: new OpenAIImagesTransport(),
+  // D-321: identisk wiring-mønster som apps/api/src/main.ts sin TelnyxTransport.
+  telnyx: new TelnyxTransport(() => toolSecretProvider.get("JARVIS_TELNYX_FROM_NUMBER")),
+  // D-322: identisk wiring-mønster som apps/api/src/main.ts sin RunwayTransport.
+  runway: new RunwayTransport(),
+  // D-323: identisk wiring-mønster som apps/api/src/main.ts sin KlingTransport.
+  kling: new KlingTransport(() => toolSecretProvider.get("JARVIS_KLING_ACCESS_KEY")),
+  // D-324: identisk wiring-mønster som apps/api/src/main.ts sin GoogleVeoTransport.
+  google_veo: new GoogleVeoTransport(),
+  // D-327: identisk wiring-mønster som apps/api/src/main.ts sin HiggsfieldTransport.
+  higgsfield: new HiggsfieldTransport(() => toolSecretProvider.get("JARVIS_HIGGSFIELD_KEY_ID")),
+  // D-329: identisk wiring-mønster som apps/api/src/main.ts sin TodoistTransport.
+  todoist: new TodoistTransport(),
+  // D-330: identisk wiring-mønster som apps/api/src/main.ts sin TrelloTransport.
+  trello: new TrelloTransport(() => toolSecretProvider.get("JARVIS_TRELLO_API_KEY")),
+  // D-331: identisk wiring-mønster som apps/api/src/main.ts sin JiraTransport.
+  jira: new JiraTransport(
+    () => toolSecretProvider.get("JARVIS_JIRA_BASE_URL"),
+    () => toolSecretProvider.get("JARVIS_JIRA_EMAIL")
+  ),
+  // D-332: identisk wiring-mønster som apps/api/src/main.ts sin LinearTransport.
+  linear: new LinearTransport(),
+  // D-333: identisk wiring-mønster som apps/api/src/main.ts sin HubSpotTransport.
+  hubspot: new HubSpotTransport(),
+  // D-334: identisk wiring-mønster som apps/api/src/main.ts sin PipedriveTransport.
+  pipedrive: new PipedriveTransport(() => toolSecretProvider.get("JARVIS_PIPEDRIVE_BASE_URL")),
   // D-242/D-248: identisk wiring-mønster som apps/api/src/main.ts - `vercel`
   // manglet en ekte transport her også - `VercelTransport` fantes aldri,
   // `transport("vercel")` falt derfor alltid tilbake til
@@ -326,6 +399,8 @@ for (const tool of firstWaveTools({
   growth: new GrowthTransport(growthService),
   // UA-4 Google Ads-slice (D-83): identisk wiring-mønster som apps/api/src/main.ts.
   googleads: new GoogleAdsTransport(growthService),
+  // D-335 (UA-4 Meta Ads-slice): identisk wiring-mønster som apps/api/src/main.ts.
+  metaads: new MetaAdsTransport(growthService),
   // UA-6 Finance & Spend Integrity Gateway (D-107): identisk wiring-mønster som apps/api/src/main.ts.
   finance: new FinanceTransport(financeService, fikenCredentialsProvider),
   // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2): identisk wiring-mønster som apps/api/src/main.ts.
@@ -346,6 +421,12 @@ for (const tool of firstWaveTools({
   // D-105 host-fix: samme wiring-mønster som apps/api/src/main.ts.
   dockerMutationTargets: parseDockerMutationTargets(process.env["JARVIS_DOCKER_MUTATION_TARGETS"])
 })) toolGateway.register(tool);
+// D-289 ("vil ha alt at han har full kontroll"): SAMME "beregn ÉN gang, rett
+// etter registreringsløkken"-mønster som apps/api/src/main.ts sin egen
+// `fullMeshTools` - eksponerer NØYAKTIG det som er registrert på DENNE
+// prosessens `toolGateway`-instans, ikke en håndskrevet, potensielt
+// avvikende kuratert liste.
+const fullMeshTools = allMeshTools(toolGateway);
 const workerIdentity = {
   person_id: process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias",
   tenant_id: process.env["JARVIS_TENANT_ID"] ?? "tenant-personal",
@@ -434,7 +515,7 @@ worker.register(
   "executive",
   executiveHandler({
     gateway,
-    tools: { definitions: meshToolDefinitions(), executor: new MeshToolExecutor(toolGateway, workerIdentity) },
+    tools: { definitions: fullMeshTools.map((t) => t.def), executor: new MeshToolExecutor(toolGateway, workerIdentity, 4000, fullMeshTools) },
     sandbox: runner
   })
 );

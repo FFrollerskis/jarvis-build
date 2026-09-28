@@ -6,7 +6,7 @@ import type {
   SituationAutonomyPolicy,
   SituationNotificationPolicy
 } from "@jarvis/situations";
-import { listConnectorStatus, meshToolBindings, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
+import { listConnectorStatus, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
 import { rankAttentionQueue } from "./ranking.ts";
 import type {
   AttentionItem, AttentionItemDetail, CapabilityStatus, ConnectorStatusReport, ControlSurfaceStatus, DelegationBoard
@@ -284,17 +284,67 @@ export class ExecutiveService {
    * slår kun opp den REGISTRERTE `ToolDefinition` for å finne
    * `credential_ref`, aldri et nytt, parallelt oppslag.
    */
-  async getCapabilityStatus(): Promise<CapabilityStatus> {
+  /**
+   * D-289 (Tobias direkte i chat: "vil ha alt at han har full kontroll" -
+   * retningsvalg på D-288): samtaleflaten kaller nå `allMeshTools(gateway)`
+   * (ALLE registrerte `tool_id:action`-par), ikke lenger kun de 5 kuraterte
+   * `MESH_TOOLS`. Én rad PER HANDLING (~150+) ville både sprengt
+   * `MeshToolExecutor` sin `maxOutputChars`-trimming (4000 tegn, se
+   * `mesh-bridge.ts`) OG vært et ubrukelig svar å relayere muntlig/i chat -
+   * gruppert PER `tool_id` er både kompakt nok OG mer nyttig for Charlie å
+   * faktisk formidle ("GitHub: 23 handlinger, klasse A-D, tilkoblet").
+   * `configured` er `true` KUN når ALLE distinkte `credential_ref`-er under
+   * den `tool_id`-en er satt - samme presence-only-disiplin (ALDRI verdien)
+   * som `hasSecret()` sin egen kontrakt. Fortsatt RENT avledet av
+   * `ToolGateway.list()` - ALDRI en egen, potensielt avvikende opptelling
+   * (samme D-209/D-237-disiplin som FØR denne posten, nå på et større
+   * register).
+   *
+   * D-317 (Tobias direkte i chat: "bygg modell-selvbevissthet inn i
+   * check_my_capabilities"): valgfri `servingModel` - hvilken leverandør/
+   * modell som FAKTISK genererer DENNE samtaleturen. Kommer UTELUKKENDE fra
+   * `ToolInvocationContext.servingModel` (via `ExecutiveTransport`), ALDRI
+   * fra en modell-oppgitt parameter - se `gateway.ts` sitt filhode for
+   * `ToolInvocationContext`. `null` når ukjent (f.eks. kalt utenfor en
+   * modellgenerert samtaletur, som i disse enhetstestene) - ALDRI gjettet
+   * til en fast verdi.
+   */
+  async getCapabilityStatus(servingModel?: { provider: string; model: string }): Promise<CapabilityStatus> {
+    const byToolId = new Map<string, { actions: Set<string>; classes: Set<string>; refs: Set<string> }>();
+    for (const definition of this.gateway.list()) {
+      const entry = byToolId.get(definition.tool_id) ?? { actions: new Set(), classes: new Set(), refs: new Set() };
+      entry.actions.add(definition.action);
+      entry.classes.add(definition.capability_class);
+      entry.refs.add(definition.credential_ref);
+      byToolId.set(definition.tool_id, entry);
+    }
+    const refConfigured = new Map<string, boolean>();
     const chatAccessibleTools = await Promise.all(
-      meshToolBindings().map(async (binding) => {
-        const definition = this.gateway.get(binding.tool_id, binding.action);
-        const configured = definition ? await this.gateway.hasSecret(definition.credential_ref) : false;
-        return { name: binding.name, description: binding.description, configured };
-      })
+      [...byToolId.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(async ([tool_id, entry]) => {
+          const refs = [...entry.refs];
+          const configuredPerRef = await Promise.all(
+            refs.map(async (ref) => {
+              const cached = refConfigured.get(ref);
+              if (cached !== undefined) return cached;
+              const value = await this.gateway.hasSecret(ref);
+              refConfigured.set(ref, value);
+              return value;
+            })
+          );
+          return {
+            tool_id,
+            actions: [...entry.actions].sort(),
+            capability_classes: [...entry.classes].sort(),
+            configured: configuredPerRef.every(Boolean)
+          };
+        })
     );
     return {
       chat_accessible_tools: chatAccessibleTools,
-      connector_health: [...this.gateway.health.entries()].map(([tool_id, h]) => ({ tool_id, ...h }))
+      connector_health: [...this.gateway.health.entries()].map(([tool_id, h]) => ({ tool_id, ...h })),
+      serving_model: servingModel ?? null
     };
   }
 

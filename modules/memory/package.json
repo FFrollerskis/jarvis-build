@@ -13,11 +13,12 @@
   "dependencies": {
     "@jarvis/contracts": "workspace:*",
     "@jarvis/core": "workspace:*",
+    "@jarvis/model-gateway": "workspace:*",
     "@jarvis/policy": "workspace:*",
-    "pg": "^8.16.3"
+    "pg": "^8.16.3",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@jarvis/model-gateway": "workspace:*",
     "@jarvis/provider-adapters": "workspace:*",
     "@jarvis/tasks": "workspace:*",
     "@types/pg": "^8.15.6",

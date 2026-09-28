@@ -16,6 +16,7 @@ const FIXTURES = fileURLToPath(new URL("./fixtures", import.meta.url));
 const OK_BIN = `${FIXTURES}/mock-piper-ok.sh`;
 const FAIL_BIN = `${FIXTURES}/mock-piper-fail.sh`;
 const HANG_BIN = `${FIXTURES}/mock-piper-hang.sh`;
+const CLOSES_STDIN_EARLY_BIN = `${FIXTURES}/mock-piper-closes-stdin-early.sh`;
 const MODEL = `${FIXTURES}/fake-voice.onnx`;
 
 async function collect(iterable: AsyncIterable<Buffer>): Promise<Buffer[]> {
@@ -88,6 +89,21 @@ describe("D: frames - feilbanen mot mock-piper-fail.sh", () => {
     const tts = new LocalPiperTts(FAIL_BIN, MODEL);
     const playback = tts.synthesize("hei jarvis");
     await expect(collect(playback.frames)).rejects.toThrow(/local_piper_process_failed:2:.*voice_model_load_error/);
+  });
+});
+
+describe("D-256: synthesize() krasjer ALDRI hele prosessen når binæren avslutter FØR stdin er ferdigskrevet", () => {
+  it("EPIPE på proc.stdin.end(text) blir en normal avvist Promise, ALDRI en uhåndtert 'error'-hendelse", async () => {
+    // Samme bug-klasse/funn som D-256 sin LocalWhisperStt-test (stt.ts) -
+    // mock-piper-fail.sh drenerer hele stdin FØR den avslutter (`cat
+    // >/dev/null`), noe som skjulte dette fullstendig - denne fixturen
+    // avslutter i stedet UTEN å lese noe. En stor nok tekst kreves for at
+    // selve `.end(text)`-skrivingen ikke passer i OS-pipe-bufferet i ett
+    // syscall (samme grunn som `bigPcm()` i stt.ts sin egen test).
+    const tts = new LocalPiperTts(CLOSES_STDIN_EARLY_BIN, MODEL);
+    const bigText = "hei jarvis ".repeat(100_000);
+    const playback = tts.synthesize(bigText);
+    await expect(collect(playback.frames)).rejects.toThrow(/local_piper_process_failed:9:/);
   });
 });
 

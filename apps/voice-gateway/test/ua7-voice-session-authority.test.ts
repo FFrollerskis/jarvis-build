@@ -154,7 +154,7 @@ function loudFrame(): string {
   return frame.toString("base64");
 }
 
-/** Stillhet - etter `hangoverMs` (300 ms) utløser den `end_of_turn`. */
+/** Stillhet - etter `hangoverMs` (D-275: 700 ms) utløser den `end_of_turn`. */
 function silentFrame(): string {
   return Buffer.alloc(640).toString("base64");
 }
@@ -197,15 +197,16 @@ class Client {
 
   /**
    * Én komplett tur over transporten: tale, så stillhet lenge nok til at
-   * `EnergyVad` sin hangover (300 ms) faktisk løper ut. Over websocket bruker
-   * `pushAudio()` sanntid, så ventingen må være ekte - den kan ikke simuleres
-   * med `atMs` slik de direkte `VoiceSession`-testene gjør.
+   * `EnergyVad` sin hangover (D-275: 700 ms, tidligere 300 ms) faktisk løper
+   * ut. Over websocket bruker `pushAudio()` sanntid, så ventingen må være
+   * ekte - den kan ikke simuleres med `atMs` slik de direkte
+   * `VoiceSession`-testene gjør.
    */
   async speakOneTurn(): Promise<void> {
     for (let i = 0; i < 5; i++) {
       this.send({ type: "audio", data: loudFrame() });
     }
-    await this.settle(350);
+    await this.settle(800);
     this.send({ type: "audio", data: silentFrame() });
   }
 

@@ -84,13 +84,13 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| Notion | `NY_BACKLOG` | Kun eksplisitt navngitt i FRAVÆRS-kommentarer (`modules/operations`, migrasjon `048_operations.sql`) - «ingen Notion-referanse/-credential» bevisst dokumentert, ikke bygget |
+| Notion | `ALLEREDE_BYGGET (D-308)` | `NotionTransport` (`live-transports.ts`) - `search`/`create_page` (POST mot Notion REST-API v1, `Authorization: Bearer`-header PLUSS fast `Notion-Version: 2022-06-28`-header). D-41: `create_page` er en EKTE klasse B-skrivehandling (ikke kunstig innsnevret til read-only) - `rollback_procedure` er manuell arkivering (dedikert arkiver-endepunkt DEFERRED). D-64: ingen kanonisk dokument-/kunnskaps-domenemodell finnes i Jarvis - rent leverandør-adapter, samme status som Google Drive/Sheets/Dropbox. `live_test: search` (uten query). `NOTION_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_NOTION_API_KEY`) |
 | Obsidian | `ALLEREDE_BYGGET` | `ObsidianVaultKnowledgeSource` (`modules/knowledge/src/obsidian-source.ts`), UA-2 P1A - kun `.md`, `.obsidian/`-config ekskludert som default |
 | Google Drive | `ALLEREDE_BYGGET` | `connector-registry.ts` id `google_drive`; D-41 full read/opprett/oppdater/omdøp/flytt/papirkurv/deling; ingestion-kilden er separat og alltid READ ONLY |
-| OneDrive | `NY_BACKLOG` | Ingen kode funnet |
-| Dropbox | `NY_BACKLOG` | Ingen kode funnet |
+| OneDrive | `ALLEREDE_BYGGET (D-309)` | `OneDriveTransport` (`live-transports.ts`) - `list_folder`/`create_folder` (mot Microsoft Graph v1.0, `Authorization: Bearer`-header). D-41: `create_folder` er en EKTE klasse B-skrivehandling (ikke kunstig innsnevret til read-only) - `rollback_procedure` er manuell sletting. D-64: ingen kanonisk fil-lagrings-domenemodell finnes i Jarvis - rent leverandør-adapter, samme status som Google Drive/Dropbox. `live_test: list_folder` (uten path). `ONEDRIVE_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_ONEDRIVE_TOKEN`) |
+| Dropbox | `ALLEREDE_BYGGET (D-307)` | `DropboxTransport` (`live-transports.ts`) - `list_folder`/`create_folder` (POST mot Dropbox API v2, `Authorization: Bearer`-header, JSON-RPC-lignende). D-41: `create_folder` er en EKTE klasse B-skrivehandling (ikke kunstig innsnevret til read-only). D-64: ingen kanonisk fil-lagrings-domenemodell finnes i Jarvis - rent leverandør-adapter, samme status som Google Drive/Sheets. BEVISST DEFERRED: ekte fil-INNHOLD-opplasting/nedlasting (separat `content.dropboxapi.com`-vertsnavn, binær kropp) er IKKE bygget - strukturelt ulik kallform enn `ToolTransport` sitt JSON-only grensesnitt, utsatt til senere. `live_test: list_folder` (path ""). `DROPBOX_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_DROPBOX_TOKEN`) |
 | Google Docs | `ALLEREDE_DEKKET` | Dekkes av Google Drive/Docs-connectoren (`read_document`-eksport i `modules/tool-gateway/src/live-transports.ts`) - ingen egen connector nødvendig |
-| Google Sheets | `NY_BACKLOG` | Kun MIME-type-konstant (`extraction-safety.ts`) - ingen faktisk leserlese-/skrive-adapter |
+| Google Sheets | `ALLEREDE_BYGGET (D-299)` | `GoogleSheetsTransport` (`live-transports.ts`) - Sheets API v4, gjenbruker eksisterende `googleAccessToken()`-OAuth-vei men med EGEN `JARVIS_GOOGLE_SHEETS_TOKEN` (Sheets krever `spreadsheets`-scope, Drive sin bredere scope dekker den ikke). D-41 "maksimal nyttig kapabilitet" fulgt: `list_sheets`/`read_range` (A) + `update_range`/`append_row` (B, EKTE skrivehandlinger). `GOOGLE_SHEETS_LIVE_GATE=PENDING_CREDENTIALS`. Se D-299 i DECISIONS_AND_ASSUMPTIONS.md. |
 
 ### 4.4 Produktivitet / e-post / kalender
 
@@ -98,8 +98,8 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 |---|---|---|
 | Gmail | `ALLEREDE_BYGGET` | `connector-registry.ts` id `gmail`; D-34 primær e-postplattform (Q-07 lukket) |
 | Google Kalender | `ALLEREDE_BYGGET` | `connector-registry.ts` id `google_calendar`; D-34 primær kalender |
-| Microsoft Outlook | `NY_BACKLOG` | Q-07 (lukket, D-34): eksplisitt utsatt til senere, Gmail er primær i v1. Leverandørnøytral kontrakt finnes, ingen Outlook-transport bygget |
-| Microsoft 365 | `NY_BACKLOG` | Samme utsettelse som Outlook (D-34) - ingen kode |
+| Microsoft Outlook | `ALLEREDE_BYGGET (D-310)` | `MicrosoftOutlookTransport` (`live-transports.ts`) - `list_messages`/`send_mail` (mot Microsoft Graph v1.0, `Authorization: Bearer`-header). D-41/D-64: `send_mail` er BEVISST klasse D (ikke reverserbar) - IDENTISK klassifisering med Gmail sin `email.send`, dekket av den generiske klasse D-godkjenningsmekanismen i PolicyGateway/ToolGateway. Genuint separat leverandør-konto fra Gmail, ikke en konkurrerende domenemodell. `live_test: list_messages` (max=5). `MICROSOFT_OUTLOOK_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_OUTLOOK_TOKEN`) |
+| Microsoft 365 | `ALLEREDE_DEKKET (D-318)` | Microsoft sin ekvivalent til Gmail+Drive er nå bygget som to presise Microsoft Graph v1.0-connectorer: Microsoft Outlook (D-310, e-post) + OneDrive (D-309, fillagring) - ingen egen "Microsoft 365"-connector, SAMME mønster som Google Docs (dekkes av Google Drive) over. Bredere M365-flater (Teams/SharePoint/Excel Online/delt kalender) forblir UBYGD/UBEDT - krever en fersk, presist scopet instruks fra Tobias om ønsket |
 
 ### 4.5 Kode / dev / infra
 
@@ -115,54 +115,54 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| Brave Search | `NY_BACKLOG` | Ingen kode funnet |
-| Tavily | `NY_BACKLOG` | Ingen kode funnet |
-| Exa | `NY_BACKLOG` | Ingen kode funnet |
+| Brave Search | `ALLEREDE_BYGGET (D-296)` | `BraveSearchTransport` (`live-transports.ts`) - `web_search`/`news_search` (GET mot Brave Search API, `X-Subscription-Token`-header). STRUKTURELT ULIK Telegram/Slack/Discord/Twilio: INGEN skrivehandling finnes - leverandøren tilbyr genuint bare lesing. `live_test: web_search` (brukt direkte, ingen egen tilkoblingstest-handling nødvendig). `BRAVE_SEARCH_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_BRAVE_SEARCH_API_KEY`) |
+| Tavily | `ALLEREDE_BYGGET (D-301)` | `TavilyTransport` (`live-transports.ts`) - `web_search`/`news_search` (POST `https://api.tavily.com/search`, `api_key` som felt i JSON-body, IKKE en header). Kun ÉTT reelt dokumentert endepunkt - handlingene skiller seg kun på `topic`-body-feltet (general/news). STRUKTURELT LIK Brave Search: INGEN skrivehandling finnes - leverandøren tilbyr genuint bare lesing. `live_test: web_search` (query "ping"). `TAVILY_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_TAVILY_API_KEY`) |
+| Exa | `ALLEREDE_BYGGET (D-302)` | `ExaTransport` (`live-transports.ts`) - `web_search`/`find_similar`. TO separate endepunkter (`POST /search`/`POST /findSimilar`, `x-api-key`-header), ULIK Tavily sitt delte endepunkt. STRUKTURELT LIK Brave Search/Tavily: INGEN skrivehandling finnes - leverandøren tilbyr genuint bare lesing. `live_test: web_search` (query "ping"). `EXA_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_EXA_API_KEY`) |
 | Playwright | `NY_BACKLOG` | Ingen kode/dependency funnet. Jf. §1 punkt 2: nettleserautomatisering er siste utvei, kjører i sandbox med egne begrensninger når bygget |
 
 ### 4.7 Tale / video / media-AI
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| OpenAI Realtime | `NY_BACKLOG` | Ingen kode funnet (lokal whisper.cpp/piper er bygget og verifisert separat, D-217/D-223, men det er ikke OpenAI Realtime) |
-| ElevenLabs | `NY_BACKLOG` | Ingen kode funnet |
-| Deepgram | `NY_BACKLOG` | Ingen kode funnet |
-| LiveKit | `NY_BACKLOG` | Ingen kode funnet (Q-03 fortsatt ikke avgjort ved benchmark) |
-| Telnyx | `NY_BACKLOG` | Ingen kode funnet |
-| Twilio | `NY_BACKLOG` | Ingen kode funnet |
+| OpenAI Realtime | `ALDRI_EN_TOOLGATEWAY_CONNECTOR (D-328)` | FJERNET HELT fra `connector-registry.ts` - en VEDVARENDE full-dupleks WebSocket-økt, strukturelt ulik BÅDE ToolTransport OG de eksisterende SttAdapter/TtsAdapter-grensesnittene (i motsetning til ElevenLabs/Deepgram, D-319/D-320, som BARE trengte flyttes til SpeechAdapter). Krever en EGEN, ny økt-/tilkoblingshåndteringsarkitektur FØR noe kan kodes - se D-328, Q-42. Lokal whisper.cpp/piper er bygget og verifisert separat (D-217/D-223), men det er en HELT annen kapabilitet |
+| ElevenLabs | `ALLEREDE_BYGGET (D-319)` | `ElevenLabsTts` (`apps/voice-gateway/src/tts.ts`) - NY `TtsAdapter`-implementasjon, IKKE en `ToolGateway`-connector (D-64-stil arkitekturgrense: tale-leverandører hører hjemme bak `SpeechAdapter`, CLAUDE.md regel 3). `POST /v1/text-to-speech/{voice_id}?output_format=pcm_16000`, `xi-api-key`-header, rå PCM S16LE 16kHz (SAMME samplerate som resten av tale-pipelinen, unngår OpenAI sitt kjente 24kHz-resamplings-gap). `processor_terms_status: "NOT_VERIFIED"` (`PROCESSOR_REGION_MATRIX.md`) - `evaluateSpeechRouting()` avviser behandleren for ALLE memory spaces inntil Tobias selv gjennomgår ElevenLabs sine data-vilkår (Q-32-mønster). BEVISST IKKE wiret inn i `main.ts` sin aktive adapter-utvelgelse (unngår å fortrenge den allerede host-verifiserte lokale piper-installasjonen, D-223). `JARVIS_ELEVENLABS_API_KEY` + `JARVIS_ELEVENLABS_VOICE_ID` (begge påkrevd - voice_id er del av selve URL-stien) |
+| Deepgram | `ALLEREDE_BYGGET (D-320)` | `DeepgramStt` (`apps/voice-gateway/src/stt.ts`) - NY `SttAdapter`-implementasjon, IKKE en `ToolGateway`-connector (SAMME D-64-stil arkitekturgrense som ElevenLabs D-319). `POST /v1/listen` (forhåndsinnspilt/batch, SAMME "ingen ekte partials"-disiplin som OpenAI/whisper.cpp), `Authorization: Token`-header, WAV-kropp. `processor_terms_status: "NOT_VERIFIED"` (`PROCESSOR_REGION_MATRIX.md`) - `evaluateSpeechRouting()` avviser behandleren for ALLE memory spaces inntil Tobias selv gjennomgår Deepgram sine data-vilkår (Q-32-mønster). BEVISST IKKE wiret inn i `main.ts` sin aktive adapter-utvelgelse (samme regresjonsbegrunnelse som D-319). `JARVIS_DEEPGRAM_API_KEY` (+ valgfri `JARVIS_DEEPGRAM_LANG`) |
+| LiveKit | `ALDRI_EN_TOOLGATEWAY_CONNECTOR (D-328)` | FJERNET HELT fra `connector-registry.ts` - en WebRTC/SFU-media-infrastrukturplattform, et ALTERNATIVT sanntids-transportlag til `apps/voice-gateway` sin eksisterende WebSocket-arkitektur, IKKE en connector ved siden av den. Se D-328, Q-42 (Q-03 fortsatt ikke avgjort ved benchmark) |
+| Telnyx | `ALLEREDE_BYGGET (D-321)` | `TelnyxTransport` (`live-transports.ts`) - `notify`/`get_account_info` (POST /v2/messages, GET /v2/balance, `Authorization: Bearer` - ETT enkelt API-nøkkel, IKKE Twilio sin to-delte AccountSid/AuthToken-modell). SAMME "meldingsleverandør, ordinær ToolGateway-connector"-kategori som Twilio (D-64-vurdert eksplisitt: Telnyx er telefoni/SMS, IKKE en STT/TTS-leverandør, hører derfor IKKE hjemme bak SpeechAdapter slik elevenlabs/deepgram D-319/D-320 gjør). `from`-nummer injisert som resolver-closure (SAMME mønster som Twilio). D-41: `notify` er en EKTE klasse B-skrivehandling. BEVISST DEFERRED: `read_messages` (meldingshistorikk) er IKKE bygget - lavere sikker kjennskap til Telnyx sitt historikk-endepunktform enn `/v2/messages`/`/v2/balance`. `live_test: get_account_info`. `TELNYX_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_TELNYX_API_KEY` + `JARVIS_TELNYX_FROM_NUMBER`) |
+| Twilio | `ALLEREDE_BYGGET (D-295)` | `TwilioTransport` (`live-transports.ts`) - `notify`/`get_account_info`/`read_messages` (POST/GET mot Twilio REST API, `Basic`-autentisering AccountSid:AuthToken), `channel: "twilio"` lagt til `ChannelSchema`. `live_test: get_account_info` (`GET /Accounts/{sid}.json`, ingen sideeffekt). `TWILIO_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_TWILIO_ACCOUNT_SID`/`JARVIS_TWILIO_AUTH_TOKEN`/`JARVIS_TWILIO_FROM_NUMBER`) |
 | Telegram | `ALLEREDE_BYGGET` | `connector-registry.ts` id `telegram`; D-119/D-125, LIVE+VERIFIED (eier-kanal, daglig brief, `/brief`/`/status`) |
-| WhatsApp | `NY_BACKLOG` | Kun kanal-enum i `046_conversation_graph.sql` (§UA-7) - bevisst IKKE bygget («no big-bang all-providers-at-once», D-108) |
-| Slack | `NY_BACKLOG` | Samme kanal-enum-status som WhatsApp; ren meldingskanal - en ordinær `EXTERNAL_CANONICAL`-transportadapter, INGEN D-64-konflikt for selve varslings-/chat-bruken (jf. D-64-notatet i §4.11) |
-| Discord | `NY_BACKLOG` | Kun kanal-enum, samme status som WhatsApp/Slack |
-| Higgsfield | `NY_BACKLOG` | Ingen kode funnet |
-| Runway | `NY_BACKLOG` | Ingen kode funnet |
-| Kling | `NY_BACKLOG` | Ingen kode funnet |
-| Google Veo | `NY_BACKLOG` | Ingen kode funnet |
-| OpenAI Images | `NY_BACKLOG` | Ingen kode funnet |
+| WhatsApp | `ALLEREDE_BYGGET (D-314)` | `WhatsAppTransport` (`live-transports.ts`) - `get_phone_number_info`/`notify` (mot WhatsApp Business Cloud API, Meta Graph API). `phone_number_id` er Jarvis sin egen avsenderidentitet (SAMME rolle som Telegram sin `chat_id`), injisert som en resolver-closure. D-41: `notify` er en EKTE klasse B-skrivehandling (navngitt IDENTISK med Slack/Discord/Telegram sin send-melding-handling for konsistens). D-64: ingen kanonisk meldings-domenemodell finnes i Jarvis (SAMME status som Slack/Discord/Twilio) - rent leverandør-adapter, ikke en konkurrerende samtalemotor (den EKSISTERENDE kanal-enum i `046_conversation_graph.sql`/§UA-7 er uendret av dette). `live_test: get_phone_number_info`. `WHATSAPP_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_WHATSAPP_TOKEN` + `JARVIS_WHATSAPP_PHONE_NUMBER_ID`) |
+| Slack | `ALLEREDE_BYGGET (D-292)` | `SlackTransport` (`live-transports.ts`) - `notify`/`get_bot_info`/`list_channels`/`read_channel_history` (chat.postMessage/auth.test/conversations.list/conversations.history), `channel: "slack"` lagt til `ChannelSchema`. `live_test: get_bot_info` (auth.test, ingen sideeffekt). `SLACK_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_SLACK_BOT_TOKEN`) |
+| Discord | `ALLEREDE_BYGGET (D-294)` | `DiscordTransport` (`live-transports.ts`) - `notify`/`get_bot_info`/`list_channels`/`read_channel_history` (POST/GET mot Discord REST API v10 `/channels/{id}/messages`, `/users/@me`, `/guilds/{id}/channels`, `/channels/{id}/messages`), `channel: "discord"` lagt til `ChannelSchema`. `live_test: get_bot_info` (`GET /users/@me`, ingen sideeffekt). `DISCORD_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_DISCORD_BOT_TOKEN`) |
+| Higgsfield | `ALLEREDE_BYGGET (D-327)` | `HiggsfieldTransport` (`live-transports.ts`) - `generate_video`/`get_task_status` (mot `api.higgsfield.ai`). Higgsfield er en MULTI-MODELL-markedsplass (proxyer tredjeparts videomodeller under vertsnavnet, f.eks. `bytedance/seedance-2.0`) - `model_path` er derfor et PÅKREVD parameter fra KALLEREN, INGEN hardkodet default-modell (ville vært et ubedt, nestet leverandørvalg - se D-327 for full D-64-begrunnelse). Autentisering: `Authorization: Key <key_id>:<key_secret>` - ETT header-felt, kolon-sammensatt i klartekst (IKKE en signeringsoperasjon som Kling, D-323). API-formen er sekundærkilde-krysssjekket via `WebSearch` denne økten. D-41: `generate_video` er en EKTE klasse B-skrivehandling med REELL kostnad per kall. `get_task_status` er PÅKREVD (asynkron generering). BEVISST INGEN `live_test`/kontoendepunkt-handling - INGEN verifisert gratis/parameterløst endepunkt funnet, D-41 DEFERRED. D-64: ingen kanonisk video-domenemodell finnes i Jarvis - rent leverandør-adapter. `HIGGSFIELD_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_HIGGSFIELD_KEY_SECRET` + `JARVIS_HIGGSFIELD_KEY_ID`) |
+| Runway | `ALLEREDE_BYGGET (D-322)` | `RunwayTransport` (`live-transports.ts`) - `get_account_info`/`generate_video`/`get_task_status` (mot `api.dev.runwayml.com/v1`, `Authorization: Bearer` PLUSS PÅKREVD `X-Runway-Version: 2024-11-06`-header). API-formen er sekundærkilde-krysssjekket via `WebSearch` denne økten (WebFetch mot `dev.runwayml.com` fortsatt egress-blokkert) - en ÆRLIG mellomting mellom denne-økten-verifisert og kun trent kunnskap, IKKE overdrevet til den sterkere påstanden. D-41: `generate_video` er en EKTE klasse B-skrivehandling med REELL kostnad per kall (`get_account_info`, gratis/sideeffekt-fri, brukt som `live_test` i stedet, SAMME disiplin som OpenAI Images D-316). `get_task_status` er PÅKREVD (asynkron generering - `generate_video` alene returnerer kun en task-id, aldri det ferdige resultatet). D-64: ingen kanonisk video-domenemodell finnes i Jarvis - rent leverandør-adapter. `RUNWAY_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_RUNWAY_API_KEY`) |
+| Kling | `ALLEREDE_BYGGET (D-323)` | `KlingTransport` (`live-transports.ts`) - `generate_video`/`get_task_status` (mot `api.klingai.com/v1/videos/image2video`). STRUKTURELT ANNERLEDES autentisering enn ALLE andre connectorer i registeret: en selv-generert, kortlevd (~30 min) JWT (HS256) signert med et Access Key/Secret Key-par (`iss`=access_key, `exp`/`nbf`), IKKE en statisk Bearer-token videresendt uendret - implementert avhengighetsfritt via `node:crypto` (`createHmac`), SAMME disiplin som `vipps-webhook.ts` sin HMAC-verifisering (D-110). API-formen er sekundærkilde-krysssjekket via `WebSearch` denne økten (flere uavhengige kilder for base-URL/endepunkt/JWT-claims/responsform), IKKE denne-økten primærkilde-verifisert. D-41: `generate_video` er en EKTE klasse B-skrivehandling med REELL kostnad per kall. `get_task_status` er PÅKREVD (asynkron generering). BEVISST INGEN `live_test`/`get_account_info`: INGEN verifisert gratis/parameterløst konto-/saldoendepunkt funnet denne økten - D-41 eksplisitt DEFERRED i stedet for gjettet fram. D-64: ingen kanonisk video-domenemodell finnes i Jarvis - rent leverandør-adapter. `KLING_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_KLING_SECRET_KEY` + `JARVIS_KLING_ACCESS_KEY`) |
+| Google Veo | `ALLEREDE_BYGGET (D-324)` | `GoogleVeoTransport` (`live-transports.ts`) - `list_models`/`generate_video`/`get_task_status` (mot `generativelanguage.googleapis.com/v1beta`, `x-goog-api-key`-header - SAMME auth-form som `gemini` sin EKSISTERENDE model_provider-oppføring, `packages/provider-adapters/src/gemini.ts`). `predictLongRunning` er en STRUKTURELT ULIK kapabilitet (videogenerering, ikke tekst-fullføring via `generateContent`) - egen `tool_id`, SAMME presedens som OpenAI Images (D-316) fikk for `openai`. API-formen er sekundærkilde-krysssjekket via `WebSearch` denne økten (flere uavhengige kilder), IKKE denne-økten primærkilde-verifisert. D-41: `generate_video` er en EKTE klasse B-skrivehandling med REELL kostnad per kall (`list_models`, gratis/sideeffekt-fri, brukt som `live_test` i stedet). `get_task_status` er PÅKREVD (asynkron long-running-operation). D-64: ingen kanonisk video-domenemodell finnes i Jarvis - rent leverandør-adapter. `GOOGLE_VEO_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_GOOGLE_VEO_API_KEY`) |
+| OpenAI Images | `ALLEREDE_BYGGET (D-316)` | `OpenAIImagesTransport` (`live-transports.ts`) - `list_models`/`generate_image` (mot OpenAI Images API). Egen `tool_id` fra `openai` sin model_provider-oppføring (ModelGateway) - strukturelt ulik kapabilitet (bildegenerering, ikke tekst-fullføring). D-41: `generate_image` er en EKTE klasse B-skrivehandling med REELL kostnad per kall - `list_models` (gratis) brukt som `live_test` i stedet. D-64: ingen kanonisk bildegenererings-domenemodell finnes i Jarvis - rent leverandør-adapter. `OPENAI_IMAGES_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_OPENAI_IMAGES_API_KEY`) |
 
 ### 4.8 Musikk
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| Spotify | `NY_BACKLOG` | Ingen kode funnet |
+| Spotify | `ALLEREDE_BYGGET (D-313)` | `SpotifyTransport` (`live-transports.ts`) - `get_currently_playing`/`add_to_queue` (mot Spotify Web API). EKTE OAuth2 `refresh_token`→`access_token`-utveksling PER kall (`spotifyAccessToken()`, SAMME mønster som `googleAccessToken()`) - `client_id`/`client_secret` delt app-konfig lest direkte fra env, `credential_ref` peker på refresh-tokenet. D-41: `add_to_queue` er en EKTE klasse B-skrivehandling - `rollback_procedure` er manuell hopp-over via `skip_to_next` (intet dedikert fjern-fra-kø-endepunkt, DEFERRED). D-64: ingen kanonisk musikk-domenemodell finnes i Jarvis - rent leverandør-adapter. `live_test: get_currently_playing`. `SPOTIFY_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_SPOTIFY_CLIENT_ID` + `JARVIS_SPOTIFY_CLIENT_SECRET` + `JARVIS_SPOTIFY_REFRESH_TOKEN`) |
 | Apple Music | `NY_BACKLOG` | Ingen kode funnet |
 
 ### 4.9 Automatisering / workflow
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| n8n | `NY_BACKLOG` | Ingen kode funnet |
+| n8n | `ALLEREDE_BYGGET (D-311)` | `N8nTransport` (`live-transports.ts`) - `list_workflows`/`activate_workflow` (mot n8n sitt REST-API v1, `X-N8N-API-KEY`-header - IKKE `Authorization: Bearer`). TYPISK selv-hostet - base-URL må konfigureres (`JARVIS_N8N_API_BASE_URL`), samme resolver-mønster som Grafana/Prometheus. D-41: `activate_workflow` er en EKTE klasse B-skrivehandling - `rollback_procedure` er manuell deaktivering (dedikert `deactivate_workflow` DEFERRED). D-64: ingen kanonisk workflow-/automasjons-domenemodell finnes i Jarvis - rent leverandør-adapter. `live_test: list_workflows`. `N8N_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_N8N_API_KEY` + `JARVIS_N8N_API_BASE_URL`) |
 | Zapier | `NY_BACKLOG` | Ingen kode funnet |
-| Make | `NY_BACKLOG` | Ingen kode funnet |
+| Make | `ALLEREDE_BYGGET (D-315)` | `MakeTransport` (`live-transports.ts`) - `get_current_user`/`run_scenario` (mot Make sitt API v2, `Authorization: Token <token>` - IKKE `Bearer`). Zone-spesifikk base-URL (SAMME resolver-mønster som n8n/Grafana/Prometheus). D-41: `run_scenario` er en EKTE klasse B-skrivehandling. D-64: ingen kanonisk workflow-/automasjons-domenemodell finnes i Jarvis (SAMME status som n8n D-311) - rent leverandør-adapter. `live_test: get_current_user`. `MAKE_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_MAKE_API_KEY` + `JARVIS_MAKE_API_BASE_URL`) |
 | Apple Shortcuts | `NY_BACKLOG` | Ingen kode funnet - henger sammen med D-36 Apple-runtime-sporet (se §4.14) |
 
 ### 4.10 Smart hjem
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| Home Assistant | `ALLEREDE_BYGGET` (kode), live-evidens `BLOCKED_EXTERNAL` | `modules/tool-gateway/src/home-assistant.ts`; enhetsbuss jf. §5 under. Live-verifisering krever ekte HA-instans+token (HA-RUNTIME, D-108-utsatt) |
-| HomeKit | `NY_BACKLOG` | Ingen kode funnet - henger sammen med D-36 Apple-runtime-sporet |
-| Philips Hue | `NY_BACKLOG` | Ingen kode funnet - i Jarvis sin arkitektur går enhetsstyring normalt via Home Assistant (§5), ikke en direkte Hue-connector; avklares ved faktisk byggeordre |
+| Home Assistant | `ALLEREDE_BYGGET` (`ToolDefinition`-lag), transport `IKKE` bygget ennå (D-336-funn) | `modules/tool-gateway/src/home-assistant.ts` - `homeAssistantTools()` er fullt definert (read_state/light_set/climate_set/lock_set/alarm_set, korrekt A/B/D-klassifisering, Q-34 preflight/postcondition), men standard-transporten er FORTSATT `UnconfiguredHttpTransport` - INGEN ekte `HomeAssistantTransport`, IKKE wiret inn i `firstWaveTools()`/`main.ts`/`worker-main.ts`, INGEN `.env.example`-oppføring. En ekte HTTP-transport BLE IKKE bygget denne runden: `site_id`/`room_id` → HA sin egen area/entity-adressering er en UBEKREFTET mapping (HA sitt community-forum har åpne, ubesvarte tråder om nøyaktig dette - "REST API / Service Calls / Specify Target"), OG "per sted egen HA-instans" (§5) betyr base-URL må løses PER `site_id`, IKKE en enkelt global URL som Grafana/n8n. BEVISST IKKE gjettet - se D-336 i DECISIONS_AND_ASSUMPTIONS.md |
+| HomeKit | `NY_BACKLOG` | Ingen kode funnet - henger sammen med D-36 Apple-runtime-sporet, STRUKTURELT ULIK Home Assistant (Apple sin egen HAP-protokoll) |
+| Philips Hue | `ALLEREDE_DEKKET (D-336)` | Enhetsstyring går via Home Assistant (§5 under), IKKE en direkte Hue-connector - `connector-registry.ts` sin plassholder FJERNET HELT, samme presedens som Microsoft 365 (D-318) |
 
 ### 4.11 Finans / CRM / ads / prosjektstyring
 
@@ -171,22 +171,26 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 | Fiken | `ALLEREDE_BYGGET` | `connector-registry.ts` id `fiken`; D-107, UA-6 første slice. `FIKEN_LIVE_GATE=PENDING_CREDENTIALS`. `live_test: list_companies` lagt til D-242 (gjenbruker `FikenTransport.listCompanies()`, `GET /companies` - tidligere `presence_only`) |
 | Folio | `NY_BACKLOG` | Ingen kode funnet (kun tidligere vag plassholder i denne paragrafen) |
 | Stripe | `ALLEREDE_BYGGET` | `connector-registry.ts` id `stripe`; D-109. `STRIPE_LIVE_GATE=PASS_PENDING_ARCHITECT_REVIEW` (D-228, faktisk host-kjørt og grønt, venter uavhengig arkitektgjennomgang). `live_test: get_balance` lagt til D-242 (`GET /v1/balance` - tidligere `presence_only`) |
-| HubSpot | `NY_BACKLOG – D-64-PORT PÅKREVD` | Se D-64-notat under - CRM/tickets er `JARVIS_CANONICAL` som utgangspunkt (Zendesk-presedensen), ALDRI en automatisk leverandørvalg |
-| Pipedrive | `NY_BACKLOG – D-64-PORT PÅKREVD` | Samme D-64-notat |
+| HubSpot | `ALLEREDE_BYGGET (D-333)` | `connector-registry.ts` id `hubspot`; FEMTE av de seks D-64-port-krevende faktisk bygget (etter Todoist/Trello/Jira/Linear, D-329-D-332) - kun transport-laget (`HubSpotTransport`, `/crm/v3/objects/{objectType}`, `object_type` PÅKREVD parameter for contacts/companies/deals). `live_test: list_objects` |
+| Pipedrive | `ALLEREDE_BYGGET (D-334)` | `connector-registry.ts` id `pipedrive`; SJETTE og SISTE av de seks D-64-port-krevende faktisk bygget (etter Todoist/Trello/Jira/Linear/HubSpot, D-329-D-333) - kun transport-laget (`PipedriveTransport`, per-tenant base-URL + `x-api-token`-header, `/api/v2/{objectType}` for persons/organizations/deals). `live_test: list_objects` |
 | Google Ads | `ALLEREDE_BYGGET` | UA-4, D-83/D-84 (merget PR #23). COMPLETE for lesing/rapportering; mutate utsatt bak UA-6. `GOOGLE_ADS_LIVE_VERIFICATION=DEFERRED_TO_FINAL_INTEGRATION_PHASE` (D-86) |
-| Meta Ads | `NY_BACKLOG` | Eksplisitt bekreftet fraværende i `modules/growth` sin egen transport-wiring-test («ZERO annonseplattform-leverandør-avhengighet ... ingen Meta Ads-credential-referanse») |
-| Linear | `NY_BACKLOG – D-64-PORT PÅKREVD` | Eksplisitt navngitt som «fremtidig, valgfri adapter, aldri domeneeier» i `business-brief.test.ts` sin egen kommentar - allerede korrekt D-64-posisjonert, ikke bygget |
-| Jira | `NY_BACKLOG – D-64-PORT PÅKREVD` | Samme D-64-notat som Linear; også eksplisitt navngitt fraværende i `modules/operations`/`modules/product` sine transport-wiring-tester |
-| Trello | `NY_BACKLOG – D-64-PORT PÅKREVD` | Samme D-64-notat |
-| Todoist | `NY_BACKLOG – D-64-PORT PÅKREVD` | Samme D-64-notat |
+| Meta Ads | `ALLEREDE_BYGGET (D-335)` | Growth Core-ADAPTER (D-64), SAMME arkitektur som Google Ads (D-83) - `MetaAdsTransport` i `modules/growth/src/meta-ads-transport.ts`, `metaads.*`-namespace i `firstWaveTools()`. `list_campaigns`/`sync_campaigns`/`sync_spend` mot Meta Graph API v26.0 (`access_token` som query-parameter). `sync_tracking_tags` (fbclid) BEVISST DEFERRED (D-41) - ingen bekreftet spørrbar fbclid-ressurs funnet. IKKE registrert i `connector-registry.ts` (samme som `googleads`) |
+| Linear | `ALLEREDE_BYGGET (D-332)` | `connector-registry.ts` id `linear`; FJERDE av de seks D-64-port-krevende faktisk bygget (etter Todoist/Trello/Jira, D-329/D-330/D-331) - kun transport-laget (`LinearTransport`, ETT GraphQL-endepunkt, INGEN REST-API, rå API-nøkkel UTEN Bearer). `live_test: list_teams` |
+| Jira | `ALLEREDE_BYGGET (D-331)` | `connector-registry.ts` id `jira`; TREDJE av de seks D-64-port-krevende faktisk bygget (etter Todoist/Trello, D-329/D-330) - kun transport-laget (`JiraTransport`, per-tenant base-URL + Basic email:token-auth, `/rest/api/3/search/jql` - den gamle `/search`-veien er fjernet). `live_test: search_issues` |
+| Trello | `ALLEREDE_BYGGET (D-330)` | `connector-registry.ts` id `trello`; ANDRE av de seks D-64-port-krevende faktisk bygget (etter Todoist, D-329) - kun transport-laget (`TrelloTransport`, `key`/`token` som query-parametere). `live_test: list_boards` |
+| Todoist | `ALLEREDE_BYGGET (D-329)` | `connector-registry.ts` id `todoist`; FØRSTE av de seks D-64-port-krevende faktisk bygget - kun transport-laget (`TodoistTransport`, unifisert `/api/v1/`-API), IKKE den fulle `OperationsTask`-synk-mappingen D-291 beskriver (den er egen, ennå ubygget oppgave). `live_test: list_tasks` |
 
-**D-64-notat (CRM/prosjektstyring, 6 leverandører over 2 kapabilitetskategorier - HubSpot/Pipedrive
-under CRM, Linear/Jira/Trello/Todoist under prosjektstyring/tickets):** CLAUDE.md regel 12 (D-64) sitt
-EGET eksempel er nøyaktig «Support/tickets skal være `JARVIS_CANONICAL`, ikke automatisk en SaaS-
-leverandør» (Zendesk-presedensen, draft-PR #13, aldri merget). Disse seks er derfor IKKE blankofullmakt-
-godkjent til å bli domeneeiere bare fordi de står på Tobias sin liste - hver av dem MÅ kjøre gjennom
-sin egen Core-vs-Adapter-beslutningsport (D-64, `ARCHITECTURE.md` §11.2: kapabilitet → kanonisk Jarvis-
-tilstand → hva krever faktisk et eksternt system → portabilitets-/utfalls-/dataeierskapstest →
+**D-64-notat (RETTET av D-291, 2026-09-26 - se DECISIONS_AND_ASSUMPTIONS.md):** CRM/prosjektstyring
+(HubSpot/Pipedrive/Linear/Jira/Trello/Todoist) sto tidligere som `D-64-PORT PÅKREVD` her - men porten
+var ALLEREDE kjørt og avgjort for begge kapabilitetskategoriene FØR D-231 listet disse seks: CRM via
+Business OS (D-49, se "Flere CRM-integrasjoner Q-16"-raden i `ARCHITECTURE.md` §11), prosjektstyring/
+tickets via Operations Core (D-129, `OperationsTask`). Begge er allerede EKSPLISITT `JARVIS_CANONICAL`
+med en dokumentert "ekstern leverandør = valgfri synk-adapter, ALDRI domeneeier"-grense - nøyaktig
+samme mønster som Support/tickets sin Zendesk-presedens. Ingen NY Core-vs-Adapter-port er nødvendig
+for disse seks - de er nå ordinær `NY_BACKLOG` (adapter-bygging), ikke portblokkert. Uendret av D-291,
+til referanse - full port-metodikk for FREMTIDIGE, faktisk uavgjorte kapabiliteter (`ARCHITECTURE.md`
+§11.2: kapabilitet → kanonisk Jarvis-tilstand → hva krever faktisk et eksternt system → portabilitets-/
+utfalls-/dataeierskapstest →
 system-of-record-klassifisering) FØR noe velges eller bygges. Blir en av dem vurdert som en CORE
 DEPENDENCY under den porten: `CORE_DEPENDENCY_DECISION_REQUIRED=true` rapporteres til Tobias FØR noe
 velges - se D-64 i `DECISIONS_AND_ASSUMPTIONS.md`. Alle øvrige punkter i denne paragrafen (rene
@@ -197,17 +201,17 @@ er derimot naturlige `EXTERNAL_CANONICAL`-adaptere UTEN denne konflikten.
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| Google Maps | `NY_BACKLOG` | Ingen kode funnet |
-| Google Places | `NY_BACKLOG` | Ingen kode funnet |
-| Google Routes | `NY_BACKLOG` | Ingen kode funnet |
+| Google Maps | `ALLEREDE_BYGGET (D-298)` | `GoogleMapsTransport` (`live-transports.ts`) - KUN Geocoding-API (`geocode`/`reverse_geocode`), API-nøkkel som `key`-query-parameter. D-64-sjekk kjørt eksplisitt FØR bygging: `modules/location` sin kanoniske lokasjons-/geofence-modell er UBERØRT (stateless adresse-oppslag, ikke personens posisjon over tid). `google_places`/`google_routes` under forblir separate, ubygde backlog-punkter. `GOOGLE_MAPS_LIVE_GATE=PENDING_CREDENTIALS`. Se D-298 i DECISIONS_AND_ASSUMPTIONS.md. |
+| Google Places | `ALLEREDE_BYGGET (D-303)` | `GooglePlacesTransport` (`live-transports.ts`) - `search_places`/`get_place_details` (GET mot det eldre, stabile Places-API-et, `key`-query-parameter, samme mønster som Google Maps). SAMME D-64-domenevurdering som Google Maps: stateless tredjeparts-stedoppslag, IKKE eierens egen posisjon/geofence. STRUKTURELT LIK Google Maps: INGEN skrivehandling finnes - leverandøren tilbyr genuint bare lesing. `live_test: search_places` (query "Eiffel Tower"). `GOOGLE_PLACES_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_GOOGLE_PLACES_API_KEY`) |
+| Google Routes | `ALLEREDE_BYGGET (D-304)` | `GoogleRoutesTransport` (`live-transports.ts`) - `get_directions`/`get_distance_matrix` (GET mot det eldre, stabile Directions-/Distance Matrix-API-et, `key`-query-parameter, samme mønster som Google Maps/Places). SAMME D-64-domenevurdering som Google Maps/Places: stateless tredjeparts-rute-oppslag, IKKE eierens egen posisjon/geofence. STRUKTURELT LIK Google Maps/Places: INGEN skrivehandling finnes - leverandøren tilbyr genuint bare lesing. `live_test: get_directions` (Paris -> Versailles). `GOOGLE_ROUTES_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_GOOGLE_ROUTES_API_KEY`) |
 
 ### 4.13 Observability
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| Sentry | `NY_BACKLOG` | D-64-audit (migrasjon `036_incidents.sql`) bekrefter eksplisitt «GCP/Cloudflare/Sentry/Vercel-deploy-sporing er ALLE fraværende» - Jarvis sin egen `incidents`-modell er `JARVIS_CANONICAL`, Sentry ville vært en ren evidenskilde bak den (samme mønster som Docker/D-105), ikke bygget |
-| Grafana | `NY_BACKLOG` | Ingen kode funnet |
-| Prometheus | `NY_BACKLOG` | Ingen kode funnet |
+| Sentry | `ALLEREDE_BYGGET (D-297)` | `SentryTransport` (`live-transports.ts`) - organisasjonsscopet REST-API v0, `Authorization: Bearer`. D-64-sjekk kjørt eksplisitt FØR bygging (denne radens tidligere advarsel): `Incident`/`IncidentEvidence` (`modules/incidents`) er FORTSATT Jarvis sin egen kanoniske tilstandsmaskin, UBERØRT av denne connectoren - `sentry.update_issue` endrer kun Sentry sitt EGET issue-status-felt, aldri `Incident.status`. Samme "tynt API-gjennomtrekk, ikke en konkurrerende domenemodell"-rolle som Docker/D-105 (som OGSÅ er både en `docker`-ToolGateway-connector OG en evidenskilde for `Deployment.source`). `SENTRY_LIVE_GATE=PENDING_CREDENTIALS`. Se D-297 i DECISIONS_AND_ASSUMPTIONS.md. |
+| Grafana | `ALLEREDE_BYGGET (D-305)` | `GrafanaTransport` (`live-transports.ts`) - `search_dashboards`/`get_dashboard` (GET mot Grafana sitt HTTP-API, `Authorization: Bearer`-header). FØRSTE connector som er TYPISK selv-hostet - base-URL må konfigureres (`JARVIS_GRAFANA_API_BASE_URL`), samme resolver-mønster som Sentry sin org-slug. STRUKTURELT LIK Sentry/Brave Search: INGEN skrivehandling finnes for denne connectoren - leverandøren brukes her kun til lesing. `live_test: search_dashboards`. `GRAFANA_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_GRAFANA_API_KEY` + `JARVIS_GRAFANA_API_BASE_URL`) |
+| Prometheus | `ALLEREDE_BYGGET (D-306)` | `PrometheusTransport` (`live-transports.ts`) - `query`/`query_range` (GET mot Prometheus sitt HTTP-API, PromQL via query-parameter, `Authorization: Bearer`-header). SAMME "typisk selv-hostet"-struktur som Grafana - base-URL må konfigureres (`JARVIS_PROMETHEUS_API_BASE_URL`), samme resolver-mønster. STRUKTURELT LIK Grafana: INGEN skrivehandling finnes - Prometheus sitt HTTP-API tilbyr uansett intet skrive-endepunkt for metrikkdata. `live_test: query` (PromQL "up"). `PROMETHEUS_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_PROMETHEUS_TOKEN` + `JARVIS_PROMETHEUS_API_BASE_URL`) |
 
 ### 4.14 Sikkerhet
 
@@ -222,8 +226,8 @@ er derimot naturlige `EXTERNAL_CANONICAL`-adaptere UTEN denne konflikten.
 | Apple Push Notification service | `NY_BACKLOG` | Del av det eksisterende, `BLOCKED_EXTERNAL` D-36 Apple-runtime-sporet (krever Mac mini/Xcode/Developer-konto, se `docs/APPLE_PHASE8_CHECKLIST.md`) - ikke en isolert ny connector |
 | iOS Shortcuts | `NY_BACKLOG` | Samme D-36-spor som APNs |
 | Apple Watch | `NY_BACKLOG` | Samme D-36-spor - fysisk klokke-test er selv et navngitt D-36-akseptansepunkt |
-| Windows | `IKKE EN CONNECTOR – Q-39 FLAGGET` | Operativsystemet Tobias sin PC/lokale Docker-drift kjører på (CLAUDE.md regel 9) - ikke en ekstern leverandør-API i ToolGateway-forstand. Se Q-39 for presisering av hva Tobias konkret mener |
-| macOS | `IKKE EN CONNECTOR – Q-39 FLAGGET` | Henger sammen med det eksisterende D-36 Apple-runtime-sporet, ikke en isolert ny connector. Se Q-39 |
+| Windows | `IKKE EN CONNECTOR – ALLEREDE DEKKET (D-290)` | Operativsystemet Tobias sin PC/lokale Docker-drift kjører på (CLAUDE.md regel 9) - fullt dekket, ingen ny kapabilitet mangler. Se D-290: en EVENTUELL fremtidig ny evne (skrivebords-/prosessautomatisering PÅ Windows-PC-en) er IKKE dekket av denne raden og krever en egen, ennå ikke reist forespørsel |
+| macOS | `IKKE EN CONNECTOR – ALLEREDE DEKKET (D-290)` | Henger sammen med det eksisterende, uendrede D-36 Apple-runtime-sporet - ikke en isolert ny connector. Se D-290 |
 
 ## 5. Home Assistant (spesialrolle)
 

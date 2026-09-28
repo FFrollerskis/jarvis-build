@@ -153,12 +153,13 @@ export interface DelegationBoard {
  * (daværende namnløse) chat-personaen konfabulere om egne evner ("jeg er
  * flere AI-er i én", "jeg har banktilgang") når den ble spurt introspektive
  * spørsmål - fordi den strukturelt IKKE hadde noe verktøy å faktisk sjekke
- * med. `chat_accessible_tools` er RENT avledet av `meshToolDefinitions()`
- * (`@jarvis/tool-gateway`) - den SAMME trusted-lag-listen som faktisk
- * avgjør hva chat-modellen kan kalle i DENNE samtalen (§P1A i
- * `mesh-bridge.ts`) - ALDRI en egen, potensielt avvikende kopi. Å spørre
- * "hva har jeg tilgang til" via DETTE verktøyet er derfor strukturelt
- * umulig å svare feil på - svaret ER kilden selve chat-verktøykjeden bruker.
+ * med. `chat_accessible_tools` er RENT avledet av `ToolGateway.list()`
+ * (`@jarvis/tool-gateway`) - siden D-289 den SAMME registeropptellingen
+ * `allMeshTools()` selv bruker for å bygge det chat-modellen FAKTISK kan
+ * kalle i DENNE samtalen (§P1A/D-289 i `mesh-bridge.ts`) - ALDRI en egen,
+ * potensielt avvikende kopi. Å spørre "hva har jeg tilgang til" via DETTE
+ * verktøyet er derfor strukturelt umulig å svare feil på - svaret ER
+ * kilden selve chat-verktøykjeden bruker.
  * D-237 (funn i faktisk bruk, 2026-09-22): opprinnelig listet
  * `chat_accessible_tools` KUN navn/beskrivelse - et mesh-verktøy sto der
  * selv om det underliggende credential-referansen var helt ukonfigurert,
@@ -166,7 +167,13 @@ export interface DelegationBoard {
  * faktisk var BRUKBART akkurat nå. `configured` lukker nøyaktig DET gapet -
  * samme `ToolGateway.hasSecret()`-presence-sjekk dashbordets "Integrasjoner"
  * allerede bruker (`@jarvis/tool-gateway` sin `listConnectorStatus()`), nå
- * også tilgjengelig FRA SELVE SAMTALEN per mesh-verktøy.
+ * også tilgjengelig FRA SELVE SAMTALEN per tool_id.
+ * D-289 (2026-09-26, "vil ha alt at han har full kontroll"): mesh-flaten
+ * gikk fra 5 kuraterte verktøy til ALLE ~28 registrerte `tool_id`-er - én
+ * rad PER HANDLING (~150+) ville sprengt `MeshToolExecutor` sin
+ * output-trimming OG vært ubrukelig å relayere muntlig, så denne raden er nå
+ * GRUPPERT per `tool_id` (handlinger + risikoklasser samlet), ikke per
+ * enkelthandling som før D-289.
  * `connector_health` er RENT avledet av `ToolGateway.health` (BO-03,
  * `gateway.ts`) - SAMME kilde som `/infra/status`-ruten allerede eksponerer
  * til eieren via HTTP, nå også tilgjengelig FRA SELVE SAMTALEN. Helsen er
@@ -178,8 +185,21 @@ export interface DelegationBoard {
  * - se D-209/task-sporing for videre arbeid.
  */
 export interface CapabilityStatus {
-  chat_accessible_tools: Array<{ name: string; description: string; configured: boolean }>;
+  chat_accessible_tools: Array<{
+    tool_id: string;
+    actions: string[];
+    capability_classes: string[];
+    configured: boolean;
+  }>;
   connector_health: Array<{ tool_id: string; state: string; at: string; detail?: string }>;
+  /**
+   * D-317 (Tobias direkte i chat: "bygg modell-selvbevissthet inn i
+   * check_my_capabilities"): hvilken leverandør/modell som FAKTISK genererer
+   * DENNE samtaleturen - `null` når ukjent, ALDRI gjettet. Se
+   * `ExecutiveService.getCapabilityStatus()` sitt filhode for kilden
+   * (`ToolInvocationContext.servingModel`, trusted-lag, aldri modell-oppgitt).
+   */
+  serving_model: { provider: string; model: string } | null;
 }
 
 /**

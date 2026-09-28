@@ -55,14 +55,17 @@ export class VoiceHealth {
     return "LIVE";
   }
 
-  snapshot(configured: Record<string, boolean>): Record<string, { state: VoiceComponentState; success: number; failures: number }> {
-    const out: Record<string, { state: VoiceComponentState; success: number; failures: number }> = {};
+  snapshot(
+    configured: Record<string, boolean>
+  ): Record<string, { state: VoiceComponentState; success: number; failures: number; last_error?: string }> {
+    const out: Record<string, { state: VoiceComponentState; success: number; failures: number; last_error?: string }> = {};
     for (const [component, isConfigured] of Object.entries(configured)) {
       const s = this.stats.get(component);
       out[component] = {
         state: this.state(component, isConfigured),
         success: s?.success ?? 0,
-        failures: s?.failures ?? 0
+        failures: s?.failures ?? 0,
+        ...(s?.last_error !== undefined ? { last_error: s.last_error } : {})
       };
     }
     return out;

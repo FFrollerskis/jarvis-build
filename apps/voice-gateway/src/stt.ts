@@ -1,5 +1,10 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { readFile, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { SpeechProcessorDeclaration } from "@jarvis/contracts";
+import { maybeDumpAudioForDebug } from "./debug-audio-dump.ts";
 
 /**
  * SpeechAdapter (STT): streaming-kontrakt bak adapter - ingen leverandørkode
@@ -142,6 +147,93 @@ export class OpenAiStt implements SttAdapter {
 }
 
 /**
+ * D-320 (harder-tier tale-backlog, andre slice - SAMME D-64-stil sjekk mot
+ * `SpeechAdapter` som D-319/ElevenLabs gjorde for TTS-siden): `deepgram`
+ * fjernet fra `connector-registry.ts` sin backlog og bygget her som en NY
+ * `SttAdapter`, IKKE en `ToolGateway`-connector - se `tts.ts` sin
+ * `ElevenLabsTts`-klassekommentar for full begrunnelse (SAMME resonnement,
+ * bare STT i stedet for TTS).
+ *
+ * `processor.processor_terms_status` er BEVISST `"NOT_VERIFIED"` - SAMME
+ * Q-32-mønster som ElevenLabs (D-319): krever en EKTE Tobias-gjennomgang av
+ * Deepgram sin Data controls-side FØR `evaluateSpeechRouting()` slipper
+ * behandleren gjennom for noen memory space. BEVISST IKKE wiret inn i
+ * `main.ts` sin aktive adapter-utvelgelse - SAMME regresjonsbegrunnelse som
+ * D-319 (routing-porten har ingen stille fallback, ville risikert å
+ * fortrenge Tobias sin host-verifiserte lokale whisper.cpp-installasjon,
+ * D-223, med en behandler routingen uansett avviser).
+ *
+ * Deepgram sitt forhåndsinnspilte ("batch") `/v1/listen`-endepunkt brukes -
+ * SAMME "batch, ingen ekte partials"-disiplin som `OpenAiStt`/`LocalWhisperStt`
+ * over (Deepgram tilbyr ekte streaming via WebSocket, men det er en HELT
+ * annen transportform enn denne buffer-og-transkriber-kontrakten - vurderes
+ * ikke her). Lyden sendes som en WAV-fil (`pcm16ToWav()`, SAMME hjelpefunksjon
+ * som `OpenAiStt`/`LocalWhisperStt` bruker) i selve request-kroppen - Deepgram
+ * detekterer format/samplerate fra WAV-headeren selv, ingen separate
+ * `encoding`/`sample_rate`-query-parametre nødvendig når kroppen allerede er
+ * en gyldig WAV-fil. `language`-query-parameteret defaulter til norsk, SAMME
+ * som `OpenAiStt`/`LocalWhisperStt`.
+ *
+ * Samme D-297-ærlighetsforbehold som D-319/ElevenLabs: API-formen
+ * (`Authorization: Token <key>`-header, `POST /v1/listen`, JSON-svaret sin
+ * `results.channels[0].alternatives[0].transcript`-struktur) er Deepgram sin
+ * langvarig dokumenterte, stabile konvensjon - trent kunnskap, IKKE denne-
+ * økten-verifisert mot live dokumentasjon (nettverksegress til
+ * `deepgram.com`/doc-domener bekreftet blokkert).
+ */
+export class DeepgramStt implements SttAdapter {
+  readonly name = "deepgram-stt";
+  /** EKSTERN databehandler - se klassekommentaren for D-320/Q-32-status. */
+  readonly processor: SpeechProcessorDeclaration = {
+    processor_id: "deepgram-listen",
+    locality: "external",
+    processor_row_declared: true,
+    processor_terms_status: "NOT_VERIFIED"
+  };
+  constructor(
+    private readonly apiKey: string | undefined = process.env["JARVIS_DEEPGRAM_API_KEY"],
+    private readonly language: string = process.env["JARVIS_DEEPGRAM_LANG"] ?? "no",
+    /** PCM-samplerate for wav-innpakking - SAMME 16 kHz-forventning som resten av piloten. */
+    private readonly sampleRate: number = 16000
+  ) {}
+
+  available(): boolean {
+    return Boolean(this.apiKey);
+  }
+
+  startStream(): SttStream {
+    if (!this.apiKey) {
+      throw new Error("deepgram_stt_not_configured");
+    }
+    const chunks: Buffer[] = [];
+    const { apiKey, language, sampleRate } = this;
+    return {
+      pushAudio(frame: Buffer): void {
+        chunks.push(frame);
+      },
+      async end(): Promise<string> {
+        const wav = pcm16ToWav(Buffer.concat(chunks), sampleRate);
+        const response = await fetch(`https://api.deepgram.com/v1/listen?language=${language}`, {
+          method: "POST",
+          headers: { authorization: `Token ${apiKey}`, "content-type": "audio/wav" },
+          body: wav
+        });
+        if (!response.ok) {
+          throw new Error(`deepgram_stt_error_${response.status}`);
+        }
+        const body = (await response.json()) as {
+          results?: { channels?: Array<{ alternatives?: Array<{ transcript?: string }> }> };
+        };
+        return body.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? "";
+      },
+      onPartial(): void {
+        // Batch-API gir ikke partials; streaming-kandidater vurderes i benchmark.
+      }
+    };
+  }
+}
+
+/**
  * Task #125 (D-217): lokal STT via whisper.cpp-binæren i `JARVIS_WHISPER_BIN`
  * (full sti til den installerte kjørbare filen - navnet varierer mellom
  * whisper.cpp-versjoner, f.eks. `main`/`whisper-cli`, derfor ALDRI hardkodet
@@ -163,6 +255,18 @@ export class OpenAiStt implements SttAdapter {
  * den med `-f -` (Unix-konvensjonen for "les fra stdin") - lyden forlater
  * derfor prosessminnet KUN via et pipe til den lokale binæren, ALDRI via
  * filsystemet.
+ *
+ * D-279 (2026-09-26, Tobias sitt EKSPLISITTE samtykke i chat, ETTER at
+ * D-262→D-278, 17 poster, hadde individuelt utelukket HVER kildekode-
+ * testbar hypotese): DENNE filen kaller nå `maybeDumpAudioForDebug()`
+ * (`debug-audio-dump.ts` - bevisst IKKE i §22-testens filliste) når
+ * resultatet er tomt - men selve filskrivingen skjer UTELUKKENDE i DEN
+ * separate filen, aldri her. `stt.ts` inneholder derfor FORTSATT null
+ * disk-skrive-API-er selv - påstanden over ("lyden forlater prosessminnet
+ * KUN via et pipe") forblir bokstavelig sann for STT-KALLET; unntaket er et
+ * bevisst, eksplisitt Tobias-autorisert sidespor, AV som standard
+ * (`JARVIS_VOICE_DEBUG_DUMP_DIR` usatt = no-op), for denne ene, midlertidige
+ * diagnostikk-undersøkelsen. Se D-279 i DECISIONS_AND_ASSUMPTIONS.md.
  *
  * UNVERIFIED (D-41-disiplin, eksplisitt disclosed, ikke stille antatt): BÅDE
  * de eksakte CLI-flaggene (`-m`/`-f`/`-nt`/`-l`) OG antagelsen om at
@@ -210,16 +314,142 @@ export class LocalWhisperStt implements SttAdapter {
       },
       async end(): Promise<string> {
         const wav = pcm16ToWav(Buffer.concat(chunks), sampleRate);
-        const proc = spawn(binPath, ["-m", modelPath, "-f", "-", "-nt", "-l", language], {
-          stdio: ["pipe", "pipe", "pipe"]
-        });
+        // D-266 (Tobias direkte i chat, live NAS-test MED D-265 sin
+        // anti-alias-fiks aktiv): IDENTISK symptom som FØR D-265 - whisper.cpp
+        // brukte fortsatt ekte, lengde-proporsjonal encode-/decode-tid (opptil
+        // 1766ms) på flere turer (0,6-0,8 sek reell tale), OG `fallbacks = 1
+        // p / 0 h` (whisper.cpp sin EGEN temperatur-refallback, utløst av
+        // dens interne selvtillits-vakter) - men produserte likevel
+        // KONSEKVENT tomt resultat. Dette utelukker anti-alias-forvrengning
+        // som eneste/hovedårsak: selv med korrekt resamplet lyd (D-265)
+        // vedvarer mønsteret UENDRET. Verifisert mot whisper.cpp v1.9.4 sin
+        // faktiske kildekode (examples/cli/cli.cpp, IKKE gjettet - D-41-
+        // disiplin): `-nth`/`--no-speech-thold` (standard 0.6) sammen med
+        // `-et`/`--entropy-thold` (2.40) og `-lpt`/`--logprob-thold` (-1.00)
+        // er whisper.cpp sin EGEN interne "er dette faktisk tale"-vakt som
+        // stille forkaster et dekodet segment når den ikke er trygg nok -
+        // PRESIST forklarer et ekte dekodeforsøk (ikke-null sample-/decode-
+        // tid, en fallback-retry) som likevel ender tomt. Denne vakten er
+        // STRUKTURELT REDUNDANT her: `EnergyVad` (`vad.ts`) har ALLEREDE
+        // avgjort at dette ER tale FØR STT-en i det hele tatt kalles (en tur
+        // starter kun ved `speech_start`, lyd mates kun under `speech`-
+        // tilstand) - whisper.cpp sin egen, dårligere kalibrerte
+        // (svakeste "base"-modell, norsk som ikke-engelsk språk) gjetning på
+        // det SAMME spørsmålet overstyrer i praksis vår VAD sitt allerede
+        // tatte vedtak.
+        //
+        // D-267 (RETTELSE, funnet FØRSTE live-forsøk med D-266 sin
+        // `-nth 0.0`-fiks): D-266 hadde retningen på terskelen BAKVENDT -
+        // whisper.cpp (identisk med OpenAI Whisper sin referanseimplementasjon
+        // sin `decoding.py`) forkaster et segment når `no_speech_prob >
+        // no_speech_thold` - en LAV terskel gjør det derfor LETTERE å
+        // overskride (nesten enhver ikke-null no-speech-sannsynlighet > 0.0),
+        // altså MER aggressiv forkasting, IKKE mindre. Live-loggen etter
+        // D-266 bekreftet dette PRESIST: flere forsøk viste nå
+        // `decode time = 0.00 ms / 1 runs` (whisper.cpp forkastet FØR reell
+        // dekoding i det hele tatt startet) - enda raskere avvist enn med
+        // standardverdien 0.6. Riktig retning for å DEAKTIVERE vakten er å
+        // gjøre terskelen umulig å overskride: en gyldig sannsynlighet kan
+        // aldri overstige 1.0, så `1.01` garanterer at
+        // `no_speech_prob > no_speech_thold` ALDRI blir sann.
+        // D-270 (DEN FAKTISKE root cause, funnet ved a lese whisper.cpp v1.9.4
+        // sin EGEN kildekode direkte - examples/cli/cli.cpp, IKKE gjettet,
+        // etter at D-269 sin sampleRate-diagnostikk beviste at ALLE tidligere
+        // lag (VAD, WAV-header, no-speech-vakt, midt-i-turen-spleising,
+        // nettleser-resampling) FAKTISK var korrekte, mens text_length: 0
+        // FORTSATT var 100% konsekvent pa tvers av ni pafolgende, hoylytte,
+        // fullengde-turer): whisper-cli sin fout_factory
+        // (cli.cpp linje ca 1117-1131) setter fname_out til INPUT-filnavnet
+        // (fname_inp) nar -of/--output-file IKKE er gitt - og siden vi
+        // sender -f - (stdin), blir fname_inp (og dermed fname_out)
+        // BOKSTAVELIG "-". is_stdout = (fname_out == "-") blir dermed
+        // SANN, og konstruktoren setter
+        // print_segment_callback = is_stdout ? nullptr : whisper_print_segment_callback
+        // - selve callback-en som ville skrevet HVERT transkribert segment
+        // blir EKSPLISITT deaktivert (nullptr) utelukkende FORDI stdin-input
+        // tilfeldigvis kolliderer med "-"-sentinelen for stdout-output.
+        // output_txt() (funksjonen som FAKTISK ville skrevet klartekst-
+        // resultatet) kalles KUN nar params.output_txt er satt (cli.cpp sin
+        // output_ext(txt, ...)-makro) - et flagg vi ALDRI har sendt.
+        // Nettoresultat: whisper.cpp gjor EKTE, fullstendig dekodingsarbeid
+        // (bekrefter ALLE tidligere observerte ikke-null encode-/decode-
+        // tider gjennom HELE denne okten), beregner et EKTE transkript
+        // internt, og SKRIVER DET DERETTER INGEN STEDER. Den evig
+        // tilstedevaerende "warning: '--output-file -' used without any
+        // other '--output-*'" (synlig i HVER ENESTE stderr-logg denne
+        // okten, konsekvent avfeid som stoy) var whisper.cpp sin egen,
+        // aerlige innrommelse av PRESIST dette. Fiks: legg til
+        // -otxt/--output-txt - dette setter params.output_txt = true, som
+        // far output_ext(txt, ...) til faktisk a kalle
+        // fout_factory.open(".txt", ...) (som, siden is_stdout er sann,
+        // apner /dev/stdout DIREKTE) og deretter output_txt(...), som
+        // skriver hvert segment sin klartekst (ledende whitespace trimmet,
+        // ingen tidsstempler/JSON, verifisert linje-for-linje mot
+        // output_txt() sin egen kildekode) til akkurat den strommen var
+        // proc.stdout.on("data", ...)-lytter allerede fanger opp.
+        // D-281 (root cause FUNNET og VERIFISERT ved å lese whisper.cpp v1.9.4
+        // sin faktiske kildekode - examples/cli/cli.cpp, fout_factory::open(),
+        // linje ca 1135-1150 - OG ved en isolert, app-uavhengig reproduksjon
+        // via en frittstående Node.js-spawn()-testskript rett mot den ekte
+        // binæren og en av de FAKTISK innspilte, ETTER D-270/D-271-fiksene
+        // fortsatt tomme, lydklippene, bekreftet i live lytting å inneholde
+        // klar, tydelig tale - "hører meg selv klart og tydelig", Tobias):
+        // D-270 sin `-otxt`-fiks fikk whisper.cpp til å FAKTISK KALLE
+        // output_txt() - men UTEN et eksplisitt `-of`-flagg forblir
+        // fname_out == fname_inp == "-" (stdin-sentinelen), altså
+        // is_stdout == true, og fout_factory::open() prøver da å skrive til
+        // stdout ved å ÅPNE "/dev/stdout" PÅ NYTT som en helt FERSK
+        // std::ofstream (ikke ved å gjenbruke selve filedeskriptor 1) -
+        // KOMMENTERT rett over selve koden i whisper.cpp: "Also assuming
+        // /dev is mounted" - open()-resultatet sjekkes ALDRI, og feil
+        // rapporteres BEVISST ALDRI ("Not using fprintf stderr here because
+        // it might equal stdout"). Manuelle `docker exec`/shell-tester
+        // (Test A/B/C) LYKTES alle konsekvent, FORDI en shell allerede har
+        // satt opp fd 1 til å PEKE PÅ noe reelt før whisper-cli i det hele
+        // tatt starter. Node.js sin `child_process.spawn()` med
+        // `stdio: ["pipe","pipe","pipe"]` gir derimot whisper-cli et helt
+        // NYTT, Node-eid anonymt pipe som fd 1 - og whisper.cpp sin egen,
+        // pathname-baserte "/dev/stdout"-gjenåpning klarer IKKE å levere
+        // bytes til DEN, selv om selve dekodingen (bekreftet identisk,
+        // ekte, ikke-null encode-/decode-tid gjennom HELE D-262→D-280-
+        // serien) skjer helt normalt internt. Fiksen slutter å stole på
+        // denne skjøre stdout-gjenåpningen: `-of <midlertidig-basenavn>`
+        // ber whisper.cpp skrive til en EKTE fil (whisper.cpp sin egen,
+        // lenge etablerte, velprøvde skrivevei - IKKE en spesialtilpasset
+        // stdout-sti), og koden under leser DEN filen eksplisitt etter at
+        // prosessen er ferdig. KUN transkribert TEKST berører disk
+        // midlertidig her, ALDRI selve lyden - lyden går fortsatt
+        // UTELUKKENDE via stdin-pipen (`proc.stdin.end(wav)` under, uendret
+        // fra før) - §22-invarianten (rå lyd persisteres aldri) er derfor
+        // fortsatt intakt.
+        const tmpOutBase = join(tmpdir(), `jarvis-whisper-${randomUUID()}`);
+        const proc = spawn(
+          binPath,
+          ["-m", modelPath, "-f", "-", "-nt", "-otxt", "-of", tmpOutBase, "-nth", "1.01", "-l", language],
+          {
+            stdio: ["pipe", "pipe", "pipe"]
+          }
+        );
         let stdout = "";
         let stderr = "";
+        let stdinError: Error | null = null;
         proc.stdout.on("data", (d: Buffer) => {
           stdout += d.toString("utf8");
         });
         proc.stderr.on("data", (d: Buffer) => {
           stderr += d.toString("utf8");
+        });
+        // D-256: hvis binæren avslutter (eller lukker sin egen stdin) FØR vi er
+        // ferdige med å skrive, feiler `.end(wav)` under med EPIPE. `proc`s
+        // EGET "error"-event (håndtert i exitCode-løftet under) dekker KUN
+        // spawn-feil på selve prosessen, ALDRI en skrivefeil på understrømmen
+        // `proc.stdin` - uten en egen lytter her er det en UHÅNDTERT
+        // "error"-hendelse, og Node kaster/krasjer HELE prosessen (funnet
+        // live på NAS-en: "den bare lukker seg" - containeren restartet på
+        // hver eneste taleytring). Lagre feilen i stedet, la `close`-eventet
+        // (som fortsatt fyres uansett) avgjøre utfallet som normalt.
+        proc.stdin.on("error", (err: Error) => {
+          stdinError = err;
         });
         const exitCode = new Promise<number | null>((resolve, reject) => {
           proc.once("error", reject);
@@ -233,14 +463,128 @@ export class LocalWhisperStt implements SttAdapter {
           throw new Error(`local_whisper_spawn_failed:${(err as Error).message.slice(0, 200)}`);
         }
         if (code !== 0) {
-          throw new Error(`local_whisper_process_failed:${code ?? "unknown"}:${stderr.slice(0, 200)}`);
+          await cleanupTmpOutput(tmpOutBase);
+          const detail = stdinError
+            ? `${stderr.slice(0, 150)} (stdin write: ${(stdinError as Error).message})`
+            : stderr.slice(0, 200);
+          throw new Error(`local_whisper_process_failed:${code ?? "unknown"}:${detail}`);
         }
-        return stdout.trim();
+        // D-281: teksten leses nå fra `-of`-filen (se spawn-kommentaren over),
+        // IKKE lenger fra `stdout` - `-otxt` uten `-of` skrev (upålitelig) til
+        // en gjenåpnet "/dev/stdout"; `-of <tmpOutBase>` skriver til en EKTE
+        // fil whisper.cpp selv oppretter (`<tmpOutBase>.txt`). Filen inneholder
+        // KUN transkribert tekst (whisper.cpp sin egen output_txt(), ingen
+        // tidsstempler/JSON - samme innhold som FØR, bare en annen kanal) -
+        // slettes uansett utfall (`cleanupTmpOutput`), ALDRI liggende igjen.
+        let text: string;
+        try {
+          text = (await readFile(`${tmpOutBase}.txt`, "utf8")).trim();
+        } catch (err) {
+          await cleanupTmpOutput(tmpOutBase);
+          throw new Error(`local_whisper_output_file_missing:${(err as Error).message.slice(0, 200)}`);
+        }
+        await cleanupTmpOutput(tmpOutBase);
+        // D-263 (Tobias direkte i chat, live NAS-test MED D-262 sin nye logging
+        // aktiv): HVER eneste tur, inkludert én med 2+ sekunder sammenhengende
+        // tale-energi, ga `voice_stt_result` med `text_length: 0` - ALDRI
+        // `voice_core_reply_sent`. whisper-cli avsluttet med kode 0 (INGEN
+        // `local_whisper_process_failed`) - prosessen kjørte altså "vellykket",
+        // den bare fant ingenting å transkribere. `stderr` (whisper.cpp sin
+        // EGEN diagnostikk - modell-/decode-/"no speech"-info, ALDRI selve
+        // transkripsjonen, som kun skrives til stdout) ble FØR denne fiksen
+        // fanget opp, men stille kastet bort på nøyaktig denne (suksess+tomt
+        // resultat) stien - samme "en feil/et signal svelges stille"-mønster
+        // som D-254/D-261/D-262, nå ett lag dypere inne i selve STT-adapteren.
+        // KUN logget når resultatet faktisk er tomt (aldri når en transkripsjon
+        // finnes) - unngår enhver risiko for at whisper.cpp sin verbose stderr
+        // skulle inneholde delvis gjenkjent tale, samme personvern-disiplin
+        // som §22 andre steder i filen.
+        //
+        // D-264 (Tobias direkte i chat, FØRSTE live-forsøk MED denne
+        // diagnostikken på): et 300-tegns utdrag var IKKE nok - whisper.cpp
+        // sitt modell-laste-banner alene (GPU-init/flash-attn/dtw-linjene,
+        // ALLTID skrevet FØRST) fylte hele budsjettet og kuttet av FØR selve
+        // prosesserings-/"no speech"-diagnostikken lenger ned i stderr kunne
+        // nås. 4000 tegn er rikelig for whisper.cpp sin fulle stderr for én
+        // kort ytring (banner + system_info + evt. per-segment-info +
+        // timing-oppsummering), fortsatt trygt bundet (aldri ubegrenset).
+        if (!text) {
+          // D-271 (live NAS-forsøk MED D-270 sin -otxt-fiks aktiv, bekreftet
+          // via at "--output-file -"-advarselen ENDELIG er borte fra
+          // stderr): FORTSATT `text_length: 0` på noen turer, men denne
+          // gangen med synlig EKTE flerrunde-dekoding (sample-/batchd-tid),
+          // ikke lenger det gamle "decode time = 0.00 ms / 1 run FØR reell
+          // dekoding startet"-mønsteret D-266/D-267 identifiserte. To
+          // gjenstående, ikke-utelukkede forklaringer: (a) `output_txt()`
+          // FAKTISK skriver whisper.cpp sitt EGNE, legitime "ingen
+          // gjenkjennbar tale"-resultat (en ekte modell-avgjørelse på denne
+          // spesifikke lyden, ikke en kode-bug), eller (b) et FORTSATT
+          // gjenværende plumbing-lag mellom `output_txt()` sin
+          // `/dev/stdout`-skriving og vår `proc.stdout.on("data", ...)`-
+          // lytter. `stdout.length` (RÅ byte-lengde FØR trim, ALDRI selve
+          // innholdet - samme §22-personvernsdisiplin som resten av denne
+          // klassen) skiller de to: 0 betyr INGEN bytes noensinne ankom
+          // (fortsatt et plumbing-lag), mens et positivt tall (f.eks. kun
+          // whitespace/linjeskift) beviser whisper.cpp FAKTISK skrev noe -
+          // og at selve MODELLEN, ikke rørledningen, er neste sted å se.
+          console.error(
+            JSON.stringify({
+              msg: "voice_stt_empty_result_diagnostic",
+              wav_bytes: wav.length,
+              // D-281: `stdout_raw_length` var den avgjørende diagnostikken
+              // FØR fiksen (0 bekreftet plumbing-laget, se D-271-kommentaren
+              // over) - stdout brukes ikke lenger som teksttransport, men
+              // feltet beholdes uendret (nå typisk 0/nær-0) for kontinuitet
+              // i loggmønsteret. `text.length` er den NYE, avgjørende
+              // diagnostikken: 0 her betyr whisper.cpp selv skrev en tom
+              // `.txt`-fil (en EKTE modell-avgjørelse på lyden), ikke lenger
+              // et transportspørsmål.
+              stdout_raw_length: stdout.length,
+              output_file_text_length: text.length,
+              stderr_excerpt: stderr.slice(0, 4000)
+            })
+          );
+          // D-279: se filhode-kommentaren over. AV med mindre Tobias selv har
+          // satt JARVIS_VOICE_DEBUG_DUMP_DIR - da en no-op. `.catch()` i
+          // stedet for await-i-try: en feil her (f.eks. mappen ikke skrivbar)
+          // skal ALDRI kaste videre og forstyrre selve STT-svaret.
+          maybeDumpAudioForDebug(wav)
+            .then((path) => {
+              if (path) {
+                console.error(JSON.stringify({ msg: "voice_debug_audio_dumped", path }));
+              }
+            })
+            .catch((err: unknown) => {
+              console.error(
+                JSON.stringify({ msg: "voice_debug_audio_dump_failed", error: (err as Error).message })
+              );
+            });
+        }
+        return text;
       },
       onPartial(): void {
         // whisper.cpp sin batch-CLI gir ingen inkrementelle partials - se klassekommentaren.
       }
     };
+  }
+}
+
+/**
+ * D-281: sletter whisper.cpp sin `-of`-utdatafil (`<base>.txt`) etter at
+ * `LocalWhisperStt.end()` er ferdig med å lese den - uansett om lesingen
+ * lyktes, feilet, eller prosessen aldri produserte filen i det hele tatt
+ * (f.eks. `code !== 0`). Kun den MIDLERTIDIGE TRANSKRIPT-TEKSTEN berører
+ * disk her, ALDRI selve lyden (§22 uendret - se filhode-kommentaren).
+ * `unlink()` sin egen feil (typisk ENOENT når filen aldri ble opprettet)
+ * svelges bevisst - opprydding skal ALDRI kaste og overstyre det egentlige
+ * STT-resultatet/-feilen den ble kalt etter.
+ */
+async function cleanupTmpOutput(tmpBase: string): Promise<void> {
+  try {
+    await unlink(`${tmpBase}.txt`);
+  } catch {
+    // Forventet når filen aldri ble opprettet (f.eks. prosessen feilet FØR
+    // output_txt() ble kalt) - ikke en feil å rapportere videre.
   }
 }
 

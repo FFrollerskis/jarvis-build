@@ -4,7 +4,7 @@ import {
   type SpeechRoutingDecision,
   type VoiceAuthorizationResult
 } from "@jarvis/contracts";
-import { PassthroughAec, PassthroughNoiseSuppressor, type AudioFilter } from "./audio.ts";
+import { PassthroughAec, PassthroughNoiseSuppressor, rmsEnergy, type AudioFilter } from "./audio.ts";
 import { EnergyVad, type VadAdapter } from "./vad.ts";
 import { SentenceChunker } from "./chunker.ts";
 import type { VoiceHealth } from "./health.ts";
@@ -184,6 +184,43 @@ export class VoiceSession {
   /** Avslaget rapporteres ÉN gang per sesjon per retning - aldri per lydramme. */
   private sttDenialReported = false;
   private ttsDenialReported = false;
+  /**
+   * D-261 (Tobias direkte i chat: en ellers HELT feilfri tilkobling -
+   * "started" med SERVER_VERIFIED, ingen krasj, ingen feilmelding noe sted -
+   * etterfulgt av total stillhet (INGEN state-endring i det hele tatt) i
+   * ~57 sekunder, deretter en ren frakobling. Verken klientens Tekniske logg
+   * (kun mottatte meldinger) eller container-loggen (ingen console.error i
+   * `pushAudio()` i det hele tatt) kunne skille mellom "lydrammer når aldri
+   * serveren" og "lydrammer ankommer, men krysser aldri VAD-terskelen
+   * (`EnergyVad` sin `threshold = 0.05`)" - eksplisitt gjentatt tilbakemelding
+   * gjennom hele denne økten: "sett opp bedre logging på hele systemet".
+   * Disse to feltene + logglinjene under svarer PRESIST på det spørsmålet
+   * direkte i `docker compose logs voice-gateway` ved NESTE forsøk, uten at
+   * Tobias må navigere en DevTools WS-"Messages"-fane (upraktisk å forklare
+   * presist over chat, se forsøket rett før denne fiksen).
+   */
+  private audioFrameCount = 0;
+  private lastAudioHeartbeatAt = 0;
+  /**
+   * D-262 (Tobias direkte i chat, live NAS-test MED D-261 sin nye logging
+   * aktiv): heartbeaten viste ekte tale/stillhet-mønster (RMS 0.17-0.52 under
+   * tale, nær 0 i pauser) og INGEN feillogg noe sted (`voice_stt_error`/
+   * `voice_core_error`/`voice_message_error` alle fraværende) - likevel
+   * svarte Jarvis fortsatt ikke ("ingen svar"). D-261 sin sampling (kun
+   * ~1-av-24 rammer, hvert 2. sekund) kan strukturelt ALDRI bekrefte om
+   * `end_of_turn` faktisk noen gang fyrte mellom to målinger, og
+   * `finishTurn()` sin `if (!text) return`-gren (linje ~352, FØR denne
+   * fiksen) var - og er, for tomt transkript - fullstendig stille: intet
+   * logglinje, ingen event, ingenting. Whisper.cpp er DOKUMENTERT kjent for
+   * å returnere tom/whitespace-transkripsjon for reell, men for kort/svak
+   * tale - som ville reprodusere PRESIST det observerte bildet (sunn
+   * VAD-aktivitet, null feil, null svar). De tre nye, upåkrevde
+   * (ikke-throttlede) logglinjene under gjør de to strukturelt umulig-å-
+   * skille-fra-hverandre spørsmålene direkte observerbare ved NESTE forsøk:
+   * (1) fyrte `end_of_turn` i det hele tatt, (2) hva fikk STT-en tilbake
+   * (KUN lengde - aldri selve teksten, samme personvern-disiplin som §22),
+   * (3) leverte Core faktisk et svar som ble sendt videre til klienten.
+   */
 
   constructor(
     private readonly identity: VoiceIdentity,
@@ -244,6 +281,35 @@ export class VoiceSession {
     const frame = this.noise.process(this.aec.process(rawFrame));
     const vadEvent = this.vad.push(frame, atMs);
 
+    // D-261: se feltkommentaren over - bekrefter BÅDE at rammer faktisk
+    // ankommer (første ramme, logges ÉN gang) OG hvilken energi/VAD-hendelse
+    // hver ramme faktisk gir (et 2-sekunders "hjertesignal", aldri per
+    // ramme - dette kalles opptil 50x/sekund og ville oversvømmet loggen).
+    this.audioFrameCount += 1;
+    if (this.audioFrameCount === 1) {
+      console.error(JSON.stringify({ msg: "voice_audio_first_frame", bytes: rawFrame.length }));
+    }
+    if (atMs - this.lastAudioHeartbeatAt >= 2000) {
+      this.lastAudioHeartbeatAt = atMs;
+      console.error(
+        JSON.stringify({
+          msg: "voice_audio_heartbeat",
+          frame_count: this.audioFrameCount,
+          rms_energy: Number(rmsEnergy(frame).toFixed(4)),
+          vad_event: vadEvent
+        })
+      );
+    }
+
+    // D-262: ALDRI throttlet, i motsetning til heartbeaten over - dette er
+    // sjeldne tilstandsoverganger (typisk noen få per ytring), ikke en
+    // per-ramme-hendelse, så det finnes ingen fare for logg-oversvømmelse.
+    // Beviser DEFINITIVT om `end_of_turn` faktisk fyrer, noe 2-sekunders
+    // sampling strukturelt aldri kan bekrefte mellom to målinger.
+    if (vadEvent === "speech_start" || vadEvent === "end_of_turn") {
+      console.error(JSON.stringify({ msg: "voice_vad_transition", vad_event: vadEvent }));
+    }
+
     if (vadEvent === "speech_start") {
       if (this.state === "speaking" || this.state === "thinking") {
         this.bargeIn(atMs);
@@ -252,7 +318,24 @@ export class VoiceSession {
         this.beginTurn(atMs);
       }
     }
-    if (this.stt && (vadEvent === "speech" || vadEvent === "speech_start")) {
+    // D-268 (live NAS-funn, SAMME test-runde som D-267 sin -nth 1.01-fiks):
+    // D-267 beviste at whisper.cpp sin egen no-speech-vakt IKKE lenger var
+    // problemet (ekte, ikke-null decode-tid observert), men transkripsjonen
+    // var FORTSATT `text_length: 0` - med en whisper-rapportert varighet på
+    // kun 0,6-0,7 sek for en hel ytring. Årsaken: denne grenen filtrerte KUN
+    // på "speech"/"speech_start" - EnergyVad returnerer "silence" for ENHVER
+    // ramme under terskelen, også midt i en aktiv tur (et kort opphold
+    // mellom ord, en stemmeløs konsonant) FØR `hangoverMs` faktisk er
+    // oppnådd og `end_of_turn` fyrer. Slike rammer ble ALDRI sendt til STT-
+    // adapteren - de ble ikke bare trimmet i endene, de ble SPLEISET UT AV
+    // MIDTEN av WAV-en, som produserer diskontinuerlig/knepen lyd whisper.cpp
+    // ikke kan gjenkjenne som sammenhengende tale. Fikset ved å sende ALLE
+    // rammer så lenge en tur faktisk er aktiv (`this.stt` satt) og rammen
+    // ikke er selve `end_of_turn`-avslutningsrammen - `vad.ts` sin egen
+    // `hangoverMs`-logikk avgjør fortsatt PRESIST når turen faktisk slutter;
+    // denne grenen bestemmer kun hvilke rammer som når adapteren mens den
+    // pågår.
+    if (this.stt && vadEvent !== "end_of_turn") {
       this.stt.pushAudio(frame);
     }
     if (vadEvent === "end_of_turn" && this.stt) {
@@ -298,13 +381,25 @@ export class VoiceSession {
       try {
         text = await stt.end();
       } catch (err) {
-        // §35: STT-feil → normalisert feil, ALDRI modellkjøring på manglende transkript.
+        // §35: STT-feil → normalisert feil til klienten, ALDRI modellkjøring på
+        // manglende transkript. D-254: den tekniske detaljen (whisper.cpp
+        // exit code/stderr, OpenAI-status osv.) ble tidligere KUN lagret i
+        // in-memory health-state, aldri logget eller eksponert noe sted - en
+        // reell feil var derfor praktisk udiagnostiserbar uten kildekode-
+        // endring + redeploy hver gang. Logg den nå server-side, samme
+        // mønster som voice_core_error/voice_message_error under.
+        console.error(JSON.stringify({ msg: "voice_stt_error", error: (err as Error).message.slice(0, 200) }));
         this.health?.recordFailure("stt", (err as Error).message);
         this.events.onError("stt_error");
         this.setState("listening");
         return;
       }
       metrics.t_final_transcript = Date.now();
+      // D-262: KUN lengde, ALDRI selve transkriptet (§22-personvernsdisiplinen
+      // gjelder også diagnostikk) - avslører presist om STT-en returnerte tomt
+      // (whisper.cpp-mønster for svak/kort tale) FØR den stille `return`
+      // under, som tidligere ga NULL signal om at dette i det hele tatt skjedde.
+      console.error(JSON.stringify({ msg: "voice_stt_result", text_length: text.length }));
       if (!text) {
         // §35: tom/ugyldig transkript (støy, ingen tale) → ingen modellkjøring.
         return;
@@ -336,6 +431,18 @@ export class VoiceSession {
       // ALDRI tilbake/re-utfører allerede utførte verktøy (§17).
       this.journal.markCompleted(utteranceId);
       this.events.onReply(reply);
+      // D-262: bekrefter at Core faktisk produserte et svar OG at det ble
+      // videresendt til transportlaget (`server.ts` sin `onReply` -> `ws.send`)
+      // - uten dette kan et "ingen svar"-symptom ALDRI skilles mellom "turen
+      // kjørte aldri" og "turen kjørte, svaret nådde bare ikke klienten".
+      console.error(
+        JSON.stringify({
+          msg: "voice_core_reply_sent",
+          reply_chars: reply.reply.length,
+          routed: reply.routed,
+          cancelled: Boolean(reply.cancelled)
+        })
+      );
       if (this.epoch === turnEpoch && !reply.cancelled) {
         if (!this.core.chatStream) {
           // Ikke-streaming Core: hele svaret tales som ett stykke via køen.
@@ -471,7 +578,7 @@ export class VoiceSession {
     this.playback = playback;
     let first = true;
     try {
-      for await (const frame of playback.frames) {
+      for await (const frame of alignPcm16Frames(playback.frames)) {
         if (this.epoch !== turnEpoch) {
           playback.cancel();
           return; // gammel lyd slippes aldri gjennom etter barge-in (§16)
@@ -556,5 +663,57 @@ export class VoiceSession {
       this.state = state;
       this.events.onState(state);
     }
+  }
+}
+
+/**
+ * D-258 (Tobias direkte i chat, live NAS-test etter D-257: talegjenkjenning/
+ * -svar fungerte ("Hallo?" -> ekte modellsvar), men klienten logget
+ * "ugyldig melding fra server" gjentatte ganger per tur og lyden var brutt/
+ * uteble - opplevd av Tobias som "ingen respons").
+ *
+ * Root cause: `apps/web/voice.html` sin `playTtsFrame()` bygger
+ * `new Int16Array(bytes.buffer)` fra HVER `tts_frame`-melding for seg
+ * (PCM16 mono) - `Int16Array` KREVER at buffer-lengden er et partall
+ * (et helt antall 2-byte samples), ellers kaster konstruktøren en
+ * `RangeError`, fanget av `voice.html`s generiske
+ * `catch { techLog("ugyldig melding fra server") }` (linje ~484) - hele
+ * rammen forkastes stille.
+ *
+ * `speakNext()` under (linje ~481, FØR denne fiksen) videresendte HVER
+ * rå chunk fra `playback.frames` direkte som én `tts_frame`-melding
+ * (`server.ts` sin `onTtsFrame`). For `LocalPiperTts` (D-253) kommer disse
+ * chunkene rett fra `for await (const chunk of proc.stdout)` i tts.ts -
+ * Node sin Readable-strøm grupperer bytes etter hva OS-pipen leverer i hvert
+ * øyeblikk, UTEN å respektere PCM-sample-grenser. Enhver chunk med et
+ * oddetall antall bytes (statistisk ca. halvparten, konsistent med det
+ * observerte mønsteret av annenhver `tts_frame` som feilet) produserte denne
+ * krasjen på klienten. Samme strukturelle sårbarhet fantes allerede i
+ * `OpenAiTts` (fetch-body-chunks er heller ikke sample-justerte), men er
+ * ALDRI blitt utøvd i praksis før D-253 - `MarkerStt`/`FakeTts` var eneste
+ * reelt kjørte adapter helt til nå (se D-253-kommentaren i
+ * d253-voice-gateway-local-stt-tts.test.ts).
+ *
+ * Fiksen legges HER (session.ts, sentralt FØR `onTtsFrame` kalles), ikke i
+ * hver enkelt adapter - session.ts er allerede stedet som eier hele
+ * TTS-avspillingsløkken (`speakNext()`), og enhver FREMTIDIG TTS-adapter
+ * arver beskyttelsen automatisk uten å måtte huske på den selv.
+ *
+ * Bufrer en eventuell overskytende siste byte fra én chunk og limer den inn
+ * FØRST i neste chunk, slik at HVER `yield`-ede buffer alltid har et partall
+ * lengde (et helt antall samples) - ingen lyddata går tapt, kun en evt.
+ * midlertidig 1-bytes forsinkelse på selve sample-grensen. En eventuell
+ * ufullstendig siste byte ved STRØMMENS slutt (ingen mer data kommer) kan
+ * strukturelt aldri bli en hel sample og forkastes bevisst der.
+ */
+export async function* alignPcm16Frames(frames: AsyncIterable<Buffer>): AsyncIterable<Buffer> {
+  let carry: Buffer | null = null;
+  for await (const chunk of frames) {
+    const combined: Buffer = carry ? Buffer.concat([carry, chunk]) : chunk;
+    const evenLength: number = combined.length - (combined.length % 2);
+    if (evenLength > 0) {
+      yield combined.subarray(0, evenLength);
+    }
+    carry = evenLength < combined.length ? combined.subarray(evenLength) : null;
   }
 }

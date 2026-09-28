@@ -57,3 +57,21 @@ d926cf79812952d7a0f92635d8d153095a8eee68:docs/DECISIONS_AND_ASSUMPTIONS.md:gener
 # just truncated) in a later commit - see the entry above for the full
 # justification (Stripe PaymentIntent object ID, not a secret).
 b4aa30ef8f9a6d922b5f71c1802f556b88b50642:docs/DECISIONS_AND_ASSUMPTIONS.md:generic-api-key:444
+
+# gitleaks' generic-api-key rule flagged the literal string
+# "JARVIS_N8N_API_KEY" (D-311 n8n connector `credential_ref` field, both
+# the `list_workflows` and `activate_workflow` ToolDefinitions) - this is
+# an ENV-VAR-NAME reference (the key ToolGateway uses to look up the real
+# secret via SecretProvider at runtime), never the secret value itself.
+# The exact same shape (`credential_ref: "JARVIS_<NAME>_API_KEY"`) appears
+# ~330 other times in this same file (e.g. JARVIS_GITHUB_TOKEN,
+# JARVIS_STRIPE_API_KEY) without ever triggering gitleaks; only this one
+# string's entropy (3.572431, reported by CI) happens to cross the rule's
+# threshold, most likely due to the digit "8" and repeated "N" in "N8N".
+# Verified manually: no credential, key, token, or password value of any
+# kind appears at this location - identical false-positive class to the
+# Stripe PaymentIntent object ID entry above. The value is the real,
+# meaningful env-var name used consistently in .env.example and
+# connector-registry.ts, so it is not reworded to a lower-entropy form.
+b50bf5cd9177d344a91725badb962c35a5e7891b:modules/tool-gateway/src/integrations.ts:generic-api-key:3294
+b50bf5cd9177d344a91725badb962c35a5e7891b:modules/tool-gateway/src/integrations.ts:generic-api-key:3302

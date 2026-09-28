@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolInvocationContext, ToolTransport } from "./gateway.ts";
 import { GithubRateLimitedError, GithubRateLimitController } from "./github-rate-limit-controller.ts";
@@ -843,6 +844,287 @@ export class TelegramTransport implements ToolTransport {
 }
 
 /**
+ * D-292 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+ * fullføres"). Slack Web API - offisielt dokumenterte endepunkter, ikke
+ * gjettet: `chat.postMessage` (send), `auth.test` (boten sin egen identitet,
+ * INGEN sideeffekt - SAMME "trygg tilkoblingstest"-rolle som Telegram sin
+ * `getMe` over), `conversations.list`/`conversations.history` (lesing).
+ * Autentisering: `Authorization: Bearer <bot-token>`-header på ALLE kall
+ * (Slack sin egen dokumenterte standard, IKKE en URL-embedded token som
+ * Telegram). Slack sin EGEN respons-konvolutt er `{ok: boolean, error?:
+ * string, ...}` uansett HTTP-status (200 selv ved logisk feil) - `body.ok`
+ * MÅ derfor sjekkes eksplisitt, en `response.ok`-sjekk alene ville sluppet
+ * gjennom en logisk Slack-feil som suksess.
+ */
+export class SlackTransport implements ToolTransport {
+  private async call(
+    method: string, credential: string, params: Record<string, JsonValue>, useJsonBody: boolean
+  ): Promise<{ ok: boolean; error?: string; [key: string]: JsonValue | boolean | string | undefined }> {
+    const url = `https://slack.com/api/${method}`;
+    const response = useJsonBody
+      ? await fetch(url, {
+          method: "POST",
+          headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+          body: JSON.stringify(params)
+        })
+      : await fetch(`${url}?${new URLSearchParams(params as Record<string, string>).toString()}`, {
+          headers: { authorization: `Bearer ${credential}` }
+        });
+    if (!response.ok) throw new Error(`slack_error_${response.status}`);
+    return (await response.json()) as { ok: boolean; error?: string };
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "notify") {
+      const body = await this.call(
+        "chat.postMessage", credential,
+        { channel: String(parameters["channel"]), text: String(parameters["message"]) }, true
+      );
+      if (!body.ok) throw new Error(`slack_error_${body.error ?? "unknown"}`);
+      return { external_id: String((body as { ts?: string }).ts ?? "sent") };
+    }
+    if (action === "get_bot_info") {
+      const body = await this.call("auth.test", credential, {}, true);
+      if (!body.ok) throw new Error(`slack_error_${body.error ?? "unknown"}`);
+      return { data: body as JsonValue };
+    }
+    if (action === "list_channels") {
+      const body = await this.call("conversations.list", credential, {}, false);
+      if (!body.ok) throw new Error(`slack_error_${body.error ?? "unknown"}`);
+      return { data: (body as { channels?: JsonValue }).channels ?? null };
+    }
+    if (action === "read_channel_history") {
+      const params: Record<string, JsonValue> = { channel: String(parameters["channel"]) };
+      if (parameters["limit"] !== undefined) params["limit"] = parameters["limit"];
+      const body = await this.call("conversations.history", credential, params, false);
+      if (!body.ok) throw new Error(`slack_error_${body.error ?? "unknown"}`);
+      return { data: (body as { messages?: JsonValue }).messages ?? null };
+    }
+    throw new Error(`slack_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-294 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+ * fullføres" - andre slice, samme mønster som Slack/D-292 over). Discord
+ * sitt offisielle REST API v10 (`discord.com/developers/docs`) - ULIK
+ * Slack: INGEN `{ok, error}`-konvolutt, en suksess-respons ER selve
+ * ressurs-JSON-en direkte, og en feil kommer som en EKTE HTTP-feilstatus
+ * (`response.ok` alene er derfor tilstrekkelig her, i motsetning til
+ * Slack). Autentisering: `Authorization: Bot <bot-token>`-header på ALLE
+ * kall. `POST /channels/{channel_id}/messages` (send, `SEND_MESSAGES`),
+ * `GET /users/@me` (boten sin egen identitet, INGEN sideeffekt - SAMME
+ * trygge tilkoblingstest-rolle som Telegram/Slack sine egne over),
+ * `GET /guilds/{guild_id}/channels` (`VIEW_CHANNEL`), `GET /channels/
+ * {channel_id}/messages` (`READ_MESSAGE_HISTORY`) - alle fire offisielt
+ * dokumenterte, ikke gjettet.
+ */
+export class DiscordTransport implements ToolTransport {
+  private async call(path: string, credential: string, init?: RequestInit): Promise<JsonValue> {
+    const response = await fetch(`https://discord.com/api/v10${path}`, {
+      ...init,
+      headers: { ...init?.headers, authorization: `Bot ${credential}` }
+    });
+    if (!response.ok) throw new Error(`discord_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "notify") {
+      const body = await this.call(`/channels/${String(parameters["channel_id"])}/messages`, credential, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content: String(parameters["message"]) })
+      });
+      return { external_id: String((body as { id?: string }).id ?? "sent") };
+    }
+    if (action === "get_bot_info") {
+      const body = await this.call("/users/@me", credential);
+      return { data: body };
+    }
+    if (action === "list_channels") {
+      const body = await this.call(`/guilds/${String(parameters["guild_id"])}/channels`, credential);
+      return { data: body };
+    }
+    if (action === "read_channel_history") {
+      const query = parameters["limit"] !== undefined ? `?limit=${String(parameters["limit"])}` : "";
+      const body = await this.call(`/channels/${String(parameters["channel_id"])}/messages${query}`, credential);
+      return { data: body };
+    }
+    throw new Error(`discord_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-295 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+ * fullføres" - tredje slice). Twilio sitt offisielle REST API
+ * (`www.twilio.com/docs/sms/api`) - `Basic`-autentisering (`AccountSid`
+ * som brukernavn, `AuthToken` som passord), IKKE en bearer-token som
+ * Slack/Discord. `POST /Messages.json` (send SMS, `AccountSid` i URL-
+ * stien), `GET /Accounts/{AccountSid}.json` (kontoens egen identitet,
+ * INGEN sideeffekt - SAMME trygge tilkoblingstest-rolle som Telegram/
+ * Slack/Discord sine egne over), `GET /Messages.json` (lesing). Twilio
+ * krever et TREDJE, fast konfigurasjonsverdi utover selve credential-en
+ * boten sender - avsendernummeret (`From`) - som IKKE er en sideeffekt-
+ * fri modell-/kall-parameter (Twilio validerer at nummeret faktisk
+ * tilhører kontoen), derfor injisert som en resolver-closure via
+ * konstruktøren, SAMME mønster som Telegram sin `chat_id` (D-247) - IKKE
+ * en ny mekanisme. `AccountSid` injiseres på SAMME måte (URL-stien
+ * krever den, men selve `credential_ref` gateway.execute() slår opp er
+ * `JARVIS_TWILIO_AUTH_TOKEN` - `credential_refs`-listen i
+ * `connector-registry.ts` forblir uendret den fulle, presence-visende
+ * listen av alle tre).
+ */
+export class TwilioTransport implements ToolTransport {
+  constructor(
+    private readonly accountSid: () => Promise<string | null>,
+    private readonly fromNumber: () => Promise<string | null>
+  ) {}
+
+  private async call(path: string, credential: string, init?: RequestInit): Promise<JsonValue> {
+    const accountSid = await this.accountSid();
+    if (!accountSid) throw new Error("twilio_account_sid_not_configured");
+    const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}${path}`, {
+      ...init,
+      headers: { ...init?.headers, authorization: `Basic ${Buffer.from(`${accountSid}:${credential}`).toString("base64")}` }
+    });
+    if (!response.ok) throw new Error(`twilio_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "notify") {
+      const from = await this.fromNumber();
+      if (!from) throw new Error("twilio_from_number_not_configured");
+      const body = await this.call("/Messages.json", credential, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ To: String(parameters["to"]), From: from, Body: String(parameters["message"]) }).toString()
+      });
+      return { external_id: String((body as { sid?: string }).sid ?? "sent") };
+    }
+    if (action === "get_account_info") {
+      const body = await this.call(".json", credential);
+      return { data: body };
+    }
+    if (action === "read_messages") {
+      const query = parameters["limit"] !== undefined ? `?PageSize=${String(parameters["limit"])}` : "";
+      const body = await this.call(`/Messages.json${query}`, credential);
+      return { data: (body as { messages?: JsonValue }).messages ?? null };
+    }
+    throw new Error(`twilio_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-296 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+ * fullføres" - fjerde slice). Brave Search API sitt offisielle REST-
+ * endepunkt (`api.search.brave.com/res/v1/...`) - `X-Subscription-Token`-
+ * header (IKKE `Authorization: Bearer`, verifisert mot offisiell
+ * dokumentasjon, ikke antatt fra de forrige connectorenes mønster).
+ * STRUKTURELT ULIK Telegram/Slack/Discord/Twilio: INGEN `notify`/sideeffekt-
+ * handling finnes i det hele tatt - Brave Search er en RENT lesende
+ * søke-API, leverandøren tilbyr genuint INGEN skrivehandling (D-41 sitt
+ * "read-only kun akseptabelt når leverandøren faktisk ikke tilbyr mer"-
+ * unntak gjelder derfor ÆRLIG her, ikke som en snarvei). To handlinger -
+ * `web_search` (`/res/v1/web/search`) og `news_search` (`/res/v1/news/
+ * search`) - begge offisielt dokumenterte separate endepunkter, IKKE
+ * gjettet. Siden ALT er lesing uten sideeffekt, kan `web_search` selv
+ * TRYGT brukes direkte som `live_test` - INGEN egen "get_account_info"-
+ * handling er nødvendig (Brave har heller ingen kontoidentitets-endepunkt
+ * å teste mot).
+ */
+export class BraveSearchTransport implements ToolTransport {
+  private async call(path: string, credential: string, params: Record<string, string>): Promise<JsonValue> {
+    const response = await fetch(`https://api.search.brave.com/res/v1/${path}?${new URLSearchParams(params).toString()}`, {
+      headers: { "x-subscription-token": credential, accept: "application/json" }
+    });
+    if (!response.ok) throw new Error(`brave_search_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "web_search") {
+      const params: Record<string, string> = { q: String(parameters["query"]) };
+      if (parameters["count"] !== undefined) params["count"] = String(parameters["count"]);
+      const body = await this.call("web/search", credential, params);
+      return { data: (body as { web?: { results?: JsonValue } }).web?.results ?? null };
+    }
+    if (action === "news_search") {
+      const params: Record<string, string> = { q: String(parameters["query"]) };
+      if (parameters["count"] !== undefined) params["count"] = String(parameters["count"]);
+      const body = await this.call("news/search", credential, params);
+      return { data: (body as { results?: JsonValue }).results ?? null };
+    }
+    throw new Error(`brave_search_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-297 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+ * fullføres" - femte slice). **Ærlighetsmerknad (se D-297 i DECISIONS_AND_
+ * ASSUMPTIONS.md):** dette øktens miljø blokkerer utgående nettverkstrafikk
+ * til vilkårlige eksterne domener (`docs.tavily.com`/`api.search.brave.com`
+ * begge bekreftet EGRESS_BLOCKED via `WebFetch` under bygging av denne
+ * connectoren) - API-formen under kunne derfor IKKE bekreftes mot en LEVENDE
+ * hentet kopi av Sentry sin offisielle dokumentasjon denne økten, i motsetning
+ * til hva D-292/D-294/D-295/D-296 sine kommentarer hevdet ("verifisert mot
+ * offisiell dokumentasjon"). Den er basert på Sentry sitt organisasjons-
+ * scopede REST-API v0 (`sentry.io/api/0/...`, `Authorization: Bearer <token>`)
+ * - et offentlig, stabilt uendret API-mønster over flere år - men dette er
+ * TRENT kunnskap, IKKE en denne-økten-bekreftet kilde. `SENTRY_LIVE_GATE`
+ * forblir derfor `PENDING_CREDENTIALS` og krever en EKTE live-test med et
+ * ekte token FØR `LIVE_VERIFIED` kan påstås - se `connector-registry.ts`.
+ *
+ * Organisasjons-slug er, som Twilio sin AccountSid (D-295), en resolver-
+ * closure slått opp PÅ NYTT ved hvert kall (IKKE frosset ved oppstart) -
+ * Sentry sitt organisasjonsscopede API krever slug-en i URL-stien for alle
+ * fire handlinger under. `update_issue` er den ENESTE skrivehandlingen -
+ * en PUT mot et eksisterende issue (status-endring: resolved/ignored/
+ * unresolved) er reversibel (en ny `update_issue` kan sette status tilbake)
+ * og idempotent (samme body gir samme sluttilstand, ULIKT Slack/Discord/
+ * Twilio sin `notify` som alltid oppretter en NY melding per kall).
+ */
+export class SentryTransport implements ToolTransport {
+  constructor(private readonly orgSlug: () => Promise<string | null>) {}
+
+  private async call(path: string, credential: string, init?: RequestInit): Promise<JsonValue> {
+    const orgSlug = await this.orgSlug();
+    if (!orgSlug) throw new Error("sentry_org_slug_not_configured");
+    const response = await fetch(`https://sentry.io/api/0/organizations/${orgSlug}${path}`, {
+      ...init,
+      headers: { ...init?.headers, authorization: `Bearer ${credential}`, "content-type": "application/json" }
+    });
+    if (!response.ok) throw new Error(`sentry_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_projects") {
+      const body = await this.call("/projects/", credential);
+      return { data: body };
+    }
+    if (action === "list_issues") {
+      const query = encodeURIComponent(String(parameters["query"] ?? "is:unresolved"));
+      const body = await this.call(`/issues/?query=${query}`, credential);
+      return { data: body };
+    }
+    if (action === "get_issue") {
+      const body = await this.call(`/issues/${String(parameters["issue_id"])}/`, credential);
+      return { data: body };
+    }
+    if (action === "update_issue") {
+      const body = await this.call(`/issues/${String(parameters["issue_id"])}/`, credential, {
+        method: "PUT",
+        body: JSON.stringify({ status: parameters["status"] })
+      });
+      return { data: body };
+    }
+    throw new Error(`sentry_unsupported_action_${action}`);
+  }
+}
+
+/**
  * D-242/D-248 (funnet UAVHENGIG to ganger, samme bug, se D-248 sin egen
  * lærdomskolonne i DECISIONS_AND_ASSUMPTIONS.md): `vercel` har hatt en
  * `live_test`-oppføring i `connector-registry.ts` siden D-213, men
@@ -1517,5 +1799,1453 @@ export class TelegramCommandPoller {
       const oldest = this.handled.values().next();
       if (!oldest.done) this.handled.delete(oldest.value);
     }
+  }
+}
+
+/**
+ * D-298 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+ * fullføres" - sjette slice). **Samme ærlighetsforbehold som D-297** (se
+ * DECISIONS_AND_ASSUMPTIONS.md): dette øktens nettverksegress er blokkert
+ * mot eksterne dokumentasjonsdomener, så API-formen under er basert på
+ * trent kunnskap om Google Maps Platform sitt offentlige, år-stabile
+ * Geocoding API (`maps.googleapis.com/maps/api/geocode/json`), IKKE en
+ * denne-økten-bekreftet kilde. BEVISST AVGRENSET til KUN Geocoding
+ * (`geocode`/`reverse_geocode`) - Places- og Routes-API-ene er separate,
+ * fortsatt ubygde backlog-id-er (`google_places`/`google_routes`) med egne
+ * credential_refs i `connector-registry.ts`, IKKE konflatert inn her.
+ * STRUKTURELT LIK Brave Search: leverandøren tilbyr genuint bare lesing for
+ * Geocoding-endepunktet, D-41 sitt read-only-unntak ærlig oppfylt. API-
+ * nøkkelen sendes som `key`-query-parameter (Google sin egen dokumenterte
+ * REST-konvensjon for denne API-en, IKKE en header som Brave Search).
+ * Google sin egen `status`-verdi i svaret (OK/ZERO_RESULTS/REQUEST_DENIED/
+ * OVER_QUERY_LIMIT/...) returneres RÅTT som en del av `data` - transporten
+ * tolker den IKKE selv (samme "ikke overtolke leverandørsvar"-disiplin som
+ * andre lesehandlinger i denne rekken).
+ */
+export class GoogleMapsTransport implements ToolTransport {
+  private async call(params: Record<string, string>, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?${new URLSearchParams({ ...params, key: credential }).toString()}`);
+    if (!response.ok) throw new Error(`google_maps_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "geocode") {
+      const body = await this.call({ address: String(parameters["address"]) }, credential);
+      return { data: body };
+    }
+    if (action === "reverse_geocode") {
+      const body = await this.call({ latlng: String(parameters["latlng"]) }, credential);
+      return { data: body };
+    }
+    throw new Error(`google_maps_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-299 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+ * fullføres" - syvende slice). **Samme ærlighetsforbehold som D-297/D-298**
+ * (nettverksegress blokkert, basert på trent kunnskap om Google Sheets API
+ * v4, ikke denne-økten-bekreftet). Gjenbruker den EKSISTERENDE, allerede
+ * proven `googleAccessToken()` OAuth-refresh-token-utveksleren (SAMME
+ * `JARVIS_GOOGLE_CLIENT_ID`/`JARVIS_GOOGLE_CLIENT_SECRET` Desktop-klient som
+ * Gmail/Calendar/Drive allerede bruker) - MEN med sin EGEN, separate
+ * `credential_ref` (`JARVIS_GOOGLE_SHEETS_TOKEN`, samme som D-232 sin
+ * opprinnelige plassholder allerede spesifiserte), IKKE gjenbruk av
+ * `JARVIS_GOOGLE_TOKEN`. Årsak: Sheets sin celledata-API (`sheets.
+ * googleapis.com/v4/...`) krever den DEDIKERTE `spreadsheets`-OAuth-scopen -
+ * Drive sin brede `auth/drive`-scope dekker Sheets-FILER som Drive-objekter
+ * (liste/slette/dele), men IKKE selve celleinnholdet via Sheets-API-et. Å
+ * anta det eksisterende `JARVIS_GOOGLE_TOKEN` allerede har denne scopen ville
+ * vært en USIKKER antakelse denne økten ikke kan bekrefte - en egen credential
+ * er derfor det ÆRLIGE valget (feiler tydelig med `insufficient_scope` hvis
+ * Tobias limmer inn feil token, i stedet for å late som det virker).
+ * D-41 sitt "maksimal nyttig kapabilitet"-prinsipp (ikke read-only av
+ * bekvemmelighet): `read_range`/`list_sheets` (klasse A) OG `update_range`/
+ * `append_row` (klasse B, ekte skrivehandlinger) - samme "full funksjonell
+ * tilgang"-disiplin som Drive (D-42) allerede etablerte, ikke en kunstig
+ * innsnevring.
+ */
+export class GoogleSheetsTransport implements ToolTransport {
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    const token = await googleAccessToken(credential);
+    const spreadsheetId = String(parameters["spreadsheet_id"]);
+    if (action === "list_sheets") {
+      const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties`, {
+        headers: { authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) throw new Error(`sheets_error_${response.status}`);
+      const body = (await response.json()) as { sheets?: Array<{ properties?: { title?: string; sheetId?: number } }> };
+      return { data: (body.sheets ?? []).map((s) => ({ title: s.properties?.title ?? "", sheet_id: s.properties?.sheetId ?? null })) as unknown as JsonValue };
+    }
+    if (action === "read_range") {
+      const range = encodeURIComponent(String(parameters["range"]));
+      const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}`, {
+        headers: { authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) throw new Error(`sheets_error_${response.status}`);
+      const body = (await response.json()) as { values?: JsonValue };
+      return { data: body.values ?? [] };
+    }
+    if (action === "update_range") {
+      const range = encodeURIComponent(String(parameters["range"]));
+      const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}?valueInputOption=USER_ENTERED`, {
+        method: "PUT",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ range: String(parameters["range"]), values: parameters["values"] })
+      });
+      if (!response.ok) throw new Error(`sheets_error_${response.status}`);
+      return { data: (await response.json()) as JsonValue };
+    }
+    if (action === "append_row") {
+      const range = encodeURIComponent(String(parameters["range"]));
+      const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}:append?valueInputOption=USER_ENTERED`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ range: String(parameters["range"]), values: [parameters["row"]] })
+      });
+      if (!response.ok) throw new Error(`sheets_error_${response.status}`);
+      const body = (await response.json()) as { updates?: { updatedRange?: string } };
+      return { external_id: body.updates?.updatedRange ?? "appended" };
+    }
+    throw new Error(`sheets_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-301 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+ * fullføres" - tilbake til ett-connector-per-PR etter D-297-300-samlingen).
+ * **Samme ærlighetsforbehold som D-297/D-298/D-299/D-300** (nettverksegress
+ * blokkert denne økten, `WebFetch` mot eksterne dokumentasjonsdomener
+ * bekreftet `EGRESS_BLOCKED` - se D-297): API-formen under er basert på
+ * trent kunnskap om Tavily sitt offentlige Search-API, IKKE en denne-økten-
+ * bekreftet kilde. Tavily sender API-nøkkelen som `api_key`-FELT I POST-
+ * BODY-en (IKKE en `Authorization`-header, ULIK Sentry/Brave Search) - deres
+ * opprinnelige, mest utbredt dokumenterte autentiseringsform. Kun ÉTT reelt
+ * dokumentert endepunkt (`POST /search`) er kjent med tilstrekkelig
+ * sikkerhet - `web_search`/`news_search` skiller seg derfor KUN på `topic`-
+ * body-feltet (general/news) mot SAMME endepunkt, i stedet for å gjette på
+ * et separat nyhets-endepunkts URL/form. STRUKTURELT LIK Brave Search: D-41
+ * sitt read-only-unntak ærlig oppfylt (søke-API, ingen skrivehandling).
+ */
+export class TavilyTransport implements ToolTransport {
+  private async call(topic: "general" | "news", parameters: Record<string, JsonValue>, credential: string): Promise<JsonValue> {
+    const body: Record<string, JsonValue> = { api_key: credential, query: String(parameters["query"]), topic };
+    if (parameters["max_results"] !== undefined) body["max_results"] = parameters["max_results"];
+    const response = await fetch("https://api.tavily.com/search", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error(`tavily_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "web_search") {
+      const body = await this.call("general", parameters, credential);
+      return { data: (body as { results?: JsonValue }).results ?? null };
+    }
+    if (action === "news_search") {
+      const body = await this.call("news", parameters, credential);
+      return { data: (body as { results?: JsonValue }).results ?? null };
+    }
+    throw new Error(`tavily_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-302 (Tobias direkte i chat: "fortsett og jobbe ikke vent på ci" - niende
+ * slice). **Samme ærlighetsforbehold som D-297/D-298/D-299/D-300/D-301**
+ * (nettverksegress blokkert denne økten, `WebFetch` mot eksterne
+ * dokumentasjonsdomener bekreftet `EGRESS_BLOCKED` - se D-297): API-formen
+ * under er basert på trent kunnskap om Exa sitt offentlige, nevrale søke-API,
+ * IKKE en denne-økten-bekreftet kilde. Exa sender API-nøkkelen som en
+ * `x-api-key`-HEADER (IKKE `Authorization: Bearer`, IKKE et body-felt som
+ * Tavily). TO separate, EGNE endepunkter - `POST /search` (`web_search`) og
+ * `POST /findSimilar` (`find_similar`, tar en `url` i stedet for en `query`)
+ * - ULIK Tavily, som deler ETT endepunkt via et body-felt. STRUKTURELT LIK
+ * Brave Search/Tavily: D-41 sitt read-only-unntak ærlig oppfylt (søke-API,
+ * ingen skrivehandling).
+ */
+export class ExaTransport implements ToolTransport {
+  private async post(path: string, body: Record<string, JsonValue>, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://api.exa.ai${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": credential },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error(`exa_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "web_search") {
+      const body: Record<string, JsonValue> = { query: String(parameters["query"]) };
+      if (parameters["num_results"] !== undefined) body["numResults"] = parameters["num_results"];
+      const result = await this.post("/search", body, credential);
+      return { data: (result as { results?: JsonValue }).results ?? null };
+    }
+    if (action === "find_similar") {
+      const body: Record<string, JsonValue> = { url: String(parameters["url"]) };
+      if (parameters["num_results"] !== undefined) body["numResults"] = parameters["num_results"];
+      const result = await this.post("/findSimilar", body, credential);
+      return { data: (result as { results?: JsonValue }).results ?? null };
+    }
+    throw new Error(`exa_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-303 (bygget parallelt mens D-302 sin CI kjørte, samme brede ordre -
+ * tiende slice). **Samme ærlighetsforbehold som D-297-D-302** (nettverksegress
+ * blokkert denne økten, basert på trent kunnskap, ikke denne-økten-bekreftet).
+ * Bruker det ELDRE, langvarig stabile Places-API-et (`maps.googleapis.com/
+ * maps/api/place/...`, `key`-query-parameter) - SAMME autentiseringsform som
+ * `GoogleMapsTransport` over, bevisst IKKE det nyere v1 Places-API-et
+ * (`places.googleapis.com`, felt-maske-/header-basert auth, en helt annen
+ * kallform). Google sin egen `status`-verdi i svaret (OK/ZERO_RESULTS/...)
+ * returneres RÅTT, IKKE tolket av transporten selv - samme mønster som
+ * `GoogleMapsTransport`.
+ */
+export class GooglePlacesTransport implements ToolTransport {
+  private async call(path: string, params: Record<string, string>, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://maps.googleapis.com/maps/api/place/${path}/json?${new URLSearchParams({ ...params, key: credential }).toString()}`);
+    if (!response.ok) throw new Error(`google_places_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "search_places") {
+      const body = await this.call("textsearch", { query: String(parameters["query"]) }, credential);
+      return { data: body };
+    }
+    if (action === "get_place_details") {
+      const body = await this.call("details", { place_id: String(parameters["place_id"]) }, credential);
+      return { data: body };
+    }
+    throw new Error(`google_places_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-304 (bygget parallelt mens D-303 sin CI kjørte, samme brede ordre -
+ * ellevte slice, fullfører "Google-lokasjons-trioen" Maps/Places/Routes).
+ * **Samme ærlighetsforbehold som D-297-D-303** (nettverksegress blokkert
+ * denne økten, basert på trent kunnskap, ikke denne-økten-bekreftet). Bruker
+ * det ELDRE, langvarig stabile Directions-/Distance Matrix-API-et
+ * (`maps.googleapis.com/maps/api/...`, `key`-query-parameter) - SAMME
+ * autentiseringsform som `GoogleMapsTransport`/`GooglePlacesTransport` over,
+ * bevisst IKKE det nyere v2 Routes-API-et (`routes.googleapis.com`, felt-
+ * maske-/header-basert auth, en helt annen kallform). Google sin egen
+ * `status`-verdi i svaret returneres RÅTT, IKKE tolket av transporten selv -
+ * samme mønster som de to andre Google-transportene.
+ */
+export class GoogleRoutesTransport implements ToolTransport {
+  private async call(path: string, params: Record<string, string>, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://maps.googleapis.com/maps/api/${path}/json?${new URLSearchParams({ ...params, key: credential }).toString()}`);
+    if (!response.ok) throw new Error(`google_routes_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "get_directions") {
+      const body = await this.call("directions", { origin: String(parameters["origin"]), destination: String(parameters["destination"]) }, credential);
+      return { data: body };
+    }
+    if (action === "get_distance_matrix") {
+      const body = await this.call("distancematrix", { origins: String(parameters["origins"]), destinations: String(parameters["destinations"]) }, credential);
+      return { data: body };
+    }
+    throw new Error(`google_routes_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-305 (bygget parallelt mens D-304 sin CI kjørte, samme brede ordre -
+ * tolvte slice). **Samme ærlighetsforbehold som D-297-D-304** (nettverksegress
+ * blokkert denne økten, basert på trent kunnskap, ikke denne-økten-bekreftet).
+ * FØRSTE connector i denne rekken som er TYPISK selv-hostet - Grafana har
+ * INGEN fast SaaS-domene som `sentry.io`/`api.tavily.com`, så base-URL-en må
+ * konfigureres (`JARVIS_GRAFANA_API_BASE_URL`), samme resolver-argument-
+ * mønster som `SentryTransport` sin org-slug (D-297). `Authorization:
+ * Bearer <api_key>` mot Grafana sitt HTTP-API. STRUKTURELT LIK Google Maps/
+ * Places/Routes/Brave Search/Tavily/Exa: INGEN skrivehandling finnes - D-41
+ * sitt read-only-unntak ærlig oppfylt.
+ */
+export class GrafanaTransport implements ToolTransport {
+  constructor(private readonly baseUrl: () => Promise<string | null>) {}
+
+  private async call(path: string, credential: string): Promise<JsonValue> {
+    const baseUrl = await this.baseUrl();
+    if (!baseUrl) throw new Error("grafana_base_url_not_configured");
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}${path}`, {
+      headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" }
+    });
+    if (!response.ok) throw new Error(`grafana_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "search_dashboards") {
+      const query = parameters["query"] !== undefined ? `?query=${encodeURIComponent(String(parameters["query"]))}` : "";
+      const body = await this.call(`/api/search${query}`, credential);
+      return { data: body };
+    }
+    if (action === "get_dashboard") {
+      const body = await this.call(`/api/dashboards/uid/${encodeURIComponent(String(parameters["uid"]))}`, credential);
+      return { data: body };
+    }
+    throw new Error(`grafana_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-306 (bygget parallelt mens D-305 sin CI kjørte, samme brede ordre -
+ * trettende slice). **Samme ærlighetsforbehold som D-297-D-305**
+ * (nettverksegress blokkert denne økten, basert på trent kunnskap, ikke
+ * denne-økten-bekreftet). SAMME "typisk selv-hostet"-struktur som Grafana
+ * (D-305) - base-URL-en må konfigureres (`JARVIS_PROMETHEUS_API_BASE_URL`),
+ * SAMME resolver-argument-mønster. `Authorization: Bearer <token>` mot
+ * Prometheus sitt HTTP-API (PromQL via query-parameter). STRUKTURELT LIK
+ * Grafana/Google-familien/Brave Search/Tavily/Exa: INGEN skrivehandling
+ * finnes - D-41 sitt read-only-unntak ærlig oppfylt (Prometheus sitt
+ * HTTP-API tilbyr uansett ingen skrive-endepunkt for metrikkdata).
+ */
+export class PrometheusTransport implements ToolTransport {
+  constructor(private readonly baseUrl: () => Promise<string | null>) {}
+
+  private async call(path: string, params: Record<string, string>, credential: string): Promise<JsonValue> {
+    const baseUrl = await this.baseUrl();
+    if (!baseUrl) throw new Error("prometheus_base_url_not_configured");
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}${path}?${new URLSearchParams(params).toString()}`, {
+      headers: { authorization: `Bearer ${credential}` }
+    });
+    if (!response.ok) throw new Error(`prometheus_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "query") {
+      const body = await this.call("/api/v1/query", { query: String(parameters["query"]) }, credential);
+      return { data: body };
+    }
+    if (action === "query_range") {
+      const body = await this.call("/api/v1/query_range", {
+        query: String(parameters["query"]),
+        start: String(parameters["start"]),
+        end: String(parameters["end"]),
+        step: String(parameters["step"])
+      }, credential);
+      return { data: body };
+    }
+    throw new Error(`prometheus_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-307 (bygget parallelt mens D-306 sin CI kjørte, samme brede ordre -
+ * fjortende slice). **Samme ærlighetsforbehold som D-297-D-306**
+ * (nettverksegress blokkert denne økten, basert på trent kunnskap, ikke
+ * denne-økten-bekreftet). Dropbox API v2 (`api.dropboxapi.com/2/files/...`,
+ * JSON-RPC-stil POST-kall) - `Authorization: Bearer <token>`-header, ETT
+ * langvarig access-token (INGEN OAuth-refresh-token-utveksling som Google-
+ * familien). D-41 sitt "maksimal nyttig kapabilitet"-prinsipp fulgt - EKTE
+ * skrivehandling (`create_folder`), ikke kunstig innsnevret til read-only.
+ * BEVISST AVGRENSET fra fil-INNHOLD-opplasting/nedlasting (Dropbox sitt
+ * separate `content.dropboxapi.com`-vertsnavn med binær body/spesielle
+ * `Dropbox-API-Arg`-headere - en strukturelt ulik kallform, se D-307 i
+ * DECISIONS_AND_ASSUMPTIONS.md).
+ */
+export class DropboxTransport implements ToolTransport {
+  private async call(path: string, body: Record<string, JsonValue>, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://api.dropboxapi.com/2/files/${path}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error(`dropbox_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_folder") {
+      const body = await this.call("list_folder", { path: String(parameters["path"] ?? "") }, credential);
+      return { data: body };
+    }
+    if (action === "create_folder") {
+      const body = await this.call("create_folder_v2", { path: String(parameters["path"]) }, credential);
+      return { data: body };
+    }
+    throw new Error(`dropbox_unsupported_action_${action}`);
+  }
+}
+
+export class NotionTransport implements ToolTransport {
+  private async call(method: "POST", path: string, body: Record<string, JsonValue>, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://api.notion.com/v1/${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${credential}`,
+        "content-type": "application/json",
+        "Notion-Version": "2022-06-28"
+      },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error(`notion_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "search") {
+      const body: Record<string, JsonValue> = {};
+      if (typeof parameters["query"] === "string" && parameters["query"] !== "") body["query"] = parameters["query"];
+      const result = await this.call("POST", "search", body, credential);
+      return { data: result };
+    }
+    if (action === "create_page") {
+      const body = await this.call("POST", "pages", {
+        parent: parameters["parent"] as JsonValue,
+        properties: parameters["properties"] as JsonValue
+      }, credential);
+      return { data: body };
+    }
+    throw new Error(`notion_unsupported_action_${action}`);
+  }
+}
+
+export class OneDriveTransport implements ToolTransport {
+  private async call(method: "GET" | "POST", path: string, body: Record<string, JsonValue> | undefined, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${credential}`,
+        "content-type": "application/json"
+      },
+      ...(body ? { body: JSON.stringify(body) } : {})
+    });
+    if (!response.ok) throw new Error(`onedrive_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_folder") {
+      const path = typeof parameters["path"] === "string" && parameters["path"] !== ""
+        ? `/me/drive/root:/${encodeURIComponent(parameters["path"] as string)}:/children`
+        : "/me/drive/root/children";
+      const result = await this.call("GET", path, undefined, credential);
+      return { data: result };
+    }
+    if (action === "create_folder") {
+      const result = await this.call("POST", "/me/drive/root/children", {
+        name: parameters["name"] as JsonValue,
+        folder: {},
+        "@microsoft.graph.conflictBehavior": "fail"
+      }, credential);
+      return { data: result };
+    }
+    throw new Error(`onedrive_unsupported_action_${action}`);
+  }
+}
+
+export class MicrosoftOutlookTransport implements ToolTransport {
+  private async call(method: "GET" | "POST", path: string, body: Record<string, JsonValue> | undefined, credential: string): Promise<JsonValue | null> {
+    const response = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${credential}`,
+        "content-type": "application/json"
+      },
+      ...(body ? { body: JSON.stringify(body) } : {})
+    });
+    if (!response.ok) throw new Error(`microsoft_outlook_error_${response.status}`);
+    if (response.status === 202 || response.status === 204) return null;
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_messages") {
+      const max = typeof parameters["max"] === "number" ? parameters["max"] : 10;
+      const result = await this.call("GET", `/me/messages?$top=${max}`, undefined, credential);
+      return { data: result };
+    }
+    if (action === "send_mail") {
+      await this.call("POST", "/me/sendMail", {
+        message: {
+          subject: parameters["subject"] as JsonValue,
+          body: { contentType: "Text", content: parameters["body"] as JsonValue },
+          toRecipients: [{ emailAddress: { address: parameters["to"] as JsonValue } }]
+        }
+      }, credential);
+      return { data: null };
+    }
+    throw new Error(`microsoft_outlook_unsupported_action_${action}`);
+  }
+}
+
+export class N8nTransport implements ToolTransport {
+  constructor(private readonly baseUrl: () => Promise<string | null>) {}
+
+  private async call(method: "GET" | "POST", path: string, credential: string): Promise<JsonValue> {
+    const baseUrl = await this.baseUrl();
+    if (!baseUrl) throw new Error("n8n_base_url_not_configured");
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}${path}`, {
+      method,
+      headers: { "X-N8N-API-KEY": credential, "content-type": "application/json" }
+    });
+    if (!response.ok) throw new Error(`n8n_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_workflows") {
+      const body = await this.call("GET", "/api/v1/workflows", credential);
+      return { data: body };
+    }
+    if (action === "activate_workflow") {
+      const body = await this.call("POST", `/api/v1/workflows/${encodeURIComponent(String(parameters["id"]))}/activate`, credential);
+      return { data: body };
+    }
+    throw new Error(`n8n_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-312: Spotify sitt Accounts-API krever en OAuth2 `refresh_token`-utveksling
+ * (SAMME mønster som `googleAccessToken()` over) - `client_id`/`client_secret`
+ * er DELT app-konfig (ikke per-bruker secret), lest direkte fra env, IKKE via
+ * `credential_ref` (kun refresh-tokenet er den faktiske, roterte secreten).
+ */
+async function spotifyAccessToken(refreshToken: string): Promise<string> {
+  const clientId = process.env["JARVIS_SPOTIFY_CLIENT_ID"];
+  const clientSecret = process.env["JARVIS_SPOTIFY_CLIENT_SECRET"];
+  if (!clientId || !clientSecret) throw new Error("spotify_oauth_client_not_configured");
+  const response = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`
+    },
+    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken })
+  });
+  if (!response.ok) throw new Error(`spotify_auth_failed_${response.status}`);
+  return ((await response.json()) as { access_token: string }).access_token;
+}
+
+export class SpotifyTransport implements ToolTransport {
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    const token = await spotifyAccessToken(credential);
+    if (action === "get_currently_playing") {
+      const response = await fetch("https://api.spotify.com/v1/me/player/currently-playing", {
+        headers: { authorization: `Bearer ${token}` }
+      });
+      if (response.status === 204) return { data: null };
+      if (!response.ok) throw new Error(`spotify_error_${response.status}`);
+      return { data: (await response.json()) as JsonValue };
+    }
+    if (action === "add_to_queue") {
+      const uri = encodeURIComponent(String(parameters["uri"]));
+      const response = await fetch(`https://api.spotify.com/v1/me/player/queue?uri=${uri}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) throw new Error(`spotify_error_${response.status}`);
+      return { data: null };
+    }
+    throw new Error(`spotify_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-314. WhatsApp Business Cloud API (Meta Graph API) - `phone_number_id`
+ * er Jarvis sin EGEN avsender-identitet (SAMME rolle som Telegram sin
+ * `chat_id` - fast konfig, IKKE en per-kall parameter), injisert som en
+ * resolver-closure (SAMME mønster som n8n/Grafana/Prometheus sin base-URL).
+ * `notify` er navngitt IDENTISK med Slack/Discord/Telegram sin
+ * send-melding-handling for konsistens på tvers av meldingsleverandører.
+ */
+export class WhatsAppTransport implements ToolTransport {
+  constructor(private readonly phoneNumberId: () => Promise<string | null>) {}
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    const phoneNumberId = await this.phoneNumberId();
+    if (!phoneNumberId) throw new Error("whatsapp_phone_number_id_not_configured");
+    if (action === "get_phone_number_info") {
+      const response = await fetch(
+        `https://graph.facebook.com/v20.0/${phoneNumberId}?fields=display_phone_number,verified_name`,
+        { headers: { authorization: `Bearer ${credential}` } }
+      );
+      if (!response.ok) throw new Error(`whatsapp_error_${response.status}`);
+      return { data: (await response.json()) as JsonValue };
+    }
+    if (action === "notify") {
+      const response = await fetch(`https://graph.facebook.com/v20.0/${phoneNumberId}/messages`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          messaging_product: "whatsapp", to: String(parameters["to"]),
+          type: "text", text: { body: String(parameters["message"]) }
+        })
+      });
+      if (!response.ok) throw new Error(`whatsapp_error_${response.status}`);
+      const body = (await response.json()) as { messages?: Array<{ id?: string }> };
+      return { external_id: body.messages?.[0]?.id ?? "sent" };
+    }
+    throw new Error(`whatsapp_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-315. Make (tidligere Integromat) sitt API v2 - zone-spesifikk base-URL
+ * (f.eks. `https://eu1.make.com`, brukeren sin egen kontosone), injisert
+ * som en resolver-closure (SAMME mønster som n8n/Grafana/Prometheus).
+ * `Authorization: Token <api-token>` - Make sitt EGET dokumenterte
+ * headerformat (IKKE `Bearer`, SAMME strukturelle auth-header-navn-
+ * variasjon som n8n sin `X-N8N-API-KEY` demonstrerte for D-311).
+ */
+export class MakeTransport implements ToolTransport {
+  constructor(private readonly baseUrl: () => Promise<string | null>) {}
+
+  private async call(method: "GET" | "POST", path: string, credential: string): Promise<JsonValue> {
+    const baseUrl = await this.baseUrl();
+    if (!baseUrl) throw new Error("make_base_url_not_configured");
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}${path}`, {
+      method,
+      headers: { authorization: `Token ${credential}`, "content-type": "application/json" }
+    });
+    if (!response.ok) throw new Error(`make_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "get_current_user") {
+      const body = await this.call("GET", "/api/v2/users/me", credential);
+      return { data: body };
+    }
+    if (action === "run_scenario") {
+      const body = await this.call("POST", `/api/v2/scenarios/${encodeURIComponent(String(parameters["scenario_id"]))}/run`, credential);
+      return { data: body };
+    }
+    throw new Error(`make_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-316. OpenAI Images API - `POST /v1/images/generations` (bildegenerering,
+ * EKTE kostnad per kall, IKKE gjettet frem som `list_models`-alternativet
+ * for `live_test`: `GET /v1/models` er gratis/sideeffekt-fritt, SAMME
+ * "trygg tilkoblingstest"-rolle som andre connectorers `get_bot_info`/
+ * `auth.test`). Egen `tool_id` fra `openai` sin model_provider-oppføring
+ * (ModelGateway) - dette er en STRUKTURELT ulik kapabilitet (bildegenerering
+ * via ToolGateway, ikke tekst-fullføring via ModelGateway).
+ */
+export class OpenAIImagesTransport implements ToolTransport {
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_models") {
+      const response = await fetch("https://api.openai.com/v1/models", {
+        headers: { authorization: `Bearer ${credential}` }
+      });
+      if (!response.ok) throw new Error(`openai_images_error_${response.status}`);
+      const body = (await response.json()) as { data?: JsonValue };
+      return { data: body.data ?? null };
+    }
+    if (action === "generate_image") {
+      const response = await fetch("https://api.openai.com/v1/images/generations", {
+        method: "POST",
+        headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          prompt: String(parameters["prompt"]),
+          n: typeof parameters["n"] === "number" ? parameters["n"] : 1,
+          size: typeof parameters["size"] === "string" ? parameters["size"] : "1024x1024"
+        })
+      });
+      if (!response.ok) throw new Error(`openai_images_error_${response.status}`);
+      const body = (await response.json()) as { data?: JsonValue };
+      return { data: body.data ?? null };
+    }
+    throw new Error(`openai_images_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-321 (tredje tale-backlog-punkt vurdert i sveipen, MEN strukturelt ulik
+ * D-319/D-320: Telnyx er telefoni-/SMS-plattform, IKKE en STT/TTS-leverandør
+ * - D-64-vurderingen som allerede ble notert som nødvendig i PROJECT_STATUS.md
+ * FØR denne sliceen konkluderer med at Telnyx hører hjemme som en ordinær
+ * `ToolGateway`-connector, SAMME "meldingsleverandør"-kategori som Twilio
+ * (D-295) - IKKE bak `SpeechAdapter`). Telnyx sitt REST-API v2
+ * (`api.telnyx.com/v2/...`, `Authorization: Bearer <api_key>` - ETT enkelt
+ * API-nøkkel, IKKE Twilio sin to-delte AccountSid/AuthToken-modell) - SAMME
+ * "notify er ekte utsendelse (klasse B), get_account_info er trygg
+ * tilkoblingstest (klasse A)"-mønster som Telegram/Slack/Discord/Twilio.
+ * `from`-nummeret injiseres som en resolver-closure (SAMME mønster som
+ * Twilio sin `fromNumber`/WhatsApp sin `phone_number_id`) - Jarvis sin egen
+ * avsenderidentitet, IKKE en per-kall-parameter. `get_account_info` bruker
+ * Telnyx sitt kjente, dokumenterte `GET /v2/balance`-endepunkt (kontoens
+ * gjeldende saldo) - trygt, sideeffekt-fritt, brukes som `live_test`.
+ * BEVISST DEFERRED (D-41 eksplisitt merket, ikke stille utelatt): en
+ * `read_messages`-handling (Twilio sin tredje handling) er IKKE bygget her -
+ * Telnyx sitt meldingshistorikk-API har en annen, mindre sikkert kjent
+ * endepunktform enn `/v2/messages`/`/v2/balance`, utsatt til en senere
+ * utvidelse i stedet for gjettet frem. Samme D-297-ærlighetsforbehold som
+ * resten av denne sveipen: API-formen er Telnyx sin langvarig dokumenterte,
+ * trente kunnskap - forsøkt, men IKKE denne-økten-verifisert mot live
+ * dokumentasjon (nettverksegress bekreftet blokkert).
+ */
+export class TelnyxTransport implements ToolTransport {
+  constructor(private readonly fromNumber: () => Promise<string | null>) {}
+
+  private async call(path: string, credential: string, init?: RequestInit): Promise<JsonValue> {
+    const response = await fetch(`https://api.telnyx.com/v2${path}`, {
+      ...init,
+      headers: { ...init?.headers, authorization: `Bearer ${credential}` }
+    });
+    if (!response.ok) throw new Error(`telnyx_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "notify") {
+      const from = await this.fromNumber();
+      if (!from) throw new Error("telnyx_from_number_not_configured");
+      const body = await this.call("/messages", credential, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ from, to: String(parameters["to"]), text: String(parameters["message"]) })
+      });
+      const data = (body as { data?: { id?: string } }).data;
+      return { external_id: data?.id ?? "sent" };
+    }
+    if (action === "get_account_info") {
+      const body = await this.call("/balance", credential);
+      return { data: (body as { data?: JsonValue }).data ?? null };
+    }
+    throw new Error(`telnyx_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-322 (video-gen-familien, FØRSTE slice bygget under det EKSPLISITT
+ * lavere-sikkerhet-merket PROJECT_STATUS.md allerede varslet for
+ * higgsfield/runway/kling/google_veo) - MEN med en STERKERE evidensbasis enn
+ * D-297-mønsteret ellers i denne sveipen: API-formen under er BEKREFTET via
+ * `WebSearch` denne økten (flere uavhengige kilder krysset - Runway sin egen
+ * `dev.runwayml.com`/`docs.dev.runwayml.com`, GitHub sin `api-evangelist/
+ * runwayml`-referanse, `apitracker.io`, community-agent-skills som siterer
+ * SAMME endepunktformer), IKKE bare trent kunnskap alene - selve
+ * `WebFetch`-kallet mot primærkilden (`dev.runwayml.com`) er FORTSATT
+ * blokkert av nettverksegress denne økten, så dette ER sekundærkilde-
+ * krysssjekket, IKKE en direkte primærkilde-lesning - en ÆRLIG mellomting
+ * mellom "denne-økten-verifisert" og "kun trent kunnskap", eksplisitt
+ * kategorisert som sådan, ikke overdrevet til den sterkere påstanden.
+ *
+ * `https://api.dev.runwayml.com/v1` - `Authorization: Bearer <api_key>`
+ * PLUSS en PÅKREVD, datert `X-Runway-Version`-header (`2024-11-06`,
+ * bekreftet på tvers av samtlige kryssjekkede kilder). Tre handlinger:
+ * `get_account_info` (klasse A, `GET /v1/organization` - kreditbalanse/tier,
+ * trygt/sideeffekt-fritt, brukt som `live_test`), `generate_video` (klasse
+ * B, `POST /v1/image_to_video`, EKTE kostnad per kall - ALDRI brukt som
+ * live_test, SAMME "generering koster, list/status er gratis"-disiplin som
+ * OpenAI Images D-316) og `get_task_status` (klasse A, `GET /v1/tasks/{id}`
+ * - asynkron generering krever polling, en connector uten denne handlingen
+ * ville vært ubrukelig siden `generate_video` alene aldri gir det ferdige
+ * resultatet).
+ */
+export class RunwayTransport implements ToolTransport {
+  private async call(path: string, credential: string, init?: RequestInit): Promise<JsonValue> {
+    const response = await fetch(`https://api.dev.runwayml.com/v1${path}`, {
+      ...init,
+      headers: { ...init?.headers, authorization: `Bearer ${credential}`, "X-Runway-Version": "2024-11-06" }
+    });
+    if (!response.ok) throw new Error(`runway_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "get_account_info") {
+      const body = await this.call("/organization", credential);
+      return { data: body };
+    }
+    if (action === "generate_video") {
+      const body = await this.call("/image_to_video", credential, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: typeof parameters["model"] === "string" ? parameters["model"] : "gen4.5",
+          promptImage: String(parameters["promptImage"]),
+          promptText: typeof parameters["promptText"] === "string" ? parameters["promptText"] : undefined,
+          ratio: typeof parameters["ratio"] === "string" ? parameters["ratio"] : "1280:720",
+          duration: typeof parameters["duration"] === "number" ? parameters["duration"] : 5
+        })
+      });
+      return { external_id: String((body as { id?: string }).id ?? "queued") };
+    }
+    if (action === "get_task_status") {
+      const body = await this.call(`/tasks/${String(parameters["task_id"])}`, credential);
+      return { data: body };
+    }
+    throw new Error(`runway_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-323 (video-gen-familien, ANDRE slice - SAMME WebSearch-sekundærkilde-
+ * krysssjekk-disiplin D-322/Runway etablerte, flere uavhengige kilder
+ * krysset per faktapåstand under). Kling sitt REST-API (`api.klingai.com`)
+ * er STRUKTURELT ANNERLEDES enn ALLE tidligere connectorer i denne sveipen:
+ * autentisering er INGEN statisk API-nøkkel/Bearer-token videresendt
+ * uendret, men en SELV-GENERERT, kortlevd (~30 min) JWT (HS256) signert
+ * med et Access Key/Secret Key-par (`iss`=access_key, `exp`=now+1800,
+ * `nbf`=now-5 - bekreftet identisk på tvers av samtlige kryssjekkede
+ * kilder). `encodeKlingJwt()` under implementerer dette MANUELT via Node
+ * sin innebygde `node:crypto` (`createHmac("sha256", ...)`) - SAMME
+ * avhengighetsfrie disiplin som `vipps-webhook.ts` sin HMAC-verifisering
+ * (D-110) - IKKE en ny `jsonwebtoken`-avhengighet for én enkelt
+ * signeringsoperasjon. Access Key injisert som resolver-closure (SAMME
+ * "fast konfigurasjonsverdi utover selve credential-en"-mønster som
+ * Twilio sin `accountSid`, D-295) - Secret Key ER selve `credential_ref`-
+ * verdien (brukes KUN til signering, ALDRI sendt i klartekst over
+ * nettverket eller logget).
+ *
+ * To handlinger - `generate_video` (klasse B, `POST /v1/videos/
+ * image2video`, EKTE kostnad per kall - ALDRI live_test) og
+ * `get_task_status` (klasse A, `GET /v1/videos/image2video/{task_id}` -
+ * PÅKREVD polling, SAMME "generering er asynkron"-mønster som Runway
+ * D-322). Responsformen (`{code, data: {task_id, task_status, ...}}`) er
+ * bekreftet på tvers av flere uavhengige kilder. BEVISST INGEN
+ * `live_test`: INGEN verifisert gratis/parameterløs saldo-/kontoendepunkt
+ * funnet (Kling sin dokumentasjon nevner en "Deduction Query"/"Account
+ * Usage"-flate, men EKSAKT endepunktsti er IKKE bekreftet av noen
+ * kryssjekket kilde denne økten) - D-41 eksplisitt DEFERRED i stedet for
+ * gjettet fram, `NO_LIVE_TEST_IDS`-mønsteret i
+ * `d242-connector-health-sweep.test.ts` håndterer allerede en connector
+ * uten `live_test` korrekt (INGEN ny testinfrastruktur nødvendig).
+ */
+function encodeKlingJwt(accessKey: string, secretKey: string): string {
+  const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+  const now = Math.floor(Date.now() / 1000);
+  const payload = Buffer.from(JSON.stringify({ iss: accessKey, exp: now + 1800, nbf: now - 5 })).toString("base64url");
+  const signingInput = `${header}.${payload}`;
+  const signature = createHmac("sha256", secretKey).update(signingInput).digest("base64url");
+  return `${signingInput}.${signature}`;
+}
+
+export class KlingTransport implements ToolTransport {
+  constructor(private readonly accessKey: () => Promise<string | null>) {}
+
+  private async call(path: string, credential: string, init?: RequestInit): Promise<JsonValue> {
+    const accessKey = await this.accessKey();
+    if (!accessKey) throw new Error("kling_access_key_not_configured");
+    const token = encodeKlingJwt(accessKey, credential);
+    const response = await fetch(`https://api.klingai.com${path}`, {
+      ...init,
+      headers: { ...init?.headers, authorization: `Bearer ${token}` }
+    });
+    if (!response.ok) throw new Error(`kling_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "generate_video") {
+      const body = await this.call("/v1/videos/image2video", credential, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          image_url: String(parameters["image_url"]),
+          prompt: typeof parameters["prompt"] === "string" ? parameters["prompt"] : undefined,
+          duration: typeof parameters["duration"] === "string" ? parameters["duration"] : undefined,
+          aspect_ratio: typeof parameters["aspect_ratio"] === "string" ? parameters["aspect_ratio"] : undefined
+        })
+      });
+      const data = (body as { data?: { task_id?: string } }).data;
+      return { external_id: data?.task_id ?? "queued" };
+    }
+    if (action === "get_task_status") {
+      const body = await this.call(`/v1/videos/image2video/${String(parameters["task_id"])}`, credential);
+      return { data: (body as { data?: JsonValue }).data ?? null };
+    }
+    throw new Error(`kling_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-324 (video-gen-familien, TREDJE slice - SAMME WebSearch-sekundærkilde-
+ * krysssjekk-disiplin D-322/D-323 etablerte). Google Veo kjøres over den
+ * SAMME Gemini API-vert/auth-form (`generativelanguage.googleapis.com`,
+ * `x-goog-api-key`-header) som `GeminiAdapter` sin EKSISTERENDE
+ * model_provider-oppføring (`packages/provider-adapters/src/gemini.ts`) -
+ * denne transporten gjenbruker BEVISST den SAMME, allerede denne-
+ * kodebasen-bekreftede auth-formen (IKKE gjettet på nytt) i stedet for å
+ * anta en annen header/vertsnavn. `predictLongRunning` er likevel en
+ * STRUKTURELT ULIK kapabilitet enn `generateContent` (videogenerering,
+ * asynkron long-running-operation, ikke tekst-fullføring) - egen `tool_id`
+ * her, SAMME presedens som OpenAI Images (D-316) fikk for `openai` sin
+ * model_provider-oppføring.
+ *
+ * Tre handlinger - `list_models` (klasse A, `GET /v1beta/models` - SAMME
+ * endepunkt D-106 sin kommentar i `gemini.ts` allerede refererer som en
+ * ekte, host-bekreftet katalogflate, gratis/sideeffekt-fritt, brukt som
+ * `live_test`), `generate_video` (klasse B, `POST /v1beta/models/{model}:
+ * predictLongRunning`, kropp `{instances:[{prompt}], parameters:
+ * {aspectRatio}}` - bekreftet på tvers av flere uavhengige kilder, EKTE
+ * kostnad per kall - ALDRI brukt som `live_test`, SAMME "generering
+ * koster, status/liste er gratis"-disiplin som Runway D-322/Kling D-323)
+ * og `get_task_status` (klasse A, `GET /v1beta/{operation_name}` -
+ * PÅKREVD polling av Google sin standard long-running-operation-kontrakt,
+ * `done`-felt + `response.generateVideoResponse.generatedSamples[0].
+ * video.uri` når ferdig - bekreftet på tvers av flere uavhengige kilder).
+ * Default-modellen `veo-3.1-generate-preview` er BEVISST kun en default,
+ * IKKE hardkodet - kan overstyres per kall (SAMME "ikke lås inn en
+ * bestemt modellversjon uten mulighet til å overstyre"-disiplin som
+ * Runway sin `model`-parameter).
+ */
+export class GoogleVeoTransport implements ToolTransport {
+  private async call(path: string, credential: string, init?: RequestInit): Promise<JsonValue> {
+    const response = await fetch(`https://generativelanguage.googleapis.com${path}`, {
+      ...init,
+      headers: { ...init?.headers, "x-goog-api-key": credential }
+    });
+    if (!response.ok) throw new Error(`google_veo_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_models") {
+      const body = await this.call("/v1beta/models", credential);
+      return { data: (body as { models?: JsonValue }).models ?? null };
+    }
+    if (action === "generate_video") {
+      const model = typeof parameters["model"] === "string" ? parameters["model"] : "veo-3.1-generate-preview";
+      const body = await this.call(`/v1beta/models/${model}:predictLongRunning`, credential, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          instances: [{ prompt: String(parameters["prompt"]) }],
+          parameters: typeof parameters["aspect_ratio"] === "string" ? { aspectRatio: parameters["aspect_ratio"] } : undefined
+        })
+      });
+      return { external_id: String((body as { name?: string }).name ?? "queued") };
+    }
+    if (action === "get_task_status") {
+      const body = await this.call(`/v1beta/${String(parameters["operation_name"])}`, credential);
+      return { data: body };
+    }
+    throw new Error(`google_veo_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-327 (video-gen-familien, SISTE slice - SAMME WebSearch-sekundærkilde-
+ * krysssjekk-disiplin D-322/D-323/D-324 etablerte). Higgsfield sitt REST-
+ * API (`api.higgsfield.ai`) er STRUKTURELT ANNERLEDES enn Runway/Kling/
+ * Google Veo på én kritisk måte: det er en MULTI-MODELL-markedsplass som
+ * proxyer FLERE, uavhengige tredjeparts videogenereringsmodeller under
+ * ETT vertsnavn - bekreftet eksempel-endepunkt `POST /bytedance/
+ * seedance-2.0/text-to-video` (kryssjekket på tvers av flere uavhengige
+ * kilder: offisielle quickstart-docs, community-swagger-repoer, tredje-
+ * parts API-guider). Det finnes IKKE ETT stabilt, "standard" genererings-
+ * endepunkt tilsvarende Runway sin `/image_to_video` eller Kling sin
+ * `/videos/image2video` - stien selv KODER hvilken underliggende
+ * tredjeparts-modell som brukes. Å HARDKODE én bestemt modellsti (f.eks.
+ * `bytedance/seedance-2.0`) som en "default" ville derfor vært et
+ * BEVISST, ubedt leverandørvalg NESTET inni en allerede navngitt
+ * connector - EKSAKT den feilklassen D-64 forbyr ("X løser dette
+ * allerede" er ikke tilstrekkelig grunn, se D-326/Q-41 sin identiske
+ * resonnering for Playwright sine konkurrerende cloud-vendorer).
+ * `generate_video` krever derfor et EKSPLISITT `model_path`-parameter fra
+ * KALLEREN (INGEN default) - dette er IKKE et gjettet leverandørvalg av
+ * Jarvis, det er en generisk, tynn pass-through til Higgsfield sin egen
+ * markedsplass-URL-struktur, og valget av HVILKEN modell forblir hos
+ * den som faktisk kaller verktøyet (samme prinsipp som å ALDRI velge en
+ * MCP-server sitt verktøy på forhånd, se D-325).
+ *
+ * Autentisering: `Authorization: Key <key_id>:<key_secret>` - ETT enkelt
+ * header-felt der de to delene er kolon-sammensatt i klartekst (IKKE en
+ * kryptografisk signeringsoperasjon som Kling sin JWT, D-323 - strukturelt
+ * enklere, men FORTSATT to separate credentials, samme "list alle
+ * nødvendige verdier"-disiplin). Key Secret ER `credential_ref`
+ * (invoke-tidspunkt-parameteren) - Key ID injiseres som resolver-closure
+ * (SAMME "fast konfigurasjonsverdi utover selve credential-en"-mønster
+ * som Twilio sin `accountSid`, D-295).
+ *
+ * To handlinger - `generate_video` (klasse B, `POST /{model_path}/
+ * text-to-video`, EKTE kostnad per kall - ALDRI `live_test`) og
+ * `get_task_status` (klasse A, `GET /requests/{request_id}/status` -
+ * PÅKREVD polling, bekreftet identisk sti på tvers av flere uavhengige
+ * kilder, uavhengig av hvilken underliggende modell som genererte
+ * requesten). BEVISST INGEN `live_test`: INGEN verifisert gratis/
+ * parameterløst saldo-/kontoendepunkt funnet denne økten - SAMME
+ * DEFERRED-disiplin og SAMME `NO_LIVE_TEST_IDS`-håndtering som Kling
+ * (D-323).
+ */
+export class HiggsfieldTransport implements ToolTransport {
+  constructor(private readonly keyId: () => Promise<string | null>) {}
+
+  private async call(path: string, credential: string, init?: RequestInit): Promise<JsonValue> {
+    const keyId = await this.keyId();
+    if (!keyId) throw new Error("higgsfield_key_id_not_configured");
+    const response = await fetch(`https://api.higgsfield.ai${path}`, {
+      ...init,
+      headers: { ...init?.headers, authorization: `Key ${keyId}:${credential}` }
+    });
+    if (!response.ok) throw new Error(`higgsfield_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "generate_video") {
+      const modelPath = String(parameters["model_path"]);
+      const body = await this.call(`/${modelPath}/text-to-video`, credential, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: String(parameters["prompt"]) })
+      });
+      return { external_id: String((body as { request_id?: string }).request_id ?? "queued") };
+    }
+    if (action === "get_task_status") {
+      const body = await this.call(`/requests/${String(parameters["request_id"])}/status`, credential);
+      return { data: body };
+    }
+    throw new Error(`higgsfield_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-329. Todoist sitt REST-API - BEVISST verifisert via WebSearch (WebFetch
+ * mot developer.todoist.com selv er nettverk-egress-blokkert) FØR bygging,
+ * fordi den gamle `/rest/v2/tasks`-veien (kjent fra trent kunnskap) er
+ * BEKREFTET pensjonert i favør av den unifiserte `/api/v1/`-veien (Sync +
+ * REST slått sammen) - se D-329 i DECISIONS_AND_ASSUMPTIONS.md for full
+ * sekundærkilde-krysssjekket evidens per endepunkt. Kun de seks endepunktene
+ * som ble kryssjekket mot FLERE uavhengige sekundærkilder er bygget her
+ * (create/list/get/update/close/reopen) - `delete_task` er BEVISST UTELATT
+ * (D-41 DEFERRED, ikke stille utelatt): ingen sekundærkilde i dette søket
+ * bekreftet eksakt HTTP-metode/status for slette-endepunktet.
+ *
+ * D-64/D-291: dette er UTELUKKENDE transport-laget (rå API-adapter, samme
+ * granularitet som hver andre `ToolTransport` i denne filen) - IKKE den
+ * fulle "synk-adapter inn i Business OS/`OperationsTask`" D-291 beskriver.
+ * Den kanoniske synk-mappingen (`OperationsService.createTask()` med
+ * `source_type: "todoist"`/`source_instance_id`/`canonical_uri`) er en EGEN,
+ * ennå ubygget oppgave som krever sin egen arkitekturbeslutning (poll-basert
+ * sweep vs. webhook vs. on-demand fra verktøykall) - BEVISST IKKE gjettet
+ * frem her, se D-329 sin "gjenstår"-seksjon.
+ */
+export class TodoistTransport implements ToolTransport {
+  private async call(method: "GET" | "POST", path: string, body: Record<string, JsonValue> | undefined, credential: string): Promise<JsonValue | null> {
+    const response = await fetch(`https://api.todoist.com/api/v1${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${credential}`,
+        "content-type": "application/json"
+      },
+      ...(body ? { body: JSON.stringify(body) } : {})
+    });
+    if (!response.ok) throw new Error(`todoist_error_${response.status}`);
+    if (response.status === 204) return null;
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_tasks") {
+      const body = await this.call("GET", "/tasks", undefined, credential);
+      return { data: body };
+    }
+    if (action === "get_task") {
+      const body = await this.call("GET", `/tasks/${String(parameters["task_id"])}`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "create_task") {
+      const payload: Record<string, JsonValue> = { content: String(parameters["content"]) };
+      if (typeof parameters["project_id"] === "string") payload["project_id"] = parameters["project_id"];
+      if (typeof parameters["description"] === "string") payload["description"] = parameters["description"];
+      if (typeof parameters["due_string"] === "string") payload["due_string"] = parameters["due_string"];
+      if (typeof parameters["priority"] === "number") payload["priority"] = parameters["priority"];
+      const body = await this.call("POST", "/tasks", payload, credential);
+      return { external_id: String((body as { id?: string } | null)?.id ?? ""), data: body };
+    }
+    if (action === "update_task") {
+      const payload: Record<string, JsonValue> = {};
+      if (typeof parameters["content"] === "string") payload["content"] = parameters["content"];
+      if (typeof parameters["description"] === "string") payload["description"] = parameters["description"];
+      if (typeof parameters["due_string"] === "string") payload["due_string"] = parameters["due_string"];
+      if (typeof parameters["priority"] === "number") payload["priority"] = parameters["priority"];
+      const body = await this.call("POST", `/tasks/${String(parameters["task_id"])}`, payload, credential);
+      return { data: body };
+    }
+    if (action === "close_task") {
+      await this.call("POST", `/tasks/${String(parameters["task_id"])}/close`, {}, credential);
+      return { data: null };
+    }
+    if (action === "reopen_task") {
+      await this.call("POST", `/tasks/${String(parameters["task_id"])}/reopen`, {}, credential);
+      return { data: null };
+    }
+    throw new Error(`todoist_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-330. Trello - ANNEN av de seks D-64-port-krevende CRM-/prosjektstyrings-
+ * leverandørene bygget (D-291 stengte porten; D-329 bygget Todoist FØRST,
+ * samme mønster gjenbrukt her). API-formen BEVISST verifisert via WebSearch
+ * denne økten (sekundærkilde-krysssjekket - Atlassian sin egen developer.
+ * atlassian.com/cloud/trello REST-dokumentasjon, kryssjekket mot en
+ * uavhengig praktisk gjennomgang og Trello sin egen offisielle "getting
+ * started"-side hos Atlassian Support). Autentisering er `key`/`token` som
+ * QUERY-PARAMETERE (IKKE en Authorization-header - en STRUKTURELT annen
+ * auth-form enn hver annen connector i denne filen, Trello sitt API
+ * støtter riktignok også `Authorization: Bearer` men key/token-formen er
+ * den mest utbredte og eldste, bekreftet på tvers av alle kilder). `key`
+ * (API-nøkkelen) er en resolver-closure (samme mønster som Twilio sin
+ * `accountSid`), `token` er selve `credential`-parameteren. UTELUKKENDE
+ * transport-laget - se D-329 sin doc-kommentar over for hvorfor den fulle
+ * `OperationsTask`-synk-mappingen BEVISST ikke er bygget her.
+ */
+export class TrelloTransport implements ToolTransport {
+  constructor(private readonly apiKey: () => Promise<string | null>) {}
+
+  private async call(method: "GET" | "POST" | "PUT", path: string, body: Record<string, JsonValue> | undefined, credential: string): Promise<JsonValue> {
+    const key = await this.apiKey();
+    if (!key) throw new Error("trello_api_key_not_configured");
+    const separator = path.includes("?") ? "&" : "?";
+    const response = await fetch(`https://api.trello.com/1${path}${separator}key=${encodeURIComponent(key)}&token=${encodeURIComponent(credential)}`, {
+      method,
+      headers: { "content-type": "application/json" },
+      ...(body ? { body: JSON.stringify(body) } : {})
+    });
+    if (!response.ok) throw new Error(`trello_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_boards") {
+      const body = await this.call("GET", "/members/me/boards", undefined, credential);
+      return { data: body };
+    }
+    if (action === "list_cards") {
+      const body = await this.call("GET", `/boards/${String(parameters["board_id"])}/cards`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "get_card") {
+      const body = await this.call("GET", `/cards/${String(parameters["card_id"])}`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "create_card") {
+      const payload: Record<string, JsonValue> = { idList: String(parameters["list_id"]), name: String(parameters["name"]) };
+      if (typeof parameters["desc"] === "string") payload["desc"] = parameters["desc"];
+      const body = await this.call("POST", "/cards", payload, credential);
+      return { external_id: String((body as { id?: string }).id ?? ""), data: body };
+    }
+    if (action === "update_card") {
+      const payload: Record<string, JsonValue> = {};
+      if (typeof parameters["name"] === "string") payload["name"] = parameters["name"];
+      if (typeof parameters["desc"] === "string") payload["desc"] = parameters["desc"];
+      if (typeof parameters["list_id"] === "string") payload["idList"] = parameters["list_id"];
+      const body = await this.call("PUT", `/cards/${String(parameters["card_id"])}`, payload, credential);
+      return { data: body };
+    }
+    if (action === "close_card") {
+      const body = await this.call("PUT", `/cards/${String(parameters["card_id"])}`, { closed: true }, credential);
+      return { data: body };
+    }
+    if (action === "reopen_card") {
+      const body = await this.call("PUT", `/cards/${String(parameters["card_id"])}`, { closed: false }, credential);
+      return { data: body };
+    }
+    throw new Error(`trello_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-331. Jira - TREDJE av de seks D-64-port-krevende CRM-/prosjektstyrings-
+ * leverandørene bygget (D-291 stengte porten; D-329/D-330 bygget Todoist/
+ * Trello først). API-formen BEVISST verifisert via WebSearch denne økten
+ * (sekundærkilde-krysssjekket - Atlassian sin egen developer.atlassian.com/
+ * cloud/jira/platform/rest/v3-dokumentasjon, kryssjekket mot uavhengige
+ * community-tråder): **STRUKTURELT ANNERLEDES enn Todoist/Trello** - Jira
+ * Cloud er PER-TENANT (`https://<domain>.atlassian.net`), IKKE ett fast
+ * vertsnavn, derfor en TREDJE resolver (`baseUrl`, samme mønster som
+ * Grafana/Prometheus, D-305/D-306) i tillegg til `email` (Basic auth er
+ * `email:api_token`, IKKE bare et bearer-token). **Kritisk API-drift
+ * bekreftet i søket:** den gamle `/rest/api/3/search`-veien er HELT
+ * FJERNET fra Jira Cloud - `/rest/api/3/search/jql` er PÅKREVD i stedet
+ * (samme "trent kunnskap kan være utdatert"-funn som Todoist sin
+ * `/rest/v2/`-pensjonering, D-329). `description`-feltet på `create_issue`/
+ * `update_issue` krever Atlassian Document Format (IKKE en ren streng) -
+ * bekreftet direkte i søket - en minimal ADF-wrapper bygges derfor internt
+ * fra en enkel tekststreng-parameter, kalleren skal ALDRI måtte konstruere
+ * ADF-JSON selv for denne enkle bruken.
+ */
+export class JiraTransport implements ToolTransport {
+  constructor(
+    private readonly baseUrl: () => Promise<string | null>,
+    private readonly email: () => Promise<string | null>
+  ) {}
+
+  private async call(method: "GET" | "POST" | "PUT", path: string, body: Record<string, JsonValue> | undefined, credential: string): Promise<JsonValue | null> {
+    const baseUrl = await this.baseUrl();
+    if (!baseUrl) throw new Error("jira_base_url_not_configured");
+    const email = await this.email();
+    if (!email) throw new Error("jira_email_not_configured");
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/rest/api/3${path}`, {
+      method,
+      headers: {
+        authorization: `Basic ${Buffer.from(`${email}:${credential}`).toString("base64")}`,
+        "content-type": "application/json"
+      },
+      ...(body ? { body: JSON.stringify(body) } : {})
+    });
+    if (!response.ok) throw new Error(`jira_error_${response.status}`);
+    if (response.status === 204) return null;
+    return (await response.json()) as JsonValue;
+  }
+
+  private static toAdf(text: string): JsonValue {
+    return { type: "doc", version: 1, content: [{ type: "paragraph", content: [{ type: "text", text }] }] } as unknown as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "search_issues") {
+      const jql = encodeURIComponent(String(parameters["jql"]));
+      const body = await this.call("GET", `/search/jql?jql=${jql}`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "get_issue") {
+      const body = await this.call("GET", `/issue/${String(parameters["issue_key"])}`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "list_transitions") {
+      const body = await this.call("GET", `/issue/${String(parameters["issue_key"])}/transitions`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "create_issue") {
+      const fields: Record<string, JsonValue> = {
+        project: { key: String(parameters["project_key"]) },
+        summary: String(parameters["summary"]),
+        issuetype: { name: String(parameters["issue_type"]) }
+      };
+      if (typeof parameters["description"] === "string") fields["description"] = JiraTransport.toAdf(parameters["description"]);
+      const body = await this.call("POST", "/issue", { fields }, credential);
+      return { external_id: String((body as { key?: string } | null)?.key ?? ""), data: body };
+    }
+    if (action === "update_issue") {
+      const fields: Record<string, JsonValue> = {};
+      if (typeof parameters["summary"] === "string") fields["summary"] = parameters["summary"];
+      if (typeof parameters["description"] === "string") fields["description"] = JiraTransport.toAdf(parameters["description"]);
+      await this.call("PUT", `/issue/${String(parameters["issue_key"])}`, { fields }, credential);
+      return { data: null };
+    }
+    if (action === "transition_issue") {
+      await this.call("POST", `/issue/${String(parameters["issue_key"])}/transitions`, { transition: { id: String(parameters["transition_id"]) } }, credential);
+      return { data: null };
+    }
+    throw new Error(`jira_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-332. Linear - FJERDE av de seks D-64-port-krevende CRM-/prosjekt-
+ * styrings-leverandørene bygget (D-291 stengte porten; D-329/D-330/D-331
+ * bygget Todoist/Trello/Jira først). API-formen BEVISST verifisert via
+ * WebSearch denne økten (sekundærkilde-krysssjekket - Linear sin egen
+ * linear.app/developers/graphql-dokumentasjon, kryssjekket mot uavhengige
+ * praktiske gjennomganger): **STRUKTURELT ANNERLEDES enn Todoist/Trello/
+ * Jira - Linear har INGEN REST-API i det hele tatt**, ETT eneste GraphQL-
+ * endepunkt (`POST https://api.linear.app/graphql`) for BÅDE lesing og
+ * skriving. Autentisering er RÅ API-nøkkel i `Authorization`-headeren -
+ * BEKREFTET UTEN `Bearer`-prefiks (et `Bearer lin_api_...`-forsøk feiler
+ * eksplisitt ifølge dokumentasjonen - en lett å gjette-feil unngått ved å
+ * faktisk verifisere). GraphQL returnerer OFTE HTTP 200 selv ved feltfeil -
+ * `call()` sjekker derfor BÅDE `response.ok` OG et `errors`-felt i selve
+ * svarskroppen, aldri kun én av dem.
+ */
+export class LinearTransport implements ToolTransport {
+  private async call(query: string, variables: Record<string, JsonValue>, credential: string): Promise<JsonValue> {
+    const response = await fetch("https://api.linear.app/graphql", {
+      method: "POST",
+      headers: { authorization: credential, "content-type": "application/json" },
+      body: JSON.stringify({ query, variables })
+    });
+    if (!response.ok) throw new Error(`linear_error_${response.status}`);
+    const body = (await response.json()) as { data?: JsonValue; errors?: JsonValue[] };
+    if (body.errors && body.errors.length > 0) throw new Error("linear_graphql_error");
+    return body.data ?? null;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_teams") {
+      const body = await this.call("query { teams { nodes { id name } } }", {}, credential);
+      return { data: (body as { teams?: { nodes?: JsonValue } } | null)?.teams?.nodes ?? null };
+    }
+    if (action === "list_issues") {
+      const teamId = parameters["team_id"];
+      const query = typeof teamId === "string"
+        ? "query($teamId: ID!) { team(id: $teamId) { issues { nodes { id identifier title } } } }"
+        : "query { issues { nodes { id identifier title } } }";
+      const body = await this.call(query, typeof teamId === "string" ? { teamId } : {}, credential);
+      const nodes = typeof teamId === "string"
+        ? (body as { team?: { issues?: { nodes?: JsonValue } } } | null)?.team?.issues?.nodes
+        : (body as { issues?: { nodes?: JsonValue } } | null)?.issues?.nodes;
+      return { data: nodes ?? null };
+    }
+    if (action === "get_issue") {
+      const body = await this.call(
+        "query($id: String!) { issue(id: $id) { id identifier title description state { id name } } }",
+        { id: String(parameters["issue_id"]) },
+        credential
+      );
+      return { data: (body as { issue?: JsonValue } | null)?.issue ?? null };
+    }
+    if (action === "create_issue") {
+      const input: Record<string, JsonValue> = { teamId: String(parameters["team_id"]), title: String(parameters["title"]) };
+      if (typeof parameters["description"] === "string") input["description"] = parameters["description"];
+      const body = await this.call(
+        "mutation($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { id identifier title } } }",
+        { input },
+        credential
+      );
+      const issue = (body as { issueCreate?: { issue?: { identifier?: string } } } | null)?.issueCreate?.issue;
+      return { external_id: String(issue?.identifier ?? ""), data: body };
+    }
+    if (action === "update_issue") {
+      const input: Record<string, JsonValue> = {};
+      if (typeof parameters["title"] === "string") input["title"] = parameters["title"];
+      if (typeof parameters["description"] === "string") input["description"] = parameters["description"];
+      if (typeof parameters["state_id"] === "string") input["stateId"] = parameters["state_id"];
+      const body = await this.call(
+        "mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success issue { id identifier } } }",
+        { id: String(parameters["issue_id"]), input },
+        credential
+      );
+      return { data: body };
+    }
+    throw new Error(`linear_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-333. HubSpot - FEMTE av de seks D-64-port-krevende CRM-/prosjekt-
+ * styrings-leverandørene bygget (D-291 stengte porten; D-329/D-330/D-331/
+ * D-332 bygget Todoist/Trello/Jira/Linear først). API-formen BEVISST
+ * verifisert via WebSearch denne økten (sekundærkilde-krysssjekket -
+ * HubSpot sin egen developers.hubspot.com-dokumentasjon, kryssjekket mot
+ * uavhengige community-tråder): `Authorization: Bearer <private app-
+ * token>` mot `/crm/v3/objects/{objectType}` - EKSAKT samme URL-mønster
+ * for `contacts`/`companies`/`deals` (kun URL-segmentet endres, resten av
+ * request/response-formen er IDENTISK for alle tre). `object_type` er
+ * derfor et EKSPLISITT, PÅKREVD parameter fra kalleren (ikke tre separate
+ * dupliserte handlingssett) - en generalisering direkte begrunnet i
+ * HubSpot sin EGEN API-struktur, ikke en Jarvis-oppfunnet forenkling.
+ * `properties` (opprettelse/oppdatering) og `filterGroups` (søk) sendes
+ * gjennom UENDRET fra kalleren - Jarvis pålegger INGEN egen CRM-
+ * feltskjema-antakelse.
+ */
+export class HubSpotTransport implements ToolTransport {
+  private async call(method: "GET" | "POST" | "PATCH", path: string, body: Record<string, JsonValue> | undefined, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://api.hubapi.com/crm/v3${path}`, {
+      method,
+      headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+      ...(body ? { body: JSON.stringify(body) } : {})
+    });
+    if (!response.ok) throw new Error(`hubspot_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    const objectType = () => String(parameters["object_type"]);
+    if (action === "list_objects") {
+      const limit = typeof parameters["limit"] === "number" ? parameters["limit"] : 10;
+      const body = await this.call("GET", `/objects/${objectType()}?limit=${limit}`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "get_object") {
+      const body = await this.call("GET", `/objects/${objectType()}/${String(parameters["id"])}`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "search_objects") {
+      const body = await this.call(
+        "POST",
+        `/objects/${objectType()}/search`,
+        { filterGroups: parameters["filter_groups"] ?? [], limit: parameters["limit"] ?? 10 },
+        credential
+      );
+      return { data: body };
+    }
+    if (action === "create_object") {
+      const body = await this.call("POST", `/objects/${objectType()}`, { properties: parameters["properties"] ?? {} }, credential);
+      return { external_id: String((body as { id?: string }).id ?? ""), data: body };
+    }
+    if (action === "update_object") {
+      const body = await this.call(
+        "PATCH",
+        `/objects/${objectType()}/${String(parameters["id"])}`,
+        { properties: parameters["properties"] ?? {} },
+        credential
+      );
+      return { data: body };
+    }
+    throw new Error(`hubspot_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-334. Pipedrive - SJETTE og SISTE av de seks D-64-port-krevende CRM-/
+ * prosjektstyrings-leverandørene bygget (D-291 stengte porten; D-329 til
+ * D-333 bygget Todoist/Trello/Jira/Linear/HubSpot først). API-formen
+ * BEVISST verifisert via WebSearch denne økten (sekundærkilde-
+ * krysssjekket - Pipedrive sin egen developers.pipedrive.com/pipedrive.
+ * readme.io-dokumentasjon, kryssjekket mot uavhengige guider): Pipedrive
+ * er PER-TENANT (`https://<company-domain>.pipedrive.com`, SAMME
+ * strukturelle form som Jira, D-331) OG bruker `/api/v2/{objectType}` -
+ * EKSAKT samme URL-symmetri for `persons`/`organizations`/`deals` som
+ * HubSpot sin `/crm/v3/objects/{objectType}` (D-333), derfor SAMME
+ * "object_type som eksplisitt kaller-parameter"-disiplin, IKKE tre
+ * dupliserte handlingssett. **Kritisk auth-funn:** API v2 sin anbefalte
+ * metode er `x-api-token`-HEADEREN (IKKE `Authorization: Bearer` som
+ * v1/OAuth) - en fjerde, distinkt auth-form i denne D-64-gate-serien
+ * (Todoist: ren bearer, Trello: query-parametere, Jira: Basic email:token,
+ * Linear: rå nøkkel uten Bearer, HubSpot: Bearer, Pipedrive: egen header).
+ */
+export class PipedriveTransport implements ToolTransport {
+  constructor(private readonly baseUrl: () => Promise<string | null>) {}
+
+  private async call(method: "GET" | "POST" | "PATCH", path: string, body: Record<string, JsonValue> | undefined, credential: string): Promise<JsonValue> {
+    const baseUrl = await this.baseUrl();
+    if (!baseUrl) throw new Error("pipedrive_base_url_not_configured");
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/api/v2${path}`, {
+      method,
+      headers: { "x-api-token": credential, "content-type": "application/json" },
+      ...(body ? { body: JSON.stringify(body) } : {})
+    });
+    if (!response.ok) throw new Error(`pipedrive_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    const objectType = () => String(parameters["object_type"]);
+    if (action === "list_objects") {
+      const limit = typeof parameters["limit"] === "number" ? parameters["limit"] : 10;
+      const body = await this.call("GET", `/${objectType()}?limit=${limit}`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "get_object") {
+      const body = await this.call("GET", `/${objectType()}/${String(parameters["id"])}`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "search_objects") {
+      const term = encodeURIComponent(String(parameters["term"]));
+      const body = await this.call("GET", `/${objectType()}/search?term=${term}`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "create_object") {
+      const body = await this.call("POST", `/${objectType()}`, (parameters["properties"] ?? {}) as Record<string, JsonValue>, credential);
+      return { external_id: String((body as { data?: { id?: string | number } }).data?.id ?? ""), data: body };
+    }
+    if (action === "update_object") {
+      const body = await this.call("PATCH", `/${objectType()}/${String(parameters["id"])}`, (parameters["properties"] ?? {}) as Record<string, JsonValue>, credential);
+      return { data: body };
+    }
+    throw new Error(`pipedrive_unsupported_action_${action}`);
   }
 }

@@ -105,10 +105,23 @@
 
   // Samme dev-identitet/enhetsautentisering som apps/web/dashboard.html - se
   // D-131-kommentarene der for hvorfor feltene under kun er PÅSTANDER som
-  // følger med et ekte enhetsbevis. Samme localStorage-nøkkel for enhetsnøkkel
-  // (jarvis.devicekey) - dashbord og tale er SAMME fysiske enhet/nettleser.
+  // følger med et ekte enhetsbevis. Samme localStorage-nøkler for enhetsnøkkel
+  // OG device_id (jarvis.devicekey/jarvis.deviceid) - dashbord og tale er
+  // SAMME fysiske enhet/nettleser, og deler derfor SAMME enhetsidentitet.
+  //
+  // D-252: device_id var FØR en literal ("dev-web") DELT av ENHVER nettleser
+  // - se samme D-252-kommentar i apps/web/index.html for hele funnet/fiksen.
+  // loadOrCreateDeviceId() under er identisk logikk, samme localStorage-nøkkel.
+  function loadOrCreateDeviceId() {
+    const stored = localStorage.getItem("jarvis.deviceid");
+    if (stored) return stored;
+    const id = "web-" + crypto.randomUUID();
+    localStorage.setItem("jarvis.deviceid", id);
+    return id;
+  }
+
   const identity = {
-    person_id: "person-tobias", tenant_id: "tenant-personal", device_id: "dev-web",
+    person_id: "person-tobias", tenant_id: "tenant-personal", device_id: loadOrCreateDeviceId(),
     memory_space: "personal"
   };
 
@@ -190,11 +203,31 @@
     if (!res.ok || !body.ok) throw new Error("devices/register: " + (body.reason || res.status));
   }
 
-  enrollForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const ticket = enrollTicket.value.trim();
-    if (!ticket) return;
-    enrollTicket.value = "";
+  /**
+   * D-260 (Tobias direkte i chat, 2026-09-25: gjentatte
+   * "enrollment_ticket_invalid"-feil på tvers av flere ferske billetter - rot-
+   * årsaken var til slutt bekreftet ("skrev feil") å være ren
+   * kopier/lim-inn-korrupsjon av selve billett-strengen (base64url med `-`/`_`
+   * - tegn mobile nettlesere/SSH-klienter ofte tolker som ordgrenser ved
+   * dobbelttrykk-for-å-velge, og som terminalvindu-bredde kan brekke over to
+   * linjer). "slutt å be meg gjøre ting og finn ut av det": en manuell
+   * kopiering av en 44-tegns tilfeldig streng FRA en terminal TIL et
+   * nettleser-skjema er strukturelt feilutsatt uansett hvor forsiktig
+   * brukeren er - løsningen fjerner selve kopisteget, ikke instruksjonen om
+   * hvordan å kopiere forsiktig.
+   *
+   * `submitEnrollment()` er delt av BEGGE innrulleringsveiene under: det
+   * manuelle skjemaet (uendret, i tilfelle billett-URL-en av en eller annen
+   * grunn ikke kan brukes) OG `tryAutoEnrollFromUrl()`, som leser billetten
+   * fra `?enroll=`-spørringsparameteren i selve siden sin URL i stedet for et
+   * skjemafelt - `enroll-ticket-main.ts` skriver nå (når
+   * `JARVIS_PUBLIC_VOICE_BASE_URL` er satt) en FULLSTENDIG, KLIKKBAR lenke
+   * til akkurat denne URL-en. De fleste SSH-klienter/terminaler (Termius,
+   * iTerm, Windows Terminal, PuTTY m.fl.) gjenkjenner en `https://`-lenke i
+   * output og gjør den klikkbar - null manuell tekstseleksjon, null
+   * kopier/lim-inn av selve billett-strengen i det hele tatt.
+   */
+  async function submitEnrollment(ticket) {
     try {
       if (!deviceKey) deviceKey = await loadOrCreateDeviceKey();
       await enrollDevice(deviceKey.privateKey, deviceKey.publicKey, ticket);
@@ -203,7 +236,31 @@
     } catch (err) {
       statusEl.textContent = "Innrullering feilet: " + err.message;
     }
+  }
+
+  enrollForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const ticket = enrollTicket.value.trim();
+    if (!ticket) return;
+    enrollTicket.value = "";
+    void submitEnrollment(ticket);
   });
+
+  /**
+   * Leser `?enroll=<billett>` fra siden sin EGEN URL (aldri fra et skjema)
+   * og fjerner den fra adresselinjen UMIDDELBART via `history.replaceState()`
+   * - FØR selve innrulleringsforsøket - slik at en billett (engangs per
+   * design) aldri blir stående synlig i nettleserhistorikken/bokmerker, og en
+   * siderefresh aldri kan forsøke å gjenbruke en allerede konsumert billett.
+   */
+  function tryAutoEnrollFromUrl() {
+    const ticket = new URLSearchParams(location.search).get("enroll");
+    if (!ticket) return;
+    history.replaceState(null, "", location.pathname + location.hash);
+    statusEl.textContent = "Innrullerer enheten automatisk …";
+    void submitEnrollment(ticket);
+  }
+  tryAutoEnrollFromUrl();
 
   function escapeHtml(text) {
     const div = document.createElement("div");
@@ -346,7 +403,42 @@
 
   function startMicCapture() {
     if (!micStream) return;
-    captureCtx = new AudioContext();
+    // D-265 (Tobias direkte i chat, live NAS-test MED D-263/D-264 sin nye
+    // whisper.cpp-stderr-diagnostikk på): whisper.cpp brukte EKTE encode-tid
+    // (opptil ~1,7s) proporsjonalt med lydlengden på flere ytringer (0,3-1,6
+    // sekund reell tale-energi, IKKE bare "for kort") - og produserte likevel
+    // KONSEKVENT null tokens, uten noen "no speech detected"-advarsel. Det
+    // beviser lyden når whisper sin encoder, men encoderen finner ingen
+    // gjenkjennbar tale i den - ulikt vår egen grovt energibaserte VAD (som
+    // KUN måler volum og derfor ikke reagerer på dette i det hele tatt).
+    // Root cause: `downsampleTo16kMono()` under gjør REN lineær interpolasjon
+    // fra nettleserens native mikrofonrate (typisk 44,1/48 kHz) ned til 16
+    // kHz UTEN et anti-alias-lavpassfilter FØRST - en kjent, veldokumentert
+    // kilde til nettopp denne typen forvrengning: høyfrekvent innhold foldes
+    // tilbake som støy og ødelegger den fonetiske informasjonen en ASR-modell
+    // er avhengig av, MENS den rene lyd-ENERGIEN (det vår EnergyVad faktisk
+    // måler) forblir uendret - PRESIST forklarer hvorfor VAD-en så "ekte tale"
+    // mens whisper.cpp konsekvent fant ingenting.
+    // Fiks: be nettleseren selv resample til 16 kHz direkte i AudioContext-
+    // konstruktøren (samme mønster som `ensurePlaybackCtx()` sin
+    // `new AudioContext({ sampleRate: 24000 })` under) - plattformens EGEN
+    // resampler bruker korrekt anti-alias-filtrering, i motsetning til vår
+    // hånd-rullede interpolasjon. `downsampleTo16kMono()` sin
+    // `inRate === 16000`-tidligretur gjør dette til en ren no-op i det vanlige
+    // tilfellet (funksjonen beholdes KUN som et forsvarsnett for nettlesere
+    // som ignorerer `sampleRate`-hintet).
+    captureCtx = new AudioContext({ sampleRate: 16000 });
+    // D-269: D-265 sin fiks ANTAR at nettleseren faktisk innvilger
+    // `{ sampleRate: 16000 }`-hintet - men AudioContext-konstruktøren
+    // GARANTERER det ALDRI (spesifikasjonen tillater implementasjonen å
+    // koerse til en annen, plattform-/enhet-støttet rate uten å kaste feil).
+    // Gjør DERFOR den faktiske, forhandlede raten synlig direkte i
+    // tech-loggen (ingen ny terminal-runde nødvendig) - er den IKKE nøyaktig
+    // 16000, kjører `downsampleTo16kMono()` sin hånd-rullede
+    // interpolasjons-forsvarsnett fortsatt, og D-265 sin anti-alias-fiks er
+    // FAKTISK ikke i effekt på denne enheten/nettleseren, selv om koden ser
+    // riktig ut.
+    techLog("mic captureCtx.sampleRate = " + captureCtx.sampleRate + (captureCtx.sampleRate !== 16000 ? " (AVVIK - nettleseren ignorerte 16000-hintet, downsampleTo16kMono() sin interpolasjon er AKTIV)" : " (OK - direkte 16kHz, ingen interpolasjon)"));
     const source = captureCtx.createMediaStreamSource(micStream);
     // ScriptProcessorNode er deprecated men uten byggetrinn er det den enkleste
     // veien til rå PCM-samples uten en separat AudioWorklet-modulfil.
@@ -440,15 +532,50 @@
     statusEl.textContent = "Ber om mikrofontilgang …";
     blockPanel.style.display = "none";
     trustPill.style.display = "none";
+    // D-259 (Tobias direkte i chat, 2026-09-25: "jeg sa bare hei Charlie så
+    // kommer alt dette tøyset" - en skjermdump viste en lang, urelatert
+    // samtale om undertekster/AI-Media-kreditering han aldri sa noe om
+    // akkurat da). Root cause: `appendTurn()` la ALLTID til nederst i
+    // `transcriptEl`, uten at NOE sted tømte den mellom samtaler - i en
+    // nettleserfane holdt åpen over flere test-økter (vanlig gjennom en hel
+    // D-25x-debug-runde) hopet gamle, urelaterte turer seg opp, og en helt
+    // NY samtale startet stille nederst i den lange loggen i stedet for
+    // synlig fra bunnen av et tomt panel. Tømmes derfor eksplisitt HER, ved
+    // hvert "Start samtale"-klikk - selve WebSocket-sesjonen/backend-turene
+    // var aldri sammenblandet (kun den VISUELLE nettleser-siden), så dette
+    // er en ren UI-fiks, ingen endring i selve tale-/autorisasjonslogikken.
+    transcriptEl.innerHTML = '<p class="empty">Ingen samtale ennå.</p>';
     try {
       if (!deviceKey) deviceKey = await loadOrCreateDeviceKey();
-      // D-249: uten disse plukker mikrofonen ofte opp Jarvis sin egen TTS-lyd fra
-      // høyttaleren (spesielt på telefon, mikrofon og høyttaler fysisk nær
-      // hverandre) - energibasert VAD (server.ts/vad.ts) tolker dette som
-      // barge-in, kutter TTS midt i setningen og forgifter STT-transkripsjonen
-      // med Jarvis sin egen stemme.
+      // D-249: uten `echoCancellation` plukker mikrofonen ofte opp Jarvis sin
+      // egen TTS-lyd fra høyttaleren (spesielt på telefon, mikrofon og
+      // høyttaler fysisk nær hverandre) - energibasert VAD (server.ts/vad.ts)
+      // tolker dette som barge-in, kutter TTS midt i setningen og forgifter
+      // STT-transkripsjonen med Jarvis sin egen stemme. `echoCancellation`
+      // beholdes derfor.
+      //
+      // D-276 (live NAS-funn, ETTER D-275 sin VAD-hangover-fiks): en FULL,
+      // usplittet 9,7 sekunders ytring (bevist ved `voice_vad_transition`
+      // KUN speech_start+end_of_turn, ingen fragmentering) ga FORTSATT
+      // `stdout_raw_length:0`/`text_length:0` - til tross for ekte,
+      // flerrunde dekodingsarbeid og RMS-energimønster som ser ut som ekte
+      // tale (0,05-0,30). D-274 har allerede bevist HELE resten av kjeden
+      // (WAV-header/stdin/modell/NAS-miljø) korrekt mot en KJENT god lydfil -
+      // symptomet peker derfor nå mot selve LYDINNHOLDET som fanges, ikke
+      // lenger mot segmentering/rørledning/modell. `noiseSuppression` (WebRTC
+      // sin nettleser-interne støyfjerning) er en kjent, dokumentert kilde
+      // til PRESIST dette mønsteret - amplityde/RMS-energien bevares
+      // (algoritmen fjerner ALDRI all lydenergi), men den spektrale/fonetiske
+      // strukturen tale-modeller trenger kan bli kraftig forvrengt av
+      // aggressiv spektral gating, spesielt for ikke-engelsk tale slike
+      // algoritmer ofte er dårligere kalibrert mot. Deaktivert her som neste,
+      // målrettet diagnostikk-variabel (ISOLERT - `echoCancellation`/
+      // `autoGainControl` UENDRET, én endring om gangen, D-41-disiplin) -
+      // IKKE ennå bevist årsaken, kun den mest sannsynlige gjenværende
+      // kandidaten etter at alt annet er kildekode-/live-verifisert korrekt.
+      // Se D-276 i DECISIONS_AND_ASSUMPTIONS.md.
       micStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+        audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: true }
       });
       statusEl.textContent = "Signerer enhetsbevis …";
       const { challenge, signature } = await signChallenge(deviceKey.privateKey, identity.device_id);
@@ -468,7 +595,18 @@
         setConnected(true);
       });
       ws.addEventListener("message", (ev) => {
-        try { handleServerMessage(JSON.parse(ev.data)); } catch { techLog("ugyldig melding fra server"); }
+        // D-258: brukte tidligere en generisk melding uten detalj her - da
+        // rot-årsaken var en klient-side `Int16Array`-RangeError (se
+        // apps/voice-gateway/src/session.ts sin `alignPcm16Frames()`-
+        // kommentar for hele funnet), var denne linjen ALENE grunnen til at
+        // Tobias måtte lime inn full teknisk logg for at feilen kunne
+        // spores i det hele tatt. `err.message` (og et par tegn av selve
+        // meldingen, til hjelp når JSON.parse selv feiler) gjør fremtidige
+        // tilsvarende feil synlige direkte i "Teknisk logg"-panelet.
+        try { handleServerMessage(JSON.parse(ev.data)); } catch (err) {
+          techLog("ugyldig melding fra server: " + (err && err.message ? err.message : String(err)) +
+            " (rå: " + String(ev.data).slice(0, 120) + ")");
+        }
       });
       ws.addEventListener("close", () => { techLog("WebSocket lukket."); stopConversation(); });
       ws.addEventListener("error", () => { techLog("WebSocket-feil."); statusEl.textContent = "Tilkoblingsfeil mot voice-gateway."; });
