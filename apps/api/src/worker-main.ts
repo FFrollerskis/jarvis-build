@@ -5,7 +5,7 @@ import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@j
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport, GmailTransport,
-  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, VercelTransport, MeshToolExecutor, allMeshTools, PgGithubRateLimitStore,
+  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, VercelTransport, MeshToolExecutor, allMeshTools, PgGithubRateLimitStore,
   ToolGateway, driveTransportsIfConfigured, firstWaveTools, parseDockerMutationTargets
 } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
@@ -349,6 +349,29 @@ for (const tool of firstWaveTools({
   make: new MakeTransport(() => toolSecretProvider.get("JARVIS_MAKE_API_BASE_URL")),
   // D-316: identisk wiring-mønster som apps/api/src/main.ts sin OpenAIImagesTransport.
   openai_images: new OpenAIImagesTransport(),
+  // D-321: identisk wiring-mønster som apps/api/src/main.ts sin TelnyxTransport.
+  telnyx: new TelnyxTransport(() => toolSecretProvider.get("JARVIS_TELNYX_FROM_NUMBER")),
+  // D-322: identisk wiring-mønster som apps/api/src/main.ts sin RunwayTransport.
+  runway: new RunwayTransport(),
+  // D-323: identisk wiring-mønster som apps/api/src/main.ts sin KlingTransport.
+  kling: new KlingTransport(() => toolSecretProvider.get("JARVIS_KLING_ACCESS_KEY")),
+  // D-324: identisk wiring-mønster som apps/api/src/main.ts sin GoogleVeoTransport.
+  google_veo: new GoogleVeoTransport(),
+  // D-327: identisk wiring-mønster som apps/api/src/main.ts sin HiggsfieldTransport.
+  higgsfield: new HiggsfieldTransport(() => toolSecretProvider.get("JARVIS_HIGGSFIELD_KEY_ID")),
+  // D-329: identisk wiring-mønster som apps/api/src/main.ts sin TodoistTransport.
+  todoist: new TodoistTransport(),
+  // D-330: identisk wiring-mønster som apps/api/src/main.ts sin TrelloTransport.
+  trello: new TrelloTransport(() => toolSecretProvider.get("JARVIS_TRELLO_API_KEY")),
+  // D-331: identisk wiring-mønster som apps/api/src/main.ts sin JiraTransport.
+  jira: new JiraTransport(
+    () => toolSecretProvider.get("JARVIS_JIRA_BASE_URL"),
+    () => toolSecretProvider.get("JARVIS_JIRA_EMAIL")
+  ),
+  // D-332: identisk wiring-mønster som apps/api/src/main.ts sin LinearTransport.
+  linear: new LinearTransport(),
+  // D-333: identisk wiring-mønster som apps/api/src/main.ts sin HubSpotTransport.
+  hubspot: new HubSpotTransport(),
   // D-242/D-248: identisk wiring-mønster som apps/api/src/main.ts - `vercel`
   // manglet en ekte transport her også - `VercelTransport` fantes aldri,
   // `transport("vercel")` falt derfor alltid tilbake til

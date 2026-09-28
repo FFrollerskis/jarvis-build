@@ -1,7 +1,100 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-318:
-registeropprydning - "Microsoft 365" fjernet HELT som egen backlog-plassholder** (Tobias direkte
+**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-333: FEMTE av de
+seks D-64-port-krevende CRM-/prosjektstyrings-leverandørene faktisk bygget - HubSpot, kun
+transport-laget, SAMME mønster som Todoist/Trello/Jira/Linear (D-329-D-332).** FØRSTE ekte
+CRM-leverandør i denne serien (de fire foregående var prosjektstyring/tickets). BEVISST verifisert
+via `WebSearch`: `Authorization: Bearer <private app-token>` mot `/crm/v3/objects/{objectType}` -
+EKSAKT samme URL-mønster for contacts/companies/deals. Designvalg direkte begrunnet i HubSpot sin
+egen API-symmetri: `object_type` er et PÅKREVD parameter fra kalleren i stedet for tre dupliserte
+handlingssett (samme "kalleren styrer routing"-mønster som Higgsfield sin `model_path`, D-327).
+`properties`/`filter_groups` sendes UENDRET fra kalleren - Jarvis pålegger INGEN egen CRM-
+feltskjema-antakelse. Bygget: `HubSpotTransport` - `list_objects`/`get_object`/`search_objects`
+(klasse A) + `create_object`/`update_object` (klasse B). UTELUKKENDE transport-laget - samme
+`OperationsTask`/Business OS-synk-avgrensning som D-329-D-332. `connector-registry.test.ts`
+oppdatert (14→13 gjenværende backlog, 2→1 D-64-gate - KUN Pipedrive gjenstår, 45→46 bygde, 59
+totalt uendret). `drive-runtime-wiring.test.ts` "tom konstruktør"-telling 23→24. Ny
+`d333-hubspot-transport.test.ts` (11 tester). `pnpm --filter @jarvis/tool-gateway typecheck`/
+`pnpm --filter @jarvis/api typecheck`/`npx eslint` - alle rene. Targeted test-kjøring
+(`d333-hubspot-transport`/`connector-registry`/`d242-connector-health-sweep`/
+`drive-runtime-wiring`) 61/61 grønt. Se D-333 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Neste:** KUN Pipedrive gjenstår av de seks D-64-port-krevende leverandørene - kan bygges på
+SAMME måte, transport-lag først, og HubSpot sin "object_type-som-eksplisitt-parameter"-disiplin
+er sannsynligvis direkte anvendbar der også (Pipedrive har en lignende multi-objekt-CRM-struktur:
+persons/organizations/deals). Uavhengig av den større `OperationsTask`/Business OS-synk-
+arkitekturen (poll-basert sweep vs. webhook vs. on-demand fra verktøykall, hvilken modul eier
+synk-loopen - IKKE avgjort, ikke gjettet frem). Tre funn venter fortsatt på Tobias sitt svar før
+noe kodes: `zapier` (Q-40, MCP-klient-kapabilitet?), `playwright`/`google_cloud` (Q-41, for vage),
+`openai_realtime`/`livekit` (Q-42, krever en NY arkitekturkategori - sanntids-samtale-økt/
+alternativ SFU-transport). Resterende vage backlog-punkter (`apple_music`/`folio`/`meta_ads`) og
+enhets-/plattform-spesifikke punkter (`apple_shortcuts`/`homekit`/`philips_hue`/`apns`/
+`ios_shortcuts`/`apple_watch`) har INGEN klar D-64-vurdering ennå.
+
+**Forrige milepæl (uendret): D-332: FJERDE av de seks D-64-port-krevende faktisk bygget - Linear,
+kun transport-laget.** Se D-332 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret): D-331: TREDJE av de seks D-64-port-krevende faktisk bygget - Jira,
+kun transport-laget.** Se D-331 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret): D-330: ANDRE av de seks D-64-port-krevende faktisk bygget - Trello,
+kun transport-laget.** Se D-330 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret): D-327: FJERDE og FAKTISK SISTE video-gen-familie-slice - Higgsfield
+bygget som en ORDINÆR `ToolGateway`-connector, MEN med et EKSPLISITT kaller-oppgitt `model_path` i
+stedet for en hardkodet default-modell.** Se D-327 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret): D-326: FUNN, IKKE en byggeslice - `playwright`/`google_cloud` er
+fortsatt for VAGE til å bygge, nå FORMALISERT med et eget Q-nummer (Q-41).** Se D-326 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret): D-325: FUNN, IKKE en byggeslice - Zapier sin gamle NLA REST-API er
+SUNSET, leverandøren peker nå til en MCP-server, IKKE en REST-connector.** Se D-325 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret): D-324: TREDJE og
+SISTE video-gen-familie-slice - Google Veo bygget som en ORDINÆR `ToolGateway`-connector** (Tobias
+direkte i chat: "Fortsett mens ci kjører" - mens PR #195/D-323 sin CI fortsatt kjørte). Fullfører
+alle tre opprinnelig identifiserte video-gen-punkter (runway/kling/google_veo) i samme sveip.
+Kritisk D-64-funn FØR bygging: Google Veo kjøres over den SAMME Gemini API-vert/auth-form
+(`generativelanguage.googleapis.com`, `x-goog-api-key`) som `gemini` sin EKSISTERENDE
+model_provider-oppføring (verifisert direkte mot EKSISTERENDE kildekode, `gemini.ts`) - MEN
+`predictLongRunning` er en STRUKTURELT ULIK kapabilitet (videogenerering, ikke tekst-fullføring) -
+egen `tool_id`, SAMME "samme konto, ulik kapabilitet"-presedens som OpenAI Images (D-316) fikk for
+`openai`. Bygget `GoogleVeoTransport` (`live-transports.ts`) - tre handlinger: `list_models`
+(klasse A, `GET /v1beta/models`, brukt som `live_test`), `generate_video` (klasse B,
+`POST /v1beta/models/{model}:predictLongRunning`, EKTE kostnad per kall - ALDRI `live_test`) og
+`get_task_status` (klasse A, `GET /v1beta/{operation_name}` - PÅKREVD polling av Google sin
+standard long-running-operation-kontrakt). `connector-registry.ts` sin D-232-plassholder oppdatert
+i place (`category: "backlog"` → `"tool_gateway"`, credential_refs UENDRET - kun én nøkkel var
+alltid korrekt). Wiret inn i BÅDE `main.ts` og `worker-main.ts` med TOM konstruktør (bump 20→21 i
+begge "tom konstruktør"-tellinger). NY
+`modules/tool-gateway/test/d324-google-veo-transport.test.ts` (12 tester).
+`connector-registry.test.ts`/`drive-runtime-wiring.test.ts` oppdatert (21 gjenværende
+backlog-punkter, 40 bygde, live_test-telling 35→36, 61 totalt UENDRET). `pnpm --filter
+@jarvis/tool-gateway typecheck`/`pnpm --filter @jarvis/api typecheck`/`npx eslint` rene. Se D-324 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret): D-323: ANDRE video-gen-familie-slice - Kling bygget som en ORDINÆR
+`ToolGateway`-connector, MEN med en STRUKTURELT ANNERLEDES autentisering (selv-generert JWT).** Se
+D-323 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret): D-322: FØRSTE video-gen-familie-slice - Runway bygget som en ORDINÆR
+`ToolGateway`-connector.** Se D-322 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret): D-321: Telnyx bygget som en ORDINÆR `ToolGateway`-connector, IKKE en
+`SpeechAdapter`.** Se D-321 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret): D-320: ANDRE tale-backlog-slice - Deepgram bygget som NY
+`SttAdapter`, SAMME mønster som ElevenLabs D-319.** Se D-320 i DECISIONS_AND_ASSUMPTIONS.md for
+full detalj.
+
+**Forrige milepæl (uendret): D-319: FØRSTE tale-backlog-slice - ElevenLabs bygget som NY
+`TtsAdapter`, IKKE en `ToolGateway`-connector.** Se D-319 i DECISIONS_AND_ASSUMPTIONS.md for full
+detalj (samme mønster D-320 gjenbrukte identisk for Deepgram/STT).
+
+**Forrige milepæl (uendret): D-318: registeropprydning - "Microsoft 365" fjernet HELT som egen
+backlog-plassholder** (Tobias direkte
 i chat: "fortsett å jobbe", fortsatt gjennomgang av D-231-backlogen etter D-192-merge av PR
 #192/#193). `INTEGRATIONS.md` sin Microsoft 365-rad var stale siden D-310 landet: sa fortsatt
 `NY_BACKLOG`, men Microsoft sin praktiske ekvivalent til Gmail+Drive er NÅ FAKTISK komplett -

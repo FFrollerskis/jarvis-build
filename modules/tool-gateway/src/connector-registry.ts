@@ -523,11 +523,49 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   { id: "playwright", display_name: "Playwright", category: "backlog", credential_refs: ["JARVIS_PLAYWRIGHT_API_KEY"] },
 
   // §4.7 Tale / video / media-AI
-  { id: "openai_realtime", display_name: "OpenAI Realtime", category: "backlog", credential_refs: ["JARVIS_OPENAI_REALTIME_API_KEY"] },
-  { id: "elevenlabs", display_name: "ElevenLabs", category: "backlog", credential_refs: ["JARVIS_ELEVENLABS_API_KEY"] },
-  { id: "deepgram", display_name: "Deepgram", category: "backlog", credential_refs: ["JARVIS_DEEPGRAM_API_KEY"] },
-  { id: "livekit", display_name: "LiveKit", category: "backlog", credential_refs: ["JARVIS_LIVEKIT_API_KEY"] },
-  { id: "telnyx", display_name: "Telnyx", category: "backlog", credential_refs: ["JARVIS_TELNYX_API_KEY"] },
+  // D-328: "openai_realtime" fjernet HELT herfra - IKKE en ToolGateway-
+  // connector (samme domenegrense-feil som elevenlabs/deepgram, D-319/
+  // D-320), MEN OGSÅ IKKE byggbar som en enkel SpeechAdapter-utvidelse:
+  // OpenAI Realtime API er en VEDVARENDE, full-dupleks WebSocket-økt
+  // (samtaletilstand/avbrudds-håndtering/verktøykall INNI selve
+  // tilkoblingen) - strukturelt ulik BÅDE ToolTransport (statisk REST)
+  // OG de EKSISTERENDE SttAdapter/TtsAdapter-grensesnittene (enkle
+  // batch-/strømmings-forespørsler). Krever en EGEN, ny arkitekturbeslutning
+  // (en økt-/tilkoblingshåndteringsmodell) FØR noe kan kodes - se D-328 i
+  // DECISIONS_AND_ASSUMPTIONS.md og Q-42 i OPEN_QUESTIONS.md.
+  // D-319: "elevenlabs" fjernet HELT herfra - dette er en TALE-leverandør
+  // (TTS), IKKE en ToolGateway-connector. En egen ToolTransport ville vært
+  // en D-64-stil domenegrense-feil (CLAUDE.md regel 3: SpeechAdapter er den
+  // riktige adapter-grensen for tale-leverandører). Bygget i stedet som
+  // `ElevenLabsTts` (`apps/voice-gateway/src/tts.ts`), gated bak
+  // `PROCESSOR_REGION_MATRIX.md`/`evaluateSpeechRouting()` (D-122), IKKE bak
+  // denne registrerings-/credential-helsesjekk-dashboardet. Samme
+  // "ALLEREDE_DEKKET/ikke-her, ikke stille utelatt"-disiplin som
+  // microsoft_365 (D-318) - se DECISIONS_AND_ASSUMPTIONS.md D-319.
+  // D-320: "deepgram" fjernet HELT herfra - SAMME grunn/mønster som
+  // "elevenlabs" (D-319) rett over, bare STT i stedet for TTS. Bygget som
+  // `DeepgramStt` (`apps/voice-gateway/src/stt.ts`).
+  // D-328: "livekit" fjernet HELT herfra - SAMME begrunnelse som
+  // "openai_realtime" rett over: LiveKit er en WebRTC/SFU-media-
+  // infrastrukturplattform (server-SDK for rom-/token-styring, ekte
+  // sanntids audio/video-transport), IKKE en enkel REST-API OG IKKE en
+  // enkel SpeechAdapter-utvidelse - den er strukturelt en ALTERNATIV
+  // sanntids-transportlag til `apps/voice-gateway` sin EKSISTERENDE
+  // WebSocket-arkitektur, ikke en connector ved siden av den. Se D-328 i
+  // DECISIONS_AND_ASSUMPTIONS.md og Q-42 i OPEN_QUESTIONS.md.
+  {
+    // D-321 (bygget, flyttet ut av backlog): Telnyx er en meldingsleverandør
+    // (SMS/telefoni), IKKE en tale-leverandør (STT/TTS) - HØRER derfor hjemme
+    // her som en ordinær ToolGateway-connector, i motsetning til elevenlabs/
+    // deepgram (D-319/D-320) som ble fjernet fra dette registeret. SAMME
+    // "notify/get_account_info"-mønster som Twilio. `credential_refs`
+    // utvidet med FROM_NUMBER, samme "list alle nødvendige verdier"-disiplin
+    // som D-245/D-246/D-295. Oppdatert i place (var en D-232 backlog-
+    // plassholder) - ALDRI en ny, separat oppføring med samme id.
+    id: "telnyx", display_name: "Telnyx", category: "tool_gateway",
+    credential_refs: ["JARVIS_TELNYX_API_KEY", "JARVIS_TELNYX_FROM_NUMBER"],
+    live_test: { tool_id: "telnyx", action: "get_account_info", parameters: () => ({}) }
+  },
   {
     // D-295 (bygget, flyttet ut av backlog): samme "notify er ekte utsendelse,
     // get_account_info er trygg tilkoblingstest"-disiplin som Telegram/Slack/
@@ -569,10 +607,152 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     credential_refs: ["JARVIS_DISCORD_BOT_TOKEN"],
     live_test: { tool_id: "discord", action: "get_bot_info", parameters: () => ({}) }
   },
-  { id: "higgsfield", display_name: "Higgsfield", category: "backlog", credential_refs: ["JARVIS_HIGGSFIELD_API_KEY"] },
-  { id: "runway", display_name: "Runway", category: "backlog", credential_refs: ["JARVIS_RUNWAY_API_KEY"] },
-  { id: "kling", display_name: "Kling", category: "backlog", credential_refs: ["JARVIS_KLING_API_KEY"] },
-  { id: "google_veo", display_name: "Google Veo", category: "backlog", credential_refs: ["JARVIS_GOOGLE_VEO_API_KEY"] },
+  {
+    // D-327 (bygget, flyttet ut av backlog): SISTE video-gen-connector,
+    // SAMME WebSearch-sekundærkilde-krysssjekk-disiplin D-322/D-323/D-324
+    // etablerte. Higgsfield sitt API er en MULTI-MODELL-markedsplass
+    // (proxyer tredjeparts-modeller som `bytedance/seedance-2.0` under
+    // EGET vertsnavn) - IKKE ETT fast genererings-endepunkt som Runway/
+    // Kling/Veo. `generate_video` krever derfor et EKSPLISITT
+    // `model_path`-parameter fra KALLEREN (INGEN hardkodet default) - se
+    // HiggsfieldTransport sin doc-kommentar i live-transports.ts for
+    // full D-64-begrunnelse for hvorfor dette IKKE er et gjettet
+    // leverandørvalg. Oppdatert i place (var en D-232 backlog-
+    // plassholder) - ALDRI en ny, separat oppføring med samme id.
+    // credential_refs utvidet fra ÉN til TO nøkler (Key ID/Key Secret er
+    // BEGGE reelle credentials hos Higgsfield, samme "list alle
+    // nødvendige verdier"-disiplin som D-245/D-246/D-295/D-323).
+    // BEVISST INGEN live_test - ingen verifisert gratis/parameterløst
+    // kontoendepunkt funnet, se D-327 i DECISIONS_AND_ASSUMPTIONS.md.
+    id: "higgsfield", display_name: "Higgsfield", category: "tool_gateway",
+    credential_refs: ["JARVIS_HIGGSFIELD_KEY_SECRET", "JARVIS_HIGGSFIELD_KEY_ID"]
+  },
+  {
+    // D-329 (bygget, flyttet ut av backlog_d64_gate - FØRSTE av de seks
+    // D-64-port-krevende CRM-/prosjektstyrings-leverandørene, D-291 stengte
+    // selve porten 2026-09-26 og avgjorde prosjektstyring/tickets som
+    // `JARVIS_CANONICAL` via `@jarvis/operations` sin `OperationsTask`
+    // (D-129) - ekstern leverandør er en VALGFRI synk-adapter, ALDRI
+    // domeneeier). API-formen BEKREFTET via WebSearch denne økten
+    // (sekundærkilde-krysssjekket, IKKE bare trent kunnskap): den gamle
+    // `/rest/v2/tasks`-veien er PENSJONERT, unifisert `/api/v1/` gjelder nå
+    // - se TodoistTransport sin doc-kommentar i live-transports.ts for full
+    // evidens-kategorisering. Oppdatert i place (var en D-232 backlog-
+    // plassholder i §4.11) - ALDRI en ny, separat oppføring med samme id.
+    // Dette er UTELUKKENDE transport-laget - selve OperationsTask-synk-
+    // mappingen er BEVISST IKKE bygget her (D-41 DEFERRED, se D-329).
+    id: "todoist", display_name: "Todoist", category: "tool_gateway",
+    credential_refs: ["JARVIS_TODOIST_API_TOKEN"],
+    live_test: { tool_id: "todoist", action: "list_tasks", parameters: () => ({}) }
+  },
+  {
+    // D-330 (bygget, flyttet ut av backlog_d64_gate - ANDRE av de seks
+    // D-64-port-krevende, samme mønster som Todoist/D-329). API-formen
+    // BEKREFTET via WebSearch denne økten (sekundærkilde-krysssjekket):
+    // `key`/`token` som QUERY-PARAMETERE - en STRUKTURELT annen auth-form
+    // enn hver annen connector her, se TrelloTransport sin doc-kommentar i
+    // live-transports.ts. `credential_refs` UENDRET (allerede to nøkler fra
+    // D-232-plassholderen - API-nøkkelen var ALLEREDE korrekt identifisert
+    // som en egen credential, ikke lagt til her). Dette er UTELUKKENDE
+    // transport-laget - se D-329 sin doc-kommentar over for hvorfor den
+    // fulle OperationsTask-synk-mappingen BEVISST ikke er bygget her.
+    id: "trello", display_name: "Trello", category: "tool_gateway",
+    credential_refs: ["JARVIS_TRELLO_API_KEY", "JARVIS_TRELLO_TOKEN"],
+    live_test: { tool_id: "trello", action: "list_boards", parameters: () => ({}) }
+  },
+  {
+    // D-331 (bygget, flyttet ut av backlog_d64_gate - TREDJE av de seks
+    // D-64-port-krevende, samme mønster som Todoist/Trello). Jira Cloud er
+    // PER-TENANT (`https://<domain>.atlassian.net`) - `credential_refs`
+    // utvidet fra ÉN til TRE nøkler (base-URL + e-post er BEGGE reelle,
+    // separate konfigurasjonsverdier utover selve API-tokenet, samme "list
+    // alle nødvendige verdier"-disiplin som D-245/D-246/D-295/D-323).
+    // API-formen BEKREFTET via WebSearch denne økten: den gamle
+    // `/rest/api/3/search`-veien er HELT FJERNET, `/rest/api/3/search/jql`
+    // PÅKREVD i stedet - se JiraTransport sin doc-kommentar i
+    // live-transports.ts for full evidens-kategorisering. Dette er
+    // UTELUKKENDE transport-laget - se D-329 sin doc-kommentar over for
+    // hvorfor den fulle OperationsTask-synk-mappingen BEVISST ikke er
+    // bygget her.
+    id: "jira", display_name: "Jira", category: "tool_gateway",
+    credential_refs: ["JARVIS_JIRA_API_TOKEN", "JARVIS_JIRA_BASE_URL", "JARVIS_JIRA_EMAIL"],
+    live_test: { tool_id: "jira", action: "search_issues", parameters: () => ({ jql: "order by created DESC" }) }
+  },
+  {
+    // D-332 (bygget, flyttet ut av backlog_d64_gate - FJERDE av de seks
+    // D-64-port-krevende, samme mønster som Todoist/Trello/Jira). Linear
+    // har INGEN REST-API - ETT GraphQL-endepunkt for BÅDE lesing og
+    // skriving, se LinearTransport sin doc-kommentar i live-transports.ts.
+    // `credential_refs` UENDRET (allerede korrekt ÉN nøkkel fra D-232-
+    // plassholderen - ren API-nøkkel, INGEN Bearer-prefiks, BEKREFTET via
+    // WebSearch). Dette er UTELUKKENDE transport-laget - se D-329 sin
+    // doc-kommentar over for hvorfor den fulle OperationsTask-synk-
+    // mappingen BEVISST ikke er bygget her.
+    id: "linear", display_name: "Linear", category: "tool_gateway",
+    credential_refs: ["JARVIS_LINEAR_API_KEY"],
+    live_test: { tool_id: "linear", action: "list_teams", parameters: () => ({}) }
+  },
+  {
+    // D-333 (bygget, flyttet ut av backlog_d64_gate - FEMTE av de seks
+    // D-64-port-krevende, samme mønster som Todoist/Trello/Jira/Linear).
+    // HubSpot sitt `/crm/v3/objects/{objectType}`-mønster er EKSAKT
+    // identisk for contacts/companies/deals - `object_type` er derfor et
+    // PÅKREVD parameter fra kalleren (samme "kalleren styrer routing"-
+    // disiplin som Higgsfield sin model_path, D-327), se HubSpotTransport
+    // sin doc-kommentar i live-transports.ts. `credential_refs` UENDRET
+    // (allerede korrekt ÉN nøkkel fra D-232-plassholderen - Bearer private
+    // app-token). Dette er UTELUKKENDE transport-laget - se D-329 sin
+    // doc-kommentar over for hvorfor den fulle OperationsTask-synk-
+    // mappingen BEVISST ikke er bygget her.
+    id: "hubspot", display_name: "HubSpot", category: "tool_gateway",
+    credential_refs: ["JARVIS_HUBSPOT_API_KEY"],
+    live_test: { tool_id: "hubspot", action: "list_objects", parameters: () => ({ object_type: "contacts", limit: 1 }) }
+  },
+  {
+    // D-322 (bygget, flyttet ut av backlog): FØRSTE video-gen-connector -
+    // API-formen BEKREFTET via WebSearch denne økten (kryssjekket mot flere
+    // uavhengige kilder), IKKE bare trent kunnskap - se RunwayTransport sin
+    // doc-kommentar i live-transports.ts for full evidens-kategorisering.
+    // Oppdatert i place (var en D-232 backlog-plassholder) - ALDRI en ny,
+    // separat oppføring med samme id.
+    id: "runway", display_name: "Runway", category: "tool_gateway",
+    credential_refs: ["JARVIS_RUNWAY_API_KEY"],
+    live_test: { tool_id: "runway", action: "get_account_info", parameters: () => ({}) }
+  },
+  {
+    // D-323 (bygget, flyttet ut av backlog): ANDRE video-gen-connector,
+    // SAMME WebSearch-sekundærkilde-krysssjekk-disiplin D-322/Runway
+    // etablerte. STRUKTURELT ANNERLEDES autentisering enn ALLE andre
+    // connectorer i registeret: en selv-generert, kortlevd JWT (HS256)
+    // signert med et Access Key/Secret Key-par - IKKE en statisk
+    // Bearer-token videresendt uendret. Se KlingTransport sin
+    // doc-kommentar i live-transports.ts for full evidens-kategorisering
+    // og signeringsdetaljer. Oppdatert i place (var en D-232 backlog-
+    // plassholder) - ALDRI en ny, separat oppføring med samme id.
+    // credential_refs utvidet fra ÉN til TO nøkler (Access Key/Secret
+    // Key er BEGGE reelle credentials hos Kling, samme "list alle
+    // nødvendige verdier"-disiplin som D-245/D-246/D-295). BEVISST INGEN
+    // live_test - se D-323 i DECISIONS_AND_ASSUMPTIONS.md for hvorfor.
+    id: "kling", display_name: "Kling", category: "tool_gateway",
+    credential_refs: ["JARVIS_KLING_SECRET_KEY", "JARVIS_KLING_ACCESS_KEY"]
+  },
+  {
+    // D-324 (bygget, flyttet ut av backlog): TREDJE video-gen-connector,
+    // SAMME WebSearch-sekundærkilde-krysssjekk-disiplin D-322/D-323
+    // etablerte. Google Veo kjøres over den SAMME Gemini API-vertsnavn/
+    // auth-formen (`generativelanguage.googleapis.com`, `x-goog-api-key`)
+    // som `gemini` sin EKSISTERENDE model_provider-oppføring
+    // (packages/provider-adapters/src/gemini.ts) - MEN `predictLongRunning`
+    // er en STRUKTURELT ULIK kapabilitet (videogenerering, ikke
+    // tekst-fullføring via `generateContent`) - egen `tool_id` her, SAMME
+    // presedens som OpenAI Images (D-316) fikk for `openai`. Oppdatert i
+    // place (var en D-232 backlog-plassholder) - ALDRI en ny, separat
+    // oppføring med samme id. Se GoogleVeoTransport sin doc-kommentar i
+    // live-transports.ts for full evidens-kategorisering.
+    id: "google_veo", display_name: "Google Veo", category: "tool_gateway",
+    credential_refs: ["JARVIS_GOOGLE_VEO_API_KEY"],
+    live_test: { tool_id: "google_veo", action: "list_models", parameters: () => ({}) }
+  },
   {
     // D-316 (bygget, flyttet ut av backlog): egen tool_id fra `openai` sin
     // model_provider-oppføring (ModelGateway) - bildegenerering, ikke
@@ -628,13 +808,14 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   // §4.11 Finans / CRM / ads / prosjektstyring
   { id: "folio", display_name: "Folio", category: "backlog", credential_refs: ["JARVIS_FOLIO_API_KEY"] },
   // D-64-port påkrevd (CLAUDE.md regel 12) - synlighet her er IKKE en avgjort domeneeier-status.
-  { id: "hubspot", display_name: "HubSpot", category: "backlog_d64_gate", credential_refs: ["JARVIS_HUBSPOT_API_KEY"] },
   { id: "pipedrive", display_name: "Pipedrive", category: "backlog_d64_gate", credential_refs: ["JARVIS_PIPEDRIVE_API_KEY"] },
   { id: "meta_ads", display_name: "Meta Ads", category: "backlog", credential_refs: ["JARVIS_META_ADS_TOKEN"] },
-  { id: "linear", display_name: "Linear", category: "backlog_d64_gate", credential_refs: ["JARVIS_LINEAR_API_KEY"] },
-  { id: "jira", display_name: "Jira", category: "backlog_d64_gate", credential_refs: ["JARVIS_JIRA_API_TOKEN"] },
-  { id: "trello", display_name: "Trello", category: "backlog_d64_gate", credential_refs: ["JARVIS_TRELLO_API_KEY", "JARVIS_TRELLO_TOKEN"] },
-  { id: "todoist", display_name: "Todoist", category: "backlog_d64_gate", credential_refs: ["JARVIS_TODOIST_API_TOKEN"] },
+  // D-329/D-330/D-331/D-332/D-333: FØRSTE (Todoist), ANDRE (Trello), TREDJE
+  // (Jira), FJERDE (Linear) og FEMTE (HubSpot) av de seks D-64-port-krevende faktisk bygget
+  // (D-291 stengte selve porten) - kun transport-laget, se
+  // TodoistTransport/TrelloTransport/JiraTransport/LinearTransport/
+  // HubSpotTransport sine doc-kommentarer i live-transports.ts for hva som
+  // BEVISST gjenstår.
 
   // §4.12 Kart
   {

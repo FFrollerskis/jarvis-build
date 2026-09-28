@@ -3399,6 +3399,415 @@ export function firstWaveTools(
       idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 10,
       credential_ref: "JARVIS_OPENAI_IMAGES_API_KEY", output_trust: "internal", transport: transport("openai_images")
     },
+    /**
+     * D-321. SAMME "notify er ekte utsendelse (klasse B), get_account_info er
+     * trygg tilkoblingstest (klasse A)"-mønster som Telegram/Slack/Discord/
+     * Twilio (D-295) - Telnyx er en ordinær `ToolGateway`-meldingsleverandør-
+     * connector, IKKE en `SpeechAdapter` (D-64-vurdering FØR bygging, se
+     * `TelnyxTransport` sin doc-kommentar i `live-transports.ts`). ETT enkelt
+     * Bearer-API-nøkkel (IKKE Twilio sin to-delte AccountSid/AuthToken-modell)
+     * - `telnyx:send`/`telnyx:read` er interne Jarvis-plassholder-scopes,
+     * SAMME konvensjon som Twilio sin `sms:send`/`sms:read`.
+     */
+    {
+      tool_id: "telnyx", action: "notify", description: "Send SMS (POST /v2/messages)",
+      input_schema: record({ to: z.string(), message: z.string().max(1600) }), capability_class: "B",
+      scopes: ["telnyx:send"], reversible: true, rollback_procedure: "send korreksjonsmelding",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TELNYX_API_KEY", output_trust: "internal", transport: transport("telnyx")
+    },
+    {
+      tool_id: "telnyx", action: "get_account_info", description: "Les kontoens gjeldende saldo (GET /v2/balance) - brukes som tilkoblingstest, ALDRI en ekte SMS-utsendelse",
+      input_schema: empty, capability_class: "A", scopes: ["telnyx:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_TELNYX_API_KEY",
+      output_trust: "untrusted", transport: transport("telnyx")
+    },
+    /**
+     * D-322. Runway sitt REST-API v1 (`api.dev.runwayml.com`) - BEKREFTET via
+     * `WebSearch` denne økten (flere uavhengige kilder krysset), se
+     * `RunwayTransport` sin doc-kommentar i `live-transports.ts` for full
+     * evidens-kategorisering. `get_account_info` er GRATIS/sideeffekt-fri
+     * (brukes som `live_test` NETTOPP fordi `generate_video` har reell
+     * kostnad per kall, SAMME disiplin som OpenAI Images D-316).
+     * `get_task_status` er også gratis lesing - asynkron generering krever
+     * polling for å faktisk få resultatet.
+     */
+    {
+      tool_id: "runway", action: "get_account_info", description: "Les organisasjonens kredittbalanse/tier (GET /v1/organization, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: empty, capability_class: "A", scopes: ["video:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_RUNWAY_API_KEY",
+      output_trust: "untrusted", transport: transport("runway")
+    },
+    {
+      tool_id: "runway", action: "generate_video", description: "Generer en video fra et bilde + tekstbeskrivelse (POST /v1/image_to_video, EKTE kostnad per kall, asynkron - returnerer en task-id, poll get_task_status for resultat)",
+      input_schema: record({
+        promptImage: z.string(), promptText: z.string().max(1000).optional(),
+        model: z.string().optional(), ratio: z.string().optional(), duration: z.number().min(1).max(60).optional()
+      }),
+      capability_class: "B", scopes: ["video:generate"], reversible: true,
+      rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kreditt/kostnad, kan ikke og trenger ikke reverseres)",
+      idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 5,
+      credential_ref: "JARVIS_RUNWAY_API_KEY", output_trust: "internal", transport: transport("runway")
+    },
+    {
+      tool_id: "runway", action: "get_task_status", description: "Sjekk status/resultat for en tidligere generering (GET /v1/tasks/{id}, gratis/sideeffekt-fritt, untrusted ingestion - PÅKREVD for å faktisk hente ut ferdig video siden generate_video kun returnerer en task-id)",
+      input_schema: record({ task_id: z.string() }), capability_class: "A", scopes: ["video:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_RUNWAY_API_KEY",
+      output_trust: "untrusted", transport: transport("runway")
+    },
+    /**
+     * D-323. Kling sitt REST-API (`api.klingai.com`) - autentisering er en
+     * selv-generert JWT (HS256, Access Key/Secret Key), IKKE en statisk
+     * Bearer-token, se `KlingTransport` sin doc-kommentar i
+     * `live-transports.ts` for full evidens-kategorisering.
+     * `credential_ref` her er Secret Key (brukt til signering) - Access
+     * Key injiseres separat som resolver-closure i main.ts/worker-main.ts
+     * (SAMME "fast konfigurasjonsverdi utover credential"-mønster som
+     * Twilio sin accountSid, D-295). BEVISST INGEN klasse A-handling her -
+     * ingen verifisert gratis/parameterløst kontoendepunkt funnet denne
+     * økten (D-41 DEFERRED), derfor heller ingen `live_test` i
+     * connector-registry.ts.
+     */
+    {
+      tool_id: "kling", action: "generate_video", description: "Generer en video fra et bilde + tekstbeskrivelse (POST /v1/videos/image2video, EKTE kostnad per kall, asynkron - returnerer en task-id, poll get_task_status for resultat)",
+      input_schema: record({
+        image_url: z.string(), prompt: z.string().max(1000).optional(),
+        duration: z.string().optional(), aspect_ratio: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["video:generate"], reversible: true,
+      rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kreditt/kostnad, kan ikke og trenger ikke reverseres)",
+      idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 5,
+      credential_ref: "JARVIS_KLING_SECRET_KEY", output_trust: "internal", transport: transport("kling")
+    },
+    {
+      tool_id: "kling", action: "get_task_status", description: "Sjekk status/resultat for en tidligere generering (GET /v1/videos/image2video/{task_id}, gratis/sideeffekt-fritt, untrusted ingestion - PÅKREVD for å faktisk hente ut ferdig video siden generate_video kun returnerer en task-id)",
+      input_schema: record({ task_id: z.string() }), capability_class: "A", scopes: ["video:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_KLING_SECRET_KEY",
+      output_trust: "untrusted", transport: transport("kling")
+    },
+    /**
+     * D-324. Google Veo kjøres over den SAMME Gemini API-vert/auth-form som
+     * `gemini` sin model_provider-oppføring (`x-goog-api-key`), men
+     * `predictLongRunning` er en strukturelt ulik kapabilitet
+     * (videogenerering, ikke tekst-fullføring) - egen `tool_id` her, se
+     * `GoogleVeoTransport` sin doc-kommentar i `live-transports.ts` for full
+     * evidens-kategorisering.
+     */
+    {
+      tool_id: "google_veo", action: "list_models", description: "List tilgjengelige Gemini/Veo-modeller (GET /v1beta/models, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: empty, capability_class: "A", scopes: ["video:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GOOGLE_VEO_API_KEY",
+      output_trust: "untrusted", transport: transport("google_veo")
+    },
+    {
+      tool_id: "google_veo", action: "generate_video", description: "Generer en video fra en tekstbeskrivelse (POST /v1beta/models/{model}:predictLongRunning, EKTE kostnad per kall, asynkron - returnerer et operation-navn, poll get_task_status for resultat)",
+      input_schema: record({
+        prompt: z.string(), model: z.string().optional(), aspect_ratio: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["video:generate"], reversible: true,
+      rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kreditt/kostnad, kan ikke og trenger ikke reverseres)",
+      idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 5,
+      credential_ref: "JARVIS_GOOGLE_VEO_API_KEY", output_trust: "internal", transport: transport("google_veo")
+    },
+    {
+      tool_id: "google_veo", action: "get_task_status", description: "Sjekk status/resultat for en tidligere generering (GET /v1beta/{operation_name}, gratis/sideeffekt-fritt, untrusted ingestion - PÅKREVD for å faktisk hente ut ferdig video siden generate_video kun returnerer et operation-navn)",
+      input_schema: record({ operation_name: z.string() }), capability_class: "A", scopes: ["video:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_GOOGLE_VEO_API_KEY",
+      output_trust: "untrusted", transport: transport("google_veo")
+    },
+    /**
+     * D-327. Higgsfield sitt REST-API (`api.higgsfield.ai`) er en MULTI-
+     * MODELL-markedsplass (proxyer tredjeparts-modeller under vertsnavnet,
+     * f.eks. `bytedance/seedance-2.0`) - `model_path` er derfor et
+     * PÅKREVD parameter fra kalleren (INGEN hardkodet default-modell), se
+     * `HiggsfieldTransport` sin doc-kommentar i `live-transports.ts` for
+     * full D-64-begrunnelse. `credential_ref` her er Key Secret - Key ID
+     * injiseres separat som resolver-closure i main.ts/worker-main.ts.
+     * BEVISST INGEN klasse A-handling/`live_test` - ingen verifisert
+     * gratis/parameterløst kontoendepunkt funnet (D-41 DEFERRED).
+     */
+    {
+      tool_id: "higgsfield", action: "generate_video", description: "Generer en video fra en tekstbeskrivelse via en NAVNGITT Higgsfield-modellsti (POST /{model_path}/text-to-video, EKTE kostnad per kall, asynkron - returnerer en request_id, poll get_task_status for resultat). model_path er PÅKREVD - Higgsfield er en multi-modell-markedsplass, ingen default-modell er valgt på forhånd",
+      input_schema: record({ model_path: z.string(), prompt: z.string() }),
+      capability_class: "B", scopes: ["video:generate"], reversible: true,
+      rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kreditt/kostnad, kan ikke og trenger ikke reverseres)",
+      idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 5,
+      credential_ref: "JARVIS_HIGGSFIELD_KEY_SECRET", output_trust: "internal", transport: transport("higgsfield")
+    },
+    {
+      tool_id: "higgsfield", action: "get_task_status", description: "Sjekk status/resultat for en tidligere generering (GET /requests/{request_id}/status, gratis/sideeffekt-fritt, untrusted ingestion - PÅKREVD for å faktisk hente ut ferdig video siden generate_video kun returnerer en request_id)",
+      input_schema: record({ request_id: z.string() }), capability_class: "A", scopes: ["video:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_HIGGSFIELD_KEY_SECRET",
+      output_trust: "untrusted", transport: transport("higgsfield")
+    },
+    /**
+     * D-329. Todoist - FØRSTE av de seks D-64-port-krevende CRM-/
+     * prosjektstyrings-leverandørene som faktisk er bygget (D-291 stengte
+     * porten selv; dette er transport-laget). API-formen (unifisert
+     * `/api/v1/`, IKKE den pensjonerte `/rest/v2/`-veien) er BEVISST
+     * verifisert via WebSearch denne økten, se TodoistTransport sin doc-
+     * kommentar i live-transports.ts. `delete_task` er BEVISST UTELATT
+     * (D-41 DEFERRED) - ingen sekundærkilde bekreftet eksakt HTTP-metode/
+     * status for slette-endepunktet i dette søket.
+     */
+    {
+      tool_id: "todoist", action: "list_tasks", description: "List alle aktive oppgaver (GET /tasks, gratis/sideeffekt-fritt, untrusted ingestion - kun aktive/uferdige oppgaver returneres, lukkede er ikke tilgjengelig via dette endepunktet)",
+      input_schema: empty, capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_TODOIST_API_TOKEN",
+      output_trust: "untrusted", transport: transport("todoist")
+    },
+    {
+      tool_id: "todoist", action: "get_task", description: "Hent én oppgave (GET /tasks/{task_id}, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ task_id: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_TODOIST_API_TOKEN",
+      output_trust: "untrusted", transport: transport("todoist")
+    },
+    {
+      tool_id: "todoist", action: "create_task", description: "Opprett en ny oppgave (POST /tasks, EKTE ekstern tilstand skapes)",
+      input_schema: record({
+        content: z.string(), project_id: z.string().optional(), description: z.string().optional(),
+        due_string: z.string().optional(), priority: z.number().optional()
+      }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "close_task eller manuell sletting i Todoist",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TODOIST_API_TOKEN", output_trust: "internal", transport: transport("todoist")
+    },
+    {
+      tool_id: "todoist", action: "update_task", description: "Oppdater felter på en eksisterende oppgave (POST /tasks/{task_id}, delvis oppdatering)",
+      input_schema: record({
+        task_id: z.string(), content: z.string().optional(), description: z.string().optional(),
+        due_string: z.string().optional(), priority: z.number().optional()
+      }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "ny update_task med forrige verdier",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TODOIST_API_TOKEN", output_trust: "internal", transport: transport("todoist")
+    },
+    {
+      tool_id: "todoist", action: "close_task", description: "Fullfør (lukk) en oppgave (POST /tasks/{task_id}/close, returnerer 204)",
+      input_schema: record({ task_id: z.string() }), capability_class: "B", scopes: ["tasks:write"],
+      reversible: true, rollback_procedure: "reopen_task med samme task_id",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TODOIST_API_TOKEN", output_trust: "internal", transport: transport("todoist")
+    },
+    {
+      tool_id: "todoist", action: "reopen_task", description: "Gjenåpne en tidligere lukket oppgave, samme id (POST /tasks/{task_id}/reopen, returnerer 204)",
+      input_schema: record({ task_id: z.string() }), capability_class: "B", scopes: ["tasks:write"],
+      reversible: true, rollback_procedure: "close_task med samme task_id",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TODOIST_API_TOKEN", output_trust: "internal", transport: transport("todoist")
+    },
+    /**
+     * D-330. Trello - ANDRE av de seks D-64-port-krevende faktisk bygget
+     * (D-291 stengte porten; D-329 bygget Todoist FØRST). `key`/`token`
+     * som query-parametere (IKKE en Authorization-header), se
+     * TrelloTransport sin doc-kommentar i live-transports.ts.
+     */
+    {
+      tool_id: "trello", action: "list_boards", description: "List alle boards eieren har tilgang til (GET /members/me/boards, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: empty, capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_TRELLO_TOKEN",
+      output_trust: "untrusted", transport: transport("trello")
+    },
+    {
+      tool_id: "trello", action: "list_cards", description: "List alle kort på et board (GET /boards/{board_id}/cards, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ board_id: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_TRELLO_TOKEN",
+      output_trust: "untrusted", transport: transport("trello")
+    },
+    {
+      tool_id: "trello", action: "get_card", description: "Hent ett kort (GET /cards/{card_id}, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ card_id: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_TRELLO_TOKEN",
+      output_trust: "untrusted", transport: transport("trello")
+    },
+    {
+      tool_id: "trello", action: "create_card", description: "Opprett et nytt kort på en liste (POST /cards, EKTE ekstern tilstand skapes)",
+      input_schema: record({ list_id: z.string(), name: z.string(), desc: z.string().optional() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "close_card eller manuell sletting i Trello",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TRELLO_TOKEN", output_trust: "internal", transport: transport("trello")
+    },
+    {
+      tool_id: "trello", action: "update_card", description: "Oppdater felter på et eksisterende kort (PUT /cards/{card_id}, delvis oppdatering)",
+      input_schema: record({ card_id: z.string(), name: z.string().optional(), desc: z.string().optional(), list_id: z.string().optional() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "ny update_card med forrige verdier",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TRELLO_TOKEN", output_trust: "internal", transport: transport("trello")
+    },
+    {
+      tool_id: "trello", action: "close_card", description: "Arkiver (lukk) et kort (PUT /cards/{card_id} {closed:true})",
+      input_schema: record({ card_id: z.string() }), capability_class: "B", scopes: ["tasks:write"],
+      reversible: true, rollback_procedure: "reopen_card med samme card_id",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TRELLO_TOKEN", output_trust: "internal", transport: transport("trello")
+    },
+    {
+      tool_id: "trello", action: "reopen_card", description: "Gjenåpne et tidligere arkivert kort, samme id (PUT /cards/{card_id} {closed:false})",
+      input_schema: record({ card_id: z.string() }), capability_class: "B", scopes: ["tasks:write"],
+      reversible: true, rollback_procedure: "close_card med samme card_id",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TRELLO_TOKEN", output_trust: "internal", transport: transport("trello")
+    },
+    /**
+     * D-331. Jira - TREDJE av de seks D-64-port-krevende faktisk bygget
+     * (D-291 stengte porten; D-329/D-330 bygget Todoist/Trello først).
+     * `/rest/api/3/search/jql` (IKKE den fjernede `/search`-veien), Basic
+     * auth (`email:api_token`), base-URL er per-tenant - se JiraTransport
+     * sin doc-kommentar i live-transports.ts.
+     */
+    {
+      tool_id: "jira", action: "search_issues", description: "Søk etter issues med JQL (GET /rest/api/3/search/jql, gratis/sideeffekt-fritt, untrusted ingestion - den gamle /search-veien er HELT FJERNET fra Jira Cloud)",
+      input_schema: record({ jql: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_JIRA_API_TOKEN",
+      output_trust: "untrusted", transport: transport("jira")
+    },
+    {
+      tool_id: "jira", action: "get_issue", description: "Hent én issue (GET /rest/api/3/issue/{issue_key}, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ issue_key: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_JIRA_API_TOKEN",
+      output_trust: "untrusted", transport: transport("jira")
+    },
+    {
+      tool_id: "jira", action: "list_transitions", description: "List tilgjengelige status-overganger for en issue (GET /rest/api/3/issue/{issue_key}/transitions, gratis/sideeffekt-fritt - PÅKREVD for å finne riktig transition_id FØR transition_issue)",
+      input_schema: record({ issue_key: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_JIRA_API_TOKEN",
+      output_trust: "untrusted", transport: transport("jira")
+    },
+    {
+      tool_id: "jira", action: "create_issue", description: "Opprett en ny issue (POST /rest/api/3/issue, EKTE ekstern tilstand skapes - description konverteres internt til Atlassian Document Format)",
+      input_schema: record({ project_key: z.string(), summary: z.string(), issue_type: z.string(), description: z.string().optional() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "manuell sletting/arkivering i Jira",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_JIRA_API_TOKEN", output_trust: "internal", transport: transport("jira")
+    },
+    {
+      tool_id: "jira", action: "update_issue", description: "Oppdater felter på en eksisterende issue (PUT /rest/api/3/issue/{issue_key}, delvis oppdatering)",
+      input_schema: record({ issue_key: z.string(), summary: z.string().optional(), description: z.string().optional() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "ny update_issue med forrige verdier",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_JIRA_API_TOKEN", output_trust: "internal", transport: transport("jira")
+    },
+    {
+      tool_id: "jira", action: "transition_issue", description: "Flytt en issue til en ny status (POST /rest/api/3/issue/{issue_key}/transitions {transition:{id}} - transition_id må hentes via list_transitions FØRST)",
+      input_schema: record({ issue_key: z.string(), transition_id: z.string() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: false,
+      rollback_procedure: "ny transition_issue til en tilbake-transition, hvis en slik finnes i workflowen (IKKE garantert reversibel)",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_JIRA_API_TOKEN", output_trust: "internal", transport: transport("jira")
+    },
+    /**
+     * D-332. Linear - FJERDE av de seks D-64-port-krevende faktisk bygget
+     * (D-291 stengte porten; D-329/D-330/D-331 bygget Todoist/Trello/Jira
+     * først). ETT GraphQL-endepunkt, INGEN REST-API - se LinearTransport
+     * sin doc-kommentar i live-transports.ts. Rå API-nøkkel i
+     * Authorization-headeren, BEKREFTET UTEN Bearer-prefiks.
+     */
+    {
+      tool_id: "linear", action: "list_teams", description: "List alle team eieren har tilgang til (GraphQL query, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: empty, capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_LINEAR_API_KEY",
+      output_trust: "untrusted", transport: transport("linear")
+    },
+    {
+      tool_id: "linear", action: "list_issues", description: "List issues, valgfritt filtrert på team_id (GraphQL query, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ team_id: z.string().optional() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_LINEAR_API_KEY",
+      output_trust: "untrusted", transport: transport("linear")
+    },
+    {
+      tool_id: "linear", action: "get_issue", description: "Hent én issue (GraphQL query, gratis/sideeffekt-fritt, untrusted ingestion - issue_id kan være UUID eller identifier som 'ENG-123')",
+      input_schema: record({ issue_id: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_LINEAR_API_KEY",
+      output_trust: "untrusted", transport: transport("linear")
+    },
+    {
+      tool_id: "linear", action: "create_issue", description: "Opprett en ny issue (GraphQL mutation issueCreate, EKTE ekstern tilstand skapes)",
+      input_schema: record({ team_id: z.string(), title: z.string(), description: z.string().optional() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "manuell arkivering/sletting i Linear",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_LINEAR_API_KEY", output_trust: "internal", transport: transport("linear")
+    },
+    {
+      tool_id: "linear", action: "update_issue", description: "Oppdater felter på en eksisterende issue, inkl. status via state_id (GraphQL mutation issueUpdate, delvis oppdatering)",
+      input_schema: record({ issue_id: z.string(), title: z.string().optional(), description: z.string().optional(), state_id: z.string().optional() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "ny update_issue med forrige verdier",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_LINEAR_API_KEY", output_trust: "internal", transport: transport("linear")
+    },
+    /**
+     * D-333. HubSpot - FEMTE av de seks D-64-port-krevende faktisk bygget
+     * (D-291 stengte porten; D-329/D-330/D-331/D-332 bygget Todoist/Trello/
+     * Jira/Linear først). `/crm/v3/objects/{objectType}` - `object_type`
+     * er PÅKREVD fra kalleren (contacts/companies/deals deler EKSAKT
+     * samme URL-mønster), se HubSpotTransport sin doc-kommentar i
+     * live-transports.ts.
+     */
+    {
+      tool_id: "hubspot", action: "list_objects", description: "List objekter av en gitt type (GET /crm/v3/objects/{object_type}, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ object_type: z.enum(["contacts", "companies", "deals"]), limit: z.number().optional() }),
+      capability_class: "A", scopes: ["crm:read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_HUBSPOT_API_KEY",
+      output_trust: "untrusted", transport: transport("hubspot")
+    },
+    {
+      tool_id: "hubspot", action: "get_object", description: "Hent ett objekt (GET /crm/v3/objects/{object_type}/{id}, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ object_type: z.enum(["contacts", "companies", "deals"]), id: z.string() }),
+      capability_class: "A", scopes: ["crm:read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_HUBSPOT_API_KEY",
+      output_trust: "untrusted", transport: transport("hubspot")
+    },
+    {
+      tool_id: "hubspot", action: "search_objects", description: "Søk etter objekter med HubSpot sin filterGroups-syntaks (POST /crm/v3/objects/{object_type}/search, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ object_type: z.enum(["contacts", "companies", "deals"]), filter_groups: z.array(z.record(z.string(), z.unknown())).optional(), limit: z.number().optional() }),
+      capability_class: "A", scopes: ["crm:read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_HUBSPOT_API_KEY",
+      output_trust: "untrusted", transport: transport("hubspot")
+    },
+    {
+      tool_id: "hubspot", action: "create_object", description: "Opprett et nytt objekt (POST /crm/v3/objects/{object_type} {properties}, EKTE ekstern tilstand skapes)",
+      input_schema: record({ object_type: z.enum(["contacts", "companies", "deals"]), properties: z.record(z.string(), z.unknown()) }),
+      capability_class: "B", scopes: ["crm:write"], reversible: true,
+      rollback_procedure: "manuell arkivering/sletting i HubSpot",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_HUBSPOT_API_KEY", output_trust: "internal", transport: transport("hubspot")
+    },
+    {
+      tool_id: "hubspot", action: "update_object", description: "Oppdater felter på et eksisterende objekt (PATCH /crm/v3/objects/{object_type}/{id} {properties}, delvis oppdatering)",
+      input_schema: record({ object_type: z.enum(["contacts", "companies", "deals"]), id: z.string(), properties: z.record(z.string(), z.unknown()) }),
+      capability_class: "B", scopes: ["crm:write"], reversible: true,
+      rollback_procedure: "ny update_object med forrige verdier",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_HUBSPOT_API_KEY", output_trust: "internal", transport: transport("hubspot")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

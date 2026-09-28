@@ -47,7 +47,7 @@ import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
   allMeshTools, PgGithubRateLimitStore,
-  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
+  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
 import {
@@ -699,6 +699,52 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // D-316: tom konstruktør - INGEN base-URL/org-slug nødvendig (fast
     // OpenAI-vertsnavn, kun Bearer-token).
     openai_images: new OpenAIImagesTransport(),
+    // D-321: `from`-nummeret er Jarvis sin egen avsenderidentitet - SAMME
+    // resolver-mot-readSecretProvider-mønster som Twilio (D-295).
+    telnyx: new TelnyxTransport(() => readSecretProvider.get("JARVIS_TELNYX_FROM_NUMBER")),
+    // D-322: tom konstruktør - fast Runway-vertsnavn, kun Bearer-token +
+    // en fast X-Runway-Version-header (satt inni transporten selv).
+    runway: new RunwayTransport(),
+    // D-323: Kling krever ÉN fast konfigurasjonsverdi utover selve
+    // credential-en (Access Key, brukt som JWT `iss`-claim) - SAMME
+    // resolver-mot-readSecretProvider-mønster som Telnyx/Twilio over.
+    // Secret Key (credential_ref) brukes til JWT-signering inni
+    // transporten selv, ALDRI sendt uendret som header-verdi.
+    kling: new KlingTransport(() => readSecretProvider.get("JARVIS_KLING_ACCESS_KEY")),
+    // D-324: tom konstruktør - fast Gemini API-vertsnavn, kun
+    // x-goog-api-key-header (SAMME auth-form som `gemini` sin EKSISTERENDE
+    // model_provider-oppføring, se GoogleVeoTransport sin doc-kommentar).
+    google_veo: new GoogleVeoTransport(),
+    // D-327: Higgsfield krever ÉN fast konfigurasjonsverdi utover selve
+    // credential-en (Key ID, brukt sammen med Key Secret i ETT
+    // Authorization-header-felt) - SAMME resolver-mot-readSecretProvider-
+    // mønster som Telnyx/Twilio/Kling over.
+    higgsfield: new HiggsfieldTransport(() => readSecretProvider.get("JARVIS_HIGGSFIELD_KEY_ID")),
+    // D-329: Todoist krever KUN selve credential-en (bearer-token, ingen
+    // ekstra fast konfigurasjonsverdi) - samme tomme-konstruktør-mønster
+    // som Discord/Notion over.
+    todoist: new TodoistTransport(),
+    // D-330: Trello krever ÉN fast konfigurasjonsverdi utover selve
+    // credential-en (API-nøkkel, brukt sammen med token som query-
+    // parametere) - SAMME resolver-mot-readSecretProvider-mønster som
+    // Telnyx/Twilio/Kling/Higgsfield over.
+    trello: new TrelloTransport(() => readSecretProvider.get("JARVIS_TRELLO_API_KEY")),
+    // D-331: Jira Cloud er PER-TENANT - krever TO faste konfigurasjons-
+    // verdier utover selve credential-en (base-URL + e-post), SAMME
+    // resolver-mot-readSecretProvider-mønster som Twilio (D-295) sin
+    // to-resolver-form.
+    jira: new JiraTransport(
+      () => readSecretProvider.get("JARVIS_JIRA_BASE_URL"),
+      () => readSecretProvider.get("JARVIS_JIRA_EMAIL")
+    ),
+    // D-332: Linear krever KUN selve credential-en (rå API-nøkkel i
+    // Authorization-headeren, ingen ekstra fast konfigurasjonsverdi) -
+    // samme tomme-konstruktør-mønster som Discord/Notion/Todoist over.
+    linear: new LinearTransport(),
+    // D-333: HubSpot krever KUN selve credential-en (Bearer private
+    // app-token, ingen ekstra fast konfigurasjonsverdi) - samme
+    // tomme-konstruktør-mønster som Discord/Notion/Todoist/Linear over.
+    hubspot: new HubSpotTransport(),
     // D-242/D-248: `vercel` hadde en `live_test` siden D-213, men ALDRI en
     // ekte transport her - falt gjennom til `UnconfiguredHttpTransport`
     // (ubetinget `vercel_not_configured`), uansett credential-tilstand (se
