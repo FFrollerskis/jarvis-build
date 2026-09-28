@@ -75,7 +75,14 @@ const AUDITED_CLASS_D_PREFLIGHT_DECISIONS: ReadonlyArray<{
   { tool_id: "github", action: "delete_branch", requires_target: true },
   { tool_id: "docker", action: "redeploy_container", requires_target: false },
   { tool_id: "docker", action: "stop_container", requires_target: true },
-  { tool_id: "docker", action: "start_container", requires_target: true }
+  { tool_id: "docker", action: "start_container", requires_target: true },
+  // D-337: GCE-instanser må finnes FØR start/stop/reset kan handle på dem
+  // (motsatt av Docker sin redeploy_container - GCE har ingen "første
+  // deploy oppretter målet"-handling i denne sliceen), så et null/undefined
+  // preflight-resultat betyr strukturelt "mål finnes ikke" for alle tre.
+  { tool_id: "gce", action: "start_instance", requires_target: true },
+  { tool_id: "gce", action: "stop_instance", requires_target: true },
+  { tool_id: "gce", action: "reset_instance", requires_target: true }
 ];
 
 describe("B: audit-as-code - ALLE eksisterende klasse D + preflight_action-verktøy har et EKSPLISITT, revidert valg", () => {
