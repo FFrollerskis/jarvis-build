@@ -85,7 +85,8 @@ const gateway = new ModelGateway({
     // D-106: samme lokal-Gemma-registrering som apps/api/src/main.ts - se der for full begrunnelse.
     new LocalOpenAiCompatibleAdapter(
       process.env["JARVIS_GEMMA_LOCAL_URL"],
-      process.env["JARVIS_GEMMA_LOCAL_MODEL"] ?? "gemma-local",
+      // D-340: samme tom-streng-.env-bug som apps/api/src/main.ts - se der for full begrunnelse.
+      process.env["JARVIS_GEMMA_LOCAL_MODEL"] || "gemma-local",
       undefined,
       "gemma_local"
     ),
@@ -594,7 +595,8 @@ const knowledgeRegistry = new KnowledgeSourceRegistry([
     tenant_id: process.env["JARVIS_TENANT_ID"] ?? "tenant-personal",
     memory_space_id: "personal",
     source_instance_id: "email:inbox",
-    account: process.env["JARVIS_GOOGLE_ACCOUNT"] ?? "post@tsworkflow.com"
+    // D-340: samme tom-streng-.env-bug - JARVIS_GOOGLE_ACCOUNT="" i .env skal falle til defaulten.
+    account: process.env["JARVIS_GOOGLE_ACCOUNT"] || "post@tsworkflow.com"
   }
 ]);
 worker.register(

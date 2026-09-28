@@ -208,7 +208,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // providere. Se `capability-registry.ts` sin `gemma_local`-profil.
       new LocalOpenAiCompatibleAdapter(
         process.env["JARVIS_GEMMA_LOCAL_URL"],
-        process.env["JARVIS_GEMMA_LOCAL_MODEL"] ?? "gemma-local",
+        // D-340: samme tom-streng-.env-bug som resten av provider-adapters -
+        // denne ENE oppringingen satte modellen RÅTT (bypasset adapterens
+        // egen `envOrDefault()`-fiksede default), `||` retter opp samme sted.
+        process.env["JARVIS_GEMMA_LOCAL_MODEL"] || "gemma-local",
         undefined,
         "gemma_local"
       ),

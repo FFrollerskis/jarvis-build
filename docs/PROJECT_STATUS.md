@@ -14,7 +14,14 @@ feilsøkings-diagnostikk (nå fikset, matcher gemini/gemma/kimi). **Fikset:** ny
 `envOrDefault()`/`firstNonEmptyEnv()`-hjelpere (`packages/provider-adapters/src/types.ts`), brukt i
 alle sju adaptere; `gateway.ts` sin `InfisicalSecretProvider.env`-default byttet `??`→`||`. Nye
 tester: `conformance.test.ts` (+3) + `d213-writable-secret-provider.test.ts` (+1). `pnpm -w
-typecheck` (33/33) og `npx eslint` begge rene. Se D-340.
+typecheck` (33/33) og `npx eslint` begge rene. **Utvidet sveip** (samme økt, mens PR #200 ventet på
+CI): repo-bred grep fant seks flere ekte forekomster av samme bug utenfor provider-adapters -
+`JARVIS_BROWSER_GATEWAY_PORT` (browser-gateway sin port, `Number("")` er 0), `JARVIS_GEMMA_LOCAL_MODEL`
+(2 steder, bypasset adapterens egen fiks), `JARVIS_GOOGLE_ACCOUNT` (7 steder: worker-main/email-
+ingress/business-event-sync/live-transports×3/conversation-graph + 2 host-scripts) - alle rettet med
+`||`. `pnpm -w typecheck` re-kjørt (33/33), eslint rent, `browser-gateway` sin DB-uavhengige
+testsuite 9/9 grønt; de øvrige sveip-rettede stedene er DB-avhengige og IKKE kjørt denne runden
+(sandkasse-begrensning, se under). Se D-340 for full detalj.
 
 **UAVKLART BLOKKERING (krever Tobias sin egen handling, IKKE en kodefiks):** Vercel/dashbordets
 connector-credentials 403'et samtidig (`tool_failed:infisical_login_401`) - `InfisicalSecretProvider.

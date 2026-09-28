@@ -43,7 +43,8 @@ export class SupportEmailService {
     private readonly gateway: ToolGateway,
     private readonly business: BusinessService,
     private readonly support: SupportService,
-    private readonly accountEmail: string = process.env["JARVIS_GOOGLE_ACCOUNT"] ?? "post@tsworkflow.com",
+    // D-340: JARVIS_GOOGLE_ACCOUNT="" (tom, men til stede i .env) skal falle til defaulten - se D-340 i DECISIONS_AND_ASSUMPTIONS.md.
+    private readonly accountEmail: string = process.env["JARVIS_GOOGLE_ACCOUNT"] || "post@tsworkflow.com",
     private readonly supportInboxEmails: string[] = (process.env["JARVIS_SUPPORT_INBOX_EMAILS"] ?? "")
       .split(",")
       .map((e) => e.trim().toLowerCase())

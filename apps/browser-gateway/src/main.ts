@@ -7,7 +7,11 @@ import { createBrowserGateway } from "./server.ts";
  * secrets - denne prosessen har ingen ekstern credential i det hele tatt,
  * bare en delt Chromium-instans.
  */
-const port = Number(process.env["JARVIS_BROWSER_GATEWAY_PORT"] ?? "3030");
+// D-340: JARVIS_BROWSER_GATEWAY_PORT="" (tom, men til stede i .env) matcher
+// samme docker-compose-env_file-bug fikset i provider-adapters/gateway.ts -
+// `??` fanger ikke tom streng, og Number("") er 0 (OS velger tilfeldig port,
+// bryter compose sin faste "3030:3030"-portmapping).
+const port = Number(process.env["JARVIS_BROWSER_GATEWAY_PORT"] || "3030");
 const engine = new PlaywrightBrowserEngine();
 const server = createBrowserGateway({ engine });
 

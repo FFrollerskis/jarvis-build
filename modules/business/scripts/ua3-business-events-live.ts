@@ -89,7 +89,8 @@ log(`UA-3 BUSINESS-EVENT-LINKAGE LIVE ACCEPTANCE - run_id=${runId}`);
 assertRuntimeCredentialsConfigured();
 const pool = createPool(configFromEnv());
 const adminPool = createPool(adminConfigFromEnv());
-const ACCOUNT = process.env["JARVIS_GOOGLE_ACCOUNT"] ?? "post@tsworkflow.com";
+// D-340: JARVIS_GOOGLE_ACCOUNT="" (tom, men til stede i .env) skal falle til defaulten.
+const ACCOUNT = process.env["JARVIS_GOOGLE_ACCOUNT"] || "post@tsworkflow.com";
 
 const TENANT_A = `tenant-ua3-be-live-${runId}-a`;
 const TENANT_B = `tenant-ua3-be-live-${runId}-b`; // §tenant-isolasjon: annen tenant, skal forbli urørt

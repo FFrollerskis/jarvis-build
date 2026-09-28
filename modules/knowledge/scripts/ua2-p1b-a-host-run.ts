@@ -438,7 +438,7 @@ async function main(): Promise<void> {
             `deterministisk akseptanse-testmelding funnet - Gmail-connectoren har INGEN implementert send-handling ennå, ` +
             "så INGEN trygg måte å konstruere et kontrollert test-vedlegg denne runden; postkassen skannes ALDRI utover " +
             `den allerede planlagte listingen + ETT smalt subject-søk. For neste kjøring: send ÉN liten test-e-post fra ` +
-            `en ANNEN konto til ${process.env["JARVIS_GOOGLE_ACCOUNT"] ?? "den konfigurerte Jarvis-kontoen"} med EKSAKT ` +
+            `en ANNEN konto til ${process.env["JARVIS_GOOGLE_ACCOUNT"] || "den konfigurerte Jarvis-kontoen"} med EKSAKT ` +
             `emnefelt "${ACCEPTANCE_FIXTURE_SUBJECT}" og ETT vedlegg for å bevise denne veien LIVE - se D-46 §11.)`
         );
         return;
@@ -483,7 +483,7 @@ async function main(): Promise<void> {
         async describeImage() { return ""; }
       };
       const registry = new KnowledgeSourceRegistry([
-        { source_type: "email_attachment", tenant_id: TENANT, memory_space_id: SPACE, source_instance_id: "email:live", account: process.env["JARVIS_GOOGLE_ACCOUNT"] ?? "post@tsworkflow.com", max: 5 }
+        { source_type: "email_attachment", tenant_id: TENANT, memory_space_id: SPACE, source_instance_id: "email:live", account: process.env["JARVIS_GOOGLE_ACCOUNT"] || "post@tsworkflow.com", max: 5 }
       ]);
       const source = registry.build(TENANT, SPACE, "email:live", { toolGateway, identity: identity(), ocr: noopOcr });
       const sync = new KnowledgeSyncService(pool, embedding);
