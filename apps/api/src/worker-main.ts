@@ -4,7 +4,7 @@ import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEn
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
-  DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, GithubRateLimitController, GithubTransport, GmailTransport,
+  DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, GithubRateLimitController, GithubTransport, GmailTransport,
   GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, MeshToolExecutor, allMeshTools, PgGithubRateLimitStore,
   ToolGateway, driveTransportsIfConfigured, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets
 } from "@jarvis/tool-gateway";
@@ -418,6 +418,8 @@ for (const tool of firstWaveTools({
   docker: new DockerTransport(),
   // D-337: samme wiring-mønster som apps/api/src/main.ts.
   gce: new GceTransport(),
+  // D-338: samme wiring-mønster som apps/api/src/main.ts.
+  mcp_zapier: new McpZapierTransport(),
   ...driveTransportsIfConfigured()
 }, {
   // D-105 host-fix: samme wiring-mønster som apps/api/src/main.ts.

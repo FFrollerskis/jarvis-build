@@ -1,43 +1,43 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-337: Google Cloud
-"servere" bygget som en GCE-connector (Google Compute Engine) - direkte svar på Tobias sin chat-
-instruks: "Google cloud skal være Google ads alle servere alle markedsføring osv osv".** Google
-Ads er ALLEREDE bygget (D-83); "alle servere" = Google Compute Engine, standard-betydningen på
-GCP. "All markedsføring osv osv" utover Ads BEVISST IKKE bygget denne sliceen - hver annen
-GCP-del-tjeneste krever sin egen, ferske D-41-verifisering under et NYTT D-nummer. En
-`Explore`-agent verifiserte API-formen via WebSearch FØR bygging:
-`https://compute.googleapis.com/compute/v1/projects/{project}/zones/{zone}/instances/...`,
-OAuth-scope `auth/compute`. Kritisk funn: `instances.start`/`.stop`/`.reset` er ASYNKRONE -
-returnerer et `Operation` UMIDDELBART, `zoneOperations.get` MÅ polles til `status: "DONE"`. Bygget:
-`GceTransport` (`modules/tool-gateway/src/gce-transport.ts`) - `list_instances`/`get_instance`
-(klasse A) + `start_instance`/`stop_instance`/`reset_instance` (klasse D, ALLE poller operasjonen
-til DONE INNI `invoke()` FØR retur, `postcondition_predicate` verifiserer sluttilstanden).
-`gce-target-policy.ts` - SAMME "transport transporterer, target-policy autoriserer"-oppdeling som
-Docker (D-105): `start_instance`/`stop_instance` er PRODUKSJONS-autorisert (kun kjøretilstand,
-SAMME status som Docker sin stop/start); `reset_instance` er en HARD reboot - DEFERRED for
-produksjon (kun `jarvis-sentinel-*`), SAMME status som Docker sin `redeploy_container`.
-`JARVIS_GOOGLE_CLOUD_REFRESH_TOKEN`/`_PROJECT_ID` - egen refresh-token (compute-scopen kan IKKE
-antas dekket av noen eksisterende Google-token). `connector-registry.ts` sin gamle, vage
-`google_cloud`-plassholder FJERNET HELT - `gce` spores IKKE der (SAMME status som `docker`).
-Ny `gce-transport.test.ts` (16 tester) + `gce-target-policy.test.ts` (18 tester).
-`connector-registry.test.ts` oppdatert (`BACKLOG_IDS` 10→9, registeret 57→56 totalt).
-`drive-runtime-wiring.test.ts` "tom konstruktør"-telling 24→25. `pnpm --filter @jarvis/tool-gateway
-typecheck`/`pnpm --filter @jarvis/api typecheck`/`npx eslint` alle rene. Targeted test-kjøring
-80/80 grønt. Se Q-41 i OPEN_QUESTIONS.md for lukkingen av `google_cloud`-halvparten (`playwright`
-forblir åpen/under bygging, se D-339). Se D-337 i DECISIONS_AND_ASSUMPTIONS.md.
+**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR #199) - **D-338: MCP-
+klient-kapabilitet for Zapier, KUN discovery-halvparten - Tobias sitt direkte chat-svar "ja bygg mcp
+zapier", bygget PARALLELT mens PR #199 (D-337) sin CI kjørte ("Jobb videre mens ci kjører").**
+Lukker Q-40 del (a) MED JA; del (b) - godkjenningsmodell for LIVE INVOKERING av dynamisk oppdagede
+verktøy - BEVISST IKKE avgjort, ingen `call_tool`-handling finnes i det hele tatt. Bygget:
+`McpZapierTransport` (`modules/tool-gateway/src/mcp-zapier-transport.ts`) - KUN `list_tools`
+(klasse A, JSON-RPC 2.0 `tools/list` mot Zapier sin MCP-server, `output_trust: "untrusted"`).
+Selve MCP-server-URL-en (personlig provisjonert, hemmelighets-ekvivalent) lagres som
+`JARVIS_MCP_ZAPIER_SERVER_URL` via `credential_ref`. En `text/event-stream`-respons rapporteres
+ærlig `mcp_streamable_sse_not_supported` (DEFERRED). `connector-registry.ts` sin gamle
+`"zapier"`-plassholder oppdatert I PLACE (backlog → tool_gateway). Ny `mcp-zapier-transport.test.ts`
+(13 tester). `connector-registry.test.ts` (`BACKLOG_IDS` 9→8, registeret UENDRET 56 - oppdatert i
+place, ikke fjernet). `drive-runtime-wiring.test.ts` "tom konstruktør"-telling 25→26. Full-workspace
+`pnpm -w typecheck` (32/32)/`npx eslint apps modules packages` begge rene. Targeted test-kjøring
+67/67 grønt. `MCP_ZAPIER_LIVE_GATE=PENDING_CREDENTIALS`. Se Q-40/D-338.
 
-**Neste:** MCP-klient-kapabilitet for Zapier (D-338, Tobias sa eksplisitt "ja bygg mcp zapier" -
-konservativ FØRSTE slice: read-only `tools/list`-discovery + audit-logging, ZERO live-invokering
-inntil godkjennings-modellen for dynamisk-oppdagede verktøy er avgjort) og Playwright lokal
-nettleser-automasjon (D-339, Tobias bekreftet "viktig for at den skal kunne kontrollere mer" -
-egen prosess, `apps/browser-gateway`, mirrorer voice-gateway sin "egen prosess"-presedens) er
-BEGGE under aktiv bygging. Deretter gjenstår: `apple_music`/`folio` (ingen klar D-64-vurdering
-ennå), `homekit`/enhets-spesifikke punkter (`apple_shortcuts`/`apns`/`ios_shortcuts`/
-`apple_watch`), Home Assistant sin FAKTISKE transport-bygging (D-336, venter på videre
-dokumentasjonsverifisering ELLER Tobias sitt HA-oppsett), og `openai_realtime`/`livekit` (Q-42,
-uavklart - "Q-43" nevnt av Tobias i chat finnes IKKE i loggen, avklares når han bekrefter hva han
-mente).
+**Forrige milepæl (samme PR #199): D-337: Google Cloud "servere" bygget som en GCE-connector
+(Google Compute Engine) - direkte svar på Tobias sin chat-instruks: "Google cloud skal være Google
+ads alle servere alle markedsføring osv osv".** Google Ads er ALLEREDE bygget (D-83); "alle
+servere" = Google Compute Engine. "All markedsføring osv osv" utover Ads BEVISST IKKE bygget denne
+sliceen. `GceTransport` (klasse A list/get, klasse D start/stop/reset med asynkron operasjon-
+polling-til-DONE) + `gce-target-policy.ts` (SAMME target-policy-oppdeling som Docker D-105).
+`JARVIS_GOOGLE_CLOUD_REFRESH_TOKEN`/`_PROJECT_ID`. 80/80 targeted tester grønt. Se Q-41/D-337. Én
+CI-runde krevde en fiks: `q34-preflight-target-existence.test.ts` sin "audit-as-code"-test manglet
+de tre nye `gce.*`-mutasjonene i sin reviderte liste - fikset (`requires_target: true` for alle
+tre), verifisert direkte mot de faktiske `ToolDefinition`-objektene (embedded Postgres i denne
+sandboxen blokkerer selve test-filens `beforeAll` med et kjent, forhåndseksisterende
+`/tmp`-tillatelsesproblem).
+
+**Neste:** Playwright lokal nettleser-automasjon (D-339, Tobias bekreftet "viktig for at den skal
+kunne kontrollere mer" - egen prosess, `apps/browser-gateway`, mirrorer voice-gateway sin "egen
+prosess"-presedens) er under aktiv bygging. Deretter: PR #199 sin CI må verifiseres grønt (D-337
+sin fiks nettopp pushet) FØR merge under D-192. Deretter gjenstår: `apple_music`/`folio` (ingen
+klar D-64-vurdering ennå), `homekit`/enhets-spesifikke punkter (`apple_shortcuts`/`apns`/
+`ios_shortcuts`/`apple_watch`), Home Assistant sin FAKTISKE transport-bygging (D-336, venter på
+videre dokumentasjonsverifisering ELLER Tobias sitt HA-oppsett), og `openai_realtime`/`livekit`
+(Q-42, uavklart - "Q-43" nevnt av Tobias i chat finnes IKKE i loggen, avklares når han bekrefter
+hva han mente).
 
 **Forrige milepæl (uendret): D-336: FUNN, IKKE en full byggeslice - Home Assistant sin transport
 BLE IKKE bygget (en genuin, ubekreftet room→entity-mapping-avgjørelse), MEN `philips_hue` sin

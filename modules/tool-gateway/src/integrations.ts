@@ -1701,6 +1701,26 @@ export function firstWaveTools(
       postcondition_predicate: (after) => (after as { status?: string } | null)?.status === "RUNNING",
       parameterAuthorizer: gceTargetAuthorizer("reset_instance")
     },
+    // D-338 (Tobias direkte i chat: "ja bygg mcp zapier"): MCP-klient-
+    // discovery-only FØRSTE slice. `list_tools` (klasse A) kaller Zapier sin
+    // MCP-server sin `tools/list` og returnerer den RÅ listen ufiltrert -
+    // `output_trust: "untrusted"` fordi innholdet er ekstern, DYNAMISK
+    // oppdaget data (CLAUDE.md regel 7 - Ingestion Zone, aldri instruksjoner,
+    // aldri direkte til autoritativt minne). INGEN `call_tool`-handling
+    // finnes i det hele tatt denne sliceen - live-invokering av et dynamisk
+    // oppdaget, tredjeparts-eid verktøy krever sin egen godkjennings-
+    // modell-avgjørelse (Q-40 (b), fortsatt åpen) FØR den bygges. Selve
+    // MCP-server-URL-en er hemmelighets-ekvivalent (Zapier provisjonerer den
+    // PER BRUKER) og lagres derfor som `credential_ref`, ALDRI som en
+    // parameter - se `mcp-zapier-transport.ts`.
+    {
+      tool_id: "mcp_zapier", action: "list_tools", description: "List verktøyene Zapier sin MCP-server for øyeblikket eksponerer (read-only discovery, untrusted - ALDRI invokert)",
+      input_schema: empty, capability_class: "A",
+      scopes: ["mcp_zapier:read"], reversible: true,
+      rollback_procedure: "ingen mutasjon utført - ren lesing",
+      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_MCP_ZAPIER_SERVER_URL", output_trust: "untrusted", transport: transport("mcp_zapier")
+    },
     // UA-6 Finance & Spend Integrity Gateway - FØRSTE slice (D-107):
     // provider-nøytralt `finance.*`-namespace. `submit_payment_intent` er
     // klasse D (den ENESTE handlingen som faktisk poster en ekte

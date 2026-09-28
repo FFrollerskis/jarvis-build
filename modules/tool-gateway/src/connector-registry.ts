@@ -813,7 +813,22 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     id: "n8n", display_name: "n8n", category: "tool_gateway", credential_refs: ["JARVIS_N8N_API_KEY", "JARVIS_N8N_API_BASE_URL"],
     live_test: { tool_id: "n8n", action: "list_workflows", parameters: () => ({}) }
   },
-  { id: "zapier", display_name: "Zapier", category: "backlog", credential_refs: ["JARVIS_ZAPIER_API_KEY"] },
+  {
+    // D-338 (bygget, flyttet ut av backlog - Tobias direkte i chat: "ja bygg
+    // mcp zapier"): KUN discovery-halvparten. `credential_ref` er selve MCP-
+    // server-URL-en (Zapier provisjonerer den PER BRUKER, hemmelighets-
+    // ekvivalent) - IKKE en separat API-nøkkel som den gamle plassholderen
+    // antok. `tool_id` er "mcp_zapier" (ikke "zapier") for å gjøre den
+    // strukturelle grensen eksplisitt: dette er en GENERELL MCP-klient-
+    // kapabilitet konfigurert MOT Zapier sin server, ikke en Zapier-
+    // spesifikk API-integrasjon. INGEN live-invokering av oppdagede verktøy
+    // finnes ennå (Q-40 (b), fortsatt åpen) - se mcp-zapier-transport.ts.
+    // Oppdatert i place (var en D-232 backlog-plassholder) - ALDRI en ny,
+    // separat oppføring med samme id (D-293-disiplinen).
+    id: "zapier", display_name: "Zapier (MCP, kun discovery)", category: "tool_gateway",
+    credential_refs: ["JARVIS_MCP_ZAPIER_SERVER_URL"],
+    live_test: { tool_id: "mcp_zapier", action: "list_tools", parameters: () => ({}) }
+  },
   {
     // D-315 (bygget, flyttet ut av backlog): `credential_refs` utvidet med
     // API_BASE_URL (zone-spesifikk, SAMME "list alle nødvendige

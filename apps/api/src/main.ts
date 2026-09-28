@@ -44,7 +44,7 @@ import {
   runMemoryRetentionSweepForAllTenants
 } from "@jarvis/memory";
 import {
-  DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, GithubRateLimitController, GithubTransport,
+  DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
   allMeshTools, PgGithubRateLimitStore,
   TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
@@ -821,6 +821,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // gater tilgjengelighet, JARVIS_GOOGLE_CLOUD_PROJECT_ID leses direkte
     // fra env (se gce-transport.ts).
     gce: new GceTransport(),
+    // D-338 (MCP Zapier discovery-only sliceen): lat/tom-konstruktør - selve
+    // URL-en (hemmelighets-ekvivalent) leses via credential_ref inni
+    // ToolGateway sin secret-provider-kjede, ALDRI konstruktør-parameter
+    // (se mcp-zapier-transport.ts).
+    mcp_zapier: new McpZapierTransport(),
     // UA-7 Communications Hub - foerste slice (D-119): eget
     // `conversation_graph.*`-namespace. D-119 FINAL AUTHORITY HARDENING:
     // denne transporten MOTTAR og KREVER `ToolInvocationContext` (D-68) -
