@@ -1,44 +1,43 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-335: Meta Ads
-bygget som en Growth Core-ADAPTER (SAMME arkitektur som Google Ads/D-83), IKKE en frittstående
-ToolGateway-connector - lukker det siste gjenstående D-316-notat-funnet med faktisk kode.** En
-`Explore`-agent kjørte en frisk D-64-undersøkelse FØRST og fant at `modules/growth` sin
-eksisterende `GoogleAdsTransport` allerede er en bevist, gjenbrukbar mal for AKKURAT denne
-kategorien - `"meta_ads"`/`"fbclid"` fantes ALLEREDE som gyldige verdier i `types.ts`, D-64-porten
-var derfor allerede lukket (GO, ingen ny Tobias-avklaring nødvendig). BEVISST verifisert via FIRE
-`WebSearch`-kall: `https://graph.facebook.com/v26.0/act_{ad_account_id}/campaigns`/`.../insights` -
-`access_token` som QUERY-PARAMETER (IKKE en header - en TREDJE distinkt auth-form etter Google Ads
-sin Bearer-etter-refresh og Pipedrive sin `x-api-token`-header), langlivet system-bruker-token
-(INGEN token-utveksling, ULIKT Google Ads). `insights.spend` er en DESIMAL-STRENG (IKKE mikros som
-Google Ads sin `cost_micros`) - egen `decimalCurrencyToMinorUnits()`-funksjon. Bygget:
-`MetaAdsTransport` (`modules/growth/src/meta-ads-transport.ts`) - `list_campaigns`/`sync_campaigns`
-(klasse A/B) + `sync_spend` (klasse B, `level=campaign`+`time_increment=1`). Bevisst DEFERRED:
-`sync_tracking_tags` (fbclid) IKKE bygget - ingen bekreftet spørrbar fbclid-ressurs funnet (samme
-D-41-disiplin som Pipedrive sin `delete_object`-utelatelse). `firstWaveTools()` fikk et nytt
-`metaads.*`-namespace (`integrations.ts`), wiret inn i BÅDE `main.ts`/`worker-main.ts` med SAMME
-`new MetaAdsTransport(growthService)`-mønster som Google Ads. `connector-registry.ts` sin
-`meta_ads`-plassholder FJERNET HELT (Growth Core-adaptere spores IKKE der, samme status som
-`googleads` - `BACKLOG_IDS` 12→11, registeret 59→58 totalt). `.env.example` sin gamle
-`JARVIS_META_ADS_TOKEN` erstattet av `JARVIS_META_ADS_ACCESS_TOKEN`/`_AD_ACCOUNT_ID`/`_API_VERSION`
-ved siden av `JARVIS_GOOGLE_ADS_*`. Ny `meta-ads-transport.test.ts` (20 tester) +
-`meta-ads-wiring.test.ts` (4 tester). `pnpm --filter @jarvis/growth typecheck`/`pnpm --filter
-@jarvis/tool-gateway typecheck`/`pnpm --filter @jarvis/api typecheck`/`npx eslint` - alle rene.
-Targeted test-kjøring (`meta-ads-transport`/`meta-ads-wiring`/`google-ads-transport`/
-`google-ads-wiring`/`connector-registry`/`drive-runtime-wiring`) 96/96 grønt. Se D-335 i
-DECISIONS_AND_ASSUMPTIONS.md.
+**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-336: FUNN, IKKE en
+full byggeslice - Home Assistant sin transport BLE IKKE bygget (en genuin, ubekreftet room→entity-
+mapping-avgjørelse funnet FØR koding, BEVISST IKKE gjettet), MEN `philips_hue` sin backlog-
+plassholder FJERNET HELT (ren ALLEREDE_DEKKET-rydding).** En `Explore`-agent undersøkte om
+`homekit`/`philips_hue` kunne løses SAMME måte som Meta Ads (D-335) - fant at
+`modules/tool-gateway/src/home-assistant.ts` sin `homeAssistantTools()` ALLEREDE er fullt definert
+(5 handlinger, solid testdekning) MEN standard-transporten er FORTSATT `UnconfiguredHttpTransport`
+- ALDRI wiret inn i `firstWaveTools()`/`main.ts`/`worker-main.ts`. To funn, håndtert ULIKT: (1)
+**Philips Hue er ren ALLEREDE_DEKKET** - enhetsstyring går via Home Assistant (dokumentert i §5
+allerede), `connector-registry.ts` sin plassholder FJERNET (SAMME presedens som `microsoft_365`
+D-318). `homekit` FORBLIR - Apple sin egen HAP-protokoll, STRUKTURELT ULIK. (2) **Selve
+`HomeAssistantTransport`-bygget BEVISST STOPPET:** `site_id`/`room_id` → HA sin egen entity_id/
+area_id-adressering er IKKE dokumentert noe sted - `light_set`/`climate_set`/`alarm_set` tar
+`site_id`+`room_id` UTEN et eksplisitt `entity`-felt (KUN `lock_set` har det). TRE `WebSearch`-kall
+fant at HA sitt EGET community-forum har en ÅPEN, ubesvart tråd som stiller AKKURAT dette
+spørsmålet - IKKE trygt gjettbar informasjon. I tillegg krever "egen HA-instans per sted" (§5) en
+`site_id`→base-URL-oppslag, STRUKTURELT ULIKT Grafana/n8n sin enkelt-base-URL-resolver. Å bygge nå
+ville krevd enten å GJETTE en navnekonvensjon (brutt D-41), videre dokumentasjonsverifisering
+(nettverksegress mot dokumentasjonsdomener har vært blokkert flere ganger tidligere i sesjonen), eller
+Tobias sitt faktiske HA-oppsett - INGEN av disse ble gjort. `connector-registry.test.ts` oppdatert
+(11→10 gjenværende backlog, registeret 58→57 totalt, ny "philips_hue BEVISST IKKE registrert,
+homekit FORBLIR"-test). `pnpm --filter @jarvis/tool-gateway typecheck`/`npx eslint`
+rene. `connector-registry.test.ts` isolert: 25/25 grønt. `INTEGRATIONS.md` Home Assistant-raden
+korrigert til å reflektere den FAKTISKE delvise byggestatusen, Philips Hue endret til
+`ALLEREDE_DEKKET (D-336)`. Se D-336 i DECISIONS_AND_ASSUMPTIONS.md.
 
-**Neste:** Etter D-335 gjenstår KUN de genuint vage/uklare backlog-punktene: `apple_music`/`folio`
-(ingen klar D-64-vurdering ennå - trenger enten en dedikert undersøkelse eller Tobias sin
-presisering av hvilken faktisk leverandør "Folio" betyr), enhets-/plattform-spesifikke punkter
-(`apple_shortcuts`/`homekit`/`philips_hue`/`apns`/`ios_shortcuts`/`apple_watch` - ingen av disse
-passer det etablerte "ToolTransport mot et vertsnavn"-mønsteret uten ny infrastruktur), og tre
-funn som venter på Tobias sitt svar: `zapier` (Q-40, MCP-klient-kapabilitet?), `playwright`/
-`google_cloud` (Q-41, for vage), `openai_realtime`/`livekit` (Q-42, krever en NY
-arkitekturkategori). Ingen av disse kan bygges videre uten enten en egen D-64/undersøkelsesslice
-eller Tobias sin avklaring - standing-ordren "fortsett... begynn og fullfør noe annet" fortsetter
-mot neste egnet punkt, som nå sannsynligvis krever enten en `apple_music`/`folio`-undersøkelse
-(samme Explore-agent-mønster som D-335) eller å vente på Tobias sitt svar på Q-40/Q-41/Q-42.
+**Neste:** Etter D-336 gjenstår: `apple_music`/`folio` (ingen klar D-64-vurdering ennå - trenger
+enten en dedikert undersøkelse eller Tobias sin presisering av hvilken faktisk leverandør "Folio"
+betyr), `homekit`/enhets-spesifikke punkter (`apple_shortcuts`/`apns`/`ios_shortcuts`/
+`apple_watch` - ingen passer det etablerte mønsteret uten ny infrastruktur), Home Assistant sin
+FAKTISKE transport-bygging (venter på enten videre dokumentasjonsverifisering ELLER Tobias sitt
+HA-oppsett - se D-336), og tre funn som venter på Tobias sitt svar: `zapier` (Q-40), `playwright`/
+`google_cloud` (Q-41), `openai_realtime`/`livekit` (Q-42). Ingen av disse kan bygges videre uten
+enten en egen undersøkelsesslice eller Tobias sin avklaring - standing-ordren "fortsett... begynn
+og fullfør noe annet" fortsetter mot neste egnet punkt.
+
+**Forrige milepæl (uendret): D-335: Meta Ads bygget som en Growth Core-ADAPTER, lukker det siste
+D-316-notat-funnet med faktisk kode.** Se D-335 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 **Forrige milepæl (uendret): D-334: SJETTE og SISTE av de seks D-64-port-krevende faktisk bygget -
 Pipedrive, kun transport-laget. Hele D-64-gate-connector-FAMILIEN er nå fullført i kode.** Se D-334

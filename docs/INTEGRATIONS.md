@@ -160,9 +160,9 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| Home Assistant | `ALLEREDE_BYGGET` (kode), live-evidens `BLOCKED_EXTERNAL` | `modules/tool-gateway/src/home-assistant.ts`; enhetsbuss jf. §5 under. Live-verifisering krever ekte HA-instans+token (HA-RUNTIME, D-108-utsatt) |
-| HomeKit | `NY_BACKLOG` | Ingen kode funnet - henger sammen med D-36 Apple-runtime-sporet |
-| Philips Hue | `NY_BACKLOG` | Ingen kode funnet - i Jarvis sin arkitektur går enhetsstyring normalt via Home Assistant (§5), ikke en direkte Hue-connector; avklares ved faktisk byggeordre |
+| Home Assistant | `ALLEREDE_BYGGET` (`ToolDefinition`-lag), transport `IKKE` bygget ennå (D-336-funn) | `modules/tool-gateway/src/home-assistant.ts` - `homeAssistantTools()` er fullt definert (read_state/light_set/climate_set/lock_set/alarm_set, korrekt A/B/D-klassifisering, Q-34 preflight/postcondition), men standard-transporten er FORTSATT `UnconfiguredHttpTransport` - INGEN ekte `HomeAssistantTransport`, IKKE wiret inn i `firstWaveTools()`/`main.ts`/`worker-main.ts`, INGEN `.env.example`-oppføring. En ekte HTTP-transport BLE IKKE bygget denne runden: `site_id`/`room_id` → HA sin egen area/entity-adressering er en UBEKREFTET mapping (HA sitt community-forum har åpne, ubesvarte tråder om nøyaktig dette - "REST API / Service Calls / Specify Target"), OG "per sted egen HA-instans" (§5) betyr base-URL må løses PER `site_id`, IKKE en enkelt global URL som Grafana/n8n. BEVISST IKKE gjettet - se D-336 i DECISIONS_AND_ASSUMPTIONS.md |
+| HomeKit | `NY_BACKLOG` | Ingen kode funnet - henger sammen med D-36 Apple-runtime-sporet, STRUKTURELT ULIK Home Assistant (Apple sin egen HAP-protokoll) |
+| Philips Hue | `ALLEREDE_DEKKET (D-336)` | Enhetsstyring går via Home Assistant (§5 under), IKKE en direkte Hue-connector - `connector-registry.ts` sin plassholder FJERNET HELT, samme presedens som Microsoft 365 (D-318) |
 
 ### 4.11 Finans / CRM / ads / prosjektstyring
 
