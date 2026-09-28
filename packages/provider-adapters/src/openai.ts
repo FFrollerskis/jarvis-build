@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   classifyFetchError,
   classifyHttpStatus,
+  envOrDefault,
   ProviderError,
   sseLines,
   textOnly,
@@ -18,7 +19,7 @@ export class OpenAiAdapter implements ModelProviderAdapter {
 
   constructor(
     private readonly apiKey: string | undefined = process.env["OPENAI_API_KEY"],
-    readonly model: string = process.env["JARVIS_OPENAI_MODEL"] ?? "gpt-5",
+    readonly model: string = envOrDefault("JARVIS_OPENAI_MODEL", "gpt-5"),
     private readonly baseUrl: string = "https://api.openai.com",
     private readonly timeoutMs: number = Number(process.env["JARVIS_MODEL_TIMEOUT_MS"] ?? 60_000)
   ) {}

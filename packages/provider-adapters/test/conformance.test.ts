@@ -534,6 +534,30 @@ describe("D-106 HOST-FIX Defekt B: trygg feilsøkings-diagnostikk for Gemini/Kim
     expect(pe.diagnostic?.request_operation).toBe("generateContent");
   });
 
+  it("anthropic: 400 klassifiseres til bad_request MED trygg diagnostikk (D-340, samme mønster som gemma_hosted over - anthropic.ts manglet denne diagnostikken siden UA-1, host-bevis 2026-09-28: en reell 400 var til nå en helt opak 'anthropic_error_400')", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "model: not_a_real_model" } }),
+            { status: 400 }
+          )
+      )
+    );
+    const err = await new AnthropicAdapter("hemmelig-key", "claude-sonnet-5", "http://mock")
+      .complete(REQUEST)
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProviderError);
+    const pe = err as ProviderError;
+    expect(pe.kind).toBe("bad_request");
+    expect(pe.status).toBe(400);
+    expect(pe.diagnostic?.provider_error_code).toBe("invalid_request_error");
+    expect(pe.diagnostic?.sanitized_endpoint).toBe("mock/v1/messages");
+    expect(pe.diagnostic?.request_operation).toBe("messages");
+  });
+
   it("gemma_hosted: stream()-operasjonen sin diagnostikk merker request_operation som streamGenerateContent, ikke generateContent", async () => {
     vi.stubGlobal(
       "fetch",
@@ -629,6 +653,45 @@ describe("D-106 HOST-FIX Defekt B: trygg feilsøkings-diagnostikk for Gemini/Kim
     } finally {
       if (prev === undefined) delete process.env["JARVIS_GEMINI_MODEL"];
       else process.env["JARVIS_GEMINI_MODEL"] = prev;
+    }
+  });
+
+  it("D-340 (host-bevist, NAS-deploy 2026-09-28): en TOM (men til stede) JARVIS_GEMINI_MODEL faller fortsatt tilbake til defaulten - docker compose sin env_file-mekanisme setter variabelen til en FAKTISK tom streng når .env inneholder 'NAVN=' uten verdi, og en rå '??' fanger IKKE det tilfellet (kun null/undefined)", () => {
+    const prev = process.env["JARVIS_GEMINI_MODEL"];
+    process.env["JARVIS_GEMINI_MODEL"] = "";
+    try {
+      // Selve produksjonsbugen: den samme defaulterings-logikken adapteren FAKTISK bruker
+      // (uten konstruktør-argument, direkte fra process.env, slik `mesh-bridge.ts` konstruerer den).
+      expect(new GeminiAdapter().model).toBe("gemini-3.6-flash");
+    } finally {
+      if (prev === undefined) delete process.env["JARVIS_GEMINI_MODEL"];
+      else process.env["JARVIS_GEMINI_MODEL"] = prev;
+    }
+  });
+
+  it("D-340: samme tom-streng-fallback for anthropic (JARVIS_ANTHROPIC_MODEL) og gemma_hosted (JARVIS_GEMMA_MODEL + GEMMA_API_KEY→GEMINI_API_KEY-kjeden)", () => {
+    const prevAnthropicModel = process.env["JARVIS_ANTHROPIC_MODEL"];
+    const prevGemmaModel = process.env["JARVIS_GEMMA_MODEL"];
+    const prevGemmaKey = process.env["GEMMA_API_KEY"];
+    const prevGeminiKey = process.env["GEMINI_API_KEY"];
+    process.env["JARVIS_ANTHROPIC_MODEL"] = "";
+    process.env["JARVIS_GEMMA_MODEL"] = "";
+    process.env["GEMMA_API_KEY"] = "";
+    process.env["GEMINI_API_KEY"] = "delt-nokkel-fallback";
+    try {
+      expect(new AnthropicAdapter().model).toBe("claude-sonnet-5");
+      const gemma = new GemmaHostedAdapter();
+      expect(gemma.model).toBe("gemma-4-26b-a4b-it");
+      expect(gemma.available()).toBe(true); // GEMMA_API_KEY="" skal falle tilbake til GEMINI_API_KEY, ikke bli værende tom.
+    } finally {
+      if (prevAnthropicModel === undefined) delete process.env["JARVIS_ANTHROPIC_MODEL"];
+      else process.env["JARVIS_ANTHROPIC_MODEL"] = prevAnthropicModel;
+      if (prevGemmaModel === undefined) delete process.env["JARVIS_GEMMA_MODEL"];
+      else process.env["JARVIS_GEMMA_MODEL"] = prevGemmaModel;
+      if (prevGemmaKey === undefined) delete process.env["GEMMA_API_KEY"];
+      else process.env["GEMMA_API_KEY"] = prevGemmaKey;
+      if (prevGeminiKey === undefined) delete process.env["GEMINI_API_KEY"];
+      else process.env["GEMINI_API_KEY"] = prevGeminiKey;
     }
   });
 

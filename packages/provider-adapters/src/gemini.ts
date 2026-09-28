@@ -1,6 +1,7 @@
 import {
   classifyFetchError,
   classifyHttpStatus,
+  envOrDefault,
   extractProviderErrorCode,
   ProviderError,
   sanitizeEndpointForDiagnostics,
@@ -34,7 +35,7 @@ export class GeminiAdapter implements ModelProviderAdapter {
 
   constructor(
     private readonly apiKey: string | undefined = process.env["GEMINI_API_KEY"],
-    readonly model: string = process.env["JARVIS_GEMINI_MODEL"] ?? "gemini-3.6-flash",
+    readonly model: string = envOrDefault("JARVIS_GEMINI_MODEL", "gemini-3.6-flash"),
     private readonly baseUrl: string = "https://generativelanguage.googleapis.com",
     private readonly timeoutMs: number = Number(process.env["JARVIS_MODEL_TIMEOUT_MS"] ?? 60_000)
   ) {}

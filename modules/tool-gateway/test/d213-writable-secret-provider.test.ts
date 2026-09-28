@@ -127,6 +127,30 @@ describe("C: InfisicalSecretProvider.set() - upsert (PATCH FØRST, POST kun på 
     await expect(provider.set("REF", "value")).rejects.toThrow("infisical_auth_expired");
   });
 
+  it("D-340: en TOM (men til stede) INFISICAL_ENV-miljøvariabel faller tilbake til defaulten 'dev' - samme 'tom streng ER IKKE usatt'-bug D-236 allerede fikset for EnvSecretProvider.get() i samme fil, som konstruktørens `??` ikke fanget (docker compose sin env_file-mekanisme setter variabelen til en FAKTISK tom streng når .env inneholder 'INFISICAL_ENV=' uten verdi)", async () => {
+    const prev = process.env["INFISICAL_ENV"];
+    process.env["INFISICAL_ENV"] = "";
+    try {
+      const calls: Array<{ body: string }> = [];
+      vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+        if (String(url).includes("/auth/universal-auth/login")) {
+          return { ok: true, json: async () => ({ accessToken: "tok-1" }) } as unknown as Response;
+        }
+        calls.push({ body: String(init.body) });
+        return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
+      });
+      // Ingen konstruktør-argumenter - samme kall-form som main.ts/worker-main.ts faktisk bruker,
+      // slik at defaulten FAKTISK evalueres (et eksplisitt tomt argument ville hoppet over den).
+      const provider = new InfisicalSecretProvider("https://infisical.example", "client-id", "client-secret", "project-id");
+      await provider.set("REF", "value");
+      const body = JSON.parse(calls[0]!.body) as Record<string, unknown>;
+      expect(body["environment"]).toBe("dev");
+    } finally {
+      if (prev === undefined) delete process.env["INFISICAL_ENV"];
+      else process.env["INFISICAL_ENV"] = prev;
+    }
+  });
+
   it("en vedvarende feil (verken 401 eller 404) kaster 'infisical_set_<status>' og setter health='unavailable'", async () => {
     vi.stubGlobal("fetch", async (url: string) => {
       if (String(url).includes("/auth/universal-auth/login")) {

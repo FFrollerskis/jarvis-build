@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 import {
   classifyFetchError,
   classifyHttpStatus,
+  envOrDefault,
+  extractProviderErrorCode,
   ProviderError,
+  sanitizeEndpointForDiagnostics,
   sseLines,
   type ChatMessage,
   type ModelProviderAdapter,
@@ -38,7 +41,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
 
   constructor(
     private readonly apiKey: string | undefined = process.env["ANTHROPIC_API_KEY"],
-    readonly model: string = process.env["JARVIS_ANTHROPIC_MODEL"] ?? "claude-sonnet-5",
+    readonly model: string = envOrDefault("JARVIS_ANTHROPIC_MODEL", "claude-sonnet-5"),
     private readonly baseUrl: string = "https://api.anthropic.com",
     private readonly timeoutMs: number = Number(process.env["JARVIS_MODEL_TIMEOUT_MS"] ?? 60_000)
   ) {}
@@ -102,7 +105,27 @@ export class AnthropicAdapter implements ModelProviderAdapter {
       throw classifyFetchError(this.name, err);
     }
     if (!response.ok) {
-      throw classifyHttpStatus(this.name, response.status);
+      // D-340 (samme mønster som gemini.ts/gemma.ts/kimi.ts, D-106 HOST-FIX
+      // Defekt B): anthropic.ts manglet denne diagnostikken siden UA-1 -
+      // en reell `bad_request` fra Anthropic sitt Messages API var derfor
+      // til nå en helt opak `anthropic_error_400` uten noen indikasjon på
+      // ÅRSAK (host-bevis, 2026-09-28 NAS-deploy: nøyaktig denne opake
+      // feilen var alt loggen kunne vise for Charlie sin generiske
+      // "Noe gikk galt"-feilmelding). Trygg, begrenset metadata - ALDRI
+      // nøkkelen (den sendes i `x-api-key`-header, aldri i URL-en over),
+      // ALDRI hele body.
+      let providerErrorCode: string | undefined;
+      try {
+        providerErrorCode = extractProviderErrorCode(await response.text());
+      } catch {
+        // Body kunne ikke leses - diagnostikk er beste-innsats, aldri en blokkerende avhengighet.
+      }
+      const sanitizedEndpoint = sanitizeEndpointForDiagnostics(`${this.baseUrl}/v1/messages`);
+      throw classifyHttpStatus(this.name, response.status, {
+        ...(providerErrorCode !== undefined ? { provider_error_code: providerErrorCode } : {}),
+        ...(sanitizedEndpoint !== undefined ? { sanitized_endpoint: sanitizedEndpoint } : {}),
+        request_operation: "messages"
+      });
     }
     return response;
   }

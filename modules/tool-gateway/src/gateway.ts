@@ -66,7 +66,13 @@ export class InfisicalSecretProvider implements SecretProvider {
     private readonly clientId = process.env["INFISICAL_CLIENT_ID"],
     private readonly clientSecret = process.env["INFISICAL_CLIENT_SECRET"],
     private readonly projectId = process.env["INFISICAL_PROJECT_ID"],
-    private readonly env = process.env["INFISICAL_ENV"] ?? "dev"
+    // D-340: samme "en tom, men til stede, .env-verdi ER IKKE 'usatt'"-bug
+    // D-236 (rett over, EnvSecretProvider.get()) allerede fikset i DENNE
+    // filen - `??` fanger kun null/undefined, ikke tom streng, så en uutfylt
+    // `INFISICAL_ENV=`-linje i .env ga tidligere `environment=""` i alle
+    // Infisical-kall i stedet for defaulten "dev". `||` (streng, aldri en
+    // gyldig tom verdi) løser det samme her, samme semantikk som ovenfor.
+    private readonly env = process.env["INFISICAL_ENV"] || "dev"
   ) {}
 
   available(): boolean {
