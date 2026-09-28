@@ -23,7 +23,7 @@ import {
   type VippsCredentials, type VippsCredentialsProvider
 } from "@jarvis/finance";
 import { ConsentEnforcementService, ConsentService, ConsentTransport } from "@jarvis/consent";
-import { GoogleAdsTransport, GrowthService, GrowthTransport, marketingMemoryBriefSource } from "@jarvis/growth";
+import { GoogleAdsTransport, GrowthService, GrowthTransport, MetaAdsTransport, marketingMemoryBriefSource } from "@jarvis/growth";
 import { executiveHandler } from "./executive.ts";
 import {
   AnthropicAdapter,
@@ -399,6 +399,8 @@ for (const tool of firstWaveTools({
   growth: new GrowthTransport(growthService),
   // UA-4 Google Ads-slice (D-83): identisk wiring-mønster som apps/api/src/main.ts.
   googleads: new GoogleAdsTransport(growthService),
+  // D-335 (UA-4 Meta Ads-slice): identisk wiring-mønster som apps/api/src/main.ts.
+  metaads: new MetaAdsTransport(growthService),
   // UA-6 Finance & Spend Integrity Gateway (D-107): identisk wiring-mønster som apps/api/src/main.ts.
   finance: new FinanceTransport(financeService, fikenCredentialsProvider),
   // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2): identisk wiring-mønster som apps/api/src/main.ts.

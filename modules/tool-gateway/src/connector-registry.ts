@@ -824,12 +824,17 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
 
   // §4.11 Finans / CRM / ads / prosjektstyring
   { id: "folio", display_name: "Folio", category: "backlog", credential_refs: ["JARVIS_FOLIO_API_KEY"] },
-  { id: "meta_ads", display_name: "Meta Ads", category: "backlog", credential_refs: ["JARVIS_META_ADS_TOKEN"] },
   // D-329 til D-334: alle seks D-64-port-krevende leverandørene faktisk bygget
   // (D-291 stengte selve porten) - kun transport-laget, se
   // TodoistTransport/TrelloTransport/JiraTransport/LinearTransport/
   // HubSpotTransport/PipedriveTransport sine doc-kommentarer i
   // live-transports.ts for hva som BEVISST gjenstår.
+  // D-335: Meta Ads sin plassholder er FJERNET HELT herfra (IKKE bygget som
+  // en generisk ToolGateway-connector) - den er en Growth Core-ADAPTER
+  // (D-64), SAMME arkitektur/sporing som googleads (heller ALDRI i dette
+  // registeret) - se MetaAdsTransport i modules/growth/src/meta-ads-
+  // transport.ts og firstWaveTools() sin metaads.*-namespace i
+  // integrations.ts i stedet.
 
   // §4.12 Kart
   {
