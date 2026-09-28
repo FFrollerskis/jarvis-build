@@ -43,7 +43,23 @@ describe("D-252: device_id er en per-nettleser generert/persistert verdi, ALDRI 
       // Genererer en fersk, tilfeldig ID KUN når ingen finnes fra før -
       // aldri en ny ID ved hver sideinnlasting (som ville vært samme bug,
       // bare per-fane i stedet for per-alle-nettlesere).
+      expect(body).toContain("randomUUID()");
+    });
+
+    // D-342 (host-bevist: "crypto.randomUUID is not a function" ved tilgang
+    // over Tailscale/annen ren HTTP - metoden finnes rett og slett ikke i en
+    // nettleser uten "secure context", HTTPS/localhost): loadOrCreateDeviceId()
+    // kaller nå en lokal randomUUID()-wrapper (ikke crypto.randomUUID() direkte)
+    // som faller trygt tilbake til en Math.random()-basert v4-UUID - trygt
+    // fordi dette KUN er en lokal enhets-ID (aldri et kryptografisk hemmelig
+    // token, se D-131-kommentaren i filene selv).
+    it(`${name}: har en randomUUID()-wrapper med trygg fallback når crypto.randomUUID() ikke finnes (usikker kontekst)`, () => {
+      const fnMatch = source.match(/function randomUUID\(\)\s*\{([\s\S]*?)\n {2}\}/);
+      expect(fnMatch).not.toBeNull();
+      const body = fnMatch?.[1] ?? "";
+      expect(body).toContain('typeof crypto.randomUUID === "function"');
       expect(body).toContain("crypto.randomUUID()");
+      expect(body).toMatch(/Math\.random/);
     });
   }
 
