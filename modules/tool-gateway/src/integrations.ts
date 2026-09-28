@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import type { MemoryWriter } from "@jarvis/memory";
 import { authorizeDockerTarget, type DockerMutationAction } from "./docker-target-policy.ts";
+import { authorizeGceTarget, type GceMutationAction } from "./gce-target-policy.ts";
 import type { ToolDefinition, ToolTransport } from "./gateway.ts";
 
 /**
@@ -67,6 +68,8 @@ export function firstWaveTools(
   transports: Partial<Record<string, ToolTransport>> = {},
   config: {
     dockerMutationTargets?: ReadonlySet<string>;
+    /** D-337: SAMME "eier-konfigurert produksjonsmål-autorisasjon"-mønster som `dockerMutationTargets` over, for GCE-mutasjon - se `gce-target-policy.ts`. */
+    gceMutationTargets?: ReadonlySet<string>;
     /**
      * UA-10 P1 (D-160): domenepakker som eier sine EGNE `ToolDefinition`-lister
      * (f.eks. `@jarvis/situations` sin `situationsToolDefinitions()`) legges
@@ -84,6 +87,13 @@ export function firstWaveTools(
     const name = parameters["name"];
     if (typeof name !== "string") return { allowed: false, reason: "missing_name_parameter" };
     return authorizeDockerTarget(action, name, dockerMutationTargets);
+  };
+  const gceMutationTargets = config.gceMutationTargets ?? new Set<string>();
+  const gceTargetAuthorizer = (action: GceMutationAction) => (parameters: Record<string, JsonValue>) => {
+    const zone = parameters["zone"];
+    const instanceName = parameters["instance_name"];
+    if (typeof zone !== "string" || typeof instanceName !== "string") return { allowed: false, reason: "missing_target_parameters" };
+    return authorizeGceTarget(action, zone, instanceName, gceMutationTargets);
   };
   return [
     {
@@ -1632,6 +1642,64 @@ export function firstWaveTools(
       // Q-34-revisjon: samme begrunnelse som stop_container over.
       preflight_action: "inspect_container", preflight_requires_target: true,
       parameterAuthorizer: dockerTargetAuthorizer("start_container")
+    },
+    // D-337 (Google Cloud "servere"-sliceen, Tobias sin eksplisitte Q-41-
+    // presisering i chat). SAMME "transporten transporterer, target-policy
+    // autoriserer"-oppdeling som Docker over - se gce-target-policy.ts.
+    // list_instances/get_instance er ren lesing (klasse A). start_instance/
+    // stop_instance endrer KUN kjøretilstand (ingen data tapt) - SAMME
+    // "bevist trygg mot produksjon"-status som Docker sin stop/start -
+    // derfor PRODUKSJONS-autorisert (JARVIS_GCE_MUTATION_TARGETS) i tillegg
+    // til sentinel. reset_instance er en HARD reboot (kan kappe pågående
+    // skriving) - SAMME "ikke bevist trygg"-status som Docker sin
+    // redeploy_container - derfor STRUKTURELT DEFERRED for produksjon (kun
+    // jarvis-sentinel-*) inntil egen vurdering er gjort.
+    {
+      tool_id: "gce", action: "list_instances", description: "List GCE-instanser i én sone",
+      input_schema: record({ zone: z.string() }), capability_class: "A",
+      scopes: ["gce:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 30,
+      credential_ref: "JARVIS_GOOGLE_CLOUD_REFRESH_TOKEN", output_trust: "untrusted", transport: transport("gce")
+    },
+    {
+      tool_id: "gce", action: "get_instance", description: "Les én GCE-instans sin tilstand",
+      input_schema: record({ zone: z.string(), instance_name: z.string() }), capability_class: "A",
+      scopes: ["gce:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 60,
+      credential_ref: "JARVIS_GOOGLE_CLOUD_REFRESH_TOKEN", output_trust: "untrusted", transport: transport("gce")
+    },
+    {
+      tool_id: "gce", action: "start_instance", description: "Start en GCE-instans (asynkron - polles til DONE FØR retur) - eier-konfigurert produksjonsmål ELLER jarvis-sentinel-* (akseptanse)",
+      input_schema: record({ zone: z.string(), instance_name: z.string() }), capability_class: "D",
+      scopes: ["gce:write"], reversible: true,
+      rollback_procedure: "gce.stop_instance mot samme mål, reinspisert for å verifisere kjøretilstand",
+      idempotent_external: true, timeout_ms: 90_000, rate_limit_per_minute: 10,
+      credential_ref: "JARVIS_GOOGLE_CLOUD_REFRESH_TOKEN", output_trust: "internal", transport: transport("gce"),
+      preflight_action: "get_instance", preflight_requires_target: true,
+      postcondition_predicate: (after) => (after as { status?: string } | null)?.status === "RUNNING",
+      parameterAuthorizer: gceTargetAuthorizer("start_instance")
+    },
+    {
+      tool_id: "gce", action: "stop_instance", description: "Stopp en GCE-instans (asynkron - polles til DONE FØR retur) - eier-konfigurert produksjonsmål ELLER jarvis-sentinel-* (akseptanse)",
+      input_schema: record({ zone: z.string(), instance_name: z.string() }), capability_class: "D",
+      scopes: ["gce:write"], reversible: true,
+      rollback_procedure: "gce.start_instance mot samme mål, reinspisert for å verifisere kjøretilstand",
+      idempotent_external: true, timeout_ms: 90_000, rate_limit_per_minute: 10,
+      credential_ref: "JARVIS_GOOGLE_CLOUD_REFRESH_TOKEN", output_trust: "internal", transport: transport("gce"),
+      preflight_action: "get_instance", preflight_requires_target: true,
+      postcondition_predicate: (after) => (after as { status?: string } | null)?.status === "TERMINATED",
+      parameterAuthorizer: gceTargetAuthorizer("stop_instance")
+    },
+    {
+      tool_id: "gce", action: "reset_instance", description: "Hard reboot av en GCE-instans (asynkron - polles til DONE FØR retur) - DEFERRED for produksjon, kun jarvis-sentinel-* (akseptanse) inntil egen vurdering er gjort",
+      input_schema: record({ zone: z.string(), instance_name: z.string() }), capability_class: "D",
+      scopes: ["gce:write"], reversible: true,
+      rollback_procedure: "ingen automatisk - verifiser RUNNING på nytt, varsle eier ved avvik",
+      idempotent_external: false, timeout_ms: 90_000, rate_limit_per_minute: 5,
+      credential_ref: "JARVIS_GOOGLE_CLOUD_REFRESH_TOKEN", output_trust: "internal", transport: transport("gce"),
+      preflight_action: "get_instance", preflight_requires_target: true,
+      postcondition_predicate: (after) => (after as { status?: string } | null)?.status === "RUNNING",
+      parameterAuthorizer: gceTargetAuthorizer("reset_instance")
     },
     // UA-6 Finance & Spend Integrity Gateway - FØRSTE slice (D-107):
     // provider-nøytralt `finance.*`-namespace. `submit_payment_intent` er

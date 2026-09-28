@@ -483,7 +483,15 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   // 12/D-64-disiplin).
 
   // §4.5 Kode / dev / infra
-  { id: "google_cloud", display_name: "Google Cloud", category: "backlog", credential_refs: ["JARVIS_GOOGLE_CLOUD_API_KEY"] },
+  // D-337: 'google_cloud' sin gamle, vage plassholder FJERNET HELT. Tobias
+  // presiserte eksplisitt i chat (svar på Q-41): "servere" - bygget som GCE
+  // (Google Compute Engine), SAMME status som Docker - en ren ToolGateway-
+  // infra-transport, IKKE sporet i dette registeret (se gce-transport.ts).
+  // "All markedsføring osv osv" utover Google Ads (allerede bygget, D-83)
+  // er BEVISST IKKE bygget denne sliceen - hver ANNEN GCP-del-tjeneste
+  // (Analytics/Search Console/Merchant Center/osv) krever sin EGEN, fersk
+  // D-41-verifisering under et NYTT D-nummer, ALDRI gjettet frem sammen med
+  // denne sliceen eller stille bundlet inn i én vag "google_cloud"-tag.
 
   // §4.6 Søk / browser
   {

@@ -44,11 +44,11 @@ import {
   runMemoryRetentionSweepForAllTenants
 } from "@jarvis/memory";
 import {
-  DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
+  DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
   allMeshTools, PgGithubRateLimitStore,
   TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
-  emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
+  emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
 import {
   BusinessEventSyncService, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService,
@@ -816,6 +816,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // docker-transport.ts) - uten den satt er "docker" strukturelt
     // credential_unavailable, ALDRI et stille fall til en ambient binærsti.
     docker: new DockerTransport(),
+    // D-337 (Google Cloud "servere"-sliceen): SAMME lat/tom-konstruktør-
+    // mønster som DockerTransport over - JARVIS_GOOGLE_CLOUD_REFRESH_TOKEN
+    // gater tilgjengelighet, JARVIS_GOOGLE_CLOUD_PROJECT_ID leses direkte
+    // fra env (se gce-transport.ts).
+    gce: new GceTransport(),
     // UA-7 Communications Hub - foerste slice (D-119): eget
     // `conversation_graph.*`-namespace. D-119 FINAL AUTHORITY HARDENING:
     // denne transporten MOTTAR og KREVER `ToolInvocationContext` (D-68) -
@@ -834,6 +839,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // (fail-closed, se docker-target-policy.ts) - sentinel-mål (host-
     // akseptanse) er alltid tilgjengelig uavhengig av denne variabelen.
     dockerMutationTargets: parseDockerMutationTargets(process.env["JARVIS_DOCKER_MUTATION_TARGETS"]),
+    // D-337: SAMME "les env ÉN gang ved oppstart, fail-closed hvis tom"-
+    // mønster som dockerMutationTargets over - se gce-target-policy.ts.
+    gceMutationTargets: parseGceMutationTargets(process.env["JARVIS_GCE_MUTATION_TARGETS"]),
     // UA-10 P1 (D-160): eierens kontrollflate for Situation Engine - se over.
     // UA-11 Executive Mode P0 (D-162): den SAMLEDE attention-ranking-/
     // kontrollflaten - komponerer `situations.*` via DENNE SAMME

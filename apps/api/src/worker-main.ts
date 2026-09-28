@@ -4,9 +4,9 @@ import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEn
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
-  DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport, GmailTransport,
+  DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, GithubRateLimitController, GithubTransport, GmailTransport,
   GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, MeshToolExecutor, allMeshTools, PgGithubRateLimitStore,
-  ToolGateway, driveTransportsIfConfigured, firstWaveTools, parseDockerMutationTargets
+  ToolGateway, driveTransportsIfConfigured, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets
 } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
 import { SupportService, SupportTransport } from "@jarvis/support";
@@ -416,10 +416,14 @@ for (const tool of firstWaveTools({
   consent: new ConsentTransport(consentService, consentEnforcementService),
   // D-105: samme wiring-mønster som apps/api/src/main.ts.
   docker: new DockerTransport(),
+  // D-337: samme wiring-mønster som apps/api/src/main.ts.
+  gce: new GceTransport(),
   ...driveTransportsIfConfigured()
 }, {
   // D-105 host-fix: samme wiring-mønster som apps/api/src/main.ts.
-  dockerMutationTargets: parseDockerMutationTargets(process.env["JARVIS_DOCKER_MUTATION_TARGETS"])
+  dockerMutationTargets: parseDockerMutationTargets(process.env["JARVIS_DOCKER_MUTATION_TARGETS"]),
+  // D-337: samme wiring-mønster som apps/api/src/main.ts.
+  gceMutationTargets: parseGceMutationTargets(process.env["JARVIS_GCE_MUTATION_TARGETS"])
 })) toolGateway.register(tool);
 // D-289 ("vil ha alt at han har full kontroll"): SAMME "beregn ÉN gang, rett
 // etter registreringsløkken"-mønster som apps/api/src/main.ts sin egen

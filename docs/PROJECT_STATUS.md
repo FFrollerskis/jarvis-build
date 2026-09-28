@@ -1,40 +1,48 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-336: FUNN, IKKE en
-full byggeslice - Home Assistant sin transport BLE IKKE bygget (en genuin, ubekreftet room→entity-
-mapping-avgjørelse funnet FØR koding, BEVISST IKKE gjettet), MEN `philips_hue` sin backlog-
-plassholder FJERNET HELT (ren ALLEREDE_DEKKET-rydding).** En `Explore`-agent undersøkte om
-`homekit`/`philips_hue` kunne løses SAMME måte som Meta Ads (D-335) - fant at
-`modules/tool-gateway/src/home-assistant.ts` sin `homeAssistantTools()` ALLEREDE er fullt definert
-(5 handlinger, solid testdekning) MEN standard-transporten er FORTSATT `UnconfiguredHttpTransport`
-- ALDRI wiret inn i `firstWaveTools()`/`main.ts`/`worker-main.ts`. To funn, håndtert ULIKT: (1)
-**Philips Hue er ren ALLEREDE_DEKKET** - enhetsstyring går via Home Assistant (dokumentert i §5
-allerede), `connector-registry.ts` sin plassholder FJERNET (SAMME presedens som `microsoft_365`
-D-318). `homekit` FORBLIR - Apple sin egen HAP-protokoll, STRUKTURELT ULIK. (2) **Selve
-`HomeAssistantTransport`-bygget BEVISST STOPPET:** `site_id`/`room_id` → HA sin egen entity_id/
-area_id-adressering er IKKE dokumentert noe sted - `light_set`/`climate_set`/`alarm_set` tar
-`site_id`+`room_id` UTEN et eksplisitt `entity`-felt (KUN `lock_set` har det). TRE `WebSearch`-kall
-fant at HA sitt EGET community-forum har en ÅPEN, ubesvart tråd som stiller AKKURAT dette
-spørsmålet - IKKE trygt gjettbar informasjon. I tillegg krever "egen HA-instans per sted" (§5) en
-`site_id`→base-URL-oppslag, STRUKTURELT ULIKT Grafana/n8n sin enkelt-base-URL-resolver. Å bygge nå
-ville krevd enten å GJETTE en navnekonvensjon (brutt D-41), videre dokumentasjonsverifisering
-(nettverksegress mot dokumentasjonsdomener har vært blokkert flere ganger tidligere i sesjonen), eller
-Tobias sitt faktiske HA-oppsett - INGEN av disse ble gjort. `connector-registry.test.ts` oppdatert
-(11→10 gjenværende backlog, registeret 58→57 totalt, ny "philips_hue BEVISST IKKE registrert,
-homekit FORBLIR"-test). `pnpm --filter @jarvis/tool-gateway typecheck`/`npx eslint`
-rene. `connector-registry.test.ts` isolert: 25/25 grønt. `INTEGRATIONS.md` Home Assistant-raden
-korrigert til å reflektere den FAKTISKE delvise byggestatusen, Philips Hue endret til
-`ALLEREDE_DEKKET (D-336)`. Se D-336 i DECISIONS_AND_ASSUMPTIONS.md.
+**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-337: Google Cloud
+"servere" bygget som en GCE-connector (Google Compute Engine) - direkte svar på Tobias sin chat-
+instruks: "Google cloud skal være Google ads alle servere alle markedsføring osv osv".** Google
+Ads er ALLEREDE bygget (D-83); "alle servere" = Google Compute Engine, standard-betydningen på
+GCP. "All markedsføring osv osv" utover Ads BEVISST IKKE bygget denne sliceen - hver annen
+GCP-del-tjeneste krever sin egen, ferske D-41-verifisering under et NYTT D-nummer. En
+`Explore`-agent verifiserte API-formen via WebSearch FØR bygging:
+`https://compute.googleapis.com/compute/v1/projects/{project}/zones/{zone}/instances/...`,
+OAuth-scope `auth/compute`. Kritisk funn: `instances.start`/`.stop`/`.reset` er ASYNKRONE -
+returnerer et `Operation` UMIDDELBART, `zoneOperations.get` MÅ polles til `status: "DONE"`. Bygget:
+`GceTransport` (`modules/tool-gateway/src/gce-transport.ts`) - `list_instances`/`get_instance`
+(klasse A) + `start_instance`/`stop_instance`/`reset_instance` (klasse D, ALLE poller operasjonen
+til DONE INNI `invoke()` FØR retur, `postcondition_predicate` verifiserer sluttilstanden).
+`gce-target-policy.ts` - SAMME "transport transporterer, target-policy autoriserer"-oppdeling som
+Docker (D-105): `start_instance`/`stop_instance` er PRODUKSJONS-autorisert (kun kjøretilstand,
+SAMME status som Docker sin stop/start); `reset_instance` er en HARD reboot - DEFERRED for
+produksjon (kun `jarvis-sentinel-*`), SAMME status som Docker sin `redeploy_container`.
+`JARVIS_GOOGLE_CLOUD_REFRESH_TOKEN`/`_PROJECT_ID` - egen refresh-token (compute-scopen kan IKKE
+antas dekket av noen eksisterende Google-token). `connector-registry.ts` sin gamle, vage
+`google_cloud`-plassholder FJERNET HELT - `gce` spores IKKE der (SAMME status som `docker`).
+Ny `gce-transport.test.ts` (16 tester) + `gce-target-policy.test.ts` (18 tester).
+`connector-registry.test.ts` oppdatert (`BACKLOG_IDS` 10→9, registeret 57→56 totalt).
+`drive-runtime-wiring.test.ts` "tom konstruktør"-telling 24→25. `pnpm --filter @jarvis/tool-gateway
+typecheck`/`pnpm --filter @jarvis/api typecheck`/`npx eslint` alle rene. Targeted test-kjøring
+80/80 grønt. Se Q-41 i OPEN_QUESTIONS.md for lukkingen av `google_cloud`-halvparten (`playwright`
+forblir åpen/under bygging, se D-339). Se D-337 i DECISIONS_AND_ASSUMPTIONS.md.
 
-**Neste:** Etter D-336 gjenstår: `apple_music`/`folio` (ingen klar D-64-vurdering ennå - trenger
-enten en dedikert undersøkelse eller Tobias sin presisering av hvilken faktisk leverandør "Folio"
-betyr), `homekit`/enhets-spesifikke punkter (`apple_shortcuts`/`apns`/`ios_shortcuts`/
-`apple_watch` - ingen passer det etablerte mønsteret uten ny infrastruktur), Home Assistant sin
-FAKTISKE transport-bygging (venter på enten videre dokumentasjonsverifisering ELLER Tobias sitt
-HA-oppsett - se D-336), og tre funn som venter på Tobias sitt svar: `zapier` (Q-40), `playwright`/
-`google_cloud` (Q-41), `openai_realtime`/`livekit` (Q-42). Ingen av disse kan bygges videre uten
-enten en egen undersøkelsesslice eller Tobias sin avklaring - standing-ordren "fortsett... begynn
-og fullfør noe annet" fortsetter mot neste egnet punkt.
+**Neste:** MCP-klient-kapabilitet for Zapier (D-338, Tobias sa eksplisitt "ja bygg mcp zapier" -
+konservativ FØRSTE slice: read-only `tools/list`-discovery + audit-logging, ZERO live-invokering
+inntil godkjennings-modellen for dynamisk-oppdagede verktøy er avgjort) og Playwright lokal
+nettleser-automasjon (D-339, Tobias bekreftet "viktig for at den skal kunne kontrollere mer" -
+egen prosess, `apps/browser-gateway`, mirrorer voice-gateway sin "egen prosess"-presedens) er
+BEGGE under aktiv bygging. Deretter gjenstår: `apple_music`/`folio` (ingen klar D-64-vurdering
+ennå), `homekit`/enhets-spesifikke punkter (`apple_shortcuts`/`apns`/`ios_shortcuts`/
+`apple_watch`), Home Assistant sin FAKTISKE transport-bygging (D-336, venter på videre
+dokumentasjonsverifisering ELLER Tobias sitt HA-oppsett), og `openai_realtime`/`livekit` (Q-42,
+uavklart - "Q-43" nevnt av Tobias i chat finnes IKKE i loggen, avklares når han bekrefter hva han
+mente).
+
+**Forrige milepæl (uendret): D-336: FUNN, IKKE en full byggeslice - Home Assistant sin transport
+BLE IKKE bygget (en genuin, ubekreftet room→entity-mapping-avgjørelse), MEN `philips_hue` sin
+backlog-plassholder FJERNET HELT (ren ALLEREDE_DEKKET-rydding).** Se D-336 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 **Forrige milepæl (uendret): D-335: Meta Ads bygget som en Growth Core-ADAPTER, lukker det siste
 D-316-notat-funnet med faktisk kode.** Se D-335 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
