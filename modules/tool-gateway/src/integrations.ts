@@ -3607,6 +3607,63 @@ export function firstWaveTools(
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_TODOIST_API_TOKEN", output_trust: "internal", transport: transport("todoist")
     },
+    /**
+     * D-330. Trello - ANDRE av de seks D-64-port-krevende faktisk bygget
+     * (D-291 stengte porten; D-329 bygget Todoist FØRST). `key`/`token`
+     * som query-parametere (IKKE en Authorization-header), se
+     * TrelloTransport sin doc-kommentar i live-transports.ts.
+     */
+    {
+      tool_id: "trello", action: "list_boards", description: "List alle boards eieren har tilgang til (GET /members/me/boards, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: empty, capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_TRELLO_TOKEN",
+      output_trust: "untrusted", transport: transport("trello")
+    },
+    {
+      tool_id: "trello", action: "list_cards", description: "List alle kort på et board (GET /boards/{board_id}/cards, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ board_id: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_TRELLO_TOKEN",
+      output_trust: "untrusted", transport: transport("trello")
+    },
+    {
+      tool_id: "trello", action: "get_card", description: "Hent ett kort (GET /cards/{card_id}, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ card_id: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_TRELLO_TOKEN",
+      output_trust: "untrusted", transport: transport("trello")
+    },
+    {
+      tool_id: "trello", action: "create_card", description: "Opprett et nytt kort på en liste (POST /cards, EKTE ekstern tilstand skapes)",
+      input_schema: record({ list_id: z.string(), name: z.string(), desc: z.string().optional() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "close_card eller manuell sletting i Trello",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TRELLO_TOKEN", output_trust: "internal", transport: transport("trello")
+    },
+    {
+      tool_id: "trello", action: "update_card", description: "Oppdater felter på et eksisterende kort (PUT /cards/{card_id}, delvis oppdatering)",
+      input_schema: record({ card_id: z.string(), name: z.string().optional(), desc: z.string().optional(), list_id: z.string().optional() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "ny update_card med forrige verdier",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TRELLO_TOKEN", output_trust: "internal", transport: transport("trello")
+    },
+    {
+      tool_id: "trello", action: "close_card", description: "Arkiver (lukk) et kort (PUT /cards/{card_id} {closed:true})",
+      input_schema: record({ card_id: z.string() }), capability_class: "B", scopes: ["tasks:write"],
+      reversible: true, rollback_procedure: "reopen_card med samme card_id",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TRELLO_TOKEN", output_trust: "internal", transport: transport("trello")
+    },
+    {
+      tool_id: "trello", action: "reopen_card", description: "Gjenåpne et tidligere arkivert kort, samme id (PUT /cards/{card_id} {closed:false})",
+      input_schema: record({ card_id: z.string() }), capability_class: "B", scopes: ["tasks:write"],
+      reversible: true, rollback_procedure: "close_card med samme card_id",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TRELLO_TOKEN", output_trust: "internal", transport: transport("trello")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

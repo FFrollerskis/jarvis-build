@@ -177,7 +177,7 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 | Meta Ads | `NY_BACKLOG` | Eksplisitt bekreftet fraværende i `modules/growth` sin egen transport-wiring-test («ZERO annonseplattform-leverandør-avhengighet ... ingen Meta Ads-credential-referanse») |
 | Linear | `NY_BACKLOG – klar for bygging som adapter (D-291)` | D-64-porten er ALLEREDE kjørt og avgjort for prosjektstyring/tickets (Operations Core, D-129, `OperationsTask` - status/prioritet/owner_person_id/frist) - Linear ville KUN vært en synk-adapter, aldri domeneeier. Ingen ny port nødvendig, se D-291 |
 | Jira | `NY_BACKLOG – klar for bygging som adapter (D-291)` | Samme som Linear |
-| Trello | `NY_BACKLOG – klar for bygging som adapter (D-291)` | Samme som Linear |
+| Trello | `ALLEREDE_BYGGET (D-330)` | `connector-registry.ts` id `trello`; ANDRE av de seks D-64-port-krevende faktisk bygget (etter Todoist, D-329) - kun transport-laget (`TrelloTransport`, `key`/`token` som query-parametere). `live_test: list_boards` |
 | Todoist | `ALLEREDE_BYGGET (D-329)` | `connector-registry.ts` id `todoist`; FØRSTE av de seks D-64-port-krevende faktisk bygget - kun transport-laget (`TodoistTransport`, unifisert `/api/v1/`-API), IKKE den fulle `OperationsTask`-synk-mappingen D-291 beskriver (den er egen, ennå ubygget oppgave). `live_test: list_tasks` |
 
 **D-64-notat (RETTET av D-291, 2026-09-26 - se DECISIONS_AND_ASSUMPTIONS.md):** CRM/prosjektstyring

@@ -2884,3 +2884,75 @@ export class TodoistTransport implements ToolTransport {
     throw new Error(`todoist_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-330. Trello - ANNEN av de seks D-64-port-krevende CRM-/prosjektstyrings-
+ * leverandørene bygget (D-291 stengte porten; D-329 bygget Todoist FØRST,
+ * samme mønster gjenbrukt her). API-formen BEVISST verifisert via WebSearch
+ * denne økten (sekundærkilde-krysssjekket - Atlassian sin egen developer.
+ * atlassian.com/cloud/trello REST-dokumentasjon, kryssjekket mot en
+ * uavhengig praktisk gjennomgang og Trello sin egen offisielle "getting
+ * started"-side hos Atlassian Support). Autentisering er `key`/`token` som
+ * QUERY-PARAMETERE (IKKE en Authorization-header - en STRUKTURELT annen
+ * auth-form enn hver annen connector i denne filen, Trello sitt API
+ * støtter riktignok også `Authorization: Bearer` men key/token-formen er
+ * den mest utbredte og eldste, bekreftet på tvers av alle kilder). `key`
+ * (API-nøkkelen) er en resolver-closure (samme mønster som Twilio sin
+ * `accountSid`), `token` er selve `credential`-parameteren. UTELUKKENDE
+ * transport-laget - se D-329 sin doc-kommentar over for hvorfor den fulle
+ * `OperationsTask`-synk-mappingen BEVISST ikke er bygget her.
+ */
+export class TrelloTransport implements ToolTransport {
+  constructor(private readonly apiKey: () => Promise<string | null>) {}
+
+  private async call(method: "GET" | "POST" | "PUT", path: string, body: Record<string, JsonValue> | undefined, credential: string): Promise<JsonValue> {
+    const key = await this.apiKey();
+    if (!key) throw new Error("trello_api_key_not_configured");
+    const separator = path.includes("?") ? "&" : "?";
+    const response = await fetch(`https://api.trello.com/1${path}${separator}key=${encodeURIComponent(key)}&token=${encodeURIComponent(credential)}`, {
+      method,
+      headers: { "content-type": "application/json" },
+      ...(body ? { body: JSON.stringify(body) } : {})
+    });
+    if (!response.ok) throw new Error(`trello_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_boards") {
+      const body = await this.call("GET", "/members/me/boards", undefined, credential);
+      return { data: body };
+    }
+    if (action === "list_cards") {
+      const body = await this.call("GET", `/boards/${String(parameters["board_id"])}/cards`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "get_card") {
+      const body = await this.call("GET", `/cards/${String(parameters["card_id"])}`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "create_card") {
+      const payload: Record<string, JsonValue> = { idList: String(parameters["list_id"]), name: String(parameters["name"]) };
+      if (typeof parameters["desc"] === "string") payload["desc"] = parameters["desc"];
+      const body = await this.call("POST", "/cards", payload, credential);
+      return { external_id: String((body as { id?: string }).id ?? ""), data: body };
+    }
+    if (action === "update_card") {
+      const payload: Record<string, JsonValue> = {};
+      if (typeof parameters["name"] === "string") payload["name"] = parameters["name"];
+      if (typeof parameters["desc"] === "string") payload["desc"] = parameters["desc"];
+      if (typeof parameters["list_id"] === "string") payload["idList"] = parameters["list_id"];
+      const body = await this.call("PUT", `/cards/${String(parameters["card_id"])}`, payload, credential);
+      return { data: body };
+    }
+    if (action === "close_card") {
+      const body = await this.call("PUT", `/cards/${String(parameters["card_id"])}`, { closed: true }, credential);
+      return { data: body };
+    }
+    if (action === "reopen_card") {
+      const body = await this.call("PUT", `/cards/${String(parameters["card_id"])}`, { closed: false }, credential);
+      return { data: body };
+    }
+    throw new Error(`trello_unsupported_action_${action}`);
+  }
+}

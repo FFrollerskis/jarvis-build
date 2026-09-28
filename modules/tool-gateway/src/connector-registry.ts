@@ -646,6 +646,21 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     live_test: { tool_id: "todoist", action: "list_tasks", parameters: () => ({}) }
   },
   {
+    // D-330 (bygget, flyttet ut av backlog_d64_gate - ANDRE av de seks
+    // D-64-port-krevende, samme mønster som Todoist/D-329). API-formen
+    // BEKREFTET via WebSearch denne økten (sekundærkilde-krysssjekket):
+    // `key`/`token` som QUERY-PARAMETERE - en STRUKTURELT annen auth-form
+    // enn hver annen connector her, se TrelloTransport sin doc-kommentar i
+    // live-transports.ts. `credential_refs` UENDRET (allerede to nøkler fra
+    // D-232-plassholderen - API-nøkkelen var ALLEREDE korrekt identifisert
+    // som en egen credential, ikke lagt til her). Dette er UTELUKKENDE
+    // transport-laget - se D-329 sin doc-kommentar over for hvorfor den
+    // fulle OperationsTask-synk-mappingen BEVISST ikke er bygget her.
+    id: "trello", display_name: "Trello", category: "tool_gateway",
+    credential_refs: ["JARVIS_TRELLO_API_KEY", "JARVIS_TRELLO_TOKEN"],
+    live_test: { tool_id: "trello", action: "list_boards", parameters: () => ({}) }
+  },
+  {
     // D-322 (bygget, flyttet ut av backlog): FØRSTE video-gen-connector -
     // API-formen BEKREFTET via WebSearch denne økten (kryssjekket mot flere
     // uavhengige kilder), IKKE bare trent kunnskap - se RunwayTransport sin
@@ -750,10 +765,10 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   { id: "meta_ads", display_name: "Meta Ads", category: "backlog", credential_refs: ["JARVIS_META_ADS_TOKEN"] },
   { id: "linear", display_name: "Linear", category: "backlog_d64_gate", credential_refs: ["JARVIS_LINEAR_API_KEY"] },
   { id: "jira", display_name: "Jira", category: "backlog_d64_gate", credential_refs: ["JARVIS_JIRA_API_TOKEN"] },
-  { id: "trello", display_name: "Trello", category: "backlog_d64_gate", credential_refs: ["JARVIS_TRELLO_API_KEY", "JARVIS_TRELLO_TOKEN"] },
-  // D-329: FØRSTE av de seks D-64-port-krevende (D-291 stengte selve porten;
-  // dette er første faktiske bygg) - kun transport-laget, se TodoistTransport
-  // sin doc-kommentar i live-transports.ts for hva som BEVISST gjenstår.
+  // D-329/D-330: FØRSTE (Todoist) og ANDRE (Trello) av de seks D-64-port-
+  // krevende faktisk bygget (D-291 stengte selve porten) - kun transport-
+  // laget, se TodoistTransport/TrelloTransport sine doc-kommentarer i
+  // live-transports.ts for hva som BEVISST gjenstår.
 
   // §4.12 Kart
   {

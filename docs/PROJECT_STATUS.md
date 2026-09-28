@@ -1,27 +1,23 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-329: FØRSTE av
-de seks D-64-port-krevende CRM-/prosjektstyrings-leverandørene faktisk bygget - Todoist, kun
-transport-laget.** D-291 (2026-09-26) hadde allerede stengt selve D-64-porten for hele gruppen
-(CRM → Business OS/D-49, prosjektstyring/tickets → Operations Core/D-129), men et FERSKT funn
-denne økten viste at `connector-registry.ts` sin kode (`category: "backlog_d64_gate"` +
-kommentarblokk) ALDRI var oppdatert etter D-291 - kun `docs/INTEGRATIONS.md` var rettet. Valgte
-Todoist først (enklest API-form av de seks - ren bearer-token). API-formen BEVISST verifisert via
-`WebSearch` (WebFetch mot developer.todoist.com er nettverk-egress-blokkert): den gamle
-`/rest/v2/tasks`-veien er BEKREFTET pensjonert, unifisert `/api/v1/`-vei brukt i stedet. Bygget:
-`TodoistTransport` - `list_tasks`/`get_task` (klasse A) + `create_task`/`update_task`/
-`close_task`/`reopen_task` (klasse B). `delete_task` BEVISST DEFERRED (D-41 - ingen sekundærkilde
-bekreftet eksakt HTTP-metode/status). Dette er UTELUKKENDE transport-laget - den fulle
-`OperationsTask`-synk-mappingen D-291 beskriver er en EGEN, ennå ubygget oppgave (se "Neste").
-`connector-registry.test.ts` oppdatert (18→17 gjenværende backlog, 6→5 D-64-gate, 41→42 bygde, 59
-totalt uendret). `drive-runtime-wiring.test.ts` "tom konstruktør"-telling 21→22. Ny
-`d329-todoist-transport.test.ts` (12 tester). `pnpm --filter @jarvis/tool-gateway typecheck`/
-`pnpm --filter @jarvis/api typecheck`/`npx eslint` på alle endrede filer - alle rene. Full relevant
-test-suite (`d329-todoist-transport`/`connector-registry`/`d242-connector-health-sweep`/
-`drive-runtime-wiring`) kjørt fersk: 62/62 grønt. Se D-329 i DECISIONS_AND_ASSUMPTIONS.md.
+**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-330: ANDRE av de
+seks D-64-port-krevende CRM-/prosjektstyrings-leverandørene faktisk bygget - Trello, kun
+transport-laget, SAMME mønster som Todoist (D-329).** Trello sitt API er STRUKTURELT annerledes
+nok til å verifisere separat: `key`/`token` som QUERY-PARAMETERE (IKKE en Authorization-header) -
+BEVISST verifisert via `WebSearch` (Atlassian sin developer.atlassian.com/cloud/trello-dokumentasjon,
+kryssjekket). Bygget: `TrelloTransport` - `list_boards`/`list_cards`/`get_card` (klasse A) +
+`create_card`/`update_card`/`close_card`/`reopen_card` (klasse B, arkivering via `closed:true/false`
+- Trello sitt API bruker selv "closed", grensesnittet viser "archived"). UTELUKKENDE
+transport-laget - samme `OperationsTask`-synk-avgrensning som D-329. `connector-registry.test.ts`
+oppdatert (17→16 gjenværende backlog, 5→4 D-64-gate, 42→43 bygde, 59 totalt uendret).
+`drive-runtime-wiring.test.ts` "tom konstruktør"-telling UENDRET (resolver-argument-form, teller
+ikke med). Ny `d330-trello-transport.test.ts` (13 tester). `pnpm --filter @jarvis/tool-gateway
+typecheck`/`pnpm --filter @jarvis/api typecheck`/`npx eslint` - alle rene. Targeted test-kjøring
+(`d330-trello-transport`/`connector-registry`/`d242-connector-health-sweep`/`drive-runtime-wiring`)
+63/63 grønt. Se D-330 i DECISIONS_AND_ASSUMPTIONS.md.
 
-**Neste:** De fem GJENVÆRENDE D-64-port-krevende leverandørene (hubspot/pipedrive/linear/jira/
-trello) kan bygges på SAMME måte som Todoist - transport-lag først, uavhengig av den større
+**Neste:** De fire GJENVÆRENDE D-64-port-krevende leverandørene (hubspot/pipedrive/linear/jira) kan
+bygges på SAMME måte som Todoist/Trello - transport-lag først, uavhengig av den større
 `OperationsTask`-synk-arkitekturen (poll-basert sweep vs. webhook vs. on-demand fra verktøykall,
 hvilken modul eier synk-loopen - IKKE avgjort, ikke gjettet frem). Tre funn venter fortsatt på
 Tobias sitt svar før noe kodes: `zapier` (Q-40, MCP-klient-kapabilitet?), `playwright`/
@@ -29,6 +25,9 @@ Tobias sitt svar før noe kodes: `zapier` (Q-40, MCP-klient-kapabilitet?), `play
 - sanntids-samtale-økt/alternativ SFU-transport). Resterende vage backlog-punkter (`apple_music`/
 `folio`/`meta_ads`) og enhets-/plattform-spesifikke punkter (`apple_shortcuts`/`homekit`/
 `philips_hue`/`apns`/`ios_shortcuts`/`apple_watch`) har INGEN klar D-64-vurdering ennå.
+
+**Forrige milepæl (uendret): D-329: FØRSTE av de seks D-64-port-krevende faktisk bygget - Todoist,
+kun transport-laget.** Se D-329 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 **Forrige milepæl (uendret): D-328: FUNN, IKKE en byggeslice - `openai_realtime`/`livekit`
 FJERNET HELT fra `connector-registry.ts`, passer INGEN eksisterende adapter-grensesnitt.** Se
