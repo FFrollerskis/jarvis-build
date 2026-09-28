@@ -44,7 +44,7 @@ import {
   runMemoryRetentionSweepForAllTenants
 } from "@jarvis/memory";
 import {
-  DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, GithubRateLimitController, GithubTransport,
+  DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
   allMeshTools, PgGithubRateLimitStore,
   TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
@@ -826,6 +826,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // ToolGateway sin secret-provider-kjede, ALDRI konstruktør-parameter
     // (se mcp-zapier-transport.ts).
     mcp_zapier: new McpZapierTransport(),
+    // D-339 (Playwright-sliceen): lat/tom-konstruktør - selve base-URL-en
+    // (ingen ekte hemmelighet, kun en konfigurert adresse til
+    // apps/browser-gateway sin egen prosess) leses via credential_ref inni
+    // ToolGateway sin secret-provider-kjede, ALDRI konstruktør-parameter
+    // (se browser-transport.ts).
+    browser: new BrowserGatewayTransport(),
     // UA-7 Communications Hub - foerste slice (D-119): eget
     // `conversation_graph.*`-namespace. D-119 FINAL AUTHORITY HARDENING:
     // denne transporten MOTTAR og KREVER `ToolInvocationContext` (D-68) -

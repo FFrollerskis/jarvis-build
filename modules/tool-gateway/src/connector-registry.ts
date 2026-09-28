@@ -528,7 +528,21 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     credential_refs: ["JARVIS_EXA_API_KEY"],
     live_test: { tool_id: "exa", action: "web_search", parameters: () => ({ query: "ping" }) }
   },
-  { id: "playwright", display_name: "Playwright", category: "backlog", credential_refs: ["JARVIS_PLAYWRIGHT_API_KEY"] },
+  {
+    // D-339 (bygget, flyttet ut av backlog - Tobias direkte i chat: "playwrite
+    // er viktig for at den skal kunne kontrollere mer", bekrefter lokal/selv-
+    // hostet nettleserautomasjon, ALDRI en tredjeparts cloud-browser-
+    // leverandør). KUN read-only-halvparten (`navigate`/`extract_text`/
+    // `screenshot`) - `click`/`fill_form`/`submit` DEFERRED, se
+    // apps/browser-gateway/src/browser-engine.ts. `credential_refs` er
+    // BASE-URL-en til apps/browser-gateway sin egen prosess - INGEN ekte
+    // API-nøkkel finnes (den gamle plassholderen antok feilaktig én).
+    // Oppdatert i place (var en D-232 backlog-plassholder) - ALDRI en ny,
+    // separat oppføring med samme id (D-293-disiplinen).
+    id: "playwright", display_name: "Playwright (lokal nettleserautomasjon, kun read-only)", category: "tool_gateway",
+    credential_refs: ["JARVIS_BROWSER_GATEWAY_BASE_URL"],
+    live_test: { tool_id: "browser", action: "navigate", parameters: () => ({ url: "https://example.com" }) }
+  },
 
   // §4.7 Tale / video / media-AI
   // D-328: "openai_realtime" fjernet HELT herfra - IKKE en ToolGateway-

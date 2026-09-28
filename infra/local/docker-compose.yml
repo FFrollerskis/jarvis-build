@@ -245,5 +245,27 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  browser-gateway:
+    # D-339: egen prosess (CLAUDE.md ufravikelig regel 5, SAMME "egen
+    # prosess"-presedens som voice-gateway) - en ekte nettleserøkt har
+    # tilstand (cookies/innlogging/faner) som ikke passer inn i
+    # `api`/`worker`. Ingen database, ingen credentials - `credential_ref`
+    # (`JARVIS_BROWSER_GATEWAY_BASE_URL`) på `api`/`worker`-siden peker
+    # bare på DENNE tjenestens container-interne adresse.
+    build:
+      context: ../..
+      dockerfile: infra/local/browser-gateway.Dockerfile
+    environment:
+      JARVIS_BROWSER_GATEWAY_PORT: "${JARVIS_BROWSER_GATEWAY_PORT:-3030}"
+    ports:
+      - "${JARVIS_BROWSER_GATEWAY_PORT:-3030}:${JARVIS_BROWSER_GATEWAY_PORT:-3030}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${JARVIS_BROWSER_GATEWAY_PORT:-3030}/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+
 volumes:
   jarvis-pgdata:

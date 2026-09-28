@@ -1,43 +1,49 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR #199) - **D-338: MCP-
-klient-kapabilitet for Zapier, KUN discovery-halvparten - Tobias sitt direkte chat-svar "ja bygg mcp
-zapier", bygget PARALLELT mens PR #199 (D-337) sin CI kjørte ("Jobb videre mens ci kjører").**
-Lukker Q-40 del (a) MED JA; del (b) - godkjenningsmodell for LIVE INVOKERING av dynamisk oppdagede
-verktøy - BEVISST IKKE avgjort, ingen `call_tool`-handling finnes i det hele tatt. Bygget:
-`McpZapierTransport` (`modules/tool-gateway/src/mcp-zapier-transport.ts`) - KUN `list_tools`
-(klasse A, JSON-RPC 2.0 `tools/list` mot Zapier sin MCP-server, `output_trust: "untrusted"`).
-Selve MCP-server-URL-en (personlig provisjonert, hemmelighets-ekvivalent) lagres som
-`JARVIS_MCP_ZAPIER_SERVER_URL` via `credential_ref`. En `text/event-stream`-respons rapporteres
-ærlig `mcp_streamable_sse_not_supported` (DEFERRED). `connector-registry.ts` sin gamle
-`"zapier"`-plassholder oppdatert I PLACE (backlog → tool_gateway). Ny `mcp-zapier-transport.test.ts`
-(13 tester). `connector-registry.test.ts` (`BACKLOG_IDS` 9→8, registeret UENDRET 56 - oppdatert i
-place, ikke fjernet). `drive-runtime-wiring.test.ts` "tom konstruktør"-telling 25→26. Full-workspace
-`pnpm -w typecheck` (32/32)/`npx eslint apps modules packages` begge rene. Targeted test-kjøring
-67/67 grønt. `MCP_ZAPIER_LIVE_GATE=PENDING_CREDENTIALS`. Se Q-40/D-338.
+**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR #199) - **D-339:
+Playwright lokal nettleser-automasjon, KUN read-only-halvparten - Tobias sitt direkte chat-svar
+"playwrite er viktig for at den skal kunne kontrollere mer" (bekrefter branch (a) fra D-326, ALDRI
+en cloud-browser-vendor), bygget PARALLELT mens PR #199 sin CI kjørte.** `click`/`fill_form`/
+`submit` BEVISST IKKE bygget - egen, fersk domene-vokterdesign kreves før mutasjon av tredjeparts
+nettsider. Ny, EGEN prosess `apps/browser-gateway` (CLAUDE.md regel 5, mirrorer voice-gateway):
+`browser-engine.ts` (`PlaywrightBrowserEngine`, delt lat-startet Chromium) + `server.ts`
+(`POST /invoke`) + `main.ts`. `BrowserGatewayTransport` (`modules/tool-gateway/src/browser-
+transport.ts`) broer inn via HTTP. Tre `ToolDefinition`-er - `browser.navigate`/`extract_text`/
+`screenshot` (alle klasse A, `output_trust: "untrusted"`). `JARVIS_BROWSER_GATEWAY_BASE_URL` som
+`credential_ref` (INGEN ekte hemmelighet, kun en prosess-adresse). `infra/local/browser-
+gateway.Dockerfile` (Microsoft sitt offisielle Playwright-image, `v1.63.0-noble`, VERIFISERT å
+eksistere) + ny `browser-gateway`-tjeneste i `docker-compose.yml`. `connector-registry.ts` sin
+gamle `"playwright"`-plassholder oppdatert I PLACE. Ny `apps/browser-gateway/test/server.test.ts`
+(9 tester, fake nettleser-motor) + `modules/tool-gateway/test/browser-transport.test.ts`
+(7 tester) + `modules/core/test/d339-browser-gateway-compose-wiring.test.ts` (5 tester).
+`connector-registry.test.ts` (`BACKLOG_IDS` 8→7, registeret UENDRET 56). `drive-runtime-wiring.test.ts`
+"tom konstruktør"-telling 26→27. Full-workspace `pnpm -w typecheck` (33/34 pakker med typecheck-
+script, inkl. nye `@jarvis/browser-gateway`)/`npx eslint apps modules packages` begge rene.
+Targeted test-kjøring 84/84 grønt. `BROWSER_GATEWAY_LIVE_GATE=PENDING_HOST_ACCEPTANCE` - INGEN
+ekte Chromium startet i CI denne sliceen (kun fake-motor-tester). Se Q-41/D-326/D-339.
+
+**Forrige milepæl (samme PR #199): D-338: MCP-klient-kapabilitet for Zapier, KUN discovery-
+halvparten - Tobias sitt direkte chat-svar "ja bygg mcp zapier".** Lukker Q-40 del (a) MED JA; del
+(b) BEVISST IKKE avgjort. `McpZapierTransport` - KUN `list_tools` (klasse A, JSON-RPC 2.0
+`tools/list`, `output_trust: "untrusted"`). `JARVIS_MCP_ZAPIER_SERVER_URL`. 67/67 targeted tester
+grønt. Se Q-40/D-338.
 
 **Forrige milepæl (samme PR #199): D-337: Google Cloud "servere" bygget som en GCE-connector
 (Google Compute Engine) - direkte svar på Tobias sin chat-instruks: "Google cloud skal være Google
-ads alle servere alle markedsføring osv osv".** Google Ads er ALLEREDE bygget (D-83); "alle
-servere" = Google Compute Engine. "All markedsføring osv osv" utover Ads BEVISST IKKE bygget denne
-sliceen. `GceTransport` (klasse A list/get, klasse D start/stop/reset med asynkron operasjon-
-polling-til-DONE) + `gce-target-policy.ts` (SAMME target-policy-oppdeling som Docker D-105).
+ads alle servere alle markedsføring osv osv".** `GceTransport` (klasse A list/get, klasse D
+start/stop/reset med asynkron operasjon-polling-til-DONE) + `gce-target-policy.ts`.
 `JARVIS_GOOGLE_CLOUD_REFRESH_TOKEN`/`_PROJECT_ID`. 80/80 targeted tester grønt. Se Q-41/D-337. Én
 CI-runde krevde en fiks: `q34-preflight-target-existence.test.ts` sin "audit-as-code"-test manglet
 de tre nye `gce.*`-mutasjonene i sin reviderte liste - fikset (`requires_target: true` for alle
-tre), verifisert direkte mot de faktiske `ToolDefinition`-objektene (embedded Postgres i denne
-sandboxen blokkerer selve test-filens `beforeAll` med et kjent, forhåndseksisterende
-`/tmp`-tillatelsesproblem).
+tre).
 
-**Neste:** Playwright lokal nettleser-automasjon (D-339, Tobias bekreftet "viktig for at den skal
-kunne kontrollere mer" - egen prosess, `apps/browser-gateway`, mirrorer voice-gateway sin "egen
-prosess"-presedens) er under aktiv bygging. Deretter: PR #199 sin CI må verifiseres grønt (D-337
-sin fiks nettopp pushet) FØR merge under D-192. Deretter gjenstår: `apple_music`/`folio` (ingen
-klar D-64-vurdering ennå), `homekit`/enhets-spesifikke punkter (`apple_shortcuts`/`apns`/
-`ios_shortcuts`/`apple_watch`), Home Assistant sin FAKTISKE transport-bygging (D-336, venter på
-videre dokumentasjonsverifisering ELLER Tobias sitt HA-oppsett), og `openai_realtime`/`livekit`
-(Q-42, uavklart - "Q-43" nevnt av Tobias i chat finnes IKKE i loggen, avklares når han bekrefter
-hva han mente).
+**Neste:** PR #199 sin CI må verifiseres grønt (D-337/D-338/D-339 alle pushet til samme PR) FØR
+merge under D-192. Deretter gjenstår: `apple_music`/`folio` (ingen klar D-64-vurdering ennå),
+`homekit`/enhets-spesifikke punkter (`apple_shortcuts`/`apns`/`ios_shortcuts`/`apple_watch`), Home
+Assistant sin FAKTISKE transport-bygging (D-336, venter på videre dokumentasjonsverifisering
+ELLER Tobias sitt HA-oppsett), `openai_realtime`/`livekit` (Q-42, uavklart - "Q-43" nevnt av
+Tobias i chat finnes IKKE i loggen, avklares når han bekrefter hva han mente), og `browser.click`/
+`fill_form`/`submit` (D-339 sin bevisst utsatte mutasjonshalvpart - egen domene-vokterdesign).
 
 **Forrige milepæl (uendret): D-336: FUNN, IKKE en full byggeslice - Home Assistant sin transport
 BLE IKKE bygget (en genuin, ubekreftet room→entity-mapping-avgjørelse), MEN `philips_hue` sin

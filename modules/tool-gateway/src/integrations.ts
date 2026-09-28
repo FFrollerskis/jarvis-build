@@ -1721,6 +1721,39 @@ export function firstWaveTools(
       idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_MCP_ZAPIER_SERVER_URL", output_trust: "untrusted", transport: transport("mcp_zapier")
     },
+    // D-339 (Tobias direkte i chat: "playwrite er viktig for at den skal
+    // kunne kontrollere mer" - bekrefter lokal/selv-hostet nettleser-
+    // automasjon, ALDRI en tredjeparts cloud-browser-leverandør). KUN
+    // read-only-handlingene denne FØRSTE sliceen - `click`/`fill_form`/
+    // `submit` (mutasjon av tredjeparts nettsider) er BEVISST IKKE bygget,
+    // se `apps/browser-gateway/src/browser-engine.ts` sitt filhode for full
+    // begrunnelse. `output_trust: "untrusted"` for ALLE tre - sideinnhold
+    // (tittel/tekst/skjermbilde) er ekstern data (CLAUDE.md regel 7).
+    // `credential_ref` er selve BASE-URL-en til `apps/browser-gateway`
+    // sin egen prosess (`JARVIS_BROWSER_GATEWAY_BASE_URL`) - INGEN ekte
+    // hemmelighet finnes (Jarvis sin egen sideprosess), se
+    // `browser-transport.ts`.
+    {
+      tool_id: "browser", action: "navigate", description: "Naviger den delte nettleserfanen til en URL (http/https), returnerer den faktiske URL-en/tittelen etter lasting (untrusted)",
+      input_schema: record({ url: z.string().max(2000) }), capability_class: "A",
+      scopes: ["browser:read"], reversible: true, rollback_procedure: "ingen (ren navigering, ingen tilstand endres utenfor selve fanen)",
+      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 30,
+      credential_ref: "JARVIS_BROWSER_GATEWAY_BASE_URL", output_trust: "untrusted", transport: transport("browser")
+    },
+    {
+      tool_id: "browser", action: "extract_text", description: "Les den synlige teksten fra den delte nettleserfanen sin GJELDENDE side (etter siste navigate, untrusted)",
+      input_schema: empty, capability_class: "A",
+      scopes: ["browser:read"], reversible: true, rollback_procedure: "ingen (ren lesing)",
+      idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 30,
+      credential_ref: "JARVIS_BROWSER_GATEWAY_BASE_URL", output_trust: "untrusted", transport: transport("browser")
+    },
+    {
+      tool_id: "browser", action: "screenshot", description: "Ta et skjermbilde (PNG, base64) av den delte nettleserfanen sin GJELDENDE side (etter siste navigate, untrusted)",
+      input_schema: empty, capability_class: "A",
+      scopes: ["browser:read"], reversible: true, rollback_procedure: "ingen (ren lesing)",
+      idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 30,
+      credential_ref: "JARVIS_BROWSER_GATEWAY_BASE_URL", output_trust: "untrusted", transport: transport("browser")
+    },
     // UA-6 Finance & Spend Integrity Gateway - FØRSTE slice (D-107):
     // provider-nøytralt `finance.*`-namespace. `submit_payment_intent` er
     // klasse D (den ENESTE handlingen som faktisk poster en ekte
