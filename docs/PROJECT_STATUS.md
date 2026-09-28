@@ -1,31 +1,35 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-325: FUNN, IKKE
-en byggeslice - Zapier sin gamle NLA REST-API er SUNSET (29. mai 2026, FØR i dag), leverandøren
-peker nå til en MCP-server (`mcp.zapier.com`), IKKE en REST-connector.** Plukket opp `zapier` fra
-backlogen (Tobias: "Fortsett" - mens PR #195/D-324 sin CI fortsatt kjørte). `WebSearch` (som
-lyktes der `WebFetch` fortsatt er blokkert) avdekket at Zapier sin integrasjonsform har endret seg
-STRUKTURELT - Model Context Protocol (MCP) er en helt annen kapabilitetsklasse enn ALLE
-eksisterende `ToolTransport`-implementasjoner (statiske REST-kall). INGEN kode skrevet - å bygge
-en `ZapierTransport` nå ville ENTEN truffet et dødt endepunkt ELLER krevd en ubedt, stor
-arkitekturutvidelse (en generell MCP-klient-kapabilitet). Ny `Q-40` registrert i
-`docs/OPEN_QUESTIONS.md` som ber Tobias eksplisitt avgjøre om en MCP-klient-kapabilitet i
-ToolGateway er ønsket. `zapier` forblir UENDRET i backlogen. Se D-325 i
+**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-326: FUNN, IKKE
+en byggeslice - `playwright`/`google_cloud` er fortsatt for VAGE til å bygge, nå FORMALISERT med et
+eget Q-nummer (Q-41) - fikser en tidligere "loggført kun som løs prosa"-lapsus.** Plukket opp
+`playwright` fra backlogen (Tobias: "Fortsett å jobb men vi venter på ci" - mens PR #195/D-325 sin
+CI fortsatt kjørte). `WebSearch` bekreftet OG SKJERPET en gammel, ikke-formalisert observasjon
+lenger nede i denne filen ("Nytt merknad"-seksjonen): Playwright er et open source-bibliotek uten
+egen API-nøkkel-modell - MINST syv innbyrdes KONKURRERENDE tredjeparts cloud-browser-vendorer
+finnes i stedet (Browserbase/TestingBot/Bug0/Scrapfly/Browserize/Hyperbrowser/Kernel), og å velge
+én ville vært et ubedt leverandørvalg. `google_cloud` er vag av en annen grunn (hundrevis av
+uavhengige del-API-er, ikke ett avgrenset scope). INGEN kode skrevet for noen av de to - begge
+forblir UENDRET i backlogen. Ny `Q-41` registrert i `docs/OPEN_QUESTIONS.md`. Se D-326 i
 DECISIONS_AND_ASSUMPTIONS.md.
 
-**Neste:** `zapier` venter på Tobias sitt svar på Q-40 (MCP-klient-kapabilitet ønsket eller ikke) -
-IKKE kodbar før den porten er kjørt. Video-gen-familien er FULLFØRT (runway D-322, kling D-323,
-google_veo D-324) - `higgsfield` gjenstår som en EGEN, senere vurdering (samme WebSearch-disiplin
-bør prøves først). De resterende tale-backlog-punktene (`livekit`/`openai_realtime`) MÅ fortsatt
-flagges eksplisitt lavere-sikkerhet hvis/når bygget - `livekit` er en WebRTC/SFU-
-infrastrukturleverandør (server-SDK/token-generering, IKKE et enkelt REST-endepunkt, en vesentlig
-større byggeoppgave enn ElevenLabs/Deepgram/Telnyx) og `openai_realtime` er en nyere, potensielt
-raskere-bevegende beta-API. D-64-CRM-gruppa (hubspot/pipedrive/linear/jira/trello/todoist) står
-fortsatt uavklart og krever en egen, større sync-adapter-arkitektur (D-291). Resterende vage
-backlog-punkter (`google_cloud`/`playwright`/`apple_music`/`folio`/`meta_ads`) og enhets-/
-plattform-spesifikke punkter (`apple_shortcuts`/`homekit`/`philips_hue`/`apns`/`ios_shortcuts`/
-`apple_watch`) har INGEN klar D-64-vurdering ennå - ingen av dem bør forsøkt kodet uten enten en
-egen WebSearch-vurderingsrunde ELLER en presisering fra Tobias om ønsket omfang.
+**Neste:** `playwright`/`google_cloud` (Q-41) og `zapier` (Q-40) venter alle på et Tobias-svar før
+noe kodes. Video-gen-familien er FULLFØRT (runway D-322, kling D-323, google_veo D-324) -
+`higgsfield` gjenstår som en EGEN, senere vurdering (samme WebSearch-disiplin bør prøves først). De
+resterende tale-backlog-punktene (`livekit`/`openai_realtime`) MÅ fortsatt flagges eksplisitt
+lavere-sikkerhet hvis/når bygget - `livekit` er en WebRTC/SFU-infrastrukturleverandør (server-SDK/
+token-generering, IKKE et enkelt REST-endepunkt, en vesentlig større byggeoppgave enn ElevenLabs/
+Deepgram/Telnyx) og `openai_realtime` er en nyere, potensielt raskere-bevegende beta-API.
+D-64-CRM-gruppa (hubspot/pipedrive/linear/jira/trello/todoist) står fortsatt uavklart og krever en
+egen, større sync-adapter-arkitektur (D-291). Resterende vage backlog-punkter (`apple_music`/
+`folio`/`meta_ads`) og enhets-/plattform-spesifikke punkter (`apple_shortcuts`/`homekit`/
+`philips_hue`/`apns`/`ios_shortcuts`/`apple_watch`) har INGEN klar D-64-vurdering ennå - ingen av
+dem bør forsøkt kodet uten enten en egen WebSearch-vurderingsrunde ELLER en presisering fra Tobias
+om ønsket omfang.
+
+**Forrige milepæl (uendret): D-325: FUNN, IKKE en byggeslice - Zapier sin gamle NLA REST-API er
+SUNSET, leverandøren peker nå til en MCP-server, IKKE en REST-connector.** Se D-325 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 **Forrige milepæl (uendret): D-324: TREDJE og
 SISTE video-gen-familie-slice - Google Veo bygget som en ORDINÆR `ToolGateway`-connector** (Tobias
