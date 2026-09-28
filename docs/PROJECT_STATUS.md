@@ -1,37 +1,25 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-327: FJERDE og
-FAKTISK SISTE video-gen-familie-slice - Higgsfield bygget som en ORDINÆR `ToolGateway`-connector,
-MEN med et EKSPLISITT kaller-oppgitt `model_path` i stedet for en hardkodet default-modell.**
-Tobias ga en stående fullmakt i chat ("fortsett... til alt er gjennomført... Watch hvis en ci er
-grønn perfekt merge om den er rød fiks... begynn og fullfør noe annet") - fortsatte derfor til
-`higgsfield`, det fjerde opprinnelig identifiserte video-gen-punktet, mens PR #195/D-326 sin CI
-fortsatt kjørte. Kritisk D-64-funn: Higgsfield sitt API er en MULTI-MODELL-MARKEDSPLASS som
-proxyer FLERE, uavhengige tredjeparts videomodeller under ETT vertsnavn (bekreftet eksempel
-`/bytedance/seedance-2.0/text-to-video`) - INGEN stabilt "standard" endepunkt finnes. Å hardkode
-én modellsti som default ville vært et ubedt, NESTET leverandørvalg (samme feilklasse som D-326).
-Løst STRUKTURELT, ikke gjettet: `generate_video` krever et EKSPLISITT `model_path`-parameter fra
-KALLEREN - valget av underliggende modell forblir hos den som faktisk bruker verktøyet, ikke
-forhåndsbestemt av Claude. Bygget `HiggsfieldTransport` (`live-transports.ts`) -
-`Authorization: Key <key_id>:<key_secret>` (kolon-sammensatt i klartekst, IKKE en signeringsoperasjon
-som Kling). To handlinger - `generate_video` (klasse B, EKTE kostnad - ALDRI `live_test`) og
-`get_task_status` (klasse A, PÅKREVD polling). BEVISST INGEN `live_test` (samme
-`NO_LIVE_TEST_IDS`-disiplin som Kling, D-323). `connector-registry.ts` sin D-232-plassholder
-oppdatert i place (`category: "backlog"` → `"tool_gateway"`, `credential_refs` utvidet fra én til
-to nøkler). Wiret inn med resolver-argument-konstruktør (ingen bump i "tom konstruktør"-tellingen).
-NY `modules/tool-gateway/test/d327-higgsfield-transport.test.ts` (11 tester).
-`connector-registry.test.ts`/`drive-runtime-wiring.test.ts` oppdatert (20 gjenværende
-backlog-punkter, 41 bygde, 61 totalt UENDRET). `pnpm --filter @jarvis/tool-gateway
-typecheck`/`pnpm --filter @jarvis/api typecheck`/`npx eslint` rene. Se D-327 i
-DECISIONS_AND_ASSUMPTIONS.md.
+**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-328: FUNN, IKKE
+en byggeslice - `openai_realtime`/`livekit` FJERNET HELT fra `connector-registry.ts` - IKKE fordi
+de hører hjemme et annet sted (elevenlabs/deepgram-mønsteret), men fordi de IKKE passer NOEN
+eksisterende adapter-grensesnitt.** Fortsatte den stående fullmakten fra Tobias ved å revidere de
+resterende tale-backlog-punktene etter at video-gen-familien var fullført (D-327). `openai_realtime`
+sto fortsatt som en ordinær `ToolGateway`-plassholder - samme opprinnelige feil som elevenlabs/
+deepgram HADDE (D-319/D-320) - MEN OpenAI Realtime API er en VEDVARENDE full-dupleks WebSocket-økt
+(samtaletilstand/avbrudds-håndtering/verktøykall INNI selve tilkoblingen), strukturelt ulik BÅDE
+`ToolTransport` OG de eksisterende `SttAdapter`/`TtsAdapter`-grensesnittene - å bygge den som "bare
+en ny SttAdapter" ville vært en feil forenkling, ikke en flytting. `livekit` er en WebRTC/SFU-
+media-infrastrukturplattform - et ALTERNATIVT sanntids-transportlag til voice-gateway sin
+EKSISTERENDE WebSocket-arkitektur, ikke en connector ved siden av den. INGEN kode skrevet for noen
+av de to - BEGGE fjernet HELT fra registeret (61→59 totale oppføringer, IKKE en byggeslice).
+`.env.example`-nøklene BEHOLDT (fremtidig implementasjon vil trenge dem). Ny `Q-42` registrert i
+`docs/OPEN_QUESTIONS.md`. Se D-328 i DECISIONS_AND_ASSUMPTIONS.md.
 
-**Neste:** Video-gen-familien (runway/kling/google_veo/higgsfield) er NÅ FULLSTENDIG FULLFØRT -
-ingen gjenstående punkter i denne familien. `playwright`/`google_cloud` (Q-41) og `zapier` (Q-40)
-venter fortsatt på et Tobias-svar før noe kodes. De resterende tale-backlog-punktene
-(`livekit`/`openai_realtime`) MÅ fortsatt flagges eksplisitt lavere-sikkerhet hvis/når bygget -
-`livekit` er en WebRTC/SFU-infrastrukturleverandør (server-SDK/token-generering, IKKE et enkelt
-REST-endepunkt, en vesentlig større byggeoppgave enn ElevenLabs/Deepgram/Telnyx) og
-`openai_realtime` er en nyere, potensielt raskere-bevegende beta-API. D-64-CRM-gruppa
+**Neste:** Video-gen-familien (runway/kling/google_veo/higgsfield) er FULLSTENDIG FULLFØRT. Tre
+funn venter nå på Tobias sitt svar før noe kodes: `zapier` (Q-40, MCP-klient-kapabilitet?),
+`playwright`/`google_cloud` (Q-41, for vage), `openai_realtime`/`livekit` (Q-42, krever en NY
+arkitekturkategori - sanntids-samtale-økt/alternativ SFU-transport). D-64-CRM-gruppa
 (hubspot/pipedrive/linear/jira/trello/todoist) står fortsatt uavklart og krever en egen, større
 sync-adapter-arkitektur (D-291). Resterende vage backlog-punkter (`apple_music`/`folio`/
 `meta_ads`) og enhets-/plattform-spesifikke punkter (`apple_shortcuts`/`homekit`/`philips_hue`/
@@ -39,7 +27,13 @@ sync-adapter-arkitektur (D-291). Resterende vage backlog-punkter (`apple_music`/
 krever ES256-JWT-signering + Apple Developer-team-ID (strukturelt ulikt alt bygget så langt),
 `ios_shortcuts`/`apple_watch`/`apple_shortcuts` er enhetsside automasjon (IKKE en cloud REST-API i
 det hele tatt) - ingen av disse bør forsøkt kodet uten enten en egen WebSearch-vurderingsrunde
-ELLER en presisering fra Tobias om ønsket omfang.
+ELLER en presisering fra Tobias om ønsket omfang. Gjenstående backlog (18 punkter) er nå
+UTELUKKENDE punkter som krever Tobias sitt input eller en vesentlig større arkitektur-BO - INGEN
+flere "rene", trygt-gjettbare enkeltstående connector-slicer gjenstår i denne sveipen.
+
+**Forrige milepæl (uendret): D-327: FJERDE og FAKTISK SISTE video-gen-familie-slice - Higgsfield
+bygget som en ORDINÆR `ToolGateway`-connector, MEN med et EKSPLISITT kaller-oppgitt `model_path` i
+stedet for en hardkodet default-modell.** Se D-327 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 **Forrige milepæl (uendret): D-326: FUNN, IKKE en byggeslice - `playwright`/`google_cloud` er
 fortsatt for VAGE til å bygge, nå FORMALISERT med et eget Q-nummer (Q-41).** Se D-326 i

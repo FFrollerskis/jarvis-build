@@ -523,7 +523,16 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   { id: "playwright", display_name: "Playwright", category: "backlog", credential_refs: ["JARVIS_PLAYWRIGHT_API_KEY"] },
 
   // §4.7 Tale / video / media-AI
-  { id: "openai_realtime", display_name: "OpenAI Realtime", category: "backlog", credential_refs: ["JARVIS_OPENAI_REALTIME_API_KEY"] },
+  // D-328: "openai_realtime" fjernet HELT herfra - IKKE en ToolGateway-
+  // connector (samme domenegrense-feil som elevenlabs/deepgram, D-319/
+  // D-320), MEN OGSÅ IKKE byggbar som en enkel SpeechAdapter-utvidelse:
+  // OpenAI Realtime API er en VEDVARENDE, full-dupleks WebSocket-økt
+  // (samtaletilstand/avbrudds-håndtering/verktøykall INNI selve
+  // tilkoblingen) - strukturelt ulik BÅDE ToolTransport (statisk REST)
+  // OG de EKSISTERENDE SttAdapter/TtsAdapter-grensesnittene (enkle
+  // batch-/strømmings-forespørsler). Krever en EGEN, ny arkitekturbeslutning
+  // (en økt-/tilkoblingshåndteringsmodell) FØR noe kan kodes - se D-328 i
+  // DECISIONS_AND_ASSUMPTIONS.md og Q-42 i OPEN_QUESTIONS.md.
   // D-319: "elevenlabs" fjernet HELT herfra - dette er en TALE-leverandør
   // (TTS), IKKE en ToolGateway-connector. En egen ToolTransport ville vært
   // en D-64-stil domenegrense-feil (CLAUDE.md regel 3: SpeechAdapter er den
@@ -536,7 +545,14 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   // D-320: "deepgram" fjernet HELT herfra - SAMME grunn/mønster som
   // "elevenlabs" (D-319) rett over, bare STT i stedet for TTS. Bygget som
   // `DeepgramStt` (`apps/voice-gateway/src/stt.ts`).
-  { id: "livekit", display_name: "LiveKit", category: "backlog", credential_refs: ["JARVIS_LIVEKIT_API_KEY"] },
+  // D-328: "livekit" fjernet HELT herfra - SAMME begrunnelse som
+  // "openai_realtime" rett over: LiveKit er en WebRTC/SFU-media-
+  // infrastrukturplattform (server-SDK for rom-/token-styring, ekte
+  // sanntids audio/video-transport), IKKE en enkel REST-API OG IKKE en
+  // enkel SpeechAdapter-utvidelse - den er strukturelt en ALTERNATIV
+  // sanntids-transportlag til `apps/voice-gateway` sin EKSISTERENDE
+  // WebSocket-arkitektur, ikke en connector ved siden av den. Se D-328 i
+  // DECISIONS_AND_ASSUMPTIONS.md og Q-42 i OPEN_QUESTIONS.md.
   {
     // D-321 (bygget, flyttet ut av backlog): Telnyx er en meldingsleverandør
     // (SMS/telefoni), IKKE en tale-leverandør (STT/TTS) - HØRER derfor hjemme
