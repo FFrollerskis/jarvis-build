@@ -820,7 +820,14 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
 
   // §4.10 Smart hjem
   { id: "homekit", display_name: "HomeKit", category: "backlog", credential_refs: ["JARVIS_HOMEKIT_TOKEN"] },
-  { id: "philips_hue", display_name: "Philips Hue", category: "backlog", credential_refs: ["JARVIS_PHILIPS_HUE_API_KEY"] },
+  // D-336: 'philips_hue' sin plassholder FJERNET HELT - ALLEREDE_DEKKET.
+  // Enhetsstyring går via Home Assistant (INTEGRATIONS.md §5, CLAUDE.md regel
+  // 5), IKKE en direkte Hue-connector - `homeAssistantTools()` (home-
+  // assistant.ts) dekker allerede light_set/climate_set/lock_set/alarm_set/
+  // read_state. SAMME "ALLEREDE_DEKKET, ingen egen connector"-presedens som
+  // microsoft_365 (D-318). `homekit` (Apple sin egen HAP-protokoll,
+  // STRUKTURELT ULIK Home Assistant sitt REST/WebSocket-API) forblir - hører
+  // til D-36 Apple-runtime-sporet, IKKE denne rydden.
 
   // §4.11 Finans / CRM / ads / prosjektstyring
   { id: "folio", display_name: "Folio", category: "backlog", credential_refs: ["JARVIS_FOLIO_API_KEY"] },
