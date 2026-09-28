@@ -661,6 +661,24 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     live_test: { tool_id: "trello", action: "list_boards", parameters: () => ({}) }
   },
   {
+    // D-331 (bygget, flyttet ut av backlog_d64_gate - TREDJE av de seks
+    // D-64-port-krevende, samme mønster som Todoist/Trello). Jira Cloud er
+    // PER-TENANT (`https://<domain>.atlassian.net`) - `credential_refs`
+    // utvidet fra ÉN til TRE nøkler (base-URL + e-post er BEGGE reelle,
+    // separate konfigurasjonsverdier utover selve API-tokenet, samme "list
+    // alle nødvendige verdier"-disiplin som D-245/D-246/D-295/D-323).
+    // API-formen BEKREFTET via WebSearch denne økten: den gamle
+    // `/rest/api/3/search`-veien er HELT FJERNET, `/rest/api/3/search/jql`
+    // PÅKREVD i stedet - se JiraTransport sin doc-kommentar i
+    // live-transports.ts for full evidens-kategorisering. Dette er
+    // UTELUKKENDE transport-laget - se D-329 sin doc-kommentar over for
+    // hvorfor den fulle OperationsTask-synk-mappingen BEVISST ikke er
+    // bygget her.
+    id: "jira", display_name: "Jira", category: "tool_gateway",
+    credential_refs: ["JARVIS_JIRA_API_TOKEN", "JARVIS_JIRA_BASE_URL", "JARVIS_JIRA_EMAIL"],
+    live_test: { tool_id: "jira", action: "search_issues", parameters: () => ({ jql: "order by created DESC" }) }
+  },
+  {
     // D-322 (bygget, flyttet ut av backlog): FØRSTE video-gen-connector -
     // API-formen BEKREFTET via WebSearch denne økten (kryssjekket mot flere
     // uavhengige kilder), IKKE bare trent kunnskap - se RunwayTransport sin
@@ -764,11 +782,11 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   { id: "pipedrive", display_name: "Pipedrive", category: "backlog_d64_gate", credential_refs: ["JARVIS_PIPEDRIVE_API_KEY"] },
   { id: "meta_ads", display_name: "Meta Ads", category: "backlog", credential_refs: ["JARVIS_META_ADS_TOKEN"] },
   { id: "linear", display_name: "Linear", category: "backlog_d64_gate", credential_refs: ["JARVIS_LINEAR_API_KEY"] },
-  { id: "jira", display_name: "Jira", category: "backlog_d64_gate", credential_refs: ["JARVIS_JIRA_API_TOKEN"] },
-  // D-329/D-330: FØRSTE (Todoist) og ANDRE (Trello) av de seks D-64-port-
-  // krevende faktisk bygget (D-291 stengte selve porten) - kun transport-
-  // laget, se TodoistTransport/TrelloTransport sine doc-kommentarer i
-  // live-transports.ts for hva som BEVISST gjenstår.
+  // D-329/D-330/D-331: FØRSTE (Todoist), ANDRE (Trello) og TREDJE (Jira) av
+  // de seks D-64-port-krevende faktisk bygget (D-291 stengte selve porten)
+  // - kun transport-laget, se TodoistTransport/TrelloTransport/
+  // JiraTransport sine doc-kommentarer i live-transports.ts for hva som
+  // BEVISST gjenstår.
 
   // §4.12 Kart
   {

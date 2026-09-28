@@ -1,23 +1,24 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-330: ANDRE av de
-seks D-64-port-krevende CRM-/prosjektstyrings-leverandørene faktisk bygget - Trello, kun
-transport-laget, SAMME mønster som Todoist (D-329).** Trello sitt API er STRUKTURELT annerledes
-nok til å verifisere separat: `key`/`token` som QUERY-PARAMETERE (IKKE en Authorization-header) -
-BEVISST verifisert via `WebSearch` (Atlassian sin developer.atlassian.com/cloud/trello-dokumentasjon,
-kryssjekket). Bygget: `TrelloTransport` - `list_boards`/`list_cards`/`get_card` (klasse A) +
-`create_card`/`update_card`/`close_card`/`reopen_card` (klasse B, arkivering via `closed:true/false`
-- Trello sitt API bruker selv "closed", grensesnittet viser "archived"). UTELUKKENDE
-transport-laget - samme `OperationsTask`-synk-avgrensning som D-329. `connector-registry.test.ts`
-oppdatert (17→16 gjenværende backlog, 5→4 D-64-gate, 42→43 bygde, 59 totalt uendret).
-`drive-runtime-wiring.test.ts` "tom konstruktør"-telling UENDRET (resolver-argument-form, teller
-ikke med). Ny `d330-trello-transport.test.ts` (13 tester). `pnpm --filter @jarvis/tool-gateway
-typecheck`/`pnpm --filter @jarvis/api typecheck`/`npx eslint` - alle rene. Targeted test-kjøring
-(`d330-trello-transport`/`connector-registry`/`d242-connector-health-sweep`/`drive-runtime-wiring`)
-63/63 grønt. Se D-330 i DECISIONS_AND_ASSUMPTIONS.md.
+**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-331: TREDJE av de
+seks D-64-port-krevende CRM-/prosjektstyrings-leverandørene faktisk bygget - Jira, kun
+transport-laget, SAMME mønster som Todoist/Trello (D-329/D-330).** Jira Cloud er PER-TENANT
+(`https://<domain>.atlassian.net`) med Basic `email:api_token`-auth - en TREDJE strukturelt
+distinkt auth-/adresseringsform. BEVISST verifisert via `WebSearch`: den gamle
+`/rest/api/3/search`-veien er HELT FJERNET (`/search/jql` påkrevd i stedet), og `description` på
+issues krever Atlassian Document Format (bygges internt fra en enkel streng - kalleren konstruerer
+ALDRI ADF selv). Bygget: `JiraTransport` - `search_issues`/`get_issue`/`list_transitions`
+(klasse A) + `create_issue`/`update_issue`/`transition_issue` (klasse B). UTELUKKENDE
+transport-laget - samme `OperationsTask`-synk-avgrensning som D-329/D-330.
+`connector-registry.test.ts` oppdatert (16→15 gjenværende backlog, 4→3 D-64-gate, 43→44 bygde, 59
+totalt uendret). `drive-runtime-wiring.test.ts` "tom konstruktør"-telling UENDRET (to-resolver-
+form, teller ikke med). Ny `d331-jira-transport.test.ts` (14 tester). `pnpm --filter
+@jarvis/tool-gateway typecheck`/`pnpm --filter @jarvis/api typecheck`/`npx eslint` - alle rene.
+Targeted test-kjøring (`d331-jira-transport`/`connector-registry`/`d242-connector-health-sweep`/
+`drive-runtime-wiring`) 64/64 grønt. Se D-331 i DECISIONS_AND_ASSUMPTIONS.md.
 
-**Neste:** De fire GJENVÆRENDE D-64-port-krevende leverandørene (hubspot/pipedrive/linear/jira) kan
-bygges på SAMME måte som Todoist/Trello - transport-lag først, uavhengig av den større
+**Neste:** De tre GJENVÆRENDE D-64-port-krevende leverandørene (hubspot/pipedrive/linear) kan
+bygges på SAMME måte som Todoist/Trello/Jira - transport-lag først, uavhengig av den større
 `OperationsTask`-synk-arkitekturen (poll-basert sweep vs. webhook vs. on-demand fra verktøykall,
 hvilken modul eier synk-loopen - IKKE avgjort, ikke gjettet frem). Tre funn venter fortsatt på
 Tobias sitt svar før noe kodes: `zapier` (Q-40, MCP-klient-kapabilitet?), `playwright`/
@@ -26,12 +27,11 @@ Tobias sitt svar før noe kodes: `zapier` (Q-40, MCP-klient-kapabilitet?), `play
 `folio`/`meta_ads`) og enhets-/plattform-spesifikke punkter (`apple_shortcuts`/`homekit`/
 `philips_hue`/`apns`/`ios_shortcuts`/`apple_watch`) har INGEN klar D-64-vurdering ennå.
 
+**Forrige milepæl (uendret): D-330: ANDRE av de seks D-64-port-krevende faktisk bygget - Trello,
+kun transport-laget.** Se D-330 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
 **Forrige milepæl (uendret): D-329: FØRSTE av de seks D-64-port-krevende faktisk bygget - Todoist,
 kun transport-laget.** Se D-329 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
-
-**Forrige milepæl (uendret): D-328: FUNN, IKKE en byggeslice - `openai_realtime`/`livekit`
-FJERNET HELT fra `connector-registry.ts`, passer INGEN eksisterende adapter-grensesnitt.** Se
-D-328 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 **Forrige milepæl (uendret): D-327: FJERDE og FAKTISK SISTE video-gen-familie-slice - Higgsfield
 bygget som en ORDINÆR `ToolGateway`-connector, MEN med et EKSPLISITT kaller-oppgitt `model_path` i

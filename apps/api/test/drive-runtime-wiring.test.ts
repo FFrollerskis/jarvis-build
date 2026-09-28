@@ -144,6 +144,7 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     expect(callBlock).toMatch(/higgsfield: new HiggsfieldTransport\(\(\) => readSecretProvider\.get\("JARVIS_HIGGSFIELD_KEY_ID"\)\)/);
     expect(callBlock).toContain("todoist: new TodoistTransport()");
     expect(callBlock).toMatch(/trello: new TrelloTransport\(\(\) => readSecretProvider\.get\("JARVIS_TRELLO_API_KEY"\)\)/);
+    expect(callBlock).toMatch(/jira: new JiraTransport\(\s*\(\) => readSecretProvider\.get\("JARVIS_JIRA_BASE_URL"\),\s*\(\) => readSecretProvider\.get\("JARVIS_JIRA_EMAIL"\)\s*\)/);
   });
   it("worker-main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede transportene som før (+docker D-105, +vercel D-242/D-248, +slack D-292, +discord D-294, +brave_search D-296, +google_maps D-298, +google_sheets D-299, +tavily D-301, +exa D-302, +google_places D-303, +google_routes D-304, +dropbox D-307, +notion D-308, +onedrive D-309, +microsoft_outlook D-310, +spotify D-313, +openai_images D-316, +runway D-322, +google_veo D-324, +todoist D-329) - telegram er BEVISST hoistet til en delt konstant av D-181/D184, ikke lenger en bokstavelig tom-konstruktør her; twilio D-295/sentry D-297/grafana D-305/prometheus D-306/n8n D-311/whatsapp D-314/make D-315/telnyx D-321/kling D-323/higgsfield D-327 teller heller ikke med, samme begrunnelse som main.ts", () => {
     const callIdx = workerSource.indexOf("firstWaveTools({");
@@ -195,6 +196,7 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     expect(callBlock).toMatch(/higgsfield: new HiggsfieldTransport\(\(\) => toolSecretProvider\.get\("JARVIS_HIGGSFIELD_KEY_ID"\)\)/);
     expect(callBlock).toContain("todoist: new TodoistTransport()");
     expect(callBlock).toMatch(/trello: new TrelloTransport\(\(\) => toolSecretProvider\.get\("JARVIS_TRELLO_API_KEY"\)\)/);
+    expect(callBlock).toMatch(/jira: new JiraTransport\(\s*\(\) => toolSecretProvider\.get\("JARVIS_JIRA_BASE_URL"\),\s*\(\) => toolSecretProvider\.get\("JARVIS_JIRA_EMAIL"\)\s*\)/);
     expect(callBlock).toContain("discord: new DiscordTransport()");
     expect(callBlock).toContain("telegram: telegramTransport");
   });

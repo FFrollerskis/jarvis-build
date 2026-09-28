@@ -2956,3 +2956,90 @@ export class TrelloTransport implements ToolTransport {
     throw new Error(`trello_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-331. Jira - TREDJE av de seks D-64-port-krevende CRM-/prosjektstyrings-
+ * leverandørene bygget (D-291 stengte porten; D-329/D-330 bygget Todoist/
+ * Trello først). API-formen BEVISST verifisert via WebSearch denne økten
+ * (sekundærkilde-krysssjekket - Atlassian sin egen developer.atlassian.com/
+ * cloud/jira/platform/rest/v3-dokumentasjon, kryssjekket mot uavhengige
+ * community-tråder): **STRUKTURELT ANNERLEDES enn Todoist/Trello** - Jira
+ * Cloud er PER-TENANT (`https://<domain>.atlassian.net`), IKKE ett fast
+ * vertsnavn, derfor en TREDJE resolver (`baseUrl`, samme mønster som
+ * Grafana/Prometheus, D-305/D-306) i tillegg til `email` (Basic auth er
+ * `email:api_token`, IKKE bare et bearer-token). **Kritisk API-drift
+ * bekreftet i søket:** den gamle `/rest/api/3/search`-veien er HELT
+ * FJERNET fra Jira Cloud - `/rest/api/3/search/jql` er PÅKREVD i stedet
+ * (samme "trent kunnskap kan være utdatert"-funn som Todoist sin
+ * `/rest/v2/`-pensjonering, D-329). `description`-feltet på `create_issue`/
+ * `update_issue` krever Atlassian Document Format (IKKE en ren streng) -
+ * bekreftet direkte i søket - en minimal ADF-wrapper bygges derfor internt
+ * fra en enkel tekststreng-parameter, kalleren skal ALDRI måtte konstruere
+ * ADF-JSON selv for denne enkle bruken.
+ */
+export class JiraTransport implements ToolTransport {
+  constructor(
+    private readonly baseUrl: () => Promise<string | null>,
+    private readonly email: () => Promise<string | null>
+  ) {}
+
+  private async call(method: "GET" | "POST" | "PUT", path: string, body: Record<string, JsonValue> | undefined, credential: string): Promise<JsonValue | null> {
+    const baseUrl = await this.baseUrl();
+    if (!baseUrl) throw new Error("jira_base_url_not_configured");
+    const email = await this.email();
+    if (!email) throw new Error("jira_email_not_configured");
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/rest/api/3${path}`, {
+      method,
+      headers: {
+        authorization: `Basic ${Buffer.from(`${email}:${credential}`).toString("base64")}`,
+        "content-type": "application/json"
+      },
+      ...(body ? { body: JSON.stringify(body) } : {})
+    });
+    if (!response.ok) throw new Error(`jira_error_${response.status}`);
+    if (response.status === 204) return null;
+    return (await response.json()) as JsonValue;
+  }
+
+  private static toAdf(text: string): JsonValue {
+    return { type: "doc", version: 1, content: [{ type: "paragraph", content: [{ type: "text", text }] }] } as unknown as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "search_issues") {
+      const jql = encodeURIComponent(String(parameters["jql"]));
+      const body = await this.call("GET", `/search/jql?jql=${jql}`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "get_issue") {
+      const body = await this.call("GET", `/issue/${String(parameters["issue_key"])}`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "list_transitions") {
+      const body = await this.call("GET", `/issue/${String(parameters["issue_key"])}/transitions`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "create_issue") {
+      const fields: Record<string, JsonValue> = {
+        project: { key: String(parameters["project_key"]) },
+        summary: String(parameters["summary"]),
+        issuetype: { name: String(parameters["issue_type"]) }
+      };
+      if (typeof parameters["description"] === "string") fields["description"] = JiraTransport.toAdf(parameters["description"]);
+      const body = await this.call("POST", "/issue", { fields }, credential);
+      return { external_id: String((body as { key?: string } | null)?.key ?? ""), data: body };
+    }
+    if (action === "update_issue") {
+      const fields: Record<string, JsonValue> = {};
+      if (typeof parameters["summary"] === "string") fields["summary"] = parameters["summary"];
+      if (typeof parameters["description"] === "string") fields["description"] = JiraTransport.toAdf(parameters["description"]);
+      await this.call("PUT", `/issue/${String(parameters["issue_key"])}`, { fields }, credential);
+      return { data: null };
+    }
+    if (action === "transition_issue") {
+      await this.call("POST", `/issue/${String(parameters["issue_key"])}/transitions`, { transition: { id: String(parameters["transition_id"]) } }, credential);
+      return { data: null };
+    }
+    throw new Error(`jira_unsupported_action_${action}`);
+  }
+}

@@ -3664,6 +3664,58 @@ export function firstWaveTools(
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_TRELLO_TOKEN", output_trust: "internal", transport: transport("trello")
     },
+    /**
+     * D-331. Jira - TREDJE av de seks D-64-port-krevende faktisk bygget
+     * (D-291 stengte porten; D-329/D-330 bygget Todoist/Trello først).
+     * `/rest/api/3/search/jql` (IKKE den fjernede `/search`-veien), Basic
+     * auth (`email:api_token`), base-URL er per-tenant - se JiraTransport
+     * sin doc-kommentar i live-transports.ts.
+     */
+    {
+      tool_id: "jira", action: "search_issues", description: "Søk etter issues med JQL (GET /rest/api/3/search/jql, gratis/sideeffekt-fritt, untrusted ingestion - den gamle /search-veien er HELT FJERNET fra Jira Cloud)",
+      input_schema: record({ jql: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_JIRA_API_TOKEN",
+      output_trust: "untrusted", transport: transport("jira")
+    },
+    {
+      tool_id: "jira", action: "get_issue", description: "Hent én issue (GET /rest/api/3/issue/{issue_key}, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ issue_key: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_JIRA_API_TOKEN",
+      output_trust: "untrusted", transport: transport("jira")
+    },
+    {
+      tool_id: "jira", action: "list_transitions", description: "List tilgjengelige status-overganger for en issue (GET /rest/api/3/issue/{issue_key}/transitions, gratis/sideeffekt-fritt - PÅKREVD for å finne riktig transition_id FØR transition_issue)",
+      input_schema: record({ issue_key: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_JIRA_API_TOKEN",
+      output_trust: "untrusted", transport: transport("jira")
+    },
+    {
+      tool_id: "jira", action: "create_issue", description: "Opprett en ny issue (POST /rest/api/3/issue, EKTE ekstern tilstand skapes - description konverteres internt til Atlassian Document Format)",
+      input_schema: record({ project_key: z.string(), summary: z.string(), issue_type: z.string(), description: z.string().optional() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "manuell sletting/arkivering i Jira",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_JIRA_API_TOKEN", output_trust: "internal", transport: transport("jira")
+    },
+    {
+      tool_id: "jira", action: "update_issue", description: "Oppdater felter på en eksisterende issue (PUT /rest/api/3/issue/{issue_key}, delvis oppdatering)",
+      input_schema: record({ issue_key: z.string(), summary: z.string().optional(), description: z.string().optional() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "ny update_issue med forrige verdier",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_JIRA_API_TOKEN", output_trust: "internal", transport: transport("jira")
+    },
+    {
+      tool_id: "jira", action: "transition_issue", description: "Flytt en issue til en ny status (POST /rest/api/3/issue/{issue_key}/transitions {transition:{id}} - transition_id må hentes via list_transitions FØRST)",
+      input_schema: record({ issue_key: z.string(), transition_id: z.string() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: false,
+      rollback_procedure: "ny transition_issue til en tilbake-transition, hvis en slik finnes i workflowen (IKKE garantert reversibel)",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_JIRA_API_TOKEN", output_trust: "internal", transport: transport("jira")
+    },
     ...(config.additionalTools ?? [])
   ];
 }
