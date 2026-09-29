@@ -89,6 +89,19 @@ services:
       REDIS_URL: "redis://infisical-redis:6379"
       SITE_URL: "http://127.0.0.1:3060"
       TELEMETRY_ENABLED: "false"
+      # D-346: uten disse kan Infisical ALDRI sende verifikasjons-/passord-
+      # gjenopprettings-e-post (bevist host-side: "Failed to send verification
+      # code" på /signup, og INGEN "Glemt passord"-gjenoppretting mulig for et
+      # eksisterende admin-medlemskap hvis passordet er tapt). Tomme .env-
+      # verdier (`${VAR:-}`) er trygt no-op når Tobias ikke har fylt dem inn -
+      # samme "aldri en tvunget, hardkodet leverandør"-linje som resten av
+      # denne filen. Aldri en hemmelighet i selve denne filen - kun .env.
+      SMTP_HOST: "${INFISICAL_SMTP_HOST:-}"
+      SMTP_PORT: "${INFISICAL_SMTP_PORT:-}"
+      SMTP_USERNAME: "${INFISICAL_SMTP_USERNAME:-}"
+      SMTP_PASSWORD: "${INFISICAL_SMTP_PASSWORD:-}"
+      SMTP_FROM_ADDRESS: "${INFISICAL_SMTP_FROM_ADDRESS:-}"
+      SMTP_FROM_NAME: "${INFISICAL_SMTP_FROM_NAME:-Infisical}"
     ports:
       - "3060:8080"
     depends_on:
