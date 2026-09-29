@@ -107,6 +107,7 @@
   .pill.state-inactive { background: var(--success-bg); color: var(--success-fg); }
   .pill.conn-configured { background: var(--success-bg); color: var(--success-fg); }
   .pill.conn-missing { background: var(--warn-bg); color: var(--warn-fg); }
+  .pill.conn-notbuilt { background: var(--panel-2); color: var(--text-dim); }
   .pill.test-ok { background: var(--success-bg); color: var(--success-fg); }
   .pill.test-fail { background: var(--danger-bg); color: var(--danger-fg); }
   /* D-230 (K2): risiko-alvorlighet/sannsynlighet gjenbruker EKSAKT de samme
@@ -960,28 +961,48 @@
     return words.join(" ");
   }
 
+  /**
+   * D-345 (Tobias direkte i chat: "viktig at absolutt alt i dash faktisk
+   * fungerer å koble til"): `backlog`/`backlog_d64_gate` sine 10
+   * connector-oppføringer har `credential_refs` (for synlighet, D-232), MEN
+   * INGEN `ToolTransport` er registrert for dem i `ToolGateway` - å lagre en
+   * credential her via `set_connector_credential` SKRIVER faktisk til
+   * Infisical (skrivestien sjekker kun at referansen er listet, ikke at
+   * connectoren er bygget), men har ALDRI noen effekt, siden Jarvis ikke har
+   * noe verktøy å bruke den med. Dashbordet viste FØR denne fiksen identisk
+   * "lagre credential her og den virker"-skjema for disse som for de 49
+   * faktisk bygde connectorene - en ærlig løgn om hva "koble til" faktisk
+   * oppnår. Viser nå en INERT "ikke bygget ennå"-pille og ingen lagre-/
+   * test-UI i det hele tatt for disse 10, i stedet for et skjema som ser
+   * funksjonelt ut men ikke gjør noe.
+   */
   function renderConnectorCard(c) {
     const name = escapeHtml(c.display_name || c.id);
     const configured = !!c.configured;
+    const isBacklog = c.category === "backlog" || c.category === "backlog_d64_gate";
     const health = c.health && c.health.state ? escapeHtml(c.health.state) : "ikke testet ennå";
     const isLive = c.test_method === "live";
     const testMethod = isLive ? "live-testbar" : "kun presence-sjekk";
-    const credRows = (Array.isArray(c.credentials) ? c.credentials : []).map((cred) => {
-      const ref = escapeHtml(cred.ref);
-      return '<div class="cred-row">' +
-        '<label title="' + ref + '">' + ref + (cred.configured ? " ✓" : "") + '</label>' +
-        '<input type="password" placeholder="lim inn ny verdi …" data-cred-input data-connector-id="' + escapeHtml(c.id) + '" data-credential-ref="' + ref + '" autocomplete="off">' +
-        '<button data-save-cred data-connector-id="' + escapeHtml(c.id) + '" data-credential-ref="' + ref + '">Lagre</button>' +
-        "</div>";
-    }).join("");
+    const credRows = isBacklog
+      ? '<div class="meta">Ikke bygget ennå - Jarvis har ingen verktøykobling for denne connectoren. ' +
+        "Lagring av credentials her har INGEN effekt før den er bygget.</div>"
+      : (Array.isArray(c.credentials) ? c.credentials : []).map((cred) => {
+          const ref = escapeHtml(cred.ref);
+          return '<div class="cred-row">' +
+            '<label title="' + ref + '">' + ref + (cred.configured ? " ✓" : "") + '</label>' +
+            '<input type="password" placeholder="lim inn ny verdi …" data-cred-input data-connector-id="' + escapeHtml(c.id) + '" data-credential-ref="' + ref + '" autocomplete="off">' +
+            '<button data-save-cred data-connector-id="' + escapeHtml(c.id) + '" data-credential-ref="' + ref + '">Lagre</button>' +
+            "</div>";
+        }).join("");
+    const pillClass = isBacklog ? "conn-notbuilt" : (configured ? "conn-configured" : "conn-missing");
+    const pillText = isBacklog ? "ikke bygget" : (configured ? "konfigurert" : "ikke konfigurert");
     return '<div class="card" data-connector-card="' + escapeHtml(c.id) + '">' +
-      '<span class="pill ' + (configured ? "conn-configured" : "conn-missing") + '">' +
-        (configured ? "konfigurert" : "ikke konfigurert") + "</span>" +
+      '<span class="pill ' + pillClass + '">' + pillText + "</span>" +
       '<div class="title">' + name + "</div>" +
-      '<div class="meta">Helse: ' + health + " · " + testMethod + "</div>" +
+      (isBacklog ? "" : '<div class="meta">Helse: ' + health + " · " + testMethod + "</div>") +
       credRows +
-      (isLive ? '<button class="test-btn" data-test-connector data-connector-id="' + escapeHtml(c.id) + '">Test tilkobling</button>' : "") +
-      '<div class="test-result" data-test-result="' + escapeHtml(c.id) + '"></div>' +
+      (!isBacklog && isLive ? '<button class="test-btn" data-test-connector data-connector-id="' + escapeHtml(c.id) + '">Test tilkobling</button>' : "") +
+      (isBacklog ? "" : '<div class="test-result" data-test-result="' + escapeHtml(c.id) + '"></div>') +
       "</div>";
   }
 

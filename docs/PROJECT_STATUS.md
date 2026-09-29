@@ -1,14 +1,40 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-29 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-344: MERGET, PR #205
+**Oppdatert:** 2026-09-29 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-345: FUNN + FIKS
+- Tobias direkte i chat, etter D-344 sin bekreftede fiks: "rydd alt å fiks at jeg kan koble alt til
+å når jeg kobler det til så ser jarvis det med en gang... viktig at absolutt alt i dash faktisk
+fungerer å koble til".** Agent-undersøkelse (IKKE gjettet) bekreftet at "koble til → Jarvis ser det
+med en gang"-mekanismen ALLEREDE er bygget og fungerer (`ToolGateway.execute()`/`hasSecret()` henter
+credentials LIVE fra Infisical per kall, ingen restart nødvendig) - BETINGET av at Infisical faktisk
+er nåbar (Infisical 401 er FORTSATT en ren, ekstern credential-blokkering, uendret siden D-340,
+krever Tobias sin egen handling). Fant OGSÅ en ekte dashbord-løgn: av 59 registrerte connectorer er
+49 faktisk bygget, men de 10 `backlog`/`backlog_d64_gate`-plassholderne (apple_watch/homekit/apns
+osv.) viste et IDENTISK "lagre credential"-skjema som de ekte - en lagret verdi ville skrives til
+Infisical, men ALDRI bli brukt (ingen `ToolTransport` finnes for dem). **Fikset, to lag:**
+`apps/web/dashboard.html` viser nå en inert "ikke bygget"-pille og INGEN lagre-/test-UI for disse
+10; `modules/owner-controls/src/transport.ts` sin `set_connector_credential` avviser NÅ eksplisitt
+ethvert forsøk på dem FØR `gateway.setSecret()` kalles (forsvar i dybden, ikke bare skjult i UI).
+**Testdekning:** `d213-connector-credentials.test.ts` (+1) - 14/14 grønt. `node --check` på
+dashbordets script fortsatt gyldig. `pnpm -w typecheck` (33/33)/eslint rene. Bredere
+`modules/owner-controls`-suite: 59 reelle tester grønt (1 fil feilet KUN på kjent
+embedded-Postgres-begrensning). Se D-345.
+
+**Neste:** commit/push D-345, ny PR, vent på CI, merge under D-192. Deretter be Tobias fikse
+Infisical-siden selv (regenerere maskinidentitet i admin-UI, port 3060) - det er nå den ENESTE
+gjenværende blokkeringen for at "koble til" faktisk gir umiddelbar effekt for Vercel/andre
+Infisical-avhengige connectorer. Test deretter i dashbordet at de 10 ubygde connectorene nå viser
+tydelig "ikke bygget"-status uten et falskt lagre-skjema.
+
+**Forrige milepæl (uendret): D-344: MERGET, PR #205
 (to-forelder-merge `efe0558`, under D-192 stående fullmakt) OG LIVE BEKREFTET AV TOBIAS: etter
 redeploy svarte Charlie normalt på BÅDE tekst-webchat ("Hei, hei, hei — jeg hører deg!") OG
 tale-hilsen ("Hei igjen 🙂 Hva kan jeg hjelpe deg med?"), INGEN feilmeldinger, `check_my_capabilities`
 kjørte gjennom det fulle verktøymeshet og listet reell konfigurert/ikke-konfigurert status korrekt.**
 Hele D-340→D-344-kjeden (tom `.env`-verdi → Google Schema anyOf/additionalProperties →
 exclusiveMinimum boolsk-vs-numerisk) er dermed bevist faktisk løst end-to-end på produksjons-NAS-en,
-ikke bare i isolerte offline-tester. FUNN + FIKS
-- Tobias sin egen live NAS-redeploy av D-343: `docker logs local-api-1` viste `gemma_hosted` sin
+ikke bare i isolerte offline-tester.
+
+D-344 sin opprinnelige FUNN + FIKS: Tobias sin egen live NAS-redeploy av D-343: `docker logs local-api-1` viste `gemma_hosted` sin
 feilklasse SKIFTET fra `INVALID_ARGUMENT`-400 til `RESOURCE_EXHAUSTED`-429 (BEVIS på at D-343
 faktisk traff), MEN `anthropic` sin `invalid_request_error`-400 PERSISTERTE UENDRET gjennom
 D-340/D-341/D-343.** Kodeinspeksjon (IKKE gjettet): `anthropic.ts` (OG `openai.ts`/`kimi.ts`/
