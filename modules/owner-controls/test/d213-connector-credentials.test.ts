@@ -96,6 +96,29 @@ describe("A: owner_controls.set_connector_credential", () => {
     expect(data).toEqual({ connector_id: "github", credential_ref: "JARVIS_GITHUB_TOKEN", configured: true });
     expect(JSON.stringify(result)).not.toContain("ghp_real_secret_value");
   });
+
+  it("D-345: avvist for en 'backlog'-connector (credential_refs finnes KUN for synlighet, D-232 - INGEN ToolTransport registrert) - ALDRI et stille no-op setSecret()-kall", async () => {
+    const { gateway, setSecretCalls } = fakeGateway();
+    const transport = new OwnerControlsTransport(fakeService(), gateway);
+    await expect(
+      transport.invoke(
+        "set_connector_credential",
+        { connector_id: "apple_watch", credential_ref: "JARVIS_APPLE_WATCH_TOKEN", value: "v" },
+        "cred", { identity: identity() }
+      )
+    ).rejects.toThrow("connector_not_built_yet:apple_watch");
+    expect(setSecretCalls).toEqual([]);
+  });
+
+  // D-345 sin "backlog_d64_gate"-gren (de seks D-64-port-krevende CRM-/
+  // prosjektstyrings-leverandørene) er IKKE separat testet her med en ekte
+  // registeroppføring - alle seks (hubspot/pipedrive/linear/jira/trello/
+  // todoist, D-330 til D-334/D-329) er nå FAKTISK bygget og flyttet til
+  // `category: "tool_gateway"`, så `CONNECTOR_REGISTRY` har for øyeblikket
+  // INGEN gjenværende `backlog_d64_gate`-oppføring å teste mot (IKKE gjettet
+  // frem med en fiktiv connector_id her). Koden sin sjekk er symmetrisk med
+  // `"backlog"`-grenen over (samme `if`-betingelse), og typen forblir en
+  // gyldig `category`-verdi for en fremtidig ny D-64-gate-oppføring.
 });
 
 describe("B: owner_controls.test_connector", () => {

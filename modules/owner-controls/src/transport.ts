@@ -112,6 +112,15 @@ export class OwnerControlsTransport implements ToolTransport {
         if (!definition.credential_refs.includes(credentialRef)) {
           throw new Error(`credential_ref_not_registered_for_connector:${connectorId}`);
         }
+        // D-345: backlog/backlog_d64_gate connectorer har `credential_refs` KUN
+        // for synlighet (D-232) - INGEN `ToolTransport` er registrert for dem,
+        // så en lagret verdi ville aldri blitt brukt til noe. Avvises HER
+        // (ikke bare skjult i dashbordet, apps/web/dashboard.html) slik at
+        // ENHVER kaller - dashbordet, en fremtidig API-klient, et rått
+        // curl-kall - får et ærlig svar i stedet for et stille no-op-skriv.
+        if (definition.category === "backlog" || definition.category === "backlog_d64_gate") {
+          throw new Error(`connector_not_built_yet:${connectorId}`);
+        }
         await this.gateway.setSecret(credentialRef, value);
         return { data: { connector_id: connectorId, credential_ref: credentialRef, configured: true } as unknown as JsonValue };
       }
