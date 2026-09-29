@@ -25,6 +25,22 @@ gjenværende blokkeringen for at "koble til" faktisk gir umiddelbar effekt for V
 Infisical-avhengige connectorer. Test deretter i dashbordet at de 10 ubygde connectorene nå viser
 tydelig "ikke bygget"-status uten et falskt lagre-skjema.
 
+**D-345 tillegg (samme dag, PR #207 allerede merget 92990e8):** Tobias rapporterte etter redeploy
+403 på "Lagre" for Vercel/Notion (ekte, ferdigbygde connectorer - IKKE D-345 sin backlog-liste) og
+"feilet: credential_unavailable" på "Test tilkobling" for begge. Kodesporing (IKKE gjettet):
+`InfisicalSecretProvider.set()`/`.login()` (`modules/tool-gateway/src/gateway.ts:82-143`) kaster
+`infisical_login_401`/`infisical_auth_expired` på et 401 fra Infisical - fanges av
+`ToolGateway.execute()` sin catch-all (`gateway.ts:590-600`, logger KUN til Postgres-audit via
+`writeAudit()`, ALDRI til stdout - derfor tomt `docker logs local-api-1`), gis videre som
+`tool_denied`-403 til dashbordet. `credential_unavailable` (`gateway.ts:486-487`) er SAMME
+mekanisme for lesing (`secrets.get()` returnerer `null` når Infisical er unåbar). Begge symptomene
+forklares dermed FULLT UT av den allerede kjente, uløste D-340 Infisical `401`-blokkeringen - dette
+er IKKE en ny/annen feil og krever INGEN kodeendring. Bedt Tobias verifisere direkte (ikke gjettet):
+`docker exec local-api-1 sh -c 'curl -s -o /dev/null -w "%{http_code}\n" -X POST
+"$INFISICAL_URL/api/v1/auth/universal-auth/login" -H "content-type: application/json" -d
+"{\"clientId\":\"$INFISICAL_CLIENT_ID\",\"clientSecret\":\"$INFISICAL_CLIENT_SECRET\"}"'` - en 401
+her bekrefter dette er ren fortsettelse av D-340, en annen kode ville bety noe nytt å undersøke.
+
 **Forrige milepæl (uendret): D-344: MERGET, PR #205
 (to-forelder-merge `efe0558`, under D-192 stående fullmakt) OG LIVE BEKREFTET AV TOBIAS: etter
 redeploy svarte Charlie normalt på BÅDE tekst-webchat ("Hei, hei, hei — jeg hører deg!") OG
