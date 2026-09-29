@@ -25,6 +25,27 @@ gjenværende blokkeringen for at "koble til" faktisk gir umiddelbar effekt for V
 Infisical-avhengige connectorer. Test deretter i dashbordet at de 10 ubygde connectorene nå viser
 tydelig "ikke bygget"-status uten et falskt lagre-skjema.
 
+**D-345 tillegg (samme dag, PR #207 allerede merget 92990e8):** Tobias rapporterte etter redeploy
+403 på "Lagre" for Vercel/Notion (ekte, ferdigbygde connectorer - IKKE D-345 sin backlog-liste) og
+"feilet: credential_unavailable" på "Test tilkobling" for begge. Kodesporing (IKKE gjettet):
+`InfisicalSecretProvider.set()`/`.login()` (`modules/tool-gateway/src/gateway.ts:82-143`) kaster
+`infisical_login_401`/`infisical_auth_expired` på et 401 fra Infisical - fanges av
+`ToolGateway.execute()` sin catch-all (`gateway.ts:590-600`, logger KUN til Postgres-audit via
+`writeAudit()`, ALDRI til stdout - derfor tomt `docker logs local-api-1`), gis videre som
+`tool_denied`-403 til dashbordet. `credential_unavailable` (`gateway.ts:486-487`) er SAMME
+mekanisme for lesing (`secrets.get()` returnerer `null` når Infisical er unåbar). Begge symptomene
+forklares dermed FULLT UT av den allerede kjente, uløste D-340 Infisical `401`-blokkeringen - dette
+er IKKE en ny/annen feil og krever INGEN kodeendring. **LIVE BEKREFTET (2026-09-29, ikke gjettet):**
+containeren manglet `curl`, så Tobias kjørte i stedet den EKSAKT SAMME kall-formen med Node 22 (som
+allerede kjører i containeren): `docker exec local-api-1 node -e 'fetch(process.env.INFISICAL_URL+
+"/api/v1/auth/universal-auth/login",{method:"POST",headers:{"content-type":"application/json"},
+body:JSON.stringify({clientId:process.env.INFISICAL_CLIENT_ID,clientSecret:process.env
+.INFISICAL_CLIENT_SECRET})}).then(r=>console.log(r.status))'` - svarte `401`. Dette er NØYAKTIG det
+samme kallet `InfisicalSecretProvider.login()` selv gjør, så D-340 er nå bevist å være den ENESTE og
+FAKTISKE årsaken til Vercel/Notion-403-ene - ingen videre kodeundersøkelse nødvendig. Gjenstår KUN:
+Tobias regenererer maskinidentiteten (`INFISICAL_CLIENT_ID`/`INFISICAL_CLIENT_SECRET`) i Infisical
+sitt admin-UI (port 3060), oppdaterer `.env`, redeployer.
+
 **Forrige milepæl (uendret): D-344: MERGET, PR #205
 (to-forelder-merge `efe0558`, under D-192 stående fullmakt) OG LIVE BEKREFTET AV TOBIAS: etter
 redeploy svarte Charlie normalt på BÅDE tekst-webchat ("Hei, hei, hei — jeg hører deg!") OG
