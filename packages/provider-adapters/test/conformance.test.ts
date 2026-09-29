@@ -464,6 +464,41 @@ describe("provider-adapter conformance (UA-1 §28)", () => {
     expect(JSON.stringify(gemmaConfig.responseSchema)).not.toContain("additionalProperties");
   });
 
+  it("D-343: gemma_hosted fjerner exclusiveMinimum/exclusiveMaximum (OpenAPI-3.0-boolsk stil fra Zod sin .positive()/.int().positive(), IKKE dokumentert i Google sitt Schema-format) fra verktøy-parametre - host-bevist voice_core_error for finance-relaterte verktøy (f.eks. finance:create_payment_intent sitt amount_ore) selv ETTER D-341 sin anyOf/additionalProperties-fiks var live - minimum/maximum selv BEHOLDES uendret", async () => {
+    let capturedBody: Record<string, unknown> = {};
+    const capture = vi.fn(async (_url: string, init: RequestInit) => {
+      capturedBody = JSON.parse(init.body as string) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }], usageMetadata: {} }),
+        { status: 200 }
+      );
+    });
+    vi.stubGlobal("fetch", capture);
+    await new GemmaHostedAdapter("k", "m", "http://mock").complete({
+      ...REQUEST,
+      tools: [
+        {
+          name: "finance__create_payment_intent",
+          description: "opprett betalingsintensjon",
+          input_schema: {
+            type: "object",
+            properties: { amount_ore: { type: "integer", exclusiveMinimum: true, minimum: 0 } },
+            required: ["amount_ore"]
+          }
+        }
+      ]
+    });
+    const tools = capturedBody["tools"] as Array<{ functionDeclarations: Array<{ parameters: Record<string, unknown> }> }>;
+    const parameters = tools[0]?.functionDeclarations[0]?.parameters;
+    expect(JSON.stringify(parameters)).not.toContain("exclusiveMinimum");
+    expect(JSON.stringify(parameters)).not.toContain("exclusiveMaximum");
+    expect(parameters).toEqual({
+      type: "object",
+      properties: { amount_ore: { type: "integer", minimum: 0 } },
+      required: ["amount_ore"]
+    });
+  });
+
   it("local_llm: tool_calls fra et OpenAI-kompatibelt svar normaliseres til ToolCallRequest", async () => {
     mockFetch(
       () =>

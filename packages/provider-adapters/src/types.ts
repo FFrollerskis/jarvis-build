@@ -250,6 +250,30 @@ export function firstNonEmptyEnv(...names: string[]): string | undefined {
  * Delt her (ikke duplisert i `gemini.ts`/`gemma.ts`) - SAMME Google-API-
  * begrensning gjelder identisk for verktøy-parametre OG responseSchema,
  * begge adaptere.
+ *
+ * D-343 (host-bevist, 2026-09-29: Charlie svarte FORTSATT `voice_core_error`/
+ * "Noe gikk galt under generering" fra gemma_hosted ETTER D-341 var deployet
+ * OG D-342/D-192-testrunden faktisk nådde en ekte tool-mesh-samtale for
+ * FØRSTE gang - `docker logs local-api-1` viste SAMME `gemma_hosted`
+ * `INVALID_ARGUMENT`-diagnostikk som D-341, uendret): offline-skanning av
+ * ALLE 400 registrerte verktøy sin sanerte utdata (`npx tsx` mot de EKTE
+ * Zod-skjemaene, IKKE gjettet) fant 9 gjenværende verktøy (finance/
+ * finance_spend/finance_stripe/finance_vipps sine beløps-/intervallfelter,
+ * f.eks. `finance:create_payment_intent.amount_ore`) med
+ * `exclusiveMinimum: true` (OpenAPI-3.0-boolsk stil, fra Zod sin
+ * `.positive()`/`.int().positive()`) - ET FELT Google sitt begrensede
+ * Schema-format IKKE dokumenterer (samme "ukjent felt i tools-arrayet
+ * knekker ALLE 400 verktøy samtidig"-mekanisme som D-341 sin `anyOf`-
+ * oppdagelse - egress til `ai.google.dev` er BLOKKERT i denne økten, SAMME
+ * D-297-forbehold: dette er trent kunnskap om Google sitt dokumenterte
+ * Schema-feltsett, IKKE denne-økten-verifisert mot live dokumentasjon).
+ * `exclusiveMinimum`/`exclusiveMaximum` fjernes derfor her (samme
+ * "modell-veiledende kopi, ALDRI autorisasjonsgrensen"-begrunnelse som
+ * `additionalProperties`/unions over) - `minimum`/`maximum` BEHOLDES
+ * uendret (dokumentert støttet av Google, og selv om de IKKE skulle være
+ * det ville de i verste fall ignoreres, aldri knekke kallet, siden de ikke
+ * er strukturelt uventede nøkler på samme måte som en bar boolsk flagg-
+ * verdi kan være).
  */
 export function sanitizeGeminiSchema(schema: unknown): unknown {
   if (Array.isArray(schema)) {
@@ -262,6 +286,8 @@ export function sanitizeGeminiSchema(schema: unknown): unknown {
     }
     const rest: Record<string, unknown> = { ...obj };
     delete rest["additionalProperties"];
+    delete rest["exclusiveMinimum"];
+    delete rest["exclusiveMaximum"];
     for (const key of Object.keys(rest)) {
       rest[key] = sanitizeGeminiSchema(rest[key]);
     }
