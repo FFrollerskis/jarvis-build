@@ -1,6 +1,13 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-29 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-344: FUNN + FIKS
+**Oppdatert:** 2026-09-29 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-344: MERGET, PR #205
+(to-forelder-merge `efe0558`, under D-192 stående fullmakt) OG LIVE BEKREFTET AV TOBIAS: etter
+redeploy svarte Charlie normalt på BÅDE tekst-webchat ("Hei, hei, hei — jeg hører deg!") OG
+tale-hilsen ("Hei igjen 🙂 Hva kan jeg hjelpe deg med?"), INGEN feilmeldinger, `check_my_capabilities`
+kjørte gjennom det fulle verktøymeshet og listet reell konfigurert/ikke-konfigurert status korrekt.**
+Hele D-340→D-344-kjeden (tom `.env`-verdi → Google Schema anyOf/additionalProperties →
+exclusiveMinimum boolsk-vs-numerisk) er dermed bevist faktisk løst end-to-end på produksjons-NAS-en,
+ikke bare i isolerte offline-tester. FUNN + FIKS
 - Tobias sin egen live NAS-redeploy av D-343: `docker logs local-api-1` viste `gemma_hosted` sin
 feilklasse SKIFTET fra `INVALID_ARGUMENT`-400 til `RESOURCE_EXHAUSTED`-429 (BEVIS på at D-343
 faktisk traff), MEN `anthropic` sin `invalid_request_error`-400 PERSISTERTE UENDRET gjennom
@@ -19,9 +26,12 @@ faktiske grensen for ALLE providere (i motsetning til D-343 sin Google-spesifikk
 Bredere `modules/tool-gateway`-suite: 681 reelle tester grønt (12 filer feilet KUN på kjent
 embedded-Postgres `/tmp`-tillatelsesfeil). Se D-344.
 
-**Neste:** commit/push D-344, ny PR, vent på CI, merge under D-192. Deretter be Tobias redeploye på
-NAS-en igjen og teste chat/voice på nytt - forventet resultat: Anthropic bør nå enten lykkes eller
-gi en NY, annerledes feilklasse (som gir fersk evidens om noe fortsatt gjenstår der).
+**Neste:** ingen umiddelbar oppfølging påkrevd for chat/voice-generering - bekreftet fungerende.
+Gjenstående, eksplisitt utsatte punkter fra denne økten: persistent volume for `tailscaled`
+(unngå fremtidig tilstandstap ved daemon-krasj), opprydding av Tailscale-enhetsnavn
+(`jarvis-nas-1` vs. det opprinnelige `jarvis-nas-2`, orphan-oppføring), og den fortsatt uavklarte
+Infisical `401`-credential-blokkeringen for Vercel/dashbord-connector-credentials (krever Tobias
+sin egen handling i Infisical sitt admin-UI). Ingen av disse er kodefeil.
 
 **Forrige milepæl (MERGET, PR #204): D-343: FUNN + FIKS
 - Tobias sin egen live NAS-redeploy av D-342 nådde FØRSTE gang en ekte tool-mesh-samtale over
