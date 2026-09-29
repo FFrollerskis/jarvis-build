@@ -1,6 +1,10 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-342: FUNN + FIKS
+**Oppdatert:** 2026-09-29 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-342: MERGET, PR #202
+(to-forelder-merge `bf2da67`, under D-192 stående fullmakt - Tobias direkte til stede/drivende i
+chat-økten frem til dette punktet, ingen separat ChatGPT-arkitekt-forhåndsreview for dette scopet).
+Fersk HEAD-/base-guard rett før merge bekreftet uendret `head.sha b570512.../base.sha b26570a...`,
+`mergeable_state: "clean"`, begge CI-runs på HEAD grønne (`success`) - FUNN + FIKS
 - Tobias nådde NAS-en over Tailscale/HTTP etter en Docker daemon-krasj + Tailscale-reautentisering
 (se D-342-detalj under), fikk `Uncaught TypeError: crypto.randomUUID is not a function at
 loadOrCreateDeviceId (voice:119:32)` - "kommer inn men i9ngenting fungerer".** Rotårsak, IKKE gjettet:
@@ -18,12 +22,11 @@ foreldreløse Tailscale-oppføringer - begge bevisst utsatt. **Testdekning:**
 fallback) - 10/10 grønt. `node --check` på alle tre sidenes ekstraherte inline-script fortsatt
 syntaktisk gyldig. Se D-342.
 
-**Neste:** commit/push D-342-fiksen, ny PR, vent på CI, merge under D-192. Deretter be Tobias
-`git pull` + `docker compose ... up -d --build` på NAS-en og bekrefte at `crypto.randomUUID`-feilen
-er borte og at voice/dashboard/webchat faktisk laster og fungerer over Tailscale-HTTP-tilgangen.
-Følg opp senere (ikke denne økten): persistent volume for `tailscaled`, opprydding av Tailscale-
-enhetsnavn, og den fortsatt uavklarte Infisical `401`-credential-blokkeringen (krever Tobias sin
-egen handling, se under).
+**Neste:** be Tobias `git pull` + `docker compose ... up -d --build` på NAS-en og bekrefte at
+`crypto.randomUUID`-feilen er borte og at voice/dashboard/webchat faktisk laster og fungerer over
+Tailscale-HTTP-tilgangen. Følg opp senere (ikke denne økten): persistent volume for `tailscaled`,
+opprydding av Tailscale-enhetsnavn, og den fortsatt uavklarte Infisical `401`-credential-
+blokkeringen (krever Tobias sin egen handling, se under).
 
 **Forrige milepæl (uendret): D-341: FUNN + FIKS
 - Charlie svarte FORTSATT 400 (gemini/gemma_hosted/anthropic) etter at D-340 (merget, PR #200) var
