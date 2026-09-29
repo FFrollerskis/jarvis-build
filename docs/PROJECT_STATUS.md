@@ -1,6 +1,23 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-29 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-345: FUNN + FIKS
+**Oppdatert:** 2026-09-29 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-346: FUNN + FIKS.**
+D-340 sin "regenerer Infisical-maskinidentiteten i admin-UI" viste seg FAKTISK blokkert (ikke bare
+et glemt passord): eksisterende passord avvist, ingen SSO konfigurert, OG `/signup` feiler med
+"Failed to send verification code" - Infisical-instansen har INGEN SMTP satt opp, så verken
+passord-gjenoppretting eller ny registrering kan fullføres. Ingen instance-admin-token fra den
+opprinnelige bootstrap-en ble noensinne lagret i repoet; `/api/v1/admin/bootstrap` kan uansett kun
+kjøres én gang. **Fikset:** lagt til `SMTP_HOST`/`PORT`/`USERNAME`/`PASSWORD`/`FROM_ADDRESS`/
+`FROM_NAME` på `infisical`-tjenesten i `infra/local/docker-compose.yml`, lest fra nye
+`INFISICAL_SMTP_*`-variabler i `.env` (tomme = no-op, ingen regresjon). Se D-346.
+
+**Neste:** Tobias fyller inn `INFISICAL_SMTP_*` i `.env` med en ekte SMTP-leverandør (Gmail SMTP
+m/app-passord e.l.), kjører `docker compose up -d infisical` (kun den tjenesten trenger restart),
+bruker deretter "Glemt passord" på DEN EKSISTERENDE `post@tsworkflow.com`-kontoen (bevarer alle
+allerede lagrede secrets - IKKE `/signup`, som oppretter en ny, tom org). Deretter: rotere
+`INFISICAL_CLIENT_SECRET` som opprinnelig planlagt under D-340/D-346, oppdatere `.env`, redeploye
+api/worker, bekrefte med samme `node -e fetch(...)`-sjekk som tidligere (forventer 200).
+
+**Forrige milepæl (uendret, MERGET PR #208 e722d5b under D-192): D-345: FUNN + FIKS
 - Tobias direkte i chat, etter D-344 sin bekreftede fiks: "rydd alt å fiks at jeg kan koble alt til
 å når jeg kobler det til så ser jarvis det med en gang... viktig at absolutt alt i dash faktisk
 fungerer å koble til".** Agent-undersøkelse (IKKE gjettet) bekreftet at "koble til → Jarvis ser det
