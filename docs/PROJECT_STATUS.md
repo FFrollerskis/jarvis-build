@@ -1,6 +1,31 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-341: FUNN + FIKS
+**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-342: FUNN + FIKS
+- Tobias nådde NAS-en over Tailscale/HTTP etter en Docker daemon-krasj + Tailscale-reautentisering
+(se D-342-detalj under), fikk `Uncaught TypeError: crypto.randomUUID is not a function at
+loadOrCreateDeviceId (voice:119:32)` - "kommer inn men i9ngenting fungerer".** Rotårsak, IKKE gjettet:
+`crypto.randomUUID()` krever en "secure context" (HTTPS/`localhost`) - ren `http://<tailscale-
+hostnavn>:<port>`-tilgang er IKKE en secure context, så metoden mangler helt på `crypto`-objektet der.
+Rammer alle tre klientsidene likt (`voice.html`/`index.html`/`dashboard.html`, delt
+`loadOrCreateDeviceId()`-mønster, D-252). **Fikset:** ny lokal `randomUUID()`-wrapper i alle tre filer
+- bruker ekte `crypto.randomUUID()` når tilgjengelig, ellers en `Math.random()`-basert v4-UUID-
+fallback (sanity-sjekket offline: 1000/1000 gyldige v4-strenger). Trygt fordi `device_id` KUN er en
+lokal `localStorage`-enhetsidentifikator for innrulleringsisolasjon (D-131/D-252), ALDRI et
+kryptografisk hemmelig token. **IKKE i scope:** persistent volume for `tailscaled`-containeren (mistet
+auth-state ved samme daemon-krasj, NAS-en fikk nytt tailnet-navn `jarvis-nas-1`), opprydding av
+foreldreløse Tailscale-oppføringer - begge bevisst utsatt. **Testdekning:**
+`d252-per-browser-device-id.test.ts` oppdatert (assertion + 3 nye tester for wrapperens trygge
+fallback) - 10/10 grønt. `node --check` på alle tre sidenes ekstraherte inline-script fortsatt
+syntaktisk gyldig. Se D-342.
+
+**Neste:** commit/push D-342-fiksen, ny PR, vent på CI, merge under D-192. Deretter be Tobias
+`git pull` + `docker compose ... up -d --build` på NAS-en og bekrefte at `crypto.randomUUID`-feilen
+er borte og at voice/dashboard/webchat faktisk laster og fungerer over Tailscale-HTTP-tilgangen.
+Følg opp senere (ikke denne økten): persistent volume for `tailscaled`, opprydding av Tailscale-
+enhetsnavn, og den fortsatt uavklarte Infisical `401`-credential-blokkeringen (krever Tobias sin
+egen handling, se under).
+
+**Forrige milepæl (uendret): D-341: FUNN + FIKS
 - Charlie svarte FORTSATT 400 (gemini/gemma_hosted/anthropic) etter at D-340 (merget, PR #200) var
 deployet på NAS-en (Tobias sin egen `docker logs`-paste viste D-106-diagnostikken direkte).** D-340
 løste riktig modellnavn, men avdekket en HELT SEPARAT skjema-inkompatibilitet mot Google sitt
