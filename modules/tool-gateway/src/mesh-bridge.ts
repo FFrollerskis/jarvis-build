@@ -181,11 +181,67 @@ export function allMeshTools(gateway: ToolGateway): MeshToolMapping[] {
     def: {
       name: `${definition.tool_id}__${definition.action}`,
       description: `[klasse ${definition.capability_class}] ${definition.description}`,
-      input_schema: zodToJsonSchema(definition.input_schema, { target: "openApi3" }) as Record<string, unknown>
+      input_schema: normalizeJsonSchemaBounds(
+        zodToJsonSchema(definition.input_schema, { target: "openApi3" }) as Record<string, unknown>
+      )
     },
     tool_id: definition.tool_id,
     action: definition.action
   }));
+}
+
+/**
+ * D-344 (host-bevist, 2026-09-29: Anthropic sin `invalid_request_error`
+ * PERSISTERTE UENDRET gjennom D-340/D-341/D-343, mens gemma_hosted sin
+ * feilklasse skiftet fra `INVALID_ARGUMENT`-400 til `RESOURCE_EXHAUSTED`-429
+ * (bevis på at D-343 sin fiks FAKTISK traff - samme skjema-inngang ellers
+ * uendret): `zodToJsonSchema(...,{target:"openApi3"})` sin utdata er
+ * OpenAPI-3.0-DIALEKT, IKKE gyldig JSON-Schema-draft-07+ - `.positive()`/
+ * `.gt()`/`.negative()`/`.lt()` produserer `exclusiveMinimum: true` (BOOLSK
+ * flagg) PLUSS en separat `minimum`-verdi, mens standard JSON Schema (som
+ * Anthropic sin `input_schema` FAKTISK forventer, trent kunnskap - egress
+ * til `docs.anthropic.com` BLOKKERT denne økten, SAMME D-297-forbehold,
+ * IKKE denne-økten-verifisert) krever `exclusiveMinimum` som et TALL direkte
+ * (`exclusiveMinimum: 0`, INGEN separat `minimum`-nøkkel). `gemini.ts`/
+ * `gemma.ts` sin `sanitizeGeminiSchema()` (D-343) STRIPPER disse nøklene
+ * fullstendig (riktig for Google, som ikke støtter grensen i NOEN form) -
+ * MEN `anthropic.ts` (og `openai.ts`/`kimi.ts`/`local-llm.ts`/`ollama.ts`)
+ * bruker `allMeshTools()` sin utdata RÅTT, UTEN sanering - de samme 9
+ * finans-verktøyene (D-343) sender derfor et boolsk `exclusiveMinimum` til
+ * en leverandør som forventer et TALL, en type-mismatch KVALITATIVT ULIK
+ * D-343 sin Google-spesifikke "feltet finnes ikke i det hele tatt"-defekt.
+ * Konverteres HER, FØR skjemaet forlater `allMeshTools()` (ÉN kilde til
+ * sannhet for ALLE providere, ikke duplisert per adapter) - IKKE en
+ * strip (som ville mistet den faktiske grensen for providere som STØTTER
+ * standard JSON Schema), en KORREKT matematisk oversettelse:
+ * `{minimum: X, exclusiveMinimum: true}` (OpenAPI 3.0, "verdi > X") blir
+ * `{exclusiveMinimum: X}` (JSON Schema draft-07+, SAMME betydning).
+ * `zodToJsonSchema` sin openApi3-modus bekreftet (offline `npx tsx`,
+ * IKKE gjettet) å ALDRI sette det boolske flagget til `false` eksplisitt -
+ * nøkkelen er enten fraværende (inklusiv `.min()`/`.max()`, UENDRET her) eller
+ * `true` (eksklusiv) - ingen tredje gren å håndtere.
+ */
+export function normalizeJsonSchemaBounds(schema: unknown): Record<string, unknown> {
+  if (Array.isArray(schema)) {
+    return schema.map(normalizeJsonSchemaBounds) as unknown as Record<string, unknown>;
+  }
+  if (!schema || typeof schema !== "object") {
+    return schema as Record<string, unknown>;
+  }
+  const obj = schema as Record<string, unknown>;
+  const rest: Record<string, unknown> = { ...obj };
+  if (rest["exclusiveMinimum"] === true && typeof rest["minimum"] === "number") {
+    rest["exclusiveMinimum"] = rest["minimum"];
+    delete rest["minimum"];
+  }
+  if (rest["exclusiveMaximum"] === true && typeof rest["maximum"] === "number") {
+    rest["exclusiveMaximum"] = rest["maximum"];
+    delete rest["maximum"];
+  }
+  for (const key of Object.keys(rest)) {
+    rest[key] = normalizeJsonSchemaBounds(rest[key]);
+  }
+  return rest;
 }
 
 /**

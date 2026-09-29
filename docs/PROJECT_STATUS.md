@@ -1,6 +1,29 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-29 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-343: FUNN + FIKS
+**Oppdatert:** 2026-09-29 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-344: FUNN + FIKS
+- Tobias sin egen live NAS-redeploy av D-343: `docker logs local-api-1` viste `gemma_hosted` sin
+feilklasse SKIFTET fra `INVALID_ARGUMENT`-400 til `RESOURCE_EXHAUSTED`-429 (BEVIS på at D-343
+faktisk traff), MEN `anthropic` sin `invalid_request_error`-400 PERSISTERTE UENDRET gjennom
+D-340/D-341/D-343.** Kodeinspeksjon (IKKE gjettet): `anthropic.ts` (OG `openai.ts`/`kimi.ts`/
+`local-llm.ts`/`ollama.ts`) bruker `allMeshTools()` sin RÅ `zodToJsonSchema(...,{target:"openApi3"})`
+-utdata UTEN sanering - `sanitizeGeminiSchema()` kjøres KUN i `gemini.ts`/`gemma.ts`. De SAMME 9
+finans-verktøyene D-343 fant sender `exclusiveMinimum: true` (OpenAPI-3.0-BOOLSK stil) til Anthropic,
+som forventer standard JSON Schema (draft-07+, TALL direkte) - en KVALITATIVT ANNEN defekt enn D-343
+(Google mangler feltet HELT; Anthropic FORVENTER det, men i feil form). **Fikset, IKKE en strip:**
+ny `normalizeJsonSchemaBounds()` i `allMeshTools()` sin KILDE (`mesh-bridge.ts`) konverterer
+MATEMATISK KORREKT `{minimum: X, exclusiveMinimum: true}` → `{exclusiveMinimum: X}` - bevarer den
+faktiske grensen for ALLE providere (i motsetning til D-343 sin Google-spesifikke strip).
+`sanitizeGeminiSchema()` sin ubetingede sletting fungerer uendret på begge former, INGEN endring i
+`types.ts`. Offline-sveip: 0/400 gjenværende boolsk form. **Testdekning:**
+`d289-full-capability-mesh.test.ts` (+2) - 8/8 grønt. `pnpm -w typecheck` (33/33)/eslint rene.
+Bredere `modules/tool-gateway`-suite: 681 reelle tester grønt (12 filer feilet KUN på kjent
+embedded-Postgres `/tmp`-tillatelsesfeil). Se D-344.
+
+**Neste:** commit/push D-344, ny PR, vent på CI, merge under D-192. Deretter be Tobias redeploye på
+NAS-en igjen og teste chat/voice på nytt - forventet resultat: Anthropic bør nå enten lykkes eller
+gi en NY, annerledes feilklasse (som gir fersk evidens om noe fortsatt gjenstår der).
+
+**Forrige milepæl (MERGET, PR #204): D-343: FUNN + FIKS
 - Tobias sin egen live NAS-redeploy av D-342 nådde FØRSTE gang en ekte tool-mesh-samtale over
 HTTPS/Tailscale (enhet innrullert via `enroll-ticket`), men `docker logs local-api-1` viste
 `gemma_hosted` FORTSATT `INVALID_ARGUMENT`, voice-gatewayen logget `voice_core_error`.** D-341 sin
@@ -16,7 +39,8 @@ ikke bare finans-relaterte. **Fikset:** `sanitizeGeminiSchema()` (`types.ts`) fj
 `additionalProperties`/unions) - `minimum`/`maximum` selv BEHOLDES uendret. Offline-sveip etter
 fiksen: 0/400 gjenværende kjente issues (utvidet skanning: `type`-array, `$ref`,
 `definitions`/`$defs`, `const` - ingen funnet). **Testdekning:** `conformance.test.ts` (+1) -
-100/100 grønt (targeted). `pnpm -w typecheck` (33/33) og `npx eslint` rene. Se D-343.
+100/100 grønt (targeted). `pnpm -w typecheck` (33/33) og `npx eslint` rene. To-forelder-merge
+`f2457fb`, under D-192 stående fullmakt. Se D-343.
 
 **Forrige milepæl (MERGET, PR #202+#203): D-342: crypto.randomUUID secure-context-fiks
 - Tobias nådde NAS-en over Tailscale/HTTP etter en Docker daemon-krasj + Tailscale-reautentisering,
@@ -41,13 +65,11 @@ kryptografiske PÅSTAND) som OGSÅ krever secure context - MEN her finnes beviss
 gjenopprette HTTPS-tilgangen. Enheten måtte deretter rulles inn på nytt (`enroll-ticket`) siden
 nøkkelen fra den usikre HTTP-konteksten ikke lenger var gyldig.
 
-**Neste:** be Tobias `git pull` + `docker compose ... up -d --build` på NAS-en og teste chat/voice
-på nytt over `https://jarvis-nas-1.tail3935f7.ts.net/`. Følg opp senere (ikke denne økten):
-persistent volume for `tailscaled` (unngå fremtidig tilstandstap ved daemon-krasj), opprydding av
-Tailscale-enhetsnavn, og den fortsatt uavklarte Infisical `401`-credential-blokkeringen (krever
-Tobias sin egen handling, se under). Anthropic sin `invalid_request_error` er FORTSATT ikke
-rotårsaks-forklart (D-341 sitt forbehold gjelder uendret - ingen ny evidens denne runden utover
-samme kategori-kode).
+Følg opp senere (ikke denne økten): persistent volume for `tailscaled` (unngå fremtidig
+tilstandstap ved daemon-krasj), opprydding av Tailscale-enhetsnavn, og den fortsatt uavklarte
+Infisical `401`-credential-blokkeringen (krever Tobias sin egen handling, se under). Anthropic sin
+`invalid_request_error` sin rotårsak er nå (D-344) en konkret, testet hypotese - se D-344 øverst i
+dette dokumentet for status.
 
 **Forrige milepæl (uendret): D-341: FUNN + FIKS
 - Charlie svarte FORTSATT 400 (gemini/gemma_hosted/anthropic) etter at D-340 (merget, PR #200) var

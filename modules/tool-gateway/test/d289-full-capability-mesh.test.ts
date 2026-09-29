@@ -120,4 +120,36 @@ describe("D-289: allMeshTools() - full-kapabilitet mesh-generator", () => {
   it("et tomt register gir en tom, ikke en kastet, liste", () => {
     expect(allMeshTools(buildGateway())).toEqual([]);
   });
+
+  it("D-344: konverterer OpenAPI-3.0-boolske exclusiveMinimum/exclusiveMaximum (fra Zod sin .positive()/.negative()/.gt()/.lt()) til standard JSON-Schema-draft-07-TALL, IKKE en strip - Anthropic (og andre standard-JSON-Schema-providere) forventer exclusiveMinimum som et tall, ikke et boolsk flagg + separat minimum", () => {
+    const gateway = buildGateway();
+    gateway.register({
+      tool_id: "demo_finance", action: "create_payment_intent", description: "Opprett betaling",
+      input_schema: z.object({ amount_ore: z.number().int().positive(), discount_ore: z.number().negative().optional() }).strict() as never,
+      capability_class: "B", scopes: [], reversible: false, rollback_procedure: "manuell refusjon",
+      idempotent_external: true, timeout_ms: 5000, rate_limit_per_minute: 60,
+      credential_ref: "DEMO_FINANCE_REF", output_trust: "internal", transport: noopTransport
+    });
+    const mapping = allMeshTools(gateway)[0];
+    const properties = (mapping?.def.input_schema as { properties: Record<string, unknown> }).properties;
+    // amount_ore: .positive() -> {exclusiveMinimum: true, minimum: 0} -> {exclusiveMinimum: 0}
+    expect(properties["amount_ore"]).toEqual({ type: "integer", exclusiveMinimum: 0 });
+    // discount_ore: .negative() -> {exclusiveMaximum: true, maximum: 0} -> {exclusiveMaximum: 0}
+    expect(JSON.stringify(properties["discount_ore"])).not.toContain('"exclusiveMaximum":true');
+    expect(properties["discount_ore"]).toMatchObject({ exclusiveMaximum: 0 });
+  });
+
+  it("D-344: inklusive grenser (.min()/.max(), INGEN boolsk flagg fra zod-to-json-schema) forblir UENDRET", () => {
+    const gateway = buildGateway();
+    gateway.register({
+      tool_id: "demo_range", action: "act", description: "Handling med inklusiv grense",
+      input_schema: z.object({ count: z.number().min(1).max(10) }).strict() as never,
+      capability_class: "A", scopes: [], reversible: true, rollback_procedure: "ingen",
+      idempotent_external: true, timeout_ms: 5000, rate_limit_per_minute: 60,
+      credential_ref: "DEMO_RANGE_REF", output_trust: "internal", transport: noopTransport
+    });
+    const mapping = allMeshTools(gateway)[0];
+    const properties = (mapping?.def.input_schema as { properties: Record<string, unknown> }).properties;
+    expect(properties["count"]).toEqual({ type: "number", minimum: 1, maximum: 10 });
+  });
 });
