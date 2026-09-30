@@ -143,6 +143,81 @@ describe("Skriveflyt: ADD/UPDATE/NOOP/INVALIDATE med versjonering", () => {
   });
 });
 
+/**
+ * D-357 (funn ved kildekode-gjennomgang av `memory-writer.ts`, IKKE en ny
+ * Tobias-rapport): `apply()` sitt eksisterende-rad-oppslag ekskluderte
+ * `status='invalidated'` - en tidligere invalidert rad (f.eks. D-287 sin
+ * 60-dagers retensjons-sveip) var derfor usynlig for oppslaget, og et forsøk
+ * på å lære det SAMME faktumet (samme tenant/space/type/subject) på nytt
+ * traff `memory_items` sin `UNIQUE (tenant_id, space, type, subject)`-
+ * begrensning i `insertItem()` og kastet - en feil som ble SVELGET stille av
+ * `ConversationEngine` sitt fire-and-forget `memory.ingest()`-kall (D-283),
+ * så det observerbare symptomet var "dette faktumet kan ALDRI læres på
+ * nytt" - samme symptomklasse som D-300 ("husker ingenting"), en ANNEN,
+ * uavhengig rotårsak.
+ */
+describe("D-357: et invalidert faktum kan læres på nytt (gjenoppliving, ikke en UNIQUE-krasj)", () => {
+  it("TRUSTED gjenoppliving av et invalidert faktum -> UPDATE (ikke ADD/krasj), status active igjen, synlig i retrieval", async () => {
+    const id = identity("personal");
+    const add = await writer.apply(id, TRUSTED, candidate("personal", "test.gjenopplivet", "Første sannhet tau1."));
+    await writer.invalidate(id, "personal", add.memory_item_id, "test-utgått");
+    let results = await retriever.search(id, { spaces: ["personal"], query: "tau1" });
+    expect(results).toHaveLength(0);
+
+    const revived = await writer.apply(id, TRUSTED, candidate("personal", "test.gjenopplivet", "Faktumet er sant igjen tau1."));
+    expect(revived.op).toBe("UPDATE");
+    expect(revived.memory_item_id).toBe(add.memory_item_id);
+
+    results = await retriever.search(id, { spaces: ["personal"], query: "tau1" });
+    const item = results.find((r) => r.memory_item_id === add.memory_item_id);
+    expect(item?.content).toBe("Faktumet er sant igjen tau1.");
+  });
+
+  it("gjenoppliving med IDENTISK innhold som det invaliderte er IKKE et stille NOOP - status blir active igjen", async () => {
+    const id = identity("personal");
+    const add = await writer.apply(id, TRUSTED, candidate("personal", "test.identisk-gjenopplivet", "Uendret sannhet ypsilon1."));
+    await writer.invalidate(id, "personal", add.memory_item_id, "test-utgått");
+
+    const revived = await writer.apply(id, TRUSTED, candidate("personal", "test.identisk-gjenopplivet", "Uendret sannhet ypsilon1."));
+    expect(revived.op).toBe("UPDATE");
+
+    const results = await retriever.search(id, { spaces: ["personal"], query: "ypsilon1" });
+    expect(results.find((r) => r.memory_item_id === add.memory_item_id)).toBeDefined();
+  });
+
+  it("UNTRUSTED gjenoppliving av et invalidert faktum blir quarantined (SAMME regel som et helt nytt untrusted faktum), IKKE synlig før eksplisitt promotering", async () => {
+    const id = identity("personal");
+    const add = await writer.apply(id, TRUSTED, candidate("personal", "test.untrusted-gjenopplivet", "Sannhet phi1."));
+    await writer.invalidate(id, "personal", add.memory_item_id, "test-utgått");
+
+    const revived = await writer.apply(id, UNTRUSTED, candidate("personal", "test.untrusted-gjenopplivet", "Ubetrodd påstand phi1."));
+    expect(revived.op).toBe("UPDATE");
+    let results = await retriever.search(id, { spaces: ["personal"], query: "phi1" });
+    expect(results.find((r) => r.memory_item_id === add.memory_item_id)).toBeUndefined();
+
+    expect(await writer.promoteFromQuarantine(id, "personal", add.memory_item_id)).toBe(true);
+    results = await retriever.search(id, { spaces: ["personal"], query: "phi1" });
+    expect(results.find((r) => r.memory_item_id === add.memory_item_id)?.content).toBe("Ubetrodd påstand phi1.");
+  });
+
+  it("en gjenopplivet rad sin gamle invaliderte tilstand forblir bevart i memory_versions (append-only historikk, aldri skjult)", async () => {
+    const id = identity("personal");
+    const add = await writer.apply(id, TRUSTED, candidate("personal", "test.historikk-bevart", "Original sannhet chi1."));
+    await writer.invalidate(id, "personal", add.memory_item_id, "test-utgått");
+    await writer.apply(id, TRUSTED, candidate("personal", "test.historikk-bevart", "Ny sannhet chi1."));
+
+    const versions = await withMemoryTransaction(appPool, "tenant-a", ["personal"], (c) =>
+      c.query("SELECT change_kind, content FROM memory_versions WHERE memory_item_id = $1 ORDER BY valid_to", [
+        add.memory_item_id
+      ])
+    );
+    expect(versions.rows).toEqual([
+      { change_kind: "invalidated", content: "Original sannhet chi1." },
+      { change_kind: "superseded", content: "Original sannhet chi1." }
+    ]);
+  });
+});
+
 describe("Akseptanse 3: karantene for ubetrodd innhold", () => {
   it("untrusted kilde → karantene, ikke i retrieval; promotering krever policy-godkjenning", async () => {
     const id = identity("personal");

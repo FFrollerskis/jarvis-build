@@ -1,9 +1,141 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-352: BYGGET
-(dashbord: statusfiltre + merke-ikoner inkl. Discord + større/"fansy" kort + heartbeat-prikk på
-alle connectorer) + D-351: FUNN + FIKS (mesh-verktøy-output-kapping skjulte 40 av 56 connectorer
-for Charlie) + D-350: BYGGET (Zapier `call_tool`, Q-40(b) LUKKET) + D-349: FIKS (Jira tom-JQL-400).**
+**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-357: FIKS + FUNN
+("...så minne ferdig" - reell "kan aldri læres på nytt etter invalidering"-bug FIKSET i
+`MemoryWriter.apply()`; en separat GDPR-erasure/append-only-trigger-konflikt FUNNET men IKKE fikset,
+krever embedded-Postgres-verifisering denne sandkassen ikke tillater) + D-356: DELVIS BYGGET
+("fortsett og fikse voice ferdig" - streaming-STT bygget/testet for Deepgram, gated NOT_VERIFIED
+inntil Tobias-DPA-gjennomgang; VAD-modell-bytte BEVISST fortsatt utsatt, begrunnet; en OpenAI
+Realtime-variant ble bygget OG REVERTERT midt i økten da den viste seg motsi en eksisterende
+arkitektursperre - se eget avsnitt under) + D-355: BYGGET, steg 2
+av to (verktøy-utløst eskalering fra Gemma til Anthropic/OpenAI/Gemini for kode-deloppgaver via nytt
+`delegate_code_task`-verktøy, tilbakelevering til Gemma via eksisterende tool-loop-arkitektur; bilde-
+generering trengte INGEN ny kode - allerede et mesh-verktøy Gemma kan kalle) + D-354: BYGGET, steg 1
+(Gemma som REELL default for tekst+tale via eksplisitt `providerPreference`-injeksjon med
+gjennomsiktig fallback-retry) + D-353: FUNN + DELVIS FIKS (tale: Markdown lest bokstavelig FIKSET,
+VAD-terskel/hangover gjort tunbar, batch-STT-latens dokumentert som en fremtidig, større byggeslice)
++ D-352: BYGGET (dashbord: statusfiltre + merke-ikoner inkl. Discord + større/"fansy" kort +
+heartbeat-prikk på alle connectorer) + D-351: FUNN + FIKS (mesh-verktøy-output-kapping skjulte 40 av
+56 connectorer for Charlie) + D-350: BYGGET (Zapier `call_tool`, Q-40(b) LUKKET) + D-349: FIKS (Jira
+tom-JQL-400).**
+
+**D-357 ("...så minne ferdig" - andre halvdel av samme ordre som D-356):**
+1. **FIKSET: `MemoryWriter.apply()` kunne ALDRI lære et invalidert faktum på nytt.** Oppslaget etter
+   en eksisterende rad ekskluderte `status='invalidated'` - en tidligere invalidert rad (D-287 sin
+   60-dagers retensjons-sveip, eller en eksplisitt `invalidate()`) ble usynlig for oppslaget, og et
+   nytt forsøk på samme faktum traff `memory_items` sin `UNIQUE (tenant_id,space,type,subject)` og
+   kastet en rå Postgres-krasj - SVELGET stille av `ConversationEngine` sitt fire-and-forget
+   `memory.ingest()`-kall (D-283). Observerbart symptom: "dette kan ALDRI læres på nytt" - en TREDJE,
+   uavhengig rotårsak til samme "husker ingenting"-symptomklasse D-300 allerede delvis fikset. Fikset
+   ved å utvide oppslaget til å inkludere `invalidated` og eksplisitt gjenopplive raden via samme
+   bitemporale oppdateringsvei (ALDRI et stille NOOP selv ved identisk innhold; ny status følger
+   SAMME regel som et helt nytt faktum - trusted->active, untrusted->quarantined med uendret krav om
+   eksplisitt `promoteFromQuarantine()`-godkjenning). 4 nye tester lagt til. **Kan IKKE kjøres i denne
+   sandkassen** (embedded Postgres, `/tmp`-tilgang - samme kjente, FØR-eksisterende begrensning som
+   flere andre testfiler denne økten, et reelt arbeidsforsøk med alternativ `TMPDIR` mislyktes også) -
+   fiksen er i stedet manuelt spor-gjennom-verifisert mot koden for alle fire testscenarioene.
+2. **FUNNET, IKKE FIKSET: GDPR-sletting krasjer for enhver person med minst én `memory_versions`-rad.**
+   `memory_versions` har en `BEFORE UPDATE OR DELETE`-append-only-trigger; `modules/erasure/src/
+   plan.ts` gjør likevel en rå `DELETE FROM memory_versions` (bekreftet innenfor en eksplisitt
+   transaksjon) - kaster og ruller HELE slettingen tilbake for enhver person som noensinne har hatt
+   et minnefaktum oppdatert ELLER invalidert. Ikke fikset her - krever en migrasjonsendring jeg ikke
+   kan skyte blindt uten embedded-Postgres-verifisering. Registrert som egen, fremtidig oppgave.
+3. **Andre kjente arkitekturgap, bevisst IKKE rørt denne runden:** `LocalHashEmbedding` (ikke-
+   semantisk hash) er fortsatt den faktiske produksjons-embeddingen; `KnowledgeRetriever`/
+   `ContextEngine` fortsatt uten produksjonskonsument; MEMORY_ARCHITECTURE.md §9 sitt eval-sett
+   fortsatt aldri kjørt. Se D-357 i DECISIONS_AND_ASSUMPTIONS.md for full begrunnelse på alle punkter.
+
+**D-356 ("fortsett og fikse voice ferdig", direkte oppfølging av D-353s to eksplisitt utsatte funn):**
+1. **VAD-modell-bytte (Silero) - FORTSATT BEVISST UTSATT, med begrunnelse.** Grensesnittet er
+   swappbart, men (a) async inferens ville krevd en reell endring i `session.ts` sin
+   `pushAudio()`-kallsted, (b) INGEN ekte lyd finnes i denne sandkassen for å validere at en ny
+   modell faktisk HJELPER fremfor å regredere den allerede D-275-tunede `EnergyVad`-en, (c) den
+   dypere rotårsaken (ekko/støy fra egen TTS-avspilling) krever AEC, som er en EGEN, EKSPLISITT
+   fremtidig stop/go-arkitekturbeslutning (`VOICE_ARCHITECTURE.md` §3) - en VAD-modell-bytte alene
+   løser ikke den uansett. En begrunnet risikovurdering, ikke en udokumentert mangel.
+2. **Streaming STT - BYGGET: `DeepgramStreamingStt`.** Ekte `wss://api.deepgram.com/v1/listen`,
+   server transkriberer fortløpende (VÅR EGEN VAD styrer fortsatt turgrenser, ikke leverandørens) -
+   eliminerer D-353s batch-dekode-flaskehals. **Ærlighetsnotat:** et FØRSTE forsøk denne økten bygget
+   mot OpenAI sitt Realtime API (`intent=transcription`) - fullt bygget, 17 tester grønt - FØR det
+   ble oppdaget at DETTE motsier D-328/Q-42 (en TIDLIGERE, `WebSearch`-VERIFISERT konklusjon: hele
+   `/v1/realtime` er "ikke kodbar før presisert"). Siden denne økten har blokkert nettverkstilgang og
+   ikke kan re-verifisere om et smalere unntak faktisk finnes, ble koden REVERTERT I SIN HELHET FØR
+   commit (ingen spor i historikken) i stedet for å stille overstyre en bedre informert tidligere
+   konklusjon. Pivoterte til Deepgram (rent, avgrenset transkripsjons-API, INGEN av D-328s
+   samtaletilstand/verktøykall-bekymring) - passer eksisterende `SttAdapter`-kontrakt uendret, kun
+   D-320s allerede kjente "ny leverandør krever DPA-gjennomgang"-sperre gjelder (`processor_terms_
+   status: "NOT_VERIFIED"`, `evaluateSpeechRouting()` avviser for alle memory spaces til Tobias
+   gjennomgår Deepgram sin Data controls-side - trolig ÉN handling dekker begge Deepgram-radene).
+   BEVISST IKKE wiret inn i `main.ts` sin aktive adapter-utvelgelse (samme mønster som D-319/D-320).
+
+18 nye tester (`d356-deepgram-streaming-stt.test.ts`) - 18/18 grønt. Full `apps/voice-gateway/test`
+kjørt fil-for-fil: 16/16 filer, 152/152 tester grønt (`voice-e2e.test.ts` samme kjente sandkasse-
+hengning som D-353, ikke kjørt). `pnpm -w typecheck`/`eslint` rene. **IKKE live-testet av Tobias, IKKE
+aktivert i produksjon ennå** - krever hans egen Deepgram Data-controls-gjennomgang + matriseoppdatering
+FØR denne faktisk kan slås på. Se D-356 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**D-355 (Tobias gjentok D-354-ordren ordrett direkte i chat etter en worker-restart - samme
+avklaring gjelder: kun Anthropic/OpenAI/Gemini, konkrete kategorier). Steg 2, BYGGET:** nytt
+`modules/model-gateway/src/specialist-delegation.ts` - `delegate_code_task`-verktøy Gemma kan kalle
+(samme agentiske mønster som de ~56 andre mesh-verktøyene) for å delegere en konkret kode-deloppgave
+til Anthropic/OpenAI/Gemini (`providerPreference`, D-106s eksisterende mekanisme, `purpose: "CODE"`).
+Verifisert FØR bygging (kildekode lest, ikke gjettet) at `completeWithTools()` sin ytre tool-loop
+ALLEREDE bygger `roundInput` fra det faste ytre `input`-objektet hver runde (`model-gateway.ts`
+linje 592-596) - et nestet delegerings-kall lekker ALDRI sin `providerPreference` ut til neste runde,
+så Gemma AUTOMATISK synter det endelige svaret fra spesialistens resultat, ingen ny mekanikk. Bilde-
+generering trengte INGEN ny kode - `openai_images.generate_image` (D-316) er allerede et ordinært
+mesh-verktøy, allerede eksponert til Gemma. Ingen automatisk Gemma-fallback hvis alle tre spesialister
+feiler her - feiler ÆRLIG tilbake som en verktøyfeil. Wiret inn i `apps/api/src/main.ts` sin
+`conversationEngine`-tools (samtale-/tale-flaten, D-30) via en liten komposisjons-dispatcher ved
+siden av `MeshToolExecutor` - BEVISST avgrenset til chat/voice, ikke `executiveHandler`-workeren.
+11 nye tester (6 executor-logikk + 5 kildeteksts-baserte wiring-bevis) - 11/11 grønt. `pnpm -w
+typecheck`/`eslint` rene. Full `modules/model-gateway/test`: 243/246 grønt (3 skippet, kun kjent
+FØR-eksisterende embedded-Postgres-sandkassebegrensning, ingen regresjon). Se D-355 i
+DECISIONS_AND_ASSUMPTIONS.md. **Med dette er BEGGE steg av Tobias sin "Gemma som standard, eskaler
+ved behov"-ordre bygget.**
+
+**D-354 (Tobias direkte i chat: "gemma skal være standar for tekst og tale siden den er gratis ...
+først ved større forespørsler ... skal den spinne opp agenter" - avklart via `AskUserQuestion`: kun
+Anthropic/OpenAI/Gemini som eskaleringsmål, samme flyt for tekst+tale, konkrete kategorier avgjør
+eskalering). Steg 1 (nå, BYGGET): `apps/api/src/conversation.ts` sin `ConversationEngine.handle()`
+injiserer `providerPreference: ["gemma_local", "gemma_hosted"]` (D-106s eksisterende, allerede
+testede mekanisme i `router.ts` - INGEN ny routing-logikk) som default for ordinær chat, KUN når
+eieren/override IKKE allerede har bedt om noe spesifikt (eksplisitt `provider`/`providerPreference`/
+`mode`) - aldri en stille overstyring av en eksplisitt forespørsel. Gateway-kallet er pakket i
+try/catch: `NoEligibleProviderError`/`provider_preference_exhausted` fra DENNE defaulten (aldri fra
+en eksplisitt "bruk Gemma"-forespørsel, som feiler ærlig i stedet) trigger en retry UTEN
+`providerPreference` (normal AUTO-vekting/betalt fallback som før), logget eksplisitt
+(`d354_gemma_default_preference_exhausted_fallback`) - aldri en stille degradering. Verifisert trygt
+å prøve på nytt (routeren velger provider FØR noe strømmes, ingen delvis tekst tapt/duplisert). Tale
+dekkes automatisk (samme `/chat`-sti som tekst, D-30) - ingen egen voice-gateway-endring nødvendig.
+`sensitivity` (D-203) og `runCouncil()` (alltid kvalitetsprioritert) er BEVISST UBERØRT.
+`apps/api/test/conversation-d106-overrides.test.ts`: 28/28 grønt (4 nye D-354-tester + 1 oppdatert).
+`tsc --noEmit`/`eslint` rene. **Steg 2 (verktøy-utløst eskalering for kode/bilde-generering med
+tilbakelevering til Gemma) er BEVISST IKKE bygget her** - egen, større runde. Se D-354 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
+**D-353 (talekvalitet, tre funn rapportert samtidig av Tobias - ulik "fikset"-status per funn,
+ALDRI late som alle tre er løst fordi de kom i samme melding):**
+1. **TTS leste Markdown bokstavelig ("stjerne stjerne punktum") - FIKSET.** Ny `sanitizeForSpeech()`
+   (`apps/voice-gateway/src/text-sanitize.ts`), ETT sentralt sanerings-punkt i `session.ts` sin
+   `enqueueTts()` FØR enhver TTS-adapter - fjerner fet/kursiv/kode/lenker/liste-markører, siste
+   sikkerhetsnett fjerner enhver gjenværende `*`/`` ` ``. 15 nye tester, 15/15 grønt.
+2. **STT hører dårlig + kan ikke avbryte - IKKE manglende funksjon, en kalibreringsbegrensning gjort
+   tunbar.** Barge-in FINNES og er testet allerede - mest sannsynlig oppdager `EnergyVad` sin faste
+   terskel (0,05) rett og slett ikke avbruddsforsøket som tale. `JARVIS_VOICE_VAD_THRESHOLD`/
+   `JARVIS_VOICE_VAD_HANGOVER_MS` er nå miljøvariabel-styrt (`main.ts`, samme D-236/D-340
+   "tom streng er ikke usatt"-disiplin fanget FØR den ble en ny bug), UENDREDE defaultverdier -
+   krever Tobias sin egen kalibrering mot `voice_audio_heartbeat`-loggen, ikke en kodefiks jeg kan
+   gjøre blindt uten ekte lyd å teste mot. Full VAD-modell-utskifting (Silero-klasse) er en større,
+   IKKE forsøkt endring.
+3. **Respons-latens - TTS/LLM-strømming ALLEREDE bra, flaskehalsen er batch-STT (whisper.cpp venter
+   på HELE ytringen).** Ekte fiks (streaming STT) er en større arkitektonisk endring, IKKE forsøkt i
+   dag - `hangoverMs` (punkt 2) er eneste tilgjengelige, trygge latens-spak nå.
+
+`pnpm --filter @jarvis/voice-gateway typecheck`/`eslint` rene. 16/17 testfiler, 139/139 tester grønt
+(`voice-e2e.test.ts` hopper over - BEKREFTET FØR-eksisterende sandkasse-hengning via `git stash`, ikke
+en regresjon). **IKKE live-testet av Tobias ennå** - krever NAS-redeploy. Se D-353 i
+DECISIONS_AND_ASSUMPTIONS.md.
 
 **D-352:** Tobias direkte i chat: "LEGG OPP FILTRE PÅ TILKOBLINGER OG LEGG OPP LOGER SÅ DU SER
 DISCORD LOGOEN PÅ DISCORD TILKOBLINGEN GJØR DEM LITT STØRRE OG MER FANSY OG SETT OPP HEART BEAT PÅ

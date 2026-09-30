@@ -20,7 +20,15 @@ import {
 } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { DeploymentService, DiagnosisService, IncidentService } from "@jarvis/incidents";
-import { AiCouncil, ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
+import {
+  AiCouncil,
+  createSpecialistDelegationExecutor,
+  DELEGATE_CODE_TASK_TOOL_NAME,
+  ModelGateway,
+  SPECIALIST_DELEGATION_TOOLS,
+  traceSinkFromEnv,
+  type ToolExecutor
+} from "@jarvis/model-gateway";
 import {
   AnthropicAdapter,
   GemmaHostedAdapter,
@@ -1008,10 +1016,30 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // `MESH_TOOLS` - se `fullMeshTools` sitt filhode over for hvorfor ingen
     // ny godkjenningssperre er lagt til (D-41: sovereign owner-modus for
     // klasse D er uendret).
+    // D-354/D-355 ("gemma skal være standar for tekst og tale ... ved
+    // større forespørsler kode endringer ... skal den spinne opp agenter
+    // ... kommer tilbake til gemma med svaret"): `SPECIALIST_DELEGATION_TOOLS`
+    // (`delegate_code_task`) lagt til SISTE, PÅ SIDEN AV de ~56 mesh-
+    // verktøyene - samme "legg til på slutten"-disiplin som hver ny mesh-
+    // connector i D-297+ har fulgt. Bilde-generering trenger INGEN ny
+    // delegerings-vei - `openai_images.generate_image` er allerede et
+    // ordinært mesh-verktøy i `fullMeshTools`.
     tools: {
-      definitions: fullMeshTools.map((t) => t.def),
+      definitions: [...fullMeshTools.map((t) => t.def), ...SPECIALIST_DELEGATION_TOOLS],
       // D-351: 4000 → 20_000 (se mesh-bridge.ts sitt filhode for host-målt begrunnelse).
-      executorFor: (identity) => new MeshToolExecutor(toolGateway, identity, 20_000, fullMeshTools)
+      // D-355: komposisjon - `delegate_code_task` prøves FØRST (ukjent navn
+      // for MeshToolExecutor ville uansett returnert TOOL_NOT_FOUND, men
+      // eksplisitt navnesjekk her er tydeligere enn å stole på fallthrough).
+      executorFor: (identity): ToolExecutor => {
+        const meshExecutor = new MeshToolExecutor(toolGateway, identity, 20_000, fullMeshTools);
+        const delegationExecutor = createSpecialistDelegationExecutor(gateway);
+        return {
+          execute: (call, ctx) =>
+            call.tool_name === DELEGATE_CODE_TASK_TOOL_NAME
+              ? delegationExecutor.execute(call, ctx)
+              : meshExecutor.execute(call, ctx)
+        };
+      }
     },
     // Task #121 (D-214): kosmetisk personlighetslag, se conversation.ts sin
     // `buildSystemPrompt()`/`loadPersonality()`.

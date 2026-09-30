@@ -7,6 +7,7 @@ import {
 import { PassthroughAec, PassthroughNoiseSuppressor, rmsEnergy, type AudioFilter } from "./audio.ts";
 import { EnergyVad, type VadAdapter } from "./vad.ts";
 import { SentenceChunker } from "./chunker.ts";
+import { sanitizeForSpeech } from "./text-sanitize.ts";
 import type { VoiceHealth } from "./health.ts";
 import type { SttAdapter, SttStream } from "./stt.ts";
 import type { TtsAdapter, TtsPlayback } from "./tts.ts";
@@ -530,6 +531,14 @@ export class VoiceSession {
     if (this.epoch !== turnEpoch || chunk.trim().length === 0) {
       return;
     }
+    // D-353: ETT sentralt sanerings-punkt, FØR chunken noen gang når en
+    // TTS-adapter - beskytter samtlige (OpenAI/ElevenLabs/lokal Piper) mot å
+    // uttale rå Markdown-syntaks (**fet**, lister, kodeblokker, lenker) som
+    // modellen skriver uvitende om at denne mottakeren HØRER teksten.
+    const sanitized = sanitizeForSpeech(chunk);
+    if (sanitized.length === 0) {
+      return;
+    }
     // D-122: køes ikke i det hele tatt når behandleren er avvist - da forblir
     // `tts_chars` ÆRLIG null i stedet for å telle tegn som aldri ble behandlet.
     if (!this.ttsRouting.allowed) {
@@ -537,12 +546,12 @@ export class VoiceSession {
       return;
     }
     if (metrics) {
-      metrics.tts_chars = (metrics.tts_chars ?? 0) + chunk.length;
+      metrics.tts_chars = (metrics.tts_chars ?? 0) + sanitized.length;
       if (metrics.t_first_tts_request === undefined) {
         metrics.t_first_tts_request = Date.now();
       }
     }
-    this.ttsQueue.push(chunk);
+    this.ttsQueue.push(sanitized);
     this.ttsWorker = this.ttsWorker.then(() => this.speakNext(turnEpoch, metrics));
   }
 

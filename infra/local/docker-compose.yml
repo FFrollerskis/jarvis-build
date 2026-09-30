@@ -240,6 +240,14 @@ services:
       # denne hele klassen konfigurasjonsfeil (compose-passthrough MÅ
       # eksplisitt listes for HVER variabel, ikke bare `.env`-filen).
       JARVIS_VOICE_DEBUG_DUMP_DIR: "${JARVIS_VOICE_DEBUG_DUMP_DIR:-}"
+      # D-353 (Tobias direkte i chat: "den hører meg veldig dårlig ... kan
+      # heller ikke bryte han midt i en samtale"). SAMME D-280-disiplin som
+      # over: må listes HER eksplisitt, ellers når en `.env`-verdi ALDRI
+      # containeren. Usatt: `main.ts` sine egne defaultverdier (0.05/700ms,
+      # D-275) gjelder uendret - ingen atferdsendring uten eksplisitt
+      # operatør-handling.
+      JARVIS_VOICE_VAD_THRESHOLD: "${JARVIS_VOICE_VAD_THRESHOLD:-}"
+      JARVIS_VOICE_VAD_HANGOVER_MS: "${JARVIS_VOICE_VAD_HANGOVER_MS:-}"
     volumes:
       # D-280: ALLTID montert (harmløst når JARVIS_VOICE_DEBUG_DUMP_DIR er
       # usatt - ingenting skriver dit) - se `debug-audio-dump.ts` (D-279).

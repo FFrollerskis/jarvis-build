@@ -61,10 +61,26 @@ export class MemoryWriter {
       const sourceId = await this.ensureSource(client, identity.tenant_id, source);
       const observedAt = candidate.observed_at ?? new Date().toISOString();
 
+      // D-357 (funn ved kildekode-gjennomgang, IKKE rapportert av Tobias): raden
+      // MÅ inkludere 'invalidated' her, ikke bare 'active'/'quarantined'. Uten
+      // dette blir en tidligere INVALIDERT rad (f.eks. D-287 sin 60-dagers
+      // retensjons-sveip, eller en eksplisitt `invalidate()`) usynlig for DETTE
+      // oppslaget - `!row` under blir sann selv om en rad FAKTISK eksisterer for
+      // (tenant_id, space, type, subject) - og `insertItem()` under kaster da en
+      // rå Postgres UNIQUE-krasj (`008_memory.sql` sin
+      // `UNIQUE (tenant_id, space, type, subject)`-begrensning dekker ALLE
+      // statuser, ikke bare aktive). Siden `ConversationEngine` sitt kall til
+      // `memory.ingest()` er fire-and-forget og SVELGER feil (D-283s kommentar i
+      // `conversation.ts`), var den observerbare konsekvensen en STILLE, permanent
+      // "dette faktumet kan ALDRI læres på nytt" - nøyaktig samme symptomklasse
+      // ("husker ingenting") som D-300 fant en ANNEN rotårsak til (for smal
+      // regelbasert uttrekking) - dette er en TREDJE, uavhengig årsak til samme
+      // symptom, oppdaget ved lesing, ikke ved en ny Tobias-rapport.
       const existing = await client.query(
         `SELECT memory_item_id, content, subject, version, valid_from, trust_level, status
          FROM memory_items
-         WHERE tenant_id = $1 AND space = $2 AND type = $3 AND subject = $4 AND status IN ('active','quarantined')`,
+         WHERE tenant_id = $1 AND space = $2 AND type = $3 AND subject = $4
+           AND status IN ('active','quarantined','invalidated')`,
         [identity.tenant_id, space, candidate.type, candidate.subject]
       );
       const row = existing.rows[0] as ItemRow | undefined;
@@ -83,14 +99,26 @@ export class MemoryWriter {
         return { op: "ADD", memory_item_id: id, status } as const;
       }
 
+      // D-357: en tidligere INVALIDERT rad må ALDRI behandles som et stille NOOP
+      // selv om innholdet er byte-for-byte likt det som ble invalidert - et
+      // faktum som "blir sant igjen" er en reell statusendring (invalidated ->
+      // active/quarantined), ALDRI en no-op, ellers forblir raden permanent
+      // usynlig for lesing (`status='invalidated'`) uansett hvor mange ganger
+      // det gjentas. NOOP-optimaliseringen gjelder derfor KUN en allerede-synlig
+      // (active/quarantined) rad, uendret fra før.
       const normalized = (s: string) => s.trim().toLowerCase();
-      if (normalized(row.content) === normalized(candidate.content)) {
+      if (row.status !== "invalidated" && normalized(row.content) === normalized(candidate.content)) {
         await writeAudit(client, identity, { type: "memory.noop", payload: { memory_item_id: row.memory_item_id } });
         return { op: "NOOP", memory_item_id: row.memory_item_id } as const;
       }
 
-      // Untrusted kan aldri overskrive eksisterende trusted/internal innhold:
-      if (source.trust === "untrusted" && row.trust_level !== "untrusted") {
+      // Untrusted kan aldri overskrive eksisterende trusted/internal innhold -
+      // men KUN relevant for en CURRENTLY LIVE (active/quarantined) rad; en
+      // invalidert rad har INGEN nåværende sannhet å beskytte, så gjenoppliving
+      // av den går ALLTID til den generelle oppdaterings-/gjenopplivings-grenen
+      // under (som selv avgjør ny status ut fra `source.trust`, SAMME regel som
+      // `!row`-grenen over bruker for et helt nytt faktum).
+      if (source.trust === "untrusted" && row.status !== "invalidated" && row.trust_level !== "untrusted") {
         const id = await this.insertItem(
           client, identity, space,
           { ...candidate, subject: `${candidate.subject}#quarantined-${randomUUID().slice(0, 8)}` },
@@ -106,6 +134,18 @@ export class MemoryWriter {
         return { op: "QUARANTINED_CONFLICT", memory_item_id: id, conflicts_with: row.memory_item_id } as const;
       }
 
+      // D-357: gjenopplivings-status for en tidligere INVALIDERT rad følger
+      // NØYAKTIG samme regel som `!row`-grenen over (trusted -> active,
+      // untrusted -> quarantined, krever samme eksplisitte
+      // `promoteFromQuarantine()`-godkjenning som ethvert nytt untrusted
+      // faktum). En allerede LIVE rad (active/quarantined) beholder sin
+      // EKSISTERENDE status UENDRET her - en vanlig oppdatering av et
+      // quarantined faktum forfremmer det ALDRI stille til active (§"aldri
+      // automatisk" i `promoteFromQuarantine()` sin klassekommentar gjelder
+      // identisk for denne grenen, ikke bare den eksplisitte godkjenningsveien).
+      const newStatus =
+        row.status === "invalidated" ? (source.trust === "untrusted" ? "quarantined" : "active") : row.status;
+
       // Versjoner den gamle sannheten (bitemporalt: gyldig til nå), oppdater itemet.
       await client.query(
         `INSERT INTO memory_versions
@@ -117,14 +157,21 @@ export class MemoryWriter {
       await client.query(
         `UPDATE memory_items
            SET content = $2, version = $3, observed_at = $4, valid_from = now(),
-               trust_level = $5, confidence = $6, has_conflict = true, updated_at = now()
+               trust_level = $5, confidence = $6, has_conflict = true, updated_at = now(),
+               status = $7, valid_to = NULL
          WHERE memory_item_id = $1`,
-        [row.memory_item_id, candidate.content, newVersion, observedAt, source.trust, candidate.confidence]
+        [row.memory_item_id, candidate.content, newVersion, observedAt, source.trust, candidate.confidence, newStatus]
       );
+      // UENDRET fra før D-357: writeEmbedding() kalles ubetinget på enhver
+      // oppdatering (også en som forblir 'quarantined') - IKKE endret her for å
+      // holde denne fiksen avgrenset til re-add-etter-invalidert-bugen alene;
+      // en eventuell innstramming av embedding-skriving for ikke-aktive rader
+      // er en egen, separat vurdering (krever å lese `retriever.ts` sin
+      // status-filtrering FØR den endres), ikke gjort blindt her.
       await this.writeEmbedding(client, identity.tenant_id, space, row.memory_item_id, candidate);
       await writeAudit(client, identity, {
         type: "memory.update",
-        payload: { memory_item_id: row.memory_item_id, version: newVersion }
+        payload: { memory_item_id: row.memory_item_id, version: newVersion, status: newStatus }
       });
       return { op: "UPDATE", memory_item_id: row.memory_item_id, version: newVersion, conflict: true } as const;
     });

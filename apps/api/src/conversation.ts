@@ -3,6 +3,7 @@ import { ContextBuilder, MessageStore, fastRoute } from "@jarvis/core";
 import {
   BudgetExceededError,
   classifyDecisionImportance,
+  NoEligibleProviderError,
   parseRoutingOverride,
   type AiCouncil,
   type DecisionClassification,
@@ -272,6 +273,39 @@ export class ConversationEngine {
       // BEVISST UBERØRT - den trigges KUN for eksplisitt høy-innvirkning-beslutninger
       // (`decision-importance.ts`) eller eksplisitt eierfrase, og skal IKKE automatisk
       // nedgraderes til lav-sensitivitet bare fordi normal chat nå er det.
+      // D-354 (Tobias direkte i chat: "gemma skal være standar for tekst og
+      // tale siden den er gratis ... først ved større forespørsler ... skal
+      // den spinne opp agenter" - avklart med AskUserQuestion til: kun
+      // Anthropic/OpenAI/Gemini som eskaleringsmål, samme flyt for tekst OG
+      // tale, konkrete kategorier avgjør eskalering). Steg 1 av to (steg 2 -
+      // verktøy-utløst eskalering for kode/bilde med tilbakelevering til
+      // Gemma - er en EGEN, større runde, IKKE bygget her).
+      //
+      // Gjør Gemma til REELL standard for vanlig tekst-/taleprat: injiser en
+      // HARD, ordnet preferanseliste (`providerPreference`, D-106s
+      // eksisterende mekanisme - INGEN scoring, INGEN stille fallback utenfor
+      // listen, se router.ts) KUN når eieren/override IKKE allerede har bedt
+      // om noe spesifikt (eksplisitt provider, eksplisitt providerPreference,
+      // eksplisitt mode) - en eksplisitt forespørsel skal ALDRI stille
+      // overstyres av denne defaulten. `gemma_local` FØR `gemma_hosted` (egen
+      // maskinvare foran delt gratis-tier-kvote).
+      //
+      // Valgt FREMFOR å stole på at AUTO-scoringen (router.ts sin `score()`)
+      // "naturlig" favoriserer Gemma: selv om registry-tallene i dag faktisk
+      // gir `gemma_hosted` høyest AUTO-poengsum for vanlig PUBLIC_OR_LOW_
+      // SENSITIVITY-chat, er det EKSPLISITT, deterministisk og uavhengig av
+      // hvilke providere som faktisk er konfigurert/friske i en gitt
+      // driftsatt instans - Tobias sin egen live-test ("hvorfor kjører den på
+      // Sonnet og ikke Gemma") viste at scoring alene ikke reelt garanterte
+      // dette i praksis. `usingDefaultGemmaPreference` spores eksplisitt slik
+      // at feilhåndteringen under KUN faller tilbake til normal AUTO-vekting
+      // (inkl. betalte providere) når DENNE defaulten - ikke en eksplisitt
+      // eierforespørsel - var kilden til preferansen.
+      const usingDefaultGemmaPreference =
+        provider === undefined &&
+        override?.provider === undefined &&
+        override?.providerPreference === undefined &&
+        override?.mode === undefined;
       const input = {
         tenant_id: identity.tenant_id,
         session_id: identity.session_id,
@@ -280,7 +314,9 @@ export class ConversationEngine {
         ...(provider !== undefined ? { provider } : override?.provider !== undefined ? { provider: override.provider } : {}),
         ...(provider === undefined && override?.providerPreference !== undefined
           ? { providerPreference: override.providerPreference }
-          : {}),
+          : usingDefaultGemmaPreference
+            ? { providerPreference: ["gemma_local", "gemma_hosted"] }
+            : {}),
         ...(provider === undefined && override?.mode !== undefined ? { mode: override.mode } : {}),
         ...(override?.paid_models_allowed !== undefined ? { paid_models_allowed: override.paid_models_allowed } : {}),
         request: { system, messages: history, max_tokens: 1024 }
@@ -308,16 +344,47 @@ export class ConversationEngine {
             }
           }
         : undefined;
-      const result = this.deps.tools
-        ? await this.deps.gateway.completeWithTools(input, {
-            tools: this.deps.tools.definitions,
-            executor: this.deps.tools.executorFor(identity),
-            ...(onEvent ? { onEvent } : {}),
-            ...(signal ? { signal } : {})
-          })
-        : onEvent
-          ? await this.deps.gateway.stream(input, onEvent, signal)
-          : await this.deps.gateway.complete(input);
+      const callGateway = (callInput: typeof input) =>
+        this.deps.tools
+          ? this.deps.gateway.completeWithTools(callInput, {
+              tools: this.deps.tools.definitions,
+              executor: this.deps.tools.executorFor(identity),
+              ...(onEvent ? { onEvent } : {}),
+              ...(signal ? { signal } : {})
+            })
+          : onEvent
+            ? this.deps.gateway.stream(callInput, onEvent, signal)
+            : this.deps.gateway.complete(callInput);
+      let result;
+      try {
+        result = await callGateway(input);
+      } catch (err) {
+        // D-354: kun defaulten (ikke en eksplisitt eierforespørsel om Gemma)
+        // faller tilbake - se den store kommentaren over `input`-konstruksjonen.
+        // `this.router.plan(...)` kalles alltid FØR noe strømmes (verifisert i
+        // `model-gateway.ts`), så ingen delvis tekst er sendt til `onToken`
+        // enda her - retry-fra-scratch er trygt, ingen duplisert output.
+        if (
+          usingDefaultGemmaPreference &&
+          err instanceof NoEligibleProviderError &&
+          err.message.includes("provider_preference_exhausted")
+        ) {
+          const { providerPreference: omittedGemmaPreference, ...fallbackInput } = input;
+          // §"ærlighet og sporbarhet": degraderingen skal ALDRI være stille -
+          // samme diagnostikk-mønster (`msg`-felt, ingen prompt/svar-innhold)
+          // som `stream_debug_conversation` over.
+          console.error(
+            JSON.stringify({
+              msg: "d354_gemma_default_preference_exhausted_fallback",
+              omitted_preference: omittedGemmaPreference,
+              reason: err.message
+            })
+          );
+          result = await callGateway(fallbackInput);
+        } else {
+          throw err;
+        }
+      }
       await this.deps.messages.save(identity, "assistant", result.text);
       return { reply: result.text, routed: "model" };
     } catch (err) {

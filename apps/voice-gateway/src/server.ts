@@ -22,6 +22,7 @@ import {
 } from "./session.ts";
 import type { SttAdapter } from "./stt.ts";
 import type { TtsAdapter } from "./tts.ts";
+import type { VadAdapter } from "./vad.ts";
 
 /**
  * Voice Gateway-prosessen: WebSocket-transport (D-29/BO-12 §24 - bidireksjonal
@@ -181,6 +182,13 @@ export interface VoiceGatewayOptions {
   /** Delt journal (failover-gjenopptak i test/prod). */
   journal?: UtteranceJournal;
   health?: VoiceHealth;
+  /**
+   * D-353: valgfri, EKSPLISITT VAD-instans (f.eks. `EnergyVad` med
+   * miljøvariabel-styrt terskel/hangover fra `main.ts`) - `undefined` lar
+   * `VoiceSession` sin egen konstruktør-default (`new EnergyVad()`) gjelde
+   * uendret, samme atferd som FØR dette feltet fantes.
+   */
+  vad?: VadAdapter;
 }
 
 /**
@@ -305,7 +313,7 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
           onError: (error) => send({ type: "error", error })
         },
         options.journal ?? new UtteranceJournal(),
-        undefined,
+        options.vad,
         undefined,
         undefined,
         undefined,
