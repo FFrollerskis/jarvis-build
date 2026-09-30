@@ -1,6 +1,9 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-356: DELVIS BYGGET
+**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-357: FIKS + FUNN
+("...så minne ferdig" - reell "kan aldri læres på nytt etter invalidering"-bug FIKSET i
+`MemoryWriter.apply()`; en separat GDPR-erasure/append-only-trigger-konflikt FUNNET men IKKE fikset,
+krever embedded-Postgres-verifisering denne sandkassen ikke tillater) + D-356: DELVIS BYGGET
 ("fortsett og fikse voice ferdig" - streaming-STT bygget/testet for Deepgram, gated NOT_VERIFIED
 inntil Tobias-DPA-gjennomgang; VAD-modell-bytte BEVISST fortsatt utsatt, begrunnet; en OpenAI
 Realtime-variant ble bygget OG REVERTERT midt i økten da den viste seg motsi en eksisterende
@@ -15,6 +18,32 @@ VAD-terskel/hangover gjort tunbar, batch-STT-latens dokumentert som en fremtidig
 heartbeat-prikk på alle connectorer) + D-351: FUNN + FIKS (mesh-verktøy-output-kapping skjulte 40 av
 56 connectorer for Charlie) + D-350: BYGGET (Zapier `call_tool`, Q-40(b) LUKKET) + D-349: FIKS (Jira
 tom-JQL-400).**
+
+**D-357 ("...så minne ferdig" - andre halvdel av samme ordre som D-356):**
+1. **FIKSET: `MemoryWriter.apply()` kunne ALDRI lære et invalidert faktum på nytt.** Oppslaget etter
+   en eksisterende rad ekskluderte `status='invalidated'` - en tidligere invalidert rad (D-287 sin
+   60-dagers retensjons-sveip, eller en eksplisitt `invalidate()`) ble usynlig for oppslaget, og et
+   nytt forsøk på samme faktum traff `memory_items` sin `UNIQUE (tenant_id,space,type,subject)` og
+   kastet en rå Postgres-krasj - SVELGET stille av `ConversationEngine` sitt fire-and-forget
+   `memory.ingest()`-kall (D-283). Observerbart symptom: "dette kan ALDRI læres på nytt" - en TREDJE,
+   uavhengig rotårsak til samme "husker ingenting"-symptomklasse D-300 allerede delvis fikset. Fikset
+   ved å utvide oppslaget til å inkludere `invalidated` og eksplisitt gjenopplive raden via samme
+   bitemporale oppdateringsvei (ALDRI et stille NOOP selv ved identisk innhold; ny status følger
+   SAMME regel som et helt nytt faktum - trusted->active, untrusted->quarantined med uendret krav om
+   eksplisitt `promoteFromQuarantine()`-godkjenning). 4 nye tester lagt til. **Kan IKKE kjøres i denne
+   sandkassen** (embedded Postgres, `/tmp`-tilgang - samme kjente, FØR-eksisterende begrensning som
+   flere andre testfiler denne økten, et reelt arbeidsforsøk med alternativ `TMPDIR` mislyktes også) -
+   fiksen er i stedet manuelt spor-gjennom-verifisert mot koden for alle fire testscenarioene.
+2. **FUNNET, IKKE FIKSET: GDPR-sletting krasjer for enhver person med minst én `memory_versions`-rad.**
+   `memory_versions` har en `BEFORE UPDATE OR DELETE`-append-only-trigger; `modules/erasure/src/
+   plan.ts` gjør likevel en rå `DELETE FROM memory_versions` (bekreftet innenfor en eksplisitt
+   transaksjon) - kaster og ruller HELE slettingen tilbake for enhver person som noensinne har hatt
+   et minnefaktum oppdatert ELLER invalidert. Ikke fikset her - krever en migrasjonsendring jeg ikke
+   kan skyte blindt uten embedded-Postgres-verifisering. Registrert som egen, fremtidig oppgave.
+3. **Andre kjente arkitekturgap, bevisst IKKE rørt denne runden:** `LocalHashEmbedding` (ikke-
+   semantisk hash) er fortsatt den faktiske produksjons-embeddingen; `KnowledgeRetriever`/
+   `ContextEngine` fortsatt uten produksjonskonsument; MEMORY_ARCHITECTURE.md §9 sitt eval-sett
+   fortsatt aldri kjørt. Se D-357 i DECISIONS_AND_ASSUMPTIONS.md for full begrunnelse på alle punkter.
 
 **D-356 ("fortsett og fikse voice ferdig", direkte oppfølging av D-353s to eksplisitt utsatte funn):**
 1. **VAD-modell-bytte (Silero) - FORTSATT BEVISST UTSATT, med begrunnelse.** Grensesnittet er
