@@ -164,4 +164,70 @@ describe("GmailTransport - intern logikk (fetch mocket)", () => {
       /gmail_unsupported_action_delete_everything/
     );
   });
+
+  /**
+   * D-348 (Tobias direkte i chat, live: Charlie svarte `gmail_unsupported_action_send`
+   * på "send en epost til henrik@ffskis.com") - `tool_id: "email", action: "send"`
+   * var registrert (klasse D) og policy-testet mot en FakeTransport, men den EKTE
+   * `GmailTransport` (faktisk wiret i main.ts/worker-main.ts) manglet selve casen.
+   */
+  /** Rebygger den avsendte `raw`-MIME-strengen fra et fanget fetch-kall sin `init.body`, for assertions mot selve meldingsinnholdet. */
+  function decodeRawMessage(init: RequestInit | undefined): string {
+    const parsed = JSON.parse(String(init?.body)) as { raw: string };
+    const standard = parsed.raw.replace(/-/g, "+").replace(/_/g, "/");
+    const padding = standard.length % 4 === 0 ? "" : "=".repeat(4 - (standard.length % 4));
+    return Buffer.from(standard + padding, "base64").toString("utf8");
+  }
+
+  /** Egen, isolert fetch-mock for `send`-testene: fanger init.body for `/messages/send`-kallet spesifikt (den delte beforeEach-mocken over registrerer kun url/method, ikke body). */
+  function mockFetchCapturingSendBody(sendResponse: Response): { capturedInit: () => RequestInit | undefined } {
+    let captured: RequestInit | undefined;
+    global.fetch = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("https://oauth2.googleapis.com/token")) {
+        return jsonResponse(200, { access_token: "fake-access-token" });
+      }
+      if (url.includes("/messages/send")) {
+        captured = init;
+        return sendResponse;
+      }
+      throw new Error(`uventet fetch-kall i send-test: ${url}`);
+    }) as unknown as typeof fetch;
+    return { capturedInit: () => captured };
+  }
+
+  it("I: send - POSTer til users.messages.send med et base64url-kodet RFC 2822 'raw'-felt, ASCII To/Subject uendret", async () => {
+    const { capturedInit } = mockFetchCapturingSendBody(jsonResponse(200, { id: "sent-1", threadId: "t9" }));
+    const transport = new GmailTransport();
+    const result = await transport.invoke(
+      "send",
+      { to: "henrik@ffskis.com", subject: "Hei", body: "Det er Jarvis" },
+      "refresh-token"
+    );
+    expect(capturedInit()?.method).toBe("POST");
+    const raw = decodeRawMessage(capturedInit());
+    expect(raw).toContain("To: henrik@ffskis.com");
+    expect(raw).toContain("Subject: Hei");
+    expect(raw).toContain("Content-Transfer-Encoding: base64");
+    expect(raw).toContain(Buffer.from("Det er Jarvis", "utf8").toString("base64"));
+    expect((result.data as { id: string }).id).toBe("sent-1");
+  });
+
+  it("J: send - Subject med norske tegn (æøå) RFC 2047-kodes (=?UTF-8?B?...?=), body base64-kodes i meldingskroppen", async () => {
+    const { capturedInit } = mockFetchCapturingSendBody(jsonResponse(200, { id: "sent-2" }));
+    const transport = new GmailTransport();
+    await transport.invoke("send", { to: "a@b.no", subject: "Møte i går", body: "hei på deg" }, "refresh-token");
+    const raw = decodeRawMessage(capturedInit());
+    const expectedEncodedSubject = `=?UTF-8?B?${Buffer.from("Møte i går", "utf8").toString("base64")}?=`;
+    expect(raw).toContain(`Subject: ${expectedEncodedSubject}`);
+    expect(raw).toContain(Buffer.from("hei på deg", "utf8").toString("base64"));
+  });
+
+  it("K: send - feil HTTP-status kaster gmail_error_<status>", async () => {
+    queue.push(new Response("", { status: 403 }));
+    const transport = new GmailTransport();
+    await expect(
+      transport.invoke("send", { to: "a@b.no", subject: "x", body: "y" }, "refresh-token")
+    ).rejects.toThrow(/gmail_error_403/);
+  });
 });
