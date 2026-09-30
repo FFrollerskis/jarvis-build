@@ -1,5 +1,11 @@
 # PROJECT STATUS
 
+**MERGET under D-192 (2026-09-30, commit `e5138c4`):** PR #215 (D-353/D-354/D-355/D-356/D-357) - CI
+grønt på HEAD `99a95c2`, ingen åpne review-tråder, to-forelder `merge_method=merge`. Branch resatt
+til `origin/main` per konvensjon. **IKKE live-testet av Tobias på NAS-en for noen av de fem ennå** -
+neste anbefalte steg er hans egen redeploy + faktisk taletest, PLUSS (for D-356 sin streaming-STT)
+hans egen raske Deepgram Data-controls-gjennomgang FØR `DeepgramStreamingStt` kan aktiveres.
+
 **Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-357: FIKS + FUNN
 ("...så minne ferdig" - reell "kan aldri læres på nytt etter invalidering"-bug FIKSET i
 `MemoryWriter.apply()`; en separat GDPR-erasure/append-only-trigger-konflikt FUNNET men IKKE fikset,
