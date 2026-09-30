@@ -1,21 +1,29 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-29 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-346: FUNN + FIKS.**
-D-340 sin "regenerer Infisical-maskinidentiteten i admin-UI" viste seg FAKTISK blokkert (ikke bare
-et glemt passord): eksisterende passord avvist, ingen SSO konfigurert, OG `/signup` feiler med
-"Failed to send verification code" - Infisical-instansen har INGEN SMTP satt opp, så verken
-passord-gjenoppretting eller ny registrering kan fullføres. Ingen instance-admin-token fra den
-opprinnelige bootstrap-en ble noensinne lagret i repoet; `/api/v1/admin/bootstrap` kan uansett kun
-kjøres én gang. **Fikset:** lagt til `SMTP_HOST`/`PORT`/`USERNAME`/`PASSWORD`/`FROM_ADDRESS`/
-`FROM_NAME` på `infisical`-tjenesten i `infra/local/docker-compose.yml`, lest fra nye
-`INFISICAL_SMTP_*`-variabler i `.env` (tomme = no-op, ingen regresjon). Se D-346.
+**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-340/D-346: LUKKET,
+LIVE BEKREFTET.** Hele kjeden fra D-340 (Infisical 401) til D-346 (SMTP-gap som blokkerte selve
+gjenopprettingen) er nå bevist løst end-to-end på produksjons-NAS-en:
+1. Tobias fylte inn ekte `INFISICAL_SMTP_*`-verdier (Gmail SMTP) i `.env`, redeploy av `infisical`
+   bekreftet SMTP fungerer (host-loggen viste `SMTP - Verified connection to smtp.gmail.com:587`).
+2. Selve nettleser-gjenopprettingsflyten i DENNE spesifikke Infisical-versjonen viste seg å ha en
+   EKTE, uavhengig frontend-bug (ikke noe VI konfigurerte feil): "Confirm Email"-knappen i
+   passord-reset-flyten fanger ALLTID enhver feil generisk og viser en misvisende "Email service
+   not configured"-modal/side, uansett faktisk årsak (bekreftet ved å lese den FAKTISK kjørende
+   frontend-bundlen direkte i containeren, `docker exec ... grep`, ikke gjettet fra GitHub - versjonen
+   som kjører stemmer IKKE med `main`-branchen sin kildekode). Omgått ved å kalle backend-endepunktene
+   direkte (`/api/v1/password/email/password-reset` → `/api/v1/password/email/password-reset-verify`
+   → `/api/v2/password/password-reset`) via `docker exec local-api-1 node -e fetch(...)` - bekreftet
+   at kontoen (`post@tsworkflow.com`) hele tiden var fullt frisk (`isAccepted:true`,
+   `isEmailVerified:true`), passordet ble satt på nytt reelt (200 OK).
+3. Tobias logget inn i Infisical-UI-et, fant `jarvis-api`-maskinidentiteten (Access Control →
+   Identities → Universal Auth), genererte en NY Client Secret, oppdaterte `INFISICAL_CLIENT_ID`/
+   `_CLIENT_SECRET` i `.env`, redeploy av api+worker.
+4. **Live bekreftet:** `docker exec local-api-1 node -e fetch(.../universal-auth/login,...)` → `200`
+   (var `401` siden D-340). D-340 er dermed FAKTISK lukket, ikke bare kode levert.
 
-**Neste:** Tobias fyller inn `INFISICAL_SMTP_*` i `.env` med en ekte SMTP-leverandør (Gmail SMTP
-m/app-passord e.l.), kjører `docker compose up -d infisical` (kun den tjenesten trenger restart),
-bruker deretter "Glemt passord" på DEN EKSISTERENDE `post@tsworkflow.com`-kontoen (bevarer alle
-allerede lagrede secrets - IKKE `/signup`, som oppretter en ny, tom org). Deretter: rotere
-`INFISICAL_CLIENT_SECRET` som opprinnelig planlagt under D-340/D-346, oppdatere `.env`, redeploye
-api/worker, bekrefte med samme `node -e fetch(...)`-sjekk som tidligere (forventer 200).
+**Neste:** Tobias bekrefter i dashbordet at Vercel/Notion sin "Lagre"/"Test tilkobling" nå fungerer
+uten feil (den opprinnelige 403/`credential_unavailable`-rapporten som startet D-340-sporet).
+Deretter: docs-commit for D-340/D-346 sluttbekreftelse (denne oppdateringen).
 
 **Forrige milepæl (uendret, MERGET PR #208 e722d5b under D-192): D-345: FUNN + FIKS
 - Tobias direkte i chat, etter D-344 sin bekreftede fiks: "rydd alt å fiks at jeg kan koble alt til
