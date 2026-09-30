@@ -1,14 +1,36 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-354: BYGGET, steg 1
-av to (Gemma som REELL default for tekst+tale via eksplisitt `providerPreference`-injeksjon med
-gjennomsiktig fallback-retry; steg 2 - verktøy-utløst eskalering til Anthropic/OpenAI/Gemini for
-kode/bilde - IKKE bygget, egen runde) + D-353: FUNN + DELVIS FIKS (tale: Markdown lest bokstavelig
-FIKSET, VAD-terskel/hangover gjort tunbar, batch-STT-latens dokumentert som en fremtidig, større
-byggeslice) + D-352: BYGGET (dashbord: statusfiltre + merke-ikoner inkl. Discord + større/"fansy"
-kort + heartbeat-prikk på alle connectorer) + D-351: FUNN + FIKS (mesh-verktøy-output-kapping skjulte
-40 av 56 connectorer for Charlie) + D-350: BYGGET (Zapier `call_tool`, Q-40(b) LUKKET) + D-349: FIKS
-(Jira tom-JQL-400).**
+**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-355: BYGGET, steg 2
+av to (verktøy-utløst eskalering fra Gemma til Anthropic/OpenAI/Gemini for kode-deloppgaver via nytt
+`delegate_code_task`-verktøy, tilbakelevering til Gemma via eksisterende tool-loop-arkitektur; bilde-
+generering trengte INGEN ny kode - allerede et mesh-verktøy Gemma kan kalle) + D-354: BYGGET, steg 1
+(Gemma som REELL default for tekst+tale via eksplisitt `providerPreference`-injeksjon med
+gjennomsiktig fallback-retry) + D-353: FUNN + DELVIS FIKS (tale: Markdown lest bokstavelig FIKSET,
+VAD-terskel/hangover gjort tunbar, batch-STT-latens dokumentert som en fremtidig, større byggeslice)
++ D-352: BYGGET (dashbord: statusfiltre + merke-ikoner inkl. Discord + større/"fansy" kort +
+heartbeat-prikk på alle connectorer) + D-351: FUNN + FIKS (mesh-verktøy-output-kapping skjulte 40 av
+56 connectorer for Charlie) + D-350: BYGGET (Zapier `call_tool`, Q-40(b) LUKKET) + D-349: FIKS (Jira
+tom-JQL-400).**
+
+**D-355 (Tobias gjentok D-354-ordren ordrett direkte i chat etter en worker-restart - samme
+avklaring gjelder: kun Anthropic/OpenAI/Gemini, konkrete kategorier). Steg 2, BYGGET:** nytt
+`modules/model-gateway/src/specialist-delegation.ts` - `delegate_code_task`-verktøy Gemma kan kalle
+(samme agentiske mønster som de ~56 andre mesh-verktøyene) for å delegere en konkret kode-deloppgave
+til Anthropic/OpenAI/Gemini (`providerPreference`, D-106s eksisterende mekanisme, `purpose: "CODE"`).
+Verifisert FØR bygging (kildekode lest, ikke gjettet) at `completeWithTools()` sin ytre tool-loop
+ALLEREDE bygger `roundInput` fra det faste ytre `input`-objektet hver runde (`model-gateway.ts`
+linje 592-596) - et nestet delegerings-kall lekker ALDRI sin `providerPreference` ut til neste runde,
+så Gemma AUTOMATISK synter det endelige svaret fra spesialistens resultat, ingen ny mekanikk. Bilde-
+generering trengte INGEN ny kode - `openai_images.generate_image` (D-316) er allerede et ordinært
+mesh-verktøy, allerede eksponert til Gemma. Ingen automatisk Gemma-fallback hvis alle tre spesialister
+feiler her - feiler ÆRLIG tilbake som en verktøyfeil. Wiret inn i `apps/api/src/main.ts` sin
+`conversationEngine`-tools (samtale-/tale-flaten, D-30) via en liten komposisjons-dispatcher ved
+siden av `MeshToolExecutor` - BEVISST avgrenset til chat/voice, ikke `executiveHandler`-workeren.
+11 nye tester (6 executor-logikk + 5 kildeteksts-baserte wiring-bevis) - 11/11 grønt. `pnpm -w
+typecheck`/`eslint` rene. Full `modules/model-gateway/test`: 243/246 grønt (3 skippet, kun kjent
+FØR-eksisterende embedded-Postgres-sandkassebegrensning, ingen regresjon). Se D-355 i
+DECISIONS_AND_ASSUMPTIONS.md. **Med dette er BEGGE steg av Tobias sin "Gemma som standard, eskaler
+ved behov"-ordre bygget.**
 
 **D-354 (Tobias direkte i chat: "gemma skal være standar for tekst og tale siden den er gratis ...
 først ved større forespørsler ... skal den spinne opp agenter" - avklart via `AskUserQuestion`: kun
