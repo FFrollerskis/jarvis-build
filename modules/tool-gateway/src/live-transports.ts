@@ -240,6 +240,19 @@ function base64UrlToStandard(data: string): string {
   return standard + padding;
 }
 
+/** D-348: RFC 2047 "encoded word" for en utgående MIME-headerverdi (f.eks. Subject) som inneholder ikke-ASCII (norske æøå) - ren ASCII returneres uendret. Sjekker tegnkoder direkte (ikke en \x00-\x7F-regex) fordi kontrolltegn-områder i regex-literaler er lint-forbudt (no-control-regex). */
+function isAscii(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    if (value.charCodeAt(i) > 127) return false;
+  }
+  return true;
+}
+
+function encodeMimeHeaderValue(value: string): string {
+  if (isAscii(value)) return value;
+  return `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`;
+}
+
 export class GmailTransport implements ToolTransport {
   // D-340: JARVIS_GOOGLE_ACCOUNT="" (tom, men til stede i .env) skal falle til defaulten - se D-340 i DECISIONS_AND_ASSUMPTIONS.md.
   constructor(readonly accountEmail: string = process.env["JARVIS_GOOGLE_ACCOUNT"] || "post@tsworkflow.com") {}
@@ -253,9 +266,51 @@ export class GmailTransport implements ToolTransport {
         return this.listMessages(parameters, auth);
       case "read_attachment":
         return this.readAttachment(parameters, auth);
+      case "send":
+        return this.send(parameters, auth);
       default:
         throw new Error(`gmail_unsupported_action_${action}`);
     }
+  }
+
+  /**
+   * D-348 (Tobias direkte i chat, live: Charlie svarte
+   * `gmail_unsupported_action_send` på "send en epost til henrik@ffskis.com").
+   * `tool_id: "email", action: "send"` var REGISTRERT i `integrations.ts`
+   * (klasse D, `mail.send`-scope) og FULLT testet på policy-/godkjenningsnivå
+   * (`fase7-tools.test.ts` sin "email.send uten signert godkjenning..."-test)
+   * - MEN kun mot en `FakeTransport`. Den EKTE `GmailTransport`, faktisk wiret
+   * inn som `email`-transporten i `main.ts`/`worker-main.ts`, implementerte
+   * ALDRI selve `send`-casen - en deklarert, godkjent kapabilitet uten en
+   * fungerende utførelse bak seg, samme funnklasse som D-345 sin
+   * dashbord-løgn (deklarert ≠ faktisk bygget), her for chat-mesh-siden.
+   * `users.messages.send` krever en RFC 2822-melding, base64url-kodet i
+   * `raw`-feltet (IKKE et JSON-meldingsobjekt som Microsoft Graph, se
+   * `MicrosoftOutlookTransport.send_mail` over) - Subject RFC 2047-kodes når
+   * den inneholder ikke-ASCII (norske æøå), body sendes som base64 med
+   * linjebryting hver 76. tegn (RFC 2045), slik at meldingen er gyldig MIME
+   * uansett innhold, ikke bare for rene ASCII-tester.
+   */
+  private async send(parameters: Record<string, JsonValue>, auth: Record<string, string>) {
+    const to = String(parameters["to"] ?? "");
+    const subject = String(parameters["subject"] ?? "");
+    const body = String(parameters["body"] ?? "");
+    const encodedSubject = encodeMimeHeaderValue(subject);
+    const encodedBody = Buffer.from(body, "utf8").toString("base64").match(/.{1,76}/g)?.join("\r\n") ?? "";
+    const message =
+      `To: ${to}\r\n` +
+      `Subject: ${encodedSubject}\r\n` +
+      `Content-Type: text/plain; charset="UTF-8"\r\n` +
+      `Content-Transfer-Encoding: base64\r\n` +
+      `\r\n${encodedBody}`;
+    const raw = Buffer.from(message, "utf8").toString("base64url");
+    const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({ raw })
+    });
+    if (!res.ok) throw new Error(`gmail_error_${res.status}`);
+    return { data: (await res.json()) as JsonValue };
   }
 
   private async readInbox(parameters: Record<string, JsonValue>, auth: Record<string, string>) {
