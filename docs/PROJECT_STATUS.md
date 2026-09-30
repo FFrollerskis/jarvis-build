@@ -1,6 +1,10 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-355: BYGGET, steg 2
+**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-356: DELVIS BYGGET
+("fortsett og fikse voice ferdig" - streaming-STT bygget/testet for Deepgram, gated NOT_VERIFIED
+inntil Tobias-DPA-gjennomgang; VAD-modell-bytte BEVISST fortsatt utsatt, begrunnet; en OpenAI
+Realtime-variant ble bygget OG REVERTERT midt i økten da den viste seg motsi en eksisterende
+arkitektursperre - se eget avsnitt under) + D-355: BYGGET, steg 2
 av to (verktøy-utløst eskalering fra Gemma til Anthropic/OpenAI/Gemini for kode-deloppgaver via nytt
 `delegate_code_task`-verktøy, tilbakelevering til Gemma via eksisterende tool-loop-arkitektur; bilde-
 generering trengte INGEN ny kode - allerede et mesh-verktøy Gemma kan kalle) + D-354: BYGGET, steg 1
@@ -11,6 +15,35 @@ VAD-terskel/hangover gjort tunbar, batch-STT-latens dokumentert som en fremtidig
 heartbeat-prikk på alle connectorer) + D-351: FUNN + FIKS (mesh-verktøy-output-kapping skjulte 40 av
 56 connectorer for Charlie) + D-350: BYGGET (Zapier `call_tool`, Q-40(b) LUKKET) + D-349: FIKS (Jira
 tom-JQL-400).**
+
+**D-356 ("fortsett og fikse voice ferdig", direkte oppfølging av D-353s to eksplisitt utsatte funn):**
+1. **VAD-modell-bytte (Silero) - FORTSATT BEVISST UTSATT, med begrunnelse.** Grensesnittet er
+   swappbart, men (a) async inferens ville krevd en reell endring i `session.ts` sin
+   `pushAudio()`-kallsted, (b) INGEN ekte lyd finnes i denne sandkassen for å validere at en ny
+   modell faktisk HJELPER fremfor å regredere den allerede D-275-tunede `EnergyVad`-en, (c) den
+   dypere rotårsaken (ekko/støy fra egen TTS-avspilling) krever AEC, som er en EGEN, EKSPLISITT
+   fremtidig stop/go-arkitekturbeslutning (`VOICE_ARCHITECTURE.md` §3) - en VAD-modell-bytte alene
+   løser ikke den uansett. En begrunnet risikovurdering, ikke en udokumentert mangel.
+2. **Streaming STT - BYGGET: `DeepgramStreamingStt`.** Ekte `wss://api.deepgram.com/v1/listen`,
+   server transkriberer fortløpende (VÅR EGEN VAD styrer fortsatt turgrenser, ikke leverandørens) -
+   eliminerer D-353s batch-dekode-flaskehals. **Ærlighetsnotat:** et FØRSTE forsøk denne økten bygget
+   mot OpenAI sitt Realtime API (`intent=transcription`) - fullt bygget, 17 tester grønt - FØR det
+   ble oppdaget at DETTE motsier D-328/Q-42 (en TIDLIGERE, `WebSearch`-VERIFISERT konklusjon: hele
+   `/v1/realtime` er "ikke kodbar før presisert"). Siden denne økten har blokkert nettverkstilgang og
+   ikke kan re-verifisere om et smalere unntak faktisk finnes, ble koden REVERTERT I SIN HELHET FØR
+   commit (ingen spor i historikken) i stedet for å stille overstyre en bedre informert tidligere
+   konklusjon. Pivoterte til Deepgram (rent, avgrenset transkripsjons-API, INGEN av D-328s
+   samtaletilstand/verktøykall-bekymring) - passer eksisterende `SttAdapter`-kontrakt uendret, kun
+   D-320s allerede kjente "ny leverandør krever DPA-gjennomgang"-sperre gjelder (`processor_terms_
+   status: "NOT_VERIFIED"`, `evaluateSpeechRouting()` avviser for alle memory spaces til Tobias
+   gjennomgår Deepgram sin Data controls-side - trolig ÉN handling dekker begge Deepgram-radene).
+   BEVISST IKKE wiret inn i `main.ts` sin aktive adapter-utvelgelse (samme mønster som D-319/D-320).
+
+18 nye tester (`d356-deepgram-streaming-stt.test.ts`) - 18/18 grønt. Full `apps/voice-gateway/test`
+kjørt fil-for-fil: 16/16 filer, 152/152 tester grønt (`voice-e2e.test.ts` samme kjente sandkasse-
+hengning som D-353, ikke kjørt). `pnpm -w typecheck`/`eslint` rene. **IKKE live-testet av Tobias, IKKE
+aktivert i produksjon ennå** - krever hans egen Deepgram Data-controls-gjennomgang + matriseoppdatering
+FØR denne faktisk kan slås på. Se D-356 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **D-355 (Tobias gjentok D-354-ordren ordrett direkte i chat etter en worker-restart - samme
 avklaring gjelder: kun Anthropic/OpenAI/Gemini, konkrete kategorier). Steg 2, BYGGET:** nytt

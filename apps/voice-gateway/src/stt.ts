@@ -4,6 +4,7 @@ import { readFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SpeechProcessorDeclaration } from "@jarvis/contracts";
+import { WebSocket as WsClient } from "ws";
 import { maybeDumpAudioForDebug } from "./debug-audio-dump.ts";
 
 /**
@@ -228,6 +229,205 @@ export class DeepgramStt implements SttAdapter {
       },
       onPartial(): void {
         // Batch-API gir ikke partials; streaming-kandidater vurderes i benchmark.
+      }
+    };
+  }
+}
+
+/** Minimal, injiserbar WS-kontrakt - lar tester fake'e tilkoblingen uten ekte nettverk. */
+interface DeepgramSocket {
+  sendBinary(data: Buffer): void;
+  sendText(data: string): void;
+  close(): void;
+  onOpen(cb: () => void): void;
+  onMessage(cb: (data: string) => void): void;
+  onError(cb: (err: unknown) => void): void;
+  onClose(cb: () => void): void;
+}
+
+function defaultDeepgramSocketFactory(url: string, headers: Record<string, string>): DeepgramSocket {
+  const socket = new WsClient(url, { headers });
+  return {
+    sendBinary: (data) => socket.send(data),
+    sendText: (data) => socket.send(data),
+    close: () => socket.close(),
+    onOpen: (cb) => socket.on("open", cb),
+    onMessage: (cb) => socket.on("message", (data) => cb(data.toString())),
+    onError: (cb) => socket.on("error", cb),
+    onClose: (cb) => socket.on("close", cb)
+  };
+}
+
+/**
+ * D-356 (Tobias direkte i chat: "fortsett og fikse voice ferdig" - direkte
+ * oppfølging av D-353s EKSPLISITT UTSATTE latens-funn: "flaskehalsen er
+ * batch-STT ... ekte fiks (streaming STT) er en STØRRE arkitektonisk
+ * endring - IKKE forsøkt i dag").
+ *
+ * Deepgram sitt EKTE strømmings-endepunkt (`wss://api.deepgram.com/v1/listen`)
+ * - til forskjell fra `DeepgramStt` over (batch, `POST /v1/listen`, venter
+ * på HELE ytringen). Server transkriberer FORTLØPENDE mens råe PCM16-
+ * lydrammer sendes BINÆRT over SAMME WebSocket - ingen JSON-innpakking av
+ * selve lyden.
+ *
+ * BEVISST IKKE OpenAI Realtime API (`/v1/realtime`): en TIDLIGERE økt
+ * undersøkte DEN via ekte `WebSearch` (D-328/Q-42, nettverk var da
+ * tilgjengelig) og konkluderte eksplisitt "Ikke kodbar før presisert" - det
+ * er en VEDVARENDE, full-dupleks samtale-økt (tur-deteksjon/avbrudds-
+ * håndtering/verktøykall INNI selve tilkoblingen), en STØRRE arkitektur-
+ * beslutning Tobias selv må ta FØRST (Q-42, fortsatt åpent). Denne posten
+ * respekterer den porten UENDRET - bygger IKKE mot `/v1/realtime` i noen
+ * form (et FØRSTE forsøk i DENNE økten bygget faktisk mot OpenAI sitt
+ * transkripsjons-underformat av `/v1/realtime`, men ble reversert da denne
+ * motsigelsen mot D-328/Q-42 ble oppdaget midt i byggingen - se D-356 sin
+ * fulle ærlighetsnotat i DECISIONS_AND_ASSUMPTIONS.md). Deepgram sitt
+ * STT-strømmings-produkt er derimot et rent, avgrenset transkripsjons-API
+ * (INGEN samtaletilstand/verktøykall inni tilkoblingen) - passer den
+ * EKSISTERENDE `SttAdapter`/`SttStream`-kontrakten uendret, SAMME
+ * grensesnitt som `DeepgramStt`/`OpenAiStt` over, ingen ny
+ * arkitekturkategori.
+ *
+ * Turens START/SLUTT styres FORTSATT av VÅR EGEN, allerede tunede
+ * `EnergyVad` (`vad.ts`, D-275) - IKKE Deepgram sin egen server-side
+ * endpointing (`vad_events`/`utterance_end_ms` BEVISST IKKE satt i
+ * query-strengen under) - ETT sted avgjør turgrenser, ALDRI to
+ * konkurrerende VAD-er. Når VÅR VAD sin `end_of_turn` trigger `session.ts`
+ * sin `finishTurn()` -> `stt.end()`, sendes `{"type":"CloseStream"}` -
+ * serveren har ALLEREDE transkribert fortløpende underveis, så
+ * sluttresultatet er nær øyeblikkelig i stedet for å vente på
+ * whisper.cpp/OpenAI sin hele-ytringen-batch-dekoding (D-353s dokumenterte
+ * flaskehals).
+ *
+ * SAMME leverandør som `DeepgramStt` - MEN en distinkt `processor_id` her
+ * (`deepgram-listen-streaming`) siden D-122 regel 3 gjelder PER TJENESTE.
+ * `processor_terms_status: "NOT_VERIFIED"` (SAMME D-320-fail-closed-
+ * mønster, UENDRET - en strømmings-variant av en allerede IKKE-godkjent
+ * leverandør er IKKE mer godkjent enn batch-varianten). BEVISST IKKE wiret
+ * inn i `main.ts` sin aktive adapter-utvelgelse, SAMME regresjonsbegrunnelse
+ * som D-319/D-320 (rutingporten har ingen stille fallback).
+ *
+ * D-297-ærlighetsforbehold: nettverksegress til `api.deepgram.com` bekreftet
+ * BLOKKERT i DENNE sandkassen (samme sjekk som D-320) - meldingsprotokollen
+ * under (query-parametre, `Results`/`Metadata`-eventformen, `CloseStream`)
+ * er TRENT KUNNSKAP om en offentlig, langvarig stabil API-flate - IKKE
+ * denne-økten-verifisert mot live dokumentasjon. Krever Tobias sin egen
+ * live-test FØR protokollen regnes bekreftet, HELT UAVHENGIG av
+ * DPA-statusen over (to separate porter, aldri sammenblandet).
+ */
+export class DeepgramStreamingStt implements SttAdapter {
+  readonly name = "deepgram-streaming-stt";
+  readonly processor: SpeechProcessorDeclaration = {
+    processor_id: "deepgram-listen-streaming",
+    locality: "external",
+    processor_row_declared: true,
+    processor_terms_status: "NOT_VERIFIED"
+  };
+
+  constructor(
+    private readonly apiKey: string | undefined = process.env["JARVIS_DEEPGRAM_API_KEY"],
+    private readonly language: string = process.env["JARVIS_DEEPGRAM_LANG"] ?? "no",
+    private readonly sampleRate: number = 16000,
+    private readonly socketFactory: (url: string, headers: Record<string, string>) => DeepgramSocket = defaultDeepgramSocketFactory
+  ) {}
+
+  available(): boolean {
+    return Boolean(this.apiKey);
+  }
+
+  startStream(): SttStream {
+    if (!this.apiKey) {
+      throw new Error("deepgram_streaming_stt_not_configured");
+    }
+    const { apiKey, language, sampleRate, socketFactory } = this;
+    let partialCb: (text: string) => void = () => {};
+    let finalText = "";
+    let sessionReady = false;
+    const queue: Array<() => void> = [];
+    let resolveEnd: ((text: string) => void) | undefined;
+    let rejectEnd: ((err: Error) => void) | undefined;
+    let terminalError: Error | undefined;
+    let terminalText: string | undefined;
+    let closeRequested = false;
+
+    const settleError = (err: Error): void => {
+      if (terminalError !== undefined || terminalText !== undefined) return;
+      terminalError = err;
+      rejectEnd?.(err);
+    };
+    const settleText = (text: string): void => {
+      if (terminalError !== undefined || terminalText !== undefined) return;
+      terminalText = text;
+      resolveEnd?.(text);
+    };
+    const sendOrQueue = (fn: () => void): void => {
+      if (sessionReady) fn();
+      else queue.push(fn);
+    };
+
+    const url =
+      `wss://api.deepgram.com/v1/listen?language=${language}` +
+      `&encoding=linear16&sample_rate=${sampleRate}&interim_results=true&punctuate=true`;
+    const socket = socketFactory(url, { authorization: `Token ${apiKey}` });
+
+    socket.onOpen(() => {
+      sessionReady = true;
+      for (const fn of queue.splice(0)) fn();
+    });
+
+    socket.onMessage((raw) => {
+      let event: { type?: string; is_final?: boolean; channel?: { alternatives?: Array<{ transcript?: string }> } };
+      try {
+        event = JSON.parse(raw) as typeof event;
+      } catch {
+        return;
+      }
+      if (event.type === "Results") {
+        const transcript = event.channel?.alternatives?.[0]?.transcript ?? "";
+        if (transcript.length === 0) return;
+        if (event.is_final) {
+          finalText = finalText.length > 0 ? `${finalText} ${transcript}` : transcript;
+        }
+        partialCb(finalText.length > 0 ? finalText : transcript);
+        return;
+      }
+      if (event.type === "Metadata") {
+        socket.close();
+        if (closeRequested) {
+          settleText(finalText);
+        }
+      }
+    });
+    socket.onError((err) => settleError(err instanceof Error ? err : new Error(String(err))));
+    socket.onClose(() => {
+      if (closeRequested) {
+        settleText(finalText);
+      } else {
+        settleError(new Error("deepgram_streaming_stt_closed_before_result"));
+      }
+    });
+
+    return {
+      pushAudio(frame: Buffer): void {
+        sendOrQueue(() => socket.sendBinary(frame));
+      },
+      end(): Promise<string> {
+        return new Promise((resolve, reject) => {
+          if (terminalError !== undefined) {
+            reject(terminalError);
+            return;
+          }
+          if (terminalText !== undefined) {
+            resolve(terminalText);
+            return;
+          }
+          resolveEnd = resolve;
+          rejectEnd = reject;
+          closeRequested = true;
+          sendOrQueue(() => socket.sendText(JSON.stringify({ type: "CloseStream" })));
+        });
+      },
+      onPartial(cb: (text: string) => void): void {
+        partialCb = cb;
       }
     };
   }
