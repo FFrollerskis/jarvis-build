@@ -1,8 +1,22 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-350: BYGGET
-(Zapier `call_tool`, Q-40(b) LUKKET) + D-349: FIKS (Jira tom-JQL-400), begge fra Tobias sin fulle
+**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-351: FUNN + FIKS
+(mesh-verktøy-output-kapping skjulte 40 av 56 connectorer for Charlie) + D-350: BYGGET (Zapier
+`call_tool`, Q-40(b) LUKKET) + D-349: FIKS (Jira tom-JQL-400), alle fra Tobias sin fulle
 live-connector-sveip via Charlie.**
+
+**D-351:** Tobias, live via Charlie: "ER MANGE FLERE EN DE" - Charlie rapporterte kun ~16
+"kjernesystemer" fra `executive.get_connector_status`, mens det ekte registeret har 56. Rotårsak
+IKKE i `executive`/`connector-registry.ts` (begge bekreftet korrekte ved lesing) - lå i
+`MeshToolExecutor.execute()` (`mesh-bridge.ts`): en FLAT `maxOutputChars`-grense på 4000 tegn brukt
+UNIFORMT for ALLE meshverktøy, uten noe tydelig varsel når data ble kappet. Host-målt (midlertidig
+skript, kjørt mot det ekte registeret, deretter slettet): 56 connectorer, 12 472 tegn full
+serialisert payload - over 3x den gamle grensen. **Fikset:** `maxOutputChars`-default hevet fra
+4000 til 20 000 (mesh-bridge.ts sin konstruktør) + de tre eksplisitte kallstedene (`apps/api/src/
+main.ts` ×2, `apps/api/src/worker-main.ts` ×1). Selve trunkeringsmekanismen er uendret - kun
+grensen hevet, med >60% headroom for videre registervekst. 4 nye tester (`d351-mesh-tool-executor-
+output-cap.test.ts`, inkl. en "audit-as-code"-regresjon mot det ekte `CONNECTOR_REGISTRY`) - 4/4
+grønt. Se D-351 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **D-350:** Tobias spurt EKSPLISITT via `AskUserQuestion` (ikke gjettet) om godkjenningsmodell for
 Zapier sin live verktøykjøring - valgte "klasse D som standard". `mcp_zapier.call_tool` er nå
@@ -35,9 +49,11 @@ som trenger det"):**
   konfigurert i det hele tatt (Docker: selve binæren finnes ikke i miljøet Charlie kjører fra),
   ikke en fornyelsesfeil av noe slag.
 
-**Neste (umiddelbart):** commit/push/PR for D-349+D-350, merge under D-192 når CI er grønt. Deretter
-NAS-redeploy for at Zapier `call_tool` faktisk blir tilgjengelig for Charlie. Fiken/Sentry venter på
-Tobias sin egen handling (reauth-skript / nytt token) - ingen videre kode mulig før det.
+**Neste (umiddelbart):** commit/push/PR for D-349+D-350+D-351 (samme branch/PR #214), merge under
+D-192 når CI er grønt. Deretter NAS-redeploy for at Zapier `call_tool` OG den hevede
+mesh-output-grensen faktisk blir tilgjengelig for Charlie - Tobias bør da be Charlie kjøre
+`get_connector_status` på nytt og bekrefte alle 56 nå vises. Fiken/Sentry venter på Tobias sin egen
+handling (reauth-skript / nytt token) - ingen videre kode mulig før det.
 
 **Forrige milepæl (uendret, MERGET under D-192): D-348 - Gmail-sending manglet i den EKTE
 transporten.** Tobias, live via Charlie: "send en epost til henrik@ffskis.com å si hei det er

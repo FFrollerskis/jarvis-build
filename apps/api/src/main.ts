@@ -935,7 +935,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       gateway,
       tools: {
         definitions: fullMeshTools.map((t) => t.def),
-        executor: new MeshToolExecutor(toolGateway, ownerIdentity, 4000, fullMeshTools)
+        // D-351: 4000 → 20_000 (se mesh-bridge.ts sitt filhode for host-målt begrunnelse).
+        executor: new MeshToolExecutor(toolGateway, ownerIdentity, 20_000, fullMeshTools)
       }
     })
   );
@@ -1009,7 +1010,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // klasse D er uendret).
     tools: {
       definitions: fullMeshTools.map((t) => t.def),
-      executorFor: (identity) => new MeshToolExecutor(toolGateway, identity, 4000, fullMeshTools)
+      // D-351: 4000 → 20_000 (se mesh-bridge.ts sitt filhode for host-målt begrunnelse).
+      executorFor: (identity) => new MeshToolExecutor(toolGateway, identity, 20_000, fullMeshTools)
     },
     // Task #121 (D-214): kosmetisk personlighetslag, se conversation.ts sin
     // `buildSystemPrompt()`/`loadPersonality()`.
