@@ -1,9 +1,34 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-352: BYGGET
-(dashbord: statusfiltre + merke-ikoner inkl. Discord + større/"fansy" kort + heartbeat-prikk på
-alle connectorer) + D-351: FUNN + FIKS (mesh-verktøy-output-kapping skjulte 40 av 56 connectorer
-for Charlie) + D-350: BYGGET (Zapier `call_tool`, Q-40(b) LUKKET) + D-349: FIKS (Jira tom-JQL-400).**
+**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-353: FUNN + DELVIS
+FIKS (tale: Markdown lest bokstavelig FIKSET, VAD-terskel/hangover gjort tunbar, batch-STT-latens
+dokumentert som en fremtidig, større byggeslice) + D-352: BYGGET (dashbord: statusfiltre +
+merke-ikoner inkl. Discord + større/"fansy" kort + heartbeat-prikk på alle connectorer) + D-351:
+FUNN + FIKS (mesh-verktøy-output-kapping skjulte 40 av 56 connectorer for Charlie) + D-350: BYGGET
+(Zapier `call_tool`, Q-40(b) LUKKET) + D-349: FIKS (Jira tom-JQL-400).**
+
+**D-353 (talekvalitet, tre funn rapportert samtidig av Tobias - ulik "fikset"-status per funn,
+ALDRI late som alle tre er løst fordi de kom i samme melding):**
+1. **TTS leste Markdown bokstavelig ("stjerne stjerne punktum") - FIKSET.** Ny `sanitizeForSpeech()`
+   (`apps/voice-gateway/src/text-sanitize.ts`), ETT sentralt sanerings-punkt i `session.ts` sin
+   `enqueueTts()` FØR enhver TTS-adapter - fjerner fet/kursiv/kode/lenker/liste-markører, siste
+   sikkerhetsnett fjerner enhver gjenværende `*`/`` ` ``. 15 nye tester, 15/15 grønt.
+2. **STT hører dårlig + kan ikke avbryte - IKKE manglende funksjon, en kalibreringsbegrensning gjort
+   tunbar.** Barge-in FINNES og er testet allerede - mest sannsynlig oppdager `EnergyVad` sin faste
+   terskel (0,05) rett og slett ikke avbruddsforsøket som tale. `JARVIS_VOICE_VAD_THRESHOLD`/
+   `JARVIS_VOICE_VAD_HANGOVER_MS` er nå miljøvariabel-styrt (`main.ts`, samme D-236/D-340
+   "tom streng er ikke usatt"-disiplin fanget FØR den ble en ny bug), UENDREDE defaultverdier -
+   krever Tobias sin egen kalibrering mot `voice_audio_heartbeat`-loggen, ikke en kodefiks jeg kan
+   gjøre blindt uten ekte lyd å teste mot. Full VAD-modell-utskifting (Silero-klasse) er en større,
+   IKKE forsøkt endring.
+3. **Respons-latens - TTS/LLM-strømming ALLEREDE bra, flaskehalsen er batch-STT (whisper.cpp venter
+   på HELE ytringen).** Ekte fiks (streaming STT) er en større arkitektonisk endring, IKKE forsøkt i
+   dag - `hangoverMs` (punkt 2) er eneste tilgjengelige, trygge latens-spak nå.
+
+`pnpm --filter @jarvis/voice-gateway typecheck`/`eslint` rene. 16/17 testfiler, 139/139 tester grønt
+(`voice-e2e.test.ts` hopper over - BEKREFTET FØR-eksisterende sandkasse-hengning via `git stash`, ikke
+en regresjon). **IKKE live-testet av Tobias ennå** - krever NAS-redeploy. Se D-353 i
+DECISIONS_AND_ASSUMPTIONS.md.
 
 **D-352:** Tobias direkte i chat: "LEGG OPP FILTRE PÅ TILKOBLINGER OG LEGG OPP LOGER SÅ DU SER
 DISCORD LOGOEN PÅ DISCORD TILKOBLINGEN GJØR DEM LITT STØRRE OG MER FANSY OG SETT OPP HEART BEAT PÅ
