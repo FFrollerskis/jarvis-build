@@ -2,14 +2,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { McpProtocolError, McpZapierTransport } from "../src/mcp-zapier-transport.ts";
 
 /**
- * D-338 (Tobias direkte i chat: "ja bygg mcp zapier" - discovery-only FØRSTE
- * slice). Rene wiring-/kontraktstester (INGEN embedded Postgres, INGEN ekte
- * Zapier-kall - SAMME `fetch`-stubbing-mønster som `gce-transport.test.ts`).
- * Beviser: KUN `list_tools` finnes (INGEN `call_tool`/invoker-handling i det
- * hele tatt - Q-40 (b) forblir bevisst åpen), URL-en (selve hemmeligheten)
- * lekkes ALDRI i feilmeldinger, JSON-RPC-feil klassifiseres eksplisitt, en
- * SSE-strøm rapporteres ærlig som DEFERRED fremfor gjettet på, og
- * retry/backoff er KUN for retry-bare HTTP-statuser.
+ * D-338 (Tobias direkte i chat: "ja bygg mcp zapier" - discovery FØRSTE
+ * slice) + D-350 (2026-09-30: `call_tool` bygget - Tobias valgte "klasse D
+ * som standard" eksplisitt via AskUserQuestion, løser Q-40 (b)). Rene
+ * wiring-/kontraktstester (INGEN embedded Postgres, INGEN ekte Zapier-kall -
+ * SAMME `fetch`-stubbing-mønster som `gce-transport.test.ts`). Beviser:
+ * URL-en (selve hemmeligheten) lekkes ALDRI i feilmeldinger, JSON-RPC-feil
+ * klassifiseres eksplisitt, en SSE-strøm rapporteres ærlig som DEFERRED
+ * fremfor gjettet på, retry/backoff er KUN for retry-bare HTTP-statuser, og
+ * `call_tool` sitt `tools/call`-kall skiller en ekte MCP-protokollsuksess
+ * fra MCP sitt eget `result.isError`-signal (en verktøykjøring som feilet
+ * INNI en ellers vellykket JSON-RPC-respons).
  */
 
 const SERVER_URL = "https://mcp.zapier.com/api/mcp/s/super-secret-per-user-token/mcp";
@@ -43,12 +46,75 @@ describe("A: konfigurasjonsvalidering - kaster FØR noe HTTP-kall gjøres", () =
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("ukjent action kaster mcp_zapier_action_not_implemented - INGEN call_tool/invoker-handling finnes i det hele tatt denne sliceen", async () => {
+  it("ukjent action kaster mcp_zapier_action_not_implemented", async () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
     const transport = new McpZapierTransport();
-    await expect(transport.invoke("call_tool", { name: "some_zap" }, SERVER_URL)).rejects.toThrow("mcp_zapier_action_not_implemented:call_tool");
+    await expect(transport.invoke("delete_everything", {}, SERVER_URL)).rejects.toThrow("mcp_zapier_action_not_implemented:delete_everything");
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("D-350: call_tool uten tool_name kaster mcp_zapier_tool_name_required FØR noe HTTP-kall gjøres", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const transport = new McpZapierTransport();
+    await expect(transport.invoke("call_tool", {}, SERVER_URL)).rejects.toThrow("mcp_zapier_tool_name_required");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * D-350: `call_tool` - Q-40 (b) løst, Tobias valgte klasse D som standard
+ * eksplisitt via AskUserQuestion (ikke gjettet). Selve klassifiseringen
+ * (capability_class: "D") håndheves i `integrations.ts`, IKKE her - disse
+ * testene beviser KUN transportlaget: riktig JSON-RPC-form, `isError`-
+ * skillet, og at feilmeldinger fortsatt aldri lekker URL-en/hemmeligheten.
+ */
+describe("E: call_tool - tools/call, og MCP sitt eget isError-suksess/feil-skille", () => {
+  it("POSTer en korrekt JSON-RPC 2.0 tools/call-forespørsel med {name, arguments}", async () => {
+    const fetchSpy = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "opprettet" }] } }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const transport = new McpZapierTransport();
+    const result = await transport.invoke("call_tool", { tool_name: "create_zap", arguments: { title: "test" } }, SERVER_URL);
+    expect(result.data).toEqual([{ type: "text", text: "opprettet" }]);
+    const [url, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(SERVER_URL);
+    const body = JSON.parse(options.body as string) as { method: string; params: { name: string; arguments: unknown } };
+    expect(body.method).toBe("tools/call");
+    expect(body.params).toEqual({ name: "create_zap", arguments: { title: "test" } });
+  });
+
+  it("mangler arguments -> sender tomt objekt, ikke undefined", async () => {
+    const fetchSpy = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [] } }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const transport = new McpZapierTransport();
+    await transport.invoke("call_tool", { tool_name: "ping" }, SERVER_URL);
+    const body = JSON.parse((fetchSpy.mock.calls[0] as [string, RequestInit])[1].body as string) as { params: { arguments: unknown } };
+    expect(body.params.arguments).toEqual({});
+  });
+
+  it("result.isError:true kastes som McpProtocolError - kalt gikk gjennom, men verktøyet feilet INNI en ellers vellykket JSON-RPC-respons - ALDRI rapportert som suksess", async () => {
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { isError: true, content: [{ type: "text", text: "hemmelig intern feildetalj" }] } }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const transport = new McpZapierTransport();
+    const err = await transport.invoke("call_tool", { tool_name: "flaky_zap" }, SERVER_URL).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(McpProtocolError);
+    expect((err as Error).message).toBe("mcp_zapier_tool_execution_failed:mcp.zapier.com");
+    expect((err as Error).message).not.toContain("hemmelig intern feildetalj");
+    expect((err as Error).message).not.toContain("super-secret-per-user-token");
+  });
+
+  it("mangler result.content ved suksess -> data:null, ikke en kastet feil", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }), { status: 200, headers: { "content-type": "application/json" } })));
+    const transport = new McpZapierTransport();
+    const result = await transport.invoke("call_tool", { tool_name: "noop" }, SERVER_URL);
+    expect(result.data).toBeNull();
+  });
+
+  it("en JSON-RPC-protokollfeil (body.error) klassifiseres identisk som for list_tools", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: -32602, message: "Invalid params" } }), { status: 200, headers: { "content-type": "application/json" } })));
+    const transport = new McpZapierTransport();
+    await expect(transport.invoke("call_tool", { tool_name: "x" }, SERVER_URL)).rejects.toThrow(/mcp_jsonrpc_error_-32602/);
   });
 });
 

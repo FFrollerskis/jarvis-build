@@ -829,17 +829,20 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   },
   {
     // D-338 (bygget, flyttet ut av backlog - Tobias direkte i chat: "ja bygg
-    // mcp zapier"): KUN discovery-halvparten. `credential_ref` er selve MCP-
-    // server-URL-en (Zapier provisjonerer den PER BRUKER, hemmelighets-
-    // ekvivalent) - IKKE en separat API-nøkkel som den gamle plassholderen
-    // antok. `tool_id` er "mcp_zapier" (ikke "zapier") for å gjøre den
-    // strukturelle grensen eksplisitt: dette er en GENERELL MCP-klient-
-    // kapabilitet konfigurert MOT Zapier sin server, ikke en Zapier-
-    // spesifikk API-integrasjon. INGEN live-invokering av oppdagede verktøy
-    // finnes ennå (Q-40 (b), fortsatt åpen) - se mcp-zapier-transport.ts.
-    // Oppdatert i place (var en D-232 backlog-plassholder) - ALDRI en ny,
-    // separat oppføring med samme id (D-293-disiplinen).
-    id: "zapier", display_name: "Zapier (MCP, kun discovery)", category: "tool_gateway",
+    // mcp zapier") + D-350 (2026-09-30: `call_tool` bygget, Q-40 (b) løst -
+    // Tobias valgte klasse D som standard for ALLE dynamisk oppdagede
+    // verktøy, eksplisitt spurt via AskUserQuestion). `credential_ref` er
+    // selve MCP-server-URL-en (Zapier provisjonerer den PER BRUKER,
+    // hemmelighets-ekvivalent) - IKKE en separat API-nøkkel som den gamle
+    // plassholderen antok. `tool_id` er "mcp_zapier" (ikke "zapier") for å
+    // gjøre den strukturelle grensen eksplisitt: dette er en GENERELL
+    // MCP-klient-kapabilitet konfigurert MOT Zapier sin server, ikke en
+    // Zapier-spesifikk API-integrasjon. `live_test` bruker FORTSATT KUN
+    // `list_tools` (read-only discovery) - `call_tool` er klasse D og skal
+    // ALDRI trigges av en "trygg tilkoblingstest". Oppdatert i place (var en
+    // D-232 backlog-plassholder) - ALDRI en ny, separat oppføring med samme
+    // id (D-293-disiplinen).
+    id: "zapier", display_name: "Zapier (MCP)", category: "tool_gateway",
     credential_refs: ["JARVIS_MCP_ZAPIER_SERVER_URL"],
     live_test: { tool_id: "mcp_zapier", action: "list_tools", parameters: () => ({}) }
   },

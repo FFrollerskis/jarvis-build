@@ -1,12 +1,22 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-349: FIKS
-(Jira tom-JQL-400) + connector-sveip-funn etter Tobias sin fulle live-test av alle koblede
-connectorer via Charlie.** "sjekk jira" → 400 Bad Request. WebSearch-verifisert mot Atlassian sin
-egen dokumentasjon: `/rest/api/3/search/jql` krever en "bounded" JQL - en TOM streng gir 400.
+**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-350: BYGGET
+(Zapier `call_tool`, Q-40(b) LUKKET) + D-349: FIKS (Jira tom-JQL-400), begge fra Tobias sin fulle
+live-connector-sveip via Charlie.**
+
+**D-350:** Tobias spurt EKSPLISITT via `AskUserQuestion` (ikke gjettet) om godkjenningsmodell for
+Zapier sin live verktøykjøring - valgte "klasse D som standard". `mcp_zapier.call_tool` er nå
+bygget (`tools/call` JSON-RPC, `{name, arguments}`), `capability_class: "D"` FAST for ALLE
+dynamisk oppdagede verktøy uansett navn - ingen ny godkjenningsmekanisme, gjenbruker eksisterende
+generisk klasse D-håndtering. `result.isError` (MCP sitt eget "kallet gikk gjennom, men verktøyet
+feilet internt"-signal) kastes eksplisitt, ALDRI rapportert som suksess, og `content` lekkes ALDRI
+i feilteksten. 6 nye tester (`mcp-zapier-transport.test.ts`, 19/19 grønt). Se D-350 i
+DECISIONS_AND_ASSUMPTIONS.md og Q-40 i OPEN_QUESTIONS.md (nå FULLSTENDIG LUKKET).
+
+**D-349:** "sjekk jira" → 400 Bad Request. WebSearch-verifisert mot Atlassian sin egen
+dokumentasjon: `/rest/api/3/search/jql` krever en "bounded" JQL - en TOM streng gir 400.
 `z.string()` alene lot en tom streng bestå Zod-valideringen og nå frem til Jira sitt API i stedet
 for å bli avvist lokalt. **Fikset:** `z.string()` → `z.string().min(1)`. 1 ny test, 15/15 grønt.
-Se D-349 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Refresh-token-/credential-status per Tobias sin brede live-sveip ("fikse refresh token på alle
 som trenger det"):**
@@ -24,16 +34,10 @@ som trenger det"):**
 - **Vipps/Wallester/Grafana/Prometheus/Docker(host)** - `credential_unavailable`/`ENOENT`: aldri
   konfigurert i det hele tatt (Docker: selve binæren finnes ikke i miljøet Charlie kjører fra),
   ikke en fornyelsesfeil av noe slag.
-- **Zapier** ("hjelp Zapier"): Q-40(b) er BEVISST fortsatt åpen (D-338) - `mcp_zapier.list_tools`
-  (discovery) fungerer, men live-invokering (`call_tool`) av et DYNAMISK oppdaget, tredjeparts-eid
-  MCP-verktøysett krever en eksplisitt godkjenningsmodell-beslutning FØR den kan kodes (statiske,
-  PR-reviderte `ToolDefinition`-lister forutsetter et FAST verktøysett - en MCP-server kan endre sin
-  egen liste når som helst utenfor Jarvis sin kontroll). IKKE kodet uten Tobias sitt eksplisitte
-  retningsvalg her - spurt direkte i chat denne økten.
 
-**Neste (umiddelbart):** commit/push/PR for D-349, merge under D-192 når CI er grønt. Vent på
-Tobias sitt svar på Zapier-godkjenningsmodellen. Fiken/Sentry venter på Tobias sin egen handling
-(reauth-skript / nytt token) - ingen videre kode mulig før det.
+**Neste (umiddelbart):** commit/push/PR for D-349+D-350, merge under D-192 når CI er grønt. Deretter
+NAS-redeploy for at Zapier `call_tool` faktisk blir tilgjengelig for Charlie. Fiken/Sentry venter på
+Tobias sin egen handling (reauth-skript / nytt token) - ingen videre kode mulig før det.
 
 **Forrige milepæl (uendret, MERGET under D-192): D-348 - Gmail-sending manglet i den EKTE
 transporten.** Tobias, live via Charlie: "send en epost til henrik@ffskis.com å si hei det er
