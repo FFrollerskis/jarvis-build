@@ -1,9 +1,20 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-351: FUNN + FIKS
-(mesh-verktøy-output-kapping skjulte 40 av 56 connectorer for Charlie) + D-350: BYGGET (Zapier
-`call_tool`, Q-40(b) LUKKET) + D-349: FIKS (Jira tom-JQL-400), alle fra Tobias sin fulle
-live-connector-sveip via Charlie.**
+**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-352: BYGGET
+(dashbord: statusfiltre + merke-ikoner inkl. Discord + større/"fansy" kort + heartbeat-prikk på
+alle connectorer) + D-351: FUNN + FIKS (mesh-verktøy-output-kapping skjulte 40 av 56 connectorer
+for Charlie) + D-350: BYGGET (Zapier `call_tool`, Q-40(b) LUKKET) + D-349: FIKS (Jira tom-JQL-400).**
+
+**D-352:** Tobias direkte i chat: "LEGG OPP FILTRE PÅ TILKOBLINGER OG LEGG OPP LOGER SÅ DU SER
+DISCORD LOGOEN PÅ DISCORD TILKOBLINGEN GJØR DEM LITT STØRRE OG MER FANSY OG SETT OPP HEART BEAT PÅ
+ALLE SÅ VI VET NÅR NOEN AV DE FEILER". RENT presentasjon i `apps/web/dashboard.html` - statusfilter-
+chips (Alle/Konfigurert/Ikke konfigurert/Feiler/Ikke bygget) kombinert med eksisterende fritekstsøk,
+et lokalt håndskrevet SVG-merkeikon per connector (egen Discord-glyff + Slack/Vercel/Telegram/
+WhatsApp/Spotify/Notion/GitHub, fargekodet monogram-fallback for resten - ALDRI en ekstern
+logo-CDN), større kort med ny ikon-header, og en pulserende heartbeat-prikk som gjenbruker DEN
+EKSISTERENDE `ToolGateway.health`-dataen (BO-03/D-242 sin daglige sveip) - ingen ny backend-
+mekanisme. `node --check` på scriptet gyldig, alle 82 eksisterende dashbord-wiring-tester UENDRET
+grønt. Se D-352 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **D-351:** Tobias, live via Charlie: "ER MANGE FLERE EN DE" - Charlie rapporterte kun ~16
 "kjernesystemer" fra `executive.get_connector_status`, mens det ekte registeret har 56. Rotårsak
