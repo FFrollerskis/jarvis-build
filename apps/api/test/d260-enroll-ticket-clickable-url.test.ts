@@ -33,8 +33,12 @@ describe("D-260: enroll-ticket-main.ts skriver en klikkbar innrulleringslenke n�
     expect(scriptSource).toContain('process.env["JARVIS_PUBLIC_VOICE_BASE_URL"]');
   });
 
-  it("bygger URL-en som <base>/voice?enroll=<billett> - SAMME query-parameter voice.html sin tryAutoEnrollFromUrl() leser", () => {
-    expect(scriptSource).toMatch(/\/voice\?enroll=\$\{created\.ticket\}/);
+  it("bygger URL-en som <base>/<targetPath>?enroll=<billett> - SAMME query-parameter voice.html/index.html/dashboard.html sin tryAutoEnrollFromUrl() leser (D-347: målsiden er nå valgbar)", () => {
+    expect(scriptSource).toMatch(/\/\$\{targetPath\}\?enroll=\$\{created\.ticket\}/);
+  });
+
+  it("D-347: targetPath default er UENDRET 'voice' (D-260 sin opprinnelige, testede oppførsel) når --path ikke er gitt", () => {
+    expect(scriptSource).toContain('(flag("path") ?? "voice")');
   });
 
   it("fjerner et evt. etterfølgende skråstrek fra base-URL-en (unngår dobbel // i den ferdige lenken)", () => {

@@ -21,10 +21,20 @@
 //
 // Bruk:
 //   node --experimental-transform-types src/enroll-ticket-main.ts \
-//     [--tenant <id>] [--person <id>] [--device <id>] [--ttl-minutes <n>]
+//     [--tenant <id>] [--person <id>] [--device <id>] [--ttl-minutes <n>] [--path <side>]
 //
 // Uten flagg brukes de SAMME defaultene som `seedOwner()`
 // (JARVIS_TENANT_ID / JARVIS_OWNER_PERSON_ID).
+//
+// D-347: `--path` velger hvilken side den klikkbare lenken peker til
+// (`voice` er uendret default - D-260 sin opprinnelige, testede oppførsel).
+// `apps/web/index.html` og `apps/web/dashboard.html` fikk NÅ samme
+// `tryAutoEnrollFromUrl()`-mønster som `voice.html` (delt `jarvis.deviceid`/
+// `jarvis.devicekey` i localStorage PER OPPRINNELSE - alle tre sidene på
+// samme host:port innrullerer derfor SAMME enhet uansett hvilken side
+// billetten konsumeres fra). Flagget finnes for å kunne peke lenken direkte
+// til siden eieren faktisk trenger akkurat da (f.eks. `--path dashboard`),
+// uten en ekstra manuell navigering etter innrullering.
 import { adminConfigFromEnv, createEnrollmentTicket, createPool } from "@jarvis/core";
 
 function flag(name: string): string | undefined {
@@ -35,6 +45,7 @@ function flag(name: string): string | undefined {
 const tenantId = flag("tenant") ?? process.env["JARVIS_TENANT_ID"] ?? "tenant-personal";
 const personId = flag("person") ?? process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias";
 const deviceId = flag("device");
+const targetPath = (flag("path") ?? "voice").replace(/^\/+/, "");
 const ttlRaw = flag("ttl-minutes");
 const ttlMinutes = ttlRaw === undefined ? 15 : Number(ttlRaw);
 if (!Number.isFinite(ttlMinutes) || ttlMinutes <= 0 || ttlMinutes > 120) {
@@ -78,7 +89,7 @@ try {
   // noe som helst selv.
   const publicBaseUrl = process.env["JARVIS_PUBLIC_VOICE_BASE_URL"];
   if (publicBaseUrl) {
-    const enrollUrl = `${publicBaseUrl.replace(/\/+$/, "")}/voice?enroll=${created.ticket}`;
+    const enrollUrl = `${publicBaseUrl.replace(/\/+$/, "")}/${targetPath}?enroll=${created.ticket}`;
     console.log("  Åpne denne lenken direkte (innrullerer automatisk, ingen kopiering nødvendig):");
     console.log("");
     console.log(`  ${enrollUrl}`);

@@ -550,11 +550,15 @@
     return grant;
   }
 
-  enrollForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const ticket = enrollTicket.value.trim();
-    if (!ticket) return;
-    enrollTicket.value = "";
+  /**
+   * D-260 (apps/web/voice.html): en 44-tegns base64url-billett kopiert fra en
+   * NAS-terminal til et nettleser-skjemafelt er strukturelt feilutsatt (Tobias
+   * gjentatte ganger, live: "SKJØNNER INGENTING"/feilskriving). D-347: samme
+   * fiks manglet her og i index.html - kun voice.html fikk den. Delt logikk i
+   * `submitEnrollment()` slik at `tryAutoEnrollFromUrl()` under kan gjenbruke
+   * NØYAKTIG samme sti som det manuelle skjemaet, i stedet for å duplisere den.
+   */
+  async function submitEnrollment(ticket) {
     try {
       if (!deviceKey) deviceKey = await loadOrCreateDeviceKey();
       await enrollDevice(deviceKey.privateKey, deviceKey.publicKey, ticket);
@@ -564,7 +568,32 @@
     } catch (err) {
       statusEl.textContent = "Innrullering feilet: " + err.message;
     }
+  }
+
+  enrollForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const ticket = enrollTicket.value.trim();
+    if (!ticket) return;
+    enrollTicket.value = "";
+    void submitEnrollment(ticket);
   });
+
+  /**
+   * D-347: leser `?enroll=<billett>` fra siden sin EGEN URL (aldri fra et
+   * skjema) og fjerner den fra adresselinjen UMIDDELBART via
+   * `history.replaceState()` - FØR selve innrulleringsforsøket - slik at en
+   * billett (engangs per design) aldri blir stående synlig i nettleser-
+   * historikken/bokmerker, og en siderefresh aldri kan forsøke å gjenbruke en
+   * allerede konsumert billett. Se samme mønster i apps/web/voice.html (D-260).
+   */
+  function tryAutoEnrollFromUrl() {
+    const ticket = new URLSearchParams(location.search).get("enroll");
+    if (!ticket) return;
+    history.replaceState(null, "", location.pathname + location.hash);
+    statusEl.textContent = "Innrullerer enheten automatisk …";
+    void submitEnrollment(ticket);
+  }
+  tryAutoEnrollFromUrl();
 
   /** D-199: kun de tre LESE-handlingene servertes /executive/query selv hvitelister. */
   async function queryExecutive(action) {

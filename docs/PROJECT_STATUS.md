@@ -1,8 +1,29 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-340/D-346: LUKKET,
-LIVE BEKREFTET.** Hele kjeden fra D-340 (Infisical 401) til D-346 (SMTP-gap som blokkerte selve
-gjenopprettingen) er nå bevist løst end-to-end på produksjons-NAS-en:
+**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-347: FUNN + FIKS
+(dashbord-innrullering).** Mens Tobias forsøkte å visuelt bekrefte D-340/D-346 sin fiks i selve
+dashbordet (`http://10.0.0.30:3010/dashboard`), viste siden `POST /session/authorize` 403 × 8 og
+stod evig på "Laster …". Database-bevist rotårsak (`audit_events` sin `identity.denied`-tabell ga
+**0 rader** - utelukker `unknown_membership`/`unknown_device`/`unknown_memory_space`/
+`device_authority_revoked`, ren kodelesing av `dashboard.html`/kontraktsenumene utelukker
+`unknown_channel`/`malformed_evidence`): **`device_proof_invalid`** - denne nettleseren har simpelthen
+ALDRI kjørt innrulleringsflyten (FORVENTET, korrekt håndhevelse - ikke en autorisasjonsbug). Den
+reelle bruksfeilen: D-260 sin `?enroll=`-URL-autoinnrullering (unngår manuell kopi/lim-inn av en
+44-tegns billett) fantes KUN i `voice.html`, aldri portert til `dashboard.html`/`index.html`.
+**Fikset:** samme `tryAutoEnrollFromUrl()`/`submitEnrollment()`-mønster lagt til begge sider (deler
+`jarvis.deviceid`/`jarvis.devicekey` i localStorage PER OPPRINNELSE, så én innrullering dekker alle
+tre sidene); `enroll-ticket-main.ts` fikk et `--path <side>`-flagg (default uendret `voice`) for å
+peke den klikkbare lenken direkte til `/dashboard`. Se D-347 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Neste (umiddelbart):** Tobias kjører på NAS-en:
+`docker exec local-api-1 node --experimental-transform-types apps/api/src/enroll-ticket-main.ts --path dashboard`
+- gir enten en klikkbar lenke (hvis `JARVIS_PUBLIC_VOICE_BASE_URL` er satt i `.env`) eller en bar
+billett å lime inn i dashbordets innrullerings-skjema. Deretter: bekreft i dashbordet at Vercel/Notion
+sin "Lagre"/"Test tilkobling" fungerer uten feil (den opprinnelige rapporten som startet D-340-sporet).
+
+**Forrige milepæl (uendret, MERGET PR #210 under D-192): D-340/D-346 - LUKKET, LIVE BEKREFTET.**
+Hele kjeden fra D-340 (Infisical 401) til D-346 (SMTP-gap som blokkerte selve gjenopprettingen) er
+bevist løst end-to-end på produksjons-NAS-en:
 1. Tobias fylte inn ekte `INFISICAL_SMTP_*`-verdier (Gmail SMTP) i `.env`, redeploy av `infisical`
    bekreftet SMTP fungerer (host-loggen viste `SMTP - Verified connection to smtp.gmail.com:587`).
 2. Selve nettleser-gjenopprettingsflyten i DENNE spesifikke Infisical-versjonen viste seg å ha en
@@ -20,10 +41,6 @@ gjenopprettingen) er nå bevist løst end-to-end på produksjons-NAS-en:
    `_CLIENT_SECRET` i `.env`, redeploy av api+worker.
 4. **Live bekreftet:** `docker exec local-api-1 node -e fetch(.../universal-auth/login,...)` → `200`
    (var `401` siden D-340). D-340 er dermed FAKTISK lukket, ikke bare kode levert.
-
-**Neste:** Tobias bekrefter i dashbordet at Vercel/Notion sin "Lagre"/"Test tilkobling" nå fungerer
-uten feil (den opprinnelige 403/`credential_unavailable`-rapporten som startet D-340-sporet).
-Deretter: docs-commit for D-340/D-346 sluttbekreftelse (denne oppdateringen).
 
 **Forrige milepæl (uendret, MERGET PR #208 e722d5b under D-192): D-345: FUNN + FIKS
 - Tobias direkte i chat, etter D-344 sin bekreftede fiks: "rydd alt å fiks at jeg kan koble alt til
