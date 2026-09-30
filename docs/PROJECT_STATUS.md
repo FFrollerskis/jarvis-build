@@ -1,19 +1,82 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-348: FUNN + FIKS
-(Gmail-sending manglet i den EKTE transporten).** Tobias, live via Charlie: "send en epost til
-henrik@ffskis.com å si hei det er jarvis" → `gmail_unsupported_action_send`. `tool_id: "email",
-action: "send"` var registrert (klasse D) og FULLT policy-testet, men KUN mot en `FakeTransport` -
-den ekte `GmailTransport` (wiret i `main.ts`) implementerte aldri selve `send`-casen. SAMME
-funnklasse som D-345 (deklarert kapabilitet uten fungerende utførelse), her for chat-mesh-siden.
-**Fikset:** `GmailTransport.send()` - `users.messages.send` med et base64url-kodet RFC 2822-`raw`-
-felt, Subject RFC 2047-kodes for norske tegn (æøå), body base64/76-tegns linjebrutt. 3 nye tester
-(`gmail-attachment-transport.test.ts`, 11/11 grønt). Se D-348 i DECISIONS_AND_ASSUMPTIONS.md.
+**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-352: BYGGET
+(dashbord: statusfiltre + merke-ikoner inkl. Discord + større/"fansy" kort + heartbeat-prikk på
+alle connectorer) + D-351: FUNN + FIKS (mesh-verktøy-output-kapping skjulte 40 av 56 connectorer
+for Charlie) + D-350: BYGGET (Zapier `call_tool`, Q-40(b) LUKKET) + D-349: FIKS (Jira tom-JQL-400).**
 
-**Neste (umiddelbart):** commit/push/PR for D-348, merge under D-192 når CI er grønt. Deretter:
-NAS-redeploy (`api`/`worker`) plukker opp BÅDE D-347 (dashbord-auto-innrullering) og D-348
-(Gmail-sending) samtidig - Tobias kan da faktisk sende testen til henrik@ffskis.com på nytt via
-Charlie og bekrefte den fungerer live.
+**D-352:** Tobias direkte i chat: "LEGG OPP FILTRE PÅ TILKOBLINGER OG LEGG OPP LOGER SÅ DU SER
+DISCORD LOGOEN PÅ DISCORD TILKOBLINGEN GJØR DEM LITT STØRRE OG MER FANSY OG SETT OPP HEART BEAT PÅ
+ALLE SÅ VI VET NÅR NOEN AV DE FEILER". RENT presentasjon i `apps/web/dashboard.html` - statusfilter-
+chips (Alle/Konfigurert/Ikke konfigurert/Feiler/Ikke bygget) kombinert med eksisterende fritekstsøk,
+et lokalt håndskrevet SVG-merkeikon per connector (egen Discord-glyff + Slack/Vercel/Telegram/
+WhatsApp/Spotify/Notion/GitHub, fargekodet monogram-fallback for resten - ALDRI en ekstern
+logo-CDN), større kort med ny ikon-header, og en pulserende heartbeat-prikk som gjenbruker DEN
+EKSISTERENDE `ToolGateway.health`-dataen (BO-03/D-242 sin daglige sveip) - ingen ny backend-
+mekanisme. `node --check` på scriptet gyldig, alle 82 eksisterende dashbord-wiring-tester UENDRET
+grønt. Se D-352 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**D-351:** Tobias, live via Charlie: "ER MANGE FLERE EN DE" - Charlie rapporterte kun ~16
+"kjernesystemer" fra `executive.get_connector_status`, mens det ekte registeret har 56. Rotårsak
+IKKE i `executive`/`connector-registry.ts` (begge bekreftet korrekte ved lesing) - lå i
+`MeshToolExecutor.execute()` (`mesh-bridge.ts`): en FLAT `maxOutputChars`-grense på 4000 tegn brukt
+UNIFORMT for ALLE meshverktøy, uten noe tydelig varsel når data ble kappet. Host-målt (midlertidig
+skript, kjørt mot det ekte registeret, deretter slettet): 56 connectorer, 12 472 tegn full
+serialisert payload - over 3x den gamle grensen. **Fikset:** `maxOutputChars`-default hevet fra
+4000 til 20 000 (mesh-bridge.ts sin konstruktør) + de tre eksplisitte kallstedene (`apps/api/src/
+main.ts` ×2, `apps/api/src/worker-main.ts` ×1). Selve trunkeringsmekanismen er uendret - kun
+grensen hevet, med >60% headroom for videre registervekst. 4 nye tester (`d351-mesh-tool-executor-
+output-cap.test.ts`, inkl. en "audit-as-code"-regresjon mot det ekte `CONNECTOR_REGISTRY`) - 4/4
+grønt. Se D-351 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**D-350:** Tobias spurt EKSPLISITT via `AskUserQuestion` (ikke gjettet) om godkjenningsmodell for
+Zapier sin live verktøykjøring - valgte "klasse D som standard". `mcp_zapier.call_tool` er nå
+bygget (`tools/call` JSON-RPC, `{name, arguments}`), `capability_class: "D"` FAST for ALLE
+dynamisk oppdagede verktøy uansett navn - ingen ny godkjenningsmekanisme, gjenbruker eksisterende
+generisk klasse D-håndtering. `result.isError` (MCP sitt eget "kallet gikk gjennom, men verktøyet
+feilet internt"-signal) kastes eksplisitt, ALDRI rapportert som suksess, og `content` lekkes ALDRI
+i feilteksten. 6 nye tester (`mcp-zapier-transport.test.ts`, 19/19 grønt). Se D-350 i
+DECISIONS_AND_ASSUMPTIONS.md og Q-40 i OPEN_QUESTIONS.md (nå FULLSTENDIG LUKKET).
+
+**D-349:** "sjekk jira" → 400 Bad Request. WebSearch-verifisert mot Atlassian sin egen
+dokumentasjon: `/rest/api/3/search/jql` krever en "bounded" JQL - en TOM streng gir 400.
+`z.string()` alene lot en tom streng bestå Zod-valideringen og nå frem til Jira sitt API i stedet
+for å bli avvist lokalt. **Fikset:** `z.string()` → `z.string().min(1)`. 1 ny test, 15/15 grønt.
+
+**Refresh-token-/credential-status per Tobias sin brede live-sveip ("fikse refresh token på alle
+som trenger det"):**
+- **Fiken** (`invalid_grant`) - refresh-tokenet er FAKTISK ugyldig/tilbaketrukket hos Fiken, IKKE en
+  kodefeil (`fiken-oauth.ts`/`fiken-transport.ts` sin fornyelsesflyt typechecker rent og er uendret
+  siden D-107/D-241). Dette KREVER Tobias sin egen browser-interaktive handling - kan ikke
+  automatiseres fra denne økten. Eksisterende, uendret bootstrap-skript:
+  `node --env-file=.env --experimental-transform-types modules/finance/scripts/fiken-reauth.ts`
+  (kjøres på NAS-en, repo-rot, forutsetter `JARVIS_FIKEN_CLIENT_ID`/`_CLIENT_SECRET` allerede i
+  `.env`).
+- **Sentry** (403) - IKKE en refresh-token-arkitektur (statisk `JARVIS_SENTRY_API_TOKEN` sendt som
+  Bearer, ingen fornyelse finnes eller trengs for denne integrasjonstypen). 403 betyr tokenet
+  mangler org-tilgang/scope eller er ugyldig - krever Tobias genererer et nytt Internal Integration
+  Token i Sentry sitt UI og limer det inn i Infisical/.env. IKKE kodbart.
+- **Vipps/Wallester/Grafana/Prometheus/Docker(host)** - `credential_unavailable`/`ENOENT`: aldri
+  konfigurert i det hele tatt (Docker: selve binæren finnes ikke i miljøet Charlie kjører fra),
+  ikke en fornyelsesfeil av noe slag.
+
+**Neste (umiddelbart):** commit/push/PR for D-349+D-350+D-351 (samme branch/PR #214), merge under
+D-192 når CI er grønt. Deretter NAS-redeploy for at Zapier `call_tool` OG den hevede
+mesh-output-grensen faktisk blir tilgjengelig for Charlie - Tobias bør da be Charlie kjøre
+`get_connector_status` på nytt og bekrefte alle 56 nå vises. Fiken/Sentry venter på Tobias sin egen
+handling (reauth-skript / nytt token) - ingen videre kode mulig før det.
+
+**Forrige milepæl (uendret, MERGET under D-192): D-348 - Gmail-sending manglet i den EKTE
+transporten.** Tobias, live via Charlie: "send en epost til henrik@ffskis.com å si hei det er
+jarvis" → `gmail_unsupported_action_send`. `tool_id: "email", action: "send"` var registrert
+(klasse D) og FULLT policy-testet, men KUN mot en `FakeTransport` - den ekte `GmailTransport`
+(wiret i `main.ts`) implementerte aldri selve `send`-casen. SAMME funnklasse som D-345 (deklarert
+kapabilitet uten fungerende utførelse), her for chat-mesh-siden. **Fikset:** `GmailTransport.send()`
+- `users.messages.send` med et base64url-kodet RFC 2822-`raw`-felt, Subject RFC 2047-kodes for
+norske tegn (æøå), body base64/76-tegns linjebrutt. 3 nye tester (`gmail-attachment-transport.
+test.ts`, 11/11 grønt). Se D-348 i DECISIONS_AND_ASSUMPTIONS.md. **LIVE BEKREFTET** (Tobias sin
+egen test via Charlie, denne økten): e-post faktisk sendt til BÅDE henrik@ffskis.com og
+tobias.sg@icloud.com.
 
 **Forrige milepæl (uendret, MERGET PR #211/#212 under D-192): D-347 - dashbord-innrullering.** Mens
 Tobias forsøkte å visuelt bekrefte D-340/D-346 sin fiks i selve dashbordet

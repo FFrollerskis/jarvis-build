@@ -141,6 +141,51 @@
   .connector-group[open] summary::before { transform:rotate(90deg); }
   .connector-group-body { padding:12px; display:flex; flex-direction:column; gap:8px; }
   .connector-group .card { margin-bottom:0; }
+  /*
+   * D-352 (Tobias direkte i chat: "LEGG OPP FILTRE PÅ TILKOBLINGER OG LEGG
+   * OPP LOGOER SÅ DU SER DISCORD LOGOEN PÅ DISCORD TILKOBLINGEN GJØR DEM
+   * LITT STØRRE OG MER FANSY OG SETT OPP HEART BEAT PÅ ALLE SÅ VI VET NÅR
+   * NOEN AV DE FEILER"). RENT kosmetisk, samme D-239-disiplin (ingen
+   * selector fjernet/omdøpt, kun nye tillegg) - status-filterchips over
+   * søkefeltet, en merke-ikon-flis per connector-kort (bygget lokalt i
+   * connectorIconHtml(), ALDRI en ekstern CDN - regel 9), og en pulserende
+   * "heartbeat"-prikk som gjenbruker DEN EKSISTERENDE `health`-dataen
+   * (BO-03/D-242) - ingen ny backend-mekanisme.
+   */
+  .connector-toolbar { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }
+  .connector-status-chip {
+    background: var(--panel); color: var(--text-dim); border:1px solid var(--border); border-radius:999px;
+    padding:6px 14px; font-size:12px; font-weight:600; cursor:pointer; letter-spacing:0.02em;
+    transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+    user-select:none;
+  }
+  .connector-status-chip:hover { border-color: var(--accent); color: var(--text); }
+  .connector-status-chip.active {
+    background: linear-gradient(180deg, var(--accent-strong), var(--accent)); color:#022; border-color:transparent;
+    box-shadow: 0 4px 14px -4px var(--accent-glow);
+  }
+  .connector-group-body .card { padding:18px 20px; }
+  .connector-card-head { display:flex; align-items:center; gap:14px; margin-bottom:6px; }
+  .connector-icon {
+    flex:0 0 auto; width:44px; height:44px; border-radius:12px; display:flex; align-items:center; justify-content:center;
+    font-weight:700; font-size:15px; color:#fff; letter-spacing:0.02em;
+    box-shadow: 0 2px 10px -2px rgba(0,0,0,0.55), inset 0 0 0 1px rgba(255,255,255,0.10);
+  }
+  .connector-icon svg { width:26px; height:26px; display:block; }
+  .connector-card-titles { flex:1; min-width:0; }
+  .connector-card-titles .title { font-size:15px; margin-top:3px; }
+  .heartbeat { flex:0 0 auto; display:flex; align-items:center; gap:6px; font-size:11px; color: var(--text-dim); max-width:180px; }
+  .heartbeat span:last-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .heartbeat-dot { width:9px; height:9px; border-radius:50%; background: var(--text-dim); flex:0 0 auto; }
+  .heartbeat-dot.hb-healthy { background: var(--success-fg); --hb-glow: rgba(110,231,183,0.55); animation: pulse-dot-hb 2s ease-in-out infinite; }
+  .heartbeat-dot.hb-warn { background: var(--warn-fg); --hb-glow: rgba(251,191,36,0.55); animation: pulse-dot-hb 1.4s ease-in-out infinite; }
+  .heartbeat-dot.hb-fail { background: var(--danger-fg); --hb-glow: rgba(251,113,133,0.6); animation: pulse-dot-hb 1s ease-in-out infinite; }
+  .heartbeat-dot.hb-unknown { background: var(--text-dim); opacity:0.45; }
+  @keyframes pulse-dot-hb {
+    0%   { box-shadow: 0 0 0 0 var(--hb-glow, transparent); }
+    70%  { box-shadow: 0 0 0 6px transparent; }
+    100% { box-shadow: 0 0 0 0 transparent; }
+  }
   .cred-row { display:flex; gap:6px; margin-top:8px; align-items:center; }
   .cred-row label { font-size:11px; color: var(--text-dim); min-width:0; flex:0 0 auto; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
   .cred-row input { flex:1; min-width:0; background: var(--bg); color: var(--text); border:1px solid var(--border);
@@ -278,6 +323,13 @@
          (som D-199 sier skal forbli lese-kun for alltid). -->
     <h2>Integrasjoner</h2>
     <div id="connectors-summary" class="connectors-summary"></div>
+    <div class="connector-toolbar" id="connector-status-filters">
+      <button type="button" class="connector-status-chip active" data-status-filter="all">Alle</button>
+      <button type="button" class="connector-status-chip" data-status-filter="configured">Konfigurert</button>
+      <button type="button" class="connector-status-chip" data-status-filter="missing">Ikke konfigurert</button>
+      <button type="button" class="connector-status-chip" data-status-filter="failing">Feiler</button>
+      <button type="button" class="connector-status-chip" data-status-filter="backlog">Ikke bygget</button>
+    </div>
     <input type="search" id="connector-filter" class="connector-filter" placeholder="Søk connector (navn eller kategori) …" autocomplete="off">
     <div id="connectors"><p class="empty">Laster …</p></div>
   </section>
@@ -982,13 +1034,139 @@
   const CONNECTOR_CATEGORY_ORDER = ["tool_gateway", "model_provider", "finance", "backlog", "backlog_d64_gate"];
   const connectorFilterEl = document.getElementById("connector-filter");
   const connectorsSummaryEl = document.getElementById("connectors-summary");
+  const connectorStatusFiltersEl = document.getElementById("connector-status-filters");
   let lastConnectorsData = null;
+  let connectorStatusFilter = "all";
 
   function connectorCategoryLabel(category) {
     if (CONNECTOR_CATEGORY_LABELS[category]) return CONNECTOR_CATEGORY_LABELS[category];
     const words = String(category || "ukjent").split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1));
     return words.join(" ");
   }
+
+  /**
+   * D-352: merkefarger/-glyffer for connector-ikonet (RENT presentasjon,
+   * håndskrevet lokalt - ALDRI en ekstern logo-CDN, regel 9). En connector
+   * uten oppføring her faller automatisk tilbake til et fargekodet
+   * monogram (connectorFallbackColor()/connectorMonogram() under) - SAMME
+   * "ingen ny UI-kode nødvendig når registeret vokser"-egenskap
+   * CONNECTOR_CATEGORY_LABELS sin fallback allerede har.
+   */
+  const CONNECTOR_BRAND_COLORS = {
+    discord: "#5865F2", slack: "#4A154B", github: "#24292f", vercel: "#000000",
+    telegram: "#26A5E4", whatsapp: "#25D366", spotify: "#1DB954", notion: "#2f3437",
+    gmail: "#EA4335", google_calendar: "#1a73e8", google_drive: "#1a73e8",
+    google_sheets: "#1a73e8", google_maps: "#1a73e8", google_places: "#1a73e8",
+    google_routes: "#1a73e8", google_veo: "#1a73e8", gemini: "#1a73e8",
+    microsoft_outlook: "#0078D4", onedrive: "#0078D4", dropbox: "#0061FF",
+    stripe: "#635BFF", twilio: "#F22F46", jira: "#0052CC", trello: "#0079BF",
+    linear: "#5E6AD2", hubspot: "#FF7A59", pipedrive: "#26292C",
+    openai: "#10A37F", openai_images: "#10A37F", anthropic: "#D97757",
+    brave_search: "#FB542B", zapier: "#FF4A00", make: "#6D00CC",
+    sentry: "#362D59", grafana: "#F46800", prometheus: "#E6522C",
+    vipps: "#FF5B24", n8n: "#EA4B71", todoist: "#E44332"
+  };
+  const CONNECTOR_BRAND_ICONS = {
+    discord: '<svg viewBox="0 0 24 24" fill="none">' +
+      '<path d="M5 8.8C7.8 6.3 16.2 6.3 19 8.8c1.6 3.3 1.7 6.7.6 9.1-1.6 1.2-3.3 1.9-5 2.3l-.9-1.6c.9-.2 1.8-.6 2.6-1.1-.2-.1-.5-.3-.7-.5-3.6 1.7-7.6 1.7-11.2 0-.2.2-.5.4-.7.5.8.5 1.7.9 2.6 1.1l-.9 1.6c-1.7-.4-3.4-1.1-5-2.3C3.3 15.5 3.4 12.1 5 8.8Z" fill="#fff"/>' +
+      '<ellipse cx="9.2" cy="13" rx="1.4" ry="1.6" fill="#5865F2"/><ellipse cx="14.8" cy="13" rx="1.4" ry="1.6" fill="#5865F2"/>' +
+      "</svg>",
+    slack: '<svg viewBox="0 0 24 24">' +
+      '<rect x="9.5" y="2" width="3" height="8" rx="1.5" fill="#36C5F0"/><rect x="14" y="9.5" width="8" height="3" rx="1.5" fill="#2EB67D"/>' +
+      '<rect x="11.5" y="14" width="3" height="8" rx="1.5" fill="#ECB22E"/><rect x="2" y="11.5" width="8" height="3" rx="1.5" fill="#E01E5A"/>' +
+      '<circle cx="7.5" cy="9.5" r="2" fill="#36C5F0"/><circle cx="16.5" cy="7.5" r="2" fill="#2EB67D"/>' +
+      '<circle cx="16.5" cy="14.5" r="2" fill="#ECB22E"/><circle cx="7.5" cy="16.5" r="2" fill="#E01E5A"/>' +
+      "</svg>",
+    vercel: '<svg viewBox="0 0 24 24"><path d="M12 3 22 20H2Z" fill="#fff"/></svg>',
+    telegram: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5" fill="#fff"/><path d="M6 12.2 17.5 7l-2 10-3.6-2.8-1.8 1.8-.4-3Z" fill="#26A5E4"/></svg>',
+    whatsapp: '<svg viewBox="0 0 24 24">' +
+      '<path d="M12 4a8 8 0 0 0-6.9 12l-1 3.6 3.7-1A8 8 0 1 0 12 4Z" fill="#fff"/>' +
+      '<path d="M9 8.6c.2-.5.4-.5.6-.5h.5c.2 0 .3 0 .5.4l.6 1.4c.1.2.1.3 0 .5l-.5.6c-.1.2-.2.3 0 .5.3.5.8 1.1 1.3 1.5.6.5 1.1.7 1.3.8.2.1.3.1.5-.1l.6-.7c.2-.2.3-.1.5 0l1.3.6c.2.1.3.2.4.3.1.1.1.5-.1 1-.2.5-1 .9-1.4.9-.4.1-.9.1-1.4-.1-.3-.1-.8-.3-1.4-.6-2.3-1.1-3.8-3.4-3.9-3.6-.1-.2-1-1.3-1-2.5s.6-1.8.8-2.1Z" fill="#25D366"/>' +
+      "</svg>",
+    spotify: '<svg viewBox="0 0 24 24">' +
+      '<circle cx="12" cy="12" r="9" fill="#fff"/>' +
+      '<path d="M6.8 9.6c3.4-1 7.4-.8 10.2.9" stroke="#1DB954" stroke-width="1.6" stroke-linecap="round" fill="none"/>' +
+      '<path d="M7.2 12.8c2.8-.7 6.1-.5 8.5 1" stroke="#1DB954" stroke-width="1.6" stroke-linecap="round" fill="none"/>' +
+      '<path d="M7.6 15.9c2.2-.5 4.8-.4 6.7.8" stroke="#1DB954" stroke-width="1.4" stroke-linecap="round" fill="none"/>' +
+      "</svg>",
+    notion: '<svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2" fill="#fff"/><path d="M7 7h9M7 11h9M7 15h6" stroke="#2f3437" stroke-width="1.6" stroke-linecap="round"/></svg>',
+    github: '<svg viewBox="0 0 24 24"><path fill="#fff" d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.8c-2.8.6-3.4-1.3-3.4-1.3-.4-1.1-1-1.4-1-1.4-.9-.6.1-.6.1-.6 1 .1 1.5 1 1.5 1 .9 1.5 2.3 1.1 2.9.8.1-.7.3-1.1.6-1.4-2.2-.2-4.6-1.1-4.6-5 0-1.1.4-2 1-2.7-.1-.2-.4-1.3.1-2.7 0 0 .8-.3 2.7 1a9.4 9.4 0 0 1 5 0c1.9-1.3 2.7-1 2.7-1 .5 1.4.2 2.5.1 2.7.6.7 1 1.6 1 2.7 0 3.9-2.4 4.8-4.6 5 .3.3.6.9.6 1.8v2.6c0 .3.2.6.7.5A10 10 0 0 0 12 2Z"/></svg>'
+  };
+
+  function connectorFallbackColor(id) {
+    let hash = 0;
+    for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
+    return "hsl(" + (hash % 360) + ", 55%, 40%)";
+  }
+
+  function connectorMonogram(displayName) {
+    const words = String(displayName || "?").split(/[\s/]+/).filter(Boolean);
+    if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
+    return String(displayName || "?").slice(0, 2).toUpperCase();
+  }
+
+  function connectorIconHtml(c) {
+    const bg = CONNECTOR_BRAND_COLORS[c.id] || connectorFallbackColor(c.id);
+    const glyph = CONNECTOR_BRAND_ICONS[c.id];
+    const inner = glyph || "<span>" + escapeHtml(connectorMonogram(c.display_name || c.id)) + "</span>";
+    return '<div class="connector-icon" style="background:' + bg + '" aria-hidden="true">' + inner + "</div>";
+  }
+
+  /**
+   * D-352: "heartbeat" - RENT presentasjon av den EKSISTERENDE
+   * `ToolGateway.health`-dataen (BO-03), allerede fylt daglig av D-242 sin
+   * sveip for alle live-testbare, konfigurerte connectorer. Ingen ny
+   * backend-mekanisme - kun en pulserende status-prikk + relativ tid for
+   * data som allerede kom over `get_connector_status`.
+   */
+  const HEARTBEAT_WARN_STATES = new Set(["degraded", "rate_limited"]);
+  const HEARTBEAT_FAIL_STATES = new Set(["auth_failed", "unavailable"]);
+  const HEARTBEAT_STATE_LABELS = {
+    healthy: "Frisk", degraded: "Degradert", rate_limited: "Rate-limited",
+    auth_failed: "Autentisering feiler", unavailable: "Utilgjengelig"
+  };
+
+  function heartbeatClass(health) {
+    const state = health && health.state;
+    if (!state) return "hb-unknown";
+    if (state === "healthy") return "hb-healthy";
+    if (HEARTBEAT_WARN_STATES.has(state)) return "hb-warn";
+    if (HEARTBEAT_FAIL_STATES.has(state)) return "hb-fail";
+    return "hb-unknown";
+  }
+
+  function formatRelativeTime(iso) {
+    const then = iso ? new Date(iso).getTime() : NaN;
+    if (Number.isNaN(then)) return "";
+    const min = Math.round((Date.now() - then) / 60000);
+    if (min < 1) return "nå nettopp";
+    if (min < 60) return "for " + min + " min siden";
+    const hrs = Math.round(min / 60);
+    if (hrs < 24) return "for " + hrs + " t siden";
+    return "for " + Math.round(hrs / 24) + " d siden";
+  }
+
+  function heartbeatLabel(health) {
+    if (!health || !health.state) return "Ikke testet ennå";
+    const label = HEARTBEAT_STATE_LABELS[health.state] || health.state;
+    const when = formatRelativeTime(health.at);
+    return label + (when ? " · " + when : "");
+  }
+
+  function isBacklogConnector(c) {
+    return c.category === "backlog" || c.category === "backlog_d64_gate";
+  }
+
+  const CONNECTOR_STATUS_PREDICATES = {
+    all: () => true,
+    configured: (c) => !isBacklogConnector(c) && !!c.configured,
+    missing: (c) => !isBacklogConnector(c) && !c.configured,
+    failing: (c) => {
+      const cls = heartbeatClass(c.health);
+      return cls === "hb-fail" || cls === "hb-warn";
+    },
+    backlog: (c) => isBacklogConnector(c)
+  };
 
   /**
    * D-345 (Tobias direkte i chat: "viktig at absolutt alt i dash faktisk
@@ -1009,7 +1187,6 @@
     const name = escapeHtml(c.display_name || c.id);
     const configured = !!c.configured;
     const isBacklog = c.category === "backlog" || c.category === "backlog_d64_gate";
-    const health = c.health && c.health.state ? escapeHtml(c.health.state) : "ikke testet ennå";
     const isLive = c.test_method === "live";
     const testMethod = isLive ? "live-testbar" : "kun presence-sjekk";
     const credRows = isBacklog
@@ -1025,10 +1202,21 @@
         }).join("");
     const pillClass = isBacklog ? "conn-notbuilt" : (configured ? "conn-configured" : "conn-missing");
     const pillText = isBacklog ? "ikke bygget" : (configured ? "konfigurert" : "ikke konfigurert");
+    const hbLabel = escapeHtml(heartbeatLabel(c.health));
     return '<div class="card" data-connector-card="' + escapeHtml(c.id) + '">' +
-      '<span class="pill ' + pillClass + '">' + pillText + "</span>" +
-      '<div class="title">' + name + "</div>" +
-      (isBacklog ? "" : '<div class="meta">Helse: ' + health + " · " + testMethod + "</div>") +
+      '<div class="connector-card-head">' +
+        connectorIconHtml(c) +
+        '<div class="connector-card-titles">' +
+          '<span class="pill ' + pillClass + '">' + pillText + "</span>" +
+          '<div class="title">' + name + "</div>" +
+        "</div>" +
+        (isBacklog ? "" :
+          '<div class="heartbeat" title="' + hbLabel + '">' +
+            '<span class="heartbeat-dot ' + heartbeatClass(c.health) + '"></span>' +
+            "<span>" + hbLabel + "</span>" +
+          "</div>") +
+      "</div>" +
+      (isBacklog ? "" : '<div class="meta">' + testMethod + "</div>") +
       credRows +
       (!isBacklog && isLive ? '<button class="test-btn" data-test-connector data-connector-id="' + escapeHtml(c.id) + '">Test tilkobling</button>' : "") +
       (isBacklog ? "" : '<div class="test-result" data-test-result="' + escapeHtml(c.id) + '"></div>') +
@@ -1047,13 +1235,14 @@
     connectorsSummaryEl.textContent = configuredCount + " av " + allConnectors.length + " connectorer konfigurert";
 
     const term = (filterText || "").trim().toLowerCase();
-    const connectors = term
-      ? allConnectors.filter((c) =>
-          (c.display_name || c.id || "").toLowerCase().includes(term) ||
-          connectorCategoryLabel(c.category).toLowerCase().includes(term))
-      : allConnectors;
+    const statusPred = CONNECTOR_STATUS_PREDICATES[connectorStatusFilter] || CONNECTOR_STATUS_PREDICATES.all;
+    const connectors = allConnectors.filter((c) =>
+      statusPred(c) && (!term ||
+        (c.display_name || c.id || "").toLowerCase().includes(term) ||
+        connectorCategoryLabel(c.category).toLowerCase().includes(term)));
     if (connectors.length === 0) {
-      connectorsEl.innerHTML = '<p class="empty">Ingen connectorer matcher «' + escapeHtml(filterText) + '».</p>';
+      connectorsEl.innerHTML = '<p class="empty">Ingen connectorer matcher' +
+        (term ? " «" + escapeHtml(filterText) + "»" : " filteret") + ".</p>";
       return;
     }
 
@@ -1085,6 +1274,16 @@
   }
 
   connectorFilterEl.addEventListener("input", () => {
+    renderConnectors(null, connectorFilterEl.value);
+  });
+
+  connectorStatusFiltersEl.addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-status-filter]");
+    if (!chip) return;
+    connectorStatusFilter = chip.dataset.statusFilter;
+    connectorStatusFiltersEl.querySelectorAll(".connector-status-chip").forEach((el) => {
+      el.classList.toggle("active", el === chip);
+    });
     renderConnectors(null, connectorFilterEl.value);
   });
 

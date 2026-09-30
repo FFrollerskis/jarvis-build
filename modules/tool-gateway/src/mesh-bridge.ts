@@ -252,7 +252,21 @@ export class MeshToolExecutor {
   constructor(
     private readonly toolGateway: ToolGateway,
     private readonly identity: unknown,
-    private readonly maxOutputChars = 4000,
+    // D-351 (Tobias direkte i chat, live: "ER MANGE FLERE EN DE" - Charlie
+    // rapporterte kun ~16 connectorer fra `executive.get_connector_status`,
+    // mens `CONNECTOR_REGISTRY` faktisk har 56+). Host-målt (denne økten,
+    // `listConnectorStatus()` kjørt direkte mot den ekte registeret): FULL,
+    // uforkortet serialisert status er 12 472 tegn - godt over den
+    // FORRIGE flate 4000-tegns-grensen, som derfor kappet JSON-arrayet midt
+    // i, uten at brukeren fikk noe tydelig varsel (kun et strukturelt
+    // `truncated: true`-felt sammen med en RÅ, midt-i-arrayet avkappet
+    // JSON-streng - ikke noe et menneske ville lest som "her mangler data").
+    // 20 000 gir >60 % headroom over dagens fulle størrelse ETTERSOM
+    // registeret vokser videre (nye connectorer legges jevnlig til) - gjelder
+    // ALLE meshverktøy uniformt (samme grense brukes for ethvert kall), ikke
+    // bare denne ene handlingen, siden andre datatunge lesinger (f.eks.
+    // `list_messages` med mange e-poster) kan ramme SAMME bug-klasse.
+    private readonly maxOutputChars = 20_000,
     /**
      * Default: kun A/B-read-verktøyene over. Tester/senere faser kan eksponere
      * flere mappinger - autorisasjon (inkl. D-pipeline) håndheves UANSETT i

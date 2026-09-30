@@ -1702,23 +1702,44 @@ export function firstWaveTools(
       parameterAuthorizer: gceTargetAuthorizer("reset_instance")
     },
     // D-338 (Tobias direkte i chat: "ja bygg mcp zapier"): MCP-klient-
-    // discovery-only FØRSTE slice. `list_tools` (klasse A) kaller Zapier sin
-    // MCP-server sin `tools/list` og returnerer den RÅ listen ufiltrert -
-    // `output_trust: "untrusted"` fordi innholdet er ekstern, DYNAMISK
-    // oppdaget data (CLAUDE.md regel 7 - Ingestion Zone, aldri instruksjoner,
-    // aldri direkte til autoritativt minne). INGEN `call_tool`-handling
-    // finnes i det hele tatt denne sliceen - live-invokering av et dynamisk
-    // oppdaget, tredjeparts-eid verktøy krever sin egen godkjennings-
-    // modell-avgjørelse (Q-40 (b), fortsatt åpen) FØR den bygges. Selve
-    // MCP-server-URL-en er hemmelighets-ekvivalent (Zapier provisjonerer den
-    // PER BRUKER) og lagres derfor som `credential_ref`, ALDRI som en
-    // parameter - se `mcp-zapier-transport.ts`.
+    // discovery. `list_tools` (klasse A) kaller Zapier sin MCP-server sin
+    // `tools/list` og returnerer den RÅ listen ufiltrert - `output_trust:
+    // "untrusted"` fordi innholdet er ekstern, DYNAMISK oppdaget data
+    // (CLAUDE.md regel 7 - Ingestion Zone, aldri instruksjoner, aldri
+    // direkte til autoritativt minne). Selve MCP-server-URL-en er
+    // hemmelighets-ekvivalent (Zapier provisjonerer den PER BRUKER) og
+    // lagres derfor som `credential_ref`, ALDRI som en parameter - se
+    // `mcp-zapier-transport.ts`.
     {
       tool_id: "mcp_zapier", action: "list_tools", description: "List verktøyene Zapier sin MCP-server for øyeblikket eksponerer (read-only discovery, untrusted - ALDRI invokert)",
       input_schema: empty, capability_class: "A",
       scopes: ["mcp_zapier:read"], reversible: true,
       rollback_procedure: "ingen mutasjon utført - ren lesing",
       idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_MCP_ZAPIER_SERVER_URL", output_trust: "untrusted", transport: transport("mcp_zapier")
+    },
+    // D-350 (Tobias direkte i chat, 2026-09-30, eksplisitt spurt via
+    // AskUserQuestion - IKKE gjettet: "klasse D som standard" valgt av tre
+    // tilbudte alternativer) - løser Q-40 (b). `call_tool` er ALLTID klasse
+    // D, FAST for ALLE dynamisk oppdagede Zapier-verktøy uansett navn/
+    // formodet risiko - Jarvis kan strukturelt IKKE vurdere et verktøy den
+    // aldri har sett kildekoden/dokumentasjonen til, så den strengeste
+    // klassen brukes ubetinget for samtlige, aldri en per-verktøy-gjetning.
+    // Den smale, eier-konfigurerte unntakslisten (det andre tilbudte
+    // alternativet) ble EKSPLISITT valgt BORT - ikke bygget. `tool_name`/
+    // `arguments` er RENE PÅSTANDER fra kalleren (samme "aldri instruksjon"-
+    // presedens som all annen ekstern input) - selve MCP-kallet, og dermed
+    // hva som FAKTISK skjer, skjer alltid PostFlight for godkjenningen
+    // (`ToolGateway.execute()` sin generiske klasse D-håndtering, keyed KUN
+    // på `capability_class` - ingen ny godkjenningsmekanisme oppfunnet her).
+    // `output_trust: "untrusted"` for returnert `content` av SAMME grunn som
+    // `list_tools` - et Zap sin utdata er like ekstern/dynamisk som listen.
+    {
+      tool_id: "mcp_zapier", action: "call_tool", description: "Kjør ett navngitt Zapier MCP-verktøy med oppgitte argumenter (tools/call, klasse D FAST for ALLE, uansett verktøy - se D-350)",
+      input_schema: record({ tool_name: z.string().min(1), arguments: z.record(z.string(), z.unknown()).optional() }),
+      capability_class: "D", scopes: ["mcp_zapier:call"], reversible: false,
+      rollback_procedure: "ikke reverserbar - derfor klasse D (Jarvis kjenner ikke det faktiske verktøyets virkning)",
+      idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 10,
       credential_ref: "JARVIS_MCP_ZAPIER_SERVER_URL", output_trust: "untrusted", transport: transport("mcp_zapier")
     },
     // D-339 (Tobias direkte i chat: "playwrite er viktig for at den skal
@@ -3823,8 +3844,15 @@ export function firstWaveTools(
      * sin doc-kommentar i live-transports.ts.
      */
     {
+      // D-349 (Tobias live via Charlie: "test jira" → 400 Bad Request BÅDE med og
+      // uten oppgitt jql). WebSearch-verifisert mot Atlassian sin egen dokumentasjon
+      // denne økten: /rest/api/3/search/jql krever en "bounded" JQL - en TOM streng
+      // gir eksplisitt 400 ("unbounded query"). z.string() alene tillater "" å bestå
+      // Zod-valideringen, som deretter sendte en tom/uendret query til Jira og fikk
+      // en forvirrende live 400 i stedet for en rask, lokal, forklarende avvisning -
+      // .min(1) lukker gapet FØR nettverkskallet i det hele tatt skjer.
       tool_id: "jira", action: "search_issues", description: "Søk etter issues med JQL (GET /rest/api/3/search/jql, gratis/sideeffekt-fritt, untrusted ingestion - den gamle /search-veien er HELT FJERNET fra Jira Cloud)",
-      input_schema: record({ jql: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      input_schema: record({ jql: z.string().min(1) }), capability_class: "A", scopes: ["tasks:read"],
       reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_JIRA_API_TOKEN",
       output_trust: "untrusted", transport: transport("jira")

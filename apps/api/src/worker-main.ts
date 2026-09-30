@@ -524,7 +524,9 @@ worker.register(
   "executive",
   executiveHandler({
     gateway,
-    tools: { definitions: fullMeshTools.map((t) => t.def), executor: new MeshToolExecutor(toolGateway, workerIdentity, 4000, fullMeshTools) },
+    // D-351: 4000 → 20_000 (se mesh-bridge.ts sitt filhode for host-målt begrunnelse) - SAMME
+    // grense som api-workeren (main.ts) bruker, uendret "identisk oppførsel"-presedens.
+    tools: { definitions: fullMeshTools.map((t) => t.def), executor: new MeshToolExecutor(toolGateway, workerIdentity, 20_000, fullMeshTools) },
     sandbox: runner
   })
 );
