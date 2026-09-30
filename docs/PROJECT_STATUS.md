@@ -1,11 +1,34 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-353: FUNN + DELVIS
-FIKS (tale: Markdown lest bokstavelig FIKSET, VAD-terskel/hangover gjort tunbar, batch-STT-latens
-dokumentert som en fremtidig, større byggeslice) + D-352: BYGGET (dashbord: statusfiltre +
-merke-ikoner inkl. Discord + større/"fansy" kort + heartbeat-prikk på alle connectorer) + D-351:
-FUNN + FIKS (mesh-verktøy-output-kapping skjulte 40 av 56 connectorer for Charlie) + D-350: BYGGET
-(Zapier `call_tool`, Q-40(b) LUKKET) + D-349: FIKS (Jira tom-JQL-400).**
+**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-354: BYGGET, steg 1
+av to (Gemma som REELL default for tekst+tale via eksplisitt `providerPreference`-injeksjon med
+gjennomsiktig fallback-retry; steg 2 - verktøy-utløst eskalering til Anthropic/OpenAI/Gemini for
+kode/bilde - IKKE bygget, egen runde) + D-353: FUNN + DELVIS FIKS (tale: Markdown lest bokstavelig
+FIKSET, VAD-terskel/hangover gjort tunbar, batch-STT-latens dokumentert som en fremtidig, større
+byggeslice) + D-352: BYGGET (dashbord: statusfiltre + merke-ikoner inkl. Discord + større/"fansy"
+kort + heartbeat-prikk på alle connectorer) + D-351: FUNN + FIKS (mesh-verktøy-output-kapping skjulte
+40 av 56 connectorer for Charlie) + D-350: BYGGET (Zapier `call_tool`, Q-40(b) LUKKET) + D-349: FIKS
+(Jira tom-JQL-400).**
+
+**D-354 (Tobias direkte i chat: "gemma skal være standar for tekst og tale siden den er gratis ...
+først ved større forespørsler ... skal den spinne opp agenter" - avklart via `AskUserQuestion`: kun
+Anthropic/OpenAI/Gemini som eskaleringsmål, samme flyt for tekst+tale, konkrete kategorier avgjør
+eskalering). Steg 1 (nå, BYGGET): `apps/api/src/conversation.ts` sin `ConversationEngine.handle()`
+injiserer `providerPreference: ["gemma_local", "gemma_hosted"]` (D-106s eksisterende, allerede
+testede mekanisme i `router.ts` - INGEN ny routing-logikk) som default for ordinær chat, KUN når
+eieren/override IKKE allerede har bedt om noe spesifikt (eksplisitt `provider`/`providerPreference`/
+`mode`) - aldri en stille overstyring av en eksplisitt forespørsel. Gateway-kallet er pakket i
+try/catch: `NoEligibleProviderError`/`provider_preference_exhausted` fra DENNE defaulten (aldri fra
+en eksplisitt "bruk Gemma"-forespørsel, som feiler ærlig i stedet) trigger en retry UTEN
+`providerPreference` (normal AUTO-vekting/betalt fallback som før), logget eksplisitt
+(`d354_gemma_default_preference_exhausted_fallback`) - aldri en stille degradering. Verifisert trygt
+å prøve på nytt (routeren velger provider FØR noe strømmes, ingen delvis tekst tapt/duplisert). Tale
+dekkes automatisk (samme `/chat`-sti som tekst, D-30) - ingen egen voice-gateway-endring nødvendig.
+`sensitivity` (D-203) og `runCouncil()` (alltid kvalitetsprioritert) er BEVISST UBERØRT.
+`apps/api/test/conversation-d106-overrides.test.ts`: 28/28 grønt (4 nye D-354-tester + 1 oppdatert).
+`tsc --noEmit`/`eslint` rene. **Steg 2 (verktøy-utløst eskalering for kode/bilde-generering med
+tilbakelevering til Gemma) er BEVISST IKKE bygget her** - egen, større runde. Se D-354 i
+DECISIONS_AND_ASSUMPTIONS.md.
 
 **D-353 (talekvalitet, tre funn rapportert samtidig av Tobias - ulik "fikset"-status per funn,
 ALDRI late som alle tre er løst fordi de kom i samme melding):**

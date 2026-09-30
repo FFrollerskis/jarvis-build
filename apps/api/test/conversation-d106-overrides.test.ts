@@ -2,7 +2,13 @@ import { describe, expect, it } from "vitest";
 import type pg from "pg";
 import type { IdentityContext } from "@jarvis/contracts";
 import { ContextBuilder, MessageStore } from "@jarvis/core";
-import { MemoryTraceSink, type AiCouncil, type CompleteInput, type ModelGateway } from "@jarvis/model-gateway";
+import {
+  MemoryTraceSink,
+  NoEligibleProviderError,
+  type AiCouncil,
+  type CompleteInput,
+  type ModelGateway
+} from "@jarvis/model-gateway";
 import type { InProcessWorker, TaskService } from "@jarvis/tasks";
 import { ConversationEngine } from "../src/conversation.ts";
 
@@ -178,14 +184,121 @@ describe("D-106 ConversationEngine: routing overrides folder inn i CompleteInput
     expect(captured?.provider).toBe("openai");
   });
 
-  it("G: vanlig tekst uten kjent frase -> ingen override-felt satt (uendret oppførsel, §23)", async () => {
+  it("G: vanlig tekst uten kjent frase -> ingen provider/mode/paid_models-override satt (uendret, §23)", async () => {
     let captured: CompleteInput | undefined;
     const engine = buildEngine({ onComplete: (input) => (captured = input) });
     await engine.handle(identity, "hva er klokken?");
     expect(captured?.provider).toBeUndefined();
     expect(captured?.mode).toBeUndefined();
     expect(captured?.paid_models_allowed).toBeUndefined();
+  });
+
+  /**
+   * D-354 (Tobias direkte i chat: "gemma skal være standar for tekst og tale
+   * siden den er gratis"): erstatter den gamle §23-påstanden om at
+   * `providerPreference` ALLTID er usatt for vanlig tekst - nå er DETTE
+   * nettopp defaulten for ordinær prat uten noen eksplisitt override.
+   */
+  it("G2 (D-354): vanlig tekst uten override -> providerPreference=[gemma_local, gemma_hosted] som default", async () => {
+    let captured: CompleteInput | undefined;
+    const engine = buildEngine({ onComplete: (input) => (captured = input) });
+    await engine.handle(identity, "hva er klokken?");
+    expect(captured?.providerPreference).toEqual(["gemma_local", "gemma_hosted"]);
+  });
+
+  it("G3 (D-354): eksplisitt provider-override ('bruk bare Claude') får ALDRI Gemma-default-preferansen injisert ved siden av", async () => {
+    let captured: CompleteInput | undefined;
+    const engine = buildEngine({ onComplete: (input) => (captured = input) });
+    await engine.handle(identity, "bruk bare Claude til dette");
+    expect(captured?.provider).toBe("anthropic");
     expect(captured?.providerPreference).toBeUndefined();
+  });
+
+  it("G4 (D-354): eksplisitt API-nivå provider-parameter undertrykker Gemma-default-preferansen", async () => {
+    let captured: CompleteInput | undefined;
+    const engine = buildEngine({ onComplete: (input) => (captured = input) });
+    await engine.handle(identity, "hva er klokken?", undefined, undefined, "openai");
+    expect(captured?.provider).toBe("openai");
+    expect(captured?.providerPreference).toBeUndefined();
+  });
+
+  it("G5 (D-354): 'bruk bare lokale modeller' (mode=LOCAL) undertrykker Gemma-default-preferansen", async () => {
+    let captured: CompleteInput | undefined;
+    const engine = buildEngine({ onComplete: (input) => (captured = input) });
+    await engine.handle(identity, "bruk bare lokale modeller");
+    expect(captured?.mode).toBe("LOCAL");
+    expect(captured?.providerPreference).toBeUndefined();
+  });
+
+  it("G6 (D-354): når routeren kaster provider_preference_exhausted for default-Gemma-preferansen, faller motoren TILBAKE til normal AUTO-ruting (ingen providerPreference i retry-kallet) i stedet for å feile", async () => {
+    const pool = fakePool();
+    const messages = new MessageStore(pool);
+    const context = new ContextBuilder(pool);
+    const capturedInputs: CompleteInput[] = [];
+    let callCount = 0;
+    const gateway = {
+      complete: async (input: CompleteInput) => {
+        callCount++;
+        capturedInputs.push(input);
+        if (input.providerPreference) {
+          throw new NoEligibleProviderError(
+            "provider_preference_exhausted: ingen av [gemma_local,gemma_hosted] er konfigurert/kvalifisert"
+          );
+        }
+        return { text: "fallback-svar", usage: { input_tokens: 1, output_tokens: 1 }, provider: "anthropic", model: "claude-sonnet-5" };
+      },
+      stream: async () => {
+        throw new Error("stream skal ikke kalles i denne testen");
+      },
+      completeWithTools: async () => {
+        throw new Error("completeWithTools skal ikke kalles i denne testen");
+      }
+    } as unknown as ModelGateway;
+    const engine = new ConversationEngine({
+      messages,
+      context,
+      gateway,
+      tasks: fakeTasks,
+      worker: fakeWorker,
+      trace: new MemoryTraceSink()
+    });
+    const result = await engine.handle(identity, "hva er klokken?");
+    expect(callCount).toBe(2);
+    expect(capturedInputs[0]?.providerPreference).toEqual(["gemma_local", "gemma_hosted"]);
+    expect(capturedInputs[1]?.providerPreference).toBeUndefined();
+    expect(result.reply).toBe("fallback-svar");
+    expect(result.routed).toBe("model");
+  });
+
+  it("G7 (D-354): en EKSPLISITT eierforespørsel om Gemma ('bruk gemma') faller ALDRI stille tilbake ved provider_preference_exhausted - feiler ærlig i stedet", async () => {
+    const pool = fakePool();
+    const messages = new MessageStore(pool);
+    const context = new ContextBuilder(pool);
+    let callCount = 0;
+    const gateway = {
+      complete: async () => {
+        callCount++;
+        throw new NoEligibleProviderError(
+          "provider_preference_exhausted: ingen av [gemma_local,gemma_hosted] er konfigurert/kvalifisert"
+        );
+      },
+      stream: async () => {
+        throw new Error("stream skal ikke kalles i denne testen");
+      },
+      completeWithTools: async () => {
+        throw new Error("completeWithTools skal ikke kalles i denne testen");
+      }
+    } as unknown as ModelGateway;
+    const engine = new ConversationEngine({
+      messages,
+      context,
+      gateway,
+      tasks: fakeTasks,
+      worker: fakeWorker,
+      trace: new MemoryTraceSink()
+    });
+    await expect(engine.handle(identity, "bruk gemma til dette")).rejects.toThrow(NoEligibleProviderError);
+    expect(callCount).toBe(1);
   });
 
   it("H: 'bruk Gemma' -> CompleteInput.providerPreference=[gemma_local, gemma_hosted]", async () => {
