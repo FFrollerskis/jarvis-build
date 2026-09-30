@@ -162,6 +162,22 @@ describe("E: firstWaveTools() registrerer alle jira.*-handlinger med korrekt ris
     }
   });
 
+  /**
+   * D-349 (Tobias live via Charlie: "test jira" → 400 Bad Request BÅDE med
+   * og uten oppgitt jql). Atlassian sin dokumentasjon (WebSearch-verifisert
+   * denne økten): /rest/api/3/search/jql krever en "bounded" JQL - en TOM
+   * streng gir 400 ("unbounded query"). `z.string()` alene lot en tom
+   * streng bestå Zod-valideringen og nå helt frem til Jira sitt API, som
+   * deretter feilet med en forvirrende live 400 - skjemaet skal avvise den
+   * FØR noe nettverkskall i det hele tatt skjer.
+   */
+  it("D-349: jira.search_issues sitt input_schema avviser en TOM jql-streng (ikke bare fravær av feltet)", () => {
+    const tool = firstWaveTools().find((t) => t.tool_id === "jira" && t.action === "search_issues");
+    expect(tool).toBeDefined();
+    expect(tool!.input_schema.safeParse({ jql: "" }).success).toBe(false);
+    expect(tool!.input_schema.safeParse({ jql: "project = X" }).success).toBe(true);
+  });
+
   it("jira.create_issue/update_issue/transition_issue er klasse B (muterer ekstern tilstand)", () => {
     for (const action of ["create_issue", "update_issue", "transition_issue"]) {
       const tool = firstWaveTools().find((t) => t.tool_id === "jira" && t.action === action);

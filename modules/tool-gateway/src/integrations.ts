@@ -3823,8 +3823,15 @@ export function firstWaveTools(
      * sin doc-kommentar i live-transports.ts.
      */
     {
+      // D-349 (Tobias live via Charlie: "test jira" → 400 Bad Request BÅDE med og
+      // uten oppgitt jql). WebSearch-verifisert mot Atlassian sin egen dokumentasjon
+      // denne økten: /rest/api/3/search/jql krever en "bounded" JQL - en TOM streng
+      // gir eksplisitt 400 ("unbounded query"). z.string() alene tillater "" å bestå
+      // Zod-valideringen, som deretter sendte en tom/uendret query til Jira og fikk
+      // en forvirrende live 400 i stedet for en rask, lokal, forklarende avvisning -
+      // .min(1) lukker gapet FØR nettverkskallet i det hele tatt skjer.
       tool_id: "jira", action: "search_issues", description: "Søk etter issues med JQL (GET /rest/api/3/search/jql, gratis/sideeffekt-fritt, untrusted ingestion - den gamle /search-veien er HELT FJERNET fra Jira Cloud)",
-      input_schema: record({ jql: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      input_schema: record({ jql: z.string().min(1) }), capability_class: "A", scopes: ["tasks:read"],
       reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_JIRA_API_TOKEN",
       output_trust: "untrusted", transport: transport("jira")

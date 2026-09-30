@@ -1,19 +1,51 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-348: FUNN + FIKS
-(Gmail-sending manglet i den EKTE transporten).** Tobias, live via Charlie: "send en epost til
-henrik@ffskis.com å si hei det er jarvis" → `gmail_unsupported_action_send`. `tool_id: "email",
-action: "send"` var registrert (klasse D) og FULLT policy-testet, men KUN mot en `FakeTransport` -
-den ekte `GmailTransport` (wiret i `main.ts`) implementerte aldri selve `send`-casen. SAMME
-funnklasse som D-345 (deklarert kapabilitet uten fungerende utførelse), her for chat-mesh-siden.
-**Fikset:** `GmailTransport.send()` - `users.messages.send` med et base64url-kodet RFC 2822-`raw`-
-felt, Subject RFC 2047-kodes for norske tegn (æøå), body base64/76-tegns linjebrutt. 3 nye tester
-(`gmail-attachment-transport.test.ts`, 11/11 grønt). Se D-348 i DECISIONS_AND_ASSUMPTIONS.md.
+**Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-349: FIKS
+(Jira tom-JQL-400) + connector-sveip-funn etter Tobias sin fulle live-test av alle koblede
+connectorer via Charlie.** "sjekk jira" → 400 Bad Request. WebSearch-verifisert mot Atlassian sin
+egen dokumentasjon: `/rest/api/3/search/jql` krever en "bounded" JQL - en TOM streng gir 400.
+`z.string()` alene lot en tom streng bestå Zod-valideringen og nå frem til Jira sitt API i stedet
+for å bli avvist lokalt. **Fikset:** `z.string()` → `z.string().min(1)`. 1 ny test, 15/15 grønt.
+Se D-349 i DECISIONS_AND_ASSUMPTIONS.md.
 
-**Neste (umiddelbart):** commit/push/PR for D-348, merge under D-192 når CI er grønt. Deretter:
-NAS-redeploy (`api`/`worker`) plukker opp BÅDE D-347 (dashbord-auto-innrullering) og D-348
-(Gmail-sending) samtidig - Tobias kan da faktisk sende testen til henrik@ffskis.com på nytt via
-Charlie og bekrefte den fungerer live.
+**Refresh-token-/credential-status per Tobias sin brede live-sveip ("fikse refresh token på alle
+som trenger det"):**
+- **Fiken** (`invalid_grant`) - refresh-tokenet er FAKTISK ugyldig/tilbaketrukket hos Fiken, IKKE en
+  kodefeil (`fiken-oauth.ts`/`fiken-transport.ts` sin fornyelsesflyt typechecker rent og er uendret
+  siden D-107/D-241). Dette KREVER Tobias sin egen browser-interaktive handling - kan ikke
+  automatiseres fra denne økten. Eksisterende, uendret bootstrap-skript:
+  `node --env-file=.env --experimental-transform-types modules/finance/scripts/fiken-reauth.ts`
+  (kjøres på NAS-en, repo-rot, forutsetter `JARVIS_FIKEN_CLIENT_ID`/`_CLIENT_SECRET` allerede i
+  `.env`).
+- **Sentry** (403) - IKKE en refresh-token-arkitektur (statisk `JARVIS_SENTRY_API_TOKEN` sendt som
+  Bearer, ingen fornyelse finnes eller trengs for denne integrasjonstypen). 403 betyr tokenet
+  mangler org-tilgang/scope eller er ugyldig - krever Tobias genererer et nytt Internal Integration
+  Token i Sentry sitt UI og limer det inn i Infisical/.env. IKKE kodbart.
+- **Vipps/Wallester/Grafana/Prometheus/Docker(host)** - `credential_unavailable`/`ENOENT`: aldri
+  konfigurert i det hele tatt (Docker: selve binæren finnes ikke i miljøet Charlie kjører fra),
+  ikke en fornyelsesfeil av noe slag.
+- **Zapier** ("hjelp Zapier"): Q-40(b) er BEVISST fortsatt åpen (D-338) - `mcp_zapier.list_tools`
+  (discovery) fungerer, men live-invokering (`call_tool`) av et DYNAMISK oppdaget, tredjeparts-eid
+  MCP-verktøysett krever en eksplisitt godkjenningsmodell-beslutning FØR den kan kodes (statiske,
+  PR-reviderte `ToolDefinition`-lister forutsetter et FAST verktøysett - en MCP-server kan endre sin
+  egen liste når som helst utenfor Jarvis sin kontroll). IKKE kodet uten Tobias sitt eksplisitte
+  retningsvalg her - spurt direkte i chat denne økten.
+
+**Neste (umiddelbart):** commit/push/PR for D-349, merge under D-192 når CI er grønt. Vent på
+Tobias sitt svar på Zapier-godkjenningsmodellen. Fiken/Sentry venter på Tobias sin egen handling
+(reauth-skript / nytt token) - ingen videre kode mulig før det.
+
+**Forrige milepæl (uendret, MERGET under D-192): D-348 - Gmail-sending manglet i den EKTE
+transporten.** Tobias, live via Charlie: "send en epost til henrik@ffskis.com å si hei det er
+jarvis" → `gmail_unsupported_action_send`. `tool_id: "email", action: "send"` var registrert
+(klasse D) og FULLT policy-testet, men KUN mot en `FakeTransport` - den ekte `GmailTransport`
+(wiret i `main.ts`) implementerte aldri selve `send`-casen. SAMME funnklasse som D-345 (deklarert
+kapabilitet uten fungerende utførelse), her for chat-mesh-siden. **Fikset:** `GmailTransport.send()`
+- `users.messages.send` med et base64url-kodet RFC 2822-`raw`-felt, Subject RFC 2047-kodes for
+norske tegn (æøå), body base64/76-tegns linjebrutt. 3 nye tester (`gmail-attachment-transport.
+test.ts`, 11/11 grønt). Se D-348 i DECISIONS_AND_ASSUMPTIONS.md. **LIVE BEKREFTET** (Tobias sin
+egen test via Charlie, denne økten): e-post faktisk sendt til BÅDE henrik@ffskis.com og
+tobias.sg@icloud.com.
 
 **Forrige milepæl (uendret, MERGET PR #211/#212 under D-192): D-347 - dashbord-innrullering.** Mens
 Tobias forsøkte å visuelt bekrefte D-340/D-346 sin fiks i selve dashbordet
