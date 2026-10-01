@@ -12,6 +12,7 @@ export * from "./browser-transport.ts";
 export * from "./github-rate-limit-controller.ts";
 export * from "./scheduler.ts";
 export * from "./mesh-bridge.ts";
+export * from "./model-tool-surface.ts";
 export * from "./memory-transport.ts";
 export * from "./connector-registry.ts";
 export * from "./connector-health-sweep.ts";

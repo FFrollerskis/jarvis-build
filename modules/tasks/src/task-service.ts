@@ -93,6 +93,19 @@ export class TaskService {
     if (contract.tenant_id !== identity.tenant_id) {
       return { ok: false, reason: "tenant_mismatch" };
     }
+    // Remediering del 1 (JARVIS-001/010): executive-`command`-jobber (vilkårlig
+    // kommandokjøring i worker-containeren) er deaktivert - avvises FØR kø/policy.
+    const submittedData = contract.input.data as Record<string, unknown>;
+    if (contract.agent_profile === "executive" && submittedData["command"] !== undefined && submittedData["command"] !== null) {
+      await withTenantTransaction(this.pool, identity.tenant_id, (client) =>
+        writeAudit(client, identity, {
+          type: "task.rejected",
+          reason: "executive_command_disabled",
+          payload: { task_id: contract.task_id }
+        })
+      );
+      return { ok: false, reason: "executive_command_disabled" };
+    }
     const privateSpaces = ["personal", "health", "business", "project", "home"];
     if (
       contract.input.trust_level === "untrusted" &&

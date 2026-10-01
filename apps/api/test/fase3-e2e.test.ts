@@ -160,7 +160,8 @@ beforeAll(async () => {
     password: "test-superuser-pw",
     port,
     persistent: false
-  }),
+  })
+,
     // D-141 B: proben maa bruke instansens EGNE credentials.
     { identity: { user: "postgres", password: "test-superuser-pw", database: "postgres" } }
   );
@@ -246,7 +247,12 @@ beforeAll(async () => {
   gateway = new ModelGateway({
     pool: appPool,
     trace,
-    providers: [new FailingAdapter(), scripted] // beviser også fallback: failing → scripted
+    providers: [new FailingAdapter(), scripted], // beviser også fallback: failing → scripted
+    // Remediering del 1 (JARVIS-006): `scripted` er nå en eksplisitt LOCAL/0-provider i
+    // DEFAULT_PRICING (tidligere falt den til `default_rate` = fantomkostnad). Akseptanse 2
+    // beviser at en kostnad BLIR bokført og knyttet til session/task - til det trengs en
+    // eksplisitt, ikke-null test-sats (legacy `rates`-opsjonen vinner over pricing-tabellen).
+    rates: { scripted: { input_per_1k_ore: 30, output_per_1k_ore: 150 } }
   });
   const queue = new PgTaskQueue(appPool);
   worker = new InProcessWorker(queue);
@@ -268,6 +274,9 @@ beforeAll(async () => {
   const deviceService = new DeviceService(appPool);
   const grantService = new SessionGrantService(appPool);
   server = createApiServer({
+    // Remediering del 1: dev-rutene (/worker/tick, /tools/critical-demo) er av i produksjon;
+    // denne testen trenger dem eksplisitt.
+    enableDevRoutes: true,
     identity: identityService,
     sessions: sessionService,
     // D-130/D-131: `/chat` krever nå et ekte, enhetsbevist GRANT (ikke lenger

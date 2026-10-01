@@ -66,8 +66,21 @@ export interface AttentionQueueFilter {
   domain?: string;
 }
 
+export interface ExecutiveServiceOptions {
+  /**
+   * Remediering del 1: når satt, er DETTE (og ingenting annet) det modellen
+   * faktisk kan kalle. `getCapabilityStatus()` rapporterer da kun disse parene
+   * som `chat_accessible_tools` - aldri hele registeret (en falsk påstand om
+   * tilgjengelighet er selv en konfabulasjonskilde, jf. D-209).
+   */
+  modelSurface?: ReadonlyArray<{ readonly tool_id: string; readonly action: string }>;
+}
+
 export class ExecutiveService {
-  constructor(private readonly gateway: ToolGateway) {}
+  constructor(
+    private readonly gateway: ToolGateway,
+    private readonly options: ExecutiveServiceOptions = {}
+  ) {}
 
   /**
    * Henter (via `situations.get_queue`, ALDRI en egen spørring) + pause-/
@@ -311,7 +324,11 @@ export class ExecutiveService {
    */
   async getCapabilityStatus(servingModel?: { provider: string; model: string }): Promise<CapabilityStatus> {
     const byToolId = new Map<string, { actions: Set<string>; classes: Set<string>; refs: Set<string> }>();
-    for (const definition of this.gateway.list()) {
+    const surface = this.options.modelSurface;
+    const registered = this.gateway.list();
+    const allowed = surface ? new Set(surface.map((s) => `${s.tool_id}:${s.action}`)) : undefined;
+    for (const definition of registered) {
+      if (allowed && !allowed.has(`${definition.tool_id}:${definition.action}`)) continue;
       const entry = byToolId.get(definition.tool_id) ?? { actions: new Set(), classes: new Set(), refs: new Set() };
       entry.actions.add(definition.action);
       entry.classes.add(definition.capability_class);
@@ -344,7 +361,16 @@ export class ExecutiveService {
     return {
       chat_accessible_tools: chatAccessibleTools,
       connector_health: [...this.gateway.health.entries()].map(([tool_id, h]) => ({ tool_id, ...h })),
-      serving_model: servingModel ?? null
+      serving_model: servingModel ?? null,
+      ...(allowed
+        ? {
+            model_surface: {
+              restricted: true,
+              registered_actions: registered.length,
+              model_accessible_actions: registered.filter((d) => allowed.has(`${d.tool_id}:${d.action}`)).length
+            }
+          }
+        : {})
     };
   }
 

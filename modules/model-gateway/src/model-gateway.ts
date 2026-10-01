@@ -227,6 +227,11 @@ export class ModelGateway {
     return this.registry;
   }
 
+  /** Remediering del 1: ALLE konstruerte adapternavn (uansett `available()`), brukt av oppstartens eksplisitt-pris-sjekk. */
+  listProviderNames(): string[] {
+    return this.opts.providers.map((p) => p.name);
+  }
+
   /** D-106: providernavn med `available()===true` akkurat nå - AI Council/Collaboration bruker denne til å avgjøre kandidater/`unavailable_members` FØR kall gjøres. */
   listConfiguredProviders(): string[] {
     return this.opts.providers.filter((p) => p.available()).map((p) => p.name);

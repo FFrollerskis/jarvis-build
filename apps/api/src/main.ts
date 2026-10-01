@@ -22,12 +22,10 @@ import { InfraExecutionGate, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { DeploymentService, DiagnosisService, IncidentService } from "@jarvis/incidents";
 import {
   AiCouncil,
-  createSpecialistDelegationExecutor,
-  DELEGATE_CODE_TASK_TOOL_NAME,
+  assertProvidersHaveExplicitPricing,
+  DEFAULT_PRICING,
   ModelGateway,
-  SPECIALIST_DELEGATION_TOOLS,
-  traceSinkFromEnv,
-  type ToolExecutor
+  traceSinkFromEnv
 } from "@jarvis/model-gateway";
 import {
   AnthropicAdapter,
@@ -39,11 +37,7 @@ import {
   OllamaAdapter,
   OpenAiAdapter
 } from "@jarvis/provider-adapters";
-import { DockerSandboxRunner, InProcessWorker, PgTaskQueue, ProcessSandboxRunner, TaskService } from "@jarvis/tasks";
-import {
-  ResolvingSelfModificationGithubClient, SelfModificationService, SelfModificationTransport,
-  selfModificationToolDefinitions
-} from "@jarvis/self-modification";
+import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
 import {
   LlmExtractionAdapter,
   LocalHashEmbedding,
@@ -55,7 +49,7 @@ import {
 import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
-  allMeshTools, PgGithubRateLimitStore,
+  MODEL_SURFACE_ALLOWLIST, resolveModelToolSurface, PgGithubRateLimitStore,
   TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
@@ -247,6 +241,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       spend_approved: process.env["JARVIS_BUDGET_APPROVED"] === "true"
     }
   });
+  // JARVIS-006: hver konstruert adapter MÅ ha eksplisitt pris - ingen stille `default_rate`.
+  assertProvidersHaveExplicitPricing(DEFAULT_PRICING, gateway.listProviderNames());
   // D-106 (AI Mesh Council/Collaboration/lokal-Gemma-utvidelse): egen
   // orkestrering over SAMME `gateway`/`pool` - ingen ny modellkall-vei, ingen
   // ny sikkerhetsvei (hvert Council-medlemsanrop går via `gateway.complete()`
@@ -555,60 +551,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         parameters: { message: text.slice(i, i + 3900) } });
     }
   };
-  // Task #121 (D-214): to-lags selvendrings-modell. SAMME sandbox-valg-
-  // mønster som worker-main.ts sin egen "coding"-jobbregistrering
-  // (JARVIS_SANDBOX=docker|process) - api-prosessen får sin EGEN
-  // `SandboxRunner`-instans (egen prosess, ingen delt tilstand med workeren).
-  // `resolveGitToken` gjenbruker `readSecretProvider` (SAMME Infisical-
-  // primær/.env-fallback-kjede som resten av denne filen, D-211) - ALDRI en
-  // ny, parallell secret-vei. `prGateway: toolGateway` gjenbruker DEN SAMME
-  // instansen som resten av verktøyene i denne filen (duck-typed mot
-  // `PrPublishingGateway`, se pr-publisher.ts sitt filhode) - PR-opprettelse
-  // går derfor uendret via `github.create_pr` (klasse C); selve automergen
-  // (klasse B, se github-client.ts) bruker en HELT EGEN, smalere HTTP-vei,
-  // ALDRI `github.merge_pr` (klasse D).
-  const selfModificationSandbox =
-    process.env["JARVIS_SANDBOX"] === "docker" ? new DockerSandboxRunner() : new ProcessSandboxRunner();
-  const selfModificationService = new SelfModificationService({
-    pool,
-    sandbox: selfModificationSandbox,
-    resolveGitToken: () => readSecretProvider.get("JARVIS_GITHUB_TOKEN"),
-    githubClient: new ResolvingSelfModificationGithubClient(() => readSecretProvider.get("JARVIS_GITHUB_TOKEN")),
-    prGateway: toolGateway,
-    ownerPersonId: ownerControlAuthority.owner_person_id,
-    taskService,
-    notify: sendTelegram
-  });
-  // Sveiper periodisk (samme uref'et setInterval-mønster som
-  // `deviceRegistry.refresh()` over) - CI tar typisk minutter, 60s er en
-  // fornuftig balanse mellom rask auto-merge og unødig GitHub-API-trafikk.
-  // Task #123 (D-214): to nye, UAVHENGIG try/catch'ede sveiper ved siden av
-  // den eksisterende zero-review-portvakten - `sweepPendingJobs()` følger opp
-  // `proposeCodeChange()` sine asynkrone kodejobber, `sweepApprovedRequests()`
-  // merger en `/godkjenn`-godkjent `requires_approval`-rad. Én sveips feil
-  // (uansett hvilken) stjeler ALDRI de to andre - SAMME isolasjonsdisiplin
-  // som selve tjenesten allerede har per-rad internt.
-  setInterval(
-    () =>
-      void selfModificationService
-        .sweepPendingRequests()
-        .catch((err) => console.error(JSON.stringify({ msg: "self_modification_sweep_error", error: (err as Error).message }))),
-    60_000
-  ).unref();
-  setInterval(
-    () =>
-      void selfModificationService
-        .sweepPendingJobs()
-        .catch((err) => console.error(JSON.stringify({ msg: "self_modification_job_sweep_error", error: (err as Error).message }))),
-    60_000
-  ).unref();
-  setInterval(
-    () =>
-      void selfModificationService
-        .sweepApprovedRequests()
-        .catch((err) => console.error(JSON.stringify({ msg: "self_modification_approved_sweep_error", error: (err as Error).message }))),
-    60_000
-  ).unref();
+  // REMEDIERING DEL 1 (JARVIS-042/043): selvmodifikasjon er FRYST inntil
+  // remedieringsdel 9 (SHA-bundet godkjenning, kill-switch-/freeze-respekt,
+  // audit). `SelfModificationService` konstrueres IKKE, de tre 60-sekunders-
+  // sveipene (`sweepPendingRequests`/`sweepPendingJobs`/`sweepApprovedRequests`)
+  // startes IKKE, `self_modification.*` registreres IKKE i ToolGateway og
+  // Telegram-kommandoene `/godkjenn`/`/avvis` har ingen handler. Modulen
+  // `@jarvis/self-modification` ligger urørt og dormant i repoet.
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(githubRateLimitController),
@@ -879,7 +828,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // `situations`/`executive`, ingen parallell registreringsvei.
     additionalTools: [
       ...situationsToolDefinitions(new SituationsTransport(situationEngine, situationDomainPauses)),
-      ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway))),
+      ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, { modelSurface: MODEL_SURFACE_ALLOWLIST }))),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten
       // av eier-autoritets-/session-grant-mønstrene i denne filen - IKKE en ny,
@@ -902,26 +851,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // SAMME `memoryRetriever`-instansen `conversationEngine` under gjenbruker
       // for bakgrunnskontekst - se `memoryRetriever` sin egen filhode-kommentar
       // lenger opp for hvorfor den ble hevet ut hit.
-      ...memoryToolDefinitions(new MemorySearchTransport(memoryRetriever)),
-      // Task #121 (D-214): `self_modification.propose_personality_change` -
-      // DEN SAMME `selfModificationService`-instansen konstruert over
-      // (delt med den periodiske sveipen og Telegram-godkjenningsbroen
-      // lenger ned) - kun ÉN chat-kallbar handling i denne sliceen (se
-      // transport.ts sitt filhode for hvorfor merge/godkjenning BEVISST
-      // ikke er chat-kallbare).
-      ...selfModificationToolDefinitions(new SelfModificationTransport(selfModificationService))
+      ...memoryToolDefinitions(new MemorySearchTransport(memoryRetriever))
     ]
   })) toolGateway.register(tool);
-  // D-289 (Tobias direkte i chat: "vil ha alt at han har full kontroll" -
-  // retningsvalg på D-288): beregnet ÉN gang, RETT ETTER at hele
-  // registreringsløkken over er ferdig (samtlige `tool_id`-er - inkl.
-  // situations/executive/owner_controls/governance/memory/self_modification
-  // - er FAKTISK registrert i akkurat dette punktet, se løkken over) -
-  // ALDRI per samtaletur. Gjenbrukt UENDRET av BÅDE `conversationEngine`
-  // sine `tools` (samtale-/tale-flaten, se under) OG `executive`-worker-
-  // jobbhandleren (BO-11.1 §9, se lenger ned) - SAMME liste, ALDRI to
-  // potensielt avvikende kopier av "hva Charlie/executive-jobber kan kalle".
-  const fullMeshTools = allMeshTools(toolGateway);
+  // REMEDIERING DEL 1 (JARVIS-002): `allMeshTools()` (hele registeret) er IKKE
+  // lenger koblet til noen aktiv flate. Chat, tale, Telegram og executive-jobber
+  // får KUN det eksplisitte lese-minimumssettet (`MODEL_SURFACE_ALLOWLIST`);
+  // oppstarten feiler lukket hvis noe i flaten ikke er klasse A / ren lesing.
+  const modelToolSurface = resolveModelToolSurface(toolGateway);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
   // registrert med Gmail/Calendar over) - ingen ny transport-vei.
   const businessEventSyncService = new BusinessEventSyncService(toolGateway, businessService, openLoopService);
@@ -944,9 +881,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     executiveHandler({
       gateway,
       tools: {
-        definitions: fullMeshTools.map((t) => t.def),
+        definitions: modelToolSurface.map((t) => t.def),
         // D-351: 4000 → 20_000 (se mesh-bridge.ts sitt filhode for host-målt begrunnelse).
-        executor: new MeshToolExecutor(toolGateway, ownerIdentity, 20_000, fullMeshTools)
+        executor: new MeshToolExecutor(toolGateway, ownerIdentity, 20_000, modelToolSurface)
       }
     })
   );
@@ -1010,38 +947,18 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         memoryWriter.ingestText(identity, { kind: "conversation", ref: identity.session_id, trust: "trusted" }, text)
     },
     council: aiCouncil,
-    // D-30 live-funn: samtalebanen (tekst + voice via /chat) får mesh-verktøyene.
-    // Executor bindes til samtalens RESOLVED identity - aldri ownerIdentity -
-    // slik at tenant/delegation/authority følger den som faktisk snakker.
-    // D-289 ("vil ha alt at han har full kontroll"): `fullMeshTools` (ALLE
-    // registrerte tool_id:action-par), ikke lenger de 5 kuraterte
-    // `MESH_TOOLS` - se `fullMeshTools` sitt filhode over for hvorfor ingen
-    // ny godkjenningssperre er lagt til (D-41: sovereign owner-modus for
-    // klasse D er uendret).
-    // D-354/D-355 ("gemma skal være standar for tekst og tale ... ved
-    // større forespørsler kode endringer ... skal den spinne opp agenter
-    // ... kommer tilbake til gemma med svaret"): `SPECIALIST_DELEGATION_TOOLS`
-    // (`delegate_code_task`) lagt til SISTE, PÅ SIDEN AV de ~56 mesh-
-    // verktøyene - samme "legg til på slutten"-disiplin som hver ny mesh-
-    // connector i D-297+ har fulgt. Bilde-generering trenger INGEN ny
-    // delegerings-vei - `openai_images.generate_image` er allerede et
-    // ordinært mesh-verktøy i `fullMeshTools`.
+    // D-30 live-funn: samtalebanen (tekst + voice via /chat) har verktøykall.
+    // REMEDIERING DEL 1 (JARVIS-002/JARVIS-035): kun det eksplisitte lese-
+    // minimumssettet. `delegate_code_task` (nøstet sky-kall med hardkodet
+    // PUBLIC-sensitivitet som omgår `paid_models_allowed`/policy, D-354/D-355)
+    // er FRYST av flaten inntil en senere remedieringsfase har gjort
+    // delegeringen policy-/budsjettstyrt. Executor bindes til samtalens
+    // RESOLVED identity (aldri ownerIdentity) - autorisasjon/D-pipeline/audit
+    // håndheves uendret per kall i ToolGateway.
     tools: {
-      definitions: [...fullMeshTools.map((t) => t.def), ...SPECIALIST_DELEGATION_TOOLS],
+      definitions: modelToolSurface.map((t) => t.def),
       // D-351: 4000 → 20_000 (se mesh-bridge.ts sitt filhode for host-målt begrunnelse).
-      // D-355: komposisjon - `delegate_code_task` prøves FØRST (ukjent navn
-      // for MeshToolExecutor ville uansett returnert TOOL_NOT_FOUND, men
-      // eksplisitt navnesjekk her er tydeligere enn å stole på fallthrough).
-      executorFor: (identity): ToolExecutor => {
-        const meshExecutor = new MeshToolExecutor(toolGateway, identity, 20_000, fullMeshTools);
-        const delegationExecutor = createSpecialistDelegationExecutor(gateway);
-        return {
-          execute: (call, ctx) =>
-            call.tool_name === DELEGATE_CODE_TASK_TOOL_NAME
-              ? delegationExecutor.execute(call, ctx)
-              : meshExecutor.execute(call, ctx)
-        };
-      }
+      executorFor: (identity) => new MeshToolExecutor(toolGateway, identity, 20_000, modelToolSurface)
     },
     // Task #121 (D-214): kosmetisk personlighetslag, se conversation.ts sin
     // `buildSystemPrompt()`/`loadPersonality()`.
@@ -1191,34 +1108,8 @@ porter: se docs/RUNTIME_GATES.md`;
         // 3. SAMME motor som /chat, bundet til den OPPLØSTE identiteten.
         const result = await conversationEngine.handle(authorized.identity, text);
         return result.reply;
-      },
-      // Task #121 (D-214): `requires_approval`-sporets raske "one-tap"
-      // eier-godkjenning. `poll()` har ALLEREDE fail-closed avvist enhver
-      // ikke-eier-chat FØR `dispatch()` i det hele tatt nås (§C3 i
-      // d125-telegram-inbound-wiring.test.ts) - `actorPersonId` er derfor
-      // TRYGT den konfigurerte eier-identiteten, ALDRI noe fra selve
-      // meldingsteksten (SAMME `JARVIS_OWNER_PERSON_ID ?? "person-tobias"`-
-      // uttrykk som `telegramOwnerAuthority`/`seedOwner()` over).
-      approveSelfMod: async (requestId) => {
-        try {
-          const updated = await selfModificationService.resolveApproval(
-            requestId, "approved", process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias"
-          );
-          return `Godkjent: ${updated.request_id} (${updated.kind}) - status=${updated.status}`;
-        } catch (err) {
-          return `Kunne ikke godkjenne ${requestId}: ${err instanceof Error ? err.message : "ukjent feil"}`;
-        }
-      },
-      rejectSelfMod: async (requestId) => {
-        try {
-          const updated = await selfModificationService.resolveApproval(
-            requestId, "rejected", process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias"
-          );
-          return `Avvist: ${updated.request_id} (${updated.kind}) - status=${updated.status}`;
-        } catch (err) {
-          return `Kunne ikke avvise ${requestId}: ${err instanceof Error ? err.message : "ukjent feil"}`;
-        }
       }
+      // REMEDIERING DEL 1: `/godkjenn`/`/avvis` (selvmodifikasjon) har ingen handler - frosset (JARVIS-042/043).
     }, sendTelegram).start();
     // BO-05: reboot-durabel morgenlevering (DB-laas, Europe/Oslo, catch-up, aldri duplikat).
     // Bruker DailyBrief.deliverViaTelegram() (ikke den generiske sendTelegram-

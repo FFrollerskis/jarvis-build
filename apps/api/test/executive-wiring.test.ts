@@ -20,17 +20,21 @@ describe("A: apps/api/src/main.ts komponerer executiveToolDefinitions() INNI SAM
   it("importerer ExecutiveService/ExecutiveTransport/executiveToolDefinitions fra @jarvis/executive", () => {
     expect(mainSource).toMatch(/import\s*\{[^}]*ExecutiveService[^}]*ExecutiveTransport[^}]*executiveToolDefinitions[^}]*\}\s*from\s*"@jarvis\/executive"/s);
   });
-  it("kaller executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway))) INNI additionalTools - IKKE et separat, parallelt registreringssted", () => {
+  it("kaller executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, { modelSurface }))) INNI additionalTools - IKKE et separat, parallelt registreringssted", () => {
     const callIdx = mainSource.indexOf("firstWaveTools({");
     expect(callIdx).toBeGreaterThan(-1);
     const callBlock = mainSource.slice(callIdx, mainSource.indexOf("})) toolGateway.register(tool);", callIdx));
     expect(callBlock).toContain("additionalTools: [");
     expect(callBlock).toContain("...situationsToolDefinitions(new SituationsTransport(situationEngine, situationDomainPauses))");
-    expect(callBlock).toContain("...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway)))");
+    // Remediering del 1: ExecutiveService får den eksplisitte modellflaten, slik at
+    // `check_my_capabilities` aldri påstår at hele registeret er tilgjengelig for modellen.
+    expect(callBlock).toContain(
+      "...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, { modelSurface: MODEL_SURFACE_ALLOWLIST })))"
+    );
   });
   it("ExecutiveService konstrueres med DEN SAMME toolGateway-instansen (nøstet gateway.execute(), aldri situationEngine/situationDomainPauses direkte)", () => {
     expect(mainSource).not.toMatch(/new ExecutiveService\(\s*situationEngine/);
-    expect(mainSource).toContain("new ExecutiveService(toolGateway)");
+    expect(mainSource).toContain("new ExecutiveService(toolGateway, { modelSurface: MODEL_SURFACE_ALLOWLIST })");
   });
 });
 

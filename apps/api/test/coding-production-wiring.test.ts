@@ -164,6 +164,9 @@ beforeAll(async () => {
   const deviceService = new DeviceService(appPool);
   const grantService = new SessionGrantService(appPool);
   server = createApiServer({
+    // Remediering del 1: dev-rutene (/worker/tick, /tools/critical-demo) er av i produksjon;
+    // denne testen trenger dem eksplisitt.
+    enableDevRoutes: true,
     identity: identityService,
     sessions: sessionService,
     // D-130/D-131: `ApiDeps.channelAuthority` og `ApiDeps.grants` er nå
