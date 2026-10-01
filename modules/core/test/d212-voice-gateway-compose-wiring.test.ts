@@ -50,7 +50,11 @@ describe("D-212: voice-gateway-tjenesten finnes i infra/local/docker-compose.yml
   });
 
   it("porter mappes via JARVIS_VOICE_PORT (default 3020), samme variabel som apps/voice-gateway/src/main.ts leser", () => {
-    expect(block).toMatch(/"\$\{JARVIS_VOICE_PORT:-3020\}:\$\{JARVIS_VOICE_PORT:-3020\}"/);
+    expect(block).toMatch(/\$\{JARVIS_VOICE_PORT:-3020\}:\$\{JARVIS_VOICE_PORT:-3020\}/);
+  });
+
+  it("D-362 (live NAS-funn: host-portpublisering kolliderte med Tailscale Serve, som allerede lyttet på nøyaktig samme port): bundet til KUN loopback (127.0.0.1), ikke alle grensesnitt", () => {
+    expect(block).toMatch(/"127\.0\.0\.1:\$\{JARVIS_VOICE_PORT:-3020\}:\$\{JARVIS_VOICE_PORT:-3020\}"/);
   });
 
   it("har helsesjekk mot /health, samme mønster som api-tjenesten", () => {
