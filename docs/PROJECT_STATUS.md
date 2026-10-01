@@ -1,5 +1,20 @@
 # PROJECT STATUS
 
+**Oppdatert 2026-10-01 - D-361 (BYGGET + EKTE HOST-VERIFISERT): samlet kommandosentral, del 2 av 2 ("Hermes + Honcho + sinnsyk interface"-ordren).**
+`apps/web/command.html` - et nytt HUD-skall som viser de tre allerede-hardnede sidene (nå `/chat`,
+uendret `/voice`/`/dashboard`) som samme-origin iframes bak en fane-bar, IKKE en omskrivning av deres
+egen Ed25519-/lyd-/SSE-logikk. `GET /` serverer skallet nå (chat-siden flyttet til `/chat`). Visuelt
+gjenbruker dashboard.html sin D-239-HUD-palett, utvidet med arc-reactor-logo/glødende faner/
+hjørnerammer ("iron vibes"). Fant og fikset FØR commit: Oversikt-fanen stod fast på "Laster ..." etter
+innrullering via Samtale-fanen (alle tre iframes monteres samtidig, FØR enhetsnøkkelen fantes) -
+`pendingReload`-flagg tvinger en reload av den fanen FØRSTE gang brukeren faktisk bytter til den.
+**Ekte host-verifisert** (system-Postgres fra D-358, alle 62 migrasjoner, en ekte `main.ts`-serverprosess
+på port 3010, en ekte enrollment-billett, det pre-installerte Chromium via Playwright): full
+ende-til-ende-flyt bevist i en EKTE nettleser - auto-innrullering, deretter ekte autoriserte
+dashbord-data (ikke "Laster ...") i Oversikt, Tale-fanen rendret korrekt. Skjermbilder sendt til
+Tobias. Ny `apps/api/test/d361-command-center-wiring.test.ts` (16 tester) + eksisterende 42 relaterte
+wiring-tester - alle grønne. `tsc`/`eslint` rene. Se D-361 i DECISIONS_AND_ASSUMPTIONS.md.
+
 **Oppdatert 2026-10-01 - D-359 (STOPPET, krever Tobias-retning) + D-360 (BYGGET): "Hermes + Honcho + sinnsyk interface"-ordre, del 1 av 2.**
 Tobias ba direkte i chat om tre ting: (1) "hermes" (avklart: NousResearch-modellfamilien) integrert i
 ModelGateway, (2) Honcho sjekket for minne ("reell integrasjonsvurdering (D-64-gate)", hans eget svar
