@@ -253,8 +253,24 @@ services:
       # usatt - ingenting skriver dit) - se `debug-audio-dump.ts` (D-279).
       # `.gitignore`-ført slik at et dumpet klipp aldri kan havne i git.
       - ./voice-debug-dumps:/voice-debug
+    # D-362 (Tobias direkte i chat, live NAS-funn under D-361-redeploy:
+    # "failed to bind host port 0.0.0.0:3020/tcp: address already in use").
+    # Root cause: `JARVIS_PUBLIC_VOICE_BASE_URL` (se .env.example) betyr
+    # Tailscale Serve/Funnel ALLEREDE lytter PÅ TAILSCALE-GRENSESNITTET sin
+    # egen 3020-port og reverse-proxyer inn til denne containeren - en
+    # ubundet `3020:3020`-publisering (implisitt `0.0.0.0`, ALLE grensesnitt)
+    # kolliderer derfor med Tailscale sin egen lytter på NØYAKTIG samme port.
+    # Bundet til KUN loopback her: Tailscale Serve forwarder uansett til
+    # `localhost:3020` (ALDRI den rå LAN-/WAN-adressen), så dette endrer
+    # INGEN faktisk nåbarhet for Tobias sin reelle bruk - det fjerner KUN en
+    # unødvendig, bredere eksponering enn det som faktisk trengs (samme
+    # "lokal først, ALDRI direkte til internett uten Tailscale" prinsipp som
+    # regel 9). Container-til-container-kall (ingen finnes i dag for denne
+    # porten - `JARVIS_CORE_URL` over går motsatt vei, api->voice-gateway
+    # finnes ikke) ville uansett brukt tjenestenavnet `voice-gateway:3020`
+    # over det interne Docker-nettverket, aldri denne host-publiseringen.
     ports:
-      - "${JARVIS_VOICE_PORT:-3020}:${JARVIS_VOICE_PORT:-3020}"
+      - "127.0.0.1:${JARVIS_VOICE_PORT:-3020}:${JARVIS_VOICE_PORT:-3020}"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${JARVIS_VOICE_PORT:-3020}/health >/dev/null"]
       interval: 10s
