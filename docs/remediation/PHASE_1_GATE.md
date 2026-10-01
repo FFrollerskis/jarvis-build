@@ -4,7 +4,7 @@
 |---|---|
 | Dato | 2026-10-01 |
 | Branch | `remediation/01-containment-baseline` (utgangspunkt: `main` @ `9706af0`, audit av `35075a2`) |
-| PR | draft, **IKKE merget** (se `FINDINGS_LEDGER.md`) |
+| PR | draft, **IKKE merget** (#218) |
 | Beslutning | D-363 · ADR-001 · Q-43 |
 | Uavhengig review | **IKKE gjort.** Denne filen er Claude sin egen evidens, ikke en uavhengig godkjenning. |
 
