@@ -34,6 +34,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { buildSpawnInvocation, readPinnedPackageManager, resolvePackageManager } from "../../core/scripts/lib/package-manager-resolve.ts";
+import { requireProductionMutationConsent } from "../../core/scripts/lib/production-mutation-guard.ts";
+
+// Remediering del 1 (JARVIS-086): mutates the live stack - refuses without explicit consent.
+requireProductionMutationConsent("d174-executive-control-surface-host-run.ts");
 
 const repoRoot = process.cwd();
 

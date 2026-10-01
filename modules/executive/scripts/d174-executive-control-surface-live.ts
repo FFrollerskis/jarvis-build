@@ -58,6 +58,10 @@ import {
 } from "@jarvis/finance";
 import { ExecutiveService } from "../src/service.ts";
 import { ExecutiveTransport, executiveToolDefinitions } from "../src/transport.ts";
+import { requireProductionMutationConsent } from "../../core/scripts/lib/production-mutation-guard.ts";
+
+// Remediering del 1 (JARVIS-086): mutates the live stack - refuses without explicit consent.
+requireProductionMutationConsent("d174-executive-control-surface-live.ts");
 
 type Verdict = "PASS" | "FAIL" | "BLOCKED_BY_RUNTIME_ROLE";
 

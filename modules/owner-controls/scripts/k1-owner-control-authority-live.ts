@@ -88,6 +88,10 @@ import { OwnerControlsService } from "../src/service.ts";
 import { OwnerControlsTransport, ownerControlsToolDefinitions } from "../src/transport.ts";
 import type { OwnerControlState } from "../src/types.ts";
 import type { IdentityContext } from "@jarvis/contracts";
+import { requireProductionMutationConsent } from "../../core/scripts/lib/production-mutation-guard.ts";
+
+// Remediering del 1 (JARVIS-086): mutates the live stack - refuses without explicit consent.
+requireProductionMutationConsent("k1-owner-control-authority-live.ts");
 
 type Verdict = "PASS" | "FAIL" | "BLOCKED_BY_RUNTIME_ROLE";
 
