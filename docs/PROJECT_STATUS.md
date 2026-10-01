@@ -1,11 +1,16 @@
 # PROJECT STATUS
 
+**Oppdatert 2026-10-01 - D-359a: Honcho AVVIST (Tobias direkte i chat: "ja dropp det").** Honcho er
+IKKE integrert - ingen kode/avhengighet/skjema lagt til noe sted. Jarvis sitt eget minnesystem
+(D-357/D-358) dekker behovet; en ekstern tjeneste ville enten kostet penger (cloud) eller lagt til ny
+driftskompleksitet (selvhostet) for en kapabilitet ingen konkret funksjon er bedt om. Se D-359a i
+DECISIONS_AND_ASSUMPTIONS.md. Alle tre delene av "Hermes + Honcho + sinnsyk interface"-ordren er nå
+ferdig behandlet: D-358/D-360/D-361 merget, D-359 avklart/lukket.
+
 **MERGET under D-192 (2026-10-01, commit `e133eb1`):** PR #216 (D-358/D-360/D-361) - Tobias direkte i
 chat: "merge PR #216". CI grønt på HEAD `4f917d7`, ingen åpne review-tråder, to-forelder
-`merge_method=merge`. Branch resatt til `origin/main` per konvensjon. **D-359 (Honcho) er FORTSATT
-uløst** - ingen kode ble lagt til, venter fortsatt på Tobias sitt retningsvalg (se D-359 i
-DECISIONS_AND_ASSUMPTIONS.md), uendret av denne mergingen. **IKKE live-testet av Tobias på NAS-en
-ennå** for noen av D-358/D-360/D-361 - neste anbefalte steg er hans egen redeploy + faktisk bruk
+`merge_method=merge`. Branch resatt til `origin/main` per konvensjon. **IKKE live-testet av Tobias på
+NAS-en ennå** for noen av D-358/D-360/D-361 - neste anbefalte steg er hans egen redeploy + faktisk bruk
 (spesielt D-361s samlede `/`-flate og D-360s Hermes-nøkkel).
 
 **Oppdatert 2026-10-01 - D-361 (BYGGET + EKTE HOST-VERIFISERT): samlet kommandosentral, del 2 av 2 ("Hermes + Honcho + sinnsyk interface"-ordren).**
