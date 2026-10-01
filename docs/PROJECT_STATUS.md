@@ -1,5 +1,26 @@
 # PROJECT STATUS
 
+**Oppdatert 2026-10-01 - D-359 (STOPPET, krever Tobias-retning) + D-360 (BYGGET): "Hermes + Honcho + sinnsyk interface"-ordre, del 1 av 2.**
+Tobias ba direkte i chat om tre ting: (1) "hermes" (avklart: NousResearch-modellfamilien) integrert i
+ModelGateway, (2) Honcho sjekket for minne ("reell integrasjonsvurdering (D-64-gate)", hans eget svar
+på et oppklaringsspørsmål), (3) en samlet, "sinnsyk" command-center-flate (chat+tale+dashboard ett
+sted, "iron vibes"). **D-359 (Honcho): D-64-porten kjørt, konkluderte `CORE_DEPENDENCY_DECISION_
+REQUIRED=true`** - "minne/theory-of-mind om personer" er ordrett et JARVIS_CANONICAL-eksempel i D-64s
+egen tekst, og Jarvis har ALLEREDE et fullstendig egenbygget sovereign minnedomene (D-357/D-358,
+FERDIGSTILT i samme økt). Portvurderingen stopper derfor der D-64 sier den skal - INGEN Honcho-kode
+lagt til, venter på Tobias sitt retningsvalg (avvis / kun sidestilt read-only adapter / annet). Se
+D-359 i DECISIONS_AND_ASSUMPTIONS.md. **D-360 (Hermes): BYGGET og testet.** `HermesAdapter`
+(`packages/provider-adapters/src/hermes.ts`) - OpenAI-kompatibelt mønster identisk med Kimi,
+base-URL/modell-ID (`Hermes-4-70B`) WebSearch-verifisert mot to uavhengige kilder (D-41-disiplin,
+ingen live Nous-nøkkel/nettverkstilgang i denne sandkassen - `HERMES_LIVE_GATE=PENDING_CREDENTIALS`).
+Wiret inn overalt (capability-registry/override-parser/pricing/main.ts/worker-main.ts/.env.example).
+**Bevisst IKKE** lagt til AI Councilets automatiske default-medlemskap - et første forsøk ble reversert
+etter at en full testkjøring viste det ville brutt eksisterende `council.test.ts`-eksakthetssjekker
+(samme bug-klasse som D-310a). 378 testet bestått/3 hoppet over (kun den forhåndseksisterende embedded-
+Postgres-sandkasse-begrensningen feilet, uberørt). `tsc`/`eslint` rene på provider-adapters/model-
+gateway/api. Se D-360 i DECISIONS_AND_ASSUMPTIONS.md. **Del 2 (det samlede interfacet) gjenstår** -
+neste steg i denne økten.
+
 **Oppdatert 2026-10-01 - D-358: FIKSET (Tobias direkte i chat: "Først fiks ferdig resten av minne").**
 Ferdigstiller D-357s eneste gjenstående "funnet, ikke fikset"-punkt: GDPR-erasure kastet for enhver
 person med en versjonert minnerad (`memory_versions` sin `forbid_mutation()`-trigger blokkerte

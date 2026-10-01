@@ -188,6 +188,25 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
     latency_class: "medium"
   },
   {
+    // D-360 (Tobias direkte i chat: "hermes" - NousResearch-modellfamilien,
+    // ikke Hermes Agent-rammeverket): `"Hermes-4-70B"`, 131 072 tokens
+    // kontekst, tool-calling/JSON-modus/schema-adherence - alt WebSearch-
+    // verifisert mot Nous sin egen `hermes-agent`-repo-dokumentasjon OG
+    // uavhengige tredjeparts-prisoversikter (ingen nettverkstilgang til
+    // `inference-api.nousresearch.com` selv i denne sandkassen - samme
+    // forbehold som D-106s Gemini-prisoppdatering). `quality_class` konservativ
+    // (sammenlignbar med Kimi - ingen ekte sammenlignende evaluering kjørt
+    // denne økten) inntil faktisk bruk/evaluering foreligger.
+    provider: "hermes",
+    model: "Hermes-4-70B",
+    capabilities: ["text", "reasoning", "tool_calling", "structured_output"],
+    context_tokens: 131_072,
+    locality: "cloud",
+    cost_class: 1,
+    quality_class: 4,
+    latency_class: "medium"
+  },
+  {
     provider: "ollama",
     model: "llama3.1",
     capabilities: ["text", "structured_output"],

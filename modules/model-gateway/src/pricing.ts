@@ -63,6 +63,18 @@ export const DEFAULT_PRICING: PricingTable = {
       pricing_verified_at: "2026-08-23"
     },
     kimi: { input_per_1k_ore: 0.7, output_per_1k_ore: 3.2 },
+    // D-360: Nous Portal sin offisielle $/1M-token-rate for Hermes-4-70B
+    // ($0.093 input / $0.373 output) - WebSearch-verifisert (pricepertoken.com),
+    // direkte WebFetch mot nousresearch.com-domener var nettverks-blokkert i
+    // denne sandkassen (samme forbehold-mønster som D-106s Gemini-oppdatering
+    // over). Konvertert med filens egen ca. 10,5 kr/USD: $0.000093/1k*10.5≈
+    // 0.098 øre input, $0.000373/1k*10.5≈0.392 øre output.
+    hermes: {
+      input_per_1k_ore: 0.1,
+      output_per_1k_ore: 0.39,
+      pricing_mode: "PAID",
+      pricing_verified_at: "2026-10-01"
+    },
     ollama: { input_per_1k_ore: 0, output_per_1k_ore: 0, pricing_mode: "LOCAL" },
     // D-80/D-81: hostet Gemma sin default-modell er gratis-tier (0 øre) PER
     // 2026-08-19 (bekreftet via WebSearch mot Google sin offisielle Gemini

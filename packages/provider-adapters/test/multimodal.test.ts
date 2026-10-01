@@ -3,6 +3,7 @@ import {
   AnthropicAdapter,
   GemmaHostedAdapter,
   GeminiAdapter,
+  HermesAdapter,
   KimiAdapter,
   LocalOpenAiCompatibleAdapter,
   OllamaAdapter,
@@ -159,6 +160,14 @@ describe("Ikke-vision-adaptere degraderer ContentPart[] TRYGT til tekst - ALDRI 
 
   it("I: KimiAdapter sender textOnly() - streng, ikke array", async () => {
     const adapter = new KimiAdapter("test-key", "test-model", "http://mock");
+    await adapter.complete({ messages: [MULTIMODAL_MESSAGE] });
+    const messages = capturedBody?.["messages"] as Array<{ role: string; content: unknown }>;
+    const userMsg = messages.find((m) => m.role === "user");
+    expect(typeof userMsg?.content).toBe("string");
+  });
+
+  it("I2 (D-360): HermesAdapter sender textOnly() - streng, ikke array", async () => {
+    const adapter = new HermesAdapter("test-key", "test-model", "http://mock");
     await adapter.complete({ messages: [MULTIMODAL_MESSAGE] });
     const messages = capturedBody?.["messages"] as Array<{ role: string; content: unknown }>;
     const userMsg = messages.find((m) => m.role === "user");

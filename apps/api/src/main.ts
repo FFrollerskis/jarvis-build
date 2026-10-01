@@ -33,6 +33,7 @@ import {
   AnthropicAdapter,
   GemmaHostedAdapter,
   GeminiAdapter,
+  HermesAdapter,
   KimiAdapter,
   LocalOpenAiCompatibleAdapter,
   OllamaAdapter,
@@ -224,6 +225,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         "gemma_local"
       ),
       new KimiAdapter(),
+      new HermesAdapter(),
       new OllamaAdapter()
       // D-106 HOST-FIX (produksjonsherding, Defekt E): `ScriptedAdapter` er ALDRI
       // registrert her lenger - live host-kjøring viste at den, som en ordinær

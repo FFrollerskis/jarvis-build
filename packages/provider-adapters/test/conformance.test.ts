@@ -3,6 +3,7 @@ import {
   AnthropicAdapter,
   GemmaHostedAdapter,
   GeminiAdapter,
+  HermesAdapter,
   KimiAdapter,
   LocalOpenAiCompatibleAdapter,
   normalizeLocalLlmBaseUrl,
@@ -58,6 +59,15 @@ const CASES: Case[] = [
   {
     name: "kimi",
     make: () => new KimiAdapter("test-key", "test-model", "http://mock"),
+    successBody: {
+      choices: [{ message: { content: "hei" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 10, completion_tokens: 5 }
+    }
+  },
+  {
+    // D-360: Hermes (NousResearch) - samme OpenAI-kompatible chat/completions-form som Kimi.
+    name: "hermes",
+    make: () => new HermesAdapter("test-key", "test-model", "http://mock"),
     successBody: {
       choices: [{ message: { content: "hei" }, finish_reason: "stop" }],
       usage: { prompt_tokens: 10, completion_tokens: 5 }
@@ -177,7 +187,9 @@ describe("provider-adapter conformance (UA-1 §28)", () => {
                     ? new GeminiAdapter("", "m", "http://mock")
                     : c.name === "gemma_hosted"
                       ? new GemmaHostedAdapter("", "m", "http://mock")
-                      : new KimiAdapter("", "m", "http://mock");
+                      : c.name === "hermes"
+                        ? new HermesAdapter("", "m", "http://mock")
+                        : new KimiAdapter("", "m", "http://mock");
         expect(adapter.available()).toBe(false);
         const err = await adapter.complete(REQUEST).then(() => null).catch((e: unknown) => e);
         expect((err as ProviderError).kind).toBe("not_configured");
@@ -634,6 +646,29 @@ describe("D-106 HOST-FIX Defekt B: trygg feilsøkings-diagnostikk for Gemini/Kim
     expect(pe.diagnostic?.request_operation).toBe("chat.completions");
   });
 
+  it("hermes: 404 klassifiseres til bad_request MED trygg diagnostikk (D-360, samme OpenAI-kompatible mønster som kimi)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: { message: "model not found", code: "model_not_found" } }), {
+            status: 404
+          })
+      )
+    );
+    const err = await new HermesAdapter("hemmelig-key", "Hermes-4-70B", "http://mock")
+      .complete(REQUEST)
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProviderError);
+    const pe = err as ProviderError;
+    expect(pe.kind).toBe("bad_request");
+    expect(pe.status).toBe(404);
+    expect(pe.diagnostic?.provider_error_code).toBe("model_not_found");
+    expect(pe.diagnostic?.sanitized_endpoint).toBe("mock/v1/chat/completions");
+    expect(pe.diagnostic?.request_operation).toBe("chat.completions");
+  });
+
   it("gemma_hosted: 400 klassifiseres til bad_request MED trygg diagnostikk (D-106 HOST-FIX Defekt B, tidligere manglet for denne adapteren - host-bevis 2026-09-20: hvert reelt `gemma_hosted`-kall feilet opakt med `bad_request` og falt stille tilbake til `openai`)", async () => {
     vi.stubGlobal(
       "fetch",
@@ -848,6 +883,17 @@ describe("D-106 HOST-FIX Defekt B: trygg feilsøkings-diagnostikk for Gemini/Kim
     return new KimiAdapter("k", "m").complete(REQUEST).then(() => {
       const [url] = fetchSpy.mock.calls[0] as [string, RequestInit];
       expect(url).toBe("https://api.moonshot.ai/v1/chat/completions");
+    });
+  });
+
+  it("hermes: base-URL-en og default-modellen matcher Nous sin offisielle dokumentasjon (D-360, WebSearch-verifisert - ingen nettverkstilgang til inference-api.nousresearch.com i denne sandkassen for en live-ringbekreftelse, se hermes.ts)", () => {
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { content: "x" } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const adapter = new HermesAdapter("k");
+    expect(adapter.model).toBe("Hermes-4-70B");
+    return adapter.complete(REQUEST).then(() => {
+      const [url] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe("https://inference-api.nousresearch.com/v1/chat/completions");
     });
   });
 });

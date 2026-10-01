@@ -7,3 +7,4 @@ export * from "./gemini.ts";
 export * from "./gemma.ts";
 export * from "./local-llm.ts";
 export * from "./kimi.ts";
+export * from "./hermes.ts";
