@@ -135,6 +135,19 @@ export class CouncilSynthesisError extends Error {
  * per kjøring av `AiCouncil.resolveGemmaFamilyProvider()`, ALDRI en statisk
  * antakelse. De fire andre familiene ER allerede sine egne konkrete
  * providernavn (ingen tilsvarende tvetydighet).
+ *
+ * D-360: Hermes (NousResearch) ble BEVISST IKKE lagt til her/i
+ * `NON_GEMMA_DEFAULT_MEMBERS` - en adapter-registrering er lavrisiko/additiv
+ * (CLAUDE.md regel 3), men å utvide den AUTOMATISKE Council-default-
+ * medlemslisten er en separat, invasiv atferdsendring: `run()` under bruker
+ * DENNE listen som default når `members` ikke er eksplisitt oppgitt, og et
+ * stort antall eksisterende tester i `council.test.ts` (f.eks. "P": en
+ * EKSAKT `toEqual`-sjekk på `unavailable_members`) antar nøyaktig de fire
+ * eksisterende familiene + Gemma. Hermes forblir fullt tilgjengelig via
+ * eksplisitt provider-valg/routing-override (se `override-parser.ts`) og
+ * router-scoring - KUN den automatiske Council-ensemble-default-medlemskapet
+ * er bevisst utelatt, til en egen vurdering av kostnad/latens-avveiningen
+ * for Councilet selv er gjort.
  */
 export const CANONICAL_COUNCIL_FAMILIES = ["anthropic", "openai", "gemini", "kimi", "gemma"] as const;
 

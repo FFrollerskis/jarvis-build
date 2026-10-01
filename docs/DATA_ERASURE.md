@@ -34,6 +34,15 @@ Kartlagt ved lesing av faktisk skjema (`modules/core/src/db/migrations/*.sql`), 
 | `knowledge_documents.title`, `knowledge_documents.content` | Ingestert dokumentinnhold (UA-2 P0) |
 | `artifacts.content` | Jobb-genererte artefakter (tekst/kode/filinnhold) |
 
+**D-358-notat (funnet ved kildekode-gjennomgang, ikke en ny Tobias-rapport):** `memory_versions` sin
+`forbid_mutation()`-trigger (008_memory.sql) var FØR D-358 EKSAKT like ubetinget som `events`/
+`audit_events` sin (§D under) - til forskjell fra DEM var `memory_versions` ALDRI ment å være
+strukturelt blokkert (den står i DENNE tabellen, §A, ikke §D) - en reell, uteste bug, ikke en bevisst
+"blokkert, ikke fake COMPLETE"-grense. Fikset med en NAVNGITT, transaksjonslokal GUC-unntaksvei
+(`062_memory_erasure_bypass.sql`, `jarvis.erasure_in_progress` + `TG_TABLE_NAME='memory_versions'`) -
+`events`/`audit_events` sin trigger forblir UENDRET ubetinget, SAMME garanti som §D under beskriver.
+Se D-358 i DECISIONS_AND_ASSUMPTIONS.md.
+
 ### B. DERIVED CONTENT (må slettes sammen med originalen)
 
 | Tabell | Avledet fra |

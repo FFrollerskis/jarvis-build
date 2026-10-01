@@ -335,6 +335,15 @@ const WEB_INDEX = fileURLToPath(new URL("../../web/index.html", import.meta.url)
 /** D-199: samme statiske servering som WEB_INDEX over, egen side for dashboard.html. */
 const WEB_DASHBOARD = fileURLToPath(new URL("../../web/dashboard.html", import.meta.url));
 /**
+ * D-361 (Tobias direkte i chat: "sinnsyk interface ... slipper og skrive 3
+ * forskjellige url"): en samlet HUD-skall-side som viser WEB_INDEX/WEB_VOICE/
+ * WEB_DASHBOARD som samme-origin iframes bak faner - ingen av de tre sin
+ * egen logikk er duplisert/omskrevet. `/` serverer nå dette skallet;
+ * chat-siden flyttet til `/chat` (fortsatt direkte nåbar, nå også iframe-
+ * kilden for Samtale-fanen) slik at skallet har noe å peke chat-fanen til.
+ */
+const WEB_COMMAND = fileURLToPath(new URL("../../web/command.html", import.meta.url));
+/**
  * D-212 (task #120): samme statiske servering som WEB_INDEX/WEB_DASHBOARD
  * over - `voice.html` snakker IKKE med denne Core-prosessen for selve
  * talestrømmen (den kobler direkte til den separate voice-gateway-prosessen
@@ -396,11 +405,18 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
   }
 
   if (req.method === "GET" && url.pathname === "/") {
-    const html = await readFile(WEB_INDEX, "utf8");
+    const html = await readFile(WEB_COMMAND, "utf8");
     // D-249: uten no-cache kan en mobilnettleser fortsette å servere en
     // gammel, allerede-fikset versjon av siden fra sin lokale cache selv
     // etter en fersk `docker compose up --build` - forvirrende og vanskelig
     // å skille fra at selve fiksen ikke virket.
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
+    res.end(html);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/chat") {
+    const html = await readFile(WEB_INDEX, "utf8");
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
     res.end(html);
     return;

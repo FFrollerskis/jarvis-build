@@ -29,6 +29,7 @@ import {
   AnthropicAdapter,
   GemmaHostedAdapter,
   GeminiAdapter,
+  HermesAdapter,
   KimiAdapter,
   LocalOpenAiCompatibleAdapter,
   OllamaAdapter,
@@ -91,6 +92,7 @@ const gateway = new ModelGateway({
       "gemma_local"
     ),
     new KimiAdapter(),
+    new HermesAdapter(),
     new OllamaAdapter()
   ]
 });

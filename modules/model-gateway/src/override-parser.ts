@@ -91,6 +91,7 @@ const PROVIDER_PHRASES: ProviderPhraseEntry[] = [
   { patterns: [/\bbruke?\s+(bare\s+|kun\s+)?openai\b/i, /\bbruke?\s+(bare\s+|kun\s+)?gpt\b/i], provider: "openai" },
   { patterns: [/\bbruke?\s+(bare\s+|kun\s+)?gemini\b/i], provider: "gemini" },
   { patterns: [/\bbruke?\s+(bare\s+|kun\s+)?kimi\b/i], provider: "kimi" },
+  { patterns: [/\bbruke?\s+(bare\s+|kun\s+)?hermes\b/i], provider: "hermes" },
   {
     // "Gemma" er en modellFAMILIE, ikke en enkelt providerinstans - kan kjøre
     // lokalt (D-106 `gemma_local`) eller hostet (D-80 `gemma_hosted`).

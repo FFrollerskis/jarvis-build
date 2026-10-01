@@ -12,7 +12,7 @@ import {
 } from "@jarvis/core";
 import { type ErasureScope, scopeSummary } from "./scope.ts";
 import { planScope } from "./plan.ts";
-import { setTenantOnlyContext } from "./context.ts";
+import { setErasureInProgress, setTenantOnlyContext } from "./context.ts";
 
 export interface ErasurePreview {
   scope: ErasureScope;
@@ -127,6 +127,10 @@ export class ErasureService {
         });
       }
 
+      // D-358: lar KUN memory_versions sin append-only-trigger slippe gjennom
+      // DENNE transaksjonens DELETE (062_memory_erasure_bypass.sql) - satt
+      // rett FØR selve slettingen, ALDRI for "count"/preview-grenen over.
+      await setErasureInProgress(client);
       const plan = await planScope(client, "delete", scope);
       await recordErasureFingerprints(
         client,

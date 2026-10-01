@@ -1,5 +1,67 @@
 # PROJECT STATUS
 
+**Oppdatert 2026-10-01 - D-361 (BYGGET + EKTE HOST-VERIFISERT): samlet kommandosentral, del 2 av 2 ("Hermes + Honcho + sinnsyk interface"-ordren).**
+`apps/web/command.html` - et nytt HUD-skall som viser de tre allerede-hardnede sidene (nå `/chat`,
+uendret `/voice`/`/dashboard`) som samme-origin iframes bak en fane-bar, IKKE en omskrivning av deres
+egen Ed25519-/lyd-/SSE-logikk. `GET /` serverer skallet nå (chat-siden flyttet til `/chat`). Visuelt
+gjenbruker dashboard.html sin D-239-HUD-palett, utvidet med arc-reactor-logo/glødende faner/
+hjørnerammer ("iron vibes"). Fant og fikset FØR commit: Oversikt-fanen stod fast på "Laster ..." etter
+innrullering via Samtale-fanen (alle tre iframes monteres samtidig, FØR enhetsnøkkelen fantes) -
+`pendingReload`-flagg tvinger en reload av den fanen FØRSTE gang brukeren faktisk bytter til den.
+**Ekte host-verifisert** (system-Postgres fra D-358, alle 62 migrasjoner, en ekte `main.ts`-serverprosess
+på port 3010, en ekte enrollment-billett, det pre-installerte Chromium via Playwright): full
+ende-til-ende-flyt bevist i en EKTE nettleser - auto-innrullering, deretter ekte autoriserte
+dashbord-data (ikke "Laster ...") i Oversikt, Tale-fanen rendret korrekt. Skjermbilder sendt til
+Tobias. Ny `apps/api/test/d361-command-center-wiring.test.ts` (16 tester) + eksisterende 42 relaterte
+wiring-tester - alle grønne. `tsc`/`eslint` rene. Se D-361 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Oppdatert 2026-10-01 - D-359 (STOPPET, krever Tobias-retning) + D-360 (BYGGET): "Hermes + Honcho + sinnsyk interface"-ordre, del 1 av 2.**
+Tobias ba direkte i chat om tre ting: (1) "hermes" (avklart: NousResearch-modellfamilien) integrert i
+ModelGateway, (2) Honcho sjekket for minne ("reell integrasjonsvurdering (D-64-gate)", hans eget svar
+på et oppklaringsspørsmål), (3) en samlet, "sinnsyk" command-center-flate (chat+tale+dashboard ett
+sted, "iron vibes"). **D-359 (Honcho): D-64-porten kjørt, konkluderte `CORE_DEPENDENCY_DECISION_
+REQUIRED=true`** - "minne/theory-of-mind om personer" er ordrett et JARVIS_CANONICAL-eksempel i D-64s
+egen tekst, og Jarvis har ALLEREDE et fullstendig egenbygget sovereign minnedomene (D-357/D-358,
+FERDIGSTILT i samme økt). Portvurderingen stopper derfor der D-64 sier den skal - INGEN Honcho-kode
+lagt til, venter på Tobias sitt retningsvalg (avvis / kun sidestilt read-only adapter / annet). Se
+D-359 i DECISIONS_AND_ASSUMPTIONS.md. **D-360 (Hermes): BYGGET og testet.** `HermesAdapter`
+(`packages/provider-adapters/src/hermes.ts`) - OpenAI-kompatibelt mønster identisk med Kimi,
+base-URL/modell-ID (`Hermes-4-70B`) WebSearch-verifisert mot to uavhengige kilder (D-41-disiplin,
+ingen live Nous-nøkkel/nettverkstilgang i denne sandkassen - `HERMES_LIVE_GATE=PENDING_CREDENTIALS`).
+Wiret inn overalt (capability-registry/override-parser/pricing/main.ts/worker-main.ts/.env.example).
+**Bevisst IKKE** lagt til AI Councilets automatiske default-medlemskap - et første forsøk ble reversert
+etter at en full testkjøring viste det ville brutt eksisterende `council.test.ts`-eksakthetssjekker
+(samme bug-klasse som D-310a). 378 testet bestått/3 hoppet over (kun den forhåndseksisterende embedded-
+Postgres-sandkasse-begrensningen feilet, uberørt). `tsc`/`eslint` rene på provider-adapters/model-
+gateway/api. Se D-360 i DECISIONS_AND_ASSUMPTIONS.md. **Del 2 (det samlede interfacet) gjenstår** -
+neste steg i denne økten.
+
+**Oppdatert 2026-10-01 - D-358: FIKSET (Tobias direkte i chat: "Først fiks ferdig resten av minne").**
+Ferdigstiller D-357s eneste gjenstående "funnet, ikke fikset"-punkt: GDPR-erasure kastet for enhver
+person med en versjonert minnerad (`memory_versions` sin `forbid_mutation()`-trigger blokkerte
+`plan.ts` sin rå DELETE ubetinget). Fikset med en navngitt, dobbelt avgrenset unntaksvei (ny migrasjon
+`062_memory_erasure_bypass.sql`: `TG_TABLE_NAME='memory_versions'` OG en transaksjonslokal GUC,
+`jarvis.erasure_in_progress`, satt KUN av `ErasureService.executeErasure()` sin delete-gren) -
+`events`/`audit_events` sin ubetingede append-only-garanti er UBERØRT. **Ekte host-verifisert denne
+gangen** (ikke bare trace-gjennom): oppdaget at et system-installert PostgreSQL 16 var tilgjengelig i
+sandkassen UAVHENGIG av `embedded-postgres`-npm-pakken testene bruker (som fortsatt feiler - trolig
+fordi den binæren ikke kjører riktig som root) - kjørte alle 62 ekte migrasjoner + fire eksplisitte
+scenarioer (blokkert uten flagg / lykkes med flagg / flagg lekker ikke på tvers av transaksjoner /
+`events` fortsatt blokkert selv med flagget) + en full 10-tabells simulering av `plan.ts` sin eksakte
+produksjonsrekkefølge, alle mot en ekte non-superuser app-rolle. Ny test "V (D-358)" i
+`erasure-service.test.ts` (kan ikke kjøres via vitest i DENNE sandkassen, men CI sin `pnpm test` kjørte
+embedded Postgres vellykket på D-357s nettopp mergede PR #215 - forventes å kjøre der).
+`pnpm --filter @jarvis/erasure exec tsc --noEmit`/`eslint` rene. Se D-358 i
+DECISIONS_AND_ASSUMPTIONS.md. **Gjenstående, bevisst ikke rørt (arkitekturvalg, ikke bugs):**
+`LocalHashEmbedding` som produksjons-"semantisk" søk; `KnowledgeRetriever`/`ContextEngine` uten
+produksjonskonsument; MEMORY_ARCHITECTURE.md §9 sitt eval-sett aldri kjørt.
+
+**MERGET under D-192 (2026-09-30, commit `e5138c4`):** PR #215 (D-353/D-354/D-355/D-356/D-357) - CI
+grønt på HEAD `99a95c2`, ingen åpne review-tråder, to-forelder `merge_method=merge`. Branch resatt
+til `origin/main` per konvensjon. **IKKE live-testet av Tobias på NAS-en for noen av de fem ennå** -
+neste anbefalte steg er hans egen redeploy + faktisk taletest, PLUSS (for D-356 sin streaming-STT)
+hans egen raske Deepgram Data-controls-gjennomgang FØR `DeepgramStreamingStt` kan aktiveres.
+
 **Oppdatert:** 2026-09-30 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-357: FIKS + FUNN
 ("...så minne ferdig" - reell "kan aldri læres på nytt etter invalidering"-bug FIKSET i
 `MemoryWriter.apply()`; en separat GDPR-erasure/append-only-trigger-konflikt FUNNET men IKKE fikset,

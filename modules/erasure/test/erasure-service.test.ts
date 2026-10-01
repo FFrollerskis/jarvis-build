@@ -62,6 +62,31 @@ async function plantMemoryItem(tenantId: string, space: string, content: string)
   return memoryItemId;
 }
 
+/**
+ * D-358: SAMME som `plantMemoryItem()`, men gir det planlagte faktumet en
+ * reell versjonshistorikk (en `memory_versions`-rad + `status='invalidated'`,
+ * NØYAKTIG mønsteret `MemoryWriter.invalidate()` skriver) - de EKSISTERENDE
+ * erasure-testene over plantet ALDRI en versjonert rad, så de traff aldri
+ * `memory_versions` sin append-only-trigger i det hele tatt (D-357/D-358s
+ * funn). Denne hjelperen gjør det mulig å faktisk bevise at en ekte
+ * GDPR-sletting lykkes selv når offeret har en versjonshistorikk.
+ */
+async function plantVersionedMemoryItem(tenantId: string, space: string, content: string): Promise<string> {
+  const memoryItemId = await plantMemoryItem(tenantId, space, content);
+  await withMemoryTransaction(appPool, tenantId, [space as never], async (client) => {
+    await client.query(
+      `INSERT INTO memory_versions (memory_item_id, tenant_id, space, version, subject, content, valid_from, valid_to, change_kind)
+       SELECT memory_item_id, tenant_id, space, version, subject, content, valid_from, now(), 'invalidated'
+       FROM memory_items WHERE memory_item_id = $1`,
+      [memoryItemId]
+    );
+    await client.query("UPDATE memory_items SET status = 'invalidated', valid_to = now() WHERE memory_item_id = $1", [
+      memoryItemId
+    ]);
+  });
+  return memoryItemId;
+}
+
 async function plantDerivedMemoryRows(tenantId: string, space: string, content: string): Promise<void> {
   await withMemoryTransaction(appPool, tenantId, [space as never], async (client) => {
     await client.query("INSERT INTO summaries (summary_id, tenant_id, space, scope, scope_key, content) VALUES ($1,$2,$3,'daily',$4,$5)", [
@@ -715,6 +740,56 @@ describe("Q-20 ErasureService", () => {
     await cleanup.executeErasure({
       scope: { type: "memory_space", tenant_id: TENANT_A, memory_space_id: "personal" },
       requestId: `req-cleanup-${randomUUID()}`,
+      identity: identityFor(TENANT_A, "personal")
+    });
+  });
+
+  it("V (D-358): hard delete lykkes for et faktum med VERSJONSHISTORIKK - memory_versions sin append-only-trigger blokkerer ALDRI en ekte erasure", async () => {
+    const sentinel = `SentinelVersionedErasure${randomUUID().replace(/-/g, "")}`;
+    const memoryItemId = await plantVersionedMemoryItem(TENANT_A, "personal", sentinel);
+
+    // Eksplisitt bevis på at raden FAKTISK har versjonshistorikk FØR sletting
+    // - uten dette kunne testen gitt et falskt grønt resultat (testet en tom
+    // memory_versions-tabell, ikke selve bug-scenarioet).
+    const versionsBefore = await adminPool.query("SELECT 1 FROM memory_versions WHERE memory_item_id = $1", [memoryItemId]);
+    expect(versionsBefore.rowCount).toBe(1);
+
+    const service = new ErasureService(appPool, sovereignPolicy, embedding);
+    const result = await service.executeErasure({
+      scope: { type: "memory_space", tenant_id: TENANT_A, memory_space_id: "personal" },
+      requestId: `req-${randomUUID()}`,
+      identity: identityFor(TENANT_A, "personal")
+    });
+    // D-357/D-358s funn (FØR fiksen): dette kastet "append_only_table:
+    // memory_versions tillater ikke DELETE" og result.status ble "failed" -
+    // SAMME transaksjon rullet DA hele slettingen tilbake.
+    expect(result.status).toBe("completed");
+    expect(result.record_counts["memory_versions"]).toBe(1);
+    expect(result.record_counts["memory_items"]).toBe(1);
+
+    const versionsAfter = await adminPool.query("SELECT 1 FROM memory_versions WHERE memory_item_id = $1", [memoryItemId]);
+    expect(versionsAfter.rowCount).toBe(0);
+
+    // Append-only-prinsippet gjelder FORTSATT for enhver annen tilgang -
+    // DENNE fiksen omgår ALDRI det generelt, kun DENNE transaksjonens
+    // kontrollerte erasure-sletting (SAMME regresjonsbevis som D-357/D-358s
+    // `memory.test.ts` sin "memory_versions er append-only"-test, her bevist
+    // på nytt i erasure-konteksten for å utelukke at fiksen lekket bredere).
+    // En FERSK versjonert rad plantes her (fremfor å stole på rester fra
+    // andre tester) slik at DELETE-en garantert treffer minst én rad og
+    // dermed faktisk utløser triggeren.
+    const guardMemoryItemId = await plantVersionedMemoryItem(TENANT_A, "personal", `${sentinel}Guard`);
+    await expect(
+      withMemoryTransaction(appPool, TENANT_A, ["personal" as never], (client) =>
+        client.query("DELETE FROM memory_versions WHERE memory_item_id = $1", [guardMemoryItemId])
+      )
+    ).rejects.toThrow("append_only_table");
+
+    // Rydd opp den fersk-plantede vakt-raden (unngå å forurense senere tester).
+    const cleanupGuard = new ErasureService(appPool, sovereignPolicy, embedding);
+    await cleanupGuard.executeErasure({
+      scope: { type: "memory_space", tenant_id: TENANT_A, memory_space_id: "personal" },
+      requestId: `req-cleanup-guard-${randomUUID()}`,
       identity: identityFor(TENANT_A, "personal")
     });
   });
