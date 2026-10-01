@@ -22,6 +22,19 @@ export async function setTenantOnlyContext(client: pg.PoolClient, tenantId: stri
   await client.query("SELECT set_config('jarvis.tenant_id', $1, true)", [tenantId]);
 }
 
+/**
+ * D-358: transaksjonslokal GUC (`is_local=true`, SAMME mønster som
+ * `jarvis.tenant_id` over - forsvinner automatisk ved COMMIT/ROLLBACK,
+ * lekker ALDRI til en senere transaksjon/tilkobling) som lar
+ * `memory_versions` sin `forbid_mutation()`-trigger (062_memory_erasure_
+ * bypass.sql) slippe gjennom NØYAKTIG denne transaksjonens DELETE - append-
+ * only-prinsippet gjelder UENDRET for enhver annen tilgang. Kalles KUN av
+ * `ErasureService.executeErasure()` sin "delete"-gren, ALDRI "count"/preview.
+ */
+export async function setErasureInProgress(client: pg.PoolClient): Promise<void> {
+  await client.query("SELECT set_config('jarvis.erasure_in_progress', 'true', true)");
+}
+
 /** Splitt en liste med spaces i [ikke-health-gruppen, health-gruppen-eller-tom] - aldri blandet i én RLS-kontekst. */
 export function partitionSpaces(spaces: readonly string[]): { rest: string[]; health: string[] } {
   const health = spaces.filter((s) => s === "health");

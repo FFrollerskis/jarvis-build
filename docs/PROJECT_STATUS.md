@@ -1,5 +1,25 @@
 # PROJECT STATUS
 
+**Oppdatert 2026-10-01 - D-358: FIKSET (Tobias direkte i chat: "Først fiks ferdig resten av minne").**
+Ferdigstiller D-357s eneste gjenstående "funnet, ikke fikset"-punkt: GDPR-erasure kastet for enhver
+person med en versjonert minnerad (`memory_versions` sin `forbid_mutation()`-trigger blokkerte
+`plan.ts` sin rå DELETE ubetinget). Fikset med en navngitt, dobbelt avgrenset unntaksvei (ny migrasjon
+`062_memory_erasure_bypass.sql`: `TG_TABLE_NAME='memory_versions'` OG en transaksjonslokal GUC,
+`jarvis.erasure_in_progress`, satt KUN av `ErasureService.executeErasure()` sin delete-gren) -
+`events`/`audit_events` sin ubetingede append-only-garanti er UBERØRT. **Ekte host-verifisert denne
+gangen** (ikke bare trace-gjennom): oppdaget at et system-installert PostgreSQL 16 var tilgjengelig i
+sandkassen UAVHENGIG av `embedded-postgres`-npm-pakken testene bruker (som fortsatt feiler - trolig
+fordi den binæren ikke kjører riktig som root) - kjørte alle 62 ekte migrasjoner + fire eksplisitte
+scenarioer (blokkert uten flagg / lykkes med flagg / flagg lekker ikke på tvers av transaksjoner /
+`events` fortsatt blokkert selv med flagget) + en full 10-tabells simulering av `plan.ts` sin eksakte
+produksjonsrekkefølge, alle mot en ekte non-superuser app-rolle. Ny test "V (D-358)" i
+`erasure-service.test.ts` (kan ikke kjøres via vitest i DENNE sandkassen, men CI sin `pnpm test` kjørte
+embedded Postgres vellykket på D-357s nettopp mergede PR #215 - forventes å kjøre der).
+`pnpm --filter @jarvis/erasure exec tsc --noEmit`/`eslint` rene. Se D-358 i
+DECISIONS_AND_ASSUMPTIONS.md. **Gjenstående, bevisst ikke rørt (arkitekturvalg, ikke bugs):**
+`LocalHashEmbedding` som produksjons-"semantisk" søk; `KnowledgeRetriever`/`ContextEngine` uten
+produksjonskonsument; MEMORY_ARCHITECTURE.md §9 sitt eval-sett aldri kjørt.
+
 **MERGET under D-192 (2026-09-30, commit `e5138c4`):** PR #215 (D-353/D-354/D-355/D-356/D-357) - CI
 grønt på HEAD `99a95c2`, ingen åpne review-tråder, to-forelder `merge_method=merge`. Branch resatt
 til `origin/main` per konvensjon. **IKKE live-testet av Tobias på NAS-en for noen av de fem ennå** -
