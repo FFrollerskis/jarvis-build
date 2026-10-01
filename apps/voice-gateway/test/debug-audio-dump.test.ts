@@ -3,7 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { maybeDumpAudioForDebug } from "../src/debug-audio-dump.ts";
+import { DEBUG_DUMP_CONSENT_VALUE, debugDumpEnabled, maybeDumpAudioForDebug } from "../src/debug-audio-dump.ts";
 
 /**
  * D-279: `maybeDumpAudioForDebug()` er den ENESTE, eksplisitt Tobias-
@@ -14,11 +14,16 @@ import { maybeDumpAudioForDebug } from "../src/debug-audio-dump.ts";
  */
 describe("D-279: maybeDumpAudioForDebug() - opt-in-only, av som standard", () => {
   const envKey = "JARVIS_VOICE_DEBUG_DUMP_DIR";
+  const consentKey = "JARVIS_VOICE_DEBUG_DUMP_CONSENT";
   const originalValue = process.env[envKey];
+  const originalConsent = process.env[consentKey];
   let dir: string;
 
   beforeEach(async () => {
     delete process.env[envKey];
+    // Remediering del 1: dumpen krever OGSÅ eksplisitt samtykke - testene under som
+    // faktisk skal skrive setter det selv.
+    process.env[consentKey] = DEBUG_DUMP_CONSENT_VALUE;
     dir = await mkdtemp(join(tmpdir(), "jarvis-voice-debug-dump-test-"));
   });
 
@@ -28,7 +33,29 @@ describe("D-279: maybeDumpAudioForDebug() - opt-in-only, av som standard", () =>
     } else {
       process.env[envKey] = originalValue;
     }
+    if (originalConsent === undefined) {
+      delete process.env[consentKey];
+    } else {
+      process.env[consentKey] = originalConsent;
+    }
     await rm(dir, { recursive: true, force: true });
+  });
+
+  it("Remediering del 1 (JARVIS-080): mappen alene (gammel .env) skriver ALDRI rå lyd - samtykke kreves", async () => {
+    process.env[envKey] = dir;
+    delete process.env[consentKey];
+    expect(debugDumpEnabled()).toBe(false);
+    expect(await maybeDumpAudioForDebug(Buffer.from("rå lyd"))).toBeUndefined();
+    expect(await readdir(dir)).toEqual([]);
+    process.env[consentKey] = "yes";
+    expect(debugDumpEnabled()).toBe(false);
+    expect(await maybeDumpAudioForDebug(Buffer.from("rå lyd"))).toBeUndefined();
+    expect(await readdir(dir)).toEqual([]);
+  });
+
+  it("samtykke alene (uten mappe) skriver heller ingenting", async () => {
+    expect(debugDumpEnabled()).toBe(false);
+    expect(await maybeDumpAudioForDebug(Buffer.from("x"))).toBeUndefined();
   });
 
   it("er en ren no-op når JARVIS_VOICE_DEBUG_DUMP_DIR er usatt (produksjons-default)", async () => {

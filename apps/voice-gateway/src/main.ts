@@ -1,10 +1,12 @@
+import { envPort } from "@jarvis/contracts";
 import { VoiceHealth } from "./health.ts";
 import { createVoiceGateway, HttpCoreClient } from "./server.ts";
-import { LocalWhisperStt, MarkerStt, OpenAiStt } from "./stt.ts";
-import { FakeTts, LocalPiperTts, OpenAiTts } from "./tts.ts";
+import { selectSpeechAdapters } from "./adapter-selection.ts";
+import { LocalWhisperStt, OpenAiStt } from "./stt.ts";
+import { LocalPiperTts, OpenAiTts } from "./tts.ts";
 import { EnergyVad } from "./vad.ts";
 
-const port = Number(process.env["JARVIS_VOICE_PORT"] ?? 3020);
+const port = envPort("JARVIS_VOICE_PORT", 3020);
 const coreUrl = process.env["JARVIS_CORE_URL"] ?? "http://127.0.0.1:3010";
 
 /**
@@ -54,8 +56,17 @@ const openAiStt = new OpenAiStt();
 const openAiTts = new OpenAiTts();
 const localWhisperStt = new LocalWhisperStt();
 const localPiperTts = new LocalPiperTts();
-const stt = openAiStt.available() ? openAiStt : localWhisperStt.available() ? localWhisperStt : new MarkerStt();
-const tts = openAiTts.available() ? openAiTts : localPiperTts.available() ? localPiperTts : new FakeTts();
+// REMEDIERING DEL 1 (JARVIS-080): INGEN stille fallback til MarkerStt/FakeTts - oppstarten
+// feiler lukket uten en ekte adapter (se `adapter-selection.ts`).
+function selectOrExit() {
+  try {
+    return selectSpeechAdapters({ openAiStt, localWhisperStt, openAiTts, localPiperTts });
+  } catch (err) {
+    console.error(JSON.stringify({ msg: "jarvis-voice-gateway startup_failed", error: (err as Error).message }));
+    process.exit(1);
+  }
+}
+const { stt, tts } = selectOrExit();
 const health = new VoiceHealth();
 
 const server = createVoiceGateway({ core: new HttpCoreClient(coreUrl), stt, tts, health, vad });

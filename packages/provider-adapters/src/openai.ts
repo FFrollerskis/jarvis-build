@@ -3,6 +3,7 @@ import {
   classifyFetchError,
   classifyHttpStatus,
   envOrDefault,
+  envPositiveInt,
   ProviderError,
   sseLines,
   textOnly,
@@ -21,7 +22,7 @@ export class OpenAiAdapter implements ModelProviderAdapter {
     private readonly apiKey: string | undefined = process.env["OPENAI_API_KEY"],
     readonly model: string = envOrDefault("JARVIS_OPENAI_MODEL", "gpt-5"),
     private readonly baseUrl: string = "https://api.openai.com",
-    private readonly timeoutMs: number = Number(process.env["JARVIS_MODEL_TIMEOUT_MS"] ?? 60_000)
+    private readonly timeoutMs: number = envPositiveInt("JARVIS_MODEL_TIMEOUT_MS", 60_000)
   ) {}
 
   available(): boolean {

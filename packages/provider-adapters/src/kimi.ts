@@ -2,6 +2,7 @@ import {
   classifyFetchError,
   classifyHttpStatus,
   envOrDefault,
+  envPositiveInt,
   extractProviderErrorCode,
   firstNonEmptyEnv,
   ProviderError,
@@ -35,7 +36,7 @@ export class KimiAdapter implements ModelProviderAdapter {
     private readonly apiKey: string | undefined = firstNonEmptyEnv("KIMI_API_KEY", "MOONSHOT_API_KEY"),
     readonly model: string = envOrDefault("JARVIS_KIMI_MODEL", "kimi-k3"),
     private readonly baseUrl: string = envOrDefault("JARVIS_KIMI_URL", "https://api.moonshot.ai"),
-    private readonly timeoutMs: number = Number(process.env["JARVIS_MODEL_TIMEOUT_MS"] ?? 60_000)
+    private readonly timeoutMs: number = envPositiveInt("JARVIS_MODEL_TIMEOUT_MS", 60_000)
   ) {}
 
   available(): boolean {

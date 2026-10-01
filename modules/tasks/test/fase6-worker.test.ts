@@ -171,6 +171,25 @@ describe("Akseptanse 4 + delegeringskontrakt", () => {
     expect((result as { reason: string }).reason).toBe("untrusted_with_private_memory_and_network");
   });
 
+  it("Remediering del 1: executive-kontrakt med input.data.command avvises deterministisk FØR kø (JARVIS-001/010)", async () => {
+    for (const command of [["id"], ["sh", "-c", "env"], []]) {
+      const result = await tasks.submit(
+        identity,
+        contract({ input: { data: { command }, trust_level: "internal", provenance: "test" } })
+      );
+      expect(result.ok).toBe(false);
+      expect((result as { reason: string }).reason).toBe("executive_command_disabled");
+    }
+    // en vanlig executive-jobb uten command godtas fortsatt
+    expect((await tasks.submit(identity, contract({ goal: "uten command" }))).ok).toBe(true);
+    // og den avviste jobben havnet ikke i køen
+    const rejected = await tasks.submit(
+      identity,
+      contract({ goal: "skal ikke i køen", input: { data: { command: ["id"] }, trust_level: "internal", provenance: "test" } })
+    );
+    expect(rejected.ok).toBe(false);
+  });
+
   it("cross-tenant kontrakt avvises", async () => {
     const result = await tasks.submit(identity, contract({ tenant_id: "tenant-budget" }));
     expect(result.ok).toBe(false);

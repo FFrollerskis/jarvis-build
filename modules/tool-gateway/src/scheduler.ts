@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
+import { envHour } from "@jarvis/contracts";
 
 /**
  * BO-05: reboot-durabel daglig scheduler. Tilstand i Postgres (scheduler_state):
@@ -13,7 +14,7 @@ export class DailyScheduler {
   constructor(
     private readonly pool: pg.Pool,
     private readonly jobName = "daily-brief",
-    private readonly hour = Number(process.env["JARVIS_BRIEF_HOUR"] ?? 7),
+    private readonly hour = envHour("JARVIS_BRIEF_HOUR", 7),
     private readonly timeZone = "Europe/Oslo"
   ) {}
 

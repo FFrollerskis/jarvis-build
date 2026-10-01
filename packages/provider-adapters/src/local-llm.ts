@@ -3,6 +3,7 @@ import {
   classifyFetchError,
   classifyHttpStatus,
   envOrDefault,
+  envPositiveInt,
   ProviderError,
   textOnly,
   type ModelProviderAdapter,
@@ -69,7 +70,7 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
   constructor(
     private readonly baseUrl: string | undefined = process.env["LOCAL_LLM_BASE_URL"],
     readonly model: string = envOrDefault("LOCAL_LLM_MODEL", "local-model"),
-    private readonly timeoutMs: number = Number(process.env["JARVIS_MODEL_TIMEOUT_MS"] ?? 120_000),
+    private readonly timeoutMs: number = envPositiveInt("JARVIS_MODEL_TIMEOUT_MS", 120_000),
     name: string = "local_llm"
   ) {
     this.name = name;
