@@ -13,7 +13,7 @@
 #  - Flytende image-tagger er pinnet til tag@digest (flerarkitektur-indeks-digest,
 #    slått opp mot Docker Hub/MCR 2026-10-01). Sammenlign mot det NAS-en faktisk kjører
 #    (`docker compose images`) FØR `up --build` - se docs/remediation/BASELINE.md.
-#  Strukturelt vakt: modules/core/test/remediation-1-containment-invariants.test.ts.
+#  Strukturelt vakt: ops/security/check-containment.mjs (kjøres i CI og som `pnpm check:containment`).
 
 services:
   postgres:

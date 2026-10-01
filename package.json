@@ -12,6 +12,7 @@
     "build": "pnpm -r run build",
     "lint": "eslint .",
     "typecheck": "pnpm -r run typecheck",
+    "check:containment": "node ops/security/check-containment.mjs",
     "test": "vitest run"
   },
   "devDependencies": {

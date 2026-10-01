@@ -30,6 +30,9 @@ jobs:
       - name: Install backup tooling (age + PostgreSQL client)
         run: sudo apt-get update && sudo apt-get install -y age postgresql-client
 
+      - name: Containment invariants (JARVIS-001/002/008/009/080/089)
+        run: pnpm check:containment
+
       - name: Lint
         run: pnpm lint
 
