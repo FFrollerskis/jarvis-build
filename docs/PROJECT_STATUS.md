@@ -1,5 +1,17 @@
 # PROJECT STATUS
 
+**MERGET under D-192 (2026-10-01, commit `35075a2`): PR #217 (D-362 voice-gateway/Tailscale
+portkollisjon-fiks).** CI grønt (gitleaks/windows-git-auth/build-test, inkl. én ruled-out-as-unrelated
+flake i `embedded-postgres-port-lease.test.ts` bekreftet via én re-run), `mergeable_state: clean`, ingen
+åpne review-tråder, to-forelder `merge_method=merge`. Branch resatt til `origin/main`. Denne fiksen var
+TIDLIGERE kun pushet til feature-branchen ved en feil fra Claude sin side (ikke merget) - Tobias sin
+forrige `git pull origin main` fant derfor korrekt "Already up to date" men INNEHOLDT IKKE fiksen; dette
+er nå rettet. **Neste steg for Tobias:** `git pull origin main` + `docker compose -f
+infra/local/docker-compose.yml up -d --build` på nytt (denne gangen inneholder `main` faktisk D-362), så
+verifiser `docker port local-voice-gateway-1` (forvent `127.0.0.1:3020->3020/tcp`) og `curl -s
+http://127.0.0.1:3020/health`, og til slutt et ekte taleforsøk via Tailscale-URL-en eller `/`-sidens
+Tale-fane. Se D-362 i DECISIONS_AND_ASSUMPTIONS.md.
+
 **Oppdatert 2026-10-01 - D-362: live NAS-redeploy-funn under D-361-testing, port-fiks pushet.**
 Tobias kjørte selv `git pull` + `docker compose up -d --build` på NAS-en for D-358/D-360/D-361.
 To problemer dukket opp, begge løst i chat: (1) `.env`-interpolasjon i `docker compose` (v5.1.3) leste
