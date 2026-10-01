@@ -36,13 +36,13 @@ export interface PricingTable {
 
 /** Grove omregninger (USD→øre ca. 10.5 kr/USD, aug 2026) - konfig, ikke fasit. */
 export const DEFAULT_PRICING: PricingTable = {
-  version: "2026-08.2",
-  updated_at: "2026-08-23",
+  version: "2026-10.1",
+  updated_at: "2026-10-01",
   rates: {
-    "openai:gpt-4o-mini": { input_per_1k_ore: 0.2, output_per_1k_ore: 0.7, cached_per_1k_ore: 0.1 },
-    "openai:gpt-5": { input_per_1k_ore: 1.4, output_per_1k_ore: 10.5, cached_per_1k_ore: 0.2 },
-    openai: { input_per_1k_ore: 1.4, output_per_1k_ore: 10.5 },
-    anthropic: { input_per_1k_ore: 3.2, output_per_1k_ore: 15.8, cached_per_1k_ore: 0.4 },
+    "openai:gpt-4o-mini": { input_per_1k_ore: 0.2, output_per_1k_ore: 0.7, cached_per_1k_ore: 0.1, pricing_mode: "PAID" },
+    "openai:gpt-5": { input_per_1k_ore: 1.4, output_per_1k_ore: 10.5, cached_per_1k_ore: 0.2, pricing_mode: "PAID" },
+    openai: { input_per_1k_ore: 1.4, output_per_1k_ore: 10.5, pricing_mode: "PAID" },
+    anthropic: { input_per_1k_ore: 3.2, output_per_1k_ore: 15.8, cached_per_1k_ore: 0.4, pricing_mode: "PAID" },
     // D-106 GEMINI MODEL MIGRATION (2026-08-23): raten var kalibrert for
     // `gemini-2.5-flash` (nå under utfasing, se gemini.ts). `gemini-3.6-flash`
     // sin offisielle pris ($1.50/$7.50 per 1M input/output-tokens,
@@ -62,7 +62,7 @@ export const DEFAULT_PRICING: PricingTable = {
       pricing_mode: "PAID",
       pricing_verified_at: "2026-08-23"
     },
-    kimi: { input_per_1k_ore: 0.7, output_per_1k_ore: 3.2 },
+    kimi: { input_per_1k_ore: 0.7, output_per_1k_ore: 3.2, pricing_mode: "PAID" },
     // D-360: Nous Portal sin offisielle $/1M-token-rate for Hermes-4-70B
     // ($0.093 input / $0.373 output) - WebSearch-verifisert (pricepertoken.com),
     // direkte WebFetch mot nousresearch.com-domener var nettverks-blokkert i
@@ -93,7 +93,14 @@ export const DEFAULT_PRICING: PricingTable = {
     // - infrastrukturkost (strøm/maskinvare/drift) er en SEPARAT, ikke-modellert
     // kostnadskategori, ALDRI oppdiktet som modell-øre her. "API-kostnad 0" er
     // IKKE det samme som "total driftskostnad 0".
-    local_llm: { input_per_1k_ore: 0, output_per_1k_ore: 0, pricing_mode: "LOCAL" }
+    local_llm: { input_per_1k_ore: 0, output_per_1k_ore: 0, pricing_mode: "LOCAL" },
+    // JARVIS-006 / Remediering del 1: `gemma_local` (standard chat-/minnemodell,
+    // Tobias sin egen PC) hadde INGEN rad og falt derfor til `default_rate`
+    // (30/150 øre per 1k) - fantomkostnad som traff 3 000-kr-hardgrensen.
+    // Lokal inferens har ALDRI en API-kostnad (se `local_llm` over).
+    gemma_local: { input_per_1k_ore: 0, output_per_1k_ore: 0, pricing_mode: "LOCAL" },
+    // Deterministisk testprovider (ScriptedAdapter): aldri en reell kostnad.
+    scripted: { input_per_1k_ore: 0, output_per_1k_ore: 0, pricing_mode: "LOCAL" }
   },
   default_rate: { input_per_1k_ore: 30, output_per_1k_ore: 150 }
 };
@@ -116,4 +123,60 @@ export function costOre(
       (cached / 1000) * (rate.cached_per_1k_ore ?? rate.input_per_1k_ore) +
       (usage.output_tokens / 1000) * rate.output_per_1k_ore
   );
+}
+
+export class MissingExplicitPricingError extends Error {
+  constructor(readonly missing: string[], readonly violations: string[] = []) {
+    super(
+      [
+        missing.length > 0 ? `mangler eksplisitt pris for: ${missing.join(", ")}` : "",
+        violations.length > 0 ? `lokal provider med ikke-null API-pris: ${violations.join(", ")}` : ""
+      ]
+        .filter(Boolean)
+        .join("; ")
+    );
+    this.name = "MissingExplicitPricingError";
+  }
+}
+
+/**
+ * JARVIS-006: `default_rate` (30/150 øre per 1k) er en bevisst konservativ
+ * sats for UKJENTE betalte leverandører - men den ble i praksis også brukt for
+ * en REGISTRERT lokal modell (`gemma_local`) og produserte fantomforbruk.
+ * Hver registrert provider MÅ derfor ha en eksplisitt rad (`provider` eller
+ * `provider:model`), og en lokal provider MÅ være `pricing_mode: "LOCAL"` med
+ * 0 øre (lokal inferens har aldri en API-kostnad; infrastrukturkost er en
+ * separat, ikke-modellert kategori).
+ */
+export function assertExplicitPricing(
+  table: PricingTable,
+  profiles: ReadonlyArray<{ provider: string; model: string; locality: "local" | "cloud" }>
+): void {
+  const missing: string[] = [];
+  const violations: string[] = [];
+  for (const p of profiles) {
+    const rate = table.rates[`${p.provider}:${p.model}`] ?? table.rates[p.provider];
+    if (!rate) {
+      missing.push(p.provider);
+      continue;
+    }
+    if (p.locality === "local" && (rate.pricing_mode !== "LOCAL" || rate.input_per_1k_ore !== 0 || rate.output_per_1k_ore !== 0)) {
+      violations.push(p.provider);
+    }
+  }
+  if (missing.length > 0 || violations.length > 0) {
+    throw new MissingExplicitPricingError(missing, violations);
+  }
+}
+
+/** Streng variant for produksjonsoppstart: hvert faktisk konstruert adapter-navn må ha eksplisitt pris. */
+export function assertProvidersHaveExplicitPricing(table: PricingTable, providerNames: readonly string[]): void {
+  const missing = providerNames.filter((name) => {
+    const hasProvider = table.rates[name] !== undefined;
+    const hasModelSpecific = Object.keys(table.rates).some((k) => k.startsWith(`${name}:`));
+    return !hasProvider && !hasModelSpecific;
+  });
+  if (missing.length > 0) {
+    throw new MissingExplicitPricingError(missing);
+  }
 }

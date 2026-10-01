@@ -20,7 +20,7 @@ import { classifyCompletionOutcome, computeAdaptiveRetryMaxTokens, type Completi
 import { CapabilityRegistry, type ModelCapability } from "./capability-registry.ts";
 import { ProviderHealthTracker, type ProviderHealthState } from "./provider-health.ts";
 import { AiRouter, type RoutePlan } from "./router.ts";
-import { costOre as computeCostOre, DEFAULT_PRICING, type PricingTable } from "./pricing.ts";
+import { assertExplicitPricing, costOre as computeCostOre, DEFAULT_PRICING, type PricingTable } from "./pricing.ts";
 import type { TraceSink } from "./trace.ts";
 
 /**
@@ -214,6 +214,8 @@ export class ModelGateway {
     this.guard = new BudgetGuard(opts.pool, opts.budget ?? DEFAULT_BUDGET);
     this.registry = opts.registry ?? new CapabilityRegistry();
     this.pricing = opts.pricing ?? DEFAULT_PRICING;
+    // JARVIS-006: ingen registrert modellprofil får falle til `default_rate`.
+    assertExplicitPricing(this.pricing, this.registry.list());
     this.router = new AiRouter(this.registry, this.health);
     for (const p of opts.providers) {
       this.byName.set(p.name, p);
