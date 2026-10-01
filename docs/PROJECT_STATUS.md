@@ -1,5 +1,17 @@
 # PROJECT STATUS
 
+**Oppdatert 2026-10-01 - D-362: live NAS-redeploy-funn under D-361-testing, port-fiks pushet.**
+Tobias kjørte selv `git pull` + `docker compose up -d --build` på NAS-en for D-358/D-360/D-361.
+To problemer dukket opp, begge løst i chat: (1) `.env`-interpolasjon i `docker compose` (v5.1.3) leste
+ikke repo-rotens `.env` for sin EGEN topp-nivå-variabelsubstitusjon - løst med en lokal, git-ignorert
+kopi i `infra/local/.env` (ren NAS-drift, ingen kodeendring, rotårsak IKKE fullstendig forklart).
+(2) **Ekte kodefiks:** `voice-gateway` sin host-portbinding (3020) kolliderte med en ALLEREDE
+eksisterende Tailscale Serve-konfigurasjon som lyttet på samme port - endret til kun loopback
+(`127.0.0.1:3020:3020`) i `infra/local/docker-compose.yml`, siden Tailscale Serve uansett alltid
+forwarder til `localhost`. **IKKE verifisert av Tobias ennå at voice-gateway faktisk starter** etter
+denne fiksen - venter på hans neste `git pull` + redeploy-forsøk. Se D-362 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
 **Oppdatert 2026-10-01 - D-359a: Honcho AVVIST (Tobias direkte i chat: "ja dropp det").** Honcho er
 IKKE integrert - ingen kode/avhengighet/skjema lagt til noe sted. Jarvis sitt eget minnesystem
 (D-357/D-358) dekker behovet; en ekstern tjeneste ville enten kostet penger (cloud) eller lagt til ny
