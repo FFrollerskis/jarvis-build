@@ -1,5 +1,19 @@
 # PROJECT STATUS
 
+## AKTIV STATUS – Remediering del 1 av 10 (2026-10-01) – kun observerbare fakta
+
+- **Fase/oppgave:** remediering del 1 («containment + baseline + sporbar prosess»). Branch `remediation/01-containment-baseline`, **draft-PR, IKKE merget**. Basert på audit av `35075a2` (JARVIS-001…100). Del 2 er IKKE startet.
+- **Gjort i repoet (kode + tester, kjørt lokalt/CI):** modellflate = eksplisitt lesende 5-handlingers allowlist (api + worker, boot-sjekk feiler lukket); executive `command` avvises; `/worker/tick` og `/tools/critical-demo` kun bak test-flagg; selvmodifikasjon og issue-#68-worker frosset; voice rå-lyd-dump fjernet som standard + test-adaptere feiler lukket; eksplisitt pris for alle providere (`gemma_local`=0); admin-/DB-porter på 127.0.0.1 og images pinnet til digest (`docker compose config`-bevis i `docs/remediation/PHASE_1_GATE.md`); ugyldig env = oppstartsfeil; `pnpm check:containment` i CI; host-akseptansescript krever eksplisitt samtykke.
+- **Dette er CONTAINMENT, ikke lukking.** Underliggende funn (autoritetsmodell, taint-gate, bekreftelse m.fl.) er IKKE fikset; status per funn: [`docs/remediation/FINDINGS_LEDGER.md`](remediation/FINDINGS_LEDGER.md).
+- **Ikke kontrollert (kunne ikke nås fra denne økten):** faktisk deployet commit/image og kjørende porter på NAS, PC-worker, backup/restore mot ekte data. Se [`BASELINE.md`](remediation/BASELINE.md) (operatørkommando: `ops/remediation/collect-runtime-baseline.sh`).
+- **Backup (JARVIS-007): `BLOCKED_EXTERNAL`.** Verktøy + runbook er ferdig og bevist mot lokale Postgres-klynger; ingen restore fra NAS er kjørt, så backup er IKKE verifisert. Se [`BACKUP_RESTORE_RUNBOOK.md`](remediation/BACKUP_RESTORE_RUNBOOK.md).
+- **Blokkeringer (krever Tobias/host):** NAS-baseline, første ekte backup + restore + kopi utenfor NAS, Infisical-nøkkel-escrow, deaktivering av PC-worker/schtask + PAT-rotasjon, branch protection/required review, anvendelse av fantomkostnad-kompensasjon, sletting av eksisterende voice-dumper, Q-43 (HF6 mangler → `MISSING_GOVERNING_INPUT`). Full liste: [`PHASE_1_GATE.md`](remediation/PHASE_1_GATE.md).
+- **Motsagte påstander:** `LIVE-PROVEN`/`VERIFIED`-påstander under (og i `SOVEREIGN_GRADUATION_MATRIX.md`/`RUNTIME_GATES.md`) som audit-funnene motsier er merket `CLAIM_DISPUTED_BY_AUDIT` eller dekket av banner. **Alt under denne seksjonen er HISTORISK logg per slice, ikke gjeldende status** (ADR-001, JARVIS-059/100).
+- **Neste oppgave:** Tobias/arkitekt gjennomgår PR og `PHASE 1 GATE`; deretter del 2 etter eksplisitt ordre. Dokumenthierarki: [`ADR-001`](remediation/ADR-001-dokumenthierarki.md).
+
+---
+
+
 **MERGET under D-192 (2026-10-01, commit `35075a2`): PR #217 (D-362 voice-gateway/Tailscale
 portkollisjon-fiks).** CI grønt (gitleaks/windows-git-auth/build-test, inkl. én ruled-out-as-unrelated
 flake i `embedded-postgres-port-lease.test.ts` bekreftet via én re-run), `mergeable_state: clean`, ingen

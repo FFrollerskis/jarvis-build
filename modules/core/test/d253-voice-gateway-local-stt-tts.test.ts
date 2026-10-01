@@ -28,7 +28,7 @@ describe("D-253: voice-gateway.Dockerfile bygger/henter ekte lokal STT/TTS", () 
   const dockerfile = readDockerfile();
 
   it("runtime-steget bruker et glibc-baseimage (node:*-bookworm*), ikke alpine - Piper sin offisielle binær er glibc-lenket", () => {
-    expect(dockerfile).toMatch(/FROM node:22-bookworm-slim AS runtime/);
+    expect(dockerfile).toMatch(/FROM node:22-bookworm-slim@sha256:[0-9a-f]{64} AS runtime/);
     expect(dockerfile).not.toMatch(/FROM node:22-alpine/);
   });
 
@@ -87,7 +87,7 @@ describe("D-253: voice-gateway.Dockerfile bygger/henter ekte lokal STT/TTS", () 
   });
 
   it("kjøres som en flertrinns-bygg (whisper-builder + runtime) - build-toolchainen (build-essential/cmake/git) havner ALDRI i det endelige kjøre-imaget", () => {
-    expect(dockerfile).toMatch(/FROM debian:bookworm-slim AS whisper-builder/);
+    expect(dockerfile).toMatch(/FROM debian:bookworm-slim@sha256:[0-9a-f]{64} AS whisper-builder/);
     expect(dockerfile).toMatch(/COPY --from=whisper-builder/);
   });
 });
