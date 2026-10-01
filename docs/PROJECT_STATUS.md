@@ -1,5 +1,13 @@
 # PROJECT STATUS
 
+**MERGET under D-192 (2026-10-01, commit `e133eb1`):** PR #216 (D-358/D-360/D-361) - Tobias direkte i
+chat: "merge PR #216". CI grønt på HEAD `4f917d7`, ingen åpne review-tråder, to-forelder
+`merge_method=merge`. Branch resatt til `origin/main` per konvensjon. **D-359 (Honcho) er FORTSATT
+uløst** - ingen kode ble lagt til, venter fortsatt på Tobias sitt retningsvalg (se D-359 i
+DECISIONS_AND_ASSUMPTIONS.md), uendret av denne mergingen. **IKKE live-testet av Tobias på NAS-en
+ennå** for noen av D-358/D-360/D-361 - neste anbefalte steg er hans egen redeploy + faktisk bruk
+(spesielt D-361s samlede `/`-flate og D-360s Hermes-nøkkel).
+
 **Oppdatert 2026-10-01 - D-361 (BYGGET + EKTE HOST-VERIFISERT): samlet kommandosentral, del 2 av 2 ("Hermes + Honcho + sinnsyk interface"-ordren).**
 `apps/web/command.html` - et nytt HUD-skall som viser de tre allerede-hardnede sidene (nå `/chat`,
 uendret `/voice`/`/dashboard`) som samme-origin iframes bak en fane-bar, IKKE en omskrivning av deres
