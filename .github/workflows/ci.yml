@@ -25,6 +25,11 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      # Remediering del 1 (JARVIS-007): backup/restore-testen kjører de ekte verktøyene
+      # (pg_dump/pg_restore/psql + age) mot to ekte Postgres-klustre.
+      - name: Install backup tooling (age + PostgreSQL client)
+        run: sudo apt-get update && sudo apt-get install -y age postgresql-client
+
       - name: Lint
         run: pnpm lint
 
