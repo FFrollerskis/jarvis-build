@@ -238,7 +238,8 @@ export class MetaAdsTransport implements ToolTransport {
   constructor(
     private readonly growth: GrowthService,
     private readonly defaultAdAccountId: string | undefined = process.env["JARVIS_META_ADS_AD_ACCOUNT_ID"],
-    private readonly apiVersion: string = process.env["JARVIS_META_ADS_API_VERSION"] ?? DEFAULT_API_VERSION
+    // Remediering del 1 (JARVIS-083/092): en blank `KEY=` i .env er IKKE en versjon - tom/usatt = default.
+    private readonly apiVersion: string = (process.env["JARVIS_META_ADS_API_VERSION"] ?? "").trim() || DEFAULT_API_VERSION
   ) {}
 
   async invoke(action: string, parameters: Record<string, JsonValue>, credential: string): Promise<{ external_id?: string; data?: JsonValue }> {
