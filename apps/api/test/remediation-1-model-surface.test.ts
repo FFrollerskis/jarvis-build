@@ -4,6 +4,7 @@ import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "
 import {
   FORBIDDEN_MODEL_TOOL_IDS,
   MODEL_SURFACE_ALLOWLIST,
+  MODEL_SURFACE_QUARANTINE_WRITES,
   MemorySearchTransport,
   MeshToolExecutor,
   ModelSurfaceViolationError,
@@ -31,7 +32,7 @@ function productionDefinitions(): ToolDefinition[] {
     {
       additionalTools: [
         ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(fakeGatewayForExecutive))),
-        ...memoryToolDefinitions(new MemorySearchTransport(fakeRetriever))
+        ...memoryToolDefinitions(new MemorySearchTransport(fakeRetriever, {} as never))
       ]
     }
   );
@@ -56,16 +57,33 @@ describe("JARVIS-002: modellens aktive verktøyflate", () => {
     expect(defs.some((d) => d.capability_class === "C")).toBe(true);
   });
 
-  it("flaten er nøyaktig allowlisten: 5 lese-handlinger, alle klasse A", () => {
+  it("flaten er nøyaktig allowlisten: 5 lese-handlinger (klasse A) + 1 karantene-skriving (memory.propose, klasse B, D-367)", () => {
     const surface = resolveModelToolSurface(registry(defs));
-    expect(surface.map((m) => `${m.tool_id}:${m.action}`).sort()).toEqual(
-      MODEL_SURFACE_ALLOWLIST.map((a) => `${a.tool_id}:${a.action}`).sort()
-    );
-    expect(surface).toHaveLength(5);
+    const expected = [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES].map((a) => `${a.tool_id}:${a.action}`).sort();
+    expect(surface.map((m) => `${m.tool_id}:${m.action}`).sort()).toEqual(expected);
+    expect(surface).toHaveLength(6);
+    expect(MODEL_SURFACE_QUARANTINE_WRITES.map((a) => `${a.tool_id}:${a.action}`)).toEqual(["memory:propose"]);
     const byKey = new Map(defs.map((d) => [`${d.tool_id}:${d.action}`, d]));
     for (const m of surface) {
-      expect(byKey.get(`${m.tool_id}:${m.action}`)?.capability_class, `${m.tool_id}:${m.action}`).toBe("A");
+      const isQuarantineWrite = m.tool_id === "memory" && m.action === "propose";
+      expect(byKey.get(`${m.tool_id}:${m.action}`)?.capability_class, `${m.tool_id}:${m.action}`).toBe(isQuarantineWrite ? "B" : "A");
     }
+  });
+
+  it("D-367: eier-handlingene (approve/reject/list_proposals) er registrert men IKKE på modellflaten", () => {
+    const surfaceKeys = new Set(resolveModelToolSurface(registry(defs)).map((m) => `${m.tool_id}:${m.action}`));
+    const registered = new Set(defs.map((d) => `${d.tool_id}:${d.action}`));
+    for (const ownerOnly of ["memory:approve_proposal", "memory:reject_proposal", "memory:list_proposals"]) {
+      expect(registered.has(ownerOnly), ownerOnly).toBe(true);
+      expect(surfaceKeys.has(ownerOnly), ownerOnly).toBe(false);
+    }
+  });
+
+  it("D-367: memory.propose må være klasse B med nøyaktig scope [memory.propose] - ellers feiler oppstarten lukket", () => {
+    const tampered = defs.map((d) => (d.tool_id === "memory" && d.action === "propose" ? { ...d, capability_class: "C" as const } : d));
+    expect(() => resolveModelToolSurface(registry(tampered))).toThrow(/karantene-skriving må være klasse B/);
+    const wrongScope = defs.map((d) => (d.tool_id === "memory" && d.action === "propose" ? { ...d, scopes: ["memory.approve"] } : d));
+    expect(() => resolveModelToolSurface(registry(wrongScope))).toThrow(/scopes må være nøyaktig/);
   });
 
   it("modellens aktive tool-list mangler ALLE write/delete/send/pay/merge/owner-control-verktøy", () => {
@@ -77,12 +95,13 @@ describe("JARVIS-002: modellens aktive verktøyflate", () => {
     for (const forbiddenId of FORBIDDEN_MODEL_TOOL_IDS) {
       expect(surface.some((m) => m.tool_id === forbiddenId), forbiddenId).toBe(false);
     }
-    // og ingen klasse B/C/D-handling kan ha sneket seg inn
+    // og ingen klasse B/C/D-handling kan ha sneket seg inn - UNNTATT den ene, eksplisitt navngitte karantene-skrivingen (D-367)
     const surfaceKeys = new Set(surface.map((m) => `${m.tool_id}:${m.action}`));
     const exposedNonReadClasses = defs
       .filter((d) => surfaceKeys.has(`${d.tool_id}:${d.action}`))
-      .filter((d) => d.capability_class !== "A");
-    expect(exposedNonReadClasses).toEqual([]);
+      .filter((d) => d.capability_class !== "A")
+      .map((d) => `${d.tool_id}:${d.action}:${d.capability_class}`);
+    expect(exposedNonReadClasses).toEqual(["memory:propose:B"]);
   });
 
   it("modellen kan ikke kalle et verktøy utenfor flaten: MeshToolExecutor returnerer TOOL_NOT_FOUND uten å nå ToolGateway", async () => {
@@ -140,7 +159,7 @@ describe("JARVIS-002: modellens aktive verktøyflate", () => {
   it("curatedReadOnlyMeshTools returnerer en kopi - kallere kan ikke utvide den interne listen", () => {
     const copy = curatedReadOnlyMeshTools();
     copy.push({ def: { name: "x", description: "x", input_schema: { type: "object" } }, tool_id: "email", action: "send" });
-    expect(curatedReadOnlyMeshTools()).toHaveLength(5);
+    expect(curatedReadOnlyMeshTools()).toHaveLength(6);
   });
 
   it("getCapabilityStatus påstår IKKE at hele registeret er tilgjengelig når flaten er begrenset", async () => {
@@ -149,13 +168,14 @@ describe("JARVIS-002: modellens aktive verktøyflate", () => {
       health: new Map(),
       hasSecret: async () => true
     } as unknown as ToolGateway;
-    const restricted = await new ExecutiveService(gateway, { modelSurface: MODEL_SURFACE_ALLOWLIST }).getCapabilityStatus();
+    const fullSurface = [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES];
+    const restricted = await new ExecutiveService(gateway, { modelSurface: fullSurface }).getCapabilityStatus();
     const accessibleActions = restricted.chat_accessible_tools.flatMap((t) => t.actions.map((a) => `${t.tool_id}:${a}`));
-    expect(accessibleActions.sort()).toEqual(MODEL_SURFACE_ALLOWLIST.map((a) => `${a.tool_id}:${a.action}`).sort());
+    expect(accessibleActions.sort()).toEqual(fullSurface.map((a) => `${a.tool_id}:${a.action}`).sort());
     expect(restricted.model_surface).toEqual({
       restricted: true,
       registered_actions: defs.length,
-      model_accessible_actions: 5
+      model_accessible_actions: 6
     });
     // uten begrensning (legacy-bruk) oppfører den seg som før
     const unrestricted = await new ExecutiveService(gateway).getCapabilityStatus();

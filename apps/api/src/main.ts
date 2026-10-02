@@ -52,7 +52,7 @@ import {
 import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
-  MODEL_SURFACE_ALLOWLIST, resolveModelToolSurface, PgGithubRateLimitStore,
+  MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, resolveModelToolSurface, PgGithubRateLimitStore,
   TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
@@ -830,7 +830,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // `situations`/`executive`, ingen parallell registreringsvei.
     additionalTools: [
       ...situationsToolDefinitions(new SituationsTransport(situationEngine, situationDomainPauses)),
-      ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, { modelSurface: MODEL_SURFACE_ALLOWLIST }))),
+      ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, { modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES] }))),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten
       // av eier-autoritets-/session-grant-mønstrene i denne filen - IKKE en ny,
@@ -854,7 +854,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // SAMME `memoryRetriever`-instansen `conversationEngine` under gjenbruker
       // for bakgrunnskontekst - se `memoryRetriever` sin egen filhode-kommentar
       // lenger opp for hvorfor den ble hevet ut hit.
-      ...memoryToolDefinitions(new MemorySearchTransport(memoryRetriever))
+      ...memoryToolDefinitions(new MemorySearchTransport(memoryRetriever, memoryWriter))
     ]
   })) toolGateway.register(tool);
   // REMEDIERING DEL 1 (JARVIS-002): `allMeshTools()` (hele registeret) er IKKE

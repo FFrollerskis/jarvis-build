@@ -259,6 +259,13 @@ const GOVERNANCE_MUTATE_ACTIONS = [
 const OWNER_CONTROLS_CONNECTOR_ACTIONS = ["set_connector_credential", "test_connector"] as const;
 
 /**
+ * D-367: eierens godkjenning av modellens minneforslag (`memory.propose` -> karantene). EGEN rute og EGET hardkodet
+ * allowlist; handlingene står IKKE på modellens verktøyflate, og ruten krever et grant fra en innrullert enhet - modellen
+ * kan altså aldri godkjenne sine egne forslag. Samme kroppsform/avslagsrekkefølge som `/owner-controls/connector-credentials`.
+ */
+const MEMORY_PROPOSAL_ACTIONS = ["list_proposals", "approve_proposal", "reject_proposal"] as const;
+
+/**
  * Task #124 (UA-11 Executive dashboard-UI, MUTASJONS-DELEN, D-199 §7s eget
  * eksplisitt utsatte gap): de 12 `executive.*`-mutasjonshandlingene
  * (`pause_domain`/`resume_domain`/`resolve_situation`/`activate_kill_switch`/
@@ -926,6 +933,35 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     }
     const result = await deps.executive.gateway.execute({
       identity: resolved.identity, tool_id: "owner_controls", action, parameters
+    });
+    if (!result.ok) {
+      return json(res, 403, { error: "tool_denied", reason: result.reason });
+    }
+    return json(res, 200, { ok: true, data: result.data, session_id: resolved.identity.session_id });
+  }
+
+  if (deps.executive && req.method === "POST" && url.pathname === "/memory/proposals") {
+    const raw: unknown = await readBodyOrUndefined(req);
+    const parsedBody = grantBodyOrReject(res, raw, EXECUTIVE_QUERY_BODY_KEYS);
+    if (!parsedBody) return;
+    if (typeof parsedBody["action"] !== "string") {
+      return json(res, 400, { error: "malformed_request", reason: "grant_malformed", request_id: requestIdOf(res) });
+    }
+    const action = parsedBody["action"];
+    if (!(MEMORY_PROPOSAL_ACTIONS as readonly string[]).includes(action)) {
+      return json(res, 400, { error: "malformed_request", reason: "action_not_allowed" });
+    }
+    const parameters =
+      typeof parsedBody["parameters"] === "object" && parsedBody["parameters"] !== null && !Array.isArray(parsedBody["parameters"])
+        ? (parsedBody["parameters"] as Record<string, JsonValue>)
+        : {};
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
+    if (!resolved.ok) {
+      if (resolved.responded) return;
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+    }
+    const result = await deps.executive.gateway.execute({
+      identity: resolved.identity, tool_id: "memory", action, parameters
     });
     if (!result.ok) {
       return json(res, 403, { error: "tool_denied", reason: result.reason });

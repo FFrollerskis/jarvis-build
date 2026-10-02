@@ -48,16 +48,17 @@ describe("per-enhet rate limit på grantBodyOrReject-rutene (P3-a)", () => {
   });
   afterAll(async () => { await close?.(); });
 
-  it("etter grensen svarer ALLE grant-rutene 429 (også /executive/query og /governance/query), og verktøyet kalles ikke mer", async () => {
+  it("etter grensen svarer ALLE grant-rutene 429 (også /executive/query og /memory/proposals), og verktøyet kalles ikke mer", async () => {
     const call = (path: string, body: unknown) => fetch(`${url}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     const statuses: number[] = [];
     statuses.push((await call("/executive/query", { grant_token: "good", action: "get_attention_queue" })).status);
-    statuses.push((await call("/governance/query", { grant_token: "good", action: "list_decisions" })).status);
+    statuses.push((await call("/memory/proposals", { grant_token: "good", action: "list_proposals" })).status);
     statuses.push((await call("/executive/query", { grant_token: "good", action: "get_control_surface_status" })).status);
     expect(statuses).toEqual([200, 200, 200]);
     const before = executed.length;
     for (const [path, body] of [
       ["/executive/query", { grant_token: "good", action: "get_attention_queue" }],
+      ["/memory/proposals", { grant_token: "good", action: "list_proposals" }],
       ["/governance/query", { grant_token: "good", action: "list_decisions" }],
       ["/owner-controls/connector-credentials", { grant_token: "good", action: "test_connector" }]
     ] as const) {

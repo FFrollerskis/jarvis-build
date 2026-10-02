@@ -4,7 +4,7 @@ import type { IdentityContext, MemorySpace, TrustLevel } from "@jarvis/contracts
 import { writeAudit } from "@jarvis/core";
 import type { PolicyGateway } from "@jarvis/policy";
 import type { EmbeddingProvider } from "./embedding.ts";
-import type { ExtractionAdapter, MemoryCandidate } from "./extraction.ts";
+import type { ExtractionAdapter, MemoryCandidate, MemoryType } from "./extraction.ts";
 import { withMemoryTransaction } from "./spaces.ts";
 
 export interface SourceRef {
@@ -37,6 +37,12 @@ interface ItemRow {
  * - endringer versjoneres (motstrid markeres, skjules aldri)
  * - all skriving auditeres i samme transaksjon
  */
+const PROPOSAL_MAX_SUBJECT = 120;
+const PROPOSAL_MAX_CONTENT = 1000;
+const PROPOSAL_TYPES: readonly MemoryType[] = [
+  "semantic", "episodic", "preference", "procedure", "relation", "project", "operational", "decision", "commitment"
+];
+
 export class MemoryWriter {
   constructor(
     private readonly pool: pg.Pool,
@@ -200,6 +206,71 @@ export class MemoryWriter {
       );
       await writeAudit(client, identity, { type: "memory.invalidate", payload: { memory_item_id: itemId, reason } });
       return { op: "INVALIDATE", memory_item_id: itemId } as const;
+    });
+  }
+
+  /**
+   * D-367: modell-initiert «husk dette» - ALLTID karantene, aldri direkte autoritativt minne (regel 7).
+   * Kilden er `tool`/untrusted (aldri `conversation`/trusted som automatisk uttrekk bruker), så `apply()` gir
+   * `quarantined` (og skriver ingen embedding, så det kommer aldri fram i `search()` før eieren godkjenner).
+   * Space er ALLTID `identity.memory_space_id` - modellen kan ikke velge space. Et forslag kan aldri overskrive
+   * en trusted/aktiv rad (`apply()` gir da QUARANTINED_CONFLICT med eget emne).
+   */
+  async propose(
+    identity: IdentityContext,
+    input: { subject: string; content: string; type?: MemoryType }
+  ): Promise<ApplyOutcome> {
+    const subject = typeof input.subject === "string" ? input.subject.trim() : "";
+    const content = typeof input.content === "string" ? input.content.trim() : "";
+    const type = input.type ?? "semantic";
+    // eslint-disable-next-line no-control-regex
+    const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+    if (subject.length < 1 || subject.length > PROPOSAL_MAX_SUBJECT || CONTROL.test(subject)) throw new Error("invalid_proposal_subject");
+    if (content.length < 1 || content.length > PROPOSAL_MAX_CONTENT || CONTROL.test(content)) throw new Error("invalid_proposal_content");
+    if (!PROPOSAL_TYPES.includes(type)) throw new Error("invalid_proposal_type");
+    const candidate: MemoryCandidate = {
+      space: identity.memory_space_id as MemorySpace,
+      type, subject, content, confidence: 0.5
+    };
+    return this.apply(identity, { kind: "tool", ref: `memory.propose:${identity.session_id}`, trust: "untrusted" }, candidate);
+  }
+
+  /** Åpne (karantene-)forslag fra `memory.propose` for eierens space - kun lesing, kun forslag (kilde `tool`). */
+  async listProposals(identity: IdentityContext): Promise<Array<{ memory_item_id: string; subject: string; content: string; type: string; proposed_at: string }>> {
+    const space = identity.memory_space_id as MemorySpace;
+    return withMemoryTransaction(this.pool, identity.tenant_id, [space], async (client) => {
+      const result = await client.query(
+        `SELECT m.memory_item_id, m.subject, m.content, m.type, m.observed_at
+           FROM memory_items m JOIN memory_sources s ON s.source_id = m.source_id
+          WHERE m.tenant_id = $1 AND m.space = $2 AND m.owner_person_id = $3
+            AND m.status = 'quarantined' AND s.kind = 'tool'
+          ORDER BY m.observed_at DESC LIMIT 50`,
+        [identity.tenant_id, space, identity.person_id]
+      );
+      return result.rows.map((r: { memory_item_id: string; subject: string; content: string; type: string; observed_at: Date | string }) => ({
+        memory_item_id: r.memory_item_id, subject: r.subject, content: r.content, type: r.type,
+        proposed_at: new Date(r.observed_at).toISOString()
+      }));
+    });
+  }
+
+  /** Eierens avvisning av et karantene-forslag: invalideres (ikke slettet - sporbart), aldri autoritativt. Klasse B via Policy Gateway. */
+  async rejectFromQuarantine(identity: IdentityContext, space: MemorySpace, itemId: string): Promise<boolean> {
+    const decision = await this.policy.authorize({
+      identity,
+      toolCall: { tool_id: "memory", action: "reject_quarantined", capability_class: "B", parameters: { memory_item_id: itemId } }
+    });
+    if (decision.decision !== "ALLOW") return false;
+    return withMemoryTransaction(this.pool, identity.tenant_id, [space], async (client) => {
+      const result = await client.query(
+        `UPDATE memory_items SET status = 'invalidated', valid_to = now(), updated_at = now()
+          WHERE memory_item_id = $1 AND tenant_id = $2 AND space = $3 AND status = 'quarantined'
+          RETURNING memory_item_id`,
+        [itemId, identity.tenant_id, space]
+      );
+      if (result.rowCount === 0) return false;
+      await writeAudit(client, identity, { type: "memory.rejected", payload: { memory_item_id: itemId } });
+      return true;
     });
   }
 

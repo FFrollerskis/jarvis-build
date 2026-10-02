@@ -25,7 +25,7 @@ describe("A: apps/api/src/main.ts registrerer memory.search i SAMME additionalTo
   it("konstruerer memoryRetriever ÉN gang og gjenbruker DEN i BEGGE additionalTools OG conversationEngine - ikke to separate instanser", () => {
     const constructions = mainSource.match(/new MemoryRetriever\(/g) ?? [];
     expect(constructions).toHaveLength(1);
-    expect(mainSource).toContain("new MemorySearchTransport(memoryRetriever)");
+    expect(mainSource).toContain("new MemorySearchTransport(memoryRetriever, memoryWriter)");
     // D-283: `memory:` er nå et lite komposisjonsobjekt (contextFor + ingest)
     // i stedet for `memoryRetriever` direkte - `contextFor` DELEGERER fortsatt
     // til DEN SAMME instansen, se egen påstand under.
@@ -49,12 +49,12 @@ describe("A: apps/api/src/main.ts registrerer memory.search i SAMME additionalTo
     );
   });
 
-  it("kaller memoryToolDefinitions(new MemorySearchTransport(memoryRetriever)) INNI additionalTools - IKKE et separat, parallelt registreringssted", () => {
+  it("kaller memoryToolDefinitions(new MemorySearchTransport(memoryRetriever, memoryWriter)) INNI additionalTools - IKKE et separat, parallelt registreringssted", () => {
     const callIdx = mainSource.indexOf("firstWaveTools({");
     expect(callIdx).toBeGreaterThan(-1);
     const callBlock = mainSource.slice(callIdx, mainSource.indexOf("})) toolGateway.register(tool);", callIdx));
     expect(callBlock).toContain("additionalTools: [");
-    expect(callBlock).toContain("...memoryToolDefinitions(new MemorySearchTransport(memoryRetriever))");
+    expect(callBlock).toContain("...memoryToolDefinitions(new MemorySearchTransport(memoryRetriever, memoryWriter))");
   });
 });
 

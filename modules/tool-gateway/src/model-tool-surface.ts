@@ -27,6 +27,16 @@ export const MODEL_SURFACE_ALLOWLIST: ReadonlyArray<{ readonly tool_id: string; 
   { tool_id: "memory", action: "search" }
 ];
 
+/**
+ * D-367: de ENESTE skrivehandlingene modellen har, og de er bevisst smale: skriver KUN til karantene
+ * (`memory.propose`), aldri autoritativt, aldri ekstern effekt. Eier-handlingene (`approve_proposal`/
+ * `reject_proposal`/`list_proposals`) står IKKE her - de nås kun via grant-ruten `/memory/proposals`.
+ * Utvidelse krever en ny beslutning og at `assertReadOnlyModelSurface()` fortsatt består.
+ */
+export const MODEL_SURFACE_QUARANTINE_WRITES: ReadonlyArray<{ readonly tool_id: string; readonly action: string; readonly scope: string }> = [
+  { tool_id: "memory", action: "propose", scope: "memory.propose" }
+];
+
 /** Verktøy-id-er som ALDRI kan stå på modellflaten (eier-kontroll, selvmodifikasjon, infra, penger, deploy, automasjon). */
 export const FORBIDDEN_MODEL_TOOL_IDS: ReadonlyArray<string> = [
   "owner_controls",
@@ -70,8 +80,21 @@ export function assertReadOnlyModelSurface(
   const violations: string[] = [];
   const registered = new Map(gateway.list().map((d) => [key(d.tool_id, d.action), d]));
   const mappedKeys = new Set(mappings.map((m) => key(m.tool_id, m.action)));
-  const allowKeys = new Set(MODEL_SURFACE_ALLOWLIST.map((a) => key(a.tool_id, a.action)));
+  const allowKeys = new Set([...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES].map((a) => key(a.tool_id, a.action)));
 
+  for (const a of MODEL_SURFACE_QUARANTINE_WRITES) {
+    const k = key(a.tool_id, a.action);
+    if (FORBIDDEN_MODEL_TOOL_IDS.includes(a.tool_id)) violations.push(`${k}: forbudt verktøy-id`);
+    const def = registered.get(k);
+    const skippedAsUnregistered = options.allowUnregistered === true && !def;
+    if (!mappedKeys.has(k) && !skippedAsUnregistered) violations.push(`${k}: mangler eksplisitt mesh-mapping`);
+    if (!def) {
+      if (!options.allowUnregistered) violations.push(`${k}: ikke registrert i ToolGateway`);
+    } else {
+      if (def.capability_class !== "B") violations.push(`${k}: karantene-skriving må være klasse B (var ${def.capability_class})`);
+      if (def.scopes.length !== 1 || def.scopes[0] !== a.scope) violations.push(`${k}: scopes må være nøyaktig [${a.scope}]`);
+    }
+  }
   for (const a of MODEL_SURFACE_ALLOWLIST) {
     const k = key(a.tool_id, a.action);
     if (FORBIDDEN_MODEL_TOOL_IDS.includes(a.tool_id)) violations.push(`${k}: forbudt verktøy-id`);
