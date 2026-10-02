@@ -366,21 +366,11 @@ describe("Akseptanse 2: modellkall har kostnad knyttet til session/task", () => 
 });
 
 describe("Akseptanse 3: kritisk verktøy (klasse D) i kjørende app", () => {
-  const identityBody = {
-    person_id: "person-tobias",
-    tenant_id: "tenant-personal",
-    memory_space: "personal",
-    session_id: "sess-critical",
-    device_id: "dev-web",
-    channel: "web",
-    auth_strength: "active"
-  };
-
   async function criticalDemo(approval?: SignedApproval) {
     const response = await fetch(`${baseUrl}/tools/critical-demo`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ identity: identityBody, parameters: { confirm: true }, approval })
+      body: JSON.stringify({ grant_token: await authorize(webIdentity), parameters: { confirm: true }, approval })
     });
     return { status: response.status, body: (await response.json()) as Record<string, unknown> };
   }

@@ -23,6 +23,19 @@ export function fingerprintPem(pem: string): string {
  * Klient-sendt device_id alene stoles aldri på: forhøyet auth_strength og
  * klasse D-godkjenninger krever signatur fra REGISTRERT enhetsnøkkel.
  */
+/** Kastes av `issueChallenge()` når antallet utestående nonces er over grensen (JARVIS-063). */
+export class ChallengeLimitError extends Error {
+  constructor(readonly scope: "global") {
+    super(`challenge_limit_exceeded:${scope}`);
+    this.name = "ChallengeLimitError";
+  }
+}
+
+/** Øvre grenser for utestående (ikke-forbrukte, ikke-utløpte) nonces. Minnet er aldri ubegrenset. */
+const MAX_OUTSTANDING_CHALLENGES = 5_000;
+const MAX_OUTSTANDING_CHALLENGES_PER_DEVICE = 10;
+const CHALLENGE_TTL_MS = 60_000;
+
 export class DeviceService {
   private readonly challenges = new Map<string, { device_id: string; expires: number }>();
 
@@ -110,8 +123,28 @@ export class DeviceService {
 
   /** Challenge-respons: klienten signerer en engangs-nonce med enhetsnøkkelen. */
   issueChallenge(deviceId: string): string {
+    const now = Date.now();
+    // Utløpte nonces ryddes FØR grensen sjekkes - ellers ville en rolig periode
+    // etter et flom-forsøk fortsatt vært avvist.
+    const mine: string[] = [];
+    for (const [nonce, entry] of this.challenges) {
+      if (entry.expires < now) {
+        this.challenges.delete(nonce);
+      } else if (entry.device_id === deviceId) {
+        mine.push(nonce);
+      }
+    }
+    // Per enhet EVIKTES den eldste i stedet for å avvise: ellers kunne en
+    // uautentisert klient som kjenner en device_id låse eieren ute fra å få
+    // en nonce (DoS). Map bevarer innsettingsrekkefølgen, så `mine[0]` er eldst.
+    while (mine.length >= MAX_OUTSTANDING_CHALLENGES_PER_DEVICE) {
+      this.challenges.delete(mine.shift() as string);
+    }
+    if (this.challenges.size >= MAX_OUTSTANDING_CHALLENGES) {
+      throw new ChallengeLimitError("global");
+    }
     const challenge = `chal-${randomUUID()}`;
-    this.challenges.set(challenge, { device_id: deviceId, expires: Date.now() + 60_000 });
+    this.challenges.set(challenge, { device_id: deviceId, expires: now + CHALLENGE_TTL_MS });
     return challenge;
   }
 
