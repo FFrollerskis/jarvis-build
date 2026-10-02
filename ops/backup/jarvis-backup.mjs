@@ -12,6 +12,7 @@
  */
 import { rmSync } from "node:fs";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { DEFAULT_DATABASES, runBackup } from "./lib/backup.mjs";
 import { backupAgeHours, pruneBackupSets, runRestoreVerify } from "./lib/restore-verify.mjs";
 import { makeRunner } from "./lib/runner.mjs";
@@ -86,7 +87,9 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   return 1;
 }
 
-const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname);
+// D-372: sammenlign file://-URL-er. `new URL(..).pathname` gir `/C:/...` på Windows, så main() kjørte aldri og verktøyet
+// avsluttet med exit 0 uten å ha gjort noe (falsk grønn restore-verifisering).
+const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 if (isMain) {
   main().then((code) => { process.exitCode = code; }).catch((err) => {
     console.error(`[jarvis-backup] FAILED: ${String(err.message).slice(0, 400)}`);
