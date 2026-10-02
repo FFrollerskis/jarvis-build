@@ -53,7 +53,19 @@ Ingen `env_file`, ingen Docker-socket, ingen `privileged`/`cap_add`.
 
 ## 4. Kvalitetsporter (kjørt i denne økten)
 
-<<GATES>>
+| Kommando | Resultat |
+|---|---|
+| `pnpm -r typecheck` | exit 0 (alle pakker) |
+| `pnpm exec eslint . --ignore-pattern ".claude/**"` | 0 feil, 0 advarsler. (`pnpm lint` uten ignore feiler lokalt med ~1000 feil som alle ligger i git-ignorert `.claude/worktrees/`, som ikke finnes i CI.) |
+| `pnpm check:containment` | `containment invariants hold` |
+| `gitleaks detect` (hele historikken) | `no leaks found` – tre falske positive (testfikstur-passord, miljønavnliste) er dokumentert i `.gitleaksignore`; historikk ikke omskrevet |
+| `docker compose --env-file <dummy> config` | OK, se §3 |
+| `vitest run` (hele repoet, embedded Postgres som ikke-root) | 416 filer / 7062 tester: 413 filer og 7038 tester passerte, 22 hoppet over, 3 filer feilet i 1. kjøring |
+| – `modules/memory/test/memory.test.ts` | **Forårsaket av denne PR-en** (testen seedet to aktive sesjoner for samme person; ny unik indeks avviser det). Seed rettet (andre sesjon `closed`); re-kjørt: 22/22 |
+| – `modules/watchdog/test/w1-production-wiring.test.ts` | **Forårsaket av denne PR-en** (strukturtest forventet `?? "tenant-personal"`). Oppdatert til `owner.tenant_id`; re-kjørt: 118/118 i watchdog-suiten |
+| – `modules/core/test/embedded-postgres-ipv4-contention.test.ts` («B.3») | **Ikke berørt av denne PR-en:** samme feil som i del 1 (miljørelatert port-/IPv4-kontensjon i sandbox-VM-en); filen og testhjelperne er uendret |
+| Del 2-spesifikke tester | control-plane-auth 55 · compose-isolasjon 39 · schema-invarianter 15 · device-revokering/sesjon 14 · policy 40 · browser-gateway 124 · url-sikring 49 · git-policy + wiring 17+ · owner-identitet 15 · static pages · job-container 18 · containment 26 (alle grønne) |
+| Full CI på PR #219 | kjører; resultat rapporteres i PR/status |
 
 ## 5. `BLOCKED_EXTERNAL` / åpne punkter (krever Tobias eller host)
 
