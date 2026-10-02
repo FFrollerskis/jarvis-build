@@ -126,7 +126,7 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     expect(callBlock).toContain("docker: new DockerTransport()");
     expect(callBlock).toContain("gce: new GceTransport()");
     expect(callBlock).toContain("mcp_zapier: new McpZapierTransport()");
-    expect(callBlock).toContain('browser: new BrowserGatewayTransport(process.env["JARVIS_BROWSER_GATEWAY_TOKEN_SECRET"])');
+    expect(callBlock).toContain('browser: new BrowserGatewayTransport(process.env["JARVIS_BROWSER_GATEWAY_TOKEN_SECRET"] ?? "")');
     expect(callBlock).toContain("vercel: new VercelTransport()");
     expect(callBlock).toContain("slack: new SlackTransport()");
     expect(callBlock).toContain("discord: new DiscordTransport()");
@@ -187,7 +187,7 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     expect(callBlock).toContain("docker: new DockerTransport()");
     expect(callBlock).toContain("gce: new GceTransport()");
     expect(callBlock).toContain("mcp_zapier: new McpZapierTransport()");
-    expect(callBlock).toContain('browser: new BrowserGatewayTransport(process.env["JARVIS_BROWSER_GATEWAY_TOKEN_SECRET"])');
+    expect(callBlock).toContain('browser: new BrowserGatewayTransport(process.env["JARVIS_BROWSER_GATEWAY_TOKEN_SECRET"] ?? "")');
     expect(callBlock).toContain("vercel: new VercelTransport()");
     expect(callBlock).toContain("slack: new SlackTransport()");
     expect(callBlock).toContain("brave_search: new BraveSearchTransport()");
