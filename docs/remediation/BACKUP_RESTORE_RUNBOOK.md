@@ -1,6 +1,6 @@
 # Runbook – kryptert backup og restore-verifisering (JARVIS-007)
 
-**Status: `BLOCKED_EXTERNAL`.** Verktøyet er bygget og testet mot to ekte PostgreSQL-klustre (`modules/core/test/remediation-1-backup-restore.test.ts`, kjører i CI). **Ingen backup er tatt av produksjonsdatabasen og ingen restore er bevist på NAS-en.** Backup kan først kalles *verifisert* når steg 5 under har gått grønt mot et ekte sett. Til da: `BLOCKED_EXTERNAL`.
+**Status (2026-10-02): `RESTORE_VERIFISERT` for ett sett.** Backup `jarvis-backup-20261002T211007Z` ble tatt på NAS-en og restore-verifisert på Tobias' Windows-PC (Git Bash + Docker Desktop): `ok: true`, tabeller og eksakte radtall lik manifestet for jarvis (130/9019), infisical (188/954) og langfuse (40/373). **Fortsatt åpent:** daglig cron, flere kopier utenfor NAS, nøkkel-escrow, full katastrofe-restore til produksjon, sletting av ukryptert dump i `backups/stray/`.
 
 ## Hva som dekkes
 
