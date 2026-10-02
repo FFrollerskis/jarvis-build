@@ -6,7 +6,7 @@ import type { AddressInfo } from "node:net";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { approvalSigningBytes, type ApprovalPayload, type IdentityContext, type SignedApproval } from "@jarvis/contracts";
+import { signApproval, type ApprovalPayload, type IdentityContext, type JsonValue, type SignedApproval } from "@jarvis/contracts";
 import {
   ChannelSessionAuthority,
   ContextBuilder,
@@ -84,17 +84,18 @@ const webIdentity = {
   channel: "web"
 } as const;
 
-function makeApproval(overrides: Partial<ApprovalPayload> = {}): SignedApproval {
-  const payload: ApprovalPayload = {
+function makeApproval(overrides: Partial<Omit<ApprovalPayload, "parameters_hash">> & { parameters?: Record<string, JsonValue> } = {}): SignedApproval {
+  return signApproval(watchKeys.privateKey, {
+    tool_id: "demo",
     action: "critical_demo",
+    tenant_id: webIdentity.tenant_id,
+    person_id: webIdentity.person_id,
+    approver_person_id: webIdentity.person_id,
     parameters: { confirm: true },
-    expires_at: new Date(Date.now() + 60_000).toISOString(),
     nonce: `nonce-${randomUUID()}`,
     approving_device_id: "watch-1",
     ...overrides
-  };
-  const signature = sign(null, approvalSigningBytes(payload), watchKeys.privateKey).toString("base64");
-  return { ...payload, signature };
+  });
 }
 
 /**
@@ -211,7 +212,7 @@ beforeAll(async () => {
   });
 
   const devices = new InMemoryDeviceRegistry();
-  devices.register("watch-1", watchKeys.publicKey);
+  devices.register("watch-1", watchKeys.publicKey, { tenant_id: "tenant-personal", person_id: "person-tobias" });
   const policy = new PolicyGateway({
     devices,
     nonces: new PgApprovalStore(appPool),

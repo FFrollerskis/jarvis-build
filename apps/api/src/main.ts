@@ -840,6 +840,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       ...ownerControlsToolDefinitions(new OwnerControlsTransport(new OwnerControlsService(killSwitch, ownerControls, {
         pool,
         grants: grantService,
+        devices: new DeviceService(pool),
         authority: ownerControlAuthority
       }), toolGateway)),
       // UA-11 Executive Mode "K2" (D-64): decision log/scenarios/risk register/
