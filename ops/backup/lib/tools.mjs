@@ -7,6 +7,8 @@ import { join } from "node:path";
  * disk: pg_dump output is piped straight into `age`.
  */
 export function findBinary(name, env = process.env) {
+  // D-370: a host without `age` (e.g. the NAS) points JARVIS_AGE_BIN at ops/backup/age-docker.sh.
+  if (name === "age" && env.JARVIS_AGE_BIN && existsSync(env.JARVIS_AGE_BIN)) return env.JARVIS_AGE_BIN;
   const dirs = (env.PATH ?? "").split(":").filter(Boolean);
   try {
     for (const v of readdirSync("/usr/lib/postgresql").sort().reverse()) dirs.push(join("/usr/lib/postgresql", v, "bin"));
