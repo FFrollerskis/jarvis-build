@@ -49,6 +49,15 @@ const record = (shape: z.ZodRawShape) => z.object(shape).strict() as unknown as 
  * har IKKE et `permission_id`-parameter (den OPPRETTER en) og bruker derfor
  * bevisst IKKE denne - den grovere fil-eksistens-sjekken er riktig for den.
  */
+/** Del 3: etterbetingelse for `create_permission` - en tilgang med forespurt rolle/type/mottaker finnes nå. */
+function drivePermissionCreated(data: JsonValue, parameters: Record<string, JsonValue>): boolean {
+  const permissions = (data as { permissions?: Array<{ role?: unknown; type?: unknown; emailAddress?: unknown; domain?: unknown }> } | null)?.permissions ?? [];
+  return permissions.some((p) =>
+    p?.role === parameters["role"] && p?.type === parameters["type"] &&
+    (parameters["email_address"] === undefined || p?.emailAddress === parameters["email_address"]) &&
+    (parameters["domain"] === undefined || p?.domain === parameters["domain"]));
+}
+
 function drivePermissionIdExists(data: JsonValue, parameters: Record<string, JsonValue>): boolean {
   const permissions = (data as { permissions?: Array<{ id?: unknown }> } | null)?.permissions ?? [];
   return permissions.some((p) => p?.id === parameters["permission_id"]);
@@ -145,7 +154,9 @@ export function firstWaveTools(
       capability_class: "D", scopes: ["mail.send"], reversible: false,
       rollback_procedure: "ikke reverserbar - derfor klasse D", idempotent_external: false,
       timeout_ms: 15_000, rate_limit_per_minute: 5, credential_ref: "JARVIS_EMAIL_TOKEN",
-      output_trust: "internal", transport: transport("email")
+      output_trust: "internal", transport: transport("email"),
+      // Del 3: ingen forhåndseksisterende tilstand - mottaker valideres i transporten, Gmail sin melding-ID er etterbetingelsen.
+      class_d_profile: "outbound_message"
     },
     {
       tool_id: "drive", action: "read_document", description: "Les dokument (untrusted ingestion)",
@@ -274,7 +285,8 @@ export function firstWaveTools(
       scopes: ["drive.delete"], reversible: false,
       rollback_procedure: "ikke reverserbar - derfor klasse D", idempotent_external: true,
       timeout_ms: 15_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_GOOGLE_TOKEN",
-      output_trust: "internal", transport: transport("drive"), preflight_action: "get_metadata", preflight_requires_target: true
+      output_trust: "internal", transport: transport("drive"), preflight_action: "get_metadata", preflight_requires_target: true,
+      postcondition_target_absent: true
     },
     {
       // Deling/tilgangsstyring er sikkerhetskritisk (kan eksponere innhold for
@@ -289,7 +301,8 @@ export function firstWaveTools(
       capability_class: "D", scopes: ["drive.permissions.write"], reversible: true,
       rollback_procedure: "fjern den opprettede tilgangen (delete_permission)", idempotent_external: false,
       timeout_ms: 10_000, rate_limit_per_minute: 15, credential_ref: "JARVIS_GOOGLE_TOKEN",
-      output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions", preflight_requires_target: true
+      output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions", preflight_requires_target: true,
+      postcondition_predicate: drivePermissionCreated
     },
     {
       tool_id: "drive", action: "update_permission", description: "Endre rollen på en eksisterende Drive-deling (krever signert godkjenning for delegerte identiteter)",
@@ -298,7 +311,8 @@ export function firstWaveTools(
       rollback_procedure: "sett rollen tilbake til forrige verdi", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 15, credential_ref: "JARVIS_GOOGLE_TOKEN",
       output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions",
-      preflight_requires_target: true, preflight_target_check: drivePermissionIdExists
+      preflight_requires_target: true, preflight_target_check: drivePermissionIdExists,
+      postcondition_predicate: (after, params) => (after as { permissions?: Array<{ id?: unknown; role?: unknown }> } | null)?.permissions?.some((p) => p?.id === params["permission_id"] && p?.role === params["role"]) === true
     },
     {
       tool_id: "drive", action: "delete_permission", description: "Fjern en eksisterende Drive-deling (krever signert godkjenning for delegerte identiteter)",
@@ -307,7 +321,8 @@ export function firstWaveTools(
       rollback_procedure: "gjenopprett tilgangen manuelt (ikke automatisk reverserbar)", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 15, credential_ref: "JARVIS_GOOGLE_TOKEN",
       output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions",
-      preflight_requires_target: true, preflight_target_check: drivePermissionIdExists
+      preflight_requires_target: true, preflight_target_check: drivePermissionIdExists,
+      postcondition_predicate: (after, params) => !drivePermissionIdExists(after, params)
     },
     // UA-2 P1B-A §2: e-post-vedlegg-ingestion - full meldingslisting (body-tekst
     // + vedleggs-MIME-metadata) og separat vedleggsnedlasting. Lagt til på
@@ -1544,7 +1559,8 @@ export function firstWaveTools(
       // Q-34-revisjon: `get_pull_request` kaster allerede på et ukjent
       // `pr_number` (404 er ikke i GITHUB_RETRYABLE_STATUS, live-transports.ts)
       // - strukturelt sikkerhetsnett, ikke en oppførselsendring.
-      preflight_action: "get_pull_request", preflight_requires_target: true
+      preflight_action: "get_pull_request", preflight_requires_target: true,
+      postcondition_predicate: (after) => (after as { merged?: unknown } | null)?.merged === true
     },
     {
       // Branch-sletting er PERMANENT hvis sha-en ikke er kjent fra andre steder -
@@ -1559,7 +1575,8 @@ export function firstWaveTools(
       credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "internal", transport: transport("github"),
       // Q-34-revisjon: `get_branch` kaster allerede på en ukjent branch (samme
       // begrunnelse som merge_pr over).
-      preflight_action: "get_branch", preflight_requires_target: true
+      preflight_action: "get_branch", preflight_requires_target: true,
+      postcondition_target_absent: true
     },
     {
       // D-105 (UA-5 kriterium 1): Docker-lesehandlinger - virker mot ETHVERT
@@ -1610,7 +1627,11 @@ export function firstWaveTools(
       rollback_procedure: "docker.redeploy_container på nytt med image-verdien fra preflight-inspeksjonen (before_state)",
       idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 10,
       credential_ref: "JARVIS_DOCKER_BIN", output_trust: "internal", transport: transport("docker"),
-      preflight_action: "inspect_container", preflight_requires_target: false,
+      preflight_action: "inspect_container", preflight_requires_target: false, allows_missing_preflight_target: true,
+      postcondition_predicate: (after, params) => {
+        const c = after as { status?: unknown; image?: unknown } | null;
+        return c?.status === "running" && c?.image === params["image"];
+      },
       parameterAuthorizer: dockerTargetAuthorizer("redeploy_container")
     },
     {
@@ -1630,6 +1651,7 @@ export function firstWaveTools(
       // INGEN legitim "stopp en container som ikke finnes"-tilstand - null
       // preflight betyr her alltid "mål finnes ikke".
       preflight_action: "inspect_container", preflight_requires_target: true,
+      postcondition_predicate: (after) => (after as { status?: unknown } | null)?.status !== "running",
       parameterAuthorizer: dockerTargetAuthorizer("stop_container")
     },
     {
@@ -1641,6 +1663,7 @@ export function firstWaveTools(
       credential_ref: "JARVIS_DOCKER_BIN", output_trust: "internal", transport: transport("docker"),
       // Q-34-revisjon: samme begrunnelse som stop_container over.
       preflight_action: "inspect_container", preflight_requires_target: true,
+      postcondition_predicate: (after) => (after as { status?: unknown } | null)?.status === "running",
       parameterAuthorizer: dockerTargetAuthorizer("start_container")
     },
     // D-337 (Google Cloud "servere"-sliceen, Tobias sin eksplisitte Q-41-

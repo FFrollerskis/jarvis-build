@@ -9,7 +9,7 @@ import { assertProvidersHaveExplicitPricing, DEFAULT_PRICING, ModelGateway, trac
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport, GmailTransport,
   GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, MeshToolExecutor, resolveModelToolSurface, PgGithubRateLimitStore,
-  ToolGateway, driveTransportsIfConfigured, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets
+  ToolGateway, driveTransportsIfConfigured, firstWaveTools, telegramClassDNotifier, parseDockerMutationTargets, parseGceMutationTargets
 } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
 import { SupportService, SupportTransport } from "@jarvis/support";
@@ -173,7 +173,8 @@ const toolSecretProvider = new FallbackSecretProvider(
   infisicalSecretProvider,
   new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider())
 );
-const toolGateway = new ToolGateway(pool, policy, toolSecretProvider, ownerControls, infisicalSecretProvider);
+// Del 3 (JARVIS-013/043): samme HÅRDE klasse D-pipeline som API-prosessen (API/worker-parity); varsleren bindes rett under.
+const toolGateway = new ToolGateway(pool, policy, toolSecretProvider, ownerControls, infisicalSecretProvider, { enforce: true });
 const businessService = new BusinessService(pool);
 // UA-3 next slice (D-53): samme OpenLoopService-wiring som api - workeren sin
 // mesh-tool-executor maa kunne kalle de nye business-handlingene identisk.
@@ -450,6 +451,11 @@ for (const tool of firstWaveTools({
 const modelToolSurface = resolveModelToolSurface(toolGateway, { onlyRegistered: true });
 // Systemidentitet med unik sesjons-id per oppstart (ingen falsk fast `sess-worker`).
 const workerIdentity = systemIdentity(owner, "worker", { channel: "api" });
+toolGateway.setClassDNotifier(telegramClassDNotifier({
+  execute: (req) => toolGateway.execute({ ...req, identity: req.identity as never }),
+  secrets: toolSecretProvider,
+  identity: workerIdentity as never
+}));
 
 // D-180 (W1, D183 - retter D182 sitt REAL_INTERNAL_GAP-funn): @jarvis/watchdog
 // var FØR denne posten null-koblet til noen produksjonsprosess. Plassert HER,

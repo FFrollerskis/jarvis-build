@@ -225,7 +225,7 @@ describe("ConfirmationStore: binding, utløp, engangs, eierskap og isolasjon", (
   it("utløpt bekreftelse godtas ikke (selv om den var godkjent)", async () => {
     const c = { ...callA, parameters: { ...callA.parameters, subject: "utløp" } };
     const created = (await store.checkAndConsume(c, who, [])) as { confirmation_id: string };
-    expect(await store.decide({ tenant_id: TENANT, person_id: OWNER }, created.confirmation_id, "approve")).toBe(true);
+    expect(await store.decide({ tenant_id: TENANT, person_id: OWNER, device_id: "dev-pc" }, created.confirmation_id, "approve")).toBe(true);
     nowMs += 6 * 60_000;
     // DB-klokken avgjør forbruket (expires_at > now()): flytt utløpet bakover for å simulere tid som har gått
     await admin.query("UPDATE action_confirmations SET expires_at = now() - interval '1 minute' WHERE confirmation_id = $1", [created.confirmation_id]);
@@ -237,7 +237,7 @@ describe("ConfirmationStore: binding, utløp, engangs, eierskap og isolasjon", (
   it("avvist bekreftelse gir confirmation_rejected og utfører ikke", async () => {
     const c = { ...callA, parameters: { ...callA.parameters, subject: "avvist" } };
     const created = (await store.checkAndConsume(c, who, [])) as { confirmation_id: string };
-    expect(await store.decide({ tenant_id: TENANT, person_id: OWNER }, created.confirmation_id, "reject")).toBe(true);
+    expect(await store.decide({ tenant_id: TENANT, person_id: OWNER, device_id: "dev-pc" }, created.confirmation_id, "reject")).toBe(true);
     const r = await store.checkAndConsume(c, who, []);
     expect(r).toMatchObject({ ok: false, reason: "confirmation_rejected" });
   });
@@ -245,7 +245,7 @@ describe("ConfirmationStore: binding, utløp, engangs, eierskap og isolasjon", (
   it("binding_hash i DB er SHA-256 over kallet+person+enhet+utløp+nonce - og en manipulert rad avvises (binding mismatch)", async () => {
     const c = { ...callA, parameters: { ...callA.parameters, subject: "tamper" } };
     const created = (await store.checkAndConsume(c, who, [])) as { confirmation_id: string };
-    await store.decide({ tenant_id: TENANT, person_id: OWNER }, created.confirmation_id, "approve");
+    await store.decide({ tenant_id: TENANT, person_id: OWNER, device_id: "dev-pc" }, created.confirmation_id, "approve");
     await admin.query("UPDATE action_confirmations SET binding_hash = repeat('0', 64) WHERE confirmation_id = $1", [created.confirmation_id]);
     const r = await store.checkAndConsume(c, who, []);
     expect(r).toMatchObject({ ok: false, reason: "confirmation_binding_mismatch" });
@@ -256,7 +256,7 @@ describe("ConfirmationStore: binding, utløp, engangs, eierskap og isolasjon", (
   it("samtidig forbruk: av to samtidige forsøk vinner nøyaktig ett (engangs)", async () => {
     const c = { ...callA, parameters: { ...callA.parameters, subject: "race" } };
     const created = (await store.checkAndConsume(c, who, [])) as { confirmation_id: string };
-    await store.decide({ tenant_id: TENANT, person_id: OWNER }, created.confirmation_id, "approve");
+    await store.decide({ tenant_id: TENANT, person_id: OWNER, device_id: "dev-pc" }, created.confirmation_id, "approve");
     const results = await Promise.all([store.checkAndConsume(c, who, []), store.checkAndConsume(c, who, [])]);
     expect(results.filter((r) => r.ok)).toHaveLength(1);
   });
@@ -264,7 +264,7 @@ describe("ConfirmationStore: binding, utløp, engangs, eierskap og isolasjon", (
   it("bekreftelse for en annen enhet (device_id) gjelder ikke (bundet til enheten som ba om den)", async () => {
     const c = { ...callA, parameters: { ...callA.parameters, subject: "enhet" } };
     const created = (await store.checkAndConsume(c, who, [])) as { confirmation_id: string };
-    await store.decide({ tenant_id: TENANT, person_id: OWNER }, created.confirmation_id, "approve");
+    await store.decide({ tenant_id: TENANT, person_id: OWNER, device_id: "dev-pc" }, created.confirmation_id, "approve");
     const other = await store.checkAndConsume(c, { ...who, device_id: "dev-annen" }, []);
     expect(other.ok).toBe(false);
   });
@@ -272,7 +272,7 @@ describe("ConfirmationStore: binding, utløp, engangs, eierskap og isolasjon", (
   it("audit finnes for forespørsel, godkjenning og forbruk, og hemmeligheter i parametre havner ikke i forhåndsvisningen", async () => {
     const c = { tool_id: "email", action: "send", parameters: { to: "a@b.no", subject: "hemmelig", body: "token ghp_abcdefghijklmnopqrstuvwxyz0123456789" } };
     const created = (await store.checkAndConsume(c, who, [])) as { confirmation_id: string };
-    await store.decide({ tenant_id: TENANT, person_id: OWNER }, created.confirmation_id, "approve");
+    await store.decide({ tenant_id: TENANT, person_id: OWNER, device_id: "dev-pc" }, created.confirmation_id, "approve");
     await store.checkAndConsume(c, who, []);
     const types = (await admin.query("SELECT type FROM audit_events WHERE payload->>'confirmation_id' = $1 ORDER BY audit_id", [created.confirmation_id])).rows.map((r: { type: string }) => r.type);
     expect(types).toEqual(["confirmation.requested", "confirmation.approved", "confirmation.consumed"]);

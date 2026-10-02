@@ -418,13 +418,18 @@ describe("A4: Q-34 P2-oppfølging (uavhengig arkitektkontroll av PR #82) - dedup
 describe("C: konkret atferd per domene gjennom den EKTE ToolGateway.execute()-pipelinen", () => {
   class FakeDockerTransport implements ToolTransport {
     calls: string[] = [];
-    constructor(private readonly containerExists: boolean) {}
-    async invoke(action: string): Promise<{ external_id?: string; data?: JsonValue }> {
+    /** Del 3: stateful - etterbetingelsene (running/exited/image) leser faktisk tilstand via inspect_container. */
+    private state: { status: string; image: string } | null;
+    constructor(containerExists: boolean) {
+      this.state = containerExists ? { status: "running", image: "alpine:3.20" } : null;
+    }
+    async invoke(action: string, parameters: Record<string, JsonValue> = {}): Promise<{ external_id?: string; data?: JsonValue }> {
       this.calls.push(action);
-      if (action === "inspect_container") {
-        return this.containerExists ? { data: { status: "running" } } : { data: null };
-      }
-      return { data: { status: action === "stop_container" ? "exited" : action === "start_container" ? "running" : "running" } };
+      if (action === "inspect_container") return { data: this.state };
+      if (action === "stop_container") this.state = { status: "exited", image: this.state?.image ?? "" };
+      else if (action === "start_container") this.state = { status: "running", image: this.state?.image ?? "" };
+      else if (action === "redeploy_container") this.state = { status: "running", image: String(parameters["image"] ?? "") };
+      return { data: this.state };
     }
   }
 

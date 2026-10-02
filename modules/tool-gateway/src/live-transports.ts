@@ -323,7 +323,8 @@ export class GmailTransport implements ToolTransport {
       body: JSON.stringify({ raw })
     });
     if (!res.ok) throw new Error(`gmail_error_${res.status}`);
-    return { data: (await res.json()) as JsonValue };
+    const sent = (await res.json()) as { id?: string };
+    return { ...(typeof sent.id === "string" ? { external_id: sent.id } : {}), data: sent as JsonValue };
   }
 
   private async readInbox(parameters: Record<string, JsonValue>, auth: Record<string, string>) {
