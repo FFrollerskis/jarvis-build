@@ -40,20 +40,20 @@ describe("A: TwilioTransport.invoke('notify', ...) - POST /Messages.json, ekte s
     const calls: string[] = [];
     vi.stubGlobal("fetch", async (url: string) => { calls.push(url); return { ok: true, json: async () => ({}) } as unknown as Response; });
     const transport = new TwilioTransport(() => Promise.resolve("AC-x"), () => Promise.resolve(null));
-    await expect(transport.invoke("notify", { to: "+1", message: "hei" }, "tok")).rejects.toThrow("twilio_from_number_not_configured");
+    await expect(transport.invoke("notify", { to: "+15550000001", message: "hei" }, "tok")).rejects.toThrow("twilio_from_number_not_configured");
     expect(calls).toHaveLength(0);
   });
 
   it("mangler AccountSid -> kaster 'twilio_account_sid_not_configured'", async () => {
     vi.stubGlobal("fetch", async () => ({ ok: true, json: async () => ({}) }) as unknown as Response);
     const transport = new TwilioTransport(() => Promise.resolve(null), () => Promise.resolve("+1"));
-    await expect(transport.invoke("notify", { to: "+1", message: "hei" }, "tok")).rejects.toThrow("twilio_account_sid_not_configured");
+    await expect(transport.invoke("notify", { to: "+15550000001", message: "hei" }, "tok")).rejects.toThrow("twilio_account_sid_not_configured");
   });
 
   it("en HTTP-feil kaster 'twilio_error_<status>'", async () => {
     vi.stubGlobal("fetch", async () => ({ ok: false, status: 401 }) as unknown as Response);
     const transport = new TwilioTransport(() => Promise.resolve("AC-x"), () => Promise.resolve("+1"));
-    await expect(transport.invoke("notify", { to: "+1", message: "hei" }, "bad-token")).rejects.toThrow("twilio_error_401");
+    await expect(transport.invoke("notify", { to: "+15550000001", message: "hei" }, "bad-token")).rejects.toThrow("twilio_error_401");
   });
 });
 

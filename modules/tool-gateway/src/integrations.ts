@@ -141,7 +141,7 @@ export function firstWaveTools(
     {
       // Sending av e-post er klasse D i startfasen (INTEGRATIONS.md: alltid godkjenning).
       tool_id: "email", action: "send", description: "Send e-post (krever signert godkjenning)",
-      input_schema: record({ to: z.string(), subject: z.string(), body: z.string() }),
+      input_schema: record({ to: z.string().max(254), subject: z.string().max(200), body: z.string().max(100_000) }),
       capability_class: "D", scopes: ["mail.send"], reversible: false,
       rollback_procedure: "ikke reverserbar - derfor klasse D", idempotent_external: false,
       timeout_ms: 15_000, rate_limit_per_minute: 5, credential_ref: "JARVIS_EMAIL_TOKEN",
@@ -3161,7 +3161,7 @@ export function firstWaveTools(
     },
     {
       tool_id: "google_sheets", action: "update_range", description: "Overskriv celleverdier i et område (PUT /v4/spreadsheets/{id}/values/{range})",
-      input_schema: record({ spreadsheet_id: z.string(), range: z.string().max(200), values: z.array(z.array(z.union([z.string(), z.number(), z.boolean()]))) }),
+      input_schema: record({ spreadsheet_id: z.string(), range: z.string().max(200), values: z.array(z.array(z.union([z.string(), z.number(), z.boolean()]))), value_input_option: z.enum(["RAW", "USER_ENTERED"]).optional() }),
       capability_class: "B", scopes: ["https://www.googleapis.com/auth/spreadsheets"], reversible: true,
       rollback_procedure: "ny update_range-kalling med forrige verdier", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GOOGLE_SHEETS_TOKEN",
@@ -3169,7 +3169,7 @@ export function firstWaveTools(
     },
     {
       tool_id: "google_sheets", action: "append_row", description: "Legg til en NY rad nederst i et område (POST /v4/spreadsheets/{id}/values/{range}:append)",
-      input_schema: record({ spreadsheet_id: z.string(), range: z.string().max(200), row: z.array(z.union([z.string(), z.number(), z.boolean()])) }),
+      input_schema: record({ spreadsheet_id: z.string(), range: z.string().max(200), row: z.array(z.union([z.string(), z.number(), z.boolean()])), value_input_option: z.enum(["RAW", "USER_ENTERED"]).optional() }),
       capability_class: "B", scopes: ["https://www.googleapis.com/auth/spreadsheets"], reversible: false,
       rollback_procedure: "slett raden manuelt i regnearket (ingen radidentifikator returneres av API-et)", idempotent_external: false,
       timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GOOGLE_SHEETS_TOKEN",
@@ -3436,7 +3436,7 @@ export function firstWaveTools(
     {
       // Sending av e-post er klasse D, SAMME begrunnelse som email.send over.
       tool_id: "microsoft_outlook", action: "send_mail", description: "Send e-post via Outlook (POST /me/sendMail, krever signert godkjenning)",
-      input_schema: record({ to: z.string(), subject: z.string(), body: z.string() }),
+      input_schema: record({ to: z.string().max(254), subject: z.string().max(200), body: z.string().max(100_000) }),
       capability_class: "D", scopes: ["Mail.Send"], reversible: false,
       rollback_procedure: "ikke reverserbar - derfor klasse D", idempotent_external: false,
       timeout_ms: 15_000, rate_limit_per_minute: 5, credential_ref: "JARVIS_OUTLOOK_TOKEN",
