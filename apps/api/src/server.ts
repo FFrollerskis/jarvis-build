@@ -293,19 +293,33 @@ const EXECUTIVE_MUTATE_ACTIONS = [
  * Stille ignorering er farlig her: en klient (eller en fremtidig
  * refaktorering) kunne ellers TRO at feltet virket.
  */
-function parseGrantBody<K extends readonly string[]>(raw: unknown, allowedKeys: K): Record<string, unknown> | null {
+/**
+ * Remediering del 2 (JARVIS-001): SAMME avvisningsrekkefølge og -koder som `authedRequest` for de grant-beskyttede rutene som
+ * tolker kroppen selv (chat/brief/executive/governance): ikke-objekt -> 400, forbudt identitetsfelt -> 400
+ * `identity_field_forbidden`, ukjent felt -> 400, manglende grant -> 401 `grant_required`. Sender svaret selv og returnerer null.
+ */
+function grantBodyOrReject<K extends readonly string[]>(res: ServerResponse, raw: unknown, allowedKeys: K): Record<string, unknown> | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    json(res, 400, { error: "malformed_request", request_id: requestIdOf(res) });
     return null;
   }
   const obj = raw as Record<string, unknown>;
+  const forbidden = FORBIDDEN_IDENTITY_BODY_KEYS.find((key) => key in obj);
+  if (forbidden !== undefined) {
+    json(res, 400, { error: "identity_field_forbidden", field: forbidden, request_id: requestIdOf(res) });
+    return null;
+  }
   if (Object.keys(obj).some((key) => !(allowedKeys as readonly string[]).includes(key))) {
+    json(res, 400, { error: "malformed_request", reason: "unknown_field", request_id: requestIdOf(res) });
     return null;
   }
   if (typeof obj["grant_token"] !== "string" || obj["grant_token"].length === 0) {
+    json(res, 401, { error: "grant_required", request_id: requestIdOf(res) });
     return null;
   }
   return obj;
 }
+
 
 /**
  * D-131 funn 1: DEN ENE veien fra et framlagt bærer-bevis til en
@@ -741,9 +755,10 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
   }
 
   if (req.method === "POST" && url.pathname === "/chat") {
-    const parsedBody = parseGrantBody(await readBody(req), CHAT_BODY_KEYS);
-    if (!parsedBody || typeof parsedBody["message"] !== "string") {
-      return json(res, 400, { error: "malformed_request", reason: "grant_malformed" });
+    const parsedBody = grantBodyOrReject(res, await readBody(req), CHAT_BODY_KEYS);
+    if (!parsedBody) return;
+    if (typeof parsedBody["message"] !== "string") {
+      return json(res, 400, { error: "malformed_request", reason: "grant_malformed", request_id: requestIdOf(res) });
     }
     const body: ChatBody = {
       grant_token: parsedBody["grant_token"] as string,
@@ -823,10 +838,8 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
   if (deps.brief && req.method === "POST" && url.pathname === "/brief") {
     // D-131 funn 1: identisk autoritetsmodell som `/chat` over - `/brief` var
     // den ANDRE ruten som oppgraderte en rå sesjons-ID til `signed`.
-    const parsedBody = parseGrantBody(await readBody(req), BRIEF_BODY_KEYS);
-    if (!parsedBody) {
-      return json(res, 400, { error: "malformed_request", reason: "grant_malformed" });
-    }
+    const parsedBody = grantBodyOrReject(res, await readBody(req), BRIEF_BODY_KEYS);
+    if (!parsedBody) return;
     const body: BriefBody = { grant_token: parsedBody["grant_token"] as string };
     const resolved = await resolveFromGrant(deps, body.grant_token);
     if (!resolved.ok) {
@@ -848,9 +861,10 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     // UANSETT FØR selve `toolGateway.execute()`-kallet - identisk rekkefølge
     // som `/chat`.
     const raw: unknown = await readBodyOrUndefined(req);
-    const parsedBody = parseGrantBody(raw, EXECUTIVE_QUERY_BODY_KEYS);
-    if (!parsedBody || typeof parsedBody["action"] !== "string") {
-      return json(res, 400, { error: "malformed_request", reason: "grant_malformed" });
+    const parsedBody = grantBodyOrReject(res, raw, EXECUTIVE_QUERY_BODY_KEYS);
+    if (!parsedBody) return;
+    if (typeof parsedBody["action"] !== "string") {
+      return json(res, 400, { error: "malformed_request", reason: "grant_malformed", request_id: requestIdOf(res) });
     }
     const action = parsedBody["action"];
     if (!(EXECUTIVE_QUERY_ACTIONS as readonly string[]).includes(action)) {
@@ -879,9 +893,10 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     // action FØR grantet løses, avvis et ugyldig/utløpt grant FØR
     // gateway.execute() nås).
     const raw: unknown = await readBodyOrUndefined(req);
-    const parsedBody = parseGrantBody(raw, EXECUTIVE_QUERY_BODY_KEYS);
-    if (!parsedBody || typeof parsedBody["action"] !== "string") {
-      return json(res, 400, { error: "malformed_request", reason: "grant_malformed" });
+    const parsedBody = grantBodyOrReject(res, raw, EXECUTIVE_QUERY_BODY_KEYS);
+    if (!parsedBody) return;
+    if (typeof parsedBody["action"] !== "string") {
+      return json(res, 400, { error: "malformed_request", reason: "grant_malformed", request_id: requestIdOf(res) });
     }
     const action = parsedBody["action"];
     if (!(OWNER_CONTROLS_CONNECTOR_ACTIONS as readonly string[]).includes(action)) {
@@ -912,9 +927,10 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     // "finance" direkte) - executive-laget videresender selv, nøstet, med
     // UENDRET identitet (§2 i design-notatet).
     const raw: unknown = await readBodyOrUndefined(req);
-    const parsedBody = parseGrantBody(raw, EXECUTIVE_QUERY_BODY_KEYS);
-    if (!parsedBody || typeof parsedBody["action"] !== "string") {
-      return json(res, 400, { error: "malformed_request", reason: "grant_malformed" });
+    const parsedBody = grantBodyOrReject(res, raw, EXECUTIVE_QUERY_BODY_KEYS);
+    if (!parsedBody) return;
+    if (typeof parsedBody["action"] !== "string") {
+      return json(res, 400, { error: "malformed_request", reason: "grant_malformed", request_id: requestIdOf(res) });
     }
     const action = parsedBody["action"];
     if (!(EXECUTIVE_MUTATE_ACTIONS as readonly string[]).includes(action)) {
@@ -945,9 +961,10 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     // (`governanceToolDefinitions()` registrert i main.ts), INGEN ny
     // ApiDeps-nøkkel.
     const raw: unknown = await readBodyOrUndefined(req);
-    const parsedBody = parseGrantBody(raw, EXECUTIVE_QUERY_BODY_KEYS);
-    if (!parsedBody || typeof parsedBody["action"] !== "string") {
-      return json(res, 400, { error: "malformed_request", reason: "grant_malformed" });
+    const parsedBody = grantBodyOrReject(res, raw, EXECUTIVE_QUERY_BODY_KEYS);
+    if (!parsedBody) return;
+    if (typeof parsedBody["action"] !== "string") {
+      return json(res, 400, { error: "malformed_request", reason: "grant_malformed", request_id: requestIdOf(res) });
     }
     const action = parsedBody["action"];
     if (!(GOVERNANCE_QUERY_ACTIONS as readonly string[]).includes(action)) {
@@ -977,9 +994,10 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     // fulgte). ALLE ti handlingene er klasse A/B - INGEN klasse C/D-
     // preflight-krav her, i motsetning til /executive/mutate.
     const raw: unknown = await readBodyOrUndefined(req);
-    const parsedBody = parseGrantBody(raw, EXECUTIVE_QUERY_BODY_KEYS);
-    if (!parsedBody || typeof parsedBody["action"] !== "string") {
-      return json(res, 400, { error: "malformed_request", reason: "grant_malformed" });
+    const parsedBody = grantBodyOrReject(res, raw, EXECUTIVE_QUERY_BODY_KEYS);
+    if (!parsedBody) return;
+    if (typeof parsedBody["action"] !== "string") {
+      return json(res, 400, { error: "malformed_request", reason: "grant_malformed", request_id: requestIdOf(res) });
     }
     const action = parsedBody["action"];
     if (!(GOVERNANCE_MUTATE_ACTIONS as readonly string[]).includes(action)) {
@@ -1045,7 +1063,8 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       ? (body as Record<string, unknown>)["device_id"] : undefined;
     if (typeof body !== "object" || body === null || Array.isArray(body)
       || Object.keys(body).some((key) => key !== "device_id")
-      || typeof deviceId !== "string" || deviceId.length === 0 || deviceId.length > 200) {
+      || typeof deviceId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(deviceId)) {
+      // JARVIS-063: enhets-id har et lukket tegnsett (ingen stier/mellomrom/kontrolltegn) og maks 128 tegn.
       return json(res, 400, { error: "malformed_request", request_id: requestIdOf(res) });
     }
     try {
