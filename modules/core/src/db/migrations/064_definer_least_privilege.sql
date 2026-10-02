@@ -65,7 +65,7 @@ GRANT EXECUTE ON FUNCTION jarvis_session_grant_tenant(text) TO jarvis_app;
 -- Remediering del 2 (JARVIS-076): scope-FK for identitetskritiske grants. `session_grants.device_id`/`session_id` pekte på
 -- `devices`/`sessions` med ENKELTKOLONNE-FK uten tenant_id - en FK-kontroll omgår RLS, så et grant i tenant A kunne
 -- referere en enhet/sesjon i tenant B. Nå komposittnøkler (tenant_id, id): et grant kan KUN referere rader i SAMME tenant.
--- (Resten av tenant-kryssende FK-er er registrert som baseline i remediation-2-schema-invariants.test.ts - DEFERRED, Q-41.)
+-- (Resten av tenant-kryssende FK-er er registrert som baseline i remediation-2-schema-invariants.test.ts - DEFERRED, Q-44.)
 ALTER TABLE devices ADD CONSTRAINT devices_tenant_device_uk UNIQUE (tenant_id, device_id);
 ALTER TABLE sessions ADD CONSTRAINT sessions_tenant_session_uk UNIQUE (tenant_id, session_id);
 ALTER TABLE session_grants DROP CONSTRAINT session_grants_device_id_fkey;

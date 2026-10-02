@@ -1,4 +1,4 @@
-import { assertGithubRepoSlug, encodePathSegment, guardedFetch } from "./url-safety.ts";
+import { guardedFetch } from "./url-safety.ts";
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolTransport } from "./gateway.ts";
 import { googleAccessToken } from "./live-transports.ts";

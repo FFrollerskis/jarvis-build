@@ -219,6 +219,7 @@ export function createCodingHandler(deps: {
         credentialSlug = ref.slug;
       } else {
         // Uten credential (lokale/test-repoer): ingen option-injeksjon (`--upload-pack=...`) og ingen `ext::`-transport.
+        // eslint-disable-next-line no-control-regex
         if (input.repo_url.startsWith("-") || /^ext::/i.test(input.repo_url) || /[\u0000-\u001f]/.test(input.repo_url)) {
           throw new GitPolicyError("repo_url_invalid");
         }

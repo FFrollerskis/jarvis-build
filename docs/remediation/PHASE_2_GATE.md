@@ -1,0 +1,71 @@
+# PHASE 2 GATE – Remediering del 2 av 10 (nettverk, autentisering, enheter, secrets, isolasjon)
+
+| Felt | Verdi |
+|---|---|
+| Dato | 2026-10-02 |
+| Branch | `remediation/02-identity-network-isolation` (stablet på `remediation/01-containment-baseline` / PR #218) |
+| PR | draft, **IKKE merget** (`PR_DEL2`) |
+| Beslutning | D-364 · Q-44 · Q-45 |
+| Uavhengig review | **IKKE gjort** – verken del 1 eller del 2. Denne filen er Claude sin egen evidens, ikke en godkjenning. |
+
+## 1. Gate-utfall
+
+**`PHASE 2 GATE: PASS` på repo-nivå (alle akseptansekriterier har atferdsbevis), med `BLOCKED_EXTERNAL` for runtime-verifisering.**
+
+- Alle åtte akseptansepunkter i ordren er dekket av tester som kjører mot ekte Postgres, ekte Chromium, ekte `git`, ekte HTTP-servere eller (compose/Dockerfile) strukturelt – se §2.
+- **Ingenting er `VERIFIED` i runtime.** Sandbox-VM-en har ingen Docker-daemon, ingen NAS, ingen Swift-verktøykjede og ingen GitHub App. Ikke-root/read-only/seccomp/Chromium-sandbox i KJØRENDE containere, live-DB-migrering (063/064, nye roller), Infisical/Langfuse under `infisical_app`/`langfuse_app` og Swift-klienten er derfor `BLOCKED_EXTERNAL` (§5).
+- Del 2 er stablet på del 1 (PR #218), som heller ikke er gjennomgått. Ingen funn er erklært lukket.
+
+## 2. Bevismatrise mot akseptansekriteriene
+
+Statusvokabular: ADR-001 §2.4. Tall er kjørt i denne økten (§4).
+
+| Akseptanse / krav | Tiltak (kode) | Bevis (test/kommando) | Status |
+|---|---|---|---|
+| **Ingen relevant route godtar tillitsskapende identity-felt fra body** (krav 1, 2, 8) | `authedRequest`/`grantBodyOrReject` i `apps/api/src/server.ts`: forbudte felt (`person_id`, `tenant_id`, `memory_space`, `session_id`, `device_id`, `channel`, `auth_strength`, `owner_person_id`, …) = 400 `identity_field_forbidden`; hviteliste per rute; `/devices/challenge/verify` fjernet | `apps/api/test/remediation-2-control-plane-auth.test.ts` B: **hvert** forbudt felt × **hver** av 19 kontrollruter, selv med gyldig grant; `executive-query-e2e`, `d131-authority-hardening-e2e`, `session-authority-e2e` (oppdatert) | `CODE_FIXED` |
+| **Ukjent/revokert device og feil grant får 401/403 på alle kontrollflater** (krav 1, 3) | 401 `grant_required`, 403 `identity_denied`; permanent revokering (`revoked_device_keys`), `PgDeviceRegistry.approverFor` uten cache | `remediation-2-control-plane-auth.test.ts` A (19 ruter × 3 manglende-token-former + 4 bogus-grants), C (revokert enhet: 403 på alle 19, ny autorisasjon nektes; ukjent enhet, feil nøkkel, gjenbrukt challenge, feil person/tenant), D (20 parallelle autorisasjoner → én aktiv sesjon); `remediation-2-device-revocation-session.test.ts` (14) | `CODE_FIXED` |
+| Godkjenninger bundet til tool/action/parametre/tenant/person/approver/issued_at/expiry/nonce; Ed25519 ved enrollment (krav 3) | `packages/contracts/src/approval.ts` v2, `modules/policy/*`, `device-service.ts` | `modules/policy/test/policy-gateway.test.ts` (40: hver binding avvises med egen årsak, TTL, skew, eier-rolle, utsatt nonce), `remediation-2-device-revocation-session.test.ts` | `CODE_FIXED` (Swift-klient `UNVERIFIED`) |
+| **Ingen nettverksbane fra browser kan nå interne metadata-/DB-/vault-adresser** (krav 4) | service-token; privat `browser`-nett (kun api/worker/gateway); `egress-proxy` (DNS én gang, alle svar offentlige, redirect/subressurs/WebSocket via proxy, loopback/RFC1918/link-local/CGNAT/169.254.169.254/compose-verter blokkert); per-kall `BrowserContext`; `chromiumSandbox:true` påkrevd | `apps/browser-gateway/test/*` (egress-policy, egress-proxy med DNS-rebinding/blandede svar, `engine-egress.test.ts` med EKTE Chromium mot loopback-server, redirect til loopback, `http://`/`https://` til interne mål), `remediation-2-compose-isolation.test.ts` (browser kun på `browser`-nett, ingen host-port, seccomp-fil) | `CODE_FIXED`; Chromium-sandbox/seccomp i container `BLOCKED_EXTERNAL` |
+| **Worker-miljøet inneholder ikke vault master key eller unødvendige leverandørnøkler** (krav 6) | `infra/local/service-env.mjs` (kilde), generert `environment:` per tjeneste, ingen `env_file`, `NEVER_IN_RUNTIME` | `remediation-2-compose-isolation.test.ts` A/B (39): compose = manifest; worker/api/voice/browser får aldri `INFISICAL_ENCRYPTION_KEY`/`INFISICAL_AUTH_SECRET`/`JARVIS_DB_ADMIN_*`/`NEXTAUTH_SECRET`/`SALT`/`LANGFUSE_*`; worker får ikke webhook-/medie-/meldingsnøkler; browser får kun port + token; `docker compose config` (dummy-env) rendret og kontrollert | `CODE_FIXED` |
+| **Ingen generell kommando kan startes fra en task contract** (krav 5, 7) | executive `command` avvises (`executive_command_disabled`) og er fjernet i handleren; `test_command` kun kjente testløpere (`assertTestCommand`); `JobContainerPolicy`/`resolveJobSandboxRunner` feiler lukket; ingen Docker-socket; git fjernet fra api-image | `modules/tasks/test/remediation-2-job-container.test.ts` (18), `remediation-2-git-policy.test.ts`, `coding-git-auth-wiring.test.ts` (O: `sh -c`, `node -e`, `curl`, `npm install` avvist før sandbox), `fase6-worker.test.ts`, `check-containment` | `CODE_FIXED`; ingen runner konfigurert (Q-45) |
+| **Ikke-root og least-privilege bevises i compose-/prosesstest** (krav 6) | Dockerfiler `USER node`/`pwuser`; `x-hardening` (cap_drop ALL, no-new-privileges, read_only, tmpfs); `infisical_app`/`langfuse_app`/`jarvis_runtime` (NOSUPERUSER/NOBYPASSRLS); `jarvis_definer` | `remediation-2-compose-isolation.test.ts` C + D (bootstrap-SQL mot ekte Postgres: roller, eierskapsoverdragelse av eksisterende DB, idempotens, isolasjon mellom DB-er, ingen CREATEROLE/CREATEDB, passordrotasjon, fail closed uten/for kort passord), `ops/security/test/check-containment.test.mjs` (26), `remediation-2-schema-invariants.test.ts` | `CODE_FIXED` (struktur + ekte Postgres); **kjørende container ikke-root: `BLOCKED_EXTERNAL`** |
+| Git-credentials (krav 7) | `git-policy.ts`, `git-auth.ts` (credential kun protokoll+vert+repo-sti), `coding.ts`, `task-service.ts` | `coding-git-auth-wiring.test.ts` (M–P), `git-auth.test.ts`, `git-credential-isolation.test.ts` (ekte git ↔ lokal smart-HTTP), `remediation-2-git-policy.test.ts` | `CODE_FIXED` (kortlevd GitHub-identitet: Q-45) |
+| Én eier-identitet (krav 8) | `owner-config.ts`, `owner.ts`, `systemIdentity`, HTML-injeksjon | `remediation-2-owner-identity.test.ts` (15, ekte prosess: exit 1 uten konfig), `owner-config.test.ts`, `remediation-2-static-pages.test.ts` | `CODE_FIXED` |
+| SECURITY DEFINER/RLS/scope (krav 9) | migrasjon 064, `serializeMemorySpaces`, SCRAM-verifier | `remediation-2-schema-invariants.test.ts` (15): alle definer-funksjoner eid av ikke-superbruker/ikke-BYPASSRLS, virker for vanlig `jarvis_app`-medlem; RLS-unntaksliste; `true`-policyer; FK-baseline; komma/mellomrom-GUC fail closed; klartekst aldri i DDL | `CODE_FIXED` (DEFERRED: Q-44/Q-45) |
+| HTTP/DB/compose-atferdstester (krav 10): uautent., spoofing, revokert, samtidig, fremmed tenant, SSRF (direkte/redirect/DNS), container-secret-isolasjon | se over | spoofing + fremmed tenant: `remediation-2-control-plane-auth.test.ts` B («hendelse i tenant A usynlig for B»); SSRF: `apps/browser-gateway/test/*` + `engine-egress`; secrets: `remediation-2-compose-isolation.test.ts` | `CODE_FIXED` |
+| URL-/frontend-/DoS-hardening (JARVIS-063/064/066/091) | `http-guard.ts`, nonce-CSP, `guardedFetch` | `remediation-2-control-plane-auth.test.ts` E/F, `remediation-2-static-pages.test.ts`, `modules/tool-gateway/test/remediation-2-url-safety.test.ts` (49) | `CODE_FIXED` (JARVIS-066 delvis: Q-45) |
+
+## 3. Statiske bevis (compose)
+
+`docker compose --env-file <dummy> -f infra/local/docker-compose.yml config` (kun parsing, ingen daemon):
+
+| Tjeneste | Host-port | Nett | Hardening |
+|---|---|---|---|
+| api | `127.0.0.1:3010` | `core`, `browser` | `x-hardening` |
+| worker | – | `core`, `browser` | `x-hardening` |
+| migrate | – | `core` | `x-hardening` (engangs, admin-rolle) |
+| voice-gateway | `127.0.0.1:3020` | `core` | `x-hardening` |
+| browser-gateway | – | **kun `browser`** | cap_drop ALL, no-new-privileges, **seccomp-profil**, read_only, tmpfs, `USER pwuser` |
+| postgres / infisical / langfuse | `127.0.0.1` | `core` | no-new-privileges (tredjeparts-images) |
+| db-bootstrap / infisical-redis | – | `core` | – |
+
+Ingen `env_file`, ingen Docker-socket, ingen `privileged`/`cap_add`.
+
+## 4. Kvalitetsporter (kjørt i denne økten)
+
+<<GATES>>
+
+## 5. `BLOCKED_EXTERNAL` / åpne punkter (krever Tobias eller host)
+
+1. **Runtime-verifisering på NAS** etter redeploy: `docker compose up -d --build`, så `docker top`/`docker exec id` (ikke-root), `docker inspect` (ReadonlyRootfs, CapDrop, SecurityOpt), `ss -tln`, og at Chromium faktisk starter med `chromiumSandbox:true` under `browser-gateway.seccomp.json` (ellers feiler gatewayen lukket – ingen stille nedgradering).
+2. **`.env`-oppdatering før redeploy** (api/worker/migrate nekter å starte uten): `JARVIS_TENANT_ID`, `JARVIS_OWNER_PERSON_ID`, `JARVIS_OWNER_NAME`, `INFISICAL_DB_PASSWORD`, `LANGFUSE_DB_PASSWORD`, `JARVIS_BROWSER_GATEWAY_TOKEN_SECRET`, `JARVIS_GIT_ALLOWED_REPOS` (se `.env.example`).
+3. **Live-DB-migrering 063/064** (`jarvis_definer`, komposittnøkler, unik sesjonsindeks som rydder duplikat-aktive sesjoner) og **`db-bootstrap` mot eksisterende `jarvis-pgdata`-volum** (eierskapsoverdragelse for `infisical`/`langfuse`): ta backup først (del 1-runbook), kontroller at Infisical og Langfuse starter under de nye rollene.
+4. **Swift-klienten** (`apps/mobile`): ny godkjenningssignering er skrevet men IKKE kompilert/kjørt – bygg og test på macOS.
+5. **Vertsside job-runner** for kodejobber og **kortlevd GitHub-identitet** (GitHub App) – Q-45. Inntil da feiler hver kodejobb lukket.
+6. **Revokering av eksisterende enheter** som skal ut av bruk, og kontroll av at ingen aktive grants overlever nøkkelrotasjon på host.
+7. Alle `BLOCKED_EXTERNAL` fra del 1 er uendret (backup/NAS-baseline, PC-worker, branch protection, fantomkostnad-kompensasjon).
+8. Uavhengig arkitekt-review av BEGGE PR-er før merge (CLAUDE.md).
+
+## 6. Bevisst IKKE gjort
+
+Del 3 (taint-gate/ubetrodd-innhold, bekreftelsesmodell for utvidet verktøyflate, kostnads-/budsjettgrenser, øvrige `OPEN` funn). Q-44-gjelden (≈113 tenant-kryssende FK-er) og `memory_items`-unikhet er kun *låst som baseline*, ikke migrert. Non-extractable nettleser-nøkkel (JARVIS-066 delvis) er ikke bygget. Ingen vertsside job-runner er bygget (kun grensesnittet + fail-closed).

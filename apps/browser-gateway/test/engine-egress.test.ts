@@ -19,7 +19,7 @@ const hasChromium = existsSync(CHROMIUM);
 
 let internal: Server;
 let publicSite: Server;
-let internalHits: string[] = [];
+const internalHits: string[] = [];
 let proxy: EgressProxy;
 let engine: PlaywrightBrowserEngine;
 

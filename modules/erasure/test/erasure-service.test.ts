@@ -1,11 +1,11 @@
-import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import type { IdentityContext, JsonValue, SignedApproval } from "@jarvis/contracts";
+import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import { signApproval } from "@jarvis/contracts";
 import { createPool, failErasureRequest, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";

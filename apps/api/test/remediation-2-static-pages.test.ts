@@ -109,9 +109,8 @@ describe("JARVIS-066: escapeHtml escaper anførselstegn (attributt-injeksjon)", 
   for (const file of ["voice.html", "dashboard.html"]) {
     it(`${file}: escapeHtml("\\"><img onerror=x>") inneholder ingen rå " eller <`, () => {
       const html = readFileSync(`${WEB_DIR}${file}`, "utf8");
-      const body = /function escapeHtml\(text\) \{[\s\S]*?\n  \}/.exec(html)?.[0] as string;
+      const body = /function escapeHtml\(text\) \{[\s\S]*?\n {2}\}/.exec(html)?.[0] as string;
       expect(body).toBeDefined();
-      // eslint-disable-next-line @typescript-eslint/no-implied-eval
       const escapeHtml = new Function(`${body}; return escapeHtml;`)() as (t: unknown) => string;
       const out = escapeHtml(`"><img src=x onerror='alert(1)'>&\``);
       expect(out).not.toMatch(/["'<>`]/);

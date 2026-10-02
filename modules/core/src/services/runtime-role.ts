@@ -42,7 +42,6 @@ export function scramSha256Verifier(password: string, salt: Buffer = randomBytes
 }
 
 function passwordLiteral(password: string): string {
-  // eslint-disable-next-line no-control-regex
   return /^[\u0020-\u007e]+$/.test(password) ? quoteLiteral(scramSha256Verifier(password)) : quoteLiteral(password);
 }
 

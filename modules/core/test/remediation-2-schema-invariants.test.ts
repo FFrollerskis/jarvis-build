@@ -190,7 +190,7 @@ describe("B/C: RLS-dekning og policyer (JARVIS-076)", () => {
     const rows = r.rows as Array<{ tablename: string; policyname: string; roles: string; qual: string | null; with_check: string | null }>;
     const nonDefiner = rows.filter((x) => x.roles !== "{jarvis_definer}").map((x) => `${x.tablename}.${x.policyname}`);
     // people_via_membership: `WITH CHECK (true)` lar en tenant-kontekst opprette `people`-rader (identitetsposter uten tenant-data)
-    // FØR medlemskapsraden finnes; lesing/endring er fortsatt begrenset av USING (medlemskap). Se D-364 / Q-41.
+    // FØR medlemskapsraden finnes; lesing/endring er fortsatt begrenset av USING (medlemskap). Se D-364 / Q-44.
     expect(nonDefiner).toEqual(["people.people_via_membership"]);
     expect(rows.find((x) => x.policyname === "people_via_membership")?.with_check).toBe("true");
     expect(rows.find((x) => x.policyname === "people_via_membership")?.qual).not.toBe("true");
@@ -211,7 +211,7 @@ describe("D: scope-FK-baseline (JARVIS-076)", () => {
     return (r.rows as Array<{ id: string }>).map((x) => x.id);
   }
 
-  it("ingen NYE tenant-kryssende FK-er (baseline kan bare krympe) - eksisterende gjeld er registrert som DEFERRED (Q-41)", async () => {
+  it("ingen NYE tenant-kryssende FK-er (baseline kan bare krympe) - eksisterende gjeld er registrert som DEFERRED (Q-44)", async () => {
     const current = await currentViolations();
     if (process.env["JARVIS_UPDATE_SCOPE_FK_BASELINE"] === "1") {
       await writeFile(BASELINE, `${JSON.stringify(current, null, 2)}\n`, "utf8");
