@@ -54,6 +54,11 @@ describe("produksjonskode har ingen konkurrerende eier-kilder", () => {
   it.each(["main.ts", "worker-main.ts", "migrate-main.ts", "enroll-ticket-main.ts"])("%s: kaller ownerConfigOrExit()", (file) => {
     expect(read(join(API_SRC, file))).toContain("ownerConfigOrExit()");
   });
+  it("main.ts gir serveren eier-identiteten (ellers 503 owner_not_configured på /chat, /dashboard, /voice i produksjon)", () => {
+    const src = read(join(API_SRC, "main.ts"));
+    const deps = src.slice(src.indexOf("const deps: ApiDeps = {"));
+    expect(deps).toMatch(/owner:\s*\{\s*tenant_id:\s*owner\.tenant_id,\s*person_id:\s*owner\.owner_person_id\s*\}/);
+  });
   it("ingen falske faste sesjons-id-er (sess-brief/sess-worker/sess-coding/...) i prosessinngangene", () => {
     for (const file of ["main.ts", "worker-main.ts"]) {
       const src = read(join(API_SRC, file));

@@ -968,6 +968,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     personality: loadPersonalityConfig
   });
   const deps: ApiDeps = {
+    // Del 2 (JARVIS-065): den validerte eier-identiteten fyller visningsfeltene i /chat, /dashboard og /voice
+    // (aldri autoritet - den kommer fra et verifisert grant). Uten denne svarer sidene 503 `owner_not_configured`.
+    owner: { tenant_id: owner.tenant_id, person_id: owner.owner_person_id },
     identity: identityService,
     devices: deviceService,
     grants: grantService,
