@@ -88,7 +88,7 @@ describe("D: firstWaveTools() registrerer n8n.list_workflows som klasse A og n8n
     expect(listWorkflows.output_trust).toBe("untrusted");
     expect(listWorkflows.idempotent_external).toBe(true);
     const activateWorkflow = tools.find((t) => t.action === "activate_workflow")!;
-    expect(activateWorkflow.capability_class).toBe("B");
+    expect(activateWorkflow.capability_class).toBe("C");
     expect(activateWorkflow.credential_ref).toBe("JARVIS_N8N_API_KEY");
     expect(activateWorkflow.reversible).toBe(true);
   });

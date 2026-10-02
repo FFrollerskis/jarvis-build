@@ -91,10 +91,10 @@ describe("C: en ukjent handling kaster 'telnyx_unsupported_action_<action>'", ()
 });
 
 describe("D: firstWaveTools() registrerer begge telnyx.*-handlinger med korrekt risikoklasse", () => {
-  it("telnyx.notify er klasse B (reell sideeffekt)", () => {
+  it("telnyx.notify er klasse C (betalt SMS, Del 3)", () => {
     const tool = firstWaveTools().find((t) => t.tool_id === "telnyx" && t.action === "notify");
     expect(tool).toBeDefined();
-    expect(tool!.capability_class).toBe("B");
+    expect(tool!.capability_class).toBe("C");
     expect(tool!.credential_ref).toBe("JARVIS_TELNYX_API_KEY");
   });
 

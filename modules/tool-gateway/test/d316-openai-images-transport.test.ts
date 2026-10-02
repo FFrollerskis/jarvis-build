@@ -83,7 +83,7 @@ describe("D: firstWaveTools() registrerer openai_images.list_models som klasse A
     expect(listModels.output_trust).toBe("untrusted");
     expect(listModels.idempotent_external).toBe(true);
     const generateImage = tools.find((t) => t.action === "generate_image")!;
-    expect(generateImage.capability_class).toBe("B");
+    expect(generateImage.capability_class).toBe("C");
     expect(generateImage.credential_ref).toBe("JARVIS_OPENAI_IMAGES_API_KEY");
     expect(generateImage.idempotent_external).toBe(false);
   });

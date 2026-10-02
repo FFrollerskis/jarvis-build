@@ -107,10 +107,10 @@ describe("D: en ukjent handling kaster 'twilio_unsupported_action_<action>'", ()
 });
 
 describe("E: firstWaveTools() registrerer alle tre twilio.*-handlinger med korrekt risikoklasse", () => {
-  it("twilio.notify er klasse B (reell sideeffekt)", () => {
+  it("twilio.notify er klasse C (betalt SMS, Del 3)", () => {
     const tool = firstWaveTools().find((t) => t.tool_id === "twilio" && t.action === "notify");
     expect(tool).toBeDefined();
-    expect(tool!.capability_class).toBe("B");
+    expect(tool!.capability_class).toBe("C");
     expect(tool!.credential_ref).toBe("JARVIS_TWILIO_AUTH_TOKEN");
   });
 

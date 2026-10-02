@@ -27,7 +27,7 @@ function updatesResponse(updates: Array<{ update_id: number; chat: string; text:
     json: async () => ({
       result: updates.map((u) => ({
         update_id: u.update_id,
-        message: { chat: { id: Number(u.chat) }, text: u.text }
+        message: { chat: { id: Number(u.chat), type: "private" }, from: { id: Number(u.chat) }, text: u.text }
       }))
     })
   } as unknown as Response;

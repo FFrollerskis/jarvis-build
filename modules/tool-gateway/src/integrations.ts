@@ -1462,7 +1462,7 @@ export function firstWaveTools(
     {
       tool_id: "github", action: "comment_on_issue", description: "Kommenter på et issue eller en PR (samme endepunkt)",
       input_schema: record({ repo: z.string(), issue_number: z.string(), body: z.string() }),
-      capability_class: "B", scopes: ["repo:write"], reversible: true,
+      capability_class: "C", scopes: ["repo:write"], reversible: true,
       rollback_procedure: "ingen automatisk sletting av kommentaren bygget - manuell oppfølging", idempotent_external: false,
       timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GITHUB_TOKEN",
       output_trust: "internal", transport: transport("github")
@@ -1502,7 +1502,7 @@ export function firstWaveTools(
     {
       tool_id: "github", action: "rerun_workflow_run", description: "Kjør en Actions-workflow-kjøring på nytt (valgfri failed_only for kun feilede jobber)",
       input_schema: record({ repo: z.string(), run_id: z.string(), failed_only: z.boolean().optional() }),
-      capability_class: "B", scopes: ["repo:write"], reversible: true,
+      capability_class: "C", scopes: ["repo:write"], reversible: true,
       rollback_procedure: "github.cancel_workflow_run", idempotent_external: false,
       timeout_ms: 15_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_GITHUB_TOKEN",
       output_trust: "internal", transport: transport("github")
@@ -1510,7 +1510,7 @@ export function firstWaveTools(
     {
       tool_id: "github", action: "cancel_workflow_run", description: "Avbryt en pågående Actions-workflow-kjøring",
       input_schema: record({ repo: z.string(), run_id: z.string() }),
-      capability_class: "B", scopes: ["repo:write"], reversible: true,
+      capability_class: "C", scopes: ["repo:write"], reversible: true,
       rollback_procedure: "github.rerun_workflow_run", idempotent_external: false,
       timeout_ms: 15_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_GITHUB_TOKEN",
       output_trust: "internal", transport: transport("github")
@@ -2946,7 +2946,7 @@ export function firstWaveTools(
      */
     {
       tool_id: "slack", action: "notify", description: "Send melding til en Slack-kanal (chat.postMessage)",
-      input_schema: record({ channel: z.string(), message: z.string().max(4000) }), capability_class: "B",
+      input_schema: record({ channel: z.string(), message: z.string().max(4000) }), capability_class: "C",
       scopes: ["chat:write"], reversible: true, rollback_procedure: "send korreksjonsmelding",
       idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_SLACK_BOT_TOKEN", output_trust: "internal", transport: transport("slack")
@@ -2987,7 +2987,7 @@ export function firstWaveTools(
      */
     {
       tool_id: "discord", action: "notify", description: "Send melding til en Discord-kanal (POST /channels/{id}/messages)",
-      input_schema: record({ channel_id: z.string(), message: z.string().max(2000) }), capability_class: "B",
+      input_schema: record({ channel_id: z.string(), message: z.string().max(2000) }), capability_class: "C",
       scopes: ["SEND_MESSAGES"], reversible: true, rollback_procedure: "send korreksjonsmelding",
       idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_DISCORD_BOT_TOKEN", output_trust: "internal", transport: transport("discord")
@@ -3025,7 +3025,7 @@ export function firstWaveTools(
      */
     {
       tool_id: "twilio", action: "notify", description: "Send SMS (POST /Messages.json)",
-      input_schema: record({ to: z.string(), message: z.string().max(1600) }), capability_class: "B",
+      input_schema: record({ to: z.string(), message: z.string().max(1600) }), capability_class: "C",
       scopes: ["sms:send"], reversible: true, rollback_procedure: "send korreksjonsmelding",
       idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_TWILIO_AUTH_TOKEN", output_trust: "internal", transport: transport("twilio")
@@ -3468,7 +3468,7 @@ export function firstWaveTools(
     {
       tool_id: "n8n", action: "activate_workflow", description: "Aktiver en workflow (POST /api/v1/workflows/{id}/activate)",
       input_schema: record({ id: z.string() }),
-      capability_class: "B", scopes: ["workflow:write"], reversible: true,
+      capability_class: "C", scopes: ["workflow:write"], reversible: true,
       rollback_procedure: "deaktiver workflowen manuelt i n8n sitt UI (deactivate_workflow ikke bygget ennå)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_N8N_API_KEY", output_trust: "internal", transport: transport("n8n")
@@ -3518,7 +3518,7 @@ export function firstWaveTools(
     {
       tool_id: "whatsapp", action: "notify", description: "Send melding via WhatsApp (POST /{phone_number_id}/messages)",
       input_schema: record({ to: z.string(), message: z.string().max(4096) }),
-      capability_class: "B", scopes: ["whatsapp_business_messaging"], reversible: true,
+      capability_class: "C", scopes: ["whatsapp_business_messaging"], reversible: true,
       rollback_procedure: "send korreksjonsmelding", idempotent_external: false,
       timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_WHATSAPP_TOKEN", output_trust: "internal", transport: transport("whatsapp")
@@ -3541,7 +3541,7 @@ export function firstWaveTools(
     {
       tool_id: "make", action: "run_scenario", description: "Kjør en scenario (POST /api/v2/scenarios/{id}/run)",
       input_schema: record({ scenario_id: z.string() }),
-      capability_class: "B", scopes: ["scenarios:run"], reversible: true,
+      capability_class: "C", scopes: ["scenarios:run"], reversible: true,
       rollback_procedure: "ingen generell angrehandling - avhenger av hva scenarioet faktisk gjør, vurderes per scenario",
       idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_MAKE_API_KEY", output_trust: "internal", transport: transport("make")
@@ -3566,7 +3566,7 @@ export function firstWaveTools(
     {
       tool_id: "openai_images", action: "generate_image", description: "Generer et bilde fra en tekstbeskrivelse (POST /v1/images/generations, EKTE kostnad per kall)",
       input_schema: record({ prompt: z.string().max(4000), n: z.number().min(1).max(10).optional(), size: z.string().optional() }),
-      capability_class: "B", scopes: ["images:generate"], reversible: true,
+      capability_class: "C", scopes: ["images:generate"], reversible: true,
       rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kvote/kostnad, kan ikke og trenger ikke reverseres)",
       idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 10,
       credential_ref: "JARVIS_OPENAI_IMAGES_API_KEY", output_trust: "internal", transport: transport("openai_images")
@@ -3583,7 +3583,7 @@ export function firstWaveTools(
      */
     {
       tool_id: "telnyx", action: "notify", description: "Send SMS (POST /v2/messages)",
-      input_schema: record({ to: z.string(), message: z.string().max(1600) }), capability_class: "B",
+      input_schema: record({ to: z.string(), message: z.string().max(1600) }), capability_class: "C",
       scopes: ["telnyx:send"], reversible: true, rollback_procedure: "send korreksjonsmelding",
       idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_TELNYX_API_KEY", output_trust: "internal", transport: transport("telnyx")
@@ -3618,7 +3618,7 @@ export function firstWaveTools(
         promptImage: z.string(), promptText: z.string().max(1000).optional(),
         model: z.string().optional(), ratio: z.string().optional(), duration: z.number().min(1).max(60).optional()
       }),
-      capability_class: "B", scopes: ["video:generate"], reversible: true,
+      capability_class: "C", scopes: ["video:generate"], reversible: true,
       rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kreditt/kostnad, kan ikke og trenger ikke reverseres)",
       idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 5,
       credential_ref: "JARVIS_RUNWAY_API_KEY", output_trust: "internal", transport: transport("runway")
@@ -3649,7 +3649,7 @@ export function firstWaveTools(
         image_url: z.string(), prompt: z.string().max(1000).optional(),
         duration: z.string().optional(), aspect_ratio: z.string().optional()
       }),
-      capability_class: "B", scopes: ["video:generate"], reversible: true,
+      capability_class: "C", scopes: ["video:generate"], reversible: true,
       rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kreditt/kostnad, kan ikke og trenger ikke reverseres)",
       idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 5,
       credential_ref: "JARVIS_KLING_SECRET_KEY", output_trust: "internal", transport: transport("kling")
@@ -3681,7 +3681,7 @@ export function firstWaveTools(
       input_schema: record({
         prompt: z.string(), model: z.string().optional(), aspect_ratio: z.string().optional()
       }),
-      capability_class: "B", scopes: ["video:generate"], reversible: true,
+      capability_class: "C", scopes: ["video:generate"], reversible: true,
       rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kreditt/kostnad, kan ikke og trenger ikke reverseres)",
       idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 5,
       credential_ref: "JARVIS_GOOGLE_VEO_API_KEY", output_trust: "internal", transport: transport("google_veo")
@@ -3707,7 +3707,7 @@ export function firstWaveTools(
     {
       tool_id: "higgsfield", action: "generate_video", description: "Generer en video fra en tekstbeskrivelse via en NAVNGITT Higgsfield-modellsti (POST /{model_path}/text-to-video, EKTE kostnad per kall, asynkron - returnerer en request_id, poll get_task_status for resultat). model_path er PÅKREVD - Higgsfield er en multi-modell-markedsplass, ingen default-modell er valgt på forhånd",
       input_schema: record({ model_path: z.string(), prompt: z.string() }),
-      capability_class: "B", scopes: ["video:generate"], reversible: true,
+      capability_class: "C", scopes: ["video:generate"], reversible: true,
       rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kreditt/kostnad, kan ikke og trenger ikke reverseres)",
       idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 5,
       credential_ref: "JARVIS_HIGGSFIELD_KEY_SECRET", output_trust: "internal", transport: transport("higgsfield")

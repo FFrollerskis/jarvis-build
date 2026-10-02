@@ -19,8 +19,8 @@ describe("D-41 risikoklasse-matrise for github.*", () => {
   const expectedClasses: Record<string, string> = {
     read_repo_meta: "A", read_issues: "A", list_branches: "A", get_branch: "A", get_commit: "A",
     list_pull_requests: "A", get_pull_request: "A", list_workflow_runs: "A", get_workflow_run: "A", list_workflow_jobs: "A",
-    create_branch: "B", update_pr: "B", comment_on_issue: "B", set_labels: "B", request_reviewers: "B",
-    create_issue: "B", update_issue: "B", rerun_workflow_run: "B", cancel_workflow_run: "B",
+    create_branch: "B", update_pr: "B", comment_on_issue: "C", set_labels: "B", request_reviewers: "B",
+    create_issue: "B", update_issue: "B", rerun_workflow_run: "C", cancel_workflow_run: "C",
     create_pr: "C", dispatch_workflow: "C",
     merge_pr: "D", delete_branch: "D"
   };
