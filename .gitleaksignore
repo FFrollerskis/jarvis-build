@@ -75,3 +75,11 @@ b4aa30ef8f9a6d922b5f71c1802f556b88b50642:docs/DECISIONS_AND_ASSUMPTIONS.md:gener
 # connector-registry.ts, so it is not reworded to a lower-entropy form.
 b50bf5cd9177d344a91725badb962c35a5e7891b:modules/tool-gateway/src/integrations.ts:generic-api-key:3294
 b50bf5cd9177d344a91725badb962c35a5e7891b:modules/tool-gateway/src/integrations.ts:generic-api-key:3302
+
+# Remediation part 1 (PR #218): synthetic test-fixture password (a dummy value
+# passed to a fake docker-compose runner command builder to prove the password
+# is sent by NAME via `-e PGPASSWORD` and never appears in argv). Verified
+# manually: not a credential for any system. History is not rewritten (repo
+# rule); the fixture value was replaced by a low-entropy placeholder in the
+# next commit, so only the historical commit is ignored here.
+0e52d44c3aea5072ca256afd9e1e86952e88b420:modules/core/test/remediation-1-backup-restore.test.ts:generic-api-key:225

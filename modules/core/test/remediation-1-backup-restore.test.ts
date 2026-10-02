@@ -220,17 +220,20 @@ describe.skipIf(!haveTools)("kryptert backup + restore-verifisering (ekte Postgr
   }, 240_000);
 });
 
+// Ikke en ekte hemmelighet: bevisst laventropi-plassholder (gitleaks generic-api-key).
+const DUMMY_PASSWORD = "not-real";
+
 describe("runner: produksjonsbanen (docker compose exec) - kommandokonstruksjon", () => {
   it("passordet sendes ved NAVN (-e PGPASSWORD) og står aldri i argv", () => {
-    const runner = makeRunner({ mode: "docker", composeFile: "/srv/jarvis/infra/local/docker-compose.yml", user: "postgres", password: "hemmelig-pw-123" });
+    const runner = makeRunner({ mode: "docker", composeFile: "/srv/jarvis/infra/local/docker-compose.yml", user: "postgres", password: DUMMY_PASSWORD });
     const cmd = runner.command("pg_dump", ["-Fc", "--snapshot=00000003-1"], { database: "jarvis" });
     expect(cmd.file).toBe("docker");
     expect(cmd.args).toEqual([
       "compose", "-f", "/srv/jarvis/infra/local/docker-compose.yml", "exec", "-T", "-e", "PGPASSWORD", "postgres",
       "pg_dump", "-U", "postgres", "-d", "jarvis", "-Fc", "--snapshot=00000003-1"
     ]);
-    expect(cmd.args.join(" ")).not.toContain("hemmelig-pw-123");
-    expect(cmd.env["PGPASSWORD"]).toBe("hemmelig-pw-123");
+    expect(cmd.args.join(" ")).not.toContain(DUMMY_PASSWORD);
+    expect(cmd.env["PGPASSWORD"]).toBe(DUMMY_PASSWORD);
     expect(runner.endpoint).toBe("docker-compose:postgres");
   });
 
