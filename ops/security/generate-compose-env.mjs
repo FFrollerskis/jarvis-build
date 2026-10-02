@@ -34,7 +34,26 @@ export function renderEnvironment(service, indent = "      ") {
   return lines.join("\n");
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+/** Erstatter den genererte blokken for hver tjeneste direkte i compose-teksten (fra markørkommentaren til siste 6-mellomroms-linje). */
+export function rewriteCompose(text) {
+  const lines = text.split("\n");
+  for (const service of Object.keys(SERVICE_ENV)) {
+    const marker = `# GENERERT fra infra/local/service-env.mjs (SERVICE_ENV.${service})`;
+    const start = lines.findIndex((l) => l.trim().startsWith(marker));
+    if (start === -1) throw new Error(`mangler markør for ${service} i compose`);
+    let end = start + 1;
+    while (end < lines.length && /^ {6}\S/.test(lines[end])) end += 1;
+    lines.splice(start, end - start, ...renderEnvironment(service).split("\n"));
+  }
+  return lines.join("\n");
+}
+
+if (import.meta.url === `file://${process.argv[1]}` && process.argv[2] === "--write") {
+  const { readFileSync, writeFileSync } = await import("node:fs");
+  const target = new URL("../../infra/local/docker-compose.yml", import.meta.url);
+  writeFileSync(target, rewriteCompose(readFileSync(target, "utf8")));
+  console.log("docker-compose.yml oppdatert fra service-env.mjs");
+} else if (import.meta.url === `file://${process.argv[1]}`) {
   const wanted = process.argv.slice(2);
   for (const service of wanted.length ? wanted : Object.keys(SERVICE_ENV)) {
     console.log(`# --- ${service} ---\n${renderEnvironment(service)}\n`);

@@ -39,7 +39,7 @@ import {
   OllamaAdapter,
   OpenAiAdapter
 } from "@jarvis/provider-adapters";
-import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
+import { InProcessWorker, PgTaskQueue, TaskService, allowedReposFromEnv } from "@jarvis/tasks";
 import {
   LlmExtractionAdapter,
   LocalHashEmbedding,
@@ -541,7 +541,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // `SelfModificationService.proposeCodeChange()` under - ALDRI to parallelle
   // `TaskService`-konstruksjoner mot samme pool. Hevet hit (tidligere lenger ned)
   // FORDI selfModificationService (rett under) nå trenger den ved konstruksjon.
-  const taskService = new TaskService(pool, queue, policy);
+  const taskService = new TaskService(pool, queue, policy, { codingRepoAllowlist: allowedReposFromEnv(process.env) });
   // D-125/task #123 (D-214): `sendTelegram` hevet hit (tidligere lenger ned, kun
   // brukt av Telegram-pollerens svarbane/DailyScheduler) - `SelfModificationService`
   // sin nye owner-varsling (se `notify` under) trenger DEN SAMME, allerede

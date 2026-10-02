@@ -5,6 +5,7 @@ export * from "./worker.ts";
 export * from "./sandbox.ts";
 export * from "./job-container.ts";
 export * from "./git-auth.ts";
+export * from "./git-policy.ts";
 export * from "./coding.ts";
 export * from "./coding-agent-eval.ts";
 export * from "./eval-fixture-repo.ts";

@@ -41,6 +41,7 @@ import {
   ClaudeCodeAgent,
   InProcessWorker,
   PgTaskQueue,
+  allowedReposFromEnv,
   createCodingHandler,
   resolveJobSandboxRunner,
   withSecretRedaction
@@ -587,6 +588,9 @@ worker.register(
       // jobben feiler FØR clone forsøkes (`git_auth_unavailable`), ALDRI et
       // stille fall til uautentisert git.
       gitAuth: { secretProvider: new EnvSecretProvider() },
+      // Remediering del 2 (JARVIS-064): credentialen gjelder KUN github.com + disse eksakte repoene
+      // (JARVIS_GIT_ALLOWED_REPOS, ellers JARVIS_GITHUB_REPO). Tom allowlist = hver kodejobb feiler lukket.
+      allowedRepos: allowedReposFromEnv(process.env),
       github: { gateway: toolGateway }
     }),
     [process.env["ANTHROPIC_API_KEY"], process.env["JARVIS_GITHUB_TOKEN"]]
