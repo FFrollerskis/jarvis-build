@@ -158,6 +158,16 @@ describe("Del 2: isolasjon (JARVIS-009/010/011) - strukturelle invarianter", () 
       expect(v.length, extra).toBeGreaterThan(0);
     }
   });
+  it("cap_add: kun SYS_CHROOT på browser-gateway (D-365); alt annet avvises", () => {
+    const b = (extra) => checkCompose(compose(svc("browser-gateway", `${hardened}    networks: [browser]\n${extra}`)));
+    expect(b('    cap_add: ["SYS_CHROOT"]\n')).toEqual([]);
+    expect(b("    cap_add:\n      - SYS_CHROOT\n")).toEqual([]);
+    expect(b('    cap_add: ["SYS_ADMIN"]\n').length).toBeGreaterThan(0);
+    expect(b('    cap_add: ["SYS_CHROOT", "NET_ADMIN"]\n').length).toBeGreaterThan(0);
+    expect(b("    cap_add:\n      - SYS_CHROOT\n      - SYS_ADMIN\n").length).toBeGreaterThan(0);
+    // SYS_CHROOT er ikke et generelt unntak: andre tjenester får ikke legge den til.
+    expect(checkCompose(compose(svc("api", `${hardened}    cap_add: ["SYS_CHROOT"]\n`))).length).toBeGreaterThan(0);
+  });
   it("krever herding på api/worker/migrate/voice/browser", () => {
     const v = checkCompose(compose(svc("worker", "    command: [node]\n")));
     expect(v.some((x) => x.includes("drop all capabilities"))).toBe(true);

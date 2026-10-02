@@ -84,6 +84,21 @@ function pinned(imageRef) {
   return /@sha256:[0-9a-f]{64}$/.test(imageRef.trim());
 }
 
+/** Navn i `cap_add` (flow-liste `[A, B]` eller blokkliste `- A`), uten anførselstegn. */
+function capAddNames(block) {
+  const names = [];
+  for (let i = 0; i < block.length; i++) {
+    const m = /^\s{4}cap_add:\s*(.*)$/.exec(block[i] ?? "");
+    if (!m) continue;
+    const inline = (m[1] ?? "").replace(/#.*$/, "");
+    for (const t of inline.match(/[A-Za-z_]+/g) ?? []) names.push(t.toUpperCase());
+    for (let j = i + 1; j < block.length && /^\s{6}-\s*/.test(block[j] ?? ""); j++) {
+      for (const t of (block[j] ?? "").replace(/#.*$/, "").match(/[A-Za-z_]+/g) ?? []) names.push(t.toUpperCase());
+    }
+  }
+  return names;
+}
+
 export function checkCompose(text, label = "docker-compose.yml") {
   const violations = [];
   const services = parseComposeServices(text);
@@ -99,7 +114,12 @@ export function checkCompose(text, label = "docker-compose.yml") {
     if (/docker\.sock/.test(body)) violations.push(`${label}: service '${name}' mounts the Docker socket`);
     // Del 2 (JARVIS-009/010): ingen tjeneste får hele .env-settet; capabilities legges aldri til; ingen sandbox-av.
     if (/^\s{4}env_file:/m.test(body)) violations.push(`${label}: service '${name}' uses env_file (whole .env set) - list per-service variables explicitly`);
-    if (/^\s{4}cap_add:/m.test(body)) violations.push(`${label}: service '${name}' adds Linux capabilities (cap_add)`);
+    // D-365: eneste tillatte unntak er `SYS_CHROOT` på browser-gateway (Chromium-sandboxens chroot under `cap_drop: ALL`).
+    if (/^\s{4}cap_add:/m.test(body)) {
+      const added = capAddNames(block);
+      const allowed = name === "browser-gateway" && added.length === 1 && added[0] === "SYS_CHROOT";
+      if (!allowed) violations.push(`${label}: service '${name}' adds Linux capabilities (cap_add: ${added.join(",") || "?"}) - only SYS_CHROOT on browser-gateway is allowed (D-365)`);
+    }
     if (/seccomp[=:]\s*unconfined/.test(body) || /apparmor[=:]\s*unconfined/.test(body)) violations.push(`${label}: service '${name}' disables seccomp/apparmor (unconfined)`);
     if (/^\s{4}user:\s*["']?(root|0)\b/m.test(body)) violations.push(`${label}: service '${name}' runs as root`);
     const image = /^\s{4}image:\s*(\S+)/m.exec(body)?.[1];

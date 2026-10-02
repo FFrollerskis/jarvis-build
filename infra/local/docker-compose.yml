@@ -564,6 +564,10 @@ services:
       JARVIS_BROWSER_GATEWAY_TOKEN_SECRET: "${JARVIS_BROWSER_GATEWAY_TOKEN_SECRET:?sett JARVIS_BROWSER_GATEWAY_TOKEN_SECRET (>= 32 tegn) i .env}"
     networks: [browser]
     cap_drop: ["ALL"]
+    # D-365 (NAS-probe, ikke gjetting): Chromiums namespace-sandbox kaller chroot("/proc/self/fdinfo/") og feiler uten
+    # SYS_CHROOT når `cap_drop: ALL` er satt ("Zygote process exited prematurely"). Dette er den ENESTE capabilityen som legges
+    # tilbake (SYS_ADMIN/privileged er fortsatt forbudt; sjekket av ops/security/check-containment.mjs).
+    cap_add: ["SYS_CHROOT"]
     security_opt:
       - "no-new-privileges:true"
       - "seccomp=./browser-gateway.seccomp.json"

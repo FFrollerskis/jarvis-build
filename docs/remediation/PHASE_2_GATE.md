@@ -45,7 +45,7 @@ Statusvokabular: ADR-001 §2.4. Tall er kjørt i denne økten (§4).
 | worker | – | `core`, `browser` | `x-hardening` |
 | migrate | – | `core` | `x-hardening` (engangs, admin-rolle) |
 | voice-gateway | `127.0.0.1:3020` | `core` | `x-hardening` |
-| browser-gateway | – | **kun `browser`** | cap_drop ALL, no-new-privileges, **seccomp-profil**, read_only, tmpfs, `USER pwuser` |
+| browser-gateway | – | **kun `browser`** | cap_drop ALL + **`cap_add: SYS_CHROOT` (eneste, D-365)**, no-new-privileges, **seccomp-profil**, read_only, tmpfs, `USER pwuser` |
 | postgres / infisical / langfuse | `127.0.0.1` | `core` | no-new-privileges (tredjeparts-images) |
 | db-bootstrap / infisical-redis | – | `core` | – |
 
@@ -66,6 +66,14 @@ Ingen `env_file`, ingen Docker-socket, ingen `privileged`/`cap_add`.
 | – `modules/core/test/embedded-postgres-ipv4-contention.test.ts` («B.3») | **Ikke berørt av denne PR-en:** samme feil som i del 1 (miljørelatert port-/IPv4-kontensjon i sandbox-VM-en); filen og testhjelperne er uendret |
 | Del 2-spesifikke tester | control-plane-auth 55 · compose-isolasjon 39 · schema-invarianter 15 · device-revokering/sesjon 14 · policy 40 · browser-gateway 124 · url-sikring 49 · git-policy + wiring 17+ · owner-identitet 15 · static pages · job-container 18 · containment 26 (alle grønne) |
 | Full CI på PR #219 | kjører; resultat rapporteres i PR/status |
+
+## 5a. Runtime-observasjoner fra NAS-redeploy (2026-10-02, utskrift limt inn av Tobias; D-365)
+
+Observert i kjørende stack etter `docker compose up -d --build` fra `6b716e3`/`66236c3`:
+- **Observert OK:** `migrate` og `db-bootstrap` exit 0; 063/064 registrert i `schema_migrations`; api/worker/voice kjører UID 1000 og browser-gateway UID 1001, alle `ReadonlyRootfs=true`, `CapDrop=[ALL]`, `no-new-privileges`; browser-gateway under seccomp-profilen; ingen rolle utenom `postgres` er superuser/bypassrls, `jarvis_definer` er NOLOGIN og eier alle 4 SECURITY DEFINER-funksjoner; `/health` 200, `/infra/pause` uten grant 401, browser-gateway uten token 401; kun 127.0.0.1-bindinger (Tailscale Serve er tailnet-only og peker på 127.0.0.1).
+- **Funn 1 (rettet `66236c3`):** Infisical krasjet (`permission denied for schema pgboss`) fordi bootstrap bare overdro `public`; nå overdras alle skjemaer/objekttyper. Regresjonstest gjenskaper feilen uten fiksen. Etter fiksen sto Infisical `Up` (ikke restartende).
+- **Funn 2 (rettet `6b716e3`):** seccomp-profilstien løstes mot `infra/local/` av Compose v2.
+- **Funn 3 (D-365):** `browser-gateway` `unhealthy` (`/health` 503, fail-closed): Chromium-sandboxen krever `SYS_CHROOT` under `cap_drop ALL`. Isolerte prober (`ops/security/diagnose-browser-sandbox.sh`): A–E feiler, C (uten cap_drop) OK, F (`cap_drop ALL` + `SYS_CHROOT`) OK. `cap_add: [SYS_CHROOT]` + allowlist i `check-containment.mjs` er innført; **helsesjekk i den kjørende stacken er IKKE bekreftet før redeploy av denne endringen**.
 
 ## 5. `BLOCKED_EXTERNAL` / åpne punkter (krever Tobias eller host)
 

@@ -139,7 +139,11 @@ describe("C: ikke-root og herding (JARVIS-009/010)", () => {
   it("browser-gateway: kun `browser`-nettverket, ingen host-port, seccomp-profil (ikke SYS_ADMIN/privileged) som finnes", () => {
     const body = (services["browser-gateway"] ?? []).join("\n");
     expect(body).toMatch(/networks:\s*\[browser\]/);
-    expect(body).not.toMatch(/SYS_ADMIN|privileged|cap_add/);
+    expect(body).not.toMatch(/SYS_ADMIN|privileged/);
+    // D-365: `cap_drop: ALL` + NØYAKTIG én tilbakelagt capability (SYS_CHROOT, målt på NAS) - ellers starter ikke Chromium-sandboxen.
+    expect(body).toMatch(/cap_drop:\s*\["ALL"\]/);
+    expect(body).toMatch(/cap_add:\s*\["SYS_CHROOT"\]/);
+    expect(body.match(/cap_add:/g)).toHaveLength(1);
     expect(body).toMatch(/seccomp=\.\/browser-gateway\.seccomp\.json/); // relativt til compose-filens mappe (infra/local)
     expect(existsSync(join(ROOT, "infra/local/browser-gateway.seccomp.json"))).toBe(true);
     const profile = JSON.parse(read("infra/local/browser-gateway.seccomp.json")) as { defaultAction: string };
