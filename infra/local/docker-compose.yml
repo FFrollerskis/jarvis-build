@@ -26,8 +26,8 @@
 #  - KODEJOBBER kjører IKKE i worker-containeren: ingen Docker-socket monteres, `JARVIS_JOB_RUNNER` er ikke satt ->
 #    HVER kodejobb feiler lukket (`job_container_runner_not_configured`) til en vertsside runner finnes.
 #  Strukturelt vakt: ops/security/check-containment.mjs + modules/core/test/remediation-2-compose-isolation.test.ts.
-#  Start ALLTID fra repo-roten (`docker compose -f infra/local/docker-compose.yml ...`): seccomp-profilen under refereres
-#  relativt til arbeidskatalogen.
+#  seccomp-profilen under refereres relativt til compose-filens mappe (Compose v2 løser stien mot prosjektmappen), så
+#  `docker compose -f infra/local/docker-compose.yml ...` virker uavhengig av arbeidskatalog.
 
 x-hardening: &hardening
   cap_drop: ["ALL"]
@@ -566,7 +566,7 @@ services:
     cap_drop: ["ALL"]
     security_opt:
       - "no-new-privileges:true"
-      - "seccomp=infra/local/browser-gateway.seccomp.json"
+      - "seccomp=./browser-gateway.seccomp.json"
     read_only: true
     tmpfs:
       - "/tmp:rw,nosuid,size=512m"

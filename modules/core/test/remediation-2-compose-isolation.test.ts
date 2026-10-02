@@ -140,7 +140,7 @@ describe("C: ikke-root og herding (JARVIS-009/010)", () => {
     const body = (services["browser-gateway"] ?? []).join("\n");
     expect(body).toMatch(/networks:\s*\[browser\]/);
     expect(body).not.toMatch(/SYS_ADMIN|privileged|cap_add/);
-    expect(body).toMatch(/seccomp=infra\/local\/browser-gateway\.seccomp\.json/);
+    expect(body).toMatch(/seccomp=\.\/browser-gateway\.seccomp\.json/); // relativt til compose-filens mappe (infra/local)
     expect(existsSync(join(ROOT, "infra/local/browser-gateway.seccomp.json"))).toBe(true);
     const profile = JSON.parse(read("infra/local/browser-gateway.seccomp.json")) as { defaultAction: string };
     expect(profile.defaultAction).toBe("SCMP_ACT_ERRNO");
