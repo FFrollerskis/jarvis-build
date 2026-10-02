@@ -1,5 +1,6 @@
 // Jarvis worker-prosess (BO-07): egen container/prosess som drenerer durable-køen.
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
+import "./normalize-env.ts";
 import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { assertProvidersHaveExplicitPricing, DEFAULT_PRICING, ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";

@@ -1,4 +1,5 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
+import "./normalize-env.ts";
 import { envHour, envInt, envPort } from "@jarvis/contracts";
 import {
   ChannelSessionAuthority,

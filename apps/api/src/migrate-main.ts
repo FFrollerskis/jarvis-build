@@ -7,6 +7,7 @@
 // CREATE EXTENSION krever admin-privilegier) - ALDRI runtime-config. Bootstrapper i
 // samme kjøring den ekte runtime-LOGIN-rollen api/worker skal koble til med, slik at
 // de aldri trenger/kan falle tilbake til admin-tilkoblingen.
+import "./normalize-env.ts";
 import { adminConfigFromEnv, configFromEnv, createPool, ensureRuntimeRole, runMigrations } from "@jarvis/core";
 import { seedOwner } from "./seed.ts";
 
