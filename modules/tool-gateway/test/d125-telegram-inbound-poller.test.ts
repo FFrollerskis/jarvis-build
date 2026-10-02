@@ -38,7 +38,7 @@ function updatesResponse(updates: Array<{ update_id: number; chat: string; text:
     json: async () => ({
       result: updates.map((u) => ({
         update_id: u.update_id,
-        message: { chat: { id: Number(u.chat) }, text: u.text }
+        message: { chat: { id: Number(u.chat), type: "private" }, from: { id: Number(u.chat) }, text: u.text }
       }))
     })
   } as unknown as Response;
@@ -297,11 +297,13 @@ describe("D-222: dispatch()- og poll()-feil logges strukturert (tidligere bar `c
       p.start(10);
       await vi.advanceTimersByTimeAsync(15);
 
-      const line = errorSpy.mock.calls.map(([l]) => l as string).find((l) => l.includes("telegram_poll_tick_failed"));
+      // Del 3: en nettverksfeil fanges nå INNE i poll() og varsles strukturert (kind=network, consecutive) - fortsatt aldri stille.
+      const line = errorSpy.mock.calls.map(([l]) => l as string).find((l) => l.includes("telegram_poll_failed"));
       expect(line).toBeDefined();
-      const parsed = JSON.parse(line as string) as { msg: string; error: string };
-      expect(parsed.msg).toBe("telegram_poll_tick_failed");
-      expect(parsed.error).toContain("network_boom");
+      const parsed = JSON.parse(line as string) as { msg: string; kind: string; consecutive: number };
+      expect(parsed.msg).toBe("telegram_poll_failed");
+      expect(parsed.kind).toBe("network");
+      expect(parsed.consecutive).toBeGreaterThanOrEqual(1);
       p.stop();
     } finally {
       vi.useRealTimers();

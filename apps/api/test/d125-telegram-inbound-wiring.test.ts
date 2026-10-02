@@ -48,7 +48,7 @@ describe("D-125 A: ingen parallell motor - den kanoniske banen gjenbrukes", () =
     expect(codeOnly.split("new SessionService(").length - 1).toBe(1);
     expect(codeOnly.split("new IdentityService(").length - 1).toBe(1);
     // Svaret går ut via den EKSISTERENDE ToolGateway-styrte send-banen.
-    expect(codeOnly).toContain("}, sendTelegram).start();");
+    expect(codeOnly).toMatch(/\}, sendTelegram, \{[\s\S]*?\}\)\.start\(\);/);
   });
 
   it("A4: den eksisterende sendTelegram går fortsatt gjennom ToolGateway (ikke direkte fetch)", () => {
@@ -113,7 +113,10 @@ describe("D-125 C: fail-closed FØR modell-, verktøy- og lenkearbeid", () => {
       fileURLToPath(new URL("../../../modules/tool-gateway/src/live-transports.ts", import.meta.url)),
       "utf8"
     );
-    expect(transports).toContain("if (chat !== this.ownerChatId) continue;");
+    // Del 3 (JARVIS-024): grensen er STRENGERE enn chat-id alene - privat chat OG avsender (from.id) = eier.
+    expect(transports).toContain("chat === this.ownerChatId &&");
+    expect(transports).toContain('update.message?.chat.type === "private"');
+    expect(transports).toContain("String(update.message.from.id) === this.ownerChatId");
   });
 });
 

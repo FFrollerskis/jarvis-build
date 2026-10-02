@@ -8,7 +8,8 @@ import {
   encodePathSegment,
   guardedFetch
 } from "./url-safety.ts";
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
+import type pg from "pg";
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolInvocationContext, ToolTransport } from "./gateway.ts";
 import { GithubRateLimitedError, GithubRateLimitController } from "./github-rate-limit-controller.ts";
@@ -1702,6 +1703,49 @@ export interface TelegramInboundOwnerMessage {
  */
 const TELEGRAM_HANDLED_UPDATE_MEMORY = 512;
 
+/** Del 3 (JARVIS-024): `getUpdates` får aldri henge evig - da ville `polling`-låsen aldri sluppet og hele polleren stoppet. */
+const TELEGRAM_FETCH_TIMEOUT_MS = 10_000;
+
+/** Holdbar offset (D-374). Implementasjoner må tåle at `save` feiler - polleren varsler og fortsetter. */
+export interface TelegramOffsetStore {
+  load(): Promise<number>;
+  save(nextOffset: number): Promise<void>;
+}
+
+/** Postgres-lagret offset per bot. Nøkkelen er en trunkert SHA-256 av tokenet - tokenet selv lagres aldri. */
+export class PgTelegramOffsetStore implements TelegramOffsetStore {
+  private readonly botKey: string;
+  constructor(private readonly pool: pg.Pool, token: string) {
+    this.botKey = createHash("sha256").update(token).digest("hex").slice(0, 32);
+  }
+  async load(): Promise<number> {
+    const result = await this.pool.query("SELECT next_offset FROM telegram_poll_state WHERE bot_key = $1", [this.botKey]);
+    const row = result.rows[0] as { next_offset: string | number } | undefined;
+    return row ? Number(row.next_offset) : 0;
+  }
+  async save(nextOffset: number): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO telegram_poll_state (bot_key, next_offset) VALUES ($1, $2)
+       ON CONFLICT (bot_key) DO UPDATE SET next_offset = GREATEST(telegram_poll_state.next_offset, EXCLUDED.next_offset), updated_at = now()`,
+      [this.botKey, nextOffset]
+    );
+  }
+}
+
+export interface TelegramPollFailure {
+  kind: "http_status" | "timeout" | "network" | "invalid_body" | "offset_load" | "offset_save" | "dispatch_failed";
+  status?: number;
+  consecutive: number;
+  detail?: string;
+}
+
+export interface TelegramPollerOptions {
+  offsetStore?: TelegramOffsetStore;
+  fetchTimeoutMs?: number;
+  /** Kalles ved HVER polle-feil (aldri stille). `consecutive` teller feil på rad (nullstilles ved en vellykket runde). */
+  onFailure?(failure: TelegramPollFailure): void;
+}
+
 /**
  * Telegram-kommandopolling: /brief og /status via getUpdates (long-poll).
  * Svar leveres via Tool Gateway (policy/audit) - aldri direkte fetch tilbake.
@@ -1764,8 +1808,23 @@ export class TelegramCommandPoller {
        */
       chat?(message: TelegramInboundOwnerMessage): Promise<string | undefined>;
     },
-    private readonly send: (text: string) => Promise<void>
+    private readonly send: (text: string) => Promise<void>,
+    private readonly options: TelegramPollerOptions = {}
   ) {}
+
+  private offsetLoaded = false;
+  private consecutiveFailures = 0;
+
+  private fail(failure: Omit<TelegramPollFailure, "consecutive">): void {
+    this.consecutiveFailures += 1;
+    const full: TelegramPollFailure = { ...failure, consecutive: this.consecutiveFailures };
+    console.error(JSON.stringify({ msg: "telegram_poll_failed", ...full }));
+    try {
+      this.options.onFailure?.(full);
+    } catch {
+      // en feilende varslingskrok skal aldri velte polleren
+    }
+  }
 
   start(intervalMs = 4000): void {
     // D-222: tidligere `.catch(() => undefined)` - en `poll()`-feil UTENFOR
@@ -1789,35 +1848,86 @@ export class TelegramCommandPoller {
     if (this.polling) return; // se §1 i klassekommentaren - aldri to samtidige poll
     this.polling = true;
     try {
-      const response = await guardedFetch(`https://api.telegram.org/bot${this.token}/getUpdates?offset=${this.offset}&timeout=0`);
-      if (!response.ok) return;
-      const body = (await response.json()) as { result?: Array<{ update_id: number; message?: { chat: { id: number }; text?: string } }> };
+      if (!this.offsetLoaded && this.options.offsetStore) {
+        try {
+          this.offset = await this.options.offsetStore.load();
+          this.offsetLoaded = true;
+        } catch (err) {
+          // Uten kjent offset ville en restart levert gamle meldinger på nytt - heller ikke polle enn å spille av.
+          this.fail({ kind: "offset_load", detail: err instanceof Error ? err.message.slice(0, 120) : "unknown" });
+          return;
+        }
+      }
+      let response: Response;
+      try {
+        response = await guardedFetch(`https://api.telegram.org/bot${this.token}/getUpdates?offset=${this.offset}&timeout=0`, {
+          signal: AbortSignal.timeout(this.options.fetchTimeoutMs ?? TELEGRAM_FETCH_TIMEOUT_MS)
+        });
+      } catch (err) {
+        const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+        this.fail({ kind: timedOut ? "timeout" : "network", detail: err instanceof Error ? err.name : "unknown" });
+        return;
+      }
+      if (!response.ok) {
+        this.fail({ kind: "http_status", status: response.status });
+        return;
+      }
+      let body: {
+        result?: Array<{ update_id: number; message?: { chat: { id: number; type?: string }; from?: { id: number }; text?: string } }>;
+      };
+      try {
+        body = (await response.json()) as typeof body;
+      } catch {
+        this.fail({ kind: "invalid_body" });
+        return;
+      }
+      this.consecutiveFailures = 0;
       for (const update of body.result ?? []) {
-        this.offset = update.update_id + 1;
-        if (this.handled.has(update.update_id)) continue; // §2 - aldri dobbel handling
+        if (this.handled.has(update.update_id)) {
+          await this.advanceOffset(update.update_id + 1); // §2 - aldri dobbel handling
+          continue;
+        }
         const chat = String(update.message?.chat.id ?? "");
-        // Fail-closed FØR alt annet: en fremmed chat markeres ikke, teller ikke,
-        // og utløser ingen modell-, verktøy- eller sesjonsarbeid.
-        if (chat !== this.ownerChatId) continue; // kun owner - ingen fremmede kommandoer
+        // Fail-closed FØR alt annet. Del 3 (JARVIS-024): chat-id ALENE er ikke nok - meldingen må komme i en PRIVAT chat
+        // OG avsenderen (`from.id`) må være eieren. Et gruppe-/kanal-oppslag der eierens chat-id tilfeldigvis
+        // matcher, eller en melding uten avsender, utløser ingenting.
+        const isOwner =
+          chat === this.ownerChatId &&
+          update.message?.chat.type === "private" &&
+          update.message.from !== undefined &&
+          String(update.message.from.id) === this.ownerChatId;
+        if (!isOwner) {
+          await this.advanceOffset(update.update_id + 1);
+          continue;
+        }
         this.rememberHandled(update.update_id);
         const text = update.message?.text ?? "";
         try {
           await this.dispatch(chat, text);
         } catch (err) {
-          // D-222: bar `catch {}` uten fanget feil-variabel - STERKERE signal
-          // enn `.catch(() => undefined)` (D-221-lærdommen: ingen mulighet å
-          // logge originalfeilen uten en kodeendring). Isolasjonen (én
-          // melding feiler ikke resten av batchen) er UENDRET - kun
-          // stillheten var feilen.
+          // D-222: isolasjonen (én melding feiler ikke resten av batchen) er UENDRET - og feilen er aldri stille.
           console.error(JSON.stringify({
             msg: "telegram_dispatch_failed",
             update_id: update.update_id,
             error: err instanceof Error ? err.message : String(err)
           }));
+          this.fail({ kind: "dispatch_failed", detail: err instanceof Error ? err.message.slice(0, 120) : "unknown" });
         }
+        await this.advanceOffset(update.update_id + 1);
       }
     } finally {
       this.polling = false;
+    }
+  }
+
+  /** Neste offset lagres ETTER at oppdateringen er behandlet (eller bevisst forkastet), ikke før. En lagringsfeil varsles, aldri svelges. */
+  private async advanceOffset(next: number): Promise<void> {
+    if (next > this.offset) this.offset = next;
+    if (!this.options.offsetStore) return;
+    try {
+      await this.options.offsetStore.save(this.offset);
+    } catch (err) {
+      this.fail({ kind: "offset_save", detail: err instanceof Error ? err.message.slice(0, 120) : "unknown" });
     }
   }
 

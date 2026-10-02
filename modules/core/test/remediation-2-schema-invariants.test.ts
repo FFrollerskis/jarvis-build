@@ -157,7 +157,8 @@ describe("B/C: RLS-dekning og policyer (JARVIS-076)", () => {
     scheduler_state: "global jobb-claim per (job_name, run_date) for flere instanser",
     schema_migrations: "migrasjonsregister; jarvis_app har kun SELECT",
     self_modification_requests: "globale selvendringsforespørsler (eier-autorisert PR-flyt); `coding_tenant_id` er en peker, ikke tenant-eierskap",
-    situation_domain_pauses: "global domene-pause satt av eier (D-163)"
+    situation_domain_pauses: "global domene-pause satt av eier (D-163)",
+    telegram_poll_state: "global holdbar getUpdates-offset per bot (infrastruktur, D-374), ikke tenant-data"
   };
 
   it("hver tabell i public har FORCE RLS eller står i den begrunnede unntakslisten - og unntakene bærer ingen tenant_id", async () => {

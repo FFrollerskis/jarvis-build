@@ -19,7 +19,9 @@ import {
   assertRuntimeRoleSafe,
   configFromEnv,
   createPool,
-  runMigrations
+  runMigrations,
+  withTenantTransaction,
+  writeAudit
 } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { DeploymentService, DiagnosisService, IncidentService } from "@jarvis/incidents";
@@ -53,7 +55,7 @@ import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
   MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, resolveModelToolSurface, PgGithubRateLimitStore,
-  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
+  PgTelegramOffsetStore, TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
 import {
@@ -1121,7 +1123,19 @@ porter: se docs/RUNTIME_GATES.md`;
         return result.reply;
       }
       // REMEDIERING DEL 1: `/godkjenn`/`/avvis` (selvmodifikasjon) har ingen handler - frosset (JARVIS-042/043).
-    }, sendTelegram).start();
+    }, sendTelegram, {
+      // Del 3 (JARVIS-024): holdbar offset (restart spiller ikke av meldinger), fetch-timeout (standard i polleren) og
+      // varsling - polleren logger HVER feil strukturert; en vedvarende feil (3 på rad, deretter hver 30.) får i tillegg en audit-rad.
+      offsetStore: new PgTelegramOffsetStore(pool, process.env["JARVIS_TELEGRAM_TOKEN"]),
+      onFailure: (failure) => {
+        if (failure.consecutive !== 3 && failure.consecutive % 30 !== 0) return;
+        void withTenantTransaction(pool, owner.tenant_id, (client) =>
+          writeAudit(client, ownerIdentity, { type: "telegram.poll_degraded", reason: failure.kind, payload: { ...failure } })
+        ).catch((err: unknown) => {
+          console.error(JSON.stringify({ msg: "telegram_poll_degraded_audit_failed", error: err instanceof Error ? err.message : String(err) }));
+        });
+      }
+    }).start();
     // BO-05: reboot-durabel morgenlevering (DB-laas, Europe/Oslo, catch-up, aldri duplikat).
     // Bruker DailyBrief.deliverViaTelegram() (ikke den generiske sendTelegram-
     // closuren over) FORDI den idempotency-nøkler hver chunk på
