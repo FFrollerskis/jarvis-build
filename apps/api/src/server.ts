@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
@@ -136,6 +137,12 @@ export interface ApiDeps {
   enableDevRoutes?: boolean;
   /** Remediering del 2 (JARVIS-063): overstyr rate-limit-tallene (tester). Standard: se `DEFAULT_RATE_LIMITS`. */
   rateLimits?: Partial<ApiRateLimits>;
+  /**
+   * Remediering del 2 (JARVIS-065): den ENE validerte eier-identiteten (fra `loadOwnerConfig`). Brukes KUN til å fylle
+   * visningsfeltene (`person_id`/`tenant_id`) i de statiske sidene - aldri som autoritet (autoritet kommer alltid fra
+   * en verifisert grant). Uten verdien svarer de brukervendte sidene 503 `owner_not_configured`.
+   */
+  owner?: { tenant_id: string; person_id: string };
 }
 
 export interface HealthStatus {
@@ -600,6 +607,63 @@ function domainFailure(res: ServerResponse, status: number, code: string, err: u
   json(res, status, { error: code, request_id: requestIdOf(res) });
 }
 
+
+/**
+ * Remediering del 2 (JARVIS-066): statiske sider får (a) en nonce-basert CSP (ingen `unsafe-inline`-script), (b) rammebeskyttelse
+ * (`frame-ancestors 'self'` + `X-Frame-Options: SAMEORIGIN` - command.html monterer de andre sidene som samme-origin iframes),
+ * (c) `nosniff`/`no-referrer`, og (d) eier-identiteten injisert fra validert konfig i stedet for hardkodet i HTML.
+ */
+const OWNER_META_PLACEHOLDER = "<!--JARVIS_OWNER_META-->";
+
+function escapeAttribute(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+export function renderStaticPage(html: string, nonce: string, owner?: { tenant_id: string; person_id: string }): string {
+  const meta = owner
+    ? `<meta name="jarvis-owner" content="${escapeAttribute(JSON.stringify({ tenant_id: owner.tenant_id, person_id: owner.person_id }))}">`
+    : "";
+  return html
+    .replace(OWNER_META_PLACEHOLDER, meta)
+    .replace(/<script>/g, `<script nonce="${nonce}">`)
+    .replace(/<style>/g, `<style nonce="${nonce}">`);
+}
+
+export function staticPageHeaders(nonce: string): Record<string, string> {
+  return {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-cache",
+    "content-security-policy": [
+      "default-src 'none'",
+      `script-src 'nonce-${nonce}'`,
+      `style-src 'nonce-${nonce}'`,
+      "img-src 'self' data: blob:",
+      "media-src 'self' blob:",
+      // Tale-gatewayen er en egen prosess på samme vert (port 3020) - ws(s) mot samme vert, aldri vilkårlige mål.
+      "connect-src 'self' ws://*:3020 wss://*:3020",
+      "frame-src 'self'",
+      "frame-ancestors 'self'",
+      "base-uri 'none'",
+      "form-action 'self'",
+      "object-src 'none'"
+    ].join("; "),
+    "x-frame-options": "SAMEORIGIN",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+    "permissions-policy": "microphone=(self), camera=(), geolocation=()"
+  };
+}
+
+async function sendStaticPage(res: ServerResponse, file: string, deps: ApiDeps | undefined, needsOwner: boolean): Promise<void> {
+  if (needsOwner && !deps?.owner) {
+    return json(res, 503, { error: "owner_not_configured", request_id: requestIdOf(res) });
+  }
+  const html = await readFile(file, "utf8");
+  const nonce = randomBytes(16).toString("base64");
+  res.writeHead(200, staticPageHeaders(nonce));
+  res.end(renderStaticPage(html, nonce, deps?.owner));
+}
+
 async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
 
@@ -608,34 +672,22 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
   }
 
   if (req.method === "GET" && url.pathname === "/") {
-    const html = await readFile(WEB_COMMAND, "utf8");
-    // D-249: uten no-cache kan en mobilnettleser fortsette å servere en
-    // gammel, allerede-fikset versjon av siden fra sin lokale cache selv
-    // etter en fersk `docker compose up --build` - forvirrende og vanskelig
-    // å skille fra at selve fiksen ikke virket.
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
-    res.end(html);
+    await sendStaticPage(res, WEB_COMMAND, deps, false);
     return;
   }
 
   if (req.method === "GET" && url.pathname === "/chat") {
-    const html = await readFile(WEB_INDEX, "utf8");
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
-    res.end(html);
+    await sendStaticPage(res, WEB_INDEX, deps, true);
     return;
   }
 
   if (req.method === "GET" && url.pathname === "/dashboard") {
-    const html = await readFile(WEB_DASHBOARD, "utf8");
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
-    res.end(html);
+    await sendStaticPage(res, WEB_DASHBOARD, deps, true);
     return;
   }
 
   if (req.method === "GET" && url.pathname === "/voice") {
-    const html = await readFile(WEB_VOICE, "utf8");
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
-    res.end(html);
+    await sendStaticPage(res, WEB_VOICE, deps, true);
     return;
   }
 

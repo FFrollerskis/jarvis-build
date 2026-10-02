@@ -624,8 +624,9 @@ describe("D-30 live-funn-fix: ConversationEngine → mesh tool bridge (§1-§6)"
   });
 
   it("H: owner-seed (inkl. voice-device og web-device) er idempotent - to kjøringer, én rad per device", async () => {
-    await seedOwner(adminPool);
-    await seedOwner(adminPool); // idempotens: andre kjøring endrer ingenting
+    const owner = { tenant_id: "tenant-personal", owner_person_id: "person-tobias", owner_display_name: "Tobias" };
+    await seedOwner(adminPool, owner);
+    await seedOwner(adminPool, owner); // idempotens: andre kjøring endrer ingenting
     const devices = await adminPool.query(
       "SELECT device_id, kind, COUNT(*)::int AS n FROM devices WHERE device_id IN ('jarvis-core','jarvis-voice-live','dev-web') GROUP BY device_id, kind ORDER BY device_id"
     );

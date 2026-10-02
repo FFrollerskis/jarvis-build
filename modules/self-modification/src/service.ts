@@ -361,7 +361,7 @@ export class SelfModificationService {
     }
     const jobIdentity: IdentityContext = {
       person_id: this.deps.ownerPersonId, tenant_id: request.coding_tenant_id, memory_space_id: "personal",
-      session_id: "sess-self-mod-sweep", device_id: "jarvis-core", channel: "api", auth_strength: "active"
+      session_id: `sess-self-mod-sweep-${randomUUID().slice(0, 8)}`, device_id: "jarvis-core", channel: "api", auth_strength: "active"
     };
     const task = await this.deps.taskService.get(jobIdentity, request.coding_task_id);
     if (!task.ok) return "pending"; // f.eks. et forbigående policy-avslag - prøves igjen neste sveip
