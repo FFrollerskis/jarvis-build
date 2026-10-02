@@ -38,11 +38,10 @@ import {
 import {
   ArtifactStore,
   ClaudeCodeAgent,
-  DockerSandboxRunner,
   InProcessWorker,
   PgTaskQueue,
-  ProcessSandboxRunner,
   createCodingHandler,
+  resolveJobSandboxRunner,
   withSecretRedaction
 } from "@jarvis/tasks";
 import { KnowledgeSourceRegistry, emailIngestHandler } from "@jarvis/knowledge";
@@ -430,7 +429,7 @@ for (const tool of firstWaveTools({
   // D-338: samme wiring-mønster som apps/api/src/main.ts.
   mcp_zapier: new McpZapierTransport(),
   // D-339: samme wiring-mønster som apps/api/src/main.ts.
-  browser: new BrowserGatewayTransport(),
+  browser: new BrowserGatewayTransport(process.env["JARVIS_BROWSER_GATEWAY_TOKEN_SECRET"] ?? ""),
   ...driveTransportsIfConfigured()
 }, {
   // D-105 host-fix: samme wiring-mønster som apps/api/src/main.ts.
@@ -519,14 +518,16 @@ setInterval(
   WATCHDOG_INTERVAL_MS
 );
 
-// Sandbox-jobber: DockerSandboxRunner på host-runtime (D-32-verifisert). I container
-// er prosess-sandbox default (containeren selv er isolasjonsgrensen; ingen Docker-socket
-// monteres inn). Velges eksplisitt via JARVIS_SANDBOX=docker|process.
-const runner =
-  process.env["JARVIS_SANDBOX"] === "docker" ? new DockerSandboxRunner() : new ProcessSandboxRunner();
+// REMEDIERING DEL 2 (JARVIS-010): kodejobber kjører KUN i en per-jobb-container med eksplisitt policy
+// (ikke-root, read-only rootfs, ressursgrenser, egress via allowlistet proxy, ingen arvede secrets) -
+// se modules/tasks/src/job-container.ts. Finnes ingen gyldig runner (`JARVIS_JOB_RUNNER=container` +
+// digest-pinnet `JARVIS_JOB_IMAGE`/`JARVIS_JOB_NETWORK`/`JARVIS_JOB_EGRESS_PROXY`), feiler HVER kodejobb
+// lukket (`job_container_runner_not_configured`). `ProcessSandboxRunner`/`DockerSandboxRunner` er IKKE
+// lenger koblet til produksjon; det gamle `JARVIS_SANDBOX`-valget finnes ikke.
+const runner = resolveJobSandboxRunner(process.env);
 
 // BO-11.1 §9: delt executive-handler (samme fil som api-workeren) - identisk
-// kontrakt for samme kø: prompt → mesh, tools=true → tool-løkke, command → sandbox.
+// kontrakt for samme kø: prompt → mesh, tools=true → tool-løkke (command-kontrakter avvises).
 worker.register(
   "executive",
   executiveHandler({

@@ -794,7 +794,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // apps/browser-gateway sin egen prosess) leses via credential_ref inni
     // ToolGateway sin secret-provider-kjede, ALDRI konstruktør-parameter
     // (se browser-transport.ts).
-    browser: new BrowserGatewayTransport(),
+    browser: new BrowserGatewayTransport(process.env["JARVIS_BROWSER_GATEWAY_TOKEN_SECRET"] ?? ""),
     // UA-7 Communications Hub - foerste slice (D-119): eget
     // `conversation_graph.*`-namespace. D-119 FINAL AUTHORITY HARDENING:
     // denne transporten MOTTAR og KREVER `ToolInvocationContext` (D-68) -

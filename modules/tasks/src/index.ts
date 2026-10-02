@@ -3,6 +3,7 @@ export * from "./pg-task-queue.ts";
 export * from "./task-service.ts";
 export * from "./worker.ts";
 export * from "./sandbox.ts";
+export * from "./job-container.ts";
 export * from "./git-auth.ts";
 export * from "./coding.ts";
 export * from "./coding-agent-eval.ts";
