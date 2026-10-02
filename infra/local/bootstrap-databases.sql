@@ -70,6 +70,60 @@ SELECT format('ALTER SEQUENCE %I.%I OWNER TO infisical_app', sequence_schema, se
     AND (SELECT pg_get_userbyid(c.relowner) FROM pg_class c
           WHERE c.oid = format('%I.%I', s.sequence_schema, s.sequence_name)::regclass) <> 'infisical_app' \gexec
 
+
+-- Alle ikke-system-skjemaer (Infisical oppretter f.eks. `pgboss` utenfor `public`), og ALLE objekttyper, overdras til app-rollen.
+-- Uten dette feiler appen med `permission denied for schema pgboss` på et eksisterende, superbruker-eid volum.
+-- Extension-eide objekter (pgcrypto/uuid-ossp/pg_trgm) hoppes over; de eies av extensionen.
+SELECT set_config('jarvis.app_role', 'infisical_app', false);
+DO $own$
+DECLARE
+  app text := current_setting('jarvis.app_role');
+  r record;
+BEGIN
+  FOR r IN SELECT nspname FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema' LOOP
+    EXECUTE format('ALTER SCHEMA %I OWNER TO %I', r.nspname, app);
+  END LOOP;
+  -- tabeller, partisjonerte tabeller, views, materialiserte views, fremmedtabeller (eide sekvenser følger tabellen)
+  FOR r IN
+    SELECT n.nspname, c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND c.relkind IN ('r','p','v','m','f')
+       AND pg_get_userbyid(c.relowner) <> app
+       AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+       AND NOT (c.relkind = 'r' AND c.relispartition)
+  LOOP
+    EXECUTE format('ALTER %s %I.%I OWNER TO %I',
+      CASE r.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'f' THEN 'FOREIGN TABLE' ELSE 'TABLE' END,
+      r.nspname, r.relname, app);
+  END LOOP;
+  -- sekvenser (kun de som ikke er eid av en kolonne; eide følger tabellen)
+  FOR r IN
+    SELECT n.nspname, c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND c.relkind = 'S'
+       AND pg_get_userbyid(c.relowner) <> app
+       AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype IN ('a','i','e'))
+  LOOP
+    EXECUTE format('ALTER SEQUENCE %I.%I OWNER TO %I', r.nspname, r.relname, app);
+  END LOOP;
+  -- funksjoner/prosedyrer/aggregater
+  FOR r IN
+    SELECT p.oid::regprocedure::text AS sig FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND pg_get_userbyid(p.proowner) <> app
+       AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+  LOOP
+    EXECUTE format('ALTER ROUTINE %s OWNER TO %I', r.sig, app);
+  END LOOP;
+  -- enum-/range-/domene-typer (array-typer følger basetypen)
+  FOR r IN
+    SELECT n.nspname, t.typname, t.typtype FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+     WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND t.typtype IN ('e','r','m','d')
+       AND pg_get_userbyid(t.typowner) <> app
+       AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e')
+  LOOP
+    EXECUTE format('ALTER %s %I.%I OWNER TO %I', CASE r.typtype WHEN 'd' THEN 'DOMAIN' ELSE 'TYPE' END, r.nspname, r.typname, app);
+  END LOOP;
+END
+$own$;
+
 \connect langfuse
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -82,3 +136,56 @@ SELECT format('ALTER SEQUENCE %I.%I OWNER TO langfuse_app', sequence_schema, seq
   WHERE sequence_schema = 'public'
     AND (SELECT pg_get_userbyid(c.relowner) FROM pg_class c
           WHERE c.oid = format('%I.%I', s.sequence_schema, s.sequence_name)::regclass) <> 'langfuse_app' \gexec
+
+-- Alle ikke-system-skjemaer (Infisical oppretter f.eks. `pgboss` utenfor `public`), og ALLE objekttyper, overdras til app-rollen.
+-- Uten dette feiler appen med `permission denied for schema pgboss` på et eksisterende, superbruker-eid volum.
+-- Extension-eide objekter (pgcrypto/uuid-ossp/pg_trgm) hoppes over; de eies av extensionen.
+SELECT set_config('jarvis.app_role', 'langfuse_app', false);
+DO $own$
+DECLARE
+  app text := current_setting('jarvis.app_role');
+  r record;
+BEGIN
+  FOR r IN SELECT nspname FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema' LOOP
+    EXECUTE format('ALTER SCHEMA %I OWNER TO %I', r.nspname, app);
+  END LOOP;
+  -- tabeller, partisjonerte tabeller, views, materialiserte views, fremmedtabeller (eide sekvenser følger tabellen)
+  FOR r IN
+    SELECT n.nspname, c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND c.relkind IN ('r','p','v','m','f')
+       AND pg_get_userbyid(c.relowner) <> app
+       AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+       AND NOT (c.relkind = 'r' AND c.relispartition)
+  LOOP
+    EXECUTE format('ALTER %s %I.%I OWNER TO %I',
+      CASE r.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'f' THEN 'FOREIGN TABLE' ELSE 'TABLE' END,
+      r.nspname, r.relname, app);
+  END LOOP;
+  -- sekvenser (kun de som ikke er eid av en kolonne; eide følger tabellen)
+  FOR r IN
+    SELECT n.nspname, c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND c.relkind = 'S'
+       AND pg_get_userbyid(c.relowner) <> app
+       AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype IN ('a','i','e'))
+  LOOP
+    EXECUTE format('ALTER SEQUENCE %I.%I OWNER TO %I', r.nspname, r.relname, app);
+  END LOOP;
+  -- funksjoner/prosedyrer/aggregater
+  FOR r IN
+    SELECT p.oid::regprocedure::text AS sig FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND pg_get_userbyid(p.proowner) <> app
+       AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+  LOOP
+    EXECUTE format('ALTER ROUTINE %s OWNER TO %I', r.sig, app);
+  END LOOP;
+  -- enum-/range-/domene-typer (array-typer følger basetypen)
+  FOR r IN
+    SELECT n.nspname, t.typname, t.typtype FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+     WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND t.typtype IN ('e','r','m','d')
+       AND pg_get_userbyid(t.typowner) <> app
+       AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e')
+  LOOP
+    EXECUTE format('ALTER %s %I.%I OWNER TO %I', CASE r.typtype WHEN 'd' THEN 'DOMAIN' ELSE 'TYPE' END, r.nspname, r.typname, app);
+  END LOOP;
+END
+$own$;

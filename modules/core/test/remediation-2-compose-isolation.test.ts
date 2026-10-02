@@ -200,6 +200,13 @@ describe.skipIf(!hasPsql)("D: bootstrap-databases.sql (ekte Postgres 16)", () =>
     const legacy = connectAs("postgres", "pw", "infisical");
     await legacy.query("CREATE TABLE legacy_secret_metadata (id int primary key)");
     await legacy.query("INSERT INTO legacy_secret_metadata VALUES (1)");
+    // Infisical (pg-boss) har et EGET skjema utenfor `public`, med tabeller/typer/funksjoner/views eid av superbrukeren.
+    await legacy.query(`CREATE SCHEMA pgboss;
+      CREATE TYPE pgboss.job_state AS ENUM ('created','active');
+      CREATE TABLE pgboss.job (id int primary key, state pgboss.job_state);
+      CREATE SEQUENCE pgboss.standalone_seq;
+      CREATE VIEW pgboss.job_view AS SELECT id FROM pgboss.job;
+      CREATE FUNCTION pgboss.job_count() RETURNS bigint LANGUAGE sql AS 'SELECT count(*) FROM pgboss.job';`);
     await legacy.end();
     admin = connectAs("postgres", "pw", "jarvis_test");
   }, 240_000);
@@ -247,6 +254,22 @@ describe.skipIf(!hasPsql)("D: bootstrap-databases.sql (ekte Postgres 16)", () =>
     await infisical.query("CREATE TABLE migrated_by_app (id int)"); // eier public-skjemaet
     const tableOwner = await infisical.query("SELECT tableowner FROM pg_tables WHERE tablename = 'legacy_secret_metadata'");
     expect(tableOwner.rows[0]).toEqual({ tableowner: "infisical_app" });
+    // Skjema utenfor `public` (JARVIS-009-regresjon: `permission denied for schema pgboss` på eksisterende volum).
+    await infisical.query("INSERT INTO pgboss.job VALUES (1, 'created')");
+    await infisical.query("CREATE TABLE pgboss.created_by_app (id int)");
+    await infisical.query("SELECT pgboss.job_count()");
+    await infisical.query("ALTER SEQUENCE pgboss.standalone_seq RESTART");
+    const inspector = connectAs("postgres", "pw", "infisical");
+    const pgbossOwners = await inspector.query(
+      `SELECT DISTINCT o FROM (
+         SELECT pg_get_userbyid(nspowner) AS o FROM pg_namespace WHERE nspname = 'pgboss'
+         UNION ALL SELECT pg_get_userbyid(relowner) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'pgboss'
+         UNION ALL SELECT pg_get_userbyid(proowner) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pgboss'
+         UNION ALL SELECT pg_get_userbyid(typowner) FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = 'pgboss' AND t.typtype = 'e'
+       ) x`
+    );
+    await inspector.end();
+    expect(pgbossOwners.rows).toEqual([{ o: "infisical_app" }]);
     await infisical.end();
   });
 
