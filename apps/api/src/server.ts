@@ -955,8 +955,9 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       typeof parsedBody["parameters"] === "object" && parsedBody["parameters"] !== null && !Array.isArray(parsedBody["parameters"])
         ? (parsedBody["parameters"] as Record<string, JsonValue>)
         : {};
-    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string);
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
     if (!resolved.ok) {
+      if (resolved.responded) return;
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
     }
     const result = await deps.executive.gateway.execute({
