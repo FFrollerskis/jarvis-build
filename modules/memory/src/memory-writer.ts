@@ -4,7 +4,7 @@ import type { IdentityContext, MemorySpace, TrustLevel } from "@jarvis/contracts
 import { writeAudit } from "@jarvis/core";
 import type { PolicyGateway } from "@jarvis/policy";
 import type { EmbeddingProvider } from "./embedding.ts";
-import type { ExtractionAdapter, MemoryCandidate, MemoryType } from "./extraction.ts";
+import type { ExistingMemoryHint, ExtractionAdapter, MemoryCandidate, MemoryType } from "./extraction.ts";
 import { withMemoryTransaction } from "./spaces.ts";
 
 export interface SourceRef {
@@ -53,12 +53,48 @@ export class MemoryWriter {
 
   /** Registrer kilde + trekk ut kandidater + anvend dem. */
   async ingestText(identity: IdentityContext, source: SourceRef, text: string): Promise<ApplyOutcome[]> {
-    const candidates = await this.extractor.extract(text, identity, source.trust);
+    // D-373: kun BETRODDE kilder får se eksisterende minner (ubetrodd innhold skal aldri trekke ut/avsløre autoritativt minne).
+    const hints = source.trust === "untrusted" ? [] : await this.relatedHints(identity, text);
+    const candidates = await this.extractor.extract(text, identity, source.trust, hints);
     const outcomes: ApplyOutcome[] = [];
     for (const candidate of candidates) {
       outcomes.push(await this.apply(identity, source, candidate));
     }
     return outcomes;
+  }
+
+  /**
+   * D-373: de mest relevante aktive, betrodde minnene i identitetens space (ordoverlapp mot teksten + de nyeste), så uttrekket kan
+   * gjenbruke samme `subject` for samme fakta. Fail-soft: en feil her gir ingen hint (som før D-373), aldri en kastet feil.
+   */
+  private async relatedHints(identity: IdentityContext, text: string): Promise<ExistingMemoryHint[]> {
+    try {
+      const space = identity.memory_space_id as MemorySpace;
+      const rows = await withMemoryTransaction(this.pool, identity.tenant_id, [space], async (client) => {
+        const res = await client.query(
+          `SELECT type, subject, content FROM memory_items
+           WHERE tenant_id = $1 AND space = $2 AND status = 'active' AND trust_level <> 'untrusted'
+           ORDER BY updated_at DESC LIMIT 200`,
+          [identity.tenant_id, space]
+        );
+        return res.rows as ExistingMemoryHint[];
+      });
+      const tokens = (s: string) => new Set(s.toLowerCase().split(/[^a-zæøå0-9]+/).filter((t) => t.length >= 3));
+      const wanted = tokens(text);
+      const scored = rows.map((r, index) => {
+        let overlap = 0;
+        for (const t of tokens(`${r.subject} ${r.content}`)) if (wanted.has(t)) overlap++;
+        return { r, index, overlap };
+      });
+      const picked = new Map<string, ExistingMemoryHint>();
+      for (const x of [...scored].sort((a, b) => b.overlap - a.overlap || a.index - b.index).filter((x) => x.overlap > 0).slice(0, 12)) {
+        picked.set(`${x.r.type}\u0000${x.r.subject}`, x.r);
+      }
+      for (const x of scored.slice(0, 12)) picked.set(`${x.r.type}\u0000${x.r.subject}`, x.r);
+      return [...picked.values()].slice(0, 24);
+    } catch {
+      return [];
+    }
   }
 
   async apply(identity: IdentityContext, source: SourceRef, candidate: MemoryCandidate): Promise<ApplyOutcome> {
@@ -92,6 +128,23 @@ export class MemoryWriter {
       const row = existing.rows[0] as ItemRow | undefined;
 
       if (!row) {
+        // D-373: NØYAKTIG samme innhold finnes allerede aktivt under et annet emne -> ingen duplikatrad. Sammenlignes i JS
+        // (ikke `lower()` i SQL: den følger databasens locale og lowercaser ikke Æ/Ø/Å i C-locale). Begrenset til de 500
+        // nyeste aktive radene av samme type/space.
+        const wantedContent = candidate.content.trim().toLowerCase();
+        const recent = await client.query(
+          `SELECT memory_item_id, content FROM memory_items
+           WHERE tenant_id = $1 AND space = $2 AND type = $3 AND status = 'active'
+           ORDER BY updated_at DESC LIMIT 500`,
+          [identity.tenant_id, space, candidate.type]
+        );
+        const dup = (recent.rows as Array<{ memory_item_id: string; content: string }>).find(
+          (r) => r.content.trim().toLowerCase() === wantedContent
+        );
+        if (dup) {
+          await writeAudit(client, identity, { type: "memory.noop", payload: { memory_item_id: dup.memory_item_id, reason: "duplicate_content" } });
+          return { op: "NOOP", memory_item_id: dup.memory_item_id } as const;
+        }
         const status = source.trust === "untrusted" ? "quarantined" : "active";
         const id = await this.insertItem(client, identity, space, candidate, sourceId, observedAt, source.trust, status);
         if (status === "active") {
