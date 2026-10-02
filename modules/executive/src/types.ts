@@ -200,6 +200,13 @@ export interface CapabilityStatus {
    * (`ToolInvocationContext.servingModel`, trusted-lag, aldri modell-oppgitt).
    */
   serving_model: { provider: string; model: string } | null;
+  /**
+   * Remediering del 1 (JARVIS-002): satt når modellflaten er begrenset til et
+   * eksplisitt lese-minimumssett. `registered_actions` er hele registeret,
+   * `model_accessible_actions` er det modellen faktisk kan kalle i denne
+   * samtalen - forskjellen er BEVISST ikke tilgjengelig for modellen.
+   */
+  model_surface?: { restricted: boolean; registered_actions: number; model_accessible_actions: number };
 }
 
 /**

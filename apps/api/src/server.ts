@@ -25,8 +25,8 @@ import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts"
 
 /**
  * Fase 3: minimalt API uten rammeverk (rammeverksvalg utsatt til behovet
- * krever det). Ruter: /health, / (webchat), /chat (SSE/JSON),
- * /tools/critical-demo (klasse D-stub for policybevis i kjørende app).
+ * krever det). Ruter: /health, / (webchat), /chat (SSE/JSON).
+ * (/tools/critical-demo og /worker/tick finnes kun bak `enableDevRoutes`, aldri i produksjon.)
  *
  * Merk: API-et binder localhost i dev og har ingen egen HTTP-autentisering
  * ennå - enhetsautentisering kommer med kanalene i senere faser (dokumentert).
@@ -123,6 +123,13 @@ export interface ApiDeps {
    * ødelegger byte-for-byte-signaturen Stripe krever) - se egen gren under.
    */
   finance?: { service: FinanceService; cards?: CardService };
+  /**
+   * Remediering del 1 (JARVIS-001/063): dev-/demo-rutene `/worker/tick` (uautentisert
+   * kødrenering) og `/tools/critical-demo` (klasse D-stub) er DEAKTIVERT i produksjon.
+   * Kun tester setter denne eksplisitt til `true`; `main.ts` setter den ALDRI, og
+   * den kan ikke slås på via miljøvariabel.
+   */
+  enableDevRoutes?: boolean;
 }
 
 export interface HealthStatus {
@@ -437,7 +444,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
   }
 
   const depRoutes = [
-    "/chat", "/worker/tick", "/tools/critical-demo", "/tasks/submit", "/voice/session/authorize", "/session/authorize",
+    "/chat", "/tasks/submit", "/voice/session/authorize", "/session/authorize",
     "/incidents/create", "/incidents/get", "/incidents/list", "/incidents/evidence/add", "/incidents/correlate", "/incidents/repair",
     "/infra/recovery/attempt", "/infra/pause", "/infra/resume", "/infra/degrade", "/infra/status"
   ];
@@ -995,13 +1002,13 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     }
   }
 
-  if (req.method === "POST" && url.pathname === "/worker/tick") {
+  if (deps.enableDevRoutes === true && req.method === "POST" && url.pathname === "/worker/tick") {
     // Dev-hjelper: kjør køen én runde (produksjonsworker kjører på intervall i main).
     const ran = await deps.worker.drain();
     return json(res, 200, { ran });
   }
 
-  if (req.method === "POST" && url.pathname === "/tools/critical-demo") {
+  if (deps.enableDevRoutes === true && req.method === "POST" && url.pathname === "/tools/critical-demo") {
     // Klasse D-stub (fase 3-avgrensning): beviser at kritiske verktøy
     // blokkeres uten gyldig signert godkjenning i den KJØRENDE appen.
     const body = (await readBody(req)) as {

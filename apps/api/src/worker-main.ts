@@ -2,10 +2,10 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
-import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
+import { assertProvidersHaveExplicitPricing, DEFAULT_PRICING, ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport, GmailTransport,
-  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, MeshToolExecutor, allMeshTools, PgGithubRateLimitStore,
+  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, MeshToolExecutor, resolveModelToolSurface, PgGithubRateLimitStore,
   ToolGateway, driveTransportsIfConfigured, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets
 } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
@@ -96,6 +96,12 @@ const gateway = new ModelGateway({
     new OllamaAdapter()
   ]
 });
+// JARVIS-006: hver konstruert adapter MÅ ha eksplisitt pris - ingen stille `default_rate`.
+try {
+  assertProvidersHaveExplicitPricing(DEFAULT_PRICING, gateway.listProviderNames());
+} catch (err) {
+  failStartup(err);
+}
 
 // BO-11 (§29): worker-tool-mesh gjennom SAMME trusted Tool Gateway/Policy som api -
 // ingen provider/tool-bypass. Kun ufarlige read-verktøy eksponeres (mesh-bridge).
@@ -432,12 +438,11 @@ for (const tool of firstWaveTools({
   // D-337: samme wiring-mønster som apps/api/src/main.ts.
   gceMutationTargets: parseGceMutationTargets(process.env["JARVIS_GCE_MUTATION_TARGETS"])
 })) toolGateway.register(tool);
-// D-289 ("vil ha alt at han har full kontroll"): SAMME "beregn ÉN gang, rett
-// etter registreringsløkken"-mønster som apps/api/src/main.ts sin egen
-// `fullMeshTools` - eksponerer NØYAKTIG det som er registrert på DENNE
-// prosessens `toolGateway`-instans, ikke en håndskrevet, potensielt
-// avvikende kuratert liste.
-const fullMeshTools = allMeshTools(toolGateway);
+// REMEDIERING DEL 1 (JARVIS-002): SAMME eksplisitte lese-minimumssett som
+// apps/api/src/main.ts (`MODEL_SURFACE_ALLOWLIST`), begrenset til det som er
+// registrert på DENNE prosessens `toolGateway` (worker har en delmengde).
+// Hele registeret (`allMeshTools()`) eksponeres ALDRI for modellen.
+const modelToolSurface = resolveModelToolSurface(toolGateway, { onlyRegistered: true });
 const workerIdentity = {
   person_id: process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias",
   tenant_id: process.env["JARVIS_TENANT_ID"] ?? "tenant-personal",
@@ -528,8 +533,7 @@ worker.register(
     gateway,
     // D-351: 4000 → 20_000 (se mesh-bridge.ts sitt filhode for host-målt begrunnelse) - SAMME
     // grense som api-workeren (main.ts) bruker, uendret "identisk oppførsel"-presedens.
-    tools: { definitions: fullMeshTools.map((t) => t.def), executor: new MeshToolExecutor(toolGateway, workerIdentity, 20_000, fullMeshTools) },
-    sandbox: runner
+    tools: { definitions: modelToolSurface.map((t) => t.def), executor: new MeshToolExecutor(toolGateway, workerIdentity, 20_000, modelToolSurface) }
   })
 );
 

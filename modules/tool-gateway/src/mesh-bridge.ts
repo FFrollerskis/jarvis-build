@@ -113,6 +113,15 @@ const MESH_TOOLS: MeshToolMapping[] = [
 ];
 
 /**
+ * Remediering del 1: de EKSPLISITTE, kuraterte lese-mappingene som utgjør
+ * modellens aktive verktøyflate (se `model-tool-surface.ts`). Returnerer en
+ * kopi - kallere kan ikke mutere den interne listen.
+ */
+export function curatedReadOnlyMeshTools(): MeshToolMapping[] {
+  return [...MESH_TOOLS];
+}
+
+/**
  * D-237 (Charlie-selv-bevissthet, funn i faktisk bruk): `meshToolDefinitions()`
  * alene eksponerer KUN navn/beskrivelse - ingen vei til å slå opp det
  * underliggende `tool_id`/`action`-paret og dermed `credential_ref`.
@@ -175,6 +184,13 @@ export function meshToolDefinitions(tools: MeshToolMapping[] = MESH_TOOLS): Mesh
  * (i motsetning til `MESH_TOOLS`) - modellens rå argumenter går RETT til
  * `gateway.execute()`, validert DETERMINISTISK av `input_schema.safeParse()`
  * der (§17, CLAUDE.md regel 2 - aldri kun promptregler).
+ */
+/**
+ * REMEDIERING DEL 1 (JARVIS-002): denne generatoren er IKKE lenger koblet til
+ * noen aktiv modellflate (chat/tale/Telegram/executive). Den eksponerer hele
+ * registeret og må ikke brukes som modellens verktøyliste før en deterministisk
+ * autoritetsmodell (taint-gate, per-flate verktøysett, bekreftelse) finnes -
+ * bruk `resolveModelToolSurface()` (`model-tool-surface.ts`).
  */
 export function allMeshTools(gateway: ToolGateway): MeshToolMapping[] {
   return gateway.list().map((definition) => ({

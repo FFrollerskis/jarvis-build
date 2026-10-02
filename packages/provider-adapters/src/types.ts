@@ -215,6 +215,21 @@ export function envOrDefault(name: string, fallback: string): string {
   return value !== undefined && value !== "" ? value : fallback;
 }
 
+/**
+ * Remediering del 1 (JARVIS-078/092): `Number(process.env["JARVIS_MODEL_TIMEOUT_MS"] ?? 60_000)` ga
+ * `0` ms for en tom streng (`KEY=` i `.env`) og `NaN` for søppel. Tom/usatt = defaulten;
+ * satt men ikke et positivt heltall = oppstartsfeil (kaster).
+ */
+export function envPositiveInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const parsed = Number(raw.trim());
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`ugyldig miljøvariabel ${name}="${raw.slice(0, 40)}": forventet positivt heltall (tom/usatt = ${fallback})`);
+  }
+  return parsed;
+}
+
 /** Samme tom-streng-som-usatt-semantikk for en kjede av valgfrie fallback-miljøvariabler (ingen sluttdefault - kan returnere undefined). */
 export function firstNonEmptyEnv(...names: string[]): string | undefined {
   for (const name of names) {

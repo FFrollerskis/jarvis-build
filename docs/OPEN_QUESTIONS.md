@@ -21,6 +21,12 @@
 | Q-38 | **Lukket 2026-09-22 (direkte Tobias-svar i chat) → D-234:** 1Password DROPPET fra backlogen. Tobias bekreftet at siden Infisical allerede er PRIMÆR `SecretProvider` (Q-05/D-211/D-213), trengs ikke 1Password. Ingen ERSTATTE/PERSONLIG-lese-connector-vurdering nødvendig. |
 | Q-39 | **Lukket 2026-09-26 (Tobias direkte i chat: "Fiks Q-39 og gi meg svaret" - eksplisitt delegert til Claude i stedet for et presist svar på selve intensjonen) → D-290:** Windows/macOS er IKKE nye connectorer og IKKE ubygget backlog - begge var allerede FULLT DEKKET av eksisterende spor før D-231 listet dem: Windows = CLAUDE.md regel 9 («lokal først», Jarvis kjører allerede på Tobias sin PC/Docker), macOS = det eksisterende D-36 Apple-runtime-sporet (`BLOCKED_EXTERNAL`, uendret). Standardtolkningen valgt der Tobias sitt konkrete formål var uspesifisert. Hvis Tobias FAKTISK mente ny skrivebords-/prosessautomatisering på Windows-PC-en (analogt Apple Shortcuts-punktet) - en reell, ennå ikke eksisterende evne, ikke bare drifts-OS-et - er det en EGEN, ennå ikke scopet funksjonsforespørsel han må reise eksplisitt; DENNE lukkingen dekker ikke den muligheten stille. |
 
+## Åpne spørsmål – krever Tobias
+
+| ID | Spørsmål | Status |
+|---|---|---|
+| Q-43 | **HF6 / Continuous Intelligence v1.2 (og eventuelle øvrige governing-filer) finnes ikke i repoet** (D-363, [ADR-001](remediation/ADR-001-dokumenthierarki.md)). Hvilken fil/versjon skal være gjeldende governing-input, hva er forgjengeren, og hva erstatter den eksplisitt? | **`MISSING_GOVERNING_INPUT`** (2026-10-01). Ingen krav er diktet fra den manglende filen; gamle sikkerhetsinvarianter gjelder inntil en eksplisitt navngitt beslutning erstatter dem. Sikkerhetsarbeidet fortsetter. |
+
 ## Avgjøres av måling/prototype (ikke av diskusjon)
 
 | ID | Spørsmål | Avgjøres i | Metode |

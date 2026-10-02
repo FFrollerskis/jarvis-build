@@ -1,5 +1,14 @@
 # Runtime gates – status og evidens (v4.0 reality check, 2026-08-13)
 
+
+> **⚠ REMEDIERING DEL 1 (2026-10-01, JARVIS-059/ADR-001): STATUSVERDIER ER HISTORISKE.** Uavhengig audit av
+> commit `35075a2` fant at «PRODUCTION_VERIFIED»/«VERIFIED»-verdiene for minne (UA-2), Q-20-erasure, Business
+> Graph (UA-3), OPS-RUNTIME (backup/restore), Situation Engine (UA-10) og voice er motsagt av koden. En
+> «VERIFIED»-verdi i denne filen betyr kun at en navngitt test-/host-kjøring en gang besto mot daværende kode -
+> den er IKKE evidens for dagens HEAD, og backup/restore er ikke bevist før en ekte restore (se
+> `docs/remediation/BACKUP_RESTORE_RUNBOOK.md`, status `BLOCKED_EXTERNAL`). Gjeldende status per funn:
+> [`docs/remediation/FINDINGS_LEDGER.md`](remediation/FINDINGS_LEDGER.md).
+
 Statusverdier: NOT_IMPLEMENTED · IMPLEMENTED_NOT_VERIFIED · PARTIAL_RUNTIME · PRODUCTION_VERIFIED · BLOCKED_EXTERNAL
 
 **Se også** [`docs/SOVEREIGN_GRADUATION_MATRIX.md`](SOVEREIGN_GRADUATION_MATRIX.md) (D-163, 2026-09-17)

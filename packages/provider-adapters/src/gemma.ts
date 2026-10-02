@@ -3,6 +3,7 @@ import {
   classifyFetchError,
   classifyHttpStatus,
   envOrDefault,
+  envPositiveInt,
   extractProviderErrorCode,
   firstNonEmptyEnv,
   ProviderError,
@@ -97,7 +98,7 @@ export class GemmaHostedAdapter implements ModelProviderAdapter {
     private readonly apiKey: string | undefined = firstNonEmptyEnv("GEMMA_API_KEY", "GEMINI_API_KEY"),
     readonly model: string = envOrDefault("JARVIS_GEMMA_MODEL", "gemma-4-26b-a4b-it"),
     private readonly baseUrl: string = "https://generativelanguage.googleapis.com",
-    private readonly timeoutMs: number = Number(process.env["JARVIS_MODEL_TIMEOUT_MS"] ?? 60_000)
+    private readonly timeoutMs: number = envPositiveInt("JARVIS_MODEL_TIMEOUT_MS", 60_000)
   ) {}
 
   available(): boolean {

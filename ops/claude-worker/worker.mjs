@@ -3029,11 +3029,36 @@ function cmdDisable(cfg) {
 
 /** ---------------- entrypoint ---------------- */
 
+/**
+ * REMEDIATION PART 1 (JARVIS-052 / STB-07): the architect <-> Claude control loop (issue #68
+ * ARCHITECT_TASK comments) is FROZEN until remediation part 9. The "trusted architect" is a
+ * GitHub login that the product LLM and the dispatched Claude child could both act as, and
+ * merge authority was enforced by prompt only. Every invocation that would poll the queue or
+ * dispatch work (`run`, including `--dry-run`) exits BLOCKED (3) before touching GitHub or git.
+ * `status` / `health` / `enable` / `disable` stay available so the operator can inspect it.
+ * The unfreeze value is deliberately long and descriptive - it is not a convenience toggle.
+ */
+export const FREEZE_ENV = "JARVIS_CLAUDE_WORKER_UNFREEZE";
+export const FREEZE_UNFREEZE_VALUE = "remediation-part-9-reviewed";
+
+export function workerFrozen(env = process.env) {
+  return env[FREEZE_ENV] !== FREEZE_UNFREEZE_VALUE;
+}
+
 async function main() {
-  const cfg = loadWorkerConfig(CONFIG_PATH, HERE);
   const args = process.argv.slice(2);
   const sub = args[0] && !args[0].startsWith("--") ? args[0] : "run";
   const dryRun = args.includes("--dry-run");
+  const inspectOnly = sub === "status" || sub === "health" || sub === "enable" || sub === "disable";
+  if (!inspectOnly && workerFrozen()) {
+    console.error(
+      `[${new Date().toISOString()}] FROZEN: the Jarvis Architect <-> Claude worker is frozen until remediation part 9 ` +
+        `(JARVIS-052). Nothing was polled or dispatched. Disable the scheduled task on the host: ` +
+        `schtasks /Change /TN JarvisClaudeWorker /DISABLE`
+    );
+    return EXIT.BLOCKED;
+  }
+  const cfg = loadWorkerConfig(CONFIG_PATH, HERE);
 
   switch (sub) {
     case "status": return cmdStatus(cfg);

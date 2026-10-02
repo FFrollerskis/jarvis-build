@@ -11,6 +11,7 @@ import {
   type VoiceAuthorizationResult,
   type VoiceSessionGrant
 } from "@jarvis/contracts";
+import { debugDumpEnabled } from "./debug-audio-dump.ts";
 import { VoiceHealth } from "./health.ts";
 import {
   UtteranceJournal,
@@ -248,7 +249,9 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
           stt: { name: options.stt.name, ...healthOf("stt"), processor: options.stt.processor },
           tts: { name: options.tts.name, ...healthOf("tts"), processor: options.tts.processor },
           barge_in: health.bargeInSeen ? "VERIFIED" : "READY",
-          audio_persistence: "none", // §22: rå lyd lagres aldri permanent
+          // §22: rå lyd lagres aldri permanent - UNNTATT eksplisitt samtykket diagnostikk-dump
+          // (D-279 + remediering del 1); `/status` rapporterer det ærlig.
+          audio_persistence: debugDumpEnabled() ? "debug_dump_enabled_raw_audio_on_disk" : "none",
           // D-122: hvilke memory spaces de KONFIGURERTE behandlerne faktisk kan
           // betjene. Gjør porten observerbar UTEN en sesjon - en eier skal kunne
           // se «health-tale er ikke mulig med denne konfigurasjonen» direkte.

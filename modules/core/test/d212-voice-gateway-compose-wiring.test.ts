@@ -61,11 +61,18 @@ describe("D-212: voice-gateway-tjenesten finnes i infra/local/docker-compose.yml
     expect(block).toMatch(/wget -qO- http:\/\/127\.0\.0\.1:\$\{JARVIS_VOICE_PORT:-3020\}\/health/);
   });
 
-  it("D-280: JARVIS_VOICE_DEBUG_DUMP_DIR videresendes EKSPLISITT i environment: - `docker compose` sender ALDRI automatisk hele .env inn i containeren, kun det som er listet her (live-funn: variabelen nådde ALDRI containeren FØR denne fiksen, til tross for at den sto i .env)", () => {
-    expect(block).toMatch(/JARVIS_VOICE_DEBUG_DUMP_DIR:\s*"\$\{JARVIS_VOICE_DEBUG_DUMP_DIR:-\}"/);
+  const withoutComments = block
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("#"))
+    .join("\n");
+
+  it("Remediering del 1 (JARVIS-080): rå-lyd-dump er FJERNET fra compose - JARVIS_VOICE_DEBUG_DUMP_DIR videresendes ikke (en gammel .env-verdi når aldri containeren)", () => {
+    expect(withoutComments).not.toMatch(/JARVIS_VOICE_DEBUG_DUMP_DIR/);
+    expect(withoutComments).not.toMatch(/JARVIS_VOICE_DEBUG_DUMP_CONSENT/);
   });
 
-  it("D-280: monterer et fast volum til /voice-debug (D-279 sin debug-audio-dump.ts skriver dit) - harmløst når JARVIS_VOICE_DEBUG_DUMP_DIR er usatt, siden ingenting skriver til stien uansett", () => {
-    expect(block).toMatch(/volumes:\s*\n(\s*#.*\n)*\s*-\s*\.\/voice-debug-dumps:\/voice-debug/);
+  it("Remediering del 1 (JARVIS-080): ingen volum til /voice-debug monteres - rå lyd har ingen skrivbar sti som standard", () => {
+    expect(withoutComments).not.toMatch(/voice-debug/);
+    expect(withoutComments).not.toMatch(/^\s{4}volumes:/m);
   });
 });

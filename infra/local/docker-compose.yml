@@ -5,18 +5,28 @@
 #
 # Fase 2 legger til: postgres (pgvector, pgmq). Fase 3: langfuse. Se DEPLOYMENT_STRATEGY.md.
 
+# REMEDIERING DEL 1 (JARVIS-009/008/089, containment 2026-10-01):
+#  - INGEN tjeneste publiserer en port på 0.0.0.0. Postgres (superbruker), Infisical,
+#    Langfuse og API er KUN bundet til 127.0.0.1 (Tailscale Serve forwarder til
+#    localhost - se docs/runbooks/D250_NAS_MIGRATION.md); browser-gateway publiserer
+#    ingen port (api/worker når den via tjenestenavnet `browser-gateway:3030`).
+#  - Flytende image-tagger er pinnet til tag@digest (flerarkitektur-indeks-digest,
+#    slått opp mot Docker Hub/MCR 2026-10-01). Sammenlign mot det NAS-en faktisk kjører
+#    (`docker compose images`) FØR `up --build` - se docs/remediation/BASELINE.md.
+#  Strukturelt vakt: ops/security/check-containment.mjs (kjøres i CI og som `pnpm check:containment`).
+
 services:
   postgres:
     # pgvector-image gir Postgres 16 + vector-extension (aktiveres først i fase 4).
     # pgmq er bevisst utelatt: kø-valget er pg-boss-klasse over vanlige tabeller (D-13).
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg16@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
     environment:
       POSTGRES_DB: "${JARVIS_DB_NAME:-jarvis}"
       POSTGRES_USER: "${JARVIS_DB_ADMIN_USER:-postgres}"
       # Ingen default-passord: settes i lokal .env (git-ignorert).
       POSTGRES_PASSWORD: "${JARVIS_DB_ADMIN_PASSWORD:?sett JARVIS_DB_ADMIN_PASSWORD i .env}"
     ports:
-      - "${JARVIS_DB_PORT:-5432}:5432"
+      - "127.0.0.1:${JARVIS_DB_PORT:-5432}:5432"
     volumes:
       - jarvis-pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -34,7 +44,7 @@ services:
   # trygt å kjøre på HVER oppstart, også når begge allerede finnes (f.eks. et
   # eksisterende `jarvis-pgdata`-volum fra FØR denne fiksen).
   db-bootstrap:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg16@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
     environment:
       PGPASSWORD: "${JARVIS_DB_ADMIN_PASSWORD}"
     volumes:
@@ -50,7 +60,7 @@ services:
   langfuse:
     # D-27: self-hosted Langfuse v2 (kun Postgres-avhengighet). Init-noekler
     # kommer fra .env (lokale dev-verdier) - aldri hardkodet her.
-    image: langfuse/langfuse:2
+    image: langfuse/langfuse:2.95.11@sha256:85c278dcab96c15db94191a5c1664f85aba2d7fb6771a00e99681c902c4b7015
     environment:
       DATABASE_URL: "postgresql://${JARVIS_DB_ADMIN_USER:-postgres}:${JARVIS_DB_ADMIN_PASSWORD}@postgres:5432/langfuse"
       NEXTAUTH_URL: "http://127.0.0.1:3050"
@@ -65,14 +75,14 @@ services:
       LANGFUSE_INIT_USER_NAME: "${LANGFUSE_INIT_USER_NAME}"
       LANGFUSE_INIT_USER_PASSWORD: "${LANGFUSE_INIT_USER_PASSWORD}"
     ports:
-      - "3050:3000"
+      - "127.0.0.1:3050:3000"
     depends_on:
       db-bootstrap:
         condition: service_completed_successfully
     restart: unless-stopped
 
   infisical-redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     restart: unless-stopped
     healthcheck:
       test: ["CMD","redis-cli","ping"]
@@ -81,7 +91,7 @@ services:
 
   infisical:
     # D-35: self-hosted Infisical (deler Docker-Postgres via egen db 'infisical').
-    image: infisical/infisical:latest-postgres
+    image: infisical/infisical:latest-postgres@sha256:36438985877fb5ab99c76ee1a9c73611e44d8518b44a77304b5d4c05451f8c62
     environment:
       ENCRYPTION_KEY: "${INFISICAL_ENCRYPTION_KEY}"
       AUTH_SECRET: "${INFISICAL_AUTH_SECRET}"
@@ -103,7 +113,7 @@ services:
       SMTP_FROM_ADDRESS: "${INFISICAL_SMTP_FROM_ADDRESS:-}"
       SMTP_FROM_NAME: "${INFISICAL_SMTP_FROM_NAME:-Infisical}"
     ports:
-      - "3060:8080"
+      - "127.0.0.1:3060:8080"
     depends_on:
       db-bootstrap:
         condition: service_completed_successfully
@@ -167,7 +177,7 @@ services:
       # Fra host-miljø (aldri lagret i fil her):
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
     ports:
-      - "${JARVIS_API_PORT:-3010}:${JARVIS_API_PORT:-3010}"
+      - "127.0.0.1:${JARVIS_API_PORT:-3010}:${JARVIS_API_PORT:-3010}"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${JARVIS_API_PORT:-3010}/health >/dev/null"]
       interval: 10s
@@ -230,16 +240,11 @@ services:
       # space (D-23) og klient-oppgitte, ikke server-verifiserte spaces
       # (D-123) forblir strukturelt avvist - se docs/OPEN_QUESTIONS.md.
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
-      # D-280 (rettelse av D-279 sitt LIVE-funn: `JARVIS_VOICE_DEBUG_DUMP_DIR`
-      # ble satt som en bar shell-variabel/i `.env`, men NÅDDE ALDRI
-      # containeren - `docker compose` videresender KUN variabler eksplisitt
-      # listet her i `environment:`-blokken, ALDRI automatisk alt i `.env`).
-      # Fast container-intern verdi (`/voice-debug`) i stedet for en
-      # vilkårlig operatør-valgt sti - kombinert med volumet under gir dette
-      # Tobias filen RETT PÅ NAS-filsystemet uten `docker cp`, og fjerner
-      # denne hele klassen konfigurasjonsfeil (compose-passthrough MÅ
-      # eksplisitt listes for HVER variabel, ikke bare `.env`-filen).
-      JARVIS_VOICE_DEBUG_DUMP_DIR: "${JARVIS_VOICE_DEBUG_DUMP_DIR:-}"
+      # REMEDIERING DEL 1 (JARVIS-080): rå-lyd-dump (D-279/D-280) er FJERNET fra
+      # compose - `JARVIS_VOICE_DEBUG_DUMP_DIR` videresendes ikke lenger og
+      # `./voice-debug-dumps` monteres ikke. Koden krever i tillegg et eksplisitt
+      # samtykke-flagg (se apps/voice-gateway/src/debug-audio-dump.ts), så en
+      # gammel `.env`-verdi alene aktiverer aldri lagring av rå lyd.
       # D-353 (Tobias direkte i chat: "den hører meg veldig dårlig ... kan
       # heller ikke bryte han midt i en samtale"). SAMME D-280-disiplin som
       # over: må listes HER eksplisitt, ellers når en `.env`-verdi ALDRI
@@ -248,11 +253,6 @@ services:
       # operatør-handling.
       JARVIS_VOICE_VAD_THRESHOLD: "${JARVIS_VOICE_VAD_THRESHOLD:-}"
       JARVIS_VOICE_VAD_HANGOVER_MS: "${JARVIS_VOICE_VAD_HANGOVER_MS:-}"
-    volumes:
-      # D-280: ALLTID montert (harmløst når JARVIS_VOICE_DEBUG_DUMP_DIR er
-      # usatt - ingenting skriver dit) - se `debug-audio-dump.ts` (D-279).
-      # `.gitignore`-ført slik at et dumpet klipp aldri kan havne i git.
-      - ./voice-debug-dumps:/voice-debug
     # D-362 (Tobias direkte i chat, live NAS-funn under D-361-redeploy:
     # "failed to bind host port 0.0.0.0:3020/tcp: address already in use").
     # Root cause: `JARVIS_PUBLIC_VOICE_BASE_URL` (se .env.example) betyr
@@ -294,8 +294,9 @@ services:
       dockerfile: infra/local/browser-gateway.Dockerfile
     environment:
       JARVIS_BROWSER_GATEWAY_PORT: "${JARVIS_BROWSER_GATEWAY_PORT:-3030}"
-    ports:
-      - "${JARVIS_BROWSER_GATEWAY_PORT:-3030}:${JARVIS_BROWSER_GATEWAY_PORT:-3030}"
+    # REMEDIERING DEL 1 (JARVIS-008): INGEN host-publisering. Gatewayen har ingen
+    # autentisering og kjører en delt Chromium-side - den skal kun nås fra api/worker
+    # via det interne Docker-nettverket (`http://browser-gateway:3030`).
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${JARVIS_BROWSER_GATEWAY_PORT:-3030}/health >/dev/null"]
       interval: 10s

@@ -20,7 +20,7 @@ import { classifyCompletionOutcome, computeAdaptiveRetryMaxTokens, type Completi
 import { CapabilityRegistry, type ModelCapability } from "./capability-registry.ts";
 import { ProviderHealthTracker, type ProviderHealthState } from "./provider-health.ts";
 import { AiRouter, type RoutePlan } from "./router.ts";
-import { costOre as computeCostOre, DEFAULT_PRICING, type PricingTable } from "./pricing.ts";
+import { assertExplicitPricing, costOre as computeCostOre, DEFAULT_PRICING, type PricingTable } from "./pricing.ts";
 import type { TraceSink } from "./trace.ts";
 
 /**
@@ -214,6 +214,8 @@ export class ModelGateway {
     this.guard = new BudgetGuard(opts.pool, opts.budget ?? DEFAULT_BUDGET);
     this.registry = opts.registry ?? new CapabilityRegistry();
     this.pricing = opts.pricing ?? DEFAULT_PRICING;
+    // JARVIS-006: ingen registrert modellprofil får falle til `default_rate`.
+    assertExplicitPricing(this.pricing, this.registry.list());
     this.router = new AiRouter(this.registry, this.health);
     for (const p of opts.providers) {
       this.byName.set(p.name, p);
@@ -223,6 +225,11 @@ export class ModelGateway {
   /** D-106: eksponerer registryet (read-only) for AI Council/Collaboration sin deterministiske rolletildeling (§35 - Jarvis-kode, ikke modell, velger). */
   get capabilityRegistry(): CapabilityRegistry {
     return this.registry;
+  }
+
+  /** Remediering del 1: ALLE konstruerte adapternavn (uansett `available()`), brukt av oppstartens eksplisitt-pris-sjekk. */
+  listProviderNames(): string[] {
+    return this.opts.providers.map((p) => p.name);
   }
 
   /** D-106: providernavn med `available()===true` akkurat nå - AI Council/Collaboration bruker denne til å avgjøre kandidater/`unavailable_members` FØR kall gjøres. */

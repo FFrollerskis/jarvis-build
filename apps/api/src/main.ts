@@ -1,4 +1,5 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
+import { envHour, envInt, envPort } from "@jarvis/contracts";
 import {
   ChannelSessionAuthority,
   ContextBuilder,
@@ -22,12 +23,10 @@ import { InfraExecutionGate, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { DeploymentService, DiagnosisService, IncidentService } from "@jarvis/incidents";
 import {
   AiCouncil,
-  createSpecialistDelegationExecutor,
-  DELEGATE_CODE_TASK_TOOL_NAME,
+  assertProvidersHaveExplicitPricing,
+  DEFAULT_PRICING,
   ModelGateway,
-  SPECIALIST_DELEGATION_TOOLS,
-  traceSinkFromEnv,
-  type ToolExecutor
+  traceSinkFromEnv
 } from "@jarvis/model-gateway";
 import {
   AnthropicAdapter,
@@ -39,11 +38,7 @@ import {
   OllamaAdapter,
   OpenAiAdapter
 } from "@jarvis/provider-adapters";
-import { DockerSandboxRunner, InProcessWorker, PgTaskQueue, ProcessSandboxRunner, TaskService } from "@jarvis/tasks";
-import {
-  ResolvingSelfModificationGithubClient, SelfModificationService, SelfModificationTransport,
-  selfModificationToolDefinitions
-} from "@jarvis/self-modification";
+import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
 import {
   LlmExtractionAdapter,
   LocalHashEmbedding,
@@ -55,7 +50,7 @@ import {
 import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
-  allMeshTools, PgGithubRateLimitStore,
+  MODEL_SURFACE_ALLOWLIST, resolveModelToolSurface, PgGithubRateLimitStore,
   TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
@@ -102,7 +97,7 @@ import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
 import { createApiServer, type ApiDeps } from "./server.ts";
 
-const port = Number(process.env["JARVIS_API_PORT"] ?? 3010);
+const port = envPort("JARVIS_API_PORT", 3010);
 
 async function buildDeps(): Promise<ApiDeps | undefined> {
   if (!process.env["JARVIS_DB_PASSWORD"] && !process.env["JARVIS_DB_HOST"]) {
@@ -247,6 +242,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       spend_approved: process.env["JARVIS_BUDGET_APPROVED"] === "true"
     }
   });
+  // JARVIS-006: hver konstruert adapter MÅ ha eksplisitt pris - ingen stille `default_rate`.
+  assertProvidersHaveExplicitPricing(DEFAULT_PRICING, gateway.listProviderNames());
   // D-106 (AI Mesh Council/Collaboration/lokal-Gemma-utvidelse): egen
   // orkestrering over SAMME `gateway`/`pool` - ingen ny modellkall-vei, ingen
   // ny sikkerhetsvei (hvert Council-medlemsanrop går via `gateway.complete()`
@@ -555,60 +552,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         parameters: { message: text.slice(i, i + 3900) } });
     }
   };
-  // Task #121 (D-214): to-lags selvendrings-modell. SAMME sandbox-valg-
-  // mønster som worker-main.ts sin egen "coding"-jobbregistrering
-  // (JARVIS_SANDBOX=docker|process) - api-prosessen får sin EGEN
-  // `SandboxRunner`-instans (egen prosess, ingen delt tilstand med workeren).
-  // `resolveGitToken` gjenbruker `readSecretProvider` (SAMME Infisical-
-  // primær/.env-fallback-kjede som resten av denne filen, D-211) - ALDRI en
-  // ny, parallell secret-vei. `prGateway: toolGateway` gjenbruker DEN SAMME
-  // instansen som resten av verktøyene i denne filen (duck-typed mot
-  // `PrPublishingGateway`, se pr-publisher.ts sitt filhode) - PR-opprettelse
-  // går derfor uendret via `github.create_pr` (klasse C); selve automergen
-  // (klasse B, se github-client.ts) bruker en HELT EGEN, smalere HTTP-vei,
-  // ALDRI `github.merge_pr` (klasse D).
-  const selfModificationSandbox =
-    process.env["JARVIS_SANDBOX"] === "docker" ? new DockerSandboxRunner() : new ProcessSandboxRunner();
-  const selfModificationService = new SelfModificationService({
-    pool,
-    sandbox: selfModificationSandbox,
-    resolveGitToken: () => readSecretProvider.get("JARVIS_GITHUB_TOKEN"),
-    githubClient: new ResolvingSelfModificationGithubClient(() => readSecretProvider.get("JARVIS_GITHUB_TOKEN")),
-    prGateway: toolGateway,
-    ownerPersonId: ownerControlAuthority.owner_person_id,
-    taskService,
-    notify: sendTelegram
-  });
-  // Sveiper periodisk (samme uref'et setInterval-mønster som
-  // `deviceRegistry.refresh()` over) - CI tar typisk minutter, 60s er en
-  // fornuftig balanse mellom rask auto-merge og unødig GitHub-API-trafikk.
-  // Task #123 (D-214): to nye, UAVHENGIG try/catch'ede sveiper ved siden av
-  // den eksisterende zero-review-portvakten - `sweepPendingJobs()` følger opp
-  // `proposeCodeChange()` sine asynkrone kodejobber, `sweepApprovedRequests()`
-  // merger en `/godkjenn`-godkjent `requires_approval`-rad. Én sveips feil
-  // (uansett hvilken) stjeler ALDRI de to andre - SAMME isolasjonsdisiplin
-  // som selve tjenesten allerede har per-rad internt.
-  setInterval(
-    () =>
-      void selfModificationService
-        .sweepPendingRequests()
-        .catch((err) => console.error(JSON.stringify({ msg: "self_modification_sweep_error", error: (err as Error).message }))),
-    60_000
-  ).unref();
-  setInterval(
-    () =>
-      void selfModificationService
-        .sweepPendingJobs()
-        .catch((err) => console.error(JSON.stringify({ msg: "self_modification_job_sweep_error", error: (err as Error).message }))),
-    60_000
-  ).unref();
-  setInterval(
-    () =>
-      void selfModificationService
-        .sweepApprovedRequests()
-        .catch((err) => console.error(JSON.stringify({ msg: "self_modification_approved_sweep_error", error: (err as Error).message }))),
-    60_000
-  ).unref();
+  // REMEDIERING DEL 1 (JARVIS-042/043): selvmodifikasjon er FRYST inntil
+  // remedieringsdel 9 (SHA-bundet godkjenning, kill-switch-/freeze-respekt,
+  // audit). `SelfModificationService` konstrueres IKKE, de tre 60-sekunders-
+  // sveipene (`sweepPendingRequests`/`sweepPendingJobs`/`sweepApprovedRequests`)
+  // startes IKKE, `self_modification.*` registreres IKKE i ToolGateway og
+  // Telegram-kommandoene `/godkjenn`/`/avvis` har ingen handler. Modulen
+  // `@jarvis/self-modification` ligger urørt og dormant i repoet.
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(githubRateLimitController),
@@ -879,7 +829,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // `situations`/`executive`, ingen parallell registreringsvei.
     additionalTools: [
       ...situationsToolDefinitions(new SituationsTransport(situationEngine, situationDomainPauses)),
-      ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway))),
+      ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, { modelSurface: MODEL_SURFACE_ALLOWLIST }))),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten
       // av eier-autoritets-/session-grant-mønstrene i denne filen - IKKE en ny,
@@ -902,26 +852,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // SAMME `memoryRetriever`-instansen `conversationEngine` under gjenbruker
       // for bakgrunnskontekst - se `memoryRetriever` sin egen filhode-kommentar
       // lenger opp for hvorfor den ble hevet ut hit.
-      ...memoryToolDefinitions(new MemorySearchTransport(memoryRetriever)),
-      // Task #121 (D-214): `self_modification.propose_personality_change` -
-      // DEN SAMME `selfModificationService`-instansen konstruert over
-      // (delt med den periodiske sveipen og Telegram-godkjenningsbroen
-      // lenger ned) - kun ÉN chat-kallbar handling i denne sliceen (se
-      // transport.ts sitt filhode for hvorfor merge/godkjenning BEVISST
-      // ikke er chat-kallbare).
-      ...selfModificationToolDefinitions(new SelfModificationTransport(selfModificationService))
+      ...memoryToolDefinitions(new MemorySearchTransport(memoryRetriever))
     ]
   })) toolGateway.register(tool);
-  // D-289 (Tobias direkte i chat: "vil ha alt at han har full kontroll" -
-  // retningsvalg på D-288): beregnet ÉN gang, RETT ETTER at hele
-  // registreringsløkken over er ferdig (samtlige `tool_id`-er - inkl.
-  // situations/executive/owner_controls/governance/memory/self_modification
-  // - er FAKTISK registrert i akkurat dette punktet, se løkken over) -
-  // ALDRI per samtaletur. Gjenbrukt UENDRET av BÅDE `conversationEngine`
-  // sine `tools` (samtale-/tale-flaten, se under) OG `executive`-worker-
-  // jobbhandleren (BO-11.1 §9, se lenger ned) - SAMME liste, ALDRI to
-  // potensielt avvikende kopier av "hva Charlie/executive-jobber kan kalle".
-  const fullMeshTools = allMeshTools(toolGateway);
+  // REMEDIERING DEL 1 (JARVIS-002): `allMeshTools()` (hele registeret) er IKKE
+  // lenger koblet til noen aktiv flate. Chat, tale, Telegram og executive-jobber
+  // får KUN det eksplisitte lese-minimumssettet (`MODEL_SURFACE_ALLOWLIST`);
+  // oppstarten feiler lukket hvis noe i flaten ikke er klasse A / ren lesing.
+  const modelToolSurface = resolveModelToolSurface(toolGateway);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
   // registrert med Gmail/Calendar over) - ingen ny transport-vei.
   const businessEventSyncService = new BusinessEventSyncService(toolGateway, businessService, openLoopService);
@@ -944,9 +882,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     executiveHandler({
       gateway,
       tools: {
-        definitions: fullMeshTools.map((t) => t.def),
+        definitions: modelToolSurface.map((t) => t.def),
         // D-351: 4000 → 20_000 (se mesh-bridge.ts sitt filhode for host-målt begrunnelse).
-        executor: new MeshToolExecutor(toolGateway, ownerIdentity, 20_000, fullMeshTools)
+        executor: new MeshToolExecutor(toolGateway, ownerIdentity, 20_000, modelToolSurface)
       }
     })
   );
@@ -1010,38 +948,18 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         memoryWriter.ingestText(identity, { kind: "conversation", ref: identity.session_id, trust: "trusted" }, text)
     },
     council: aiCouncil,
-    // D-30 live-funn: samtalebanen (tekst + voice via /chat) får mesh-verktøyene.
-    // Executor bindes til samtalens RESOLVED identity - aldri ownerIdentity -
-    // slik at tenant/delegation/authority følger den som faktisk snakker.
-    // D-289 ("vil ha alt at han har full kontroll"): `fullMeshTools` (ALLE
-    // registrerte tool_id:action-par), ikke lenger de 5 kuraterte
-    // `MESH_TOOLS` - se `fullMeshTools` sitt filhode over for hvorfor ingen
-    // ny godkjenningssperre er lagt til (D-41: sovereign owner-modus for
-    // klasse D er uendret).
-    // D-354/D-355 ("gemma skal være standar for tekst og tale ... ved
-    // større forespørsler kode endringer ... skal den spinne opp agenter
-    // ... kommer tilbake til gemma med svaret"): `SPECIALIST_DELEGATION_TOOLS`
-    // (`delegate_code_task`) lagt til SISTE, PÅ SIDEN AV de ~56 mesh-
-    // verktøyene - samme "legg til på slutten"-disiplin som hver ny mesh-
-    // connector i D-297+ har fulgt. Bilde-generering trenger INGEN ny
-    // delegerings-vei - `openai_images.generate_image` er allerede et
-    // ordinært mesh-verktøy i `fullMeshTools`.
+    // D-30 live-funn: samtalebanen (tekst + voice via /chat) har verktøykall.
+    // REMEDIERING DEL 1 (JARVIS-002/JARVIS-035): kun det eksplisitte lese-
+    // minimumssettet. `delegate_code_task` (nøstet sky-kall med hardkodet
+    // PUBLIC-sensitivitet som omgår `paid_models_allowed`/policy, D-354/D-355)
+    // er FRYST av flaten inntil en senere remedieringsfase har gjort
+    // delegeringen policy-/budsjettstyrt. Executor bindes til samtalens
+    // RESOLVED identity (aldri ownerIdentity) - autorisasjon/D-pipeline/audit
+    // håndheves uendret per kall i ToolGateway.
     tools: {
-      definitions: [...fullMeshTools.map((t) => t.def), ...SPECIALIST_DELEGATION_TOOLS],
+      definitions: modelToolSurface.map((t) => t.def),
       // D-351: 4000 → 20_000 (se mesh-bridge.ts sitt filhode for host-målt begrunnelse).
-      // D-355: komposisjon - `delegate_code_task` prøves FØRST (ukjent navn
-      // for MeshToolExecutor ville uansett returnert TOOL_NOT_FOUND, men
-      // eksplisitt navnesjekk her er tydeligere enn å stole på fallthrough).
-      executorFor: (identity): ToolExecutor => {
-        const meshExecutor = new MeshToolExecutor(toolGateway, identity, 20_000, fullMeshTools);
-        const delegationExecutor = createSpecialistDelegationExecutor(gateway);
-        return {
-          execute: (call, ctx) =>
-            call.tool_name === DELEGATE_CODE_TASK_TOOL_NAME
-              ? delegationExecutor.execute(call, ctx)
-              : meshExecutor.execute(call, ctx)
-        };
-      }
+      executorFor: (identity) => new MeshToolExecutor(toolGateway, identity, 20_000, modelToolSurface)
     },
     // Task #121 (D-214): kosmetisk personlighetslag, se conversation.ts sin
     // `buildSystemPrompt()`/`loadPersonality()`.
@@ -1191,34 +1109,8 @@ porter: se docs/RUNTIME_GATES.md`;
         // 3. SAMME motor som /chat, bundet til den OPPLØSTE identiteten.
         const result = await conversationEngine.handle(authorized.identity, text);
         return result.reply;
-      },
-      // Task #121 (D-214): `requires_approval`-sporets raske "one-tap"
-      // eier-godkjenning. `poll()` har ALLEREDE fail-closed avvist enhver
-      // ikke-eier-chat FØR `dispatch()` i det hele tatt nås (§C3 i
-      // d125-telegram-inbound-wiring.test.ts) - `actorPersonId` er derfor
-      // TRYGT den konfigurerte eier-identiteten, ALDRI noe fra selve
-      // meldingsteksten (SAMME `JARVIS_OWNER_PERSON_ID ?? "person-tobias"`-
-      // uttrykk som `telegramOwnerAuthority`/`seedOwner()` over).
-      approveSelfMod: async (requestId) => {
-        try {
-          const updated = await selfModificationService.resolveApproval(
-            requestId, "approved", process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias"
-          );
-          return `Godkjent: ${updated.request_id} (${updated.kind}) - status=${updated.status}`;
-        } catch (err) {
-          return `Kunne ikke godkjenne ${requestId}: ${err instanceof Error ? err.message : "ukjent feil"}`;
-        }
-      },
-      rejectSelfMod: async (requestId) => {
-        try {
-          const updated = await selfModificationService.resolveApproval(
-            requestId, "rejected", process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias"
-          );
-          return `Avvist: ${updated.request_id} (${updated.kind}) - status=${updated.status}`;
-        } catch (err) {
-          return `Kunne ikke avvise ${requestId}: ${err instanceof Error ? err.message : "ukjent feil"}`;
-        }
       }
+      // REMEDIERING DEL 1: `/godkjenn`/`/avvis` (selvmodifikasjon) har ingen handler - frosset (JARVIS-042/043).
     }, sendTelegram).start();
     // BO-05: reboot-durabel morgenlevering (DB-laas, Europe/Oslo, catch-up, aldri duplikat).
     // Bruker DailyBrief.deliverViaTelegram() (ikke den generiske sendTelegram-
@@ -1247,7 +1139,7 @@ porter: se docs/RUNTIME_GATES.md`;
   // sveipen kjører (default kl. 04) - REN passiv observasjon/regnskap,
   // ALDRI påvirket av finance_kill_switch (se spend-service.ts §13-JSDoc).
   new DailyScheduler(
-    pool, "finance-spend-integrity-sweep", Number(process.env["JARVIS_FINANCE_SPEND_SWEEP_HOUR"] ?? 4)
+    pool, "finance-spend-integrity-sweep", envHour("JARVIS_FINANCE_SPEND_SWEEP_HOUR", 4)
   ).start(() => runFinanceSpendIntegritySweepForAllTenants(pool, spendService).then(() => undefined));
   // D-109 (UA-6 Slice 3) §15: periodisk Stripe-utfallssynk (explicit GET-
   // refresh av `provider_acknowledged`-rader) + provider-avviksdeteksjon -
@@ -1259,14 +1151,14 @@ porter: se docs/RUNTIME_GATES.md`;
   // ingen `provider_acknowledged`-Stripe-rader å synke før noen faktisk
   // sender en Stripe-betaling.
   new DailyScheduler(
-    pool, "stripe-payment-sync", Number(process.env["JARVIS_STRIPE_SYNC_HOUR"] ?? 3)
+    pool, "stripe-payment-sync", envHour("JARVIS_STRIPE_SYNC_HOUR", 3)
   ).start(() => runStripePaymentSyncForAllTenants(pool, financeService).then(() => undefined));
   // D-110 (UA-6 Slice 4) §14: periodisk Vipps-utfallssynk + provider-
   // avviksdeteksjon - SAMME mekanisme/begrunnelse som stripe-payment-sync
   // over (eget job_name, egen klokkeslett-env, trygt å kjøre uten
   // JARVIS_VIPPS_*-credentials konfigurert).
   new DailyScheduler(
-    pool, "vipps-payment-sync", Number(process.env["JARVIS_VIPPS_SYNC_HOUR"] ?? 3)
+    pool, "vipps-payment-sync", envHour("JARVIS_VIPPS_SYNC_HOUR", 3)
   ).start(() => runVippsPaymentSyncForAllTenants(pool, financeService).then(() => undefined));
   // D-111 (UA-6 Slice 5) §17: periodisk open-banking-sveip (samtykke-
   // verifisering/konto-/transaksjonssynk/betalingsstatus/avstemming/avvik)
@@ -1274,19 +1166,19 @@ porter: se docs/RUNTIME_GATES.md`;
   // uten JARVIS_NEONOMICS_*-credentials (provider-steg blir no-op, de
   // rent lokale avstemmings-/avviks-stegene kjører fortsatt).
   new DailyScheduler(
-    pool, "neonomics-sweep", Number(process.env["JARVIS_NEONOMICS_SYNC_HOUR"] ?? 3)
+    pool, "neonomics-sweep", envHour("JARVIS_NEONOMICS_SYNC_HOUR", 3)
   ).start(() => runNeonomicsSweepForAllTenants(pool, bankingService, financeService).then(() => undefined));
   // D-112 (UA-6 Slice 6): daglig Wallester-kortsveip (tilstands-/
   // autorisasjons-/transaksjonssynk -> avstemming -> avviksdeteksjon) -
   // SAMME reboot-durable DailyScheduler-mekanisme.
   new DailyScheduler(
-    pool, "wallester-sweep", Number(process.env["JARVIS_WALLESTER_SYNC_HOUR"] ?? 5)
+    pool, "wallester-sweep", envHour("JARVIS_WALLESTER_SYNC_HOUR", 5)
   ).start(() => runWallesterSweepForAllTenants(pool, cardService).then(() => undefined));
   // UA-3 next slice (D-53) §19/§20: periodisk open-loop-sveip - gjenbruker SAMME
   // reboot-durable DailyScheduler-mekanisme (eget job_name, egen klokkeslett-env),
   // uavhengig av om Telegram er konfigurert (deteksjon != levering).
   new DailyScheduler(
-    pool, "business-open-loop-sweep", Number(process.env["JARVIS_BUSINESS_SWEEP_HOUR"] ?? 6)
+    pool, "business-open-loop-sweep", envHour("JARVIS_BUSINESS_SWEEP_HOUR", 6)
   ).start(() => runOpenLoopSweepForAllTenants(pool, openLoopService).then(() => undefined));
   // D-198 (V4-revisjon, masterplanens "Business Operating Loop"): UKENTLIG
   // (ALDRI daglig - se runBusinessWeeklyBriefForAllTenants() sin doc-
@@ -1299,9 +1191,9 @@ porter: se docs/RUNTIME_GATES.md`;
   // ukedagen, se isWeeklyBriefDay()). Default mandag (JARVIS_BUSINESS_
   // WEEKLY_BRIEF_WEEKDAY=1) kl. 07 (JARVIS_BUSINESS_WEEKLY_BRIEF_HOUR).
   new DailyScheduler(
-    pool, "business-weekly-brief", Number(process.env["JARVIS_BUSINESS_WEEKLY_BRIEF_HOUR"] ?? 7)
+    pool, "business-weekly-brief", envHour("JARVIS_BUSINESS_WEEKLY_BRIEF_HOUR", 7)
   ).start(async () => {
-    if (!isWeeklyBriefDay(new Date(), "Europe/Oslo", Number(process.env["JARVIS_BUSINESS_WEEKLY_BRIEF_WEEKDAY"] ?? 1))) return;
+    if (!isWeeklyBriefDay(new Date(), "Europe/Oslo", envInt("JARVIS_BUSINESS_WEEKLY_BRIEF_WEEKDAY", 1, { min: 0, max: 7 }))) return;
     const result = await runBusinessWeeklyBriefForAllTenants(pool, toolGateway, (tenantId) => ({
       ...ownerIdentity, tenant_id: tenantId, memory_space_id: "business", session_id: "sess-business-weekly-brief"
     }));
@@ -1326,7 +1218,7 @@ porter: se docs/RUNTIME_GATES.md`;
   // (`completed_at` forblir NULL) og en `situation_sweep_failed`-linje
   // logges strukturert.
   new DailyScheduler(
-    pool, "situation-sweep", Number(process.env["JARVIS_SITUATION_SWEEP_HOUR"] ?? 7)
+    pool, "situation-sweep", envHour("JARVIS_SITUATION_SWEEP_HOUR", 7)
   ).start(() => runSituationSweepForAllTenants(pool, {
     openLoops: openLoopService,
     // D-195 (infra-slice): SAMME allerede-konstruerte `incidentService`
@@ -1347,14 +1239,14 @@ porter: se docs/RUNTIME_GATES.md`;
   // synkroniserte aktiviteter er tilgjengelige naar sveipet (default 06) og
   // morgenbriefen kjører.
   new DailyScheduler(
-    pool, "business-events-sync", Number(process.env["JARVIS_BUSINESS_EVENTS_SYNC_HOUR"] ?? 5)
+    pool, "business-events-sync", envHour("JARVIS_BUSINESS_EVENTS_SYNC_HOUR", 5)
   ).start(() => runBusinessEventSyncForAllTenants(pool, businessEventSyncService).then(() => undefined));
   // UA-7 Communications Hub - foerste slice (D-119): periodisk Gmail->
   // Conversation Graph-identitetskobling - SAMME reboot-durable
   // DailyScheduler-mekanisme (eget job_name, egen klokkeslett-env),
   // uavhengig av business-events-sync over.
   new DailyScheduler(
-    pool, "conversation-graph-sync", Number(process.env["JARVIS_CONVERSATION_GRAPH_SYNC_HOUR"] ?? 5)
+    pool, "conversation-graph-sync", envHour("JARVIS_CONVERSATION_GRAPH_SYNC_HOUR", 5)
   ).start(() => runConversationGraphSyncForAllTenants(pool, conversationGraphSyncService).then(() => undefined));
   // UA-3 profiling/scoring-slice (D-61) §23: periodisk, idempotent
   // score-rekalkulering - SAMME reboot-durable DailyScheduler-mekanisme (eget
@@ -1362,7 +1254,7 @@ porter: se docs/RUNTIME_GATES.md`;
   // open-loop-sveipet (06) slik at rekalkuleringen ser den ferskeste
   // aktivitets-/open-loop-tilstanden (default kl. 07).
   new DailyScheduler(
-    pool, "business-scoring-recalc", Number(process.env["JARVIS_BUSINESS_SCORING_HOUR"] ?? 7)
+    pool, "business-scoring-recalc", envHour("JARVIS_BUSINESS_SCORING_HOUR", 7)
   ).start(() => runScoringSweepForAllTenants(pool, scoringService).then(() => undefined));
   // UA-3 Native Jarvis Support Core (D-66) §7/§24: periodisk Gmail-innboks-
   // reconciliation - SAMME reboot-durable DailyScheduler-mekanisme, eget
@@ -1375,7 +1267,7 @@ porter: se docs/RUNTIME_GATES.md`;
   // konfigurert - routing blir da deterministisk tomt (ingen meldinger
   // klassifiseres som support, se `email-ingress.ts`).
   new DailyScheduler(
-    pool, "support-inbox-sync", Number(process.env["JARVIS_SUPPORT_INBOX_SYNC_HOUR"] ?? 8)
+    pool, "support-inbox-sync", envHour("JARVIS_SUPPORT_INBOX_SYNC_HOUR", 8)
   ).start(() => runSupportInboxSyncForAllTenants(pool, supportEmailService).then(() => undefined));
   // D-85: periodisk anomaly->anbefaling-sveip (growth-eid BESLUTNINGS-lag,
   // ALDRI utførelse) - SAMME reboot-durable DailyScheduler-mekanisme, eget
@@ -1385,7 +1277,7 @@ porter: se docs/RUNTIME_GATES.md`;
   // strengt nødvendig (åpen-loop-koblingen er `null`-trygg uansett rekkefølge,
   // se `detectAndRecommendSpendAnomalies()`-kommentaren i modules/growth).
   new DailyScheduler(
-    pool, "growth-action-recommendation-sweep", Number(process.env["JARVIS_GROWTH_RECOMMENDATION_SWEEP_HOUR"] ?? 9)
+    pool, "growth-action-recommendation-sweep", envHour("JARVIS_GROWTH_RECOMMENDATION_SWEEP_HOUR", 9)
   ).start(() => runActionRecommendationSweepForAllTenants(pool, growthService).then(() => undefined));
   // UA-8 Personal Digital Twin (D-130) §6: periodisk retensjons-håndhevelse
   // for lokasjonsobservasjoner - SAMME reboot-durable DailyScheduler-
@@ -1393,7 +1285,7 @@ porter: se docs/RUNTIME_GATES.md`;
   // faktiske observasjoner ennå (ingen ekstern lokasjons-leverandør koblet
   // til i denne sliceen) - sveipet blir da et no-op.
   new DailyScheduler(
-    pool, "location-retention-sweep", Number(process.env["JARVIS_LOCATION_RETENTION_SWEEP_HOUR"] ?? 2)
+    pool, "location-retention-sweep", envHour("JARVIS_LOCATION_RETENTION_SWEEP_HOUR", 2)
   ).start(() => runLocationRetentionSweepForAllTenants(pool, locationService).then(() => undefined));
   // UA-8 Personal Digital Twin (D-130) §6: periodisk retensjons-håndhevelse
   // for helseobservasjoner - SAMME mekanisme/begrunnelse som
@@ -1401,7 +1293,7 @@ porter: se docs/RUNTIME_GATES.md`;
   // (default kl. 02) - begge er rene, uavhengige retensjons-ryddejobber uten
   // downstream-avhengigheter til andre UA-3/UA-4-sveip.
   new DailyScheduler(
-    pool, "health-retention-sweep", Number(process.env["JARVIS_HEALTH_RETENTION_SWEEP_HOUR"] ?? 2)
+    pool, "health-retention-sweep", envHour("JARVIS_HEALTH_RETENTION_SWEEP_HOUR", 2)
   ).start(() => runHealthRetentionSweepForAllTenants(pool, healthService).then(() => undefined));
   // UA-9 Vision & Physical World (D-153): periodisk retensjons-håndhevelse
   // for hendelsesobservasjoner - SAMME reboot-durable DailyScheduler-
@@ -1410,7 +1302,7 @@ porter: se docs/RUNTIME_GATES.md`;
   // Trygt å kjøre uten noen faktiske hendelser ennå (ingen ekstern kamera-
   // leverandør koblet til i denne sliceen) - sveipet blir da et no-op.
   new DailyScheduler(
-    pool, "vision-retention-sweep", Number(process.env["JARVIS_VISION_RETENTION_SWEEP_HOUR"] ?? 2)
+    pool, "vision-retention-sweep", envHour("JARVIS_VISION_RETENTION_SWEEP_HOUR", 2)
   ).start(() => runVisionRetentionSweepForAllTenants(pool, visionService).then(() => undefined));
   // D-286 (Tobias direkte i chat, "alle" - alle tre foreslåtte tilnærminger
   // til ubegrenset minnevekst): periodisk konsolidering av gamle EPISODISKE
@@ -1420,10 +1312,10 @@ porter: se docs/RUNTIME_GATES.md`;
   // begrunnelse (bevisst snever scope - rører ALDRI preference/decision/
   // relation/semantic-typer, KUN episodic samtale-minner).
   new DailyScheduler(
-    pool, "memory-retention-sweep", Number(process.env["JARVIS_MEMORY_RETENTION_SWEEP_HOUR"] ?? 2)
+    pool, "memory-retention-sweep", envHour("JARVIS_MEMORY_RETENTION_SWEEP_HOUR", 2)
   ).start(() =>
     runMemoryRetentionSweepForAllTenants(
-      pool, memoryWriter, memorySummaries, Number(process.env["JARVIS_MEMORY_RETENTION_DAYS"] ?? 60)
+      pool, memoryWriter, memorySummaries, envInt("JARVIS_MEMORY_RETENTION_DAYS", 60, { min: 1, max: 3650 })
     ).then(() => undefined)
   );
   // D-242 (Tobias direkte chat-instruks: "du skal bygge det for absolutt
@@ -1441,7 +1333,7 @@ porter: se docs/RUNTIME_GATES.md`;
   // hopper deterministisk over enhver ikke-konfigurert connector FØR noe
   // kall gjøres (se doc-kommentaren i `connector-health-sweep.ts`).
   new DailyScheduler(
-    pool, "connector-health-sweep", Number(process.env["JARVIS_CONNECTOR_HEALTH_SWEEP_HOUR"] ?? 10)
+    pool, "connector-health-sweep", envHour("JARVIS_CONNECTOR_HEALTH_SWEEP_HOUR", 10)
   ).start(async () => {
     const result = await runConnectorHealthSweep(toolGateway, ownerIdentity);
     if (result.failed.length > 0) {

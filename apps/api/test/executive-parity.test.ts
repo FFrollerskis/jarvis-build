@@ -3,15 +3,17 @@ import type pg from "pg";
 import type { JobContract } from "@jarvis/contracts";
 import { MemoryTraceSink, ModelGateway, type ToolExecutor } from "@jarvis/model-gateway";
 import { ScriptedAdapter, type ToolCallRequest, type ToolResultMessage } from "@jarvis/provider-adapters";
-import type { ClaimedTask, JobContext, SandboxRunner } from "@jarvis/tasks";
-import { executiveHandler } from "../src/executive.ts";
+import type { ClaimedTask, JobContext } from "@jarvis/tasks";
+import { ExecutiveCommandDisabledError, executiveHandler } from "../src/executive.ts";
 
 /**
  * BO-11.1 §9-§10: api-workeren og worker-containeren registrerer SAMME delte
  * executive-handler (apps/api/src/executive.ts). Testene beviser at begge
- * konfigurasjonene (med/uten sandbox) gir semantisk likt resultat for samme
- * durable jobb - ingen gammel echo-/provider-direkte-handler kan vinne
- * queue-racet igjen.
+ * konfigurasjonene gir semantisk likt resultat for samme durable jobb - ingen
+ * gammel echo-/provider-direkte-handler kan vinne queue-racet igjen.
+ *
+ * Remediering del 1 (JARVIS-001/010): `command`-grenen (sandbox-kjøring) er
+ * fjernet - en kontrakt med `input.data.command` avvises deterministisk.
  */
 
 function fakePool(): pg.Pool {
@@ -78,17 +80,6 @@ const ctx: JobContext = {
   assertNotCancelled: async () => undefined
 };
 
-const fakeSandbox: SandboxRunner = {
-  name: "fake-sandbox",
-  async create() {
-    return {
-      workdir: "/tmp/fake",
-      exec: (cmd: string) => ({ code: 0, stdout: `ran:${cmd}`, stderr: "" }),
-      dispose: async () => undefined
-    };
-  }
-};
-
 describe("BO-11.1 §10: executive-handler-paritet api ↔ worker-container", () => {
   it("samme tools-jobb gir semantisk likt resultat i begge konfigurasjoner - samme idempotensnøkkel", async () => {
     const api = recordingExecutor();
@@ -96,8 +87,7 @@ describe("BO-11.1 §10: executive-handler-paritet api ↔ worker-container", () 
     const apiHandler = executiveHandler({ gateway: newGateway(), tools: { definitions: TOOLS, executor: api.executor } });
     const workerHandler = executiveHandler({
       gateway: newGateway(),
-      tools: { definitions: TOOLS, executor: workerC.executor },
-      sandbox: fakeSandbox
+      tools: { definitions: TOOLS, executor: workerC.executor }
     });
     const task = makeTask({ prompt: "hva skjer i dag?", tools: true, purpose: "BACKGROUND" });
     const apiResult = await apiHandler(task, ctx);
@@ -114,7 +104,7 @@ describe("BO-11.1 §10: executive-handler-paritet api ↔ worker-container", () 
 
   it("prompt-jobb uten tools går via mesh (aldri echo) i begge konfigurasjoner", async () => {
     const apiHandler = executiveHandler({ gateway: newGateway() });
-    const workerHandler = executiveHandler({ gateway: newGateway(), sandbox: fakeSandbox });
+    const workerHandler = executiveHandler({ gateway: newGateway() });
     const task = makeTask({ prompt: "oppsummer dagen", purpose: "BACKGROUND" });
     const a = await apiHandler(task, ctx);
     const b = await workerHandler(task, ctx);
@@ -123,20 +113,17 @@ describe("BO-11.1 §10: executive-handler-paritet api ↔ worker-container", () 
     expect(a["text"]).toBe(b["text"]);
   });
 
-  it("command-jobb: sandbox der den finnes; uten sandbox kvitteres målet (aldri crash/racefeil)", async () => {
-    const apiHandler = executiveHandler({ gateway: newGateway() });
-    const workerHandler = executiveHandler({ gateway: newGateway(), sandbox: fakeSandbox });
-    const task = makeTask({ command: ["echo", "hei"] });
-    const a = await apiHandler(task, ctx);
-    const b = await workerHandler(task, ctx);
-    expect(a["echo"]).toBe("morgenstatus"); // api: kvittering
-    expect(b["stdout"]).toBe("ran:echo"); // worker: sandbox
-    expect(b["sandbox"]).toBe("fake-sandbox");
+  it("command-jobb avvises deterministisk (executive_command_disabled) - ingen sandbox-kjøring, ingen kvittering", async () => {
+    const handler = executiveHandler({ gateway: newGateway() });
+    await expect(handler(makeTask({ command: ["echo", "hei"] }), ctx)).rejects.toBeInstanceOf(ExecutiveCommandDisabledError);
+    await expect(handler(makeTask({ command: [] }), ctx)).rejects.toThrow("executive_command_disabled");
+    // også når en prompt er med: command vinner aldri, den avvises først
+    await expect(handler(makeTask({ prompt: "hei", command: ["id"] }), ctx)).rejects.toThrow("executive_command_disabled");
   });
 
   it("styringsjobb uten prompt/command kvitteres identisk", async () => {
     const a = await executiveHandler({ gateway: newGateway() })(makeTask({}), ctx);
-    const b = await executiveHandler({ gateway: newGateway(), sandbox: fakeSandbox })(makeTask({}), ctx);
+    const b = await executiveHandler({ gateway: newGateway() })(makeTask({}), ctx);
     expect(a["echo"]).toBe("morgenstatus");
     expect(b["echo"]).toBe("morgenstatus");
   });

@@ -1,5 +1,11 @@
 # Jarvis – implementeringsplan (ti faser)
 
+> **⚠ Remediering 2026-10-01 (ADR-001):** Statuslinjen under («Utkast v1.0 – venter på godkjenning av fase 1») er
+> HISTORISK og beskriver ikke dagens repo. Dette dokumentet er en plan, ikke et krav og ikke statusbevis.
+> Gjeldende dokumenthierarki og remedieringsstatus: [`docs/remediation/ADR-001-dokumenthierarki.md`](remediation/ADR-001-dokumenthierarki.md)
+> og [`docs/remediation/FINDINGS_LEDGER.md`](remediation/FINDINGS_LEDGER.md).
+
+
 **Status:** Utkast v1.0 – venter på godkjenning av fase 1 før kode skrives.
 Fasene følger masterplanens ti-delte byggeplan, med fase 1 omdefinert til et kjørbart fundament
 (beslutning D-11 i [DECISIONS_AND_ASSUMPTIONS.md](DECISIONS_AND_ASSUMPTIONS.md)).

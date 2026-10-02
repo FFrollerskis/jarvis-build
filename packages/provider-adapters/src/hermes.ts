@@ -2,6 +2,7 @@ import {
   classifyFetchError,
   classifyHttpStatus,
   envOrDefault,
+  envPositiveInt,
   extractProviderErrorCode,
   firstNonEmptyEnv,
   ProviderError,
@@ -47,7 +48,7 @@ export class HermesAdapter implements ModelProviderAdapter {
     private readonly apiKey: string | undefined = firstNonEmptyEnv("HERMES_API_KEY", "NOUS_API_KEY"),
     readonly model: string = envOrDefault("JARVIS_HERMES_MODEL", "Hermes-4-70B"),
     private readonly baseUrl: string = envOrDefault("JARVIS_HERMES_URL", "https://inference-api.nousresearch.com"),
-    private readonly timeoutMs: number = Number(process.env["JARVIS_MODEL_TIMEOUT_MS"] ?? 60_000)
+    private readonly timeoutMs: number = envPositiveInt("JARVIS_MODEL_TIMEOUT_MS", 60_000)
   ) {}
 
   available(): boolean {

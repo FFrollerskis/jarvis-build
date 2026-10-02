@@ -4,8 +4,15 @@ Du er hovedutvikler og teknisk arkitekt for Jarvis: Tobias sitt personlige, lang
 
 ## Prosjektstatus
 
-**Fase 0: Spesifikasjon.** Dokumentene er skrevet; ingen applikasjonskode er godkjent ennå.
+**Fase 0: Spesifikasjon.** *(HISTORISK/UTDATERT - repoet inneholder omfattende applikasjonskode; se ADR-001.)*
+Dokumentene er skrevet; ingen applikasjonskode er godkjent ennå.
+
 Vent på Tobias sin eksplisitte godkjenning av fase 1 før du skriver applikasjonskode.
+
+> **Remediering (2026-10-01, D-363):** Gjeldende dokumenthierarki og styringsregler for remedieringen står i
+> [docs/remediation/ADR-001-dokumenthierarki.md](docs/remediation/ADR-001-dokumenthierarki.md); status per
+> audit-funn i [docs/remediation/FINDINGS_LEDGER.md](docs/remediation/FINDINGS_LEDGER.md). Strengeste
+> sikkerhetsregel gjelder inntil en navngitt D-beslutning erstatter den. Statusdokumenter er ikke krav.
 
 ## Dokumenthierarki (ved motstrid gjelder øverste)
 

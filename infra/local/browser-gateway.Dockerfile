@@ -13,7 +13,7 @@
 # installerte npm-pakken sin forventede browser-binær-versjon mot den som
 # faktisk ligger i imaget. `-noble` (Ubuntu 24.04) matcher CI sin
 # `ubuntu-24.04`-runner - ingen grunn til en annen Ubuntu-linje her.
-FROM mcr.microsoft.com/playwright:v1.63.0-noble AS runtime
+FROM mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27 AS runtime
 
 WORKDIR /app
 RUN corepack enable

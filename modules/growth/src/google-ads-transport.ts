@@ -244,7 +244,8 @@ export class GoogleAdsTransport implements ToolTransport {
     private readonly defaultCustomerId: string | undefined = process.env["JARVIS_GOOGLE_ADS_CUSTOMER_ID"],
     private readonly developerToken: string | undefined = process.env["JARVIS_GOOGLE_ADS_DEVELOPER_TOKEN"],
     private readonly loginCustomerId: string | undefined = process.env["JARVIS_GOOGLE_ADS_LOGIN_CUSTOMER_ID"],
-    private readonly apiVersion: string = process.env["JARVIS_GOOGLE_ADS_API_VERSION"] ?? DEFAULT_API_VERSION
+    // Remediering del 1 (JARVIS-083/092): en blank `KEY=` i .env er IKKE en versjon - tom/usatt = default.
+    private readonly apiVersion: string = (process.env["JARVIS_GOOGLE_ADS_API_VERSION"] ?? "").trim() || DEFAULT_API_VERSION
   ) {}
 
   async invoke(action: string, parameters: Record<string, JsonValue>, credential: string): Promise<{ external_id?: string; data?: JsonValue }> {

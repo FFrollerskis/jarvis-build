@@ -39,8 +39,13 @@ describe("D-339: browser-gateway-tjenesten finnes i infra/local/docker-compose.y
     expect(block).not.toMatch(/depends_on:/);
   });
 
-  it("porter mappes via JARVIS_BROWSER_GATEWAY_PORT (default 3030), samme variabel som apps/browser-gateway/src/main.ts leser", () => {
-    expect(block).toMatch(/"\$\{JARVIS_BROWSER_GATEWAY_PORT:-3030\}:\$\{JARVIS_BROWSER_GATEWAY_PORT:-3030\}"/);
+  it("JARVIS_BROWSER_GATEWAY_PORT (default 3030) styrer lytteporten inni containeren, samme variabel som apps/browser-gateway/src/main.ts leser", () => {
+    expect(block).toMatch(/JARVIS_BROWSER_GATEWAY_PORT:\s*"\$\{JARVIS_BROWSER_GATEWAY_PORT:-3030\}"/);
+  });
+
+  it("Remediering del 1 (JARVIS-008): INGEN host-publisering - uautentisert gateway nås kun via det interne Docker-nettverket", () => {
+    expect(block).not.toMatch(/^\s{4}ports:/m);
+    expect(block).not.toMatch(/-\s*"[^"]*:[^"]*"/);
   });
 
   it("har helsesjekk mot /health, samme mønster som api-/voice-gateway-tjenestene", () => {

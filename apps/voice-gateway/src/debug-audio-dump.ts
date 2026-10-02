@@ -34,9 +34,23 @@ import { join } from "node:path";
  *   - Ment som et MIDLERTIDIG diagnostikk-verktøy for DENNE spesifikke
  *     undersøkelsen - fjernes igjen når rotårsaken er funnet (se D-279).
  */
+/**
+ * REMEDIERING DEL 1 (JARVIS-080): dumpen er AV som standard også når en gammel
+ * `.env` fortsatt har `JARVIS_VOICE_DEBUG_DUMP_DIR` satt (den lå i produksjons-
+ * `.env` etter D-279/D-280, og `/status` sa likevel `audio_persistence: "none"`).
+ * Rå lyd kan nå KUN lagres når BÅDE mappen OG dette eksplisitte samtykket er
+ * satt - og `/status` rapporterer det ærlig (se `debugDumpEnabled()`).
+ */
+export const DEBUG_DUMP_CONSENT_VALUE = "I_ACCEPT_RAW_AUDIO_ON_DISK";
+
+export function debugDumpEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  const dir = env["JARVIS_VOICE_DEBUG_DUMP_DIR"];
+  return Boolean(dir) && env["JARVIS_VOICE_DEBUG_DUMP_CONSENT"] === DEBUG_DUMP_CONSENT_VALUE;
+}
+
 export async function maybeDumpAudioForDebug(wav: Buffer): Promise<string | undefined> {
   const dir = process.env["JARVIS_VOICE_DEBUG_DUMP_DIR"];
-  if (!dir) {
+  if (!dir || !debugDumpEnabled()) {
     return undefined;
   }
   await mkdir(dir, { recursive: true });

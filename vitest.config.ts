@@ -24,6 +24,12 @@ export default defineConfig({
     }
   },
   test: {
+    env: {
+      // Remediering del 1 (JARVIS-052): claude-worker er frosset i produksjon; worker-testene
+      // driver den ekte entrypointen og trenger eksplisitt opphevelse. En egen test beviser
+      // at den er frosset UTEN denne verdien.
+      JARVIS_CLAUDE_WORKER_UNFREEZE: "remediation-part-9-reviewed"
+    },
     include: [
       "{apps,packages,modules}/*/test/**/*.test.ts",
       // Ikke-produkt infrastruktur (D-126): worker/supervisor-kilden i ops/ er
