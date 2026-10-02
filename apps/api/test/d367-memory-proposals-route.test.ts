@@ -83,6 +83,15 @@ describe("D-367: wiring", () => {
     expect(main).toMatch(/new MemorySearchTransport\(memoryRetriever, memoryWriter\)/);
     expect(main).toMatch(/modelSurface: \[\.\.\.MODEL_SURFACE_ALLOWLIST, \.\.\.MODEL_SURFACE_QUARANTINE_WRITES\]/);
   });
+  it("D-369: samtalemotoren gir executoren eierens rå melding, main.ts har av-bryteren, og `owner_stated` kan ikke komme fra modell-args", () => {
+    const conversation = readFileSync(fileURLToPath(new URL("../src/conversation.ts", import.meta.url)), "utf8");
+    expect(conversation).toContain("executorFor(identity, { user_message: text })");
+    expect(main).toMatch(/JARVIS_MEMORY_AUTO_APPROVE"\] === "false" \? undefined : turn/);
+    const mesh = readFileSync(fileURLToPath(new URL("../../../modules/tool-gateway/src/mesh-bridge.ts", import.meta.url)), "utf8");
+    // mappingen for suggest_memory kopierer kun subject/content/type - aldri et owner_stated-felt fra modellen
+    const mapping = mesh.slice(mesh.indexOf('name: "suggest_memory"'), mesh.indexOf('action: "propose"') + 400);
+    expect(mapping).not.toMatch(/modelArgs\["owner_stated"\]/);
+  });
   it("dashbordet godkjenner via grant-ruten og bruker aldri chat/modell til godkjenning", () => {
     expect(dashboard).toContain('fetch("/memory/proposals"');
     expect(dashboard).toContain("data-memory-approve");

@@ -218,8 +218,8 @@ export class MemoryWriter {
    */
   async propose(
     identity: IdentityContext,
-    input: { subject: string; content: string; type?: MemoryType }
-  ): Promise<ApplyOutcome> {
+    input: { subject: string; content: string; type?: MemoryType; owner_stated?: boolean }
+  ): Promise<ApplyOutcome & { auto_approved?: boolean }> {
     const subject = typeof input.subject === "string" ? input.subject.trim() : "";
     const content = typeof input.content === "string" ? input.content.trim() : "";
     const type = input.type ?? "semantic";
@@ -232,7 +232,22 @@ export class MemoryWriter {
       space: identity.memory_space_id as MemorySpace,
       type, subject, content, confidence: 0.5
     };
-    return this.apply(identity, { kind: "tool", ref: `memory.propose:${identity.session_id}`, trust: "untrusted" }, candidate);
+    const outcome = await this.apply(identity, { kind: "tool", ref: `memory.propose:${identity.session_id}`, trust: "untrusted" }, candidate);
+    // D-369: eieren ba UTTRYKKELIG om dette i samme tur (avgjort deterministisk av kalleren, `ownerStatesMemory`) -> godkjenn med en
+    // gang via SAMME policy-sjekk som manuell godkjenning. Konflikter (QUARANTINED_CONFLICT) og NOOP godkjennes ALDRI automatisk.
+    if (input.owner_stated === true && outcome.op === "ADD" && outcome.status === "quarantined") {
+      const approved = await this.promoteFromQuarantine(identity, candidate.space, outcome.memory_item_id);
+      if (approved) {
+        await withMemoryTransaction(this.pool, identity.tenant_id, [candidate.space], (client) =>
+          writeAudit(client, identity, {
+            type: "memory.auto_approved",
+            payload: { memory_item_id: outcome.memory_item_id, reason: "owner_explicit_request" }
+          })
+        );
+      }
+      return { ...outcome, auto_approved: approved };
+    }
+    return outcome;
   }
 
   /** Åpne (karantene-)forslag fra `memory.propose` for eierens space - kun lesing, kun forslag (kilde `tool`). */

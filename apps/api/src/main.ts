@@ -961,7 +961,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     tools: {
       definitions: modelToolSurface.map((t) => t.def),
       // D-351: 4000 → 20_000 (se mesh-bridge.ts sitt filhode for host-målt begrunnelse).
-      executorFor: (identity) => new MeshToolExecutor(toolGateway, identity, 20_000, modelToolSurface)
+      // D-369: eierens rå melding i turen (kun fra grant-autentisert chat) gir den deterministiske «uttrykkelig be om å huske»-sjekken;
+      // `JARVIS_MEMORY_AUTO_APPROVE=false` slår auto-godkjenning av eier-uttrykte minner av (da går ALT via karantene).
+      executorFor: (identity, turn) => new MeshToolExecutor(
+        toolGateway, identity, 20_000, modelToolSurface,
+        process.env["JARVIS_MEMORY_AUTO_APPROVE"] === "false" ? undefined : turn
+      )
     },
     // Task #121 (D-214): kosmetisk personlighetslag, se conversation.ts sin
     // `buildSystemPrompt()`/`loadPersonality()`.

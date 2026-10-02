@@ -1,6 +1,7 @@
 import type { ToolCallRequest, ToolDefinition as MeshToolDefinition, ToolResultMessage } from "@jarvis/provider-adapters";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import type { ToolGateway } from "./gateway.ts";
+import { ownerStatesMemory } from "./owner-stated-memory.ts";
 
 /**
  * UA-1 P1A (§13, §16-§17): trusted bro mellom AI Mesh og Tool Gateway.
@@ -115,9 +116,10 @@ const MESH_TOOLS: MeshToolMapping[] = [
     def: {
       name: "suggest_memory",
       description:
-        "Foreslå at noe lagres i langtidsminnet - KUN når Tobias eksplisitt ber deg huske noe. Forslaget havner i " +
-        "KARANTENE og brukes ikke som minne før Tobias godkjenner det i dashbordet; si det tydelig til ham. Bruk et kort, " +
-        "kanonisk emne (f.eks. 'tobias.familie') og én presis, selvstendig setning som innhold.",
+        "Foreslå at noe lagres i langtidsminnet - KUN når Tobias eksplisitt ber deg huske noe. Ber han uttrykkelig om det i " +
+        "meldingen sin (f.eks. 'husk at …'), lagres det med en gang; ellers (hvis du selv foreslår det) havner det i KARANTENE " +
+        "til Tobias godkjenner det i dashbordet - svar ærlig ut fra statusen i resultatet. Bruk et kort, kanonisk emne " +
+        "(f.eks. 'tobias.familie') og én presis, selvstendig setning med Tobias sine egne ord som innhold.",
       input_schema: {
         type: "object",
         properties: {
@@ -315,7 +317,12 @@ export class MeshToolExecutor {
      * flere mappinger - autorisasjon (inkl. D-pipeline) håndheves UANSETT i
      * Tool Gateway/Policy per kall, aldri av denne listen (§17).
      */
-    private readonly tools: MeshToolMapping[] = MESH_TOOLS
+    private readonly tools: MeshToolMapping[] = MESH_TOOLS,
+    /**
+     * D-369: eierens RÅ melding i denne samtaleturen (trusted: kommer fra grant-autentisert chat, aldri fra modell/verktøy).
+     * Brukes kun til den deterministiske `ownerStatesMemory()`-sjekken for `memory.propose`. Udefinert = aldri auto-godkjenning.
+     */
+    private readonly turn?: { user_message: string }
   ) {}
 
   async execute(
@@ -330,12 +337,21 @@ export class MeshToolExecutor {
         success: false, output: null, error_category: "TOOL_NOT_FOUND", at
       };
     }
+    let parameters = (mapped.parameters ? mapped.parameters(call.arguments) : call.arguments) as Record<string, unknown>;
+    if (mapped.tool_id === "memory" && mapped.action === "propose") {
+      // D-369: `owner_stated` settes HER i trusted lag (mappingen over kopierer aldri et slikt felt fra modell-args), og kun når
+      // eierens egen melding uttrykkelig ba om det og dekker innholdet. Ellers (og alltid for modellens egne forslag): karantene.
+      const { owner_stated: _ignored, ...rest } = parameters;
+      void _ignored;
+      parameters = ownerStatesMemory(this.turn?.user_message, String(rest["subject"] ?? ""), String(rest["content"] ?? ""))
+        ? { ...rest, owner_stated: true }
+        : rest;
+    }
     const result = await this.toolGateway.execute({
       identity: this.identity as never,
       tool_id: mapped.tool_id,
       action: mapped.action,
-      // Trusted parameterbygging når mappingen definerer den - ellers model-args.
-      parameters: (mapped.parameters ? mapped.parameters(call.arguments) : call.arguments) as never,
+      parameters: parameters as never,
       idempotency_key: ctx.idempotency_key,
       // D-317: `call.provider`/`.model` er stemplet av selve adapteren som genererte
       // DENNE turen (se ToolCallRequest sitt filhode i provider-adapters) - ALDRI fra
