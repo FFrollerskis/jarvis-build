@@ -37,4 +37,8 @@ for _ in $(seq 1 60); do
 done
 [ "$ready" = 1 ] || { echo "scratch-containeren ble ikke klar" >&2; exit 1; }
 
-node "$HERE/jarvis-backup.mjs" verify --set "$SET_DIR" --identity "$IDENTITY" --scratch-container "$NAME"
+# Git Bash på Windows: node.exe forstår ikke /c/Users/... - bruk Windows-stil (C:/Users/...) når cygpath finnes (D-372).
+NODE_HERE="$HERE"
+if command -v cygpath >/dev/null 2>&1; then NODE_HERE="$(cygpath -m "$HERE")"; fi
+
+node "$NODE_HERE/jarvis-backup.mjs" verify --set "$SET_DIR" --identity "$IDENTITY" --scratch-container "$NAME"
