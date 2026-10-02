@@ -8,6 +8,11 @@
 # hente en URL; interne mål SKAL gi 403 `egress_blocked`, kontrollen (offentlig side) SKAL gi 200. Kun statuskode og
 # feilkode skrives ut (aldri sideinnhold). Ingenting endres; alle mål er kun lesing (GET via nettleser) og interne mål
 # blir aldri hentet hvis policyen virker.
+#
+# MERK (arkitekt-review, D-368): de 17 direkte målene avvises av det SYNTAKTISKE laget (assertNavigableUrl) FØR Chromium. Det er
+# REDIRECT-testene (kun med RUN_REDIRECT=1, krever internett), `browser_egress_denied`-linjene i gateway-loggen (del 4) og ekte-Chromium-testen
+# i apps/browser-gateway/test/engine-egress.test.ts som viser at PROXY-laget håndhever. En redirect-test som ikke gir 403 egress_blocked
+# (f.eks. 502 fordi httpbin er nede) er WARN, aldri PASS.
 set -u
 API="${API_CONTAINER:-local-api-1}"
 RUN_REDIRECT="${RUN_REDIRECT:-0}"
@@ -74,8 +79,8 @@ record("KONTROLL offentlig https://example.com/", "200", await call("https://exa
   record("token gjenbrukt med ENDRET body", "401", { status: res4.status, error: "", hasData: false });
 }
 if (process.env.RUN_REDIRECT === "1") {
-  record("REDIRECT fra offentlig side til metadata", "NOT200", await call("https://httpbin.org/redirect-to?url=http%3A%2F%2F169.254.169.254%2Flatest%2Fmeta-data%2F&status_code=302"));
-  record("REDIRECT til compose-vert api:3010", "NOT200", await call("https://httpbin.org/redirect-to?url=http%3A%2F%2Fapi%2F&status_code=302"));
+  record("REDIRECT fra offentlig side til metadata", "BLOCK", await call("https://httpbin.org/redirect-to?url=http%3A%2F%2F169.254.169.254%2Flatest%2Fmeta-data%2F&status_code=302"));
+  record("REDIRECT til compose-vert api", "BLOCK", await call("https://httpbin.org/redirect-to?url=http%3A%2F%2Fapi%2F&status_code=302"));
 }
 const fail = results.filter((r) => !r.ok && !r.warn).length;
 const warn = results.filter((r) => r.warn).length;

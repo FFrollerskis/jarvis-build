@@ -307,6 +307,16 @@ describe.skipIf(!hasPsql)("D: bootstrap-databases.sql (ekte Postgres 16)", () =>
     await fresh.end();
   });
 
+  it("Arkitekt-review (P3): setning-logging slås av FØR ALTER ROLE ... PASSWORD (ingen klartekst-passord i serverlogg)", () => {
+    const sql = read("infra/local/bootstrap-databases.sql");
+    const firstAlter = sql.indexOf("ALTER ROLE infisical_app WITH LOGIN");
+    for (const setting of ["SET log_statement = 'none'", "SET log_min_error_statement = 'panic'", "SET log_min_duration_statement = -1"]) {
+      const at = sql.indexOf(setting);
+      expect(at, setting).toBeGreaterThan(-1);
+      expect(at, setting).toBeLessThan(firstAlter);
+    }
+  });
+
   it("filen inneholder ingen passord-literaler", () => {
     const sql = read("infra/local/bootstrap-databases.sql");
     expect(sql).toMatch(/\\getenv infisical_pw INFISICAL_DB_PASSWORD/);

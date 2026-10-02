@@ -108,3 +108,14 @@ Statusord: se [ADR-001 §2.4](ADR-001-dokumenthierarki.md). `(delvis)` i «Rest�
 | JARVIS-098 | P3 | Voice/mobile minor: web client hygiene (unbounded tech log), authorization trust-model gaps, TTS teardown suspicions, text pipeline edge cases, ben… | ikke tildelt | `OPEN` | — | — | — | #218 | Ikke berørt av del 1. |
 | JARVIS-099 | P3 | Worker/infra minor: healthchecks liveness-only elsewhere, config inconsistencies, merge-proof store in child-writable dir, matching weaknesses, dea… | ikke tildelt | `OPEN` | — | — | — | #218 | Ikke berørt av del 1. |
 | JARVIS-100 | P3 | Documentation drift bundles per slice (status headers, stale comments, stale runbooks, PROJECT_STATUS size) not already covered by JARVIS-058/059 | ikke tildelt – TASK-GOV-01 | `OPEN` | — | — | — | #218 | Dokumentdrift. Kun de motsagte påstandene (059) og hierarkiet (058) er adressert. |
+
+## Korrigerende merknader etter arkitekt-review (2026-10-02, D-368)
+
+Radene over er ikke omskrevet; disse merknadene korrigerer påstander som reviewen viste var for brede:
+- **JARVIS-001** (identitet): «utelukkende fra grant» holdt ikke for `/tasks/submit` (`contract.owner_person_id`) - rettet i D-368 (`TaskService.submit` binder eier til grant-personen).
+- **JARVIS-063** (DoS): per-enhet-grensen gjaldt bare `authedRequest`-rutene - nå alle grant-ruter; `clientKey` bruker siste XFF-element.
+- **JARVIS-008** (browser): WebRTC/UDP gikk utenom egress-proxyen - rettet (Chromium-flagg + ekte-Chromium-test); live-probens redirect-tester krever nå 403.
+- **JARVIS-065** (eier-identitet): server og nettsider er rene, men Swift-klientene har fortsatt hardkodet `person-tobias`/`tenant-personal` (Q-46).
+- **JARVIS-076** («SCRAM for rolle-passord»): gjelder `jarvis_runtime`; bootstrap-rollene settes via server-side-hashet `ALTER ROLE` med setning-logging avslått.
+- **JARVIS-091** («`guardedFetch` på alle leverandørkall»): overdrevet - Infisical (`gateway.ts`), `mcp-zapier-transport.ts`, `browser-transport.ts` bruker rå `fetch` mot konfigurerte base-URL-er (Q-46).
+

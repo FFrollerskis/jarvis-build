@@ -118,17 +118,18 @@ function isLoopback(address: string | undefined): boolean {
 }
 
 /**
- * Klient-IP for rate limiting. `X-Forwarded-For` stoles KUN på når selve
- * TCP-peeren er loopback (Tailscale Serve/lokal reverse proxy) - ellers kunne
- * enhver klient velge sin egen rate-limit-nøkkel.
+ * Klient-IP for rate limiting. `X-Forwarded-For` stoles KUN på når selve TCP-peeren er loopback (Tailscale Serve/lokal reverse
+ * proxy) - ellers kunne enhver klient velge sin egen rate-limit-nøkkel. Arkitekt-review (P3): vi bruker SISTE element (det vår egen,
+ * betrodde proxy la til) - aldri det første, som en klient selv kan ha satt når proxyen appender i stedet for å overskrive.
  */
 export function clientKey(req: IncomingMessage): string {
   const peer = req.socket.remoteAddress;
   if (isLoopback(peer)) {
     const fwd = req.headers["x-forwarded-for"];
-    const first = (Array.isArray(fwd) ? fwd[0] : fwd)?.split(",")[0]?.trim();
-    if (first) {
-      return first;
+    const parts = (Array.isArray(fwd) ? fwd.join(",") : fwd)?.split(",").map((p) => p.trim()).filter((p) => p.length > 0) ?? [];
+    const last = parts[parts.length - 1];
+    if (last) {
+      return last;
     }
   }
   return peer ?? "unknown";

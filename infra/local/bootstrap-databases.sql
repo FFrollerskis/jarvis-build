@@ -35,6 +35,13 @@ SELECT format('CREATE ROLE %I LOGIN', 'infisical_app')
 SELECT format('CREATE ROLE %I LOGIN', 'langfuse_app')
   WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'langfuse_app') \gexec
 
+-- Arkitekt-review (P3): passordene settes som server-side-hashet SCRAM (password_encryption), men selve DDL-en bærer literalen.
+-- Slå derfor av setning-logging for DENNE sesjonen FØR de to ALTER ROLE (også feilsetninger, som ellers logges med teksten).
+-- `pg_stat_statements` normaliserer konstanter og lagrer ikke literalen. Kun superbruker kan sette disse (db-bootstrap er admin).
+SET log_statement = 'none';
+SET log_min_error_statement = 'panic';
+SET log_min_duration_statement = -1;
+
 SELECT format('ALTER ROLE infisical_app WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'infisical_pw') \gexec
 SELECT format('ALTER ROLE langfuse_app WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'langfuse_pw') \gexec
 
