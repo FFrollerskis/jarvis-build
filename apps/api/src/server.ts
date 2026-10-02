@@ -651,6 +651,10 @@ export function staticPageHeaders(nonce: string): Record<string, string> {
       "default-src 'none'",
       `script-src 'nonce-${nonce}'`,
       `style-src 'nonce-${nonce}'`,
+      // D-366: sidene setter `style="..."`-attributter (statisk og via innerHTML i dashbordet/stemmesiden). Kun ATTRIBUTTER tillates inline;
+      // `<style>`-elementer krever fortsatt nonce, og script-src har ingen unsafe-inline. Ingen ekstern innlasting er mulig
+      // (default-src 'none', img/font/connect låst), så CSS-injeksjon kan ikke eksfiltrere data.
+      "style-src-attr 'unsafe-inline'",
       "img-src 'self' data: blob:",
       "media-src 'self' blob:",
       // Tale-gatewayen er en egen prosess på samme vert (port 3020) - ws(s) mot samme vert, aldri vilkårlige mål.

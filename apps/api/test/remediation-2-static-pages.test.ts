@@ -64,7 +64,10 @@ describe("JARVIS-066: sikkerhetsheadere og nonce-CSP", () => {
       const res = await fetch(`${withOwner.url}${path}`);
       const csp = res.headers.get("content-security-policy") ?? "";
       expect(csp, path).toMatch(/script-src 'nonce-[A-Za-z0-9+/=]+'/);
-      expect(csp, path).not.toContain("unsafe-inline");
+      // D-366: `unsafe-inline` finnes KUN i `style-src-attr` (style-attributter); aldri for script-src/style-src (elementer).
+      expect(csp.replace("style-src-attr 'unsafe-inline'", ""), path).not.toContain("unsafe-inline");
+      expect(csp, path).toContain("style-src-attr 'unsafe-inline'");
+      expect(csp, path).toMatch(/style-src 'nonce-[A-Za-z0-9+/=]+'/);
       expect(csp, path).not.toContain("unsafe-eval");
       expect(csp, path).toContain("default-src 'none'");
       expect(csp, path).toContain("frame-ancestors 'self'");
