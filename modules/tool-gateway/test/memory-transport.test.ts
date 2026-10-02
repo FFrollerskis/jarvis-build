@@ -78,12 +78,42 @@ describe("A: MemorySearchTransport.invoke('search', ...) - skopes ALLTID til ide
 });
 
 describe("B: memoryToolDefinitions() - klasse A (lesing), strict() skjema uten identitetsfelt", () => {
-  it("registrert som tool_id='memory'/action='search', klasse A", () => {
+  it("registrert som tool_id='memory'/action='search', klasse A (+ D-367: propose/list/approve/reject_proposal)", () => {
     const tools = memoryToolDefinitions(new MemorySearchTransport(fakeRetriever().retriever));
-    expect(tools).toHaveLength(1);
+    expect(tools.map((t) => t.action)).toEqual(["search", "propose", "list_proposals", "approve_proposal", "reject_proposal"]);
     expect(tools[0]!.tool_id).toBe("memory");
     expect(tools[0]!.action).toBe("search");
     expect(tools[0]!.capability_class).toBe("A");
+    const byAction = new Map(tools.map((t) => [t.action, t]));
+    expect(byAction.get("propose")!.capability_class).toBe("B");
+    expect(byAction.get("propose")!.scopes).toEqual(["memory.propose"]);
+    expect(byAction.get("approve_proposal")!.scopes).toEqual(["memory.approve"]);
+  });
+
+  it("D-367: propose uten konfigurert writer feiler lukket; propose-skjema avviser identitet/space-felt og lange verdier", async () => {
+    const transport = new MemorySearchTransport(fakeRetriever().retriever);
+    const ctx = { identity: { tenant_id: "t", person_id: "p", memory_space_id: "personal", session_id: "s", device_id: "d" } } as never;
+    await expect(transport.invoke("propose", { subject: "a", content: "b" }, "x", ctx)).rejects.toThrow("memory_proposals_not_configured");
+    const propose = memoryToolDefinitions(transport).find((t) => t.action === "propose")!;
+    const schema = propose.input_schema as unknown as { safeParse: (v: unknown) => { success: boolean } };
+    expect(schema.safeParse({ subject: "a", content: "b" }).success).toBe(true);
+    expect(schema.safeParse({ subject: "a", content: "b", space: "health" }).success).toBe(false);
+    expect(schema.safeParse({ subject: "a", content: "b", tenant_id: "x" }).success).toBe(false);
+    expect(schema.safeParse({ subject: "a", content: "x".repeat(1001) }).success).toBe(false);
+  });
+
+  it("D-367: transporten kaller writer.propose med identiteten fra konteksten og svarer at forslaget er i karantene", async () => {
+    const calls: unknown[] = [];
+    const writer = {
+      propose: async (identity: unknown, input: unknown) => { calls.push({ identity, input }); return { op: "ADD", memory_item_id: "mem-1", status: "quarantined" }; },
+      listProposals: async () => [], promoteFromQuarantine: async () => true, rejectFromQuarantine: async () => true
+    };
+    const transport = new MemorySearchTransport(fakeRetriever().retriever, writer as never);
+    const identity = { tenant_id: "t", person_id: "p", memory_space_id: "personal", session_id: "s", device_id: "d" };
+    const out = await transport.invoke("propose", { subject: "tobias.familie", content: "Maria og Henrik", type: "relation" }, "x", { identity } as never);
+    expect(calls).toEqual([{ identity, input: { subject: "tobias.familie", content: "Maria og Henrik", type: "relation" } }]);
+    expect((out.data as { status: string }).status).toBe("quarantined");
+    expect(out.external_id).toBe("mem-1");
   });
 
   it("input_schema avviser identitetsfelt (tenant_id) i parametre - kun query/limit er gyldige", () => {

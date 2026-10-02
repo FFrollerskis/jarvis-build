@@ -59,7 +59,8 @@ beforeAll(async () => {
   const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
     new EmbeddedPostgres({
     databaseDir, user: "postgres", password: "test-superuser-pw", port, persistent: false
-  }),
+  })
+,
     // D-141 B: proben maa bruke instansens EGNE credentials.
     { identity: { user: "postgres", password: "test-superuser-pw", database: "postgres" } }
   );
@@ -83,9 +84,9 @@ beforeAll(async () => {
       ('person-tobias', 'tenant-a'), ('person-tobias', 'tenant-b');
     INSERT INTO devices (device_id, tenant_id, person_id, kind) VALUES
       ('dev-pc', 'tenant-a', 'person-tobias', 'pc');
-    INSERT INTO sessions (session_id, tenant_id, person_id, last_channel, last_device_id) VALUES
-      ('sess-mem', 'tenant-a', 'person-tobias', 'web', 'dev-pc'),
-      ('sess-ny-okt', 'tenant-a', 'person-tobias', 'web', 'dev-pc');
+    INSERT INTO sessions (session_id, tenant_id, person_id, last_channel, last_device_id, status) VALUES
+      ('sess-mem', 'tenant-a', 'person-tobias', 'web', 'dev-pc', 'active'),
+      ('sess-ny-okt', 'tenant-a', 'person-tobias', 'web', 'dev-pc', 'closed');
   `);
   appPool = createPool({
     host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "jarvis_test", password: "test-app-pw"
@@ -250,6 +251,75 @@ describe("Akseptanse 3: karantene for ubetrodd innhold", () => {
     const item = results.find((r) => r.memory_item_id === original.memory_item_id);
     expect(item?.content).toBe("Sann verdi lambda1.");
     expect(results.find((r) => r.content.includes("Falsk"))).toBeUndefined();
+  });
+});
+
+describe("D-367: memory.propose - modellens forslag havner ALLTID i karantene", () => {
+  it("propose -> quarantined, ikke i retrieval, synlig i listProposals; godkjenning gjør det aktivt", async () => {
+    const id = identity("personal");
+    const out = await writer.propose(id, { subject: "tobias.propose.familie", content: "Barna heter proposealfa1 og proposebeta1." });
+    expect(out.op).toBe("ADD");
+    expect((out as { status: string }).status).toBe("quarantined");
+
+    // Aldri i søk før godkjenning (regel 7: ikke direkte til autoritativt minne), og ingen embedding skrevet.
+    expect((await retriever.search(id, { spaces: ["personal"], query: "proposealfa1" })).map((r) => r.memory_item_id)).not.toContain(out.memory_item_id);
+    const emb = await adminPool.query("SELECT 1 FROM embeddings WHERE memory_item_id = $1", [out.memory_item_id]);
+    expect(emb.rowCount).toBe(0);
+
+    const listed = await writer.listProposals(id);
+    expect(listed.map((p) => p.memory_item_id)).toContain(out.memory_item_id);
+
+    const row = await adminPool.query("SELECT status, trust_level FROM memory_items WHERE memory_item_id = $1", [out.memory_item_id]);
+    expect(row.rows[0]).toMatchObject({ status: "quarantined", trust_level: "untrusted" });
+
+    // Godkjenning (eier, aktiv auth) -> aktivt og søkbart; forsvinner fra forslagslisten.
+    expect(await writer.promoteFromQuarantine(id, "personal", out.memory_item_id)).toBe(true);
+    expect((await retriever.search(id, { spaces: ["personal"], query: "proposealfa1" })).map((r) => r.memory_item_id)).toContain(out.memory_item_id);
+    expect((await writer.listProposals(id)).map((p) => p.memory_item_id)).not.toContain(out.memory_item_id);
+  });
+
+  it("reject invaliderer forslaget (sporbart, ikke slettet) og det blir aldri søkbart; passiv auth kan ikke avvise", async () => {
+    const id = identity("personal");
+    const out = await writer.propose(id, { subject: "tobias.propose.avvis", content: "Avvist påstand proposegamma1." });
+    const weak = { ...id, auth_strength: "passive" as const };
+    expect(await writer.rejectFromQuarantine(weak, "personal", out.memory_item_id)).toBe(false);
+    expect(await writer.rejectFromQuarantine(id, "personal", out.memory_item_id)).toBe(true);
+    expect(await writer.rejectFromQuarantine(id, "personal", out.memory_item_id)).toBe(false); // allerede behandlet
+    expect((await retriever.search(id, { spaces: ["personal"], query: "proposegamma1" })).map((r) => r.memory_item_id)).not.toContain(out.memory_item_id);
+    const row = await adminPool.query("SELECT status FROM memory_items WHERE memory_item_id = $1", [out.memory_item_id]);
+    expect(row.rows[0].status).toBe("invalidated");
+    const audit = await adminPool.query("SELECT 1 FROM audit_events WHERE type = 'memory.rejected' AND payload->>'memory_item_id' = $1", [out.memory_item_id]);
+    expect(audit.rowCount).toBe(1);
+  });
+
+  it("et forslag kan aldri overskrive godkjent/trusted minne (konflikt får eget karantene-emne)", async () => {
+    const id = identity("personal");
+    const original = await writer.apply(id, TRUSTED, candidate("personal", "test.propose.vern", "Sann verdi proposedelta1."));
+    const attack = await writer.propose(id, { subject: "test.propose.vern", content: "Falsk verdi proposedelta1!" });
+    expect(attack.op).toBe("QUARANTINED_CONFLICT");
+    const results = await retriever.search(id, { spaces: ["personal"], query: "proposedelta1" });
+    expect(results.find((r) => r.memory_item_id === original.memory_item_id)?.content).toBe("Sann verdi proposedelta1.");
+    expect(results.find((r) => r.content.includes("Falsk"))).toBeUndefined();
+  });
+
+  it("space er alltid identitetens egen (modellen kan ikke velge); ugyldig input avvises før noe skrives", async () => {
+    const id = identity("personal");
+    const out = await writer.propose(id, { subject: "tobias.propose.space", content: "Kun personlig proposeepsilon1." });
+    const row = await adminPool.query("SELECT space FROM memory_items WHERE memory_item_id = $1", [out.memory_item_id]);
+    expect(row.rows[0].space).toBe("personal");
+    await expect(writer.propose(id, { subject: "", content: "x" })).rejects.toThrow("invalid_proposal_subject");
+    await expect(writer.propose(id, { subject: "a".repeat(121), content: "x" })).rejects.toThrow("invalid_proposal_subject");
+    await expect(writer.propose(id, { subject: "ok", content: "" })).rejects.toThrow("invalid_proposal_content");
+    await expect(writer.propose(id, { subject: "ok", content: "x".repeat(1001) })).rejects.toThrow("invalid_proposal_content");
+    await expect(writer.propose(id, { subject: "ok", content: "bad\u0000char" })).rejects.toThrow("invalid_proposal_content");
+    await expect(writer.propose(id, { subject: "ok", content: "x", type: "hacker" as never })).rejects.toThrow("invalid_proposal_type");
+  });
+
+  it("tenant-isolasjon: andre tenants ser ikke forslagene", async () => {
+    const a = identity("personal");
+    const out = await writer.propose(a, { subject: "tobias.propose.tenant", content: "Hemmelig proposezeta1." });
+    const b = identity("personal", "tenant-b");
+    expect((await writer.listProposals(b)).map((p) => p.memory_item_id)).not.toContain(out.memory_item_id);
   });
 });
 

@@ -109,6 +109,33 @@ const MESH_TOOLS: MeshToolMapping[] = [
     tool_id: "memory",
     action: "search",
     parameters: (modelArgs) => ({ query: String(modelArgs["query"] ?? "") })
+  },
+  {
+    // D-367: modellens ENESTE skrivehandling - ALLTID karantene (se `memory-transport.ts`/`model-tool-surface.ts`).
+    def: {
+      name: "suggest_memory",
+      description:
+        "Foreslå at noe lagres i langtidsminnet - KUN når Tobias eksplisitt ber deg huske noe. Forslaget havner i " +
+        "KARANTENE og brukes ikke som minne før Tobias godkjenner det i dashbordet; si det tydelig til ham. Bruk et kort, " +
+        "kanonisk emne (f.eks. 'tobias.familie') og én presis, selvstendig setning som innhold.",
+      input_schema: {
+        type: "object",
+        properties: {
+          subject: { type: "string", description: "Kort kanonisk emne, f.eks. 'tobias.familie.barn'." },
+          content: { type: "string", description: "Det som skal huskes, som én presis setning." },
+          type: { type: "string", enum: ["semantic", "preference", "relation", "project", "decision", "commitment", "procedure"], description: "Minnetype (standard: semantic)." }
+        },
+        required: ["subject", "content"],
+        additionalProperties: false
+      }
+    },
+    tool_id: "memory",
+    action: "propose",
+    parameters: (modelArgs) => ({
+      subject: String(modelArgs["subject"] ?? ""),
+      content: String(modelArgs["content"] ?? ""),
+      ...(typeof modelArgs["type"] === "string" ? { type: modelArgs["type"] } : {})
+    })
   }
 ];
 

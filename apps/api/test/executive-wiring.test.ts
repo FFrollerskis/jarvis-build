@@ -29,12 +29,12 @@ describe("A: apps/api/src/main.ts komponerer executiveToolDefinitions() INNI SAM
     // Remediering del 1: ExecutiveService får den eksplisitte modellflaten, slik at
     // `check_my_capabilities` aldri påstår at hele registeret er tilgjengelig for modellen.
     expect(callBlock).toContain(
-      "...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, { modelSurface: MODEL_SURFACE_ALLOWLIST })))"
+      "...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, { modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES] })))"
     );
   });
   it("ExecutiveService konstrueres med DEN SAMME toolGateway-instansen (nøstet gateway.execute(), aldri situationEngine/situationDomainPauses direkte)", () => {
     expect(mainSource).not.toMatch(/new ExecutiveService\(\s*situationEngine/);
-    expect(mainSource).toContain("new ExecutiveService(toolGateway, { modelSurface: MODEL_SURFACE_ALLOWLIST })");
+    expect(mainSource).toContain("new ExecutiveService(toolGateway, { modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES] })");
   });
 });
 
