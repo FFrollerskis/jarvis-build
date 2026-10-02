@@ -93,3 +93,19 @@ Observert i kjørende stack etter `docker compose up -d --build` fra `6b716e3`/`
 ## 6. Bevisst IKKE gjort
 
 Del 3 (taint-gate/ubetrodd-innhold, bekreftelsesmodell for utvidet verktøyflate, kostnads-/budsjettgrenser, øvrige `OPEN` funn). Q-44-gjelden (≈113 tenant-kryssende FK-er) og `memory_items`-unikhet er kun *låst som baseline*, ikke migrert. Non-extractable nettleser-nøkkel (JARVIS-066 delvis) er ikke bygget. Ingen vertsside job-runner er bygget (kun grensesnittet + fail-closed).
+
+## 7. Arkitekt-review (2026-10-02) – funn og rettelser (D-368)
+
+Uavhengig review av #218 (APPROVE) og #219 (CHANGES_REQUESTED, HEAD 637de6e + delta til 1b38e46). Rettet i denne PR-en:
+
+| Funn | Status | Bevis |
+|---|---|---|
+| P1 `contract.owner_person_id` kunne settes av klienten (ble kodejobbens identitet / SOVEREIGN) | **Rettet** | `TaskService.submit` → `owner_mismatch`; `modules/tasks/test/fase6-worker.test.ts` (ekte Postgres: avvist før kø + audit; eierens egen kontrakt godtas) |
+| P2 WebRTC/UDP utenom egress-proxyen | **Rettet** (gjenskapt: STUN-pakke nådde lokal UDP-lytter uten flaggene) | `CHROMIUM_LAUNCH_ARGS` + ekte-Chromium-test i `apps/browser-gateway/test/engine-egress.test.ts` |
+| P3 per-enhet rate limit manglet på `grantBodyOrReject`-rutene | **Rettet** | `apps/api/test/review-219-http-guard.test.ts` |
+| P3 `clientKey` stolte på FØRSTE XFF-element | **Rettet** (siste element) | samme testfil |
+| P3 klartekst-passord i bootstrap-DDL kunne havne i serverlogg | **Rettet** (logging av) | `remediation-2-compose-isolation.test.ts` + kjører mot ekte Postgres |
+| Live egress-bevis: redirect-testene godtok enhver ikke-200 | **Strammet** (krever 403 `egress_blocked`, WARN ellers) | `ops/security/browser-egress-probe.sh` |
+| Swift hardkodet identitet, worker `CONNECTOR_ENV`, seccomp-trimming, egen egress-proxy, latent brukket jobb-container, `guardedFetch`-unntak, CSP-unntak, app-styrt RLS | **Utsatt** (alle P3/åpne risikoer) | Q-46 |
+
+**Korrigerte påstander:** se D-368 (identitet fra grant, per-enhet-grenser, hardkodet identitet i Swift, SCRAM-formulering, `guardedFetch`-omfang, draft-status). **Ikke dekket av reviewen** (reviewer oppga selv): `FINAL_AUDIT_REPORT*.md`, de 68 `OPEN`-funnene utenfor del 1/2, `modules/business|finance|growth` utover guard-innsettingene, ops/backup/restore-verify i detalj, `ops/remediation/phantom-cost`-SQL. DB-suitene (control-plane-auth, device-revokering, schema-invarianter, compose-isolasjon/bootstrap) kunne ikke kjøres av reviewer (root); de kjøres her som ikke-root-bruker og i CI.

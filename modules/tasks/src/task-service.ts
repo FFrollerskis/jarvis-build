@@ -104,6 +104,14 @@ export class TaskService {
     if (contract.tenant_id !== identity.tenant_id) {
       return { ok: false, reason: "tenant_mismatch" };
     }
+    // Arkitekt-review av #219 (P1): kontraktens `owner_person_id` blir kodejobbens identitet i workeren (og eier ⇒ SOVEREIGN
+    // i policy). Den MÅ derfor være nøyaktig den verifiserte grant-personen - aldri en verdi klienten selv har satt.
+    if (contract.owner_person_id !== identity.person_id) {
+      await withTenantTransaction(this.pool, identity.tenant_id, (client) =>
+        writeAudit(client, identity, { type: "task.rejected", reason: "owner_mismatch", payload: { task_id: contract.task_id } })
+      );
+      return { ok: false, reason: "owner_mismatch" };
+    }
     // Remediering del 1 (JARVIS-001/010): executive-`command`-jobber (vilkårlig
     // kommandokjøring i worker-containeren) er deaktivert - avvises FØR kø/policy.
     const submittedData = contract.input.data as Record<string, unknown>;

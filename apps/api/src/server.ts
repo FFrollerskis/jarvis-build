@@ -343,8 +343,9 @@ function grantBodyOrReject<K extends readonly string[]>(res: ServerResponse, raw
  */
 async function resolveFromGrant(
   deps: ApiDeps,
-  grantToken: string
-): Promise<{ ok: true; identity: IdentityContext } | { ok: false; reason: string }> {
+  grantToken: string,
+  res?: ServerResponse
+): Promise<{ ok: true; identity: IdentityContext } | { ok: false; reason: string; responded?: true }> {
   const verified = await deps.grants.verify(grantToken);
   if (!verified.ok) {
     return { ok: false, reason: verified.reason };
@@ -361,6 +362,15 @@ async function resolveFromGrant(
   });
   if (!resolved.ok) {
     return { ok: false, reason: resolved.reason };
+  }
+  // Arkitekt-review (P3): per-enhet rate limit gjelder ALLE grant-beskyttede ruter (ikke bare `authedRequest`-rutene) - et gyldig
+  // grant er det som identifiserer enheten, så grensen tas først ETTER vellykket verifisering. Svaret (429) sendes her.
+  if (res) {
+    const limiters = limiterRegistry.get(res);
+    if (limiters && !limiters.device.take(`${resolved.identity.tenant_id}|${resolved.identity.device_id}`)) {
+      json(res, 429, { error: "rate_limited", request_id: requestIdOf(res) });
+      return { ok: false, reason: "rate_limited", responded: true };
+    }
   }
   return { ok: true, identity: resolved.identity };
 }
@@ -547,14 +557,10 @@ async function authedRequest(
     json(res, 401, { error: "grant_required", request_id: requestIdOf(res) });
     return null;
   }
-  const resolved = await resolveFromGrant(deps, token);
+  const resolved = await resolveFromGrant(deps, token, res);
   if (!resolved.ok) {
+    if (resolved.responded) return null; // 429 er allerede sendt (per-enhet-grense)
     json(res, 403, { error: "identity_denied", reason: resolved.reason, request_id: requestIdOf(res) });
-    return null;
-  }
-  const limiters = limiterRegistry.get(res);
-  if (limiters && !limiters.device.take(`${resolved.identity.tenant_id}|${resolved.identity.device_id}`)) {
-    json(res, 429, { error: "rate_limited", request_id: requestIdOf(res) });
     return null;
   }
   const { grant_token: _omit, ...rest } = body;
@@ -769,8 +775,9 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       message: parsedBody["message"],
       ...(typeof parsedBody["provider"] === "string" ? { provider: parsedBody["provider"] } : {})
     };
-    const resolved = await resolveFromGrant(deps, body.grant_token);
+    const resolved = await resolveFromGrant(deps, body.grant_token, res);
     if (!resolved.ok) {
+      if (resolved.responded) return;
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
     }
     const sessionId = resolved.identity.session_id;
@@ -845,8 +852,9 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     const parsedBody = grantBodyOrReject(res, await readBody(req), BRIEF_BODY_KEYS);
     if (!parsedBody) return;
     const body: BriefBody = { grant_token: parsedBody["grant_token"] as string };
-    const resolved = await resolveFromGrant(deps, body.grant_token);
+    const resolved = await resolveFromGrant(deps, body.grant_token, res);
     if (!resolved.ok) {
+      if (resolved.responded) return;
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
     }
     const artifact = await deps.brief.generate(resolved.identity);
@@ -878,8 +886,9 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       typeof parsedBody["parameters"] === "object" && parsedBody["parameters"] !== null && !Array.isArray(parsedBody["parameters"])
         ? (parsedBody["parameters"] as Record<string, JsonValue>)
         : {};
-    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string);
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
     if (!resolved.ok) {
+      if (resolved.responded) return;
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
     }
     const result = await deps.executive.gateway.execute({
@@ -910,8 +919,9 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       typeof parsedBody["parameters"] === "object" && parsedBody["parameters"] !== null && !Array.isArray(parsedBody["parameters"])
         ? (parsedBody["parameters"] as Record<string, JsonValue>)
         : {};
-    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string);
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
     if (!resolved.ok) {
+      if (resolved.responded) return;
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
     }
     const result = await deps.executive.gateway.execute({
@@ -944,8 +954,9 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       typeof parsedBody["parameters"] === "object" && parsedBody["parameters"] !== null && !Array.isArray(parsedBody["parameters"])
         ? (parsedBody["parameters"] as Record<string, JsonValue>)
         : {};
-    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string);
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
     if (!resolved.ok) {
+      if (resolved.responded) return;
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
     }
     const result = await deps.executive.gateway.execute({
@@ -978,8 +989,9 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       typeof parsedBody["parameters"] === "object" && parsedBody["parameters"] !== null && !Array.isArray(parsedBody["parameters"])
         ? (parsedBody["parameters"] as Record<string, JsonValue>)
         : {};
-    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string);
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
     if (!resolved.ok) {
+      if (resolved.responded) return;
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
     }
     const result = await deps.executive.gateway.execute({
@@ -1011,8 +1023,9 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       typeof parsedBody["parameters"] === "object" && parsedBody["parameters"] !== null && !Array.isArray(parsedBody["parameters"])
         ? (parsedBody["parameters"] as Record<string, JsonValue>)
         : {};
-    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string);
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
     if (!resolved.ok) {
+      if (resolved.responded) return;
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
     }
     const result = await deps.executive.gateway.execute({

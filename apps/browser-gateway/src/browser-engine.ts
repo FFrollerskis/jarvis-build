@@ -57,6 +57,17 @@ export class BrowserBusyError extends Error {
  * Én delt Chromium-PROSESS (starten er dyr), men én ny `BrowserContext` per kall - og
  * konteksten lukkes alltid (også ved feil/timeout).
  */
+/**
+ * Arkitekt-review av #219 (P2): WebRTC/ICE sender UDP (og TCP-kandidater) DIREKTE, utenom `--proxy-server`. En angriperside kunne
+ * dermed nå docker-bro, vertens tjenester og LAN uten om egress-proxyen. `disable_non_proxied_udp` slår av all UDP som ikke går
+ * via proxyen (og HTTP-proxyen støtter ikke UDP, så WebRTC mot ikke-proxiede mål blir stengt). Låst av en test mot ekte Chromium.
+ */
+export const CHROMIUM_LAUNCH_ARGS: readonly string[] = [
+  "--disable-dev-shm-usage",
+  "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+  "--webrtc-ip-handling-policy=disable_non_proxied_udp"
+];
+
 export class PlaywrightBrowserEngine implements BrowserEngine {
   private browserPromise: Promise<import("playwright").Browser> | undefined;
   private inFlight = 0;
@@ -76,7 +87,7 @@ export class PlaywrightBrowserEngine implements BrowserEngine {
           chromiumSandbox: this.options.sandbox ?? true,
           ...(this.options.executablePath !== undefined ? { executablePath: this.options.executablePath } : {}),
           proxy: { server: this.options.proxyServer, bypass: "<-loopback>" },
-          args: ["--disable-dev-shm-usage"]
+          args: [...CHROMIUM_LAUNCH_ARGS]
         });
         // Krasjet nettleser: glem den, så neste kall starter en frisk (ikke en cachet feil).
         browser.on("disconnected", () => {
