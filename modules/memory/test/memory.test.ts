@@ -380,6 +380,19 @@ describe("D-369: eier-uttrykt minne regnes som eierens egne ord (aktivt + versjo
   });
 });
 
+describe("Del 3: hemmeligheter kommer aldri inn i minnet (siste forsvar)", () => {
+  it("ingestText av tekst med en kjent hemmelighet gir ingen rader; propose med hemmelighet avvises", async () => {
+    const id = identity("personal");
+    const before = (await adminPool.query("SELECT count(*)::int AS n FROM memory_items")).rows[0].n as number;
+    const out = await writer.ingestText(id, TRUSTED, "Husk at tokenet er ghp_abcdefghijklmnopqrstuvwxyz0123456789 for alltid.");
+    expect(out).toEqual([]);
+    await expect(writer.propose(id, { subject: "api.token", content: "passordet mitt er Sommer2026!" })).rejects.toThrow("invalid_proposal_secret");
+    await expect(writer.propose(id, { subject: "ghp_abcdefghijklmnopqrstuvwxyz0123456789", content: "hei" })).rejects.toThrow("invalid_proposal_secret");
+    const after = (await adminPool.query("SELECT count(*)::int AS n FROM memory_items")).rows[0].n as number;
+    expect(after).toBe(before);
+  });
+});
+
 describe("Akseptanse 2: tenant- og space-isolasjon (inkl. health/guest)", () => {
   beforeAll(async () => {
     const spaces: Array<[MemorySpace, string, string]> = [

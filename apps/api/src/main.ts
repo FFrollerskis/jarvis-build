@@ -948,8 +948,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // sesjonen (rule 4: "kilde og task_id/session_id"). Feil her
       // SVELGES av kalleren (`conversation.ts` sin `.catch()`) - en
       // minnefeil skal ALDRI ødelegge selve samtalesvaret.
-      ingest: (identity, text) =>
-        memoryWriter.ingestText(identity, { kind: "conversation", ref: identity.session_id, trust: "trusted" }, text)
+      ingest: (identity, text, opts) =>
+        memoryWriter.ingestText(
+          identity,
+          // Del 3 (JARVIS-013): innlimt/lang tekst er ikke eierens egne ord -> untrusted (karantene), ikke aktivt betrodd minne.
+          { kind: "conversation", ref: identity.session_id, trust: opts?.pasted ? "untrusted" : "trusted" },
+          text
+        )
     },
     council: aiCouncil,
     // D-30 live-funn: samtalebanen (tekst + voice via /chat) har verktøykall.

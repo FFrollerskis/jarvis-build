@@ -1,5 +1,5 @@
 import type { IdentityContext } from "@jarvis/contracts";
-import { ContextBuilder, MessageStore, fastRoute } from "@jarvis/core";
+import { ContextBuilder, MessageStore, describeSecretFindings, fastRoute, scanForSecrets } from "@jarvis/core";
 import {
   BudgetExceededError,
   classifyDecisionImportance,
@@ -37,7 +37,7 @@ export interface ConversationDeps {
      * forget) - en treg/feilende minneskriving skal ALDRI legge latency
      * til eller ødelegge selve samtalesvaret.
      */
-    ingest?(identity: IdentityContext, text: string): Promise<unknown>;
+    ingest?(identity: IdentityContext, text: string, opts?: { pasted?: boolean }): Promise<unknown>;
   };
   /**
    * D-30 live-funn: mesh-verktøy for samtalebanen (tekst OG voice går via /chat).
@@ -71,6 +71,15 @@ export interface ConversationDeps {
    * (identisk med oppførsel før D-214).
    */
   personality?: () => PersonalityConfig;
+}
+
+/** Del 3 (JARVIS-013): innlimt/ekstern tekst (lang, flere e-post-/dokument-headere, store kodeblokker) er ikke eierens egne ord. */
+export function looksLikePastedContent(text: string): boolean {
+  if (text.length > 1500) return true;
+  const headerLines = text.split("\n").filter((l) => /^\s*(from|fra|to|til|subject|emne|sent|sendt|date|dato|cc)\s*:/i.test(l)).length;
+  if (headerLines >= 2) return true;
+  const fenced = [...text.matchAll(/```[\s\S]*?```/g)].some((m) => m[0].length > 400);
+  return fenced;
 }
 
 export interface ChatReply {
@@ -150,9 +159,36 @@ export class ConversationEngine {
     }
   }
 
+  /**
+   * Del 3 (JARVIS-013/005): ALL eier-tekst skannes for hemmeligheter FØR noe annet skjer - meldingslogg, minneuttrekk, rask bane, council
+   * og modellkall ser kun den REDIGERTE teksten. En funnet hemmelighet gir i tillegg INGEN minneskriving, og eieren får vite det
+   * (kun typen, aldri verdien). Selve credential-innleggingen hører hjemme i dashbordets eierflate, ikke i samtalen.
+   */
   async handle(
     identity: IdentityContext,
     text: string,
+    onToken?: (t: string) => void,
+    signal?: AbortSignal,
+    provider?: string,
+    onToolCall?: (toolName: string) => void
+  ): Promise<ChatReply> {
+    const scan = scanForSecrets(text);
+    if (scan.findings.length === 0) {
+      return this.handleScanned(identity, text, { secretsFound: false }, onToken, signal, provider, onToolCall);
+    }
+    const result = await this.handleScanned(identity, scan.text, { secretsFound: true }, onToken, signal, provider, onToolCall);
+    const notice =
+      `\n\n⚠️ Meldingen din så ut til å inneholde en hemmelighet (${describeSecretFindings(scan.findings)}). ` +
+      "Jeg har fjernet den før den ble lagret eller sendt til noen modell, og den huskes ikke. " +
+      "Legg inn nøkler og passord via «Koble til» i dashbordet - aldri i samtalen.";
+    onToken?.(notice);
+    return { ...result, reply: result.reply + notice };
+  }
+
+  private async handleScanned(
+    identity: IdentityContext,
+    text: string,
+    flags: { secretsFound: boolean },
     onToken?: (t: string) => void,
     /** BO-11.1 §6: klient-disconnect propagerer helt til provider-upstream. */
     signal?: AbortSignal,
@@ -170,8 +206,10 @@ export class ConversationEngine {
     // Council/modell) - alle tre grener representerer noe eieren faktisk sa.
     // Fire-and-forget: `await` her ville lagt embedding-/DB-latency til HVERT
     // eneste samtalesvar for en helt sidestilt bekvemmelighet.
-    if (this.deps.memory?.ingest) {
-      this.deps.memory.ingest(identity, text).catch((err: unknown) => {
+    // Del 3: ingen minneskriving av en melding som inneholdt en hemmelighet; lange/innlimte tekster (e-post, dokumenter) regnes ikke
+    // som eierens egne ord (JARVIS-013) og går via karantene i stedet for å bli aktivt, betrodd minne.
+    if (this.deps.memory?.ingest && !flags.secretsFound) {
+      this.deps.memory.ingest(identity, text, { pasted: looksLikePastedContent(text) }).catch((err: unknown) => {
         console.error(JSON.stringify({
           msg: "conversation_memory_ingest_failed",
           error: err instanceof Error ? err.message : String(err)
