@@ -15,7 +15,7 @@ Alle filer er `age`-kryptert (`*.age`). Klartekst-dump skrives aldri til disk. `
 
 ## Forutsetninger (én gang)
 
-* På NAS-en (verten): `age` og `node` ≥ 22. Mangler de: `BLOCKED_EXTERNAL` (installeres av Tobias).
+* På NAS-en (verten): `docker` og `node` (v18 forventes å fungere, ikke verifisert). `age` trengs **ikke** på verten: `nas-backup.sh` bruker `age-docker.sh` (engangs-container, D-370) når `age` mangler. Restore-verifisering (§5) gjøres på PC og krever `age` der.
 * En age-nøkkelfil lages **på en annen maskin enn NAS-en** (PC eller offline):
   ```bash
   age-keygen -o jarvis-backup-identity.txt        # PRIVAT – oppbevares offline, aldri på NAS-en, aldri i repoet

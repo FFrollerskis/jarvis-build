@@ -20,6 +20,13 @@ JARVIS_BACKUP_AGE_RECIPIENT="$(head -n1 "$RECIPIENT_FILE" | tr -d '[:space:]')"
 export JARVIS_DB_ADMIN_PASSWORD JARVIS_BACKUP_AGE_RECIPIENT
 [ -n "${JARVIS_DB_ADMIN_USER:-}" ] && export JARVIS_DB_ADMIN_USER
 
+# NAS-er (UGOS/DSM) leveres uten `age`: bruk en lokalt bygd engangs-container i stedet (D-370).
+# Kun den OFFENTLIGE nøkkelen sendes inn; containeren har ingen nettverkstilgang.
+if ! command -v age >/dev/null 2>&1; then
+  export JARVIS_AGE_BIN="$HERE/age-docker.sh"
+  "$JARVIS_AGE_BIN" --ensure-image
+fi
+
 mkdir -p "$OUT_DIR"
 chmod 700 "$OUT_DIR"
 
