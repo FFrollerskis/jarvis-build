@@ -321,6 +321,24 @@ export type ToolResult =
  * idempotensdedupe → adapter → audit (credential-ref + ekstern ID, aldri selve
  * secreten) → output klassifisert som untrusted der kilden er ekstern.
  */
+/**
+ * Del 3 (JARVIS-003/005/035): `credentialBinding` binder eier-tilkoblede leverandør-credentials til den autentiserte eieren i eierens
+ * tenant(s). `internalRefs` (interne, tenant-skopede referanser uten leverandør-secret) er unntatt. Uten binding oppfører gatewayen seg som før.
+ */
+export interface CredentialBinding {
+  owner_person_id: string;
+  owner_tenants: readonly string[];
+  internalRefs: ReadonlySet<string>;
+}
+
+export interface ToolGatewayOptions {
+  classDPipeline?: ClassDPipelineOptions;
+  credentialBinding?: CredentialBinding;
+}
+
+/** Parameterfelt som er identitet/scope - utledes av den autentiserte identiteten, aldri av en modell- eller klientverdi. */
+const IDENTITY_PARAMETER_FIELDS = ["tenant_id", "person_id", "actor_person_id", "owner_person_id"] as const;
+
 export class ToolGateway {
   private readonly tools = new Map<string, ToolDefinition>();
   /** BO-03: connector-health per tool_id (healthy/degraded/auth_failed/rate_limited/unavailable). */
@@ -348,11 +366,14 @@ export class ToolGateway {
      * en egen, parallell Infisical-tilkobling.
      */
     private readonly writableSecrets?: WritableSecretProvider,
-    /** Del 3: klasse D-pipeline (påkrevd idempotensnøkkel, fullstendig kjede, out-of-band-varsler). Av som standard for testhjelpere; produksjon slår på. */
-    private readonly classDPipeline?: ClassDPipelineOptions
+    /** Del 3: valgfrie harde porter. Av som standard for testhjelpere; produksjon slår dem på (main.ts/worker-main.ts). */
+    private readonly options?: ToolGatewayOptions
   ) {
-    this.classDNotifier = classDPipeline?.notifier;
+    this.classDPipeline = options?.classDPipeline;
+    this.classDNotifier = options?.classDPipeline?.notifier;
   }
+
+  private readonly classDPipeline: ClassDPipelineOptions | undefined;
 
   private classDNotifier: ClassDNotifier | undefined;
 
@@ -442,6 +463,30 @@ export class ToolGateway {
     const input = definition.input_schema.safeParse(request.parameters);
     if (!input.success) {
       return this.deny(request, "invalid_parameters");
+    }
+    // Del 3 (JARVIS-005/035): identitets-/scope-felt i parametrene må samsvare med den autentiserte identiteten (gatewayen avviser avvik).
+    const binding = this.options?.credentialBinding;
+    const isOwner = binding
+      ? request.identity.person_id === binding.owner_person_id && binding.owner_tenants.includes(request.identity.tenant_id) && request.identity.delegation_id === undefined
+      : false;
+    for (const field of IDENTITY_PARAMETER_FIELDS) {
+      const supplied = request.parameters[field];
+      if (supplied === undefined || supplied === null) continue;
+      const expected = field === "tenant_id" ? request.identity.tenant_id : request.identity.person_id;
+      // `owner_person_id` er «eier/ansvarlig» i CRM/styring: bare den suverene eieren kan tildele en annen person.
+      if (supplied !== expected && !(field === "owner_person_id" && isOwner)) {
+        return this.deny(request, `scope_mismatch:${field}`);
+      }
+    }
+    if (request.jobContract) {
+      const space = request.parameters["memory_space"] ?? request.parameters["memory_space_id"];
+      if (typeof space === "string" && !request.jobContract.allowed_memory_spaces.includes(space)) {
+        return this.deny(request, "job_memory_space_not_allowed");
+      }
+    }
+    // Eier-tilkoblede leverandør-credentials kan bare brukes av den autentiserte eieren i eierens tenant (aldri en annen person/tenant/delegat).
+    if (binding && definition.credential_ref !== "" && !binding.internalRefs.has(definition.credential_ref) && !isOwner) {
+      return this.deny(request, "credential_not_bound_to_identity");
     }
     const decision = await this.policy.authorize({
       identity: request.identity,

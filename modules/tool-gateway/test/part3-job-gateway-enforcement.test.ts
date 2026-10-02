@@ -92,3 +92,57 @@ describe("gateway håndhever jobbkontrakten ved utførelse", () => {
     expect(t.calls).toBe(0);
   });
 });
+
+describe("M8: scope fra identitet + credential-binding", () => {
+  const binding = { owner_person_id: "person-tobias", owner_tenants: ["tenant-a"], internalRefs: new Set(["INTERNAL_REF"]) };
+  const bound = (t: T): ToolGateway => {
+    const g = new ToolGateway(appPool, policy, { name: "t", get: async () => "cred" }, undefined, undefined, { credentialBinding: binding });
+    g.register({ ...def("read", t), input_schema: { safeParse: (v: unknown) => ({ success: true, data: v as Record<string, JsonValue> }) } as ToolDefinition["input_schema"] });
+    g.register({ ...def("internal", t), credential_ref: "INTERNAL_REF" });
+    return g;
+  };
+  const other: IdentityContext = { ...identity, person_id: "person-annen", tenant_id: "tenant-b", session_id: "s-b" };
+
+  it("eieren i eierens tenant bruker eier-credentials", async () => {
+    const t = new T();
+    expect((await bound(t).execute({ identity, tool_id: "demo", action: "read", parameters: {} })).ok).toBe(true);
+  });
+  it("fremmed tenant/person kan IKKE bruke eierens leverandør-credential (selv for lesing)", async () => {
+    const t = new T();
+    expect(await bound(t).execute({ identity: other, tool_id: "demo", action: "read", parameters: {} })).toEqual({ ok: false, reason: "credential_not_bound_to_identity" });
+    expect(t.calls).toBe(0);
+  });
+  it("samme tenant men ikke-eier person avvises", async () => {
+    const t = new T();
+    expect(await bound(t).execute({ identity: { ...identity, person_id: "person-annen" }, tool_id: "demo", action: "read", parameters: {} }))
+      .toEqual({ ok: false, reason: "credential_not_bound_to_identity" });
+  });
+  it("delegert identitet (delegation_id) arver aldri eierens credentials", async () => {
+    const t = new T();
+    expect(await bound(t).execute({ identity: { ...identity, delegation_id: "deleg-1" } as IdentityContext, tool_id: "demo", action: "read", parameters: {} }))
+      .toEqual({ ok: false, reason: "credential_not_bound_to_identity" });
+  });
+  it("interne (tenant-skopede) referanser er unntatt bindingen", async () => {
+    const t = new T();
+    expect((await bound(t).execute({ identity: other, tool_id: "demo", action: "internal", parameters: {} })).ok).toBe(true);
+  });
+  it("parameter tenant_id/person_id/actor_person_id som ikke er identiteten avvises; samsvarende godtas", async () => {
+    const t = new T(); const g = bound(t);
+    expect(await g.execute({ identity, tool_id: "demo", action: "read", parameters: { tenant_id: "tenant-b" } })).toEqual({ ok: false, reason: "scope_mismatch:tenant_id" });
+    expect(await g.execute({ identity, tool_id: "demo", action: "read", parameters: { person_id: "person-annen" } })).toEqual({ ok: false, reason: "scope_mismatch:person_id" });
+    expect(await g.execute({ identity, tool_id: "demo", action: "read", parameters: { actor_person_id: "person-annen" } })).toEqual({ ok: false, reason: "scope_mismatch:actor_person_id" });
+    expect((await g.execute({ identity, tool_id: "demo", action: "read", parameters: { tenant_id: "tenant-a", person_id: "person-tobias" } })).ok).toBe(true);
+    expect(t.calls).toBe(1);
+  });
+  it("owner_person_id: eieren kan tildele en annen person; en annen identitet kan ikke utgi seg for eieren", async () => {
+    const t = new T(); const g = bound(t);
+    expect((await g.execute({ identity, tool_id: "demo", action: "read", parameters: { owner_person_id: "person-annen" } })).ok).toBe(true);
+    expect(await g.execute({ identity: other, tool_id: "demo", action: "internal", parameters: { owner_person_id: "person-tobias" } })).toEqual({ ok: false, reason: "scope_mismatch:owner_person_id" });
+  });
+  it("jobb: memory_space utenfor kontraktens allowed_memory_spaces avvises", async () => {
+    const t = new T(); const g = bound(t);
+    const c = contract({ allowed_tools: ["demo"], allowed_memory_spaces: ["project"] });
+    expect(await g.execute({ identity, tool_id: "demo", action: "read", parameters: { memory_space: "health" }, jobContract: c })).toEqual({ ok: false, reason: "job_memory_space_not_allowed" });
+    expect((await g.execute({ identity, tool_id: "demo", action: "read", parameters: { memory_space: "project" }, jobContract: c })).ok).toBe(true);
+  });
+});

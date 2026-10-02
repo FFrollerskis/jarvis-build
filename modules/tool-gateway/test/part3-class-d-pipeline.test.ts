@@ -198,7 +198,7 @@ afterAll(async () => {
 }, 120_000);
 
 function gw(notifier?: ClassDNotifier, enforce = true): ToolGateway {
-  return new ToolGateway(appPool, policy, secrets, undefined, undefined, { enforce, ...(notifier ? { notifier } : {}) });
+  return new ToolGateway(appPool, policy, secrets, undefined, undefined, { classDPipeline: { enforce, ...(notifier ? { notifier } : {}) } });
 }
 
 describe("C: gatewayen håndhever kjeden før noen mutasjon", () => {
