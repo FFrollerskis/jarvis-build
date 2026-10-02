@@ -14,8 +14,8 @@ RECIPIENT_FILE="${JARVIS_BACKUP_RECIPIENT_FILE:-$HOME/.jarvis-backup-recipient}"
 [ -f "$ROOT/.env" ] || { echo "finner ikke $ROOT/.env" >&2; exit 1; }
 [ -f "$RECIPIENT_FILE" ] || { echo "finner ikke $RECIPIENT_FILE (offentlig age-nøkkel, én linje)" >&2; exit 1; }
 
-JARVIS_DB_ADMIN_PASSWORD="$(grep -E '^JARVIS_DB_ADMIN_PASSWORD=' "$ROOT/.env" | tail -n1 | cut -d= -f2-)"
-JARVIS_DB_ADMIN_USER="$(grep -E '^JARVIS_DB_ADMIN_USER=' "$ROOT/.env" | tail -n1 | cut -d= -f2- || true)"
+JARVIS_DB_ADMIN_PASSWORD="$(grep -E '^JARVIS_DB_ADMIN_PASSWORD=' "$ROOT/.env" | tail -n1 | cut -d= -f2- | tr -d '\r')"
+JARVIS_DB_ADMIN_USER="$(grep -E '^JARVIS_DB_ADMIN_USER=' "$ROOT/.env" | tail -n1 | cut -d= -f2- | tr -d '\r' || true)"
 JARVIS_BACKUP_AGE_RECIPIENT="$(head -n1 "$RECIPIENT_FILE" | tr -d '[:space:]')"
 export JARVIS_DB_ADMIN_PASSWORD JARVIS_BACKUP_AGE_RECIPIENT
 [ -n "${JARVIS_DB_ADMIN_USER:-}" ] && export JARVIS_DB_ADMIN_USER
