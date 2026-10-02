@@ -15,6 +15,7 @@ import {
   type StreamHandler,
   type ToolCallRequest
 } from "./types.ts";
+import { renderToolResultText } from "./tool-result-envelope.ts";
 
 /**
  * UA-2 P1B-A (D-43 §3): eneste adapter med EKTE bildestøtte i denne runden
@@ -64,7 +65,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
         content: ex.results.map((r) => ({
           type: "tool_result",
           tool_use_id: r.tool_call_id,
-          content: JSON.stringify(r.output ?? r.error_category ?? null),
+          content: renderToolResultText(r),
           ...(r.success ? {} : { is_error: true })
         }))
       });

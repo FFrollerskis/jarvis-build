@@ -1,0 +1,210 @@
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import type pg from "pg";
+import { canonicalStringify, type IdentityContext, type JsonValue } from "@jarvis/contracts";
+import { withTenantTransaction } from "../db/pool.ts";
+import { scanForSecrets } from "./secret-scan.ts";
+import { writeAudit } from "./audit-writer.ts";
+
+/**
+ * Del 3 (JARVIS-002/014): bundne bekreftelsesobjekter (se migrasjon 066). All logikk for hashing, binding, utløp og engangsforbruk bor HER,
+ * i deterministisk kode - aldri i en prompt. Modellen får bare vite «bekreftelse kreves» (og id-en), aldri hvordan den gis.
+ */
+export const CONFIRMATION_TTL_MS = 5 * 60_000;
+
+/** Parametre som uttrykker MOTTAKER/MÅL/BELØP trekkes ut deterministisk (kun for visning + eksplisitt binding; hele parameter-settet hashes uansett). */
+const RECIPIENT_KEYS = ["to", "recipient", "recipients", "channel", "channel_id", "chat_id", "phone", "number"];
+const TARGET_KEYS = ["repo", "spreadsheet_id", "document_id", "file_id", "folder_id", "url", "base_url", "workflow_id", "scenario_id", "container", "instance", "card_id", "payment_id", "issue_number", "pr_number"];
+const AMOUNT_KEYS = ["amount", "amount_ore", "amount_minor", "value", "limit_ore"];
+
+function pick(parameters: Record<string, JsonValue>, keys: string[]): JsonValue | null {
+  for (const key of keys) if (key in parameters) return parameters[key] as JsonValue;
+  return null;
+}
+
+export interface CanonicalCall {
+  tool_id: string;
+  action: string;
+  parameters: Record<string, JsonValue>;
+}
+
+export interface ConfirmationSubject {
+  tenant_id: string;
+  person_id: string;
+  device_id?: string | null;
+  session_id?: string | null;
+}
+
+/** SHA-256 over den kanoniske handlingen + bruker/enhet (uten nonce/utløp): finner raden igjen ved retry av SAMME kall. */
+export function callFingerprint(call: CanonicalCall, who: ConfirmationSubject): string {
+  const body: JsonValue = {
+    v: 1,
+    tool_id: call.tool_id,
+    action: call.action,
+    parameters: call.parameters,
+    target: pick(call.parameters, TARGET_KEYS),
+    recipient: pick(call.parameters, RECIPIENT_KEYS),
+    amount: pick(call.parameters, AMOUNT_KEYS),
+    tenant_id: who.tenant_id,
+    person_id: who.person_id,
+    device_id: who.device_id ?? null
+  };
+  return createHash("sha256").update(canonicalStringify(body)).digest("hex");
+}
+
+/** Full binding: fingeravtrykket + utløp + nonce. Dette er hva eieren faktisk godkjenner. */
+export function bindingHash(fingerprint: string, expiresAtIso: string, nonce: string): string {
+  return createHash("sha256").update(canonicalStringify({ v: 1, call: fingerprint, expires_at: expiresAtIso, nonce })).digest("hex");
+}
+
+export function summarizeCall(call: CanonicalCall, taintReasons: string[]): JsonValue {
+  // Forhåndsvisning for eieren: hemmeligheter fjernet, kuttet. Selve godkjenningen er hashen, ikke denne teksten.
+  const preview = scanForSecrets(JSON.stringify(call.parameters)).text.slice(0, 1000);
+  return {
+    tool: `${call.tool_id}.${call.action}`,
+    recipient: pick(call.parameters, RECIPIENT_KEYS),
+    target: pick(call.parameters, TARGET_KEYS),
+    amount: pick(call.parameters, AMOUNT_KEYS),
+    parameter_keys: Object.keys(call.parameters).sort(),
+    parameters_preview: preview,
+    taint_reasons: taintReasons
+  };
+}
+
+export type ConfirmationCheck =
+  | { ok: true; confirmation_id: string }
+  | { ok: false; reason: "confirmation_required" | "confirmation_pending" | "confirmation_rejected" | "confirmation_expired" | "confirmation_binding_mismatch"; confirmation_id?: string };
+
+export interface PendingConfirmation {
+  confirmation_id: string;
+  tool_id: string;
+  action: string;
+  summary: JsonValue;
+  taint_reasons: string[];
+  expires_at: string;
+  created_at: string;
+}
+
+interface Row {
+  confirmation_id: string;
+  binding_hash: string;
+  nonce: string;
+  status: string;
+  expires_at: Date;
+}
+
+export class ConfirmationStore {
+  constructor(private readonly pool: pg.Pool, private readonly now: () => Date = () => new Date()) {}
+
+  /**
+   * Kalles av executoren FØR en tainted handling. Ingen godkjent bekreftelse -> opprett/gjenbruk en PENDING og avvis. En godkjent og
+   * IKKE utløpt bekreftelse som matcher full binding forbrukes atomisk (engangs) og slipper handlingen gjennom.
+   */
+  async checkAndConsume(call: CanonicalCall, who: ConfirmationSubject, taintReasons: string[]): Promise<ConfirmationCheck> {
+    const fingerprint = callFingerprint(call, who);
+    const now = this.now();
+    return withTenantTransaction(this.pool, who.tenant_id, async (client) => {
+      const found = await client.query(
+        `SELECT confirmation_id, binding_hash, nonce, status, expires_at
+           FROM action_confirmations
+          WHERE tenant_id = $1 AND person_id = $2 AND call_fingerprint = $3 AND status IN ('pending', 'approved', 'rejected')
+          ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
+        [who.tenant_id, who.person_id, fingerprint]
+      );
+      const row = found.rows[0] as Row | undefined;
+      if (row) {
+        if (row.expires_at.getTime() <= now.getTime()) {
+          await client.query("UPDATE action_confirmations SET status = 'expired' WHERE confirmation_id = $1 AND status <> 'consumed'", [row.confirmation_id]);
+        } else if (row.status === "rejected") {
+          return { ok: false, reason: "confirmation_rejected", confirmation_id: row.confirmation_id } as const;
+        } else if (row.status === "pending") {
+          return { ok: false, reason: "confirmation_pending", confirmation_id: row.confirmation_id } as const;
+        } else if (row.status === "approved") {
+          // Full binding verifiseres på nytt fra det som FAKTISK kalles nå (ikke fra det som ble lagret som tekst).
+          const recomputed = bindingHash(fingerprint, row.expires_at.toISOString(), row.nonce);
+          if (recomputed !== row.binding_hash) return { ok: false, reason: "confirmation_binding_mismatch", confirmation_id: row.confirmation_id } as const;
+          const consumed = await client.query(
+            `UPDATE action_confirmations SET status = 'consumed', consumed_at = now()
+              WHERE confirmation_id = $1 AND status = 'approved' AND binding_hash = $2 AND expires_at > now()`,
+            [row.confirmation_id, recomputed]
+          );
+          if ((consumed.rowCount ?? 0) === 1) {
+            await writeAudit(client, { tenant_id: who.tenant_id, person_id: who.person_id, ...(who.session_id ? { session_id: who.session_id } : {}), ...(who.device_id ? { device_id: who.device_id } : {}) }, {
+              type: "confirmation.consumed",
+              tool_id: call.tool_id,
+              action: call.action,
+              payload: { confirmation_id: row.confirmation_id, binding_hash: recomputed }
+            });
+            return { ok: true, confirmation_id: row.confirmation_id } as const;
+          }
+          return { ok: false, reason: "confirmation_expired", confirmation_id: row.confirmation_id } as const;
+        }
+      }
+      // Ingen gyldig bekreftelse: opprett en ny PENDING bundet til dette kallet.
+      const id = `conf-${randomUUID()}`;
+      const nonce = randomBytes(16).toString("hex");
+      const expires = new Date(now.getTime() + CONFIRMATION_TTL_MS);
+      await client.query(
+        `INSERT INTO action_confirmations
+           (confirmation_id, tenant_id, person_id, device_id, session_id, tool_id, action, call_fingerprint, binding_hash, nonce, summary, taint_reasons, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+        [id, who.tenant_id, who.person_id, who.device_id ?? null, who.session_id ?? null, call.tool_id, call.action, fingerprint,
+          bindingHash(fingerprint, expires.toISOString(), nonce), nonce, JSON.stringify(summarizeCall(call, taintReasons)), taintReasons, expires]
+      );
+      await writeAudit(client, { tenant_id: who.tenant_id, person_id: who.person_id, ...(who.session_id ? { session_id: who.session_id } : {}), ...(who.device_id ? { device_id: who.device_id } : {}) }, {
+        type: "confirmation.requested",
+        tool_id: call.tool_id,
+        action: call.action,
+        payload: { confirmation_id: id, taint_reasons: taintReasons }
+      });
+      return { ok: false, reason: "confirmation_required", confirmation_id: id } as const;
+    });
+  }
+
+  async listPending(identity: Pick<IdentityContext, "tenant_id" | "person_id">): Promise<PendingConfirmation[]> {
+    return withTenantTransaction(this.pool, identity.tenant_id, async (client) => {
+      const res = await client.query(
+        `SELECT confirmation_id, tool_id, action, summary, taint_reasons, expires_at, created_at
+           FROM action_confirmations
+          WHERE tenant_id = $1 AND person_id = $2 AND status = 'pending' AND expires_at > now()
+          ORDER BY created_at DESC LIMIT 50`,
+        [identity.tenant_id, identity.person_id]
+      );
+      return res.rows.map((r: { confirmation_id: string; tool_id: string; action: string; summary: JsonValue; taint_reasons: string[]; expires_at: Date; created_at: Date }) => ({
+        confirmation_id: r.confirmation_id,
+        tool_id: r.tool_id,
+        action: r.action,
+        summary: r.summary,
+        taint_reasons: r.taint_reasons,
+        expires_at: r.expires_at.toISOString(),
+        created_at: r.created_at.toISOString()
+      }));
+    });
+  }
+
+  /**
+   * Eierens beslutning. KUN samme person som bekreftelsen gjelder (aldri en annen), kun mens den er pending og ikke utløpt.
+   * Kalles utelukkende fra grant-autentisert rute - aldri fra modell/verktøy.
+   */
+  async decide(
+    decider: Pick<IdentityContext, "tenant_id" | "person_id" | "device_id">,
+    confirmationId: string,
+    decision: "approve" | "reject"
+  ): Promise<boolean> {
+    return withTenantTransaction(this.pool, decider.tenant_id, async (client) => {
+      const updated = await client.query(
+        `UPDATE action_confirmations
+            SET status = $4, decided_at = now(), decided_by_person_id = $2, decided_via_device_id = $5
+          WHERE confirmation_id = $1 AND tenant_id = $3 AND person_id = $2 AND status = 'pending' AND expires_at > now()`,
+        [confirmationId, decider.person_id, decider.tenant_id, decision === "approve" ? "approved" : "rejected", decider.device_id ?? null]
+      );
+      const ok = (updated.rowCount ?? 0) === 1;
+      if (ok) {
+        await writeAudit(client, { tenant_id: decider.tenant_id, person_id: decider.person_id, ...(decider.device_id ? { device_id: decider.device_id } : {}) }, {
+          type: `confirmation.${decision === "approve" ? "approved" : "rejected"}`,
+          payload: { confirmation_id: confirmationId }
+        });
+      }
+      return ok;
+    });
+  }
+}

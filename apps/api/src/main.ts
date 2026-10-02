@@ -19,6 +19,7 @@ import {
   assertRuntimeRoleSafe,
   configFromEnv,
   createPool,
+  ConfirmationStore,
   runMigrations,
   withTenantTransaction,
   writeAudit
@@ -53,7 +54,7 @@ import {
 } from "@jarvis/memory";
 import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport,
-  GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
+  GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, assertManifestInvariants, buildToolManifest, memoryToolDefinitions, selectSurfaceTools,
   MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, resolveModelToolSurface, PgGithubRateLimitStore,
   PgTelegramOffsetStore, TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
@@ -864,6 +865,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // får KUN det eksplisitte lese-minimumssettet (`MODEL_SURFACE_ALLOWLIST`);
   // oppstarten feiler lukket hvis noe i flaten ikke er klasse A / ren lesing.
   const modelToolSurface = resolveModelToolSurface(toolGateway);
+  // Del 3: sentralt manifest avledet fra ALLE registrerte handlinger. Bruddet er en oppstartsfeil (fail closed): ingen modellflate med
+  // send/pay/delete/control, ingen klasse B/A for utgående handlinger, ingen eier-eksklusive navnerom på en flate.
+  const toolManifest = buildToolManifest(toolGateway.list());
+  assertManifestInvariants(toolManifest);
+  const confirmationStore = new ConfirmationStore(pool);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
   // registrert med Gmail/Calendar over) - ingen ny transport-vei.
   const businessEventSyncService = new BusinessEventSyncService(toolGateway, businessService, openLoopService);
@@ -970,10 +976,17 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // D-351: 4000 → 20_000 (se mesh-bridge.ts sitt filhode for host-målt begrunnelse).
       // D-369: eierens rå melding i turen (kun fra grant-autentisert chat) gir den deterministiske «uttrykkelig be om å huske»-sjekken;
       // `JARVIS_MEMORY_AUTO_APPROVE=false` slår auto-godkjenning av eier-uttrykte minner av (da går ALT via karantene).
+      // Del 3 (JARVIS-002/014/028): turen bærer flate + taint + grenser; executoren håndhever flate-allowlist, kallgrenser og taint-porten
+      // (bundne bekreftelser) i deterministisk kode. Modellen ser kun relevante verktøy per flate/intensjon (`select`), ikke hele settet.
       executorFor: (identity, turn) => new MeshToolExecutor(
         toolGateway, identity, 20_000, modelToolSurface,
-        process.env["JARVIS_MEMORY_AUTO_APPROVE"] === "false" ? undefined : turn
-      )
+        turn && process.env["JARVIS_MEMORY_AUTO_APPROVE"] === "false" ? { ...turn, user_message: "" } : turn,
+        { manifest: toolManifest, confirmations: confirmationStore }
+      ),
+      select: ({ surface, text }) => {
+        const selection = selectSurfaceTools(surface, text, modelToolSurface);
+        return { definitions: selection.selected.map((m) => m.def), limits: selection.limits };
+      }
     },
     // Task #121 (D-214): kosmetisk personlighetslag, se conversation.ts sin
     // `buildSystemPrompt()`/`loadPersonality()`.
@@ -1015,7 +1028,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // instans som resten av deps over (incidents.gateway osv.) - `/executive/
     // query` i server.ts begrenser seg selv til et hardkodet lese-kun
     // allowlist, ingen ny autorisasjonsmekanisme her.
-    executive: { gateway: toolGateway }
+    executive: { gateway: toolGateway },
+    confirmations: confirmationStore
   };
   // D-196: samme drain-løkke som worker-main.ts (linje ~486) - MEN den
   // logget ALDRI en `tick()`-feil her (feil under selve claim/complete/fail-

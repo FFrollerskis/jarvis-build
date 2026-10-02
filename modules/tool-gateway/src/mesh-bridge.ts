@@ -2,6 +2,9 @@ import type { ToolCallRequest, ToolDefinition as MeshToolDefinition, ToolResultM
 import { zodToJsonSchema } from "zod-to-json-schema";
 import type { ToolGateway } from "./gateway.ts";
 import { ownerStatesMemory } from "./owner-stated-memory.ts";
+import type { JsonValue } from "@jarvis/contracts";
+import { SURFACE_TOOL_GRANTS, requiresConfirmationWhenTainted, type ToolManifest } from "./tool-manifest.ts";
+import type { TurnContext } from "./turn-context.ts";
 
 /**
  * UA-1 P1A (§13, §16-§17): trusted bro mellom AI Mesh og Tool Gateway.
@@ -293,6 +296,24 @@ export function normalizeJsonSchemaBounds(schema: unknown): Record<string, unkno
  * Strukturelt kompatibel med ModelGateway.ToolExecutor. Resultatet trimmes før
  * det går tilbake til modellen - aldri credentials/intern metadata (§22).
  */
+/**
+ * Del 3 (JARVIS-002/014): bekreftelsesport (strukturell grensesnitt - implementert av `ConfirmationStore` i @jarvis/core). Executoren bruker den
+ * KUN i en tainted tur for handlinger som krever ny bekreftelse. Modellen når aldri denne porten.
+ */
+export interface ConfirmationGate {
+  checkAndConsume(
+    call: { tool_id: string; action: string; parameters: Record<string, JsonValue> },
+    who: { tenant_id: string; person_id: string; device_id?: string | null; session_id?: string | null },
+    taintReasons: string[]
+  ): Promise<{ ok: true; confirmation_id: string } | { ok: false; reason: string; confirmation_id?: string }>;
+}
+
+export interface MeshToolGuards {
+  /** Sentralt manifest. Et mappet verktøy uten manifest-oppføring feiler LUKKET. */
+  manifest: ToolManifest;
+  confirmations?: ConfirmationGate;
+}
+
 export class MeshToolExecutor {
   constructor(
     private readonly toolGateway: ToolGateway,
@@ -322,7 +343,9 @@ export class MeshToolExecutor {
      * D-369: eierens RÅ melding i denne samtaleturen (trusted: kommer fra grant-autentisert chat, aldri fra modell/verktøy).
      * Brukes kun til den deterministiske `ownerStatesMemory()`-sjekken for `memory.propose`. Udefinert = aldri auto-godkjenning.
      */
-    private readonly turn?: { user_message: string }
+    private readonly turn?: Pick<TurnContext, "user_message"> & Partial<Omit<TurnContext, "user_message">>,
+    /** Del 3: manifest + bekreftelsesport. Uten `guards` oppfører executoren seg som før (kun for testhjelpere/legacy kallere). */
+    private readonly guards?: MeshToolGuards
   ) {}
 
   async execute(
@@ -347,6 +370,54 @@ export class MeshToolExecutor {
         ? { ...rest, owner_stated: true }
         : rest;
     }
+    const key = `${mapped.tool_id}.${mapped.action}`;
+    const turn = this.turn;
+    // 1. Hard flate-allowlist (forsvar i dybden - utvalget skal allerede ha filtrert): et verktøy utenfor flaten utføres ALDRI.
+    if (turn?.surface && !SURFACE_TOOL_GRANTS[turn.surface].some((g) => `${g.tool_id}.${g.action}` === key)) {
+      return {
+        tool_call_id: call.tool_call_id, tool_name: call.tool_name, execution_id: "none",
+        success: false, output: null, error_category: "TOOL_NOT_ON_SURFACE", at
+      };
+    }
+    // 2. Kallgrenser per tur (JARVIS-028): aldri ubegrenset verktøy-fan-out.
+    if (turn?.limits && turn.calls) {
+      if (turn.calls.total >= turn.limits.max_total_calls) {
+        return {
+          tool_call_id: call.tool_call_id, tool_name: call.tool_name, execution_id: "none",
+          success: false, output: null, error_category: "TOOL_CALL_LIMIT", at
+        };
+      }
+      turn.calls.total += 1;
+    }
+    // 3. Manifest + taint-port: i en tainted tur krever C/D og utgående/betalt/ekstern skriving en NY, bundet eier-bekreftelse.
+    if (this.guards) {
+      const entry = this.guards.manifest.get(key);
+      if (!entry) {
+        return {
+          tool_call_id: call.tool_call_id, tool_name: call.tool_name, execution_id: "none",
+          success: false, output: null, error_category: "TOOL_NOT_IN_MANIFEST", at
+        };
+      }
+      if (turn?.taint?.tainted && requiresConfirmationWhenTainted(entry)) {
+        const gate = this.guards.confirmations;
+        const identity = this.identity as { tenant_id: string; person_id: string; device_id?: string; session_id?: string };
+        const check = gate
+          ? await gate.checkAndConsume({ tool_id: mapped.tool_id, action: mapped.action, parameters: parameters as Record<string, JsonValue> }, identity, turn.taint.reasons)
+          : ({ ok: false, reason: "confirmation_unavailable" } as { ok: false; reason: string; confirmation_id?: string });
+        if (!check.ok) {
+          return {
+            tool_call_id: call.tool_call_id, tool_name: call.tool_name, execution_id: "none",
+            success: false,
+            output: {
+              confirmation_required: true,
+              confirmation_id: check.confirmation_id ?? null,
+              message: "Handlingen krever at eieren bekrefter den eksplisitt i dashbordet (Bekreftelser). Utfør den IKKE på nytt før eieren har bekreftet."
+            },
+            error_category: check.reason.toUpperCase(), at, trust: "internal", source: key
+          };
+        }
+      }
+    }
     const result = await this.toolGateway.execute({
       identity: this.identity as never,
       tool_id: mapped.tool_id,
@@ -366,12 +437,17 @@ export class MeshToolExecutor {
     }
     let output: unknown = result.data ?? null;
     const serialized = JSON.stringify(output);
+    let truncated = false;
     if (serialized && serialized.length > this.maxOutputChars) {
       output = { truncated: true, preview: serialized.slice(0, this.maxOutputChars) };
+      truncated = true;
     }
+    // Del 3: tillit bevares fra verktøydefinisjonen (aldri fra modellen), og ubetrodd output TAINTER turen deterministisk.
+    if (result.output_trust === "untrusted") turn?.taint?.mark(`untrusted_output:${key}`);
     return {
       tool_call_id: call.tool_call_id, tool_name: call.tool_name, execution_id: ctx.idempotency_key,
-      success: true, output, at
+      success: true, output, at,
+      trust: result.output_trust, source: key, bounds: { truncated, max_chars: this.maxOutputChars }
     };
   }
 }

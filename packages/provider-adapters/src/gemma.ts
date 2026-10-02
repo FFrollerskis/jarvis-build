@@ -18,6 +18,7 @@ import {
   type StreamHandler,
   type ToolCallRequest
 } from "./types.ts";
+import { renderToolResult } from "./tool-result-envelope.ts";
 
 /**
  * D-79 (AI Mesh Gemma-first kost-/personvernarkitektur): hostet Gemma via
@@ -120,7 +121,7 @@ export class GemmaHostedAdapter implements ModelProviderAdapter {
         parts: ex.results.map((r) => ({
           functionResponse: {
             name: r.tool_name,
-            response: { name: r.tool_name, content: r.success ? r.output : { error: r.error_category ?? "tool_failed" } }
+            response: { name: r.tool_name, content: renderToolResult(r) }
           }
         }))
       });

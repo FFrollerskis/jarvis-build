@@ -151,6 +151,8 @@ export interface ToolLoopOptions {
   signal?: AbortSignal;
   /** Maks modellrunder (default 4) - aldri uendelig tool-loop. */
   maxRounds?: number;
+  /** Del 3 (JARVIS-028): maks verktøykall utført per runde. Overskytende kall forkastes (ikke utført) - aldri en ubegrenset fan-out. */
+  maxCallsPerRound?: number;
 }
 
 /** Minimal, deterministisk JSON-Schema-validering (§25): required + ukjente felter. */
@@ -604,7 +606,7 @@ export class ModelGateway {
       result = opts.onEvent
         ? await this.stream(roundInput, opts.onEvent, opts.signal)
         : await this.complete(roundInput);
-      const calls = result.tool_calls ?? [];
+      const calls = (result.tool_calls ?? []).slice(0, opts.maxCallsPerRound ?? Number.POSITIVE_INFINITY);
       if (calls.length === 0) {
         break;
       }

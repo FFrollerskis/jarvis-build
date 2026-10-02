@@ -2,6 +2,7 @@ export * from "./db/pool.ts";
 export * from "./db/migrator.ts";
 export * from "./db/pg-date.ts";
 export * from "./services/audit-writer.ts";
+export * from "./services/confirmation-store.ts";
 export * from "./services/secret-scan.ts";
 export * from "./services/identity-service.ts";
 export * from "./services/session-service.ts";

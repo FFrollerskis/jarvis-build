@@ -54,6 +54,15 @@ export interface ToolResultMessage {
   output: unknown;
   error_category?: string;
   at: string;
+  /**
+   * Del 3 (JARVIS-002): tillitsnivå på verktøyoutput, satt av TRUSTED lag (executor) fra verktøydefinisjonen - aldri av modellen.
+   * Mangler den, behandles outputen som `untrusted` (fail-closed). Bevares gjennom hele løkka og ut i hver adapter via data-envelopet.
+   */
+  trust?: "trusted" | "internal" | "untrusted";
+  /** Verktøykilde, f.eks. `email.read_inbox` (proveniens). */
+  source?: string;
+  /** Størrelsesgrenser som ble brukt på outputen. */
+  bounds?: { truncated: boolean; max_chars: number };
 }
 
 /** Én gjennomført tool-runde (provider-nøytral) - gjør cross-provider resume mulig. */

@@ -15,6 +15,7 @@ import {
 import { ProviderError, type StreamEvent, type ToolDefinition } from "@jarvis/provider-adapters";
 import { DEFAULT_PERSONALITY_CONFIG, type PersonalityConfig } from "@jarvis/self-modification";
 import type { TaskService, InProcessWorker } from "@jarvis/tasks";
+import { createTurnContext, surfaceForChannel, type Surface, type SurfaceLimits, type TurnContext } from "@jarvis/tool-gateway";
 import { randomUUID } from "node:crypto";
 
 export interface ConversationDeps {
@@ -48,7 +49,12 @@ export interface ConversationDeps {
    */
   tools?: {
     definitions: ToolDefinition[];
-    executorFor(identity: IdentityContext, turn?: { user_message: string }): ToolExecutor;
+    executorFor(identity: IdentityContext, turn?: TurnContext): ToolExecutor;
+    /**
+     * Del 3 (JARVIS-002/028): deterministisk per-flate utvalg av verktøy for DENNE turen (hard allowlist per flate + intensjon + grenser).
+     * Når satt brukes den i stedet for `definitions` (som da kun er referansen/øvre grense). Tomt utvalg => ingen verktøy i runden.
+     */
+    select?(input: { surface: Surface; text: string }): { definitions: ToolDefinition[]; limits: SurfaceLimits };
   };
   /**
    * D-106 (AI Mesh Council/Collaboration/lokal-Gemma-utvidelse §"large
@@ -206,9 +212,13 @@ export class ConversationEngine {
     // Council/modell) - alle tre grener representerer noe eieren faktisk sa.
     // Fire-and-forget: `await` her ville lagt embedding-/DB-latency til HVERT
     // eneste samtalesvar for en helt sidestilt bekvemmelighet.
+    // Del 3: flaten (web/voice/telegram/background) styrer hvilke verktøy og skriveveier som finnes. Telegram er READ-ONLY inntil signert
+    // godkjenning finnes (chat-id alene er ikke nok autoritet for skriving) - derfor ingen minneskriving fra Telegram.
+    const surface = surfaceForChannel(identity.channel);
+    const turn = createTurnContext(surface, text);
     // Del 3: ingen minneskriving av en melding som inneholdt en hemmelighet; lange/innlimte tekster (e-post, dokumenter) regnes ikke
     // som eierens egne ord (JARVIS-013) og går via karantene i stedet for å bli aktivt, betrodd minne.
-    if (this.deps.memory?.ingest && !flags.secretsFound) {
+    if (this.deps.memory?.ingest && !flags.secretsFound && surface !== "telegram") {
       this.deps.memory.ingest(identity, text, { pasted: looksLikePastedContent(text) }).catch((err: unknown) => {
         console.error(JSON.stringify({
           msg: "conversation_memory_ingest_failed",
@@ -382,11 +392,16 @@ export class ConversationEngine {
             }
           }
         : undefined;
+      // Del 3: per-flate utvalg + grenser (runder/kall per runde). Uten `select` brukes hele `definitions` (legacy/test).
+      const selection = this.deps.tools?.select?.({ surface, text });
+      const toolDefinitions = selection ? selection.definitions : this.deps.tools?.definitions ?? [];
+      const useTools = this.deps.tools !== undefined && toolDefinitions.length > 0;
       const callGateway = (callInput: typeof input) =>
-        this.deps.tools
+        this.deps.tools && useTools
           ? this.deps.gateway.completeWithTools(callInput, {
-              tools: this.deps.tools.definitions,
-              executor: this.deps.tools.executorFor(identity, { user_message: text }),
+              tools: toolDefinitions,
+              executor: this.deps.tools.executorFor(identity, turn),
+              ...(selection ? { maxRounds: selection.limits.max_rounds, maxCallsPerRound: selection.limits.max_calls_per_round } : {}),
               ...(onEvent ? { onEvent } : {}),
               ...(signal ? { signal } : {})
             })

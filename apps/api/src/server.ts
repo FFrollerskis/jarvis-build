@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import type pg from "pg";
-import { ChallengeLimitError } from "@jarvis/core";
+import { ChallengeLimitError, type ConfirmationStore } from "@jarvis/core";
 import type {
   ChannelSessionAuthority, DeviceEnrollmentService, DeviceService, IdentityService,
   SessionGrantService, SessionService, VoiceSessionAuthority
@@ -92,6 +92,11 @@ export interface ApiDeps {
    * UA-10/UA-11 selv allerede fulgte).
    */
   executive?: { gateway: ToolGateway };
+  /**
+   * Del 3 (JARVIS-002/014): bundne bekreftelsesobjekter for handlinger i en tainted tur. Kun grant-ruten `/confirmations` kan liste/avgjøre dem -
+   * aldri modellen. Uten verdien svarer ruten 404.
+   */
+  confirmations?: ConfirmationStore;
   /**
    * D-102 (UA-5 Production Real Coding Agent / Tested-Fix Pipeline Wiring v1):
    * SAMME `TaskService`-instans som allerede konstrueres for `ConversationEngine`
@@ -263,6 +268,7 @@ const OWNER_CONTROLS_CONNECTOR_ACTIONS = ["set_connector_credential", "test_conn
  * allowlist; handlingene står IKKE på modellens verktøyflate, og ruten krever et grant fra en innrullert enhet - modellen
  * kan altså aldri godkjenne sine egne forslag. Samme kroppsform/avslagsrekkefølge som `/owner-controls/connector-credentials`.
  */
+const CONFIRMATION_ACTIONS = ["list", "decide"] as const;
 const MEMORY_PROPOSAL_ACTIONS = ["list_proposals", "approve_proposal", "reject_proposal"] as const;
 
 /**
@@ -938,6 +944,38 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       return json(res, 403, { error: "tool_denied", reason: result.reason });
     }
     return json(res, 200, { ok: true, data: result.data, session_id: resolved.identity.session_id });
+  }
+
+  if (deps.confirmations && req.method === "POST" && url.pathname === "/confirmations") {
+    // Del 3: eierens bekreftelser for tainted handlinger. SAMME grant-rekkefølge som /memory/proposals. `decide` gjelder KUN
+    // bekreftelser for samme person som grantet, kun mens de er pending og ikke utløpt (se ConfirmationStore.decide).
+    const raw: unknown = await readBodyOrUndefined(req);
+    const parsedBody = grantBodyOrReject(res, raw, EXECUTIVE_QUERY_BODY_KEYS);
+    if (!parsedBody) return;
+    if (typeof parsedBody["action"] !== "string" || !(CONFIRMATION_ACTIONS as readonly string[]).includes(parsedBody["action"])) {
+      return json(res, 400, { error: "malformed_request", reason: "action_not_allowed" });
+    }
+    const action = parsedBody["action"] as (typeof CONFIRMATION_ACTIONS)[number];
+    const parameters =
+      typeof parsedBody["parameters"] === "object" && parsedBody["parameters"] !== null && !Array.isArray(parsedBody["parameters"])
+        ? (parsedBody["parameters"] as Record<string, JsonValue>)
+        : {};
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
+    if (!resolved.ok) {
+      if (resolved.responded) return;
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+    }
+    if (action === "list") {
+      return json(res, 200, { ok: true, data: await deps.confirmations.listPending(resolved.identity) });
+    }
+    const id = parameters["confirmation_id"];
+    const decision = parameters["decision"];
+    if (typeof id !== "string" || id.length === 0 || id.length > 100 || (decision !== "approve" && decision !== "reject")) {
+      return json(res, 400, { error: "malformed_request", reason: "decision_malformed" });
+    }
+    const ok = await deps.confirmations.decide(resolved.identity, id, decision);
+    if (!ok) return json(res, 404, { error: "not_pending", reason: "confirmation_not_pending_or_expired" });
+    return json(res, 200, { ok: true, data: { confirmation_id: id, decision } });
   }
 
   if (deps.executive && req.method === "POST" && url.pathname === "/memory/proposals") {
