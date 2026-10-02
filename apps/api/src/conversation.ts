@@ -2,6 +2,7 @@ import type { IdentityContext } from "@jarvis/contracts";
 import { ContextBuilder, MessageStore, describeSecretFindings, fastRoute, scanForSecrets } from "@jarvis/core";
 import {
   BudgetExceededError,
+  classifyContentSensitivity,
   classifyDecisionImportance,
   NoEligibleProviderError,
   parseRoutingOverride,
@@ -28,6 +29,8 @@ export interface ConversationDeps {
   /** Fase 4: hybridminne-kontekst med kildeangivelse (kun gjeldende space). */
   memory?: {
     contextFor(identity: IdentityContext, userText: string): Promise<string>;
+    /** Del 3: valgfri variant med metadata (minnerom/sensitivitet) så ruteren kan utlede sensitivitet fra innholdet. */
+    contextWithMeta?(identity: IdentityContext, userText: string): Promise<{ text: string; spaces: string[]; sensitivities: string[] }>;
     /**
      * D-283: valgfri skrivevei - eierens egne ord fra DENNE samtalen (rå
      * brukertekst, ALDRI assistentens genererte svar - se kallstedet i
@@ -302,7 +305,12 @@ export class ConversationEngine {
         role: (m.role === "assistant" ? "assistant" : "user") as "assistant" | "user",
         content: m.content
       }));
-      const memoryContext = this.deps.memory ? await this.deps.memory.contextFor(identity, text) : "";
+      const memoryMeta = this.deps.memory
+        ? this.deps.memory.contextWithMeta
+          ? await this.deps.memory.contextWithMeta(identity, text)
+          : { text: await this.deps.memory.contextFor(identity, text), spaces: [identity.memory_space_id], sensitivities: [] as string[] }
+        : { text: "", spaces: [] as string[], sensitivities: [] as string[] };
+      const memoryContext = memoryMeta.text;
       const personality = this.loadPersonality();
       const systemPrompt = buildSystemPrompt(personality);
       const system = memoryContext ? `${systemPrompt}\n\n${memoryContext}` : systemPrompt;
@@ -354,11 +362,23 @@ export class ConversationEngine {
         override?.provider === undefined &&
         override?.providerPreference === undefined &&
         override?.mode === undefined;
+      // Del 3: per-flate utvalg + grenser (runder/kall per runde). Uten `select` brukes hele `definitions` (legacy/test).
+      const selection = this.deps.tools?.select?.({ surface, text });
+      const toolDefinitions = selection ? selection.definitions : this.deps.tools?.definitions ?? [];
+      const useTools = this.deps.tools !== undefined && toolDefinitions.length > 0;
+      // Del 3 (JARVIS-016/035): sensitivitet utledes av INNHOLDET (minne, historikk, melding, verktøykilder) - ikke lenger hardkodet «public».
+      // Helse/finans/hemmeligheter ⇒ kun lokal behandler; privat/forretningsminne og verktøyruter ⇒ aldri gratis/delt sky.
+      const sensitivityDecision = classifyContentSensitivity({
+        texts: [text, ...history.map((m) => m.content)],
+        memory_spaces: memoryMeta.spaces,
+        memory_sensitivities: memoryMeta.sensitivities,
+        private_tool_output: useTools
+      });
       const input = {
         tenant_id: identity.tenant_id,
         session_id: identity.session_id,
         purpose: "CHAT" as const,
-        sensitivity: "PUBLIC_OR_LOW_SENSITIVITY" as const,
+        sensitivity: sensitivityDecision.sensitivity,
         ...(provider !== undefined ? { provider } : override?.provider !== undefined ? { provider: override.provider } : {}),
         ...(provider === undefined && override?.providerPreference !== undefined
           ? { providerPreference: override.providerPreference }
@@ -392,10 +412,6 @@ export class ConversationEngine {
             }
           }
         : undefined;
-      // Del 3: per-flate utvalg + grenser (runder/kall per runde). Uten `select` brukes hele `definitions` (legacy/test).
-      const selection = this.deps.tools?.select?.({ surface, text });
-      const toolDefinitions = selection ? selection.definitions : this.deps.tools?.definitions ?? [];
-      const useTools = this.deps.tools !== undefined && toolDefinitions.length > 0;
       const callGateway = (callInput: typeof input) =>
         this.deps.tools && useTools
           ? this.deps.gateway.completeWithTools(callInput, {
@@ -488,6 +504,8 @@ export class ConversationEngine {
       tenant_id: identity.tenant_id,
       session_id: identity.session_id,
       decision_context: text,
+      // Del 3: rådet går gjennom SAMME sensitivitetsregler som chat (innholdsbasert, fail-closed) - aldri udefinert/«public».
+      sensitivity: classifyContentSensitivity({ texts: [text], memory_spaces: [identity.memory_space_id] }).sensitivity,
       ...(override?.paid_models_allowed !== undefined ? { paid_models_allowed: override.paid_models_allowed } : {}),
       trigger: {
         trigger_source: triggerSource,

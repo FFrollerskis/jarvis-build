@@ -57,6 +57,7 @@ const identity: IdentityContext = {
 function buildEngine(opts: {
   onComplete?: (input: CompleteInput) => void;
   onCouncilRun?: (input: unknown) => void;
+  memory?: ConstructorParameters<typeof ConversationEngine>[0]["memory"];
 }): ConversationEngine {
   const pool = fakePool();
   const messages = new MessageStore(pool);
@@ -107,7 +108,8 @@ function buildEngine(opts: {
     tasks: fakeTasks,
     worker: fakeWorker,
     trace: new MemoryTraceSink(),
-    council
+    council,
+    ...(opts.memory ? { memory: opts.memory } : {})
   });
 }
 
@@ -359,12 +361,12 @@ describe("D-106 HOST-FIX: automatisk høy-innvirkning-klassifisering trigger Cou
    * ikke automatisk nedgraderes til lav-sensitivitet bare fordi normal chat
    * nå er det.
    */
-  it("I2: Council-input har INGEN sensitivity-felt (D-203s default gjelder KUN normal chat, aldri Council)", async () => {
+  it("I2 (Del 3): Council-input har en KLASSIFISERT sensitivitet (aldri udefinert, aldri «public» for eierens personlige rom)", async () => {
     let captured: unknown;
     const engine = buildEngine({ onCouncilRun: (input) => (captured = input) });
     await engine.handle(identity, "Should we replace Jarvis' canonical memory architecture?");
     const input = captured as { sensitivity?: unknown };
-    expect(input.sensitivity).toBeUndefined();
+    expect(input.sensitivity).toBe("PRIVATE");
   });
 
   it("J: stor finansiell beslutning trigger Council automatisk", async () => {
@@ -456,5 +458,29 @@ describe("D-106 HOST-FIX: automatisk høy-innvirkning-klassifisering trigger Cou
     await engine.handle(identity, "ikke bruk betalte modeller - should we make this provider a core dependency?");
     const input = captured as { paid_models_allowed?: boolean };
     expect(input.paid_models_allowed).toBe(false);
+  });
+
+  /** Del 3 (JARVIS-016/035): sensitivitet utledes av innholdet - helse/finans/hemmeligheter ⇒ lokal behandler, privat minne ⇒ aldri gratis sky. */
+  it("V (Del 3): helse-/finans-/hemmelighetsinnhold i chat ⇒ SECRET_RESTRICTED (gemma_hosted/sky utelukket av ruteren)", async () => {
+    for (const msg of ["jeg har fått en ny diagnose, hva nå?", "hva er saldoen på kontoen min?", "kontonummeret mitt er 1234.56.78901"]) {
+      let captured: CompleteInput | undefined;
+      const engine = buildEngine({ onComplete: (input) => (captured = input) });
+      await engine.handle(identity, msg);
+      expect(captured?.sensitivity, msg).toBe("SECRET_RESTRICTED");
+    }
+  });
+
+  it("W (Del 3): relevant privat minne i konteksten ⇒ PRIVATE (ikke gratis/delt sky); helserom-minne ⇒ SECRET_RESTRICTED", async () => {
+    const mem = (spaces: string[], sensitivities: string[]) => ({
+      contextFor: async () => "- noe [kilde: x:1]",
+      contextWithMeta: async () => ({ text: "Relevant minne (med kilde):\n- noe [kilde: x:1]", spaces, sensitivities })
+    });
+    let captured: CompleteInput | undefined;
+    await buildEngine({ onComplete: (i) => (captured = i), memory: mem(["personal"], ["normal"]) }).handle(identity, "hva sa jeg om det?");
+    expect(captured?.sensitivity).toBe("PRIVATE");
+    await buildEngine({ onComplete: (i) => (captured = i), memory: mem(["health"], ["normal"]) }).handle(identity, "hva sa jeg om det?");
+    expect(captured?.sensitivity).toBe("SECRET_RESTRICTED");
+    await buildEngine({ onComplete: (i) => (captured = i), memory: mem(["personal"], ["special"]) }).handle(identity, "hva sa jeg om det?");
+    expect(captured?.sensitivity).toBe("SECRET_RESTRICTED");
   });
 });
