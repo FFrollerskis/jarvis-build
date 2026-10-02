@@ -38,4 +38,6 @@ probe "B: A + apparmor=unconfined"                                  --cap-drop A
 probe "C: A uten cap_drop ALL"                                      --security-opt no-new-privileges:true --security-opt "seccomp=$PROFILE"
 probe "D: A uten no-new-privileges"                                 --cap-drop ALL --security-opt "seccomp=$PROFILE"
 probe "E: A + --ipc=host"                                           --cap-drop ALL --security-opt no-new-privileges:true --security-opt "seccomp=$PROFILE" --ipc=host
+probe "F: A + cap_add SYS_CHROOT (minste kandidat)"                 --cap-drop ALL --cap-add SYS_CHROOT --security-opt no-new-privileges:true --security-opt "seccomp=$PROFILE"
+probe "G: A + cap_add SYS_CHROOT,SETUID,SETGID"                      --cap-drop ALL --cap-add SYS_CHROOT --cap-add SETUID --cap-add SETGID --security-opt no-new-privileges:true --security-opt "seccomp=$PROFILE"
 echo "--- ferdig (ingen endringer gjort)"
