@@ -323,6 +323,63 @@ describe("D-367: memory.propose - modellens forslag havner ALLTID i karantene", 
   });
 });
 
+describe("D-369: eier-uttrykt minne regnes som eierens egne ord (aktivt + versjonert); alt annet forblir i karantene", () => {
+  it("owner_stated + nytt emne -> aktivt og søkbart med en gang, med audit memory.auto_approved", async () => {
+    const id = identity("personal");
+    const out = await writer.propose(id, { subject: "tobias.auto.kaffe", content: "Tobias liker svart autokaffe1", owner_stated: true });
+    expect(out.op).toBe("ADD");
+    expect(out.auto_approved).toBe(true);
+    const row = await adminPool.query("SELECT status, trust_level FROM memory_items WHERE memory_item_id = $1", [out.memory_item_id]);
+    expect(row.rows[0]).toMatchObject({ status: "active", trust_level: "trusted" });
+    expect((await retriever.search(id, { spaces: ["personal"], query: "autokaffe1" })).map((r) => r.memory_item_id)).toContain(out.memory_item_id);
+    const audit = await adminPool.query("SELECT payload FROM audit_events WHERE type = 'memory.auto_approved' AND payload->>'memory_item_id' = $1", [out.memory_item_id]);
+    expect(audit.rowCount).toBe(1);
+    expect(audit.rows[0].payload).toMatchObject({ reason: "owner_explicit_request", op: "ADD" });
+  });
+
+  it("uten owner_stated forblir forslaget i karantene (modellens egne forslag)", async () => {
+    const id = identity("personal");
+    const out = await writer.propose(id, { subject: "tobias.auto.modell", content: "Modellens eget forslag autotest2" });
+    expect(out.auto_approved).toBeUndefined();
+    const row = await adminPool.query("SELECT status FROM memory_items WHERE memory_item_id = $1", [out.memory_item_id]);
+    expect(row.rows[0].status).toBe("quarantined");
+  });
+
+  it("owner_stated men svak autentisering (policy DENY) -> vanlig karantene-forslag, ingen auto_approved-audit", async () => {
+    const weak = { ...identity("personal"), auth_strength: "passive" as const };
+    const out = await writer.propose(weak, { subject: "tobias.auto.svak", content: "Svak autentisering autotest3", owner_stated: true });
+    expect(out.auto_approved).toBe(false);
+    const row = await adminPool.query("SELECT status FROM memory_items WHERE memory_item_id = $1", [out.memory_item_id]);
+    expect(row.rows[0].status).toBe("quarantined");
+    const audit = await adminPool.query("SELECT 1 FROM audit_events WHERE type = 'memory.auto_approved' AND payload->>'memory_item_id' = $1", [out.memory_item_id]);
+    expect(audit.rowCount).toBe(0);
+  });
+
+  it("owner_stated på et emne som allerede finnes (samme type) OPPDATERER med versjonering - ikke en karantene-konflikt; historikk bevares", async () => {
+    const id = identity("personal");
+    const original = await writer.apply(id, TRUSTED, candidate("personal", "test.auto.oppdater", "Første verdi autotest4."));
+    const update = await writer.propose(id, { subject: "test.auto.oppdater", content: "Ny verdi autotest4 fra eieren", owner_stated: true });
+    expect(update.op).toBe("UPDATE");
+    expect(update.auto_approved).toBe(true);
+    expect(update.memory_item_id).toBe(original.memory_item_id);
+    const results = await retriever.search(id, { spaces: ["personal"], query: "autotest4" });
+    const item = results.find((r) => r.memory_item_id === original.memory_item_id);
+    expect(item?.content).toBe("Ny verdi autotest4 fra eieren");
+    expect(item?.has_conflict).toBe(true);
+    expect(item?.versions?.map((v) => v.content)).toContain("Første verdi autotest4.");
+  });
+
+  it("et modellforslag UTEN owner_stated kan fortsatt aldri overskrive aktivt minne (konflikt får eget karantene-emne)", async () => {
+    const id = identity("personal");
+    const original = await writer.apply(id, TRUSTED, candidate("personal", "test.auto.vern", "Sann verdi autotest5."));
+    const attack = await writer.propose(id, { subject: "test.auto.vern", content: "Falsk verdi autotest5!" });
+    expect(attack.op).toBe("QUARANTINED_CONFLICT");
+    const results = await retriever.search(id, { spaces: ["personal"], query: "autotest5" });
+    expect(results.find((r) => r.memory_item_id === original.memory_item_id)?.content).toBe("Sann verdi autotest5.");
+    expect(results.find((r) => r.content.includes("Falsk"))).toBeUndefined();
+  });
+});
+
 describe("Akseptanse 2: tenant- og space-isolasjon (inkl. health/guest)", () => {
   beforeAll(async () => {
     const spaces: Array<[MemorySpace, string, string]> = [

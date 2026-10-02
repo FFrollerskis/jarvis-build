@@ -218,8 +218,8 @@ export class MemoryWriter {
    */
   async propose(
     identity: IdentityContext,
-    input: { subject: string; content: string; type?: MemoryType }
-  ): Promise<ApplyOutcome> {
+    input: { subject: string; content: string; type?: MemoryType; owner_stated?: boolean }
+  ): Promise<ApplyOutcome & { auto_approved?: boolean }> {
     const subject = typeof input.subject === "string" ? input.subject.trim() : "";
     const content = typeof input.content === "string" ? input.content.trim() : "";
     const type = input.type ?? "semantic";
@@ -232,7 +232,28 @@ export class MemoryWriter {
       space: identity.memory_space_id as MemorySpace,
       type, subject, content, confidence: 0.5
     };
-    return this.apply(identity, { kind: "tool", ref: `memory.propose:${identity.session_id}`, trust: "untrusted" }, candidate);
+    // D-369 (revidert): eieren ba UTTRYKKELIG om dette i samme tur (avgjort deterministisk av kalleren, `ownerStatesMemory`). Da regnes
+    // innholdet som eierens egne ord - SAMME tillitsnivå og versjonering som D-283 sin automatiske lagring av eierens meldinger
+    // (ADD / UPDATE med bevart historikk og motstrid markert / NOOP), IKKE en karantene-konflikt mot eksisterende minne. Policy
+    // Gateway (klasse B, aktiv auth) må fortsatt tillate det; ved DENY faller vi tilbake til vanlig karantene-forslag under.
+    if (input.owner_stated === true) {
+      const decision = await this.policy.authorize({
+        identity,
+        toolCall: { tool_id: "memory", action: "auto_approve_owner_stated", capability_class: "B", parameters: { subject } }
+      });
+      if (decision.decision === "ALLOW") {
+        const applied = await this.apply(identity, { kind: "tool", ref: `memory.propose.owner:${identity.session_id}`, trust: "trusted" }, candidate);
+        await withMemoryTransaction(this.pool, identity.tenant_id, [candidate.space], (client) =>
+          writeAudit(client, identity, {
+            type: "memory.auto_approved",
+            payload: { memory_item_id: applied.memory_item_id, op: applied.op, reason: "owner_explicit_request" }
+          })
+        );
+        return { ...applied, auto_approved: true };
+      }
+    }
+    const outcome = await this.apply(identity, { kind: "tool", ref: `memory.propose:${identity.session_id}`, trust: "untrusted" }, candidate);
+    return input.owner_stated === true ? { ...outcome, auto_approved: false } : outcome;
   }
 
   /** Åpne (karantene-)forslag fra `memory.propose` for eierens space - kun lesing, kun forslag (kilde `tool`). */

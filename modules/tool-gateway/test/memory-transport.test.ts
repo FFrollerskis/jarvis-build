@@ -102,6 +102,21 @@ describe("B: memoryToolDefinitions() - klasse A (lesing), strict() skjema uten i
     expect(schema.safeParse({ subject: "a", content: "x".repeat(1001) }).success).toBe(false);
   });
 
+  it("D-369: transporten svarer 'approved' når writeren auto-godkjente, og sender owner_stated KUN når parameteren er true", async () => {
+    const seen: unknown[] = [];
+    const writer = {
+      propose: async (_i: unknown, input: unknown) => { seen.push(input); return { op: "ADD", memory_item_id: "mem-9", status: "quarantined", auto_approved: true }; },
+      listProposals: async () => [], promoteFromQuarantine: async () => true, rejectFromQuarantine: async () => true
+    };
+    const transport = new MemorySearchTransport(fakeRetriever().retriever, writer as never);
+    const identity = { tenant_id: "t", person_id: "p", memory_space_id: "personal", session_id: "s", device_id: "d" };
+    const ok = await transport.invoke("propose", { subject: "a", content: "b", owner_stated: true }, "x", { identity } as never);
+    expect((ok.data as { status: string }).status).toBe("approved");
+    await transport.invoke("propose", { subject: "a", content: "b", owner_stated: "ja" as never }, "x", { identity } as never);
+    expect(seen[0]).toMatchObject({ owner_stated: true });
+    expect(seen[1]).not.toHaveProperty("owner_stated");
+  });
+
   it("D-367: transporten kaller writer.propose med identiteten fra konteksten og svarer at forslaget er i karantene", async () => {
     const calls: unknown[] = [];
     const writer = {

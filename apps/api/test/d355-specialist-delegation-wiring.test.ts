@@ -30,7 +30,8 @@ describe("D-355 (frosset av remediering del 1): delegate_code_task er IKKE på C
 
   it("B: ConversationEngine sin tools-definisjonsliste er KUN den eksplisitte modellflaten", () => {
     expect(codeOnly).toContain("definitions: modelToolSurface.map((t) => t.def),");
-    expect(codeOnly).toContain("new MeshToolExecutor(toolGateway, identity, 20_000, modelToolSurface)");
+    // D-369: executoren får i tillegg eierens turn-kontekst (femte argument) - flaten (modelToolSurface) er uendret.
+    expect(codeOnly).toMatch(/new MeshToolExecutor\(\s*toolGateway, identity, 20_000, modelToolSurface,/);
   });
 
   it("C: kun ÉN ModelGateway konstrueres i main.ts (ingen egen gateway for delegering)", () => {

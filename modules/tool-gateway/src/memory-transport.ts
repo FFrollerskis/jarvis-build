@@ -71,16 +71,21 @@ export class MemorySearchTransport implements ToolTransport {
         const outcome = await this.writer.propose(identity, {
           subject: String(parameters["subject"] ?? ""),
           content: String(parameters["content"] ?? ""),
-          ...(typeof parameters["type"] === "string" ? { type: parameters["type"] as MemoryType } : {})
+          ...(typeof parameters["type"] === "string" ? { type: parameters["type"] as MemoryType } : {}),
+          // D-369: settes KUN av den trusted executoren (aldri fra modell-args) når eierens egen melding uttrykkelig ba om det.
+          ...(parameters["owner_stated"] === true ? { owner_stated: true } : {})
         });
-        const status = outcome.op === "NOOP" ? "already_known" : "quarantined";
+        const approved = (outcome as { auto_approved?: boolean }).auto_approved === true;
+        const status = outcome.op === "NOOP" ? "already_known" : approved ? "approved" : "quarantined";
         return {
           external_id: "memory_item_id" in outcome ? outcome.memory_item_id : undefined,
           data: {
             status,
-            note: status === "quarantined"
-              ? "Lagret som FORSLAG i karantene. Det brukes ikke som minne før Tobias godkjenner det i dashbordet."
-              : "Dette er allerede lagret."
+            note: status === "approved"
+              ? "Lagret som minne (eieren ba uttrykkelig om det)."
+              : status === "quarantined"
+                ? "Lagret som FORSLAG i karantene. Det brukes ikke som minne før Tobias godkjenner det i dashbordet."
+                : "Dette er allerede lagret."
           }
         } as { external_id?: string; data?: JsonValue };
       }
@@ -138,7 +143,9 @@ export function memoryToolDefinitions(transport: MemorySearchTransport): ToolDef
       input_schema: record({
         subject: z.string().min(1).max(120),
         content: z.string().min(1).max(1000),
-        type: z.enum(["semantic", "episodic", "preference", "procedure", "relation", "project", "operational", "decision", "commitment"]).optional()
+        type: z.enum(["semantic", "episodic", "preference", "procedure", "relation", "project", "operational", "decision", "commitment"]).optional(),
+        /** D-369: settes kun av trusted executor (modell-args når aldri hit: mesh-mappingen kopierer bare subject/content/type). */
+        owner_stated: z.boolean().optional()
       }),
       capability_class: "B",
       scopes: ["memory.propose"],

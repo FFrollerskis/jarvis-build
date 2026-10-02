@@ -48,7 +48,7 @@ export interface ConversationDeps {
    */
   tools?: {
     definitions: ToolDefinition[];
-    executorFor(identity: IdentityContext): ToolExecutor;
+    executorFor(identity: IdentityContext, turn?: { user_message: string }): ToolExecutor;
   };
   /**
    * D-106 (AI Mesh Council/Collaboration/lokal-Gemma-utvidelse §"large
@@ -348,7 +348,7 @@ export class ConversationEngine {
         this.deps.tools
           ? this.deps.gateway.completeWithTools(callInput, {
               tools: this.deps.tools.definitions,
-              executor: this.deps.tools.executorFor(identity),
+              executor: this.deps.tools.executorFor(identity, { user_message: text }),
               ...(onEvent ? { onEvent } : {}),
               ...(signal ? { signal } : {})
             })

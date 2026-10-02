@@ -16,3 +16,4 @@ export * from "./model-tool-surface.ts";
 export * from "./memory-transport.ts";
 export * from "./connector-registry.ts";
 export * from "./connector-health-sweep.ts";
+export * from "./owner-stated-memory.ts";
