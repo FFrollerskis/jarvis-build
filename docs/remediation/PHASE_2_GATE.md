@@ -4,7 +4,7 @@
 |---|---|
 | Dato | 2026-10-02 |
 | Branch | `remediation/02-identity-network-isolation` (stablet på `remediation/01-containment-baseline` / PR #218) |
-| PR | draft, **IKKE merget** (`PR_DEL2`) |
+| PR | draft, **IKKE merget** (`#219`) |
 | Beslutning | D-364 · Q-44 · Q-45 |
 | Uavhengig review | **IKKE gjort** – verken del 1 eller del 2. Denne filen er Claude sin egen evidens, ikke en godkjenning. |
 
