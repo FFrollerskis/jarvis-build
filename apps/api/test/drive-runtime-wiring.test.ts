@@ -112,7 +112,7 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
   // D-338: mcp_zapier: new McpZapierTransport() lagt til - SAMME tom-
   // konstruktør-form (selve URL-en kommer via credential_ref, ikke
   // konstruktøren) - teller derfor MED, 25→26.
-  // D-339: browser: new BrowserGatewayTransport() lagt til - SAMME tom-
+  // D-339: browser: new BrowserGatewayTransport(process.env["JARVIS_BROWSER_GATEWAY_TOKEN_SECRET"]) lagt til - SAMME tom-
   // konstruktør-form (base-URL-en kommer via credential_ref) - teller
   // derfor MED, 26→27.
   // Remediering del 2 (JARVIS-008): browser ttar nå tjeneste-token-hemmeligheten som konstruktørargument
@@ -126,7 +126,7 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     expect(callBlock).toContain("docker: new DockerTransport()");
     expect(callBlock).toContain("gce: new GceTransport()");
     expect(callBlock).toContain("mcp_zapier: new McpZapierTransport()");
-    expect(callBlock).toContain("browser: new BrowserGatewayTransport()");
+    expect(callBlock).toContain('browser: new BrowserGatewayTransport(process.env["JARVIS_BROWSER_GATEWAY_TOKEN_SECRET"])');
     expect(callBlock).toContain("vercel: new VercelTransport()");
     expect(callBlock).toContain("slack: new SlackTransport()");
     expect(callBlock).toContain("discord: new DiscordTransport()");
@@ -187,7 +187,7 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     expect(callBlock).toContain("docker: new DockerTransport()");
     expect(callBlock).toContain("gce: new GceTransport()");
     expect(callBlock).toContain("mcp_zapier: new McpZapierTransport()");
-    expect(callBlock).toContain("browser: new BrowserGatewayTransport()");
+    expect(callBlock).toContain('browser: new BrowserGatewayTransport(process.env["JARVIS_BROWSER_GATEWAY_TOKEN_SECRET"])');
     expect(callBlock).toContain("vercel: new VercelTransport()");
     expect(callBlock).toContain("slack: new SlackTransport()");
     expect(callBlock).toContain("brave_search: new BraveSearchTransport()");
