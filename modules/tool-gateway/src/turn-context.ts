@@ -104,3 +104,24 @@ export function selectSurfaceTools(surface: Surface, text: string, candidates: R
   }
   return { selected, schema_tokens: tokens, limits, dropped };
 }
+
+const JOB_MEMORY_SPACES = ["personal", "business", "project", "health", "home", "guest", "shared"] as const;
+
+/**
+ * Del 3 (JARVIS-005/012): identiteten en delegert jobb handler med kommer fra den SIGNERTE kontrakten (som `TaskService.submit` har
+ * bundet til den grant-autentiserte personen/tenanten) - aldri en fast worker-/system-identitet og aldri modellargumenter.
+ * Memory space = kontraktens første tillatte rom (ellers `project`); `session_id` er unikt per jobb.
+ */
+export function jobIdentityFor<T extends { memory_space_id: string; session_id: string; person_id: string; tenant_id: string }>(
+  base: T,
+  contract: { owner_person_id: string; tenant_id: string; task_id: string; allowed_memory_spaces: readonly string[] }
+): T {
+  const space = contract.allowed_memory_spaces.find((s): s is (typeof JOB_MEMORY_SPACES)[number] => (JOB_MEMORY_SPACES as readonly string[]).includes(s));
+  return {
+    ...base,
+    person_id: contract.owner_person_id,
+    tenant_id: contract.tenant_id,
+    memory_space_id: space ?? "project",
+    session_id: `job:${contract.task_id}`
+  };
+}

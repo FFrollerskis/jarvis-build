@@ -127,6 +127,19 @@ export class TaskService {
       );
       return { ok: false, reason: "executive_command_disabled" };
     }
+    // Del 3 (JARVIS-005/012): `tools:true` krever en EKSPLISITT, ikke-tom `allowed_tools` og en ikke-ubetrodd kontrakt.
+    if (submittedData["tools"] === true) {
+      const toolsReason =
+        contract.allowed_tools.length === 0 ? "job_tools_require_allowlist"
+        : contract.input.trust_level === "untrusted" ? "job_tools_untrusted_contract"
+        : undefined;
+      if (toolsReason) {
+        await withTenantTransaction(this.pool, identity.tenant_id, (client) =>
+          writeAudit(client, identity, { type: "task.rejected", reason: toolsReason, payload: { task_id: contract.task_id } })
+        );
+        return { ok: false, reason: toolsReason };
+      }
+    }
     // Remediering del 2 (JARVIS-009/064): kodejobb-input valideres deterministisk FØR kø - repo må være allowlistet,
     // testkommando må være en kjent testløper (aldri en vilkårlig kommando fra en task contract).
     if (contract.agent_profile === "coding") {

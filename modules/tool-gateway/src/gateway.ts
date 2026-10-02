@@ -303,6 +303,14 @@ export interface ToolDefinition {
   class_d_profile?: "outbound_message";
 }
 
+/**
+ * Del 3: `allowed_tools`-oppføring = `tool_id` (alle handlinger i verktøyet) ELLER `tool_id.action` (kun den handlingen).
+ * Tom liste tillater ingenting.
+ */
+export function jobContractAllows(allowed: readonly string[], toolId: string, action: string): boolean {
+  return allowed.includes(toolId) || allowed.includes(`${toolId}.${action}`);
+}
+
 export type ToolResult =
   | { ok: true; external_id?: string; data?: JsonValue; output_trust: TrustLevel; deduplicated: boolean; notified?: boolean }
   | { ok: false; reason: string };
@@ -421,8 +429,15 @@ export class ToolGateway {
     if (!definition) {
       return this.deny(request, "unknown_tool");
     }
-    if (request.jobContract && !request.jobContract.allowed_tools.includes(request.tool_id)) {
+    if (request.jobContract && !jobContractAllows(request.jobContract.allowed_tools, request.tool_id, request.action)) {
       return this.deny(request, "tool_not_in_job_contract");
+    }
+    // Del 3 (JARVIS-005/012): en jobb kan aldri handle som en annen person/tenant enn den signerte kontrakten sier.
+    if (
+      request.jobContract &&
+      (request.jobContract.owner_person_id !== request.identity.person_id || request.jobContract.tenant_id !== request.identity.tenant_id)
+    ) {
+      return this.deny(request, "job_identity_mismatch");
     }
     const input = definition.input_schema.safeParse(request.parameters);
     if (!input.success) {

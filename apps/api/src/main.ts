@@ -56,7 +56,7 @@ import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, assertManifestInvariants, buildToolManifest, memoryToolDefinitions, selectSurfaceTools,
   MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, resolveModelToolSurface, PgGithubRateLimitStore,
-  PgTelegramOffsetStore, TelegramCommandPoller, telegramClassDNotifier, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
+  PgTelegramOffsetStore, TelegramCommandPoller, createTurnContext, jobIdentityFor, telegramClassDNotifier, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
 import {
@@ -898,9 +898,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     executiveHandler({
       gateway,
       tools: {
-        definitions: modelToolSurface.map((t) => t.def),
+        all: modelToolSurface,
         // D-351: 4000 → 20_000 (se mesh-bridge.ts sitt filhode for host-målt begrunnelse).
-        executor: new MeshToolExecutor(toolGateway, ownerIdentity, 20_000, modelToolSurface)
+        // Del 3 (JARVIS-005/012): per-jobb identitet fra den signerte kontrakten + bakgrunnsflate + kontrakten håndhevet i gatewayen.
+        executorFor: (task, allowed) => new MeshToolExecutor(
+          toolGateway, jobIdentityFor(ownerIdentity, task.contract), 20_000, [...allowed],
+          createTurnContext("background", String((task.contract.input.data as { prompt?: unknown })["prompt"] ?? "")),
+          { manifest: toolManifest, confirmations: confirmationStore, jobContract: task.contract }
+        )
       }
     })
   );

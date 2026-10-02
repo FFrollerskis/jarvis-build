@@ -1,8 +1,8 @@
 import type { ToolCallRequest, ToolDefinition as MeshToolDefinition, ToolResultMessage } from "@jarvis/provider-adapters";
 import { zodToJsonSchema } from "zod-to-json-schema";
-import type { ToolGateway } from "./gateway.ts";
+import { jobContractAllows, type ToolGateway } from "./gateway.ts";
 import { ownerStatesMemory } from "./owner-stated-memory.ts";
-import type { JsonValue } from "@jarvis/contracts";
+import type { JobContract, JsonValue } from "@jarvis/contracts";
 import { SURFACE_TOOL_GRANTS, requiresConfirmationWhenTainted, type ToolManifest } from "./tool-manifest.ts";
 import type { TurnContext } from "./turn-context.ts";
 
@@ -312,6 +312,8 @@ export interface MeshToolGuards {
   /** Sentralt manifest. Et mappet verktøy uten manifest-oppføring feiler LUKKET. */
   manifest: ToolManifest;
   confirmations?: ConfirmationGate;
+  /** Del 3: delegert jobb - gatewayen håndhever kontraktens `allowed_tools` og eier-/tenant-identitet i tillegg til skjemafilteret. */
+  jobContract?: JobContract;
 }
 
 export class MeshToolExecutor {
@@ -424,6 +426,7 @@ export class MeshToolExecutor {
       action: mapped.action,
       parameters: parameters as never,
       idempotency_key: ctx.idempotency_key,
+      ...(this.guards?.jobContract ? { jobContract: this.guards.jobContract } : {}),
       // D-317: `call.provider`/`.model` er stemplet av selve adapteren som genererte
       // DENNE turen (se ToolCallRequest sitt filhode i provider-adapters) - ALDRI fra
       // modell-oppgitte argumenter, SAMME trusted-lag-kanal som identity/approval.
@@ -450,4 +453,13 @@ export class MeshToolExecutor {
       trust: result.output_trust, source: key, bounds: { truncated, max_chars: this.maxOutputChars }
     };
   }
+}
+
+/**
+ * Del 3 (JARVIS-005/012): skjemaene en delegert jobb får se = kun mappinger kontrakten eksplisitt tillater (`tool_id` eller
+ * `tool_id.action`) OG som bakgrunnsflaten har tildelt. Samme regel håndheves igjen ved utførelse (gateway + executor).
+ */
+export function filterMeshToolsForJob(mappings: ReadonlyArray<MeshToolMapping>, contract: Pick<JobContract, "allowed_tools">): MeshToolMapping[] {
+  const granted = new Set(SURFACE_TOOL_GRANTS.background.map((g) => `${g.tool_id}.${g.action}`));
+  return mappings.filter((m) => granted.has(`${m.tool_id}.${m.action}`) && jobContractAllows(contract.allowed_tools, m.tool_id, m.action));
 }
