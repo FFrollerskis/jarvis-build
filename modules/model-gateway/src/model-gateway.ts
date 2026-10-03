@@ -559,7 +559,14 @@ export class ModelGateway {
         ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
         ...(input.mode !== undefined ? { mode: input.mode } : {}),
         ...(input.provider !== undefined ? { provider: input.provider } : {}),
-        required_capabilities: [...(input.required_capabilities ?? []), "streaming"],
+        // D-379: for SECRET_RESTRICTED er kun lokale providere kvalifisert, og de lokale OpenAI-kompatible
+        // adapterne har ikke native streaming (ærlig registry, D-80). `executePlan` normaliserer allerede til én
+        // text_delta for adaptere uten `.stream()`, så native streaming kreves ikke her - alternativet er at
+        // helse/finans-chat feiler lukket uten noen kvalifisert provider.
+        required_capabilities: [
+          ...(input.required_capabilities ?? []),
+          ...(input.sensitivity === "SECRET_RESTRICTED" ? [] : (["streaming"] as const))
+        ],
         ...(input.sensitivity !== undefined ? { sensitivity: input.sensitivity } : {}),
         ...(input.paid_models_allowed !== undefined
           ? { paid_models_allowed: input.paid_models_allowed }

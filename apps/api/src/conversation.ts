@@ -365,7 +365,7 @@ export class ConversationEngine {
       // Del 3: per-flate utvalg + grenser (runder/kall per runde). Uten `select` brukes hele `definitions` (legacy/test).
       const selection = this.deps.tools?.select?.({ surface, text });
       const toolDefinitions = selection ? selection.definitions : this.deps.tools?.definitions ?? [];
-      const useTools = this.deps.tools !== undefined && toolDefinitions.length > 0;
+      let useTools = this.deps.tools !== undefined && toolDefinitions.length > 0;
       // Del 3 (JARVIS-016/035): sensitivitet utledes av INNHOLDET (minne, historikk, melding, verktøykilder) - ikke lenger hardkodet «public».
       // Helse/finans/hemmeligheter ⇒ kun lokal behandler; privat/forretningsminne og verktøyruter ⇒ aldri gratis/delt sky.
       const sensitivityDecision = classifyContentSensitivity({
@@ -374,6 +374,11 @@ export class ConversationEngine {
         memory_sensitivities: memoryMeta.sensitivities,
         private_tool_output: useTools
       });
+      // D-379: en SECRET_RESTRICTED-tur (helse/finans/hemmelighet) går kun til lokal modell, og den lokale
+      // OpenAI-kompatible Gemma-en har ikke pålitelig verktøykall. Uten dette feiler turen lukket
+      // (`no_eligible_provider`) selv for «hei». Slike turer kjøres derfor uten verktøy (også tryggere: sensitivt
+      // innhold + verktøy er den farligste kombinasjonen). Sensitiviteten selv er uendret.
+      if (sensitivityDecision.sensitivity === "SECRET_RESTRICTED") useTools = false;
       const input = {
         tenant_id: identity.tenant_id,
         session_id: identity.session_id,
