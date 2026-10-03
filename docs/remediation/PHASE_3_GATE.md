@@ -57,6 +57,12 @@ Gruppevis (`vitest run <katalog>/`, som `nobody`, ekte embedded Postgres). **Tot
 6. Sensitivitetsklassifiseringen er mønster-/metadatabasert; ukjente formater og indirekte omtaler kan slippe gjennom.
 7. Q-47 (Tobias): DEFERRED-listen, SECRET_RESTRICTED vs PRIVATE for helse/finans, `JARVIS_DESTINATION_HOST_ALLOWLIST`, roter Infisical-nøklene som ble limt inn i chat.
 
+## 5b. Runtime-observasjon (NAS, 2026-10-03, observert via Tobias sine utskrifter)
+
+- **Observert:** `main` `9177ded` (#227) bygget og startet; `migrate` Exited (ok), `migrations_complete`; `action_confirmations` og `telegram_poll_state` finnes (`to_regclass`); `/health` ok; api `healthy`; Telegram-token og chat-id er satt (kun telling, ikke verdier).
+- **Feil funnet i drift, ikke av CI:** `local-worker-1` gikk i restart-loop med `ToolManifestViolationError` («tildelt flate … men ikke registrert» for `memory.*`/`executive.get_capability_status`). Årsak: worker har et delvis register. Rettet i #229 (`ignoreUnregisteredGrants` i `worker-main.ts`, test i `part3-tool-manifest.test.ts`). Etter redeploy på `917c80f`: worker `Up`, `jarvis-worker started`, ingen `violation`; api `healthy`. Lærdom: ingen test starter `worker-main.ts` – oppstartsvakter bør ha en røyktest (ikke gjort).
+- **IKKE observert:** «Bekreftelser»-panelet i dashbordet, step-up fra ekte dashbord-grant (`signed`/`web`-antakelsen), klasse D-varsling via Telegram, sensitivitetsrutingen i ekte chat, jobb-`allowed_tools` i ekte kø, `JARVIS_DESTINATION_HOST_ALLOWLIST` (#228 ikke merget; variabelen når ikke api før den er det).
+
 ## 6. Neste
 
 Del 4 (idempotens, eksterne sideeffekter, finansintegritet) startes IKKE før Tobias ber om det. Uavhengig arkitekt-review av denne grenen er ikke gjort.
