@@ -453,7 +453,8 @@ for (const tool of firstWaveTools({
 // Hele registeret (`allMeshTools()`) eksponeres ALDRI for modellen.
 const modelToolSurface = resolveModelToolSurface(toolGateway, { onlyRegistered: true });
 const toolManifest = buildToolManifest(toolGateway.list());
-assertManifestInvariants(toolManifest);
+// Workeren registrerer ikke chat-flatenes verktøy (memory/executive) - de er bare tildelt flater, og `modelToolSurface` er onlyRegistered. Uten dette krasjer workeren ved oppstart.
+assertManifestInvariants(toolManifest, { ignoreUnregisteredGrants: true });
 // Systemidentitet med unik sesjons-id per oppstart (ingen falsk fast `sess-worker`).
 const workerIdentity = systemIdentity(owner, "worker", { channel: "api" });
 toolGateway.setClassDNotifier(telegramClassDNotifier({

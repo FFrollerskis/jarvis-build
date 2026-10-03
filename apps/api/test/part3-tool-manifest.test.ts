@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "@jarvis/executive";
 import { GovernanceTransport, governanceToolDefinitions } from "@jarvis/governance";
@@ -185,5 +187,19 @@ describe("JARVIS-024 (strukturell invariant): ingen kontroll-/hemmelighets-/iden
         expect(entry?.effect, `${surface}: ${g.tool_id}.${g.action}`).toBe("read");
       }
     }
+  });
+});
+
+describe("worker-oppstart: delvis register (uten memory/executive) skal ikke krasje manifest-vakten", () => {
+  const partial = buildToolManifest(defs.filter((d) => d.tool_id !== "memory" && d.tool_id !== "executive"));
+  it("uten flagg feiler vakten på tildelte men uregistrerte flate-handlinger (API må ha dem)", () => {
+    expect(() => assertManifestInvariants(partial)).toThrow(ToolManifestViolationError);
+  });
+  it("med ignoreUnregisteredGrants (workeren) består den - øvrige invarianter gjelder fortsatt", () => {
+    expect(() => assertManifestInvariants(partial, { ignoreUnregisteredGrants: true })).not.toThrow();
+  });
+  it("worker-main.ts bruker flagget", () => {
+    const src = readFileSync(fileURLToPath(new URL("../src/worker-main.ts", import.meta.url)), "utf8");
+    expect(src).toMatch(/assertManifestInvariants\(toolManifest, \{ ignoreUnregisteredGrants: true \}\)/);
   });
 });
