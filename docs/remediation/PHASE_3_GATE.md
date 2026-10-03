@@ -55,7 +55,7 @@ Gruppevis (`vitest run <katalog>/`, som `nobody`, ekte embedded Postgres). **Tot
 4. `delegate_code_task` er fortsatt fryst fra chat; policy-/budsjettstyrt delegering er ikke bygget (kun sensitivitetsregelen).
 5. **Ikke runtime-verifisert:** NAS-redeploy, live leverandør-postconditions (Drive/GitHub/Docker readback mot ekte API), Telegram-varsling av klasse D, step-up fra ekte dashbord-grant (antakelse: dashbord-grant er `signed`/`web` – må sjekkes ved første bruk), migrasjon 065/066 på NAS.
 6. Sensitivitetsklassifiseringen er mønster-/metadatabasert; ukjente formater og indirekte omtaler kan slippe gjennom.
-7. Q-47 (Tobias): DEFERRED-listen, SECRET_RESTRICTED vs PRIVATE for helse/finans, `JARVIS_DESTINATION_HOST_ALLOWLIST`, roter Infisical-nøklene som ble limt inn i chat.
+7. Q-47 (Tobias): DEFERRED-listen, `JARVIS_DESTINATION_HOST_ALLOWLIST`, roter Infisical-nøklene som ble limt inn i chat. **Besvart (D-378):** helse/finans er `SECRET_RESTRICTED` (lokal modell, usladdet; hemmeligheter sladdes fortsatt). Ikke verifisert: at en lokal modell er konfigurert på NAS.
 
 ## 5b. Runtime-observasjon (NAS, 2026-10-03, observert via Tobias sine utskrifter)
 
