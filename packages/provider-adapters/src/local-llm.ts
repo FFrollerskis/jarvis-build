@@ -64,6 +64,17 @@ export function normalizeLocalLlmBaseUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "");
 }
 
+/**
+ * D-385: tenkemodeller (f.eks. Qwen3 via Ollama) kan levere resonneringen som `<think>...</think>` INNE i `content`. Den skal aldri nå
+ * eieren (chat/tale) eller bli lagret som svar. Fjerner lukkede blokker og en åpen blokk uten avslutning (avkuttet på `max_tokens`).
+ */
+export function stripThinking(text: string): string {
+  return text
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<think>[\s\S]*$/i, "")
+    .trim();
+}
+
 export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
   readonly name: string;
   private readonly chatCompletionsUrl: string | undefined;
@@ -72,7 +83,13 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
     private readonly baseUrl: string | undefined = process.env["LOCAL_LLM_BASE_URL"],
     readonly model: string = envOrDefault("LOCAL_LLM_MODEL", "local-model"),
     private readonly timeoutMs: number = envPositiveInt("JARVIS_MODEL_TIMEOUT_MS", 120_000),
-    name: string = "local_llm"
+    name: string = "local_llm",
+    /**
+     * D-385: `"off"` sender `reasoning_effort: "none"` (Ollama sin OpenAI-kompatible rute) slik at tenkemodeller ikke bruker `max_tokens`
+     * på resonnering (tale har 320 tokens - hele budsjettet kan ellers gå til «tenking» og gi tomt svar). Av som standard: uendret
+     * oppførsel for modeller/servere uten tenking. Styres av `JARVIS_LOCAL_LLM_THINKING=off`.
+     */
+    private readonly thinking: "off" | "default" = process.env["JARVIS_LOCAL_LLM_THINKING"] === "off" ? "off" : "default"
   ) {
     this.name = name;
     this.chatCompletionsUrl = baseUrl ? `${normalizeLocalLlmBaseUrl(baseUrl)}/v1/chat/completions` : undefined;
@@ -132,6 +149,7 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
           stream: false,
           messages,
           max_tokens: request.max_tokens ?? 1024,
+          ...(this.thinking === "off" ? { reasoning_effort: "none" } : {}),
           ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
           ...(request.tools?.length
             ? {
@@ -168,7 +186,7 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
       throw new ProviderError(this.name, "invalid_response", `${this.name}_invalid_response`);
     }
     const message = body.choices[0]?.message;
-    const text = message?.content ?? "";
+    const text = stripThinking(message?.content ?? "");
     if (text) onToken?.(text);
     const toolCalls = (message?.tool_calls ?? []).map((c) => this.parseToolCall(c.id, c.function.name, c.function.arguments));
     let structured: unknown;
