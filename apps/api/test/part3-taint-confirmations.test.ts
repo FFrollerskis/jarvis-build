@@ -4,7 +4,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { IdentityContext } from "@jarvis/contracts";
+import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import { ConfirmationStore, createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import {
@@ -293,7 +293,7 @@ describe("data-envelope bevarer trust", () => {
 });
 
 describe("D-382: eierens godkjenning UTFØRER kallet (approveAndTake) - bundet, engangs, fra hvilken som helst av eierens enheter", () => {
-  const actCall = { tool_id: "todoist", action: "create_task", parameters: { content: "kjøp melk", tenant_id: TENANT } as Record<string, never> };
+  const actCall = { tool_id: "todoist", action: "create_task", parameters: { content: "kjøp melk", tenant_id: TENANT } as Record<string, JsonValue> };
 
   it("pending med lagrede parametre -> approveAndTake gir nøyaktig kallet, én gang; deretter null", async () => {
     const first = await store.checkAndConsume(actCall, identity, ["owner_action_tier"]);
@@ -315,17 +315,17 @@ describe("D-382: eierens godkjenning UTFØRER kallet (approveAndTake) - bundet, 
   });
 
   it("en annen person, en avvist, en utløpt eller en manipulert bekreftelse kan aldri tas ut", async () => {
-    const pending = await store.checkAndConsume({ ...actCall, parameters: { content: "annen", tenant_id: TENANT } as never }, identity, ["owner_action_tier"]);
+    const pending = await store.checkAndConsume({ ...actCall, parameters: { content: "annen", tenant_id: TENANT } }, identity, ["owner_action_tier"]);
     const id = (pending as { confirmation_id: string }).confirmation_id;
     expect(await store.approveAndTake({ tenant_id: TENANT, person_id: "person-annen", device_id: "dev-x" }, id)).toBeNull();
     // Manipulert: parametrene endres i databasen etter at eieren «så» dem -> bindingen matcher ikke.
     await admin.query("UPDATE action_confirmations SET parameters = $2 WHERE confirmation_id = $1", [id, JSON.stringify({ content: "slett alt", tenant_id: TENANT })]);
     expect(await store.approveAndTake(identity, id)).toBeNull();
-    const rejected = await store.checkAndConsume({ ...actCall, parameters: { content: "nei", tenant_id: TENANT } as never }, identity, ["owner_action_tier"]);
+    const rejected = await store.checkAndConsume({ ...actCall, parameters: { content: "nei", tenant_id: TENANT } }, identity, ["owner_action_tier"]);
     const rid = (rejected as { confirmation_id: string }).confirmation_id;
     expect(await store.decide(identity, rid, "reject")).toBe(true);
     expect(await store.approveAndTake(identity, rid)).toBeNull();
-    const old = await store.checkAndConsume({ ...actCall, parameters: { content: "gammel", tenant_id: TENANT } as never }, identity, ["owner_action_tier"]);
+    const old = await store.checkAndConsume({ ...actCall, parameters: { content: "gammel", tenant_id: TENANT } }, identity, ["owner_action_tier"]);
     const oid = (old as { confirmation_id: string }).confirmation_id;
     nowMs += 6 * 60_000;
     await admin.query("UPDATE action_confirmations SET expires_at = now() - interval '1 minute' WHERE confirmation_id = $1", [oid]);
