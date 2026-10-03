@@ -483,4 +483,32 @@ describe("D-106 HOST-FIX: automatisk høy-innvirkning-klassifisering trigger Cou
     await buildEngine({ onComplete: (i) => (captured = i), memory: mem(["personal"], ["special"]) }).handle(identity, "hva sa jeg om det?");
     expect(captured?.sensitivity).toBe("SECRET_RESTRICTED");
   });
+  /** D-379: SECRET_RESTRICTED går kun til lokal modell uten verktøykall - ellers feiler selv «hei» lukket (observert på NAS). */
+  it("X (D-379): SECRET_RESTRICTED-tur kjøres uten verktøy (ingen completeWithTools), men sensitiviteten forblir SECRET_RESTRICTED", async () => {
+    let captured: CompleteInput | undefined;
+    let withToolsCalled = false;
+    const pool = fakePool();
+    const gateway = {
+      complete: async (input: CompleteInput) => {
+        captured = input;
+        return { text: "modellsvar", usage: { input_tokens: 1, output_tokens: 1 }, provider: "gemma_local", model: "m" };
+      },
+      stream: async () => { throw new Error("stream ikke forventet"); },
+      completeWithTools: async () => { withToolsCalled = true; throw new Error("verktøy skal ikke brukes for SECRET_RESTRICTED"); }
+    } as unknown as ModelGateway;
+    const tool = { name: "read_tasks", description: "x", input_schema: { type: "object", properties: {}, additionalProperties: false } };
+    const engine = new ConversationEngine({
+      messages: new MessageStore(pool), context: new ContextBuilder(pool), gateway, tasks: fakeTasks, worker: fakeWorker,
+      trace: new MemoryTraceSink(),
+      memory: {
+        contextFor: async () => "- noe [kilde: x:1]",
+        contextWithMeta: async () => ({ text: "Relevant minne (med kilde):\n- noe [kilde: x:1]", spaces: ["health"], sensitivities: ["normal"] })
+      },
+      tools: { definitions: [tool], all: [tool], executorFor: () => ({ execute: async () => { throw new Error("ikke brukt"); } }) }
+    } as unknown as ConstructorParameters<typeof ConversationEngine>[0]);
+    const out = await engine.handle(identity, "hei");
+    expect(out.reply).toBe("modellsvar");
+    expect(withToolsCalled).toBe(false);
+    expect(captured?.sensitivity).toBe("SECRET_RESTRICTED");
+  });
 });
