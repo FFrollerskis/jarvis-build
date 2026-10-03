@@ -180,3 +180,6 @@ export const CHAT_READ_TIER: ReadonlyArray<{ readonly tool_id: string; readonly 
   { tool_id: "vercel", action: "read_deployments" },
   { tool_id: "whatsapp", action: "get_phone_number_info" }
 ];
+
+/** `tool_id.action`-nøkler for rask oppslag. */
+export const CHAT_READ_TIER_KEYS: ReadonlySet<string> = new Set(CHAT_READ_TIER.map((g) => `${g.tool_id}.${g.action}`));

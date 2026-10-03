@@ -54,7 +54,7 @@ import {
 } from "@jarvis/memory";
 import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport,
-  GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, assertManifestInvariants, buildToolManifest, memoryToolDefinitions, selectSurfaceTools,
+  CHAT_ACT_TIER, CHAT_READ_TIER, GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, assertManifestInvariants, buildToolManifest, describeSurfaceCatalog, memoryToolDefinitions, selectSurfaceTools,
   MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, resolveModelToolSurface, PgGithubRateLimitStore,
   PgTelegramOffsetStore, TelegramCommandPoller, createTurnContext, jobIdentityFor, telegramClassDNotifier, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
@@ -843,7 +843,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // `situations`/`executive`, ingen parallell registreringsvei.
     additionalTools: [
       ...situationsToolDefinitions(new SituationsTransport(situationEngine, situationDomainPauses)),
-      ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, { modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES] }))),
+      ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, { modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES, ...CHAT_READ_TIER, ...CHAT_ACT_TIER] }))),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten
       // av eier-autoritets-/session-grant-mønstrene i denne filen - IKKE en ny,
@@ -874,7 +874,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // lenger koblet til noen aktiv flate. Chat, tale, Telegram og executive-jobber
   // får KUN det eksplisitte lese-minimumssettet (`MODEL_SURFACE_ALLOWLIST`);
   // oppstarten feiler lukket hvis noe i flaten ikke er klasse A / ren lesing.
-  const modelToolSurface = resolveModelToolSurface(toolGateway, { includeChatReadTier: true });
+  const modelToolSurface = resolveModelToolSurface(toolGateway, { includeChatReadTier: true, includeChatActTier: true });
   // Del 3: sentralt manifest avledet fra ALLE registrerte handlinger. Bruddet er en oppstartsfeil (fail closed): ingen modellflate med
   // send/pay/delete/control, ingen klasse B/A for utgående handlinger, ingen eier-eksklusive navnerom på en flate.
   const toolManifest = buildToolManifest(toolGateway.list());
@@ -998,6 +998,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         turn && process.env["JARVIS_MEMORY_AUTO_APPROVE"] === "false" ? { ...turn, user_message: "" } : turn,
         { manifest: toolManifest, confirmations: confirmationStore }
       ),
+      // D-383: Charlie vet alltid hvilke tjenester som finnes på flaten (ikke bare de skjemaene som er vedlagt denne runden).
+      catalog: (surface) => describeSurfaceCatalog(modelToolSurface, surface).text,
       select: ({ surface, text }) => {
         const selection = selectSurfaceTools(surface, text, modelToolSurface);
         return {

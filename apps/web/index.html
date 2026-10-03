@@ -4,34 +4,98 @@
 <meta charset="utf-8">
 <!--JARVIS_OWNER_META-->
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Jarvis</title>
+<title>Charlie · Samtale</title>
 <style>
-  :root { color-scheme: dark; }
-  body { font-family: system-ui, sans-serif; background:#0d1117; color:#e6edf3; margin:0;
-         display:flex; flex-direction:column; height:100vh; }
-  header { padding:10px 16px; background:#161b22; font-weight:600; }
-  header small { color:#8b949e; font-weight:400; margin-left:8px; }
-  #log { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:8px; }
-  .msg { max-width:70%; padding:8px 12px; border-radius:10px; white-space:pre-wrap; }
-  .user { align-self:flex-end; background:#1f6feb; }
-  .jarvis { align-self:flex-start; background:#21262d; }
-  .meta { align-self:flex-start; color:#8b949e; font-size:12px; }
-  form { display:flex; gap:8px; padding:12px 16px; background:#161b22; }
-  input { flex:1; background:#0d1117; color:#e6edf3; border:1px solid #30363d;
-          border-radius:8px; padding:10px; font-size:15px; }
-  button { background:#238636; color:#fff; border:0; border-radius:8px; padding:0 18px; cursor:pointer; }
-  #enroll { display:none; padding:12px 16px; background:#161b22; border-top:1px solid #30363d; }
-  #enroll p { margin:0 0 8px; color:#8b949e; font-size:13px; }
-  #enroll code { color:#e6edf3; background:#0d1117; padding:2px 5px; border-radius:4px; }
-  #enroll form { padding:0; background:none; }
+  /*
+   * D-382 (Tobias direkte i chat: "bygg ui bedre ... hele dash voice og chat ser bedre ut"): samme design-tokens som
+   * dashboard.html/command.html (D-239/D-361). Identitets-/grant-logikken under er UENDRET (Ed25519 via Web Crypto, D-131/D-252/D-347).
+   * Nytt: meldingsbobler med lett markdown, skrive-indikator, verktøystatus-chip, hurtigvalg, og bekreftelseskort (D-382) -
+   * «Godkjenn og utfør» går til grant-ruten /confirmations (serveren utfører), aldri til modellen.
+   */
+  :root {
+    color-scheme: dark;
+    --bg: #05070c; --panel: #0c121e; --panel-2: #101a2b; --border: #1c2942; --text: #e9eefb; --text-dim: #7e8bab;
+    --accent: #22d3ee; --accent-strong: #67e8f9; --accent-glow: rgba(34,211,238,0.35);
+    --ok: #6ee7b7; --ok-bg: #0c2a20; --warn: #fbbf24; --warn-bg: #3a2a06; --danger: #fb7185; --danger-bg: #3d1220; --info: #93c5fd;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { font-family: -apple-system, "Segoe UI", "Inter", Roboto, system-ui, sans-serif; margin:0; display:flex; flex-direction:column; height:100vh;
+         background: radial-gradient(ellipse 900px 500px at 50% -10%, rgba(34,211,238,0.10), transparent 60%), var(--bg); background-attachment: fixed;
+         color: var(--text); -webkit-font-smoothing: antialiased; }
+  header { padding:12px 18px; background: rgba(12,18,30,0.82); backdrop-filter: blur(10px); border-bottom:1px solid #16203380;
+           font-weight:600; display:flex; align-items:center; gap:10px; }
+  header .dot { width:8px; height:8px; border-radius:50%; background: var(--accent); box-shadow: 0 0 0 0 var(--accent-glow); animation: pulse 2.2s ease-in-out infinite; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 var(--accent-glow); } 70% { box-shadow: 0 0 0 7px rgba(34,211,238,0); } 100% { box-shadow: 0 0 0 0 rgba(34,211,238,0); } }
+  header small { color: var(--text-dim); font-weight:400; margin-left:4px; font-size:12px; }
+  #log { flex:1; overflow-y:auto; padding:18px 16px 8px; display:flex; flex-direction:column; gap:10px; scroll-behavior:smooth; }
+  #log > * { max-width: 820px; width:100%; margin-left:auto; margin-right:auto; }
+  .msg { display:flex; gap:10px; align-items:flex-end; }
+  .msg.user { flex-direction: row-reverse; }
+  .avatar { width:30px; height:30px; border-radius:50%; flex:none; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:800; letter-spacing:0.02em; }
+  .msg.jarvis .avatar { background: radial-gradient(circle at 35% 35%, rgba(103,232,249,0.95), rgba(34,211,238,0.4) 60%, #0c121e 100%); color:#022; box-shadow: 0 0 14px -4px var(--accent-glow); }
+  .msg.user .avatar { background: var(--panel-2); border:1px solid var(--border); color: var(--text-dim); }
+  .bubble { padding:10px 14px; border-radius:16px; line-height:1.5; font-size:15px; max-width: min(78%, 640px); white-space:pre-wrap; overflow-wrap:anywhere; }
+  .msg.user .bubble { background: linear-gradient(180deg, #1d4ed8, #1e40af); color:#fff; border-bottom-right-radius:4px; }
+  .msg.jarvis .bubble { background: var(--panel-2); border:1px solid var(--border); border-bottom-left-radius:4px; }
+  .msg.jarvis .bubble.error { border-color: rgba(251,113,133,0.5); background: var(--danger-bg); color:#fecdd3; }
+  .bubble b { font-weight:700; } .bubble code { background: rgba(0,0,0,0.35); border:1px solid var(--border); border-radius:5px; padding:1px 5px; font-size:13px; }
+  .bubble ul { margin:4px 0 2px; padding-left:18px; white-space:normal; } .bubble li { margin:2px 0; }
+  .meta { color: var(--text-dim); font-size:11px; padding-left:40px; margin-top:-4px; }
+  .typing { display:inline-flex; gap:4px; align-items:center; height:18px; }
+  .typing i { width:6px; height:6px; border-radius:50%; background: var(--accent); opacity:0.4; animation: blink 1.2s infinite; }
+  .typing i:nth-child(2) { animation-delay:0.2s; } .typing i:nth-child(3) { animation-delay:0.4s; }
+  @keyframes blink { 0%,80%,100% { opacity:0.25; transform: translateY(0); } 40% { opacity:1; transform: translateY(-2px); } }
+  .tool-chip { align-self:flex-start; margin-left:40px; font-size:12px; color: var(--accent-strong); background: rgba(34,211,238,0.08); border:1px solid rgba(34,211,238,0.25);
+               border-radius:999px; padding:3px 10px; display:inline-flex; gap:6px; align-items:center; }
+  .tool-chip::before { content:""; width:6px; height:6px; border-radius:50%; background: var(--accent); animation: pulse 1.6s infinite; }
+  /* D-382: bekreftelseskort - handlingen utføres av serveren når Tobias trykker Godkjenn. */
+  .confirm { margin-left:40px; background: var(--panel); border:1px solid rgba(251,191,36,0.45); border-left:3px solid var(--warn); border-radius: var(--radius);
+             padding:12px 14px; max-width: min(78%, 640px); }
+  .confirm .title { font-weight:700; font-size:13px; color: var(--warn); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:4px; }
+  .confirm .what { font-size:14px; margin-bottom:8px; }
+  .confirm .what code { font-size:12px; }
+  .confirm .actions { display:flex; gap:8px; flex-wrap:wrap; }
+  .confirm button { border:0; border-radius:9px; padding:7px 14px; font-weight:700; cursor:pointer; font-size:13px; }
+  .confirm button.approve { background: linear-gradient(180deg, var(--accent-strong), var(--accent)); color:#022; }
+  .confirm button.reject { background: var(--panel-2); color: var(--text); border:1px solid var(--border); }
+  .confirm button:disabled { opacity:0.5; cursor:default; }
+  .confirm .result { font-size:12px; color: var(--text-dim); margin-top:8px; }
+  .confirm.done { border-color: rgba(110,231,183,0.45); border-left-color: var(--ok); } .confirm.done .title { color: var(--ok); }
+  .confirm.rejected { border-color: var(--border); border-left-color: var(--text-dim); opacity:0.75; } .confirm.rejected .title { color: var(--text-dim); }
+  #suggestions { display:flex; gap:8px; flex-wrap:wrap; padding:0 16px 8px; max-width:852px; margin:0 auto; width:100%; }
+  #suggestions button { background: var(--panel); border:1px solid var(--border); color: var(--text-dim); border-radius:999px; padding:6px 12px; font-size:12px; cursor:pointer; }
+  #suggestions button:hover { border-color: var(--accent); color: var(--accent-strong); }
+  form#form { display:flex; gap:8px; padding:12px 16px 14px; background: rgba(12,18,30,0.82); backdrop-filter: blur(10px); border-top:1px solid #16203380; }
+  form#form > * { max-width:852px; }
+  #input { flex:1; background: var(--bg); color: var(--text); border:1px solid var(--border); border-radius:12px; padding:11px 14px; font-size:15px; font-family:inherit;
+           resize:none; min-height:44px; max-height:160px; line-height:1.4; }
+  #input:focus { outline:none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(34,211,238,0.15); }
+  form#form button { background: linear-gradient(180deg, var(--accent-strong), var(--accent)); color:#022; border:0; border-radius:12px; padding:0 20px; cursor:pointer; font-weight:700;
+                     box-shadow: 0 0 0 1px rgba(34,211,238,0.3), 0 4px 14px -4px var(--accent-glow); }
+  form#form button:disabled { background: var(--panel-2); color: var(--text-dim); box-shadow:none; cursor:default; }
+  #enroll { display:none; padding:12px 16px; background: var(--panel); border-top:1px solid var(--border); }
+  #enroll p { margin:0 0 8px; color: var(--text-dim); font-size:13px; }
+  #enroll code { color: var(--text); background: var(--bg); padding:2px 5px; border-radius:4px; }
+  #enroll form { padding:0; background:none; border:0; display:flex; gap:8px; }
+  #enroll input { flex:1; background: var(--bg); color: var(--text); border:1px solid var(--border); border-radius:8px; padding:10px; font-size:15px; }
+  #enroll button { background: var(--accent); color:#022; border:0; border-radius:8px; padding:0 18px; cursor:pointer; font-weight:700; }
+  @media (max-width: 560px) { .bubble, .confirm { max-width: 88%; } #log { padding:14px 10px 6px; } }
 </style>
 </head>
 <body>
-<header>Jarvis <small>fase 3 tekst-MVP · «hjelp» for kommandoer</small></header>
+<header><span class="dot"></span>Charlie <small>spør, be om noe, eller si «hva kan du?»</small></header>
 <div id="log"></div>
+<div id="suggestions">
+  <button type="button" data-suggest="Hva skjer i dag?">Hva skjer i dag?</button>
+  <button type="button" data-suggest="Sjekk e-posten min">Sjekk e-posten</button>
+  <button type="button" data-suggest="Sjekk saldoen min">Sjekk saldoen</button>
+  <button type="button" data-suggest="Hvilke tjenester og verktøy kan du bruke?">Hva kan du?</button>
+</div>
 <form id="form">
-  <input id="input" placeholder="Snakk med Jarvis …" autocomplete="off" autofocus>
-  <button>Send</button>
+  <textarea id="input" placeholder="Snakk med Charlie … (Enter sender, Shift+Enter ny linje)" autocomplete="off" autofocus rows="1"></textarea>
+  <button id="send">Send</button>
 </form>
 <div id="enroll">
   <p>Denne enheten er ikke innrullert ennå. Kjør på maskinen som eier Jarvis:
@@ -45,6 +109,8 @@
   const log = document.getElementById("log");
   const form = document.getElementById("form");
   const input = document.getElementById("input");
+  const sendBtn = document.getElementById("send");
+  const suggestions = document.getElementById("suggestions");
   const enrollPanel = document.getElementById("enroll");
   const enrollForm = document.getElementById("enroll-form");
   const enrollTicket = document.getElementById("enroll-ticket");
@@ -117,14 +183,144 @@
   /** Enhetsnøkkelen, holdt for å kunne re-autorisere når grantet utløper. */
   let deviceKey = null;
 
-  function add(cls, text) {
-    const el = document.createElement("div");
-    el.className = "msg " + cls;
-    el.textContent = text;
-    log.appendChild(el);
-    log.scrollTop = log.scrollHeight;
-    return el;
+  function escapeHtml(text) {
+    return String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   }
+
+  /**
+   * Lett, TRYGG markdown for Charlie sine svar: teksten HTML-escapes FØRST, deretter gjenkjennes kun **fet**, `kode` og
+   * «- »-punktlister. Ingen rå HTML fra modellen når noen gang DOM-en.
+   */
+  function renderRich(text) {
+    const esc = escapeHtml(text);
+    const lines = esc.split("\n");
+    let html = "";
+    let inList = false;
+    for (const line of lines) {
+      const m = line.match(/^\s*[-•*]\s+(.*)$/);
+      if (m) {
+        if (!inList) { html += "<ul>"; inList = true; }
+        html += "<li>" + m[1] + "</li>";
+      } else {
+        if (inList) { html += "</ul>"; inList = false; }
+        html += (html && !html.endsWith("</ul>") ? "\n" : "") + line;
+      }
+    }
+    if (inList) html += "</ul>";
+    return html
+      .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+      .replace(/`([^`\n]+)`/g, "<code>$1</code>");
+  }
+
+  function scrollDown() { log.scrollTop = log.scrollHeight; }
+
+  /** Legger til en melding. Returnerer boble-elementet (tekst settes via .textContent / setRich). */
+  function add(cls, text) {
+    const row = document.createElement("div");
+    row.className = "msg " + cls;
+    const avatar = document.createElement("div");
+    avatar.className = "avatar";
+    avatar.textContent = cls === "user" ? "T" : "C";
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.textContent = text;
+    row.appendChild(avatar);
+    row.appendChild(bubble);
+    log.appendChild(row);
+    scrollDown();
+    return bubble;
+  }
+  function setTyping(bubble) {
+    bubble.innerHTML = '<span class="typing"><i></i><i></i><i></i></span>';
+  }
+  function setRich(bubble, text) {
+    bubble.innerHTML = renderRich(text);
+    scrollDown();
+  }
+  function addMeta(text) {
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = text;
+    log.appendChild(meta);
+    scrollDown();
+  }
+  const TOOL_LABELS = [
+    [/^calendar/, "Sjekker kalenderen"], [/^email|^microsoft_outlook/, "Ser på e-posten"], [/^github/, "Sjekker GitHub"], [/^memory|search_my_memory/, "Leter i minnet"],
+    [/^finance/, "Sjekker økonomien"], [/^(brave_search|tavily|exa)/, "Søker på nettet"], [/^(notion|drive|dropbox|onedrive|google_sheets)/, "Ser i dokumentene"],
+    [/^(todoist|trello|jira|linear)/, "Sjekker oppgavene"], [/^(slack|discord)/, "Sjekker meldingene"], [/check_my_capabilities|^executive/, "Sjekker egne evner"]
+  ];
+  function toolLabel(name) {
+    for (const [re, label] of TOOL_LABELS) if (re.test(name)) return label + " …";
+    return "Jobber med saken …";
+  }
+  function showToolChip(name) {
+    const chip = document.createElement("div");
+    chip.className = "tool-chip";
+    chip.textContent = toolLabel(name);
+    log.appendChild(chip);
+    scrollDown();
+    return chip;
+  }
+
+  /**
+   * D-382: bekreftelseskort rett i samtalen. «Godkjenn og utfør» går til grant-ruten /confirmations - SERVEREN utfører
+   * handlingen (deterministisk, med eierens grant-identitet), modellen får aldri kallet tilbake. Teksten her er kun visning.
+   */
+  function toolHuman(tool) {
+    const [id, action] = String(tool || "").split(".");
+    const labels = { create: "opprette", update: "oppdatere", send: "sende", notify: "sende melding via", sync: "synkronisere", trash: "flytte til papirkurv i", close: "lukke i", reopen: "gjenåpne i", append: "legge til rad i", move: "flytte i", rename: "gi nytt navn i", reply: "svare i", assign: "tildele i", set: "endre i", add: "legge til i", comment: "kommentere i", cancel: "avbryte i", pause: "pause i", resume: "gjenoppta i" };
+    const verb = Object.keys(labels).find((k) => (action || "").startsWith(k));
+    return (verb ? labels[verb] + " " : "kjøre " + (action || "") + " i ") + (id || "").replace(/_/g, " ");
+  }
+  function addConfirmation(c) {
+    const card = document.createElement("div");
+    card.className = "confirm";
+    card.dataset.confirmId = c.confirmation_id;
+    card.innerHTML =
+      '<div class="title">Venter på din godkjenning</div>' +
+      '<div class="what">Charlie vil <b>' + escapeHtml(toolHuman(c.tool)) + "</b> <code>" + escapeHtml(c.tool || "") + "</code></div>" +
+      '<div class="actions"><button type="button" class="approve">Godkjenn og utfør</button><button type="button" class="reject">Avvis</button></div>' +
+      '<div class="result"></div>';
+    log.appendChild(card);
+    scrollDown();
+  }
+  async function decideConfirmation(card, decision) {
+    const buttons = card.querySelectorAll("button");
+    buttons.forEach((b) => { b.disabled = true; });
+    const result = card.querySelector(".result");
+    result.textContent = decision === "approve" ? "Utfører …" : "Avviser …";
+    try {
+      const active = await ensureGrant();
+      const res = await fetch("/confirmations", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ grant_token: active.grant_token, action: "decide", parameters: { confirmation_id: card.dataset.confirmId, decision } })
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.status === 404) { result.textContent = "Bekreftelsen er ikke lenger gyldig (utløpt eller allerede avgjort)."; card.classList.add("rejected"); return; }
+      if (!res.ok && !(body && body.data && body.data.executed)) throw new Error((body && (body.reason || body.error)) || String(res.status));
+      if (decision === "reject") { result.textContent = "Avvist."; card.classList.add("rejected"); card.querySelector(".title").textContent = "Avvist"; return; }
+      const r = (body.data && body.data.result) || {};
+      if (r.ok === false) {
+        result.textContent = "Godkjent, men utførelsen ble stoppet: " + (r.reason || "ukjent årsak") + ".";
+        card.classList.add("rejected");
+        card.querySelector(".title").textContent = "Stoppet";
+      } else {
+        result.textContent = "Utført" + (r.external_id ? " · ref " + r.external_id : "") + ".";
+        card.classList.add("done");
+        card.querySelector(".title").textContent = "Utført";
+      }
+    } catch (err) {
+      result.textContent = "Feil: " + err.message;
+      buttons.forEach((b) => { b.disabled = false; });
+    }
+  }
+  log.addEventListener("click", (e) => {
+    const btn = e.target.closest(".confirm button");
+    if (!btn) return;
+    const card = btn.closest(".confirm");
+    void decideConfirmation(card, btn.classList.contains("approve") ? "approve" : "reject");
+  });
 
   function base64FromBuffer(buffer) {
     const bytes = new Uint8Array(buffer);
@@ -250,7 +446,7 @@
 
   const sessionReady = ensureGrant();
   sessionReady.catch((err) => {
-    add("jarvis", "Autorisering feilet: " + err.message);
+    add("jarvis", "Autorisering feilet: " + err.message).classList.add("error");
   });
 
   /**
@@ -268,7 +464,7 @@
       await ensureGrant();
       add("jarvis", "Enheten er innrullert.");
     } catch (err) {
-      add("jarvis", "Innrullering feilet: " + err.message);
+      add("jarvis", "Innrullering feilet: " + err.message).classList.add("error");
     }
   }
 
@@ -297,21 +493,45 @@
   }
   tryAutoEnrollFromUrl();
 
+  // Tekstfelt: Enter sender, Shift+Enter gir ny linje; høyden følger innholdet.
+  function autosize() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 160) + "px"; }
+  input.addEventListener("input", autosize);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+  });
+  suggestions.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-suggest]");
+    if (!btn) return;
+    input.value = btn.dataset.suggest;
+    form.requestSubmit();
+  });
+
+  let busy = false;
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
+    if (busy) return;
     const message = input.value.trim();
     if (!message) return;
     input.value = "";
+    autosize();
+    suggestions.style.display = "none";
     add("user", message);
-    const reply = add("jarvis", "…");
+    const reply = add("jarvis", "");
+    setTyping(reply);
+    busy = true;
+    sendBtn.disabled = true;
     let active;
     try {
       // Fornyer automatisk hvis grantet er i ferd med å utløpe - se ensureGrant().
       active = await ensureGrant();
     } catch (err) {
       reply.textContent = "Autorisering feilet: " + err.message;
+      reply.classList.add("error");
+      busy = false; sendBtn.disabled = false;
       return;
     }
+    let text = "";
+    let chip = null;
     try {
       // D-131 funn 1: KUN grant-tokenet. `tenant_id`/`memory_space`/`channel`/
       // `session_id` sendes ikke lenger - serveren leser dem ut av grant-raden,
@@ -321,8 +541,7 @@
         headers: { "content-type": "application/json", accept: "text/event-stream" },
         body: JSON.stringify({ grant_token: active.grant_token, message })
       });
-      if (!res.ok) { reply.textContent = "Feil: " + res.status + " " + await res.text(); return; }
-      reply.textContent = "";
+      if (!res.ok) { reply.textContent = "Feil: " + res.status + " " + await res.text(); reply.classList.add("error"); return; }
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -335,20 +554,25 @@
         for (const frame of frames) {
           const event = (frame.match(/^event: (.+)$/m) || [])[1];
           const data = JSON.parse((frame.match(/^data: (.+)$/m) || [])[1] || "{}");
-          if (event === "token") reply.textContent += data.token;
-          if (event === "error") reply.textContent = "Feil: " + (data.message || "ukjent feil");
+          if (event === "token") { text += data.token; setRich(reply, text); }
+          if (event === "tool_call") { if (chip) chip.remove(); chip = showToolChip(data.tool_name || ""); }
+          if (event === "error") { reply.textContent = "Feil: " + (data.message || "ukjent feil"); reply.classList.add("error"); }
           if (event === "done") {
-            if (!reply.textContent) reply.textContent = data.reply;
-            const meta = document.createElement("div");
-            meta.className = "meta";
-            meta.textContent = "rute: " + data.routed + " · sesjon: " + data.session_id +
-              (data.task_id ? " · jobb: " + data.task_id : "");
-            log.appendChild(meta);
+            if (chip) { chip.remove(); chip = null; }
+            if (!text) { text = data.reply || ""; setRich(reply, text); }
+            if (Array.isArray(data.confirmations)) data.confirmations.forEach(addConfirmation);
+            addMeta("rute: " + data.routed + (data.task_id ? " · jobb: " + data.task_id : ""));
           }
         }
       }
     } catch (err) {
       reply.textContent = "Nettverksfeil: " + err.message;
+      reply.classList.add("error");
+    } finally {
+      if (chip) chip.remove();
+      busy = false;
+      sendBtn.disabled = false;
+      input.focus();
     }
   });
 </script>

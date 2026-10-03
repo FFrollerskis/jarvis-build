@@ -1,5 +1,6 @@
 import { chatReadTierMeshTools, curatedReadOnlyMeshTools, type MeshToolMapping } from "./mesh-bridge.ts";
 import { CHAT_READ_TIER } from "./chat-read-tier.ts";
+import { CHAT_ACT_TIER } from "./chat-act-tier.ts";
 import { inferEffect } from "./tool-manifest.ts";
 import type { ToolGateway } from "./gateway.ts";
 
@@ -151,13 +152,43 @@ export function assertChatReadTier(
 }
 
 /**
+ * D-382: hvert par i handlingsnivået må være registrert som klasse B eller C med effekt write/send/delete, uten forbudt verktøy-id og
+ * uten eier-/minne-navnerom. Feiler lukket. (Selve bekreftelseskravet håndheves i `MeshToolExecutor`, låst av egen test.)
+ */
+export function assertChatActTier(
+  gateway: Pick<ToolGateway, "list">,
+  options: { allowUnregistered?: boolean } = {}
+): void {
+  const violations: string[] = [];
+  const registered = new Map(gateway.list().map((d) => [key(d.tool_id, d.action), d]));
+  const seen = new Set<string>();
+  for (const a of CHAT_ACT_TIER) {
+    const k = key(a.tool_id, a.action);
+    if (seen.has(k)) violations.push(`${k}: duplisert i handlingsnivået`);
+    seen.add(k);
+    if (FORBIDDEN_MODEL_TOOL_IDS.includes(a.tool_id)) violations.push(`${k}: forbudt verktøy-id`);
+    if (a.tool_id === "memory" || a.tool_id === "consent") violations.push(`${k}: eier-/minne-navnerom kan ikke stå i handlingsnivået`);
+    if (CHAT_READ_TIER.some((b) => b.tool_id === a.tool_id && b.action === a.action)) violations.push(`${k}: står allerede i lese-nivået`);
+    const def = registered.get(k);
+    if (!def) {
+      if (!options.allowUnregistered) violations.push(`${k}: ikke registrert i ToolGateway`);
+      continue;
+    }
+    if (def.capability_class !== "B" && def.capability_class !== "C") violations.push(`${k}: klasse ${def.capability_class}, kun B/C er tillatt i handlingsnivået`);
+    const effect = inferEffect(def.tool_id, def.action);
+    if (effect !== "write" && effect !== "send" && effect !== "delete") violations.push(`${k}: effekt «${effect}» er ikke tillatt i handlingsnivået`);
+  }
+  if (violations.length > 0) throw new ModelSurfaceViolationError(violations);
+}
+
+/**
  * Den aktive modellflaten for chat, tale, Telegram og executive-jobber.
  * Kaster `ModelSurfaceViolationError` ved oppstart hvis noe i flaten ikke er
  * ren lesing - oppstarten feiler lukket.
  */
 export function resolveModelToolSurface(
   gateway: Pick<ToolGateway, "list">,
-  options: { onlyRegistered?: boolean; includeChatReadTier?: boolean } = {}
+  options: { onlyRegistered?: boolean; includeChatReadTier?: boolean; includeChatActTier?: boolean } = {}
 ): MeshToolMapping[] {
   let mappings = curatedReadOnlyMeshTools();
   if (options.onlyRegistered) {
@@ -168,10 +199,16 @@ export function resolveModelToolSurface(
     mappings = mappings.filter((m) => registered.has(key(m.tool_id, m.action)));
   }
   assertReadOnlyModelSurface(gateway, mappings, { allowUnregistered: options.onlyRegistered === true });
+  let out = mappings;
   if (options.includeChatReadTier === true) {
     // D-381: kun api-prosessen (eierens chat) får lese-nivået; worker-jobber beholder minimumssettet.
     assertChatReadTier(gateway, { allowUnregistered: options.onlyRegistered === true });
-    return [...mappings, ...chatReadTierMeshTools(gateway.list(), CHAT_READ_TIER)];
+    out = [...out, ...chatReadTierMeshTools(gateway.list(), CHAT_READ_TIER, "read")];
   }
-  return mappings;
+  if (options.includeChatActTier === true) {
+    // D-382: handlingsnivået - skjemaet merkes tydelig for modellen; utførelse krever alltid eierens bekreftelse (executor).
+    assertChatActTier(gateway, { allowUnregistered: options.onlyRegistered === true });
+    out = [...out, ...chatReadTierMeshTools(gateway.list(), CHAT_ACT_TIER, "act")];
+  }
+  return out;
 }

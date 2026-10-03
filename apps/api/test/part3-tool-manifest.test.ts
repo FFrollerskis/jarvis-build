@@ -9,6 +9,7 @@ import {
   MIN_RISK_BY_EFFECT,
   OWNER_ONLY_NAMESPACES,
   SURFACES,
+  CHAT_ACT_TIER,
   CHAT_READ_TIER,
   SURFACE_TOOL_GRANTS,
   MemorySearchTransport,
@@ -38,7 +39,7 @@ function productionDefinitions(): ToolDefinition[] {
   });
 }
 
-const TIER_KEYS = new Set(CHAT_READ_TIER.map((g) => `${g.tool_id}.${g.action}`));
+const TIER_KEYS = new Set([...CHAT_READ_TIER, ...CHAT_ACT_TIER].map((g) => `${g.tool_id}.${g.action}`));
 const defs = productionDefinitions();
 const manifest = buildToolManifest(defs);
 const entries = [...manifest.values()];
@@ -112,10 +113,11 @@ describe("flater (surfaces)", () => {
   it("structural invariant: eier-eksklusive navnerom (kontroll, penger, infra, selvmod, samtykke) finnes ikke på NOEN flate", () => {
     for (const e of entries) {
       if (!OWNER_ONLY_NAMESPACES.has(e.tool_id)) continue;
-      // D-381: eneste unntak = ren LESING i chattens lese-nivå, og kun på web_chat (aldri tale/Telegram/bakgrunn).
+      // D-381/D-382: eneste unntak = chattens lese-/handlingsnivå, og kun på web_chat (aldri tale/Telegram/bakgrunn); aldri pay/control/D.
       if (TIER_KEYS.has(e.key)) {
         expect(e.surfaces, e.key).toEqual(["web_chat"]);
-        expect(e.effect, e.key).toBe("read");
+        expect(["read", "write", "send", "delete"], e.key).toContain(e.effect);
+        expect(e.risk, e.key).not.toBe("D");
       } else expect(e.surfaces, e.key).toEqual([]);
     }
     for (const key of [
@@ -176,7 +178,7 @@ describe("JARVIS-024 (strukturell invariant): ingen kontroll-/hemmelighets-/iden
     for (const surface of SURFACES) {
       for (const g of SURFACE_TOOL_GRANTS[surface]) {
         expect(`${g.tool_id}.${g.action}`, `${surface}: ${g.tool_id}.${g.action}`).not.toMatch(FORBIDDEN);
-        if (surface === "web_chat" && TIER_KEYS.has(`${g.tool_id}.${g.action}`)) continue; // D-381: lese-nivå (se over)
+        if (surface === "web_chat" && TIER_KEYS.has(`${g.tool_id}.${g.action}`)) continue; // D-381/D-382: lese-/handlingsnivå (se over)
         expect(OWNER_ONLY_NAMESPACES.has(g.tool_id), `${surface}: ${g.tool_id}`).toBe(false);
       }
     }

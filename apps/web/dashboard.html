@@ -1814,7 +1814,7 @@
         '<span class="pill">' + escapeHtml((c.tool_id || "") + "." + (c.action || "")) + "</span>" +
         '<div class="meta">' + escapeHtml(JSON.stringify(c.summary || {})) + "</div>" +
         '<div class="meta">Årsak: ' + escapeHtml((c.taint_reasons || []).join(", ")) + " · utløper " + escapeHtml(c.expires_at || "") + "</div>" +
-        '<button class="btn small" data-confirm-approve data-confirm-id="' + id + '">Bekreft</button> ' +
+        '<button class="btn small" data-confirm-approve data-confirm-id="' + id + '">Godkjenn og utfør</button> ' +
         '<button class="btn small" data-confirm-reject data-confirm-id="' + id + '">Avvis</button>' +
         "</div>";
     }).join("");
@@ -1835,9 +1835,14 @@
     if (!btn) return;
     btn.disabled = true;
     confirmationsResultEl.textContent = "";
+    // D-382: godkjenning UTFØRER handlingen i serveren (deterministisk, grant-autentisert) - resultatet vises her.
     confirmationsCall("decide", { confirmation_id: btn.dataset.confirmId, decision: approve ? "approve" : "reject" })
-      .then(() => {
-        confirmationsResultEl.textContent = approve ? "Bekreftet. Be Jarvis utføre handlingen på nytt (gjelder én gang)." : "Avvist.";
+      .then((data) => {
+        if (!approve) { confirmationsResultEl.textContent = "Avvist."; return loadConfirmations(); }
+        const r = (data && data.result) || {};
+        confirmationsResultEl.textContent = r.ok === false
+          ? "Godkjent, men utførelsen feilet: " + (r.reason || "ukjent")
+          : "Godkjent og utført" + (data && data.tool ? " (" + data.tool + ")" : "") + (r.external_id ? " · ref " + r.external_id : "") + ".";
         return loadConfirmations();
       })
       .catch((err) => { confirmationsResultEl.textContent = "Feil: " + err.message; btn.disabled = false; });
