@@ -393,6 +393,99 @@ describe("Del 3: hemmeligheter kommer aldri inn i minnet (siste forsvar)", () =>
   });
 });
 
+describe("D-373: motstrid og duplikater oppdages også når uttrekket velger ulike emnenavn", () => {
+  const scripted = (reply: Array<{ type: "relation" | "preference"; subject: string; content: string }>, seen: { hints?: unknown[] } = {}) => ({
+    async extract(_t: string, _i: IdentityContext, _tr: string, existing?: unknown[]) {
+      seen.hints = existing ?? [];
+      return reply.map((c) => ({ space: "personal" as const, confidence: 0.8, ...c }));
+    }
+  });
+  const withExtractor = (extractor: ReturnType<typeof scripted>) =>
+    new MemoryWriter(appPool, new LocalHashEmbedding(), extractor as never, policy);
+  const CONVERSATION: SourceRef = { kind: "conversation", ref: "sess-mem", trust: "trusted" };
+
+  it("betrodd kilde: eksisterende aktive minner sendes som hint; ubetrodd kilde får ALDRI hint", async () => {
+    const id = identity("personal");
+    await writer.apply(id, TRUSTED, { ...candidate("personal", "d373.hint.far", "Faren til testpersonen d373a heter Olav."), type: "relation" as const });
+    const seenTrusted: { hints?: unknown[] } = {};
+    await withExtractor(scripted([], seenTrusted)).ingestText(id, CONVERSATION, "snakk om d373a");
+    expect(JSON.stringify(seenTrusted.hints)).toContain("d373.hint.far");
+    const seenUntrusted: { hints?: unknown[] } = {};
+    await withExtractor(scripted([], seenUntrusted)).ingestText(id, UNTRUSTED, "snakk om d373a");
+    expect(seenUntrusted.hints).toEqual([]);
+  });
+
+  it("hint inneholder aldri karantene-/ubetrodde rader", async () => {
+    const id = identity("personal");
+    await writer.apply(id, UNTRUSTED, candidate("personal", "d373.karantene.rad", "Ubetrodd d373b påstand."));
+    const seen: { hints?: unknown[] } = {};
+    await withExtractor(scripted([], seen)).ingestText(id, CONVERSATION, "d373b");
+    expect(JSON.stringify(seen.hints)).not.toContain("d373.karantene.rad");
+  });
+
+  it("gjenbrukt emne gir versjonert OPPDATERING med motstrid markert og historikk bevart (Lindhagen -> Hansen)", async () => {
+    const id = identity("personal");
+    const first = await writer.apply(id, TRUSTED, { ...candidate("personal", "d373.far.navn", "Pappa heter Henrik Lindhagen d373c."), type: "relation" as const });
+    const out = await withExtractor(scripted([{ type: "relation", subject: "d373.far.navn", content: "Pappa heter Henrik Hansen d373c." }])).ingestText(id, CONVERSATION, "pappa heter Henrik Hansen d373c");
+    expect(out[0]).toMatchObject({ op: "UPDATE", memory_item_id: first.memory_item_id, conflict: true });
+    const row = await adminPool.query("SELECT content, has_conflict, version FROM memory_items WHERE memory_item_id = $1", [first.memory_item_id]);
+    expect(row.rows[0]).toMatchObject({ content: "Pappa heter Henrik Hansen d373c.", has_conflict: true, version: 2 });
+    const old = await adminPool.query("SELECT content FROM memory_versions WHERE memory_item_id = $1", [first.memory_item_id]);
+    expect(old.rows.map((r: { content: string }) => r.content)).toContain("Pappa heter Henrik Lindhagen d373c.");
+  });
+
+  it("NØYAKTIG samme innhold under et annet emne blir NOOP (ingen duplikatrad)", async () => {
+    const id = identity("personal");
+    const first = await writer.apply(id, TRUSTED, candidate("personal", "d373.dup.a", "Brukeren liker havregrøt d373d."));
+    const second = await writer.apply(id, TRUSTED, candidate("personal", "d373.dup.b", "  brukeren liker HAVREGRØT d373d. "));
+    expect(second).toMatchObject({ op: "NOOP", memory_item_id: first.memory_item_id });
+    const rows = await adminPool.query("SELECT 1 FROM memory_items WHERE content ILIKE '%havregrøt d373d%'");
+    expect(rows.rowCount).toBe(1);
+    const audit = await adminPool.query("SELECT payload FROM audit_events WHERE type = 'memory.noop' AND payload->>'reason' = 'duplicate_content' AND payload->>'memory_item_id' = $1", [first.memory_item_id]);
+    expect(audit.rowCount).toBe(1);
+  });
+
+  it("samme innhold i et ANNET space regnes ikke som duplikat (space-isolasjon)", async () => {
+    const a = await writer.apply(identity("personal"), TRUSTED, candidate("personal", "d373.space.a", "Isolasjonstest d373e verdi."));
+    const b = await writer.apply(identity("business"), TRUSTED, candidate("business", "d373.space.b", "Isolasjonstest d373e verdi."));
+    expect(b.op).toBe("ADD");
+    expect(b.memory_item_id).not.toBe(a.memory_item_id);
+  });
+});
+
+describe("D-373: ops/memory/invalidate-subjects.sql (eier-opprydding) invaliderer kun angitte AKTIVE emner, med versjon og audit", () => {
+  it("angitte emner -> invalidert (ikke slettet), versjonslogg + audit; andre emner urørt; ikke lenger søkbare", async () => {
+    const sqlPath = join(__dirname, "../../../ops/memory/invalidate-subjects.sql");
+    const raw = await readFile(sqlPath, "utf8");
+    const id = identity("personal");
+    const a = await writer.apply(id, TRUSTED, candidate("personal", "d373.rydd.a", "Rydd d373f første påstand."));
+    const b = await writer.apply(id, TRUSTED, candidate("personal", "d373.rydd.b", "Rydd d373f andre påstand."));
+    const keep = await writer.apply(id, TRUSTED, candidate("personal", "d373.rydd.behold", "Rydd d373f skal bli."));
+    const sql = raw
+      .split("\n")
+      .filter((l) => !l.startsWith("\\set"))
+      .join("\n")
+      .replace(":subjects", "'d373.rydd.a','d373.rydd.b','finnes.ikke'");
+    await adminPool.query(sql);
+    const rows = await adminPool.query("SELECT memory_item_id, status FROM memory_items WHERE memory_item_id = ANY($1)", [[a.memory_item_id, b.memory_item_id, keep.memory_item_id]]);
+    const status = Object.fromEntries(rows.rows.map((r: { memory_item_id: string; status: string }) => [r.memory_item_id, r.status]));
+    expect(status[a.memory_item_id]).toBe("invalidated");
+    expect(status[b.memory_item_id]).toBe("invalidated");
+    expect(status[keep.memory_item_id]).toBe("active");
+    const versions = await adminPool.query("SELECT 1 FROM memory_versions WHERE memory_item_id = $1 AND change_kind = 'invalidated'", [a.memory_item_id]);
+    expect(versions.rowCount).toBe(1);
+    const audit = await adminPool.query("SELECT payload FROM audit_events WHERE type = 'memory.invalidate' AND payload->>'reason' = 'owner_cleanup_d373'");
+    expect(audit.rowCount).toBe(2);
+    const found = (await retriever.search(id, { spaces: ["personal"], query: "d373f" })).map((r) => r.memory_item_id);
+    expect(found).not.toContain(a.memory_item_id);
+    expect(found).not.toContain(b.memory_item_id);
+    // idempotent: en ny kjøring rører ikke allerede invaliderte rader
+    await adminPool.query(sql);
+    const again = await adminPool.query("SELECT 1 FROM audit_events WHERE type = 'memory.invalidate' AND payload->>'reason' = 'owner_cleanup_d373'");
+    expect(again.rowCount).toBe(2);
+  });
+});
+
 describe("Akseptanse 2: tenant- og space-isolasjon (inkl. health/guest)", () => {
   beforeAll(async () => {
     const spaces: Array<[MemorySpace, string, string]> = [
