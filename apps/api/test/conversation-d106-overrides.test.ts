@@ -495,6 +495,8 @@ describe("D-106 HOST-FIX: automatisk høy-innvirkning-klassifisering trigger Cou
     withTools: () => Promise<unknown>;
     onComplete?: (input: CompleteInput) => void;
     executeTool?: (executor: ToolExecutor) => Promise<void>;
+    onTools?: (input: CompleteInput) => void;
+    minSensitivity?: "SECRET_RESTRICTED";
   }): ConversationEngine {
     const pool = fakePool();
     const gateway = {
@@ -503,7 +505,8 @@ describe("D-106 HOST-FIX: automatisk høy-innvirkning-klassifisering trigger Cou
         return { text: "uten verktøy", usage: { input_tokens: 1, output_tokens: 1 }, provider: "gemma_local", model: "m" };
       },
       stream: async () => { throw new Error("stream ikke forventet"); },
-      completeWithTools: async (_input: CompleteInput, o: { executor: ToolExecutor }) => {
+      completeWithTools: async (input: CompleteInput, o: { executor: ToolExecutor }) => {
+        opts.onTools?.(input);
         await opts.executeTool?.(o.executor);
         return opts.withTools();
       }
@@ -516,7 +519,7 @@ describe("D-106 HOST-FIX: automatisk høy-innvirkning-klassifisering trigger Cou
         contextFor: async () => "- noe [kilde: x:1]",
         contextWithMeta: async () => ({ text: "Relevant minne (med kilde):\n- noe [kilde: x:1]", spaces: opts.memorySpaces ?? ["health"], sensitivities: ["normal"] })
       },
-      tools: { definitions: [tool], all: [tool], executorFor: () => ({ execute: async () => ({ tool_call_id: "c", tool_name: "read_tasks", execution_id: "e", success: true, output: null, at: "" }) }) }
+      tools: { definitions: [tool], all: [tool], ...(opts.minSensitivity ? { select: () => ({ definitions: [tool], limits: { max_tools_per_round: 8, max_schema_tokens: 1500, max_rounds: 4, max_calls_per_round: 4, max_total_calls: 8 }, min_sensitivity: opts.minSensitivity }) } : {}), executorFor: () => ({ execute: async () => ({ tool_call_id: "c", tool_name: "read_tasks", execution_id: "e", success: true, output: null, at: "" }) }) }
     } as unknown as ConstructorParameters<typeof ConversationEngine>[0]);
   }
   const call = { tool_call_id: "c1", tool_name: "read_tasks", arguments: {}, provider: "gemma_local", model: "m" };
@@ -559,5 +562,16 @@ describe("D-106 HOST-FIX: automatisk høy-innvirkning-klassifisering trigger Cou
     });
     await expect(engine.handle(identity, "hei")).rejects.toBeInstanceOf(ProviderError);
     expect(completeCalled).toBe(false);
+  });
+  it("X2 (D-381): valgte finans-verktøy løfter en ellers uskyldig tur til SECRET_RESTRICTED FØR første modellkall (aldri sky for verktøyresultatet)", async () => {
+    let seen: CompleteInput | undefined;
+    const engine = toolEngine({
+      memorySpaces: ["personal"],
+      minSensitivity: "SECRET_RESTRICTED",
+      onTools: (i) => (seen = i),
+      withTools: async () => ({ text: "svar", usage: { input_tokens: 1, output_tokens: 1 }, provider: "gemma_local", model: "m" })
+    });
+    await engine.handle(identity, "hei");
+    expect(seen?.sensitivity).toBe("SECRET_RESTRICTED");
   });
 });

@@ -9,6 +9,7 @@ import {
   MIN_RISK_BY_EFFECT,
   OWNER_ONLY_NAMESPACES,
   SURFACES,
+  CHAT_READ_TIER,
   SURFACE_TOOL_GRANTS,
   MemorySearchTransport,
   curatedReadOnlyMeshTools,
@@ -37,6 +38,7 @@ function productionDefinitions(): ToolDefinition[] {
   });
 }
 
+const TIER_KEYS = new Set(CHAT_READ_TIER.map((g) => `${g.tool_id}.${g.action}`));
 const defs = productionDefinitions();
 const manifest = buildToolManifest(defs);
 const entries = [...manifest.values()];
@@ -109,7 +111,12 @@ describe("flater (surfaces)", () => {
 
   it("structural invariant: eier-eksklusive navnerom (kontroll, penger, infra, selvmod, samtykke) finnes ikke på NOEN flate", () => {
     for (const e of entries) {
-      if (OWNER_ONLY_NAMESPACES.has(e.tool_id)) expect(e.surfaces, e.key).toEqual([]);
+      if (!OWNER_ONLY_NAMESPACES.has(e.tool_id)) continue;
+      // D-381: eneste unntak = ren LESING i chattens lese-nivå, og kun på web_chat (aldri tale/Telegram/bakgrunn).
+      if (TIER_KEYS.has(e.key)) {
+        expect(e.surfaces, e.key).toEqual(["web_chat"]);
+        expect(e.effect, e.key).toBe("read");
+      } else expect(e.surfaces, e.key).toEqual([]);
     }
     for (const key of [
       "owner_controls.set_connector_credential", "owner_controls.revoke_device", "owner_controls.activate_kill_switch",
@@ -121,7 +128,9 @@ describe("flater (surfaces)", () => {
   });
 
   it("ingen flate-handling har identitetsfelt (tenant/person/space) i modellskjemaet", () => {
-    for (const e of entries) if (e.surfaces.length > 0) expect(e.scope_fields, e.key).toEqual([]);
+    // D-381: lese-nivå-handlinger har identitetsfelt i det REGISTRERTE skjemaet, men trusted lag binder dem og fjerner dem fra modellens skjema
+    // (låst i part3-chat-read-tier.test.ts). Alt annet på en flate må fortsatt være uten identitetsfelt.
+    for (const e of entries) if (e.surfaces.length > 0 && !TIER_KEYS.has(e.key)) expect(e.scope_fields, e.key).toEqual([]);
   });
 
   it("en utvidelse som bryter reglene feiler lukket (mutasjonstest)", () => {
@@ -167,6 +176,7 @@ describe("JARVIS-024 (strukturell invariant): ingen kontroll-/hemmelighets-/iden
     for (const surface of SURFACES) {
       for (const g of SURFACE_TOOL_GRANTS[surface]) {
         expect(`${g.tool_id}.${g.action}`, `${surface}: ${g.tool_id}.${g.action}`).not.toMatch(FORBIDDEN);
+        if (surface === "web_chat" && TIER_KEYS.has(`${g.tool_id}.${g.action}`)) continue; // D-381: lese-nivå (se over)
         expect(OWNER_ONLY_NAMESPACES.has(g.tool_id), `${surface}: ${g.tool_id}`).toBe(false);
       }
     }
