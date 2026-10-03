@@ -90,3 +90,14 @@ b50bf5cd9177d344a91725badb962c35a5e7891b:modules/tool-gateway/src/integrations.t
 46440336f1473d8c4e857d058b553a26ff029d73:modules/core/test/remediation-2-schema-invariants.test.ts:generic-api-key:286
 46440336f1473d8c4e857d058b553a26ff029d73:modules/core/test/remediation-2-schema-invariants.test.ts:generic-api-key:298
 d350375fbe45d8f455e9c3eae7c6964213591182:infra/local/service-env.mjs:generic-api-key:202
+
+# Del 3 (D-374): SYNTETISKE testfixtures i modules/core/test/part3-secret-scan.test.ts. Filen tester at hemmelighetsskanneren
+# gjenkjenner kjente token-formater, så den må inneholde token-lignende strenger. Alle verdier er oppdiktede (ingen ekte nøkkel/token/passord);
+# verifisert manuelt. Skannes også i historikken (første commit) - derfor fingerprint-oppføringer i stedet for å omskrive historikk.
+1cf6d9e08cb45806e5b6cbd37bac6b7d2a499dc3:modules/core/test/part3-secret-scan.test.ts:gcp-api-key:13
+1cf6d9e08cb45806e5b6cbd37bac6b7d2a499dc3:modules/core/test/part3-secret-scan.test.ts:generic-api-key:11
+1cf6d9e08cb45806e5b6cbd37bac6b7d2a499dc3:modules/core/test/part3-secret-scan.test.ts:generic-api-key:19
+1cf6d9e08cb45806e5b6cbd37bac6b7d2a499dc3:modules/core/test/part3-secret-scan.test.ts:generic-api-key:20
+1cf6d9e08cb45806e5b6cbd37bac6b7d2a499dc3:modules/core/test/part3-secret-scan.test.ts:generic-api-key:53
+1cf6d9e08cb45806e5b6cbd37bac6b7d2a499dc3:modules/core/test/part3-secret-scan.test.ts:jwt:16
+1cf6d9e08cb45806e5b6cbd37bac6b7d2a499dc3:modules/core/test/part3-secret-scan.test.ts:stripe-access-token:10
