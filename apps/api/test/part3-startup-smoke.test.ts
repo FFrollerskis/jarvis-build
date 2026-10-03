@@ -16,7 +16,6 @@ import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
  * og krever at de kommer opp uten å krasje. Fanger enhver fremtidig oppstartsvakt (manifest, rolle, pris, wiring) før NAS.
  */
 const API_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const ROOT = resolve(API_DIR, "..", "..");
 
 let stop: (() => Promise<void>) | undefined;
 let admin: pg.Pool;
