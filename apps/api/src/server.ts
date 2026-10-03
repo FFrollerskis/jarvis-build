@@ -1,3 +1,4 @@
+import { stepUpDenial } from "./step-up.ts";
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -937,6 +938,10 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       if (resolved.responded) return;
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
     }
+    const stepUp = stepUpDenial(resolved.identity, action);
+    if (stepUp) {
+      return json(res, 403, { error: "step_up_required", reason: stepUp });
+    }
     const result = await deps.executive.gateway.execute({
       identity: resolved.identity, tool_id: "owner_controls", action, parameters
     });
@@ -1032,6 +1037,11 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     if (!resolved.ok) {
       if (resolved.responded) return;
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+    }
+    // Del 3 (JARVIS-024/037): step-up for følsomme kontrollhandlinger (signert enhet + egnet kanal); brytere som stopper ting er unntatt.
+    const stepUp = stepUpDenial(resolved.identity, action);
+    if (stepUp) {
+      return json(res, 403, { error: "step_up_required", reason: stepUp });
     }
     const result = await deps.executive.gateway.execute({
       identity: resolved.identity, tool_id: "executive", action, parameters

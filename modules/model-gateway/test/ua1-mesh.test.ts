@@ -386,6 +386,22 @@ describe("UA-1 gateway fallback + cost + critic (§12-§19)", () => {
     void gateway;
   });
 
+  it("Del 3: critic arver sensitivitet - SECRET_RESTRICTED primærinnhold sendes ALDRI til en sky-critic", async () => {
+    const { pool } = fakePool();
+    let cloudCalls = 0;
+    const cloud: ModelProviderAdapter = {
+      name: "openai", model: "gpt-test", available: () => true,
+      complete: async () => { cloudCalls += 1; return { text: "kritikk", usage: { input_tokens: 1, output_tokens: 1 }, provider: "openai", model: "gpt-test" } as never; }
+    };
+    const gateway = new ModelGateway({ pool, trace: new MemoryTraceSink(), providers: [new ScriptedAdapter(() => "svar"), cloud] });
+    const result = await gateway.complete({
+      tenant_id: "tenant-a", critic: true, sensitivity: "SECRET_RESTRICTED", providerPreference: ["scripted"], request: REQUEST
+    });
+    expect(result.text).toBe("svar");
+    expect(cloudCalls).toBe(0);
+    expect(result.metadata?.["critic_error"]).toBeTruthy();
+  });
+
   it("meshStatus: kompakt status uten secrets (§37)", async () => {
     const { pool } = fakePool();
     const gateway = new ModelGateway({

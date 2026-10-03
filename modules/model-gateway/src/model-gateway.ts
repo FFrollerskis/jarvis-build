@@ -686,7 +686,13 @@ export class ModelGateway {
       // Foretrekk annen provider enn primær for uavhengig blikk; ellers samme.
       const others = new Map([...runtimes].filter(([name, rt]) => rt.configured && name !== primary.provider));
       const pool = others.size > 0 ? others : runtimes;
-      const criticPlan = this.router.plan({ mode: "QUALITY", purpose: "CRITIQUE" }, pool);
+      // Del 3 (JARVIS-016): criticen ser det samme innholdet som primærkallet - SAMME sensitivitets-/betalt-modell-regler gjelder.
+      const criticPlan = this.router.plan({
+        mode: "QUALITY",
+        purpose: "CRITIQUE",
+        ...(input.sensitivity !== undefined ? { sensitivity: input.sensitivity } : {}),
+        ...(input.paid_models_allowed !== undefined ? { paid_models_allowed: input.paid_models_allowed } : {})
+      }, pool);
       const lastUserMessage = [...input.request.messages].reverse().find((m) => m.role === "user");
       const lastUser = lastUserMessage ? textOnly(lastUserMessage.content) : "";
       // §30: critic er review-rolle - får ALDRI tools, kan aldri utføre side-effekter.

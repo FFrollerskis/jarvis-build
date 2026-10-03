@@ -9,6 +9,7 @@ import {
   SURFACES,
   SURFACE_TOOL_GRANTS,
   MemorySearchTransport,
+  curatedReadOnlyMeshTools,
   ToolManifestViolationError,
   assertManifestInvariants,
   buildToolManifest,
@@ -155,5 +156,34 @@ describe("effektinferens", () => {
     expect(inferEffect("x", "delete_file")).toBe("delete");
     expect(inferEffect("x", "submit_refund")).toBe("pay");
     expect(inferEffect("x", "create_issue")).toBe("write");
+  });
+});
+
+describe("JARVIS-024 (strukturell invariant): ingen kontroll-/hemmelighets-/identitetshandling står på NOEN modellflate", () => {
+  const FORBIDDEN = /(credential|secret|revoke|kill_switch|destination|personality|system_prompt|prompt_change|freeze|device|enroll|grant|kill)/i;
+  it("hver flate (tale, Telegram, bakgrunn, chat, coding) har bare tildelte handlinger uten forbudte navn", () => {
+    for (const surface of SURFACES) {
+      for (const g of SURFACE_TOOL_GRANTS[surface]) {
+        expect(`${g.tool_id}.${g.action}`, `${surface}: ${g.tool_id}.${g.action}`).not.toMatch(FORBIDDEN);
+        expect(OWNER_ONLY_NAMESPACES.has(g.tool_id), `${surface}: ${g.tool_id}`).toBe(false);
+      }
+    }
+  });
+  it("de faktiske modell-skjemaene (kuraterte mesh-verktøy) har ingen forbudte navn og ingen identitetsfelt", () => {
+    for (const m of curatedReadOnlyMeshTools()) {
+      expect(m.def.name).not.toMatch(FORBIDDEN);
+      const props = Object.keys(((m.def.input_schema as { properties?: Record<string, unknown> }).properties) ?? {});
+      for (const forbiddenField of ["tenant_id", "person_id", "owner_person_id", "actor_person_id", "memory_space", "memory_space_id"]) {
+        expect(props, `${m.def.name}.${forbiddenField}`).not.toContain(forbiddenField);
+      }
+    }
+  });
+  it("tale, Telegram og bakgrunn har aldri skrivehandlinger mot privat minne eller eksterne systemer", () => {
+    for (const surface of ["voice", "telegram", "background"] as const) {
+      for (const g of SURFACE_TOOL_GRANTS[surface]) {
+        const entry = manifest.get(`${g.tool_id}.${g.action}`);
+        expect(entry?.effect, `${surface}: ${g.tool_id}.${g.action}`).toBe("read");
+      }
+    }
   });
 });

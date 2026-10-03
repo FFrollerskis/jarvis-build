@@ -856,7 +856,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         grants: grantService,
         devices: new DeviceService(pool),
         authority: ownerControlAuthority
-      }), toolGateway)),
+      }), toolGateway, (process.env["JARVIS_DESTINATION_HOST_ALLOWLIST"] ?? "").split(",").map((h) => h.trim()).filter((h) => h.length > 0))),
       // UA-11 Executive Mode "K2" (D-64): decision log/scenarios/risk register/
       // goals-OKRs - RENE journalposter over DEN SAMME `pool`-instansen som
       // resten av denne filen (`withMemoryTransaction`, se `GovernanceService`

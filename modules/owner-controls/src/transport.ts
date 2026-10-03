@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { BUSINESS_INTERNAL_CREDENTIAL_REF } from "@jarvis/business";
 import type { JsonValue } from "@jarvis/contracts";
-import { CONNECTOR_REGISTRY, type ToolDefinition, type ToolGateway, type ToolInvocationContext, type ToolTransport } from "@jarvis/tool-gateway";
+import { CONNECTOR_REGISTRY, assertSafeVendorUrl, type ToolDefinition, type ToolGateway, type ToolInvocationContext, type ToolTransport } from "@jarvis/tool-gateway";
 import type { OwnerControlsService } from "./service.ts";
 
 /**
@@ -33,7 +33,13 @@ export class OwnerControlsTransport implements ToolTransport {
    */
   constructor(
     private readonly service: OwnerControlsService,
-    private readonly gateway?: ToolGateway
+    private readonly gateway?: ToolGateway,
+    /**
+     * Del 3 (JARVIS-037): vertsallowlist for DESTINASJONS-konfig (credential-refs som holder en URL, f.eks. Jira/Grafana/n8n base-URL).
+     * Uten allowlist (eller med en vert utenfor den) avvises skrivingen - en lagret URL ville ellers styrt hvor eierens credentials sendes.
+     * Mønstre: eksakt vert (`jira.firma.no`) eller `*.firma.no`.
+     */
+    private readonly destinationHostAllowlist: readonly string[] = []
   ) {}
 
   async invoke(
@@ -120,6 +126,9 @@ export class OwnerControlsTransport implements ToolTransport {
         // curl-kall - får et ærlig svar i stedet for et stille no-op-skriv.
         if (definition.category === "backlog" || definition.category === "backlog_d64_gate") {
           throw new Error(`connector_not_built_yet:${connectorId}`);
+        }
+        if (isDestinationRef(credentialRef)) {
+          assertDestinationAllowed(value, this.destinationHostAllowlist);
         }
         await this.gateway.setSecret(credentialRef, value);
         return { data: { connector_id: connectorId, credential_ref: credentialRef, configured: true } as unknown as JsonValue };
@@ -273,4 +282,30 @@ export function ownerControlsToolDefinitions(transport: OwnerControlsTransport):
       reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true, ...common
     }
   ];
+}
+
+
+/** Credential-refs som holder en destinasjon (URL), ikke en hemmelighet - styrer HVOR eierens credentials sendes. */
+export function isDestinationRef(ref: string): boolean {
+  return /(?:_|^)(?:BASE_URL|SERVER_URL|URL|ENDPOINT|HOST|WEBHOOK)$/i.test(ref);
+}
+
+/** Del 3 (JARVIS-037): destinasjons-URL må være en ren https-URL hvis vert står på eierens allowlist. Tom allowlist = lukket. */
+export function assertDestinationAllowed(value: string, allowlist: readonly string[]): void {
+  if (allowlist.length === 0) throw new Error("destination_host_allowlist_not_configured");
+  let safe: string;
+  try {
+    safe = assertSafeVendorUrl(value);
+  } catch {
+    throw new Error("destination_url_unsafe");
+  }
+  const url = new URL(safe);
+  if (url.protocol !== "https:") throw new Error("destination_url_must_be_https");
+  const host = url.hostname.toLowerCase();
+  const allowed = allowlist.some((entry) => {
+    const pattern = entry.trim().toLowerCase();
+    if (pattern.startsWith("*.")) return host.endsWith(pattern.slice(1)) && host.length > pattern.length - 1;
+    return host === pattern;
+  });
+  if (!allowed) throw new Error("destination_host_not_allowlisted");
 }
