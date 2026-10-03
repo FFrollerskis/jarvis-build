@@ -1,5 +1,6 @@
 import type { CapabilityClass } from "@jarvis/contracts";
 import type { ToolDefinition } from "./gateway.ts";
+import { CHAT_READ_TIER } from "./chat-read-tier.ts";
 
 /**
  * Del 3 (JARVIS-002/015/028): ÉTT sentralt capability-/tool-manifest. Hver registrert handling får en manifest-oppføring AVLEDET fra
@@ -147,6 +148,9 @@ export function scopeFieldsOf(def: ToolDefinition): string[] {
   return SCOPE_FIELD_NAMES.filter((name) => name in shape);
 }
 
+/** D-381: lese-nivå-handlinger kan ha identitetsfelt i det registrerte skjemaet fordi trusted lag binder dem (fjernet fra modellens skjema). */
+const CHAT_READ_TIER_KEYS: ReadonlySet<string> = new Set(CHAT_READ_TIER.map((g) => `${g.tool_id}.${g.action}`));
+
 /** Flatene en handling kan stå på. ALT annet er forbudt. Utvidelse er en sikkerhetsendring (ny beslutning + test). */
 export const SURFACE_TOOL_GRANTS: Readonly<Record<Surface, ReadonlyArray<{ tool_id: string; action: string }>>> = {
   web_chat: [
@@ -155,7 +159,9 @@ export const SURFACE_TOOL_GRANTS: Readonly<Record<Surface, ReadonlyArray<{ tool_
     { tool_id: "github", action: "read_issues" },
     { tool_id: "executive", action: "get_capability_status" },
     { tool_id: "memory", action: "search" },
-    { tool_id: "memory", action: "propose" }
+    { tool_id: "memory", action: "propose" },
+    // D-381: chattens lese-nivå (kun ren lesing; modellen ser et lite utvalg per melding, ikke hele listen).
+    ...CHAT_READ_TIER
   ],
   // Tale: transkripsjonen er upålitelig (STT-feil, omgivelser) - kun lesing, ingen minneforslag.
   voice: [
@@ -259,7 +265,10 @@ export function assertManifestInvariants(manifest: ToolManifest, options: { igno
     }
     if (entry.risk === "D" && entry.idempotency !== "required") violations.push(`${entry.key}: klasse D må kreve idempotens`);
     if (entry.surfaces.length > 0) {
-      if (OWNER_ONLY_NAMESPACES.has(entry.tool_id)) violations.push(`${entry.key}: eier-eksklusivt navnerom kan ikke stå på en modellflate`);
+      // D-381: eierens egen chat (web_chat, grant-autentisert) kan LESE finans-navnerommene via lese-nivået; tale/Telegram/bakgrunn aldri,
+      // og skriving/sending/betaling aldri (effekt-reglene under gjelder uendret).
+      const ownerReadOnWebChat = CHAT_READ_TIER_KEYS.has(entry.key) && entry.effect === "read" && entry.surfaces.every((s) => s === "web_chat");
+      if (OWNER_ONLY_NAMESPACES.has(entry.tool_id) && !ownerReadOnWebChat) violations.push(`${entry.key}: eier-eksklusivt navnerom kan ikke stå på en modellflate`);
       const quarantineWrite = QUARANTINE_WRITE_KEYS.has(entry.key);
       if (entry.risk !== "A" && !quarantineWrite) violations.push(`${entry.key}: kun klasse A (eller karantene-skriving) kan stå på en modellflate (er ${entry.risk})`);
       if (entry.effect !== "read" && !quarantineWrite) violations.push(`${entry.key}: effekt «${entry.effect}» kan ikke stå på en modellflate`);
@@ -267,7 +276,7 @@ export function assertManifestInvariants(manifest: ToolManifest, options: { igno
         violations.push(`${entry.key}: send/pay/delete/control kan aldri stå på en modellflate`);
       }
       if (entry.cost === "paid") violations.push(`${entry.key}: betalte handlinger kan ikke stå på en modellflate`);
-      if (entry.scope_fields.length > 0) violations.push(`${entry.key}: skjemaet har identitetsfelt (${entry.scope_fields.join(",")}) på en modellflate`);
+      if (entry.scope_fields.length > 0 && !CHAT_READ_TIER_KEYS.has(entry.key)) violations.push(`${entry.key}: skjemaet har identitetsfelt (${entry.scope_fields.join(",")}) på en modellflate`);
       if (entry.surfaces.includes("telegram") && entry.effect !== "read") violations.push(`${entry.key}: Telegram er read-only`);
       if (entry.surfaces.includes("voice") && entry.effect !== "read") violations.push(`${entry.key}: tale er read-only`);
       if (entry.surfaces.includes("background") && entry.effect !== "read") violations.push(`${entry.key}: bakgrunnsjobber er read-only`);

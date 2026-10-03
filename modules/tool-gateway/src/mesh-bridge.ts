@@ -3,7 +3,7 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 import { jobContractAllows, type ToolGateway } from "./gateway.ts";
 import { ownerStatesMemory } from "./owner-stated-memory.ts";
 import type { JobContract, JsonValue } from "@jarvis/contracts";
-import { SURFACE_TOOL_GRANTS, requiresConfirmationWhenTainted, type ToolManifest } from "./tool-manifest.ts";
+import { SURFACE_TOOL_GRANTS, requiresConfirmationWhenTainted, scopeFieldsOf, type ToolManifest } from "./tool-manifest.ts";
 import type { TurnContext } from "./turn-context.ts";
 
 /**
@@ -26,6 +26,11 @@ export interface MeshToolMapping {
    * `invalid_parameters`-DENY i ToolGateway for alle tre read-verktøyene.
    */
   parameters?: (modelArgs: Record<string, unknown>) => Record<string, unknown>;
+  /**
+   * D-381: identitets-/scope-felt (tenant_id, memory_space, person-felt) som TRUSTED lag fyller fra den autentiserte identiteten
+   * ved utførelse - de er fjernet fra skjemaet modellen ser, og en verdi modellen likevel sender overstyres alltid.
+   */
+  scope_bindings?: ReadonlyArray<string>;
 }
 
 const MESH_TOOLS: MeshToolMapping[] = [
@@ -296,6 +301,64 @@ export function normalizeJsonSchemaBounds(schema: unknown): Record<string, unkno
  * Strukturelt kompatibel med ModelGateway.ToolExecutor. Resultatet trimmes før
  * det går tilbake til modellen - aldri credentials/intern metadata (§22).
  */
+/** Identiteten trusted lag binder scope-felt fra (kun disse feltene leses). */
+export interface BindableIdentity {
+  tenant_id: string;
+  person_id: string;
+  memory_space_id?: string;
+}
+
+/** D-381: identitet vinner ALLTID over det modellen eventuelt har sendt i et scope-felt. */
+export function bindScopeFields(
+  parameters: Record<string, unknown>,
+  fields: ReadonlyArray<string>,
+  identity: BindableIdentity
+): Record<string, unknown> {
+  const bound: Record<string, unknown> = { ...parameters };
+  for (const f of fields) {
+    if (f === "tenant_id") bound[f] = identity.tenant_id;
+    else if (f === "memory_space" || f === "space") {
+      if (identity.memory_space_id !== undefined) bound[f] = identity.memory_space_id;
+    } else bound[f] = identity.person_id;
+  }
+  return bound;
+}
+
+/**
+ * D-381: mesh-mappinger for chattens lese-nivå (`CHAT_READ_TIER`). Én mapping per allowlistet OG registrert par. Skjemaet modellen ser
+ * har ALDRI identitets-/scope-felt (de fjernes og bindes i trusted lag, se `scope_bindings`). Kun lesing - se `assertChatReadTier()`.
+ */
+export function chatReadTierMeshTools(
+  definitions: ReadonlyArray<ReturnType<ToolGateway["list"]>[number]>,
+  allowlist: ReadonlyArray<{ readonly tool_id: string; readonly action: string }>
+): MeshToolMapping[] {
+  const byKey = new Map(definitions.map((d) => [`${d.tool_id}.${d.action}`, d]));
+  const out: MeshToolMapping[] = [];
+  for (const a of allowlist) {
+    const def = byKey.get(`${a.tool_id}.${a.action}`);
+    if (!def) continue;
+    const scope = scopeFieldsOf(def);
+    const schema = normalizeJsonSchemaBounds(zodToJsonSchema(def.input_schema, { target: "openApi3" }) as Record<string, unknown>);
+    if (scope.length > 0) {
+      const props = { ...((schema["properties"] as Record<string, unknown> | undefined) ?? {}) };
+      for (const f of scope) delete props[f];
+      schema["properties"] = props;
+      if (Array.isArray(schema["required"])) schema["required"] = (schema["required"] as string[]).filter((r) => !scope.includes(r));
+    }
+    out.push({
+      def: {
+        name: `${def.tool_id}__${def.action}`,
+        description: `[lesing] ${def.description}`,
+        input_schema: schema
+      },
+      tool_id: def.tool_id,
+      action: def.action,
+      ...(scope.length > 0 ? { scope_bindings: scope } : {})
+    });
+  }
+  return out;
+}
+
 /**
  * Del 3 (JARVIS-002/014): bekreftelsesport (strukturell grensesnitt - implementert av `ConfirmationStore` i @jarvis/core). Executoren bruker den
  * KUN i en tainted tur for handlinger som krever ny bekreftelse. Modellen når aldri denne porten.
@@ -312,7 +375,7 @@ export interface MeshToolGuards {
   /** Sentralt manifest. Et mappet verktøy uten manifest-oppføring feiler LUKKET. */
   manifest: ToolManifest;
   confirmations?: ConfirmationGate;
-  /** Del 3: delegert jobb - gatewayen håndhever kontraktens `allowed_tools` og eier-/tenant-identitet i tillegg til skjemafilteret. */
+/** Del 3: delegert jobb - gatewayen håndhever kontraktens `allowed_tools` og eier-/tenant-identitet i tillegg til skjemafilteret. */
   jobContract?: JobContract;
 }
 
@@ -371,6 +434,9 @@ export class MeshToolExecutor {
       parameters = ownerStatesMemory(this.turn?.user_message, String(rest["subject"] ?? ""), String(rest["content"] ?? ""))
         ? { ...rest, owner_stated: true }
         : rest;
+    }
+    if (mapped.scope_bindings && mapped.scope_bindings.length > 0) {
+      parameters = bindScopeFields(parameters, mapped.scope_bindings, this.identity as BindableIdentity);
     }
     const key = `${mapped.tool_id}.${mapped.action}`;
     const turn = this.turn;

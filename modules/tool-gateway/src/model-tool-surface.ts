@@ -1,4 +1,6 @@
-import { curatedReadOnlyMeshTools, type MeshToolMapping } from "./mesh-bridge.ts";
+import { chatReadTierMeshTools, curatedReadOnlyMeshTools, type MeshToolMapping } from "./mesh-bridge.ts";
+import { CHAT_READ_TIER } from "./chat-read-tier.ts";
+import { inferEffect } from "./tool-manifest.ts";
 import type { ToolGateway } from "./gateway.ts";
 
 /**
@@ -120,13 +122,42 @@ export function assertReadOnlyModelSurface(
 }
 
 /**
+ * D-381: hvert par i chattens lese-nivå må være registrert som klasse A, ren lesing (effekt «read»), uten forbudt verktøy-id og uten
+ * skrive-/kontroll-handlingsnavn. Feiler lukket - en handling som senere endres til skriving stopper oppstarten.
+ */
+export function assertChatReadTier(
+  gateway: Pick<ToolGateway, "list">,
+  options: { allowUnregistered?: boolean } = {}
+): void {
+  const violations: string[] = [];
+  const registered = new Map(gateway.list().map((d) => [key(d.tool_id, d.action), d]));
+  const seen = new Set<string>();
+  for (const a of CHAT_READ_TIER) {
+    const k = key(a.tool_id, a.action);
+    if (seen.has(k)) violations.push(`${k}: duplisert i lese-nivået`);
+    seen.add(k);
+    if (FORBIDDEN_MODEL_TOOL_IDS.includes(a.tool_id)) violations.push(`${k}: forbudt verktøy-id`);
+    if (WRITE_ACTION_PATTERN.test(a.action)) violations.push(`${k}: handlingsnavnet ser ut som skriving/kontroll`);
+    if (MODEL_SURFACE_ALLOWLIST.some((b) => b.tool_id === a.tool_id && b.action === a.action)) violations.push(`${k}: allerede i minimumssettet`);
+    const def = registered.get(k);
+    if (!def) {
+      if (!options.allowUnregistered) violations.push(`${k}: ikke registrert i ToolGateway`);
+      continue;
+    }
+    if (def.capability_class !== "A") violations.push(`${k}: klasse ${def.capability_class}, kun klasse A (lesing) er tillatt`);
+    if (inferEffect(def.tool_id, def.action) !== "read") violations.push(`${k}: effekt er ikke «read»`);
+  }
+  if (violations.length > 0) throw new ModelSurfaceViolationError(violations);
+}
+
+/**
  * Den aktive modellflaten for chat, tale, Telegram og executive-jobber.
  * Kaster `ModelSurfaceViolationError` ved oppstart hvis noe i flaten ikke er
  * ren lesing - oppstarten feiler lukket.
  */
 export function resolveModelToolSurface(
   gateway: Pick<ToolGateway, "list">,
-  options: { onlyRegistered?: boolean } = {}
+  options: { onlyRegistered?: boolean; includeChatReadTier?: boolean } = {}
 ): MeshToolMapping[] {
   let mappings = curatedReadOnlyMeshTools();
   if (options.onlyRegistered) {
@@ -137,5 +168,10 @@ export function resolveModelToolSurface(
     mappings = mappings.filter((m) => registered.has(key(m.tool_id, m.action)));
   }
   assertReadOnlyModelSurface(gateway, mappings, { allowUnregistered: options.onlyRegistered === true });
+  if (options.includeChatReadTier === true) {
+    // D-381: kun api-prosessen (eierens chat) får lese-nivået; worker-jobber beholder minimumssettet.
+    assertChatReadTier(gateway, { allowUnregistered: options.onlyRegistered === true });
+    return [...mappings, ...chatReadTierMeshTools(gateway.list(), CHAT_READ_TIER)];
+  }
   return mappings;
 }

@@ -4,6 +4,7 @@ import {
   BudgetExceededError,
   classifyContentSensitivity,
   classifyDecisionImportance,
+  maxSensitivity,
   NoEligibleProviderError,
   parseRoutingOverride,
   type AiCouncil,
@@ -57,7 +58,7 @@ export interface ConversationDeps {
      * Del 3 (JARVIS-002/028): deterministisk per-flate utvalg av verktøy for DENNE turen (hard allowlist per flate + intensjon + grenser).
      * Når satt brukes den i stedet for `definitions` (som da kun er referansen/øvre grense). Tomt utvalg => ingen verktøy i runden.
      */
-    select?(input: { surface: Surface; text: string }): { definitions: ToolDefinition[]; limits: SurfaceLimits };
+    select?(input: { surface: Surface; text: string }): { definitions: ToolDefinition[]; limits: SurfaceLimits; min_sensitivity?: "SECRET_RESTRICTED" };
   };
   /**
    * D-106 (AI Mesh Council/Collaboration/lokal-Gemma-utvidelse §"large
@@ -368,12 +369,20 @@ export class ConversationEngine {
       const useTools = this.deps.tools !== undefined && toolDefinitions.length > 0;
       // Del 3 (JARVIS-016/035): sensitivitet utledes av INNHOLDET (minne, historikk, melding, verktøykilder) - ikke lenger hardkodet «public».
       // Helse/finans/hemmeligheter ⇒ kun lokal behandler; privat/forretningsminne og verktøyruter ⇒ aldri gratis/delt sky.
-      const sensitivityDecision = classifyContentSensitivity({
+      const classified = classifyContentSensitivity({
         texts: [text, ...history.map((m) => m.content)],
         memory_spaces: memoryMeta.spaces,
         memory_sensitivities: memoryMeta.sensitivities,
         private_tool_output: useTools
       });
+      // D-381: velger utvalget finans-verktøy, er turen SECRET_RESTRICTED allerede FØR første modellkall (kun lokal modell) - verktøyresultatet
+      // skal aldri kunne nå en skymodell i en senere runde, uansett hvordan meldingen var formulert.
+      const sensitivityDecision = selection?.min_sensitivity
+        ? {
+            sensitivity: maxSensitivity(classified.sensitivity, selection.min_sensitivity),
+            reasons: [...classified.reasons, `tool_selection:${selection.min_sensitivity}`]
+          }
+        : classified;
       const input = {
         tenant_id: identity.tenant_id,
         session_id: identity.session_id,

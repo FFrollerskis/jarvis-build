@@ -874,7 +874,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // lenger koblet til noen aktiv flate. Chat, tale, Telegram og executive-jobber
   // får KUN det eksplisitte lese-minimumssettet (`MODEL_SURFACE_ALLOWLIST`);
   // oppstarten feiler lukket hvis noe i flaten ikke er klasse A / ren lesing.
-  const modelToolSurface = resolveModelToolSurface(toolGateway);
+  const modelToolSurface = resolveModelToolSurface(toolGateway, { includeChatReadTier: true });
   // Del 3: sentralt manifest avledet fra ALLE registrerte handlinger. Bruddet er en oppstartsfeil (fail closed): ingen modellflate med
   // send/pay/delete/control, ingen klasse B/A for utgående handlinger, ingen eier-eksklusive navnerom på en flate.
   const toolManifest = buildToolManifest(toolGateway.list());
@@ -1000,7 +1000,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       ),
       select: ({ surface, text }) => {
         const selection = selectSurfaceTools(surface, text, modelToolSurface);
-        return { definitions: selection.selected.map((m) => m.def), limits: selection.limits };
+        return {
+          definitions: selection.selected.map((m) => m.def),
+          limits: selection.limits,
+          ...(selection.min_sensitivity ? { min_sensitivity: selection.min_sensitivity } : {})
+        };
       }
     },
     // Task #121 (D-214): kosmetisk personlighetslag, se conversation.ts sin

@@ -54,6 +54,59 @@ const INTENT_KEYWORDS: Readonly<Record<string, RegExp>> = {
   "memory.search": /(husker|husk\b|minne|sa jeg|nevnte|forrige|tidligere|hva heter|hvem er|vet du|fortalte)/i,
   "memory.propose": /(husk\b|ikke glem|lagre|noter|ta vare|remember|foreslå)/i
 };
+/**
+ * D-381: intensjonsord per verktøy-id for chattens lese-nivå (norsk + engelsk). Kun UTVALG (hva modellen får se denne runden) - aldri
+ * autorisasjon; hele nivået er allerede låst av `SURFACE_TOOL_GRANTS`. Uten oppføring brukes selve verktøy-id-en som nøkkelord.
+ */
+const TOOL_INTENTS: Readonly<Record<string, RegExp>> = {
+  finance_neonomics: /(bank|konto|saldo|neonomics|transaksjon|samtykke|kontoutskrift|innskudd|uttak)/i,
+  finance_stripe: /(stripe|kortbetaling|refusjon)/i,
+  finance_vipps: /(vipps)/i,
+  finance_wallester: /(wallester|bankkort|\bkort\b|kortbruk)/i,
+  finance_spend: /(utgift|abonnement|innkjøp|forbruk|\bspend\b|faste kostnader|budsjett|\bkostnad)/i,
+  notion: /(notion)/i,
+  slack: /(slack)/i,
+  discord: /(discord)/i,
+  telegram: /(telegram)/i,
+  drive: /(drive|dokument|\bfil(er)?\b|google docs)/i,
+  dropbox: /(dropbox)/i,
+  onedrive: /(onedrive)/i,
+  google_sheets: /(sheets|regneark)/i,
+  microsoft_outlook: /(outlook)/i,
+  todoist: /(todoist|gjøremål|oppgaveliste|to-?do)/i,
+  contract: /(kontrakt|avtaler\b|fornyelse)/i,
+  support: /(support|billett|ticket|kundehenvendelse)/i,
+  business: /(forretning|selskap|åpne saker|oppfølging|metrikk)/i,
+  growth: /(kampanje|markedsføring|vekst)/i,
+  googleads: /(google ?ads|annonse)/i,
+  metaads: /(meta ?ads|facebook|instagram|annonse)/i,
+  vercel: /(vercel|utrulling|deploy)/i,
+  sentry: /(sentry|feillogg|exception)/i,
+  brave_search: /(søk (på )?nett|nettsøk|websøk|google|nyheter|brave)/i,
+  tavily: /(tavily|søk (på )?nett|nettsøk|nyheter)/i,
+  google_maps: /(kart|adresse|koordinat)/i,
+  google_places: /(sted|restaurant|butikk|åpningstid)/i,
+  google_routes: /(rute|veibeskrivelse|kjøretid|avstand)/i,
+  spotify: /(spotify|musikk|spilles)/i,
+  twilio: /(twilio|\bsms\b)/i,
+  whatsapp: /(whatsapp)/i
+};
+const GENERIC_SKIP = new Set(["finance", "google", "conversation", "graph", "openai"]);
+const toolIntentCache = new Map<string, RegExp | null>();
+function toolIntent(tool_id: string): RegExp | null {
+  const known = TOOL_INTENTS[tool_id];
+  if (known) return known;
+  let cached = toolIntentCache.get(tool_id);
+  if (cached === undefined) {
+    const words = tool_id.split("_").filter((w) => w.length >= 4 && !GENERIC_SKIP.has(w));
+    cached = words.length > 0 ? new RegExp(`(${words.join("|")})`, "i") : null;
+    toolIntentCache.set(tool_id, cached);
+  }
+  return cached;
+}
+/** Finans-verktøy (`finance_*`) gjør turen SECRET_RESTRICTED (D-378: kun lokal modell) - uavhengig av hvordan meldingen er formulert. */
+const RESTRICTED_TOOL_ID = /^finance(_|$)/;
+
 const OVERVIEW = /(oversikt|hva skjer|brief|morgenbrief|hva har jeg)/i;
 const OVERVIEW_KEYS = new Set(["email.read_inbox", "calendar.read_events", "github.read_issues"]);
 const ALWAYS_PRIORITY = ["memory.search", "email.read_inbox", "calendar.read_events", "github.read_issues", "executive.get_capability_status", "memory.propose"];
@@ -65,6 +118,8 @@ export interface SurfaceSelection {
   limits: SurfaceLimits;
   /** Handlinger som ble felt bort av utvalg/grenser (diagnostikk). */
   dropped: string[];
+  /** D-381: laveste sensitivitet turen MÅ ha fordi verktøyene som ble valgt eksponerer data i den klassen. */
+  min_sensitivity?: "SECRET_RESTRICTED";
 }
 
 const mappingKey = (m: MeshToolMapping) => `${m.tool_id}.${m.action}`;
@@ -81,10 +136,15 @@ export function selectSurfaceTools(surface: Surface, text: string, candidates: R
   const overview = OVERVIEW.test(text);
   let wanted = allowed.filter((m) => {
     const key = mappingKey(m);
-    return (INTENT_KEYWORDS[key]?.test(text) ?? false) || (overview && OVERVIEW_KEYS.has(key));
+    const intent = INTENT_KEYWORDS[key] ?? toolIntent(m.tool_id);
+    return (intent?.test(text) ?? false) || (overview && OVERVIEW_KEYS.has(key));
   });
   if (wanted.length === 0) wanted = allowed.filter((m) => mappingKey(m) === "memory.search");
-  wanted.sort((a, b) => ALWAYS_PRIORITY.indexOf(mappingKey(a)) - ALWAYS_PRIORITY.indexOf(mappingKey(b)));
+  const rank = (m: MeshToolMapping): number => {
+    const i = ALWAYS_PRIORITY.indexOf(mappingKey(m));
+    return i === -1 ? ALWAYS_PRIORITY.length : i;
+  };
+  wanted.sort((a, b) => rank(a) - rank(b));
 
   const selected: MeshToolMapping[] = [];
   const dropped: string[] = allowed.filter((m) => !wanted.includes(m)).map(mappingKey);
@@ -102,7 +162,8 @@ export function selectSurfaceTools(surface: Surface, text: string, candidates: R
   for (const m of selected) {
     if (!granted.has(mappingKey(m))) throw new Error(`surface_selection_violation:${surface}:${mappingKey(m)}`);
   }
-  return { selected, schema_tokens: tokens, limits, dropped };
+  const restricted = selected.some((m) => RESTRICTED_TOOL_ID.test(m.tool_id));
+  return { selected, schema_tokens: tokens, limits, dropped, ...(restricted ? { min_sensitivity: "SECRET_RESTRICTED" as const } : {}) };
 }
 
 const JOB_MEMORY_SPACES = ["personal", "business", "project", "health", "home", "guest", "shared"] as const;
