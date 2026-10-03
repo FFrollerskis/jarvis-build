@@ -9,7 +9,8 @@ import {
   estimateSchemaTokens,
   firstWaveTools,
   selectSurfaceTools,
-  surfaceForChannel
+  surfaceForChannel,
+  type ToolGateway
 } from "../src/index.ts";
 
 /** Del 3 (JARVIS-028/002): deterministisk per-flate utvalg, hard allowlist etter utvalg, og målte skjema-tokens med regresjonsterskel. */
@@ -38,7 +39,7 @@ describe("utvalg per intensjon", () => {
 describe("hard allowlist per flate", () => {
   it("ingen flate kan noensinne få et verktøy utenfor sin tildeling - selv om kandidatlisten inneholder ALT i registeret", () => {
     const registry = firstWaveTools({});
-    const everything = allMeshTools({ list: () => registry });
+    const everything = allMeshTools({ list: () => registry } as unknown as ToolGateway);
     expect(everything.length).toBeGreaterThan(300);
     for (const surface of SURFACES) {
       const granted = new Set(SURFACE_TOOL_GRANTS[surface].map((g) => `${g.tool_id}.${g.action}`));
@@ -58,7 +59,7 @@ describe("hard allowlist per flate", () => {
 describe("skjema-tokens: målt og med regresjonsterskel (JARVIS-028)", () => {
   it("hele registeret ville kostet tusenvis av tokens per runde; dagens flater er under en liten, fast terskel", () => {
     const registry = firstWaveTools({});
-    const everything = allMeshTools({ list: () => registry });
+    const everything = allMeshTools({ list: () => registry } as unknown as ToolGateway);
     const fullRegistryTokens = estimateSchemaTokens(everything.map((m) => m.def));
     const currentSurfaceTokens = estimateSchemaTokens(mappings.map((m) => m.def));
     // Dokumentert måling (se PHASE_3_GATE): fullt register er > 20x flaten modellen faktisk får.
