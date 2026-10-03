@@ -7,9 +7,11 @@ import {
   NoEligibleProviderError,
   type AiCouncil,
   type CompleteInput,
-  type ModelGateway
+  type ModelGateway,
+  type ToolExecutor
 } from "@jarvis/model-gateway";
 import type { InProcessWorker, TaskService } from "@jarvis/tasks";
+import { ProviderError } from "@jarvis/provider-adapters";
 import { ConversationEngine } from "../src/conversation.ts";
 
 /**
@@ -483,32 +485,79 @@ describe("D-106 HOST-FIX: automatisk høy-innvirkning-klassifisering trigger Cou
     await buildEngine({ onComplete: (i) => (captured = i), memory: mem(["personal"], ["special"]) }).handle(identity, "hva sa jeg om det?");
     expect(captured?.sensitivity).toBe("SECRET_RESTRICTED");
   });
-  /** D-379: SECRET_RESTRICTED går kun til lokal modell uten verktøykall - ellers feiler selv «hei» lukket (observert på NAS). */
-  it("X (D-379): SECRET_RESTRICTED-tur kjøres uten verktøy (ingen completeWithTools), men sensitiviteten forblir SECRET_RESTRICTED", async () => {
-    let captured: CompleteInput | undefined;
-    let withToolsCalled = false;
+  /**
+   * D-380 (erstatter D-379 sin «ingen verktøy»): SECRET_RESTRICTED går kun til lokal modell, og verktøy er FORTSATT på -
+   * eieren skal ha ren tilgang. Støtter ikke den lokale modellen verktøykall (Ollama: 400), nedgraderes turen til
+   * tekst uten verktøy - men aldri via sky, og aldri etter at et verktøy er utført.
+   */
+  function toolEngine(opts: {
+    memorySpaces?: string[];
+    withTools: () => Promise<unknown>;
+    onComplete?: (input: CompleteInput) => void;
+    executeTool?: (executor: ToolExecutor) => Promise<void>;
+  }): ConversationEngine {
     const pool = fakePool();
     const gateway = {
       complete: async (input: CompleteInput) => {
-        captured = input;
-        return { text: "modellsvar", usage: { input_tokens: 1, output_tokens: 1 }, provider: "gemma_local", model: "m" };
+        opts.onComplete?.(input);
+        return { text: "uten verktøy", usage: { input_tokens: 1, output_tokens: 1 }, provider: "gemma_local", model: "m" };
       },
       stream: async () => { throw new Error("stream ikke forventet"); },
-      completeWithTools: async () => { withToolsCalled = true; throw new Error("verktøy skal ikke brukes for SECRET_RESTRICTED"); }
+      completeWithTools: async (_input: CompleteInput, o: { executor: ToolExecutor }) => {
+        await opts.executeTool?.(o.executor);
+        return opts.withTools();
+      }
     } as unknown as ModelGateway;
     const tool = { name: "read_tasks", description: "x", input_schema: { type: "object", properties: {}, additionalProperties: false } };
-    const engine = new ConversationEngine({
+    return new ConversationEngine({
       messages: new MessageStore(pool), context: new ContextBuilder(pool), gateway, tasks: fakeTasks, worker: fakeWorker,
       trace: new MemoryTraceSink(),
       memory: {
         contextFor: async () => "- noe [kilde: x:1]",
-        contextWithMeta: async () => ({ text: "Relevant minne (med kilde):\n- noe [kilde: x:1]", spaces: ["health"], sensitivities: ["normal"] })
+        contextWithMeta: async () => ({ text: "Relevant minne (med kilde):\n- noe [kilde: x:1]", spaces: opts.memorySpaces ?? ["health"], sensitivities: ["normal"] })
       },
-      tools: { definitions: [tool], all: [tool], executorFor: () => ({ execute: async () => { throw new Error("ikke brukt"); } }) }
+      tools: { definitions: [tool], all: [tool], executorFor: () => ({ execute: async () => ({ tool_call_id: "c", tool_name: "read_tasks", execution_id: "e", success: true, output: null, at: "" }) }) }
     } as unknown as ConstructorParameters<typeof ConversationEngine>[0]);
+  }
+  const call = { tool_call_id: "c1", tool_name: "read_tasks", arguments: {}, provider: "gemma_local", model: "m" };
+
+  it("X (D-380): SECRET_RESTRICTED-tur beholder verktøy (completeWithTools kalles) - eieren har ren tilgang", async () => {
+    let withToolsCalled = false;
+    const engine = toolEngine({ withTools: async () => { withToolsCalled = true; return { text: "med verktøy", usage: { input_tokens: 1, output_tokens: 1 }, provider: "gemma_local", model: "m" }; } });
     const out = await engine.handle(identity, "hei");
-    expect(out.reply).toBe("modellsvar");
-    expect(withToolsCalled).toBe(false);
+    expect(withToolsCalled).toBe(true);
+    expect(out.reply).toBe("med verktøy");
+  });
+
+  it("Y (D-380): lokal modell avviser verktøy (bad_request) før noe er utført ⇒ svarer uten verktøy, sensitivitet uendret, aldri sky", async () => {
+    let captured: CompleteInput | undefined;
+    const engine = toolEngine({
+      withTools: async () => { throw new ProviderError("gemma_local", "bad_request", "gemma_local_error_400", 400); },
+      onComplete: (i) => (captured = i)
+    });
+    const out = await engine.handle(identity, "hei");
+    expect(out.reply).toBe("uten verktøy");
     expect(captured?.sensitivity).toBe("SECRET_RESTRICTED");
+  });
+
+  it("Z (D-380): feiler modellen ETTER at et verktøy er utført, nedgraderes det IKKE (ingen stille retry etter sideeffekt)", async () => {
+    let completeCalled = false;
+    const engine = toolEngine({
+      executeTool: async (ex) => { await ex.execute(call, { tenant_id: "tenant-1", idempotency_key: "k" }); },
+      withTools: async () => { throw new ProviderError("gemma_local", "bad_request", "gemma_local_error_400", 400); },
+      onComplete: () => { completeCalled = true; }
+    });
+    await expect(engine.handle(identity, "hei")).rejects.toBeInstanceOf(ProviderError);
+    expect(completeCalled).toBe(false);
+  });
+
+  it("Z2 (D-380): andre feil enn bad_request (f.eks. timeout) nedgraderes ikke", async () => {
+    let completeCalled = false;
+    const engine = toolEngine({
+      withTools: async () => { throw new ProviderError("gemma_local", "timeout", "gemma_local_timeout"); },
+      onComplete: () => { completeCalled = true; }
+    });
+    await expect(engine.handle(identity, "hei")).rejects.toBeInstanceOf(ProviderError);
+    expect(completeCalled).toBe(false);
   });
 });
