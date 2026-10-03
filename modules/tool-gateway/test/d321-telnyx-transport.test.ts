@@ -37,21 +37,21 @@ describe("A: TelnyxTransport.invoke('notify', ...) - POST /v2/messages, ekte sid
     const calls: string[] = [];
     vi.stubGlobal("fetch", async (url: string) => { calls.push(url); return { ok: true, json: async () => ({}) } as unknown as Response; });
     const transport = new TelnyxTransport(() => Promise.resolve(null));
-    await expect(transport.invoke("notify", { to: "+1", message: "hei" }, "tok")).rejects.toThrow("telnyx_from_number_not_configured");
+    await expect(transport.invoke("notify", { to: "+15550000001", message: "hei" }, "tok")).rejects.toThrow("telnyx_from_number_not_configured");
     expect(calls).toHaveLength(0);
   });
 
   it("manglende data.id i svaret -> external_id defaulter til 'sent'", async () => {
     vi.stubGlobal("fetch", async () => ({ ok: true, json: async () => ({}) }) as unknown as Response);
     const transport = new TelnyxTransport(() => Promise.resolve("+1"));
-    const result = await transport.invoke("notify", { to: "+1", message: "hei" }, "tok");
+    const result = await transport.invoke("notify", { to: "+15550000001", message: "hei" }, "tok");
     expect(result.external_id).toBe("sent");
   });
 
   it("en HTTP-feil kaster 'telnyx_error_<status>'", async () => {
     vi.stubGlobal("fetch", async () => ({ ok: false, status: 401 }) as unknown as Response);
     const transport = new TelnyxTransport(() => Promise.resolve("+1"));
-    await expect(transport.invoke("notify", { to: "+1", message: "hei" }, "bad-key")).rejects.toThrow("telnyx_error_401");
+    await expect(transport.invoke("notify", { to: "+15550000001", message: "hei" }, "bad-key")).rejects.toThrow("telnyx_error_401");
   });
 });
 
@@ -91,10 +91,10 @@ describe("C: en ukjent handling kaster 'telnyx_unsupported_action_<action>'", ()
 });
 
 describe("D: firstWaveTools() registrerer begge telnyx.*-handlinger med korrekt risikoklasse", () => {
-  it("telnyx.notify er klasse B (reell sideeffekt)", () => {
+  it("telnyx.notify er klasse C (betalt SMS, Del 3)", () => {
     const tool = firstWaveTools().find((t) => t.tool_id === "telnyx" && t.action === "notify");
     expect(tool).toBeDefined();
-    expect(tool!.capability_class).toBe("B");
+    expect(tool!.capability_class).toBe("C");
     expect(tool!.credential_ref).toBe("JARVIS_TELNYX_API_KEY");
   });
 

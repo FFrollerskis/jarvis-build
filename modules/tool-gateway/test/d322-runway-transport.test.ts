@@ -138,10 +138,10 @@ describe("E: firstWaveTools() registrerer alle tre runway.*-handlinger med korre
     expect(tool!.credential_ref).toBe("JARVIS_RUNWAY_API_KEY");
   });
 
-  it("runway.generate_video er klasse B (ekte kostnad per kall, ALDRI live_test)", () => {
+  it("runway.generate_video er klasse C (ekte kostnad per kall, ALDRI live_test)", () => {
     const tool = firstWaveTools().find((t) => t.tool_id === "runway" && t.action === "generate_video");
     expect(tool).toBeDefined();
-    expect(tool!.capability_class).toBe("B");
+    expect(tool!.capability_class).toBe("C");
     expect(tool!.idempotent_external).toBe(false);
   });
 

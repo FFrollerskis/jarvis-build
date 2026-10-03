@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { JobContractSchema, type IdentityContext, type JobContract, type MemorySpace } from "@jarvis/contracts";
-import { withTenantTransaction, writeAudit } from "@jarvis/core";
+import { scanForSecrets, withTenantTransaction, writeAudit } from "@jarvis/core";
 import type { PolicyGateway } from "@jarvis/policy";
 import { GitPolicyError, assertRepoAllowed, assertTestCommand } from "./git-policy.ts";
 import type { TaskView, WorkflowAdapter } from "./workflow-adapter.ts";
@@ -30,7 +30,9 @@ export class TaskService {
     private readonly options: TaskServiceOptions = {}
   ) {}
 
-  async create(identity: IdentityContext, goal: string): Promise<TaskServiceResult<{ task_id: string }>> {
+  async create(identity: IdentityContext, rawGoal: string): Promise<TaskServiceResult<{ task_id: string }>> {
+    // Del 3 (JARVIS-013): målet lagres i kontrakten OG audit i klartekst - hemmeligheter fjernes først.
+    const goal = scanForSecrets(rawGoal).text;
     const decision = await this.policy.authorize({
       identity,
       toolCall: { tool_id: "tasks", action: "create_task", capability_class: "B", parameters: { goal } }
@@ -124,6 +126,19 @@ export class TaskService {
         })
       );
       return { ok: false, reason: "executive_command_disabled" };
+    }
+    // Del 3 (JARVIS-005/012): `tools:true` krever en EKSPLISITT, ikke-tom `allowed_tools` og en ikke-ubetrodd kontrakt.
+    if (submittedData["tools"] === true) {
+      const toolsReason =
+        contract.allowed_tools.length === 0 ? "job_tools_require_allowlist"
+        : contract.input.trust_level === "untrusted" ? "job_tools_untrusted_contract"
+        : undefined;
+      if (toolsReason) {
+        await withTenantTransaction(this.pool, identity.tenant_id, (client) =>
+          writeAudit(client, identity, { type: "task.rejected", reason: toolsReason, payload: { task_id: contract.task_id } })
+        );
+        return { ok: false, reason: toolsReason };
+      }
     }
     // Remediering del 2 (JARVIS-009/064): kodejobb-input valideres deterministisk FØR kø - repo må være allowlistet,
     // testkommando må være en kjent testløper (aldri en vilkårlig kommando fra en task contract).

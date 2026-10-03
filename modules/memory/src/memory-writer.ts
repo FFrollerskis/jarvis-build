@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import type { IdentityContext, MemorySpace, TrustLevel } from "@jarvis/contracts";
-import { writeAudit } from "@jarvis/core";
+import { containsSecret, writeAudit } from "@jarvis/core";
 import type { PolicyGateway } from "@jarvis/policy";
 import type { EmbeddingProvider } from "./embedding.ts";
 import type { ExistingMemoryHint, ExtractionAdapter, MemoryCandidate, MemoryType } from "./extraction.ts";
@@ -53,6 +53,8 @@ export class MemoryWriter {
 
   /** Registrer kilde + trekk ut kandidater + anvend dem. */
   async ingestText(identity: IdentityContext, source: SourceRef, text: string): Promise<ApplyOutcome[]> {
+    // Del 3 (JARVIS-013): tekst med en kjent hemmelighet lagres ALDRI i minnet (kallere redigerer først; dette er siste forsvar).
+    if (containsSecret(text)) return [];
     // D-373: kun BETRODDE kilder får se eksisterende minner (ubetrodd innhold skal aldri trekke ut/avsløre autoritativt minne).
     const hints = source.trust === "untrusted" ? [] : await this.relatedHints(identity, text);
     const candidates = await this.extractor.extract(text, identity, source.trust, hints);
@@ -281,6 +283,7 @@ export class MemoryWriter {
     if (subject.length < 1 || subject.length > PROPOSAL_MAX_SUBJECT || CONTROL.test(subject)) throw new Error("invalid_proposal_subject");
     if (content.length < 1 || content.length > PROPOSAL_MAX_CONTENT || CONTROL.test(content)) throw new Error("invalid_proposal_content");
     if (!PROPOSAL_TYPES.includes(type)) throw new Error("invalid_proposal_type");
+    if (containsSecret(subject) || containsSecret(content)) throw new Error("invalid_proposal_secret");
     const candidate: MemoryCandidate = {
       space: identity.memory_space_id as MemorySpace,
       type, subject, content, confidence: 0.5

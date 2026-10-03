@@ -81,7 +81,7 @@ describe("D: firstWaveTools() registrerer whatsapp.get_phone_number_info som kla
     expect(phoneNumberInfo.output_trust).toBe("untrusted");
     expect(phoneNumberInfo.idempotent_external).toBe(true);
     const notify = tools.find((t) => t.action === "notify")!;
-    expect(notify.capability_class).toBe("B");
+    expect(notify.capability_class).toBe("C");
     expect(notify.credential_ref).toBe("JARVIS_WHATSAPP_TOKEN");
     expect(notify.reversible).toBe(true);
     expect(notify.idempotent_external).toBe(false);

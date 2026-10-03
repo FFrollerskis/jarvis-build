@@ -1,6 +1,17 @@
 # PROJECT STATUS
 
-## AKTIV STATUS – Remediering del 2 av 10 (2026-10-02) – kun observerbare fakta
+## AKTIV STATUS – Remediering del 3 av 10 (2026-10-03) – kun observerbare fakta
+
+- **Fase/oppgave:** remediering del 3 («LLM-autoritet, verktøy, prompt injection og godkjenning»). Branch `remediation/03-authority-tool-safety`, **draft-PR, IKKE merget, ikke uavhengig reviewet**. Beslutninger: D-374…D-377, åpne spørsmål Q-47. Del 4 er IKKE startet.
+- **Gjort i repoet (kode + tester):** sentralt tool-manifest med invarianter; per-flate verktøysett (målt 38 382 → 602 skjema-tokens/runde); data-envelope med bevart trust; tur-taint + bundne engangs-bekreftelser (migrasjon 066, dashbord «Bekreftelser», `POST /confirmations`); klasse D minimumspipeline som hard port (nøkkel, kjede, postconditions, Telegram-varsling, avstemming); jobbidentitet fra kontrakt + `allowed_tools` i skjema og gateway; credential-binding til eieren + scope-vakt; step-up + vertsallowlist for kontrollflaten; innholdsbasert sensitivitetsruting (chat, råd, uttrekk, critic); reklassifisering + utgående validering; hemmelighetsdeteksjon; Telegram read-only med varig offset. Bevis og ærlig DEFERRED-liste: [`docs/remediation/PHASE_3_GATE.md`](remediation/PHASE_3_GATE.md); funn: [`FINDINGS_LEDGER.md`](remediation/FINDINGS_LEDGER.md).
+- **Dette er `CODE_FIXED`/`CONTAINED` i repoet – IKKE `VERIFIED` i runtime** og ingen erklæring om at Jarvis er «sikker mot prompt injection» - kun de testede invariantene.
+- **Atferdsendringer for eier (Q-47):** seks klasse D-handlinger er utilgjengelige til kjeden finnes (finans-betaling/refund/capture, Zapier `call_tool`, Outlook `send_mail`); URL-konfig via dashbord krever `JARVIS_DESTINATION_HOST_ALLOWLIST`; privat/helse/finans-innhold går ikke til gratis delt sky; Telegram er read-only.
+- **Operatørhandlinger:** sett `JARVIS_DESTINATION_HOST_ALLOWLIST` hvis URL-refs skal lagres; roter Infisical-nøklene som ble limt inn i chat (Q-47e); migrasjon 065/066 kjøres ved neste migrate.
+- **Neste oppgave:** uavhengig arkitekt-review av del 3; Tobias svarer på Q-47; del 4 først etter eksplisitt ordre.
+
+---
+
+## (HISTORISK) Remediering del 2 av 10 (2026-10-02) – kun observerbare fakta
 
 - **Fase/oppgave:** remediering del 2 («nettverk, autentisering, enheter, secrets og isolasjon»). Branch `remediation/02-identity-network-isolation` (**stablet på `remediation/01-containment-baseline` / PR #218 – del 1 er IKKE gjennomgått eller merget**), **draft-PR, IKKE merget**. Beslutning: D-364. Del 3 er IKKE startet.
 - **Gjort i repoet (kode + tester, kjørt lokalt mot ekte Postgres/Chromium/git):** alle kontrollruter bruker server-verifisert grant (identitetsfelt i body = 400, manglende grant 401, ugyldig/revokert 403); permanent enhetsrevokering; godkjenninger v2 bundet til tool/action/parametre/tenant/person/approver/utløp/nonce; Ed25519-validering; én aktiv sesjon per person (unik indeks); browser-gateway med tjeneste-token + egress-proxy + egen kontekst per kall + ikke-root/sandbox-krav; executive shell-gren fjernet og jobb-container-grensesnitt som feiler lukket; per-tjeneste secrets (ingen `env_file`), egne DB-roller for Infisical/Langfuse, ikke-root + `cap_drop ALL` + read-only; git-credential kun til github.com + allowlistet repo; én validert eier-identitet (ingen `person-tobias`); `jarvis_definer` eier alle SECURITY DEFINER-funksjoner; RLS-/FK-invarianter; nonce-CSP; sentral URL-sikring. Detaljer og bevis: [`docs/remediation/PHASE_2_GATE.md`](remediation/PHASE_2_GATE.md), status per funn: [`FINDINGS_LEDGER.md`](remediation/FINDINGS_LEDGER.md).

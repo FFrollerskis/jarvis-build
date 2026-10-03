@@ -63,3 +63,49 @@ export async function guardedFetch(input: string | URL, init?: RequestInit): Pro
   assertSafeVendorUrl(raw);
   return fetch(raw, init);
 }
+
+/**
+ * Del 3 (JARVIS-048): utgående parametre fra modell/klient valideres deterministisk FØR de når en leverandør.
+ * Alle avvik kaster `UnsafeOutboundParameterError` (aldri en stille «rensing» som endrer hva som sendes).
+ */
+export class UnsafeOutboundParameterError extends Error {
+  constructor(readonly reason: string) {
+    super(`unsafe_outbound_parameter:${reason}`);
+    this.name = "UnsafeOutboundParameterError";
+  }
+}
+
+/** En RFC 5322-header-verdi: ingen CR/LF/NUL/kontrolltegn (hemmelig Bcc/header-injeksjon), 1..max tegn. */
+export function assertHeaderValue(value: unknown, label: string, max = 200): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > max) throw new UnsafeOutboundParameterError(`${label}_invalid`);
+  if (CONTROL.test(value) || /[\u2028\u2029]/.test(value)) throw new UnsafeOutboundParameterError(`${label}_control_characters`);
+  return value;
+}
+
+const EMAIL_ADDRESS = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
+
+/** NØYAKTIG én ren adresse (`bruker@domene.tld`): ingen visningsnavn, kommaer, flere mottakere, vinkelparenteser eller kontrolltegn. */
+export function assertSingleEmailAddress(value: unknown, label = "to"): string {
+  const header = assertHeaderValue(value, label, 254);
+  if (!EMAIL_ADDRESS.test(header)) throw new UnsafeOutboundParameterError(`${label}_not_a_single_address`);
+  return header;
+}
+
+/** E.164: `+` og 8..15 sifre. SMS/WhatsApp-mottakere er alltid eksplisitte nummer. */
+export function assertE164(value: unknown, label = "to"): string {
+  if (typeof value !== "string" || !/^\+[1-9]\d{7,14}$/.test(value)) throw new UnsafeOutboundParameterError(`${label}_not_e164`);
+  return value;
+}
+
+const DANGEROUS_SHEET_FUNCTIONS = /\b(IMPORT(?:DATA|XML|HTML|FEED|RANGE)|HYPERLINK|IMAGE|WEBSERVICE|QUERY|GOOGLEFINANCE|EXECUTE)\s*\(/i;
+
+/** Celleverdier som kan evalueres som formler: ingen utgående/eksfiltrerende funksjoner selv når USER_ENTERED er eksplisitt tillatt. */
+export function assertNoDangerousSheetFormulas(cells: unknown): void {
+  const walk = (value: unknown): void => {
+    if (Array.isArray(value)) return value.forEach(walk);
+    if (typeof value === "string" && /^\s*[=+\-@]/.test(value) && DANGEROUS_SHEET_FUNCTIONS.test(value)) {
+      throw new UnsafeOutboundParameterError("sheet_formula_not_allowed");
+    }
+  };
+  walk(cells);
+}

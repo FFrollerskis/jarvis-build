@@ -1,4 +1,4 @@
-import type { CompleteInput } from "@jarvis/model-gateway";
+import { classifyContentSensitivity, type CompleteInput } from "@jarvis/model-gateway";
 import type { IdentityContext, MemorySpace, TrustLevel } from "@jarvis/contracts";
 import { z } from "zod";
 
@@ -264,6 +264,8 @@ export class LlmExtractionAdapter implements ExtractionAdapter {
       tenant_id: identity.tenant_id,
       session_id: identity.session_id,
       purpose: "EXTRACT",
+      // Del 3 (JARVIS-016): uttrekk går gjennom samme innholdsbaserte sensitivitetsregler - helse/finans/hemmeligheter ⇒ kun lokal behandler.
+      sensitivity: classifyContentSensitivity({ texts: [text], memory_spaces: [identity.memory_space_id] }).sensitivity,
       required_capabilities: ["structured_output"],
       request: {
         system: buildExtractionPrompt(existing),

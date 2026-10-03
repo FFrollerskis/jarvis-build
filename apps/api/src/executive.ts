@@ -1,13 +1,28 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import { ModelPurposeSchema } from "@jarvis/contracts";
 import type { ModelGateway, ToolExecutor } from "@jarvis/model-gateway";
-import type { ToolDefinition } from "@jarvis/provider-adapters";
 import type { ClaimedTask, JobContext } from "@jarvis/tasks";
+import { filterMeshToolsForJob, type MeshToolMapping } from "@jarvis/tool-gateway";
 
 export interface ExecutiveHandlerOptions {
   gateway: ModelGateway;
-  /** BO-11 §29: mesh-verktøy via trusted executor (Tool Gateway) - aldri bypass. */
-  tools?: { definitions: ToolDefinition[]; executor: ToolExecutor };
+  /**
+   * BO-11 §29 + Del 3 (JARVIS-005/012): mesh-verktøy via trusted executor (Tool Gateway) - aldri bypass.
+   * `all` er KANDIDATENE; handleren filtrerer dem mot jobbkontraktens `allowed_tools` (skjemaliste) og `executorFor` bygges per jobb med
+   * kontraktens egen identitet + kontrakten (så gatewayen håndhever det samme ved utførelse).
+   */
+  tools?: {
+    all: ReadonlyArray<MeshToolMapping>;
+    executorFor(task: ClaimedTask, allowed: ReadonlyArray<MeshToolMapping>): ToolExecutor;
+  };
+}
+
+/** `tools:true` uten eksplisitt verktøyliste, eller på en ubetrodd kontrakt, avvises deterministisk (Del 3). */
+export class ExecutiveToolsDeniedError extends Error {
+  constructor(readonly reason: "job_tools_require_allowlist" | "job_tools_untrusted_contract" | "job_tools_none_permitted") {
+    super(reason);
+    this.name = "ExecutiveToolsDeniedError";
+  }
 }
 
 /**
@@ -53,14 +68,20 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
         purpose: purpose.success ? purpose.data : ("BACKGROUND" as const),
         request: { messages: [{ role: "user" as const, content: input.prompt }], max_tokens: 1024 }
       };
-      // BO-11 (§29): tools=true gir modellen mesh-verktøy via trusted executor.
-      const result =
-        input.tools && opts.tools
-          ? await opts.gateway.completeWithTools(meshInput, {
-              tools: opts.tools.definitions,
-              executor: opts.tools.executor
-            })
-          : await opts.gateway.complete(meshInput);
+      // BO-11 (§29) + Del 3: tools=true gir modellen KUN verktøyene kontrakten eksplisitt tillater, med kontraktens egen identitet.
+      let result;
+      if (input.tools && opts.tools) {
+        if (task.contract.allowed_tools.length === 0) throw new ExecutiveToolsDeniedError("job_tools_require_allowlist");
+        if (task.contract.input.trust_level === "untrusted") throw new ExecutiveToolsDeniedError("job_tools_untrusted_contract");
+        const allowed = filterMeshToolsForJob(opts.tools.all, task.contract);
+        if (allowed.length === 0) throw new ExecutiveToolsDeniedError("job_tools_none_permitted");
+        result = await opts.gateway.completeWithTools(meshInput, {
+          tools: allowed.map((m) => m.def),
+          executor: opts.tools.executorFor(task, allowed)
+        });
+      } else {
+        result = await opts.gateway.complete(meshInput);
+      }
       return {
         text: result.text.slice(0, 4000),
         provider: result.provider,

@@ -141,10 +141,10 @@ describe("D: en ukjent handling kaster 'kling_unsupported_action_<action>'", () 
 });
 
 describe("E: firstWaveTools() registrerer begge kling.*-handlinger med korrekt risikoklasse", () => {
-  it("kling.generate_video er klasse B (ekte kostnad per kall, ALDRI live_test)", () => {
+  it("kling.generate_video er klasse C (ekte kostnad per kall, ALDRI live_test)", () => {
     const tool = firstWaveTools().find((t) => t.tool_id === "kling" && t.action === "generate_video");
     expect(tool).toBeDefined();
-    expect(tool!.capability_class).toBe("B");
+    expect(tool!.capability_class).toBe("C");
     expect(tool!.idempotent_external).toBe(false);
     expect(tool!.credential_ref).toBe("JARVIS_KLING_SECRET_KEY");
   });

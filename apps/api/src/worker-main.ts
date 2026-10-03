@@ -3,15 +3,15 @@
 import "./normalize-env.ts";
 import { systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit } from "./owner.ts";
-import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
+import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { assertProvidersHaveExplicitPricing, DEFAULT_PRICING, ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport, GmailTransport,
   GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, MeshToolExecutor, resolveModelToolSurface, PgGithubRateLimitStore,
-  ToolGateway, driveTransportsIfConfigured, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets
+  ToolGateway, assertManifestInvariants, buildToolManifest, createTurnContext, driveTransportsIfConfigured, firstWaveTools, jobIdentityFor, telegramClassDNotifier, parseDockerMutationTargets, parseGceMutationTargets
 } from "@jarvis/tool-gateway";
-import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
+import { BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
 import { SupportService, SupportTransport } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
 import { ProductService, ProductTransport } from "@jarvis/product";
@@ -173,7 +173,11 @@ const toolSecretProvider = new FallbackSecretProvider(
   infisicalSecretProvider,
   new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider())
 );
-const toolGateway = new ToolGateway(pool, policy, toolSecretProvider, ownerControls, infisicalSecretProvider);
+// Del 3 (JARVIS-013/043): samme HÅRDE klasse D-pipeline som API-prosessen (API/worker-parity); varsleren bindes rett under.
+const toolGateway = new ToolGateway(pool, policy, toolSecretProvider, ownerControls, infisicalSecretProvider, {
+  classDPipeline: { enforce: true },
+  credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: [owner.tenant_id], internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) }
+});
 const businessService = new BusinessService(pool);
 // UA-3 next slice (D-53): samme OpenLoopService-wiring som api - workeren sin
 // mesh-tool-executor maa kunne kalle de nye business-handlingene identisk.
@@ -448,8 +452,15 @@ for (const tool of firstWaveTools({
 // registrert på DENNE prosessens `toolGateway` (worker har en delmengde).
 // Hele registeret (`allMeshTools()`) eksponeres ALDRI for modellen.
 const modelToolSurface = resolveModelToolSurface(toolGateway, { onlyRegistered: true });
+const toolManifest = buildToolManifest(toolGateway.list());
+assertManifestInvariants(toolManifest);
 // Systemidentitet med unik sesjons-id per oppstart (ingen falsk fast `sess-worker`).
 const workerIdentity = systemIdentity(owner, "worker", { channel: "api" });
+toolGateway.setClassDNotifier(telegramClassDNotifier({
+  execute: (req) => toolGateway.execute({ ...req, identity: req.identity as never }),
+  secrets: toolSecretProvider,
+  identity: workerIdentity as never
+}));
 
 // D-180 (W1, D183 - retter D182 sitt REAL_INTERNAL_GAP-funn): @jarvis/watchdog
 // var FØR denne posten null-koblet til noen produksjonsprosess. Plassert HER,
@@ -536,7 +547,15 @@ worker.register(
     gateway,
     // D-351: 4000 → 20_000 (se mesh-bridge.ts sitt filhode for host-målt begrunnelse) - SAMME
     // grense som api-workeren (main.ts) bruker, uendret "identisk oppførsel"-presedens.
-    tools: { definitions: modelToolSurface.map((t) => t.def), executor: new MeshToolExecutor(toolGateway, workerIdentity, 20_000, modelToolSurface) }
+    // Del 3 (JARVIS-005/012): per-jobb identitet fra kontrakten, bakgrunnsflate, manifest + kontrakt håndhevet i gatewayen (API/worker-parity).
+    tools: {
+      all: modelToolSurface,
+      executorFor: (task, allowed) => new MeshToolExecutor(
+        toolGateway, jobIdentityFor(workerIdentity, task.contract), 20_000, [...allowed],
+        createTurnContext("background", String((task.contract.input.data as { prompt?: unknown })["prompt"] ?? "")),
+        { manifest: toolManifest, confirmations: new ConfirmationStore(pool), jobContract: task.contract }
+      )
+    }
   })
 );
 

@@ -227,7 +227,7 @@ describe("HOST FIX #1: normal API/worker-runtime wirer EnvSecretProvider inn i S
     // navngitte `toolSecretProvider`-konvensjon (se testen under) - regex-en oppdatert til
     // å matche variabelnavnet i stedet for et inline `new`-uttrykk, SAMME instans-identitet
     // fortsatt bevist (gitt inn TO ganger, som `readSecretProvider` OG `infisicalSecretProvider`).
-    expect(mainSource).toMatch(/const infisicalSecretProvider = new InfisicalSecretProvider\(\);[\s\S]*?const readSecretProvider = new FallbackSecretProvider\(\s*infisicalSecretProvider,\s*new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)\s*\);\s*const toolGateway = new ToolGateway\(pool, policy, readSecretProvider, ownerControls, infisicalSecretProvider\);/);
+    expect(mainSource).toMatch(/const infisicalSecretProvider = new InfisicalSecretProvider\(\);[\s\S]*?const readSecretProvider = new FallbackSecretProvider\(\s*infisicalSecretProvider,\s*new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)\s*\);\s*(?:\/\/[^\n]*\s*)*const toolGateway = new ToolGateway\(pool, policy, readSecretProvider, ownerControls, infisicalSecretProvider(?:, \{[\s\S]*?\})?\);/);
     // D-90: BusinessTransport-konstruktørkallet ble flerlinjet for å romme den
     // injiserte `marketingMemoryBriefSource(growthService)`-argumentet - samme
     // fem første argumenter (businessService/openLoopService/pool/toolGateway/
@@ -239,7 +239,7 @@ describe("HOST FIX #1: normal API/worker-runtime wirer EnvSecretProvider inn i S
     // Task #122 (D-213): samme hoisting som main.ts - `infisicalSecretProvider`
     // er nå en navngitt konstant, gitt inn i BÅDE lese-kjeden og `ToolGateway`
     // sitt `writableSecrets`-argument.
-    expect(workerSource).toMatch(/const infisicalSecretProvider = new InfisicalSecretProvider\(\);\s*const toolSecretProvider = new FallbackSecretProvider\(\s*infisicalSecretProvider,\s*new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)\s*\);\s*const toolGateway = new ToolGateway\(pool, policy, toolSecretProvider, ownerControls, infisicalSecretProvider\);/);
+    expect(workerSource).toMatch(/const infisicalSecretProvider = new InfisicalSecretProvider\(\);\s*const toolSecretProvider = new FallbackSecretProvider\(\s*infisicalSecretProvider,\s*new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)\s*\);\s*(?:\/\/[^\n]*\s*)*const toolGateway = new ToolGateway\(pool, policy, toolSecretProvider, ownerControls, infisicalSecretProvider(?:, \{[\s\S]*?\})?\);/);
     expect(workerSource).toMatch(/business: new BusinessTransport\(\s*businessService, openLoopService, pool, toolGateway, scoringService,\s*\[marketingMemoryBriefSource\(growthService\)\]\s*\)/);
   });
 });

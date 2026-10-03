@@ -269,14 +269,9 @@ describe("I: den nøstede identiteten er den EKTE kalleren sin - kan IKKE overst
     const result = await gateway.execute({
       identity: identityFor(DELEGATE, TENANT_B), tool_id: "support", action: "reply", parameters
     });
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      const data = result.data as { sent?: boolean; error?: string } | undefined;
-      // Fortsatt SCOPED (identity.tenant_id=B er ikke i owner_tenants=[A]) - krever en godkjenning,
-      // IKKE stille tillatt bare fordi parameters HEVDER tenant A.
-      expect(data?.sent).toBe(false);
-      expect(data?.error).toContain("class_d_missing_approval");
-    }
+    // Del 3 (JARVIS-005/012): gatewayen avviser nå selve avviket (parameters.tenant_id != identity.tenant_id) FØR noe kjøres -
+    // strengere enn tidligere «SCOPED krever godkjenning»: ingen sovereign-authority og ingen nøstet send.
+    expect(result).toEqual({ ok: false, reason: "scope_mismatch:tenant_id" });
     expect(emailFake.calls).toHaveLength(0);
   });
 });

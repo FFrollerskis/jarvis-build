@@ -271,7 +271,7 @@ describe("M: BO-05 daglig morgenlevering bruker DailyBrief.deliverViaTelegram() 
 
   it("sendTelegram-closuren finnes fortsatt (uendret) for TelegramCommandPoller sine generiske svar - denne fiksen fjerner den IKKE, kun morgenleverings-bruken av den", () => {
     expect(mainSource).toMatch(/const sendTelegram = async \(text: string\) => \{/);
-    expect(mainSource).toMatch(/\}, sendTelegram\)\.start\(\);/);
+    expect(mainSource).toMatch(/\}, sendTelegram, \{[\s\S]*?\}\)\.start\(\);/);
   });
 });
 

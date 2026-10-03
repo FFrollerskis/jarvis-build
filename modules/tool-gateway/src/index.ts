@@ -1,4 +1,5 @@
 export * from "./gateway.ts";
+export * from "./class-d-pipeline.ts";
 export * from "./integrations.ts";
 export * from "./home-assistant.ts";
 export * from "./daily-brief.ts";
@@ -17,3 +18,6 @@ export * from "./memory-transport.ts";
 export * from "./connector-registry.ts";
 export * from "./connector-health-sweep.ts";
 export * from "./owner-stated-memory.ts";
+export * from "./tool-manifest.ts";
+export * from "./turn-context.ts";
+export * from "./url-safety.ts";

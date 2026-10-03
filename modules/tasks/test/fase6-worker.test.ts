@@ -173,6 +173,20 @@ describe("Akseptanse 4 + delegeringskontrakt", () => {
     expect((await tasks.submit(identity, contract({ goal: "eier sender sin egen jobb" }))).ok).toBe(true);
   });
 
+  it("Del 3: tools:true med tom allowed_tools eller ubetrodd kontrakt avvises FØR kø, med audit", async () => {
+    const noList = contract({ goal: "tools uten liste", allowed_tools: [], input: { data: { prompt: "x", tools: true }, trust_level: "internal", provenance: "chat" } });
+    const r1 = await tasks.submit(identity, noList);
+    expect(r1.ok).toBe(false);
+    expect((r1 as { reason: string }).reason).toBe("job_tools_require_allowlist");
+    const untrusted = contract({ goal: "tools på ubetrodd", allowed_tools: ["calendar"], allowed_network_targets: [], allowed_memory_spaces: [], input: { data: { prompt: "x", tools: true }, trust_level: "untrusted", provenance: "e-post" } });
+    const r2 = await tasks.submit(identity, untrusted);
+    expect((r2 as { reason: string }).reason).toBe("job_tools_untrusted_contract");
+    const queued = await adminPool.query("SELECT 1 FROM tasks WHERE task_id = ANY($1)", [[noList.task_id, untrusted.task_id]]);
+    expect(queued.rowCount).toBe(0);
+    const ok = contract({ goal: "tools med liste", allowed_tools: ["calendar"], input: { data: { prompt: "x", tools: true }, trust_level: "internal", provenance: "chat" } });
+    expect((await tasks.submit(identity, ok)).ok).toBe(true);
+  });
+
   it("untrusted jobb med privat minne + utgående nettverk avvises strukturelt", async () => {
     const attack = contract({
       input: { data: {}, trust_level: "untrusted", provenance: "ukjent-dokument" },

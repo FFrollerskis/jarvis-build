@@ -222,17 +222,33 @@ export class MemoryRetriever {
 
   /** Kompakt kontekstblokk med kildeangivelse for Conversation Engine. */
   async contextFor(identity: IdentityContext, userText: string): Promise<string> {
+    return (await this.contextWithMeta(identity, userText)).text;
+  }
+
+  /**
+   * Del 3 (JARVIS-016/035): samme kontekstblokk + metadata om HVA som faktisk ble hentet (minnerom og `sensitivity`-kolonnen), slik at
+   * ruteren kan utlede sensitivitet fra innholdet i stedet for å anta «public». Tom kontekst = ingen minne er med i modellkallet.
+   */
+  async contextWithMeta(identity: IdentityContext, userText: string): Promise<{ text: string; spaces: string[]; sensitivities: string[] }> {
     const items = await this.search(identity, {
       spaces: [identity.memory_space_id],
       query: userText,
       limit: 5
     });
     if (items.length === 0) {
-      return "";
+      return { text: "", spaces: [], sensitivities: [] };
     }
     const lines = items.map(
       (item) => `- ${item.content} [kilde: ${item.source.kind}:${item.source.ref}]`
     );
-    return `Relevant minne (med kilde):\n${lines.join("\n")}`;
+    const ids = items.map((item) => item.memory_item_id);
+    const sensitivities = await withMemoryTransaction(this.pool, identity.tenant_id, [identity.memory_space_id], async (client) =>
+      ((await client.query("SELECT DISTINCT sensitivity FROM memory_items WHERE memory_item_id = ANY($1)", [ids])).rows as Array<{ sensitivity: string }>).map((r) => r.sensitivity)
+    );
+    return {
+      text: `Relevant minne (med kilde):\n${lines.join("\n")}`,
+      spaces: [...new Set(items.map((item) => item.space))],
+      sensitivities
+    };
   }
 }

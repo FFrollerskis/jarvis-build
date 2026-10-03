@@ -49,6 +49,15 @@ const record = (shape: z.ZodRawShape) => z.object(shape).strict() as unknown as 
  * har IKKE et `permission_id`-parameter (den OPPRETTER en) og bruker derfor
  * bevisst IKKE denne - den grovere fil-eksistens-sjekken er riktig for den.
  */
+/** Del 3: etterbetingelse for `create_permission` - en tilgang med forespurt rolle/type/mottaker finnes nå. */
+function drivePermissionCreated(data: JsonValue, parameters: Record<string, JsonValue>): boolean {
+  const permissions = (data as { permissions?: Array<{ role?: unknown; type?: unknown; emailAddress?: unknown; domain?: unknown }> } | null)?.permissions ?? [];
+  return permissions.some((p) =>
+    p?.role === parameters["role"] && p?.type === parameters["type"] &&
+    (parameters["email_address"] === undefined || p?.emailAddress === parameters["email_address"]) &&
+    (parameters["domain"] === undefined || p?.domain === parameters["domain"]));
+}
+
 function drivePermissionIdExists(data: JsonValue, parameters: Record<string, JsonValue>): boolean {
   const permissions = (data as { permissions?: Array<{ id?: unknown }> } | null)?.permissions ?? [];
   return permissions.some((p) => p?.id === parameters["permission_id"]);
@@ -141,11 +150,13 @@ export function firstWaveTools(
     {
       // Sending av e-post er klasse D i startfasen (INTEGRATIONS.md: alltid godkjenning).
       tool_id: "email", action: "send", description: "Send e-post (krever signert godkjenning)",
-      input_schema: record({ to: z.string(), subject: z.string(), body: z.string() }),
+      input_schema: record({ to: z.string().max(254), subject: z.string().max(200), body: z.string().max(100_000) }),
       capability_class: "D", scopes: ["mail.send"], reversible: false,
       rollback_procedure: "ikke reverserbar - derfor klasse D", idempotent_external: false,
       timeout_ms: 15_000, rate_limit_per_minute: 5, credential_ref: "JARVIS_EMAIL_TOKEN",
-      output_trust: "internal", transport: transport("email")
+      output_trust: "internal", transport: transport("email"),
+      // Del 3: ingen forhåndseksisterende tilstand - mottaker valideres i transporten, Gmail sin melding-ID er etterbetingelsen.
+      class_d_profile: "outbound_message"
     },
     {
       tool_id: "drive", action: "read_document", description: "Les dokument (untrusted ingestion)",
@@ -274,7 +285,8 @@ export function firstWaveTools(
       scopes: ["drive.delete"], reversible: false,
       rollback_procedure: "ikke reverserbar - derfor klasse D", idempotent_external: true,
       timeout_ms: 15_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_GOOGLE_TOKEN",
-      output_trust: "internal", transport: transport("drive"), preflight_action: "get_metadata", preflight_requires_target: true
+      output_trust: "internal", transport: transport("drive"), preflight_action: "get_metadata", preflight_requires_target: true,
+      postcondition_target_absent: true
     },
     {
       // Deling/tilgangsstyring er sikkerhetskritisk (kan eksponere innhold for
@@ -289,7 +301,8 @@ export function firstWaveTools(
       capability_class: "D", scopes: ["drive.permissions.write"], reversible: true,
       rollback_procedure: "fjern den opprettede tilgangen (delete_permission)", idempotent_external: false,
       timeout_ms: 10_000, rate_limit_per_minute: 15, credential_ref: "JARVIS_GOOGLE_TOKEN",
-      output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions", preflight_requires_target: true
+      output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions", preflight_requires_target: true,
+      postcondition_predicate: drivePermissionCreated
     },
     {
       tool_id: "drive", action: "update_permission", description: "Endre rollen på en eksisterende Drive-deling (krever signert godkjenning for delegerte identiteter)",
@@ -298,7 +311,8 @@ export function firstWaveTools(
       rollback_procedure: "sett rollen tilbake til forrige verdi", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 15, credential_ref: "JARVIS_GOOGLE_TOKEN",
       output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions",
-      preflight_requires_target: true, preflight_target_check: drivePermissionIdExists
+      preflight_requires_target: true, preflight_target_check: drivePermissionIdExists,
+      postcondition_predicate: (after, params) => (after as { permissions?: Array<{ id?: unknown; role?: unknown }> } | null)?.permissions?.some((p) => p?.id === params["permission_id"] && p?.role === params["role"]) === true
     },
     {
       tool_id: "drive", action: "delete_permission", description: "Fjern en eksisterende Drive-deling (krever signert godkjenning for delegerte identiteter)",
@@ -307,7 +321,8 @@ export function firstWaveTools(
       rollback_procedure: "gjenopprett tilgangen manuelt (ikke automatisk reverserbar)", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 15, credential_ref: "JARVIS_GOOGLE_TOKEN",
       output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions",
-      preflight_requires_target: true, preflight_target_check: drivePermissionIdExists
+      preflight_requires_target: true, preflight_target_check: drivePermissionIdExists,
+      postcondition_predicate: (after, params) => !drivePermissionIdExists(after, params)
     },
     // UA-2 P1B-A §2: e-post-vedlegg-ingestion - full meldingslisting (body-tekst
     // + vedleggs-MIME-metadata) og separat vedleggsnedlasting. Lagt til på
@@ -1462,7 +1477,7 @@ export function firstWaveTools(
     {
       tool_id: "github", action: "comment_on_issue", description: "Kommenter på et issue eller en PR (samme endepunkt)",
       input_schema: record({ repo: z.string(), issue_number: z.string(), body: z.string() }),
-      capability_class: "B", scopes: ["repo:write"], reversible: true,
+      capability_class: "C", scopes: ["repo:write"], reversible: true,
       rollback_procedure: "ingen automatisk sletting av kommentaren bygget - manuell oppfølging", idempotent_external: false,
       timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GITHUB_TOKEN",
       output_trust: "internal", transport: transport("github")
@@ -1502,7 +1517,7 @@ export function firstWaveTools(
     {
       tool_id: "github", action: "rerun_workflow_run", description: "Kjør en Actions-workflow-kjøring på nytt (valgfri failed_only for kun feilede jobber)",
       input_schema: record({ repo: z.string(), run_id: z.string(), failed_only: z.boolean().optional() }),
-      capability_class: "B", scopes: ["repo:write"], reversible: true,
+      capability_class: "C", scopes: ["repo:write"], reversible: true,
       rollback_procedure: "github.cancel_workflow_run", idempotent_external: false,
       timeout_ms: 15_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_GITHUB_TOKEN",
       output_trust: "internal", transport: transport("github")
@@ -1510,7 +1525,7 @@ export function firstWaveTools(
     {
       tool_id: "github", action: "cancel_workflow_run", description: "Avbryt en pågående Actions-workflow-kjøring",
       input_schema: record({ repo: z.string(), run_id: z.string() }),
-      capability_class: "B", scopes: ["repo:write"], reversible: true,
+      capability_class: "C", scopes: ["repo:write"], reversible: true,
       rollback_procedure: "github.rerun_workflow_run", idempotent_external: false,
       timeout_ms: 15_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_GITHUB_TOKEN",
       output_trust: "internal", transport: transport("github")
@@ -1544,7 +1559,8 @@ export function firstWaveTools(
       // Q-34-revisjon: `get_pull_request` kaster allerede på et ukjent
       // `pr_number` (404 er ikke i GITHUB_RETRYABLE_STATUS, live-transports.ts)
       // - strukturelt sikkerhetsnett, ikke en oppførselsendring.
-      preflight_action: "get_pull_request", preflight_requires_target: true
+      preflight_action: "get_pull_request", preflight_requires_target: true,
+      postcondition_predicate: (after) => (after as { merged?: unknown } | null)?.merged === true
     },
     {
       // Branch-sletting er PERMANENT hvis sha-en ikke er kjent fra andre steder -
@@ -1559,7 +1575,8 @@ export function firstWaveTools(
       credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "internal", transport: transport("github"),
       // Q-34-revisjon: `get_branch` kaster allerede på en ukjent branch (samme
       // begrunnelse som merge_pr over).
-      preflight_action: "get_branch", preflight_requires_target: true
+      preflight_action: "get_branch", preflight_requires_target: true,
+      postcondition_target_absent: true
     },
     {
       // D-105 (UA-5 kriterium 1): Docker-lesehandlinger - virker mot ETHVERT
@@ -1610,7 +1627,11 @@ export function firstWaveTools(
       rollback_procedure: "docker.redeploy_container på nytt med image-verdien fra preflight-inspeksjonen (before_state)",
       idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 10,
       credential_ref: "JARVIS_DOCKER_BIN", output_trust: "internal", transport: transport("docker"),
-      preflight_action: "inspect_container", preflight_requires_target: false,
+      preflight_action: "inspect_container", preflight_requires_target: false, allows_missing_preflight_target: true,
+      postcondition_predicate: (after, params) => {
+        const c = after as { status?: unknown; image?: unknown } | null;
+        return c?.status === "running" && c?.image === params["image"];
+      },
       parameterAuthorizer: dockerTargetAuthorizer("redeploy_container")
     },
     {
@@ -1630,6 +1651,7 @@ export function firstWaveTools(
       // INGEN legitim "stopp en container som ikke finnes"-tilstand - null
       // preflight betyr her alltid "mål finnes ikke".
       preflight_action: "inspect_container", preflight_requires_target: true,
+      postcondition_predicate: (after) => (after as { status?: unknown } | null)?.status !== "running",
       parameterAuthorizer: dockerTargetAuthorizer("stop_container")
     },
     {
@@ -1641,6 +1663,7 @@ export function firstWaveTools(
       credential_ref: "JARVIS_DOCKER_BIN", output_trust: "internal", transport: transport("docker"),
       // Q-34-revisjon: samme begrunnelse som stop_container over.
       preflight_action: "inspect_container", preflight_requires_target: true,
+      postcondition_predicate: (after) => (after as { status?: unknown } | null)?.status === "running",
       parameterAuthorizer: dockerTargetAuthorizer("start_container")
     },
     // D-337 (Google Cloud "servere"-sliceen, Tobias sin eksplisitte Q-41-
@@ -2946,7 +2969,7 @@ export function firstWaveTools(
      */
     {
       tool_id: "slack", action: "notify", description: "Send melding til en Slack-kanal (chat.postMessage)",
-      input_schema: record({ channel: z.string(), message: z.string().max(4000) }), capability_class: "B",
+      input_schema: record({ channel: z.string(), message: z.string().max(4000) }), capability_class: "C",
       scopes: ["chat:write"], reversible: true, rollback_procedure: "send korreksjonsmelding",
       idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_SLACK_BOT_TOKEN", output_trust: "internal", transport: transport("slack")
@@ -2987,7 +3010,7 @@ export function firstWaveTools(
      */
     {
       tool_id: "discord", action: "notify", description: "Send melding til en Discord-kanal (POST /channels/{id}/messages)",
-      input_schema: record({ channel_id: z.string(), message: z.string().max(2000) }), capability_class: "B",
+      input_schema: record({ channel_id: z.string(), message: z.string().max(2000) }), capability_class: "C",
       scopes: ["SEND_MESSAGES"], reversible: true, rollback_procedure: "send korreksjonsmelding",
       idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_DISCORD_BOT_TOKEN", output_trust: "internal", transport: transport("discord")
@@ -3025,7 +3048,7 @@ export function firstWaveTools(
      */
     {
       tool_id: "twilio", action: "notify", description: "Send SMS (POST /Messages.json)",
-      input_schema: record({ to: z.string(), message: z.string().max(1600) }), capability_class: "B",
+      input_schema: record({ to: z.string(), message: z.string().max(1600) }), capability_class: "C",
       scopes: ["sms:send"], reversible: true, rollback_procedure: "send korreksjonsmelding",
       idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_TWILIO_AUTH_TOKEN", output_trust: "internal", transport: transport("twilio")
@@ -3161,7 +3184,7 @@ export function firstWaveTools(
     },
     {
       tool_id: "google_sheets", action: "update_range", description: "Overskriv celleverdier i et område (PUT /v4/spreadsheets/{id}/values/{range})",
-      input_schema: record({ spreadsheet_id: z.string(), range: z.string().max(200), values: z.array(z.array(z.union([z.string(), z.number(), z.boolean()]))) }),
+      input_schema: record({ spreadsheet_id: z.string(), range: z.string().max(200), values: z.array(z.array(z.union([z.string(), z.number(), z.boolean()]))), value_input_option: z.enum(["RAW", "USER_ENTERED"]).optional() }),
       capability_class: "B", scopes: ["https://www.googleapis.com/auth/spreadsheets"], reversible: true,
       rollback_procedure: "ny update_range-kalling med forrige verdier", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GOOGLE_SHEETS_TOKEN",
@@ -3169,7 +3192,7 @@ export function firstWaveTools(
     },
     {
       tool_id: "google_sheets", action: "append_row", description: "Legg til en NY rad nederst i et område (POST /v4/spreadsheets/{id}/values/{range}:append)",
-      input_schema: record({ spreadsheet_id: z.string(), range: z.string().max(200), row: z.array(z.union([z.string(), z.number(), z.boolean()])) }),
+      input_schema: record({ spreadsheet_id: z.string(), range: z.string().max(200), row: z.array(z.union([z.string(), z.number(), z.boolean()])), value_input_option: z.enum(["RAW", "USER_ENTERED"]).optional() }),
       capability_class: "B", scopes: ["https://www.googleapis.com/auth/spreadsheets"], reversible: false,
       rollback_procedure: "slett raden manuelt i regnearket (ingen radidentifikator returneres av API-et)", idempotent_external: false,
       timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GOOGLE_SHEETS_TOKEN",
@@ -3436,7 +3459,7 @@ export function firstWaveTools(
     {
       // Sending av e-post er klasse D, SAMME begrunnelse som email.send over.
       tool_id: "microsoft_outlook", action: "send_mail", description: "Send e-post via Outlook (POST /me/sendMail, krever signert godkjenning)",
-      input_schema: record({ to: z.string(), subject: z.string(), body: z.string() }),
+      input_schema: record({ to: z.string().max(254), subject: z.string().max(200), body: z.string().max(100_000) }),
       capability_class: "D", scopes: ["Mail.Send"], reversible: false,
       rollback_procedure: "ikke reverserbar - derfor klasse D", idempotent_external: false,
       timeout_ms: 15_000, rate_limit_per_minute: 5, credential_ref: "JARVIS_OUTLOOK_TOKEN",
@@ -3468,7 +3491,7 @@ export function firstWaveTools(
     {
       tool_id: "n8n", action: "activate_workflow", description: "Aktiver en workflow (POST /api/v1/workflows/{id}/activate)",
       input_schema: record({ id: z.string() }),
-      capability_class: "B", scopes: ["workflow:write"], reversible: true,
+      capability_class: "C", scopes: ["workflow:write"], reversible: true,
       rollback_procedure: "deaktiver workflowen manuelt i n8n sitt UI (deactivate_workflow ikke bygget ennå)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_N8N_API_KEY", output_trust: "internal", transport: transport("n8n")
@@ -3518,7 +3541,7 @@ export function firstWaveTools(
     {
       tool_id: "whatsapp", action: "notify", description: "Send melding via WhatsApp (POST /{phone_number_id}/messages)",
       input_schema: record({ to: z.string(), message: z.string().max(4096) }),
-      capability_class: "B", scopes: ["whatsapp_business_messaging"], reversible: true,
+      capability_class: "C", scopes: ["whatsapp_business_messaging"], reversible: true,
       rollback_procedure: "send korreksjonsmelding", idempotent_external: false,
       timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_WHATSAPP_TOKEN", output_trust: "internal", transport: transport("whatsapp")
@@ -3541,7 +3564,7 @@ export function firstWaveTools(
     {
       tool_id: "make", action: "run_scenario", description: "Kjør en scenario (POST /api/v2/scenarios/{id}/run)",
       input_schema: record({ scenario_id: z.string() }),
-      capability_class: "B", scopes: ["scenarios:run"], reversible: true,
+      capability_class: "C", scopes: ["scenarios:run"], reversible: true,
       rollback_procedure: "ingen generell angrehandling - avhenger av hva scenarioet faktisk gjør, vurderes per scenario",
       idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_MAKE_API_KEY", output_trust: "internal", transport: transport("make")
@@ -3566,7 +3589,7 @@ export function firstWaveTools(
     {
       tool_id: "openai_images", action: "generate_image", description: "Generer et bilde fra en tekstbeskrivelse (POST /v1/images/generations, EKTE kostnad per kall)",
       input_schema: record({ prompt: z.string().max(4000), n: z.number().min(1).max(10).optional(), size: z.string().optional() }),
-      capability_class: "B", scopes: ["images:generate"], reversible: true,
+      capability_class: "C", scopes: ["images:generate"], reversible: true,
       rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kvote/kostnad, kan ikke og trenger ikke reverseres)",
       idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 10,
       credential_ref: "JARVIS_OPENAI_IMAGES_API_KEY", output_trust: "internal", transport: transport("openai_images")
@@ -3583,7 +3606,7 @@ export function firstWaveTools(
      */
     {
       tool_id: "telnyx", action: "notify", description: "Send SMS (POST /v2/messages)",
-      input_schema: record({ to: z.string(), message: z.string().max(1600) }), capability_class: "B",
+      input_schema: record({ to: z.string(), message: z.string().max(1600) }), capability_class: "C",
       scopes: ["telnyx:send"], reversible: true, rollback_procedure: "send korreksjonsmelding",
       idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_TELNYX_API_KEY", output_trust: "internal", transport: transport("telnyx")
@@ -3618,7 +3641,7 @@ export function firstWaveTools(
         promptImage: z.string(), promptText: z.string().max(1000).optional(),
         model: z.string().optional(), ratio: z.string().optional(), duration: z.number().min(1).max(60).optional()
       }),
-      capability_class: "B", scopes: ["video:generate"], reversible: true,
+      capability_class: "C", scopes: ["video:generate"], reversible: true,
       rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kreditt/kostnad, kan ikke og trenger ikke reverseres)",
       idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 5,
       credential_ref: "JARVIS_RUNWAY_API_KEY", output_trust: "internal", transport: transport("runway")
@@ -3649,7 +3672,7 @@ export function firstWaveTools(
         image_url: z.string(), prompt: z.string().max(1000).optional(),
         duration: z.string().optional(), aspect_ratio: z.string().optional()
       }),
-      capability_class: "B", scopes: ["video:generate"], reversible: true,
+      capability_class: "C", scopes: ["video:generate"], reversible: true,
       rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kreditt/kostnad, kan ikke og trenger ikke reverseres)",
       idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 5,
       credential_ref: "JARVIS_KLING_SECRET_KEY", output_trust: "internal", transport: transport("kling")
@@ -3681,7 +3704,7 @@ export function firstWaveTools(
       input_schema: record({
         prompt: z.string(), model: z.string().optional(), aspect_ratio: z.string().optional()
       }),
-      capability_class: "B", scopes: ["video:generate"], reversible: true,
+      capability_class: "C", scopes: ["video:generate"], reversible: true,
       rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kreditt/kostnad, kan ikke og trenger ikke reverseres)",
       idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 5,
       credential_ref: "JARVIS_GOOGLE_VEO_API_KEY", output_trust: "internal", transport: transport("google_veo")
@@ -3707,7 +3730,7 @@ export function firstWaveTools(
     {
       tool_id: "higgsfield", action: "generate_video", description: "Generer en video fra en tekstbeskrivelse via en NAVNGITT Higgsfield-modellsti (POST /{model_path}/text-to-video, EKTE kostnad per kall, asynkron - returnerer en request_id, poll get_task_status for resultat). model_path er PÅKREVD - Higgsfield er en multi-modell-markedsplass, ingen default-modell er valgt på forhånd",
       input_schema: record({ model_path: z.string(), prompt: z.string() }),
-      capability_class: "B", scopes: ["video:generate"], reversible: true,
+      capability_class: "C", scopes: ["video:generate"], reversible: true,
       rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kreditt/kostnad, kan ikke og trenger ikke reverseres)",
       idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 5,
       credential_ref: "JARVIS_HIGGSFIELD_KEY_SECRET", output_trust: "internal", transport: transport("higgsfield")

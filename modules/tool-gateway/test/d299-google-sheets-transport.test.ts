@@ -89,14 +89,14 @@ describe("C: GoogleSheetsTransport.invoke('update_range', ...) - PUT, ekte skriv
     vi.unstubAllEnvs();
   });
 
-  it("PUTer {range,values} til /v4/spreadsheets/{id}/values/{range}?valueInputOption=USER_ENTERED", async () => {
+  it("PUTer {range,values} til /v4/spreadsheets/{id}/values/{range}?valueInputOption=RAW", async () => {
     const calls = stubGoogleOAuthThenSheets({ ok: true, json: async () => ({ updatedRange: "Ark1!A1:B1" }) });
     const transport = new GoogleSheetsTransport();
     const result = await transport.invoke(
       "update_range", { spreadsheet_id: "abc123", range: "Ark1!A1:B1", values: [["hei", "verden"]] }, "refresh-token"
     );
     const sheetsCall = calls.find((c) => c.url.includes("sheets.googleapis.com"));
-    expect(sheetsCall!.url).toBe("https://sheets.googleapis.com/v4/spreadsheets/abc123/values/Ark1!A1%3AB1?valueInputOption=USER_ENTERED");
+    expect(sheetsCall!.url).toBe("https://sheets.googleapis.com/v4/spreadsheets/abc123/values/Ark1!A1%3AB1?valueInputOption=RAW");
     expect(sheetsCall!.init?.method).toBe("PUT");
     expect(JSON.parse(String(sheetsCall!.init?.body))).toEqual({ range: "Ark1!A1:B1", values: [["hei", "verden"]] });
     expect(result.data).toMatchObject({ updatedRange: "Ark1!A1:B1" });
@@ -113,14 +113,14 @@ describe("D: GoogleSheetsTransport.invoke('append_row', ...) - POST :append, ekt
     vi.unstubAllEnvs();
   });
 
-  it("POSTer {range,values:[[row]]} til .../values/{range}:append?valueInputOption=USER_ENTERED", async () => {
+  it("POSTer {range,values:[[row]]} til .../values/{range}:append?valueInputOption=RAW", async () => {
     const calls = stubGoogleOAuthThenSheets({ ok: true, json: async () => ({ updates: { updatedRange: "Ark1!A5:B5" } }) });
     const transport = new GoogleSheetsTransport();
     const result = await transport.invoke(
       "append_row", { spreadsheet_id: "abc123", range: "Ark1!A:B", row: ["ny", "rad"] }, "refresh-token"
     );
     const sheetsCall = calls.find((c) => c.url.includes("sheets.googleapis.com"));
-    expect(sheetsCall!.url).toBe("https://sheets.googleapis.com/v4/spreadsheets/abc123/values/Ark1!A%3AB:append?valueInputOption=USER_ENTERED");
+    expect(sheetsCall!.url).toBe("https://sheets.googleapis.com/v4/spreadsheets/abc123/values/Ark1!A%3AB:append?valueInputOption=RAW");
     expect(sheetsCall!.init?.method).toBe("POST");
     expect(JSON.parse(String(sheetsCall!.init?.body))).toEqual({ range: "Ark1!A:B", values: [["ny", "rad"]] });
     expect(result.external_id).toBe("Ark1!A5:B5");

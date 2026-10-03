@@ -86,7 +86,7 @@ describe("D: firstWaveTools() registrerer make.get_current_user som klasse A og 
     expect(currentUser.output_trust).toBe("untrusted");
     expect(currentUser.idempotent_external).toBe(true);
     const runScenario = tools.find((t) => t.action === "run_scenario")!;
-    expect(runScenario.capability_class).toBe("B");
+    expect(runScenario.capability_class).toBe("C");
     expect(runScenario.credential_ref).toBe("JARVIS_MAKE_API_KEY");
     expect(runScenario.reversible).toBe(true);
   });

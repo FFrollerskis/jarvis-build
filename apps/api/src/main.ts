@@ -19,7 +19,10 @@ import {
   assertRuntimeRoleSafe,
   configFromEnv,
   createPool,
-  runMigrations
+  ConfirmationStore,
+  runMigrations,
+  withTenantTransaction,
+  writeAudit
 } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { DeploymentService, DiagnosisService, IncidentService } from "@jarvis/incidents";
@@ -51,13 +54,13 @@ import {
 } from "@jarvis/memory";
 import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport,
-  GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
+  GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, assertManifestInvariants, buildToolManifest, memoryToolDefinitions, selectSurfaceTools,
   MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, resolveModelToolSurface, PgGithubRateLimitStore,
-  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
+  PgTelegramOffsetStore, TelegramCommandPoller, createTurnContext, jobIdentityFor, telegramClassDNotifier, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
 import {
-  BusinessEventSyncService, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService,
+  BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessEventSyncService, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService,
   ScoringService, isWeeklyBriefDay, runBusinessEventSyncForAllTenants, runBusinessWeeklyBriefForAllTenants,
   runOpenLoopSweepForAllTenants, runScoringSweepForAllTenants
 } from "@jarvis/business";
@@ -279,7 +282,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     infisicalSecretProvider,
     new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider())
   );
-  const toolGateway = new ToolGateway(pool, policy, readSecretProvider, ownerControls, infisicalSecretProvider);
+  // Del 3 (JARVIS-013/043): klasse D-pipelinen er HÅRD i produksjon (nøkkel + full kjede + out-of-band-varsler; varsleren bindes sent under).
+  const toolGateway = new ToolGateway(pool, policy, readSecretProvider, ownerControls, infisicalSecretProvider, {
+    classDPipeline: { enforce: true },
+    // Del 3 (JARVIS-003/005): eier-tilkoblede leverandør-credentials bindes til den autentiserte eieren i eierens tenant.
+    credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: [owner.tenant_id], internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) }
+  });
   // D-104: egen tjeneste over SAMME runtime-pool, ingen ny motor - gjenbruker
   // DEN SAMME `toolGateway`-instansen (registrert med github under) for
   // recovery-forsøk, ALDRI et direkte transport-kall (se recovery.ts).
@@ -547,6 +555,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // sin nye owner-varsling (se `notify` under) trenger DEN SAMME, allerede
   // ToolGateway-styrte send-banen, IKKE en egen, parallell varslingsmekanisme.
   // Avhenger KUN av `toolGateway`/`ownerIdentity`, begge allerede konstruert over.
+  toolGateway.setClassDNotifier(telegramClassDNotifier({
+    execute: (req) => toolGateway.execute({ ...req, identity: req.identity as never }),
+    secrets: readSecretProvider,
+    identity: ownerIdentity as never
+  }));
   const sendTelegram = async (text: string) => {
     for (let i = 0; i < text.length; i += 3900) {
       await toolGateway.execute({ identity: ownerIdentity as never, tool_id: "telegram", action: "notify",
@@ -843,7 +856,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         grants: grantService,
         devices: new DeviceService(pool),
         authority: ownerControlAuthority
-      }), toolGateway)),
+      }), toolGateway, (process.env["JARVIS_DESTINATION_HOST_ALLOWLIST"] ?? "").split(",").map((h) => h.trim()).filter((h) => h.length > 0))),
       // UA-11 Executive Mode "K2" (D-64): decision log/scenarios/risk register/
       // goals-OKRs - RENE journalposter over DEN SAMME `pool`-instansen som
       // resten av denne filen (`withMemoryTransaction`, se `GovernanceService`
@@ -862,6 +875,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // får KUN det eksplisitte lese-minimumssettet (`MODEL_SURFACE_ALLOWLIST`);
   // oppstarten feiler lukket hvis noe i flaten ikke er klasse A / ren lesing.
   const modelToolSurface = resolveModelToolSurface(toolGateway);
+  // Del 3: sentralt manifest avledet fra ALLE registrerte handlinger. Bruddet er en oppstartsfeil (fail closed): ingen modellflate med
+  // send/pay/delete/control, ingen klasse B/A for utgående handlinger, ingen eier-eksklusive navnerom på en flate.
+  const toolManifest = buildToolManifest(toolGateway.list());
+  assertManifestInvariants(toolManifest);
+  const confirmationStore = new ConfirmationStore(pool);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
   // registrert med Gmail/Calendar over) - ingen ny transport-vei.
   const businessEventSyncService = new BusinessEventSyncService(toolGateway, businessService, openLoopService);
@@ -884,9 +902,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     executiveHandler({
       gateway,
       tools: {
-        definitions: modelToolSurface.map((t) => t.def),
+        all: modelToolSurface,
         // D-351: 4000 → 20_000 (se mesh-bridge.ts sitt filhode for host-målt begrunnelse).
-        executor: new MeshToolExecutor(toolGateway, ownerIdentity, 20_000, modelToolSurface)
+        // Del 3 (JARVIS-005/012): per-jobb identitet fra den signerte kontrakten + bakgrunnsflate + kontrakten håndhevet i gatewayen.
+        executorFor: (task, allowed) => new MeshToolExecutor(
+          toolGateway, jobIdentityFor(ownerIdentity, task.contract), 20_000, [...allowed],
+          createTurnContext("background", String((task.contract.input.data as { prompt?: unknown })["prompt"] ?? "")),
+          { manifest: toolManifest, confirmations: confirmationStore, jobContract: task.contract }
+        )
       }
     })
   );
@@ -946,8 +969,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // sesjonen (rule 4: "kilde og task_id/session_id"). Feil her
       // SVELGES av kalleren (`conversation.ts` sin `.catch()`) - en
       // minnefeil skal ALDRI ødelegge selve samtalesvaret.
-      ingest: (identity, text) =>
-        memoryWriter.ingestText(identity, { kind: "conversation", ref: identity.session_id, trust: "trusted" }, text)
+      ingest: (identity, text, opts) =>
+        memoryWriter.ingestText(
+          identity,
+          // Del 3 (JARVIS-013): innlimt/lang tekst er ikke eierens egne ord -> untrusted (karantene), ikke aktivt betrodd minne.
+          { kind: "conversation", ref: identity.session_id, trust: opts?.pasted ? "untrusted" : "trusted" },
+          text
+        )
     },
     council: aiCouncil,
     // D-30 live-funn: samtalebanen (tekst + voice via /chat) har verktøykall.
@@ -963,10 +991,17 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // D-351: 4000 → 20_000 (se mesh-bridge.ts sitt filhode for host-målt begrunnelse).
       // D-369: eierens rå melding i turen (kun fra grant-autentisert chat) gir den deterministiske «uttrykkelig be om å huske»-sjekken;
       // `JARVIS_MEMORY_AUTO_APPROVE=false` slår auto-godkjenning av eier-uttrykte minner av (da går ALT via karantene).
+      // Del 3 (JARVIS-002/014/028): turen bærer flate + taint + grenser; executoren håndhever flate-allowlist, kallgrenser og taint-porten
+      // (bundne bekreftelser) i deterministisk kode. Modellen ser kun relevante verktøy per flate/intensjon (`select`), ikke hele settet.
       executorFor: (identity, turn) => new MeshToolExecutor(
         toolGateway, identity, 20_000, modelToolSurface,
-        process.env["JARVIS_MEMORY_AUTO_APPROVE"] === "false" ? undefined : turn
-      )
+        turn && process.env["JARVIS_MEMORY_AUTO_APPROVE"] === "false" ? { ...turn, user_message: "" } : turn,
+        { manifest: toolManifest, confirmations: confirmationStore }
+      ),
+      select: ({ surface, text }) => {
+        const selection = selectSurfaceTools(surface, text, modelToolSurface);
+        return { definitions: selection.selected.map((m) => m.def), limits: selection.limits };
+      }
     },
     // Task #121 (D-214): kosmetisk personlighetslag, se conversation.ts sin
     // `buildSystemPrompt()`/`loadPersonality()`.
@@ -1008,7 +1043,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // instans som resten av deps over (incidents.gateway osv.) - `/executive/
     // query` i server.ts begrenser seg selv til et hardkodet lese-kun
     // allowlist, ingen ny autorisasjonsmekanisme her.
-    executive: { gateway: toolGateway }
+    executive: { gateway: toolGateway },
+    confirmations: confirmationStore
   };
   // D-196: samme drain-løkke som worker-main.ts (linje ~486) - MEN den
   // logget ALDRI en `tick()`-feil her (feil under selve claim/complete/fail-
@@ -1121,7 +1157,19 @@ porter: se docs/RUNTIME_GATES.md`;
         return result.reply;
       }
       // REMEDIERING DEL 1: `/godkjenn`/`/avvis` (selvmodifikasjon) har ingen handler - frosset (JARVIS-042/043).
-    }, sendTelegram).start();
+    }, sendTelegram, {
+      // Del 3 (JARVIS-024): holdbar offset (restart spiller ikke av meldinger), fetch-timeout (standard i polleren) og
+      // varsling - polleren logger HVER feil strukturert; en vedvarende feil (3 på rad, deretter hver 30.) får i tillegg en audit-rad.
+      offsetStore: new PgTelegramOffsetStore(pool, process.env["JARVIS_TELEGRAM_TOKEN"]),
+      onFailure: (failure) => {
+        if (failure.consecutive !== 3 && failure.consecutive % 30 !== 0) return;
+        void withTenantTransaction(pool, owner.tenant_id, (client) =>
+          writeAudit(client, ownerIdentity, { type: "telegram.poll_degraded", reason: failure.kind, payload: { ...failure } })
+        ).catch((err: unknown) => {
+          console.error(JSON.stringify({ msg: "telegram_poll_degraded_audit_failed", error: err instanceof Error ? err.message : String(err) }));
+        });
+      }
+    }).start();
     // BO-05: reboot-durabel morgenlevering (DB-laas, Europe/Oslo, catch-up, aldri duplikat).
     // Bruker DailyBrief.deliverViaTelegram() (ikke den generiske sendTelegram-
     // closuren over) FORDI den idempotency-nøkler hver chunk på

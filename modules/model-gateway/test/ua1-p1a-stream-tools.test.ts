@@ -305,3 +305,22 @@ describe("P1A capability-routing + override (§36-§38)", () => {
     expect(validateToolArgs(schema, { a: 1, b: 2 })).toContain("unknown_field");
   });
 });
+
+describe("Del 3 (JARVIS-028): maxCallsPerRound begrenser verktøy-fan-out", () => {
+  it("overskytende kall i en runde utføres ikke", async () => {
+    const { pool } = fakePool();
+    let asked = false;
+    const adapter = new ScriptedAdapter(
+      () => "ferdig",
+      (req) => {
+        if (req.tool_exchanges || asked) return [];
+        asked = true;
+        return [1, 2, 3, 4, 5].map((i) => call(`c${i}`, "read_tasks", { limit: i }));
+      }
+    );
+    const { executor, executions } = countingExecutor();
+    const gateway = new ModelGateway({ pool, trace: new MemoryTraceSink(), providers: [adapter] });
+    await gateway.completeWithTools({ tenant_id: "tenant-a", request: REQUEST }, { tools: TOOLS, executor, maxCallsPerRound: 2 });
+    expect(executions.map((e) => e.tool_call_id)).toEqual(["c1", "c2"]);
+  });
+});

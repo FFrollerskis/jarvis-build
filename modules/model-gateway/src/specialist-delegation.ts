@@ -1,4 +1,5 @@
 import type { ToolCallRequest, ToolDefinition, ToolResultMessage } from "@jarvis/provider-adapters";
+import { classifyContentSensitivity } from "./content-sensitivity.ts";
 import type { ModelGateway, ToolExecutor } from "./model-gateway.ts";
 
 /**
@@ -113,7 +114,8 @@ export function createSpecialistDelegationExecutor(gateway: ModelGateway): ToolE
           ...(ctx.session_id !== undefined ? { session_id: ctx.session_id } : {}),
           ...(ctx.task_id !== undefined ? { task_id: ctx.task_id } : {}),
           purpose: "CODE",
-          sensitivity: "PUBLIC_OR_LOW_SENSITIVITY",
+          // Del 3 (JARVIS-016): oppgaveteksten klassifiseres - sensitivt innhold kan aldri sendes til en delt/gratis sky-spesialist.
+          sensitivity: classifyContentSensitivity({ texts: [task] }).sensitivity,
           providerPreference: [...SPECIALIST_PROVIDER_PREFERENCE],
           request: {
             system: SPECIALIST_SYSTEM_PROMPT,

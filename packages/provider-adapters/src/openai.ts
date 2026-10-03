@@ -13,6 +13,7 @@ import {
   type StreamHandler,
   type ToolCallRequest
 } from "./types.ts";
+import { renderToolResultText } from "./tool-result-envelope.ts";
 
 /** OpenAI Chat Completions-adapter (UA-1 baseline). Nøkkel fra miljø/vault - aldri kode. */
 export class OpenAiAdapter implements ModelProviderAdapter {
@@ -46,7 +47,7 @@ export class OpenAiAdapter implements ModelProviderAdapter {
         }))
       });
       for (const r of ex.results) {
-        messages.push({ role: "tool", tool_call_id: r.tool_call_id, content: JSON.stringify(r.output ?? r.error_category ?? null) });
+        messages.push({ role: "tool", tool_call_id: r.tool_call_id, content: renderToolResultText(r) });
       }
     }
     return {

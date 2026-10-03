@@ -102,10 +102,10 @@ describe("D: en ukjent handling kaster 'discord_unsupported_action_<action>'", (
 });
 
 describe("E: firstWaveTools() registrerer alle fire discord.*-handlinger med korrekt risikoklasse", () => {
-  it("discord.notify er klasse B (reell sideeffekt)", () => {
+  it("discord.notify er klasse C (utgående melding, Del 3)", () => {
     const tool = firstWaveTools().find((t) => t.tool_id === "discord" && t.action === "notify");
     expect(tool).toBeDefined();
-    expect(tool!.capability_class).toBe("B");
+    expect(tool!.capability_class).toBe("C");
     expect(tool!.credential_ref).toBe("JARVIS_DISCORD_BOT_TOKEN");
   });
 

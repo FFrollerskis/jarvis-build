@@ -4,7 +4,8 @@ import type { JobContract } from "@jarvis/contracts";
 import { MemoryTraceSink, ModelGateway, type ToolExecutor } from "@jarvis/model-gateway";
 import { ScriptedAdapter, type ToolCallRequest, type ToolResultMessage } from "@jarvis/provider-adapters";
 import type { ClaimedTask, JobContext } from "@jarvis/tasks";
-import { ExecutiveCommandDisabledError, executiveHandler } from "../src/executive.ts";
+import type { MeshToolMapping } from "@jarvis/tool-gateway";
+import { ExecutiveCommandDisabledError, ExecutiveToolsDeniedError, executiveHandler } from "../src/executive.ts";
 
 /**
  * BO-11.1 §9-§10: api-workeren og worker-containeren registrerer SAMME delte
@@ -25,12 +26,16 @@ function fakePool(): pg.Pool {
   return { connect: async () => client } as unknown as pg.Pool;
 }
 
-const TOOLS = [
+const TOOLS: MeshToolMapping[] = [
   {
-    name: "read_calendar_today",
-    description: "Les kalender",
-    input_schema: { type: "object", properties: {}, required: [], additionalProperties: false }
-  }
+    def: {
+      name: "read_calendar_today",
+      description: "Les kalender",
+      input_schema: { type: "object", properties: {}, required: [], additionalProperties: false }
+    },
+    tool_id: "calendar",
+    action: "read_events"
+  } as unknown as MeshToolMapping
 ];
 
 function recordingExecutor(): { executor: ToolExecutor; keys: string[] } {
@@ -63,11 +68,14 @@ function newGateway(): ModelGateway {
   return new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [adapter] });
 }
 
-function makeTask(data: Record<string, unknown>): ClaimedTask {
+function makeTask(data: Record<string, unknown>, extra: Partial<JobContract> = {}): ClaimedTask {
   return {
     task_id: "task-parity-1",
     tenant_id: "tenant-personal",
-    contract: { goal: "morgenstatus", input: { data }, allowed_tools: [] } as unknown as JobContract,
+    contract: {
+      goal: "morgenstatus", owner_person_id: "person-tobias", tenant_id: "tenant-personal", allowed_memory_spaces: ["project"],
+      input: { data, trust_level: "internal", provenance: "test" }, allowed_tools: ["calendar"], ...extra
+    } as unknown as JobContract,
     attempts: 1,
     checkpoint: null
   };
@@ -84,10 +92,10 @@ describe("BO-11.1 §10: executive-handler-paritet api ↔ worker-container", () 
   it("samme tools-jobb gir semantisk likt resultat i begge konfigurasjoner - samme idempotensnøkkel", async () => {
     const api = recordingExecutor();
     const workerC = recordingExecutor();
-    const apiHandler = executiveHandler({ gateway: newGateway(), tools: { definitions: TOOLS, executor: api.executor } });
+    const apiHandler = executiveHandler({ gateway: newGateway(), tools: { all: TOOLS, executorFor: () => api.executor } });
     const workerHandler = executiveHandler({
       gateway: newGateway(),
-      tools: { definitions: TOOLS, executor: workerC.executor }
+      tools: { all: TOOLS, executorFor: () => workerC.executor }
     });
     const task = makeTask({ prompt: "hva skjer i dag?", tools: true, purpose: "BACKGROUND" });
     const apiResult = await apiHandler(task, ctx);
@@ -100,6 +108,28 @@ describe("BO-11.1 §10: executive-handler-paritet api ↔ worker-container", () 
     // §19: idempotensnøkkelen er identisk (tenant+task+tool+args) uansett hvem som claimet:
     expect(api.keys).toEqual(workerC.keys);
     expect(api.keys).toHaveLength(1);
+  });
+
+  it("Del 3: tools:true med tom allowed_tools / ubetrodd kontrakt / ingen tillatt verktøy avvises før noe modellkall", async () => {
+    const exec = recordingExecutor();
+    const handler = executiveHandler({ gateway: newGateway(), tools: { all: TOOLS, executorFor: () => exec.executor } });
+    const data = { prompt: "hva skjer?", tools: true, purpose: "BACKGROUND" };
+    await expect(handler(makeTask(data, { allowed_tools: [] }), ctx)).rejects.toMatchObject({ reason: "job_tools_require_allowlist" });
+    await expect(handler(makeTask(data, { input: { data, trust_level: "untrusted", provenance: "email" } as never }), ctx)).rejects.toBeInstanceOf(ExecutiveToolsDeniedError);
+    await expect(handler(makeTask(data, { allowed_tools: ["github"] }), ctx)).rejects.toMatchObject({ reason: "job_tools_none_permitted" });
+    expect(exec.keys).toEqual([]);
+  });
+
+  it("Del 3: skjemalisten filtreres på tool_id OG tool_id.action", async () => {
+    const seen: string[][] = [];
+    const handler = executiveHandler({
+      gateway: newGateway(),
+      tools: { all: TOOLS, executorFor: (_t, allowed) => { seen.push(allowed.map((m) => `${m.tool_id}.${m.action}`)); return recordingExecutor().executor; } }
+    });
+    const data = { prompt: "hva skjer?", tools: true, purpose: "BACKGROUND" };
+    await handler(makeTask(data, { allowed_tools: ["calendar.read_events"] }), ctx);
+    expect(seen).toEqual([["calendar.read_events"]]);
+    await expect(handler(makeTask(data, { allowed_tools: ["calendar.create_event"] }), ctx)).rejects.toMatchObject({ reason: "job_tools_none_permitted" });
   });
 
   it("prompt-jobb uten tools går via mesh (aldri echo) i begge konfigurasjoner", async () => {

@@ -44,9 +44,10 @@ describe("A: apps/api/src/main.ts registrerer memory.search i SAMME additionalTo
     expect(mainSource).toMatch(/import\s*\{[^}]*LlmExtractionAdapter[^}]*\}\s*from\s*"@jarvis\/memory"/s);
     expect(mainSource).not.toMatch(/import\s*\{[^}]*RuleBasedExtractor[^}]*\}\s*from\s*"@jarvis\/memory"/s);
     expect(mainSource).toContain("new MemoryWriter(pool, memoryEmbedding, new LlmExtractionAdapter(gateway), policy)");
-    expect(mainSource).toContain(
-      'ingest: (identity, text) =>\n        memoryWriter.ingestText(identity, { kind: "conversation", ref: identity.session_id, trust: "trusted" }, text)'
-    );
+    // Del 3 (JARVIS-013): innlimt/lang tekst (opts.pasted) er ikke eierens egne ord -> untrusted (karantene).
+    expect(mainSource).toContain("ingest: (identity, text, opts) =>");
+    expect(mainSource).toContain('trust: opts?.pasted ? "untrusted" : "trusted"');
+    expect(mainSource).toContain("memoryWriter.ingestText(");
   });
 
   it("kaller memoryToolDefinitions(new MemorySearchTransport(memoryRetriever, memoryWriter)) INNI additionalTools - IKKE et separat, parallelt registreringssted", () => {

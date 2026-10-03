@@ -124,10 +124,10 @@ describe("E: firstWaveTools() registrerer alle tre google_veo.*-handlinger med k
     expect(tool!.credential_ref).toBe("JARVIS_GOOGLE_VEO_API_KEY");
   });
 
-  it("google_veo.generate_video er klasse B (ekte kostnad per kall, ALDRI live_test)", () => {
+  it("google_veo.generate_video er klasse C (ekte kostnad per kall, ALDRI live_test)", () => {
     const tool = firstWaveTools().find((t) => t.tool_id === "google_veo" && t.action === "generate_video");
     expect(tool).toBeDefined();
-    expect(tool!.capability_class).toBe("B");
+    expect(tool!.capability_class).toBe("C");
     expect(tool!.idempotent_external).toBe(false);
   });
 

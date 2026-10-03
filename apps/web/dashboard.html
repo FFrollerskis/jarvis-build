@@ -318,6 +318,13 @@
     </div>
   </section>
   <section>
+    <!-- Del 3 (JARVIS-002/014): handlinger Jarvis vil utføre mens ubetrodd innhold (e-post, web, verktøyoutput, tale) er med i grunnlaget
+         venter her. Bekreftelsen er bundet til nøyaktig verktøy+parametre+mottaker, enhet og utløp, og kan brukes én gang. Via egen grant-rute (/confirmations). -->
+    <h2>Bekreftelser</h2>
+    <div id="confirmations"><p class="empty">Laster …</p></div>
+    <div class="action-result" id="confirmations-result"></div>
+  </section>
+  <section>
     <!-- D-367: minneforslag fra Jarvis (memory.propose) ligger i KARANTENE til du godkjenner dem her. Godkjenning går via
          egen grant-rute (/memory/proposals) - modellen kan aldri godkjenne sine egne forslag. -->
     <h2>Minneforslag</h2>
@@ -1779,6 +1786,63 @@
       .catch((err) => { memoryProposalsResultEl.textContent = "Feil: " + err.message; btn.disabled = false; });
   });
 
+  const confirmationsEl = document.getElementById("confirmations");
+  const confirmationsResultEl = document.getElementById("confirmations-result");
+
+  /** Del 3: SAMME kroppsform som de andre grant-rutene; egen rute og eget server-allowlist (`CONFIRMATION_ACTIONS`). */
+  async function confirmationsCall(action, parameters) {
+    const active = await ensureGrant();
+    const res = await fetch("/confirmations", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant_token: active.grant_token, action, parameters: parameters || {} })
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.ok) throw new Error(action + ": " + (body.reason || body.error || res.status));
+    return body.data;
+  }
+
+  function renderConfirmations(data) {
+    const items = Array.isArray(data) ? data : [];
+    if (items.length === 0) {
+      confirmationsEl.innerHTML = '<p class="empty">Ingen handlinger venter på bekreftelse.</p>';
+      return;
+    }
+    confirmationsEl.innerHTML = items.map((c) => {
+      const id = escapeHtml(c.confirmation_id || "");
+      return '<div class="card">' +
+        '<span class="pill">' + escapeHtml((c.tool_id || "") + "." + (c.action || "")) + "</span>" +
+        '<div class="meta">' + escapeHtml(JSON.stringify(c.summary || {})) + "</div>" +
+        '<div class="meta">Årsak: ' + escapeHtml((c.taint_reasons || []).join(", ")) + " · utløper " + escapeHtml(c.expires_at || "") + "</div>" +
+        '<button class="btn small" data-confirm-approve data-confirm-id="' + id + '">Bekreft</button> ' +
+        '<button class="btn small" data-confirm-reject data-confirm-id="' + id + '">Avvis</button>' +
+        "</div>";
+    }).join("");
+  }
+
+  async function loadConfirmations() {
+    try {
+      renderConfirmations(await confirmationsCall("list"));
+    } catch (err) {
+      confirmationsEl.innerHTML = '<p class="empty">Kunne ikke hente bekreftelser: ' + escapeHtml(err.message) + "</p>";
+    }
+  }
+
+  confirmationsEl.addEventListener("click", (e) => {
+    const approve = e.target.closest("[data-confirm-approve]");
+    const reject = e.target.closest("[data-confirm-reject]");
+    const btn = approve || reject;
+    if (!btn) return;
+    btn.disabled = true;
+    confirmationsResultEl.textContent = "";
+    confirmationsCall("decide", { confirmation_id: btn.dataset.confirmId, decision: approve ? "approve" : "reject" })
+      .then(() => {
+        confirmationsResultEl.textContent = approve ? "Bekreftet. Be Jarvis utføre handlingen på nytt (gjelder én gang)." : "Avvist.";
+        return loadConfirmations();
+      })
+      .catch((err) => { confirmationsResultEl.textContent = "Feil: " + err.message; btn.disabled = false; });
+  });
+
   async function loadAll() {
     refreshBtn.disabled = true;
     statusEl.textContent = "Laster …";
@@ -1806,6 +1870,7 @@
       renderDelegationBoard(delegationData);
       statusEl.textContent = "Oppdatert " + new Date().toLocaleTimeString("nb-NO");
       void loadMemoryProposals();
+      void loadConfirmations();
     } catch (err) {
       statusEl.textContent = "Feil: " + err.message;
     } finally {

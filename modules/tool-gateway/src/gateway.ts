@@ -2,6 +2,7 @@ import type pg from "pg";
 import { z } from "zod";
 import type { CapabilityClass, IdentityContext, JobContract, JsonValue, TrustLevel } from "@jarvis/contracts";
 import { withTenantTransaction, writeAudit } from "@jarvis/core";
+import { assessClassDPipeline, isClassDExempt, isNotFoundError, type ClassDNotifier, type ClassDPipelineOptions } from "./class-d-pipeline.ts";
 import { isSelfRecoveryAction, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
 
 /** Secrets bak adapter (D-16): env/SOPS nå; Infisical/OpenBao (Q-05, krever Docker) senere. */
@@ -288,10 +289,30 @@ export interface ToolDefinition {
    * mekanisme i gatewayen, ingen docker-spesifikk kode her.
    */
   parameterAuthorizer?: (parameters: Record<string, JsonValue>, identity: IdentityContext) => { allowed: boolean; reason: string };
+  /**
+   * Del 3 (JARVIS-013/043): `true` når et slette-/fjerne-verktøy bekrefter etterbetingelsen ved at readback svarer «finnes ikke»
+   * (kastet not-found eller `data: null`). Uten dette kan en vellykket sletting aldri verifiseres av en readback.
+   */
+  postcondition_target_absent?: boolean;
+  /**
+   * Del 3: `true` når `preflight_requires_target` er BEVISST false (f.eks. første deploy av en container - «finnes ikke ennå» er en gyldig
+   * tilstand), slik at klasse D-pipelinen aksepterer en nullable før-tilstand uten å kreve eksisterende mål.
+   */
+  allows_missing_preflight_target?: boolean;
+  /** Del 3: `outbound_message` = ingen forhåndseksisterende tilstand; mottaker valideres i transporten og leverandørens bekreftede ID er etterbetingelsen. */
+  class_d_profile?: "outbound_message";
+}
+
+/**
+ * Del 3: `allowed_tools`-oppføring = `tool_id` (alle handlinger i verktøyet) ELLER `tool_id.action` (kun den handlingen).
+ * Tom liste tillater ingenting.
+ */
+export function jobContractAllows(allowed: readonly string[], toolId: string, action: string): boolean {
+  return allowed.includes(toolId) || allowed.includes(`${toolId}.${action}`);
 }
 
 export type ToolResult =
-  | { ok: true; external_id?: string; data?: JsonValue; output_trust: TrustLevel; deduplicated: boolean }
+  | { ok: true; external_id?: string; data?: JsonValue; output_trust: TrustLevel; deduplicated: boolean; notified?: boolean }
   | { ok: false; reason: string };
 
 /**
@@ -300,6 +321,24 @@ export type ToolResult =
  * idempotensdedupe → adapter → audit (credential-ref + ekstern ID, aldri selve
  * secreten) → output klassifisert som untrusted der kilden er ekstern.
  */
+/**
+ * Del 3 (JARVIS-003/005/035): `credentialBinding` binder eier-tilkoblede leverandør-credentials til den autentiserte eieren i eierens
+ * tenant(s). `internalRefs` (interne, tenant-skopede referanser uten leverandør-secret) er unntatt. Uten binding oppfører gatewayen seg som før.
+ */
+export interface CredentialBinding {
+  owner_person_id: string;
+  owner_tenants: readonly string[];
+  internalRefs: ReadonlySet<string>;
+}
+
+export interface ToolGatewayOptions {
+  classDPipeline?: ClassDPipelineOptions;
+  credentialBinding?: CredentialBinding;
+}
+
+/** Parameterfelt som er identitet/scope - utledes av den autentiserte identiteten, aldri av en modell- eller klientverdi. */
+const IDENTITY_PARAMETER_FIELDS = ["tenant_id", "person_id", "actor_person_id", "owner_person_id"] as const;
+
 export class ToolGateway {
   private readonly tools = new Map<string, ToolDefinition>();
   /** BO-03: connector-health per tool_id (healthy/degraded/auth_failed/rate_limited/unavailable). */
@@ -326,8 +365,22 @@ export class ToolGateway {
      * worker-main.ts), gitt en gang til her, eksplisitt for skriving - ALDRI
      * en egen, parallell Infisical-tilkobling.
      */
-    private readonly writableSecrets?: WritableSecretProvider
-  ) {}
+    private readonly writableSecrets?: WritableSecretProvider,
+    /** Del 3: valgfrie harde porter. Av som standard for testhjelpere; produksjon slår dem på (main.ts/worker-main.ts). */
+    private readonly options?: ToolGatewayOptions
+  ) {
+    this.classDPipeline = options?.classDPipeline;
+    this.classDNotifier = options?.classDPipeline?.notifier;
+  }
+
+  private readonly classDPipeline: ClassDPipelineOptions | undefined;
+
+  private classDNotifier: ClassDNotifier | undefined;
+
+  /** Del 3: sen binding (varsleren trenger selve gatewayen for Telegram-transporten). */
+  setClassDNotifier(notifier: ClassDNotifier): void {
+    this.classDNotifier = notifier;
+  }
 
   /**
    * Task #119 (integrasjons-dashboard, D-211): presence-sjekk for eierens
@@ -397,12 +450,43 @@ export class ToolGateway {
     if (!definition) {
       return this.deny(request, "unknown_tool");
     }
-    if (request.jobContract && !request.jobContract.allowed_tools.includes(request.tool_id)) {
+    if (request.jobContract && !jobContractAllows(request.jobContract.allowed_tools, request.tool_id, request.action)) {
       return this.deny(request, "tool_not_in_job_contract");
+    }
+    // Del 3 (JARVIS-005/012): en jobb kan aldri handle som en annen person/tenant enn den signerte kontrakten sier.
+    if (
+      request.jobContract &&
+      (request.jobContract.owner_person_id !== request.identity.person_id || request.jobContract.tenant_id !== request.identity.tenant_id)
+    ) {
+      return this.deny(request, "job_identity_mismatch");
     }
     const input = definition.input_schema.safeParse(request.parameters);
     if (!input.success) {
       return this.deny(request, "invalid_parameters");
+    }
+    // Del 3 (JARVIS-005/035): identitets-/scope-felt i parametrene må samsvare med den autentiserte identiteten (gatewayen avviser avvik).
+    const binding = this.options?.credentialBinding;
+    const isOwner = binding
+      ? request.identity.person_id === binding.owner_person_id && binding.owner_tenants.includes(request.identity.tenant_id) && request.identity.delegation_id === undefined
+      : false;
+    for (const field of IDENTITY_PARAMETER_FIELDS) {
+      const supplied = request.parameters[field];
+      if (supplied === undefined || supplied === null) continue;
+      const expected = field === "tenant_id" ? request.identity.tenant_id : request.identity.person_id;
+      // `owner_person_id` er «eier/ansvarlig» i CRM/styring: bare den suverene eieren kan tildele en annen person.
+      if (supplied !== expected && !(field === "owner_person_id" && isOwner)) {
+        return this.deny(request, `scope_mismatch:${field}`);
+      }
+    }
+    if (request.jobContract) {
+      const space = request.parameters["memory_space"] ?? request.parameters["memory_space_id"];
+      if (typeof space === "string" && !request.jobContract.allowed_memory_spaces.includes(space)) {
+        return this.deny(request, "job_memory_space_not_allowed");
+      }
+    }
+    // Eier-tilkoblede leverandør-credentials kan bare brukes av den autentiserte eieren i eierens tenant (aldri en annen person/tenant/delegat).
+    if (binding && definition.credential_ref !== "" && !binding.internalRefs.has(definition.credential_ref) && !isOwner) {
+      return this.deny(request, "credential_not_bound_to_identity");
     }
     const decision = await this.policy.authorize({
       identity: request.identity,
@@ -489,6 +573,27 @@ export class ToolGateway {
       return this.deny(request, "credential_unavailable");
     }
 
+    // Del 3 (JARVIS-013/043): klasse D-pipelinen er en HARD port - uten hele kjeden er handlingen utilgjengelig (fail-closed).
+    const classDGoverned = this.classDPipeline?.enforce === true && definition.capability_class === "D" && !isClassDExempt(definition);
+    if (classDGoverned) {
+      const assessment = assessClassDPipeline(definition);
+      if (!assessment.complete) {
+        return this.deny(request, `class_d_pipeline_incomplete:${assessment.missing.join(",")}`);
+      }
+      if (!request.idempotency_key) {
+        return this.deny(request, "class_d_idempotency_key_required");
+      }
+      let notifierReady = false;
+      try {
+        notifierReady = this.classDNotifier ? await this.classDNotifier.ready() : false;
+      } catch {
+        notifierReady = false;
+      }
+      if (!notifierReady) {
+        return this.deny(request, this.classDNotifier ? "class_d_notifier_not_ready" : "class_d_notifier_missing");
+      }
+    }
+
     // SECURITY FIX #2 (D-68): DEN OPPRINNELIGE kalleren sin identitet/godkjenning -
     // gitt uendret videre til transporten for ethvert nøstet gateway-kall den evt.
     // selv gjør. ALDRI fabrikkert/eskalert her - kun videreformidlet.
@@ -553,7 +658,8 @@ export class ToolGateway {
     // håndheves separat (in-memory `executed`-cache i
     // ModelGateway.completeWithTools, modules/model-gateway/src/model-gateway.ts).
     const dedupeApplies = definition.capability_class !== "A";
-    return withTenantTransaction(this.pool, request.identity.tenant_id, async (client) => {
+    let classDOutcome: { outcome: "executed" | "unverified"; external_id: string | null } | undefined;
+    const result = await withTenantTransaction<ToolResult>(this.pool, request.identity.tenant_id, async (client) => {
       if (dedupeApplies && request.idempotency_key) {
         const prior = await client.query(
           "SELECT external_id, status, postcondition_reason FROM tool_executions WHERE idempotency_key = $1",
@@ -612,13 +718,16 @@ export class ToolGateway {
       }
       let afterState: JsonValue | null = null;
       let readbackFailed = false;
+      let readbackAbsent = false;
       if (needsEvidence) {
         try {
           const post = await definition.transport.invoke(definition.preflight_action!, request.parameters, credential, invocationContext);
           afterState = post.data ?? null;
-        } catch {
+        } catch (err) {
           afterState = null; // readback-feil skjuler aldri at handlingen skjedde - audit under
-          readbackFailed = true;
+          // Del 3: for et slette-verktøy ER «finnes ikke» etterbetingelsen - ikke en uleselig readback.
+          if (definition.postcondition_target_absent && isNotFoundError((err as Error).message)) readbackAbsent = true;
+          else readbackFailed = true;
         }
       }
       // Q-34 P1-oppfølging: for et verktøy som EKSPLISITT lover
@@ -631,7 +740,13 @@ export class ToolGateway {
       // `postcondition_predicate` satt - samme opt-in-disiplin som resten av
       // Q-34-lukkingen.
       let postconditionReason: string | null = null;
-      if (definition.capability_class === "D" && definition.postcondition_predicate) {
+      if (classDGoverned && definition.class_d_profile === "outbound_message") {
+        // Del 3: leverandørens bekreftede ID er etterbetingelsen for en utgående melding.
+        if (!external.external_id) postconditionReason = "postcondition_unverified:no_provider_id";
+      } else if (definition.capability_class === "D" && definition.postcondition_target_absent) {
+        if (readbackFailed) postconditionReason = "postcondition_unverified:readback_failed";
+        else if (!readbackAbsent && afterState !== null) postconditionReason = "postcondition_mismatch";
+      } else if (definition.capability_class === "D" && definition.postcondition_predicate) {
         if (readbackFailed) {
           postconditionReason = "postcondition_unverified:readback_failed";
         } else if (afterState === null) {
@@ -683,6 +798,7 @@ export class ToolGateway {
           ...(needsEvidence ? { before_state: beforeState, after_state: afterState, recovery: { snapshot: beforeState, procedure: definition.rollback_procedure } } : {})
         }
       });
+      classDOutcome = { outcome: postconditionVerified ? "executed" : "unverified", external_id: external.external_id ?? null };
       if (!postconditionVerified) {
         // Uleselig/manglende/feil etter-tilstand er en driftsavvikelse, ikke
         // en autentiserings-/rate-feil - men FORTSATT ikke "healthy": en
@@ -699,6 +815,62 @@ export class ToolGateway {
         deduplicated: false
       } as const;
     });
+    if (classDGoverned && classDOutcome) {
+      return this.notifyClassD(request, definition, classDOutcome, result);
+    }
+    return result;
+  }
+
+  /**
+   * Del 3: umiddelbar out-of-band-varsling etter en klasse D-utførelse. Handlingen har da allerede skjedd, så en varslingsfeil kan ikke
+   * rulle den tilbake - den gjøres i stedet SYNLIG: audit `tool.class_d_notification_failed` + `notified:false` på resultatet.
+   */
+  private async notifyClassD(
+    request: { identity: IdentityContext; tool_id: string; action: string; idempotency_key?: string },
+    definition: ToolDefinition,
+    outcome: { outcome: "executed" | "unverified"; external_id: string | null },
+    result: ToolResult
+  ): Promise<ToolResult> {
+    let notified = false;
+    try {
+      await this.classDNotifier!.notify({
+        tenant_id: request.identity.tenant_id, person_id: request.identity.person_id,
+        tool_id: request.tool_id, action: request.action, outcome: outcome.outcome,
+        external_id: outcome.external_id, idempotency_key: request.idempotency_key ?? "",
+        recovery: definition.rollback_procedure, at: new Date().toISOString()
+      });
+      notified = true;
+    } catch (err) {
+      await withTenantTransaction(this.pool, request.identity.tenant_id, (client) =>
+        writeAudit(client, request.identity, {
+          type: "tool.class_d_notification_failed", decision: "ALLOW", reason: (err as Error).message.slice(0, 120),
+          tool_id: request.tool_id, action: request.action, capability_class: "D", payload: { external_id: outcome.external_id }
+        })
+      ).catch(() => undefined);
+      this.setHealth("class_d_notifier", "degraded", (err as Error).message.slice(0, 60));
+    }
+    return result.ok ? { ...result, notified } : result;
+  }
+
+  /**
+   * Del 3: avstemming av klasse D-handlinger hvis utfall ikke kunne bekreftes (`status='unverified'`). Returnerer før-tilstand og
+   * recovery-prosedyren slik at eieren (eller en jobb) kan rette opp - ALDRI en ny automatisk mutasjon.
+   */
+  async reconcile(tenantId: string, limit = 50): Promise<Array<{
+    idempotency_key: string; tool_id: string; action: string; external_id: string | null;
+    reason: string | null; before_state: JsonValue | null; recovery: string;
+  }>> {
+    const rows = await withTenantTransaction(this.pool, tenantId, async (client) =>
+      (await client.query(
+        `SELECT idempotency_key, tool_id, action, external_id, postcondition_reason, before_state
+           FROM tool_executions WHERE status = 'unverified' ORDER BY executed_at DESC LIMIT $1`, [Math.min(Math.max(limit, 1), 200)]
+      )).rows as Array<{ idempotency_key: string; tool_id: string; action: string; external_id: string | null; postcondition_reason: string | null; before_state: JsonValue | null }>
+    );
+    return rows.map((r) => ({
+      idempotency_key: r.idempotency_key, tool_id: r.tool_id, action: r.action, external_id: r.external_id,
+      reason: r.postcondition_reason, before_state: r.before_state,
+      recovery: this.get(r.tool_id, r.action)?.rollback_procedure ?? "ukjent verktøy - manuell oppfølging"
+    }));
   }
 
   /**

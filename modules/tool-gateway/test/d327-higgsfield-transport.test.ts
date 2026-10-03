@@ -106,10 +106,10 @@ describe("C: en ukjent handling kaster 'higgsfield_unsupported_action_<action>'"
 });
 
 describe("D: firstWaveTools() registrerer begge higgsfield.*-handlinger med korrekt risikoklasse", () => {
-  it("higgsfield.generate_video er klasse B (ekte kostnad per kall, ALDRI live_test)", () => {
+  it("higgsfield.generate_video er klasse C (ekte kostnad per kall, ALDRI live_test)", () => {
     const tool = firstWaveTools().find((t) => t.tool_id === "higgsfield" && t.action === "generate_video");
     expect(tool).toBeDefined();
-    expect(tool!.capability_class).toBe("B");
+    expect(tool!.capability_class).toBe("C");
     expect(tool!.idempotent_external).toBe(false);
     expect(tool!.credential_ref).toBe("JARVIS_HIGGSFIELD_KEY_SECRET");
   });
