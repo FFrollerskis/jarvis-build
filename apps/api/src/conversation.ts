@@ -365,7 +365,7 @@ export class ConversationEngine {
       // Del 3: per-flate utvalg + grenser (runder/kall per runde). Uten `select` brukes hele `definitions` (legacy/test).
       const selection = this.deps.tools?.select?.({ surface, text });
       const toolDefinitions = selection ? selection.definitions : this.deps.tools?.definitions ?? [];
-      let useTools = this.deps.tools !== undefined && toolDefinitions.length > 0;
+      const useTools = this.deps.tools !== undefined && toolDefinitions.length > 0;
       // Del 3 (JARVIS-016/035): sensitivitet utledes av INNHOLDET (minne, historikk, melding, verktøykilder) - ikke lenger hardkodet «public».
       // Helse/finans/hemmeligheter ⇒ kun lokal behandler; privat/forretningsminne og verktøyruter ⇒ aldri gratis/delt sky.
       const sensitivityDecision = classifyContentSensitivity({
@@ -374,11 +374,6 @@ export class ConversationEngine {
         memory_sensitivities: memoryMeta.sensitivities,
         private_tool_output: useTools
       });
-      // D-379: en SECRET_RESTRICTED-tur (helse/finans/hemmelighet) går kun til lokal modell, og den lokale
-      // OpenAI-kompatible Gemma-en har ikke pålitelig verktøykall. Uten dette feiler turen lukket
-      // (`no_eligible_provider`) selv for «hei». Slike turer kjøres derfor uten verktøy (også tryggere: sensitivt
-      // innhold + verktøy er den farligste kombinasjonen). Sensitiviteten selv er uendret.
-      if (sensitivityDecision.sensitivity === "SECRET_RESTRICTED") useTools = false;
       const input = {
         tenant_id: identity.tenant_id,
         session_id: identity.session_id,
@@ -417,11 +412,19 @@ export class ConversationEngine {
             }
           }
         : undefined;
+      // D-380: sporer om noe verktøy faktisk ble utført, så en nedgradering (se under) aldri skjer etter en sideeffekt.
+      let toolsExecuted = false;
+      const trackedExecutor = (inner: { execute: ToolExecutor["execute"] }): ToolExecutor => ({
+        execute: (call, ctx) => {
+          toolsExecuted = true;
+          return inner.execute(call, ctx);
+        }
+      });
       const callGateway = (callInput: typeof input) =>
         this.deps.tools && useTools
           ? this.deps.gateway.completeWithTools(callInput, {
               tools: toolDefinitions,
-              executor: this.deps.tools.executorFor(identity, turn),
+              executor: trackedExecutor(this.deps.tools.executorFor(identity, turn)),
               ...(selection ? { maxRounds: selection.limits.max_rounds, maxCallsPerRound: selection.limits.max_calls_per_round } : {}),
               ...(onEvent ? { onEvent } : {}),
               ...(signal ? { signal } : {})
@@ -455,6 +458,21 @@ export class ConversationEngine {
             })
           );
           result = await callGateway(fallbackInput);
+        } else if (
+          useTools &&
+          sensitivityDecision.sensitivity === "SECRET_RESTRICTED" &&
+          err instanceof ProviderError &&
+          err.kind === "bad_request" &&
+          partial === "" &&
+          !toolsExecuted
+        ) {
+          // D-380: SECRET_RESTRICTED går kun til lokal modell, og ikke alle lokale modeller støtter verktøykall
+          // (Ollama svarer 400). Da svarer vi uten verktøy i stedet for å feile - men KUN før noe tekst er sendt og
+          // før noe verktøy er utført, og aldri via sky. Degraderingen er alltid synlig i loggen.
+          console.error(
+            JSON.stringify({ msg: "d380_local_model_rejected_tools_fallback", provider: err.provider, reason: err.message })
+          );
+          result = await (onEvent ? this.deps.gateway.stream(input, onEvent, signal) : this.deps.gateway.complete(input));
         } else {
           throw err;
         }
