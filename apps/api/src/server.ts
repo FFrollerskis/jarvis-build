@@ -978,6 +978,26 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     if (typeof id !== "string" || id.length === 0 || id.length > 100 || (decision !== "approve" && decision !== "reject")) {
       return json(res, 400, { error: "malformed_request", reason: "decision_malformed" });
     }
+    if (decision === "approve" && deps.executive) {
+      // D-382: godkjenning UTFØRER kallet i deterministisk kode - samme ToolGateway (policy, kill switch, klasse D-pipeline, audit) som
+      // alt annet, med eierens grant-identitet og bekreftelses-id som idempotensnøkkel (aldri dobbel utførelse).
+      const taken = await deps.confirmations.approveAndTake(resolved.identity, id);
+      if (!taken) return json(res, 404, { error: "not_pending", reason: "confirmation_not_pending_or_expired" });
+      const result = await deps.executive.gateway.execute({
+        identity: resolved.identity,
+        tool_id: taken.tool_id,
+        action: taken.action,
+        parameters: taken.parameters,
+        idempotency_key: `confirmation:${taken.confirmation_id}`
+      });
+      const stored: JsonValue = result.ok
+        ? { ok: true, data: (result.data ?? null) as JsonValue, external_id: result.external_id ?? null }
+        : { ok: false, reason: result.reason };
+      await deps.confirmations.recordResult(resolved.identity, id, stored);
+      return json(res, result.ok ? 200 : 409, {
+        ok: result.ok, data: { confirmation_id: id, decision, executed: true, tool: `${taken.tool_id}.${taken.action}`, result: stored }
+      });
+    }
     const ok = await deps.confirmations.decide(resolved.identity, id, decision);
     if (!ok) return json(res, 404, { error: "not_pending", reason: "confirmation_not_pending_or_expired" });
     return json(res, 200, { ok: true, data: { confirmation_id: id, decision } });

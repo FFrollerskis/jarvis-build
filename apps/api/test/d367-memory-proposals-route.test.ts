@@ -81,7 +81,7 @@ describe("D-367: wiring", () => {
   const dashboard = readFileSync(fileURLToPath(new URL("../../web/dashboard.html", import.meta.url)), "utf8");
   it("main.ts gir MemorySearchTransport en MemoryWriter, og kapabilitetsstatusen inkluderer karantene-flaten", () => {
     expect(main).toMatch(/new MemorySearchTransport\(memoryRetriever, memoryWriter\)/);
-    expect(main).toMatch(/modelSurface: \[\.\.\.MODEL_SURFACE_ALLOWLIST, \.\.\.MODEL_SURFACE_QUARANTINE_WRITES\]/);
+    expect(main).toMatch(/modelSurface: \[\.\.\.MODEL_SURFACE_ALLOWLIST, \.\.\.MODEL_SURFACE_QUARANTINE_WRITES(, \.\.\.CHAT_READ_TIER, \.\.\.CHAT_ACT_TIER)?\]/);
   });
   it("D-369: samtalemotoren gir executoren eierens rå melding, main.ts har av-bryteren, og `owner_stated` kan ikke komme fra modell-args", () => {
     const conversation = readFileSync(fileURLToPath(new URL("../src/conversation.ts", import.meta.url)), "utf8");

@@ -48,16 +48,20 @@ describe("lese-nivået er låst til ren lesing", () => {
 
   it("manifest-invariantene holder med lese-nivået på web_chat, og ingen annen flate fikk det", () => {
     expect(() => assertManifestInvariants(buildToolManifest(defs))).not.toThrow();
-    for (const s of ["voice", "telegram", "background", "coding"] as const) {
+    for (const s of ["telegram", "background", "coding"] as const) {
       expect(SURFACE_TOOL_GRANTS[s].length).toBeLessThanOrEqual(5);
       expect(SURFACE_TOOL_GRANTS[s].some((g) => /^finance/.test(g.tool_id)), s).toBe(false);
     }
-    // Eier-eksklusive navnerom (finans) står KUN på web_chat, og kun som lesing.
+    // D-382: tale får lese-nivået uten finans - og aldri en handling.
+    expect(SURFACE_TOOL_GRANTS.voice.some((g) => /^finance/.test(g.tool_id))).toBe(false);
+    expect(SURFACE_TOOL_GRANTS.voice.length).toBeLessThan(SURFACE_TOOL_GRANTS.web_chat.length);
+    // Eier-eksklusive navnerom (finans) står KUN på web_chat: lesing (klasse A) eller handlingsnivå (B/C, aldri pay/control/D).
     for (const e of buildToolManifest(defs).values()) {
       if (/^finance/.test(e.tool_id) && e.surfaces.length > 0) {
         expect(e.surfaces, e.key).toEqual(["web_chat"]);
-        expect(e.effect, e.key).toBe("read");
-        expect(e.risk, e.key).toBe("A");
+        expect(["read", "write", "send", "delete"], e.key).toContain(e.effect);
+        expect(e.risk, e.key).not.toBe("D");
+        if (e.effect === "read") expect(e.risk, e.key).toBe("A");
       }
     }
   });

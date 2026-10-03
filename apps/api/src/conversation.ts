@@ -59,6 +59,8 @@ export interface ConversationDeps {
      * Når satt brukes den i stedet for `definitions` (som da kun er referansen/øvre grense). Tomt utvalg => ingen verktøy i runden.
      */
     select?(input: { surface: Surface; text: string }): { definitions: ToolDefinition[]; limits: SurfaceLimits; min_sensitivity?: "SECRET_RESTRICTED" };
+    /** D-383: kompakt katalog over tjenestene modellen kan bruke på flaten (settes i systemprompten hver tur). */
+    catalog?(surface: Surface): string;
   };
   /**
    * D-106 (AI Mesh Council/Collaboration/lokal-Gemma-utvidelse §"large
@@ -100,6 +102,8 @@ export interface ChatReply {
   cancelled?: boolean;
   /** §11: streamen ble avbrutt av provider-feil ETTER output-start - aldri skjult. */
   interrupted?: boolean;
+  /** D-382: handlinger modellen ba om i denne turen som venter på Tobias' godkjenning (utføres via /confirmations). */
+  confirmations?: Array<{ confirmation_id: string; tool: string; status: string }>;
 }
 
 // Permissions ligger ALDRI i prompten - Policy/Execution Authority er trusted
@@ -136,11 +140,25 @@ export interface ChatReply {
 //      eller påvirke denne suffiksen - det er selve poenget med to-lags-
 //      modellen (D-208: eieren nektet eksplisitt full ugjennomgått
 //      selvpatching av sikkerhetskritisk atferd).
-function buildSystemPrompt(personality: PersonalityConfig): string {
+function buildSystemPrompt(personality: PersonalityConfig, context: { surface: Surface; catalog: string } = { surface: "web_chat", catalog: "" }): string {
   const cosmetic =
     `Du er Charlie - Tobias og familien sin egen AI, kjønnsnøytral, med en ekte personlighet: ` +
     `${personality.tone_descriptors.join(", ")}. ${personality.style_notes} `;
-  return cosmetic + SAFETY_CRITICAL_SUFFIX;
+  // D-382: tale er muntlig - kort, uten lister/markdown/lenker/ID-er (TTS leser alt høyt).
+  const voiceStyle = context.surface === "voice"
+    ? "Dette er en TALESAMTALE: svar kort (1-3 setninger), naturlig muntlig norsk, ingen lister, markdown, lenker, kodeblokker eller ID-er. "
+    : "";
+  // D-383: katalog + spilleregler for verktøy - alltid med, uavhengig av hvilke skjema som er vedlagt akkurat denne runden.
+  const capabilities = context.catalog
+    ? `Tjenester du kan bruke i denne samtalen (lese = hente informasjon, handle = opprette/oppdatere/sende/synkronisere): ${context.catalog}. ` +
+      "Verktøyskjemaene vedlagt denne runden er valgt ut fra Tobias sin melding - trenger du en annen tjeneste fra listen, si hvilken " +
+      "og be om presisering i stedet for å påstå at du mangler tilgang. " +
+      "Alle handlinger som endrer noe utføres KUN etter at Tobias har godkjent en bekreftelse i chatten/dashbordet: når et verktøy svarer " +
+      "confirmation_required, forklar kort hva som vil skje og be ham godkjenne - kall IKKE verktøyet på nytt. " +
+      "Du kan ALDRI: betale, slette permanent, slå sammen kode (merge), styre servere, endre sikkerhets-/eierinnstillinger eller handle via Telegram - " +
+      "slike ting gjør Tobias selv i dashbordet. "
+    : "";
+  return cosmetic + voiceStyle + capabilities + SAFETY_CRITICAL_SUFFIX;
 }
 
 const SAFETY_CRITICAL_SUFFIX =
@@ -313,7 +331,9 @@ export class ConversationEngine {
         : { text: "", spaces: [] as string[], sensitivities: [] as string[] };
       const memoryContext = memoryMeta.text;
       const personality = this.loadPersonality();
-      const systemPrompt = buildSystemPrompt(personality);
+      // D-383: katalogen over tjenester på denne flaten + hvordan handlinger fungerer; D-382: tale får en egen, muntlig stil.
+      const catalog = this.deps.tools?.catalog?.(surface) ?? "";
+      const systemPrompt = buildSystemPrompt(personality, { surface, catalog });
       const system = memoryContext ? `${systemPrompt}\n\n${memoryContext}` : systemPrompt;
       // UA-1: Conversation Engine oppgir purpose - aldri provider direkte (§31).
       // P1A (§27): SSE-klienter får normalisert stream; klienten ser aldri provider-format.
@@ -396,7 +416,8 @@ export class ConversationEngine {
             : {}),
         ...(provider === undefined && override?.mode !== undefined ? { mode: override.mode } : {}),
         ...(override?.paid_models_allowed !== undefined ? { paid_models_allowed: override.paid_models_allowed } : {}),
-        request: { system, messages: history, max_tokens: 1024 }
+        // D-382: tale skal være kort (TTS-latens og muntlig form) - teksten styres av prompten, taket er et sikkerhetsnett.
+        request: { system, messages: history, max_tokens: surface === "voice" ? 320 : 1024 }
       };
       // D-30 live-funn: med tools konfigurert går BÅDE streaming- og JSON-banen
       // gjennom completeWithTools (samme normaliserte tool-løkke som executive/
@@ -423,10 +444,17 @@ export class ConversationEngine {
         : undefined;
       // D-380: sporer om noe verktøy faktisk ble utført, så en nedgradering (se under) aldri skjer etter en sideeffekt.
       let toolsExecuted = false;
+      // D-382: bekreftelser modellen utløste i denne turen samles her (fra trusted executor-output, aldri fra modelltekst).
+      const confirmations: NonNullable<ChatReply["confirmations"]> = [];
       const trackedExecutor = (inner: { execute: ToolExecutor["execute"] }): ToolExecutor => ({
-        execute: (call, ctx) => {
+        execute: async (call, ctx) => {
           toolsExecuted = true;
-          return inner.execute(call, ctx);
+          const out = await inner.execute(call, ctx);
+          const o = out.output as { confirmation_required?: boolean; confirmation_id?: string | null; status?: string } | null;
+          if (o && o.confirmation_required === true && typeof o.confirmation_id === "string" && !confirmations.some((c) => c.confirmation_id === o.confirmation_id)) {
+            confirmations.push({ confirmation_id: o.confirmation_id, tool: out.source ?? call.tool_name, status: o.status ?? "confirmation_required" });
+          }
+          return out;
         }
       });
       const callGateway = (callInput: typeof input) =>
@@ -487,7 +515,7 @@ export class ConversationEngine {
         }
       }
       await this.deps.messages.save(identity, "assistant", result.text);
-      return { reply: result.text, routed: "model" };
+      return { reply: result.text, routed: "model", ...(confirmations.length > 0 ? { confirmations } : {}) };
     } catch (err) {
       if (err instanceof BudgetExceededError) {
         const reply = `Modellkall stoppet av budsjettvakten: ${err.message}`;
