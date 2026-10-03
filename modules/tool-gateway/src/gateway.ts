@@ -740,7 +740,7 @@ export class ToolGateway {
       // `postcondition_predicate` satt - samme opt-in-disiplin som resten av
       // Q-34-lukkingen.
       let postconditionReason: string | null = null;
-      if (definition.capability_class === "D" && definition.class_d_profile === "outbound_message") {
+      if (classDGoverned && definition.class_d_profile === "outbound_message") {
         // Del 3: leverandørens bekreftede ID er etterbetingelsen for en utgående melding.
         if (!external.external_id) postconditionReason = "postcondition_unverified:no_provider_id";
       } else if (definition.capability_class === "D" && definition.postcondition_target_absent) {

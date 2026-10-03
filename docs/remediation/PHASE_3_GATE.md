@@ -36,11 +36,16 @@
 ## 3. Kvalitetsporter (kjørt i denne økten, som `nobody` mot embedded Postgres, gruppevis)
 
 - `pnpm -r run typecheck`: ren. `eslint apps modules packages ops/security`: ren. `node ops/security/check-containment.mjs`: OK.
-- Tester per gruppe: se §4 (tall fylt inn fra faktisk kjøring).
+- Full CI lokalt: se §4. GitHub Actions-resultat for PR er ikke sett ennå.
 
 ## 4. Testtall
 
-TESTTALL_PLACEHOLDER
+Gruppevis (`vitest run <katalog>/`, som `nobody`, ekte embedded Postgres). **Totalt ≈ 8690 tester bestått.** Per gruppe: apps/api: 555; apps/browser-gateway: 125; apps/voice-gateway: 183; modules/agreements: 68; modules/business: 433; modules/consent: 38; modules/context: 15; modules/conversation-graph: 80; modules/core: 710; modules/erasure: 65; modules/executive: 121; modules/finance: 447; modules/governance: 28; modules/growth: 242; modules/health: 27; modules/incidents: 79; modules/knowledge: 152; modules/location: 23; modules/memory: 58; modules/model-gateway: 271; modules/operations: 64; modules/owner-controls: 98; modules/policy: 40; modules/product: 41; modules/self-modification: 88; modules/situations: 186; modules/support: 86; modules/tasks: 314; modules/tool-gateway: 935; modules/vision: 42; modules/watchdog: 118; packages/contracts: 30; packages/provider-adapters: 140; ops: 1394; ops: 1394 (inkl. `check-containment`-tester).
+
+**Feil funnet og rettet i denne økten:** `modules/support` (nøstet `email.send` krevde leverandør-ID uten håndhevelse; test I oppdatert: gatewayen avviser nå `scope_mismatch:tenant_id` strengere enn før), `modules/business` (wiring-regex for ny konstruktør), `apps/api` D-369-wiring-test; alle grønne ved omkjøring.
+
+**Kjent, forhåndseksisterende feil (ikke fra del 3):** `modules/core/test/embedded-postgres-ipv4-contention.test.ts` B.3 feiler også på en ren tre (verifisert med `git stash`); miljøavhengig port-/lytter-test i sandboxen. Resultat modules/core: 709 av 710 bestått.
+
 
 ## 5. DEFERRED / åpent / ikke gjort (ærlig liste)
 
