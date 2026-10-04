@@ -331,7 +331,7 @@ export class BusinessService {
         `SELECT count(*)::int AS n FROM business_leads WHERE tenant_id = $1 AND status IN ('new','contacted','qualified')`, [tenantId]
       );
       const opportunities = await client.query(
-        `SELECT count(*)::int AS n, COALESCE(sum(value_ore), 0)::int AS value FROM business_opportunities
+        `SELECT count(*)::int AS n, COALESCE(sum(value_ore), 0)::bigint AS value FROM business_opportunities
          WHERE tenant_id = $1 AND stage NOT IN ('won','lost')`,
         [tenantId]
       );
@@ -345,7 +345,8 @@ export class BusinessService {
       return {
         open_leads: leads.rows[0].n,
         active_opportunities: opportunities.rows[0].n,
-        open_pipeline_value_ore: opportunities.rows[0].value,
+        // D-396 (JARVIS-082): sum(::int) kastet «integer out of range» over ~21 MNOK; bigint kommer som streng fra pg.
+        open_pipeline_value_ore: Number(opportunities.rows[0].value),
         overdue_followups: followups.rows[0].n,
         won_opportunities_30d: won.rows[0].n
       };

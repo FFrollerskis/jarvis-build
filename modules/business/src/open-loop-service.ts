@@ -537,7 +537,7 @@ export class OpenLoopService {
           company_id: null, contact_id: null, opportunity_id: null, lead_id: null, followup_id: null,
           activity_id: null, ticket_id: null, contract_id: null, campaign_id: row.campaign_id,
           loop_type: "marketing_spend_anomaly", detection_key: detectionKey,
-          reason: `Kampanje "${row.name}" sin utgift for ${row.event_date} (${row.spend_amount_ore} øre) er ${direction === "over" ? "vesentlig over" : "vesentlig under"} det glidende 7-dagers-snittet (${Math.round(Number(row.trailing_avg_ore))} øre)`,
+          reason: `Kampanje "${row.name}" sin utgift for ${row.event_date} (${formatMoney(row.spend_amount_ore, "NOK")}) er ${direction === "over" ? "vesentlig over" : "vesentlig under"} det glidende 7-dagers-snittet (${formatMoney(Math.round(Number(row.trailing_avg_ore)), "NOK")})`,
           next_action: `Gjennomgå utgiftsavvik for kampanje ${row.campaign_id}`, priority: direction === "over" ? "high" : "normal",
           owner_person_id: row.owner_person_id, due_at: null
         });
@@ -587,8 +587,8 @@ export class OpenLoopService {
         const detectionKey = `${loopType}:${row.payment_intent_id}`;
         currentKeys.push(detectionKey);
         const reason = isMismatch
-          ? `Betalingsintensjon "${row.purpose}" (${row.amount_ore} ${row.currency} til ${row.vendor_name}) er avstemt som IKKE samsvarende med Fiken sin bokførte post`
-          : `Betalingsintensjon "${row.purpose}" (${row.amount_ore} ${row.currency} til ${row.vendor_name}) har uløste avvik: ${row.anomaly_flags.join(", ")}`;
+          ? `Betalingsintensjon "${row.purpose}" (${formatMoney(row.amount_ore, row.currency)} til ${row.vendor_name}) er avstemt som IKKE samsvarende med Fiken sin bokførte post`
+          : `Betalingsintensjon "${row.purpose}" (${formatMoney(row.amount_ore, row.currency)} til ${row.vendor_name}) har uløste avvik: ${row.anomaly_flags.join(", ")}`;
         const result = await upsertOpenLoop(client, {
           open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
           company_id: null, contact_id: null, opportunity_id: null, lead_id: null, followup_id: null,
@@ -620,13 +620,13 @@ export class OpenLoopService {
    */
   async detectUnexpectedSpend(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
     return this.surfaceSpendRecordAnomaly(tenantId, memorySpace, "UNEXPECTED_SPEND", "finance_spend_unexpected", "high",
-      (row) => `Utgift på ${row.amount_ore} ${row.currency} (${row.category}) skjedde etter at en tilknyttet forpliktelse ble satt på pause/kansellert`,
+      (row) => `Utgift på ${formatMoney(row.amount_ore, row.currency)} (${row.category}) skjedde etter at en tilknyttet forpliktelse ble satt på pause/kansellert`,
       (row) => `Gjennomgå uventet utgift ${row.spend_record_id}`);
   }
 
   async detectSpendAmountDeviation(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
     return this.surfaceSpendRecordAnomaly(tenantId, memorySpace, "AMOUNT_DEVIATION", "finance_spend_amount_deviation", "normal",
-      (row) => `Utgift på ${row.amount_ore} ${row.currency} (${row.category}) avviker fra tilknyttet forpliktelses forventede beløp utover toleransen`,
+      (row) => `Utgift på ${formatMoney(row.amount_ore, row.currency)} (${row.category}) avviker fra tilknyttet forpliktelses forventede beløp utover toleransen`,
       (row) => `Undersøk beløpsavvik for utgift ${row.spend_record_id}`);
   }
 
@@ -673,7 +673,7 @@ export class OpenLoopService {
 
   async detectMissingRecurringCharges(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
     return this.surfaceCommitmentAnomaly(tenantId, memorySpace, "MISSING_EXPECTED_SPEND", "finance_recurring_charge_missing", "high",
-      (row) => `Forpliktelse "${row.description}" til ${row.vendor_name} (${row.expected_amount_ore} ${row.currency}) har uteblitt lenger enn forventet belastningsvindu`,
+      (row) => `Forpliktelse "${row.description}" til ${row.vendor_name} (${formatMoney(row.expected_amount_ore, row.currency)}) har uteblitt lenger enn forventet belastningsvindu`,
       (row) => `Undersøk uteblitt belastning for forpliktelse ${row.commitment_id}`);
   }
 
@@ -722,7 +722,7 @@ export class OpenLoopService {
    */
   async detectMissingProcurementFulfillment(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
     return this.surfaceProcurementAnomaly(tenantId, memorySpace, "MISSING_EXPECTED_SPEND", "finance_procurement_missing", "high",
-      (row) => `Anskaffelse "${row.description}" fra ${row.vendor_name} (${row.expected_amount_ore} ${row.currency}, forventet ${row.expected_date}) er uteblitt utover det forventede vinduet`,
+      (row) => `Anskaffelse "${row.description}" fra ${row.vendor_name} (${formatMoney(row.expected_amount_ore, row.currency)}, forventet ${row.expected_date}) er uteblitt utover det forventede vinduet`,
       (row) => `Undersøk uteblitt anskaffelse ${row.procurement_item_id}`);
   }
 
@@ -784,7 +784,7 @@ export class OpenLoopService {
           company_id: null, contact_id: null, opportunity_id: null, lead_id: null, followup_id: null,
           activity_id: null, ticket_id: null, contract_id: null, campaign_id: null,
           loop_type: "bank_transaction_unmatched", detection_key: detectionKey,
-          reason: `Banktransaksjon ${row.bank_transaction_id} (${row.direction === "debit" ? "utgående" : "inngående"} ${row.amount_ore} ${row.currency}${row.counterparty_name ? ` - ${row.counterparty_name}` : ""}) har uløste bankavvik: ${row.anomaly_flags.join(", ")}`,
+          reason: `Banktransaksjon ${row.bank_transaction_id} (${row.direction === "debit" ? "utgående" : "inngående"} ${formatMoney(row.amount_ore, row.currency)}${row.counterparty_name ? ` - ${row.counterparty_name}` : ""}) har uløste bankavvik: ${row.anomaly_flags.join(", ")}`,
           next_action: `Undersøk og avstem banktransaksjon ${row.bank_transaction_id}`,
           priority: row.anomaly_flags.includes("UNEXPECTED_LARGE_DEBIT") ? "high" : "normal",
           owner_person_id: null, due_at: null
@@ -857,7 +857,7 @@ export class OpenLoopService {
           company_id: null, contact_id: null, opportunity_id: null, lead_id: null, followup_id: null,
           activity_id: null, ticket_id: null, contract_id: null, campaign_id: null,
           loop_type: "card_anomaly_attention", detection_key: detectionKey,
-          reason: `Korttransaksjon ${row.card_transaction_id} (${row.amount_ore} ${row.currency}${row.merchant_name ? ` - ${row.merchant_name}` : ""}, kort «${row.card_name}») har uløste kortavvik: ${row.anomaly_flags.join(", ")}`,
+          reason: `Korttransaksjon ${row.card_transaction_id} (${formatMoney(row.amount_ore, row.currency)}${row.merchant_name ? ` - ${row.merchant_name}` : ""}, kort «${row.card_name}») har uløste kortavvik: ${row.anomaly_flags.join(", ")}`,
           next_action: `Undersøk korttransaksjon ${row.card_transaction_id}`,
           priority: row.anomaly_flags.some((f) => f === "DUPLICATE_ECONOMIC_EFFECT" || f === "CARD_SPEND_AFTER_FREEZE" || f === "CARD_SPEND_AFTER_CLOSE") ? "high" : "normal",
           owner_person_id: null, due_at: null
@@ -959,8 +959,8 @@ export class OpenLoopService {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(
         status === "all"
-          ? `SELECT * FROM business_open_loops WHERE tenant_id = $1 ORDER BY priority DESC, due_at ASC NULLS LAST`
-          : `SELECT * FROM business_open_loops WHERE tenant_id = $1 AND status = $2 ORDER BY priority DESC, due_at ASC NULLS LAST`,
+          ? `SELECT * FROM business_open_loops WHERE tenant_id = $1 ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, due_at ASC NULLS LAST`
+          : `SELECT * FROM business_open_loops WHERE tenant_id = $1 AND status = $2 ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, due_at ASC NULLS LAST`,
         status === "all" ? [tenantId] : [tenantId, status]
       );
       return rows as BusinessOpenLoop[];
@@ -1158,9 +1158,25 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
        -- Gjenaapning (§9 i byggeordren): en tidligere resolved loop for SAMME vilkaar settes
        -- eksplisitt tilbake til 'open' med ny opened_at - historikken bevares i audit_events,
        -- ikke som en ny rad for samme detection_key.
-       status = 'open', opened_at = CASE WHEN business_open_loops.status = 'resolved' THEN now() ELSE business_open_loops.opened_at END,
-       resolved_at = CASE WHEN business_open_loops.status = 'resolved' THEN NULL ELSE business_open_loops.resolved_at END,
-       resolution_reason = CASE WHEN business_open_loops.status = 'resolved' THEN NULL ELSE business_open_loops.resolution_reason END,
+       -- D-396 (JARVIS-082): en loop eieren/operatøren selv har lukket (resolution_reason <> 'condition_no_longer_true') gjenåpnes IKKE av det
+       -- neste sveipet - da var «lukk» umulig. Undertrykkelsen varer 7 dager; er vilkåret fortsatt sant etter det, gjenåpnes den (uendret §9).
+       -- Auto-løste loops (vilkåret forsvant) gjenåpnes umiddelbart når vilkåret kommer tilbake.
+       status = CASE WHEN business_open_loops.status = 'resolved'
+                      AND business_open_loops.resolution_reason IS DISTINCT FROM 'condition_no_longer_true'
+                      AND business_open_loops.resolved_at > now() - interval '7 days'
+                     THEN 'resolved' ELSE 'open' END,
+       opened_at = CASE WHEN business_open_loops.status = 'resolved' AND NOT (business_open_loops.resolution_reason IS DISTINCT FROM 'condition_no_longer_true'
+                                                                               OR business_open_loops.resolved_at <= now() - interval '7 days')
+                        THEN business_open_loops.opened_at
+                        WHEN business_open_loops.status = 'resolved' THEN now() ELSE business_open_loops.opened_at END,
+       resolved_at = CASE WHEN business_open_loops.status = 'resolved'
+                           AND (business_open_loops.resolution_reason IS NOT DISTINCT FROM 'condition_no_longer_true'
+                                OR business_open_loops.resolved_at <= now() - interval '7 days')
+                          THEN NULL ELSE business_open_loops.resolved_at END,
+       resolution_reason = CASE WHEN business_open_loops.status = 'resolved'
+                                 AND (business_open_loops.resolution_reason IS NOT DISTINCT FROM 'condition_no_longer_true'
+                                      OR business_open_loops.resolved_at <= now() - interval '7 days')
+                                THEN NULL ELSE business_open_loops.resolution_reason END,
        reason = EXCLUDED.reason, priority = EXCLUDED.priority, due_at = EXCLUDED.due_at, updated_at = now()
      RETURNING (xmax = 0) AS inserted`,
     [
@@ -1182,4 +1198,23 @@ async function autoResolveStale(client: pg.PoolClient, tenantId: string, loopTyp
     [tenantId, loopType, currentKeys]
   );
   return rowCount ?? 0;
+}
+
+/**
+ * D-396 (JARVIS-082): beløp lagres i øre (bigint kommer som streng fra pg), men begrunnelser lest av mennesker skal si kroner -
+ * «50000 NOK» for 500 kr var en tusen-gangers misvisning. Eksakt heltallsaritmetikk (ingen flyttall).
+ */
+export function formatMoney(amountOre: string | number | bigint | null | undefined, currency?: string): string {
+  if (amountOre === null || amountOre === undefined) return currency ? `ukjent beløp ${currency}` : "ukjent beløp";
+  let ore: bigint;
+  try {
+    ore = BigInt(typeof amountOre === "number" ? Math.round(amountOre) : amountOre);
+  } catch {
+    return currency ? `ukjent beløp ${currency}` : "ukjent beløp";
+  }
+  const negative = ore < 0n;
+  const abs = negative ? -ore : ore;
+  const whole = (abs / 100n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, "\u00a0");
+  const frac = (abs % 100n).toString().padStart(2, "0");
+  return `${negative ? "-" : ""}${whole},${frac}${currency ? ` ${currency}` : ""}`;
 }
