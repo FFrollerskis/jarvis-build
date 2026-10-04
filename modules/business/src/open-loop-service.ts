@@ -573,7 +573,7 @@ export class OpenLoopService {
              (jsonb_array_length(anomaly_flags) > 0 AND (
                state IN ('draft','submitted','provider_acknowledged')
                -- D-392 (JARVIS-072): leverandørkonflikter på en allerede avsluttet intensjon (f.eks. sen TERMINATED mot settled) er ekte pengeavvik
-               OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(anomaly_flags) AS f(flag) WHERE f.flag LIKE 'PROVIDER\_%')
+               OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(anomaly_flags) AS f(flag) WHERE f.flag LIKE 'PROVIDER\\_%')
              ))
              OR reconciliation_state = 'mismatched'
            )`,
