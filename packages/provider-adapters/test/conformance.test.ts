@@ -537,6 +537,29 @@ describe("provider-adapter conformance (UA-1 §28)", () => {
     expect(result.tool_calls?.[0]).toMatchObject({ tool_call_id: "call_1", tool_name: "read_x", arguments: { a: 1 }, provider: "local_llm" });
   });
 
+  it("local_llm (D-385): fjerner <think>-blokker (lukket og avkuttet) fra svaret", async () => {
+    const reply = (content: string) =>
+      vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { content } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { status: 200 }));
+    vi.stubGlobal("fetch", reply("<think>Brukeren spør om Paris.</think>\n\nParis er hovedstaden."));
+    expect((await new LocalOpenAiCompatibleAdapter("http://mock", "m").complete(REQUEST)).text).toBe("Paris er hovedstaden.");
+    vi.stubGlobal("fetch", reply("<think>tenker og tenker uten slutt"));
+    expect((await new LocalOpenAiCompatibleAdapter("http://mock", "m").complete(REQUEST)).text).toBe("");
+    vi.stubGlobal("fetch", reply("Vanlig svar uten tenking."));
+    expect((await new LocalOpenAiCompatibleAdapter("http://mock", "m").complete(REQUEST)).text).toBe("Vanlig svar uten tenking.");
+  });
+
+  it("local_llm (D-385): reasoning_effort sendes kun når tenking er slått av (off); ellers uendret request", async () => {
+    const fetchSpy = vi.fn(
+      async () => new Response(JSON.stringify({ choices: [{ message: { content: "x" } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { status: 200 })
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+    await new LocalOpenAiCompatibleAdapter("http://mock", "m", undefined, "local_llm", "default").complete(REQUEST);
+    await new LocalOpenAiCompatibleAdapter("http://mock", "m", undefined, "local_llm", "off").complete(REQUEST);
+    const bodies = fetchSpy.mock.calls.map(([, init]) => JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>);
+    expect(bodies[0]?.["reasoning_effort"]).toBeUndefined();
+    expect(bodies[1]?.["reasoning_effort"]).toBe("none");
+  });
+
   it("local_llm: sender ALDRI en Authorization-header (rent lokalt endepunkt, ingen credential å lekke)", async () => {
     const fetchSpy = vi.fn(
       async () => new Response(JSON.stringify({ choices: [{ message: { content: "x" } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { status: 200 })
