@@ -101,3 +101,13 @@ d350375fbe45d8f455e9c3eae7c6964213591182:infra/local/service-env.mjs:generic-api
 1cf6d9e08cb45806e5b6cbd37bac6b7d2a499dc3:modules/core/test/part3-secret-scan.test.ts:generic-api-key:53
 1cf6d9e08cb45806e5b6cbd37bac6b7d2a499dc3:modules/core/test/part3-secret-scan.test.ts:jwt:16
 1cf6d9e08cb45806e5b6cbd37bac6b7d2a499dc3:modules/core/test/part3-secret-scan.test.ts:stripe-access-token:10
+
+# CI-gitleaks skanner ALLE refs, ikke bare PR-ens commits: falske positiver fra de stablede grenene (connectors-v2 og remediering 6)
+# ma derfor ogsa vaere kjent her. Alle er verifisert manuelt som syntetiske testverdier eller navn pa hemmelighetsreferanser - ingen ekte hemmeligheter.
+9134088b890b480e636e297dc6899a32b5e3ef54:modules/tool-gateway/src/integrations.ts:generic-api-key:3583
+f0fd3eaef6f1a80f2eb8d9d66a3ef1631348173e:.gitleaksignore:generic-api-key:105
+2e3d4ee9038599624e582e79415ab3fac1915711:modules/incidents/test/d394-redaction.test.ts:stripe-access-token:10
+2e3d4ee9038599624e582e79415ab3fac1915711:modules/incidents/test/d394-redaction.test.ts:stripe-access-token:17
+2e3d4ee9038599624e582e79415ab3fac1915711:modules/incidents/test/d394-redaction.test.ts:aws-access-token:11
+2e3d4ee9038599624e582e79415ab3fac1915711:modules/incidents/test/d394-redaction.test.ts:aws-access-token:17
+2e3d4ee9038599624e582e79415ab3fac1915711:modules/incidents/test/d394-redaction.test.ts:jwt:7
