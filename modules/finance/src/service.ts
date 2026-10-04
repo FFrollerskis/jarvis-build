@@ -37,6 +37,7 @@ import {
   PaymentIntentAlreadySubmittedError,
   PaymentIntentNotFoundError,
   AmbiguousProviderResponseError,
+  IdempotencyKeyConflictError,
   StripeCredentialsUnavailableError,
   PaymentIntentNotStripeError,
   PaymentIntentNotSettledError,
@@ -56,7 +57,8 @@ import {
   ExcessiveCaptureAmountError,
   CaptureAlreadySubmittedError,
   CaptureNotFoundError,
-  VIPPS_STATUS_TO_JARVIS_STATE
+  VIPPS_STATUS_TO_JARVIS_STATE,
+  VIPPS_MODIFICATION_EVENTS
 } from "./types.ts";
 import type {
   CreatePaymentIntentInput,
@@ -248,6 +250,18 @@ async function withTenantContext<T>(pool: pg.Pool, tenantId: string, fn: (client
   }
 }
 
+/** D-392: resultat av fase 1 i `submitPaymentIntent` - hva som skal skje UTENFOR transaksjonen. */
+type SubmitPlan =
+  | { kind: "noop"; intent: PaymentIntent }
+  | { kind: "blocked"; error: FinanceKillSwitchActiveError }
+  | { kind: "call"; idempotentAtProvider: boolean; run: () => Promise<(client: pg.PoolClient) => Promise<PaymentIntent>> };
+
+/** 4xx (unntatt 408/429) fra leverandøren = tydelig avvist FØR noen bivirkning; alt annet (tidsavbrudd, nettverk, 5xx) er et ukjent utfall. */
+export function isDefinitiveProviderRejection(err: unknown): boolean {
+  const status = (err as { httpStatus?: unknown; status?: unknown } | null)?.httpStatus ?? (err as { status?: unknown } | null)?.status;
+  return typeof status === "number" && status >= 400 && status < 500 && status !== 408 && status !== 429;
+}
+
 async function readForUpdate(client: pg.PoolClient, tenantId: string, paymentIntentId: string, forUpdate: boolean): Promise<PaymentIntent | null> {
   const { rows } = await client.query(
     `SELECT * FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2${forUpdate ? " FOR UPDATE" : ""}`,
@@ -349,7 +363,20 @@ export class FinanceService {
       );
       if (rows.length === 0) {
         const existing = await client.query(`SELECT * FROM payment_intents WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, input.idempotency_key]);
-        return existing.rows[0] as PaymentIntent;
+        const prior = existing.rows[0] as PaymentIntent;
+        // D-392 (JARVIS-072): samme nøkkel + andre parametre er en NY intensjon, ikke en retry - aldri returner en annen betaling stille.
+        const mismatched = [
+          Number(prior.amount_ore) !== input.amount_ore ? "amount_ore" : null,
+          prior.currency !== (input.currency ?? "NOK") ? "currency" : null,
+          prior.purpose !== input.purpose ? "purpose" : null,
+          prior.vendor_name !== input.vendor_name ? "vendor_name" : null,
+          prior.account_code !== input.account_code ? "account_code" : null,
+          prior.provider !== (input.provider ?? "fiken") ? "provider" : null,
+          (prior.vendor_provider_ref ?? null) !== (input.vendor_provider_ref ?? null) ? "vendor_provider_ref" : null,
+          (prior.counter_account_code ?? null) !== (input.counter_account_code ?? null) ? "counter_account_code" : null
+        ].filter((f): f is string => f !== null);
+        if (mismatched.length > 0) throw new IdempotencyKeyConflictError(input.idempotency_key, mismatched);
+        return prior;
       }
       const intent = rows[0] as PaymentIntent;
       await insertEvent(client, tenantId, memorySpace, {
@@ -403,16 +430,32 @@ export class FinanceService {
    * lest (`current.provider`).
    */
   async submitPaymentIntent(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, credentialsProvider: FikenCredentialsProvider, actorPersonId?: string): Promise<PaymentIntent> {
-    const outcome = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client): Promise<{ ok: true; intent: PaymentIntent } | { ok: false; error: FinanceKillSwitchActiveError }> => {
+    // D-392 (JARVIS-019): reserve-then-execute. Fase 1 (kort transaksjon) validerer og REserverer intensjonen (`draft -> submitted`) og
+    // committer FØR leverandørkallet; fase 2 kaller leverandøren UTEN åpen DB-transaksjon/radlås; fase 3 (kort transaksjon) lagrer utfallet.
+    // En `submitted`-intent uten `provider_ref` betyr «innsending startet, utfall ukjent»: Stripe/Vipps gjenopptas trygt (deterministisk
+    // Idempotency-Key hos leverandøren), Fiken/Neonomics krever eieravstemming - ALDRI en blind ny økonomisk handling.
+    const outcome = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client): Promise<SubmitPlan> => {
       const current = await readForUpdate(client, tenantId, paymentIntentId, true);
       if (!current) throw new PaymentIntentNotFoundError(paymentIntentId);
 
-      if (current.state === "submitted" || current.state === "provider_acknowledged" || current.state === "settled") {
-        return { ok: true, intent: current }; // idempotent no-op: ALDRI en ny provider-mutasjon for en allerede-innsendt intent.
+      const resuming = current.state === "submitted" && !current.provider_ref;
+      if (resuming && current.provider !== "stripe" && current.provider !== "vipps") {
+        throw new AmbiguousProviderResponseError(paymentIntentId, "submit_outcome_unknown_reconcile_required");
+      }
+      if (!resuming && (current.state === "submitted" || current.state === "provider_acknowledged" || current.state === "settled")) {
+        return { kind: "noop", intent: current }; // idempotent no-op: ALDRI en ny provider-mutasjon for en allerede-innsendt intent.
       }
       if (isTerminalPaymentIntentState(current.state)) {
         throw new PaymentIntentAlreadySubmittedError(paymentIntentId, current.state);
       }
+      const reserve = async (): Promise<void> => {
+        if (resuming) return;
+        await client.query(
+          `UPDATE payment_intents SET state = 'submitted', submitted_at = now(), updated_at = now()
+           WHERE tenant_id = $1 AND payment_intent_id = $2 AND state = 'draft'`,
+          [tenantId, paymentIntentId]
+        );
+      };
 
       const killSwitch = await client.query(`SELECT enabled FROM finance_kill_switch WHERE tenant_id = $1`, [tenantId]);
       if ((killSwitch.rows[0] as { enabled: boolean } | undefined)?.enabled === true) {
@@ -430,10 +473,10 @@ export class FinanceService {
           payment_intent_id: paymentIntentId, event_type: "kill_switch_blocked",
           summary: "Innsending blokkert: finans-nødbryter er aktivert", actor_person_id: actorPersonId ?? null, metadata: {}
         });
-        return { ok: false, error: new FinanceKillSwitchActiveError(tenantId) };
+        return { kind: "blocked", error: new FinanceKillSwitchActiveError(tenantId) };
       }
 
-      assertValidPaymentIntentTransition(current.state, "submitted");
+      if (!resuming) assertValidPaymentIntentTransition(current.state, "submitted");
 
       // D-116: DEN kanoniske vendor-korrekthets-choke-pointen - kjøres FØR
       // ALLE fire provider-grener under (fiken/stripe/vipps/neonomics), i
@@ -474,12 +517,12 @@ export class FinanceService {
         // NESTE forsøk gjenbruker SAMME idempotency-nøkkel over (se
         // kommentar over), ALDRI en blind ny økonomisk handling mot et
         // usikkert forrige utfall.
-        const stripePaymentIntent: StripePaymentIntentObject = await transport.createPaymentIntent({
+        await reserve();
+        return this.submitPlan(true, () => transport.createPaymentIntent({
           amountOre, currency: current.currency,
           metadata: { jarvis_payment_intent_id: paymentIntentId, jarvis_tenant_id: tenantId },
           idempotencyKey
-        });
-
+        }), async (client: pg.PoolClient, stripePaymentIntent: StripePaymentIntentObject) => {
         const { rows } = await client.query(
           `UPDATE payment_intents
              SET state = 'provider_acknowledged', provider_ref = $3, provider_status = $4,
@@ -498,7 +541,8 @@ export class FinanceService {
           payment_intent_id: paymentIntentId, event_type: "provider_acknowledged",
           summary: "Stripe bekreftet opprettelsen av PaymentIntent-objektet", actor_person_id: actorPersonId ?? null, metadata: {}
         });
-        return { ok: true, intent: updated };
+        return updated;
+        });
       }
 
       if (current.provider === "vipps") {
@@ -515,11 +559,11 @@ export class FinanceService {
         // Jarvis sin egen `payment_intent_id` gjenbrukt DIREKTE (allerede
         // globalt unik via `randomUUID()`, se `createPaymentIntent()`),
         // SAMME "pointer, aldri en separat generert streng"-prinsipp.
-        const vippsPayment: VippsPaymentObject = await transport.createPayment({
+        await reserve();
+        return this.submitPlan(true, () => transport.createPayment({
           amountOre, currency: current.currency, reference: paymentIntentId,
           paymentDescription: current.purpose.slice(0, 100), returnUrl: VIPPS_PLACEHOLDER_RETURN_URL, idempotencyKey
-        });
-
+        }), async (client: pg.PoolClient, vippsPayment: VippsPaymentObject) => {
         const { rows } = await client.query(
           `UPDATE payment_intents
              SET state = 'provider_acknowledged', provider_ref = $3, provider_status = $4,
@@ -539,7 +583,8 @@ export class FinanceService {
           summary: "Vipps bekreftet opprettelsen - VENTER på brukerbekreftelse i Vipps-appen (state=CREATED)",
           actor_person_id: actorPersonId ?? null, metadata: {}
         });
-        return { ok: true, intent: updated };
+        return updated;
+        });
       }
 
       if (current.provider === "neonomics") {
@@ -569,25 +614,33 @@ export class FinanceService {
         if (!credentials) throw new NeonomicsCredentialsUnavailableError(tenantId);
         const amountOre = Number(current.amount_ore);
         const gateway = this.neonomicsGatewayFactory(credentials);
-        try {
-          // Dobbel idempotens (samme prinsipp som Stripe/Vipps): Jarvis
-          // sin DB-tilstandssjekk over + `endToEndReference` =
-          // payment_intent_id (deterministisk, ALDRI random per forsøk) -
-          // et usikkert forrige utfall kan gjenfinnes hos provider via
-          // referansen i stedet for å blindt sende en NY bankbetaling
-          // (byggeordrens §12).
-          const neonomicsPayment: NeonomicsPaymentObject = await gateway.initiateDomesticPayment({
-            sessionId: consent.provider_session_id, debtorAccountId: debtorAccount.provider_account_id,
-            creditorName: current.vendor_name, creditorAccountIdentifier: current.vendor_provider_ref,
-            amountOre, currency: current.currency, referenceText: current.purpose, endToEndReference: paymentIntentId
-          });
+        await reserve();
+        // Dobbel idempotens (samme prinsipp som Stripe/Vipps): Jarvis sin DB-reservasjon over + `endToEndReference` = payment_intent_id
+        // (deterministisk, ALDRI random per forsøk) - et usikkert forrige utfall kan gjenfinnes hos provider via referansen i stedet for
+        // å blindt sende en NY bankbetaling (byggeordrens §12). Neonomics har ingen Idempotency-Key: et ubekreftet utfall krever avstemming.
+        return this.submitPlan(false, async () => {
+          try {
+            return await gateway.initiateDomesticPayment({
+              sessionId: consent.provider_session_id!, debtorAccountId: debtorAccount.provider_account_id,
+              creditorName: current.vendor_name, creditorAccountIdentifier: current.vendor_provider_ref!,
+              amountOre, currency: current.currency, referenceText: current.purpose, endToEndReference: paymentIntentId
+            });
+          } catch (err) {
+            if (err instanceof NeonomicsPaymentAuthorizationRequiredError) {
+              // 1428 UNDER selve initieringen, uten en returnert betalings-ID å forankre SCA-fortsettelsen mot - et GENUINT tvetydig
+              // provider-svar (byggeordrens §5-prinsipp «aldri stille anta»). Raden settes tilbake til draft (ingen betaling bekreftet).
+              throw new AmbiguousProviderResponseError(paymentIntentId, "sca_required_without_payment_id");
+            }
+            throw err;
+          }
+        }, async (client: pg.PoolClient, neonomicsPayment: NeonomicsPaymentObject) => {
           const { rows } = await client.query(
             `UPDATE payment_intents
                SET state = 'provider_acknowledged', provider_ref = $3, provider_status = $4,
                    provider_reported_amount_ore = $5, provider_reported_currency = $6,
                    provider_status_updated_at = now(), submitted_at = now(), updated_at = now()
              WHERE tenant_id = $1 AND payment_intent_id = $2 RETURNING *`,
-            [tenantId, paymentIntentId, neonomicsPayment.id, neonomicsPayment.status, amountOre, current.currency]
+            [tenantId, paymentIntentId, neonomicsPayment.id, neonomicsPayment.status, null, null] // D-392 (JARVIS-071): Neonomics ekkoer ikke beløp - aldri Jarvis' egne verdier utgitt som leverandørens
           );
           const updated = rows[0] as PaymentIntent;
           await insertEvent(client, tenantId, memorySpace, {
@@ -600,18 +653,8 @@ export class FinanceService {
             summary: "Neonomics bekreftet betalingsinitieringen - SCA hos banken kan fortsatt kreves (se get_payment_authorization_url)",
             actor_person_id: actorPersonId ?? null, metadata: {}
           });
-          return { ok: true, intent: updated };
-        } catch (err) {
-          if (err instanceof NeonomicsPaymentAuthorizationRequiredError) {
-            // 1428 UNDER selve initieringen, uten en returnert betalings-ID
-            // å forankre SCA-fortsettelsen mot - et GENUINT tvetydig
-            // provider-svar (byggeordrens §5-prinsipp «aldri stille anta»).
-            // Raden forblir draft (ingen state-mutasjon skjedde) - en
-            // korrigert retry med samme deterministiske referanse er trygg.
-            throw new AmbiguousProviderResponseError(paymentIntentId, "sca_required_without_payment_id");
-          }
-          throw err;
-        }
+          return updated;
+        });
       }
 
       // provider === "fiken" (uendret oppførsel, byte-for-byte identisk med FØR D-109).
@@ -629,35 +672,99 @@ export class FinanceService {
       // verdi i `amount`-feltet.
       const amountOre = Number(current.amount_ore);
       const transport = this.fikenTransportFactory(credentials);
-      const journalEntry = await transport.createGeneralJournalEntry({
+      await reserve();
+      // Fiken har ingen Idempotency-Key: et ubekreftet utfall (tidsavbrudd) lar intensjonen stå som `submitted` uten provider_ref og krever
+      // eieravstemming - en blind retry kunne postert journalen to ganger.
+      return this.submitPlan(false, () => transport.createGeneralJournalEntry({
         description: current.purpose,
         // D-398 (JARVIS-097): bokføringsdato er norsk kalenderdato (Europe/Oslo) - UTC ga feil dato mellom 22:00/23:00 og midnatt lokal tid.
         date: osloCalendarDate(),
         lines: [
           { account: current.account_code, amount: amountOre },
-          { account: current.counter_account_code, amount: -amountOre }
+          { account: current.counter_account_code!, amount: -amountOre }
         ]
+      }), async (client: pg.PoolClient, journalEntry: FikenJournalEntry) => {
+        const { rows } = await client.query(
+          `UPDATE payment_intents SET state = 'provider_acknowledged', provider_ref = $3, submitted_at = now(), updated_at = now()
+           WHERE tenant_id = $1 AND payment_intent_id = $2 RETURNING *`,
+          [tenantId, paymentIntentId, String(journalEntry.journalEntryId)]
+        );
+        const updated = rows[0] as PaymentIntent;
+        await insertEvent(client, tenantId, memorySpace, {
+          payment_intent_id: paymentIntentId, event_type: "submitted",
+          summary: `Sendt til Fiken - journalpost ${journalEntry.journalEntryId}`, actor_person_id: actorPersonId ?? null,
+          metadata: { provider_ref: String(journalEntry.journalEntryId) }
+        });
+        await insertEvent(client, tenantId, memorySpace, {
+          payment_intent_id: paymentIntentId, event_type: "provider_acknowledged",
+          summary: "Fiken bekreftet journalposten", actor_person_id: actorPersonId ?? null, metadata: {}
+        });
+        return updated;
       });
-
-      const { rows } = await client.query(
-        `UPDATE payment_intents SET state = 'provider_acknowledged', provider_ref = $3, submitted_at = now(), updated_at = now()
-         WHERE tenant_id = $1 AND payment_intent_id = $2 RETURNING *`,
-        [tenantId, paymentIntentId, String(journalEntry.journalEntryId)]
-      );
-      const updated = rows[0] as PaymentIntent;
-      await insertEvent(client, tenantId, memorySpace, {
-        payment_intent_id: paymentIntentId, event_type: "submitted",
-        summary: `Sendt til Fiken - journalpost ${journalEntry.journalEntryId}`, actor_person_id: actorPersonId ?? null,
-        metadata: { provider_ref: String(journalEntry.journalEntryId) }
-      });
-      await insertEvent(client, tenantId, memorySpace, {
-        payment_intent_id: paymentIntentId, event_type: "provider_acknowledged",
-        summary: "Fiken bekreftet journalposten", actor_person_id: actorPersonId ?? null, metadata: {}
-      });
-      return { ok: true, intent: updated };
     });
-    if (!outcome.ok) throw outcome.error;
-    return outcome.intent;
+    if (outcome.kind === "blocked") throw outcome.error;
+    if (outcome.kind === "noop") return outcome.intent;
+    return this.runSubmitPlan(tenantId, memorySpace, paymentIntentId, outcome);
+  }
+
+  /**
+   * D-392 (JARVIS-019): leverandørkall UTEN åpen DB-transaksjon/radlås for operasjoner som er idempotente hos leverandøren (deterministisk
+   * Idempotency-Key). Fase 1 `prepare` (kort tx, med FOR UPDATE) validerer og returnerer enten et ferdig utfall, en blokkering eller en plan;
+   * fase 2 `call` kjører uten tx; fase 3 `apply` (ny, kort tx) låser raden på nytt og lagrer utfallet. To samtidige kall sender begge samme
+   * Idempotency-Key, som leverandøren slår sammen til én handling; `apply` er selv idempotent (ser den at raden allerede er ferdigstilt, skriver den ikke på nytt).
+   */
+  private async providerCallOutsideLock<TPlan, R, Out>(
+    tenantId: string, memorySpace: MemorySpace,
+    steps: {
+      prepare: (client: pg.PoolClient) => Promise<{ kind: "done"; out: Out } | { kind: "blocked"; error: Error } | { kind: "call"; plan: TPlan }>;
+      call: (plan: TPlan) => Promise<R>;
+      apply: (client: pg.PoolClient, plan: TPlan, result: R) => Promise<Out>;
+    }
+  ): Promise<Out> {
+    const prepared = await withMemoryTransaction(this.pool, tenantId, [memorySpace], steps.prepare);
+    if (prepared.kind === "blocked") throw prepared.error;
+    if (prepared.kind === "done") return prepared.out;
+    const result = await steps.call(prepared.plan);
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => steps.apply(client, prepared.plan, result));
+  }
+
+  /** D-392: bygger en leverandørkall-plan (kjøres UTENFOR transaksjon) + en ferdigstillings-skriver (kjøres i en ny, kort transaksjon). */
+  private submitPlan<R>(
+    idempotentAtProvider: boolean,
+    invoke: () => Promise<R>,
+    finalize: (client: pg.PoolClient, result: R) => Promise<PaymentIntent>
+  ): SubmitPlan {
+    return { kind: "call", idempotentAtProvider, run: async () => { const result = await invoke(); return (client) => finalize(client, result); } };
+  }
+
+  private async runSubmitPlan(
+    tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, plan: Extract<SubmitPlan, { kind: "call" }>
+  ): Promise<PaymentIntent> {
+    let finalizer: (client: pg.PoolClient) => Promise<PaymentIntent>;
+    try {
+      finalizer = await plan.run();
+    } catch (err) {
+      // Idempotent hos leverandør (Stripe/Vipps), tydelig avvist (4xx) eller bevisst tvetydig-signalert: sett tilbake til draft slik at en
+      // korrigert/gjentatt retry er trygg. Ellers (tidsavbrudd/nettverk/5xx) forblir intensjonen reservert = utfall ukjent (fail-closed).
+      if (plan.idempotentAtProvider || err instanceof AmbiguousProviderResponseError || isDefinitiveProviderRejection(err)) {
+        await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+          await client.query(
+            `UPDATE payment_intents SET state = 'draft', submitted_at = NULL, updated_at = now()
+             WHERE tenant_id = $1 AND payment_intent_id = $2 AND state = 'submitted' AND provider_ref IS NULL`,
+            [tenantId, paymentIntentId]
+          );
+        }).catch((revertErr) => {
+          console.error(JSON.stringify({ msg: "finance_submit_revert_failed", payment_intent_id: paymentIntentId, error: (revertErr as Error).message.slice(0, 120) }));
+        });
+      }
+      throw err;
+    }
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const current = await readForUpdate(client, tenantId, paymentIntentId, true);
+      if (!current) throw new PaymentIntentNotFoundError(paymentIntentId);
+      if (current.state !== "submitted") return current; // en samtidig gjenopptakelse har allerede ferdigstilt den.
+      return finalizer(client);
+    });
   }
 
   /**
@@ -1018,10 +1125,18 @@ export class FinanceService {
         }), envelope.created]
       );
       if (inserted.rows.length === 0) {
-        return { status: "duplicate" as const, eventId: envelope.id };
+        // D-392 (JARVIS-070): en `failed_retryable`-hendelse er IKKE «ferdig» - leverandørens retry skal behandle den på nytt (tidligere svarte
+        // retry `duplicate` og hendelsen ble liggende for alltid i dødbrevkøen uten noen reprosessor).
+        const prior = await client.query(`SELECT status FROM stripe_webhook_events WHERE stripe_event_id = $1 FOR UPDATE`, [envelope.id]);
+        if ((prior.rows[0] as { status: string } | undefined)?.status !== "failed_retryable") {
+          return { status: "duplicate" as const, eventId: envelope.id };
+        }
       }
 
-      await client.query(`UPDATE stripe_webhook_events SET status = 'verified' WHERE stripe_event_id = $1`, [envelope.id]);
+      await client.query(`UPDATE stripe_webhook_events SET status = 'verified', error_message = NULL WHERE stripe_event_id = $1`, [envelope.id]);
+      // D-392 (JARVIS-070): SAVEPOINT - en SQL-feil under anvendelsen avbryter ellers hele transaksjonen («current transaction is aborted»), slik at
+      // selve dødbrev-skrivingen under feilet, svaret ble 502 og hendelsen forsvant sporløst. Nå rulles kun anvendelsen tilbake.
+      await client.query("SAVEPOINT webhook_apply");
 
       try {
         // charge.*/refund.*-hendelser peker til foreldre-PaymentIntent via
@@ -1053,7 +1168,9 @@ export class FinanceService {
         }
 
         const forceJarvisState: PaymentIntentState | undefined = envelope.type === "payment_intent.payment_failed" ? "failed" : undefined;
-        await this.applyStripePaymentOutcome(
+        // D-392 (JARVIS-020): KUN et payment_intent-objekt bærer PaymentIntent-status/-beløp. `refund.*` (refund-status/-beløp) og `charge.*`
+        // (charge-status) ble tidligere anvendt som PaymentIntent-status og kunne flytte betalingen til feil tilstand/beløpsavvik.
+        if (envelope.object_type === "payment_intent") await this.applyStripePaymentOutcome(
           client, intentRow.tenant_id, intentRow.memory_space_id as MemorySpace, intentRow,
           {
             stripeStatus: envelope.status ?? intentRow.provider_status ?? "", stripeAmountOre: envelope.amount_ore, stripeCurrency: envelope.currency,
@@ -1075,6 +1192,7 @@ export class FinanceService {
         await client.query(`UPDATE stripe_webhook_events SET status = 'processed', payment_intent_id = $2, processed_at = now() WHERE stripe_event_id = $1`, [envelope.id, intentRow.payment_intent_id]);
         return { status: "processed" as const, eventId: envelope.id };
       } catch (err) {
+        await client.query("ROLLBACK TO SAVEPOINT webhook_apply");
         await client.query(`UPDATE stripe_webhook_events SET status = 'failed_retryable', error_message = $2, processed_at = now() WHERE stripe_event_id = $1`, [envelope.id, (err as Error).message.slice(0, 500)]);
         return { status: "failed_retryable" as const, eventId: envelope.id };
       }
@@ -1162,49 +1280,48 @@ export class FinanceService {
     // actorPersonId` over) - en fremtidig slice kan koble den til en
     // dedikert refusjons-hendelseslogg om behovet faktisk oppstår.
     void actorPersonId;
-    const outcome = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client): Promise<{ ok: true; refund: StripeRefund } | { ok: false; error: FinanceKillSwitchActiveError }> => {
-      const { rows: refundRows } = await client.query(`SELECT * FROM stripe_refunds WHERE tenant_id = $1 AND refund_id = $2 FOR UPDATE`, [tenantId, refundId]);
-      const current = refundRows[0] as StripeRefund | undefined;
-      if (!current) throw new RefundNotFoundError(refundId);
+    const isInFlightOrDone = (state: string): boolean => state === "submitted" || state === "provider_acknowledged" || state === "settled";
+    return this.providerCallOutsideLock<{ current: StripeRefund; providerRef: string; transport: StripePaymentWriter }, StripeRefundObject, StripeRefund>(tenantId, memorySpace, {
+      prepare: async (client) => {
+        const { rows: refundRows } = await client.query(`SELECT * FROM stripe_refunds WHERE tenant_id = $1 AND refund_id = $2 FOR UPDATE`, [tenantId, refundId]);
+        const current = refundRows[0] as StripeRefund | undefined;
+        if (!current) throw new RefundNotFoundError(refundId);
 
-      if (current.state === "submitted" || current.state === "provider_acknowledged" || current.state === "settled") {
-        return { ok: true, refund: current }; // idempotent no-op.
-      }
-      if (isTerminalPaymentIntentState(current.state)) {
-        throw new RefundAlreadySubmittedError(refundId, current.state);
-      }
+        if (isInFlightOrDone(current.state)) return { kind: "done", out: current }; // idempotent no-op.
+        if (isTerminalPaymentIntentState(current.state)) throw new RefundAlreadySubmittedError(refundId, current.state);
 
-      const killSwitch = await client.query(`SELECT enabled FROM finance_kill_switch WHERE tenant_id = $1`, [tenantId]);
-      if ((killSwitch.rows[0] as { enabled: boolean } | undefined)?.enabled === true) {
-        return { ok: false, error: new FinanceKillSwitchActiveError(tenantId) };
-      }
+        const killSwitch = await client.query(`SELECT enabled FROM finance_kill_switch WHERE tenant_id = $1`, [tenantId]);
+        if ((killSwitch.rows[0] as { enabled: boolean } | undefined)?.enabled === true) {
+          return { kind: "blocked", error: new FinanceKillSwitchActiveError(tenantId) };
+        }
 
-      assertValidPaymentIntentTransition(current.state, "submitted");
-      const intent = await this.requireStripePaymentIntent(client, tenantId, current.payment_intent_id, false);
-      if (!intent.provider_ref) throw new PaymentIntentNotSettledError(current.payment_intent_id, intent.state);
-      const credentials = await this.stripeCredentialsProvider.getCredentials(tenantId);
-      if (!credentials) throw new StripeCredentialsUnavailableError(tenantId);
-      const transport = this.stripeTransportFactory(credentials);
-
-      const stripeRefund = await transport.createRefund({
-        stripePaymentIntentId: intent.provider_ref, amountOre: current.amount_ore,
+        assertValidPaymentIntentTransition(current.state, "submitted");
+        const intent = await this.requireStripePaymentIntent(client, tenantId, current.payment_intent_id, false);
+        if (!intent.provider_ref) throw new PaymentIntentNotSettledError(current.payment_intent_id, intent.state);
+        const credentials = await this.stripeCredentialsProvider.getCredentials(tenantId);
+        if (!credentials) throw new StripeCredentialsUnavailableError(tenantId);
+        return { kind: "call", plan: { current, providerRef: intent.provider_ref, transport: this.stripeTransportFactory(credentials) } };
+      },
+      call: ({ current, providerRef, transport }) => transport.createRefund({
+        stripePaymentIntentId: providerRef, amountOre: current.amount_ore,
         ...(current.reason !== null ? { reason: current.reason } : {}),
-        // Deterministisk avledet fra refund_id - SAMME dobbel-idempotens-
-        // begrunnelse som `submitPaymentIntent()` sin Stripe-gren.
+        // Deterministisk avledet fra refund_id - SAMME dobbel-idempotens-begrunnelse som `submitPaymentIntent()` sin Stripe-gren.
         idempotencyKey: `stripe-refund:${refundId}`
-      });
-
-      const targetState: StripeRefundState = STRIPE_REFUND_STATUS_TO_STATE[stripeRefund.status] ?? "provider_acknowledged";
-      const timestampColumn = targetState === "settled" ? "settled_at" : targetState === "failed" ? "failed_at" : targetState === "cancelled" ? "cancelled_at" : null;
-      const { rows } = await client.query(
-        `UPDATE stripe_refunds SET state = $3, provider_ref = $4${timestampColumn ? `, ${timestampColumn} = now()` : ""}, submitted_at = now(), updated_at = now()
-         WHERE tenant_id = $1 AND refund_id = $2 RETURNING *`,
-        [tenantId, refundId, targetState === current.state ? "provider_acknowledged" : targetState, stripeRefund.id]
-      );
-      return { ok: true, refund: rows[0] as StripeRefund };
+      }),
+      apply: async (client, { current }, stripeRefund) => {
+        const { rows: lockedRows } = await client.query(`SELECT * FROM stripe_refunds WHERE tenant_id = $1 AND refund_id = $2 FOR UPDATE`, [tenantId, refundId]);
+        const locked = lockedRows[0] as StripeRefund | undefined;
+        if (locked && isInFlightOrDone(locked.state)) return locked; // en samtidig innsending (samme Idempotency-Key) har allerede lagret utfallet.
+        const targetState: StripeRefundState = STRIPE_REFUND_STATUS_TO_STATE[stripeRefund.status] ?? "provider_acknowledged";
+        const timestampColumn = targetState === "settled" ? "settled_at" : targetState === "failed" ? "failed_at" : targetState === "cancelled" ? "cancelled_at" : null;
+        const { rows } = await client.query(
+          `UPDATE stripe_refunds SET state = $3, provider_ref = $4${timestampColumn ? `, ${timestampColumn} = now()` : ""}, submitted_at = now(), updated_at = now()
+           WHERE tenant_id = $1 AND refund_id = $2 RETURNING *`,
+          [tenantId, refundId, targetState === current.state ? "provider_acknowledged" : targetState, stripeRefund.id]
+        );
+        return rows[0] as StripeRefund;
+      }
     });
-    if (!outcome.ok) throw outcome.error;
-    return outcome.refund;
   }
 
   /** Kalt fra webhook-innhentingen for `refund.*`/`charge.refunded`-hendelser - SAMME ordens-/anti-tilbakegang-prinsipp, egen liten sti siden `stripe_refunds` er en egen tabell. */
@@ -1444,7 +1561,15 @@ export class FinanceService {
 
     const targetState = VIPPS_STATUS_TO_JARVIS_STATE[outcome.vippsState] ?? null;
     let stateChanges = "";
-    const values: unknown[] = [tenantId, current.payment_intent_id, outcome.vippsState, outcome.vippsAmountOre, outcome.vippsCurrency, new Date(outcome.sourceEventEpochMs).toISOString(), outcome.sourceEventKey];
+    // D-392 (JARVIS-020): en modifikasjonshendelse (CAPTURED/REFUNDED) bærer capture-/refusjonsbeløpet - betalingens egen status/beløp røres ikke.
+    const isModification = VIPPS_MODIFICATION_EVENTS.has(outcome.vippsState);
+    const values: unknown[] = [
+      tenantId, current.payment_intent_id,
+      isModification ? current.provider_status : outcome.vippsState,
+      isModification ? current.provider_reported_amount_ore : outcome.vippsAmountOre,
+      isModification ? current.provider_reported_currency : outcome.vippsCurrency,
+      new Date(outcome.sourceEventEpochMs).toISOString(), outcome.sourceEventKey
+    ];
 
     if (targetState !== null && targetState !== current.state) {
       if (!canTransitionPaymentIntent(current.state, targetState)) {
@@ -1565,10 +1690,18 @@ export class FinanceService {
         }), envelope.timestamp ? new Date(envelope.timestamp).toISOString() : null]
       );
       if (inserted.rows.length === 0) {
-        return { status: "duplicate" as const, eventId: envelope.dedupeKey };
+        // D-392 (JARVIS-070): en `failed_retryable`-hendelse er IKKE «ferdig» - leverandørens retry skal behandle den på nytt (tidligere svarte
+        // retry `duplicate` og hendelsen ble liggende for alltid i dødbrevkøen uten noen reprosessor).
+        const prior = await client.query(`SELECT status FROM vipps_webhook_events WHERE dedupe_key = $1 FOR UPDATE`, [envelope.dedupeKey]);
+        if ((prior.rows[0] as { status: string } | undefined)?.status !== "failed_retryable") {
+          return { status: "duplicate" as const, eventId: envelope.dedupeKey };
+        }
       }
 
-      await client.query(`UPDATE vipps_webhook_events SET status = 'verified' WHERE dedupe_key = $1`, [envelope.dedupeKey]);
+      await client.query(`UPDATE vipps_webhook_events SET status = 'verified', error_message = NULL WHERE dedupe_key = $1`, [envelope.dedupeKey]);
+      // D-392 (JARVIS-070): SAVEPOINT - en SQL-feil under anvendelsen avbryter ellers hele transaksjonen («current transaction is aborted»), slik at
+      // selve dødbrev-skrivingen under feilet, svaret ble 502 og hendelsen forsvant sporløst. Nå rulles kun anvendelsen tilbake.
+      await client.query("SAVEPOINT webhook_apply");
 
       try {
         const existing = await client.query(`SELECT * FROM payment_intents WHERE provider_ref = $1 AND provider = 'vipps' FOR UPDATE`, [envelope.reference]);
@@ -1606,6 +1739,7 @@ export class FinanceService {
         await client.query(`UPDATE vipps_webhook_events SET status = 'processed', payment_intent_id = $2, processed_at = now() WHERE dedupe_key = $1`, [envelope.dedupeKey, intentRow.payment_intent_id]);
         return { status: "processed" as const, eventId: envelope.dedupeKey };
       } catch (err) {
+        await client.query("ROLLBACK TO SAVEPOINT webhook_apply");
         await client.query(`UPDATE vipps_webhook_events SET status = 'failed_retryable', error_message = $2, processed_at = now() WHERE dedupe_key = $1`, [envelope.dedupeKey, (err as Error).message.slice(0, 500)]);
         return { status: "failed_retryable" as const, eventId: envelope.dedupeKey };
       }
@@ -1679,48 +1813,51 @@ export class FinanceService {
    * mellomtilstand som faktisk ikke eksisterer for denne handlingen).
    */
   async submitVippsCapture(tenantId: string, memorySpace: MemorySpace, captureId: string, actorPersonId?: string): Promise<VippsCapture> {
-    const outcome = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client): Promise<{ ok: true; capture: VippsCapture; performed: boolean } | { ok: false; error: FinanceKillSwitchActiveError }> => {
-      const { rows: captureRows } = await client.query(`SELECT * FROM vipps_captures WHERE tenant_id = $1 AND capture_id = $2 FOR UPDATE`, [tenantId, captureId]);
-      const current = captureRows[0] as VippsCapture | undefined;
-      if (!current) throw new CaptureNotFoundError(captureId);
+    const inFlightOrDone = (state: string): boolean => state === "submitted" || state === "provider_acknowledged" || state === "settled";
+    const outcome = await this.providerCallOutsideLock<
+      { current: VippsCapture; providerRef: string; transport: VippsPaymentWriter }, unknown, { capture: VippsCapture; performed: boolean }
+    >(tenantId, memorySpace, {
+      prepare: async (client) => {
+        const { rows: captureRows } = await client.query(`SELECT * FROM vipps_captures WHERE tenant_id = $1 AND capture_id = $2 FOR UPDATE`, [tenantId, captureId]);
+        const current = captureRows[0] as VippsCapture | undefined;
+        if (!current) throw new CaptureNotFoundError(captureId);
 
-      if (current.state === "submitted" || current.state === "provider_acknowledged" || current.state === "settled") {
-        // Idempotent no-op - `performed: false` slik at post-transaksjons-
-        // blokken under ALDRI logger et nytt 'captured'-event for en retry
-        // (ville forurenset audit-historikken med duplikater).
-        return { ok: true, capture: current, performed: false };
-      }
-      if (isTerminalPaymentIntentState(current.state)) {
-        throw new CaptureAlreadySubmittedError(captureId, current.state);
-      }
+        if (inFlightOrDone(current.state)) {
+          // Idempotent no-op - `performed: false` slik at blokken under ALDRI logger et nytt 'captured'-event for en retry.
+          return { kind: "done", out: { capture: current, performed: false } };
+        }
+        if (isTerminalPaymentIntentState(current.state)) throw new CaptureAlreadySubmittedError(captureId, current.state);
 
-      const killSwitch = await client.query(`SELECT enabled FROM finance_kill_switch WHERE tenant_id = $1`, [tenantId]);
-      if ((killSwitch.rows[0] as { enabled: boolean } | undefined)?.enabled === true) {
-        return { ok: false, error: new FinanceKillSwitchActiveError(tenantId) };
-      }
+        const killSwitch = await client.query(`SELECT enabled FROM finance_kill_switch WHERE tenant_id = $1`, [tenantId]);
+        if ((killSwitch.rows[0] as { enabled: boolean } | undefined)?.enabled === true) {
+          return { kind: "blocked", error: new FinanceKillSwitchActiveError(tenantId) };
+        }
 
-      assertValidPaymentIntentTransition(current.state, "submitted");
-      const intent = await this.requireVippsPaymentIntent(client, tenantId, current.payment_intent_id, false);
-      if (!intent.provider_ref) throw new PaymentIntentNotAuthorizedError(current.payment_intent_id, intent.provider_status);
-      if (intent.provider_status !== "AUTHORIZED") throw new PaymentIntentNotAuthorizedError(current.payment_intent_id, intent.provider_status);
-      const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
-      if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
-      const transport = this.vippsTransportFactory(credentials);
-
-      await transport.capturePayment({
-        reference: intent.provider_ref, amountOre: current.amount_ore, currency: current.currency,
+        assertValidPaymentIntentTransition(current.state, "submitted");
+        const intent = await this.requireVippsPaymentIntent(client, tenantId, current.payment_intent_id, false);
+        if (!intent.provider_ref) throw new PaymentIntentNotAuthorizedError(current.payment_intent_id, intent.provider_status);
+        if (intent.provider_status !== "AUTHORIZED") throw new PaymentIntentNotAuthorizedError(current.payment_intent_id, intent.provider_status);
+        const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
+        if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
+        return { kind: "call", plan: { current, providerRef: intent.provider_ref, transport: this.vippsTransportFactory(credentials) } };
+      },
+      call: ({ current, providerRef, transport }) => transport.capturePayment({
+        reference: providerRef, amountOre: current.amount_ore, currency: current.currency,
         // SAMME dobbel-idempotens-begrunnelse som Stripe: avledet FRA capture_id, ALDRI random per forsøk.
         idempotencyKey: `vipps-capture:${captureId}`
-      });
-
-      const { rows } = await client.query(
-        `UPDATE vipps_captures SET state = 'settled', submitted_at = now(), settled_at = now(), updated_at = now()
-         WHERE tenant_id = $1 AND capture_id = $2 RETURNING *`,
-        [tenantId, captureId]
-      );
-      return { ok: true, capture: rows[0] as VippsCapture, performed: true };
+      }),
+      apply: async (client) => {
+        const { rows: lockedRows } = await client.query(`SELECT * FROM vipps_captures WHERE tenant_id = $1 AND capture_id = $2 FOR UPDATE`, [tenantId, captureId]);
+        const locked = lockedRows[0] as VippsCapture | undefined;
+        if (locked && inFlightOrDone(locked.state)) return { capture: locked, performed: false };
+        const { rows } = await client.query(
+          `UPDATE vipps_captures SET state = 'settled', submitted_at = now(), settled_at = now(), updated_at = now()
+           WHERE tenant_id = $1 AND capture_id = $2 RETURNING *`,
+          [tenantId, captureId]
+        );
+        return { capture: rows[0] as VippsCapture, performed: true };
+      }
     });
-    if (!outcome.ok) throw outcome.error;
 
     if (outcome.performed) {
       await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
@@ -1797,43 +1934,46 @@ export class FinanceService {
    * IDENTISK semantikk, ALDRI en ny state-maskin-endring for D-110).
    */
   async cancelVippsPayment(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, actorPersonId?: string): Promise<PaymentIntent> {
-    const outcome = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client): Promise<{ ok: true; intent: PaymentIntent } | { ok: false; error: FinanceKillSwitchActiveError }> => {
-      const current = await this.requireVippsPaymentIntent(client, tenantId, paymentIntentId, true);
-      if (isTerminalPaymentIntentState(current.state)) {
-        return { ok: true, intent: current }; // idempotent no-op - ALDRI et nytt provider-kall for en allerede-terminal intensjon.
-      }
-      if (!current.provider_ref) {
-        // Aldri innsendt til Vipps ennå - reint lokal avbrytelse (SAMME sti som `cancelPaymentIntent()`).
+    return this.providerCallOutsideLock<{ providerRef: string; transport: VippsPaymentWriter }, unknown, PaymentIntent>(tenantId, memorySpace, {
+      prepare: async (client) => {
+        const current = await this.requireVippsPaymentIntent(client, tenantId, paymentIntentId, true);
+        if (isTerminalPaymentIntentState(current.state)) {
+          return { kind: "done", out: current }; // idempotent no-op - ALDRI et nytt provider-kall for en allerede-terminal intensjon.
+        }
+        if (!current.provider_ref) {
+          // Aldri innsendt til Vipps ennå - reint lokal avbrytelse (SAMME sti som `cancelPaymentIntent()`).
+          assertValidPaymentIntentTransition(current.state, "cancelled");
+          const { rows } = await client.query(
+            `UPDATE payment_intents SET state = 'cancelled', cancelled_at = now(), updated_at = now() WHERE tenant_id = $1 AND payment_intent_id = $2 RETURNING *`,
+            [tenantId, paymentIntentId]
+          );
+          await insertEvent(client, tenantId, memorySpace, { payment_intent_id: paymentIntentId, event_type: "cancelled", summary: "Kansellert (aldri innsendt til Vipps)", actor_person_id: actorPersonId ?? null, metadata: {} });
+          return { kind: "done", out: rows[0] as PaymentIntent };
+        }
+
+        const killSwitch = await client.query(`SELECT enabled FROM finance_kill_switch WHERE tenant_id = $1`, [tenantId]);
+        if ((killSwitch.rows[0] as { enabled: boolean } | undefined)?.enabled === true) {
+          return { kind: "blocked", error: new FinanceKillSwitchActiveError(tenantId) };
+        }
+
         assertValidPaymentIntentTransition(current.state, "cancelled");
+        const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
+        if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
+        return { kind: "call", plan: { providerRef: current.provider_ref, transport: this.vippsTransportFactory(credentials) } };
+      },
+      call: ({ providerRef, transport }) => transport.cancelPayment(providerRef, `vipps-cancel:${paymentIntentId}`),
+      apply: async (client) => {
+        const locked = await this.requireVippsPaymentIntent(client, tenantId, paymentIntentId, true);
+        if (isTerminalPaymentIntentState(locked.state)) return locked; // en samtidig annullering/webhook har allerede ferdigstilt den.
         const { rows } = await client.query(
-          `UPDATE payment_intents SET state = 'cancelled', cancelled_at = now(), updated_at = now() WHERE tenant_id = $1 AND payment_intent_id = $2 RETURNING *`,
+          `UPDATE payment_intents SET state = 'cancelled', provider_status = 'CANCELLED', provider_status_updated_at = now(), cancelled_at = now(), updated_at = now()
+           WHERE tenant_id = $1 AND payment_intent_id = $2 RETURNING *`,
           [tenantId, paymentIntentId]
         );
-        await insertEvent(client, tenantId, memorySpace, { payment_intent_id: paymentIntentId, event_type: "cancelled", summary: "Kansellert (aldri innsendt til Vipps)", actor_person_id: actorPersonId ?? null, metadata: {} });
-        return { ok: true, intent: rows[0] as PaymentIntent };
+        await insertEvent(client, tenantId, memorySpace, { payment_intent_id: paymentIntentId, event_type: "cancelled", summary: "Kansellert hos Vipps (reservasjon frigjort)", actor_person_id: actorPersonId ?? null, metadata: {} });
+        return rows[0] as PaymentIntent;
       }
-
-      const killSwitch = await client.query(`SELECT enabled FROM finance_kill_switch WHERE tenant_id = $1`, [tenantId]);
-      if ((killSwitch.rows[0] as { enabled: boolean } | undefined)?.enabled === true) {
-        return { ok: false, error: new FinanceKillSwitchActiveError(tenantId) };
-      }
-
-      assertValidPaymentIntentTransition(current.state, "cancelled");
-      const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
-      if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
-      const transport = this.vippsTransportFactory(credentials);
-      await transport.cancelPayment(current.provider_ref, `vipps-cancel:${paymentIntentId}`);
-
-      const { rows } = await client.query(
-        `UPDATE payment_intents SET state = 'cancelled', provider_status = 'CANCELLED', provider_status_updated_at = now(), cancelled_at = now(), updated_at = now()
-         WHERE tenant_id = $1 AND payment_intent_id = $2 RETURNING *`,
-        [tenantId, paymentIntentId]
-      );
-      await insertEvent(client, tenantId, memorySpace, { payment_intent_id: paymentIntentId, event_type: "cancelled", summary: "Kansellert hos Vipps (reservasjon frigjort)", actor_person_id: actorPersonId ?? null, metadata: {} });
-      return { ok: true, intent: rows[0] as PaymentIntent };
     });
-    if (!outcome.ok) throw outcome.error;
-    return outcome.intent;
   }
 
   // === Refunds (byggeordrens §8) ===========================================
@@ -1878,44 +2018,42 @@ export class FinanceService {
   /** Vipps sin refund-respons er, SAMME begrunnelse som capture, SYNKRON og ENDELIG - `state` settes DIREKTE til `settled` ved 2xx. */
   async submitVippsRefund(tenantId: string, memorySpace: MemorySpace, refundId: string, actorPersonId?: string): Promise<VippsRefund> {
     void actorPersonId; // SAMME begrunnelse som `submitStripeRefund()` sin `void actorPersonId` - radens egen tidsstempel-historikk ER audit-stien.
-    const outcome = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client): Promise<{ ok: true; refund: VippsRefund } | { ok: false; error: FinanceKillSwitchActiveError }> => {
-      const { rows: refundRows } = await client.query(`SELECT * FROM vipps_refunds WHERE tenant_id = $1 AND refund_id = $2 FOR UPDATE`, [tenantId, refundId]);
-      const current = refundRows[0] as VippsRefund | undefined;
-      if (!current) throw new RefundNotFoundError(refundId);
+    const inFlightOrDone = (state: string): boolean => state === "submitted" || state === "provider_acknowledged" || state === "settled";
+    return this.providerCallOutsideLock<{ current: VippsRefund; providerRef: string; transport: VippsPaymentWriter }, unknown, VippsRefund>(tenantId, memorySpace, {
+      prepare: async (client) => {
+        const { rows: refundRows } = await client.query(`SELECT * FROM vipps_refunds WHERE tenant_id = $1 AND refund_id = $2 FOR UPDATE`, [tenantId, refundId]);
+        const current = refundRows[0] as VippsRefund | undefined;
+        if (!current) throw new RefundNotFoundError(refundId);
+        if (inFlightOrDone(current.state)) return { kind: "done", out: current };
+        if (isTerminalPaymentIntentState(current.state)) throw new RefundAlreadySubmittedError(refundId, current.state);
 
-      if (current.state === "submitted" || current.state === "provider_acknowledged" || current.state === "settled") {
-        return { ok: true, refund: current };
+        const killSwitch = await client.query(`SELECT enabled FROM finance_kill_switch WHERE tenant_id = $1`, [tenantId]);
+        if ((killSwitch.rows[0] as { enabled: boolean } | undefined)?.enabled === true) {
+          return { kind: "blocked", error: new FinanceKillSwitchActiveError(tenantId) };
+        }
+
+        assertValidPaymentIntentTransition(current.state, "submitted");
+        const intent = await this.requireVippsPaymentIntent(client, tenantId, current.payment_intent_id, false);
+        if (!intent.provider_ref) throw new PaymentIntentNotSettledError(current.payment_intent_id, intent.state);
+        const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
+        if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
+        return { kind: "call", plan: { current, providerRef: intent.provider_ref, transport: this.vippsTransportFactory(credentials) } };
+      },
+      call: ({ current, providerRef, transport }) => transport.refundPayment({
+        reference: providerRef, amountOre: current.amount_ore, currency: current.currency, idempotencyKey: `vipps-refund:${refundId}`
+      }),
+      apply: async (client, { providerRef }) => {
+        const { rows: lockedRows } = await client.query(`SELECT * FROM vipps_refunds WHERE tenant_id = $1 AND refund_id = $2 FOR UPDATE`, [tenantId, refundId]);
+        const locked = lockedRows[0] as VippsRefund | undefined;
+        if (locked && inFlightOrDone(locked.state)) return locked;
+        const { rows } = await client.query(
+          `UPDATE vipps_refunds SET state = 'settled', provider_ref = $3, submitted_at = now(), settled_at = now(), updated_at = now()
+           WHERE tenant_id = $1 AND refund_id = $2 RETURNING *`,
+          [tenantId, refundId, providerRef]
+        );
+        return rows[0] as VippsRefund;
       }
-      if (isTerminalPaymentIntentState(current.state)) {
-        throw new RefundAlreadySubmittedError(refundId, current.state);
-      }
-
-      const killSwitch = await client.query(`SELECT enabled FROM finance_kill_switch WHERE tenant_id = $1`, [tenantId]);
-      if ((killSwitch.rows[0] as { enabled: boolean } | undefined)?.enabled === true) {
-        return { ok: false, error: new FinanceKillSwitchActiveError(tenantId) };
-      }
-
-      assertValidPaymentIntentTransition(current.state, "submitted");
-      const intent = await this.requireVippsPaymentIntent(client, tenantId, current.payment_intent_id, false);
-      if (!intent.provider_ref) throw new PaymentIntentNotSettledError(current.payment_intent_id, intent.state);
-      const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
-      if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
-      const transport = this.vippsTransportFactory(credentials);
-
-      await transport.refundPayment({
-        reference: intent.provider_ref, amountOre: current.amount_ore, currency: current.currency,
-        idempotencyKey: `vipps-refund:${refundId}`
-      });
-
-      const { rows } = await client.query(
-        `UPDATE vipps_refunds SET state = 'settled', provider_ref = $3, submitted_at = now(), settled_at = now(), updated_at = now()
-         WHERE tenant_id = $1 AND refund_id = $2 RETURNING *`,
-        [tenantId, refundId, intent.provider_ref]
-      );
-      return { ok: true, refund: rows[0] as VippsRefund };
     });
-    if (!outcome.ok) throw outcome.error;
-    return outcome.refund;
   }
 
   async getVippsRefund(tenantId: string, memorySpace: MemorySpace, refundId: string): Promise<VippsRefund | null> {
@@ -2257,10 +2395,18 @@ export class FinanceService {
         [envelope.dedupeKey, neonomicsTenantId, envelope.paymentId, envelope.status, JSON.stringify({ payment_id: envelope.paymentId, status: envelope.status })]
       );
       if (inserted.rows.length === 0) {
-        return { status: "duplicate" as const, eventId: envelope.dedupeKey };
+        // D-392 (JARVIS-070): en `failed_retryable`-hendelse er IKKE «ferdig» - leverandørens retry skal behandle den på nytt (tidligere svarte
+        // retry `duplicate` og hendelsen ble liggende for alltid i dødbrevkøen uten noen reprosessor).
+        const prior = await client.query(`SELECT status FROM neonomics_webhook_events WHERE dedupe_key = $1 FOR UPDATE`, [envelope.dedupeKey]);
+        if ((prior.rows[0] as { status: string } | undefined)?.status !== "failed_retryable") {
+          return { status: "duplicate" as const, eventId: envelope.dedupeKey };
+        }
       }
 
-      await client.query(`UPDATE neonomics_webhook_events SET status = 'verified' WHERE dedupe_key = $1`, [envelope.dedupeKey]);
+      await client.query(`UPDATE neonomics_webhook_events SET status = 'verified', error_message = NULL WHERE dedupe_key = $1`, [envelope.dedupeKey]);
+      // D-392 (JARVIS-070): SAVEPOINT - en SQL-feil under anvendelsen avbryter ellers hele transaksjonen («current transaction is aborted»), slik at
+      // selve dødbrev-skrivingen under feilet, svaret ble 502 og hendelsen forsvant sporløst. Nå rulles kun anvendelsen tilbake.
+      await client.query("SAVEPOINT webhook_apply");
 
       try {
         const existing = await client.query(`SELECT * FROM payment_intents WHERE provider_ref = $1 AND provider = 'neonomics' FOR UPDATE`, [envelope.paymentId]);
@@ -2286,6 +2432,7 @@ export class FinanceService {
         await client.query(`UPDATE neonomics_webhook_events SET status = 'processed', payment_intent_id = $2, processed_at = now() WHERE dedupe_key = $1`, [envelope.dedupeKey, intentRow.payment_intent_id]);
         return { status: "processed" as const, eventId: envelope.dedupeKey };
       } catch (err) {
+        await client.query("ROLLBACK TO SAVEPOINT webhook_apply");
         await client.query(`UPDATE neonomics_webhook_events SET status = 'failed_retryable', error_message = $2, processed_at = now() WHERE dedupe_key = $1`, [envelope.dedupeKey, (err as Error).message.slice(0, 500)]);
         return { status: "failed_retryable" as const, eventId: envelope.dedupeKey };
       }

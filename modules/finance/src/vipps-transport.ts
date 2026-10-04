@@ -76,6 +76,10 @@ const MAX_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 500;
 const TOKEN_REFRESH_SKEW_MS = 60_000;
 
+import { toOreInteger } from "./ore.ts";
+
+import { financeSignal, isRetrySafe } from "./http.ts";
+
 export type VippsEnvironment = "test" | "production";
 
 export function vippsApiBaseUrl(environment: VippsEnvironment): string {
@@ -181,6 +185,7 @@ export class VippsTransport implements VippsPaymentWriter {
       return this.cachedToken.token;
     }
     const response = await fetch(`${this.baseUrl}/accesstoken/get`, {
+        signal: financeSignal(),
       method: "POST",
       headers: {
         client_id: this.clientId,
@@ -218,6 +223,7 @@ export class VippsTransport implements VippsPaymentWriter {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const accessToken = await this.getAccessToken();
       const response = await fetch(`${this.baseUrl}${path}`, {
+        signal: financeSignal(),
         method,
         headers: {
           authorization: `Bearer ${accessToken}`,
@@ -233,7 +239,7 @@ export class VippsTransport implements VippsPaymentWriter {
         return (await response.json()) as T;
       }
       const rawBody = await response.text().catch(() => "");
-      const retryable = RETRYABLE_HTTP_STATUS.has(response.status);
+      const retryable = RETRYABLE_HTTP_STATUS.has(response.status) && isRetrySafe(method, response.status, idempotencyKey !== undefined);
       lastError = new VippsApiError(`vipps_api_failed_${response.status}:${classifyVippsErrorBody(rawBody)}`, response.status, retryable);
       if (!retryable || attempt === MAX_ATTEMPTS) throw lastError;
       await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
@@ -246,7 +252,7 @@ export class VippsTransport implements VippsPaymentWriter {
       "POST",
       "/epayment/v1/payments",
       {
-        amount: { currency: input.currency, value: input.amountOre },
+        amount: { currency: input.currency, value: toOreInteger(input.amountOre) },
         paymentMethod: { type: "WALLET" },
         reference: input.reference,
         paymentDescription: input.paymentDescription,
@@ -265,7 +271,7 @@ export class VippsTransport implements VippsPaymentWriter {
     return this.request<VippsPaymentObject>(
       "POST",
       `/epayment/v1/payments/${encodeURIComponent(input.reference)}/capture`,
-      { modificationAmount: { currency: input.currency, value: input.amountOre } },
+      { modificationAmount: { currency: input.currency, value: toOreInteger(input.amountOre) } },
       input.idempotencyKey
     );
   }
@@ -278,7 +284,7 @@ export class VippsTransport implements VippsPaymentWriter {
     return this.request<VippsPaymentObject>(
       "POST",
       `/epayment/v1/payments/${encodeURIComponent(input.reference)}/refund`,
-      { modificationAmount: { currency: input.currency, value: input.amountOre } },
+      { modificationAmount: { currency: input.currency, value: toOreInteger(input.amountOre) } },
       input.idempotencyKey
     );
   }

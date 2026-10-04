@@ -23,7 +23,7 @@ describe("A: TelegramTransport.invoke('get_bot_info', ...) - Bot API getMe, inge
     const result = await transport.invoke("get_bot_info", {}, "test-bot-token");
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe("https://api.telegram.org/bottest-bot-token/getMe");
-    expect(calls[0]!.init).toBeUndefined();
+    expect(calls[0]!.init?.method).toBeUndefined(); // D-392: kun et avbruddssignal er satt, ingen kropp/metode
     expect(result.data).toEqual({ id: 12345, is_bot: true, username: "jarvis_bot" });
   });
 

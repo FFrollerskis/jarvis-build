@@ -65,6 +65,8 @@ const BUSINESS_JWT_LIFETIME_SECONDS = 5;
 /** Business-paginering (eier-levert primærkilde): `from_record`/`records_count`, ALDRI et gjettet side-token. */
 const RECORDS_COUNT = 100;
 
+import { financeSignal, isRetrySafe } from "./http.ts";
+
 export class WallesterApiError extends Error {
   constructor(
     message: string,
@@ -248,6 +250,7 @@ export class WallesterTransport implements WallesterGateway {
         nowEpochSeconds: Math.floor(Date.now() / 1000)
       });
       const response = await fetch(`${this.baseUrl}${path}`, {
+        signal: financeSignal(),
         method,
         headers: {
           authorization: `Bearer ${jwt}`,
@@ -261,7 +264,7 @@ export class WallesterTransport implements WallesterGateway {
         return (text ? JSON.parse(text) : {}) as T;
       }
       const message = sanitizeErrorBody(await response.text().catch(() => ""));
-      const retryable = RETRYABLE_HTTP_STATUS.has(response.status);
+      const retryable = RETRYABLE_HTTP_STATUS.has(response.status) && isRetrySafe(method, response.status, false);
       lastError = new WallesterApiError(`wallester_api_failed_${response.status}:${message}`, response.status, retryable);
       if (!retryable || attempt === MAX_ATTEMPTS) throw lastError;
       await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
@@ -370,16 +373,28 @@ export class WallesterTransport implements WallesterGateway {
     const rawSecurity = await this.request<Record<string, unknown>>("PATCH", `/v1/cards/${encodeURIComponent(providerCardId)}/security`, this.mapSecurityBody(limits));
     const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
     const bool = (v: unknown, fallback: boolean): boolean => (typeof v === "boolean" ? v : fallback);
-    return {
+    const applied: Omit<WallesterCardLimitsApplied, "confirmed"> = {
       transactionLimitOre: num(rawLimits["transaction_purchase"]),
       dailyLimitOre: num(rawLimits["daily_purchase"]),
       weeklyLimitOre: num(rawLimits["weekly_purchase"]),
       monthlyLimitOre: num(rawLimits["monthly_purchase"]),
       atmEnabled: bool(rawSecurity["withdrawal_enabled"], limits.atmEnabled),
       onlineEnabled: bool(rawSecurity["internet_purchase_enabled"], limits.onlineEnabled),
-      contactlessEnabled: bool(rawSecurity["contactless_enabled"], limits.contactlessEnabled),
-      confirmed: true
+      contactlessEnabled: bool(rawSecurity["contactless_enabled"], limits.contactlessEnabled)
     };
+    // D-392 (JARVIS-071): `confirmed` skal bety at leverandøren FAKTISK ekkoet de forespurte verdiene - ikke at kallet ikke kastet.
+    // Mangler ekkoet (null/ikke-boolsk) eller avviker det fra det som ble bedt om, er utfallet ubekreftet.
+    const echoed = (requested: number | null, got: number | null): boolean => requested === null || got === requested;
+    const echoedBool = (raw: unknown, requested: boolean): boolean => typeof raw === "boolean" && raw === requested;
+    const confirmed =
+      echoed(limits.transactionLimitOre, applied.transactionLimitOre) &&
+      echoed(limits.dailyLimitOre, applied.dailyLimitOre) &&
+      echoed(limits.weeklyLimitOre, applied.weeklyLimitOre) &&
+      echoed(limits.monthlyLimitOre, applied.monthlyLimitOre) &&
+      echoedBool(rawSecurity["withdrawal_enabled"], limits.atmEnabled) &&
+      echoedBool(rawSecurity["internet_purchase_enabled"], limits.onlineEnabled) &&
+      echoedBool(rawSecurity["contactless_enabled"], limits.contactlessEnabled);
+    return { ...applied, confirmed };
   }
 
   private mapAuthorization(raw: Record<string, unknown>): WallesterAuthorizationObject {

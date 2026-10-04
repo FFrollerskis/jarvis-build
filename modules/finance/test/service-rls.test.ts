@@ -110,9 +110,11 @@ describe("A: idempotent opprettelse (akseptansekriterium 1 - retry can never dou
   it("samme idempotency_key returnerer SAMME rad, oppretter aldri en duplikat", async () => {
     const key = `idem-fixed-${Math.random()}`;
     const first = await service.createPaymentIntent(TENANT_A, "business", baseInput({ idempotency_key: key }));
-    const second = await service.createPaymentIntent(TENANT_A, "business", baseInput({ idempotency_key: key, vendor_name: "ANNET NAVN - skal IKKE brukes" }));
+    const second = await service.createPaymentIntent(TENANT_A, "business", baseInput({ idempotency_key: key }));
     expect(second.payment_intent_id).toBe(first.payment_intent_id);
     expect(second.vendor_name).toBe("Leverandør AS");
+    // D-392 (JARVIS-072): samme nøkkel med ANDRE parametre er en konflikt - aldri en stille retur av en annen betaling.
+    await expect(service.createPaymentIntent(TENANT_A, "business", baseInput({ idempotency_key: key, vendor_name: "ANNET NAVN" }))).rejects.toThrow("idempotency_key_conflict");
     const all = await service.listPaymentIntents(TENANT_A, "business");
     expect(all.filter((i) => i.idempotency_key === key)).toHaveLength(1);
   });
