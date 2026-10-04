@@ -1149,7 +1149,7 @@ Critic     ${mesh.critic}`;
   const statusText = async () => {
     const gates = [...toolGateway.health.entries()].map(([k, v]) => `${k}:${v.state}`).join(" ");
     return `JARVIS STATUS
-fase: v4.0 UA-1 P1A + D-30 voice foundation
+miljø: ${process.env["JARVIS_ENV"] ?? "dev"}
 connectors: ${gates || "ingen kall enda"}
 ${await aiMeshText()}
 ${await voiceText()}

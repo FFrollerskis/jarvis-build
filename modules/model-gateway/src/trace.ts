@@ -55,7 +55,7 @@ export interface JsonlRotation {
   maxFiles: number;
 }
 
-export const DEFAULT_JSONL_ROTATION: JsonlRotation = { maxBytes: 50 * 1024 * 1024, maxFiles: 3 };
+export const DEFAULT_JSONL_ROTATION: JsonlRotation = { maxBytes: 20 * 1024 * 1024, maxFiles: 2 };
 
 async function fileSize(path: string): Promise<number> {
   try {
