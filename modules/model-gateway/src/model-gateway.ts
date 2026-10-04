@@ -673,10 +673,7 @@ export class ModelGateway {
         success: false, output: null, error_category: `INVALID_ARGUMENTS:${validationError}`, at
       };
     }
-    const idempotencyKey = createHash("sha256")
-      .update(`${input.tenant_id}:${input.task_id ?? input.session_id ?? "adhoc"}:${call.tool_name}:${JSON.stringify(call.arguments, Object.keys(call.arguments).sort())}`)
-      .digest("hex")
-      .slice(0, 32);
+    const idempotencyKey = toolCallIdempotencyKey(input, call);
     const cached = executed.get(idempotencyKey);
     if (cached) {
       // Retry/fallback/reconnect: samme utførelse returneres - aldri dobbel side-effekt (§19).
@@ -992,4 +989,33 @@ export class ModelGateway {
     stamps.push(now);
     this.callTimestamps.set(tenantId, stamps);
   }
+}
+
+/** Tidsvindu for samtalebundne (ikke oppgavebundne) nøkler: samme mutasjon senere i en langlevd økt er en NY intensjon, ikke en retry. */
+export const SESSION_IDEMPOTENCY_WINDOW_MS = 10 * 60 * 1000;
+
+/** Kanonisk JSON: nøkler sortert på ALLE nivåer (JARVIS-017: replacer-arrayen `JSON.stringify(x, keys)` filtrerte bort nøstede felt). */
+export function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map((v) => canonicalJson(v)).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`;
+}
+
+export function toolCallIdempotencyKey(
+  input: { tenant_id: string; task_id?: string; session_id?: string },
+  call: { tool_name: string; arguments: Record<string, unknown> },
+  nowMs: number = Date.now()
+): string {
+  // Oppgavebundne nøkler er stabile (en oppgave-retry skal aldri duplisere); samtalebundne får et tidsvindu så en senere, bevisst gjentakelse ikke
+  // stilltiende hoppes over for alltid (JARVIS-017: dedupe-rader utløp aldri).
+  const scope = input.task_id !== undefined
+    ? `task:${input.task_id}`
+    : `${input.session_id ?? "adhoc"}:${Math.floor(nowMs / SESSION_IDEMPOTENCY_WINDOW_MS)}`;
+  return createHash("sha256")
+    .update(`${input.tenant_id}:${scope}:${call.tool_name}:${canonicalJson(call.arguments)}`)
+    .digest("hex")
+    .slice(0, 32);
 }

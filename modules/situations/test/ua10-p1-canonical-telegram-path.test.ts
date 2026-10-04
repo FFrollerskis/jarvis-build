@@ -256,7 +256,7 @@ describe("KANONISK STI: INFORM + ACT når EKTE TelegramTransport med credential 
 });
 
 describe("HOST-FUNN 2105bb7d REPRODUSERT: en wrapper som dropper credential foran TelegramTransport gir NØYAKTIG host-symptomet", () => {
-  it("botundefined -> 404 -> tool.failed i audit, ingen tool_executions-rad, pending=1, errors=[], stage forblir act (ikke act_notify)", async () => {
+  it("botundefined -> 404 -> tool.failed i audit, ingen VELLYKKET tool_executions-rad, pending=1, errors=[], stage forblir act (ikke act_notify)", async () => {
     const actuator = new FakeActuatorTransport();
     const gateway = buildGateway(new CredentialDroppingWrapper(new TelegramTransport()), actuator);
     await seedHighPriorityLoop();
@@ -277,8 +277,9 @@ describe("HOST-FUNN 2105bb7d REPRODUSERT: en wrapper som dropper credential fora
     expect(r.auto_act).toEqual({ attempted: 1, succeeded: 1, denied: 0, skipped: 0 });
     expect(sit.stage).toBe("act");
     expect(sit.act_result).toBe("succeeded");
-    const { rows: execs } = await adminPool.query(`SELECT count(*)::int AS n FROM tool_executions WHERE tenant_id = $1 AND tool_id = 'telegram'`, [TENANT]);
-    expect((execs[0] as { n: number }).n).toBe(0);
+    // D-392 (reserve-then-execute): et mislykket forsøk etterlater nå en `failed`-rad (kvittering på forsøket) - men aldri en vellykket utførelse.
+    const { rows: execs } = await adminPool.query(`SELECT status FROM tool_executions WHERE tenant_id = $1 AND tool_id = 'telegram'`, [TENANT]);
+    expect((execs as Array<{ status: string }>).filter((e) => e.status === "succeeded")).toHaveLength(0);
     // Den ENESTE sporbare grunnen i produksjon ligger i audit_events (`tool.failed` / `telegram_error_404`).
     const { rows: audit } = await adminPool.query(
       `SELECT DISTINCT type, decision, reason FROM audit_events WHERE tenant_id = $1 AND tool_id = 'telegram' AND at >= $2 ORDER BY 1`,

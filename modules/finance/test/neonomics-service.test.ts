@@ -382,7 +382,7 @@ describe("E: PIS-betalingsinitiering (FinanceService)", () => {
     expect(gateway.initiateCalls).toHaveLength(1);
   });
 
-  it("nettverksfeil UNDER initiering etterlater draft - korrigert retry er trygg og gjenbruker samme deterministiske referanse", async () => {
+  it("D-392: nettverksfeil/tidsavbrudd UNDER initiering = utfall ukjent: intensjonen forblir `submitted`, og retry sender ALDRI en ny bankbetaling", async () => {
     freshServices();
     const { bankAccountId } = await syncedAccountId();
     const intent = await neonomicsIntent(bankAccountId);
@@ -390,6 +390,23 @@ describe("E: PIS-betalingsinitiering (FinanceService)", () => {
       throw new Error("network_timeout_simulated");
     };
     await expect(finance.submitPaymentIntent(TENANT_A, "business", intent.payment_intent_id, { getCredentials: async () => null })).rejects.toThrow("network_timeout_simulated");
+    const after = await finance.getPaymentIntent(TENANT_A, "business", intent.payment_intent_id);
+    expect(after?.state).toBe("submitted");
+    expect(after?.provider_ref).toBeNull();
+    gateway.onInitiatePayment = async () => ({ id: "neo-pay-retry", status: "PDNG" });
+    await expect(finance.submitPaymentIntent(TENANT_A, "business", intent.payment_intent_id, { getCredentials: async () => null }))
+      .rejects.toThrow("submit_outcome_unknown_reconcile_required");
+    expect(gateway.initiateCalls).toHaveLength(1);
+  });
+
+  it("D-392: tydelig avvisning (4xx) UNDER initiering etterlater draft - korrigert retry er trygg og gjenbruker samme deterministiske referanse", async () => {
+    freshServices();
+    const { bankAccountId } = await syncedAccountId();
+    const intent = await neonomicsIntent(bankAccountId);
+    gateway.onInitiatePayment = async () => {
+      throw Object.assign(new Error("neonomics_api_error_400:bad_request"), { httpStatus: 400 });
+    };
+    await expect(finance.submitPaymentIntent(TENANT_A, "business", intent.payment_intent_id, { getCredentials: async () => null })).rejects.toThrow("bad_request");
     const after = await finance.getPaymentIntent(TENANT_A, "business", intent.payment_intent_id);
     expect(after?.state).toBe("draft");
     gateway.onInitiatePayment = async () => ({ id: "neo-pay-retry", status: "PDNG" });

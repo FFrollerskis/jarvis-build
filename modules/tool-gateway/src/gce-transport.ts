@@ -1,4 +1,4 @@
-import { guardedFetch } from "./url-safety.ts";
+import { guardedFetch, isRetrySafeStatus } from "./url-safety.ts";
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolTransport } from "./gateway.ts";
 import { googleAccessToken } from "./live-transports.ts";
@@ -111,7 +111,7 @@ async function gceRequest(options: GceRequestOptions): Promise<JsonValue> {
       return (await response.json()) as JsonValue;
     }
     const rawBody = await response.text().catch(() => "");
-    const retryable = RETRYABLE_HTTP_STATUS.has(response.status);
+    const retryable = RETRYABLE_HTTP_STATUS.has(response.status) && isRetrySafeStatus(options.method, response.status);
     lastError = new GceApiError(`gce_api_error_${response.status}:${classifyGceErrorBody(rawBody)}`, response.status, retryable);
     if (!retryable || attempt === MAX_ATTEMPTS) break;
     await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
