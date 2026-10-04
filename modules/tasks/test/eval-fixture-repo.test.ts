@@ -133,13 +133,6 @@ describe("eval-fixture-repo: kryssplattform disponibel repo-bootstrap (INGEN ekt
     }
   });
 
-  it("G: filen introduserer INGEN endring i timeout-mekanikken (dokumentert, ikke re-testet her - se coding-agent-eval-timeout.test.ts)", () => {
-    // coding-agent-eval-timeout.test.ts bruker sin egen, uavhengige inline
-    // seed-rutine (ett enkelt README.md, ingen undermappe) - berøres IKKE av
-    // denne filen eller av endringene i ua5-coding-agent-live-eval.ts.
-    expect(true).toBe(true);
-  });
-
   it("Windows-regresjonsklasse: fersk disponibel repo + ingen antatt brukeridentitet + vertslignende signeringskonfig -> vellykket seed-commit med nøstede stier", async () => {
     await writeFile(
       fakeGlobalConfig,

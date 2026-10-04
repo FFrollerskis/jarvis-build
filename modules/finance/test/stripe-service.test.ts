@@ -657,8 +657,20 @@ describe("SECURITY: hemmelighet-redaksjon", () => {
     expect(err.message).not.toContain("sk_");
   });
 
-  it("webhook payload_summary lagrer ALDRI hele nyttelasten - kun det trygge minimal-utvalget (bevist strukturelt av parseStripeEventEnvelope, se stripe-webhook.test.ts)", () => {
-    expect(true).toBe(true); // strukturell garanti allerede bevist i stripe-webhook.test.ts D-testene - denne noterer koblingen eksplisitt for testmatrisen.
+  it("webhook payload_summary lagrer ALDRI hele nyttelasten - sensitive felter i objektet havner ikke i den lagrede raden", async () => {
+    const intent = await createStripeIntent();
+    writer.onCreatePaymentIntent = async (input) => ({ id: "pi_summary_1", object: "payment_intent", amount: input.amountOre, currency: "nok", status: "requires_payment_method", metadata: input.metadata });
+    const submitted = await service.submitPaymentIntent(TENANT_A, "business", intent.payment_intent_id, {} as never);
+    const now = Math.floor(Date.now() / 1000);
+    const eventId = `evt_summary_${randomUUID()}`;
+    const rawBody = stripeEventBuffer({
+      id: eventId, type: "payment_intent.succeeded", created: now,
+      data: { object: { id: submitted.provider_ref, object: "payment_intent", status: "succeeded", client_secret: "pi_SENTINEL_client_secret", receipt_email: "kunde-SENTINEL@example.no", shipping: { name: "SENTINEL Navn" } } }
+    });
+    await service.ingestStripeWebhookEvent(rawBody, signedHeader(rawBody, now), now);
+    const stored = await service.getWebhookEvent(TENANT_A, eventId);
+    expect(stored).not.toBeNull();
+    expect(JSON.stringify(stored?.payload_summary ?? {})).not.toContain("SENTINEL");
   });
 });
 
@@ -691,14 +703,6 @@ describe("SECURITY: tenant-isolasjon", () => {
     await service.ingestStripeWebhookEvent(rawBody, signedHeader(rawBody, now), now);
     const crossRead = await service.getWebhookEvent(TENANT_B, eventId);
     expect(crossRead).toBeNull();
-  });
-});
-
-describe("SECURITY: provider-objekt-isolasjon (tenant-kryssjekk ved provider_ref-oppslag)", () => {
-  beforeAll(() => freshService());
-
-  it("dekket av WEBHOOK-blokken over ('en hendelse mot et provider_ref som tilhører en ANNEN tenant') - notert eksplisitt her for testmatrisen", () => {
-    expect(true).toBe(true);
   });
 });
 

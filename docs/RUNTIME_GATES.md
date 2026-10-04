@@ -1,5 +1,7 @@
 # Runtime gates – status og evidens (v4.0 reality check, 2026-08-13)
 
+> **Merk (ADR-001 §2.3.6, D-398/JARVIS-100):** «PRODUCTION_VERIFIED»/«LIVE-PROVEN»/«HOST_VERIFIED» i denne tabellen er *historiske, daterte* påstander om koden slik den var på det tidspunktet. De er IKKE re-verifisert mot gjeldende HEAD etter remedieringen; status per funn står i [FINDINGS_LEDGER](remediation/FINDINGS_LEDGER.md).
+
 
 > **⚠ REMEDIERING DEL 1 (2026-10-01, JARVIS-059/ADR-001): STATUSVERDIER ER HISTORISKE.** Uavhengig audit av
 > commit `35075a2` fant at «PRODUCTION_VERIFIED»/«VERIFIED»-verdiene for minne (UA-2), Q-20-erasure, Business
