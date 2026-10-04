@@ -249,7 +249,8 @@ describe("D: scope-FK-baseline (JARVIS-076)", () => {
     const fks = await admin.query(`SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid = 'session_grants'::regclass AND contype = 'f' ORDER BY 1`);
     const defs = (fks.rows as Array<{ def: string }>).map((r) => r.def);
     expect(defs).toContain("FOREIGN KEY (tenant_id, device_id) REFERENCES devices(tenant_id, device_id)");
-    expect(defs).toContain("FOREIGN KEY (tenant_id, session_id) REFERENCES sessions(tenant_id, session_id)");
+    // D-395 (migrasjon 074): sesjons-FK-en er ON DELETE CASCADE (erasure av en sesjon må ikke blokkeres av grants) - fortsatt tenant-komposittnøkkel.
+    expect(defs).toContain("FOREIGN KEY (tenant_id, session_id) REFERENCES sessions(tenant_id, session_id) ON DELETE CASCADE");
   });
 });
 
