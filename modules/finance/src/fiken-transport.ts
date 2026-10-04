@@ -122,6 +122,8 @@ async function exchangeFikenAccessToken(refreshToken: string): Promise<{ token: 
 }
 
 export async function fikenAccessToken(refreshToken: string): Promise<string> {
+  // Fail-closed FØR cachen: uten klient-credentials skal aldri et cachet token (fra tidligere konfigurasjon) slippe gjennom.
+  if (!process.env["JARVIS_FIKEN_CLIENT_ID"] || !process.env["JARVIS_FIKEN_CLIENT_SECRET"]) throw new Error("fiken_oauth_client_not_configured");
   const cached = fikenTokenCache.get(refreshToken);
   if (cached && cached.expiresAtMs - FIKEN_TOKEN_MARGIN_MS > Date.now()) return cached.token;
   const pending = fikenTokenInflight.get(refreshToken);
