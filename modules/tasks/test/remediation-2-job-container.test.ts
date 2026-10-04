@@ -123,12 +123,12 @@ describe("C: DockerJobSandboxRunner - livssyklus og kill", () => {
   it("exec kjører `docker exec` i /work med eksplisitte env-navn; ekstra env med forbudt navn nektes uten å kjøre", async () => {
     const { exec, calls } = recorder((args) => (args[0] === "exec" ? { stdout: "ok" } : {}));
     const sandbox = await new DockerJobSandboxRunner(policy, exec, { PATH: "/usr/bin" }).create();
-    const ok = sandbox.exec("git", ["status"], 5_000, { JARVIS_GIT_TOKEN: "tok" });
+    const ok = await sandbox.exec("git", ["status"], 5_000, { JARVIS_GIT_TOKEN: "tok" });
     expect(ok).toEqual({ code: 0, stdout: "ok", stderr: "" });
     const execCall = calls.find((c) => c.args[0] === "exec");
     expect(execCall?.args.slice(0, 4)).toEqual(["exec", "--workdir", "/work", "-e"]);
     expect(execCall?.args.join(" ")).not.toContain("tok");
-    const denied = sandbox.exec("env", [], 5_000, { INFISICAL_ENCRYPTION_KEY: "x" });
+    const denied = await sandbox.exec("env", [], 5_000, { INFISICAL_ENCRYPTION_KEY: "x" });
     expect(denied.code).toBe(1);
     expect(denied.stderr).toContain("job_env_forbidden");
     expect(calls.filter((c) => c.args[0] === "exec")).toHaveLength(1);
@@ -138,10 +138,10 @@ describe("C: DockerJobSandboxRunner - livssyklus og kill", () => {
   it("timeout dreper HELE containeren (`rm -f`), og senere exec feiler lukket", async () => {
     const { exec, calls } = recorder((args) => (args[0] === "exec" ? { status: null, timedOut: true } : {}));
     const sandbox = await new DockerJobSandboxRunner(policy, exec, { PATH: "/usr/bin" }).create();
-    const hung = sandbox.exec("sleep", ["999"], 1_000);
+    const hung = await sandbox.exec("sleep", ["999"], 1_000);
     expect(hung.code).toBe(124);
     expect(calls.some((c) => c.args[0] === "rm" && c.args[1] === "-f")).toBe(true);
-    const after = sandbox.exec("git", ["status"]);
+    const after = await sandbox.exec("git", ["status"]);
     expect(after).toEqual({ code: 1, stdout: "", stderr: "job_container_terminated" });
     await sandbox.dispose();
   });

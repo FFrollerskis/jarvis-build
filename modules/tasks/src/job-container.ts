@@ -1,8 +1,8 @@
-import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execProcess } from "./process-exec.ts";
 import type { ExecResult, Sandbox, SandboxRunner } from "./sandbox.ts";
 
 /**
@@ -130,15 +130,15 @@ export interface DockerExecResult {
   stderr: string;
   timedOut?: boolean;
 }
-export type DockerExec = (bin: string, args: string[], options: { env?: Record<string, string>; timeoutMs?: number }) => DockerExecResult;
+/** D-394: kan være asynkron (produksjon) eller synkron (testdobler). */
+export type DockerExec = (bin: string, args: string[], options: { env?: Record<string, string>; timeoutMs?: number }) => DockerExecResult | Promise<DockerExecResult>;
 
-const defaultExec: DockerExec = (bin, args, options) => {
-  const r = spawnSync(bin, args, {
-    encoding: "utf8", shell: false, ...(options.timeoutMs !== undefined ? { timeout: options.timeoutMs, killSignal: "SIGKILL" as const } : {}),
-    ...(options.env !== undefined ? { env: options.env } : {})
+const defaultExec: DockerExec = async (bin, args, options) => {
+  const r = await execProcess(bin, args, {
+    ...(options.env !== undefined ? { env: options.env } : {}),
+    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {})
   });
-  const timedOut = (r.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT";
-  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "", timedOut };
+  return { status: r.status, stdout: r.stdout, stderr: r.stderr, timedOut: r.timedOut };
 };
 
 /**
@@ -165,26 +165,26 @@ export class DockerJobSandboxRunner implements SandboxRunner {
     // Verdiene leveres til `docker`-prosessens EGEN env og videresendes med `-e NAVN` - de står aldri i argv.
     const baseEnv: Record<string, string> = { PATH: this.hostEnv["PATH"] ?? "" };
     const createEnv = { ...baseEnv, ...jobEnv };
-    const created = this.exec(bin, createArgs, { env: createEnv, timeoutMs: 30_000 });
+    const created = await this.exec(bin, createArgs, { env: createEnv, timeoutMs: 30_000 });
     if (created.status !== 0) {
       await rm(workdir, { recursive: true, force: true });
       throw new Error("job_container_create_failed");
     }
-    const started = this.exec(bin, ["start", containerName], { env: baseEnv, timeoutMs: 30_000 });
+    const started = await this.exec(bin, ["start", containerName], { env: baseEnv, timeoutMs: 30_000 });
     if (started.status !== 0) {
-      this.exec(bin, ["rm", "-f", containerName], { env: baseEnv, timeoutMs: 30_000 });
+      await this.exec(bin, ["rm", "-f", containerName], { env: baseEnv, timeoutMs: 30_000 });
       await rm(workdir, { recursive: true, force: true });
       throw new Error("job_container_start_failed");
     }
     let dead = false;
-    const kill = (): void => {
+    const kill = async (): Promise<void> => {
       dead = true;
       // `rm -f` dreper HELE container-prosessgruppen (PID-namespace) - ikke bare `docker exec`-klienten.
-      this.exec(bin, ["rm", "-f", containerName], { env: baseEnv, timeoutMs: 30_000 });
+      await this.exec(bin, ["rm", "-f", containerName], { env: baseEnv, timeoutMs: 30_000 });
     };
     return {
       workdir,
-      exec: (command: string, args: string[], timeoutMs = 60_000, extraEnv?: Record<string, string>): ExecResult => {
+      exec: async (command: string, args: string[], timeoutMs = 60_000, extraEnv?: Record<string, string>): Promise<ExecResult> => {
         if (dead) {
           return { code: 1, stdout: "", stderr: "job_container_terminated" };
         }
@@ -195,15 +195,15 @@ export class DockerJobSandboxRunner implements SandboxRunner {
           }
         }
         const execArgs = ["exec", "--workdir", "/work", ...extraNames.flatMap((n) => ["-e", n]), containerName, command, ...args];
-        const result = this.exec(bin, execArgs, { env: { ...baseEnv, ...(extraEnv ?? {}) }, timeoutMs });
+        const result = await this.exec(bin, execArgs, { env: { ...baseEnv, ...(extraEnv ?? {}) }, timeoutMs });
         if (result.timedOut) {
-          kill();
+          await kill();
           return { code: 124, stdout: result.stdout, stderr: `${result.stderr}\njob_exec_timeout` };
         }
         return { code: result.status ?? 1, stdout: result.stdout, stderr: result.stderr };
       },
       dispose: async (): Promise<void> => {
-        if (!dead) kill();
+        if (!dead) await kill();
         await rm(workdir, { recursive: true, force: true });
       }
     };

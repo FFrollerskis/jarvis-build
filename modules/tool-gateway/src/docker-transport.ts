@@ -1,4 +1,5 @@
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { scanForSecrets } from "@jarvis/core";
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolTransport } from "./gateway.ts";
 
@@ -50,12 +51,26 @@ interface ContainerState {
   restart_count: number;
 }
 
-function run(bin: string, args: string[], timeoutMs: number): { code: number; stdout: string; stderr: string } {
-  const result = spawnSync(bin, args, { timeout: timeoutMs, encoding: "utf8", shell: false });
-  if (result.error) {
-    throw new Error(`docker_spawn_failed:${result.error.message}`);
-  }
-  return { code: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+/**
+ * D-394 (JARVIS-023): asynkron prosesskjøring. `spawnSync` blokkerte HELE Node-event-loopen (API HTTP/SSE/voice, worker-heartbeat) i opptil
+ * `timeoutMs` per docker-kall; `execFile` lar resten av prosessen leve mens docker svarer. Samme semantikk som før: ikke-null exit-kode returneres,
+ * spawn-feil/tidsavbrudd kaster `docker_spawn_failed`, utdata er begrenset (8 MB).
+ */
+function run(bin: string, args: string[], timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(bin, args, { timeout: timeoutMs, encoding: "utf8", killSignal: "SIGKILL", maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) {
+        const code = (error as NodeJS.ErrnoException & { code?: unknown }).code;
+        if (typeof code === "number" && !(error as { killed?: boolean }).killed) {
+          resolve({ code, stdout: stdout ?? "", stderr: stderr ?? "" });
+          return;
+        }
+        reject(new Error(`docker_spawn_failed:${error.message}`));
+        return;
+      }
+      resolve({ code: 0, stdout: stdout ?? "", stderr: stderr ?? "" });
+    });
+  });
 }
 
 function parseInspect(stdout: string): ContainerState {
@@ -77,12 +92,14 @@ function parseInspect(stdout: string): ContainerState {
 }
 
 function redactSecretsInline(text: string): string {
-  return text
+  // D-394 (JARVIS-069): lokale mønstre + den sentrale skanneren (JWT, private nøkler, Stripe/Slack/AWS/Google/Telegram, passordfraser, kortnumre).
+  const local = text
     .replace(/Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, "Bearer [REDACTED]")
     .replace(/Authorization:\s*.*/gi, "Authorization: [REDACTED]")
     .replace(/gh[pousr]_[A-Za-z0-9]{20,}/g, "[REDACTED_GITHUB_TOKEN]")
     .replace(/sk-ant-[A-Za-z0-9\-_]{10,}/g, "[REDACTED_ANTHROPIC_KEY]")
     .replace(/((?:[A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*)\s*[:=]\s*)(\S+)/gi, "$1[REDACTED]");
+  return scanForSecrets(local).text;
 }
 
 export class DockerTransport implements ToolTransport {
@@ -102,7 +119,7 @@ export class DockerTransport implements ToolTransport {
     if (action === "list_containers") {
       const labelFilter = typeof parameters["label_filter"] === "string" ? (parameters["label_filter"] as string) : undefined;
       const args = ["ps", "--format", "{{json .}}", ...(labelFilter ? ["--filter", `label=${labelFilter}`] : [])];
-      const { code, stdout, stderr } = run(dockerBin, args, this.timeoutMs);
+      const { code, stdout, stderr } = await run(dockerBin, args, this.timeoutMs);
       if (code !== 0) throw new Error(`docker_ps_failed:${stderr.slice(0, 160)}`);
       const containers = stdout
         .split("\n")
@@ -114,7 +131,7 @@ export class DockerTransport implements ToolTransport {
     if (action === "inspect_container") {
       const name = parameters["name"];
       assertValidContainerName(name);
-      const { code, stdout, stderr } = run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs);
+      const { code, stdout, stderr } = await run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs);
       if (code !== 0) {
         if (/No such (container|object)/i.test(stderr)) {
           // D-105: "finnes ikke ennå" er en GYLDIG tilstand (f.eks. FØRSTE
@@ -142,7 +159,7 @@ export class DockerTransport implements ToolTransport {
         ...(since ? ["--since", since] : []), ...(until ? ["--until", until] : []),
         name
       ];
-      const { code, stdout, stderr } = run(dockerBin, args, this.timeoutMs);
+      const { code, stdout, stderr } = await run(dockerBin, args, this.timeoutMs);
       if (code !== 0) throw new Error(`docker_logs_failed:${stderr.slice(0, 160)}`);
       const lines = (stdout + stderr)
         .split("\n")
@@ -161,11 +178,11 @@ export class DockerTransport implements ToolTransport {
       const image = parameters["image"];
       assertValidContainerName(name);
       assertValidImageRef(image);
-      run(dockerBin, ["rm", "-f", "--", name], this.timeoutMs); // best-effort - "finnes ikke" er OK (første deploy)
-      const started = run(dockerBin, ["run", "-d", "--name", name, "--label", "jarvis.sentinel=true", "--label", "jarvis.managed=true", "--", image, "sleep", "999999999"], this.timeoutMs);
+      await run(dockerBin, ["rm", "-f", "--", name], this.timeoutMs); // best-effort - "finnes ikke" er OK (første deploy)
+      const started = await run(dockerBin, ["run", "-d", "--name", name, "--label", "jarvis.sentinel=true", "--label", "jarvis.managed=true", "--", image, "sleep", "999999999"], this.timeoutMs);
       if (started.code !== 0) throw new Error(`docker_run_failed:${started.stderr.slice(0, 160)}`);
       const containerId = started.stdout.trim().slice(0, 12);
-      const inspected = run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs);
+      const inspected = await run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs);
       if (inspected.code !== 0) throw new Error(`docker_post_deploy_inspect_failed:${inspected.stderr.slice(0, 160)}`);
       return { external_id: containerId, data: parseInspect(inspected.stdout) as unknown as JsonValue };
     }
@@ -173,9 +190,9 @@ export class DockerTransport implements ToolTransport {
     if (action === "stop_container") {
       const name = parameters["name"];
       assertValidContainerName(name);
-      const stopped = run(dockerBin, ["stop", "--", name], this.timeoutMs);
+      const stopped = await run(dockerBin, ["stop", "--", name], this.timeoutMs);
       if (stopped.code !== 0) throw new Error(`docker_stop_failed:${stopped.stderr.slice(0, 160)}`);
-      const inspected = run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs);
+      const inspected = await run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs);
       if (inspected.code !== 0) throw new Error(`docker_post_stop_inspect_failed:${inspected.stderr.slice(0, 160)}`);
       return { data: parseInspect(inspected.stdout) as unknown as JsonValue };
     }
@@ -183,9 +200,9 @@ export class DockerTransport implements ToolTransport {
     if (action === "start_container") {
       const name = parameters["name"];
       assertValidContainerName(name);
-      const started = run(dockerBin, ["start", "--", name], this.timeoutMs);
+      const started = await run(dockerBin, ["start", "--", name], this.timeoutMs);
       if (started.code !== 0) throw new Error(`docker_start_failed:${started.stderr.slice(0, 160)}`);
-      const inspected = run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs);
+      const inspected = await run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs);
       if (inspected.code !== 0) throw new Error(`docker_post_start_inspect_failed:${inspected.stderr.slice(0, 160)}`);
       return { data: parseInspect(inspected.stdout) as unknown as JsonValue };
     }
