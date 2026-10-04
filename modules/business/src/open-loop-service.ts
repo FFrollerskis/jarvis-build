@@ -122,7 +122,7 @@ export class OpenLoopService {
            )
            AND NOT EXISTS (
              SELECT 1 FROM support_ticket_events e
-             WHERE e.tenant_id = t.tenant_id AND e.ticket_id = t.ticket_id AND e.event_type IN ('agent_reply', 'internal_note')
+             WHERE e.tenant_id = t.tenant_id AND e.ticket_id = t.ticket_id AND e.event_type = 'agent_reply'
                AND e.occurred_at > COALESCE((
                  SELECT max(e2.occurred_at) FROM support_ticket_events e2
                  WHERE e2.tenant_id = t.tenant_id AND e2.ticket_id = t.ticket_id AND e2.event_type = 'customer_message'
