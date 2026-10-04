@@ -117,6 +117,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   assertRuntimeCredentialsConfigured();
   // Remediering del 2 (JARVIS-065): ÉN validert eier-identitet for hele prosessen (fail closed uten).
   const owner = ownerConfigOrExit();
+  process.env["JARVIS_PROCESS"] ??= "api"; // D-394 (JARVIS-054): audit-rader merkes med hvilken prosess som skrev dem
   const pool = createPool(configFromEnv());
   // Migrasjoner kjøres av admin-bruker i drift; her antas app-bruker å ha skjema fra før.
   if (process.env["JARVIS_DB_RUN_MIGRATIONS"] === "true") {

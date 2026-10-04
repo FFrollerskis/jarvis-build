@@ -445,8 +445,12 @@ export class ToolGateway {
     jobContract?: JobContract;
     /** D-317: se `ToolInvocationContext.servingModel` sitt filhode. */
     servingModel?: { provider: string; model: string };
+    /** D-394 (JARVIS-054): korrelasjons-ID-er som følger HVER audit-rad for dette kallet. */
+    task_id?: string;
+    trace_id?: string;
   }): Promise<ToolResult> {
     const definition = this.get(request.tool_id, request.action);
+    const corr = { ...(request.task_id !== undefined ? { task_id: request.task_id } : {}), ...(request.trace_id !== undefined ? { trace_id: request.trace_id } : {}) };
     if (!definition) {
       return this.deny(request, "unknown_tool");
     }
@@ -669,7 +673,7 @@ export class ToolGateway {
           | { external_id: string | null; status: string; postcondition_reason: string | null }
           | undefined;
         if (row?.status === "succeeded") {
-          await writeAudit(client, request.identity, {
+          await writeAudit(client, request.identity, { ...corr,
             type: "tool.deduplicated", tool_id: request.tool_id, action: request.action,
             payload: { external_id: row.external_id }
           });
@@ -688,7 +692,7 @@ export class ToolGateway {
         // ALDRI tilfeldig bli en ok:true. Den MÅ se det NØYAKTIG samme sanne,
         // ikke-suksessfulle resultatet som den opprinnelige kalleren fikk.
         if (row?.status === "unverified") {
-          await writeAudit(client, request.identity, {
+          await writeAudit(client, request.identity, { ...corr,
             type: "tool.postcondition_unverified", decision: "ALLOW",
             tool_id: request.tool_id, action: request.action, capability_class: definition.capability_class,
             payload: { external_id: row.external_id, replayed: true, reason: row.postcondition_reason }
@@ -708,7 +712,7 @@ export class ToolGateway {
           /401|403|auth/.test(message) ? "auth_failed" : /429|rate/.test(message) ? "rate_limited" : "unavailable",
           message.slice(0, 60));
         // Kontrollert feil: revoked credential/timeout/providerfeil åpner ingenting.
-        await writeAudit(client, request.identity, {
+        await writeAudit(client, request.identity, { ...corr,
           type: "tool.failed", decision: "DENY", reason: (err as Error).message.slice(0, 120),
           tool_id: request.tool_id, action: request.action,
           capability_class: definition.capability_class,
@@ -781,7 +785,7 @@ export class ToolGateway {
            JSON.stringify(beforeState), JSON.stringify(afterState), postconditionReason]
         );
       }
-      await writeAudit(client, request.identity, {
+      await writeAudit(client, request.identity, { ...corr,
         // Q-34 P1-oppfølging: en EGEN audit-type når verifiseringen feiler -
         // ALDRI "tool.executed" (som en fremtidig leser rimelig ville tolket
         // som "bekreftet vellykket"). before_state/after_state/recovery er
