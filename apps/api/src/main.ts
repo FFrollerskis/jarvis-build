@@ -32,6 +32,7 @@ import {
   assertProvidersHaveExplicitPricing,
   DEFAULT_PRICING,
   ModelGateway,
+  budgetConfigFromEnv,
   traceSinkFromEnv
 } from "@jarvis/model-gateway";
 import {
@@ -247,12 +248,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // + ingen ekte lokal provider NÅ ærlig med `PaidModelsDisabledError`
       // (router.ts) - en strukturert, auditerbar feil, ALDRI et falskt svar.
     ],
-    budget: {
-      warn_ore: 100_000,
-      approval_ore: 200_000,
-      hard_limit_ore: 300_000,
-      spend_approved: process.env["JARVIS_BUDGET_APPROVED"] === "true"
-    }
+    // D-395 (JARVIS-039): samme budsjettkilde som workeren (`budgetConfigFromEnv`) - tidligere hardkodet her og med `DEFAULT_BUDGET` i workeren.
+    budget: budgetConfigFromEnv()
   });
   // JARVIS-006: hver konstruert adapter MÅ ha eksplisitt pris - ingen stille `default_rate`.
   assertProvidersHaveExplicitPricing(DEFAULT_PRICING, gateway.listProviderNames());
