@@ -4,126 +4,171 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Jarvis</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='48' fill='%2305070c'/%3E%3Ccircle cx='50' cy='50' r='40' fill='none' stroke='%2322d3ee' stroke-width='3' opacity='0.55'/%3E%3Ccircle cx='50' cy='50' r='27' fill='none' stroke='%2367e8f9' stroke-width='2.5' opacity='0.85'/%3E%3Ccircle cx='50' cy='50' r='9' fill='%2267e8f9'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='48' fill='%2305070c'/%3E%3Ccircle cx='50' cy='50' r='40' fill='none' stroke='%2322d3ee' stroke-width='3' opacity='0.55'/%3E%3Ccircle cx='50' cy='50' r='27' fill='none' stroke='%2367e8f9' stroke-width='2.5' opacity='0.85'/%3E%3Ccircle cx='50' cy='50' r='9' fill='%2367e8f9'/%3E%3C/svg%3E">
 <style>
   /*
-   * D-361 (Tobias direkte i chat: "lag en sinnsyk interface ... et sted hvor
-   * jeg kan skrive og snakke med jarvis direkte ... oppgrader eksisterende
-   * dashbord inn i den nye interface ... slipper og skrive 3 forskjellige url
-   * ... moderne og teknologisk ... iron vibes"). Dette er en SKALL-side -
-   * chat/tale/dashbord sin egen logikk (Ed25519-enhetsauth, lyd-capture/
-   * -avspilling, SSE-strømming, alle eksisterende executive-/governance-
-   * spørringer) er IKKE duplisert hit: de tre allerede fungerende, allerede
-   * testede sidene (/chat, /voice, /dashboard) kjører som direkte, samme-
-   * origin iframes under én felles HUD-fasade. Samme-origin betyr
-   * localStorage (enhetsnøkkel/-ID) deles automatisk mellom dem - ingen ny
-   * identitetslogikk, ingen risiko for å bryte en allerede skjør,
-   * host-verifisert flyt (WebCrypto/WebSocket/AudioContext) ved å skrive den
-   * om på nytt inne i én side.
-   *
-   * Design-tokens GJENBRUKT ORDRETT fra dashboard.html (D-239) - "oppgrader
-   * eksisterende dashbord inn i" tolket som visuell kontinuitet, ikke en
-   * konkurrerende stil. Utvidet med et arc-reactor-aktig HUD-skall (faner,
-   * glødende aktiv-indikator, hjørnerammer) for "iron vibes"-ønsket. Ingen
-   * ekstern font/CDN (regel 9) - kun system-fontstacken.
+   * D-361 (opprinnelig HUD-skall) + D-387 (Tobias direkte i chat: "oppgradere hele ui og layout alt jeg kan se til det
+   * beste og mest optimale og ha en teknologisk og ordentlig look"). Dette er fortsatt et SKALL: chat/tale/dashbord sin
+   * egen logikk (Ed25519-enhetsauth, lyd, SSE, executive/governance) er IKKE duplisert hit - de tre sidene kjører som
+   * samme-origin iframes. Nytt i D-387: sidepanel-navigasjon (faner nederst på mobil), delt visning (samtale + tale side
+   * om side på brede skjermer), live statuslinje (API-helse via /health, tale-tilstand, antall ting som venter i
+   * oversikten) matet av postMessage FRA iframene (origin-sjekket), hurtigtaster (Alt+1/2/3, Alt+D) og «last fanen på
+   * nytt». Ingen ekstern font/CDN (regel 9). Ingen WebCrypto-enhetsauth eller egen tale-socket her (D-361-testen håndhever det).
    */
   :root {
     color-scheme: dark;
-    --bg: #05070c;
-    --bg-glow: radial-gradient(ellipse 900px 500px at 50% -10%, rgba(34,211,238,0.10), transparent 60%);
-    --panel: #0c121e;
-    --panel-2: #101a2b;
-    --border: #1c2942;
-    --border-soft: #16203380;
-    --text: #e9eefb;
-    --text-dim: #7e8bab;
-    --accent: #22d3ee;
-    --accent-strong: #67e8f9;
-    --accent-glow: rgba(34,211,238,0.35);
-    --danger-fg: #fb7185;
-    --radius: 12px;
+    --bg: #05070c; --bg-2: #080c15; --panel: #0c121e; --panel-2: #101a2b; --panel-3: #15213a;
+    --border: #1c2942; --border-soft: rgba(28,41,66,0.55); --border-hi: #2a3d63;
+    --text: #e9eefb; --text-dim: #7e8bab; --text-mute: #55617f;
+    --accent: #22d3ee; --accent-strong: #67e8f9; --accent-glow: rgba(34,211,238,0.35); --accent-soft: rgba(34,211,238,0.10);
+    --ok: #6ee7b7; --warn: #fbbf24; --danger: #fb7185; --info: #93c5fd;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, "Segoe UI", "Inter", Roboto, system-ui, sans-serif;
+    --radius: 12px; --sidebar: 212px;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body {
-    font-family: -apple-system, "Segoe UI", "Inter", Roboto, system-ui, sans-serif;
-    background: var(--bg-glow), var(--bg);
-    background-attachment: fixed;
-    color: var(--text); margin:0; display:flex; flex-direction:column; height:100vh; overflow:hidden;
+    font-family: var(--sans); margin:0; height:100vh; overflow:hidden; color: var(--text);
+    background:
+      radial-gradient(ellipse 1100px 600px at 20% -10%, rgba(34,211,238,0.10), transparent 60%),
+      radial-gradient(ellipse 800px 500px at 100% 100%, rgba(59,130,246,0.07), transparent 60%),
+      var(--bg);
     -webkit-font-smoothing: antialiased;
+    display:grid; grid-template-columns: var(--sidebar) 1fr; grid-template-rows: 1fr auto;
+    grid-template-areas: "side main" "side status";
   }
-
-  /* --- Hjørnerammer: rent dekorativt HUD-mønster, fast posisjonert, aldri i veien for klikk. --- */
-  .corner { position:fixed; width:26px; height:26px; border-color: var(--accent); opacity:0.5; pointer-events:none; z-index:50; }
-  .corner.tl { top:10px; left:10px; border-top:2px solid; border-left:2px solid; }
-  .corner.tr { top:10px; right:10px; border-top:2px solid; border-right:2px solid; }
-  .corner.bl { bottom:10px; left:10px; border-bottom:2px solid; border-left:2px solid; }
-  .corner.br { bottom:10px; right:10px; border-bottom:2px solid; border-right:2px solid; }
-
-  header {
-    padding:12px 20px; background: rgba(12,18,30,0.82); backdrop-filter: blur(10px);
-    border-bottom: 1px solid var(--border-soft);
-    display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;
+  body::before {
+    content:""; position:fixed; inset:0; pointer-events:none; z-index:0; opacity:0.35;
+    background-image: linear-gradient(rgba(34,211,238,0.045) 1px, transparent 1px), linear-gradient(90deg, rgba(34,211,238,0.045) 1px, transparent 1px);
+    background-size: 44px 44px;
+    mask-image: radial-gradient(ellipse 80% 70% at 50% 30%, #000 20%, transparent 100%);
   }
-  .brand { display:flex; align-items:center; gap:10px; font-weight:700; font-size:16px; letter-spacing:0.04em; }
-  .reactor { position:relative; width:26px; height:26px; flex:none; }
+  .corner { position:fixed; width:22px; height:22px; border-color: var(--accent); opacity:0.45; pointer-events:none; z-index:50; }
+  .corner.tl { top:8px; left:8px; border-top:2px solid; border-left:2px solid; }
+  .corner.tr { top:8px; right:8px; border-top:2px solid; border-right:2px solid; }
+  .corner.bl { bottom:8px; left:8px; border-bottom:2px solid; border-left:2px solid; }
+  .corner.br { bottom:8px; right:8px; border-bottom:2px solid; border-right:2px solid; }
+
+  /* ---------- Sidepanel ---------- */
+  aside {
+    grid-area: side; display:flex; flex-direction:column; gap:6px; padding:14px 10px; z-index:2;
+    background: linear-gradient(180deg, rgba(12,18,30,0.92), rgba(8,12,21,0.92)); border-right:1px solid var(--border-soft);
+    backdrop-filter: blur(12px);
+  }
+  .brand { display:flex; align-items:center; gap:10px; padding:4px 8px 14px; border-bottom:1px solid var(--border-soft); margin-bottom:6px; }
+  .reactor { position:relative; width:34px; height:34px; flex:none; filter: drop-shadow(0 0 8px var(--accent-glow)); }
   .reactor svg { width:100%; height:100%; }
-  .reactor .ring1 { animation: spin 7s linear infinite; }
-  .reactor .ring2 { animation: spin 5s linear infinite reverse; }
+  .reactor .ring1 { transform-origin: 20px 20px; animation: spin 7s linear infinite; }
+  .reactor .ring2 { transform-origin: 20px 20px; animation: spin 5s linear infinite reverse; }
   @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-  .brand small { color: var(--text-dim); font-weight:400; font-size:11px; letter-spacing:0.02em; margin-left:2px; }
-  #clock { color: var(--text-dim); font-size:12px; font-variant-numeric: tabular-nums; }
-
-  nav#tabs { display:flex; gap:4px; padding:0 14px; background: rgba(12,18,30,0.55); border-bottom:1px solid var(--border-soft); overflow-x:auto; }
+  .brand .name { font-weight:800; letter-spacing:0.12em; font-size:14px; line-height:1.1; }
+  .brand .sub { color: var(--text-dim); font-size:10.5px; letter-spacing:0.08em; text-transform:uppercase; margin-top:3px; }
+  nav#tabs { display:flex; flex-direction:column; gap:4px; }
   nav#tabs button {
-    appearance:none; border:0; background:none; color: var(--text-dim); padding:12px 16px 10px;
-    font-size:13px; font-weight:600; letter-spacing:0.02em; cursor:pointer; position:relative;
-    display:flex; align-items:center; gap:7px; white-space:nowrap;
+    appearance:none; border:1px solid transparent; background:none; color: var(--text-dim); padding:10px 12px; border-radius:10px;
+    font-size:13.5px; font-weight:600; letter-spacing:0.01em; cursor:pointer; display:flex; align-items:center; gap:10px; text-align:left;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease; position:relative; font-family:inherit;
   }
-  nav#tabs button svg { width:15px; height:15px; opacity:0.75; }
-  nav#tabs button.active { color: var(--accent-strong); }
+  nav#tabs button svg { width:17px; height:17px; opacity:0.8; flex:none; }
+  nav#tabs button:hover { background: var(--panel-2); color: var(--text); }
+  nav#tabs button.active { background: linear-gradient(90deg, var(--accent-soft), transparent); color: var(--accent-strong); border-color: rgba(34,211,238,0.28); }
   nav#tabs button.active svg { opacity:1; filter: drop-shadow(0 0 4px var(--accent-glow)); }
-  nav#tabs button::after {
-    content:""; position:absolute; left:10px; right:10px; bottom:0; height:2px; border-radius:2px;
-    background: var(--accent); opacity:0; transform: scaleX(0.4); transition: opacity 0.15s ease, transform 0.15s ease;
-  }
-  nav#tabs button.active::after { opacity:1; transform: scaleX(1); box-shadow: 0 0 10px var(--accent-glow); }
-  nav#tabs button .dot { width:6px; height:6px; border-radius:50%; background: var(--text-dim); flex:none; }
+  nav#tabs button.active::before { content:""; position:absolute; left:-10px; top:9px; bottom:9px; width:3px; border-radius:3px; background: var(--accent); box-shadow: 0 0 10px var(--accent-glow); }
+  nav#tabs button .label { flex:1; }
+  nav#tabs button kbd { font-family: var(--mono); font-size:10px; color: var(--text-mute); border:1px solid var(--border); border-radius:5px; padding:1px 5px; }
+  nav#tabs button .dot { width:7px; height:7px; border-radius:50%; background: var(--text-mute); flex:none; }
   nav#tabs button .dot.live { background: var(--accent); box-shadow: 0 0 0 0 var(--accent-glow); animation: pulse-dot 2.2s ease-in-out infinite; }
-  @keyframes pulse-dot {
-    0%   { box-shadow: 0 0 0 0 var(--accent-glow); }
-    70%  { box-shadow: 0 0 0 6px rgba(34,211,238,0); }
-    100% { box-shadow: 0 0 0 0 rgba(34,211,238,0); }
+  nav#tabs button .dot.listening { background: var(--ok); box-shadow: 0 0 0 0 rgba(110,231,183,0.5); animation: pulse-dot 1.6s ease-in-out infinite; }
+  nav#tabs button .dot.thinking { background: var(--warn); animation: blink 1s ease-in-out infinite; }
+  nav#tabs button .dot.speaking { background: var(--info); animation: blink 0.5s ease-in-out infinite; }
+  nav#tabs button .badge { font-family: var(--mono); font-size:10.5px; font-weight:700; background: var(--danger); color:#fff; border-radius:999px; padding:1px 7px; min-width:20px; text-align:center; display:none; }
+  nav#tabs button .badge.on { display:inline-block; }
+  @keyframes pulse-dot { 0% { box-shadow: 0 0 0 0 var(--accent-glow); } 70% { box-shadow: 0 0 0 6px rgba(34,211,238,0); } 100% { box-shadow: 0 0 0 0 rgba(34,211,238,0); } }
+  @keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0.35; } }
+  .side-spacer { flex:1; }
+  .side-tools { display:flex; flex-direction:column; gap:4px; border-top:1px solid var(--border-soft); padding-top:10px; }
+  .side-tools button {
+    appearance:none; border:1px solid var(--border); background: var(--panel); color: var(--text-dim); padding:8px 10px; border-radius:9px;
+    font-size:12px; font-weight:600; cursor:pointer; display:flex; align-items:center; gap:8px; font-family:inherit; transition: border-color 0.15s ease, color 0.15s ease;
   }
+  .side-tools button:hover { border-color: var(--accent); color: var(--accent-strong); }
+  .side-tools button.active { border-color: rgba(34,211,238,0.5); color: var(--accent-strong); background: var(--accent-soft); }
+  .side-tools button svg { width:14px; height:14px; }
+  .side-tools kbd { margin-left:auto; font-family: var(--mono); font-size:10px; color: var(--text-mute); }
+  .health { display:flex; flex-direction:column; gap:6px; padding:10px 8px 2px; font-size:11px; color: var(--text-dim); font-family: var(--mono); }
+  .health .row { display:flex; align-items:center; gap:8px; justify-content:space-between; }
+  .health .k { color: var(--text-mute); letter-spacing:0.06em; text-transform:uppercase; font-size:10px; }
+  .health .v { display:flex; align-items:center; gap:6px; }
+  .hdot { width:7px; height:7px; border-radius:50%; background: var(--text-mute); }
+  .hdot.ok { background: var(--ok); box-shadow: 0 0 8px rgba(110,231,183,0.6); }
+  .hdot.bad { background: var(--danger); box-shadow: 0 0 8px rgba(251,113,133,0.6); }
+  .hdot.wait { background: var(--warn); }
 
-  main { flex:1; position:relative; min-height:0; }
-  main iframe {
-    position:absolute; inset:0; width:100%; height:100%; border:0; background: var(--bg);
-    display:none;
-  }
+  /* ---------- Hovedflate ---------- */
+  main { grid-area: main; position:relative; min-height:0; min-width:0; z-index:1; display:grid; grid-template-columns: 1fr; }
+  main.dual { grid-template-columns: 1fr 1fr; gap:1px; background: var(--border-soft); }
+  main iframe { position:absolute; inset:0; width:100%; height:100%; border:0; background: var(--bg); display:none; }
   main iframe.active { display:block; }
+  main.dual { position:relative; }
+  main.dual .pane { position:relative; min-width:0; min-height:0; background: var(--bg); }
+  .pane { position:absolute; inset:0; }
+  main.dual #pane-chat, main.dual #pane-voice { position:relative; display:block; }
+  main.dual #pane-dashboard { display:none; }
+  main.dual #pane-chat iframe, main.dual #pane-voice iframe { display:block; }
+  main:not(.dual) .pane { display:none; }
+  main:not(.dual) .pane.active { display:block; }
+  main:not(.dual) .pane.active iframe { display:block; }
+  .pane-bar { position:absolute; top:8px; right:10px; z-index:3; display:flex; gap:6px; opacity:0; transition: opacity 0.15s ease; }
+  .pane:hover .pane-bar { opacity:1; }
+  .pane-bar button {
+    appearance:none; border:1px solid var(--border); background: rgba(12,18,30,0.85); color: var(--text-dim); border-radius:8px; padding:4px 8px;
+    font-size:11px; cursor:pointer; font-family:inherit; backdrop-filter: blur(6px); display:flex; align-items:center; gap:5px;
+  }
+  .pane-bar button:hover { border-color: var(--accent); color: var(--accent-strong); }
+  .pane-bar button svg { width:12px; height:12px; }
 
   #boot {
-    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
-    flex-direction:column; gap:10px; color: var(--text-dim); font-size:13px; background: var(--bg);
-    transition: opacity 0.3s ease; pointer-events:none;
+    position:absolute; inset:0; z-index:5; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:14px;
+    color: var(--text-dim); font-size:13px; background: var(--bg); transition: opacity 0.35s ease; pointer-events:none;
   }
   #boot.hidden { opacity:0; }
-  #boot .spinner {
-    width:34px; height:34px; border-radius:50%; border:2px solid var(--border);
-    border-top-color: var(--accent); animation: spin 0.9s linear infinite;
-  }
+  #boot .spinner { width:44px; height:44px; border-radius:50%; border:2px solid var(--border); border-top-color: var(--accent); animation: spin 0.9s linear infinite; box-shadow: 0 0 20px -4px var(--accent-glow); }
+  #boot .steps { font-family: var(--mono); font-size:11px; letter-spacing:0.08em; color: var(--text-mute); text-transform:uppercase; }
 
-  @media (max-width: 560px) {
-    header { padding:10px 14px; }
-    .brand small { display:none; }
-    nav#tabs button span.label { display:inline; }
+  /* ---------- Statuslinje ---------- */
+  footer#status {
+    grid-area: status; z-index:2; display:flex; align-items:center; gap:14px; padding:6px 14px; font-family: var(--mono); font-size:11px;
+    color: var(--text-dim); background: rgba(12,18,30,0.88); border-top:1px solid var(--border-soft); backdrop-filter: blur(10px); white-space:nowrap; overflow:hidden;
   }
+  footer#status .seg { display:flex; align-items:center; gap:6px; }
+  footer#status .seg .k { color: var(--text-mute); letter-spacing:0.06em; text-transform:uppercase; font-size:10px; }
+  footer#status .sep { width:1px; height:14px; background: var(--border); }
+  footer#status .grow { flex:1; }
+  #clock { color: var(--text); font-variant-numeric: tabular-nums; letter-spacing:0.04em; }
+  #date { color: var(--text-dim); }
+
+  @media (max-width: 900px) {
+    body { grid-template-columns: 1fr; grid-template-rows: 1fr auto auto; grid-template-areas: "main" "status" "side"; }
+    aside { flex-direction:row; align-items:center; padding:6px 8px; border-right:0; border-top:1px solid var(--border-soft); gap:6px; }
+    .brand, .side-spacer, .health, nav#tabs button kbd, .side-tools kbd { display:none; }
+    nav#tabs { flex-direction:row; flex:1; }
+    nav#tabs button { flex:1; justify-content:center; padding:10px 6px; font-size:12px; }
+    nav#tabs button .label { flex:none; }
+    nav#tabs button.active::before { display:none; }
+    .side-tools { flex-direction:row; border-top:0; padding-top:0; }
+    .side-tools button .t { display:none; }
+    main.dual { grid-template-columns: 1fr; }
+    main.dual #pane-voice { display:none; }
+    footer#status .hide-sm { display:none; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 </head>
 <body>
 <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
-<header>
+
+<aside>
   <div class="brand">
     <span class="reactor" aria-hidden="true">
       <svg viewBox="0 0 40 40">
@@ -132,37 +177,71 @@
         <circle cx="20" cy="20" r="4" fill="#67e8f9"/>
       </svg>
     </span>
-    <span>JARVIS <small>kommandosentral</small></span>
+    <div><div class="name">JARVIS</div><div class="sub">kommandosentral</div></div>
   </div>
-  <div id="clock"></div>
-</header>
-<nav id="tabs">
-  <button data-tab="chat" class="active">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-    <span class="label">Samtale</span>
-  </button>
-  <button data-tab="voice">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg>
-    <span class="label">Tale</span>
-    <span class="dot" id="voice-dot"></span>
-  </button>
-  <button data-tab="dashboard">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
-    <span class="label">Oversikt</span>
-  </button>
-</nav>
-<main>
-  <div id="boot"><div class="spinner"></div><div>Starter kommandosentral …</div></div>
-  <iframe id="frame-chat" class="active" src="/chat" title="Samtale med Jarvis"></iframe>
-  <iframe id="frame-voice" src="/voice" title="Tale" allow="microphone; autoplay"></iframe>
-  <iframe id="frame-dashboard" src="/dashboard" title="Oversikt"></iframe>
+  <nav id="tabs">
+    <button data-tab="chat" class="active" title="Samtale (Alt+1)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      <span class="label">Samtale</span><span class="dot" id="chat-dot"></span><kbd>1</kbd>
+    </button>
+    <button data-tab="voice" title="Tale (Alt+2)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg>
+      <span class="label">Tale</span><span class="dot" id="voice-dot"></span><kbd>2</kbd>
+    </button>
+    <button data-tab="dashboard" title="Oversikt (Alt+3)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
+      <span class="label">Oversikt</span><span class="badge" id="dash-badge">0</span><kbd>3</kbd>
+    </button>
+  </nav>
+  <div class="health" id="health">
+    <div class="row"><span class="k">API</span><span class="v"><span class="hdot wait" id="api-dot"></span><span id="api-text">sjekker …</span></span></div>
+    <div class="row"><span class="k">Tale</span><span class="v"><span class="hdot" id="voice-hdot"></span><span id="voice-text">frakoblet</span></span></div>
+    <div class="row"><span class="k">Venter</span><span class="v"><span id="pending-text">–</span></span></div>
+  </div>
+  <div class="side-spacer"></div>
+  <div class="side-tools">
+    <button id="dual-btn" title="Samtale og tale side om side (Alt+D)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="8" height="16" rx="1.5"/><rect x="13" y="4" width="8" height="16" rx="1.5"/></svg>
+      <span class="t">Delt visning</span><kbd>Alt+D</kbd>
+    </button>
+    <button id="reload-btn" title="Last aktiv fane på nytt">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>
+      <span class="t">Last på nytt</span>
+    </button>
+  </div>
+</aside>
+
+<main id="main">
+  <div id="boot"><div class="spinner"></div><div>Starter kommandosentral …</div><div class="steps" id="boot-steps">samtale · tale · oversikt</div></div>
+  <div class="pane active" id="pane-chat">
+    <div class="pane-bar"><button data-reload="chat" title="Last samtale på nytt"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>Samtale</button></div>
+    <iframe id="frame-chat" class="active" src="/chat" title="Samtale med Jarvis"></iframe>
+  </div>
+  <div class="pane" id="pane-voice">
+    <div class="pane-bar"><button data-reload="voice" title="Last tale på nytt"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>Tale</button></div>
+    <iframe id="frame-voice" src="/voice" title="Tale" allow="microphone; autoplay"></iframe>
+  </div>
+  <div class="pane" id="pane-dashboard">
+    <div class="pane-bar"><button data-reload="dashboard" title="Last oversikt på nytt"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>Oversikt</button></div>
+    <iframe id="frame-dashboard" src="/dashboard" title="Oversikt"></iframe>
+  </div>
 </main>
+
+<footer id="status">
+  <span class="seg"><span class="k">Charlie</span><span id="chat-text">klar</span></span>
+  <span class="sep hide-sm"></span>
+  <span class="seg hide-sm"><span class="k">Rute</span><span id="route-text">–</span></span>
+  <span class="sep hide-sm"></span>
+  <span class="seg hide-sm"><span class="k">Siste tur</span><span id="latency-text">–</span></span>
+  <span class="grow"></span>
+  <span class="seg"><span id="date"></span></span>
+  <span class="seg"><span id="clock"></span></span>
+</footer>
+
 <script>
   /**
-   * Samme-origin iframes - localStorage (jarvis.deviceid/jarvis.devicekey)
-   * deles automatisk med denne siden og mellom fanene, SAMME nøkler
-   * index.html/voice.html/dashboard.html allerede bruker. Ingen ny
-   * identitets-/auth-logikk skrives her.
+   * Samme-origin iframes - localStorage (jarvis.deviceid/jarvis.devicekey) deles automatisk med denne siden og mellom
+   * fanene, SAMME nøkler index.html/voice.html/dashboard.html allerede bruker. Ingen identitets-/auth-logikk her.
    */
   const tabs = document.querySelectorAll("#tabs button");
   const frames = {
@@ -170,43 +249,77 @@
     voice: document.getElementById("frame-voice"),
     dashboard: document.getElementById("frame-dashboard")
   };
+  const panes = {
+    chat: document.getElementById("pane-chat"),
+    voice: document.getElementById("pane-voice"),
+    dashboard: document.getElementById("pane-dashboard")
+  };
+  const main = document.getElementById("main");
   const boot = document.getElementById("boot");
+  const dualBtn = document.getElementById("dual-btn");
+  let current = "chat";
+  let dual = false;
 
   /**
-   * D-361: Oversikt/Tale-fanene monteres SAMTIDIG med Samtale-fanen ved
-   * sidelasting - hvis enheten innrulleres via Samtale-fanens EGEN
-   * ?enroll=-flyt ETTERPÅ (vanlig: en fersk, aldri innrullert enhet), rakk
-   * Oversikt-fanen allerede forsøke OG feile sin egen ensureGrant() FØR
-   * localStorage fikk den ferske enhetsnøkkelen - den ville stå fast på
-   * "Laster ..." helt til en manuell sidelasting, ikke fordi noe er galt,
-   * men fordi den rett og slett aldri fikk prøve på nytt. Reload derfor den
-   * (ENDA ikke-aktiverte) fanen sin iframe FØRSTE gang brukeren faktisk
-   * bytter til den etter en innrullering startet herfra - da er
-   * auto-innrulleringen (et par raske HTTP-kall) med overveldende
-   * sannsynlighet allerede ferdig, og fanen får en ekte ny sjanse med en nå
-   * gyldig enhetsnøkkel i stedet for å gjenbruke sitt eget mislykkede første
-   * forsøk.
+   * D-361: Oversikt/Tale-fanene monteres SAMTIDIG med Samtale-fanen ved sidelasting - hvis enheten innrulleres via
+   * Samtale-fanens EGEN ?enroll=-flyt ETTERPÅ, rakk de andre fanene allerede forsøke OG feile sin ensureGrant() FØR
+   * localStorage fikk den ferske enhetsnøkkelen. Reload derfor den (ENDA ikke-aktiverte) fanen sin iframe FØRSTE gang
+   * brukeren faktisk bytter til den etter en innrullering startet herfra.
    */
   const pendingReload = { voice: false, dashboard: false };
 
+  function reloadFrame(name) {
+    const frame = frames[name];
+    if (!frame) return;
+    frame.src = frame.src;
+  }
+
+  function applyLayout() {
+    main.classList.toggle("dual", dual);
+    dualBtn.classList.toggle("active", dual);
+    Object.entries(panes).forEach(([key, pane]) => pane.classList.toggle("active", key === current));
+    Object.entries(frames).forEach(([key, frame]) => frame.classList.toggle("active", key === current || (dual && (key === "chat" || key === "voice"))));
+    tabs.forEach((b) => b.classList.toggle("active", b.dataset.tab === current));
+  }
+
   function activate(name) {
-    if (pendingReload[name]) {
-      pendingReload[name] = false;
-      frames[name].src = frames[name].src;
-    }
-    tabs.forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
-    Object.entries(frames).forEach(([key, frame]) => frame.classList.toggle("active", key === name));
-    try { localStorage.setItem("jarvis.command.tab", name); } catch { /* privat modus/blokkert - ingen funksjonell avhengighet */ }
+    if (!frames[name]) return;
+    if (pendingReload[name]) { pendingReload[name] = false; reloadFrame(name); }
+    current = name;
+    if (name === "dashboard" && dual) { dual = false; }
+    applyLayout();
+    try { localStorage.setItem("jarvis.command.tab", name); localStorage.setItem("jarvis.command.dual", dual ? "1" : "0"); } catch { /* privat modus/blokkert - ingen funksjonell avhengighet */ }
+    updateVoiceDot();
   }
   tabs.forEach((btn) => btn.addEventListener("click", () => activate(btn.dataset.tab)));
 
+  function toggleDual() {
+    dual = !dual;
+    if (dual) {
+      if (pendingReload.voice) { pendingReload.voice = false; reloadFrame("voice"); }
+      if (current === "dashboard") current = "chat";
+    }
+    applyLayout();
+    try { localStorage.setItem("jarvis.command.dual", dual ? "1" : "0"); } catch { /* beste-innsats */ }
+    updateVoiceDot();
+  }
+  dualBtn.addEventListener("click", toggleDual);
+  document.getElementById("reload-btn").addEventListener("click", () => reloadFrame(current));
+  document.querySelectorAll("[data-reload]").forEach((btn) => btn.addEventListener("click", () => reloadFrame(btn.dataset.reload)));
+
+  // Hurtigtaster: Alt+1/2/3 bytter fane, Alt+D delt visning. Alt-kombinasjoner kolliderer ikke med skriving i iframene.
+  document.addEventListener("keydown", (e) => {
+    if (!e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.key === "1") { e.preventDefault(); activate("chat"); }
+    else if (e.key === "2") { e.preventDefault(); activate("voice"); }
+    else if (e.key === "3") { e.preventDefault(); activate("dashboard"); }
+    else if (e.key.toLowerCase() === "d") { e.preventDefault(); toggleDual(); }
+  });
+
   /**
-   * D-361: `enroll-ticket-main.ts` sin `--path`-lenke kan peke hit (`/`)
-   * hvis Tobias velger en tom sti. Samme mønster som index.html/voice.html
-   * sin tryAutoEnrollFromUrl() (D-347/D-260) - fjern billetten fra
-   * adresselinjen UMIDDELBART, videresend den til Samtale-fanens iframe
-   * (som allerede har sin EGEN tryAutoEnrollFromUrl() og konsumerer den der)
-   * i stedet for å duplisere innrulleringslogikken i dette skallet.
+   * D-361: `enroll-ticket-main.ts` sin `--path`-lenke kan peke hit (`/`). Samme mønster som index.html/voice.html sin
+   * tryAutoEnrollFromUrl() (D-347/D-260) - fjern billetten fra adresselinjen UMIDDELBART, videresend den til Samtale-
+   * fanens iframe (som har sin EGEN tryAutoEnrollFromUrl()) i stedet for å duplisere innrulleringslogikken her.
    */
   const incomingTicket = new URLSearchParams(location.search).get("enroll");
   if (incomingTicket) {
@@ -217,38 +330,108 @@
   }
 
   let restored = "chat";
-  try { restored = localStorage.getItem("jarvis.command.tab") || "chat"; } catch { /* beste-innsats */ }
-  if (frames[restored]) activate(restored);
-  if (incomingTicket) activate("chat");
+  try {
+    restored = localStorage.getItem("jarvis.command.tab") || "chat";
+    dual = localStorage.getItem("jarvis.command.dual") === "1" && window.innerWidth > 900;
+  } catch { /* beste-innsats */ }
+  if (!frames[restored]) restored = "chat";
+  if (incomingTicket) { restored = "chat"; dual = false; }
+  activate(restored);
 
   let loaded = 0;
-  Object.values(frames).forEach((frame) => {
+  const bootSteps = document.getElementById("boot-steps");
+  Object.entries(frames).forEach(([key, frame]) => {
     frame.addEventListener("load", () => {
       loaded += 1;
+      bootSteps.textContent = loaded + "/3 flater klare";
       if (loaded >= Object.keys(frames).length) boot.classList.add("hidden");
     });
   });
-  // Sikkerhetsnett: skjul boot-skjermen uansett etter 4s selv om en frame
-  // (f.eks. voice-gateway nedetid) aldri fyrer "load" rent.
+  // Sikkerhetsnett: skjul boot-skjermen uansett etter 4s selv om en frame (f.eks. voice-gateway nedetid) aldri fyrer "load" rent.
   setTimeout(() => boot.classList.add("hidden"), 4000);
 
   function tick() {
-    document.getElementById("clock").textContent = new Date().toLocaleTimeString("nb-NO");
+    const now = new Date();
+    document.getElementById("clock").textContent = now.toLocaleTimeString("nb-NO");
+    document.getElementById("date").textContent = now.toLocaleDateString("nb-NO", { weekday: "short", day: "numeric", month: "short" });
   }
   tick();
   setInterval(tick, 1000);
 
-  // Enkel "live"-indikator på Tale-fanen: lytter på voice.html sin egen
-  // tilstand VIA et postMessage denne siden selv sender til seg selv - ingen
-  // endring i voice.html nødvendig, så dette er bevisst en no-op ARV-hekte
-  // (document.visibilityState alene er ikke en reell tale-tilstand): dotten
-  // tennes KUN når Tale-fanen faktisk er aktiv, som et enkelt, ærlig signal
-  // om "dette er fanen som nå er synlig", ikke en påstand om samtalestatus.
+  /**
+   * D-387: live-statuser kommer fra iframene selv via postMessage (origin-sjekket - samme origin, aldri "*"-lytting):
+   *   { jarvis: "voice-state", state }                 fra voice.html (idle/listening/thinking/speaking/interrupted/offline)
+   *   { jarvis: "voice-metrics", ms, routed }          fra voice.html (siste tur: end-of-speech → første lyd)
+   *   { jarvis: "chat-busy", busy, routed }            fra index.html
+   *   { jarvis: "dashboard-summary", attention, confirmations, proposals, failing, kill_switch }  fra dashboard.html
+   * Skallet SENDER aldri noe inn i iframene - det er en ren visning av det de allerede vet.
+   */
+  const voiceDot = document.getElementById("voice-dot");
+  const voiceHdot = document.getElementById("voice-hdot");
+  const voiceText = document.getElementById("voice-text");
+  const chatDot = document.getElementById("chat-dot");
+  const chatText = document.getElementById("chat-text");
+  const routeText = document.getElementById("route-text");
+  const latencyText = document.getElementById("latency-text");
+  const dashBadge = document.getElementById("dash-badge");
+  const pendingText = document.getElementById("pending-text");
+  let voiceState = "offline";
+  const VOICE_LABELS = { offline: "frakoblet", idle: "tilkoblet", listening: "lytter", thinking: "tenker", speaking: "snakker", interrupted: "avbrutt" };
+
   function updateVoiceDot() {
-    document.getElementById("voice-dot").classList.toggle("live", frames.voice.classList.contains("active"));
+    const visible = frames.voice.classList.contains("active");
+    voiceDot.className = "dot" + (voiceState === "offline" || voiceState === "idle" ? (visible ? " live" : "") : " " + voiceState);
+    voiceHdot.className = "hdot" + (voiceState === "offline" ? "" : voiceState === "interrupted" ? " bad" : " ok");
+    voiceText.textContent = VOICE_LABELS[voiceState] || voiceState;
   }
-  tabs.forEach((btn) => btn.addEventListener("click", updateVoiceDot));
   updateVoiceDot();
+
+  window.addEventListener("message", (event) => {
+    if (event.origin !== location.origin) return;
+    const msg = event.data;
+    if (!msg || typeof msg !== "object" || typeof msg.jarvis !== "string") return;
+    if (msg.jarvis === "voice-state") {
+      voiceState = typeof msg.state === "string" ? msg.state : "offline";
+      updateVoiceDot();
+    } else if (msg.jarvis === "voice-metrics") {
+      if (typeof msg.ms === "number") latencyText.textContent = Math.round(msg.ms) + " ms til lyd";
+      if (typeof msg.routed === "string" && msg.routed) routeText.textContent = msg.routed;
+    } else if (msg.jarvis === "chat-busy") {
+      chatDot.className = "dot" + (msg.busy ? " thinking" : "");
+      chatText.textContent = msg.busy ? "jobber …" : "klar";
+      if (typeof msg.routed === "string" && msg.routed) routeText.textContent = msg.routed;
+    } else if (msg.jarvis === "dashboard-summary") {
+      const attention = Number(msg.attention) || 0;
+      const confirmations = Number(msg.confirmations) || 0;
+      const proposals = Number(msg.proposals) || 0;
+      const failing = Number(msg.failing) || 0;
+      const total = attention + confirmations + proposals;
+      dashBadge.textContent = String(total);
+      dashBadge.classList.toggle("on", total > 0);
+      pendingText.textContent = total === 0 && failing === 0
+        ? "ingenting"
+        : [attention ? attention + " saker" : "", confirmations ? confirmations + " bekreft" : "", proposals ? proposals + " minne" : "", failing ? failing + " feiler" : ""].filter(Boolean).join(" · ");
+      if (msg.kill_switch === true) { chatText.textContent = "KILL SWITCH AKTIV"; chatDot.className = "dot speaking"; }
+    }
+  });
+
+  // API-helse: /health er offentlig (ingen grant) og svarer kun {status, service, version, time}.
+  const apiDot = document.getElementById("api-dot");
+  const apiText = document.getElementById("api-text");
+  async function checkHealth() {
+    const t0 = performance.now();
+    try {
+      const res = await fetch("/health", { cache: "no-store" });
+      const body = await res.json().catch(() => ({}));
+      const ms = Math.round(performance.now() - t0);
+      if (res.ok && body.status === "ok") { apiDot.className = "hdot ok"; apiText.textContent = "ok · " + ms + " ms"; }
+      else { apiDot.className = "hdot bad"; apiText.textContent = "feil " + res.status; }
+    } catch {
+      apiDot.className = "hdot bad"; apiText.textContent = "ikke nådd";
+    }
+  }
+  checkHealth();
+  setInterval(() => { if (document.visibilityState === "visible") void checkHealth(); }, 30000);
 </script>
 </body>
 </html>
