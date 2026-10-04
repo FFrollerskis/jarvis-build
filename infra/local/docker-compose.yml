@@ -29,6 +29,13 @@
 #  seccomp-profilen under refereres relativt til compose-filens mappe (Compose v2 løser stien mot prosjektmappen), så
 #  `docker compose -f infra/local/docker-compose.yml ...` virker uavhengig av arbeidskatalog.
 
+# D-395 (JARVIS-074): Docker-logger uten grenser fylte disken (json-file har ingen standardgrense). Hver tjeneste roterer: maks 5 x 20 MB.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 x-hardening: &hardening
   cap_drop: ["ALL"]
   security_opt: ["no-new-privileges:true"]
@@ -37,6 +44,7 @@ x-hardening: &hardening
 
 services:
   postgres:
+    logging: *default-logging
     # pgvector-image gir Postgres 16 + vector-extension (aktiveres først i fase 4).
     # pgmq er bevisst utelatt: kø-valget er pg-boss-klasse over vanlige tabeller (D-13).
     image: pgvector/pgvector:pg16@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
@@ -63,6 +71,7 @@ services:
   # overleverer eierskap av en eksisterende `infisical`/`langfuse`-database fra superbrukeren (se
   # bootstrap-databases.sql). Passordene leses fra miljøet inne i psql (`\getenv`) - de står aldri i kommandolinjen.
   db-bootstrap:
+    logging: *default-logging
     image: pgvector/pgvector:pg16@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
     environment:
       PGPASSWORD: "${JARVIS_DB_ADMIN_PASSWORD:?sett JARVIS_DB_ADMIN_PASSWORD i .env}"
@@ -80,6 +89,7 @@ services:
     restart: "no"
 
   langfuse:
+    logging: *default-logging
     # D-27: self-hosted Langfuse v2 (kun Postgres-avhengighet). Init-noekler
     # kommer fra .env (lokale dev-verdier) - aldri hardkodet her.
     # REMEDIERING DEL 2: kobler til som `langfuse_app` (egen rolle, eier av kun `langfuse`-databasen) - IKKE superbruker.
@@ -107,6 +117,7 @@ services:
     restart: unless-stopped
 
   infisical-redis:
+    logging: *default-logging
     image: redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     networks: [core]
     security_opt: ["no-new-privileges:true"]
@@ -117,6 +128,7 @@ services:
       retries: 5
 
   infisical:
+    logging: *default-logging
     # D-35: self-hosted Infisical (deler Docker-Postgres via egen db 'infisical').
     # REMEDIERING DEL 2: kobler til som `infisical_app` (egen rolle, eier av kun `infisical`-databasen) - IKKE superbruker.
     # ENCRYPTION_KEY/AUTH_SECRET (vault-hovednøkkelen) finnes KUN her.
@@ -154,6 +166,7 @@ services:
   # (ensureRuntimeRole). REMEDIERING DEL 2: dette er en ENGANGS-jobb, IKKE en runtime-tjeneste, og den får kun
   # admin-/rolle-/identitetsvariablene (ingen connector-/modellnøkler).
   migrate:
+    logging: *default-logging
     <<: *hardening
     build:
       context: ../..
@@ -179,6 +192,7 @@ services:
     restart: "no"
 
   api:
+    logging: *default-logging
     # Q-21: bruker RUNTIME-credentials (JARVIS_DB_USER/PASSWORD via configFromEnv()) - ALDRI JARVIS_DB_ADMIN_*.
     # main.ts fail-closer ved oppstart hvis tilkoblingen skulle vise seg å være superuser/BYPASSRLS (assertRuntimeRoleSafe).
     # D-201-host-fix: LANGFUSE_BASE_URL respekterer en eksplisitt .env-verdi (Langfuse Cloud) med den container-interne
@@ -312,6 +326,7 @@ services:
       JARVIS_ONEDRIVE_TOKEN: "${JARVIS_ONEDRIVE_TOKEN:-}"
       JARVIS_OPENAI_IMAGES_API_KEY: "${JARVIS_OPENAI_IMAGES_API_KEY:-}"
       JARVIS_OPENAI_REALTIME_API_KEY: "${JARVIS_OPENAI_REALTIME_API_KEY:-}"
+      JARVIS_OPERATIONAL_RETENTION_SWEEP_HOUR: "${JARVIS_OPERATIONAL_RETENTION_SWEEP_HOUR:-}"
       JARVIS_OUTLOOK_TOKEN: "${JARVIS_OUTLOOK_TOKEN:-}"
       JARVIS_OWNER_NAME: "${JARVIS_OWNER_NAME:-}"
       JARVIS_OWNER_PERSON_ID: "${JARVIS_OWNER_PERSON_ID:-}"
@@ -391,6 +406,7 @@ services:
     restart: unless-stopped
 
   worker:
+    logging: *default-logging
     # Q-21: samme RUNTIME-credentials som api (aldri admin). REMEDIERING DEL 2: ingen vault-hovednøkkel, ingen webhook-
     # hemmeligheter, ingen media-/meldings-leverandørnøkler (se service-env.mjs). Kodejobber kjører IKKE her (se toppen).
     <<: *hardening
@@ -556,6 +572,7 @@ services:
     restart: unless-stopped
 
   voice-gateway:
+    logging: *default-logging
     # D-212 (task #120): egen prosess (CLAUDE.md ufravikelig regel 5) - IKKE en rute i `api`. `JARVIS_CORE_URL` peker på
     # `api`-tjenestens container-interne adresse. D-253: EGET image (voice-gateway.Dockerfile) med lokal whisper.cpp/piper.
     # REMEDIERING DEL 1 (JARVIS-080): rå-lyd-dump er FJERNET (`JARVIS_VOICE_DEBUG_DUMP_DIR` videresendes ikke).
@@ -598,6 +615,7 @@ services:
     restart: unless-stopped
 
   browser-gateway:
+    logging: *default-logging
     # D-339: egen prosess. REMEDIERING DEL 2 (JARVIS-008): krever tjeneste-token (JARVIS_BROWSER_GATEWAY_TOKEN_SECRET) fra
     # api/worker, kun på det private `browser`-nettverket (ingen host-port), ikke-root (`pwuser`), AKTIV Chromium-sandbox via
     # Microsofts offisielle seccomp-profil (user namespaces) i stedet for SYS_ADMIN/privileged, read-only rootfs + tmpfs.

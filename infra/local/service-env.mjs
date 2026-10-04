@@ -254,7 +254,7 @@ const WORKER_EXCLUDES = new Set(["JARVIS_BRIEF_HOUR"]);
 
 /** Hva hver tjeneste får videresendt fra operatørens `.env` (interpolasjon `${NAVN:-}` i compose). */
 export const SERVICE_ENV = {
-  api: [...CORE_ENV, ...MODEL_ENV, ...CONNECTOR_ENV, ...WEBHOOK_ENV, ...MEDIA_HOME_ENV, ...MESSAGING_AUTOMATION_ENV, "LANGFUSE_BASE_URL", "JARVIS_API_PORT"],
+  api: [...CORE_ENV, ...MODEL_ENV, ...CONNECTOR_ENV, ...WEBHOOK_ENV, ...MEDIA_HOME_ENV, ...MESSAGING_AUTOMATION_ENV, "LANGFUSE_BASE_URL", "JARVIS_API_PORT", "JARVIS_OPERATIONAL_RETENTION_SWEEP_HOUR"],
   worker: [...CORE_ENV.filter((n) => !WORKER_EXCLUDES.has(n)), ...MODEL_ENV, ...CONNECTOR_ENV, "LANGFUSE_BASE_URL", "JARVIS_CLAUDE_BIN", "JARVIS_JOB_RUNNER", "JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY"],
   // migrate: engangs-jobb med ADMIN-rollen (CREATE ROLE/EXTENSION/RLS) - IKKE en runtime-tjeneste. Får den distinkte
   // runtime-rollens passord for å opprette rollen, men ingen connector-/modellnøkler.

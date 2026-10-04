@@ -21,6 +21,7 @@ import {
   createPool,
   ConfirmationStore,
   runMigrationsAsAdmin,
+  runOperationalRetentionSweep,
   withTenantTransaction,
   writeAudit
 } from "@jarvis/core";
@@ -1435,6 +1436,15 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "memory-profile-sweep", envHour("JARVIS_MEMORY_PROFILE_SWEEP_HOUR", 4)
   ).start(() => runMemoryProfileSweepForAllTenants(pool).then(() => undefined));
+  // D-395 (JARVIS-074): daglig oppbevaring for driftsrader som ellers vokser uten grense (utløpte godkjenninger/grants/billetter, ferdige
+  // verktøyutføringer, gamle scheduler-rader). All sletting skjer i `prune_operational_data()` (SECURITY DEFINER, faste gulv i RLS-policyene);
+  // runtime-rollen har kun EXECUTE. Revisjon/hendelser/kostnadsledger berøres ikke (eierbeslutning).
+  new DailyScheduler(
+    pool, "operational-retention-sweep", envHour("JARVIS_OPERATIONAL_RETENTION_SWEEP_HOUR", 3)
+  ).start(async () => {
+    const result = await runOperationalRetentionSweep(pool);
+    console.log(JSON.stringify({ msg: "operational_retention_sweep_completed", ...result }));
+  });
   if (memoryEmbedding.model !== "local-hash-v1") {
     setTimeout(() => {
       runMemoryReembedSweepForAllTenants(pool, memoryEmbedding, { maxRows: 500 }).catch((err: unknown) => {

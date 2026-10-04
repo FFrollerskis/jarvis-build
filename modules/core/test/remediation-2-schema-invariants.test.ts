@@ -68,7 +68,9 @@ describe("A: SECURITY DEFINER med minste privilegium (JARVIS-073)", () => {
       "claim_next_task(text,integer,text[])",
       "jarvis_list_all_tenant_ids(integer)",
       "jarvis_list_business_tenant_ids(integer)",
-      "jarvis_session_grant_tenant(text)"
+      "jarvis_session_grant_tenant(text)",
+      // D-395 (JARVIS-074): oppbevaringsfunksjonen (073) - samme invarianter (eid av jarvis_definer, låst search_path, ingen PUBLIC-EXECUTE).
+      "prune_operational_data(integer,integer,integer,integer,integer,integer)"
     ]);
     for (const row of r.rows as Array<{ fn: string; owner: string; rolsuper: boolean; rolbypassrls: boolean; proconfig: string[]; public_exec: boolean; app_exec: boolean }>) {
       expect(row.owner, row.fn).toBe("jarvis_definer");
@@ -83,10 +85,19 @@ describe("A: SECURITY DEFINER med minste privilegium (JARVIS-073)", () => {
   it("jarvis_definer har KUN de smale rettighetene funksjonene trenger (ingen INSERT/DELETE, ingen audit/events/approvals)", async () => {
     const priv = async (table: string, p: string): Promise<boolean> =>
       (await admin.query("SELECT has_table_privilege('jarvis_definer', $1, $2) AS ok", [table, p])).rows[0].ok as boolean;
+    // D-395 (073): DELETE finnes KUN på oppbevaringstabellene, og hver er bundet av en egen DELETE-policy rettet mot jarvis_definer (faste gulv).
+    const RETENTION_DELETE = new Set(["session_grants", "approvals"]);
     for (const t of ["tasks", "tenants", "session_grants", "audit_events", "events", "approvals", "devices", "sessions", "memory_items"]) {
       expect(await priv(t, "INSERT"), `${t} INSERT`).toBe(false);
-      expect(await priv(t, "DELETE"), `${t} DELETE`).toBe(false);
+      expect(await priv(t, "DELETE"), `${t} DELETE`).toBe(RETENTION_DELETE.has(t));
       expect(await priv(t, "TRUNCATE"), `${t} TRUNCATE`).toBe(false);
+    }
+    for (const t of ["session_grants", "approvals", "device_enrollment_tickets", "tool_executions"]) {
+      const policies = await admin.query(
+        "SELECT count(*)::int AS n FROM pg_policies WHERE schemaname = 'public' AND tablename = $1 AND cmd = 'DELETE' AND 'jarvis_definer' = ANY(roles)",
+        [t]
+      );
+      expect((policies.rows[0] as { n: number }).n, `${t} DELETE-policy for jarvis_definer`).toBeGreaterThanOrEqual(1);
     }
     for (const t of ["audit_events", "events", "approvals", "devices", "sessions", "memory_items", "messages"]) {
       expect(await priv(t, "SELECT"), `${t} SELECT`).toBe(false);
