@@ -5,7 +5,7 @@ import { dirname } from "node:path";
 export interface TraceSpan {
   trace_id: string;
   /** D-106 HOST-FIX: `council_suppressed` spores når eieren eksplisitt undertrykker et policy-mandatert Council-trigger (§"AUDITABILITY" - aldri en stille undertrykkelse). */
-  kind: "model_call" | "fast_route" | "job" | "budget" | "council_suppressed";
+  kind: "model_call" | "fast_route" | "job" | "budget" | "council_suppressed" | "model_advice";
   name: string;
   tenant_id: string;
   session_id?: string;

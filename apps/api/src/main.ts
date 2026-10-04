@@ -29,7 +29,7 @@ import { DeploymentService, DiagnosisService, IncidentService } from "@jarvis/in
 import {
   AiCouncil,
   assertProvidersHaveExplicitPricing,
-  DEFAULT_PRICING,
+  pricingFromEnv,
   ModelGateway,
   traceSinkFromEnv
 } from "@jarvis/model-gateway";
@@ -202,6 +202,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const gateway = new ModelGateway({
     pool,
     trace,
+    // D-399: eier-bekreftede modellpriser (JARVIS_MODEL_PRICING) flettes over standardtabellen - nødvendig for at dyrere modeller skal være valgbare per kall.
+    pricing: pricingFromEnv(),
     providers: [
       // D-79 (AI Mesh Gemma-first): gemma_hosted/local_llm registreres alltid,
       // som alle andre adaptere - `.available()` (nøkkel/URL satt) avgjør om de
@@ -252,7 +254,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     }
   });
   // JARVIS-006: hver konstruert adapter MÅ ha eksplisitt pris - ingen stille `default_rate`.
-  assertProvidersHaveExplicitPricing(DEFAULT_PRICING, gateway.listProviderNames());
+  assertProvidersHaveExplicitPricing(pricingFromEnv(), gateway.listProviderNames());
   // D-106 (AI Mesh Council/Collaboration/lokal-Gemma-utvidelse): egen
   // orkestrering over SAMME `gateway`/`pool` - ingen ny modellkall-vei, ingen
   // ny sikkerhetsvei (hvert Council-medlemsanrop går via `gateway.complete()`
