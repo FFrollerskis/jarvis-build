@@ -131,6 +131,8 @@ export class SupportTransport implements ToolTransport {
           },
           context.approval
         );
+        // D-396 (JARVIS-046): et svar som IKKE ble sendt er en FEIL for kalleren (evidens er allerede lagret som internal_note) - aldri ok med ekstern id.
+        if (!result.sent) throw new Error(`support_reply_not_sent: ${result.error ?? "ukjent feil"}`);
         return { external_id: result.event.event_id, data: result as unknown as JsonValue };
       }
       case "ingest_message": {

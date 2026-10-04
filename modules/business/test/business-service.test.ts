@@ -285,3 +285,37 @@ describe("W: ingen direkte modell-leverandør-bypass (strukturelt)", () => {
     expect(source).not.toMatch(/@jarvis\/model-gateway|@jarvis\/provider-adapters|openai|anthropic/i);
   });
 });
+
+describe("D-396 (JARVIS-049): navnebasert oppslag og kundebilde", () => {
+  it("findCompanies/findContacts finner på delstreng, escaper LIKE-jokertegn og isolerer tenants", async () => {
+    const acme = await service.createCompany(TENANT_A, "business", { name: "Acme Fjordkraft AS", domain: "acme-fjord.no" });
+    await service.createCompany(TENANT_A, "business", { name: "Prosent100% Test" });
+    await service.createCompany(TENANT_B, "business", { name: "Acme Hemmelig AS" });
+    const contact = await service.createContact(TENANT_A, "business", { name: "Kari Fjord", email: "kari@acme-fjord.no", company_id: acme.company_id });
+
+    const byName = await service.findCompanies(TENANT_A, "business", "fjordkraft");
+    expect(byName.map((c) => c.company_id)).toContain(acme.company_id);
+    expect((await service.findCompanies(TENANT_A, "business", "acme-fjord.no")).map((c) => c.company_id)).toContain(acme.company_id);
+    // tenant-isolasjon: B sitt selskap er aldri synlig for A
+    expect((await service.findCompanies(TENANT_A, "business", "Hemmelig"))).toHaveLength(0);
+    // jokertegn: «%» er en bokstavelig delstreng, ikke «match alt»
+    expect((await service.findCompanies(TENANT_A, "business", "%"))).toHaveLength(1);
+    expect((await service.findCompanies(TENANT_A, "business", "_"))).toHaveLength(0);
+    expect(await service.findCompanies(TENANT_A, "business", "   ")).toEqual([]);
+
+    expect((await service.findContacts(TENANT_A, "business", "kari@acme")).map((c) => c.contact_id)).toContain(contact.contact_id);
+    expect((await service.findContacts(TENANT_A, "business", "Kari")).length).toBeGreaterThan(0);
+  });
+
+  it("customerOverview samler selskap, kontakter og åpne forhold - og er null for fremmed/ukjent selskap", async () => {
+    const company = await service.createCompany(TENANT_A, "business", { name: "Overview Kunde AS" });
+    await service.createContact(TENANT_A, "business", { name: "Ola Overview", company_id: company.company_id });
+    await service.createFollowup(TENANT_A, "business", { title: "Ring Ola", due_at: "2026-12-01T00:00:00Z", company_id: company.company_id });
+    const overview = await service.customerOverview(TENANT_A, "business", company.company_id);
+    expect(overview?.company.name).toBe("Overview Kunde AS");
+    expect(overview?.contacts).toHaveLength(1);
+    expect(overview?.open_followups).toHaveLength(1);
+    expect(await service.customerOverview(TENANT_B, "business", company.company_id)).toBeNull();
+    expect(await service.customerOverview(TENANT_A, "business", "finnes-ikke")).toBeNull();
+  });
+});

@@ -26,6 +26,18 @@ export class ExecutiveToolsDeniedError extends Error {
 }
 
 /**
+ * D-396 (JARVIS-062): en jobb uten `prompt` (og uten `command`) har ingenting å utføre. Tidligere ble målet «kvittert» med `{echo: goal}`
+ * og jobben markert som FERDIG - brukeren så «Jobb opprettet», deretter «ferdig», uten at noe var gjort. Nå feiler jobben eksplisitt og
+ * lesbart i stedet for å late som den utførte noe.
+ */
+export class ExecutiveNoExecutableInputError extends Error {
+  constructor() {
+    super("executive_no_executable_input");
+    this.name = "ExecutiveNoExecutableInputError";
+  }
+}
+
+/**
  * Remediering del 1 (JARVIS-001/010/062): executive-`command`-grenen (vilkårlig
  * kommando i prosess-sandbox som root i worker-containeren med hele `.env`) er
  * FJERNET. En kontrakt med `input.data.command` avvises deterministisk - både
@@ -44,7 +56,7 @@ export class ExecutiveCommandDisabledError extends Error {
  * Begge drenerer samme durable kø og MÅ ha identisk kontrakt (BO-10-læringen):
  * prompt → AI Mesh m/purpose; prompt+tools → mesh-tool-løkke via trusted
  * executor (kun det eksplisitte lese-minimumssettet); command → AVVIST
- * (se `ExecutiveCommandDisabledError`); ellers kvitteres målet.
+ * (se `ExecutiveCommandDisabledError`); ellers feiler jobben med `ExecutiveNoExecutableInputError` (D-396: aldri en falsk «ferdig»-kvittering).
  * Ingen gammel echo-/provider-direkte-handler kan vinne queue-racet igjen.
  */
 export function executiveHandler(opts: ExecutiveHandlerOptions) {
@@ -90,6 +102,6 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
         tokens: { in: result.usage.input_tokens, out: result.usage.output_tokens }
       };
     }
-    return { echo: task.contract.goal, done_at: new Date().toISOString() };
+    throw new ExecutiveNoExecutableInputError();
   };
 }

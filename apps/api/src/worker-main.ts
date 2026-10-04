@@ -49,7 +49,7 @@ import {
   withSecretRedaction
 } from "@jarvis/tasks";
 import { KnowledgeSourceRegistry, emailIngestHandler } from "@jarvis/knowledge";
-import { LocalHashEmbedding } from "@jarvis/memory";
+import { createEmbeddingProviderFromEnv } from "@jarvis/memory";
 import {
   WatchdogEmergencyAlertSink, Watchdog, costExplosionCheck, costWarningCheck, databaseCheck, stuckTasksCheck,
   parseWatchdogIntervalMs, parseCostHardLimitOre
@@ -661,7 +661,8 @@ const knowledgeRegistry = new KnowledgeSourceRegistry([
 worker.register(
   "knowledge-ingest-email",
   emailIngestHandler({
-    pool, toolGateway, embeddings: new LocalHashEmbedding(), visionGateway: gateway, registry: knowledgeRegistry
+    pool, toolGateway, // D-396 (JARVIS-031): samme embedding-leverandør som api (env-styrt) - ikke en hardkodet LocalHashEmbedding i workeren.
+    embeddings: createEmbeddingProviderFromEnv(), visionGateway: gateway, registry: knowledgeRegistry
   })
 );
 

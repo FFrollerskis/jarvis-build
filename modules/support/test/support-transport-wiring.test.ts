@@ -56,6 +56,10 @@ function fakeSupportService(ticket: { ticket_id: string; channel: string; source
   const ingestCalls: unknown[] = [];
   return {
     getTicket: async () => ticket,
+    findEventBySourceMessage: async (_t: string, _s: string, _st: string, _si: string, sourceMessageId: string) =>
+      (ingestCalls as Array<Record<string, unknown>>).some((c) => c["source_message_id"] === sourceMessageId)
+        ? { event_id: "ev-prior", event_type: "agent_reply" }
+        : null,
     ingestMessage: async (_tenantId: string, _space: string, input: Record<string, unknown>) => {
       ingestCalls.push(input);
       return { ticket, event: { event_id: `ev-${ingestCalls.length}`, event_type: input["is_from_customer"] ? "customer_message" : "agent_reply" }, ticket_created: false, event_created: true, reopened: false };
@@ -88,18 +92,22 @@ describe("J: reply ruter GJENNOM eksisterende email.send (ToolGateway), ALDRI en
 
 describe("K: reply-idempotens", () => {
   it("samme idempotency_key gir samme source_message_id inn i ingestMessage (gjenbruker EKSISTERENDE idempotens-mekanisme)", async () => {
-    const gateway = { execute: async () => ({ ok: true, data: {} }) } as unknown as ToolGateway;
+    let gatewayCalls = 0;
+    const gateway = { execute: async () => { gatewayCalls++; return { ok: true, data: {} }; } } as unknown as ToolGateway;
     const support = fakeSupportService({
       ticket_id: "sup-tk-2", channel: "email", source_type: "gmail", source_instance_id: "acct-1",
       source_thread_id: "thread-2", subject: "Test2", company_id: null, contact_id: null, entity_resolution: "unmatched"
     });
     const emailService = new SupportEmailService(gateway, {} as unknown as BusinessService, support);
     const identity = { person_id: "system", tenant_id: "tenant-x", memory_space_id: "business", session_id: "s", device_id: "d", channel: "api", auth_strength: "active" } as never;
-    await emailService.reply("tenant-x", "business", identity, "sup-tk-2", { to: "a@b.no", subject: "S", body: "B", idempotency_key: "idem-42" });
-    await emailService.reply("tenant-x", "business", identity, "sup-tk-2", { to: "a@b.no", subject: "S", body: "B", idempotency_key: "idem-42" });
+    const first = await emailService.reply("tenant-x", "business", identity, "sup-tk-2", { to: "a@b.no", subject: "S", body: "B", idempotency_key: "idem-42" });
+    const second = await emailService.reply("tenant-x", "business", identity, "sup-tk-2", { to: "a@b.no", subject: "S", body: "B", idempotency_key: "idem-42" });
+    // D-396 (JARVIS-046): andre kall med samme nøkkel er en NO-OP - verken gateway eller ingestMessage kalles på nytt.
+    expect(first.sent).toBe(true);
+    expect(second.sent).toBe(true);
+    expect(gatewayCalls).toBe(1);
     const calls = support._ingestCalls as Array<{ source_message_id: string }>;
-    expect(calls).toHaveLength(2);
-    expect(calls[0]!.source_message_id).toBe(calls[1]!.source_message_id);
+    expect(calls).toHaveLength(1);
     expect(calls[0]!.source_message_id).toContain("idem-42");
   });
 });

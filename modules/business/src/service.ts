@@ -238,6 +238,64 @@ export class BusinessService {
     });
   }
 
+  /**
+   * D-396 (JARVIS-049): navnebasert oppslag. «Hva skjer med kunde X?» krevde tidligere en `company_id` modellen ikke kunne vite - nå finner
+   * den selskapet fra navn/domene først. ILIKE-jokertegn i søket (`%`, `_`, `\\`) escapes slik at søket alltid er en ren delstreng.
+   */
+  async findCompanies(tenantId: string, memorySpace: MemorySpace, query: string, limit = 10): Promise<BusinessCompany[]> {
+    const q = escapeLike(query.trim());
+    if (!q) return [];
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM business_companies WHERE tenant_id = $1 AND (name ILIKE $2 ESCAPE '\\' OR domain ILIKE $2 ESCAPE '\\')
+         ORDER BY (lower(name) = lower($3)) DESC, name ASC LIMIT $4`,
+        [tenantId, `%${q}%`, query.trim(), clampLimit(limit)]
+      );
+      return rows as BusinessCompany[];
+    });
+  }
+
+  async findContacts(tenantId: string, memorySpace: MemorySpace, query: string, limit = 10): Promise<BusinessContact[]> {
+    const q = escapeLike(query.trim());
+    if (!q) return [];
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM business_contacts WHERE tenant_id = $1 AND (name ILIKE $2 ESCAPE '\\' OR email ILIKE $2 ESCAPE '\\')
+         ORDER BY name ASC LIMIT $3`,
+        [tenantId, `%${q}%`, clampLimit(limit)]
+      );
+      return rows as BusinessContact[];
+    });
+  }
+
+  /** Samlet kundebilde: selskap + kontakter + åpne muligheter/oppfølginger/loops + siste aktiviteter (alt tenant-/space-skopet, kun lesing). */
+  async customerOverview(tenantId: string, memorySpace: MemorySpace, companyId: string, activityLimit = 10): Promise<CustomerOverview | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const company = (await client.query(`SELECT * FROM business_companies WHERE tenant_id = $1 AND company_id = $2`, [tenantId, companyId])).rows[0] as BusinessCompany | undefined;
+      if (!company) return null;
+      const contacts = (await client.query(`SELECT * FROM business_contacts WHERE tenant_id = $1 AND company_id = $2 ORDER BY name LIMIT 50`, [tenantId, companyId])).rows as BusinessContact[];
+      const opportunities = (await client.query(
+        `SELECT opportunity_id, title, stage, value_ore FROM business_opportunities WHERE tenant_id = $1 AND company_id = $2 AND stage NOT IN ('won','lost') ORDER BY updated_at DESC LIMIT 20`,
+        [tenantId, companyId]
+      )).rows;
+      const followups = (await client.query(
+        `SELECT followup_id, title, due_at FROM business_followups WHERE tenant_id = $1 AND company_id = $2 AND status = 'open' ORDER BY due_at ASC LIMIT 20`,
+        [tenantId, companyId]
+      )).rows;
+      const openLoops = (await client.query(
+        `SELECT open_loop_id, loop_type, reason, priority, due_at FROM business_open_loops WHERE tenant_id = $1 AND company_id = $2 AND status = 'open'
+         ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, due_at ASC NULLS LAST LIMIT 20`,
+        [tenantId, companyId]
+      )).rows;
+      const recent = (await client.query(
+        `SELECT activity_id, activity_type, summary, canonical_uri, occurred_at FROM business_activities WHERE tenant_id = $1 AND company_id = $2
+         ORDER BY occurred_at DESC LIMIT $3`,
+        [tenantId, companyId, clampLimit(activityLimit)]
+      )).rows as CustomerTimelineEntry[];
+      return { company, contacts, open_opportunities: opportunities, open_followups: followups, open_loops: openLoops, recent_activities: recent };
+    });
+  }
+
   /** "Hva skjer med kunde X?" (akseptansekriterium 1): komplett, kilde-forankret tidslinje for ett selskap. */
   async companyTimeline(tenantId: string, memorySpace: MemorySpace, companyId: string): Promise<CustomerTimelineEntry[]> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
@@ -331,7 +389,7 @@ export class BusinessService {
         `SELECT count(*)::int AS n FROM business_leads WHERE tenant_id = $1 AND status IN ('new','contacted','qualified')`, [tenantId]
       );
       const opportunities = await client.query(
-        `SELECT count(*)::int AS n, COALESCE(sum(value_ore), 0)::int AS value FROM business_opportunities
+        `SELECT count(*)::int AS n, COALESCE(sum(value_ore), 0)::bigint AS value FROM business_opportunities
          WHERE tenant_id = $1 AND stage NOT IN ('won','lost')`,
         [tenantId]
       );
@@ -345,7 +403,8 @@ export class BusinessService {
       return {
         open_leads: leads.rows[0].n,
         active_opportunities: opportunities.rows[0].n,
-        open_pipeline_value_ore: opportunities.rows[0].value,
+        // D-396 (JARVIS-082): sum(::int) kastet «integer out of range» over ~21 MNOK; bigint kommer som streng fra pg.
+        open_pipeline_value_ore: Number(opportunities.rows[0].value),
         overdue_followups: followups.rows[0].n,
         won_opportunities_30d: won.rows[0].n
       };
@@ -385,4 +444,22 @@ export async function recordActivityInTransaction(
     ]
   );
   return rows[0] as BusinessActivity;
+}
+
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+function clampLimit(limit: number): number {
+  return Math.min(Math.max(Math.trunc(Number.isFinite(limit) ? limit : 10), 1), 50);
+}
+
+/** D-396 (JARVIS-049): samlet, skrivebeskyttet kundebilde. */
+export interface CustomerOverview {
+  company: BusinessCompany;
+  contacts: BusinessContact[];
+  open_opportunities: Array<Record<string, unknown>>;
+  open_followups: Array<Record<string, unknown>>;
+  open_loops: Array<Record<string, unknown>>;
+  recent_activities: CustomerTimelineEntry[];
 }
