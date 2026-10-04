@@ -47,24 +47,59 @@ function githubHeaders(token: string, extra: Record<string, string> = {}): Recor
 export class HttpSelfModificationGithubClient implements SelfModificationGithubClient {
   constructor(private readonly token: string) {}
 
+  /**
+   * D-397 (JARVIS-042): CI for en EKSAKT commit-SHA (ikke et branch-navn) - kombinerer legacy commit-statuser OG check-runs
+   * (GitHub Actions rapporterer som check-runs, som `/status` ikke ser). Regler, fail-closed:
+   *   - en feilet/avbrutt/timed_out/action_required check-run eller en `failure`/`error`-status => `failure`
+   *   - en ikke-ferdig check-run => `pending`
+   *   - `success` krever at ALT er grønt OG at det finnes minst én status eller check-run (ingen CI er IKKE grønt).
+   */
   async getCombinedCiStatus(repo: string, ref: string): Promise<CiStatus> {
-    const response = await fetch(`https://api.github.com/repos/${repo}/commits/${ref}/status`, {
+    const statusResponse = await fetch(`https://api.github.com/repos/${repo}/commits/${ref}/status`, {
       headers: githubHeaders(this.token)
     });
-    if (!response.ok) throw new Error(`self_modification_github_status_${response.status}`);
-    const body = (await response.json()) as { state?: string };
-    if (body.state === "success") return "success";
-    if (body.state === "failure" || body.state === "error") return "failure";
+    if (!statusResponse.ok) throw new Error(`self_modification_github_status_${statusResponse.status}`);
+    const status = (await statusResponse.json()) as { state?: string; total_count?: number };
+    if (status.state === "failure" || status.state === "error") return "failure";
+
+    const runsResponse = await fetch(`https://api.github.com/repos/${repo}/commits/${ref}/check-runs?per_page=100`, {
+      headers: githubHeaders(this.token)
+    });
+    if (!runsResponse.ok) throw new Error(`self_modification_github_check_runs_${runsResponse.status}`);
+    const runsBody = (await runsResponse.json()) as { check_runs?: Array<{ status?: string; conclusion?: string | null }>; total_count?: number };
+    const runs = Array.isArray(runsBody.check_runs) ? runsBody.check_runs : null;
+    // Et svar uten `check_runs` er IKKE «ingen kjøringer» - det er ukjent, og ukjent er aldri grønt.
+    if (runs === null) return "pending";
+    const BAD = new Set(["failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale"]);
+    const GOOD = new Set(["success", "neutral", "skipped"]);
+    if (runs.some((r) => r.status === "completed" && BAD.has(String(r.conclusion)))) return "failure";
+    if (runs.some((r) => r.status !== "completed")) return "pending";
+    if (runs.some((r) => !GOOD.has(String(r.conclusion)))) return "failure";
+    // Flere enn 100 check-runs vurderes ikke stykkevis - da er svaret «pending» heller enn en delvis grønn.
+    if ((runsBody.total_count ?? runs.length) > runs.length) return "pending";
+    if (status.state === "success") return "success";
+    // Ingen legacy-statuser: grønt kun når det finnes minst én fullført, grønn check-run.
+    if ((status.total_count ?? 0) === 0 && runs.length > 0) return "success";
     return "pending";
   }
 
+  /**
+   * D-397 (JARVIS-042): ALLE sider av PR-ens filliste (var kuttet ved 100). GitHub tillater maks 3 000 filer; når taket nås
+   * kan vi ikke bevise at listen er komplett, og kaller kaster (fail-closed) i stedet for å klassifisere en delmengde.
+   */
   async getPullRequestChangedFiles(repo: string, prNumber: string): Promise<string[]> {
-    const response = await fetch(`https://api.github.com/repos/${repo}/pulls/${prNumber}/files?per_page=100`, {
-      headers: githubHeaders(this.token)
-    });
-    if (!response.ok) throw new Error(`self_modification_github_files_${response.status}`);
-    const body = (await response.json()) as Array<{ filename: string }>;
-    return body.map((f) => f.filename);
+    const files: string[] = [];
+    const MAX_PAGES = 30;
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const response = await fetch(`https://api.github.com/repos/${repo}/pulls/${prNumber}/files?per_page=100&page=${page}`, {
+        headers: githubHeaders(this.token)
+      });
+      if (!response.ok) throw new Error(`self_modification_github_files_${response.status}`);
+      const body = (await response.json()) as Array<{ filename: string }>;
+      files.push(...body.map((f) => f.filename));
+      if (body.length < 100) return files;
+    }
+    throw new Error("self_modification_github_files_truncated");
   }
 
   async getPullRequestHeadSha(repo: string, prNumber: string): Promise<string> {

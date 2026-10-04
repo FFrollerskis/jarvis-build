@@ -34,12 +34,26 @@ export function resolveBinary(envName, fallback) {
   return { command: override, prefix: [] };
 }
 
+/**
+ * D-397 (JARVIS-088): every `gh` call is time-bounded. `execFileSync` without a timeout blocks the worker (and, through the
+ * lock heartbeat it can no longer renew, the whole queue) for as long as GitHub or the network cares to hang. A timeout
+ * surfaces as a thrown error, which every caller here already maps to `{ ok: false }` = UNKNOWN, never "nothing there".
+ * Override with `JARVIS_WORKER_GH_TIMEOUT_MS` (clamped 1 s .. 30 min); default 2 min.
+ */
+export function timeoutMsFromEnv(envName, fallbackMs, env = process.env) {
+  const raw = Number(env[envName]);
+  if (!Number.isFinite(raw) || raw <= 0) return fallbackMs;
+  return Math.min(30 * 60_000, Math.max(1_000, Math.trunc(raw)));
+}
+
 function gh(args, opts = {}) {
   const { command, prefix } = resolveBinary("JARVIS_WORKER_GH", "gh");
   return execFileSync(command, [...prefix, ...args], {
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
+    timeout: timeoutMsFromEnv("JARVIS_WORKER_GH_TIMEOUT_MS", 120_000),
+    killSignal: "SIGKILL",
     ...opts
   });
 }

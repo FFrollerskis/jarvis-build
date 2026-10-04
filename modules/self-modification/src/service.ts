@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import type { IdentityContext, JobContract } from "@jarvis/contracts";
+import { withTenantTransaction, writeAudit } from "@jarvis/core";
 import type { SandboxRunner, TaskService } from "@jarvis/tasks";
 import {
   GIT_CREDENTIAL_ISOLATION_ARGS, GIT_HARDENING_ARGS, GIT_LOCAL_HARDENING_ARGS, assertRepoAllowed, createGitAuthHandle,
@@ -50,6 +51,49 @@ export interface SelfModificationServiceDeps {
    * (eieren kan uansett spørre `getRequest()` eksplisitt).
    */
   notify?: (text: string) => Promise<void>;
+  /**
+   * D-397 (JARVIS-042): eier-kontrollene (kill switch, connector-freeze). PÅKREVD - uten en port kan modulen ikke bygges, så
+   * en merge aldri kan gå utenom kill switch/freeze. Se `selfModificationControlsFrom()`.
+   */
+  controls: SelfModificationControls;
+  /** D-397: tenant revisjonsradene skrives under (selvendring er global; revisjon er likevel tenant-partisjonert). */
+  auditTenantId: string;
+}
+
+/** D-397: «får noe selvendrings-relatert skje akkurat nå?» - false = eieren har stoppet/fryst. Aldri kast; ukjent = false. */
+export interface SelfModificationControls {
+  allowed(): Promise<{ allowed: true } | { allowed: false; reason: string }>;
+}
+
+/** Strukturell form av `OwnerControlsService.getControlState()` (ingen avhengighet til @jarvis/owner-controls). */
+export interface OwnerControlStateReader {
+  getControlState(): Promise<{
+    kill_switch: { active: boolean };
+    frozen_connectors: ReadonlyArray<{ connector_id: string }>;
+  }>;
+}
+
+/**
+ * D-397 (JARVIS-042): bygger kontroll-porten fra eier-kontrollene. Kill switch aktiv, eller `github`/`self_modification`
+ * frosset, stopper alle forslag og ALLE merger. En feil ved lesing av tilstanden er også «ikke tillatt» (fail-closed).
+ */
+export function selfModificationControlsFrom(
+  reader: OwnerControlStateReader,
+  frozenConnectorIds: ReadonlyArray<string> = ["github", "self_modification"]
+): SelfModificationControls {
+  return {
+    async allowed() {
+      try {
+        const state = await reader.getControlState();
+        if (state.kill_switch.active) return { allowed: false, reason: "kill_switch_active" };
+        const frozen = state.frozen_connectors.find((c) => frozenConnectorIds.includes(c.connector_id));
+        if (frozen) return { allowed: false, reason: `connector_frozen:${frozen.connector_id}` };
+        return { allowed: true };
+      } catch {
+        return { allowed: false, reason: "owner_controls_unreadable" };
+      }
+    }
+  };
 }
 
 function requestRowFromDb(row: Record<string, unknown>): SelfModificationRequest {
@@ -68,7 +112,9 @@ function requestRowFromDb(row: Record<string, unknown>): SelfModificationRequest
     resolved_at: row["resolved_at"] ? (row["resolved_at"] as Date).toISOString() : null,
     resolved_by_person_id: (row["resolved_by_person_id"] as string | null) ?? null,
     coding_task_id: (row["coding_task_id"] as string | null) ?? null,
-    coding_tenant_id: (row["coding_tenant_id"] as string | null) ?? null
+    coding_tenant_id: (row["coding_tenant_id"] as string | null) ?? null,
+    classified_head_sha: (row["classified_head_sha"] as string | null) ?? null,
+    approved_head_sha: (row["approved_head_sha"] as string | null) ?? null
   };
 }
 
@@ -121,6 +167,42 @@ export class SelfModificationService {
     }
   }
 
+  /** D-397: kill switch/connector-freeze stopper alt selvendrings-relatert - kastes FØR noe arbeid starter. */
+  private async assertNotPaused(): Promise<void> {
+    const gate = await this.deps.controls.allowed();
+    if (!gate.allowed) throw new Error(`self_modification_blocked:${gate.reason}`);
+  }
+
+  private readonly loggedBlocked = new Set<string>();
+
+  /**
+   * D-397 (JARVIS-042): append-only revisjon av hver selvendrings-beslutning (godkjenning, avvisning, blokkert merge, merge).
+   * `strict`: feiler skrivingen, kastes feilen - brukt FØR merge, så en merge aldri skjer uten revisjonsspor.
+   */
+  private async audit(
+    type: string,
+    request: { request_id: string },
+    entry: { decision: "ALLOW" | "DENY"; reason?: string; payload?: Record<string, unknown> },
+    strict = false
+  ): Promise<void> {
+    try {
+      await withTenantTransaction(this.deps.pool, this.deps.auditTenantId, (client) =>
+        writeAudit(
+          client,
+          { tenant_id: this.deps.auditTenantId, person_id: this.deps.ownerPersonId, device_id: "jarvis-core" },
+          {
+            type, decision: entry.decision, tool_id: "self_modification", action: type.replace(/^self_modification\./, ""),
+            ...(entry.reason !== undefined ? { reason: entry.reason } : {}),
+            payload: { request_id: request.request_id, ...(entry.payload ?? {}) }
+          }
+        )
+      );
+    } catch (err) {
+      if (strict) throw err;
+      console.error(JSON.stringify({ msg: "self_modification_audit_failed", type, error: (err as Error).message.slice(0, 200) }));
+    }
+  }
+
   /**
    * Zero-review-sporet. Skjemavalidering (PersonalityConfigSchema) skjer
    * FØR noe git-arbeid i det hele tatt - en ugyldig konfig kaster her,
@@ -134,6 +216,7 @@ export class SelfModificationService {
     input: { tone_descriptors: string[]; style_notes: string }
   ): Promise<{ request_id: string; pr_number: string; pr_url: string; branch: string; risk: string }> {
     this.assertOwner(identity);
+    await this.assertNotPaused();
 
     const config: PersonalityConfig = PersonalityConfigSchema.parse({
       tone_descriptors: input.tone_descriptors,
@@ -218,14 +301,16 @@ export class SelfModificationService {
         throw new Error("self_modification_pr_missing_number");
       }
 
+      // D-397: diffen er klassifisert på AKKURAT denne commiten - merge bindes til den.
+      const headSha = await this.deps.githubClient.getPullRequestHeadSha(this.repoSlug, pr.pr_number);
       const requestId = `selfmod-${randomUUID()}`;
       await this.deps.pool.query(
         `INSERT INTO self_modification_requests
-           (request_id, kind, risk, target_paths, branch, pr_number, pr_url, status, requested_by_person_id, summary)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+           (request_id, kind, risk, target_paths, branch, pr_number, pr_url, status, requested_by_person_id, summary, classified_head_sha)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
         [
           requestId, "personality_config", risk, [PERSONALITY_CONFIG_PATH], branch, pr.pr_number, pr.pr_url ?? "",
-          "pending_ci", identity.person_id, `Personlighetskonfig oppdatert av ${identity.person_id}`
+          "pending_ci", identity.person_id, `Personlighetskonfig oppdatert av ${identity.person_id}`, headSha.toLowerCase()
         ]
       );
       return { request_id: requestId, pr_number: pr.pr_number, pr_url: pr.pr_url ?? "", branch, risk };
@@ -270,6 +355,7 @@ export class SelfModificationService {
     input: { goal: string }
   ): Promise<{ request_id: string; coding_task_id: string; branch: string }> {
     this.assertOwner(identity);
+    await this.assertNotPaused();
     if (input.goal.trim().length === 0) {
       throw new Error("self_modification_missing_goal");
     }
@@ -385,6 +471,9 @@ export class SelfModificationService {
       return "failed";
     }
 
+    // D-397: SHA FØRST, så filer: en push mellom de to kallene gir en SHA som er eldre enn filene (aldri omvendt), og
+    // `attemptMerge` avviser da PR-en fordi nåværende head ikke lenger er den klassifiserte.
+    const headSha = (await this.deps.githubClient.getPullRequestHeadSha(this.repoSlug, pr.pr_number)).toLowerCase();
     const actualFiles = await this.deps.githubClient.getPullRequestChangedFiles(this.repoSlug, pr.pr_number);
     const risk = classifySelfModification(actualFiles);
     const branch = result?.branch ?? request.branch;
@@ -403,14 +492,14 @@ export class SelfModificationService {
     const nextStatus: SelfModificationRequestStatus = risk === "zero_review" ? "pending_ci" : "awaiting_approval";
     await this.deps.pool.query(
       `UPDATE self_modification_requests
-         SET target_paths = $2, branch = $3, pr_number = $4, pr_url = $5, risk = $6, status = $7
+         SET target_paths = $2, branch = $3, pr_number = $4, pr_url = $5, risk = $6, status = $7, classified_head_sha = $8
        WHERE request_id = $1`,
-      [request.request_id, actualFiles, branch, pr.pr_number, pr.pr_url ?? "", risk, nextStatus]
+      [request.request_id, actualFiles, branch, pr.pr_number, pr.pr_url ?? "", risk, nextStatus, headSha]
     );
     if (nextStatus === "awaiting_approval") {
       await safeNotify(this.deps.notify,
         `Selvendring venter på godkjenning (${request.request_id}): ${pr.pr_url ?? pr.pr_number}\n` +
-        `Endrer: ${actualFiles.join(", ")}\nGodkjenn: /godkjenn ${request.request_id}\nAvvis: /avvis ${request.request_id}`);
+        `Endrer: ${actualFiles.join(", ")}\nCommit: ${headSha.slice(0, 12)} (godkjenningen gjelder KUN denne commiten)\nGodkjenn: /godkjenn ${request.request_id}\nAvvis: /avvis ${request.request_id}`);
     }
     return "advanced";
   }
@@ -461,35 +550,71 @@ export class SelfModificationService {
    * raden kom fra, siden `forbidden !== request.risk` for begge.
    */
   private async attemptMerge(request: SelfModificationRequest): Promise<"merged" | "pending" | "failed"> {
-    const ci = await this.deps.githubClient.getCombinedCiStatus(this.repoSlug, request.branch);
+    // D-397 (JARVIS-042) 1: kill switch / connector-freeze. En blokkert merge er IKKE en feil og IKKE en avvisning - raden
+    // blir stående og prøves igjen når eieren opphever stoppen. Loggføres/revideres kun første gang per prosess.
+    const gate = await this.deps.controls.allowed();
+    if (!gate.allowed) {
+      if (!this.loggedBlocked.has(request.request_id)) {
+        this.loggedBlocked.add(request.request_id);
+        await this.audit("self_modification.merge_blocked", request, { decision: "DENY", reason: gate.reason });
+      }
+      return "pending";
+    }
+
+    // D-397 2: merge krever en SHA som er bundet til det som ble klassifisert (zero_review) eller godkjent (approved).
+    // Legacy-rader uten SHA, og rader der PR-ens head har flyttet seg, feiler LUKKET - aldri «merge likevel».
+    const boundSha = request.status === "approved" ? request.approved_head_sha : request.classified_head_sha;
+    if (!boundSha) {
+      await this.markResolved(request.request_id, "ci_failed", null);
+      await this.audit("self_modification.merge_refused", request, { decision: "DENY", reason: "head_sha_unbound" });
+      await safeNotify(this.deps.notify, `Selvendring blokkert: ingen commit er bundet til forespørselen (${request.request_id}). Opprett den på nytt.`);
+      return "failed";
+    }
+    const currentHead = (await this.deps.githubClient.getPullRequestHeadSha(this.repoSlug, request.pr_number)).toLowerCase();
+    if (currentHead !== boundSha.toLowerCase()) {
+      await this.markResolved(request.request_id, "ci_failed", null);
+      await this.audit("self_modification.merge_refused", request, {
+        decision: "DENY", reason: "head_sha_changed", payload: { bound_sha: boundSha, current_head: currentHead }
+      });
+      await safeNotify(this.deps.notify,
+        `Selvendring blokkert FØR merge: PR-en har fått en ny commit etter ${request.status === "approved" ? "godkjenning" : "klassifisering"} ` +
+        `(${request.request_id}, ${boundSha.slice(0, 12)} -> ${currentHead.slice(0, 12)}).`);
+      return "failed";
+    }
+
+    // 3: CI mot NØYAKTIG den bundne SHA-en (aldri branch-navnet, som kan ha flyttet seg).
+    const ci = await this.deps.githubClient.getCombinedCiStatus(this.repoSlug, boundSha);
     if (ci === "pending") return "pending";
     if (ci === "failure") {
       await this.markResolved(request.request_id, "ci_failed", null);
       return "failed";
     }
 
-    // Reverifisering: EKSAKT `target_paths` (aldri mer, aldri mindre) - se
-    // klassekommentaren. En diff som har vokst siden opprettelsen (uansett
-    // årsak) blokkerer automerge her, permanent for DENNE forespørselen -
-    // ALDRI et stille "merge likevel fordi CI tilfeldigvis er grønt".
+    // 4: Reverifisering: EKSAKT `target_paths` (aldri mer, aldri mindre). En diff som har vokst siden opprettelsen blokkerer
+    // automerge, permanent for DENNE forespørselen - ALDRI et stille "merge likevel fordi CI tilfeldigvis er grønt".
     const actualFiles = await this.deps.githubClient.getPullRequestChangedFiles(this.repoSlug, request.pr_number);
     const expected = [...request.target_paths].sort();
     const actual = [...actualFiles].sort();
     const diffMatches = expected.length === actual.length && expected.every((p, i) => p === actual[i]);
     if (!diffMatches || classifySelfModification(actualFiles) !== request.risk) {
       await this.markResolved(request.request_id, "ci_failed", null);
+      await this.audit("self_modification.merge_refused", request, { decision: "DENY", reason: "diff_changed" });
       await safeNotify(this.deps.notify,
         `Selvendring blokkert FØR merge: diffen har endret seg siden godkjenning/klassifisering (${request.request_id}).`);
       return "failed";
     }
 
-    const headSha = await this.deps.githubClient.getPullRequestHeadSha(this.repoSlug, request.pr_number);
+    // 5: revisjon FØRST (strict - uten revisjonsspor ingen merge), så merge med SHA som precondition (409 hvis head flytter seg).
+    await this.audit("self_modification.merge_attempt", request, {
+      decision: "ALLOW", payload: { sha: boundSha, pr_number: request.pr_number, risk: request.risk, files: actualFiles, status: request.status }
+    }, true);
     const result = await this.deps.githubClient.mergePullRequest(this.repoSlug, request.pr_number, {
-      sha: headSha,
+      sha: boundSha,
       commitTitle: `jarvis: ${request.summary}`
     });
     if (!result.merged) return "pending"; // f.eks. 405/stale sha - prøves på nytt neste sveip
     await this.markResolved(request.request_id, "merged", null);
+    await this.audit("self_modification.merged", request, { decision: "ALLOW", payload: { sha: boundSha, pr_number: request.pr_number } });
     await safeNotify(this.deps.notify, `Selvendring merget: ${request.pr_url || request.pr_number} (${request.request_id}).`);
     return "merged";
   }
@@ -551,6 +676,8 @@ export class SelfModificationService {
    * UENDRET av den koblingen, akkurat som forventet ved skrivetidspunktet.
    */
   async resolveApproval(requestId: string, decision: "approved" | "rejected", actorPersonId: string): Promise<SelfModificationRequest> {
+    // D-397: kun eieren kan avgjøre. Før dette stolte metoden på at kalleren (Telegram-binding) var riktig; nå håndheves det her.
+    if (actorPersonId !== this.deps.ownerPersonId) throw new Error("self_modification_owner_only");
     const existing = await this.deps.pool.query("SELECT * FROM self_modification_requests WHERE request_id = $1", [requestId]);
     const row = existing.rows[0] as Record<string, unknown> | undefined;
     if (!row) throw new Error("self_modification_request_not_found");
@@ -558,7 +685,31 @@ export class SelfModificationService {
     if (request.status !== "awaiting_approval") {
       throw new Error(`self_modification_request_not_awaiting_approval:${request.status}`);
     }
-    await this.markResolved(requestId, decision, actorPersonId);
+    if (decision === "approved") {
+      // D-397 (JARVIS-042): godkjenningen bindes til commiten eieren fikk vist. Har PR-en fått en ny commit siden, godkjennes
+      // ingenting - eieren må avvise (eller be om en ny forespørsel) og får en ny SHA å ta stilling til.
+      const gate = await this.deps.controls.allowed();
+      if (!gate.allowed) throw new Error(`self_modification_blocked:${gate.reason}`);
+      if (!request.classified_head_sha) throw new Error("self_modification_head_sha_unbound");
+      const currentHead = (await this.deps.githubClient.getPullRequestHeadSha(this.repoSlug, request.pr_number)).toLowerCase();
+      if (currentHead !== request.classified_head_sha.toLowerCase()) {
+        await this.audit("self_modification.approval_refused", request, {
+          decision: "DENY", reason: "head_sha_changed", payload: { classified: request.classified_head_sha, current_head: currentHead }
+        });
+        throw new Error("self_modification_head_changed_since_review");
+      }
+      const claimed = await this.deps.pool.query(
+        `UPDATE self_modification_requests
+            SET status = 'approved', resolved_at = now(), resolved_by_person_id = $2, approved_head_sha = classified_head_sha
+          WHERE request_id = $1 AND status = 'awaiting_approval'`,
+        [requestId, actorPersonId]
+      );
+      if (claimed.rowCount !== 1) throw new Error("self_modification_request_not_awaiting_approval:changed");
+      await this.audit("self_modification.approved", request, { decision: "ALLOW", payload: { sha: request.classified_head_sha } });
+    } else {
+      await this.markResolved(requestId, "rejected", actorPersonId);
+      await this.audit("self_modification.rejected", request, { decision: "ALLOW", reason: "owner_rejected" });
+    }
     const updated = await this.deps.pool.query("SELECT * FROM self_modification_requests WHERE request_id = $1", [requestId]);
     return requestRowFromDb(updated.rows[0] as Record<string, unknown>);
   }

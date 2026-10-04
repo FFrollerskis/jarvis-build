@@ -19,7 +19,7 @@
 
 import { spawnSync } from "node:child_process";
 import { sanitize } from "./health.mjs";
-import { resolveBinary } from "./github.mjs";
+import { resolveBinary, timeoutMsFromEnv } from "./github.mjs";
 
 /**
  * The raw spawn, shared by the two public doors below.
@@ -32,7 +32,13 @@ function spawnGit(cfg, args, runner) {
   let res;
   try {
     const { command, prefix } = resolveBinary("JARVIS_WORKER_GIT", "git");
-    const options = { cwd: cfg.repoPath, encoding: "utf8", windowsHide: true };
+    // D-397 (JARVIS-088): a hung git (network fetch, credential prompt, locked index) must not hold the worker forever.
+    // `spawnSync` reports a timeout as `res.error` (ETIMEDOUT), which is already an `exited: false` UNKNOWN below.
+    // Override with `JARVIS_WORKER_GIT_TIMEOUT_MS` (clamped 1 s .. 30 min); default 3 min.
+    const options = {
+      cwd: cfg.repoPath, encoding: "utf8", windowsHide: true,
+      timeout: timeoutMsFromEnv("JARVIS_WORKER_GIT_TIMEOUT_MS", 180_000), killSignal: "SIGKILL"
+    };
     // D-158 REVIEW-FIX: an EXPLICIT environment is passed ONLY when a caller has
     // asked for one with `withGitEnv`. Every other call site in the worker keeps
     // inheriting this process's environment byte for byte, exactly as before -

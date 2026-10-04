@@ -16,15 +16,40 @@ afterEach(() => {
 });
 
 describe("A: HttpSelfModificationGithubClient - REST-mapping", () => {
-  it("A1: getCombinedCiStatus mapper 'success'/'failure'/'error'/annet korrekt", async () => {
+  /** `/status` + `/check-runs` for én SHA. */
+  const ci = (status: unknown, runs: unknown) => async (url: string) =>
+    url.includes("/check-runs") ? jsonResponse(runs) : jsonResponse(status);
+  const run = (conclusion: string | null, status = "completed") => ({ status, conclusion });
+
+  it("A1: getCombinedCiStatus - statuser + check-runs, fail-closed (D-397)", async () => {
     const client = new HttpSelfModificationGithubClient("tok");
-    vi.stubGlobal("fetch", async () => jsonResponse({ state: "success" }));
+    // statuser grønne + én grønn check-run -> success
+    vi.stubGlobal("fetch", ci({ state: "success", total_count: 1 }, { check_runs: [run("success")], total_count: 1 }));
     expect(await client.getCombinedCiStatus("o/r", "sha1")).toBe("success");
-    vi.stubGlobal("fetch", async () => jsonResponse({ state: "failure" }));
+    // failure/error-status -> failure uansett check-runs
+    vi.stubGlobal("fetch", ci({ state: "failure", total_count: 1 }, { check_runs: [run("success")] }));
     expect(await client.getCombinedCiStatus("o/r", "sha1")).toBe("failure");
-    vi.stubGlobal("fetch", async () => jsonResponse({ state: "error" }));
+    vi.stubGlobal("fetch", ci({ state: "error", total_count: 1 }, { check_runs: [] }));
     expect(await client.getCombinedCiStatus("o/r", "sha1")).toBe("failure");
-    vi.stubGlobal("fetch", async () => jsonResponse({ state: "pending" }));
+    // en feilet check-run (f.eks. gitleaks) -> failure selv om statusene er grønne
+    vi.stubGlobal("fetch", ci({ state: "success", total_count: 1 }, { check_runs: [run("success"), run("failure")] }));
+    expect(await client.getCombinedCiStatus("o/r", "sha1")).toBe("failure");
+    vi.stubGlobal("fetch", ci({ state: "pending", total_count: 0 }, { check_runs: [run("timed_out")] }));
+    expect(await client.getCombinedCiStatus("o/r", "sha1")).toBe("failure");
+    // ikke-ferdig check-run -> pending
+    vi.stubGlobal("fetch", ci({ state: "success", total_count: 1 }, { check_runs: [run(null, "in_progress")] }));
+    expect(await client.getCombinedCiStatus("o/r", "sha1")).toBe("pending");
+    // kun Actions (ingen legacy-statuser): grønne check-runs -> success; skipped/neutral teller som grønt
+    vi.stubGlobal("fetch", ci({ state: "pending", total_count: 0 }, { check_runs: [run("success"), run("skipped"), run("neutral")], total_count: 3 }));
+    expect(await client.getCombinedCiStatus("o/r", "sha1")).toBe("success");
+    // INGEN CI i det hele tatt er IKKE grønt
+    vi.stubGlobal("fetch", ci({ state: "pending", total_count: 0 }, { check_runs: [], total_count: 0 }));
+    expect(await client.getCombinedCiStatus("o/r", "sha1")).toBe("pending");
+    // svar uten check_runs er ukjent, aldri grønt
+    vi.stubGlobal("fetch", ci({ state: "success", total_count: 1 }, {}));
+    expect(await client.getCombinedCiStatus("o/r", "sha1")).toBe("pending");
+    // flere check-runs enn én side -> aldri en delvis grønn
+    vi.stubGlobal("fetch", ci({ state: "pending", total_count: 0 }, { check_runs: [run("success")], total_count: 150 }));
     expect(await client.getCombinedCiStatus("o/r", "sha1")).toBe("pending");
   });
 
@@ -38,6 +63,24 @@ describe("A: HttpSelfModificationGithubClient - REST-mapping", () => {
     const client = new HttpSelfModificationGithubClient("tok");
     vi.stubGlobal("fetch", async () => jsonResponse([{ filename: "a.ts" }, { filename: "b.ts" }]));
     expect(await client.getPullRequestChangedFiles("o/r", "1")).toEqual(["a.ts", "b.ts"]);
+  });
+
+  it("A3b: filliste pagineres (var kuttet ved 100) - side 2 leses, og taket (3000) feiler LUKKET i stedet for en delmengde", async () => {
+    const client = new HttpSelfModificationGithubClient("tok");
+    const page = (n: number, count: number) => Array.from({ length: count }, (_, i) => ({ filename: `p${n}-${i}.ts` }));
+    const seenPages: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      const n = Number(new URL(url).searchParams.get("page"));
+      seenPages.push(String(n));
+      return jsonResponse(n === 1 ? page(1, 100) : n === 2 ? page(2, 100) : page(3, 5));
+    });
+    const files = await client.getPullRequestChangedFiles("o/r", "1");
+    expect(files).toHaveLength(205);
+    expect(files).toContain("p3-4.ts");
+    expect(seenPages).toEqual(["1", "2", "3"]);
+    // Alltid fulle sider: 30 sider = 3000 filer = GitHubs tak, listen kan ikke bevises komplett.
+    vi.stubGlobal("fetch", async () => jsonResponse(page(1, 100)));
+    await expect(client.getPullRequestChangedFiles("o/r", "1")).rejects.toThrow("self_modification_github_files_truncated");
   });
 
   it("A4: getPullRequestHeadSha returnerer head.sha, kaster hvis manglende", async () => {
@@ -76,19 +119,21 @@ describe("B: ResolvingSelfModificationGithubClient - tokenet oppløses PÅ NYTT 
     const tokens = ["token-1", "token-2"];
     let call = 0;
     const seenAuth: string[] = [];
-    vi.stubGlobal("fetch", async (_url: string, init: { headers: Record<string, string> }) => {
+    vi.stubGlobal("fetch", async (url: string, init: { headers: Record<string, string> }) => {
       seenAuth.push(init.headers["authorization"] ?? "");
-      return jsonResponse({ state: "success" });
+      return url.includes("/check-runs") ? jsonResponse({ check_runs: [{ status: "completed", conclusion: "success" }], total_count: 1 }) : jsonResponse({ state: "success", total_count: 1 });
     });
     const client = new ResolvingSelfModificationGithubClient(async () => tokens[call++] ?? null);
     await client.getCombinedCiStatus("o/r", "sha1");
     await client.getCombinedCiStatus("o/r", "sha1");
-    expect(seenAuth).toEqual(["Bearer token-1", "Bearer token-2"]);
+    // Hvert CI-kall gjør to forespørsler (status + check-runs); tokenet oppløses på nytt for hver KLIENT-metode, ikke per forespørsel.
+    expect(seenAuth).toEqual(["Bearer token-1", "Bearer token-1", "Bearer token-2", "Bearer token-2"]);
   });
 
   it("B3: delegerer korrekt til alle fire metodene", async () => {
     vi.stubGlobal("fetch", async (url: string) => {
-      if (url.includes("/status")) return jsonResponse({ state: "success" });
+      if (url.includes("/check-runs")) return jsonResponse({ check_runs: [{ status: "completed", conclusion: "success" }], total_count: 1 });
+      if (url.includes("/status")) return jsonResponse({ state: "success", total_count: 1 });
       if (url.includes("/files")) return jsonResponse([{ filename: "x" }]);
       if (url.endsWith("/pulls/1")) return jsonResponse({ head: { sha: "s1" } });
       if (url.endsWith("/merge")) return jsonResponse({ merged: true });

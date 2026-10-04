@@ -88,4 +88,8 @@ export interface SelfModificationRequest {
   resolved_by_person_id: string | null;
   coding_task_id: string | null;
   coding_tenant_id: string | null;
+  /** D-397 (JARVIS-042): PR-ens head-SHA da diffen ble klassifisert - merge kreves bundet til denne. `null` = legacy-rad (fail-closed). */
+  classified_head_sha: string | null;
+  /** D-397: SHA-en eieren faktisk godkjente (satt ved `resolveApproval('approved')`). */
+  approved_head_sha: string | null;
 }
