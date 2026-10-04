@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -46,6 +46,7 @@ async function writeFakeDocker(): Promise<{ dockerBin: string; statePath: string
     "  process.exit(0);",
     "}",
     "if (cmd === \"logs\") {",
+    "  fs.writeFileSync(STATE + '.logs-args', JSON.stringify(args));", // D-398 (JARVIS-029): lar testen se NØYAKTIG hva transporten sendte til CLI-en
     "  process.stdout.write('2026-01-01T00:00:00.000000000Z line one TOKEN=leakedvalue123\\n2026-01-01T00:00:01.000000000Z line two ok\\n');",
     "  process.exit(0);",
     "}",
@@ -130,14 +131,17 @@ describe("D-105: DockerTransport (EKTE subprosess-kall, fake docker-kjørbar fil
   });
 
   it("F: get_logs respekterer en HARD tail-grense (200) selv om et større tall bes om - ALDRI ubegrenset rå loggdumping", async () => {
-    const { dockerBin } = await writeFakeDocker();
+    const { dockerBin, statePath } = await writeFakeDocker();
     const transport = new DockerTransport();
     // Fake-scriptet returnerer alltid 2 linjer uansett --tail-argv (enkel fake) - denne testen
     // beviser at TRANSPORTEN faktisk sender en BEGRENSET --tail-verdi til CLI-en, ikke at
-    // fake-daemonen begrenser noe selv.
+    // fake-daemonen begrenser noe selv (fake-scriptet logger argv til `<state>.logs-args`).
     await transport.invoke("get_logs", { name: "jarvis-sentinel-test", tail: 999_999 }, dockerBin);
-    // Ingen kastet feil, ingen uendelig ventetid - selve grensesettingen er strukturell (docker-transport.ts: Math.min(...,200)).
-    expect(true).toBe(true);
+    const sent = JSON.parse(await readFile(`${statePath}.logs-args`, "utf8")) as string[];
+    expect(sent[sent.indexOf("--tail") + 1]).toBe("200"); // klemmet av transporten (Math.min(...,200)), ikke av fake-daemonen
+    await transport.invoke("get_logs", { name: "jarvis-sentinel-test", tail: -5 }, dockerBin);
+    const sentLow = JSON.parse(await readFile(`${statePath}.logs-args`, "utf8")) as string[];
+    expect(sentLow[sentLow.indexOf("--tail") + 1]).toBe("1"); // nedre grense også
   });
 
   it("G: redeploy_container mot en FEILENDE docker-daemon (FAKE_DOCKER_FAIL_RUN) gir en EKSPLISITT kastet feil - ALDRI en stille fabrikkert suksess", async () => {

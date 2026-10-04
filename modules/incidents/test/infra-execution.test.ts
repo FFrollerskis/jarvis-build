@@ -569,3 +569,45 @@ describe("D-105 host-fix (D-41-korreksjon): eier-konfigurert produksjons-mål-au
     expect(aReadByB).toBeNull();
   });
 });
+
+describe("D-398 (JARVIS-094): journal-idempotens og nøkkelkollisjon", () => {
+  it("retry med SAMME nøkkel/mål/handling returnerer den eksisterende journalraden - ingen UNIQUE-krasj, ingen ny rad", async () => {
+    const transport = new FakeDockerTransport();
+    const gateway = buildGateway(transport);
+    const input = { tenant_id: TENANT_A, target: "jarvis-sentinel-idem", action: "redeploy_container" as const, target_image: "alpine:3.20", idempotency_key: "infra-key-idem-1" };
+    const first = await executeInfraMutation({ pool: appPool, gateway }, identityA, input);
+    const again = await executeInfraMutation({ pool: appPool, gateway }, identityA, input);
+    expect(again.execution_id).toBe(first.execution_id);
+    const { rows } = await adminPool.query("SELECT count(*)::int AS n FROM infra_executions WHERE tenant_id = $1 AND idempotency_key = $2", [TENANT_A, input.idempotency_key]);
+    expect((rows[0] as { n: number }).n).toBe(1);
+  });
+
+  it("samme nøkkel for et ANNET mål/en annen handling => eksplisitt infra_idempotency_key_conflict (aldri stille gjenbruk)", async () => {
+    const transport = new FakeDockerTransport();
+    const gateway = buildGateway(transport);
+    await executeInfraMutation({ pool: appPool, gateway }, identityA, {
+      tenant_id: TENANT_A, target: "jarvis-sentinel-conf-a", action: "redeploy_container", target_image: "alpine:3.20", idempotency_key: "infra-key-conflict"
+    });
+    await expect(executeInfraMutation({ pool: appPool, gateway }, identityA, {
+      tenant_id: TENANT_A, target: "jarvis-sentinel-conf-b", action: "stop_container", idempotency_key: "infra-key-conflict"
+    })).rejects.toThrow("infra_idempotency_key_conflict");
+  });
+
+  it("nøkkelen allerede brukt av en ANNEN handling i tool_executions => UNKNOWN (ikke SUCCESS), med key_collision i kvitteringen", async () => {
+    const transport = new FakeDockerTransport();
+    const gateway = buildGateway(transport);
+    await executeInfraMutation({ pool: appPool, gateway }, identityA, {
+      tenant_id: TENANT_A, target: "jarvis-sentinel-kc", action: "redeploy_container", target_image: "alpine:3.20", idempotency_key: "infra-key-kc-0"
+    });
+    // Bruk en nøkkel direkte mot gatewayen (ingen journalrad) for en annen handling...
+    await gateway.execute({ identity: identityA, tool_id: "docker", action: "stop_container", parameters: { name: "jarvis-sentinel-kc" }, idempotency_key: "infra-key-kc-shared" });
+    // ...og gjenbruk SAMME nøkkel til en redeploy: gatewayen dedupliserer, men tool_executions-raden tilhører stop_container.
+    const execution = await executeInfraMutation({ pool: appPool, gateway }, identityA, {
+      tenant_id: TENANT_A, target: "jarvis-sentinel-kc", action: "redeploy_container", target_image: "alpine:3.21", idempotency_key: "infra-key-kc-shared"
+    });
+    expect(execution.verification_outcome).not.toBe("SUCCESS");
+    expect(execution.before_state).toBeNull();
+    expect(execution.after_state).toBeNull();
+    expect(JSON.stringify(execution.provider_receipt)).toContain("key_collision");
+  });
+});
