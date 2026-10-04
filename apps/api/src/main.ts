@@ -46,7 +46,9 @@ import {
 import { InProcessWorker, PgTaskQueue, TaskService, allowedReposFromEnv } from "@jarvis/tasks";
 import {
   LlmExtractionAdapter,
-  LocalHashEmbedding,
+  createEmbeddingProviderFromEnv,
+  runMemoryProfileSweepForAllTenants,
+  runMemoryReembedSweepForAllTenants,
   MemoryRetriever,
   MemoryWriter,
   SummaryService,
@@ -515,7 +517,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // `memory.search`-verktøyet i `additionalTools` under OG gjenbrukes av
   // `ConversationEngine` sin egen bakgrunns-kontekst (`conversationEngine`
   // under) - IKKE to separate `MemoryRetriever`-instanser mot samme pool.
-  const memoryEmbedding = new LocalHashEmbedding();
+  // D-386 (Minne v2): ÉN faktory for embedding-provideren - alltid LOKAL (`assertLocalEmbedding` i writer/retriever
+  // stopper en sky-provider ved oppstart). `ollama` (bge-m3 o.l.) gir ekte semantisk gjenfinning; `local-hash` er
+  // kun fallback uten semantikk og logges som advarsel så det aldri går ubemerket i drift.
+  const memoryEmbedding = createEmbeddingProviderFromEnv();
+  console.log(JSON.stringify({
+    msg: memoryEmbedding.model === "local-hash-v1" ? "memory_embedding_fallback_hash_no_semantics" : "memory_embedding_provider",
+    model: memoryEmbedding.model, dim: memoryEmbedding.dim, locality: memoryEmbedding.locality
+  }));
   const memoryRetriever = new MemoryRetriever(pool, memoryEmbedding);
   // D-283 (Tobias direkte i chat, "ja bygg minne-skrivingen", ETTER at D-282
   // sin live-samtale avdekket at minnet var en HELT PASSIV lesestruktur -
@@ -542,7 +551,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // begrunnelse): `SummaryService` FANTES fra før, men ble ALDRI konstruert
   // eller kalt fra noe produksjonssted (D-286 sitt eget funn) - kun
   // `memory-retention-sweep`-jobben under bruker den.
-  const memorySummaries = new SummaryService(pool);
+  // D-386: LLM-genererte dagssammendrag (purpose SUMMARIZE via samme gateway/ruter - sensitivt innhold går lokalt) med vektor,
+  // så sammendragslaget faktisk er LESBART i retrieveren. Template-fallback når modellen feiler.
+  const memorySummaries = new SummaryService(pool, { completer: gateway, embeddings: memoryEmbedding });
   // D-102: ÉN delt `TaskService`-instans - gjenbrukes UENDRET av `ConversationEngine`
   // (eksisterende `tasks.create`-goal-only-vei), den nye `/tasks/submit`-HTTP-ruten
   // (full `JobContract`, inkl. `agent_profile: "coding"`), OG (task #123, D-214)
@@ -958,6 +969,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     trace,
     memory: {
       contextFor: (identity, userText) => memoryRetriever.contextFor(identity, userText),
+      // D-384: minnets rom/sensitivitet må følge med til ruteren (helse/special ⇒ kun lokal modell) - uten dette ble det aldri klassifisert.
+      contextWithMeta: (identity, userText, options) => memoryRetriever.contextWithMeta(identity, userText, options),
       // D-283: eierens EGNE ord i denne samtalen (chat OG tale - BEGGE går
       // via SAMME `/chat`, se D-30-kommentaren ved `tools` under) skrives nå
       // faktisk til minnet, IKKE lenger en ren lesestruktur. `trust:
@@ -974,7 +987,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
           identity,
           // Del 3 (JARVIS-013): innlimt/lang tekst er ikke eierens egne ord -> untrusted (karantene), ikke aktivt betrodd minne.
           { kind: "conversation", ref: identity.session_id, trust: opts?.pasted ? "untrusted" : "trusted" },
-          text
+          text,
+          // D-386: foregående turer som DATA til uttrekket (pronomen/svar på spørsmål) + kanal på episoden.
+          { ...(opts?.recent_turns ? { recent_turns: opts.recent_turns } : {}), channel: identity.channel }
         )
     },
     council: aiCouncil,
@@ -1382,6 +1397,23 @@ porter: se docs/RUNTIME_GATES.md`;
       pool, memoryWriter, memorySummaries, envInt("JARVIS_MEMORY_RETENTION_DAYS", 60, { min: 1, max: 3650 })
     ).then(() => undefined)
   );
+  // D-386: nattlig re-embedding av items/episoder/sammendrag som mangler vektor for GJELDENDE modell (modellbytte i
+  // .env, eller vektorskriving som feilet fordi Ollama var nede). Samme reboot-durable DailyScheduler-mønster.
+  // I tillegg ett kort, begrenset kick etter oppstart så et modellbytte virker samme dag - aldri i oppstartsstien.
+  new DailyScheduler(
+    pool, "memory-reembed-sweep", envHour("JARVIS_MEMORY_REEMBED_SWEEP_HOUR", 3)
+  ).start(() => runMemoryReembedSweepForAllTenants(pool, memoryEmbedding).then(() => undefined));
+  // D-386: nattlig rekompilering av den alltid-tilstede eierprofilen per space (deterministisk, ingen LLM).
+  new DailyScheduler(
+    pool, "memory-profile-sweep", envHour("JARVIS_MEMORY_PROFILE_SWEEP_HOUR", 4)
+  ).start(() => runMemoryProfileSweepForAllTenants(pool).then(() => undefined));
+  if (memoryEmbedding.model !== "local-hash-v1") {
+    setTimeout(() => {
+      runMemoryReembedSweepForAllTenants(pool, memoryEmbedding, { maxRows: 500 }).catch((err: unknown) => {
+        console.error(JSON.stringify({ msg: "memory_reembed_boot_kick_failed", error: (err as Error).message.slice(0, 200) }));
+      });
+    }, 30_000).unref();
+  }
   // D-242 (Tobias direkte chat-instruks: "du skal bygge det for absolutt
   // alle som tester en gang om dagen så vi vet om credentials fungerer
   // eller ikke hele tiden"): daglig `ConnectorHealthSweep` - SAMME

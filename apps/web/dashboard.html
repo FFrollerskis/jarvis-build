@@ -4,102 +4,96 @@
 <meta charset="utf-8">
 <!--JARVIS_OWNER_META-->
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Jarvis · Executive</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='48' fill='%230d1117'/%3E%3Ctext x='50' y='68' font-size='58' font-family='system-ui,sans-serif' font-weight='700' fill='%237ee2a8' text-anchor='middle'%3EJ%3C/text%3E%3C/svg%3E">
+<title>Jarvis · Oversikt</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='48' fill='%2305070c'/%3E%3Ccircle cx='50' cy='50' r='40' fill='none' stroke='%2322d3ee' stroke-width='3' opacity='0.55'/%3E%3Ccircle cx='50' cy='50' r='27' fill='none' stroke='%2367e8f9' stroke-width='2.5' opacity='0.85'/%3E%3Ccircle cx='50' cy='50' r='9' fill='%2367e8f9'/%3E%3C/svg%3E">
 <style>
   /*
-   * D-239 (visuell modernisering, Tobias direkte i chat: "forbedre dashbordet
-   * til og se moderne og jarvis ut"). RENT kosmetisk - hver eneste selector
-   * (ID/klasse) under er UENDRET fra før, kun egenskapsverdier (farger/
-   * skygger/typografi/avstand) er nye, pluss et par rent dekorative ::before-
-   * pseudoelementer (status-prikk, ikon-glyffer) som ALDRI kan påvirke JS/
-   * tester - ingen wiring-test i repoet søker etter spesifikke fargeverdier
-   * eller header-markup (verifisert eksplisitt før denne endringen). Ingen
-   * ekstern font-/CDN-avhengighet (regel 9, "lokal først") - kun system-
-   * fontstacken, nå kuratert bevisst i stedet for en enkel default.
+   * D-239/D-352 (tidligere visuelle løft) + D-387 (Tobias direkte i chat: "oppgradere hele ui og layout alt jeg kan se
+   * til det beste og mest optimale ... teknologisk og ordentlig look"). Hver ID/klasse JS-en og wiring-testene bruker er
+   * UENDRET; nytt er LAYOUT og OVERSIKT: en statusstripe øverst (saker som venter, bekreftelser, minneforslag,
+   * integrasjoner, nødbrytere) regnet ut av de allerede hentede datasettene, en klistret seksjonsnavigasjon med
+   * tellere, to-kolonne-rutenett for skjemaene på brede skjermer, sammenleggbare seksjoner (husket i localStorage),
+   * auto-oppdatering hvert minutt mens fanen er synlig, og et sammendrag til kommandosentral-skallet via postMessage.
+   * Alle mutasjoner går fortsatt via sine EGNE grant-ruter (D-199/D-213/D-230/D-367/Del 3) - ingen ny backend.
    */
   :root {
     color-scheme: dark;
-    --bg: #05070c;
-    --bg-glow: radial-gradient(ellipse 900px 500px at 50% -10%, rgba(34,211,238,0.10), transparent 60%);
-    --panel: #0c121e;
-    --panel-2: #101a2b;
-    --border: #1c2942;
-    --border-soft: #16203380;
-    --text: #e9eefb;
-    --text-dim: #7e8bab;
-    --accent: #22d3ee;
-    --accent-strong: #67e8f9;
-    --accent-glow: rgba(34,211,238,0.35);
-    --success-bg: #0c2a20;
-    --success-fg: #6ee7b7;
-    --warn-bg: #3a2a06;
-    --warn-fg: #fbbf24;
-    --danger-bg: #3d1220;
-    --danger-fg: #fb7185;
-    --info-bg: #101f38;
-    --info-fg: #93c5fd;
-    --radius: 12px;
-    --shadow-panel: 0 1px 2px rgba(0,0,0,0.4), 0 8px 24px -12px rgba(0,0,0,0.6);
+    --bg: #05070c; --bg-glow: radial-gradient(ellipse 900px 500px at 50% -10%, rgba(34,211,238,0.10), transparent 60%);
+    --panel: #0c121e; --panel-2: #101a2b; --panel-3: #15213a; --border: #1c2942; --border-soft: rgba(28,41,66,0.55); --border-hi: #2a3d63;
+    --text: #e9eefb; --text-dim: #7e8bab; --text-mute: #55617f;
+    --accent: #22d3ee; --accent-strong: #67e8f9; --accent-glow: rgba(34,211,238,0.35); --accent-soft: rgba(34,211,238,0.10);
+    --success-bg: #0c2a20; --success-fg: #6ee7b7; --warn-bg: #3a2a06; --warn-fg: #fbbf24; --danger-bg: #3d1220; --danger-fg: #fb7185; --info-bg: #101f38; --info-fg: #93c5fd;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --radius: 12px; --shadow-panel: 0 1px 2px rgba(0,0,0,0.4), 0 8px 24px -12px rgba(0,0,0,0.6);
   }
   * { box-sizing: border-box; }
   body {
-    font-family: -apple-system, "Segoe UI", "Inter", Roboto, system-ui, sans-serif;
-    background: var(--bg-glow), var(--bg);
-    background-attachment: fixed;
-    color: var(--text); margin:0; display:flex; flex-direction:column; min-height:100vh;
-    -webkit-font-smoothing: antialiased;
+    font-family: -apple-system, "Segoe UI", "Inter", Roboto, system-ui, sans-serif; background: var(--bg-glow), var(--bg); background-attachment: fixed;
+    color: var(--text); margin:0; display:flex; flex-direction:column; min-height:100vh; -webkit-font-smoothing: antialiased;
   }
   header {
-    position: sticky; top: 0; z-index: 5;
-    padding:14px 20px; background: rgba(12,18,30,0.82); backdrop-filter: blur(10px);
-    border-bottom: 1px solid var(--border-soft);
-    font-weight:600; display:flex; align-items:center; justify-content:space-between; gap:12px;
+    position: sticky; top: 0; z-index: 6; padding:10px 20px; background: rgba(12,18,30,0.86); backdrop-filter: blur(10px); border-bottom: 1px solid var(--border-soft);
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
   }
-  header > span:first-child { display:flex; align-items:baseline; gap:2px; }
-  header > span:first-child::before {
-    content:""; display:inline-block; width:8px; height:8px; border-radius:50%;
-    background: var(--accent); margin-right:10px; align-self:center;
-    box-shadow: 0 0 0 0 var(--accent-glow);
-    animation: pulse-dot 2.2s ease-in-out infinite;
-  }
-  @keyframes pulse-dot {
-    0%   { box-shadow: 0 0 0 0 var(--accent-glow); }
-    70%  { box-shadow: 0 0 0 7px rgba(34,211,238,0); }
-    100% { box-shadow: 0 0 0 0 rgba(34,211,238,0); }
-  }
-  header > span:first-child > span,
-  header > span:first-child { font-size:16px; letter-spacing:0.02em; }
-  header small { color: var(--text-dim); font-weight:400; margin-left:10px; font-size:12px; }
+  header .who { display:flex; align-items:center; gap:10px; }
+  header .who::before { content:""; display:inline-block; width:8px; height:8px; border-radius:50%; background: var(--accent); box-shadow: 0 0 0 0 var(--accent-glow); animation: pulse-dot 2.2s ease-in-out infinite; }
+  header .who b { font-size:15px; letter-spacing:0.02em; }
+  header .who small { color: var(--text-dim); font-weight:400; font-size:11.5px; margin-left:4px; }
+  @keyframes pulse-dot { 0% { box-shadow: 0 0 0 0 var(--accent-glow); } 70% { box-shadow: 0 0 0 7px rgba(34,211,238,0); } 100% { box-shadow: 0 0 0 0 rgba(34,211,238,0); } }
+  header .right { display:flex; align-items:center; gap:10px; }
+  #updated { font-family: var(--mono); font-size:11px; color: var(--text-mute); }
   #refresh {
-    background: linear-gradient(180deg, var(--accent-strong), var(--accent));
-    color:#022; border:0; border-radius:8px; padding:7px 16px; font-weight:600; font-size:13px;
-    cursor:pointer; box-shadow: 0 0 0 1px rgba(34,211,238,0.3), 0 4px 14px -4px var(--accent-glow);
-    transition: transform 0.12s ease, box-shadow 0.12s ease;
+    background: linear-gradient(180deg, var(--accent-strong), var(--accent)); color:#022; border:0; border-radius:9px; padding:8px 16px; font-weight:700; font-size:13px; font-family:inherit;
+    cursor:pointer; box-shadow: 0 0 0 1px rgba(34,211,238,0.3), 0 4px 14px -4px var(--accent-glow); transition: transform 0.12s ease, box-shadow 0.12s ease; display:inline-flex; align-items:center; gap:7px;
   }
-  #refresh:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 0 0 1px rgba(34,211,238,0.45), 0 6px 18px -4px var(--accent-glow); }
+  #refresh svg { width:14px; height:14px; }
+  #refresh:hover:not(:disabled) { transform: translateY(-1px); }
   #refresh:disabled { background: var(--panel-2); color: var(--text-dim); box-shadow:none; cursor:default; }
-  main { flex:1; padding:20px 16px 40px; display:flex; flex-direction:column; gap:28px; max-width:920px; width:100%;
-         margin:0 auto; box-sizing:border-box; }
-  section h2 {
-    font-size:12px; color: var(--accent); text-transform:uppercase; letter-spacing:0.14em; margin:0 0 12px;
-    font-weight:700; display:flex; align-items:center; gap:8px;
+  #refresh:disabled svg { animation: spin 0.9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  nav#secnav { position: sticky; top:53px; z-index:5; display:flex; gap:4px; padding:6px 16px; background: rgba(8,12,21,0.86); backdrop-filter: blur(10px); border-bottom:1px solid var(--border-soft); overflow-x:auto; }
+  nav#secnav a { color: var(--text-dim); text-decoration:none; font-size:12.5px; font-weight:600; padding:7px 12px; border-radius:8px; white-space:nowrap; display:inline-flex; align-items:center; gap:7px; transition: background 0.15s ease, color 0.15s ease; }
+  nav#secnav a:hover { background: var(--panel-2); color: var(--text); }
+  nav#secnav a.active { background: var(--accent-soft); color: var(--accent-strong); }
+  nav#secnav a .n { font-family: var(--mono); font-size:10.5px; background: var(--panel-3); color: var(--text-dim); border-radius:999px; padding:1px 7px; min-width:20px; text-align:center; }
+  nav#secnav a .n.hot { background: var(--danger-bg); color: var(--danger-fg); }
+
+  main { flex:1; padding:18px 16px 60px; display:flex; flex-direction:column; gap:22px; max-width:1180px; width:100%; margin:0 auto; }
+
+  /* Statusstripe */
+  #summary { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap:10px; }
+  .tile { background: linear-gradient(180deg, var(--panel), var(--panel-2)); border:1px solid var(--border); border-radius: var(--radius); padding:12px 14px; box-shadow: var(--shadow-panel); position:relative; overflow:hidden; text-decoration:none; color:inherit; display:block; transition: border-color 0.15s ease, transform 0.15s ease; }
+  .tile:hover { border-color: var(--border-hi); transform: translateY(-1px); }
+  .tile::after { content:""; position:absolute; left:0; right:0; top:0; height:2px; background: var(--accent); opacity:0.5; }
+  .tile.hot::after { background: var(--danger-fg); opacity:1; } .tile.warn::after { background: var(--warn-fg); opacity:1; } .tile.ok::after { background: var(--success-fg); opacity:0.9; }
+  .tile .k { font-size:10.5px; color: var(--text-dim); text-transform:uppercase; letter-spacing:0.12em; font-weight:700; }
+  .tile .v { font-family: var(--mono); font-size:24px; margin-top:4px; line-height:1.1; }
+  .tile.hot .v { color: var(--danger-fg); } .tile.warn .v { color: var(--warn-fg); } .tile.ok .v { color: var(--success-fg); }
+  .tile .s { font-size:11px; color: var(--text-mute); margin-top:4px; font-family: var(--mono); }
+
+  section { scroll-margin-top: 104px; }
+  section > h2 {
+    font-size:12px; color: var(--accent); text-transform:uppercase; letter-spacing:0.14em; margin:0 0 12px; font-weight:700; display:flex; align-items:center; gap:10px; cursor:pointer; user-select:none;
   }
-  section h2::after { content:""; flex:1; height:1px; background: linear-gradient(90deg, var(--border), transparent); }
-  section h3 { font-size:12px; color: var(--text-dim); margin:20px 0 8px; text-transform:uppercase; letter-spacing:0.08em; }
+  section > h2 .n { font-family: var(--mono); font-size:10.5px; background: var(--panel-3); color: var(--text-dim); border-radius:999px; padding:1px 7px; min-width:20px; text-align:center; letter-spacing:0; }
+  section > h2 .n.hot { background: var(--danger-bg); color: var(--danger-fg); }
+  section > h2::after { content:""; flex:1; height:1px; background: linear-gradient(90deg, var(--border), transparent); }
+  section > h2 .chev { width:14px; height:14px; color: var(--text-mute); transition: transform 0.15s ease; }
+  section.collapsed > h2 .chev { transform: rotate(-90deg); }
+  section.collapsed > .body { display:none; }
+  section h3 { font-size:11.5px; color: var(--text-dim); margin:18px 0 8px; text-transform:uppercase; letter-spacing:0.1em; }
   section h3:first-of-type { margin-top:4px; }
+  .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+  .grid2 > .card { margin-bottom:0; }
   .card {
-    background: var(--panel); border:1px solid var(--border); border-radius: var(--radius);
-    padding:14px 16px; margin-bottom:8px; box-shadow: var(--shadow-panel);
-    transition: border-color 0.15s ease, transform 0.15s ease;
+    background: var(--panel); border:1px solid var(--border); border-radius: var(--radius); padding:14px 16px; margin-bottom:8px; box-shadow: var(--shadow-panel);
+    transition: border-color 0.15s ease;
   }
-  .card:hover { border-color:#28395c; }
+  .card:hover { border-color: var(--border-hi); }
   .card .title { font-weight:600; letter-spacing:0.01em; }
-  .card .meta { color: var(--text-dim); font-size:12px; margin-top:5px; }
-  .pill {
-    display:inline-block; padding:3px 10px; border-radius:999px; font-size:11px; margin-right:6px;
-    font-weight:600; letter-spacing:0.02em; text-transform:uppercase;
-  }
+  .card .meta { color: var(--text-dim); font-size:12.5px; margin-top:5px; line-height:1.45; overflow-wrap:anywhere; }
+  .pill { display:inline-block; padding:3px 9px; border-radius:999px; font-size:10.5px; margin-right:6px; margin-bottom:4px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase; font-family: var(--mono); background: var(--panel-3); color: var(--text-dim); }
   .pill.priority-high { background: var(--danger-bg); color: var(--danger-fg); }
   .pill.priority-normal { background: var(--info-bg); color: var(--info-fg); }
   .pill.priority-low { background: var(--panel-2); color: var(--text-dim); }
@@ -111,9 +105,6 @@
   .pill.conn-notbuilt { background: var(--panel-2); color: var(--text-dim); }
   .pill.test-ok { background: var(--success-bg); color: var(--success-fg); }
   .pill.test-fail { background: var(--danger-bg); color: var(--danger-fg); }
-  /* D-230 (K2): risiko-alvorlighet/sannsynlighet gjenbruker EKSAKT de samme
-     fargeverdiene klasse D-advarsler/priority-high allerede bruker over -
-     ingen ny fargeoppfinnelse. */
   .pill.sev-critical, .pill.sev-high { background: var(--danger-bg); color: var(--danger-fg); }
   .pill.sev-medium { background: var(--warn-bg); color: var(--warn-fg); }
   .pill.sev-low { background: var(--panel-2); color: var(--text-dim); }
@@ -121,336 +112,337 @@
   .pill.prob-medium { background: var(--info-bg); color: var(--info-fg); }
   .pill.prob-low { background: var(--panel-2); color: var(--text-dim); }
   .empty { color: var(--text-dim); font-style:italic; font-size:13px; }
-  .connectors-summary { color: var(--accent-strong); font-size:12px; margin-bottom:10px; font-weight:600;
-                         letter-spacing:0.03em; text-transform:uppercase; }
+  .connectors-summary { color: var(--accent-strong); font-size:11.5px; margin-bottom:10px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; font-family: var(--mono); }
   .connector-filter {
-    width:100%; background: var(--panel); color: var(--text); border:1px solid var(--border);
-    border-radius:10px; padding:10px 12px; font-size:13px; margin-bottom:14px;
+    width:100%; background: var(--panel); color: var(--text); border:1px solid var(--border); border-radius:10px; padding:10px 12px; font-size:13px; margin-bottom:14px; font-family:inherit;
     transition: border-color 0.15s ease, box-shadow 0.15s ease;
   }
-  .connector-filter::placeholder { color: var(--text-dim); }
+  .connector-filter::placeholder { color: var(--text-mute); }
   .connector-filter:focus { outline:none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(34,211,238,0.15); }
-  .connector-group { border:1px solid var(--border); border-radius: var(--radius); margin-bottom:10px; overflow:hidden;
-                      background: var(--panel); }
+  .connector-group { border:1px solid var(--border); border-radius: var(--radius); margin-bottom:10px; overflow:hidden; background: var(--panel); }
   .connector-group summary {
-    cursor:pointer; padding:12px 16px; background: var(--panel-2); font-weight:600; font-size:12px;
-    color: var(--text); list-style:none; display:flex; align-items:center; gap:10px;
-    text-transform:uppercase; letter-spacing:0.06em; user-select:none;
+    cursor:pointer; padding:11px 16px; background: var(--panel-2); font-weight:700; font-size:11.5px; color: var(--text); list-style:none; display:flex; align-items:center; gap:10px;
+    text-transform:uppercase; letter-spacing:0.08em; user-select:none; font-family: var(--mono);
   }
   .connector-group summary::-webkit-details-marker { display:none; }
   .connector-group summary::before { content:"▸"; color: var(--accent); transition:transform 0.15s ease; font-size:11px; }
   .connector-group[open] summary::before { transform:rotate(90deg); }
-  .connector-group-body { padding:12px; display:flex; flex-direction:column; gap:8px; }
+  .connector-group-body { padding:12px; display:grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap:10px; }
   .connector-group .card { margin-bottom:0; }
-  /*
-   * D-352 (Tobias direkte i chat: "LEGG OPP FILTRE PÅ TILKOBLINGER OG LEGG
-   * OPP LOGOER SÅ DU SER DISCORD LOGOEN PÅ DISCORD TILKOBLINGEN GJØR DEM
-   * LITT STØRRE OG MER FANSY OG SETT OPP HEART BEAT PÅ ALLE SÅ VI VET NÅR
-   * NOEN AV DE FEILER"). RENT kosmetisk, samme D-239-disiplin (ingen
-   * selector fjernet/omdøpt, kun nye tillegg) - status-filterchips over
-   * søkefeltet, en merke-ikon-flis per connector-kort (bygget lokalt i
-   * connectorIconHtml(), ALDRI en ekstern CDN - regel 9), og en pulserende
-   * "heartbeat"-prikk som gjenbruker DEN EKSISTERENDE `health`-dataen
-   * (BO-03/D-242) - ingen ny backend-mekanisme.
-   */
   .connector-toolbar { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }
   .connector-status-chip {
-    background: var(--panel); color: var(--text-dim); border:1px solid var(--border); border-radius:999px;
-    padding:6px 14px; font-size:12px; font-weight:600; cursor:pointer; letter-spacing:0.02em;
-    transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
-    user-select:none;
+    background: var(--panel); color: var(--text-dim); border:1px solid var(--border); border-radius:999px; padding:6px 14px; font-size:12px; font-weight:600; cursor:pointer; letter-spacing:0.02em; font-family:inherit;
+    transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease; user-select:none;
   }
   .connector-status-chip:hover { border-color: var(--accent); color: var(--text); }
-  .connector-status-chip.active {
-    background: linear-gradient(180deg, var(--accent-strong), var(--accent)); color:#022; border-color:transparent;
-    box-shadow: 0 4px 14px -4px var(--accent-glow);
-  }
-  .connector-group-body .card { padding:18px 20px; }
-  .connector-card-head { display:flex; align-items:center; gap:14px; margin-bottom:6px; }
+  .connector-status-chip.active { background: linear-gradient(180deg, var(--accent-strong), var(--accent)); color:#022; border-color:transparent; box-shadow: 0 4px 14px -4px var(--accent-glow); }
+  .connector-group-body .card { padding:16px 18px; }
+  .connector-card-head { display:flex; align-items:center; gap:12px; margin-bottom:6px; }
   .connector-icon {
-    flex:0 0 auto; width:44px; height:44px; border-radius:12px; display:flex; align-items:center; justify-content:center;
-    font-weight:700; font-size:15px; color:#fff; letter-spacing:0.02em;
+    flex:0 0 auto; width:42px; height:42px; border-radius:12px; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:14px; color:#fff; letter-spacing:0.02em;
     box-shadow: 0 2px 10px -2px rgba(0,0,0,0.55), inset 0 0 0 1px rgba(255,255,255,0.10);
   }
-  .connector-icon svg { width:26px; height:26px; display:block; }
+  .connector-icon svg { width:24px; height:24px; display:block; }
   .connector-card-titles { flex:1; min-width:0; }
-  .connector-card-titles .title { font-size:15px; margin-top:3px; }
-  .heartbeat { flex:0 0 auto; display:flex; align-items:center; gap:6px; font-size:11px; color: var(--text-dim); max-width:180px; }
+  .connector-card-titles .title { font-size:14.5px; margin-top:2px; }
+  .heartbeat { flex:0 0 auto; display:flex; align-items:center; gap:6px; font-size:11px; color: var(--text-dim); max-width:160px; font-family: var(--mono); }
   .heartbeat span:last-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .heartbeat-dot { width:9px; height:9px; border-radius:50%; background: var(--text-dim); flex:0 0 auto; }
   .heartbeat-dot.hb-healthy { background: var(--success-fg); --hb-glow: rgba(110,231,183,0.55); animation: pulse-dot-hb 2s ease-in-out infinite; }
   .heartbeat-dot.hb-warn { background: var(--warn-fg); --hb-glow: rgba(251,191,36,0.55); animation: pulse-dot-hb 1.4s ease-in-out infinite; }
   .heartbeat-dot.hb-fail { background: var(--danger-fg); --hb-glow: rgba(251,113,133,0.6); animation: pulse-dot-hb 1s ease-in-out infinite; }
   .heartbeat-dot.hb-unknown { background: var(--text-dim); opacity:0.45; }
-  @keyframes pulse-dot-hb {
-    0%   { box-shadow: 0 0 0 0 var(--hb-glow, transparent); }
-    70%  { box-shadow: 0 0 0 6px transparent; }
-    100% { box-shadow: 0 0 0 0 transparent; }
-  }
+  @keyframes pulse-dot-hb { 0% { box-shadow: 0 0 0 0 var(--hb-glow, transparent); } 70% { box-shadow: 0 0 0 6px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
   .cred-row { display:flex; gap:6px; margin-top:8px; align-items:center; }
-  .cred-row label { font-size:11px; color: var(--text-dim); min-width:0; flex:0 0 auto; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
-  .cred-row input { flex:1; min-width:0; background: var(--bg); color: var(--text); border:1px solid var(--border);
-                     border-radius:8px; padding:7px 10px; font-size:13px; transition: border-color 0.15s ease; }
+  .cred-row label { font-size:11px; color: var(--text-dim); min-width:0; flex:0 0 auto; font-family: var(--mono); max-width:45%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .cred-row input { flex:1; min-width:0; background: var(--bg); color: var(--text); border:1px solid var(--border); border-radius:8px; padding:7px 10px; font-size:13px; transition: border-color 0.15s ease; font-family:inherit; }
   .cred-row input:focus { outline:none; border-color: var(--accent); }
   .cred-row button, .test-btn {
-    background: var(--panel-2); color: var(--text); border:1px solid var(--border); border-radius:8px;
-    padding:7px 12px; font-size:12px; font-weight:600; cursor:pointer; transition: border-color 0.15s ease, color 0.15s ease;
+    background: var(--panel-2); color: var(--text); border:1px solid var(--border); border-radius:8px; padding:7px 12px; font-size:12px; font-weight:600; cursor:pointer; font-family:inherit; transition: border-color 0.15s ease, color 0.15s ease;
   }
   .cred-row button:hover:not(:disabled), .test-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-strong); }
   .cred-row button:disabled, .test-btn:disabled { opacity:0.5; cursor:default; }
   .test-btn { margin-top:8px; }
   .test-result { font-size:12px; margin-top:8px; }
-  #status { padding:14px 20px; background: rgba(12,18,30,0.9); border-top:1px solid var(--border-soft);
-            color: var(--text-dim); font-size:12px; letter-spacing:0.02em; }
+  #status { position: sticky; bottom:0; z-index:4; padding:8px 20px; background: rgba(12,18,30,0.92); border-top:1px solid var(--border-soft); color: var(--text-dim); font-size:11.5px; letter-spacing:0.02em; font-family: var(--mono); backdrop-filter: blur(8px); }
   #enroll { display:none; padding:14px 20px; background: var(--panel-2); border-top:1px solid var(--border-soft); }
   #enroll p { margin:0 0 8px; color: var(--text-dim); font-size:13px; }
-  #enroll code { color: var(--accent-strong); background: var(--bg); padding:2px 6px; border-radius:5px;
-                 font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  #enroll code { color: var(--accent-strong); background: var(--bg); padding:2px 6px; border-radius:5px; font-family: var(--mono); }
   #enroll form { display:flex; gap:8px; padding:0; }
-  #enroll input { flex:1; background: var(--bg); color: var(--text); border:1px solid var(--border); border-radius:8px;
-                  padding:10px 12px; font-size:15px; }
+  #enroll input { flex:1; background: var(--bg); color: var(--text); border:1px solid var(--border); border-radius:8px; padding:10px 12px; font-size:15px; }
   #enroll input:focus { outline:none; border-color: var(--accent); }
-  #enroll button {
-    background: linear-gradient(180deg, var(--accent-strong), var(--accent)); color:#022; border:0;
-    border-radius:8px; padding:0 20px; font-weight:600; cursor:pointer;
-  }
+  #enroll button { background: linear-gradient(180deg, var(--accent-strong), var(--accent)); color:#022; border:0; border-radius:8px; padding:0 20px; font-weight:600; cursor:pointer; font-family:inherit; }
   .action-row { display:flex; gap:6px; margin-top:8px; align-items:center; flex-wrap:wrap; }
   .action-row input, .action-row select, .cred-row select {
-    flex:1; min-width:120px; background: var(--bg); color: var(--text);
-    border:1px solid var(--border); border-radius:8px; padding:7px 10px; font-size:13px;
+    flex:1; min-width:120px; background: var(--bg); color: var(--text); border:1px solid var(--border); border-radius:8px; padding:7px 10px; font-size:13px; font-family:inherit;
   }
   .action-row input:focus, .action-row select:focus, .cred-row select:focus { outline:none; border-color: var(--accent); }
   .btn {
-    background: var(--panel-2); color: var(--text); border:1px solid var(--border); border-radius:8px; padding:7px 12px;
-    font-size:12px; font-weight:600; cursor:pointer; transition: border-color 0.15s ease, color 0.15s ease;
+    background: var(--panel-2); color: var(--text); border:1px solid var(--border); border-radius:8px; padding:7px 12px; font-size:12px; font-weight:600; cursor:pointer; font-family:inherit; transition: border-color 0.15s ease, color 0.15s ease;
   }
   .btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-strong); }
   .btn:disabled { opacity:0.5; cursor:default; }
   .btn.danger { background: var(--danger-bg); color: var(--danger-fg); border-color:#5c2436; }
   .btn.danger:hover:not(:disabled) { border-color: var(--danger-fg); color:#fff; }
   .btn.small { padding:4px 9px; font-size:11px; margin-left:6px; }
-  .action-result { font-size:12px; margin-top:8px; color: var(--text-dim); }
-  /* Task #124: bekreftelsesmodal - class-D-handlinger krever at eieren
-     skriver EKSAKT handlingsnavnet FØR "Bekreft" aktiveres (ekstra friksjon
-     for de mest alvorlige bryterne), class B/C viser samme modal uten det
-     kravet. Se openConfirmModal()/ACTION_META. */
-  #confirm-overlay { display:none; position:fixed; inset:0; background:rgba(2,4,8,0.72); backdrop-filter: blur(2px);
-                      z-index:10; align-items:center; justify-content:center; padding:16px; }
+  .action-result { font-size:12px; margin-top:8px; color: var(--text-dim); font-family: var(--mono); }
+  .action-result:empty { display:none; }
+  /* Task #124: bekreftelsesmodal - class-D-handlinger krever at eieren skriver EKSAKT handlingsnavnet FØR "Bekreft" aktiveres. */
+  #confirm-overlay { display:none; position:fixed; inset:0; background:rgba(2,4,8,0.72); backdrop-filter: blur(3px); z-index:10; align-items:center; justify-content:center; padding:16px; }
   #confirm-overlay.open { display:flex; }
-  #confirm-box { background: var(--panel); border:1px solid var(--border); border-radius: var(--radius); padding:20px;
-                 max-width:440px; width:100%; box-shadow: 0 20px 60px -20px rgba(0,0,0,0.8); }
+  #confirm-box { background: var(--panel); border:1px solid var(--border-hi); border-radius: var(--radius); padding:20px; max-width:460px; width:100%; box-shadow: 0 20px 60px -20px rgba(0,0,0,0.9), 0 0 0 1px rgba(34,211,238,0.08); }
   #confirm-box .confirm-title { font-weight:700; font-size:15px; margin-bottom:10px; }
-  #confirm-box .confirm-class { display:inline-block; padding:3px 10px; border-radius:999px; font-size:11px;
-                                 margin-bottom:12px; font-weight:600; text-transform:uppercase; letter-spacing:0.04em; }
+  #confirm-box .confirm-class { display:inline-block; padding:3px 10px; border-radius:999px; font-size:11px; margin-bottom:12px; font-weight:700; text-transform:uppercase; letter-spacing:0.06em; font-family: var(--mono); }
   #confirm-box .confirm-class.class-d { background: var(--danger-bg); color: var(--danger-fg); }
   #confirm-box .confirm-class.class-c { background: var(--warn-bg); color: var(--warn-fg); }
   #confirm-box .confirm-class.class-b { background: var(--info-bg); color: var(--info-fg); }
   #confirm-box .confirm-desc { font-size:13px; color: var(--text); margin-bottom:6px; }
   #confirm-box .confirm-rollback { font-size:12px; color: var(--text-dim); margin-bottom:14px; }
-  #confirm-box input { width:100%; background: var(--bg); color: var(--text);
-                        border:1px solid var(--border); border-radius:8px; padding:9px; font-size:13px; margin-bottom:14px; }
+  #confirm-box input { width:100%; background: var(--bg); color: var(--text); border:1px solid var(--border); border-radius:8px; padding:9px; font-size:13px; margin-bottom:14px; font-family: var(--mono); }
   #confirm-box input:focus { outline:none; border-color: var(--accent); }
   #confirm-box .confirm-buttons { display:flex; gap:8px; justify-content:flex-end; }
   ::-webkit-scrollbar { width:10px; height:10px; }
   ::-webkit-scrollbar-track { background: var(--bg); }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius:6px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+  @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } header .who small { display:none; } #updated { display:none; } nav#secnav { top:49px; } main { padding:14px 12px 60px; } }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 </head>
 <body>
 <header>
-  <span>Jarvis <small>executive-dashboard · attention/kontroll: lese + eier-mutasjon (UA-11, task #124) · integrasjoner: lese + eier-mutasjon (D-213) · styring (K2): lese + eier-mutasjon (D-230)</small></span>
-  <button id="refresh">Oppdater</button>
+  <span class="who"><b>Oversikt</b><small>attention · kontroll · bekreftelser · minne · integrasjoner · styring</small></span>
+  <span class="right">
+    <span id="updated"></span>
+    <button id="refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>Oppdater</button>
+  </span>
 </header>
+<nav id="secnav">
+  <a href="#sec-attention">Oppmerksomhet <span class="n" data-count="attention">–</span></a>
+  <a href="#sec-control">Kontroll</a>
+  <a href="#sec-confirmations">Bekreftelser <span class="n" data-count="confirmations">–</span></a>
+  <a href="#sec-memory">Minne <span class="n" data-count="proposals">–</span></a>
+  <a href="#sec-connectors">Integrasjoner <span class="n" data-count="connectors">–</span></a>
+  <a href="#sec-governance">Styring</a>
+</nav>
 <main>
-  <section>
-    <h2>Attention queue</h2>
-    <div id="attention-queue"><p class="empty">Laster …</p></div>
-  </section>
-  <section>
-    <h2>Control surface</h2>
-    <div id="control-surface"><p class="empty">Laster …</p></div>
-  </section>
-  <section>
-    <!-- Task #124 (UA-11 Executive dashboard-UI, MUTASJONS-DELEN, D-199 §7):
-         EGEN rute (/executive/mutate), EGET hardkodet allowlist server-siden
-         (EXECUTIVE_MUTATE_ACTIONS) - ALDRI via /executive/query. Hvert
-         mutasjonsskjema går via mutateExecutive(), som ALLTID viser
-         bekreftelsesdialogen (openConfirmModal()) FØR selve POST-en - se
-         der for klasse-D-preflight-kravet (typed confirmation). -->
-    <h2>Kontrollhandlinger</h2>
-    <div id="critical-controls"></div>
-    <div class="card">
-      <div class="title">Pause situasjonsdomene</div>
-      <div class="action-row">
-        <input id="pause-domain-name" placeholder="domene (f.eks. finance)" autocomplete="off">
-        <input id="pause-domain-reason" placeholder="begrunnelse (påkrevd)" autocomplete="off">
-        <button class="btn" id="pause-domain-btn">Pause</button>
-      </div>
-      <div class="action-result" id="pause-domain-result"></div>
-    </div>
-    <div class="card">
-      <div class="title">Frys connector</div>
-      <div class="action-row">
-        <input id="freeze-connector-id" placeholder="connector_id (f.eks. github)" autocomplete="off">
-        <input id="freeze-connector-reason" placeholder="begrunnelse (påkrevd)" autocomplete="off">
-        <button class="btn" id="freeze-connector-btn">Frys</button>
-      </div>
-      <div class="action-result" id="freeze-connector-result"></div>
-    </div>
-    <div class="card">
-      <div class="title">Tilbakekall credential</div>
-      <div class="action-row">
-        <input id="revoke-credential-ref" placeholder="credential_ref" autocomplete="off">
-        <input id="revoke-credential-reason" placeholder="begrunnelse (påkrevd)" autocomplete="off">
-        <button class="btn danger" id="revoke-credential-btn">Tilbakekall</button>
-      </div>
-      <div class="action-result" id="revoke-credential-result"></div>
-    </div>
-    <div class="card">
-      <div class="title">Tilbakekall enhet</div>
-      <div class="action-row">
-        <input id="revoke-device-id" placeholder="device_id" autocomplete="off">
-        <input id="revoke-device-reason" placeholder="begrunnelse (påkrevd)" autocomplete="off">
-        <button class="btn danger" id="revoke-device-btn">Tilbakekall enhet</button>
-      </div>
-      <div class="action-result" id="revoke-device-result"></div>
+  <div id="summary">
+    <a class="tile" href="#sec-attention" id="tile-attention"><div class="k">Venter på deg</div><div class="v" data-count="attention">–</div><div class="s">saker i attention queue</div></a>
+    <a class="tile" href="#sec-confirmations" id="tile-confirmations"><div class="k">Bekreftelser</div><div class="v" data-count="confirmations">–</div><div class="s">handlinger som venter</div></a>
+    <a class="tile" href="#sec-memory" id="tile-proposals"><div class="k">Minneforslag</div><div class="v" data-count="proposals">–</div><div class="s">i karantene</div></a>
+    <a class="tile" href="#sec-connectors" id="tile-connectors"><div class="k">Integrasjoner</div><div class="v" data-count="connectors">–</div><div class="s" id="tile-connectors-sub">konfigurert</div></a>
+    <a class="tile" href="#sec-control" id="tile-kill"><div class="k">Kill switch</div><div class="v" id="tile-kill-v">–</div><div class="s">global stopp</div></a>
+    <a class="tile" href="#sec-control" id="tile-finance"><div class="k">Finans-nødbryter</div><div class="v" id="tile-finance-v">–</div><div class="s">alle spend-handlinger</div></a>
+  </div>
+
+  <section id="sec-attention" data-section="attention">
+    <h2><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>Attention queue <span class="n" data-count="attention">–</span></h2>
+    <div class="body">
+      <div id="attention-queue"><p class="empty">Laster …</p></div>
     </div>
   </section>
-  <section>
+
+  <section id="sec-control" data-section="control">
+    <h2><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>Control surface og kontrollhandlinger</h2>
+    <div class="body">
+      <div id="control-surface"><p class="empty">Laster …</p></div>
+      <!-- Task #124 (UA-11 Executive dashboard-UI, MUTASJONS-DELEN, D-199 §7): EGEN rute (/executive/mutate), EGET hardkodet
+           allowlist server-siden (EXECUTIVE_MUTATE_ACTIONS) - ALDRI via /executive/query. Hvert mutasjonsskjema går via
+           mutateExecutive(), som ALLTID viser bekreftelsesdialogen (openConfirmModal()) FØR selve POST-en. -->
+      <h3>Kontrollhandlinger</h3>
+      <div id="critical-controls" class="grid2"></div>
+      <div class="grid2" style="margin-top:10px;">
+        <div class="card">
+          <div class="title">Pause situasjonsdomene</div>
+          <div class="action-row">
+            <input id="pause-domain-name" placeholder="domene (f.eks. finance)" autocomplete="off">
+            <input id="pause-domain-reason" placeholder="begrunnelse (påkrevd)" autocomplete="off">
+            <button class="btn" id="pause-domain-btn">Pause</button>
+          </div>
+          <div class="action-result" id="pause-domain-result"></div>
+        </div>
+        <div class="card">
+          <div class="title">Frys connector</div>
+          <div class="action-row">
+            <input id="freeze-connector-id" placeholder="connector_id (f.eks. github)" autocomplete="off">
+            <input id="freeze-connector-reason" placeholder="begrunnelse (påkrevd)" autocomplete="off">
+            <button class="btn" id="freeze-connector-btn">Frys</button>
+          </div>
+          <div class="action-result" id="freeze-connector-result"></div>
+        </div>
+        <div class="card">
+          <div class="title">Tilbakekall credential</div>
+          <div class="action-row">
+            <input id="revoke-credential-ref" placeholder="credential_ref" autocomplete="off">
+            <input id="revoke-credential-reason" placeholder="begrunnelse (påkrevd)" autocomplete="off">
+            <button class="btn danger" id="revoke-credential-btn">Tilbakekall</button>
+          </div>
+          <div class="action-result" id="revoke-credential-result"></div>
+        </div>
+        <div class="card">
+          <div class="title">Tilbakekall enhet</div>
+          <div class="action-row">
+            <input id="revoke-device-id" placeholder="device_id" autocomplete="off">
+            <input id="revoke-device-reason" placeholder="begrunnelse (påkrevd)" autocomplete="off">
+            <button class="btn danger" id="revoke-device-btn">Tilbakekall enhet</button>
+          </div>
+          <div class="action-result" id="revoke-device-result"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="sec-confirmations" data-section="confirmations">
     <!-- Del 3 (JARVIS-002/014): handlinger Jarvis vil utføre mens ubetrodd innhold (e-post, web, verktøyoutput, tale) er med i grunnlaget
          venter her. Bekreftelsen er bundet til nøyaktig verktøy+parametre+mottaker, enhet og utløp, og kan brukes én gang. Via egen grant-rute (/confirmations). -->
-    <h2>Bekreftelser</h2>
-    <div id="confirmations"><p class="empty">Laster …</p></div>
-    <div class="action-result" id="confirmations-result"></div>
-  </section>
-  <section>
-    <!-- D-367: minneforslag fra Jarvis (memory.propose) ligger i KARANTENE til du godkjenner dem her. Godkjenning går via
-         egen grant-rute (/memory/proposals) - modellen kan aldri godkjenne sine egne forslag. -->
-    <h2>Minneforslag</h2>
-    <div id="memory-proposals"><p class="empty">Laster …</p></div>
-    <div class="action-result" id="memory-proposals-result"></div>
-  </section>
-  <section>
-    <!-- Task #119 (D-211): status-lese-delen. Task #122 (D-213): "lim inn
-         nøkkel"/"test connector"-mutasjonen - EGEN rute
-         (/owner-controls/connector-credentials), ALDRI via /executive/query
-         (som D-199 sier skal forbli lese-kun for alltid). -->
-    <h2>Integrasjoner</h2>
-    <div id="connectors-summary" class="connectors-summary"></div>
-    <div class="connector-toolbar" id="connector-status-filters">
-      <button type="button" class="connector-status-chip active" data-status-filter="all">Alle</button>
-      <button type="button" class="connector-status-chip" data-status-filter="configured">Konfigurert</button>
-      <button type="button" class="connector-status-chip" data-status-filter="missing">Ikke konfigurert</button>
-      <button type="button" class="connector-status-chip" data-status-filter="failing">Feiler</button>
-      <button type="button" class="connector-status-chip" data-status-filter="backlog">Ikke bygget</button>
+    <h2><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>Bekreftelser <span class="n" data-count="confirmations">–</span></h2>
+    <div class="body">
+      <div id="confirmations"><p class="empty">Laster …</p></div>
+      <div class="action-result" id="confirmations-result"></div>
     </div>
-    <input type="search" id="connector-filter" class="connector-filter" placeholder="Søk connector (navn eller kategori) …" autocomplete="off">
-    <div id="connectors"><p class="empty">Laster …</p></div>
   </section>
-  <section>
-    <!-- D-230: K2-dashboardet for @jarvis/governance (migrasjon 059,
-         modules/governance/) - lesing via /governance/query, skriving via
-         /governance/mutate (ALLE klasse A/B, INGEN bekreftelsesdialog-krav
-         siden governance ikke har klasse C/D-handlinger). Delegeringstavlen
-         er RENT LESENDE og bruker /executive/query (executive.
-         get_delegation_board), IKKE /governance/query. -->
-    <h2>Styring (K2)</h2>
 
-    <h3>Beslutningslogg</h3>
-    <div id="decisions-list"><p class="empty">Laster …</p></div>
-    <form id="decision-form" class="card">
-      <div class="action-row">
-        <input id="decision-title" placeholder="Tittel" autocomplete="off">
-        <input id="decision-rationale" placeholder="Begrunnelse" autocomplete="off">
-        <select id="decision-maker">
-          <option value="owner">Eier</option>
-          <option value="jarvis">Jarvis</option>
-        </select>
-        <button class="btn" type="submit">Opprett beslutning</button>
-      </div>
-      <div class="action-result" id="decision-form-result"></div>
-    </form>
+  <section id="sec-memory" data-section="memory">
+    <!-- D-367: minneforslag fra Jarvis (memory.propose) ligger i KARANTENE til du godkjenner dem her. Godkjenning går via
+         egen grant-rute (/memory/proposals) - modellen kan aldri godkjenne sine egne forslag.
+         D-386: lista viser også fakta uttrekket var USIKKERT på (konfidens under 0,5) og fakta fra innlimt tekst - de blir aktivt
+         minne først når du godkjenner. -->
+    <h2><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>Minneforslag <span class="n" data-count="proposals">–</span></h2>
+    <div class="body">
+      <div id="memory-proposals"><p class="empty">Laster …</p></div>
+      <div class="action-result" id="memory-proposals-result"></div>
+    </div>
+  </section>
 
-    <h3>Scenarier</h3>
-    <div id="scenarios-list"><p class="empty">Laster …</p></div>
-    <form id="scenario-form" class="card">
-      <div class="action-row">
-        <input id="scenario-title" placeholder="Tittel" autocomplete="off">
-        <input id="scenario-assumptions" placeholder="Antakelser" autocomplete="off">
-        <input id="scenario-outcome" placeholder="Forventet utfall" autocomplete="off">
-        <button class="btn" type="submit">Opprett scenario</button>
+  <section id="sec-connectors" data-section="connectors">
+    <!-- Task #119 (D-211): status-lese-delen. Task #122 (D-213): "lim inn nøkkel"/"test connector"-mutasjonen - EGEN rute
+         (/owner-controls/connector-credentials), ALDRI via /executive/query (som D-199 sier skal forbli lese-kun for alltid). -->
+    <h2><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>Integrasjoner <span class="n" data-count="connectors">–</span></h2>
+    <div class="body">
+      <div id="connectors-summary" class="connectors-summary"></div>
+      <div class="connector-toolbar" id="connector-status-filters">
+        <button type="button" class="connector-status-chip active" data-status-filter="all">Alle</button>
+        <button type="button" class="connector-status-chip" data-status-filter="configured">Konfigurert</button>
+        <button type="button" class="connector-status-chip" data-status-filter="missing">Ikke konfigurert</button>
+        <button type="button" class="connector-status-chip" data-status-filter="failing">Feiler</button>
+        <button type="button" class="connector-status-chip" data-status-filter="backlog">Ikke bygget</button>
       </div>
-      <div class="action-result" id="scenario-form-result"></div>
-    </form>
+      <input type="search" id="connector-filter" class="connector-filter" placeholder="Søk connector (navn eller kategori) …" autocomplete="off">
+      <div id="connectors"><p class="empty">Laster …</p></div>
+    </div>
+  </section>
 
-    <h3>Risikoregister</h3>
-    <div id="risks-list"><p class="empty">Laster …</p></div>
-    <form id="risk-form" class="card">
-      <div class="action-row">
-        <input id="risk-title" placeholder="Tittel" autocomplete="off">
-        <input id="risk-description" placeholder="Beskrivelse" autocomplete="off">
-        <select id="risk-severity">
-          <option value="low">Lav</option>
-          <option value="medium">Middels</option>
-          <option value="high">Høy</option>
-          <option value="critical">Kritisk</option>
-        </select>
-        <select id="risk-probability">
-          <option value="low">Lav</option>
-          <option value="medium">Middels</option>
-          <option value="high">Høy</option>
-        </select>
-        <button class="btn" type="submit">Legg til risiko</button>
+  <section id="sec-governance" data-section="governance">
+    <!-- D-230: K2-dashboardet for @jarvis/governance (migrasjon 059, modules/governance/) - lesing via /governance/query,
+         skriving via /governance/mutate (ALLE klasse A/B, INGEN bekreftelsesdialog-krav). Delegeringstavlen er RENT LESENDE
+         og bruker /executive/query (executive.get_delegation_board), IKKE /governance/query. -->
+    <h2><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>Styring (K2)</h2>
+    <div class="body">
+      <div class="grid2">
+        <div>
+          <h3>Beslutningslogg</h3>
+          <div id="decisions-list"><p class="empty">Laster …</p></div>
+          <form id="decision-form" class="card">
+            <div class="action-row">
+              <input id="decision-title" placeholder="Tittel" autocomplete="off">
+              <input id="decision-rationale" placeholder="Begrunnelse" autocomplete="off">
+              <select id="decision-maker">
+                <option value="owner">Eier</option>
+                <option value="jarvis">Jarvis</option>
+              </select>
+              <button class="btn" type="submit">Opprett beslutning</button>
+            </div>
+            <div class="action-result" id="decision-form-result"></div>
+          </form>
+        </div>
+        <div>
+          <h3>Scenarier</h3>
+          <div id="scenarios-list"><p class="empty">Laster …</p></div>
+          <form id="scenario-form" class="card">
+            <div class="action-row">
+              <input id="scenario-title" placeholder="Tittel" autocomplete="off">
+              <input id="scenario-assumptions" placeholder="Antakelser" autocomplete="off">
+              <input id="scenario-outcome" placeholder="Forventet utfall" autocomplete="off">
+              <button class="btn" type="submit">Opprett scenario</button>
+            </div>
+            <div class="action-result" id="scenario-form-result"></div>
+          </form>
+        </div>
       </div>
-      <div class="action-result" id="risk-form-result"></div>
-    </form>
-    <form id="risk-update-form" class="card">
-      <div class="title">Oppdater risiko</div>
-      <div class="action-row">
-        <input id="risk-update-id" placeholder="risk_id" autocomplete="off">
-        <select id="risk-update-severity">
-          <option value="">Alvorlighet (uendret)</option>
-          <option value="low">Lav</option>
-          <option value="medium">Middels</option>
-          <option value="high">Høy</option>
-          <option value="critical">Kritisk</option>
-        </select>
-        <select id="risk-update-probability">
-          <option value="">Sannsynlighet (uendret)</option>
-          <option value="low">Lav</option>
-          <option value="medium">Middels</option>
-          <option value="high">Høy</option>
-        </select>
-      </div>
-      <div class="action-row">
-        <input id="risk-update-mitigation" placeholder="Tiltaksplan (uendret hvis tom)" autocomplete="off">
-        <select id="risk-update-status">
-          <option value="">Status (uendret)</option>
-          <option value="identified">Identifisert</option>
-          <option value="mitigating">Under tiltak</option>
-          <option value="accepted">Akseptert</option>
-          <option value="resolved">Løst</option>
-        </select>
-        <button class="btn" type="submit">Oppdater risiko</button>
-      </div>
-      <div class="action-result" id="risk-update-form-result"></div>
-    </form>
 
-    <h3>Mål/OKR</h3>
-    <div id="goals-list"><p class="empty">Laster …</p></div>
-    <form id="goal-form" class="card">
-      <div class="action-row">
-        <input id="goal-title" placeholder="Tittel" autocomplete="off">
-        <input id="goal-description" placeholder="Beskrivelse (valgfritt)" autocomplete="off">
-        <input id="goal-target-date" placeholder="Måldato (valgfritt, ISO)" autocomplete="off">
-        <button class="btn" type="submit">Opprett mål</button>
+      <h3>Risikoregister</h3>
+      <div id="risks-list"><p class="empty">Laster …</p></div>
+      <div class="grid2">
+        <form id="risk-form" class="card">
+          <div class="title">Ny risiko</div>
+          <div class="action-row">
+            <input id="risk-title" placeholder="Tittel" autocomplete="off">
+            <input id="risk-description" placeholder="Beskrivelse" autocomplete="off">
+          </div>
+          <div class="action-row">
+            <select id="risk-severity">
+              <option value="low">Lav</option>
+              <option value="medium">Middels</option>
+              <option value="high">Høy</option>
+              <option value="critical">Kritisk</option>
+            </select>
+            <select id="risk-probability">
+              <option value="low">Lav</option>
+              <option value="medium">Middels</option>
+              <option value="high">Høy</option>
+            </select>
+            <button class="btn" type="submit">Legg til risiko</button>
+          </div>
+          <div class="action-result" id="risk-form-result"></div>
+        </form>
+        <form id="risk-update-form" class="card">
+          <div class="title">Oppdater risiko</div>
+          <div class="action-row">
+            <input id="risk-update-id" placeholder="risk_id" autocomplete="off">
+            <select id="risk-update-severity">
+              <option value="">Alvorlighet (uendret)</option>
+              <option value="low">Lav</option>
+              <option value="medium">Middels</option>
+              <option value="high">Høy</option>
+              <option value="critical">Kritisk</option>
+            </select>
+            <select id="risk-update-probability">
+              <option value="">Sannsynlighet (uendret)</option>
+              <option value="low">Lav</option>
+              <option value="medium">Middels</option>
+              <option value="high">Høy</option>
+            </select>
+          </div>
+          <div class="action-row">
+            <input id="risk-update-mitigation" placeholder="Tiltaksplan (uendret hvis tom)" autocomplete="off">
+            <select id="risk-update-status">
+              <option value="">Status (uendret)</option>
+              <option value="identified">Identifisert</option>
+              <option value="mitigating">Under tiltak</option>
+              <option value="accepted">Akseptert</option>
+              <option value="resolved">Løst</option>
+            </select>
+            <button class="btn" type="submit">Oppdater risiko</button>
+          </div>
+          <div class="action-result" id="risk-update-form-result"></div>
+        </form>
       </div>
-      <div class="action-result" id="goal-form-result"></div>
-    </form>
 
-    <h3>Delegeringstavle</h3>
-    <div id="delegation-board"><p class="empty">Laster …</p></div>
+      <h3>Mål/OKR</h3>
+      <div id="goals-list"><p class="empty">Laster …</p></div>
+      <form id="goal-form" class="card">
+        <div class="action-row">
+          <input id="goal-title" placeholder="Tittel" autocomplete="off">
+          <input id="goal-description" placeholder="Beskrivelse (valgfritt)" autocomplete="off">
+          <input id="goal-target-date" placeholder="Måldato (valgfritt, ISO)" autocomplete="off">
+          <button class="btn" type="submit">Opprett mål</button>
+        </div>
+        <div class="action-result" id="goal-form-result"></div>
+      </form>
+
+      <h3>Delegeringstavle</h3>
+      <div id="delegation-board"><p class="empty">Laster …</p></div>
+    </div>
   </section>
 </main>
 <div id="confirm-overlay">
@@ -489,6 +481,56 @@
   const enrollPanel = document.getElementById("enroll");
   const enrollForm = document.getElementById("enroll-form");
   const enrollTicket = document.getElementById("enroll-ticket");
+  const updatedEl = document.getElementById("updated");
+
+  /**
+   * D-387: statusstripen/seksjonstellerne/kommandosentral-sammendraget regnes ut av de SAMME datasettene render-
+   * funksjonene under allerede får - ingen nye spørringer, ingen ny backend. Sendes til skallet (command.html) via
+   * postMessage med eksplisitt origin (samme origin, aldri "*").
+   */
+  const summary = { attention: null, confirmations: null, proposals: null, connectors_total: null, connectors_configured: null, failing: 0, kill_switch: null, finance_kill_switch: undefined };
+  const inShell = window.parent !== window;
+  function setCount(key, value, hot) {
+    document.querySelectorAll('[data-count="' + key + '"]').forEach((el) => {
+      el.textContent = value === null || value === undefined ? "–" : String(value);
+      el.classList.toggle("hot", !!hot);
+    });
+  }
+  function setTile(id, cls) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.remove("hot", "warn", "ok");
+    if (cls) el.classList.add(cls);
+  }
+  function updateSummary() {
+    setCount("attention", summary.attention, (summary.attention || 0) > 0);
+    setTile("tile-attention", (summary.attention || 0) > 0 ? "hot" : summary.attention === 0 ? "ok" : "");
+    setCount("confirmations", summary.confirmations, (summary.confirmations || 0) > 0);
+    setTile("tile-confirmations", (summary.confirmations || 0) > 0 ? "warn" : summary.confirmations === 0 ? "ok" : "");
+    setCount("proposals", summary.proposals, false);
+    setTile("tile-proposals", (summary.proposals || 0) > 0 ? "warn" : summary.proposals === 0 ? "ok" : "");
+    const connectorsText = summary.connectors_total === null ? null : summary.connectors_configured + "/" + summary.connectors_total;
+    setCount("connectors", connectorsText, summary.failing > 0);
+    setTile("tile-connectors", summary.failing > 0 ? "hot" : summary.connectors_total !== null ? "ok" : "");
+    const sub = document.getElementById("tile-connectors-sub");
+    if (sub) sub.textContent = summary.failing > 0 ? summary.failing + " feiler/degradert" : "konfigurert";
+    const killEl = document.getElementById("tile-kill-v");
+    if (killEl) { killEl.textContent = summary.kill_switch === null ? "–" : summary.kill_switch ? "AKTIV" : "av"; setTile("tile-kill", summary.kill_switch === null ? "" : summary.kill_switch ? "hot" : "ok"); }
+    const finEl = document.getElementById("tile-finance-v");
+    if (finEl) {
+      finEl.textContent = summary.finance_kill_switch === undefined ? "–" : summary.finance_kill_switch === null ? "ukonf." : summary.finance_kill_switch ? "AKTIV" : "av";
+      setTile("tile-finance", summary.finance_kill_switch === undefined ? "" : summary.finance_kill_switch ? "hot" : summary.finance_kill_switch === null ? "warn" : "ok");
+    }
+    if (inShell) {
+      try {
+        window.parent.postMessage({
+          jarvis: "dashboard-summary",
+          attention: summary.attention || 0, confirmations: summary.confirmations || 0, proposals: summary.proposals || 0,
+          failing: summary.failing || 0, kill_switch: summary.kill_switch === true
+        }, location.origin);
+      } catch { /* skallet er valgfritt */ }
+    }
+  }
 
   // Samme dev-identitet/enhetsautentisering som apps/web/index.html - se
   // D-131-kommentarene der for hvorfor feltene under kun er PÅSTANDER som
@@ -870,6 +912,7 @@
    */
   function renderAttentionQueue(data) {
     const items = Array.isArray(data) ? data : [];
+    summary.attention = items.length;
     if (items.length === 0) {
       attentionQueueEl.innerHTML = '<p class="empty">Ingen elementer venter på oppmerksomhet.</p>';
       return;
@@ -932,6 +975,8 @@
     const financeKillSwitch = data.finance_kill_switch;
     const financeActive = !!(financeKillSwitch && financeKillSwitch.enabled);
     const financeKnown = financeKillSwitch !== null && financeKillSwitch !== undefined;
+    summary.kill_switch = killSwitchActive;
+    summary.finance_kill_switch = financeKnown ? financeActive : null;
 
     let html = '<div class="card">' +
       '<span class="pill ' + (killSwitchActive ? "state-frozen" : "state-inactive") + '">kill switch: ' +
@@ -1250,11 +1295,15 @@
     if (data) lastConnectorsData = data;
     const allConnectors = (lastConnectorsData && Array.isArray(lastConnectorsData.connectors)) ? lastConnectorsData.connectors : [];
     if (allConnectors.length === 0) {
+      summary.connectors_total = 0; summary.connectors_configured = 0; summary.failing = 0;
       connectorsSummaryEl.textContent = "";
       connectorsEl.innerHTML = '<p class="empty">Ingen connectorer registrert.</p>';
       return;
     }
     const configuredCount = allConnectors.filter((c) => c.configured).length;
+    summary.connectors_total = allConnectors.length;
+    summary.connectors_configured = configuredCount;
+    summary.failing = allConnectors.filter((c) => CONNECTOR_STATUS_PREDICATES.failing(c)).length;
     connectorsSummaryEl.textContent = configuredCount + " av " + allConnectors.length + " connectorer konfigurert";
 
     const term = (filterText || "").trim().toLowerCase();
@@ -1746,6 +1795,8 @@
 
   function renderMemoryProposals(data) {
     const items = Array.isArray(data) ? data : [];
+    summary.proposals = items.length;
+    updateSummary();
     if (items.length === 0) {
       memoryProposalsEl.innerHTML = '<p class="empty">Ingen minneforslag venter på godkjenning.</p>';
       return;
@@ -1804,6 +1855,8 @@
 
   function renderConfirmations(data) {
     const items = Array.isArray(data) ? data : [];
+    summary.confirmations = items.length;
+    updateSummary();
     if (items.length === 0) {
       confirmationsEl.innerHTML = '<p class="empty">Ingen handlinger venter på bekreftelse.</p>';
       return;
@@ -1873,7 +1926,9 @@
       renderRisks(risksData);
       renderGoals(goalsData);
       renderDelegationBoard(delegationData);
+      updateSummary();
       statusEl.textContent = "Oppdatert " + new Date().toLocaleTimeString("nb-NO");
+      updatedEl.textContent = "oppdatert " + new Date().toLocaleTimeString("nb-NO", { hour: "2-digit", minute: "2-digit" }) + " · auto hvert minutt";
       void loadMemoryProposals();
       void loadConfirmations();
     } catch (err) {
@@ -1885,6 +1940,38 @@
 
   refreshBtn.addEventListener("click", () => { void loadAll(); });
   loadAll();
+
+  // D-387: auto-oppdatering hvert minutt mens fanen er synlig (ingen spørringer i bakgrunnen).
+  setInterval(() => { if (document.visibilityState === "visible" && !refreshBtn.disabled) void loadAll(); }, 60000);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && !refreshBtn.disabled) void loadAll(); });
+
+  // D-387: sammenleggbare seksjoner (husket per nettleser) + aktiv seksjon i navigasjonen.
+  const COLLAPSE_KEY = "jarvis.dashboard.collapsed";
+  let collapsed = {};
+  try { collapsed = JSON.parse(localStorage.getItem(COLLAPSE_KEY) || "{}") || {}; } catch { collapsed = {}; }
+  document.querySelectorAll("section[data-section]").forEach((section) => {
+    const key = section.dataset.section;
+    if (collapsed[key]) section.classList.add("collapsed");
+    section.querySelector("h2").addEventListener("click", () => {
+      section.classList.toggle("collapsed");
+      collapsed[key] = section.classList.contains("collapsed");
+      try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify(collapsed)); } catch { /* kun komfort */ }
+    });
+  });
+  const navLinks = Array.from(document.querySelectorAll("#secnav a"));
+  const sections = navLinks.map((a) => document.querySelector(a.getAttribute("href"))).filter(Boolean);
+  function highlightNav() {
+    const y = window.scrollY + 120;
+    let active = sections[0];
+    for (const s of sections) if (s.offsetTop <= y) active = s;
+    navLinks.forEach((a) => a.classList.toggle("active", active && a.getAttribute("href") === "#" + active.id));
+  }
+  window.addEventListener("scroll", highlightNav, { passive: true });
+  highlightNav();
+  navLinks.forEach((a) => a.addEventListener("click", () => {
+    const target = document.querySelector(a.getAttribute("href"));
+    if (target && target.classList.contains("collapsed")) target.querySelector("h2").click();
+  }));
 </script>
 </body>
 </html>

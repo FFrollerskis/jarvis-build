@@ -5,114 +5,172 @@
 <!--JARVIS_OWNER_META-->
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Jarvis · Tale</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='48' fill='%230d1117'/%3E%3Ctext x='50' y='68' font-size='58' font-family='system-ui,sans-serif' font-weight='700' fill='%237ee2a8' text-anchor='middle'%3EJ%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='48' fill='%2305070c'/%3E%3Ccircle cx='50' cy='50' r='40' fill='none' stroke='%2322d3ee' stroke-width='3' opacity='0.55'/%3E%3Ccircle cx='50' cy='50' r='27' fill='none' stroke='%2367e8f9' stroke-width='2.5' opacity='0.85'/%3E%3Ccircle cx='50' cy='50' r='9' fill='%2367e8f9'/%3E%3C/svg%3E">
 <style>
   /*
-   * D-382 (Tobias direkte i chat: "voice ... ser bedre ut"): samme design-tokens som dashboard.html/command.html (D-239/D-361).
-   * KUN kosmetikk - hver ID og all JS under er uendret (host-verifisert lydkjede, WebCrypto-innrullering, Q-32-porten).
+   * D-382 (første visuelle løft) + D-387 (Tobias direkte i chat: "oppgradere hele ui ... teknologisk og ordentlig
+   * look" + "gå over hele voice strukturen så vi får den raskeste responsen ... hører meg bra"). Den host-verifiserte
+   * lydkjeden (16 kHz capture, D-265/D-269; echoCancellation/noiseSuppression-valg, D-249/D-276; fade på TTS-rammer,
+   * D-249), WebCrypto-innrulleringen og Q-32-porten er UENDRET. Nytt: orben drives av EKTE mikrofonnivå (RMS fra de
+   * samme PCM-rammene som sendes) og TTS-nivå, så du SER at Jarvis hører deg; «partial»-transkript vises live mens du
+   * snakker; siste turs latens (slutt på tale → første lyd) vises som tall; demp-knapp (mikrofon på pause uten å miste
+   * sesjonen); mellomromstasten starter/stopper; tilstand meldes til kommandosentralen via postMessage.
    */
   :root {
     color-scheme: dark;
-    --bg: #05070c; --panel: #0c121e; --panel-2: #101a2b; --border: #1c2942; --text: #e9eefb; --text-dim: #7e8bab;
+    --bg: #05070c; --panel: #0c121e; --panel-2: #101a2b; --panel-3: #15213a; --border: #1c2942; --border-soft: rgba(28,41,66,0.55);
+    --text: #e9eefb; --text-dim: #7e8bab; --text-mute: #55617f;
     --accent: #22d3ee; --accent-strong: #67e8f9; --accent-glow: rgba(34,211,238,0.35);
     --ok: #6ee7b7; --ok-bg: #0c2a20; --warn: #fbbf24; --warn-bg: #3a2a06; --danger: #fb7185; --danger-bg: #3d1220; --info: #93c5fd; --info-bg: #101f38;
-    --radius: 14px;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --radius: 14px; --level: 0; --tts: 0;
   }
   * { box-sizing: border-box; }
+  html, body { height:100%; }
   body { font-family: -apple-system, "Segoe UI", "Inter", Roboto, system-ui, sans-serif; background: radial-gradient(ellipse 900px 500px at 50% -10%, rgba(34,211,238,0.10), transparent 60%), var(--bg);
-         background-attachment: fixed; color: var(--text); margin:0; display:flex; flex-direction:column; min-height:100vh; -webkit-font-smoothing: antialiased; }
-  header { position: sticky; top:0; z-index:5; padding:12px 18px; background: rgba(12,18,30,0.82); backdrop-filter: blur(10px); border-bottom:1px solid #16203380;
-           font-weight:600; display:flex; align-items:center; justify-content:space-between; gap:12px; }
-  header small { color: var(--text-dim); font-weight:400; margin-left:8px; font-size:12px; }
-  main { flex:1; padding:18px 16px 32px; display:flex; flex-direction:column; gap:14px; max-width:680px; width:100%; margin:0 auto; }
-  .card { background: var(--panel); border:1px solid var(--border); border-radius: var(--radius); padding:14px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.4), 0 8px 24px -12px rgba(0,0,0,0.6); }
-  .card label { font-size:11px; color: var(--text-dim); text-transform:uppercase; letter-spacing:0.1em; font-weight:700; }
-  .pill { display:inline-block; padding:3px 10px; border-radius:999px; font-size:11px; margin-right:6px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase; }
-  .pill.state-idle { background: var(--panel-2); color: var(--text-dim); }
+         background-attachment: fixed; color: var(--text); margin:0; display:flex; flex-direction:column; height:100vh; -webkit-font-smoothing: antialiased; }
+  header { flex:none; padding:10px 16px; background: rgba(12,18,30,0.82); backdrop-filter: blur(10px); border-bottom:1px solid var(--border-soft);
+           display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  header .who { display:flex; flex-direction:column; line-height:1.15; }
+  header .who b { font-size:15px; letter-spacing:0.02em; }
+  header .who small { color: var(--text-dim); font-size:11.5px; }
+  .pill { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:999px; font-size:11px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; font-family: var(--mono); border:1px solid transparent; }
+  .pill.state-idle { background: var(--panel-2); color: var(--text-dim); border-color: var(--border); }
   .pill.state-listening { background: var(--ok-bg); color: var(--ok); }
   .pill.state-thinking { background: var(--warn-bg); color: var(--warn); }
   .pill.state-speaking { background: var(--info-bg); color: var(--info); }
   .pill.state-interrupted { background: var(--danger-bg); color: var(--danger); }
   .pill.trust-server_verified { background: var(--ok-bg); color: var(--ok); }
   .pill.trust-client_asserted { background: var(--warn-bg); color: var(--warn); }
-  /* Orb: visualiserer tilstanden (lytter/tenker/snakker) - ren CSS, drevet av samme state-pill-klasse som før. */
-  #orb-wrap { display:flex; flex-direction:column; align-items:center; gap:14px; padding:8px 0 4px; }
-  #orb { width:132px; height:132px; border-radius:50%; position:relative; background: radial-gradient(circle at 35% 35%, rgba(103,232,249,0.9), rgba(34,211,238,0.35) 45%, rgba(12,18,30,0.9) 72%);
-         box-shadow: 0 0 0 1px rgba(34,211,238,0.35), 0 0 40px -6px var(--accent-glow); transition: box-shadow 0.3s ease, transform 0.3s ease; }
+  main { flex:1; min-height:0; overflow-y:auto; padding:14px 16px 24px; display:grid; gap:14px; max-width:1100px; width:100%; margin:0 auto;
+         grid-template-columns: minmax(300px, 380px) 1fr; grid-template-areas: "stage transcript" "stage transcript"; align-content:start; }
+  #stage { grid-area: stage; display:flex; flex-direction:column; gap:12px; position:sticky; top:0; }
+  #transcript-card { grid-area: transcript; min-height:300px; }
+  .card { background: var(--panel); border:1px solid var(--border); border-radius: var(--radius); padding:14px 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.4), 0 8px 24px -12px rgba(0,0,0,0.6); }
+  .card label, .card .k { font-size:11px; color: var(--text-dim); text-transform:uppercase; letter-spacing:0.1em; font-weight:700; }
+
+  /* Orb: visualiserer tilstanden (lytter/tenker/snakker) OG det faktiske lydnivået (--level = mikrofon-RMS, --tts = avspillingsnivå). */
+  #orb-wrap { display:flex; flex-direction:column; align-items:center; gap:10px; padding:16px 0 6px; position:relative; }
+  #orb { width:150px; height:150px; border-radius:50%; position:relative; background: radial-gradient(circle at 35% 35%, rgba(103,232,249,0.95), rgba(34,211,238,0.35) 45%, rgba(12,18,30,0.9) 72%);
+         box-shadow: 0 0 0 1px rgba(34,211,238,0.35), 0 0 40px -6px var(--accent-glow); transition: box-shadow 0.3s ease; transform: scale(calc(1 + var(--level) * 0.22 + var(--tts) * 0.12)); will-change: transform; }
   #orb::before, #orb::after { content:""; position:absolute; inset:-10px; border-radius:50%; border:1px solid rgba(34,211,238,0.35); opacity:0; }
-  body[data-state="listening"] #orb { box-shadow: 0 0 0 1px rgba(110,231,183,0.6), 0 0 60px -4px rgba(110,231,183,0.45); }
+  #ring { position:absolute; width:190px; height:190px; border-radius:50%; border:1px dashed rgba(34,211,238,0.25); top:-4px; animation: spin 18s linear infinite; pointer-events:none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  body[data-state="listening"] #orb { box-shadow: 0 0 0 1px rgba(110,231,183,0.6), 0 0 calc(40px + var(--level) * 70px) -4px rgba(110,231,183,0.5); }
   body[data-state="listening"] #orb::before { opacity:1; animation: ripple 1.8s ease-out infinite; }
   body[data-state="thinking"] #orb { animation: breathe 1.4s ease-in-out infinite; }
-  body[data-state="speaking"] #orb { box-shadow: 0 0 0 1px rgba(147,197,253,0.6), 0 0 70px -2px rgba(147,197,253,0.5); animation: speak 0.55s ease-in-out infinite; }
+  body[data-state="speaking"] #orb { box-shadow: 0 0 0 1px rgba(147,197,253,0.6), 0 0 calc(50px + var(--tts) * 80px) -2px rgba(147,197,253,0.55); }
   body[data-state="interrupted"] #orb { box-shadow: 0 0 0 1px rgba(251,113,133,0.6), 0 0 40px -6px rgba(251,113,133,0.4); }
+  body[data-muted="1"] #orb { filter: saturate(0.3); }
   @keyframes ripple { 0% { transform: scale(1); opacity:0.8; } 100% { transform: scale(1.35); opacity:0; } }
   @keyframes breathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.06); } }
-  @keyframes speak { 0%,100% { transform: scale(1); } 50% { transform: scale(1.04); } }
-  #big-btn { width:100%; padding:16px; font-size:16px; font-weight:700; border-radius:12px; border:0; cursor:pointer; letter-spacing:0.02em;
+  #bars { display:flex; gap:3px; align-items:flex-end; height:26px; }
+  #bars i { width:4px; border-radius:2px; background: var(--accent); opacity:0.8; height:4px; transition: height 0.08s linear; }
+  #live { min-height:22px; font-size:14px; color: var(--text-dim); font-style:italic; text-align:center; padding:0 8px; }
+  #live:not(:empty)::before { content:"« "; } #live:not(:empty)::after { content:" »"; }
+  .controls { display:flex; gap:8px; }
+  #big-btn { flex:1; padding:15px; font-size:16px; font-weight:700; border-radius:12px; border:0; cursor:pointer; letter-spacing:0.02em; font-family:inherit;
              background: linear-gradient(180deg, var(--accent-strong), var(--accent)); color:#022; box-shadow: 0 0 0 1px rgba(34,211,238,0.3), 0 6px 18px -6px var(--accent-glow); transition: transform 0.12s ease; }
   #big-btn:hover:not(:disabled) { transform: translateY(-1px); }
   #big-btn.active { background: linear-gradient(180deg, #fb7185, #e11d48); color:#fff; box-shadow: 0 0 0 1px rgba(251,113,133,0.4); }
   #big-btn:disabled { background: var(--panel-2); color: var(--text-dim); box-shadow:none; cursor:default; }
-  #ws-url { width:100%; background: var(--bg); color: var(--text); border:1px solid var(--border); border-radius:10px; padding:9px 10px; font-size:13px; margin-top:6px; }
+  #mute-btn { width:54px; border-radius:12px; border:1px solid var(--border); background: var(--panel-2); color: var(--text-dim); cursor:pointer; display:flex; align-items:center; justify-content:center; }
+  #mute-btn:disabled { opacity:0.4; cursor:default; }
+  #mute-btn.on { border-color: rgba(251,191,36,0.6); color: var(--warn); background: var(--warn-bg); }
+  #mute-btn svg { width:20px; height:20px; }
+  .stats { display:grid; grid-template-columns: 1fr 1fr; gap:8px; }
+  .stat { background: var(--panel-2); border:1px solid var(--border); border-radius:10px; padding:8px 10px; }
+  .stat .k { font-size:10px; }
+  .stat .v { font-family: var(--mono); font-size:16px; margin-top:2px; color: var(--text); }
+  .stat .v.good { color: var(--ok); } .stat .v.slow { color: var(--warn); } .stat .v.bad { color: var(--danger); }
+  .stat .s { font-size:10px; color: var(--text-mute); font-family: var(--mono); }
+  #ws-url { width:100%; background: var(--bg); color: var(--text); border:1px solid var(--border); border-radius:10px; padding:9px 10px; font-size:13px; margin-top:6px; font-family: var(--mono); }
   #ws-url:focus { outline:none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(34,211,238,0.15); }
   #transcript { display:flex; flex-direction:column; gap:10px; }
-  .turn { padding:10px 14px; border-radius:14px; max-width:85%; line-height:1.45; font-size:15px; }
+  .turn { padding:10px 14px; border-radius:14px; max-width:88%; line-height:1.45; font-size:15px; white-space:pre-wrap; overflow-wrap:anywhere; }
   .turn.user { align-self:flex-end; background: linear-gradient(180deg, #1d4ed8, #1e40af); color:#fff; border-bottom-right-radius:4px; }
   .turn.jarvis { align-self:flex-start; background: var(--panel-2); border:1px solid var(--border); border-bottom-left-radius:4px; }
-  .turn .label { font-size:10px; color: var(--text-dim); margin-bottom:3px; text-transform:uppercase; letter-spacing:0.08em; font-weight:700; }
+  .turn .label { font-size:10px; color: var(--text-dim); margin-bottom:3px; text-transform:uppercase; letter-spacing:0.08em; font-weight:700; font-family: var(--mono); }
   .turn.user .label { color: rgba(255,255,255,0.7); }
+  .turn.tool { align-self:flex-start; background: none; border:1px dashed var(--border); color: var(--accent-strong); font-size:12px; font-family: var(--mono); padding:5px 10px; }
   #block-panel { display:none; background: var(--warn-bg); border:1px solid #6b4e00; border-radius: var(--radius); padding:14px; font-size:13px; line-height:1.5; }
   #block-panel h3 { margin:0 0 6px; color: var(--warn); font-size:14px; }
-  #status { padding:10px 16px; background: rgba(12,18,30,0.82); border-top:1px solid #16203380; color: var(--text-dim); font-size:13px; min-height:38px; }
-  #enroll { display:none; padding:12px 16px; background: var(--panel); border-top:1px solid var(--border); }
+  #status { flex:none; padding:8px 16px; background: rgba(12,18,30,0.82); border-top:1px solid var(--border-soft); color: var(--text-dim); font-size:12.5px; min-height:34px; font-family: var(--mono); }
+  #enroll { display:none; padding:12px 16px; background: var(--panel); border-top:1px solid var(--border); flex:none; }
   #enroll p { margin:0 0 8px; color: var(--text-dim); font-size:13px; }
-  #enroll code { color: var(--text); background: var(--bg); padding:2px 5px; border-radius:4px; }
+  #enroll code { color: var(--text); background: var(--bg); padding:2px 5px; border-radius:4px; font-family: var(--mono); }
   #enroll form { display:flex; gap:8px; padding:0; }
   #enroll input { flex:1; background: var(--bg); color: var(--text); border:1px solid var(--border); border-radius:8px; padding:10px; font-size:15px; }
-  #enroll button { background: var(--accent); color:#022; border:0; border-radius:8px; padding:0 18px; cursor:pointer; font-weight:700; }
-  details summary { cursor:pointer; color: var(--text-dim); font-size:12px; }
+  #enroll button { background: var(--accent); color:#022; border:0; border-radius:8px; padding:0 18px; cursor:pointer; font-weight:700; font-family:inherit; }
+  details summary { cursor:pointer; color: var(--text-dim); font-size:12px; user-select:none; }
+  details summary:hover { color: var(--accent-strong); }
   .empty { color: var(--text-dim); font-style:italic; }
-  .hint { margin:6px 0 0; font-size:12px; color: var(--text-dim); }
+  .hint { margin:6px 0 0; font-size:12px; color: var(--text-dim); line-height:1.5; }
   .hint a { color: var(--info); }
-  @media (max-width: 560px) { main { padding:14px 12px 28px; } #orb { width:108px; height:108px; } }
+  #tech-log { font-size:11px; color:#8b949e; white-space:pre-wrap; margin-top:6px; font-family: var(--mono); max-height:220px; overflow:auto; }
+  ::-webkit-scrollbar { width:10px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: var(--border); border-radius:6px; }
+  @media (max-width: 760px) {
+    main { grid-template-columns: 1fr; grid-template-areas: "stage" "transcript"; padding:12px 12px 24px; }
+    #stage { position:static; }
+    #orb { width:118px; height:118px; } #ring { width:150px; height:150px; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 </head>
-<body>
+<body data-state="idle" data-muted="0">
 <header>
-  <span>Charlie <small>tale · snakk naturlig, avbryt når du vil</small></span>
+  <div class="who"><b>Charlie · tale</b><small>snakk naturlig, avbryt når du vil</small></div>
   <span id="state-pill" class="pill state-idle">idle</span>
 </header>
 <main>
-  <div id="orb-wrap" aria-hidden="true"><div id="orb"></div></div>
-
-  <button id="big-btn">Start samtale</button>
-
-  <details>
-    <summary>Tilkobling (voice-gateway)</summary>
-    <div class="card" style="margin-top:8px;">
-      <label for="ws-url">Voice-gateway WebSocket-adresse</label>
-      <input id="ws-url" placeholder="ws://127.0.0.1:3020" autocomplete="off">
-      <p class="hint">
-        Samme nettleser/enhet som brukes til <a href="/dashboard">dashbordet</a> - enhetsnøkkelen
-        gjenbrukes. Voice Gateway er en EGEN prosess fra Core (CLAUDE.md regel 5), typisk port 3020.
-      </p>
+  <div id="stage">
+    <div class="card">
+      <div id="orb-wrap" aria-hidden="true"><div id="ring"></div><div id="orb"></div></div>
+      <div id="bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      <div id="live"></div>
+      <div class="controls" style="margin-top:10px;">
+        <button id="big-btn">Start samtale</button>
+        <button id="mute-btn" title="Demp mikrofonen (M)" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg>
+        </button>
+      </div>
+      <p class="hint" style="text-align:center;">Mellomrom starter/stopper · M demper</p>
     </div>
-  </details>
 
-  <div id="block-panel">
-    <h3>Ekstern taleleverandør er policy-blokkert</h3>
-    <p id="block-panel-text"></p>
+    <div class="stats">
+      <div class="stat"><div class="k">Svartid</div><div class="v" id="stat-latency">–</div><div class="s">slutt på tale → første lyd</div></div>
+      <div class="stat"><div class="k">Rute</div><div class="v" id="stat-route" style="font-size:13px;">–</div><div class="s" id="stat-turns">0 turer</div></div>
+    </div>
+
+    <div id="block-panel">
+      <h3>Ekstern taleleverandør er policy-blokkert</h3>
+      <p id="block-panel-text"></p>
+    </div>
+
+    <details>
+      <summary>Tilkobling (voice-gateway)</summary>
+      <div class="card" style="margin-top:8px;">
+        <label for="ws-url">Voice-gateway WebSocket-adresse</label>
+        <input id="ws-url" placeholder="ws://127.0.0.1:3020" autocomplete="off">
+        <p class="hint">
+          Samme nettleser/enhet som brukes til <a href="/dashboard">dashbordet</a> - enhetsnøkkelen
+          gjenbrukes. Voice Gateway er en EGEN prosess fra Core (CLAUDE.md regel 5), typisk port 3020.
+        </p>
+      </div>
+    </details>
+    <details>
+      <summary>Teknisk logg</summary>
+      <div id="tech-log"></div>
+    </details>
   </div>
 
-  <div class="card">
-    <span id="trust-pill" class="pill" style="display:none;"></span>
+  <div class="card" id="transcript-card">
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px;">
+      <span class="k">Samtale</span>
+      <span id="trust-pill" class="pill" style="display:none;"></span>
+    </div>
     <div id="transcript"><p class="empty">Ingen samtale ennå.</p></div>
   </div>
-
-  <details>
-    <summary>Teknisk logg</summary>
-    <div id="tech-log" style="font-size:12px; color:#8b949e; white-space:pre-wrap; margin-top:6px;"></div>
-  </details>
 </main>
 <div id="status"></div>
 <div id="enroll">
@@ -126,6 +184,7 @@
 <script>
   const wsUrlInput = document.getElementById("ws-url");
   const bigBtn = document.getElementById("big-btn");
+  const muteBtn = document.getElementById("mute-btn");
   const statePill = document.getElementById("state-pill");
   const trustPill = document.getElementById("trust-pill");
   const blockPanel = document.getElementById("block-panel");
@@ -136,6 +195,11 @@
   const enrollPanel = document.getElementById("enroll");
   const enrollForm = document.getElementById("enroll-form");
   const enrollTicket = document.getElementById("enroll-ticket");
+  const liveEl = document.getElementById("live");
+  const barsEl = document.getElementById("bars");
+  const statLatency = document.getElementById("stat-latency");
+  const statRoute = document.getElementById("stat-route");
+  const statTurns = document.getElementById("stat-turns");
 
   // Samme dev-identitet/enhetsautentisering som apps/web/dashboard.html - se
   // D-131-kommentarene der for hvorfor feltene under kun er PÅSTANDER som
@@ -145,10 +209,8 @@
   //
   // D-252: device_id var FØR en literal ("dev-web") DELT av ENHVER nettleser
   // - se samme D-252-kommentar i apps/web/index.html for hele funnet/fiksen.
-  // loadOrCreateDeviceId() under er identisk logikk, samme localStorage-nøkkel.
   // D-342 (host-bevist: "crypto.randomUUID is not a function" over Tailscale/
-  // annen ren HTTP-tilgang) - crypto.randomUUID() krever en "secure context"
-  // (HTTPS/localhost); metoden finnes rett og slett ikke i nettleseren ellers.
+  // annen ren HTTP-tilgang) - crypto.randomUUID() krever en "secure context".
   // Fallback trengs KUN her - dette er en lokal enhets-ID i localStorage
   // (D-252), aldri et kryptografisk hemmelig token.
   function randomUUID() {
@@ -190,6 +252,14 @@
   let playbackCtx = null;
   let nextPlaybackTime = 0;
   const pendingPlaybackSources = [];
+  let micMuted = false;
+  let turns = 0;
+
+  const inShell = window.parent !== window;
+  function tellShell(payload) {
+    if (!inShell) return;
+    try { window.parent.postMessage(payload, location.origin); } catch { /* skallet er valgfritt */ }
+  }
 
   function defaultVoiceWsUrl() {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -198,7 +268,7 @@
   wsUrlInput.value = localStorage.getItem("jarvis.voicewsurl") || defaultVoiceWsUrl();
 
   function techLog(line) {
-    techLogEl.textContent = new Date().toLocaleTimeString("nb-NO") + "  " + line + "\n" + techLogEl.textContent;
+    techLogEl.textContent = new Date().toLocaleTimeString("nb-NO") + "  " + line + "\n" + techLogEl.textContent.slice(0, 20000);
   }
 
   function base64FromBuffer(buffer) {
@@ -261,28 +331,9 @@
   }
 
   /**
-   * D-260 (Tobias direkte i chat, 2026-09-25: gjentatte
-   * "enrollment_ticket_invalid"-feil på tvers av flere ferske billetter - rot-
-   * årsaken var til slutt bekreftet ("skrev feil") å være ren
-   * kopier/lim-inn-korrupsjon av selve billett-strengen (base64url med `-`/`_`
-   * - tegn mobile nettlesere/SSH-klienter ofte tolker som ordgrenser ved
-   * dobbelttrykk-for-å-velge, og som terminalvindu-bredde kan brekke over to
-   * linjer). "slutt å be meg gjøre ting og finn ut av det": en manuell
-   * kopiering av en 44-tegns tilfeldig streng FRA en terminal TIL et
-   * nettleser-skjema er strukturelt feilutsatt uansett hvor forsiktig
-   * brukeren er - løsningen fjerner selve kopisteget, ikke instruksjonen om
-   * hvordan å kopiere forsiktig.
-   *
-   * `submitEnrollment()` er delt av BEGGE innrulleringsveiene under: det
-   * manuelle skjemaet (uendret, i tilfelle billett-URL-en av en eller annen
-   * grunn ikke kan brukes) OG `tryAutoEnrollFromUrl()`, som leser billetten
-   * fra `?enroll=`-spørringsparameteren i selve siden sin URL i stedet for et
-   * skjemafelt - `enroll-ticket-main.ts` skriver nå (når
-   * `JARVIS_PUBLIC_VOICE_BASE_URL` er satt) en FULLSTENDIG, KLIKKBAR lenke
-   * til akkurat denne URL-en. De fleste SSH-klienter/terminaler (Termius,
-   * iTerm, Windows Terminal, PuTTY m.fl.) gjenkjenner en `https://`-lenke i
-   * output og gjør den klikkbar - null manuell tekstseleksjon, null
-   * kopier/lim-inn av selve billett-strengen i det hele tatt.
+   * D-260: en manuell kopiering av en 44-tegns tilfeldig streng FRA en terminal TIL et nettleser-skjema er strukturelt
+   * feilutsatt - `enroll-ticket-main.ts` skriver en KLIKKBAR `?enroll=`-lenke hit. `submitEnrollment()` er delt av BEGGE
+   * innrulleringsveiene (manuelt skjema og `tryAutoEnrollFromUrl()`).
    */
   async function submitEnrollment(ticket) {
     try {
@@ -304,11 +355,8 @@
   });
 
   /**
-   * Leser `?enroll=<billett>` fra siden sin EGEN URL (aldri fra et skjema)
-   * og fjerner den fra adresselinjen UMIDDELBART via `history.replaceState()`
-   * - FØR selve innrulleringsforsøket - slik at en billett (engangs per
-   * design) aldri blir stående synlig i nettleserhistorikken/bokmerker, og en
-   * siderefresh aldri kan forsøke å gjenbruke en allerede konsumert billett.
+   * Leser `?enroll=<billett>` fra siden sin EGEN URL (aldri fra et skjema) og fjerner den fra adresselinjen
+   * UMIDDELBART via `history.replaceState()` - FØR selve innrulleringsforsøket.
    */
   function tryAutoEnrollFromUrl() {
     const ticket = new URLSearchParams(location.search).get("enroll");
@@ -329,26 +377,27 @@
     if (transcriptEl.querySelector(".empty")) transcriptEl.innerHTML = "";
     const div = document.createElement("div");
     div.className = "turn " + role;
-    div.innerHTML = '<div class="label">' + (role === "user" ? "Du" : "Jarvis") + '</div>' + escapeHtml(text);
+    const when = new Date().toLocaleTimeString("nb-NO", { hour: "2-digit", minute: "2-digit" });
+    div.innerHTML = '<div class="label">' + (role === "user" ? "Du" : role === "tool" ? "Verktøy" : "Jarvis") + " · " + when + '</div>' + escapeHtml(text);
     transcriptEl.appendChild(div);
-    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    div.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
+  function setState(state) {
+    statePill.className = "pill state-" + state;
+    statePill.textContent = state === "idle" ? "klar" : state === "listening" ? "lytter" : state === "thinking" ? "tenker" : state === "speaking" ? "snakker" : state === "interrupted" ? "avbrutt" : state;
+    document.body.dataset.state = state; // D-382: orb-animasjonen (ren CSS) følger samme tilstand
+    tellShell({ jarvis: "voice-state", state: ws ? state : "offline" });
+    if (state !== "listening") liveEl.textContent = "";
   }
 
   /**
    * D-212 (task #120, Q-32 punkt 1 - HARD EKSTERN/JURIDISK BLOKKERING).
-   * `speech_routing_denied_stt:<outcome>`/`speech_routing_denied_tts:<outcome>`
-   * betyr at `packages/contracts/src/speech.ts` sin `evaluateSpeechRouting()`
-   * NEKTET denne konkrete forespørselen. **OPPDATERT (D-226, 2026-09-22):**
-   * `processor_terms_status` på OpenAI-radene er nå faktisk `VERIFIED` (Tobias
-   * bekreftet region/databehandleravtale/treningsvilkår/retensjon selv) -
-   * denne meldingen dukker derfor IKKE lenger opp for ethvert kall, kun for de
-   * to gjenværende, UENDRET håndhevede grensene: `health`-space (D-23,
-   * `DENIED_SENSITIVE_SPACE_REQUIRES_LOCAL_PROCESSOR` - krever ALLTID en
-   * lokal behandler, uansett vilkårsstatus) og en klient-oppgitt, ikke
-   * server-verifisert space (D-123, `DENIED_MEMORY_SPACE_NOT_SERVER_VERIFIED`).
-   * Dette er IKKE feil Jarvis/Claude skal "rette" - de er de tilsiktede,
-   * gjenværende sikkerhetsgrensene. Panelet under forklarer dette ÆRLIG i
-   * stedet for å se ut som en generisk feil - se docs/OPEN_QUESTIONS.md Q-32.
+   * `speech_routing_denied_stt:<outcome>`/`speech_routing_denied_tts:<outcome>` betyr at `evaluateSpeechRouting()`
+   * NEKTET denne konkrete forespørselen. OPPDATERT (D-226): `processor_terms_status` på OpenAI-radene er nå `VERIFIED`
+   * - denne meldingen dukker derfor kun opp for de to gjenværende, UENDRET håndhevede grensene: `health`-space (D-23,
+   * krever ALLTID en lokal behandler) og en klient-oppgitt, ikke server-verifisert space (D-123). Dette er IKKE feil
+   * Jarvis/Claude skal "rette" - se docs/OPEN_QUESTIONS.md Q-32.
    */
   function showBlockPanel(kind) {
     blockPanel.style.display = "block";
@@ -369,34 +418,49 @@
     device_authority_revoked: "Enhetens nøkkel ble tilbakekalt akkurat idet sesjonen skulle utstedes."
   };
 
+  function showMetrics(m) {
+    if (!m) return;
+    turns += 1;
+    statTurns.textContent = turns + (turns === 1 ? " tur" : " turer") + (m.cancelled ? " · siste avbrutt" : "");
+    const ms = typeof m.end_of_speech_to_first_audio_ms === "number" ? m.end_of_speech_to_first_audio_ms : null;
+    if (ms !== null) {
+      statLatency.textContent = (ms / 1000).toFixed(2) + " s";
+      statLatency.className = "v " + (ms < 1500 ? "good" : ms < 3500 ? "slow" : "bad");
+    }
+    if (m.routed) statRoute.textContent = m.routed;
+    tellShell({ jarvis: "voice-metrics", ms: ms === null ? undefined : ms, routed: m.routed || "" });
+  }
+
   function handleServerMessage(msg) {
     techLog(JSON.stringify(msg).slice(0, 300));
     switch (msg.type) {
       case "started": {
         const authority = msg.memory_space_authority;
-        trustPill.style.display = "inline-block";
+        trustPill.style.display = "inline-flex";
         trustPill.className = "pill trust-" + String(authority).toLowerCase();
         trustPill.textContent = authority === "SERVER_VERIFIED" ? "enhet bevist" : "enhet IKKE bevist (kun lokal tale)";
-        statusEl.textContent = "Tilkoblet.";
+        statusEl.textContent = "Tilkoblet - snakk når du vil.";
         startMicCapture();
+        muteBtn.disabled = false;
         break;
       }
       case "state": {
-        statePill.className = "pill state-" + msg.state;
-        statePill.textContent = msg.state;
-        document.body.dataset.state = msg.state; // D-382: orb-animasjonen (ren CSS) følger samme tilstand
+        setState(msg.state);
         break;
       }
       case "partial":
+        // D-387: vis det Jarvis hører MENS du snakker - ren visning, aldri grunnlag for noe.
+        if (typeof msg.text === "string") liveEl.textContent = msg.text.slice(-160);
         break;
       case "final":
+        liveEl.textContent = "";
         if (msg.text) appendTurn("user", msg.text);
         break;
       case "reply":
         if (msg.reply) appendTurn("jarvis", msg.reply);
         break;
       case "tool_activity":
-        if (msg.activity) statusEl.textContent = msg.activity;
+        if (msg.activity) { statusEl.textContent = msg.activity; appendTurn("tool", msg.activity); }
         break;
       case "tts_frame":
         playTtsFrame(msg.data);
@@ -405,6 +469,7 @@
         stopPlayback();
         break;
       case "metrics":
+        showMetrics(msg.metrics);
         break;
       case "error": {
         const error = String(msg.error || "");
@@ -431,6 +496,32 @@
       default:
         break;
     }
+  }
+
+  // --- Nivåvisning: orb + stolper drives av RMS fra de samme PCM-rammene som sendes (ingen ekstra lydgraf). ---
+  let micLevel = 0;
+  let ttsLevel = 0;
+  let levelRaf = 0;
+  const bars = Array.from(barsEl.children);
+  function levelLoop() {
+    micLevel *= 0.85;
+    ttsLevel *= 0.9;
+    document.documentElement.style.setProperty("--level", micMuted ? "0" : micLevel.toFixed(3));
+    document.documentElement.style.setProperty("--tts", ttsLevel.toFixed(3));
+    const lvl = Math.max(micMuted ? 0 : micLevel, ttsLevel);
+    bars.forEach((b, i) => {
+      const phase = Math.abs(i - (bars.length - 1) / 2) / (bars.length / 2);
+      const h = 4 + Math.max(0, lvl - phase * 0.35) * 48;
+      b.style.height = Math.min(26, h) + "px";
+      b.style.background = ttsLevel > micLevel ? "var(--info)" : "var(--accent)";
+    });
+    levelRaf = requestAnimationFrame(levelLoop);
+  }
+  function pushMicLevel(float32) {
+    let sum = 0;
+    for (let i = 0; i < float32.length; i += 4) sum += float32[i] * float32[i];
+    const rms = Math.sqrt(sum / Math.max(1, float32.length / 4));
+    micLevel = Math.max(micLevel, Math.min(1, rms * 6));
   }
 
   // --- Mikrofonopptak: PCM16 mono 16kHz, samme format OpenAiStt forventer (stt.ts). ---
@@ -461,41 +552,13 @@
 
   function startMicCapture() {
     if (!micStream) return;
-    // D-265 (Tobias direkte i chat, live NAS-test MED D-263/D-264 sin nye
-    // whisper.cpp-stderr-diagnostikk på): whisper.cpp brukte EKTE encode-tid
-    // (opptil ~1,7s) proporsjonalt med lydlengden på flere ytringer (0,3-1,6
-    // sekund reell tale-energi, IKKE bare "for kort") - og produserte likevel
-    // KONSEKVENT null tokens, uten noen "no speech detected"-advarsel. Det
-    // beviser lyden når whisper sin encoder, men encoderen finner ingen
-    // gjenkjennbar tale i den - ulikt vår egen grovt energibaserte VAD (som
-    // KUN måler volum og derfor ikke reagerer på dette i det hele tatt).
-    // Root cause: `downsampleTo16kMono()` under gjør REN lineær interpolasjon
-    // fra nettleserens native mikrofonrate (typisk 44,1/48 kHz) ned til 16
-    // kHz UTEN et anti-alias-lavpassfilter FØRST - en kjent, veldokumentert
-    // kilde til nettopp denne typen forvrengning: høyfrekvent innhold foldes
-    // tilbake som støy og ødelegger den fonetiske informasjonen en ASR-modell
-    // er avhengig av, MENS den rene lyd-ENERGIEN (det vår EnergyVad faktisk
-    // måler) forblir uendret - PRESIST forklarer hvorfor VAD-en så "ekte tale"
-    // mens whisper.cpp konsekvent fant ingenting.
-    // Fiks: be nettleseren selv resample til 16 kHz direkte i AudioContext-
-    // konstruktøren (samme mønster som `ensurePlaybackCtx()` sin
-    // `new AudioContext({ sampleRate: 24000 })` under) - plattformens EGEN
-    // resampler bruker korrekt anti-alias-filtrering, i motsetning til vår
-    // hånd-rullede interpolasjon. `downsampleTo16kMono()` sin
-    // `inRate === 16000`-tidligretur gjør dette til en ren no-op i det vanlige
-    // tilfellet (funksjonen beholdes KUN som et forsvarsnett for nettlesere
-    // som ignorerer `sampleRate`-hintet).
+    // D-265 (live NAS-test): whisper.cpp fant konsekvent null tokens selv med ekte tale-energi - root cause var
+    // `downsampleTo16kMono()` sin rene lineære interpolasjon fra 44,1/48 kHz UTEN anti-alias-lavpass. Fiks: be
+    // nettleseren selv resample til 16 kHz direkte i AudioContext-konstruktøren (plattformens egen resampler
+    // bruker korrekt anti-alias-filtrering). `downsampleTo16kMono()` beholdes KUN som forsvarsnett.
     captureCtx = new AudioContext({ sampleRate: 16000 });
-    // D-269: D-265 sin fiks ANTAR at nettleseren faktisk innvilger
-    // `{ sampleRate: 16000 }`-hintet - men AudioContext-konstruktøren
-    // GARANTERER det ALDRI (spesifikasjonen tillater implementasjonen å
-    // koerse til en annen, plattform-/enhet-støttet rate uten å kaste feil).
-    // Gjør DERFOR den faktiske, forhandlede raten synlig direkte i
-    // tech-loggen (ingen ny terminal-runde nødvendig) - er den IKKE nøyaktig
-    // 16000, kjører `downsampleTo16kMono()` sin hånd-rullede
-    // interpolasjons-forsvarsnett fortsatt, og D-265 sin anti-alias-fiks er
-    // FAKTISK ikke i effekt på denne enheten/nettleseren, selv om koden ser
-    // riktig ut.
+    // D-269: AudioContext-konstruktøren GARANTERER ALDRI at `{ sampleRate: 16000 }` innvilges - gjør den faktiske,
+    // forhandlede raten synlig i tech-loggen.
     techLog("mic captureCtx.sampleRate = " + captureCtx.sampleRate + (captureCtx.sampleRate !== 16000 ? " (AVVIK - nettleseren ignorerte 16000-hintet, downsampleTo16kMono() sin interpolasjon er AKTIV)" : " (OK - direkte 16kHz, ingen interpolasjon)"));
     const source = captureCtx.createMediaStreamSource(micStream);
     // ScriptProcessorNode er deprecated men uten byggetrinn er det den enkleste
@@ -504,7 +567,9 @@
     captureNode.onaudioprocess = (event) => {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       const input = event.inputBuffer.getChannelData(0);
-      const downsampled = downsampleTo16kMono(input, captureCtx.sampleRate);
+      pushMicLevel(input);
+      // Dempet: send stillhet i stedet for ingenting, så gatewayens VAD/turn-taking ser en levende, stille strøm.
+      const downsampled = micMuted ? new Float32Array(downsampleTo16kMono(input, captureCtx.sampleRate).length) : downsampleTo16kMono(input, captureCtx.sampleRate);
       const pcm16 = float32ToPcm16(downsampled);
       ws.send(JSON.stringify({ type: "audio", data: base64FromBuffer(pcm16.buffer) }));
     };
@@ -516,12 +581,18 @@
     silentGain.gain.value = 0;
     captureNode.connect(silentGain);
     silentGain.connect(captureCtx.destination);
+    if (!levelRaf) levelLoop();
   }
 
   function stopMicCapture() {
     if (captureNode) { captureNode.disconnect(); captureNode.onaudioprocess = null; captureNode = null; }
     if (captureCtx) { void captureCtx.close(); captureCtx = null; }
     if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+    if (levelRaf) { cancelAnimationFrame(levelRaf); levelRaf = 0; }
+    micLevel = 0; ttsLevel = 0;
+    document.documentElement.style.setProperty("--level", "0");
+    document.documentElement.style.setProperty("--tts", "0");
+    bars.forEach((b) => { b.style.height = "4px"; });
   }
 
   // --- TTS-avspilling: PCM16 mono 24kHz (OpenAI /v1/audio/speech response_format "pcm"). ---
@@ -541,17 +612,15 @@
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     const pcm16 = new Int16Array(bytes.buffer);
     const float32 = new Float32Array(pcm16.length);
-    for (let i = 0; i < pcm16.length; i++) float32[i] = pcm16[i] / 0x8000;
+    let sum = 0;
+    for (let i = 0; i < pcm16.length; i++) { float32[i] = pcm16[i] / 0x8000; sum += float32[i] * float32[i]; }
+    ttsLevel = Math.max(ttsLevel, Math.min(1, Math.sqrt(sum / Math.max(1, pcm16.length)) * 5));
     const buffer = ctx.createBuffer(1, float32.length, 24000);
     buffer.copyToChannel(float32, 0);
     const source = ctx.createBufferSource();
     source.buffer = buffer;
-    // D-249: tilstøtende PCM-rammer stitches sammen med harde kanter - et
-    // spenningssprang ved hver rammegrense der bølgeformen ikke krysser null
-    // høres ut som klikk/skurr, forsterket av at rammer fra nettverket ikke
-    // alltid ankommer jevnt. En kort lineær fade inn/ut (maks 3ms, eller
-    // halve rammens lengde for svært korte rammer) fjerner spranget uten
-    // hørbart tap av lyd.
+    // D-249: tilstøtende PCM-rammer stitches sammen med harde kanter - en kort lineær fade inn/ut (maks 3ms)
+    // fjerner klikk/skurr uten hørbart tap av lyd.
     const gain = ctx.createGain();
     const fadeSeconds = Math.min(0.003, buffer.duration / 2);
     source.connect(gain);
@@ -576,6 +645,7 @@
       try { source.stop(); } catch { /* allerede stoppet */ }
     }
     if (playbackCtx) nextPlaybackTime = playbackCtx.currentTime;
+    ttsLevel = 0;
   }
 
   // --- Tilkobling ---
@@ -583,55 +653,31 @@
   function setConnected(active) {
     bigBtn.textContent = active ? "Avslutt samtale" : "Start samtale";
     bigBtn.className = active ? "active" : "";
+    if (!active) { muteBtn.disabled = true; setMuted(false); }
   }
+
+  function setMuted(on) {
+    micMuted = on;
+    muteBtn.classList.toggle("on", on);
+    document.body.dataset.muted = on ? "1" : "0";
+    muteBtn.title = on ? "Slå på mikrofonen (M)" : "Demp mikrofonen (M)";
+    if (ws) statusEl.textContent = on ? "Mikrofonen er dempet." : "Tilkoblet - snakk når du vil.";
+  }
+  muteBtn.addEventListener("click", () => { if (!muteBtn.disabled) setMuted(!micMuted); });
 
   async function startConversation() {
     bigBtn.disabled = true;
     statusEl.textContent = "Ber om mikrofontilgang …";
     blockPanel.style.display = "none";
     trustPill.style.display = "none";
-    // D-259 (Tobias direkte i chat, 2026-09-25: "jeg sa bare hei Charlie så
-    // kommer alt dette tøyset" - en skjermdump viste en lang, urelatert
-    // samtale om undertekster/AI-Media-kreditering han aldri sa noe om
-    // akkurat da). Root cause: `appendTurn()` la ALLTID til nederst i
-    // `transcriptEl`, uten at NOE sted tømte den mellom samtaler - i en
-    // nettleserfane holdt åpen over flere test-økter (vanlig gjennom en hel
-    // D-25x-debug-runde) hopet gamle, urelaterte turer seg opp, og en helt
-    // NY samtale startet stille nederst i den lange loggen i stedet for
-    // synlig fra bunnen av et tomt panel. Tømmes derfor eksplisitt HER, ved
-    // hvert "Start samtale"-klikk - selve WebSocket-sesjonen/backend-turene
-    // var aldri sammenblandet (kun den VISUELLE nettleser-siden), så dette
-    // er en ren UI-fiks, ingen endring i selve tale-/autorisasjonslogikken.
+    liveEl.textContent = "";
+    // D-259: transcript-panelet tømmes ved HVERT "Start samtale"-klikk - ingen stille sammenblanding av flere økter i én fane.
     transcriptEl.innerHTML = '<p class="empty">Ingen samtale ennå.</p>';
     try {
       if (!deviceKey) deviceKey = await loadOrCreateDeviceKey();
-      // D-249: uten `echoCancellation` plukker mikrofonen ofte opp Jarvis sin
-      // egen TTS-lyd fra høyttaleren (spesielt på telefon, mikrofon og
-      // høyttaler fysisk nær hverandre) - energibasert VAD (server.ts/vad.ts)
-      // tolker dette som barge-in, kutter TTS midt i setningen og forgifter
-      // STT-transkripsjonen med Jarvis sin egen stemme. `echoCancellation`
-      // beholdes derfor.
-      //
-      // D-276 (live NAS-funn, ETTER D-275 sin VAD-hangover-fiks): en FULL,
-      // usplittet 9,7 sekunders ytring (bevist ved `voice_vad_transition`
-      // KUN speech_start+end_of_turn, ingen fragmentering) ga FORTSATT
-      // `stdout_raw_length:0`/`text_length:0` - til tross for ekte,
-      // flerrunde dekodingsarbeid og RMS-energimønster som ser ut som ekte
-      // tale (0,05-0,30). D-274 har allerede bevist HELE resten av kjeden
-      // (WAV-header/stdin/modell/NAS-miljø) korrekt mot en KJENT god lydfil -
-      // symptomet peker derfor nå mot selve LYDINNHOLDET som fanges, ikke
-      // lenger mot segmentering/rørledning/modell. `noiseSuppression` (WebRTC
-      // sin nettleser-interne støyfjerning) er en kjent, dokumentert kilde
-      // til PRESIST dette mønsteret - amplityde/RMS-energien bevares
-      // (algoritmen fjerner ALDRI all lydenergi), men den spektrale/fonetiske
-      // strukturen tale-modeller trenger kan bli kraftig forvrengt av
-      // aggressiv spektral gating, spesielt for ikke-engelsk tale slike
-      // algoritmer ofte er dårligere kalibrert mot. Deaktivert her som neste,
-      // målrettet diagnostikk-variabel (ISOLERT - `echoCancellation`/
-      // `autoGainControl` UENDRET, én endring om gangen, D-41-disiplin) -
-      // IKKE ennå bevist årsaken, kun den mest sannsynlige gjenværende
-      // kandidaten etter at alt annet er kildekode-/live-verifisert korrekt.
-      // Se D-276 i DECISIONS_AND_ASSUMPTIONS.md.
+      // D-249: `echoCancellation` beholdes (uten den plukker mikrofonen opp Jarvis sin egen TTS og VAD tolker det som
+      // barge-in). D-276: `noiseSuppression: false` - WebRTC-støyfjerning bevarer energien men forvrenger den
+      // fonetiske strukturen tale-modeller trenger (spesielt norsk); `autoGainControl` UENDRET. Se D-276.
       micStream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: true }
       });
@@ -651,23 +697,17 @@
           device_proof: { challenge, signature }
         }));
         setConnected(true);
+        tellShell({ jarvis: "voice-state", state: "idle" });
       });
       ws.addEventListener("message", (ev) => {
-        // D-258: brukte tidligere en generisk melding uten detalj her - da
-        // rot-årsaken var en klient-side `Int16Array`-RangeError (se
-        // apps/voice-gateway/src/session.ts sin `alignPcm16Frames()`-
-        // kommentar for hele funnet), var denne linjen ALENE grunnen til at
-        // Tobias måtte lime inn full teknisk logg for at feilen kunne
-        // spores i det hele tatt. `err.message` (og et par tegn av selve
-        // meldingen, til hjelp når JSON.parse selv feiler) gjør fremtidige
-        // tilsvarende feil synlige direkte i "Teknisk logg"-panelet.
+        // D-258: `err.message` (og et par tegn av selve meldingen) gjør fremtidige feil synlige direkte i "Teknisk logg".
         try { handleServerMessage(JSON.parse(ev.data)); } catch (err) {
           techLog("ugyldig melding fra server: " + (err && err.message ? err.message : String(err)) +
             " (rå: " + String(ev.data).slice(0, 120) + ")");
         }
       });
       ws.addEventListener("close", () => { techLog("WebSocket lukket."); stopConversation(); });
-      ws.addEventListener("error", () => { techLog("WebSocket-feil."); statusEl.textContent = "Tilkoblingsfeil mot voice-gateway."; });
+      ws.addEventListener("error", () => { techLog("WebSocket-feil."); statusEl.textContent = "Tilkoblingsfeil mot voice-gateway (" + url + "). Kjører gatewayen, og er adressen riktig under «Tilkobling»?"; });
     } catch (err) {
       statusEl.textContent = "Feil: " + err.message;
       stopConversation();
@@ -684,12 +724,23 @@
     statePill.className = "pill state-idle";
     statePill.textContent = "idle";
     document.body.dataset.state = "idle";
+    liveEl.textContent = "";
+    tellShell({ jarvis: "voice-state", state: "offline" });
   }
 
   bigBtn.addEventListener("click", () => {
     if (ws) { stopConversation(); statusEl.textContent = "Frakoblet."; }
     else { void startConversation(); }
   });
+
+  // Hurtigtaster: mellomrom starter/stopper, M demper - kun når fokus ikke står i et skrivefelt.
+  document.addEventListener("keydown", (e) => {
+    const tag = (e.target && e.target.tagName) || "";
+    if (tag === "INPUT" || tag === "TEXTAREA" || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === " ") { e.preventDefault(); if (!bigBtn.disabled) bigBtn.click(); }
+    else if (e.key.toLowerCase() === "m") { e.preventDefault(); if (!muteBtn.disabled) setMuted(!micMuted); }
+  });
+  tellShell({ jarvis: "voice-state", state: "offline" });
 </script>
 </body>
 </html>

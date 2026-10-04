@@ -37,6 +37,11 @@ const tenantB: IdentityContext = {
 class CountingEmbedding implements EmbeddingProvider {
   readonly model = "counting-local-hash-v1";
   readonly dim: number;
+  readonly locality = "local" as const;
+  readonly minSimilarity = 0.6;
+  async embedBatch(texts: string[]): Promise<number[][]> {
+    return Promise.all(texts.map((t) => this.embed(t)));
+  }
   calls = 0;
   private readonly inner = new LocalHashEmbedding();
   constructor() {

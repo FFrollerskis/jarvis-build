@@ -43,7 +43,12 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   const result = empty();
   const tv = [tenantId, space];
   const spaceCol = "space = $2";
-  for (const table of ["memory_versions", "memory_item_entities", "embeddings", "relations", "entities", "summaries", "decisions", "commitments", "deadlines", "memory_items"]) {
+  // D-386 Minne v2: memory_links (FK-kaskade fra memory_items, slettes likevel eksplisitt først), memory_vectors (polymorf,
+  // ingen FK), memory_episodes (verbatim ytringer) og memory_profiles (kompilert profil) - alle (tenant_id, space)-skopet.
+  for (const table of [
+    "memory_links", "memory_vectors", "memory_episodes", "memory_profiles",
+    "memory_versions", "memory_item_entities", "embeddings", "relations", "entities", "summaries", "decisions", "commitments", "deadlines", "memory_items"
+  ]) {
     add(result, table, await run(client, mode, table, `tenant_id = $1 AND ${spaceCol}`, tv));
   }
   if (mode === "delete") {
