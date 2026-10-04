@@ -57,6 +57,10 @@ const RETRYABLE_HTTP_STATUS: ReadonlySet<number> = new Set([429, 500, 502, 503, 
 const MAX_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 500;
 
+import { toOreInteger } from "./ore.ts";
+
+import { financeSignal, isRetrySafe } from "./http.ts";
+
 export class StripeApiError extends Error {
   constructor(
     message: string,
@@ -162,6 +166,7 @@ export class StripeTransport {
     let lastError: StripeApiError | null = null;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const response = await fetch(`${STRIPE_API_BASE}${path}`, {
+        signal: financeSignal(),
         method,
         headers: {
           authorization: `Bearer ${this.secretKey}`,
@@ -176,7 +181,7 @@ export class StripeTransport {
       }
       const rawBody = await response.text().catch(() => "");
       const { summary, errorType } = classifyStripeErrorBody(rawBody);
-      const retryable = RETRYABLE_HTTP_STATUS.has(response.status);
+      const retryable = RETRYABLE_HTTP_STATUS.has(response.status) && isRetrySafe(method, response.status, idempotencyKey !== undefined);
       lastError = new StripeApiError(`stripe_api_failed_${response.status}:${summary}`, response.status, retryable, errorType);
       if (!retryable || attempt === MAX_ATTEMPTS) throw lastError;
       await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
@@ -197,7 +202,7 @@ export class StripeTransport {
       "POST",
       "/payment_intents",
       {
-        amount: input.amountOre,
+        amount: toOreInteger(input.amountOre),
         currency: input.currency.toLowerCase(),
         "automatic_payment_methods[enabled]": true,
         "automatic_payment_methods[allow_redirects]": "never",
@@ -217,7 +222,7 @@ export class StripeTransport {
       "/refunds",
       {
         payment_intent: input.stripePaymentIntentId,
-        amount: input.amountOre,
+        amount: toOreInteger(input.amountOre),
         ...(input.reason !== undefined ? { reason: input.reason } : {})
       },
       input.idempotencyKey

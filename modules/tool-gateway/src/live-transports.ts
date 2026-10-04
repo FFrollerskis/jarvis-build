@@ -6,7 +6,8 @@ import {
   assertSingleEmailAddress,
   UnsafeOutboundParameterError,
   encodePathSegment,
-  guardedFetch
+  guardedFetch,
+  isRetrySafeStatus
 } from "./url-safety.ts";
 import { createHash, createHmac } from "node:crypto";
 import type pg from "pg";
@@ -1464,7 +1465,7 @@ async function githubFetchRaw(url: string, init: RequestInit, controller?: Githu
       const rawBody = await response.text().catch(() => "");
       const outcome = controller ? await controller.recordOutcome(mutation, response.status, response.headers, rawBody) : undefined;
       const rateLimitClassified = outcome?.kind === "PRIMARY_RATE_LIMIT" || outcome?.kind === "SECONDARY_RATE_LIMIT";
-      const retryable = GITHUB_RETRYABLE_STATUS.has(response.status) && !rateLimitClassified;
+      const retryable = GITHUB_RETRYABLE_STATUS.has(response.status) && !rateLimitClassified && isRetrySafeStatus(init.method, response.status);
       lastError = new GithubApiError(
         `github_api_error_${response.status}:${classifyGithubErrorBody(rawBody)}`, response.status, retryable,
         outcome && outcome.kind !== "OK" && outcome.kind !== "OTHER" ? outcome.kind : undefined

@@ -662,12 +662,23 @@ export class ToolGateway {
     // håndheves separat (in-memory `executed`-cache i
     // ModelGateway.completeWithTools, modules/model-gateway/src/model-gateway.ts).
     const dedupeApplies = definition.capability_class !== "A";
+    const tenantId = request.identity.tenant_id;
+    const ledgerKey = dedupeApplies && request.idempotency_key ? request.idempotency_key : undefined;
     let classDOutcome: { outcome: "executed" | "unverified"; external_id: string | null } | undefined;
-    const result = await withTenantTransaction<ToolResult>(this.pool, request.identity.tenant_id, async (client) => {
-      if (dedupeApplies && request.idempotency_key) {
+
+    // D-392 (JARVIS-004/022) fase 1 - RESERVER: raden committes FØR leverandørkallet, og ingen DB-forbindelse holdes åpen over nettverket.
+    // Står raden igjen som 'reserved' (krasj/SIGKILL/audit-feil midt i kallet) er utfallet UKJENT og en retry utfører ALDRI en ny mutasjon.
+    if (ledgerKey !== undefined) {
+      const gate = await withTenantTransaction<ToolResult | null>(this.pool, tenantId, async (client) => {
+        const inserted = await client.query(
+          `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, status, before_state)
+           VALUES ($1, $2, $3, $4, 'reserved', $5) ON CONFLICT DO NOTHING`,
+          [tenantId, ledgerKey, request.tool_id, request.action, JSON.stringify(beforeState)]
+        );
+        if (inserted.rowCount === 1) return null;
         const prior = await client.query(
           "SELECT external_id, status, postcondition_reason FROM tool_executions WHERE idempotency_key = $1",
-          [request.idempotency_key]
+          [ledgerKey]
         );
         const row = prior.rows[0] as
           | { external_id: string | null; status: string; postcondition_reason: string | null }
@@ -684,13 +695,8 @@ export class ToolGateway {
             deduplicated: true
           } as const;
         }
-        // Q-34 P2-oppfølging (uavhengig arkitektkontroll av PR #82,
-        // EXACT_HEAD_SHA 91b0168): den FØRSTE gjennomkjøringen kunne ikke
-        // bekrefte resultatet (`status='unverified'`, migrasjon 054) - en
-        // retry med SAMME idempotency_key skal ALDRI utløse en ny mutasjon
-        // (den forrige kan strukturelt allerede ha skjedd), men skal OGSÅ
-        // ALDRI tilfeldig bli en ok:true. Den MÅ se det NØYAKTIG samme sanne,
-        // ikke-suksessfulle resultatet som den opprinnelige kalleren fikk.
+        // Q-34 P2-oppfølging: en retry med SAMME idempotency_key etter `unverified` skal ALDRI utløse en ny mutasjon og ALDRI bli ok:true -
+        // den ser NØYAKTIG det samme sanne, ikke-suksessfulle resultatet som den opprinnelige kalleren fikk.
         if (row?.status === "unverified") {
           await writeAudit(client, request.identity, { ...corr,
             type: "tool.postcondition_unverified", decision: "ALLOW",
@@ -699,33 +705,53 @@ export class ToolGateway {
           });
           return { ok: false, reason: row.postcondition_reason ?? "postcondition_unverified:replayed" } as const;
         }
-      }
-      let external: { external_id?: string; data?: JsonValue };
-      try {
-        external = await withTimeout(
-          definition.transport.invoke(request.action, request.parameters, credential, invocationContext),
-          definition.timeout_ms
-        );
-      } catch (err) {
-        const message = (err as Error).message;
-        this.setHealth(request.tool_id,
-          /401|403|auth/.test(message) ? "auth_failed" : /429|rate/.test(message) ? "rate_limited" : "unavailable",
-          message.slice(0, 60));
-        // Kontrollert feil: revoked credential/timeout/providerfeil åpner ingenting.
+        if (row?.status === "failed") {
+          // Leverandøren avviste forrige forsøk (ingen bekreftet bivirkning): re-arm raden atomisk; kun én samtidig retry vinner.
+          const rearmed = await client.query(
+            `UPDATE tool_executions SET status = 'reserved', executed_at = now(), before_state = $2, postcondition_reason = NULL
+              WHERE idempotency_key = $1 AND status = 'failed'`,
+            [ledgerKey, JSON.stringify(beforeState)]
+          );
+          if (rearmed.rowCount === 1) return null;
+        }
         await writeAudit(client, request.identity, { ...corr,
-          type: "tool.failed", decision: "DENY", reason: (err as Error).message.slice(0, 120),
-          tool_id: request.tool_id, action: request.action,
-          capability_class: definition.capability_class,
-          payload: { credential_ref: definition.credential_ref }
+          type: "tool.execution_in_flight", decision: "DENY", reason: "execution_in_flight_or_outcome_unknown",
+          tool_id: request.tool_id, action: request.action, capability_class: definition.capability_class,
+          payload: { status: row?.status ?? null }
         });
-        return { ok: false, reason: `tool_failed:${(err as Error).message.slice(0, 80)}` } as const;
-      }
-      let afterState: JsonValue | null = null;
+        return { ok: false, reason: "execution_in_flight_or_outcome_unknown" } as const;
+      });
+      if (gate !== null) return gate;
+    }
+
+    // Fase 2 - UTFØR utenfor transaksjon (JARVIS-022): leverandørkall, preflight og readback holder ingen pool-forbindelse, så nøstede
+    // `execute()`-kall (eksekutiv/komposisjoner) kan ikke tømme poolen og deadlocke.
+    let external: { external_id?: string; data?: JsonValue } = {};
+    let failure: { message: string; timedOut: boolean } | undefined;
+    try {
+      external = await withTimeout(
+        definition.transport.invoke(request.action, request.parameters, credential, invocationContext),
+        definition.timeout_ms
+      );
+    } catch (err) {
+      const message = (err as Error).message;
+      failure = { message, timedOut: message === "tool_timeout" };
+      this.setHealth(request.tool_id,
+        /401|403|auth/.test(message) ? "auth_failed" : /429|rate/.test(message) ? "rate_limited" : "unavailable",
+        message.slice(0, 60));
+    }
+
+    let afterState: JsonValue | null = null;
+    let postconditionReason: string | null = null;
+    if (!failure) {
       let readbackFailed = false;
       let readbackAbsent = false;
       if (needsEvidence) {
         try {
-          const post = await definition.transport.invoke(definition.preflight_action!, request.parameters, credential, invocationContext);
+          const post = await withTimeout(
+            definition.transport.invoke(definition.preflight_action!, request.parameters, credential, invocationContext),
+            definition.timeout_ms
+          );
           afterState = post.data ?? null;
         } catch (err) {
           afterState = null; // readback-feil skjuler aldri at handlingen skjedde - audit under
@@ -734,16 +760,7 @@ export class ToolGateway {
           else readbackFailed = true;
         }
       }
-      // Q-34 P1-oppfølging: for et verktøy som EKSPLISITT lover
-      // resultatverifisering (`postcondition_predicate`), avgjør om
-      // etter-tilstanden faktisk BEKREFTER den tiltenkte nye tilstanden.
-      // `postconditionReason` er `null` NÅR OG BARE NÅR verifisert - både
-      // returverdien OG (Q-34 P2) den lagrede raden bruker NØYAKTIG samme
-      // strengverdi, slik at en senere replay kan gi et IDENTISK, ikke bare
-      // et generisk, avslag. Uendret `null` (verifisert) for ALT uten
-      // `postcondition_predicate` satt - samme opt-in-disiplin som resten av
-      // Q-34-lukkingen.
-      let postconditionReason: string | null = null;
+      // Q-34 P1-oppfølging: `postconditionReason` er `null` NÅR OG BARE NÅR verifisert (kun for verktøy som lover verifisering).
       if (classDGoverned && definition.class_d_profile === "outbound_message") {
         // Del 3: leverandørens bekreftede ID er etterbetingelsen for en utgående melding.
         if (!external.external_id) postconditionReason = "postcondition_unverified:no_provider_id";
@@ -756,13 +773,7 @@ export class ToolGateway {
         } else if (afterState === null) {
           postconditionReason = "postcondition_unverified:target_missing";
         } else {
-          // Q-34 P2-oppfølging: `postcondition_predicate` er UTVIDELSESKODE
-          // (definert av HVERT enkelt verktøy, ikke av gatewayen selv) og
-          // kjøres INNI transaksjonen - en kastet feil her (f.eks. et
-          // uventet/malformert providersvar) skal IKKE la unntaket boble opp
-          // og abortere transaksjonen (som ville tapt audit/tool_executions-
-          // bevismaterialet for en mutasjon som FAKTISK skjedde), men
-          // behandles som "ikke verifisert", identisk med en uleselig readback.
+          // Predikatet er UTVIDELSESKODE: en kastet feil er «ikke verifisert», aldri en tapt bevisføring for en mutasjon som skjedde.
           let predicateHeld: boolean;
           try {
             predicateHeld = definition.postcondition_predicate(afterState, request.parameters);
@@ -770,55 +781,93 @@ export class ToolGateway {
             predicateHeld = false;
             postconditionReason = "postcondition_unverified:predicate_error";
           }
-          if (postconditionReason === null && !predicateHeld) {
-            postconditionReason = "postcondition_mismatch";
+          if (postconditionReason === null && !predicateHeld) postconditionReason = "postcondition_mismatch";
+        }
+      }
+    }
+    const postconditionVerified = !failure && postconditionReason === null;
+    // Et tidsavbrudd betyr at bivirkningen KAN ha skjedd: aldri retry-bar (unverified), i motsetning til en kastet leverandørfeil.
+    const finalStatus: "succeeded" | "failed" | "unverified" = failure
+      ? (failure.timedOut ? "unverified" : "failed")
+      : postconditionVerified ? "succeeded" : "unverified";
+    const finalReason = failure
+      ? (failure.timedOut ? "postcondition_unverified:tool_timeout_outcome_unknown" : `tool_failed:${failure.message.slice(0, 80)}`)
+      : postconditionReason;
+
+    // Fase 3 - FERDIGSTILL ledger + audit i én kort transaksjon (to forsøk; feiler begge står raden som 'reserved' = fail-closed).
+    const finalize = (): Promise<void> =>
+      withTenantTransaction<void>(this.pool, tenantId, async (client) => {
+        if (ledgerKey !== undefined) {
+          await client.query(
+            `UPDATE tool_executions SET status = $2, external_id = $3, after_state = $4, postcondition_reason = $5, executed_at = now()
+              WHERE idempotency_key = $1 AND status = 'reserved'`,
+            [ledgerKey, finalStatus, external.external_id ?? null, JSON.stringify(afterState), finalReason]
+          );
+        }
+        if (failure) {
+          // Kontrollert feil: revoked credential/timeout/providerfeil åpner ingenting.
+          await writeAudit(client, request.identity, { ...corr,
+            type: "tool.failed", decision: "DENY", reason: failure.message.slice(0, 120),
+            tool_id: request.tool_id, action: request.action,
+            capability_class: definition.capability_class,
+            payload: { credential_ref: definition.credential_ref, outcome_unknown: failure.timedOut }
+          });
+          return;
+        }
+        await writeAudit(client, request.identity, { ...corr,
+          // Egen audit-type når verifiseringen feiler - ALDRI «tool.executed» for en ubekreftet handling.
+          type: postconditionVerified ? "tool.executed" : "tool.postcondition_unverified", decision: "ALLOW",
+          tool_id: request.tool_id, action: request.action,
+          capability_class: definition.capability_class,
+          payload: {
+            credential_ref: definition.credential_ref, // referanse - aldri verdien
+            external_id: external.external_id ?? null,
+            scopes: definition.scopes,
+            rollback: definition.rollback_procedure,
+            ...(needsEvidence ? { before_state: beforeState, after_state: afterState, recovery: { snapshot: beforeState, procedure: definition.rollback_procedure } } : {})
           }
-        }
-      }
-      const postconditionVerified = postconditionReason === null;
-      if (dedupeApplies && request.idempotency_key) {
-        await client.query(
-          `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status, before_state, after_state, postcondition_reason)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT DO NOTHING`,
-          [request.identity.tenant_id, request.idempotency_key, request.tool_id, request.action,
-           external.external_id ?? null, postconditionVerified ? "succeeded" : "unverified",
-           JSON.stringify(beforeState), JSON.stringify(afterState), postconditionReason]
-        );
-      }
-      await writeAudit(client, request.identity, { ...corr,
-        // Q-34 P1-oppfølging: en EGEN audit-type når verifiseringen feiler -
-        // ALDRI "tool.executed" (som en fremtidig leser rimelig ville tolket
-        // som "bekreftet vellykket"). before_state/after_state/recovery er
-        // UENDRET tilstede i payloaden begge veier - mutasjonskallet lyktes
-        // strukturelt, og recovery-tooling må fortsatt se before_state.
-        type: postconditionVerified ? "tool.executed" : "tool.postcondition_unverified", decision: "ALLOW",
-        tool_id: request.tool_id, action: request.action,
-        capability_class: definition.capability_class,
-        payload: {
-          credential_ref: definition.credential_ref, // referanse - aldri verdien
-          external_id: external.external_id ?? null,
-          scopes: definition.scopes,
-          rollback: definition.rollback_procedure,
-          ...(needsEvidence ? { before_state: beforeState, after_state: afterState, recovery: { snapshot: beforeState, procedure: definition.rollback_procedure } } : {})
-        }
+        });
       });
+    let finalized = false;
+    let finalizeError = "";
+    for (let attempt = 0; attempt < 2 && !finalized; attempt += 1) {
+      try {
+        await finalize();
+        finalized = true;
+      } catch (err) {
+        finalizeError = (err as Error).message.slice(0, 80);
+      }
+    }
+    if (!finalized) {
+      console.error(JSON.stringify({ msg: "tool_ledger_finalize_failed", tool_id: request.tool_id, action: request.action, error: finalizeError }));
+      this.setHealth(request.tool_id, "degraded", "ledger_finalize_failed");
+      if (!failure) classDOutcome = { outcome: "unverified", external_id: external.external_id ?? null };
+      const unfinalized: ToolResult = failure
+        ? { ok: false, reason: `tool_failed:${failure.message.slice(0, 80)}` }
+        : { ok: false, reason: "postcondition_unverified:ledger_finalize_failed" };
+      if (classDGoverned && classDOutcome) return this.notifyClassD(request, definition, classDOutcome, unfinalized);
+      return unfinalized;
+    }
+    let result: ToolResult;
+    if (failure) {
+      result = { ok: false, reason: `tool_failed:${failure.message.slice(0, 80)}` };
+    } else {
       classDOutcome = { outcome: postconditionVerified ? "executed" : "unverified", external_id: external.external_id ?? null };
       if (!postconditionVerified) {
-        // Uleselig/manglende/feil etter-tilstand er en driftsavvikelse, ikke
-        // en autentiserings-/rate-feil - men FORTSATT ikke "healthy": en
-        // fremtidig kaller skal se degraderingen, ikke en falsk grønn status.
+        // Uleselig/manglende/feil etter-tilstand er en driftsavvikelse - men FORTSATT ikke «healthy».
         this.setHealth(request.tool_id, "degraded", "postcondition_unverified");
-        return { ok: false, reason: postconditionReason! } as const;
+        result = { ok: false, reason: postconditionReason! };
+      } else {
+        this.setHealth(request.tool_id, "healthy");
+        result = {
+          ok: true,
+          ...(external.external_id !== undefined ? { external_id: external.external_id } : {}),
+          ...(external.data !== undefined ? { data: external.data } : {}),
+          output_trust: definition.output_trust,
+          deduplicated: false
+        };
       }
-      this.setHealth(request.tool_id, "healthy");
-      return {
-        ok: true,
-        ...(external.external_id !== undefined ? { external_id: external.external_id } : {}),
-        ...(external.data !== undefined ? { data: external.data } : {}),
-        output_trust: definition.output_trust,
-        deduplicated: false
-      } as const;
-    });
+    }
     if (classDGoverned && classDOutcome) {
       return this.notifyClassD(request, definition, classDOutcome, result);
     }
@@ -867,7 +916,7 @@ export class ToolGateway {
     const rows = await withTenantTransaction(this.pool, tenantId, async (client) =>
       (await client.query(
         `SELECT idempotency_key, tool_id, action, external_id, postcondition_reason, before_state
-           FROM tool_executions WHERE status = 'unverified' ORDER BY executed_at DESC LIMIT $1`, [Math.min(Math.max(limit, 1), 200)]
+           FROM tool_executions WHERE status = 'unverified' OR (status = 'reserved' AND executed_at < now() - interval '5 minutes') ORDER BY executed_at DESC LIMIT $1`, [Math.min(Math.max(limit, 1), 200)]
       )).rows as Array<{ idempotency_key: string; tool_id: string; action: string; external_id: string | null; postcondition_reason: string | null; before_state: JsonValue | null }>
     );
     return rows.map((r) => ({
