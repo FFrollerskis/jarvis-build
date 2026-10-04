@@ -55,6 +55,8 @@ const MAX_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 500;
 const TOKEN_REFRESH_SKEW_MS = 60_000;
 
+import { financeSignal, isRetrySafe } from "./http.ts";
+
 export type NeonomicsEnvironment = "sandbox" | "production";
 
 export function neonomicsApiBaseUrl(environment: NeonomicsEnvironment): string {
@@ -236,6 +238,7 @@ export class NeonomicsTransport implements NeonomicsGateway {
       return this.cachedToken.token;
     }
     const response = await fetch(`${this.baseUrl}/auth/realms/${encodeURIComponent(this.realm)}/protocol/openid-connect/token`, {
+        signal: financeSignal(),
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ grant_type: "client_credentials", client_id: this.clientId, client_secret: this.clientSecret }).toString()
@@ -255,6 +258,7 @@ export class NeonomicsTransport implements NeonomicsGateway {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const token = await this.getAccessToken();
       const response = await fetch(`${this.baseUrl}${path}`, {
+        signal: financeSignal(),
         method,
         headers: {
           authorization: `Bearer ${token}`,
@@ -274,7 +278,7 @@ export class NeonomicsTransport implements NeonomicsGateway {
       // BRUKEREN har handlet hos banken).
       if (errorCode === 1426) throw new NeonomicsConsentRequiredError(opts.sessionId ?? "(ingen sesjon)");
       if (errorCode === 1428) throw new NeonomicsPaymentAuthorizationRequiredError(message);
-      const retryable = RETRYABLE_HTTP_STATUS.has(response.status);
+      const retryable = RETRYABLE_HTTP_STATUS.has(response.status) && isRetrySafe(method, response.status, false);
       lastError = new NeonomicsApiError(`neonomics_api_failed_${response.status}:${message}`, response.status, errorCode, retryable);
       if (!retryable || attempt === MAX_ATTEMPTS) throw lastError;
       await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
