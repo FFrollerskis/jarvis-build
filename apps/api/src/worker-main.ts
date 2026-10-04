@@ -5,7 +5,7 @@ import { systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit } from "./owner.ts";
 import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
-import { assertProvidersHaveExplicitPricing, ModelGateway, pricingFromEnv, traceSinkFromEnv } from "@jarvis/model-gateway";
+import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, ModelGateway, pricingFromEnv, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport, GmailTransport,
   GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, MeshToolExecutor, resolveModelToolSurface, PgGithubRateLimitStore,
@@ -51,7 +51,7 @@ import {
 import { KnowledgeSourceRegistry, emailIngestHandler } from "@jarvis/knowledge";
 import { createEmbeddingProviderFromEnv } from "@jarvis/memory";
 import {
-  WatchdogEmergencyAlertSink, Watchdog, costExplosionCheck, databaseCheck, stuckTasksCheck,
+  WatchdogEmergencyAlertSink, Watchdog, costExplosionCheck, costWarningCheck, databaseCheck, stuckTasksCheck,
   parseWatchdogIntervalMs, parseCostHardLimitOre
 } from "@jarvis/watchdog";
 
@@ -100,7 +100,10 @@ const gateway = new ModelGateway({
     new KimiAdapter(),
     new HermesAdapter(),
     new OllamaAdapter()
-  ]
+  ],
+  // D-395 (JARVIS-039): workeren hadde INGEN egen budsjettkonfig (falt tilbake til DEFAULT_BUDGET med spend_approved=false) - en godkjenning eieren ga
+  // i api gjaldt ikke her. Samme kilde som api: `budgetConfigFromEnv()`.
+  budget: budgetConfigFromEnv()
 });
 // JARVIS-006: hver konstruert adapter MÅ ha eksplisitt pris - ingen stille `default_rate`.
 try {
@@ -544,6 +547,8 @@ watchdog.register(
     parseCostHardLimitOre(process.env["JARVIS_COST_HARD_LIMIT_ORE"])
   )
 );
+// D-395 (JARVIS-039): varsel ved varselgrensen (tidligere kun et internt nivå som aldri nådde eieren).
+watchdog.register(costWarningCheck(pool, owner.tenant_id, budgetConfigFromEnv().warn_ore));
 const WATCHDOG_INTERVAL_MS = parseWatchdogIntervalMs(process.env["JARVIS_WATCHDOG_INTERVAL_MS"]);
 setInterval(
   () =>

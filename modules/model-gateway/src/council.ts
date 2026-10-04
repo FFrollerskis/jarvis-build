@@ -3,6 +3,7 @@ import type pg from "pg";
 import { EventWriter, withTenantTransaction } from "@jarvis/core";
 import type { DataSensitivity, JsonValue } from "@jarvis/contracts";
 import { ModelGateway, type CompleteInput } from "./model-gateway.ts";
+import { envPositiveInt } from "@jarvis/provider-adapters";
 import { isSensitivityEligible } from "./router.ts";
 
 /**
@@ -208,10 +209,7 @@ const COUNCIL_SYNTHESIS_MAX_TOKENS = 4096;
  * høylytt (`InvalidTimeoutError`) ved første faktiske Council-kall, aldri en
  * stille fallback til en gjettet verdi.
  */
-const COUNCIL_MODEL_TIMEOUT_MS =
-  process.env["JARVIS_COUNCIL_MODEL_TIMEOUT_MS"] !== undefined
-    ? Number(process.env["JARVIS_COUNCIL_MODEL_TIMEOUT_MS"])
-    : 120_000;
+const COUNCIL_MODEL_TIMEOUT_MS = envPositiveInt("JARVIS_COUNCIL_MODEL_TIMEOUT_MS", 120_000);
 
 /**
  * D-106 HOST-FIX (produksjonsherding, Defekt D): live host-kjøring viste
@@ -297,6 +295,23 @@ function parseUnambiguousJsonObject(text: string): unknown | undefined {
 
 /** Matcher ett fenced kodeblokk-par (```json ... ``` ELLER generisk ``` ... ```), språk-tag valgfri. */
 const MARKDOWN_FENCE_RE = /```[ \t]*([a-zA-Z0-9_-]*)[ \t]*\r?\n?([\s\S]*?)```/g;
+
+/**
+ * D-395 (JARVIS-078): `CONSENSUS` ble tidligere gitt når INGEN var uenig - også når ingen støttet noe (0 støttende) eller kun ett medlem svarte.
+ * Nå krever CONSENSUS at ALLE som faktisk svarte støtter beslutningen og at minst to medlemmer deltok; uten det er rådet ikke enig, bare uten uenighet.
+ * Ren funksjon (Jarvis eier statusberegningen - aldri en selvrapportert modell-enum).
+ */
+export function computeConsensusStatus(c: { members: number; unavailable: number; round3: number; supporting: number; dissenting: number }): CouncilResult["consensus_status"] {
+  if (c.dissenting === 0) {
+    const everyoneSupports = c.supporting >= c.round3 && c.round3 >= 2;
+    const fullCouncil = c.unavailable === 0 && c.round3 >= c.members;
+    if (everyoneSupports && fullCouncil) return "CONSENSUS";
+    // Ingen uenighet, men ikke et fullt råd der alle støtter: mangler medlemmer/deltakere → degradert; noen nøytrale → flertall; ingen støtte i det hele tatt → ingen konsensus.
+    if (c.unavailable > 0 || c.round3 < 2 || c.supporting === 0) return "DEGRADED_NO_CONSENSUS";
+    return "MAJORITY";
+  }
+  return c.supporting > c.dissenting ? "MAJORITY" : "SPLIT";
+}
 
 /**
  * Deterministisk, streng JSON-uthenting fra en modells fritekstsvar - delt
@@ -639,14 +654,13 @@ export class AiCouncil {
     }
 
     // Jarvis eier statusberegningen - ALDRI en selvrapportert modell-enum (§"Jarvis owns synthesis/state").
-    const consensus_status: CouncilResult["consensus_status"] =
-      unavailable.length > 0 && round3.length < members.length && dissenting.length === 0 && supporting.length < members.length
-        ? "DEGRADED_NO_CONSENSUS"
-        : dissenting.length === 0
-          ? "CONSENSUS"
-          : supporting.length > dissenting.length
-            ? "MAJORITY"
-            : "SPLIT";
+    const consensus_status = computeConsensusStatus({
+      members: members.length,
+      unavailable: unavailable.length,
+      round3: round3.length,
+      supporting: supporting.length,
+      dissenting: dissenting.length
+    });
 
     const result: CouncilResult = {
       council_id: councilId,
@@ -695,8 +709,10 @@ export class AiCouncil {
         // Ren data (strenger/tall/arrays/objekter) - trygg strukturell cast, aldri fabrikert innhold.
         payload: payload as Record<string, JsonValue>
       });
-    } catch {
-      // Persistens er auditerbarhet, ikke funksjon - en feil her skal aldri velte selve Council-kjøringen.
+    } catch (err) {
+      // Persistens er auditerbarhet, ikke funksjon - en feil her skal aldri velte selve Council-kjøringen. D-395 (JARVIS-078): men den logges
+      // (tidligere helt stille) slik at manglende revisjonsspor er synlig.
+      console.error(JSON.stringify({ msg: "council_event_persist_failed", council_id: councilId, type, error: err instanceof Error ? err.message.slice(0, 160) : String(err) }));
     }
   }
 
@@ -709,8 +725,9 @@ export class AiCouncil {
           [councilId, input.task_id, input.tenant_id, `AI-råd: ${councilId}`, JSON.stringify(result)]
         )
       );
-    } catch {
-      // Samme som over - artefakt-lagring er beste-innsats audit, aldri en blokkerende avhengighet.
+    } catch (err) {
+      // Samme som over - artefakt-lagring er beste-innsats audit, aldri en blokkerende avhengighet (men feilen logges, D-395).
+      console.error(JSON.stringify({ msg: "council_artifact_persist_failed", council_id: councilId, error: err instanceof Error ? err.message.slice(0, 160) : String(err) }));
     }
   }
 }

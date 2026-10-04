@@ -61,7 +61,9 @@ export const MODEL_ENV = [
   "GEMMA_API_KEY",
   "HERMES_API_KEY",
   "JARVIS_BUDGET_APPROVED",
+  "JARVIS_COST_APPROVAL_ORE",
   "JARVIS_COST_HARD_LIMIT_ORE",
+  "JARVIS_COST_WARN_ORE",
   "JARVIS_COUNCIL_MODEL_TIMEOUT_MS",
   "JARVIS_GEMINI_MODEL",
   "JARVIS_MODEL_ADVISOR",
@@ -249,16 +251,20 @@ export const TEST_ONLY_ENV = [
 
 /** Faste, ikke-hemmelige tjenestekoblinger som settes som literaler i compose (ikke videresendt fra .env). */
 export const FIXED_ENV = {
-  api: { JARVIS_DB_HOST: "postgres", JARVIS_DB_PORT: "5432", INFISICAL_URL: "http://infisical:8080" },
-  worker: { JARVIS_DB_HOST: "postgres", JARVIS_DB_PORT: "5432", INFISICAL_URL: "http://infisical:8080" }
+  // D-395 (JARVIS-092): JSONL-sporfilen MÅ ligge på tmpfs (rootfs er read-only, default `var/traces.jsonl` ga EROFS), og api når voice-gateway på
+  // tjenestenavnet (uten JARVIS_VOICE_URL viste /status alltid «ikke konfigurert»).
+  api: { JARVIS_DB_HOST: "postgres", JARVIS_DB_PORT: "5432", INFISICAL_URL: "http://infisical:8080", JARVIS_TRACE_FILE: "/tmp/traces.jsonl", JARVIS_VOICE_URL: "http://voice-gateway:3020" },
+  worker: { JARVIS_DB_HOST: "postgres", JARVIS_DB_PORT: "5432", INFISICAL_URL: "http://infisical:8080", JARVIS_TRACE_FILE: "/tmp/traces.jsonl" }
 };
 
 const WORKER_EXCLUDES = new Set(["JARVIS_BRIEF_HOUR"]);
 
 /** Hva hver tjeneste får videresendt fra operatørens `.env` (interpolasjon `${NAVN:-}` i compose). */
 export const SERVICE_ENV = {
-  api: [...CORE_ENV, ...MODEL_ENV, ...CONNECTOR_ENV, ...WEBHOOK_ENV, ...MEDIA_HOME_ENV, ...MESSAGING_AUTOMATION_ENV, "LANGFUSE_BASE_URL", "JARVIS_API_PORT"],
-  worker: [...CORE_ENV.filter((n) => !WORKER_EXCLUDES.has(n)), ...MODEL_ENV, ...CONNECTOR_ENV, "LANGFUSE_BASE_URL", "JARVIS_CLAUDE_BIN", "JARVIS_JOB_RUNNER", "JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY"],
+  api: [...CORE_ENV, ...MODEL_ENV, ...CONNECTOR_ENV, ...WEBHOOK_ENV, ...MEDIA_HOME_ENV, ...MESSAGING_AUTOMATION_ENV, "LANGFUSE_BASE_URL", "JARVIS_API_PORT", "JARVIS_OPERATIONAL_RETENTION_SWEEP_HOUR", "JARVIS_TRACE_FILE", "JARVIS_VOICE_URL", "JARVIS_COUNCIL_AUTO_MAX_PER_HOUR",
+    // D-395 (JARVIS-092): sveip-klokkeslett main.ts leser (tidligere ikke videresendt til containeren, så compose kunne aldri endre dem).
+    "JARVIS_BUSINESS_EVENTS_SYNC_HOUR", "JARVIS_BUSINESS_SCORING_HOUR", "JARVIS_BUSINESS_SWEEP_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_WEEKDAY", "JARVIS_CONNECTOR_HEALTH_SWEEP_HOUR", "JARVIS_CONVERSATION_GRAPH_SYNC_HOUR", "JARVIS_FINANCE_SPEND_SWEEP_HOUR", "JARVIS_GROWTH_RECOMMENDATION_SWEEP_HOUR", "JARVIS_HEALTH_RETENTION_SWEEP_HOUR", "JARVIS_LOCATION_RETENTION_SWEEP_HOUR", "JARVIS_SITUATION_SWEEP_HOUR", "JARVIS_SUPPORT_INBOX_SYNC_HOUR", "JARVIS_VISION_RETENTION_SWEEP_HOUR", "JARVIS_STREAM_DEBUG"],
+  worker: [...CORE_ENV.filter((n) => !WORKER_EXCLUDES.has(n)), ...MODEL_ENV, ...CONNECTOR_ENV, "LANGFUSE_BASE_URL", "JARVIS_TRACE_FILE", "JARVIS_CLAUDE_BIN", "JARVIS_JOB_RUNNER", "JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY"],
   // migrate: engangs-jobb med ADMIN-rollen (CREATE ROLE/EXTENSION/RLS) - IKKE en runtime-tjeneste. Får den distinkte
   // runtime-rollens passord for å opprette rollen, men ingen connector-/modellnøkler.
   migrate: ["JARVIS_DB_ADMIN_USER", "JARVIS_DB_ADMIN_PASSWORD", "JARVIS_DB_USER", "JARVIS_DB_PASSWORD", "JARVIS_ENV", "JARVIS_TENANT_ID", "JARVIS_OWNER_PERSON_ID", "JARVIS_OWNER_NAME"],

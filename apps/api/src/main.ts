@@ -20,7 +20,8 @@ import {
   configFromEnv,
   createPool,
   ConfirmationStore,
-  runMigrations,
+  runMigrationsAsAdmin,
+  runOperationalRetentionSweep,
   withTenantTransaction,
   writeAudit
 } from "@jarvis/core";
@@ -31,6 +32,7 @@ import {
   assertProvidersHaveExplicitPricing,
   pricingFromEnv,
   ModelGateway,
+  budgetConfigFromEnv,
   traceSinkFromEnv
 } from "@jarvis/model-gateway";
 import {
@@ -118,9 +120,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // Remediering del 2 (JARVIS-065): ÉN validert eier-identitet for hele prosessen (fail closed uten).
   const owner = ownerConfigOrExit();
   const pool = createPool(configFromEnv());
-  // Migrasjoner kjøres av admin-bruker i drift; her antas app-bruker å ha skjema fra før.
+  // Migrasjoner kjøres av admin-bruker i drift (compose: `migrate`-tjenesten); her antas app-bruker å ha skjema fra før.
+  // D-395 (JARVIS-075): flagget kjører migratoren med ADMIN-konfig i en egen, kortlivet pool - aldri med runtime-rollen (Q-21) - og feiler
+  // lukket uten JARVIS_DB_ADMIN_PASSWORD.
   if (process.env["JARVIS_DB_RUN_MIGRATIONS"] === "true") {
-    await runMigrations(pool);
+    await runMigrationsAsAdmin();
   }
   // Q-21: appen skal ALDRI starte normalt med en superuser/BYPASSRLS-tilkobling - RLS
   // er strukturelt umulig å håndheve for en slik rolle, uansett hvor korrekte policyene er.
@@ -246,12 +250,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // + ingen ekte lokal provider NÅ ærlig med `PaidModelsDisabledError`
       // (router.ts) - en strukturert, auditerbar feil, ALDRI et falskt svar.
     ],
-    budget: {
-      warn_ore: 100_000,
-      approval_ore: 200_000,
-      hard_limit_ore: 300_000,
-      spend_approved: process.env["JARVIS_BUDGET_APPROVED"] === "true"
-    }
+    // D-395 (JARVIS-039): samme budsjettkilde som workeren (`budgetConfigFromEnv`) - tidligere hardkodet her og med `DEFAULT_BUDGET` i workeren.
+    budget: budgetConfigFromEnv()
   });
   // JARVIS-006: hver konstruert adapter MÅ ha eksplisitt pris - ingen stille `default_rate`.
   assertProvidersHaveExplicitPricing(pricingFromEnv(), gateway.listProviderNames());
@@ -1150,7 +1150,7 @@ Critic     ${mesh.critic}`;
   const statusText = async () => {
     const gates = [...toolGateway.health.entries()].map(([k, v]) => `${k}:${v.state}`).join(" ");
     return `JARVIS STATUS
-fase: v4.0 UA-1 P1A + D-30 voice foundation
+miljø: ${process.env["JARVIS_ENV"] ?? "dev"}
 connectors: ${gates || "ingen kall enda"}
 ${await aiMeshText()}
 ${await voiceText()}
@@ -1437,6 +1437,15 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "memory-profile-sweep", envHour("JARVIS_MEMORY_PROFILE_SWEEP_HOUR", 4)
   ).start(() => runMemoryProfileSweepForAllTenants(pool).then(() => undefined));
+  // D-395 (JARVIS-074): daglig oppbevaring for driftsrader som ellers vokser uten grense (utløpte godkjenninger/grants/billetter, ferdige
+  // verktøyutføringer, gamle scheduler-rader). All sletting skjer i `prune_operational_data()` (SECURITY DEFINER, faste gulv i RLS-policyene);
+  // runtime-rollen har kun EXECUTE. Revisjon/hendelser/kostnadsledger berøres ikke (eierbeslutning).
+  new DailyScheduler(
+    pool, "operational-retention-sweep", envHour("JARVIS_OPERATIONAL_RETENTION_SWEEP_HOUR", 3)
+  ).start(async () => {
+    const result = await runOperationalRetentionSweep(pool);
+    console.log(JSON.stringify({ msg: "operational_retention_sweep_completed", ...result }));
+  });
   if (memoryEmbedding.model !== "local-hash-v1") {
     setTimeout(() => {
       runMemoryReembedSweepForAllTenants(pool, memoryEmbedding, { maxRows: 500 }).catch((err: unknown) => {
