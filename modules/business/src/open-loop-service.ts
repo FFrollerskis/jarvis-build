@@ -3,7 +3,7 @@ import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
 import type { AttentionQueueEntry, BusinessOpenLoop, OpenLoopPriority, OpenLoopType, SweepResult } from "./open-loop-types.ts";
-import { classifyAttentionBucket } from "./open-loop-types.ts";
+import { classifyAttentionBucket, deterministicLoopConfidence } from "./open-loop-types.ts";
 
 /**
  * UA-3 next slice (D-53): automatisk open-loop-deteksjon. Gjenbruker
@@ -1152,8 +1152,9 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
     `INSERT INTO business_open_loops
        (open_loop_id, tenant_id, memory_space_id, company_id, contact_id, opportunity_id, lead_id, followup_id, activity_id,
         ticket_id, contract_id, campaign_id, payment_intent_id, finance_spend_record_id, finance_recurring_commitment_id,
-        finance_procurement_item_id, product_item_id, operations_task_id, loop_type, detection_key, reason, next_action, priority, owner_person_id, due_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+        finance_procurement_item_id, product_item_id, operations_task_id, loop_type, detection_key, reason, next_action, priority, owner_person_id, due_at,
+        detection_method, confidence)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, 'deterministic', $26)
      ON CONFLICT (tenant_id, detection_key) DO UPDATE SET
        -- Gjenaapning (§9 i byggeordren): en tidligere resolved loop for SAMME vilkaar settes
        -- eksplisitt tilbake til 'open' med ny opened_at - historikken bevares i audit_events,
@@ -1177,14 +1178,15 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
                                  AND (business_open_loops.resolution_reason IS NOT DISTINCT FROM 'condition_no_longer_true'
                                       OR business_open_loops.resolved_at <= now() - interval '7 days')
                                 THEN NULL ELSE business_open_loops.resolution_reason END,
-       reason = EXCLUDED.reason, priority = EXCLUDED.priority, due_at = EXCLUDED.due_at, updated_at = now()
+       reason = EXCLUDED.reason, priority = EXCLUDED.priority, due_at = EXCLUDED.due_at, confidence = EXCLUDED.confidence, updated_at = now()
      RETURNING (xmax = 0) AS inserted`,
     [
       input.open_loop_id, input.tenant_id, input.memory_space, input.company_id, input.contact_id,
       input.opportunity_id, input.lead_id, input.followup_id, input.activity_id, input.ticket_id, input.contract_id, input.campaign_id,
       input.payment_intent_id ?? null, input.finance_spend_record_id ?? null, input.finance_recurring_commitment_id ?? null,
       input.finance_procurement_item_id ?? null, input.product_item_id ?? null, input.operations_task_id ?? null,
-      input.loop_type, input.detection_key, input.reason, input.next_action, input.priority, input.owner_person_id, input.due_at
+      input.loop_type, input.detection_key, input.reason, input.next_action, input.priority, input.owner_person_id, input.due_at,
+      deterministicLoopConfidence(input.loop_type)
     ]
   );
   return (rows[0] as { inserted: boolean }).inserted ? "inserted" : "updated";

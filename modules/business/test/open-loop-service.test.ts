@@ -10,6 +10,7 @@ import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { withMemoryTransaction } from "@jarvis/memory";
 import { BusinessService } from "../src/service.ts";
 import { OpenLoopService, formatMoney } from "../src/open-loop-service.ts";
+import { deterministicLoopConfidence } from "../src/open-loop-types.ts";
 
 /**
  * UA-3 next slice (D-53) - testmatrise for automatisk open-loop-deteksjon
@@ -168,6 +169,18 @@ describe("D: gjenaapning - D-396: operatoer-lukket loop undertrykkes 7 dager, de
     );
     await openLoops.detectOverdueFollowups(TENANT_A, "business");
     expect((await openLoops.readOpenLoop(TENANT_A, "business", original.open_loop_id))?.status).toBe("open");
+  });
+});
+
+describe("D-396 (JARVIS-045): deterministisk confidence", () => {
+  it("en deterministisk loop faar confidence 0.9 (hard fakta), heuristikk 0.7 - aldri NULL", async () => {
+    const followup = await business.createFollowup(TENANT_A, "business", { title: "Confidence", due_at: "2020-07-01T00:00:00Z" });
+    await openLoops.detectOverdueFollowups(TENANT_A, "business");
+    const loop = (await openLoops.listOpenLoops(TENANT_A, "business", "open")).find((l) => l.followup_id === followup.followup_id)!;
+    expect(loop.detection_method).toBe("deterministic");
+    expect(Number(loop.confidence)).toBe(0.9);
+    expect(deterministicLoopConfidence("stalled_opportunity")).toBe(0.7);
+    expect(deterministicLoopConfidence("support_ticket_needs_reply")).toBe(0.9);
   });
 });
 
