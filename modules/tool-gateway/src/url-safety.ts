@@ -61,7 +61,22 @@ export function assertSafeVendorUrl(raw: string): string {
 export async function guardedFetch(input: string | URL, init?: RequestInit): Promise<Response> {
   const raw = typeof input === "string" ? input : input.toString();
   assertSafeVendorUrl(raw);
-  return fetch(raw, init);
+  // D-392 (JARVIS-018): ingen leverandørkall uten avbrudd - gatewayens `withTimeout` avviser bare løftet, så uten dette ville selve
+  // forespørselen (og dens evt. bivirkning) fortsette å leve etter at kalleren har fått «tool_timeout».
+  return fetch(raw, init?.signal ? init : { ...init, signal: AbortSignal.timeout(VENDOR_FETCH_TIMEOUT_MS) });
+}
+
+export const VENDOR_FETCH_TIMEOUT_MS = 45_000;
+
+/**
+ * D-392 (JARVIS-018): trygg-å-gjenta-regel for leverandørkall. 429 er et avslag FØR behandling og kan alltid gjentas; 5xx på en
+ * mutasjon (POST/PUT/PATCH/DELETE) betyr at bivirkningen KAN ha skjedd - da er en automatisk retry en dobbel handling, så den
+ * gjøres aldri. 5xx på lesing (GET/HEAD) gjentas som før.
+ */
+export function isRetrySafeStatus(method: string | undefined, status: number): boolean {
+  if (status === 429) return true;
+  if (status >= 500 && status <= 504) return (method ?? "GET").toUpperCase() === "GET" || (method ?? "GET").toUpperCase() === "HEAD";
+  return false;
 }
 
 /**

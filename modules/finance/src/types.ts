@@ -136,6 +136,14 @@ export class InvalidAccountCodeError extends Error {
   }
 }
 
+/** D-392 (JARVIS-072): samme idempotency_key med ANDRE parametre er en feil, aldri en stille retur av en annen betaling. */
+export class IdempotencyKeyConflictError extends Error {
+  constructor(readonly idempotencyKey: string, readonly mismatchedFields: readonly string[]) {
+    super(`idempotency_key_conflict:${idempotencyKey}:${mismatchedFields.join(",")}`);
+    this.name = "IdempotencyKeyConflictError";
+  }
+}
+
 export class InvalidAmountError extends Error {
   constructor(readonly amountOre: number) {
     super(`invalid_amount_ore:${amountOre}`);
@@ -586,5 +594,14 @@ export const VIPPS_STATUS_TO_JARVIS_STATE: Readonly<Record<string, PaymentIntent
   AUTHORIZED: null,
   TERMINATED: "cancelled",
   EXPIRED: "cancelled",
-  CANCELLED: "cancelled"
+  CANCELLED: "cancelled",
+  // D-392 (JARVIS-020): ABORTED er en ekte avsluttet betalingstilstand i Vipps ePayment (brukeren avbrøt) - ikke en modifikasjonshendelse.
+  ABORTED: "cancelled"
 };
+
+/**
+ * D-392 (JARVIS-020): CAPTURED/REFUNDED er MODIFIKASJONSHENDELSER (beløpet gjelder selve capturen/refusjonen), ikke betalingstilstander -
+ * Vipps sin `payment.state` forblir AUTHORIZED etter capture. De må ALDRI overskrive `provider_status`/`provider_reported_amount_ore`
+ * (da ville en delvis capture gjort at neste capture feilet med «ikke AUTHORIZED», og det rapporterte beløpet bli capture-beløpet).
+ */
+export const VIPPS_MODIFICATION_EVENTS: ReadonlySet<string> = new Set(["CAPTURED", "REFUNDED"]);
