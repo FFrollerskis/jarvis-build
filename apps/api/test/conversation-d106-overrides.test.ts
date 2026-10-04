@@ -574,4 +574,39 @@ describe("D-106 HOST-FIX: automatisk høy-innvirkning-klassifisering trigger Cou
     await engine.handle(identity, "hei");
     expect(seen?.sensitivity).toBe("SECRET_RESTRICTED");
   });
+  it("X3 (D-382): bekreftelser modellen utløste samles i svaret (fra trusted executor-output), og systemprompten bærer katalogen", async () => {
+    let systemSeen = "";
+    const pool = fakePool();
+    const tool = { name: "todoist__create_task", description: "x", input_schema: { type: "object", properties: {}, additionalProperties: false } };
+    const gateway = {
+      complete: async () => { throw new Error("ikke forventet"); },
+      stream: async () => { throw new Error("ikke forventet"); },
+      completeWithTools: async (input: CompleteInput, o: { executor: ToolExecutor }) => {
+        systemSeen = input.request.system ?? "";
+        await o.executor.execute({ tool_call_id: "c1", tool_name: "todoist__create_task", arguments: {}, provider: "gemma_local", model: "m" }, { tenant_id: "tenant-1", idempotency_key: "k" });
+        return { text: "Lagt til bekreftelse", usage: { input_tokens: 1, output_tokens: 1 }, provider: "gemma_local", model: "m" };
+      }
+    } as unknown as ModelGateway;
+    const engine = new ConversationEngine({
+      messages: new MessageStore(pool), context: new ContextBuilder(pool), gateway, tasks: fakeTasks, worker: fakeWorker, trace: new MemoryTraceSink(),
+      tools: {
+        definitions: [tool], all: [tool],
+        catalog: () => "Todoist (lese + handle); kalender (kun lese)",
+        executorFor: () => ({ execute: async () => ({ tool_call_id: "c1", tool_name: "todoist__create_task", execution_id: "none", success: false, output: { confirmation_required: true, confirmation_id: "conf-7", status: "confirmation_required" }, error_category: "CONFIRMATION_REQUIRED", at: "", source: "todoist.create_task" }) })
+      }
+    } as unknown as ConstructorParameters<typeof ConversationEngine>[0]);
+    const out = await engine.handle(identity, "legg til kjøp melk i todoist");
+    expect(out.confirmations).toEqual([{ confirmation_id: "conf-7", tool: "todoist.create_task", status: "confirmation_required" }]);
+    expect(systemSeen).toContain("Todoist (lese + handle)");
+    expect(systemSeen).toContain("confirmation_required");
+    expect(systemSeen).not.toContain("TALESAMTALE");
+  });
+
+  it("X4 (D-382): tale får muntlig stil og kortere svar-tak", async () => {
+    let seen: CompleteInput | undefined;
+    const engine = buildEngine({ onComplete: (i) => (seen = i) });
+    await engine.handle({ ...identity, channel: "voice" }, "hva er klokken?");
+    expect(seen?.request.system).toContain("TALESAMTALE");
+    expect(seen?.request.max_tokens).toBe(320);
+  });
 });

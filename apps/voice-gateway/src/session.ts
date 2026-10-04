@@ -136,6 +136,24 @@ const TOOL_ACTIVITY_TEXT: Record<string, string> = {
   read_recent_email: "Ser på e-posten din …",
   read_github_issues: "Sjekker GitHub …"
 };
+/** D-382: lese-nivået (D-381) gir verktøynavn på formen `tool_id__action` - kort, trusted status per tjeneste (aldri payload). */
+const TOOL_ACTIVITY_BY_PREFIX: ReadonlyArray<[RegExp, string]> = [
+  [/^calendar/, "Sjekker kalenderen din …"],
+  [/^email|^microsoft_outlook/, "Ser på e-posten din …"],
+  [/^github/, "Sjekker GitHub …"],
+  [/^memory/, "Leter i minnet …"],
+  [/^finance/, "Sjekker økonomien …"],
+  [/^(brave_search|tavily|exa)/, "Søker på nettet …"],
+  [/^(notion|drive|dropbox|onedrive|google_sheets)/, "Ser i dokumentene …"],
+  [/^(todoist|trello|jira|linear)/, "Sjekker oppgavene …"],
+  [/^(slack|discord)/, "Sjekker meldingene …"]
+];
+export function toolActivityText(toolName: string): string {
+  const exact = TOOL_ACTIVITY_TEXT[toolName];
+  if (exact) return exact;
+  for (const [re, text] of TOOL_ACTIVITY_BY_PREFIX) if (re.test(toolName)) return text;
+  return "Jobber med saken …";
+}
 
 /**
  * Utterance-journal: gjør turer idempotente ved failover/gjenopptak.
@@ -501,7 +519,7 @@ export class VoiceSession {
           if (metrics.t_tool_activity === undefined) {
             metrics.t_tool_activity = Date.now();
           }
-          this.events.onToolActivity?.(TOOL_ACTIVITY_TEXT[event.tool_name] ?? "Jobber med saken …");
+          this.events.onToolActivity?.(toolActivityText(event.tool_name));
         }
       },
       signal

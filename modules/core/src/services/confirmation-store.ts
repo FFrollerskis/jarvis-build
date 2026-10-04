@@ -143,12 +143,15 @@ export class ConfirmationStore {
       const id = `conf-${randomUUID()}`;
       const nonce = randomBytes(16).toString("hex");
       const expires = new Date(now.getTime() + CONFIRMATION_TTL_MS);
+      // D-382: selve kallet (scope-bundne parametre fra trusted lag) lagres slik at eierens godkjenning kan UTFØRE det i
+      // deterministisk kode (`approveAndTake`). Bindingen over kanonisk kall + utløp + nonce verifiseres på nytt før utførelse.
       await client.query(
         `INSERT INTO action_confirmations
-           (confirmation_id, tenant_id, person_id, device_id, session_id, tool_id, action, call_fingerprint, binding_hash, nonce, summary, taint_reasons, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+           (confirmation_id, tenant_id, person_id, device_id, session_id, tool_id, action, call_fingerprint, binding_hash, nonce, summary, taint_reasons, expires_at, parameters)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
         [id, who.tenant_id, who.person_id, who.device_id ?? null, who.session_id ?? null, call.tool_id, call.action, fingerprint,
-          bindingHash(fingerprint, expires.toISOString(), nonce), nonce, JSON.stringify(summarizeCall(call, taintReasons)), taintReasons, expires]
+          bindingHash(fingerprint, expires.toISOString(), nonce), nonce, JSON.stringify(summarizeCall(call, taintReasons)), taintReasons, expires,
+          JSON.stringify(call.parameters)]
       );
       await writeAudit(client, { tenant_id: who.tenant_id, person_id: who.person_id, ...(who.session_id ? { session_id: who.session_id } : {}), ...(who.device_id ? { device_id: who.device_id } : {}) }, {
         type: "confirmation.requested",
@@ -178,6 +181,63 @@ export class ConfirmationStore {
         expires_at: r.expires_at.toISOString(),
         created_at: r.created_at.toISOString()
       }));
+    });
+  }
+
+  /**
+   * D-382: eierens godkjenning som UTFØRER kallet. Atomisk: pending → consumed (godkjent og forbrukt i samme steg), KUN samme person,
+   * kun mens den er pending og ikke utløpt, og KUN hvis bindingen (kanonisk kall + utløp + nonce) fortsatt matcher det lagrede kallet.
+   * Returnerer kallet trusted lag skal kjøre (med `confirmation_id` som idempotensnøkkel), eller `null` når ingenting kan utføres.
+   * Kalles utelukkende fra grant-autentisert rute - aldri fra modell/verktøy.
+   */
+  async approveAndTake(
+    decider: Pick<IdentityContext, "tenant_id" | "person_id" | "device_id">,
+    confirmationId: string
+  ): Promise<{ confirmation_id: string; tool_id: string; action: string; parameters: Record<string, JsonValue> } | null> {
+    return withTenantTransaction(this.pool, decider.tenant_id, async (client) => {
+      const found = await client.query(
+        `SELECT confirmation_id, tool_id, action, parameters, call_fingerprint, binding_hash, nonce, expires_at, device_id
+           FROM action_confirmations
+          WHERE confirmation_id = $1 AND tenant_id = $2 AND person_id = $3 AND status = 'pending' AND expires_at > now()
+          FOR UPDATE`,
+        [confirmationId, decider.tenant_id, decider.person_id]
+      );
+      const row = found.rows[0] as
+        | { confirmation_id: string; tool_id: string; action: string; parameters: Record<string, JsonValue> | null; call_fingerprint: string; binding_hash: string; nonce: string; expires_at: Date; device_id: string | null }
+        | undefined;
+      if (!row || row.parameters === null) return null;
+      // Bindingen beregnes på nytt fra det som FAKTISK ble lagret (inkl. enheten kallet kom fra - godkjenningen kan skje fra en annen
+      // enhet, og den registreres i decided_via_device_id) - et endret kall ville ikke matche.
+      const recomputedFingerprint = callFingerprint(
+        { tool_id: row.tool_id, action: row.action, parameters: row.parameters },
+        { tenant_id: decider.tenant_id, person_id: decider.person_id, device_id: row.device_id }
+      );
+      if (recomputedFingerprint !== row.call_fingerprint) return null;
+      if (bindingHash(row.call_fingerprint, row.expires_at.toISOString(), row.nonce) !== row.binding_hash) return null;
+      const updated = await client.query(
+        `UPDATE action_confirmations
+            SET status = 'consumed', decided_at = now(), decided_by_person_id = $2, decided_via_device_id = $3, consumed_at = now()
+          WHERE confirmation_id = $1 AND status = 'pending'`,
+        [row.confirmation_id, decider.person_id, decider.device_id ?? null]
+      );
+      if ((updated.rowCount ?? 0) !== 1) return null;
+      await writeAudit(client, { tenant_id: decider.tenant_id, person_id: decider.person_id, ...(decider.device_id ? { device_id: decider.device_id } : {}) }, {
+        type: "confirmation.approved",
+        tool_id: row.tool_id,
+        action: row.action,
+        payload: { confirmation_id: row.confirmation_id, binding_hash: row.binding_hash, executes: true }
+      });
+      return { confirmation_id: row.confirmation_id, tool_id: row.tool_id, action: row.action, parameters: row.parameters };
+    });
+  }
+
+  /** D-382: resultatet av utførelsen lagres på bekreftelsen (sporbarhet; vises i chat/dashbord). */
+  async recordResult(decider: Pick<IdentityContext, "tenant_id">, confirmationId: string, result: JsonValue): Promise<void> {
+    await withTenantTransaction(this.pool, decider.tenant_id, async (client) => {
+      await client.query(
+        `UPDATE action_confirmations SET result = $2, executed_at = now() WHERE confirmation_id = $1 AND tenant_id = $3`,
+        [confirmationId, JSON.stringify(result), decider.tenant_id]
+      );
     });
   }
 

@@ -104,6 +104,25 @@ function toolIntent(tool_id: string): RegExp | null {
   }
   return cached;
 }
+/** D-382: handlingsnivået velges kun når meldingen uttrykker en handling (ikke bare nevner tjenesten). */
+const ACTION_VERBS = /(send|sende|opprett|lag\b|lage|legg (til|inn)|oppdater|endre|flytt|slett|fjern|arkiver|lukk|åpne? (igjen|på nytt)|svar\b|svare|synk|synkroniser|book|bestill|sett\b|registrer|fullfør|marker|tildel|eskaler|avbryt|kanseller|pause|gjenoppta|aktiver|kommenter|publiser|kjør|start|create|update|add|move|delete|remove|reply|sync|close|assign|schedule|post)/i;
+/** D-382: handlingsord → handlingsnavn-prefiks, så den handlingen eieren faktisk ber om rangeres først innenfor budsjettet. */
+const VERB_TO_ACTION: ReadonlyArray<[RegExp, RegExp]> = [
+  [/synk|synkroniser|sync|avstem/i, /^(sync|reconcile)/],
+  [/opprett|lag\b|lage|legg (til|inn)|registrer|create|add|book|bestill|ny\b/i, /^(create|add|append|record|register|ingest)/],
+  [/oppdater|endre|sett\b|update|set\b|marker|tildel|assign|link/i, /^(update|set|assign|link|transition|rename)/],
+  [/slett|fjern|arkiver|delete|remove|trash|papirkurv/i, /^(trash|delete|remove|archive)/],
+  [/send|svar|kommenter|notify|reply|post|varsle|si fra/i, /^(notify|send|reply|comment|publish|dispatch)/],
+  [/lukk|fullfør|close|complete|ferdig/i, /^(close|complete)/],
+  [/åpne? (igjen|på nytt)|reopen|gjenoppta|resume/i, /^(reopen|resume)/],
+  [/flytt|move/i, /^move/],
+  [/pause|avbryt|kanseller|cancel|stopp/i, /^(pause|cancel|defer)/],
+  [/eskaler|escalate/i, /^escalate/],
+  [/aktiver|activate|kjør|run|start/i, /^(activate|run|rerun|start)/]
+];
+function verbMatches(action: string, text: string): boolean {
+  return VERB_TO_ACTION.some(([verb, prefix]) => verb.test(text) && prefix.test(action));
+}
 /** Finans-verktøy (`finance_*`) gjør turen SECRET_RESTRICTED (D-378: kun lokal modell) - uavhengig av hvordan meldingen er formulert. */
 const RESTRICTED_TOOL_ID = /^finance(_|$)/;
 
@@ -134,15 +153,21 @@ export function selectSurfaceTools(surface: Surface, text: string, candidates: R
   const granted = new Set(SURFACE_TOOL_GRANTS[surface].map((g) => `${g.tool_id}.${g.action}`));
   const allowed = candidates.filter((m) => granted.has(mappingKey(m)));
   const overview = OVERVIEW.test(text);
+  const wantsAction = ACTION_VERBS.test(text);
   let wanted = allowed.filter((m) => {
     const key = mappingKey(m);
     const intent = INTENT_KEYWORDS[key] ?? toolIntent(m.tool_id);
-    return (intent?.test(text) ?? false) || (overview && OVERVIEW_KEYS.has(key));
+    const hit = (intent?.test(text) ?? false) || (overview && OVERVIEW_KEYS.has(key));
+    // D-382: handlinger kun når eieren faktisk ber om en handling - ellers kun lesing.
+    return m.kind === "act" ? hit && wantsAction : hit;
   });
   if (wanted.length === 0) wanted = allowed.filter((m) => mappingKey(m) === "memory.search");
+  // Rangering innenfor budsjettet: faste prioriteter → handlingen eieren ba om (verbtreff) → lesinger → øvrige handlinger.
   const rank = (m: MeshToolMapping): number => {
     const i = ALWAYS_PRIORITY.indexOf(mappingKey(m));
-    return i === -1 ? ALWAYS_PRIORITY.length : i;
+    if (i !== -1) return i;
+    if (m.kind === "act") return verbMatches(m.action, text) ? 10 : 30;
+    return 20;
   };
   wanted.sort((a, b) => rank(a) - rank(b));
 
