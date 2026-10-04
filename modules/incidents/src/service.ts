@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { redactSecrets } from "./redact.ts";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
@@ -84,7 +85,7 @@ export class IncidentService {
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
         [
           evidence_id, tenantId, memorySpace, incidentId, input.source_type, input.status ?? "UNVERIFIED",
-          input.source_ref ?? null, input.summary, input.observed_at, input.contradicts_evidence_id ?? null
+          input.source_ref ? redactSecrets(input.source_ref) : null, redactSecrets(input.summary), input.observed_at, input.contradicts_evidence_id ?? null
         ]
       );
       return rows[0] as IncidentEvidence;

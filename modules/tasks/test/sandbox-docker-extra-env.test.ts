@@ -46,7 +46,7 @@ describe("D-103 HOST-FIX v2: DockerSandboxRunner extraEnv-koblingsgap reparert",
     const runner = new DockerSandboxRunner("node:22-alpine", dockerBin);
     const sandbox = await runner.create();
     const secretValue = "super-secret-token-never-in-argv";
-    sandbox.exec("echo", ["hi"], undefined, { JARVIS_GIT_CREDENTIAL_TOKEN: secretValue });
+    await sandbox.exec("echo", ["hi"], undefined, { JARVIS_GIT_CREDENTIAL_TOKEN: secretValue });
     const record = JSON.parse(await readFile(recordPath, "utf8")) as { args: string[]; envValues: Record<string, string> };
     expect(record.args).toContain("-e");
     expect(record.args).toContain("JARVIS_GIT_CREDENTIAL_TOKEN");
@@ -61,7 +61,7 @@ describe("D-103 HOST-FIX v2: DockerSandboxRunner extraEnv-koblingsgap reparert",
     const runner = new DockerSandboxRunner("node:22-alpine", dockerBin);
     const sandbox = await runner.create();
     const secretValue = "super-secret-token-value-b";
-    sandbox.exec("echo", ["hi"], undefined, { JARVIS_GIT_CREDENTIAL_TOKEN: secretValue });
+    await sandbox.exec("echo", ["hi"], undefined, { JARVIS_GIT_CREDENTIAL_TOKEN: secretValue });
     const record = JSON.parse(await readFile(recordPath, "utf8")) as { args: string[]; envValues: Record<string, string> };
     expect(record.envValues["JARVIS_GIT_CREDENTIAL_TOKEN"]).toBe(secretValue);
     await sandbox.dispose();
@@ -71,7 +71,7 @@ describe("D-103 HOST-FIX v2: DockerSandboxRunner extraEnv-koblingsgap reparert",
     const { dockerBin, recordPath } = await writeFakeDocker();
     const runner = new DockerSandboxRunner("node:22-alpine", dockerBin);
     const sandbox = await runner.create();
-    sandbox.exec("echo", ["hi"]);
+    await sandbox.exec("echo", ["hi"]);
     const record = JSON.parse(await readFile(recordPath, "utf8")) as { args: string[] };
     expect(record.args).not.toContain("-e");
     await sandbox.dispose();
@@ -81,7 +81,7 @@ describe("D-103 HOST-FIX v2: DockerSandboxRunner extraEnv-koblingsgap reparert",
     const { dockerBin, recordPath } = await writeFakeDocker();
     const runner = new DockerSandboxRunner("node:22-alpine", dockerBin);
     const sandbox = await runner.create();
-    sandbox.exec("echo", ["hi"], undefined, { GIT_TERMINAL_PROMPT: "0", JARVIS_GIT_CREDENTIAL_TOKEN: "tok" });
+    await sandbox.exec("echo", ["hi"], undefined, { GIT_TERMINAL_PROMPT: "0", JARVIS_GIT_CREDENTIAL_TOKEN: "tok" });
     const record = JSON.parse(await readFile(recordPath, "utf8")) as { args: string[] };
     expect(record.args.filter((a) => a === "-e").length).toBe(2);
     expect(record.args).toContain("GIT_TERMINAL_PROMPT");
@@ -93,8 +93,8 @@ describe("D-103 HOST-FIX v2: DockerSandboxRunner extraEnv-koblingsgap reparert",
     const { dockerBin, recordPath } = await writeFakeDocker();
     const runner = new DockerSandboxRunner("node:22-alpine", dockerBin);
     const sandbox = await runner.create();
-    sandbox.exec("git", ["clone", "url", "."], undefined, { JARVIS_GIT_CREDENTIAL_TOKEN: "tok" });
-    sandbox.exec("git", ["status"]); // agent-formet lokalt kall, ingen extraEnv
+    await sandbox.exec("git", ["clone", "url", "."], undefined, { JARVIS_GIT_CREDENTIAL_TOKEN: "tok" });
+    await sandbox.exec("git", ["status"]); // agent-formet lokalt kall, ingen extraEnv
     const record = JSON.parse(await readFile(recordPath, "utf8")) as { args: string[] };
     expect(record.args).not.toContain("-e");
     await sandbox.dispose();

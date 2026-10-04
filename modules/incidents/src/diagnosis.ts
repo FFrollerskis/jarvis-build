@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { redactSecrets } from "./redact.ts";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
@@ -36,7 +37,7 @@ export class DiagnosisService {
         `INSERT INTO incident_diagnoses (diagnosis_id, tenant_id, memory_space_id, incident_id, conclusion, status, source, supersedes_diagnosis_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
         [
-          diagnosis_id, tenantId, memorySpace, incidentId, input.conclusion,
+          diagnosis_id, tenantId, memorySpace, incidentId, redactSecrets(input.conclusion),
           input.status ?? "UNVERIFIED", input.source, input.supersedes_diagnosis_id ?? null
         ]
       );

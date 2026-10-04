@@ -85,7 +85,7 @@ function contract(overrides: Partial<JobContract> = {}): JobContract {
 class FakeEditingAgent implements CodingAgentAdapter {
   readonly name = "fake-editing-agent";
   async modify(exec: CodingAgentExec): Promise<string> {
-    exec("node", ["-e", "require('fs').writeFileSync('fix.js', 'module.exports = 1;\\n')"]);
+    await exec("node", ["-e", "require('fs').writeFileSync('fix.js', 'module.exports = 1;\\n')"]);
     return "la til fix.js";
   }
 }

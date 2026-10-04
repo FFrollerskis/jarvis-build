@@ -68,6 +68,7 @@ try {
 }
 // Remediering del 2 (JARVIS-065): ÉN validert eier-identitet (fail closed uten) - ingen env-defaults for eier/tenant.
 const owner = ownerConfigOrExit();
+process.env["JARVIS_PROCESS"] ??= "worker"; // D-394 (JARVIS-054): audit-rader merkes med hvilken prosess som skrev dem
 const pool = createPool(configFromEnv());
 try {
   await assertRuntimeRoleSafe(pool);

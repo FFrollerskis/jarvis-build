@@ -70,7 +70,9 @@ describe("D-125 B: identitet/tenant/space/sesjon bindes KUN fra betrodd server-s
   });
 
   it("B2: hver autoritetsverdi kommer fra env/seed-konstanter - ingen fra en melding", () => {
-    expect(authorityConstruction).toContain('owner_chat_id: process.env["JARVIS_TELEGRAM_CHAT_ID"]');
+    // D-394 (JARVIS-056): chat-id leses via den delte secret-kjeden (Infisical-primær, env-fallback) - fortsatt server-side konfigurasjon, aldri fra en melding.
+    expect(authorityConstruction).toContain("owner_chat_id: telegramChatId");
+    expect(codeOnly).toContain('const telegramChatId = (await readSecretProvider.get("JARVIS_TELEGRAM_CHAT_ID"))');
     // Remediering del 2 (JARVIS-065): tenant/person kommer fra den ENE validerte eier-konfigen (`owner`), ikke fra env-defaults.
     expect(authorityConstruction).toContain("tenant_id: owner.tenant_id");
     expect(authorityConstruction).toContain("person_id: owner.owner_person_id");

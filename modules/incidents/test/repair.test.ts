@@ -47,7 +47,7 @@ class RepoUrlRedirectingSandboxRunner implements SandboxRunner {
     const sandbox = await this.inner.create(jobEnv);
     return {
       workdir: sandbox.workdir,
-      exec: (command: string, args: string[], timeoutMs?: number, extraEnv?: Record<string, string>): ExecResult =>
+      exec: (command: string, args: string[], timeoutMs?: number, extraEnv?: Record<string, string>): ExecResult | Promise<ExecResult> =>
         sandbox.exec(command, args.map((a) => (a === this.redirectFrom ? this.redirectTo : a)), timeoutMs, extraEnv),
       dispose: () => sandbox.dispose()
     };

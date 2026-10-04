@@ -248,22 +248,22 @@ export class SelfModificationService {
       const mustOk = (label: string, result: { code: number; stderr?: string }) => {
         if (result.code !== 0) throw new Error(`self_modification_${label}_failed:${(result.stderr ?? "").slice(0, 200)}`);
       };
-      mustOk("clone", sandbox.exec("git", netArgs(["clone", "--depth", "1", "--branch", this.baseBranch, "--", repoRef.canonicalUrl, "."]), undefined, gitAuth.env));
-      mustOk("branch", localGit(["checkout", "-b", branch]));
+      mustOk("clone", await sandbox.exec("git", netArgs(["clone", "--depth", "1", "--branch", this.baseBranch, "--", repoRef.canonicalUrl, "."]), undefined, gitAuth.env));
+      mustOk("branch", await localGit(["checkout", "-b", branch]));
       const content = `${JSON.stringify(config, null, 2)}\n`;
-      const writeResult = sandbox.exec("node", ["-e", `require('fs').writeFileSync(${JSON.stringify(PERSONALITY_CONFIG_PATH)}, ${JSON.stringify(content)})`]);
+      const writeResult = await sandbox.exec("node", ["-e", `require('fs').writeFileSync(${JSON.stringify(PERSONALITY_CONFIG_PATH)}, ${JSON.stringify(content)})`]);
       mustOk("write_config", writeResult);
-      mustOk("add", localGit(["add", "--", PERSONALITY_CONFIG_PATH]));
+      mustOk("add", await localGit(["add", "--", PERSONALITY_CONFIG_PATH]));
       // D-101-mønster (coding.ts): sjekk at NØYAKTIG den forventede stien ble
       // endret FØR commit - en agent/prosess-feil som ved et uhell rørte en
       // annen fil skal ALDRI committes stille.
-      const staged = localGit(["diff", "--cached", "--name-only"]);
+      const staged = await localGit(["diff", "--cached", "--name-only"]);
       const stagedPaths = staged.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
       if (stagedPaths.length !== 1 || stagedPaths[0] !== PERSONALITY_CONFIG_PATH) {
         throw new Error(`self_modification_unexpected_staged_paths:${stagedPaths.join(",")}`);
       }
-      mustOk("commit", localGit(["commit", "-m", `jarvis: oppdater Charlie sin personlighetskonfig (${identity.person_id})`]));
-      mustOk("push", sandbox.exec("git", netArgs(["push", "origin", `${branch}:${branch}`]), undefined, gitAuth.env));
+      mustOk("commit", await localGit(["commit", "-m", `jarvis: oppdater Charlie sin personlighetskonfig (${identity.person_id})`]));
+      mustOk("push", await sandbox.exec("git", netArgs(["push", "origin", `${branch}:${branch}`]), undefined, gitAuth.env));
 
       const taskId = `self-mod-${randomUUID()}`;
       const jobContract: JobContract = {
