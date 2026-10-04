@@ -175,12 +175,13 @@ export class OpenAiAdapter implements ModelProviderAdapter {
     let text = "";
     let ttft: number | undefined;
     let finish = "";
+    let sawDone = false;
     let usage = { input_tokens: 0, output_tokens: 0 };
     const pendingTools = new Map<number, { id?: string; name?: string; args: string }>();
     const completedCalls: ToolCallRequest[] = [];
     try {
       for await (const data of sseLines(response.body)) {
-        if (data === "[DONE]") break;
+        if (data === "[DONE]") { sawDone = true; break; }
         let chunk: {
           choices?: Array<{
             delta?: { content?: string | null; tool_calls?: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }> };
@@ -229,6 +230,11 @@ export class OpenAiAdapter implements ModelProviderAdapter {
     if (signal?.aborted) {
       onEvent({ type: "cancelled" });
       throw new ProviderError(this.name, "cancelled", `${this.name}_cancelled`);
+    }
+    // D-393 (JARVIS-038): en strøm som tar slutt uten verken `finish_reason` eller `[DONE]` er AVBRUTT, ikke et normalt «stop» - tidligere ble
+    // en avkuttet forbindelse rapportert som vellykket (og kuttet svar ble levert som komplett).
+    if (!finish && !sawDone) {
+      throw new ProviderError(this.name, "stream_interrupted", `${this.name}_stream_ended_without_finish`);
     }
     // Komplette tool calls valideres/parses FØRST når hele payload er mottatt (§24).
     for (const pending of pendingTools.values()) {

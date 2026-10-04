@@ -523,7 +523,7 @@ toolGateway.setClassDNotifier(telegramClassDNotifier({
 const watchdogAlertSink = new WatchdogEmergencyAlertSink(telegramTransport, toolSecretProvider);
 const watchdog = new Watchdog(watchdogAlertSink, killSwitch);
 watchdog.register(databaseCheck(pool));
-watchdog.register(stuckTasksCheck(pool));
+watchdog.register(stuckTasksCheck(pool, owner.tenant_id));
 // D-187 (BLOCKER B2, arkitekt-order D187 mot PR #96): begge miljøvariablene
 // valideres FØR bruk - `parseCostHardLimitOre`/`parseWatchdogIntervalMs`
 // kaster ved enhver eksplisitt oppgitt, ugyldig verdi (fail-closed oppstart)

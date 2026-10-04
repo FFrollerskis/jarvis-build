@@ -280,6 +280,10 @@ export class AnthropicAdapter implements ModelProviderAdapter {
       onEvent({ type: "cancelled" });
       throw new ProviderError(this.name, "cancelled", `${this.name}_cancelled`);
     }
+    // D-393 (JARVIS-038): ingen `stop_reason` = strømmen ble avbrutt, ikke et normalt «end_turn».
+    if (!finish) {
+      throw new ProviderError(this.name, "stream_interrupted", `${this.name}_stream_ended_without_stop_reason`);
+    }
     const usage = { input_tokens: inputTokens, output_tokens: outputTokens };
     onEvent({ type: "usage", usage });
     onEvent({ type: "finish", finish_reason: finish || "end_turn" });
