@@ -4153,6 +4153,32 @@ export function firstWaveTools(
       idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_PIPEDRIVE_API_KEY", output_trust: "internal", transport: transport("pipedrive")
     },
+    // D-396 (JARVIS-049): navnebasert oppslag + samlet kundebilde (alle klasse A, kun lesing) - før dette krevde «hva skjer med kunde X?» en company_id
+    // modellen ikke kunne vite. Lagt til på SLUTTEN (før additionalTools), samme grunn som øvrige senere tilføyelser.
+    {
+      tool_id: "business", action: "find_companies", description: "Finn selskaper/kunder på navn eller domene (delstreng, case-insensitivt)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), query: z.string().min(1), limit: z.number().int().min(1).max(50).optional() }),
+      capability_class: "A", scopes: ["business.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "find_contacts", description: "Finn kontaktpersoner på navn eller e-post (delstreng, case-insensitivt)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), query: z.string().min(1), limit: z.number().int().min(1).max(50).optional() }),
+      capability_class: "A", scopes: ["business.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "get_customer_overview", description: "Samlet kundebilde for ett selskap: kontakter, åpne muligheter/oppfølginger/loops og siste aktiviteter",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), company_id: z.string() }),
+      capability_class: "A", scopes: ["business.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { ToolGateway } from "@jarvis/tool-gateway";
 import { extractCounterpartEmails, extractEmailAddress, type BusinessService } from "@jarvis/business";
@@ -156,6 +157,13 @@ export class SupportEmailService {
   ): Promise<{ sent: boolean; error?: string; ticket: SupportTicket | null; event: SupportTicketEvent }> {
     const ticket = await this.support.getTicket(tenantId, memorySpace, ticketId);
     if (!ticket) throw new Error("support_ticket_not_found");
+    // D-396 (JARVIS-046): idempotent svar - er et VELLYKKET `reply:<idempotency_key>` allerede registrert, sendes INTET på nytt (gateway kalles
+    // ikke). Mislykkede forsøk lagres under en unik nøkkel (`reply-failed:...`) slik at samme idempotency_key kan prøves på nytt etter en feil.
+    const replySourceInstance = ticket.source_instance_id ?? this.accountEmail;
+    const prior = await this.support.findEventBySourceMessage(
+      tenantId, memorySpace, ticket.source_type, replySourceInstance, `reply:${input.idempotency_key}`
+    );
+    if (prior) return { sent: true, ticket: await this.support.getTicket(tenantId, memorySpace, ticketId), event: prior };
     let sent = false;
     let error: string | undefined;
     try {
@@ -179,9 +187,10 @@ export class SupportEmailService {
       channel: ticket.channel, source_type: ticket.source_type,
       source_instance_id: ticket.source_instance_id ?? this.accountEmail,
       source_thread_id: ticket.source_thread_id ?? ticket.ticket_id,
-      source_message_id: `reply:${input.idempotency_key}`,
+      source_message_id: sent ? `reply:${input.idempotency_key}` : `reply-failed:${input.idempotency_key}:${randomUUID()}`,
       subject: ticket.subject, summary: sent ? `Svar sendt til ${input.to}` : `Svar-forsoek feilet: ${error ?? "ukjent feil"}`,
       is_from_customer: false, entity_resolution: ticket.entity_resolution,
+      ...(sent ? {} : { outbound_outcome: "failed_send" as const }),
       ...(ticket.company_id !== null ? { company_id: ticket.company_id } : {}),
       ...(ticket.contact_id !== null ? { contact_id: ticket.contact_id } : {})
     });

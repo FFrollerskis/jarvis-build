@@ -100,6 +100,16 @@ export interface KnowledgeListResult {
   records: KnowledgeRecord[];
   /** Elementer bevisst hoppet over (f.eks. binærfiler Drive ikke kan eksportere til tekst) - IKKE en feil, IKKE tombstonet. */
   skipped: SkippedRecord[];
+  /**
+   * D-396 (JARVIS-032): `partial` = listingen er et VINDU/en avkortet delmengde av kildens tilstand (f.eks. e-post «siste 14 dager, maks N»).
+   * Fravær i en partiell listing betyr IKKE at dokumentet er slettet - `KnowledgeSyncService` tombstoner da ALDRI. Utelatt = `complete` (uendret kontrakt).
+   */
+  listing?: "complete" | "partial";
+  /**
+   * D-396 (JARVIS-032): for en `partial` listing kan kilden likevel peke ut en TRYGG delmengde å tombstone: kun dokumenter hvis `metadata[metadata_key]`
+   * er blant `values` (f.eks. e-post: meldinger som faktisk ble listet - et vedlegg/en side som mangler i en listet melding er borte; meldinger utenfor vinduet røres ikke).
+   */
+  tombstone_scope?: { metadata_key: string; values: string[] };
 }
 
 /**

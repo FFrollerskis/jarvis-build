@@ -5,7 +5,7 @@ import { MemoryTraceSink, ModelGateway, type ToolExecutor } from "@jarvis/model-
 import { ScriptedAdapter, type ToolCallRequest, type ToolResultMessage } from "@jarvis/provider-adapters";
 import type { ClaimedTask, JobContext } from "@jarvis/tasks";
 import type { MeshToolMapping } from "@jarvis/tool-gateway";
-import { ExecutiveCommandDisabledError, ExecutiveToolsDeniedError, executiveHandler } from "../src/executive.ts";
+import { ExecutiveCommandDisabledError, ExecutiveNoExecutableInputError, ExecutiveToolsDeniedError, executiveHandler } from "../src/executive.ts";
 
 /**
  * BO-11.1 §9-§10: api-workeren og worker-containeren registrerer SAMME delte
@@ -151,10 +151,8 @@ describe("BO-11.1 §10: executive-handler-paritet api ↔ worker-container", () 
     await expect(handler(makeTask({ prompt: "hei", command: ["id"] }), ctx)).rejects.toThrow("executive_command_disabled");
   });
 
-  it("styringsjobb uten prompt/command kvitteres identisk", async () => {
-    const a = await executiveHandler({ gateway: newGateway() })(makeTask({}), ctx);
-    const b = await executiveHandler({ gateway: newGateway() })(makeTask({}), ctx);
-    expect(a["echo"]).toBe("morgenstatus");
-    expect(b["echo"]).toBe("morgenstatus");
+  it("D-396 (JARVIS-062): jobb uten prompt/command feiler identisk og eksplisitt - aldri en falsk echo-kvittering", async () => {
+    await expect(executiveHandler({ gateway: newGateway() })(makeTask({}), ctx)).rejects.toThrow("executive_no_executable_input");
+    await expect(executiveHandler({ gateway: newGateway() })(makeTask({}), ctx)).rejects.toBeInstanceOf(ExecutiveNoExecutableInputError);
   });
 });

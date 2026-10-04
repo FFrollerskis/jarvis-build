@@ -130,6 +130,18 @@ export class BusinessTransport implements ToolTransport {
         });
         return { external_id: row.activity_id, data: row as unknown as JsonValue };
       }
+      case "find_companies": {
+        const rows = await this.service.findCompanies(tenantId, memorySpace, requireString(parameters, "query"), parameters["limit"] !== undefined ? Number(parameters["limit"]) : 10);
+        return { data: rows as unknown as JsonValue };
+      }
+      case "find_contacts": {
+        const rows = await this.service.findContacts(tenantId, memorySpace, requireString(parameters, "query"), parameters["limit"] !== undefined ? Number(parameters["limit"]) : 10);
+        return { data: rows as unknown as JsonValue };
+      }
+      case "get_customer_overview": {
+        const overview = await this.service.customerOverview(tenantId, memorySpace, requireString(parameters, "company_id"));
+        return { data: overview as unknown as JsonValue };
+      }
       case "read_company_timeline": {
         const rows = await this.service.companyTimeline(tenantId, memorySpace, requireString(parameters, "company_id"));
         return { data: rows as unknown as JsonValue };

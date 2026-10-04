@@ -109,3 +109,10 @@ d350375fbe45d8f455e9c3eae7c6964213591182:infra/local/service-env.mjs:generic-api
 # f0fd3ea: kommentaren over ble i sin forste versjon selv flagget (den siterte feltet ordrett). Samme
 # falske positiv, omformulert i neste commit; historikken beholder den.
 f0fd3eaef6f1a80f2eb8d9d66a3ef1631348173e:.gitleaksignore:generic-api-key:105
+
+# CI-gitleaks skanner ALLE refs: syntetiske testverdier fra remediering-6 (modules/incidents/test/d394-redaction.test.ts, verifisert manuelt - ingen ekte hemmeligheter)
+2e3d4ee9038599624e582e79415ab3fac1915711:modules/incidents/test/d394-redaction.test.ts:aws-access-token:11
+2e3d4ee9038599624e582e79415ab3fac1915711:modules/incidents/test/d394-redaction.test.ts:aws-access-token:17
+2e3d4ee9038599624e582e79415ab3fac1915711:modules/incidents/test/d394-redaction.test.ts:jwt:7
+2e3d4ee9038599624e582e79415ab3fac1915711:modules/incidents/test/d394-redaction.test.ts:stripe-access-token:10
+2e3d4ee9038599624e582e79415ab3fac1915711:modules/incidents/test/d394-redaction.test.ts:stripe-access-token:17

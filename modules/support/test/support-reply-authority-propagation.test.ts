@@ -158,12 +158,9 @@ describe("B: delegat UTEN signert klasse-D-godkjenning -> nested email.send NEKT
     const { gateway, support, emailFake } = buildGateway([TENANT_A]); // delegat matcher IKKE owner_tenants/owner_person_id
     const { parameters } = await replyParams(support, TENANT_A, "b");
     const result = await gateway.execute({ identity: identityFor(DELEGATE, TENANT_A), tool_id: "support", action: "reply", parameters });
-    expect(result.ok).toBe(true); // ytre support:reply er klasse C, tillatt via mandat
-    if (result.ok) {
-      const data = result.data as { sent?: boolean; error?: string } | undefined;
-      expect(data?.sent).toBe(false);
-      expect(data?.error).toContain("class_d_missing_approval");
-    }
+    // D-396 (JARVIS-046): et IKKE-sendt svar er nå en feil for kalleren (evidens lagres som internal_note), ikke ok:true med sent:false.
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("class_d_missing_approval");
     expect(emailFake.calls).toHaveLength(0); // aldri naadd frem til selve utsendingen
   });
 });
@@ -231,12 +228,9 @@ describe("F: en 'system'-merket identitet blir ALDRI stille eier - samme fail-cl
     const result = await gateway.execute({
       identity: identityFor("system", TENANT_A), tool_id: "support", action: "reply", parameters
     });
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      const data = result.data as { sent?: boolean; error?: string } | undefined;
-      expect(data?.sent).toBe(false);
-      expect(data?.error).toContain("class_d_missing_approval");
-    }
+    // D-396 (JARVIS-046): et IKKE-sendt svar er nå en feil for kalleren (evidens lagres som internal_note), ikke ok:true med sent:false.
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("class_d_missing_approval");
     expect(emailFake.calls).toHaveLength(0);
   });
 });

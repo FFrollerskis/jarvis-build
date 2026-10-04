@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { FakeHealthMetricSource } from "../src/fake-source.ts";
-import { HealthObservationValidationError, HealthService } from "../src/service.ts";
+import { HealthObservationValidationError, HealthRetentionPolicyRequiredError, HealthService } from "../src/service.ts";
 import type { HealthObservationInput } from "../src/types.ts";
 
 /**
@@ -74,6 +74,9 @@ beforeAll(async () => {
 
   appPool = createPool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "jarvis_hlt_svc_test", password: "pw2" });
   service = new HealthService(appPool);
+  // D-396 (JARVIS-093): helse-inntak er fail-closed uten oppbevaringsvindu - A/F/G/H skriver observasjoner og trenger en konfigurert policy.
+  await service.setRetentionPolicy(TENANT_A, { retention_days: 3650 });
+  await service.setRetentionPolicy(TENANT_B, { retention_days: 3650 });
 }, 240_000);
 
 afterAll(async () => {
@@ -134,12 +137,13 @@ describe("B: ugyldig verdi/metric_type avvises deterministisk - INGEN rad skreve
 });
 
 describe("C: retention_expires_at beregnes korrekt fra det konfigurerte vinduet", () => {
-  it("fravær av en konfigurert policy gir retention_expires_at = NULL (aldri automatisk purget)", async () => {
+  it("D-396: fravær av en konfigurert policy avviser inntaket fail-closed (retention_policy_required) - ingen rad skrives", async () => {
     const tenantNoPolicy = "tenant-hlt-svc-nopolicy";
     await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantNoPolicy}', 'No Policy', 'person')`);
     await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}', '${tenantNoPolicy}')`);
-    const row = await service.ingestObservation(tenantNoPolicy, PERSON_A, validHeartRate());
-    expect(row.retention_expires_at).toBeNull();
+    await expect(service.ingestObservation(tenantNoPolicy, PERSON_A, validHeartRate())).rejects.toThrow(HealthRetentionPolicyRequiredError);
+    await expect(service.ingestObservation(tenantNoPolicy, PERSON_A, validHeartRate())).rejects.toThrow("retention_policy_required");
+    expect(await service.getRecentMetrics(tenantNoPolicy, PERSON_A)).toHaveLength(0);
   });
 
   it("en konfigurert policy på N dager gir retention_expires_at = observed_at + N dager, eksakt", async () => {
@@ -276,6 +280,7 @@ describe("H: HealthMetricSource-adapterkontrakten komponerer ende-til-ende via i
     const tenantId = "tenant-hlt-svc-source";
     await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'Source', 'person')`);
     await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_B}', '${tenantId}')`);
+    await service.setRetentionPolicy(tenantId, { retention_days: 3650 }); // D-396: inntak er fail-closed uten policy
 
     const source = new FakeHealthMetricSource([
       validHeartRate({ observed_at: "2026-09-01T06:00:00.000Z" }),
@@ -296,6 +301,7 @@ describe("H: HealthMetricSource-adapterkontrakten komponerer ende-til-ende via i
     const tenantId = "tenant-hlt-svc-source-since";
     await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'SourceSince', 'person')`);
     await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_B}', '${tenantId}')`);
+    await service.setRetentionPolicy(tenantId, { retention_days: 3650 }); // D-396: inntak er fail-closed uten policy
     const source = new FakeHealthMetricSource([
       validHeartRate({ observed_at: "2026-01-01T00:00:00.000Z" }),
       validHeartRate({ observed_at: "2026-05-01T00:00:00.000Z" })

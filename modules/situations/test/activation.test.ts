@@ -241,7 +241,7 @@ describe("B: DELIVER - ett INFORM/SUGGEST-varsel per syklus, evidens-først, ald
     await seedLoop(TENANT_A, { priority: "normal" });
     await seedLoop(TENANT_A, { priority: "low" }); // remember - varsles ikke
     const first = await sweep();
-    expect(first.delivery).toEqual({ delivered: 1, reconciled_from_evidence: 0, pending: 0, evidence_mismatch: 0 });
+    expect(first.delivery).toEqual({ delivered: 1, reconciled_from_evidence: 0, pending: 0, evidence_mismatch: 0, deferred: 0, paused: 0 });
     expect(telegram.calls).toHaveLength(1);
     expect(String(telegram.calls[0]!.parameters["message"])).toContain("Jarvis oppdaget [pipeline, normal]");
     const [sit] = (await situationsOf(TENANT_A)).filter((s) => s.stage === "inform");
@@ -264,7 +264,7 @@ describe("B: DELIVER - ett INFORM/SUGGEST-varsel per syklus, evidens-først, ald
     // Simuler krasj: leveransen ble bekreftet (tool_executions) men bokføringen committet aldri.
     await adminPool.query(`UPDATE situations SET inform_delivered_at = NULL WHERE tenant_id = $1`, [TENANT_A]);
     const r = await sweep();
-    expect(r.delivery).toEqual({ delivered: 0, reconciled_from_evidence: 1, pending: 0, evidence_mismatch: 0 });
+    expect(r.delivery).toEqual({ delivered: 0, reconciled_from_evidence: 1, pending: 0, evidence_mismatch: 0, deferred: 0, paused: 0 });
     expect(telegram.calls).toHaveLength(1);
     expect((await situationsOf(TENANT_A))[0]!.inform_delivered_at).not.toBeNull();
   });
@@ -296,7 +296,7 @@ describe("B: DELIVER - ett INFORM/SUGGEST-varsel per syklus, evidens-først, ald
       [TENANT_A, key]
     );
     const r = await sweep();
-    expect(r.delivery).toEqual({ delivered: 0, reconciled_from_evidence: 0, pending: 0, evidence_mismatch: 1 });
+    expect(r.delivery).toEqual({ delivered: 0, reconciled_from_evidence: 0, pending: 0, evidence_mismatch: 1, deferred: 0, paused: 0 });
     expect(telegram.calls).toHaveLength(0);
     expect((await situationsOf(TENANT_A))[0]!.inform_delivered_at).toBeNull();
   });

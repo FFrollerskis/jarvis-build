@@ -164,8 +164,8 @@ describe("C: credential-verdien lekker ALDRI i reason-/audit-feltet", () => {
     // Ytre support.reply "lykkes" (ticket/event opprettes uansett) - selve
     // e-post-utsendingen INNI feiler kontrollert (samme mønster som
     // SupportEmailService.reply(): sent=false, error satt, aldri en kastet feil).
-    expect(result.ok).toBe(true);
-    if (result.ok) expect((result.data as { sent?: boolean } | undefined)?.sent).toBe(false);
+    // D-396 (JARVIS-046): en mislykket utsending er en feil for kalleren (evidens ligger som internal_note).
+    expect(result.ok).toBe(false);
     expect(JSON.stringify(result)).not.toContain("SUPPORT-SUPER-SECRET-SHOULD-NEVER-LEAK-42");
   });
 });
