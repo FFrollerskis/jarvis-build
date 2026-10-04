@@ -132,7 +132,9 @@ export class Watchdog {
 
   constructor(
     private readonly alerts: AlertSink,
-    private readonly killSwitch: KillSwitch
+    private readonly killSwitch: KillSwitch,
+    /** D-393 (JARVIS-041): hver sjekk har et tidsavbrudd - en hengende sjekk blokkerte ellers hele overvåkningen (ticking-låsen ble aldri sluppet). */
+    private readonly checkTimeoutMs = 20_000
   ) {}
 
   register(check: HealthCheck): void {
@@ -162,7 +164,15 @@ export class Watchdog {
       for (const check of this.checks) {
         let result: { ok: boolean; severity: Severity; message: string };
         try {
-          result = await check.run();
+          let timer: NodeJS.Timeout | undefined;
+          try {
+            result = await Promise.race([
+              check.run(),
+              new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`tidsavbrudd etter ${this.checkTimeoutMs} ms`)), this.checkTimeoutMs); })
+            ]);
+          } finally {
+            if (timer) clearTimeout(timer);
+          }
         } catch (err) {
           result = { ok: false, severity: "critical", message: `sjekk feilet: ${(err as Error).message}` };
         }
@@ -204,16 +214,24 @@ export class Watchdog {
   }
 }
 
-/** Fastlåste jobber: running med utløpt lease = fastlåst worker (reclaim finnes, men varsle). */
-export function stuckTasksCheck(pool: pg.Pool): HealthCheck {
+/**
+ * Fastlåste jobber: running med utløpt lease = fastlåst worker (reclaim finnes, men varsle).
+ *
+ * D-393 (JARVIS-041): `tasks` har FORCE ROW LEVEL SECURITY (`tenant_id = current_setting('jarvis.tenant_id')`). Sjekken kjørte tidligere mot
+ * poolen UTEN tenant-kontekst og så derfor ALLTID 0 rader på den ekte `jarvis_runtime`-rollen (samme feil som `costExplosionCheck` hadde, D-191) -
+ * en blind overvåker. Nå kjøres spørringen i `withTenantTransaction` for den konfigurerte eier-tenanten.
+ */
+export function stuckTasksCheck(pool: pg.Pool, tenantId: string): HealthCheck {
   return {
     name: "stuck_tasks",
     runbook: "docs/runbooks/TIER1_RUNBOOKS.md#worker",
     async run() {
-      const result = await pool.query(
-        `SELECT count(*)::int AS n FROM tasks WHERE status = 'running' AND lease_expires_at < now()`
-      );
-      const n = (result.rows[0] as { n: number }).n;
+      const n = await withTenantTransaction(pool, tenantId, async (client) => {
+        const result = await client.query(
+          `SELECT count(*)::int AS n FROM tasks WHERE status = 'running' AND lease_expires_at < now()`
+        );
+        return (result.rows[0] as { n: number }).n;
+      });
       return n === 0
         ? { ok: true, severity: "info", message: "" }
         : { ok: false, severity: "warning", message: `${n} jobber med utløpt lease` };
