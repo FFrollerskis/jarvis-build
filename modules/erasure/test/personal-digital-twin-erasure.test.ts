@@ -144,7 +144,7 @@ beforeAll(async () => {
   // Eier-konfigurerte space-nivå retensjonspolicyer (Q-20 må ALDRI fjerne
   // disse ved en person-scope erasure - de gjelder resten av tenanten).
   await location.setRetentionPolicy(TENANT_A, "personal", { retention_days: 45, actor_person_id: OWNER });
-  await health.setRetentionPolicy(TENANT_A, { retention_days: 200, actor_person_id: OWNER });
+  await health.setRetentionPolicy(TENANT_A, { retention_days: 200, actor_person_id: OWNER }); // D-396 (JARVIS-093): helse-inntak er fail-closed uten policy - satt FØR seed-observasjonene under
 }, 240_000);
 
 afterAll(async () => {

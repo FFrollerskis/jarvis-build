@@ -201,6 +201,10 @@ export interface InformDeliveryResult {
   pending: number;
   /** Bevis under nøkkelen som IKKE er en `telegram`/`notify`-rad - fail-closed, aldri godtatt. */
   evidence_mismatch: number;
+  /** D-396: over per-sveip-taket - utsatt til neste sveip (ikke en feil). */
+  deferred: number;
+  /** D-396: hoppet over fordi domenet (eller alle domener) er satt på pause. */
+  paused: number;
 }
 
 /** Utfallet av én auto-ACT-syklus (`autoActPending()`). */

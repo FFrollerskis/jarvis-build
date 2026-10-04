@@ -309,11 +309,17 @@ export class GemmaHostedAdapter implements ModelProviderAdapter {
             finishReason?: string;
           }>;
           usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; cachedContentTokenCount?: number };
+          error?: { code?: number; message?: string; status?: string };
         };
         try {
           chunk = JSON.parse(data) as typeof chunk;
         } catch {
           continue;
+        }
+        // D-393 (JARVIS-038): en feil-chunk (`{ error: {...} }`) midt i strømmen ble tidligere ignorert (ingen `candidates`) og strømmen
+        // endte som «STOP». Den klassifiseres nå som en normalisert leverandørfeil.
+        if (chunk.error) {
+          throw classifyHttpStatus(this.name, typeof chunk.error.code === "number" ? chunk.error.code : 500);
         }
         const candidate = chunk.candidates?.[0];
         for (const part of candidate?.content?.parts ?? []) {
@@ -351,6 +357,9 @@ export class GemmaHostedAdapter implements ModelProviderAdapter {
     if (signal?.aborted) {
       onEvent({ type: "cancelled" });
       throw new ProviderError(this.name, "cancelled", `${this.name}_cancelled`);
+    }
+    if (!finish) {
+      throw new ProviderError(this.name, "stream_interrupted", `${this.name}_stream_ended_without_finish_reason`);
     }
     const usage = { input_tokens: inputTokens, output_tokens: outputTokens, ...(cachedTokens !== undefined ? { cached_tokens: cachedTokens } : {}) };
     onEvent({ type: "usage", usage });

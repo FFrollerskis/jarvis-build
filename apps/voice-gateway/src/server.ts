@@ -239,8 +239,17 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
   const health = options.health ?? new VoiceHealth();
   const server = createServer((req, res) => {
     if (req.method === "GET" && req.url === "/health") {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", service: "jarvis-voice-gateway", version: "0.2.0" }));
+      // D-393 (JARVIS-026): ikke lenger en konstant «ok». Talekjeden er IKKE frisk når STT eller TTS ikke er konfigurert eller er UNAVAILABLE
+      // (3 sammenhengende feil) - da svarer vi 503 med komponentstatus, slik at compose/`depends_on` og eieren ser sannheten.
+      const stt = healthOf("stt");
+      const tts = healthOf("tts");
+      const bad = (c: { state: string } | undefined): boolean => c === undefined || c.state === "NOT_CONFIGURED" || c.state === "UNAVAILABLE";
+      const ok = !bad(stt) && !bad(tts);
+      res.writeHead(ok ? 200 : 503, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        status: ok ? "ok" : "unavailable", service: "jarvis-voice-gateway", version: "0.2.0",
+        checks: { stt: stt?.state ?? "NOT_CONFIGURED", tts: tts?.state ?? "NOT_CONFIGURED" }
+      }));
       return;
     }
     if (req.method === "GET" && req.url === "/status") {

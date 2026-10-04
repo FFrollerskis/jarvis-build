@@ -20,6 +20,8 @@ export interface SyncReport {
   skipped: number;
   /** UA-2 P1A §16: satt KUN når `source.list()` kastet et klassifisert `KnowledgeSourceError` - observability, endrer ALDRI tombstone-oppførsel. */
   error_class?: SourceErrorClass;
+  /** D-396 (JARVIS-032): `partial` når kilden meldte en delvis/vindu-listing - da ble ingenting tombstonet. */
+  listing?: "complete" | "partial";
 }
 
 /**
@@ -64,9 +66,13 @@ export class KnowledgeSyncService {
   async sync(identity: IdentityContext, memorySpace: MemorySpace, source: KnowledgeSource): Promise<SyncReport> {
     let records: KnowledgeRecord[];
     let skippedExternalIds: string[] = [];
+    let listingPartial = false;
+    let tombstoneScope: { metadata_key: string; values: string[] } | undefined;
     try {
       const result = await source.list();
       records = result.records;
+      listingPartial = result.listing === "partial";
+      tombstoneScope = result.tombstone_scope;
       skippedExternalIds = result.skipped.map((s) => s.external_id);
     } catch (err) {
       // Hele kilden feilet (f.eks. nettverk/credential) - ingen dokumenter ble
@@ -77,17 +83,28 @@ export class KnowledgeSyncService {
       return { ...EMPTY_REPORT, failed: 1, ...(error_class ? { error_class } : {}) };
     }
 
-    const report: SyncReport = { ...EMPTY_REPORT, skipped: skippedExternalIds.length };
+    const report: SyncReport = { ...EMPTY_REPORT, skipped: skippedExternalIds.length, ...(listingPartial ? { listing: "partial" as const } : {}) };
     const seenExternalIds: string[] = [];
 
     await withMemoryTransaction(this.pool, identity.tenant_id, [memorySpace], async (client) => {
       for (const record of records) {
         report.scanned += 1;
         seenExternalIds.push(record.external_id);
+        // D-396 (JARVIS-032): én mislykket SQL-setning i en Postgres-transaksjon avbryter HELE transaksjonen («current transaction is aborted») -
+        // alle påfølgende records og tombstone-spørringen feilet da også. SAVEPOINT per record isolerer feilen til akkurat dette dokumentet.
+        await client.query("SAVEPOINT knowledge_record");
         try {
           await this.upsertOne(client, identity.tenant_id, memorySpace, record, report);
-        } catch {
+          await client.query("RELEASE SAVEPOINT knowledge_record");
+        } catch (err) {
+          await client.query("ROLLBACK TO SAVEPOINT knowledge_record");
+          await client.query("RELEASE SAVEPOINT knowledge_record");
           report.failed += 1;
+          // Kun feilmelding (aldri innhold) - tidligere ble årsaken svelget helt.
+          console.warn(JSON.stringify({
+            msg: "knowledge_sync_record_failed", source_type: source.source_type, external_id: record.external_id,
+            error: (err as Error).message.slice(0, 200)
+          }));
         }
       }
 
@@ -98,6 +115,22 @@ export class KnowledgeSyncService {
       // element feilet, kun elementer kilden faktisk så mangle. Aldri
       // hard-delete her uansett - historikk/provenance blir stående.
       const protectedExternalIds = [...seenExternalIds, ...skippedExternalIds];
+      if (listingPartial) {
+        // D-396 (JARVIS-032): partiell listing (vindu/avkortet) - fravær er ikke bevis på sletting. Kilden kan peke ut en trygg delmengde
+        // (`tombstone_scope`, f.eks. meldinger som faktisk ble listet); uten scope tombstones ingenting.
+        if (!tombstoneScope || tombstoneScope.values.length === 0 || !/^[a-z_][a-z0-9_]*$/.test(tombstoneScope.metadata_key)) {
+          report.tombstoned = 0;
+          return;
+        }
+        const scoped = await client.query(
+          `UPDATE knowledge_documents SET deleted = true, deleted_at = now(), updated_at = now()
+           WHERE tenant_id = $1 AND source_type = $2 AND source_instance_id = $3 AND deleted = false
+             AND (metadata ->> $5) = ANY($6::text[]) AND NOT (external_id = ANY($4::text[]))`,
+          [identity.tenant_id, source.source_type, source.source_instance_id, protectedExternalIds, tombstoneScope.metadata_key, tombstoneScope.values]
+        );
+        report.tombstoned = scoped.rowCount ?? 0;
+        return;
+      }
       const tombstoneResult = await client.query(
         `UPDATE knowledge_documents SET deleted = true, deleted_at = now(), updated_at = now()
          WHERE tenant_id = $1 AND source_type = $2 AND source_instance_id = $3 AND deleted = false

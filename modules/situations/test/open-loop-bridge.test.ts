@@ -93,7 +93,7 @@ describe("D: runSituationSweepForAllTenants - RLS-trygg tenant-katalog, feilisol
       resolveForResolvedSources: async () => 0,
       deliverPendingInformNotifications: async (tenantId: string) => {
         if (tenantId === fail) throw new Error("boom");
-        return { delivered: 0, reconciled_from_evidence: 0, pending: 0, evidence_mismatch: 0 };
+        return { delivered: 0, reconciled_from_evidence: 0, pending: 0, evidence_mismatch: 0, deferred: 0, paused: 0 };
       },
       autoActPending: async () => ({ attempted: 0, succeeded: 0, denied: 0, skipped: 0 })
     }) as unknown as SituationEngine;
@@ -124,7 +124,7 @@ describe("D: runSituationSweepForAllTenants - RLS-trygg tenant-katalog, feilisol
 describe("E: assertSituationSweepHealthy (review 5229219808 funn 3) - usunne resultater KASTER, sunne passerer stille", () => {
   const healthy = (): SituationSweepResult => ({
     ingested: 3, identity_conflicts: 0, resolved_from_source: 1,
-    delivery: { delivered: 2, reconciled_from_evidence: 0, pending: 0, evidence_mismatch: 0 },
+    delivery: { delivered: 2, reconciled_from_evidence: 0, pending: 0, evidence_mismatch: 0, deferred: 0, paused: 0 },
     auto_act: { attempted: 1, succeeded: 0, denied: 1, skipped: 1 },
     errors: []
   });
@@ -138,7 +138,7 @@ describe("E: assertSituationSweepHealthy (review 5229219808 funn 3) - usunne res
     ["errors[]", { errors: ["deliver:Error:boom"] }],
     ["identity_conflicts", { identity_conflicts: 1 }],
     ["delivery.evidence_mismatch", { delivery: { delivered: 0, reconciled_from_evidence: 0, pending: 0, evidence_mismatch: 1 } }],
-    ["delivery.pending", { delivery: { delivered: 0, reconciled_from_evidence: 0, pending: 2, evidence_mismatch: 0 } }]
+    ["delivery.pending", { delivery: { delivered: 0, reconciled_from_evidence: 0, pending: 2, evidence_mismatch: 0, deferred: 0, paused: 0 } }]
   ] as const)("%s => SituationSweepFailedError som navngir tenanten", (_label, override) => {
     const results = { "t-ok": healthy(), "t-bad": { ...healthy(), ...override } as SituationSweepResult };
     let thrown: unknown;

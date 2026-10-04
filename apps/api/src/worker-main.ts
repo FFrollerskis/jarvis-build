@@ -49,7 +49,7 @@ import {
   withSecretRedaction
 } from "@jarvis/tasks";
 import { KnowledgeSourceRegistry, emailIngestHandler } from "@jarvis/knowledge";
-import { LocalHashEmbedding } from "@jarvis/memory";
+import { createEmbeddingProviderFromEnv } from "@jarvis/memory";
 import {
   WatchdogEmergencyAlertSink, Watchdog, costExplosionCheck, databaseCheck, stuckTasksCheck,
   parseWatchdogIntervalMs, parseCostHardLimitOre
@@ -523,7 +523,7 @@ toolGateway.setClassDNotifier(telegramClassDNotifier({
 const watchdogAlertSink = new WatchdogEmergencyAlertSink(telegramTransport, toolSecretProvider);
 const watchdog = new Watchdog(watchdogAlertSink, killSwitch);
 watchdog.register(databaseCheck(pool));
-watchdog.register(stuckTasksCheck(pool));
+watchdog.register(stuckTasksCheck(pool, owner.tenant_id));
 // D-187 (BLOCKER B2, arkitekt-order D187 mot PR #96): begge miljøvariablene
 // valideres FØR bruk - `parseCostHardLimitOre`/`parseWatchdogIntervalMs`
 // kaster ved enhver eksplisitt oppgitt, ugyldig verdi (fail-closed oppstart)
@@ -656,7 +656,8 @@ const knowledgeRegistry = new KnowledgeSourceRegistry([
 worker.register(
   "knowledge-ingest-email",
   emailIngestHandler({
-    pool, toolGateway, embeddings: new LocalHashEmbedding(), visionGateway: gateway, registry: knowledgeRegistry
+    pool, toolGateway, // D-396 (JARVIS-031): samme embedding-leverandør som api (env-styrt) - ikke en hardkodet LocalHashEmbedding i workeren.
+    embeddings: createEmbeddingProviderFromEnv(), visionGateway: gateway, registry: knowledgeRegistry
   })
 );
 
