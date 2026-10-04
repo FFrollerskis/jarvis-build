@@ -1,5 +1,5 @@
 import type pg from "pg";
-import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
+import { MemorySpaceSchema, type IdentityContext, type MemorySpace } from "@jarvis/contracts";
 import type { ClaimedTask, JobContext } from "@jarvis/tasks";
 import type { EmbeddingProvider } from "@jarvis/memory";
 import type { ToolGateway } from "@jarvis/tool-gateway";
@@ -41,7 +41,10 @@ export function emailIngestHandler(opts: EmailIngestHandlerOptions) {
     if (!sourceInstanceId) {
       throw new Error("email_ingest_handler_requires_source_instance_id");
     }
-    const memorySpaceId = (input.memory_space_id ?? "personal") as MemorySpace;
+    // D-396 (JARVIS-032): jobb-input er ikke-betrodd - en ukjent memory space ble tidligere castet rått og endte som en SQL-/RLS-feil dypt nede.
+    const parsedSpace = MemorySpaceSchema.safeParse(input.memory_space_id ?? "personal");
+    if (!parsedSpace.success) throw new Error("email_ingest_invalid_memory_space");
+    const memorySpaceId: MemorySpace = parsedSpace.data;
 
     const identity: IdentityContext = {
       person_id: task.contract.owner_person_id, tenant_id: task.tenant_id, memory_space_id: memorySpaceId,
