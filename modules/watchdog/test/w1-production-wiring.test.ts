@@ -37,7 +37,7 @@ describe("W1: @jarvis/watchdog er faktisk konsumert av worker-main.ts (WATCHDOG_
   it("worker-main.ts konstruerer ÉN Watchdog-instans og registrerer alle tre kanoniske sjekker", () => {
     expect(workerMainSource).toContain("new Watchdog(watchdogAlertSink, killSwitch)");
     expect(workerMainSource).toContain("watchdog.register(databaseCheck(pool))");
-    expect(workerMainSource).toContain("watchdog.register(stuckTasksCheck(pool))");
+    expect(workerMainSource).toContain("watchdog.register(stuckTasksCheck(pool, owner.tenant_id))");
     expect(workerMainSource).toMatch(/watchdog\.register\(\s*costExplosionCheck\(/);
     // Nøyaktig ÉN konstruksjon - ingen duplikat watchdog-instans i samme fil.
     expect(workerMainSource.match(/new Watchdog\(/g)?.length).toBe(1);
