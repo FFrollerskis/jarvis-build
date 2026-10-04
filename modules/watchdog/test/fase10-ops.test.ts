@@ -62,7 +62,7 @@ describe("Akseptanse 1: watchdog oppdager simulert feil og varsler med runbook",
     const killSwitch = new KillSwitch();
     const watchdog = new Watchdog(sink, killSwitch);
     watchdog.register(databaseCheck(appPool));
-    watchdog.register(stuckTasksCheck(adminPool));
+    watchdog.register(stuckTasksCheck(adminPool, "tenant-a"));
     let restarts = 0;
     watchdog.registerAction("stuck_tasks", async () => { restarts += 1; }, 2);
 
@@ -155,5 +155,35 @@ describe("Akseptanse 3: kostnad synlig per modell/tenant/oppgave", () => {
     expect(report.by_kind.find((r) => r.kind === "model:scripted")?.ore).toBe(1200);
     expect(report.by_tenant[0]?.tenant_id).toBe("tenant-a");
     expect(report.by_task.find((r) => r.task_id === "task-x")?.ore).toBe(1200);
+  });
+});
+
+describe("D-393 (JARVIS-041): vaktbikkja som faktisk ser", () => {
+  it("stuckTasksCheck finner en fastlåst jobb på den ekte RLS-rollen (tenant-kontekst), ikke bare som superuser", async () => {
+    await adminPool.query(`
+      INSERT INTO tasks (task_id, tenant_id, owner_person_id, goal, contract, status, worker_id, lease_expires_at)
+      VALUES ('task-stuck-rls','tenant-a','person-tobias','g','{}'::jsonb,'running','w1', now() - interval '1 minute')
+    `);
+    try {
+      const sink = new MemoryAlertSink();
+      const watchdog = new Watchdog(sink, new KillSwitch());
+      watchdog.register(stuckTasksCheck(appPool, "tenant-a")); // appPool = jarvis_app, FORCE RLS
+      await watchdog.tick();
+      expect(sink.alerts.filter((a) => a.check === "stuck_tasks")).toHaveLength(1);
+    } finally {
+      await adminPool.query("DELETE FROM tasks WHERE task_id = 'task-stuck-rls'");
+    }
+  });
+
+  it("en hengende sjekk gir critical tidsavbrudd-varsel og blokkerer ikke neste tick", async () => {
+    const sink = new MemoryAlertSink();
+    const watchdog = new Watchdog(sink, new KillSwitch(), 50);
+    watchdog.register({ name: "hangs", runbook: "docs/runbooks/TIER1_RUNBOOKS.md", run: () => new Promise(() => undefined) });
+    await watchdog.tick();
+    expect(sink.alerts[0]?.severity).toBe("critical");
+    expect(sink.alerts[0]?.message).toContain("tidsavbrudd");
+    expect(watchdog.isTicking()).toBe(false);
+    await watchdog.tick();
+    expect(sink.alerts).toHaveLength(2);
   });
 });

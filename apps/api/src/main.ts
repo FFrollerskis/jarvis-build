@@ -102,7 +102,7 @@ import {
 import { ConversationEngine } from "./conversation.ts";
 import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
-import { createApiServer, type ApiDeps } from "./server.ts";
+import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
 
 const port = envPort("JARVIS_API_PORT", 3010);
 
@@ -1055,6 +1055,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     personality: loadPersonalityConfig
   });
   const deps: ApiDeps = {
+    // D-393 (JARVIS-026): `/health` svarer 503 når databasen ikke svarer (tidligere konstant «ok»).
+    readiness: makeReadiness({ database: () => pool.query("SELECT 1") }),
     // Del 2 (JARVIS-065): den validerte eier-identiteten fyller visningsfeltene i /chat, /dashboard og /voice
     // (aldri autoritet - den kommer fra et verifisert grant). Uten denne svarer sidene 503 `owner_not_configured`.
     owner: { tenant_id: owner.tenant_id, person_id: owner.owner_person_id },
