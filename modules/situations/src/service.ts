@@ -250,6 +250,8 @@ export class SituationRecoveryUnauthorizedError extends Error {
   }
 }
 
+/** D-396 (JARVIS-085): under `telegram.notify` sin 20/min-grense (se integrations.ts) - rest utsettes til neste sveip. */
+export const MAX_INFORM_DELIVERIES_PER_SWEEP = 15;
 const DEFAULT_RESUPPRESS_HOURS = 24;
 
 const STAGE_RANK: Record<SituationStage, number> = {
@@ -312,7 +314,20 @@ function canonicalJsonValue(value: JsonValue): string {
  */
 export function buildInformMessage(domain: string, priority: SituationPriority, stage: SituationStage, reason: string): string {
   const head = stage === "suggest" ? "Jarvis foreslår handling" : "Jarvis oppdaget";
-  return `${head} [${domain}, ${priority}]: ${reason}`;
+  const prefix = `${head} [${domain}, ${priority}]: `;
+  return prefix + sanitizeAndCap(reason, MAX_TELEGRAM_MESSAGE_CHARS - prefix.length);
+}
+
+/**
+ * D-396 (JARVIS-085): `telegram.notify` avviser meldinger over 4 000 tegn, og `reason` bærer UBETRODD tekst (emne/leverandørnavn). En for lang tekst forble
+ * `pending` for alltid og feilet situasjonssveipet HVER dag. Kontrolltegn (unntatt linjeskift/tab) fjernes, og teksten kuttes med «…» innenfor rommet.
+ * Samme funksjon brukes ved frysing og levering, så fingeravtrykket (nøkkelen) forblir konsistent.
+ */
+export const MAX_TELEGRAM_MESSAGE_CHARS = 3500;
+function sanitizeAndCap(text: string, room: number): string {
+  // eslint-disable-next-line no-control-regex
+  const clean = text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, " ");
+  return clean.length > room ? `${clean.slice(0, Math.max(0, room - 1))}…` : clean;
 }
 
 /**
@@ -424,7 +439,9 @@ export function computeActOperationFingerprint(
 
 /** Den EKSAKTE meldingsteksten ACT+NOTIFY sender - EGEN funksjon slik at BÅDE selve sendingen OG rekonsilieringen (se `computeNotifyKey()`) GARANTERT bruker NØYAKTIG samme tekst. */
 export function buildNotifyMessage(reason: string, toolId: string, action: string): string {
-  return `Jarvis utførte en handling: ${reason} (${toolId}.${action})`;
+  const prefix = "Jarvis utførte en handling: ";
+  const suffix = ` (${toolId}.${action})`;
+  return prefix + sanitizeAndCap(reason, MAX_TELEGRAM_MESSAGE_CHARS - prefix.length - suffix.length) + suffix;
 }
 
 /**
@@ -524,14 +541,17 @@ export class SituationEngine {
     }
     const value = parsed.data;
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      // D-396 (JARVIS-085): MERGE i stedet for overskriving - et felt som IKKE er oppgitt beholder eksisterende verdi (en oppdatering av kun `resuppress_hours`
+      // nullstilte stille stille-timene). Eksplisitt `null` nullstiller fortsatt feltet.
+      const provided = (k: "quiet_hours_start_utc" | "quiet_hours_end_utc" | "resuppress_hours"): boolean => value[k] !== undefined;
       const { rows } = await client.query(
         `INSERT INTO situation_notification_policies (tenant_id, memory_space_id, quiet_hours_start_utc, quiet_hours_end_utc, resuppress_hours, actor_person_id, updated_at)
          VALUES ($1, $2, $3, $4, COALESCE($5, ${DEFAULT_RESUPPRESS_HOURS}), $6, now())
          ON CONFLICT (tenant_id, memory_space_id)
          DO UPDATE SET
-           quiet_hours_start_utc = EXCLUDED.quiet_hours_start_utc,
-           quiet_hours_end_utc = EXCLUDED.quiet_hours_end_utc,
-           resuppress_hours = EXCLUDED.resuppress_hours,
+           quiet_hours_start_utc = CASE WHEN $7::boolean THEN EXCLUDED.quiet_hours_start_utc ELSE situation_notification_policies.quiet_hours_start_utc END,
+           quiet_hours_end_utc = CASE WHEN $8::boolean THEN EXCLUDED.quiet_hours_end_utc ELSE situation_notification_policies.quiet_hours_end_utc END,
+           resuppress_hours = CASE WHEN $9::boolean THEN EXCLUDED.resuppress_hours ELSE situation_notification_policies.resuppress_hours END,
            actor_person_id = EXCLUDED.actor_person_id,
            updated_at = now()
          RETURNING *`,
@@ -541,7 +561,10 @@ export class SituationEngine {
           value.quiet_hours_start_utc ?? null,
           value.quiet_hours_end_utc ?? null,
           value.resuppress_hours ?? null,
-          value.actor_person_id ?? null
+          value.actor_person_id ?? null,
+          provided("quiet_hours_start_utc"),
+          provided("quiet_hours_end_utc"),
+          provided("resuppress_hours")
         ]
       );
       return rows[0] as SituationNotificationPolicy;
@@ -1285,8 +1308,23 @@ export class SituationEngine {
     if (identity.tenant_id !== tenantId || identity.memory_space_id !== memorySpace) {
       throw new SituationActScopeMismatchError(tenantId, memorySpace, identity.tenant_id, identity.memory_space_id);
     }
-    const result: InformDeliveryResult = { delivered: 0, reconciled_from_evidence: 0, pending: 0, evidence_mismatch: 0 };
-    const pending = await this.listPendingInformNotifications(tenantId, memorySpace);
+    const result: InformDeliveryResult = { delivered: 0, reconciled_from_evidence: 0, pending: 0, evidence_mismatch: 0, deferred: 0, paused: 0 };
+    const allPending = await this.listPendingInformNotifications(tenantId, memorySpace);
+    // D-396 (JARVIS-085): (1) en pause (`pause_all`/domene) stoppet tidligere KUN ACT - varsler gikk videre; nå hoppes pausede domener over (durabel DB-sjekk).
+    const pausedRows = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(`SELECT domain FROM situation_domain_pauses`);
+      return rows as Array<{ domain: string }>;
+    });
+    const allPaused = pausedRows.some((r) => r.domain === ALL_DOMAINS);
+    const pausedDomains = new Set(pausedRows.map((r) => r.domain));
+    const deliverable = allPending.filter((item) => {
+      const isPaused = allPaused || pausedDomains.has(item.situation.domain);
+      if (isPaused) result.paused += 1;
+      return !isPaused;
+    });
+    // (2) maks leveranser per sveip (Telegram-grensen er 20/min): resten er UTSATT (`deferred`) til neste sveip, ikke «ulevert»/usunn.
+    const pending = deliverable.slice(0, MAX_INFORM_DELIVERIES_PER_SWEEP);
+    result.deferred = deliverable.length - pending.length;
     for (const item of pending) {
       const key = computeInformNotifyKey(item.situation.situation_id, item.anchor, item.message);
       const evidence = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
