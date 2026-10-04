@@ -20,7 +20,7 @@ import {
   configFromEnv,
   createPool,
   ConfirmationStore,
-  runMigrations,
+  runMigrationsAsAdmin,
   withTenantTransaction,
   writeAudit
 } from "@jarvis/core";
@@ -118,9 +118,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // Remediering del 2 (JARVIS-065): ÉN validert eier-identitet for hele prosessen (fail closed uten).
   const owner = ownerConfigOrExit();
   const pool = createPool(configFromEnv());
-  // Migrasjoner kjøres av admin-bruker i drift; her antas app-bruker å ha skjema fra før.
+  // Migrasjoner kjøres av admin-bruker i drift (compose: `migrate`-tjenesten); her antas app-bruker å ha skjema fra før.
+  // D-395 (JARVIS-075): flagget kjører migratoren med ADMIN-konfig i en egen, kortlivet pool - aldri med runtime-rollen (Q-21) - og feiler
+  // lukket uten JARVIS_DB_ADMIN_PASSWORD.
   if (process.env["JARVIS_DB_RUN_MIGRATIONS"] === "true") {
-    await runMigrations(pool);
+    await runMigrationsAsAdmin();
   }
   // Q-21: appen skal ALDRI starte normalt med en superuser/BYPASSRLS-tilkobling - RLS
   // er strukturelt umulig å håndheve for en slik rolle, uansett hvor korrekte policyene er.
