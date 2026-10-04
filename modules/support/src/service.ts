@@ -313,7 +313,9 @@ export class SupportService {
           actor_person_id: null, source_type: input.source_type, source_instance_id: input.source_instance_id,
           source_message_id: null, canonical_uri: input.canonical_uri ?? null, metadata: {}, occurred_at: input.occurred_at ?? null
         });
-      } else if (input.is_from_customer && isTerminalTicketStatus(ticket.status)) {
+      } else if (input.is_from_customer && isTerminalTicketStatus(ticket.status) && !(await this.messageAlreadyIngested(client, tenantId, input))) {
+        // D-396 (JARVIS-046): en re-levering av en ALLEREDE innlest melding skal aldri gjenåpne en løst ticket (idempotens: samme
+        // `source_message_id` = ingen tilstandsendring). Sjekken skjer FØR reåpningen; selve event-insert under er fortsatt idempotent.
         const target = reopenTargetStatus();
         assertValidTicketTransition(ticket.status, target);
         const { rows } = await client.query(
@@ -331,7 +333,7 @@ export class SupportService {
       const eventResult = await insertEvent(
         client, tenantId, memorySpace,
         {
-          ticket_id: ticket.ticket_id, event_type: input.is_from_customer ? "customer_message" : "agent_reply",
+          ticket_id: ticket.ticket_id, event_type: input.is_from_customer ? "customer_message" : input.outbound_outcome === "failed_send" ? "internal_note" : "agent_reply",
           summary: input.summary, actor_person_id: null, source_type: input.source_type,
           source_instance_id: input.source_instance_id, source_message_id: input.source_message_id,
           canonical_uri: input.canonical_uri ?? null, metadata: {}, occurred_at: input.occurred_at ?? null
@@ -359,6 +361,29 @@ export class SupportService {
       }
       return { ticket, event: eventResult.event, ticket_created: ticketCreated, event_created: eventResult.created, reopened };
     });
+  }
+
+  /** D-396 (JARVIS-046): slå opp et allerede registrert event via leverandørens meldings-identitet (brukes for idempotent svar). */
+  async findEventBySourceMessage(
+    tenantId: string, memorySpace: MemorySpace, sourceType: string, sourceInstanceId: string, sourceMessageId: string
+  ): Promise<SupportTicketEvent | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM support_ticket_events WHERE tenant_id = $1 AND source_type = $2 AND source_instance_id = $3 AND source_message_id = $4 LIMIT 1`,
+        [tenantId, sourceType, sourceInstanceId, sourceMessageId]
+      );
+      return (rows[0] as SupportTicketEvent) ?? null;
+    });
+  }
+
+  private async messageAlreadyIngested(client: pg.PoolClient, tenantId: string, input: IngestMessageInput): Promise<boolean> {
+    if (!input.source_message_id) return false;
+    const { rows } = await client.query(
+      `SELECT 1 FROM support_ticket_events
+        WHERE tenant_id = $1 AND source_type = $2 AND source_instance_id = $3 AND source_message_id = $4 LIMIT 1`,
+      [tenantId, input.source_type, input.source_instance_id, input.source_message_id]
+    );
+    return rows.length > 0;
   }
 
   private async readForUpdate(client: pg.PoolClient, tenantId: string, ticketId: string): Promise<SupportTicket | null> {

@@ -797,16 +797,56 @@ export class ModelGateway {
   ): Promise<void> {
     const cost =
       this.legacyCostOverride(result) ?? computeCostOre(this.pricing, result.provider, result.model, result.usage);
-    await this.recordCost(input, result, cost, {
-      success: true,
-      fallback: ctx.failedProviders.length > 0,
-      critic: ctx.isCritic,
-      latency_ms: ctx.latency,
-      // BO-11.1 §4: streaming-/tool-metrics SQL-spørrbare (migrasjon 016).
-      stream: Boolean(ctx.streamOpts),
-      ...(result.ttft_ms !== undefined ? { ttft_ms: result.ttft_ms } : {}),
-      tool_calls: result.tool_calls?.length ?? 0
-    });
+    // D-393 (JARVIS-034): kostnads- og sporingsskriving ETTER et vellykket leverandørkall er bokføring, ikke en leverandørfeil. Tidligere
+    // gikk en feilet `cost_events`-INSERT eller trace-skriving til `catch` i `executePlan`, ble talt som leverandørfeil og utløste et NYTT
+    // (fakturert) kall mot neste kandidat selv om svaret allerede forelå. Nå logges feilen høyt (med beløpet slik at det kan etterbokføres)
+    // og svaret returneres.
+    try {
+      await this.recordCost(input, result, cost, {
+        success: true,
+        fallback: ctx.failedProviders.length > 0,
+        critic: ctx.isCritic,
+        latency_ms: ctx.latency,
+        // BO-11.1 §4: streaming-/tool-metrics SQL-spørrbare (migrasjon 016).
+        stream: Boolean(ctx.streamOpts),
+        ...(result.ttft_ms !== undefined ? { ttft_ms: result.ttft_ms } : {}),
+        tool_calls: result.tool_calls?.length ?? 0
+      });
+    } catch (err) {
+      this.bookkeepingFailures += 1;
+      console.error(JSON.stringify({
+        msg: "model_cost_bookkeeping_failed", provider: result.provider, model: result.model, tenant_id: input.tenant_id,
+        cost_ore: cost, input_tokens: result.usage.input_tokens, output_tokens: result.usage.output_tokens, error: (err as Error).message.slice(0, 160)
+      }));
+    }
+    try {
+      await this.recordAttemptTrace(input, result, outcome, cost, ctx);
+    } catch (err) {
+      this.bookkeepingFailures += 1;
+      console.error(JSON.stringify({ msg: "model_trace_bookkeeping_failed", provider: result.provider, error: (err as Error).message.slice(0, 160) }));
+    }
+  }
+
+  /** D-393: antall bokføringsfeil (kost/trace) som ble isolert fra leverandørfeilhåndteringen - synlig for drift/tester. */
+  bookkeepingFailures = 0;
+
+  private async recordAttemptTrace(
+    input: CompleteInput,
+    result: ModelResult,
+    outcome: CompletionOutcome,
+    cost: number,
+    ctx: {
+      traceId: string;
+      started: number;
+      budgetLevel: string;
+      isCritic: boolean;
+      adapterName: string;
+      latency: number;
+      failedProviders: string[];
+      plan: { mode: string; reason: string };
+      adaptiveRetryOfOutcome?: CompletionOutcome;
+    }
+  ): Promise<void> {
     await this.opts.trace.record({
       trace_id: ctx.traceId,
       kind: "model_call",

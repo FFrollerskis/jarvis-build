@@ -330,7 +330,7 @@ describe("D-199-B: gemma_hosted sin nye .stream() (Q-30 lukket)", () => {
             new Blob([
               data({ candidates: [{ content: { parts: [{ text: "Brukeren sa hei. Jeg bør svare høflig.", thought: true }] } }] }),
               data({ candidates: [{ content: { parts: [{ text: "Hei! " }] } }] }),
-              data({ candidates: [{ content: { parts: [{ text: "Hvordan kan jeg hjelpe?" }], finishReason: "STOP" } }], usageMetadata: {} })
+              data({ candidates: [{ content: { parts: [{ text: "Hvordan kan jeg hjelpe?" }] }, finishReason: "STOP" }], usageMetadata: {} })
             ]).stream(),
             { status: 200, headers: { "content-type": "text/event-stream" } }
           )
