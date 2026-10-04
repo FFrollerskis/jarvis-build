@@ -112,6 +112,8 @@ export class WatchdogEmergencyAlertSink implements AlertSink {
 export interface HealthCheck {
   name: string;
   runbook: string;
+  /** D-395 (JARVIS-039): minste tid mellom to IDENTISKE varsler fra denne sjekken (overstyrer watchdogens standard). */
+  cooldownMs?: number;
   run(): Promise<{ ok: boolean; severity: Severity; message: string }>;
 }
 
@@ -129,12 +131,17 @@ export class Watchdog {
   // ordren) - en treg sjekk (f.eks. en langsom cost_events-spørring) skal
   // aldri kunne kjøre TO ganger samtidig fra to intervall-tikk som overlapper.
   private ticking = false;
+  /** D-395 (JARVIS-039): siste sendte varsel per sjekk - et vedvarende avvik varslet tidligere HVERT tick (hvert minutt) i det uendelige. */
+  private readonly lastAlert = new Map<string, { message: string; at: number }>();
 
   constructor(
     private readonly alerts: AlertSink,
     private readonly killSwitch: KillSwitch,
     /** D-393 (JARVIS-041): hver sjekk har et tidsavbrudd - en hengende sjekk blokkerte ellers hele overvåkningen (ticking-låsen ble aldri sluppet). */
-    private readonly checkTimeoutMs = 20_000
+    private readonly checkTimeoutMs = 20_000,
+    /** D-395: samme varsel fra samme sjekk sendes på nytt først etter dette (eller straks meldingen endres). Standard 30 minutter. */
+    private readonly alertCooldownMs = 30 * 60_000,
+    private readonly now: () => number = () => Date.now()
   ) {}
 
   register(check: HealthCheck): void {
@@ -177,6 +184,7 @@ export class Watchdog {
           result = { ok: false, severity: "critical", message: `sjekk feilet: ${(err as Error).message}` };
         }
         if (result.ok) {
+          this.lastAlert.delete(check.name); // avviket er borte - neste avvik varsles umiddelbart
           continue;
         }
         const alert: Alert = {
@@ -188,12 +196,22 @@ export class Watchdog {
         // ALDRI blokkerer den allerede fullførte tilstandsmutasjonen i
         // check.run() (f.eks. costExplosionCheck sin durable kill-switch-
         // aktivering skjer FØR dette punktet, uavhengig av om varsling lykkes).
-        try {
-          await this.alerts.send(alert);
-        } catch (err) {
-          console.error(JSON.stringify({
-            msg: "watchdog_alert_delivery_failed", check: check.name, error: (err as Error).message
-          }));
+        const previous = this.lastAlert.get(check.name);
+        const cooldown = check.cooldownMs ?? this.alertCooldownMs;
+        if (previous && previous.message === alert.message && this.now() - previous.at < cooldown) {
+          // D-395: identisk gjentakelse innenfor nedkjølingen - observerbart, men ikke et nytt varsel (spam).
+          console.warn(JSON.stringify({ msg: "watchdog_alert_suppressed_repeat", check: check.name }));
+        } else {
+          this.lastAlert.set(check.name, { message: alert.message, at: this.now() });
+          try {
+            await this.alerts.send(alert);
+          } catch (err) {
+            // Leveringsfeil: ikke registrer som sendt, så neste tick prøver igjen.
+            this.lastAlert.delete(check.name);
+            console.error(JSON.stringify({
+              msg: "watchdog_alert_delivery_failed", check: check.name, error: (err as Error).message
+            }));
+          }
         }
         const action = this.actions.get(check.name);
         if (action && action.attempts < action.maxAttempts) {
@@ -334,6 +352,26 @@ export function costExplosionCheck(
       }
       await killSwitch.activateDurable(`kostnadseksplosjon: ${spent} øre >= ${hardLimitOre}`, ownerPersonId);
       return { ok: false, severity: "critical", message: `kill switch aktivert (${(spent / 100).toFixed(0)} kr)` };
+    }
+  };
+}
+
+/**
+ * D-395 (JARVIS-039): varselgrensen (standard 1 000 kr/mnd) ble aldri varslet - `BudgetGuard` ga bare nivået «warn» internt. Denne sjekken varsler (én gang per
+ * døgn) når månedsforbruket passerer varselgrensen, med en KONSTANT melding slik at nedkjølingen virker. Rører aldri kill switchen (kun hardgrensen gjør det).
+ */
+export function costWarningCheck(pool: pg.Pool, tenantId: string, warnOre = 100_000): HealthCheck {
+  return {
+    name: "cost_warning",
+    runbook: "docs/runbooks/TIER1_RUNBOOKS.md#kostnad",
+    cooldownMs: 24 * 60 * 60_000,
+    async run() {
+      const spent = await withTenantTransaction(pool, tenantId, async (client) => {
+        const result = await client.query(`SELECT coalesce(sum(amount_ore),0)::int AS spent FROM cost_events WHERE at >= date_trunc('month', now())`);
+        return (result.rows[0] as { spent: number }).spent;
+      });
+      if (spent < warnOre) return { ok: true, severity: "info", message: "" };
+      return { ok: false, severity: "warning", message: `månedlig kostnad er over varselgrensen (${(warnOre / 100).toFixed(0)} kr)` };
     }
   };
 }

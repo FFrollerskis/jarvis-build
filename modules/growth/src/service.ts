@@ -420,16 +420,19 @@ export class GrowthService {
       const totalSpend = Number(snapshot.total_spend_ore);
       const wonOpportunities = snapshot.won_opportunities;
       const attributedRevenue = Number(snapshot.attributed_revenue_ore);
+      const hasForeignCurrency = snapshot.spend_currencies.some((c) => c !== "NOK");
       return {
         campaign_id: campaignId,
         total_spend_ore: snapshot.total_spend_ore,
+        spend_currencies: snapshot.spend_currencies,
         attributed_leads: snapshot.attributed_leads,
         attributed_opportunities: snapshot.attributed_opportunities,
         attributed_meetings: snapshot.attributed_meetings,
         won_opportunities: wonOpportunities,
         attributed_revenue_ore: snapshot.attributed_revenue_ore,
-        cac_ore: wonOpportunities > 0 ? totalSpend / wonOpportunities : null,
-        roas: totalSpend > 0 ? attributedRevenue / totalSpend : null
+        // D-395: ratioene er udefinerte (null) når utgiften inneholder fremmed valuta - inntekten (`value_ore`) er NOK, og en blanding gir meningsløse tall.
+        cac_ore: !hasForeignCurrency && wonOpportunities > 0 ? totalSpend / wonOpportunities : null,
+        roas: !hasForeignCurrency && totalSpend > 0 ? attributedRevenue / totalSpend : null
       };
     });
   }
@@ -448,23 +451,35 @@ export class GrowthService {
     tenantId: string,
     campaignId: string
   ): Promise<{
-    total_spend_ore: string; attributed_leads: number; attributed_opportunities: number;
+    total_spend_ore: string; spend_currencies: string[]; attributed_leads: number; attributed_opportunities: number;
     attributed_meetings: number; won_opportunities: number; attributed_revenue_ore: string;
   }> {
+    // D-395 (JARVIS-083): (1) utgift telles ÉN gang per dato - samme dag kan ha rader fra flere kildetyper (manuell + provider_sync), og SUM over alle
+    // dobbelttalte den; kilden med høyest tillit (provider_sync > csv_import > manual) vinner per dato. (2) Kun NOK summeres - en USD-rad ble tidligere
+    // lagt rett oppå NOK; fremmed valuta rapporteres i `spend_currencies` og gjør ratioene udefinerte (ALDRI en fabrikkert blanding). (3) Inntekt summeres
+    // over DISTINKTE tilskrevne enheter - samme opportunity tilskrevet under begge modeller (first/last touch) telte tidligere dobbelt.
     const { rows } = await client.query(
-      `SELECT
-         COALESCE((SELECT SUM(spend_amount_ore) FROM marketing_spend_events WHERE tenant_id = $1 AND campaign_id = $2), 0) AS total_spend_ore,
-         COUNT(DISTINCT CASE WHEN a.entity_type = 'lead' THEN a.entity_id END) AS attributed_leads,
-         COUNT(DISTINCT CASE WHEN a.entity_type = 'opportunity' THEN a.entity_id END) AS attributed_opportunities,
-         COUNT(DISTINCT CASE WHEN a.entity_type = 'opportunity' AND o.stage = 'won' THEN a.entity_id END) AS won_opportunities,
+      `WITH spend AS (
+         SELECT DISTINCT ON (event_date) event_date, spend_amount_ore, currency
+           FROM marketing_spend_events
+          WHERE tenant_id = $1 AND campaign_id = $2
+          ORDER BY event_date, CASE source_type WHEN 'provider_sync' THEN 0 WHEN 'csv_import' THEN 1 ELSE 2 END
+       ), attr AS (
+         SELECT DISTINCT entity_type, entity_id FROM marketing_attributions WHERE tenant_id = $1 AND campaign_id = $2
+       )
+       SELECT
+         COALESCE((SELECT SUM(spend_amount_ore) FROM spend WHERE upper(currency) = 'NOK'), 0) AS total_spend_ore,
+         COALESCE((SELECT array_agg(DISTINCT upper(currency) ORDER BY upper(currency)) FROM spend), '{}') AS spend_currencies,
+         COUNT(CASE WHEN a.entity_type = 'lead' THEN 1 END) AS attributed_leads,
+         COUNT(CASE WHEN a.entity_type = 'opportunity' THEN 1 END) AS attributed_opportunities,
+         COUNT(CASE WHEN a.entity_type = 'opportunity' AND o.stage = 'won' THEN 1 END) AS won_opportunities,
          COALESCE(SUM(CASE WHEN a.entity_type = 'opportunity' AND o.stage = 'won' THEN o.value_ore ELSE 0 END), 0) AS attributed_revenue_ore
-       FROM marketing_attributions a
-       LEFT JOIN business_opportunities o ON o.tenant_id = a.tenant_id AND o.opportunity_id = a.entity_id AND a.entity_type = 'opportunity'
-       WHERE a.tenant_id = $1 AND a.campaign_id = $2`,
+       FROM attr a
+       LEFT JOIN business_opportunities o ON o.tenant_id = $1 AND o.opportunity_id = a.entity_id AND a.entity_type = 'opportunity'`,
       [tenantId, campaignId]
     );
     const row = rows[0] as {
-      total_spend_ore: string; attributed_leads: string; attributed_opportunities: string; won_opportunities: string; attributed_revenue_ore: string;
+      total_spend_ore: string; spend_currencies: string[]; attributed_leads: string; attributed_opportunities: string; won_opportunities: string; attributed_revenue_ore: string;
     };
     const meetingRows = await client.query(
       `SELECT COUNT(DISTINCT act.activity_id) AS attributed_meetings
@@ -481,6 +496,7 @@ export class GrowthService {
     );
     return {
       total_spend_ore: row.total_spend_ore,
+      spend_currencies: row.spend_currencies,
       attributed_leads: Number(row.attributed_leads),
       attributed_opportunities: Number(row.attributed_opportunities),
       attributed_meetings: Number((meetingRows.rows[0] as { attributed_meetings: string }).attributed_meetings),
