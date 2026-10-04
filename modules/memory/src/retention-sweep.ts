@@ -55,6 +55,8 @@ async function findEpisodicCandidates(
        JOIN memory_sources ms ON ms.source_id = mi.source_id
        WHERE mi.tenant_id = $1 AND mi.space = $2 AND mi.status = 'active'
          AND mi.type = 'episodic' AND ms.kind = 'conversation'
+         -- D-386: special (helse/finans) konsolideres ALDRI inn i et sammendrag (som ikke bærer sensitivitet) - de forblir egne items.
+         AND mi.sensitivity <> 'special'
          AND mi.observed_at < now() - ($3 || ' days')::interval
        ORDER BY day`,
       [tenantId, space, retentionDays]

@@ -47,6 +47,7 @@ import { InProcessWorker, PgTaskQueue, TaskService, allowedReposFromEnv } from "
 import {
   LlmExtractionAdapter,
   createEmbeddingProviderFromEnv,
+  runMemoryProfileSweepForAllTenants,
   runMemoryReembedSweepForAllTenants,
   MemoryRetriever,
   MemoryWriter,
@@ -550,7 +551,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // begrunnelse): `SummaryService` FANTES fra før, men ble ALDRI konstruert
   // eller kalt fra noe produksjonssted (D-286 sitt eget funn) - kun
   // `memory-retention-sweep`-jobben under bruker den.
-  const memorySummaries = new SummaryService(pool);
+  // D-386: LLM-genererte dagssammendrag (purpose SUMMARIZE via samme gateway/ruter - sensitivt innhold går lokalt) med vektor,
+  // så sammendragslaget faktisk er LESBART i retrieveren. Template-fallback når modellen feiler.
+  const memorySummaries = new SummaryService(pool, { completer: gateway, embeddings: memoryEmbedding });
   // D-102: ÉN delt `TaskService`-instans - gjenbrukes UENDRET av `ConversationEngine`
   // (eksisterende `tasks.create`-goal-only-vei), den nye `/tasks/submit`-HTTP-ruten
   // (full `JobContract`, inkl. `agent_profile: "coding"`), OG (task #123, D-214)
@@ -967,7 +970,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     memory: {
       contextFor: (identity, userText) => memoryRetriever.contextFor(identity, userText),
       // D-384: minnets rom/sensitivitet må følge med til ruteren (helse/special ⇒ kun lokal modell) - uten dette ble det aldri klassifisert.
-      contextWithMeta: (identity, userText) => memoryRetriever.contextWithMeta(identity, userText),
+      contextWithMeta: (identity, userText, options) => memoryRetriever.contextWithMeta(identity, userText, options),
       // D-283: eierens EGNE ord i denne samtalen (chat OG tale - BEGGE går
       // via SAMME `/chat`, se D-30-kommentaren ved `tools` under) skrives nå
       // faktisk til minnet, IKKE lenger en ren lesestruktur. `trust:
@@ -984,7 +987,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
           identity,
           // Del 3 (JARVIS-013): innlimt/lang tekst er ikke eierens egne ord -> untrusted (karantene), ikke aktivt betrodd minne.
           { kind: "conversation", ref: identity.session_id, trust: opts?.pasted ? "untrusted" : "trusted" },
-          text
+          text,
+          // D-386: foregående turer som DATA til uttrekket (pronomen/svar på spørsmål) + kanal på episoden.
+          { ...(opts?.recent_turns ? { recent_turns: opts.recent_turns } : {}), channel: identity.channel }
         )
     },
     council: aiCouncil,
@@ -1398,6 +1403,10 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "memory-reembed-sweep", envHour("JARVIS_MEMORY_REEMBED_SWEEP_HOUR", 3)
   ).start(() => runMemoryReembedSweepForAllTenants(pool, memoryEmbedding).then(() => undefined));
+  // D-386: nattlig rekompilering av den alltid-tilstede eierprofilen per space (deterministisk, ingen LLM).
+  new DailyScheduler(
+    pool, "memory-profile-sweep", envHour("JARVIS_MEMORY_PROFILE_SWEEP_HOUR", 4)
+  ).start(() => runMemoryProfileSweepForAllTenants(pool).then(() => undefined));
   if (memoryEmbedding.model !== "local-hash-v1") {
     setTimeout(() => {
       runMemoryReembedSweepForAllTenants(pool, memoryEmbedding, { maxRows: 500 }).catch((err: unknown) => {

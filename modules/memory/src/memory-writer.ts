@@ -1,13 +1,14 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
 import type { IdentityContext, MemorySpace, TrustLevel } from "@jarvis/contracts";
 import { containsSecret, writeAudit } from "@jarvis/core";
 import type { PolicyGateway } from "@jarvis/policy";
 import { classifyContentSensitivity } from "@jarvis/model-gateway";
 import { assertLocalEmbedding, type EmbeddingProvider } from "./embedding.ts";
-import type { ExistingMemoryHint, ExtractionAdapter, MemoryCandidate, MemoryType } from "./extraction.ts";
+import { normalizeKeywords, type ExistingMemoryHint, type ExtractionAdapter, type ExtractionContext, type MemoryCandidate, type MemoryType } from "./extraction.ts";
 import { withMemoryTransaction } from "./spaces.ts";
-import { upsertVector } from "./vectors.ts";
+import { compileMemoryProfile } from "./profile.ts";
+import { hasPgVector, similaritySql, upsertVector, vectorArg } from "./vectors.ts";
 
 export interface SourceRef {
   kind: "conversation" | "document" | "tool" | "manual";
@@ -53,6 +54,31 @@ export function itemSensitivity(space: MemorySpace, candidate: Pick<MemoryCandid
   return "normal";
 }
 
+/** D-386: viktighet når uttrekket ikke oppgir en (forpliktelser/beslutninger høyt, hendelser lavt). */
+export const DEFAULT_IMPORTANCE: Readonly<Record<MemoryType, number>> = {
+  commitment: 8, decision: 8, relation: 7, preference: 7, project: 6, semantic: 5, operational: 5, procedure: 5, episodic: 3
+};
+
+/** D-386 (§6.8): en betrodd kandidat under denne konfidensen blir KARANTENE (eieren godkjenner i dashbordet), aldri aktivt minne. */
+export const CONFIDENCE_MIN_ACTIVE = 0.5;
+
+const TRIVIAL_WORD = /^(hei+|hallo|heisann|hey|yo|takk|tusen|skal|du|ha|ok+|okei|okay|ja|nei|jepp|nope|greit|flott|bra|supert|perfekt|fint|hade|det|god|natt|morgen|morn|stopp|avbryt|hm+|æh+|eh+|mm+|ja+|nei+|jo)$/iu;
+
+/**
+ * D-386 (JARVIS-067): ytringer uten informasjonsverdi (hilsen/bekreftelse/for kort) skal ALDRI koste et LLM-uttrekk eller en
+ * hint-spørring. Deterministisk, konservativ liste - heller ett unødvendig uttrekk for en tvilsom setning enn et tapt faktum.
+ */
+export function isTrivialUtterance(text: string): boolean {
+  const t = text.trim();
+  if (t.length < 8) return true;
+  const words = t.toLowerCase().split(/[\s!.?,;:]+/u).filter((w) => w.length > 0);
+  return words.length <= 4 && words.every((w) => TRIVIAL_WORD.test(w));
+}
+
+function contentHash(text: string): string {
+  return createHash("sha256").update(text.normalize("NFKC").trim().toLowerCase()).digest("hex").slice(0, 32);
+}
+
 const PROPOSAL_MAX_SUBJECT = 120;
 const PROPOSAL_MAX_CONTENT = 1000;
 const PROPOSAL_TYPES: readonly MemoryType[] = [
@@ -69,18 +95,113 @@ export class MemoryWriter {
     assertLocalEmbedding(embeddings);
   }
 
-  /** Registrer kilde + trekk ut kandidater + anvend dem. */
-  async ingestText(identity: IdentityContext, source: SourceRef, text: string): Promise<ApplyOutcome[]> {
+  /**
+   * Registrer kilde + (D-386) lagre eierens VERBATIM ytring som episode + trekk ut kandidater + anvend dem.
+   * - Trivielle ytringer (hilsen/bekreftelse) hopper over alt (JARVIS-067).
+   * - Episoden er lag 1 for samtale: søkbar verbatim («struktur skal utfylle verbatim tekst, ikke erstatte den»), og hvert
+   *   uttrukket faktum peker tilbake på den (`evidence_episode_id`). Kun betrodde samtalekilder - innlimt/ubetrodd tekst er
+   *   ikke eierens egne ord og lagres ikke verbatim.
+   * - Hver kandidat anvendes ISOLERT: en feil (f.eks. UNIQUE-race når to meldinger lærer samme emne samtidig) mister aldri
+   *   resten av kandidatene; en race prøves én gang til (raden finnes nå → oppdateringsgrenen).
+   * - `op: "INVALIDATE"` (eieren sier at noe ikke lenger gjelder) invaliderer det eksisterende minnet - aldri sletting.
+   */
+  async ingestText(
+    identity: IdentityContext,
+    source: SourceRef,
+    text: string,
+    opts: { recent_turns?: ExtractionContext["recent_turns"]; channel?: string } = {}
+  ): Promise<ApplyOutcome[]> {
     // Del 3 (JARVIS-013): tekst med en kjent hemmelighet lagres ALDRI i minnet (kallere redigerer først; dette er siste forsvar).
     if (containsSecret(text)) return [];
+    if (isTrivialUtterance(text)) return [];
+    const observedAt = new Date().toISOString();
+    const space = identity.memory_space_id as MemorySpace;
+    const episodeId = source.kind === "conversation" && source.trust !== "untrusted"
+      ? await this.persistEpisode(identity, space, text, source.trust, observedAt, opts.channel ?? identity.channel)
+      : undefined;
     // D-373: kun BETRODDE kilder får se eksisterende minner (ubetrodd innhold skal aldri trekke ut/avsløre autoritativt minne).
     const hints = source.trust === "untrusted" ? [] : await this.relatedHints(identity, text);
-    const candidates = await this.extractor.extract(text, identity, source.trust, hints);
+    const candidates = await this.extractor.extract(text, identity, source.trust, hints, {
+      observed_at: observedAt,
+      ...(opts.recent_turns ? { recent_turns: opts.recent_turns } : {})
+    });
     const outcomes: ApplyOutcome[] = [];
     for (const candidate of candidates) {
-      outcomes.push(await this.apply(identity, source, candidate));
+      const meta = { observedAt, ...(episodeId ? { evidenceEpisodeId: episodeId } : {}) };
+      try {
+        if (candidate.op === "INVALIDATE") {
+          if (source.trust !== "untrusted") {
+            const out = await this.invalidateBySubject(identity, space, candidate.type, candidate.subject, "owner_negation");
+            if (out) outcomes.push(out);
+          }
+          continue;
+        }
+        outcomes.push(await this.apply(identity, source, candidate, meta));
+      } catch (err) {
+        let failure: unknown = err;
+        if ((err as { code?: string }).code === "23505") {
+          // Subjekt-race: en annen melding lærte samme (type, subject) mellom oppslaget og INSERT - raden finnes nå, så en ny
+          // runde går deterministisk i oppdateringsgrenen i stedet for å miste kandidaten.
+          try {
+            outcomes.push(await this.apply(identity, source, candidate, meta));
+            continue;
+          } catch (retryErr) {
+            failure = retryErr;
+          }
+        }
+        console.error(JSON.stringify({ msg: "memory_candidate_apply_failed", subject: candidate.subject, type: candidate.type, error: (failure as Error).message.slice(0, 200) }));
+      }
+    }
+    // D-386: profilen (alltid-tilstede blokk) rekompileres når et varig faktum ble lagt til/oppdatert/invalidert - billig og
+    // deterministisk; feil her skal aldri velte selve lagringen (nattlig sveip tar det uansett).
+    if (outcomes.some((o) => o.op !== "NOOP")) {
+      try {
+        await compileMemoryProfile(this.pool, identity.tenant_id, space);
+      } catch (err) {
+        console.error(JSON.stringify({ msg: "memory_profile_compile_failed", error: (err as Error).message.slice(0, 200) }));
+      }
     }
     return outcomes;
+  }
+
+  /** D-386: verbatim ytring som episode (dedupe per sesjon på innholdshash). Vektor skrives forsøksvis; feil velter ikke lagringen. */
+  private async persistEpisode(identity: IdentityContext, space: MemorySpace, text: string, trust: TrustLevel, observedAt: string, channel: string): Promise<string> {
+    const hash = contentHash(text);
+    const sensitivity = itemSensitivity(space, { subject: "", content: text });
+    return withMemoryTransaction(this.pool, identity.tenant_id, [space], async (client) => {
+      const existing = await client.query(
+        "SELECT episode_id FROM memory_episodes WHERE tenant_id = $1 AND space = $2 AND session_id = $3 AND content_hash = $4",
+        [identity.tenant_id, space, identity.session_id, hash]
+      );
+      const found = (existing.rows[0] as { episode_id: string } | undefined)?.episode_id;
+      if (found) return found;
+      const id = `ep-${randomUUID()}`;
+      await client.query(
+        `INSERT INTO memory_episodes (episode_id, tenant_id, space, owner_person_id, session_id, channel, role, content, content_hash, observed_at, sensitivity, trust_level)
+         VALUES ($1, $2, $3, $4, $5, $6, 'user', $7, $8, $9, $10, $11)`,
+        [id, identity.tenant_id, space, identity.person_id, identity.session_id, channel, text, hash, observedAt, sensitivity, trust]
+      );
+      try {
+        const vector = await this.embeddings.embed(text);
+        await upsertVector(client, this.pool, { kind: "episode", id, tenantId: identity.tenant_id, space }, this.embeddings, vector);
+      } catch (err) {
+        console.error(JSON.stringify({ msg: "memory_embedding_failed", model: this.embeddings.model, episode_id: id, error: (err as Error).message.slice(0, 200) }));
+      }
+      await writeAudit(client, identity, { type: "memory.episode", payload: { episode_id: id, sensitivity } });
+      return id;
+    });
+  }
+
+  /** D-386: eierens negasjon («glem at …», «ikke lenger …») invaliderer det aktive minnet for (type, subject). Null når ingen finnes. */
+  async invalidateBySubject(identity: IdentityContext, space: MemorySpace, type: MemoryType, subject: string, reason: string): Promise<ApplyOutcome | null> {
+    const row = await withMemoryTransaction(this.pool, identity.tenant_id, [space], async (client) =>
+      (await client.query(
+        "SELECT memory_item_id FROM memory_items WHERE tenant_id = $1 AND space = $2 AND type = $3 AND subject = $4 AND status = 'active'",
+        [identity.tenant_id, space, type, subject]
+      )).rows[0] as { memory_item_id: string } | undefined
+    );
+    if (!row) return null;
+    return this.invalidate(identity, space, row.memory_item_id, reason);
   }
 
   /**
@@ -107,6 +228,9 @@ export class MemoryWriter {
         return { r, index, overlap };
       });
       const picked = new Map<string, ExistingMemoryHint>();
+      // D-386: semantiske naboer FØRST (ekte modell) - fanger «samme ting, andre ord» som ordoverlapp aldri ser. Hash-provideren
+      // hoppes over (dens naboer er støy). Fail-soft.
+      for (const r of await this.semanticNeighbours(identity, space, text)) picked.set(`${r.type}\u0000${r.subject}`, r);
       for (const x of [...scored].sort((a, b) => b.overlap - a.overlap || a.index - b.index).filter((x) => x.overlap > 0).slice(0, 12)) {
         picked.set(`${x.r.type}\u0000${x.r.subject}`, x.r);
       }
@@ -117,11 +241,38 @@ export class MemoryWriter {
     }
   }
 
-  async apply(identity: IdentityContext, source: SourceRef, candidate: MemoryCandidate): Promise<ApplyOutcome> {
+  private async semanticNeighbours(identity: IdentityContext, space: MemorySpace, text: string): Promise<ExistingMemoryHint[]> {
+    if (this.embeddings.model === "local-hash-v1") return [];
+    try {
+      const vector = await this.embeddings.embed(text);
+      return await withMemoryTransaction(this.pool, identity.tenant_id, [space], async (client) => {
+        const pgv = await hasPgVector(client, this.pool);
+        const sim = similaritySql(this.embeddings, pgv, "$1");
+        const res = await client.query(
+          `SELECT m.type, m.subject, m.content
+             FROM memory_vectors v JOIN memory_items m ON m.memory_item_id = v.ref_id
+            WHERE v.ref_kind = 'item' AND v.model = $2 AND v.dim = $3 AND m.status = 'active' AND m.trust_level <> 'untrusted'
+              AND ${sim} >= $4
+            ORDER BY ${sim} DESC LIMIT 8`,
+          [vectorArg(pgv, vector), this.embeddings.model, this.embeddings.dim, this.embeddings.minSimilarity]
+        );
+        return res.rows as ExistingMemoryHint[];
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  async apply(
+    identity: IdentityContext,
+    source: SourceRef,
+    candidate: MemoryCandidate,
+    meta: { observedAt?: string; evidenceEpisodeId?: string } = {}
+  ): Promise<ApplyOutcome> {
     const space = candidate.space;
     return withMemoryTransaction(this.pool, identity.tenant_id, [space], async (client) => {
       const sourceId = await this.ensureSource(client, identity.tenant_id, source);
-      const observedAt = candidate.observed_at ?? new Date().toISOString();
+      const observedAt = candidate.observed_at ?? meta.observedAt ?? new Date().toISOString();
 
       // D-357 (funn ved kildekode-gjennomgang, IKKE rapportert av Tobias): raden
       // MÅ inkludere 'invalidated' her, ikke bare 'active'/'quarantined'. Uten
@@ -165,15 +316,18 @@ export class MemoryWriter {
           await writeAudit(client, identity, { type: "memory.noop", payload: { memory_item_id: dup.memory_item_id, reason: "duplicate_content" } });
           return { op: "NOOP", memory_item_id: dup.memory_item_id } as const;
         }
-        const status = source.trust === "untrusted" ? "quarantined" : "active";
-        const id = await this.insertItem(client, identity, space, candidate, sourceId, observedAt, source.trust, status);
+        // D-386 (§6.8): ubetrodd kilde ⇒ karantene; en betrodd kandidat med LAV konfidens (gjetning, mishørt tale) ⇒ også karantene
+        // (eieren godkjenner i dashbordet) - aldri stille et aktivt, autoritativt minne.
+        const lowConfidence = source.trust !== "untrusted" && candidate.confidence < CONFIDENCE_MIN_ACTIVE;
+        const status = source.trust === "untrusted" || lowConfidence ? "quarantined" : "active";
+        const id = await this.insertItem(client, identity, space, candidate, sourceId, observedAt, source.trust, status, meta.evidenceEpisodeId);
         if (status === "active") {
           await this.writeEmbedding(client, identity.tenant_id, space, id, candidate);
           await this.linkEntities(client, identity.tenant_id, space, id, candidate);
         }
         await writeAudit(client, identity, {
           type: "memory.add",
-          payload: { memory_item_id: id, status, subject: candidate.subject }
+          payload: { memory_item_id: id, status, subject: candidate.subject, ...(lowConfidence ? { reason: "low_confidence" } : {}) }
         });
         return { op: "ADD", memory_item_id: id, status } as const;
       }
@@ -222,8 +376,13 @@ export class MemoryWriter {
       // quarantined faktum forfremmer det ALDRI stille til active (§"aldri
       // automatisk" i `promoteFromQuarantine()` sin klassekommentar gjelder
       // identisk for denne grenen, ikke bare den eksplisitte godkjenningsveien).
+      // D-386: eierens EGNE, betrodde ord overstyrer en karantenert rad for samme emne (f.eks. først sett i en innlimt e-post) -
+      // raden blir aktiv i stedet for at eierens utsagn forblir usynlig for alltid. Ubetrodd/lav konfidens beholder karantenen.
+      const trustedOverride = row.status === "quarantined" && source.trust === "trusted" && candidate.confidence >= CONFIDENCE_MIN_ACTIVE;
       const newStatus =
-        row.status === "invalidated" ? (source.trust === "untrusted" ? "quarantined" : "active") : row.status;
+        row.status === "invalidated"
+          ? (source.trust === "untrusted" ? "quarantined" : "active")
+          : trustedOverride ? "active" : row.status;
 
       // Versjoner den gamle sannheten (bitemporalt: gyldig til nå), oppdater itemet.
       await client.query(
@@ -233,14 +392,25 @@ export class MemoryWriter {
         [row.memory_item_id, identity.tenant_id, space, row.version, row.subject, row.content, row.valid_from]
       );
       const newVersion = row.version + 1;
+      // D-386: bitemporalt - `valid_from` er NÅR det nye gjelder i verden (hendelsestid når kjent), `observed_at` når vi fikk vite det;
+      // `has_conflict` kun ved reell motstrid (modellen avgjør; ukjent ⇒ true som før), ikke ved enhver presisering.
       await client.query(
         `UPDATE memory_items
-           SET content = $2, version = $3, observed_at = $4, valid_from = now(),
-               trust_level = $5, confidence = $6, has_conflict = true, updated_at = now(),
-               status = $7, valid_to = NULL
+           SET content = $2, version = $3, observed_at = $4, valid_from = COALESCE($8::timestamptz, now()),
+               trust_level = $5, confidence = $6, has_conflict = $9, updated_at = now(),
+               status = $7, valid_to = NULL,
+               importance = COALESCE($10, importance), keywords = $11, event_time_raw = COALESCE($12, event_time_raw),
+               evidence_episode_id = COALESCE($13, evidence_episode_id)
          WHERE memory_item_id = $1`,
-        [row.memory_item_id, candidate.content, newVersion, observedAt, source.trust, candidate.confidence, newStatus]
+        [
+          row.memory_item_id, candidate.content, newVersion, observedAt, source.trust, candidate.confidence, newStatus,
+          candidate.event_time ?? null, candidate.contradicts_existing ?? true, candidate.importance ?? null,
+          normalizeKeywords(candidate.keywords), candidate.event_time_raw ?? null, meta.evidenceEpisodeId ?? null
+        ]
       );
+      if (candidate.entities && candidate.entities.length > 0 && newStatus === "active") {
+        await this.linkEntities(client, identity.tenant_id, space, row.memory_item_id, candidate);
+      }
       // UENDRET fra før D-357: writeEmbedding() kalles ubetinget på enhver
       // oppdatering (også en som forblir 'quarantined') - IKKE endret her for å
       // holde denne fiksen avgrenset til re-add-etter-invalidert-bugen alene;
@@ -252,7 +422,7 @@ export class MemoryWriter {
         type: "memory.update",
         payload: { memory_item_id: row.memory_item_id, version: newVersion, status: newStatus }
       });
-      return { op: "UPDATE", memory_item_id: row.memory_item_id, version: newVersion, conflict: true } as const;
+      return { op: "UPDATE", memory_item_id: row.memory_item_id, version: newVersion, conflict: candidate.contradicts_existing ?? true } as const;
     });
   }
 
@@ -338,7 +508,7 @@ export class MemoryWriter {
         `SELECT m.memory_item_id, m.subject, m.content, m.type, m.observed_at
            FROM memory_items m JOIN memory_sources s ON s.source_id = m.source_id
           WHERE m.tenant_id = $1 AND m.space = $2 AND m.owner_person_id = $3
-            AND m.status = 'quarantined' AND s.kind = 'tool'
+            AND m.status = 'quarantined' AND s.kind IN ('tool', 'conversation')
           ORDER BY m.observed_at DESC LIMIT 50`,
         [identity.tenant_id, space, identity.person_id]
       );
@@ -425,18 +595,22 @@ export class MemoryWriter {
     sourceId: string,
     observedAt: string,
     trust: TrustLevel,
-    status: "active" | "quarantined"
+    status: "active" | "quarantined",
+    evidenceEpisodeId?: string
   ): Promise<string> {
     const id = `mem-${randomUUID()}`;
     await client.query(
       `INSERT INTO memory_items
          (memory_item_id, tenant_id, space, owner_person_id, type, subject, content, source_id,
-          observed_at, valid_from, sensitivity, trust_level, confidence, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10,$11,$12,$13)`,
+          observed_at, valid_from, sensitivity, trust_level, confidence, status,
+          importance, keywords, event_time_raw, evidence_episode_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($14::timestamptz, $9),$10,$11,$12,$13,$15,$16,$17,$18)`,
       [
         id, identity.tenant_id, space, identity.person_id, candidate.type, candidate.subject,
         candidate.content, sourceId, observedAt,
-        itemSensitivity(space, candidate), trust, candidate.confidence, status
+        itemSensitivity(space, candidate), trust, candidate.confidence, status,
+        candidate.event_time ?? null, candidate.importance ?? DEFAULT_IMPORTANCE[candidate.type],
+        normalizeKeywords(candidate.keywords), candidate.event_time_raw ?? null, evidenceEpisodeId ?? null
       ]
     );
     return id;
@@ -473,7 +647,8 @@ export class MemoryWriter {
   ): Promise<void> {
     for (const entity of candidate.entities ?? []) {
       const key = `${entity.kind}:${entity.name.toLowerCase()}`;
-      const entityId = `ent-${key.replace(/[^a-z0-9:]/g, "-")}`;
+      // D-386 (JARVIS-076): entity_id er PK uten tenant - samme (kind, name) i to tenanter kolliderte. Tenant-skopet hash-id.
+      const entityId = `ent-${createHash("sha256").update(`${tenantId}\u0000${key}`).digest("hex").slice(0, 24)}`;
       await client.query(
         `INSERT INTO entities (entity_id, tenant_id, space, kind, name, canonical_key)
          VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (tenant_id, canonical_key) DO NOTHING`,

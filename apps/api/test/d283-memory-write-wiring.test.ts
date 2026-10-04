@@ -91,7 +91,7 @@ describe("D-283: ConversationEngine.handle() skriver eierens ord til minnet via 
     expect(calls[0]?.identity).toBe(identity);
   });
 
-  it("B: kalles ogsa for rask-bane-meldinger (fastRoute), ikke kun modell-banen", async () => {
+  it("B (D-386, erstatter D-283 B): rask-bane-kommandoer (fastRoute) utløser IKKE uttrekk - en kommando er aldri et faktum om eieren (JARVIS-067)", async () => {
     const calls: string[] = [];
     const engine = buildEngine({
       contextFor: async () => "",
@@ -100,7 +100,11 @@ describe("D-283: ConversationEngine.handle() skriver eierens ord til minnet via 
       }
     });
     await engine.handle(identity, "status");
-    expect(calls).toEqual(["status"]);
+    await flushMicrotasks();
+    expect(calls).toEqual([]);
+    await engine.handle(identity, "Pappa heter Henrik og bor i Bergen.");
+    await flushMicrotasks();
+    expect(calls).toEqual(["Pappa heter Henrik og bor i Bergen."]);
   });
 
   it("C: fire-and-forget - en AVVIST ingest()-promise kaster ALDRI og ødelegger ALDRI selve samtalesvaret", async () => {

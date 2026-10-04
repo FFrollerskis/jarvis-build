@@ -32,7 +32,11 @@ export interface ConversationDeps {
   memory?: {
     contextFor(identity: IdentityContext, userText: string): Promise<string>;
     /** Del 3: valgfri variant med metadata (minnerom/sensitivitet) så ruteren kan utlede sensitivitet fra innholdet. */
-    contextWithMeta?(identity: IdentityContext, userText: string): Promise<{ text: string; spaces: string[]; sensitivities: string[]; withheld_restricted?: number }>;
+    contextWithMeta?(
+      identity: IdentityContext,
+      userText: string,
+      options?: { budgetTokens?: number }
+    ): Promise<{ text: string; spaces: string[]; sensitivities: string[]; withheld_restricted?: number; profile_included?: boolean }>;
     /**
      * D-283: valgfri skrivevei - eierens egne ord fra DENNE samtalen (rå
      * brukertekst, ALDRI assistentens genererte svar - se kallstedet i
@@ -43,7 +47,11 @@ export interface ConversationDeps {
      * forget) - en treg/feilende minneskriving skal ALDRI legge latency
      * til eller ødelegge selve samtalesvaret.
      */
-    ingest?(identity: IdentityContext, text: string, opts?: { pasted?: boolean }): Promise<unknown>;
+    ingest?(
+      identity: IdentityContext,
+      text: string,
+      opts?: { pasted?: boolean; recent_turns?: Array<{ role: "user" | "assistant"; content: string }> }
+    ): Promise<unknown>;
   };
   /**
    * D-30 live-funn: mesh-verktøy for samtalebanen (tekst OG voice går via /chat).
@@ -159,8 +167,21 @@ function buildSystemPrompt(personality: PersonalityConfig, context: { surface: S
       "Du kan ALDRI: betale, slette permanent, slå sammen kode (merge), styre servere, endre sikkerhets-/eierinnstillinger eller handle via Telegram - " +
       "slike ting gjør Tobias selv i dashbordet. "
     : "";
-  return cosmetic + voiceStyle + capabilities + SAFETY_CRITICAL_SUFFIX;
+  return cosmetic + voiceStyle + capabilities + MEMORY_RULES + SAFETY_CRITICAL_SUFFIX;
 }
+
+/**
+ * D-386: modellen får vite HVORDAN minnet virker, så den verken dikter opp evner eller nekter for dem: det den forteller er
+ * lagret automatisk; «husk at …» lagres uttrykkelig; «hva vet du om …»/«husker du …» skal bruke memory.search når blokken
+ * ikke dekker spørsmålet; Telegram lagrer ikke; er noe ikke i blokken eller søket, si det ærlig i stedet for å gjette.
+ */
+const MEMORY_RULES =
+  "Minne: det Tobias forteller deg i chat og tale lagres automatisk som minner (verbatim og som fakta), og en kort profil " +
+  "pluss de mest relevante minnene for denne meldingen ligger i blokken «Profil»/«Relevant minne» over når de finnes - bruk dem " +
+  "og oppgi kilden når du siterer dem. Sier Tobias «husk at …», bekreft kort at det er lagret. Spør han «hva vet du om …», " +
+  "«husker du …» eller om noe fra en tidligere samtale som IKKE står i blokken, bruk verktøyet memory.search før du svarer - " +
+  "og finner du ingenting, si ærlig at du ikke har det lagret. Sier han at noe ikke lenger stemmer, bekreft at det oppdateres. " +
+  "Via Telegram lagres ingenting. ";
 
 const SAFETY_CRITICAL_SUFFIX =
   "Du kan bruke de verktøyene runtime eksplisitt gjør tilgjengelige i denne samtalen, og ALDRI " +
@@ -214,6 +235,19 @@ export class ConversationEngine {
     return { ...result, reply: result.reply + notice };
   }
 
+  /** D-386: de siste turene FØR meldingen som nettopp ble lagret (ekskluderer selve meldingen). Fail-soft: tom liste ved feil. */
+  private async recentTurnsBefore(identity: IdentityContext, currentText: string): Promise<Array<{ role: "user" | "assistant"; content: string }>> {
+    try {
+      const history = await this.deps.messages.history(identity, 6);
+      const rows = history.filter((m) => m.role === "user" || m.role === "assistant");
+      const last = rows[rows.length - 1];
+      const withoutCurrent = last && last.role === "user" && last.content === currentText ? rows.slice(0, -1) : rows;
+      return withoutCurrent.slice(-4).map((m) => ({ role: m.role as "user" | "assistant", content: m.content.slice(0, 400) }));
+    } catch {
+      return [];
+    }
+  }
+
   private async handleScanned(
     identity: IdentityContext,
     text: string,
@@ -241,16 +275,22 @@ export class ConversationEngine {
     const turn = createTurnContext(surface, text);
     // Del 3: ingen minneskriving av en melding som inneholdt en hemmelighet; lange/innlimte tekster (e-post, dokumenter) regnes ikke
     // som eierens egne ord (JARVIS-013) og går via karantene i stedet for å bli aktivt, betrodd minne.
-    if (this.deps.memory?.ingest && !flags.secretsFound && surface !== "telegram") {
-      this.deps.memory.ingest(identity, text, { pasted: looksLikePastedContent(text) }).catch((err: unknown) => {
-        console.error(JSON.stringify({
-          msg: "conversation_memory_ingest_failed",
-          error: err instanceof Error ? err.message : String(err)
-        }));
-      });
+    const intent = fastRoute(text);
+    // D-386 (JARVIS-067): en rask-bane-kommando («status», «lys på») er aldri et faktum om eieren - ingen uttrekk for den.
+    // De siste turene FØR denne meldingen sendes med som DATA, så «han»/«det»/svar på Charlies spørsmål kan tolkes.
+    if (this.deps.memory?.ingest && !flags.secretsFound && surface !== "telegram" && !intent) {
+      const pasted = looksLikePastedContent(text);
+      const recentTurns = pasted ? Promise.resolve([]) : this.recentTurnsBefore(identity, text);
+      recentTurns
+        .then((recent_turns) => this.deps.memory?.ingest?.(identity, text, { pasted, recent_turns }))
+        .catch((err: unknown) => {
+          console.error(JSON.stringify({
+            msg: "conversation_memory_ingest_failed",
+            error: err instanceof Error ? err.message : String(err)
+          }));
+        });
     }
 
-    const intent = fastRoute(text);
     if (intent) {
       const started = Date.now();
       const result = await this.handleFastIntent(identity, intent);
@@ -327,7 +367,8 @@ export class ConversationEngine {
       }));
       const memoryMeta = this.deps.memory
         ? this.deps.memory.contextWithMeta
-          ? await this.deps.memory.contextWithMeta(identity, text)
+          // D-386: tokenbudsjett per flate - tale er latens-sensitiv og svarer kort (max_tokens 320), chat får full blokk.
+          ? await this.deps.memory.contextWithMeta(identity, text, { budgetTokens: surface === "voice" ? 500 : 1200 })
           : { text: await this.deps.memory.contextFor(identity, text), spaces: [identity.memory_space_id], sensitivities: [] as string[] }
         : { text: "", spaces: [] as string[], sensitivities: [] as string[] };
       const memoryContext = memoryMeta.text;

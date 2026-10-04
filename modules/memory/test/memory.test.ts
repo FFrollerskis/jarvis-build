@@ -419,7 +419,8 @@ describe("D-373: motstrid og duplikater oppdages også når uttrekket velger uli
     const id = identity("personal");
     await writer.apply(id, UNTRUSTED, candidate("personal", "d373.karantene.rad", "Ubetrodd d373b påstand."));
     const seen: { hints?: unknown[] } = {};
-    await withExtractor(scripted([], seen)).ingestText(id, CONVERSATION, "d373b");
+    // D-386: «d373b» alene er under trivial-terskelen (ingen uttrekk) - en reell setning må til.
+    await withExtractor(scripted([], seen)).ingestText(id, CONVERSATION, "snakk om d373b");
     expect(JSON.stringify(seen.hints)).not.toContain("d373.karantene.rad");
   });
 

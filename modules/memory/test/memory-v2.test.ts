@@ -275,3 +275,100 @@ describe("C: gjenfinning v2 - ELLER-fulltekst, nøkkelord, fusjon, episoder, sam
     expect(old?.source.ref).toMatch(/^seed \(v1\)$/);
   });
 });
+
+describe("D (slice B): skrivevei v2 - episoder, konfidensgate, negasjon, trivial-gating, betrodd overstyrer karantene", () => {
+  const id = { ...identity("personal"), session_id: "sess-v2-b" };
+  const CONV: SourceRef = { kind: "conversation", ref: "sess-v2-b", trust: "trusted" };
+
+  /** Skriptet uttrekk: returnerer kandidater per tekst (DB-fri, som FakeCompleter-mønsteret i llm-extraction.test.ts). */
+  function scripted(map: Record<string, Array<Record<string, unknown>>>) {
+    const seen: Array<{ text: string; context: unknown; hints: number }> = [];
+    const extractor = {
+      async extract(text: string, ident: IdentityContext, _t: unknown, existing: unknown[] = [], context: unknown) {
+        seen.push({ text, context, hints: existing.length });
+        return (map[text] ?? []).map((c) => ({ space: ident.memory_space_id, confidence: 0.9, type: "semantic", ...c }));
+      }
+    };
+    return { extractor, seen };
+  }
+
+  it("verbatim ytring lagres som episode med bevis-peker fra faktumet, med vektor, dedupet per sesjon; trivielle ytringer hopper over alt", async () => {
+    const { extractor, seen } = scripted({
+      "Søsteren min heter Ida og bor i Tromsø phi21.": [{ subject: "tobias.soster", content: "Tobias sin søster heter Ida og bor i Tromsø phi21.", type: "relation", keywords: ["Ida", "Tromsø"], importance: 8, entities: [{ kind: "person", name: "Ida" }] }]
+    });
+    const w = new MemoryWriter(appPool, new LocalHashEmbedding(), extractor as never, policy);
+    expect(await w.ingestText(id, CONV, "ok takk!")).toEqual([]);
+    expect(await w.ingestText(id, CONV, "hei")).toEqual([]);
+    expect(seen).toHaveLength(0);
+    const out = await w.ingestText(id, CONV, "Søsteren min heter Ida og bor i Tromsø phi21.", { recent_turns: [{ role: "assistant", content: "Har du søsken?" }], channel: "voice" });
+    expect(out[0]?.op).toBe("ADD");
+    expect(seen[0]?.hints).toBeGreaterThanOrEqual(0);
+    expect((seen[0]?.context as { observed_at?: string }).observed_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    const ep = await adminPool.query("SELECT episode_id, content, channel, sensitivity, role FROM memory_episodes WHERE session_id = 'sess-v2-b' AND content LIKE '%phi21%'");
+    expect(ep.rowCount).toBe(1);
+    expect(ep.rows[0]).toMatchObject({ content: "Søsteren min heter Ida og bor i Tromsø phi21.", channel: "voice", sensitivity: "normal", role: "user" });
+    const item = await adminPool.query("SELECT evidence_episode_id, keywords, importance FROM memory_items WHERE memory_item_id = $1", [(out[0] as { memory_item_id: string }).memory_item_id]);
+    expect(item.rows[0]).toEqual({ evidence_episode_id: ep.rows[0].episode_id, keywords: ["ida", "tromsø"], importance: 8 });
+    expect((await adminPool.query("SELECT 1 FROM memory_vectors WHERE ref_kind = 'episode' AND ref_id = $1", [ep.rows[0].episode_id])).rowCount).toBe(1);
+    // Entitet lenket med tenant-skopet id
+    const ent = await adminPool.query("SELECT e.entity_id, e.name FROM memory_item_entities me JOIN entities e ON e.entity_id = me.entity_id WHERE me.memory_item_id = $1", [(out[0] as { memory_item_id: string }).memory_item_id]);
+    expect(ent.rows[0]?.name).toBe("Ida");
+    expect(String(ent.rows[0]?.entity_id)).toMatch(/^ent-[0-9a-f]{24}$/);
+    // Samme ytring en gang til i samme sesjon: ingen ny episode
+    await w.ingestText(id, CONV, "Søsteren min heter Ida og bor i Tromsø phi21.");
+    expect((await adminPool.query("SELECT count(*)::int AS n FROM memory_episodes WHERE session_id = 'sess-v2-b' AND content LIKE '%phi21%'")).rows[0].n).toBe(1);
+    // Episoden er søkbar verbatim
+    const hits = await retriever.search(id, { spaces: ["personal"], query: "phi21 Tromsø", kinds: ["episode"] });
+    expect(hits[0]?.kind).toBe("episode");
+  });
+
+  it("lav konfidens fra betrodd kilde => karantene (synlig som forslag), ikke aktivt minne; betrodd høy-konfidens overstyrer karantene senere", async () => {
+    const { extractor } = scripted({
+      "Tror kanskje Ola har bursdag i mai chi33?": [{ subject: "ola.bursdag", content: "Ola har bursdag i mai chi33.", confidence: 0.3 }],
+      "Ola har bursdag 12. mai chi33.": [{ subject: "ola.bursdag", content: "Ola har bursdag 12. mai chi33.", confidence: 0.95, contradicts_existing: false }]
+    });
+    const w = new MemoryWriter(appPool, new LocalHashEmbedding(), extractor as never, policy);
+    const low = await w.ingestText(id, CONV, "Tror kanskje Ola har bursdag i mai chi33?");
+    expect(low[0]).toMatchObject({ op: "ADD", status: "quarantined" });
+    expect((await retriever.search(id, { spaces: ["personal"], query: "chi33" })).map((h) => h.memory_item_id)).not.toContain((low[0] as { memory_item_id: string }).memory_item_id);
+    expect((await w.listProposals(id)).map((p) => p.memory_item_id)).toContain((low[0] as { memory_item_id: string }).memory_item_id);
+    const high = await w.ingestText(id, CONV, "Ola har bursdag 12. mai chi33.");
+    expect(high[0]).toMatchObject({ op: "UPDATE", conflict: false });
+    const row = await adminPool.query("SELECT status, has_conflict, content FROM memory_items WHERE memory_item_id = $1", [(high[0] as { memory_item_id: string }).memory_item_id]);
+    expect(row.rows[0]).toEqual({ status: "active", has_conflict: false, content: "Ola har bursdag 12. mai chi33." });
+  });
+
+  it("negasjon (op INVALIDATE) invaliderer det aktive minnet - aldri sletting; hendelsestid blir valid_from (bitemporalt)", async () => {
+    const { extractor } = scripted({
+      "Jeg skal til tannlegen neste fredag psi44.": [{ subject: "tobias.tannlege", content: "Tobias skal til tannlegen psi44.", type: "commitment", event_time: "2026-10-09", event_time_raw: "neste fredag" }],
+      "Glem det med tannlegen psi44, den er avlyst.": [{ subject: "tobias.tannlege", content: "Tannlegetimen er avlyst.", type: "commitment", op: "INVALIDATE" }]
+    });
+    const w = new MemoryWriter(appPool, new LocalHashEmbedding(), extractor as never, policy);
+    const add = await w.ingestText(id, CONV, "Jeg skal til tannlegen neste fredag psi44.");
+    const itemId = (add[0] as { memory_item_id: string }).memory_item_id;
+    const row = await adminPool.query("SELECT valid_from::date::text AS vf, event_time_raw, importance FROM memory_items WHERE memory_item_id = $1", [itemId]);
+    expect(row.rows[0]).toEqual({ vf: "2026-10-09", event_time_raw: "neste fredag", importance: 8 });
+    const neg = await w.ingestText(id, CONV, "Glem det med tannlegen psi44, den er avlyst.");
+    expect(neg[0]).toEqual({ op: "INVALIDATE", memory_item_id: itemId });
+    expect((await adminPool.query("SELECT status FROM memory_items WHERE memory_item_id = $1", [itemId])).rows[0].status).toBe("invalidated");
+    expect((await adminPool.query("SELECT change_kind FROM memory_versions WHERE memory_item_id = $1", [itemId])).rows.map((r) => r.change_kind)).toContain("invalidated");
+  });
+
+  it("én kandidat som feiler mister ikke resten (isolert per kandidat)", async () => {
+    const { extractor } = scripted({
+      "To ting omega12.": [
+        { subject: "ugyldig.type", content: "Ugyldig type omega12.", type: "bogus" },
+        { subject: "ok.emne", content: "Gyldig faktum omega12." }
+      ]
+    });
+    const w = new MemoryWriter(appPool, new LocalHashEmbedding(), extractor as never, policy);
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const out = await w.ingestText(id, CONV, "To ting omega12.");
+      expect(out.map((o) => o.op)).toEqual(["ADD"]);
+      expect(spy.mock.calls.some((c) => String(c[0]).includes("memory_candidate_apply_failed"))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

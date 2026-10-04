@@ -62,7 +62,7 @@ describe("B: LlmExtractionAdapter.extract - gyldig strukturert svar mappes til M
     const extractor = new LlmExtractionAdapter(fake);
     const candidates = await extractor.extract("Jeg bor i Trondheim.", identity("business"), "trusted");
     expect(candidates).toEqual([
-      { space: "business", type: "relation", subject: "tobias.bosted", content: "Tobias bor i Trondheim.", confidence: 0.9 }
+      { space: "business", type: "relation", subject: "tobias.bosted", content: "Tobias bor i Trondheim.", confidence: 0.9, keywords: [], op: "ADD" }
     ]);
   });
 
@@ -192,5 +192,49 @@ describe("F: D-373 eksisterende minner gjenbrukes (ingen duplikat-emner)", () =>
     }));
     const out = await new LlmExtractionAdapter(fake).extract("Pappa heter Henrik Hansen", identity("personal"), "trusted", existing);
     expect(out[0]).toMatchObject({ type: "relation", subject: "far.navn", content: "Pappa heter Henrik Hansen." });
+  });
+});
+
+describe("E (D-386): utvidet uttrekk - observasjonsdato, foregående turer, nøkkelord, viktighet, hendelsestid, negasjon, entiteter", () => {
+  it("prompten bærer observasjonsdato med ukedag og de foregående turene som DATA; skjemaet krever de nye feltene", async () => {
+    const fake = new FakeCompleter(() => ({ text: "", structured_output: { candidates: [] } }));
+    await new LlmExtractionAdapter(fake).extract("Han kommer på fredag.", identity("personal"), "trusted", [], {
+      observed_at: "2026-10-04T10:00:00.000Z",
+      recent_turns: [{ role: "assistant", content: "Når kommer Dennis?" }]
+    });
+    const system = fake.calls[0]!.request.system as string;
+    expect(system).toContain("OBSERVASJONSDATO (nå): 2026-10-04 (søndag)");
+    expect(system).toContain("FOREGÅENDE TURER");
+    expect(system).toContain("- assistent: Når kommer Dennis?");
+    const schema = JSON.stringify(fake.calls[0]!.request.structured_schema);
+    for (const f of ["keywords", "importance", "event_time", "event_time_raw", "\"op\"", "contradicts", "entities"]) expect(schema).toContain(f);
+    expect(fake.calls[0]!.request.max_tokens).toBe(1600);
+  });
+
+  it("nye felt mappes og normaliseres; ugyldig event_time forkastes stille (ikke hele kandidaten); INVALIDATE mot ukjent emne forkastes", async () => {
+    const fake = new FakeCompleter(() => ({
+      text: "",
+      structured_output: {
+        candidates: [
+          { type: "commitment", subject: "Tobias.Tannlege", content: "Tobias skal til tannlegen.", confidence: 0.9, keywords: ["Tannlegen Smil AS", "  Oslo "], importance: 9.4, event_time: "2026-10-09", event_time_raw: "neste fredag", op: "ADD", contradicts: false, entities: [{ kind: "Organisasjon", name: "Tannlegen Smil AS" }] },
+          { type: "semantic", subject: "x.y", content: "Noe med dårlig dato.", confidence: 0.8, keywords: [], importance: 0, event_time: "neste uke en gang", event_time_raw: "", op: "ADD", contradicts: false, entities: [] },
+          { type: "preference", subject: "finnes.ikke", content: "Glem dette.", confidence: 0.9, keywords: [], importance: 5, event_time: "", event_time_raw: "", op: "INVALIDATE", contradicts: false, entities: [] },
+          { type: "preference", subject: "tobias.kaffe", content: "Liker ikke kaffe lenger.", confidence: 0.9, keywords: [], importance: 5, event_time: "", event_time_raw: "", op: "INVALIDATE", contradicts: true, entities: [] }
+        ]
+      }
+    }));
+    const out = await new LlmExtractionAdapter(fake).extract("...", identity("personal"), "trusted", [{ type: "preference", subject: "tobias.kaffe", content: "Tobias liker kaffe." }]);
+    expect(out).toHaveLength(3);
+    expect(out[0]).toMatchObject({ subject: "tobias.tannlege", keywords: ["tannlegen smil as", "oslo"], importance: 9, event_time: "2026-10-09", event_time_raw: "neste fredag", op: "ADD", contradicts_existing: false, entities: [{ kind: "organisasjon", name: "Tannlegen Smil AS" }] });
+    expect(out[1]).toMatchObject({ subject: "x.y", op: "ADD" });
+    expect(out[1]).not.toHaveProperty("event_time");
+    expect(out[1]).not.toHaveProperty("importance");
+    expect(out[2]).toMatchObject({ subject: "tobias.kaffe", op: "INVALIDATE", contradicts_existing: true });
+  });
+
+  it("gamle svar uten de nye feltene parses fortsatt (bakoverkompatibelt): op=ADD, tomme nøkkelord", async () => {
+    const fake = new FakeCompleter(() => ({ text: "", structured_output: { candidates: [{ type: "relation", subject: "tobias.bosted", content: "Tobias bor i Trondheim.", confidence: 0.9 }] } }));
+    const out = await new LlmExtractionAdapter(fake).extract("Jeg bor i Trondheim.", identity("personal"), "trusted");
+    expect(out[0]).toMatchObject({ subject: "tobias.bosted", op: "ADD", keywords: [] });
   });
 });
