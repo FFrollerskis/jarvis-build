@@ -13,6 +13,9 @@ COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json ./
 COPY apps ./apps
 COPY packages ./packages
 COPY modules ./modules
+# D-396 (JARVIS-057): `config/charlie-personality.json` leses av apps/api/src/personality-config.ts (to nivåer opp fra apps/api/src). Uten denne
+# kopien falt Charlie stille tilbake til DEFAULT_PERSONALITY_CONFIG i containeren, så eierens personlighetskonfig aldri hadde effekt.
+COPY config ./config
 # --prod: kun runtime-avhengigheter (test-/dev-verktøy holdes ute av imaget).
 RUN pnpm install --frozen-lockfile --prod
 

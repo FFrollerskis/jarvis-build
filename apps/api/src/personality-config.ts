@@ -23,7 +23,15 @@ export function loadPersonalityConfig(): PersonalityConfig {
     const raw = readFileSync(CONFIG_PATH, "utf8");
     const parsed = PersonalityConfigSchema.parse(JSON.parse(raw));
     return parsed;
-  } catch {
+  } catch (err) {
+    // D-396 (JARVIS-057): fall-tilbake til standardverdier er riktig, men skal ALDRI være stille - en manglende fil (feil image) eller ugyldig JSON
+    // betyr at eierens konfig ikke har effekt. Logger kun feiltype/filnavn, aldri filinnhold.
+    const code = (err as NodeJS.ErrnoException).code;
+    console.warn(JSON.stringify({
+      msg: "personality_config_fallback_to_default",
+      reason: code === "ENOENT" ? "file_missing" : err instanceof SyntaxError ? "invalid_json" : "schema_invalid",
+      file: "config/charlie-personality.json"
+    }));
     return DEFAULT_PERSONALITY_CONFIG;
   }
 }

@@ -661,7 +661,13 @@ export class ConversationEngine {
         if (!result.ok) {
           return { reply: `Kunne ikke opprette jobb: ${result.reason}`, routed: "fast" };
         }
-        return { reply: `Jobb opprettet: ${result.value.task_id}`, routed: "fast", task_id: result.value.task_id };
+        // D-396 (JARVIS-062): en mål-bare jobb («opprett jobb: <mål>») har ingen kjørbar input - executive-handleren feiler den eksplisitt. Si det
+        // ærlig i stedet for «Jobb opprettet» (som antydet at noe ville bli utført).
+        return {
+          reply: `Jobb registrert: ${result.value.task_id}. Merk: en jobb opprettet fra chat kun med et mål har ingen automatisk utførelse - ` +
+            "send en jobb med prompt (POST /tasks/submit) for at Jarvis faktisk skal utføre den.",
+          routed: "fast", task_id: result.value.task_id
+        };
       }
       case "task_status": {
         const result = await this.deps.tasks.get(identity, intent.task_id);

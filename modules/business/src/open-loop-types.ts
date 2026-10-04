@@ -38,6 +38,18 @@ export type OpenLoopType =
   | "operations_task_overdue"
   | "operations_task_escalation_needed";
 export type OpenLoopDetectionMethod = "deterministic" | "ai_assisted";
+
+/**
+ * D-396 (JARVIS-045): deterministiske loops hadde `confidence = NULL` - konsumenter (brief/attention) kunne ikke skille «hard fakta» fra
+ * heuristikk. Hard-fakta-regler (frist passert, ticket uten svar, forfalt forpliktelse, bankavvik) = 0.9; terskel-/stillstandsheuristikker
+ * (dager uten aktivitet, utgiftsavvik mot glidende snitt) = 0.7. Verdiene er KALIBRERINGSFORSLAG - eier kan justere (NEEDS_TOBIAS: kalibrering mot faktiske data).
+ */
+export const HEURISTIC_LOOP_TYPES: ReadonlySet<OpenLoopType> = new Set<OpenLoopType>([
+  "stalled_opportunity", "contract_review_required", "marketing_spend_anomaly", "product_item_needs_triage", "product_item_high_priority_stalled"
+]);
+export function deterministicLoopConfidence(loopType: string): number {
+  return HEURISTIC_LOOP_TYPES.has(loopType as OpenLoopType) ? 0.7 : 0.9;
+}
 export type OpenLoopPriority = "low" | "normal" | "high";
 export type OpenLoopStatus = "open" | "resolved";
 

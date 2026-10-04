@@ -99,8 +99,9 @@ describe("registrering: alle business-handlinger er registrert med riktig risiko
   it("A-klasse for lesing, B for enkle reversible skrivinger, C for tilstandsoverganger - ingen D i dette sliceet", () => {
     const defs = firstWaveTools({});
     const business = new Map(defs.filter((d) => d.tool_id === "business").map((d) => [d.action, d.capability_class]));
-    // UA-3 profiling/scoring-slice (D-61): 8 nye score-handlinger lagt til på SLUTTEN (22 -> 30).
-    expect(business.size).toBe(30);
+    // UA-3 profiling/scoring-slice (D-61): 8 nye score-handlinger lagt til på SLUTTEN (22 -> 30); D-396 (JARVIS-049): +3 lese-/oppslagshandlinger (30 -> 33).
+    expect(business.size).toBe(33);
+    for (const a of ["find_companies", "find_contacts", "get_customer_overview"]) expect(business.get(a)).toBe("A");
     expect(business.get("create_company")).toBe("B");
     expect(business.get("create_contact")).toBe("B");
     expect(business.get("create_lead")).toBe("B");

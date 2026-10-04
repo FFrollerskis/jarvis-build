@@ -121,12 +121,22 @@ export function buildStatusSource(gateway: ToolGateway | null, statusFile = "doc
       const items: BriefItem[] = [];
       const status = await readFile(statusFile, "utf8").catch(() => "");
       const gates = [...status.matchAll(/\| \*\*(D-\d+)\*\* \| ([^|]+)\|/g)].map((m) => `${m[1]}: ${(m[2] ?? "").trim().slice(0, 60)}`);
-      items.push({
-        source: "jarvis-build", ref: "runtime-gates",
-        title: `${gates.length} åpne runtime-porter`, detail: gates.join(" · "),
-        at: new Date().toISOString(), score: 45,
-        why: "porter må lukkes før produksjonsstatus", action: "kjør runtime-verifikasjon (Docker/credentials-dagen)"
-      });
+      if (status === "") {
+        // D-396 (JARVIS-057): `docs/` ligger i .dockerignore og er ikke i runtime-imaget - «0 åpne runtime-porter» var en løgn (ukjent ≠ ingen).
+        items.push({
+          source: "jarvis-build", ref: "runtime-gates",
+          title: "Byggestatus utilgjengelig", detail: `${statusFile} finnes ikke i dette miljøet (docs er ikke i runtime-imaget) - antall åpne runtime-porter er UKJENT`,
+          at: new Date().toISOString(), score: 20,
+          why: "statuskilden kan ikke leses her", action: "les docs/PROJECT_STATUS.md i repoet"
+        });
+      } else {
+        items.push({
+          source: "jarvis-build", ref: "runtime-gates",
+          title: `${gates.length} åpne runtime-porter`, detail: gates.join(" · "),
+          at: new Date().toISOString(), score: 45,
+          why: "porter må lukkes før produksjonsstatus", action: "kjør runtime-verifikasjon (Docker/credentials-dagen)"
+        });
+      }
       if (gateway) {
         const issues = await gateway.execute({
           identity, tool_id: "github", action: "read_issues", parameters: { repo: "tsworkflow/jarvisbuild" }
