@@ -631,7 +631,8 @@ export class FinanceService {
       const transport = this.fikenTransportFactory(credentials);
       const journalEntry = await transport.createGeneralJournalEntry({
         description: current.purpose,
-        date: new Date().toISOString().slice(0, 10),
+        // D-398 (JARVIS-097): bokføringsdato er norsk kalenderdato (Europe/Oslo) - UTC ga feil dato mellom 22:00/23:00 og midnatt lokal tid.
+        date: osloCalendarDate(),
         lines: [
           { account: current.account_code, amount: amountOre },
           { account: current.counter_account_code, amount: -amountOre }
@@ -2392,4 +2393,9 @@ export class FinanceService {
     }
     return { synced, failed };
   }
+}
+
+/** D-398 (JARVIS-097): `YYYY-MM-DD` i Europe/Oslo (håndterer sommer-/vintertid). */
+export function osloCalendarDate(now: Date = new Date()): string {
+  return new Intl.DateTimeFormat("sv-SE", { timeZone: "Europe/Oslo", year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
 }

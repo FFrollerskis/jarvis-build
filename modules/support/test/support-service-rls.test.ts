@@ -109,6 +109,16 @@ describe("C: get/list/search", () => {
     expect(rows.length).toBeGreaterThan(0);
     expect(rows.every((r) => r.subject.includes("Unique-Search-Marker-XYZ"))).toBe(true);
   });
+  it("D-398 (JARVIS-097): %, _ og \\ i subject_contains er bokstavelige tegn, aldri jokertegn", async () => {
+    await service.createTicket(TENANT_A, "business", { subject: "Rabatt 50% hos Acme_AS" });
+    await service.createTicket(TENANT_A, "business", { subject: "Rabatt 50 prosent hos AcmeXAS" });
+    const pct = await service.searchTickets(TENANT_A, "business", { subject_contains: "50%" });
+    expect(pct.map((r) => r.subject)).toEqual(["Rabatt 50% hos Acme_AS"]); // «50%» matcher ikke «50 prosent»
+    const underscore = await service.searchTickets(TENANT_A, "business", { subject_contains: "Acme_AS" });
+    expect(underscore.map((r) => r.subject)).toEqual(["Rabatt 50% hos Acme_AS"]); // «_» matcher ikke «X»
+    const matchAll = await service.searchTickets(TENANT_A, "business", { subject_contains: "%" });
+    expect(matchAll.every((r) => r.subject.includes("%"))).toBe(true); // «%» alene er ikke «alt»
+  });
 });
 
 describe("G: prioritet", () => {
