@@ -139,7 +139,8 @@ const defaultStripeTransportFactory: StripeTransportFactory = (credentials) => n
  * `BusinessInternalSecretProvider`, IKKE et async `SecretProvider`-kall
  * for hvert innkommende webhook-kall).
  */
-export type StripeWebhookSecretProvider = () => string | null;
+/** D-394 (JARVIS-056): kan være asynkron slik at hemmeligheten hentes fra den delte `SecretProvider`-kjeden (Infisical-primær) i stedet for kun `process.env`. */
+export type StripeWebhookSecretProvider = () => string | null | Promise<string | null>;
 
 /**
  * D-109 tenant/konto-mapping-grense (byggeordrens §12): ETT globalt Stripe-
@@ -169,7 +170,7 @@ const defaultVippsTransportFactory: VippsTransportFactory = (credentials) =>
   new VippsTransport(credentials.clientId, credentials.clientSecret, credentials.subscriptionKey, credentials.merchantSerialNumber, credentials.environment);
 
 /** SAMME sentinel-mønster som `StripeWebhookSecretProvider` - ETT globalt webhook-signeringssekret (fra Vipps sin webhook-registrering), ikke tenant-parametrisert. */
-export type VippsWebhookSecretProvider = () => string | null;
+export type VippsWebhookSecretProvider = () => string | null | Promise<string | null>;
 
 /**
  * D-111 (UA-6 Slice 5): ETT globalt eier-tilkoblet Neonomics-credential-sett
@@ -196,7 +197,7 @@ export const defaultNeonomicsGatewayFactory: NeonomicsGatewayFactory = (credenti
   new NeonomicsTransport(credentials.clientId, credentials.clientSecret, credentials.deviceId, credentials.environment, credentials.realm ?? (credentials.environment === "production" ? "production" : "sandbox"));
 
 /** Webhook-API-nøkkelen Tobias selv velger ved registrering i Neonomics sin Merchant-portal (se neonomics-webhook.ts) - SAMME sentinel-mønster som Stripe-/Vipps-webhook-secret-providerne. */
-export type NeonomicsWebhookApiKeyProvider = () => string | null;
+export type NeonomicsWebhookApiKeyProvider = () => string | null | Promise<string | null>;
 
 /** D-111 tenant-mapping-grense: ETT globalt Neonomics-kundeforhold tilhører NØYAKTIG ÉN eksplisitt konfigurert tenant - ALDRI utledet fra webhook-nyttelast-metadata. */
 export type NeonomicsTenantResolver = () => string | null;
@@ -978,7 +979,7 @@ export class FinanceService {
    * oppfrisking bruker.
    */
   async ingestStripeWebhookEvent(rawBody: Buffer, signatureHeader: string | undefined, nowSeconds: number = Math.floor(Date.now() / 1000)): Promise<{ status: StripeWebhookEventStatus | "duplicate" | "invalid_signature"; eventId?: string }> {
-    const webhookSecret = this.stripeWebhookSecretProvider();
+    const webhookSecret = await this.stripeWebhookSecretProvider();
     if (!webhookSecret) throw new StripeCredentialsUnavailableError("(webhook-signeringshemmelighet ikke konfigurert)");
     const verification = verifyStripeWebhookSignature(rawBody, signatureHeader, webhookSecret, nowSeconds);
     if (!verification.valid) {
@@ -1536,7 +1537,7 @@ export class FinanceService {
     nowMs: number = Date.now()
   ): Promise<{ status: VippsWebhookEventStatus | "duplicate"; eventId?: string }> {
     void nowMs; // Vipps sin Webhooks API har INGEN bekreftet tidsstempel-toleransevindu-kontrakt (se vipps-webhook.ts) - parameteren beholdes for signatur-symmetri med Stripe-stien og fremtidig bruk, men brukes bevisst ikke til en oppfunnet avvisning ennå.
-    const webhookSecret = this.vippsWebhookSecretProvider();
+    const webhookSecret = await this.vippsWebhookSecretProvider();
     if (!webhookSecret) throw new VippsCredentialsUnavailableError("(webhook-signeringshemmelighet ikke konfigurert)");
     const verification = verifyVippsWebhookSignature(rawBody, method, pathAndQuery, headers, webhookSecret);
     if (!verification.valid) {
@@ -2230,7 +2231,7 @@ export class FinanceService {
    * dedup-/tenant-vokter-/ordens-struktur som Stripe-/Vipps-mottakene.
    */
   async ingestNeonomicsWebhookEvent(rawBody: Buffer, apiKeyHeader: string | undefined, nowMs: number = Date.now()): Promise<{ status: "received" | "verified" | "processed" | "failed_retryable" | "unsupported" | "duplicate"; eventId?: string }> {
-    const configuredKey = this.neonomicsWebhookApiKeyProvider();
+    const configuredKey = await this.neonomicsWebhookApiKeyProvider();
     if (!configuredKey) throw new NeonomicsCredentialsUnavailableError("(webhook-API-nøkkel ikke konfigurert)");
     const auth = verifyNeonomicsWebhookApiKey(apiKeyHeader, configuredKey);
     if (!auth.valid) {
