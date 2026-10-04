@@ -363,7 +363,7 @@ describe("Akseptanse 4: failover uten doble verktøyhandlinger", () => {
     await client.waitFor((m) => m.type === "started");
     client.send({ type: "replay_final", utterance_id: "utt-failover-1", text: "opprett jobb: failovertest" });
     const reply = await client.waitFor((m) => m.type === "reply");
-    expect(String(reply["reply"])).toContain("Jobb opprettet");
+    expect(String(reply["reply"])).toContain("Jobb registrert");
     client.close();
 
     // "Gateway-restart": ny tilkobling/sesjon med samme (delte/persisterte) journal
