@@ -5,6 +5,7 @@ import { ownerStatesMemory } from "./owner-stated-memory.ts";
 import type { JobContract, JsonValue } from "@jarvis/contracts";
 import { SURFACE_TOOL_GRANTS, requiresConfirmationWhenTainted, scopeFieldsOf, type ToolManifest } from "./tool-manifest.ts";
 import type { TurnContext } from "./turn-context.ts";
+import { CHAT_ACT_TIER_KEYS } from "./chat-act-tier.ts";
 
 /**
  * UA-1 P1A (§13, §16-§17): trusted bro mellom AI Mesh og Tool Gateway.
@@ -31,6 +32,8 @@ export interface MeshToolMapping {
    * ved utførelse - de er fjernet fra skjemaet modellen ser, og en verdi modellen likevel sender overstyres alltid.
    */
   scope_bindings?: ReadonlyArray<string>;
+  /** D-382: `act` = endrer noe; utføres kun etter eierens bundne bekreftelse. Udefinert/`read` = lesing. */
+  kind?: "read" | "act";
 }
 
 const MESH_TOOLS: MeshToolMapping[] = [
@@ -330,7 +333,8 @@ export function bindScopeFields(
  */
 export function chatReadTierMeshTools(
   definitions: ReadonlyArray<ReturnType<ToolGateway["list"]>[number]>,
-  allowlist: ReadonlyArray<{ readonly tool_id: string; readonly action: string }>
+  allowlist: ReadonlyArray<{ readonly tool_id: string; readonly action: string }>,
+  kind: "read" | "act" = "read"
 ): MeshToolMapping[] {
   const byKey = new Map(definitions.map((d) => [`${d.tool_id}.${d.action}`, d]));
   const out: MeshToolMapping[] = [];
@@ -348,11 +352,14 @@ export function chatReadTierMeshTools(
     out.push({
       def: {
         name: `${def.tool_id}__${def.action}`,
-        description: `[lesing] ${def.description}`,
+        description: kind === "act"
+          ? `[HANDLING - utføres først når Tobias godkjenner bekreftelsen] ${def.description}`
+          : `[lesing] ${def.description}`,
         input_schema: schema
       },
       tool_id: def.tool_id,
       action: def.action,
+      kind,
       ...(scope.length > 0 ? { scope_bindings: scope } : {})
     });
   }
@@ -466,11 +473,16 @@ export class MeshToolExecutor {
           success: false, output: null, error_category: "TOOL_NOT_IN_MANIFEST", at
         };
       }
-      if (turn?.taint?.tainted && requiresConfirmationWhenTainted(entry)) {
+      // D-382: handlingsnivået krever ALLTID eierens bundne bekreftelse (ikke bare i en tainted tur) - godkjenningen utfører kallet
+      // i trusted lag (/confirmations), så modellen skal aldri kalle verktøyet på nytt.
+      const isAct = CHAT_ACT_TIER_KEYS.has(key);
+      const taintedNeeds = turn?.taint?.tainted === true && requiresConfirmationWhenTainted(entry);
+      if (isAct || taintedNeeds) {
         const gate = this.guards.confirmations;
         const identity = this.identity as { tenant_id: string; person_id: string; device_id?: string; session_id?: string };
+        const reasons = [...(turn?.taint?.reasons ?? []), ...(isAct ? ["owner_action_tier"] : [])];
         const check = gate
-          ? await gate.checkAndConsume({ tool_id: mapped.tool_id, action: mapped.action, parameters: parameters as Record<string, JsonValue> }, identity, turn.taint.reasons)
+          ? await gate.checkAndConsume({ tool_id: mapped.tool_id, action: mapped.action, parameters: parameters as Record<string, JsonValue> }, identity, reasons)
           : ({ ok: false, reason: "confirmation_unavailable" } as { ok: false; reason: string; confirmation_id?: string });
         if (!check.ok) {
           return {
@@ -479,7 +491,10 @@ export class MeshToolExecutor {
             output: {
               confirmation_required: true,
               confirmation_id: check.confirmation_id ?? null,
-              message: "Handlingen krever at eieren bekrefter den eksplisitt i dashbordet (Bekreftelser). Utfør den IKKE på nytt før eieren har bekreftet."
+              status: check.reason,
+              message: check.reason === "confirmation_rejected"
+                ? "Tobias avviste denne handlingen. Ikke prøv igjen - spør hva han vil i stedet."
+                : "Handlingen er lagt til bekreftelse. Forklar Tobias kort hva som vil skje og be ham godkjenne (knapp i chatten/dashbordet). Når han godkjenner, utføres handlingen automatisk - kall IKKE verktøyet på nytt."
             },
             error_category: check.reason.toUpperCase(), at, trust: "internal", source: key
           };
