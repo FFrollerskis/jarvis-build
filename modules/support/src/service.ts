@@ -139,7 +139,10 @@ export class SupportService {
       if (filter.company_id !== undefined) push("company_id = $N", filter.company_id);
       if (filter.contact_id !== undefined) push("contact_id = $N", filter.contact_id);
       if (filter.ticket_number !== undefined) push("ticket_number = $N", filter.ticket_number);
-      if (filter.subject_contains !== undefined) push("subject ILIKE $N", `%${filter.subject_contains}%`);
+      if (filter.subject_contains !== undefined) {
+        // D-398 (JARVIS-097): `%`/`_`/`\` i søketeksten er bokstavelige tegn, ikke jokertegn.
+        push("subject ILIKE $N ESCAPE '\\'", `%${filter.subject_contains.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+      }
       const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
       const { rows } = await client.query(
         `SELECT * FROM support_tickets WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC LIMIT ${limit}`,

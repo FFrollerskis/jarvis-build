@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Jarvis Core API - fase 1: minimalt kjørbart fundament med health-endepunkt",
+  "description": "Jarvis Core API: HTTP-grensesnitt (chat, oppgaver, kontrollflater), worker- og scheduler-oppstart bak policy gateway",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "dev": "node --experimental-transform-types src/main.ts",

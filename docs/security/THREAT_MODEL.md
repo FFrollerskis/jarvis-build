@@ -1,5 +1,7 @@
 # Jarvis – trusselmodell (fase 1)
 
+> **Dokumentstatus (ADR-001, D-398/JARVIS-100):** utkast som aldri er formelt godkjent og delvis overstyrt de facto av senere D-beslutninger ([ADR-001](../remediation/ADR-001-dokumenthierarki.md) §2.2). Bruk dokumentet som *strengeste-regel*-kilde - ikke som bevis for at noe er bygget, godkjent eller verifisert. Status per funn: [FINDINGS_LEDGER](../remediation/FINDINGS_LEDGER.md).
+
 **Status:** v1.0. Levende dokument; revideres per fase. Tillitszonene er definert i
 [SECURITY_MODEL.md](../SECURITY_MODEL.md) §2: Ingestion, Reasoning, Memory, Execution, Secret.
 

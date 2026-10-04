@@ -207,7 +207,7 @@ describe("Akseptanse 2: e-post kan aldri utløse utgående handling uten godkjen
   });
 });
 
-describe("Idempotens: timeout + retry gir ikke dobbel ekstern handling", () => {
+describe("Idempotens: retry med SAMME nøkkel dedupliseres (D-398: navnet påstod «timeout + retry», men ingen timeout simuleres her - timeout-scenarioet er JARVIS-017/018-gjeld)", () => {
   it("første kall utfører; retry med samme nøkkel dedupliseres med samme external_id", async () => {
     const key = `idem-${randomUUID()}`;
     const parameters = { message: "deploy ferdig" };

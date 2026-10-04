@@ -1,5 +1,7 @@
 # Jarvis – talearkitektur (Voice Gateway)
 
+> **Dokumentstatus (ADR-001, D-398/JARVIS-100):** utkast som aldri er formelt godkjent og delvis overstyrt de facto av senere D-beslutninger ([ADR-001](remediation/ADR-001-dokumenthierarki.md) §2.2). Bruk dokumentet som *strengeste-regel*-kilde - ikke som bevis for at noe er bygget, godkjent eller verifisert. Status per funn: [FINDINGS_LEDGER](remediation/FINDINGS_LEDGER.md).
+
 **Status:** Utkast v1.0. Ved motstrid gjelder [CANONICAL_SPEC.md](CANONICAL_SPEC.md).
 
 ## 1. Rolle og avgrensning
