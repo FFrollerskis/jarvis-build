@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
 
@@ -100,8 +100,20 @@ describe("blocker 7: every numeric bound is finite and checked", () => {
 
   it("rejects out-of-range values", () => {
     expect(() => loadWorkerConfig(write(baseConfig({ maxAttempts: 0 })), root)).toThrow(/between 1 and 50/);
-    expect(() => loadWorkerConfig(write(baseConfig({ claudeTimeoutMinutes: 100000 })), root)).toThrow(/between 1 and 600/);
+    expect(() => loadWorkerConfig(write(baseConfig({ claudeTimeoutMinutes: 100000 })), root)).toThrow(/between 1 and 110/);
     expect(() => loadWorkerConfig(write(baseConfig({ heartbeatSeconds: 0 })), root)).toThrow(/between 5 and 3600/);
+  });
+
+  it("D-398 (JARVIS-099): claudeTimeoutMinutes can never exceed the scheduled task's 2 h execution limit", () => {
+    expect(() => loadWorkerConfig(write(baseConfig({ claudeTimeoutMinutes: 111 })), root)).toThrow(/between 1 and 110/);
+    expect(() => loadWorkerConfig(write(baseConfig({ claudeTimeoutMinutes: 110 })), root)).not.toThrow();
+  });
+
+  it("D-398 (JARVIS-099): the 110 min cap stays below install-task.ps1's -ExecutionTimeLimit (structural)", () => {
+    const ps = readFileSync(new URL("../install-task.ps1", import.meta.url), "utf8");
+    const hours = Number(/ExecutionTimeLimit \(New-TimeSpan -Hours (\d+)\)/.exec(ps)?.[1]);
+    expect(hours).toBeGreaterThan(0);
+    expect(110).toBeLessThan(hours * 60);
   });
 
   it("rejects a heartbeat interval that would make a healthy owner look stale", () => {

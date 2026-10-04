@@ -1,5 +1,7 @@
 # Jarvis – kanonisk spesifikasjon
 
+> **Dokumentstatus (ADR-001, D-398/JARVIS-100):** utkast som aldri er formelt godkjent og delvis overstyrt de facto av senere D-beslutninger ([ADR-001](remediation/ADR-001-dokumenthierarki.md) §2.2). Bruk dokumentet som *strengeste-regel*-kilde - ikke som bevis for at noe er bygget, godkjent eller verifisert. Status per funn: [FINDINGS_LEDGER](remediation/FINDINGS_LEDGER.md).
+
 **Status:** Utkast v1.0 – venter på Tobias sin godkjenning før implementering.
 **Kilde:** [docs/input/01_Jarvis_Masterplan_v2.1.md](input/01_Jarvis_Masterplan_v2.1.md) (masterplan v2.1, 12. august 2026) + kritisk gjennomgang dokumentert i [DECISIONS_AND_ASSUMPTIONS.md](DECISIONS_AND_ASSUMPTIONS.md).
 
