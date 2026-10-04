@@ -39,6 +39,11 @@ export interface WorkflowAdapter {
   /** Requeuer hvis attempts < max_attempts, ellers failed. Returnerer ny status. */
   fail(tenantId: string, taskId: string, workerId: string, error: string): Promise<"created" | "failed" | "stale">;
   markCancelled(tenantId: string, taskId: string, workerId: string): Promise<boolean>;
+  /**
+   * D-393 (JARVIS-040): forlenger leasen for en KJØRENDE jobb (heartbeat). `false` = leasen er tapt (en annen worker har/kan overta, eller jobben er
+   * ferdig/kansellert) - kalleren skal da slutte å tro at den eier jobben.
+   */
+  renewLease(tenantId: string, taskId: string, workerId: string, leaseSeconds: number): Promise<boolean>;
   get(tenantId: string, taskId: string): Promise<TaskView | null>;
   /** Kansellering: created→cancelled direkte; running→cancel_requested; ferdig→false. */
   requestCancel(tenantId: string, taskId: string): Promise<"cancelled" | "requested" | "not_cancellable">;

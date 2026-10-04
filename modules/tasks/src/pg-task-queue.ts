@@ -68,6 +68,17 @@ export class PgTaskQueue implements WorkflowAdapter {
     });
   }
 
+  async renewLease(tenantId: string, taskId: string, workerId: string, leaseSeconds: number): Promise<boolean> {
+    const result = await withTenantTransaction(this.pool, tenantId, (client) =>
+      client.query(
+        `UPDATE tasks SET lease_expires_at = now() + make_interval(secs => $3)
+         WHERE task_id = $1 AND worker_id = $2 AND status = 'running'`,
+        [taskId, workerId, leaseSeconds]
+      )
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
   async markCancelled(tenantId: string, taskId: string, workerId: string): Promise<boolean> {
     const result = await withTenantTransaction(this.pool, tenantId, (client) =>
       client.query(

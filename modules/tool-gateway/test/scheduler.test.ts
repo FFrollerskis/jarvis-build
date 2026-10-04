@@ -109,3 +109,61 @@ describe("D-218: DailyScheduler.start() sitt siste sikkerhetsnett", () => {
     expect(errorSpy).not.toHaveBeenCalled();
   });
 });
+
+describe("D-393 (JARVIS-027): retry i stedet for tapt dag", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let timer: NodeJS.Timeout | undefined;
+  beforeEach(() => { errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined); });
+  afterEach(() => { if (timer) clearInterval(timer); errorSpy.mockRestore(); });
+
+  const row = async (job: string) =>
+    (await pool.query<{ attempts: number; completed_at: Date | null; retry_after: Date | null; last_error: string | null }>(
+      "SELECT attempts, completed_at, retry_after, last_error FROM scheduler_state WHERE job_name = $1", [job]
+    )).rows[0];
+
+  it("feilet kjøring får retry_after + last_error; ved retry_after passert overtas dagen og fullføres", async () => {
+    const job = "sched-retry-ok";
+    const scheduler = new DailyScheduler(pool, job, 0);
+    let calls = 0;
+    const deliver = async (): Promise<void> => { calls += 1; if (calls === 1) throw new Error("transient-net"); };
+    timer = scheduler.start(deliver, 20);
+    await waitFor(async () => (await row(job))?.retry_after != null);
+    const failed = await row(job);
+    expect(failed?.last_error).toContain("transient-net");
+    expect(failed?.completed_at).toBeNull();
+    expect(calls).toBe(1); // ingen retry før backoff
+    await pool.query("UPDATE scheduler_state SET retry_after = now() - interval '1 second' WHERE job_name = $1", [job]);
+    await waitFor(async () => (await row(job))?.completed_at != null);
+    expect(calls).toBe(2);
+    expect((await row(job))?.attempts).toBe(2);
+  });
+
+  it("en hengt claim (krasj uten fullføring) overtas først etter 15 min lease", async () => {
+    const job = "sched-stale-claim";
+    const crashed = new DailyScheduler(pool, job, 0);
+    expect(await crashed.claimToday()).toBe(true);
+    const other = new DailyScheduler(pool, job, 0);
+    expect(await other.claimToday()).toBe(false); // claim er fersk
+    await pool.query("UPDATE scheduler_state SET claimed_at = now() - interval '16 minutes' WHERE job_name = $1", [job]);
+    expect(await other.claimToday()).toBe(true);
+    expect((await row(job))?.attempts).toBe(2);
+  });
+
+  it("gir opp etter 4 forsøk (synlig i loggen) og fullført jobb claimes aldri igjen", async () => {
+    const job = "sched-give-up";
+    const scheduler = new DailyScheduler(pool, job, 0);
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      expect(await scheduler.claimToday()).toBe(true);
+      await scheduler.markFailed(`fail-${attempt}`);
+      await pool.query("UPDATE scheduler_state SET retry_after = now() - interval '1 second' WHERE job_name = $1", [job]);
+    }
+    expect(await scheduler.claimToday()).toBe(false);
+    expect(errorSpy.mock.calls.some((c) => String(c[0]).includes("daily_scheduler_gave_up"))).toBe(true);
+
+    const doneJob = new DailyScheduler(pool, "sched-done-never-again", 0);
+    expect(await doneJob.claimToday()).toBe(true);
+    await doneJob.markCompleted();
+    await pool.query("UPDATE scheduler_state SET claimed_at = now() - interval '1 hour' WHERE job_name = $1", ["sched-done-never-again"]);
+    expect(await doneJob.claimToday()).toBe(false);
+  });
+});
