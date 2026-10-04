@@ -43,7 +43,7 @@ export interface DecisionClassification {
 }
 
 /** Endres KUN når mønstrene under endres reelt - auditerbar versjonering, aldri stille endret klassifiseringsatferd. */
-export const CLASSIFIER_VERSION = "d106-decision-importance-v1";
+export const CLASSIFIER_VERSION = "d395-decision-importance-v2";
 
 /**
  * Materialitetsterskel for "financial magnitude" (§ordren: "material
@@ -60,30 +60,55 @@ interface SignalCategory {
   patterns: RegExp[];
 }
 
-const NUMBER_PATTERN = "\\d{1,3}(?:[.,]\\d{3})+|\\d{4,}";
+/**
+ * D-395 (JARVIS-078): norske beløp skrives «500 000 kr» (mellomrom/NBSP som tusenskille) og «2 millioner kroner» - begge ga tidligere INGEN treff
+ * (kun «500.000»/«500,000»/«500000» ble gjenkjent), så en reell høy-innvirkning-beslutning på norsk ble klassifisert som rutine.
+ */
+const NUMBER_PATTERN = "\\d{1,3}(?:[.,\\s\u00a0\u202f]\\d{3})+|\\d{4,}";
 const CURRENCY_PATTERN = "(nok|kr\\.?|kroner|usd|eur|gbp|\\$|€|£)";
+const DECIMAL_PATTERN = "\\d+(?:[.,]\\d+)?";
+const MULTIPLIER_PATTERN = "(milliarder|milliard|mrd\\.?|billion|millioner|million|mill\\.?|mio\\.?)";
 const FINANCIAL_AFTER = new RegExp(`\\b(${NUMBER_PATTERN})\\s*${CURRENCY_PATTERN}\\b`, "i");
 const FINANCIAL_BEFORE = new RegExp(`${CURRENCY_PATTERN}\\s*(${NUMBER_PATTERN})\\b`, "i");
+/** «2 millioner kroner», «1,5 mill kr», «3 mrd NOK». */
+const MULTIPLIED_AFTER = new RegExp(`\\b(${DECIMAL_PATTERN})\\s*${MULTIPLIER_PATTERN}\\s*${CURRENCY_PATTERN}(?![a-z])`, "i");
+/** «kr 2 millioner», «$2 million». */
+const MULTIPLIED_BEFORE = new RegExp(`${CURRENCY_PATTERN}\\s*(${DECIMAL_PATTERN})\\s*${MULTIPLIER_PATTERN}(?![a-z])`, "i");
 
 function parseAmount(numStr: string): number | undefined {
-  const cleaned = numStr.replace(/[.,]/g, "");
+  const cleaned = numStr.replace(/[.,\s\u00a0\u202f]/g, "");
   const value = Number(cleaned);
   return Number.isFinite(value) ? value : undefined;
 }
 
-/** Deterministisk beløps-uthenting - ALDRI gjettet, kun det som faktisk står i teksten. */
+function multiplierOf(word: string): number {
+  return /^(milliard|mrd|billion)/i.test(word) ? 1_000_000_000 : 1_000_000;
+}
+
+/** Deterministisk beløps-uthenting - ALDRI gjettet, kun det som faktisk står i teksten. Returnerer det STØRSTE beløpet (materialitet = det største). */
 function extractFinancialAmount(text: string): { raw: string; value: number } | undefined {
+  const found: Array<{ raw: string; value: number }> = [];
   const after = text.match(FINANCIAL_AFTER);
   if (after) {
     const value = parseAmount(after[1] as string);
-    if (value !== undefined) return { raw: after[0], value };
+    if (value !== undefined) found.push({ raw: after[0], value });
   }
   const before = text.match(FINANCIAL_BEFORE);
   if (before) {
     const value = parseAmount(before[2] as string);
-    if (value !== undefined) return { raw: before[0], value };
+    if (value !== undefined) found.push({ raw: before[0], value });
   }
-  return undefined;
+  const multAfter = text.match(MULTIPLIED_AFTER);
+  if (multAfter) {
+    const base = Number((multAfter[1] as string).replace(",", "."));
+    if (Number.isFinite(base)) found.push({ raw: multAfter[0], value: base * multiplierOf(multAfter[2] as string) });
+  }
+  const multBefore = text.match(MULTIPLIED_BEFORE);
+  if (multBefore) {
+    const base = Number((multBefore[2] as string).replace(",", "."));
+    if (Number.isFinite(base)) found.push({ raw: multBefore[0], value: base * multiplierOf(multBefore[3] as string) });
+  }
+  return found.sort((a, b) => b.value - a.value)[0];
 }
 
 /** §ordre "irreversible infrastructure change" / "irreversible/destructive action". */
@@ -235,9 +260,9 @@ export function classifyDecisionImportance(text: string): DecisionClassification
  * Eksplisitt DEFERRED (Q-26-ærlighet, IKKE skjult - jf. filens topp-kommentar):
  * (1) INGEN valutakonvertering - et beløp i USD/EUR/GBP sammenlignes mot
  *     SAMME nominelle terskel som NOK, ikke en reell kryssvaluta-vurdering.
- * (2) INGEN "million"/"milliard"/"million"-multiplikator-parsing (f.eks.
- *     "2 million NOK" gir INGEN treff i dagens mønstre) - kun eksplisitte
- *     tall med tusen-separator eller ≥4 siffer.
+ * (2) (LØST i D-395: "2 millioner kroner"/"1,5 mill kr"/"3 mrd NOK" og
+ *     "500 000 kr" gjenkjennes nå.) Fortsatt IKKE gjenkjent: beløp uten
+ *     valutaangivelse, og skrivemåter som "2M"/"500k".
  * (3) Terskelen (100 000) er en ENKELT global konstant, IKKE per-tenant/
  *     per-policy-konfigurerbar ennå.
  * Ingen av disse er skjulte begrensninger - alle er eksplisitt dokumentert

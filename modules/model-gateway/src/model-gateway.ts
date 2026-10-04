@@ -183,9 +183,20 @@ export interface MeshProviderStatus {
   avg_latency_ms?: number;
 }
 
+/**
+ * Ruterens tilstand utledes av de KONFIGURERTE providerne: ingen konfigurert (eller alle UNAVAILABLE) = UNAVAILABLE, noen DEGRADED/RATE_LIMITED/UNAVAILABLE = DEGRADED,
+ * ellers HEALTHY. Ren funksjon (testbar).
+ */
+export function meshRouterState(providers: Array<{ configured: boolean; state: ProviderHealthState }>): "HEALTHY" | "DEGRADED" | "UNAVAILABLE" {
+  const usable = providers.filter((p) => p.configured && p.state !== "NOT_CONFIGURED");
+  if (usable.length === 0 || usable.every((p) => p.state === "UNAVAILABLE")) return "UNAVAILABLE";
+  return usable.some((p) => p.state === "DEGRADED" || p.state === "RATE_LIMITED" || p.state === "UNAVAILABLE") ? "DEGRADED" : "HEALTHY";
+}
+
 export interface MeshStatus {
   providers: MeshProviderStatus[];
-  router: "HEALTHY";
+  /** D-395 (JARVIS-078): beregnet fra faktisk providerhelse (tidligere en hardkodet «HEALTHY»). */
+  router: "HEALTHY" | "DEGRADED" | "UNAVAILABLE";
   /** VERIFIED = cross-provider fallback har faktisk skjedd i denne runtime (§25). */
   fallback: "VERIFIED" | "READY" | "LOGIC_ONLY";
   critic: "VERIFIED" | "READY_SELECTIVE";
@@ -759,7 +770,7 @@ export class ModelGateway {
           ...(s.avg_latency_ms !== undefined ? { avg_latency_ms: s.avg_latency_ms } : {})
         };
       }),
-      router: "HEALTHY",
+      router: meshRouterState([...runtimes].map(([name, rt]) => ({ configured: rt.configured, state: (snapshot[name] as NonNullable<(typeof snapshot)[string]>).state }))),
       fallback: this.crossProviderFallbackSeen
         ? "VERIFIED"
         : [...runtimes].filter(([name, r]) => r.configured && name !== "scripted").length >= 2

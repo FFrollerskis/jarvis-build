@@ -1,7 +1,8 @@
-import type { IdentityContext } from "@jarvis/contracts";
+import { envInt, type IdentityContext } from "@jarvis/contracts";
 import { ContextBuilder, MessageStore, describeSecretFindings, fastRoute, scanForSecrets } from "@jarvis/core";
 import {
   BudgetExceededError,
+  CouncilAutoTriggerLimiter,
   classifyContentSensitivity,
   partitionHistoryBySensitivity,
   classifyDecisionImportance,
@@ -28,6 +29,8 @@ export interface ConversationDeps {
   tasks: TaskService;
   worker: InProcessWorker;
   trace: TraceSink;
+  /** D-395: injiserbar begrenser for automatisk råd-trigger (tester); default bygges fra JARVIS_COUNCIL_AUTO_MAX_PER_HOUR. */
+  councilAutoLimiter?: CouncilAutoTriggerLimiter;
   /** Fase 4: hybridminne-kontekst med kildeangivelse (kun gjeldende space). */
   memory?: {
     contextFor(identity: IdentityContext, userText: string): Promise<string>;
@@ -207,7 +210,12 @@ const SAFETY_CRITICAL_SUFFIX =
  * sesjonshistorikken; rask bane spores i trace (akseptanse 4).
  */
 export class ConversationEngine {
-  constructor(private readonly deps: ConversationDeps) {}
+  /** D-395 (JARVIS-078): tak for AUTOMATISK råd-trigger (eksplisitt eier-bestilling er aldri begrenset). Default 3 per time per tenant. */
+  private readonly councilAutoLimiter: CouncilAutoTriggerLimiter;
+
+  constructor(private readonly deps: ConversationDeps) {
+    this.councilAutoLimiter = deps.councilAutoLimiter ?? new CouncilAutoTriggerLimiter(envInt("JARVIS_COUNCIL_AUTO_MAX_PER_HOUR", 3, { min: 1, max: 100 }));
+  }
 
   private loadPersonality(): PersonalityConfig {
     if (!this.deps.personality) return DEFAULT_PERSONALITY_CONFIG;
@@ -362,7 +370,27 @@ export class ConversationEngine {
         : classification.decision_importance === "HIGH_IMPACT_DECISION"
           ? "high_impact_classifier"
           : undefined;
-      if (triggerSource) {
+      // D-395 (JARVIS-078): (1) uten konfigurert råd skal en AUTOMATISK klassifisering ikke erstatte svaret på spørsmålet med en feilmelding - da faller
+      // meldingen gjennom til vanlig samtale; (2) automatisk trigger har kostnadstak (glidende time) - over taket faller den også gjennom, med revisjonsspor.
+      let councilAllowed = true;
+      if (triggerSource === "high_impact_classifier") {
+        if (!this.deps.council) {
+          councilAllowed = false;
+        } else if (!this.councilAutoLimiter.tryAcquire(identity.tenant_id)) {
+          councilAllowed = false;
+          await this.deps.trace.record({
+            trace_id: `trace-${randomUUID()}`,
+            kind: "council_suppressed",
+            name: "auto_trigger_rate_limited",
+            tenant_id: identity.tenant_id,
+            session_id: identity.session_id,
+            at: new Date().toISOString(),
+            duration_ms: 0,
+            metadata: { decision_importance: classification.decision_importance, trigger_reasons: classification.trigger_reasons }
+          });
+        }
+      }
+      if (triggerSource && councilAllowed) {
         return this.runCouncil(identity, text, triggerSource, classification, override, onToken);
       }
     }
@@ -619,7 +647,8 @@ export class ConversationEngine {
       const reply = "AI-rådet er ikke konfigurert i denne kjøringen.";
       await this.deps.messages.save(identity, "assistant", reply);
       onToken?.(reply);
-      return { reply, routed: "model" };
+      // D-395: ingen modell kjørte - `routed: "model"` var uriktig (samme semantikk som en blokkert tur).
+      return { reply, routed: "blocked" };
     }
     const result = await this.deps.council.run({
       tenant_id: identity.tenant_id,
