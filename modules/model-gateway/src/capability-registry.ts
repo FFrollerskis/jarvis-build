@@ -180,7 +180,9 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
     // gjeldende flaggskip med 1M-token kontekst (uendret fra 256k-antakelsen).
     provider: "kimi",
     model: "kimi-k3",
-    capabilities: ["text", "reasoning", "tool_calling"],
+    // D-393 (JARVIS-036): `KimiAdapter` sender kun tekst (ingen `tools`/`tool_calls`-støtte) - registeret påstår ikke mer enn adapteren kan.
+    // Å påstå `tool_calling` ga verktøykall som ble stille droppet og jobber merket som vellykkede. Gjeninnføres når adapteren faktisk støtter det.
+    capabilities: ["text", "reasoning"],
     context_tokens: 1_000_000,
     locality: "cloud",
     cost_class: 2,
@@ -199,7 +201,9 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
     // denne økten) inntil faktisk bruk/evaluering foreligger.
     provider: "hermes",
     model: "Hermes-4-70B",
-    capabilities: ["text", "reasoning", "tool_calling", "structured_output"],
+    // D-393 (JARVIS-036): `HermesAdapter` sender kun tekst (ingen `tools`, ingen `response_format`) - ærlig registry (D-80): modellen KAN
+    // verktøy/JSON, men adapteren eksponerer det ikke, og routeren velger på adapterens evne.
+    capabilities: ["text", "reasoning"],
     context_tokens: 131_072,
     locality: "cloud",
     cost_class: 1,

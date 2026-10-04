@@ -19,15 +19,27 @@ export interface ProviderStats {
   last_error?: string;
   last_error_kind?: ProviderErrorKind;
   last_success_at?: number;
+  last_failure_at?: number;
   rate_limited_until?: number;
   latencies_ms: number[];
 }
 
 const RATE_LIMIT_BACKOFF_MS = 60_000;
 const UNAVAILABLE_THRESHOLD = 3;
+/** D-393 (JARVIS-033): UNAVAILABLE er en BEGRENSET pause (halv-åpen krets), ikke en dom til neste omstart. */
+const UNAVAILABLE_COOLDOWN_BASE_MS = 30_000;
+const UNAVAILABLE_COOLDOWN_MAX_MS = 5 * 60_000;
+
+/** Pause etter N sammenhengende feil: 30 s ved terskelen, dobles per ekstra feil, maks 5 min. */
+export function unavailableCooldownMs(consecutiveFailures: number): number {
+  const extra = Math.max(0, consecutiveFailures - UNAVAILABLE_THRESHOLD);
+  return Math.min(UNAVAILABLE_COOLDOWN_BASE_MS * 2 ** Math.min(extra, 10), UNAVAILABLE_COOLDOWN_MAX_MS);
+}
 
 export class ProviderHealthTracker {
   private readonly stats = new Map<string, ProviderStats>();
+
+  constructor(private readonly now: () => number = Date.now) {}
 
   private ensure(provider: string): ProviderStats {
     let s = this.stats.get(provider);
@@ -42,7 +54,7 @@ export class ProviderHealthTracker {
     const s = this.ensure(provider);
     s.success += 1;
     s.consecutive_failures = 0;
-    s.last_success_at = Date.now();
+    s.last_success_at = this.now();
     delete s.rate_limited_until;
     s.latencies_ms.push(latencyMs);
     if (s.latencies_ms.length > 50) {
@@ -56,8 +68,9 @@ export class ProviderHealthTracker {
     s.consecutive_failures += 1;
     s.last_error = message.slice(0, 200);
     s.last_error_kind = kind;
+    s.last_failure_at = this.now();
     if (kind === "rate_limit") {
-      s.rate_limited_until = Date.now() + RATE_LIMIT_BACKOFF_MS;
+      s.rate_limited_until = this.now() + RATE_LIMIT_BACKOFF_MS;
     }
   }
 
@@ -69,11 +82,15 @@ export class ProviderHealthTracker {
     if (!s || (s.success === 0 && s.failures === 0)) {
       return "CONFIGURED";
     }
-    if (s.rate_limited_until && s.rate_limited_until > Date.now()) {
+    if (s.rate_limited_until && s.rate_limited_until > this.now()) {
       return "RATE_LIMITED";
     }
     if (s.consecutive_failures >= UNAVAILABLE_THRESHOLD) {
-      return "UNAVAILABLE";
+      // D-393 (JARVIS-033): etter pausen slippes ETT prøvekall gjennom (DEGRADED); lykkes det nullstilles teller i `recordSuccess`,
+      // feiler det starter en lengre pause. Uten dette var en provider med 3 feil utestengt til prosessen ble startet på nytt.
+      const since = this.now() - (s.last_failure_at ?? 0);
+      if (since < unavailableCooldownMs(s.consecutive_failures)) return "UNAVAILABLE";
+      return "DEGRADED";
     }
     if (s.consecutive_failures > 0) {
       return "DEGRADED";
