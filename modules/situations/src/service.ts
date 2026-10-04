@@ -433,7 +433,7 @@ export function computeActOperationFingerprint(
   action: string,
   parameters: Record<string, JsonValue>
 ): string {
-  const canonical = `${situationId} ${toolId} ${action} ${canonicalJsonValue(parameters)}`;
+  const canonical = `${situationId}\u0000${toolId}\u0000${action}\u0000${canonicalJsonValue(parameters)}`;
   return createHash("sha256").update(canonical).digest("hex");
 }
 

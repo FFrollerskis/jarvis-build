@@ -54,7 +54,7 @@ describe("meldingstekst: ubetrodd reason kuttes og renses", () => {
     const m = buildInformMessage("support", "normal", "inform", long);
     expect(m.length).toBeLessThanOrEqual(MAX_TELEGRAM_MESSAGE_CHARS);
     expect(m.endsWith("…")).toBe(true);
-    expect(m).not.toMatch(/[\u0000\u0007]/);
+    expect(m.includes("\u0000") || m.includes("\u0007")).toBe(false);
     expect(m).toContain("kontroll\nlinje2");
     const n = buildNotifyMessage(long, "tool", "act");
     expect(n.length).toBeLessThanOrEqual(MAX_TELEGRAM_MESSAGE_CHARS);
