@@ -5,6 +5,7 @@ import {
   envPositiveInt,
   extractProviderErrorCode,
   ProviderError,
+  effectiveModel,
   sanitizeEndpointForDiagnostics,
   sanitizeGeminiSchema,
   textOnly,
@@ -55,7 +56,7 @@ export class GeminiAdapter implements ModelProviderAdapter {
       parts: [{ text: textOnly(m.content) }]
     }));
     const started = Date.now();
-    const url = `${this.baseUrl}/v1beta/models/${this.model}:generateContent`;
+    const url = `${this.baseUrl}/v1beta/models/${effectiveModel(request, this.model)}:generateContent`;
     let response: Response;
     try {
       response = await fetch(url, {
@@ -130,7 +131,7 @@ export class GeminiAdapter implements ModelProviderAdapter {
         ...(usage.cachedContentTokenCount !== undefined ? { cached_tokens: usage.cachedContentTokenCount } : {})
       },
       provider: this.name,
-      model: this.model,
+      model: effectiveModel(request, this.model),
       latency_ms: Date.now() - started,
       ...(body.candidates[0]?.finishReason ? { finish_reason: body.candidates[0].finishReason } : {}),
       ...(structured !== undefined ? { structured_output: structured } : {})

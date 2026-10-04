@@ -5,7 +5,7 @@ import { systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit } from "./owner.ts";
 import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
-import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, DEFAULT_PRICING, ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
+import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, ModelGateway, pricingFromEnv, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport, GmailTransport,
   GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, MeshToolExecutor, resolveModelToolSurface, PgGithubRateLimitStore,
@@ -83,6 +83,7 @@ const worker = new InProcessWorker(queue);
 const gateway = new ModelGateway({
   pool,
   trace: traceSinkFromEnv("var/worker-traces.jsonl"),
+  pricing: pricingFromEnv(), // D-399: se apps/api/src/main.ts
   providers: [
     new OpenAiAdapter(),
     new AnthropicAdapter(),
@@ -107,7 +108,7 @@ const gateway = new ModelGateway({
 });
 // JARVIS-006: hver konstruert adapter MÅ ha eksplisitt pris - ingen stille `default_rate`.
 try {
-  assertProvidersHaveExplicitPricing(DEFAULT_PRICING, gateway.listProviderNames());
+  assertProvidersHaveExplicitPricing(pricingFromEnv(), gateway.listProviderNames());
 } catch (err) {
   failStartup(err);
 }

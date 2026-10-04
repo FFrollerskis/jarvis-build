@@ -13,3 +13,5 @@ export * from "./council-limiter.ts";
 export * from "./collaboration.ts";
 export * from "./specialist-delegation.ts";
 export * from "./content-sensitivity.ts";
+export * from "./model-catalog.ts";
+export * from "./routing-advisor.ts";

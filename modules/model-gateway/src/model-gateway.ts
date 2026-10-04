@@ -21,6 +21,8 @@ import { CapabilityRegistry, type ModelCapability } from "./capability-registry.
 import { ProviderHealthTracker, type ProviderHealthState } from "./provider-health.ts";
 import { AiRouter, type RoutePlan } from "./router.ts";
 import { assertExplicitPricing, costOre as computeCostOre, DEFAULT_PRICING, type PricingTable } from "./pricing.ts";
+import { modelCatalogFromEnv, type CatalogModel, type ModelTier } from "./model-catalog.ts";
+import { describeTask, HeuristicRoutingAdvisor, selectModelForTier, type RoutingAdvisor } from "./routing-advisor.ts";
 import type { TraceSink } from "./trace.ts";
 
 /**
@@ -129,6 +131,13 @@ export interface GatewayOptions {
   rates?: Record<string, { input_per_1k_ore: number; output_per_1k_ore: number }>;
   /** Enkel rate limit: maks kall per minutt per tenant. */
   maxCallsPerMinute?: number;
+  /**
+   * D-399 (modellrådgiver): rådgiver som anbefaler modelltrinn per oppgave (default: deterministisk heuristikk). `advisorMode`: `off` = ingen rådgivning, `shadow` (default) = logg hva
+   * rådgiveren VILLE valgt men endre ingenting, `active` = bruk anbefalingen (billigste valgbare modell som holder, kun hos ruterens primære leverandør). Env: `JARVIS_MODEL_ADVISOR`.
+   */
+  advisor?: RoutingAdvisor;
+  catalog?: readonly CatalogModel[];
+  advisorMode?: "off" | "shadow" | "active";
 }
 
 /**
@@ -216,6 +225,9 @@ export class ModelGateway {
   private readonly callTimestamps = new Map<string, number[]>();
   private readonly registry: CapabilityRegistry;
   private readonly pricing: PricingTable;
+  private readonly advisor: RoutingAdvisor;
+  private readonly catalog: readonly CatalogModel[];
+  private readonly advisorMode: "off" | "shadow" | "active";
   readonly health = new ProviderHealthTracker();
   private readonly router: AiRouter;
   private readonly byName = new Map<string, ModelProviderAdapter>();
@@ -230,6 +242,10 @@ export class ModelGateway {
     // JARVIS-006: ingen registrert modellprofil får falle til `default_rate`.
     assertExplicitPricing(this.pricing, this.registry.list());
     this.router = new AiRouter(this.registry, this.health);
+    this.advisor = opts.advisor ?? new HeuristicRoutingAdvisor();
+    this.catalog = opts.catalog ?? modelCatalogFromEnv();
+    const envMode = process.env["JARVIS_MODEL_ADVISOR"]?.trim().toLowerCase();
+    this.advisorMode = opts.advisorMode ?? (envMode === "off" || envMode === "active" || envMode === "shadow" ? envMode : "shadow");
     for (const p of opts.providers) {
       this.byName.set(p.name, p);
     }
@@ -272,6 +288,54 @@ export class ModelGateway {
     return { ...input, request: { ...input.request, timeoutMs: resolved } };
   }
 
+
+  /**
+   * D-399 (modellrådgiver): velger MODELL innenfor ruterens primære leverandør. Leverandørvalget (sensitivitet, betalte modeller, helse, capabilities) er allerede gjort av ruteren og
+   * røres ikke; her velges billigste valgbare katalogmodell som holder for oppgaven. `shadow` logger kun hva som VILLE skjedd. Feil i rådgivningen faller alltid tilbake til ruterens plan.
+   */
+  private async applyModelAdvice(input: CompleteInput, plan: RoutePlan, budgetLevel: string, traceId: string): Promise<RoutePlan> {
+    if (this.advisorMode === "off") return plan;
+    const primary = plan.candidates[0];
+    if (!primary) return plan;
+    try {
+      const task = describeTask(input.request, input.purpose);
+      const advice = await this.advisor.advise(task);
+      const maxTier: ModelTier | undefined = budgetLevel === "warn" ? "standard" : undefined;
+      const selection = selectModelForTier(advice.tier, {
+        eligibleProviders: [primary.provider],
+        providerDefaultModel: (p) => this.byName.get(p)?.model,
+        pricing: this.pricing,
+        catalog: this.catalog,
+        ...(maxTier !== undefined ? { maxTier } : {})
+      });
+      const wouldChange = selection !== null && selection.model !== primary.model;
+      await this.opts.trace.record({
+        trace_id: traceId, kind: "model_advice", name: `advice_${this.advisorMode}`, tenant_id: input.tenant_id,
+        ...(input.session_id !== undefined ? { session_id: input.session_id } : {}),
+        ...(input.task_id !== undefined ? { task_id: input.task_id } : {}),
+        at: new Date().toISOString(), duration_ms: 0,
+        metadata: {
+          mode: this.advisorMode, advisor: advice.advisor, advised_tier: advice.tier, confidence: advice.confidence, reason: advice.reason,
+          task: { kind: task.kind, complexity: task.complexity, size_chars: task.size_chars, needs_tools: task.needs_tools, tool_rounds: task.tool_rounds },
+          router_provider: primary.provider, router_model: primary.model,
+          advised_model: selection?.model ?? null, downgraded: selection?.downgraded ?? false, would_change: wouldChange,
+          budget_level: budgetLevel, ...(maxTier !== undefined ? { tier_cap: maxTier } : {})
+        }
+      });
+      if (this.advisorMode === "active" && selection && wouldChange) {
+        return { ...plan, candidates: [{ provider: selection.provider, model: selection.model }, ...plan.candidates.slice(1)] };
+      }
+    } catch (err) {
+      console.warn(JSON.stringify({ msg: "model_advice_failed", error: (err as Error).message.slice(0, 120) }));
+    }
+    return plan;
+  }
+
+  /** D-399: per-kall modell: kun når kandidatens modell avviker fra adapterens standard (ellers uendret request). */
+  private requestForCandidate(request: ModelRequest, candidateModel: string, adapterModel: string | undefined): ModelRequest {
+    return candidateModel !== "ukjent" && adapterModel !== undefined && candidateModel !== adapterModel ? { ...request, model: candidateModel } : request;
+  }
+
   async complete(rawInput: CompleteInput): Promise<ModelResult> {
     const input = this.applyTimeoutOverride(rawInput);
     const started = Date.now();
@@ -295,7 +359,7 @@ export class ModelGateway {
       throw new BudgetExceededError(budget.level, budget.spent_ore);
     }
 
-    const plan = this.router.plan(
+    const routerPlan = this.router.plan(
       {
         ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
         ...(input.mode !== undefined ? { mode: input.mode } : {}),
@@ -314,6 +378,7 @@ export class ModelGateway {
       },
       this.providerRuntimes()
     );
+    const plan = await this.applyModelAdvice(input, routerPlan, budget.level, traceId);
 
     const result = await this.executePlan(input, plan, traceId, started, budget.level, false);
 
@@ -338,7 +403,7 @@ export class ModelGateway {
     requestOverride?: ModelRequest,
     streamOpts?: { onEvent: StreamHandler; signal?: AbortSignal }
   ): Promise<ModelResult> {
-    const request = requestOverride ?? input.request;
+    const baseRequest = requestOverride ?? input.request;
     const failedProviders: string[] = [];
     let lastError: Error | null = null;
 
@@ -347,6 +412,8 @@ export class ModelGateway {
       if (!adapter || !adapter.available()) {
         continue;
       }
+      // D-399: per-kall modell for DENNE kandidaten (kun når rådgiveren valgte en annen enn adapterens standard).
+      const request = this.requestForCandidate(baseRequest, candidate.model, adapter.model);
       if (failedProviders.length > 0 && streamOpts) {
         streamOpts.onEvent({
           type: "fallback",
@@ -565,7 +632,7 @@ export class ModelGateway {
     if (budget.level === "hard_blocked" || budget.level === "needs_approval") {
       throw new BudgetExceededError(budget.level, budget.spent_ore);
     }
-    const plan = this.router.plan(
+    const routerPlan = this.router.plan(
       {
         ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
         ...(input.mode !== undefined ? { mode: input.mode } : {}),
@@ -589,6 +656,7 @@ export class ModelGateway {
       },
       this.providerRuntimes()
     );
+    const plan = await this.applyModelAdvice(input, routerPlan, budget.level, traceId);
     return this.executePlan(input, plan, traceId, started, budget.level, false, undefined, { onEvent, ...(signal ? { signal } : {}) });
   }
 

@@ -42,6 +42,9 @@ export const DEFAULT_PRICING: PricingTable = {
     "openai:gpt-4o-mini": { input_per_1k_ore: 0.2, output_per_1k_ore: 0.7, cached_per_1k_ore: 0.1, pricing_mode: "PAID" },
     "openai:gpt-5": { input_per_1k_ore: 1.4, output_per_1k_ore: 10.5, cached_per_1k_ore: 0.2, pricing_mode: "PAID" },
     openai: { input_per_1k_ore: 1.4, output_per_1k_ore: 10.5, pricing_mode: "PAID" },
+    // D-399: Sonnet 5.5 har SAMME sats som leverandørnivå-raden under (raden er satt for Sonnet-klassen) - eksplisitt slik at den er valgbar per kall. Øvrige Anthropic-modeller
+    // (Haiku/Opus/Fable) har bevisst IKKE en rad før eier har bekreftet prisen (`JARVIS_MODEL_PRICING`) - uten pris er de aldri valgbare.
+    "anthropic:claude-sonnet-5-5": { input_per_1k_ore: 3.2, output_per_1k_ore: 15.8, cached_per_1k_ore: 0.4, pricing_mode: "PAID" },
     anthropic: { input_per_1k_ore: 3.2, output_per_1k_ore: 15.8, cached_per_1k_ore: 0.4, pricing_mode: "PAID" },
     // D-106 GEMINI MODEL MIGRATION (2026-08-23): raten var kalibrert for
     // `gemini-2.5-flash` (nå under utfasing, se gemini.ts). `gemini-3.6-flash`
@@ -179,4 +182,30 @@ export function assertProvidersHaveExplicitPricing(table: PricingTable, provider
   if (missing.length > 0) {
     throw new MissingExplicitPricingError(missing);
   }
+}
+
+/**
+ * D-399: eier-bekreftede modellpriser via `JARVIS_MODEL_PRICING` (JSON: `{"anthropic:claude-fable-5-1": {"input_per_1k_ore": ..., "output_per_1k_ore": ...}}`).
+ * Flettes OVER standardtabellen. Ugyldige oppføringer kaster (aldri stille ignorering - en feil pris er verre enn ingen pris).
+ */
+export function pricingFromEnv(base: PricingTable = DEFAULT_PRICING, env: Record<string, string | undefined> = process.env): PricingTable {
+  const raw = env["JARVIS_MODEL_PRICING"]?.trim();
+  if (!raw) return base;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("invalid_model_pricing: JARVIS_MODEL_PRICING er ikke gyldig JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid_model_pricing: forventet et objekt");
+  const rates: Record<string, TokenRate> = { ...base.rates };
+  for (const [key, v] of Object.entries(parsed as Record<string, Record<string, unknown>>)) {
+    if (!/^[a-z0-9_]{1,40}:[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(key)) throw new Error(`invalid_model_pricing: nøkkel '${key}' må være provider:model`);
+    const inp = Number(v?.["input_per_1k_ore"]);
+    const out = Number(v?.["output_per_1k_ore"]);
+    if (!Number.isFinite(inp) || !Number.isFinite(out) || inp < 0 || out < 0) throw new Error(`invalid_model_pricing: ${key} mangler gyldige satser`);
+    const cached = v?.["cached_per_1k_ore"] !== undefined ? Number(v["cached_per_1k_ore"]) : undefined;
+    rates[key] = { input_per_1k_ore: inp, output_per_1k_ore: out, ...(cached !== undefined && Number.isFinite(cached) ? { cached_per_1k_ore: cached } : {}), pricing_mode: "PAID" };
+  }
+  return { ...base, rates };
 }
