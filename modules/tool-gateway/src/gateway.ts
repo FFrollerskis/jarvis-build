@@ -445,8 +445,12 @@ export class ToolGateway {
     jobContract?: JobContract;
     /** D-317: se `ToolInvocationContext.servingModel` sitt filhode. */
     servingModel?: { provider: string; model: string };
+    /** D-394 (JARVIS-054): korrelasjons-ID-er som følger HVER audit-rad for dette kallet. */
+    task_id?: string;
+    trace_id?: string;
   }): Promise<ToolResult> {
     const definition = this.get(request.tool_id, request.action);
+    const corr = { ...(request.task_id !== undefined ? { task_id: request.task_id } : {}), ...(request.trace_id !== undefined ? { trace_id: request.trace_id } : {}) };
     if (!definition) {
       return this.deny(request, "unknown_tool");
     }
@@ -680,7 +684,7 @@ export class ToolGateway {
           | { external_id: string | null; status: string; postcondition_reason: string | null }
           | undefined;
         if (row?.status === "succeeded") {
-          await writeAudit(client, request.identity, {
+          await writeAudit(client, request.identity, { ...corr,
             type: "tool.deduplicated", tool_id: request.tool_id, action: request.action,
             payload: { external_id: row.external_id }
           });
@@ -694,7 +698,7 @@ export class ToolGateway {
         // Q-34 P2-oppfølging: en retry med SAMME idempotency_key etter `unverified` skal ALDRI utløse en ny mutasjon og ALDRI bli ok:true -
         // den ser NØYAKTIG det samme sanne, ikke-suksessfulle resultatet som den opprinnelige kalleren fikk.
         if (row?.status === "unverified") {
-          await writeAudit(client, request.identity, {
+          await writeAudit(client, request.identity, { ...corr,
             type: "tool.postcondition_unverified", decision: "ALLOW",
             tool_id: request.tool_id, action: request.action, capability_class: definition.capability_class,
             payload: { external_id: row.external_id, replayed: true, reason: row.postcondition_reason }
@@ -710,7 +714,7 @@ export class ToolGateway {
           );
           if (rearmed.rowCount === 1) return null;
         }
-        await writeAudit(client, request.identity, {
+        await writeAudit(client, request.identity, { ...corr,
           type: "tool.execution_in_flight", decision: "DENY", reason: "execution_in_flight_or_outcome_unknown",
           tool_id: request.tool_id, action: request.action, capability_class: definition.capability_class,
           payload: { status: row?.status ?? null }
@@ -802,7 +806,7 @@ export class ToolGateway {
         }
         if (failure) {
           // Kontrollert feil: revoked credential/timeout/providerfeil åpner ingenting.
-          await writeAudit(client, request.identity, {
+          await writeAudit(client, request.identity, { ...corr,
             type: "tool.failed", decision: "DENY", reason: failure.message.slice(0, 120),
             tool_id: request.tool_id, action: request.action,
             capability_class: definition.capability_class,
@@ -810,7 +814,7 @@ export class ToolGateway {
           });
           return;
         }
-        await writeAudit(client, request.identity, {
+        await writeAudit(client, request.identity, { ...corr,
           // Egen audit-type når verifiseringen feiler - ALDRI «tool.executed» for en ubekreftet handling.
           type: postconditionVerified ? "tool.executed" : "tool.postcondition_unverified", decision: "ALLOW",
           tool_id: request.tool_id, action: request.action,

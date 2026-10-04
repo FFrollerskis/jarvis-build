@@ -1,3 +1,5 @@
+import { scanForSecrets } from "@jarvis/core";
+
 /**
  * D-105 (UA-5 kriterium 1, §Q): kjøretids-redaksjon av driftslogger FØR
  * persistering - operasjonelle logger (Docker container-utdata) er
@@ -25,5 +27,7 @@ export function redactSecrets(text: string): string {
   for (const { re, replacement } of PATTERNS) {
     result = result.replace(re, replacement);
   }
-  return result;
+  // D-394 (JARVIS-069): den sentrale skanneren (Del 3) dekker flere formater enn de fire lokale mønstrene (JWT, private nøkler, Stripe/Slack/AWS/
+  // Google-nøkler, Telegram-token, passordfraser, kortnumre) - alle driftslogger og fritekst-evidens går gjennom BEGGE.
+  return scanForSecrets(result).text;
 }

@@ -525,6 +525,7 @@ export class MeshToolExecutor {
       action: mapped.action,
       parameters: parameters as never,
       idempotency_key: ctx.idempotency_key,
+      ...(ctx.task_id !== undefined ? { task_id: ctx.task_id } : {}),
       ...(this.guards?.jobContract ? { jobContract: this.guards.jobContract } : {}),
       // D-317: `call.provider`/`.model` er stemplet av selve adapteren som genererte
       // DENNE turen (se ToolCallRequest sitt filhode i provider-adapters) - ALDRI fra

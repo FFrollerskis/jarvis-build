@@ -119,6 +119,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   assertRuntimeCredentialsConfigured();
   // Remediering del 2 (JARVIS-065): ÉN validert eier-identitet for hele prosessen (fail closed uten).
   const owner = ownerConfigOrExit();
+  process.env["JARVIS_PROCESS"] ??= "api"; // D-394 (JARVIS-054): audit-rader merkes med hvilken prosess som skrev dem
   const pool = createPool(configFromEnv());
   // Migrasjoner kjøres av admin-bruker i drift (compose: `migrate`-tjenesten); her antas app-bruker å ha skjema fra før.
   // D-395 (JARVIS-075): flagget kjører migratoren med ADMIN-konfig i en egen, kortlivet pool - aldri med runtime-rollen (Q-21) - og feiler
@@ -404,7 +405,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       return { secretKey };
     }
   };
-  const stripeWebhookSecretProvider = () => process.env["JARVIS_STRIPE_WEBHOOK_SECRET"] ?? null;
+  // D-394 (JARVIS-056): webhook-hemmeligheter leses via den delte kjeden (Infisical-primær, .env-fallback) - samme som øvrige credentials -
+  // slik at «lim inn ny verdi» i dashbordet faktisk gjelder, i stedet for at en rotert hemmelighet ble liggende i `process.env` til omstart.
+  const stripeWebhookSecretProvider = async () => (await readSecretProvider.get("JARVIS_STRIPE_WEBHOOK_SECRET")) ?? null;
   const stripeTenantResolver = () => process.env["JARVIS_STRIPE_TENANT_ID"] ?? null;
   // D-110 (UA-6 Slice 4): SAMME "ETT globalt eier-tilkoblet credential-sett"-
   // mønster som Stripe over - INGEN tenant-parametrisert multi-MSN-oppslag
@@ -419,7 +422,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       return { clientId, clientSecret, subscriptionKey, merchantSerialNumber, environment: process.env["JARVIS_VIPPS_ENVIRONMENT"] === "production" ? "production" : "test" };
     }
   };
-  const vippsWebhookSecretProvider = () => process.env["JARVIS_VIPPS_WEBHOOK_SECRET"] ?? null;
+  const vippsWebhookSecretProvider = async () => (await readSecretProvider.get("JARVIS_VIPPS_WEBHOOK_SECRET")) ?? null;
   const vippsTenantResolver = () => process.env["JARVIS_VIPPS_TENANT_ID"] ?? null;
   // D-111 (UA-6 Slice 5): SAMME "ETT globalt eier-tilkoblet credential-sett"-
   // mønster - ett Neonomics-kundeforhold, en Jarvis-stabil x-device-id.
@@ -436,7 +439,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       };
     }
   };
-  const neonomicsWebhookApiKeyProvider = () => process.env["JARVIS_NEONOMICS_WEBHOOK_API_KEY"] ?? null;
+  const neonomicsWebhookApiKeyProvider = async () => (await readSecretProvider.get("JARVIS_NEONOMICS_WEBHOOK_API_KEY")) ?? null;
   const neonomicsTenantResolver = () => process.env["JARVIS_NEONOMICS_TENANT_ID"] ?? null;
   // D-112 (UA-6 Slice 6), korrigert owner-provided primary-source-audit
   // (PR #62 runde 4): SAMME "ETT globalt eier-tilkoblet credential-sett"-
@@ -1156,7 +1159,11 @@ ${await aiMeshText()}
 ${await voiceText()}
 porter: se docs/RUNTIME_GATES.md`;
   };
-  if (process.env["JARVIS_TELEGRAM_TOKEN"] && process.env["JARVIS_TELEGRAM_CHAT_ID"]) {
+  // D-394 (JARVIS-056): Telegram-token/chat-id leses via den delte kjeden (Infisical-primær, .env-fallback) - tidligere kun `process.env`, så en
+  // token limt inn i dashbordet var usynlig for polleren (split-brain mot `telegram.notify`-verktøyet som allerede brukte kjeden).
+  const telegramToken = (await readSecretProvider.get("JARVIS_TELEGRAM_TOKEN")) ?? undefined;
+  const telegramChatId = (await readSecretProvider.get("JARVIS_TELEGRAM_CHAT_ID")) ?? undefined;
+  if (telegramToken && telegramChatId) {
     // D-125 (UA-7, FEMTE slice): den betrodde server-side eier-autoriteten for
     // inngående Telegram. HVER verdi kommer fra prosessens egen konfigurasjon
     // og fra `seedOwner()`-radene (`apps/api/src/seed.ts`) - INGEN av dem kan
@@ -1166,7 +1173,7 @@ porter: se docs/RUNTIME_GATES.md`;
     const telegramOwnerAuthority = new TelegramOwnerAuthority(
       { sessions: sessionService, identity: identityService },
       {
-        owner_chat_id: process.env["JARVIS_TELEGRAM_CHAT_ID"],
+        owner_chat_id: telegramChatId,
         tenant_id: owner.tenant_id,
         person_id: owner.owner_person_id,
         // Tjeneste-enheten denne prosessen allerede ER seedet som.
@@ -1174,7 +1181,7 @@ porter: se docs/RUNTIME_GATES.md`;
         memory_space: "personal"
       }
     );
-    new TelegramCommandPoller(process.env["JARVIS_TELEGRAM_TOKEN"], process.env["JARVIS_TELEGRAM_CHAT_ID"], {
+    new TelegramCommandPoller(telegramToken, telegramChatId, {
       brief: async () => DailyBrief.render(await dailyBrief.generate(ownerIdentity as never)),
       status: statusText,
       ai: aiMeshText,
@@ -1211,7 +1218,7 @@ porter: se docs/RUNTIME_GATES.md`;
     }, sendTelegram, {
       // Del 3 (JARVIS-024): holdbar offset (restart spiller ikke av meldinger), fetch-timeout (standard i polleren) og
       // varsling - polleren logger HVER feil strukturert; en vedvarende feil (3 på rad, deretter hver 30.) får i tillegg en audit-rad.
-      offsetStore: new PgTelegramOffsetStore(pool, process.env["JARVIS_TELEGRAM_TOKEN"]),
+      offsetStore: new PgTelegramOffsetStore(pool, telegramToken),
       onFailure: (failure) => {
         if (failure.consecutive !== 3 && failure.consecutive % 30 !== 0) return;
         void withTenantTransaction(pool, owner.tenant_id, (client) =>

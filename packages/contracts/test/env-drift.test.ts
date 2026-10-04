@@ -50,7 +50,8 @@ const compose = readFileSync(join(ROOT, "infra/local/docker-compose.yml"), "utf8
 
 /** A: lest i koden men bevisst ikke i `.env.example` - hver med grunn. */
 const NOT_IN_EXAMPLE: Record<string, string> = {
-  JARVIS_SOME_HOUR: "eksempelnavn i dokumentasjonen til envHour (ikke en ekte variabel)"
+  JARVIS_SOME_HOUR: "eksempelnavn i dokumentasjonen til envHour (ikke en ekte variabel)",
+  JARVIS_PROCESS: "D-394: settes av prosessen selv ved oppstart (`process.env[\"JARVIS_PROCESS\"] ??= \"api\"|\"worker\"`) for å merke audit-rader - ikke en operatør-innstilling"
 };
 
 /** B: lest av api/worker, men bevisst ikke videresendt av compose - hver med grunn. */
@@ -58,6 +59,7 @@ const NOT_IN_CONTAINER: Record<string, string> = {
   JARVIS_DB_RUN_MIGRATIONS: "migrasjoner kjøres av `migrate`-tjenesten; flagget er kun for lokal kjøring utenfor compose og krever admin-passord (api/worker får det aldri)",
   JARVIS_VOICE_DEVICE_ID: "seed-parameter for migrate-jobben (apps/api/src/seed.ts), ikke runtime",
   JARVIS_DB_HOST: "fast verdi satt av compose (FIXED_ENV)",
+  JARVIS_PROCESS: "D-394: satt av prosessen selv (`??=` i main.ts/worker-main.ts) - compose trenger ikke videresende den",
   JARVIS_STRIPE_WEBHOOK_SECRET: "webhook-hemmeligheter leses av api (WEBHOOK_ENV); worker-main refererer dem kun i en kommentar/feilmelding",
   JARVIS_VIPPS_WEBHOOK_SECRET: "se JARVIS_STRIPE_WEBHOOK_SECRET",
   JARVIS_NEONOMICS_WEBHOOK_API_KEY: "se JARVIS_STRIPE_WEBHOOK_SECRET",
