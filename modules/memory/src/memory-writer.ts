@@ -3,9 +3,11 @@ import type pg from "pg";
 import type { IdentityContext, MemorySpace, TrustLevel } from "@jarvis/contracts";
 import { containsSecret, writeAudit } from "@jarvis/core";
 import type { PolicyGateway } from "@jarvis/policy";
-import type { EmbeddingProvider } from "./embedding.ts";
+import { classifyContentSensitivity } from "@jarvis/model-gateway";
+import { assertLocalEmbedding, type EmbeddingProvider } from "./embedding.ts";
 import type { ExistingMemoryHint, ExtractionAdapter, MemoryCandidate, MemoryType } from "./extraction.ts";
 import { withMemoryTransaction } from "./spaces.ts";
+import { upsertVector } from "./vectors.ts";
 
 export interface SourceRef {
   kind: "conversation" | "document" | "tool" | "manual";
@@ -37,6 +39,20 @@ interface ItemRow {
  * - endringer versjoneres (motstrid markeres, skjules aldri)
  * - all skriving auditeres i samme transaksjon
  */
+/**
+ * D-386 (lukker D-376-gapet «sensitivitet fastsettes FØR lagring», MEMORY_ARCHITECTURE §6.6): sensitivitet per item
+ * avgjøres av INNHOLDET, ikke bare rommet. Helse-/finans-/hemmelighetssignaler (samme deterministiske klassifisering
+ * som ruteren bruker) ⇒ `special` uansett space, så faktumet senere kun går til lokal modell (D-384-regelen). Et
+ * privat-/forretningssignal ⇒ `sensitive`. Helse-rommet er alltid `special`.
+ */
+export function itemSensitivity(space: MemorySpace, candidate: Pick<MemoryCandidate, "subject" | "content">): "normal" | "sensitive" | "special" {
+  if (space === "health") return "special";
+  const level = classifyContentSensitivity({ texts: [`${candidate.subject} ${candidate.content}`] }).sensitivity;
+  if (level === "SECRET_RESTRICTED") return "special";
+  if (level === "PRIVATE" || level === "BUSINESS_CONFIDENTIAL") return "sensitive";
+  return "normal";
+}
+
 const PROPOSAL_MAX_SUBJECT = 120;
 const PROPOSAL_MAX_CONTENT = 1000;
 const PROPOSAL_TYPES: readonly MemoryType[] = [
@@ -49,7 +65,9 @@ export class MemoryWriter {
     private readonly embeddings: EmbeddingProvider,
     private readonly extractor: ExtractionAdapter,
     private readonly policy: PolicyGateway
-  ) {}
+  ) {
+    assertLocalEmbedding(embeddings);
+  }
 
   /** Registrer kilde + trekk ut kandidater + anvend dem. */
   async ingestText(identity: IdentityContext, source: SourceRef, text: string): Promise<ApplyOutcome[]> {
@@ -418,12 +436,17 @@ export class MemoryWriter {
       [
         id, identity.tenant_id, space, identity.person_id, candidate.type, candidate.subject,
         candidate.content, sourceId, observedAt,
-        space === "health" ? "special" : "normal", trust, candidate.confidence, status
+        itemSensitivity(space, candidate), trust, candidate.confidence, status
       ]
     );
     return id;
   }
 
+  /**
+   * D-386: vektor til det modellbevisste `memory_vectors` (068); den frosne `embeddings`-tabellen skrives ikke lenger.
+   * En feil i embedding-tjenesten (Ollama nede, dimensjonsfeil) skal ALDRI velte selve minneskrivingen - faktumet
+   * lagres uansett (fulltekst virker), feilen logges, og `runMemoryReembedSweep` fyller vektoren senere.
+   */
   private async writeEmbedding(
     client: pg.PoolClient,
     tenantId: string,
@@ -431,26 +454,15 @@ export class MemoryWriter {
     itemId: string,
     candidate: Pick<MemoryCandidate, "subject" | "content">
   ): Promise<void> {
-    const vector = await this.embeddings.embed(`${candidate.subject} ${candidate.content}`);
-    await client.query(
-      `INSERT INTO embeddings (memory_item_id, tenant_id, space, model, dim, embedding)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (memory_item_id) DO UPDATE SET model = $4, dim = $5, embedding = $6`,
-      [itemId, tenantId, space, this.embeddings.model, this.embeddings.dim, vector]
-    );
-    // D-28: speil til pgvector-kolonnen når den finnes (Docker-PG). Ufarlig no-op ellers.
-    if (this.pgVectorCache === undefined) {
-      const r = await client.query(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='embeddings' AND column_name='vec') AS has"
-      );
-      this.pgVectorCache = (r.rows[0] as { has: boolean }).has;
+    let vector: number[];
+    try {
+      vector = await this.embeddings.embed(`${candidate.subject} ${candidate.content}`);
+    } catch (err) {
+      console.error(JSON.stringify({ msg: "memory_embedding_failed", model: this.embeddings.model, memory_item_id: itemId, error: (err as Error).message.slice(0, 200) }));
+      return;
     }
-    if (this.pgVectorCache) {
-      await client.query("UPDATE embeddings SET vec = ($2::text)::vector WHERE memory_item_id = $1",
-        [itemId, JSON.stringify(vector)]);
-    }
+    await upsertVector(client, this.pool, { kind: "item", id: itemId, tenantId, space }, this.embeddings, vector);
   }
-  private pgVectorCache: boolean | undefined;
 
   private async linkEntities(
     client: pg.PoolClient,

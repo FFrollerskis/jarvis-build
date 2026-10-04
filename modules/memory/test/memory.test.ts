@@ -263,7 +263,7 @@ describe("D-367: memory.propose - modellens forslag havner ALLTID i karantene", 
 
     // Aldri i søk før godkjenning (regel 7: ikke direkte til autoritativt minne), og ingen embedding skrevet.
     expect((await retriever.search(id, { spaces: ["personal"], query: "proposealfa1" })).map((r) => r.memory_item_id)).not.toContain(out.memory_item_id);
-    const emb = await adminPool.query("SELECT 1 FROM embeddings WHERE memory_item_id = $1", [out.memory_item_id]);
+    const emb = await adminPool.query("SELECT 1 FROM memory_vectors WHERE ref_kind = 'item' AND ref_id = $1", [out.memory_item_id]);
     expect(emb.rowCount).toBe(0);
 
     const listed = await writer.listProposals(id);

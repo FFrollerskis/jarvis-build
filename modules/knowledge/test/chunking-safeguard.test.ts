@@ -62,6 +62,11 @@ afterAll(async () => {
 class LengthRecordingEmbedding implements EmbeddingProvider {
   readonly model = "length-recording-v1";
   readonly dim: number;
+  readonly locality = "local" as const;
+  readonly minSimilarity = 0.6;
+  async embedBatch(texts: string[]): Promise<number[][]> {
+    return Promise.all(texts.map((t) => this.embed(t)));
+  }
   receivedLengths: number[] = [];
   private readonly inner = new LocalHashEmbedding();
   constructor() {

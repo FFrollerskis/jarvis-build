@@ -35,7 +35,7 @@ function fakeRetriever(items: RetrievedItem[] = []): { retriever: MemoryRetrieve
 const sampleItem: RetrievedItem = {
   memory_item_id: "mem-1", subject: "Bilen", content: "Tobias kjører en Tesla Model 3", type: "fact",
   space: "personal", score: 0.9, valid_from: "2026-01-01T00:00:00.000Z", valid_to: null,
-  has_conflict: false, source: { kind: "conversation", ref: "sess-1", trust_level: "internal" }
+  has_conflict: false, kind: "item" as const, importance: 5, observed_at: "2026-01-01T00:00:00.000Z", keywords: [], source: { kind: "conversation", ref: "sess-1", trust_level: "internal" }
 };
 
 describe("A: MemorySearchTransport.invoke('search', ...) - skopes ALLTID til identity.memory_space_id, ALDRI cross-space", () => {
