@@ -49,8 +49,9 @@ describe("worker-main.ts registrerer 'knowledge-ingest-email' på SAMME InProces
     expect(registryBlock).toContain("source_instance_id:");
   });
 
-  it("E: bruker LocalHashEmbedding fra @jarvis/memory - SAMME embedding-konvensjon som main.ts (D-28), ingen ny embedding-avhengighet", () => {
-    expect(source).toMatch(/import\s*\{[^}]*LocalHashEmbedding[^}]*\}\s*from\s*"@jarvis\/memory"/s);
-    expect(source).toContain("new LocalHashEmbedding()");
+  it("E: D-396 (JARVIS-031) - bruker createEmbeddingProviderFromEnv fra @jarvis/memory (SAMME env-styrte leverandør som main.ts), ikke en hardkodet LocalHashEmbedding", () => {
+    expect(source).toMatch(/import\s*\{[^}]*createEmbeddingProviderFromEnv[^}]*\}\s*from\s*"@jarvis\/memory"/s);
+    expect(source).toContain("embeddings: createEmbeddingProviderFromEnv()");
+    expect(source).not.toContain("new LocalHashEmbedding()");
   });
 });

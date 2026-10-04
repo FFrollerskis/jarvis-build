@@ -76,9 +76,11 @@ export class KnowledgeRetriever {
                 ${simExpr} AS sim
          FROM knowledge_embeddings e
          JOIN knowledge_documents d ON d.knowledge_document_id = e.knowledge_document_id
-         WHERE d.deleted = false${pgv ? " AND e.vec IS NOT NULL" : ""} AND ${simExpr} >= 0.4
+         WHERE d.deleted = false AND e.model = $2 AND e.dim = $3${pgv ? " AND e.vec IS NOT NULL" : ""} AND ${simExpr} >= 0.4
          ORDER BY sim DESC LIMIT 60`,
-        [vecArg]
+        // D-396 (JARVIS-031): kun vektorer fra SAMME embedding-modell/dimensjon som spørringen - to ulike modeller har ikke sammenlignbare rom
+        // (cosine mellom dem er meningsløst og, med pgvector, en dimensjonsfeil). Dokumenter embeddet med en annen modell finnes fortsatt via FTS.
+        [vecArg, this.embeddings.model, this.embeddings.dim]
       );
 
       const byId = new Map<string, KnowledgeSearchResult & { fts_rank: number; sim: number }>();

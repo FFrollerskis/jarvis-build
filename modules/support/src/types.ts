@@ -104,6 +104,11 @@ export interface IngestMessageInput {
   contact_id?: string;
   entity_resolution: EntityResolutionState;
   occurred_at?: string;
+  /**
+   * D-396 (JARVIS-046): `failed_send` registrerer et mislykket utgående svar-forsøk som `internal_note` (evidens), ALDRI som
+   * `agent_reply` - ellers ville et svar som aldri nådde kunden telle som besvart i "trenger svar"-deteksjonen.
+   */
+  outbound_outcome?: "failed_send";
 }
 
 export interface IngestMessageResult {

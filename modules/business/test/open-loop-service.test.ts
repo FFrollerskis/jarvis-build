@@ -9,7 +9,8 @@ import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { withMemoryTransaction } from "@jarvis/memory";
 import { BusinessService } from "../src/service.ts";
-import { OpenLoopService } from "../src/open-loop-service.ts";
+import { OpenLoopService, formatMoney } from "../src/open-loop-service.ts";
+import { deterministicLoopConfidence } from "../src/open-loop-types.ts";
 
 /**
  * UA-3 next slice (D-53) - testmatrise for automatisk open-loop-deteksjon
@@ -132,14 +133,20 @@ describe("C: resolusjon - deterministisk vilkaar-basert auto-resolve", () => {
   });
 });
 
-describe("D: gjenaapning - resolved loop for SAMME vilkaar gjenaapnes paa SAMME rad, ingen duplikat", () => {
-  it("en manuelt resolved, fortsatt-forfalt oppfoelging gjenaapnes ved neste sveip (samme open_loop_id)", async () => {
+describe("D: gjenaapning - D-396: operatoer-lukket loop undertrykkes 7 dager, deretter gjenaapnes den paa SAMME rad", () => {
+  it("en manuelt resolved, fortsatt-forfalt oppfoelging forblir lukket ved neste sveip, og gjenaapnes (samme open_loop_id) naar undertrykkelsen er utloept", async () => {
     const followup = await business.createFollowup(TENANT_A, "business", { title: "Gjenaapnes", due_at: "2020-05-01T00:00:00Z" });
     await openLoops.detectOverdueFollowups(TENANT_A, "business");
     const loops = await openLoops.listOpenLoops(TENANT_A, "business", "open");
     const originalLoop = loops.find((l) => l.followup_id === followup.followup_id)!;
     await openLoops.resolveOpenLoop(TENANT_A, "business", originalLoop.open_loop_id, "feilaktig lukket");
 
+    await openLoops.detectOverdueFollowups(TENANT_A, "business");
+    const stillResolved = await openLoops.readOpenLoop(TENANT_A, "business", originalLoop.open_loop_id);
+    expect(stillResolved?.status).toBe("resolved");
+    expect(stillResolved?.resolution_reason).toBe("feilaktig lukket");
+
+    await adminPool.query("UPDATE business_open_loops SET resolved_at = now() - interval '8 days' WHERE open_loop_id = $1", [originalLoop.open_loop_id]);
     await openLoops.detectOverdueFollowups(TENANT_A, "business");
     const reopened = await openLoops.readOpenLoop(TENANT_A, "business", originalLoop.open_loop_id);
     expect(reopened?.status).toBe("open");
@@ -150,6 +157,48 @@ describe("D: gjenaapning - resolved loop for SAMME vilkaar gjenaapnes paa SAMME 
       client.query("SELECT count(*)::int AS n FROM business_open_loops WHERE tenant_id = $1 AND followup_id = $2", [TENANT_A, followup.followup_id])
     );
     expect((rows[0] as { n: number }).n).toBe(1);
+  });
+
+  it("en auto-loest loop (vilkaaret forsvant) gjenaapnes umiddelbart naar vilkaaret kommer tilbake", async () => {
+    const followup = await business.createFollowup(TENANT_A, "business", { title: "Auto-loest", due_at: "2020-06-01T00:00:00Z" });
+    await openLoops.detectOverdueFollowups(TENANT_A, "business");
+    const original = (await openLoops.listOpenLoops(TENANT_A, "business", "open")).find((l) => l.followup_id === followup.followup_id)!;
+    await adminPool.query(
+      "UPDATE business_open_loops SET status = 'resolved', resolved_at = now(), resolution_reason = 'condition_no_longer_true' WHERE open_loop_id = $1",
+      [original.open_loop_id]
+    );
+    await openLoops.detectOverdueFollowups(TENANT_A, "business");
+    expect((await openLoops.readOpenLoop(TENANT_A, "business", original.open_loop_id))?.status).toBe("open");
+  });
+});
+
+describe("D-396 (JARVIS-045): deterministisk confidence", () => {
+  it("en deterministisk loop faar confidence 0.9 (hard fakta), heuristikk 0.7 - aldri NULL", async () => {
+    const followup = await business.createFollowup(TENANT_A, "business", { title: "Confidence", due_at: "2020-07-01T00:00:00Z" });
+    await openLoops.detectOverdueFollowups(TENANT_A, "business");
+    const loop = (await openLoops.listOpenLoops(TENANT_A, "business", "open")).find((l) => l.followup_id === followup.followup_id)!;
+    expect(loop.detection_method).toBe("deterministic");
+    expect(Number(loop.confidence)).toBe(0.9);
+    expect(deterministicLoopConfidence("stalled_opportunity")).toBe(0.7);
+    expect(deterministicLoopConfidence("support_ticket_needs_reply")).toBe(0.9);
+  });
+});
+
+describe("D-396 (JARVIS-082): sortering og beloepsformat", () => {
+  it("listOpenLoops sorterer 'high' foer 'normal' (alfabetisk DESC ga motsatt rekkefoelge)", async () => {
+    const loops = await openLoops.listOpenLoops(TENANT_A, "business", "open");
+    const priorities = loops.map((l) => l.priority);
+    const firstNormal = priorities.indexOf("normal");
+    const lastHigh = priorities.lastIndexOf("high");
+    if (firstNormal !== -1 && lastHigh !== -1) expect(lastHigh).toBeLessThan(firstNormal);
+  });
+
+  it("formatMoney: oere -> kroner med to desimaler og tusenskille, eksakt for store bigint-verdier", () => {
+    expect(formatMoney("50000", "NOK")).toBe("500,00 NOK");
+    expect(formatMoney(5, "NOK")).toBe("0,05 NOK");
+    expect(formatMoney("123456789012")).toBe("1\u00a0234\u00a0567\u00a0890,12");
+    expect(formatMoney(-150, "EUR")).toBe("-1,50 EUR");
+    expect(formatMoney(null, "NOK")).toBe("ukjent beløp NOK");
   });
 });
 

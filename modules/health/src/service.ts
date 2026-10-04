@@ -37,6 +37,17 @@ import {
  * feilregistrert måling korrigeres av en NY observasjon fra kilden, ALDRI
  * ved å mutere en historisk rad.
  */
+/**
+ * D-396 (JARVIS-093): helsedata er særlig kategori (GDPR art. 9). Inntak uten en eier-konfigurert oppbevaringstid ga `retention_expires_at = NULL`
+ * (lagres for alltid). Nå er inntak fail-closed: konfigurer oppbevaringsvindu (`setRetentionPolicy`) FØR helsedata tas inn.
+ */
+export class HealthRetentionPolicyRequiredError extends Error {
+  constructor() {
+    super("retention_policy_required");
+    this.name = "HealthRetentionPolicyRequiredError";
+  }
+}
+
 export class HealthObservationValidationError extends Error {
   constructor(
     public readonly field: string,
@@ -125,6 +136,8 @@ export class HealthService {
     }
 
     return withMemoryTransaction(this.pool, tenantId, ["health"], async (client) => {
+      const policy = await client.query(`SELECT 1 FROM health_retention_policies WHERE tenant_id = $1 AND memory_space_id = 'health'`, [tenantId]);
+      if (policy.rows.length === 0) throw new HealthRetentionPolicyRequiredError();
       const { rows } = await client.query(
         `INSERT INTO health_metric_observations
            (observation_id, tenant_id, person_id, metric_type, value, unit, source_type, source_instance_id, observed_at, retention_expires_at)

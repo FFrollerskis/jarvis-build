@@ -11,7 +11,7 @@ import {
 } from "./url-safety.ts";
 import { createHash, createHmac } from "node:crypto";
 import type pg from "pg";
-import { AccessTokenCache, bearerFor, dropboxRefreshExchange, microsoftRefreshExchange, spotifyRefreshExchange } from "./oauth-refresh.ts";
+import { AccessTokenCache, bearerFor, type RefreshedToken, dropboxRefreshExchange, microsoftRefreshExchange, spotifyRefreshExchange } from "./oauth-refresh.ts";
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolInvocationContext, ToolTransport } from "./gateway.ts";
 import { GithubRateLimitedError, GithubRateLimitController } from "./github-rate-limit-controller.ts";
@@ -175,7 +175,7 @@ export function parseGoogleAuthFailureReason(reason: string): GoogleAuthErrorCla
  * aldri). Konto-/tenant-oppløsning: hver transport-instans er bundet til én
  * eksplisitt konto (accountEmail) - ingen implisitt cross-account fallback.
  */
-export async function googleAccessToken(refreshToken: string): Promise<string> {
+async function googleTokenExchange(refreshToken: string): Promise<RefreshedToken> {
   const clientId = process.env["JARVIS_GOOGLE_CLIENT_ID"];
   const clientSecret = process.env["JARVIS_GOOGLE_CLIENT_SECRET"];
   if (!clientId || !clientSecret) throw new Error("google_oauth_client_not_configured");
@@ -195,7 +195,22 @@ export async function googleAccessToken(refreshToken: string): Promise<string> {
     const details = classifyGoogleTokenEndpointError(response.status, rawBody, { provenDesktopClient });
     throw new Error(`google_auth_failed_${response.status}:${details.errorClass}${details.googleError ? `:${details.googleError}` : ""}`);
   }
-  return ((await response.json()) as { access_token: string }).access_token;
+  const json = (await response.json()) as { access_token: string; expires_in?: number | string };
+  const expiresIn = Number(json.expires_in);
+  return { access_token: json.access_token, expires_in: Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : 3600 };
+}
+
+/**
+ * D-396 (JARVIS-047): access-tokenet caches i minnet (60 s før utløp) og parallelle kall deler én utveksling - tidligere ble det gjort én
+ * token-utveksling per Gmail/Calendar/Drive-kall (og N ganger i en knowledge-sync). Feilede utvekslinger caches aldri.
+ * `resetGoogleAccessTokenCache()` finnes for tester og for tvungen fornyelse etter en 401.
+ */
+let googleTokenCache = new AccessTokenCache({ exchange: googleTokenExchange }, { label: "google" });
+export function resetGoogleAccessTokenCache(): void {
+  googleTokenCache = new AccessTokenCache({ exchange: googleTokenExchange }, { label: "google" });
+}
+export async function googleAccessToken(refreshToken: string): Promise<string> {
+  return googleTokenCache.get(refreshToken);
 }
 
 /** Gmail sin `attachmentId`/vedleggs-metadata, funnet ved å gå gjennom MIME-treet (`payload.parts`, kan være nøstet). */
@@ -266,6 +281,34 @@ function encodeMimeHeaderValue(value: string): string {
   return `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`;
 }
 
+/** D-396 (JARVIS-047): øvre tak for én handling - kalleren styrer fortsatt `max`, men ingen handling skanner en ubegrenset postkasse/kalender. */
+const GOOGLE_LIST_HARD_MAX = 200;
+function boundedMax(raw: JsonValue | undefined, fallback: number): number {
+  const n = Number(raw ?? fallback);
+  return Math.min(Math.max(Number.isFinite(n) ? Math.trunc(n) : fallback, 1), GOOGLE_LIST_HARD_MAX);
+}
+
+/**
+ * D-396 (JARVIS-047): Gmail `messages.list` returnerer én side - uten `nextPageToken`-løkke ble alt etter første side stille tapt. Siden følges til
+ * `max` er nådd; `truncated=true` betyr at det fantes flere meldinger enn `max` (kalleren kan snevre inn søket/tidsvinduet i stedet for å tro at den fikk alt).
+ */
+async function gmailListIds(auth: Record<string, string>, query: string, max: number): Promise<{ ids: string[]; truncated: boolean }> {
+  const ids: string[] = [];
+  let pageToken: string | undefined;
+  for (let page = 0; page < 20; page++) {
+    const pageSize = Math.min(100, max - ids.length);
+    const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=${pageSize}&q=${encodeURIComponent(query)}${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ""}`;
+    const list = await guardedFetch(url, { headers: auth });
+    if (!list.ok) throw new Error(`gmail_error_${list.status}`);
+    const body = (await list.json()) as { messages?: Array<{ id: string }>; nextPageToken?: string };
+    for (const m of body.messages ?? []) if (ids.length < max) ids.push(m.id);
+    pageToken = body.nextPageToken;
+    if (ids.length >= max) return { ids, truncated: Boolean(pageToken) || (body.messages ?? []).length > pageSize };
+    if (!pageToken) return { ids, truncated: false };
+  }
+  return { ids, truncated: true };
+}
+
 export class GmailTransport implements ToolTransport {
   // D-340: JARVIS_GOOGLE_ACCOUNT="" (tom, men til stede i .env) skal falle til defaulten - se D-340 i DECISIONS_AND_ASSUMPTIONS.md.
   constructor(readonly accountEmail: string = process.env["JARVIS_GOOGLE_ACCOUNT"] || "post@tsworkflow.com") {}
@@ -330,14 +373,14 @@ export class GmailTransport implements ToolTransport {
   }
 
   private async readInbox(parameters: Record<string, JsonValue>, auth: Record<string, string>) {
-    const max = Number(parameters["max"] ?? 15);
-    const list = await guardedFetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=${max}&q=newer_than:2d`, { headers: auth });
-    if (!list.ok) throw new Error(`gmail_error_${list.status}`);
-    const ids = (((await list.json()) as { messages?: Array<{ id: string }> }).messages ?? []).slice(0, max);
+    const max = boundedMax(parameters["max"], 15);
+    const { ids: idList, truncated } = await gmailListIds(auth, "newer_than:2d", max);
+    const ids = idList.map((id) => ({ id }));
+    let skipped = 0;
     const messages: JsonValue[] = [];
     for (const { id } of ids) {
       const m = await guardedFetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodePathSegment(id, "message_id")}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`, { headers: auth });
-      if (!m.ok) continue;
+      if (!m.ok) { skipped++; continue; }
       const msg = (await m.json()) as { id: string; threadId: string; labelIds?: string[]; internalDate?: string; payload?: { headers?: Array<{ name: string; value: string }> } };
       const h = (name: string) => msg.payload?.headers?.find((x) => x.name === name)?.value ?? "";
       messages.push({
@@ -348,7 +391,7 @@ export class GmailTransport implements ToolTransport {
         account: this.accountEmail
       });
     }
-    return { data: { messages } };
+    return { data: { messages, truncated, skipped } };
   }
 
   /**
@@ -362,18 +405,15 @@ export class GmailTransport implements ToolTransport {
    * ubegrenset full-postkasse-skann her.
    */
   private async listMessages(parameters: Record<string, JsonValue>, auth: Record<string, string>) {
-    const max = Number(parameters["max"] ?? 15);
+    const max = boundedMax(parameters["max"], 15);
     const query = parameters["query"] ? String(parameters["query"]) : "newer_than:14d";
-    const list = await guardedFetch(
-      `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=${max}&q=${encodeURIComponent(query)}`,
-      { headers: auth }
-    );
-    if (!list.ok) throw new Error(`gmail_error_${list.status}`);
-    const ids = (((await list.json()) as { messages?: Array<{ id: string }> }).messages ?? []).slice(0, max);
+    const { ids: idList, truncated } = await gmailListIds(auth, query, max);
+    const ids = idList.map((id) => ({ id }));
+    let skipped = 0;
     const messages: JsonValue[] = [];
     for (const { id } of ids) {
       const m = await guardedFetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodePathSegment(id, "message_id")}?format=full`, { headers: auth });
-      if (!m.ok) continue;
+      if (!m.ok) { skipped++; continue; }
       const msg = (await m.json()) as {
         id: string; threadId: string; internalDate?: string;
         payload?: {
@@ -394,7 +434,7 @@ export class GmailTransport implements ToolTransport {
         account: this.accountEmail
       });
     }
-    return { data: { messages } };
+    return { data: { messages, truncated, skipped } };
   }
 
   /** UA-2 P1B-A §2: last ned RÅ vedleggsbytes (standard base64) for ETT vedlegg - aldri hele meldingen på nytt. */
@@ -417,6 +457,27 @@ export class GmailTransport implements ToolTransport {
   }
 }
 
+/**
+ * D-396 (JARVIS-047): Calendar `events.list` følges med `nextPageToken` til `max` er nådd (tidligere stille avkuttet ved én side).
+ * `truncated=true` = det fantes flere hendelser enn `max` i vinduet.
+ */
+async function calendarListPaged<T>(baseUrl: string, token: string, max: number): Promise<{ items: T[]; truncated: boolean }> {
+  const items: T[] = [];
+  let pageToken: string | undefined;
+  for (let page = 0; page < 20; page++) {
+    const pageSize = Math.min(100, max - items.length);
+    const url = `${baseUrl}&maxResults=${pageSize}${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ""}`;
+    const response = await guardedFetch(url, { headers: { authorization: `Bearer ${token}` } });
+    if (!response.ok) throw new Error(`calendar_error_${response.status}`);
+    const body = (await response.json()) as { items?: T[]; nextPageToken?: string };
+    for (const item of body.items ?? []) if (items.length < max) items.push(item);
+    pageToken = body.nextPageToken;
+    if (items.length >= max) return { items, truncated: Boolean(pageToken) || (body.items ?? []).length > pageSize };
+    if (!pageToken) return { items, truncated: false };
+  }
+  return { items, truncated: true };
+}
+
 export class GoogleCalendarTransport implements ToolTransport {
   // D-340: JARVIS_GOOGLE_ACCOUNT="" (tom, men til stede i .env) skal falle til defaulten - se D-340 i DECISIONS_AND_ASSUMPTIONS.md.
   constructor(readonly accountEmail: string = process.env["JARVIS_GOOGLE_ACCOUNT"] || "post@tsworkflow.com") {}
@@ -433,11 +494,11 @@ export class GoogleCalendarTransport implements ToolTransport {
 
   private async readEvents(parameters: Record<string, JsonValue>, credential: string) {
     const token = await googleAccessToken(credential);
-    const url = `https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&timeMin=${encodeURIComponent(String(parameters["from"]))}&timeMax=${encodeURIComponent(String(parameters["to"]))}&maxResults=25`;
-    const response = await guardedFetch(url, { headers: { authorization: `Bearer ${token}` } });
-    if (!response.ok) throw new Error(`calendar_error_${response.status}`);
-    const body = (await response.json()) as { items?: Array<{ id: string; summary?: string; description?: string; location?: string; hangoutLink?: string; attendees?: unknown[]; start?: { dateTime?: string; date?: string }; end?: { dateTime?: string } }> };
-    const events: JsonValue[] = (body.items ?? []).map((e) => ({
+    const url = `https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&timeMin=${encodeURIComponent(String(parameters["from"]))}&timeMax=${encodeURIComponent(String(parameters["to"]))}`;
+    const { items, truncated } = await calendarListPaged<{ id: string; summary?: string; description?: string; location?: string; hangoutLink?: string; attendees?: unknown[]; start?: { dateTime?: string; date?: string }; end?: { dateTime?: string } }>(
+      url, token, boundedMax(parameters["max"], 25)
+    );
+    const events: JsonValue[] = items.map((e) => ({
       id: e.id, title: e.summary ?? "(uten tittel)",
       start: e.start?.dateTime ?? e.start?.date ?? "", end: e.end?.dateTime ?? "",
       location: e.location ?? e.hangoutLink ?? "",
@@ -445,7 +506,7 @@ export class GoogleCalendarTransport implements ToolTransport {
       needs_prep: String(Boolean(e.description && e.description.length > 40)),
       account: this.accountEmail
     }));
-    return { data: { events } };
+    return { data: { events, truncated } };
   }
 
   /**
@@ -460,17 +521,13 @@ export class GoogleCalendarTransport implements ToolTransport {
    */
   private async listEvents(parameters: Record<string, JsonValue>, credential: string) {
     const token = await googleAccessToken(credential);
-    const url = `https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&timeMin=${encodeURIComponent(String(parameters["from"]))}&timeMax=${encodeURIComponent(String(parameters["to"]))}&maxResults=${Number(parameters["max"] ?? 25)}`;
-    const response = await guardedFetch(url, { headers: { authorization: `Bearer ${token}` } });
-    if (!response.ok) throw new Error(`calendar_error_${response.status}`);
-    const body = (await response.json()) as {
-      items?: Array<{
-        id: string; summary?: string; location?: string; htmlLink?: string;
-        organizer?: { email?: string }; attendees?: Array<{ email?: string; resource?: boolean }>;
-        start?: { dateTime?: string; date?: string }; end?: { dateTime?: string; date?: string };
-      }>;
-    };
-    const events: JsonValue[] = (body.items ?? []).map((e) => ({
+    const url = `https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&timeMin=${encodeURIComponent(String(parameters["from"]))}&timeMax=${encodeURIComponent(String(parameters["to"]))}`;
+    const { items, truncated } = await calendarListPaged<{
+      id: string; summary?: string; location?: string; htmlLink?: string;
+      organizer?: { email?: string }; attendees?: Array<{ email?: string; resource?: boolean }>;
+      start?: { dateTime?: string; date?: string }; end?: { dateTime?: string; date?: string };
+    }>(url, token, boundedMax(parameters["max"], 25));
+    const events: JsonValue[] = items.map((e) => ({
       id: e.id, title: e.summary ?? "(uten tittel)",
       start: e.start?.dateTime ?? e.start?.date ?? "", end: e.end?.dateTime ?? e.end?.date ?? "",
       location: e.location ?? "",
@@ -479,7 +536,7 @@ export class GoogleCalendarTransport implements ToolTransport {
       attendees: (e.attendees ?? []).filter((a) => !a.resource && a.email).map((a) => String(a.email)) as unknown as JsonValue,
       account: this.accountEmail
     }));
-    return { data: { events } };
+    return { data: { events, truncated } };
   }
 }
 
