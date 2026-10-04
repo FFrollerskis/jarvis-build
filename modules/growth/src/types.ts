@@ -334,7 +334,10 @@ export interface CampaignEvent {
  */
 export interface CampaignPerformance {
   campaign_id: string;
+  /** KUN NOK-utgift (én kilde per dato, D-395). Fremmed valuta står i `spend_currencies` og gjør cac/roas udefinerte. */
   total_spend_ore: string;
+  /** Distinkte valutaer i (dedupliserte) utgiftsrader. Inneholder noe annet enn NOK ⇒ cac_ore/roas er null. */
+  spend_currencies: string[];
   attributed_leads: number;
   attributed_opportunities: number;
   attributed_meetings: number;
