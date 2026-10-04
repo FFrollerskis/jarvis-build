@@ -74,7 +74,8 @@ BEGIN
   IF has_vector THEN
     CREATE EXTENSION IF NOT EXISTS vector;
     ALTER TABLE memory_vectors ADD COLUMN vec vector;
-    UPDATE memory_vectors SET vec = embedding::text::vector;
+    -- real[]::text er `{a,b,c}`, mens pgvector parser `[a,b,c]` - bytt klammer (feilet på NAS med ekte embeddings).
+    UPDATE memory_vectors SET vec = translate(embedding::text, '{}', '[]')::vector;
     CREATE INDEX memory_vectors_hnsw_64   ON memory_vectors USING hnsw ((vec::vector(64))   vector_cosine_ops) WHERE dim = 64;
     CREATE INDEX memory_vectors_hnsw_768  ON memory_vectors USING hnsw ((vec::vector(768))  vector_cosine_ops) WHERE dim = 768;
     CREATE INDEX memory_vectors_hnsw_1024 ON memory_vectors USING hnsw ((vec::vector(1024)) vector_cosine_ops) WHERE dim = 1024;
