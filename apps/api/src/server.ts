@@ -778,13 +778,11 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     return;
   }
 
-  const depRoutes = [
-    "/chat", "/tasks/submit", "/voice/session/authorize", "/session/authorize",
-    "/incidents/create", "/incidents/get", "/incidents/list", "/incidents/evidence/add", "/incidents/correlate", "/incidents/repair",
-    "/infra/recovery/attempt", "/infra/pause", "/infra/resume", "/infra/degrade", "/infra/status"
-  ];
+  // D-395 (JARVIS-092): uten avhengigheter (helse-modus) er HVER API-rute utilgjengelig fordi API-et ikke er konfigurert - ikke bare en håndskrevet
+  // liste som ble stale (~25 nyere ruter ga 404 i stedet for 503). ALLE API-ruter er ikke-GET (de eneste GET-rutene er sidene/helse over), så
+  // enhver ikke-GET svarer 503 `not_configured`; en ukjent GET er fortsatt 404.
   if (!deps) {
-    if (depRoutes.includes(url.pathname)) {
+    if (req.method !== "GET" && req.method !== "HEAD") {
       return json(res, 503, { error: "not_configured", request_id: requestIdOf(res) });
     }
     return json(res, 404, { error: "not_found" });

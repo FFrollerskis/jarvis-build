@@ -1,4 +1,7 @@
 # SOPS-konfigurasjon (fase 1-strategi, D-16).
+# INAKTIV (D-395/JARVIS-092): ingen kryptert fil finnes under config/secrets/ og nøkkelen under er en placeholder. Hemmeligheter
+# lagres i Infisical (primær) med .env som fallback (D-211/D-35). Å AKTIVERE SOPS (generere age-nøkkel = nøkkelforvaltning) eller fjerne
+# det fra CLAUDE.md regel 1 er en eierbeslutning (Tobias) - se FINDINGS_LEDGER JARVIS-092. En drift-test låser at filen forblir ærlig.
 # Krypterte konfigfiler legges under config/secrets/ og krypteres med age.
 # PLACEHOLDER: erstatt med reell age-mottaker (public key) før første krypterte fil.
 # Generer nøkkelpar med: age-keygen -o key.txt  (privat nøkkel lagres UTENFOR repoet)

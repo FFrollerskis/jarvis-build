@@ -8,7 +8,7 @@
 // samme kjøring den ekte runtime-LOGIN-rollen api/worker skal koble til med, slik at
 // de aldri trenger/kan falle tilbake til admin-tilkoblingen.
 import "./normalize-env.ts";
-import { adminConfigFromEnv, configFromEnv, createPool, ensureRuntimeRole, runMigrations } from "@jarvis/core";
+import { adminConfigFromEnv, configFromEnv, createPool, ensureRuntimeRole, planMigrations, runMigrations } from "@jarvis/core";
 import { ownerConfigOrExit } from "./owner.ts";
 import { seedOwner } from "./seed.ts";
 
@@ -24,8 +24,10 @@ const resolvedAdminConfig = adminConfigFromEnv();
 console.log(`migrate_effective_db_user=${resolvedAdminConfig.user}`);
 
 const adminPool = createPool(resolvedAdminConfig);
-try {
-  await runMigrations(adminPool);
+
+async function migrateAndBootstrap(): Promise<void> {
+  const applied = await runMigrations(adminPool);
+  console.log(JSON.stringify({ msg: "migrations_applied", count: applied.length, files: applied }));
   // Owner-seed (BO-08 + D-30 voice-device): idempotent, delt funksjon (testes
   // direkte) - fjerner det manuelle one-time-SQL-steget fra BO-07.
   await seedOwner(adminPool, owner);
@@ -48,6 +50,18 @@ try {
   }
 
   console.log(JSON.stringify({ msg: "migrations_complete", owner_seed: "ensured" }));
+}
+
+try {
+  // D-395 (JARVIS-075): `--plan` (eller JARVIS_MIGRATE_PLAN_ONLY=true) er skrivebeskyttet - viser hva som VILLE blitt anvendt, hvilke anvendte
+  // filer som er endret og hvilke databaserader koden ikke kjenner. Kjøres FØR backup/anvendelse; exit 2 hvis en anvendt fil er endret.
+  if (process.argv.includes("--plan") || process.env["JARVIS_MIGRATE_PLAN_ONLY"] === "true") {
+    const plan = await planMigrations(adminPool);
+    console.log(JSON.stringify({ msg: "migration_plan", ...plan }));
+    process.exitCode = plan.checksum_mismatches.length > 0 ? 2 : 0;
+  } else {
+    await migrateAndBootstrap();
+  }
 } finally {
   await adminPool.end();
 }

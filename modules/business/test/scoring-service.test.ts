@@ -272,3 +272,35 @@ describe("X: scoring-kapabilitet er fail-closed naar ikke konfigurert (deploymen
       .rejects.toThrow("business_scoring_not_configured");
   });
 });
+
+describe("D-395 (JARVIS-083): rangering og rekalkulering", () => {
+  it("rankLeads/rankOpportunities viser IKKE avsluttede entiteter som beholder en gammel skår", async () => {
+    const open = await business.createLead(TENANT_A, "business", { title: "D395 åpen lead", status: "qualified" });
+    const closed = await business.createLead(TENANT_A, "business", { title: "D395 avsluttet lead", status: "qualified" });
+    await scoring.recalculateLeadScore(TENANT_A, "business", open.lead_id);
+    await scoring.recalculateLeadScore(TENANT_A, "business", closed.lead_id);
+    await adminPool.query("UPDATE business_leads SET status = 'disqualified' WHERE lead_id = $1", [closed.lead_id]);
+    const ranked = (await scoring.rankLeads(TENANT_A, "business", 500)).map((r) => r.entity_id);
+    expect(ranked).toContain(open.lead_id);
+    expect(ranked).not.toContain(closed.lead_id);
+  });
+
+  it("recalculateTenant tar de lengst siden skårede først (aldri skårede aller først) - ikke en vilkårlig 500-delmengde", async () => {
+    const stale = await business.createLead(TENANT_B, "business", { title: "D395 gammel skår", status: "qualified" });
+    const fresh = await business.createLead(TENANT_B, "business", { title: "D395 fersk skår", status: "qualified" });
+    await scoring.recalculateLeadScore(TENANT_B, "business", stale.lead_id);
+    await scoring.recalculateLeadScore(TENANT_B, "business", fresh.lead_id);
+    await adminPool.query("UPDATE business_scores SET calculated_at = now() - interval '30 days' WHERE entity_id = $1", [stale.lead_id]);
+    const before = Date.now();
+    await scoring.recalculateTenant(TENANT_B, "business");
+    const rows = await adminPool.query("SELECT entity_id, calculated_at FROM business_scores WHERE entity_id = ANY($1)", [[stale.lead_id, fresh.lead_id]]);
+    // Begge er skåret på nytt innenfor grensen (<500); den gamle skåren er ikke lenger 30 dager gammel.
+    for (const r of rows.rows as Array<{ calculated_at: Date }>) expect(r.calculated_at.getTime()).toBeGreaterThanOrEqual(before - 60_000);
+  });
+
+  it("spørringen som velger kandidater sorterer etter siste skåring (strukturelt bevis for ORDER BY)", async () => {
+    const src = (await import("node:fs")).readFileSync(new URL("../src/scoring-service.ts", import.meta.url), "utf8");
+    expect(src).toMatch(/ORDER BY s\.calculated_at ASC NULLS FIRST, l\.lead_id LIMIT 500/);
+    expect(src).toMatch(/ORDER BY s\.calculated_at ASC NULLS FIRST, o\.opportunity_id LIMIT 500/);
+  });
+});

@@ -1,5 +1,6 @@
 import type pg from "pg";
 import { withTenantTransaction } from "@jarvis/core";
+import { envInt } from "@jarvis/contracts";
 
 /**
  * Håndhevede kostnadsgrenser (CANONICAL_SPEC §7, masterplan §7.2) - i kode,
@@ -20,6 +21,24 @@ export const DEFAULT_BUDGET: BudgetConfig = {
   hard_limit_ore: 300_000,
   spend_approved: false
 };
+
+/**
+ * D-395 (JARVIS-039): ÉN kilde til budsjettgrensene for api OG worker. Tidligere hadde api grensene hardkodet (og `JARVIS_BUDGET_APPROVED` lest kun der),
+ * mens workeren brukte `DEFAULT_BUDGET` med `spend_approved=false` - så en godkjenning eieren ga gjaldt ikke workeren, og watchdogens hardgrense
+ * (`JARVIS_COST_HARD_LIMIT_ORE`) var en ANNEN verdi enn guardens - en høyere grense slapp aldri gjennom begge. Nå leses alle fra miljøet:
+ * `JARVIS_COST_WARN_ORE` (100 000), `JARVIS_COST_APPROVAL_ORE` (200 000), `JARVIS_COST_HARD_LIMIT_ORE` (300 000), `JARVIS_BUDGET_APPROVED` (false).
+ * Rekkefølgen varsel <= godkjenning <= hardgrense håndheves ved oppstart (ugyldig = feil, aldri en stille rar grense).
+ */
+export function budgetConfigFromEnv(env: Record<string, string | undefined> = process.env): BudgetConfig {
+  const bounds = { min: 1, max: 100_000_000 };
+  const warn_ore = envInt("JARVIS_COST_WARN_ORE", DEFAULT_BUDGET.warn_ore, bounds, env);
+  const approval_ore = envInt("JARVIS_COST_APPROVAL_ORE", DEFAULT_BUDGET.approval_ore, bounds, env);
+  const hard_limit_ore = envInt("JARVIS_COST_HARD_LIMIT_ORE", DEFAULT_BUDGET.hard_limit_ore, bounds, env);
+  if (!(warn_ore <= approval_ore && approval_ore <= hard_limit_ore)) {
+    throw new Error(`ugyldig budsjett: krever JARVIS_COST_WARN_ORE (${warn_ore}) <= JARVIS_COST_APPROVAL_ORE (${approval_ore}) <= JARVIS_COST_HARD_LIMIT_ORE (${hard_limit_ore})`);
+  }
+  return { warn_ore, approval_ore, hard_limit_ore, spend_approved: env["JARVIS_BUDGET_APPROVED"]?.trim().toLowerCase() === "true" };
+}
 
 export type BudgetLevel = "ok" | "warn" | "needs_approval" | "hard_blocked";
 

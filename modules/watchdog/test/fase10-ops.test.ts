@@ -60,7 +60,8 @@ describe("Akseptanse 1: watchdog oppdager simulert feil og varsler med runbook",
     `);
     const sink = new MemoryAlertSink();
     const killSwitch = new KillSwitch();
-    const watchdog = new Watchdog(sink, killSwitch);
+    // D-395: nedkjøling 0 - denne testen gjelder maks antall tiltak per tick, ikke varsel-spam (se d395-alert-cooldown.test.ts).
+    const watchdog = new Watchdog(sink, killSwitch, 20_000, 0);
     watchdog.register(databaseCheck(appPool));
     watchdog.register(stuckTasksCheck(adminPool, "tenant-a"));
     let restarts = 0;
@@ -177,7 +178,7 @@ describe("D-393 (JARVIS-041): vaktbikkja som faktisk ser", () => {
 
   it("en hengende sjekk gir critical tidsavbrudd-varsel og blokkerer ikke neste tick", async () => {
     const sink = new MemoryAlertSink();
-    const watchdog = new Watchdog(sink, new KillSwitch(), 50);
+    const watchdog = new Watchdog(sink, new KillSwitch(), 50, 0); // D-395: nedkjøling 0 (testen gjelder tidsavbrudd per tick)
     watchdog.register({ name: "hangs", runbook: "docs/runbooks/TIER1_RUNBOOKS.md", run: () => new Promise(() => undefined) });
     await watchdog.tick();
     expect(sink.alerts[0]?.severity).toBe("critical");
