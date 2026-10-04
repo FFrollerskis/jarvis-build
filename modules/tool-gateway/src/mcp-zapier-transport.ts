@@ -1,5 +1,6 @@
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolTransport } from "./gateway.ts";
+import { isRetrySafeStatus, VENDOR_FETCH_TIMEOUT_MS } from "./url-safety.ts";
 
 /**
  * D-338 (Tobias direkte i chat: "ja bygg mcp zapier" - svarer på Q-40 (a) MED
@@ -115,6 +116,7 @@ export class McpZapierTransport implements ToolTransport {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const response = await fetch(credential, {
         method: "POST",
+        signal: AbortSignal.timeout(VENDOR_FETCH_TIMEOUT_MS),
         headers: {
           "content-type": "application/json",
           accept: "application/json, text/event-stream"
@@ -134,7 +136,8 @@ export class McpZapierTransport implements ToolTransport {
         return body.result;
       }
 
-      const retryable = RETRYABLE_HTTP_STATUS.has(response.status);
+      // `tools/call` kan utføre en handling i en tredjepart (Zapier): kun 429 (avslag før behandling) gjentas; `tools/list` er ren lesing.
+      const retryable = RETRYABLE_HTTP_STATUS.has(response.status) && isRetrySafeStatus(method === "tools/list" ? "GET" : "POST", response.status);
       lastError = new Error(`mcp_zapier_http_error_${response.status}:${host}`);
       if (!retryable || attempt === MAX_ATTEMPTS) break;
       await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));
