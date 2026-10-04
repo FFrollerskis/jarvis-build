@@ -5,98 +5,187 @@
 <!--JARVIS_OWNER_META-->
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Charlie · Samtale</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='48' fill='%2305070c'/%3E%3Ccircle cx='50' cy='50' r='40' fill='none' stroke='%2322d3ee' stroke-width='3' opacity='0.55'/%3E%3Ccircle cx='50' cy='50' r='27' fill='none' stroke='%2367e8f9' stroke-width='2.5' opacity='0.85'/%3E%3Ccircle cx='50' cy='50' r='9' fill='%2367e8f9'/%3E%3C/svg%3E">
 <style>
   /*
-   * D-382 (Tobias direkte i chat: "bygg ui bedre ... hele dash voice og chat ser bedre ut"): samme design-tokens som
-   * dashboard.html/command.html (D-239/D-361). Identitets-/grant-logikken under er UENDRET (Ed25519 via Web Crypto, D-131/D-252/D-347).
-   * Nytt: meldingsbobler med lett markdown, skrive-indikator, verktøystatus-chip, hurtigvalg, og bekreftelseskort (D-382) -
-   * «Godkjenn og utfør» går til grant-ruten /confirmations (serveren utfører), aldri til modellen.
+   * D-382 (første visuelle løft) + D-387 (Tobias direkte i chat: "oppgradere hele ui og layout ... teknologisk og
+   * ordentlig look"). Identitets-/grant-logikken under er UENDRET (Ed25519 via Web Crypto, D-131/D-252/D-347) - alt
+   * nytt er presentasjon og klientside-komfort: tom-tilstand med hilsen og hurtigvalg, rikere (fortsatt escape-først)
+   * markdown, «Stopp»-knapp som faktisk avbryter strømmen (server-siden propagerer abort til modellen, BO-11.1),
+   * «Prøv igjen» ved feil, kopier-knapp, verktøyaktivitet som tidslinje inne i svaret, samtalen huskes i sessionStorage
+   * (kun visning - serverens episodeminne er sannheten, D-386), og status meldes til kommandosentral-skallet via
+   * postMessage. Bekreftelseskort (D-382): «Godkjenn og utfør» går til grant-ruten /confirmations - serveren utfører.
    */
   :root {
     color-scheme: dark;
-    --bg: #05070c; --panel: #0c121e; --panel-2: #101a2b; --border: #1c2942; --text: #e9eefb; --text-dim: #7e8bab;
-    --accent: #22d3ee; --accent-strong: #67e8f9; --accent-glow: rgba(34,211,238,0.35);
+    --bg: #05070c; --panel: #0c121e; --panel-2: #101a2b; --panel-3: #15213a; --border: #1c2942; --border-soft: rgba(28,41,66,0.55);
+    --text: #e9eefb; --text-dim: #7e8bab; --text-mute: #55617f;
+    --accent: #22d3ee; --accent-strong: #67e8f9; --accent-glow: rgba(34,211,238,0.35); --accent-soft: rgba(34,211,238,0.10);
+    --user: #1d4ed8; --user-2: #1e40af;
     --ok: #6ee7b7; --ok-bg: #0c2a20; --warn: #fbbf24; --warn-bg: #3a2a06; --danger: #fb7185; --danger-bg: #3d1220; --info: #93c5fd;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     --radius: 14px;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
-  body { font-family: -apple-system, "Segoe UI", "Inter", Roboto, system-ui, sans-serif; margin:0; display:flex; flex-direction:column; height:100vh;
-         background: radial-gradient(ellipse 900px 500px at 50% -10%, rgba(34,211,238,0.10), transparent 60%), var(--bg); background-attachment: fixed;
-         color: var(--text); -webkit-font-smoothing: antialiased; }
-  header { padding:12px 18px; background: rgba(12,18,30,0.82); backdrop-filter: blur(10px); border-bottom:1px solid #16203380;
-           font-weight:600; display:flex; align-items:center; gap:10px; }
-  header .dot { width:8px; height:8px; border-radius:50%; background: var(--accent); box-shadow: 0 0 0 0 var(--accent-glow); animation: pulse 2.2s ease-in-out infinite; }
-  @keyframes pulse { 0% { box-shadow: 0 0 0 0 var(--accent-glow); } 70% { box-shadow: 0 0 0 7px rgba(34,211,238,0); } 100% { box-shadow: 0 0 0 0 rgba(34,211,238,0); } }
-  header small { color: var(--text-dim); font-weight:400; margin-left:4px; font-size:12px; }
-  #log { flex:1; overflow-y:auto; padding:18px 16px 8px; display:flex; flex-direction:column; gap:10px; scroll-behavior:smooth; }
-  #log > * { max-width: 820px; width:100%; margin-left:auto; margin-right:auto; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Inter", Roboto, system-ui, sans-serif; margin:0; display:flex; flex-direction:column; height:100vh;
+    background: radial-gradient(ellipse 900px 500px at 50% -10%, rgba(34,211,238,0.10), transparent 60%), var(--bg); background-attachment: fixed;
+    color: var(--text); -webkit-font-smoothing: antialiased;
+  }
+  header {
+    padding:10px 16px; background: rgba(12,18,30,0.82); backdrop-filter: blur(10px); border-bottom:1px solid var(--border-soft);
+    display:flex; align-items:center; gap:12px; flex:none;
+  }
+  .orb { width:30px; height:30px; border-radius:50%; flex:none; background: radial-gradient(circle at 35% 35%, rgba(103,232,249,0.95), rgba(34,211,238,0.4) 60%, #0c121e 100%);
+         box-shadow: 0 0 0 1px rgba(34,211,238,0.3), 0 0 16px -4px var(--accent-glow); transition: box-shadow 0.3s ease; }
+  body[data-busy="1"] .orb { animation: breathe 1.2s ease-in-out infinite; box-shadow: 0 0 0 1px rgba(103,232,249,0.6), 0 0 24px -2px var(--accent-glow); }
+  @keyframes breathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.08); } }
+  header .who { display:flex; flex-direction:column; line-height:1.15; }
+  header .who b { font-size:15px; letter-spacing:0.02em; }
+  header .who small { color: var(--text-dim); font-size:11.5px; }
+  header .grow { flex:1; }
+  .chip { display:inline-flex; align-items:center; gap:6px; font-family: var(--mono); font-size:11px; padding:4px 10px; border-radius:999px; border:1px solid var(--border); color: var(--text-dim); background: var(--panel); white-space:nowrap; }
+  .chip i { width:7px; height:7px; border-radius:50%; background: var(--text-mute); }
+  .chip.ok i { background: var(--ok); box-shadow: 0 0 8px rgba(110,231,183,0.6); }
+  .chip.busy i { background: var(--warn); animation: blink 0.9s ease-in-out infinite; }
+  .chip.bad i { background: var(--danger); }
+  @keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0.3; } }
+  .icon-btn { appearance:none; background: var(--panel); border:1px solid var(--border); color: var(--text-dim); border-radius:9px; width:32px; height:32px; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; transition: border-color 0.15s ease, color 0.15s ease; }
+  .icon-btn:hover { border-color: var(--accent); color: var(--accent-strong); }
+  .icon-btn svg { width:15px; height:15px; }
+
+  #log { flex:1; overflow-y:auto; padding:18px 16px 8px; display:flex; flex-direction:column; gap:12px; scroll-behavior:smooth; }
+  #log > * { max-width: 860px; width:100%; margin-left:auto; margin-right:auto; }
+  #hero { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; text-align:center; padding:40px 12px 12px; flex:1; }
+  #hero .big-orb { width:92px; height:92px; border-radius:50%; background: radial-gradient(circle at 35% 35%, rgba(103,232,249,0.95), rgba(34,211,238,0.4) 55%, #0c121e 100%);
+                   box-shadow: 0 0 0 1px rgba(34,211,238,0.35), 0 0 60px -8px var(--accent-glow); position:relative; margin-bottom:10px; }
+  #hero .big-orb::after { content:""; position:absolute; inset:-12px; border-radius:50%; border:1px dashed rgba(34,211,238,0.35); animation: spin 14s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #hero h1 { margin:0; font-size:22px; font-weight:700; letter-spacing:0.01em; }
+  #hero p { margin:0; color: var(--text-dim); font-size:14px; max-width:520px; }
+  .hidden { display:none !important; }
+
   .msg { display:flex; gap:10px; align-items:flex-end; }
   .msg.user { flex-direction: row-reverse; }
   .avatar { width:30px; height:30px; border-radius:50%; flex:none; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:800; letter-spacing:0.02em; }
   .msg.jarvis .avatar { background: radial-gradient(circle at 35% 35%, rgba(103,232,249,0.95), rgba(34,211,238,0.4) 60%, #0c121e 100%); color:#022; box-shadow: 0 0 14px -4px var(--accent-glow); }
   .msg.user .avatar { background: var(--panel-2); border:1px solid var(--border); color: var(--text-dim); }
-  .bubble { padding:10px 14px; border-radius:16px; line-height:1.5; font-size:15px; max-width: min(78%, 640px); white-space:pre-wrap; overflow-wrap:anywhere; }
-  .msg.user .bubble { background: linear-gradient(180deg, #1d4ed8, #1e40af); color:#fff; border-bottom-right-radius:4px; }
+  .col { display:flex; flex-direction:column; gap:4px; max-width: min(80%, 680px); min-width:0; }
+  .msg.user .col { align-items:flex-end; }
+  .bubble { padding:10px 14px; border-radius:16px; line-height:1.55; font-size:15px; white-space:pre-wrap; overflow-wrap:anywhere; position:relative; }
+  .msg.user .bubble { background: linear-gradient(180deg, var(--user), var(--user-2)); color:#fff; border-bottom-right-radius:4px; }
   .msg.jarvis .bubble { background: var(--panel-2); border:1px solid var(--border); border-bottom-left-radius:4px; }
   .msg.jarvis .bubble.error { border-color: rgba(251,113,133,0.5); background: var(--danger-bg); color:#fecdd3; }
-  .bubble b { font-weight:700; } .bubble code { background: rgba(0,0,0,0.35); border:1px solid var(--border); border-radius:5px; padding:1px 5px; font-size:13px; }
-  .bubble ul { margin:4px 0 2px; padding-left:18px; white-space:normal; } .bubble li { margin:2px 0; }
-  .meta { color: var(--text-dim); font-size:11px; padding-left:40px; margin-top:-4px; }
+  .bubble b { font-weight:700; } .bubble em { font-style:italic; color: var(--accent-strong); }
+  .bubble code { background: rgba(0,0,0,0.35); border:1px solid var(--border); border-radius:5px; padding:1px 5px; font-size:13px; font-family: var(--mono); }
+  .bubble pre { background: #040609; border:1px solid var(--border); border-radius:10px; padding:10px 12px; overflow:auto; font-size:12.5px; font-family: var(--mono); white-space:pre; margin:6px 0; }
+  .bubble pre code { background:none; border:0; padding:0; font-size:inherit; }
+  .bubble ul, .bubble ol { margin:4px 0 2px; padding-left:20px; white-space:normal; } .bubble li { margin:2px 0; }
+  .bubble h3, .bubble h4 { margin:8px 0 2px; font-size:14px; color: var(--accent-strong); letter-spacing:0.04em; text-transform:uppercase; }
+  .bubble a { color: var(--info); text-decoration: underline; text-underline-offset:2px; }
+  .bubble table { border-collapse: collapse; margin:6px 0; font-size:13px; white-space:normal; }
+  .bubble td, .bubble th { border:1px solid var(--border); padding:4px 8px; text-align:left; }
+  .bubble th { background: var(--panel-3); }
+  .meta { color: var(--text-mute); font-size:11px; font-family: var(--mono); display:flex; gap:8px; align-items:center; padding:0 4px; }
+  .msg.user .meta { justify-content:flex-end; }
+  .meta button { appearance:none; background:none; border:0; color: var(--text-mute); cursor:pointer; font-family:inherit; font-size:11px; padding:0; display:inline-flex; align-items:center; gap:4px; }
+  .meta button:hover { color: var(--accent-strong); }
+  .meta button svg { width:12px; height:12px; }
   .typing { display:inline-flex; gap:4px; align-items:center; height:18px; }
-  .typing i { width:6px; height:6px; border-radius:50%; background: var(--accent); opacity:0.4; animation: blink 1.2s infinite; }
+  .typing i { width:6px; height:6px; border-radius:50%; background: var(--accent); opacity:0.4; animation: dots 1.2s infinite; }
   .typing i:nth-child(2) { animation-delay:0.2s; } .typing i:nth-child(3) { animation-delay:0.4s; }
-  @keyframes blink { 0%,80%,100% { opacity:0.25; transform: translateY(0); } 40% { opacity:1; transform: translateY(-2px); } }
-  .tool-chip { align-self:flex-start; margin-left:40px; font-size:12px; color: var(--accent-strong); background: rgba(34,211,238,0.08); border:1px solid rgba(34,211,238,0.25);
-               border-radius:999px; padding:3px 10px; display:inline-flex; gap:6px; align-items:center; }
+  @keyframes dots { 0%,80%,100% { opacity:0.25; transform: translateY(0); } 40% { opacity:1; transform: translateY(-2px); } }
+  .activity { display:flex; flex-direction:column; gap:3px; }
+  .tool-chip { align-self:flex-start; font-size:12px; color: var(--accent-strong); background: var(--accent-soft); border:1px solid rgba(34,211,238,0.25);
+               border-radius:999px; padding:3px 10px; display:inline-flex; gap:7px; align-items:center; font-family: var(--mono); }
   .tool-chip::before { content:""; width:6px; height:6px; border-radius:50%; background: var(--accent); animation: pulse 1.6s infinite; }
+  .tool-chip.done { color: var(--text-dim); background: var(--panel); border-color: var(--border); }
+  .tool-chip.done::before { animation:none; background: var(--ok); }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 var(--accent-glow); } 70% { box-shadow: 0 0 0 6px rgba(34,211,238,0); } 100% { box-shadow: 0 0 0 0 rgba(34,211,238,0); } }
   /* D-382: bekreftelseskort - handlingen utføres av serveren når Tobias trykker Godkjenn. */
   .confirm { margin-left:40px; background: var(--panel); border:1px solid rgba(251,191,36,0.45); border-left:3px solid var(--warn); border-radius: var(--radius);
-             padding:12px 14px; max-width: min(78%, 640px); }
-  .confirm .title { font-weight:700; font-size:13px; color: var(--warn); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:4px; }
+             padding:12px 14px; max-width: min(80%, 680px); }
+  .confirm .title { font-weight:700; font-size:12px; color: var(--warn); text-transform:uppercase; letter-spacing:0.1em; margin-bottom:4px; font-family: var(--mono); }
   .confirm .what { font-size:14px; margin-bottom:8px; }
-  .confirm .what code { font-size:12px; }
+  .confirm .what code { font-size:12px; font-family: var(--mono); background: rgba(0,0,0,0.35); border:1px solid var(--border); border-radius:5px; padding:1px 5px; }
   .confirm .actions { display:flex; gap:8px; flex-wrap:wrap; }
-  .confirm button { border:0; border-radius:9px; padding:7px 14px; font-weight:700; cursor:pointer; font-size:13px; }
+  .confirm button { border:0; border-radius:9px; padding:7px 14px; font-weight:700; cursor:pointer; font-size:13px; font-family:inherit; }
   .confirm button.approve { background: linear-gradient(180deg, var(--accent-strong), var(--accent)); color:#022; }
   .confirm button.reject { background: var(--panel-2); color: var(--text); border:1px solid var(--border); }
   .confirm button:disabled { opacity:0.5; cursor:default; }
   .confirm .result { font-size:12px; color: var(--text-dim); margin-top:8px; }
   .confirm.done { border-color: rgba(110,231,183,0.45); border-left-color: var(--ok); } .confirm.done .title { color: var(--ok); }
   .confirm.rejected { border-color: var(--border); border-left-color: var(--text-dim); opacity:0.75; } .confirm.rejected .title { color: var(--text-dim); }
-  #suggestions { display:flex; gap:8px; flex-wrap:wrap; padding:0 16px 8px; max-width:852px; margin:0 auto; width:100%; }
-  #suggestions button { background: var(--panel); border:1px solid var(--border); color: var(--text-dim); border-radius:999px; padding:6px 12px; font-size:12px; cursor:pointer; }
-  #suggestions button:hover { border-color: var(--accent); color: var(--accent-strong); }
-  form#form { display:flex; gap:8px; padding:12px 16px 14px; background: rgba(12,18,30,0.82); backdrop-filter: blur(10px); border-top:1px solid #16203380; }
-  form#form > * { max-width:852px; }
-  #input { flex:1; background: var(--bg); color: var(--text); border:1px solid var(--border); border-radius:12px; padding:11px 14px; font-size:15px; font-family:inherit;
-           resize:none; min-height:44px; max-height:160px; line-height:1.4; }
+
+  #suggestions { display:flex; gap:8px; flex-wrap:wrap; justify-content:center; padding:0 16px 8px; max-width:892px; margin:0 auto; width:100%; }
+  #suggestions button { background: var(--panel); border:1px solid var(--border); color: var(--text-dim); border-radius:999px; padding:7px 13px; font-size:12.5px; cursor:pointer; font-family:inherit; display:inline-flex; gap:6px; align-items:center; transition: border-color 0.15s ease, color 0.15s ease, transform 0.12s ease; }
+  #suggestions button:hover { border-color: var(--accent); color: var(--accent-strong); transform: translateY(-1px); }
+  #suggestions button svg { width:13px; height:13px; opacity:0.8; }
+
+  #composer { flex:none; padding:10px 16px 12px; background: rgba(12,18,30,0.82); backdrop-filter: blur(10px); border-top:1px solid var(--border-soft); }
+  form#form { display:flex; gap:8px; align-items:flex-end; max-width:892px; margin:0 auto; }
+  .input-wrap { flex:1; position:relative; }
+  #input { width:100%; background: var(--bg); color: var(--text); border:1px solid var(--border); border-radius:14px; padding:12px 14px; font-size:15px; font-family:inherit;
+           resize:none; min-height:46px; max-height:180px; line-height:1.45; display:block; transition: border-color 0.15s ease, box-shadow 0.15s ease; }
   #input:focus { outline:none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(34,211,238,0.15); }
-  form#form button { background: linear-gradient(180deg, var(--accent-strong), var(--accent)); color:#022; border:0; border-radius:12px; padding:0 20px; cursor:pointer; font-weight:700;
-                     box-shadow: 0 0 0 1px rgba(34,211,238,0.3), 0 4px 14px -4px var(--accent-glow); }
-  form#form button:disabled { background: var(--panel-2); color: var(--text-dim); box-shadow:none; cursor:default; }
-  #enroll { display:none; padding:12px 16px; background: var(--panel); border-top:1px solid var(--border); }
+  #input::placeholder { color: var(--text-mute); }
+  form#form button { border:0; border-radius:12px; height:46px; padding:0 18px; cursor:pointer; font-weight:700; font-family:inherit; font-size:14px; display:inline-flex; align-items:center; gap:7px; transition: transform 0.12s ease, opacity 0.15s ease; }
+  form#form button svg { width:16px; height:16px; }
+  #send { background: linear-gradient(180deg, var(--accent-strong), var(--accent)); color:#022; box-shadow: 0 0 0 1px rgba(34,211,238,0.3), 0 4px 14px -4px var(--accent-glow); }
+  #send:hover:not(:disabled) { transform: translateY(-1px); }
+  #send:disabled { background: var(--panel-2); color: var(--text-dim); box-shadow:none; cursor:default; }
+  #stop { background: var(--danger-bg); color: var(--danger); border:1px solid rgba(251,113,133,0.4); display:none; }
+  body[data-busy="1"] #stop { display:inline-flex; }
+  .hint { max-width:892px; margin:6px auto 0; font-size:11px; color: var(--text-mute); font-family: var(--mono); display:flex; gap:12px; }
+  .hint span b { color: var(--text-dim); font-weight:600; }
+
+  #enroll { display:none; padding:12px 16px; background: var(--panel); border-top:1px solid var(--border); flex:none; }
   #enroll p { margin:0 0 8px; color: var(--text-dim); font-size:13px; }
-  #enroll code { color: var(--text); background: var(--bg); padding:2px 5px; border-radius:4px; }
+  #enroll code { color: var(--text); background: var(--bg); padding:2px 5px; border-radius:4px; font-family: var(--mono); }
   #enroll form { padding:0; background:none; border:0; display:flex; gap:8px; }
   #enroll input { flex:1; background: var(--bg); color: var(--text); border:1px solid var(--border); border-radius:8px; padding:10px; font-size:15px; }
-  #enroll button { background: var(--accent); color:#022; border:0; border-radius:8px; padding:0 18px; cursor:pointer; font-weight:700; }
-  @media (max-width: 560px) { .bubble, .confirm { max-width: 88%; } #log { padding:14px 10px 6px; } }
+  #enroll button { background: var(--accent); color:#022; border:0; border-radius:8px; padding:0 18px; cursor:pointer; font-weight:700; font-family:inherit; }
+  ::-webkit-scrollbar { width:10px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: var(--border); border-radius:6px; }
+  @media (max-width: 560px) { .col, .confirm { max-width: 90%; } #log { padding:14px 10px 6px; } .hint { display:none; } header .who small { display:none; } .chip .t { display:none; } }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 </head>
-<body>
-<header><span class="dot"></span>Charlie <small>spør, be om noe, eller si «hva kan du?»</small></header>
-<div id="log"></div>
-<div id="suggestions">
-  <button type="button" data-suggest="Hva skjer i dag?">Hva skjer i dag?</button>
-  <button type="button" data-suggest="Sjekk e-posten min">Sjekk e-posten</button>
-  <button type="button" data-suggest="Sjekk saldoen min">Sjekk saldoen</button>
-  <button type="button" data-suggest="Hvilke tjenester og verktøy kan du bruke?">Hva kan du?</button>
+<body data-busy="0">
+<header>
+  <span class="orb" aria-hidden="true"></span>
+  <div class="who"><b>Charlie</b><small>spør, be om noe, eller si «hva kan du?»</small></div>
+  <span class="grow"></span>
+  <span class="chip" id="route-chip" title="Hvilken rute siste svar gikk" style="display:none"><span class="t">rute</span><span id="route-text"></span></span>
+  <span class="chip" id="conn-chip"><i></i><span id="conn-text">autoriserer …</span></span>
+  <button class="icon-btn" id="clear-btn" title="Tøm samtalevisningen (Ctrl+K) - minnet på serveren beholdes">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>
+  </button>
+</header>
+<div id="log">
+  <div id="hero">
+    <div class="big-orb" aria-hidden="true"></div>
+    <h1 id="hero-title">Hei.</h1>
+    <p>Jeg er Charlie. Jeg husker det du forteller meg, kan bruke verktøyene dine, og ber alltid om bekreftelse før noe som ikke kan angres.</p>
+  </div>
 </div>
-<form id="form">
-  <textarea id="input" placeholder="Snakk med Charlie … (Enter sender, Shift+Enter ny linje)" autocomplete="off" autofocus rows="1"></textarea>
-  <button id="send">Send</button>
-</form>
+<div id="suggestions">
+  <button type="button" data-suggest="Hva skjer i dag?"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg>Hva skjer i dag?</button>
+  <button type="button" data-suggest="Sjekk e-posten min"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>Sjekk e-posten</button>
+  <button type="button" data-suggest="Sjekk saldoen min"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M2 10h20"/></svg>Sjekk saldoen</button>
+  <button type="button" data-suggest="Hva husker du om meg?"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a7 7 0 0 0-7 7c0 3 2 5 3 6v3h8v-3c1-1 3-3 3-6a7 7 0 0 0-7-7z"/></svg>Hva husker du?</button>
+  <button type="button" data-suggest="Hvilke tjenester og verktøy kan du bruke?"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a4 4 0 0 0 5 5L22 9l-3-3-2 2-2-2 2-2-3-3-2.3 2.3zM3 21l8-8"/></svg>Hva kan du?</button>
+</div>
+<div id="composer">
+  <form id="form">
+    <div class="input-wrap">
+      <textarea id="input" placeholder="Snakk med Charlie …" autocomplete="off" autofocus rows="1"></textarea>
+    </div>
+    <button type="button" id="stop" title="Stopp svaret (Esc)"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>Stopp</button>
+    <button id="send" title="Send (Enter)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4z"/></svg>Send</button>
+  </form>
+  <div class="hint"><span><b>Enter</b> send</span><span><b>Shift+Enter</b> ny linje</span><span><b>Esc</b> stopp</span><span><b>Ctrl+K</b> tøm visning</span></div>
+</div>
 <div id="enroll">
   <p>Denne enheten er ikke innrullert ennå. Kjør på maskinen som eier Jarvis:
      <code>pnpm --filter @jarvis/api enroll-ticket</code> og lim inn billetten under.</p>
@@ -107,13 +196,20 @@
 </div>
 <script>
   const log = document.getElementById("log");
+  const hero = document.getElementById("hero");
   const form = document.getElementById("form");
   const input = document.getElementById("input");
   const sendBtn = document.getElementById("send");
+  const stopBtn = document.getElementById("stop");
+  const clearBtn = document.getElementById("clear-btn");
   const suggestions = document.getElementById("suggestions");
   const enrollPanel = document.getElementById("enroll");
   const enrollForm = document.getElementById("enroll-form");
   const enrollTicket = document.getElementById("enroll-ticket");
+  const connChip = document.getElementById("conn-chip");
+  const connText = document.getElementById("conn-text");
+  const routeChip = document.getElementById("route-chip");
+  const routeText = document.getElementById("route-text");
 
   // Dev-identitet (fase 3): enhetsautentisering er faktisk koblet til for
   // DENNE dev-siden også (Ed25519 via Web Crypto). Fortsatt en lokal,
@@ -125,23 +221,16 @@
   // kun grant-tokenet, og serveren leser person/tenant/enhet/space/kanal ut av
   // grant-raden.
   //
-  // D-252 (live NAS-migreringsfunn, Tobias direkte i chat: "dette kan ikke
-  // komme hver gang" - gjentatt "Autorisering feilet: enhet ikke innrullert"):
-  // `device_id` var FØR en hardkodet literal ("dev-web") DELT av ENHVER
-  // nettleser som lastet denne siden - telefon, PC, en ny nettleserprofil.
-  // Siden innrullering/nøkkelrotasjon er PER `device_id` (D-131), betydde
-  // det at innrullering fra ÉN nettleser stille rullet nøkkelen for ALLE
-  // andre, og enhver annen allerede-innrullert nettleser sluttet øyeblikkelig
-  // å fungere ("enhet ikke innrullert" ved neste autoriseringsforsøk) -
-  // uten at NOEN av nettleserne noensinne gjorde noe galt. `device_id` er nå
-  // selv en per-nettleser, tilfeldig generert og lagret verdi (samme
-  // `localStorage`-levetid som selve nøkkelen) - hver nettleser får sin EGEN
-  // enhetsidentitet og kan innrulleres/leve permanent uavhengig av alle andre.
+  // D-252 (live NAS-migreringsfunn): `device_id` var FØR en hardkodet literal
+  // ("dev-web") DELT av ENHVER nettleser som lastet denne siden. Siden
+  // innrullering/nøkkelrotasjon er PER `device_id` (D-131), rullet innrullering
+  // fra ÉN nettleser stille nøkkelen for ALLE andre. `device_id` er nå en
+  // per-nettleser, tilfeldig generert og lagret verdi (samme `localStorage`-
+  // levetid som selve nøkkelen).
   // D-342 (host-bevist: "crypto.randomUUID is not a function" over Tailscale/
   // annen ren HTTP-tilgang) - crypto.randomUUID() krever en "secure context"
-  // (HTTPS/localhost); metoden finnes rett og slett ikke i nettleseren ellers.
-  // Fallback trengs KUN her - dette er en lokal enhets-ID i localStorage
-  // (D-252), aldri et kryptografisk hemmelig token.
+  // (HTTPS/localhost). Fallback trengs KUN her - dette er en lokal enhets-ID i
+  // localStorage (D-252), aldri et kryptografisk hemmelig token.
   function randomUUID() {
     if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
       return crypto.randomUUID();
@@ -175,89 +264,169 @@
 
   /**
    * D-131 funn 1: det betrodde BÆRER-BEVISET fra /session/authorize
-   * ({ grant_token, expires_at_ms, ... }), ikke en sesjons-ID. En sesjons-ID
-   * er samtalekontinuitet og kan ikke dokumentere hvilken enhet som står bak
-   * et kall, om nøkkelen er tilbakekalt, eller når autoriteten utløper.
+   * ({ grant_token, expires_at_ms, ... }), ikke en sesjons-ID.
    */
   let grant = null;
   /** Enhetsnøkkelen, holdt for å kunne re-autorisere når grantet utløper. */
   let deviceKey = null;
+
+  const inShell = window.parent !== window;
+  function tellShell(payload) {
+    if (!inShell) return;
+    try { window.parent.postMessage(Object.assign({ jarvis: "chat-busy" }, payload), location.origin); } catch { /* skallet er valgfritt */ }
+  }
+  function setConn(state, text) {
+    connChip.className = "chip " + state;
+    connText.textContent = text;
+  }
+  function setBusy(on) {
+    document.body.dataset.busy = on ? "1" : "0";
+    sendBtn.disabled = on;
+    tellShell({ busy: on });
+  }
 
   function escapeHtml(text) {
     return String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   }
 
   /**
-   * Lett, TRYGG markdown for Charlie sine svar: teksten HTML-escapes FØRST, deretter gjenkjennes kun **fet**, `kode` og
-   * «- »-punktlister. Ingen rå HTML fra modellen når noen gang DOM-en.
+   * Lett, TRYGG markdown for Charlie sine svar: teksten HTML-escapes FØRST, deretter gjenkjennes kun en liten, kjent
+   * delmengde (kodeblokker, overskrifter, punkt-/nummerlister, enkle tabeller, **fet**, _kursiv_, `kode`, lenker med
+   * http(s)-protokoll). Ingen rå HTML fra modellen når noen gang DOM-en, og en lenke uten http(s) blir ren tekst.
    */
+  function inlineRich(esc) {
+    return esc
+      .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+      .replace(/(^|[\s(])_([^_\n]+)_(?=[\s).,!?:;]|$)/g, "$1<em>$2</em>")
+      .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+      .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  }
   function renderRich(text) {
     const esc = escapeHtml(text);
     const lines = esc.split("\n");
     let html = "";
-    let inList = false;
-    for (const line of lines) {
-      const m = line.match(/^\s*[-•*]\s+(.*)$/);
-      if (m) {
-        if (!inList) { html += "<ul>"; inList = true; }
-        html += "<li>" + m[1] + "</li>";
-      } else {
-        if (inList) { html += "</ul>"; inList = false; }
-        html += (html && !html.endsWith("</ul>") ? "\n" : "") + line;
+    let list = null;
+    let code = null;
+    let table = null;
+    const closeList = () => { if (list) { html += "</" + list + ">"; list = null; } };
+    const closeTable = () => { if (table) { html += "</table>"; table = null; } };
+    for (const raw of lines) {
+      if (code !== null) {
+        if (/^\s*```/.test(raw)) { html += "<pre><code>" + code.join("\n") + "</code></pre>"; code = null; }
+        else code.push(raw);
+        continue;
       }
+      if (/^\s*```/.test(raw)) { closeList(); closeTable(); code = []; continue; }
+      const h = raw.match(/^\s*(#{1,4})\s+(.*)$/);
+      if (h) { closeList(); closeTable(); html += "<h" + (h[1].length <= 2 ? 3 : 4) + ">" + inlineRich(h[2]) + "</h" + (h[1].length <= 2 ? 3 : 4) + ">"; continue; }
+      const t = raw.match(/^\s*\|(.+)\|\s*$/);
+      if (t) {
+        closeList();
+        if (/^[\s|:-]+$/.test(t[1])) continue;
+        const cells = t[1].split("|").map((c) => inlineRich(c.trim()));
+        if (!table) { table = "table"; html += "<table><tr>" + cells.map((c) => "<th>" + c + "</th>").join("") + "</tr>"; }
+        else html += "<tr>" + cells.map((c) => "<td>" + c + "</td>").join("") + "</tr>";
+        continue;
+      }
+      closeTable();
+      const ul = raw.match(/^\s*[-•*]\s+(.*)$/);
+      const ol = raw.match(/^\s*\d+[.)]\s+(.*)$/);
+      if (ul || ol) {
+        const kind = ul ? "ul" : "ol";
+        if (list !== kind) { closeList(); html += "<" + kind + ">"; list = kind; }
+        html += "<li>" + inlineRich((ul || ol)[1]) + "</li>";
+        continue;
+      }
+      closeList();
+      html += (html && !/>$/.test(html) ? "\n" : "") + inlineRich(raw);
     }
-    if (inList) html += "</ul>";
-    return html
-      .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
-      .replace(/`([^`\n]+)`/g, "<code>$1</code>");
+    if (code !== null) html += "<pre><code>" + code.join("\n") + "</code></pre>";
+    closeList(); closeTable();
+    return html;
   }
 
   function scrollDown() { log.scrollTop = log.scrollHeight; }
+  function timeLabel(d) { return (d || new Date()).toLocaleTimeString("nb-NO", { hour: "2-digit", minute: "2-digit" }); }
 
   /** Legger til en melding. Returnerer boble-elementet (tekst settes via .textContent / setRich). */
-  function add(cls, text) {
+  function add(cls, text, at) {
+    hero.classList.add("hidden");
     const row = document.createElement("div");
     row.className = "msg " + cls;
     const avatar = document.createElement("div");
     avatar.className = "avatar";
     avatar.textContent = cls === "user" ? "T" : "C";
+    const col = document.createElement("div");
+    col.className = "col";
+    const activity = document.createElement("div");
+    activity.className = "activity";
     const bubble = document.createElement("div");
     bubble.className = "bubble";
     bubble.textContent = text;
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const time = document.createElement("span");
+    time.textContent = timeLabel(at);
+    meta.appendChild(time);
+    if (cls === "jarvis") {
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.title = "Kopier svaret";
+      copy.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>kopier';
+      copy.addEventListener("click", () => {
+        const plain = bubble.innerText;
+        const done = () => { copy.lastChild.textContent = "kopiert"; setTimeout(() => { copy.lastChild.textContent = "kopier"; }, 1500); };
+        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(plain).then(done, () => {});
+      });
+      meta.appendChild(copy);
+    }
+    col.appendChild(activity);
+    col.appendChild(bubble);
+    col.appendChild(meta);
     row.appendChild(avatar);
-    row.appendChild(bubble);
+    row.appendChild(col);
     log.appendChild(row);
     scrollDown();
+    bubble._meta = meta;
+    bubble._activity = activity;
     return bubble;
   }
   function setTyping(bubble) {
     bubble.innerHTML = '<span class="typing"><i></i><i></i><i></i></span>';
   }
+  // Strømmede tokens rendres maks én gang per animasjonsramme per boble (markdown-parsing av hele teksten per token er unødvendig).
   function setRich(bubble, text) {
-    bubble.innerHTML = renderRich(text);
-    scrollDown();
+    bubble._pending = text;
+    if (bubble._queued) return;
+    bubble._queued = true;
+    requestAnimationFrame(() => {
+      bubble._queued = false;
+      bubble.innerHTML = renderRich(bubble._pending);
+      scrollDown();
+    });
   }
-  function addMeta(text) {
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    meta.textContent = text;
-    log.appendChild(meta);
-    scrollDown();
+  function addMeta(bubble, text) {
+    const span = document.createElement("span");
+    span.textContent = text;
+    (bubble._meta || bubble.parentElement).appendChild(span);
   }
   const TOOL_LABELS = [
-    [/^calendar/, "Sjekker kalenderen"], [/^email|^microsoft_outlook/, "Ser på e-posten"], [/^github/, "Sjekker GitHub"], [/^memory|search_my_memory/, "Leter i minnet"],
-    [/^finance/, "Sjekker økonomien"], [/^(brave_search|tavily|exa)/, "Søker på nettet"], [/^(notion|drive|dropbox|onedrive|google_sheets)/, "Ser i dokumentene"],
-    [/^(todoist|trello|jira|linear)/, "Sjekker oppgavene"], [/^(slack|discord)/, "Sjekker meldingene"], [/check_my_capabilities|^executive/, "Sjekker egne evner"]
+    [/^calendar|^google_calendar/, "Sjekker kalenderen"], [/^email|^gmail|^microsoft_outlook/, "Ser på e-posten"], [/^github/, "Sjekker GitHub"],
+    [/^memory|search_my_memory/, "Leter i minnet"], [/^finance|^neonomics|^stripe|^vipps|^wallester/, "Sjekker økonomien"],
+    [/^(brave_search|tavily|exa|web_search)/, "Søker på nettet"], [/^(notion|drive|google_drive|dropbox|onedrive|google_sheets)/, "Ser i dokumentene"],
+    [/^(todoist|trello|jira|linear)/, "Sjekker oppgavene"], [/^(slack|discord|telegram|whatsapp|twilio|telnyx)/, "Sjekker meldingene"],
+    [/^(home_assistant|hue)/, "Snakker med huset"], [/^(playwright|browser)/, "Åpner nettleseren"], [/^(vercel|gce|docker|infra)/, "Sjekker driften"],
+    [/check_my_capabilities|^executive/, "Sjekker egne evner"]
   ];
   function toolLabel(name) {
-    for (const [re, label] of TOOL_LABELS) if (re.test(name)) return label + " …";
-    return "Jobber med saken …";
+    for (const [re, label] of TOOL_LABELS) if (re.test(name)) return label;
+    return "Jobber med " + String(name || "saken").replace(/[._]/g, " ");
   }
-  function showToolChip(name) {
+  function showToolChip(bubble, name) {
     const chip = document.createElement("div");
     chip.className = "tool-chip";
-    chip.textContent = toolLabel(name);
-    log.appendChild(chip);
+    chip.textContent = toolLabel(name) + " …";
+    bubble._activity.appendChild(chip);
     scrollDown();
     return chip;
   }
@@ -268,7 +437,7 @@
    */
   function toolHuman(tool) {
     const [id, action] = String(tool || "").split(".");
-    const labels = { create: "opprette", update: "oppdatere", send: "sende", notify: "sende melding via", sync: "synkronisere", trash: "flytte til papirkurv i", close: "lukke i", reopen: "gjenåpne i", append: "legge til rad i", move: "flytte i", rename: "gi nytt navn i", reply: "svare i", assign: "tildele i", set: "endre i", add: "legge til i", comment: "kommentere i", cancel: "avbryte i", pause: "pause i", resume: "gjenoppta i" };
+    const labels = { create: "opprette", update: "oppdatere", send: "sende", notify: "sende melding via", sync: "synkronisere", trash: "flytte til papirkurv i", close: "lukke i", reopen: "gjenåpne i", append: "legge til rad i", move: "flytte i", rename: "gi nytt navn i", reply: "svare i", assign: "tildele i", set: "endre i", add: "legge til i", comment: "kommentere i", cancel: "avbryte i", pause: "pause i", resume: "gjenoppta i", delete: "slette i", upload: "laste opp til", deploy: "deployere i", run: "kjøre i" };
     const verb = Object.keys(labels).find((k) => (action || "").startsWith(k));
     return (verb ? labels[verb] + " " : "kjøre " + (action || "") + " i ") + (id || "").replace(/_/g, " ");
   }
@@ -337,10 +506,8 @@
   }
 
   /**
-   * Enhetsnøkkel i localStorage (JWK, Ed25519). Rundtrippen JWK → JWK er
-   * enklere enn rå PKCS8 i nettleseren, og JWK for Ed25519 bærer allerede den
-   * offentlige komponenten (`x`) sammen med den private (`d`), så vi kan
-   * rekonstruere en offentlig nøkkel fra kun det lagrede private JWK-et.
+   * Enhetsnøkkel i localStorage (JWK, Ed25519). JWK for Ed25519 bærer allerede den offentlige komponenten (`x`) sammen
+   * med den private (`d`), så vi kan rekonstruere en offentlig nøkkel fra kun det lagrede private JWK-et.
    */
   async function loadOrCreateDeviceKey() {
     const stored = localStorage.getItem("jarvis.devicekey");
@@ -374,9 +541,8 @@
   }
 
   /**
-   * Beviser enheten og henter et ferskt grant. Returnerer `null` (aldri en
-   * kastet feil) når enheten rett og slett ikke er innrullert ennå - da er
-   * innrullering, ikke en feilmelding, det riktige neste steget.
+   * Beviser enheten og henter et ferskt grant. Returnerer `null` (aldri en kastet feil) når enheten rett og slett ikke
+   * er innrullert ennå - da er innrullering, ikke en feilmelding, det riktige neste steget.
    */
   async function authorize(privateKey) {
     const { challenge, signature } = await signChallenge(privateKey, identity.device_id);
@@ -396,16 +562,8 @@
   }
 
   /**
-   * D-131 (arkitektkontroll av PR #79, funn 2): innrullering krever nå
-   * EKSPLISITT eier-/bootstrap-autoritet. Den gamle koden her kalte
-   * /devices/register med en selvoppgitt `identity` og `auth_strength:"active"`
-   * - altså anonym innrullering: enhver nettverksklient som kjente de (ikke
-   * hemmelige) ID-ene kunne skrive sin egen nøkkel og deretter «bevise» den.
-   *
-   * To lovlige veier nå. Har vi allerede en innrullert nøkkel på denne enheten,
-   * autoriserer den sin EGEN rotasjon (`device_proof`). Ellers kreves en
-   * engangs-billett fra en lokal eier-handling
-   * (`pnpm --filter @jarvis/api enroll-ticket`).
+   * D-131 (arkitektkontroll av PR #79, funn 2): innrullering krever EKSPLISITT eier-/bootstrap-autoritet - en engangs-
+   * billett fra en lokal eier-handling (`pnpm --filter @jarvis/api enroll-ticket`). Ingen anonym innrullering.
    */
   async function enrollDevice(privateKey, publicKey, ticket) {
     const pem = pemFromSpki(await crypto.subtle.exportKey("spki", publicKey));
@@ -427,10 +585,8 @@
   }
 
   /**
-   * Sørger for at vi har et GYLDIG grant akkurat nå. Et grant er kortlevd med
-   * vilje (SESSION_GRANT_TTL_MS) - re-autorisering koster én signatur, og det
-   * er nettopp derfor kort levetid er trygt. 30 s margin så vi ikke sender et
-   * bevis som utløper mens forespørselen er underveis.
+   * Sørger for at vi har et GYLDIG grant akkurat nå. Et grant er kortlevd med vilje (SESSION_GRANT_TTL_MS) -
+   * re-autorisering koster én signatur. 30 s margin så vi ikke sender et bevis som utløper underveis.
    */
   async function ensureGrant() {
     if (grant && grant.expires_at_ms - 30_000 > Date.now()) return grant;
@@ -438,9 +594,11 @@
     grant = await authorize(deviceKey.privateKey);
     if (!grant) {
       enrollPanel.style.display = "block";
+      setConn("bad", "ikke innrullert");
       throw new Error("enhet ikke innrullert");
     }
     enrollPanel.style.display = "none";
+    setConn("ok", "enhet bevist");
     return grant;
   }
 
@@ -450,12 +608,9 @@
   });
 
   /**
-   * D-260 (apps/web/voice.html): en 44-tegns base64url-billett kopiert fra en
-   * NAS-terminal til et nettleser-skjemafelt er strukturelt feilutsatt (Tobias
-   * gjentatte ganger, live: "SKJØNNER INGENTING"/feilskriving). D-347: samme
-   * fiks manglet her og i dashboard.html - kun voice.html fikk den. Delt logikk
-   * i `submitEnrollment()` slik at `tryAutoEnrollFromUrl()` under kan gjenbruke
-   * NØYAKTIG samme sti som det manuelle skjemaet, i stedet for å duplisere den.
+   * D-260/D-347: en 44-tegns base64url-billett kopiert fra en terminal til et skjemafelt er strukturelt feilutsatt.
+   * Delt logikk i `submitEnrollment()` slik at `tryAutoEnrollFromUrl()` under gjenbruker NØYAKTIG samme sti som det
+   * manuelle skjemaet.
    */
   async function submitEnrollment(ticket) {
     try {
@@ -477,12 +632,9 @@
   });
 
   /**
-   * D-347: leser `?enroll=<billett>` fra siden sin EGEN URL (aldri fra et
-   * skjema) og fjerner den fra adresselinjen UMIDDELBART via
-   * `history.replaceState()` - FØR selve innrulleringsforsøket - slik at en
-   * billett (engangs per design) aldri blir stående synlig i nettleser-
-   * historikken/bokmerker, og en siderefresh aldri kan forsøke å gjenbruke en
-   * allerede konsumert billett. Se samme mønster i apps/web/voice.html (D-260).
+   * D-347: leser `?enroll=<billett>` fra siden sin EGEN URL (aldri fra et skjema) og fjerner den fra adresselinjen
+   * UMIDDELBART via `history.replaceState()` - FØR selve innrulleringsforsøket - slik at en engangsbillett aldri blir
+   * stående i historikk/bokmerker og en refresh aldri gjenbruker en konsumert billett.
    */
   function tryAutoEnrollFromUrl() {
     const ticket = new URLSearchParams(location.search).get("enroll");
@@ -493,11 +645,48 @@
   }
   tryAutoEnrollFromUrl();
 
+  // Hilsen etter tid på døgnet (kun tom-tilstand).
+  (function greet() {
+    const h = new Date().getHours();
+    const word = h < 5 ? "God natt" : h < 10 ? "God morgen" : h < 18 ? "Hei" : "God kveld";
+    document.getElementById("hero-title").textContent = word + ", Tobias.";
+  })();
+
+  /**
+   * D-387: samtalen huskes i sessionStorage (kun denne fanen, kun visning) slik at et bytte/reload i kommandosentralen
+   * ikke tømmer skjermen. Serverens episodeminne (D-386) er sannheten - dette er aldri en kilde for Charlie.
+   */
+  const TRANSCRIPT_KEY = "jarvis.chat.transcript";
+  let transcript = [];
+  try { transcript = JSON.parse(sessionStorage.getItem(TRANSCRIPT_KEY) || "[]"); if (!Array.isArray(transcript)) transcript = []; } catch { transcript = []; }
+  function remember(role, text, route) {
+    transcript.push({ role, text, at: Date.now(), route: route || "" });
+    if (transcript.length > 60) transcript = transcript.slice(-60);
+    try { sessionStorage.setItem(TRANSCRIPT_KEY, JSON.stringify(transcript)); } catch { /* full/blokkert - kun komfort */ }
+  }
+  transcript.forEach((m) => {
+    const bubble = add(m.role === "user" ? "user" : "jarvis", m.text, new Date(m.at));
+    if (m.role !== "user") { setRich(bubble, m.text); if (m.route) addMeta(bubble, "rute: " + m.route); }
+  });
+  if (transcript.length) suggestions.style.display = "none";
+  clearBtn.addEventListener("click", () => {
+    transcript = [];
+    try { sessionStorage.removeItem(TRANSCRIPT_KEY); } catch { /* ignorer */ }
+    log.querySelectorAll(".msg, .confirm").forEach((el) => el.remove());
+    hero.classList.remove("hidden");
+    suggestions.style.display = "";
+    input.focus();
+  });
+
   // Tekstfelt: Enter sender, Shift+Enter gir ny linje; høyden følger innholdet.
-  function autosize() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 160) + "px"; }
+  function autosize() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 180) + "px"; }
   input.addEventListener("input", autosize);
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && busy && currentAbort) { e.preventDefault(); currentAbort.abort(); }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); clearBtn.click(); }
   });
   suggestions.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-suggest]");
@@ -505,21 +694,21 @@
     input.value = btn.dataset.suggest;
     form.requestSubmit();
   });
+  stopBtn.addEventListener("click", () => { if (currentAbort) currentAbort.abort(); });
 
   let busy = false;
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    if (busy) return;
-    const message = input.value.trim();
-    if (!message) return;
-    input.value = "";
-    autosize();
+  let currentAbort = null;
+  let lastMessage = "";
+
+  async function sendMessage(message) {
     suggestions.style.display = "none";
     add("user", message);
+    remember("user", message);
+    lastMessage = message;
     const reply = add("jarvis", "");
     setTyping(reply);
     busy = true;
-    sendBtn.disabled = true;
+    setBusy(true);
     let active;
     try {
       // Fornyer automatisk hvis grantet er i ferd med å utløpe - se ensureGrant().
@@ -527,19 +716,24 @@
     } catch (err) {
       reply.textContent = "Autorisering feilet: " + err.message;
       reply.classList.add("error");
-      busy = false; sendBtn.disabled = false;
+      busy = false; setBusy(false);
       return;
     }
     let text = "";
     let chip = null;
+    const usedTools = [];
+    let routed = "";
+    const abort = new AbortController();
+    currentAbort = abort;
+    const t0 = performance.now();
     try {
-      // D-131 funn 1: KUN grant-tokenet. `tenant_id`/`memory_space`/`channel`/
-      // `session_id` sendes ikke lenger - serveren leser dem ut av grant-raden,
+      // D-131 funn 1: KUN grant-tokenet. Serveren leser tenant/space/kanal/sesjon ut av grant-raden,
       // og /chat avviser en kropp med ukjente felter.
       const res = await fetch("/chat", {
         method: "POST",
         headers: { "content-type": "application/json", accept: "text/event-stream" },
-        body: JSON.stringify({ grant_token: active.grant_token, message })
+        body: JSON.stringify({ grant_token: active.grant_token, message }),
+        signal: abort.signal
       });
       if (!res.ok) { reply.textContent = "Feil: " + res.status + " " + await res.text(); reply.classList.add("error"); return; }
       const reader = res.body.getReader();
@@ -555,25 +749,55 @@
           const event = (frame.match(/^event: (.+)$/m) || [])[1];
           const data = JSON.parse((frame.match(/^data: (.+)$/m) || [])[1] || "{}");
           if (event === "token") { text += data.token; setRich(reply, text); }
-          if (event === "tool_call") { if (chip) chip.remove(); chip = showToolChip(data.tool_name || ""); }
+          if (event === "tool_call") {
+            if (chip) { chip.classList.add("done"); chip.textContent = chip.textContent.replace(/ …$/, ""); }
+            chip = showToolChip(reply, data.tool_name || "");
+            usedTools.push(data.tool_name || "");
+          }
           if (event === "error") { reply.textContent = "Feil: " + (data.message || "ukjent feil"); reply.classList.add("error"); }
           if (event === "done") {
-            if (chip) { chip.remove(); chip = null; }
+            if (chip) { chip.classList.add("done"); chip.textContent = chip.textContent.replace(/ …$/, ""); chip = null; }
             if (!text) { text = data.reply || ""; setRich(reply, text); }
             if (Array.isArray(data.confirmations)) data.confirmations.forEach(addConfirmation);
-            addMeta("rute: " + data.routed + (data.task_id ? " · jobb: " + data.task_id : ""));
+            routed = data.routed || "";
+            addMeta(reply, "rute: " + routed + " · " + ((performance.now() - t0) / 1000).toFixed(1) + " s" + (data.task_id ? " · jobb: " + data.task_id : ""));
+            if (routed) { routeChip.style.display = ""; routeText.textContent = routed; }
+            remember("jarvis", text, routed);
           }
         }
       }
     } catch (err) {
-      reply.textContent = "Nettverksfeil: " + err.message;
-      reply.classList.add("error");
+      if (abort.signal.aborted) {
+        if (!text) reply.textContent = "(stoppet)";
+        addMeta(reply, "stoppet av deg");
+        if (text) remember("jarvis", text, "");
+      } else {
+        reply.textContent = "Nettverksfeil: " + err.message;
+        reply.classList.add("error");
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.textContent = "prøv igjen";
+        retry.addEventListener("click", () => { if (!busy) void sendMessage(lastMessage); });
+        reply._meta.appendChild(retry);
+      }
     } finally {
       if (chip) chip.remove();
+      currentAbort = null;
       busy = false;
-      sendBtn.disabled = false;
+      setBusy(false);
+      tellShell({ busy: false, routed });
       input.focus();
     }
+  }
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (busy) return;
+    const message = input.value.trim();
+    if (!message) return;
+    input.value = "";
+    autosize();
+    void sendMessage(message);
   });
 </script>
 </body>
