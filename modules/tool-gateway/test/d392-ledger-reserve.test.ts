@@ -105,11 +105,11 @@ describe("D-392 JARVIS-004/022: reserve-then-execute", () => {
 
   it("en pool med EN forbindelse deadlocker ikke når transporten selv gjør et nøstet gateway-kall (JARVIS-022)", async () => {
     let nested: Awaited<ReturnType<ToolGateway["execute"]>> | undefined;
-    let gateway!: ToolGateway;
+    const holder: { gateway?: ToolGateway } = {};
     const transport: ToolTransport = {
       async invoke(action) {
         if (action === "create_event") {
-          nested = await gateway.execute({
+          nested = await holder.gateway!.execute({
             identity, tool_id: "calendar", action: "list_events",
             parameters: { from: new Date().toISOString(), to: new Date(Date.now() + 86_400_000).toISOString() }
           });
@@ -117,7 +117,8 @@ describe("D-392 JARVIS-004/022: reserve-then-execute", () => {
         return { external_id: "evt-nested", data: { events: [] } };
       }
     };
-    gateway = gatewayWith(smallPool, transport);
+    const gateway = gatewayWith(smallPool, transport);
+    holder.gateway = gateway;
     const result = await Promise.race([
       createEvent(gateway, params(), `k-${randomUUID()}`),
       new Promise<"deadlock">((resolve) => setTimeout(() => resolve("deadlock"), 8000))
