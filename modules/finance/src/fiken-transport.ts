@@ -55,6 +55,8 @@ const RETRYABLE_HTTP_STATUS: ReadonlySet<number> = new Set([429, 500, 502, 503, 
 const MAX_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 500;
 
+import { financeSignal, isRetrySafe } from "./http.ts";
+
 export class FikenApiError extends Error {
   constructor(
     message: string,
@@ -90,11 +92,25 @@ function classifyFikenErrorBody(rawBody: string): string {
  * `scripts/fiken-reauth.ts` bruker), ALDRI i form-kroppen slik den
  * opprinnelige D-107-implementasjonen gjorde.
  */
-export async function fikenAccessToken(refreshToken: string): Promise<string> {
+/**
+ * D-398 (JARVIS-097): tidligere én token-utveksling per Fiken-kall (og per transport-instans, som lages per operasjon). Access-tokenet caches nå i minnet
+ * (nøkkel = refresh-token; 60 s sikkerhetsmargin før utløp; parallelle kall deler én utveksling; feil caches aldri). Tokenet logges aldri.
+ */
+const fikenTokenCache = new Map<string, { token: string; expiresAtMs: number }>();
+const fikenTokenInflight = new Map<string, Promise<string>>();
+const FIKEN_TOKEN_MARGIN_MS = 60_000;
+const FIKEN_TOKEN_DEFAULT_TTL_S = 3600;
+export function resetFikenAccessTokenCache(): void {
+  fikenTokenCache.clear();
+  fikenTokenInflight.clear();
+}
+
+async function exchangeFikenAccessToken(refreshToken: string): Promise<{ token: string; ttlSeconds: number }> {
   const clientId = process.env["JARVIS_FIKEN_CLIENT_ID"];
   const clientSecret = process.env["JARVIS_FIKEN_CLIENT_SECRET"];
   if (!clientId || !clientSecret) throw new Error("fiken_oauth_client_not_configured");
   const response = await fetch(FIKEN_OAUTH_TOKEN_ENDPOINT, {
+        signal: financeSignal(),
     method: "POST",
     headers: { authorization: fikenBasicAuthHeader(clientId, clientSecret), "content-type": "application/x-www-form-urlencoded" },
     body: buildRefreshTokenExchangeBody(refreshToken)
@@ -103,7 +119,29 @@ export async function fikenAccessToken(refreshToken: string): Promise<string> {
     const rawBody = await response.text().catch(() => "");
     throw new FikenApiError(`fiken_auth_failed_${response.status}:${classifyFikenErrorBody(rawBody)}`, response.status, false);
   }
-  return ((await response.json()) as { access_token: string }).access_token;
+  const body = (await response.json()) as { access_token: string; expires_in?: number | string };
+  const ttl = Number(body.expires_in);
+  return { token: body.access_token, ttlSeconds: Number.isFinite(ttl) && ttl > 0 ? ttl : FIKEN_TOKEN_DEFAULT_TTL_S };
+}
+
+export async function fikenAccessToken(refreshToken: string): Promise<string> {
+  // Fail-closed FØR cachen: uten klient-credentials skal aldri et cachet token (fra tidligere konfigurasjon) slippe gjennom.
+  if (!process.env["JARVIS_FIKEN_CLIENT_ID"] || !process.env["JARVIS_FIKEN_CLIENT_SECRET"]) throw new Error("fiken_oauth_client_not_configured");
+  const cached = fikenTokenCache.get(refreshToken);
+  if (cached && cached.expiresAtMs - FIKEN_TOKEN_MARGIN_MS > Date.now()) return cached.token;
+  const pending = fikenTokenInflight.get(refreshToken);
+  if (pending) return pending;
+  const run = (async () => {
+    try {
+      const { token, ttlSeconds } = await exchangeFikenAccessToken(refreshToken);
+      fikenTokenCache.set(refreshToken, { token, expiresAtMs: Date.now() + ttlSeconds * 1000 });
+      return token;
+    } finally {
+      fikenTokenInflight.delete(refreshToken);
+    }
+  })();
+  fikenTokenInflight.set(refreshToken, run);
+  return run;
 }
 
 export interface FikenContact {
@@ -161,6 +199,7 @@ export class FikenTransport {
     let lastError: FikenApiError | null = null;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const response = await fetch(`${FIKEN_API_BASE}${path}`, {
+        signal: financeSignal(),
         method,
         headers: {
           authorization: `Bearer ${token}`,
@@ -174,7 +213,7 @@ export class FikenTransport {
         return (await response.json()) as T;
       }
       const rawBody = await response.text().catch(() => "");
-      const retryable = RETRYABLE_HTTP_STATUS.has(response.status);
+      const retryable = RETRYABLE_HTTP_STATUS.has(response.status) && isRetrySafe(method, response.status, false);
       lastError = new FikenApiError(`fiken_api_failed_${response.status}:${classifyFikenErrorBody(rawBody)}`, response.status, retryable);
       if (!retryable || attempt === MAX_ATTEMPTS) throw lastError;
       await sleep(BASE_BACKOFF_MS * 2 ** (attempt - 1));

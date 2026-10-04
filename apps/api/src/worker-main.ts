@@ -5,10 +5,10 @@ import { systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit } from "./owner.ts";
 import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
-import { assertProvidersHaveExplicitPricing, DEFAULT_PRICING, ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
+import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, ModelGateway, pricingFromEnv, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport, GmailTransport,
-  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, MeshToolExecutor, resolveModelToolSurface, PgGithubRateLimitStore,
+  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, MeshToolExecutor, resolveModelToolSurface, PgGithubRateLimitStore,
   ToolGateway, assertManifestInvariants, buildToolManifest, createTurnContext, driveTransportsIfConfigured, firstWaveTools, jobIdentityFor, telegramClassDNotifier, parseDockerMutationTargets, parseGceMutationTargets
 } from "@jarvis/tool-gateway";
 import { BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
@@ -49,9 +49,9 @@ import {
   withSecretRedaction
 } from "@jarvis/tasks";
 import { KnowledgeSourceRegistry, emailIngestHandler } from "@jarvis/knowledge";
-import { LocalHashEmbedding } from "@jarvis/memory";
+import { createEmbeddingProviderFromEnv } from "@jarvis/memory";
 import {
-  WatchdogEmergencyAlertSink, Watchdog, costExplosionCheck, databaseCheck, stuckTasksCheck,
+  WatchdogEmergencyAlertSink, Watchdog, costExplosionCheck, costWarningCheck, databaseCheck, stuckTasksCheck,
   parseWatchdogIntervalMs, parseCostHardLimitOre
 } from "@jarvis/watchdog";
 
@@ -68,6 +68,7 @@ try {
 }
 // Remediering del 2 (JARVIS-065): ÉN validert eier-identitet (fail closed uten) - ingen env-defaults for eier/tenant.
 const owner = ownerConfigOrExit();
+process.env["JARVIS_PROCESS"] ??= "worker"; // D-394 (JARVIS-054): audit-rader merkes med hvilken prosess som skrev dem
 const pool = createPool(configFromEnv());
 try {
   await assertRuntimeRoleSafe(pool);
@@ -82,6 +83,7 @@ const worker = new InProcessWorker(queue);
 const gateway = new ModelGateway({
   pool,
   trace: traceSinkFromEnv("var/worker-traces.jsonl"),
+  pricing: pricingFromEnv(), // D-399: se apps/api/src/main.ts
   providers: [
     new OpenAiAdapter(),
     new AnthropicAdapter(),
@@ -99,11 +101,14 @@ const gateway = new ModelGateway({
     new KimiAdapter(),
     new HermesAdapter(),
     new OllamaAdapter()
-  ]
+  ],
+  // D-395 (JARVIS-039): workeren hadde INGEN egen budsjettkonfig (falt tilbake til DEFAULT_BUDGET med spend_approved=false) - en godkjenning eieren ga
+  // i api gjaldt ikke her. Samme kilde som api: `budgetConfigFromEnv()`.
+  budget: budgetConfigFromEnv()
 });
 // JARVIS-006: hver konstruert adapter MÅ ha eksplisitt pris - ingen stille `default_rate`.
 try {
-  assertProvidersHaveExplicitPricing(DEFAULT_PRICING, gateway.listProviderNames());
+  assertProvidersHaveExplicitPricing(pricingFromEnv(), gateway.listProviderNames());
 } catch (err) {
   failStartup(err);
 }
@@ -316,6 +321,14 @@ const githubRateLimitController = new GithubRateLimitController(
 // for å fryses fra `process.env` ved oppstart (samme bug-klasse/fiks som
 // D-246 sine fem finans-connectorer).
 const telegramTransport = new TelegramTransport(() => toolSecretProvider.get("JARVIS_TELEGRAM_CHAT_ID"));
+// D-388: én delt Microsoft Graph-auth for OneDrive + Outlook (identisk med apps/api/src/main.ts).
+const microsoftGraphAuth = new MicrosoftGraphAuth({
+  refreshToken: () => toolSecretProvider.get("JARVIS_MICROSOFT_REFRESH_TOKEN"),
+  clientId: () => toolSecretProvider.get("JARVIS_MICROSOFT_CLIENT_ID"),
+  clientSecret: () => toolSecretProvider.get("JARVIS_MICROSOFT_CLIENT_SECRET"),
+  tenant: () => toolSecretProvider.get("JARVIS_MICROSOFT_TENANT_ID"),
+  persist: (value) => toolGateway.setSecret("JARVIS_MICROSOFT_REFRESH_TOKEN", value)
+});
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
   github: new GithubTransport(githubRateLimitController), telegram: telegramTransport,
@@ -350,17 +363,25 @@ for (const tool of firstWaveTools({
   // D-306: identisk wiring-mønster som apps/api/src/main.ts sin PrometheusTransport.
   prometheus: new PrometheusTransport(() => toolSecretProvider.get("JARVIS_PROMETHEUS_API_BASE_URL")),
   // D-307: identisk wiring-mønster som apps/api/src/main.ts sin DropboxTransport.
-  dropbox: new DropboxTransport(),
+  // D-388: identisk wiring-mønster som apps/api/src/main.ts (refresh-token + app-nøkkel via secret-kjeden).
+  dropbox: new DropboxTransport({
+    refreshToken: () => toolSecretProvider.get("JARVIS_DROPBOX_REFRESH_TOKEN"),
+    appKey: () => toolSecretProvider.get("JARVIS_DROPBOX_APP_KEY"),
+    appSecret: () => toolSecretProvider.get("JARVIS_DROPBOX_APP_SECRET")
+  }),
   // D-308: identisk wiring-mønster som apps/api/src/main.ts sin NotionTransport.
   notion: new NotionTransport(),
-  // D-309: identisk wiring-mønster som apps/api/src/main.ts sin OneDriveTransport.
-  onedrive: new OneDriveTransport(),
-  // D-310: identisk wiring-mønster som apps/api/src/main.ts sin MicrosoftOutlookTransport.
-  microsoft_outlook: new MicrosoftOutlookTransport(),
+  // D-388: identisk wiring-mønster som apps/api/src/main.ts - delt Microsoft Graph-auth for OneDrive + Outlook.
+  onedrive: new OneDriveTransport(microsoftGraphAuth),
+  microsoft_outlook: new MicrosoftOutlookTransport(microsoftGraphAuth),
   // D-311: identisk wiring-mønster som apps/api/src/main.ts sin N8nTransport.
   n8n: new N8nTransport(() => toolSecretProvider.get("JARVIS_N8N_API_BASE_URL")),
   // D-313: identisk wiring-mønster som apps/api/src/main.ts sin SpotifyTransport.
-  spotify: new SpotifyTransport(),
+  spotify: new SpotifyTransport({
+    clientId: () => toolSecretProvider.get("JARVIS_SPOTIFY_CLIENT_ID"),
+    clientSecret: () => toolSecretProvider.get("JARVIS_SPOTIFY_CLIENT_SECRET"),
+    persist: (value) => toolGateway.setSecret("JARVIS_SPOTIFY_REFRESH_TOKEN", value)
+  }),
   // D-314: identisk wiring-mønster som apps/api/src/main.ts sin WhatsAppTransport.
   whatsapp: new WhatsAppTransport(() => toolSecretProvider.get("JARVIS_WHATSAPP_PHONE_NUMBER_ID")),
   // D-315: identisk wiring-mønster som apps/api/src/main.ts sin MakeTransport.
@@ -396,7 +417,9 @@ for (const tool of firstWaveTools({
   // manglet en ekte transport her også - `VercelTransport` fantes aldri,
   // `transport("vercel")` falt derfor alltid tilbake til
   // `UnconfiguredHttpTransport("vercel")` (ubetinget `vercel_not_configured`).
-  vercel: new VercelTransport(),
+  vercel: new VercelTransport(() => toolSecretProvider.get("JARVIS_VERCEL_TEAM_ID")),
+  // D-388 (JARVIS-061): identisk wiring-mønster som apps/api/src/main.ts sin HomeAssistantTransport.
+  "home-assistant": new HomeAssistantTransport(() => toolSecretProvider.get("JARVIS_HA_BASE_URL"), () => toolSecretProvider.get("JARVIS_HA_ROOMS")),
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans gis til
   // BusinessTransport slik at sync_business_events kan kalle Gmail/Calendar
   // - identisk wiring-mønster som apps/api/src/main.ts.
@@ -445,7 +468,9 @@ for (const tool of firstWaveTools({
   // D-105 host-fix: samme wiring-mønster som apps/api/src/main.ts.
   dockerMutationTargets: parseDockerMutationTargets(process.env["JARVIS_DOCKER_MUTATION_TARGETS"]),
   // D-337: samme wiring-mønster som apps/api/src/main.ts.
-  gceMutationTargets: parseGceMutationTargets(process.env["JARVIS_GCE_MUTATION_TARGETS"])
+  gceMutationTargets: parseGceMutationTargets(process.env["JARVIS_GCE_MUTATION_TARGETS"]),
+  // D-388 (JARVIS-061): Home Assistant-verktøyene registreres med ekte transport - samme som apps/api/src/main.ts.
+  additionalTools: homeAssistantTools(new HomeAssistantTransport(() => toolSecretProvider.get("JARVIS_HA_BASE_URL"), () => toolSecretProvider.get("JARVIS_HA_ROOMS")))
 })) toolGateway.register(tool);
 // REMEDIERING DEL 1 (JARVIS-002): SAMME eksplisitte lese-minimumssett som
 // apps/api/src/main.ts (`MODEL_SURFACE_ALLOWLIST`), begrenset til det som er
@@ -503,7 +528,7 @@ toolGateway.setClassDNotifier(telegramClassDNotifier({
 const watchdogAlertSink = new WatchdogEmergencyAlertSink(telegramTransport, toolSecretProvider);
 const watchdog = new Watchdog(watchdogAlertSink, killSwitch);
 watchdog.register(databaseCheck(pool));
-watchdog.register(stuckTasksCheck(pool));
+watchdog.register(stuckTasksCheck(pool, owner.tenant_id));
 // D-187 (BLOCKER B2, arkitekt-order D187 mot PR #96): begge miljøvariablene
 // valideres FØR bruk - `parseCostHardLimitOre`/`parseWatchdogIntervalMs`
 // kaster ved enhver eksplisitt oppgitt, ugyldig verdi (fail-closed oppstart)
@@ -523,6 +548,8 @@ watchdog.register(
     parseCostHardLimitOre(process.env["JARVIS_COST_HARD_LIMIT_ORE"])
   )
 );
+// D-395 (JARVIS-039): varsel ved varselgrensen (tidligere kun et internt nivå som aldri nådde eieren).
+watchdog.register(costWarningCheck(pool, owner.tenant_id, budgetConfigFromEnv().warn_ore));
 const WATCHDOG_INTERVAL_MS = parseWatchdogIntervalMs(process.env["JARVIS_WATCHDOG_INTERVAL_MS"]);
 setInterval(
   () =>
@@ -636,7 +663,8 @@ const knowledgeRegistry = new KnowledgeSourceRegistry([
 worker.register(
   "knowledge-ingest-email",
   emailIngestHandler({
-    pool, toolGateway, embeddings: new LocalHashEmbedding(), visionGateway: gateway, registry: knowledgeRegistry
+    pool, toolGateway, // D-396 (JARVIS-031): samme embedding-leverandør som api (env-styrt) - ikke en hardkodet LocalHashEmbedding i workeren.
+    embeddings: createEmbeddingProviderFromEnv(), visionGateway: gateway, registry: knowledgeRegistry
   })
 );
 

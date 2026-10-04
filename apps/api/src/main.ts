@@ -20,7 +20,8 @@ import {
   configFromEnv,
   createPool,
   ConfirmationStore,
-  runMigrations,
+  runMigrationsAsAdmin,
+  runOperationalRetentionSweep,
   withTenantTransaction,
   writeAudit
 } from "@jarvis/core";
@@ -29,8 +30,9 @@ import { DeploymentService, DiagnosisService, IncidentService } from "@jarvis/in
 import {
   AiCouncil,
   assertProvidersHaveExplicitPricing,
-  DEFAULT_PRICING,
+  pricingFromEnv,
   ModelGateway,
+  budgetConfigFromEnv,
   traceSinkFromEnv
 } from "@jarvis/model-gateway";
 import {
@@ -58,7 +60,7 @@ import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport,
   CHAT_ACT_TIER, CHAT_READ_TIER, GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, assertManifestInvariants, buildToolManifest, describeSurfaceCatalog, memoryToolDefinitions, selectSurfaceTools,
   MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, resolveModelToolSurface, PgGithubRateLimitStore,
-  PgTelegramOffsetStore, TelegramCommandPoller, createTurnContext, jobIdentityFor, telegramClassDNotifier, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
+  PgTelegramOffsetStore, TelegramCommandPoller, createTurnContext, jobIdentityFor, telegramClassDNotifier, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
 import {
@@ -102,7 +104,7 @@ import {
 import { ConversationEngine } from "./conversation.ts";
 import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
-import { createApiServer, type ApiDeps } from "./server.ts";
+import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
 
 const port = envPort("JARVIS_API_PORT", 3010);
 
@@ -117,10 +119,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   assertRuntimeCredentialsConfigured();
   // Remediering del 2 (JARVIS-065): ÉN validert eier-identitet for hele prosessen (fail closed uten).
   const owner = ownerConfigOrExit();
+  process.env["JARVIS_PROCESS"] ??= "api"; // D-394 (JARVIS-054): audit-rader merkes med hvilken prosess som skrev dem
   const pool = createPool(configFromEnv());
-  // Migrasjoner kjøres av admin-bruker i drift; her antas app-bruker å ha skjema fra før.
+  // Migrasjoner kjøres av admin-bruker i drift (compose: `migrate`-tjenesten); her antas app-bruker å ha skjema fra før.
+  // D-395 (JARVIS-075): flagget kjører migratoren med ADMIN-konfig i en egen, kortlivet pool - aldri med runtime-rollen (Q-21) - og feiler
+  // lukket uten JARVIS_DB_ADMIN_PASSWORD.
   if (process.env["JARVIS_DB_RUN_MIGRATIONS"] === "true") {
-    await runMigrations(pool);
+    await runMigrationsAsAdmin();
   }
   // Q-21: appen skal ALDRI starte normalt med en superuser/BYPASSRLS-tilkobling - RLS
   // er strukturelt umulig å håndheve for en slik rolle, uansett hvor korrekte policyene er.
@@ -202,6 +207,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const gateway = new ModelGateway({
     pool,
     trace,
+    // D-399: eier-bekreftede modellpriser (JARVIS_MODEL_PRICING) flettes over standardtabellen - nødvendig for at dyrere modeller skal være valgbare per kall.
+    pricing: pricingFromEnv(),
     providers: [
       // D-79 (AI Mesh Gemma-first): gemma_hosted/local_llm registreres alltid,
       // som alle andre adaptere - `.available()` (nøkkel/URL satt) avgjør om de
@@ -244,15 +251,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // + ingen ekte lokal provider NÅ ærlig med `PaidModelsDisabledError`
       // (router.ts) - en strukturert, auditerbar feil, ALDRI et falskt svar.
     ],
-    budget: {
-      warn_ore: 100_000,
-      approval_ore: 200_000,
-      hard_limit_ore: 300_000,
-      spend_approved: process.env["JARVIS_BUDGET_APPROVED"] === "true"
-    }
+    // D-395 (JARVIS-039): samme budsjettkilde som workeren (`budgetConfigFromEnv`) - tidligere hardkodet her og med `DEFAULT_BUDGET` i workeren.
+    budget: budgetConfigFromEnv()
   });
   // JARVIS-006: hver konstruert adapter MÅ ha eksplisitt pris - ingen stille `default_rate`.
-  assertProvidersHaveExplicitPricing(DEFAULT_PRICING, gateway.listProviderNames());
+  assertProvidersHaveExplicitPricing(pricingFromEnv(), gateway.listProviderNames());
   // D-106 (AI Mesh Council/Collaboration/lokal-Gemma-utvidelse): egen
   // orkestrering over SAMME `gateway`/`pool` - ingen ny modellkall-vei, ingen
   // ny sikkerhetsvei (hvert Council-medlemsanrop går via `gateway.complete()`
@@ -402,7 +405,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       return { secretKey };
     }
   };
-  const stripeWebhookSecretProvider = () => process.env["JARVIS_STRIPE_WEBHOOK_SECRET"] ?? null;
+  // D-394 (JARVIS-056): webhook-hemmeligheter leses via den delte kjeden (Infisical-primær, .env-fallback) - samme som øvrige credentials -
+  // slik at «lim inn ny verdi» i dashbordet faktisk gjelder, i stedet for at en rotert hemmelighet ble liggende i `process.env` til omstart.
+  const stripeWebhookSecretProvider = async () => (await readSecretProvider.get("JARVIS_STRIPE_WEBHOOK_SECRET")) ?? null;
   const stripeTenantResolver = () => process.env["JARVIS_STRIPE_TENANT_ID"] ?? null;
   // D-110 (UA-6 Slice 4): SAMME "ETT globalt eier-tilkoblet credential-sett"-
   // mønster som Stripe over - INGEN tenant-parametrisert multi-MSN-oppslag
@@ -417,7 +422,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       return { clientId, clientSecret, subscriptionKey, merchantSerialNumber, environment: process.env["JARVIS_VIPPS_ENVIRONMENT"] === "production" ? "production" : "test" };
     }
   };
-  const vippsWebhookSecretProvider = () => process.env["JARVIS_VIPPS_WEBHOOK_SECRET"] ?? null;
+  const vippsWebhookSecretProvider = async () => (await readSecretProvider.get("JARVIS_VIPPS_WEBHOOK_SECRET")) ?? null;
   const vippsTenantResolver = () => process.env["JARVIS_VIPPS_TENANT_ID"] ?? null;
   // D-111 (UA-6 Slice 5): SAMME "ETT globalt eier-tilkoblet credential-sett"-
   // mønster - ett Neonomics-kundeforhold, en Jarvis-stabil x-device-id.
@@ -434,7 +439,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       };
     }
   };
-  const neonomicsWebhookApiKeyProvider = () => process.env["JARVIS_NEONOMICS_WEBHOOK_API_KEY"] ?? null;
+  const neonomicsWebhookApiKeyProvider = async () => (await readSecretProvider.get("JARVIS_NEONOMICS_WEBHOOK_API_KEY")) ?? null;
   const neonomicsTenantResolver = () => process.env["JARVIS_NEONOMICS_TENANT_ID"] ?? null;
   // D-112 (UA-6 Slice 6), korrigert owner-provided primary-source-audit
   // (PR #62 runde 4): SAMME "ETT globalt eier-tilkoblet credential-sett"-
@@ -584,6 +589,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // startes IKKE, `self_modification.*` registreres IKKE i ToolGateway og
   // Telegram-kommandoene `/godkjenn`/`/avvis` har ingen handler. Modulen
   // `@jarvis/self-modification` ligger urørt og dormant i repoet.
+  // D-388: én delt Microsoft Graph-auth for OneDrive + Outlook (se wiring under).
+  const microsoftGraphAuth = new MicrosoftGraphAuth({
+    refreshToken: () => readSecretProvider.get("JARVIS_MICROSOFT_REFRESH_TOKEN"),
+    clientId: () => readSecretProvider.get("JARVIS_MICROSOFT_CLIENT_ID"),
+    clientSecret: () => readSecretProvider.get("JARVIS_MICROSOFT_CLIENT_SECRET"),
+    tenant: () => readSecretProvider.get("JARVIS_MICROSOFT_TENANT_ID"),
+    persist: (value) => toolGateway.setSecret("JARVIS_MICROSOFT_REFRESH_TOKEN", value)
+  });
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(githubRateLimitController),
@@ -659,7 +672,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // over - Dropbox sender `path` som et vanlig handlingsparameter per
     // kall, ingen resolver-closure nødvendig (ETT fast access-token, INGEN
     // OAuth-refresh-flyt som Google-familien).
-    dropbox: new DropboxTransport(),
+    // D-388: Dropbox-tokens er kortlivede - refresh-token + app-nøkkel/-hemmelighet via secret-kjeden gir automatisk
+    // fornyelse (cachet i minnet); uten refresh-konfig brukes `JARVIS_DROPBOX_TOKEN` statisk som før.
+    dropbox: new DropboxTransport({
+      refreshToken: () => readSecretProvider.get("JARVIS_DROPBOX_REFRESH_TOKEN"),
+      appKey: () => readSecretProvider.get("JARVIS_DROPBOX_APP_KEY"),
+      appSecret: () => readSecretProvider.get("JARVIS_DROPBOX_APP_SECRET")
+    }),
     // D-308: ren tom-konstruktør, samme mønster som Dropbox over - Notion
     // sender `Notion-Version` som en FAST header inni transporten selv
     // (ingen resolver-closure nødvendig, ETT fast integrasjonstoken).
@@ -667,17 +686,22 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // D-309: ren tom-konstruktør, samme mønster som Dropbox/Notion over -
     // OneDrive sender `path`/`name` som vanlige handlingsparametere per
     // kall, ingen resolver-closure nødvendig.
-    onedrive: new OneDriveTransport(),
-    // D-310: ren tom-konstruktør, samme mønster som OneDrive over -
-    // Microsoft Outlook sender parametere per handling, ingen
-    // resolver-closure nødvendig.
-    microsoft_outlook: new MicrosoftOutlookTransport(),
+    // D-388: OneDrive og Outlook deler ÉN Microsoft Graph-auth (refresh-token + app-registrering + tenant via
+    // secret-kjeden). Microsoft roterer refresh-tokenet i hvert svar - det nye skrives tilbake via
+    // `toolGateway.setSecret()` (Infisical). Uten refresh-konfig brukes de statiske tokenene som før.
+    onedrive: new OneDriveTransport(microsoftGraphAuth),
+    microsoft_outlook: new MicrosoftOutlookTransport(microsoftGraphAuth),
     // D-311: SAMME resolver-mot-readSecretProvider-mønster som Grafana/
     // Prometheus - n8n er også typisk selv-hostet.
     n8n: new N8nTransport(() => readSecretProvider.get("JARVIS_N8N_API_BASE_URL")),
     // D-313: tom konstruktør - `client_id`/`client_secret` leses direkte fra
     // env inne i `spotifyAccessToken()` (delt app-konfig, ikke en resolver).
-    spotify: new SpotifyTransport(),
+    // D-388: client_id/secret via secret-kjeden (ikke fryst fra env), access-token cachet, rotert refresh-token persisteres.
+    spotify: new SpotifyTransport({
+      clientId: () => readSecretProvider.get("JARVIS_SPOTIFY_CLIENT_ID"),
+      clientSecret: () => readSecretProvider.get("JARVIS_SPOTIFY_CLIENT_SECRET"),
+      persist: (value) => toolGateway.setSecret("JARVIS_SPOTIFY_REFRESH_TOKEN", value)
+    }),
     // D-314: `phone_number_id` er Jarvis sin egen avsenderidentitet - SAMME
     // resolver-mot-readSecretProvider-mønster som Telegram sin chat_id.
     whatsapp: new WhatsAppTransport(() => readSecretProvider.get("JARVIS_WHATSAPP_PHONE_NUMBER_ID")),
@@ -742,7 +766,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // (ubetinget `vercel_not_configured`), uansett credential-tilstand (se
     // `live-transports.ts` sin `VercelTransport`-doc-kommentar for full
     // begrunnelse).
-    vercel: new VercelTransport(),
+    // D-388: valgfri team-kontekst (`teamId` på alle kall) via secret-kjeden.
+    vercel: new VercelTransport(() => readSecretProvider.get("JARVIS_VERCEL_TEAM_ID")),
+    // D-388 (JARVIS-061): ekte Home Assistant-transport - base-URL + romkart via secret-kjeden, token via credential_ref.
+    "home-assistant": new HomeAssistantTransport(() => readSecretProvider.get("JARVIS_HA_BASE_URL"), () => readSecretProvider.get("JARVIS_HA_ROOMS")),
     // D-90 (UA-4 NESTE SLICE): Business OS × Marketing Memory-integrasjon -
     // `marketingMemoryBriefSource(growthService)` injiseres her (app-laget,
     // som allerede har BEGGE tjenestene) i stedet for at `@jarvis/business`
@@ -853,6 +880,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // selv bruker - IKKE en kopi. Registrert i SAMME liste/løkke som
     // `situations`/`executive`, ingen parallell registreringsvei.
     additionalTools: [
+      // D-388 (JARVIS-061): Home Assistant-verktøyene (definert siden fase 9, aldri registrert) registreres nå med den
+      // ekte transporten fra `transports`-recorden over - samme ene register-løkke som resten.
+      ...homeAssistantTools(new HomeAssistantTransport(() => readSecretProvider.get("JARVIS_HA_BASE_URL"), () => readSecretProvider.get("JARVIS_HA_ROOMS"))),
       ...situationsToolDefinitions(new SituationsTransport(situationEngine, situationDomainPauses)),
       ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, { modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES, ...CHAT_READ_TIER, ...CHAT_ACT_TIER] }))),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
@@ -1015,8 +1045,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       ),
       // D-383: Charlie vet alltid hvilke tjenester som finnes på flaten (ikke bare de skjemaene som er vedlagt denne runden).
       catalog: (surface) => describeSurfaceCatalog(modelToolSurface, surface).text,
-      select: ({ surface, text }) => {
-        const selection = selectSurfaceTools(surface, text, modelToolSurface);
+      select: ({ surface, text, recent_owner_messages }) => {
+        // D-389: eierens forrige meldinger gir kontekst til utvalget (oppfølgingsspørsmål beholder tjenesten).
+        const selection = selectSurfaceTools(surface, text, modelToolSurface, { recent_owner_messages: recent_owner_messages ?? [] });
         return {
           definitions: selection.selected.map((m) => m.def),
           limits: selection.limits,
@@ -1029,6 +1060,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     personality: loadPersonalityConfig
   });
   const deps: ApiDeps = {
+    // D-393 (JARVIS-026): `/health` svarer 503 når databasen ikke svarer (tidligere konstant «ok»).
+    readiness: makeReadiness({ database: () => pool.query("SELECT 1") }),
     // Del 2 (JARVIS-065): den validerte eier-identiteten fyller visningsfeltene i /chat, /dashboard og /voice
     // (aldri autoritet - den kommer fra et verifisert grant). Uten denne svarer sidene 503 `owner_not_configured`.
     owner: { tenant_id: owner.tenant_id, person_id: owner.owner_person_id },
@@ -1120,13 +1153,17 @@ Critic     ${mesh.critic}`;
   const statusText = async () => {
     const gates = [...toolGateway.health.entries()].map(([k, v]) => `${k}:${v.state}`).join(" ");
     return `JARVIS STATUS
-fase: v4.0 UA-1 P1A + D-30 voice foundation
+miljø: ${process.env["JARVIS_ENV"] ?? "dev"}
 connectors: ${gates || "ingen kall enda"}
 ${await aiMeshText()}
 ${await voiceText()}
 porter: se docs/RUNTIME_GATES.md`;
   };
-  if (process.env["JARVIS_TELEGRAM_TOKEN"] && process.env["JARVIS_TELEGRAM_CHAT_ID"]) {
+  // D-394 (JARVIS-056): Telegram-token/chat-id leses via den delte kjeden (Infisical-primær, .env-fallback) - tidligere kun `process.env`, så en
+  // token limt inn i dashbordet var usynlig for polleren (split-brain mot `telegram.notify`-verktøyet som allerede brukte kjeden).
+  const telegramToken = (await readSecretProvider.get("JARVIS_TELEGRAM_TOKEN")) ?? undefined;
+  const telegramChatId = (await readSecretProvider.get("JARVIS_TELEGRAM_CHAT_ID")) ?? undefined;
+  if (telegramToken && telegramChatId) {
     // D-125 (UA-7, FEMTE slice): den betrodde server-side eier-autoriteten for
     // inngående Telegram. HVER verdi kommer fra prosessens egen konfigurasjon
     // og fra `seedOwner()`-radene (`apps/api/src/seed.ts`) - INGEN av dem kan
@@ -1136,7 +1173,7 @@ porter: se docs/RUNTIME_GATES.md`;
     const telegramOwnerAuthority = new TelegramOwnerAuthority(
       { sessions: sessionService, identity: identityService },
       {
-        owner_chat_id: process.env["JARVIS_TELEGRAM_CHAT_ID"],
+        owner_chat_id: telegramChatId,
         tenant_id: owner.tenant_id,
         person_id: owner.owner_person_id,
         // Tjeneste-enheten denne prosessen allerede ER seedet som.
@@ -1144,7 +1181,7 @@ porter: se docs/RUNTIME_GATES.md`;
         memory_space: "personal"
       }
     );
-    new TelegramCommandPoller(process.env["JARVIS_TELEGRAM_TOKEN"], process.env["JARVIS_TELEGRAM_CHAT_ID"], {
+    new TelegramCommandPoller(telegramToken, telegramChatId, {
       brief: async () => DailyBrief.render(await dailyBrief.generate(ownerIdentity as never)),
       status: statusText,
       ai: aiMeshText,
@@ -1181,7 +1218,7 @@ porter: se docs/RUNTIME_GATES.md`;
     }, sendTelegram, {
       // Del 3 (JARVIS-024): holdbar offset (restart spiller ikke av meldinger), fetch-timeout (standard i polleren) og
       // varsling - polleren logger HVER feil strukturert; en vedvarende feil (3 på rad, deretter hver 30.) får i tillegg en audit-rad.
-      offsetStore: new PgTelegramOffsetStore(pool, process.env["JARVIS_TELEGRAM_TOKEN"]),
+      offsetStore: new PgTelegramOffsetStore(pool, telegramToken),
       onFailure: (failure) => {
         if (failure.consecutive !== 3 && failure.consecutive % 30 !== 0) return;
         void withTenantTransaction(pool, owner.tenant_id, (client) =>
@@ -1407,6 +1444,15 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "memory-profile-sweep", envHour("JARVIS_MEMORY_PROFILE_SWEEP_HOUR", 4)
   ).start(() => runMemoryProfileSweepForAllTenants(pool).then(() => undefined));
+  // D-395 (JARVIS-074): daglig oppbevaring for driftsrader som ellers vokser uten grense (utløpte godkjenninger/grants/billetter, ferdige
+  // verktøyutføringer, gamle scheduler-rader). All sletting skjer i `prune_operational_data()` (SECURITY DEFINER, faste gulv i RLS-policyene);
+  // runtime-rollen har kun EXECUTE. Revisjon/hendelser/kostnadsledger berøres ikke (eierbeslutning).
+  new DailyScheduler(
+    pool, "operational-retention-sweep", envHour("JARVIS_OPERATIONAL_RETENTION_SWEEP_HOUR", 3)
+  ).start(async () => {
+    const result = await runOperationalRetentionSweep(pool);
+    console.log(JSON.stringify({ msg: "operational_retention_sweep_completed", ...result }));
+  });
   if (memoryEmbedding.model !== "local-hash-v1") {
     setTimeout(() => {
       runMemoryReembedSweepForAllTenants(pool, memoryEmbedding, { maxRows: 500 }).catch((err: unknown) => {

@@ -98,7 +98,7 @@ export class EmailAttachmentKnowledgeSource implements KnowledgeSource {
   }
 
   async list(): Promise<KnowledgeListResult> {
-    const messages = await this.fetchMessages();
+    const { messages } = await this.fetchMessages();
     const records: KnowledgeRecord[] = [];
     const skipped: SkippedRecord[] = [];
 
@@ -122,14 +122,16 @@ export class EmailAttachmentKnowledgeSource implements KnowledgeSource {
         skipped.push(...outcome.skipped);
       }
     }
-    return { records, skipped };
+    // D-396 (JARVIS-032): e-postlistingen er ALLTID et vindu (`query` = f.eks. siste 14 dager, `max` = tak) - eldre meldinger er ikke «slettet» selv om de
+    // ikke er med. Derfor `partial`: sync tombstoner aldri e-postdokumenter ut fra fravær i vinduet - KUN vedlegg/sider som mangler i en melding som FAKTISK ble listet (`tombstone_scope`).
+    return { records, skipped, listing: "partial", tombstone_scope: { metadata_key: "message_id", values: messages.map((m) => m.id) } };
   }
 
   private canonicalUri(messageId: string): string {
     return `https://mail.google.com/mail/u/0/#all/${messageId}`;
   }
 
-  private async fetchMessages(): Promise<GmailMessageSummary[]> {
+  private async fetchMessages(): Promise<{ messages: GmailMessageSummary[]; truncated: boolean }> {
     const result = await this.toolGateway.execute({
       identity: this.identity, tool_id: "email", action: "list_messages",
       parameters: { max: this.listParams.max ?? 15, ...(this.listParams.query ? { query: this.listParams.query } : {}) }
@@ -137,8 +139,8 @@ export class EmailAttachmentKnowledgeSource implements KnowledgeSource {
     if (!result.ok) {
       throw new KnowledgeSourceError(classifyToolFailure(result.reason), `email_list_messages_failed: ${result.reason}`);
     }
-    const body = result.data as { messages: GmailMessageSummary[] } | undefined;
-    return body?.messages ?? [];
+    const body = result.data as { messages: GmailMessageSummary[]; truncated?: boolean } | undefined;
+    return { messages: body?.messages ?? [], truncated: body?.truncated === true };
   }
 
   private buildTextRecord(

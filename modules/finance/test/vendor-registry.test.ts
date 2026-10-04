@@ -262,15 +262,6 @@ describe("10: retry/idempotency uendret", () => {
   });
 });
 
-describe("11: provider transport kalles 0 ganger ved mismatch", () => {
-  it("aggregert på tvers av 2/3/4/5 - fikenCalls forblir 0 for ALLE mismatch-klassene i denne suiten", () => {
-    // Selve nulltellingen er allerede bevist PER scenario over (2,3,4,5,6,8,9) -
-    // denne testen dokumenterer eksplisitt at kravet er dekket på tvers av
-    // HELE mismatch-flaten, ikke kun én isolert sti.
-    expect(true).toBe(true);
-  });
-});
-
 describe("12: finance kill switch uendret", () => {
   it("nødbryteren blokkerer FORTSATT en vendor-korrekt intent FØR vendor-gaten i det hele tatt nås", async () => {
     const vendor = await makeVendor(TENANT_A, "Kill Switch Vendor");

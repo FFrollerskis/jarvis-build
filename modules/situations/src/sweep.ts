@@ -70,7 +70,7 @@ export interface SituationSweepResult {
   errors: string[];
 }
 
-const emptyDelivery = (): InformDeliveryResult => ({ delivered: 0, reconciled_from_evidence: 0, pending: 0, evidence_mismatch: 0 });
+const emptyDelivery = (): InformDeliveryResult => ({ delivered: 0, reconciled_from_evidence: 0, pending: 0, evidence_mismatch: 0, deferred: 0, paused: 0 });
 const emptyAutoAct = (): AutoActResult => ({ attempted: 0, succeeded: 0, denied: 0, skipped: 0 });
 const describe = (err: unknown): string => (err instanceof Error ? `${err.name}:${err.message.slice(0, 120)}` : "unknown_error");
 

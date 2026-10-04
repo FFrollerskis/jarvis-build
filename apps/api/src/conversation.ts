@@ -1,7 +1,8 @@
-import type { IdentityContext } from "@jarvis/contracts";
+import { envInt, type IdentityContext } from "@jarvis/contracts";
 import { ContextBuilder, MessageStore, describeSecretFindings, fastRoute, scanForSecrets } from "@jarvis/core";
 import {
   BudgetExceededError,
+  CouncilAutoTriggerLimiter,
   classifyContentSensitivity,
   partitionHistoryBySensitivity,
   classifyDecisionImportance,
@@ -28,6 +29,8 @@ export interface ConversationDeps {
   tasks: TaskService;
   worker: InProcessWorker;
   trace: TraceSink;
+  /** D-395: injiserbar begrenser for automatisk råd-trigger (tester); default bygges fra JARVIS_COUNCIL_AUTO_MAX_PER_HOUR. */
+  councilAutoLimiter?: CouncilAutoTriggerLimiter;
   /** Fase 4: hybridminne-kontekst med kildeangivelse (kun gjeldende space). */
   memory?: {
     contextFor(identity: IdentityContext, userText: string): Promise<string>;
@@ -67,7 +70,7 @@ export interface ConversationDeps {
      * Del 3 (JARVIS-002/028): deterministisk per-flate utvalg av verktøy for DENNE turen (hard allowlist per flate + intensjon + grenser).
      * Når satt brukes den i stedet for `definitions` (som da kun er referansen/øvre grense). Tomt utvalg => ingen verktøy i runden.
      */
-    select?(input: { surface: Surface; text: string }): { definitions: ToolDefinition[]; limits: SurfaceLimits; min_sensitivity?: "SECRET_RESTRICTED" };
+    select?(input: { surface: Surface; text: string; recent_owner_messages?: string[] }): { definitions: ToolDefinition[]; limits: SurfaceLimits; min_sensitivity?: "SECRET_RESTRICTED" };
     /** D-383: kompakt katalog over tjenestene modellen kan bruke på flaten (settes i systemprompten hver tur). */
     catalog?(surface: Surface): string;
   };
@@ -154,16 +157,25 @@ function buildSystemPrompt(personality: PersonalityConfig, context: { surface: S
     `Du er Charlie - Tobias og familien sin egen AI, kjønnsnøytral, med en ekte personlighet: ` +
     `${personality.tone_descriptors.join(", ")}. ${personality.style_notes} `;
   // D-382: tale er muntlig - kort, uten lister/markdown/lenker/ID-er (TTS leser alt høyt).
+  // D-390: det viktigste først, hele ord (TTS leser forkortelser/symboler dårlig), aldri gjenta spørsmålet.
   const voiceStyle = context.surface === "voice"
-    ? "Dette er en TALESAMTALE: svar kort (1-3 setninger), naturlig muntlig norsk, ingen lister, markdown, lenker, kodeblokker eller ID-er. "
+    ? "Dette er en TALESAMTALE: svar kort (1-3 setninger), naturlig muntlig norsk, det viktigste først, uten å gjenta spørsmålet; " +
+      "bruk hele ord i stedet for forkortelser og symboler (si «klokka halv sju», «tjue prosent», «for eksempel»); " +
+      "ingen lister, markdown, lenker, kodeblokker eller ID-er. "
     : "";
   // D-383: katalog + spilleregler for verktøy - alltid med, uavhengig av hvilke skjema som er vedlagt akkurat denne runden.
+  // D-389: tydeligere spilleregler - bruk verktøy aktivt (handlinger er trygge fordi de alltid går via bekreftelse), følg opp
+  // verktøyresultater med neste steg, og gjengi feilforklaringen (`message`) når noe feiler i stedet for å gjette.
   const capabilities = context.catalog
-    ? `Tjenester du kan bruke i denne samtalen (lese = hente informasjon, handle = opprette/oppdatere/sende/synkronisere): ${context.catalog}. ` +
-      "Verktøyskjemaene vedlagt denne runden er valgt ut fra Tobias sin melding - trenger du en annen tjeneste fra listen, si hvilken " +
-      "og be om presisering i stedet for å påstå at du mangler tilgang. " +
+    ? `Tjenester du kan bruke i denne samtalen (lese = hente informasjon, handle = opprette/oppdatere/sende/synkronisere; i klammer står hverdagsord Tobias bruker om dem): ${context.catalog}. ` +
+      "Verktøyskjemaene vedlagt denne runden er valgt ut fra Tobias sin melding (og tjenestene fra meldingene like før) - trenger du en annen tjeneste fra listen, " +
+      "si hvilken og be om presisering i stedet for å påstå at du mangler tilgang. " +
+      "Bruk verktøyene aktivt: ber Tobias om noe en tjeneste kan gjøre, kall verktøyet med en gang i stedet for å spørre om lov eller beskrive hva du kunne gjort; " +
+      "trenger du en id (sak, fil, enhet, rom), hent den med en liste-/søkehandling først og gå så videre i samme svar. " +
       "Alle handlinger som endrer noe utføres KUN etter at Tobias har godkjent en bekreftelse i chatten/dashbordet: når et verktøy svarer " +
       "confirmation_required, forklar kort hva som vil skje og be ham godkjenne - kall IKKE verktøyet på nytt. " +
+      "Feiler et verktøy, får du en forklaring i feltet message (hva som gikk galt og hva Tobias kan gjøre, f.eks. legge inn en nøkkel under Integrasjoner): " +
+      "gjengi den kort på vanlig norsk, og følg retry-feltet (never = ikke prøv igjen, later = ikke i denne turen, with_corrected_parameters = én gang til med rettede felt). " +
       "Du kan ALDRI: betale, slette permanent, slå sammen kode (merge), styre servere, endre sikkerhets-/eierinnstillinger eller handle via Telegram - " +
       "slike ting gjør Tobias selv i dashbordet. "
     : "";
@@ -198,7 +210,12 @@ const SAFETY_CRITICAL_SUFFIX =
  * sesjonshistorikken; rask bane spores i trace (akseptanse 4).
  */
 export class ConversationEngine {
-  constructor(private readonly deps: ConversationDeps) {}
+  /** D-395 (JARVIS-078): tak for AUTOMATISK råd-trigger (eksplisitt eier-bestilling er aldri begrenset). Default 3 per time per tenant. */
+  private readonly councilAutoLimiter: CouncilAutoTriggerLimiter;
+
+  constructor(private readonly deps: ConversationDeps) {
+    this.councilAutoLimiter = deps.councilAutoLimiter ?? new CouncilAutoTriggerLimiter(envInt("JARVIS_COUNCIL_AUTO_MAX_PER_HOUR", 3, { min: 1, max: 100 }));
+  }
 
   private loadPersonality(): PersonalityConfig {
     if (!this.deps.personality) return DEFAULT_PERSONALITY_CONFIG;
@@ -353,7 +370,27 @@ export class ConversationEngine {
         : classification.decision_importance === "HIGH_IMPACT_DECISION"
           ? "high_impact_classifier"
           : undefined;
-      if (triggerSource) {
+      // D-395 (JARVIS-078): (1) uten konfigurert råd skal en AUTOMATISK klassifisering ikke erstatte svaret på spørsmålet med en feilmelding - da faller
+      // meldingen gjennom til vanlig samtale; (2) automatisk trigger har kostnadstak (glidende time) - over taket faller den også gjennom, med revisjonsspor.
+      let councilAllowed = true;
+      if (triggerSource === "high_impact_classifier") {
+        if (!this.deps.council) {
+          councilAllowed = false;
+        } else if (!this.councilAutoLimiter.tryAcquire(identity.tenant_id)) {
+          councilAllowed = false;
+          await this.deps.trace.record({
+            trace_id: `trace-${randomUUID()}`,
+            kind: "council_suppressed",
+            name: "auto_trigger_rate_limited",
+            tenant_id: identity.tenant_id,
+            session_id: identity.session_id,
+            at: new Date().toISOString(),
+            duration_ms: 0,
+            metadata: { decision_importance: classification.decision_importance, trigger_reasons: classification.trigger_reasons }
+          });
+        }
+      }
+      if (triggerSource && councilAllowed) {
         return this.runCouncil(identity, text, triggerSource, classification, override, onToken);
       }
     }
@@ -433,7 +470,10 @@ export class ConversationEngine {
         override?.providerPreference === undefined &&
         override?.mode === undefined;
       // Del 3: per-flate utvalg + grenser (runder/kall per runde). Uten `select` brukes hele `definitions` (legacy/test).
-      const selection = this.deps.tools?.select?.({ surface, text });
+      // D-389: eierens egne forrige meldinger (aldri modell-/verktøytekst) følger med, så et oppfølgingsspørsmål beholder tjenesten.
+      const ownerTurns = fullHistory.filter((m) => m.role === "user").map((m) => m.content);
+      if (ownerTurns.length > 0 && ownerTurns[ownerTurns.length - 1] === text) ownerTurns.pop();
+      const selection = this.deps.tools?.select?.({ surface, text, recent_owner_messages: ownerTurns.slice(-3) });
       const toolDefinitions = selection ? selection.definitions : this.deps.tools?.definitions ?? [];
       const useTools = this.deps.tools !== undefined && toolDefinitions.length > 0;
       // Del 3 (JARVIS-016/035): sensitivitet utledes av INNHOLDET (minne, historikk, melding, verktøykilder) - ikke lenger hardkodet «public».
@@ -607,7 +647,8 @@ export class ConversationEngine {
       const reply = "AI-rådet er ikke konfigurert i denne kjøringen.";
       await this.deps.messages.save(identity, "assistant", reply);
       onToken?.(reply);
-      return { reply, routed: "model" };
+      // D-395: ingen modell kjørte - `routed: "model"` var uriktig (samme semantikk som en blokkert tur).
+      return { reply, routed: "blocked" };
     }
     const result = await this.deps.council.run({
       tenant_id: identity.tenant_id,
@@ -649,7 +690,13 @@ export class ConversationEngine {
         if (!result.ok) {
           return { reply: `Kunne ikke opprette jobb: ${result.reason}`, routed: "fast" };
         }
-        return { reply: `Jobb opprettet: ${result.value.task_id}`, routed: "fast", task_id: result.value.task_id };
+        // D-396 (JARVIS-062): en mål-bare jobb («opprett jobb: <mål>») har ingen kjørbar input - executive-handleren feiler den eksplisitt. Si det
+        // ærlig i stedet for «Jobb opprettet» (som antydet at noe ville bli utført).
+        return {
+          reply: `Jobb registrert: ${result.value.task_id}. Merk: en jobb opprettet fra chat kun med et mål har ingen automatisk utførelse - ` +
+            "send en jobb med prompt (POST /tasks/submit) for at Jarvis faktisk skal utføre den.",
+          routed: "fast", task_id: result.value.task_id
+        };
       }
       case "task_status": {
         const result = await this.deps.tasks.get(identity, intent.task_id);

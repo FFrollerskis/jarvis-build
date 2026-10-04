@@ -93,6 +93,18 @@ export interface ModelRequest {
    * noe sted i adapterne.
    */
   timeoutMs?: number;
+  /**
+   * D-399 (modellrådgiver): per-kall modellvalg INNENFOR adapterens leverandør (f.eks. Sonnet i stedet for Fable). Settes KUN av `ModelGateway` etter validering mot
+   * modellkatalogen - aldri av en kaller/modell. Udefinert (normaltilfellet) = adapterens konfigurerte standardmodell, uendret oppførsel. Adaptere uten støtte ignorerer feltet.
+   */
+  model?: string;
+}
+
+/** D-399: forsvar i dybden - modell-id-en havner i en URL-sti/JSON-kropp, så kun trygge tegn slippes gjennom selv om gatewayen allerede har validert mot katalogen. */
+export function effectiveModel(request: { model?: string }, fallback: string): string {
+  if (request.model === undefined) return fallback;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(request.model)) throw new Error("invalid_model_override");
+  return request.model;
 }
 
 /** UA-1 P1A: normalisert streaming-event. Resten av Jarvis ser aldri provider-format. */

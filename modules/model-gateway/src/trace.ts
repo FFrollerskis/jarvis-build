@@ -1,11 +1,11 @@
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile, mkdir, rename, rm, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 
 /** Trace-span for observability. Alle modellkall og fast-ruter skal spores. */
 export interface TraceSpan {
   trace_id: string;
   /** D-106 HOST-FIX: `council_suppressed` spores når eieren eksplisitt undertrykker et policy-mandatert Council-trigger (§"AUDITABILITY" - aldri en stille undertrykkelse). */
-  kind: "model_call" | "fast_route" | "job" | "budget" | "council_suppressed";
+  kind: "model_call" | "fast_route" | "job" | "budget" | "council_suppressed" | "model_advice";
   name: string;
   tenant_id: string;
   session_id?: string;
@@ -43,17 +43,77 @@ export function traceSinkFromEnv(jsonlPath = "var/traces.jsonl"): TraceSink {
   return new JsonlTraceSink(jsonlPath);
 }
 
-/** Lokal JSONL-fil (git-ignorert var/-katalog). Enkel, grep-bar, portabel. */
+/**
+ * D-395 (JARVIS-074): JSONL-sporet vokste uten grense i containerlaget. Filen roteres nå ved `maxBytes`
+ * (`fil` → `fil.1` → … → `fil.<maxFiles>`; den eldste slettes), så det samlede diskforbruket er begrenset til
+ * omtrent (maxFiles + 1) × maxBytes.
+ */
+export interface JsonlRotation {
+  /** Rotér når neste linje ville gjort filen større enn dette. */
+  maxBytes: number;
+  /** Antall roterte filer som beholdes ved siden av den aktive. */
+  maxFiles: number;
+}
+
+export const DEFAULT_JSONL_ROTATION: JsonlRotation = { maxBytes: 20 * 1024 * 1024, maxFiles: 2 };
+
+async function fileSize(path: string): Promise<number> {
+  try {
+    return (await stat(path)).size;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw err;
+  }
+}
+
+const ignoreMissing = (err: unknown): void => {
+  if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+};
+
+/** Lokal JSONL-fil (git-ignorert var/-katalog). Enkel, grep-bar, portabel. Størrelsesbasert rotasjon (se `JsonlRotation`). */
 export class JsonlTraceSink implements TraceSink {
   private dirReady = false;
-  constructor(private readonly filePath: string) {}
+  private size: number | undefined;
+  /** Skrivinger serialiseres: rotasjon og append må aldri flettes sammen. */
+  private chain: Promise<void> = Promise.resolve();
+  private readonly rotation: JsonlRotation;
 
-  async record(span: TraceSpan): Promise<void> {
+  constructor(private readonly filePath: string, rotation: Partial<JsonlRotation> = {}) {
+    this.rotation = {
+      maxBytes: Math.max(1, rotation.maxBytes ?? DEFAULT_JSONL_ROTATION.maxBytes),
+      maxFiles: Math.max(1, rotation.maxFiles ?? DEFAULT_JSONL_ROTATION.maxFiles)
+    };
+  }
+
+  record(span: TraceSpan): Promise<void> {
+    const run = this.chain.then(() => this.write(span));
+    this.chain = run.catch(() => undefined);
+    return run;
+  }
+
+  private async write(span: TraceSpan): Promise<void> {
     if (!this.dirReady) {
       await mkdir(dirname(this.filePath), { recursive: true });
       this.dirReady = true;
     }
-    await appendFile(this.filePath, `${JSON.stringify(span)}\n`, "utf8");
+    const line = `${JSON.stringify(span)}\n`;
+    const bytes = Buffer.byteLength(line, "utf8");
+    if (this.size === undefined) this.size = await fileSize(this.filePath);
+    if (this.size > 0 && this.size + bytes > this.rotation.maxBytes) {
+      await this.rotate();
+      this.size = 0;
+    }
+    await appendFile(this.filePath, line, "utf8");
+    this.size += bytes;
+  }
+
+  private async rotate(): Promise<void> {
+    const { maxFiles } = this.rotation;
+    await rm(`${this.filePath}.${maxFiles}`, { force: true });
+    for (let i = maxFiles - 1; i >= 1; i -= 1) {
+      await rename(`${this.filePath}.${i}`, `${this.filePath}.${i + 1}`).catch(ignoreMissing);
+    }
+    await rename(this.filePath, `${this.filePath}.1`).catch(ignoreMissing);
   }
 }
 

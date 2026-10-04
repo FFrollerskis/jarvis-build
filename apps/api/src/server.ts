@@ -38,6 +38,8 @@ import {
  * ennå - enhetsautentisering kommer med kanalene i senere faser (dokumentert).
  */
 export interface ApiDeps {
+  /** D-393 (JARVIS-026): se `makeReadiness` - uten denne er `/health` ren prosess-liveness. */
+  readiness?: () => Promise<ReadinessResult>;
   identity: IdentityService;
   sessions: SessionService;
   conversation: ConversationEngine;
@@ -160,6 +162,48 @@ export interface HealthStatus {
 
 export function healthStatus(): HealthStatus {
   return { status: "ok", service: "jarvis-api", version: "0.1.0", time: new Date().toISOString() };
+}
+
+/**
+ * D-393 (JARVIS-026): ekte beredskap. `/health` var en konstant «ok» - compose-helsesjekker og `depends_on` så «frisk» selv om databasen var
+ * borte. Når `ApiDeps.readiness` er satt, svarer `/health` og `/ready` 503 med per-komponent-status ved svikt; uten den (ren helse-modus,
+ * ingen avhengigheter konfigurert) er prosessen sin egen eneste avhengighet og svaret er uendret. `/live` er alltid ren prosess-liveness.
+ */
+export interface ReadinessResult {
+  ready: boolean;
+  checks: Record<string, "ok" | string>;
+}
+
+/** Bygger en readiness-sjekk som kjører hver sonde med tidsavbrudd og gjenbruker siste svar kort (ingen sonde-storm fra helsesjekker). */
+export function makeReadiness(
+  probes: Record<string, () => Promise<unknown>>,
+  options: { timeoutMs?: number; cacheMs?: number; now?: () => number } = {}
+): () => Promise<ReadinessResult> {
+  const timeoutMs = options.timeoutMs ?? 2000;
+  const cacheMs = options.cacheMs ?? 3000;
+  const now = options.now ?? Date.now;
+  let cached: { at: number; result: ReadinessResult } | undefined;
+  return async () => {
+    if (cached && now() - cached.at < cacheMs) return cached.result;
+    const checks: Record<string, "ok" | string> = {};
+    await Promise.all(Object.entries(probes).map(async ([name, probe]) => {
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          probe(),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("timeout")), timeoutMs); })
+        ]);
+        checks[name] = "ok";
+      } catch (err) {
+        checks[name] = `unavailable:${(err as Error).message.slice(0, 60)}`;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }));
+    const result: ReadinessResult = { ready: Object.values(checks).every((v) => v === "ok"), checks };
+    cached = { at: now(), result };
+    return result;
+  };
 }
 
 /**
@@ -705,8 +749,13 @@ async function sendStaticPage(res: ServerResponse, file: string, deps: ApiDeps |
 async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
 
-  if (req.method === "GET" && url.pathname === "/health") {
+  if (req.method === "GET" && url.pathname === "/live") {
     return json(res, 200, healthStatus());
+  }
+  if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/ready")) {
+    if (!deps?.readiness) return json(res, 200, healthStatus());
+    const readiness = await deps.readiness();
+    return json(res, readiness.ready ? 200 : 503, { ...healthStatus(), status: readiness.ready ? "ok" : "unavailable", checks: readiness.checks });
   }
 
   if (req.method === "GET" && url.pathname === "/") {
@@ -729,13 +778,11 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     return;
   }
 
-  const depRoutes = [
-    "/chat", "/tasks/submit", "/voice/session/authorize", "/session/authorize",
-    "/incidents/create", "/incidents/get", "/incidents/list", "/incidents/evidence/add", "/incidents/correlate", "/incidents/repair",
-    "/infra/recovery/attempt", "/infra/pause", "/infra/resume", "/infra/degrade", "/infra/status"
-  ];
+  // D-395 (JARVIS-092): uten avhengigheter (helse-modus) er HVER API-rute utilgjengelig fordi API-et ikke er konfigurert - ikke bare en håndskrevet
+  // liste som ble stale (~25 nyere ruter ga 404 i stedet for 503). ALLE API-ruter er ikke-GET (de eneste GET-rutene er sidene/helse over), så
+  // enhver ikke-GET svarer 503 `not_configured`; en ukjent GET er fortsatt 404.
   if (!deps) {
-    if (depRoutes.includes(url.pathname)) {
+    if (req.method !== "GET" && req.method !== "HEAD") {
       return json(res, 503, { error: "not_configured", request_id: requestIdOf(res) });
     }
     return json(res, 404, { error: "not_found" });

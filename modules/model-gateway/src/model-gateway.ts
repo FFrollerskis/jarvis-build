@@ -21,6 +21,8 @@ import { CapabilityRegistry, type ModelCapability } from "./capability-registry.
 import { ProviderHealthTracker, type ProviderHealthState } from "./provider-health.ts";
 import { AiRouter, type RoutePlan } from "./router.ts";
 import { assertExplicitPricing, costOre as computeCostOre, DEFAULT_PRICING, type PricingTable } from "./pricing.ts";
+import { modelCatalogFromEnv, type CatalogModel, type ModelTier } from "./model-catalog.ts";
+import { describeTask, HeuristicRoutingAdvisor, selectModelForTier, type RoutingAdvisor } from "./routing-advisor.ts";
 import type { TraceSink } from "./trace.ts";
 
 /**
@@ -129,6 +131,13 @@ export interface GatewayOptions {
   rates?: Record<string, { input_per_1k_ore: number; output_per_1k_ore: number }>;
   /** Enkel rate limit: maks kall per minutt per tenant. */
   maxCallsPerMinute?: number;
+  /**
+   * D-399 (modellrådgiver): rådgiver som anbefaler modelltrinn per oppgave (default: deterministisk heuristikk). `advisorMode`: `off` = ingen rådgivning, `shadow` (default) = logg hva
+   * rådgiveren VILLE valgt men endre ingenting, `active` = bruk anbefalingen (billigste valgbare modell som holder, kun hos ruterens primære leverandør). Env: `JARVIS_MODEL_ADVISOR`.
+   */
+  advisor?: RoutingAdvisor;
+  catalog?: readonly CatalogModel[];
+  advisorMode?: "off" | "shadow" | "active";
 }
 
 /**
@@ -183,9 +192,20 @@ export interface MeshProviderStatus {
   avg_latency_ms?: number;
 }
 
+/**
+ * Ruterens tilstand utledes av de KONFIGURERTE providerne: ingen konfigurert (eller alle UNAVAILABLE) = UNAVAILABLE, noen DEGRADED/RATE_LIMITED/UNAVAILABLE = DEGRADED,
+ * ellers HEALTHY. Ren funksjon (testbar).
+ */
+export function meshRouterState(providers: Array<{ configured: boolean; state: ProviderHealthState }>): "HEALTHY" | "DEGRADED" | "UNAVAILABLE" {
+  const usable = providers.filter((p) => p.configured && p.state !== "NOT_CONFIGURED");
+  if (usable.length === 0 || usable.every((p) => p.state === "UNAVAILABLE")) return "UNAVAILABLE";
+  return usable.some((p) => p.state === "DEGRADED" || p.state === "RATE_LIMITED" || p.state === "UNAVAILABLE") ? "DEGRADED" : "HEALTHY";
+}
+
 export interface MeshStatus {
   providers: MeshProviderStatus[];
-  router: "HEALTHY";
+  /** D-395 (JARVIS-078): beregnet fra faktisk providerhelse (tidligere en hardkodet «HEALTHY»). */
+  router: "HEALTHY" | "DEGRADED" | "UNAVAILABLE";
   /** VERIFIED = cross-provider fallback har faktisk skjedd i denne runtime (§25). */
   fallback: "VERIFIED" | "READY" | "LOGIC_ONLY";
   critic: "VERIFIED" | "READY_SELECTIVE";
@@ -205,6 +225,9 @@ export class ModelGateway {
   private readonly callTimestamps = new Map<string, number[]>();
   private readonly registry: CapabilityRegistry;
   private readonly pricing: PricingTable;
+  private readonly advisor: RoutingAdvisor;
+  private readonly catalog: readonly CatalogModel[];
+  private readonly advisorMode: "off" | "shadow" | "active";
   readonly health = new ProviderHealthTracker();
   private readonly router: AiRouter;
   private readonly byName = new Map<string, ModelProviderAdapter>();
@@ -219,6 +242,10 @@ export class ModelGateway {
     // JARVIS-006: ingen registrert modellprofil får falle til `default_rate`.
     assertExplicitPricing(this.pricing, this.registry.list());
     this.router = new AiRouter(this.registry, this.health);
+    this.advisor = opts.advisor ?? new HeuristicRoutingAdvisor();
+    this.catalog = opts.catalog ?? modelCatalogFromEnv();
+    const envMode = process.env["JARVIS_MODEL_ADVISOR"]?.trim().toLowerCase();
+    this.advisorMode = opts.advisorMode ?? (envMode === "off" || envMode === "active" || envMode === "shadow" ? envMode : "shadow");
     for (const p of opts.providers) {
       this.byName.set(p.name, p);
     }
@@ -261,6 +288,54 @@ export class ModelGateway {
     return { ...input, request: { ...input.request, timeoutMs: resolved } };
   }
 
+
+  /**
+   * D-399 (modellrådgiver): velger MODELL innenfor ruterens primære leverandør. Leverandørvalget (sensitivitet, betalte modeller, helse, capabilities) er allerede gjort av ruteren og
+   * røres ikke; her velges billigste valgbare katalogmodell som holder for oppgaven. `shadow` logger kun hva som VILLE skjedd. Feil i rådgivningen faller alltid tilbake til ruterens plan.
+   */
+  private async applyModelAdvice(input: CompleteInput, plan: RoutePlan, budgetLevel: string, traceId: string): Promise<RoutePlan> {
+    if (this.advisorMode === "off") return plan;
+    const primary = plan.candidates[0];
+    if (!primary) return plan;
+    try {
+      const task = describeTask(input.request, input.purpose);
+      const advice = await this.advisor.advise(task);
+      const maxTier: ModelTier | undefined = budgetLevel === "warn" ? "standard" : undefined;
+      const selection = selectModelForTier(advice.tier, {
+        eligibleProviders: [primary.provider],
+        providerDefaultModel: (p) => this.byName.get(p)?.model,
+        pricing: this.pricing,
+        catalog: this.catalog,
+        ...(maxTier !== undefined ? { maxTier } : {})
+      });
+      const wouldChange = selection !== null && selection.model !== primary.model;
+      await this.opts.trace.record({
+        trace_id: traceId, kind: "model_advice", name: `advice_${this.advisorMode}`, tenant_id: input.tenant_id,
+        ...(input.session_id !== undefined ? { session_id: input.session_id } : {}),
+        ...(input.task_id !== undefined ? { task_id: input.task_id } : {}),
+        at: new Date().toISOString(), duration_ms: 0,
+        metadata: {
+          mode: this.advisorMode, advisor: advice.advisor, advised_tier: advice.tier, confidence: advice.confidence, reason: advice.reason,
+          task: { kind: task.kind, complexity: task.complexity, size_chars: task.size_chars, needs_tools: task.needs_tools, tool_rounds: task.tool_rounds },
+          router_provider: primary.provider, router_model: primary.model,
+          advised_model: selection?.model ?? null, downgraded: selection?.downgraded ?? false, would_change: wouldChange,
+          budget_level: budgetLevel, ...(maxTier !== undefined ? { tier_cap: maxTier } : {})
+        }
+      });
+      if (this.advisorMode === "active" && selection && wouldChange) {
+        return { ...plan, candidates: [{ provider: selection.provider, model: selection.model }, ...plan.candidates.slice(1)] };
+      }
+    } catch (err) {
+      console.warn(JSON.stringify({ msg: "model_advice_failed", error: (err as Error).message.slice(0, 120) }));
+    }
+    return plan;
+  }
+
+  /** D-399: per-kall modell: kun når kandidatens modell avviker fra adapterens standard (ellers uendret request). */
+  private requestForCandidate(request: ModelRequest, candidateModel: string, adapterModel: string | undefined): ModelRequest {
+    return candidateModel !== "ukjent" && adapterModel !== undefined && candidateModel !== adapterModel ? { ...request, model: candidateModel } : request;
+  }
+
   async complete(rawInput: CompleteInput): Promise<ModelResult> {
     const input = this.applyTimeoutOverride(rawInput);
     const started = Date.now();
@@ -284,7 +359,7 @@ export class ModelGateway {
       throw new BudgetExceededError(budget.level, budget.spent_ore);
     }
 
-    const plan = this.router.plan(
+    const routerPlan = this.router.plan(
       {
         ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
         ...(input.mode !== undefined ? { mode: input.mode } : {}),
@@ -303,6 +378,7 @@ export class ModelGateway {
       },
       this.providerRuntimes()
     );
+    const plan = await this.applyModelAdvice(input, routerPlan, budget.level, traceId);
 
     const result = await this.executePlan(input, plan, traceId, started, budget.level, false);
 
@@ -327,7 +403,7 @@ export class ModelGateway {
     requestOverride?: ModelRequest,
     streamOpts?: { onEvent: StreamHandler; signal?: AbortSignal }
   ): Promise<ModelResult> {
-    const request = requestOverride ?? input.request;
+    const baseRequest = requestOverride ?? input.request;
     const failedProviders: string[] = [];
     let lastError: Error | null = null;
 
@@ -336,6 +412,8 @@ export class ModelGateway {
       if (!adapter || !adapter.available()) {
         continue;
       }
+      // D-399: per-kall modell for DENNE kandidaten (kun når rådgiveren valgte en annen enn adapterens standard).
+      const request = this.requestForCandidate(baseRequest, candidate.model, adapter.model);
       if (failedProviders.length > 0 && streamOpts) {
         streamOpts.onEvent({
           type: "fallback",
@@ -554,7 +632,7 @@ export class ModelGateway {
     if (budget.level === "hard_blocked" || budget.level === "needs_approval") {
       throw new BudgetExceededError(budget.level, budget.spent_ore);
     }
-    const plan = this.router.plan(
+    const routerPlan = this.router.plan(
       {
         ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
         ...(input.mode !== undefined ? { mode: input.mode } : {}),
@@ -578,6 +656,7 @@ export class ModelGateway {
       },
       this.providerRuntimes()
     );
+    const plan = await this.applyModelAdvice(input, routerPlan, budget.level, traceId);
     return this.executePlan(input, plan, traceId, started, budget.level, false, undefined, { onEvent, ...(signal ? { signal } : {}) });
   }
 
@@ -620,6 +699,12 @@ export class ModelGateway {
       const sizeBefore = executed.size;
       const results: ToolResultMessage[] = [];
       for (const call of calls) {
+        // D-390 (JARVIS-079 «barge-in stops streaming not tools»): et avbrudd (tale-barge-in, klient borte) stopper også
+        // verktøyløkka - ingen nye verktøykall startes etter at signalet er satt. Et kall som allerede kjører fullføres
+        // (side-effekter rulles aldri tilbake, §17), men neste kall/runde avbrytes rent som `cancelled`.
+        if (opts.signal?.aborted) {
+          throw new ProviderError(result.provider ?? "router", "cancelled", "tool_loop_cancelled");
+        }
         results.push(await this.executeToolCall(call, input, known, executed, () => {
           if (repairUsed) {
             return false;
@@ -667,10 +752,7 @@ export class ModelGateway {
         success: false, output: null, error_category: `INVALID_ARGUMENTS:${validationError}`, at
       };
     }
-    const idempotencyKey = createHash("sha256")
-      .update(`${input.tenant_id}:${input.task_id ?? input.session_id ?? "adhoc"}:${call.tool_name}:${JSON.stringify(call.arguments, Object.keys(call.arguments).sort())}`)
-      .digest("hex")
-      .slice(0, 32);
+    const idempotencyKey = toolCallIdempotencyKey(input, call);
     const cached = executed.get(idempotencyKey);
     if (cached) {
       // Retry/fallback/reconnect: samme utførelse returneres - aldri dobbel side-effekt (§19).
@@ -753,7 +835,7 @@ export class ModelGateway {
           ...(s.avg_latency_ms !== undefined ? { avg_latency_ms: s.avg_latency_ms } : {})
         };
       }),
-      router: "HEALTHY",
+      router: meshRouterState([...runtimes].map(([name, rt]) => ({ configured: rt.configured, state: (snapshot[name] as NonNullable<(typeof snapshot)[string]>).state }))),
       fallback: this.crossProviderFallbackSeen
         ? "VERIFIED"
         : [...runtimes].filter(([name, r]) => r.configured && name !== "scripted").length >= 2
@@ -791,16 +873,56 @@ export class ModelGateway {
   ): Promise<void> {
     const cost =
       this.legacyCostOverride(result) ?? computeCostOre(this.pricing, result.provider, result.model, result.usage);
-    await this.recordCost(input, result, cost, {
-      success: true,
-      fallback: ctx.failedProviders.length > 0,
-      critic: ctx.isCritic,
-      latency_ms: ctx.latency,
-      // BO-11.1 §4: streaming-/tool-metrics SQL-spørrbare (migrasjon 016).
-      stream: Boolean(ctx.streamOpts),
-      ...(result.ttft_ms !== undefined ? { ttft_ms: result.ttft_ms } : {}),
-      tool_calls: result.tool_calls?.length ?? 0
-    });
+    // D-393 (JARVIS-034): kostnads- og sporingsskriving ETTER et vellykket leverandørkall er bokføring, ikke en leverandørfeil. Tidligere
+    // gikk en feilet `cost_events`-INSERT eller trace-skriving til `catch` i `executePlan`, ble talt som leverandørfeil og utløste et NYTT
+    // (fakturert) kall mot neste kandidat selv om svaret allerede forelå. Nå logges feilen høyt (med beløpet slik at det kan etterbokføres)
+    // og svaret returneres.
+    try {
+      await this.recordCost(input, result, cost, {
+        success: true,
+        fallback: ctx.failedProviders.length > 0,
+        critic: ctx.isCritic,
+        latency_ms: ctx.latency,
+        // BO-11.1 §4: streaming-/tool-metrics SQL-spørrbare (migrasjon 016).
+        stream: Boolean(ctx.streamOpts),
+        ...(result.ttft_ms !== undefined ? { ttft_ms: result.ttft_ms } : {}),
+        tool_calls: result.tool_calls?.length ?? 0
+      });
+    } catch (err) {
+      this.bookkeepingFailures += 1;
+      console.error(JSON.stringify({
+        msg: "model_cost_bookkeeping_failed", provider: result.provider, model: result.model, tenant_id: input.tenant_id,
+        cost_ore: cost, input_tokens: result.usage.input_tokens, output_tokens: result.usage.output_tokens, error: (err as Error).message.slice(0, 160)
+      }));
+    }
+    try {
+      await this.recordAttemptTrace(input, result, outcome, cost, ctx);
+    } catch (err) {
+      this.bookkeepingFailures += 1;
+      console.error(JSON.stringify({ msg: "model_trace_bookkeeping_failed", provider: result.provider, error: (err as Error).message.slice(0, 160) }));
+    }
+  }
+
+  /** D-393: antall bokføringsfeil (kost/trace) som ble isolert fra leverandørfeilhåndteringen - synlig for drift/tester. */
+  bookkeepingFailures = 0;
+
+  private async recordAttemptTrace(
+    input: CompleteInput,
+    result: ModelResult,
+    outcome: CompletionOutcome,
+    cost: number,
+    ctx: {
+      traceId: string;
+      started: number;
+      budgetLevel: string;
+      isCritic: boolean;
+      adapterName: string;
+      latency: number;
+      failedProviders: string[];
+      plan: { mode: string; reason: string };
+      adaptiveRetryOfOutcome?: CompletionOutcome;
+    }
+  ): Promise<void> {
     await this.opts.trace.record({
       trace_id: ctx.traceId,
       kind: "model_call",
@@ -946,4 +1068,33 @@ export class ModelGateway {
     stamps.push(now);
     this.callTimestamps.set(tenantId, stamps);
   }
+}
+
+/** Tidsvindu for samtalebundne (ikke oppgavebundne) nøkler: samme mutasjon senere i en langlevd økt er en NY intensjon, ikke en retry. */
+export const SESSION_IDEMPOTENCY_WINDOW_MS = 10 * 60 * 1000;
+
+/** Kanonisk JSON: nøkler sortert på ALLE nivåer (JARVIS-017: replacer-arrayen `JSON.stringify(x, keys)` filtrerte bort nøstede felt). */
+export function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map((v) => canonicalJson(v)).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`;
+}
+
+export function toolCallIdempotencyKey(
+  input: { tenant_id: string; task_id?: string; session_id?: string },
+  call: { tool_name: string; arguments: Record<string, unknown> },
+  nowMs: number = Date.now()
+): string {
+  // Oppgavebundne nøkler er stabile (en oppgave-retry skal aldri duplisere); samtalebundne får et tidsvindu så en senere, bevisst gjentakelse ikke
+  // stilltiende hoppes over for alltid (JARVIS-017: dedupe-rader utløp aldri).
+  const scope = input.task_id !== undefined
+    ? `task:${input.task_id}`
+    : `${input.session_id ?? "adhoc"}:${Math.floor(nowMs / SESSION_IDEMPOTENCY_WINDOW_MS)}`;
+  return createHash("sha256")
+    .update(`${input.tenant_id}:${scope}:${call.tool_name}:${canonicalJson(call.arguments)}`)
+    .digest("hex")
+    .slice(0, 32);
 }

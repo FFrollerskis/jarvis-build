@@ -2,6 +2,11 @@
 import type pg from "pg";
 import type { OwnerConfig } from "@jarvis/contracts";
 
+/** `production`/`prod` (uavhengig av store/små bokstaver) regnes som produksjon; alt annet (inkl. uset) er dev. */
+export function isProductionEnv(value: string | undefined): boolean {
+  return value !== undefined && /^(production|prod)$/i.test(value.trim());
+}
+
 /**
  * Owner-seed (BO-08 + D-30 live-funn): identitetsdata for fersk database,
  * idempotent (ON CONFLICT DO NOTHING). ID-ene er konfig - aldri hardkodet i
@@ -12,7 +17,7 @@ import type { OwnerConfig } from "@jarvis/contracts";
  * 403 identity_denied/unknown_device på host-live - derfor seedes den her,
  * i samme transaksjonsfrie idempotente stil som jarvis-core.
  *
- * `dev-web` er `apps/web/index.html`s dev-chat-demo sin enhet.
+ * `dev-web` er `apps/web/index.html`s dev-chat-demo sin enhet (D-395: seedes ikke når `JARVIS_ENV=production`).
  *
  * D-131 (uavhengig arkitektkontroll av PR #79, funn 2): raden seedes fortsatt,
  * men den er ikke lenger noen forutsetning for innrullering -
@@ -41,10 +46,14 @@ export async function seedOwner(pool: pg.Pool, owner: OwnerConfig): Promise<void
     "INSERT INTO devices (device_id,tenant_id,person_id,kind) VALUES ($1,$2,$3,'voice') ON CONFLICT DO NOTHING",
     [voiceDevice, tenant, person]
   );
-  await pool.query(
-    "INSERT INTO devices (device_id,tenant_id,person_id,kind) VALUES ('dev-web',$1,$2,'web') ON CONFLICT DO NOTHING",
-    [tenant, person]
-  );
+  // D-395 (JARVIS-092): `dev-web` er en delt demo-enhet (nettleserne bruker per-nettleser-ID siden D-252) - den seedes IKKE i produksjon
+  // (`JARVIS_ENV=production`). Raden har ingen offentlig nøkkel og kan ikke autentisere, men en produksjonsdatabase skal ikke bære demo-rader.
+  if (!isProductionEnv(process.env["JARVIS_ENV"])) {
+    await pool.query(
+      "INSERT INTO devices (device_id,tenant_id,person_id,kind) VALUES ('dev-web',$1,$2,'web') ON CONFLICT DO NOTHING",
+      [tenant, person]
+    );
+  }
   await pool.query(
     "INSERT INTO memory_spaces (memory_space_id,tenant_id,space) VALUES ('personal',$1,'personal') ON CONFLICT DO NOTHING",
     [tenant]

@@ -22,15 +22,29 @@ export interface ExecuteInfraMutationInput {
 async function readToolExecutionState(
   pool: pg.Pool,
   tenantId: string,
-  idempotencyKey: string
-): Promise<{ before: JsonValue | null; after: JsonValue | null }> {
+  idempotencyKey: string,
+  expected: { tool_id: string; action: string }
+): Promise<{ before: JsonValue | null; after: JsonValue | null; key_collision: boolean }> {
   return withTenantTransaction(pool, tenantId, async (client) => {
     const { rows } = await client.query(
-      `SELECT before_state, after_state FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2`,
+      `SELECT tool_id, action, before_state, after_state FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2`,
       [tenantId, idempotencyKey]
     );
-    const row = rows[0] as { before_state: JsonValue | null; after_state: JsonValue | null } | undefined;
-    return { before: row?.before_state ?? null, after: row?.after_state ?? null };
+    const row = rows[0] as { tool_id: string; action: string; before_state: JsonValue | null; after_state: JsonValue | null } | undefined;
+    // D-398 (JARVIS-094): nøkkelen kan ha vært brukt av et ANNET verktøy/en annen handling - da tilhører før-/etter-tilstanden ikke denne mutasjonen og
+    // kan aldri journalføres som dens bevis (tidligere ble en fremmed rad lest som egen og kunne gi SUCCESS).
+    if (row && (row.tool_id !== expected.tool_id || row.action !== expected.action)) {
+      return { before: null, after: null, key_collision: true };
+    }
+    return { before: row?.before_state ?? null, after: row?.after_state ?? null, key_collision: false };
+  });
+}
+
+/** D-398 (JARVIS-094): eksisterende journalrad for nøkkelen (idempotent retry). */
+async function findExecutionByKey(pool: pg.Pool, tenantId: string, idempotencyKey: string): Promise<InfraExecution | null> {
+  return withTenantTransaction(pool, tenantId, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM infra_executions WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, idempotencyKey]);
+    return (rows[0] as InfraExecution) ?? null;
   });
 }
 
@@ -118,6 +132,14 @@ export async function executeInfraMutation(
       ? { name: input.target, image: input.target_image as string }
       : { name: input.target };
 
+  // D-398 (JARVIS-094): idempotent retry. Samme nøkkel + samme handling/mål => returner den EKSISTERENDE journalraden (ingen ny utførelse, ingen UNIQUE-krasj).
+  // Samme nøkkel brukt for noe ANNET => eksplisitt konflikt - aldri stille gjenbruk av en annen mutasjons bevis.
+  const prior = await findExecutionByKey(deps.pool, input.tenant_id, input.idempotency_key);
+  if (prior) {
+    if (prior.action === input.action && prior.target === input.target) return prior;
+    throw new Error("infra_idempotency_key_conflict");
+  }
+
   const result = await deps.gateway.execute({
     identity,
     tool_id: "docker",
@@ -126,14 +148,14 @@ export async function executeInfraMutation(
     idempotency_key: input.idempotency_key
   });
 
-  const { before, after } = result.ok
-    ? await readToolExecutionState(deps.pool, input.tenant_id, input.idempotency_key)
-    : { before: null, after: null };
+  const { before, after, key_collision } = result.ok
+    ? await readToolExecutionState(deps.pool, input.tenant_id, input.idempotency_key, { tool_id: "docker", action: input.action })
+    : { before: null, after: null, key_collision: false };
   const state_diff = computeStateDiff(before, after);
   const verification_outcome = determineOutcome(input.action, result.ok, after, input.target_image);
   const recovery_plan = buildRecoveryPlan(input.action, before, input.target);
   const provider_receipt: JsonValue = result.ok
-    ? ({ external_id: result.external_id ?? null } as unknown as JsonValue)
+    ? ({ external_id: result.external_id ?? null, ...(key_collision ? { key_collision: true } : {}) } as unknown as JsonValue)
     : ({ reason: (result as { reason: string }).reason } as unknown as JsonValue);
   const requested_operation =
     input.action === "redeploy_container"
@@ -152,6 +174,7 @@ export async function executeInfraMutation(
           incident_id, idempotency_key, requested_operation, requested_state, before_state, recovery_plan,
           provider_receipt, after_state, state_diff, verification_outcome, recovery_available)
        VALUES ($1,$2,$3,$4,$5,'docker','docker',$6,'D',$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+       ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
        RETURNING *`,
       [
         execution_id, input.tenant_id, input.person_id ?? null, input.device_id ?? null, input.target,
@@ -168,7 +191,10 @@ export async function executeInfraMutation(
         state_diff === null ? null : JSON.stringify(state_diff), verification_outcome, before !== null
       ]
     );
-    return rows[0] as InfraExecution;
+    if (rows[0]) return rows[0] as InfraExecution;
+    // Samtidig kall med samme nøkkel vant racet (UNIQUE) - returner vinnerens journalrad i stedet for å krasje.
+    const existing = (await client.query(`SELECT * FROM infra_executions WHERE tenant_id = $1 AND idempotency_key = $2`, [input.tenant_id, input.idempotency_key])).rows[0];
+    return existing as InfraExecution;
   });
 }
 

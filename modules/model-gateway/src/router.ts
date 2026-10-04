@@ -336,7 +336,10 @@ export class AiRouter {
     };
 
     // Health-sortering (§11): UNAVAILABLE ekskluderes, RATE_LIMITED bakerst.
-    const rankedIgnoringHealth = [...eligible].sort((a, b) => score(b) - score(a));
+    // D-395 (JARVIS-078): uavgjort poengsum avgjøres DETERMINISTISK på providernavn - ikke på registreringsrekkefølgen i main.ts (stabil sortering
+    // ga ellers hvilken adapter som tilfeldigvis ble registrert først).
+    const byProviderName = (a: { profile: ModelProfile }, b: { profile: ModelProfile }): number => a.profile.provider.localeCompare(b.profile.provider);
+    const rankedIgnoringHealth = [...eligible].sort((a, b) => score(b) - score(a) || byProviderName(a, b));
     const healthy = eligible.filter((e) => e.state !== "UNAVAILABLE");
     if (healthy.length === 0) {
       throw new NoEligibleProviderError("alle kvalifiserte providere er UNAVAILABLE");
@@ -345,7 +348,7 @@ export class AiRouter {
       const aLimited = a.state === "RATE_LIMITED" ? 1 : 0;
       const bLimited = b.state === "RATE_LIMITED" ? 1 : 0;
       if (aLimited !== bLimited) return aLimited - bLimited;
-      return score(b) - score(a);
+      return score(b) - score(a) || byProviderName(a, b);
     });
 
     const top = ranked[0] as (typeof ranked)[number];

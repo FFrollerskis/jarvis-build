@@ -65,8 +65,8 @@ export const OWNER_ONLY_NAMESPACES: ReadonlySet<string> = new Set([
 const PAID_MEDIA = new Set(["openai_images", "runway", "kling", "google_veo", "higgsfield"]);
 const SMS_LIKE = new Set(["twilio", "telnyx", "whatsapp"]);
 const METERED = new Set(["brave_search", "tavily", "exa", "google_maps", "google_places", "google_routes"]);
-const OWNER_CONFIGURED_URL = new Set(["jira", "pipedrive", "grafana", "prometheus", "n8n", "make", "finance_wallester"]);
-const PRIVATE_NAMESPACES = new Set(["email", "calendar", "drive", "gmail", "microsoft_outlook", "memory", "dropbox", "onedrive", "notion", "slack", "discord", "telegram", "whatsapp", "twilio", "telnyx", "google_sheets", "spotify"]);
+const OWNER_CONFIGURED_URL = new Set(["jira", "pipedrive", "grafana", "prometheus", "n8n", "make", "finance_wallester", "home-assistant"]);
+const PRIVATE_NAMESPACES = new Set(["email", "calendar", "drive", "gmail", "microsoft_outlook", "memory", "dropbox", "onedrive", "notion", "slack", "discord", "telegram", "whatsapp", "twilio", "telnyx", "google_sheets", "spotify", "home-assistant"]);
 
 const READ_VERB = /^(read|get|list|search|query|find|fetch|lookup|describe|inspect|check|status|test|health|count|summar|show|view|browse|explain|rank|evaluate|resolve|upcoming|due|overdue|cancellable|campaign_performance|geocode|reverse_geocode|web_search|news_search|extract|screenshot|navigate)/;
 const SEND_VERB = /(^|_)(send|notify|reply|forward|publish|broadcast|invite|call_tool|run_scenario|activate_workflow|dispatch_workflow|comment_on_issue|rerun_workflow_run|cancel_workflow_run)(_|$)/;
@@ -79,6 +79,8 @@ const EFFECT_OVERRIDES: Record<string, Effect> = {
   [k("memory", "propose")]: "write",
   [k("memory", "search")]: "read",
   [k("memory", "list_proposals")]: "read",
+  // D-388: nedlasting er lesing av innhold (ingen ekstern effekt).
+  [k("dropbox", "download_file")]: "read",
   [k("tasks", "create_task")]: "write",
   [k("github", "create_branch")]: "write",
   [k("github", "merge_pr")]: "control",
@@ -335,7 +337,9 @@ export interface SurfaceLimits {
 
 export const SURFACE_LIMITS: Readonly<Record<Surface, SurfaceLimits>> = {
   // D-382: skjemaene for handlinger (opprett/oppdater) er større enn lese-skjemaene - rommet er hevet, utvalget er fortsatt per melding.
-  web_chat: { max_tools_per_round: 10, max_schema_tokens: 3000, max_rounds: 4, max_calls_per_round: 4, max_total_calls: 8 },
+  // D-389: 10/3000/4/8 → 12/4000/5/12 - rom for én hel tjeneste (lese + handle) pluss minne/kalender i samme runde, og en ekstra
+  // runde til å følge opp et verktøyresultat (f.eks. list → read → handle). Tale/Telegram er uendret (latens/kort svar).
+  web_chat: { max_tools_per_round: 12, max_schema_tokens: 4000, max_rounds: 5, max_calls_per_round: 4, max_total_calls: 12 },
   voice: { max_tools_per_round: 6, max_schema_tokens: 1500, max_rounds: 3, max_calls_per_round: 3, max_total_calls: 5 },
   telegram: { max_tools_per_round: 5, max_schema_tokens: 1000, max_rounds: 3, max_calls_per_round: 3, max_total_calls: 5 },
   background: { max_tools_per_round: 8, max_schema_tokens: 1500, max_rounds: 6, max_calls_per_round: 4, max_total_calls: 16 },

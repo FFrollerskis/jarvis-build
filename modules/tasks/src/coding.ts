@@ -1,18 +1,18 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import type { IdentityContext } from "@jarvis/contracts";
-import { withTenantTransaction } from "@jarvis/core";
+import { scanForSecrets, withTenantTransaction } from "@jarvis/core";
 import type { PolicyGateway } from "@jarvis/policy";
 import { createGitAuthHandle, GIT_CREDENTIAL_ISOLATION_ARGS, githubCredentialScope } from "./git-auth.ts";
 import {
   GIT_HARDENING_ARGS, GIT_LOCAL_HARDENING_ARGS, GitPolicyError, assertJobBranch, assertRepoAllowed, assertTestCommand
 } from "./git-policy.ts";
 import { publishPullRequestForCodingJob, type PrPublishingGateway } from "./pr-publisher.ts";
-import type { SandboxRunner } from "./sandbox.ts";
+import type { ExecResult, SandboxRunner } from "./sandbox.ts";
 import type { TaskHandler } from "./worker.ts";
 
 /** Kodejobb-eksekutør slik sandboxen faktisk eksponerer den (samme signatur som `Sandbox.exec`). */
-export type CodingAgentExec = (cmd: string, args: string[], timeoutMs?: number) => { code: number; stdout: string; stderr: string };
+export type CodingAgentExec = (cmd: string, args: string[], timeoutMs?: number) => ExecResult | Promise<ExecResult>;
 
 /** Kodeagent bak adapter: skriptet i test; Claude Code headless når binær/nøkkel finnes. */
 export interface CodingAgentAdapter {
@@ -26,7 +26,7 @@ export class ScriptedCodingAgent implements CodingAgentAdapter {
   async modify(exec: CodingAgentExec, goal: string): Promise<string> {
     const content = `# Endring utført av jarvis-worker\n\nMål: ${goal}\n`;
     const escaped = content.replace(/\n/g, "\\n").replace(/"/g, '\\"');
-    exec("node", ["-e", `require('fs').writeFileSync('CHANGES.md', "${escaped}")`]);
+    await exec("node", ["-e", `require('fs').writeFileSync('CHANGES.md', "${escaped}")`]);
     return "La til CHANGES.md med målbeskrivelse";
   }
 }
@@ -78,7 +78,7 @@ export class ClaudeCodeAgent implements CodingAgentAdapter {
       "--permission-mode", "acceptEdits",
       "--allowedTools", "Read,Edit"
     ];
-    const result = exec(this.bin, args, this.timeoutMs);
+    const result = await exec(this.bin, args, this.timeoutMs);
     if (result.code !== 0) {
       throw new Error(`claude_code_cli_failed:${(result.stderr || result.stdout || "").slice(0, 300)}`);
     }
@@ -108,7 +108,8 @@ export class ArtifactStore {
       client.query(
         `INSERT INTO artifacts (artifact_id, task_id, tenant_id, kind, name, content)
          VALUES ($1, $2, $3, $4, $5, $6)`,
-        [`art-${randomUUID()}`, taskId, tenantId, kind, name, content.slice(0, 100_000)]
+        // D-394 (JARVIS-069): artefakter (testlogger, diff) er fritekst fra en agent/prosess og kan inneholde hemmeligheter - redigeres FØR lagring.
+        [`art-${randomUUID()}`, taskId, tenantId, kind, name, scanForSecrets(content.slice(0, 100_000)).text]
       )
     );
   }
@@ -297,14 +298,14 @@ export function createCodingHandler(deps: {
       // ingen submoduler) og credential-scopet (host + repo) - se git-policy.ts / git-auth.ts.
       const netArgs = (args: string[]): string[] =>
         (gitAuth ? [...GIT_CREDENTIAL_ISOLATION_ARGS, ...gitAuth.credentialHelperArgs, ...GIT_HARDENING_ARGS, ...args] : ["-c", "core.hooksPath=/dev/null", "-c", "protocol.ext.allow=never", ...args]);
-      must("clone", sandbox.exec("git", netArgs(["clone", "--", cloneUrl, "."]), undefined, gitAuth?.env));
+      must("clone", await sandbox.exec("git", netArgs(["clone", "--", cloneUrl, "."]), undefined, gitAuth?.env));
       await ctx.assertNotCancelled();
-      must("branch", run("git", ["checkout", "-b", branch]));
+      must("branch", await run("git", ["checkout", "-b", branch]));
       const description = await deps.agent.modify(run, task.contract.goal);
       await ctx.saveCheckpoint({ step: "modified", branch });
       await ctx.assertNotCancelled();
 
-      const testResult = sandbox.exec(testCmd[0] as string, testCmd.slice(1));
+      const testResult = await sandbox.exec(testCmd[0] as string, testCmd.slice(1));
       await deps.artifacts.save(task.tenant_id, task.task_id, "test-log", "tests.txt",
         `exit=${testResult.code}\n${testResult.stdout}\n${testResult.stderr}`);
       must("tests", testResult);
@@ -313,21 +314,21 @@ export function createCodingHandler(deps: {
       // korrekt og ærlig ikke gjorde noen endring (f.eks. fordi den ikke
       // hadde grunnlag for å gjette en verdi) skal ALDRI tvinges gjennom en
       // tom commit eller få dette fremstilt som en git-/harness-mekanikk-feil.
-      const status = localGit(["status", "--porcelain"]);
+      const status = await localGit(["status", "--porcelain"]);
       if (status.stdout.trim().length === 0) {
         throw new Error(NO_CHANGES_TO_COMMIT_LABEL);
       }
-      must("add", run("git", ["add", "-A"]));
-      must("commit", run("git", ["commit", "-m", `jarvis: ${task.contract.goal}`]));
-      const commitSha = run("git", ["rev-parse", "HEAD"]).stdout.trim();
-      const diff = localGit(["show", "--stat", "HEAD"]);
+      must("add", await run("git", ["add", "-A"]));
+      must("commit", await run("git", ["commit", "-m", `jarvis: ${task.contract.goal}`]));
+      const commitSha = (await run("git", ["rev-parse", "HEAD"])).stdout.trim();
+      const diff = await localGit(["show", "--stat", "HEAD"]);
       await deps.artifacts.save(task.tenant_id, task.task_id, "patch", "change.txt", diff.stdout);
       // D-103 §13: kansellering FØR push - den nyeste, første EKSTERNE
       // sideeffekten (en ekte branch synlig på GitHub) skal ALDRI skje etter
       // en allerede innkommet kanselleringsforespørsel.
       await ctx.assertNotCancelled();
       // Guard i runneren: kun jobb-branchen pushes; aldri beskyttede brancher.
-      must("push", sandbox.exec("git", netArgs(["push", "origin", `${branch}:${branch}`]), undefined, gitAuth?.env));
+      must("push", await sandbox.exec("git", netArgs(["push", "origin", `${branch}:${branch}`]), undefined, gitAuth?.env));
       await deps.artifacts.save(task.tenant_id, task.task_id, "pr-proposal", "pr.json",
         JSON.stringify({ branch, title: `jarvis: ${task.contract.goal}`, body: description, merge: "KREVER MENNESKELIG GODKJENNING" }));
 

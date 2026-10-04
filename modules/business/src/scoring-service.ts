@@ -137,14 +137,27 @@ export class ScoringService {
   /** §23 i byggeordren: bounded, idempotent batch-rekalkulering - kalt av DailyScheduler, ingen ny koe. */
   async recalculateTenant(tenantId: string, memorySpace: MemorySpace): Promise<{ leads: number; opportunities: number }> {
     const { rows: leadRows } = await withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) =>
-      client.query(`SELECT lead_id FROM business_leads WHERE tenant_id = $1 AND status NOT IN ('disqualified','converted') LIMIT 500`, [tenantId])
+      // D-395 (JARVIS-083): LIMIT uten ORDER BY re-skåret de samme (vilkårlige) 500 hver dag mens resten aldri ble skåret. Nå: lengst siden skåret først (aldri skåret = først).
+      client.query(
+        `SELECT l.lead_id FROM business_leads l
+         LEFT JOIN business_scores s ON s.tenant_id = l.tenant_id AND s.entity_type = 'lead' AND s.score_type = 'lead_priority' AND s.entity_id = l.lead_id
+         WHERE l.tenant_id = $1 AND l.status NOT IN ('disqualified','converted')
+         ORDER BY s.calculated_at ASC NULLS FIRST, l.lead_id LIMIT 500`,
+        [tenantId]
+      )
     );
     let leads = 0;
     for (const row of leadRows as Array<{ lead_id: string }>) {
       if (await this.recalculateLeadScore(tenantId, memorySpace, row.lead_id)) leads++;
     }
     const { rows: oppRows } = await withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) =>
-      client.query(`SELECT opportunity_id FROM business_opportunities WHERE tenant_id = $1 AND stage NOT IN ('won','lost') LIMIT 500`, [tenantId])
+      client.query(
+        `SELECT o.opportunity_id FROM business_opportunities o
+         LEFT JOIN business_scores s ON s.tenant_id = o.tenant_id AND s.entity_type = 'opportunity' AND s.score_type = 'opportunity_risk' AND s.entity_id = o.opportunity_id
+         WHERE o.tenant_id = $1 AND o.stage NOT IN ('won','lost')
+         ORDER BY s.calculated_at ASC NULLS FIRST, o.opportunity_id LIMIT 500`,
+        [tenantId]
+      )
     );
     let opportunities = 0;
     for (const row of oppRows as Array<{ opportunity_id: string }>) {
@@ -174,6 +187,7 @@ export class ScoringService {
         `SELECT s.*, l.title FROM business_scores s
          JOIN business_leads l ON l.tenant_id = s.tenant_id AND l.lead_id = s.entity_id
          WHERE s.tenant_id = $1 AND s.entity_type = 'lead' AND s.score_type = 'lead_priority'
+           AND l.status NOT IN ('disqualified','converted') -- D-395: avsluttede entiteter beholder en gammel skår og skal ikke rangeres
          ORDER BY (CASE WHEN s.manual_override THEN s.override_score ELSE s.score END) DESC
          LIMIT $2`,
         [tenantId, limit]
@@ -188,6 +202,7 @@ export class ScoringService {
         `SELECT s.*, o.title FROM business_scores s
          JOIN business_opportunities o ON o.tenant_id = s.tenant_id AND o.opportunity_id = s.entity_id
          WHERE s.tenant_id = $1 AND s.entity_type = 'opportunity' AND s.score_type = 'opportunity_risk'
+           AND o.stage NOT IN ('won','lost') -- D-395: avsluttede entiteter beholder en gammel skår og skal ikke rangeres
          ORDER BY (CASE WHEN s.manual_override THEN s.override_score ELSE s.score END) DESC
          LIMIT $2`,
         [tenantId, limit]

@@ -274,7 +274,9 @@ export function loadWorkerConfig(configPath, root) {
     claudeCommand: typeof raw.claudeCommand === "string" && raw.claudeCommand ? raw.claudeCommand : "claude",
     claudeArgs,
     claudeArgsAcknowledgedBypass: bypass,
-    claudeTimeoutMinutes: requireBoundedNumber(raw, "claudeTimeoutMinutes", { min: 1, max: 600, fallback: 55 }),
+    // D-398 (JARVIS-099): taket er 110 min - den planlagte Windows-oppgaven (`install-task.ps1`, `-ExecutionTimeLimit 2 h`) dreper hele kjøringen ved 120 min, så en
+    // lengre claude-timeout (tidligere opptil 600) kunne aldri nås og ville avsluttet jobben midt i en merge-overgang.
+    claudeTimeoutMinutes: requireBoundedNumber(raw, "claudeTimeoutMinutes", { min: 1, max: 110, fallback: 55 }),
     promptDelivery,
 
     logDir,

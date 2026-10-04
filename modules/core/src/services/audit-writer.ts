@@ -9,6 +9,9 @@ export interface AuditEntry {
   action?: string;
   capability_class?: string;
   payload?: Record<string, unknown>;
+  /** D-394 (JARVIS-054): korrelasjon mot jobb og modellspor, slik at en handling kan rekonstrueres på tvers av tabeller. */
+  task_id?: string;
+  trace_id?: string;
 }
 
 /**
@@ -27,11 +30,18 @@ export interface AuditEntry {
 export type AuditSubject = Pick<IdentityContext, "tenant_id" | "person_id"> &
   Partial<Pick<IdentityContext, "session_id" | "device_id">>;
 
+/** D-394: hvilken prosess (api/worker/…) som skrev raden - settes fra `JARVIS_PROCESS` (compose), ellers ukjent (NULL). */
+function processName(): string | null {
+  const name = process.env["JARVIS_PROCESS"];
+  return name && name.length > 0 ? name.slice(0, 40) : null;
+}
+
 export async function writeAudit(client: pg.PoolClient, identity: AuditSubject, entry: AuditEntry): Promise<void> {
   await client.query(
     `INSERT INTO audit_events
-       (tenant_id, person_id, session_id, device_id, type, decision, reason, tool_id, action, capability_class, payload)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+       (tenant_id, person_id, session_id, device_id, type, decision, reason, tool_id, action, capability_class, payload,
+        task_id, trace_id, actor_kind, process)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
     [
       identity.tenant_id,
       identity.person_id,
@@ -43,7 +53,12 @@ export async function writeAudit(client: pg.PoolClient, identity: AuditSubject, 
       entry.tool_id ?? null,
       entry.action ?? null,
       entry.capability_class ?? null,
-      JSON.stringify(entry.payload ?? {})
+      JSON.stringify(entry.payload ?? {}),
+      entry.task_id ?? null,
+      entry.trace_id ?? null,
+      // Systemhandlinger (`person_id: "system"`) merkes eksplisitt i stedet for å se ut som en person.
+      identity.person_id === "system" ? "system" : "person",
+      processName()
     ]
   );
 }

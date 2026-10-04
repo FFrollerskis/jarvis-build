@@ -5,6 +5,7 @@ import {
   envOrDefault,
   envPositiveInt,
   ProviderError,
+  effectiveModel,
   sseLines,
   textOnly,
   type ModelProviderAdapter,
@@ -51,7 +52,7 @@ export class OpenAiAdapter implements ModelProviderAdapter {
       }
     }
     return {
-      model: this.model,
+      model: effectiveModel(request, this.model),
       messages,
       // gpt-5/o-serien avviser legacy max_tokens; max_completion_tokens gjelder alle chat-modeller.
       max_completion_tokens: request.max_tokens ?? 1024,
@@ -101,7 +102,7 @@ export class OpenAiAdapter implements ModelProviderAdapter {
     return response;
   }
 
-  private parseToolCall(id: string | undefined, name: string | undefined, args: string): ToolCallRequest {
+  private parseToolCall(id: string | undefined, name: string | undefined, args: string, model: string = this.model): ToolCallRequest {
     let parsed: Record<string, unknown>;
     try {
       parsed = args.trim() === "" ? {} : (JSON.parse(args) as Record<string, unknown>);
@@ -113,7 +114,7 @@ export class OpenAiAdapter implements ModelProviderAdapter {
       tool_name: name ?? "",
       arguments: parsed,
       provider: this.name,
-      model: this.model
+      model
     };
   }
 
@@ -138,7 +139,7 @@ export class OpenAiAdapter implements ModelProviderAdapter {
     const message = body.choices[0]?.message;
     const text = message?.content ?? "";
     if (text) onToken?.(text);
-    const toolCalls = (message?.tool_calls ?? []).map((c) => this.parseToolCall(c.id, c.function.name, c.function.arguments));
+    const toolCalls = (message?.tool_calls ?? []).map((c) => this.parseToolCall(c.id, c.function.name, c.function.arguments, effectiveModel(request, this.model)));
     const cached = body.usage.prompt_tokens_details?.cached_tokens;
     let structured: unknown;
     if (request.structured_schema && text) {
@@ -156,7 +157,7 @@ export class OpenAiAdapter implements ModelProviderAdapter {
         ...(cached !== undefined ? { cached_tokens: cached } : {})
       },
       provider: this.name,
-      model: this.model,
+      model: effectiveModel(request, this.model),
       latency_ms: Date.now() - started,
       ...(body.choices[0]?.finish_reason ? { finish_reason: body.choices[0].finish_reason } : {}),
       ...(response.headers.get("x-request-id") ? { provider_request_id: response.headers.get("x-request-id") as string } : {}),
@@ -171,16 +172,17 @@ export class OpenAiAdapter implements ModelProviderAdapter {
     if (!response.body) {
       throw new ProviderError(this.name, "invalid_response", `${this.name}_no_stream_body`);
     }
-    onEvent({ type: "start", provider: this.name, model: this.model, generation_id: `gen-${randomUUID().slice(0, 12)}` });
+    onEvent({ type: "start", provider: this.name, model: effectiveModel(request, this.model), generation_id: `gen-${randomUUID().slice(0, 12)}` });
     let text = "";
     let ttft: number | undefined;
     let finish = "";
+    let sawDone = false;
     let usage = { input_tokens: 0, output_tokens: 0 };
     const pendingTools = new Map<number, { id?: string; name?: string; args: string }>();
     const completedCalls: ToolCallRequest[] = [];
     try {
       for await (const data of sseLines(response.body)) {
-        if (data === "[DONE]") break;
+        if (data === "[DONE]") { sawDone = true; break; }
         let chunk: {
           choices?: Array<{
             delta?: { content?: string | null; tool_calls?: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }> };
@@ -230,9 +232,14 @@ export class OpenAiAdapter implements ModelProviderAdapter {
       onEvent({ type: "cancelled" });
       throw new ProviderError(this.name, "cancelled", `${this.name}_cancelled`);
     }
+    // D-393 (JARVIS-038): en strøm som tar slutt uten verken `finish_reason` eller `[DONE]` er AVBRUTT, ikke et normalt «stop» - tidligere ble
+    // en avkuttet forbindelse rapportert som vellykket (og kuttet svar ble levert som komplett).
+    if (!finish && !sawDone) {
+      throw new ProviderError(this.name, "stream_interrupted", `${this.name}_stream_ended_without_finish`);
+    }
     // Komplette tool calls valideres/parses FØRST når hele payload er mottatt (§24).
     for (const pending of pendingTools.values()) {
-      const call = this.parseToolCall(pending.id, pending.name, pending.args);
+      const call = this.parseToolCall(pending.id, pending.name, pending.args, effectiveModel(request, this.model));
       completedCalls.push(call);
       onEvent({ type: "tool_call_complete", call });
     }
@@ -242,7 +249,7 @@ export class OpenAiAdapter implements ModelProviderAdapter {
       text,
       usage,
       provider: this.name,
-      model: this.model,
+      model: effectiveModel(request, this.model),
       latency_ms: Date.now() - started,
       ...(ttft !== undefined ? { ttft_ms: ttft } : {}),
       finish_reason: finish || "stop",

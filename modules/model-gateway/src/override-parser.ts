@@ -102,10 +102,36 @@ const PROVIDER_PHRASES: ProviderPhraseEntry[] = [
   }
 ];
 
-function firstMatch(text: string, patterns: RegExp[]): string | undefined {
+/**
+ * D-395 (JARVIS-078): en frase teller KUN som en instruksjon når den står i en IMPERATIV/forespørsels-kontekst. Parseren ignorerte tidligere
+ * negasjon («jeg vil IKKE bruke Claude» ga override MOT hensikten) og avfyrte på vanlig prosa («det er fint å bruke Gemini til dette»,
+ * «hva er forskjellen på å bruke Gemini og GPT»). Nå forkastes treff som
+ *  (a) har en negasjon like foran (ikke/aldri/slutt/unngå/uten, don't/never/stop/without),
+ *  (b) står etter infinitivsmerket «å» («å bruke …») - beskrivelse, ikke ordre,
+ *  (c) står inni sitert tekst («…»/"…") - sitat, ikke instruksjon.
+ * Eksplisitte NO_*-fraser (ikke bruk AI-rådet, ikke bruk betalte modeller) er egne mønstre og påvirkes ikke.
+ */
+const NEGATORS = /(?:^|[\s,.;:!?(])(?:ikke|aldri|slutt|unng[åa]|uten|ingen|n[åa]r?\s+ikke|don'?t|do\s+not|never|stop|without|no\s+longer)\s*$/i;
+const INFINITIVE = /(?:^|[\s,.;:!?(])(?:[åa]|til\s+[åa]|for\s+[åa]|liker\s+[åa]|vil\s+[åa])\s*$/i;
+
+function isImperativeContext(text: string, index: number): boolean {
+  // Setningsgrensen: kun tekst etter siste . ! ? ; teller som kontekst (en negasjon i forrige setning gjelder ikke).
+  const before = text.slice(0, index);
+  const sentence = before.slice(Math.max(before.lastIndexOf("."), before.lastIndexOf("!"), before.lastIndexOf("?"), before.lastIndexOf(";")) + 1);
+  const tail = sentence.split(/\s+/).slice(-4).join(" "); // maks fire ord foran frasen
+  if (NEGATORS.test(tail) || /\b(ikke|aldri|don'?t|never)\b[^.?!;,]{0,25}$/i.test(sentence)) return false;
+  if (INFINITIVE.test(sentence)) return false;
+  const quotes = (before.match(/["«»]/g) ?? []).length;
+  if (quotes % 2 === 1) return false;
+  return true;
+}
+
+function firstMatch(text: string, patterns: RegExp[], requireImperative = false): string | undefined {
   for (const p of patterns) {
-    const m = text.match(p);
-    if (m) return m[0];
+    const flags = p.flags.includes("g") ? p.flags : `${p.flags}g`;
+    for (const m of text.matchAll(new RegExp(p.source, flags))) {
+      if (!requireImperative || isImperativeContext(text, m.index ?? 0)) return m[0];
+    }
   }
   return undefined;
 }
@@ -125,11 +151,11 @@ export function parseRoutingOverride(text: string): RoutingOverrideIntent | null
   if (noCouncilMatch) {
     return { suppressCouncil: true, matched_phrase: noCouncilMatch };
   }
-  const councilMatch = firstMatch(text, COUNCIL_PATTERNS);
+  const councilMatch = firstMatch(text, COUNCIL_PATTERNS, true);
   if (councilMatch) {
     return { triggerCouncil: true, matched_phrase: councilMatch };
   }
-  const localMatch = firstMatch(text, LOCAL_ONLY_PATTERNS);
+  const localMatch = firstMatch(text, LOCAL_ONLY_PATTERNS, true);
   if (localMatch) {
     return { mode: "LOCAL", matched_phrase: localMatch };
   }
@@ -137,12 +163,12 @@ export function parseRoutingOverride(text: string): RoutingOverrideIntent | null
   if (noPaidMatch) {
     return { paid_models_allowed: false, matched_phrase: noPaidMatch };
   }
-  const bestMatch = firstMatch(text, BEST_MODEL_PATTERNS);
+  const bestMatch = firstMatch(text, BEST_MODEL_PATTERNS, true);
   if (bestMatch) {
     return { mode: "QUALITY", matched_phrase: bestMatch };
   }
   for (const entry of PROVIDER_PHRASES) {
-    const match = firstMatch(text, entry.patterns);
+    const match = firstMatch(text, entry.patterns, true);
     if (match) {
       return {
         ...(entry.provider !== undefined ? { provider: entry.provider } : {}),

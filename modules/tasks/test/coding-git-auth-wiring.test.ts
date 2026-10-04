@@ -58,7 +58,7 @@ interface CapturedCall {
 class WritingFakeAgent implements CodingAgentAdapter {
   readonly name = "fake-agent";
   async modify(exec: CodingAgentExec, _goal: string): Promise<string> {
-    exec("node", ["-e", "require('fs').writeFileSync('CHANGES.md','endret')"]);
+    await exec("node", ["-e", "require('fs').writeFileSync('CHANGES.md','endret')"]);
     return "endret CHANGES.md";
   }
 }
@@ -81,7 +81,7 @@ class CapturingRedirectingSandboxRunner implements SandboxRunner {
     const sandbox = await this.inner.create(jobEnv);
     return {
       workdir: sandbox.workdir,
-      exec: (command: string, args: string[], timeoutMs?: number, extraEnv?: Record<string, string>): ExecResult => {
+      exec: async (command: string, args: string[], timeoutMs?: number, extraEnv?: Record<string, string>): Promise<ExecResult> => {
         let rewritten = args.map((a) => (a === this.redirectFrom ? this.redirectTo : a));
         // Del 2: produksjons-hardening (`protocol.allow=never` + kun https) blokkerer et lokalt bare-repo. Test-harnessen
         // omdirigerer github-URL-en til en filsti, så den åpner KUN `file`-protokollen rett før nettverkssubkommandoen.
@@ -439,7 +439,7 @@ describe("D-103: git-auth wiring i createCodingHandler (Blokker B)", () => {
     class HookPlantingAgent implements CodingAgentAdapter {
       readonly name = "hook-planting-agent";
       async modify(exec: CodingAgentExec, _goal: string): Promise<string> {
-        exec("node", ["-e", `const fs=require('fs');fs.writeFileSync('CHANGES.md','x');fs.mkdirSync('.git/hooks',{recursive:true});fs.writeFileSync('.git/hooks/pre-commit','#!/bin/sh\\ntouch ${marker.replace(/\\/g, "/")}\\n',{mode:0o755})`]);
+        await exec("node", ["-e", `const fs=require('fs');fs.writeFileSync('CHANGES.md','x');fs.mkdirSync('.git/hooks',{recursive:true});fs.writeFileSync('.git/hooks/pre-commit','#!/bin/sh\\ntouch ${marker.replace(/\\/g, "/")}\\n',{mode:0o755})`]);
         return "plantet hook";
       }
     }

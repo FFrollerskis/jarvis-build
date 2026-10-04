@@ -10,7 +10,7 @@ import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import type { ExecResult, Sandbox, SandboxRunner, TaskService, TaskView } from "@jarvis/tasks";
 import type { PrPublishingGateway, ToolExecutionResult } from "@jarvis/tasks";
 import type { CiStatus, SelfModificationGithubClient } from "../src/github-client.ts";
-import { SelfModificationService } from "../src/service.ts";
+import { SelfModificationService, selfModificationControlsFrom, type SelfModificationControls } from "../src/service.ts";
 
 /**
  * Task #121 (D-214): ende-til-ende-bevis for `SelfModificationService` mot
@@ -28,6 +28,9 @@ let appPool: pg.Pool;
 
 const OWNER = "person-selfmod-owner";
 const OTHER = "person-selfmod-other";
+
+const AUDIT_TENANT = "tenant-personal";
+const ALLOW_ALL: SelfModificationControls = { allowed: async () => ({ allowed: true }) };
 
 const ownerIdentity: IdentityContext = {
   person_id: OWNER, tenant_id: "tenant-personal", memory_space_id: "personal",
@@ -145,9 +148,12 @@ class FakeGithubClient implements SelfModificationGithubClient {
   mergeResult: { merged: boolean; message?: string } = { merged: true };
   throwOnCi = false;
   calls: string[] = [];
+  /** D-397: hvilken ref CI ble spurt om - skal ALLTID være den bundne SHA-en, aldri et branch-navn. */
+  ciRefs: string[] = [];
 
-  async getCombinedCiStatus(_repo: string, _ref: string): Promise<CiStatus> {
+  async getCombinedCiStatus(_repo: string, ref: string): Promise<CiStatus> {
     this.calls.push("ci_status");
+    this.ciRefs.push(ref);
     if (this.throwOnCi) throw new Error("simulated_ci_status_error");
     return this.ciStatus;
   }
@@ -203,6 +209,7 @@ function buildService(opts: {
   prGateway?: FakePrGateway;
   gitToken?: string | null;
   taskService?: FakeTaskService;
+  controls?: SelfModificationControls;
 }): {
   service: SelfModificationService;
   sandbox: FakeSandboxRunner;
@@ -227,6 +234,8 @@ function buildService(opts: {
     repoSlug: "tsworkflow/jarvisbuild",
     baseBranch: "main",
     taskService: taskService as unknown as TaskService,
+    controls: opts.controls ?? ALLOW_ALL,
+    auditTenantId: AUDIT_TENANT,
     notify: async (text: string) => {
       notified.push(text);
     }
@@ -236,12 +245,14 @@ function buildService(opts: {
 
 async function insertRequest(overrides: Partial<{
   request_id: string; risk: string; status: string; target_paths: string[]; branch: string; pr_number: string; pr_url: string;
+  classified_head_sha: string | null; approved_head_sha: string | null;
 }> = {}): Promise<string> {
   const requestId = overrides.request_id ?? `selfmod-${Math.random().toString(36).slice(2)}`;
   await appPool.query(
     `INSERT INTO self_modification_requests
-       (request_id, kind, risk, target_paths, branch, pr_number, pr_url, status, requested_by_person_id, summary)
-     VALUES ($1, 'personality_config', $2, $3, $4, $5, $6, $7, $8, 'test-seeded')`,
+       (request_id, kind, risk, target_paths, branch, pr_number, pr_url, status, requested_by_person_id, summary,
+        classified_head_sha, approved_head_sha)
+     VALUES ($1, 'personality_config', $2, $3, $4, $5, $6, $7, $8, 'test-seeded', $9, $10)`,
     [
       requestId,
       overrides.risk ?? "zero_review",
@@ -250,7 +261,9 @@ async function insertRequest(overrides: Partial<{
       overrides.pr_number ?? "42",
       overrides.pr_url ?? "https://github.com/tsworkflow/jarvisbuild/pull/42",
       overrides.status ?? "pending_ci",
-      OWNER
+      OWNER,
+      overrides.classified_head_sha === undefined ? "deadbeef" : overrides.classified_head_sha,
+      overrides.approved_head_sha === undefined ? ((overrides.status ?? "pending_ci") === "approved" ? "deadbeef" : null) : overrides.approved_head_sha
     ]
   );
   return requestId;
@@ -321,6 +334,9 @@ describe("B: proposePersonalityChange - lykkes-banen", () => {
     expect(row.rows[0].risk).toBe("zero_review");
     expect(row.rows[0].target_paths).toEqual(["config/charlie-personality.json"]);
     expect(row.rows[0].requested_by_person_id).toBe(OWNER);
+    // D-397: diffen er klassifisert på nøyaktig denne commiten.
+    expect(row.rows[0].classified_head_sha).toBe("deadbeef");
+    expect(row.rows[0].approved_head_sha).toBeNull();
   });
 
   it("B2: commit-meldingen inneholder identitetens person_id (proveniens)", async () => {
@@ -385,7 +401,7 @@ describe("D: sweepPendingRequests - CI-portvakten", () => {
     const outcome = await service.sweepPendingRequests();
     expect(outcome.still_pending).toEqual([requestId]);
     expect(outcome.merged).toEqual([]);
-    expect(githubClient.calls).toEqual(["ci_status"]);
+    expect(githubClient.calls).toEqual(["head_sha", "ci_status"]);
     const row = await appPool.query("SELECT status FROM self_modification_requests WHERE request_id=$1", [requestId]);
     expect(row.rows[0].status).toBe("pending_ci");
   });
@@ -407,7 +423,7 @@ describe("D: sweepPendingRequests - CI-portvakten", () => {
     const { service, githubClient } = buildService({});
     const outcome = await service.sweepPendingRequests();
     expect(outcome.merged).toEqual([requestId]);
-    expect(githubClient.calls).toEqual(["ci_status", "changed_files", "head_sha", "merge"]);
+    expect(githubClient.calls).toEqual(["head_sha", "ci_status", "changed_files", "merge"]);
     const row = await appPool.query("SELECT status FROM self_modification_requests WHERE request_id=$1", [requestId]);
     expect(row.rows[0].status).toBe("merged");
   });
@@ -472,6 +488,7 @@ describe("E: resolveApproval - Telegram-godkjennings-tilstandsmaskinen", () => {
     const { service } = buildService({});
     const updated = await service.resolveApproval(requestId, "approved", OWNER);
     expect(updated.status).toBe("approved");
+    expect(updated.approved_head_sha).toBe("deadbeef");
     expect(updated.resolved_by_person_id).toBe(OWNER);
     expect(updated.resolved_at).not.toBeNull();
   });
@@ -666,9 +683,10 @@ describe("H: sweepPendingJobs - følger opp den asynkrone kodejobben", () => {
     });
     const outcome = await service.sweepPendingJobs();
     expect(outcome.advanced).toEqual([proposed.request_id]);
-    const row = await appPool.query("SELECT status, risk FROM self_modification_requests WHERE request_id=$1", [proposed.request_id]);
+    const row = await appPool.query("SELECT status, risk, classified_head_sha FROM self_modification_requests WHERE request_id=$1", [proposed.request_id]);
     expect(row.rows[0].status).toBe("pending_ci");
     expect(row.rows[0].risk).toBe("zero_review");
+    expect(row.rows[0].classified_head_sha).toBe("deadbeef");
     expect(notified).toEqual([]);
   });
 
@@ -689,6 +707,7 @@ describe("H: sweepPendingJobs - følger opp den asynkrone kodejobben", () => {
     expect(row.rows[0].risk).toBe("requires_approval");
     const notice = notified.find((t) => t.includes(proposed.request_id));
     expect(notice).toBeDefined();
+    expect(notice).toContain("Commit: deadbeef");
     expect(notice).toContain(`/godkjenn ${proposed.request_id}`);
     expect(notice).toContain(`/avvis ${proposed.request_id}`);
   });
@@ -719,7 +738,7 @@ describe("I: sweepApprovedRequests - merge-koblingen for owner-godkjente kodeend
     const { service, notified } = buildService({ githubClient });
     const outcome = await service.sweepApprovedRequests();
     expect(outcome.merged).toEqual([requestId]);
-    expect(githubClient.calls).toEqual(["ci_status", "changed_files", "head_sha", "merge"]);
+    expect(githubClient.calls).toEqual(["head_sha", "ci_status", "changed_files", "merge"]);
     const row = await appPool.query("SELECT status FROM self_modification_requests WHERE request_id=$1", [requestId]);
     expect(row.rows[0].status).toBe("merged");
     expect(notified.some((t) => t.includes(requestId))).toBe(true);
@@ -753,5 +772,135 @@ describe("I: sweepApprovedRequests - merge-koblingen for owner-godkjente kodeend
     expect(outcome.failed).not.toContain(requestId);
     expect(outcome.still_pending).not.toContain(requestId);
     expect(githubClient.calls).toEqual([]);
+  });
+});
+
+/** D-397 (JARVIS-042): SHA-bundet godkjenning, kill switch/freeze, revisjonsspor. */
+describe("J: SHA-binding, eier-kontroller og revisjon (JARVIS-042)", () => {
+  const auditTypes = async (requestId: string): Promise<string[]> => {
+    const r = await adminPool.query(
+      "SELECT type FROM audit_events WHERE tool_id = 'self_modification' AND payload->>'request_id' = $1 ORDER BY audit_id",
+      [requestId]
+    );
+    return r.rows.map((x: { type: string }) => x.type);
+  };
+
+  it("J1: CI spørres mot den BUNDNE SHA-en, aldri et branch-navn - og merge sender samme SHA som precondition", async () => {
+    const requestId = await insertRequest({ classified_head_sha: "deadbeef" });
+    const githubClient = new FakeGithubClient();
+    let mergedSha = "";
+    githubClient.mergePullRequest = async (_r, _p, opts) => { mergedSha = opts.sha; githubClient.calls.push("merge"); return { merged: true }; };
+    const { service } = buildService({ githubClient });
+    expect((await service.sweepPendingRequests()).merged).toEqual([requestId]);
+    expect(githubClient.ciRefs).toEqual(["deadbeef"]);
+    expect(mergedSha).toBe("deadbeef");
+  });
+
+  it("J2: PR-en har fått en NY commit etter klassifisering -> ci_failed, ALDRI CI/merge, eieren varsles, revisjon skrevet", async () => {
+    const requestId = await insertRequest({ classified_head_sha: "deadbeef" });
+    const githubClient = new FakeGithubClient();
+    githubClient.headSha = "cafef00d";
+    const { service, notified } = buildService({ githubClient });
+    const outcome = await service.sweepPendingRequests();
+    expect(outcome.failed).toEqual([requestId]);
+    expect(githubClient.calls).toEqual(["head_sha"]);
+    const row = await appPool.query("SELECT status FROM self_modification_requests WHERE request_id=$1", [requestId]);
+    expect(row.rows[0].status).toBe("ci_failed");
+    expect(notified.some((t) => t.includes(requestId) && t.includes("ny commit"))).toBe(true);
+    expect(await auditTypes(requestId)).toEqual(["self_modification.merge_refused"]);
+  });
+
+  it("J3: legacy-rad UTEN bundet SHA feiler LUKKET (ci_failed), ingen GitHub-kall utover ingenting", async () => {
+    const requestId = await insertRequest({ classified_head_sha: null });
+    const { service, githubClient } = buildService({});
+    const outcome = await service.sweepPendingRequests();
+    expect(outcome.failed).toEqual([requestId]);
+    expect(githubClient.calls).toEqual([]);
+    const row = await appPool.query("SELECT status FROM self_modification_requests WHERE request_id=$1", [requestId]);
+    expect(row.rows[0].status).toBe("ci_failed");
+  });
+
+  it("J4: kill switch aktiv -> INGEN merge, raden blir stående pending_ci, revidert ÉN gang; opphevet -> merges", async () => {
+    const requestId = await insertRequest();
+    let active = true;
+    const controls = selfModificationControlsFrom({
+      getControlState: async () => ({ kill_switch: { active }, frozen_connectors: [] })
+    });
+    const { service, githubClient } = buildService({ controls });
+    expect((await service.sweepPendingRequests()).still_pending).toEqual([requestId]);
+    expect((await service.sweepPendingRequests()).still_pending).toEqual([requestId]);
+    expect(githubClient.calls).toEqual([]);
+    expect(await auditTypes(requestId)).toEqual(["self_modification.merge_blocked"]);
+    active = false;
+    expect((await service.sweepPendingRequests()).merged).toEqual([requestId]);
+    expect(await auditTypes(requestId)).toEqual(["self_modification.merge_blocked", "self_modification.merge_attempt", "self_modification.merged"]);
+  });
+
+  it("J5: frosset github-connector stopper merge; ulesbar eier-tilstand er også «ikke tillatt» (fail-closed)", async () => {
+    const frozen = selfModificationControlsFrom({
+      getControlState: async () => ({ kill_switch: { active: false }, frozen_connectors: [{ connector_id: "github" }] })
+    });
+    expect(await frozen.allowed()).toEqual({ allowed: false, reason: "connector_frozen:github" });
+    const broken = selfModificationControlsFrom({ getControlState: async () => { throw new Error("db_down"); } });
+    expect(await broken.allowed()).toEqual({ allowed: false, reason: "owner_controls_unreadable" });
+    const unrelated = selfModificationControlsFrom({
+      getControlState: async () => ({ kill_switch: { active: false }, frozen_connectors: [{ connector_id: "slack" }] })
+    });
+    expect(await unrelated.allowed()).toEqual({ allowed: true });
+  });
+
+  it("J6: kill switch aktiv stopper også nye forslag FØR sandbox/jobb opprettes", async () => {
+    const controls: SelfModificationControls = { allowed: async () => ({ allowed: false, reason: "kill_switch_active" }) };
+    const { service, sandbox, taskService } = buildService({ controls });
+    await expect(service.proposePersonalityChange(ownerIdentity, { tone_descriptors: ["varm"], style_notes: "t" })).rejects.toThrow("self_modification_blocked:kill_switch_active");
+    await expect(service.proposeCodeChange(ownerIdentity, { goal: "x" })).rejects.toThrow("self_modification_blocked:kill_switch_active");
+    expect(sandbox.createCalls).toBe(0);
+    expect(taskService.submitted).toHaveLength(0);
+  });
+
+  it("J7: godkjenning avvises når PR-en har fått en ny commit siden eieren fikk SHA-en vist - raden forblir awaiting_approval", async () => {
+    const requestId = await insertRequest({ risk: "requires_approval", status: "awaiting_approval", classified_head_sha: "deadbeef" });
+    const githubClient = new FakeGithubClient();
+    githubClient.headSha = "cafef00d";
+    const { service } = buildService({ githubClient });
+    await expect(service.resolveApproval(requestId, "approved", OWNER)).rejects.toThrow("self_modification_head_changed_since_review");
+    const row = await appPool.query("SELECT status, approved_head_sha FROM self_modification_requests WHERE request_id=$1", [requestId]);
+    expect(row.rows[0].status).toBe("awaiting_approval");
+    expect(row.rows[0].approved_head_sha).toBeNull();
+    expect(await auditTypes(requestId)).toEqual(["self_modification.approval_refused"]);
+  });
+
+  it("J8: en godkjent rad merges IKKE hvis en ny commit kom ETTER godkjenningen (approved_head_sha != nåværende head)", async () => {
+    const requestId = await insertRequest({
+      risk: "requires_approval", status: "approved", target_paths: ["apps/api/src/some-feature.ts"],
+      classified_head_sha: "deadbeef", approved_head_sha: "deadbeef"
+    });
+    const githubClient = new FakeGithubClient();
+    githubClient.changedFiles = ["apps/api/src/some-feature.ts"];
+    githubClient.headSha = "0badc0de";
+    const { service } = buildService({ githubClient });
+    expect((await service.sweepApprovedRequests()).failed).toEqual([requestId]);
+    expect(githubClient.calls).toEqual(["head_sha"]);
+  });
+
+  it("J9: godkjenning og avvisning krever eier-identiteten; revisjon skrives for begge", async () => {
+    const approveId = await insertRequest({ risk: "requires_approval", status: "awaiting_approval" });
+    const rejectId = await insertRequest({ risk: "requires_approval", status: "awaiting_approval" });
+    const { service } = buildService({});
+    await expect(service.resolveApproval(approveId, "approved", OTHER)).rejects.toThrow("self_modification_owner_only");
+    await expect(service.resolveApproval(rejectId, "rejected", OTHER)).rejects.toThrow("self_modification_owner_only");
+    await service.resolveApproval(approveId, "approved", OWNER);
+    await service.resolveApproval(rejectId, "rejected", OWNER);
+    expect(await auditTypes(approveId)).toEqual(["self_modification.approved"]);
+    expect(await auditTypes(rejectId)).toEqual(["self_modification.rejected"]);
+  });
+
+  it("J10: godkjenning kan ikke gis mens kill switch er aktiv", async () => {
+    const requestId = await insertRequest({ risk: "requires_approval", status: "awaiting_approval" });
+    const controls: SelfModificationControls = { allowed: async () => ({ allowed: false, reason: "kill_switch_active" }) };
+    const { service } = buildService({ controls });
+    await expect(service.resolveApproval(requestId, "approved", OWNER)).rejects.toThrow("self_modification_blocked:kill_switch_active");
+    const row = await appPool.query("SELECT status FROM self_modification_requests WHERE request_id=$1", [requestId]);
+    expect(row.rows[0].status).toBe("awaiting_approval");
   });
 });

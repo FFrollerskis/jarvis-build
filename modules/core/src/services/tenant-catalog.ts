@@ -38,6 +38,13 @@ export async function listBusinessTenantIds(pool: pg.Pool, limit = 200): Promise
   }
   const tenantIds = result.rows.map((row) => row.tenant_id);
   console.log(JSON.stringify({ msg: "business_tenants_enumerated", count: tenantIds.length }));
+  if (tenantIds.length === 0) {
+    // D-396 (JARVIS-044): en tom katalog gjør ALLE business-sveip (open loops, scoring, brief, event-sync, finans, vekst) til stille no-ops - synliggjør det.
+    console.warn(JSON.stringify({
+      msg: "business_sweeps_no_business_tenants",
+      hint: "ingen tenant med kind='business' finnes - alle business-sveip er no-ops til en business-tenant opprettes (se docs/remediation/FINDINGS_LEDGER.md JARVIS-044)"
+    }));
+  }
   return tenantIds;
 }
 

@@ -1,7 +1,7 @@
-import { spawnSync } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execProcess } from "./process-exec.ts";
 
 export interface ExecResult {
   code: number;
@@ -30,7 +30,8 @@ export interface Sandbox {
    * `ClaudeCodeAgent`s egen `exec()`-kall (som fortsatt kun bruker
    * basis-`env`en fra `create()`).
    */
-  exec(command: string, args: string[], timeoutMs?: number, extraEnv?: Record<string, string>): ExecResult;
+  /** D-394: kan være asynkron (kjører barneprosessen uten å blokkere event-loopen); synkrone testdobler støttes fortsatt. */
+  exec(command: string, args: string[], timeoutMs?: number, extraEnv?: Record<string, string>): ExecResult | Promise<ExecResult>;
   dispose(): Promise<void>;
 }
 
@@ -50,15 +51,13 @@ export class ProcessSandboxRunner implements SandboxRunner {
     };
     return {
       workdir,
-      exec(command: string, args: string[], timeoutMs = 60_000, extraEnv?: Record<string, string>): ExecResult {
-        const result = spawnSync(command, args, {
+      async exec(command: string, args: string[], timeoutMs = 60_000, extraEnv?: Record<string, string>): Promise<ExecResult> {
+        const result = await execProcess(command, args, {
           cwd: workdir,
           env: extraEnv ? { ...env, ...extraEnv } : env, // ren env - ingen arvede secrets
-          timeout: timeoutMs,
-          encoding: "utf8",
-          shell: false
+          timeoutMs
         });
-        return { code: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+        return { code: result.status ?? 1, stdout: result.stdout, stderr: result.stderr };
       },
       async dispose(): Promise<void> {
         await rm(workdir, { recursive: true, force: true });
@@ -99,9 +98,9 @@ export class DockerSandboxRunner implements SandboxRunner {
       // `docker run`-kommandolinjen/argv/prosesslisten (kun navnet gjør) -
       // samme "aldri i argv"-invariant som `ProcessSandboxRunner` allerede
       // overholder.
-      exec(command: string, args: string[], timeoutMs = 60_000, extraEnv?: Record<string, string>): ExecResult {
+      async exec(command: string, args: string[], timeoutMs = 60_000, extraEnv?: Record<string, string>): Promise<ExecResult> {
         const envArgs = extraEnv ? Object.keys(extraEnv).flatMap((key) => ["-e", key]) : [];
-        const result = spawnSync(dockerBin, [
+        const result = await execProcess(dockerBin, [
           "run", "--rm",
           "--network", "none",
           "--memory", "256m",
@@ -112,9 +111,7 @@ export class DockerSandboxRunner implements SandboxRunner {
           ...envArgs,
           image, command, ...args
         ], {
-          timeout: timeoutMs,
-          encoding: "utf8",
-          shell: false,
+          timeoutMs,
           // `docker`-CLI-prosessen selv trenger disse i SIN egen env for at
           // bare `-e <NAVN>`-formen (over) skal ha noe å videresende - dette
           // ER selve mekanismen (dokumentert `docker run --help`-oppførsel),
@@ -122,7 +119,7 @@ export class DockerSandboxRunner implements SandboxRunner {
           // (docker selv trenger PATH osv. for å kjøre) + `extraEnv` over.
           env: extraEnv ? { ...process.env, ...extraEnv } : process.env
         });
-        return { code: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+        return { code: result.status ?? 1, stdout: result.stdout, stderr: result.stderr };
       },
       async dispose(): Promise<void> {
         await rm(workdir, { recursive: true, force: true });

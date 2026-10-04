@@ -19,10 +19,11 @@ import {
   type CoreClient,
   type CoreReply,
   type CoreStreamEvent,
-  type VoiceIdentity
+  type VoiceIdentity,
+  type VoiceSessionOptions
 } from "./session.ts";
 import type { SttAdapter } from "./stt.ts";
-import type { TtsAdapter } from "./tts.ts";
+import { DEFAULT_TTS_SAMPLE_RATE, type TtsAdapter } from "./tts.ts";
 import type { VadAdapter } from "./vad.ts";
 
 /**
@@ -184,12 +185,15 @@ export interface VoiceGatewayOptions {
   journal?: UtteranceJournal;
   health?: VoiceHealth;
   /**
-   * D-353: valgfri, EKSPLISITT VAD-instans (f.eks. `EnergyVad` med
-   * miljøvariabel-styrt terskel/hangover fra `main.ts`) - `undefined` lar
-   * `VoiceSession` sin egen konstruktør-default (`new EnergyVad()`) gjelde
-   * uendret, samme atferd som FØR dette feltet fantes.
+   * D-353: valgfri, EKSPLISITT VAD (f.eks. `EnergyVad` med miljøvariabel-styrt terskel/hangover fra `main.ts`) - `undefined` lar
+   * `VoiceSession` sin egen konstruktør-default (`new EnergyVad()`) gjelde uendret.
+   * D-390 (JARVIS-079 «shared EnergyVad across sessions»): en FABRIKK gir hver WebSocket-sesjon sin EGEN VAD-instans - én delt
+   * instans ville latt to samtidige sesjoner forstyrre hverandres tale/stillhet-tilstand (og støygulv). En ren instans støttes
+   * fortsatt (bakoverkompatibelt), men bør kun brukes i tester med én sesjon.
    */
-  vad?: VadAdapter;
+  vad?: VadAdapter | (() => VadAdapter);
+  /** D-390: pre-roll, fyllord og talt verktøystatus per sesjon (se `VoiceSessionOptions`). */
+  session?: VoiceSessionOptions;
 }
 
 /**
@@ -235,8 +239,17 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
   const health = options.health ?? new VoiceHealth();
   const server = createServer((req, res) => {
     if (req.method === "GET" && req.url === "/health") {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", service: "jarvis-voice-gateway", version: "0.2.0" }));
+      // D-393 (JARVIS-026): ikke lenger en konstant «ok». Talekjeden er IKKE frisk når STT eller TTS ikke er konfigurert eller er UNAVAILABLE
+      // (3 sammenhengende feil) - da svarer vi 503 med komponentstatus, slik at compose/`depends_on` og eieren ser sannheten.
+      const stt = healthOf("stt");
+      const tts = healthOf("tts");
+      const bad = (c: { state: string } | undefined): boolean => c === undefined || c.state === "NOT_CONFIGURED" || c.state === "UNAVAILABLE";
+      const ok = !bad(stt) && !bad(tts);
+      res.writeHead(ok ? 200 : 503, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        status: ok ? "ok" : "unavailable", service: "jarvis-voice-gateway", version: "0.2.0",
+        checks: { stt: stt?.state ?? "NOT_CONFIGURED", tts: tts?.state ?? "NOT_CONFIGURED" }
+      }));
       return;
     }
     if (req.method === "GET" && req.url === "/status") {
@@ -247,7 +260,9 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
           service: "jarvis-voice-gateway",
           transport: "websocket",
           stt: { name: options.stt.name, ...healthOf("stt"), processor: options.stt.processor },
-          tts: { name: options.tts.name, ...healthOf("tts"), processor: options.tts.processor },
+          tts: { name: options.tts.name, ...healthOf("tts"), processor: options.tts.processor, sample_rate: options.tts.sampleRate ?? DEFAULT_TTS_SAMPLE_RATE },
+          // D-390: observerbart hva sesjonene faktisk kjører med.
+          session_options: options.session ?? {},
           barge_in: health.bargeInSeen ? "VERIFIED" : "READY",
           // §22: rå lyd lagres aldri permanent - UNNTATT eksplisitt samtykket diagnostikk-dump
           // (D-279 + remediering del 1); `/status` rapporterer det ærlig.
@@ -316,16 +331,18 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
           onError: (error) => send({ type: "error", error })
         },
         options.journal ?? new UtteranceJournal(),
-        options.vad,
+        typeof options.vad === "function" ? options.vad() : options.vad,
         undefined,
         undefined,
         undefined,
         health,
-        authority
+        authority,
+        options.session ?? {}
       );
       // Tillitsnivået er en del av svaret: en klient skal kunne SE at den kjører
       // ubevist, i stedet for å oppdage det som et uforklarlig `speech_routing_denied`.
-      send({ type: "started", memory_space_authority: authority });
+      // D-390: TTS-samplerate følger med, så klienten spiller av i riktig rate (piper 22 050, OpenAI 24 000, ElevenLabs 16 000).
+      send({ type: "started", memory_space_authority: authority, tts_sample_rate: options.tts.sampleRate ?? DEFAULT_TTS_SAMPLE_RATE });
     };
 
     /**

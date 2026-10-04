@@ -6,6 +6,7 @@ import {
   envPositiveInt,
   extractProviderErrorCode,
   ProviderError,
+  effectiveModel,
   sanitizeEndpointForDiagnostics,
   sseLines,
   type ChatMessage,
@@ -71,7 +72,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
       });
     }
     return {
-      model: this.model,
+      model: effectiveModel(request, this.model),
       max_tokens: request.max_tokens ?? 1024,
       ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
       ...(request.system ? { system: request.system } : {}),
@@ -157,7 +158,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
         tool_name: c.name ?? "",
         arguments: c.input ?? {},
         provider: this.name,
-        model: this.model
+        model: effectiveModel(request, this.model)
       }));
     return {
       text,
@@ -167,7 +168,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
         ...(body.usage.cache_read_input_tokens !== undefined ? { cached_tokens: body.usage.cache_read_input_tokens } : {})
       },
       provider: this.name,
-      model: this.model,
+      model: effectiveModel(request, this.model),
       latency_ms: Date.now() - started,
       ...(body.stop_reason ? { finish_reason: body.stop_reason } : {}),
       ...(response.headers.get("request-id") ? { provider_request_id: response.headers.get("request-id") as string } : {}),
@@ -181,7 +182,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
     if (!response.body) {
       throw new ProviderError(this.name, "invalid_response", `${this.name}_no_stream_body`);
     }
-    onEvent({ type: "start", provider: this.name, model: this.model, generation_id: `gen-${randomUUID().slice(0, 12)}` });
+    onEvent({ type: "start", provider: this.name, model: effectiveModel(request, this.model), generation_id: `gen-${randomUUID().slice(0, 12)}` });
     let text = "";
     let ttft: number | undefined;
     let finish = "";
@@ -242,7 +243,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
                 throw new ProviderError(this.name, "invalid_tool_call", `${this.name}_invalid_tool_arguments`);
               }
               const call: ToolCallRequest = {
-                tool_call_id: pending.id, tool_name: pending.name, arguments: args, provider: this.name, model: this.model
+                tool_call_id: pending.id, tool_name: pending.name, arguments: args, provider: this.name, model: effectiveModel(request, this.model)
               };
               completedCalls.push(call);
               onEvent({ type: "tool_call_complete", call });
@@ -280,6 +281,10 @@ export class AnthropicAdapter implements ModelProviderAdapter {
       onEvent({ type: "cancelled" });
       throw new ProviderError(this.name, "cancelled", `${this.name}_cancelled`);
     }
+    // D-393 (JARVIS-038): ingen `stop_reason` = strømmen ble avbrutt, ikke et normalt «end_turn».
+    if (!finish) {
+      throw new ProviderError(this.name, "stream_interrupted", `${this.name}_stream_ended_without_stop_reason`);
+    }
     const usage = { input_tokens: inputTokens, output_tokens: outputTokens };
     onEvent({ type: "usage", usage });
     onEvent({ type: "finish", finish_reason: finish || "end_turn" });
@@ -287,7 +292,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
       text,
       usage,
       provider: this.name,
-      model: this.model,
+      model: effectiveModel(request, this.model),
       latency_ms: Date.now() - started,
       ...(ttft !== undefined ? { ttft_ms: ttft } : {}),
       finish_reason: finish || "end_turn",

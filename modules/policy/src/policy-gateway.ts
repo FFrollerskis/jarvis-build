@@ -71,6 +71,12 @@ export interface PolicyGatewayOptions {
   infraGate?: InfraExecutionGate;
   infraToolIds?: ReadonlySet<string>;
   auditSink?: (event: PolicyAuditEvent) => void;
+  /**
+   * D-393 (JARVIS-053): øvre grense for den innebygde minne-journalen (`auditLog`) når INGEN `auditSink` er koblet til. Journalen var en
+   * ubegrenset array i begge prosessene og vokste for hver eneste avgjørelse. Eldste hendelser forkastes først (ringbuffer); `auditDropped` teller dem.
+   * Produksjon skal koble en varig `auditSink` - den innebygde journalen er kun for tester/nød og har aldri vært autoritativ.
+   */
+  maxInMemoryAudit?: number;
   clock?: () => Date;
 }
 
@@ -87,6 +93,8 @@ export class PolicyGateway {
   private readonly auditSink: (event: PolicyAuditEvent) => void;
   private readonly clock: () => Date;
   readonly auditLog: PolicyAuditEvent[] = [];
+  /** D-393: antall hendelser som er forkastet fra `auditLog` fordi grensen var nådd. */
+  auditDropped = 0;
   private readonly opts: PolicyGatewayOptions;
 
   constructor(options: PolicyGatewayOptions) {
@@ -96,7 +104,15 @@ export class PolicyGateway {
     this.killSwitch = options.killSwitch;
     this.mandates = options.mandates ?? new Set();
     this.clock = options.clock ?? (() => new Date());
-    this.auditSink = options.auditSink ?? ((event) => this.auditLog.push(event));
+    const maxInMemory = Math.max(1, options.maxInMemoryAudit ?? 5_000);
+    this.auditSink = options.auditSink ?? ((event) => {
+      this.auditLog.push(event);
+      if (this.auditLog.length > maxInMemory) {
+        const overflow = this.auditLog.length - maxInMemory;
+        this.auditLog.splice(0, overflow);
+        this.auditDropped += overflow;
+      }
+    });
   }
 
   async authorize(request: AuthorizationRequest): Promise<AuthorizationResult> {
