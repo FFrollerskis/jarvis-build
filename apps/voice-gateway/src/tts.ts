@@ -12,8 +12,68 @@ export interface TtsPlayback {
   cancel(): void;
 }
 
+/**
+ * D-405: eierens stemmeinnstillinger (kun AVSPILLING - ingen autoritet/data). Alle verdier valideres og klemmes i `sanitizeVoiceSettings`;
+ * standardverdiene gir NØYAKTIG dagens oppførsel (ingen ekstra flagg sendes til motoren).
+ */
+export interface VoiceSettings {
+  /** Talehastighet som multiplikator (1 = normal). */
+  speed: number;
+  /** Uttrykksfullhet/variasjon som multiplikator (1 = motorens standard). Kun motorer som støtter det (Piper). */
+  expressiveness: number;
+  /** Pause mellom setninger i millisekunder (200 = Pipers standard). Kun motorer som støtter det (Piper). */
+  pause_ms: number;
+}
+
+export type TtsOptions = Partial<VoiceSettings>;
+
+/** Hva en motor faktisk kan justere - sendes til klienten slik at UI-et aldri lover noe motoren ikke gjør. */
+export interface VoiceCapabilities {
+  speed: boolean;
+  expressiveness: boolean;
+  pause: boolean;
+}
+
+export const DEFAULT_VOICE_SETTINGS: Readonly<VoiceSettings> = { speed: 1, expressiveness: 1, pause_ms: 200 };
+export const VOICE_SETTING_LIMITS = {
+  speed: { min: 0.6, max: 1.6 },
+  expressiveness: { min: 0.3, max: 1.5 },
+  pause_ms: { min: 0, max: 1500 }
+} as const;
+
+/** Klemmer innkommende (ubetrodd) input til gyldige verdier; ugyldige/manglende felt faller til standard. */
+export function sanitizeVoiceSettings(raw: unknown): VoiceSettings {
+  const src = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
+  const num = (key: keyof VoiceSettings): number => {
+    const v = src[key];
+    const lim = VOICE_SETTING_LIMITS[key];
+    if (typeof v !== "number" || !Number.isFinite(v)) return DEFAULT_VOICE_SETTINGS[key];
+    return Math.min(lim.max, Math.max(lim.min, v));
+  };
+  return { speed: num("speed"), expressiveness: num("expressiveness"), pause_ms: Math.round(num("pause_ms")) };
+}
+
+/**
+ * Piper-flagg for innstillingene. KUN verdier som avviker fra standard gir flagg - standardinnstillinger sender ingenting og gir bit-identisk
+ * oppførsel som før. (`--length_scale`: høyere = saktere, derfor 1/speed. Pipers egne CLI-standarder: noise_scale 0.667, noise_w 0.8,
+ * sentence_silence 0.2 s.) UVERIFISERT mot akkurat den installerte piper-binæren; feiler et kall med egne flagg, kjøres det på nytt uten.
+ */
+export function piperArgsFor(options: TtsOptions | undefined): string[] {
+  if (!options) return [];
+  const s = { ...DEFAULT_VOICE_SETTINGS, ...options };
+  const args: string[] = [];
+  if (Math.abs(s.speed - 1) > 0.005) args.push("--length_scale", (1 / s.speed).toFixed(3));
+  if (Math.abs(s.expressiveness - 1) > 0.005) {
+    args.push("--noise_scale", (0.667 * s.expressiveness).toFixed(3), "--noise_w", (0.8 * s.expressiveness).toFixed(3));
+  }
+  if (Math.abs(s.pause_ms - DEFAULT_VOICE_SETTINGS.pause_ms) >= 1) args.push("--sentence_silence", (s.pause_ms / 1000).toFixed(3));
+  return args;
+}
+
 export interface TtsAdapter {
   readonly name: string;
+  /** D-405: hva som kan justeres per sesjon (udefinert = ingenting). */
+  readonly voiceCapabilities?: VoiceCapabilities;
   /**
    * D-122: samme erklæring som `SttAdapter.processor`. TTS er tatt med fordi
    * SVAR-teksten fra en `health`-samtale er like avslørende som spørsmålet -
@@ -27,7 +87,7 @@ export interface TtsAdapter {
    */
   readonly sampleRate?: number;
   available(): boolean;
-  synthesize(text: string): TtsPlayback;
+  synthesize(text: string, options?: TtsOptions): TtsPlayback;
 }
 
 export const DEFAULT_TTS_SAMPLE_RATE = 24_000;
@@ -106,17 +166,21 @@ export class OpenAiTts implements TtsAdapter {
     return Boolean(this.apiKey);
   }
 
-  synthesize(text: string): TtsPlayback {
+  /** D-405: OpenAI sitt tale-API har `speed` (0.25-4.0); uttrykk/pause finnes ikke der. */
+  readonly voiceCapabilities: VoiceCapabilities = { speed: true, expressiveness: false, pause: false };
+
+  synthesize(text: string, options?: TtsOptions): TtsPlayback {
     if (!this.apiKey) {
       throw new Error("openai_tts_not_configured");
     }
     const { apiKey, model, voice } = this;
+    const speed = options?.speed !== undefined && Math.abs(options.speed - 1) > 0.005 ? options.speed : undefined;
     let cancelled = false;
     async function* generate(): AsyncIterable<Buffer> {
       const response = await fetch("https://api.openai.com/v1/audio/speech", {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({ model, voice, input: text, response_format: "pcm" })
+        body: JSON.stringify({ model, voice, input: text, response_format: "pcm", ...(speed !== undefined ? { speed } : {}) })
       });
       if (!response.ok || !response.body) {
         throw new Error(`openai_tts_error_${response.status}`);
@@ -293,14 +357,18 @@ export class LocalPiperTts implements TtsAdapter {
     return Boolean(this.binPath) && Boolean(this.modelPath);
   }
 
-  synthesize(text: string): TtsPlayback {
+  /** D-405: piper kan justere hastighet (length_scale), uttrykk (noise_scale/noise_w) og setningspause (sentence_silence). */
+  readonly voiceCapabilities: VoiceCapabilities = { speed: true, expressiveness: true, pause: true };
+
+  synthesize(text: string, options?: TtsOptions): TtsPlayback {
     if (!this.binPath || !this.modelPath) {
       throw new Error("local_piper_not_configured");
     }
     const { binPath, modelPath } = this;
+    const extraArgs = piperArgsFor(options);
     let cancelled = false;
     let child: ReturnType<typeof spawn> | undefined;
-    async function* generate(): AsyncIterable<Buffer> {
+    async function* runOnce(extra: string[]): AsyncIterable<Buffer> {
       if (cancelled) {
         return;
       }
@@ -312,7 +380,7 @@ export class LocalPiperTts implements TtsAdapter {
       // (Node ser aldri EOF) og cancel() ville hengt til den underliggende
       // prosessen selv ga opp, EKSAKT det §15/§16 (barge-in) forbyr. Bevist
       // av `test/local-piper-tts.test.ts` sin `mock-piper-hang.sh`.
-      const proc = spawn(binPath, ["--model", modelPath, "--output_raw"], {
+      const proc = spawn(binPath, ["--model", modelPath, "--output_raw", ...extra], {
         stdio: ["pipe", "pipe", "pipe"],
         detached: true
       });
@@ -349,6 +417,28 @@ export class LocalPiperTts implements TtsAdapter {
           ? `${stderr.slice(0, 150)} (stdin write: ${(stdinError as Error).message})`
           : stderr.slice(0, 200);
         throw new Error(`local_piper_process_failed:${code ?? "unknown"}:${detail}`);
+      }
+    }
+    /**
+     * D-405: egne stemmeflagg er UVERIFISERT mot akkurat den installerte piper-binæren. Feiler kallet FØR noen lyd er levert, kjøres det
+     * på nytt med standardflagg (aldri stille - logget) i stedet for at et ugyldig flagg gjør Jarvis stum. Standardinnstillinger = én kjøring, uendret.
+     */
+    async function* generate(): AsyncIterable<Buffer> {
+      const attempts: string[][] = extraArgs.length > 0 ? [extraArgs, []] : [[]];
+      for (let i = 0; i < attempts.length; i++) {
+        let yielded = false;
+        try {
+          for await (const chunk of runOnce(attempts[i] ?? [])) {
+            yielded = true;
+            yield chunk;
+          }
+          return;
+        } catch (err) {
+          if (cancelled || yielded || i === attempts.length - 1) {
+            throw err;
+          }
+          console.warn(JSON.stringify({ msg: "piper_custom_voice_params_failed_retry_default", reason: (err as Error).message.slice(0, 120) }));
+        }
       }
     }
     return {
