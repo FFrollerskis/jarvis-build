@@ -54,9 +54,10 @@ describe("stream(): SECRET_RESTRICTED uten native streaming (D-379)", () => {
     expect(calls).toEqual([]);
   });
 
-  it("andre sensitiviteter krever fortsatt native streaming (uendret): gemma_local uten .stream() er ikke kvalifisert", async () => {
+  it("andre sensitiviteter krever fortsatt native streaming (uendret): en provider uten streaming i registeret (kimi) er ikke kvalifisert", async () => {
+    // D-404: gemma_local har nå ekte .stream() og `streaming` i registeret; kimi er en provider som fortsatt mangler det.
     const calls: string[] = [];
-    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [adapter("gemma_local", calls)] });
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [adapter("kimi", calls)] });
     await expect(
       gateway.stream({ tenant_id: "t", purpose: "CHAT", sensitivity: "PRIVATE", request: REQUEST }, () => undefined)
     ).rejects.toBeInstanceOf(NoEligibleProviderError);

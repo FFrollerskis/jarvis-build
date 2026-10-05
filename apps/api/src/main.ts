@@ -916,6 +916,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // får KUN det eksplisitte lese-minimumssettet (`MODEL_SURFACE_ALLOWLIST`);
   // oppstarten feiler lukket hvis noe i flaten ikke er klasse A / ren lesing.
   const modelToolSurface = resolveModelToolSurface(toolGateway, { includeChatReadTier: true, includeChatActTier: true });
+  // D-404: hvilke tjenester Charlie FAKTISK får i katalogen per flate (kun navn - ingen innhold). Eier meldte at han «bare har to verktøy»;
+  // da kan loggen vise om katalogen eller modellens lesning var feil.
+  for (const surface of ["web_chat", "voice"] as const) {
+    console.log(JSON.stringify({ msg: "chat_tool_catalog", surface, services: describeSurfaceCatalog(modelToolSurface, surface).services.map((s) => s.tool_id) }));
+  }
   // Del 3: sentralt manifest avledet fra ALLE registrerte handlinger. Bruddet er en oppstartsfeil (fail closed): ingen modellflate med
   // send/pay/delete/control, ingen klasse B/A for utgående handlinger, ingen eier-eksklusive navnerom på en flate.
   const toolManifest = buildToolManifest(toolGateway.list());
