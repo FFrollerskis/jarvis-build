@@ -170,6 +170,7 @@ function buildSystemPrompt(personality: PersonalityConfig, context: { surface: S
     ? `Tjenester du kan bruke i denne samtalen (lese = hente informasjon, handle = opprette/oppdatere/sende/synkronisere; i klammer står hverdagsord Tobias bruker om dem): ${context.catalog}. ` +
       "Verktøyskjemaene vedlagt denne runden er valgt ut fra Tobias sin melding (og tjenestene fra meldingene like før) - trenger du en annen tjeneste fra listen, " +
       "si hvilken og be om presisering i stedet for å påstå at du mangler tilgang. " +
+      "Når Tobias spør hva du har tilgang til, svar med HELE listen over (alle tjenestene), ikke bare de få verktøyskjemaene som tilfeldigvis er vedlagt denne runden. " +
       "Bruk verktøyene aktivt: ber Tobias om noe en tjeneste kan gjøre, kall verktøyet med en gang i stedet for å spørre om lov eller beskrive hva du kunne gjort; " +
       "trenger du en id (sak, fil, enhet, rom), hent den med en liste-/søkehandling først og gå så videre i samme svar. " +
       "Alle handlinger som endrer noe utføres KUN etter at Tobias har godkjent en bekreftelse i chatten/dashbordet: når et verktøy svarer " +
@@ -582,6 +583,22 @@ export class ConversationEngine {
               omitted_preference: omittedGemmaPreference,
               reason: err.message
             })
+          );
+          result = await callGateway(fallbackInput);
+        } else if (
+          // D-404: «Gemma først» er en HARD preferanse (ingen stille sky-fallback ved planlegging), men når den lokale leverandøren er nede (PC av,
+          // tidsavbrudd, serverfeil) FØR noe er sendt eller utført, skal eieren få svar og ikke en feil. Fallbacken kjører gjennom SAMME router uten
+          // preferansen, så sensitivitets-/betalingsreglene gjelder uendret (SECRET_RESTRICTED kan aldri havne i sky), og degraderingen logges alltid.
+          usingDefaultGemmaPreference &&
+          err instanceof ProviderError &&
+          (err.provider === "gemma_local" || err.provider === "gemma_hosted") &&
+          ["timeout", "network", "server", "rate_limit", "not_configured"].includes(err.kind) &&
+          partial === "" &&
+          !toolsExecuted
+        ) {
+          const { providerPreference: omittedGemmaPreference, ...fallbackInput } = input;
+          console.error(
+            JSON.stringify({ msg: "d404_gemma_provider_failed_fallback", provider: err.provider, kind: err.kind, omitted_preference: omittedGemmaPreference })
           );
           result = await callGateway(fallbackInput);
         } else if (

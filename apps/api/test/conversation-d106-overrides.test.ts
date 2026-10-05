@@ -274,6 +274,56 @@ describe("D-106 ConversationEngine: routing overrides folder inn i CompleteInput
     expect(result.routed).toBe("model");
   });
 
+  it("G8 (D-404): når default-Gemma feiler med tidsavbrudd/nettverk FØR noe er sendt, faller motoren tilbake til normal ruting (synlig i loggen) i stedet for å gi eieren en feil", async () => {
+    const pool = fakePool();
+    const captured: CompleteInput[] = [];
+    const gateway = {
+      complete: async (input: CompleteInput) => {
+        captured.push(input);
+        if (input.providerPreference) throw new ProviderError("gemma_local", "timeout", "gemma_local_timeout");
+        return { text: "reserve-svar", usage: { input_tokens: 1, output_tokens: 1 }, provider: "anthropic", model: "claude-sonnet-5" };
+      },
+      stream: async () => { throw new Error("stream skal ikke kalles"); },
+      completeWithTools: async () => { throw new Error("completeWithTools skal ikke kalles"); }
+    } as unknown as ModelGateway;
+    const engine = new ConversationEngine({ messages: new MessageStore(pool), context: new ContextBuilder(pool), gateway, tasks: fakeTasks, worker: fakeWorker, trace: new MemoryTraceSink() });
+    const result = await engine.handle(identity, "hva er klokken?");
+    expect(captured).toHaveLength(2);
+    expect(captured[0]?.providerPreference).toEqual(["gemma_local", "gemma_hosted"]);
+    expect(captured[1]?.providerPreference).toBeUndefined();
+    // Sensitivitet følger med uendret inn i fallbacken (routeren stopper SECRET_RESTRICTED fra sky).
+    expect(captured[1]?.sensitivity).toBe(captured[0]?.sensitivity);
+    expect(result.reply).toBe("reserve-svar");
+  });
+
+  it("G9 (D-404): andre feil fra Gemma (f.eks. bad_request/auth) og feil fra ANDRE leverandører faller IKKE stille tilbake", async () => {
+    for (const [provider, kind] of [["gemma_local", "bad_request"], ["gemma_local", "auth"], ["openai", "timeout"]] as const) {
+      const pool = fakePool();
+      let calls = 0;
+      const gateway = {
+        complete: async () => { calls++; throw new ProviderError(provider, kind, `${provider}_${kind}`); },
+        stream: async () => { throw new Error("stream skal ikke kalles"); },
+        completeWithTools: async () => { throw new Error("completeWithTools skal ikke kalles"); }
+      } as unknown as ModelGateway;
+      const engine = new ConversationEngine({ messages: new MessageStore(pool), context: new ContextBuilder(pool), gateway, tasks: fakeTasks, worker: fakeWorker, trace: new MemoryTraceSink() });
+      await expect(engine.handle(identity, "hva er klokken?")).rejects.toBeInstanceOf(ProviderError);
+      expect(calls, `${provider}:${kind}`).toBe(1);
+    }
+  });
+
+  it("G10 (D-404): en EKSPLISITT eierforespørsel om Gemma faller ALDRI tilbake ved tidsavbrudd - feiler ærlig", async () => {
+    const pool = fakePool();
+    let calls = 0;
+    const gateway = {
+      complete: async () => { calls++; throw new ProviderError("gemma_local", "timeout", "gemma_local_timeout"); },
+      stream: async () => { throw new Error("stream skal ikke kalles"); },
+      completeWithTools: async () => { throw new Error("completeWithTools skal ikke kalles"); }
+    } as unknown as ModelGateway;
+    const engine = new ConversationEngine({ messages: new MessageStore(pool), context: new ContextBuilder(pool), gateway, tasks: fakeTasks, worker: fakeWorker, trace: new MemoryTraceSink() });
+    await expect(engine.handle(identity, "bruk gemma til dette")).rejects.toBeInstanceOf(ProviderError);
+    expect(calls).toBe(1);
+  });
+
   it("G7 (D-354): en EKSPLISITT eierforespørsel om Gemma ('bruk gemma') faller ALDRI stille tilbake ved provider_preference_exhausted - feiler ærlig i stedet", async () => {
     const pool = fakePool();
     const messages = new MessageStore(pool);

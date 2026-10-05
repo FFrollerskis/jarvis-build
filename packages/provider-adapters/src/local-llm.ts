@@ -5,10 +5,12 @@ import {
   envOrDefault,
   envPositiveInt,
   ProviderError,
+  sseLines,
   textOnly,
   type ModelProviderAdapter,
   type ModelRequest,
   type ModelResult,
+  type StreamHandler,
   type ToolCallRequest
 } from "./types.ts";
 import { renderToolResultText } from "./tool-result-envelope.ts";
@@ -75,6 +77,61 @@ export function stripThinking(text: string): string {
     .trim();
 }
 
+/**
+ * D-404: inkrementell variant av `stripThinking` for strømming. Tekst mellom `<think>` og `</think>` slippes ALDRI ut (heller ikke delvis når taggen
+ * er delt over to deltaer), og en åpen blokk uten avslutning forkastes ved slutten - samme garanti som `stripThinking` i `complete()`.
+ */
+export class ThinkFilter {
+  private inThink = false;
+  private buf = "";
+
+  /** Lengste suffiks av `text` som kan være starten på `tag` (tagen er ikke komplett ennå). */
+  private static partialTail(text: string, tag: string): number {
+    const lower = text.toLowerCase();
+    for (let n = Math.min(tag.length - 1, lower.length); n > 0; n--) {
+      if (tag.startsWith(lower.slice(lower.length - n))) return n;
+    }
+    return 0;
+  }
+
+  push(chunk: string): string {
+    this.buf += chunk;
+    let out = "";
+    for (;;) {
+      const lower = this.buf.toLowerCase();
+      if (!this.inThink) {
+        const idx = lower.indexOf("<think>");
+        if (idx >= 0) {
+          out += this.buf.slice(0, idx);
+          this.buf = this.buf.slice(idx + 7);
+          this.inThink = true;
+          continue;
+        }
+        const keep = ThinkFilter.partialTail(this.buf, "<think>");
+        out += this.buf.slice(0, this.buf.length - keep);
+        this.buf = this.buf.slice(this.buf.length - keep);
+        return out;
+      }
+      const end = lower.indexOf("</think>");
+      if (end >= 0) {
+        this.buf = this.buf.slice(end + 8);
+        this.inThink = false;
+        continue;
+      }
+      const keep = ThinkFilter.partialTail(this.buf, "</think>");
+      this.buf = this.buf.slice(this.buf.length - keep);
+      return out;
+    }
+  }
+
+  /** Ved strømmens slutt: en ufullstendig `<think`-hale utenfor en blokk er vanlig tekst; innhold i en åpen blokk forkastes. */
+  flush(): string {
+    const rest = this.inThink ? "" : this.buf;
+    this.buf = "";
+    return rest;
+  }
+}
+
 export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
   readonly name: string;
   private readonly chatCompletionsUrl: string | undefined;
@@ -115,10 +172,7 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
     };
   }
 
-  async complete(request: ModelRequest, onToken?: (token: string) => void): Promise<ModelResult> {
-    if (!this.baseUrl || !this.chatCompletionsUrl) {
-      throw new ProviderError(this.name, "not_configured", `${this.name}_not_configured`);
-    }
+  private buildMessages(request: ModelRequest): Array<Record<string, unknown>> {
     const messages: Array<Record<string, unknown>> = [
       ...(request.system ? [{ role: "system", content: request.system }] : []),
       ...request.messages.map((m) => ({ role: m.role, content: textOnly(m.content) }))
@@ -137,6 +191,36 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
         messages.push({ role: "tool", tool_call_id: r.tool_call_id, content: renderToolResultText(r) });
       }
     }
+    return messages;
+  }
+
+  private buildBody(request: ModelRequest, stream: boolean): Record<string, unknown> {
+    return {
+      model: this.model,
+      stream,
+      messages: this.buildMessages(request),
+      max_tokens: request.max_tokens ?? 1024,
+      ...(this.thinking === "off" ? { reasoning_effort: "none" } : {}),
+      ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
+      ...(request.tools?.length
+        ? {
+            tools: request.tools.map((t) => ({
+              type: "function",
+              function: { name: t.name, description: t.description, parameters: t.input_schema }
+            }))
+          }
+        : {}),
+      ...(request.structured_schema
+        ? { response_format: { type: "json_schema", json_schema: { name: "result", strict: true, schema: request.structured_schema } } }
+        : {}),
+      ...(stream ? { stream_options: { include_usage: true } } : {})
+    };
+  }
+
+  async complete(request: ModelRequest, onToken?: (token: string) => void): Promise<ModelResult> {
+    if (!this.baseUrl || !this.chatCompletionsUrl) {
+      throw new ProviderError(this.name, "not_configured", `${this.name}_not_configured`);
+    }
     const started = Date.now();
     let response: Response;
     try {
@@ -144,25 +228,7 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: AbortSignal.timeout(request.timeoutMs ?? this.timeoutMs),
-        body: JSON.stringify({
-          model: this.model,
-          stream: false,
-          messages,
-          max_tokens: request.max_tokens ?? 1024,
-          ...(this.thinking === "off" ? { reasoning_effort: "none" } : {}),
-          ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
-          ...(request.tools?.length
-            ? {
-                tools: request.tools.map((t) => ({
-                  type: "function",
-                  function: { name: t.name, description: t.description, parameters: t.input_schema }
-                }))
-              }
-            : {}),
-          ...(request.structured_schema
-            ? { response_format: { type: "json_schema", json_schema: { name: "result", strict: true, schema: request.structured_schema } } }
-            : {})
-        })
+        body: JSON.stringify(this.buildBody(request, false))
       });
     } catch (err) {
       throw classifyFetchError(this.name, err);
@@ -209,6 +275,139 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
       ...(body.choices[0]?.finish_reason ? { finish_reason: body.choices[0].finish_reason } : {}),
       ...(structured !== undefined ? { structured_output: structured } : {}),
       ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {})
+    };
+  }
+
+  /**
+   * D-404: ekte SSE-strømming mot et OpenAI-kompatibelt lokalt endepunkt (Ollama, llama.cpp, vLLM, LM Studio). Uten denne kunne `gateway.stream()`
+   * aldri velge `gemma_local` (registeret kan ikke påstå `streaming` uten en `.stream()`, D-80), så «Gemma først» (D-354) falt stille til sky for
+   * ALL vanlig chat. Samme event-kontrakt som `OpenAiAdapter.stream()`; `<think>`-blokker filtreres inkrementelt (`ThinkFilter`).
+   *
+   * UVERIFISERT mot en ekte Ollama-/llama.cpp-server i denne økten (kun enhetstestet mot en fake SSE-server). Særlig: om serveren strømmer
+   * verktøykall (`delta.tool_calls`) varierer mellom serverversjoner - mangler `index`, brukes posisjonen i listen.
+   */
+  async stream(request: ModelRequest, onEvent: StreamHandler, signal?: AbortSignal): Promise<ModelResult> {
+    if (!this.baseUrl || !this.chatCompletionsUrl) {
+      throw new ProviderError(this.name, "not_configured", `${this.name}_not_configured`);
+    }
+    const started = Date.now();
+    let response: Response;
+    try {
+      const timeout = AbortSignal.timeout(request.timeoutMs ?? this.timeoutMs);
+      response = await fetch(this.chatCompletionsUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+        body: JSON.stringify(this.buildBody(request, true))
+      });
+    } catch (err) {
+      if (signal?.aborted) throw new ProviderError(this.name, "cancelled", `${this.name}_cancelled`);
+      throw classifyFetchError(this.name, err);
+    }
+    if (!response.ok) {
+      throw classifyHttpStatus(this.name, response.status);
+    }
+    if (!response.body) {
+      throw new ProviderError(this.name, "invalid_response", `${this.name}_no_stream_body`);
+    }
+    onEvent({ type: "start", provider: this.name, model: this.model, generation_id: `gen-${randomUUID().slice(0, 12)}` });
+    const filter = new ThinkFilter();
+    let text = "";
+    let ttft: number | undefined;
+    let finish = "";
+    let sawDone = false;
+    let usage = { input_tokens: 0, output_tokens: 0 };
+    const pendingTools = new Map<number, { id?: string; name?: string; args: string }>();
+    const completedCalls: ToolCallRequest[] = [];
+    const emitText = (piece: string): void => {
+      if (!piece) return;
+      if (ttft === undefined) ttft = Date.now() - started;
+      text += piece;
+      onEvent({ type: "text_delta", text: piece });
+    };
+    try {
+      for await (const data of sseLines(response.body)) {
+        if (data === "[DONE]") {
+          sawDone = true;
+          break;
+        }
+        let chunk: {
+          choices?: Array<{
+            delta?: { content?: string | null; tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }> };
+            finish_reason?: string | null;
+          }>;
+          usage?: { prompt_tokens: number; completion_tokens: number } | null;
+        };
+        try {
+          chunk = JSON.parse(data) as typeof chunk;
+        } catch {
+          continue;
+        }
+        const delta = chunk.choices?.[0]?.delta;
+        if (delta?.content) emitText(filter.push(delta.content));
+        (delta?.tool_calls ?? []).forEach((tc, position) => {
+          const key = tc.index ?? position;
+          let pending = pendingTools.get(key);
+          if (!pending) {
+            pending = { args: "" };
+            pendingTools.set(key, pending);
+            if (ttft === undefined) ttft = Date.now() - started;
+          }
+          if (tc.id) pending.id = tc.id;
+          if (tc.function?.name) {
+            pending.name = (pending.name ?? "") + tc.function.name;
+            onEvent({ type: "tool_call_start", tool_call_id: pending.id ?? `idx-${key}`, tool_name: pending.name });
+          }
+          if (tc.function?.arguments) {
+            pending.args += tc.function.arguments;
+            onEvent({ type: "tool_call_delta", tool_call_id: pending.id ?? `idx-${key}`, arguments_delta: tc.function.arguments });
+          }
+        });
+        if (chunk.choices?.[0]?.finish_reason) finish = chunk.choices[0].finish_reason;
+        if (chunk.usage) usage = { input_tokens: chunk.usage.prompt_tokens, output_tokens: chunk.usage.completion_tokens };
+      }
+    } catch (err) {
+      if (signal?.aborted) {
+        onEvent({ type: "cancelled" });
+        throw new ProviderError(this.name, "cancelled", `${this.name}_cancelled`);
+      }
+      throw new ProviderError(this.name, "stream_interrupted", `${this.name}_stream_interrupted: ${(err as Error).message.slice(0, 80)}`);
+    }
+    if (signal?.aborted) {
+      onEvent({ type: "cancelled" });
+      throw new ProviderError(this.name, "cancelled", `${this.name}_cancelled`);
+    }
+    // Samme regel som OpenAiAdapter (D-393/JARVIS-038): en strøm uten verken finish_reason eller [DONE] er AVBRUTT, ikke komplett.
+    if (!finish && !sawDone) {
+      throw new ProviderError(this.name, "stream_interrupted", `${this.name}_stream_ended_without_finish`);
+    }
+    emitText(filter.flush());
+    for (const pending of pendingTools.values()) {
+      const call = this.parseToolCall(pending.id, pending.name, pending.args);
+      completedCalls.push(call);
+      onEvent({ type: "tool_call_complete", call });
+    }
+    const finalText = text.trim();
+    let structured: unknown;
+    if (request.structured_schema && finalText) {
+      try {
+        structured = JSON.parse(finalText);
+      } catch {
+        throw new ProviderError(this.name, "invalid_response", `${this.name}_invalid_structured_output`);
+      }
+    }
+    onEvent({ type: "usage", usage });
+    onEvent({ type: "finish", finish_reason: finish || "stop" });
+    return {
+      text: finalText,
+      usage,
+      provider: this.name,
+      model: this.model,
+      latency_ms: Date.now() - started,
+      ...(ttft !== undefined ? { ttft_ms: ttft } : {}),
+      finish_reason: finish || "stop",
+      ...(structured !== undefined ? { structured_output: structured } : {}),
+      ...(completedCalls.length > 0 ? { tool_calls: completedCalls } : {})
     };
   }
 }
