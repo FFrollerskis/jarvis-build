@@ -336,7 +336,7 @@
   } catch { /* beste-innsats */ }
   if (!frames[restored]) restored = "chat";
   if (incomingTicket) { restored = "chat"; dual = false; }
-  activate(restored);
+  // activate(restored) kalles lenger ned, ETTER at voiceDot m.fl. er deklarert (const i TDZ ellers: ReferenceError ved oppstart).
 
   let loaded = 0;
   const bootSteps = document.getElementById("boot-steps");
@@ -384,7 +384,7 @@
     voiceHdot.className = "hdot" + (voiceState === "offline" ? "" : voiceState === "interrupted" ? " bad" : " ok");
     voiceText.textContent = VOICE_LABELS[voiceState] || voiceState;
   }
-  updateVoiceDot();
+  activate(restored);
 
   window.addEventListener("message", (event) => {
     if (event.origin !== location.origin) return;
