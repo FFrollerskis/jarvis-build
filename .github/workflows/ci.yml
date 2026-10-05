@@ -1,9 +1,15 @@
 name: CI
 
+# Spar Actions-minutter (kvoten var tom 2026-10-05): grener testes via pull_request (én kjøring pr. push, ikke to), og
+# `main` testes etter merge. Nyere push til samme gren avbryter en pågående kjøring (aldri på main).
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
