@@ -3,7 +3,7 @@ import { envPort } from "@jarvis/contracts";
 import { VoiceHealth } from "./health.ts";
 import { createVoiceGateway, HttpCoreClient } from "./server.ts";
 import { selectSpeechAdapters } from "./adapter-selection.ts";
-import { LocalWhisperStt, OpenAiStt } from "./stt.ts";
+import { LocalWhisperStt, OpenAiStt, RemoteWhisperStt } from "./stt.ts";
 import { LocalPiperTts, OpenAiTts } from "./tts.ts";
 import { EnergyVad } from "./vad.ts";
 
@@ -71,12 +71,24 @@ const sessionOptions = {
 const openAiStt = new OpenAiStt();
 const openAiTts = new OpenAiTts();
 const localWhisperStt = new LocalWhisperStt();
+// D-403: eierens egen Whisper-server (typisk PC-ens GPU over Tailscale). Kun aktiv med JARVIS_STT_REMOTE_URL på en PRIVAT adresse; faller
+// selv tilbake til lokal whisper.cpp når serveren ikke svarer. En ikke-privat/ugyldig adresse avvises (fail-closed) og logges her.
+const remoteWhisperStt = new RemoteWhisperStt(process.env["JARVIS_STT_REMOTE_URL"], {
+  model: process.env["JARVIS_STT_REMOTE_MODEL"] || undefined,
+  language: process.env["JARVIS_WHISPER_LANG"] || undefined,
+  prompt: process.env["JARVIS_WHISPER_PROMPT"] || undefined,
+  timeoutMs: Number(process.env["JARVIS_STT_REMOTE_TIMEOUT_MS"]) || undefined,
+  fallback: localWhisperStt
+});
+if (process.env["JARVIS_STT_REMOTE_URL"]?.trim() && !remoteWhisperStt.available()) {
+  console.error(JSON.stringify({ msg: "stt_remote_whisper_rejected", reason: "JARVIS_STT_REMOTE_URL er ugyldig eller ikke en privat adresse (loopback/RFC1918/Tailscale) - ignorert" }));
+}
 const localPiperTts = new LocalPiperTts();
 // REMEDIERING DEL 1 (JARVIS-080): INGEN stille fallback til MarkerStt/FakeTts - oppstarten
 // feiler lukket uten en ekte adapter (se `adapter-selection.ts`).
 function selectOrExit() {
   try {
-    return selectSpeechAdapters({ openAiStt, localWhisperStt, openAiTts, localPiperTts });
+    return selectSpeechAdapters({ openAiStt, remoteWhisperStt, localWhisperStt, openAiTts, localPiperTts });
   } catch (err) {
     console.error(JSON.stringify({ msg: "jarvis-voice-gateway startup_failed", error: (err as Error).message }));
     process.exit(1);

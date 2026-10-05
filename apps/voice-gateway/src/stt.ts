@@ -148,6 +148,131 @@ export class OpenAiStt implements SttAdapter {
 }
 
 /**
+ * D-403: true når `host` er en PRIVAT adresse - loopback, RFC1918 (10/8, 172.16/12, 192.168/16), link-local eller Tailscale-CGNAT (100.64/10) -
+ * eller et enkelt vertsnavn uten punktum (LAN/compose-tjenestenavn). Offentlige IP-er og vanlige domenenavn gir false. Dette er HÅNDHEVINGEN av at en
+ * egen Whisper-server regnes som `locality: "local"`: lyden forlater aldri eierens eget nett. Verdien kommer ALDRI fra en env-påstand.
+ */
+export function isPrivateSttHost(host: string): boolean {
+  const h = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "localhost" || h === "::1") return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (m) {
+    const [a, b] = [Number(m[1]), Number(m[2])];
+    if ([a, b, Number(m[3]), Number(m[4])].some((n) => n > 255)) return false;
+    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127);
+  }
+  if (h.includes(":")) return h.startsWith("fe80:") || h.startsWith("fc") || h.startsWith("fd");
+  return !h.includes(".");
+}
+
+/**
+ * D-403: STT mot EIERENS EGEN Whisper-server (typisk PC-ens GPU over Tailscale) via et OpenAI-kompatibelt `POST {url}/v1/audio/transcriptions`
+ * (faster-whisper-server/speaches, whisper.cpp-serveren med `--inference-path`, m.fl.). Gir en stor modell (f.eks. large-v3-turbo) uten CPU-kost på NAS-en.
+ *
+ * SIKKERHET (fail-closed): adressen MÅ være privat (`isPrivateSttHost`) - ellers er adapteren utilgjengelig (aldri en stille sky-sending), og
+ * `locality: "local"` håndheves dermed av koden, ikke av en påstand. Redirects følges ikke. Ingen disk-skriving (§22-invarianten for rå lyd gjelder).
+ *
+ * ROBUSTHET: PC-en kan være av. Feiler kallet (nettverk/tidsavbrudd/HTTP-feil), kjøres SAMME lyd gjennom `fallback` (lokal whisper.cpp på NAS-en),
+ * og serveren hoppes over i `cooldownMs` så neste tur ikke venter på tidsavbruddet igjen. Fallbacken er alltid lokal; det finnes ingen vei til sky herfra.
+ * Batch, ingen ekte partials (samme kontrakt som øvrige STT-adaptere).
+ */
+export class RemoteWhisperStt implements SttAdapter {
+  readonly name = "remote-whisper";
+  readonly processor: SpeechProcessorDeclaration = {
+    processor_id: "owner-whisper-server",
+    locality: "local",
+    processor_row_declared: true,
+    processor_terms_status: "NOT_APPLICABLE_LOCAL"
+  };
+  private readonly baseUrl: string | undefined;
+  private downUntil = 0;
+  constructor(
+    url: string | undefined = process.env["JARVIS_STT_REMOTE_URL"],
+    private readonly options: {
+      model?: string | undefined;
+      language?: string | undefined;
+      prompt?: string | undefined;
+      timeoutMs?: number | undefined;
+      cooldownMs?: number | undefined;
+      sampleRate?: number | undefined;
+      fallback?: SttAdapter | undefined;
+      now?: (() => number) | undefined;
+    } = {}
+  ) {
+    this.baseUrl = RemoteWhisperStt.parse(url);
+  }
+
+  private static parse(url: string | undefined): string | undefined {
+    const raw = url?.trim();
+    if (!raw) return undefined;
+    try {
+      const u = new URL(raw);
+      if ((u.protocol !== "http:" && u.protocol !== "https:") || !isPrivateSttHost(u.hostname)) return undefined;
+      return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, "")}`;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Konfigurert OG privat adresse. En offentlig/ugyldig adresse gir false (fail-closed). */
+  available(): boolean {
+    return this.baseUrl !== undefined;
+  }
+
+  private get now(): number {
+    return (this.options.now ?? Date.now)();
+  }
+
+  startStream(): SttStream {
+    const baseUrl = this.baseUrl;
+    if (!baseUrl) throw new Error("remote_whisper_not_configured");
+    const chunks: Buffer[] = [];
+    const sampleRate = this.options.sampleRate ?? 16000;
+    return {
+      pushAudio: (frame: Buffer): void => {
+        chunks.push(frame);
+      },
+      end: async (): Promise<string> => {
+        const fallback = this.options.fallback;
+        const runFallback = async (reason: string): Promise<string> => {
+          if (!fallback?.available()) throw new Error(`remote_whisper_failed_no_fallback:${reason}`);
+          console.warn(JSON.stringify({ msg: "stt_remote_whisper_fallback_local", reason }));
+          const stream = fallback.startStream();
+          for (const c of chunks) stream.pushAudio(c);
+          return stream.end();
+        };
+        if (this.now < this.downUntil) return runFallback("cooldown");
+        try {
+          const wav = pcm16ToWav(Buffer.concat(chunks), sampleRate);
+          const form = new FormData();
+          if (this.options.model) form.set("model", this.options.model);
+          form.set("language", this.options.language ?? "no");
+          form.set("response_format", "json");
+          if (this.options.prompt) form.set("prompt", this.options.prompt);
+          form.set("file", new Blob([new Uint8Array(wav)], { type: "audio/wav" }), "audio.wav");
+          const response = await fetch(`${baseUrl}/v1/audio/transcriptions`, {
+            method: "POST",
+            body: form,
+            redirect: "error",
+            signal: AbortSignal.timeout(this.options.timeoutMs ?? 4000)
+          });
+          if (!response.ok) throw new Error(`http_${response.status}`);
+          const body = (await response.json()) as { text?: unknown };
+          if (typeof body.text !== "string") throw new Error("invalid_response");
+          return body.text.trim();
+        } catch (err) {
+          this.downUntil = this.now + (this.options.cooldownMs ?? 30_000);
+          return runFallback((err as Error).name === "TimeoutError" ? "timeout" : (err as Error).message.slice(0, 80));
+        }
+      },
+      onPartial: (): void => {
+        // Batch-API: ingen partials.
+      }
+    };
+  }
+}
+
+/**
  * D-320 (harder-tier tale-backlog, andre slice - SAMME D-64-stil sjekk mot
  * `SpeechAdapter` som D-319/ElevenLabs gjorde for TTS-siden): `deepgram`
  * fjernet fra `connector-registry.ts` sin backlog og bygget her som en NY
