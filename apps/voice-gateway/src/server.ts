@@ -307,6 +307,8 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
      * ikke skal kunne «forhandle» det underveis.
      */
     let grant: VoiceSessionGrant | null = null;
+    /** D-405: stemmeinnstillinger fra klienten (ubetrodd; valideres i `VoiceSession.setVoiceSettings`). */
+    let pendingVoiceSettings: unknown = undefined;
     const send = (message: Record<string, unknown>) => {
       if (ws.readyState === ws.OPEN) {
         ws.send(JSON.stringify(message));
@@ -342,7 +344,15 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
       // Tillitsnivået er en del av svaret: en klient skal kunne SE at den kjører
       // ubevist, i stedet for å oppdage det som et uforklarlig `speech_routing_denied`.
       // D-390: TTS-samplerate følger med, så klienten spiller av i riktig rate (piper 22 050, OpenAI 24 000, ElevenLabs 16 000).
-      send({ type: "started", memory_space_authority: authority, tts_sample_rate: options.tts.sampleRate ?? DEFAULT_TTS_SAMPLE_RATE });
+      // D-405: innstillinger klienten sendte FØR sesjonen startet (lagret per enhet) gjelder fra første svar.
+      if (pendingVoiceSettings !== undefined) session.setVoiceSettings(pendingVoiceSettings);
+      send({
+        type: "started",
+        memory_space_authority: authority,
+        tts_sample_rate: options.tts.sampleRate ?? DEFAULT_TTS_SAMPLE_RATE,
+        voice_capabilities: options.tts.voiceCapabilities ?? { speed: false, expressiveness: false, pause: false },
+        voice_settings: session.currentVoiceSettings()
+      });
     };
 
     /**
@@ -498,6 +508,18 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
           // Autoriteten kontrolleres FØR lydrammen dekodes og mates videre -
           // ikke én ramme passerer en utløpt grant.
           activeSession()?.pushAudio(Buffer.from(String(message["data"]), "base64"));
+          return;
+        }
+        case "voice_settings": {
+          // D-405: kun avspillingsinnstillinger - ingen autoritet, ingen data. Ubeviste klienter kan også justere sin egen stemme.
+          pendingVoiceSettings = message["settings"];
+          const applied = session ? session.setVoiceSettings(pendingVoiceSettings) : undefined;
+          send({ type: "voice_settings", applied: applied ?? null, capabilities: options.tts.voiceCapabilities ?? { speed: false, expressiveness: false, pause: false } });
+          return;
+        }
+        case "voice_sample": {
+          // «Test stemmen»: kort, fast tekst (aldri klientens egen tekst - ingen vei for å få Jarvis til å lese opp vilkårlig innhold).
+          activeSession()?.speakSample("Hei, dette er stemmen min. Slik høres jeg ut med de innstillingene du har valgt.");
           return;
         }
         case "replay_final": {

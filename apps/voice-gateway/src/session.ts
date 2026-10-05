@@ -10,7 +10,7 @@ import { SentenceChunker } from "./chunker.ts";
 import { sanitizeForSpeech } from "./text-sanitize.ts";
 import type { VoiceHealth } from "./health.ts";
 import type { SttAdapter, SttStream } from "./stt.ts";
-import type { TtsAdapter, TtsPlayback } from "./tts.ts";
+import { DEFAULT_VOICE_SETTINGS, sanitizeVoiceSettings, type TtsAdapter, type TtsPlayback, type VoiceSettings } from "./tts.ts";
 
 /**
  * BO-12 §23: eksplisitt tilstandsmaskin. idle = før klienten har aktivert
@@ -225,6 +225,8 @@ export class VoiceSession {
   private epoch = 0;
   private ttsQueue: TtsQueueItem[] = [];
   private ttsWorker: Promise<void> = Promise.resolve();
+  /** D-405: eierens stemmeinnstillinger for denne sesjonen (kun avspilling). */
+  private voiceSettings: VoiceSettings = { ...DEFAULT_VOICE_SETTINGS };
   private activeTurnAbort: AbortController | null = null;
   /** D-390 (JARVIS-079): etter `disconnect()` når ingen tur Core - en STT som fullfører etterpå kjører aldri verktøy for en død socket. */
   private closed = false;
@@ -319,6 +321,29 @@ export class VoiceSession {
 
   currentState(): VoiceState {
     return this.state;
+  }
+
+  /** D-405: tar imot stemmeinnstillinger fra klienten (ubetrodd input - validert og klemt). Gjelder fra neste TTS-chunk. */
+  setVoiceSettings(raw: unknown): VoiceSettings {
+    this.voiceSettings = sanitizeVoiceSettings(raw);
+    // Forhåndssyntetiserte chunker i køen er laget med de gamle innstillingene - kast dem så neste chunk bruker de nye.
+    for (const item of this.ttsQueue) {
+      item.primed?.playback.cancel();
+      delete item.primed;
+    }
+    return this.voiceSettings;
+  }
+
+  currentVoiceSettings(): VoiceSettings {
+    return this.voiceSettings;
+  }
+
+  /** D-405: «Test stemmen» - samme TTS-vei som svar (sanering, rutingporten, kø), men uten modellkall. Ingen samtaletur startes. */
+  speakSample(text: string): void {
+    this.enqueueTts(text, this.epoch);
+    void this.ttsWorker.then(() => {
+      if (this.playback === null && this.ttsQueue.length === 0 && this.state === "speaking") this.setState("listening");
+    });
   }
 
   /** D-122: observerbar for `/status`, tester og revisjon - aldri en skjult beslutning. */
@@ -698,7 +723,7 @@ export class VoiceSession {
     this.setState("speaking");
     let primed: PrimedPlayback;
     try {
-      primed = item.primed ?? primePlayback(this.ttsAdapter, item.text);
+      primed = item.primed ?? primePlayback(this.ttsAdapter, item.text, this.voiceSettings);
     } catch (err) {
       // §36: TTS-feil forkaster ALDRI Jarvis-svaret (teksten er alt levert via onReply).
       this.health?.recordFailure("tts", (err as Error).message);
@@ -711,7 +736,7 @@ export class VoiceSession {
     const next = this.ttsQueue[0];
     if (next !== undefined && next.primed === undefined) {
       try {
-        next.primed = primePlayback(this.ttsAdapter, next.text);
+        next.primed = primePlayback(this.ttsAdapter, next.text, this.voiceSettings);
       } catch {
         // Rapporteres når chunken selv skal tales (samme feilvei som over).
       }
@@ -867,8 +892,8 @@ interface PrimedPlayback {
   first: Promise<IteratorResult<Buffer>>;
 }
 
-function primePlayback(adapter: TtsAdapter, text: string): PrimedPlayback {
-  const playback = adapter.synthesize(text);
+function primePlayback(adapter: TtsAdapter, text: string, settings?: VoiceSettings): PrimedPlayback {
+  const playback = settings ? adapter.synthesize(text, settings) : adapter.synthesize(text);
   const iterator = playback.frames[Symbol.asyncIterator]();
   const first = iterator.next();
   // Avvisningen håndteres når chunken spilles (`primedFrames` kaster den videre) - aldri en «unhandled rejection» i mellomtiden.
