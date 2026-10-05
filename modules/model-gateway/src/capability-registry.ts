@@ -139,7 +139,8 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
     // modell som faktisk kjører via `LOCAL_LLM_MODEL`).
     provider: "local_llm",
     model: "local-model",
-    capabilities: ["text", "tool_calling", "structured_output"],
+    // D-404: samme adapterklasse som gemma_local - ekte streaming finnes nå.
+    capabilities: ["text", "tool_calling", "structured_output", "streaming"],
     context_tokens: 32_000,
     locality: "local",
     cost_class: 1,
@@ -165,7 +166,8 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
     // kontekstpåstand.
     provider: "gemma_local",
     model: "gemma-local",
-    capabilities: ["text", "reasoning", "tool_calling", "structured_output"],
+    // D-404: `LocalOpenAiCompatibleAdapter.stream()` finnes nå (ekte SSE) - uten `streaming` kunne gateway.stream() aldri velge denne profilen.
+    capabilities: ["text", "reasoning", "tool_calling", "structured_output", "streaming"],
     context_tokens: 32_000,
     locality: "local",
     cost_class: 1,

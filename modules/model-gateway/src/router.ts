@@ -232,16 +232,18 @@ export class AiRouter {
       const requiredForPref = new Set<ModelCapability>(input.required_capabilities ?? []);
       if (input.needs_structured) requiredForPref.add("structured_output");
       const attempted: string[] = [];
+      // D-404: HVILKEN port som avviste hver leverandør (tidligere bare «ingen er konfigurert/kvalifisert» - kostet en hel feilsøkingsrunde).
+      const rejected: string[] = [];
       for (const name of input.providerPreference) {
         const rt = providers.get(name);
         attempted.push(name);
-        if (!rt?.configured) continue;
+        if (!rt?.configured) { rejected.push(`${name}:not_configured`); continue; }
         const profile = this.registry.profileOrGeneric(name, rt.model);
         const missing = [...requiredForPref].filter((c) => !profile.capabilities.includes(c));
-        if (missing.length > 0) continue;
-        if (!isSensitivityEligible(profile, input.sensitivity)) continue;
-        if (!isPaidModelsEligible(profile, input.paid_models_allowed)) continue;
-        if (this.health.state(name, true) === "UNAVAILABLE") continue;
+        if (missing.length > 0) { rejected.push(`${name}:missing_capabilities=${missing.join("+")}`); continue; }
+        if (!isSensitivityEligible(profile, input.sensitivity)) { rejected.push(`${name}:sensitivity=${input.sensitivity ?? "undefined"}`); continue; }
+        if (!isPaidModelsEligible(profile, input.paid_models_allowed)) { rejected.push(`${name}:paid_models_disabled`); continue; }
+        if (this.health.state(name, true) === "UNAVAILABLE") { rejected.push(`${name}:health_unavailable`); continue; }
         return {
           mode: "SPECIFIC_PROVIDER",
           reason: "PROVIDER_PREFERENCE",
@@ -249,7 +251,7 @@ export class AiRouter {
         };
       }
       throw new NoEligibleProviderError(
-        `provider_preference_exhausted: ingen av [${attempted.join(",")}] er konfigurert/kvalifisert`
+        `provider_preference_exhausted: ingen av [${attempted.join(",")}] er konfigurert/kvalifisert (${rejected.join("; ")})`
       );
     }
 
