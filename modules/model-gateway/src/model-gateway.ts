@@ -43,6 +43,16 @@ export const DEFAULT_MODEL_TIMEOUT_MS = 60_000;
  */
 export const MAX_MODEL_TIMEOUT_MS = 180_000;
 
+/**
+ * D-402: bakgrunnsformål (minneuttrekk, sammendrag, klassifisering) kan ta lang tid på en lokal modell uten at leverandøren er nede.
+ * Et TIDSAVBRUDD der sier ingenting om om samme leverandør kan svare på en chat-tur, så det teller ikke mot helsesporingen
+ * (ellers stenger bakgrunnsjobber en lokal modell ute fra chatten og samtalen faller stille til betalt sky). Nettverks-/server-feil teller fortsatt.
+ */
+const BACKGROUND_PURPOSES: ReadonlySet<string> = new Set(["EXTRACT", "SUMMARIZE", "QUICK_CLASSIFICATION"]);
+export function isBackgroundTimeout(purpose: string | undefined, kind: string): boolean {
+  return kind === "timeout" && purpose !== undefined && BACKGROUND_PURPOSES.has(purpose);
+}
+
 /** Ugyldig eksplisitt `CompleteInput.timeoutMs` (ikke-endelig/≤0/over `MAX_MODEL_TIMEOUT_MS`) - feiler høylytt, aldri en stille klemming/gjetning. */
 export class InvalidTimeoutError extends Error {
   constructor(readonly requestedMs: number) {
@@ -565,7 +575,7 @@ export class ModelGateway {
                   throw pe;
                 }
                 lastError = pe;
-                this.health.recordFailure(adapter.name, pe.kind, pe.message);
+                if (!isBackgroundTimeout(input.purpose, pe.kind)) this.health.recordFailure(adapter.name, pe.kind, pe.message);
                 await this.recordFailedAttempt(input, adapter.name, pe, isCritic);
                 break;
               }
@@ -587,7 +597,7 @@ export class ModelGateway {
             await this.recordFailedAttempt(input, adapter.name, pe, isCritic);
             throw pe;
           }
-          this.health.recordFailure(adapter.name, pe.kind, pe.message);
+          if (!isBackgroundTimeout(input.purpose, pe.kind)) this.health.recordFailure(adapter.name, pe.kind, pe.message);
           await this.recordFailedAttempt(input, adapter.name, pe, isCritic);
           // D-106 HOST-FIX Defekt B-oppfølging (host-bevis 2026-09-20): et mislykket
           // forsøk skrev FØR denne linjen KUN `kind` til `cost_events`
