@@ -102,6 +102,15 @@
   #enroll form { display:flex; gap:8px; padding:0; }
   #enroll input { flex:1; background: var(--bg); color: var(--text); border:1px solid var(--border); border-radius:8px; padding:10px; font-size:15px; }
   #enroll button { background: var(--accent); color:#022; border:0; border-radius:8px; padding:0 18px; cursor:pointer; font-weight:700; font-family:inherit; }
+  /* D-405: stemmeinnstillinger */
+  .vs-row { display:grid; grid-template-columns: 1fr auto; gap:4px 12px; align-items:center; margin-top:12px; }
+  .vs-row input[type=range] { grid-column: 1 / -1; width:100%; accent-color: var(--accent); }
+  .vs-row .vs-val { font-family: var(--mono); font-size:12px; color: var(--accent-strong); }
+  .vs-row.disabled { opacity:0.45; }
+  .vs-actions { display:flex; gap:8px; margin-top:14px; }
+  .vs-actions button { background: var(--panel-3); color: var(--text); border:1px solid var(--border); border-radius:8px; padding:7px 14px; cursor:pointer; font-size:12px; font-weight:600; }
+  .vs-actions button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-strong); }
+  .vs-actions button:disabled { opacity:0.45; cursor:not-allowed; }
   details summary { cursor:pointer; color: var(--text-dim); font-size:12px; user-select:none; }
   details summary:hover { color: var(--accent-strong); }
   .empty { color: var(--text-dim); font-style:italic; }
@@ -147,6 +156,31 @@
       <p id="block-panel-text"></p>
     </div>
 
+    <details id="voice-settings-panel">
+      <summary>Stemme (hastighet og uttrykk)</summary>
+      <div class="card" style="margin-top:8px;">
+        <div class="vs-row" id="vs-speed-row">
+          <label for="vs-speed">Hastighet</label><span class="vs-val" id="vs-speed-val">1.00×</span>
+          <input type="range" id="vs-speed" min="0.6" max="1.6" step="0.05" value="1">
+        </div>
+        <div class="vs-row" id="vs-expr-row">
+          <label for="vs-expr">Uttrykk</label><span class="vs-val" id="vs-expr-val">1.00×</span>
+          <input type="range" id="vs-expr" min="0.3" max="1.5" step="0.05" value="1">
+        </div>
+        <div class="vs-row" id="vs-pause-row">
+          <label for="vs-pause">Pause mellom setninger</label><span class="vs-val" id="vs-pause-val">200 ms</span>
+          <input type="range" id="vs-pause" min="0" max="1500" step="50" value="200">
+        </div>
+        <div class="vs-actions">
+          <button id="vs-test" disabled title="Start samtalen først">Test stemmen</button>
+          <button id="vs-reset">Tilbakestill</button>
+        </div>
+        <p class="hint" id="vs-hint">
+          Lagres på denne enheten og brukes fra neste svar. Hvilke innstillinger som virker avhenger av stemmemotoren
+          (den lokale Piper-stemmen støtter alle tre). Det finnes i dag bare én norsk Piper-stemme, så selve stemmen kan ikke byttes her.
+        </p>
+      </div>
+    </details>
     <details>
       <summary>Tilkobling (voice-gateway)</summary>
       <div class="card" style="margin-top:8px;">
@@ -266,6 +300,55 @@
     return proto + "//" + location.hostname + ":3020";
   }
   wsUrlInput.value = localStorage.getItem("jarvis.voicewsurl") || defaultVoiceWsUrl();
+
+  // D-405: stemmeinnstillinger (kun avspilling). Lagres per enhet i localStorage og sendes til gatewayen før `start` og ved hver endring.
+  const VS_DEFAULTS = { speed: 1, expressiveness: 1, pause_ms: 200 };
+  const vsEls = {
+    speed: document.getElementById("vs-speed"), expr: document.getElementById("vs-expr"), pause: document.getElementById("vs-pause"),
+    speedVal: document.getElementById("vs-speed-val"), exprVal: document.getElementById("vs-expr-val"), pauseVal: document.getElementById("vs-pause-val"),
+    test: document.getElementById("vs-test"), reset: document.getElementById("vs-reset"), hint: document.getElementById("vs-hint")
+  };
+  function loadVoiceSettings() {
+    try {
+      const raw = JSON.parse(localStorage.getItem("jarvis.voicesettings") || "{}");
+      const num = (v, d) => (typeof v === "number" && isFinite(v) ? v : d);
+      return { speed: num(raw.speed, VS_DEFAULTS.speed), expressiveness: num(raw.expressiveness, VS_DEFAULTS.expressiveness), pause_ms: num(raw.pause_ms, VS_DEFAULTS.pause_ms) };
+    } catch { return { ...VS_DEFAULTS }; }
+  }
+  let voiceSettings = loadVoiceSettings();
+  let vsTimer = null;
+  function renderVoiceSettings() {
+    vsEls.speed.value = String(voiceSettings.speed);
+    vsEls.expr.value = String(voiceSettings.expressiveness);
+    vsEls.pause.value = String(voiceSettings.pause_ms);
+    vsEls.speedVal.textContent = Number(voiceSettings.speed).toFixed(2) + "×";
+    vsEls.exprVal.textContent = Number(voiceSettings.expressiveness).toFixed(2) + "×";
+    vsEls.pauseVal.textContent = Math.round(voiceSettings.pause_ms) + " ms";
+  }
+  function sendVoiceSettings() {
+    try { localStorage.setItem("jarvis.voicesettings", JSON.stringify(voiceSettings)); } catch { /* privat modus - ingen funksjonell avhengighet */ }
+    if (typeof ws !== "undefined" && ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "voice_settings", settings: voiceSettings }));
+  }
+  function onVoiceSettingInput() {
+    voiceSettings = { speed: Number(vsEls.speed.value), expressiveness: Number(vsEls.expr.value), pause_ms: Number(vsEls.pause.value) };
+    renderVoiceSettings();
+    clearTimeout(vsTimer);
+    vsTimer = setTimeout(sendVoiceSettings, 250);
+  }
+  [vsEls.speed, vsEls.expr, vsEls.pause].forEach((el) => el.addEventListener("input", onVoiceSettingInput));
+  vsEls.reset.addEventListener("click", () => { voiceSettings = { ...VS_DEFAULTS }; renderVoiceSettings(); sendVoiceSettings(); });
+  vsEls.test.addEventListener("click", () => {
+    if (typeof ws !== "undefined" && ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "voice_sample" }));
+  });
+  /** Skrur av de glidebryterne motoren ikke støtter (så UI-et aldri lover noe motoren ikke gjør). */
+  function applyVoiceCapabilities(caps) {
+    const c = caps || { speed: false, expressiveness: false, pause: false };
+    [["vs-speed-row", c.speed, vsEls.speed], ["vs-expr-row", c.expressiveness, vsEls.expr], ["vs-pause-row", c.pause, vsEls.pause]].forEach(([id, ok, input]) => {
+      document.getElementById(id).classList.toggle("disabled", !ok);
+      input.disabled = !ok;
+    });
+  }
+  renderVoiceSettings();
 
   function techLog(line) {
     techLogEl.textContent = new Date().toLocaleTimeString("nb-NO") + "  " + line + "\n" + techLogEl.textContent.slice(0, 20000);
@@ -443,6 +526,9 @@
           if (playbackCtx) { void playbackCtx.close(); playbackCtx = null; }
         }
         techLog("tts sample rate = " + ttsSampleRate + " Hz");
+        applyVoiceCapabilities(msg.voice_capabilities);
+        vsEls.test.disabled = false;
+        vsEls.test.title = "";
         trustPill.style.display = "inline-flex";
         trustPill.className = "pill trust-" + String(authority).toLowerCase();
         trustPill.textContent = authority === "SERVER_VERIFIED" ? "enhet bevist" : "enhet IKKE bevist (kun lokal tale)";
@@ -698,6 +784,7 @@
       statusEl.textContent = "Kobler til " + url + " …";
       ws = new WebSocket(url);
       ws.addEventListener("open", () => {
+        ws.send(JSON.stringify({ type: "voice_settings", settings: voiceSettings }));
         ws.send(JSON.stringify({
           type: "start",
           identity: {
@@ -735,6 +822,7 @@
     statePill.textContent = "idle";
     document.body.dataset.state = "idle";
     liveEl.textContent = "";
+    vsEls.test.disabled = true;
     tellShell({ jarvis: "voice-state", state: "offline" });
   }
 
