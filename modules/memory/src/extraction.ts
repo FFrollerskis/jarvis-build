@@ -350,8 +350,38 @@ export function normalizeKeywords(raw: ReadonlyArray<string> | undefined): strin
   return out;
 }
 
+/** D-402: enkel FIFO-port som begrenser samtidige kall (ingen avhengigheter). */
+export class ConcurrencyGate {
+  private active = 0;
+  private readonly waiting: Array<() => void> = [];
+  constructor(private readonly max: number) {}
+
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.active >= this.max) await new Promise<void>((resolve) => this.waiting.push(resolve));
+    this.active += 1;
+    try {
+      return await fn();
+    } finally {
+      this.active -= 1;
+      this.waiting.shift()?.();
+    }
+  }
+}
+
+export interface LlmExtractionOptions {
+  /** Samtidige uttrekk (default 1). Hver samtaletur utløser et uttrekk; en lokal 8B-modell står ellers i kø hos Ollama og går ut på tid (D-402, målt 45-108 s). */
+  maxConcurrent?: number;
+  /** Eget tidsavbrudd for uttrekk (default 180 s = taket i gatewayen); bakgrunnsjobb, ikke latenskritisk. */
+  timeoutMs?: number;
+}
+
 export class LlmExtractionAdapter implements ExtractionAdapter {
-  constructor(private readonly completer: MemoryExtractionCompleter) {}
+  private readonly gate: ConcurrencyGate;
+  private readonly timeoutMs: number;
+  constructor(private readonly completer: MemoryExtractionCompleter, options: LlmExtractionOptions = {}) {
+    this.gate = new ConcurrencyGate(Math.max(1, Math.floor(options.maxConcurrent ?? 1)));
+    this.timeoutMs = options.timeoutMs ?? 180_000;
+  }
 
   async extract(
     text: string,
@@ -360,10 +390,11 @@ export class LlmExtractionAdapter implements ExtractionAdapter {
     existing: ExistingMemoryHint[] = [],
     context: ExtractionContext = {}
   ): Promise<MemoryCandidate[]> {
-    const result = await this.completer.complete({
+    const result = await this.gate.run(() => this.completer.complete({
       tenant_id: identity.tenant_id,
       session_id: identity.session_id,
       purpose: "EXTRACT",
+      timeoutMs: this.timeoutMs,
       // Del 3 (JARVIS-016): uttrekk går gjennom samme innholdsbaserte sensitivitetsregler - helse/finans/hemmeligheter ⇒ kun lokal behandler.
       // D-386: de foregående turene er med i prompten og teller derfor også i klassifiseringen.
       sensitivity: classifyContentSensitivity({
@@ -378,7 +409,7 @@ export class LlmExtractionAdapter implements ExtractionAdapter {
         max_tokens: 1600,
         structured_schema: EXTRACTION_JSON_SCHEMA
       }
-    });
+    }));
     const parsed = ExtractionResultSchema.safeParse(result.structured_output);
     // Fail-closed, ikke fail-kastende: et uparsérbart/manglende strukturert
     // svar (leverandør-særegenhet, midlertidig glipp) gir INGEN kandidater
