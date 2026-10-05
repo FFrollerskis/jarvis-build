@@ -28,6 +28,8 @@ interface Candidate<T> {
 export function selectSpeechAdapters(
   candidates: {
     openAiStt: SttAdapter & Candidate<SttAdapter>;
+    /** D-403: eierens egen Whisper-server (privat adresse). Valgt FØRST når konfigurert; faller selv tilbake til lokal whisper.cpp ved feil. */
+    remoteWhisperStt?: SttAdapter & Candidate<SttAdapter>;
     localWhisperStt: SttAdapter & Candidate<SttAdapter>;
     openAiTts: TtsAdapter & Candidate<TtsAdapter>;
     localPiperTts: TtsAdapter & Candidate<TtsAdapter>;
@@ -35,7 +37,9 @@ export function selectSpeechAdapters(
   env: Record<string, string | undefined> = process.env
 ): { stt: SttAdapter; tts: TtsAdapter } {
   const allowTest = env["JARVIS_VOICE_ALLOW_TEST_ADAPTERS"] === "true";
-  const stt: SttAdapter | undefined = candidates.openAiStt.available()
+  const stt: SttAdapter | undefined = candidates.remoteWhisperStt?.available()
+    ? candidates.remoteWhisperStt
+    : candidates.openAiStt.available()
     ? candidates.openAiStt
     : candidates.localWhisperStt.available()
       ? candidates.localWhisperStt
