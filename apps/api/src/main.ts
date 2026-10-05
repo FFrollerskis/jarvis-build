@@ -551,7 +551,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // Ingestion Zone-karantene-veien for EKSTERNT/ubetrodd innhold - e-post/
   // web/verktøyoutput - som er en helt annen tillitsklasse enn eierens egne
   // ord i en samtale, se `ingest`-kommentaren ved `conversationEngine` under).
-  const memoryWriter = new MemoryWriter(pool, memoryEmbedding, new LlmExtractionAdapter(gateway), policy);
+  const memoryWriter = new MemoryWriter(pool, memoryEmbedding, new LlmExtractionAdapter(gateway, { maxConcurrent: envInt("JARVIS_MEMORY_EXTRACTION_CONCURRENCY", 1, { min: 1, max: 8 }) }), policy);
   // D-286 (Tobias "alle" - se retention-sweep.ts sitt filhode for full
   // begrunnelse): `SummaryService` FANTES fra før, men ble ALDRI konstruert
   // eller kalt fra noe produksjonssted (D-286 sitt eget funn) - kun

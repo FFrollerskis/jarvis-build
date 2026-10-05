@@ -45,7 +45,9 @@ describe("A: apps/api/src/main.ts registrerer memory.search i SAMME additionalTo
     // implementasjon i `@jarvis/memory`, IKKE lenger konstruert i main.ts.
     expect(mainSource).toMatch(/import\s*\{[^}]*LlmExtractionAdapter[^}]*\}\s*from\s*"@jarvis\/memory"/s);
     expect(mainSource).not.toMatch(/import\s*\{[^}]*RuleBasedExtractor[^}]*\}\s*from\s*"@jarvis\/memory"/s);
-    expect(mainSource).toContain("new MemoryWriter(pool, memoryEmbedding, new LlmExtractionAdapter(gateway), policy)");
+    // D-402: uttrekket får en samtidighetsgrense (ett om gangen) - testen låser fortsatt at MemoryWriter bruker LlmExtractionAdapter(gateway, ...) og policy.
+    expect(mainSource).toMatch(/new MemoryWriter\(pool, memoryEmbedding, new LlmExtractionAdapter\(gateway[\s\S]*?\), policy\)/);
+    expect(mainSource).toContain("JARVIS_MEMORY_EXTRACTION_CONCURRENCY");
     // Del 3 (JARVIS-013): innlimt/lang tekst (opts.pasted) er ikke eierens egne ord -> untrusted (karantene).
     expect(mainSource).toContain("ingest: (identity, text, opts) =>");
     expect(mainSource).toContain('trust: opts?.pasted ? "untrusted" : "trusted"');
