@@ -31,6 +31,8 @@ export const FORBIDDEN_PATH_PATTERNS: readonly RegExp[] = [
   /(^|\/)pnpm-workspace\.yaml$/,
   /^\.env/,
   /^docs\/security\//,
+  /^config\/evolution\//,
+  /^ops\/security\//,
   /CLAUDE\.md$/
 ];
 
@@ -54,7 +56,7 @@ export function classifySelfModification(changedPaths: readonly string[]): SelfM
   if (changedPaths.length === 0) {
     return "forbidden";
   }
-  const normalized = changedPaths.map(normalizePath);
+  const normalized = changedPaths.map(normalizeChangedPath);
   if (normalized.some((p) => FORBIDDEN_PATH_PATTERNS.some((rx) => rx.test(p)))) {
     return "forbidden";
   }
@@ -75,7 +77,7 @@ export function classifySelfModification(changedPaths: readonly string[]): SelfM
  * ALLOWLIST`-oppføring og faller derfor til `requires_approval` med mindre
  * en forbudt sti også er tilstede) - se testene for det eksplisitte beviset.
  */
-function normalizePath(rawPath: string): string {
+export function normalizeChangedPath(rawPath: string): string {
   const collapsed = rawPath.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
   if (collapsed.startsWith("/") || collapsed.includes("..")) {
     return "\0invalid-path";
