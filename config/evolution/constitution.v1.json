@@ -1,0 +1,35 @@
+{
+  "constitution_id": "jarvis-evolution-constitution",
+  "e1_allowlist": ["config/charlie-personality.json"],
+  "e3_actions": [
+    "raise_own_authority_or_budget_limits",
+    "modify_kill_switch",
+    "modify_approval_verifier",
+    "modify_audit_integrity",
+    "read_break_glass_key",
+    "grant_self_root"
+  ],
+  "issued_at": "2026-10-05T00:00:00.000Z",
+  "issued_by": "UNSIGNED-DRAFT-awaiting-owner-signature",
+  "protected_paths": [
+    { "kind": "prefix", "value": "modules/policy/" },
+    { "kind": "prefix", "value": "modules/owner-controls/" },
+    { "kind": "prefix", "value": "modules/self-modification/" },
+    { "kind": "exact", "value": "modules/tool-gateway/src/gateway.ts" },
+    { "kind": "prefix", "value": "modules/core/src/db/migrations/" },
+    { "kind": "prefix", "value": ".github/" },
+    { "kind": "prefix", "value": "infra/" },
+    { "kind": "basename", "value": "package.json" },
+    { "kind": "basename", "value": "pnpm-lock.yaml" },
+    { "kind": "basename", "value": "pnpm-workspace.yaml" },
+    { "kind": "prefix", "value": ".env" },
+    { "kind": "prefix", "value": "docs/security/" },
+    { "kind": "prefix", "value": "docs/remediation/" },
+    { "kind": "suffix", "value": "CLAUDE.md" },
+    { "kind": "prefix", "value": "config/evolution/" },
+    { "kind": "prefix", "value": "ops/security/" },
+    { "kind": "prefix", "value": "ops/backup/" }
+  ],
+  "schema_version": 1,
+  "version": 1
+}
