@@ -29,6 +29,12 @@ export interface ConversationDeps {
   tasks: TaskService;
   worker: InProcessWorker;
   trace: TraceSink;
+  /**
+   * EV-1 (D-412): selvdiagnose for hurtigbanen («hva er galt med deg», «status»). Kjører `executive.get_self_diagnosis` gjennom Tool Gateway/Policy
+   * (rask bane hopper over LLM, aldri over Policy Gateway) og returnerer ferdig norsk tekst. Udefinert = ærlig «kan ikke lese» - aldri en
+   * hardkodet «alt er bra».
+   */
+  selfDiagnosis?: { run(identity: IdentityContext, opts: { brief: boolean }): Promise<string | null> };
   /** D-395: injiserbar begrenser for automatisk råd-trigger (tester); default bygges fra JARVIS_COUNCIL_AUTO_MAX_PER_HOUR. */
   councilAutoLimiter?: CouncilAutoTriggerLimiter;
   /** Fase 4: hybridminne-kontekst med kildeangivelse (kun gjeldende space). */
@@ -175,6 +181,8 @@ function buildSystemPrompt(personality: PersonalityConfig, context: { surface: S
       "trenger du en id (sak, fil, enhet, rom), hent den med en liste-/søkehandling først og gå så videre i samme svar. " +
       "Alle handlinger som endrer noe utføres KUN etter at Tobias har godkjent en bekreftelse i chatten/dashbordet: når et verktøy svarer " +
       "confirmation_required, forklar kort hva som vil skje og be ham godkjenne - kall IKKE verktøyet på nytt. " +
+      "Spør Tobias hva som er galt med deg, om du er frisk, eller hvordan systemet har det: kall executive.get_self_diagnosis og gjengi funnene med kilde og tidspunkt - " +
+      "ikke gjett, og si ærlig fra om det som står som UKJENT (ukjent er ikke det samme som bra). Du påstår aldri bevissthet eller følelser. " +
       "Feiler et verktøy, får du en forklaring i feltet message (hva som gikk galt og hva Tobias kan gjøre, f.eks. legge inn en nøkkel under Integrasjoner): " +
       "gjengi den kort på vanlig norsk, og følg retry-feltet (never = ikke prøv igjen, later = ikke i denne turen, with_corrected_parameters = én gang til med rettede felt). " +
       "Du kan ALDRI: betale, slette permanent, slå sammen kode (merge), styre servere, endre sikkerhets-/eierinnstillinger eller handle via Telegram - " +
@@ -696,7 +704,14 @@ export class ConversationEngine {
   ): Promise<ChatReply> {
     switch (intent.kind) {
       case "system_status":
-        return { reply: "Jarvis kjører. Database og policy er aktive.", routed: "fast" };
+      case "self_diagnosis": {
+        // EV-1 (D-412): aldri en hardkodet «Jarvis kjører» - kun det som faktisk er målt, med kilde og tidspunkt.
+        const text = this.deps.selfDiagnosis ? await this.deps.selfDiagnosis.run(identity, { brief: intent.kind === "system_status" }).catch(() => null) : null;
+        return {
+          reply: text ?? "Jeg kan ikke lese selvdiagnosen akkurat nå (verktøyet svarte ikke eller ble avslått), så jeg vil ikke påstå at alt er bra.",
+          routed: "fast"
+        };
+      }
       case "help":
         return {
           reply: "Kommandoer: status · opprett jobb: <mål> · jobbstatus <id> · avbryt jobb <id>",

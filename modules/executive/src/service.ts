@@ -1,3 +1,4 @@
+import { buildLimitationRegistry, composeSelfDiagnosis, type LimitationInput, type ObservationReader, type SelfDiagnosis } from "./self-model/index.ts";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import type { FinanceKillSwitch } from "@jarvis/finance";
 import type { OwnerControlState } from "@jarvis/owner-controls";
@@ -74,6 +75,14 @@ export interface ExecutiveServiceOptions {
    * tilgjengelighet er selv en konfabulasjonskilde, jf. D-209).
    */
   modelSurface?: ReadonlyArray<{ readonly tool_id: string; readonly action: string }>;
+  /**
+   * EV-1 (D-412): selvmodell. Smale, injiserte lesere (komponert i `apps/api`) + registerkildene begrensningene avledes fra. Uten dette gir
+   * `getSelfDiagnosis()` kun UNKNOWN for alle områder (aldri en gjetning om «frisk»).
+   */
+  selfModel?: {
+    readers: Readonly<Record<string, ObservationReader | undefined>>;
+    limitations: LimitationInput;
+  };
 }
 
 export class ExecutiveService {
@@ -297,6 +306,18 @@ export class ExecutiveService {
    * slår kun opp den REGISTRERTE `ToolDefinition` for å finne
    * `credential_ref`, aldri et nytt, parallelt oppslag.
    */
+  /**
+   * EV-1 (D-412): «Hva er galt med deg akkurat nå?» - kildebelagt selvdiagnose + begrensninger. RENT lesende; hver observasjon bærer kilde og
+   * tidspunkt; ukjent er UNKNOWN (aldri «frisk»). INGEN nøstede `gateway.execute()`-kall: lesere er injisert og leser sine egne kilder.
+   */
+  async getSelfDiagnosis(): Promise<SelfDiagnosis> {
+    const sm = this.options.selfModel;
+    return composeSelfDiagnosis({
+      readers: sm?.readers ?? {},
+      limitations: buildLimitationRegistry(sm?.limitations ?? { forbiddenModelToolIds: [], connectors: [], modelProfiles: [], allModelCapabilities: [] })
+    });
+  }
+
   /**
    * D-289 (Tobias direkte i chat: "vil ha alt at han har full kontroll" -
    * retningsvalg på D-288): samtaleflaten kaller nå `allMeshTools(gateway)`

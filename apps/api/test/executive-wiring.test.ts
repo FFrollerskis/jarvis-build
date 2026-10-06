@@ -29,12 +29,16 @@ describe("A: apps/api/src/main.ts komponerer executiveToolDefinitions() INNI SAM
     // Remediering del 1: ExecutiveService får den eksplisitte modellflaten, slik at
     // `check_my_capabilities` aldri påstår at hele registeret er tilgjengelig for modellen.
     expect(callBlock).toContain(
-      "...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, { modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES, ...CHAT_READ_TIER, ...CHAT_ACT_TIER] })))"
+      "...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, { modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES, ...CHAT_READ_TIER, ...CHAT_ACT_TIER],"
     );
+    // EV-1 (D-412): selvmodellens lesere kobles inn i SAMME ExecutiveService-instans (ingen parallell tjeneste).
+    expect(callBlock).toContain("selfModel: {");
+    expect(callBlock).toContain("readers: selfModelReaders");
   });
   it("ExecutiveService konstrueres med DEN SAMME toolGateway-instansen (nøstet gateway.execute(), aldri situationEngine/situationDomainPauses direkte)", () => {
     expect(mainSource).not.toMatch(/new ExecutiveService\(\s*situationEngine/);
-    expect(mainSource).toContain("new ExecutiveService(toolGateway, { modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES, ...CHAT_READ_TIER, ...CHAT_ACT_TIER] })");
+    expect(mainSource).toContain("new ExecutiveService(toolGateway, { modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES, ...CHAT_READ_TIER, ...CHAT_ACT_TIER],");
+    expect(mainSource.match(/new ExecutiveService\(/g)).toHaveLength(1);
   });
 });
 
