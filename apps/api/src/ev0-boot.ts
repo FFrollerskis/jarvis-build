@@ -31,6 +31,13 @@ export interface Ev0BootInput {
   configDir: string;
 }
 
+let lastBootStatus: Ev0BootStatus | null = null;
+
+/** EV-1 (D-412): siste oppstartsresultat (null før første sjekk) - leses av selvdiagnosen (`constitution`/`ledger`). Kun lesing, aldri en autoritet. */
+export function getLastEv0BootStatus(): Ev0BootStatus | null {
+  return lastBootStatus;
+}
+
 export async function checkEv0Boot(input: Ev0BootInput): Promise<Ev0BootStatus> {
   let constitution: ConstitutionBootStatus;
   try {
@@ -55,7 +62,8 @@ export async function checkEv0Boot(input: Ev0BootInput): Promise<Ev0BootStatus> 
   } catch (err) {
     ledger = { status: "unavailable", error: (err as Error).message.slice(0, 200) };
   }
-  return { constitution, ledger };
+  lastBootStatus = { constitution, ledger };
+  return lastBootStatus;
 }
 
 /** Én JSON-linje pr. del; en ødelagt hash-kjede logges som error (høyt), resten som info/warn. */

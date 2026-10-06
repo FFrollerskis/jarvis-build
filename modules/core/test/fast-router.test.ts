@@ -21,3 +21,18 @@ describe("Fast Router v1 (deterministisk, uten LLM)", () => {
     expect(fastRoute("")).toBeNull();
   });
 });
+
+// EV-1 (D-412): «hva er galt med deg» går til selvdiagnosen (kildebelagt, aldri LLM-gjetting).
+describe("fastRoute: self_diagnosis", () => {
+  it("gjenkjenner norske og engelske formuleringer", () => {
+    for (const text of ["hva er galt med deg", "Hva er galt med deg akkurat nå?", "hva er galt", "hva feiler det på deg", "er du frisk?", "selvdiagnose", "diagnoser deg", "what's wrong with you"]) {
+      expect(fastRoute(text), text).toEqual({ kind: "self_diagnosis" });
+    }
+  });
+
+  it("er presis: vanlige setninger som bare nevner ordene går IKKE hit", () => {
+    for (const text of ["hva er galt med bilen min", "hva er galt med denne koden", "er du frisk på å hjelpe meg med skatten", "status"]) {
+      expect(fastRoute(text)?.kind, text).not.toBe("self_diagnosis");
+    }
+  });
+});

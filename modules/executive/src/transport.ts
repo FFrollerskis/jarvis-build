@@ -70,6 +70,10 @@ export class ExecutiveTransport implements ToolTransport {
         const status = await this.service.getCapabilityStatus(context?.servingModel);
         return { data: status as unknown as JsonValue };
       }
+      case "get_self_diagnosis": {
+        const diagnosis = await this.service.getSelfDiagnosis();
+        return { data: diagnosis as unknown as JsonValue };
+      }
       case "get_connector_status": {
         const status = await this.service.getConnectorStatus();
         return { data: status as unknown as JsonValue };
@@ -208,6 +212,10 @@ export function executiveToolDefinitions(transport: ExecutiveTransport): ToolDef
     read(
       "get_capability_status",
       "Sjekk EKTE, oppdatert selv-bevissthet: hvilke verktøy er faktisk tilgjengelige i DENNE samtalen (chat_accessible_tools, samme kilde chat-verktøykjeden selv bruker), hvilken modell/leverandør som FAKTISK genererer denne turen (serving_model, D-317) og siste kjente helsetilstand per tilkoblet system (connector_health) - bruk DETTE fremfor å gjette på egne evner eller hvilken modell du er (D-209/D-317)"
+    ),
+    read(
+      "get_self_diagnosis",
+      "Svar på «hva er galt med deg akkurat nå?» fra EKTE, kildebelagte målinger (database, modellleverandører, eier-kontroller, tilkoblinger, jobber, verktøyfeil siste time, prosess, konstitusjon, endringsregister, backup, watchdog, bygg) - hvert funn har kilde og tidspunkt; ukjent vises som UKJENT (aldri som frisk) - pluss en liste over det Jeg vet at jeg ikke kan. Bruk dette i stedet for å gjette."
     ),
     read(
       "get_connector_status",

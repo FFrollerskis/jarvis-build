@@ -66,6 +66,7 @@ export const CHAT_READ_TIER: ReadonlyArray<{ readonly tool_id: string; readonly 
   { tool_id: "executive", action: "get_connector_status" },
   { tool_id: "executive", action: "get_control_surface_status" },
   { tool_id: "executive", action: "get_delegation_board" },
+  { tool_id: "executive", action: "get_self_diagnosis" },
   { tool_id: "finance_neonomics", action: "get_consent" },
   { tool_id: "finance_neonomics", action: "list_balances" },
   { tool_id: "finance_neonomics", action: "list_bank_accounts" },

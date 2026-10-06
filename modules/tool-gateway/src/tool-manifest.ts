@@ -102,7 +102,8 @@ const EFFECT_OVERRIDES: Record<string, Effect> = {
   [k("finance_stripe", "refresh_payment_state")]: "read",
   [k("finance_vipps", "refresh_payment_state")]: "read",
   [k("finance_wallester", "freeze_card")]: "control",
-  [k("executive", "get_capability_status")]: "read"
+  [k("executive", "get_capability_status")]: "read",
+  [k("executive", "get_self_diagnosis")]: "read"
 };
 
 export function inferEffect(tool_id: string, action: string): Effect {

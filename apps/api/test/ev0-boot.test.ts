@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { canonicalizeManifest, publicKeyFingerprint } from "@jarvis/self-modification";
-import { checkEv0Boot, logEv0Boot } from "../src/ev0-boot.ts";
+import { checkEv0Boot, getLastEv0BootStatus, logEv0Boot } from "../src/ev0-boot.ts";
 
 /** EV-0 (D-411): oppstartssjekken er observasjon - den kaster aldri og gir presise statuser. */
 const REPO_CONFIG = fileURLToPath(new URL("../../../config/evolution/", import.meta.url));
@@ -92,5 +92,17 @@ describe("D: komposisjonsroten (statisk)", () => {
   it("D2: fingeravtrykk-variabelen når api-containeren (compose) og er dokumentert i .env.example - men aldri en privatnøkkel", () => {
     expect(read("../../../infra/local/docker-compose.yml")).toContain("JARVIS_CONSTITUTION_PUBKEY_SHA256");
     expect(read("../../../.env.example")).toMatch(/^JARVIS_CONSTITUTION_PUBKEY_SHA256=$/m);
+  });
+});
+
+describe("E: siste resultat for selvdiagnosen (EV-1)", () => {
+  it("E1: getLastEv0BootStatus er null før første sjekk og gir siste resultat etterpå", async () => {
+    const r = await checkEv0Boot({ pool: emptyLedgerPool as never, pinnedPublicKeySha256: null, configDir: REPO_CONFIG });
+    expect(getLastEv0BootStatus()).toEqual(r);
+  });
+
+  it("E2: main.ts kobler selvmodellens ev0Status til siste oppstartsresultat", () => {
+    const main = readFileSync(fileURLToPath(new URL("../src/main.ts", import.meta.url)), "utf8");
+    expect(main).toContain("ev0Status: () => getLastEv0BootStatus()");
   });
 });

@@ -1,9 +1,10 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import "./normalize-env.ts";
 import { fileURLToPath } from "node:url";
-import { checkEv0Boot, logEv0Boot } from "./ev0-boot.ts";
+import { checkEv0Boot, getLastEv0BootStatus, logEv0Boot } from "./ev0-boot.ts";
 import { envHour, envInt, envPort, systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit } from "./owner.ts";
+import { buildSelfModelReaders } from "./self-model-readers.ts";
 import {
   ChannelSessionAuthority,
   ContextBuilder,
@@ -31,6 +32,7 @@ import { InfraExecutionGate, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { DeploymentService, DiagnosisService, IncidentService } from "@jarvis/incidents";
 import {
   AiCouncil,
+  DEFAULT_PROFILES,
   assertProvidersHaveExplicitPricing,
   pricingFromEnv,
   ModelGateway,
@@ -63,7 +65,8 @@ import {
   CHAT_ACT_TIER, CHAT_READ_TIER, GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, assertManifestInvariants, buildToolManifest, describeSurfaceCatalog, memoryToolDefinitions, selectSurfaceTools,
   MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, resolveModelToolSurface, PgGithubRateLimitStore,
   PgTelegramOffsetStore, TelegramCommandPoller, createTurnContext, jobIdentityFor, telegramClassDNotifier, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, buildStatusSource, calendarSource, driveTransportsIfConfigured,
-  emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
+  emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep,
+  CONNECTOR_REGISTRY, FORBIDDEN_MODEL_TOOL_IDS, listConnectorStatus
 } from "@jarvis/tool-gateway";
 import {
   BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessEventSyncService, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService,
@@ -81,7 +84,7 @@ import {
   DomainPauseRegistry, SituationEngine, SituationsTransport, assertSituationSweepHealthy, runSituationSweepForAllTenants,
   situationsToolDefinitions
 } from "@jarvis/situations";
-import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "@jarvis/executive";
+import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions, renderSelfDiagnosisNo, type SelfDiagnosis } from "@jarvis/executive";
 import { GovernanceService, GovernanceTransport, governanceToolDefinitions } from "@jarvis/governance";
 import { OwnerControlsService, OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
 import {
@@ -147,6 +150,18 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const killSwitch = new KillSwitch(pool, ownerControlAuthority);
   await killSwitch.restore();
   const ownerControls = new OwnerControls(killSwitch, pool, ownerControlAuthority);
+  // EV-1 (D-412): leserne selvdiagnosen (`executive.get_self_diagnosis`) komponeres av. `toolGateway` refereres først når en leser kalles (lat).
+  const selfModelControls = new OwnerControlsService(killSwitch, ownerControls);
+  const selfModelReaders = buildSelfModelReaders({
+    pool,
+    tenantId: owner.tenant_id,
+    meshStatus: () => gateway.meshStatus(),
+    controlState: () => selfModelControls.getControlState(),
+    connectorStatus: () => listConnectorStatus(toolGateway),
+    // EV-0 oppstartsresultat (konstitusjon + endringsregister); null til sjekken har kjørt -> UKJENT.
+    ev0Status: () => getLastEv0BootStatus(),
+    build: () => ({ sha: process.env["JARVIS_BUILD_SHA"]?.trim() || null, version: process.env["JARVIS_VERSION"]?.trim() || "0.1.0" })
+  });
   await ownerControls.restore();
   // D-174 (B2): hoistet hit (tidligere konstruert lenger nede, kun for
   // `enrollmentService`) - `OwnerControlsService` sitt nye, eier-vendte
@@ -886,7 +901,17 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // ekte transporten fra `transports`-recorden over - samme ene register-løkke som resten.
       ...homeAssistantTools(new HomeAssistantTransport(() => readSecretProvider.get("JARVIS_HA_BASE_URL"), () => readSecretProvider.get("JARVIS_HA_ROOMS"))),
       ...situationsToolDefinitions(new SituationsTransport(situationEngine, situationDomainPauses)),
-      ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, { modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES, ...CHAT_READ_TIER, ...CHAT_ACT_TIER] }))),
+      ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, { modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES, ...CHAT_READ_TIER, ...CHAT_ACT_TIER],
+        selfModel: {
+          readers: selfModelReaders,
+          limitations: {
+            forbiddenModelToolIds: FORBIDDEN_MODEL_TOOL_IDS,
+            connectors: CONNECTOR_REGISTRY.map((c) => ({ id: c.id, category: c.category, test_method: c.live_test ? "live" : "presence_only" })),
+            modelProfiles: DEFAULT_PROFILES,
+            allModelCapabilities: ["text", "reasoning", "vision", "tool_calling", "structured_output", "streaming"]
+          }
+        }
+      }))),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten
       // av eier-autoritets-/session-grant-mønstrene i denne filen - IKKE en ny,
@@ -1004,6 +1029,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     tasks: taskService,
     worker,
     trace,
+    // EV-1 (D-412): hurtigbanens selvdiagnose går gjennom Tool Gateway (Policy + revisjon) - samme verktøy som modellen kan kalle.
+    selfDiagnosis: {
+      async run(identity, opts) {
+        const result = await toolGateway.execute({ identity, tool_id: "executive", action: "get_self_diagnosis", parameters: {} });
+        if (!result.ok || result.data === undefined) return null;
+        return renderSelfDiagnosisNo(result.data as unknown as SelfDiagnosis, opts.brief ? { maxFindings: 3 } : { maxFindings: 10, includeLimitations: true });
+      }
+    },
     memory: {
       contextFor: (identity, userText) => memoryRetriever.contextFor(identity, userText),
       // D-384: minnets rom/sensitivitet må følge med til ruteren (helse/special ⇒ kun lokal modell) - uten dette ble det aldri klassifisert.
