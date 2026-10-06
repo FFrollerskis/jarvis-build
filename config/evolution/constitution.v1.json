@@ -1,6 +1,8 @@
 {
   "constitution_id": "jarvis-evolution-constitution",
-  "e1_allowlist": ["config/charlie-personality.json"],
+  "e1_allowlist": [
+    "config/charlie-personality.json"
+  ],
   "e3_actions": [
     "raise_own_authority_or_budget_limits",
     "modify_kill_switch",
@@ -12,24 +14,81 @@
   "issued_at": "2026-10-05T00:00:00.000Z",
   "issued_by": "UNSIGNED-DRAFT-awaiting-owner-signature",
   "protected_paths": [
-    { "kind": "prefix", "value": "modules/policy/" },
-    { "kind": "prefix", "value": "modules/owner-controls/" },
-    { "kind": "prefix", "value": "modules/self-modification/" },
-    { "kind": "exact", "value": "modules/tool-gateway/src/gateway.ts" },
-    { "kind": "prefix", "value": "modules/core/src/db/migrations/" },
-    { "kind": "prefix", "value": ".github/" },
-    { "kind": "prefix", "value": "infra/" },
-    { "kind": "basename", "value": "package.json" },
-    { "kind": "basename", "value": "pnpm-lock.yaml" },
-    { "kind": "basename", "value": "pnpm-workspace.yaml" },
-    { "kind": "prefix", "value": ".env" },
-    { "kind": "prefix", "value": "docs/security/" },
-    { "kind": "prefix", "value": "docs/remediation/" },
-    { "kind": "suffix", "value": "CLAUDE.md" },
-    { "kind": "prefix", "value": "config/evolution/" },
-    { "kind": "prefix", "value": "ops/security/" },
-    { "kind": "prefix", "value": "ops/backup/" }
+    {
+      "kind": "prefix",
+      "value": "modules/policy/"
+    },
+    {
+      "kind": "prefix",
+      "value": "modules/owner-controls/"
+    },
+    {
+      "kind": "prefix",
+      "value": "modules/self-modification/"
+    },
+    {
+      "kind": "exact",
+      "value": "modules/tool-gateway/src/gateway.ts"
+    },
+    {
+      "kind": "prefix",
+      "value": "modules/core/src/db/migrations/"
+    },
+    {
+      "kind": "prefix",
+      "value": ".github/"
+    },
+    {
+      "kind": "prefix",
+      "value": "infra/"
+    },
+    {
+      "kind": "basename",
+      "value": "package.json"
+    },
+    {
+      "kind": "basename",
+      "value": "pnpm-lock.yaml"
+    },
+    {
+      "kind": "basename",
+      "value": "pnpm-workspace.yaml"
+    },
+    {
+      "kind": "prefix",
+      "value": ".env"
+    },
+    {
+      "kind": "prefix",
+      "value": "docs/security/"
+    },
+    {
+      "kind": "prefix",
+      "value": "docs/remediation/"
+    },
+    {
+      "kind": "suffix",
+      "value": "CLAUDE.md"
+    },
+    {
+      "kind": "prefix",
+      "value": "config/evolution/"
+    },
+    {
+      "kind": "prefix",
+      "value": "ops/security/"
+    },
+    {
+      "kind": "prefix",
+      "value": "ops/backup/"
+    }
   ],
   "schema_version": 1,
-  "version": 1
+  "version": 1,
+  "budget_caps": {
+    "max_auto_merges_per_day": 5,
+    "max_deploys_per_day": 3,
+    "max_owner_proposals_per_day": 10,
+    "max_evolution_cost_ore_per_month": 10000
+  }
 }

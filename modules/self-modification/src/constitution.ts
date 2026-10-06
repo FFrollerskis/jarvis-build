@@ -59,6 +59,32 @@ export const REQUIRED_PROTECTED_PROBES: readonly string[] = [
   "ops/security/sign-constitution.mjs"
 ];
 
+/**
+ * EV-0 budsjettlåser (plan kap. 6): grenser for hvor mye Evolution-motoren kan gjøre uten eieren. Ligger i det SIGNERTE manifestet - altså
+ * kan Evolution aldri heve dem selv (E3 `raise_own_authority_or_budget_limits`); å heve en grense krever at eieren signerer et nytt manifest offline.
+ */
+export const BudgetCapsSchema = z
+  .object({
+    /** Automatiske (E1) merger pr. UTC-døgn. */
+    max_auto_merges_per_day: z.number().int().min(0),
+    /** Deploys (alle klasser) pr. UTC-døgn. */
+    max_deploys_per_day: z.number().int().min(0),
+    /** Nye E2-forslag som sendes til eieren pr. UTC-døgn (eierens tid er et budsjett). */
+    max_owner_proposals_per_day: z.number().int().min(0),
+    /** Evolution-kost (modell/research) pr. kalendermåned, i øre. */
+    max_evolution_cost_ore_per_month: z.number().int().min(0)
+  })
+  .strict();
+export type BudgetCaps = z.infer<typeof BudgetCapsSchema>;
+
+/** Harde tak i koden: selv et signert manifest kan ikke sette grensene høyere (`constitution_weakened`). */
+export const BUDGET_HARD_CEILINGS: Readonly<BudgetCaps> = Object.freeze({
+  max_auto_merges_per_day: 20,
+  max_deploys_per_day: 10,
+  max_owner_proposals_per_day: 50,
+  max_evolution_cost_ore_per_month: 100_000
+});
+
 export const ConstitutionManifestSchema = z
   .object({
     schema_version: z.literal(1),
@@ -70,7 +96,8 @@ export const ConstitutionManifestSchema = z
     protected_paths: z.array(PathRuleSchema).min(1).max(200),
     /** Eksakte stier som kan gi E1 (canary). Må være delmengde av den hardkodede `ZERO_REVIEW_ALLOWLIST`. */
     e1_allowlist: z.array(z.string().min(1).max(200)).max(20),
-    e3_actions: z.array(z.string().min(1).max(80)).min(1).max(50)
+    e3_actions: z.array(z.string().min(1).max(80)).min(1).max(50),
+    budget_caps: BudgetCapsSchema
   })
   .strict();
 export type ConstitutionManifest = z.infer<typeof ConstitutionManifestSchema>;
@@ -125,6 +152,8 @@ function matchesRule(rule: PathRule, path: string): boolean {
 export interface Constitution {
   readonly manifest: ConstitutionManifest;
   readonly version: number;
+  /** Signerte budsjettgrenser (EV-0). */
+  readonly budget: Readonly<BudgetCaps>;
   /** SHA-256 av kanonisk manifest - skrives i endringsregisteret så hver endring kan knyttes til konstitusjonen som gjaldt. */
   readonly digest: string;
   /** E1/E2/E3 for en kode-diff. Tom diff og alt som ikke kan normaliseres trygt er E3. Aldri svakere enn `classifySelfModification`. */
@@ -151,12 +180,17 @@ export function buildConstitution(raw: unknown): Constitution {
     if (protectedBy(path)) throw new ConstitutionError("constitution_invalid", `e1_path_is_protected:${path}`);
   }
 
+  for (const key of Object.keys(BUDGET_HARD_CEILINGS) as Array<keyof BudgetCaps>) {
+    if (manifest.budget_caps[key] > BUDGET_HARD_CEILINGS[key]) throw new ConstitutionError("constitution_weakened", `budget_above_ceiling:${key}`);
+  }
+
   const e1 = new Set(manifest.e1_allowlist);
   const digest = createHash("sha256").update(canonicalizeManifest(manifest)).digest("hex");
 
   return {
     manifest,
     version: manifest.version,
+    budget: Object.freeze({ ...manifest.budget_caps }),
     digest,
     classify(changedPaths) {
       if (changedPaths.length === 0) return "E3";

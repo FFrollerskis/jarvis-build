@@ -10,6 +10,7 @@ import {
 import { classifySelfModification } from "./policy.ts";
 import type { ChangeLedger, LedgerDecision } from "./change-ledger.ts";
 import type { EvChangeClass } from "./constitution.ts";
+import type { BudgetLock } from "./budget-lock.ts";
 import { PersonalityConfigSchema, type PersonalityConfig, type SelfModificationRequest, type SelfModificationRequestStatus } from "./types.ts";
 import type { SelfModificationGithubClient } from "./github-client.ts";
 
@@ -66,6 +67,11 @@ export interface SelfModificationServiceDeps {
    * (den er allerede utført), men logges høyt og varsles - aldri stille.
    */
   changeLedger?: { ledger: ChangeLedger; constitutionDigest: string };
+  /**
+   * D-409 (EV-0): budsjettlås for AUTOMATISKE (zero_review/E1) merger. Satt = en merge over døgngrensen blir stående `pending`
+   * (ikke feilet, ikke avvist) til neste døgn eller til eieren signerer en høyere grense. Uten: ingen budsjettgrense (som før).
+   */
+  budgetLock?: BudgetLock;
 }
 
 /** D-397: «får noe selvendrings-relatert skje akkurat nå?» - false = eieren har stoppet/fryst. Aldri kast; ukjent = false. */
@@ -162,6 +168,8 @@ export class SelfModificationService {
   constructor(private readonly deps: SelfModificationServiceDeps) {
     this.repoSlug = deps.repoSlug ?? process.env["JARVIS_GITHUB_REPO"] ?? "tsworkflow/jarvisbuild";
     this.baseBranch = deps.baseBranch ?? "main";
+    // D-409: forbruket telles fra endringsregisteret - et budsjettlås uten register ville aldri se noe forbruk og dermed aldri låse.
+    if (deps.budgetLock && !deps.changeLedger) throw new Error("self_modification_budget_lock_requires_change_ledger");
   }
 
   /**
@@ -590,6 +598,22 @@ export class SelfModificationService {
         await this.audit("self_modification.merge_blocked", request, { decision: "DENY", reason: gate.reason });
       }
       return "pending";
+    }
+
+    // D-409: budsjettlås for automatiske merger. En låst grense er IKKE en feil og IKKE en avvisning - raden blir stående.
+    if (request.risk === "zero_review" && this.deps.budgetLock) {
+      const budget = await this.deps.budgetLock.checkAutoMerge();
+      if (!budget.allowed) {
+        const key = `${request.request_id}:budget`;
+        if (!this.loggedBlocked.has(key)) {
+          this.loggedBlocked.add(key);
+          await this.audit("self_modification.merge_blocked", request, {
+            decision: "DENY", reason: budget.reason, payload: { kind: budget.kind, used: budget.used, limit: budget.limit }
+          });
+          await safeNotify(this.deps.notify, `Selvendring venter: døgngrensen for automatiske merger er nådd (${budget.used}/${budget.limit}) - ${request.request_id}.`);
+        }
+        return "pending";
+      }
     }
 
     // D-397 2: merge krever en SHA som er bundet til det som ble klassifisert (zero_review) eller godkjent (approved).

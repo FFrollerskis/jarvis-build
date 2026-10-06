@@ -8,7 +8,9 @@ node ops/security/sign-constitution.mjs keygen ~/jarvis-constitution.key ~/jarvi
 ```
 Oppbevar `.key` offline (krypert USB / passordmanager). Verktøyet nekter å overskrive eksisterende filer og skriver ut fingeravtrykket.
 
-## 2. Signer manifestet
+## 2. Sett budsjettgrensene, signer manifestet
+Før du signerer: se over `budget_caps` i `config/evolution/constitution.v1.json` (utkastverdier fra D-409 - 5 auto-merger/døgn, 3 deploys/døgn, 10 eier-forslag/døgn, 10 000 øre/måned Evolution-kost). Disse er gjetninger; sett dem til det DU vil. Grensene kan ikke heves av Jarvis; å heve dem senere krever at du øker `version` og signerer på nytt. Harde tak i koden: 20 / 10 / 50 / 100 000 øre.
+
 Sett `issued_by` i `config/evolution/constitution.v1.json` til ditt navn (fjern «UNSIGNED-DRAFT…»), øk `version` ved senere endringer, og kjør:
 ```
 node ops/security/sign-constitution.mjs sign ~/jarvis-constitution.key
