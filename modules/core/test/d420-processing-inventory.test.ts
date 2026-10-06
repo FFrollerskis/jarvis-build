@@ -58,7 +58,7 @@ describe("behandlingsoversikten dekker alt som lagres og alle behandlere", () =>
   });
 
   it("DPIA-henvisningene peker på filer som finnes, og alle UA-DPIA-ene er med i trigger-matrisen", () => {
-    const refs = [...inventory.matchAll(/`(docs\/[A-Za-z0-9_\/.-]+\.md)`/g)].map((m) => m[1]!);
+    const refs = [...inventory.matchAll(/`(docs\/[A-Za-z0-9_/.-]+\.md)`/g)].map((m) => m[1]!);
     expect(refs.length).toBeGreaterThan(5);
     expect(refs.filter((r) => !existsSync(join(ROOT, r)))).toEqual([]);
     for (const d of ["UA2_KNOWLEDGE_DPIA", "UA3_BUSINESS_DPIA", "UA7_COMMUNICATIONS_DPIA", "UA8_PERSONAL_TWIN_DPIA", "UA9_VISION_DPIA", "DPIA_VOICE", "DPIA_DRAFT"]) {

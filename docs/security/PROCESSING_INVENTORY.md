@@ -52,12 +52,12 @@ uten at det er gjort, eller (4) en DPIA-henvisning peker på en fil som ikke fin
 
 ### Kostnad og modellbruk
 
-- **Formål:** Run-rate og modellkostnad
+- **Formål:** Run-rate og modellkostnad; vedlikeholdstid per connector (`connector_maintenance_log`, append-only, kun metadata)
 - **Memory space/tenant:** system (alle tabeller tenant-skopet med FORCE RLS unntatt dokumenterte globale: `scheduler_state`, `capabilities`, `evolution_change_ledger`, `self_modification_requests`, `github_rate_limit_state`, `telegram_poll_state`)
 - **Datakategori:** Antall tokens, tidsbruk, leverandør, kostnad (ikke innhold)
 - **Retensjon:** Ingen automatisk sletting ennå (egen indeks i 073; aggregeres til run-rate).
 - **Eksterne mottakere:** Ingen
-- **Tabeller:** `cost_events`
+- **Tabeller:** `connector_maintenance_log`, `cost_events`
 
 ### Forretning (CRM, support, avtaler, drift)
 

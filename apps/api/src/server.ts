@@ -271,6 +271,13 @@ const EXECUTIVE_QUERY_ACTIONS = [
 const EXECUTIVE_QUERY_BODY_KEYS = ["grant_token", "action", "parameters"] as const;
 
 /**
+ * D-421 (UA0-RUNRATE): run-rate og connector maintenance ledger. EGNE ruter med EGNE hardkodede allowlister (lese-kun og skrive-kun holdt adskilt,
+ * samme disiplin som `/executive/query` vs `/owner-controls/...`). Skriving krever grant fra en innrullert enhet; modellen har kun lese-handlingene.
+ */
+const RUN_RATE_QUERY_ACTIONS = ["get_run_rate", "list_connector_maintenance"] as const;
+const RUN_RATE_MUTATE_ACTIONS = ["record_connector_maintenance"] as const;
+
+/**
  * D-230 (K2 governance-dashboard): `@jarvis/governance` (migrasjon 059) var
  * FERDIG BYGGET og testet (`modules/governance/test/`), men uten HTTP-rute/
  * UI - denne allowlisten er den LESE-KUN halvdelen, SAMME "hardkodet
@@ -974,6 +981,32 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       return json(res, 403, { error: "tool_denied", reason: result.reason });
     }
     return json(res, 200, { ok: true, data: result.data, session_id: resolved.identity.session_id });
+  }
+
+  if (deps.executive && req.method === "POST" && (url.pathname === "/runrate/query" || url.pathname === "/runrate/maintenance")) {
+    const mutate = url.pathname === "/runrate/maintenance";
+    const raw: unknown = await readBodyOrUndefined(req);
+    const parsedBody = grantBodyOrReject(res, raw, EXECUTIVE_QUERY_BODY_KEYS);
+    if (!parsedBody) return;
+    const allowed: readonly string[] = mutate ? RUN_RATE_MUTATE_ACTIONS : RUN_RATE_QUERY_ACTIONS;
+    // Spørringen har standardhandlingen `get_run_rate`; skrivingen krever eksplisitt handling.
+    const action = typeof parsedBody["action"] === "string" ? parsedBody["action"] : mutate ? "" : "get_run_rate";
+    if (!allowed.includes(action)) return json(res, 400, { error: "malformed_request", reason: "action_not_allowed" });
+    const parameters =
+      typeof parsedBody["parameters"] === "object" && parsedBody["parameters"] !== null && !Array.isArray(parsedBody["parameters"])
+        ? (parsedBody["parameters"] as Record<string, JsonValue>)
+        : {};
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
+    if (!resolved.ok) {
+      if (resolved.responded) return;
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+    }
+    const result = await deps.executive.gateway.execute({
+      identity: resolved.identity, tool_id: "run_rate", action, parameters,
+      ...(mutate ? { idempotency_key: `runrate-maint:${resolved.identity.session_id}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}` } : {})
+    });
+    if (!result.ok) return json(res, 403, { error: "tool_denied", reason: result.reason });
+    return json(res, 200, { ok: true, data: result.data });
   }
 
   if (deps.executive && req.method === "POST" && url.pathname === "/owner-controls/connector-credentials") {

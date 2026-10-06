@@ -1,4 +1,5 @@
 import { TasksDelegateTransport, tasksDelegateToolDefinitions } from "../src/chat-jobs.ts";
+import { RunRateTransport, runRateToolDefinitions } from "../src/run-rate.ts";
 import { describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
 import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "@jarvis/executive";
@@ -34,7 +35,8 @@ function productionDefinitions(): ToolDefinition[] {
       additionalTools: [
         ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(fakeGatewayForExecutive))),
         ...memoryToolDefinitions(new MemorySearchTransport(fakeRetriever, {} as never)),
-        ...tasksDelegateToolDefinitions(new TasksDelegateTransport({} as never, {} as never))
+        ...tasksDelegateToolDefinitions(new TasksDelegateTransport({} as never, {} as never)),
+        ...runRateToolDefinitions(new RunRateTransport({} as never))
       ]
     }
   );

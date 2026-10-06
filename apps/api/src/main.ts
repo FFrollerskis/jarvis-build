@@ -112,6 +112,7 @@ import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
 import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
 import { ChatJobs, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
+import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
 
 const port = envPort("JARVIS_API_PORT", 3010);
@@ -956,7 +957,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // lenger opp for hvorfor den ble hevet ut hit.
       ...memoryToolDefinitions(new MemorySearchTransport(memoryRetriever, memoryWriter)),
       // D-416: delegeringsnivået (opprett lesende bakgrunnsjobb / les jobbstatus) over SAMME `taskService` (policy + kontraktsregler).
-      ...tasksDelegateToolDefinitions(new TasksDelegateTransport(taskService, chatJobs))
+      ...tasksDelegateToolDefinitions(new TasksDelegateTransport(taskService, chatJobs)),
+      // D-421 (UA0-RUNRATE): run-rate og connector maintenance ledger (kun lesing for modellen; skriving via dashbord-ruten).
+      ...runRateToolDefinitions(new RunRateTransport(new RunRateService(pool)))
     ]
   })) toolGateway.register(tool);
   // REMEDIERING DEL 1 (JARVIS-002): `allMeshTools()` (hele registeret) er IKKE

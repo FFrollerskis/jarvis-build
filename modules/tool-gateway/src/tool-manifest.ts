@@ -53,7 +53,7 @@ const k = (tool_id: string, action: string) => `${tool_id}.${action}`;
 /** DB-baserte domenenavnerom (Jarvis eier tilstanden, ingen ekstern leverandør). */
 const JARVIS_CORE_NAMESPACES = new Set([
   "business", "support", "contract", "agreements", "growth", "consent", "finance", "finance_spend", "product", "operations",
-  "governance", "situations", "executive", "owner_controls", "memory", "tasks", "incidents", "conversation_graph", "self_modification"
+  "governance", "situations", "executive", "owner_controls", "memory", "tasks", "incidents", "conversation_graph", "self_modification", "run_rate"
 ]);
 const FINANCIAL_NAMESPACES = /^(finance|finance_[a-z]+)$/;
 

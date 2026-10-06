@@ -223,6 +223,7 @@
   <a href="#sec-confirmations">Bekreftelser <span class="n" data-count="confirmations">–</span></a>
   <a href="#sec-memory">Minne <span class="n" data-count="proposals">–</span></a>
   <a href="#sec-connectors">Integrasjoner <span class="n" data-count="connectors">–</span></a>
+  <a href="#sec-runrate">Kostnad</a>
   <a href="#sec-governance">Styring</a>
 </nav>
 <main>
@@ -329,6 +330,27 @@
       </div>
       <input type="search" id="connector-filter" class="connector-filter" placeholder="Søk connector (navn eller kategori) …" autocomplete="off">
       <div id="connectors"><p class="empty">Laster …</p></div>
+    </div>
+  </section>
+
+  <section id="sec-runrate" data-section="runrate">
+    <!-- D-421 (UA0-RUNRATE): run-rate fra cost_events + connector maintenance ledger. Lesing via /runrate/query, skriving (append-only) via /runrate/maintenance. -->
+    <h2><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>Kostnad og vedlikehold</h2>
+    <div class="body">
+      <div id="runrate-summary"><p class="empty">Laster …</p></div>
+      <h3>Per leverandør (30 døgn)</h3>
+      <div id="runrate-providers"></div>
+      <h3>Connector-vedlikehold</h3>
+      <div id="runrate-maintenance"></div>
+      <form id="maintenance-form" class="card">
+        <div class="grid2">
+          <input id="maint-connector" placeholder="connector-id (f.eks. gmail)" maxlength="80" required>
+          <select id="maint-kind"><option value="incident">feil/hendelse</option><option value="credential_rotation">credential-rotasjon</option><option value="api_change">API-endring</option><option value="manual_fix">manuell rettelse</option><option value="upgrade">oppgradering</option><option value="outage">nedetid</option><option value="other">annet</option></select>
+          <input id="maint-minutes" type="number" min="0" max="100000" placeholder="minutter brukt" required>
+          <input id="maint-reason" placeholder="kort årsak (ingen hemmeligheter)" maxlength="500" required>
+        </div>
+        <button type="submit">Registrer vedlikehold</button> <span id="maint-status" class="muted"></span>
+      </form>
     </div>
   </section>
 
@@ -1901,6 +1923,57 @@
       .catch((err) => { confirmationsResultEl.textContent = "Feil: " + err.message; btn.disabled = false; });
   });
 
+  /** D-421: run-rate og connector maintenance ledger. Ren tekst (textContent) - aldri innerHTML med data. */
+  async function postRunRate(path, action, parameters) {
+    const active = await ensureGrant();
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant_token: active.grant_token, action, parameters: parameters || {} })
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.ok) throw new Error(action + ": " + (body.reason || body.error || res.status));
+    return body.data;
+  }
+  const krText = (ore) => (ore / 100).toFixed(2).replace(".", ",") + " kr";
+  function fillList(el, lines) {
+    el.textContent = "";
+    if (lines.length === 0) { const p = document.createElement("p"); p.className = "empty"; p.textContent = "Ingen data ennå."; el.appendChild(p); return; }
+    const ul = document.createElement("ul");
+    for (const line of lines) { const li = document.createElement("li"); li.textContent = line; ul.appendChild(li); }
+    el.appendChild(ul);
+  }
+  function renderRunRate(r) {
+    const sum = document.getElementById("runrate-summary");
+    sum.textContent = "";
+    const pre = document.createElement("pre");
+    pre.style.whiteSpace = "pre-wrap";
+    pre.textContent = r.summary_no || "";
+    sum.appendChild(pre);
+    fillList(document.getElementById("runrate-providers"), (r.by_provider || []).map((p) =>
+      p.provider + (p.model ? " (" + p.model + ")" : "") + (p.local ? " [lokal]" : " [sky]") + ": " + krText(p.ore) + ", " + p.calls + " kall" + (p.failed_calls ? ", " + p.failed_calls + " feilet" : "")));
+    const m = r.maintenance || { by_connector: [], recent: [], minutes_30d: 0 };
+    fillList(document.getElementById("runrate-maintenance"),
+      (m.by_connector || []).map((c) => c.connector_id + ": " + c.minutes + " min (" + c.events + " hendelser, 30 døgn)")
+        .concat((m.recent || []).map((c) => "Siste: " + c.connector_id + " - " + c.event_kind + ", " + c.minutes + " min - " + c.reason)));
+  }
+  async function loadRunRate() {
+    try { renderRunRate(await postRunRate("/runrate/query", "get_run_rate")); }
+    catch (err) { document.getElementById("runrate-summary").textContent = "Kunne ikke laste kostnad: " + err.message; }
+  }
+  document.getElementById("maintenance-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const st = document.getElementById("maint-status");
+    st.textContent = "Lagrer …";
+    postRunRate("/runrate/maintenance", "record_connector_maintenance", {
+      connector_id: document.getElementById("maint-connector").value.trim(),
+      event_kind: document.getElementById("maint-kind").value,
+      minutes: Number(document.getElementById("maint-minutes").value),
+      reason: document.getElementById("maint-reason").value.trim()
+    }).then(() => { st.textContent = "Registrert."; document.getElementById("maintenance-form").reset(); return loadRunRate(); })
+      .catch((err) => { st.textContent = "Feil: " + err.message; });
+  });
+
   async function loadAll() {
     refreshBtn.disabled = true;
     statusEl.textContent = "Laster …";
@@ -1931,6 +2004,7 @@
       updatedEl.textContent = "oppdatert " + new Date().toLocaleTimeString("nb-NO", { hour: "2-digit", minute: "2-digit" }) + " · auto hvert minutt";
       void loadMemoryProposals();
       void loadConfirmations();
+      void loadRunRate();
     } catch (err) {
       statusEl.textContent = "Feil: " + err.message;
     } finally {
