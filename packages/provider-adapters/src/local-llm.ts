@@ -13,7 +13,7 @@ import {
   type StreamHandler,
   type ToolCallRequest
 } from "./types.ts";
-import { renderToolResultText } from "./tool-result-envelope.ts";
+import { renderToolResultTextForLocal } from "./tool-result-envelope.ts";
 
 /**
  * D-79 (AI Mesh Gemma-first kost-/personvernarkitektur §6): provider-nøytral
@@ -188,7 +188,7 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
         }))
       });
       for (const r of ex.results) {
-        messages.push({ role: "tool", tool_call_id: r.tool_call_id, content: renderToolResultText(r) });
+        messages.push({ role: "tool", tool_call_id: r.tool_call_id, content: renderToolResultTextForLocal(r) });
       }
     }
     return messages;

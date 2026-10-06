@@ -85,9 +85,10 @@ describe("lese-nivået er låst til ren lesing", () => {
 });
 
 describe("utvalg per melding (modellen ser aldri hele nivået)", () => {
-  it("«hei» gir fortsatt bare minnesøk - ingen utvidelse for vanlig prat", () => {
+  it("«hei» gir ingen verktøy (D-415 småprat); en vanlig sak uten treff gir bare minnesøk", () => {
     const sel = selectSurfaceTools("web_chat", "hei", surface);
-    expect(sel.selected.map((m) => `${m.tool_id}.${m.action}`)).toEqual(["memory.search"]);
+    expect(sel.selected).toEqual([]);
+    expect(selectSurfaceTools("web_chat", "snakk om været", surface).selected.map((m) => `${m.tool_id}.${m.action}`)).toEqual(["memory.search"]);
     expect(sel.min_sensitivity).toBeUndefined();
   });
 

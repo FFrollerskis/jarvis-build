@@ -3,6 +3,7 @@ import { BUSINESS_INTERNAL_CREDENTIAL_REF } from "@jarvis/business";
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import type { ExecutiveService } from "./service.ts";
+import { summarizeCapabilityStatusNo, summarizeConnectorStatusNo, summarizeSelfDiagnosisNo } from "./status-summary.ts";
 
 /**
  * UA-11 Executive Mode (P0, D-162): eierens SAMLEDE kontrollflate, eksponert
@@ -68,15 +69,15 @@ export class ExecutiveTransport implements ToolTransport {
       }
       case "get_capability_status": {
         const status = await this.service.getCapabilityStatus(context?.servingModel);
-        return { data: status as unknown as JsonValue };
+        return { data: { ...status, summary_no: summarizeCapabilityStatusNo(status) } as unknown as JsonValue };
       }
       case "get_self_diagnosis": {
         const diagnosis = await this.service.getSelfDiagnosis();
-        return { data: diagnosis as unknown as JsonValue };
+        return { data: { ...diagnosis, summary_no: summarizeSelfDiagnosisNo(diagnosis) } as unknown as JsonValue };
       }
       case "get_connector_status": {
         const status = await this.service.getConnectorStatus();
-        return { data: status as unknown as JsonValue };
+        return { data: { ...status, summary_no: summarizeConnectorStatusNo(status.connectors) } as unknown as JsonValue };
       }
       case "activate_kill_switch": {
         const result = await this.service.activateKillSwitch(identity, requireString(parameters, "reason"));
