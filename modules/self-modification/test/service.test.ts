@@ -11,6 +11,7 @@ import type { ExecResult, Sandbox, SandboxRunner, TaskService, TaskView } from "
 import type { PrPublishingGateway, ToolExecutionResult } from "@jarvis/tasks";
 import type { CiStatus, SelfModificationGithubClient } from "../src/github-client.ts";
 import { SelfModificationService, selfModificationControlsFrom, type SelfModificationControls } from "../src/service.ts";
+import { ChangeLedger, verifyChain } from "../src/change-ledger.ts";
 
 /**
  * Task #121 (D-214): ende-til-ende-bevis for `SelfModificationService` mot
@@ -210,6 +211,7 @@ function buildService(opts: {
   gitToken?: string | null;
   taskService?: FakeTaskService;
   controls?: SelfModificationControls;
+  changeLedger?: { ledger: ChangeLedger; constitutionDigest: string };
 }): {
   service: SelfModificationService;
   sandbox: FakeSandboxRunner;
@@ -236,6 +238,7 @@ function buildService(opts: {
     taskService: taskService as unknown as TaskService,
     controls: opts.controls ?? ALLOW_ALL,
     auditTenantId: AUDIT_TENANT,
+    ...(opts.changeLedger ? { changeLedger: opts.changeLedger } : {}),
     notify: async (text: string) => {
       notified.push(text);
     }
@@ -902,5 +905,59 @@ describe("J: SHA-binding, eier-kontroller og revisjon (JARVIS-042)", () => {
     await expect(service.resolveApproval(requestId, "approved", OWNER)).rejects.toThrow("self_modification_blocked:kill_switch_active");
     const row = await appPool.query("SELECT status FROM self_modification_requests WHERE request_id=$1", [requestId]);
     expect(row.rows[0].status).toBe("awaiting_approval");
+  });
+});
+
+
+describe("K: endringsregisteret (EV-0, D-408) koblet inn i tjenesten", () => {
+  const DIGEST = "c".repeat(64);
+  const ledgerRows = async (requestId: string) => (await new ChangeLedger(appPool).history(requestId));
+
+  it("K1: E2 - godkjenning og merge registreres, bundet til commiten, og kjeden er gyldig", async () => {
+    const requestId = await insertRequest({ risk: "requires_approval", status: "awaiting_approval", target_paths: ["apps/api/src/k1.ts"] });
+    const githubClient = new FakeGithubClient();
+    githubClient.changedFiles = ["apps/api/src/k1.ts"];
+    const { service } = buildService({ githubClient, changeLedger: { ledger: new ChangeLedger(appPool), constitutionDigest: DIGEST } });
+    await service.resolveApproval(requestId, "approved", OWNER);
+    await service.sweepApprovedRequests();
+    const rows = await ledgerRows(requestId);
+    expect(rows.map((r) => `${r.change_class}:${r.decision}`)).toEqual(["E2:approved", "E2:merged"]);
+    expect(rows[1]!.head_sha).not.toBeNull();
+    expect(rows[1]!.head_sha).toBe(rows[0]!.head_sha);
+    expect(JSON.parse(rows[1]!.evidence)).toMatchObject({ approved_by: OWNER });
+    expect(rows[0]!.constitution_digest).toBe(DIGEST);
+    expect(verifyChain(await new ChangeLedger(appPool).all()).ok).toBe(true);
+  });
+
+  it("K2: E1 (zero_review) - merge registreres med ci_green", async () => {
+    const requestId = await insertRequest();
+    const { service } = buildService({ changeLedger: { ledger: new ChangeLedger(appPool), constitutionDigest: DIGEST } });
+    await service.sweepPendingRequests();
+    const rows = await ledgerRows(requestId);
+    expect(rows.map((r) => `${r.change_class}:${r.decision}`)).toEqual(["E1:merged"]);
+    expect(JSON.parse(rows[0]!.evidence)).toMatchObject({ ci_green: true });
+  });
+
+  it("K3: avvisning registreres", async () => {
+    const requestId = await insertRequest({ risk: "requires_approval", status: "awaiting_approval" });
+    const { service } = buildService({ changeLedger: { ledger: new ChangeLedger(appPool), constitutionDigest: DIGEST } });
+    await service.resolveApproval(requestId, "rejected", OWNER);
+    expect((await ledgerRows(requestId)).map((r) => r.decision)).toEqual(["rejected"]);
+  });
+
+  it("K4: feil i registeret blokkerer ikke merge, men varsler eieren høyt (aldri stille)", async () => {
+    const requestId = await insertRequest();
+    const broken = { append: async () => { throw new Error("db nede"); } } as unknown as ChangeLedger;
+    const { service, notified } = buildService({ changeLedger: { ledger: broken, constitutionDigest: DIGEST } });
+    const outcome = await service.sweepPendingRequests();
+    expect(outcome.merged).toEqual([requestId]);
+    expect(notified.some((t) => t.includes("ADVARSEL") && t.includes(requestId))).toBe(true);
+  });
+
+  it("K5: uten changeLedger skjer ingenting (bakoverkompatibelt)", async () => {
+    const requestId = await insertRequest();
+    const { service } = buildService({});
+    await service.sweepPendingRequests();
+    expect(await ledgerRows(requestId)).toEqual([]);
   });
 });
