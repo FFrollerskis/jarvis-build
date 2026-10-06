@@ -3,6 +3,7 @@ import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "
 import { GovernanceTransport, governanceToolDefinitions } from "@jarvis/governance";
 import { OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
 import { SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";
+import { TasksDelegateTransport, tasksDelegateToolDefinitions } from "../src/chat-jobs.ts";
 import {
   CHAT_READ_TIER,
   MemorySearchTransport,
@@ -34,7 +35,8 @@ function productionDefinitions(): ToolDefinition[] {
       ...ownerControlsToolDefinitions(new OwnerControlsTransport({} as never, fakeGw)),
       ...governanceToolDefinitions(new GovernanceTransport({} as never)),
       ...situationsToolDefinitions(new SituationsTransport({} as never, {} as never)),
-      ...memoryToolDefinitions(new MemorySearchTransport({} as never, {} as never))
+      ...memoryToolDefinitions(new MemorySearchTransport({} as never, {} as never)),
+      ...tasksDelegateToolDefinitions(new TasksDelegateTransport({} as never, {} as never))
     ]
   });
 }

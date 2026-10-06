@@ -149,6 +149,12 @@
   ::-webkit-scrollbar { width:10px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: var(--border); border-radius:6px; }
   @media (max-width: 560px) { .col, .confirm { max-width: 90%; } #log { padding:14px 10px 6px; } .hint { display:none; } header .who small { display:none; } .chip .t { display:none; } }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+  .jobcard { align-self: center; max-width: 720px; width: calc(100% - 32px); margin: 6px auto; padding: 8px 12px; border-radius: 12px; border: 1px solid var(--line, rgba(127,127,127,.3)); font-size: 13px; opacity: .9; }
+  .jobcard .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; background: #888; }
+  .jobcard[data-status="running"] .dot, .jobcard[data-status="created"] .dot { background: #e0a030; animation: jobpulse 1.2s ease-in-out infinite; }
+  .jobcard[data-status="completed"] .dot { background: #2fa06a; }
+  .jobcard[data-status="failed"] .dot, .jobcard[data-status="cancelled"] .dot { background: #cc4b4b; }
+  @keyframes jobpulse { 50% { opacity: .35; } }
 </style>
 </head>
 <body data-busy="0">
@@ -786,9 +792,69 @@
       busy = false;
       setBusy(false);
       tellShell({ busy: false, routed });
+      pollJobsSoon();
       input.focus();
     }
   }
+
+  /**
+   * D-416: chat og agenter er to løp. Bakgrunnsjobber Charlie har startet vises som kort og poller på egen tidsplan - chatten blokkeres
+   * aldri av dem. Når en jobb er ferdig legges resultatet inn i samtalen (én gang per jobb i denne fanen); serveren har samtidig lagt det
+   * i samtalehistorikken og sendt Telegram-varsel. Resultatteksten er DATA fra jobben og vises som ren tekst/markdown (aldri rå HTML).
+   */
+  const JOBS_SHOWN_KEY = "jarvis.chat.jobs.shown";
+  let jobsShown = {};
+  try { jobsShown = JSON.parse(sessionStorage.getItem(JOBS_SHOWN_KEY) || "{}") || {}; } catch { jobsShown = {}; }
+  function markJobShown(id) {
+    jobsShown[id] = 1;
+    try { sessionStorage.setItem(JOBS_SHOWN_KEY, JSON.stringify(jobsShown)); } catch { /* kun komfort */ }
+  }
+  const JOB_STATUS_NO = { created: "i kø", running: "kjører", paused: "pauset", completed: "ferdig", failed: "feilet", cancelled: "avbrutt" };
+  let jobsTimer = null;
+  function renderJob(job) {
+    let card = log.querySelector('.jobcard[data-task-id="' + job.task_id + '"]');
+    if (!card) {
+      card = document.createElement("div");
+      card.className = "jobcard";
+      card.dataset.taskId = job.task_id;
+      log.appendChild(card);
+    }
+    const active = job.status === "created" || job.status === "running" || job.status === "paused";
+    card.dataset.status = job.status;
+    card.innerHTML = '<span class="dot"></span><b>Bakgrunnsjobb</b> ' + escapeHtml(job.title) + ' <span class="st">· ' + (JOB_STATUS_NO[job.status] || job.status) + (active ? " …" : "") + "</span>";
+    if (!active && !jobsShown[job.task_id]) {
+      markJobShown(job.task_id);
+      const text = job.status === "completed" ? (job.result_text || "(jobben ga ingen tekst)")
+        : job.status === "cancelled" ? "Jobben ble avbrutt." : "Jobben feilet: " + (job.error || "ukjent feil") + ". Ingenting er endret utad.";
+      const bubble = add("jarvis", text, new Date());
+      setRich(bubble, text);
+      addMeta(bubble, "bakgrunnsjobb: " + job.title);
+      remember("jarvis", text, "bakgrunnsjobb");
+      scrollDown();
+    }
+    return active;
+  }
+  async function pollJobs() {
+    jobsTimer = null;
+    let anyActive = false;
+    try {
+      if (!document.hidden) {
+        const active = await ensureGrant();
+        const res = await fetch("/chat/jobs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ grant_token: active.grant_token }) });
+        if (res.ok) {
+          const body = await res.json();
+          const jobs = ((body && body.data && body.data.jobs) || []).slice().reverse();
+          // Jobber som allerede var ferdige før denne fanen startet vises ikke på nytt som svar.
+          if (!pollJobs.first) { pollJobs.first = true; jobs.forEach((j) => { if (!(j.status === "created" || j.status === "running" || j.status === "paused")) { if (!jobsShown[j.task_id]) markJobShown(j.task_id); } }); }
+          jobs.forEach((j) => { if (renderJob(j)) anyActive = true; });
+        }
+      }
+    } catch { /* nettverk/grant: prøv igjen senere */ }
+    jobsTimer = setTimeout(pollJobs, anyActive ? 4000 : 20000);
+  }
+  function pollJobsSoon() { if (jobsTimer) clearTimeout(jobsTimer); jobsTimer = setTimeout(pollJobs, 800); }
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) pollJobsSoon(); });
+  pollJobsSoon();
 
   form.addEventListener("submit", (e) => {
     e.preventDefault();

@@ -335,7 +335,9 @@ export function bindScopeFields(
 export function chatReadTierMeshTools(
   definitions: ReadonlyArray<ReturnType<ToolGateway["list"]>[number]>,
   allowlist: ReadonlyArray<{ readonly tool_id: string; readonly action: string }>,
-  kind: "read" | "act" = "read"
+  kind: "read" | "act" = "read",
+  /** D-416: eget skjema-prefiks (f.eks. bakgrunnsjobb) i stedet for [lesing]/[HANDLING]. */
+  descriptionPrefix?: string
 ): MeshToolMapping[] {
   const byKey = new Map(definitions.map((d) => [`${d.tool_id}.${d.action}`, d]));
   const out: MeshToolMapping[] = [];
@@ -353,9 +355,11 @@ export function chatReadTierMeshTools(
     out.push({
       def: {
         name: `${def.tool_id}__${def.action}`,
-        description: kind === "act"
-          ? `[HANDLING - utføres først når Tobias godkjenner bekreftelsen] ${def.description}`
-          : `[lesing] ${def.description}`,
+        description: descriptionPrefix !== undefined
+          ? `${descriptionPrefix} ${def.description}`
+          : kind === "act"
+            ? `[HANDLING - utføres først når Tobias godkjenner bekreftelsen] ${def.description}`
+            : `[lesing] ${def.description}`,
         input_schema: schema
       },
       tool_id: def.tool_id,
