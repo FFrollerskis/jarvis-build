@@ -56,7 +56,8 @@ export const REQUIRED_PROTECTED_PROBES: readonly string[] = [
   "config/evolution/constitution.v1.json",
   "config/evolution/constitution.v1.sig",
   "config/evolution/constitution.pub.pem",
-  "ops/security/sign-constitution.mjs"
+  "ops/security/sign-constitution.mjs",
+  "ops/break-glass/freeze-jarvis.sh"
 ];
 
 /**
