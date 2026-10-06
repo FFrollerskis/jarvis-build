@@ -110,6 +110,7 @@ import {
 import { ConversationEngine } from "./conversation.ts";
 import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
+import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
 import { ChatJobs, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
 
@@ -165,6 +166,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     build: () => ({ sha: process.env["JARVIS_BUILD_SHA"]?.trim() || null, version: process.env["JARVIS_VERSION"]?.trim() || "0.1.0" })
   });
   await ownerControls.restore();
+  // EV-2 (D-417): SLO/drift/dataskvalitet fra eksisterende observerbarhet (cost_events, tool_executions, tasks, memory_items) - ingen parallell telemetri.
+  const sloReports = createSloReportProvider(pool, owner.tenant_id);
+  Object.assign(selfModelReaders, buildSloReaders(sloReports));
   // D-174 (B2): hoistet hit (tidligere konstruert lenger nede, kun for
   // `enrollmentService`) - `OwnerControlsService` sitt nye, eier-vendte
   // `revoke_device` (se under, `additionalTools`) trenger DENNE SAMME
@@ -924,7 +928,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
             modelProfiles: DEFAULT_PROFILES,
             allModelCapabilities: ["text", "reasoning", "vision", "tool_calling", "structured_output", "streaming"]
           }
-        }
+        },
+        slo: { report: sloReports }
       }))),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten
@@ -1051,6 +1056,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         const result = await toolGateway.execute({ identity, tool_id: "executive", action: "get_self_diagnosis", parameters: {} });
         if (!result.ok || result.data === undefined) return null;
         return renderSelfDiagnosisNo(result.data as unknown as SelfDiagnosis, opts.brief ? { maxFindings: 3 } : { maxFindings: 10, includeLimitations: true });
+      }
+    },
+    // EV-2 (D-417): hurtigbanens «hvor bra yter du» går gjennom Tool Gateway (Policy + revisjon) - samme verktøy som modellen kan kalle.
+    sloReport: {
+      async run(identity) {
+        const result = await toolGateway.execute({ identity, tool_id: "executive", action: "get_slo_report", parameters: {} });
+        const text = result.ok ? (result.data as { summary_no?: unknown } | undefined)?.summary_no : undefined;
+        return typeof text === "string" ? text : null;
       }
     },
     memory: {

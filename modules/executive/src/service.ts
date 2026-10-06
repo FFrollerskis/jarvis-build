@@ -1,3 +1,5 @@
+import type { SloReport } from "./slo/index.ts";
+import { composeSloReport, SLO_CATALOG } from "./slo/index.ts";
 import { buildLimitationRegistry, composeSelfDiagnosis, type LimitationInput, type ObservationReader, type SelfDiagnosis } from "./self-model/index.ts";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import type { FinanceKillSwitch } from "@jarvis/finance";
@@ -83,6 +85,8 @@ export interface ExecutiveServiceOptions {
     readers: Readonly<Record<string, ObservationReader | undefined>>;
     limitations: LimitationInput;
   };
+  /** EV-2 (D-417): SLO-/drift-/dataskvalitetsrapport (injisert fra `apps/api`; kun lesing av eksisterende observerbarhet). */
+  slo?: { report(): Promise<SloReport> };
 }
 
 export class ExecutiveService {
@@ -343,6 +347,21 @@ export class ExecutiveService {
    * modellgenerert samtaletur, som i disse enhetstestene) - ALDRI gjettet
    * til en fast verdi.
    */
+  /**
+   * EV-2 (D-417): tjenestemål, forverring og dataskvalitet. RENT lesende. Uten kilde: alle SLO-er UNKNOWN (aldri en gjetning om «innfridd»).
+   */
+  async getSloReport(): Promise<SloReport> {
+    const provider = this.options.slo;
+    if (provider) return provider.report();
+    const now = new Date().toISOString();
+    return composeSloReport({
+      as_of: now,
+      slos: SLO_CATALOG.map((d) => ({ id: d.id, label: d.label, status: "UNKNOWN" as const, value: null, target: d.target, metric: d.metric, samples: 0, window_hours: d.window_hours, source: "ingen kilde koblet inn", observed_at: now, detail: "Ingen måling tilgjengelig (kilde ikke koblet inn)." })),
+      drift: null,
+      data_quality: null
+    });
+  }
+
   async getCapabilityStatus(servingModel?: { provider: string; model: string }): Promise<CapabilityStatus> {
     const byToolId = new Map<string, { actions: Set<string>; classes: Set<string>; refs: Set<string> }>();
     const surface = this.options.modelSurface;

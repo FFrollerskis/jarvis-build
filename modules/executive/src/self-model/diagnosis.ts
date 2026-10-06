@@ -20,7 +20,11 @@ export const EXPECTED_AREAS: ReadonlyArray<{ id: string; critical: boolean; labe
   { id: "ledger", critical: false, label: "Endringsregister" },
   { id: "backup", critical: false, label: "Backup" },
   { id: "watchdog", critical: false, label: "Watchdog" },
-  { id: "build", critical: false, label: "Bygg/versjon" }
+  { id: "build", critical: false, label: "Bygg/versjon" },
+  // EV-2 (D-417): tjenestemål (SLO), gradvis forverring (drift) og dataskvalitet.
+  { id: "slo", critical: false, label: "Tjenestemål (SLO)" },
+  { id: "drift", critical: false, label: "Gradvis forverring (drift)" },
+  { id: "data_quality", critical: false, label: "Dataskvalitet (minne)" }
 ];
 
 const RANK: Record<SelfStatus, number> = { OK: 0, UNKNOWN: 1, DEGRADED: 2, DOWN: 3 };
