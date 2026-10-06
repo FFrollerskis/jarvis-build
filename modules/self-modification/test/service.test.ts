@@ -12,6 +12,7 @@ import type { PrPublishingGateway, ToolExecutionResult } from "@jarvis/tasks";
 import type { CiStatus, SelfModificationGithubClient } from "../src/github-client.ts";
 import { SelfModificationService, selfModificationControlsFrom, type SelfModificationControls } from "../src/service.ts";
 import { ChangeLedger, verifyChain } from "../src/change-ledger.ts";
+import { BudgetLock } from "../src/budget-lock.ts";
 
 /**
  * Task #121 (D-214): ende-til-ende-bevis for `SelfModificationService` mot
@@ -212,6 +213,7 @@ function buildService(opts: {
   taskService?: FakeTaskService;
   controls?: SelfModificationControls;
   changeLedger?: { ledger: ChangeLedger; constitutionDigest: string };
+  budgetLock?: BudgetLock;
 }): {
   service: SelfModificationService;
   sandbox: FakeSandboxRunner;
@@ -239,6 +241,7 @@ function buildService(opts: {
     controls: opts.controls ?? ALLOW_ALL,
     auditTenantId: AUDIT_TENANT,
     ...(opts.changeLedger ? { changeLedger: opts.changeLedger } : {}),
+    ...(opts.budgetLock ? { budgetLock: opts.budgetLock } : {}),
     notify: async (text: string) => {
       notified.push(text);
     }
@@ -959,5 +962,70 @@ describe("K: endringsregisteret (EV-0, D-408) koblet inn i tjenesten", () => {
     const { service } = buildService({});
     await service.sweepPendingRequests();
     expect(await ledgerRows(requestId)).toEqual([]);
+  });
+});
+
+
+describe("L: budsjettlås for automatiske merger (EV-0, D-409)", () => {
+  const DIGEST = "f".repeat(64);
+  const caps = (n: number) => ({ max_auto_merges_per_day: n, max_deploys_per_day: 5, max_owner_proposals_per_day: 5, max_evolution_cost_ore_per_month: 1000 });
+
+  it("L1: grensen er nådd -> raden blir stående pending_ci (ikke feilet), eieren varsles ÉN gang, revisjon DENY, GitHub aldri kalt for merge", async () => {
+    const requestId = await insertRequest();
+    const ledger = new ChangeLedger(appPool);
+    const githubClient = new FakeGithubClient();
+    const before = (await new ChangeLedger(appPool).countSince("1970-01-01T00:00:00Z", ["merged"], ["E1"]));
+    const { service, notified } = buildService({
+      githubClient, changeLedger: { ledger, constitutionDigest: DIGEST }, budgetLock: new BudgetLock(caps(before), ledger)
+    });
+    const first = await service.sweepPendingRequests();
+    const second = await service.sweepPendingRequests();
+    expect(first.merged).toEqual([]);
+    expect(second.merged).toEqual([]);
+    expect(githubClient.calls).not.toContain("merge");
+    const row = await appPool.query("SELECT status FROM self_modification_requests WHERE request_id=$1", [requestId]);
+    expect(row.rows[0].status).toBe("pending_ci");
+    expect(notified.filter((t) => t.includes("døgngrensen") && t.includes(requestId))).toHaveLength(1);
+    const audit = await adminPool.query(
+      "SELECT decision, reason FROM audit_events WHERE type = 'self_modification.merge_blocked' AND payload->>'request_id' = $1", [requestId]);
+    expect(audit.rows).toEqual([{ decision: "DENY", reason: "budget_exhausted" }]);
+  });
+
+  it("L2: under grensen merges som før, og neste auto-merge samme døgn stoppes", async () => {
+    const ledger = new ChangeLedger(appPool);
+    const used = await ledger.countSince(new Date(Date.now() - 24 * 3600_000).toISOString(), ["merged"], ["E0", "E1"]);
+    const lock = new BudgetLock(caps(used + 1), ledger);
+    const idA = await insertRequest();
+    const { service } = buildService({ changeLedger: { ledger, constitutionDigest: DIGEST }, budgetLock: lock });
+    expect((await service.sweepPendingRequests()).merged).toContain(idA);
+    const idB = await insertRequest();
+    const outcome = await service.sweepPendingRequests();
+    expect(outcome.merged).not.toContain(idB);
+    const row = await appPool.query("SELECT status FROM self_modification_requests WHERE request_id=$1", [idB]);
+    expect(row.rows[0].status).toBe("pending_ci");
+  });
+
+  it("L3: eier-godkjent (requires_approval) merge påvirkes ikke av auto-merge-grensen", async () => {
+    const ledger = new ChangeLedger(appPool);
+    const requestId = await insertRequest({ risk: "requires_approval", status: "approved", target_paths: ["apps/api/src/l3.ts"] });
+    const githubClient = new FakeGithubClient();
+    githubClient.changedFiles = ["apps/api/src/l3.ts"];
+    const { service } = buildService({ githubClient, changeLedger: { ledger, constitutionDigest: DIGEST }, budgetLock: new BudgetLock(caps(0), ledger) });
+    expect((await service.sweepApprovedRequests()).merged).toEqual([requestId]);
+  });
+
+  it("L4: budsjettlås uten endringsregister nektes ved oppstart (ellers ville det aldri sett forbruk)", () => {
+    const ledger = new ChangeLedger(appPool);
+    expect(() => buildService({ budgetLock: new BudgetLock(caps(1), ledger) })).toThrow("self_modification_budget_lock_requires_change_ledger");
+  });
+
+  it("L5: feil ved telling av forbruk stopper merge (fail-closed), raden blir stående", async () => {
+    const requestId = await insertRequest();
+    const broken = { countSince: async () => { throw new Error("db nede"); } };
+    const ledger = new ChangeLedger(appPool);
+    const { service } = buildService({ changeLedger: { ledger, constitutionDigest: DIGEST }, budgetLock: new BudgetLock(caps(5), broken) });
+    expect((await service.sweepPendingRequests()).merged).not.toContain(requestId);
+    const row = await appPool.query("SELECT status FROM self_modification_requests WHERE request_id=$1", [requestId]);
+    expect(row.rows[0].status).toBe("pending_ci");
   });
 });

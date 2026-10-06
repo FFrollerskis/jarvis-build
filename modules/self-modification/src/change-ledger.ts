@@ -152,6 +152,15 @@ export class ChangeLedger {
     return res.rows;
   }
 
+  /** Antall registrerte rader siden `sinceIso` med gitt beslutning og klasse (brukes av budsjettlåsene). */
+  async countSince(sinceIso: string, decisions: readonly LedgerDecision[], classes: readonly string[]): Promise<number> {
+    const res = await this.db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM evolution_change_ledger WHERE at >= $1::timestamptz AND decision = ANY($2::text[]) AND change_class = ANY($3::text[])`,
+      [sinceIso, [...decisions], [...classes]]
+    );
+    return Number(res.rows[0]?.n ?? "0");
+  }
+
   /** Verifiser i databasen (`evolution_ledger_verify()`) OG uavhengig i TypeScript; begge må være enige. */
   async verify(): Promise<VerifyResult> {
     const rows = await this.all();
