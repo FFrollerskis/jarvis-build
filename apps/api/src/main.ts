@@ -1,5 +1,7 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import "./normalize-env.ts";
+import { fileURLToPath } from "node:url";
+import { checkEv0Boot, logEv0Boot } from "./ev0-boot.ts";
 import { envHour, envInt, envPort, systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit } from "./owner.ts";
 import {
@@ -1486,6 +1488,15 @@ porter: se docs/RUNTIME_GATES.md`;
     if (result.failed.length > 0) {
       console.error(JSON.stringify({ msg: "connector_health_sweep_completed_with_failures", failed: result.failed }));
     }
+  });
+  // D-411 (EV-0): KUN observasjon - logger om Safety Constitution er verifisert og om endringsregisterets hash-kjede er hel. Kaster aldri,
+  // blokkerer ikke oppstart, og endrer ingenting (selvendring er fortsatt frosset, D-397).
+  void checkEv0Boot({
+    pool,
+    pinnedPublicKeySha256: process.env["JARVIS_CONSTITUTION_PUBKEY_SHA256"]?.trim() || null,
+    configDir: fileURLToPath(new URL("../../../config/evolution/", import.meta.url))
+  }).then((status) => logEv0Boot(status)).catch((err: unknown) => {
+    console.error(JSON.stringify({ msg: "ev0_boot_check_failed", error: (err as Error).message.slice(0, 200) }));
   });
   return deps;
 }
