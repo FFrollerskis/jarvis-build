@@ -1,5 +1,5 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
-import { ModelPurposeSchema } from "@jarvis/contracts";
+import { DataSensitivitySchema, ModelPurposeSchema } from "@jarvis/contracts";
 import type { ModelGateway, ToolExecutor } from "@jarvis/model-gateway";
 import type { ClaimedTask, JobContext } from "@jarvis/tasks";
 import { filterMeshToolsForJob, type MeshToolMapping } from "@jarvis/tool-gateway";
@@ -67,6 +67,8 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
       prompt?: string;
       purpose?: string;
       tools?: boolean;
+      sensitivity?: unknown;
+      paid_models_allowed?: unknown;
     };
     if (input.command !== undefined && input.command !== null) {
       throw new ExecutiveCommandDisabledError();
@@ -74,7 +76,11 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
     if (input.prompt) {
       await ctx.assertNotCancelled();
       const purpose = ModelPurposeSchema.safeParse(input.purpose);
+      // D-416: delegerte chat-jobber setter sensitivitet og «ingen betalte modeller» i kontrakten (lokal først). Andre jobber uendret.
+      const sensitivity = DataSensitivitySchema.safeParse(input.sensitivity);
       const meshInput = {
+        ...(sensitivity.success ? { sensitivity: sensitivity.data } : {}),
+        ...(typeof input.paid_models_allowed === "boolean" ? { paid_models_allowed: input.paid_models_allowed } : {}),
         tenant_id: task.tenant_id,
         task_id: task.task_id,
         purpose: purpose.success ? purpose.data : ("BACKGROUND" as const),

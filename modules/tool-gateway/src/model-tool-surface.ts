@@ -1,6 +1,7 @@
 import { chatReadTierMeshTools, curatedReadOnlyMeshTools, type MeshToolMapping } from "./mesh-bridge.ts";
 import { CHAT_READ_TIER } from "./chat-read-tier.ts";
 import { CHAT_ACT_TIER } from "./chat-act-tier.ts";
+import { CHAT_DELEGATE_TIER, DELEGATE_WRITE_KEYS } from "./chat-delegate-tier.ts";
 import { inferEffect } from "./tool-manifest.ts";
 import type { ToolGateway } from "./gateway.ts";
 
@@ -182,13 +183,46 @@ export function assertChatActTier(
 }
 
 /**
+ * D-416: delegeringsnivået må være registrert: `delegate_background_task` som klasse B/write, `get_task_status` som klasse A/read.
+ * Ingen forbudt verktøy-id, ingen duplikater. Feiler lukket. (Bekreftelse i tainted tur håndheves i `MeshToolExecutor`.)
+ */
+export function assertChatDelegateTier(
+  gateway: Pick<ToolGateway, "list">,
+  options: { allowUnregistered?: boolean } = {}
+): void {
+  const violations: string[] = [];
+  const registered = new Map(gateway.list().map((d) => [key(d.tool_id, d.action), d]));
+  const seen = new Set<string>();
+  for (const a of CHAT_DELEGATE_TIER) {
+    const k = key(a.tool_id, a.action);
+    if (seen.has(k)) violations.push(`${k}: duplisert i delegeringsnivået`);
+    seen.add(k);
+    if (FORBIDDEN_MODEL_TOOL_IDS.includes(a.tool_id)) violations.push(`${k}: forbudt verktøy-id`);
+    if (CHAT_READ_TIER.some((b) => b.tool_id === a.tool_id && b.action === a.action) || CHAT_ACT_TIER.some((b) => b.tool_id === a.tool_id && b.action === a.action)) {
+      violations.push(`${k}: står allerede i et annet nivå`);
+    }
+    const def = registered.get(k);
+    if (!def) {
+      if (!options.allowUnregistered) violations.push(`${k}: ikke registrert i ToolGateway`);
+      continue;
+    }
+    const write = DELEGATE_WRITE_KEYS.has(`${a.tool_id}.${a.action}`);
+    if (write && def.capability_class !== "B") violations.push(`${k}: klasse ${def.capability_class}, delegering er klasse B`);
+    if (!write && def.capability_class !== "A") violations.push(`${k}: klasse ${def.capability_class}, statusoppslag er klasse A`);
+    const effect = inferEffect(def.tool_id, def.action);
+    if (effect !== (write ? "write" : "read")) violations.push(`${k}: effekt «${effect}» er ikke tillatt i delegeringsnivået`);
+  }
+  if (violations.length > 0) throw new ModelSurfaceViolationError(violations);
+}
+
+/**
  * Den aktive modellflaten for chat, tale, Telegram og executive-jobber.
  * Kaster `ModelSurfaceViolationError` ved oppstart hvis noe i flaten ikke er
  * ren lesing - oppstarten feiler lukket.
  */
 export function resolveModelToolSurface(
   gateway: Pick<ToolGateway, "list">,
-  options: { onlyRegistered?: boolean; includeChatReadTier?: boolean; includeChatActTier?: boolean } = {}
+  options: { onlyRegistered?: boolean; includeChatReadTier?: boolean; includeChatActTier?: boolean; includeChatDelegateTier?: boolean } = {}
 ): MeshToolMapping[] {
   let mappings = curatedReadOnlyMeshTools();
   if (options.onlyRegistered) {
@@ -209,6 +243,11 @@ export function resolveModelToolSurface(
     // D-382: handlingsnivået - skjemaet merkes tydelig for modellen; utførelse krever alltid eierens bekreftelse (executor).
     assertChatActTier(gateway, { allowUnregistered: options.onlyRegistered === true });
     out = [...out, ...chatReadTierMeshTools(gateway.list(), CHAT_ACT_TIER, "act")];
+  }
+  if (options.includeChatDelegateTier === true) {
+    // D-416: kun api-prosessen (eierens chat). Skjemaet merkes som bakgrunnsjobb; ingen bekreftelse i en ren eier-tur (se chat-delegate-tier.ts).
+    assertChatDelegateTier(gateway, { allowUnregistered: options.onlyRegistered === true });
+    out = [...out, ...chatReadTierMeshTools(gateway.list(), CHAT_DELEGATE_TIER, "read", "[BAKGRUNNSJOBB - kjører videre uten at chatten venter]")];
   }
   return out;
 }

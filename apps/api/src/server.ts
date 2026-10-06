@@ -24,6 +24,7 @@ import {
   type CardService, type FinanceService
 } from "@jarvis/finance";
 import type { ConversationEngine } from "./conversation.ts";
+import type { ChatJobs } from "./chat-jobs.ts";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import {
   FORBIDDEN_IDENTITY_BODY_KEYS, HttpError, RateLimiter, clientKey, newRequestId, readJsonBody, readRawBodyLimited
@@ -100,6 +101,8 @@ export interface ApiDeps {
    * aldri modellen. Uten verdien svarer ruten 404.
    */
   confirmations?: ConfirmationStore;
+  /** D-416: eierens delegerte bakgrunnsjobber (liste/status) for chat-UI-et. Uten verdien svarer `/chat/jobs` 404. */
+  chatJobs?: ChatJobs;
   /**
    * D-102 (UA-5 Production Real Coding Agent / Tested-Fix Pipeline Wiring v1):
    * SAMME `TaskService`-instans som allerede konstrueres for `ConversationEngine`
@@ -823,6 +826,18 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       session_id: result.session.session_id,
       identity: result.identity
     });
+  }
+
+  if (deps.chatJobs && req.method === "POST" && url.pathname === "/chat/jobs") {
+    // D-416: chat og agenter er to løp. UI-et poller denne (grant-autentisert) for å vise kjørende/ferdige bakgrunnsjobber uten å blokkere chatten.
+    const parsedBody = grantBodyOrReject(res, await readBody(req), ["grant_token"] as const);
+    if (!parsedBody) return;
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
+    if (!resolved.ok) {
+      if (resolved.responded) return;
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+    }
+    return json(res, 200, { ok: true, data: { jobs: await deps.chatJobs.list(resolved.identity, 10) } });
   }
 
   if (req.method === "POST" && url.pathname === "/chat") {

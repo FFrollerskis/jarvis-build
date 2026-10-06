@@ -1,6 +1,7 @@
 import type { CapabilityClass } from "@jarvis/contracts";
 import type { ToolDefinition } from "./gateway.ts";
 import { CHAT_READ_TIER, CHAT_READ_TIER_KEYS } from "./chat-read-tier.ts";
+import { CHAT_DELEGATE_TIER, CHAT_DELEGATE_TIER_KEYS, DELEGATE_WRITE_KEYS } from "./chat-delegate-tier.ts";
 import { CHAT_ACT_TIER, CHAT_ACT_TIER_KEYS } from "./chat-act-tier.ts";
 
 /**
@@ -103,7 +104,10 @@ const EFFECT_OVERRIDES: Record<string, Effect> = {
   [k("finance_vipps", "refresh_payment_state")]: "read",
   [k("finance_wallester", "freeze_card")]: "control",
   [k("executive", "get_capability_status")]: "read",
-  [k("executive", "get_self_diagnosis")]: "read"
+  [k("executive", "get_self_diagnosis")]: "read",
+  // D-416: delegeringsnivået - oppretter en intern, lesende bakgrunnsjobb (write, klasse B) / leser jobbstatus.
+  [k("tasks", "delegate_background_task")]: "write",
+  [k("tasks", "get_task_status")]: "read"
 };
 
 export function inferEffect(tool_id: string, action: string): Effect {
@@ -153,7 +157,7 @@ export function scopeFieldsOf(def: ToolDefinition): string[] {
 }
 
 /** D-381/D-382: nivå-handlinger kan ha identitetsfelt i det registrerte skjemaet fordi trusted lag binder dem (fjernet fra modellens skjema). */
-const TIER_KEYS: ReadonlySet<string> = new Set([...CHAT_READ_TIER_KEYS, ...CHAT_ACT_TIER_KEYS]);
+const TIER_KEYS: ReadonlySet<string> = new Set([...CHAT_READ_TIER_KEYS, ...CHAT_ACT_TIER_KEYS, ...CHAT_DELEGATE_TIER_KEYS]);
 /** D-382: tale er ubetrodd inndata (STT) - lese-nivået uten finans; aldri handlingsnivået. */
 const VOICE_READ_TIER = CHAT_READ_TIER.filter((g) => !/^finance/.test(g.tool_id));
 
@@ -169,7 +173,9 @@ export const SURFACE_TOOL_GRANTS: Readonly<Record<Surface, ReadonlyArray<{ tool_
     // D-381: chattens lese-nivå (kun ren lesing; modellen ser et lite utvalg per melding, ikke hele listen).
     ...CHAT_READ_TIER,
     // D-382: handlingsnivået - utføres KUN etter eierens bundne bekreftelse (executoren håndhever det, ikke modellen).
-    ...CHAT_ACT_TIER
+    ...CHAT_ACT_TIER,
+    // D-416: delegeringsnivået (opprett lesende bakgrunnsjobb / les jobbstatus).
+    ...CHAT_DELEGATE_TIER
   ],
   // Tale: transkripsjonen er upålitelig (STT-feil, omgivelser) - kun lesing (D-382: lese-nivået uten finans), ingen minneforslag.
   voice: [
@@ -284,8 +290,13 @@ export function assertManifestInvariants(manifest: ToolManifest, options: { igno
       if (act && entry.effect !== "write" && entry.effect !== "send" && entry.effect !== "delete") violations.push(`${entry.key}: handlingsnivået tillater kun write/send/delete (er ${entry.effect})`);
       if (OWNER_ONLY_NAMESPACES.has(entry.tool_id) && !ownerReadOnWebChat && !(act && onlyWebChat)) violations.push(`${entry.key}: eier-eksklusivt navnerom kan ikke stå på en modellflate`);
       const quarantineWrite = QUARANTINE_WRITE_KEYS.has(entry.key);
-      if (entry.risk !== "A" && !quarantineWrite && !act) violations.push(`${entry.key}: kun klasse A (eller karantene-skriving/handlingsnivå) kan stå på en modellflate (er ${entry.risk})`);
-      if (entry.effect !== "read" && !quarantineWrite && !act) violations.push(`${entry.key}: effekt «${entry.effect}» kan ikke stå på en modellflate`);
+      // D-416: delegeringsnivået - kun web_chat; `delegate_background_task` er klasse B/write, `get_task_status` ren lesing (klasse A).
+      const delegateKey = CHAT_DELEGATE_TIER_KEYS.has(entry.key);
+      const delegateWrite = DELEGATE_WRITE_KEYS.has(entry.key);
+      if (delegateKey && !onlyWebChat) violations.push(`${entry.key}: delegeringsnivået kan kun stå på web_chat`);
+      if (delegateWrite && (entry.risk !== "B" || entry.effect !== "write")) violations.push(`${entry.key}: delegering er klasse B/write (er ${entry.risk}/${entry.effect})`);
+      if (entry.risk !== "A" && !quarantineWrite && !act && !delegateWrite) violations.push(`${entry.key}: kun klasse A (eller karantene-skriving/handlingsnivå) kan stå på en modellflate (er ${entry.risk})`);
+      if (entry.effect !== "read" && !quarantineWrite && !act && !delegateWrite) violations.push(`${entry.key}: effekt «${entry.effect}» kan ikke stå på en modellflate`);
       if (entry.effect === "pay" || entry.effect === "control") {
         violations.push(`${entry.key}: pay/control kan aldri stå på en modellflate`);
       }
@@ -309,6 +320,8 @@ export function assertManifestInvariants(manifest: ToolManifest, options: { igno
 
 /** Skal handlingen kreve en NY, eksplisitt bekreftelse når turen er tainted? (C/D, eller en utgående/betalt/ekstern skriving.) */
 export function requiresConfirmationWhenTainted(entry: ToolManifestEntry): boolean {
+  // D-416: ubetrodd innhold i turen kan aldri sette i gang en bakgrunnsagent uten eierens bundne bekreftelse.
+  if (DELEGATE_WRITE_KEYS.has(entry.key)) return true;
   if (entry.risk === "C" || entry.risk === "D") return true;
   if (entry.effect === "read") return false;
   if (entry.effect === "send" || entry.effect === "pay" || entry.effect === "delete" || entry.effect === "control") return true;

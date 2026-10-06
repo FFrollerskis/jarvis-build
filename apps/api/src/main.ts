@@ -110,6 +110,7 @@ import {
 import { ConversationEngine } from "./conversation.ts";
 import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
+import { ChatJobs, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
 
 const port = envPort("JARVIS_API_PORT", 3010);
@@ -606,6 +607,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         parameters: { message: text.slice(i, i + 3900) } });
     }
   };
+  // D-416: chat og agenter er to løp - delegerte bakgrunnsjobber (kø), levering av resultat tilbake til samtalen (melding + Telegram).
+  const chatJobs = new ChatJobs(pool, {
+    saveMessage: (identity, role, content) => new MessageStore(pool).save(identity, role, content),
+    notify: (text) => sendTelegram(`🔔 ${text}`),
+    log: (event) => console.log(JSON.stringify(event))
+  });
   // REMEDIERING DEL 1 (JARVIS-042/043): selvmodifikasjon er FRYST inntil
   // remedieringsdel 9 (SHA-bundet godkjenning, kill-switch-/freeze-respekt,
   // audit). `SelfModificationService` konstrueres IKKE, de tre 60-sekunders-
@@ -942,14 +949,16 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // SAMME `memoryRetriever`-instansen `conversationEngine` under gjenbruker
       // for bakgrunnskontekst - se `memoryRetriever` sin egen filhode-kommentar
       // lenger opp for hvorfor den ble hevet ut hit.
-      ...memoryToolDefinitions(new MemorySearchTransport(memoryRetriever, memoryWriter))
+      ...memoryToolDefinitions(new MemorySearchTransport(memoryRetriever, memoryWriter)),
+      // D-416: delegeringsnivået (opprett lesende bakgrunnsjobb / les jobbstatus) over SAMME `taskService` (policy + kontraktsregler).
+      ...tasksDelegateToolDefinitions(new TasksDelegateTransport(taskService, chatJobs))
     ]
   })) toolGateway.register(tool);
   // REMEDIERING DEL 1 (JARVIS-002): `allMeshTools()` (hele registeret) er IKKE
   // lenger koblet til noen aktiv flate. Chat, tale, Telegram og executive-jobber
   // får KUN det eksplisitte lese-minimumssettet (`MODEL_SURFACE_ALLOWLIST`);
   // oppstarten feiler lukket hvis noe i flaten ikke er klasse A / ren lesing.
-  const modelToolSurface = resolveModelToolSurface(toolGateway, { includeChatReadTier: true, includeChatActTier: true });
+  const modelToolSurface = resolveModelToolSurface(toolGateway, { includeChatReadTier: true, includeChatActTier: true, includeChatDelegateTier: true });
   // D-404: hvilke tjenester Charlie FAKTISK får i katalogen per flate (kun navn - ingen innhold). Eier meldte at han «bare har to verktøy»;
   // da kan loggen vise om katalogen eller modellens lesning var feil.
   for (const surface of ["web_chat", "voice"] as const) {
@@ -1145,8 +1154,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // query` i server.ts begrenser seg selv til et hardkodet lese-kun
     // allowlist, ingen ny autorisasjonsmekanisme her.
     executive: { gateway: toolGateway },
-    confirmations: confirmationStore
+    confirmations: confirmationStore,
+    chatJobs
   };
+  // D-416: lever ferdige bakgrunnsjobber tilbake til samtalen (nøyaktig én gang). Feil logges, stopper aldri prosessen.
+  setInterval(
+    () => void chatJobs.sweepDeliveries(ownerIdentity as never).catch((err) => console.error(JSON.stringify({ msg: "chat_job_sweep_error", error: (err as Error).message }))),
+    15_000
+  ).unref();
   // D-196: samme drain-løkke som worker-main.ts (linje ~486) - MEN den
   // logget ALDRI en `tick()`-feil her (feil under selve claim/complete/fail-
   // kallene mot DB, ikke en per-oppgave-handler-feil - de er allerede

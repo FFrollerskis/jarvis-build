@@ -63,6 +63,8 @@ const INTENT_KEYWORDS: Readonly<Record<string, RegExp>> = {
 const TOOL_INTENTS: Readonly<Record<string, RegExp>> = {
   // EV-1 (D-412): «hva er galt med deg» -> selvdiagnose (+ de øvrige executive-lesingene).
   executive: /(hva er galt|hva feiler|selv-?diagnos|diagnos(er|tiser)|feil med deg|er du frisk|fungerer du|virker du|er alt (ok|greit)|hvordan går det med (deg|systemet)|hva kan du ikke)/i,
+  // D-416: delegering til bakgrunnsagent («gjør det i bakgrunnen», «undersøk», «lag en rapport», «hva er status på jobben»).
+  tasks: /(bakgrunn|deleger|sub-?agent|\bagent|\bjobb(en|er)?\b|undersøk|utred|research|analyser|lag en rapport|gjør (det|dette) mens|mens jeg )/i,
   finance_neonomics: /(bank|konto|saldo|neonomics|transaksjon|samtykke|kontoutskrift|innskudd|uttak)/i,
   finance_stripe: /(stripe|kortbetaling|refusjon)/i,
   finance_vipps: /(vipps)/i,
