@@ -1,3 +1,4 @@
+import { BACKGROUND_PURPOSE_SET, INTERACTIVE_PURPOSES, type InteractivePriorityGate } from "./interactive-priority.ts";
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withTenantTransaction } from "@jarvis/core";
@@ -148,6 +149,11 @@ export interface GatewayOptions {
   advisor?: RoutingAdvisor;
   catalog?: readonly CatalogModel[];
   advisorMode?: "off" | "shadow" | "active";
+  /**
+   * D-414: «chat først» - bakgrunnsformål (EXTRACT/SUMMARIZE/QUICK_CLASSIFICATION/BACKGROUND) venter mens en interaktiv forespørsel pågår.
+   * Udefinert = ingen venting (uendret oppførsel, f.eks. i worker-prosessen som ikke ser API-ets chat).
+   */
+  priorityGate?: InteractivePriorityGate;
 }
 
 /**
@@ -347,6 +353,10 @@ export class ModelGateway {
   }
 
   async complete(rawInput: CompleteInput): Promise<ModelResult> {
+    return this.withPriority(rawInput.purpose, () => this.completeInner(rawInput));
+  }
+
+  private async completeInner(rawInput: CompleteInput): Promise<ModelResult> {
     const input = this.applyTimeoutOverride(rawInput);
     const started = Date.now();
     const traceId = `trace-${randomUUID()}`;
@@ -634,6 +644,32 @@ export class ModelGateway {
    * cancel via signal gir ren avslutning uten zombie-generation (§9/§28).
    */
   async stream(rawInput: CompleteInput, onEvent: StreamHandler, signal?: AbortSignal): Promise<ModelResult> {
+    return this.withPriority(rawInput.purpose, () => this.streamInner(rawInput, onEvent, signal));
+  }
+
+  /**
+   * D-414: interaktive formål registreres som aktive mens de kjører; bakgrunnsformål venter først på ro (maks `maxWaitMs`).
+   * Hele chat-turen (verktøyrunder med pauser) holdes sammen av `quietMs`.
+   */
+  private async withPriority<T>(purpose: string | undefined, run: () => Promise<T>): Promise<T> {
+    const gate = this.opts.priorityGate;
+    if (gate === undefined || purpose === undefined) return run();
+    if (INTERACTIVE_PURPOSES.has(purpose as never)) {
+      const leave = gate.enterInteractive();
+      try {
+        return await run();
+      } finally {
+        leave();
+      }
+    }
+    if (BACKGROUND_PURPOSE_SET.has(purpose as never)) {
+      const y = await gate.yieldToInteractive();
+      if (y.waited_ms >= 1000) console.log(JSON.stringify({ msg: "background_yielded_to_interactive", purpose, waited_ms: y.waited_ms, reason: y.reason }));
+    }
+    return run();
+  }
+
+  private async streamInner(rawInput: CompleteInput, onEvent: StreamHandler, signal?: AbortSignal): Promise<ModelResult> {
     const input = this.applyTimeoutOverride(rawInput);
     const started = Date.now();
     const traceId = `trace-${randomUUID()}`;

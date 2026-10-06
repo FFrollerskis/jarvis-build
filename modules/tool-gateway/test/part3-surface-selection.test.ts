@@ -8,6 +8,7 @@ import {
   curatedReadOnlyMeshTools,
   estimateSchemaTokens,
   firstWaveTools,
+  isSmallTalk,
   selectSurfaceTools,
   surfaceForChannel,
   type ToolGateway
@@ -33,6 +34,17 @@ describe("utvalg per intensjon", () => {
     for (const s of ["voice", "telegram", "background"] as const) {
       expect(selectSurfaceTools(s, "husk at jeg liker kaffe", mappings).selected.map(keyOf)).not.toContain("memory.propose");
     }
+  });
+});
+
+describe("D-415 småprat får ingen verktøy", () => {
+  it.each(["hei", "Hei!", "snakk norsk", "hei, hva er klokka?", "takk", "ok"])("«%s» → tomt utvalg", (t) => {
+    expect(isSmallTalk(t)).toBe(true);
+    expect(selectSurfaceTools("web_chat", t, mappings).selected).toEqual([]);
+  });
+  it.each(["hei, hva står i kalenderen?", "hva vet du om Nora", "hei og husk at jeg liker kaffe"])("«%s» er ikke småprat", (t) => {
+    expect(isSmallTalk(t)).toBe(false);
+    expect(selectSurfaceTools("web_chat", t, mappings).selected.length).toBeGreaterThan(0);
   });
 });
 

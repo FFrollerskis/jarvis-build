@@ -173,6 +173,15 @@ function verbMatches(action: string, text: string): boolean {
 /** Finans-verktøy (`finance_*`) gjør turen SECRET_RESTRICTED (D-378: kun lokal modell) - uavhengig av hvordan meldingen er formulert. */
 const RESTRICTED_TOOL_ID = /^finance(_|$)/;
 
+/**
+ * D-415: småprat uten saksinnhold (hilsen, takk, språk, klokkeslett) får INGEN verktøy. En liten lokal modell kalte statusverktøy på «hei»
+ * og svarte deretter med rå JSON. Kun korte meldinger som består av småprat teller; alt med tjeneste-/saksord går den vanlige veien.
+ */
+const SMALL_TALK = /^\s*((hei|hallo|hey|heisann|god (morgen|dag|kveld|natt)|morn|takk( for (det|hjelpen))?|tusen takk|ok(ay)?|greit|fint|supert|ja|nei|snakk norsk|snakk på norsk|på norsk|norsk|speak norwegian|bare prat|hva er klokka|hva er klokken|hvilken dag er det|hvordan går det|hvordan har du det)[\s,.!?]*)+$/i;
+export function isSmallTalk(text: string): boolean {
+  return text.trim().length <= 60 && SMALL_TALK.test(text);
+}
+
 const OVERVIEW = /(oversikt|hva skjer|brief|morgenbrief|hva har jeg)/i;
 const OVERVIEW_KEYS = new Set(["email.read_inbox", "calendar.read_events", "github.read_issues"]);
 const ALWAYS_PRIORITY = ["memory.search", "email.read_inbox", "calendar.read_events", "github.read_issues", "executive.get_capability_status", "memory.propose"];
@@ -242,7 +251,8 @@ export function selectSurfaceTools(
       wanted.push(m);
     }
   }
-  if (wanted.length === 0) wanted = allowed.filter((m) => mappingKey(m) === "memory.search");
+  // D-415: småprat → ingen verktøy; ellers uten treff kun det billigste generelle verktøyet.
+  if (wanted.length === 0 && !isSmallTalk(text)) wanted = allowed.filter((m) => mappingKey(m) === "memory.search");
   // Rangering innenfor budsjettet: faste prioriteter → navngitt tjeneste → handlingen eieren ba om (verbtreff) → lesinger → øvrige
   // handlinger → arvet kontekst.
   const rank = (m: MeshToolMapping): number => {

@@ -15,3 +15,4 @@ export * from "./specialist-delegation.ts";
 export * from "./content-sensitivity.ts";
 export * from "./model-catalog.ts";
 export * from "./routing-advisor.ts";
+export * from "./interactive-priority.ts";

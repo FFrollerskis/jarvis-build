@@ -36,6 +36,7 @@ import {
   assertProvidersHaveExplicitPricing,
   pricingFromEnv,
   ModelGateway,
+  InteractivePriorityGate,
   budgetConfigFromEnv,
   traceSinkFromEnv
 } from "@jarvis/model-gateway";
@@ -224,6 +225,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const gateway = new ModelGateway({
     pool,
     trace,
+    // D-414 («chat først»): bakgrunnsformål (minneuttrekk/sammendrag) venter mens en chat pågår, så chatten ikke står i kø bak dem på den lokale modellen.
+    // JARVIS_BACKGROUND_YIELD_MAX_MS=0 slår det av.
+    priorityGate: new InteractivePriorityGate({
+      maxWaitMs: envInt("JARVIS_BACKGROUND_YIELD_MAX_MS", 90_000, { min: 0, max: 600_000 }),
+      quietMs: envInt("JARVIS_BACKGROUND_YIELD_QUIET_MS", 4_000, { min: 0, max: 60_000 })
+    }),
     // D-399: eier-bekreftede modellpriser (JARVIS_MODEL_PRICING) flettes over standardtabellen - nødvendig for at dyrere modeller skal være valgbare per kall.
     pricing: pricingFromEnv(),
     providers: [
