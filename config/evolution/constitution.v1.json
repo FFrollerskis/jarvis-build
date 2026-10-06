@@ -81,6 +81,10 @@
     {
       "kind": "prefix",
       "value": "ops/backup/"
+    },
+    {
+      "kind": "prefix",
+      "value": "ops/break-glass/"
     }
   ],
   "schema_version": 1,

@@ -13,3 +13,7 @@ key.txt
 var/
 # D-279/D-280: opt-in voice-gateway debug-lydklipp (JARVIS_VOICE_DEBUG_DUMP_DIR) - rå lyd, aldri i git
 infra/local/voice-debug-dumps/
+
+# EV-0 (D-410): privatnøkler (konstitusjon/break-glass) skal ALDRI inn i repoet. Den OFFENTLIGE nøkkelen config/evolution/constitution.pub.pem committes.
+*.key
+*private*.pem

@@ -32,7 +32,7 @@ export const FORBIDDEN_PATH_PATTERNS: readonly RegExp[] = [
   /^\.env/,
   /^docs\/security\//,
   /^config\/evolution\//,
-  /^ops\/security\//,
+  /^ops\/(security|break-glass|backup)\//,
   /CLAUDE\.md$/
 ];
 

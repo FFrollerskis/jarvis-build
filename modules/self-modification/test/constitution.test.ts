@@ -135,7 +135,7 @@ describe("C: klassifisering E1/E2/E3 - aldri svakere enn policy.ts", () => {
   it("C3: constitution-filene, signeringsverktøyet og backup-ops er E3", () => {
     for (const p of [
       "config/evolution/constitution.v1.json", "config/evolution/constitution.v1.sig", "config/evolution/constitution.pub.pem",
-      "ops/security/sign-constitution.mjs", "ops/backup/run.sh", "docs/remediation/FINDINGS_LEDGER.md"
+      "ops/security/sign-constitution.mjs", "ops/break-glass/freeze-jarvis.sh", "ops/backup/run.sh", "docs/remediation/FINDINGS_LEDGER.md"
     ]) {
       expect(c.classify([p]), p).toBe("E3");
     }
