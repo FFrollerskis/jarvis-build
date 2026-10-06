@@ -35,6 +35,8 @@ export interface ConversationDeps {
    * hardkodet «alt er bra».
    */
   selfDiagnosis?: { run(identity: IdentityContext, opts: { brief: boolean }): Promise<string | null> };
+  /** EV-2 (D-417): tjenestemål/forverring/dataskvalitet for hurtigbanen (`executive.get_slo_report` via Tool Gateway). Udefinert = ærlig «kan ikke lese». */
+  sloReport?: { run(identity: IdentityContext): Promise<string | null> };
   /** D-395: injiserbar begrenser for automatisk råd-trigger (tester); default bygges fra JARVIS_COUNCIL_AUTO_MAX_PER_HOUR. */
   councilAutoLimiter?: CouncilAutoTriggerLimiter;
   /** Fase 4: hybridminne-kontekst med kildeangivelse (kun gjeldende space). */
@@ -714,6 +716,10 @@ export class ConversationEngine {
           reply: text ?? "Jeg kan ikke lese selvdiagnosen akkurat nå (verktøyet svarte ikke eller ble avslått), så jeg vil ikke påstå at alt er bra.",
           routed: "fast"
         };
+      }
+      case "slo_report": {
+        const text = this.deps.sloReport ? await this.deps.sloReport.run(identity).catch(() => null) : null;
+        return { reply: text ?? "Jeg kan ikke lese tjenestemålene akkurat nå, så jeg vil ikke påstå at ytelsen er bra.", routed: "fast" };
       }
       case "help":
         return {

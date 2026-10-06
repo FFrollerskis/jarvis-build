@@ -75,6 +75,10 @@ export class ExecutiveTransport implements ToolTransport {
         const diagnosis = await this.service.getSelfDiagnosis();
         return { data: { ...diagnosis, summary_no: summarizeSelfDiagnosisNo(diagnosis) } as unknown as JsonValue };
       }
+      case "get_slo_report": {
+        const report = await this.service.getSloReport();
+        return { data: report as unknown as JsonValue };
+      }
       case "get_connector_status": {
         const status = await this.service.getConnectorStatus();
         return { data: { ...status, summary_no: summarizeConnectorStatusNo(status.connectors) } as unknown as JsonValue };
@@ -217,6 +221,10 @@ export function executiveToolDefinitions(transport: ExecutiveTransport): ToolDef
     read(
       "get_self_diagnosis",
       "Svar på «hva er galt med deg akkurat nå?» fra EKTE, kildebelagte målinger (database, modellleverandører, eier-kontroller, tilkoblinger, jobber, verktøyfeil siste time, prosess, konstitusjon, endringsregister, backup, watchdog, bygg) - hvert funn har kilde og tidspunkt; ukjent vises som UKJENT (aldri som frisk) - pluss en liste over det Jeg vet at jeg ikke kan. Bruk dette i stedet for å gjette."
+    ),
+    read(
+      "get_slo_report",
+      "Svar på «hvor bra yter du?»/«er du treg?»/«har noe blitt dårligere?» fra EKTE målinger (cost_events, verktøyutførelser, jobber): tjenestemål (SLO) for chat, bakgrunn, verktøy og jobber, gradvis forverring (siste døgn mot uken før) og dataskvalitet i minnet (motstridende, duplikate, utløpte, gamle forslag). For lite data vises som ukjent, aldri som bra. Tallene er forslag til mål, ikke eier-godkjente."
     ),
     read(
       "get_connector_status",

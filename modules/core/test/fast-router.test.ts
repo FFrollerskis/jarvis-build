@@ -36,3 +36,17 @@ describe("fastRoute: self_diagnosis", () => {
     }
   });
 });
+
+describe("fastRoute: slo_report (EV-2, D-417)", () => {
+  it("gjenkjenner ytelsesspørsmål", () => {
+    for (const text of ["hvor bra yter du", "Hvor rask yter du?", "er du treg?", "ytelse", "slo", "tjenestemål", "har noe blitt dårligere", "dataskvalitet"]) {
+      expect(fastRoute(text), text).toEqual({ kind: "slo_report" });
+    }
+  });
+  it("er presis: setninger som bare nevner ordene går ikke hit", () => {
+    for (const text of ["er du treg til å svare på e-post fra Ola", "ytelse på nettsiden min", "hva er slo"]) {
+      expect(fastRoute(text)?.kind, text).not.toBe("slo_report");
+    }
+  });
+});
+

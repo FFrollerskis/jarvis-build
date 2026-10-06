@@ -7,6 +7,8 @@ export type FastIntent =
   | { kind: "system_status" }
   /** EV-1 (D-412): «hva er galt med deg» - kildebelagt selvdiagnose via Policy Gateway (aldri LLM). */
   | { kind: "self_diagnosis" }
+  /** EV-2 (D-417): «hvor bra yter du» - SLO/forverring/dataskvalitet via Policy Gateway (aldri LLM). */
+  | { kind: "slo_report" }
   | { kind: "task_status"; task_id: string }
   | { kind: "create_task"; goal: string }
   | { kind: "cancel_task"; task_id: string }
@@ -19,6 +21,10 @@ const PATTERNS: Array<[RegExp, (m: RegExpMatchArray) => FastIntent]> = [
   [
     /^(?:hva er galt(?: med deg)?(?: nå| akkurat nå)?|hva feiler(?: det)?(?: på deg)?|er du frisk|selv-?diagnose|diagnos(?:er|ér) deg|what'?s wrong(?: with you)?)\s*[?!.]*\s*$/i,
     () => ({ kind: "self_diagnosis" })
+  ],
+  [
+    /^(?:hvor (?:bra|rask) yter du|er du treg|ytelse|ytelsesstatus|slo|tjenestemål|har noe blitt dårligere|dataskvalitet|datakvalitet)\s*[?!.]*\s*$/i,
+    () => ({ kind: "slo_report" })
   ],
   [/^jobbstatus\s+(\S+)\s*$/i, (m) => ({ kind: "task_status", task_id: m[1] as string })],
   [/^opprett\s+jobb:?\s+(.+)$/i, (m) => ({ kind: "create_task", goal: (m[1] as string).trim() })],
