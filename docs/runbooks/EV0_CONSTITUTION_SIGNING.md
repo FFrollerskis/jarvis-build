@@ -22,7 +22,7 @@ Legg `constitution.v1.sig` og den OFFENTLIGE nøkkelen (`config/evolution/consti
 ```
 node ops/security/sign-constitution.mjs fingerprint ~/jarvis-constitution.pub.pem
 ```
-Verdien (64 hex) skal settes i NAS-`.env` som `JARVIS_CONSTITUTION_PUBKEY_SHA256` når kjøretids-tilkoblingen er bygget (EV-0 slice 2; variabelen er ennå ikke lest av noen tjeneste). Uten festet nøkkel avviser kjøretiden konstitusjonen (`constitution_key_not_pinned`) - et manifest, en signatur og en nøkkel i repoet er ikke nok alene.
+Verdien (64 hex) settes i NAS-`.env` som `JARVIS_CONSTITUTION_PUBKEY_SHA256`. API-et leser den ved oppstart (D-411) og logger `ev0_constitution_boot` (`verified` eller `not_verified` med feilkode) - kun observasjon, ingenting blokkeres, og selvendring er fortsatt frosset. Uten festet nøkkel avviser kjøretiden konstitusjonen (`constitution_key_not_pinned`) - et manifest, en signatur og en nøkkel i repoet er ikke nok alene. Sjekk etter bygg: `docker compose ... logs api | grep ev0_`.
 
 ## Feilkoder
 `constitution_missing` · `_unsigned` · `_key_not_pinned` · `_key_mismatch` · `_signature_invalid` · `_invalid` · `_weakened` (signert, men fjerner en påkrevd beskyttelse) · `_rollback` (lavere versjon enn kjent).
