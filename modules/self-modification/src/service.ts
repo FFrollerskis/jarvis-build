@@ -8,6 +8,8 @@ import {
   githubCredentialScope, publishPullRequestForCodingJob, type PrPublishingGateway
 } from "@jarvis/tasks";
 import { classifySelfModification } from "./policy.ts";
+import type { ChangeLedger, LedgerDecision } from "./change-ledger.ts";
+import type { EvChangeClass } from "./constitution.ts";
 import { PersonalityConfigSchema, type PersonalityConfig, type SelfModificationRequest, type SelfModificationRequestStatus } from "./types.ts";
 import type { SelfModificationGithubClient } from "./github-client.ts";
 
@@ -58,6 +60,12 @@ export interface SelfModificationServiceDeps {
   controls: SelfModificationControls;
   /** D-397: tenant revisjonsradene skrives under (selvendring er global; revisjon er likevel tenant-partisjonert). */
   auditTenantId: string;
+  /**
+   * D-408 (EV-0): valgfritt endringsregister (append-only hash-kjede, migrasjon 075). Satt = hver godkjenning, avvisning og merge
+   * registreres med konstitusjonens digest. Uten: ingen registerføring (som før). Feil i registeret blokkerer ikke tilstandsovergangen
+   * (den er allerede utført), men logges høyt og varsles - aldri stille.
+   */
+  changeLedger?: { ledger: ChangeLedger; constitutionDigest: string };
 }
 
 /** D-397: «får noe selvendrings-relatert skje akkurat nå?» - false = eieren har stoppet/fryst. Aldri kast; ukjent = false. */
@@ -171,6 +179,29 @@ export class SelfModificationService {
   private async assertNotPaused(): Promise<void> {
     const gate = await this.deps.controls.allowed();
     if (!gate.allowed) throw new Error(`self_modification_blocked:${gate.reason}`);
+  }
+
+  /** D-408: risikoklasse (policy.ts) -> endringsklasse (EV-0). */
+  private evClassOf(risk: string): EvChangeClass {
+    return risk === "zero_review" ? "E1" : risk === "requires_approval" ? "E2" : "E3";
+  }
+
+  /** D-408: registerfør en beslutning. Aldri kast videre - tilstandsovergangen er allerede gjort - men logg og varsle ved feil. */
+  private async recordLedger(
+    request: SelfModificationRequest, decision: LedgerDecision, headSha: string | null, evidence: Record<string, unknown>, recordedBy: string
+  ): Promise<void> {
+    const cfg = this.deps.changeLedger;
+    if (!cfg) return;
+    try {
+      await cfg.ledger.append({
+        change_id: request.request_id, change_class: this.evClassOf(request.risk), decision, constitution_digest: cfg.constitutionDigest,
+        subject: request.summary.slice(0, 500) || request.request_id, paths: request.target_paths, branch: request.branch,
+        head_sha: headSha, evidence: { pr_number: request.pr_number, pr_url: request.pr_url, ...evidence }, recorded_by: recordedBy
+      });
+    } catch (err) {
+      console.error(JSON.stringify({ msg: "self_modification_ledger_failed", decision, request_id: request.request_id, error: (err as Error).message.slice(0, 200) }));
+      await safeNotify(this.deps.notify, `ADVARSEL: endringsregisteret kunne ikke føre ${decision} for ${request.request_id} (${(err as Error).message.slice(0, 120)}).`);
+    }
   }
 
   private readonly loggedBlocked = new Set<string>();
@@ -615,6 +646,9 @@ export class SelfModificationService {
     if (!result.merged) return "pending"; // f.eks. 405/stale sha - prøves på nytt neste sveip
     await this.markResolved(request.request_id, "merged", null);
     await this.audit("self_modification.merged", request, { decision: "ALLOW", payload: { sha: boundSha, pr_number: request.pr_number } });
+    await this.recordLedger(request, "merged", boundSha, request.risk === "zero_review"
+      ? { ci_green: true }
+      : { approved_by: request.resolved_by_person_id ?? "", approved_head_sha: request.approved_head_sha ?? "" }, "jarvis-core");
     await safeNotify(this.deps.notify, `Selvendring merget: ${request.pr_url || request.pr_number} (${request.request_id}).`);
     return "merged";
   }
@@ -706,9 +740,11 @@ export class SelfModificationService {
       );
       if (claimed.rowCount !== 1) throw new Error("self_modification_request_not_awaiting_approval:changed");
       await this.audit("self_modification.approved", request, { decision: "ALLOW", payload: { sha: request.classified_head_sha } });
+      await this.recordLedger(request, "approved", request.classified_head_sha, { approved_by: actorPersonId, approved_head_sha: request.classified_head_sha }, actorPersonId);
     } else {
       await this.markResolved(requestId, "rejected", actorPersonId);
       await this.audit("self_modification.rejected", request, { decision: "ALLOW", reason: "owner_rejected" });
+      await this.recordLedger(request, "rejected", request.classified_head_sha, { rejected_by: actorPersonId }, actorPersonId);
     }
     const updated = await this.deps.pool.query("SELECT * FROM self_modification_requests WHERE request_id = $1", [requestId]);
     return requestRowFromDb(updated.rows[0] as Record<string, unknown>);

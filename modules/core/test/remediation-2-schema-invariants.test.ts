@@ -163,6 +163,7 @@ describe("B/C: RLS-dekning og policyer (JARVIS-076)", () => {
   /** Tabeller uten RLS - hver med begrunnelse. Ingen bærer en `tenant_id`-kolonne (tenant-eide rader MÅ ha RLS). */
   const RLS_EXEMPT: Record<string, string> = {
     capabilities: "global kapabilitetsregister (tool_id/action -> klasse), ingen tenant-data; jarvis_app har kun SELECT",
+    evolution_change_ledger: "globalt append-only endringsregister for selvendring (EV-0, D-408); hash-kjede + trigger, jarvis_app har kun SELECT/INSERT",
     github_rate_limit_state: "global state per GitHub-credential_ref (infrastruktur), ikke tenant-data",
     owner_control_state: "global eier-kontroll (kill switch/frys/tilbakekalling, D-164) - eierens egen autoritetstilstand, ikke tenant-data",
     scheduler_state: "global jobb-claim per (job_name, run_date) for flere instanser",
