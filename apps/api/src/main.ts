@@ -150,6 +150,18 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const killSwitch = new KillSwitch(pool, ownerControlAuthority);
   await killSwitch.restore();
   const ownerControls = new OwnerControls(killSwitch, pool, ownerControlAuthority);
+  // EV-1 (D-412): leserne selvdiagnosen (`executive.get_self_diagnosis`) komponeres av. `toolGateway` refereres først når en leser kalles (lat).
+  const selfModelControls = new OwnerControlsService(killSwitch, ownerControls);
+  const selfModelReaders = buildSelfModelReaders({
+    pool,
+    tenantId: owner.tenant_id,
+    meshStatus: () => gateway.meshStatus(),
+    controlState: () => selfModelControls.getControlState(),
+    connectorStatus: () => listConnectorStatus(toolGateway),
+    // EV-0 oppstartsresultat (konstitusjon + endringsregister); null til sjekken har kjørt -> UKJENT.
+    ev0Status: () => getLastEv0BootStatus(),
+    build: () => ({ sha: process.env["JARVIS_BUILD_SHA"]?.trim() || null, version: process.env["JARVIS_VERSION"]?.trim() || "0.1.0" })
+  });
   await ownerControls.restore();
   // D-174 (B2): hoistet hit (tidligere konstruert lenger nede, kun for
   // `enrollmentService`) - `OwnerControlsService` sitt nye, eier-vendte
@@ -293,18 +305,6 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider())
   );
   // Del 3 (JARVIS-013/043): klasse D-pipelinen er HÅRD i produksjon (nøkkel + full kjede + out-of-band-varsler; varsleren bindes sent under).
-  // EV-1 (D-412): leserne selvdiagnosen (`executive.get_self_diagnosis`) komponeres av. `toolGateway` refereres først når en leser kalles (lat).
-  const selfModelControls = new OwnerControlsService(killSwitch, ownerControls);
-  const selfModelReaders = buildSelfModelReaders({
-    pool,
-    tenantId: owner.tenant_id,
-    meshStatus: () => gateway.meshStatus(),
-    controlState: () => selfModelControls.getControlState(),
-    connectorStatus: () => listConnectorStatus(toolGateway),
-    // EV-0 oppstartsresultat (konstitusjon + endringsregister); null til sjekken har kjørt -> UKJENT.
-    ev0Status: () => getLastEv0BootStatus(),
-    build: () => ({ sha: process.env["JARVIS_BUILD_SHA"]?.trim() || null, version: process.env["JARVIS_VERSION"]?.trim() || "0.1.0" })
-  });
   const toolGateway = new ToolGateway(pool, policy, readSecretProvider, ownerControls, infisicalSecretProvider, {
     classDPipeline: { enforce: true },
     // Del 3 (JARVIS-003/005): eier-tilkoblede leverandør-credentials bindes til den autentiserte eieren i eierens tenant.
