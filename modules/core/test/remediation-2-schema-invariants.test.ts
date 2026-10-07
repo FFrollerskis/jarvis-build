@@ -255,6 +255,28 @@ describe("D: scope-FK-baseline (JARVIS-076)", () => {
   });
 });
 
+describe("D2: tenant-komposittnøkler for identitetsdomenet (Q-44, D-435)", () => {
+  it("conversation_channel_links kan IKKE peke på en identitet i en annen tenant (FK avviser), samme tenant virker", async () => {
+    await admin.query(`INSERT INTO conversation_identities (identity_id, tenant_id, memory_space_id, display_name) VALUES ('ci-a','t-person','business','A'), ('ci-b','t-biz','business','B')`);
+    const link = (id: string, tenant: string, identity: string) => admin.query(
+      `INSERT INTO conversation_channel_links (link_id, tenant_id, memory_space_id, identity_id, channel, channel_identifier, confidence, match_method, status) VALUES ($1,$2,'business',$3,'telegram',$4,1,'manual','active')`,
+      [id, tenant, identity, `chat-${id}`]);
+    await expect(link("l-cross", "t-person", "ci-b")).rejects.toThrow(/conversation_channel_links_identity_id_fkey_tenant/);
+    await expect(link("l-ok", "t-person", "ci-a")).resolves.toBeDefined();
+  });
+
+  it("en identitet kan ikke slås sammen inn i en annen tenants identitet, og FK-ene har tenant_id i nøkkelen", async () => {
+    await expect(admin.query(`UPDATE conversation_identities SET status='merged', merged_into_identity_id='ci-b' WHERE identity_id='ci-a'`)).rejects.toThrow(/merged_into_identity_id_fkey_tenant/);
+    const r = await admin.query(`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid = 'messages'::regclass AND contype = 'f' AND conname LIKE 'messages_session_id%'`);
+    expect((r.rows as Array<{ def: string }>).map((x) => x.def).join("\n")).toContain("FOREIGN KEY (tenant_id, session_id) REFERENCES sessions(tenant_id, session_id)");
+  });
+
+  it("jarvis_scope_fk er idempotent og kan ikke kalles av appen", async () => {
+    await admin.query(`SELECT jarvis_scope_fk('conversation_channel_links', 'identity_id', 'conversation_identities', 'identity_id')`);
+    await expect(app.query(`SELECT jarvis_scope_fk('conversation_channel_links', 'identity_id', 'conversation_identities', 'identity_id')`)).rejects.toThrow(/permission denied/i);
+  });
+});
+
 describe("E: jarvis.memory_spaces - komma/mellomrom-semantikk (JARVIS-076)", () => {
   it("serializeMemorySpaces: kun gyldige space-navn, dedupe, ingen komma/mellomrom/injeksjon, ikke tom", () => {
     expect(serializeMemorySpaces(["personal", "business", "personal"])).toBe("personal,business");
