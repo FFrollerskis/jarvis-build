@@ -76,11 +76,13 @@ describe("AnthropicAdapter - EKTE bildestøtte (eneste adapter denne runden, se 
     ]);
   });
 
-  it("F: en vanlig streng-melding forblir en ren streng (bakoverkompatibel, ingen array-innpakking)", async () => {
+  it("F: en vanlig streng-melding forblir en ren streng (bakoverkompatibel); kun SISTE melding pakkes i én tekstblokk for cache-markøren (D-432)", async () => {
     const adapter = new AnthropicAdapter("test-key", "test-model", "http://mock");
-    await adapter.complete({ messages: [{ role: "user", content: "hei" }] });
+    await adapter.complete({ messages: [{ role: "user", content: "a" }, { role: "assistant", content: "b" }, { role: "user", content: "hei" }] });
     const messages = capturedBody?.["messages"] as Array<{ role: string; content: unknown }>;
-    expect(messages[0]?.content).toBe("hei");
+    expect(messages[0]?.content).toBe("a");
+    expect(messages[1]?.content).toBe("b");
+    expect(messages[2]?.content).toEqual([{ type: "text", text: "hei", cache_control: { type: "ephemeral" } }]);
   });
 });
 

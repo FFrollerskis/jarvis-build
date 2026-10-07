@@ -27,3 +27,19 @@ export function parseToolTurnRoute(raw: string | undefined): ToolTurnRoute | nul
   }
   return { provider, model };
 }
+
+/**
+ * D-432: dagstak (øre) for samlet modellkostnad i dag. Når taket er nådd går verktøyturer til lokal modell (med en synlig merknad) til neste døgn.
+ * `JARVIS_TOOL_TURN_DAILY_CAP_ORE`: tom = standard 3000 øre (30 kr); `0` = ingen tak; ugyldig = standard (aldri «ubegrenset» ved en feil).
+ */
+export const DEFAULT_TOOL_TURN_DAILY_CAP_ORE = 3000;
+
+export function parseDailyCapOre(raw: string | undefined): number {
+  const value = (raw ?? "").trim();
+  if (value === "") return DEFAULT_TOOL_TURN_DAILY_CAP_ORE;
+  if (!/^\d{1,9}$/.test(value)) {
+    console.error(JSON.stringify({ msg: "tool_turn_daily_cap_invalid", fallback_ore: DEFAULT_TOOL_TURN_DAILY_CAP_ORE }));
+    return DEFAULT_TOOL_TURN_DAILY_CAP_ORE;
+  }
+  return Number.parseInt(value, 10);
+}
