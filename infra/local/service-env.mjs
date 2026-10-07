@@ -288,6 +288,8 @@ const WORKER_EXCLUDES = new Set(["JARVIS_BRIEF_HOUR"]);
 /** Hva hver tjeneste får videresendt fra operatørens `.env` (interpolasjon `${NAVN:-}` i compose). */
 export const SERVICE_ENV = {
   api: [...CORE_ENV, ...MODEL_ENV, ...CONNECTOR_ENV, ...WEBHOOK_ENV, ...MEDIA_HOME_ENV, ...MESSAGING_AUTOMATION_ENV, "LANGFUSE_BASE_URL", "JARVIS_API_PORT", "JARVIS_OPERATIONAL_RETENTION_SWEEP_HOUR", "JARVIS_CONSTITUTION_PUBKEY_SHA256",
+    // D-433: nød-/utviklingsbryter - API-et tømmer `executive`-køen selv (standard: worker-containeren eier køen).
+    "JARVIS_API_DRAINS_EXECUTIVE",
     // EV-1 (D-412): bygg-sha og versjon som selvdiagnosen viser (uten dem vises bygget som UKJENT).
     "JARVIS_BUILD_SHA", "JARVIS_VERSION",
     // D-414: «chat først» - bakgrunnsformål venter mens chat pågår (maks / stillhet, ms).

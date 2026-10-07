@@ -42,8 +42,12 @@ describe("A: apps/api/src/main.ts komponerer executiveToolDefinitions() INNI SAM
   });
 });
 
-describe("B: apps/api/src/worker-main.ts kobler BEVISST IKKE executive.* - eksplisitt, testet fravær (D-162), ikke et uundersøkt hull", () => {
-  it("importerer ikke @jarvis/executive - Executive Mode er en API-/HTTP-flate (samme klasse som situations selv, uendret av denne sliceen)", () => {
-    expect(workerSource).not.toContain("@jarvis/executive");
+describe("B: apps/api/src/worker-main.ts kobler KUN executive.get_capability_status (D-433: workeren eier executive-køen) - ikke resten av Executive Mode-flaten (D-162)", () => {
+  it("registrerer executive-verktøyene FILTRERT til nøyaktig handlingen bakgrunnsflaten er tildelt; ingen andre executive.*-handlinger i workeren", () => {
+    expect(workerSource).toContain("@jarvis/executive");
+    expect(workerSource).toMatch(/executiveToolDefinitions\(new ExecutiveTransport\([\s\S]*?\)\)\)\.filter\(\(d\) => d\.action === "get_capability_status"\)/);
+    expect(workerSource).not.toContain("situationsToolDefinitions");
+    expect(workerSource).not.toContain("governanceToolDefinitions");
+    expect(workerSource).not.toContain("ownerControlsToolDefinitions");
   });
 });
