@@ -2,6 +2,7 @@ import type pg from "pg";
 import { z } from "zod";
 import type { CapabilityClass, IdentityContext, JobContract, JsonValue, TrustLevel } from "@jarvis/contracts";
 import { withTenantTransaction, writeAudit } from "@jarvis/core";
+import { guardedFetch } from "./url-safety.ts";
 import { assessClassDPipeline, isClassDExempt, isNotFoundError, type ClassDNotifier, type ClassDPipelineOptions } from "./class-d-pipeline.ts";
 import { isSelfRecoveryAction, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
 
@@ -81,7 +82,7 @@ export class InfisicalSecretProvider implements SecretProvider {
   }
 
   private async login(): Promise<string> {
-    const response = await fetch(`${this.baseUrl}/api/v1/auth/universal-auth/login`, {
+    const response = await guardedFetch(`${this.baseUrl}/api/v1/auth/universal-auth/login`, {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ clientId: this.clientId, clientSecret: this.clientSecret })
     });
@@ -97,7 +98,7 @@ export class InfisicalSecretProvider implements SecretProvider {
     try {
       this.token ??= await this.login();
       const url = `${this.baseUrl}/api/v3/secrets/raw/${encodeURIComponent(ref)}?workspaceId=${this.projectId}&environment=${this.env}`;
-      const response = await fetch(url, { headers: { authorization: `Bearer ${this.token}` } });
+      const response = await guardedFetch(url, { headers: { authorization: `Bearer ${this.token}` } });
       if (response.status === 401) { this.token = null; throw new Error("infisical_auth_expired"); }
       if (response.status === 404) { this.health = "healthy"; return null; }
       if (!response.ok) throw new Error(`infisical_${response.status}`);
@@ -128,13 +129,13 @@ export class InfisicalSecretProvider implements SecretProvider {
     const url = `${this.baseUrl}/api/v3/secrets/raw/${encodeURIComponent(ref)}`;
     const body = JSON.stringify({ workspaceId: this.projectId, environment: this.env, secretValue: value });
     const headers = { authorization: `Bearer ${this.token}`, "content-type": "application/json" };
-    let response = await fetch(url, { method: "PATCH", headers, body });
+    let response = await guardedFetch(url, { method: "PATCH", headers, body });
     if (response.status === 401) {
       this.token = null;
       throw new Error("infisical_auth_expired");
     }
     if (response.status === 404) {
-      response = await fetch(url, { method: "POST", headers, body });
+      response = await guardedFetch(url, { method: "POST", headers, body });
     }
     if (!response.ok) {
       this.health = "unavailable";

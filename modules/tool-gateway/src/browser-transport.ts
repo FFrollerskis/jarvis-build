@@ -1,6 +1,10 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolTransport } from "./gateway.ts";
+import { guardedFetch } from "./url-safety.ts";
+
+/** Q-46 (D-436): browser-gateway-kall går via guardedFetch; navigasjon kan ta tid, så taket er 120 s (standard 45 s er for kort), aldri ubegrenset. */
+const BROWSER_INVOKE_TIMEOUT_MS = 120_000;
 
 /**
  * D-339: bro INN i `apps/browser-gateway` sin egen prosess (SAMME "egen
@@ -57,8 +61,9 @@ export class BrowserGatewayTransport implements ToolTransport {
       throw new Error(`browser_gateway_action_not_implemented:${action}`);
     }
     const body = JSON.stringify({ action, parameters });
-    const response = await fetch(`${credential}/invoke`, {
+    const response = await guardedFetch(`${credential}/invoke`, {
       method: "POST",
+      signal: AbortSignal.timeout(BROWSER_INVOKE_TIMEOUT_MS), // lengre enn standard 45 s: sidelasting/navigasjon kan ta tid, men aldri ubegrenset
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${signBrowserGatewayToken(this.tokenSecret, action, body)}`
