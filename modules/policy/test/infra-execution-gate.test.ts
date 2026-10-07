@@ -162,3 +162,62 @@ describe("D-104: InfraExecutionGate faktisk håndhevet i PolicyGateway.authorize
     }
   });
 });
+
+describe("D-438: varig/delt modus (uten DB - fake lagring)", () => {
+  function fakeStore() {
+    let row: { mode: "PAUSED" | "DEGRADED"; reason?: string; at: string } | null = null;
+    let failWrite = false;
+    let failRead = false;
+    return {
+      set fail(v: { write?: boolean; read?: boolean }) { failWrite = v.write ?? false; failRead = v.read ?? false; },
+      get row() { return row; },
+      store: {
+        async read() { if (failRead) throw new Error("db_down"); return row; },
+        async write(state: { mode: "NORMAL" | "DEGRADED" | "PAUSED"; reason?: string; at: string }) {
+          if (failWrite) throw new Error("db_down");
+          row = state.mode === "NORMAL" ? null : { mode: state.mode, ...(state.reason !== undefined ? { reason: state.reason } : {}), at: state.at };
+        },
+        async clear() { if (failWrite) throw new Error("db_down"); row = null; }
+      }
+    };
+  }
+
+  it("en pause i prosess A når prosess B etter refresh, og resume likeså", async () => {
+    const f = fakeStore();
+    const a = new InfraExecutionGate(undefined, f.store);
+    const b = new InfraExecutionGate(undefined, f.store);
+    await a.pauseDurable("owner", "p1");
+    await b.refresh();
+    expect(b.current().mode).toBe("PAUSED");
+    expect(b.check("B")).toBe("infra_paused");
+    await a.resumeDurable();
+    await b.refresh();
+    expect(b.current().mode).toBe("NORMAL");
+    expect(b.check("B")).toBeNull();
+  });
+
+  it("fail-safe: feiler lagringen ved pause er prosessen likevel stanset; feiler den ved resume, forblir modusen innstrammet", async () => {
+    const f = fakeStore();
+    const gate = new InfraExecutionGate(undefined, f.store);
+    f.fail = { write: true };
+    await expect(gate.pauseDurable("x")).rejects.toThrow("db_down");
+    expect(gate.current().mode).toBe("PAUSED");
+    await expect(gate.resumeDurable()).rejects.toThrow("db_down");
+    expect(gate.current().mode).toBe("PAUSED");
+  });
+
+  it("en lesefeil løser aldri en pause, og feilen registreres (ikke en stille alt-ok)", async () => {
+    const f = fakeStore();
+    const a = new InfraExecutionGate(undefined, f.store);
+    const b = new InfraExecutionGate(undefined, f.store);
+    await a.pauseDurable("owner");
+    await b.refresh();
+    f.fail = { read: true };
+    await b.refresh();
+    expect(b.current().mode).toBe("PAUSED");
+    expect(b.lastSyncError).toBe("db_down");
+    f.fail = {};
+    await b.refresh();
+    expect(b.lastSyncError).toBeNull();
+  });
+});

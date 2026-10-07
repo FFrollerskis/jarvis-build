@@ -30,7 +30,7 @@ import {
   withTenantTransaction,
   writeAudit
 } from "@jarvis/core";
-import { InfraExecutionGate, KillSwitch, PolicyGateway } from "@jarvis/policy";
+import { InfraExecutionGate, KillSwitch, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
 import { DeploymentService, DiagnosisService, IncidentService } from "@jarvis/incidents";
 import {
   AiCouncil,
@@ -189,7 +189,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // IKKE `killSwitch`/`ownerControls` - en annen, smalere, allerede
   // dokumentert D-104-begrensning, ikke K1 sitt mål) - se
   // D-104/D-164 i DECISIONS_AND_ASSUMPTIONS.md.
-  const infraGate = new InfraExecutionGate();
+  // D-438 (JARVIS-025): modusen deles via owner_control_state, så en pause via API-et også stanser workeren (synk hvert 2. s).
+  const infraGate = new InfraExecutionGate(undefined, createPgInfraModeStore(pool));
+  await infraGate.refresh();
+  infraGate.startSync();
   const infraToolIds = new Set(["github", "docker"]);
   // Enhetsregister fra databasen (fase 8): godkjenninger verifiseres mot registrerte enhetsnøkler.
   const deviceRegistry = new PgDeviceRegistry(pool, owner.tenant_id);
