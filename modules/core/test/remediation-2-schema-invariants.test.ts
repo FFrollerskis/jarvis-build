@@ -277,6 +277,22 @@ describe("D2: tenant-komposittnøkler for identitetsdomenet (Q-44, D-435)", () =
   });
 });
 
+describe("D3: tenant-komposittnøkler for pengedomenet (Q-44, D-435)", () => {
+  it("ingen penge-FK (payment/bank/card/finance/stripe/vipps/neonomics/wallester) står igjen på baseline", async () => {
+    const baseline = JSON.parse(await readFile(BASELINE, "utf8")) as string[];
+    const left = baseline.filter((x) => /^(payment_|bank_|card_|finance_|stripe_|vipps_|neonomics_|wallester_|provider_cards)/.test(x));
+    expect(left).toEqual([]);
+  });
+
+  it("betalingsintensjon-hendelser og vipps-captures peker på (tenant_id, payment_intent_id)", async () => {
+    const r = await admin.query(`SELECT conrelid::regclass::text AS tbl, pg_get_constraintdef(oid) AS def FROM pg_constraint
+      WHERE contype = 'f' AND conrelid IN ('payment_intent_events'::regclass, 'vipps_captures'::regclass, 'stripe_refunds'::regclass) AND confrelid = 'payment_intents'::regclass`);
+    const defs = r.rows as Array<{ tbl: string; def: string }>;
+    expect(defs.length).toBeGreaterThan(0);
+    for (const d of defs) expect(d.def, `${d.tbl}: ${d.def}`).toMatch(/FOREIGN KEY \(tenant_id, /);
+  });
+});
+
 describe("E: jarvis.memory_spaces - komma/mellomrom-semantikk (JARVIS-076)", () => {
   it("serializeMemorySpaces: kun gyldige space-navn, dedupe, ingen komma/mellomrom/injeksjon, ikke tom", () => {
     expect(serializeMemorySpaces(["personal", "business", "personal"])).toBe("personal,business");

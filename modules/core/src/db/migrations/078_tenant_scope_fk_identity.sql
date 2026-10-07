@@ -42,7 +42,7 @@ BEGIN
   ) INTO has_unique;
   IF NOT has_unique THEN
     EXECUTE format('ALTER TABLE %s ADD CONSTRAINT %I UNIQUE (tenant_id, %I)',
-      parent, left(parent_col || '_tenant_key', 63), parent_col);
+      parent, left((SELECT relname FROM pg_class WHERE oid = parent) || '_' || parent_col || '_tenant_key', 63), parent_col);
   END IF;
 
   new_name := left(old_name::text, 55) || '_tenant';
@@ -64,6 +64,33 @@ BEGIN
 END;
 $$;
 REVOKE ALL ON FUNCTION jarvis_scope_fk(regclass, name, regclass, name) FROM PUBLIC;
+
+-- Variant som slår opp enkeltkolonne-FK-en på navn (baseline-id `tabell.constraint`) - brukes av senere domener, så migrasjonene
+-- kan listes 1:1 mot `scope-fk-baseline.json`.
+CREATE FUNCTION jarvis_scope_fk_named(child regclass, constraint_name name) RETURNS void
+LANGUAGE plpgsql AS $$
+DECLARE
+  child_col  name;
+  parent     regclass;
+  parent_col name;
+  n          int;
+BEGIN
+  SELECT cardinality(c.conkey), c.confrelid::regclass,
+         (SELECT attname FROM pg_attribute WHERE attrelid = c.conrelid AND attnum = c.conkey[1]),
+         (SELECT attname FROM pg_attribute WHERE attrelid = c.confrelid AND attnum = c.confkey[1])
+    INTO n, parent, child_col, parent_col
+    FROM pg_constraint c
+   WHERE c.conrelid = child AND c.conname = constraint_name AND c.contype = 'f';
+  IF n IS NULL THEN
+    RETURN; -- allerede konvertert
+  END IF;
+  IF n <> 1 THEN
+    RAISE EXCEPTION 'jarvis_scope_fk_named: % er ikke en enkeltkolonne-FK', constraint_name;
+  END IF;
+  PERFORM jarvis_scope_fk(child, child_col, parent, parent_col);
+END;
+$$;
+REVOKE ALL ON FUNCTION jarvis_scope_fk_named(regclass, name) FROM PUBLIC;
 
 -- Domene 1: identitet og samtaler (høyest risiko: en feilkoblet identitet kan slå sammen/lese en annen tenants samtalepartner).
 SELECT jarvis_scope_fk('conversation_identities', 'linked_business_contact_id', 'business_contacts', 'contact_id');
