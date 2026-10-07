@@ -181,18 +181,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // `pool`-innpakning ved konstruksjon (ingen side-effekt å flytte tidligere) -
   // ÉN delt instans, ALDRI en duplikat parallell konstruksjon.
   const grantService = new SessionGrantService(pool);
-  // D-104 (UA-5 Production Operations Control Plane v1): global infra-
-  // eksekusjonsmodus - EN NY, SNEVRERE bryter enn `killSwitch` over (som
-  // forblir strengest/uendret). Gjelder KUN registrerte infra-tool_id-er
-  // (`infraToolIds` under). Prosess-lokal tilstand, BEVISST UTENFOR K1 sitt
-  // omfang (D-164 fresh-audit: `/infra/pause` muterer `InfraExecutionGate`,
-  // IKKE `killSwitch`/`ownerControls` - en annen, smalere, allerede
-  // dokumentert D-104-begrensning, ikke K1 sitt mål) - se
-  // D-104/D-164 i DECISIONS_AND_ASSUMPTIONS.md.
-  // D-438 (JARVIS-025): modusen deles via owner_control_state, så en pause via API-et også stanser workeren (synk hvert 2. s).
-  const infraGate = new InfraExecutionGate(undefined, createPgInfraModeStore(pool));
-  await infraGate.refresh();
-  infraGate.startSync();
+  // D-104 (UA-5 Production Operations Control Plane v1): global infra-eksekusjonsmodus - EN NY, SNEVRERE bryter enn `killSwitch` over (som forblir
+  // strengest/uendret). Gjelder KUN registrerte infra-tool_id-er (`infraToolIds` under). D-438 (JARVIS-025): modusen er DELT med worker-prosessen via
+  // `owner_control_state` og leses LIVE av `PolicyGateway` (ingen cache/timer); varige overganger krever eier-autoritet (`ownerControlAuthority`).
+  const infraGate = new InfraExecutionGate(undefined, createPgInfraModeStore(pool), ownerControlAuthority);
   const infraToolIds = new Set(["github", "docker"]);
   // Enhetsregister fra databasen (fase 8): godkjenninger verifiseres mot registrerte enhetsnøkler.
   const deviceRegistry = new PgDeviceRegistry(pool, owner.tenant_id);

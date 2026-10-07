@@ -171,7 +171,8 @@ export class PolicyGateway {
     // for alle andre tool_id-er (eller uten infraGate/infraToolIds
     // konfigurert i det hele tatt) er denne sjekken et strukturelt no-op.
     if (this.opts?.infraGate && this.opts?.infraToolIds?.has(toolCall.data.tool_id)) {
-      const infraDeny = this.opts.infraGate.check(toolCall.data.capability_class);
+      // D-438: LIVE (delt) modus - samme begrunnelse som kill switch over; klasse A leser ikke databasen, lesefeil avslår mutasjon (fail-closed).
+      const infraDeny = await this.opts.infraGate.checkDurable(toolCall.data.capability_class);
       if (infraDeny) {
         return this.finish(request, "DENY", infraDeny);
       }

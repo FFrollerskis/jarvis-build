@@ -37,46 +37,51 @@ afterAll(async () => {
   await stop?.();
 });
 
-describe("D-438: delt infra-modus mellom to prosesser (ekte Postgres)", () => {
-  it("pause i 'api' stanser 'worker' etter synk; degrade overstyrer; resume løser begge", async () => {
-    const api = new InfraExecutionGate(undefined, createPgInfraModeStore(app));
-    const worker = new InfraExecutionGate(undefined, createPgInfraModeStore(app));
-    await worker.refresh();
-    expect(worker.check("B")).toBeNull();
+const OWNER = { owner_person_id: "p-im" };
+
+describe("D-438: delt infra-modus mellom to prosesser (ekte Postgres, live-lesing)", () => {
+  it("pause i 'api' avslår umiddelbart i 'worker' (ingen synk); degrade overstyrer; resume løser begge", async () => {
+    const api = new InfraExecutionGate(undefined, createPgInfraModeStore(app), OWNER);
+    const worker = new InfraExecutionGate(undefined, createPgInfraModeStore(app), OWNER);
+    expect(await worker.checkDurable("B")).toBeNull();
 
     await api.pauseDurable("vedlikehold", "p-im");
-    await worker.refresh();
-    expect(worker.current()).toMatchObject({ mode: "PAUSED", reason: "vedlikehold" });
-    expect(worker.check("B")).toBe("infra_paused");
-    expect(worker.check("A")).toBeNull(); // diagnostikk er aldri stanset
+    expect(await worker.checkDurable("B")).toBe("infra_paused");
+    expect((await worker.statusDurable()).state).toMatchObject({ mode: "PAUSED", reason: "vedlikehold" });
+    expect(await worker.checkDurable("A")).toBeNull(); // diagnostikk er aldri stanset
 
     await api.degradeDurable("treg", "p-im");
-    await worker.refresh();
-    expect(worker.current().mode).toBe("DEGRADED");
-    expect(worker.check("B")).toBeNull();
-    expect(worker.check("D")).toBe("infra_degraded_blocks_class_d");
+    expect((await worker.statusDurable()).state.mode).toBe("DEGRADED");
+    expect(await worker.checkDurable("B")).toBeNull();
+    expect(await worker.checkDurable("D")).toBe("infra_degraded_blocks_class_d");
 
-    await api.resumeDurable();
-    await worker.refresh();
-    expect(worker.current().mode).toBe("NORMAL");
+    await api.resumeDurable("p-im");
+    expect(await worker.checkDurable("B")).toBeNull();
+    const row = await admin.query(`SELECT 1 FROM owner_control_state WHERE control_kind = 'infra_mode'`);
+    expect(row.rows).toHaveLength(0); // NORMAL lagres aldri - ingen rad
   });
 
-  it("en NY prosess (restart) overtar en eksisterende pause ved oppstart", async () => {
-    const before = new InfraExecutionGate(undefined, createPgInfraModeStore(app));
+  it("en NY prosess (restart) håndhever en eksisterende pause fra første kall", async () => {
+    const before = new InfraExecutionGate(undefined, createPgInfraModeStore(app), OWNER);
     await before.pauseDurable("overlever restart", "p-im");
-    const restarted = new InfraExecutionGate(undefined, createPgInfraModeStore(app));
-    expect(restarted.current().mode).toBe("NORMAL"); // før første synk
-    await restarted.refresh();
-    expect(restarted.current()).toMatchObject({ mode: "PAUSED", reason: "overlever restart" });
-    await before.resumeDurable();
+    const restarted = new InfraExecutionGate(undefined, createPgInfraModeStore(app), OWNER);
+    expect(await restarted.checkDurable("C")).toBe("infra_paused");
+    await before.resumeDurable("p-im");
+  });
+
+  it("kun eieren kan endre modusen (andre personer avvises før noe skrives)", async () => {
+    const gate = new InfraExecutionGate(undefined, createPgInfraModeStore(app), OWNER);
+    await expect(gate.pauseDurable("x", "p-annen")).rejects.toThrow(/owner_control_unauthorized/);
+    const row = await admin.query(`SELECT 1 FROM owner_control_state WHERE control_kind = 'infra_mode'`);
+    expect(row.rows).toHaveLength(0);
   });
 
   it("uleselig/ukjent lagret modus tolkes fail-closed som PAUSED (aldri stille NORMAL)", async () => {
     await admin.query(`INSERT INTO owner_control_state (control_kind, control_target, reason) VALUES ('infra_mode', 'GLOBAL', 'ikke-json')
                        ON CONFLICT (control_kind, control_target) DO UPDATE SET reason = EXCLUDED.reason`);
-    const gate = new InfraExecutionGate(undefined, createPgInfraModeStore(app));
-    await gate.refresh();
-    expect(gate.current()).toMatchObject({ mode: "PAUSED", reason: "infra_mode_state_unreadable" });
+    const gate = new InfraExecutionGate(undefined, createPgInfraModeStore(app), OWNER);
+    expect(await gate.checkDurable("B")).toBe("infra_paused");
+    expect((await gate.statusDurable()).state).toMatchObject({ mode: "PAUSED", reason: "infra_mode_state_unreadable" });
     await createPgInfraModeStore(app).clear();
   });
 
