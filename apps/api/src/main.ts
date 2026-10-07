@@ -1,5 +1,6 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import "./normalize-env.ts";
+import { parseToolTurnRoute } from "./tool-turn-route.ts";
 import { fileURLToPath } from "node:url";
 import { checkEv0Boot, getLastEv0BootStatus, logEv0Boot } from "./ev0-boot.ts";
 import { envHour, envInt, envPort, systemIdentity } from "@jarvis/contracts";
@@ -1046,6 +1047,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // delings-disiplin som D-102 sin `taskService` og D-123 sine identitets-
   // primitiver). To instanser ville gitt to separate verktøy-/trace-oppsett
   // mot samme pool, altså en stille divergens mellom kanalene.
+  // D-431: verktøyturer til skymodell (standard Sonnet 5.5), ren prat lokalt. `JARVIS_TOOL_TURN_MODEL=off` slår det av.
+  const toolTurnRoute = parseToolTurnRoute(process.env["JARVIS_TOOL_TURN_MODEL"]);
+  console.log(JSON.stringify({ msg: "tool_turn_route", route: toolTurnRoute ? `${toolTurnRoute.provider}:${toolTurnRoute.model}` : "off" }));
   const conversationEngine = new ConversationEngine({
     messages: new MessageStore(pool),
     context: new ContextBuilder(pool),
@@ -1053,6 +1057,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     tasks: taskService,
     worker,
     trace,
+    toolTurnRoute,
     // EV-1 (D-412): hurtigbanens selvdiagnose går gjennom Tool Gateway (Policy + revisjon) - samme verktøy som modellen kan kalle.
     selfDiagnosis: {
       async run(identity, opts) {

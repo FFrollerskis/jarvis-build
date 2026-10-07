@@ -861,7 +861,7 @@ describe("D-106 HOST-FIX Defekt B: trygg feilsøkings-diagnostikk for Gemini/Kim
     process.env["GEMMA_API_KEY"] = "";
     process.env["GEMINI_API_KEY"] = "delt-nokkel-fallback";
     try {
-      expect(new AnthropicAdapter().model).toBe("claude-sonnet-5");
+      expect(new AnthropicAdapter().model).toBe("claude-sonnet-5-5");
       const gemma = new GemmaHostedAdapter();
       expect(gemma.model).toBe("gemma-4-26b-a4b-it");
       expect(gemma.available()).toBe(true); // GEMMA_API_KEY="" skal falle tilbake til GEMINI_API_KEY, ikke bli værende tom.
