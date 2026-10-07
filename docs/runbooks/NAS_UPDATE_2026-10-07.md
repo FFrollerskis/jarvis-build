@@ -1,6 +1,8 @@
-# NAS-oppdatering 2026-10-07 (D-427…D-436)
+# NAS-oppdatering 2026-10-07 (D-427…D-438)
 
 Sjekkliste for neste NAS-oppdatering. **Ingenting under er verifisert på NAS ennå** – det som står under «Forventet» er hva koden og testene sier, ikke observert drift. Kjør ett steg om gangen, lim inn utdata, og stopp ved første avvik.
+
+**Merk:** punkter merket med migrasjon 078–082 og D-437/D-438 forutsetter at PR #286, #288 og #289 er merget før du oppdaterer. Sjekk `git log --oneline -15` etter `git pull`.
 
 Alle kommandoer kjøres fra `/volume1/jarvisbuild-data/jarvisbuild` (compose og `.env` finnes bare der).
 
@@ -17,7 +19,10 @@ Alle kommandoer kjøres fra `/volume1/jarvisbuild-data/jarvisbuild` (compose og 
 | D-433 | Worker eier `executive`-køen | Logglinje `executive_queue_owner: worker` |
 | D-434 | Worker-miljø: 13 connector-variabler i stedet for ca. 90 | Worker starter; bakgrunnsjobb og kodejobb fullfører |
 | D-435 | Alle 113 tenant-kryssende FK-er er komposittnøkler (migrasjon 078–080) | Migrasjonene anvendt; api og worker starter |
-| D-436 | Alle leverandørkall via `guardedFetch` (Infisical, Zapier, browser) | Infisical-lesing og browser-verktøy virker |
+| D-436 | `tool-gateway`-leverandørkall via `guardedFetch` (Infisical, Zapier, browser); Infisical-lesing har 5 s tak | Infisical-lesing og browser-verktøy virker |
+| D-437 | Rettelser etter review av D-434: modusvariabler, `evaluation_caveat` på capability-status fra worker | `check_my_capabilities` fra en bakgrunnsjobb har et forbehold om snevret miljø |
+| D-438 | Infra-modus (pause/degrade) deles mellom API og worker (migrasjon 082) | `POST /infra/pause` i API stanser også worker innen få sekunder |
+| Q-44 (D-435) | Pre-flight i migrasjon 078 + koblingstabellen `incident_diagnosis_evidence` fikk `tenant_id` (081) | Migrasjon 078–081 anvendt |
 
 ## 0. Før du starter (1 min)
 
@@ -73,6 +78,16 @@ sudo docker compose --env-file .env -f infra/local/docker-compose.yml logs --tai
 ```
 
 **Forventet:** `jarvis-worker started`, ingen `drain_error`.
+
+## 4b. Infra-modus deles mellom api og worker (D-438)
+
+Dette endrer driftsmodus midlertidig og er trygt; husk å løse den igjen. Bruk et gyldig eier-token fra nettleseren (dashbordet) – ikke lim tokenet i chat.
+
+1. Sett pause fra dashbordet/API (`POST /infra/pause` med en begrunnelse).
+2. Vent 5 sekunder og spør status: `POST /infra/status` skal vise `infra_mode.mode: "PAUSED"` og `infra_mode_sync_error: null`.
+3. Løs den: `POST /infra/resume`.
+
+**Forventet:** begge prosessene følger samme modus (worker synker hvert 2. s). Står `infra_mode_sync_error` med en feilmelding, er databasen utilgjengelig for synk – meld fra.
 
 ## 5. Akseptanseportene
 
