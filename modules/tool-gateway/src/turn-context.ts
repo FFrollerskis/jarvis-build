@@ -185,6 +185,14 @@ const SMALL_TALK = /^\s*((hei|hallo|hey|heisann|god (morgen|dag|kveld|natt)|morn
 export function isSmallTalk(text: string): boolean {
   return text.trim().length <= 60 && SMALL_TALK.test(text);
 }
+/**
+ * D-425: klage/metaspørsmål om samtalen selv («hvorfor svarer du på noe annet», «det var ikke det jeg spurte om») handler om forrige svar,
+ * ikke om en tjeneste - ingen verktøy (og ingen arvede), så modellen ikke kaller f.eks. kostnadsverktøy fra en tidligere melding.
+ */
+const META_COMPLAINT = /(svarer (du )?(på )?noe annet|svarer ikke på (det|det jeg)|ikke det jeg (spurte|ba) om|snakker (du )?(om )?noe annet|hva snakker du om|hører du ikke|forstår du ikke|du svarer feil|helt feil svar)/i;
+export function isMetaComplaint(text: string): boolean {
+  return text.trim().length <= 120 && META_COMPLAINT.test(text);
+}
 
 const OVERVIEW = /(oversikt|hva skjer|brief|morgenbrief|hva har jeg)/i;
 const OVERVIEW_KEYS = new Set(["email.read_inbox", "calendar.read_events", "github.read_issues"]);
@@ -229,7 +237,7 @@ export function selectSurfaceTools(
   const granted = new Set(SURFACE_TOOL_GRANTS[surface].map((g) => `${g.tool_id}.${g.action}`));
   const allowed = candidates.filter((m) => granted.has(mappingKey(m)));
   // D-424: småprat får ALDRI verktøy - heller ikke arvede fra tidligere meldinger (en «hei» etter en hjemmestyring-samtale ga ellers Home Assistant-verktøyene).
-  if (isSmallTalk(text)) return { selected: [], schema_tokens: 0, limits, dropped: allowed.map(mappingKey) };
+  if (isSmallTalk(text) || isMetaComplaint(text)) return { selected: [], schema_tokens: 0, limits, dropped: allowed.map(mappingKey) };
   const overview = OVERVIEW.test(text);
   const wantsAction = ACTION_VERBS.test(text);
   const named = namedServices(text);
@@ -247,8 +255,9 @@ export function selectSurfaceTools(
     return m.kind === "act" ? hit && wantsAction : hit;
   });
   // D-389: oppfølgingsspørsmål uten tjenesteord arver tjenesten(e) fra eierens forrige meldinger (kun lesing + handling ved handlingsord).
+  // D-425: kun når den gjeldende meldingen selv ikke peker på noe - ellers dro «sjekk github» med seg kostnads-/selvdiagnoseverktøy fra tidligere meldinger, og den lokale modellen valgte feil verktøy.
   const carried = new Set<string>();
-  if (recent.length > 0) {
+  if (recent.length > 0 && direct.size === 0) {
     for (const m of allowed) {
       if (direct.has(m.tool_id) || m.tool_id === "memory") continue;
       if (!hitFor(m, recent)) continue;

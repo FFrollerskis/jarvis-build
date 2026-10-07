@@ -112,3 +112,19 @@ describe("turn-kontekst", () => {
     expect(surfaceForChannel("mobile")).toBe("web_chat");
   });
 });
+
+describe("D-425 metaklage og fokusert utvalg", () => {
+  it("«hvorfor svarer du på noe annet» gir tomt utvalg, selv etter en kostnads-/selvdiagnose-samtale", () => {
+    const recent = ["hva koster du", "hvor bra yter du"];
+    for (const t of ["hvorfor svarer du på noe annet en det jeg spør om", "det var ikke det jeg spurte om", "hva snakker du om"]) {
+      expect(selectSurfaceTools("web_chat", t, mappings, { recent_owner_messages: recent }).selected, t).toEqual([]);
+    }
+  });
+  it("«ønsker at du sjekker github» etter selvdiagnose gir kun GitHub-verktøy (ingen arvede executive-/run_rate-verktøy)", () => {
+    const sel = selectSurfaceTools("web_chat", "ønsker at du sjekker github", mappings, { recent_owner_messages: ["hvor bra yter du", "hva koster du"] });
+    const ids = new Set(sel.selected.map((m) => m.tool_id));
+    expect(ids.has("github")).toBe(true);
+    expect(ids.has("executive")).toBe(false);
+    expect(ids.has("run_rate")).toBe(false);
+  });
+});
