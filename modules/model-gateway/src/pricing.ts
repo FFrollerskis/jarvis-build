@@ -9,6 +9,8 @@ export interface TokenRate {
   output_per_1k_ore: number;
   /** Rabattert pris for cache-treff der provider rapporterer det. */
   cached_per_1k_ore?: number;
+  /** D-432: pris for skriving til prompt-cachen. Standard 1,25x vanlig input (Anthropic 5-minutters cache). */
+  cache_write_per_1k_ore?: number;
   /**
    * D-81 (§7 pris-sannhet): eksplisitt skiller en BEKREFTET NÅVÆRENDE
    * leverandørpris fra en PERMANENT modellegenskap - "gratis i dag" er ALDRI
@@ -119,14 +121,16 @@ export function costOre(
   table: PricingTable,
   provider: string,
   model: string,
-  usage: { input_tokens: number; output_tokens: number; cached_tokens?: number }
+  usage: { input_tokens: number; output_tokens: number; cached_tokens?: number; cache_write_tokens?: number }
 ): number {
   const rate = rateFor(table, provider, model);
   const cached = usage.cached_tokens ?? 0;
-  const freshInput = Math.max(0, usage.input_tokens - cached);
+  const written = usage.cache_write_tokens ?? 0;
+  const freshInput = Math.max(0, usage.input_tokens - cached - written);
   return Math.ceil(
     (freshInput / 1000) * rate.input_per_1k_ore +
       (cached / 1000) * (rate.cached_per_1k_ore ?? rate.input_per_1k_ore) +
+      (written / 1000) * (rate.cache_write_per_1k_ore ?? rate.input_per_1k_ore * 1.25) +
       (usage.output_tokens / 1000) * rate.output_per_1k_ore
   );
 }
