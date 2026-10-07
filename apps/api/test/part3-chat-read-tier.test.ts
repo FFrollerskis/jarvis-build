@@ -56,7 +56,10 @@ describe("lese-nivået er låst til ren lesing", () => {
   it("manifest-invariantene holder med lese-nivået på web_chat, og ingen annen flate fikk det", () => {
     expect(() => assertManifestInvariants(buildToolManifest(defs))).not.toThrow();
     for (const s of ["telegram", "background", "coding"] as const) {
-      expect(SURFACE_TOOL_GRANTS[s].length).toBeLessThanOrEqual(5);
+      // D-427: bakgrunn har i tillegg GitHub-lesing fra lese-nivået (kun github, kun ren lesing).
+      const githubReads = s === "background" ? CHAT_READ_TIER.filter((g) => g.tool_id === "github").length : 0;
+      expect(SURFACE_TOOL_GRANTS[s].length).toBeLessThanOrEqual(5 + githubReads);
+      if (s === "background") for (const g of SURFACE_TOOL_GRANTS.background) expect(["email", "calendar", "github", "executive", "memory"], g.tool_id).toContain(g.tool_id);
       expect(SURFACE_TOOL_GRANTS[s].some((g) => /^finance/.test(g.tool_id)), s).toBe(false);
     }
     // D-382: tale får lese-nivået uten finans - og aldri en handling.
