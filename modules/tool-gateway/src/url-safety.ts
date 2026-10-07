@@ -51,7 +51,9 @@ export function assertSafeVendorUrl(raw: string): string {
   if (path.split("/").some((segment) => segment !== "" && isDotSegment(segment))) throw new UnsafeVendorUrlError("dot_segment");
   // Parseren må ende på NØYAKTIG samme vert og sti som den rå strengen (ingen stille normalisering).
   const parsed = new URL(raw);
-  if (parsed.host.toLowerCase() !== m[1]!.toLowerCase() || parsed.pathname !== (path === "" ? "/" : path)) {
+  // `new URL` fjerner standardporten (`:80` på http, `:443` på https) fra `host` - det er ingen farlig normalisering, så den strippes også fra den rå verten.
+  const rawHost = m[1]!.toLowerCase().replace(raw.toLowerCase().startsWith("https:") ? /:443$/ : /:80$/, "");
+  if (parsed.host.toLowerCase() !== rawHost || parsed.pathname !== (path === "" ? "/" : path)) {
     throw new UnsafeVendorUrlError("normalization_changed_url");
   }
   return raw;

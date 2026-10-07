@@ -1,6 +1,6 @@
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolTransport } from "./gateway.ts";
-import { isRetrySafeStatus, VENDOR_FETCH_TIMEOUT_MS } from "./url-safety.ts";
+import { guardedFetch, isRetrySafeStatus, VENDOR_FETCH_TIMEOUT_MS } from "./url-safety.ts";
 
 /**
  * D-338 (Tobias direkte i chat: "ja bygg mcp zapier" - svarer på Q-40 (a) MED
@@ -114,7 +114,7 @@ export class McpZapierTransport implements ToolTransport {
     const host = safeHostFor(credential);
     let lastError: Error | undefined;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const response = await fetch(credential, {
+      const response = await guardedFetch(credential, {
         method: "POST",
         signal: AbortSignal.timeout(VENDOR_FETCH_TIMEOUT_MS),
         headers: {
