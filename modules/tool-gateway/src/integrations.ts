@@ -249,7 +249,7 @@ export function firstWaveTools(
       // og en innsetting midt i listen ville forskjøvet dem (regresjon funnet
       // og fikset under denne BO-en).
       tool_id: "github", action: "read_repo_meta", description: "Les repo-metadata (untrusted ingestion)",
-      input_schema: record({ repo: z.string() }), capability_class: "A",
+      input_schema: record({ repo: z.string().optional() }), capability_class: "A",
       scopes: ["repo:read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30,
       credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "untrusted", transport: transport("github")
@@ -1467,42 +1467,42 @@ export function firstWaveTools(
     // indekserer dette arrayet posisjonelt.
     {
       tool_id: "github", action: "list_branches", description: "List branches i et repo",
-      input_schema: record({ repo: z.string() }), capability_class: "A",
+      input_schema: record({ repo: z.string().optional() }), capability_class: "A",
       scopes: ["repo:read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30,
       credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "untrusted", transport: transport("github")
     },
     {
       tool_id: "github", action: "get_branch", description: "Les én branch (navn/sha/protected) - brukes også som preflight/recovery-grunnlag før delete_branch",
-      input_schema: record({ repo: z.string(), branch: z.string() }), capability_class: "A",
+      input_schema: record({ repo: z.string().optional(), branch: z.string() }), capability_class: "A",
       scopes: ["repo:read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60,
       credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "untrusted", transport: transport("github")
     },
     {
       tool_id: "github", action: "get_commit", description: "Les én commit (sha/melding/forfatter/dato)",
-      input_schema: record({ repo: z.string(), ref: z.string() }), capability_class: "A",
+      input_schema: record({ repo: z.string().optional(), ref: z.string() }), capability_class: "A",
       scopes: ["repo:read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30,
       credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "untrusted", transport: transport("github")
     },
     {
       tool_id: "github", action: "list_pull_requests", description: "List PR-er (valgfri state: open/closed/all)",
-      input_schema: record({ repo: z.string(), state: z.string().optional() }), capability_class: "A",
+      input_schema: record({ repo: z.string().optional(), state: z.string().optional() }), capability_class: "A",
       scopes: ["repo:read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30,
       credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "untrusted", transport: transport("github")
     },
     {
       tool_id: "github", action: "get_pull_request", description: "Les én PR (inkl. mergeable/mergeable_state) - brukes også som preflight/target-re-read før merge_pr",
-      input_schema: record({ repo: z.string(), pr_number: z.string() }), capability_class: "A",
+      input_schema: record({ repo: z.string().optional(), pr_number: z.string() }), capability_class: "A",
       scopes: ["repo:read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60,
       credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "untrusted", transport: transport("github")
     },
     {
       tool_id: "github", action: "list_workflow_runs", description: "List Actions-workflow-kjøringer (valgfri branch/status-filter)",
-      input_schema: record({ repo: z.string(), branch: z.string().optional(), status: z.string().optional() }), capability_class: "A",
+      input_schema: record({ repo: z.string().optional(), branch: z.string().optional(), status: z.string().optional() }), capability_class: "A",
       scopes: ["repo:read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30,
       credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "untrusted", transport: transport("github")
@@ -1516,7 +1516,7 @@ export function firstWaveTools(
     },
     {
       tool_id: "github", action: "list_workflow_jobs", description: "List jobber/steg for én Actions-workflow-kjøring (hvilken jobb/steg feilet)",
-      input_schema: record({ repo: z.string(), run_id: z.string() }), capability_class: "A",
+      input_schema: record({ repo: z.string().optional(), run_id: z.string() }), capability_class: "A",
       scopes: ["repo:read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60,
       credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "untrusted", transport: transport("github")
