@@ -130,17 +130,10 @@ const killSwitch = new KillSwitch(pool, ownerControlAuthority);
 await killSwitch.restore();
 const ownerControls = new OwnerControls(killSwitch, pool, ownerControlAuthority);
 await ownerControls.restore();
-// D-104 (UA-5 Production Operations Control Plane v1): SAMME infra-gate-
-// wiring-mønster som apps/api/src/main.ts. ÆRLIG begrensning (uendret fra
-// den allerede eksisterende, BEVISST UTENFOR K1 sitt omfang - se D-164):
-// dette er en EGEN, prosess-lokal `InfraExecutionGate`-instans - en pause
-// utløst via api-prosessens `/infra/pause`-HTTP-rute endrer IKKE denne
-// workerprosessens egen gate-tilstand (ingen cross-process-synkronisering
-// bygget denne sliceen - se D-104 i DECISIONS_AND_ASSUMPTIONS.md).
-// D-438 (JARVIS-025): den prosess-lokale begrensningen over er opphevet - modusen deles med API-et via owner_control_state (synk hvert 2. s).
-const infraGate = new InfraExecutionGate(undefined, createPgInfraModeStore(pool));
-await infraGate.refresh();
-infraGate.startSync();
+// D-104 (UA-5 Production Operations Control Plane v1): SAMME infra-gate-wiring-mønster som apps/api/src/main.ts. D-438 (JARVIS-025): modusen er DELT med
+// api-prosessen via `owner_control_state` og leses LIVE av `PolicyGateway` (en pause via api-ets `/infra/pause` stanser derfor også workeren umiddelbart).
+// Workeren har ingen eier-vendt rute som endrer modusen; autoriteten settes likevel likt, så en varig overgang aldri kan skje uten eier.
+const infraGate = new InfraExecutionGate(undefined, createPgInfraModeStore(pool), ownerControlAuthority);
 // D-105: "docker" lagt til (samme rasjonale som apps/api/src/main.ts).
 const infraToolIds = new Set(["github", "docker"]);
 const deviceRegistry = new PgDeviceRegistry(pool, owner.tenant_id);

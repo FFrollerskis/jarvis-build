@@ -198,7 +198,8 @@ export function isSelfRecoveryAction(toolId: string, action: string): boolean {
 
 /**
  * D-438: delt lagring av global infra-modus i `owner_control_state` (kind `infra_mode`, mål `GLOBAL`). «Rad = aktiv (DEGRADED/PAUSED), ingen rad =
- * NORMAL»; `reason` bærer JSON {mode, reason, at}. Ugyldig JSON/ukjent modus tolkes fail-CLOSED som PAUSED (aldri stille NORMAL).
+ * NORMAL»; `reason` bærer JSON {mode, reason, at}. Ugyldig JSON/ukjent modus tolkes fail-CLOSED som PAUSED (aldri stille NORMAL). NORMAL lagres aldri -
+ * `clear()` er den ENE måten å løsne på.
  */
 export function createPgInfraModeStore(pool: pg.Pool): import("./infra-execution-gate.ts").InfraModeStore {
   const KIND = "infra_mode";
@@ -218,10 +219,6 @@ export function createPgInfraModeStore(pool: pg.Pool): import("./infra-execution
       return { mode: "PAUSED", reason: "infra_mode_state_unreadable", at: row.changed_at };
     },
     async write(state, actorPersonId) {
-      if (state.mode === "NORMAL") {
-        await deleteControlState(pool, KIND, TARGET);
-        return;
-      }
       await writeControlState(pool, KIND, TARGET, JSON.stringify({ mode: state.mode, reason: state.reason, at: state.at }), actorPersonId);
     },
     async clear() {

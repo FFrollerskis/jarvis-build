@@ -13,7 +13,7 @@ import {
   acquireContainerLogs, attemptRecovery, correlateDbState, correlateIncident, dockerProviderStatus, executeInfraMutation,
   getInfraExecution, ingestGithubDeployment, proposeRepairTask, type DeploymentService, type DiagnosisService, type IncidentService
 } from "@jarvis/incidents";
-import type { InfraExecutionGate, OwnerControls, PolicyGateway } from "@jarvis/policy";
+import { OwnerControlUnauthorizedError, type InfraExecutionGate, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
 import type { InProcessWorker, TaskService } from "@jarvis/tasks";
 import type { DockerMutationAction, ToolGateway } from "@jarvis/tool-gateway";
 import {
@@ -1740,23 +1740,26 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       });
       if (decision.decision !== "ALLOW") return json(res, 403, { decision: decision.decision, reason: decision.reason });
       const reason = fieldOptionalString(authed.body, "reason");
-      // D-438: varig overgang (delt med workeren). Strammer vi inn og lagringen feiler, er DENNE prosessen likevel stanset - kalleren får feilen, ikke en falsk suksess.
+      // D-438: varig overgang (delt med workeren), kun for eieren. Feiler lagringen etter en innstramming, er DENNE prosessen likevel stanset (strengeste-av) - men
+      // kalleren får feilen, ikke en falsk suksess: den delte modusen (og dermed workeren) er da IKKE endret.
       try {
         if (action === "pause") await infraGate.pauseDurable(reason ?? "owner_requested", authed.identity.person_id);
         else if (action === "degrade") await infraGate.degradeDurable(reason ?? "owner_requested", authed.identity.person_id);
-        else await infraGate.resumeDurable();
+        else await infraGate.resumeDurable(authed.identity.person_id);
       } catch (err) {
-        return json(res, 500, { error: "infra_mode_persist_failed", detail: (err as Error).message, state: infraGate.current(), request_id: requestIdOf(res) });
+        if (err instanceof OwnerControlUnauthorizedError) return json(res, 403, { error: "owner_control_unauthorized", request_id: requestIdOf(res) });
+        return domainFailure(res, 500, "infra_mode_persist_failed", err);
       }
-      return json(res, 200, { state: infraGate.current() });
+      return json(res, 200, { state: (await infraGate.statusDurable()).state });
     }
 
     if (req.method === "POST" && url.pathname === "/infra/status") {
       const authed = await authedRequest(req, res, deps, []);
       if (!authed) return;
+      const infra = await infraGate.statusDurable();
       return json(res, 200, {
-        infra_mode: infraGate.current(),
-        infra_mode_sync_error: infraGate.lastSyncError,
+        infra_mode: infra.state,
+        infra_mode_shared_readable: infra.shared_readable,
         connector_health: Object.fromEntries(gateway.health),
         frozen_connectors: controls ? ["github"].filter((id) => controls.isFrozen(id)) : []
       });

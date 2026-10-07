@@ -37,6 +37,14 @@ let devices: DeviceService;
 const TENANT_A = "tenant-cp-a";
 const TENANT_B = "tenant-cp-b";
 
+/** D-438: delt infra-modus med fake lagring + eier-autoritet (person-cp-a) - brukt av BÅDE policy og /infra-rutene. */
+const infraStoreState: { row: { mode: "PAUSED" | "DEGRADED"; reason?: string; at: string } | null; failWrite: boolean; failRead: boolean } = { row: null, failWrite: false, failRead: false };
+const infraGate = new InfraExecutionGate(undefined, {
+  async read() { if (infraStoreState.failRead) throw new Error("secret-db-host:5432 refused"); return infraStoreState.row; },
+  async write(state) { if (infraStoreState.failWrite) throw new Error("violates constraint owner_control_state_xyz on role jarvis_app"); infraStoreState.row = state; },
+  async clear() { if (infraStoreState.failWrite) throw new Error("secret-db-host:5432 refused"); infraStoreState.row = null; }
+}, { owner_person_id: "person-cp-a" });
+
 const keys: Record<string, TestDeviceKey> = { "cp-dev-a": generateDeviceKey(), "cp-dev-a2": generateDeviceKey(), "cp-dev-b": generateDeviceKey(), "cp-dev-race": generateDeviceKey() };
 const SUBJECT_A = { device_id: "cp-dev-a", person_id: "person-cp-a", tenant_id: TENANT_A, memory_space: "business" } as const;
 const SUBJECT_A2 = { device_id: "cp-dev-a2", person_id: "person-cp-a", tenant_id: TENANT_A, memory_space: "business" } as const;
@@ -96,7 +104,7 @@ beforeAll(async () => {
   appPool = createPool({ host: "127.0.0.1", port: leased.port, database: "jarvis_test", user: "jarvis_test_cp", password: "pw2" });
 
   const policy = new PolicyGateway({
-    devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch: new KillSwitch(), infraGate: new InfraExecutionGate(),
+    devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch: new KillSwitch(), infraGate,
     infraToolIds: new Set(["docker"]), authority: { owner_person_id: "person-cp-a", owner_tenants: [TENANT_A] }
   });
   const secrets: SecretProvider = { name: "fake", get: async () => "fake" };
@@ -115,7 +123,7 @@ beforeAll(async () => {
     channelAuthority: new ChannelSessionAuthority({ pool: appPool, devices, sessions: sessionService, identity: identityService, grants: grantService }),
     policy, worker, tasks: taskService,
     conversation: new ConversationEngine({ messages: new MessageStore(appPool), context: new ContextBuilder(appPool), gateway: modelGateway, tasks: taskService, worker, trace: new MemoryTraceSink() }),
-    incidents: { service: incidentService, deployments: new DeploymentService(appPool), gateway, infraGate: new InfraExecutionGate(), pool: appPool },
+    incidents: { service: incidentService, deployments: new DeploymentService(appPool), gateway, infraGate, pool: appPool },
     rateLimits: { perIpPerMinute: 100_000, authPerIpPerMinute: 100_000, perDevicePerMinute: 100_000 }
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -340,6 +348,67 @@ describe("F: rate limits (per-IP, auth-ruter og per-enhet)", () => {
       // andre ruter påvirkes ikke av auth-budsjettet
       expect((await fetch(`${s.url}/health`)).status).toBe(200);
     } finally { await s.close(); }
+  });
+});
+
+describe("H: delt infra-modus via /infra-rutene (D-438)", () => {
+  const reset = () => { infraStoreState.row = null; infraStoreState.failWrite = false; infraStoreState.failRead = false; infraGate.resume(); };
+
+  it("eieren kan pause/degrade/resume; modusen lagres delt og status viser den (strengeste-av)", async () => {
+    reset();
+    const grant = await mintGrant(baseUrl, SUBJECT_A, keys["cp-dev-a"]!);
+    const paused = await post("/infra/pause", { grant_token: grant, reason: "vedlikehold" });
+    expect(paused.status).toBe(200);
+    expect((paused.body["state"] as { mode: string }).mode).toBe("PAUSED");
+    expect(infraStoreState.row).toMatchObject({ mode: "PAUSED", reason: "vedlikehold" });
+    const status = await post("/infra/status", { grant_token: grant });
+    expect((status.body["infra_mode"] as { mode: string }).mode).toBe("PAUSED");
+    expect(status.body["infra_mode_shared_readable"]).toBe(true);
+    const degraded = await post("/infra/degrade", { grant_token: grant, reason: "treg" });
+    expect(degraded.status).toBe(200);
+    expect(infraStoreState.row?.mode).toBe("DEGRADED");
+    const resumed = await post("/infra/resume", { grant_token: grant });
+    expect(resumed.status).toBe(200);
+    expect((resumed.body["state"] as { mode: string }).mode).toBe("NORMAL");
+    expect(infraStoreState.row).toBeNull();
+  });
+
+  it("en annen person (annen tenant, aktiv autentisering) får 403 owner_control_unauthorized og ingenting lagres", async () => {
+    reset();
+    const grantB = await mintGrant(baseUrl, SUBJECT_B, keys["cp-dev-b"]!);
+    for (const path of ["/infra/pause", "/infra/degrade", "/infra/resume"]) {
+      const r = await post(path, { grant_token: grantB, reason: "x" });
+      expect(r.status, path).toBe(403);
+      expect(r.body["error"], path).toBe("owner_control_unauthorized");
+    }
+    expect(infraStoreState.row).toBeNull();
+    expect(infraGate.current().mode).toBe("NORMAL");
+  });
+
+  it("skrivefeil gir 500 med generisk kode (ingen DB-detaljer til klienten), ingen falsk suksess - og API-prosessen er likevel stanset", async () => {
+    reset();
+    const grant = await mintGrant(baseUrl, SUBJECT_A, keys["cp-dev-a"]!);
+    infraStoreState.failWrite = true;
+    const r = await post("/infra/pause", { grant_token: grant, reason: "x" });
+    expect(r.status).toBe(500);
+    expect(r.body["error"]).toBe("infra_mode_persist_failed");
+    expect(JSON.stringify(r.body)).not.toMatch(/secret-db-host|constraint|jarvis_app/);
+    expect(infraStoreState.row).toBeNull(); // den delte modusen er IKKE endret
+    infraStoreState.failWrite = false;
+    const status = await post("/infra/status", { grant_token: grant });
+    expect((status.body["infra_mode"] as { mode: string }).mode).toBe("PAUSED"); // strengeste-av: lokal pause består
+    reset();
+  });
+
+  it("lesefeil på delt tilstand: status sier shared_readable=false uten å lekke feilteksten", async () => {
+    reset();
+    const grant = await mintGrant(baseUrl, SUBJECT_A, keys["cp-dev-a"]!);
+    infraStoreState.failRead = true;
+    const status = await post("/infra/status", { grant_token: grant });
+    expect(status.status).toBe(200);
+    expect(status.body["infra_mode_shared_readable"]).toBe(false);
+    expect(JSON.stringify(status.body)).not.toMatch(/secret-db-host/);
+    reset();
   });
 });
 
