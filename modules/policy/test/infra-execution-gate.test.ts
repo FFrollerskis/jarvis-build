@@ -265,6 +265,59 @@ describe("D-438: delt modus, live-lesing (uten DB - fake lagring)", () => {
     expect(local.check("B")).toBe("infra_paused");
   });
 
+  it("degrade FRA pause er en løsning: lagres FØRST, og feiler lagringen forblir modusen PAUSED (ingen løsning ledsaget av en feilmelding)", async () => {
+    const f = fakeStore();
+    const gate = new InfraExecutionGate(undefined, f.store, OWNER);
+    await gate.pauseDurable("x", "owner-1");
+    f.flags.failWrite = true;
+    await expect(gate.degradeDurable("y", "owner-1")).rejects.toThrow("db_down");
+    expect(gate.current().mode).toBe("PAUSED");
+    expect(await gate.checkDurable("B")).toBe("infra_paused");
+    f.flags.failWrite = false;
+    await gate.degradeDurable("y", "owner-1");
+    expect(gate.current().mode).toBe("DEGRADED");
+    expect(f.row?.mode).toBe("DEGRADED");
+  });
+
+  it("degrade når den DELTE modusen er PAUSED (satt av en annen prosess) er også en løsning; og når den delte modusen ikke kan leses antas det verste", async () => {
+    const f = fakeStore();
+    const gate = new InfraExecutionGate(undefined, f.store, OWNER);
+    f.row = { mode: "PAUSED", at: "2026-10-07T00:00:00Z" };
+    f.flags.failWrite = true;
+    await expect(gate.degradeDurable("y", "owner-1")).rejects.toThrow("db_down");
+    expect(gate.current().mode).toBe("NORMAL"); // lokalt ikke endret; delt PAUSED gjelder fortsatt
+    expect(await gate.checkDurable("B")).toBe("infra_paused");
+    f.flags.failWrite = false;
+    f.row = null;
+    f.flags.failRead = true;
+    f.flags.failWrite = true;
+    await expect(gate.degradeDurable("z", "owner-1")).rejects.toThrow("db_down");
+    expect(gate.current().mode).toBe("NORMAL"); // kunne ikke se delt tilstand -> lagre først -> feilet -> uendret
+  });
+
+  it("degrade fra NORMAL er en innstramming: settes lokalt først og består selv om lagringen feiler", async () => {
+    const f = fakeStore();
+    const gate = new InfraExecutionGate(undefined, f.store, OWNER);
+    f.flags.failWrite = true;
+    await expect(gate.degradeDurable("y", "owner-1")).rejects.toThrow("db_down");
+    expect(gate.current().mode).toBe("DEGRADED");
+    expect(await gate.checkDurable("D")).toBe("infra_degraded_blocks_class_d");
+  });
+
+  it("statusDurable skiller lokal og delt modus: en pause som aldri nådde delt lagring er IKKE 'in_sync' (workeren er ikke stanset)", async () => {
+    const f = fakeStore();
+    const api = new InfraExecutionGate(undefined, f.store, OWNER);
+    f.flags.failWrite = true;
+    await expect(api.pauseDurable("x", "owner-1")).rejects.toThrow("db_down");
+    f.flags.failWrite = false;
+    const s = await api.statusDurable();
+    expect(s).toMatchObject({ state: { mode: "PAUSED" }, local: { mode: "PAUSED" }, shared: null, shared_readable: true, in_sync: false });
+    await api.pauseDurable("x", "owner-1");
+    expect(await api.statusDurable()).toMatchObject({ shared: { mode: "PAUSED" }, in_sync: true });
+    f.flags.failRead = true;
+    expect(await api.statusDurable()).toMatchObject({ shared_readable: false, in_sync: false });
+  });
+
   it("PolicyGateway håndhever den delte modusen LIVE (ikke en cache): en pause i en annen prosess avslår neste kall", async () => {
     const f = fakeStore();
     const gate = new InfraExecutionGate(undefined, f.store, OWNER);

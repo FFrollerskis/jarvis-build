@@ -364,6 +364,8 @@ describe("H: delt infra-modus via /infra-rutene (D-438)", () => {
     const status = await post("/infra/status", { grant_token: grant });
     expect((status.body["infra_mode"] as { mode: string }).mode).toBe("PAUSED");
     expect(status.body["infra_mode_shared_readable"]).toBe(true);
+    expect(status.body["infra_mode_in_sync"]).toBe(true);
+    expect((status.body["infra_mode_shared"] as { mode: string }).mode).toBe("PAUSED");
     const degraded = await post("/infra/degrade", { grant_token: grant, reason: "treg" });
     expect(degraded.status).toBe(200);
     expect(infraStoreState.row?.mode).toBe("DEGRADED");
@@ -397,6 +399,8 @@ describe("H: delt infra-modus via /infra-rutene (D-438)", () => {
     infraStoreState.failWrite = false;
     const status = await post("/infra/status", { grant_token: grant });
     expect((status.body["infra_mode"] as { mode: string }).mode).toBe("PAUSED"); // strengeste-av: lokal pause består
+    expect(status.body["infra_mode_shared"]).toBeNull();
+    expect(status.body["infra_mode_in_sync"]).toBe(false); // IKKE en vellykket delt pause - workeren er ikke stanset
     reset();
   });
 
@@ -407,6 +411,7 @@ describe("H: delt infra-modus via /infra-rutene (D-438)", () => {
     const status = await post("/infra/status", { grant_token: grant });
     expect(status.status).toBe(200);
     expect(status.body["infra_mode_shared_readable"]).toBe(false);
+    expect(status.body["infra_mode_in_sync"]).toBe(false);
     expect(JSON.stringify(status.body)).not.toMatch(/secret-db-host/);
     reset();
   });

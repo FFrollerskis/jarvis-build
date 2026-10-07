@@ -1759,7 +1759,11 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       const infra = await infraGate.statusDurable();
       return json(res, 200, {
         infra_mode: infra.state,
+        infra_mode_local: infra.local,
+        infra_mode_shared: infra.shared,
         infra_mode_shared_readable: infra.shared_readable,
+        // false = en innstramming gjelder KUN denne prosessen (f.eks. en pause som ikke fikk lagret) eller den delte modusen kan ikke leses: workeren er da ikke nødvendigvis stanset.
+        infra_mode_in_sync: infra.in_sync,
         connector_health: Object.fromEntries(gateway.health),
         frozen_connectors: controls ? ["github"].filter((id) => controls.isFrozen(id)) : []
       });
