@@ -127,4 +127,10 @@ describe("D-425 metaklage og fokusert utvalg", () => {
     expect(ids.has("executive")).toBe(false);
     expect(ids.has("run_rate")).toBe(false);
   });
+  it("klage + egen forespørsel i samme melding («… spør om\nsjekk github») gir fortsatt GitHub-verktøy", () => {
+    const sel = selectSurfaceTools("web_chat", "hvorfor svarer du på noe annet en det jeg spør om\nsjekk github", mappings, { recent_owner_messages: ["hva koster du"] });
+    const ids = new Set(sel.selected.map((m) => m.tool_id));
+    expect(ids.has("github")).toBe(true);
+    expect(ids.has("run_rate")).toBe(false);
+  });
 });
