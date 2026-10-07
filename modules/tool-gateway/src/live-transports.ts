@@ -1538,12 +1538,32 @@ function toPullRequestSummary(pr: {
   };
 }
 
+/**
+ * D-429: repo-oppløsning i trusted kode. Modellen (spesielt en liten lokal) sender ofte bare «jarvisbuild» eller utelater repo - da avvistes
+ * kallet før det nådde GitHub, og jobben «svarte» med gjetting. Lese-handlingene faller nå til eierens konfigurerte repo
+ * (`JARVIS_GITHUB_REPO`, ellers `tsworkflow/jarvisbuild`) når repo mangler, og et navn uten `eier/` får eierens eier. Et eksplisitt `eier/navn`
+ * brukes uendret, og alt går fortsatt gjennom `assertGithubRepoSlug`. Skrive-/kontrollhandlinger får aldri standardrepo ved manglende repo.
+ */
+const GITHUB_DEFAULT_REPO_ACTIONS: ReadonlySet<string> = new Set([
+  "get_branch", "get_commit", "get_pull_request", "list_branches", "list_pull_requests", "list_workflow_jobs", "list_workflow_runs", "read_repo_meta"
+]);
+export function resolveGithubRepo(action: string, raw: JsonValue | undefined, configured: string | undefined = process.env["JARVIS_GITHUB_REPO"]): string {
+  const fallback = typeof configured === "string" && /^[^/\s]+\/[^/\s]+$/.test(configured.trim()) ? configured.trim() : "tsworkflow/jarvisbuild";
+  const value = typeof raw === "string" ? raw.trim() : "";
+  if (value.length === 0) {
+    if (GITHUB_DEFAULT_REPO_ACTIONS.has(action)) return fallback;
+    throw new Error("github_missing_parameter:repo");
+  }
+  if (!value.includes("/") && GITHUB_DEFAULT_REPO_ACTIONS.has(action)) return `${fallback.split("/")[0]}/${value}`;
+  return value;
+}
+
 export class GithubTransport implements ToolTransport {
   /** D-97: `rateLimitController` er valgfri - UDEFINERT bevarer 100% av tidligere oppførsel (alle eksisterende kallesteder/tester som konstruerer `new GithubTransport()` uendret). Wired med en ekte kontroller kun i produksjon (`apps/api/src/main.ts`/`worker-main.ts`). */
   constructor(private readonly rateLimitController?: GithubRateLimitController) {}
 
   async invoke(action: string, parameters: Record<string, JsonValue>, credential: string, _context?: ToolInvocationContext) {
-    const repo = assertGithubRepoSlug(ghRequireString(parameters, "repo"));
+    const repo = assertGithubRepoSlug(resolveGithubRepo(action, parameters["repo"]));
     const base = `https://api.github.com/repos/${repo}`;
     const headers = githubHeaders(credential);
     const writeHeaders = githubHeaders(credential, { "content-type": "application/json" });
