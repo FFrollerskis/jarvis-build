@@ -364,7 +364,7 @@ const TRACE_STOPWORDS = new Set([
 function traceTokens(value: string): string[] {
   return (value.toLowerCase().match(/[\p{L}\p{N}]{4,}/gu) ?? []).filter((t) => !TRACE_STOPWORDS.has(t));
 }
-export function tracesToOwnerText(candidate: { content: string; subject?: string; keywords?: ReadonlyArray<string> }, ownerText: string): boolean {
+export function tracesToOwnerText(candidate: { content: string; subject?: string; keywords?: ReadonlyArray<string> | undefined }, ownerText: string): boolean {
   const own = new Set(traceTokens(ownerText).map((t) => t.slice(0, 5)));
   const distinctive = [...new Set([...traceTokens(candidate.content), ...(candidate.keywords ?? []).flatMap(traceTokens)].map((t) => t.slice(0, 5)))];
   if (distinctive.length === 0) return true;
