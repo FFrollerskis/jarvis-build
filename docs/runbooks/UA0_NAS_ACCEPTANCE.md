@@ -24,9 +24,9 @@ Lim utskriften (eller filen) inn i chatten, så vurderer jeg den.
 | C06 | lokal modellserver nåbar fra api-containeren, og `llama3.1:8b` + `bge-m3` finnes |
 | C07 | hvor chat gikk siste 24 t - WARN hvis det kostet penger i sky (D-402) |
 | C08 | feilede modellkall per leverandør siste 24 t |
-| C09 | EV-0 oppstartssjekk (konstitusjon/endringsregister) i api-loggen |
+| C09 | EV-0 oppstartssjekk (`ev0_constitution_boot`/`ev0_change_ledger_boot`) i api-loggen; usignert konstitusjon gir WARN |
 | C10 | backup er ≤ 25 t gammel, og ukryptert `stray/` er borte (D-370) |
-| C11 | tabeller uten RLS (skal kun være de dokumenterte globale) |
+| C11 | tabellene uten RLS er NØYAKTIG de 9 dokumenterte globale (ellers FAIL) |
 | C12 | api/worker kjører ikke som root, read-only rotfs, `cap_drop: ALL` |
 
 ## Tolkning

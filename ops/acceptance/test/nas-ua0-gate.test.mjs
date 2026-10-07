@@ -20,7 +20,7 @@ function fakeDocker(overrides = {}) {
     migrations: MIGS.join("\n"),
     vector: "vector", hnsw: "2", regclass: "t", delivered: "1", select1: "1",
     health: "200", models: "llama3.1:8b,bge-m3",
-    cost: "gemma_local:12 kall/0 øre", cloudOre: "0", fails: "", ev0: "ev0_boot constitution verified ledger ok", norls: "scheduler_state,capabilities",
+    cost: "gemma_local:12 kall/0 øre", cloudOre: "0", fails: "", ev0: '{"msg":"ev0_constitution_boot","status":"verified"} {"msg":"ev0_change_ledger_boot","status":"ok"}', norls: "capabilities,evolution_change_ledger,github_rate_limit_state,owner_control_state,scheduler_state,schema_migrations,self_modification_requests,situation_domain_pauses,telegram_poll_state",
     inspect: 'jarvis|true|["ALL"]',
     ...overrides
   };
@@ -82,11 +82,11 @@ describe("nas-ua0-gate.sh", () => {
   it("friskt system: alt PASS (backup ukjent uten JARVIS_BACKUP_DIR), exit 0, evidensfil uten hemmeligheter skrevet", () => {
     const r = run();
     expect(r.status, r.out).toBe(0);
-    for (const id of ["C01_compose_services", "C02_migrations_applied", "C03_pgvector_hnsw", "C04_schema_features", "C05_api_health", "C06_local_model", "C07_chat_cost_24h", "C08_provider_failures_24h", "C09_ev0_boot", "C12_container_hardening"]) {
+    for (const id of ["C01_compose_services", "C02_migrations_applied", "C03_pgvector_hnsw", "C04_schema_features", "C05_api_health", "C06_local_model", "C07_chat_cost_24h", "C08_provider_failures_24h", "C09_ev0_boot", "C11_rls_tables", "C12_container_hardening"]) {
       expect(r.out, id).toMatch(new RegExp(`${id}\\s+PASS`));
     }
     expect(r.out).toMatch(/C10_backup_freshness\s+UNKNOWN/);
-    expect(r.out).toMatch(/C11_rls_tables\s+WARN/);
+    expect(r.out).toMatch(/C11_rls_tables\s+PASS/);
     const m = r.out.match(/Evidens skrevet til: (.+)/);
     expect(m).not.toBeNull();
     const file = m[1].trim();
@@ -111,6 +111,17 @@ describe("nas-ua0-gate.sh", () => {
     const dead = run({}, { models: "ERR" });
     expect(dead.out).toMatch(/C06_local_model\s+FAIL/);
     expect(dead.status).toBe(1);
+  });
+
+  it("ev0-sjekken finner de faktiske loggnøklene; usignert konstitusjon gir WARN; ingen linjer gir UNKNOWN", () => {
+    expect(run({}, { ev0: '{"msg":"ev0_constitution_boot","status":"unsigned"}' }).out).toMatch(/C09_ev0_boot\s+WARN/);
+    expect(run({}, { ev0: "" }).out).toMatch(/C09_ev0_boot\s+UNKNOWN/);
+  });
+
+  it("RLS: ekstra tabell uten RLS er FAIL (avvik fra de dokumenterte globale)", () => {
+    const r = run({}, { norls: "capabilities,hemmelig_tabell" });
+    expect(r.out).toMatch(/C11_rls_tables\s+FAIL.*hemmelig_tabell/);
+    expect(r.status).toBe(1);
   });
 
   it("backup: fersk PASS, gammel og ukryptert stray/ gir WARN, manglende mappe FAIL", () => {
