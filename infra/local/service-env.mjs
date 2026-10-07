@@ -192,18 +192,17 @@ export const CONNECTOR_ENV = [
   "JARVIS_WALLESTER_TENANT_ID"
 ];
 /**
- * Q-46 / D-434 (minste privilegium): worker-containeren får KUN connector-variablene dens egne handlere faktisk bruker -
- * kodejobb (GitHub-token, git-credential), e-postvedlegg-ingestion (e-post/Google), bakgrunnsflatens lesing
- * (e-post, kalender, GitHub), Telegram-varsling (klasse D-varsler, watchdog) og de ikke-hemmelige mutasjonsmål-listene.
- * Finans-, annonse-, lagrings-, CRM-, overvåkings- og meldingsnøkler (alt annet i CONNECTOR_ENV) er api-only; en
- * bakgrunnsjobb kan ikke nå dem (bakgrunnsflaten er read-only: e-post/kalender/GitHub/executive/memory).
- * NB: dashbord-lagrede hemmeligheter ligger i Infisical (primær) og styres IKKE av denne listen - den begrenser kun env-fallbacken.
+ * Q-46 / D-434 + D-437 (minste privilegium, etter review): worker-containeren får KUN connector-variablene dens egne handlere faktisk bruker -
+ * kodejobb (GitHub-token, git-credential), e-postvedlegg-ingestion (e-post/Google), bakgrunnsflatens lesing (e-post, kalender, GitHub) og
+ * Telegram-varsling (klasse D-varsler, watchdog). I tillegg IKKE-hemmelige modusvariabler som styrer hvilket endepunkt en transport peker mot
+ * (Vipps/Neonomics/Wallester-miljø, Neonomics-realm) og support-innboksliste: uten dem ville en transport stille velge test/sandbox eller ignorere
+ * meldinger. Docker-/GCE-mutasjonsmål og `JARVIS_DOCKER_BIN` er IKKE med (workeren har ingen docker-socket; tom liste = ingen mutasjoner tillatt).
+ * Finans-, annonse-, lagrings-, CRM-, overvåkings- og meldingsnøkler (resten av CONNECTOR_ENV) er api-only; bakgrunnsflaten er read-only.
+ * NB (ærlig): dashbord-lagrede hemmeligheter ligger i Infisical (primær), og workeren beholder Infisical-maskinidentiteten (CORE_ENV) - denne
+ * listen begrenser KUN env-fallbacken, ikke hvelvtilgangen. Se D-437.
  */
 export const WORKER_CONNECTOR_ENV = [
-  "JARVIS_DOCKER_BIN",
-  "JARVIS_DOCKER_MUTATION_TARGETS",
   "JARVIS_EMAIL_TOKEN",
-  "JARVIS_GCE_MUTATION_TARGETS",
   "JARVIS_GITHUB_REPO",
   "JARVIS_GITHUB_TOKEN",
   "JARVIS_GIT_CREDENTIAL_TOKEN",
@@ -211,8 +210,13 @@ export const WORKER_CONNECTOR_ENV = [
   "JARVIS_GOOGLE_CLIENT_ID",
   "JARVIS_GOOGLE_CLIENT_SECRET",
   "JARVIS_GOOGLE_TOKEN",
+  "JARVIS_NEONOMICS_ENVIRONMENT",
+  "JARVIS_NEONOMICS_REALM",
+  "JARVIS_SUPPORT_INBOX_EMAILS",
   "JARVIS_TELEGRAM_CHAT_ID",
-  "JARVIS_TELEGRAM_TOKEN"
+  "JARVIS_TELEGRAM_TOKEN",
+  "JARVIS_VIPPS_ENVIRONMENT",
+  "JARVIS_WALLESTER_ENVIRONMENT"
 ];
 /** Webhook-hemmeligheter - KUN api (mottar webhooks). */
 export const WEBHOOK_ENV = [
@@ -284,7 +288,8 @@ export const FIXED_ENV = {
   worker: { JARVIS_DB_HOST: "postgres", JARVIS_DB_PORT: "5432", INFISICAL_URL: "http://infisical:8080", JARVIS_TRACE_FILE: "/tmp/traces.jsonl" }
 };
 
-const WORKER_EXCLUDES = new Set(["JARVIS_BRIEF_HOUR"]);
+// D-437: browser-gateway-token-hemmeligheten (HMAC-nøkkel for browser-kall) trengs ikke av den read-only bakgrunnsflaten.
+const WORKER_EXCLUDES = new Set(["JARVIS_BRIEF_HOUR", "JARVIS_BROWSER_GATEWAY_TOKEN_SECRET"]);
 
 /** Hva hver tjeneste får videresendt fra operatørens `.env` (interpolasjon `${NAVN:-}` i compose). */
 export const SERVICE_ENV = {

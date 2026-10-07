@@ -487,7 +487,9 @@ for (const tool of firstWaveTools({
       new MemoryWriter(pool, memoryEmbedding, new LlmExtractionAdapter(gateway, { maxConcurrent: envInt("JARVIS_MEMORY_EXTRACTION_CONCURRENCY", 1, { min: 1, max: 8 }) }), policy)
     )).filter((d) => d.action === "search"),
     ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, {
-      modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES, ...CHAT_READ_TIER, ...CHAT_ACT_TIER]
+      modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES, ...CHAT_READ_TIER, ...CHAT_ACT_TIER],
+      // D-437: workeren har snevret miljø (D-434) - «ikke konfigurert» her betyr «ikke synlig for workeren», ikke nødvendigvis «mangler».
+      evaluationCaveat: "Evaluert i worker-prosessen med snevret miljø: connectorer som kun er konfigurert via .env (ikke i hvelvet) vises som ikke konfigurert her selv om API-et har dem. Spør i chat for fullt bilde."
     }))).filter((d) => d.action === "get_capability_status")
   ]
 })) toolGateway.register(tool);
