@@ -21,6 +21,8 @@ export function summarizeCapabilityStatusNo(s: CapabilityStatus): string {
   if (missing.length > 0) lines.push(`Mangler oppsett: ${missing.map((t) => t.tool_id).join(", ")}.`);
   const bad = s.connector_health.filter((h) => h.state !== "healthy" && h.state !== "ok");
   if (bad.length > 0) lines.push(`Helseproblemer: ${bad.map((h) => `${h.tool_id} ${STATE_NO[h.state] ?? h.state}`).join(", ")}.`);
+  // D-437: små lokale modeller videreformidler KUN denne teksten (D-415) - forbeholdet må stå her, ellers får eieren høre at connectorer «mangler oppsett» som API-et faktisk har.
+  if (s.evaluation_caveat) lines.push(`Forbehold: ${s.evaluation_caveat}`);
   return lines.join("\n");
 }
 

@@ -254,3 +254,13 @@ describe("C: mesh-bridge - check_my_capabilities peker FAKTISK til executive.get
     expect(calls[0]!.servingModel).toEqual({ provider: "anthropic", model: "claude-sonnet-5" });
   });
 });
+
+describe("D-437: forbehold når statusen evalueres i en prosess med snevret miljø", () => {
+  it("evaluation_caveat følger svaret når satt (worker), og mangler ellers (api) - aldri skjult", async () => {
+    const withCaveat = await new ExecutiveService(fakeGateway(), { evaluationCaveat: "snevret miljø" }).getCapabilityStatus();
+    expect(withCaveat.evaluation_caveat).toBe("snevret miljø");
+    const without = await new ExecutiveService(fakeGateway()).getCapabilityStatus();
+    expect(without.evaluation_caveat).toBeUndefined();
+    expect("evaluation_caveat" in without).toBe(false);
+  });
+});
