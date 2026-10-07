@@ -1,14 +1,15 @@
 // Jarvis worker-prosess (BO-07): egen container/prosess som drenerer durable-køen.
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import "./normalize-env.ts";
-import { systemIdentity } from "@jarvis/contracts";
+import { envInt, systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit } from "./owner.ts";
 import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, ModelGateway, pricingFromEnv, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport, GmailTransport,
-  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, MeshToolExecutor, resolveModelToolSurface, chatReadTierMeshTools, BACKGROUND_GITHUB_READ, PgGithubRateLimitStore,
+  GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, MeshToolExecutor, resolveModelToolSurface, chatReadTierMeshTools, BACKGROUND_GITHUB_READ, PgGithubRateLimitStore,
+  CHAT_ACT_TIER, CHAT_READ_TIER, MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, memoryToolDefinitions,
   ToolGateway, assertManifestInvariants, buildToolManifest, createTurnContext, driveTransportsIfConfigured, firstWaveTools, jobIdentityFor, telegramClassDNotifier, parseDockerMutationTargets, parseGceMutationTargets
 } from "@jarvis/tool-gateway";
 import { BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
@@ -49,7 +50,8 @@ import {
   withSecretRedaction
 } from "@jarvis/tasks";
 import { KnowledgeSourceRegistry, emailIngestHandler } from "@jarvis/knowledge";
-import { createEmbeddingProviderFromEnv } from "@jarvis/memory";
+import { LlmExtractionAdapter, MemoryRetriever, MemoryWriter, createEmbeddingProviderFromEnv } from "@jarvis/memory";
+import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "@jarvis/executive";
 import {
   WatchdogEmergencyAlertSink, Watchdog, costExplosionCheck, costWarningCheck, databaseCheck, stuckTasksCheck,
   parseWatchdogIntervalMs, parseCostHardLimitOre
@@ -329,6 +331,8 @@ const microsoftGraphAuth = new MicrosoftGraphAuth({
   tenant: () => toolSecretProvider.get("JARVIS_MICROSOFT_TENANT_ID"),
   persist: (value) => toolGateway.setSecret("JARVIS_MICROSOFT_REFRESH_TOKEN", value)
 });
+// D-433: ÉN lokal embedding-leverandør for minneverktøyet (samme env-styrte factory som api; `assertLocalEmbedding` stopper en sky-provider).
+const memoryEmbedding = createEmbeddingProviderFromEnv();
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
   github: new GithubTransport(githubRateLimitController), telegram: telegramTransport,
@@ -470,7 +474,22 @@ for (const tool of firstWaveTools({
   // D-337: samme wiring-mønster som apps/api/src/main.ts.
   gceMutationTargets: parseGceMutationTargets(process.env["JARVIS_GCE_MUTATION_TARGETS"]),
   // D-388 (JARVIS-061): Home Assistant-verktøyene registreres med ekte transport - samme som apps/api/src/main.ts.
-  additionalTools: homeAssistantTools(new HomeAssistantTransport(() => toolSecretProvider.get("JARVIS_HA_BASE_URL"), () => toolSecretProvider.get("JARVIS_HA_ROOMS")))
+  additionalTools: [
+    ...homeAssistantTools(new HomeAssistantTransport(() => toolSecretProvider.get("JARVIS_HA_BASE_URL"), () => toolSecretProvider.get("JARVIS_HA_ROOMS"))),
+    // D-433 (JARVIS-025, valg B): workeren EIER nå `executive`-køen og må ha SAMME verktøy som bakgrunnsflaten gir (memory.search,
+    // executive.get_capability_status) - før dette manglet de her, så en jobb oppførte seg ulikt etter hvilken prosess som vant kø-racet.
+    // Samme konstruksjon som apps/api/src/main.ts (samme lokale embedding-leverandør, samme flateliste); selvmodell/SLO-lesere er kun for
+    // chat-flatens diagnoseverktøy og står ikke på bakgrunnsflaten.
+    // Minste privilegium: KUN de to handlingene bakgrunnsflaten er tildelt (memory.search og executive.get_capability_status) - ikke
+    // memory.propose og ikke resten av Executive Mode-flaten (angrepsflate/diagnose/kontroll hører hjemme i API-/HTTP-flaten, D-162).
+    ...memoryToolDefinitions(new MemorySearchTransport(
+      new MemoryRetriever(pool, memoryEmbedding),
+      new MemoryWriter(pool, memoryEmbedding, new LlmExtractionAdapter(gateway, { maxConcurrent: envInt("JARVIS_MEMORY_EXTRACTION_CONCURRENCY", 1, { min: 1, max: 8 }) }), policy)
+    )).filter((d) => d.action === "search"),
+    ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, {
+      modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES, ...CHAT_READ_TIER, ...CHAT_ACT_TIER]
+    }))).filter((d) => d.action === "get_capability_status")
+  ]
 })) toolGateway.register(tool);
 // REMEDIERING DEL 1 (JARVIS-002): SAMME eksplisitte lese-minimumssett som
 // apps/api/src/main.ts (`MODEL_SURFACE_ALLOWLIST`), begrenset til det som er
