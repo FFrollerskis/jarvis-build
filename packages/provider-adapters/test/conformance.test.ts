@@ -42,7 +42,8 @@ const CASES: Case[] = [
     make: () => new AnthropicAdapter("test-key", "test-model", "http://mock"),
     successBody: {
       content: [{ type: "text", text: "hei" }],
-      usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 2 },
+      // D-432: Anthropic rapporterer cache-treff UTENFOR input_tokens; adapteren normaliserer til totalt inn (8 + 2 = 10).
+      usage: { input_tokens: 8, output_tokens: 5, cache_read_input_tokens: 2 },
       stop_reason: "end_turn"
     },
     successHeaders: { "request-id": "req-2" },

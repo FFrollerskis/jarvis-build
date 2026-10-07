@@ -80,6 +80,11 @@ export interface ConversationDeps {
    * i oppstarten (`provider:model`, f.eks. `anthropic:claude-sonnet-5-5`). Gjelder aldri SECRET_RESTRICTED eller en eksplisitt eier-override.
    */
   toolTurnRoute?: { provider: string; model?: string } | null;
+  /**
+   * D-432: dagstak for verktøyturer til sky. Er dagens samlede modellkostnad >= `cap_ore` (eller kostnaden ikke kan leses), går verktøyturen til lokal
+   * modell og svaret får en fast merknad. Udefinert/null = ingen tak.
+   */
+  toolTurnDayCap?: { cap_ore: number; spentToday(tenantId: string): Promise<number> } | null;
   tools?: {
     definitions: ToolDefinition[];
     executorFor(identity: IdentityContext, turn?: TurnContext): ToolExecutor;
@@ -519,12 +524,29 @@ export class ConversationEngine {
       // ekte verktøy er valgt for turen (alt annet enn minne-reserven `memory__*`), går turen til Sonnet 5.5 (anthropic) - en 8B-modell
       // bruker verktøy upålitelig. Aldri for SECRET_RESTRICTED (helse/finans: kun lokal, D-378) og aldri over en eksplisitt eier-override.
       const toolRoute = this.deps.toolTurnRoute ?? null;
-      const toolsToCloud =
+      let toolsToCloud =
         toolRoute !== null &&
         usingDefaultGemmaPreference &&
         useTools &&
         sensitivityDecision.sensitivity !== "SECRET_RESTRICTED" &&
         toolDefinitions.some((d) => !d.name.startsWith("memory__"));
+      // D-432: dagstak. Sjekkes kun når turen faktisk ville gått til sky (ingen DB-spørring for vanlig prat). Kan kostnaden ikke leses, feiler vi lukket (lokalt).
+      let dayCapNote = "";
+      const dayCap = this.deps.toolTurnDayCap ?? null;
+      if (toolsToCloud && dayCap !== null) {
+        let capped = false;
+        try {
+          capped = (await dayCap.spentToday(identity.tenant_id)) >= dayCap.cap_ore;
+        } catch (err) {
+          capped = true;
+          console.error(JSON.stringify({ msg: "d432_day_cap_spend_unreadable_local", error: (err as Error).message.slice(0, 120) }));
+        }
+        if (capped) {
+          toolsToCloud = false;
+          dayCapNote = `\n\n(Dagstaket for sky på ${Math.round(dayCap.cap_ore / 100)} kr er nådd i dag, så dette svaret kom fra den lokale modellen. Taket nullstilles i morgen.)`;
+          console.log(JSON.stringify({ msg: "d432_tool_turn_day_cap_reached", cap_ore: dayCap.cap_ore }));
+        }
+      }
       const input = {
         tenant_id: identity.tenant_id,
         session_id: identity.session_id,
@@ -676,8 +698,11 @@ export class ConversationEngine {
           throw err;
         }
       }
-      await this.deps.messages.save(identity, "assistant", result.text);
-      return { reply: result.text, routed: "model", ...(confirmations.length > 0 ? { confirmations } : {}) };
+      // D-432: er sky-ruten stoppet av dagstaket, sier svaret det (aldri en stille nedgradering).
+      const replyText = dayCapNote ? `${result.text}${dayCapNote}` : result.text;
+      if (dayCapNote) onToken?.(dayCapNote);
+      await this.deps.messages.save(identity, "assistant", replyText);
+      return { reply: replyText, routed: "model", ...(confirmations.length > 0 ? { confirmations } : {}) };
     } catch (err) {
       if (err instanceof BudgetExceededError) {
         const reply = `Modellkall stoppet av budsjettvakten: ${err.message}`;
