@@ -228,6 +228,8 @@ export function selectSurfaceTools(
   const limits = SURFACE_LIMITS[surface];
   const granted = new Set(SURFACE_TOOL_GRANTS[surface].map((g) => `${g.tool_id}.${g.action}`));
   const allowed = candidates.filter((m) => granted.has(mappingKey(m)));
+  // D-424: småprat får ALDRI verktøy - heller ikke arvede fra tidligere meldinger (en «hei» etter en hjemmestyring-samtale ga ellers Home Assistant-verktøyene).
+  if (isSmallTalk(text)) return { selected: [], schema_tokens: 0, limits, dropped: allowed.map(mappingKey) };
   const overview = OVERVIEW.test(text);
   const wantsAction = ACTION_VERBS.test(text);
   const named = namedServices(text);

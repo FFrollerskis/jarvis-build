@@ -1069,6 +1069,28 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         return typeof text === "string" ? text : null;
       }
     },
+    // D-424: hurtigbanens «hva koster du» og «… i bakgrunnen» går gjennom Tool Gateway (Policy + revisjon) - samme verktøy modellen kan kalle.
+    costReport: {
+      async run(identity) {
+        const result = await toolGateway.execute({ identity, tool_id: "run_rate", action: "get_cost_overview", parameters: {} });
+        const text = result.ok ? (result.data as { summary_no?: unknown } | undefined)?.summary_no : undefined;
+        return typeof text === "string" ? text : null;
+      }
+    },
+    delegateBackground: {
+      async run(identity, prompt) {
+        const title = (prompt.split("\n")[0] ?? prompt).replace(/\s+/g, " ").trim().slice(0, 70).padEnd(3, ".");
+        const result = await toolGateway.execute({
+          identity, tool_id: "tasks", action: "delegate_background_task", parameters: { title, prompt: prompt.slice(0, 2000), use_tools: true },
+          idempotency_key: `fast-delegate:${identity.session_id}:${Date.now()}`
+        });
+        if (!result.ok) return null;
+        const data = result.data as { started?: unknown; message?: unknown } | undefined;
+        return data?.started === true
+          ? `Jobben «${title}» er startet i bakgrunnen. Jeg gir beskjed her når den er ferdig - du kan fortsette å snakke med meg.`
+          : typeof data?.message === "string" ? data.message : null;
+      }
+    },
     memory: {
       contextFor: (identity, userText) => memoryRetriever.contextFor(identity, userText),
       // D-384: minnets rom/sensitivitet må følge med til ruteren (helse/special ⇒ kun lokal modell) - uten dette ble det aldri klassifisert.

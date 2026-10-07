@@ -48,6 +48,15 @@ describe("D-415 småprat får ingen verktøy", () => {
   });
 });
 
+describe("D-424 småprat får ikke arvede verktøy", () => {
+  it("«hei» rett etter en kalender-/e-post-samtale gir fortsatt tomt utvalg (ikke de arvede tjenestene)", () => {
+    const recent = ["hva står i kalenderen i dag?", "og har jeg fått noen e-poster?"];
+    expect(selectSurfaceTools("web_chat", "hei", mappings, { recent_owner_messages: recent }).selected).toEqual([]);
+    // Oppfølgingsspørsmål uten tjenesteord arver fortsatt tjenesten (D-389 uendret).
+    expect(selectSurfaceTools("web_chat", "og den første, hva står i den?", mappings, { recent_owner_messages: recent }).selected.length).toBeGreaterThan(0);
+  });
+});
+
 describe("hard allowlist per flate", () => {
   it("ingen flate kan noensinne få et verktøy utenfor sin tildeling - selv om kandidatlisten inneholder ALT i registeret", () => {
     const registry = firstWaveTools({});

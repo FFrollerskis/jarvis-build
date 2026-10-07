@@ -182,7 +182,8 @@ export class TasksDelegateTransport implements ToolTransport {
       if ((await this.jobs.activeCount(identity)) >= MAX_ACTIVE_JOBS) {
         return { data: { started: false, reason: "too_many_active_jobs", message: `Det kjører allerede ${MAX_ACTIVE_JOBS} bakgrunnsjobber. Vent til en er ferdig.` } };
       }
-      const useTools = parameters["use_tools"] === true;
+      // D-424: standard er MED lese-verktøy (e-post/kalender/GitHub/minne - kun lesing); kun eksplisitt `false` gir en jobb uten verktøy.
+      const useTools = parameters["use_tools"] !== false;
       const taskId = `task-${randomUUID()}`;
       const result = await this.tasks.submit(identity, {
         task_id: taskId,
@@ -242,7 +243,7 @@ export function tasksDelegateToolDefinitions(transport: TasksDelegateTransport):
         "Legg en oppgave i bakgrunnen som en egen agent utfører mens du og Tobias fortsetter å snakke. Bruk det når Tobias ber om noe som tar tid " +
         "(undersøke, sammenstille, lage en oppsummering) eller sier at det kan kjøre i bakgrunnen. Jobben kun LESER (ingen endringer utad). " +
         "Svar Tobias kort med en gang etter at den er startet - resultatet kommer tilbake i chatten når det er ferdig. Skriv selvstendig " +
-        "oppgaveprompt med all kontekst agenten trenger; den ser ikke samtalen.",
+        "oppgaveprompt med all kontekst agenten trenger; den ser ikke samtalen. Jobben kan som standard lese e-post, kalender, GitHub og minne (kun lesing); sett use_tools=false bare hvis den ikke trenger det.",
       input_schema: record({
         title: z.string().min(3).max(80),
         prompt: z.string().min(10).max(2000),
