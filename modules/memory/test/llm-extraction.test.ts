@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CompleteInput } from "@jarvis/model-gateway";
 import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
-import { LlmExtractionAdapter, type MemoryExtractionCompleter } from "../src/extraction.ts";
+import { LlmExtractionAdapter, tracesToOwnerText, type MemoryExtractionCompleter } from "../src/extraction.ts";
 
 /**
  * D-300 (Tobias direkte i chat: "husker han ingenting... vi trodde det
@@ -128,7 +128,7 @@ describe("D: subject-normalisering", () => {
       structured_output: { candidates: [{ type: "relation", subject: "###", content: "Pappa heter Henrik og bor i Oslo", confidence: 0.7 }] }
     }));
     const extractor = new LlmExtractionAdapter(fake);
-    const candidates = await extractor.extract("noe tekst", identity("personal"), "trusted");
+    const candidates = await extractor.extract("Pappa heter Henrik og bor i Oslo", identity("personal"), "trusted");
     expect(candidates[0]?.subject).toBe("pappa.heter.henrik.og.bor");
   });
 });
@@ -223,7 +223,7 @@ describe("E (D-386): utvidet uttrekk - observasjonsdato, foregående turer, nøk
         ]
       }
     }));
-    const out = await new LlmExtractionAdapter(fake).extract("...", identity("personal"), "trusted", [{ type: "preference", subject: "tobias.kaffe", content: "Tobias liker kaffe." }]);
+    const out = await new LlmExtractionAdapter(fake).extract("Jeg skal til tannlegen Smil AS i Oslo neste fredag. Noe med dårlig dato. Jeg liker ikke kaffe lenger.", identity("personal"), "trusted", [{ type: "preference", subject: "tobias.kaffe", content: "Tobias liker kaffe." }]);
     expect(out).toHaveLength(3);
     expect(out[0]).toMatchObject({ subject: "tobias.tannlege", keywords: ["tannlegen smil as", "oslo"], importance: 9, event_time: "2026-10-09", event_time_raw: "neste fredag", op: "ADD", contradicts_existing: false, entities: [{ kind: "organisasjon", name: "Tannlegen Smil AS" }] });
     expect(out[1]).toMatchObject({ subject: "x.y", op: "ADD" });
@@ -236,5 +236,34 @@ describe("E (D-386): utvidet uttrekk - observasjonsdato, foregående turer, nøk
     const fake = new FakeCompleter(() => ({ text: "", structured_output: { candidates: [{ type: "relation", subject: "tobias.bosted", content: "Tobias bor i Trondheim.", confidence: 0.9 }] } }));
     const out = await new LlmExtractionAdapter(fake).extract("Jeg bor i Trondheim.", identity("personal"), "trusted");
     expect(out[0]).toMatchObject({ subject: "tobias.bosted", op: "ADD", keywords: [] });
+  });
+});
+
+describe("D-428: sporbarhetssperre (kandidater må stamme fra eierens siste ytring)", () => {
+  it("en kandidat hentet fra assistentens tidligere svar (ingen konkrete ord i eierens ytring) forkastes", async () => {
+    const fake = new FakeCompleter(() => ({
+      text: "",
+      structured_output: {
+        candidates: [
+          { type: "procedure", subject: "prosjekt.closearena.arbeidsforhold", content: "Når jeg er realistisk, så er dette hva jeg kan gjøre uten at du må gjøre alt selv", confidence: 0.8, keywords: [], importance: 5, event_time: "", event_time_raw: "", op: "ADD", contradicts: false, entities: [] },
+          { type: "relation", subject: "tobias.prosjekt", content: "Brukeren har prosjektet closearena.com", confidence: 0.9, keywords: ["closearena.com"], importance: 6, event_time: "", event_time_raw: "", op: "ADD", contradicts: false, entities: [] }
+        ]
+      }
+    }));
+    const out = await new LlmExtractionAdapter(fake).extract(
+      "Jeg har prosjektet closearena.com",
+      identity("personal"),
+      "trusted",
+      [],
+      { recent_turns: [{ role: "assistant", content: "Når jeg er realistisk, så er dette hva jeg kan gjøre uten at du må gjøre alt selv" }] }
+    );
+    expect(out.map((c) => c.subject)).toEqual(["tobias.prosjekt"]);
+  });
+
+  it("tracesToOwnerText: bøyning og omformulering består, fyllord/eierord alene teller ikke, INVALIDATE er uberørt", () => {
+    expect(tracesToOwnerText({ content: "Tobias bor i Trondheim." }, "Jeg bor i Trondheim.")).toBe(true);
+    expect(tracesToOwnerText({ content: "Brukeren har prosjektet closearena.com" }, "jeg driver closearena.com")).toBe(true);
+    expect(tracesToOwnerText({ content: "Brukeren elsker pizza" }, "jeg skal på kino")).toBe(false);
+    expect(tracesToOwnerText({ content: "Brukeren sier dette" }, "hva som helst")).toBe(true);
   });
 });

@@ -350,6 +350,27 @@ export function normalizeKeywords(raw: ReadonlyArray<string> | undefined): strin
   return out;
 }
 
+/**
+ * D-428: sporbarhetssperre. En liten lokal modell kan trekke ut «fakta» fra de foregående turene (assistentens egne setninger) selv om
+ * prompten forbyr det - og de lagres da som betrodd eier-minne. Deterministisk regel uavhengig av modellens ordlyd: en kandidat må dele minst
+ * ett konkret ord (>= 4 tegn, sammenlignet på 5-tegns prefiks for bøying, ikke et fyll-/eierord) med eierens SISTE ytring. Har kandidaten
+ * konkrete ord og ingen av dem står i ytringen, stammer den ikke fra eierens ord og forkastes.
+ */
+const TRACE_STOPWORDS = new Set([
+  "dette", "deres", "hadde", "være", "blir", "skal", "ikke", "fordi", "hvor", "hvis", "uten", "gjøre", "faktisk", "også", "veldig",
+  "noen", "disse", "denne", "alle", "andre", "mellom", "etter", "eller", "siden",
+  "brukeren", "brukerens", "eieren", "eierens", "tobias", "jarvis", "charlie", "personen", "samtalen", "assistenten", "sier", "snakker"
+]);
+function traceTokens(value: string): string[] {
+  return (value.toLowerCase().match(/[\p{L}\p{N}]{4,}/gu) ?? []).filter((t) => !TRACE_STOPWORDS.has(t));
+}
+export function tracesToOwnerText(candidate: { content: string; subject?: string; keywords?: ReadonlyArray<string> }, ownerText: string): boolean {
+  const own = new Set(traceTokens(ownerText).map((t) => t.slice(0, 5)));
+  const distinctive = [...new Set([...traceTokens(candidate.content), ...(candidate.keywords ?? []).flatMap(traceTokens)].map((t) => t.slice(0, 5)))];
+  if (distinctive.length === 0) return true;
+  return distinctive.some((t) => own.has(t));
+}
+
 /** D-402: enkel FIFO-port som begrenser samtidige kall (ingen avhengigheter). */
 export class ConcurrencyGate {
   private active = 0;
@@ -427,6 +448,8 @@ export class LlmExtractionAdapter implements ExtractionAdapter {
       const subject = same?.subject ?? normalizeSubject(c.subject, c.content);
       // D-386: INVALIDATE er kun gyldig mot et EKSISTERENDE minne (deterministisk sjekk - modellen kan ikke «glemme» noe som ikke finnes).
       if (c.op === "INVALIDATE" && !existingKeys.has(`${type}\u0000${subject}`)) return [];
+      // D-428: ADD-kandidater må kunne spores til eierens egne ord i den siste ytringen (ikke assistentens tidligere svar).
+      if (c.op !== "INVALIDATE" && !tracesToOwnerText({ content: c.content, subject: c.subject, keywords: c.keywords }, text)) return [];
       const eventTime = typeof c.event_time === "string" && ISO_DATE.test(c.event_time.trim()) ? c.event_time.trim() : undefined;
       const importance = typeof c.importance === "number" && c.importance >= 1 ? Math.min(10, Math.round(c.importance)) : undefined;
       const rawTime = typeof c.event_time_raw === "string" && c.event_time_raw.trim().length > 0 ? c.event_time_raw.trim().slice(0, 120) : undefined;
