@@ -104,9 +104,9 @@ elif [ -z "$fails" ]; then record C08_provider_failures_24h PASS "ingen feilede 
 else record C08_provider_failures_24h WARN "feilede/totalt: $(echo "$fails" | tr '\n' ' ')"; fi
 
 # C09: EV-0 oppstartssjekk (konstitusjon + endringsregister) fra api-loggen
-ev0="$(dc logs --no-log-prefix --tail 2000 api 2>/dev/null | grep -E 'ev0_boot' | tail -n 3 | cut -c1-200 | tr '\n' ' ')"
-if [ -z "$ev0" ]; then record C09_ev0_boot UNKNOWN "ingen ev0_boot-linjer i siste 2000 loggrader"
-elif echo "$ev0" | grep -qiE 'unsigned|missing|invalid|broken'; then record C09_ev0_boot WARN "$ev0"
+ev0="$(dc logs --no-log-prefix --tail 5000 api 2>/dev/null | grep -E 'ev0_(constitution|change_ledger)_boot' | tail -n 2 | cut -c1-220 | tr '\n' ' ')"
+if [ -z "$ev0" ]; then record C09_ev0_boot UNKNOWN "ingen ev0_constitution_boot/ev0_change_ledger_boot i siste 5000 loggrader (start api på nytt og kjør igjen)"
+elif echo "$ev0" | grep -qiE 'unsigned|missing|invalid|broken|mismatch|not_pinned|failed'; then record C09_ev0_boot WARN "$ev0"
 else record C09_ev0_boot PASS "$ev0"; fi
 
 # C10: backup-ferskhet (D-370) og ukryptert stray-mappe
@@ -123,10 +123,12 @@ else
   fi
 fi
 
-# C11: tabeller UTEN rad-nivå-sikkerhet (kun informasjon: forventet liste er globale tabeller)
+# C11: tabeller UTEN rad-nivå-sikkerhet må være nøyaktig de dokumenterte globale (RLS_EXEMPT i modules/core/test/remediation-2-schema-invariants.test.ts)
+EXPECTED_NO_RLS="capabilities,evolution_change_ledger,github_rate_limit_state,owner_control_state,scheduler_state,schema_migrations,self_modification_requests,situation_domain_pauses,telegram_poll_state"
 norls="$(psqlq "SELECT string_agg(relname, ',' ORDER BY relname) FROM pg_class WHERE relkind='r' AND relnamespace='public'::regnamespace AND NOT relrowsecurity")"
 if [ -z "$(psqlq 'SELECT 1')" ]; then record C11_rls_tables UNKNOWN "fikk ikke kontakt med databasen"
-else record C11_rls_tables WARN "tabeller uten RLS (skal kun være dokumenterte globale; sammenlign med RLS_EXEMPT i testen): ${norls:-ingen}"; fi
+elif [ "$norls" = "$EXPECTED_NO_RLS" ]; then record C11_rls_tables PASS "kun de 9 dokumenterte globale tabellene mangler RLS"
+else record C11_rls_tables FAIL "avvik fra dokumenterte globale tabeller. Funnet: ${norls:-ingen} | Forventet: $EXPECTED_NO_RLS"; fi
 
 # C12: containerherding (api/worker): ikke root, read-only rotfs, cap_drop ALL
 hard=""
