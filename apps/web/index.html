@@ -162,7 +162,7 @@
   <span class="orb" aria-hidden="true"></span>
   <div class="who"><b>Charlie</b><small>spør, be om noe, eller si «hva kan du?»</small></div>
   <span class="grow"></span>
-  <span class="chip" id="route-chip" title="Hvilken rute siste svar gikk" style="display:none"><span class="t">rute</span><span id="route-text"></span></span>
+  <span class="chip hidden" id="route-chip" title="Hvilken rute siste svar gikk"><span class="t">rute</span><span id="route-text"></span></span>
   <span class="chip" id="conn-chip"><i></i><span id="conn-text">autoriserer …</span></span>
   <button class="icon-btn" id="clear-btn" title="Tøm samtalevisningen (Ctrl+K) - minnet på serveren beholdes">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>
@@ -767,7 +767,7 @@
             if (Array.isArray(data.confirmations)) data.confirmations.forEach(addConfirmation);
             routed = data.routed || "";
             addMeta(reply, "rute: " + routed + " · " + ((performance.now() - t0) / 1000).toFixed(1) + " s" + (data.task_id ? " · jobb: " + data.task_id : ""));
-            if (routed) { routeChip.style.display = ""; routeText.textContent = routed; }
+            if (routed) { routeChip.classList.remove("hidden"); routeText.textContent = routed; }
             remember("jarvis", text, routed);
           }
         }

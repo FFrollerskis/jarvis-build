@@ -207,6 +207,9 @@
   ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
   @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } header .who small { display:none; } #updated { display:none; } nav#secnav { top:49px; } main { padding:14px 12px 60px; } }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+  /* D-440: ingen inline style-attributter (CSP uten style-src-attr). Små verktøyklasser LAST i arket så de vinner over komponentregler; JS bruker CSSOM (el.style.x), som CSP tillater. */
+  .mt10 { margin-top:10px; }
+  .hidden { display:none; }
 </style>
 </head>
 <body>
@@ -252,7 +255,7 @@
            mutateExecutive(), som ALLTID viser bekreftelsesdialogen (openConfirmModal()) FØR selve POST-en. -->
       <h3>Kontrollhandlinger</h3>
       <div id="critical-controls" class="grid2"></div>
-      <div class="grid2" style="margin-top:10px;">
+      <div class="grid2 mt10">
         <div class="card">
           <div class="title">Pause situasjonsdomene</div>
           <div class="action-row">
@@ -473,7 +476,7 @@
     <span class="confirm-class" id="confirm-class"></span>
     <div class="confirm-desc" id="confirm-desc"></div>
     <div class="confirm-rollback" id="confirm-rollback"></div>
-    <input id="confirm-typed" style="display:none" placeholder="Skriv handlingsnavnet for å bekrefte" autocomplete="off">
+    <input id="confirm-typed" class="hidden" placeholder="Skriv handlingsnavnet for å bekrefte" autocomplete="off">
     <div class="confirm-buttons">
       <button class="btn" id="confirm-cancel">Avbryt</button>
       <button class="btn danger" id="confirm-ok" disabled>Bekreft</button>
@@ -1199,7 +1202,7 @@
     const bg = CONNECTOR_BRAND_COLORS[c.id] || connectorFallbackColor(c.id);
     const glyph = CONNECTOR_BRAND_ICONS[c.id];
     const inner = glyph || "<span>" + escapeHtml(connectorMonogram(c.display_name || c.id)) + "</span>";
-    return '<div class="connector-icon" style="background:' + bg + '" aria-hidden="true">' + inner + "</div>";
+    return '<div class="connector-icon" data-bg="' + escapeHtml(bg) + '" aria-hidden="true">' + inner + "</div>";
   }
 
   /**
@@ -1365,6 +1368,8 @@
         '<div class="connector-group-body">' + items.map(renderConnectorCard).join("") + "</div>" +
         "</details>";
     }).join("");
+    // D-440: bakgrunnsfargen settes via CSSOM (tillatt av CSP), ikke som style-attributt i markup.
+    connectorsEl.querySelectorAll("[data-bg]").forEach((el) => { el.style.background = el.dataset.bg; });
   }
 
   connectorFilterEl.addEventListener("input", () => {
