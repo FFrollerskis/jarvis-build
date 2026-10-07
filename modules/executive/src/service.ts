@@ -77,6 +77,8 @@ export interface ExecutiveServiceOptions {
    * tilgjengelighet er selv en konfabulasjonskilde, jf. D-209).
    */
   modelSurface?: ReadonlyArray<{ readonly tool_id: string; readonly action: string }>;
+  /** D-437: forbehold som skal følge `getCapabilityStatus()` når prosessen har snevret miljø (se `CapabilityStatus.evaluation_caveat`). */
+  evaluationCaveat?: string;
   /**
    * EV-1 (D-412): selvmodell. Smale, injiserte lesere (komponert i `apps/api`) + registerkildene begrensningene avledes fra. Uten dette gir
    * `getSelfDiagnosis()` kun UNKNOWN for alle områder (aldri en gjetning om «frisk»).
@@ -402,6 +404,7 @@ export class ExecutiveService {
       chat_accessible_tools: chatAccessibleTools,
       connector_health: [...this.gateway.health.entries()].map(([tool_id, h]) => ({ tool_id, ...h })),
       serving_model: servingModel ?? null,
+      ...(this.options.evaluationCaveat ? { evaluation_caveat: this.options.evaluationCaveat } : {}),
       ...(allowed
         ? {
             model_surface: {
