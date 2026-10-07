@@ -2,6 +2,7 @@ import type pg from "pg";
 import { z } from "zod";
 import type { CapabilityClass, IdentityContext, JobContract, JsonValue, TrustLevel } from "@jarvis/contracts";
 import { withTenantTransaction, writeAudit } from "@jarvis/core";
+import { UnsafeVendorUrlError, guardedFetch } from "./url-safety.ts";
 import { assessClassDPipeline, isClassDExempt, isNotFoundError, type ClassDNotifier, type ClassDPipelineOptions } from "./class-d-pipeline.ts";
 import { isSelfRecoveryAction, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
 
@@ -57,6 +58,10 @@ export function isWritableSecretProvider(provider: SecretProvider): provider is 
  * secret via API. Rå verdi returneres KUN til transport-laget; aldri logget,
  * aldri til modell/Langfuse. Helse eksponeres for /status.
  */
+/** Infisical er en lokal sidecar foran HVER credential-oppslag: kort tak (ikke standard 45 s), ellers stanser et hengt sidecar chat-turer. Skriving (dashbord «Lagre») får lengre tid. */
+const INFISICAL_READ_TIMEOUT_MS = 5_000;
+const INFISICAL_WRITE_TIMEOUT_MS = 15_000;
+
 export class InfisicalSecretProvider implements SecretProvider {
   readonly name = "infisical";
   private token: string | null = null;
@@ -81,8 +86,8 @@ export class InfisicalSecretProvider implements SecretProvider {
   }
 
   private async login(): Promise<string> {
-    const response = await fetch(`${this.baseUrl}/api/v1/auth/universal-auth/login`, {
-      method: "POST", headers: { "content-type": "application/json" },
+    const response = await guardedFetch(`${this.baseUrl}/api/v1/auth/universal-auth/login`, {
+      method: "POST", signal: AbortSignal.timeout(INFISICAL_READ_TIMEOUT_MS), headers: { "content-type": "application/json" },
       body: JSON.stringify({ clientId: this.clientId, clientSecret: this.clientSecret })
     });
     if (!response.ok) throw new Error(`infisical_login_${response.status}`);
@@ -97,13 +102,15 @@ export class InfisicalSecretProvider implements SecretProvider {
     try {
       this.token ??= await this.login();
       const url = `${this.baseUrl}/api/v3/secrets/raw/${encodeURIComponent(ref)}?workspaceId=${this.projectId}&environment=${this.env}`;
-      const response = await fetch(url, { headers: { authorization: `Bearer ${this.token}` } });
+      const response = await guardedFetch(url, { signal: AbortSignal.timeout(INFISICAL_READ_TIMEOUT_MS), headers: { authorization: `Bearer ${this.token}` } });
       if (response.status === 401) { this.token = null; throw new Error("infisical_auth_expired"); }
       if (response.status === 404) { this.health = "healthy"; return null; }
       if (!response.ok) throw new Error(`infisical_${response.status}`);
       this.health = "healthy";
       return ((await response.json()) as { secret: { secretValue: string } }).secret.secretValue;
-    } catch {
+    } catch (err) {
+      // En utrygg INFISICAL_URL er en KONFIG-feil, ikke et avbrudd: si det tydelig (uten verdi) i stedet for å se ut som en Infisical-nedetid.
+      if (err instanceof UnsafeVendorUrlError) console.error(JSON.stringify({ msg: "infisical_url_unsafe", reason: err.reason }));
       this.health = "unavailable";
       return null; // fail-closed her; FallbackSecretProvider håndterer rollback
     }
@@ -128,13 +135,13 @@ export class InfisicalSecretProvider implements SecretProvider {
     const url = `${this.baseUrl}/api/v3/secrets/raw/${encodeURIComponent(ref)}`;
     const body = JSON.stringify({ workspaceId: this.projectId, environment: this.env, secretValue: value });
     const headers = { authorization: `Bearer ${this.token}`, "content-type": "application/json" };
-    let response = await fetch(url, { method: "PATCH", headers, body });
+    let response = await guardedFetch(url, { method: "PATCH", signal: AbortSignal.timeout(INFISICAL_WRITE_TIMEOUT_MS), headers, body });
     if (response.status === 401) {
       this.token = null;
       throw new Error("infisical_auth_expired");
     }
     if (response.status === 404) {
-      response = await fetch(url, { method: "POST", headers, body });
+      response = await guardedFetch(url, { method: "POST", signal: AbortSignal.timeout(INFISICAL_WRITE_TIMEOUT_MS), headers, body });
     }
     if (!response.ok) {
       this.health = "unavailable";
