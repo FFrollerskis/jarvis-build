@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { GithubApiError, GithubTransport } from "../src/live-transports.ts";
+import { GithubApiError, GithubTransport, resolveGithubRepo } from "../src/live-transports.ts";
 
 /**
  * UA-5 GitHub Developer Control Plane v1: rene wiring-/kontraktstester
@@ -350,11 +350,34 @@ describe("L: ukjent action / manglende parametre", () => {
     const transport = new GithubTransport();
     await expect(transport.invoke("delete_forever", { repo: REPO }, "tok", CTX)).rejects.toThrow("github_unsupported_action_delete_forever");
   });
-  it("manglende repo kaster FØR noe HTTP-kall", async () => {
+  it("manglende repo kaster FØR noe HTTP-kall (skrive-/kontrollhandlinger; lesing faller til eierens repo, D-429)", async () => {
     const fetchMock = vi.fn<typeof fetch>();
     vi.stubGlobal("fetch", fetchMock);
     const transport = new GithubTransport();
-    await expect(transport.invoke("read_repo_meta", {}, "tok", CTX)).rejects.toThrow("github_missing_parameter:repo");
+    await expect(transport.invoke("merge_pr", {}, "tok", CTX)).rejects.toThrow("github_missing_parameter:repo");
+    await expect(transport.invoke("create_branch", {}, "tok", CTX)).rejects.toThrow("github_missing_parameter:repo");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("D-429: repo-oppløsning for lese-handlinger (modellen sender «jarvisbuild» eller utelater repo)", () => {
+  it("manglende repo og repo uten eier faller til eierens konfigurerte repo - kun for lese-handlinger", () => {
+    expect(resolveGithubRepo("list_pull_requests", undefined, undefined)).toBe("tsworkflow/jarvisbuild");
+    expect(resolveGithubRepo("list_pull_requests", "jarvisbuild", undefined)).toBe("tsworkflow/jarvisbuild");
+    expect(resolveGithubRepo("list_pull_requests", " ", "acme/app")).toBe("acme/app");
+    expect(resolveGithubRepo("get_commit", "andre", "acme/app")).toBe("acme/andre");
+    expect(resolveGithubRepo("list_pull_requests", "annen-eier/repo", "acme/app")).toBe("annen-eier/repo");
+    // ugyldig konfig ignoreres (standard brukes), og skriving får ALDRI standardrepo
+    expect(resolveGithubRepo("list_branches", undefined, "ikke et repo")).toBe("tsworkflow/jarvisbuild");
+    expect(() => resolveGithubRepo("merge_pr", undefined, undefined)).toThrow("github_missing_parameter:repo");
+    expect(resolveGithubRepo("create_branch", "jarvisbuild", undefined)).toBe("jarvisbuild");
+  });
+  it("list_pull_requests med bare «jarvisbuild» kaller GitHub på riktig repo-URL", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse(200, []));
+    vi.stubGlobal("fetch", fetchMock);
+    await new GithubTransport().invoke("list_pull_requests", { repo: "jarvisbuild" }, "tok", CTX);
+    await new GithubTransport().invoke("list_pull_requests", {}, "tok", CTX);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/repos/tsworkflow/jarvisbuild/pulls?state=open");
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("/repos/tsworkflow/jarvisbuild/pulls?state=open");
   });
 });
