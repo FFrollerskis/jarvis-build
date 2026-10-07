@@ -30,6 +30,7 @@ function reasonFor(category: string): string {
   if (/^TOOL_CALL_LIMIT$/i.test(c)) return "grensen for verktøykall i meldingen er nådd";
   if (/^credential_/i.test(c)) return "tjenesten er ikke koblet til (nøkkel mangler eller er tilbakekalt)";
   if (/^connector_frozen$/i.test(c)) return "tjenesten er fryst i eierkontrollene";
+  if (/approval|^class_d/i.test(c)) return "krever eierens signerte godkjenning (kritisk handling)";
   if (/^rate_limited$/i.test(c) || /(^|\D)429(\D|$)/.test(c)) return "tjenesten er midlertidig begrenset (for mange kall)";
   if (/timeout|timed out|econn|enotfound|network|unavailable/i.test(c)) return "tjenesten svarte ikke";
   const status = /(?:^|\D)([45]\d\d)(?:\D|$)/.exec(c);
