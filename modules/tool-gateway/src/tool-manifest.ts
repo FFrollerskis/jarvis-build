@@ -159,6 +159,12 @@ export function scopeFieldsOf(def: ToolDefinition): string[] {
 
 /** D-381/D-382: nivå-handlinger kan ha identitetsfelt i det registrerte skjemaet fordi trusted lag binder dem (fjernet fra modellens skjema). */
 const TIER_KEYS: ReadonlySet<string> = new Set([...CHAT_READ_TIER_KEYS, ...CHAT_ACT_TIER_KEYS, ...CHAT_DELEGATE_TIER_KEYS]);
+/**
+ * D-427: bakgrunnsjobber får GitHub-LESING (PR-er, branches, commits, workflow-kjøringer, repo-metadata) - kun rene klasse A/read-handlinger fra
+ * chattens lese-nivå, aldri skriving/merge/dispatch. Uten dette kunne «undersøk i bakgrunnen hva som er åpne pull requests» aldri lese noe
+ * (flaten hadde kun `github.read_issues`). Ubetrodd output (PR-titler/-tekst) er fortsatt data, og jobben kan uansett ikke handle utad.
+ */
+export const BACKGROUND_GITHUB_READ = CHAT_READ_TIER.filter((g) => g.tool_id === "github");
 /** D-382: tale er ubetrodd inndata (STT) - lese-nivået uten finans; aldri handlingsnivået. */
 const VOICE_READ_TIER = CHAT_READ_TIER.filter((g) => !/^finance/.test(g.tool_id));
 
@@ -201,7 +207,8 @@ export const SURFACE_TOOL_GRANTS: Readonly<Record<Surface, ReadonlyArray<{ tool_
     { tool_id: "calendar", action: "read_events" },
     { tool_id: "github", action: "read_issues" },
     { tool_id: "executive", action: "get_capability_status" },
-    { tool_id: "memory", action: "search" }
+    { tool_id: "memory", action: "search" },
+    ...BACKGROUND_GITHUB_READ
   ],
   // Kodeagenten har ingen gateway-verktøy (kjører i jobb-container med egen policy).
   coding: []

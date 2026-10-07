@@ -8,7 +8,7 @@ import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@j
 import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, ModelGateway, pricingFromEnv, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport, GmailTransport,
-  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, MeshToolExecutor, resolveModelToolSurface, PgGithubRateLimitStore,
+  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, MeshToolExecutor, resolveModelToolSurface, chatReadTierMeshTools, BACKGROUND_GITHUB_READ, PgGithubRateLimitStore,
   ToolGateway, assertManifestInvariants, buildToolManifest, createTurnContext, driveTransportsIfConfigured, firstWaveTools, jobIdentityFor, telegramClassDNotifier, parseDockerMutationTargets, parseGceMutationTargets
 } from "@jarvis/tool-gateway";
 import { BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
@@ -476,7 +476,11 @@ for (const tool of firstWaveTools({
 // apps/api/src/main.ts (`MODEL_SURFACE_ALLOWLIST`), begrenset til det som er
 // registrert på DENNE prosessens `toolGateway` (worker har en delmengde).
 // Hele registeret (`allMeshTools()`) eksponeres ALDRI for modellen.
-const modelToolSurface = resolveModelToolSurface(toolGateway, { onlyRegistered: true });
+// D-427: worker-jobber får i tillegg GitHub-LESING (kun de registrerte github-parene fra lese-nivået), så en bakgrunnsjobb kan liste PR-er uansett hvilken prosess som vinner kø-racet.
+const modelToolSurface = [
+  ...resolveModelToolSurface(toolGateway, { onlyRegistered: true }),
+  ...chatReadTierMeshTools(toolGateway.list(), BACKGROUND_GITHUB_READ, "read")
+];
 const toolManifest = buildToolManifest(toolGateway.list());
 // Workeren registrerer ikke chat-flatenes verktøy (memory/executive) - de er bare tildelt flater, og `modelToolSurface` er onlyRegistered. Uten dette krasjer workeren ved oppstart.
 assertManifestInvariants(toolManifest, { ignoreUnregisteredGrants: true });
