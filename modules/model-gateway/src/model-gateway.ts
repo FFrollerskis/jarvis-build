@@ -1,5 +1,6 @@
 import { BACKGROUND_PURPOSE_SET, INTERACTIVE_PURPOSES, type InteractivePriorityGate } from "./interactive-priority.ts";
 import { randomUUID } from "node:crypto";
+import { allFailedText, mustReplaceWithFailureText, partialFailureNote, summarizeToolOutcomes } from "./tool-honesty.ts";
 import type pg from "pg";
 import { withTenantTransaction } from "@jarvis/core";
 import type { DataSensitivity, ModelPurpose, RouterMode } from "@jarvis/contracts";
@@ -719,6 +720,7 @@ export class ModelGateway {
     const exchanges: ToolExchange[] = [];
     let repairUsed = false;
     let forceFinal = false;
+    let honestyApplied = false;
     let result: ModelResult | null = null;
 
     for (let round = 1; round <= maxRounds; round++) {
@@ -735,11 +737,20 @@ export class ModelGateway {
         required_capabilities: [...(input.required_capabilities ?? []), "tool_calling"],
         request
       };
-      result = opts.onEvent
+      // D-430: har ingen verktøykall lyktes så langt, bufres runden (ingen tekst strømmes) - modellen kan ennå rette kallet, men en tekst
+      // uten data er gjetting og erstattes under av en fast, ærlig melding.
+      const failureGuard = mustReplaceWithFailureText(summarizeToolOutcomes(exchanges));
+      result = opts.onEvent && !failureGuard
         ? await this.stream(roundInput, opts.onEvent, opts.signal)
         : await this.complete(roundInput);
       const calls = (result.tool_calls ?? []).slice(0, opts.maxCallsPerRound ?? Number.POSITIVE_INFINITY);
       if (calls.length === 0) {
+        if (failureGuard) {
+          const text = allFailedText(summarizeToolOutcomes(exchanges));
+          result = { ...result, text, metadata: { ...result.metadata, tool_honesty: "all_failed" } };
+          opts.onEvent?.({ type: "text_delta", text });
+          honestyApplied = true;
+        }
         break;
       }
       const sizeBefore = executed.size;
@@ -767,6 +778,12 @@ export class ModelGateway {
     }
     if (!result) {
       throw new ProviderError("router", "not_configured", "no_provider_available");
+    }
+    // D-430: noen kall lyktes og andre feilet → fast merknad om det som mangler (modellen kan ha tiet eller dikta rundt det).
+    const partialNote = honestyApplied ? "" : partialFailureNote(summarizeToolOutcomes(exchanges));
+    if (partialNote) {
+      result = { ...result, text: `${result.text}${partialNote}`, metadata: { ...result.metadata, tool_honesty: "partial" } };
+      opts.onEvent?.({ type: "text_delta", text: partialNote });
     }
     result.metadata = { ...result.metadata, tool_rounds: exchanges.length };
     return result;

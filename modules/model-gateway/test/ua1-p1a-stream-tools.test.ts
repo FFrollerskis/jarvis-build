@@ -216,7 +216,9 @@ describe("P1A tool-løkke (§16, §19-§26, §30)", () => {
     const exchange = adapter.calls.find((r) => r.tool_exchanges)?.tool_exchanges?.[0];
     expect(exchange?.results[0]?.success).toBe(false);
     expect(exchange?.results[0]?.error_category).toContain("INVALID_ARGUMENTS");
-    expect(result.text).toBe("reparert svar");
+    // D-430: modellen svarte med tekst uten at noe kall lyktes («reparert svar» uten data) - teksten erstattes av en fast, ærlig melding.
+    expect(result.text).not.toBe("reparert svar");
+    expect(result.text).toContain("ugyldige eller manglende felt");
   });
 
   it("ukjent verktøy: TOOL_NOT_FOUND uten utførelse (§26)", async () => {
