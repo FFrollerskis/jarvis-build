@@ -67,6 +67,18 @@ const NOT_IN_CONTAINER: Record<string, string> = {
   JARVIS_WALLESTER_WEBHOOK_BASIC_PASSWORD: "se JARVIS_STRIPE_WEBHOOK_SECRET"
 };
 
+/**
+ * B (kun worker): D-434 / Q-46 - worker-containeren får bevisst ikke finans-connectorene (api-only, se WORKER_CONNECTOR_ENV).
+ * worker-main registrerer likevel transportene (samme verktøyregister), men resolverne under gir da `null`/tom verdi og
+ * transporten feiler lukket; bakgrunnsflaten (read-only) har uansett ingen finans-handlinger.
+ */
+const NOT_IN_WORKER_CONTAINER: Record<string, string> = Object.fromEntries(
+  [
+    "JARVIS_NEONOMICS_ENVIRONMENT", "JARVIS_NEONOMICS_REALM", "JARVIS_NEONOMICS_TENANT_ID", "JARVIS_STRIPE_TENANT_ID",
+    "JARVIS_VIPPS_ENVIRONMENT", "JARVIS_VIPPS_TENANT_ID", "JARVIS_WALLESTER_ENVIRONMENT", "JARVIS_WALLESTER_TENANT_ID"
+  ].map((n) => [n, "D-434: finans-connectorer er api-only (minste privilegium for worker)"])
+);
+
 /** D: dokumentert men ingen kode refererer den - bevisst reservert eller brukt av tredjeparts-container. */
 const RESERVED_KEYS: Record<string, string> = {
   JARVIS_PLAYWRIGHT_API_KEY: "reservert for fremtidig connector (D-338/D-339); ingen kode leser den ennå",
@@ -100,10 +112,27 @@ describe("B: det api og worker leser når containeren", () => {
   for (const [service, paths] of cases) {
     it(`${service}: hver variabel koden leser er i manifestet (infra/local/service-env.mjs) eller har en begrunnet unntaksgrunn`, () => {
       const manifest = new Set<string>(SERVICE_ENV[service] as string[]);
-      const missing = [...readsIn(paths)].filter((n) => !manifest.has(n) && !(n in NOT_IN_CONTAINER)).sort();
+      const missing = [...readsIn(paths)].filter((n) => !manifest.has(n) && !(n in NOT_IN_CONTAINER) && !(service === "worker" && n in NOT_IN_WORKER_CONTAINER)).sort();
       expect(missing, "legg dem i SERVICE_ENV (og regenerer compose: node ops/security/generate-compose-env.mjs --write)").toEqual([]);
     });
   }
+});
+
+describe("B2: worker-minste-privilegium (D-434)", () => {
+  it("worker får ingen finans-/annonse-/CRM-/lagringsnøkler - kun WORKER_CONNECTOR_ENV", () => {
+    const worker = new Set<string>(SERVICE_ENV.worker as string[]);
+    for (const n of ["JARVIS_STRIPE_SECRET_KEY", "JARVIS_VIPPS_CLIENT_SECRET", "JARVIS_NEONOMICS_CLIENT_SECRET", "JARVIS_WALLESTER_API_KEY",
+      "JARVIS_WALLESTER_PRIVATE_KEY_PEM", "JARVIS_FIKEN_REFRESH_TOKEN", "JARVIS_GOOGLE_ADS_REFRESH_TOKEN", "JARVIS_META_ADS_ACCESS_TOKEN",
+      "JARVIS_DROPBOX_REFRESH_TOKEN", "JARVIS_MICROSOFT_REFRESH_TOKEN", "JARVIS_SLACK_BOT_TOKEN", "JARVIS_VERCEL_TOKEN", "JARVIS_HUBSPOT_API_KEY"]) {
+      expect(worker.has(n), n).toBe(false);
+    }
+  });
+  it("worker beholder det kodejobb, e-postingestion, bakgrunnslesing og Telegram-varsling trenger", () => {
+    const worker = new Set<string>(SERVICE_ENV.worker as string[]);
+    for (const n of ["ANTHROPIC_API_KEY", "JARVIS_GITHUB_TOKEN", "JARVIS_GITHUB_REPO", "JARVIS_EMAIL_TOKEN", "JARVIS_GOOGLE_TOKEN", "JARVIS_GOOGLE_ACCOUNT", "JARVIS_TELEGRAM_TOKEN", "JARVIS_TELEGRAM_CHAT_ID"]) {
+      expect(worker.has(n), n).toBe(true);
+    }
+  });
 });
 
 describe("C: påkrevde compose-variabler er dokumentert", () => {
