@@ -64,9 +64,9 @@ describe("JARVIS-066: sikkerhetsheadere og nonce-CSP", () => {
       const res = await fetch(`${withOwner.url}${path}`);
       const csp = res.headers.get("content-security-policy") ?? "";
       expect(csp, path).toMatch(/script-src 'nonce-[A-Za-z0-9+/=]+'/);
-      // D-366: `unsafe-inline` finnes KUN i `style-src-attr` (style-attributter); aldri for script-src/style-src (elementer).
-      expect(csp.replace("style-src-attr 'unsafe-inline'", ""), path).not.toContain("unsafe-inline");
-      expect(csp, path).toContain("style-src-attr 'unsafe-inline'");
+      // D-440: ingen `unsafe-inline` noe sted (D-366 tillot det kun for style-attributter; sidene har ikke lenger noen).
+      expect(csp, path).not.toContain("unsafe-inline");
+      expect(csp, path).not.toContain("style-src-attr");
       expect(csp, path).toMatch(/style-src 'nonce-[A-Za-z0-9+/=]+'/);
       expect(csp, path).not.toContain("unsafe-eval");
       expect(csp, path).toContain("default-src 'none'");
@@ -95,6 +95,15 @@ describe("JARVIS-066: sikkerhetsheadere og nonce-CSP", () => {
       const html = readFileSync(`${WEB_DIR}${file}`, "utf8");
       expect(html, file).not.toMatch(/\son[a-z]+\s*=\s*["']/i);
       expect(html, file).not.toMatch(/javascript:/i);
+    }
+  });
+  it("sidene setter ingen style-attributter i markup eller via setAttribute/cssText (CSP blokkerer dem; bruk klasser eller CSSOM `el.style.x`)", () => {
+    for (const file of pages) {
+      const html = readFileSync(`${WEB_DIR}${file}`, "utf8");
+      expect(html, file).not.toMatch(/\sstyle\s*=/i);
+      expect(html, file).not.toMatch(/setAttribute\(\s*["']style["']/);
+      expect(html, file).not.toContain("cssText");
+      expect(html, file).not.toContain("insertAdjacentHTML");
     }
   });
   it("renderStaticPage escaper attributtverdier (anførselstegn/vinkelparenteser kan ikke bryte ut av meta-taggen)", () => {
