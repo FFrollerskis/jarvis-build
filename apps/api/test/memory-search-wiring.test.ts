@@ -63,8 +63,9 @@ describe("A: apps/api/src/main.ts registrerer memory.search i SAMME additionalTo
   });
 });
 
-describe("B: apps/api/src/worker-main.ts kobler BEVISST IKKE memory.search - samme klasse som situations/executive/governance selv (API-/HTTP-flate)", () => {
-  it("importerer ikke MemorySearchTransport", () => {
-    expect(workerSource).not.toContain("MemorySearchTransport");
+describe("B: apps/api/src/worker-main.ts kobler KUN memory.search (D-433: workeren eier executive-køen og bakgrunnsflaten har memory.search) - aldri memory.propose", () => {
+  it("registrerer minneverktøyet FILTRERT til search; propose (skriving til karantene) er ikke tilgjengelig i workeren", () => {
+    expect(workerSource).toContain("MemorySearchTransport");
+    expect(workerSource).toMatch(/memoryToolDefinitions\(new MemorySearchTransport\([\s\S]*?\)\)\.filter\(\(d\) => d\.action === "search"\)/);
   });
 });

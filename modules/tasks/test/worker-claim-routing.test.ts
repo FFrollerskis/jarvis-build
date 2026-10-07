@@ -239,4 +239,20 @@ describe("D-103: claim_next_task() atomisk profil-filtrert claim (Blokker A)", (
     expect(view?.status).toBe("created"); // ALDRI 'failed', ALDRI last_error om "ingen handler"
     expect(view?.last_error).toBeNull();
   });
+
+  it("M (D-433): en worker UTEN registrerte handlere (API etter at worker-containeren eier executive-køen) claimer ALDRI noe - jobben forblir 'created' for worker-containeren", async () => {
+    const noHandlers = new InProcessWorker(queue, 60);
+    const c = contract({ agent_profile: "executive" });
+    await queue.enqueue("tenant-a", c);
+    expect(await noHandlers.tick()).toBeNull();
+    expect(await noHandlers.drain()).toBe(0);
+    const view = await queue.get("tenant-a", c.task_id);
+    expect(view?.status).toBe("created");
+    expect(view?.last_error).toBeNull();
+    // ...og worker-containeren (executive-handler) tar den som før.
+    const owner = new InProcessWorker(queue, 60);
+    owner.register("executive", async () => ({ ok: true }));
+    expect(await owner.tick()).toBe(c.task_id);
+    expect((await queue.get("tenant-a", c.task_id))?.status).toBe("completed");
+  });
 });

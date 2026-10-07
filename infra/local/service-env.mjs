@@ -190,6 +190,29 @@ export const CONNECTOR_ENV = [
   "JARVIS_WALLESTER_SYNC_HOUR",
   "JARVIS_WALLESTER_TENANT_ID"
 ];
+/**
+ * Q-46 / D-434 (minste privilegium): worker-containeren får KUN connector-variablene dens egne handlere faktisk bruker -
+ * kodejobb (GitHub-token, git-credential), e-postvedlegg-ingestion (e-post/Google), bakgrunnsflatens lesing
+ * (e-post, kalender, GitHub), Telegram-varsling (klasse D-varsler, watchdog) og de ikke-hemmelige mutasjonsmål-listene.
+ * Finans-, annonse-, lagrings-, CRM-, overvåkings- og meldingsnøkler (alt annet i CONNECTOR_ENV) er api-only; en
+ * bakgrunnsjobb kan ikke nå dem (bakgrunnsflaten er read-only: e-post/kalender/GitHub/executive/memory).
+ * NB: dashbord-lagrede hemmeligheter ligger i Infisical (primær) og styres IKKE av denne listen - den begrenser kun env-fallbacken.
+ */
+export const WORKER_CONNECTOR_ENV = [
+  "JARVIS_DOCKER_BIN",
+  "JARVIS_DOCKER_MUTATION_TARGETS",
+  "JARVIS_EMAIL_TOKEN",
+  "JARVIS_GCE_MUTATION_TARGETS",
+  "JARVIS_GITHUB_REPO",
+  "JARVIS_GITHUB_TOKEN",
+  "JARVIS_GIT_CREDENTIAL_TOKEN",
+  "JARVIS_GOOGLE_ACCOUNT",
+  "JARVIS_GOOGLE_CLIENT_ID",
+  "JARVIS_GOOGLE_CLIENT_SECRET",
+  "JARVIS_GOOGLE_TOKEN",
+  "JARVIS_TELEGRAM_CHAT_ID",
+  "JARVIS_TELEGRAM_TOKEN"
+];
 /** Webhook-hemmeligheter - KUN api (mottar webhooks). */
 export const WEBHOOK_ENV = [
   "JARVIS_NEONOMICS_WEBHOOK_API_KEY",
@@ -265,13 +288,15 @@ const WORKER_EXCLUDES = new Set(["JARVIS_BRIEF_HOUR"]);
 /** Hva hver tjeneste får videresendt fra operatørens `.env` (interpolasjon `${NAVN:-}` i compose). */
 export const SERVICE_ENV = {
   api: [...CORE_ENV, ...MODEL_ENV, ...CONNECTOR_ENV, ...WEBHOOK_ENV, ...MEDIA_HOME_ENV, ...MESSAGING_AUTOMATION_ENV, "LANGFUSE_BASE_URL", "JARVIS_API_PORT", "JARVIS_OPERATIONAL_RETENTION_SWEEP_HOUR", "JARVIS_CONSTITUTION_PUBKEY_SHA256",
+    // D-433: nød-/utviklingsbryter - API-et tømmer `executive`-køen selv (standard: worker-containeren eier køen).
+    "JARVIS_API_DRAINS_EXECUTIVE",
     // EV-1 (D-412): bygg-sha og versjon som selvdiagnosen viser (uten dem vises bygget som UKJENT).
     "JARVIS_BUILD_SHA", "JARVIS_VERSION",
     // D-414: «chat først» - bakgrunnsformål venter mens chat pågår (maks / stillhet, ms).
     "JARVIS_BACKGROUND_YIELD_MAX_MS", "JARVIS_BACKGROUND_YIELD_QUIET_MS", "JARVIS_TRACE_FILE", "JARVIS_VOICE_URL", "JARVIS_COUNCIL_AUTO_MAX_PER_HOUR",
     // D-395 (JARVIS-092): sveip-klokkeslett main.ts leser (tidligere ikke videresendt til containeren, så compose kunne aldri endre dem).
     "JARVIS_BUSINESS_EVENTS_SYNC_HOUR", "JARVIS_BUSINESS_SCORING_HOUR", "JARVIS_BUSINESS_SWEEP_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_WEEKDAY", "JARVIS_CONNECTOR_HEALTH_SWEEP_HOUR", "JARVIS_CONVERSATION_GRAPH_SYNC_HOUR", "JARVIS_FINANCE_SPEND_SWEEP_HOUR", "JARVIS_GROWTH_RECOMMENDATION_SWEEP_HOUR", "JARVIS_HEALTH_RETENTION_SWEEP_HOUR", "JARVIS_LOCATION_RETENTION_SWEEP_HOUR", "JARVIS_SITUATION_SWEEP_HOUR", "JARVIS_SUPPORT_INBOX_SYNC_HOUR", "JARVIS_VISION_RETENTION_SWEEP_HOUR", "JARVIS_STREAM_DEBUG"],
-  worker: [...CORE_ENV.filter((n) => !WORKER_EXCLUDES.has(n)), ...MODEL_ENV, ...CONNECTOR_ENV, "LANGFUSE_BASE_URL", "JARVIS_TRACE_FILE", "JARVIS_CLAUDE_BIN", "JARVIS_JOB_RUNNER", "JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY"],
+  worker: [...CORE_ENV.filter((n) => !WORKER_EXCLUDES.has(n)), ...MODEL_ENV, ...WORKER_CONNECTOR_ENV, "LANGFUSE_BASE_URL", "JARVIS_TRACE_FILE", "JARVIS_CLAUDE_BIN", "JARVIS_JOB_RUNNER", "JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY"],
   // migrate: engangs-jobb med ADMIN-rollen (CREATE ROLE/EXTENSION/RLS) - IKKE en runtime-tjeneste. Får den distinkte
   // runtime-rollens passord for å opprette rollen, men ingen connector-/modellnøkler.
   migrate: ["JARVIS_DB_ADMIN_USER", "JARVIS_DB_ADMIN_PASSWORD", "JARVIS_DB_USER", "JARVIS_DB_PASSWORD", "JARVIS_ENV", "JARVIS_TENANT_ID", "JARVIS_OWNER_PERSON_ID", "JARVIS_OWNER_NAME"],
