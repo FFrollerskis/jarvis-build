@@ -229,7 +229,10 @@ describe("DELEGERT/SCOPED: approval-gaten består - delegat arver aldri owner au
       },
       { tools: meshToolDefinitions([D_MESH_TOOL]), executor }
     );
-    expect(result.text).toBe("kunne ikke utføre kritisk handling");
+    // D-430: ingen verktøykall lyktes → modellens tekst erstattes av en fast, ærlig melding (aldri et oppdiktet svar), med årsaken.
+    expect(result.text).not.toBe("kunne ikke utføre kritisk handling");
+    expect(result.text).toContain("jeg gjetter ikke");
+    expect(result.text).toContain("demo.critical_send: krever eierens signerte godkjenning (kritisk handling)");
     const exchange = adapter.calls.find((r) => r.tool_exchanges)?.tool_exchanges?.[0];
     expect(exchange?.results[0]?.success).toBe(false);
     // INGEN transport-kall - verken preflight eller selve handlingen (§11):
