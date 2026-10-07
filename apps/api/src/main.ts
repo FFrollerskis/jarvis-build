@@ -1,5 +1,6 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import "./normalize-env.ts";
+import { executiveQueueOwner } from "./queue-owner.ts";
 import { parseToolTurnRoute } from "./tool-turn-route.ts";
 import { fileURLToPath } from "node:url";
 import { checkEv0Boot, getLastEv0BootStatus, logEv0Boot } from "./ev0-boot.ts";
@@ -993,9 +994,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // over - en direkte, parallell instans, IKKE den lazy interne i
   // SupportTransport) - SAMME toolGateway/businessService, ingen ny transport-vei.
   const supportEmailService = new SupportEmailService(toolGateway, businessService, supportService);
-  // BO-11.1 §9: SAMME executive-handler som worker-containeren (delt fil) - api-workeren
-  // som vinner queue-racet skal håndtere tools=true-jobber identisk (uten sandbox).
-  worker.register(
+  // D-433 (JARVIS-025, valg B - Tobias 2026-10-07): WORKER-containeren eier `executive`-køen. Tidligere tømte begge prosessene den med ulikt verktøysett
+  // og ulik identitet, så en bakgrunnsjobb oppførte seg ulikt etter hvem som vant kø-racet - og agentkjøring delte prosess med chatten. API-et
+  // registrerer derfor IKKE lenger handleren (en worker uten handler claimer ingenting). `JARVIS_API_DRAINS_EXECUTIVE=true` er en nød-/utviklingsbryter
+  // for oppsett UTEN worker-container (da kjører jobbene i API-prosessen som før).
+  const executiveOwner = executiveQueueOwner(process.env);
+  const apiDrainsExecutive = executiveOwner === "api";
+  console.log(JSON.stringify({ msg: "executive_queue_owner", owner: executiveOwner }));
+  if (apiDrainsExecutive) worker.register(
     "executive",
     executiveHandler({
       gateway,
@@ -1213,7 +1219,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // "executive"-oppgavekø (ConversationEngine sin `tasks.create()`-vei) UTEN
   // noe varsel - samme leksjon som D-180 allerede fastslo for
   // `Watchdog.tick()`, aldri anvendt på DENNE identiske mekanismen.
-  setInterval(
+  if (apiDrainsExecutive) setInterval(
     () => void worker.drain().catch((err) => console.error(JSON.stringify({ msg: "drain_error", error: (err as Error).message }))),
     2_000
   ).unref();
