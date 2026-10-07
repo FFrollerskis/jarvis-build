@@ -43,14 +43,14 @@ export class DiagnosisService {
       );
       for (const evidenceId of input.supporting_evidence_ids ?? []) {
         await client.query(
-          `INSERT INTO incident_diagnosis_evidence (diagnosis_id, evidence_id, relation) VALUES ($1, $2, 'supports')`,
-          [diagnosis_id, evidenceId]
+          `INSERT INTO incident_diagnosis_evidence (tenant_id, diagnosis_id, evidence_id, relation) VALUES ($1, $2, $3, 'supports')`,
+          [tenantId, diagnosis_id, evidenceId]
         );
       }
       for (const evidenceId of input.contradicting_evidence_ids ?? []) {
         await client.query(
-          `INSERT INTO incident_diagnosis_evidence (diagnosis_id, evidence_id, relation) VALUES ($1, $2, 'contradicts')`,
-          [diagnosis_id, evidenceId]
+          `INSERT INTO incident_diagnosis_evidence (tenant_id, diagnosis_id, evidence_id, relation) VALUES ($1, $2, $3, 'contradicts')`,
+          [tenantId, diagnosis_id, evidenceId]
         );
       }
       return rows[0] as IncidentDiagnosis;
@@ -79,7 +79,7 @@ export class DiagnosisService {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(
         `SELECT de.evidence_id, de.relation FROM incident_diagnosis_evidence de
-           JOIN incident_diagnoses d ON d.diagnosis_id = de.diagnosis_id
+           JOIN incident_diagnoses d ON d.tenant_id = de.tenant_id AND d.diagnosis_id = de.diagnosis_id
          WHERE d.tenant_id = $1 AND de.diagnosis_id = $2`,
         [tenantId, diagnosisId]
       );

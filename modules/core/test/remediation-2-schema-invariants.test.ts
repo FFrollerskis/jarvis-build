@@ -211,13 +211,12 @@ describe("B/C: RLS-dekning og policyer (JARVIS-076)", () => {
 });
 
 describe("D: scope-FK-baseline (JARVIS-076)", () => {
-  /** Enkeltkolonne/uten-tenant FK mellom to tabeller som BEGGE har tenant_id: kan peke på en annen tenants rad (FK-kontroll omgår RLS). */
+  /** FK til en tenant-eid forelder (har tenant_id) uten tenant_id i nøkkelen - gjelder også koblingstabeller UTEN egen tenant_id (kan ikke ha komposittnøkkel): kan peke på en annen tenants rad (FK-kontroll omgår RLS). */
   async function currentViolations(): Promise<string[]> {
     const r = await admin.query(`
       SELECT c.conrelid::regclass::text || '.' || c.conname AS id
         FROM pg_constraint c
        WHERE c.contype = 'f' AND c.connamespace = 'public'::regnamespace
-         AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.conrelid AND a.attname = 'tenant_id' AND NOT a.attisdropped)
          AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.confrelid AND a.attname = 'tenant_id' AND NOT a.attisdropped)
          AND NOT EXISTS (SELECT 1 FROM unnest(c.conkey) k(attnum) JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum WHERE a.attname = 'tenant_id')
        ORDER BY 1`);
@@ -236,10 +235,9 @@ describe("D: scope-FK-baseline (JARVIS-076)", () => {
     expect(removed, "FK er fikset/fjernet - fjern den fra baseline (JARVIS_UPDATE_SCOPE_FK_BASELINE=1)").toEqual([]);
   });
 
-  it("identitetskritiske grants og de scope-sikre situations-nøklene er IKKE på baseline (komposittnøkler med tenant_id)", async () => {
+  it("baseline er TOM (Q-44 løst): gjeld kan ikke stille føres tilbake i fixture-filen", async () => {
     const baseline = JSON.parse(await readFile(BASELINE, "utf8")) as string[];
-    expect(baseline.some((x) => x.startsWith("situations.") && x.includes("source_open_loop"))).toBe(false);
-    expect(baseline.some((x) => x.startsWith("session_grants."))).toBe(false);
+    expect(baseline, "ny gjeld skal rettes med jarvis_scope_fk i en migrasjon - ikke registreres på baseline").toEqual([]);
   });
 
   it("cross-tenant: et grant i tenant A kan IKKE referere en enhet/sesjon i tenant B (FK avviser)", async () => {
@@ -256,17 +254,20 @@ describe("D: scope-FK-baseline (JARVIS-076)", () => {
 });
 
 describe("D2: tenant-komposittnøkler for identitetsdomenet (Q-44, D-435)", () => {
+  const seedIdentities = () => admin.query(`INSERT INTO conversation_identities (identity_id, tenant_id, memory_space_id, display_name) VALUES ('ci-a','t-person','business','A'), ('ci-b','t-biz','business','B') ON CONFLICT DO NOTHING`);
+
   it("conversation_channel_links kan IKKE peke på en identitet i en annen tenant (FK avviser), samme tenant virker", async () => {
-    await admin.query(`INSERT INTO conversation_identities (identity_id, tenant_id, memory_space_id, display_name) VALUES ('ci-a','t-person','business','A'), ('ci-b','t-biz','business','B')`);
+    await seedIdentities();
     const link = (id: string, tenant: string, identity: string) => admin.query(
       `INSERT INTO conversation_channel_links (link_id, tenant_id, memory_space_id, identity_id, channel, channel_identifier, confidence, match_method, status) VALUES ($1,$2,'business',$3,'telegram',$4,1,'manual','active')`,
       [id, tenant, identity, `chat-${id}`]);
-    await expect(link("l-cross", "t-person", "ci-b")).rejects.toThrow(/conversation_channel_links_identity_id_fkey_tenant/);
+    await expect(link("l-cross", "t-person", "ci-b")).rejects.toThrow(/conversation_channel_links_identity_id_tenant_fkey/);
     await expect(link("l-ok", "t-person", "ci-a")).resolves.toBeDefined();
   });
 
   it("en identitet kan ikke slås sammen inn i en annen tenants identitet, og FK-ene har tenant_id i nøkkelen", async () => {
-    await expect(admin.query(`UPDATE conversation_identities SET status='merged', merged_into_identity_id='ci-b' WHERE identity_id='ci-a'`)).rejects.toThrow(/merged_into_identity_id_fkey_tenant/);
+    await seedIdentities();
+    await expect(admin.query(`UPDATE conversation_identities SET status='merged', merged_into_identity_id='ci-b' WHERE identity_id='ci-a'`)).rejects.toThrow(/merged_into_identity_id_tenant_fkey/);
     const r = await admin.query(`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid = 'messages'::regclass AND contype = 'f' AND conname LIKE 'messages_session_id%'`);
     expect((r.rows as Array<{ def: string }>).map((x) => x.def).join("\n")).toContain("FOREIGN KEY (tenant_id, session_id) REFERENCES sessions(tenant_id, session_id)");
   });
@@ -278,18 +279,48 @@ describe("D2: tenant-komposittnøkler for identitetsdomenet (Q-44, D-435)", () =
 });
 
 describe("D3: tenant-komposittnøkler for pengedomenet (Q-44, D-435)", () => {
-  it("ingen penge-FK (payment/bank/card/finance/stripe/vipps/neonomics/wallester) står igjen på baseline", async () => {
-    const baseline = JSON.parse(await readFile(BASELINE, "utf8")) as string[];
-    const left = baseline.filter((x) => /^(payment_|bank_|card_|finance_|stripe_|vipps_|neonomics_|wallester_|provider_cards)/.test(x));
-    expect(left).toEqual([]);
-  });
-
   it("betalingsintensjon-hendelser og vipps-captures peker på (tenant_id, payment_intent_id)", async () => {
     const r = await admin.query(`SELECT conrelid::regclass::text AS tbl, pg_get_constraintdef(oid) AS def FROM pg_constraint
       WHERE contype = 'f' AND conrelid IN ('payment_intent_events'::regclass, 'vipps_captures'::regclass, 'stripe_refunds'::regclass) AND confrelid = 'payment_intents'::regclass`);
     const defs = r.rows as Array<{ tbl: string; def: string }>;
     expect(defs.length).toBeGreaterThan(0);
     for (const d of defs) expect(d.def, `${d.tbl}: ${d.def}`).toMatch(/FOREIGN KEY \(tenant_id, /);
+  });
+});
+
+describe("D5: hjelperne feiler høyt og forklarer (Q-44, D-435)", () => {
+  it("pre-flight lister raden som krysser tenant (id-er, ikke innhold), og jarvis_scope_fk_named avviser skrivefeil", async () => {
+    await admin.query(`CREATE TABLE pf_parent (id text PRIMARY KEY, tenant_id text NOT NULL)`);
+    await admin.query(`CREATE TABLE pf_child (cid text PRIMARY KEY, tenant_id text NOT NULL, parent_id text REFERENCES pf_parent (id))`);
+    try {
+      await admin.query(`INSERT INTO pf_parent VALUES ('p-1','t-person')`);
+      await admin.query(`INSERT INTO pf_child VALUES ('c-1','t-biz','p-1')`);
+      await expect(admin.query(`SELECT jarvis_scope_fk_preflight()`)).rejects.toThrow(/tenant_scope_fk_preflight.*pf_child\.parent_id.*t-biz\/p-1/s);
+      await expect(admin.query(`SELECT jarvis_scope_fk_named('messages', 'no_such_fkey')`)).rejects.toThrow(/ukjent constraint/);
+      // Rettes raden, passerer pre-flight og konverteringen.
+      await admin.query(`UPDATE pf_child SET tenant_id = 't-person'`);
+      await expect(admin.query(`SELECT jarvis_scope_fk_preflight()`)).resolves.toBeDefined();
+      await admin.query(`SELECT jarvis_scope_fk('pf_child', 'parent_id', 'pf_parent', 'id')`);
+      const def = await admin.query(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conrelid = 'pf_child'::regclass AND contype = 'f'`);
+      expect((def.rows as Array<{ d: string }>)[0]!.d).toContain("FOREIGN KEY (tenant_id, parent_id) REFERENCES pf_parent(tenant_id, id)");
+    } finally {
+      await admin.query(`DROP TABLE IF EXISTS pf_child, pf_parent`);
+    }
+  });
+});
+
+describe("D4: koblingstabell uten egen tenant_id fikk tenant_id + komposittnøkler (Q-44, D-435, migrasjon 081)", () => {
+  it("tenant A kan IKKE pare sin diagnose med tenant B sitt bevis; samme tenant virker; RLS er på tenant_id", async () => {
+    await admin.query(`INSERT INTO incidents (incident_id, tenant_id, title) VALUES ('inc-a','t-person','A'), ('inc-b','t-biz','B') ON CONFLICT DO NOTHING`);
+    await admin.query(`INSERT INTO incident_diagnoses (diagnosis_id, tenant_id, incident_id, conclusion, source) VALUES ('dx-a','t-person','inc-a','c','owner') ON CONFLICT DO NOTHING`);
+    await admin.query(`INSERT INTO incident_evidence (evidence_id, tenant_id, incident_id, source_type, summary, observed_at) VALUES ('ev-a','t-person','inc-a','manual','s', now()), ('ev-b','t-biz','inc-b','manual','s', now()) ON CONFLICT DO NOTHING`);
+    const link = (tenant: string, evidence: string) => admin.query(
+      `INSERT INTO incident_diagnosis_evidence (tenant_id, diagnosis_id, evidence_id, relation) VALUES ($1, 'dx-a', $2, 'supports')`, [tenant, evidence]);
+    await expect(link("t-person", "ev-b")).rejects.toThrow(/incident_diagnosis_evidence_evidence_id_tenant_fkey/);
+    await expect(link("t-biz", "ev-a")).rejects.toThrow(/incident_diagnosis_evidence_diagnosis_id_tenant_fkey/);
+    await expect(link("t-person", "ev-a")).resolves.toBeDefined();
+    const pol = await admin.query(`SELECT pg_get_expr(polqual, polrelid) AS q FROM pg_policy WHERE polrelid = 'incident_diagnosis_evidence'::regclass`);
+    expect((pol.rows as Array<{ q: string }>)[0]!.q).toContain("tenant_id");
   });
 });
 
