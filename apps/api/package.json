@@ -25,7 +25,6 @@
     "@jarvis/knowledge": "workspace:*",
     "@jarvis/location": "workspace:*",
     "@jarvis/memory": "workspace:*",
-    "@jarvis/tool-gateway": "workspace:*",
     "@jarvis/model-gateway": "workspace:*",
     "@jarvis/operations": "workspace:*",
     "@jarvis/owner-controls": "workspace:*",
@@ -36,13 +35,14 @@
     "@jarvis/situations": "workspace:*",
     "@jarvis/support": "workspace:*",
     "@jarvis/tasks": "workspace:*",
+    "@jarvis/tool-gateway": "workspace:*",
     "@jarvis/vision": "workspace:*",
     "@jarvis/watchdog": "workspace:*",
-    "pg": "^8.16.3"
+    "pg": "^8.16.3",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/pg": "^8.15.6",
-    "embedded-postgres": "16.14.0-beta.17",
-    "zod": "^3.25.76"
+    "embedded-postgres": "16.14.0-beta.17"
   }
 }
