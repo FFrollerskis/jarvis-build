@@ -85,10 +85,11 @@ describe("navngitt tjeneste prioriteres; kontekst fra forrige melding arves", ()
     expect(keys(act)).toContain("jira.transition_issue");
   });
 
-  it("arvet kontekst rangeres etter det meldingen selv peker på, og tale/Telegram får aldri en handling via kontekst", () => {
+  it("D-425: arvet kontekst brukes kun når meldingen selv ikke peker på noe, og tale/Telegram får aldri en handling via kontekst", () => {
     const sel = selectSurfaceTools("web_chat", "hva står i kalenderen i dag?", surface, { recent_owner_messages: ["vis jira-sakene mine"] });
     const order = sel.selected.map((m) => m.tool_id);
-    expect(order.indexOf("calendar")).toBeLessThan(order.indexOf("jira"));
+    expect(order).toContain("calendar");
+    expect(order).not.toContain("jira");
     for (const s of ["voice", "telegram"] as const) {
       const v = selectSurfaceTools(s, "lukk den", surface, { recent_owner_messages: ["vis jira-sakene mine"] });
       expect(v.selected.some((m) => m.kind === "act"), s).toBe(false);
