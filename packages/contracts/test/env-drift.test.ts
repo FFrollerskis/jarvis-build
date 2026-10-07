@@ -3,7 +3,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 // @ts-expect-error - .mjs uten typer (delt med ops/security)
-import { SERVICE_ENV } from "../../../infra/local/service-env.mjs";
+import { CONNECTOR_ENV, SERVICE_ENV, WORKER_CONNECTOR_ENV } from "../../../infra/local/service-env.mjs";
 
 /**
  * D-395 (JARVIS-092): konfig-drift er en klasse feil, ikke enkeltfeil - 52 variabler ble lest uten å være dokumentert, døde nøkler lå igjen og
@@ -68,16 +68,19 @@ const NOT_IN_CONTAINER: Record<string, string> = {
 };
 
 /**
- * B (kun worker): D-434 / Q-46 - worker-containeren får bevisst ikke finans-connectorene (api-only, se WORKER_CONNECTOR_ENV).
- * worker-main registrerer likevel transportene (samme verktøyregister), men resolverne under gir da `null`/tom verdi og
- * transporten feiler lukket; bakgrunnsflaten (read-only) har uansett ingen finans-handlinger.
+ * B (kun worker): D-434/D-437 - worker-containeren får bevisst ikke disse (se WORKER_CONNECTOR_ENV). worker-main registrerer likevel transportene
+ * (samme verktøyregister). Begrunnelsene er per variabel og SKAL være sanne - den read-only bakgrunnsflaten (e-post/kalender/GitHub/executive/memory)
+ * er det som faktisk hindrer bruk; manglende env alene er ikke «fail closed» for alle (derfor beholder workeren modusvariablene som velger endepunkt).
  */
-const NOT_IN_WORKER_CONTAINER: Record<string, string> = Object.fromEntries(
-  [
-    "JARVIS_NEONOMICS_ENVIRONMENT", "JARVIS_NEONOMICS_REALM", "JARVIS_NEONOMICS_TENANT_ID", "JARVIS_STRIPE_TENANT_ID",
-    "JARVIS_VIPPS_ENVIRONMENT", "JARVIS_VIPPS_TENANT_ID", "JARVIS_WALLESTER_ENVIRONMENT", "JARVIS_WALLESTER_TENANT_ID"
-  ].map((n) => [n, "D-434: finans-connectorer er api-only (minste privilegium for worker)"])
-);
+const NOT_IN_WORKER_CONTAINER: Record<string, string> = {
+  JARVIS_NEONOMICS_TENANT_ID: "tenant-resolver for finans-synk (api-only); uten den gir resolveren null og transporten har ingen tenant å virke for",
+  JARVIS_STRIPE_TENANT_ID: "som JARVIS_NEONOMICS_TENANT_ID",
+  JARVIS_VIPPS_TENANT_ID: "som JARVIS_NEONOMICS_TENANT_ID",
+  JARVIS_WALLESTER_TENANT_ID: "som JARVIS_NEONOMICS_TENANT_ID",
+  JARVIS_DOCKER_MUTATION_TARGETS: "workeren har ingen docker-socket; tom liste = ingen docker-mutasjoner tillatt (parseDockerMutationTargets gir tomt sett)",
+  JARVIS_GCE_MUTATION_TARGETS: "workeren har ikke GCE-credentials/prosjekt-id; tom liste = ingen GCE-mutasjoner tillatt",
+  JARVIS_BROWSER_GATEWAY_TOKEN_SECRET: "HMAC-nøkkel for browser-gateway-kall; den read-only bakgrunnsflaten har ingen browser-handlinger (transporten får tom hemmelighet og avviser kall)"
+};
 
 /** D: dokumentert men ingen kode refererer den - bevisst reservert eller brukt av tredjeparts-container. */
 const RESERVED_KEYS: Record<string, string> = {
@@ -118,19 +121,40 @@ describe("B: det api og worker leser når containeren", () => {
   }
 });
 
-describe("B2: worker-minste-privilegium (D-434)", () => {
-  it("worker får ingen finans-/annonse-/CRM-/lagringsnøkler - kun WORKER_CONNECTOR_ENV", () => {
-    const worker = new Set<string>(SERVICE_ENV.worker as string[]);
-    for (const n of ["JARVIS_STRIPE_SECRET_KEY", "JARVIS_VIPPS_CLIENT_SECRET", "JARVIS_NEONOMICS_CLIENT_SECRET", "JARVIS_WALLESTER_API_KEY",
-      "JARVIS_WALLESTER_PRIVATE_KEY_PEM", "JARVIS_FIKEN_REFRESH_TOKEN", "JARVIS_GOOGLE_ADS_REFRESH_TOKEN", "JARVIS_META_ADS_ACCESS_TOKEN",
-      "JARVIS_DROPBOX_REFRESH_TOKEN", "JARVIS_MICROSOFT_REFRESH_TOKEN", "JARVIS_SLACK_BOT_TOKEN", "JARVIS_VERCEL_TOKEN", "JARVIS_HUBSPOT_API_KEY"]) {
-      expect(worker.has(n), n).toBe(false);
+describe("B2: worker-minste-privilegium (D-434/D-437)", () => {
+  const worker = new Set<string>(SERVICE_ENV.worker as string[]);
+  const allowed = new Set<string>(WORKER_CONNECTOR_ENV as string[]);
+
+  it("worker får av CONNECTOR_ENV NØYAKTIG WORKER_CONNECTOR_ENV - ingen andre connector-variabler", () => {
+    const fromConnector = (CONNECTOR_ENV as string[]).filter((n) => worker.has(n)).sort();
+    expect(fromConnector).toEqual([...allowed].sort());
+    for (const n of CONNECTOR_ENV as string[]) if (!allowed.has(n)) expect(worker.has(n), n).toBe(false);
+  });
+
+  it("hver WORKER_CONNECTOR_ENV-variabel er en ekte connector-variabel (ikke en skrivefeil)", () => {
+    for (const n of allowed) expect((CONNECTOR_ENV as string[]).includes(n), n).toBe(true);
+  });
+
+  it("ingen råtnende unntak: ingen NOT_IN_WORKER_CONTAINER-variabel står i worker-manifestet", () => {
+    for (const n of Object.keys(NOT_IN_WORKER_CONTAINER)) expect(worker.has(n), n).toBe(false);
+  });
+
+  it("worker beholder det kodejobb, e-postingestion, bakgrunnslesing og Telegram-varsling trenger", () => {
+    for (const n of ["ANTHROPIC_API_KEY", "JARVIS_GITHUB_TOKEN", "JARVIS_GITHUB_REPO", "JARVIS_GIT_CREDENTIAL_TOKEN", "JARVIS_EMAIL_TOKEN", "JARVIS_GOOGLE_TOKEN",
+      "JARVIS_GOOGLE_CLIENT_ID", "JARVIS_GOOGLE_CLIENT_SECRET", "JARVIS_GOOGLE_ACCOUNT", "JARVIS_TELEGRAM_TOKEN", "JARVIS_TELEGRAM_CHAT_ID"]) {
+      expect(worker.has(n), n).toBe(true);
     }
   });
-  it("worker beholder det kodejobb, e-postingestion, bakgrunnslesing og Telegram-varsling trenger", () => {
-    const worker = new Set<string>(SERVICE_ENV.worker as string[]);
-    for (const n of ["ANTHROPIC_API_KEY", "JARVIS_GITHUB_TOKEN", "JARVIS_GITHUB_REPO", "JARVIS_EMAIL_TOKEN", "JARVIS_GOOGLE_TOKEN", "JARVIS_GOOGLE_ACCOUNT", "JARVIS_TELEGRAM_TOKEN", "JARVIS_TELEGRAM_CHAT_ID"]) {
+
+  it("modusvariabler som velger endepunkt (Vipps/Neonomics/Wallester) følger med, så en transport aldri stille velger test/sandbox", () => {
+    for (const n of ["JARVIS_VIPPS_ENVIRONMENT", "JARVIS_NEONOMICS_ENVIRONMENT", "JARVIS_NEONOMICS_REALM", "JARVIS_WALLESTER_ENVIRONMENT", "JARVIS_SUPPORT_INBOX_EMAILS"]) {
       expect(worker.has(n), n).toBe(true);
+    }
+  });
+
+  it("browser-gateway-hemmeligheten og docker-/GCE-mutasjonsmål er ikke i worker", () => {
+    for (const n of ["JARVIS_BROWSER_GATEWAY_TOKEN_SECRET", "JARVIS_DOCKER_MUTATION_TARGETS", "JARVIS_GCE_MUTATION_TARGETS", "JARVIS_DOCKER_BIN"]) {
+      expect(worker.has(n), n).toBe(false);
     }
   });
 });
