@@ -17,3 +17,6 @@ infra/local/voice-debug-dumps/
 # EV-0 (D-410): privatnøkler (konstitusjon/break-glass) skal ALDRI inn i repoet. Den OFFENTLIGE nøkkelen config/evolution/constitution.pub.pem committes.
 *.key
 *private*.pem
+
+# D-422: evidensfiler fra NAS-akseptansen (lokale, aldri i git)
+ops/acceptance/out/
