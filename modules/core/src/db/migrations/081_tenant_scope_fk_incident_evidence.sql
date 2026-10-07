@@ -9,6 +9,14 @@ ALTER TABLE incident_diagnosis_evidence ADD CONSTRAINT incident_diagnosis_eviden
 SELECT jarvis_scope_fk('incident_diagnosis_evidence', 'diagnosis_id', 'incident_diagnoses', 'diagnosis_id');
 SELECT jarvis_scope_fk('incident_diagnosis_evidence', 'evidence_id', 'incident_evidence', 'evidence_id');
 DROP POLICY incident_diagnosis_evidence_tenant ON incident_diagnosis_evidence;
+-- tenant_id-sjekken ALENE ville fjernet minne-rom-isolasjonen 037-policyen arvet: underspørringen kjører under incident_diagnoses sine RLS-policyer,
+-- inkludert den RESTRIKTIVE `incident_diagnoses_space`. Derfor beholdes diagnose-predikatet i tillegg til tenant_id.
 CREATE POLICY incident_diagnosis_evidence_tenant ON incident_diagnosis_evidence
-  USING (tenant_id = current_setting('jarvis.tenant_id', true))
-  WITH CHECK (tenant_id = current_setting('jarvis.tenant_id', true));
+  USING (
+    tenant_id = current_setting('jarvis.tenant_id', true)
+    AND diagnosis_id IN (SELECT diagnosis_id FROM incident_diagnoses WHERE tenant_id = current_setting('jarvis.tenant_id', true))
+  )
+  WITH CHECK (
+    tenant_id = current_setting('jarvis.tenant_id', true)
+    AND diagnosis_id IN (SELECT diagnosis_id FROM incident_diagnoses WHERE tenant_id = current_setting('jarvis.tenant_id', true))
+  );

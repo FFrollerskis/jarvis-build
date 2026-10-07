@@ -322,6 +322,35 @@ describe("D4: koblingstabell uten egen tenant_id fikk tenant_id + komposittnøkl
     const pol = await admin.query(`SELECT pg_get_expr(polqual, polrelid) AS q FROM pg_policy WHERE polrelid = 'incident_diagnosis_evidence'::regclass`);
     expect((pol.rows as Array<{ q: string }>)[0]!.q).toContain("tenant_id");
   });
+
+  it("RLS beholder MINNE-ROM-isolasjonen fra 037: en 'personal'-sesjon ser/lager/sletter ikke lenker til en diagnose i rommet 'health' (samme tenant)", async () => {
+    await admin.query(`INSERT INTO incidents (incident_id, tenant_id, memory_space_id, title) VALUES ('inc-h','t-person','health','H') ON CONFLICT DO NOTHING`);
+    await admin.query(`INSERT INTO incident_diagnoses (diagnosis_id, tenant_id, memory_space_id, incident_id, conclusion, source) VALUES ('dx-h','t-person','health','inc-h','c','owner') ON CONFLICT DO NOTHING`);
+    await admin.query(`INSERT INTO incident_evidence (evidence_id, tenant_id, memory_space_id, incident_id, source_type, summary, observed_at) VALUES ('ev-h','t-person','health','inc-h','manual','s', now()) ON CONFLICT DO NOTHING`);
+    await admin.query(`INSERT INTO incident_diagnosis_evidence (tenant_id, diagnosis_id, evidence_id, relation) VALUES ('t-person','dx-h','ev-h','supports') ON CONFLICT DO NOTHING`);
+    const asSession = async (spaces: string, sql: string): Promise<{ rows: unknown[]; error?: string }> => {
+      const c = await app.connect();
+      try {
+        await c.query("BEGIN");
+        await c.query("SELECT set_config('jarvis.tenant_id','t-person',true), set_config('jarvis.memory_spaces',$1,true)", [spaces]);
+        try {
+          const r = await c.query(sql);
+          return { rows: r.rows };
+        } catch (err) {
+          return { rows: [], error: (err as Error).message };
+        }
+      } finally {
+        await c.query("ROLLBACK").catch(() => undefined);
+        c.release();
+      }
+    };
+    expect((await asSession("personal", "SELECT 1 FROM incident_diagnosis_evidence WHERE diagnosis_id = 'dx-h'")).rows).toHaveLength(0);
+    expect((await asSession("health", "SELECT 1 FROM incident_diagnosis_evidence WHERE diagnosis_id = 'dx-h'")).rows).toHaveLength(1);
+    const forged = await asSession("personal", "INSERT INTO incident_diagnosis_evidence (tenant_id, diagnosis_id, evidence_id, relation) VALUES ('t-person','dx-h','ev-a','contradicts')");
+    expect(forged.error ?? "").toMatch(/row-level security/i);
+    const del = await asSession("personal", "DELETE FROM incident_diagnosis_evidence WHERE diagnosis_id = 'dx-h' RETURNING 1");
+    expect(del.rows).toHaveLength(0);
+  });
 });
 
 describe("E: jarvis.memory_spaces - komma/mellomrom-semantikk (JARVIS-076)", () => {
