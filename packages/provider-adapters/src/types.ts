@@ -125,8 +125,10 @@ export type StreamHandler = (event: StreamEvent) => void;
 export interface ModelUsage {
   input_tokens: number;
   output_tokens: number;
-  /** Kun når provider rapporterer cache-treff (f.eks. Anthropic/OpenAI). */
+  /** Kun når provider rapporterer cache-treff (f.eks. Anthropic/OpenAI). Inngår i `input_tokens` (som er TOTALT antall inn-tokens). */
   cached_tokens?: number;
+  /** D-432: tokens skrevet til prompt-cachen (Anthropic `cache_creation_input_tokens`); inngår i `input_tokens` og koster mer enn vanlig input (standard 1,25x). */
+  cache_write_tokens?: number;
 }
 
 export interface ModelResult {

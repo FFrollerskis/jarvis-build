@@ -42,6 +42,20 @@ export function budgetConfigFromEnv(env: Record<string, string | undefined> = pr
 
 export type BudgetLevel = "ok" | "warn" | "needs_approval" | "hard_blocked";
 
+/**
+ * D-432: samlet modellkostnad (øre) for tenanten i inneværende døgn (norsk tid, Europe/Oslo). Brukes til dagstaket for verktøyturer til sky
+ * (`JARVIS_TOOL_TURN_DAILY_CAP_ORE`). Teller ALLE rader i `cost_events` i dag; lokal og gratis kjøring bokføres med 0 øre.
+ */
+export async function dailySpentOre(pool: pg.Pool, tenantId: string): Promise<number> {
+  const result = await withTenantTransaction(pool, tenantId, (client) =>
+    client.query(
+      `SELECT coalesce(sum(amount_ore), 0)::int AS spent FROM cost_events
+       WHERE at >= (date_trunc('day', now() AT TIME ZONE 'Europe/Oslo') AT TIME ZONE 'Europe/Oslo')`
+    )
+  );
+  return (result.rows[0] as { spent: number }).spent;
+}
+
 export class BudgetGuard {
   constructor(
     private readonly pool: pg.Pool,

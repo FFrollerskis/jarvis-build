@@ -13,6 +13,7 @@ import {
   type ModelProviderAdapter,
   type ModelRequest,
   type ModelResult,
+  type ModelUsage,
   type StreamHandler,
   type ToolCallRequest
 } from "./types.ts";
@@ -33,6 +34,21 @@ function toAnthropicContent(content: ChatMessage["content"]): string | Array<Rec
       ? { type: "text", text: part.text }
       : { type: "image", source: { type: "base64", media_type: part.media_type, data: part.data } }
   );
+}
+
+/**
+ * D-432: Anthropic rapporterer `input_tokens` KUN for det som kom etter siste cache-punkt; cache-treff og cache-skriving kommer i egne felt.
+ * Vi normaliserer til «totalt inn» (som øvrige adaptere) + `cached_tokens` (treff) + `cache_write_tokens` (skriving), så kostnadsregnskapet stemmer.
+ */
+export function anthropicUsage(u: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }): ModelUsage {
+  const read = u.cache_read_input_tokens ?? 0;
+  const write = u.cache_creation_input_tokens ?? 0;
+  return {
+    input_tokens: u.input_tokens + read + write,
+    output_tokens: u.output_tokens,
+    ...(u.cache_read_input_tokens !== undefined ? { cached_tokens: read } : {}),
+    ...(write > 0 ? { cache_write_tokens: write } : {})
+  };
 }
 
 /**
@@ -71,14 +87,33 @@ export class AnthropicAdapter implements ModelProviderAdapter {
         }))
       });
     }
+    // D-432: prompt-caching. Prefikset (verktøy → system → meldinger) får korte cache-punkter (maks 3 av 4), så en gjentatt runde i samme tur
+    // (verktøykall → svar) og en ny melding innen få minutter leser det samme innholdet til ca. en tidel av prisen. Er prefikset for kort til å
+    // caches (under modellens minimum) ignorerer Anthropic markøren uten feil. Innholdet i forespørselen er uendret.
+    const CACHE = { type: "ephemeral" } as const;
+    const lastMessage = messages[messages.length - 1];
+    if (lastMessage) {
+      const content = lastMessage["content"];
+      if (typeof content === "string") {
+        if (content.length > 0) lastMessage["content"] = [{ type: "text", text: content, cache_control: CACHE }];
+      } else if (Array.isArray(content) && content.length > 0) {
+        const blocks = content as Array<Record<string, unknown>>;
+        const last = blocks[blocks.length - 1] as Record<string, unknown>;
+        if (last["type"] !== "image") blocks[blocks.length - 1] = { ...last, cache_control: CACHE };
+      }
+    }
+    const tools = request.tools?.length
+      ? request.tools.map((t, i, all) => ({
+          name: t.name, description: t.description, input_schema: t.input_schema,
+          ...(i === all.length - 1 ? { cache_control: CACHE } : {})
+        }))
+      : undefined;
     return {
       model: effectiveModel(request, this.model),
       max_tokens: request.max_tokens ?? 1024,
       ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
-      ...(request.system ? { system: request.system } : {}),
-      ...(request.tools?.length
-        ? { tools: request.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema })) }
-        : {}),
+      ...(request.system ? { system: [{ type: "text", text: request.system, cache_control: CACHE }] } : {}),
+      ...(tools ? { tools } : {}),
       messages,
       ...(stream ? { stream: true } : {})
     };
@@ -138,7 +173,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
     const response = await this.post(request, false);
     let body: {
       content: Array<{ type: string; text?: string; id?: string; name?: string; input?: Record<string, unknown> }>;
-      usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number };
+      usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
       stop_reason?: string;
     };
     try {
@@ -162,11 +197,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
       }));
     return {
       text,
-      usage: {
-        input_tokens: body.usage.input_tokens,
-        output_tokens: body.usage.output_tokens,
-        ...(body.usage.cache_read_input_tokens !== undefined ? { cached_tokens: body.usage.cache_read_input_tokens } : {})
-      },
+      usage: anthropicUsage(body.usage),
       provider: this.name,
       model: effectiveModel(request, this.model),
       latency_ms: Date.now() - started,
@@ -187,6 +218,8 @@ export class AnthropicAdapter implements ModelProviderAdapter {
     let ttft: number | undefined;
     let finish = "";
     let inputTokens = 0;
+    let cacheRead: number | undefined;
+    let cacheWrite = 0;
     let outputTokens = 0;
     // Anthropic streamer blokk-indeksert: index → påbegynt tool_use-blokk.
     const pendingTools = new Map<number, { id: string; name: string; json: string }>();
@@ -196,7 +229,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
         let event: {
           type: string;
           index?: number;
-          message?: { usage?: { input_tokens?: number; output_tokens?: number } };
+          message?: { usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } };
           content_block?: { type: string; id?: string; name?: string };
           delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string };
           usage?: { output_tokens?: number };
@@ -210,6 +243,8 @@ export class AnthropicAdapter implements ModelProviderAdapter {
         switch (event.type) {
           case "message_start":
             inputTokens = event.message?.usage?.input_tokens ?? 0;
+            cacheRead = event.message?.usage?.cache_read_input_tokens;
+            cacheWrite = event.message?.usage?.cache_creation_input_tokens ?? 0;
             break;
           case "content_block_start":
             if (event.content_block?.type === "tool_use" && event.index !== undefined) {
@@ -285,7 +320,11 @@ export class AnthropicAdapter implements ModelProviderAdapter {
     if (!finish) {
       throw new ProviderError(this.name, "stream_interrupted", `${this.name}_stream_ended_without_stop_reason`);
     }
-    const usage = { input_tokens: inputTokens, output_tokens: outputTokens };
+    const usage = anthropicUsage({
+      input_tokens: inputTokens, output_tokens: outputTokens,
+      ...(cacheRead !== undefined ? { cache_read_input_tokens: cacheRead } : {}),
+      ...(cacheWrite > 0 ? { cache_creation_input_tokens: cacheWrite } : {})
+    });
     onEvent({ type: "usage", usage });
     onEvent({ type: "finish", finish_reason: finish || "end_turn" });
     return {
