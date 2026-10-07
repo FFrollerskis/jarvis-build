@@ -94,10 +94,13 @@ describe("selectModelForTier - billigst som holder", () => {
     expect(selectModelForTier("standard", { ...ctx(p), catalog: cat })?.model).toBe("a-billig");
   });
   it("isModelSelectable: pris eller leverandørens standardmodell", () => {
-    const e = DEFAULT_MODEL_CATALOG.find((m) => m.model === "claude-haiku-4-5-20251001") as CatalogModel;
-    expect(isModelSelectable(e, DEFAULT_PRICING, "claude-sonnet-5")).toBe(false);
-    expect(isModelSelectable(e, priced(["anthropic:claude-haiku-4-5-20251001"]), "claude-sonnet-5")).toBe(true);
-    expect(isModelSelectable(e, DEFAULT_PRICING, "claude-haiku-4-5-20251001")).toBe(true);
+    // D-431: Haiku 4.5 har nå en eksplisitt, verifisert prisrad og er valgbar; «ikke valgbar uten pris» testes på Opus (ingen rad).
+    const haiku = DEFAULT_MODEL_CATALOG.find((m) => m.model === "claude-haiku-4-5-20251001") as CatalogModel;
+    const e = DEFAULT_MODEL_CATALOG.find((m) => m.model === "claude-opus-5-5") as CatalogModel;
+    expect(isModelSelectable(haiku, DEFAULT_PRICING, "claude-sonnet-5-5")).toBe(true);
+    expect(isModelSelectable(e, DEFAULT_PRICING, "claude-sonnet-5-5")).toBe(false);
+    expect(isModelSelectable(e, priced(["anthropic:claude-opus-5-5"]), "claude-sonnet-5-5")).toBe(true);
+    expect(isModelSelectable(e, DEFAULT_PRICING, "claude-opus-5-5")).toBe(true);
   });
 });
 

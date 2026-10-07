@@ -44,7 +44,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
 
   constructor(
     private readonly apiKey: string | undefined = process.env["ANTHROPIC_API_KEY"],
-    readonly model: string = envOrDefault("JARVIS_ANTHROPIC_MODEL", "claude-sonnet-5"),
+    readonly model: string = envOrDefault("JARVIS_ANTHROPIC_MODEL", "claude-sonnet-5-5"),
     private readonly baseUrl: string = "https://api.anthropic.com",
     private readonly timeoutMs: number = envPositiveInt("JARVIS_MODEL_TIMEOUT_MS", 60_000)
   ) {}

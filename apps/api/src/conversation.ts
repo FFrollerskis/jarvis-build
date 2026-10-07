@@ -75,6 +75,11 @@ export interface ConversationDeps {
    * authority følger den som snakker. Utførelse går UANSETT via Tool Gateway →
    * Policy/Execution Authority; definisjonene kommer fra trusted lag.
    */
+  /**
+   * D-431: hvor VERKTØYTURER sendes (ren prat går fortsatt til lokal modell). Udefinert/null = av (alt som før). Settes fra `JARVIS_TOOL_TURN_MODEL`
+   * i oppstarten (`provider:model`, f.eks. `anthropic:claude-sonnet-5-5`). Gjelder aldri SECRET_RESTRICTED eller en eksplisitt eier-override.
+   */
+  toolTurnRoute?: { provider: string; model?: string } | null;
   tools?: {
     definitions: ToolDefinition[];
     executorFor(identity: IdentityContext, turn?: TurnContext): ToolExecutor;
@@ -510,6 +515,16 @@ export class ConversationEngine {
             reasons: [...classified.reasons, `tool_selection:${selection.min_sensitivity}`]
           }
         : classified;
+      // D-431 (Tobias: «bruk ollama bare til prating - når jeg ber om tools, send ut Sonnet 5.5»): ren prat går til den lokale modellen; når et
+      // ekte verktøy er valgt for turen (alt annet enn minne-reserven `memory__*`), går turen til Sonnet 5.5 (anthropic) - en 8B-modell
+      // bruker verktøy upålitelig. Aldri for SECRET_RESTRICTED (helse/finans: kun lokal, D-378) og aldri over en eksplisitt eier-override.
+      const toolRoute = this.deps.toolTurnRoute ?? null;
+      const toolsToCloud =
+        toolRoute !== null &&
+        usingDefaultGemmaPreference &&
+        useTools &&
+        sensitivityDecision.sensitivity !== "SECRET_RESTRICTED" &&
+        toolDefinitions.some((d) => !d.name.startsWith("memory__"));
       const input = {
         tenant_id: identity.tenant_id,
         session_id: identity.session_id,
@@ -519,12 +534,15 @@ export class ConversationEngine {
         ...(provider === undefined && override?.providerPreference !== undefined
           ? { providerPreference: override.providerPreference }
           : usingDefaultGemmaPreference
-            ? { providerPreference: ["gemma_local", "gemma_hosted"] }
+            ? { providerPreference: toolsToCloud && toolRoute ? [toolRoute.provider] : ["gemma_local", "gemma_hosted"] }
             : {}),
         ...(provider === undefined && override?.mode !== undefined ? { mode: override.mode } : {}),
         ...(override?.paid_models_allowed !== undefined ? { paid_models_allowed: override.paid_models_allowed } : {}),
         // D-382: tale skal være kort (TTS-latens og muntlig form) - teksten styres av prompten, taket er et sikkerhetsnett.
-        request: { system, messages: history, max_tokens: surface === "voice" ? 320 : 1024 }
+        request: {
+          system, messages: history, max_tokens: surface === "voice" ? 320 : 1024,
+          ...(toolsToCloud && toolRoute?.model ? { model: toolRoute.model } : {})
+        }
       };
       // D-30 live-funn: med tools konfigurert går BÅDE streaming- og JSON-banen
       // gjennom completeWithTools (samme normaliserte tool-løkke som executive/
@@ -564,6 +582,13 @@ export class ConversationEngine {
           return out;
         }
       });
+      // D-431: en fallback uten verktøy-ruten må ikke arve skymodellens navn (en lokal adapter ville fått et ukjent modellnavn).
+      const stripRouteModel = <T extends { request: { model?: string | undefined } }>(i: T): T => {
+        if (!toolsToCloud) return i;
+        const { model: omittedRouteModel, ...rest } = i.request;
+        void omittedRouteModel;
+        return { ...i, request: rest } as T;
+      };
       const callGateway = (callInput: typeof input) =>
         this.deps.tools && useTools
           ? this.deps.gateway.completeWithTools(callInput, {
@@ -601,7 +626,7 @@ export class ConversationEngine {
               reason: err.message
             })
           );
-          result = await callGateway(fallbackInput);
+          result = await callGateway(stripRouteModel(fallbackInput));
         } else if (
           // D-404: «Gemma først» er en HARD preferanse (ingen stille sky-fallback ved planlegging), men når den lokale leverandøren er nede (PC av,
           // tidsavbrudd, serverfeil) FØR noe er sendt eller utført, skal eieren få svar og ikke en feil. Fallbacken kjører gjennom SAMME router uten
@@ -617,7 +642,21 @@ export class ConversationEngine {
           console.error(
             JSON.stringify({ msg: "d404_gemma_provider_failed_fallback", provider: err.provider, kind: err.kind, omitted_preference: omittedGemmaPreference })
           );
-          result = await callGateway(fallbackInput);
+          result = await callGateway(stripRouteModel(fallbackInput));
+        } else if (
+          // D-431: Sonnet er nede (tidsavbrudd, nett, kvote, ikke konfigurert) FØR noe er sendt eller utført → svar på lokal modell
+          // (samme sensitivitetsregler, ingen stille skylekkasje) i stedet for en feil. Degraderingen logges alltid.
+          toolsToCloud &&
+          err instanceof ProviderError &&
+          err.provider === toolRoute?.provider &&
+          ["timeout", "network", "server", "rate_limit", "not_configured"].includes(err.kind) &&
+          partial === "" &&
+          !toolsExecuted
+        ) {
+          console.error(JSON.stringify({ msg: "d431_cloud_tools_failed_fallback_local", kind: err.kind }));
+          const { model: omittedCloudModel, ...localRequest } = input.request;
+          void omittedCloudModel;
+          result = await callGateway({ ...input, request: localRequest, providerPreference: ["gemma_local", "gemma_hosted"] });
         } else if (
           useTools &&
           sensitivityDecision.sensitivity === "SECRET_RESTRICTED" &&

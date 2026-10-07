@@ -44,7 +44,10 @@ export const DEFAULT_PRICING: PricingTable = {
     openai: { input_per_1k_ore: 1.4, output_per_1k_ore: 10.5, pricing_mode: "PAID" },
     // D-399: Sonnet 5.5 har SAMME sats som leverandørnivå-raden under (raden er satt for Sonnet-klassen) - eksplisitt slik at den er valgbar per kall. Øvrige Anthropic-modeller
     // (Haiku/Opus/Fable) har bevisst IKKE en rad før eier har bekreftet prisen (`JARVIS_MODEL_PRICING`) - uten pris er de aldri valgbare.
-    "anthropic:claude-sonnet-5-5": { input_per_1k_ore: 3.2, output_per_1k_ore: 15.8, cached_per_1k_ore: 0.4, pricing_mode: "PAID" },
+    // D-431: Sonnet 5.5 koster $2 / $10 per million (Anthropic sin prisside, verifisert 2026-10-07; cache-lesing $0,20) - tidligere rad (3,2 / 15,8) var for høy og ga overbokført kostnad. Omregnet med ca. 10,5 kr/USD.
+    "anthropic:claude-sonnet-5-5": { input_per_1k_ore: 2.1, output_per_1k_ore: 10.5, cached_per_1k_ore: 0.21, pricing_mode: "PAID", pricing_verified_at: "2026-10-07" },
+    // D-431: Haiku 4.5 ($1 / $5 per million, cache-lesing $0,10; verifisert 2026-10-07) - eksplisitt rad gjør den valgbar per kall.
+    "anthropic:claude-haiku-4-5-20251001": { input_per_1k_ore: 1.05, output_per_1k_ore: 5.25, cached_per_1k_ore: 0.105, pricing_mode: "PAID", pricing_verified_at: "2026-10-07" },
     anthropic: { input_per_1k_ore: 3.2, output_per_1k_ore: 15.8, cached_per_1k_ore: 0.4, pricing_mode: "PAID" },
     // D-106 GEMINI MODEL MIGRATION (2026-08-23): raten var kalibrert for
     // `gemini-2.5-flash` (nå under utfasing, se gemini.ts). `gemini-3.6-flash`

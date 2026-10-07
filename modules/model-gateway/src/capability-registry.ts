@@ -77,7 +77,7 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
   },
   {
     provider: "anthropic",
-    model: "claude-sonnet-5",
+    model: "claude-sonnet-5-5",
     capabilities: ["text", "reasoning", "vision", "tool_calling", "streaming"],
     context_tokens: 200_000,
     locality: "cloud",
