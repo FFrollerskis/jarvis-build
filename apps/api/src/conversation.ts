@@ -510,6 +510,14 @@ export class ConversationEngine {
             reasons: [...classified.reasons, `tool_selection:${selection.min_sensitivity}`]
           }
         : classified;
+      // D-431 (Tobias: «bruk ollama bare til prating - når jeg ber om tools, send ut Sonnet 5.5»): ren prat går til den lokale modellen; når et
+      // ekte verktøy er valgt for turen (alt annet enn minne-reserven `memory__*`), går turen til Sonnet 5.5 (anthropic) - en 8B-modell
+      // bruker verktøy upålitelig. Aldri for SECRET_RESTRICTED (helse/finans: kun lokal, D-378) og aldri over en eksplisitt eier-override.
+      const toolsToCloud =
+        usingDefaultGemmaPreference &&
+        useTools &&
+        sensitivityDecision.sensitivity !== "SECRET_RESTRICTED" &&
+        toolDefinitions.some((d) => !d.name.startsWith("memory__"));
       const input = {
         tenant_id: identity.tenant_id,
         session_id: identity.session_id,
@@ -519,7 +527,7 @@ export class ConversationEngine {
         ...(provider === undefined && override?.providerPreference !== undefined
           ? { providerPreference: override.providerPreference }
           : usingDefaultGemmaPreference
-            ? { providerPreference: ["gemma_local", "gemma_hosted"] }
+            ? { providerPreference: toolsToCloud ? ["anthropic"] : ["gemma_local", "gemma_hosted"] }
             : {}),
         ...(provider === undefined && override?.mode !== undefined ? { mode: override.mode } : {}),
         ...(override?.paid_models_allowed !== undefined ? { paid_models_allowed: override.paid_models_allowed } : {}),
@@ -618,6 +626,18 @@ export class ConversationEngine {
             JSON.stringify({ msg: "d404_gemma_provider_failed_fallback", provider: err.provider, kind: err.kind, omitted_preference: omittedGemmaPreference })
           );
           result = await callGateway(fallbackInput);
+        } else if (
+          // D-431: Sonnet er nede (tidsavbrudd, nett, kvote, ikke konfigurert) FØR noe er sendt eller utført → svar på lokal modell
+          // (samme sensitivitetsregler, ingen stille skylekkasje) i stedet for en feil. Degraderingen logges alltid.
+          toolsToCloud &&
+          err instanceof ProviderError &&
+          err.provider === "anthropic" &&
+          ["timeout", "network", "server", "rate_limit", "not_configured"].includes(err.kind) &&
+          partial === "" &&
+          !toolsExecuted
+        ) {
+          console.error(JSON.stringify({ msg: "d431_cloud_tools_failed_fallback_local", kind: err.kind }));
+          result = await callGateway({ ...input, providerPreference: ["gemma_local", "gemma_hosted"] });
         } else if (
           useTools &&
           sensitivityDecision.sensitivity === "SECRET_RESTRICTED" &&
