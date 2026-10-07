@@ -3,8 +3,8 @@ import type { JsonValue } from "@jarvis/contracts";
 import type { ToolTransport } from "./gateway.ts";
 import { guardedFetch } from "./url-safety.ts";
 
-/** Q-46 (D-436): browser-gateway-kall går via guardedFetch; navigasjon kan ta tid, så taket er 120 s (standard 45 s er for kort), aldri ubegrenset. */
-const BROWSER_INVOKE_TIMEOUT_MS = 120_000;
+/** Q-46 (D-436): browser-gateway-kall går via guardedFetch. Taket er lik LENGSTE verktøy-timeout (`navigate`, 30 s i integrations.ts) - ikke lenger, ellers lever forespørselen (og en Chromium-kontekst) videre etter at gatewayen har gitt `tool_timeout`. */
+export const BROWSER_INVOKE_TIMEOUT_MS = 30_000;
 
 /**
  * D-339: bro INN i `apps/browser-gateway` sin egen prosess (SAMME "egen
@@ -63,7 +63,7 @@ export class BrowserGatewayTransport implements ToolTransport {
     const body = JSON.stringify({ action, parameters });
     const response = await guardedFetch(`${credential}/invoke`, {
       method: "POST",
-      signal: AbortSignal.timeout(BROWSER_INVOKE_TIMEOUT_MS), // lengre enn standard 45 s: sidelasting/navigasjon kan ta tid, men aldri ubegrenset
+      signal: AbortSignal.timeout(BROWSER_INVOKE_TIMEOUT_MS),
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${signBrowserGatewayToken(this.tokenSecret, action, body)}`
