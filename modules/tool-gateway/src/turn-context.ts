@@ -237,7 +237,9 @@ export function selectSurfaceTools(
   const granted = new Set(SURFACE_TOOL_GRANTS[surface].map((g) => `${g.tool_id}.${g.action}`));
   const allowed = candidates.filter((m) => granted.has(mappingKey(m)));
   // D-424: småprat får ALDRI verktøy - heller ikke arvede fra tidligere meldinger (en «hei» etter en hjemmestyring-samtale ga ellers Home Assistant-verktøyene).
-  if (isSmallTalk(text) || isMetaComplaint(text)) return { selected: [], schema_tokens: 0, limits, dropped: allowed.map(mappingKey) };
+  if (isSmallTalk(text)) return { selected: [], schema_tokens: 0, limits, dropped: allowed.map(mappingKey) };
+  // D-425: en klage alene gir ingen verktøy, men en klage MED en egen forespørsel («… - sjekk github») bruker verktøyene forespørselen peker på.
+  const complaint = isMetaComplaint(text);
   const overview = OVERVIEW.test(text);
   const wantsAction = ACTION_VERBS.test(text);
   const named = namedServices(text);
@@ -257,7 +259,7 @@ export function selectSurfaceTools(
   // D-389: oppfølgingsspørsmål uten tjenesteord arver tjenesten(e) fra eierens forrige meldinger (kun lesing + handling ved handlingsord).
   // D-425: kun når den gjeldende meldingen selv ikke peker på noe - ellers dro «sjekk github» med seg kostnads-/selvdiagnoseverktøy fra tidligere meldinger, og den lokale modellen valgte feil verktøy.
   const carried = new Set<string>();
-  if (recent.length > 0 && direct.size === 0) {
+  if (recent.length > 0 && direct.size === 0 && !complaint) {
     for (const m of allowed) {
       if (direct.has(m.tool_id) || m.tool_id === "memory") continue;
       if (!hitFor(m, recent)) continue;
@@ -267,7 +269,7 @@ export function selectSurfaceTools(
     }
   }
   // D-415: småprat → ingen verktøy; ellers uten treff kun det billigste generelle verktøyet.
-  if (wanted.length === 0 && !isSmallTalk(text)) wanted = allowed.filter((m) => mappingKey(m) === "memory.search");
+  if (wanted.length === 0 && !isSmallTalk(text) && !complaint) wanted = allowed.filter((m) => mappingKey(m) === "memory.search");
   // Rangering innenfor budsjettet: faste prioriteter → navngitt tjeneste → handlingen eieren ba om (verbtreff) → lesinger → øvrige
   // handlinger → arvet kontekst.
   const rank = (m: MeshToolMapping): number => {

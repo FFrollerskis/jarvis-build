@@ -136,7 +136,7 @@ export function renderRunRateNo(r: Omit<RunRateReport, "summary_no">): string {
   const top = r.by_provider.filter((p) => p.ore > 0).slice(0, 3);
   if (top.length > 0) lines.push(`Dyreste: ${top.map((p) => `${p.provider}${p.model ? ` (${p.model})` : ""} ${kr(p.ore)}`).join("; ")}.`);
   const failing = r.by_provider.filter((p) => p.calls >= 5 && p.failed_calls / p.calls >= 0.3);
-  if (failing.length > 0) lines.push(`Mange feilede kall: ${failing.map((p) => `${p.provider} ${p.failed_calls}/${p.calls}`).join("; ")}.`);
+  if (failing.length > 0) lines.push(`Mange feilede kall: ${failing.map((p) => `${p.provider}${p.model ? ` (${p.model})` : ""} ${p.failed_calls}/${p.calls}`).join("; ")}.`);
   lines.push(r.maintenance.minutes_30d > 0 ? `Connector-vedlikehold siste 30 døgn: ${r.maintenance.minutes_30d} min (${r.maintenance.by_connector.slice(0, 3).map((m) => `${m.connector_id} ${m.minutes} min`).join("; ")}).` : "Connector-vedlikehold: ingenting registrert siste 30 døgn.");
   lines.push(`Daily Brief vist ${r.value_loop.brief_days_30d} av siste 30 døgn.`);
   lines.push(`Ikke målt: ${r.not_measured.join("; ")}.`);
