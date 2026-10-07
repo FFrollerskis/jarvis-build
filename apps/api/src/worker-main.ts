@@ -4,7 +4,7 @@ import "./normalize-env.ts";
 import { envInt, systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit } from "./owner.ts";
 import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
-import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
+import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
 import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, ModelGateway, pricingFromEnv, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport, GmailTransport,
@@ -130,14 +130,10 @@ const killSwitch = new KillSwitch(pool, ownerControlAuthority);
 await killSwitch.restore();
 const ownerControls = new OwnerControls(killSwitch, pool, ownerControlAuthority);
 await ownerControls.restore();
-// D-104 (UA-5 Production Operations Control Plane v1): SAMME infra-gate-
-// wiring-mønster som apps/api/src/main.ts. ÆRLIG begrensning (uendret fra
-// den allerede eksisterende, BEVISST UTENFOR K1 sitt omfang - se D-164):
-// dette er en EGEN, prosess-lokal `InfraExecutionGate`-instans - en pause
-// utløst via api-prosessens `/infra/pause`-HTTP-rute endrer IKKE denne
-// workerprosessens egen gate-tilstand (ingen cross-process-synkronisering
-// bygget denne sliceen - se D-104 i DECISIONS_AND_ASSUMPTIONS.md).
-const infraGate = new InfraExecutionGate();
+// D-104 (UA-5 Production Operations Control Plane v1): SAMME infra-gate-wiring-mønster som apps/api/src/main.ts. D-438 (JARVIS-025): modusen er DELT med
+// api-prosessen via `owner_control_state` og leses LIVE av `PolicyGateway` (en pause via api-ets `/infra/pause` stanser derfor også workeren umiddelbart).
+// Workeren har ingen eier-vendt rute som endrer modusen; autoriteten settes likevel likt, så en varig overgang aldri kan skje uten eier.
+const infraGate = new InfraExecutionGate(undefined, createPgInfraModeStore(pool), ownerControlAuthority);
 // D-105: "docker" lagt til (samme rasjonale som apps/api/src/main.ts).
 const infraToolIds = new Set(["github", "docker"]);
 const deviceRegistry = new PgDeviceRegistry(pool, owner.tenant_id);
@@ -487,7 +483,9 @@ for (const tool of firstWaveTools({
       new MemoryWriter(pool, memoryEmbedding, new LlmExtractionAdapter(gateway, { maxConcurrent: envInt("JARVIS_MEMORY_EXTRACTION_CONCURRENCY", 1, { min: 1, max: 8 }) }), policy)
     )).filter((d) => d.action === "search"),
     ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, {
-      modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES, ...CHAT_READ_TIER, ...CHAT_ACT_TIER]
+      modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES, ...CHAT_READ_TIER, ...CHAT_ACT_TIER],
+      // D-437: workeren har snevret miljø (D-434) - «ikke konfigurert» her betyr «ikke synlig for workeren», ikke nødvendigvis «mangler».
+      evaluationCaveat: "Evaluert i worker-prosessen med snevret miljø: connectorer som kun er konfigurert via .env (ikke i hvelvet) vises som ikke konfigurert her selv om API-et har dem. Spør i chat for fullt bilde."
     }))).filter((d) => d.action === "get_capability_status")
   ]
 })) toolGateway.register(tool);

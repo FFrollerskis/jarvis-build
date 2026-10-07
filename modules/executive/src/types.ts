@@ -207,6 +207,11 @@ export interface CapabilityStatus {
    * samtalen - forskjellen er BEVISST ikke tilgjengelig for modellen.
    */
   model_surface?: { restricted: boolean; registered_actions: number; model_accessible_actions: number };
+  /**
+   * D-437 (review av D-434): satt når statusen evalueres i en prosess med SNEVRET miljø (worker). `configured` leser tilstedeværelsen av hemmeligheten i
+   * DENNE prosessens miljø/hvelv - connectorer som bare er konfigurert via `.env` vises der som «ikke konfigurert» selv om API-et har dem. Aldri skjult.
+   */
+  evaluation_caveat?: string;
 }
 
 /**

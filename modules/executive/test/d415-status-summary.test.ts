@@ -16,6 +16,11 @@ describe("D-415 summary_no", () => {
     expect(t).toContain("Mangler oppsett: slack");
     expect(t).toContain("github nede");
   });
+  it("D-437: forbeholdet fra en prosess med snevret miljø står i summary_no (det modellen faktisk videreformidler), og mangler ellers", () => {
+    const base = { chat_accessible_tools: [{ tool_id: "slack", actions: ["a"], capability_classes: ["A"], configured: false }], connector_health: [], serving_model: null };
+    expect(summarizeCapabilityStatusNo({ ...base, evaluation_caveat: "snevret miljø i worker" })).toContain("Forbehold: snevret miljø i worker");
+    expect(summarizeCapabilityStatusNo(base)).not.toContain("Forbehold");
+  });
   it("ukjent modell sies som ukjent", () => {
     expect(summarizeCapabilityStatusNo({ chat_accessible_tools: [], connector_health: [], serving_model: null })).toContain("ukjent");
   });

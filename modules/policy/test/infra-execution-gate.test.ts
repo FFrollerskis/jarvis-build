@@ -162,3 +162,122 @@ describe("D-104: InfraExecutionGate faktisk håndhevet i PolicyGateway.authorize
     }
   });
 });
+
+describe("D-438: delt modus, live-lesing (uten DB - fake lagring)", () => {
+  type Stored = { mode: "PAUSED" | "DEGRADED"; reason?: string; at: string };
+  function fakeStore() {
+    let row: Stored | null = null;
+    const flags = { failWrite: false, failRead: false, reads: 0 };
+    return {
+      flags,
+      get row() { return row; },
+      set row(v: Stored | null) { row = v; },
+      store: {
+        async read() { flags.reads++; if (flags.failRead) throw new Error("db_down"); return row; },
+        async write(state: Stored) { if (flags.failWrite) throw new Error("db_down"); row = state; },
+        async clear() { if (flags.failWrite) throw new Error("db_down"); row = null; }
+      }
+    };
+  }
+  const OWNER = { owner_person_id: "owner-1" };
+
+  it("en pause i prosess A gjelder UMIDDELBART i prosess B (ingen synk/cache), og resume likeså", async () => {
+    const f = fakeStore();
+    const a = new InfraExecutionGate(undefined, f.store, OWNER);
+    const b = new InfraExecutionGate(undefined, f.store, OWNER);
+    expect(await b.checkDurable("B")).toBeNull();
+    await a.pauseDurable("vedlikehold", "owner-1");
+    expect(await b.checkDurable("B")).toBe("infra_paused");
+    expect(await b.checkDurable("A")).toBeNull();
+    await a.degradeDurable("treg", "owner-1");
+    expect(await b.checkDurable("B")).toBeNull();
+    expect(await b.checkDurable("D")).toBe("infra_degraded_blocks_class_d");
+    await a.resumeDurable("owner-1");
+    expect(await b.checkDurable("B")).toBeNull();
+  });
+
+  it("klasse A leser ikke databasen i det hele tatt (diagnostikk er aldri avhengig av den)", async () => {
+    const f = fakeStore();
+    const gate = new InfraExecutionGate(undefined, f.store, OWNER);
+    f.flags.failRead = true;
+    expect(await gate.checkDurable("A")).toBeNull();
+    expect(f.flags.reads).toBe(0);
+  });
+
+  it("lesefeil avslår mutasjon (fail-closed: infra_mode_unavailable), aldri en antatt NORMAL", async () => {
+    const f = fakeStore();
+    const gate = new InfraExecutionGate(undefined, f.store, OWNER);
+    f.flags.failRead = true;
+    for (const c of ["B", "C", "D"] as const) expect(await gate.checkDurable(c), c).toBe("infra_mode_unavailable");
+    const status = await gate.statusDurable();
+    expect(status.shared_readable).toBe(false);
+    f.flags.failRead = false;
+    expect(await gate.checkDurable("B")).toBeNull();
+  });
+
+  it("en pause som IKKE fikk lagret er likevel i kraft i denne prosessen (strengeste-av), og et senere 'ingen rad' løser den aldri", async () => {
+    const f = fakeStore();
+    const api = new InfraExecutionGate(undefined, f.store, OWNER);
+    const worker = new InfraExecutionGate(undefined, f.store, OWNER);
+    f.flags.failWrite = true;
+    await expect(api.pauseDurable("x", "owner-1")).rejects.toThrow("db_down");
+    f.flags.failWrite = false;
+    expect(f.row).toBeNull(); // den delte modusen er IKKE endret - kalleren fikk feilen
+    expect(await api.checkDurable("B")).toBe("infra_paused"); // ... men API-prosessen er stanset
+    expect(await worker.checkDurable("B")).toBeNull(); // workeren er ikke det (ærlig: skrivefeilen ble rapportert)
+    expect((await api.statusDurable()).state.mode).toBe("PAUSED");
+  });
+
+  it("resume: feiler tømmingen, forblir modusen innstrammet (lokalt og delt)", async () => {
+    const f = fakeStore();
+    const gate = new InfraExecutionGate(undefined, f.store, OWNER);
+    await gate.pauseDurable("x", "owner-1");
+    f.flags.failWrite = true;
+    await expect(gate.resumeDurable("owner-1")).rejects.toThrow("db_down");
+    f.flags.failWrite = false;
+    expect(await gate.checkDurable("B")).toBe("infra_paused");
+    await gate.resumeDurable("owner-1");
+    expect(await gate.checkDurable("B")).toBeNull();
+  });
+
+  it("strengeste-av: delt PAUSED vinner over lokal NORMAL, og delt DEGRADED slår ikke ned en lokal PAUSED", async () => {
+    const f = fakeStore();
+    const gate = new InfraExecutionGate(undefined, f.store, OWNER);
+    f.row = { mode: "PAUSED", reason: "annen prosess", at: "2026-10-07T00:00:00Z" };
+    expect(await gate.checkDurable("B")).toBe("infra_paused");
+    f.row = { mode: "DEGRADED", at: "2026-10-07T00:00:00Z" };
+    gate.pause("lokal");
+    expect(await gate.checkDurable("B")).toBe("infra_paused");
+  });
+
+  it("varige overganger krever eieren når lagring er aktiv (samme fail-closed-regel som KillSwitch); uten lagring er det ikke nødvendig", async () => {
+    const f = fakeStore();
+    const gate = new InfraExecutionGate(undefined, f.store, OWNER);
+    await expect(gate.pauseDurable("x", "andre")).rejects.toThrow(/owner_control_unauthorized/);
+    await expect(gate.degradeDurable("x")).rejects.toThrow(/owner_control_unauthorized/);
+    await expect(gate.resumeDurable("andre")).rejects.toThrow(/owner_control_unauthorized/);
+    expect(f.row).toBeNull();
+    expect(gate.current().mode).toBe("NORMAL");
+    const noAuthority = new InfraExecutionGate(undefined, f.store);
+    await expect(noAuthority.pauseDurable("x", "owner-1")).rejects.toThrow(/owner_control_unauthorized/);
+    const local = new InfraExecutionGate();
+    await local.pauseDurable("x");
+    expect(local.check("B")).toBe("infra_paused");
+  });
+
+  it("PolicyGateway håndhever den delte modusen LIVE (ikke en cache): en pause i en annen prosess avslår neste kall", async () => {
+    const f = fakeStore();
+    const gate = new InfraExecutionGate(undefined, f.store, OWNER);
+    const policy = new PolicyGateway({
+      devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch: new KillSwitch(), infraGate: gate, infraToolIds: new Set(["github"])
+    });
+    const call = () => policy.authorize({ identity, toolCall: githubToolCall("B") });
+    expect((await call()).decision).toBe("ALLOW");
+    f.row = { mode: "PAUSED", reason: "satt av API-prosessen", at: "2026-10-07T00:00:00Z" };
+    const denied = await call();
+    expect(denied.decision).toBe("DENY");
+    expect(denied.reason).toBe("infra_paused");
+    f.flags.failRead = true;
+    expect((await call()).reason).toBe("infra_mode_unavailable");
+  });
+});
