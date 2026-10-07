@@ -274,7 +274,7 @@ const EXECUTIVE_QUERY_BODY_KEYS = ["grant_token", "action", "parameters"] as con
  * D-421 (UA0-RUNRATE): run-rate og connector maintenance ledger. EGNE ruter med EGNE hardkodede allowlister (lese-kun og skrive-kun holdt adskilt,
  * samme disiplin som `/executive/query` vs `/owner-controls/...`). Skriving krever grant fra en innrullert enhet; modellen har kun lese-handlingene.
  */
-const RUN_RATE_QUERY_ACTIONS = ["get_run_rate", "list_connector_maintenance"] as const;
+const RUN_RATE_QUERY_ACTIONS = ["get_cost_overview", "list_connector_maintenance"] as const;
 const RUN_RATE_MUTATE_ACTIONS = ["record_connector_maintenance"] as const;
 
 /**
@@ -989,8 +989,8 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     const parsedBody = grantBodyOrReject(res, raw, EXECUTIVE_QUERY_BODY_KEYS);
     if (!parsedBody) return;
     const allowed: readonly string[] = mutate ? RUN_RATE_MUTATE_ACTIONS : RUN_RATE_QUERY_ACTIONS;
-    // Spørringen har standardhandlingen `get_run_rate`; skrivingen krever eksplisitt handling.
-    const action = typeof parsedBody["action"] === "string" ? parsedBody["action"] : mutate ? "" : "get_run_rate";
+    // Spørringen har standardhandlingen `get_cost_overview`; skrivingen krever eksplisitt handling.
+    const action = typeof parsedBody["action"] === "string" ? parsedBody["action"] : mutate ? "" : "get_cost_overview";
     if (!allowed.includes(action)) return json(res, 400, { error: "malformed_request", reason: "action_not_allowed" });
     const parameters =
       typeof parsedBody["parameters"] === "object" && parsedBody["parameters"] !== null && !Array.isArray(parsedBody["parameters"])

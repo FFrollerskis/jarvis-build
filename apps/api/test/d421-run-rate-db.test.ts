@@ -88,13 +88,13 @@ describe("RunRateService (ekte Postgres)", () => {
     const svc = new RunRateService(app);
     const t = new RunRateTransport(svc);
     const ctx = { identity: { tenant_id: T, person_id: "person-tobias", memory_space_id: "personal", device_id: "d", session_id: "s" } } as never;
-    await expect(t.invoke("get_run_rate", {}, "")).rejects.toThrow("run_rate_missing_invocation_context");
-    expect(((await t.invoke("get_run_rate", {}, "", ctx)).data as { totals: unknown }).totals).toBeDefined();
+    await expect(t.invoke("get_cost_overview", {}, "")).rejects.toThrow("run_rate_missing_invocation_context");
+    expect(((await t.invoke("get_cost_overview", {}, "", ctx)).data as { totals: unknown }).totals).toBeDefined();
     expect(((await t.invoke("list_connector_maintenance", {}, "", ctx)).data as { minutes_30d: number }).minutes_30d).toBe(40);
     await expect(t.invoke("record_connector_maintenance", { connector_id: "gmail", event_kind: "bogus", minutes: 1, reason: "x" }, "", ctx)).rejects.toThrow("invalid_event_kind");
     const ok = await t.invoke("record_connector_maintenance", { connector_id: "drive", event_kind: "api_change", minutes: 10, reason: "scope endret" }, "", ctx);
     expect((ok.data as { log_id: string }).log_id).toMatch(/^\d+$/);
     const defs = runRateToolDefinitions(t);
-    expect(defs.map((d) => `${d.action}:${d.capability_class}`)).toEqual(["get_run_rate:A", "list_connector_maintenance:A", "record_connector_maintenance:B"]);
+    expect(defs.map((d) => `${d.action}:${d.capability_class}`)).toEqual(["get_cost_overview:A", "list_connector_maintenance:A", "record_connector_maintenance:B"]);
   });
 });

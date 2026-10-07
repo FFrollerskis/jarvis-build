@@ -79,6 +79,7 @@ const BASELINE_REASON: Record<string, string> = {
   approvals: "APPEND_ONLY_EVIDENCE",
   audit_events: "APPEND_ONLY_EVIDENCE",
   cost_events: "APPEND_ONLY_EVIDENCE",
+  connector_maintenance_log: "APPEND_ONLY_EVIDENCE",
   erasure_fingerprints: "APPEND_ONLY_EVIDENCE",
   erasure_requests: "APPEND_ONLY_EVIDENCE",
   events: "APPEND_ONLY_EVIDENCE",

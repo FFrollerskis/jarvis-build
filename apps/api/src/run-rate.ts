@@ -152,7 +152,7 @@ export class RunRateTransport implements ToolTransport {
     const identity = context?.identity;
     if (!identity) throw new Error("run_rate_missing_invocation_context");
     switch (action) {
-      case "get_run_rate":
+      case "get_cost_overview":
         return { data: (await this.service.report(identity.tenant_id)) as unknown as JsonValue };
       case "list_connector_maintenance": {
         const r = await this.service.report(identity.tenant_id);
@@ -180,7 +180,7 @@ export function runRateToolDefinitions(transport: RunRateTransport): ToolDefinit
   const common = { tool_id: "run_rate", scopes: ["run_rate.read"] as string[], credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN", transport, timeout_ms: 15_000, reversible: true, idempotent_external: true, output_trust: "internal" as const };
   return [
     {
-      ...common, action: "get_run_rate",
+      ...common, action: "get_cost_overview",
       description: "Hva Jarvis koster akkurat nå: modellkostnad i dag/7/30 døgn, månedsprognose, fordeling per leverandør og formål, andel til sky, connector-vedlikeholdstid og hva som IKKE er målt. Svar fra EKTE tall (cost_events) - aldri gjett.",
       input_schema: record({}), capability_class: "A", rollback_procedure: "ingen (lesing)", rate_limit_per_minute: 20
     },

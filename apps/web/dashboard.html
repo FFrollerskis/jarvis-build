@@ -1958,7 +1958,7 @@
         .concat((m.recent || []).map((c) => "Siste: " + c.connector_id + " - " + c.event_kind + ", " + c.minutes + " min - " + c.reason)));
   }
   async function loadRunRate() {
-    try { renderRunRate(await postRunRate("/runrate/query", "get_run_rate")); }
+    try { renderRunRate(await postRunRate("/runrate/query", "get_cost_overview")); }
     catch (err) { document.getElementById("runrate-summary").textContent = "Kunne ikke laste kostnad: " + err.message; }
   }
   document.getElementById("maintenance-form").addEventListener("submit", (e) => {
