@@ -50,7 +50,7 @@ describe("manifest og flater", () => {
 describe("executor: ingen bekreftelse i ren eier-tur, bekreftelse i tainted tur", () => {
   const surface = resolveModelToolSurface(gw, { onlyRegistered: true, includeChatReadTier: true, includeChatActTier: true, includeChatDelegateTier: true });
   const manifest = buildToolManifest(defs);
-  const args = { title: "Prisoversikt", prompt: "Sammenstill priser fra e-postene mine siste uke." };
+  const args = { title: "Prisoversikt", prompt: "Sammenstill priser fra e-postene mine siste uke.", use_tools: false };
   const call = { tool_call_id: "c1", tool_name: "tasks__delegate_background_task", arguments: args, provider: "p", model: "m" };
   const toolGateway = {
     execute: async (req: { tool_id: string; action: string; parameters: Record<string, never>; identity: typeof identity }) => {
@@ -115,6 +115,16 @@ describe("transport", () => {
     expect(c.allowed_tools).toEqual(["email", "calendar", "github", "memory", "executive"]);
     expect(c.input.data.tools).toBe(true);
     expect(c.input.data.prompt).not.toContain("sk-ant-api03");
+  });
+  it("D-424: uten use_tools får jobben lese-verktøyene som standard; kun eksplisitt false gir ingen", async () => {
+    submitted.length = 0;
+    await transport.invoke("delegate_background_task", { title: "Standard", prompt: "Undersøk GitHub-sakene mine og rapporter." }, "", { identity: identity as never });
+    await transport.invoke("delegate_background_task", { title: "Uten verktøy", prompt: "Skriv et dikt om høsten uten verktøy.", use_tools: false }, "", { identity: identity as never });
+    const [withTools, without] = submitted as Array<{ allowed_tools: string[]; input: { data: { tools?: boolean } } }>;
+    expect(withTools!.input.data.tools).toBe(true);
+    expect(withTools!.allowed_tools).toEqual(["email", "calendar", "github", "memory", "executive"]);
+    expect(without!.input.data.tools).toBeUndefined();
+    expect(without!.allowed_tools).toEqual([]);
   });
   it("renderDelivery rammer inn resultatet som data", () => {
     const base = { task_id: "t", title: "Rapport", result_text: "ferdig tekst", error: null, created_at: "", finished_at: "", delivered: false };

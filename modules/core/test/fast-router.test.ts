@@ -50,3 +50,24 @@ describe("fastRoute: slo_report (EV-2, D-417)", () => {
   });
 });
 
+describe("fastRoute: cost_report og delegate_background (D-424)", () => {
+  it("«hva koster du» og varianter gir cost_report", () => {
+    for (const text of ["hva koster du", "Hva koster du?", "hva koster det", "hva koster du i måneden", "run-rate", "kostnader", "api-regning", "hvor mye har du kostet", "regningen"]) {
+      expect(fastRoute(text), text).toEqual({ kind: "cost_report" });
+    }
+  });
+  it("«… i bakgrunnen» og «bakgrunnsjobb:» gir delegate_background med hele meldingen som prompt", () => {
+    const msg = "undersøk i bakgrunnen hva som er status på GitHub-sakene mine, og gi meg en kort rapport";
+    expect(fastRoute(msg)).toEqual({ kind: "delegate_background", prompt: msg });
+    expect(fastRoute("Bakgrunnsjobb: sammenstill priser fra e-postene mine siste uke")).toEqual({ kind: "delegate_background", prompt: "sammenstill priser fra e-postene mine siste uke" });
+    expect(fastRoute("deleger: lag en oppsummering av kalenderen min neste uke")).toMatchObject({ kind: "delegate_background" });
+    expect(fastRoute("kan du sjekke e-posten min i bakgrunnen?")).toMatchObject({ kind: "delegate_background" });
+  });
+  it("er presis: spørsmål OM bakgrunnen, korte og vanlige setninger går ikke hit", () => {
+    for (const text of ["hvorfor kjører den i bakgrunnen?", "hva er en bakgrunnsjobb", "er den i bakgrunnen", "i bakgrunnen", "hei", "hva skjer i dag", "hva koster en kaffe i Oslo"]) {
+      expect(fastRoute(text)?.kind, text).not.toBe("delegate_background");
+      expect(fastRoute(text)?.kind, text).not.toBe("cost_report");
+    }
+  });
+});
+

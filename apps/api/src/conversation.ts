@@ -37,6 +37,10 @@ export interface ConversationDeps {
   selfDiagnosis?: { run(identity: IdentityContext, opts: { brief: boolean }): Promise<string | null> };
   /** EV-2 (D-417): tjenestemål/forverring/dataskvalitet for hurtigbanen (`executive.get_slo_report` via Tool Gateway). Udefinert = ærlig «kan ikke lese». */
   sloReport?: { run(identity: IdentityContext): Promise<string | null> };
+  /** D-424: «hva koster du» for hurtigbanen (`run_rate.get_cost_overview` via Tool Gateway). */
+  costReport?: { run(identity: IdentityContext): Promise<string | null> };
+  /** D-424: «… i bakgrunnen» for hurtigbanen (`tasks.delegate_background_task` via Tool Gateway/Policy - eierens egen melding, ikke modellens valg). */
+  delegateBackground?: { run(identity: IdentityContext, prompt: string): Promise<string | null> };
   /** D-395: injiserbar begrenser for automatisk råd-trigger (tester); default bygges fra JARVIS_COUNCIL_AUTO_MAX_PER_HOUR. */
   councilAutoLimiter?: CouncilAutoTriggerLimiter;
   /** Fase 4: hybridminne-kontekst med kildeangivelse (kun gjeldende space). */
@@ -720,6 +724,14 @@ export class ConversationEngine {
       case "slo_report": {
         const text = this.deps.sloReport ? await this.deps.sloReport.run(identity).catch(() => null) : null;
         return { reply: text ?? "Jeg kan ikke lese tjenestemålene akkurat nå, så jeg vil ikke påstå at ytelsen er bra.", routed: "fast" };
+      }
+      case "cost_report": {
+        const text = this.deps.costReport ? await this.deps.costReport.run(identity).catch(() => null) : null;
+        return { reply: text ?? "Jeg kan ikke lese kostnadene akkurat nå, så jeg vil ikke gjette på hva jeg koster.", routed: "fast" };
+      }
+      case "delegate_background": {
+        const text = this.deps.delegateBackground ? await this.deps.delegateBackground.run(identity, intent.prompt).catch(() => null) : null;
+        return { reply: text ?? "Jeg fikk ikke startet bakgrunnsjobben (verktøyet svarte ikke eller ble avslått). Ingenting er startet.", routed: "fast" };
       }
       case "help":
         return {
