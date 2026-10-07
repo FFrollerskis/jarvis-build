@@ -1740,9 +1740,14 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       });
       if (decision.decision !== "ALLOW") return json(res, 403, { decision: decision.decision, reason: decision.reason });
       const reason = fieldOptionalString(authed.body, "reason");
-      if (action === "pause") infraGate.pause(reason ?? "owner_requested");
-      else if (action === "degrade") infraGate.degrade(reason ?? "owner_requested");
-      else infraGate.resume();
+      // D-438: varig overgang (delt med workeren). Strammer vi inn og lagringen feiler, er DENNE prosessen likevel stanset - kalleren får feilen, ikke en falsk suksess.
+      try {
+        if (action === "pause") await infraGate.pauseDurable(reason ?? "owner_requested", authed.identity.person_id);
+        else if (action === "degrade") await infraGate.degradeDurable(reason ?? "owner_requested", authed.identity.person_id);
+        else await infraGate.resumeDurable();
+      } catch (err) {
+        return json(res, 500, { error: "infra_mode_persist_failed", detail: (err as Error).message, state: infraGate.current(), request_id: requestIdOf(res) });
+      }
       return json(res, 200, { state: infraGate.current() });
     }
 
@@ -1751,6 +1756,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       if (!authed) return;
       return json(res, 200, {
         infra_mode: infraGate.current(),
+        infra_mode_sync_error: infraGate.lastSyncError,
         connector_health: Object.fromEntries(gateway.health),
         frozen_connectors: controls ? ["github"].filter((id) => controls.isFrozen(id)) : []
       });
