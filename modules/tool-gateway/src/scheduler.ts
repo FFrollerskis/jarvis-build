@@ -9,8 +9,11 @@ import { envHour } from "@jarvis/contracts";
  * ved oppstart ETTER planlagt tid samme dag leveres dagens brief en gang
  * (catch-up); aldri duplikater, aldri gaarsdagens.
  */
-/** D-393: maks forsoek per dag per jobb (foerste kjoering + retries). */
-const MAX_ATTEMPTS = 4;
+/** D-393: maks forsoek per dag per jobb (foerste kjoering + retries). Eksportert for D-443 (`scheduler-health.ts` maa bruke SAMME tall). */
+export const DAILY_SCHEDULER_MAX_ATTEMPTS = 4;
+const MAX_ATTEMPTS = DAILY_SCHEDULER_MAX_ATTEMPTS;
+/** D-393: en claim uten fullfoering er overtakbar etter dette (krasj/hengt prosess). Eksportert for D-443 (samme tall i helse-leseren). */
+export const DAILY_SCHEDULER_CLAIM_LEASE_MINUTES = 15;
 
 export class DailyScheduler {
   readonly instanceId = `sched-${randomUUID().slice(0, 8)}`;
@@ -44,9 +47,9 @@ export class DailyScheduler {
          AND scheduler_state.attempts < $4
          AND (
            (scheduler_state.retry_after IS NOT NULL AND scheduler_state.retry_after <= now())
-           OR (scheduler_state.retry_after IS NULL AND scheduler_state.claimed_at < now() - interval '15 minutes')
+           OR (scheduler_state.retry_after IS NULL AND scheduler_state.claimed_at < now() - make_interval(mins => $5::int))
          )`,
-      [this.jobName, date, this.instanceId, MAX_ATTEMPTS]
+      [this.jobName, date, this.instanceId, MAX_ATTEMPTS, DAILY_SCHEDULER_CLAIM_LEASE_MINUTES]
     );
     return (result.rowCount ?? 0) > 0;
   }

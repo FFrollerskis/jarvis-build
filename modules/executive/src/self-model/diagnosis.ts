@@ -14,6 +14,8 @@ export const EXPECTED_AREAS: ReadonlyArray<{ id: string; critical: boolean; labe
   { id: "controls", critical: true, label: "Eier-kontroller (kill switch, frysing)" },
   { id: "connectors", critical: false, label: "Tilkoblinger" },
   { id: "tasks", critical: false, label: "Jobber" },
+  // D-443: daglige bakgrunnsjobber (DailyScheduler) - feilet/ga opp/tapt i går, fra `scheduler_state`.
+  { id: "scheduled_jobs", critical: false, label: "Daglige bakgrunnsjobber" },
   { id: "errors", critical: false, label: "Verktøyfeil siste time" },
   { id: "process", critical: false, label: "Prosess (minne, disk, last)" },
   { id: "constitution", critical: false, label: "Safety Constitution" },
