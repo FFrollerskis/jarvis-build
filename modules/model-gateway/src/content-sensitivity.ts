@@ -25,8 +25,10 @@ export function maxSensitivity(...values: Array<DataSensitivity | undefined>): D
 
 const HEALTH =
   /\b(diagnose[a-zæøå]*|sykdom[a-zæøå]*|sykemelding[a-zæøå]*|medisin[a-zæøå]*|resept[a-zæøå]*|legetime|fastlege|lege\b|sykehus[a-zæøå]*|blodprøve[a-zæøå]*|psykolog[a-zæøå]*|psykisk[a-zæøå]*|depresjon[a-zæøå]*|angst\b|symptom[a-zæøå]*|allergi[a-zæøå]*|graviditet[a-zæøå]*|kreft\b|helseopplysning[a-zæøå]*|diabetes|blodtrykk|medication|diagnosis|prescription|therapy|therapist|medical)\b/i;
+// Q-49 (NAS-test 2026-10-08): `gjeld` og `bic` er IKKE lenger prefiksmønstre. `gjeld[a-zæøå]*` fanget også verbet «gjelder/gjelde/gjeldende/gjeldt» (svært vanlige ord),
+// og `bic[a-zæøå]*` fanget «bicycle». Gjeld fanges fortsatt som gjeld/gjelden/gjeldene/gjeldsbrev/gjeldsgrad/gjeldfri, og BIC kun som eget ord.
 const FINANCE_STRONG =
-  /\b(?:[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){3,7}|\d{4}[ .]?\d{2}[ .]?\d{5}|(?:kontonummer|iban|bic|cvv|kortnummer|bankid|saldo|skattemelding|skatteoppgjør|lønnsslipp|lønn|gjeld|lån|formue|inntekt|fødselsnummer|personnummer|salary|mortgage|tax return|bank account)[a-zæøå]*)(?![a-zæøå])/i;
+  /\b(?:[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){3,7}|\d{4}[ .]?\d{2}[ .]?\d{5}|(?:kontonummer|iban|cvv|kortnummer|bankid|saldo|skattemelding|skatteoppgjør|lønnsslipp|lønn|lån|formue|inntekt|fødselsnummer|personnummer|salary|mortgage|tax return|bank account)[a-zæøå]*|bic(?![a-zæøå])|gjeld(?:en|ene|s[a-zæøå]*|fri)?(?![a-zæøå]))(?![a-zæøå])/i;
 const FINANCE_WEAK = /\b(faktura[a-zæøå]*|regning[a-zæøå]*|betaling[a-zæøå]*|utbetaling|bank\b|budsjett[a-zæøå]*|kredittkort|vipps|stripe|refusjon|invoice|payment)\b/i;
 const BUSINESS = /\b(kontrakt[a-zæøå]*|kunde[a-zæøå]*|tilbud[a-zæøå]*|omsetning[a-zæøå]*|avtale[a-zæøå]*|styrereferat|oppkjøp|konkurranse|forretningshemmelighet|nda\b|confidential|konfidensiell)\b/i;
 const PRIVATE_HINT = /\b(passord|adresse|telefonnummer|mobilnummer|kjæreste|samboer|ektefelle|barna mine|skilsmisse|private?)\b/i;

@@ -80,3 +80,34 @@ describe("D-384: partitionHistoryBySensitivity", () => {
     expect(out.kept.map((m) => m.content)).toEqual(["a", "b", "c", "d", "e"]);
   });
 });
+
+/**
+ * Q-49 (NAS-test 2026-10-08): `gjeld[a-zæøå]*` fanget også verbet «gjelder/gjelde/gjeldende/gjeldt», og `bic[a-zæøå]*` fanget «bicycle». Begge sendte vanlige
+ * samtaler (og verktøyturer, D-431) stilltiende til den lokale modellen. Gjeld og BIC fanges fortsatt - kun ordene uten økonomisk innhold slipper unna.
+ */
+describe("Q-49: gjeld og BIC uten falske positiver", () => {
+  const restricted = [
+    "jeg har mye gjeld", "gjelden min er 200 000", "send gjeldsbrevet", "gjeldsgraden min er for høy", "han er gjeldfri", "gjeldene mine", "Gjeld",
+    "BIC DNBANOKK", "bic-koden er DNBANOKK", "SWIFT/BIC"
+  ];
+  const notRestricted = [
+    "Dette gjelder alle PR-er", "Det samme gjelder tallet", "gjeldende regler for GitHub", "hva gjelder issues?", "det må gjelde for alle",
+    "regelen gjeldt i fjor", "GJELDER", "ta bicycle til jobb", "bicep curl"
+  ];
+
+  it.each(restricted)("fanges fortsatt som økonomi (kun lokal modell): %s", (text) => {
+    const d = classifyContentSensitivity({ texts: [text] });
+    expect(d.sensitivity).toBe("SECRET_RESTRICTED");
+    expect(d.reasons).toContain("text:finance");
+  });
+
+  it.each(notRestricted)("er vanlig tekst, ikke økonomi: %s", (text) => {
+    expect(classifyContentSensitivity({ texts: [text] }).sensitivity).toBe("PUBLIC_OR_LOW_SENSITIVITY");
+  });
+
+  it("de øvrige sterke økonomiordene er uendret (saldo, lønn, lån, inntekt, formue, iban, kontonummer)", () => {
+    for (const text of ["saldoen min", "lønnen min", "lånet mitt", "inntekten i fjor", "formuen vår", "iban NO9386011117947", "kontonummer 1234.56.78901"]) {
+      expect(classifyContentSensitivity({ texts: [text] }).sensitivity, text).toBe("SECRET_RESTRICTED");
+    }
+  });
+});
