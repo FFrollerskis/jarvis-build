@@ -11,3 +11,4 @@ export * from "./session-grant.ts";
 export * from "./mobility.ts";
 export * from "./env.ts";
 export * from "./owner-config.ts";
+export * from "./sweep-failures.ts";

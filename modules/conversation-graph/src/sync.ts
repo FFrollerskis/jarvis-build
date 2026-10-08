@@ -22,7 +22,7 @@
  */
 
 import type pg from "pg";
-import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts";
+import type { IdentityContext, JsonValue, MemorySpace, SweepFailureCollector } from "@jarvis/contracts";
 import { extractCounterpartEmails, type BusinessService } from "@jarvis/business";
 import { listBusinessTenantIds } from "@jarvis/core";
 import type { ToolGateway } from "@jarvis/tool-gateway";
@@ -132,7 +132,8 @@ export function createConversationGraphSyncService(
  */
 export async function runConversationGraphSyncForAllTenants(
   pool: pg.Pool,
-  syncService: ConversationGraphSyncService
+  syncService: ConversationGraphSyncService,
+  failures?: SweepFailureCollector
 ): Promise<Record<string, ConversationGraphSyncStats>> {
   const tenantIds = await listBusinessTenantIds(pool, 200);
   const results: Record<string, ConversationGraphSyncStats> = {};
@@ -146,6 +147,8 @@ export async function runConversationGraphSyncForAllTenants(
       results[tenantId] = await syncService.syncGmailIdentities(tenantId, "business", identity);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      console.error(JSON.stringify({ msg: "conversation_graph_sync_tenant_failed", tenant_id: tenantId, error: message.slice(0, 200) }));
+      failures?.record(tenantId, err);
       results[tenantId] = { scanned: 0, linked: 0, error: message.slice(0, 120) };
     }
   }

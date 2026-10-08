@@ -1,4 +1,5 @@
 import type pg from "pg";
+import type { SweepFailureCollector } from "@jarvis/contracts";
 import { listBusinessTenantIds } from "@jarvis/core";
 import type { OpenLoopService } from "./open-loop-service.ts";
 import type { SweepResult } from "./open-loop-types.ts";
@@ -19,7 +20,8 @@ import type { SweepResult } from "./open-loop-types.ts";
  */
 export async function runOpenLoopSweepForAllTenants(
   pool: pg.Pool,
-  openLoops: OpenLoopService
+  openLoops: OpenLoopService,
+  failures?: SweepFailureCollector
 ): Promise<Record<string, SweepResult>> {
   const tenantIds = await listBusinessTenantIds(pool, 200);
   const results: Record<string, SweepResult> = {};
@@ -33,6 +35,7 @@ export async function runOpenLoopSweepForAllTenants(
         msg: "open_loop_sweep_tenant_failed", tenant_id: tenantId,
         error: err instanceof Error ? err.message : String(err)
       }));
+      failures?.record(tenantId, err);
       results[tenantId] = { detected: 0, updated: 0, auto_resolved: 0 };
     }
   }

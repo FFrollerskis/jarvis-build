@@ -4,6 +4,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { failOnSweepFailures } from "@jarvis/contracts";
 import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { DailyScheduler } from "../src/scheduler.ts";
@@ -165,5 +166,55 @@ describe("D-393 (JARVIS-027): retry i stedet for tapt dag", () => {
     await doneJob.markCompleted();
     await pool.query("UPDATE scheduler_state SET claimed_at = now() - interval '1 hour' WHERE job_name = $1", ["sched-done-never-again"]);
     expect(await doneJob.claimToday()).toBe(false);
+  });
+});
+
+describe("D-442 (JARVIS-027): en tenant som feiler i et sveip gjør jobben feilet (retry), aldri fullført", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let timer: NodeJS.Timeout | undefined;
+  beforeEach(() => { errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined); });
+  afterEach(() => { if (timer) clearInterval(timer); errorSpy.mockRestore(); });
+
+  const row = async (job: string) =>
+    (await pool.query<{ attempts: number; completed_at: Date | null; retry_after: Date | null; last_error: string | null }>(
+      "SELECT attempts, completed_at, retry_after, last_error FROM scheduler_state WHERE job_name = $1", [job]
+    )).rows[0];
+
+  it("registrert tenant-feil: retry_after + last_error (jobb, tenant, delmengde) settes og dagen er ikke fullført; neste forsøk uten feil fullfører", async () => {
+    const job = "sched-sweep-tenant-failure";
+    const scheduler = new DailyScheduler(pool, job, 0);
+    const processed: string[] = [];
+    let run = 0;
+    timer = scheduler.start(() => failOnSweepFailures(job, async (failures) => {
+      run += 1;
+      for (const tenant of ["tenant-ok", "tenant-x"]) {
+        if (tenant === "tenant-x" && run === 1) failures.record(tenant, new Error("Gmail nede"), "gmail");
+        else processed.push(`${run}:${tenant}`);
+      }
+    }), 20);
+
+    await waitFor(async () => (await row(job))?.retry_after != null);
+    const failed = await row(job);
+    expect(failed?.completed_at).toBeNull();
+    expect(failed?.last_error).toContain(`${job}: 1 tenant-feil (tenant-x/gmail: Gmail nede)`);
+    expect(processed).toEqual(["1:tenant-ok"]); // isolasjonen er uendret: den friske tenanten ble kjørt før jobben ble markert feilet
+    expect(run).toBe(1); // ingen retry før backoff
+
+    await pool.query("UPDATE scheduler_state SET retry_after = now() - interval '1 second' WHERE job_name = $1", [job]);
+    await waitFor(async () => (await row(job))?.completed_at != null);
+    expect(run).toBe(2);
+    expect((await row(job))?.attempts).toBe(2);
+    expect(processed).toEqual(["1:tenant-ok", "2:tenant-ok", "2:tenant-x"]);
+  });
+
+  it("sveip uten tenant-feil bokføres som fullført ved første forsøk (ingen falsk alarm)", async () => {
+    const job = "sched-sweep-clean";
+    const scheduler = new DailyScheduler(pool, job, 0);
+    timer = scheduler.start(() => failOnSweepFailures(job, async () => undefined), 20);
+    await waitFor(async () => (await row(job))?.completed_at != null);
+    const done = await row(job);
+    expect(done?.attempts).toBe(1);
+    expect(done?.last_error).toBeNull();
+    expect(errorSpy).not.toHaveBeenCalled();
   });
 });

@@ -1,4 +1,5 @@
 import type pg from "pg";
+import type { SweepFailureCollector } from "@jarvis/contracts";
 import { listBusinessTenantIds } from "@jarvis/core";
 import type { BankingService } from "./banking-service.ts";
 import type { FinanceService } from "./service.ts";
@@ -36,7 +37,7 @@ const EMPTY_RESULT: NeonomicsSweepResult = {
  * fanges per steg) mens de RENT LOKALE stegene (avstemming/avvik) fortsatt
  * kjører - passiv integritet er aldri credential-gated.
  */
-export async function runNeonomicsSweepForAllTenants(pool: pg.Pool, banking: BankingService, finance: FinanceService): Promise<Record<string, NeonomicsSweepResult>> {
+export async function runNeonomicsSweepForAllTenants(pool: pg.Pool, banking: BankingService, finance: FinanceService, failures?: SweepFailureCollector): Promise<Record<string, NeonomicsSweepResult>> {
   const tenantIds = await listBusinessTenantIds(pool, 200);
   const results: Record<string, NeonomicsSweepResult> = {};
   for (const tenantId of tenantIds) {
@@ -56,6 +57,7 @@ export async function runNeonomicsSweepForAllTenants(pool: pg.Pool, banking: Ban
             msg: "neonomics_sweep_consent_verify_failed", tenant_id: tenantId, consent_id: consent.consent_id,
             error: err instanceof Error ? err.message : String(err)
           }));
+          failures?.record(tenantId, err, `consent:${consent.consent_id}`);
         }
       }
       const accounts = await banking.listBankAccounts(tenantId, "business");
@@ -71,6 +73,7 @@ export async function runNeonomicsSweepForAllTenants(pool: pg.Pool, banking: Ban
             msg: "neonomics_sweep_transaction_sync_failed", tenant_id: tenantId, bank_account_id: account.bank_account_id,
             error: err instanceof Error ? err.message : String(err)
           }));
+          failures?.record(tenantId, err, `account:${account.bank_account_id}`);
         }
       }
     } catch (err) {
@@ -79,6 +82,7 @@ export async function runNeonomicsSweepForAllTenants(pool: pg.Pool, banking: Ban
         msg: "neonomics_sweep_consent_list_failed", tenant_id: tenantId,
         error: err instanceof Error ? err.message : String(err)
       }));
+      failures?.record(tenantId, err, "consent_list");
     }
     try {
       result.payments = await finance.syncPendingNeonomicsPayments(tenantId, "business");
@@ -88,6 +92,7 @@ export async function runNeonomicsSweepForAllTenants(pool: pg.Pool, banking: Ban
         msg: "neonomics_sweep_payment_sync_failed", tenant_id: tenantId,
         error: err instanceof Error ? err.message : String(err)
       }));
+      failures?.record(tenantId, err, "payments");
     }
     try {
       result.reconciliation = await banking.reconcileBankTransactions(tenantId, "business");
@@ -99,6 +104,7 @@ export async function runNeonomicsSweepForAllTenants(pool: pg.Pool, banking: Ban
         msg: "neonomics_sweep_reconciliation_failed", tenant_id: tenantId,
         error: err instanceof Error ? err.message : String(err)
       }));
+      failures?.record(tenantId, err, "reconciliation");
     }
     results[tenantId] = result;
   }

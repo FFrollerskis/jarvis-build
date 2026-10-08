@@ -1,4 +1,5 @@
 import type pg from "pg";
+import type { SweepFailureCollector } from "@jarvis/contracts";
 import { listBusinessTenantIds } from "@jarvis/core";
 import type { GrowthService } from "./service.ts";
 
@@ -22,7 +23,8 @@ export interface ActionRecommendationSweepResult {
 
 export async function runActionRecommendationSweepForAllTenants(
   pool: pg.Pool,
-  growth: GrowthService
+  growth: GrowthService,
+  failures?: SweepFailureCollector
 ): Promise<Record<string, ActionRecommendationSweepResult>> {
   const tenantIds = await listBusinessTenantIds(pool, 200);
   const results: Record<string, ActionRecommendationSweepResult> = {};
@@ -36,6 +38,7 @@ export async function runActionRecommendationSweepForAllTenants(
         msg: "action_recommendation_sweep_tenant_failed", tenant_id: tenantId,
         error: err instanceof Error ? err.message : String(err)
       }));
+      failures?.record(tenantId, err);
       results[tenantId] = { detected: 0, updated: 0, superseded: 0 };
     }
   }

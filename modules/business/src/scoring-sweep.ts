@@ -1,4 +1,5 @@
 import type pg from "pg";
+import type { SweepFailureCollector } from "@jarvis/contracts";
 import { listBusinessTenantIds } from "@jarvis/core";
 import type { ScoringService } from "./scoring-service.ts";
 
@@ -18,7 +19,8 @@ import type { ScoringService } from "./scoring-service.ts";
  */
 export async function runScoringSweepForAllTenants(
   pool: pg.Pool,
-  scoring: ScoringService
+  scoring: ScoringService,
+  failures?: SweepFailureCollector
 ): Promise<Record<string, { leads: number; opportunities: number }>> {
   const tenantIds = await listBusinessTenantIds(pool, 200);
   const results: Record<string, { leads: number; opportunities: number }> = {};
@@ -32,6 +34,7 @@ export async function runScoringSweepForAllTenants(
         msg: "scoring_sweep_tenant_failed", tenant_id: tenantId,
         error: err instanceof Error ? err.message : String(err)
       }));
+      failures?.record(tenantId, err);
       results[tenantId] = { leads: 0, opportunities: 0 };
     }
   }

@@ -1,4 +1,5 @@
 import type pg from "pg";
+import type { SweepFailureCollector } from "@jarvis/contracts";
 import { listBusinessTenantIds } from "@jarvis/core";
 import type { FinanceService } from "./service.ts";
 import type { VippsProviderAnomalyDetectionResult } from "./types.ts";
@@ -16,7 +17,7 @@ export interface VippsPaymentSyncResult {
  * Tenant-katalogen leses via den DELTE, RLS-trygge `listBusinessTenantIds()`
  * (@jarvis/core, Q-27) - ALDRI en rå spørring direkte mot `tenants`.
  */
-export async function runVippsPaymentSyncForAllTenants(pool: pg.Pool, financeService: FinanceService): Promise<Record<string, VippsPaymentSyncResult>> {
+export async function runVippsPaymentSyncForAllTenants(pool: pg.Pool, financeService: FinanceService, failures?: SweepFailureCollector): Promise<Record<string, VippsPaymentSyncResult>> {
   const tenantIds = await listBusinessTenantIds(pool, 200);
   const results: Record<string, VippsPaymentSyncResult> = {};
   for (const tenantId of tenantIds) {
@@ -31,6 +32,7 @@ export async function runVippsPaymentSyncForAllTenants(pool: pg.Pool, financeSer
         msg: "vipps_sweep_tenant_failed", tenant_id: tenantId,
         error: err instanceof Error ? err.message : String(err)
       }));
+      failures?.record(tenantId, err);
       results[tenantId] = { sync: { synced: 0, failed: 0 }, anomalies: { payment_intent_flags_added: 0, capture_flags_added: 0, refund_flags_added: 0, flags_cleared: 0 } };
     }
   }

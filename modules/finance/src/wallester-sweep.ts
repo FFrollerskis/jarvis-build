@@ -1,4 +1,5 @@
 import type pg from "pg";
+import type { SweepFailureCollector } from "@jarvis/contracts";
 import { listBusinessTenantIds } from "@jarvis/core";
 import type { CardService } from "./card-service.ts";
 
@@ -30,7 +31,7 @@ const EMPTY_RESULT: WallesterSweepResult = {
  * RENT LOKALE stegene (avstemming/avvik) fortsatt kjører - passiv
  * integritet er aldri credential-gated (§11/§19).
  */
-export async function runWallesterSweepForAllTenants(pool: pg.Pool, cards: CardService): Promise<Record<string, WallesterSweepResult>> {
+export async function runWallesterSweepForAllTenants(pool: pg.Pool, cards: CardService, failures?: SweepFailureCollector): Promise<Record<string, WallesterSweepResult>> {
   const tenantIds = await listBusinessTenantIds(pool, 200);
   const results: Record<string, WallesterSweepResult> = {};
   for (const tenantId of tenantIds) {
@@ -54,6 +55,7 @@ export async function runWallesterSweepForAllTenants(pool: pg.Pool, cards: CardS
             msg: "wallester_sweep_card_sync_failed", tenant_id: tenantId, card_id: card.card_id,
             error: err instanceof Error ? err.message : String(err)
           }));
+          failures?.record(tenantId, err, `card:${card.card_id}`);
         }
       }
     } catch (err) {
@@ -62,6 +64,7 @@ export async function runWallesterSweepForAllTenants(pool: pg.Pool, cards: CardS
         msg: "wallester_sweep_card_list_failed", tenant_id: tenantId,
         error: err instanceof Error ? err.message : String(err)
       }));
+      failures?.record(tenantId, err, "card_list");
     }
     try {
       result.reconciliation = await cards.reconcileCardTransactions(tenantId, "business");
@@ -72,6 +75,7 @@ export async function runWallesterSweepForAllTenants(pool: pg.Pool, cards: CardS
         msg: "wallester_sweep_reconciliation_failed", tenant_id: tenantId,
         error: err instanceof Error ? err.message : String(err)
       }));
+      failures?.record(tenantId, err, "reconciliation");
     }
     results[tenantId] = result;
   }
