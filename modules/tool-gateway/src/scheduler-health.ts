@@ -18,6 +18,13 @@ import { DAILY_SCHEDULER_CLAIM_LEASE_MINUTES, DAILY_SCHEDULER_MAX_ATTEMPTS } fro
  */
 export type SchedulerProblemKind = "lost_previous_day" | "gave_up" | "retry_pending" | "stalled";
 
+/**
+ * D-445: jobber som avhenger av eierens PC (lokal modell/embedding via Ollama) og derfor legitimt feiler de nettene PC-en er av. De prøves på nytt som alle andre, men et tap her er
+ * aldri «tapt arbeid»: det vises som DEGRADED i selvdiagnosen (med forklaring) og kommer aldri i morgenbriefen - neste kjøring tar igjen det som ble utsatt, og vektorer/sammendrag
+ * skrives uansett ved bruk mens PC-en er på. Alle andre jobber er kritiske og gir DOWN / morgenbrief-varsel når arbeidet er tapt.
+ */
+export const BEST_EFFORT_JOBS: ReadonlySet<string> = new Set(["memory-reembed-sweep", "memory-retention-sweep"]);
+
 export interface SchedulerJobProblem {
   job_name: string;
   /** `YYYY-MM-DD` (Europe/Oslo). */
@@ -25,6 +32,8 @@ export interface SchedulerJobProblem {
   kind: SchedulerProblemKind;
   attempts: number;
   max_attempts: number;
+  /** D-445: jobben avhenger av eierens PC (`BEST_EFFORT_JOBS`) - tap er DEGRADED, aldri DOWN/morgenbrief. */
+  best_effort: boolean;
   /** Avkortet (120 tegn, uten den ledende `<jobb>: `-prefiksen scheduleren selv skriver); `null` når raden ikke har noen registrert feil (for eksempel hengt claim). */
   last_error: string | null;
 }
@@ -90,6 +99,7 @@ export async function readSchedulerHealth(pool: Pick<pg.Pool, "query">): Promise
       kind,
       attempts: row.attempts,
       max_attempts: DAILY_SCHEDULER_MAX_ATTEMPTS,
+      best_effort: BEST_EFFORT_JOBS.has(row.job_name),
       last_error: trimError(row.job_name, row.last_error)
     });
   }
@@ -101,11 +111,12 @@ export async function readSchedulerHealth(pool: Pick<pg.Pool, "query">): Promise
 /** Kort norsk beskrivelse av ett problem (selvdiagnose og brief bruker samme tekst). */
 export function describeSchedulerProblem(p: SchedulerJobProblem): string {
   const why = p.last_error === null ? "" : `: ${p.last_error}`;
+  const pcNote = p.best_effort ? " (avhenger av PC-en; tas igjen neste kjøring)" : "";
   switch (p.kind) {
     case "gave_up":
-      return `${p.job_name} ga opp etter ${p.attempts}/${p.max_attempts} forsøk${why}`;
+      return `${p.job_name} ga opp etter ${p.attempts}/${p.max_attempts} forsøk${why}${pcNote}`;
     case "lost_previous_day":
-      return `${p.job_name} ble ikke fullført ${p.run_date} (${p.attempts} forsøk)${why}`;
+      return `${p.job_name} ble ikke fullført ${p.run_date} (${p.attempts} forsøk)${why}${pcNote}`;
     case "retry_pending":
       return `${p.job_name} feilet (forsøk ${p.attempts}/${p.max_attempts}), nytt forsøk er planlagt${why}`;
     case "stalled":
@@ -114,7 +125,7 @@ export function describeSchedulerProblem(p: SchedulerJobProblem): string {
 }
 
 /**
- * Morgenbriefen: kun jobber der dagens arbeid er TAPT (`gave_up`/`lost_previous_day`). En jobb som bare venter på et nytt forsøk (`retry_pending`/`stalled`)
+ * Morgenbriefen: kun KRITISKE jobber der dagens arbeid er TAPT (`gave_up`/`lost_previous_day`; ikke `BEST_EFFORT_JOBS`, D-445). En jobb som bare venter på et nytt forsøk (`retry_pending`/`stalled`)
  * er forbigående og ville bare vært støy kl. 07 - den vises i selvdiagnosen. `scheduler_state` er global (ingen tenant-RLS), så kilden bruker poolen direkte og
  * leverer KUN til eieren (`isOwner`).
  */
@@ -126,7 +137,7 @@ export function schedulerSource(pool: Pick<pg.Pool, "query">, isOwner: (identity
       if (!isOwner(identity)) return [];
       const health = await readSchedulerHealth(pool);
       return health.problems
-        .filter((p) => p.kind === "gave_up" || p.kind === "lost_previous_day")
+        .filter((p) => !p.best_effort && (p.kind === "gave_up" || p.kind === "lost_previous_day"))
         .map((p): BriefItem => ({
           source: "jarvis-scheduler",
           ref: `${p.job_name}:${p.run_date}`,

@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type pg from "pg";
 import { SweepFailureCollector } from "@jarvis/contracts";
+import { BEST_EFFORT_JOBS } from "@jarvis/tool-gateway";
 import { runBusinessEventSyncForAllTenants, runOpenLoopSweepForAllTenants, runScoringSweepForAllTenants } from "@jarvis/business";
 import { runConversationGraphSyncForAllTenants } from "@jarvis/conversation-graph";
 import {
@@ -340,6 +341,11 @@ describe("D-442: main.ts forkaster aldri et sveipresultat (kildenivå-vakt, main
     const weeklyStart = mainSource.indexOf('"business-weekly-brief"');
     const weekly = mainSource.slice(weeklyStart, mainSource.indexOf("\n  });", weeklyStart));
     expect(weekly).toMatch(/if \(result\.delivered === 0 && result\.chunks_sent === 0\) \{\s*throw new Error\(`business-weekly-brief:/);
+  });
+
+  it("D-445: hvert navn i BEST_EFFORT_JOBS er en faktisk DailyScheduler-jobb i main.ts (ellers ville klassifiseringen stille slutte å gjelde ved omdøping)", () => {
+    expect(BEST_EFFORT_JOBS.size).toBeGreaterThan(0);
+    for (const job of BEST_EFFORT_JOBS) expect(mainSource, `DailyScheduler for ${job}`).toMatch(new RegExp(`new DailyScheduler\\(\\s*pool, "${job}"`));
   });
 
   it("morgenbriefen har scheduler-kilden (eier-begrenset) - uten den vises aldri en jobb som ga opp", () => {

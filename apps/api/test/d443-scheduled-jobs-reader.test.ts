@@ -65,6 +65,23 @@ describe("D-443: scheduled_jobs-leseren", () => {
     expect(detail).toContain("memory-profile-sweep ble ikke fullført 2026-10-07");
   });
 
+  it("D-445: kun jobber som avhenger av eierens PC (best effort) har gitt opp -> DEGRADED, ikke DOWN, med forklaring - PC-en er av noen netter", async () => {
+    const obs = await readersFor([
+      rowOf({ job_name: "memory-reembed-sweep", attempts: 4, retry_after: NOW, last_error: "ollama: fetch failed" }),
+      rowOf({ job_name: "memory-retention-sweep", run_date: "2026-10-07", past_day: true, attempts: 2, retry_after: NOW, last_error: "llm nede" })
+    ]).scheduled_jobs!();
+    expect(obs).toMatchObject({ status: "DEGRADED", data: { gave_up: 1, lost_previous_day: 1, best_effort: 2 } });
+    expect((obs as { detail: string }).detail).toContain("memory-reembed-sweep ga opp etter 4/4 forsøk: ollama: fetch failed (avhenger av PC-en; tas igjen neste kjøring)");
+  });
+
+  it("D-445: en kritisk jobb som ga opp gir fortsatt DOWN, også når en PC-avhengig jobb ligger blant problemene", async () => {
+    const obs = await readersFor([
+      rowOf({ job_name: "memory-reembed-sweep", attempts: 4, retry_after: NOW, last_error: "ollama: fetch failed" }),
+      rowOf({ job_name: "stripe-payment-sync", attempts: 4, retry_after: NOW, last_error: "stripe 503" })
+    ]).scheduled_jobs!();
+    expect(obs).toMatchObject({ status: "DOWN" });
+  });
+
   it("mer enn fire problemer: de fire første vises og resten telles", async () => {
     const rows = Array.from({ length: 6 }, (_, i) => rowOf({ job_name: `job-${i}`, attempts: 4, retry_after: NOW, last_error: "x" }));
     const detail = ((await readersFor(rows).scheduled_jobs!()) as { detail: string }).detail;
