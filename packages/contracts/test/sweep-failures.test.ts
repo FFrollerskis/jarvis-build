@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   SweepFailedError,
   SweepFailureCollector,
   assertNoSweepFailures,
   describeSweepError,
-  failOnSweepFailures
+  failOnSweepFailures,
+  isDeliberatePause
 } from "../src/sweep-failures.ts";
 
 describe("D-442 (JARVIS-027): SweepFailureCollector", () => {
@@ -79,5 +80,38 @@ describe("D-442: failOnSweepFailures", () => {
 
   it("et unntak fra selve sveipet (for eksempel tenant-oppslaget) går uendret videre", async () => {
     await expect(failOnSweepFailures("demo", async () => { throw new Error("enumerering feilet"); })).rejects.toThrow("enumerering feilet");
+  });
+});
+
+describe("D-442: eierens bevisste pause er ikke en feil", () => {
+  it("frysing, tilbakekalt credential og kill switch regnes som pause (hoppet over), ikke som feil", () => {
+    for (const reason of ["connector_frozen", "credential_revoked", "kill_switch_active"]) {
+      expect(isDeliberatePause(new Error(reason))).toBe(true);
+      expect(isDeliberatePause(`tenant-feil: ${reason}`)).toBe(true);
+    }
+    for (const reason of ["credential_unavailable", "credential_not_bound_to_identity", "tool_timeout", "boom"]) {
+      expect(isDeliberatePause(new Error(reason)), reason).toBe(false);
+    }
+  });
+
+  it("collector skiller pauser fra feil; failOnSweepFailures kaster ikke for ren pause, men logger den, og kaster for ekte feil ved siden av", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      await expect(failOnSweepFailures("demo", async (f) => { f.record("t1", new Error("connector_frozen"), "gmail"); })).resolves.toBeUndefined();
+      expect(log.mock.calls.some((c) => String(c[0]).includes("sweep_skipped_owner_pause"))).toBe(true);
+
+      await expect(
+        failOnSweepFailures("demo", async (f) => {
+          f.record("t1", new Error("credential_revoked"));
+          f.record("t2", new Error("boom"), "payments");
+        })
+      ).rejects.toThrow("demo: 1 tenant-feil (t2/payments: boom)");
+    } finally {
+      log.mockRestore();
+    }
+    const c = new SweepFailureCollector();
+    c.record("t1", new Error("kill_switch_active"));
+    expect(c.failures).toEqual([]);
+    expect(c.skipped).toEqual([{ tenant_id: "t1", error: "kill_switch_active" }]);
   });
 });

@@ -13,6 +13,7 @@ import {
   runWallesterSweepForAllTenants
 } from "@jarvis/finance";
 import { runActionRecommendationSweepForAllTenants } from "@jarvis/growth";
+import { BankConsentNotActiveError } from "@jarvis/finance";
 import { runSupportInboxSyncForAllTenants } from "@jarvis/support";
 
 /**
@@ -117,6 +118,57 @@ describe("D-442: per-tenant-sveip registrerer tenant-feil uten å velte de andre
     const { failures, results } = await failuresOf((f) => runVippsPaymentSyncForAllTenants(fakePool(), finance as never, f));
     expect(failures).toEqual([{ tenant_id: "bad", error: "bad feilet" }]);
     expect(results["good"]?.sync).toEqual({ synced: 1, failed: 0 });
+  });
+});
+
+describe("D-442: per-betalings-feil som tjenestene returnerer som et tall (ikke kaster) regnes som feil - en leverandørnedetid er ikke en fullført dag", () => {
+  const noAnomalies = { payment_intent_flags_added: 0, refund_flags_added: 0, flags_cleared: 0 };
+
+  it("Stripe: sync.failed > 0 registreres med delmengde «payments»; failed = 0 gir ingenting", async () => {
+    const finance = {
+      syncPendingStripePayments: async (t: string) => (t === "bad" ? { synced: 0, failed: 3 } : { synced: 2, failed: 0 }),
+      runProviderAnomalyDetection: async () => noAnomalies
+    };
+    const { failures, results } = await failuresOf((f) => runStripePaymentSyncForAllTenants(fakePool(), finance as never, f));
+    expect(failures).toEqual([{ tenant_id: "bad", scope: "payments", error: "3 betaling(er) kunne ikke synkes" }]);
+    expect(results["bad"]?.sync).toEqual({ synced: 0, failed: 3 }); // returverdien er uendret
+  });
+
+  it("Vipps: sync.failed > 0 registreres med delmengde «payments»", async () => {
+    const finance = {
+      syncPendingVippsPayments: async (t: string) => (t === "bad" ? { synced: 1, failed: 1 } : { synced: 2, failed: 0 }),
+      runVippsProviderAnomalyDetection: async () => ({ ...noAnomalies, capture_flags_added: 0 })
+    };
+    const { failures } = await failuresOf((f) => runVippsPaymentSyncForAllTenants(fakePool(), finance as never, f));
+    expect(failures).toEqual([{ tenant_id: "bad", scope: "payments", error: "1 betaling(er) kunne ikke synkes" }]);
+  });
+
+  it("Neonomics: payments.failed > 0 registreres med delmengde «payments»", async () => {
+    const banking = {
+      listConsents: async () => [], listBankAccounts: async () => [],
+      reconcileBankTransactions: async () => ({ matched_by_reference: 0 }), runBankAnomalyDetection: async () => ({ transaction_flags_added: 0 })
+    };
+    const finance = {
+      syncPendingNeonomicsPayments: async () => ({ synced: 0, failed: 2 }),
+      runNeonomicsProviderAnomalyDetection: async () => ({ payment_intent_flags_added: 0 })
+    };
+    const collector = new SweepFailureCollector();
+    await runNeonomicsSweepForAllTenants(fakePool(["bad"]), banking as never, finance as never, collector);
+    expect(collector.failures).toEqual([{ tenant_id: "bad", scope: "payments", error: "2 betaling(er) kunne ikke synkes" }]);
+  });
+
+  it("Neonomics: et utløpt/ikke-aktivt samtykke (BankConsentNotActiveError) er en TILSTAND som flagges av egen regel - ikke en feil et nytt forsøk kan rette", async () => {
+    const banking = {
+      listConsents: async () => [{ consent_id: "c1", state: "active" }],
+      verifyConsent: async () => { throw new BankConsentNotActiveError("c1", "expired"); },
+      listBankAccounts: async () => [{ bank_account_id: "a1" }],
+      syncTransactions: async () => { throw new BankConsentNotActiveError("c1", "expired"); },
+      reconcileBankTransactions: async () => ({ matched_by_reference: 0 }), runBankAnomalyDetection: async () => ({ transaction_flags_added: 0 })
+    };
+    const finance = { syncPendingNeonomicsPayments: async () => ({ synced: 0, failed: 0 }), runNeonomicsProviderAnomalyDetection: async () => ({ payment_intent_flags_added: 0 }) };
+    const collector = new SweepFailureCollector();
+    await runNeonomicsSweepForAllTenants(fakePool(["bad"]), banking as never, finance as never, collector);
+    expect(collector.failures).toEqual([]);
   });
 });
 
@@ -241,37 +293,58 @@ describe("D-442: wallester-sweep - hvert delsteg som kan feile registreres med e
 
 describe("D-442: main.ts forkaster aldri et sveipresultat (kildenivå-vakt, main.ts kan ikke importeres - samme presedens som de øvrige *-wiring-testene)", () => {
   const mainSource = readFileSync(fileURLToPath(new URL("../src/main.ts", import.meta.url)), "utf8");
+  /** Hvert `run…ForAllTenants(`-KALL (ikke importene) med teksten fra kallet til slutten av setningen (`;` + linjeskift). */
+  const calls = [...mainSource.matchAll(/\b(run\w+ForAllTenants)\(/g)].map((m) => ({
+    fn: m[1]!,
+    stmt: mainSource.slice(m.index!, mainSource.indexOf(";\n", m.index!))
+  }));
 
-  it("ingen *ForAllTenants-kall ender i .then(() => undefined) (antimønsteret som gjorde tenant-feil usynlige for DailyScheduler)", () => {
-    const discarding = [...mainSource.matchAll(/(run\w+ForAllTenants)\([^;]*?\)\s*\.then\(\(\) => undefined\)/gs)].map((m) => m[1]);
-    expect(discarding).toEqual([]);
+  it("hvert *ForAllTenants-kall i main.ts har en eskalering: samler som sendes inn, assertNoSweepFailures på failed[], assertSituationSweepHealthy, eller (kun ukebrief/oppstartskick) eget håndtert", () => {
+    expect(calls.length).toBeGreaterThanOrEqual(19);
+    const unescalated = calls.filter(({ fn, stmt }) => {
+      if (fn === "runBusinessWeeklyBriefForAllTenants") return false; // egen logikk, testet under
+      if (/\bfailures\)/.test(stmt)) return false; // samleren sendes faktisk inn i sveipet
+      if (/assertNoSweepFailures\("[a-z-]+", summary\.failed\)/.test(stmt)) return false;
+      if (/assertSituationSweepHealthy/.test(stmt)) return false;
+      if (fn === "runMemoryReembedSweepForAllTenants" && /\{ maxRows: 500 \}\)\.catch\(/.test(stmt)) return false; // oppstartskick, ikke en DailyScheduler-jobb
+      return true;
+    });
+    expect(unescalated.map((c) => c.fn)).toEqual([]);
   });
 
-  it("11 jobber via failOnSweepFailures og 6 via assertNoSweepFailures (retensjons-/minnesveipene som allerede returnerer failed[])", () => {
-    const viaCollector = [...mainSource.matchAll(/failOnSweepFailures\("([a-z-]+)"/g)].map((m) => m[1]);
-    expect(viaCollector.sort()).toEqual([
+  it("failOnSweepFailures sender samleren videre til sveipet (ikke bare et jobbnavn), og jobbnavnet er det samme som DailyScheduler-jobben", () => {
+    const viaCollector = [...mainSource.matchAll(/failOnSweepFailures\("([a-z-]+)", \(failures\) => (run\w+)\(([^)]*)\)\)/g)];
+    expect(viaCollector.map((m) => m[1]).sort()).toEqual([
       "business-events-sync", "business-open-loop-sweep", "business-scoring-recalc", "conversation-graph-sync",
       "finance-spend-integrity-sweep", "growth-action-recommendation-sweep", "neonomics-sweep", "stripe-payment-sync",
       "support-inbox-sync", "vipps-payment-sync", "wallester-sweep"
     ]);
-    const viaFailedList = [...mainSource.matchAll(/assertNoSweepFailures\("([a-z-]+)"/g)].map((m) => m[1]);
-    expect(viaFailedList.sort()).toEqual([
-      "health-retention-sweep", "location-retention-sweep", "memory-profile-sweep", "memory-reembed-sweep", "memory-retention-sweep",
-      "vision-retention-sweep"
-    ]);
-  });
-
-  it("jobbnavnet i failOnSweepFailures/assertNoSweepFailures er det samme som DailyScheduler-jobbnavnet (last_error må peke på riktig jobb)", () => {
-    for (const [, job] of mainSource.matchAll(/(?:failOnSweepFailures|assertNoSweepFailures)\("([a-z-]+)"/g)) {
+    for (const [, job, , args] of viaCollector) {
+      expect(args, `${job}: samleren må være siste argument`).toMatch(/, failures$/);
       expect(mainSource, `DailyScheduler for ${job}`).toMatch(new RegExp(`new DailyScheduler\\(\\s*pool, "${job}"`));
     }
   });
 
-  it("morgenbriefen kaster når leveringen uteble, og ukebriefen kaster KUN når ingen tenant fikk den (retry etter delvis levering ville duplisert)", () => {
+  it("retensjons-/minnesveipene (som returnerer failed[]) kaster via assertNoSweepFailures med riktig jobbnavn og IKKE en tom liste", () => {
+    const viaFailedList = [...mainSource.matchAll(/assertNoSweepFailures\("([a-z-]+)", summary\.failed\)/g)].map((m) => m[1]);
+    expect(viaFailedList.sort()).toEqual([
+      "health-retention-sweep", "location-retention-sweep", "memory-profile-sweep", "memory-reembed-sweep", "memory-retention-sweep",
+      "vision-retention-sweep"
+    ]);
+    for (const job of viaFailedList) expect(mainSource, `DailyScheduler for ${job}`).toMatch(new RegExp(`new DailyScheduler\\(\\s*pool, "${job}"`));
+  });
+
+  it("morgenbriefen kaster når leveringen uteble, og ukebriefen kaster KUN når ingen del ble sendt til noen (retry etter delvis levering ville duplisert)", () => {
     const daily = mainSource.slice(mainSource.indexOf("daily_brief_delivery_failed"), mainSource.indexOf("daily_brief_delivery_failed") + 900);
     expect(daily).toContain('throw new Error("daily-brief: Telegram-levering feilet")');
     const weeklyStart = mainSource.indexOf('"business-weekly-brief"');
     const weekly = mainSource.slice(weeklyStart, mainSource.indexOf("\n  });", weeklyStart));
-    expect(weekly).toMatch(/if \(result\.delivered === 0\) \{\s*throw new Error\(`business-weekly-brief:/);
+    expect(weekly).toMatch(/if \(result\.delivered === 0 && result\.chunks_sent === 0\) \{\s*throw new Error\(`business-weekly-brief:/);
+  });
+
+  it("morgenbriefen har scheduler-kilden (eier-begrenset) - uten den vises aldri en jobb som ga opp", () => {
+    const start = mainSource.indexOf("new DailyBrief([");
+    const block = mainSource.slice(start, mainSource.indexOf("], pool)", start));
+    expect(block).toMatch(/schedulerSource\(pool, \(id\) => id\.person_id === owner\.owner_person_id && id\.tenant_id === owner\.tenant_id\)/);
   });
 });

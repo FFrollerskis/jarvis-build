@@ -62,6 +62,18 @@ export class DailyScheduler {
     );
   }
 
+  /**
+   * D-442: forny claimet mens jobben kjorer. Uten dette regnes en legitimt lang kjoering (reembed etter modellbytte, LLM-retensjon, mange bank-sider) som hengt naar claimet er
+   * eldre enn lease: neste tick starter da en SAMTIDIG kjoering av samme jobb, og helse-leseren (D-443) viser den som `stalled`/`gave_up` mens den fortsatt jobber.
+   */
+  async heartbeat(): Promise<void> {
+    const { date } = this.localNow();
+    await this.pool.query(
+      "UPDATE scheduler_state SET claimed_at = now() WHERE job_name = $1 AND run_date = $2 AND claimed_by = $3 AND completed_at IS NULL",
+      [this.jobName, date, this.instanceId]
+    );
+  }
+
   /** D-393: planlegg nytt forsoek med backoff (1, 5, 15 min) for DENNE instansens claim; gir opp (synlig i loggen) etter `MAX_ATTEMPTS`. */
   async markFailed(error: string): Promise<void> {
     const { date } = this.localNow();
@@ -77,10 +89,12 @@ export class DailyScheduler {
     }
   }
 
-  /** Kjoer i intervall: leverer maks en gang per dag, reboot-/multi-instans-trygt. */
-  start(deliver: () => Promise<void>, intervalMs = 60_000): NodeJS.Timeout {
+  /** Kjoer i intervall: leverer maks en gang per dag, reboot-/multi-instans-trygt. `heartbeatMs` (D-442) styrer hvor ofte claimet fornyes mens `deliver()` kjorer. */
+  start(deliver: () => Promise<void>, intervalMs = 60_000, heartbeatMs = 60_000): NodeJS.Timeout {
     const timer = setInterval(() => void (async () => {
       if (await this.claimToday()) {
+        const heartbeat = setInterval(() => void this.heartbeat().catch(() => undefined), heartbeatMs);
+        heartbeat.unref();
         try {
           await deliver();
           await this.markCompleted();
@@ -88,6 +102,8 @@ export class DailyScheduler {
           // D-393 (JARVIS-027): planlegg retry foer feilen logges av sikkerhetsnettet under (feil i selve markFailed maa ikke skjule originalfeilen).
           await this.markFailed(err instanceof Error ? err.message : String(err)).catch(() => undefined);
           throw err;
+        } finally {
+          clearInterval(heartbeat);
         }
       }
     })().catch((err) => {

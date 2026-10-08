@@ -1,4 +1,5 @@
 import type pg from "pg";
+import type { IdentityContext } from "@jarvis/contracts";
 import type { BriefItem, BriefSource } from "./daily-brief.ts";
 import { DAILY_SCHEDULER_CLAIM_LEASE_MINUTES, DAILY_SCHEDULER_MAX_ATTEMPTS } from "./scheduler.ts";
 
@@ -24,7 +25,7 @@ export interface SchedulerJobProblem {
   kind: SchedulerProblemKind;
   attempts: number;
   max_attempts: number;
-  /** Avkortet (80 tegn); `null` når raden ikke har noen registrert feil (for eksempel hengt claim). */
+  /** Avkortet (120 tegn, uten den ledende `<jobb>: `-prefiksen scheduleren selv skriver); `null` når raden ikke har noen registrert feil (for eksempel hengt claim). */
   last_error: string | null;
 }
 
@@ -46,8 +47,15 @@ interface Row {
   claim_stale: boolean;
 }
 
-const MAX_ERROR_CHARS = 80;
+const MAX_ERROR_CHARS = 120;
 const TIME_ZONE = "Europe/Oslo";
+
+/** D-442-meldingene starter med `<jobb>: N tenant-feil (`; jobbnavnet vises allerede ved siden av, så prefikset spiser bare av de tegnene årsaken trenger. */
+function trimError(jobName: string, error: string | null): string | null {
+  if (error === null) return null;
+  const prefix = `${jobName}: `;
+  return (error.startsWith(prefix) ? error.slice(prefix.length) : error).slice(0, MAX_ERROR_CHARS);
+}
 
 export function classifySchedulerRow(row: Row): SchedulerProblemKind | null {
   if (row.completed_at !== null) return null;
@@ -82,7 +90,7 @@ export async function readSchedulerHealth(pool: Pick<pg.Pool, "query">): Promise
       kind,
       attempts: row.attempts,
       max_attempts: DAILY_SCHEDULER_MAX_ATTEMPTS,
-      last_error: row.last_error === null ? null : row.last_error.slice(0, MAX_ERROR_CHARS)
+      last_error: trimError(row.job_name, row.last_error)
     });
   }
   const order: Record<SchedulerProblemKind, number> = { gave_up: 0, lost_previous_day: 1, stalled: 2, retry_pending: 3 };
@@ -107,12 +115,15 @@ export function describeSchedulerProblem(p: SchedulerJobProblem): string {
 
 /**
  * Morgenbriefen: kun jobber der dagens arbeid er TAPT (`gave_up`/`lost_previous_day`). En jobb som bare venter på et nytt forsøk (`retry_pending`/`stalled`)
- * er forbigående og ville bare vært støy kl. 07 - den vises i selvdiagnosen. `scheduler_state` er global (ingen tenant-RLS), så kilden bruker poolen direkte.
+ * er forbigående og ville bare vært støy kl. 07 - den vises i selvdiagnosen. `scheduler_state` er global (ingen tenant-RLS), så kilden bruker poolen direkte og
+ * leverer KUN til eieren (`isOwner`).
  */
-export function schedulerSource(pool: Pick<pg.Pool, "query">): BriefSource {
+export function schedulerSource(pool: Pick<pg.Pool, "query">, isOwner: (identity: IdentityContext) => boolean): BriefSource {
   return {
     name: "jarvis-scheduler",
-    async collect(): Promise<BriefItem[]> {
+    async collect(identity: IdentityContext): Promise<BriefItem[]> {
+      // `scheduler_state` er global (ingen tenant-RLS) og feilteksten kan nevne andre tenants - driftsstatus er kun for eieren, aldri for en annen tilgangsinnehaver (`/brief`).
+      if (!isOwner(identity)) return [];
       const health = await readSchedulerHealth(pool);
       return health.problems
         .filter((p) => p.kind === "gave_up" || p.kind === "lost_previous_day")

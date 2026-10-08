@@ -102,12 +102,22 @@ describe("D-443: readSchedulerHealth klassifiserer alle tilstander scheduleren k
     expect(await readSchedulerHealth(pool)).toEqual({ jobs_seen: 0, completed: 0, problems: [] });
   });
 
-  it("sorterer gave_up foran lost/stalled/retry og avkorter last_error til 80 tegn", async () => {
+  it("sorterer gave_up foran lost/stalled/retry og avkorter last_error til 120 tegn", async () => {
     await row("z-retry", { attempts: 1, retryInMinutes: 1, lastError: "r" });
     await row("a-gaveup", { attempts: DAILY_SCHEDULER_MAX_ATTEMPTS, retryInMinutes: 15, lastError: "e".repeat(300) });
     const { problems } = await readSchedulerHealth(pool);
     expect(problems.map((p) => p.job_name)).toEqual(["a-gaveup", "z-retry"]);
-    expect(problems[0]?.last_error).toHaveLength(80);
+    expect(problems[0]?.last_error).toHaveLength(120);
+  });
+
+  it("fjerner den ledende «<jobb>: »-prefiksen scheduleren selv skriver, så årsaken (tenant, delmengde, feil) ikke kuttes bort av 120-tegnsgrensen", async () => {
+    const tenant = "8f3c2b1e-6d4a-4f7b-9c1d-2e5a7b9c0d11";
+    await row("support-inbox-sync", {
+      attempts: DAILY_SCHEDULER_MAX_ATTEMPTS, retryInMinutes: 15,
+      lastError: `support-inbox-sync: 1 tenant-feil (${tenant}/gmail: credential_unavailable)`
+    });
+    const [problem] = (await readSchedulerHealth(pool)).problems;
+    expect(problem?.last_error).toBe(`1 tenant-feil (${tenant}/gmail: credential_unavailable)`);
   });
 
   it("ende-til-ende med ekte DailyScheduler: fire feilede forsøk gir gave_up, og en vellykket kjøring fjerner problemet", async () => {
@@ -156,7 +166,8 @@ describe("D-443: beskrivelse og morgenbrief-kilde", () => {
     await row("retry-job", { attempts: 1, retryInMinutes: 1, lastError: "forbigående" });
     await row("stalled-job", { attempts: 1, claimedMinutesAgo: 30 });
     await row("fine-job", { completed: true });
-    const items = await schedulerSource(pool).collect({} as never);
+    const owner = { person_id: "owner", tenant_id: "t-owner" } as never;
+    const items = await schedulerSource(pool, () => true).collect(owner);
     expect(items.map((i) => i.title).sort()).toEqual([
       "Bakgrunnsjobb uten resultat: gave-up-job",
       "Bakgrunnsjobb uten resultat: lost-job"
@@ -164,5 +175,14 @@ describe("D-443: beskrivelse og morgenbrief-kilde", () => {
     const gaveUp = items.find((i) => i.title.endsWith("gave-up-job"))!;
     expect(gaveUp).toMatchObject({ source: "jarvis-scheduler", score: 75, detail: expect.stringContaining("ga opp etter 4/4 forsøk: boom") });
     expect(gaveUp.ref).toMatch(/^gave-up-job:\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it("schedulerSource leverer KUN til eieren: en annen tilgangsinnehaver (for eksempel via /brief) får ingenting - driftsstatus kan nevne andre tenants", async () => {
+    await row("gave-up-job", { attempts: DAILY_SCHEDULER_MAX_ATTEMPTS, retryInMinutes: 15, lastError: "tenant-x: boom" });
+    const isOwner = (id: { person_id: string; tenant_id: string }) => id.person_id === "owner" && id.tenant_id === "t-owner";
+    const source = schedulerSource(pool, isOwner as never);
+    expect(await source.collect({ person_id: "owner", tenant_id: "t-owner" } as never)).toHaveLength(1);
+    expect(await source.collect({ person_id: "gjest", tenant_id: "t-owner" } as never)).toEqual([]);
+    expect(await source.collect({ person_id: "owner", tenant_id: "t-annen" } as never)).toEqual([]);
   });
 });

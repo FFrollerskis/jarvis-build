@@ -2,6 +2,7 @@ import type pg from "pg";
 import type { SweepFailureCollector } from "@jarvis/contracts";
 import { listBusinessTenantIds } from "@jarvis/core";
 import type { BankingService } from "./banking-service.ts";
+import { BankConsentNotActiveError } from "./banking-types.ts";
 import type { FinanceService } from "./service.ts";
 
 export interface NeonomicsSweepResult {
@@ -57,7 +58,9 @@ export async function runNeonomicsSweepForAllTenants(pool: pg.Pool, banking: Ban
             msg: "neonomics_sweep_consent_verify_failed", tenant_id: tenantId, consent_id: consent.consent_id,
             error: err instanceof Error ? err.message : String(err)
           }));
-          failures?.record(tenantId, err, `consent:${consent.consent_id}`);
+          // D-442: et utløpt/ikke-aktivt samtykke er en TILSTAND eieren må handle på (flagges av `bank_consent_attention`-regelen), ikke en feil et nytt forsøk kan rette -
+          // og hvert nytt forsøk ville bare kalt banken på nytt (PSD2 begrenser uovervåket kontoinformasjon).
+          if (!(err instanceof BankConsentNotActiveError)) failures?.record(tenantId, err, `consent:${consent.consent_id}`);
         }
       }
       const accounts = await banking.listBankAccounts(tenantId, "business");
@@ -73,7 +76,7 @@ export async function runNeonomicsSweepForAllTenants(pool: pg.Pool, banking: Ban
             msg: "neonomics_sweep_transaction_sync_failed", tenant_id: tenantId, bank_account_id: account.bank_account_id,
             error: err instanceof Error ? err.message : String(err)
           }));
-          failures?.record(tenantId, err, `account:${account.bank_account_id}`);
+          if (!(err instanceof BankConsentNotActiveError)) failures?.record(tenantId, err, `account:${account.bank_account_id}`);
         }
       }
     } catch (err) {
@@ -86,6 +89,8 @@ export async function runNeonomicsSweepForAllTenants(pool: pg.Pool, banking: Ban
     }
     try {
       result.payments = await finance.syncPendingNeonomicsPayments(tenantId, "business");
+      // D-442: tjenesten fanger per-betalings-feil og returnerer kun et tall - en leverandørnedetid skal ikke bokføres som en fullført dag.
+      if (result.payments.failed > 0) failures?.record(tenantId, `${result.payments.failed} betaling(er) kunne ikke synkes`, "payments");
     } catch (err) {
       // Isolert - isolasjonen er UENDRET, kun stillheten var feilen (D-227).
       console.error(JSON.stringify({

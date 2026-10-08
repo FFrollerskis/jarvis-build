@@ -27,6 +27,8 @@ export async function runStripePaymentSyncForAllTenants(pool: pg.Pool, financeSe
   for (const tenantId of tenantIds) {
     try {
       const sync = await financeService.syncPendingStripePayments(tenantId, "business");
+      // D-442: tjenesten fanger per-betalings-feil og returnerer kun et tall - en leverandørnedetid ({synced:0, failed:n}) skal ikke bokføres som en fullført dag.
+      if (sync.failed > 0) failures?.record(tenantId, `${sync.failed} betaling(er) kunne ikke synkes`, "payments");
       const anomalies = await financeService.runProviderAnomalyDetection(tenantId, "business");
       results[tenantId] = { sync, anomalies };
     } catch (err) {

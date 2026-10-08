@@ -34,15 +34,34 @@ export function describeSweepError(err: unknown): string {
   return (err instanceof Error ? err.message : String(err)).slice(0, MAX_ERROR_CHARS);
 }
 
+/**
+ * Avslagsårsaker fra `ToolGateway`/`PolicyGateway` som betyr at EIEREN bevisst har stoppet noe (frosset tilkobling, tilbakekalt credential, kill switch). Et nytt forsøk kan
+ * ikke og SKAL ikke omgå dem, og en jobb som respekterer en pause har ikke feilet - den hoppes over (registreres som `skipped`, ikke som feil).
+ */
+const DELIBERATE_PAUSE_REASONS = ["connector_frozen", "credential_revoked", "kill_switch_active"] as const;
+
+export function isDeliberatePause(err: unknown): boolean {
+  const text = err instanceof Error ? err.message : String(err);
+  return DELIBERATE_PAUSE_REASONS.some((reason) => text.includes(reason));
+}
+
 export class SweepFailureCollector {
   private readonly recorded: SweepFailure[] = [];
+  private readonly skippedByPause: SweepFailure[] = [];
 
   record(tenantId: string, err: unknown, scope?: string): void {
-    this.recorded.push({ tenant_id: tenantId, ...(scope === undefined ? {} : { scope }), error: describeSweepError(err) });
+    const entry: SweepFailure = { tenant_id: tenantId, ...(scope === undefined ? {} : { scope }), error: describeSweepError(err) };
+    if (isDeliberatePause(err)) this.skippedByPause.push(entry);
+    else this.recorded.push(entry);
   }
 
   get failures(): readonly SweepFailure[] {
     return this.recorded;
+  }
+
+  /** Tenants/delsteg som ble hoppet over fordi eieren har pauset dem (frysing, tilbakekalling, kill switch). Gir aldri nytt forsøk. */
+  get skipped(): readonly SweepFailure[] {
+    return this.skippedByPause;
   }
 }
 
@@ -75,5 +94,9 @@ export function assertNoSweepFailures(job: string, failures: readonly SweepFailu
 export async function failOnSweepFailures(job: string, run: (failures: SweepFailureCollector) => Promise<unknown>): Promise<void> {
   const failures = new SweepFailureCollector();
   await run(failures);
+  if (failures.skipped.length > 0) {
+    // Eieren har pauset noe (frysing/tilbakekalling/kill switch): jobben respekterer det og hopper over - synlig i loggen, men ikke en feil og aldri et nytt forsøk.
+    console.log(JSON.stringify({ msg: "sweep_skipped_owner_pause", job, skipped: failures.skipped.length, first: failures.skipped[0]?.error }));
+  }
   assertNoSweepFailures(job, failures.failures);
 }

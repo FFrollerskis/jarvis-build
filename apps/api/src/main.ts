@@ -1224,7 +1224,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   ).unref();
 
   const dailyBrief = new DailyBrief([
-    tasksSource(pool), schedulerSource(pool), buildStatusSource(toolGateway),
+    tasksSource(pool),
+    schedulerSource(pool, (id) => id.person_id === owner.owner_person_id && id.tenant_id === owner.tenant_id),
+    buildStatusSource(toolGateway),
     emailSource(toolGateway), calendarSource(toolGateway)
   ], pool);
   const aiMeshText = async () => {
@@ -1428,9 +1430,9 @@ porter: se docs/RUNTIME_GATES.md`;
     }));
     if (result.errors.length > 0) {
       console.error(JSON.stringify({ msg: "business_weekly_brief_failed", errors: result.errors }));
-      // D-442: retry kjører hele sveipet på nytt og briefens idempotensnøkkel inneholder `generated_at` (ny per kjøring). Etter DELVIS levering ville et nytt
-      // forsøk sendt briefen på nytt til tenants som allerede fikk den - derfor kastes det KUN når ingen tenant fikk den (da kan et nytt forsøk ikke duplisere).
-      if (result.delivered === 0) {
+      // D-442: retry kjører hele sveipet på nytt og briefens idempotensnøkkel inneholder `generated_at` (ny per kjøring). Etter DELVIS levering (en tenant som fikk
+      // briefen, eller en flerdelt brief der kun del 1 ble sendt) ville et nytt forsøk sendt noe på nytt - derfor kastes det KUN når INGEN del ble sendt til noen.
+      if (result.delivered === 0 && result.chunks_sent === 0) {
         throw new Error(`business-weekly-brief: ingen av ${result.attempted} tenant(s) fikk briefen (${result.errors[0]})`);
       }
     }

@@ -218,3 +218,49 @@ describe("D-442 (JARVIS-027): en tenant som feiler i et sveip gjør jobben feile
     expect(errorSpy).not.toHaveBeenCalled();
   });
 });
+
+describe("D-442: heartbeat holder claimet ferskt mens en lang jobb kjører", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let timer: NodeJS.Timeout | undefined;
+  beforeEach(() => { errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined); });
+  afterEach(() => { if (timer) clearInterval(timer); errorSpy.mockRestore(); });
+
+  const claimedAgeMinutes = async (job: string): Promise<number> =>
+    Number((await pool.query<{ age: number }>(
+      "SELECT extract(epoch FROM (now() - claimed_at)) / 60 AS age FROM scheduler_state WHERE job_name = $1", [job]
+    )).rows[0]?.age);
+
+  it("heartbeat() fornyer KUN claimet til den eide instansen og kun for en ikke-fullført rad", async () => {
+    const job = "sched-heartbeat-direct";
+    const owner = new DailyScheduler(pool, job, 0);
+    expect(await owner.claimToday()).toBe(true);
+    await pool.query("UPDATE scheduler_state SET claimed_at = now() - interval '20 minutes' WHERE job_name = $1", [job]);
+    await new DailyScheduler(pool, job, 0).heartbeat(); // en annen instans
+    expect(await claimedAgeMinutes(job)).toBeGreaterThan(19);
+    await owner.heartbeat();
+    expect(await claimedAgeMinutes(job)).toBeLessThan(1);
+    await owner.markCompleted();
+    await pool.query("UPDATE scheduler_state SET claimed_at = now() - interval '20 minutes' WHERE job_name = $1", [job]);
+    await owner.heartbeat(); // fullført rad røres ikke
+    expect(await claimedAgeMinutes(job)).toBeGreaterThan(19);
+  });
+
+  it("en jobb som kjører lenge får claimet fornyet av heartbeat, og ingen annen tick/instans starter en samtidig kjøring", async () => {
+    const job = "sched-heartbeat-long-run";
+    const scheduler = new DailyScheduler(pool, job, 0);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let runs = 0;
+    timer = scheduler.start(async () => { runs += 1; await gate; }, 20, 20);
+    await waitFor(async () => (await pool.query("SELECT 1 FROM scheduler_state WHERE job_name = $1", [job])).rows.length > 0);
+    // Simuler at jobben har kjørt «lenge» uten å bli overtakbar ennå (14 min < lease på 15 min), slik at testen ikke kappløper med tick-intervallet:
+    // heartbeat skal friske claimet opp igjen mens jobben fortsatt kjører.
+    await pool.query("UPDATE scheduler_state SET claimed_at = now() - interval '14 minutes' WHERE job_name = $1", [job]);
+    await waitFor(async () => (await claimedAgeMinutes(job)) < 1);
+    expect(await new DailyScheduler(pool, job, 0).claimToday()).toBe(false); // ingen samtidig kjøring
+    expect(runs).toBe(1);
+    release();
+    await waitFor(async () => (await pool.query("SELECT completed_at FROM scheduler_state WHERE job_name = $1", [job])).rows[0]?.completed_at != null);
+    expect(runs).toBe(1);
+  });
+});

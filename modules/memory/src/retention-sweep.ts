@@ -132,17 +132,25 @@ export async function runMemoryRetentionSweepForAllTenants(
       try {
         const identity = systemIdentity(tenantId, space as MemorySpace);
         const candidates = await findEpisodicCandidates(pool, tenantId, space as MemorySpace, retentionDays);
-        const days = [...new Set(candidates.map((c) => c.day))];
-        for (const day of days) {
-          await summaries.generateDaily(identity, space as MemorySpace, day);
-        }
+        // D-442: PER DAG - sammendraget for en dag genereres (LLM-kall) og dagens originaler fjernes umiddelbart etter. Feiler en senere dag eller en invalidering, er de
+        // tidligere dagene ferdig konsolidert og er ikke lenger kandidater, så et nytt forsøk (DailyScheduler prøver på nytt ved feil) gjentar ikke LLM-kallene for dem.
+        // Rekkefølgen sammendrag-FØR-invalidering er bevart innen hver dag (`generateDaily` leser kun 'active'-rader).
+        const byDay = new Map<string, EpisodicCandidate[]>();
         for (const candidate of candidates) {
-          await writer.invalidate(
-            identity,
-            space as MemorySpace,
-            candidate.memory_item_id,
-            "consolidated_into_daily_summary"
-          );
+          const dayItems = byDay.get(candidate.day);
+          if (dayItems) dayItems.push(candidate);
+          else byDay.set(candidate.day, [candidate]);
+        }
+        for (const [day, dayItems] of byDay) {
+          await summaries.generateDaily(identity, space as MemorySpace, day);
+          for (const candidate of dayItems) {
+            await writer.invalidate(
+              identity,
+              space as MemorySpace,
+              candidate.memory_item_id,
+              "consolidated_into_daily_summary"
+            );
+          }
         }
         consolidatedByTenant[`${tenantId}:${space}`] = candidates.length;
         succeeded += 1;
