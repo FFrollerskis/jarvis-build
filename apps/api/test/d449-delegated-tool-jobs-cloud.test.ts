@@ -142,6 +142,17 @@ describe("D-449: skyrute for delegerte verktøyjobber (executive-handler)", () =
     }
   });
 
+  it("forsvar i dybden: en kontrakt med skyflagg og PRIVATE, men en økonomi-/helse-/hemmelighetsprompt, går likevel lokalt (workeren klassifiserer oppgaveteksten selv)", async () => {
+    captureLogs();
+    for (const prompt of ["sjekk saldoen min og list PR-er", "oppsummer legetime og diagnose", "bruk kontonummer 1234.56.78901 til å finne e-posten"]) {
+      const h = build({});
+      const result = await h.handler(makeTask(delegated({ prompt })), ctx);
+      expect(h.calls[0]!.input.providerPreference, prompt).toBeUndefined();
+      expect(h.calls[0]!.input.paid_models_allowed, prompt).toBe(false);
+      expect("route" in result, prompt).toBe(false);
+    }
+  });
+
   it("dagstak: under taket → sky og kostnaden leses for riktig tenant; nådd eller ulesbart tak → lokal med merknad i svaret, aldri ubegrenset sky", async () => {
     const { logs, errors } = captureLogs();
     const seen: string[] = [];

@@ -1,6 +1,6 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import { DataSensitivitySchema, ModelPurposeSchema } from "@jarvis/contracts";
-import { NoEligibleProviderError, type ModelGateway, type ToolExecutor } from "@jarvis/model-gateway";
+import { NoEligibleProviderError, classifyContentSensitivity, type ModelGateway, type ToolExecutor } from "@jarvis/model-gateway";
 import { ProviderError } from "@jarvis/provider-adapters";
 import type { ClaimedTask, JobContext } from "@jarvis/tasks";
 import { filterMeshToolsForJob, type MeshToolMapping } from "@jarvis/tool-gateway";
@@ -120,7 +120,9 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
           input.delegated_from_chat === true &&
           input.cloud_tool_turns_allowed === true &&
           sensitivity.success &&
-          sensitivity.data !== "SECRET_RESTRICTED";
+          sensitivity.data !== "SECRET_RESTRICTED" &&
+          // Forsvar i dybden: oppgaveteksten klassifiseres OGSÅ her, uavhengig av hvordan kontrakten ble sendt inn (en kontrakt kan i prinsippet bygges av andre enn chatten).
+          classifyContentSensitivity({ texts: [input.prompt] }).sensitivity !== "SECRET_RESTRICTED";
         if (toolRoute !== null && cloudWanted) {
           // Dagstaket sjekkes kun når jobben faktisk ville gått til sky. Kan kostnaden ikke leses, feiler vi lukket (lokalt), som chatten (D-432).
           const dayCap = opts.toolTurnDayCap ?? null;
