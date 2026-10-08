@@ -1,8 +1,8 @@
-# NAS-oppdatering 2026-10-07 (D-427…D-438)
+# NAS-oppdatering 2026-10-07 (D-427…D-444)
 
 Sjekkliste for neste NAS-oppdatering. **Ingenting under er verifisert på NAS ennå** – det som står under «Forventet» er hva koden og testene sier, ikke observert drift. Kjør ett steg om gangen, lim inn utdata, og stopp ved første avvik.
 
-**Merk:** punkter merket med migrasjon 078–082 og D-437/D-438 forutsetter at PR #286, #288 og #289 er merget før du oppdaterer. Sjekk `git log --oneline -15` etter `git pull`.
+**Merk:** punkter merket med migrasjon 078–082 og D-437/D-438 forutsetter at PR #286, #288 og #289 er merget før du oppdaterer; D-441/D-444 kom med #295 og D-442/D-443 med #296. Sjekk `git log --oneline -15` etter `git pull`.
 
 Alle kommandoer kjøres fra `/volume1/jarvisbuild-data/jarvisbuild` (compose og `.env` finnes bare der).
 
@@ -23,6 +23,11 @@ Alle kommandoer kjøres fra `/volume1/jarvisbuild-data/jarvisbuild` (compose og 
 | D-437 | Rettelser etter review av D-434: modusvariabler, `evaluation_caveat` på capability-status fra worker | `check_my_capabilities` fra en bakgrunnsjobb har et forbehold om snevret miljø |
 | D-438 | Infra-modus (pause/degrade) deles mellom API og worker (migrasjon 082) | `POST /infra/pause` i API stanser også worker innen få sekunder |
 | Q-44 (D-435) | Pre-flight i migrasjon 078 + koblingstabellen `incident_diagnosis_evidence` fikk `tenant_id` (081) | Migrasjon 078–081 anvendt |
+| D-441 | Et tomt eller avkuttet modellsvar i chat er ikke lenger en «stille suksess»: retry ved avkorting, neste kandidat, ellers en ærlig feil; avbrutte turer fortsetter ikke i bakgrunnen | Ingen tomme chatsvar uten forklaring |
+| D-442 | 17 daglige bakgrunnsjobber feiler ikke lenger stille: tenant-feil gir nytt forsøk (1/5/15 min, maks 4 per dag) og `last_error`; morgenbrief som ikke kom frem prøves på nytt; lange jobber fornyer claimet | `scheduler_state.last_error` fylles ved feil |
+| D-443 | Daglige jobber som feiler eller gir opp vises i «Hva er galt med deg?» (område «Daglige bakgrunnsjobber») og i morgenbriefen | Se punkt 4c |
+| D-445 | Nattjobbene som bruker PC-ens lokale modell (`memory-reembed-sweep`, `memory-retention-sweep`) er «best effort»: de prøves på nytt, men et tap er DEGRADED (aldri DOWN, aldri i morgenbriefen) | Ingen morgenvarsel selv om PC-en var av om natten |
+| D-444 | Tomt svar fra lokal modell faller tilbake til vanlig ruting (som ved timeout) i stedet for «Noe gikk galt» | Logglinje `d404_gemma_provider_failed_fallback` med `kind: "invalid_response"`; kan gi en skykostnad |
 
 ## 0. Før du starter (1 min)
 
@@ -99,6 +104,31 @@ sudo docker exec -it $(sudo docker ps -qf name=postgres) psql -U postgres -d jar
 - `infra_mode_shared_readable: false`: den delte tilstanden kan ikke leses; infra-mutasjoner (github/docker, klasse B/C/D) avslås da med `infra_mode_unavailable` (fail-closed) til databasen svarer.
 - 403 `owner_control_unauthorized`: kallet kom ikke fra eier-identiteten (kun eieren kan endre modusen).
 
+## 4c. Daglige bakgrunnsjobber (D-442/D-443)
+
+Gjør dette tidligst et døgn etter oppdateringen, ellers finnes ingen rader å vise. Nye jobber får en rad i `scheduler_state` første gang de kjører.
+
+1. Skriv i chat: «Hva er galt med deg?». **Forventet:** området «Daglige bakgrunnsjobber» er OK («N av M daglige jobber er fullført, ingen feil») – eller UKJENT hvis ingen jobb har kjørt ennå. DOWN/DEGRADED nevner jobbnavn og siste feil i klartekst.
+2. Se råtilstanden (siste to dager):
+
+```
+sudo docker exec -it $(sudo docker ps -qf name=postgres) psql -U postgres -d jarvis -P pager=off -c "SELECT job_name, run_date, attempts, completed_at IS NOT NULL AS ferdig, retry_after, left(last_error, 140) AS siste_feil FROM scheduler_state WHERE run_date >= current_date - 1 ORDER BY run_date DESC, job_name;"
+```
+
+   **Forventet:** nesten alle `ferdig = t`. En jobb uten noe å gjøre (for eksempel business-synk uten business-tenant) fullfører også med `ferdig = t`.
+3. Finnes det business-tenants i det hele tatt? (Avgjør om business-jobbene gjør noe.)
+
+```
+sudo docker compose --env-file .env -f infra/local/docker-compose.yml logs --tail 300 api | grep -E "business_tenants_enumerated|business_sweeps_no_business_tenants"
+```
+
+   `business_sweeps_no_business_tenants` betyr at alle business-sveip er tomme (forventet inntil tenant-oppsettet er bestemt, JARVIS-044).
+
+**Avvik å melde fra om:**
+- En jobb med `attempts = 4` og `ferdig = f`: den ga opp. Lim inn `siste_feil`. Unntak: `memory-reembed-sweep` og `memory-retention-sweep` bruker PC-ens lokale modell og kan gi opp de nettene PC-en er av; de vises som «avhenger av PC-en; tas igjen neste kjøring» (DEGRADED) og er ikke et avvik.
+- `credential_not_bound_to_identity` fra `business-events-sync`, `conversation-graph-sync` eller `support-inbox-sync`: kjent (Q-48). Planlagte jobber kjører som `system` og kan ikke bruke din Google-konto. Du må velge løsning; se `docs/OPEN_QUESTIONS.md`.
+- Dagens morgenbrief nevner «Bakgrunnsjobb uten resultat: …»: en jobb ga opp eller ble ikke fullført i går.
+
 ## 5. Akseptanseportene
 
 ```
@@ -114,6 +144,13 @@ ops/acceptance/nas-ua0-gate.sh
 3. «du svarte feil, sjekk github igjen» → verktøy beholdes (D-426).
 4. En bakgrunnsjobb («list PR-er i bakgrunnen») → fullfører; sjekk i loggen at **worker** tok den.
 5. Spør om noe fra e-post/kalender → verktøyturen går til Sonnet 5.5.
+6. Ser du «Noe gikk galt under generering. Prøv igjen.»: hent loggraden og lim den inn.
+
+```
+sudo docker compose --env-file .env -f infra/local/docker-compose.yml logs --tail 300 api | grep -E "chat_stream_error|no_usable_output|d404_gemma_provider_failed_fallback|d431_cloud_tools_failed_fallback_local|stream_consumer_error"
+```
+
+   `d404_gemma_provider_failed_fallback` med `kind: "invalid_response"` betyr at den lokale modellen svarte tomt og at svaret kom via vanlig ruting (D-444).
 
 ## 7. Kostnad etter noen dager
 
@@ -123,6 +160,7 @@ sudo docker exec -it $(sudo docker ps -qf name=postgres) psql -U postgres -d jar
 
 **Forventet:** `gemma_local` med 0 øre; Sonnet-rader med lavere øre per kall enn før (cache-treff).
 Dagstak: når dagens sum overstiger 30 kr, får verktøyturer en fast merknad og går lokalt.
+Skyrader for vanlig prat (ikke verktøytur) etter D-444 betyr at den lokale modellen svarte tomt eller var nede; tell dem og si fra hvis de er mange.
 
 ## Hvis noe går galt
 
