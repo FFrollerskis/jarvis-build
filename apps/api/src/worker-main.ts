@@ -5,7 +5,7 @@ import { envInt, systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit } from "./owner.ts";
 import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
-import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, ModelGateway, pricingFromEnv, traceSinkFromEnv } from "@jarvis/model-gateway";
+import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, dailySpentOre, ModelGateway, pricingFromEnv, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport, GmailTransport,
   GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, MeshToolExecutor, resolveModelToolSurface, chatReadTierMeshTools, BACKGROUND_GITHUB_READ, PgGithubRateLimitStore,
@@ -29,6 +29,7 @@ import {
 import { ConsentEnforcementService, ConsentService, ConsentTransport } from "@jarvis/consent";
 import { GoogleAdsTransport, GrowthService, GrowthTransport, MetaAdsTransport, marketingMemoryBriefSource } from "@jarvis/growth";
 import { executiveHandler } from "./executive.ts";
+import { parseDailyCapOre, parseToolTurnRoute } from "./tool-turn-route.ts";
 import {
   AnthropicAdapter,
   GemmaHostedAdapter,
@@ -588,12 +589,20 @@ setInterval(
 // lenger koblet til produksjon; det gamle `JARVIS_SANDBOX`-valget finnes ikke.
 const runner = resolveJobSandboxRunner(process.env);
 
+// D-449 (Q-50, eierens ja 2026-10-08): delegerte bakgrunnsjobber med verktøy bruker SAMME skyrute og dagstak som chattens verktøyturer (D-431/D-432). NAS-test 4: en 8B-modell
+// bruker verktøy upålitelig (GitHub 404). Rute og tak leses fra samme miljøvariabler som api (`MODEL_ENV` gir dem også til worker-containeren). Økonomi/helse/hemmeligheter forblir lokale.
+const jobToolTurnRoute = parseToolTurnRoute(process.env["JARVIS_TOOL_TURN_MODEL"]);
+const jobToolTurnDailyCapOre = parseDailyCapOre(process.env["JARVIS_TOOL_TURN_DAILY_CAP_ORE"]);
+console.log(JSON.stringify({ msg: "d449_job_tool_turn_route", route: jobToolTurnRoute ? `${jobToolTurnRoute.provider}:${jobToolTurnRoute.model}` : "off", daily_cap_ore: jobToolTurnDailyCapOre }));
+
 // BO-11.1 §9: delt executive-handler (samme fil som api-workeren) - identisk
 // kontrakt for samme kø: prompt → mesh, tools=true → tool-løkke (command-kontrakter avvises).
 worker.register(
   "executive",
   executiveHandler({
     gateway,
+    toolTurnRoute: jobToolTurnRoute,
+    toolTurnDayCap: jobToolTurnRoute !== null && jobToolTurnDailyCapOre > 0 ? { cap_ore: jobToolTurnDailyCapOre, spentToday: (tenantId) => dailySpentOre(pool, tenantId) } : null,
     // D-351: 4000 → 20_000 (se mesh-bridge.ts sitt filhode for host-målt begrunnelse) - SAMME
     // grense som api-workeren (main.ts) bruker, uendret "identisk oppførsel"-presedens.
     // Del 3 (JARVIS-005/012): per-jobb identitet fra kontrakten, bakgrunnsflate, manifest + kontrakt håndhevet i gatewayen (API/worker-parity).

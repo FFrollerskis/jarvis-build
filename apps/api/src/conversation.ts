@@ -21,7 +21,7 @@ import { DEFAULT_PERSONALITY_CONFIG, type PersonalityConfig } from "@jarvis/self
 import type { TaskService, InProcessWorker } from "@jarvis/tasks";
 import { createTurnContext, surfaceForChannel, type Surface, type SurfaceLimits, type TurnContext } from "@jarvis/tool-gateway";
 import { randomUUID } from "node:crypto";
-import { localOnlyNote } from "./tool-turn-route.ts";
+import { LOCAL_FALLBACK_ERROR_KINDS, localOnlyNote } from "./tool-turn-route.ts";
 
 export interface ConversationDeps {
   messages: MessageStore;
@@ -216,13 +216,6 @@ function buildSystemPrompt(personality: PersonalityConfig, context: { surface: S
  * lagret automatisk; «husk at …» lagres uttrykkelig; «hva vet du om …»/«husker du …» skal bruke memory.search når blokken
  * ikke dekker spørsmålet; Telegram lagrer ikke; er noe ikke i blokken eller søket, si det ærlig i stedet for å gjette.
  */
-/**
- * D-404/D-431/D-444: leverandørfeil som får samtaleflaten til å svare via en ANNEN rute i stedet for å vise en feil - kun FØR noe er sendt og FØR noe verktøy er
- * utført. `invalid_response` (D-444) er et tomt eller ubrukelig svar som gatewayen ikke kunne redde med retry/neste kandidat (D-441 gjør det til en ærlig feil
- * i stedet for en stille tom melding): for eieren er en lokal modell som svarer tomt det samme som en lokal modell som er nede.
- */
-const LOCAL_FALLBACK_ERROR_KINDS: readonly string[] = ["timeout", "network", "server", "rate_limit", "not_configured", "invalid_response"];
-
 const MEMORY_RULES =
   "Minne: det Tobias forteller deg i chat og tale lagres automatisk som minner (verbatim og som fakta), og en kort profil " +
   "pluss de mest relevante minnene for denne meldingen ligger i blokken «Profil»/«Relevant minne» over når de finnes - bruk dem " +

@@ -74,3 +74,19 @@ export function localOnlyNote(reasons: readonly string[]): string {
   const hint = fromText.length > 0 ? " Dette varer til emnet ikke lenger er blant de siste meldingene." : "";
   return `\n\n(Svart på den lokale modellen: ${why}, og slikt sendes aldri til skyen.${hint})`;
 }
+
+/**
+ * D-404/D-431/D-444/D-449: leverandørfeil som får en flate til å svare via en ANNEN rute (lokal modell) i stedet for å vise en feil - kun FØR noe er sendt og FØR noe verktøy er
+ * utført. `invalid_response` (D-444) er et tomt eller ubrukelig svar som gatewayen ikke kunne redde med retry/neste kandidat (D-441 gjør det til en ærlig feil
+ * i stedet for en stille tom melding): for eieren er en lokal modell som svarer tomt det samme som en lokal modell som er nede. Delt av chatten (`conversation.ts`)
+ * og delegerte bakgrunnsjobber (`executive.ts`, D-449), så de to aldri er uenige om hva som er en «rute er nede»-feil.
+ */
+export const LOCAL_FALLBACK_ERROR_KINDS: readonly string[] = ["timeout", "network", "server", "rate_limit", "not_configured", "invalid_response"];
+
+/**
+ * D-449 (Q-50): dagstak-merknaden for en delegert bakgrunnsjobb (samme regel og tak som chatten, D-432). Står i jobbens svartekst, som leveres til samtalen som DATA.
+ * Teksten må selv ikke inneholde ord sensitivitetsklassifiseringen reagerer på (samme vakt som `localOnlyNote`).
+ */
+export function jobDayCapNote(capOre: number): string {
+  return `\n\n(Dagstaket for sky på ${Math.round(capOre / 100)} kr er nådd i dag, så jobben kjørte på den lokale modellen. Taket nullstilles i morgen.)`;
+}

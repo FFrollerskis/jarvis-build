@@ -4,6 +4,7 @@ import type pg from "pg";
 import { z } from "zod";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import { scanForSecrets, withTenantTransaction } from "@jarvis/core";
+import { DEFAULT_PROFILES, classifyContentSensitivity } from "@jarvis/model-gateway";
 import type { TaskService } from "@jarvis/tasks";
 import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 
@@ -20,6 +21,18 @@ const DELEGATED_JOB_TOOLS = ["email", "calendar", "github", "memory", "executive
 export const DELEGATED_JOB_BUDGET_ORE = 300;
 const MAX_ACTIVE_JOBS = 5;
 const RESULT_PREVIEW_CHARS = 1500;
+
+/**
+ * D-449 (Q-50): kan en delegert jobb med verktøy få bruke skyruten (samme som chattens verktøyturer, D-431)? Aldri når oppgaveteksten selv er `SECRET_RESTRICTED` (helse, økonomi, hemmeligheter:
+ * kun lokal modell, D-378), og aldri når turen som delegerte ble betjent av en LOKAL eller ukjent modell - da var turen selv låst lokalt (sensitivitet, dagstak eller skyen nede), og den
+ * lokale modellen kan ha skrevet inn innhold fra samtalen i oppgaveteksten. Uten `servingModel` (hurtigbanen «… i bakgrunnen» bruker ingen modell; oppgaveteksten ER eierens egne ord) avgjør kun
+ * oppgaveteksten. Fail-closed: en leverandør som ikke står i modellregisteret som sky regnes som lokal.
+ */
+export function cloudToolTurnsAllowed(title: string, prompt: string, servingModel: { provider: string; model: string } | undefined): boolean {
+  if (classifyContentSensitivity({ texts: [title, prompt] }).sensitivity === "SECRET_RESTRICTED") return false;
+  if (servingModel === undefined) return true;
+  return DEFAULT_PROFILES.some((profile) => profile.provider === servingModel.provider && profile.locality === "cloud");
+}
 
 export interface DelegatedJobView {
   task_id: string;
@@ -199,7 +212,9 @@ export class TasksDelegateTransport implements ToolTransport {
             sensitivity: "PRIVATE",
             paid_models_allowed: false,
             delegated_from_chat: true,
-            ...(useTools ? { tools: true } : {})
+            ...(useTools ? { tools: true } : {}),
+            // D-449 (Q-50, eierens ja): jobber MED verktøy får bruke chattens skyrute (workeren avgjør selv ved kjøring: konfigurert rute, dagstak, fallback). Flagget settes KUN her i trusted kode.
+            ...(useTools && cloudToolTurnsAllowed(title, prompt, context?.servingModel) ? { cloud_tool_turns_allowed: true } : {})
           },
           trust_level: "internal",
           provenance: `chat:${identity.session_id}`

@@ -994,6 +994,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // og ulik identitet, så en bakgrunnsjobb oppførte seg ulikt etter hvem som vant kø-racet - og agentkjøring delte prosess med chatten. API-et
   // registrerer derfor IKKE lenger handleren (en worker uten handler claimer ingenting). `JARVIS_API_DRAINS_EXECUTIVE=true` er en nød-/utviklingsbryter
   // for oppsett UTEN worker-container (da kjører jobbene i API-prosessen som før).
+  // D-431: verktøyturer til skymodell (standard Sonnet 5.5), ren prat lokalt. `JARVIS_TOOL_TURN_MODEL=off` slår det av.
+  // D-449 (Q-50): samme rute og samme dagstak gjelder delegerte bakgrunnsjobber med verktøy (executive-handleren under, og i worker-main.ts).
+  const toolTurnRoute = parseToolTurnRoute(process.env["JARVIS_TOOL_TURN_MODEL"]);
+  // D-432: dagstak for verktøyturer til sky (standard 30 kr; 0 = ingen tak). Over taket går verktøyturer lokalt med en synlig merknad.
+  const toolTurnDailyCapOre = parseDailyCapOre(process.env["JARVIS_TOOL_TURN_DAILY_CAP_ORE"]);
   const executiveOwner = executiveQueueOwner(process.env);
   const apiDrainsExecutive = executiveOwner === "api";
   console.log(JSON.stringify({ msg: "executive_queue_owner", owner: executiveOwner }));
@@ -1001,6 +1006,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     "executive",
     executiveHandler({
       gateway,
+      toolTurnRoute,
+      toolTurnDayCap: toolTurnRoute !== null && toolTurnDailyCapOre > 0 ? { cap_ore: toolTurnDailyCapOre, spentToday: (tenantId) => dailySpentOre(pool, tenantId) } : null,
       tools: {
         all: modelToolSurface,
         // D-351: 4000 → 20_000 (se mesh-bridge.ts sitt filhode for host-målt begrunnelse).
@@ -1049,10 +1056,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // delings-disiplin som D-102 sin `taskService` og D-123 sine identitets-
   // primitiver). To instanser ville gitt to separate verktøy-/trace-oppsett
   // mot samme pool, altså en stille divergens mellom kanalene.
-  // D-431: verktøyturer til skymodell (standard Sonnet 5.5), ren prat lokalt. `JARVIS_TOOL_TURN_MODEL=off` slår det av.
-  const toolTurnRoute = parseToolTurnRoute(process.env["JARVIS_TOOL_TURN_MODEL"]);
-  // D-432: dagstak for verktøyturer til sky (standard 30 kr; 0 = ingen tak). Over taket går verktøyturer lokalt med en synlig merknad.
-  const toolTurnDailyCapOre = parseDailyCapOre(process.env["JARVIS_TOOL_TURN_DAILY_CAP_ORE"]);
+  // D-431/D-432: ruten og dagstaket er parset tidlig (rett før executive-handleren, D-449) og brukes her uendret.
   console.log(JSON.stringify({ msg: "tool_turn_route", route: toolTurnRoute ? `${toolTurnRoute.provider}:${toolTurnRoute.model}` : "off", daily_cap_ore: toolTurnDailyCapOre }));
   const conversationEngine = new ConversationEngine({
     messages: new MessageStore(pool),
