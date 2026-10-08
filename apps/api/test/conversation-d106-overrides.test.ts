@@ -297,7 +297,7 @@ describe("D-106 ConversationEngine: routing overrides folder inn i CompleteInput
   });
 
   it("G9 (D-404): andre feil fra Gemma (f.eks. bad_request/auth) og feil fra ANDRE leverandører faller IKKE stille tilbake", async () => {
-    for (const [provider, kind] of [["gemma_local", "bad_request"], ["gemma_local", "auth"], ["openai", "timeout"]] as const) {
+    for (const [provider, kind] of [["gemma_local", "bad_request"], ["gemma_local", "auth"], ["openai", "timeout"], ["openai", "invalid_response"]] as const) {
       const pool = fakePool();
       let calls = 0;
       const gateway = {
@@ -316,6 +316,80 @@ describe("D-106 ConversationEngine: routing overrides folder inn i CompleteInput
     let calls = 0;
     const gateway = {
       complete: async () => { calls++; throw new ProviderError("gemma_local", "timeout", "gemma_local_timeout"); },
+      stream: async () => { throw new Error("stream skal ikke kalles"); },
+      completeWithTools: async () => { throw new Error("completeWithTools skal ikke kalles"); }
+    } as unknown as ModelGateway;
+    const engine = new ConversationEngine({ messages: new MessageStore(pool), context: new ContextBuilder(pool), gateway, tasks: fakeTasks, worker: fakeWorker, trace: new MemoryTraceSink() });
+    await expect(engine.handle(identity, "bruk gemma til dette")).rejects.toBeInstanceOf(ProviderError);
+    expect(calls).toBe(1);
+  });
+
+  it("G8b (D-444): et tomt/ubrukelig svar fra default-Gemma (invalid_response, det D-441 gjør til en ærlig feil) faller tilbake til normal ruting i stedet for «Noe gikk galt»", async () => {
+    const pool = fakePool();
+    const captured: CompleteInput[] = [];
+    const gateway = {
+      complete: async (input: CompleteInput) => {
+        captured.push(input);
+        if (input.providerPreference) throw new ProviderError("gemma_hosted", "invalid_response", "gemma_hosted_no_usable_output");
+        return { text: "reserve-svar", usage: { input_tokens: 1, output_tokens: 1 }, provider: "anthropic", model: "claude-sonnet-5" };
+      },
+      stream: async () => { throw new Error("stream skal ikke kalles"); },
+      completeWithTools: async () => { throw new Error("completeWithTools skal ikke kalles"); }
+    } as unknown as ModelGateway;
+    const engine = new ConversationEngine({ messages: new MessageStore(pool), context: new ContextBuilder(pool), gateway, tasks: fakeTasks, worker: fakeWorker, trace: new MemoryTraceSink() });
+    const result = await engine.handle(identity, "hva er klokken?");
+    expect(captured).toHaveLength(2);
+    expect(captured[1]?.providerPreference).toBeUndefined();
+    expect(captured[1]?.sensitivity).toBe(captured[0]?.sensitivity); // sensitivitetsreglene følger med uendret
+    expect(result.reply).toBe("reserve-svar");
+  });
+
+  it("G8c (D-444): streaming - kun blanke tegn er levert før det ubrukelige svaret, så fallbacken gjelder fortsatt (blanke tegn er ikke synlig output)", async () => {
+    const pool = fakePool();
+    const captured: CompleteInput[] = [];
+    const gateway = {
+      complete: async () => { throw new Error("complete skal ikke kalles"); },
+      stream: async (input: CompleteInput, onEvent: (e: { type: string; text?: string }) => void) => {
+        captured.push(input);
+        if (input.providerPreference) {
+          onEvent({ type: "text_delta", text: "\n\n" });
+          throw new ProviderError("gemma_local", "invalid_response", "gemma_local_no_usable_output");
+        }
+        onEvent({ type: "text_delta", text: "reserve-svar" });
+        return { text: "reserve-svar", usage: { input_tokens: 1, output_tokens: 1 }, provider: "anthropic", model: "claude-sonnet-5" };
+      },
+      completeWithTools: async () => { throw new Error("completeWithTools skal ikke kalles"); }
+    } as unknown as ModelGateway;
+    const engine = new ConversationEngine({ messages: new MessageStore(pool), context: new ContextBuilder(pool), gateway, tasks: fakeTasks, worker: fakeWorker, trace: new MemoryTraceSink() });
+    const tokens: string[] = [];
+    const result = await engine.handle(identity, "hva er klokken?", (t) => tokens.push(t));
+    expect(captured).toHaveLength(2);
+    expect(result.reply).toBe("reserve-svar");
+    expect(tokens.join("").trim()).toBe("reserve-svar");
+  });
+
+  it("G8d (D-444): derimot faller motoren IKKE tilbake når synlig tekst allerede er sendt til eieren (feiler ærlig, aldri to svar etter hverandre)", async () => {
+    const pool = fakePool();
+    let calls = 0;
+    const gateway = {
+      complete: async () => { throw new Error("complete skal ikke kalles"); },
+      stream: async (_input: CompleteInput, onEvent: (e: { type: string; text?: string }) => void) => {
+        calls++;
+        onEvent({ type: "text_delta", text: "Her er et halvt sv" });
+        throw new ProviderError("gemma_local", "invalid_response", "gemma_local_no_usable_output");
+      },
+      completeWithTools: async () => { throw new Error("completeWithTools skal ikke kalles"); }
+    } as unknown as ModelGateway;
+    const engine = new ConversationEngine({ messages: new MessageStore(pool), context: new ContextBuilder(pool), gateway, tasks: fakeTasks, worker: fakeWorker, trace: new MemoryTraceSink() });
+    await expect(engine.handle(identity, "hva er klokken?", () => undefined)).rejects.toBeInstanceOf(ProviderError);
+    expect(calls).toBe(1);
+  });
+
+  it("G10b (D-444): en EKSPLISITT eierforespørsel om Gemma faller heller ikke tilbake på et ubrukelig svar - feiler ærlig", async () => {
+    const pool = fakePool();
+    let calls = 0;
+    const gateway = {
+      complete: async () => { calls++; throw new ProviderError("gemma_local", "invalid_response", "gemma_local_no_usable_output"); },
       stream: async () => { throw new Error("stream skal ikke kalles"); },
       completeWithTools: async () => { throw new Error("completeWithTools skal ikke kalles"); }
     } as unknown as ModelGateway;
