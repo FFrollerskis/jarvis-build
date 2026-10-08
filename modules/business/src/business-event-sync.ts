@@ -1,5 +1,5 @@
 import type pg from "pg";
-import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts";
+import type { IdentityContext, JsonValue, MemorySpace, SweepFailureCollector } from "@jarvis/contracts";
 import { listBusinessTenantIds } from "@jarvis/core";
 import type { ToolGateway } from "@jarvis/tool-gateway";
 import type { BusinessService } from "./service.ts";
@@ -293,7 +293,8 @@ export class BusinessEventSyncService {
  */
 export async function runBusinessEventSyncForAllTenants(
   pool: pg.Pool,
-  syncService: BusinessEventSyncService
+  syncService: BusinessEventSyncService,
+  failures?: SweepFailureCollector
 ): Promise<Record<string, BusinessEventSyncResult>> {
   const tenantIds = await listBusinessTenantIds(pool, 200);
   const results: Record<string, BusinessEventSyncResult> = {};
@@ -304,7 +305,12 @@ export async function runBusinessEventSyncForAllTenants(
       channel: "api", auth_strength: "active"
     };
     try {
-      results[tenantId] = await syncService.syncTenant(tenantId, "business", identity);
+      const synced = await syncService.syncTenant(tenantId, "business", identity);
+      results[tenantId] = synced;
+      // `syncTenant()` fanger provider-feil per provider og returnerer dem som `error` på stats-objektet (Gmail og Calendar skjuler ikke hverandre).
+      // Det er fortsatt arbeid som ikke ble gjort - registrer det, ellers ser en nede Gmail-synk ut som en fullført dag (D-442).
+      if (synced.gmail.error !== undefined) failures?.record(tenantId, synced.gmail.error, "gmail");
+      if (synced.calendar.error !== undefined) failures?.record(tenantId, synced.calendar.error, "calendar");
     } catch (err) {
       // Én tenant sin synk-feil skal aldri velte hele sveipet for andre tenants -
       // isolasjonen er UENDRET, kun stillheten var feilen (D-227, samme anti-mønster-klasse som D-218-222).
@@ -312,6 +318,7 @@ export async function runBusinessEventSyncForAllTenants(
         msg: "business_event_sync_tenant_failed", tenant_id: tenantId,
         error: err instanceof Error ? err.message : String(err)
       }));
+      failures?.record(tenantId, err);
       results[tenantId] = {
         gmail: { scanned: 0, recorded: 0, unmatched: 0, ambiguous: 0 },
         calendar: { scanned: 0, recorded: 0, unmatched: 0, ambiguous: 0 },

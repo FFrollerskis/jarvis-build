@@ -1,5 +1,5 @@
 import type pg from "pg";
-import type { IdentityContext } from "@jarvis/contracts";
+import type { IdentityContext, SweepFailureCollector } from "@jarvis/contracts";
 import { listBusinessTenantIds } from "@jarvis/core";
 import type { GmailIngressStats, SupportEmailService } from "./email-ingress.ts";
 
@@ -20,7 +20,8 @@ import type { GmailIngressStats, SupportEmailService } from "./email-ingress.ts"
  */
 export async function runSupportInboxSyncForAllTenants(
   pool: pg.Pool,
-  emailService: SupportEmailService
+  emailService: SupportEmailService,
+  failures?: SweepFailureCollector
 ): Promise<Record<string, GmailIngressStats>> {
   const tenantIds = await listBusinessTenantIds(pool, 200);
   const results: Record<string, GmailIngressStats> = {};
@@ -33,6 +34,11 @@ export async function runSupportInboxSyncForAllTenants(
     try {
       results[tenantId] = await emailService.ingestFromGmail(tenantId, "business", identity);
     } catch (err) {
+      console.error(JSON.stringify({
+        msg: "support_inbox_sync_tenant_failed", tenant_id: tenantId,
+        error: err instanceof Error ? err.message : String(err)
+      }));
+      failures?.record(tenantId, err);
       results[tenantId] = {
         scanned: 0, ingested: 0, ignored_not_support: 0, unmatched: 0, ambiguous: 0,
         error: (err instanceof Error ? err.message : String(err)).slice(0, 120)

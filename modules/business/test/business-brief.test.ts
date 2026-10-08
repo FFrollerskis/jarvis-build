@@ -532,6 +532,7 @@ describe("K (D-198): runBusinessWeeklyBriefForAllTenants - per-tenant levering, 
     }));
     expect(result.attempted).toBeGreaterThanOrEqual(2); // TENANT_A + TENANT_B finnes allerede fra tidligere describe-blokker
     expect(result.delivered).toBe(result.attempted);
+    expect(result.chunks_sent).toBeGreaterThanOrEqual(result.attempted); // D-442: minst én del per levert tenant
     expect(result.errors).toEqual([]);
     const calls = (gateway as unknown as { calls: Array<{ tenant_id: string; idempotency_key: string }> }).calls;
     for (const call of calls) {
@@ -555,6 +556,7 @@ describe("K (D-198): runBusinessWeeklyBriefForAllTenants - per-tenant levering, 
     }));
     expect(result.errors.some((e) => e.startsWith(`${TENANT_A}:delivery_failed`))).toBe(true);
     expect(result.delivered).toBe(result.attempted - 1);
+    expect(result.chunks_sent).toBe(result.delivered); // D-442: kort brief = én del; tenanten som feilet bidro med 0 sendte deler
   });
 
   it("en kastende identityFor() for ÉN tenant hopper KUN over den tenanten - resten leveres fortsatt", async () => {

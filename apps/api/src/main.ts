@@ -4,7 +4,7 @@ import { executiveQueueOwner } from "./queue-owner.ts";
 import { parseDailyCapOre, parseToolTurnRoute } from "./tool-turn-route.ts";
 import { fileURLToPath } from "node:url";
 import { checkEv0Boot, getLastEv0BootStatus, logEv0Boot } from "./ev0-boot.ts";
-import { envHour, envInt, envPort, systemIdentity } from "@jarvis/contracts";
+import { assertNoSweepFailures, envHour, envInt, envPort, failOnSweepFailures, systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit } from "./owner.ts";
 import { buildSelfModelReaders } from "./self-model-readers.ts";
 import {
@@ -69,7 +69,7 @@ import {
   CHAT_ACT_TIER, CHAT_READ_TIER, GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, assertManifestInvariants, buildToolManifest, describeSurfaceCatalog, memoryToolDefinitions, selectSurfaceTools,
   MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, resolveModelToolSurface, PgGithubRateLimitStore,
   PgTelegramOffsetStore, TelegramCommandPoller, createTurnContext, jobIdentityFor, telegramClassDNotifier, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, buildStatusSource, calendarSource, driveTransportsIfConfigured,
-  emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep,
+  emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, schedulerSource, DailyScheduler, runConnectorHealthSweep,
   CONNECTOR_REGISTRY, FORBIDDEN_MODEL_TOOL_IDS, listConnectorStatus
 } from "@jarvis/tool-gateway";
 import {
@@ -1224,7 +1224,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   ).unref();
 
   const dailyBrief = new DailyBrief([
-    tasksSource(pool), buildStatusSource(toolGateway),
+    tasksSource(pool),
+    schedulerSource(pool, (id) => id.person_id === owner.owner_person_id && id.tenant_id === owner.tenant_id),
+    buildStatusSource(toolGateway),
     emailSource(toolGateway), calendarSource(toolGateway)
   ], pool);
   const aiMeshText = async () => {
@@ -1353,6 +1355,9 @@ porter: se docs/RUNTIME_GATES.md`;
       const delivered = await DailyBrief.deliverViaTelegram(toolGateway, ownerIdentity as never, brief);
       if (!delivered) {
         console.error(JSON.stringify({ msg: "daily_brief_delivery_failed", generated_at: brief.generated_at }));
+        // D-442: kast, så DailyScheduler planlegger nytt forsøk (1/5/15 min) i stedet for å bokføre dagen som fullført uten at briefen kom frem.
+        // Avveining: et nytt forsøk lager en ny brief (ny `generated_at` = nye idempotensnøkler); feilet bare del 2+ av en flerdelt brief, kan del 1 komme to ganger.
+        throw new Error("daily-brief: Telegram-levering feilet");
       }
     });
   }
@@ -1366,7 +1371,7 @@ porter: se docs/RUNTIME_GATES.md`;
   // ALDRI påvirket av finance_kill_switch (se spend-service.ts §13-JSDoc).
   new DailyScheduler(
     pool, "finance-spend-integrity-sweep", envHour("JARVIS_FINANCE_SPEND_SWEEP_HOUR", 4)
-  ).start(() => runFinanceSpendIntegritySweepForAllTenants(pool, spendService).then(() => undefined));
+  ).start(() => failOnSweepFailures("finance-spend-integrity-sweep", (failures) => runFinanceSpendIntegritySweepForAllTenants(pool, spendService, failures)));
   // D-109 (UA-6 Slice 3) §15: periodisk Stripe-utfallssynk (explicit GET-
   // refresh av `provider_acknowledged`-rader) + provider-avviksdeteksjon -
   // SAMME reboot-durable DailyScheduler-mekanisme (eget job_name, egen
@@ -1378,14 +1383,14 @@ porter: se docs/RUNTIME_GATES.md`;
   // sender en Stripe-betaling.
   new DailyScheduler(
     pool, "stripe-payment-sync", envHour("JARVIS_STRIPE_SYNC_HOUR", 3)
-  ).start(() => runStripePaymentSyncForAllTenants(pool, financeService).then(() => undefined));
+  ).start(() => failOnSweepFailures("stripe-payment-sync", (failures) => runStripePaymentSyncForAllTenants(pool, financeService, failures)));
   // D-110 (UA-6 Slice 4) §14: periodisk Vipps-utfallssynk + provider-
   // avviksdeteksjon - SAMME mekanisme/begrunnelse som stripe-payment-sync
   // over (eget job_name, egen klokkeslett-env, trygt å kjøre uten
   // JARVIS_VIPPS_*-credentials konfigurert).
   new DailyScheduler(
     pool, "vipps-payment-sync", envHour("JARVIS_VIPPS_SYNC_HOUR", 3)
-  ).start(() => runVippsPaymentSyncForAllTenants(pool, financeService).then(() => undefined));
+  ).start(() => failOnSweepFailures("vipps-payment-sync", (failures) => runVippsPaymentSyncForAllTenants(pool, financeService, failures)));
   // D-111 (UA-6 Slice 5) §17: periodisk open-banking-sveip (samtykke-
   // verifisering/konto-/transaksjonssynk/betalingsstatus/avstemming/avvik)
   // - SAMME mekanisme/tidsvindu-klasse som Stripe-/Vipps-sveipene. Trygg
@@ -1393,19 +1398,19 @@ porter: se docs/RUNTIME_GATES.md`;
   // rent lokale avstemmings-/avviks-stegene kjører fortsatt).
   new DailyScheduler(
     pool, "neonomics-sweep", envHour("JARVIS_NEONOMICS_SYNC_HOUR", 3)
-  ).start(() => runNeonomicsSweepForAllTenants(pool, bankingService, financeService).then(() => undefined));
+  ).start(() => failOnSweepFailures("neonomics-sweep", (failures) => runNeonomicsSweepForAllTenants(pool, bankingService, financeService, failures)));
   // D-112 (UA-6 Slice 6): daglig Wallester-kortsveip (tilstands-/
   // autorisasjons-/transaksjonssynk -> avstemming -> avviksdeteksjon) -
   // SAMME reboot-durable DailyScheduler-mekanisme.
   new DailyScheduler(
     pool, "wallester-sweep", envHour("JARVIS_WALLESTER_SYNC_HOUR", 5)
-  ).start(() => runWallesterSweepForAllTenants(pool, cardService).then(() => undefined));
+  ).start(() => failOnSweepFailures("wallester-sweep", (failures) => runWallesterSweepForAllTenants(pool, cardService, failures)));
   // UA-3 next slice (D-53) §19/§20: periodisk open-loop-sveip - gjenbruker SAMME
   // reboot-durable DailyScheduler-mekanisme (eget job_name, egen klokkeslett-env),
   // uavhengig av om Telegram er konfigurert (deteksjon != levering).
   new DailyScheduler(
     pool, "business-open-loop-sweep", envHour("JARVIS_BUSINESS_SWEEP_HOUR", 6)
-  ).start(() => runOpenLoopSweepForAllTenants(pool, openLoopService).then(() => undefined));
+  ).start(() => failOnSweepFailures("business-open-loop-sweep", (failures) => runOpenLoopSweepForAllTenants(pool, openLoopService, failures)));
   // D-198 (V4-revisjon, masterplanens "Business Operating Loop"): UKENTLIG
   // (ALDRI daglig - se runBusinessWeeklyBriefForAllTenants() sin doc-
   // kommentar for hvorfor en daglig push her ville duplisert situations-
@@ -1425,6 +1430,11 @@ porter: se docs/RUNTIME_GATES.md`;
     }));
     if (result.errors.length > 0) {
       console.error(JSON.stringify({ msg: "business_weekly_brief_failed", errors: result.errors }));
+      // D-442: retry kjører hele sveipet på nytt og briefens idempotensnøkkel inneholder `generated_at` (ny per kjøring). Etter DELVIS levering (en tenant som fikk
+      // briefen, eller en flerdelt brief der kun del 1 ble sendt) ville et nytt forsøk sendt noe på nytt - derfor kastes det KUN når INGEN del ble sendt til noen.
+      if (result.delivered === 0 && result.chunks_sent === 0) {
+        throw new Error(`business-weekly-brief: ingen av ${result.attempted} tenant(s) fikk briefen (${result.errors[0]})`);
+      }
     }
   });
   // UA-10 P1 AKTIVERING (D-160): situasjons-sveipen - ingest fra
@@ -1466,14 +1476,14 @@ porter: se docs/RUNTIME_GATES.md`;
   // morgenbriefen kjører.
   new DailyScheduler(
     pool, "business-events-sync", envHour("JARVIS_BUSINESS_EVENTS_SYNC_HOUR", 5)
-  ).start(() => runBusinessEventSyncForAllTenants(pool, businessEventSyncService).then(() => undefined));
+  ).start(() => failOnSweepFailures("business-events-sync", (failures) => runBusinessEventSyncForAllTenants(pool, businessEventSyncService, failures)));
   // UA-7 Communications Hub - foerste slice (D-119): periodisk Gmail->
   // Conversation Graph-identitetskobling - SAMME reboot-durable
   // DailyScheduler-mekanisme (eget job_name, egen klokkeslett-env),
   // uavhengig av business-events-sync over.
   new DailyScheduler(
     pool, "conversation-graph-sync", envHour("JARVIS_CONVERSATION_GRAPH_SYNC_HOUR", 5)
-  ).start(() => runConversationGraphSyncForAllTenants(pool, conversationGraphSyncService).then(() => undefined));
+  ).start(() => failOnSweepFailures("conversation-graph-sync", (failures) => runConversationGraphSyncForAllTenants(pool, conversationGraphSyncService, failures)));
   // UA-3 profiling/scoring-slice (D-61) §23: periodisk, idempotent
   // score-rekalkulering - SAMME reboot-durable DailyScheduler-mekanisme (eget
   // job_name, egen klokkeslett-env). Kjøres ETTER events-sync (05) og
@@ -1481,7 +1491,7 @@ porter: se docs/RUNTIME_GATES.md`;
   // aktivitets-/open-loop-tilstanden (default kl. 07).
   new DailyScheduler(
     pool, "business-scoring-recalc", envHour("JARVIS_BUSINESS_SCORING_HOUR", 7)
-  ).start(() => runScoringSweepForAllTenants(pool, scoringService).then(() => undefined));
+  ).start(() => failOnSweepFailures("business-scoring-recalc", (failures) => runScoringSweepForAllTenants(pool, scoringService, failures)));
   // UA-3 Native Jarvis Support Core (D-66) §7/§24: periodisk Gmail-innboks-
   // reconciliation - SAMME reboot-durable DailyScheduler-mekanisme, eget
   // job_name/klokkeslett-env. Kjøres ETTER de øvrige business-jobbene
@@ -1494,7 +1504,7 @@ porter: se docs/RUNTIME_GATES.md`;
   // klassifiseres som support, se `email-ingress.ts`).
   new DailyScheduler(
     pool, "support-inbox-sync", envHour("JARVIS_SUPPORT_INBOX_SYNC_HOUR", 8)
-  ).start(() => runSupportInboxSyncForAllTenants(pool, supportEmailService).then(() => undefined));
+  ).start(() => failOnSweepFailures("support-inbox-sync", (failures) => runSupportInboxSyncForAllTenants(pool, supportEmailService, failures)));
   // D-85: periodisk anomaly->anbefaling-sveip (growth-eid BESLUTNINGS-lag,
   // ALDRI utførelse) - SAMME reboot-durable DailyScheduler-mekanisme, eget
   // job_name/klokkeslett-env. Kjøres ETTER business-open-loop-sweep (default
@@ -1504,7 +1514,7 @@ porter: se docs/RUNTIME_GATES.md`;
   // se `detectAndRecommendSpendAnomalies()`-kommentaren i modules/growth).
   new DailyScheduler(
     pool, "growth-action-recommendation-sweep", envHour("JARVIS_GROWTH_RECOMMENDATION_SWEEP_HOUR", 9)
-  ).start(() => runActionRecommendationSweepForAllTenants(pool, growthService).then(() => undefined));
+  ).start(() => failOnSweepFailures("growth-action-recommendation-sweep", (failures) => runActionRecommendationSweepForAllTenants(pool, growthService, failures)));
   // UA-8 Personal Digital Twin (D-130) §6: periodisk retensjons-håndhevelse
   // for lokasjonsobservasjoner - SAMME reboot-durable DailyScheduler-
   // mekanisme (eget job_name, egen klokkeslett-env). Trygt å kjøre uten noen
@@ -1512,7 +1522,7 @@ porter: se docs/RUNTIME_GATES.md`;
   // til i denne sliceen) - sveipet blir da et no-op.
   new DailyScheduler(
     pool, "location-retention-sweep", envHour("JARVIS_LOCATION_RETENTION_SWEEP_HOUR", 2)
-  ).start(() => runLocationRetentionSweepForAllTenants(pool, locationService).then(() => undefined));
+  ).start(() => runLocationRetentionSweepForAllTenants(pool, locationService).then((summary) => assertNoSweepFailures("location-retention-sweep", summary.failed)));
   // UA-8 Personal Digital Twin (D-130) §6: periodisk retensjons-håndhevelse
   // for helseobservasjoner - SAMME mekanisme/begrunnelse som
   // location-retention-sweep over. Kjøres i samme tidlige klokkeslett-vindu
@@ -1520,7 +1530,7 @@ porter: se docs/RUNTIME_GATES.md`;
   // downstream-avhengigheter til andre UA-3/UA-4-sveip.
   new DailyScheduler(
     pool, "health-retention-sweep", envHour("JARVIS_HEALTH_RETENTION_SWEEP_HOUR", 2)
-  ).start(() => runHealthRetentionSweepForAllTenants(pool, healthService).then(() => undefined));
+  ).start(() => runHealthRetentionSweepForAllTenants(pool, healthService).then((summary) => assertNoSweepFailures("health-retention-sweep", summary.failed)));
   // UA-9 Vision & Physical World (D-153): periodisk retensjons-håndhevelse
   // for hendelsesobservasjoner - SAMME reboot-durable DailyScheduler-
   // mekanisme som location-retention-sweep over (MULTI-SPACE, IKKE health-
@@ -1529,7 +1539,7 @@ porter: se docs/RUNTIME_GATES.md`;
   // leverandør koblet til i denne sliceen) - sveipet blir da et no-op.
   new DailyScheduler(
     pool, "vision-retention-sweep", envHour("JARVIS_VISION_RETENTION_SWEEP_HOUR", 2)
-  ).start(() => runVisionRetentionSweepForAllTenants(pool, visionService).then(() => undefined));
+  ).start(() => runVisionRetentionSweepForAllTenants(pool, visionService).then((summary) => assertNoSweepFailures("vision-retention-sweep", summary.failed)));
   // D-286 (Tobias direkte i chat, "alle" - alle tre foreslåtte tilnærminger
   // til ubegrenset minnevekst): periodisk konsolidering av gamle EPISODISKE
   // samtale-minner til dagssammendrag - SAMME reboot-durable
@@ -1542,18 +1552,18 @@ porter: se docs/RUNTIME_GATES.md`;
   ).start(() =>
     runMemoryRetentionSweepForAllTenants(
       pool, memoryWriter, memorySummaries, envInt("JARVIS_MEMORY_RETENTION_DAYS", 60, { min: 1, max: 3650 })
-    ).then(() => undefined)
+    ).then((summary) => assertNoSweepFailures("memory-retention-sweep", summary.failed))
   );
   // D-386: nattlig re-embedding av items/episoder/sammendrag som mangler vektor for GJELDENDE modell (modellbytte i
   // .env, eller vektorskriving som feilet fordi Ollama var nede). Samme reboot-durable DailyScheduler-mønster.
   // I tillegg ett kort, begrenset kick etter oppstart så et modellbytte virker samme dag - aldri i oppstartsstien.
   new DailyScheduler(
     pool, "memory-reembed-sweep", envHour("JARVIS_MEMORY_REEMBED_SWEEP_HOUR", 3)
-  ).start(() => runMemoryReembedSweepForAllTenants(pool, memoryEmbedding).then(() => undefined));
+  ).start(() => runMemoryReembedSweepForAllTenants(pool, memoryEmbedding).then((summary) => assertNoSweepFailures("memory-reembed-sweep", summary.failed)));
   // D-386: nattlig rekompilering av den alltid-tilstede eierprofilen per space (deterministisk, ingen LLM).
   new DailyScheduler(
     pool, "memory-profile-sweep", envHour("JARVIS_MEMORY_PROFILE_SWEEP_HOUR", 4)
-  ).start(() => runMemoryProfileSweepForAllTenants(pool).then(() => undefined));
+  ).start(() => runMemoryProfileSweepForAllTenants(pool).then((summary) => assertNoSweepFailures("memory-profile-sweep", summary.failed)));
   // D-395 (JARVIS-074): daglig oppbevaring for driftsrader som ellers vokser uten grense (utløpte godkjenninger/grants/billetter, ferdige
   // verktøyutføringer, gamle scheduler-rader). All sletting skjer i `prune_operational_data()` (SECURITY DEFINER, faste gulv i RLS-policyene);
   // runtime-rollen har kun EXECUTE. Revisjon/hendelser/kostnadsledger berøres ikke (eierbeslutning).

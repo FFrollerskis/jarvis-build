@@ -2,7 +2,7 @@ import type pg from "pg";
 import { listBusinessTenantIds } from "@jarvis/core";
 import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import { withMemoryTransaction } from "@jarvis/memory";
-import { deliverChunkedTextViaTelegram, type BriefItem, type BriefSource, type ToolGateway } from "@jarvis/tool-gateway";
+import { deliverChunkedTextViaTelegramDetailed, type BriefItem, type BriefSource, type ToolGateway } from "@jarvis/tool-gateway";
 import type { OpenLoopService } from "./open-loop-service.ts";
 import type { BusinessDomain } from "./open-loop-types.ts";
 
@@ -238,14 +238,19 @@ export function renderWeeklyBrief(brief: WeeklyBriefArtifact): string {
  * innholdsformat (aggregert 7-dagers tilbakeblikk, ikke individuelle
  * hendelser) og dupliserer derfor ikke.
  *
- * Leveransen gjenbruker DEN ene `deliverChunkedTextViaTelegram()`-
- * mekanismen (SAMME som `DailyBrief.deliverViaTelegram()`) - idempotency-
+ * Leveransen gjenbruker DEN ene chunket-leveringsmekanismen
+ * (`deliverChunkedTextViaTelegramDetailed()`, SAMME som `DailyBrief.deliverViaTelegram()`) - idempotency-
  * nøkkelen er prefikset med `tenantId` (flere tenants' ukentlige briefer
  * samme dag må ALDRI kollidere i samme nøkkelrom).
  */
 export interface BusinessWeeklyBriefDeliveryResult {
   attempted: number;
   delivered: number;
+  /**
+   * D-442: antall Telegram-deler som faktisk ble sendt, summert over alle tenants (også for tenants som feilet på del 2+). `delivered === 0` alene betyr IKKE at
+   * ingenting ble sendt - en flerdelt brief kan være delvis levert. Kalleren må bruke dette for å avgjøre om et nytt forsøk kan duplisere noe.
+   */
+  chunks_sent: number;
   /** `tenantId:feilbeskrivelse` - aldri hemmeligheter/rådata. */
   errors: string[];
 }
@@ -257,18 +262,19 @@ export async function runBusinessWeeklyBriefForAllTenants(
   memorySpace: MemorySpace = "business"
 ): Promise<BusinessWeeklyBriefDeliveryResult> {
   const tenantIds = await listBusinessTenantIds(pool, 200);
-  const result: BusinessWeeklyBriefDeliveryResult = { attempted: 0, delivered: 0, errors: [] };
+  const result: BusinessWeeklyBriefDeliveryResult = { attempted: 0, delivered: 0, chunks_sent: 0, errors: [] };
   for (const tenantId of tenantIds) {
     result.attempted += 1;
     try {
       const brief = await generateWeeklyBrief(pool, tenantId, memorySpace);
-      const delivered = await deliverChunkedTextViaTelegram(
+      const delivery = await deliverChunkedTextViaTelegramDetailed(
         gateway,
         identityFor(tenantId),
         renderWeeklyBrief(brief),
         `business-weekly-brief-${tenantId}-${brief.generated_at}`
       );
-      if (delivered) result.delivered += 1;
+      result.chunks_sent += delivery.chunks_sent;
+      if (delivery.ok) result.delivered += 1;
       else result.errors.push(`${tenantId}:delivery_failed`);
     } catch (err) {
       // Én tenant sin feil skal aldri velte hele sveipet for andre tenants (samme disiplin som open-loop-sweep.ts).

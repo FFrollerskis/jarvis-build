@@ -3,6 +3,7 @@ import os from "node:os";
 import type pg from "pg";
 import { withTenantTransaction } from "@jarvis/core";
 import type { Observation, ObservationReader } from "@jarvis/executive";
+import { describeSchedulerProblem, readSchedulerHealth } from "@jarvis/tool-gateway";
 
 /**
  * EV-1 (D-412): leserne selvmodellen komponerer selvdiagnosen av. Hver leser er smal og injisert, leser KUN sin egen kilde, og svarer med
@@ -99,6 +100,30 @@ export function buildSelfModelReaders(deps: SelfModelReaderDeps): Record<string,
       const data = { running: r.running, stuck: r.stuck, failed_last_hour: r.failed_1h };
       if (r.stuck > 0) return { status: "DEGRADED", source: "tasks (lease)", observed_at: at, detail: `${r.stuck} jobber har utløpt lease (står fast).`, data };
       return { status: "OK", source: "tasks (lease)", observed_at: at, detail: `${r.running} kjører, ingen står fast.`, data };
+    },
+
+    /**
+     * D-443: daglige bakgrunnsjobber (`DailyScheduler` -> `scheduler_state`, global tabell uten tenant-RLS - derfor poolen direkte). DOWN når dagens (eller
+     * gårsdagens) arbeid er TAPT (ga opp / ikke fullført), DEGRADED når et nytt forsøk er planlagt eller en claim henger. Ingen rader = UNKNOWN, aldri «frisk».
+     */
+    async scheduled_jobs(): Promise<Observation> {
+      const at = iso(now());
+      const health = await readSchedulerHealth(deps.pool);
+      const count = (kind: string) => health.problems.filter((p) => p.kind === kind).length;
+      const data = {
+        jobs_seen: health.jobs_seen, completed: health.completed,
+        gave_up: count("gave_up"), lost_previous_day: count("lost_previous_day"), retry_pending: count("retry_pending"), stalled: count("stalled")
+      };
+      if (health.jobs_seen === 0) {
+        return { status: "UNKNOWN", source: "scheduler_state", observed_at: null, detail: "Ingen daglige jobber har kjørt i dag eller i går (nylig oppstart?) - ingen måling." };
+      }
+      if (health.problems.length === 0) {
+        return { status: "OK", source: "scheduler_state", observed_at: at, detail: `${health.completed} av ${health.jobs_seen} daglige jobber er fullført, ingen feil.`, data };
+      }
+      const lost = data.gave_up + data.lost_previous_day > 0;
+      const shown = health.problems.slice(0, 4).map(describeSchedulerProblem).join("; ");
+      const more = health.problems.length > 4 ? ` (+${health.problems.length - 4} til)` : "";
+      return { status: lost ? "DOWN" : "DEGRADED", source: "scheduler_state", observed_at: at, detail: `${health.problems.length} daglige jobber har problemer: ${shown}${more}.`, data };
     },
 
     async errors(): Promise<Observation> {
