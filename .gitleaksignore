@@ -120,3 +120,10 @@ f0fd3eaef6f1a80f2eb8d9d66a3ef1631348173e:.gitleaksignore:generic-api-key:105
 2e3d4ee9038599624e582e79415ab3fac1915711:modules/incidents/test/d394-redaction.test.ts:aws-access-token:11
 2e3d4ee9038599624e582e79415ab3fac1915711:modules/incidents/test/d394-redaction.test.ts:aws-access-token:17
 2e3d4ee9038599624e582e79415ab3fac1915711:modules/incidents/test/d394-redaction.test.ts:jwt:7
+
+# PR #302 (b6e8306): testfixturen i ops/nas/test/enroll-device.test.mjs brukte en bokstavelig markorverdi etter «JARVIS_DB_ADMIN_PASSWORD=»
+# for a bevise at innholdet i env-filen aldri folger med til docker-argumentene. Ingen ekte hemmelighet (verifisert manuelt) - kun en
+# oppdiktet testmarkor. Markoren er na bygget ved kjoring (ingen bokstavelig verdi i kildekoden), men CI-gitleaks skanner full historikk
+# og den opprinnelige commit-en er en del av grenens publiserte historikk (aldri force push, jf. CLAUDE.md), derfor fingeravtrykk.
+b6e8306e5588e0eb348ab95efebbd8f20db56e82:ops/nas/test/enroll-device.test.mjs:generic-api-key:18
+b6e8306e5588e0eb348ab95efebbd8f20db56e82:ops/nas/test/enroll-device.test.mjs:generic-api-key:99
