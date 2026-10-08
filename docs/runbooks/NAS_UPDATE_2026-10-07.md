@@ -6,6 +6,27 @@ Sjekkliste for neste NAS-oppdatering. **Ingenting under er verifisert på NAS en
 
 Alle kommandoer kjøres fra `/volume1/jarvisbuild-data/jarvisbuild` (compose og `.env` finnes bare der).
 
+## Koble til NAS-en (PuTTY, også når du ikke er hjemme)
+
+| PuTTY-felt | Verdi |
+|---|---|
+| Host Name (or IP address) | `100.76.2.58` |
+| Port / Connection type | `22` / SSH |
+| login as | `Jarvis` (stor J), deretter passordet til NAS-brukeren |
+
+`100.76.2.58` er NAS-ens **Tailscale-adresse** og virker fra alle nett. `10.0.0.30` / `10.0.0.138` er hjemmenettet (LAN) og virker KUN når maskinen sitter på samme nett som NAS-en. I Tailscale heter NAS-en `dxp4800plus-ring`; `jarvis-nas-2` / `jarvis-nas-1` i eldre dokumenter er gamle navn. Adressen og navnet er sist bekreftet 2026-10-02 med `sudo docker exec tailscaled tailscale status` på NAS-en (Tailscale kjører der som container, ikke som vertstjeneste). Oppkobling fra et annet nett enn hjemmenettet er ikke dokumentert testet.
+
+1. Tailscale må kjøre og være pålogget med samme konto som NAS-en (vises som `post@…` i `tailscale status`) på maskinen du sitter ved. I Tailscale-menyen skal `dxp4800plus-ring` stå i listen over enheter og ikke være offline. Er den offline, er NAS-en av eller uten internett, og da kommer du ikke inn før den er det. Står ikke maskinen din i listen (2026-10-02 hadde tailnettet én Windows-maskin, `srby`), må Tailscale installeres og logges inn der først.
+2. Skriv adressen selv. Første gang fra en ny maskin viser PuTTY «host key not cached»; det er normalt, velg Accept.
+3. Lagre økten under «Saved Sessions» (for eksempel «Jarvis-NAS»), så er neste gang ett klikk.
+4. Etter innlogging, gå til arbeidsmappen:
+
+```
+cd /volume1/jarvisbuild-data/jarvisbuild
+```
+
+**Feilsøking:** `Connection timed out` = Tailscale er ikke tilkoblet på din maskin, eller NAS-en er offline (punkt 1). `Connection refused` = NAS-en svarer, men tar ikke imot SSH på port 22. `Access denied` = feil bruker eller passord (stor J i `Jarvis`).
+
 ## Hva som er nytt siden NAS sist kjørte `85b69c5`
 
 | Beslutning | Endring | Hva du bør se |
@@ -32,13 +53,17 @@ Alle kommandoer kjøres fra `/volume1/jarvisbuild-data/jarvisbuild` (compose og 
 
 ## 0. Før du starter (1 min)
 
-Kjør sikkerhetskopi først hvis du ikke har en fersk (migrasjon 078–080 endrer nøkler, ikke data, men det er en skjemaendring):
+Kjør sikkerhetskopi først hvis du ikke har en fersk (migrasjon 078–080 endrer nøkler, ikke data, men det er en skjemaendring). De krypterte settene ligger i `/volume1/jarvisbuild-data/backups/encrypted`; en cron-jobb (`17 2 * * *`, sist sett i crontab 2026-10-03; ikke verifisert at den har kjørt siden) skal ta et nytt hver natt:
 
 ```
-ls -lt <backup-mappen> | head -3
+ls -lt /volume1/jarvisbuild-data/backups/encrypted | head -3
 ```
 
-Er den eldre enn ett døgn: kjør den vanlige backupen før du går videre.
+Er det nyeste eldre enn ett døgn (se også `/volume1/jarvisbuild-data/backups/backup.log`): kjør backupen manuelt før du går videre:
+
+```
+ops/backup/nas-backup.sh /volume1/jarvisbuild-data/backups/encrypted
+```
 
 ## 1. Hent og bygg
 
@@ -49,6 +74,22 @@ git pull
 ```
 sudo docker compose --env-file .env -f infra/local/docker-compose.yml up -d --build
 ```
+
+**Koblet til utenfra (hytta, mobilnett)?** Mister PuTTY forbindelsen midt i bygget, kan bygget dø. Kjør det da i bakgrunnen i stedet for kommandoen over:
+
+```
+sudo -v
+```
+
+```
+nohup sudo docker compose --env-file .env -f infra/local/docker-compose.yml up -d --build > /tmp/jarvis-update.log 2>&1 &
+```
+
+```
+tail -f /tmp/jarvis-update.log
+```
+
+Ctrl+C stopper bare `tail`, ikke bygget. Ved neste prompt står det `[1]+ Done …` når bygget er ferdig (etter en frakobling: se `tail -20 /tmp/jarvis-update.log`). Står det `Stopped` (sudo ville ha passord): kjør `fg`, skriv passordet og la bygget gå ferdig i forgrunnen.
 
 **Forventet:** bygget går gjennom, `migrate` avslutter med kode 0, api og worker starter.
 **Avvik å melde fra om:** `migrate` feiler. Feilen er da sannsynligvis `violates foreign key constraint … _tenant` – en eksisterende rad krysser tenant. **Fjern ikke nøkkelen**; lim inn hele feilmeldingen, så finner vi raden.
