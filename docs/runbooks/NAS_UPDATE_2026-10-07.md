@@ -1,6 +1,6 @@
 # NAS-oppdatering 2026-10-07 (D-427…D-446)
 
-Sjekkliste for neste NAS-oppdatering. **Ingenting under er verifisert på NAS ennå** – det som står under «Forventet» er hva koden og testene sier, ikke observert drift. Kjør ett steg om gangen, lim inn utdata, og stopp ved første avvik.
+Sjekkliste for neste NAS-oppdatering. **Det meste under er ikke verifisert på NAS** – det som står under «Forventet» er hva koden og testene sier, ikke observert drift. Bare steg med en egen **«Observert»**-linje er målt på NAS-en (oppdateringen 2026-10-08). Kjør ett steg om gangen, lim inn utdata, og stopp ved første avvik.
 
 **Merk:** punkter merket med migrasjon 078–082 og D-437/D-438 forutsetter at PR #286, #288 og #289 er merget før du oppdaterer; D-441/D-444 kom med #295 og D-442/D-443 med #296. Sjekk `git log --oneline -15` etter `git pull`.
 
@@ -26,6 +26,24 @@ cd /volume1/jarvisbuild-data/jarvisbuild
 ```
 
 **Feilsøking:** `Connection timed out` = Tailscale er ikke tilkoblet på din maskin, eller NAS-en er offline (punkt 1). `Connection refused` = NAS-en svarer, men tar ikke imot SSH på port 22. `Access denied` = feil bruker eller passord (stor J i `Jarvis`).
+
+**Observert 2026-10-08:** innlogging med `100.76.2.58`, port 22, bruker `Jarvis` fra et annet nett enn hjemmenettet fungerte (PuTTY).
+
+## Innrullere en ny nettleser eller enhet
+
+Hver nettleser må innrulleres én gang per adresse med en engangsbillett fra NAS-en; siden viser «Denne enheten er ikke innrullert ennå». Hintet `pnpm --filter @jarvis/api enroll-ticket` virker **ikke** på NAS-en: CLI-en trenger admin-databasetilgang, og den finnes bevisst bare i `migrate`-tjenesten (Remediering del 2), ikke i `api`/`worker`. Kjør i stedet fra `/volume1/jarvisbuild-data/jarvisbuild`:
+
+```
+ops/nas/enroll-device.sh https://dxp4800plus-ring.tail3935f7.ts.net
+```
+
+Adressen må være **den samme HTTPS-adressen nettleseren bruker**: enhetsnøkkelen lagres per nettleser og adresse, og nettleseren krever HTTPS for å lage den, så `http://` og LAN-adressen (`10.0.0.30:3010`) fungerer ikke. Valgfritt andre argument velger landingsside: `dashboard` (standard), `voice` eller `chat`. Billetten er engangs og gyldig i 15 minutter.
+
+1. Marker hele lenken skriptet skriver ut (`…?enroll=…`) med musen (dra over den; ikke dobbeltklikk, for `-` og `_` deler ordet) og lim den inn i nettleserens adressefelt. Siden innrullerer seg selv og viser «Enheten er innrullert.»
+2. Virker ikke lenken, lim den korte billett-strengen inn i feltet «Innrullerings-billett» på siden.
+3. Lim **aldri** billetten eller lenken inn i chat. `enrollment_ticket_invalid` betyr utløpt, allerede brukt eller feilkopiert: kjør skriptet på nytt.
+
+**Observert 2026-10-08:** den underliggende kommandoen (`docker compose … run --rm --no-deps -e JARVIS_PUBLIC_VOICE_BASE_URL=… migrate node --experimental-transform-types apps/api/src/enroll-ticket-main.ts --path dashboard`) ble kjørt av eieren, og siden viste «Enheten er innrullert.» **Ikke observert:** selve skriptet `ops/nas/enroll-device.sh` (testet mot en falsk `docker`, ikke på NAS-en), og at innrulleringstekstene på sidene (som nevner skriptet) først vises etter neste bygg.
 
 ## Hva som er nytt siden NAS sist kjørte `85b69c5`
 
@@ -54,7 +72,7 @@ cd /volume1/jarvisbuild-data/jarvisbuild
 
 ## 0. Før du starter (1 min)
 
-Kjør sikkerhetskopi først hvis du ikke har en fersk (migrasjon 078–080 endrer nøkler, ikke data, men det er en skjemaendring). De krypterte settene ligger i `/volume1/jarvisbuild-data/backups/encrypted`; en cron-jobb (`17 2 * * *`, sist sett i crontab 2026-10-03; ikke verifisert at den har kjørt siden) skal ta et nytt hver natt:
+Kjør sikkerhetskopi først hvis du ikke har en fersk (migrasjon 078–080 endrer nøkler, ikke data, men det er en skjemaendring). De krypterte settene ligger i `/volume1/jarvisbuild-data/backups/encrypted`; en cron-jobb (`17 2 * * *`, installert 2026-10-03) tar et nytt hver natt. **Observert 2026-10-08:** settene fra 7. og 8. oktober kl. 02:17 fantes, så cron har kjørt de to siste nettene:
 
 ```
 ls -lt /volume1/jarvisbuild-data/backups/encrypted | head -3
@@ -98,10 +116,11 @@ Ctrl+C stopper bare `tail`, ikke bygget. Ved neste prompt står det `[1]+ Done �
 ## 2. Tjenester oppe
 
 ```
-sudo docker compose --env-file .env -f infra/local/docker-compose.yml ps
+sudo docker compose --env-file .env -f infra/local/docker-compose.yml ps -a
 ```
 
-**Forventet:** `api` og `worker` kjører (api healthy), `postgres` healthy.
+**Forventet:** `api` og `worker` kjører (api healthy), `postgres` healthy, og `migrate` og `db-bootstrap` står som **Exited (0)** (`ps -a` viser også avsluttede engangsjobber; `ps` alene skjuler dem og viser dermed ikke at migrasjonene gikk bra).
+**Observert 2026-10-08:** akkurat dette. `api`, `voice-gateway`, `browser-gateway` og `postgres` healthy, `worker` Up (workeren har ingen helsesjekk), `migrate` og `db-bootstrap` Exited (0).
 
 ## 3. Migrasjonene er anvendt
 
@@ -175,10 +194,12 @@ sudo docker compose --env-file .env -f infra/local/docker-compose.yml logs --tai
 ## 5. Akseptanseportene
 
 ```
-ops/acceptance/nas-ua0-gate.sh
+JARVIS_BACKUP_DIR=/volume1/jarvisbuild-data/backups/encrypted ops/acceptance/nas-ua0-gate.sh
 ```
 
-**Forventet:** ikke flere FAIL enn sist (sist: 9 PASS / 2 WARN / 1 UNKNOWN). WARN og UNKNOWN regnes ikke som bestått.
+**Forventet:** ingen FAIL. Backup-sjekken C10 er PASS med mappen satt (uten `JARVIS_BACKUP_DIR` er den UNKNOWN). WARN og UNKNOWN regnes ikke som bestått. C06 (lokal modell) er FAIL hvis PC-en med Ollama er av, og C07 er UNKNOWN uten chat siste døgn – begge er miljø, ikke oppdateringen.
+**Observert 2026-10-08 (etter oppdateringen):** 10 PASS / 2 WARN / 0 UNKNOWN / 0 FAIL (sist: 9 / 2 / 1, uten backup-mappe satt). C08 WARN: 1 av 28 lokale modellkall feilet siste døgn (årsak ikke undersøkt). C09 WARN: `constitution_unsigned`, kjent og ikke fra oppdateringen (Safety Constitution er ikke signert av eier ennå, `docs/runbooks/EV0_CONSTITUTION_SIGNING.md`).
+Evidensfilen i `ops/acceptance/out/` ble **ikke** skrevet på NAS-en (mappen eies trolig av root etter en tidligere `sudo`-kjøring), selv om den gamle versjonen av skriptet påsto det. Nå advarer skriptet og viser rettelsen: `sudo chown -R $(id -un):$(id -gn) ops/acceptance/out` (eller sett `JARVIS_ACCEPTANCE_OUT_DIR`). Utdataene på skjermen er evidensen.
 
 ## 6. Chat-testene (i nettleseren, én om gangen)
 

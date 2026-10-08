@@ -2,7 +2,7 @@
 # UA-0 NAS-akseptanse (D-422): ÉN kommando på NAS-en som samler EVIDENS for produksjonsportene i ett dokument - uten hemmeligheter.
 #   ops/acceptance/nas-ua0-gate.sh                # kjør mot kjørende compose-stack (fra repoets rot på NAS)
 #   JARVIS_ACCEPTANCE_DRY_RUN=1 ops/acceptance/nas-ua0-gate.sh   # skriv kun sjekklisten (ingen docker)
-# Valgfritt miljø: JARVIS_BACKUP_DIR (mappen nas-backup.sh skriver til), JARVIS_COMPOSE_FILE.
+# Valgfritt miljø: JARVIS_BACKUP_DIR (mappen nas-backup.sh skriver til), JARVIS_COMPOSE_FILE, JARVIS_ACCEPTANCE_OUT_DIR (evidensmappe; standard ops/acceptance/out).
 # Leser aldri .env og skriver aldri passord/tokens: Postgres nås via lokal socket i containeren (ingen passord), og kun antall/navn/tilstand rapporteres.
 # Utdata: stdout + ops/acceptance/out/nas-ua0-gate-<tid>.md (git-ignorert). Exit 1 hvis minst én sjekk er FAIL; UNKNOWN/WARN er IKKE bestått.
 # Ærlighet: «PASS» betyr bare at DENNE målingen var som forventet akkurat nå - ikke at en UA-port er lukket.
@@ -12,7 +12,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 COMPOSE_FILE="${JARVIS_COMPOSE_FILE:-$ROOT/infra/local/docker-compose.yml}"
 DRY="${JARVIS_ACCEPTANCE_DRY_RUN:-0}"
-OUT_DIR="$HERE/out"
+OUT_DIR="${JARVIS_ACCEPTANCE_OUT_DIR:-$HERE/out}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT_FILE="$OUT_DIR/nas-ua0-gate-$STAMP.md"
 PASS=0; FAIL=0; WARN=0; UNKNOWN=0
@@ -144,8 +144,7 @@ if echo "$hard" | grep -q "AVVIK"; then record C12_container_hardening FAIL "$ha
 elif echo "$hard" | grep -q "ukjent"; then record C12_container_hardening UNKNOWN "$hard"
 else record C12_container_hardening PASS "$hard"; fi
 
-mkdir -p "$OUT_DIR"; chmod 700 "$OUT_DIR"
-{
+write_evidence() {
   echo "# UA-0 NAS-akseptanse - $STAMP"
   echo
   echo "Generert av \`ops/acceptance/nas-ua0-gate.sh\` (D-422). Ingen hemmeligheter; kun antall/navn/tilstand. PASS betyr at denne målingen var som forventet akkurat nå - ikke at en UA-port er lukket."
@@ -155,8 +154,20 @@ mkdir -p "$OUT_DIR"; chmod 700 "$OUT_DIR"
   echo "| Sjekk | Status | Detalj |"
   echo "|---|---|---|"
   printf '%s\n' "${ROWS[@]}"
-} > "$OUT_FILE"
+}
+# Evidensfilen er best effort, men scriptet skal aldri PÅSTÅ at den ble skrevet når den ikke ble det. På NAS-en var `out/` eid av en annen bruker (root etter en
+# tidligere sudo-kjøring): da feilet både chmod og skrivingen («Permission denied»), og scriptet skrev likevel «Evidens skrevet til». Utdataene på skjermen er alltid
+# evidensen; filen er en kopi. Exit-koden styres fortsatt KUN av sjekkene.
+evidence_ok=0
+if mkdir -p "$OUT_DIR" 2>/dev/null; then
+  chmod 700 "$OUT_DIR" 2>/dev/null || true
+  if ( write_evidence > "$OUT_FILE" ) 2>/dev/null; then evidence_ok=1; fi
+fi
 echo
 echo "Sammendrag: PASS=$PASS WARN=$WARN UNKNOWN=$UNKNOWN FAIL=$FAIL"
-echo "Evidens skrevet til: $OUT_FILE"
+if [ "$evidence_ok" = "1" ]; then
+  echo "Evidens skrevet til: $OUT_FILE"
+else
+  echo "ADVARSEL: evidensfilen ble IKKE skrevet ($OUT_DIR er ikke skrivbar for $(id -un)). Eies mappen av en annen bruker (for eksempel root etter en tidligere sudo-kjøring), rett den med: sudo chown -R $(id -un):$(id -gn) $OUT_DIR - eller sett JARVIS_ACCEPTANCE_OUT_DIR til en skrivbar mappe. Utdataene over er eneste evidens fra denne kjøringen." >&2
+fi
 [ "$FAIL" -eq 0 ]

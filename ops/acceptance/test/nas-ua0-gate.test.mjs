@@ -140,4 +140,37 @@ describe("nas-ua0-gate.sh", () => {
     expect(code).not.toMatch(/(\/|\s|")\.env\b/);
     expect(code).not.toMatch(/PGPASSWORD|POSTGRES_PASSWORD|DB_ADMIN_PASSWORD/);
   });
+
+  it("JARVIS_ACCEPTANCE_OUT_DIR styrer hvor evidensfilen havner", () => {
+    const outDir = join(mkdtempSync(join(tmpdir(), "gate-out-")), "evidens");
+    const r = run({ JARVIS_ACCEPTANCE_OUT_DIR: outDir });
+    expect(r.status, r.out).toBe(0);
+    const m = r.out.match(/Evidens skrevet til: (.+)/);
+    expect(m).not.toBeNull();
+    expect(m[1].trim().startsWith(outDir)).toBe(true);
+    expect(readdirSync(outDir).some((n) => /^nas-ua0-gate-.*\.md$/.test(n))).toBe(true);
+  });
+
+  it("evidensfilen kan ikke skrives: scriptet påstår ALDRI at den ble skrevet, sier hvorfor og hva som rettes, og exit-koden følger fortsatt kun sjekkene", () => {
+    // En vanlig FIL der mappen skulle ligge: mkdir feiler uavhengig av hvem som kjører testen (root omgår ellers rettighetssjekker).
+    const blocker = join(mkdtempSync(join(tmpdir(), "gate-blocker-")), "ikke-en-mappe");
+    writeFileSync(blocker, "x");
+    const outDir = join(blocker, "out");
+
+    const ok = run({ JARVIS_ACCEPTANCE_OUT_DIR: outDir });
+    expect(ok.out).not.toMatch(/Evidens skrevet til/);
+    expect(ok.out).toMatch(/ADVARSEL: evidensfilen ble IKKE skrevet/);
+    expect(ok.out).toContain(outDir);
+    expect(ok.out).toMatch(/sudo chown -R /);
+    expect(ok.out).toContain("JARVIS_ACCEPTANCE_OUT_DIR");
+    // Sjekkene og sammendraget skrives uansett: skjermen er evidensen.
+    expect(ok.out).toMatch(/C02_migrations_applied\s+PASS/);
+    expect(ok.out).toMatch(/Sammendrag: PASS=\d+ WARN=\d+ UNKNOWN=\d+ FAIL=0/);
+    expect(ok.status, ok.out).toBe(0);
+
+    // En ekte FAIL gir fortsatt exit 1, også når filen ikke kan skrives.
+    const bad = run({ JARVIS_ACCEPTANCE_OUT_DIR: outDir }, { norls: "capabilities,hemmelig_tabell" });
+    expect(bad.out).toMatch(/ADVARSEL: evidensfilen ble IKKE skrevet/);
+    expect(bad.status).toBe(1);
+  });
 });
