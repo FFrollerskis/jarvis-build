@@ -8,6 +8,7 @@ import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { DAILY_SCHEDULER_MAX_ATTEMPTS, DailyScheduler } from "../src/scheduler.ts";
 import {
+  BEST_EFFORT_JOBS,
   classifySchedulerRow,
   describeSchedulerProblem,
   readSchedulerHealth,
@@ -71,7 +72,7 @@ describe("D-443: readSchedulerHealth klassifiserer alle tilstander scheduleren k
   it("retry_pending: feilet og nytt forsøk planlagt", async () => {
     await row("sync-a", { attempts: 2, retryInMinutes: 5, lastError: "Gmail nede" });
     const { problems } = await readSchedulerHealth(pool);
-    expect(problems).toEqual([{ job_name: "sync-a", run_date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), kind: "retry_pending", attempts: 2, max_attempts: DAILY_SCHEDULER_MAX_ATTEMPTS, last_error: "Gmail nede" }]);
+    expect(problems).toEqual([{ job_name: "sync-a", run_date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), kind: "retry_pending", attempts: 2, max_attempts: DAILY_SCHEDULER_MAX_ATTEMPTS, best_effort: false, last_error: "Gmail nede" }]);
   });
 
   it("gave_up: siste forsøk feilet og forsøkene er brukt opp", async () => {
@@ -153,11 +154,26 @@ describe("D-443: classifySchedulerRow (ren)", () => {
 
 describe("D-443: beskrivelse og morgenbrief-kilde", () => {
   it("describeSchedulerProblem gir en kort norsk setning per type", () => {
-    const p = { job_name: "stripe-payment-sync", run_date: "2026-10-08", attempts: 4, max_attempts: 4, last_error: "503" };
+    const p = { job_name: "stripe-payment-sync", run_date: "2026-10-08", attempts: 4, max_attempts: 4, best_effort: false, last_error: "503" };
     expect(describeSchedulerProblem({ ...p, kind: "gave_up" })).toBe("stripe-payment-sync ga opp etter 4/4 forsøk: 503");
     expect(describeSchedulerProblem({ ...p, kind: "retry_pending", attempts: 2 })).toBe("stripe-payment-sync feilet (forsøk 2/4), nytt forsøk er planlagt: 503");
     expect(describeSchedulerProblem({ ...p, kind: "lost_previous_day", last_error: null })).toBe("stripe-payment-sync ble ikke fullført 2026-10-08 (4 forsøk)");
     expect(describeSchedulerProblem({ ...p, kind: "stalled", last_error: null })).toBe("stripe-payment-sync står fast uten fullføring (forsøk 4/4)");
+    expect(describeSchedulerProblem({ ...p, job_name: "memory-reembed-sweep", best_effort: true, kind: "gave_up" }))
+      .toBe("memory-reembed-sweep ga opp etter 4/4 forsøk: 503 (avhenger av PC-en; tas igjen neste kjøring)");
+  });
+
+  it("D-445: jobber som avhenger av eierens PC er best_effort i helsen og kommer ALDRI i morgenbriefen, mens kritiske jobber gjør det", async () => {
+    expect([...BEST_EFFORT_JOBS].sort()).toEqual(["memory-reembed-sweep", "memory-retention-sweep"]);
+    await row("memory-reembed-sweep", { attempts: DAILY_SCHEDULER_MAX_ATTEMPTS, retryInMinutes: 15, lastError: "ollama: fetch failed" });
+    await row("memory-retention-sweep", { daysAgo: 1, attempts: 2, retryInMinutes: 5, lastError: "llm nede" });
+    await row("stripe-payment-sync", { attempts: DAILY_SCHEDULER_MAX_ATTEMPTS, retryInMinutes: 15, lastError: "stripe 503" });
+    const { problems } = await readSchedulerHealth(pool);
+    expect(Object.fromEntries(problems.map((p) => [p.job_name, p.best_effort]))).toEqual({
+      "memory-reembed-sweep": true, "memory-retention-sweep": true, "stripe-payment-sync": false
+    });
+    const items = await schedulerSource(pool, () => true).collect({ person_id: "owner", tenant_id: "t-owner" } as never);
+    expect(items.map((i) => i.title)).toEqual(["Bakgrunnsjobb uten resultat: stripe-payment-sync"]);
   });
 
   it("schedulerSource varsler KUN om tapt arbeid (gave_up / lost_previous_day), ikke om forbigående retry/stalled", async () => {

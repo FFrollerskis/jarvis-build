@@ -110,9 +110,11 @@ export function buildSelfModelReaders(deps: SelfModelReaderDeps): Record<string,
       const at = iso(now());
       const health = await readSchedulerHealth(deps.pool);
       const count = (kind: string) => health.problems.filter((p) => p.kind === kind).length;
+      const lostCritical = health.problems.some((p) => (p.kind === "gave_up" || p.kind === "lost_previous_day") && !p.best_effort);
       const data = {
         jobs_seen: health.jobs_seen, completed: health.completed,
-        gave_up: count("gave_up"), lost_previous_day: count("lost_previous_day"), retry_pending: count("retry_pending"), stalled: count("stalled")
+        gave_up: count("gave_up"), lost_previous_day: count("lost_previous_day"), retry_pending: count("retry_pending"), stalled: count("stalled"),
+        best_effort: health.problems.filter((p) => p.best_effort).length
       };
       if (health.jobs_seen === 0) {
         return { status: "UNKNOWN", source: "scheduler_state", observed_at: null, detail: "Ingen daglige jobber har kjørt i dag eller i går (nylig oppstart?) - ingen måling." };
@@ -120,10 +122,10 @@ export function buildSelfModelReaders(deps: SelfModelReaderDeps): Record<string,
       if (health.problems.length === 0) {
         return { status: "OK", source: "scheduler_state", observed_at: at, detail: `${health.completed} av ${health.jobs_seen} daglige jobber er fullført, ingen feil.`, data };
       }
-      const lost = data.gave_up + data.lost_previous_day > 0;
       const shown = health.problems.slice(0, 4).map(describeSchedulerProblem).join("; ");
       const more = health.problems.length > 4 ? ` (+${health.problems.length - 4} til)` : "";
-      return { status: lost ? "DOWN" : "DEGRADED", source: "scheduler_state", observed_at: at, detail: `${health.problems.length} daglige jobber har problemer: ${shown}${more}.`, data };
+      // D-445: kun tap i KRITISKE jobber er DOWN; jobber som avhenger av eierens PC (BEST_EFFORT_JOBS) gir DEGRADED selv om de ga opp.
+      return { status: lostCritical ? "DOWN" : "DEGRADED", source: "scheduler_state", observed_at: at, detail: `${health.problems.length} daglige jobber har problemer: ${shown}${more}.`, data };
     },
 
     async errors(): Promise<Observation> {
