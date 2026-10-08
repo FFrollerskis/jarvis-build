@@ -43,3 +43,34 @@ export function parseDailyCapOre(raw: string | undefined): number {
   }
   return Number.parseInt(value, 10);
 }
+
+/**
+ * D-447 (NAS-test 2026-10-08): en verktøytur som ellers ville gått til sky, men som sensitivitetsreglene (D-378: helse/økonomi/hemmeligheter går aldri til sky)
+ * tvinger til den lokale modellen, SKAL si det. Uten merknaden fikk eieren et uleselig svar fra en liten lokal modell uten å vite hvorfor - Jarvis' eget forrige
+ * svar hadde nevnt et økonomiord, og de siste meldingene i samtalen teller med (D-384). Reglene er uendret; dette gjør bare valget synlig.
+ *
+ * Teksten må selv ALDRI inneholde et ord sensitivitetsklassifiseringen reagerer på (ellers ville merknaden holdt samtalen låst lokalt videre) - låst av en test.
+ * NB: det gjelder også ord som ikke handler om penger. Mønsteret `gjeld…` fanger verbet «gjelder/gjelde/gjeldende», så ordet unngås her (testen fanget det).
+ * Kun kategorier vises, aldri innhold.
+ */
+const LOCAL_ONLY_AREAS: Readonly<Record<string, { area: string; from: "text" | "memory" }>> = {
+  "text:finance": { area: "økonomi", from: "text" },
+  "text:health": { area: "helse", from: "text" },
+  "text:secret": { area: "nøkler eller hemmeligheter", from: "text" },
+  "memory_space:health": { area: "helseminnet", from: "memory" },
+  "memory_sensitivity:special": { area: "minne merket som særlig sensitivt", from: "memory" }
+};
+
+const joinNo = (items: readonly string[]): string => (items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} og ${items[items.length - 1]}`);
+
+export function localOnlyNote(reasons: readonly string[]): string {
+  const areas = (from: "text" | "memory"): string[] => [...new Set(reasons.flatMap((r) => (LOCAL_ONLY_AREAS[r]?.from === from ? [LOCAL_ONLY_AREAS[r]!.area] : [])))];
+  const fromText = areas("text");
+  const fromMemory = areas("memory");
+  const parts: string[] = [];
+  if (fromText.length > 0) parts.push(`meldingen eller de siste meldingene berører ${joinNo(fromText)}`);
+  if (fromMemory.length > 0) parts.push(`${joinNo(fromMemory)} ble brukt som kontekst`);
+  const why = parts.length > 0 ? parts.join(", og ") : "innholdet er klassifisert som følsomt";
+  const hint = fromText.length > 0 ? " Dette varer til emnet ikke lenger er blant de siste meldingene." : "";
+  return `\n\n(Svart på den lokale modellen: ${why}, og slikt sendes aldri til skyen.${hint})`;
+}
