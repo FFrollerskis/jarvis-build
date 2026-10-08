@@ -1,5 +1,5 @@
-import { envInt, type IdentityContext } from "@jarvis/contracts";
-import { ContextBuilder, MessageStore, describeSecretFindings, fastRoute, scanForSecrets } from "@jarvis/core";
+import { envInt, type DataSensitivity, type IdentityContext } from "@jarvis/contracts";
+import { ContextBuilder, MessageStore, delegationRequestVariants, describeSecretFindings, fastRoute, scanForSecrets } from "@jarvis/core";
 import {
   BudgetExceededError,
   CouncilAutoTriggerLimiter,
@@ -21,7 +21,7 @@ import { DEFAULT_PERSONALITY_CONFIG, type PersonalityConfig } from "@jarvis/self
 import type { TaskService, InProcessWorker } from "@jarvis/tasks";
 import { createTurnContext, surfaceForChannel, type Surface, type SurfaceLimits, type TurnContext } from "@jarvis/tool-gateway";
 import { randomUUID } from "node:crypto";
-import { localOnlyNote } from "./tool-turn-route.ts";
+import { LOCAL_FALLBACK_ERROR_KINDS, jobLocalOnlyNote, localOnlyNote } from "./tool-turn-route.ts";
 
 export interface ConversationDeps {
   messages: MessageStore;
@@ -40,8 +40,14 @@ export interface ConversationDeps {
   sloReport?: { run(identity: IdentityContext): Promise<string | null> };
   /** D-424: «hva koster du» for hurtigbanen (`run_rate.get_cost_overview` via Tool Gateway). */
   costReport?: { run(identity: IdentityContext): Promise<string | null> };
-  /** D-424: «… i bakgrunnen» for hurtigbanen (`tasks.delegate_background_task` via Tool Gateway/Policy - eierens egen melding, ikke modellens valg). */
-  delegateBackground?: { run(identity: IdentityContext, prompt: string): Promise<string | null> };
+  /**
+   * D-424: «… i bakgrunnen» for hurtigbanen (`tasks.delegate_background_task` via Tool Gateway/Policy - eierens egen melding, ikke modellens valg).
+   * D-449: `options.cloudAllowed` er motorens EGEN avgjørelse (samme regler som chatten bruker for en verktøytur: eierens ruteoverstyring, de siste meldingene, minnerommet, innlimt tekst) - kun `true`
+   * lar jobben bruke skyruten. Udefinert/`false` = jobben kjører lokalt som før D-449 (fail-closed).
+   * Svaret har `cloud`: om jobben FAKTISK fikk skyflagget. Det kan være `false` selv når motoren sa ja, fordi transporten gjør en egen kontroll av selve jobbteksten (gjennomgang nr. 4: et slikt stille
+   * lokalt-utfall skal ha merknad).
+   */
+  delegateBackground?: { run(identity: IdentityContext, prompt: string, options?: { cloudAllowed: boolean }): Promise<{ started: boolean; reply: string; cloud: boolean } | null> };
   /** D-395: injiserbar begrenser for automatisk råd-trigger (tester); default bygges fra JARVIS_COUNCIL_AUTO_MAX_PER_HOUR. */
   councilAutoLimiter?: CouncilAutoTriggerLimiter;
   /** Fase 4: hybridminne-kontekst med kildeangivelse (kun gjeldende space). */
@@ -51,7 +57,7 @@ export interface ConversationDeps {
     contextWithMeta?(
       identity: IdentityContext,
       userText: string,
-      options?: { budgetTokens?: number }
+      options?: { budgetTokens?: number; touch?: boolean }
     ): Promise<{ text: string; spaces: string[]; sensitivities: string[]; withheld_restricted?: number; profile_included?: boolean }>;
     /**
      * D-283: valgfri skrivevei - eierens egne ord fra DENNE samtalen (rå
@@ -118,6 +124,17 @@ export interface ConversationDeps {
    * (identisk med oppførsel før D-214).
    */
   personality?: () => PersonalityConfig;
+}
+
+/** D-449: resultatet av den delte ruteberegningen (`ConversationEngine.resolveTurnRouting`). */
+interface TurnRouting {
+  memoryMeta: { text: string; spaces: string[]; sensitivities: string[] };
+  history: Array<{ role: "assistant" | "user"; content: string }>;
+  usingDefaultGemmaPreference: boolean;
+  selection: ReturnType<NonNullable<NonNullable<ConversationDeps["tools"]>["select"]>> | undefined;
+  toolDefinitions: ToolDefinition[];
+  useTools: boolean;
+  sensitivityDecision: { sensitivity: DataSensitivity; reasons: string[] };
 }
 
 /** Del 3 (JARVIS-013): innlimt/ekstern tekst (lang, flere e-post-/dokument-headere, store kodeblokker) er ikke eierens egne ord. */
@@ -216,13 +233,6 @@ function buildSystemPrompt(personality: PersonalityConfig, context: { surface: S
  * lagret automatisk; «husk at …» lagres uttrykkelig; «hva vet du om …»/«husker du …» skal bruke memory.search når blokken
  * ikke dekker spørsmålet; Telegram lagrer ikke; er noe ikke i blokken eller søket, si det ærlig i stedet for å gjette.
  */
-/**
- * D-404/D-431/D-444: leverandørfeil som får samtaleflaten til å svare via en ANNEN rute i stedet for å vise en feil - kun FØR noe er sendt og FØR noe verktøy er
- * utført. `invalid_response` (D-444) er et tomt eller ubrukelig svar som gatewayen ikke kunne redde med retry/neste kandidat (D-441 gjør det til en ærlig feil
- * i stedet for en stille tom melding): for eieren er en lokal modell som svarer tomt det samme som en lokal modell som er nede.
- */
-const LOCAL_FALLBACK_ERROR_KINDS: readonly string[] = ["timeout", "network", "server", "rate_limit", "not_configured", "invalid_response"];
-
 const MEMORY_RULES =
   "Minne: det Tobias forteller deg i chat og tale lagres automatisk som minner (verbatim og som fakta), og en kort profil " +
   "pluss de mest relevante minnene for denne meldingen ligger i blokken «Profil»/«Relevant minne» over når de finnes - bruk dem " +
@@ -346,7 +356,7 @@ export class ConversationEngine {
 
     if (intent) {
       const started = Date.now();
-      const result = await this.handleFastIntent(identity, intent);
+      const result = await this.handleFastIntent(identity, intent, text, surface, provider);
       await this.deps.trace.record({
         trace_id: `trace-${randomUUID()}`,
         kind: "fast_route",
@@ -434,24 +444,10 @@ export class ConversationEngine {
     let partial = "";
     try {
       const context = await this.deps.context.build(identity);
-      const fullHistory = context.history.slice(-20).map((m) => ({
-        role: (m.role === "assistant" ? "assistant" : "user") as "assistant" | "user",
-        content: m.content
-      }));
-      const memoryMeta = this.deps.memory
-        ? this.deps.memory.contextWithMeta
-          // D-386: tokenbudsjett per flate - tale er latens-sensitiv og svarer kort (max_tokens 320), chat får full blokk.
-          ? await this.deps.memory.contextWithMeta(identity, text, { budgetTokens: surface === "voice" ? 500 : 1200 })
-          : { text: await this.deps.memory.contextFor(identity, text), spaces: [identity.memory_space_id], sensitivities: [] as string[] }
-        : { text: "", spaces: [] as string[], sensitivities: [] as string[] };
+      // D-449: ruteavgjørelsen (historikk, minne, verktøyutvalg, sensitivitet) er ÉN delt beregning - hurtigbanen «… i bakgrunnen» bruker den samme.
+      const routing = await this.resolveTurnRouting({ identity, text, surface, provider, override, historyRows: context.history, touchMemory: true });
+      const { memoryMeta, history, usingDefaultGemmaPreference, selection, toolDefinitions, useTools, sensitivityDecision } = routing;
       const memoryContext = memoryMeta.text;
-      // D-384: eldre meldinger som alene er strengere enn det denne turen ellers krever, sendes ikke med (i stedet for å låse samtalen lokalt).
-      const turnBaseline = classifyContentSensitivity({
-        texts: [text],
-        memory_spaces: memoryMeta.spaces,
-        memory_sensitivities: memoryMeta.sensitivities
-      }).sensitivity;
-      const { kept: history } = partitionHistoryBySensitivity(fullHistory, turnBaseline);
       const personality = this.loadPersonality();
       // D-383: katalogen over tjenester på denne flaten + hvordan handlinger fungerer; D-382: tale får en egen, muntlig stil.
       const catalog = this.deps.tools?.catalog?.(surface) ?? "";
@@ -500,34 +496,7 @@ export class ConversationEngine {
       // at feilhåndteringen under KUN faller tilbake til normal AUTO-vekting
       // (inkl. betalte providere) når DENNE defaulten - ikke en eksplisitt
       // eierforespørsel - var kilden til preferansen.
-      const usingDefaultGemmaPreference =
-        provider === undefined &&
-        override?.provider === undefined &&
-        override?.providerPreference === undefined &&
-        override?.mode === undefined;
-      // Del 3: per-flate utvalg + grenser (runder/kall per runde). Uten `select` brukes hele `definitions` (legacy/test).
-      // D-389: eierens egne forrige meldinger (aldri modell-/verktøytekst) følger med, så et oppfølgingsspørsmål beholder tjenesten.
-      const ownerTurns = fullHistory.filter((m) => m.role === "user").map((m) => m.content);
-      if (ownerTurns.length > 0 && ownerTurns[ownerTurns.length - 1] === text) ownerTurns.pop();
-      const selection = this.deps.tools?.select?.({ surface, text, recent_owner_messages: ownerTurns.slice(-3) });
-      const toolDefinitions = selection ? selection.definitions : this.deps.tools?.definitions ?? [];
-      const useTools = this.deps.tools !== undefined && toolDefinitions.length > 0;
-      // Del 3 (JARVIS-016/035): sensitivitet utledes av INNHOLDET (minne, historikk, melding, verktøykilder) - ikke lenger hardkodet «public».
-      // Helse/finans/hemmeligheter ⇒ kun lokal behandler; privat/forretningsminne og verktøyruter ⇒ aldri gratis/delt sky.
-      const classified = classifyContentSensitivity({
-        texts: [text, ...history.map((m) => m.content)],
-        memory_spaces: memoryMeta.spaces,
-        memory_sensitivities: memoryMeta.sensitivities,
-        private_tool_output: useTools
-      });
-      // D-381: velger utvalget finans-verktøy, er turen SECRET_RESTRICTED allerede FØR første modellkall (kun lokal modell) - verktøyresultatet
-      // skal aldri kunne nå en skymodell i en senere runde, uansett hvordan meldingen var formulert.
-      const sensitivityDecision = selection?.min_sensitivity
-        ? {
-            sensitivity: maxSensitivity(classified.sensitivity, selection.min_sensitivity),
-            reasons: [...classified.reasons, `tool_selection:${selection.min_sensitivity}`]
-          }
-        : classified;
+      // (`usingDefaultGemmaPreference`, verktøyutvalget og `sensitivityDecision` beregnes i `resolveTurnRouting` - se over.)
       // D-431 (Tobias: «bruk ollama bare til prating - når jeg ber om tools, send ut Sonnet 5.5»): ren prat går til den lokale modellen; når et
       // ekte verktøy er valgt for turen (alt annet enn minne-reserven `memory__*`), går turen til Sonnet 5.5 (anthropic) - en 8B-modell
       // bruker verktøy upålitelig. Aldri for SECRET_RESTRICTED (helse/finans: kun lokal, D-378) og aldri over en eksplisitt eier-override.
@@ -787,9 +756,115 @@ export class ConversationEngine {
     return { reply, routed: "model" };
   }
 
+  /**
+   * D-449 (Q-50, gjennomgang nr. 2 og 3): ÉN ruteavgjørelse for en verktøytur, delt av chattens modelltur (`handleScanned`) og hurtigbanen «… i bakgrunnen» (`delegationCloudDecision`). Hurtigbanen
+   * hopper over modellen og dermed over alt chatten bruker for å velge rute; hver gang den ble bygget opp stykkevis, fant en gjennomgang et stykke som manglet (siste meldinger, ruteoverstyring,
+   * verktøyutvalgets finansnivå D-381 og minnemetadata). Nå er det samme kode: historikk (inkl. D-384-oppdelingen), minnets rom/sensitivitet, utvalg av verktøy med eierens siste meldinger, og
+   * sensitivitetsklassifiseringen med `min_sensitivity`. `touchMemory: false` leser minnet uten å oppdatere «sist brukt».
+   */
+  private async resolveTurnRouting(input: {
+    identity: IdentityContext;
+    text: string;
+    surface: Surface;
+    provider: string | undefined;
+    override: RoutingOverrideIntent | null;
+    historyRows: ReadonlyArray<{ role: string; content: string }>;
+    touchMemory: boolean;
+  }): Promise<TurnRouting> {
+    const { identity, text, surface, provider, override } = input;
+    const fullHistory = input.historyRows.slice(-20).map((m) => ({
+      role: (m.role === "assistant" ? "assistant" : "user") as "assistant" | "user",
+      content: m.content
+    }));
+    const memoryMeta: TurnRouting["memoryMeta"] = this.deps.memory
+      ? this.deps.memory.contextWithMeta
+        // D-386: tokenbudsjett per flate - tale er latens-sensitiv og svarer kort (max_tokens 320), chat får full blokk.
+        ? await this.deps.memory.contextWithMeta(identity, text, { budgetTokens: surface === "voice" ? 500 : 1200, ...(input.touchMemory ? {} : { touch: false }) })
+        : input.touchMemory
+          ? { text: await this.deps.memory.contextFor(identity, text), spaces: [identity.memory_space_id], sensitivities: [] as string[] }
+          : { text: "", spaces: [identity.memory_space_id], sensitivities: [] as string[] }
+      : { text: "", spaces: [] as string[], sensitivities: [] as string[] };
+    // D-384: eldre meldinger som alene er strengere enn det denne turen ellers krever, sendes ikke med (i stedet for å låse samtalen lokalt).
+    const turnBaseline = classifyContentSensitivity({
+      texts: [text],
+      memory_spaces: memoryMeta.spaces,
+      memory_sensitivities: memoryMeta.sensitivities
+    }).sensitivity;
+    const { kept: history } = partitionHistoryBySensitivity(fullHistory, turnBaseline);
+    const usingDefaultGemmaPreference =
+      provider === undefined &&
+      override?.provider === undefined &&
+      override?.providerPreference === undefined &&
+      override?.mode === undefined;
+    // Del 3: per-flate utvalg + grenser (runder/kall per runde). Uten `select` brukes hele `definitions` (legacy/test).
+    // D-389: eierens egne forrige meldinger (aldri modell-/verktøytekst) følger med, så et oppfølgingsspørsmål beholder tjenesten.
+    const ownerTurns = fullHistory.filter((m) => m.role === "user").map((m) => m.content);
+    if (ownerTurns.length > 0 && ownerTurns[ownerTurns.length - 1] === text) ownerTurns.pop();
+    const selection = this.deps.tools?.select?.({ surface, text, recent_owner_messages: ownerTurns.slice(-3) });
+    const toolDefinitions = selection ? selection.definitions : this.deps.tools?.definitions ?? [];
+    const useTools = this.deps.tools !== undefined && toolDefinitions.length > 0;
+    // Del 3 (JARVIS-016/035): sensitivitet utledes av INNHOLDET (minne, historikk, melding, verktøykilder) - ikke lenger hardkodet «public».
+    // Helse/finans/hemmeligheter ⇒ kun lokal behandler; privat/forretningsminne og verktøyruter ⇒ aldri gratis/delt sky.
+    const classified = classifyContentSensitivity({
+      texts: [text, ...history.map((m) => m.content)],
+      memory_spaces: memoryMeta.spaces,
+      memory_sensitivities: memoryMeta.sensitivities,
+      private_tool_output: useTools
+    });
+    // D-381: velger utvalget finans-verktøy, er turen SECRET_RESTRICTED allerede FØR første modellkall (kun lokal modell) - verktøyresultatet
+    // skal aldri kunne nå en skymodell i en senere runde, uansett hvordan meldingen var formulert.
+    const sensitivityDecision = selection?.min_sensitivity
+      ? {
+          sensitivity: maxSensitivity(classified.sensitivity, selection.min_sensitivity),
+          reasons: [...classified.reasons, `tool_selection:${selection.min_sensitivity}`]
+        }
+      : classified;
+    return { memoryMeta, history, usingDefaultGemmaPreference, selection, toolDefinitions, useTools, sensitivityDecision };
+  }
+
+  /**
+   * D-449 (Q-50, gjennomgang nr. 2 og 3): skal en jobb delegert via hurtigbanen «… i bakgrunnen» få bruke skyruten? Kun når chatten ville latt en verktøytur for NØYAKTIG denne meldingen gå til sky -
+   * samme beregning (`resolveTurnRouting`: siste meldinger, minnets rom/sensitivitet, verktøyutvalgets finansnivå, sensitivitetsklassifisering) - og i tillegg:
+   *  - en eksplisitt `provider` (API/tale-enhet) eller eierens ruting i teksten («kun lokale modeller», «ikke bruk betalte modeller») vinner alltid (lokalt),
+   *  - innlimt tekst (e-post, dokumenter) er ikke «eierens egne ord» og får ikke eier-merket,
+   *  - kan ruteavgjørelsen ikke beregnes (historikk, minne), er svaret nei (fail-closed).
+   */
+  private async delegationCloudDecision(identity: IdentityContext, text: string, surface: Surface, provider: string | undefined): Promise<{ allowed: boolean; reasons: string[] }> {
+    if (provider !== undefined) return { allowed: false, reasons: ["explicit_provider"] };
+    // «… i bakgrunnen» treffer selv verktøyutvalgets delegeringsord (`tasks`), som hindrer at tjenester fra eierens tidligere meldinger arves (D-389) - det ville de blitt for selve forespørselen uten
+    // delegeringsfrasen. Derfor vurderes ALT (ruteinstruksjon, innlimt tekst og ruten selv) for meldingen slik den står OG for hver fjerning av frasen (`delegationRequestVariants`: som om eieren hadde
+    // sendt forespørselen som vanlig chat); den strengeste vinner. (Gjennomgang nr. 4: instruksjonen «bruk i bakgrunnen bare lokale modeller» ble tidligere kun sjekket slik den sto, med frasen midt i.)
+    const variants = delegationRequestVariants(text);
+    for (const variant of variants) {
+      if (parseRoutingOverride(variant) !== null) return { allowed: false, reasons: ["owner_routing_override"] };
+      if (looksLikePastedContent(variant)) return { allowed: false, reasons: ["pasted_content"] };
+    }
+    try {
+      const historyRows = await this.deps.messages.history(identity, 20);
+      // Den nettopp lagrede meldingen er den SISTE BRUKERRADEN (en leveringsmelding eller annen assistentrad kan ha kommet inn etter den) - samme regel som chattens `ownerTurns.pop()`, som også ser på siste
+      // brukerrad og ikke siste rad. For en variant skal chatten ha sett akkurat den teksten i historikken.
+      let ownRow = -1;
+      for (let i = historyRows.length - 1; i >= 0 && ownRow < 0; i--) {
+        const row = historyRows[i]!;
+        if (row.role === "user" && row.content === text) ownRow = i;
+      }
+      for (const variant of variants) {
+        const rows = ownRow < 0 ? historyRows : historyRows.map((m, i) => (i === ownRow ? { ...m, content: variant } : m));
+        const routing = await this.resolveTurnRouting({ identity, text: variant, surface, provider, override: null, historyRows: rows, touchMemory: false });
+        if (routing.sensitivityDecision.sensitivity === "SECRET_RESTRICTED") return { allowed: false, reasons: routing.sensitivityDecision.reasons };
+      }
+      return { allowed: true, reasons: [] };
+    } catch {
+      return { allowed: false, reasons: ["routing_unreadable"] };
+    }
+  }
+
   private async handleFastIntent(
     identity: IdentityContext,
-    intent: NonNullable<ReturnType<typeof fastRoute>>
+    intent: NonNullable<ReturnType<typeof fastRoute>>,
+    text: string,
+    surface: Surface,
+    provider: string | undefined
   ): Promise<ChatReply> {
     switch (intent.kind) {
       case "system_status":
@@ -810,8 +885,20 @@ export class ConversationEngine {
         return { reply: text ?? "Jeg kan ikke lese kostnadene akkurat nå, så jeg vil ikke gjette på hva jeg koster.", routed: "fast" };
       }
       case "delegate_background": {
-        const text = this.deps.delegateBackground ? await this.deps.delegateBackground.run(identity, intent.prompt).catch(() => null) : null;
-        return { reply: text ?? "Jeg fikk ikke startet bakgrunnsjobben (verktøyet svarte ikke eller ble avslått). Ingenting er startet.", routed: "fast" };
+        const cloud = this.deps.delegateBackground ? await this.delegationCloudDecision(identity, text, surface, provider) : { allowed: false, reasons: [] as string[] };
+        const started = this.deps.delegateBackground
+          ? await this.deps.delegateBackground.run(identity, intent.prompt, { cloudAllowed: cloud.allowed }).catch(() => null)
+          : null;
+        if (started === null) {
+          return { reply: "Jeg fikk ikke startet bakgrunnsjobben (verktøyet svarte ikke eller ble avslått). Ingenting er startet.", routed: "fast" };
+        }
+        // D-447-prinsippet: en jobb som tvinges til den lokale modellen skal ikke gjøre det usynlig (ingen merknad på tale; kun kategorier, aldri innhold). Kun når jobben faktisk ble startet.
+        // Lokalt kan skyldes motorens avgjørelse (`cloud.reasons`) ELLER transportens egen kontroll av jobbteksten (motoren sa ja, men jobben fikk likevel ikke skyflagget, gjennomgang nr. 4).
+        const jobLocal = started.started && !(cloud.allowed && started.cloud);
+        const localReasons = cloud.allowed ? ["job_text_gate"] : cloud.reasons;
+        if (jobLocal) console.log(JSON.stringify({ msg: "d449_fast_delegate_local", reasons: localReasons }));
+        const note = jobLocal && surface !== "voice" ? jobLocalOnlyNote(localReasons) : "";
+        return { reply: `${started.reply}${note}`, routed: "fast" };
       }
       case "help":
         return {

@@ -190,6 +190,13 @@ export interface ToolInvocationContext {
    * finnes for å stenge).
    */
   servingModel?: { provider: string; model: string };
+  /**
+   * D-449 (Q-50): hvem som skrev innholdet i `parameters`. `owner_direct` = den deterministiske hurtigbanen der parameterne er eierens EGNE ord, ordrett (ingen modell har
+   * formulert eller omskrevet dem; `main.ts` sin `delegateBackground`). Settes KUN av trusted kode i kallerens `ToolGateway.execute()`-kall, ALDRI fra `parameters` -
+   * SAMME disiplin som `servingModel`. Mangler både denne og `servingModel` (f.eks. en eier-godkjent bekreftelse som utfører et modellskrevet kall senere), er innholdets opphav
+   * UKJENT, og en transport som bruker opphavet til å åpne en dyrere/mer eksponert rute må da regne det som ikke betrodd (fail-closed).
+   */
+  contentOrigin?: "owner_direct";
 }
 
 /** Transport per integrasjon: ekte HTTP i drift, kontrollert fake i test. */
@@ -452,6 +459,8 @@ export class ToolGateway {
     jobContract?: JobContract;
     /** D-317: se `ToolInvocationContext.servingModel` sitt filhode. */
     servingModel?: { provider: string; model: string };
+    /** D-449: se `ToolInvocationContext.contentOrigin` sitt filhode (kun trusted kode setter den). */
+    contentOrigin?: "owner_direct";
     /** D-394 (JARVIS-054): korrelasjons-ID-er som følger HVER audit-rad for dette kallet. */
     task_id?: string;
     trace_id?: string;
@@ -611,7 +620,8 @@ export class ToolGateway {
     const invocationContext: ToolInvocationContext = {
       identity: request.identity,
       ...(request.approval !== undefined ? { approval: request.approval } : {}),
-      ...(request.servingModel !== undefined ? { servingModel: request.servingModel } : {})
+      ...(request.servingModel !== undefined ? { servingModel: request.servingModel } : {}),
+      ...(request.contentOrigin !== undefined ? { contentOrigin: request.contentOrigin } : {})
     };
 
     // v4.0 D-pipeline: for høyrisiko (C/D) med definert preflight leses

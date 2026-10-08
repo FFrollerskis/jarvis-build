@@ -31,6 +31,7 @@ interface ItemRow {
   valid_from: Date;
   trust_level: TrustLevel;
   status: string;
+  sensitivity: ItemSensitivity;
 }
 
 /**
@@ -46,7 +47,19 @@ interface ItemRow {
  * som ruteren bruker) ⇒ `special` uansett space, så faktumet senere kun går til lokal modell (D-384-regelen). Et
  * privat-/forretningssignal ⇒ `sensitive`. Helse-rommet er alltid `special`.
  */
-export function itemSensitivity(space: MemorySpace, candidate: Pick<MemoryCandidate, "subject" | "content">): "normal" | "sensitive" | "special" {
+export type ItemSensitivity = "normal" | "sensitive" | "special";
+
+const ITEM_SENSITIVITY_RANK: Readonly<Record<ItemSensitivity, number>> = { normal: 0, sensitive: 1, special: 2 };
+
+/**
+ * D-449 (Q-50, gjennomgang nr. 2): en oppdatering regnet tidligere IKKE om `sensitivity` - helsetekst inn i et element merket `normal` ble stående som `normal` (og gamle versjoner med helsetekst
+ * likeså). Nå er sensitiviteten det strengeste av den gamle og den nye tekstens, og senkes aldri av en harmløs senere tekst (en gammel versjon ligger fortsatt i `memory_versions`).
+ */
+export function stricterItemSensitivity(a: ItemSensitivity, b: ItemSensitivity): ItemSensitivity {
+  return ITEM_SENSITIVITY_RANK[a] >= ITEM_SENSITIVITY_RANK[b] ? a : b;
+}
+
+export function itemSensitivity(space: MemorySpace, candidate: Pick<MemoryCandidate, "subject" | "content">): ItemSensitivity {
   if (space === "health") return "special";
   const level = classifyContentSensitivity({ texts: [`${candidate.subject} ${candidate.content}`] }).sensitivity;
   if (level === "SECRET_RESTRICTED") return "special";
@@ -290,7 +303,7 @@ export class MemoryWriter {
       // regelbasert uttrekking) - dette er en TREDJE, uavhengig årsak til samme
       // symptom, oppdaget ved lesing, ikke ved en ny Tobias-rapport.
       const existing = await client.query(
-        `SELECT memory_item_id, content, subject, version, valid_from, trust_level, status
+        `SELECT memory_item_id, content, subject, version, valid_from, trust_level, status, sensitivity
          FROM memory_items
          WHERE tenant_id = $1 AND space = $2 AND type = $3 AND subject = $4
            AND status IN ('active','quarantined','invalidated')`,
@@ -400,12 +413,13 @@ export class MemoryWriter {
                trust_level = $5, confidence = $6, has_conflict = $9, updated_at = now(),
                status = $7, valid_to = NULL,
                importance = COALESCE($10, importance), keywords = $11, event_time_raw = COALESCE($12, event_time_raw),
-               evidence_episode_id = COALESCE($13, evidence_episode_id)
+               evidence_episode_id = COALESCE($13, evidence_episode_id), sensitivity = $14
          WHERE memory_item_id = $1`,
         [
           row.memory_item_id, candidate.content, newVersion, observedAt, source.trust, candidate.confidence, newStatus,
           candidate.event_time ?? null, candidate.contradicts_existing ?? true, candidate.importance ?? null,
-          normalizeKeywords(candidate.keywords), candidate.event_time_raw ?? null, meta.evidenceEpisodeId ?? null
+          normalizeKeywords(candidate.keywords), candidate.event_time_raw ?? null, meta.evidenceEpisodeId ?? null,
+          stricterItemSensitivity(row.sensitivity, itemSensitivity(space, { subject: row.subject, content: candidate.content }))
         ]
       );
       if (candidate.entities && candidate.entities.length > 0 && newStatus === "active") {

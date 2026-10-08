@@ -74,3 +74,53 @@ export function localOnlyNote(reasons: readonly string[]): string {
   const hint = fromText.length > 0 ? " Dette varer til emnet ikke lenger er blant de siste meldingene." : "";
   return `\n\n(Svart på den lokale modellen: ${why}, og slikt sendes aldri til skyen.${hint})`;
 }
+
+/**
+ * D-449 (Q-50, gjennomgang nr. 2): merknaden i svaret på «… i bakgrunnen» når jobben kjører på den lokale modellen i stedet for skyruten (eierens ruteoverstyring, innlimt tekst, en samtale som nylig berørte
+ * økonomi/helse/hemmeligheter, helse-minnerom, eller en historikk som ikke kunne leses). Samme prinsipp som D-447: aldri en usynlig nedgradering, kun kategorier (aldri innhold), og teksten må selv ikke
+ * inneholde ord sensitivitetsklassifiseringen reagerer på (svaret lagres i samtalen) - låst av en test.
+ */
+const JOB_LOCAL_REASONS: Readonly<Record<string, string>> = {
+  // Gjelder enhver instruks om modellvalg i meldingen («kun lokale modeller», «bruk Claude», «ikke bruk AI-rådet» ...): en bakgrunnsjobb kan ikke velge modell per melding, så den holdes lokal.
+  owner_routing_override: "meldingen har en egen instruks om modellvalg, og slike jobber holdes lokale",
+  explicit_provider: "denne enheten eller økten er satt til en bestemt modell",
+  pasted_content: "innlimt tekst regnes ikke som dine egne ord",
+  routing_unreadable: "samtalen kunne ikke kontrolleres",
+  "tool_selection:SECRET_RESTRICTED": "meldingen peker på økonomitjenester, og slikt sendes aldri til skyen",
+  // Gjennomgang nr. 4: samtalen var ren, men selve jobbteksten (tittel + prompt) berører økonomi, helse eller hemmeligheter, så transporten ga ikke jobben skyflagget.
+  job_text_gate: "selve jobbteksten berører økonomi, helse eller hemmeligheter, og slikt sendes aldri til skyen"
+};
+
+export function jobLocalOnlyNote(reasons: readonly string[]): string {
+  const areas = [...new Set(reasons.flatMap((r) => (LOCAL_ONLY_AREAS[r] ? [LOCAL_ONLY_AREAS[r]!.area] : [])))];
+  const parts: string[] = [];
+  if (areas.length > 0) parts.push(`samtalen berører ${joinNo(areas)}, og slikt sendes aldri til skyen`);
+  for (const reason of reasons) if (JOB_LOCAL_REASONS[reason]) parts.push(JOB_LOCAL_REASONS[reason]!);
+  const why = parts.length > 0 ? parts.join(", og ") : "innholdet er klassifisert som følsomt";
+  return `\n\n(Jobben kjører på den lokale modellen: ${why}.)`;
+}
+
+/**
+ * D-404/D-431/D-444/D-449: leverandørfeil som får en flate til å svare via en ANNEN rute (lokal modell) i stedet for å vise en feil - kun FØR noe er sendt og FØR noe verktøy er
+ * utført. `invalid_response` (D-444) er et tomt eller ubrukelig svar som gatewayen ikke kunne redde med retry/neste kandidat (D-441 gjør det til en ærlig feil
+ * i stedet for en stille tom melding): for eieren er en lokal modell som svarer tomt det samme som en lokal modell som er nede. Delt av chatten (`conversation.ts`)
+ * og delegerte bakgrunnsjobber (`executive.ts`, D-449), så de to aldri er uenige om hva som er en «rute er nede»-feil.
+ */
+export const LOCAL_FALLBACK_ERROR_KINDS: readonly string[] = ["timeout", "network", "server", "rate_limit", "not_configured", "invalid_response"];
+
+/**
+ * D-449 (Q-50): dagstak-merknaden for en delegert bakgrunnsjobb (samme regel og tak som chatten, D-432). Står FORAN jobbens svartekst (leveringsvisningen avkorter svaret bakfra, så en merknad
+ * bakerst kunne forsvunnet), som leveres til samtalen som DATA. Teksten må selv ikke inneholde ord sensitivitetsklassifiseringen reagerer på (samme vakt som `localOnlyNote`).
+ */
+export function jobDayCapNote(capOre: number): string {
+  return `(Dagstaket for sky på ${Math.round(capOre / 100)} kr er nådd i dag, så jobben kjørte på den lokale modellen. Taket nullstilles i morgen.)`;
+}
+
+/**
+ * D-449 (Q-50): en egen bryter for DELEGERTE JOBBERS skyrute (`JARVIS_JOB_TOOL_TURN_MODEL`), slik at eieren kan slå den av uten å slå av chattens verktøyruting. Tom/ikke satt = samme rute som
+ * chatten (`JARVIS_TOOL_TURN_MODEL`); `off`/`local`/`none` = jobber kjører lokalt; ellers `provider:model` (kan f.eks. være en billigere modell enn chattens). Ugyldig verdi = av (aldri en tilfeldig modell).
+ */
+export function resolveJobToolTurnRoute(rawJobRoute: string | undefined, chatRoute: ToolTurnRoute | null): ToolTurnRoute | null {
+  if ((rawJobRoute ?? "").trim() === "") return chatRoute;
+  return parseToolTurnRoute(rawJobRoute);
+}

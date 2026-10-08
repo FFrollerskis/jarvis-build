@@ -24,7 +24,7 @@ import {
   type CardService, type FinanceService
 } from "@jarvis/finance";
 import type { ConversationEngine } from "./conversation.ts";
-import type { ChatJobs } from "./chat-jobs.ts";
+import { submittedContractHasReservedKey, type ChatJobs } from "./chat-jobs.ts";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import {
   FORBIDDEN_IDENTITY_BODY_KEYS, HttpError, RateLimiter, clientKey, newRequestId, readJsonBody, readRawBodyLimited
@@ -1322,6 +1322,11 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     if (!authed) return;
     if (!("contract" in authed.body)) {
       return json(res, 400, { error: "malformed_request", reason: "contract", request_id: requestIdOf(res) });
+    }
+    // D-449 (Q-50): interne rutingsflagg (`cloud_tool_turns_allowed`) kan bare settes av trusted kode - en innsendt kontrakt som bærer dem avvises FØR submit.
+    const reservedKey = submittedContractHasReservedKey(authed.body["contract"]);
+    if (reservedKey !== null) {
+      return json(res, 400, { error: "task_rejected", reason: "reserved_input_key", key: reservedKey, request_id: requestIdOf(res) });
     }
     const result = await deps.tasks.submit(authed.identity, authed.body["contract"]);
     if (!result.ok) {

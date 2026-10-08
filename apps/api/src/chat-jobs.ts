@@ -4,8 +4,9 @@ import type pg from "pg";
 import { z } from "zod";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import { scanForSecrets, withTenantTransaction } from "@jarvis/core";
+import { DEFAULT_PROFILES, classifyContentSensitivity } from "@jarvis/model-gateway";
 import type { TaskService } from "@jarvis/tasks";
-import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
+import { financeToolIntent, type ToolDefinition, type ToolInvocationContext, type ToolTransport } from "@jarvis/tool-gateway";
 
 /**
  * D-416: chat og agenter er to løp. Chatten legger en oppgave i den durable jobbkøen (`TaskService.submit`, klasse B) og svarer med en gang;
@@ -16,10 +17,57 @@ import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarv
 
 /** Verktøy-id-ene en delegert jobb kan be om; `filterMeshToolsForJob` skjærer dem mot bakgrunnsflatens lese-tildeling (ingen skriving). */
 const DELEGATED_JOB_TOOLS = ["email", "calendar", "github", "memory", "executive"] as const;
-/** Øre. Hard grense per delegert jobb (kontraktens `model_budget_ore`). */
+/** Øre. Settes i kontraktens `model_budget_ore`, men INGEN kode leser den i dag (eksisterende forhold) - den reelle kostnadsgrensen er dagstaket (D-432/D-449), ikke dette tallet. */
 export const DELEGATED_JOB_BUDGET_ORE = 300;
 const MAX_ACTIVE_JOBS = 5;
 const RESULT_PREVIEW_CHARS = 1500;
+
+/**
+ * D-449 (Q-50): `input.data`-nøkler som BARE trusted kode (`TasksDelegateTransport`) kan sette. `POST /tasks/submit` avviser en innsendt kontrakt som bærer dem, så et rutingsflagg aldri kan
+ * forfalskes via API-et (revisjonsfunn: flagget var tidligere bare «trusted» etter konvensjon). Workeren klassifiserer i tillegg oppgaveteksten selv, uavhengig av flagget.
+ */
+export const RESERVED_SUBMIT_DATA_KEYS: readonly string[] = ["cloud_tool_turns_allowed"];
+
+export function submittedContractHasReservedKey(contract: unknown): string | null {
+  if (typeof contract !== "object" || contract === null) return null;
+  const input = (contract as { input?: unknown }).input;
+  if (typeof input !== "object" || input === null) return null;
+  const data = (input as { data?: unknown }).data;
+  if (typeof data !== "object" || data === null) return null;
+  return RESERVED_SUBMIT_DATA_KEYS.find((key) => Object.prototype.hasOwnProperty.call(data, key)) ?? null;
+}
+
+export interface CloudToolTurnInput {
+  title: string;
+  prompt: string;
+  /** Minneromene jobben får lese (kontraktens `allowed_memory_spaces`). Helse-rommet gjør jobben lokal-only, som i chatten (D-378). */
+  memorySpaces: readonly string[];
+  /** Hvilken modell som betjente turen som delegerte (trusted-lag: stemplet av adapteren, aldri fra parametere). */
+  servingModel: { provider: string; model: string } | undefined;
+  /** `owner_direct` = hurtigbanen der oppgaveteksten er eierens egne ord (trusted-lag, se `ToolInvocationContext.contentOrigin`). */
+  contentOrigin: "owner_direct" | undefined;
+}
+
+/**
+ * D-449 (Q-50): kan en delegert jobb med verktøy få bruke skyruten (samme som chattens verktøyturer, D-431)? Fail-closed, og alle disse må stemme:
+ *  1. Oppgaveteksten (tittel + prompt) og minnerommet jobben får lese er ikke `SECRET_RESTRICTED` (helse, økonomi, hemmeligheter: kun lokal modell, D-378), og teksten har ingen av ordene som får chatten til å velge et
+ *     finansverktøy (D-381, `financeToolIntent`).
+ *  2. Opphavet til innholdet er kjent og betrodd: enten ble turen som delegerte betjent av en SKYMODELL (da var turen selv ikke låst lokalt), eller oppgaveteksten er eierens egne
+ *     ord fra hurtigbanen (`contentOrigin: "owner_direct"`). Var turen betjent av en LOKAL modell (sensitivitet, dagstak eller skyen nede låste den), kan den modellen ha skrevet
+ *     innhold fra samtalen inn i oppgaveteksten. Mangler begge (f.eks. en eier-godkjent bekreftelse som utfører et modellskrevet kall i ettertid, som ikke kjenner modellen som
+ *     skrev det), er opphavet ukjent, og svaret er nei (revisjonsfunn: en tidligere versjon sa ja uten modell).
+ * En leverandør som ikke står i modellregisteret som sky regnes som lokal.
+ * Begrensning (ærlig): punkt 1 er ord-/mønsterbasert (samme klassifisering som chatten) og dekker ikke alle bøyningsformer, se Q-52.
+ */
+export function cloudToolTurnsAllowed(input: CloudToolTurnInput): boolean {
+  const content = classifyContentSensitivity({ texts: [input.title, input.prompt], memory_spaces: input.memorySpaces });
+  if (content.sensitivity === "SECRET_RESTRICTED") return false;
+  // D-381-paritet (gjennomgang nr. 3): ord som ville fått chatten til å velge et finansverktøy (og dermed låse turen lokalt) holder også jobben lokal - uansett hvem som skrev teksten.
+  if (financeToolIntent(`${input.title}\n${input.prompt}`)) return false;
+  const serving = input.servingModel;
+  if (serving !== undefined) return DEFAULT_PROFILES.some((profile) => profile.provider === serving.provider && profile.locality === "cloud");
+  return input.contentOrigin === "owner_direct";
+}
 
 export interface DelegatedJobView {
   task_id: string;
@@ -185,6 +233,16 @@ export class TasksDelegateTransport implements ToolTransport {
       // D-424: standard er MED lese-verktøy (e-post/kalender/GitHub/minne - kun lesing); kun eksplisitt `false` gir en jobb uten verktøy.
       const useTools = parameters["use_tools"] !== false;
       const taskId = `task-${randomUUID()}`;
+      // D-449: avgjørelsen tas ÉN gang her; den samme verdien setter flagget i kontrakten og rapporteres tilbake (`cloud_tool_turns`), så hurtigbanen kan si fra når jobben likevel kjører lokalt.
+      const cloudToolTurns =
+        useTools &&
+        cloudToolTurnsAllowed({
+          title,
+          prompt,
+          memorySpaces: [identity.memory_space_id],
+          servingModel: context?.servingModel,
+          contentOrigin: context?.contentOrigin
+        });
       const result = await this.tasks.submit(identity, {
         task_id: taskId,
         owner_person_id: identity.person_id,
@@ -199,7 +257,10 @@ export class TasksDelegateTransport implements ToolTransport {
             sensitivity: "PRIVATE",
             paid_models_allowed: false,
             delegated_from_chat: true,
-            ...(useTools ? { tools: true } : {})
+            ...(useTools ? { tools: true } : {}),
+            // D-449 (Q-50, eierens ja): jobber MED verktøy får bruke chattens skyrute (workeren avgjør selv ved kjøring: konfigurert rute, dagstak, fallback). Flagget settes her i trusted
+            // kode; `POST /tasks/submit` avviser det i en innsendt kontrakt (det kan ikke forfalskes via API-et), og workeren klassifiserer oppgaveteksten på nytt uansett.
+            ...(cloudToolTurns ? { cloud_tool_turns_allowed: true } : {})
           },
           trust_level: "internal",
           provenance: `chat:${identity.session_id}`
@@ -213,7 +274,7 @@ export class TasksDelegateTransport implements ToolTransport {
         max_steps: 6
       });
       if (!result.ok) return { data: { started: false, reason: result.reason, message: "Jobben ble ikke startet." } };
-      return { data: { started: true, task_id: result.value.task_id, title, message: "Jobben kjører i bakgrunnen. Si til Tobias at du gir beskjed i chatten når den er ferdig - han kan fortsette å snakke med deg." } };
+      return { data: { started: true, task_id: result.value.task_id, title, cloud_tool_turns: cloudToolTurns, message: "Jobben kjører i bakgrunnen. Si til Tobias at du gir beskjed i chatten når den er ferdig - han kan fortsette å snakke med deg." } };
     }
     if (action === "get_task_status") {
       const id = parameters["task_id"];

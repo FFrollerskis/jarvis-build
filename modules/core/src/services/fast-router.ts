@@ -41,14 +41,38 @@ const PATTERNS: Array<[RegExp, (m: RegExpMatchArray) => FastIntent]> = [
   [/^(?:skru|slå) (på|av) lyset(?: her)?\s*$/i, (m) => ({ kind: "home_light", on: (m[1] as string).toLowerCase() === "på" })]
 ];
 
-/** D-424: eksplisitt ønske om bakgrunnsjobb. Spørsmål OM bakgrunnen («hvorfor kjører den i bakgrunnen?») er ikke en bestilling. */
-const DELEGATE_MARK = /\bi bakgrunnen\b|^(?:bakgrunnsjobb|deleger)\s*:/i;
+/**
+ * D-424: eksplisitt ønske om bakgrunnsjobb. Spørsmål OM bakgrunnen («hvorfor kjører den i bakgrunnen?») er ikke en bestilling.
+ * Frasen og prefikset er definert ÉN gang (kildestrenger) og brukes både til å gjenkjenne bestillingen og til å fjerne den (`delegationRequestVariants`), så de to aldri kan komme ut av takt.
+ */
+const DELEGATE_PHRASE = String.raw`\bi bakgrunnen\b`;
+const DELEGATE_PREFIX = String.raw`(?:bakgrunnsjobb|deleger)\s*:`;
+const DELEGATE_MARK = new RegExp(`${DELEGATE_PHRASE}|^${DELEGATE_PREFIX}`, "i");
+const DELEGATE_PREFIX_STRIP = new RegExp(String.raw`^\s*${DELEGATE_PREFIX}\s*`, "i");
 const QUESTION_START = /^(?:hvorfor|hvordan|hvem|når|hva er|er det|er den|er jobben|kjører)\b/i;
 function delegateIntent(text: string): FastIntent | null {
   if (text.length < 15 || text.length > 2000) return null;
   if (!DELEGATE_MARK.test(text) || QUESTION_START.test(text)) return null;
-  const prompt = text.replace(/^(?:bakgrunnsjobb|deleger)\s*:\s*/i, "").trim();
+  const prompt = text.replace(DELEGATE_PREFIX_STRIP, "").trim();
   return prompt.length >= 10 ? { kind: "delegate_background", prompt } : null;
+}
+
+/**
+ * D-449 (Q-50, gjennomgang nr. 4): hurtigbanen «… i bakgrunnen» skal vurderes som om eieren hadde skrevet forespørselen som vanlig chat, dvs. UTEN delegeringsfrasen/-prefikset. Hvilken tekst chatten da
+ * ville sett avhenger av mellomrommet rundt frasen (et linjeskift kan avgjøre om et verktøymønster med `.*` treffer; frasen midt i «bruk i bakgrunnen bare lokale modeller» deler en ruteinstruksjon),
+ * så ALLE rimelige fjerninger returneres og kalleren lar den strengeste vinne: (1) meldingen slik den står, (2) frasen fjernet sammen med mellomrommet FØR den, (3) frasen fjernet sammen med
+ * mellomrommet ETTER den, (4) frasen erstattet med ett mellomrom og alt mellomrom slått sammen. Prefikset («bakgrunnsjobb:», «deleger:») fjernes i (2)-(4). Tomme varianter og duplikater utelates.
+ */
+export function delegationRequestVariants(input: string): string[] {
+  const withoutPrefix = input.replace(DELEGATE_PREFIX_STRIP, "");
+  const phrase = (before: string, after: string): RegExp => new RegExp(`${before}${DELEGATE_PHRASE}${after}`, "gi");
+  const variants = [
+    input,
+    withoutPrefix.replace(phrase(String.raw`\s*`, ""), "").trim(),
+    withoutPrefix.replace(phrase("", String.raw`\s*`), "").trim(),
+    withoutPrefix.replace(phrase("", ""), " ").replace(/\s+/g, " ").trim()
+  ];
+  return [...new Set(variants.filter((variant) => variant.trim().length > 0))];
 }
 
 /** null = ingen kjent kommando; gå til intelligent bane (LLM). */

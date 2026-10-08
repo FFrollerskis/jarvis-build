@@ -1,7 +1,7 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import "./normalize-env.ts";
 import { executiveQueueOwner } from "./queue-owner.ts";
-import { parseDailyCapOre, parseToolTurnRoute } from "./tool-turn-route.ts";
+import { parseDailyCapOre, parseToolTurnRoute, resolveJobToolTurnRoute } from "./tool-turn-route.ts";
 import { fileURLToPath } from "node:url";
 import { checkEv0Boot, getLastEv0BootStatus, logEv0Boot } from "./ev0-boot.ts";
 import { assertNoSweepFailures, envHour, envInt, envPort, failOnSweepFailures, systemIdentity } from "@jarvis/contracts";
@@ -994,6 +994,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // og ulik identitet, så en bakgrunnsjobb oppførte seg ulikt etter hvem som vant kø-racet - og agentkjøring delte prosess med chatten. API-et
   // registrerer derfor IKKE lenger handleren (en worker uten handler claimer ingenting). `JARVIS_API_DRAINS_EXECUTIVE=true` er en nød-/utviklingsbryter
   // for oppsett UTEN worker-container (da kjører jobbene i API-prosessen som før).
+  // D-431: verktøyturer til skymodell (standard Sonnet 5.5), ren prat lokalt. `JARVIS_TOOL_TURN_MODEL=off` slår det av.
+  // D-449 (Q-50): samme rute og samme dagstak gjelder delegerte bakgrunnsjobber med verktøy (executive-handleren under, og i worker-main.ts).
+  const toolTurnRoute = parseToolTurnRoute(process.env["JARVIS_TOOL_TURN_MODEL"]);
+  // D-432: dagstak for verktøyturer til sky (standard 30 kr; 0 = ingen tak). Over taket går verktøyturer lokalt med en synlig merknad.
+  const toolTurnDailyCapOre = parseDailyCapOre(process.env["JARVIS_TOOL_TURN_DAILY_CAP_ORE"]);
+  // D-449: delegerte jobber følger chattens rute med mindre `JARVIS_JOB_TOOL_TURN_MODEL` sier noe annet (`off` = jobber lokalt, chatten urørt).
+  const jobToolTurnRoute = resolveJobToolTurnRoute(process.env["JARVIS_JOB_TOOL_TURN_MODEL"], toolTurnRoute);
   const executiveOwner = executiveQueueOwner(process.env);
   const apiDrainsExecutive = executiveOwner === "api";
   console.log(JSON.stringify({ msg: "executive_queue_owner", owner: executiveOwner }));
@@ -1001,6 +1008,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     "executive",
     executiveHandler({
       gateway,
+      toolTurnRoute: jobToolTurnRoute,
+      toolTurnDayCap: jobToolTurnRoute !== null && toolTurnDailyCapOre > 0 ? { cap_ore: toolTurnDailyCapOre, spentToday: (tenantId) => dailySpentOre(pool, tenantId) } : null,
       tools: {
         all: modelToolSurface,
         // D-351: 4000 → 20_000 (se mesh-bridge.ts sitt filhode for host-målt begrunnelse).
@@ -1049,10 +1058,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // delings-disiplin som D-102 sin `taskService` og D-123 sine identitets-
   // primitiver). To instanser ville gitt to separate verktøy-/trace-oppsett
   // mot samme pool, altså en stille divergens mellom kanalene.
-  // D-431: verktøyturer til skymodell (standard Sonnet 5.5), ren prat lokalt. `JARVIS_TOOL_TURN_MODEL=off` slår det av.
-  const toolTurnRoute = parseToolTurnRoute(process.env["JARVIS_TOOL_TURN_MODEL"]);
-  // D-432: dagstak for verktøyturer til sky (standard 30 kr; 0 = ingen tak). Over taket går verktøyturer lokalt med en synlig merknad.
-  const toolTurnDailyCapOre = parseDailyCapOre(process.env["JARVIS_TOOL_TURN_DAILY_CAP_ORE"]);
+  // D-431/D-432: ruten og dagstaket er parset tidlig (rett før executive-handleren, D-449) og brukes her uendret.
   console.log(JSON.stringify({ msg: "tool_turn_route", route: toolTurnRoute ? `${toolTurnRoute.provider}:${toolTurnRoute.model}` : "off", daily_cap_ore: toolTurnDailyCapOre }));
   const conversationEngine = new ConversationEngine({
     messages: new MessageStore(pool),
@@ -1088,17 +1094,22 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       }
     },
     delegateBackground: {
-      async run(identity, prompt) {
+      async run(identity, prompt, options) {
         const title = (prompt.split("\n")[0] ?? prompt).replace(/\s+/g, " ").trim().slice(0, 70).padEnd(3, ".");
         const result = await toolGateway.execute({
           identity, tool_id: "tasks", action: "delegate_background_task", parameters: { title, prompt: prompt.slice(0, 2000), use_tools: true },
-          idempotency_key: `fast-delegate:${identity.session_id}:${Date.now()}`
+          idempotency_key: `fast-delegate:${identity.session_id}:${Date.now()}`,
+          // D-449 (Q-50): hurtigbanen bruker ingen modell - oppgaveteksten ER eierens egne ord (ordrett). Eneste sted `contentOrigin` settes, og KUN når samtalemotoren har avgjort at chatten ville latt en
+          // verktøytur gå til sky (eierens ruteoverstyring, de siste meldingene, minnerom og innlimt tekst, se `delegationCloudDecision`). Uten merket (eller `servingModel`) kjører jobben lokalt.
+          ...(options?.cloudAllowed === true ? { contentOrigin: "owner_direct" as const } : {})
         });
         if (!result.ok) return null;
-        const data = result.data as { started?: unknown; message?: unknown } | undefined;
+        const data = result.data as { started?: unknown; message?: unknown; cloud_tool_turns?: unknown } | undefined;
+        // `started` skiller en faktisk startet jobb fra en forklaring («for mange aktive jobber»): kun en startet jobb får merknaden om at den kjører lokalt.
+        // `cloud` = om transporten FAKTISK ga jobben skyflagget (den kontrollerer jobbteksten selv, også når motoren sa ja) - kun eksplisitt `true` teller (fail-closed).
         return data?.started === true
-          ? `Jobben «${title}» er startet i bakgrunnen. Jeg gir beskjed her når den er ferdig - du kan fortsette å snakke med meg.`
-          : typeof data?.message === "string" ? data.message : null;
+          ? { started: true, reply: `Jobben «${title}» er startet i bakgrunnen. Jeg gir beskjed her når den er ferdig - du kan fortsette å snakke med meg.`, cloud: data.cloud_tool_turns === true }
+          : typeof data?.message === "string" ? { started: false, reply: data.message, cloud: false } : null;
       }
     },
     memory: {

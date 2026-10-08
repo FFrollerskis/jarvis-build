@@ -53,6 +53,8 @@ export interface ContextOptions {
   restrictedMinScore?: number;
   /** D-386: tokenbudsjett for hele minneblokken (profil + treff). */
   budgetTokens?: number;
+  /** D-449: `false` = les uten å oppdatere «sist brukt» (ruteavgjørelsen for hurtigbanen leser minnet uten å bruke det). Standard: som før (oppdateres). */
+  touch?: boolean;
 }
 
 export interface ContextResult {
@@ -285,7 +287,7 @@ export class MemoryRetriever {
       if (topItemIds.length > 0 && kinds.has("item")) {
         const related = await client.query(
           `SELECT DISTINCT m.memory_item_id AS id, m.subject, m.content, m.type, m.space, m.valid_from, m.valid_to,
-                  m.has_conflict, m.observed_at, m.importance, m.keywords, m.last_accessed_at, m.trust_level,
+                  m.has_conflict, m.observed_at, m.importance, m.keywords, m.last_accessed_at, m.trust_level, m.sensitivity,
                   s.kind AS source_kind, s.ref AS source_ref, x.via
              FROM (
                SELECT me2.memory_item_id, 'relation'::text AS via
@@ -325,7 +327,7 @@ export class MemoryRetriever {
       if (options.timeref && tsq && kinds.has("item")) {
         const versions = await client.query(
           `SELECT v.memory_item_id, v.version, v.subject, v.content, v.valid_from, v.valid_to,
-                  m.type, m.space, m.importance, m.observed_at, m.trust_level, s.kind AS source_kind, s.ref AS source_ref
+                  m.type, m.space, m.importance, m.observed_at, m.trust_level, m.sensitivity, s.kind AS source_kind, s.ref AS source_ref
              FROM memory_versions v
              JOIN memory_items m ON m.memory_item_id = v.memory_item_id
              JOIN memory_sources s ON s.source_id = m.source_id
@@ -348,6 +350,7 @@ export class MemoryRetriever {
             importance: Number(row["importance"] ?? 5),
             observed_at: String(row["observed_at"]),
             keywords: [],
+            ...(row["sensitivity"] ? { sensitivity: String(row["sensitivity"]) } : {}),
             last_accessed_at: null,
             source: { kind: String(row["source_kind"]), ref: `${String(row["source_ref"])} (v${String(row["version"])})`, trust_level: String(row["trust_level"]) },
             score: 0.5,
@@ -411,7 +414,7 @@ export class MemoryRetriever {
     const budget = options.budgetTokens ?? DEFAULT_CONTEXT_BUDGET_TOKENS;
     const minScore = options.restrictedMinScore ?? RESTRICTED_MEMORY_MIN_SCORE;
     const space = identity.memory_space_id;
-    const items = await this.search(identity, { spaces: [space], query: userText, limit: 12 });
+    const items = await this.search(identity, { spaces: [space], query: userText, limit: 12, ...(options.touch === false ? { touch: false } : {}) });
 
     const { profile, upcoming, sensitivityById } = await withMemoryTransaction(this.pool, identity.tenant_id, [space], async (client) => {
       const prof = await client.query("SELECT content FROM memory_profiles WHERE tenant_id = $1 AND space = $2", [identity.tenant_id, space]);
