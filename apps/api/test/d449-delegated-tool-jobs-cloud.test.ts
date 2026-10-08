@@ -6,8 +6,11 @@ import { NoEligibleProviderError, type CompleteInput, type ModelGateway, type To
 import { ProviderError, type ToolCallRequest, type ToolResultMessage } from "@jarvis/provider-adapters";
 import type { ClaimedTask, JobContext } from "@jarvis/tasks";
 import type { MeshToolMapping } from "@jarvis/tool-gateway";
-import { TasksDelegateTransport, cloudToolTurnsAllowed, type ChatJobs } from "../src/chat-jobs.ts";
+import { TasksDelegateTransport, cloudToolTurnsAllowed, submittedContractHasReservedKey, type ChatJobs } from "../src/chat-jobs.ts";
 import { executiveHandler } from "../src/executive.ts";
+import { jobWithheldNote } from "../src/cloud-tool-screen.ts";
+import { jobDayCapNote, resolveJobToolTurnRoute } from "../src/tool-turn-route.ts";
+import { classifyContentSensitivity } from "@jarvis/model-gateway";
 // @ts-expect-error - ren .mjs uten typer (genererer compose-blokkene)
 import { SERVICE_ENV } from "../../../infra/local/service-env.mjs";
 
@@ -26,12 +29,12 @@ const TOOLS: MeshToolMapping[] = [
 const ctx: JobContext = { attempts: 1, checkpoint: null, saveCheckpoint: async () => undefined, assertNotCancelled: async () => undefined };
 const identity: IdentityContext = { person_id: "p1", tenant_id: "t1", memory_space_id: "personal", session_id: "s1", device_id: "d1", channel: "web", auth_strength: "active" };
 
-function makeTask(data: Record<string, unknown>, tenant = "tenant-personal"): ClaimedTask {
+function makeTask(data: Record<string, unknown>, tenant = "tenant-personal", memorySpaces: string[] = ["personal"]): ClaimedTask {
   return {
     task_id: "task-d449-1",
     tenant_id: tenant,
     contract: {
-      goal: "list PR-er", owner_person_id: "person-tobias", tenant_id: tenant, allowed_memory_spaces: ["personal"],
+      goal: "list PR-er", owner_person_id: "person-tobias", tenant_id: tenant, allowed_memory_spaces: memorySpaces,
       input: { data, trust_level: "internal", provenance: "chat:s1" }, allowed_tools: ["github"]
     } as unknown as JobContract,
     attempts: 1,
@@ -48,14 +51,23 @@ type GatewayCall = { input: CompleteInput; tools: unknown[]; executor: ToolExecu
 type Behaviour = (call: GatewayCall, index: number) => Promise<Record<string, unknown>>;
 const okResult = (provider: string, model: string) => ({ text: "Det er én åpen PR (#301).", usage: { input_tokens: 10, output_tokens: 5 }, provider, model, metadata: { tool_rounds: 1 } });
 
-function build(opts: { behaviours?: Behaviour[]; dayCap?: { cap_ore: number; spentToday(t: string): Promise<number> } | null; route?: { provider: string; model?: string } | null }) {
+function build(opts: {
+  behaviours?: Behaviour[];
+  dayCap?: { cap_ore: number; spentToday(t: string): Promise<number> } | null;
+  route?: { provider: string; model?: string } | null;
+  /** Overstyrer det trusted executoren svarer (f.eks. et minnesøk med sensitive treff). */
+  executorResult?: (call: ToolCallRequest) => Partial<ToolResultMessage>;
+}) {
   const calls: GatewayCall[] = [];
   const plain: CompleteInput[] = [];
   const executed: string[] = [];
   const executor: ToolExecutor = {
     async execute(call: ToolCallRequest, c): Promise<ToolResultMessage> {
       executed.push(c.idempotency_key);
-      return { tool_call_id: call.tool_call_id, tool_name: call.tool_name, execution_id: c.idempotency_key, success: true, output: { prs: [] }, at: new Date().toISOString() };
+      return {
+        tool_call_id: call.tool_call_id, tool_name: call.tool_name, execution_id: c.idempotency_key, success: true, output: { prs: [] }, at: new Date().toISOString(),
+        ...(opts.executorResult ? opts.executorResult(call) : {})
+      };
     }
   };
   const executorFor = vi.fn(() => executor);
@@ -153,6 +165,36 @@ describe("D-449: skyrute for delegerte verktøyjobber (executive-handler)", () =
     }
   });
 
+  it("forsvar i dybden: kontrakten gir jobben tilgang til helse-minnet → lokalt selv med flagg og nøytral prompt (minnerommet klassifiseres også her)", async () => {
+    captureLogs();
+    for (const spaces of [["health"], ["personal", "health"]]) {
+      const h = build({});
+      const result = await h.handler(makeTask(delegated(), "tenant-personal", spaces), ctx);
+      expect(h.calls[0]!.input.providerPreference, spaces.join(",")).toBeUndefined();
+      expect(h.calls[0]!.input.paid_models_allowed, spaces.join(",")).toBe(false);
+      expect("route" in result, spaces.join(",")).toBe(false);
+    }
+    // Kontroll: et vanlig personlig/forretningsrom blokkerer ikke skyruten.
+    for (const spaces of [["personal"], ["business"]]) {
+      const h = build({});
+      expect((await h.handler(makeTask(delegated(), "tenant-personal", spaces), ctx))["route"], spaces.join(",")).toBe("cloud");
+    }
+  });
+
+  it("merknaden foran svaret + svaret avkortes til 4000 tegn totalt (merknaden mistes aldri bak et langt svar)", async () => {
+    captureLogs();
+    const long = "x".repeat(6000);
+    const h = build({
+      dayCap: { cap_ore: 3000, spentToday: async () => 3000 },
+      behaviours: [async () => ({ ...okResult("gemma_local", "llama3.1:8b"), text: long })]
+    });
+    const result = await h.handler(makeTask(delegated()), ctx);
+    const text = String(result["text"]);
+    expect(text.length).toBeLessThanOrEqual(4000);
+    expect(text.startsWith("(Dagstaket for sky")).toBe(true);
+    expect(text.slice(0, 1500)).toContain("Dagstaket for sky");
+  });
+
   it("dagstak: under taket → sky og kostnaden leses for riktig tenant; nådd eller ulesbart tak → lokal med merknad i svaret, aldri ubegrenset sky", async () => {
     const { logs, errors } = captureLogs();
     const seen: string[] = [];
@@ -165,7 +207,9 @@ describe("D-449: skyrute for delegerte verktøyjobber (executive-handler)", () =
     expect(reached.calls[0]!.input.providerPreference).toBeUndefined();
     expect(reached.calls[0]!.input.paid_models_allowed).toBe(false);
     expect(r1["route"]).toBe("local_cap");
-    expect(String(r1["text"])).toContain("Dagstaket for sky på 30 kr er nådd i dag, så jobben kjørte på den lokale modellen.");
+    // Merknaden står FORAN svaret (leveringsvisningen avkorter svaret bakfra til 1500 tegn, så en merknad bakerst kunne forsvunnet).
+    expect(String(r1["text"]).startsWith("(Dagstaket for sky på 30 kr er nådd i dag, så jobben kjørte på den lokale modellen.")).toBe(true);
+    expect(String(r1["text"])).toContain("Det er én åpen PR (#301).");
 
     const unreadable = build({ dayCap: { cap_ore: 3000, spentToday: async () => { throw new Error("db nede"); } } });
     const r2 = await unreadable.handler(makeTask(delegated()), ctx);
@@ -246,6 +290,85 @@ describe("D-449: skyrute for delegerte verktøyjobber (executive-handler)", () =
   });
 });
 
+describe("D-449: verktøyresultater til skymodellen skjermes (revisjonsfunn: minnesøk uten filter)", () => {
+  const memoryCall = { tool_call_id: "m1", tool_name: "search_my_memory", arguments: { query: "meg" }, provider: "anthropic", model: "claude-sonnet-5-5" } as ToolCallRequest;
+  const item = (id: string, extra: Record<string, unknown> = {}) => ({ memory_item_id: id, kind: "item", subject: "tobias.hobby", content: "Liker å gå på ski", type: "semantic", space: "personal", ...extra });
+  const memoryOutput = [
+    item("ok1"),
+    item("sensitiv1", { sensitivity: "sensitive" }),
+    item("spesial1", { sensitivity: "special", content: "Noe særlig følsomt" }),
+    item("helse1", { space: "health", content: "Noe i helserommet" }),
+    item("tekst1", { content: "Tobias har fått en ny diagnose" })
+  ];
+  const memoryResult = () => ({ source: "memory.search", output: memoryOutput });
+  /** Gatewayen kaller executoren slik modellen ville gjort; vi returnerer det modellen (skyen) faktisk får se. */
+  const askMemory: Behaviour = async (call) => {
+    const seen = await call.executor.execute(memoryCall, { idempotency_key: "m-k1" } as never);
+    seenByModel.push(seen);
+    return okResult(call.input.providerPreference ? "anthropic" : "gemma_local", call.input.providerPreference ? "claude-sonnet-5-5" : "llama3.1:8b");
+  };
+  let seenByModel: ToolResultMessage[] = [];
+  const idsOf = (out: unknown): string[] => ((out as { results?: Array<{ memory_item_id: string }> }).results ?? (out as Array<{ memory_item_id: string }>)).map((i) => i.memory_item_id);
+
+  it("skyruten: treff merket special, i helse-rommet eller med helse-/økonomitekst holdes tilbake; vanlige og «sensitive» treff beholdes; modellen får beskjed om at noe ble holdt tilbake", async () => {
+    const { logs } = captureLogs();
+    seenByModel = [];
+    const h = build({ behaviours: [askMemory], executorResult: memoryResult });
+    const result = await h.handler(makeTask(delegated()), ctx);
+    expect(result["route"]).toBe("cloud");
+    expect(idsOf(seenByModel[0]!.output)).toEqual(["ok1", "sensitiv1"]);
+    expect((seenByModel[0]!.output as { withheld_count: number }).withheld_count).toBe(3);
+    expect(JSON.stringify(seenByModel[0]!.output)).not.toMatch(/Noe særlig følsomt|Noe i helserommet|ny diagnose/);
+    // Eieren får en synlig merknad FORAN svaret (aldri en stille innskrenking).
+    expect(String(result["text"]).startsWith(jobWithheldNote())).toBe(true);
+    // Loggen har verktøy og antall, aldri innhold.
+    const withheldLog = logs().filter((l) => l["msg"] === "d449_job_cloud_tool_output_withheld");
+    expect(withheldLog).toEqual([{ msg: "d449_job_cloud_tool_output_withheld", task_id: "task-d449-1", tool: "memory.search", withheld: 3 }]);
+    expect(JSON.stringify(logs())).not.toMatch(/Liker å gå på ski|diagnose/);
+  });
+
+  it("lokale ruter (dagstak, fallback, ingen skyflagg) ser ALT: lokal modell har lov til følsomt innhold (D-378), og ingen merknad legges til", async () => {
+    captureLogs();
+    // Dagstaket nådd → lokal rute med uskjermet executor.
+    seenByModel = [];
+    const capped = build({ behaviours: [askMemory], executorResult: memoryResult, dayCap: { cap_ore: 3000, spentToday: async () => 3000 } });
+    const r1 = await capped.handler(makeTask(delegated()), ctx);
+    expect(r1["route"]).toBe("local_cap");
+    expect(idsOf(seenByModel[0]!.output)).toHaveLength(5);
+    expect(String(r1["text"])).not.toContain(jobWithheldNote());
+
+    // Uten skyflagg (følsom oppgavetekst) → ordinær lokal rute, uskjermet.
+    seenByModel = [];
+    const noFlag = build({ behaviours: [askMemory], executorResult: memoryResult });
+    await noFlag.handler(makeTask(delegated({}, false)), ctx);
+    expect(idsOf(seenByModel[0]!.output)).toHaveLength(5);
+
+    // Skyen nede før noe er utført → lokal fallback med uskjermet executor (ingenting nådde skyen).
+    seenByModel = [];
+    const fallback = build({ behaviours: [async () => { throw new ProviderError("anthropic", "timeout", "nede"); }, askMemory], executorResult: memoryResult });
+    const r3 = await fallback.handler(makeTask(delegated()), ctx);
+    expect(r3["route"]).toBe("local_fallback");
+    expect(idsOf(seenByModel[0]!.output)).toHaveLength(5);
+  });
+
+  it("andre verktøy (GitHub/e-post/kalender) passerer urørt også på skyruten - samme oppførsel som chattens verktøyturer (D-431), dokumentert avgrensning (Q-52)", async () => {
+    captureLogs();
+    seenByModel = [];
+    const emailText = { emails: [{ subject: "Din legetime i morgen", snippet: "saldo" }] };
+    const h = build({
+      behaviours: [async (call) => {
+        seenByModel.push(await call.executor.execute({ ...memoryCall, tool_name: "read_github_prs" } as ToolCallRequest, { idempotency_key: "g1" } as never));
+        return okResult("anthropic", "claude-sonnet-5-5");
+      }],
+      executorResult: () => ({ source: "email.read_inbox", output: emailText })
+    });
+    const result = await h.handler(makeTask(delegated()), ctx);
+    expect(result["route"]).toBe("cloud");
+    expect(seenByModel[0]!.output).toEqual(emailText);
+    expect(String(result["text"])).toBe("Det er én åpen PR (#301).");
+  });
+});
+
 describe("D-449: delegeringens kontrakt (TasksDelegateTransport)", () => {
   function transport() {
     const submitted: Array<{ input: { data: Record<string, unknown> } } & Record<string, unknown>> = [];
@@ -253,69 +376,154 @@ describe("D-449: delegeringens kontrakt (TasksDelegateTransport)", () => {
     const jobs = { activeCount: async () => 0 } as unknown as ChatJobs;
     return { submitted, t: new TasksDelegateTransport(tasks as never, jobs) };
   }
-  const invoke = (t: TasksDelegateTransport, params: Record<string, unknown>, servingModel?: { provider: string; model: string }) =>
-    t.invoke("delegate_background_task", params as never, "cred", { identity, ...(servingModel ? { servingModel } : {}) });
+  type Trusted = { servingModel?: { provider: string; model: string }; contentOrigin?: "owner_direct"; identity?: IdentityContext };
+  const invoke = (t: TasksDelegateTransport, params: Record<string, unknown>, trusted: Trusted = {}) =>
+    t.invoke("delegate_background_task", params as never, "cred", { identity: trusted.identity ?? identity, ...(trusted.servingModel ? { servingModel: trusted.servingModel } : {}), ...(trusted.contentOrigin ? { contentOrigin: trusted.contentOrigin } : {}) });
+  const sonnet = { provider: "anthropic", model: "claude-sonnet-5-5" };
+  const ollama = { provider: "gemma_local", model: "llama3.1:8b" };
+  const base = { title: "Åpne PR-er", prompt: "list åpne PR-er", memorySpaces: ["personal"] as const };
 
-  it("verktøyjobb med nøytral oppgave får skyflagget, og basiskontrakten (lokal først) er uendret", async () => {
+  it("verktøyjobb med nøytral oppgave fra en skybetjent tur får skyflagget, og basiskontrakten (lokal først) er uendret", async () => {
     const { submitted, t } = transport();
-    await invoke(t, { title: "Åpne PR-er", prompt: "list åpne PR-er i repoet" });
+    await invoke(t, { title: "Åpne PR-er", prompt: "list åpne PR-er i repoet" }, { servingModel: sonnet });
     const data = submitted[0]!.input.data;
     expect(data).toMatchObject({ sensitivity: "PRIVATE", paid_models_allowed: false, delegated_from_chat: true, tools: true, cloud_tool_turns_allowed: true });
   });
 
-  it("følsom oppgavetekst (økonomi/helse/hemmelighet) eller jobb uten verktøy → ingen skyflagg", async () => {
+  it("følsom oppgavetekst (økonomi/helse/hemmelighet) eller jobb uten verktøy → ingen skyflagg, uansett hvem som betjente turen", async () => {
     for (const prompt of ["sjekk saldoen min og lag en oppsummering", "oppsummer legetime og diagnose-notatene mine", "finn kontonummer 1234.56.78901 i e-postene"]) {
       const { submitted, t } = transport();
-      await invoke(t, { title: "Oppsummering", prompt });
+      await invoke(t, { title: "Oppsummering", prompt }, { servingModel: sonnet });
       expect(submitted[0]!.input.data["cloud_tool_turns_allowed"], prompt).toBeUndefined();
       expect(submitted[0]!.input.data["paid_models_allowed"]).toBe(false);
     }
     const { submitted, t } = transport();
-    await invoke(t, { title: "Uten verktøy", prompt: "skriv en kort hilsen til teamet", use_tools: false });
+    await invoke(t, { title: "Uten verktøy", prompt: "skriv en kort hilsen til teamet", use_tools: false }, { servingModel: sonnet });
     expect(submitted[0]!.input.data["cloud_tool_turns_allowed"]).toBeUndefined();
     expect(submitted[0]!.input.data["tools"]).toBeUndefined();
   });
 
-  it("turen som delegerte: betjent av en skymodell → tillatt; av lokal eller ukjent modell → ikke (turen var selv låst lokalt); uten modell (hurtigbane) → kun oppgaveteksten avgjør", () => {
-    expect(cloudToolTurnsAllowed("Åpne PR-er", "list åpne PR-er", { provider: "anthropic", model: "claude-sonnet-5-5" })).toBe(true);
-    expect(cloudToolTurnsAllowed("Åpne PR-er", "list åpne PR-er", { provider: "gemma_local", model: "llama3.1:8b" })).toBe(false);
-    expect(cloudToolTurnsAllowed("Åpne PR-er", "list åpne PR-er", { provider: "local_llm", model: "x" })).toBe(false);
-    expect(cloudToolTurnsAllowed("Åpne PR-er", "list åpne PR-er", { provider: "ukjent_leverandor", model: "x" })).toBe(false);
-    expect(cloudToolTurnsAllowed("Åpne PR-er", "list åpne PR-er", undefined)).toBe(true);
-    expect(cloudToolTurnsAllowed("Økonomi", "hva er saldoen min", { provider: "anthropic", model: "m" })).toBe(false);
-    expect(cloudToolTurnsAllowed("Økonomi", "hva er saldoen min", undefined)).toBe(false);
+  it("opphav: skybetjent tur → tillatt; lokal eller ukjent modell → nei; hurtigbane (owner_direct) → tillatt; UTEN modell og UTEN eier-merke (f.eks. en eier-godkjent bekreftelse) → nei (fail-closed)", () => {
+    expect(cloudToolTurnsAllowed({ ...base, servingModel: sonnet, contentOrigin: undefined })).toBe(true);
+    expect(cloudToolTurnsAllowed({ ...base, servingModel: ollama, contentOrigin: undefined })).toBe(false);
+    expect(cloudToolTurnsAllowed({ ...base, servingModel: { provider: "local_llm", model: "x" }, contentOrigin: undefined })).toBe(false);
+    expect(cloudToolTurnsAllowed({ ...base, servingModel: { provider: "ukjent_leverandor", model: "x" }, contentOrigin: undefined })).toBe(false);
+    expect(cloudToolTurnsAllowed({ ...base, servingModel: undefined, contentOrigin: "owner_direct" })).toBe(true);
+    expect(cloudToolTurnsAllowed({ ...base, servingModel: undefined, contentOrigin: undefined })).toBe(false);
+    // Modellen vinner: en lokalbetjent tur blir aldri «betrodd» av et eier-merke.
+    expect(cloudToolTurnsAllowed({ ...base, servingModel: ollama, contentOrigin: "owner_direct" })).toBe(false);
   });
 
-  it("kontrakten fra en lokalbetjent tur får ikke skyflagget (ende til ende gjennom transporten)", async () => {
+  it("innholdet slår opphavet: økonomi/helse i teksten eller helse-minnerommet → nei, også for en skybetjent tur og for hurtigbanen", () => {
+    for (const origin of [{ servingModel: sonnet, contentOrigin: undefined }, { servingModel: undefined, contentOrigin: "owner_direct" as const }]) {
+      expect(cloudToolTurnsAllowed({ ...base, ...origin, title: "Økonomi", prompt: "hva er saldoen min" })).toBe(false);
+      expect(cloudToolTurnsAllowed({ ...base, ...origin, prompt: "list PR-er" , memorySpaces: ["health"] })).toBe(false);
+      expect(cloudToolTurnsAllowed({ ...base, ...origin, prompt: "list PR-er", memorySpaces: ["personal", "health"] })).toBe(false);
+      expect(cloudToolTurnsAllowed({ ...base, ...origin, memorySpaces: ["personal"] })).toBe(true);
+      expect(cloudToolTurnsAllowed({ ...base, ...origin, memorySpaces: ["business"] })).toBe(true);
+    }
+  });
+
+  it("ende til ende gjennom transporten: lokalbetjent tur, bekreftelsesvei (hverken modell eller eier-merke) og helse-minnerom → ingen skyflagg; skybetjent tur og hurtigbane → flagg", async () => {
+    const run = async (trusted: Trusted, params: Record<string, unknown> = { title: "Åpne PR-er", prompt: "list åpne PR-er i repoet" }) => {
+      const { submitted, t } = transport();
+      await invoke(t, params, trusted);
+      return submitted[0]!.input.data["cloud_tool_turns_allowed"];
+    };
+    expect(await run({ servingModel: ollama })).toBeUndefined();
+    expect(await run({})).toBeUndefined(); // bekreftelsesveien i server.ts (/confirmations) kaller gatewayen uten modell og uten eier-merke
+    expect(await run({ servingModel: sonnet })).toBe(true);
+    expect(await run({ contentOrigin: "owner_direct" })).toBe(true);
+    expect(await run({ contentOrigin: "owner_direct", identity: { ...identity, memory_space_id: "health" } })).toBeUndefined();
+  });
+
+  it("modellen kan ikke sette opphavet selv: eier-merket kommer aldri fra parametere (et `contentOrigin`-felt i parameterne er bare støy og ignoreres)", async () => {
     const { submitted, t } = transport();
-    await invoke(t, { title: "Åpne PR-er", prompt: "list åpne PR-er i repoet" }, { provider: "gemma_local", model: "llama3.1:8b" });
+    await invoke(t, { title: "Åpne PR-er", prompt: "list åpne PR-er i repoet", contentOrigin: "owner_direct", cloud_tool_turns_allowed: true }, {});
     expect(submitted[0]!.input.data["cloud_tool_turns_allowed"]).toBeUndefined();
-    const cloud = transport();
-    await invoke(cloud.t, { title: "Åpne PR-er", prompt: "list åpne PR-er i repoet" }, { provider: "anthropic", model: "claude-sonnet-5-5" });
-    expect(cloud.submitted[0]!.input.data["cloud_tool_turns_allowed"]).toBe(true);
+  });
+});
+
+describe("D-449: forfalskning og merknader", () => {
+  it("en innsendt kontrakt som bærer `cloud_tool_turns_allowed` kan oppdages (brukes av POST /tasks/submit); vanlige kontrakter og ugyldige former gir null", () => {
+    const withFlag = (value: unknown) => ({ input: { data: { prompt: "x", cloud_tool_turns_allowed: value } } });
+    for (const value of [true, false, "true", 1, null]) expect(submittedContractHasReservedKey(withFlag(value)), String(value)).toBe("cloud_tool_turns_allowed");
+    expect(submittedContractHasReservedKey({ input: { data: { prompt: "x", delegated_from_chat: true } } })).toBeNull();
+    for (const bad of [null, undefined, "x", 5, [], {}, { input: null }, { input: { data: null } }, { input: { data: "x" } }]) expect(submittedContractHasReservedKey(bad)).toBeNull();
+  });
+
+  it("merknadene som legges i jobbens svar (og dermed i samtalehistorikken) kan aldri selv låse samtalen til lokal modell", () => {
+    for (const note of [jobWithheldNote(), jobDayCapNote(3000), jobDayCapNote(1)]) {
+      expect(classifyContentSensitivity({ texts: [note] }).sensitivity, note).toBe("PUBLIC_OR_LOW_SENSITIVITY");
+    }
+  });
+
+  it("jobb-bryteren: tom = chattens rute; off = jobber lokalt (chatten urørt); egen modell = egen rute; ugyldig = av (aldri en tilfeldig modell)", () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const chat = { provider: "anthropic", model: "claude-sonnet-5-5" };
+    expect(resolveJobToolTurnRoute(undefined, chat)).toEqual(chat);
+    expect(resolveJobToolTurnRoute("", chat)).toEqual(chat);
+    expect(resolveJobToolTurnRoute("   ", chat)).toEqual(chat);
+    expect(resolveJobToolTurnRoute("off", chat)).toBeNull();
+    expect(resolveJobToolTurnRoute("local", chat)).toBeNull();
+    expect(resolveJobToolTurnRoute("anthropic:claude-haiku-4-5-20251001", chat)).toEqual({ provider: "anthropic", model: "claude-haiku-4-5-20251001" });
+    expect(resolveJobToolTurnRoute("noe rart", chat)).toBeNull();
+    // Chatten av betyr ikke at jobber er av hvis jobb-bryteren eksplisitt sier noe annet, og tom jobb-bryter følger en avskrudd chat.
+    expect(resolveJobToolTurnRoute(undefined, null)).toBeNull();
+    expect(resolveJobToolTurnRoute("anthropic:claude-sonnet-5-5", null)).toEqual(chat);
   });
 });
 
 describe("D-449: oppkobling (kildevakt)", () => {
   const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
 
-  it("worker-containeren og api sender rute og dagstak til executive-handleren, og rute/tak er parset FØR handleren konstrueres", () => {
+  it("worker-containeren og api sender jobbrute og dagstak til executive-handleren, og rute/tak er parset FØR handleren konstrueres", () => {
     const worker = read("../src/worker-main.ts");
     expect(worker).toMatch(/executiveHandler\(\{\s*gateway,\s*toolTurnRoute: jobToolTurnRoute,\s*toolTurnDayCap: jobToolTurnRoute !== null && jobToolTurnDailyCapOre > 0 \? \{ cap_ore: jobToolTurnDailyCapOre, spentToday: \(tenantId\) => dailySpentOre\(pool, tenantId\) \} : null,/);
-    expect(worker.indexOf("const jobToolTurnRoute = parseToolTurnRoute(")).toBeGreaterThan(-1);
-    expect(worker.indexOf("const jobToolTurnRoute = parseToolTurnRoute(")).toBeLessThan(worker.indexOf("executiveHandler({"));
+    expect(worker.indexOf("const jobToolTurnRoute = resolveJobToolTurnRoute(")).toBeGreaterThan(-1);
+    expect(worker.indexOf("const jobToolTurnRoute = resolveJobToolTurnRoute(")).toBeLessThan(worker.indexOf("executiveHandler({"));
+    expect(worker).toContain('process.env["JARVIS_JOB_TOOL_TURN_MODEL"]');
     expect(worker).toContain('parseToolTurnRoute(process.env["JARVIS_TOOL_TURN_MODEL"])');
     expect(worker).toContain('parseDailyCapOre(process.env["JARVIS_TOOL_TURN_DAILY_CAP_ORE"])');
 
     const main = read("../src/main.ts");
-    expect(main).toMatch(/executiveHandler\(\{\s*gateway,\s*toolTurnRoute,\s*toolTurnDayCap: toolTurnRoute !== null && toolTurnDailyCapOre > 0 \? \{ cap_ore: toolTurnDailyCapOre, spentToday: \(tenantId\) => dailySpentOre\(pool, tenantId\) \} : null,/);
-    expect(main.indexOf("const toolTurnRoute = parseToolTurnRoute(")).toBeLessThan(main.indexOf("executiveHandler({"));
+    expect(main).toMatch(/executiveHandler\(\{\s*gateway,\s*toolTurnRoute: jobToolTurnRoute,\s*toolTurnDayCap: jobToolTurnRoute !== null && toolTurnDailyCapOre > 0 \? \{ cap_ore: toolTurnDailyCapOre, spentToday: \(tenantId\) => dailySpentOre\(pool, tenantId\) \} : null,/);
+    expect(main.indexOf("const jobToolTurnRoute = resolveJobToolTurnRoute(")).toBeGreaterThan(-1);
+    expect(main.indexOf("const jobToolTurnRoute = resolveJobToolTurnRoute(")).toBeLessThan(main.indexOf("executiveHandler({"));
+    expect(main).toContain('process.env["JARVIS_JOB_TOOL_TURN_MODEL"]');
     expect(main.match(/const toolTurnRoute = parseToolTurnRoute\(/g)).toHaveLength(1);
     expect(main.match(/const toolTurnDailyCapOre = parseDailyCapOre\(/g)).toHaveLength(1);
   });
 
-  it("worker-containeren får allerede Anthropic-nøkkelen, ruten og dagstaket (MODEL_ENV) - ingen ny hemmelighet er utvidet til workeren", () => {
+  it("worker-containeren får allerede Anthropic-nøkkelen, ruten og dagstaket (MODEL_ENV), og jobb-bryteren står i både api og worker - ingen ny hemmelighet er utvidet til workeren", () => {
+    for (const service of ["worker", "api"] as const) {
+      const env: string[] = SERVICE_ENV[service];
+      for (const name of ["JARVIS_TOOL_TURN_MODEL", "JARVIS_TOOL_TURN_DAILY_CAP_ORE", "JARVIS_JOB_TOOL_TURN_MODEL"]) expect(env, `${service}:${name}`).toContain(name);
+    }
     const workerEnv: string[] = SERVICE_ENV.worker;
-    for (const name of ["ANTHROPIC_API_KEY", "JARVIS_TOOL_TURN_MODEL", "JARVIS_TOOL_TURN_DAILY_CAP_ORE", "JARVIS_BUDGET_APPROVED"]) expect(workerEnv, name).toContain(name);
+    for (const name of ["ANTHROPIC_API_KEY", "JARVIS_BUDGET_APPROVED"]) expect(workerEnv, name).toContain(name);
+  });
+
+  it("eier-merket `contentOrigin: \"owner_direct\"` settes på nøyaktig ÉN plass i produksjonskoden (hurtigbanen i main.ts); `/confirmations` og modellflaten setter det aldri", () => {
+    // Kun kode: kommentarer og typedeklarasjoner (`contentOrigin: "owner_direct" | undefined`) er ikke et sted merket SETTES.
+    const code = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+    const setters = (text: string) => code(text).match(/contentOrigin:\s*"owner_direct"(?!\s*\|)/g);
+    const src = (rel: string) => read(`../src/${rel}`);
+    const main = src("main.ts");
+    expect(setters(main)).toHaveLength(1);
+    const deleg = main.indexOf("delegateBackground: {");
+    const marker = main.indexOf('contentOrigin: "owner_direct"');
+    expect(marker).toBeGreaterThan(deleg);
+    expect(marker - deleg).toBeLessThan(900); // inne i hurtigbanens run(), ikke et annet sted
+    for (const file of ["server.ts", "conversation.ts", "chat-jobs.ts", "executive.ts", "worker-main.ts", "cloud-tool-screen.ts"]) {
+      expect(setters(src(file)), file).toBeNull();
+    }
+    // Modellens verktøykall går via mesh-bridge, som kun stempler `servingModel` fra adapteren.
+    const mesh = readFileSync(fileURLToPath(new URL("../../../modules/tool-gateway/src/mesh-bridge.ts", import.meta.url)), "utf8");
+    expect(mesh).not.toContain("contentOrigin");
+    // /tasks/submit avviser det interne flagget før submit.
+    const server = src("server.ts");
+    expect(server.indexOf("submittedContractHasReservedKey(authed.body[\"contract\"])")).toBeGreaterThan(-1);
+    expect(server.indexOf("submittedContractHasReservedKey(authed.body[\"contract\"])")).toBeLessThan(server.indexOf("deps.tasks.submit(authed.identity, authed.body[\"contract\"])"));
   });
 });

@@ -84,9 +84,18 @@ export function localOnlyNote(reasons: readonly string[]): string {
 export const LOCAL_FALLBACK_ERROR_KINDS: readonly string[] = ["timeout", "network", "server", "rate_limit", "not_configured", "invalid_response"];
 
 /**
- * D-449 (Q-50): dagstak-merknaden for en delegert bakgrunnsjobb (samme regel og tak som chatten, D-432). Står i jobbens svartekst, som leveres til samtalen som DATA.
- * Teksten må selv ikke inneholde ord sensitivitetsklassifiseringen reagerer på (samme vakt som `localOnlyNote`).
+ * D-449 (Q-50): dagstak-merknaden for en delegert bakgrunnsjobb (samme regel og tak som chatten, D-432). Står FORAN jobbens svartekst (leveringsvisningen avkorter svaret bakfra, så en merknad
+ * bakerst kunne forsvunnet), som leveres til samtalen som DATA. Teksten må selv ikke inneholde ord sensitivitetsklassifiseringen reagerer på (samme vakt som `localOnlyNote`).
  */
 export function jobDayCapNote(capOre: number): string {
-  return `\n\n(Dagstaket for sky på ${Math.round(capOre / 100)} kr er nådd i dag, så jobben kjørte på den lokale modellen. Taket nullstilles i morgen.)`;
+  return `(Dagstaket for sky på ${Math.round(capOre / 100)} kr er nådd i dag, så jobben kjørte på den lokale modellen. Taket nullstilles i morgen.)`;
+}
+
+/**
+ * D-449 (Q-50): en egen bryter for DELEGERTE JOBBERS skyrute (`JARVIS_JOB_TOOL_TURN_MODEL`), slik at eieren kan slå den av uten å slå av chattens verktøyruting. Tom/ikke satt = samme rute som
+ * chatten (`JARVIS_TOOL_TURN_MODEL`); `off`/`local`/`none` = jobber kjører lokalt; ellers `provider:model` (kan f.eks. være en billigere modell enn chattens). Ugyldig verdi = av (aldri en tilfeldig modell).
+ */
+export function resolveJobToolTurnRoute(rawJobRoute: string | undefined, chatRoute: ToolTurnRoute | null): ToolTurnRoute | null {
+  if ((rawJobRoute ?? "").trim() === "") return chatRoute;
+  return parseToolTurnRoute(rawJobRoute);
 }

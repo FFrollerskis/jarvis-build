@@ -29,7 +29,7 @@ import {
 import { ConsentEnforcementService, ConsentService, ConsentTransport } from "@jarvis/consent";
 import { GoogleAdsTransport, GrowthService, GrowthTransport, MetaAdsTransport, marketingMemoryBriefSource } from "@jarvis/growth";
 import { executiveHandler } from "./executive.ts";
-import { parseDailyCapOre, parseToolTurnRoute } from "./tool-turn-route.ts";
+import { parseDailyCapOre, parseToolTurnRoute, resolveJobToolTurnRoute } from "./tool-turn-route.ts";
 import {
   AnthropicAdapter,
   GemmaHostedAdapter,
@@ -591,7 +591,8 @@ const runner = resolveJobSandboxRunner(process.env);
 
 // D-449 (Q-50, eierens ja 2026-10-08): delegerte bakgrunnsjobber med verktøy bruker SAMME skyrute og dagstak som chattens verktøyturer (D-431/D-432). NAS-test 4: en 8B-modell
 // bruker verktøy upålitelig (GitHub 404). Rute og tak leses fra samme miljøvariabler som api (`MODEL_ENV` gir dem også til worker-containeren). Økonomi/helse/hemmeligheter forblir lokale.
-const jobToolTurnRoute = parseToolTurnRoute(process.env["JARVIS_TOOL_TURN_MODEL"]);
+// `JARVIS_JOB_TOOL_TURN_MODEL` er en egen bryter bare for jobber (`off` = jobber lokalt, chatten urørt); tom = samme rute som chatten.
+const jobToolTurnRoute = resolveJobToolTurnRoute(process.env["JARVIS_JOB_TOOL_TURN_MODEL"], parseToolTurnRoute(process.env["JARVIS_TOOL_TURN_MODEL"]));
 const jobToolTurnDailyCapOre = parseDailyCapOre(process.env["JARVIS_TOOL_TURN_DAILY_CAP_ORE"]);
 console.log(JSON.stringify({ msg: "d449_job_tool_turn_route", route: jobToolTurnRoute ? `${jobToolTurnRoute.provider}:${jobToolTurnRoute.model}` : "off", daily_cap_ore: jobToolTurnDailyCapOre }));
 

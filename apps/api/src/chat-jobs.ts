@@ -23,15 +23,47 @@ const MAX_ACTIVE_JOBS = 5;
 const RESULT_PREVIEW_CHARS = 1500;
 
 /**
- * D-449 (Q-50): kan en delegert jobb med verktøy få bruke skyruten (samme som chattens verktøyturer, D-431)? Aldri når oppgaveteksten selv er `SECRET_RESTRICTED` (helse, økonomi, hemmeligheter:
- * kun lokal modell, D-378), og aldri når turen som delegerte ble betjent av en LOKAL eller ukjent modell - da var turen selv låst lokalt (sensitivitet, dagstak eller skyen nede), og den
- * lokale modellen kan ha skrevet inn innhold fra samtalen i oppgaveteksten. Uten `servingModel` (hurtigbanen «… i bakgrunnen» bruker ingen modell; oppgaveteksten ER eierens egne ord) avgjør kun
- * oppgaveteksten. Fail-closed: en leverandør som ikke står i modellregisteret som sky regnes som lokal.
+ * D-449 (Q-50): `input.data`-nøkler som BARE trusted kode (`TasksDelegateTransport`) kan sette. `POST /tasks/submit` avviser en innsendt kontrakt som bærer dem, så et rutingsflagg aldri kan
+ * forfalskes via API-et (revisjonsfunn: flagget var tidligere bare «trusted» etter konvensjon). Workeren klassifiserer i tillegg oppgaveteksten selv, uavhengig av flagget.
  */
-export function cloudToolTurnsAllowed(title: string, prompt: string, servingModel: { provider: string; model: string } | undefined): boolean {
-  if (classifyContentSensitivity({ texts: [title, prompt] }).sensitivity === "SECRET_RESTRICTED") return false;
-  if (servingModel === undefined) return true;
-  return DEFAULT_PROFILES.some((profile) => profile.provider === servingModel.provider && profile.locality === "cloud");
+export const RESERVED_SUBMIT_DATA_KEYS: readonly string[] = ["cloud_tool_turns_allowed"];
+
+export function submittedContractHasReservedKey(contract: unknown): string | null {
+  if (typeof contract !== "object" || contract === null) return null;
+  const input = (contract as { input?: unknown }).input;
+  if (typeof input !== "object" || input === null) return null;
+  const data = (input as { data?: unknown }).data;
+  if (typeof data !== "object" || data === null) return null;
+  return RESERVED_SUBMIT_DATA_KEYS.find((key) => Object.prototype.hasOwnProperty.call(data, key)) ?? null;
+}
+
+export interface CloudToolTurnInput {
+  title: string;
+  prompt: string;
+  /** Minneromene jobben får lese (kontraktens `allowed_memory_spaces`). Helse-rommet gjør jobben lokal-only, som i chatten (D-378). */
+  memorySpaces: readonly string[];
+  /** Hvilken modell som betjente turen som delegerte (trusted-lag: stemplet av adapteren, aldri fra parametere). */
+  servingModel: { provider: string; model: string } | undefined;
+  /** `owner_direct` = hurtigbanen der oppgaveteksten er eierens egne ord (trusted-lag, se `ToolInvocationContext.contentOrigin`). */
+  contentOrigin: "owner_direct" | undefined;
+}
+
+/**
+ * D-449 (Q-50): kan en delegert jobb med verktøy få bruke skyruten (samme som chattens verktøyturer, D-431)? Fail-closed, og alle disse må stemme:
+ *  1. Oppgaveteksten (tittel + prompt) og minnerommet jobben får lese er ikke `SECRET_RESTRICTED` (helse, økonomi, hemmeligheter: kun lokal modell, D-378).
+ *  2. Opphavet til innholdet er kjent og betrodd: enten ble turen som delegerte betjent av en SKYMODELL (da var turen selv ikke låst lokalt), eller oppgaveteksten er eierens egne
+ *     ord fra hurtigbanen (`contentOrigin: "owner_direct"`). Var turen betjent av en LOKAL modell (sensitivitet, dagstak eller skyen nede låste den), kan den modellen ha skrevet
+ *     innhold fra samtalen inn i oppgaveteksten. Mangler begge (f.eks. en eier-godkjent bekreftelse som utfører et modellskrevet kall i ettertid, som ikke kjenner modellen som
+ *     skrev det), er opphavet ukjent, og svaret er nei (revisjonsfunn: en tidligere versjon sa ja uten modell).
+ * En leverandør som ikke står i modellregisteret som sky regnes som lokal.
+ * Begrensning (ærlig): punkt 1 er ord-/mønsterbasert (samme klassifisering som chatten) og dekker ikke alle bøyningsformer, se Q-52.
+ */
+export function cloudToolTurnsAllowed(input: CloudToolTurnInput): boolean {
+  const content = classifyContentSensitivity({ texts: [input.title, input.prompt], memory_spaces: input.memorySpaces });
+  if (content.sensitivity === "SECRET_RESTRICTED") return false;
+  const serving = input.servingModel;
+  if (serving !== undefined) return DEFAULT_PROFILES.some((profile) => profile.provider === serving.provider && profile.locality === "cloud");
+  return input.contentOrigin === "owner_direct";
 }
 
 export interface DelegatedJobView {
@@ -213,8 +245,18 @@ export class TasksDelegateTransport implements ToolTransport {
             paid_models_allowed: false,
             delegated_from_chat: true,
             ...(useTools ? { tools: true } : {}),
-            // D-449 (Q-50, eierens ja): jobber MED verktøy får bruke chattens skyrute (workeren avgjør selv ved kjøring: konfigurert rute, dagstak, fallback). Flagget settes KUN her i trusted kode.
-            ...(useTools && cloudToolTurnsAllowed(title, prompt, context?.servingModel) ? { cloud_tool_turns_allowed: true } : {})
+            // D-449 (Q-50, eierens ja): jobber MED verktøy får bruke chattens skyrute (workeren avgjør selv ved kjøring: konfigurert rute, dagstak, fallback). Flagget settes her i trusted
+            // kode; `POST /tasks/submit` avviser det i en innsendt kontrakt (det kan ikke forfalskes via API-et), og workeren klassifiserer oppgaveteksten på nytt uansett.
+            ...(useTools &&
+            cloudToolTurnsAllowed({
+              title,
+              prompt,
+              memorySpaces: [identity.memory_space_id],
+              servingModel: context?.servingModel,
+              contentOrigin: context?.contentOrigin
+            })
+              ? { cloud_tool_turns_allowed: true }
+              : {})
           },
           trust_level: "internal",
           provenance: `chat:${identity.session_id}`

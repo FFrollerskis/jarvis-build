@@ -4,6 +4,7 @@ import { NoEligibleProviderError, classifyContentSensitivity, type ModelGateway,
 import { ProviderError } from "@jarvis/provider-adapters";
 import type { ClaimedTask, JobContext } from "@jarvis/tasks";
 import { filterMeshToolsForJob, type MeshToolMapping } from "@jarvis/tool-gateway";
+import { cloudScreenedExecutor, jobWithheldNote } from "./cloud-tool-screen.ts";
 import { LOCAL_FALLBACK_ERROR_KINDS, jobDayCapNote } from "./tool-turn-route.ts";
 
 export interface ExecutiveHandlerOptions {
@@ -18,9 +19,10 @@ export interface ExecutiveHandlerOptions {
     executorFor(task: ClaimedTask, allowed: ReadonlyArray<MeshToolMapping>): ToolExecutor;
   };
   /**
-   * D-449 (Q-50, eierens ja 2026-10-08): samme verktøyrute som chatten (D-431, `JARVIS_TOOL_TURN_MODEL`, standard Sonnet 5.5) for DELEGERTE chat-jobber med verktøy. En 8B-modell bruker verktøy
-   * upålitelig (NAS-test 4: GitHub 404 med `llama3.1:8b`). Gjelder KUN en jobb som er delegert fra chat OG hvis kontrakt eksplisitt tillater det (`cloud_tool_turns_allowed`, satt av trusted kode
-   * i `TasksDelegateTransport` kun når oppgaveteksten ikke er `SECRET_RESTRICTED`); alle andre jobber har uendret ruting. `null`/udefinert = av.
+   * D-449 (Q-50, eierens ja 2026-10-08): samme verktøyrute som chatten (D-431, `JARVIS_TOOL_TURN_MODEL`, standard Sonnet 5.5; egen bryter `JARVIS_JOB_TOOL_TURN_MODEL`) for DELEGERTE chat-jobber med
+   * verktøy. En 8B-modell bruker verktøy upålitelig (NAS-test 4: GitHub 404 med `llama3.1:8b`). Gjelder KUN en jobb som er delegert fra chat OG hvis kontrakt eksplisitt tillater det
+   * (`cloud_tool_turns_allowed`, satt av `TasksDelegateTransport` kun når oppgaveteksten og minnerommet ikke er `SECRET_RESTRICTED` og innholdets opphav er betrodd; avvist i innsendte kontrakter
+   * på `POST /tasks/submit`); alle andre jobber har uendret ruting. På skyruten skjermes verktøyresultater (`cloud-tool-screen.ts`). `null`/udefinert = av.
    */
   toolTurnRoute?: { provider: string; model?: string } | null;
   /** D-432/D-449: samme dagstak som chatten (øre per døgn, tenant-bred). Nådd eller ulesbart tak = jobben kjører lokalt med en merknad i svaret (aldri ubegrenset sky). */
@@ -104,7 +106,8 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
       // BO-11 (§29) + Del 3: tools=true gir modellen KUN verktøyene kontrakten eksplisitt tillater, med kontraktens egen identitet.
       let result;
       let route: ExecutiveToolRoute = "default";
-      let routeNote = "";
+      // D-449: merknader som står FORAN svaret (leveringsvisningen avkorter svaret bakfra, så en merknad bakerst kunne forsvunnet).
+      const notes: string[] = [];
       if (input.tools && opts.tools) {
         if (task.contract.allowed_tools.length === 0) throw new ExecutiveToolsDeniedError("job_tools_require_allowlist");
         if (task.contract.input.trust_level === "untrusted") throw new ExecutiveToolsDeniedError("job_tools_untrusted_contract");
@@ -112,8 +115,8 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
         if (allowed.length === 0) throw new ExecutiveToolsDeniedError("job_tools_none_permitted");
         const tools = allowed.map((m) => m.def);
         const executor = opts.tools.executorFor(task, allowed);
-        // D-449 (Q-50): skyrute for verktøykjøring kun når ALT dette stemmer - konfigurert rute, delegert fra chat, kontrakten tillater det (trusted kode satte flagget fordi oppgaveteksten ikke er
-        // SECRET_RESTRICTED), og kontraktens sensitivitet er eksplisitt lest og ikke SECRET_RESTRICTED (forsvar i dybden: helse/økonomi/hemmeligheter går aldri til sky, D-378).
+        // D-449 (Q-50): skyrute for verktøykjøring kun når ALT dette stemmer - konfigurert rute, delegert fra chat, kontrakten tillater det (trusted kode satte flagget fordi oppgaveteksten og minnerommet
+        // ikke er SECRET_RESTRICTED og innholdets opphav er betrodd), og kontraktens sensitivitet er eksplisitt lest og ikke SECRET_RESTRICTED (forsvar i dybden: helse/økonomi/hemmeligheter går aldri til sky, D-378).
         const toolRoute = opts.toolTurnRoute ?? null;
         const cloudWanted =
           toolRoute !== null &&
@@ -121,8 +124,8 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
           input.cloud_tool_turns_allowed === true &&
           sensitivity.success &&
           sensitivity.data !== "SECRET_RESTRICTED" &&
-          // Forsvar i dybden: oppgaveteksten klassifiseres OGSÅ her, uavhengig av hvordan kontrakten ble sendt inn (en kontrakt kan i prinsippet bygges av andre enn chatten).
-          classifyContentSensitivity({ texts: [input.prompt] }).sensitivity !== "SECRET_RESTRICTED";
+          // Forsvar i dybden: oppgaveteksten og minnerommene jobben får lese klassifiseres OGSÅ her, uavhengig av hvordan kontrakten ble sendt inn (en kontrakt kan i prinsippet bygges av andre enn chatten).
+          classifyContentSensitivity({ texts: [input.prompt], memory_spaces: task.contract.allowed_memory_spaces }).sensitivity !== "SECRET_RESTRICTED";
         if (toolRoute !== null && cloudWanted) {
           // Dagstaket sjekkes kun når jobben faktisk ville gått til sky. Kan kostnaden ikke leses, feiler vi lukket (lokalt), som chatten (D-432).
           const dayCap = opts.toolTurnDayCap ?? null;
@@ -137,7 +140,7 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
           }
           if (capped && dayCap !== null) {
             route = "local_cap";
-            routeNote = jobDayCapNote(dayCap.cap_ore);
+            notes.push(jobDayCapNote(dayCap.cap_ore));
             result = await opts.gateway.completeWithTools(meshInput, { tools, executor });
           } else {
             // Samme inputform som chatten: ingen `paid_models_allowed`-nekt (kontraktens `false` gjelder lokal-først-ruten), men en HARD preferanse for skyleverandøren og modellen.
@@ -149,15 +152,22 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
               request: { ...cloudBase.request, ...(toolRoute.model ? { model: toolRoute.model } : {}) }
             };
             let toolsExecuted = false;
+            let withheldFromCloud = 0;
+            // Verktøyresultatene sendes videre til skymodellen: minnetreff merket særlig sensitive holdes tilbake (revisjonsfunn, se cloud-tool-screen.ts).
+            const screened = cloudScreenedExecutor(executor, ({ tool, withheld }) => {
+              withheldFromCloud += withheld;
+              console.log(JSON.stringify({ msg: "d449_job_cloud_tool_output_withheld", task_id: task.task_id, tool, withheld }));
+            });
             const trackedExecutor: ToolExecutor = {
               execute: async (call, callCtx) => {
                 toolsExecuted = true;
-                return executor.execute(call, callCtx);
+                return screened.execute(call, callCtx);
               }
             };
             try {
               result = await opts.gateway.completeWithTools(cloudInput, { tools, executor: trackedExecutor });
               route = "cloud";
+              if (withheldFromCloud > 0) notes.push(jobWithheldNote());
             } catch (err) {
               // Skyen er nede (tidsavbrudd, nett, kvote, ikke konfigurert, ubrukelig svar) FØR noe verktøy er utført → kjør på lokal modell (samme sensitivitetsregler, ingen stille skylekkasje) i stedet
               // for en feil. Etter et utført verktøy gjentas aldri jobben (verktøykall kan ha hatt virkning/kost): feilen går videre og jobben feiler ærlig.
@@ -180,8 +190,9 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
       } else {
         result = await opts.gateway.complete(meshInput);
       }
+      const header = notes.length > 0 ? `${notes.join(" ")}\n\n` : "";
       return {
-        text: routeNote ? `${result.text.slice(0, Math.max(0, 4000 - routeNote.length))}${routeNote}` : result.text.slice(0, 4000),
+        text: `${header}${result.text.slice(0, Math.max(0, 4000 - header.length))}`,
         provider: result.provider,
         model: result.model,
         tool_rounds: (result.metadata?.["tool_rounds"] as number | undefined) ?? 0,

@@ -305,6 +305,18 @@ describe("E: kropp, feil og legacy-flater (JARVIS-063/064)", () => {
       expect(res.status).toBe(404);
     }
   });
+  it("D-449: /tasks/submit avviser det interne rutingsflagget cloud_tool_turns_allowed FØR submit (en innsendt kontrakt kan ikke forfalske skyruten for bakgrunnsjobber)", async () => {
+    const grant = await mintGrant(baseUrl, SUBJECT_A, keys["cp-dev-a"]!);
+    const flagged = await post("/tasks/submit", { grant_token: grant, contract: { goal: "x", input: { data: { prompt: "x", cloud_tool_turns_allowed: true } } } });
+    expect(flagged.status).toBe(400);
+    expect(flagged.body["error"]).toBe("task_rejected");
+    expect(flagged.body["reason"]).toBe("reserved_input_key");
+    expect(flagged.body["key"]).toBe("cloud_tool_turns_allowed");
+    // Kontroll: samme (ugyldige) kontrakt UTEN flagget avvises av den ordinære kontraktvalideringen med en ANNEN årsak - avvisningen over skyldes altså vakten.
+    const plain = await post("/tasks/submit", { grant_token: grant, contract: { goal: "x", input: { data: { prompt: "x" } } } });
+    expect(plain.status).toBe(400);
+    expect(plain.body["reason"]).not.toBe("reserved_input_key");
+  });
   it("dev-/demo-rutene er av: /worker/tick og /tools/critical-demo gir 404 (uautentisert kødrenering/klasse D-stub finnes ikke)", async () => {
     for (const path of ["/worker/tick", "/tools/critical-demo"]) {
       const res = await fetch(`${baseUrl}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
