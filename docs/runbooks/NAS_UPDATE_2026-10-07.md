@@ -1,4 +1,4 @@
-# NAS-oppdatering 2026-10-07 (D-427…D-444)
+# NAS-oppdatering 2026-10-07 (D-427…D-446)
 
 Sjekkliste for neste NAS-oppdatering. **Ingenting under er verifisert på NAS ennå** – det som står under «Forventet» er hva koden og testene sier, ikke observert drift. Kjør ett steg om gangen, lim inn utdata, og stopp ved første avvik.
 
@@ -26,8 +26,9 @@ Alle kommandoer kjøres fra `/volume1/jarvisbuild-data/jarvisbuild` (compose og 
 | D-441 | Et tomt eller avkuttet modellsvar i chat er ikke lenger en «stille suksess»: retry ved avkorting, neste kandidat, ellers en ærlig feil; avbrutte turer fortsetter ikke i bakgrunnen | Ingen tomme chatsvar uten forklaring |
 | D-442 | 17 daglige bakgrunnsjobber feiler ikke lenger stille: tenant-feil gir nytt forsøk (1/5/15 min, maks 4 per dag) og `last_error`; morgenbrief som ikke kom frem prøves på nytt; lange jobber fornyer claimet | `scheduler_state.last_error` fylles ved feil |
 | D-443 | Daglige jobber som feiler eller gir opp vises i «Hva er galt med deg?» (område «Daglige bakgrunnsjobber») og i morgenbriefen | Se punkt 4c |
-| D-445 | Nattjobbene som bruker PC-ens lokale modell (`memory-reembed-sweep`, `memory-retention-sweep`) er «best effort»: de prøves på nytt, men et tap er DEGRADED (aldri DOWN, aldri i morgenbriefen) | Ingen morgenvarsel selv om PC-en var av om natten |
 | D-444 | Tomt svar fra lokal modell faller tilbake til vanlig ruting (som ved timeout) i stedet for «Noe gikk galt» | Logglinje `d404_gemma_provider_failed_fallback` med `kind: "invalid_response"`; kan gi en skykostnad |
+| D-445 | Nattjobbene som bruker PC-ens lokale modell (`memory-reembed-sweep`, `memory-retention-sweep`) er «best effort»: de prøves på nytt, men et tap er DEGRADED (aldri DOWN, aldri i morgenbriefen) | Ingen morgenvarsel selv om PC-en var av om natten |
+| D-446 | Jobbkøen: en jobb hvis worker krasjer gjenopptas høyst én gang og settes deretter til `failed` (tidligere kjørte den i det uendelige); retry med ventetid (`backoff_seconds`) | Migrasjon 083 og 084 anvendt; en krasjet jobb ender som `failed` med `lease_expired_claims_exhausted` |
 
 ## 0. Før du starter (1 min)
 
@@ -66,7 +67,7 @@ sudo docker compose --env-file .env -f infra/local/docker-compose.yml ps
 sudo docker exec -it $(sudo docker ps -qf name=postgres) psql -U postgres -d jarvis -P pager=off -c "SELECT name FROM schema_migrations ORDER BY name DESC LIMIT 5;"
 ```
 
-**Forventet (forutsetter at PR #286 er merget):** `080_tenant_scope_fk_rest.sql`, `079_tenant_scope_fk_money.sql`, `078_tenant_scope_fk_identity.sql` øverst.
+**Forventet (forutsetter at #286, #299 og rettelsen #300 er merget):** `084_task_claim_guard_safe_cap.sql`, `083_task_claim_poison_guard.sql`, `082_owner_control_infra_mode.sql`, `081_tenant_scope_fk_incident_evidence.sql`, `080_tenant_scope_fk_rest.sql` øverst. (Migrasjon 083 alene har en kjent feil som 084 retter; oppdater aldri til en `main` som har 083 uten 084.)
 
 ## 4. Loggene bekrefter ruting og køeier
 
@@ -163,6 +164,8 @@ Dagstak: når dagens sum overstiger 30 kr, får verktøyturer en fast merknad og
 Skyrader for vanlig prat (ikke verktøytur) etter D-444 betyr at den lokale modellen svarte tomt eller var nede; tell dem og si fra hvis de er mange.
 
 ## Hvis noe går galt
+
+- **En bakgrunnsjobb står som `failed` med `lease_expired_claims_exhausted`:** workeren krasjet eller ble stoppet to ganger mens jobben kjørte (for eksempel en oppdatering midt i en jobb). Jobben startes ikke på nytt; be om den på nytt. Se `logs worker` rett før feilen for årsaken.
 
 - **Worker starter ikke etter D-434:** en handler mangler en nøkkel. Lim inn `logs worker`; nøkkelen legges i `WORKER_CONNECTOR_ENV` (`infra/local/service-env.mjs`).
 - **Infisical-lesing feiler etter D-436:** sjekk at `INFISICAL_URL` er `http://infisical:8080` (vertsnavn uten understrek).
