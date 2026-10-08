@@ -26,6 +26,7 @@ Alle kommandoer kjøres fra `/volume1/jarvisbuild-data/jarvisbuild` (compose og 
 | D-441 | Et tomt eller avkuttet modellsvar i chat er ikke lenger en «stille suksess»: retry ved avkorting, neste kandidat, ellers en ærlig feil; avbrutte turer fortsetter ikke i bakgrunnen | Ingen tomme chatsvar uten forklaring |
 | D-442 | 17 daglige bakgrunnsjobber feiler ikke lenger stille: tenant-feil gir nytt forsøk (1/5/15 min, maks 4 per dag) og `last_error`; morgenbrief som ikke kom frem prøves på nytt; lange jobber fornyer claimet | `scheduler_state.last_error` fylles ved feil |
 | D-443 | Daglige jobber som feiler eller gir opp vises i «Hva er galt med deg?» (område «Daglige bakgrunnsjobber») og i morgenbriefen | Se punkt 4c |
+| D-445 | Nattjobbene som bruker PC-ens lokale modell (`memory-reembed-sweep`, `memory-retention-sweep`) er «best effort»: de prøves på nytt, men et tap er DEGRADED (aldri DOWN, aldri i morgenbriefen) | Ingen morgenvarsel selv om PC-en var av om natten |
 | D-444 | Tomt svar fra lokal modell faller tilbake til vanlig ruting (som ved timeout) i stedet for «Noe gikk galt» | Logglinje `d404_gemma_provider_failed_fallback` med `kind: "invalid_response"`; kan gi en skykostnad |
 
 ## 0. Før du starter (1 min)
@@ -124,7 +125,7 @@ sudo docker compose --env-file .env -f infra/local/docker-compose.yml logs --tai
    `business_sweeps_no_business_tenants` betyr at alle business-sveip er tomme (forventet inntil tenant-oppsettet er bestemt, JARVIS-044).
 
 **Avvik å melde fra om:**
-- En jobb med `attempts = 4` og `ferdig = f`: den ga opp. Lim inn `siste_feil`.
+- En jobb med `attempts = 4` og `ferdig = f`: den ga opp. Lim inn `siste_feil`. Unntak: `memory-reembed-sweep` og `memory-retention-sweep` bruker PC-ens lokale modell og kan gi opp de nettene PC-en er av; de vises som «avhenger av PC-en; tas igjen neste kjøring» (DEGRADED) og er ikke et avvik.
 - `credential_not_bound_to_identity` fra `business-events-sync`, `conversation-graph-sync` eller `support-inbox-sync`: kjent (Q-48). Planlagte jobber kjører som `system` og kan ikke bruke din Google-konto. Du må velge løsning; se `docs/OPEN_QUESTIONS.md`.
 - Dagens morgenbrief nevner «Bakgrunnsjobb uten resultat: …»: en jobb ga opp eller ble ikke fullført i går.
 
