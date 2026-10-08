@@ -233,6 +233,16 @@ export class TasksDelegateTransport implements ToolTransport {
       // D-424: standard er MED lese-verktøy (e-post/kalender/GitHub/minne - kun lesing); kun eksplisitt `false` gir en jobb uten verktøy.
       const useTools = parameters["use_tools"] !== false;
       const taskId = `task-${randomUUID()}`;
+      // D-449: avgjørelsen tas ÉN gang her; den samme verdien setter flagget i kontrakten og rapporteres tilbake (`cloud_tool_turns`), så hurtigbanen kan si fra når jobben likevel kjører lokalt.
+      const cloudToolTurns =
+        useTools &&
+        cloudToolTurnsAllowed({
+          title,
+          prompt,
+          memorySpaces: [identity.memory_space_id],
+          servingModel: context?.servingModel,
+          contentOrigin: context?.contentOrigin
+        });
       const result = await this.tasks.submit(identity, {
         task_id: taskId,
         owner_person_id: identity.person_id,
@@ -250,16 +260,7 @@ export class TasksDelegateTransport implements ToolTransport {
             ...(useTools ? { tools: true } : {}),
             // D-449 (Q-50, eierens ja): jobber MED verktøy får bruke chattens skyrute (workeren avgjør selv ved kjøring: konfigurert rute, dagstak, fallback). Flagget settes her i trusted
             // kode; `POST /tasks/submit` avviser det i en innsendt kontrakt (det kan ikke forfalskes via API-et), og workeren klassifiserer oppgaveteksten på nytt uansett.
-            ...(useTools &&
-            cloudToolTurnsAllowed({
-              title,
-              prompt,
-              memorySpaces: [identity.memory_space_id],
-              servingModel: context?.servingModel,
-              contentOrigin: context?.contentOrigin
-            })
-              ? { cloud_tool_turns_allowed: true }
-              : {})
+            ...(cloudToolTurns ? { cloud_tool_turns_allowed: true } : {})
           },
           trust_level: "internal",
           provenance: `chat:${identity.session_id}`
@@ -273,7 +274,7 @@ export class TasksDelegateTransport implements ToolTransport {
         max_steps: 6
       });
       if (!result.ok) return { data: { started: false, reason: result.reason, message: "Jobben ble ikke startet." } };
-      return { data: { started: true, task_id: result.value.task_id, title, message: "Jobben kjører i bakgrunnen. Si til Tobias at du gir beskjed i chatten når den er ferdig - han kan fortsette å snakke med deg." } };
+      return { data: { started: true, task_id: result.value.task_id, title, cloud_tool_turns: cloudToolTurns, message: "Jobben kjører i bakgrunnen. Si til Tobias at du gir beskjed i chatten når den er ferdig - han kan fortsette å snakke med deg." } };
     }
     if (action === "get_task_status") {
       const id = parameters["task_id"];

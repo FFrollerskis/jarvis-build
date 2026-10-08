@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fastRoute } from "@jarvis/core";
+import { delegationRequestVariants, fastRoute } from "@jarvis/core";
 
 describe("Fast Router v1 (deterministisk, uten LLM)", () => {
   it("matcher kjente kommandoer", () => {
@@ -71,3 +71,43 @@ describe("fastRoute: cost_report og delegate_background (D-424)", () => {
   });
 });
 
+// D-449 (Q-50, gjennomgang nr. 4): hurtigbanen vurderes som om eieren hadde skrevet forespørselen UTEN delegeringsfrasen; ALLE rimelige fjerninger returneres og den strengeste vinner.
+describe("delegationRequestVariants (D-449)", () => {
+  it("returnerer meldingen slik den står og hver fjerning av frasen/prefikset - uten duplikater og uten tomme varianter", () => {
+    expect(delegationRequestVariants("list åpne PR-er i bakgrunnen")).toEqual(["list åpne PR-er i bakgrunnen", "list åpne PR-er"]);
+    expect(delegationRequestVariants("Bakgrunnsjobb: sammenstill priser fra e-postene mine")).toEqual(["Bakgrunnsjobb: sammenstill priser fra e-postene mine", "sammenstill priser fra e-postene mine"]);
+    expect(delegationRequestVariants("deleger:   sjekk kalenderen min neste uke")).toContain("sjekk kalenderen min neste uke");
+    expect(delegationRequestVariants("   ")).toEqual([]);
+    expect(delegationRequestVariants("i bakgrunnen")).toEqual(["i bakgrunnen"]);
+  });
+
+  it("frasen midt i en setning: variantene bevarer ordene på hver side slik chatten ville sett dem (ingen sammenslåing av «bruk» og «bare»)", () => {
+    const variants = delegationRequestVariants("Sjekk e-posten min, og bruk i bakgrunnen bare lokale modeller");
+    expect(variants).toContain("Sjekk e-posten min, og bruk bare lokale modeller");
+    expect(variants.every((v) => !/\bi bakgrunnen\b/i.test(v) || v === "Sjekk e-posten min, og bruk i bakgrunnen bare lokale modeller")).toBe(true);
+  });
+
+  it("linjeskift: én variant beholder linjeskiftet (et mønster med `.*` treffer ikke på tvers av linjer), en annen slår alt mellomrom sammen", () => {
+    const variants = delegationRequestVariants("hvor lang tid tar det\ndit i bakgrunnen");
+    expect(variants).toContain("hvor lang tid tar det\ndit");
+    const mid = delegationRequestVariants("hvor lang tid tar det i bakgrunnen\ndit");
+    expect(mid).toContain("hvor lang tid tar det\ndit");
+    expect(mid).toContain("hvor lang tid tar det dit");
+  });
+
+  it("tegn mellom frasen og resten (komma, punktum, spørsmålstegn, tab, versaler) gir varianter uten frasen; ingen variant er selv en bestilling", () => {
+    for (const text of [
+      "list åpne PR-er i bakgrunnen.", "list åpne PR-er i bakgrunnen?", "list åpne PR-er\ti bakgrunnen", "list åpne PR-er I BAKGRUNNEN", "I bakgrunnen, list åpne PR-er",
+      "Bakgrunnsjobb: list åpne PR-er", "list åpne PR-er i bakgrunnen og i bakgrunnen igjen"
+    ]) {
+      expect(fastRoute(text)?.kind, text).toBe("delegate_background");
+      const variants = delegationRequestVariants(text);
+      expect(variants[0], text).toBe(text);
+      for (const variant of variants.slice(1)) {
+        expect(variant, text).not.toMatch(/\bi bakgrunnen\b/i);
+        expect(fastRoute(variant)?.kind, `${text} → ${variant}`).not.toBe("delegate_background");
+      }
+      expect(variants.length, text).toBeGreaterThan(1);
+    }
+  });
+});

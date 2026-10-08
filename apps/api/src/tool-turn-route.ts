@@ -81,11 +81,14 @@ export function localOnlyNote(reasons: readonly string[]): string {
  * inneholde ord sensitivitetsklassifiseringen reagerer på (svaret lagres i samtalen) - låst av en test.
  */
 const JOB_LOCAL_REASONS: Readonly<Record<string, string>> = {
-  owner_routing_override: "du ba om lokal behandling",
+  // Gjelder enhver instruks om modellvalg i meldingen («kun lokale modeller», «bruk Claude», «ikke bruk AI-rådet» ...): en bakgrunnsjobb kan ikke velge modell per melding, så den holdes lokal.
+  owner_routing_override: "meldingen har en egen instruks om modellvalg, og slike jobber holdes lokale",
   explicit_provider: "denne enheten eller økten er satt til en bestemt modell",
   pasted_content: "innlimt tekst regnes ikke som dine egne ord",
   routing_unreadable: "samtalen kunne ikke kontrolleres",
-  "tool_selection:SECRET_RESTRICTED": "meldingen peker på økonomitjenester, og slikt sendes aldri til skyen"
+  "tool_selection:SECRET_RESTRICTED": "meldingen peker på økonomitjenester, og slikt sendes aldri til skyen",
+  // Gjennomgang nr. 4: samtalen var ren, men selve jobbteksten (tittel + prompt) berører økonomi, helse eller hemmeligheter, så transporten ga ikke jobben skyflagget.
+  job_text_gate: "selve jobbteksten berører økonomi, helse eller hemmeligheter, og slikt sendes aldri til skyen"
 };
 
 export function jobLocalOnlyNote(reasons: readonly string[]): string {

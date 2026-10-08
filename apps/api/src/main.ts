@@ -1104,11 +1104,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
           ...(options?.cloudAllowed === true ? { contentOrigin: "owner_direct" as const } : {})
         });
         if (!result.ok) return null;
-        const data = result.data as { started?: unknown; message?: unknown } | undefined;
+        const data = result.data as { started?: unknown; message?: unknown; cloud_tool_turns?: unknown } | undefined;
         // `started` skiller en faktisk startet jobb fra en forklaring («for mange aktive jobber»): kun en startet jobb får merknaden om at den kjører lokalt.
+        // `cloud` = om transporten FAKTISK ga jobben skyflagget (den kontrollerer jobbteksten selv, også når motoren sa ja) - kun eksplisitt `true` teller (fail-closed).
         return data?.started === true
-          ? { started: true, reply: `Jobben «${title}» er startet i bakgrunnen. Jeg gir beskjed her når den er ferdig - du kan fortsette å snakke med meg.` }
-          : typeof data?.message === "string" ? { started: false, reply: data.message } : null;
+          ? { started: true, reply: `Jobben «${title}» er startet i bakgrunnen. Jeg gir beskjed her når den er ferdig - du kan fortsette å snakke med meg.`, cloud: data.cloud_tool_turns === true }
+          : typeof data?.message === "string" ? { started: false, reply: data.message, cloud: false } : null;
       }
     },
     memory: {

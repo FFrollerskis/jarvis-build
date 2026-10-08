@@ -1,5 +1,5 @@
 import { envInt, type DataSensitivity, type IdentityContext } from "@jarvis/contracts";
-import { ContextBuilder, MessageStore, describeSecretFindings, fastRoute, scanForSecrets } from "@jarvis/core";
+import { ContextBuilder, MessageStore, delegationRequestVariants, describeSecretFindings, fastRoute, scanForSecrets } from "@jarvis/core";
 import {
   BudgetExceededError,
   CouncilAutoTriggerLimiter,
@@ -44,8 +44,10 @@ export interface ConversationDeps {
    * D-424: «… i bakgrunnen» for hurtigbanen (`tasks.delegate_background_task` via Tool Gateway/Policy - eierens egen melding, ikke modellens valg).
    * D-449: `options.cloudAllowed` er motorens EGEN avgjørelse (samme regler som chatten bruker for en verktøytur: eierens ruteoverstyring, de siste meldingene, minnerommet, innlimt tekst) - kun `true`
    * lar jobben bruke skyruten. Udefinert/`false` = jobben kjører lokalt som før D-449 (fail-closed).
+   * Svaret har `cloud`: om jobben FAKTISK fikk skyflagget. Det kan være `false` selv når motoren sa ja, fordi transporten gjør en egen kontroll av selve jobbteksten (gjennomgang nr. 4: et slikt stille
+   * lokalt-utfall skal ha merknad).
    */
-  delegateBackground?: { run(identity: IdentityContext, prompt: string, options?: { cloudAllowed: boolean }): Promise<{ started: boolean; reply: string } | null> };
+  delegateBackground?: { run(identity: IdentityContext, prompt: string, options?: { cloudAllowed: boolean }): Promise<{ started: boolean; reply: string; cloud: boolean } | null> };
   /** D-395: injiserbar begrenser for automatisk råd-trigger (tester); default bygges fra JARVIS_COUNCIL_AUTO_MAX_PER_HOUR. */
   councilAutoLimiter?: CouncilAutoTriggerLimiter;
   /** Fase 4: hybridminne-kontekst med kildeangivelse (kun gjeldende space). */
@@ -829,17 +831,26 @@ export class ConversationEngine {
    */
   private async delegationCloudDecision(identity: IdentityContext, text: string, surface: Surface, provider: string | undefined): Promise<{ allowed: boolean; reasons: string[] }> {
     if (provider !== undefined) return { allowed: false, reasons: ["explicit_provider"] };
-    if (parseRoutingOverride(text) !== null) return { allowed: false, reasons: ["owner_routing_override"] };
-    if (looksLikePastedContent(text)) return { allowed: false, reasons: ["pasted_content"] };
     // «… i bakgrunnen» treffer selv verktøyutvalgets delegeringsord (`tasks`), som hindrer at tjenester fra eierens tidligere meldinger arves (D-389) - det ville de blitt for selve forespørselen uten
-    // delegeringsfrasen. Derfor vurderes ruten for BÅDE meldingen slik den står OG forespørselen uten delegeringsfrasen (som om eieren hadde sendt den som vanlig chat); den strengeste vinner.
-    const stripped = text.replace(/\bi bakgrunnen\b/gi, " ").replace(/^\s*(?:bakgrunnsjobb|deleger)\s*:\s*/i, "").replace(/\s+/g, " ").trim();
+    // delegeringsfrasen. Derfor vurderes ALT (ruteinstruksjon, innlimt tekst og ruten selv) for meldingen slik den står OG for hver fjerning av frasen (`delegationRequestVariants`: som om eieren hadde
+    // sendt forespørselen som vanlig chat); den strengeste vinner. (Gjennomgang nr. 4: instruksjonen «bruk i bakgrunnen bare lokale modeller» ble tidligere kun sjekket slik den sto, med frasen midt i.)
+    const variants = delegationRequestVariants(text);
+    for (const variant of variants) {
+      if (parseRoutingOverride(variant) !== null) return { allowed: false, reasons: ["owner_routing_override"] };
+      if (looksLikePastedContent(variant)) return { allowed: false, reasons: ["pasted_content"] };
+    }
     try {
       const historyRows = await this.deps.messages.history(identity, 20);
-      for (const candidate of new Set([text, stripped].filter((t) => t.length > 0))) {
-        // Den siste raden er den nettopp lagrede meldingen; for den strippede varianten skal chatten sett akkurat den teksten.
-        const rows = historyRows.map((m, i) => (i === historyRows.length - 1 && m.role === "user" && m.content === text ? { ...m, content: candidate } : m));
-        const routing = await this.resolveTurnRouting({ identity, text: candidate, surface, provider, override: null, historyRows: rows, touchMemory: false });
+      // Den nettopp lagrede meldingen er den SISTE BRUKERRADEN (en leveringsmelding eller annen assistentrad kan ha kommet inn etter den) - samme regel som chattens `ownerTurns.pop()`, som også ser på siste
+      // brukerrad og ikke siste rad. For en variant skal chatten ha sett akkurat den teksten i historikken.
+      let ownRow = -1;
+      for (let i = historyRows.length - 1; i >= 0 && ownRow < 0; i--) {
+        const row = historyRows[i]!;
+        if (row.role === "user" && row.content === text) ownRow = i;
+      }
+      for (const variant of variants) {
+        const rows = ownRow < 0 ? historyRows : historyRows.map((m, i) => (i === ownRow ? { ...m, content: variant } : m));
+        const routing = await this.resolveTurnRouting({ identity, text: variant, surface, provider, override: null, historyRows: rows, touchMemory: false });
         if (routing.sensitivityDecision.sensitivity === "SECRET_RESTRICTED") return { allowed: false, reasons: routing.sensitivityDecision.reasons };
       }
       return { allowed: true, reasons: [] };
@@ -882,8 +893,11 @@ export class ConversationEngine {
           return { reply: "Jeg fikk ikke startet bakgrunnsjobben (verktøyet svarte ikke eller ble avslått). Ingenting er startet.", routed: "fast" };
         }
         // D-447-prinsippet: en jobb som tvinges til den lokale modellen skal ikke gjøre det usynlig (ingen merknad på tale; kun kategorier, aldri innhold). Kun når jobben faktisk ble startet.
-        if (started.started && !cloud.allowed) console.log(JSON.stringify({ msg: "d449_fast_delegate_local", reasons: cloud.reasons }));
-        const note = started.started && !cloud.allowed && surface !== "voice" ? jobLocalOnlyNote(cloud.reasons) : "";
+        // Lokalt kan skyldes motorens avgjørelse (`cloud.reasons`) ELLER transportens egen kontroll av jobbteksten (motoren sa ja, men jobben fikk likevel ikke skyflagget, gjennomgang nr. 4).
+        const jobLocal = started.started && !(cloud.allowed && started.cloud);
+        const localReasons = cloud.allowed ? ["job_text_gate"] : cloud.reasons;
+        if (jobLocal) console.log(JSON.stringify({ msg: "d449_fast_delegate_local", reasons: localReasons }));
+        const note = jobLocal && surface !== "voice" ? jobLocalOnlyNote(localReasons) : "";
         return { reply: `${started.reply}${note}`, routed: "fast" };
       }
       case "help":

@@ -408,9 +408,10 @@ describe("D-449: delegeringens kontrakt (TasksDelegateTransport)", () => {
       expect(submitted[0]!.input.data["paid_models_allowed"]).toBe(false);
     }
     const { submitted, t } = transport();
-    await invoke(t, { title: "Uten verktøy", prompt: "skriv en kort hilsen til teamet", use_tools: false }, { servingModel: sonnet });
+    const noTools = await invoke(t, { title: "Uten verktøy", prompt: "skriv en kort hilsen til teamet", use_tools: false }, { servingModel: sonnet });
     expect(submitted[0]!.input.data["cloud_tool_turns_allowed"]).toBeUndefined();
     expect(submitted[0]!.input.data["tools"]).toBeUndefined();
+    expect((noTools.data as Record<string, unknown>)["cloud_tool_turns"]).toBe(false);
   });
 
   it("opphav: skybetjent tur → tillatt; lokal eller ukjent modell → nei; hurtigbane (owner_direct) → tillatt; UTEN modell og UTEN eier-merke (f.eks. en eier-godkjent bekreftelse) → nei (fail-closed)", () => {
@@ -444,8 +445,11 @@ describe("D-449: delegeringens kontrakt (TasksDelegateTransport)", () => {
   it("ende til ende gjennom transporten: lokalbetjent tur, bekreftelsesvei (hverken modell eller eier-merke) og helse-minnerom → ingen skyflagg; skybetjent tur og hurtigbane → flagg", async () => {
     const run = async (trusted: Trusted, params: Record<string, unknown> = { title: "Åpne PR-er", prompt: "list åpne PR-er i repoet" }) => {
       const { submitted, t } = transport();
-      await invoke(t, params, trusted);
-      return submitted[0]!.input.data["cloud_tool_turns_allowed"];
+      const result = await invoke(t, params, trusted);
+      const flag = submitted[0]!.input.data["cloud_tool_turns_allowed"];
+      // Gjennomgang nr. 4: transporten melder tilbake NØYAKTIG det den satte i kontrakten (`cloud_tool_turns`), så hurtigbanen kan si fra når jobben likevel kjører lokalt.
+      expect((result.data as Record<string, unknown>)["cloud_tool_turns"], JSON.stringify(trusted)).toBe(flag === true);
+      return flag;
     };
     expect(await run({ servingModel: ollama })).toBeUndefined();
     expect(await run({})).toBeUndefined(); // bekreftelsesveien i server.ts (/confirmations) kaller gatewayen uten modell og uten eier-merke
@@ -541,6 +545,9 @@ describe("D-449: oppkobling (kildevakt)", () => {
     expect(tokens).toEqual({ "apps/api/src/chat-jobs.ts": 4, "apps/api/src/main.ts": 1, "modules/tool-gateway/src/gateway.ts": 5 });
 
     const main = read("../src/main.ts");
+    // Gjennomgang nr. 4: hurtigbanen får vite om jobben FAKTISK fikk skyflagget (transportens egen kontroll av jobbteksten) - kun eksplisitt `true` fra transporten teller, aldri antatt.
+    expect(main).toContain("cloud: data.cloud_tool_turns === true");
+    expect(main).toContain("{ started: false, reply: data.message, cloud: false }");
     const deleg = main.indexOf("delegateBackground: {");
     const marker = main.indexOf('contentOrigin: "owner_direct"');
     expect(marker).toBeGreaterThan(deleg);
