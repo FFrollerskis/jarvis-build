@@ -14,8 +14,11 @@ const ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const SCRIPT = join(ROOT, "ops/nas/enroll-device.sh");
 const DEFAULT_COMPOSE = join(ROOT, "infra/local/docker-compose.yml");
 const BASE = "https://dxp4800plus-ring.tail3935f7.ts.net";
+// Markør som IKKE skal dukke opp i docker-argumentene eller utdataene. Bygget ved kjøring i stedet for som bokstavelig verdi etter «PASSWORD=»:
+// gitleaks (generic-api-key) leser en slik linje som en ekte hemmelighet selv i en testfixtur (PR #302, første commit).
+const SENTINEL = ["ikke", "i", "args", "eller", "utdata"].join("_");
 
-function setup(envContent = "JARVIS_DB_ADMIN_PASSWORD=hemmelig-passord-123\nJARVIS_OWNER_NAME=Eier\n") {
+function setup(envContent = `JARVIS_DB_ADMIN_PASSWORD=${SENTINEL}\nJARVIS_OWNER_NAME=Eier\n`) {
   const dir = mkdtempSync(join(tmpdir(), "enroll-test-"));
   const log = join(dir, "docker-args.log");
   const envFile = join(dir, "env");
@@ -96,12 +99,12 @@ describe("ops/nas/enroll-device.sh", () => {
     expect(fromEnv.dockerArgs).toContain(`JARVIS_PUBLIC_VOICE_BASE_URL=${BASE}`);
 
     const fromFile = run([], {
-      envContent: `JARVIS_DB_ADMIN_PASSWORD=hemmelig-passord-123\r\nJARVIS_PUBLIC_VOICE_BASE_URL="${BASE}"\r\nJARVIS_OWNER_NAME=Eier\r\n`
+      envContent: `JARVIS_DB_ADMIN_PASSWORD=${SENTINEL}\r\nJARVIS_PUBLIC_VOICE_BASE_URL="${BASE}"\r\nJARVIS_OWNER_NAME=Eier\r\n`
     });
     expect(fromFile.status, fromFile.out).toBe(0);
     expect(fromFile.dockerArgs).toContain(`JARVIS_PUBLIC_VOICE_BASE_URL=${BASE}`);
-    expect(fromFile.dockerArgs?.join("\n")).not.toContain("hemmelig-passord-123");
-    expect(fromFile.out).not.toContain("hemmelig-passord-123");
+    expect(fromFile.dockerArgs?.join("\n")).not.toContain(SENTINEL);
+    expect(fromFile.out).not.toContain(SENTINEL);
 
     // Argumentet vinner over miljø og fil.
     const arg = run(["https://annen.ts.net"], { env: { JARVIS_PUBLIC_VOICE_BASE_URL: BASE } });
@@ -120,7 +123,7 @@ describe("ops/nas/enroll-device.sh", () => {
     expect(code).not.toMatch(/\btee\b/);
     expect(code).not.toMatch(/>>/);
     // Omdirigeringer er kun til stderr eller /dev/null - aldri til en fil (billetten går bare til terminalen).
-    for (const m of code.matchAll(/(?<![<>=\-])\s*[0-9]?>(?!>)\s*(\S+)/g)) {
+    for (const m of code.matchAll(/(?<![<>=-])\s*[0-9]?>(?!>)\s*(\S+)/g)) {
       expect(["&2", "&1", "/dev/null"], `uventet omdirigering: ${m[0]}`).toContain(m[1].replace(/[;})"']+$/g, ""));
     }
     // Alle grep mot env-filen gjelder kun adressevariabelen.
