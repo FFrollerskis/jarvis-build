@@ -3,14 +3,19 @@ import { classifyContentSensitivity, type ToolExecutor } from "@jarvis/model-gat
 import type { ToolResultMessage } from "@jarvis/provider-adapters";
 
 /**
- * D-449 (Q-50, revisjonsfunn): en delegert jobb på skyruten sender VERKTØYRESULTATENE videre til skymodellen. Minnesøket (`memory.search`) returnerer alle aktive treff i jobbens minnerom uten
- * filter, også elementer merket `special` og helse-rommet - data som aldri skal til en skymodell (D-378). Chatten klassifiserer det omgivende minnet FØR turen (`memory_sensitivities`), men et
- * eksplisitt søk midt i en verktøyrunde ble aldri klassifisert på nytt. Denne porten gjør det for jobber: et minnetreff som er `special`, ligger i helse-rommet eller selv klassifiseres som
- * `SECRET_RESTRICTED` (helse/økonomi/hemmeligheter i teksten) holdes TILBAKE fra skymodellen, og modellen får beskjed om at noe ble holdt tilbake (aldri innholdet).
+ * D-449 (Q-50, revisjonsfunn): en delegert jobb på skyruten sender VERKTØYRESULTATENE videre til skymodellen. Minnesøket (`memory.search`) returnerer alle aktive treff i minnerommet uten filter, også elementer
+ * merket `special` og helse-rommet - data som aldri skal til en skymodell (D-378). Chatten klassifiserer det omgivende minnet FØR turen (`memory_sensitivities`), men et eksplisitt søk midt i en verktøyrunde
+ * ble aldri klassifisert på nytt. Denne porten gjør det for jobber: et minnetreff holdes TILBAKE fra skymodellen med mindre det er positivt trygt (fail-closed):
+ *  - `sensitivity` må være eksplisitt `normal` eller `sensitive` (`special` og alt ukjent/manglende holdes tilbake). Unntak: sammendrag (`kind: "summary"`) har ingen slik kolonne, men tar aldri med `special`-minner
+ *    (`summaries.ts`) og klassifiseres på tekst. Gjennomgang nr. 2 fant at relasjons-/lenketreff manglet feltet (rettet i `retriever.ts`) - og en manglende verdi regnes derfor ikke lenger som «ufarlig».
+ *  - rommet må være kjent og ikke gjøre treffet `SECRET_RESTRICTED` (helse-rommet).
+ *  - all tekst treffet bærer klassifiseres: emne, innhold, nøkkelord OG tidligere versjoner (`versions[].content`; en oppdatering regner ikke om sensitiviteten, så en gammel versjon kan bære helsetekst
+ *    selv om elementet står som `normal`).
+ * Modellen får beskjed om at noe ble holdt tilbake (aldri innholdet).
  *
- * Avgrensning (ærlig, se D-449 og Q-52): `memory.search` er det eneste bakgrunnsverktøyet med STRUKTURERTE sensitivitetsmerker. E-post, kalender og GitHub har ingen slike merker, og en
- * stikkordsskanning av hele resultatene ville gitt mange falske treff (en GitHub-liste fra dette repoet inneholder rutinemessig ord som «gjeld» og «lønn» i grennavn og tittel) og gjort
- * hovedbruken (PR-lister) ubrukelig. De har derfor samme oppførsel som chattens verktøyturer (D-431). Å utvide skjermingen til tekstskanning av alle resultater er et eget valg for eieren (Q-52).
+ * Avgrensning (ærlig, se D-449 og Q-52): `memory.search` er det eneste bakgrunnsverktøyet med STRUKTURERTE sensitivitetsmerker. E-post, kalender og GitHub har ingen slike merker, og en stikkordsskanning av hele
+ * resultatene ville gitt mange falske treff (en GitHub-liste fra dette repoet inneholder rutinemessig ord som «gjeld» og «lønn» i grennavn og tittel) og gjort hovedbruken (PR-lister) ubrukelig. De har derfor
+ * samme oppførsel som chattens verktøyturer (D-431). Å utvide skjermingen til tekstskanning av alle resultater er et eget valg for eieren (Q-52). Selve tekstklassifiseringen er stikkordsbasert og smal (Q-52).
  */
 
 /** Verktøykilden (`tool_id.action`) som skjermes. */
@@ -20,28 +25,59 @@ const SCREENED_MEMORY_TOOL_NAME = "search_my_memory";
 
 /**
  * Hvert verktøy på bakgrunnsflaten er enten skjermet (strukturerte merker) eller bevisst vurdert som «samme som chattens verktøyturer». Låst av en test mot `SURFACE_TOOL_GRANTS.background`:
- * et nytt bakgrunnsverktøy MÅ klassifiseres her før skyruten får lese det (GitHub-lesing er vurdert som gruppe, se `isReviewedBackgroundTool`).
+ * et nytt bakgrunnsverktøy (også en ny GitHub-handling) MÅ klassifiseres her før skyruten får lese det.
  */
 export const CLOUD_SCREEN_COVERAGE: Readonly<Record<string, "screened" | "reviewed_parity_with_chat">> = {
   "memory.search": "screened",
   "email.read_inbox": "reviewed_parity_with_chat",
   "calendar.read_events": "reviewed_parity_with_chat",
-  "executive.get_capability_status": "reviewed_parity_with_chat"
+  "executive.get_capability_status": "reviewed_parity_with_chat",
+  "github.read_issues": "reviewed_parity_with_chat",
+  "github.get_branch": "reviewed_parity_with_chat",
+  "github.get_commit": "reviewed_parity_with_chat",
+  "github.get_pull_request": "reviewed_parity_with_chat",
+  "github.list_branches": "reviewed_parity_with_chat",
+  "github.list_pull_requests": "reviewed_parity_with_chat",
+  "github.list_workflow_jobs": "reviewed_parity_with_chat",
+  "github.list_workflow_runs": "reviewed_parity_with_chat",
+  "github.read_repo_meta": "reviewed_parity_with_chat"
 };
 
 export function isReviewedBackgroundTool(toolId: string, action: string): boolean {
-  return `${toolId}.${action}` in CLOUD_SCREEN_COVERAGE || toolId === "github";
+  return Object.prototype.hasOwnProperty.call(CLOUD_SCREEN_COVERAGE, `${toolId}.${action}`);
 }
 
-/** Ett minnetreff kan til skymodellen kun hvis rommet er kjent og hverken merket, rommet eller teksten gjør det til `SECRET_RESTRICTED`. Ukjent form = ikke trygt. */
+/**
+ * Feltene et minnetreff fra `MemoryRetriever.search()` har i dag (`RetrievedItem`). Et ukjent felt kunne bære tekst ingen har klassifisert, så et treff med ukjente felt holdes tilbake (fail-closed) - og en test
+ * mot ekte retriever-utdata feiler FØR det blir et driftsproblem hvis retrieveren får et nytt felt, så valget gjøres bevisst her.
+ */
+export const KNOWN_MEMORY_ITEM_FIELDS: ReadonlySet<string> = new Set([
+  "memory_item_id", "kind", "subject", "content", "type", "space", "valid_from", "valid_to", "has_conflict", "importance", "observed_at",
+  "keywords", "sensitivity", "source", "score", "via", "versions"
+]);
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** Ett minnetreff kan til skymodellen kun hvis det er positivt trygt (se filhodet). Ukjent form = ikke trygt. */
 function memoryItemIsCloudSafe(item: unknown): boolean {
-  if (typeof item !== "object" || item === null) return false;
-  const rec = item as Record<string, unknown>;
-  const space = rec["space"];
-  if (typeof space !== "string" || space === "") return false;
-  const texts = [rec["subject"], rec["content"]].filter((value): value is string => typeof value === "string");
-  const sensitivities = typeof rec["sensitivity"] === "string" ? [rec["sensitivity"]] : [];
-  return classifyContentSensitivity({ memory_spaces: [space], memory_sensitivities: sensitivities, texts }).sensitivity !== "SECRET_RESTRICTED";
+  if (!isRecord(item)) return false;
+  if (Object.keys(item).some((key) => !KNOWN_MEMORY_ITEM_FIELDS.has(key))) return false;
+  const { space, sensitivity, subject, content, keywords, versions, source } = item;
+  if (typeof space !== "string" || space === "" || typeof subject !== "string" || typeof content !== "string") return false;
+  const explicit = sensitivity === "normal" || sensitivity === "sensitive";
+  const summaryWithoutColumn = item["kind"] === "summary" && sensitivity === undefined;
+  if (!explicit && !summaryWithoutColumn) return false;
+  if (keywords !== undefined && !(Array.isArray(keywords) && keywords.every((k) => typeof k === "string"))) return false;
+  if (versions !== undefined && !(Array.isArray(versions) && versions.every((v) => isRecord(v) && typeof v["content"] === "string"))) return false;
+  if (source !== undefined && !(isRecord(source) && Object.values(source).every((v) => typeof v === "string"))) return false;
+  const texts = [
+    subject,
+    content,
+    ...((keywords as string[] | undefined) ?? []),
+    ...((versions as Array<{ content: string }> | undefined) ?? []).map((v) => v.content),
+    ...(source !== undefined ? [(source as Record<string, string>)["ref"] ?? ""] : [])
+  ];
+  return classifyContentSensitivity({ memory_spaces: [space], memory_sensitivities: explicit ? [sensitivity] : [], texts }).sensitivity !== "SECRET_RESTRICTED";
 }
 
 export interface CloudScreenOutcome {
@@ -50,22 +86,20 @@ export interface CloudScreenOutcome {
   withheld: number;
 }
 
+const WITHHELD_ALL_NOTE =
+  "Minnesøket ble holdt tilbake fra denne modellen fordi resultatet ikke kunne kontrolleres for følsomt innhold. Svar uten minnet og si at minnet ikke ble lest.";
+
 /**
  * Skjermer ETT verktøyresultat før det kan nå skymodellen. Urørt (samme objekt) når ingenting er holdt tilbake. Et minnesøk uten kjent listeform (f.eks. et avkortet forhåndsvisningsobjekt, der treffene
- * ikke lar seg skille fra hverandre) holdes tilbake i sin helhet - fail-closed.
+ * ikke lar seg skille fra hverandre) holdes tilbake i sin helhet - fail-closed. Det samme gjelder et FEILET minnesøk som likevel bærer en liste (ingen kode produserer det i dag; en feil skal bare ha en forklaring).
  */
 export function screenToolResultForCloud(out: ToolResultMessage, toolName?: string): CloudScreenOutcome {
   const isMemorySearch = out.source === SCREENED_MEMORY_SOURCE || (out.source === undefined && toolName === SCREENED_MEMORY_TOOL_NAME);
-  if (!isMemorySearch || !out.success || out.output === null || out.output === undefined) return { result: out, withheld: 0 };
-  if (!Array.isArray(out.output)) {
-    return {
-      result: {
-        ...out,
-        output: { withheld_count: 1, note: "Minnesøket ble holdt tilbake fra denne modellen fordi resultatet ikke kunne kontrolleres for følsomt innhold. Svar uten minnet og si at minnet ikke ble lest." }
-      },
-      withheld: 1
-    };
+  if (!isMemorySearch || out.output === null || out.output === undefined) return { result: out, withheld: 0 };
+  if (!out.success) {
+    return Array.isArray(out.output) ? { result: { ...out, output: { withheld_count: 1, note: WITHHELD_ALL_NOTE } }, withheld: 1 } : { result: out, withheld: 0 };
   }
+  if (!Array.isArray(out.output)) return { result: { ...out, output: { withheld_count: 1, note: WITHHELD_ALL_NOTE } }, withheld: 1 };
   const kept = out.output.filter(memoryItemIsCloudSafe);
   const withheld = out.output.length - kept.length;
   if (withheld === 0) return { result: out, withheld: 0 };
@@ -75,7 +109,7 @@ export function screenToolResultForCloud(out: ToolResultMessage, toolName?: stri
       output: {
         results: kept,
         withheld_count: withheld,
-        note: `${withheld} minnetreff ble holdt tilbake fra denne modellen fordi de er merket som særlig sensitive. Si at noe ble holdt tilbake hvis det påvirker svaret.`
+        note: `${withheld} minnetreff ble holdt tilbake fra denne modellen fordi de er merket som særlig sensitive eller ikke kunne kontrolleres. Si at noe ble holdt tilbake hvis det påvirker svaret.`
       }
     },
     withheld

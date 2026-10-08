@@ -20,10 +20,16 @@ describe("Q-52: det som fanges i dag fortsatt fanges (ubestemte former og enkelt
 });
 
 describe("Q-52: KJENTE HULL (klassifiseres i dag som uskyldig; ønsket oppførsel er SECRET_RESTRICTED)", () => {
-  const definiteForms = ["legen", "fastlegen", "legetimen", "behandlingen", "kreften", "kontoutskriften", "pensjonen", "aksjene", "blodtrykket"];
+  // Bestemte former av ord som fanges i ubestemt form («lege» fanges, «legen» ikke).
+  const definiteFormsOfCaughtWords = ["legen", "fastlegen", "legetimen", "kreften", "blodtrykket"];
+  // Fanges i INGEN form (verken ubestemt eller bestemt) - målt av gjennomgang nr. 2 av Q-50.
+  const notCaughtInAnyForm = [
+    "behandling", "behandlingen", "kontoutskrift", "kontoutskriften", "pensjon", "pensjonen", "aksjer", "aksjene", "bankkonto", "kredittkortet", "inkasso",
+    "gravid", "abort", "HIV", "sykmeldt", "svangerskap", "kolonoskopi", "PIN-koden er 4321"
+  ];
   const healthVocabulary = ["helse", "helseproblemer", "ADHD", "psykiater", "tannlege", "tannlegen", "terapi", "terapeut", "migrene", "kolesterol", "insulin", "kjemoterapi", "antidepressiva", "covid", "sykmelding"];
   const financeVocabulary = ["skatten", "kontoen", "pengene", "økonomien"];
-  for (const word of [...definiteForms, ...healthVocabulary, ...financeVocabulary]) {
+  for (const word of [...definiteFormsOfCaughtWords, ...notCaughtInAnyForm, ...healthVocabulary, ...financeVocabulary]) {
     it.fails(`«${word}» fanges ikke i dag (Q-52)`, () => {
       expect(classify(word)).toBe("SECRET_RESTRICTED");
     });

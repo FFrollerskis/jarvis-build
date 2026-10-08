@@ -124,8 +124,8 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
           input.cloud_tool_turns_allowed === true &&
           sensitivity.success &&
           sensitivity.data !== "SECRET_RESTRICTED" &&
-          // Forsvar i dybden: oppgaveteksten og minnerommene jobben får lese klassifiseres OGSÅ her, uavhengig av hvordan kontrakten ble sendt inn (en kontrakt kan i prinsippet bygges av andre enn chatten).
-          classifyContentSensitivity({ texts: [input.prompt], memory_spaces: task.contract.allowed_memory_spaces }).sensitivity !== "SECRET_RESTRICTED";
+          // Forsvar i dybden: oppgaveteksten, tittelen (`goal`) og minnerommene jobben får lese klassifiseres OGSÅ her, uavhengig av hvordan kontrakten ble sendt inn (en kontrakt kan i prinsippet bygges av andre enn chatten).
+          classifyContentSensitivity({ texts: [input.prompt, task.contract.goal], memory_spaces: task.contract.allowed_memory_spaces }).sensitivity !== "SECRET_RESTRICTED";
         if (toolRoute !== null && cloudWanted) {
           // Dagstaket sjekkes kun når jobben faktisk ville gått til sky. Kan kostnaden ikke leses, feiler vi lukket (lokalt), som chatten (D-432).
           const dayCap = opts.toolTurnDayCap ?? null;

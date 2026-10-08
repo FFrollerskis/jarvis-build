@@ -76,6 +76,26 @@ export function localOnlyNote(reasons: readonly string[]): string {
 }
 
 /**
+ * D-449 (Q-50, gjennomgang nr. 2): merknaden i svaret på «… i bakgrunnen» når jobben kjører på den lokale modellen i stedet for skyruten (eierens ruteoverstyring, innlimt tekst, en samtale som nylig berørte
+ * økonomi/helse/hemmeligheter, helse-minnerom, eller en historikk som ikke kunne leses). Samme prinsipp som D-447: aldri en usynlig nedgradering, kun kategorier (aldri innhold), og teksten må selv ikke
+ * inneholde ord sensitivitetsklassifiseringen reagerer på (svaret lagres i samtalen) - låst av en test.
+ */
+const JOB_LOCAL_REASONS: Readonly<Record<string, string>> = {
+  owner_routing_override: "du ba om lokal behandling",
+  pasted_content: "innlimt tekst regnes ikke som dine egne ord",
+  history_unreadable: "samtalen kunne ikke kontrolleres"
+};
+
+export function jobLocalOnlyNote(reasons: readonly string[]): string {
+  const areas = [...new Set(reasons.flatMap((r) => (LOCAL_ONLY_AREAS[r] ? [LOCAL_ONLY_AREAS[r]!.area] : [])))];
+  const parts: string[] = [];
+  if (areas.length > 0) parts.push(`samtalen berører ${joinNo(areas)}, og slikt sendes aldri til skyen`);
+  for (const reason of reasons) if (JOB_LOCAL_REASONS[reason]) parts.push(JOB_LOCAL_REASONS[reason]!);
+  const why = parts.length > 0 ? parts.join(", og ") : "innholdet er klassifisert som følsomt";
+  return `\n\n(Jobben kjører på den lokale modellen: ${why}.)`;
+}
+
+/**
  * D-404/D-431/D-444/D-449: leverandørfeil som får en flate til å svare via en ANNEN rute (lokal modell) i stedet for å vise en feil - kun FØR noe er sendt og FØR noe verktøy er
  * utført. `invalid_response` (D-444) er et tomt eller ubrukelig svar som gatewayen ikke kunne redde med retry/neste kandidat (D-441 gjør det til en ærlig feil
  * i stedet for en stille tom melding): for eieren er en lokal modell som svarer tomt det samme som en lokal modell som er nede. Delt av chatten (`conversation.ts`)

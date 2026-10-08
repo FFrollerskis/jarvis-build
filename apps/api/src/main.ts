@@ -1094,13 +1094,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       }
     },
     delegateBackground: {
-      async run(identity, prompt) {
+      async run(identity, prompt, options) {
         const title = (prompt.split("\n")[0] ?? prompt).replace(/\s+/g, " ").trim().slice(0, 70).padEnd(3, ".");
         const result = await toolGateway.execute({
           identity, tool_id: "tasks", action: "delegate_background_task", parameters: { title, prompt: prompt.slice(0, 2000), use_tools: true },
           idempotency_key: `fast-delegate:${identity.session_id}:${Date.now()}`,
-          // D-449 (Q-50): hurtigbanen bruker ingen modell - oppgaveteksten ER eierens egne ord (ordrett). Eneste sted `contentOrigin` settes; uten den (eller `servingModel`) kjører jobben lokalt.
-          contentOrigin: "owner_direct"
+          // D-449 (Q-50): hurtigbanen bruker ingen modell - oppgaveteksten ER eierens egne ord (ordrett). Eneste sted `contentOrigin` settes, og KUN når samtalemotoren har avgjort at chatten ville latt en
+          // verktøytur gå til sky (eierens ruteoverstyring, de siste meldingene, minnerom og innlimt tekst, se `delegationCloudDecision`). Uten merket (eller `servingModel`) kjører jobben lokalt.
+          ...(options?.cloudAllowed === true ? { contentOrigin: "owner_direct" as const } : {})
         });
         if (!result.ok) return null;
         const data = result.data as { started?: unknown; message?: unknown } | undefined;

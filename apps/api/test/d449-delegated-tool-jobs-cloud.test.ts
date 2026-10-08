@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { IdentityContext, JobContract } from "@jarvis/contracts";
@@ -29,12 +29,12 @@ const TOOLS: MeshToolMapping[] = [
 const ctx: JobContext = { attempts: 1, checkpoint: null, saveCheckpoint: async () => undefined, assertNotCancelled: async () => undefined };
 const identity: IdentityContext = { person_id: "p1", tenant_id: "t1", memory_space_id: "personal", session_id: "s1", device_id: "d1", channel: "web", auth_strength: "active" };
 
-function makeTask(data: Record<string, unknown>, tenant = "tenant-personal", memorySpaces: string[] = ["personal"]): ClaimedTask {
+function makeTask(data: Record<string, unknown>, tenant = "tenant-personal", memorySpaces: string[] = ["personal"], goal = "list PR-er"): ClaimedTask {
   return {
     task_id: "task-d449-1",
     tenant_id: tenant,
     contract: {
-      goal: "list PR-er", owner_person_id: "person-tobias", tenant_id: tenant, allowed_memory_spaces: memorySpaces,
+      goal, owner_person_id: "person-tobias", tenant_id: tenant, allowed_memory_spaces: memorySpaces,
       input: { data, trust_level: "internal", provenance: "chat:s1" }, allowed_tools: ["github"]
     } as unknown as JobContract,
     attempts: 1,
@@ -165,6 +165,16 @@ describe("D-449: skyrute for delegerte verktøyjobber (executive-handler)", () =
     }
   });
 
+  it("forsvar i dybden: en sensitiv tittel (`goal`) med nøytral prompt går likevel lokalt (workeren klassifiserer tittelen også, som delegeringen gjør)", async () => {
+    captureLogs();
+    const h = build({});
+    const result = await h.handler(makeTask(delegated(), "tenant-personal", ["personal"], "Sjekk saldoen min"), ctx);
+    expect(h.calls[0]!.input.providerPreference).toBeUndefined();
+    expect("route" in result).toBe(false);
+    const ok = build({});
+    expect((await ok.handler(makeTask(delegated(), "tenant-personal", ["personal"], "Åpne PR-er"), ctx))["route"]).toBe("cloud");
+  });
+
   it("forsvar i dybden: kontrakten gir jobben tilgang til helse-minnet → lokalt selv med flagg og nøytral prompt (minnerommet klassifiseres også her)", async () => {
     captureLogs();
     for (const spaces of [["health"], ["personal", "health"]]) {
@@ -292,7 +302,7 @@ describe("D-449: skyrute for delegerte verktøyjobber (executive-handler)", () =
 
 describe("D-449: verktøyresultater til skymodellen skjermes (revisjonsfunn: minnesøk uten filter)", () => {
   const memoryCall = { tool_call_id: "m1", tool_name: "search_my_memory", arguments: { query: "meg" }, provider: "anthropic", model: "claude-sonnet-5-5" } as ToolCallRequest;
-  const item = (id: string, extra: Record<string, unknown> = {}) => ({ memory_item_id: id, kind: "item", subject: "tobias.hobby", content: "Liker å gå på ski", type: "semantic", space: "personal", ...extra });
+  const item = (id: string, extra: Record<string, unknown> = {}) => ({ memory_item_id: id, kind: "item", subject: "tobias.hobby", content: "Liker å gå på ski", type: "semantic", space: "personal", sensitivity: "normal", ...extra });
   const memoryOutput = [
     item("ok1"),
     item("sensitiv1", { sensitivity: "sensitive" }),
@@ -417,6 +427,7 @@ describe("D-449: delegeringens kontrakt (TasksDelegateTransport)", () => {
   it("innholdet slår opphavet: økonomi/helse i teksten eller helse-minnerommet → nei, også for en skybetjent tur og for hurtigbanen", () => {
     for (const origin of [{ servingModel: sonnet, contentOrigin: undefined }, { servingModel: undefined, contentOrigin: "owner_direct" as const }]) {
       expect(cloudToolTurnsAllowed({ ...base, ...origin, title: "Økonomi", prompt: "hva er saldoen min" })).toBe(false);
+      expect(cloudToolTurnsAllowed({ ...base, ...origin, title: "Sjekk saldoen min", prompt: "list åpne PR-er" })).toBe(false); // sensitiv TITTEL, nøytral prompt
       expect(cloudToolTurnsAllowed({ ...base, ...origin, prompt: "list PR-er" , memorySpaces: ["health"] })).toBe(false);
       expect(cloudToolTurnsAllowed({ ...base, ...origin, prompt: "list PR-er", memorySpaces: ["personal", "health"] })).toBe(false);
       expect(cloudToolTurnsAllowed({ ...base, ...origin, memorySpaces: ["personal"] })).toBe(true);
@@ -504,25 +515,32 @@ describe("D-449: oppkobling (kildevakt)", () => {
     for (const name of ["ANTHROPIC_API_KEY", "JARVIS_BUDGET_APPROVED"]) expect(workerEnv, name).toContain(name);
   });
 
-  it("eier-merket `contentOrigin: \"owner_direct\"` settes på nøyaktig ÉN plass i produksjonskoden (hurtigbanen i main.ts); `/confirmations` og modellflaten setter det aldri", () => {
+  it("eier-merket `contentOrigin: \"owner_direct\"` settes på nøyaktig ÉN plass i HELE produksjonskoden (hurtigbanen i main.ts, og kun når samtalemotoren sa cloudAllowed); `/confirmations` og modellflaten setter det aldri", () => {
     // Kun kode: kommentarer og typedeklarasjoner (`contentOrigin: "owner_direct" | undefined`) er ikke et sted merket SETTES.
     const code = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
     const setters = (text: string) => code(text).match(/contentOrigin:\s*"owner_direct"(?!\s*\|)/g);
-    const src = (rel: string) => read(`../src/${rel}`);
-    const main = src("main.ts");
-    expect(setters(main)).toHaveLength(1);
+    const root = fileURLToPath(new URL("../../../", import.meta.url));
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+        e.name === "node_modules" || e.name === "test" || e.name === "dist" ? [] : e.isDirectory() ? walk(`${dir}/${e.name}`) : e.name.endsWith(".ts") ? [`${dir}/${e.name}`] : []
+      );
+    const sourceDirs = ["apps", "modules", "packages"].flatMap((top) => readdirSync(`${root}${top}`, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => `${root}${top}/${e.name}/src`));
+    const files = sourceDirs.flatMap((dir) => { try { return walk(dir); } catch { return []; } });
+    expect(files.length).toBeGreaterThan(100); // vakten skanner faktisk koden
+    const hits = files.flatMap((file) => { const m = setters(readFileSync(file, "utf8")); return m ? [{ file: file.slice(root.length), n: m.length }] : []; });
+    expect(hits).toEqual([{ file: "apps/api/src/main.ts", n: 1 }]);
+
+    const main = read("../src/main.ts");
     const deleg = main.indexOf("delegateBackground: {");
     const marker = main.indexOf('contentOrigin: "owner_direct"');
     expect(marker).toBeGreaterThan(deleg);
-    expect(marker - deleg).toBeLessThan(900); // inne i hurtigbanens run(), ikke et annet sted
-    for (const file of ["server.ts", "conversation.ts", "chat-jobs.ts", "executive.ts", "worker-main.ts", "cloud-tool-screen.ts"]) {
-      expect(setters(src(file)), file).toBeNull();
-    }
+    expect(marker - deleg).toBeLessThan(1400); // inne i hurtigbanens run(), ikke et annet sted
+    expect(main).toMatch(/\.\.\.\(options\?\.cloudAllowed === true \? \{ contentOrigin: "owner_direct" as const \} : \{\}\)/);
     // Modellens verktøykall går via mesh-bridge, som kun stempler `servingModel` fra adapteren.
     const mesh = readFileSync(fileURLToPath(new URL("../../../modules/tool-gateway/src/mesh-bridge.ts", import.meta.url)), "utf8");
     expect(mesh).not.toContain("contentOrigin");
     // /tasks/submit avviser det interne flagget før submit.
-    const server = src("server.ts");
+    const server = read("../src/server.ts");
     expect(server.indexOf("submittedContractHasReservedKey(authed.body[\"contract\"])")).toBeGreaterThan(-1);
     expect(server.indexOf("submittedContractHasReservedKey(authed.body[\"contract\"])")).toBeLessThan(server.indexOf("deps.tasks.submit(authed.identity, authed.body[\"contract\"])"));
   });

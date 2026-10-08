@@ -9,6 +9,7 @@ import {
   maxSensitivity,
   NoEligibleProviderError,
   parseRoutingOverride,
+  RECENT_HISTORY_WINDOW,
   type AiCouncil,
   type DecisionClassification,
   type ModelGateway,
@@ -21,7 +22,7 @@ import { DEFAULT_PERSONALITY_CONFIG, type PersonalityConfig } from "@jarvis/self
 import type { TaskService, InProcessWorker } from "@jarvis/tasks";
 import { createTurnContext, surfaceForChannel, type Surface, type SurfaceLimits, type TurnContext } from "@jarvis/tool-gateway";
 import { randomUUID } from "node:crypto";
-import { LOCAL_FALLBACK_ERROR_KINDS, localOnlyNote } from "./tool-turn-route.ts";
+import { LOCAL_FALLBACK_ERROR_KINDS, jobLocalOnlyNote, localOnlyNote } from "./tool-turn-route.ts";
 
 export interface ConversationDeps {
   messages: MessageStore;
@@ -40,8 +41,12 @@ export interface ConversationDeps {
   sloReport?: { run(identity: IdentityContext): Promise<string | null> };
   /** D-424: «hva koster du» for hurtigbanen (`run_rate.get_cost_overview` via Tool Gateway). */
   costReport?: { run(identity: IdentityContext): Promise<string | null> };
-  /** D-424: «… i bakgrunnen» for hurtigbanen (`tasks.delegate_background_task` via Tool Gateway/Policy - eierens egen melding, ikke modellens valg). */
-  delegateBackground?: { run(identity: IdentityContext, prompt: string): Promise<string | null> };
+  /**
+   * D-424: «… i bakgrunnen» for hurtigbanen (`tasks.delegate_background_task` via Tool Gateway/Policy - eierens egen melding, ikke modellens valg).
+   * D-449: `options.cloudAllowed` er motorens EGEN avgjørelse (samme regler som chatten bruker for en verktøytur: eierens ruteoverstyring, de siste meldingene, minnerommet, innlimt tekst) - kun `true`
+   * lar jobben bruke skyruten. Udefinert/`false` = jobben kjører lokalt som før D-449 (fail-closed).
+   */
+  delegateBackground?: { run(identity: IdentityContext, prompt: string, options?: { cloudAllowed: boolean }): Promise<string | null> };
   /** D-395: injiserbar begrenser for automatisk råd-trigger (tester); default bygges fra JARVIS_COUNCIL_AUTO_MAX_PER_HOUR. */
   councilAutoLimiter?: CouncilAutoTriggerLimiter;
   /** Fase 4: hybridminne-kontekst med kildeangivelse (kun gjeldende space). */
@@ -339,7 +344,7 @@ export class ConversationEngine {
 
     if (intent) {
       const started = Date.now();
-      const result = await this.handleFastIntent(identity, intent);
+      const result = await this.handleFastIntent(identity, intent, text);
       await this.deps.trace.record({
         trace_id: `trace-${randomUUID()}`,
         kind: "fast_route",
@@ -780,9 +785,33 @@ export class ConversationEngine {
     return { reply, routed: "model" };
   }
 
+  /**
+   * D-449 (Q-50, gjennomgang nr. 2): hurtigbanen «… i bakgrunnen» hopper over modellen, og dermed også over alt chatten ellers bruker for å velge rute. Skal en delegert jobb få bruke skyruten, må
+   * motoren treffe SAMME avgjørelse som for en verktøytur i chatten - ellers kunne en jobb gå til sky akkurat når chatten ville holdt samtalen lokal:
+   *  - eierens eksplisitte ruting i meldingen («kun lokale modeller», «ikke bruk betalte modeller») vinner (`parseRoutingOverride`),
+   *  - de siste meldingene teller med (D-384: `RECENT_HISTORY_WINDOW`, inkl. denne): berørte de økonomi/helse/hemmeligheter, er samtalen låst lokalt,
+   *  - minnerommet jobben får lese (helse-rommet = lokal),
+   *  - innlimt tekst (e-post, dokumenter) er ikke «eierens egne ord» og får ikke eier-merket (`looksLikePastedContent`),
+   *  - kan historikken ikke leses, er svaret nei.
+   * Verktøyvalg-nivået (`min_sensitivity`, finansverktøy) og det omgivende minnet gjelder chattens modelltur, ikke jobben, som bare får lese-verktøy og leser selv.
+   */
+  private async delegationCloudDecision(identity: IdentityContext, text: string): Promise<{ allowed: boolean; reasons: string[] }> {
+    if (parseRoutingOverride(text) !== null) return { allowed: false, reasons: ["owner_routing_override"] };
+    if (looksLikePastedContent(text)) return { allowed: false, reasons: ["pasted_content"] };
+    let recent: string[];
+    try {
+      recent = (await this.deps.messages.history(identity, RECENT_HISTORY_WINDOW)).map((m) => m.content);
+    } catch {
+      return { allowed: false, reasons: ["history_unreadable"] };
+    }
+    const decision = classifyContentSensitivity({ texts: [text, ...recent], memory_spaces: [identity.memory_space_id] });
+    return decision.sensitivity === "SECRET_RESTRICTED" ? { allowed: false, reasons: decision.reasons } : { allowed: true, reasons: [] };
+  }
+
   private async handleFastIntent(
     identity: IdentityContext,
-    intent: NonNullable<ReturnType<typeof fastRoute>>
+    intent: NonNullable<ReturnType<typeof fastRoute>>,
+    text: string
   ): Promise<ChatReply> {
     switch (intent.kind) {
       case "system_status":
@@ -803,8 +832,17 @@ export class ConversationEngine {
         return { reply: text ?? "Jeg kan ikke lese kostnadene akkurat nå, så jeg vil ikke gjette på hva jeg koster.", routed: "fast" };
       }
       case "delegate_background": {
-        const text = this.deps.delegateBackground ? await this.deps.delegateBackground.run(identity, intent.prompt).catch(() => null) : null;
-        return { reply: text ?? "Jeg fikk ikke startet bakgrunnsjobben (verktøyet svarte ikke eller ble avslått). Ingenting er startet.", routed: "fast" };
+        const cloud = this.deps.delegateBackground ? await this.delegationCloudDecision(identity, text) : { allowed: false, reasons: [] as string[] };
+        const started = this.deps.delegateBackground
+          ? await this.deps.delegateBackground.run(identity, intent.prompt, { cloudAllowed: cloud.allowed }).catch(() => null)
+          : null;
+        if (started === null) {
+          return { reply: "Jeg fikk ikke startet bakgrunnsjobben (verktøyet svarte ikke eller ble avslått). Ingenting er startet.", routed: "fast" };
+        }
+        // D-447-prinsippet: en jobb som tvinges til den lokale modellen skal ikke gjøre det usynlig (ingen merknad på tale; kun kategorier, aldri innhold).
+        if (!cloud.allowed) console.log(JSON.stringify({ msg: "d449_fast_delegate_local", reasons: cloud.reasons }));
+        const note = !cloud.allowed && surfaceForChannel(identity.channel) !== "voice" ? jobLocalOnlyNote(cloud.reasons) : "";
+        return { reply: `${started}${note}`, routed: "fast" };
       }
       case "help":
         return {
