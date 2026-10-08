@@ -63,7 +63,7 @@ beforeAll(async () => {
   await adminPool.query(
     `INSERT INTO business_contacts (contact_id, tenant_id, company_id, name, email) VALUES
        ('ct-sup-tl-a', '${TENANT_A}', 'co-sup-tl', 'Kari', 'kari@acme.no'),
-       ('ct-sup-tl-b', '${TENANT_B}', 'co-sup-tl', 'Kari', 'kari@acme.no')`
+       ('ct-sup-tl-b', '${TENANT_B}', 'co-sup-tl-b', 'Kari', 'kari@acme.no')`
   );
 
   appPool = createPool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "jarvis_sup_tl_test", password: "pw2" });

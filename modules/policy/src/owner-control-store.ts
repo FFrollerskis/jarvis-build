@@ -74,7 +74,8 @@ export class OwnerControlUnauthorizedError extends Error {
 
 /** Fail-CLOSED: krever et konfigurert `authority` OG en matchende `actorPersonId` NAAR persistens er aktiv (`pool` gitt) - se `DomainPauseRegistry.assertAuthorized()` for identisk presedens/begrunnelse. */
 export function assertOwnerControlAuthorized(
-  pool: pg.Pool | undefined,
+  /** Persistens (typisk `pg.Pool`; D-438: også `InfraModeStore`). `undefined` = ingen varig tilstand å beskytte = ingen sjekk. */
+  pool: object | undefined,
   authority: OwnerControlAuthority | undefined,
   actorPersonId: string | undefined
 ): void {

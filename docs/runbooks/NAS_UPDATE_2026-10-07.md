@@ -81,13 +81,23 @@ sudo docker compose --env-file .env -f infra/local/docker-compose.yml logs --tai
 
 ## 4b. Infra-modus deles mellom api og worker (D-438)
 
-Dette endrer driftsmodus midlertidig og er trygt; husk å løse den igjen. Bruk et gyldig eier-token fra nettleseren (dashbordet) – ikke lim tokenet i chat.
+Dette endrer driftsmodus midlertidig og er trygt; husk å løse den igjen. Bruk et gyldig eier-token fra dashbordet/nettleseren – ikke lim tokenet i chat. Modusen leses LIVE av begge prosessene (ingen synkforsinkelse å vente på).
 
-1. Sett pause fra dashbordet/API (`POST /infra/pause` med en begrunnelse).
-2. Vent 5 sekunder og spør status: `POST /infra/status` skal vise `infra_mode.mode: "PAUSED"` og `infra_mode_sync_error: null`.
-3. Løs den: `POST /infra/resume`.
+1. Sett pause (`POST /infra/pause` med en begrunnelse).
+2. Spør status (`POST /infra/status`). **Forventet:** `infra_mode.mode: "PAUSED"`, `infra_mode_shared.mode: "PAUSED"`, `infra_mode_shared_readable: true` og `infra_mode_in_sync: true`.
+3. Bekreft at den delte raden finnes (det er DEN workeren leser):
 
-**Forventet:** begge prosessene følger samme modus (worker synker hvert 2. s). Står `infra_mode_sync_error` med en feilmelding, er databasen utilgjengelig for synk – meld fra.
+```
+sudo docker exec -it $(sudo docker ps -qf name=postgres) psql -U postgres -d jarvis -P pager=off -c "SELECT control_kind, control_target, reason, changed_at FROM owner_control_state WHERE control_kind = 'infra_mode';"
+```
+
+   **Forventet:** én rad med `GLOBAL` og en JSON-`reason` med `"mode":"PAUSED"`.
+4. Løs den: `POST /infra/resume`. Raden skal da være borte (NORMAL lagres aldri).
+
+**Avvik å melde fra om:**
+- `infra_mode_in_sync: false` eller `infra_mode_shared: null` mens `infra_mode.mode` er `PAUSED`: pausen gjelder bare API-prosessen (lagringen feilet) – workeren er IKKE stanset. Svaret på selve pause-kallet var da også en feil (`infra_mode_persist_failed`).
+- `infra_mode_shared_readable: false`: den delte tilstanden kan ikke leses; infra-mutasjoner (github/docker, klasse B/C/D) avslås da med `infra_mode_unavailable` (fail-closed) til databasen svarer.
+- 403 `owner_control_unauthorized`: kallet kom ikke fra eier-identiteten (kun eieren kan endre modusen).
 
 ## 5. Akseptanseportene
 
