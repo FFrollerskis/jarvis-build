@@ -1105,9 +1105,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         });
         if (!result.ok) return null;
         const data = result.data as { started?: unknown; message?: unknown } | undefined;
+        // `started` skiller en faktisk startet jobb fra en forklaring («for mange aktive jobber»): kun en startet jobb får merknaden om at den kjører lokalt.
         return data?.started === true
-          ? `Jobben «${title}» er startet i bakgrunnen. Jeg gir beskjed her når den er ferdig - du kan fortsette å snakke med meg.`
-          : typeof data?.message === "string" ? data.message : null;
+          ? { started: true, reply: `Jobben «${title}» er startet i bakgrunnen. Jeg gir beskjed her når den er ferdig - du kan fortsette å snakke med meg.` }
+          : typeof data?.message === "string" ? { started: false, reply: data.message } : null;
       }
     },
     memory: {

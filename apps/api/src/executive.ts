@@ -3,7 +3,7 @@ import { DataSensitivitySchema, ModelPurposeSchema } from "@jarvis/contracts";
 import { NoEligibleProviderError, classifyContentSensitivity, type ModelGateway, type ToolExecutor } from "@jarvis/model-gateway";
 import { ProviderError } from "@jarvis/provider-adapters";
 import type { ClaimedTask, JobContext } from "@jarvis/tasks";
-import { filterMeshToolsForJob, type MeshToolMapping } from "@jarvis/tool-gateway";
+import { filterMeshToolsForJob, financeToolIntent, type MeshToolMapping } from "@jarvis/tool-gateway";
 import { cloudScreenedExecutor, jobWithheldNote } from "./cloud-tool-screen.ts";
 import { LOCAL_FALLBACK_ERROR_KINDS, jobDayCapNote } from "./tool-turn-route.ts";
 
@@ -125,7 +125,9 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
           sensitivity.success &&
           sensitivity.data !== "SECRET_RESTRICTED" &&
           // Forsvar i dybden: oppgaveteksten, tittelen (`goal`) og minnerommene jobben får lese klassifiseres OGSÅ her, uavhengig av hvordan kontrakten ble sendt inn (en kontrakt kan i prinsippet bygges av andre enn chatten).
-          classifyContentSensitivity({ texts: [input.prompt, task.contract.goal], memory_spaces: task.contract.allowed_memory_spaces }).sensitivity !== "SECRET_RESTRICTED";
+          classifyContentSensitivity({ texts: [input.prompt, task.contract.goal], memory_spaces: task.contract.allowed_memory_spaces }).sensitivity !== "SECRET_RESTRICTED" &&
+          // D-381-paritet (gjennomgang nr. 3): ord som får chatten til å velge et finansverktøy holder jobben lokal.
+          !financeToolIntent(`${task.contract.goal}\n${input.prompt}`);
         if (toolRoute !== null && cloudWanted) {
           // Dagstaket sjekkes kun når jobben faktisk ville gått til sky. Kan kostnaden ikke leses, feiler vi lukket (lokalt), som chatten (D-432).
           const dayCap = opts.toolTurnDayCap ?? null;

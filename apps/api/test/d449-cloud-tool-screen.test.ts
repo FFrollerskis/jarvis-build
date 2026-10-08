@@ -104,6 +104,22 @@ describe("D-449: screenToolResultForCloud (minnesøk)", () => {
     expect(out.withheld).toBe(5);
   });
 
+  it("indre felt: ukjente felt i `source` eller i et element i `versions`, og feil typer på emne/kilde, holder treffet tilbake (kun toppnivået var sjekket før gjennomgang nr. 3)", () => {
+    const ok = item("ok", { source: { kind: "manual", ref: "seed", trust_level: "internal" }, versions: [{ version: 1, content: "ski", valid_from: "a", valid_to: "b" }] });
+    const bad = [
+      item("src-ekstra", { source: { kind: "manual", ref: "seed", trust_level: "internal", note: "Tobias har legetime" } }),
+      item("ver-ekstra", { versions: [{ version: 1, content: "ski", valid_from: "a", valid_to: "b", subject: "diagnose" }] }),
+      item("src-streng", { source: "tekst" }),
+      item("src-type", { source: { kind: 5, ref: "seed" } }),
+      item("emne-type", { subject: 5 }),
+      item("innhold-type", { content: { tekst: "ski" } }),
+      item("ver-ikke-liste", { versions: { content: "ski" } })
+    ];
+    const out = screenToolResultForCloud(memory([ok, ...bad]));
+    expect(idsOf(out.result.output)).toEqual(["ok"]);
+    expect(out.withheld).toBe(bad.length);
+  });
+
   it("ukjente felt på et treff holder det tilbake (et nytt retriever-felt kan bære uklassifisert tekst), og alle kjente felt er tillatt", () => {
     const withExtra = item("ekstra", { evidence_text: "noe som ikke er klassifisert" });
     const out = screenToolResultForCloud(memory([item("ok"), withExtra]));

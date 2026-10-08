@@ -53,6 +53,8 @@ export interface ContextOptions {
   restrictedMinScore?: number;
   /** D-386: tokenbudsjett for hele minneblokken (profil + treff). */
   budgetTokens?: number;
+  /** D-449: `false` = les uten å oppdatere «sist brukt» (ruteavgjørelsen for hurtigbanen leser minnet uten å bruke det). Standard: som før (oppdateres). */
+  touch?: boolean;
 }
 
 export interface ContextResult {
@@ -412,7 +414,7 @@ export class MemoryRetriever {
     const budget = options.budgetTokens ?? DEFAULT_CONTEXT_BUDGET_TOKENS;
     const minScore = options.restrictedMinScore ?? RESTRICTED_MEMORY_MIN_SCORE;
     const space = identity.memory_space_id;
-    const items = await this.search(identity, { spaces: [space], query: userText, limit: 12 });
+    const items = await this.search(identity, { spaces: [space], query: userText, limit: 12, ...(options.touch === false ? { touch: false } : {}) });
 
     const { profile, upcoming, sensitivityById } = await withMemoryTransaction(this.pool, identity.tenant_id, [space], async (client) => {
       const prof = await client.query("SELECT content FROM memory_profiles WHERE tenant_id = $1 AND space = $2", [identity.tenant_id, space]);

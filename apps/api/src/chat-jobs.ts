@@ -6,7 +6,7 @@ import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import { scanForSecrets, withTenantTransaction } from "@jarvis/core";
 import { DEFAULT_PROFILES, classifyContentSensitivity } from "@jarvis/model-gateway";
 import type { TaskService } from "@jarvis/tasks";
-import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
+import { financeToolIntent, type ToolDefinition, type ToolInvocationContext, type ToolTransport } from "@jarvis/tool-gateway";
 
 /**
  * D-416: chat og agenter er to løp. Chatten legger en oppgave i den durable jobbkøen (`TaskService.submit`, klasse B) og svarer med en gang;
@@ -17,7 +17,7 @@ import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarv
 
 /** Verktøy-id-ene en delegert jobb kan be om; `filterMeshToolsForJob` skjærer dem mot bakgrunnsflatens lese-tildeling (ingen skriving). */
 const DELEGATED_JOB_TOOLS = ["email", "calendar", "github", "memory", "executive"] as const;
-/** Øre. Hard grense per delegert jobb (kontraktens `model_budget_ore`). */
+/** Øre. Settes i kontraktens `model_budget_ore`, men INGEN kode leser den i dag (eksisterende forhold) - den reelle kostnadsgrensen er dagstaket (D-432/D-449), ikke dette tallet. */
 export const DELEGATED_JOB_BUDGET_ORE = 300;
 const MAX_ACTIVE_JOBS = 5;
 const RESULT_PREVIEW_CHARS = 1500;
@@ -50,7 +50,8 @@ export interface CloudToolTurnInput {
 
 /**
  * D-449 (Q-50): kan en delegert jobb med verktøy få bruke skyruten (samme som chattens verktøyturer, D-431)? Fail-closed, og alle disse må stemme:
- *  1. Oppgaveteksten (tittel + prompt) og minnerommet jobben får lese er ikke `SECRET_RESTRICTED` (helse, økonomi, hemmeligheter: kun lokal modell, D-378).
+ *  1. Oppgaveteksten (tittel + prompt) og minnerommet jobben får lese er ikke `SECRET_RESTRICTED` (helse, økonomi, hemmeligheter: kun lokal modell, D-378), og teksten har ingen av ordene som får chatten til å velge et
+ *     finansverktøy (D-381, `financeToolIntent`).
  *  2. Opphavet til innholdet er kjent og betrodd: enten ble turen som delegerte betjent av en SKYMODELL (da var turen selv ikke låst lokalt), eller oppgaveteksten er eierens egne
  *     ord fra hurtigbanen (`contentOrigin: "owner_direct"`). Var turen betjent av en LOKAL modell (sensitivitet, dagstak eller skyen nede låste den), kan den modellen ha skrevet
  *     innhold fra samtalen inn i oppgaveteksten. Mangler begge (f.eks. en eier-godkjent bekreftelse som utfører et modellskrevet kall i ettertid, som ikke kjenner modellen som
@@ -61,6 +62,8 @@ export interface CloudToolTurnInput {
 export function cloudToolTurnsAllowed(input: CloudToolTurnInput): boolean {
   const content = classifyContentSensitivity({ texts: [input.title, input.prompt], memory_spaces: input.memorySpaces });
   if (content.sensitivity === "SECRET_RESTRICTED") return false;
+  // D-381-paritet (gjennomgang nr. 3): ord som ville fått chatten til å velge et finansverktøy (og dermed låse turen lokalt) holder også jobben lokal - uansett hvem som skrev teksten.
+  if (financeToolIntent(`${input.title}\n${input.prompt}`)) return false;
   const serving = input.servingModel;
   if (serving !== undefined) return DEFAULT_PROFILES.some((profile) => profile.provider === serving.provider && profile.locality === "cloud");
   return input.contentOrigin === "owner_direct";

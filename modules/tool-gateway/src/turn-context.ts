@@ -302,6 +302,15 @@ export function selectSurfaceTools(
   return { selected, schema_tokens: tokens, limits, dropped, ...(restricted ? { min_sensitivity: "SECRET_RESTRICTED" as const } : {}) };
 }
 
+/**
+ * D-449 (Q-50, gjennomgang nr. 3): finansverktøyenes intensjonsord (D-381). Chatten låser en tur lokalt når utvalget velger et `finance_*`-verktøy (`min_sensitivity`); en delegert jobb må følge SAMME regel for
+ * sin egen tekst, ellers kunne en modellskrevet prompt («finn e-poster fra banken») gå til sky selv om de samme ordene fra eieren hadde holdt turen lokal. Dette er en overmengde (superset) av utvalget
+ * (ikke begrenset av verktøybudsjettet, ikke av småprat-regelen) - strengere, aldri løsere - og kjenner bare ordene i `TOOL_INTENTS` (jf. Q-52).
+ */
+export function financeToolIntent(text: string): boolean {
+  return Object.entries(TOOL_INTENTS).some(([toolId, intent]) => RESTRICTED_TOOL_ID.test(toolId) && intent.test(text));
+}
+
 const JOB_MEMORY_SPACES = ["personal", "business", "project", "health", "home", "guest", "shared"] as const;
 
 /**

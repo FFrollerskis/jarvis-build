@@ -156,7 +156,7 @@ describe("D-449: skyrute for delegerte verktøyjobber (executive-handler)", () =
 
   it("forsvar i dybden: en kontrakt med skyflagg og PRIVATE, men en økonomi-/helse-/hemmelighetsprompt, går likevel lokalt (workeren klassifiserer oppgaveteksten selv)", async () => {
     captureLogs();
-    for (const prompt of ["sjekk saldoen min og list PR-er", "oppsummer legetime og diagnose", "bruk kontonummer 1234.56.78901 til å finne e-posten"]) {
+    for (const prompt of ["sjekk saldoen min og list PR-er", "oppsummer legetime og diagnose", "bruk kontonummer 1234.56.78901 til å finne e-posten", "finn e-postene fra banken forrige måned", "gå gjennom abonnementene mine"]) {
       const h = build({});
       const result = await h.handler(makeTask(delegated({ prompt })), ctx);
       expect(h.calls[0]!.input.providerPreference, prompt).toBeUndefined();
@@ -428,6 +428,12 @@ describe("D-449: delegeringens kontrakt (TasksDelegateTransport)", () => {
     for (const origin of [{ servingModel: sonnet, contentOrigin: undefined }, { servingModel: undefined, contentOrigin: "owner_direct" as const }]) {
       expect(cloudToolTurnsAllowed({ ...base, ...origin, title: "Økonomi", prompt: "hva er saldoen min" })).toBe(false);
       expect(cloudToolTurnsAllowed({ ...base, ...origin, title: "Sjekk saldoen min", prompt: "list åpne PR-er" })).toBe(false); // sensitiv TITTEL, nøytral prompt
+      // D-381-paritet (gjennomgang nr. 3): ord som får chatten til å velge et finansverktøy, men som klassifiseringen ikke kjenner, holder også jobben lokal - i tittel eller prompt.
+      for (const text of ["Finn alle e-postene fra banken forrige måned", "Gå gjennom utgiftene og abonnementene mine", "Sjekk kontoutskriften fra DNB", "Finn kvitteringene for bankkortet"]) {
+        expect(classifyContentSensitivity({ texts: [text] }).sensitivity, text).not.toBe("SECRET_RESTRICTED");
+        expect(cloudToolTurnsAllowed({ ...base, ...origin, title: "Oppsummering", prompt: text }), text).toBe(false);
+        expect(cloudToolTurnsAllowed({ ...base, ...origin, title: text.slice(0, 60), prompt: "oppsummer det" }), text).toBe(false);
+      }
       expect(cloudToolTurnsAllowed({ ...base, ...origin, prompt: "list PR-er" , memorySpaces: ["health"] })).toBe(false);
       expect(cloudToolTurnsAllowed({ ...base, ...origin, prompt: "list PR-er", memorySpaces: ["personal", "health"] })).toBe(false);
       expect(cloudToolTurnsAllowed({ ...base, ...origin, memorySpaces: ["personal"] })).toBe(true);
@@ -529,6 +535,10 @@ describe("D-449: oppkobling (kildevakt)", () => {
     expect(files.length).toBeGreaterThan(100); // vakten skanner faktisk koden
     const hits = files.flatMap((file) => { const m = setters(readFileSync(file, "utf8")); return m ? [{ file: file.slice(root.length), n: m.length }] : []; });
     expect(hits).toEqual([{ file: "apps/api/src/main.ts", n: 1 }]);
+    // Gjennomgang nr. 3: en regex på den bokstavelige verdien fanger ikke en variabel, en beregnet nøkkel eller en spread. Derfor telles ALLE forekomster av identifikatoren i kode (ikke kommentarer) per fil,
+    // og tallene er låst: gateway (deklarasjon i to typer + videreføring), chat-jobs (les + typer + sending til gate-funksjonen), main.ts (den ene setteren). En ny bruk et annet sted feiler her og må vurderes.
+    const tokens = Object.fromEntries(files.flatMap((file) => { const n = (code(readFileSync(file, "utf8")).match(/\bcontentOrigin\b/g) ?? []).length; return n > 0 ? [[file.slice(root.length), n]] : []; }));
+    expect(tokens).toEqual({ "apps/api/src/chat-jobs.ts": 4, "apps/api/src/main.ts": 1, "modules/tool-gateway/src/gateway.ts": 5 });
 
     const main = read("../src/main.ts");
     const deleg = main.indexOf("delegateBackground: {");

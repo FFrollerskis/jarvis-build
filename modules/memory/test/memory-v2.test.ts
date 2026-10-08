@@ -292,6 +292,8 @@ describe("C: gjenfinning v2 - ELLER-fulltekst, nøkkelord, fusjon, episoder, sam
     expect(old?.type).toBe("semantic");
     expect(old?.source.kind).toBe("manual");
     expect(old?.source.ref).toMatch(/^seed \(v1\)$/);
+    // D-449 (gjennomgang nr. 3): også en tidligere versjon fra tidssøket bærer elementets `sensitivity` (SELECT-en manglet kolonnen), så skyskjermen aldri må gjette.
+    expect(old?.sensitivity).toBe("normal");
   });
 });
 

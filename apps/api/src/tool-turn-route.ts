@@ -82,8 +82,10 @@ export function localOnlyNote(reasons: readonly string[]): string {
  */
 const JOB_LOCAL_REASONS: Readonly<Record<string, string>> = {
   owner_routing_override: "du ba om lokal behandling",
+  explicit_provider: "denne enheten eller økten er satt til en bestemt modell",
   pasted_content: "innlimt tekst regnes ikke som dine egne ord",
-  history_unreadable: "samtalen kunne ikke kontrolleres"
+  routing_unreadable: "samtalen kunne ikke kontrolleres",
+  "tool_selection:SECRET_RESTRICTED": "meldingen peker på økonomitjenester, og slikt sendes aldri til skyen"
 };
 
 export function jobLocalOnlyNote(reasons: readonly string[]): string {

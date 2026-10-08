@@ -57,6 +57,10 @@ export const KNOWN_MEMORY_ITEM_FIELDS: ReadonlySet<string> = new Set([
 ]);
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+/** Indre felt (gjennomgang nr. 3, L2): `source` og hvert element i `versions` kan heller ikke bære ukjente felt med uklassifisert tekst. */
+const KNOWN_SOURCE_FIELDS: ReadonlySet<string> = new Set(["kind", "ref", "trust_level"]);
+const KNOWN_VERSION_FIELDS: ReadonlySet<string> = new Set(["version", "content", "valid_from", "valid_to"]);
+const onlyKnownKeys = (value: Record<string, unknown>, known: ReadonlySet<string>): boolean => Object.keys(value).every((key) => known.has(key));
 
 /** Ett minnetreff kan til skymodellen kun hvis det er positivt trygt (se filhodet). Ukjent form = ikke trygt. */
 function memoryItemIsCloudSafe(item: unknown): boolean {
@@ -68,8 +72,8 @@ function memoryItemIsCloudSafe(item: unknown): boolean {
   const summaryWithoutColumn = item["kind"] === "summary" && sensitivity === undefined;
   if (!explicit && !summaryWithoutColumn) return false;
   if (keywords !== undefined && !(Array.isArray(keywords) && keywords.every((k) => typeof k === "string"))) return false;
-  if (versions !== undefined && !(Array.isArray(versions) && versions.every((v) => isRecord(v) && typeof v["content"] === "string"))) return false;
-  if (source !== undefined && !(isRecord(source) && Object.values(source).every((v) => typeof v === "string"))) return false;
+  if (versions !== undefined && !(Array.isArray(versions) && versions.every((v) => isRecord(v) && typeof v["content"] === "string" && onlyKnownKeys(v, KNOWN_VERSION_FIELDS)))) return false;
+  if (source !== undefined && !(isRecord(source) && onlyKnownKeys(source, KNOWN_SOURCE_FIELDS) && Object.values(source).every((v) => typeof v === "string"))) return false;
   const texts = [
     subject,
     content,
