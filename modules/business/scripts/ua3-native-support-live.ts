@@ -473,7 +473,10 @@ async function main(): Promise<void> {
       JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema
       WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public' AND ccu.table_name IN ('support_tickets', 'support_ticket_events')
     `);
-    const externalFks = (fkRows.rows as Array<{ table_name: string; constraint_name: string }>).filter((r) => r.table_name !== "support_ticket_events");
+    // Q-44 (D-435): komposittnøkler (tenant_id, id) gir to rader per FK i information_schema-joinen - tell avhengige TABELLER, ikke rader.
+    const externalFks = [...new Map(
+      (fkRows.rows as Array<{ table_name: string; constraint_name: string }>).filter((r) => r.table_name !== "support_ticket_events").map((r) => [r.table_name, r])
+    ).values()];
     log(`fk_audit_external_to_support_tickets=${JSON.stringify(externalFks)}`);
     const fkAuditKnown = externalFks.length === 1 && externalFks[0]!.table_name === "business_open_loops";
 

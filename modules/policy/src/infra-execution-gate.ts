@@ -1,4 +1,4 @@
-import { OwnerControlUnauthorizedError, type OwnerControlAuthority } from "./owner-control-store.ts";
+import { assertOwnerControlAuthorized, type OwnerControlAuthority } from "./owner-control-store.ts";
 
 /**
  * UA-5 Production Operations Control Plane v1 (D-104): global infra-
@@ -106,37 +106,65 @@ export class InfraExecutionGate {
     return denyFor(stricter(this.state, shared), capabilityClass);
   }
 
-  /** Gjeldende modus for status: strengeste av lokal og delt. `shared_readable=false` når den delte tilstanden ikke kunne leses (da vises kun lokal). */
-  async statusDurable(): Promise<{ state: InfraExecutionModeState; shared_readable: boolean }> {
-    if (!this.store) return { state: this.state, shared_readable: true };
+  /**
+   * Status for eieren (D-438). `state` = gjeldende modus (strengeste av lokal og delt). Lokal og delt vises ADSKILT, og `in_sync` er sann bare når den delte
+   * modusen er lesbar og minst like streng som den lokale: ellers finnes en innstramming som KUN gjelder denne prosessen (for eksempel en pause som ikke fikk
+   * lagret) og workeren er ikke stanset - det skal aldri se ut som en vellykket delt pause.
+   */
+  async statusDurable(): Promise<{
+    state: InfraExecutionModeState;
+    local: InfraExecutionModeState;
+    shared: InfraExecutionModeState | null;
+    shared_readable: boolean;
+    in_sync: boolean;
+  }> {
+    const local = this.state;
+    if (!this.store) return { state: local, local, shared: null, shared_readable: true, in_sync: true };
     try {
-      return { state: stricter(this.state, await this.store.read()), shared_readable: true };
+      const shared = await this.store.read();
+      const sharedRank = shared ? RANK[shared.mode] : 0;
+      return { state: stricter(local, shared), local, shared, shared_readable: true, in_sync: sharedRank >= RANK[local.mode] };
     } catch (err) {
       console.error(JSON.stringify({ msg: "infra_mode_read_failed", error: (err as Error).message }));
-      return { state: this.state, shared_readable: false };
+      return { state: local, local, shared: null, shared_readable: false, in_sync: false };
     }
   }
 
   private assertAuthorized(actorPersonId: string | undefined): void {
-    if (!this.store) return; // ingen varig tilstand å beskytte (tester/enkeltprosess)
-    if (!actorPersonId || !this.authority || actorPersonId !== this.authority.owner_person_id) {
-      throw new OwnerControlUnauthorizedError(actorPersonId);
-    }
+    // Samme fail-CLOSED-regel som KillSwitch/OwnerControls (én implementasjon): ingen lagring = ingenting varig å beskytte.
+    assertOwnerControlAuthorized(this.store, this.authority, actorPersonId);
   }
 
   /**
-   * Varige overganger (D-438), kun for eieren når lagring er aktiv. Å stramme inn (pause/degrade) settes lokalt FØRST og lagres så: feiler lagringen, er
-   * DENNE prosessen likevel stanset (strengeste-av-regelen overstyres aldri av en senere lesing) og kalleren får feilen - ikke en falsk suksess. Å løsne
-   * (resume) tømmer lagringen FØRST og løsner lokalt bare hvis det lyktes.
+   * Varige overganger (D-438), kun for eieren når lagring er aktiv. REGEL: en overgang som STRAMMER INN (til en strengere modus enn både lokal og delt) settes
+   * lokalt FØRST og lagres så - feiler lagringen, er DENNE prosessen likevel stanset og kalleren får feilen. En overgang som LØSNER (til en mildere modus enn
+   * lokal ELLER delt, eller når den delte modusen ikke kan leses) lagres FØRST og settes lokalt bare hvis lagringen lyktes - feiler den, forblir modusen
+   * innstrammet. Dermed kan en feilmelding aldri ledsages av at noe ble løsnet.
    */
   async pauseDurable(reason: string, actorPersonId?: string): Promise<void> {
     this.assertAuthorized(actorPersonId);
-    this.pause(reason);
+    this.pause(reason); // PAUSED er strengest - aldri en løsning
     await this.store?.write(this.state as StoredInfraModeState, actorPersonId);
   }
 
   async degradeDurable(reason: string, actorPersonId?: string): Promise<void> {
     this.assertAuthorized(actorPersonId);
+    let loosens = RANK[this.state.mode] > RANK.DEGRADED;
+    if (this.store && !loosens) {
+      try {
+        const shared = await this.store.read();
+        loosens = shared !== null && RANK[shared.mode] > RANK.DEGRADED;
+      } catch {
+        loosens = true; // kan ikke se den delte modusen: anta det verste og lagre først
+      }
+    }
+    if (loosens) {
+      // Løsner fra PAUSED: lagre FØRST; feiler det, kaster vi og lokal modus er uendret (fortsatt innstrammet).
+      const next: InfraExecutionModeState = { mode: "DEGRADED", reason, at: this.clock().toISOString() };
+      await this.store?.write(next as StoredInfraModeState, actorPersonId);
+      this.state = next;
+      return;
+    }
     this.degrade(reason);
     await this.store?.write(this.state as StoredInfraModeState, actorPersonId);
   }

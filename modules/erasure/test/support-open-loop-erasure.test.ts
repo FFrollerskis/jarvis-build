@@ -111,11 +111,13 @@ describe("D: schema-drevet FK-audit - business_open_loops er DET ENESTE eksterne
       WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public'
         AND ccu.table_name IN ('support_tickets', 'support_ticket_events')
     `);
-    const external = (rows as Array<{ dependent_table: string; target_table: string }>).filter(
-      (r) => !(r.dependent_table === "support_ticket_events" && r.target_table === "support_tickets")
-    );
-    expect(external).toHaveLength(1);
-    expect(external[0]!.dependent_table).toBe("business_open_loops");
+    // Q-44 (D-435): FK-ene er nå (tenant_id, id)-komposittnøkler, så information_schema gir to rader per FK (én per kolonne) - tell avhengige TABELLER.
+    const external = [...new Set(
+      (rows as Array<{ dependent_table: string; target_table: string }>)
+        .filter((r) => !(r.dependent_table === "support_ticket_events" && r.target_table === "support_tickets"))
+        .map((r) => r.dependent_table)
+    )];
+    expect(external).toEqual(["business_open_loops"]);
   });
 });
 

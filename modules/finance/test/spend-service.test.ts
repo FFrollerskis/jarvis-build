@@ -37,13 +37,13 @@ function isoDate(value: unknown): string {
   return new Date(value as string | Date).toISOString().slice(0, 10);
 }
 
-async function insertMarketingSpend(campaignId: string, eventDate: string, amountOre: number, sourceType = "manual", currency = "NOK") {
+async function insertMarketingSpend(campaignId: string, eventDate: string, amountOre: number, sourceType = "manual", currency = "NOK", tenantId = TENANT_A) {
   await adminPool.query(
     `INSERT INTO marketing_spend_events (spend_event_id, tenant_id, campaign_id, event_date, spend_amount_ore, currency, source_type)
      VALUES ($1, $2, $3, $4::date, $5, $6, $7)
      ON CONFLICT (tenant_id, campaign_id, event_date, source_type) DO UPDATE SET spend_amount_ore = EXCLUDED.spend_amount_ore, currency = EXCLUDED.currency, updated_at = now()
      RETURNING spend_event_id`,
-    [`grw-se-${Math.random().toString(36).slice(2)}`, TENANT_A, campaignId, eventDate, amountOre, currency, sourceType]
+    [`grw-se-${Math.random().toString(36).slice(2)}`, tenantId, campaignId, eventDate, amountOre, currency, sourceType]
   );
 }
 
@@ -149,8 +149,8 @@ describe("A: markedsføringsutgifts-synk (§4 - inkrementell/retry-trygg/idempot
     expect(updated?.source_correction_state).toBe("correction_conflict");
   });
   it("tenant-separasjon: tenant B ser ALDRI tenant A sine utgiftsposter", async () => {
-    await insertMarketingSpend(campaignB, "2026-02-01", 4_000);
-    await adminPool.query(`UPDATE marketing_spend_events SET tenant_id = $1 WHERE campaign_id = $2`, [TENANT_B, campaignB]);
+    // Q-44 (D-435): kampanjen tilhører tenant B, så utgiftsraden MÅ også være tenant B (komposittnøkkel) - ikke «flyttet» etterpå.
+    await insertMarketingSpend(campaignB, "2026-02-01", 4_000, "manual", "NOK", TENANT_B);
     const syncResultB = await service.syncMarketingSpend(TENANT_B, "business");
     expect(syncResultB.inserted).toBeGreaterThanOrEqual(1);
     const recordsA = await service.listSpendRecords(TENANT_A, "business");

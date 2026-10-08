@@ -97,6 +97,8 @@ const BASELINE_REASON: Record<string, string> = {
   brief_seen: "IDENTITY_SCAFFOLD",
   // CASCADED: slettes via FK-kaskade fra en tabell planen allerede sletter (074)
   session_grants: "CASCADED",
+  // Q-44 (D-435, migrasjon 081): koblingstabellen fikk tenant_id; ON DELETE CASCADE fra incident_diagnoses (komposittnøkkel) fjerner lenkene når diagnosene slettes.
+  incident_diagnosis_evidence: "CASCADED",
   // CRM_CORE: Business Graph-kjernen (companies/leads/opportunities/...) - PRE-EKSISTERENDE gap fra UA-3 P0 (se plan.ts-kommentar, D-66)
   business_activities: "CRM_CORE",
   business_companies: "CRM_CORE",
