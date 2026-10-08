@@ -11,6 +11,7 @@ import {
   type ModelProviderAdapter,
   type ModelRequest,
   type ModelResult,
+  type StreamEvent,
   type StreamHandler,
   type ToolCallRequest,
   type ToolDefinition,
@@ -237,6 +238,17 @@ const CRITIC_SYSTEM =
  * deterministisk (registry+health); fallback er klassifisert, aldri blind;
  * kostnad/latency/purpose skrives til cost_events; alt spores i trace-sinken.
  */
+/** D-441: spiller et komplett (ikke-streamet) resultat av som normaliserte stream-events - brukt når et retry-svar erstatter et tomt/avkortet stream-svar. */
+function replayResultAsStreamEvents(onEvent: StreamHandler, r: ModelResult): void {
+  if (r.text.length > 0) onEvent({ type: "text_delta", text: r.text });
+  for (const call of r.tool_calls ?? []) {
+    onEvent({ type: "tool_call_start", tool_call_id: call.tool_call_id, tool_name: call.tool_name });
+    onEvent({ type: "tool_call_complete", call });
+  }
+  onEvent({ type: "usage", usage: r.usage });
+  onEvent({ type: "finish", finish_reason: r.finish_reason ?? "stop" });
+}
+
 export class ModelGateway {
   private readonly guard: BudgetGuard;
   private readonly callTimestamps = new Map<string, number[]>();
@@ -447,6 +459,10 @@ export class ModelGateway {
       for (let attempt = 1; attempt <= maxTries; attempt++) {
         const attemptStart = Date.now();
         let outputStarted = false;
+        // D-441 (JARVIS-038): `usage`/`finish` holdes tilbake til utfallet er klassifisert. Leveres de FØR (som tidligere), er konsumenten allerede «ferdig» når et tomt
+        // eller avkortet resultat avsløres, og vi kan verken prøve neste kandidat eller feile ærlig - da ble et tomt svar returnert som suksess.
+        const heldTerminalEvents: StreamEvent[] = [];
+        let visibleOutputStarted = false;
         try {
           let result: ModelResult;
           if (streamOpts) {
@@ -458,6 +474,11 @@ export class ModelGateway {
             const guardedOnEvent: StreamHandler = (event) => {
               if (event.type === "text_delta" || event.type === "tool_call_start") {
                 outputStarted = true;
+                if (event.type === "tool_call_start" || event.text.trim().length > 0) visibleOutputStarted = true;
+              }
+              if (event.type === "usage" || event.type === "finish") {
+                heldTerminalEvents.push(event);
+                return;
               }
               if (streamDebug) {
                 console.error(JSON.stringify({
@@ -473,8 +494,8 @@ export class ModelGateway {
               // Adapter uten native streaming: normalisert enkelt-delta (capability-routing
               // skal normalt hindre dette; brukes kun når streaming ikke er påkrevd cap).
               result = await adapter.complete(request, (token) => guardedOnEvent({ type: "text_delta", text: token }));
-              streamOpts.onEvent({ type: "usage", usage: result.usage });
-              streamOpts.onEvent({ type: "finish", finish_reason: result.finish_reason ?? "stop" });
+              guardedOnEvent({ type: "usage", usage: result.usage });
+              guardedOnEvent({ type: "finish", finish_reason: result.finish_reason ?? "stop" });
             }
           } else {
             result = await adapter.complete(request, isCritic ? undefined : input.onToken);
@@ -495,6 +516,10 @@ export class ModelGateway {
             }
           };
           const outcome = classifyCompletionOutcome(result);
+          // Brukbart (eller synlig output allerede levert): slipp ut de tilbakeholdte `usage`/`finish` nå, FØR den (tregere) DB-skrivingen under.
+          if (streamOpts && (outcome === "USABLE_SUCCESS" || visibleOutputStarted)) {
+            for (const held of heldTerminalEvents.splice(0)) streamOpts.onEvent(held);
+          }
           await this.recordAttemptResult(input, result, outcome, {
             traceId,
             started,
@@ -511,17 +536,14 @@ export class ModelGateway {
             return result;
           }
 
-          if (streamOpts) {
-            // §7/§17 (regresjonsvern): streaming-kontrakten er BEVISST uendret av
-            // denne fiksen - `finish`/`usage`-eventene er allerede levert til
-            // stream-forbrukeren (enten av adapter.stream() selv, eller av
-            // normaliserings-grenen over) FØR vi når hit, så et nytt forsøk her
-            // ville produsert en forvirrende dobbel start/finish-sekvens for noe
-            // konsumenten allerede oppfatter som ferdig. `.stream()` returnerer derfor
-            // FORTSATT samme resultat som før - kun trace-metadata (over) er ny og
-            // ærlig klassifisert; ingen ny retry, ingen ny kastet feil på denne stien.
+          if (streamOpts && visibleOutputStarted) {
+            // Synlig tekst (utover blanke tegn) nådde allerede konsumenten, men resultatet er likevel ikke brukbart (ekstremt sjeldent). Et nytt forsøk ville gitt en
+            // forvirrende dobbel sekvens, så resultatet returneres som før; `usage`/`finish` er sluppet ut over.
             return result;
           }
+          // D-441 (JARVIS-038): INGEN synlig output er levert og `usage`/`finish` er holdt tilbake - da behandles et tomt eller avkortet stream-resultat som i
+          // ikke-streaming-stien (ett begrenset retry ved avkorting, ellers neste kandidat eller en ærlig feil), aldri som en stille suksess.
+          heldTerminalEvents.length = 0;
 
           // D-106 PR #53 functional-success-invariant (§4): ETT begrenset,
           // evidensbasert retry-forsøk (kun ikke-streaming når vi når hit - se
@@ -537,7 +559,7 @@ export class ModelGateway {
                   ...request,
                   max_tokens: computeAdaptiveRetryMaxTokens(result, request)
                 };
-                const retryResult = await adapter.complete(retryRequest, isCritic ? undefined : input.onToken);
+                const retryResult = await adapter.complete(retryRequest, streamOpts || isCritic ? undefined : input.onToken);
                 const retryLatency = retryResult.latency_ms ?? Date.now() - retryStart;
                 this.health.recordSuccess(adapter.name, retryLatency);
                 retryResult.metadata = {
@@ -568,6 +590,7 @@ export class ModelGateway {
                   adaptiveRetryOfOutcome: outcome
                 });
                 if (retryOutcome === "USABLE_SUCCESS") {
+                  if (streamOpts) replayResultAsStreamEvents(streamOpts.onEvent, retryResult); // konsumenten får en ren sekvens for det brukbare retry-svaret
                   return retryResult;
                 }
                 // Retry-forsøket var OGSÅ ubrukelig - ærlig feil, aldri stille suksess (§4).

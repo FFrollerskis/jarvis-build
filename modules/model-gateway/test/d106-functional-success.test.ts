@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type pg from "pg";
 import {
   ProviderError,
+  ScriptedAdapter,
   type ModelProviderAdapter,
   type ModelRequest,
   type ModelResult,
@@ -296,19 +297,74 @@ describe("D-106 PR #53: ModelGateway functional-success-invariant (§2-§7)", ()
     expect(gateway.health.state("queued", true)).toBe("LIVE");
   });
 
-  it("17) streaming-kontrakten er UENDRET: tomt/trunkert resultat returneres fortsatt direkte (ingen ny throw/retry)", async () => {
+  // D-441 (JARVIS-038): D-106 lot et tomt/avkortet stream-resultat gå gjennom som suksess fordi `finish`/`usage` allerede var levert. Nå holdes de tilbake til
+  // utfallet er klassifisert, så streaming følger samme ærlige regler som ikke-streaming (retry ved avkorting, neste kandidat, ellers en feil).
+  const eventTypes = (events: Array<{ type: string }>): string[] => events.map((e) => e.type);
+
+  it("17a) streaming + avkortet uten tekst: ETT retry (ikke-streamet), konsumenten får en REN sekvens for det brukbare svaret - ingen `finish` fra det avkortede forsøket", async () => {
     const { pool } = fakePool();
     const trace = new MemoryTraceSink();
     // Bruker "openai" som providernavn - kun kjente registry-profiler har "streaming"-capability (generisk fallback har det ikke).
-    const adapter = new QueuedResultAdapter("openai", "gpt-5", [truncatedResult({ provider: "openai", model: "gpt-5" })]);
+    const adapter = new QueuedResultAdapter("openai", "gpt-5", [truncatedResult({ provider: "openai", model: "gpt-5" }), usableResult({ provider: "openai", model: "gpt-5" })]);
     const gateway = new ModelGateway({ pool, trace, providers: [adapter] });
-    const events: unknown[] = [];
-    const result = await gateway.stream({ tenant_id: "t1", request: REQUEST }, (e) => events.push(e));
-    expect(result.text).toBe("");
-    expect(adapter.calls.length).toBe(1); // INGEN retry-kall for streaming (bevisst omfangsgrense, se model-gateway.ts)
+    const events: Array<{ type: string; text?: string }> = [];
+    const result = await gateway.stream({ tenant_id: "t1", request: REQUEST }, (e) => events.push(e as { type: string; text?: string }));
+    expect(result.text).toBe("et brukbart svar");
+    expect(adapter.calls.length).toBe(2);
+    expect(adapter.calls[1]?.max_tokens).toBeGreaterThan(200); // evidensbasert utvidet tak, som i ikke-streaming
+    expect(eventTypes(events).filter((t) => t === "finish")).toHaveLength(1);
+    expect(eventTypes(events).filter((t) => t === "usage")).toHaveLength(1);
+    expect(events.filter((e) => e.type === "text_delta").map((e) => e.text)).toEqual(["et brukbart svar"]);
+    expect(eventTypes(events).slice(-2)).toEqual(["usage", "finish"]);
+  });
+
+  it("17b) streaming + tomt svar (stop) fra eneste kandidat: ærlig FEIL, aldri en tom suksess - og ingen `usage`/`finish` levert til konsumenten", async () => {
+    const { pool } = fakePool();
+    const trace = new MemoryTraceSink();
+    const adapter = new QueuedResultAdapter("openai", "gpt-5", [emptyStopResult({ provider: "openai", model: "gpt-5" })]);
+    const gateway = new ModelGateway({ pool, trace, providers: [adapter] });
+    const events: Array<{ type: string }> = [];
+    await expect(gateway.stream({ tenant_id: "t1", request: REQUEST }, (e) => events.push(e as { type: string }))).rejects.toThrow(/no_usable_output/);
+    expect(adapter.calls.length).toBe(1); // en tom `stop` er ikke et retry-kandidat (kun avkorting er det)
+    expect(eventTypes(events)).not.toContain("finish");
+    expect(eventTypes(events)).not.toContain("usage");
     // Ærlig outcome ble likevel persistert i trace-metadata.
     const span = trace.spans.find((s) => s.kind === "model_call");
-    expect((span?.metadata as Record<string, unknown>)["outcome"]).toBe("TRUNCATED_NO_USABLE_OUTPUT");
+    expect((span?.metadata as Record<string, unknown>)["outcome"]).toBe("EMPTY_OUTPUT");
+  });
+
+  it("17c) streaming + tomt svar fra første kandidat: faller til neste kandidat med `fallback`-event, og `finish` kommer nøyaktig én gang (fra den andre)", async () => {
+    const { pool } = fakePool();
+    const first = new QueuedResultAdapter("openai", "gpt-5", [emptyStopResult({ provider: "openai", model: "gpt-5" })]);
+    const gateway = new ModelGateway({ pool, trace: new MemoryTraceSink(), providers: [first, new ScriptedAdapter(() => "svar fra nr 2")] });
+    const events: Array<{ type: string; to?: string }> = [];
+    const result = await gateway.stream({ tenant_id: "t1", request: REQUEST }, (e) => events.push(e as { type: string; to?: string }));
+    expect(result.text).toBe("svar fra nr 2");
+    expect(result.provider).toBe("scripted");
+    expect(first.calls.length).toBe(1);
+    expect(eventTypes(events).filter((t) => t === "finish")).toHaveLength(1);
+    expect(events.find((e) => e.type === "fallback")?.to).toBe("scripted");
+  });
+
+  it("17d) regresjon: brukbart stream-svar leverer text_delta, usage og finish i samme rekkefølge som før", async () => {
+    const { pool } = fakePool();
+    const adapter = new QueuedResultAdapter("openai", "gpt-5", [usableResult({ provider: "openai", model: "gpt-5" })]);
+    const gateway = new ModelGateway({ pool, trace: new MemoryTraceSink(), providers: [adapter] });
+    const events: Array<{ type: string }> = [];
+    const result = await gateway.stream({ tenant_id: "t1", request: REQUEST }, (e) => events.push(e as { type: string }));
+    expect(result.text).toBe("et brukbart svar");
+    expect(eventTypes(events)).toEqual(["start", "text_delta", "usage", "finish"]);
+    expect(adapter.calls.length).toBe(1);
+  });
+
+  it("17e) streaming + kun blanke tegn levert: teller ikke som synlig output, så det behandles som tomt svar (ærlig feil) - ingen `finish`", async () => {
+    const { pool } = fakePool();
+    const adapter = new QueuedResultAdapter("openai", "gpt-5", [usableResult({ provider: "openai", model: "gpt-5", text: "   " })]);
+    const gateway = new ModelGateway({ pool, trace: new MemoryTraceSink(), providers: [adapter] });
+    const events: Array<{ type: string }> = [];
+    // blanke tegn teller ikke som synlig output, så dette behandles som tomt svar: ærlig feil
+    await expect(gateway.stream({ tenant_id: "t1", request: REQUEST }, (e) => events.push(e as { type: string }))).rejects.toThrow(/no_usable_output/);
+    expect(eventTypes(events)).not.toContain("finish");
   });
 
   it("18) tenant-isolasjon: kost/trace-rader er merket med riktig tenant_id for begge forsøk", async () => {
