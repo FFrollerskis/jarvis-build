@@ -3,6 +3,15 @@ import { JobContractSchema, type JobContract, type JsonValue } from "@jarvis/con
 import { withTenantTransaction } from "@jarvis/core";
 import type { ClaimedTask, TaskView, WorkflowAdapter } from "./workflow-adapter.ts";
 
+/** D-446: høyeste ventetid mellom to forsøk, uansett hva kontrakten ber om (en feilkonfigurert `backoff_seconds` skal ikke parkere en jobb i dager). */
+const MAX_RETRY_BACKOFF_SECONDS = 3600;
+
+/** D-446: `backoff_seconds * 2^(forsøk - 1)`, begrenset til en time. 0 (eller ugyldig) = ingen ventetid, som før. */
+export function retryBackoffSeconds(attempts: number, backoffSeconds: number): number {
+  if (!Number.isFinite(backoffSeconds) || backoffSeconds <= 0) return 0;
+  return Math.min(MAX_RETRY_BACKOFF_SECONDS, Math.round(backoffSeconds * 2 ** Math.max(0, attempts - 1)));
+}
+
 export class PgTaskQueue implements WorkflowAdapter {
   constructor(private readonly pool: pg.Pool) {}
 
@@ -49,20 +58,24 @@ export class PgTaskQueue implements WorkflowAdapter {
   async fail(tenantId: string, taskId: string, workerId: string, error: string): Promise<"created" | "failed" | "stale"> {
     return withTenantTransaction(this.pool, tenantId, async (client) => {
       const row = await client.query(
-        `SELECT attempts, contract->'retry_policy'->>'max_attempts' AS max_attempts
+        `SELECT attempts, contract->'retry_policy'->>'max_attempts' AS max_attempts,
+                contract->'retry_policy'->>'backoff_seconds' AS backoff_seconds
          FROM tasks WHERE task_id = $1 AND worker_id = $2 AND status = 'running' FOR UPDATE`,
         [taskId, workerId]
       );
-      const info = row.rows[0] as { attempts: number; max_attempts: string } | undefined;
+      const info = row.rows[0] as { attempts: number; max_attempts: string; backoff_seconds: string | null } | undefined;
       if (!info) {
         return "stale";
       }
       const retry = info.attempts < Number(info.max_attempts);
+      // D-446: et nytt forsøk venter `backoff_seconds` (eksponentielt) - ellers tok drain-løkken jobben igjen med en gang og brukte opp alle forsøkene på sekunder.
+      const backoff = retry ? retryBackoffSeconds(info.attempts, Number(info.backoff_seconds ?? 0)) : 0;
       await client.query(
         `UPDATE tasks SET status = $2, last_error = $3, worker_id = NULL, lease_expires_at = NULL,
-                finished_at = CASE WHEN $2 = 'failed' THEN now() ELSE NULL END
+                finished_at = CASE WHEN $2 = 'failed' THEN now() ELSE NULL END,
+                not_before = CASE WHEN $2 = 'created' AND $4::int > 0 THEN now() + make_interval(secs => $4::int) ELSE NULL END
          WHERE task_id = $1`,
-        [taskId, retry ? "created" : "failed", error]
+        [taskId, retry ? "created" : "failed", error, backoff]
       );
       return retry ? "created" : "failed";
     });
