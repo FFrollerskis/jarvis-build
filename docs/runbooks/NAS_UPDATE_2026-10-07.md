@@ -50,6 +50,7 @@ cd /volume1/jarvisbuild-data/jarvisbuild
 | D-444 | Tomt svar fra lokal modell faller tilbake til vanlig ruting (som ved timeout) i stedet for «Noe gikk galt» | Logglinje `d404_gemma_provider_failed_fallback` med `kind: "invalid_response"`; kan gi en skykostnad |
 | D-445 | Nattjobbene som bruker PC-ens lokale modell (`memory-reembed-sweep`, `memory-retention-sweep`) er «best effort»: de prøves på nytt, men et tap er DEGRADED (aldri DOWN, aldri i morgenbriefen) | Ingen morgenvarsel selv om PC-en var av om natten |
 | D-446 | Jobbkøen: en jobb hvis worker krasjer gjenopptas høyst én gang og settes deretter til `failed` (tidligere kjørte den i det uendelige); retry med ventetid (`backoff_seconds`) | Migrasjon 083 og 084 anvendt; en krasjet jobb ender som `failed` med `lease_expired_claims_exhausted` |
+| D-447 | En verktøytur som tvinges til den lokale modellen av sensitivitetsregelen (økonomi/helse/hemmeligheter i de siste meldingene) får en synlig merknad i svaret og logglinjen `d447_tool_turn_local_sensitivity` | Merknaden «Svart på den lokale modellen …» når samtalen nylig berørte økonomi; ellers uendret |
 
 ## 0. Før du starter (1 min)
 

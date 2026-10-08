@@ -21,6 +21,7 @@ import { DEFAULT_PERSONALITY_CONFIG, type PersonalityConfig } from "@jarvis/self
 import type { TaskService, InProcessWorker } from "@jarvis/tasks";
 import { createTurnContext, surfaceForChannel, type Surface, type SurfaceLimits, type TurnContext } from "@jarvis/tool-gateway";
 import { randomUUID } from "node:crypto";
+import { localOnlyNote } from "./tool-turn-route.ts";
 
 export interface ConversationDeps {
   messages: MessageStore;
@@ -531,14 +532,22 @@ export class ConversationEngine {
       // ekte verktøy er valgt for turen (alt annet enn minne-reserven `memory__*`), går turen til Sonnet 5.5 (anthropic) - en 8B-modell
       // bruker verktøy upålitelig. Aldri for SECRET_RESTRICTED (helse/finans: kun lokal, D-378) og aldri over en eksplisitt eier-override.
       const toolRoute = this.deps.toolTurnRoute ?? null;
-      let toolsToCloud =
+      const cloudToolsWanted =
         toolRoute !== null &&
         usingDefaultGemmaPreference &&
         useTools &&
-        sensitivityDecision.sensitivity !== "SECRET_RESTRICTED" &&
         toolDefinitions.some((d) => !d.name.startsWith("memory__"));
+      const sensitivityLocalOnly = sensitivityDecision.sensitivity === "SECRET_RESTRICTED";
+      let toolsToCloud = cloudToolsWanted && !sensitivityLocalOnly;
+      // D-447 (NAS-test 2026-10-08): en verktøytur som ville gått til sky, men som sensitivitetsregelen (D-378) tvinger lokalt, skal ikke skje usynlig. Eieren fikk et uleselig
+      // svar fra en liten lokal modell uten å vite hvorfor (Jarvis' eget forrige svar nevnte et økonomiord, og de siste meldingene teller med, D-384). Regelen er UENDRET - dette gjør
+      // bare valget synlig: en merknad i svaret (ikke på tale) og en logglinje med kategoriene, aldri innhold.
+      let routeNote = "";
+      if (cloudToolsWanted && sensitivityLocalOnly) {
+        console.log(JSON.stringify({ msg: "d447_tool_turn_local_sensitivity", reasons: sensitivityDecision.reasons }));
+        if (surface !== "voice") routeNote = localOnlyNote(sensitivityDecision.reasons);
+      }
       // D-432: dagstak. Sjekkes kun når turen faktisk ville gått til sky (ingen DB-spørring for vanlig prat). Kan kostnaden ikke leses, feiler vi lukket (lokalt).
-      let dayCapNote = "";
       const dayCap = this.deps.toolTurnDayCap ?? null;
       if (toolsToCloud && dayCap !== null) {
         let capped = false;
@@ -550,7 +559,7 @@ export class ConversationEngine {
         }
         if (capped) {
           toolsToCloud = false;
-          dayCapNote = `\n\n(Dagstaket for sky på ${Math.round(dayCap.cap_ore / 100)} kr er nådd i dag, så dette svaret kom fra den lokale modellen. Taket nullstilles i morgen.)`;
+          routeNote = `\n\n(Dagstaket for sky på ${Math.round(dayCap.cap_ore / 100)} kr er nådd i dag, så dette svaret kom fra den lokale modellen. Taket nullstilles i morgen.)`;
           console.log(JSON.stringify({ msg: "d432_tool_turn_day_cap_reached", cap_ore: dayCap.cap_ore }));
         }
       }
@@ -705,9 +714,9 @@ export class ConversationEngine {
           throw err;
         }
       }
-      // D-432: er sky-ruten stoppet av dagstaket, sier svaret det (aldri en stille nedgradering).
-      const replyText = dayCapNote ? `${result.text}${dayCapNote}` : result.text;
-      if (dayCapNote) onToken?.(dayCapNote);
+      // D-432 / D-447: er sky-ruten stoppet av dagstaket eller av sensitivitetsregelen, sier svaret det (aldri en stille nedgradering).
+      const replyText = routeNote ? `${result.text}${routeNote}` : result.text;
+      if (routeNote) onToken?.(routeNote);
       await this.deps.messages.save(identity, "assistant", replyText);
       return { reply: replyText, routed: "model", ...(confirmations.length > 0 ? { confirmations } : {}) };
     } catch (err) {
