@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type pg from "pg";
 import {
   ProviderError,
@@ -365,6 +365,120 @@ describe("D-106 PR #53: ModelGateway functional-success-invariant (§2-§7)", ()
     // blanke tegn teller ikke som synlig output, så dette behandles som tomt svar: ærlig feil
     await expect(gateway.stream({ tenant_id: "t1", request: REQUEST }, (e) => events.push(e as { type: string }))).rejects.toThrow(/no_usable_output/);
     expect(eventTypes(events)).not.toContain("finish");
+  });
+
+  // D-441 etter uavhengig gjennomgang: avbrudd og konsument-feil i de NYE banene (retry + frigivelse/avspilling av tilbakeholdte events).
+  /** Adapter som avbryter turen (som et barge-in) rett etter at det første stream-forsøket - eller retry-kallet - er ferdig. */
+  class AbortingAdapter extends QueuedResultAdapter {
+    constructor(name: string, model: string, queue: Array<ModelResult | { throw: ProviderError }>, private readonly controller: AbortController, private readonly abortAfter: "stream" | "complete") {
+      super(name, model, queue);
+    }
+    override async stream(request: ModelRequest, onEvent: StreamHandler): Promise<ModelResult> {
+      const result = await super.stream(request, onEvent);
+      if (this.abortAfter === "stream") this.controller.abort();
+      return result;
+    }
+    override async complete(request: ModelRequest): Promise<ModelResult> {
+      const result = await super.complete(request);
+      if (this.abortAfter === "complete") this.controller.abort();
+      return result;
+    }
+  }
+
+  it("17f) avbrutt etter det første (avkortede) forsøket: INGEN retry startes, ingen events etter avbruddet, og feilen er «cancelled»", async () => {
+    const { pool } = fakePool();
+    const controller = new AbortController();
+    const adapter = new AbortingAdapter("openai", "gpt-5", [truncatedResult({ provider: "openai", model: "gpt-5" }), usableResult({ provider: "openai", model: "gpt-5" })], controller, "stream");
+    const gateway = new ModelGateway({ pool, trace: new MemoryTraceSink(), providers: [adapter] });
+    const events: Array<{ type: string }> = [];
+    await expect(gateway.stream({ tenant_id: "t1", request: REQUEST }, (e) => events.push(e as { type: string }), controller.signal)).rejects.toMatchObject({ kind: "cancelled" });
+    expect(adapter.calls.length).toBe(1); // det betalte retry-kallet ble aldri startet
+    expect(eventTypes(events)).not.toContain("finish");
+    expect(eventTypes(events)).not.toContain("usage");
+    expect(eventTypes(events)).not.toContain("text_delta");
+  });
+
+  it("17g) avbrutt UNDER retry-kallet: det betalte kallet er kostnadsført, men svaret spilles IKKE av som en vellykket sekvens (kastes som «cancelled»)", async () => {
+    const { pool, costInserts } = fakePool();
+    const controller = new AbortController();
+    const adapter = new AbortingAdapter("openai", "gpt-5", [truncatedResult({ provider: "openai", model: "gpt-5" }), usableResult({ provider: "openai", model: "gpt-5" })], controller, "complete");
+    const gateway = new ModelGateway({ pool, trace: new MemoryTraceSink(), providers: [adapter] });
+    const events: Array<{ type: string }> = [];
+    await expect(gateway.stream({ tenant_id: "t1", request: REQUEST }, (e) => events.push(e as { type: string }), controller.signal)).rejects.toMatchObject({ kind: "cancelled" });
+    expect(adapter.calls.length).toBe(2); // retry-kallet ble gjennomført før avbruddet ble sett
+    expect(costInserts.filter((p) => p[3] === "model:openai")).toHaveLength(2); // begge ekte forsøk er kostnadsført
+    expect(eventTypes(events)).not.toContain("text_delta");
+    expect(eventTypes(events)).not.toContain("usage");
+    expect(eventTypes(events)).not.toContain("finish");
+  });
+
+  it("17h) streaming + retry er OGSÅ avkortet: ærlig feil etter retry, ingen `usage`/`finish`, og nøyaktig to kall", async () => {
+    const { pool } = fakePool();
+    const adapter = new QueuedResultAdapter("openai", "gpt-5", [truncatedResult({ provider: "openai", model: "gpt-5" }), truncatedResult({ provider: "openai", model: "gpt-5" })]);
+    const gateway = new ModelGateway({ pool, trace: new MemoryTraceSink(), providers: [adapter] });
+    const events: Array<{ type: string }> = [];
+    await expect(gateway.stream({ tenant_id: "t1", request: REQUEST }, (e) => events.push(e as { type: string }))).rejects.toThrow(/no_usable_output_after_retry/);
+    expect(adapter.calls.length).toBe(2);
+    expect(eventTypes(events)).not.toContain("finish");
+    expect(eventTypes(events)).not.toContain("usage");
+  });
+
+  it("17i) streaming + kun verktøykall (ingen tekst): er brukbart, og `usage`/`finish` slippes ut etter verktøyhendelsene", async () => {
+    const { pool } = fakePool();
+    const call = { tool_call_id: "c1", tool_name: "x", arguments: {}, provider: "openai", model: "gpt-5" };
+    class ToolOnlyAdapter extends QueuedResultAdapter {
+      override async stream(_request: ModelRequest, onEvent: StreamHandler): Promise<ModelResult> {
+        const next = usableResult({ provider: "openai", model: "gpt-5", text: "", finish_reason: "tool_calls", tool_calls: [call] });
+        onEvent({ type: "start", provider: this.name, model: this.model, generation_id: "gen-1" });
+        onEvent({ type: "tool_call_start", tool_call_id: "c1", tool_name: "x" });
+        onEvent({ type: "tool_call_complete", call });
+        onEvent({ type: "usage", usage: next.usage });
+        onEvent({ type: "finish", finish_reason: "tool_calls" });
+        return next;
+      }
+    }
+    const gateway = new ModelGateway({ pool, trace: new MemoryTraceSink(), providers: [new ToolOnlyAdapter("openai", "gpt-5", [])] });
+    const events: Array<{ type: string }> = [];
+    const result = await gateway.stream({ tenant_id: "t1", request: REQUEST }, (e) => events.push(e as { type: string }));
+    expect(result.tool_calls).toHaveLength(1);
+    expect(eventTypes(events)).toEqual(["start", "tool_call_start", "tool_call_complete", "usage", "finish"]);
+  });
+
+  it("17j) en konsument som kaster ved frigivelsen av `usage`/`finish` er konsumentens feil: svaret returneres, ingen failover til en ny betalt kandidat", async () => {
+    const { pool, costInserts } = fakePool();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const first = new QueuedResultAdapter("openai", "gpt-5", [usableResult({ provider: "openai", model: "gpt-5" })]);
+      const second = new QueuedResultAdapter("anthropic", "claude", [usableResult({ provider: "anthropic", model: "claude" })]);
+      const gateway = new ModelGateway({ pool, trace: new MemoryTraceSink(), providers: [first, second] });
+      const result = await gateway.stream({ tenant_id: "t1", request: REQUEST }, (e) => { if (e.type === "finish") throw new Error("konsument-bug"); });
+      expect(result.text).toBe("et brukbart svar");
+      expect(first.calls.length).toBe(1);
+      expect(second.calls.length).toBe(0); // ingen failover
+      expect(costInserts.filter((p) => String(p[3]).startsWith("model:failed"))).toHaveLength(0); // ingen falsk 0-øre-feilrad
+      expect(errorSpy.mock.calls.some((c) => String(c[0]).includes("stream_consumer_error"))).toBe(true);
+      expect(gateway.health.state("openai", true)).toBe("LIVE");
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("17k) en konsument som kaster under avspillingen av retry-svaret: svaret returneres (ett betalt retry, ikke to kandidater) og ingen feilrad skrives", async () => {
+    const { pool, costInserts } = fakePool();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const first = new QueuedResultAdapter("openai", "gpt-5", [truncatedResult({ provider: "openai", model: "gpt-5" }), usableResult({ provider: "openai", model: "gpt-5" })]);
+      const second = new QueuedResultAdapter("anthropic", "claude", [usableResult({ provider: "anthropic", model: "claude" })]);
+      const gateway = new ModelGateway({ pool, trace: new MemoryTraceSink(), providers: [first, second] });
+      const result = await gateway.stream({ tenant_id: "t1", request: REQUEST }, (e) => { if (e.type === "text_delta") throw new Error("konsument-bug"); });
+      expect(result.text).toBe("et brukbart svar");
+      expect(first.calls.length).toBe(2);
+      expect(second.calls.length).toBe(0);
+      expect(costInserts.filter((p) => String(p[3]).startsWith("model:failed"))).toHaveLength(0);
+      expect(costInserts.filter((p) => p[3] === "model:openai")).toHaveLength(2); // nøyaktig de to ekte forsøkene
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it("18) tenant-isolasjon: kost/trace-rader er merket med riktig tenant_id for begge forsøk", async () => {
