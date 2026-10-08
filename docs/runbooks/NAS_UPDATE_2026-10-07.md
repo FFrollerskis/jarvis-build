@@ -69,6 +69,7 @@ Adressen må være **den samme HTTPS-adressen nettleseren bruker**: enhetsnøkke
 | D-445 | Nattjobbene som bruker PC-ens lokale modell (`memory-reembed-sweep`, `memory-retention-sweep`) er «best effort»: de prøves på nytt, men et tap er DEGRADED (aldri DOWN, aldri i morgenbriefen) | Ingen morgenvarsel selv om PC-en var av om natten |
 | D-446 | Jobbkøen: en jobb hvis worker krasjer gjenopptas høyst én gang og settes deretter til `failed` (tidligere kjørte den i det uendelige); retry med ventetid (`backoff_seconds`) | Migrasjon 083 og 084 anvendt; en krasjet jobb ender som `failed` med `lease_expired_claims_exhausted` |
 | D-447 | En verktøytur som tvinges til den lokale modellen av sensitivitetsregelen (økonomi/helse/hemmeligheter i de siste meldingene) får en synlig merknad i svaret og logglinjen `d447_tool_turn_local_sensitivity` | Merknaden «Svart på den lokale modellen …» når samtalen nylig berørte økonomi; ellers uendret |
+| D-448 | Ordene «gjelder/gjelde/gjeldende» og «bicycle» utløser ikke lenger økonomi-regelen (lokal-tvang); gjeld/gjelden/gjeldsbrev og BIC fanges fortsatt | Verktøyturer i en samtale med «gjelder» går til Sonnet (`cost_events`: `anthropic`), ikke til `llama3.1:8b`; gjenta chat-test 3 |
 
 ## 0. Før du starter (1 min)
 
