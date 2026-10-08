@@ -99,6 +99,10 @@ describe("D-449: skjerming mot ekte minneutdata", () => {
     expect(v1.op).toBe("ADD");
     await writer.apply(id, TRUSTED, candidate("tobias.fredag", "Tobias har legetime fredag omega11."));
     await writer.apply(id, TRUSTED, candidate("tobias.fredag", "Tobias skal på kino fredag omega11."));
+    // Skriveren regner nå om sensitivity ved oppdatering (strengeste av gammel og ny), så elementet er `special` i dag. Rader skrevet FØR den rettelsen står derimot som `normal` med helsetekst i versjonene -
+    // det gjenskapes her, siden eksisterende data ikke endres av en kodeendring.
+    expect((await adminPool.query("SELECT sensitivity FROM memory_items WHERE memory_item_id = $1", [(v1 as { memory_item_id: string }).memory_item_id])).rows[0].sensitivity).toBe("special");
+    await adminPool.query("UPDATE memory_items SET sensitivity = 'normal' WHERE memory_item_id = $1", [(v1 as { memory_item_id: string }).memory_item_id]);
     const { raw, screened, seenIds } = await searchAsCloudModel("omega11");
     const hit = raw.find((r) => r["memory_item_id"] === (v1 as { memory_item_id: string }).memory_item_id);
     expect(hit, "treffet må finnes").toBeDefined();

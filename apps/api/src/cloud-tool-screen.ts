@@ -77,7 +77,8 @@ function memoryItemIsCloudSafe(item: unknown): boolean {
     ...((versions as Array<{ content: string }> | undefined) ?? []).map((v) => v.content),
     ...(source !== undefined ? [(source as Record<string, string>)["ref"] ?? ""] : [])
   ];
-  return classifyContentSensitivity({ memory_spaces: [space], memory_sensitivities: explicit ? [sensitivity] : [], texts }).sensitivity !== "SECRET_RESTRICTED";
+  // `special` er allerede avvist over (kun `normal`/`sensitive` er eksplisitt trygge), så sensitivity-merket trenger ikke gå gjennom klassifiseringen på nytt; rommet og ALL tekst gjør det.
+  return classifyContentSensitivity({ memory_spaces: [space], texts }).sensitivity !== "SECRET_RESTRICTED";
 }
 
 export interface CloudScreenOutcome {

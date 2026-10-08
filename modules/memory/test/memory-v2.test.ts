@@ -159,6 +159,25 @@ describe("B: skriving går til memory_vectors (modellbevisst), og innholdsbasert
     expect(row.rows[0]).toEqual({ sensitivity: "special" });
   });
 
+  it("D-449: en oppdatering regner om sensitivity (strengeste av gammel og ny): helsetekst inn i et `normal` element gjør det `special`, og en harmløs senere tekst senker det aldri igjen", async () => {
+    const sens = async (itemId: string) => (await adminPool.query("SELECT sensitivity FROM memory_items WHERE memory_item_id = $1", [itemId])).rows[0].sensitivity as string;
+    const first = await writer.apply(identity("personal"), TRUSTED, candidate("personal", "tobias.fredag2", "Tobias skal på kino fredag nu77."));
+    expect(first.op).toBe("ADD");
+    const itemId = (first as { memory_item_id: string }).memory_item_id;
+    expect(await sens(itemId)).toBe("normal");
+    const second = await writer.apply(identity("personal"), TRUSTED, candidate("personal", "tobias.fredag2", "Tobias har legetime fredag nu77."));
+    expect(second.op).toBe("UPDATE");
+    expect(await sens(itemId)).toBe("special");
+    await writer.apply(identity("personal"), TRUSTED, candidate("personal", "tobias.fredag2", "Tobias skal på kino fredag nu77, igjen."));
+    expect(await sens(itemId)).toBe("special");
+    // sensitive (privat-signal) kan økes til special, men ikke omvendt
+    const pr = await writer.apply(identity("personal"), TRUSTED, candidate("personal", "tobias.adresse2", "Tobias sin adresse er Skogveien 1 nu78."));
+    const prId = (pr as { memory_item_id: string }).memory_item_id;
+    expect(await sens(prId)).toBe("sensitive");
+    await writer.apply(identity("personal"), TRUSTED, candidate("personal", "tobias.adresse2", "Tobias bor på hytta nu78."));
+    expect(await sens(prId)).toBe("sensitive");
+  });
+
   it("en embedding-feil velter ALDRI minneskrivingen: faktumet lagres, vektoren mangler, og re-embed-sveipet fyller den", async () => {
     const failing: EmbeddingProvider = {
       model: "flaky-local", dim: 64, locality: "local", minSimilarity: 0.6,
