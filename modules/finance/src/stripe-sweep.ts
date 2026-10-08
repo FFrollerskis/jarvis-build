@@ -1,4 +1,5 @@
 import type pg from "pg";
+import type { SweepFailureCollector } from "@jarvis/contracts";
 import { listBusinessTenantIds } from "@jarvis/core";
 import type { FinanceService } from "./service.ts";
 import type { StripeProviderAnomalyDetectionResult } from "./types.ts";
@@ -20,12 +21,14 @@ export interface StripePaymentSyncResult {
  * ferske Stripe-utfall er tilgjengelige når resten av finans-sveipet
  * kjører samme morgen.
  */
-export async function runStripePaymentSyncForAllTenants(pool: pg.Pool, financeService: FinanceService): Promise<Record<string, StripePaymentSyncResult>> {
+export async function runStripePaymentSyncForAllTenants(pool: pg.Pool, financeService: FinanceService, failures?: SweepFailureCollector): Promise<Record<string, StripePaymentSyncResult>> {
   const tenantIds = await listBusinessTenantIds(pool, 200);
   const results: Record<string, StripePaymentSyncResult> = {};
   for (const tenantId of tenantIds) {
     try {
       const sync = await financeService.syncPendingStripePayments(tenantId, "business");
+      // D-442: tjenesten fanger per-betalings-feil og returnerer kun et tall - en leverandørnedetid ({synced:0, failed:n}) skal ikke bokføres som en fullført dag.
+      if (sync.failed > 0) failures?.record(tenantId, `${sync.failed} betaling(er) kunne ikke synkes`, "payments");
       const anomalies = await financeService.runProviderAnomalyDetection(tenantId, "business");
       results[tenantId] = { sync, anomalies };
     } catch (err) {
@@ -35,6 +38,7 @@ export async function runStripePaymentSyncForAllTenants(pool: pg.Pool, financeSe
         msg: "stripe_sweep_tenant_failed", tenant_id: tenantId,
         error: err instanceof Error ? err.message : String(err)
       }));
+      failures?.record(tenantId, err);
       results[tenantId] = { sync: { synced: 0, failed: 0 }, anomalies: { payment_intent_flags_added: 0, refund_flags_added: 0, flags_cleared: 0 } };
     }
   }

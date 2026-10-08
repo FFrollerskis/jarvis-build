@@ -1,4 +1,5 @@
 import type pg from "pg";
+import type { SweepFailureCollector } from "@jarvis/contracts";
 import { listBusinessTenantIds } from "@jarvis/core";
 import type { SpendService } from "./spend-service.ts";
 import type { SpendAnomalyDetectionResult, SpendSyncResult } from "./spend-types.ts";
@@ -22,7 +23,8 @@ export interface FinanceSpendIntegritySweepResult {
  */
 export async function runFinanceSpendIntegritySweepForAllTenants(
   pool: pg.Pool,
-  spendService: SpendService
+  spendService: SpendService,
+  failures?: SweepFailureCollector
 ): Promise<Record<string, FinanceSpendIntegritySweepResult>> {
   const tenantIds = await listBusinessTenantIds(pool, 200);
   const results: Record<string, FinanceSpendIntegritySweepResult> = {};
@@ -36,6 +38,7 @@ export async function runFinanceSpendIntegritySweepForAllTenants(
         msg: "spend_sweep_tenant_failed", tenant_id: tenantId,
         error: err instanceof Error ? err.message : String(err)
       }));
+      failures?.record(tenantId, err);
       results[tenantId] = {
         marketing: { scanned: 0, inserted: 0, updated: 0, corrected: 0, correction_conflicts: 0 },
         model_cost: { scanned: 0, inserted: 0, updated: 0, corrected: 0, correction_conflicts: 0 },

@@ -210,4 +210,53 @@ describe("D-286: runMemoryRetentionSweepForAllTenants konsoliderer gamle episodi
     expect(result.failed).toEqual([]);
     expect(result.consolidatedByTenant[`${TENANT}:personal`]).toBe(0);
   });
+
+  it("F (D-442): konsolideres PER DAG - feiler sammendraget for en senere dag, er tidligere dager ferdige og gjentas ikke (et nytt forsøk skal ikke betale LLM-kallene på nytt)", async () => {
+    const id = identity("personal");
+    const dayOld = isoDaysAgo(120);
+    const dayNewer = isoDaysAgo(100);
+    const first = await writer.apply(id, CONVERSATION, {
+      space: "personal", type: "episodic", subject: "test.perdag.forste", content: "Første dag: jeg møtte Kari i Bergen.", confidence: 0.6, observed_at: dayOld
+    });
+    const second = await writer.apply(id, CONVERSATION, {
+      space: "personal", type: "episodic", subject: "test.perdag.andre", content: "Andre dag: jeg kjøpte en sykkel i Tromsø.", confidence: 0.6, observed_at: dayNewer
+    });
+    expect(first.op).toBe("ADD");
+    expect(second.op).toBe("ADD");
+    const firstDay = new Date(dayOld).toISOString().slice(0, 10);
+    const secondDay = new Date(dayNewer).toISOString().slice(0, 10);
+    const statusOf = async (memoryItemId: string): Promise<string> =>
+      ((await withMemoryTransaction(appPool, TENANT, ["personal"], (c) =>
+        c.query("SELECT status FROM memory_items WHERE memory_item_id = $1", [memoryItemId])
+      )).rows[0] as { status: string }).status;
+
+    // Første kjøring: sammendraget for den SENERE dagen feiler (for eksempel LLM nede).
+    const calls1: string[] = [];
+    const flaky = {
+      generateDaily: async (ident: IdentityContext, space: MemorySpace, day: string) => {
+        calls1.push(day);
+        if (day === secondDay) throw new Error("llm nede");
+        return summaries.generateDaily(ident, space, day);
+      }
+    } as unknown as SummaryService;
+    const failedRun = await runMemoryRetentionSweepForAllTenants(appPool, writer, flaky, 60);
+    expect(failedRun.failed).toHaveLength(1);
+    expect(failedRun.failed[0]?.error).toContain("llm nede");
+    expect(calls1).toEqual([firstDay, secondDay]);
+    expect(await statusOf(first.memory_item_id!)).toBe("invalidated"); // den tidligere dagen ER konsolidert
+    expect(await statusOf(second.memory_item_id!)).toBe("active"); // den feilede dagen er urørt (ikke fjernet uten sammendrag)
+
+    // Nytt forsøk: kun den feilede dagen summeres på nytt - den ferdige dagen er ikke lenger kandidat.
+    const calls2: string[] = [];
+    const counting = {
+      generateDaily: async (ident: IdentityContext, space: MemorySpace, day: string) => {
+        calls2.push(day);
+        return summaries.generateDaily(ident, space, day);
+      }
+    } as unknown as SummaryService;
+    const retry = await runMemoryRetentionSweepForAllTenants(appPool, writer, counting, 60);
+    expect(retry.failed).toEqual([]);
+    expect(calls2).toEqual([secondDay]);
+    expect(await statusOf(second.memory_item_id!)).toBe("invalidated");
+  });
 });

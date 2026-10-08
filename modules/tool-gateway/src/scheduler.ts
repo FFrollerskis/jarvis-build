@@ -9,8 +9,11 @@ import { envHour } from "@jarvis/contracts";
  * ved oppstart ETTER planlagt tid samme dag leveres dagens brief en gang
  * (catch-up); aldri duplikater, aldri gaarsdagens.
  */
-/** D-393: maks forsoek per dag per jobb (foerste kjoering + retries). */
-const MAX_ATTEMPTS = 4;
+/** D-393: maks forsoek per dag per jobb (foerste kjoering + retries). Eksportert for D-443 (`scheduler-health.ts` maa bruke SAMME tall). */
+export const DAILY_SCHEDULER_MAX_ATTEMPTS = 4;
+const MAX_ATTEMPTS = DAILY_SCHEDULER_MAX_ATTEMPTS;
+/** D-393: en claim uten fullfoering er overtakbar etter dette (krasj/hengt prosess). Eksportert for D-443 (samme tall i helse-leseren). */
+export const DAILY_SCHEDULER_CLAIM_LEASE_MINUTES = 15;
 
 export class DailyScheduler {
   readonly instanceId = `sched-${randomUUID().slice(0, 8)}`;
@@ -44,9 +47,9 @@ export class DailyScheduler {
          AND scheduler_state.attempts < $4
          AND (
            (scheduler_state.retry_after IS NOT NULL AND scheduler_state.retry_after <= now())
-           OR (scheduler_state.retry_after IS NULL AND scheduler_state.claimed_at < now() - interval '15 minutes')
+           OR (scheduler_state.retry_after IS NULL AND scheduler_state.claimed_at < now() - make_interval(mins => $5::int))
          )`,
-      [this.jobName, date, this.instanceId, MAX_ATTEMPTS]
+      [this.jobName, date, this.instanceId, MAX_ATTEMPTS, DAILY_SCHEDULER_CLAIM_LEASE_MINUTES]
     );
     return (result.rowCount ?? 0) > 0;
   }
@@ -56,6 +59,18 @@ export class DailyScheduler {
     await this.pool.query(
       "UPDATE scheduler_state SET completed_at = now(), retry_after = NULL WHERE job_name = $1 AND run_date = $2",
       [this.jobName, date]
+    );
+  }
+
+  /**
+   * D-442: forny claimet mens jobben kjorer. Uten dette regnes en legitimt lang kjoering (reembed etter modellbytte, LLM-retensjon, mange bank-sider) som hengt naar claimet er
+   * eldre enn lease: neste tick starter da en SAMTIDIG kjoering av samme jobb, og helse-leseren (D-443) viser den som `stalled`/`gave_up` mens den fortsatt jobber.
+   */
+  async heartbeat(): Promise<void> {
+    const { date } = this.localNow();
+    await this.pool.query(
+      "UPDATE scheduler_state SET claimed_at = now() WHERE job_name = $1 AND run_date = $2 AND claimed_by = $3 AND completed_at IS NULL",
+      [this.jobName, date, this.instanceId]
     );
   }
 
@@ -74,10 +89,12 @@ export class DailyScheduler {
     }
   }
 
-  /** Kjoer i intervall: leverer maks en gang per dag, reboot-/multi-instans-trygt. */
-  start(deliver: () => Promise<void>, intervalMs = 60_000): NodeJS.Timeout {
+  /** Kjoer i intervall: leverer maks en gang per dag, reboot-/multi-instans-trygt. `heartbeatMs` (D-442) styrer hvor ofte claimet fornyes mens `deliver()` kjorer. */
+  start(deliver: () => Promise<void>, intervalMs = 60_000, heartbeatMs = 60_000): NodeJS.Timeout {
     const timer = setInterval(() => void (async () => {
       if (await this.claimToday()) {
+        const heartbeat = setInterval(() => void this.heartbeat().catch(() => undefined), heartbeatMs);
+        heartbeat.unref();
         try {
           await deliver();
           await this.markCompleted();
@@ -85,6 +102,8 @@ export class DailyScheduler {
           // D-393 (JARVIS-027): planlegg retry foer feilen logges av sikkerhetsnettet under (feil i selve markFailed maa ikke skjule originalfeilen).
           await this.markFailed(err instanceof Error ? err.message : String(err)).catch(() => undefined);
           throw err;
+        } finally {
+          clearInterval(heartbeat);
         }
       }
     })().catch((err) => {

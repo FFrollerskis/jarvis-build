@@ -176,15 +176,36 @@ export async function deliverChunkedTextViaTelegram(
   text: string,
   idempotencyPrefix: string
 ): Promise<boolean> {
+  return (await deliverChunkedTextViaTelegramDetailed(gateway, identity, text, idempotencyPrefix)).ok;
+}
+
+/**
+ * D-442: samme levering, men med antall sendte deler. En flerdelt tekst kan feile på del 2+ etter at del 1 er sendt; en kaller som vil prøve på nytt må vite at
+ * noe allerede er levert (et nytt forsøk får en ny `generated_at` = nye nøkler, så del 1 ville kommet to ganger).
+ */
+export interface ChunkedDeliveryResult {
+  ok: boolean;
+  /** Antall deler som faktisk ble sendt før eventuell feil. */
+  chunks_sent: number;
+}
+
+export async function deliverChunkedTextViaTelegramDetailed(
+  gateway: ToolGateway,
+  identity: IdentityContext,
+  text: string,
+  idempotencyPrefix: string
+): Promise<ChunkedDeliveryResult> {
+  let chunksSent = 0;
   for (let i = 0; i < text.length; i += 3900) {
     const result = await gateway.execute({
       identity, tool_id: "telegram", action: "notify",
       parameters: { message: text.slice(i, i + 3900) },
       idempotency_key: `${idempotencyPrefix}-${i}`
     });
-    if (!result.ok) return false;
+    if (!result.ok) return { ok: false, chunks_sent: chunksSent };
+    chunksSent += 1;
   }
-  return true;
+  return { ok: true, chunks_sent: chunksSent };
 }
 
 export class DailyBrief {
