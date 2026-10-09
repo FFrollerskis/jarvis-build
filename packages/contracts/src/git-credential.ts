@@ -12,6 +12,8 @@
  *    `https://github.com/<repoSlug>`. Den skal aldri logges, aldri lagres på disk i klartekst og aldri gis til modellen eller til
  *    agentkode i jobb-sandboxen (kun til selve git-underprosessen, via credential-helperens eget miljø - se `modules/tasks/src/git-auth.ts`).
  *  - Verdien er KORTLEVD (installasjonstoken: 1 time). Kall `tokenFor` rett før hver git-nettverksoperasjon i stedet for å holde på den.
+ *  - Implementasjonen (`GitHubAuth.gitCredentialSource`) utsteder med MINSTE rettighet for git over HTTPS (kun Contents: write, aldri Workflows/Issues/PR) og kun for dette ene repoet;
+ *    det er IKKE connectorens standard-scope-token. Forbrukere skal ikke anta noe bredere (PR-opprettelse går via ToolGateway, ikke via git-tokenet).
  *  - Feil kastes (aldri tom streng/null/undefined): en jobb som ikke kan få credential skal feile FØR clone forsøkes
  *    (`git_auth_unavailable`), aldri falle stille tilbake til uautentisert git eller et bredere token.
  */

@@ -348,6 +348,8 @@ describe("D: runbooken (docs/runbooks/GITHUB_APP.md) er i takt med koden", () =>
     expect(runbook).toContain("git_auth_revoked");
     expect(runbook).toContain("git_auth_revocation_check_failed");
     expect(runbook).toContain("git_auth_unavailable:<kode>");
+    // Ærlig om hullet: akseptansescriptet utsteder ikke kodejobbens snevre git-token (PARTIAL).
+    expect(runbook).toMatch(/Akseptansescriptet dekker ikke kodejobbens snevre git-token ennå \(`PARTIAL`\)/);
   });
 
   it("D3: rettighetene koden krever for full kapabilitet (D-41) står alle i rettighetstabellen med riktig nivå", () => {

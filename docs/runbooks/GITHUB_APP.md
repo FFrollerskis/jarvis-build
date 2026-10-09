@@ -235,6 +235,9 @@ Alt står også i `executive.get_connector_status` (`auth.detail.last_error`) og
 - Den frosne `SelfModificationService` (D-397, ikke konstruert i produksjon) har sin egen `resolveGitToken`-søm og ville fått standard-scope-tokenet hvis den tines – kobles til `tokenFor` da.
 - Loggføring av PAT-fallback og utstedelsesfeil er ratebegrenset (maks én linje per kode per minutt); status viser løpende tilstand.
 - `GitHubAppAuth.invalidate()` er ikke koblet til nøkkelrotasjon (se «Nøkkelrotasjon»); restart er veien til umiddelbar effekt.
+- **Akseptansescriptet dekker ikke kodejobbens snevre git-token ennå (`PARTIAL`).** `github-app-live.ts` utsteder standard-scope-tokenet (og kjører `git ls-remote` med det). `contents: write`-tokenet kodejobbene bruker
+  (`GitHubAuth.gitCredentialSource`) er testet mot fake-GitHub og stubbet `api.github.com`, men utstedes første gang mot ekte GitHub av den første kodejobben etter aktivering. Feiler det, står koden i `tasks.last_error`
+  (`git_auth_unavailable:<kode>`) og i `auth.detail.last_error` i `get_connector_status` (se feilsøkingstabellen); midlertidig utvei er «Rollback til PAT» eller `JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK=true`.
 - Ikke verifisert mot ekte GitHub (se toppen): alt over er testet mot en lokal fake GitHub og stubbet `api.github.com`.
 
 ## Kilder (offisiell dokumentasjon, lest 2026-10-09 fra GitHubs åpne docs-repo `github/docs`)
