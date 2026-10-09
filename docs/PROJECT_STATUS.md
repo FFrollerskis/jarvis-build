@@ -1,5 +1,14 @@
 # PROJECT STATUS
 
+## AKTIV STATUS – HF1/HF2-byggeprogrammet (D-450, 2026-10-09)
+
+- **Mandat:** Tobias' «ja til alle Q» og «ikke stopp før helt ferdig» (D-450): bygg alt som kan kodes i HF1 (Sovereign Autonomy v4.0) og HF2 (Evolution v1.2). Alt som skriver/sletter/betaler/endrer infrastruktur/selvmodifiserer er DORMANT eller bak eksisterende step-up/bekreftelse; selvendring er fortsatt frosset (D-397); `HARD_EXTERNAL_BLOCKER` (credential, betaling, fysisk handling, juridisk aksept) stopper kun den berørte delen.
+- **Levende status per punkt:** `docs/CLOSURE_MATRIX_HF1_HF2.md` (bygget / koblet / sovende / ikke bygget, og hva som gjenstår å verifisere). **Ingenting er `VERIFIED` før det finnes et artefakt (kommandoutskrift/host-kjøring) på gjeldende kode.** Siste NAS-observasjon: 2026-10-08, akseptansegate 10 PASS / 2 WARN / 0 UNKNOWN / 0 FAIL.
+- **WP-A (D-451, PR #309):** Q-53 A, Q-52 A, Q-51 D, Q-50 B og #228 (chat-minneskjerm) - to uavhengige gjennomganger, mutasjonssveip; resensitize-sveipet er sammenlign-og-bytt (review nr. 2). `NOT VERIFIED` på NAS.
+- **WP-B (D-452):** B1 merget (PR #308): evolusjonsrapporten `executive.get_evolution_report` i observasjonsmodus. B2: EV-3 radar (inert uten `JARVIS_RADAR_SOURCES`), gylden suite, red-team-lite, selvhelbredelse som visning, minnevedlikehold inkl. sensitivitetsdrift, avhengighetssjekk (skript), aktiveringsberedskap for de sovende delene (`activation_decision` alltid false).
+- **Pågår (egne grener, ikke merget):** WP-C (job-runner, backup/off-site/heartbeat, GitHub App-autentisering, Value Center), WP-D (kunnskap, business, growth, AI-mesh), WP-E/F/G (dev/cloud, finans D-kjede, kommunikasjon, personlig, syn, situasjonsmotor), WP-H (kontrollsentre).
+- **Eierhandlinger for verifiseringsøkten:** se «Samlet liste» i lukkingsmatrisen (§8).
+
 ## AKTIV STATUS – Remediering del 3 av 10 (2026-10-03) – kun observerbare fakta
 
 - **Fase/oppgave:** remediering del 3 («LLM-autoritet, verktøy, prompt injection og godkjenning»). Branch `remediation/03-authority-tool-safety`, **draft-PR, IKKE merget, ikke uavhengig reviewet**. Beslutninger: D-374…D-377, åpne spørsmål Q-47. Del 4 er IKKE startet.
