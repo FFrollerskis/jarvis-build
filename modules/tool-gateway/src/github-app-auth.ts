@@ -25,7 +25,7 @@ import { UnsafeVendorUrlError, assertGithubRepoSlug, assertSafeVendorUrl, guarde
  *    unntak kun `http://127.0.0.1` via et eksplisitt TESTFLAGG i koden - det finnes ingen miljøvariabel som kan slå det på). Redirects følges aldri
  *    på kall som bærer JWT eller installasjonstoken (review F5b).
  *  - Fornyelse: cache til 5 min før `expires_at`, én felles pågående utstedelse per scope (single-flight), eksponentiell backoff på
- *    5xx/rate limit (respekterer `Retry-After`), kort fail-fast etter en feil (ingen hamring), og et fortsatt gyldig token brukes videre
+ *    5xx/rate limit (respekterer `Retry-After`), fail-fast etter en feil som dobles per påfølgende feil (5 s -> 5 min, ingen hamring), og et fortsatt gyldig token brukes videre
  *    hvis fornyelsen feiler. Klokkeskjev rettes opp fra `Date`-headeren i GitHub sine svar (én umiddelbar gjentakelse ved 401).
  */
 
@@ -433,12 +433,26 @@ function errorMessageOf(text: string): string {
   }
 }
 
-function cooldownMsFor(err: GitHubAppAuthError): number {
+/** Tak for det eksponentielle fail-fast-vinduet (review F8). Rate limit følger leverandørens eget `Retry-After` (egen grense under). */
+const COOLDOWN_CAP_MS = 300_000;
+
+/** Vinduet starter på `baseMs` og dobles for hver PÅFØLGENDE feil på samme scope (nullstilles av første suksess), opp til `COOLDOWN_CAP_MS`. */
+function growCooldown(baseMs: number, consecutiveFailures: number): number {
+  return Math.min(COOLDOWN_CAP_MS, baseMs * 2 ** Math.min(Math.max(consecutiveFailures, 1) - 1, 16));
+}
+
+/**
+ * Hvor lenge en feil stenger for nye utstedelsesforsøk på samme scope (fail-fast, ingen hamring av GitHub). Review F8: en PERMANENT feil (feil nøkkel, slettet
+ * installasjon, avvist forespørsel) ble før møtt med et konstant 5 s-vindu - en feilkonfigurert App ga dermed ett utstedelsesforsøk mot GitHub hvert femte
+ * sekund i det uendelige. Nå dobles vinduet: 5, 10, 20, ... s, tak 5 min.
+ * `consecutiveFailures` er antall feil på denne scopen på rad, inkludert den som nettopp skjedde.
+ */
+function cooldownMsFor(err: GitHubAppAuthError, consecutiveFailures: number): number {
   switch (err.code) {
     case "GITHUB_APP_RATE_LIMITED":
       return Math.min(Math.max(err.retryAfterMs ?? 60_000, 10_000), 600_000);
     case "GITHUB_APP_UNAVAILABLE":
-      return 10_000;
+      return growCooldown(10_000, consecutiveFailures);
     case "GITHUB_APP_AUTH_FAILED":
     case "GITHUB_APP_INSTALLATION_NOT_FOUND":
     case "GITHUB_APP_INSTALLATION_SUSPENDED":
@@ -446,7 +460,7 @@ function cooldownMsFor(err: GitHubAppAuthError): number {
     case "GITHUB_APP_REQUEST_REJECTED":
     case "GITHUB_APP_SCOPE_MISMATCH":
     case "GITHUB_APP_RESPONSE_INVALID":
-      return 5_000;
+      return growCooldown(5_000, consecutiveFailures);
     default:
       // Lokale konfig-/nøkkelfeil: ingen nettverkskall er gjort, og eieren skal kunne rette opp og prøve igjen umiddelbart.
       return 0;
@@ -472,7 +486,7 @@ export class GitHubAppAuth {
 
   readonly #cache = new Map<string, CacheEntry>();
   readonly #flights = new Map<string, Promise<CacheEntry>>();
-  readonly #cooldowns = new Map<string, { untilMs: number; error: GitHubAppAuthError }>();
+  readonly #cooldowns = new Map<string, { untilMs: number; error: GitHubAppAuthError; failures: number }>();
   readonly #recentTokens = new Map<string, number>();
   readonly #lastLogAt = new Map<string, number>();
   #defaultScopeKey: string | null = null;
@@ -699,8 +713,10 @@ export class GitHubAppAuth {
     const error = asGitHubAppAuthError(err);
     this.#lastError = { code: error.code, at: new Date(this.#now()).toISOString(), http_status: error.httpStatus };
     this.#consecutiveFailures += 1;
-    const cooldown = cooldownMsFor(error);
-    if (scopeKey !== null && cooldown > 0) this.#cooldowns.set(scopeKey, { untilMs: this.#now() + cooldown, error });
+    // Antall feil på rad på DENNE scopen (oppføringen overlever utløpet av vinduet og slettes først av en suksess eller `invalidate()`).
+    const failures = (scopeKey !== null ? this.#cooldowns.get(scopeKey)?.failures ?? 0 : 0) + 1;
+    const cooldown = cooldownMsFor(error, failures);
+    if (scopeKey !== null && cooldown > 0) this.#cooldowns.set(scopeKey, { untilMs: this.#now() + cooldown, error, failures });
     this.#log({ level: "error", msg: "github_app_auth_failed", code: error.code, http_status: error.httpStatus, retryable: error.retryable }, `fail:${error.code}`, 60_000);
     return error;
   }

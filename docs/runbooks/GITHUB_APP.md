@@ -195,6 +195,10 @@ Fjern `JARVIS_GITHUB_APP_ID` og `JARVIS_GITHUB_APP_INSTALLATION_ID` fra `.env` (
 | `GITHUB_APP_RESPONSE_INVALID` | svaret mangler gyldig token/utløpstid, er ikke JSON, er urimelig stort, eller er en redirect (`unexpected_redirect_http_3xx` - følges aldri) (typisk en mellomvare/proxy som endrer svaret) | sjekk proxy/brannmur mellom NAS og api.github.com; meld fra hvis det vedvarer |
 | `github_api_error_403:Resource not accessible by integration` (i en `github.*`-handling) | App-en mangler rettigheten handlingen krever | tabellen over; godkjenn endringen i installasjonen |
 
+**Ventetid etter feil:** Jarvis prøver ikke å utstede på nytt umiddelbart etter en feil fra GitHub. Vinduet dobles for hver påfølgende feil på samme repo-scope: 5, 10, 20, 40, 80, 160 s og så 5 min
+(5xx starter på 10 s; rate limit følger GitHubs `Retry-After`), og nullstilles av første vellykkede utstedelse. Lokale feil (manglende/ugyldig nøkkel, manglende repo-scope) har ingen ventetid. Har du rettet
+årsaken på github.com og vil ha effekt med en gang, restart `api`/`worker` (nullstiller ventetiden).
+
 Alt står også i `executive.get_connector_status` (`auth.detail.last_error`) og i api-/worker-loggen som `github_app_*`-linjer.
 
 ## Sikkerhetsmodell (det en reviewer bør angripe)

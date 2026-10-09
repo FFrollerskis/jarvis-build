@@ -4,7 +4,7 @@ import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it } from "vitest";
 import { GitHubAppAuth, GitHubAppAuthError, maskGitHubSecrets, normalizeGitHubApiBase } from "../src/github-app-auth.ts";
 import { createGitHubAuth, resolveGitHubAuthSettings } from "../src/github-token-provider.ts";
-import { APP_ID, INSTALLATION_ID, REPO, failure, harness, keys, stopFakeServers } from "./support/wpc3-harness.ts";
+import { APP_ID, INSTALLATION_ID, OTHER_REPO, REPO, T0, failure, harness, keys, stopFakeServers } from "./support/wpc3-harness.ts";
 
 /**
  * WP-C3, rettelser etter den UAVHENGIGE sikkerhetsreviewen (PR #311). Hver `describe` bærer funn-id-en (F1, F4, ...) og er skrevet slik at den
@@ -243,5 +243,77 @@ describe("F6: PAT-fallback slås kun på av EKSAKT «true» (docs sier det - kod
     h.fake.script = [{ status: 404, json: { message: "Not Found" } }];
     expect(await auth.secretProvider(secrets).get("JARVIS_GITHUB_TOKEN")).toBeNull();
     expect(auth.status().pat_fallback).toEqual({ allowed: false, active: false });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+describe("F8: fail-fast-vinduet dobles for PERMANENTE feil (5, 10, 20, ... s, tak 5 min) og nullstilles av første suksess", () => {
+  /** Kjører `windows.length` mislykkede utstedelser på rad og kontrollerer at vinduet etter hver av dem er NØYAKTIG det forventede. */
+  async function exerciseWindows(h: Awaited<ReturnType<typeof harness>>, windowsMs: number[], scope?: { repositories: string[] }): Promise<void> {
+    for (const [i, windowMs] of windowsMs.entries()) {
+      const before = h.fake.mintRequests().length;
+      await failure(h.auth.token(scope));
+      expect(h.fake.mintRequests().length, `forsøk ${i + 1} skal gå mot GitHub`).toBe(before + 1);
+      h.clock.t += windowMs - 1; // rett FØR vinduet er over: fail-fast, ingen nye kall
+      await failure(h.auth.token(scope));
+      expect(h.fake.mintRequests().length, `vindu ${i + 1} (${windowMs} ms) skal stenge for nye kall`).toBe(before + 1);
+      h.clock.t += 1; // vinduet er over: neste kall går mot GitHub igjen
+    }
+  }
+
+  it("F8a: 401 på rad gir 5, 10, 20, 40, 80, 160 og så 300 s (tak) - en feilkonfigurert App hamrer ikke GitHub hvert 5. sekund", async () => {
+    const h = await harness({ overrides: { maxAttempts: 1 } });
+    const windows = [5, 10, 20, 40, 80, 160, 300, 300].map((s) => s * 1_000);
+    h.fake.script = windows.map(() => ({ status: 401, json: { message: "Bad credentials" } }));
+    await exerciseWindows(h, windows);
+  });
+
+  it("F8b: 5xx (UNAVAILABLE) starter på 10 s og dobles: 10, 20, 40, ...; alle andre permanente koder (404, 403, 422) dobles likt fra 5 s", async () => {
+    const unavailable = await harness({ overrides: { maxAttempts: 1 } });
+    unavailable.fake.script = [10, 20, 40, 80].map(() => ({ status: 503, json: { message: "unavailable" } }));
+    await exerciseWindows(unavailable, [10_000, 20_000, 40_000, 80_000]);
+    for (const status of [404, 403, 422, 400]) {
+      const h = await harness({ overrides: { maxAttempts: 1 } });
+      h.fake.script = [0, 1, 2].map(() => ({ status, json: { message: "avvist" } }));
+      await exerciseWindows(h, [5_000, 10_000, 20_000]);
+    }
+  });
+
+  it("F8c: første suksess nullstiller telleren - neste feil gir igjen et 5 s-vindu, ikke fortsettelsen av doblingen", async () => {
+    const h = await harness({ overrides: { maxAttempts: 1, repositories: [REPO, OTHER_REPO] } });
+    h.fake.script = [401, 401, 401].map((status) => ({ status, json: { message: "Bad credentials" } }));
+    await exerciseWindows(h, [5_000, 10_000, 20_000]); // tre feil: neste vindu ville vært 40 s
+    const first = await h.auth.token(); // suksess (scriptet er tomt)
+    expect(first).toMatch(/^ghs_/);
+    h.clock.t += 2 * 3_600_000; // tokenet er utløpt: neste kall må utstede på nytt
+    h.fake.script = [{ status: 401, json: { message: "Bad credentials" } }];
+    await failure(h.auth.token());
+    const afterFailure = h.fake.mintRequests().length;
+    h.clock.t += 4_999;
+    await failure(h.auth.token());
+    expect(h.fake.mintRequests().length).toBe(afterFailure); // fortsatt innenfor 5 s
+    h.clock.t += 1;
+    expect(await h.auth.token()).toMatch(/^ghs_/); // 5 s var nok - ikke 40 s
+  });
+
+  it("F8d: doblingen er per scope - en feilende scope gjør ikke en annen scope tregere; rate limit følger fortsatt leverandørens Retry-After (ikke doblet)", async () => {
+    const h = await harness({ overrides: { maxAttempts: 1, repositories: [REPO, OTHER_REPO] } });
+    h.fake.script = [{ status: 401, json: { message: "Bad credentials" } }, { status: 401, json: { message: "Bad credentials" } }];
+    await exerciseWindows(h, [5_000, 10_000], { repositories: [REPO] });
+    // En annen scope har sin egen teller og er ikke stengt av den første.
+    expect(await h.auth.token({ repositories: [OTHER_REPO] })).toMatch(/^ghs_/);
+
+    const limited = await harness({ overrides: { maxAttempts: 1 } });
+    limited.fake.script = [30, 30, 30].map(() => ({ status: 429, headers: { "retry-after": "30" }, json: { message: "slow down" } }));
+    await exerciseWindows(limited, [30_000, 30_000, 30_000]);
+  });
+
+  it("F8e: lokale feil (nøkkel mangler) har fortsatt INGEN fail-fast - eieren kan rette opp og prøve umiddelbart, uansett hvor mange feil som er gått", async () => {
+    let key: string | null = null;
+    const h = await harness({ overrides: { maxAttempts: 1, privateKey: async () => key } });
+    for (let i = 0; i < 6; i += 1) expect((await failure(h.auth.token())).code).toBe("GITHUB_APP_KEY_MISSING");
+    key = keys.pkcs1;
+    expect(await h.auth.token()).toMatch(/^ghs_/);
+    expect(h.clock.t).toBe(T0); // ingen ventetid i det hele tatt
   });
 });
