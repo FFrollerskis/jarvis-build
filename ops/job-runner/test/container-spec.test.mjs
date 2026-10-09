@@ -147,12 +147,26 @@ describe("D: jobb-env for vertsside runner - git-credentials går ALDRI inn i co
     "JARVIS_GIT_CREDENTIAL_TOKEN", "JARVIS_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GIT_ASKPASS", "SSH_ASKPASS", "SSH_AUTH_SOCK",
     "GIT_TERMINAL_PROMPT", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG", "GIT_SSH_COMMAND", "GIT_DIR", "GIT_EXEC_PATH",
     "HOME", "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "DOCKER_HOST", "HTTP_PROXY", "https_proxy", "NO_PROXY", "ALL_PROXY",
-    "INFISICAL_CLIENT_SECRET", "JARVIS_DB_PASSWORD", "POSTGRES_PASSWORD", "PGPASSWORD", "LANGFUSE_SECRET_KEY", "FOO_ENCRYPTION_KEY", "1BAD", "A=B", ""
+    "INFISICAL_CLIENT_SECRET", "JARVIS_DB_PASSWORD", "POSTGRES_PASSWORD", "PGPASSWORD", "LANGFUSE_SECRET_KEY", "FOO_ENCRYPTION_KEY", "1BAD", "A=B", "",
+    // GitHub App (WP-C3): nøkkel, app-id og installasjon hører aldri hjemme i en jobb-container
+    "JARVIS_GITHUB_APP_PRIVATE_KEY", "JARVIS_GITHUB_APP_ID", "JARVIS_GITHUB_APP_INSTALLATION_ID", "JARVIS_GITHUB_REPO", "GITHUB_APP_PRIVATE_KEY", "GITHUB_PRIVATE_KEY",
+    // navn som styrer en prosess PÅ VERTEN (jobb-env settes i miljøet til den vertsside docker-klienten): libc/Go-kjøretid, temp/konfig-kataloger, CA-stier, shell-oppstart
+    "GCONV_PATH", "LOCPATH", "NLSPATH", "HOSTALIASES", "RES_OPTIONS", "LOCALDOMAIN", "GLIBC_TUNABLES", "MALLOC_PERTURB_", "MALLOC_CONF", "TZDIR", "TMPDIR", "TMP", "TEMP",
+    "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "GODEBUG", "GOGC", "GOMAXPROCS", "GOMEMLIMIT", "GOTRACEBACK", "GOFLAGS",
+    "BASH_ENV", "ENV", "SHELL", "IFS", "PROMPT_COMMAND", "SHELLOPTS",
+    // samme navn i andre store/små bokstaver (regex er case-insensitiv: lavere-case varianter leses av mange verktøy)
+    "gconv_path", "Path", "home", "ld_preload", "docker_host", "godebug", "tmpdir"
   ];
-  it("nekter credential-, git-konfig-, proxy- og vault-navn", () => {
+  it("nekter credential-, git-konfig-, proxy- og vault-navn, GitHub App-navn og navn som styrer en vertsprosess", () => {
     for (const name of forbidden) expect(sharedSpec.isHostRunnerEnvNameAllowed(name), name).toBe(false);
   });
-  it("tillater vanlige navn", () => {
-    for (const name of ["ANTHROPIC_API_KEY", "CI", "TZ", "MY_SETTING", "GIT_AUTHOR_NAME"]) expect(sharedSpec.isHostRunnerEnvNameAllowed(name), name).toBe(true);
+  it("tillater vanlige navn (også de som LIGNER på forbudte uten å være det)", () => {
+    for (const name of ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CI", "TZ", "LANG", "LC_ALL", "MY_SETTING", "GIT_AUTHOR_NAME", "GOOGLE_API_KEY", "GOARCH_X", "GITHUB_ACTIONS", "NODE_ENV", "ENVIRONMENT", "SHELLY", "TMPFILE", "TEMPLATE", "XDG", "HOMEPAGE", "PATHS", "LD", "MY_GODEBUG", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"]) {
+      expect(sharedSpec.isHostRunnerEnvNameAllowed(name), name).toBe(true);
+    }
+  });
+  it("navnene ligger i det delte regulære uttrykket (én kilde), ikke i en kopi", () => {
+    expect(sharedSpec.HOST_RUNNER_FORBIDDEN_ENV.flags).toContain("i");
+    expect(sharedSpec.HOST_RUNNER_FORBIDDEN_ENV.source.startsWith("^(?:")).toBe(true);
   });
 });

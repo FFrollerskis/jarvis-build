@@ -31,11 +31,27 @@ const FORBIDDEN_ENV =
 
 /**
  * WP-C1: ekstra regler som gjelder KUN den vertsside runneren (ikke den eldre `container`-modusen, som beholdes uendret):
- *  - git-credentials går ALDRI inn i jobb-containeren, verken som navngitt token, askpass, credential-helper eller SSH-agent;
- *  - navn policyen selv eier (proxy, HOME, PATH, dynamisk lenker) kan ikke overstyres fra API-et.
+ *  - git-credentials (PAT, GitHub App-nøkkel/-installasjon, installasjonstoken) går ALDRI inn i jobb-containeren, verken som navngitt token, askpass, credential-helper eller SSH-agent;
+ *  - navn policyen selv eier (proxy, HOME, PATH, dynamisk lenker) kan ikke overstyres fra API-et;
+ *  - navn som styrer hvordan en PROSESS PÅ VERTEN oppfører seg. Jobb-env settes i miljøet til den vertsside `docker`-klienten (`-e NAVN` leser verdien derfra, for å holde
+ *    den utenfor argv), så et navn som endrer lasting av biblioteker, locale/charset-moduler, resolver, temp-/konfigkataloger eller Go-kjøretiden kunne påvirket en prosess
+ *    som kjører som docker-gruppen (= effektivt root). Dette er en DENY-LISTE, ikke en allow-liste: se «Sikkerhetsantagelser» i runbooken (anbefalt senere: `--env-file`).
  */
-const HOST_RUNNER_FORBIDDEN_ENV =
-  /^(JARVIS_GIT_CREDENTIAL_TOKEN|JARVIS_GITHUB_TOKEN|GITHUB_TOKEN|GH_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_PAT|GIT_ASKPASS|SSH_ASKPASS|SSH_AUTH_SOCK|GIT_TERMINAL_PROMPT|GIT_EXEC_PATH|GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE|GIT_OBJECT_DIRECTORY|GIT_ALTERNATE_OBJECT_DIRECTORIES|GIT_CONFIG|GIT_CONFIG_[A-Z0-9_]*|GIT_SSH|GIT_SSH_COMMAND|GIT_PROXY_COMMAND|HOME|PATH|LD_[A-Z_]*|DOCKER_[A-Z_]*|(?:ALL|HTTPS?|NO|FTP)_PROXY)$/i;
+const HOST_RUNNER_FORBIDDEN_ENV = new RegExp(`^(?:${[
+  // credentials
+  "JARVIS_GIT_CREDENTIAL_TOKEN", "JARVIS_GITHUB_[A-Z0-9_]*", "GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_PAT", "GITHUB_APP_[A-Z0-9_]*", "GITHUB_PRIVATE_KEY",
+  "GIT_ASKPASS", "SSH_ASKPASS", "SSH_AUTH_SOCK",
+  // git-konfigurasjon og -oppførsel
+  "GIT_TERMINAL_PROMPT", "GIT_EXEC_PATH", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_CONFIG", "GIT_CONFIG_[A-Z0-9_]*", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_PROXY_COMMAND",
+  // navn policyen eier
+  "HOME", "PATH", "LD_[A-Z_]*", "DOCKER_[A-Z_]*", "(?:ALL|HTTPS?|NO|FTP)_PROXY",
+  // styrer en prosess på verten (docker-klienten og dens libc/Go-kjøretid)
+  "GCONV_PATH", "LOCPATH", "NLSPATH", "LANGUAGE", "HOSTALIASES", "RES_OPTIONS", "LOCALDOMAIN", "GLIBC_TUNABLES", "MALLOC_[A-Z0-9_]*", "TZDIR",
+  "TMPDIR", "TMP", "TEMP", "XDG_[A-Z0-9_]*", "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE",
+  "GODEBUG", "GOGC", "GOMAXPROCS", "GOMEMLIMIT", "GOTRACEBACK", "GOFLAGS", "GOROOT", "GOPATH", "GOCACHE", "GOENV", "GOTMPDIR",
+  "BASH_ENV", "ENV", "SHELL", "IFS", "CDPATH", "PS4", "SHELLOPTS", "BASHOPTS", "PROMPT_COMMAND"
+].join("|")})$`, "i");
 
 const MEMORY = /^[1-9][0-9]{0,5}[kKmMgG]?$/;
 const TMPFS_SIZE = /^[1-9][0-9]{0,5}[kKmMgG]$/;
