@@ -1,9 +1,11 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { CONTROL_ACTION_ENDPOINTS } from "@jarvis/executive";
+import { CONTROL_ACTION_ALLOWED, CONTROL_ACTION_ENDPOINTS } from "@jarvis/executive";
 import { renderStaticPage } from "../src/server.ts";
+import { actionRequiresStepUp } from "../src/step-up.ts";
 import { runPage, type FakeElement, type FetchCall, type FetchRoute } from "./support/fake-dom.ts";
+import { productionToolDefinitions } from "./support/production-tools.ts";
 
 /**
  * WP-H0: `apps/web/control.html` - ingen byggesteg, ingen ekstern avhengighet. Siden bevises på to nivåer:
@@ -325,5 +327,112 @@ describe("atferd: handlinger", () => {
     await page.waitFor(() => page.fetchCalls.some((c) => c.path === "/executive/mutate"), "mutasjonen sendes");
     await new Promise((r) => setTimeout(r, 50));
     expect(page.fetchCalls.filter((c) => c.path === "/executive/mutate")).toHaveLength(1);
+  });
+});
+
+describe("atferd: kill switch aktiv - gjenopprettingsvisning (policyen nekter all kontrollsenter-lesing, men eieren skal kunne oppheve bryteren herfra)", () => {
+  const deniedByKillSwitch = { status: 403, body: { error: "tool_denied", reason: "kill_switch_active" } };
+  const lockedRoute = (state: { locked: boolean }): FetchRoute => ({ path }) => {
+    if (state.locked && (path === "/control/centers" || path === "/control/center")) return deniedByKillSwitch;
+    if (path === "/executive/mutate") { state.locked = false; return { body: { ok: true, data: {} } }; }
+    return undefined;
+  };
+  const recoveryButton = (page: ReturnType<typeof runPage>): FakeElement => {
+    const found = page.byId("overview").findAll((e) => e.getAttribute("data-action-id") === "lockdown.kill_switch.deactivate")[0];
+    if (!found) throw new Error("fant ikke gjenopprettingsknappen");
+    return found;
+  };
+
+  it("viser en tydelig gjenopprettingsvisning (ikke en generisk feil), ingen foreldede kort, og leser ikke hvert senter etter at oversikten er nektet", async () => {
+    const page = runPage(SERVED, baseRoute(lockedRoute({ locked: true })));
+    await loaded(page);
+    const text = allText(page.byId("overview"));
+    expect(text).toContain("Kill switch er AKTIV");
+    expect(text).toContain("Opphev kill switch");
+    expect(text).not.toContain("Kunne ikke hente kontrollsentrene");
+    expect(page.byId("centers").children).toHaveLength(0);
+    expect(page.fetchCalls.filter((c) => c.path === "/control/center")).toHaveLength(0);
+    expect(page.byId("status").textContent).toContain("Kill switch er aktiv");
+    expect(page.byId("unregistered").classList.contains("hidden")).toBe(true);
+    expect(page.byId("overview").findAll((e) => e.tagName === "a").map((a) => a.getAttribute("href"))).toEqual(["/dashboard"]);
+  });
+
+  it("knappen viser klasse D og step-up FØR trykk, krever skrevet navn, og sender den EKSISTERENDE deactivate_kill_switch til /executive/mutate - deretter vanlig visning", async () => {
+    const page = runPage(SERVED, baseRoute(lockedRoute({ locked: true })));
+    await loaded(page);
+    const button = recoveryButton(page);
+    expect(button.getAttribute("aria-label")).toContain("klasse D");
+    expect(button.getAttribute("aria-label")).toContain("krever signert enhet");
+    button.dispatch("click");
+    await page.waitFor(() => page.byId("confirm-dialog").open, "dialogen åpnes");
+    expect(page.byId("confirm-title").textContent).toBe("Opphev kill switch");
+    expect(page.byId("confirm-class").textContent).toBe("klasse D");
+    expect(page.byId("confirm-stepup").textContent).toContain("krever signert enhetsøkt");
+    expect(page.byId("confirm-typed-label").textContent).toContain("deactivate_kill_switch");
+    expect(page.byId("confirm-ok").disabled).toBe(true);
+    page.byId("confirm-typed").value = "opphev";
+    page.byId("confirm-typed").dispatch("input");
+    expect(page.byId("confirm-ok").disabled).toBe(true);
+    page.byId("confirm-typed").value = "deactivate_kill_switch";
+    page.byId("confirm-typed").dispatch("input");
+    expect(page.byId("confirm-ok").disabled).toBe(false);
+    const before = page.fetchCalls.length;
+    closeDialog(page, "ok");
+    await page.waitFor(() => page.fetchCalls.slice(before).some((c) => c.path === "/executive/mutate"), "mutasjonen sendes");
+    const post = page.fetchCalls.slice(before).find((c) => c.path === "/executive/mutate")!;
+    expect(post.body).toEqual({ grant_token: "GRANT", action: "deactivate_kill_switch", parameters: {} });
+    await page.waitFor(() => allText(page.byId("overview")).includes("Integrasjoner"), "vanlig visning etter at bryteren er opphevet");
+    expect(allText(page.byId("overview"))).not.toContain("Kill switch er AKTIV");
+    expect(page.byId("center-integration").textContent).toContain("GitHub");
+  });
+
+  it("avbryt i dialogen sender ingenting, og step-up-avslag forklares som ellers", async () => {
+    const state = { locked: true };
+    const page = runPage(SERVED, baseRoute(({ path }) => (path === "/executive/mutate" ? { status: 403, body: { error: "step_up_required", reason: "step_up_required:signed_device_session" } } : lockedRoute(state)({ path, body: {} }))));
+    await loaded(page);
+    const before = page.fetchCalls.length;
+    recoveryButton(page).dispatch("click");
+    await page.waitFor(() => page.byId("confirm-dialog").open, "dialogen åpnes");
+    closeDialog(page, "cancel");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(page.fetchCalls.length).toBe(before);
+    recoveryButton(page).dispatch("click");
+    await page.waitFor(() => page.byId("confirm-dialog").open, "dialogen åpnes igjen");
+    page.byId("confirm-typed").value = "deactivate_kill_switch";
+    page.byId("confirm-typed").dispatch("input");
+    closeDialog(page, "ok");
+    await page.waitFor(() => page.byId("status").history.some((t) => t.includes("Krever step-up")), "step-up-feil vises");
+    expect(page.byId("status").history.find((t) => t.includes("Krever step-up"))).toContain("signert enhetsøkt");
+  });
+
+  it("kill switch aktivert MENS sentrene leses (oversikten gikk gjennom, ett senter nektes): samme gjenopprettingsvisning, ikke en feilrad", async () => {
+    const page = runPage(SERVED, baseRoute(({ path, body }) => (path === "/control/center" && body["center"] === "ai" ? deniedByKillSwitch : undefined)));
+    await loaded(page);
+    expect(allText(page.byId("overview"))).toContain("Kill switch er AKTIV");
+    expect(page.byId("centers").children).toHaveLength(0);
+    expect(allText(page.byId("centers"))).not.toContain("Kunne ikke hente senteret");
+  });
+
+  it("andre policy-avslag (f.eks. ikke eier) er fortsatt en vanlig feilmelding - gjenopprettingsvisningen vises kun for kill_switch_active", async () => {
+    const page = runPage(SERVED, baseRoute(({ path }) => (path === "/control/centers" ? { status: 403, body: { error: "tool_denied", reason: "control_center_owner_only" } } : undefined)));
+    await page.waitFor(() => allText(page.byId("overview")).includes("Kunne ikke hente kontrollsentrene"), "feilen vises");
+    const text = allText(page.byId("overview"));
+    expect(text).toContain("control_center_owner_only");
+    expect(text).not.toContain("Kill switch er AKTIV");
+    expect(page.fetchCalls.some((c) => c.path === "/executive/mutate")).toBe(false);
+  });
+
+  it("DRIFT: merkene på gjenopprettingsknappen er serverens egne (klasse fra verktøydefinisjonen, step-up fra rutens mengde, handlingen står på rutens allowlist)", async () => {
+    const def = productionToolDefinitions().find((d) => d.tool_id === "executive" && d.action === "deactivate_kill_switch");
+    expect(def?.capability_class).toBe("D");
+    expect(actionRequiresStepUp("deactivate_kill_switch")).toBe(true);
+    expect(CONTROL_ACTION_ALLOWED["/executive/mutate"]).toContain("deactivate_kill_switch");
+    const page = runPage(SERVED, baseRoute(lockedRoute({ locked: true })));
+    await loaded(page);
+    recoveryButton(page).dispatch("click");
+    await page.waitFor(() => page.byId("confirm-dialog").open, "dialogen åpnes");
+    expect(page.byId("confirm-class").textContent).toBe(`klasse ${def?.capability_class}`);
+    expect(page.byId("confirm-stepup").textContent.includes("krever signert enhetsøkt")).toBe(actionRequiresStepUp("deactivate_kill_switch"));
+    closeDialog(page, "cancel");
   });
 });

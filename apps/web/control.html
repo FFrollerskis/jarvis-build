@@ -15,7 +15,9 @@
    *  - viser kun det rapportene inneholder (antall, kategorier, tidsstempler, kilde) - aldri hemmeligheter. All tekst settes med textContent (aldri innerHTML) og går i tillegg gjennom en klientside
    *    sikkerhetsvask som skjuler kjente token-former;
    *  - er tilgjengelig: semantiske overskrifter, tastatur (Tab/Enter/Escape, fokus tilbake til knappen etter dialogen), tydelig fokusring, status med TEKST og symbol (ikke bare farge), aria-live-region,
-   *    kontrast ≥ 4,5:1, respekterer prefers-reduced-motion og fungerer på smal skjerm.
+   *    kontrast ≥ 4,5:1, respekterer prefers-reduced-motion og fungerer på smal skjerm;
+   *  - håndterer kill switch: er den aktiv nekter policyen all lesing av kontrollsentrene (de står ikke på gjenopprettingslisten), så siden viser da en gjenopprettingsvisning med den ene EKSISTERENDE
+   *    handlingen `deactivate_kill_switch` (signert enhet + skrevet navn), i stedet for en tom flate.
    * Ingen byggesteg, ingen ekstern font/CDN. Enhetsautentiseringen er den samme som dashboard.html (samme localStorage-nøkler, samme /devices/challenge → /session/authorize).
    */
   :root {
@@ -344,9 +346,14 @@
   }
   async function readControl(path, payload) {
     const { res, body } = await post(path, payload);
-    if (!res.ok || !body.ok) throw new Error(path + ": " + (body.reason || body.error || res.status));
+    if (!res.ok || !body.ok) {
+      const err = new Error(path + ": " + (body.reason || body.error || res.status));
+      err.reason = typeof body.reason === "string" ? body.reason : null; // policyens avslagsårsak (f.eks. kill_switch_active) - brukes til å velge visning, aldri vist rått som HTML
+      throw err;
+    }
     return body.data;
   }
+  function isLockdown(err) { return Boolean(err) && err.reason === "kill_switch_active"; }
 
   const openCenters = new Set();
   const centersEl = document.getElementById("centers");
@@ -470,8 +477,34 @@
       const data = await readControl("/control/center", { center: summary.center });
       renderCenter(summary, { report: data.report, explanation_no: data.explanation_no });
     } catch (err) {
+      if (isLockdown(err)) throw err; // hele flaten er stanset (kill switch aktivert mens vi leste): loadAll viser gjenopprettingsvisningen
       renderCenter(summary, { error: err.message });
     }
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------------------------------------------------
+  // KILL SWITCH AKTIV: policyen nekter ALT unntatt navngitte gjenopprettings-/lesehandlinger, og kontrollsentrene (executive.get_control_center) står BEVISST ikke på den listen (den smale listen
+  // utvides ikke for en bred lesing). Da kan ingen rapport leses - men eieren skal likevel kunne oppheve bryteren herfra. Gjenopprettingshandlingen er den EKSISTERENDE `deactivate_kill_switch` på
+  // /executive/mutate (samme som dashbordet bruker): grant, step-up (signert enhet), klasse D (skriv navnet) og policyens selvgjenopprettingsunntak gjelder uendret. En test låser at merkene under er
+  // identiske med serverens (klasse, step-up, kropp).
+  // ---------------------------------------------------------------------------------------------------------------------------------------------------------
+  const KILL_SWITCH_RECOVERY = {
+    id: "lockdown.kill_switch.deactivate", label: "Opphev kill switch", endpoint: "/executive/mutate",
+    body: { action: "deactivate_kill_switch", parameters: {} },
+    risk_class: "D", requires_step_up: true, reversible: true,
+    description_no: "Opphever kill switch og gjenopptar normal drift. Krever signert enhetsøkt (nettleser/app).",
+    rollback_no: "Aktiver kill switch igjen."
+  };
+
+  function renderLockdown() {
+    centersEl.textContent = ""; // ingen foreldede kort som sier «kill switch av» skal bli stående
+    unregisteredEl.classList.add("hidden");
+    overviewEl.textContent = "";
+    overviewEl.appendChild(el("div", { class: "notice error", attrs: { role: "alert" } }, [
+      el("p", { text: "Kill switch er AKTIV. Alt er stanset, også kontrollsentrene - de er bevisst ikke blant de få handlingene som virker under kill switch. Det eneste som virker er å oppheve den." }),
+      el("div", { class: "actions" }, [actionButton(KILL_SWITCH_RECOVERY)]),
+      el("p", { text: "Samme tilstand vises også i " }, [el("a", { text: "oversikten (dashbordet)", attrs: { href: "/dashboard" } })])
+    ]));
   }
 
   async function loadAll() {
@@ -490,9 +523,15 @@
       updatedEl.textContent = "Oppdatert " + new Date().toLocaleTimeString("no-NO");
       say("Samlet status: " + statusInfo(overview.status).text + ". " + overview.centers.length + " av 10 sentre er koblet inn.");
     } catch (err) {
-      overviewEl.textContent = "";
-      overviewEl.appendChild(el("div", { class: "notice error", text: "Kunne ikke hente kontrollsentrene: " + err.message }));
-      say("Feil: " + err.message);
+      if (isLockdown(err)) {
+        renderLockdown();
+        updatedEl.textContent = "Oppdatert " + new Date().toLocaleTimeString("no-NO");
+        say("Kill switch er aktiv: alt er stanset, også kontrollsentrene. Du kan oppheve den her.");
+      } else {
+        overviewEl.textContent = "";
+        overviewEl.appendChild(el("div", { class: "notice error", text: "Kunne ikke hente kontrollsentrene: " + err.message }));
+        say("Feil: " + err.message);
+      }
     } finally {
       busy = false;
       document.getElementById("refresh").disabled = false;

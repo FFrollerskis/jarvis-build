@@ -32,6 +32,7 @@ let server: ReturnType<typeof createApiServer>;
 let serverWithoutOwner: ReturnType<typeof createApiServer>;
 let baseUrlWithoutOwner: string;
 let gateway: ToolGateway;
+let killSwitch: KillSwitch;
 
 const TENANT_A = "tenant-h0-a";
 const TENANT_B = "tenant-h0-b";
@@ -75,7 +76,8 @@ beforeAll(async () => {
   appPool = createPool({ host: "127.0.0.1", port: leased.port, database: "jarvis_test", user: "jarvis_h0", password: "pw2" });
 
   const authority = { owner_person_id: OWNER, owner_tenants: [TENANT_A] };
-  const policy = new PolicyGateway({ devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch: new KillSwitch(), authority });
+  killSwitch = new KillSwitch();
+  const policy = new PolicyGateway({ devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch, authority });
   const secrets: SecretProvider = { name: "fake", get: async () => "fake" };
   gateway = new ToolGateway(appPool, policy, secrets);
 
@@ -282,5 +284,26 @@ describe("E: siden /control serveres som de øvrige statiske sidene", () => {
     const without = await fetch(`${baseUrlWithoutOwner}/control`);
     expect(without.status).toBe(503);
     expect(((await without.json()) as { error: string }).error).toBe("owner_not_configured");
+  });
+});
+
+describe("F: kill switch aktiv - kontrollsentrene nektes (de står bevisst ikke på policyens gjenopprettingsliste), og siden bygger gjenopprettingsvisningen på nettopp denne årsaken", () => {
+  it("begge lese-rutene gir 403 tool_denied/kill_switch_active med revisjonsrad; etter oppheving virker de igjen", async () => {
+    const deniedBefore = Number((await adminPool.query("SELECT count(*) AS n FROM audit_events WHERE type = 'tool.denied' AND tool_id = 'executive' AND action = 'get_control_center' AND reason = 'kill_switch_active'")).rows[0].n);
+    killSwitch.activate("wph0-test");
+    try {
+      const overviewRes = await post("/control/centers", { grant_token: grants.owner });
+      expect(overviewRes.status).toBe(403);
+      expect(overviewRes.body).toMatchObject({ error: "tool_denied", reason: "kill_switch_active" });
+      const centerRes = await post("/control/center", { grant_token: grants.owner, center: "ai" });
+      expect(centerRes.status).toBe(403);
+      expect(centerRes.body).toMatchObject({ error: "tool_denied", reason: "kill_switch_active" });
+    } finally {
+      killSwitch.deactivate();
+    }
+    const deniedAfter = Number((await adminPool.query("SELECT count(*) AS n FROM audit_events WHERE type = 'tool.denied' AND tool_id = 'executive' AND action = 'get_control_center' AND reason = 'kill_switch_active'")).rows[0].n);
+    expect(deniedAfter - deniedBefore).toBe(2);
+    expect((await post("/control/centers", { grant_token: grants.owner })).status).toBe(200);
+    expect((await post("/control/center", { grant_token: grants.owner, center: "ai" })).status).toBe(200);
   });
 });
