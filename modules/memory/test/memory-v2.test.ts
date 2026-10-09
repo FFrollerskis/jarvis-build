@@ -307,6 +307,20 @@ describe("C: gjenfinning v2 - ELLER-fulltekst, nøkkelord, fusjon, episoder, sam
     expect(unrelated.sensitivities).not.toContain("special");
     expect(unrelated.spaces).toContain("personal");
 
+    // Uten profil og uten treff er de kommende forpliktelsene det eneste i blokken: metadataene må likevel oppgi rommet (ellers faller romgulvet PRIVAT bort i ruteren).
+    const profile = await adminPool.query("SELECT content FROM memory_profiles WHERE tenant_id = 'tenant-a' AND space = 'personal'");
+    await adminPool.query("DELETE FROM memory_profiles WHERE tenant_id = 'tenant-a' AND space = 'personal'");
+    try {
+      const onlyUpcoming = await retriever.contextWithMeta(id, "zzqx78");
+      expect(onlyUpcoming.profile_included).toBe(false);
+      expect(onlyUpcoming.text).toContain("Møte med Kari om nettsiden");
+      expect(onlyUpcoming.spaces).toEqual(["personal"]);
+    } finally {
+      for (const row of profile.rows as Array<{ content: string }>) {
+        await adminPool.query("INSERT INTO memory_profiles (tenant_id, space, content) VALUES ('tenant-a', 'personal', $1)", [row.content]);
+      }
+    }
+
     // Et direkte treff på special-elementet tar det med (da står det som treff og metadataene sier special).
     const direct = await retriever.contextWithMeta(id, "psykiateren depresjonen ypsilon88");
     expect(direct.text).toMatch(/psykiater/i);

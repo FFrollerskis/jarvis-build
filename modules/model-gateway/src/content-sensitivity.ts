@@ -189,9 +189,8 @@ export function withholdSensitiveMessages<T extends { role: string; content: str
   const cutoff = Math.max(0, messages.length - recentWindow);
   const firstRecent = direct.findIndex((isDirect, index) => index >= cutoff && isDirect);
   if (firstRecent >= 0) {
-    // Halen starter ved den første følsomme meldingen i det nylige vinduet (eller dens brukerpartner rett foran, som parregelen allerede har tatt).
-    const tailStart = firstRecent > 0 && drop[firstRecent - 1] ? firstRecent - 1 : firstRecent;
-    for (let index = tailStart; index < messages.length; index += 1) {
+    // Halen er alt ETTER den første følsomme meldingen i det nylige vinduet (selve meldingen og brukerpartneren rett foran er allerede tatt av `direct` og parregelen).
+    for (let index = firstRecent + 1; index < messages.length; index += 1) {
       if (!(options.protect?.(messages[index]!, index) ?? false)) drop[index] = true;
     }
   }
