@@ -34,6 +34,8 @@ export interface ResensitizeSweepSummary {
   raised: { sensitive: number; special: number };
   /** Antall som faktisk ble skrevet (alltid 0 utenom `apply`). */
   written: number;
+  /** `apply`: elementer som ble endret av en annen skriver mellom sveipets lesing og skriving. De hoppes over (sammenlign-og-bytt) og vurderes på nytt neste kjøring - sveipet overskriver aldri en samtidig heving. */
+  skipped_concurrent: number;
   failed: Array<{ tenant_id: string; memory_space_id: string; error: string }>;
   truncated: boolean;
 }
@@ -60,7 +62,7 @@ export async function runMemoryResensitizeSweepForAllTenants(
   options: { mode?: ResensitizeMode; maxRows?: number } = {}
 ): Promise<ResensitizeSweepSummary> {
   const mode = options.mode ?? "report";
-  const summary: ResensitizeSweepSummary = { mode, scanned: 0, raised: { sensitive: 0, special: 0 }, written: 0, failed: [], truncated: false };
+  const summary: ResensitizeSweepSummary = { mode, scanned: 0, raised: { sensitive: 0, special: 0 }, written: 0, skipped_concurrent: 0, failed: [], truncated: false };
   if (mode === "off") return summary;
   let remaining = options.maxRows ?? 5000;
   const tenantIds = await listAllTenantIds(pool, 200);
@@ -79,31 +81,49 @@ export async function runMemoryResensitizeSweepForAllTenants(
       if (space === "health") continue;
       try {
         const done = await withMemoryTransaction(pool, tenantId, [space], async (client) => {
-          const rows = (
+          // Én rad ekstra avslører at rommet ble avkortet (også når det er det siste rommet som er igjen).
+          const fetched = (
             await client.query<ItemRow>(
               `SELECT m.memory_item_id, m.subject, m.content, m.keywords, m.sensitivity,
                       (SELECT array_agg(v.subject || ' ' || v.content) FROM memory_versions v WHERE v.memory_item_id = m.memory_item_id) AS previous
                  FROM memory_items m
                 WHERE m.tenant_id = $1 AND m.space = $2 AND m.status = 'active' AND m.sensitivity <> 'special'
                 ORDER BY m.updated_at DESC LIMIT $3`,
-              [tenantId, space, remaining]
+              [tenantId, space, remaining + 1]
             )
           ).rows;
+          const rows = fetched.slice(0, remaining);
           let written = 0;
+          let skipped = 0;
+          let raisedSpecial = 0;
+          let raisedSensitive = 0;
           for (const row of rows) {
             const next = recomputedItemSensitivity(row);
             if (next === row.sensitivity) continue;
-            if (next === "special") summary.raised.special += 1;
-            else summary.raised.sensitive += 1;
-            if (mode !== "apply") continue;
-            await client.query("UPDATE memory_items SET sensitivity = $1 WHERE memory_item_id = $2 AND tenant_id = $3", [next, row.memory_item_id, tenantId]);
-            await writeAudit(client, systemIdentity(tenantId, space), { type: "memory.resensitize", payload: { memory_item_id: row.memory_item_id, from: row.sensitivity, to: next } });
-            written += 1;
+            if (mode === "apply") {
+              // Sammenlign-og-bytt på nivået sveipet leste: en samtidig skriver (MemoryWriter, manuell merking) som har hevet elementet i mellomtiden vinner - sveipet kan aldri senke.
+              const updated = await client.query(
+                "UPDATE memory_items SET sensitivity = $1 WHERE memory_item_id = $2 AND tenant_id = $3 AND sensitivity = $4",
+                [next, row.memory_item_id, tenantId, row.sensitivity]
+              );
+              if (updated.rowCount !== 1) {
+                skipped += 1;
+                continue;
+              }
+              await writeAudit(client, systemIdentity(tenantId, space), { type: "memory.resensitize", payload: { memory_item_id: row.memory_item_id, from: row.sensitivity, to: next } });
+              written += 1;
+            }
+            if (next === "special") raisedSpecial += 1;
+            else raisedSensitive += 1;
           }
-          return { scanned: rows.length, written };
+          return { scanned: rows.length, written, skipped, raisedSpecial, raisedSensitive, truncated: fetched.length > remaining };
         });
         summary.scanned += done.scanned;
         summary.written += done.written;
+        summary.skipped_concurrent += done.skipped;
+        summary.raised.special += done.raisedSpecial;
+        summary.raised.sensitive += done.raisedSensitive;
+        if (done.truncated) summary.truncated = true;
         remaining -= done.scanned;
       } catch (err) {
         const failure = { tenant_id: tenantId, memory_space_id: space, error: (err as Error).message.slice(0, 200) };
@@ -112,6 +132,6 @@ export async function runMemoryResensitizeSweepForAllTenants(
       }
     }
   }
-  console.log(JSON.stringify({ msg: "memory_resensitize_sweep_done", mode, scanned: summary.scanned, raised: summary.raised, written: summary.written, failed: summary.failed.length, truncated: summary.truncated }));
+  console.log(JSON.stringify({ msg: "memory_resensitize_sweep_done", mode, scanned: summary.scanned, raised: summary.raised, written: summary.written, skipped_concurrent: summary.skipped_concurrent, failed: summary.failed.length, truncated: summary.truncated }));
   return summary;
 }
