@@ -34,7 +34,7 @@ import {
 } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
 import { DeploymentService, DiagnosisService, IncidentService } from "@jarvis/incidents";
-import { KnowledgeRetriever } from "@jarvis/knowledge";
+import { ClaimVerificationService, KnowledgeRetriever, createKnowledgeClaimsPort } from "@jarvis/knowledge";
 import {
   AiCouncil,
   DEFAULT_PROFILES,
@@ -603,6 +603,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // web/verktøyoutput - som er en helt annen tillitsklasse enn eierens egne
   // ord i en samtale, se `ingest`-kommentaren ved `conversationEngine` under).
   const memoryWriter = new MemoryWriter(pool, memoryEmbedding, new LlmExtractionAdapter(gateway, { maxConcurrent: envInt("JARVIS_MEMORY_EXTRACTION_CONCURRENCY", 1, { min: 1, max: 8 }) }), policy);
+  // WP-D1 (UA-2, Q-26): påstandsverifisering (kildeuavhengighet, ingen autonom nettsøk). Lesingen (`knowledge.get_claim_status`) er alltid på; SKRIVING er AV som standard og slås på med
+  // JARVIS_KNOWLEDGE_CLAIM_WRITES=on (kun den eksakte verdien «on» - alt annet er av). Promotering til etablert kunnskap er KUN et forslag til minnets karantene (`MemoryWriter.propose`, D-367).
+  const knowledgeClaimWrites = (process.env["JARVIS_KNOWLEDGE_CLAIM_WRITES"] ?? "").trim().toLowerCase() === "on";
+  const knowledgeClaims = createKnowledgeClaimsPort(
+    new ClaimVerificationService(pool, { default_min_independent_sources: envInt("JARVIS_KNOWLEDGE_CLAIM_MIN_SOURCES", 2, { min: 2, max: 10 }) }),
+    { writes: knowledgeClaimWrites, promotion: memoryWriter }
+  );
   // D-286 (Tobias "alle" - se retention-sweep.ts sitt filhode for full
   // begrunnelse): `SummaryService` FANTES fra før, men ble ALDRI konstruert
   // eller kalt fra noe produksjonssted (D-286 sitt eget funn) - kun
@@ -979,8 +986,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // for bakgrunnskontekst - se `memoryRetriever` sin egen filhode-kommentar
       // lenger opp for hvorfor den ble hevet ut hit.
       ...memoryToolDefinitions(new MemorySearchTransport(memoryRetriever, memoryWriter)),
-      // WP-D1 (UA-2): `knowledge.search` over `knowledgeRetriever` (tenant-/space-skopet via RLS som app-rolle; treffene bærer strukturerte sensitivitetsmerker for skyskjermen).
-      ...knowledgeToolDefinitions(new KnowledgeSearchTransport(knowledgeRetriever)),
+      // WP-D1 (UA-2): `knowledge.search` over `knowledgeRetriever` (tenant-/space-skopet via RLS som app-rolle; treffene bærer strukturerte sensitivitetsmerker for skyskjermen) og
+      // `knowledge.get_claim_status` (Q-26: kildeverifiseringsstatus, ren lesing). Skrive-handlingene i kildeverifiseringen (registrer/evidens/tilbaketrekking/promotering som FORSLAG til karantenen)
+      // finnes KUN med JARVIS_KNOWLEDGE_CLAIM_WRITES=on, og står uansett på ingen modellflate.
+      ...knowledgeToolDefinitions(new KnowledgeSearchTransport(knowledgeRetriever, knowledgeClaims), { claimWrites: knowledgeClaimWrites }),
       // D-416: delegeringsnivået (opprett lesende bakgrunnsjobb / les jobbstatus) over SAMME `taskService` (policy + kontraktsregler).
       ...tasksDelegateToolDefinitions(new TasksDelegateTransport(taskService, chatJobs)),
       // D-421 (UA0-RUNRATE): run-rate og connector maintenance ledger (kun lesing for modellen; skriving via dashbord-ruten).
