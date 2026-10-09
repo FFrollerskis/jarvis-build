@@ -85,7 +85,10 @@ const SCENARIOS: Scenario[] = [
   { name: "resensitize gir null (har ikke kjørt)", over: () => ({ resensitize: returnsNull }), broken: ["EV-10"], notReady: [] },
   { name: "resensitize mangler", over: () => ({}), drop: ["resensitize"], broken: ["EV-10"], notReady: [] },
   // --- verktøyflaten (EV-4/EV-21) -------------------------------------------------------------------------------------------------------------------------------------------------
-  { name: "toolSurface kaster", over: () => ({ toolSurface: throwsSync }), broken: ["EV-4", "EV-21"], notReady: [] }
+  { name: "toolSurface kaster", over: () => ({ toolSurface: throwsSync }), broken: ["EV-4", "EV-21"], notReady: [] },
+  // Uten verktøyflate hoppes verktøyutvalgs-oppgavene over (L3): EV-4 er ikke OK. Red-team-oppgavene trenger ikke flaten, så EV-21 er uberørt.
+  { name: "toolSurface gir null (verktøyflaten er ikke tilgjengelig)", over: () => ({ toolSurface: returnsNull }), broken: ["EV-4"], notReady: [] },
+  { name: "toolSurface mangler", over: () => ({}), drop: ["toolSurface"], broken: ["EV-4"], notReady: [] }
 ];
 
 const byEv = (sections: readonly EvolutionSection[], ev: string): EvolutionSection => sections.find((s) => s.ev === ev)!;

@@ -10,6 +10,7 @@ import {
 } from "../src/evolution-source.ts";
 import { MAINTENANCE_CATALOG } from "@jarvis/self-modification";
 import { createRadarState } from "../src/evolution-radar.ts";
+import { GOLDEN } from "../src/golden-suite.ts";
 import type { LookupImpl } from "../src/radar-url-guard.ts";
 import { PRODUCTION_SURFACE } from "./support/fast-path-harness.ts";
 
@@ -289,6 +290,38 @@ describe("EV-4 + EV-21: gull-suite og sikkerhetsselvtest", () => {
   it("uten verktøyflate sies det at oppgaver er hoppet over (aldri stille bestått)", async () => {
     const golden = await goldenSection(ctxOf(deps()));
     expect(golden.findings.join("\n")).toMatch(/\d+ hoppet over/);
+  });
+
+  it("L3: hoppet-over-oppgaver gir aldri «Alle … bestått» og aldri OK: «N av M bestått, K hoppet over», UNKNOWN (kunne ikke måles) - og ATTENTION når noe som kjørte feilet", async () => {
+    const total = GOLDEN.length;
+    const skippedIds = GOLDEN.filter((g) => g.needsSurface).map((g) => g.task.id);
+    expect(skippedIds.length).toBeGreaterThanOrEqual(3);
+    for (const toolSurface of [() => null, undefined]) {
+      const golden = await goldenSection(ctxOf(deps(toolSurface ? { toolSurface } : { toolSurface: undefined as never })));
+      expect(golden.status).toBe("UNKNOWN");
+      expect(golden.summary_no).toBe(`${total - skippedIds.length} av ${total} gull-oppgaver bestått, ${skippedIds.length} hoppet over (verktøyflaten er ikke tilgjengelig) - ikke alle er målt.`);
+      expect(golden.summary_no).not.toContain("Alle");
+      const text = golden.findings.join("\n");
+      expect(text).toContain(`${total - skippedIds.length} av ${total} oppgaver bestått, ${skippedIds.length} hoppet over`);
+      expect(text).toContain("de er IKKE målt");
+      for (const id of skippedIds) expect(text).toContain(id);
+      expect(text).not.toMatch(/Alle \d+ /);
+    }
+    // En oppgave som KJØRTE og feilet er målt-og-dårlig (ATTENTION), også når andre er hoppet over; begge deler sies.
+    const victim = GOLDEN.find((g) => !g.needsSurface && !g.rt)!;
+    const original = victim.check;
+    (victim as { check: unknown }).check = () => false;
+    try {
+      const both = await goldenSection(ctxOf(deps({ toolSurface: () => null })));
+      expect(both.status).toBe("ATTENTION");
+      expect(both.summary_no).toContain(`1 av ${total - skippedIds.length} kjørte gull-oppgaver er ikke bestått`);
+      expect(both.summary_no).toContain(`${skippedIds.length} hoppet over (ikke målt)`);
+      const failedOnly = await goldenSection(ctxOf(deps({ toolSurface: () => PRODUCTION_SURFACE })));
+      expect(failedOnly.status).toBe("ATTENTION");
+      expect(failedOnly.summary_no).toBe(`1 av ${total} kjørte gull-oppgaver er ikke bestått - en regel Jarvis allerede har fungerer ikke lenger.`);
+    } finally {
+      (victim as { check: unknown }).check = original;
+    }
   });
 
   it("begge seksjonene deler ÉN kjøring per rapport (memoisert i konteksten)", async () => {

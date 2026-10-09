@@ -404,16 +404,24 @@ function goldenRun(ctx: EvolutionContext): Promise<GoldenRun> {
 
 export async function goldenSection(ctx: EvolutionContext): Promise<EvolutionSection> {
   const run = await goldenRun(ctx);
-  const passed = run.metrics.tasks - run.failed.length;
+  // `metrics.tasks` er antallet som faktisk ble KJØRT. «Alle bestått» sies bare når ingenting er hoppet over (L3, gjennomgang av PR #313): en oppgave som ikke er kjørt er verken bestått eller strøket.
+  const ran = run.metrics.tasks;
+  const skipped = run.skipped.length;
+  const total = ran + skipped;
+  const passed = ran - run.failed.length;
+  const failed = run.failed.length;
   const findings = [
-    `Gull-suite v1 (digest ${run.digest.slice(0, 12)}): ${passed} av ${run.metrics.tasks} oppgaver bestått${run.skipped.length > 0 ? `; ${run.skipped.length} hoppet over (verktøyflaten er ikke tilgjengelig her)` : ""}.`,
-    ...(run.failed.length > 0 ? [`Ikke bestått: ${run.failed.join(", ")}.`] : []),
+    `Gull-suite v1 (digest ${run.digest.slice(0, 12)}): ${passed} av ${total} oppgaver bestått${skipped > 0 ? `, ${skipped} hoppet over (verktøyflaten er ikke tilgjengelig her: ${run.skipped.join(", ")}) - de er IKKE målt` : ""}.`,
+    ...(failed > 0 ? [`Ikke bestått: ${run.failed.join(", ")}.`] : []),
     "Oppgavene er faktiske feil og beslutninger fra Jarvis' egen historie (klassifisering, ruting, verktøyutvalg, skjerming, repo-lås), kjørt mot de deterministiske reglene - ingen modell kalles.",
     "Ikke koblet ennå: modellevaluering mot representative oppgaver, regresjonsport mot en lagret baseline og blind A/B (krever modellkjøringer og lagret historikk)."
   ];
+  // ATTENTION = målt og dårlig (noe som kjørte feilet). UNKNOWN = noe kunne ikke måles (hoppet over) og ingenting målt er dårlig. OK kun når ALLE er kjørt og bestått.
   return {
-    ev: "EV-4", title_no: "Gull-suite (regresjonsvern)", mode: "observe", status: run.failed.length > 0 ? "ATTENTION" : "OK",
-    summary_no: run.failed.length > 0 ? `${run.failed.length} av ${run.metrics.tasks} gull-oppgaver er ikke bestått - en regel Jarvis allerede har fungerer ikke lenger.` : `Alle ${run.metrics.tasks} gull-oppgaver er bestått.`,
+    ev: "EV-4", title_no: "Gull-suite (regresjonsvern)", mode: "observe", status: failed > 0 ? "ATTENTION" : skipped > 0 ? "UNKNOWN" : "OK",
+    summary_no: failed > 0
+      ? `${failed} av ${ran} kjørte gull-oppgaver er ikke bestått - en regel Jarvis allerede har fungerer ikke lenger.${skipped > 0 ? ` I tillegg er ${skipped} hoppet over (ikke målt).` : ""}`
+      : skipped > 0 ? `${passed} av ${total} gull-oppgaver bestått, ${skipped} hoppet over (verktøyflaten er ikke tilgjengelig) - ikke alle er målt.` : `Alle ${total} gull-oppgaver er bestått.`,
     findings, source: `apps/api/src/golden-suite.ts (versjon 1, ${GOLDEN_SUITE_DIGEST().slice(0, 12)})`, observed_at: ctx.now.toISOString()
   };
 }
