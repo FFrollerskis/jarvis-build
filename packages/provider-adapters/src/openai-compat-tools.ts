@@ -18,6 +18,42 @@ export const MAX_ARGUMENT_CHARS = 1_000_000;
 const MAX_TOOL_NAME_CHARS = 128;
 const MAX_TOOL_CALL_ID_CHARS = 200;
 
+/**
+ * L10 (gjennomgang av PR #315): tokentall fra leverandøren går rett inn i kostberegningen (`cost_events`, månedsbudsjettet), så de må være tall vi kan stole på: ENDELIGE HELTALL >= 0 og under et romslig tak
+ * (en kontekst på 1M tokens er ekte; 10M er det ikke). Alt annet (`usage: {}`, negative tall, strenger, desimaler, `NaN`/`Infinity`, manglende felt) blir 0 for det feltet og meldes som et problem - aldri en streng eller `NaN`
+ * som flyter videre til kostformelen. Kallet feiler ikke (svaret er brukbart), men er merket `usage_missing`/`usage_invalid` i metadata, så ukjent kost aldri leses som gratis.
+ */
+export const MAX_REPORTED_TOKENS = 10_000_000;
+
+export interface NormalizedUsage {
+  usage: { input_tokens: number; output_tokens: number };
+  /** Kategorier (aldri verdiene) for felt som ikke var gyldige - tom når alt var i orden. */
+  problems: string[];
+}
+
+function tokenCount(value: unknown): { ok: true; value: number } | { ok: false; problem: string } {
+  if (value === undefined || value === null) return { ok: false, problem: "missing" };
+  if (typeof value !== "number") return { ok: false, problem: typeof value === "string" ? "string" : "not_a_number" };
+  if (!Number.isFinite(value)) return { ok: false, problem: "not_finite" };
+  if (!Number.isInteger(value)) return { ok: false, problem: "not_an_integer" };
+  if (value < 0) return { ok: false, problem: "negative" };
+  if (value > MAX_REPORTED_TOKENS) return { ok: false, problem: "too_large" };
+  return { ok: true, value };
+}
+
+/** `usage` fra en OpenAI-kompatibel respons (`prompt_tokens`/`completion_tokens`) → validerte tokentall. */
+export function normalizeUsage(raw: unknown): NormalizedUsage {
+  const source = isPlainObject(raw) ? raw : {};
+  const problems: string[] = isPlainObject(raw) ? [] : ["usage_not_an_object"];
+  const read = (field: "prompt_tokens" | "completion_tokens"): number => {
+    const parsed = tokenCount(source[field]);
+    if (parsed.ok) return parsed.value;
+    problems.push(`${field}:${parsed.problem}`);
+    return 0;
+  };
+  return { usage: { input_tokens: read("prompt_tokens"), output_tokens: read("completion_tokens") }, problems };
+}
+
 export interface OpenAiToolDefinition {
   type: "function";
   function: { name: string; description: string; parameters: Record<string, unknown> };
@@ -54,6 +90,21 @@ function requireToolName(provider: string, name: unknown): string {
   return name;
 }
 
+/**
+ * L14 (gjennomgang av PR #315): et verktøynavn som IKKE ble tilbudt i denne forespørselen (`request.tools`) er et ugyldig kall - samme regel som Hermes-parseren. Uten dette ble `tool_call_start`/`tool_call_complete` for et
+ * hallusinert eller injisert navn vist for klienten (strømmen) før gatewayen avviste kallet. `offered` udefinert = ingen sjekk (eldre kallere); en tom mengde = ingen verktøy tilbudt, så ethvert kall er ukjent.
+ */
+function requireOfferedToolName(provider: string, name: unknown, offered: ReadonlySet<string> | undefined): string {
+  const valid = requireToolName(provider, name);
+  if (offered !== undefined && !offered.has(valid)) throw invalidToolCall(provider, "unknown_tool");
+  return valid;
+}
+
+/** Navnene på verktøyene som ble tilbudt i forespørselen (til `normalizeToolCalls`/`ToolCallStreamAssembler`). */
+export function offeredToolNames(tools: readonly ToolDefinition[] | undefined): ReadonlySet<string> {
+  return new Set((tools ?? []).map((tool) => tool.name));
+}
+
 function toolCallId(id: unknown): string {
   return typeof id === "string" && id.length > 0 && id.length <= MAX_TOOL_CALL_ID_CHARS ? id : `call-${randomUUID().slice(0, 8)}`;
 }
@@ -66,7 +117,7 @@ export interface RawToolCall {
 }
 
 /** Normaliserer `message.tool_calls` fra et ikke-strømmet svar. Ugyldig form → `invalid_tool_call` (aldri et delvis resultat). */
-export function normalizeToolCalls(provider: string, model: string, raw: unknown, state?: ToolCallRequest["provider_state"]): ToolCallRequest[] {
+export function normalizeToolCalls(provider: string, model: string, raw: unknown, state?: ToolCallRequest["provider_state"], offered?: ReadonlySet<string>): ToolCallRequest[] {
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) throw invalidToolCall(provider, "tool_calls_not_list");
   if (raw.length > MAX_STREAMED_CALLS) throw invalidToolCall(provider, "too_many_tool_calls");
@@ -74,7 +125,7 @@ export function normalizeToolCalls(provider: string, model: string, raw: unknown
     if (!isPlainObject(item) || (item.type !== undefined && item.type !== "function") || !isPlainObject(item.function)) throw invalidToolCall(provider, "invalid_tool_call_shape");
     return {
       tool_call_id: toolCallId(item.id),
-      tool_name: requireToolName(provider, item.function.name),
+      tool_name: requireOfferedToolName(provider, item.function.name, offered),
       arguments: parseToolArguments(provider, item.function.arguments),
       provider,
       model,
@@ -136,7 +187,9 @@ export class ToolCallStreamAssembler {
   constructor(
     private readonly provider: string,
     private readonly model: string,
-    private readonly emit: (event: StreamEvent) => void
+    private readonly emit: (event: StreamEvent) => void,
+    /** L14: verktøynavnene som ble tilbudt. Et navn utenfor mengden avvises (`invalid_tool_call`) FØR noe `tool_call_start` sendes til klienten. Udefinert = ingen sjekk. */
+    private readonly offered?: ReadonlySet<string>
   ) {}
 
   /** `true` når deltaene inneholdt verktøykall-innhold (brukes til time-to-first-token). */
@@ -156,8 +209,10 @@ export class ToolCallStreamAssembler {
       if (typeof delta.id === "string" && delta.id.length > 0 && call.id === undefined) call.id = delta.id;
       const name = delta.function?.name;
       if (typeof name === "string" && name.length > 0) {
-        if (call.name === undefined) call.name = name;
-        else if (call.name !== name) throw invalidToolCall(this.provider, "conflicting_tool_names");
+        if (call.name === undefined) {
+          if (this.offered !== undefined && !this.offered.has(name)) throw invalidToolCall(this.provider, "unknown_tool");
+          call.name = name;
+        } else if (call.name !== name) throw invalidToolCall(this.provider, "conflicting_tool_names");
       }
       if (call.name !== undefined && !call.started) {
         call.started = true;

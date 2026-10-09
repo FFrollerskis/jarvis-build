@@ -294,3 +294,19 @@ describe("neutralizeProtocolTags / parseHermesOutput (rene funksjoner)", () => {
     expect(parseHermesOutput("bare tekst", undefined)).toEqual({ text: "bare tekst", calls: [], ignored_blocks: 0 });
   });
 });
+
+describe("L10: usage valideres også for Hermes", () => {
+  it("ugyldig usage gir validerte tokentall og merket svar; gyldig usage røres ikke", async () => {
+    for (const [usage, expected] of [
+      [{}, { input_tokens: 0, output_tokens: 0 }],
+      [{ prompt_tokens: -1, completion_tokens: "4" }, { input_tokens: 0, output_tokens: 0 }],
+      [{ prompt_tokens: 20, completion_tokens: 6 }, { input_tokens: 20, output_tokens: 6 }]
+    ] as const) {
+      const s = await serve(() => ({ json: { choices: [{ message: { content: "Hei" }, finish_reason: "stop" }], usage } }));
+      const result = await adapterFor(s).complete({ messages: USER });
+      expect(result.usage).toEqual(expected);
+      if (expected.input_tokens === 20) expect(result.metadata).toBeUndefined();
+      else expect(result.metadata).toMatchObject({ usage_missing: true, usage_invalid: true });
+    }
+  });
+});

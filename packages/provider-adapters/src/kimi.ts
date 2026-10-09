@@ -16,7 +16,7 @@ import {
   type StreamHandler,
   type ToolCallRequest
 } from "./types.ts";
-import { normalizeToolCalls, openAiToolReplayMessages, ToolCallStreamAssembler, toOpenAiToolDefinitions, type ToolCallDelta } from "./openai-compat-tools.ts";
+import { normalizeToolCalls, normalizeUsage, offeredToolNames, openAiToolReplayMessages, ToolCallStreamAssembler, toOpenAiToolDefinitions, type ToolCallDelta } from "./openai-compat-tools.ts";
 
 /**
  * Kimi (Moonshot AI)-adapter. Masterplan v4.0 planlegger Kimi for long
@@ -154,16 +154,19 @@ export class KimiAdapter implements ModelProviderAdapter {
     const message = body.choices[0]?.message;
     const text = message?.content ?? "";
     const hasToolCalls = Array.isArray(message?.tool_calls) && (message?.tool_calls as unknown[]).length > 0;
-    const toolCalls = normalizeToolCalls(this.name, this.model, message?.tool_calls, this.stateFor(message?.reasoning_content, hasToolCalls));
+    const toolCalls = normalizeToolCalls(this.name, this.model, message?.tool_calls, this.stateFor(message?.reasoning_content, hasToolCalls), offeredToolNames(request.tools));
     if (text) onToken?.(text);
+    // L10: tokentall valideres (endelige heltall >= 0) før de når kostberegningen; ugyldige felt blir 0 og svaret merkes, aldri en streng/NaN.
+    const normalized = normalizeUsage(body.usage);
     return {
       text,
-      usage: { input_tokens: body.usage.prompt_tokens, output_tokens: body.usage.completion_tokens },
+      usage: normalized.usage,
       provider: this.name,
       model: this.model,
       latency_ms: Date.now() - started,
       ...(body.choices[0]?.finish_reason ? { finish_reason: body.choices[0].finish_reason } : {}),
-      ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {})
+      ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+      ...(normalized.problems.length > 0 ? { metadata: { usage_missing: true, usage_invalid: true, usage_problems: normalized.problems } } : {})
     };
   }
 
@@ -178,13 +181,14 @@ export class KimiAdapter implements ModelProviderAdapter {
       throw new ProviderError(this.name, "invalid_response", `${this.name}_no_stream_body`);
     }
     onEvent({ type: "start", provider: this.name, model: this.model, generation_id: `gen-${randomUUID().slice(0, 12)}` });
-    const assembler = new ToolCallStreamAssembler(this.name, this.model, onEvent);
+    const assembler = new ToolCallStreamAssembler(this.name, this.model, onEvent, offeredToolNames(request.tools));
     let text = "";
     let reasoning = "";
     let ttft: number | undefined;
     let finish = "";
     let sawDone = false;
     let usage: { input_tokens: number; output_tokens: number } | undefined;
+    let usageProblems: string[] = [];
     try {
       for await (const data of sseLines(response.body)) {
         if (data === "[DONE]") {
@@ -215,7 +219,17 @@ export class KimiAdapter implements ModelProviderAdapter {
         if (assembler.push(delta?.tool_calls) && ttft === undefined) ttft = Date.now() - started;
         if (choice?.finish_reason) finish = choice.finish_reason;
         const reported = chunk.usage ?? choice?.usage;
-        if (reported) usage = { input_tokens: reported.prompt_tokens, output_tokens: reported.completion_tokens };
+        if (reported) {
+          // L10: en gyldig statistikk-chunk vinner alltid; en ugyldig brukes (som nuller) kun så lenge ingen annen er mottatt.
+          const normalized = normalizeUsage(reported);
+          if (normalized.problems.length === 0) {
+            usage = normalized.usage;
+            usageProblems = [];
+          } else if (usage === undefined) {
+            usage = normalized.usage;
+            usageProblems = normalized.problems;
+          }
+        }
       }
     } catch (err) {
       if (signal?.aborted) {
@@ -245,8 +259,8 @@ export class KimiAdapter implements ModelProviderAdapter {
       latency_ms: Date.now() - started,
       ...(ttft !== undefined ? { ttft_ms: ttft } : {}),
       finish_reason: finish || "stop",
-      // Ærlig: manglet statistikk-chunken helt, er tokentallene 0 fordi de er ukjente (ikke fordi kallet var gratis).
-      ...(usage === undefined ? { metadata: { usage_missing: true } } : {}),
+      // Ærlig: manglet statistikk-chunken helt (eller var den ugyldig, L10), er tokentallene 0 fordi de er ukjente (ikke fordi kallet var gratis).
+      ...(usage === undefined ? { metadata: { usage_missing: true } } : usageProblems.length > 0 ? { metadata: { usage_missing: true, usage_invalid: true, usage_problems: usageProblems } } : {}),
       ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {})
     };
   }

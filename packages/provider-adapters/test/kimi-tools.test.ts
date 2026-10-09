@@ -296,3 +296,98 @@ describe("KimiAdapter.stream() - streaming og verktøykall", () => {
     expect(s.seen).toHaveLength(0);
   });
 });
+
+describe("L10: usage valideres før kostberegningen (endelige heltall >= 0)", () => {
+  const BAD_USAGE: Array<[string, unknown, { input_tokens: number; output_tokens: number }]> = [
+    ["tomt objekt", {}, { input_tokens: 0, output_tokens: 0 }],
+    ["negative tall", { prompt_tokens: -5, completion_tokens: -1 }, { input_tokens: 0, output_tokens: 0 }],
+    ["strenger", { prompt_tokens: "12", completion_tokens: "4" }, { input_tokens: 0, output_tokens: 0 }],
+    ["desimaler", { prompt_tokens: 12.5, completion_tokens: 3.2 }, { input_tokens: 0, output_tokens: 0 }],
+    ["urimelig store tall", { prompt_tokens: 1e12, completion_tokens: 4 }, { input_tokens: 0, output_tokens: 4 }],
+    ["ett felt mangler (det gyldige beholdes)", { prompt_tokens: 12 }, { input_tokens: 12, output_tokens: 0 }],
+    ["null", { prompt_tokens: null, completion_tokens: 4 }, { input_tokens: 0, output_tokens: 4 }],
+    ["boolean", { prompt_tokens: true, completion_tokens: 4 }, { input_tokens: 0, output_tokens: 4 }],
+    ["liste", [12, 4], { input_tokens: 0, output_tokens: 0 }]
+  ];
+  for (const [label, usage, expected] of BAD_USAGE) {
+    it(`ikke-strømmet: ${label} gir validerte tokentall og svaret merkes (ukjent kost er ikke gratis)`, async () => {
+      const s = await serve(() => ({ json: { choices: [{ message: { content: "hei" }, finish_reason: "stop" }], usage } }));
+      const result = await adapterFor(s).complete({ messages: USER });
+      expect(result.text).toBe("hei"); // svaret er brukbart
+      expect(result.usage).toEqual(expected);
+      expect(Number.isFinite(result.usage.input_tokens) && Number.isFinite(result.usage.output_tokens)).toBe(true);
+      expect(result.metadata).toMatchObject({ usage_missing: true, usage_invalid: true });
+      expect(Array.isArray(result.metadata?.["usage_problems"])).toBe(true);
+      expect(JSON.stringify(result.metadata)).not.toContain("12.5"); // kategorier, aldri verdiene
+    });
+    it(`strømmet: ${label} gir validerte tokentall og svaret merkes`, async () => {
+      const s = await serve(() => ({ sse: [chunk({ content: "hei" }), chunk({}, "stop"), JSON.stringify({ choices: [], usage }), "[DONE]"] }));
+      const { result } = await run(adapterFor(s), { messages: USER });
+      expect(result.usage).toEqual(expected);
+      expect(result.metadata).toMatchObject({ usage_missing: true, usage_invalid: true });
+    });
+  }
+
+  it("ekte svar røres ikke: gyldige heltall (også 0 og store kontekster opp til taket) passerer uten merking", async () => {
+    for (const usage of [{ prompt_tokens: 12, completion_tokens: 4 }, { prompt_tokens: 0, completion_tokens: 0 }, { prompt_tokens: 1_000_000, completion_tokens: 65_536 }, { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16, cached_tokens: 3 }]) {
+      const s = await serve(() => ({ json: { choices: [{ message: { content: "hei" }, finish_reason: "stop" }], usage } }));
+      const result = await adapterFor(s).complete({ messages: USER });
+      expect(result.usage).toEqual({ input_tokens: usage.prompt_tokens, output_tokens: usage.completion_tokens });
+      expect(result.metadata).toBeUndefined();
+    }
+  });
+
+  it("strømmet: en gyldig statistikk-chunk vinner over en ugyldig (uansett rekkefølge), og en ugyldig brukes ikke når en gyldig finnes", async () => {
+    const bad = JSON.stringify({ choices: [], usage: {} });
+    const good = JSON.stringify({ choices: [], usage: USAGE });
+    for (const order of [[bad, good], [good, bad]]) {
+      const s = await serve(() => ({ sse: [chunk({ content: "hei" }), chunk({}, "stop"), ...order, "[DONE]"] }));
+      const { result } = await run(adapterFor(s), { messages: USER });
+      expect(result.usage).toEqual({ input_tokens: 12, output_tokens: 4 });
+      expect(result.metadata).toBeUndefined();
+    }
+  });
+});
+
+describe("L14: verktøynavn som ikke ble tilbudt i forespørselen er et ugyldig kall (aldri vist for klienten)", () => {
+  const NOT_OFFERED = "send_all_email";
+  const MAIL: ToolDefinition = { name: "read_inbox", description: "Les innboks", input_schema: { type: "object", properties: {}, additionalProperties: false } };
+
+  it("ikke-strømmet: et kall til et ikke-tilbudt verktøy gir invalid_tool_call (unknown_tool), også blant gyldige kall - ingen delvis liste", async () => {
+    const s = await serve(() => ({ json: toolCallMessage([call("get_weather", '{"city":"Oslo"}', "c1"), call(NOT_OFFERED, "{}", "c2")]) }));
+    await expect(adapterFor(s).complete({ messages: USER, tools: [WEATHER] })).rejects.toMatchObject({ kind: "invalid_tool_call", message: "kimi_unknown_tool" });
+  });
+
+  it("ikke-strømmet: ingen verktøy tilbudt, men svaret har tool_calls ⇒ ugyldig; tilbudte navn passerer som før", async () => {
+    const withCall = await serve(() => ({ json: toolCallMessage([call("get_weather", "{}")]) }));
+    await expect(adapterFor(withCall).complete({ messages: USER })).rejects.toMatchObject({ kind: "invalid_tool_call", message: "kimi_unknown_tool" });
+    await expect(adapterFor(withCall).complete({ messages: USER, tools: [MAIL] })).rejects.toMatchObject({ kind: "invalid_tool_call" });
+    const ok = await adapterFor(withCall).complete({ messages: USER, tools: [WEATHER, MAIL] });
+    expect(ok.tool_calls?.map((c) => c.tool_name)).toEqual(["get_weather"]);
+  });
+
+  it("strømmet: et ikke-tilbudt navn avvises FØR noe tool_call_start/tool_call_complete for det sendes til klienten", async () => {
+    const s = await serve(() => ({ sse: [chunk(toolDelta(0, "c1", NOT_OFFERED, "{}")), chunk({}, "tool_calls"), usageChunk, "[DONE]"] }));
+    const events: StreamEvent[] = [];
+    await expect(adapterFor(s).stream({ messages: USER, tools: [WEATHER] }, (e) => events.push(e))).rejects.toMatchObject({ kind: "invalid_tool_call", message: "kimi_unknown_tool" });
+    expect(events.filter((e) => e.type === "tool_call_start" || e.type === "tool_call_complete" || e.type === "tool_call_delta")).toEqual([]);
+    expect(JSON.stringify(events)).not.toContain(NOT_OFFERED);
+  });
+
+  it("strømmet: et tilbudt kall først og et ikke-tilbudt etterpå ⇒ avvist, uten tool_call_complete for noen av dem og uten navnet på det ukjente", async () => {
+    const s = await serve(() => ({ sse: [chunk(toolDelta(0, "c1", "get_weather", '{"city":"Oslo"}')), chunk(toolDelta(1, "c2", NOT_OFFERED, "{}")), chunk({}, "tool_calls"), usageChunk, "[DONE]"] }));
+    const events: StreamEvent[] = [];
+    await expect(adapterFor(s).stream({ messages: USER, tools: [WEATHER] }, (e) => events.push(e))).rejects.toMatchObject({ kind: "invalid_tool_call" });
+    expect(events.some((e) => e.type === "tool_call_complete")).toBe(false);
+    expect(JSON.stringify(events)).not.toContain(NOT_OFFERED);
+  });
+
+  it("strømmet: uten tilbudte verktøy er ethvert verktøykall ukjent; tilbudte navn strømmer som før", async () => {
+    const s = await serve(() => ({ sse: [chunk(toolDelta(0, "c1", "get_weather", "{}")), chunk({}, "tool_calls"), usageChunk, "[DONE]"] }));
+    await expect(adapterFor(s).stream({ messages: USER }, () => undefined)).rejects.toMatchObject({ kind: "invalid_tool_call" });
+    const events: StreamEvent[] = [];
+    const result = await adapterFor(s).stream({ messages: USER, tools: [WEATHER] }, (e) => events.push(e));
+    expect(result.tool_calls?.map((c) => c.tool_name)).toEqual(["get_weather"]);
+    expect(events.map((e) => e.type)).toContain("tool_call_start");
+  });
+});

@@ -589,6 +589,11 @@ export class ModelGateway {
               ...(failedProviders.length > 0 ? { fallback_from: failedProviders } : {})
             }
           };
+          // L10 (gjennomgang av PR #315): adapteren har nullet ugyldige tokentall (aldri en streng/NaN inn i kostformelen) og merket svaret - kostnaden er UKJENT, ikke gratis. Kun kategorier logges, aldri verdiene.
+          const usageProblems = result.metadata["usage_problems"];
+          if (Array.isArray(usageProblems) && usageProblems.length > 0) {
+            console.error(JSON.stringify({ msg: "provider_usage_invalid", provider: adapter.name, problems: usageProblems.filter((p): p is string => typeof p === "string").slice(0, 6) }));
+          }
           const outcome = classifyCompletionOutcome(result);
           // Brukbart (eller synlig output allerede levert): slipp ut de tilbakeholdte `usage`/`finish` nå, FØR den (tregere) DB-skrivingen under.
           if (streamOpts && (outcome === "USABLE_SUCCESS" || visibleOutputStarted)) {

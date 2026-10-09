@@ -15,7 +15,7 @@ import {
   type ToolCallRequest
 } from "./types.ts";
 import { HermesToolParseError, hermesToolReplayMessages, parseHermesOutput, renderHermesToolsSystemBlock } from "./hermes-tools.ts";
-import { normalizeToolCalls } from "./openai-compat-tools.ts";
+import { normalizeToolCalls, normalizeUsage } from "./openai-compat-tools.ts";
 
 /**
  * Hermes (NousResearch)-adapter. Tobias direkte i chat (D-360): "Hermes
@@ -129,15 +129,21 @@ export class HermesAdapter implements ModelProviderAdapter {
     const parsed = this.parseOutput(message?.content ?? "", message?.tool_calls, tools);
     if (parsed.text) onToken?.(parsed.text);
     const finish = body.choices[0]?.finish_reason;
+    // L10: tokentall valideres (endelige heltall >= 0) før de når kostberegningen; ugyldige felt blir 0 og svaret merkes, aldri en streng/NaN.
+    const normalized = normalizeUsage(body.usage);
+    const metadata = {
+      ...(parsed.ignored_blocks > 0 ? { tool_blocks_ignored: parsed.ignored_blocks } : {}),
+      ...(normalized.problems.length > 0 ? { usage_missing: true, usage_invalid: true, usage_problems: normalized.problems } : {})
+    };
     return {
       text: parsed.text,
-      usage: { input_tokens: body.usage.prompt_tokens, output_tokens: body.usage.completion_tokens },
+      usage: normalized.usage,
       provider: this.name,
       model: this.model,
       latency_ms: Date.now() - started,
       ...(parsed.calls.length > 0 ? { finish_reason: "tool_calls" } : finish ? { finish_reason: finish } : {}),
       ...(parsed.calls.length > 0 ? { tool_calls: parsed.calls } : {}),
-      ...(parsed.ignored_blocks > 0 ? { metadata: { tool_blocks_ignored: parsed.ignored_blocks } } : {})
+      ...(Object.keys(metadata).length > 0 ? { metadata } : {})
     };
   }
 
