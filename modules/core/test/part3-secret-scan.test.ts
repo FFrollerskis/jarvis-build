@@ -72,12 +72,24 @@ describe("gjennomgang av WP-A (D-451): bankkoder og kvadratisk kjøretid", () =>
   it("bestemte former av PIN-/BankID-/engangskode redigeres bort («PIN-koden er 4821»), ikke bare «pin-kode er …»", () => {
     const r = scanForSecrets("PIN-koden er 4821, BankID-koden min er 99887766 og engangskoden: 123456. Pinkoden = 7777 også.");
     expect(r.text).not.toMatch(/4821|99887766|123456|7777/);
-    expect(r.findings.find((f) => f.kind === "spoken_password")?.count).toBe(4);
+    expect(r.findings.find((f) => f.kind === "spoken_code")?.count).toBe(4);
   });
 
   it("vanlig tekst om koder uten selve koden røres ikke", () => {
     const text = "Jeg glemte PIN-koden til kortet, og engangskoden kom aldri.";
     expect(scanForSecrets(text)).toEqual({ text, findings: [] });
+  });
+
+  it("gjennomgang nr. 2: «engangskoden fra banken er 998877» redigeres, men statusord etter «er» («engangskoden er sendt til deg», «Pin er satt til høy», «password is required») er ikke hemmeligheter", () => {
+    const redacted = scanForSecrets("engangskoden fra banken er 998877 og PIN-koden på SMS er 4821");
+    expect(redacted.text).not.toMatch(/998877|4821/);
+    expect(redacted.findings.find((f) => f.kind === "spoken_code")?.count).toBe(2);
+    for (const text of ["engangskoden er sendt til deg", "Pin er satt til høy", "password is required", "passordet er endret", "Passordet er feil, prøv igjen", "the password is invalid"]) {
+      expect(scanForSecrets(text), text).toEqual({ text, findings: [] });
+    }
+    // Et ord-passord (uten siffer) redigeres fortsatt; en kode krever siffer.
+    expect(scanForSecrets("passordet mitt er solskinn").text).toBe("passordet mitt er [REDACTED:spoken_password]");
+    expect(scanForSecrets("PIN-koden er hemmelig")).toEqual({ text: "PIN-koden er hemmelig", findings: [] });
   });
 
   it("lange tekster uten nøkkelord tar ikke kvadratisk tid (named_secret er begrenset): 500 KB «lege-lege-…» og «a.b.…» under 2 sekunder hver", () => {

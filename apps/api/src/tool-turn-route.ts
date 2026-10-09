@@ -166,6 +166,18 @@ const TRAILING_SYSTEM_NOTE = new RegExp(`(?:\\n\\n|^)\\((?:${SYSTEM_NOTE_PREFIXE
  * heller ikke telle med når historikken klassifiseres (Q-52 A la «helse» til ordforrådet, og merknaden bruker det ordet for å si hva som ble beskyttet - uten stripping ville merknaden selv holdt samtalen låst lokalt).
  * Sikkert ved konstruksjon: det som fjernes sendes heller ikke til noen modell, så en modell som later som den skriver en merknad kan ikke skjule innhold FOR klassifiseringen mens det likevel når en modell.
  */
+const UUID_TOKEN = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+const SOURCE_MARKER = /\[kilde: ([^\]]*)\]/g;
+
+/**
+ * Gjennomgang nr. 2 av WP-A (D-451): minneblokken bærer en kildemarkør per linje («[kilde: conversation:sess-<uuid>]»). En tilfeldig økt-ID er bare heksadesimale tegn, men 0,37 % av dem inneholder en tallrekke som ligner et norsk kontonummer
+ * (11 siffer) og ga en falsk «økonomi»-treff som låste turen lokalt med en misvisende merknad. Kun UUID-ER INNE I SELVE KILDEMARKØREN tas bort FØR klassifiseringen (innholdet i minnet røres ikke, så en kontonummer-lignende tekst i
+ * selve minnet fanges fortsatt); blokken som sendes til modellen er uendret.
+ */
+export function stripSourceMarkerIds(memoryText: string): string {
+  return memoryText.replace(SOURCE_MARKER, (_whole, inner: string) => `[kilde: ${inner.replace(UUID_TOKEN, "")}]`);
+}
+
 export function stripSystemNotes(content: string): string {
   let out = content;
   for (let round = 0; round < 4; round += 1) {
