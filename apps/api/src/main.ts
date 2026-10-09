@@ -114,6 +114,7 @@ import { ConversationEngine } from "./conversation.ts";
 import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
 import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
+import { createEvolutionReportProvider } from "./evolution-source.ts";
 import { ChatJobs, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
@@ -173,6 +174,16 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // EV-2 (D-417): SLO/drift/dataskvalitet fra eksisterende observerbarhet (cost_events, tool_executions, tasks, memory_items) - ingen parallell telemetri.
   const sloReports = createSloReportProvider(pool, owner.tenant_id);
   Object.assign(selfModelReaders, buildSloReaders(sloReports));
+  // WP-B (D-452): evolusjonsportene (EV-0…EV-23) i OBSERVASJONSMODUS - kun lesing av eksisterende observerbarhet, `acts: false`. Selvendring er fortsatt frosset (D-397).
+  const evolutionReports = createEvolutionReportProvider({
+    pool,
+    tenantId: owner.tenant_id,
+    ev0Status: () => getLastEv0BootStatus(),
+    slo: sloReports,
+    connectors: () => listConnectorStatus(toolGateway),
+    killSwitchActive: async () => (await selfModelControls.getControlState()).kill_switch.active,
+    mesh: () => gateway.meshStatus()
+  });
   // D-174 (B2): hoistet hit (tidligere konstruert lenger nede, kun for
   // `enrollmentService`) - `OwnerControlsService` sitt nye, eier-vendte
   // `revoke_device` (se under, `additionalTools`) trenger DENNE SAMME
@@ -936,7 +947,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         },
         slo: { report: sloReports },
         // WP-C3 (Q-45 b): autentiseringsmetode (pat/app, installasjons-id, utløp, repo-scope, rettigheter) i get_connector_status - aldri tokenverdier.
-        connectorAuth: (connectorId) => (connectorId === "github" ? githubAuth.connectorAuthInfo() : undefined)
+        connectorAuth: (connectorId) => (connectorId === "github" ? githubAuth.connectorAuthInfo() : undefined),
+        evolution: { report: evolutionReports }
       }))),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten
@@ -1089,6 +1101,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     sloReport: {
       async run(identity) {
         const result = await toolGateway.execute({ identity, tool_id: "executive", action: "get_slo_report", parameters: {} });
+        const text = result.ok ? (result.data as { summary_no?: unknown } | undefined)?.summary_no : undefined;
+        return typeof text === "string" ? text : null;
+      }
+    },
+    // WP-B (D-452): hurtigbanens «hvordan utvikler du deg» går gjennom Tool Gateway (Policy + revisjon) - samme verktøy modellen kan kalle.
+    evolutionReport: {
+      async run(identity) {
+        const result = await toolGateway.execute({ identity, tool_id: "executive", action: "get_evolution_report", parameters: {} });
         const text = result.ok ? (result.data as { summary_no?: unknown } | undefined)?.summary_no : undefined;
         return typeof text === "string" ? text : null;
       }
