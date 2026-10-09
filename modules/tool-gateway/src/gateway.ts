@@ -315,6 +315,43 @@ export interface ToolDefinition {
   allows_missing_preflight_target?: boolean;
   /** Del 3: `outbound_message` = ingen forhåndseksisterende tilstand; mottaker valideres i transporten og leverandørens bekreftede ID er etterbetingelsen. */
   class_d_profile?: "outbound_message";
+  /**
+   * WP-F1 (D-453, JARVIS-013/043 for penger): MÅLVALIDERING MED SPESIFIKK ÅRSAK. `preflight_target_check` svarer bare ja/nei og gir alltid
+   * `preflight_target_not_found` - for en pengehandling må eieren se HVORFOR den ble stoppet (feil tilstand, beløpsformat, valuta, konto, leverandør,
+   * duplikat, nødbryter). Kjøres på den ferske tilstandslesingen FØR noe reserveres/utføres (klasse D). Returnerer `null` når målet er gyldig,
+   * ellers en kort årsakskode som gatewayen avviser med som `preflight_invalid:<kode>`. Mangler tilstanden (`null`) avvises det som
+   * `preflight_target_not_found`, og en kastet feil i validatoren er fail-closed (`preflight_invalid:validator_error`).
+   */
+  preflight_validator?: (data: JsonValue, parameters: Record<string, JsonValue>) => string | null;
+  /**
+   * WP-F1 (JARVIS-072): credential-kravet bestemmes PER KALL i stedet for statisk (`finance.submit_payment_intent` krevde alltid Fiken-token, også for
+   * Stripe/Vipps-intensjoner). Kjøres ETTER policy-/parameter-/rate-limit-/frys-portene (aldri før autorisasjon) og returnerer credential-referansen som
+   * gjelder for akkurat dette kallet; `null`/feil = fail-closed (`credential_ref_unresolved`). Den STATISKE `credential_ref` beholdes som eier-binding-markør
+   * (en ikke-intern statisk ref krever fortsatt den autentiserte eieren) - den løste refen får samme eier-binding, aldri en svakere.
+   */
+  credential_ref_resolver?: (parameters: Record<string, JsonValue>, context: ToolInvocationContext) => Promise<string | null>;
+  /**
+   * WP-F1: kort, REDIGERT sammendrag (beløp/valuta/leverandørtype - aldri kontonummer/KID/kortdata) av hva handlingen gjelder, hentet fra den ferske
+   * tilstandslesingen. Settes på det umiddelbare out-of-band-varselet (`ClassDNotification.summary`) slik at eieren ser HVA som ble gjort, ikke bare
+   * at noe ble gjort. Kastet feil = intet sammendrag (varselet sendes uansett).
+   */
+  notification_summary?: (state: JsonValue | null, parameters: Record<string, JsonValue>) => string | null;
+}
+
+/**
+ * WP-F1: en transport som VET at leverandørutfallet er ukjent (tidsavbrudd/nettverk/5xx etter at et kall kan ha nådd leverandøren) kaster en feil som begynner med
+ * dette prefikset. Gatewayen behandler den som et gateway-tidsavbrudd: raden blir `unverified` (aldri retry-bar med samme nøkkel, havner i `reconcile()`),
+ * og eieren varsles om at utfallet er ukjent - en kastet leverandørfeil (`failed`) betyr derimot «ingen bivirkning, retry tillatt».
+ */
+export const OUTCOME_UNKNOWN_PREFIX = "outcome_unknown";
+
+export function isOutcomeUnknownMessage(message: string): boolean {
+  return message === "tool_timeout" || message.startsWith(OUTCOME_UNKNOWN_PREFIX);
+}
+
+/** Årsakskoder fra en validator havner i avslagsårsaken og audit - kun et trygt tegnsett og en kort lengde. */
+function sanitizeReasonCode(reason: string): string {
+  return reason.replace(/[^A-Za-z0-9_:.-]/g, "_").slice(0, 80);
 }
 
 /**
@@ -585,10 +622,38 @@ export class ToolGateway {
     // Unntaket er FORTSATT like smalt - kun disse navngitte handlingene per
     // tool_id, ALDRI en bredere "alle lesinger"-regel for noen av de fire.
     const isCredentialRevocationSelfRecovery = isSelfRecoveryAction(request.tool_id, request.action);
-    if (!isCredentialRevocationSelfRecovery && (await this.controls?.isRevokedDurable(definition.credential_ref))) {
+    // SECURITY FIX #2 (D-68): DEN OPPRINNELIGE kalleren sin identitet/godkjenning -
+    // gitt uendret videre til transporten for ethvert nøstet gateway-kall den evt.
+    // selv gjør. ALDRI fabrikkert/eskalert her - kun videreformidlet.
+    const invocationContext: ToolInvocationContext = {
+      identity: request.identity,
+      ...(request.approval !== undefined ? { approval: request.approval } : {}),
+      ...(request.servingModel !== undefined ? { servingModel: request.servingModel } : {}),
+      ...(request.contentOrigin !== undefined ? { contentOrigin: request.contentOrigin } : {})
+    };
+    // WP-F1 (JARVIS-072): credential-kravet kan bestemmes per kall (f.eks. intensjonens provider). Skjer ETTER alle autorisasjonsportene over, og er
+    // fail-closed: en resolver som feiler eller ikke kan avgjøre refen gir avslag - aldri en stille fallback til en annen leverandørs credential.
+    let credentialRef = definition.credential_ref;
+    if (definition.credential_ref_resolver) {
+      let resolved: string | null = null;
+      try {
+        resolved = await definition.credential_ref_resolver(request.parameters, invocationContext);
+      } catch {
+        resolved = null;
+      }
+      if (typeof resolved !== "string" || resolved === "") {
+        return this.deny(request, "credential_ref_unresolved");
+      }
+      credentialRef = resolved;
+      // Samme eier-binding for den løste refen som for den statiske (aldri svakere).
+      if (binding && !binding.internalRefs.has(credentialRef) && !isOwner) {
+        return this.deny(request, "credential_not_bound_to_identity");
+      }
+    }
+    if (!isCredentialRevocationSelfRecovery && (await this.controls?.isRevokedDurable(credentialRef))) {
       return this.deny(request, "credential_revoked");
     }
-    const credential = await this.secrets.get(definition.credential_ref);
+    const credential = await this.secrets.get(credentialRef);
     if (!credential) {
       return this.deny(request, "credential_unavailable");
     }
@@ -614,15 +679,18 @@ export class ToolGateway {
       }
     }
 
-    // SECURITY FIX #2 (D-68): DEN OPPRINNELIGE kalleren sin identitet/godkjenning -
-    // gitt uendret videre til transporten for ethvert nøstet gateway-kall den evt.
-    // selv gjør. ALDRI fabrikkert/eskalert her - kun videreformidlet.
-    const invocationContext: ToolInvocationContext = {
-      identity: request.identity,
-      ...(request.approval !== undefined ? { approval: request.approval } : {}),
-      ...(request.servingModel !== undefined ? { servingModel: request.servingModel } : {}),
-      ...(request.contentOrigin !== undefined ? { contentOrigin: request.contentOrigin } : {})
-    };
+    // Q-18 (D-30 host-akseptanse): tool_executions-dedupe finnes for å hindre
+    // dobbel SIDE-EFFEKT på C/D-mutasjoner (§21/§19 i BO-11) - A-klasse READs
+    // har ingen side-effekt å beskytte mot duplisering, og data kan ha endret
+    // seg mellom to spørringer (f.eks. to "hva står på kalenderen"-spørsmål i
+    // samme langtlevende voice-session). Dedupe på database-/session-nivå
+    // gjelder derfor KUN C/D. Beskyttelse mot at MODELLEN utfører samme
+    // semantiske kall flere ganger i ÉN modellrunde/samtaletur er uendret og
+    // håndheves separat (in-memory `executed`-cache i
+    // ModelGateway.completeWithTools, modules/model-gateway/src/model-gateway.ts).
+    const dedupeApplies = definition.capability_class !== "A";
+    const tenantId = request.identity.tenant_id;
+    const ledgerKey = dedupeApplies && request.idempotency_key ? request.idempotency_key : undefined;
 
     // v4.0 D-pipeline: for høyrisiko (C/D) med definert preflight leses
     // nå-tilstanden FØR handlingen (deterministisk preflight + recovery-
@@ -653,6 +721,22 @@ export class ToolGateway {
         ) {
           return this.deny(request, "preflight_target_not_found");
         }
+        // WP-F1: validering med SPESIFIKK årsak (beløp/valuta/konto/leverandør/tilstand/duplikat/nødbryter). En replay av en nøkkel som allerede har et
+        // endelig utfall i ledgeren (gjennomført/uverifisert/under utførelse) valideres IKKE på nytt: tilstanden har da flyttet seg ved handlingen selv, og
+        // ledger-porten under svarer med det lagrede utfallet (aldri en ny mutasjon) i stedet for et misvisende «ikke lenger gyldig».
+        if (definition.capability_class === "D" && definition.preflight_validator) {
+          if (beforeState === null) return this.deny(request, "preflight_target_not_found");
+          const replayStatus = ledgerKey !== undefined ? await this.peekLedgerStatus(tenantId, ledgerKey) : null;
+          if (replayStatus === null || replayStatus === "failed") {
+            let invalid: string | null;
+            try {
+              invalid = definition.preflight_validator(beforeState, request.parameters);
+            } catch {
+              invalid = "validator_error";
+            }
+            if (invalid !== null) return this.deny(request, `preflight_invalid:${sanitizeReasonCode(invalid)}`);
+          }
+        }
       } catch (err) {
         if (definition.capability_class === "D") {
           return this.deny(request, `preflight_failed:${(err as Error).message.slice(0, 60)}`);
@@ -669,19 +753,7 @@ export class ToolGateway {
       }
     }
 
-    // Q-18 (D-30 host-akseptanse): tool_executions-dedupe finnes for å hindre
-    // dobbel SIDE-EFFEKT på C/D-mutasjoner (§21/§19 i BO-11) - A-klasse READs
-    // har ingen side-effekt å beskytte mot duplisering, og data kan ha endret
-    // seg mellom to spørringer (f.eks. to "hva står på kalenderen"-spørsmål i
-    // samme langtlevende voice-session). Dedupe på database-/session-nivå
-    // gjelder derfor KUN C/D. Beskyttelse mot at MODELLEN utfører samme
-    // semantiske kall flere ganger i ÉN modellrunde/samtaletur er uendret og
-    // håndheves separat (in-memory `executed`-cache i
-    // ModelGateway.completeWithTools, modules/model-gateway/src/model-gateway.ts).
-    const dedupeApplies = definition.capability_class !== "A";
-    const tenantId = request.identity.tenant_id;
-    const ledgerKey = dedupeApplies && request.idempotency_key ? request.idempotency_key : undefined;
-    let classDOutcome: { outcome: "executed" | "unverified"; external_id: string | null } | undefined;
+    let classDOutcome: { outcome: "executed" | "unverified" | "unknown"; external_id: string | null } | undefined;
 
     // D-392 (JARVIS-004/022) fase 1 - RESERVER: raden committes FØR leverandørkallet, og ingen DB-forbindelse holdes åpen over nettverket.
     // Står raden igjen som 'reserved' (krasj/SIGKILL/audit-feil midt i kallet) er utfallet UKJENT og en retry utfører ALDRI en ny mutasjon.
@@ -752,7 +824,8 @@ export class ToolGateway {
       );
     } catch (err) {
       const message = (err as Error).message;
-      failure = { message, timedOut: message === "tool_timeout" };
+      // WP-F1: «utfall ukjent» = gateway-tidsavbrudd ELLER en transport som selv vet at leverandørkallet kan ha gått gjennom (`outcome_unknown:...`).
+      failure = { message, timedOut: isOutcomeUnknownMessage(message) };
       this.setHealth(request.tool_id,
         /401|403|auth/.test(message) ? "auth_failed" : /429|rate/.test(message) ? "rate_limited" : "unavailable",
         message.slice(0, 60));
@@ -827,7 +900,7 @@ export class ToolGateway {
             type: "tool.failed", decision: "DENY", reason: failure.message.slice(0, 120),
             tool_id: request.tool_id, action: request.action,
             capability_class: definition.capability_class,
-            payload: { credential_ref: definition.credential_ref, outcome_unknown: failure.timedOut }
+            payload: { credential_ref: credentialRef, outcome_unknown: failure.timedOut }
           });
           return;
         }
@@ -837,7 +910,7 @@ export class ToolGateway {
           tool_id: request.tool_id, action: request.action,
           capability_class: definition.capability_class,
           payload: {
-            credential_ref: definition.credential_ref, // referanse - aldri verdien
+            credential_ref: credentialRef, // referanse - aldri verdien
             external_id: external.external_id ?? null,
             scopes: definition.scopes,
             rollback: definition.rollback_procedure,
@@ -859,15 +932,18 @@ export class ToolGateway {
       console.error(JSON.stringify({ msg: "tool_ledger_finalize_failed", tool_id: request.tool_id, action: request.action, error: finalizeError }));
       this.setHealth(request.tool_id, "degraded", "ledger_finalize_failed");
       if (!failure) classDOutcome = { outcome: "unverified", external_id: external.external_id ?? null };
+      else if (failure.timedOut) classDOutcome = { outcome: "unknown", external_id: null };
       const unfinalized: ToolResult = failure
         ? { ok: false, reason: `tool_failed:${failure.message.slice(0, 80)}` }
         : { ok: false, reason: "postcondition_unverified:ledger_finalize_failed" };
-      if (classDGoverned && classDOutcome) return this.notifyClassD(request, definition, classDOutcome, unfinalized);
+      if (classDGoverned && classDOutcome) return this.notifyClassD(request, definition, classDOutcome, unfinalized, beforeState);
       return unfinalized;
     }
     let result: ToolResult;
     if (failure) {
       result = { ok: false, reason: `tool_failed:${failure.message.slice(0, 80)}` };
+      // WP-F1: et UKJENT utfall (tidsavbrudd/`outcome_unknown`) er ikke «ingenting skjedde» - eieren varsles umiddelbart out-of-band (aldri stille).
+      if (failure.timedOut) classDOutcome = { outcome: "unknown", external_id: null };
     } else {
       classDOutcome = { outcome: postconditionVerified ? "executed" : "unverified", external_id: external.external_id ?? null };
       if (!postconditionVerified) {
@@ -886,28 +962,45 @@ export class ToolGateway {
       }
     }
     if (classDGoverned && classDOutcome) {
-      return this.notifyClassD(request, definition, classDOutcome, result);
+      return this.notifyClassD(request, definition, classDOutcome, result, beforeState);
     }
     return result;
+  }
+
+  /** WP-F1: status på ledger-raden for en nøkkel (`null` = ingen rad). Kort, selvstendig transaksjon - brukes av replay-vakten rundt preflight-validatoren. */
+  private async peekLedgerStatus(tenantId: string, ledgerKey: string): Promise<string | null> {
+    return withTenantTransaction<string | null>(this.pool, tenantId, async (client) => {
+      const res = await client.query("SELECT status FROM tool_executions WHERE idempotency_key = $1", [ledgerKey]);
+      return (res.rows[0] as { status: string } | undefined)?.status ?? null;
+    });
   }
 
   /**
    * Del 3: umiddelbar out-of-band-varsling etter en klasse D-utførelse. Handlingen har da allerede skjedd, så en varslingsfeil kan ikke
    * rulle den tilbake - den gjøres i stedet SYNLIG: audit `tool.class_d_notification_failed` + `notified:false` på resultatet.
+   * WP-F1: også ved UKJENT utfall (`unknown`), og med et redigert sammendrag (`notification_summary`) av hva handlingen gjaldt.
    */
   private async notifyClassD(
-    request: { identity: IdentityContext; tool_id: string; action: string; idempotency_key?: string },
+    request: { identity: IdentityContext; tool_id: string; action: string; idempotency_key?: string; parameters?: Record<string, JsonValue> },
     definition: ToolDefinition,
-    outcome: { outcome: "executed" | "unverified"; external_id: string | null },
-    result: ToolResult
+    outcome: { outcome: "executed" | "unverified" | "unknown"; external_id: string | null },
+    result: ToolResult,
+    summaryState: JsonValue | null = null
   ): Promise<ToolResult> {
     let notified = false;
+    let summary: string | null = null;
+    try {
+      summary = definition.notification_summary?.(summaryState, request.parameters ?? {}) ?? null;
+    } catch {
+      summary = null; // et sammendrag er pynt - aldri en grunn til å miste selve varselet
+    }
     try {
       await this.classDNotifier!.notify({
         tenant_id: request.identity.tenant_id, person_id: request.identity.person_id,
         tool_id: request.tool_id, action: request.action, outcome: outcome.outcome,
         external_id: outcome.external_id, idempotency_key: request.idempotency_key ?? "",
-        recovery: definition.rollback_procedure, at: new Date().toISOString()
+        recovery: definition.rollback_procedure, at: new Date().toISOString(),
+        ...(summary !== null && summary.length > 0 ? { summary: summary.slice(0, 300) } : {})
       });
       notified = true;
     } catch (err) {
@@ -929,16 +1022,22 @@ export class ToolGateway {
   async reconcile(tenantId: string, limit = 50): Promise<Array<{
     idempotency_key: string; tool_id: string; action: string; external_id: string | null;
     reason: string | null; before_state: JsonValue | null; recovery: string;
+    /** WP-F1: `unverified` (utført men ikke bekreftet / utfall ukjent) eller `reserved` (krasj midt i kallet, eldre enn 5 min). */
+    status: string; executed_at: string; after_state: JsonValue | null;
   }>> {
     const rows = await withTenantTransaction(this.pool, tenantId, async (client) =>
       (await client.query(
-        `SELECT idempotency_key, tool_id, action, external_id, postcondition_reason, before_state
+        `SELECT idempotency_key, tool_id, action, external_id, postcondition_reason, before_state, after_state, status, executed_at
            FROM tool_executions WHERE status = 'unverified' OR (status = 'reserved' AND executed_at < now() - interval '5 minutes') ORDER BY executed_at DESC LIMIT $1`, [Math.min(Math.max(limit, 1), 200)]
-      )).rows as Array<{ idempotency_key: string; tool_id: string; action: string; external_id: string | null; postcondition_reason: string | null; before_state: JsonValue | null }>
+      )).rows as Array<{
+        idempotency_key: string; tool_id: string; action: string; external_id: string | null; postcondition_reason: string | null;
+        before_state: JsonValue | null; after_state: JsonValue | null; status: string; executed_at: Date
+      }>
     );
     return rows.map((r) => ({
       idempotency_key: r.idempotency_key, tool_id: r.tool_id, action: r.action, external_id: r.external_id,
-      reason: r.postcondition_reason, before_state: r.before_state,
+      reason: r.postcondition_reason, before_state: r.before_state, after_state: r.after_state,
+      status: r.status, executed_at: r.executed_at instanceof Date ? r.executed_at.toISOString() : String(r.executed_at),
       recovery: this.get(r.tool_id, r.action)?.rollback_procedure ?? "ukjent verktøy - manuell oppfølging"
     }));
   }
