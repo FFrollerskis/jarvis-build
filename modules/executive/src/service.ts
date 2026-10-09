@@ -2,6 +2,10 @@ import type { SloReport } from "./slo/index.ts";
 import { composeSloReport, SLO_CATALOG } from "./slo/index.ts";
 import { composeEvolutionReport, type EvolutionReport } from "./evolution/index.ts";
 import { composeAiMeshReport, type AiMeshReport } from "./ai-mesh/index.ts";
+import {
+  composeValueReport, deriveChangeFreeze, describeValueLoops, evaluateBuilderLoopReadiness, proposeOpsActions,
+  type ValueMeasurementSource, type ValueMeasurement, type ValueReport, type ValueRuntimeFacts, type ValueWindows
+} from "./value/index.ts";
 import { buildLimitationRegistry, composeSelfDiagnosis, type LimitationInput, type ObservationReader, type SelfDiagnosis } from "./self-model/index.ts";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import type { FinanceKillSwitch } from "@jarvis/finance";
@@ -95,6 +99,11 @@ export interface ExecutiveServiceOptions {
   evolution?: { report(): Promise<EvolutionReport> };
   /** WP-D4 (JARVIS-033/036/078): AI Mesh-status (injisert fra `apps/api`; kun lesing - gjør aldri et modellkall). */
   aiMesh?: { report(): Promise<AiMeshReport> };
+  /**
+   * WP-C4: Value Center. `source` måler bruk per verdiløkke (kun aggregater, lesing som app-rolle under RLS); `facts` gir kjøretidsfakta (flagg, EV-0-status, erklærte porter). Uten `value` er alle metrikker
+   * `not_measurable` (aldri 0) og løkke-statusene `unknown`.
+   */
+  value?: { source: ValueMeasurementSource; facts: () => Promise<ValueRuntimeFacts> | ValueRuntimeFacts };
 }
 
 export class ExecutiveService {
@@ -399,6 +408,67 @@ export class ExecutiveService {
     });
   }
 
+  /**
+   * WP-C4: Value Center - bruksmetrikk per verdiløkke (V1-V5) og kjernebruk, V3 Builder Loop-beredskap (sovende, `activation_decision` alltid false) og V5-forslag (kun når `JARVIS_V5_PROPOSALS_ENABLED`; ingenting utføres).
+   * RENT lesende, ingen nøstede `gateway.execute()`-kall. `tenantId` kommer fra den betrodde konteksten (transporten), aldri fra parametre. Hver del feiler for seg: en kilde som svikter gir `not_measurable`/`unknown`,
+   * aldri et påstått 0 og aldri en kastet feil.
+   */
+  async getValueReport(tenantId: string): Promise<ValueReport> {
+    const value = this.options.value;
+    const asOf = new Date().toISOString();
+    let windows: ValueWindows | null = null;
+    let measurements: ValueMeasurement[] = [];
+    let sourceError: string | undefined;
+    let facts: ValueRuntimeFacts | null = null;
+    if (value === undefined) {
+      sourceError = "ingen kilde koblet inn";
+    } else {
+      const [setResult, factsResult] = await Promise.allSettled([(async () => value.source.measure(tenantId))(), (async () => value.facts())()]);
+      if (setResult.status === "fulfilled") ({ windows, measurements } = setResult.value);
+      else sourceError = "målingen feilet";
+      if (factsResult.status === "fulfilled") facts = factsResult.value;
+    }
+
+    // V3-beredskap: change freeze avledes av hendelser (måling), kill switch (fakta) og SLO-rapporten. Alt som ikke kan fastslås gir `null` = ukjent = ikke oppfylt (fail-closed).
+    const incidents = measurements.find((m) => m.id === "ops.incidents_open_now");
+    const incidentsOpen = incidents?.state === "measured" && typeof incidents.now === "number" ? incidents.now : null;
+    const slo = await this.getSloReport().then((r) => r, () => null);
+    const observabilityOk = slo !== null && slo.slos.some((s) => s.status !== "UNKNOWN");
+    const killSwitch = facts?.kill_switch_active ?? null;
+    const freeze = incidentsOpen === null || killSwitch === null || slo === null
+      ? null
+      : deriveChangeFreeze({ incident_open: incidentsOpen > 0, observability_ok: observabilityOk, slo_breaches: slo.slos.filter((s) => s.status === "BREACH").length, kill_switch_active: killSwitch });
+    // V3 trenger bare GitHub-tilkoblingen; hele registeret (flere hvelv-oppslag per connector) leses KUN når V5-forslag er på og faktisk skal vurderes.
+    const proposalsEnabled = facts?.v5_proposals_enabled === true;
+    const connectors = await this.getConnectorStatus(proposalsEnabled ? undefined : ["github"]).then((r) => r.connectors, () => null);
+    const github = connectors?.find((c) => c.id === "github");
+    // Kunne ikke lese tilkoblingene -> ukjent (null), ikke «ikke konfigurert». Satt opp men aldri kalt (ingen helse) -> også ukjent.
+    const githubHealthy: boolean | null = connectors === null ? null : github === undefined || !github.configured ? false : github.health === null ? null : github.health.state === "healthy";
+    const builder = evaluateBuilderLoopReadiness({
+      constitution_verified: facts?.ev0.constitution_verified ?? null,
+      ledger_ok: facts?.ev0.ledger_ok ?? null,
+      change_freeze: freeze,
+      github_connector_healthy: githubHealthy,
+      declared_gates: facts?.declared_gates ?? []
+    });
+
+    // V5: forslag KUN når flagget er på. Selvdiagnosen leses bare da (den kjører flere lesere).
+    const waiting = measurements.find((m) => m.id === "ops.tasks_waiting_over_15m_now");
+    const diagnosis = proposalsEnabled ? await this.getSelfDiagnosis().then((d) => d, () => null) : null;
+    const ops = proposeOpsActions({
+      enabled: proposalsEnabled,
+      slo: slo === null ? null : slo.slos.map((s) => ({ id: s.id, status: s.status })),
+      observations: diagnosis === null ? null : Object.fromEntries(Object.entries(diagnosis.observations).map(([k, o]) => [k, { status: o.status, ...(o.data !== undefined ? { data: o.data } : {}) }])),
+      connectors: connectors === null ? null : connectors.map((c) => ({ id: c.id, configured: c.configured, test_method: c.test_method, health: c.health === null ? null : { state: c.health.state } })),
+      tasks_waiting_over_15m: waiting?.state === "measured" && typeof waiting.now === "number" ? waiting.now : null
+    });
+
+    return composeValueReport({
+      as_of: asOf, windows, measurements, ...(sourceError !== undefined ? { source_error_no: sourceError } : {}),
+      loops: describeValueLoops(facts), builder_loop: builder, ops_proposals: ops
+    });
+  }
+
   async getCapabilityStatus(servingModel?: { provider: string; model: string }): Promise<CapabilityStatus> {
     const byToolId = new Map<string, { actions: Set<string>; classes: Set<string>; refs: Set<string> }>();
     const surface = this.options.modelSurface;
@@ -459,7 +529,7 @@ export class ExecutiveService {
    * `@jarvis/tool-gateway`) kaller KUN `gateway.hasSecret()` (presence,
    * aldri verdi) og leser `gateway.health` direkte.
    */
-  async getConnectorStatus(): Promise<ConnectorStatusReport> {
-    return { connectors: await listConnectorStatus(this.gateway) };
+  async getConnectorStatus(onlyIds?: readonly string[]): Promise<ConnectorStatusReport> {
+    return { connectors: await listConnectorStatus(this.gateway, onlyIds) };
   }
 }
