@@ -15,8 +15,13 @@ import { financeToolIntent, type ToolDefinition, type ToolInvocationContext, typ
  * `TaskService.submit` (policy + kontraktsregler + audit), og modellen styrer kun tittel/prompt - aldri identitet, verktøyliste, budsjett eller flate.
  */
 
-/** Verktøy-id-ene en delegert jobb kan be om; `filterMeshToolsForJob` skjærer dem mot bakgrunnsflatens lese-tildeling (ingen skriving). */
-const DELEGATED_JOB_TOOLS = ["email", "calendar", "github", "memory", "executive"] as const;
+/**
+ * Verktøy-id-ene en delegert jobb kan be om; `filterMeshToolsForJob` skjærer dem mot bakgrunnsflatens lese-tildeling (ingen skriving).
+ * Gjennomgang av PR #316 (L-7): `executive` står her som den ENE lese-handlingen bakgrunnsflaten har (`executive.get_capability_status`), ikke som hele verktøyet. Jobber kjører som eieren, og `executive` har mutasjoner
+ * (`cancel_task`, kill switch, frys, tilbakekall, enhetstilbakekall …): en hel-verktøy-oppføring tillot dem på KONTRAKTSnivå (bare bakgrunnsflatens filter stoppet dem). `tool_id.action`-formen støttes av
+ * `jobContractAllows`. En drift-test låser at oppføringen er nøyaktig bakgrunnsflatens executive-tildeling.
+ */
+const DELEGATED_JOB_TOOLS = ["email", "calendar", "github", "memory", "executive.get_capability_status"] as const;
 /** Øre. Settes i kontraktens `model_budget_ore`, men INGEN kode leser den i dag (eksisterende forhold) - den reelle kostnadsgrensen er dagstaket (D-432/D-449), ikke dette tallet. */
 export const DELEGATED_JOB_BUDGET_ORE = 300;
 /** Maks samtidige delegerte bakgrunnsjobber per eier (eksportert: AI Center viser taket i parallell-delegasjonsoverheaden og må aldri ha en egen kopi). */
