@@ -18,6 +18,10 @@ import type {
  *  - Alle feil lukkes: ugyldig konfig/utilgjengelig runner/avvist token gir en jobbfeil med stabil kode, aldri en stille fallback.
  *
  * Jobben opprettes først ved `gitCheckout` (runneren trenger repoet for å klone); `exec` før det kaster.
+ *
+ * Tilgang til socketen er en filsystem-rettighet, ikke et hemmelig token alene: socketen er 0660 med gruppen `jarvis-job-clients`, og
+ * worker-containeren får KUN den gruppen via `group_add` (numerisk gid i `JARVIS_JOB_RUNNER_GID`, brukt av den valgfrie
+ * override-filen infra/job-runner/docker-compose.job-runner.yml). Tokenfilen er et andre, uavhengig lag.
  */
 
 const SOCKET_PATH = /^\/[A-Za-z0-9._/-]{1,100}$/;
