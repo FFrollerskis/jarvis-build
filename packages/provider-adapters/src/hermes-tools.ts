@@ -19,8 +19,9 @@ import { stripThinking } from "./local-llm.ts";
  * Er INGEN verktøy tilbudt i forespørselen, tolkes aldri tagger som kall: fullstendige blokker fjernes fra den synlige teksten og telles (`ignored_blocks`), aldri utført.
  * Tekst inni `<think>` ignoreres (et kall som bare står i resonneringen er ikke et kall).
  *
- * INJEKSJONSVERN: verktøyoutput (ubetrodd data) legges i `<tool_response>` som det maskinlesbare DATA-envelopet (Del 3, JARVIS-002), og protokoll-taggene (`<tool_call`, `</tool_response` m.fl.) i
- * all data vi selv setter i prompten skrives som `<...` (JSON-escape, tapsfritt) - data kan dermed ikke lukke blokken sin eller forfalske et kall. Modellen kan likevel selv gjenta tagger i et
+ * INJEKSJONSVERN: verktøyoutput (ubetrodd data) legges i `<tool_response>` som det maskinlesbare DATA-envelopet (Del 3, JARVIS-002), og protokoll-taggene (`<tool_call`, `</tool_response` m.fl.) og
+ * kontrolltokens (`<|im_start|>`, `<|im_end|>`, alle `<|…|>`, `<｜…｜>`, `<s>`/`</s>` m.fl.) i all data vi selv setter i prompten skrives som `<...` (JSON-escape, tapsfritt) - data kan dermed ikke lukke blokken sin,
+ * forfalske et kall eller åpne en ny rolle. Vanlig meldingstekst (system/bruker/assistent) røres ikke her. Modellen kan likevel selv gjenta tagger i et
  * svar; derfor er navnesjekken over det som faktisk avgjør, og gatewayen validerer skjema og utfører kun via trusted executor (Policy/bekreftelse).
  */
 export const HERMES_MAX_TOOL_CALLS = 16;
@@ -28,13 +29,18 @@ export const HERMES_MAX_BLOCK_CHARS = 100_000;
 
 const OPEN = "<tool_call>";
 const CLOSE = "</tool_call>";
-const PROTOCOL_TAG = /<(\/?(?:tool_call|tool_response|tools|think)\b)/gi;
+// L8 (gjennomgang av PR #315): protokollmerkene i Hermes-familiens eget format (verktøy, resonnering og JSON-skjema). Listen er ikke uttømmende - det er navnesjekken i parseren som avgjør - men dekker merkene modellkortene beskriver.
+const PROTOCOL_TAG = /<(\/?(?:tool_call|tool_response|tools|think|schema|scratch_pad|function_call|function_response)\b)/gi;
+// L8: KONTROLLTOKENS. Hermes bruker ChatML (`<|im_start|>`, `<|im_end|>`) og Llama 3-tokenizeren (`<|eot_id|>`, `<|start_header_id|>`, `<|begin_of_text|>` …); andre stakker bruker `<｜…｜>` (fullbredde-strek) eller SentencePiece
+// (`<s>`, `</s>`, `<unk>`, `<pad>`, `<eos>`, `<bos>`). En tokenizer som leser slike strenger i teksten som EKTE kontrolltokens lar ubetrodd verktøyoutput (som leveres som `user`-melding) avslutte en tur eller åpne en ny rolle
+// (`<|im_end|><|im_start|>system …`). Alle `<|`/`<｜`-former og SentencePiece-navnene skrives derfor om til `\u003c…` (gyldig JSON, tapsfritt) akkurat som protokolltaggene.
+const CONTROL_TOKEN = /<(?=[|\uFF5C]|\/?(?:s|unk|pad|eos|bos)>)/gi;
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
-/** Skriver protokoll-tagger i (allerede JSON-serialisert) tekst som `<...`: gyldig JSON, tapsfritt, men ikke lenger en tagg. */
+/** Skriver protokoll-tagger og kontrolltokens i (allerede JSON-serialisert) tekst som `<...`: gyldig JSON, tapsfritt, men ikke lenger en tagg eller et token. */
 export function neutralizeProtocolTags(json: string): string {
-  return json.replace(PROTOCOL_TAG, "\\u003c$1");
+  return json.replace(PROTOCOL_TAG, "\\u003c$1").replace(CONTROL_TOKEN, "\\u003c");
 }
 
 /** Systemmelding-blokken som tilbyr verktøyene (modellkortets format). Legges ETTER Jarvis' egen systemprompt. */
