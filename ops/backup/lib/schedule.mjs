@@ -175,6 +175,17 @@ export function findOrphanSets(outDir, nowMs, maxAgeMs = ORPHAN_MAX_AGE_MS) {
   return orphans;
 }
 
+/** `jarvis-backup-20261009T020000Z` -> epoch-ms (UTC); null hvis navnet ikke er en ekte dato (siffer-mønsteret slipper f.eks. `99999999T999999Z` gjennom). */
+export function setNameMs(name) {
+  const m = /^jarvis-backup-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(String(name));
+  if (m === null) return null;
+  const [y, mo, d, h, mi, se] = m.slice(1).map(Number);
+  const ms = Date.UTC(y, mo - 1, d, h, mi, se);
+  const back = new Date(ms);
+  // Date.UTC ruller over (måned 13, time 25): kun navn som overlever en rundtur er ekte tidspunkt.
+  return Number.isFinite(ms) && back.getUTCFullYear() === y && back.getUTCMonth() === mo - 1 && back.getUTCDate() === d && back.getUTCHours() === h && back.getUTCMinutes() === mi && back.getUTCSeconds() === se ? ms : null;
+}
+
 /**
  * Retensjon: komplette sett STRENGT eldre enn `retainDays`, men aldri de `keepNewest` nyeste (minst 1) og aldri de navngitte i `protect` (siste verifiserte og siste off-site-bekreftede sett:
  * de er det eneste beviset på at en restore faktisk virker / at kopien finnes utenfor huset). Settene er sortert eldste først; resultatet også.
@@ -722,6 +733,34 @@ export async function runTick(config, deps, env = process.env) {
       }
     }
 
+    /**
+     * Review F11: hvilket sett fra fjernmålet som verifiseres. «Leksikografisk siste navn» lot hvem som helst med skrivetilgang til målet bestemme det: et navn langt frem
+     * (`jarvis-backup-99999999T999999Z`) eller et plausibelt navn rett etter det nyeste sorterte sist og ble det «nyeste». Nå: (1) navn som ikke er en ekte dato eller ligger mer enn
+     * 5 min frem i tid (klokkeavvik/plantet) er aldri kandidater, og nevnes som advarsel; (2) finnes et lokalt komplett sett, SKAL fjernmålets nyeste (plausible) sett være nøyaktig det -
+     * ellers er off-site ikke à jour (eller målet har uventede sett) og ingenting verifiseres i stedet; (3) uten lokale sett (PC med privatnøkkelen) velges det nyeste plausible.
+     */
+    async function chooseOffsiteSet() {
+      const nowMs = now().getTime();
+      const plausible = [];
+      const implausible = [];
+      for (const n of (await deps.sink.list()).slice().sort()) {
+        const ms = setNameMs(n);
+        (ms !== null && ms <= nowMs + FUTURE_SKEW_MS ? plausible : implausible).push(n);
+      }
+      if (implausible.length > 0) log("warn", "offsite_set_name_implausible", { count: implausible.length, sets: implausible.slice(-3).join(","), note: "navn som ikke er en ekte dato eller ligger frem i tid er ikke kandidater for verifisering" });
+      const remoteNewest = plausible.at(-1);
+      const localNewest = readSets().at(-1);
+      if (localNewest === undefined) {
+        if (remoteNewest === undefined) throw new ScheduleError("verify_failed", "ingen sett i off-site-målet å verifisere");
+        return remoteNewest;
+      }
+      if (remoteNewest === localNewest.name) return remoteNewest;
+      if (!plausible.includes(localNewest.name)) {
+        throw new ScheduleError("verify_failed", `det nyeste lokale settet (${localNewest.name}) finnes ikke i off-site-målet - kopien er ikke à jour, så et eldre fjernt sett verifiseres ikke i stedet`);
+      }
+      throw new ScheduleError("verify_failed", `off-site-målet har nyere sett (${remoteNewest}) enn det nyeste lokale (${localNewest.name}) - uventet (annen vert, klokkeavvik eller et plantet navn): ingenting verifiseres`);
+    }
+
     async function verifyStage(st) {
       const v = st.restore_verify;
       v.last_attempt_at = iso(now());
@@ -740,9 +779,7 @@ export async function runTick(config, deps, env = process.env) {
         let setDir;
         if (config.verify.source === "offsite") {
           if (!sinkPresent) throw new ScheduleError("verify_config_invalid", "kilde off-site krever en off-site-adapter");
-          const names = await deps.sink.list();
-          const name = names.at(-1);
-          if (name === undefined) throw new ScheduleError("verify_failed", "ingen sett i off-site-målet å verifisere");
+          const name = await chooseOffsiteSet();
           mkdirSync(config.out, { recursive: true, mode: 0o700 });
           tmpRoot = mkdtempSync(join(config.out, ".verify-tmp-"));
           setDir = join(tmpRoot, name);

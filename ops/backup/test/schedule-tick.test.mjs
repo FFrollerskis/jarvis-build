@@ -6,8 +6,8 @@ import { ConfigError } from "../lib/env.mjs";
 import { OffsiteError, prepareSetForOffsite } from "../lib/offsite.mjs";
 import { loadScheduleConfig } from "../lib/config.mjs";
 import {
-  EXIT, ScheduleError, backupDecision, buildDefaultDeps, dropFutureTimestamps, findFutureSets, findHollowSets, findOrphanSets, listCompleteSets, offsiteDecision, retryDelayMs, runTick,
-  setFileProblems, setsToPrune, verifyDecision
+  EXIT, ScheduleError, backupDecision, buildDefaultDeps, dropFutureTimestamps, findFutureSets, findHollowSets, findOrphanSets, listCompleteSets, offsiteDecision, retryDelayMs,
+  runTick, setFileProblems, setNameMs, setsToPrune, verifyDecision
 } from "../lib/schedule.mjs";
 import { emptyStatus, readStatusFile } from "../lib/state.mjs";
 import { RECIPIENT, cleanupTempDirs, fakeEncryptManifest, hoursAgo, makeSet, tempDir } from "./helpers.mjs";
@@ -1071,6 +1071,85 @@ describe("WP-C2 tick (review F8): «komplett sett» betyr at filene manifestet l
     const r = await h.tick();
     expect(r.actions).toEqual(["backup"]);
     expect(r.decisions.backup).toMatchObject({ due: true, reason: "interval_elapsed" });
+  });
+});
+
+describe("WP-C2 tick (review F11): kilde off-site verifiserer settet som hører til det lokale nyeste - ikke «siste navn» fra et mål andre kan skrive til", () => {
+  const MIN = 60_000;
+  /** PC-en med privatnøkkelen (kun verify-rollen) eller NAS-en (har lokale sett): `local` bestemmer om det finnes et lokalt komplett sett. */
+  const setup = (remote, { local = true } = {}) => {
+    const sink = fakeSink({ remote });
+    const h = harness({ identity: true, sink, env: { JARVIS_BACKUP_OFFSITE_LOCAL_DIR: "/mnt/usb/jarvis" }, flags: { roles: "verify", "verify-source": "offsite" } });
+    const set = local ? makeSet(h.out, hoursAgo(T0, 3)) : null;
+    return { sink, h, set };
+  };
+  const stamp = (ms) => `jarvis-backup-${new Date(ms).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z")}`;
+
+  it("setNameMs: kun navn som er en ekte dato gir et tidspunkt (siffermønsteret alene slipper `99999999T999999Z` og måned 00 gjennom)", () => {
+    expect(setNameMs("jarvis-backup-20261009T020000Z")).toBe(Date.UTC(2026, 9, 9, 2, 0, 0));
+    expect(setNameMs("jarvis-backup-20240229T235959Z")).toBe(Date.UTC(2024, 1, 29, 23, 59, 59));
+    for (const bad of ["jarvis-backup-99999999T999999Z", "jarvis-backup-20260000T000000Z", "jarvis-backup-20261301T000000Z", "jarvis-backup-20260100T000000Z", "jarvis-backup-20260229T000000Z",
+      "jarvis-backup-20261009T250000Z", "jarvis-backup-20261009T006000Z", "jarvis-backup-20261009T000060Z", "jarvis-backup-20261009", "annet", "", undefined]) {
+      expect(setNameMs(bad), String(bad)).toBeNull();
+    }
+  });
+
+  it("plantede navn (langt frem, umulig dato, ugyldig måned) er aldri kandidater: settet som hører til det lokale nyeste hentes og verifiseres, og navnene nevnes som advarsel", async () => {
+    const planted = ["jarvis-backup-20991231T235959Z", "jarvis-backup-99999999T999999Z", "jarvis-backup-20261340T000000Z", stamp(T0.getTime() + 20 * MIN)];
+    const { sink, h, set } = setup(["jarvis-backup-20261001T020000Z", ...planted]);
+    // fjernmålet har det lokale nyeste settet også
+    sink.state.remote.add(set.name);
+    const r = await h.tick();
+    expect(r).toMatchObject({ exitCode: EXIT.OK, actions: ["verify"] });
+    expect(sink.state.fetches).toEqual([set.name]);
+    expect(h.status().restore_verify).toMatchObject({ state: "ok", last_set: set.name, last_success_set: set.name, source: "offsite" });
+    expect(h.logs).toContainEqual(expect.objectContaining({ level: "warn", event: "offsite_set_name_implausible", count: 4 }));
+  });
+
+  it("et PLAUSIBELT, nyere navn rett etter det nyeste (alle 'ser' ekte ut) stjeler ikke verifiseringen: den feiler høylytt og ingenting hentes", async () => {
+    const { sink, h, set } = setup([]);
+    const planted = stamp(T0.getTime() - 1 * MIN); // etter det lokale nyeste (-3 t), før «nå»: lexikografisk SIST, men ikke vårt
+    sink.state.remote.add(set.name);
+    sink.state.remote.add(planted);
+    const r = await h.tick();
+    expect(r).toMatchObject({ exitCode: EXIT.VERIFY_FAILED, failed: ["verify"] });
+    expect(sink.state.fetches).toEqual([]);
+    expect(h.verifyCalls).toEqual([]);
+    expect(h.status().restore_verify).toMatchObject({ state: "failed", last_error_code: "verify_failed" });
+    expect(h.status().restore_verify.last_error).toContain(`off-site-målet har nyere sett (${planted}) enn det nyeste lokale (${set.name})`);
+    expect(readdirSync(h.out).filter((n) => n.startsWith(".verify-tmp-"))).toEqual([]);
+  });
+
+  it("det nyeste lokale settet finnes ikke off-site (kopien er etter): verifiseres IKKE et eldre fjernt sett i stedet - feil med årsaken", async () => {
+    const { sink, h, set } = setup(["jarvis-backup-20261001T020000Z", "jarvis-backup-20261005T020000Z"]);
+    const r = await h.tick();
+    expect(r).toMatchObject({ exitCode: EXIT.VERIFY_FAILED, failed: ["verify"] });
+    expect(sink.state.fetches).toEqual([]);
+    expect(h.status().restore_verify.last_error).toContain(`det nyeste lokale settet (${set.name}) finnes ikke i off-site-målet`);
+    expect(h.status().restore_verify.last_success_at).toBeNull();
+  });
+
+  it("uten lokale sett (PC-en): det nyeste PLAUSIBLE fjerne settet velges - fremtidsnavn hoppes over; bare implausible navn gir «ingen sett»", async () => {
+    const a = setup(["jarvis-backup-20261001T020000Z", "jarvis-backup-20261008T020000Z", "jarvis-backup-20991231T235959Z", "jarvis-backup-99999999T999999Z"], { local: false });
+    expect((await a.h.tick()).exitCode).toBe(EXIT.OK);
+    expect(a.sink.state.fetches).toEqual(["jarvis-backup-20261008T020000Z"]);
+
+    const b = setup(["jarvis-backup-20260000T000000Z", "jarvis-backup-20991231T235959Z", "jarvis-backup-99999999T999999Z"], { local: false });
+    expect(await b.h.tick()).toMatchObject({ exitCode: EXIT.VERIFY_FAILED, failed: ["verify"] });
+    expect(b.sink.state.fetches).toEqual([]);
+    expect(b.h.status().restore_verify.last_error).toContain("ingen sett i off-site-målet å verifisere");
+
+    const empty = setup([], { local: false });
+    expect(await empty.h.tick()).toMatchObject({ exitCode: EXIT.VERIFY_FAILED });
+    expect(empty.h.status().restore_verify.last_error).toContain("ingen sett i off-site-målet å verifisere");
+  });
+
+  it("et lokalt sett datert i FREMTIDEN er ikke «det lokale nyeste» (klokkeavvik): da gjelder PC-regelen", async () => {
+    const { sink, h } = setup(["jarvis-backup-20261008T020000Z"], { local: false });
+    makeSet(h.out, new Date(T0.getTime() + 3 * D));
+    const r = await h.tick();
+    expect(r.exitCode).toBe(EXIT.OK);
+    expect(sink.state.fetches).toEqual(["jarvis-backup-20261008T020000Z"]);
   });
 });
 
