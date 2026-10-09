@@ -88,7 +88,7 @@ import {
   DomainPauseRegistry, SituationEngine, SituationsTransport, assertSituationSweepHealthy, runSituationSweepForAllTenants,
   situationsToolDefinitions
 } from "@jarvis/situations";
-import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions, renderSelfDiagnosisNo, type SelfDiagnosis } from "@jarvis/executive";
+import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions, parseFollowUpPushPolicy, renderSelfDiagnosisNo, type SelfDiagnosis } from "@jarvis/executive";
 import { GovernanceService, GovernanceTransport, governanceToolDefinitions } from "@jarvis/governance";
 import { OwnerControlsService, OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
 import {
@@ -114,6 +114,9 @@ import { ConversationEngine } from "./conversation.ts";
 import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
 import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
+import { startFollowUpPush } from "./follow-up-push.ts";
+import { buildValueRuntimeFacts } from "./value-facts.ts";
+import { createValueMeasurementSource } from "./value-source.ts";
 import { ChatJobs, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
@@ -173,6 +176,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // EV-2 (D-417): SLO/drift/dataskvalitet fra eksisterende observerbarhet (cost_events, tool_executions, tasks, memory_items) - ingen parallell telemetri.
   const sloReports = createSloReportProvider(pool, owner.tenant_id);
   Object.assign(selfModelReaders, buildSloReaders(sloReports));
+  // WP-C4 (UA0-RUNRATE): Value Center - bruk per verdiløkke fra eksisterende tabeller (kun aggregater/tidsstempler, lesing som app-rolle under RLS). Den daglige løperens helse (global tabell) vises kun for eierens tenant.
+  const valueSource = createValueMeasurementSource(pool, { schedulerTenantId: owner.tenant_id });
+  // WP-C4 V2: planlagt oppfølgingsvarsel. AV som standard (kun `JARVIS_V2_PUSH_ENABLED=true` slår på); kanalen (Telegram) avgjøres lenger ned når token/chat er lest.
+  const v2PushPolicy = parseFollowUpPushPolicy(process.env);
+  let telegramDeliveryConfigured = false;
   // D-174 (B2): hoistet hit (tidligere konstruert lenger nede, kun for
   // `enrollmentService`) - `OwnerControlsService` sitt nye, eier-vendte
   // `revoke_device` (se under, `additionalTools`) trenger DENNE SAMME
@@ -928,7 +936,15 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
             allModelCapabilities: ["text", "reasoning", "vision", "tool_calling", "structured_output", "streaming"]
           }
         },
-        slo: { report: sloReports }
+        slo: { report: sloReports },
+        // WP-C4: Value Center - kilde (aggregater under RLS) + kjøretidsfakta (flagg, EV-0, kill switch, erklærte porter). Ingen innhold, ingen skriving; V3/V5 er sovende og kan aldri aktiveres herfra.
+        value: {
+          source: valueSource,
+          facts: () => buildValueRuntimeFacts({
+            env: process.env, push: v2PushPolicy, deliveryConfigured: () => telegramDeliveryConfigured, ev0Status: () => getLastEv0BootStatus(),
+            killSwitchActive: async () => (await selfModelControls.getControlState()).kill_switch.active
+          })
+        }
       }))),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten
@@ -1081,6 +1097,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     sloReport: {
       async run(identity) {
         const result = await toolGateway.execute({ identity, tool_id: "executive", action: "get_slo_report", parameters: {} });
+        const text = result.ok ? (result.data as { summary_no?: unknown } | undefined)?.summary_no : undefined;
+        return typeof text === "string" ? text : null;
+      }
+    },
+    // WP-C4: hurtigbanens «hva har du hjulpet meg med» går gjennom Tool Gateway (Policy + revisjon) - samme verktøy modellen kan kalle (`executive.get_value_report`, klasse A).
+    valueReport: {
+      async run(identity) {
+        const result = await toolGateway.execute({ identity, tool_id: "executive", action: "get_value_report", parameters: {} });
         const text = result.ok ? (result.data as { summary_no?: unknown } | undefined)?.summary_no : undefined;
         return typeof text === "string" ? text : null;
       }
@@ -1286,6 +1310,7 @@ porter: se docs/RUNTIME_GATES.md`;
   // token limt inn i dashbordet var usynlig for polleren (split-brain mot `telegram.notify`-verktøyet som allerede brukte kjeden).
   const telegramToken = (await readSecretProvider.get("JARVIS_TELEGRAM_TOKEN")) ?? undefined;
   const telegramChatId = (await readSecretProvider.get("JARVIS_TELEGRAM_CHAT_ID")) ?? undefined;
+  telegramDeliveryConfigured = Boolean(telegramToken && telegramChatId);
   if (telegramToken && telegramChatId) {
     // D-125 (UA-7, FEMTE slice): den betrodde server-side eier-autoriteten for
     // inngående Telegram. HVER verdi kommer fra prosessens egen konfigurasjon
@@ -1371,7 +1396,15 @@ porter: se docs/RUNTIME_GATES.md`;
         throw new Error("daily-brief: Telegram-levering feilet");
       }
     });
+    // WP-C4 V2 (DORMANT): planlagt oppfølgingsvarsel til eierens EGEN Telegram via den eksisterende `telegram.notify` (Policy Gateway, kill switch, frys, revisjon, idempotens). Startes KUN når `JARVIS_V2_PUSH_ENABLED=true`;
+    // rolig tid, døgngrense, minsteavstand og dedupe håndheves av ledgeren (se `follow-up-push.ts`). Uten flagget opprettes verken tidtaker eller lesing.
+    if (v2PushPolicy.enabled) {
+      startFollowUpPush({ pool, graph: conversationGraphService, gateway: toolGateway, ownerIdentity, policy: v2PushPolicy });
+    } else {
+      console.log(JSON.stringify({ msg: "v2_push_disabled" }));
+    }
   }
+  if (v2PushPolicy.enabled && !telegramDeliveryConfigured) console.warn(JSON.stringify({ msg: "v2_push_enabled_but_no_channel", detail: "JARVIS_V2_PUSH_ENABLED=true, men Telegram (token + chat) er ikke konfigurert - ingen varsler sendes" }));
   // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2) §12:
   // periodisk intern utgifts-synk (marketing/model_cost) + matching/
   // avstemming + deterministisk avviksdeteksjon - SAMME reboot-durable

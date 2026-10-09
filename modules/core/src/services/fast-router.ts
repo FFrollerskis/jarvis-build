@@ -11,6 +11,8 @@ export type FastIntent =
   | { kind: "slo_report" }
   /** D-424: «hva koster du» - run-rate fra cost_events via Policy Gateway (aldri LLM). */
   | { kind: "cost_report" }
+  /** WP-C4: «hva har du hjulpet meg med»/«verdi»/«bruk» - Value Center (bruk per verdiløkke, kun tall) via Policy Gateway (aldri LLM). */
+  | { kind: "value_report" }
   /** D-424: «… i bakgrunnen» - eierens egen melding legges som bakgrunnsjobb via Policy Gateway; en svak lokal modell skal ikke måtte velge verktøy. */
   | { kind: "delegate_background"; prompt: string }
   | { kind: "task_status"; task_id: string }
@@ -33,6 +35,11 @@ const PATTERNS: Array<[RegExp, (m: RegExpMatchArray) => FastIntent]> = [
   [
     /^(?:hva koster (?:du|det)(?: meg)?(?: nå| i måneden| per måned| å kjøre deg)?|hvor mye (?:har du|har jeg|har det) (?:kostet|brukt)(?: .*)?|run-?rate|kostnad(?:er)?|api-?regning(?:en)?|regningen)\s*[?!.]*\s*$/i,
     () => ({ kind: "cost_report" })
+  ],
+  [
+    // WP-C4: hele meldingen må være spørsmålet (ankret) - setninger som bare nevner «verdi»/«bruk» («verdi av bilen min», «bruk av tid») går til den intelligente banen.
+    /^(?:hva har du (?:hjulpet meg med|gjort for meg|levert)(?: (?:hittil|så langt|i det siste|denne uken|siste uke|i uka|i måneden|siste måned))?|hvor mye bruker (?:jeg )?deg|hvor nyttig er du|verdi(?:-?rapport|-?senter)?|value ?center|bruk(?:s(?:statistikk|metrikk))?|min bruk)\s*[?!.]*\s*$/i,
+    () => ({ kind: "value_report" })
   ],
   [/^jobbstatus\s+(\S+)\s*$/i, (m) => ({ kind: "task_status", task_id: m[1] as string })],
   [/^opprett\s+jobb:?\s+(.+)$/i, (m) => ({ kind: "create_task", goal: (m[1] as string).trim() })],

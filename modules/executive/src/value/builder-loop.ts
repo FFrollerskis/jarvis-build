@@ -74,7 +74,7 @@ export interface FreezeSignals {
 
 /**
  * Change freeze-reglene (ustabilt system: hendelse, manglende observerbarhet, brutt tjenestemål eller kill switch). Samme fire regler som `changeFreeze()` i EV-8 (`@jarvis/self-modification`); duplisert fordi
- * `@jarvis/executive` ikke avhenger av den pakken, og låst mot den av `apps/api/test/wpc4-value-wiring.test.ts` (likhet for alle 16 kombinasjoner) så de to aldri kan drive fra hverandre.
+ * `@jarvis/executive` ikke avhenger av den pakken, og låst mot den av `apps/api/test/wpc4-value-wiring.test.ts` (likhet over alle kombinasjoner av de fire signalene) så de to aldri kan drive fra hverandre.
  */
 export function deriveChangeFreeze(s: FreezeSignals): { frozen: boolean; reasons: string[] } {
   const reasons: string[] = [];

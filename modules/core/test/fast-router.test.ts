@@ -71,6 +71,37 @@ describe("fastRoute: cost_report og delegate_background (D-424)", () => {
   });
 });
 
+// WP-C4: «hva har du hjulpet meg med» går til Value Center (kun tall fra tabellene, aldri LLM-gjetting). Hele meldingen må være spørsmålet (ankret).
+describe("fastRoute: value_report (WP-C4)", () => {
+  it("gjenkjenner verdi- og bruksspørsmål", () => {
+    for (const text of [
+      "hva har du hjulpet meg med", "Hva har du hjulpet meg med?", "hva har du hjulpet meg med denne uken", "hva har du gjort for meg hittil", "hva har du levert så langt?",
+      "verdi", "Verdi?", "verdirapport", "verdi-rapport", "verdisenter", "value center", "valuecenter", "bruk", "Bruk!", "bruksstatistikk", "bruksmetrikk", "min bruk", "hvor mye bruker jeg deg", "hvor nyttig er du"
+    ]) {
+      expect(fastRoute(text), text).toEqual({ kind: "value_report" });
+    }
+  });
+  it("er presis: setninger som bare nevner ordene går IKKE hit (de går til den intelligente banen)", () => {
+    for (const text of [
+      "hva er verdien av huset mitt", "verdi av bilen min", "verdien", "bruk av tid i uka", "bruk Google til å finne en restaurant", "hva er bruk av komma", "min bruk av strøm",
+      "hva har du hjulpet Ola med", "hva har du gjort for meg i går kveld på kalenderen", "hvor mye bruker bilen", "hvor nyttig er en sparkesykkel", "value center for Acme AS", "hei"
+    ]) {
+      expect(fastRoute(text)?.kind, text).not.toBe("value_report");
+    }
+  });
+  it("de eldre intensjonene er uberørt av den nye (kostnad, ytelse, diagnose, hjelp)", () => {
+    expect(fastRoute("hva koster du")).toEqual({ kind: "cost_report" });
+    expect(fastRoute("hvor mye har jeg brukt")).toEqual({ kind: "cost_report" });
+    expect(fastRoute("hvor bra yter du")).toEqual({ kind: "slo_report" });
+    expect(fastRoute("hva er galt med deg")).toEqual({ kind: "self_diagnosis" });
+    expect(fastRoute("hjelp")).toEqual({ kind: "help" });
+    expect(fastRoute("status")).toEqual({ kind: "system_status" });
+  });
+  it("hurtigbanen leser KUN rapporten: ingen parametre eller fritekst bæres med videre", () => {
+    expect(Object.keys(fastRoute("hva har du hjulpet meg med") ?? {})).toEqual(["kind"]);
+  });
+});
+
 // D-449 (Q-50, gjennomgang nr. 4): hurtigbanen vurderes som om eieren hadde skrevet forespørselen UTEN delegeringsfrasen; ALLE rimelige fjerninger returneres og den strengeste vinner.
 describe("delegationRequestVariants (D-449)", () => {
   it("returnerer meldingen slik den står og hver fjerning av frasen/prefikset - uten duplikater og uten tomme varianter", () => {
