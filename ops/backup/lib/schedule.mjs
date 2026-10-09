@@ -461,7 +461,8 @@ export async function runTick(config, deps, env = process.env) {
     const newest = sets.at(-1) ?? null;
     const overdue = config.roles.has("backup") && !(backupRan && !failed.includes("backup")) && (newest === null || now().getTime() - newest.createdMs > OVERDUE_FACTOR * config.intervalMs);
     if (actions.length > 0) {
-      if (failed.length === 0) await heartbeat.success();
+      // Review F3: `success` bare når tikket også ender med exit 0. En forfalt backup (exit 3, f.eks. i backoff mens off-site/verify likevel kjørte) er IKKE suksess - monitoren skal få /fail.
+      if (failed.length === 0 && !overdue) await heartbeat.success();
       else await heartbeat.fail();
       recordHeartbeat();
     }

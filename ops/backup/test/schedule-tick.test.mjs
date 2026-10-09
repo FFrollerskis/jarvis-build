@@ -281,6 +281,26 @@ describe("WP-C2 tick: planlagt backup (falsk backup/klokke, ekte filsystem)", ()
     expect((await h.tick()).exitCode).toBe(EXIT.OK);
   });
 
+  it("review F3 (mutant H2): et tikk som gjør noe men ender FORFALT (exit 3) sender /fail til monitoren - aldri `success`", async () => {
+    const h = harness({ identity: true });
+    makeSet(h.out, hoursAgo(T0, 40)); // eldre enn 1,5 × intervall
+    const st = emptyStatus();
+    st.backup.retry_after = new Date(T0.getTime() + H).toISOString(); // backup i backoff: tikket tar den ikke
+    st.backup.consecutive_failures = 1;
+    writeFileSync(h.config.statusFile, JSON.stringify(st));
+    const r = await h.tick();
+    expect(r).toMatchObject({ exitCode: EXIT.OVERDUE, outcome: "overdue", actions: ["verify"], failed: [] }); // verify kjørte og lyktes - men backupen er forfalt
+    expect(h.verifyCalls).toHaveLength(1);
+    expect(h.hb).toEqual(["start", "fail"]);
+    expect(h.status().heartbeat).toMatchObject({ configured: true, last_ping_kind: "fail" });
+
+    // motstykket: samme tikk uten forfall (backupen er fersk) sender `success`
+    const fresh = harness({ identity: true });
+    makeSet(fresh.out, hoursAgo(T0, 2));
+    expect(await fresh.tick()).toMatchObject({ exitCode: EXIT.OK, actions: ["verify"] });
+    expect(fresh.hb).toEqual(["start", "success"]);
+  });
+
   it("lås: et levende tikk blokkerer (exit 0, ingenting kjører, ingen status skrevet); en lås fra en død prosess tas over", async () => {
     const h = harness();
     const lockFile = h.config.lockFile;
