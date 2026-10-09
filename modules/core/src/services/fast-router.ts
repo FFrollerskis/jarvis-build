@@ -54,6 +54,23 @@ const PATTERNS: Array<[RegExp, (m: RegExpMatchArray) => FastIntent]> = [
   [/^(?:skru|slå) (på|av) lyset(?: her)?\s*$/i, (m) => ({ kind: "home_light", on: (m[1] as string).toLowerCase() === "på" })]
 ];
 
+export const FAST_ROUTE_PATTERNS: readonly RegExp[] = PATTERNS.map(([pattern]) => pattern);
+
+/**
+ * L4 (gjennomgang av PR #312): hurtigbanen kjører SYNKRONT på hendelsesløkken for hver innkommende melding. Mønstre som ender i `\s*[?!.]*\s*$` (to tilstøtende kvantorer over mellomrom) og `\s+(.+)$` bruker O(n²) tid når
+ * meldingen har et langt mellomromsløp og så et tegn som ikke passer: «verdi» + 32 000 mellomrom + «x» blokkerte hendelsesløkken i 2,5 s (også de eldre mønstrene: `kostnad` 1,9 s). Forsvaret er todelt og gjelder HELE klassen (også
+ * mønstre som legges til senere), ikke bare det ene mønsteret:
+ *   1. en melding på over 2 000 tegn er aldri en hurtigkommando (ingen kjent kommando er så lang) og går til den intelligente banen uten at noe regulært uttrykk kjøres,
+ *   2. før matching kollapses hvert mellomromsløp til ÉN tegn (`" "`, eller `"\n"` når løpet inneholder et linjeskift, slik at ankrene `.`/`$` oppfører seg som før) - ingen kvantor kan da få mer enn ett mellomrom å jobbe med.
+ * Normale meldinger oppfører seg som før; eneste forskjell er at flere mellomrom/tabulatorer mellom ordene i en kommando nå også gjenkjennes («hva  er galt med deg»).
+ */
+export const FAST_ROUTE_MAX_CHARS = 2_000;
+
+/** Hvert mellomromsløp (inkl. tabulator, NBSP og Unicode-mellomrom) blir ETT tegn: `"\n"` hvis løpet inneholder et linjeskift, ellers `" "`. Lineær tid. */
+function collapseWhitespaceRuns(text: string): string {
+  return text.replace(/\s+/g, (run) => (/[\n\r\u2028\u2029]/.test(run) ? "\n" : " "));
+}
+
 /**
  * D-424: eksplisitt ønske om bakgrunnsjobb. Spørsmål OM bakgrunnen («hvorfor kjører den i bakgrunnen?») er ikke en bestilling.
  * Frasen og prefikset er definert ÉN gang (kildestrenger) og brukes både til å gjenkjenne bestillingen og til å fjerne den (`delegationRequestVariants`), så de to aldri kan komme ut av takt.
@@ -90,9 +107,12 @@ export function delegationRequestVariants(input: string): string[] {
 
 /** null = ingen kjent kommando; gå til intelligent bane (LLM). */
 export function fastRoute(input: string): FastIntent | null {
+  // L4: lengdetak og mellomrom-normalisering FØR noe regulært uttrykk kjøres (se `FAST_ROUTE_MAX_CHARS`). Delegeringen leser den opprinnelige teksten (D-449: eierens egne ord, ordrett).
+  if (typeof input !== "string" || input.length > FAST_ROUTE_MAX_CHARS) return null;
   const text = input.trim();
+  const flat = collapseWhitespaceRuns(text);
   for (const [pattern, build] of PATTERNS) {
-    const match = text.match(pattern);
+    const match = flat.match(pattern);
     if (match) {
       return build(match);
     }

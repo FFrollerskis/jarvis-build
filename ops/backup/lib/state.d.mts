@@ -4,9 +4,9 @@ export interface BackupStatusFile {
   updated_at: string | null;
   last_tick_at: string | null;
   backup: { last_attempt_at: string | null; last_success_at: string | null; last_set: string | null; duration_s: number | null; size_bytes: number | null; consecutive_failures: number; retry_after: string | null; last_error_code: string | null; last_error: string | null };
-  retention: { last_pruned_at: string | null; last_pruned_count: number; last_skipped_reason: string | null };
+  retention: { last_pruned_at: string | null; last_pruned_count: number; last_skipped_reason: string | null; hold_until: string | null };
   offsite: { state: string; adapter: string | null; last_attempt_at: string | null; last_success_at: string | null; last_verified_at: string | null; last_set: string | null; verification: string | null; consecutive_failures: number; retry_after: string | null; last_error_code: string | null; last_error: string | null };
-  restore_verify: { state: string; last_attempt_at: string | null; last_success_at: string | null; last_set: string | null; duration_s: number | null; fetch_duration_s: number | null; tables: number | null; rows: number | null; source: string | null; reported_by: string | null; consecutive_failures: number; retry_after: string | null; last_error_code: string | null; last_error: string | null };
+  restore_verify: { state: string; last_attempt_at: string | null; last_success_at: string | null; last_set: string | null; last_success_set: string | null; duration_s: number | null; fetch_duration_s: number | null; tables: number | null; rows: number | null; source: string | null; reported_by: string | null; consecutive_failures: number; retry_after: string | null; last_error_code: string | null; last_error: string | null };
   heartbeat: { configured: boolean; last_ping_at: string | null; last_ping_kind: string | null; last_ping_ok: boolean | null; last_error_code: string | null };
 }
 export declare const STATUS_SCHEMA: number;

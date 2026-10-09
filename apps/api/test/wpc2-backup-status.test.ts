@@ -1,11 +1,13 @@
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { closeSync, constants as fsConstants, mkdirSync, mkdtempSync, openSync, symlinkSync, writeFileSync } from "node:fs";
+import { open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { composeSelfDiagnosis } from "@jarvis/executive";
 import { buildExport, emptyStatus, type BackupStatusFile } from "../../../ops/backup/lib/state.mjs";
 import {
-  BACKUP_STATUS_MAX_BYTES, backupMaintenanceLastRun, backupStatusSourceFromEnv, observeBackupStatus, parseBackupStatus, readBackupStatusFile, type BackupStatusRead
+  BACKUP_STATUS_MAX_BYTES, STATUS_OPEN_FLAGS, backupMaintenanceLastRun, backupStatusSourceFromEnv, observeBackupStatus, parseBackupStatus, readBackupStatusFile, type BackupStatusRead
 } from "../src/backup-status.ts";
 import { buildSelfModelReaders } from "../src/self-model-readers.ts";
 
@@ -137,13 +139,55 @@ describe("WP-C2 backup-leser: tolkning av statusen (alder over terskel = ærlig 
     expect(o.detail).toContain("statusfilen er 2,1 d gammel - backup-tikket (cron/systemd) ser ikke ut til å kjøre");
   });
 
-  it("klokkeavvik (fil/sett datert i fremtiden): aldri negative aldre eller en falsk «frisk» uten forklaring - alderen vises som 0 og avviket nevnes", () => {
-    const o = observe(exported(() => undefined, { name: "jarvis-backup-20261009T050000Z", createdAt: iso(NOW.getTime() + 3 * H), sizeBytes: 1 }, new Date(NOW.getTime() + 5 * H)));
-    expect(o.detail).toContain("siste backup for 0,0 t siden");
-    expect(o.detail).not.toMatch(/-\d/);
-    expect(o.detail).toContain("siste sett er datert i fremtiden (klokkeavvik)");
-    expect(o.detail).toContain("statusfilen er datert i fremtiden");
-    expect(o.data).toMatchObject({ backup_age_hours: 0, status_age_hours: 0 });
+  it("review F14: klokkeavvik innenfor 5 min er jitter (alder 0, OK) - men et tidspunkt FREM i tid utover det er DEGRADED med årsaken, aldri en falsk «0 t siden»", () => {
+    const MIN = 60_000;
+    // jitter: filen skrevet 4 min «frem» og siste sett 3 min frem er helt greit
+    const jitter = observe(exported(() => undefined, { name: "jarvis-backup-20261009T030300Z", createdAt: iso(NOW.getTime() + 3 * MIN), sizeBytes: 1 }, new Date(NOW.getTime() + 4 * MIN)));
+    expect(jitter.status).toBe("OK");
+    expect(jitter.detail).toContain("siste backup for 0,0 t siden");
+    expect(jitter.data).toMatchObject({ backup_age_hours: 0, status_age_hours: 0 });
+    // 6 min frem er over toleransen
+    const six = observe(exported(() => undefined, undefined, new Date(NOW.getTime() + 6 * MIN)));
+    expect(six.status).toBe("DEGRADED");
+    expect(six.detail).toContain("statusfilen er datert 0,1 t frem i tid");
+
+    // statusfilen +5 t: DEGRADED (før F14: OK med bare en merknad, alder klampet til 0)
+    const file = observe(exported(() => undefined, undefined, new Date(NOW.getTime() + 5 * H)));
+    expect(file.status).toBe("DEGRADED");
+    expect(file.detail).toContain("statusfilen er datert 5,0 t frem i tid (klokkeavvik mellom NAS og API, eller en endret fil) - alderen kan ikke bevises");
+    expect(file.detail).not.toMatch(/-\d/);
+    expect(file.data).toMatchObject({ status_age_hours: null });
+    expect(file.observed_at).toBe(NOW.toISOString()); // dateringen fra en fil som påstår fremtiden går ikke videre til selvdiagnosen
+
+    // siste sett +3 t: DEGRADED, og «siste backup for … siden» står IKKE som godt
+    const set = observe(exported(() => undefined, { name: "jarvis-backup-20261009T060000Z", createdAt: iso(NOW.getTime() + 3 * H), sizeBytes: 1 }));
+    expect(set.status).toBe("DEGRADED");
+    expect(set.detail).toContain("siste backup-sett er datert 3,0 t frem i tid");
+    expect(set.detail).not.toContain("siste backup for");
+    expect(set.data).toMatchObject({ backup_age_hours: null });
+    // et fremtidsdatert sett skjuler ikke at forsøkene feiler: begge årsakene står der, og 3 feil på rad er DOWN som ellers
+    const failing = observe(exported((s) => { s.backup.consecutive_failures = 3; s.backup.last_error_code = "backup_failed"; }, { name: "jarvis-backup-20261009T060000Z", createdAt: iso(NOW.getTime() + 3 * H), sizeBytes: 1 }));
+    expect(failing.status).toBe("DOWN");
+    expect(failing.detail).toContain("siste backup-sett er datert 3,0 t frem i tid");
+    expect(failing.detail).toContain("siste backup-forsøk feilet (3 på rad: backup feilet)");
+
+    // off-site og restore-verifisering datert frem i tid kan heller ikke bevise noe
+    const off = observe(exported((s) => { s.offsite.last_success_at = iso(NOW.getTime() + 10 * 24 * H); }));
+    expect(off.status).toBe("DEGRADED");
+    expect(off.detail).toContain("siste off-site-kopi er datert 10,0 d frem i tid");
+    expect(off.detail).not.toContain("off-site OK");
+    const ver = observe(exported((s) => { s.restore_verify.last_success_at = iso(NOW.getTime() + 100 * 24 * H); }));
+    expect(ver.status).toBe("DEGRADED");
+    expect(ver.detail).toContain("siste restore-verifisering er datert 100,0 d frem i tid");
+    expect(ver.detail).not.toContain("restore verifisert for");
+    expect(ver.data).toMatchObject({ restore_verify_age_days: null });
+
+    // alt på en gang: fortsatt ingen negative tall noe sted
+    const all = observe(exported((s) => { s.offsite.last_success_at = iso(NOW.getTime() + 2 * H); s.restore_verify.last_success_at = iso(NOW.getTime() + 2 * H); }, { name: "jarvis-backup-20261009T050000Z", createdAt: iso(NOW.getTime() + 2 * H), sizeBytes: 1 }, new Date(NOW.getTime() + 2 * H)));
+    expect(all.status).toBe("DEGRADED");
+    expect(all.detail).not.toMatch(/-\d/);
+    expect(JSON.stringify(all.data)).not.toMatch(/-\d/);
+    expect(all.detail.match(/frem i tid/g)).toHaveLength(4);
   });
 
   it("manglende eller ulesbar fil = UNKNOWN (aldri «frisk»), med forklaring", () => {
@@ -208,14 +252,15 @@ describe("WP-C2 backup-leser: tolkning av statusen (alder over terskel = ærlig 
 });
 
 describe("WP-C2 backup-leser: filen på disk (størrelsesgrense, kun vanlige filer, kaster aldri)", () => {
-  it("leser en gyldig fil (også via symlenke), og returnerer missing/invalid ellers", async () => {
+  it("leser en gyldig fil, og returnerer missing/invalid ellers (en symlenke følges ikke: mounten er en mappe med en vanlig fil)", async () => {
     const dir = tmp();
     const file = join(dir, "backup-status.json");
     writeFileSync(file, JSON.stringify(exported()));
     expect(await readBackupStatusFile(file)).toMatchObject({ kind: "ok" });
     symlinkSync(file, join(dir, "lenke.json"));
-    expect(await readBackupStatusFile(join(dir, "lenke.json"))).toMatchObject({ kind: "ok" });
+    expect(await readBackupStatusFile(join(dir, "lenke.json"))).toEqual({ kind: "invalid", reason: "unreadable" });
     expect(await readBackupStatusFile(join(dir, "finnes-ikke.json"))).toEqual({ kind: "missing" });
+    expect(await readBackupStatusFile(join(dir, "ingen-mappe", "backup-status.json"))).toEqual({ kind: "missing" });
     mkdirSync(join(dir, "en-mappe"));
     expect(await readBackupStatusFile(join(dir, "en-mappe"))).toEqual({ kind: "invalid", reason: "unreadable" });
     writeFileSync(join(dir, "stor.json"), "x".repeat(BACKUP_STATUS_MAX_BYTES + 1));
@@ -236,6 +281,152 @@ describe("WP-C2 backup-leser: filen på disk (størrelsesgrense, kun vanlige fil
     const source = backupStatusSourceFromEnv({ JARVIS_BACKUP_STATUS_FILE: join(dir, "s.json") });
     expect(source).toBeTypeOf("function");
     expect(await source!()).toMatchObject({ kind: "ok" });
+  });
+});
+
+describe("WP-C2 backup-leser (review F10/A5): filen i den monterte mappen kan være noe annet enn en vanlig fil - lesingen henger aldri selvdiagnosen", () => {
+  const onLinux = process.platform === "linux";
+  const SEC = 3_000;
+  /** Race mot en vakt: en lesing som henger (open() på en FIFO uten skriver) skal feile TESTEN raskt i stedet for å la den vente til vitest gir opp. */
+  const guarded = <T,>(p: Promise<T>): Promise<T | "HUNG"> => Promise.race([p, new Promise<"HUNG">((resolve) => setTimeout(() => resolve("HUNG"), SEC))]);
+  const mkfifo = (path: string): void => { execFileSync("mkfifo", [path]); };
+  /** Frigjør en trådpool-tråd som sitter blokkert i open(FIFO) (kun relevant når koden er brutt): en skriver-open slipper leseren. */
+  const unblock = (fifo: string): void => {
+    try {
+      closeSync(openSync(fifo, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK));
+    } catch {
+      // ingen blokkert leser: ingenting å frigjøre
+    }
+  };
+  const UNREADABLE = { kind: "invalid", reason: "unreadable" } as const;
+  const liesAboutBeingAFile = async () => ({ isFile: () => true });
+
+  it.skipIf(!onLinux)("en FIFO uten skriver er uleselig UMIDDELBART (open() ville ventet for alltid og holdt en trådpool-tråd)", async () => {
+    const fifo = join(tmp(), "backup-status.json");
+    mkfifo(fifo);
+    try {
+      expect(await guarded(readBackupStatusFile(fifo))).toEqual(UNREADABLE);
+    } finally {
+      unblock(fifo);
+    }
+  });
+
+  it.skipIf(!onLinux)("lstat kommer FØRST: en FIFO, symlenke eller mappe åpnes aldri (open er ikke en gang kalt)", async () => {
+    const dir = tmp();
+    const real = join(dir, "ekte.json");
+    writeFileSync(real, JSON.stringify(exported()));
+    const link = join(dir, "lenke.json");
+    symlinkSync(real, link);
+    const fifo = join(dir, "fifo.json");
+    mkfifo(fifo);
+    const folder = join(dir, "mappe.json");
+    mkdirSync(folder);
+    const spy = vi.fn(open);
+    for (const path of [link, fifo, folder]) expect(await guarded(readBackupStatusFile(path, undefined, { open: spy })), path).toEqual(UNREADABLE);
+    expect(spy).not.toHaveBeenCalled();
+    expect(await readBackupStatusFile(real, undefined, { open: spy })).toMatchObject({ kind: "ok" });
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it.skipIf(!onLinux)("filen byttes ut med en FIFO ETTER lstat: O_NONBLOCK hindrer blokkering, og fstat på det åpne håndtaket avviser den (ikke «not_json»)", async () => {
+    const fifo = join(tmp(), "backup-status.json");
+    mkfifo(fifo);
+    try {
+      expect(await guarded(readBackupStatusFile(fifo, undefined, { lstat: liesAboutBeingAFile }))).toEqual(UNREADABLE);
+    } finally {
+      unblock(fifo);
+    }
+  });
+
+  it.skipIf(!onLinux)("filen byttes ut med en symlenke ETTER lstat: O_NOFOLLOW - filen bak lenken leses ikke", async () => {
+    const dir = tmp();
+    const real = join(dir, "ekte.json");
+    writeFileSync(real, JSON.stringify(exported()));
+    const link = join(dir, "lenke.json");
+    symlinkSync(real, link);
+    expect(await readBackupStatusFile(link, undefined, { lstat: liesAboutBeingAFile })).toEqual(UNREADABLE);
+  });
+
+  it("open får akkurat flaggene O_RDONLY | O_NONBLOCK | O_NOFOLLOW", async () => {
+    const file = join(tmp(), "backup-status.json");
+    writeFileSync(file, JSON.stringify(exported()));
+    const seen: number[] = [];
+    const result = await readBackupStatusFile(file, undefined, { open: async (path, flags) => { seen.push(flags); return open(path, flags); } });
+    expect(result).toMatchObject({ kind: "ok" });
+    expect(seen).toEqual([STATUS_OPEN_FLAGS]);
+    if (onLinux) {
+      expect(seen[0]! & fsConstants.O_NONBLOCK).toBe(fsConstants.O_NONBLOCK);
+      expect(seen[0]! & fsConstants.O_NOFOLLOW).toBe(fsConstants.O_NOFOLLOW);
+    }
+  });
+
+  it("en lesing som henger (hengt montering) gir `timeout` innen fristen, og en ny lesing legger IKKE et nytt kall oppå den hengte - først når den er ferdig leses det igjen", async () => {
+    const file = join(tmp(), "backup-status.json");
+    writeFileSync(file, JSON.stringify(exported()));
+    let calls = 0;
+    let failHungOpen: () => void = () => undefined;
+    const hungOpen = (): Promise<never> => {
+      calls += 1;
+      return new Promise<never>((_resolve, reject) => { failHungOpen = () => reject(Object.assign(new Error("EIO"), { code: "EIO" })); });
+    };
+    const t0 = Date.now();
+    expect(await guarded(readBackupStatusFile(file, undefined, { open: hungOpen, timeoutMs: 40 }))).toEqual({ kind: "invalid", reason: "timeout" });
+    expect(Date.now() - t0).toBeLessThan(SEC);
+    expect(await guarded(readBackupStatusFile(file, undefined, { open: hungOpen, timeoutMs: 40 }))).toEqual({ kind: "invalid", reason: "timeout" });
+    expect(calls).toBe(1);
+    // en TIDSAVBRUDD er ikke en feil i selve filen: selvdiagnosen sier det som det er
+    const o = observeBackupStatus({ kind: "invalid", reason: "timeout" }, NOW);
+    expect(o).toMatchObject({ status: "UNKNOWN", observed_at: null });
+    expect(o.detail).toContain("lesingen tok for lang tid");
+    failHungOpen();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(await readBackupStatusFile(file)).toMatchObject({ kind: "ok" });
+  });
+
+  it("en lesing som blir ferdig etter fristen lukker håndtaket sitt (ingen lekkede fd-er), og hengte lesinger av ANDRE stier påvirker ikke denne", async () => {
+    const dir = tmp();
+    const file = join(dir, "backup-status.json");
+    writeFileSync(file, JSON.stringify(exported()));
+    const other = join(dir, "annen.json");
+    writeFileSync(other, JSON.stringify(exported()));
+    let closed = 0;
+    let finishOpen: () => void = () => undefined;
+    const slowOpen = (path: string, flags: number) =>
+      new Promise<Awaited<ReturnType<typeof open>>>((resolve, reject) => {
+        finishOpen = () => { open(path, flags).then((handle) => { const close = handle.close.bind(handle); handle.close = async () => { closed += 1; await close(); }; resolve(handle); }, reject); };
+      });
+    expect(await guarded(readBackupStatusFile(file, undefined, { open: slowOpen, timeoutMs: 30 }))).toEqual({ kind: "invalid", reason: "timeout" });
+    expect(await readBackupStatusFile(other)).toMatchObject({ kind: "ok" }); // annen sti: uberørt
+    finishOpen();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(closed).toBe(1);
+    expect(await readBackupStatusFile(file)).toMatchObject({ kind: "ok" });
+  });
+});
+
+describe("WP-C2 backup-leser (review A3): feilkoder fra filen slås opp som EGNE nøkler - navn på Object.prototype er ikke koder", () => {
+  it("constructor/toString/__proto__/hasOwnProperty/… i alle fire last_error_code-feltene blir null og når aldri teksten (kjente koder passerer fortsatt)", () => {
+    const evilNames = ["constructor", "toString", "valueOf", "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable", "toLocaleString", "__proto__", "__defineGetter__", "__lookupGetter__"];
+    for (const evil of evilNames) {
+      const doc = JSON.parse(JSON.stringify(exported((s) => { s.backup.consecutive_failures = 1; }))) as Record<string, Record<string, unknown>>;
+      for (const section of ["backup", "offsite", "restore_verify", "heartbeat"]) doc[section]!["last_error_code"] = evil;
+      const snapshot = parseBackupStatus(doc);
+      expect(snapshot, evil).not.toBeNull();
+      expect(snapshot?.backup.last_error_code, `${evil} backup`).toBeNull();
+      expect(snapshot?.offsite.last_error_code, `${evil} offsite`).toBeNull();
+      expect(snapshot?.restore_verify.last_error_code, `${evil} restore_verify`).toBeNull();
+      expect(snapshot?.heartbeat.last_error_code, `${evil} heartbeat`).toBeNull();
+      const text = observeBackupStatus({ kind: "ok", snapshot: snapshot! }, NOW).detail;
+      expect(text, evil).toContain("ukjent årsak");
+      expect(text, evil).not.toMatch(/native code|function|\[object|undefined/);
+    }
+    const good = JSON.parse(JSON.stringify(exported((s) => { s.backup.consecutive_failures = 1; }))) as Record<string, Record<string, unknown>>;
+    good["backup"]!["last_error_code"] = "backup_timeout";
+    good["offsite"]!["last_error_code"] = "offsite_ineligible";
+    good["restore_verify"]!["last_error_code"] = "verify_integrity";
+    good["heartbeat"]!["last_error_code"] = "heartbeat_failed";
+    const snap = parseBackupStatus(good)!;
+    expect([snap.backup.last_error_code, snap.offsite.last_error_code, snap.restore_verify.last_error_code, snap.heartbeat.last_error_code]).toEqual(["backup_timeout", "offsite_ineligible", "verify_integrity", "heartbeat_failed"]);
   });
 });
 
