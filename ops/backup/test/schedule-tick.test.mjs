@@ -533,6 +533,28 @@ describe("WP-C2 tick: restore-verifisering (scratch, uten å røre produksjon)",
     expect(h.status().restore_verify).toMatchObject({ last_error_code: "verify_mismatch", consecutive_failures: 2, retry_after: new Date(h.now().getTime() + 12 * H).toISOString() });
   });
 
+  it("vaktene i verifiseringen (manifest, scratch) gir egne feilkoder og en forklaring i den interne statusen; tekst fra andre trinn (kan sitere ubetrodd SQL) kommer aldri inn", async () => {
+    const h = harness({ identity: true });
+    makeSet(h.out, hoursAgo(T0, 1));
+    h.verifyResult = { exitCode: 2, report: { ok: false, stage: "scratch_guard", error: "scratch-serveren er ikke en tom, kastbar instans: 3 database(r) utenfor systemdatabasene (f.eks. jarvis)", databases: [] } };
+    expect(await h.tick()).toMatchObject({ exitCode: EXIT.VERIFY_FAILED, failed: ["verify"] });
+    expect(h.status().restore_verify).toMatchObject({ state: "failed", last_error_code: "verify_config_invalid" });
+    expect(h.status().restore_verify.last_error).toContain("scratch_guard");
+    expect(h.status().restore_verify.last_error).toContain("ikke en tom, kastbar instans");
+
+    h.verifyResult = { exitCode: 2, report: { ok: false, stage: "manifest", error: "manifest.json har ugyldig form: databases[0].tables har ugyldig tabellnavn eller radtall", databases: [] } };
+    h.advance(7 * H);
+    await h.tick();
+    expect(h.status().restore_verify).toMatchObject({ last_error_code: "verify_integrity", consecutive_failures: 2 });
+    expect(h.status().restore_verify.last_error).toContain("ugyldig tabellnavn");
+
+    h.verifyResult = { exitCode: 2, report: { ok: false, stage: "restore", error: "pg_restore: ERROR: EVIL-SENTINEL (siterer SQL fra settet)", databases: [] } };
+    h.advance(13 * H);
+    await h.tick();
+    expect(h.status().restore_verify).toMatchObject({ last_error_code: "verify_failed", consecutive_failures: 3 });
+    expect(JSON.stringify(h.status())).not.toContain("EVIL-SENTINEL");
+  });
+
   it("en rapport med ok:true men exit-kode ≠ 0 (eller omvendt) regnes IKKE som verifisert (aldri stol på ett signal alene)", async () => {
     const h = harness({ identity: true });
     makeSet(h.out, hoursAgo(T0, 1));

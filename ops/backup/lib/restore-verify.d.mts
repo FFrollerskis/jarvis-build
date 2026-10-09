@@ -2,6 +2,14 @@ import type { BackupManifest } from "./backup.mjs";
 import type { PgRunner } from "./runner.mjs";
 
 export declare const SCRATCH_DB_PREFIX: string;
+export declare const SCRATCH_ALLOWED_DB: RegExp;
+/** Tom liste = manifestet har forventet form (settet er ubetrodd; tabell-/databasenavn limes inn i SQL). */
+export declare function manifestProblems(manifest: unknown): string[];
+/** Beviser at scratch-serveren er en tom, kastbar instans FØR noe skrives dit (kun lesing). */
+export declare function checkScratchServer(
+  scratchRunner: PgRunner,
+  manifest: { databases: Array<{ database: string }> }
+): Promise<{ ok: true } | { ok: false; error: string }>;
 export interface RestoreVerifyDatabaseReport {
   database: string;
   ok: boolean;
@@ -14,7 +22,7 @@ export interface RestoreVerifyDatabaseReport {
 }
 export interface RestoreVerifyReport {
   ok: boolean;
-  stage: "integrity" | "restore" | "complete";
+  stage: "manifest" | "integrity" | "scratch_guard" | "restore" | "complete";
   set?: string;
   source_endpoint?: string;
   scratch_endpoint?: string;

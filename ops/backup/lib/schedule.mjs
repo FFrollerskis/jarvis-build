@@ -227,7 +227,10 @@ export function defaultVerify(config, env) {
     }
     if (res.timedOut) throw new ScheduleError("verify_timeout", `restore-verifisering brukte mer enn ${Math.round(config.verify.timeoutMs / 60_000)} min og ble stoppet`);
     const report = parseJsonObject(res.stdout);
-    if (report === null) throw new ScheduleError("verify_failed", `restore-verifisering ga ingen rapport (exit ${res.code ?? res.spawnError ?? "?"}) - IKKE verifisert`);
+    if (report === null) {
+      const why = tail(res.stderr, 2);
+      throw new ScheduleError("verify_failed", `restore-verifisering ga ingen rapport (exit ${res.code ?? res.spawnError ?? "?"}) - IKKE verifisert${why === "" ? "" : `: ${why}`}`);
+    }
     return { report, exitCode: res.code };
   };
 }
@@ -263,11 +266,15 @@ function verifyOutcome(result) {
   const ok = report.ok === true && result.exitCode === 0;
   let code = null;
   if (!ok) {
-    if (report.stage === "integrity") code = "verify_integrity";
+    if (report.stage === "integrity" || report.stage === "manifest") code = "verify_integrity";
+    else if (report.stage === "scratch_guard") code = "verify_config_invalid"; // scratch-serveren er ikke tom/kastbar: feilpekt konfig, ikke en feil i settet
     else if (dbs.some((d) => d?.ok === false)) code = "verify_mismatch";
     else code = "verify_failed";
   }
-  return { ok, code, tables: sum("tables_restored"), rows: sum("total_rows_expected") };
+  // Vaktene (manifest, scratch) har faste norske feiltekster uten innhold fra settet: de vises i den interne statusen - «hvorfor» er hele poenget med vakten.
+  // Annen verktøyfeil (stderr fra pg_restore/psql kan sitere ubetrodd SQL) kommer aldri hit.
+  const guarded = (report.stage === "manifest" || report.stage === "scratch_guard") && typeof report.error === "string";
+  return { ok, code, tables: sum("tables_restored"), rows: sum("total_rows_expected"), detail: guarded ? `restore-verifisering stoppet (${report.stage}): ${report.error}`.slice(0, 280) : null };
 }
 
 /**
@@ -584,7 +591,7 @@ export async function runTick(config, deps, env = process.env) {
         v.last_set = setName;
         v.tables = outcome.tables;
         v.rows = outcome.rows;
-        if (!outcome.ok) throw new ScheduleError(outcome.code ?? "verify_failed", "restore-verifisering avdekket avvik (se rapporten fra verktøyet)");
+        if (!outcome.ok) throw new ScheduleError(outcome.code ?? "verify_failed", outcome.detail ?? "restore-verifisering avdekket avvik (se rapporten fra verktøyet)");
         v.state = "ok";
         v.last_success_at = iso(now());
         v.consecutive_failures = 0;

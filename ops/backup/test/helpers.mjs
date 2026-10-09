@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -80,4 +80,50 @@ export function fakeBinDir(binaries) {
     chmodSync(file, 0o755);
   }
   return dir;
+}
+
+/**
+ * En falsk Postgres-KLIENT for tester av restore-verifiseringen uten Postgres: `runner.command()` peker på et node-skript som svarer på de få spørringene
+ * verifisereren stiller (databaselisten, tabelloversikten, radtall) og LOGGER hvert kall - også teksten som mates til `psql -f -`. `calls()` er beviset på hva som
+ * ble skrevet til «serveren» og i hvilken rekkefølge. `state` kan endres underveis (`setState`).
+ */
+export function fakeScratchRunner({ endpoint = "127.0.0.1:55432", databases = ["postgres", "template0", "template1"], tables = {}, counts = {}, fail = false } = {}) {
+  const dir = tempDir("wpc2-fakepg-");
+  const script = join(dir, "fake-pg.mjs");
+  const stateFile = join(dir, "state.json");
+  const logFile = join(dir, "calls.jsonl");
+  writeFileSync(logFile, "");
+  writeFileSync(script, `
+    import { appendFileSync, readFileSync } from "node:fs";
+    const [tool, ...args] = process.argv.slice(2);
+    const state = JSON.parse(readFileSync(process.env.FAKE_PG_STATE, "utf8"));
+    const flag = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : undefined; };
+    const sql = flag("-c");
+    const stdin = flag("-f") === "-" ? readFileSync(0, "utf8") : "";
+    appendFileSync(process.env.FAKE_PG_LOG, JSON.stringify({ tool, database: flag("-d"), sql: sql ?? null, stdin }) + "\\n");
+    if (state.fail) { console.error("psql: error: connection to server failed"); process.exit(2); }
+    if (sql && /FROM pg_database/.test(sql)) { console.log(state.databases.join("\\n")); process.exit(0); }
+    if (sql && /FROM pg_class/.test(sql)) { console.log((state.tables[flag("-d")] ?? []).join("\\n")); process.exit(0); }
+    if (sql && /^SELECT count/.test(sql)) { console.log(String(state.counts[sql.replace(/^SELECT count\\(\\*\\) FROM /, "")] ?? 0)); process.exit(0); }
+    process.exit(0);
+  `);
+  const state = { databases, tables, counts, fail };
+  const save = () => writeFileSync(stateFile, JSON.stringify(state));
+  save();
+  const runner = {
+    mode: "direct",
+    endpoint,
+    command: (tool, args, { database } = {}) => ({
+      file: process.execPath,
+      args: [script, tool, ...(database ? ["-d", database] : []), ...args],
+      env: { ...process.env, FAKE_PG_STATE: stateFile, FAKE_PG_LOG: logFile }
+    })
+  };
+  return {
+    runner,
+    setState: (patch) => { Object.assign(state, patch); save(); },
+    calls: () => readFileSync(logFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)),
+    /** Kall som ikke er rene lesespørringer (SELECT): CREATE/DROP/`-f -`-skript og alt annet som kan endre serveren. */
+    writes: () => readFileSync(logFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((c) => !(typeof c.sql === "string" && /^\s*SELECT\b/i.test(c.sql)))
+  };
 }

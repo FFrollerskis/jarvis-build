@@ -184,6 +184,29 @@ describe.skipIf(!haveTools)("kryptert backup + restore-verifisering (ekte Postgr
     await expect(runRestoreVerify({ setDir, identityFile, scratchRunner: runnerFor(sourcePort) })).rejects.toThrow(/refusing to restore into the source server/);
   }, 240_000);
 
+  it("review F1: en feilpekt scratch (samme server under et annet navn) nektes av tom-sjekken - ingenting skrives, kildens roller og passord er urørt", async () => {
+    await exec(sourcePort, "postgres", "CREATE ROLE f1_probe LOGIN PASSWORD 'gammelt-passord'");
+    try {
+      const out = join(work, "out7b");
+      const { setDir } = await runBackup({ runner: runnerFor(sourcePort), outDir: out, recipient, now: new Date("2026-10-01T22:31:00Z") });
+      await exec(sourcePort, "postgres", "ALTER ROLE f1_probe PASSWORD 'nytt-passord'"); // produksjonen har gått videre siden backupen
+      const hash = async () => (await exec(sourcePort, "postgres", "SELECT rolpassword FROM pg_authid WHERE rolname = 'f1_probe'")).rows[0]?.rolpassword as string;
+      const before = await hash();
+      expect(before).toMatch(/^SCRAM-SHA-256\$/);
+      // `localhost` ≠ `127.0.0.1` som streng, men er samme server: bare tom-sjekken kan stoppe dette
+      const alias = makeRunner({ mode: "direct", host: "localhost", port: sourcePort, user: "postgres", password: "pw" });
+      expect(alias.endpoint).not.toBe(runnerFor(sourcePort).endpoint);
+      const report = await runRestoreVerify({ setDir, identityFile, scratchRunner: alias, now: new Date("2026-10-01T22:32:00Z") });
+      expect(report).toMatchObject({ ok: false, stage: "scratch_guard" });
+      expect(report.error).toContain("ikke en tom, kastbar instans");
+      expect(await hash()).toBe(before); // passordet er IKKE overskrevet til backup-tidens
+      expect((await exec(sourcePort, "postgres", `SELECT datname FROM pg_database WHERE datname LIKE '${SCRATCH_DB_PREFIX}%'`)).rows).toEqual([]);
+      expect((await exec(sourcePort, "jarvis", "SELECT count(*)::int AS n FROM tenants")).rows[0]?.n).toBe(2);
+    } finally {
+      await exec(sourcePort, "postgres", "DROP ROLE IF EXISTS f1_probe");
+    }
+  }, 240_000);
+
   it("ingen ukryptert backup: manglende/ugyldig age-mottaker avvises FØR noe skrives", async () => {
     const out = join(work, "out8");
     for (const bad of [undefined, "", "hemmelig passfrase", "age-secret-key-1ABC"] as unknown[]) {
