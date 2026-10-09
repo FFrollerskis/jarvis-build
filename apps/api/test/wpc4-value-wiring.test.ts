@@ -12,8 +12,8 @@ import { OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/ow
 import { SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";
 import { changeFreeze } from "@jarvis/self-modification";
 import {
-  CHAT_READ_TIER, MemorySearchTransport, ModelSurfaceViolationError, SURFACE_TOOL_GRANTS, assertChatReadTier, assertManifestInvariants, buildToolManifest, firstWaveTools, homeAssistantTools,
-  memoryToolDefinitions, selectSurfaceTools, type ToolDefinition, type ToolGateway
+  CHAT_READ_TIER, KnowledgeSearchTransport, MemorySearchTransport, ModelSurfaceViolationError, SURFACE_TOOL_GRANTS, assertChatReadTier, assertManifestInvariants, buildToolManifest, firstWaveTools, homeAssistantTools,
+  knowledgeToolDefinitions, memoryToolDefinitions, selectSurfaceTools, type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
 import { TasksDelegateTransport, tasksDelegateToolDefinitions } from "../src/chat-jobs.ts";
 import { ConversationEngine } from "../src/conversation.ts";
@@ -43,6 +43,8 @@ function productionDefinitions(): ToolDefinition[] {
       ...governanceToolDefinitions(new GovernanceTransport({} as never)),
       ...situationsToolDefinitions(new SituationsTransport({} as never, {} as never)),
       ...memoryToolDefinitions(new MemorySearchTransport({} as never, {} as never)),
+      // WP-D1 (UA-2): kunnskapssøket og påstandsstatusen er på chattens lese-nivå og må være registrert for at nivået skal bestå.
+      ...knowledgeToolDefinitions(new KnowledgeSearchTransport({} as never)),
       ...tasksDelegateToolDefinitions(new TasksDelegateTransport({} as never, {} as never)),
       ...runRateToolDefinitions(new RunRateTransport({} as never))
     ]
