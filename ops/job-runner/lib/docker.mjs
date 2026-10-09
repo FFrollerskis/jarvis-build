@@ -1,4 +1,5 @@
 import { RunnerError } from "./errors.mjs";
+import { scrubPaths } from "./log.mjs";
 import { runProcess } from "./process.mjs";
 
 /**
@@ -31,15 +32,17 @@ const CONTAINER_NAME = /^jarvis-job-[a-f0-9-]{36}$/;
 
 /** Tynn, typet fasade over `docker` for akkurat de kallene runneren trenger - ingenting annet kan utføres. */
 export class DockerClient {
-  /** @param {{ exec: DockerExec, registry: import("./log.mjs").SecretRegistry }} options */
+  /** @param {{ exec: DockerExec, registry: import("./log.mjs").SecretRegistry, scrub?: ReadonlyArray<readonly [string, string]> }} options */
   constructor(options) {
     this.exec = options.exec;
     this.registry = options.registry;
+    /** Interne stier som aldri skal stå i en feildetalj til klienten (f.eks. bind-mount-kilden i en docker-feilmelding). */
+    this.scrub = options.scrub ?? [];
   }
 
   /** @param {ProcessResult} r */
   detail(r) {
-    return this.registry.redact(`${r.stderr.toString("utf8")} ${r.stdout.toString("utf8")}`.replace(/\s+/g, " ").trim()).slice(0, 200);
+    return scrubPaths(this.registry.redact(`${r.stderr.toString("utf8")} ${r.stdout.toString("utf8")}`.replace(/\s+/g, " ").trim()), this.scrub).slice(0, 200);
   }
 
   /** Daemon nåbar? Returnerer server-versjon. */

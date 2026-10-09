@@ -73,6 +73,20 @@ export class SecretRegistry {
 }
 
 /**
+ * Erstatter runnerens interne stier (jobbkatalogen, installasjonskatalogen) i tekst som går UT til klienten eller loggen (feildetaljer fra git/docker). Stier er ingen
+ * hemmeligheter, men en worker (eller en kompromittert en) trenger ikke vite hvor jobbkatalogene ligger. Lengste prefiks først.
+ * @param {string} text
+ * @param {ReadonlyArray<readonly [string, string]>} replacements par av [prefiks, erstatning]
+ */
+export function scrubPaths(text, replacements) {
+  let out = String(text);
+  for (const [prefix, replacement] of [...replacements].sort((a, b) => b[0].length - a[0].length)) {
+    if (prefix.length > 1) out = out.split(prefix).join(replacement);
+  }
+  return out;
+}
+
+/**
  * @param {{ write?: (line: string) => void, now?: () => Date, registry?: SecretRegistry, component?: string }} [options]
  */
 export function createLogger(options = {}) {

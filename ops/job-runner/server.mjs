@@ -107,7 +107,10 @@ export async function createRunnerService(options) {
     dockerBin: config.dockerBin,
     baseEnv: { PATH: "/usr/bin:/bin:/usr/local/bin", HOME: homeDir, DOCKER_CONFIG: homeDir, ...(config.dockerHost ? { DOCKER_HOST: config.dockerHost } : {}) }
   });
-  const docker = new DockerClient({ exec: dockerExec, registry });
+  // Interne stier som aldri skal stå i en feildetalj til worker: jobbkatalogene og installasjonskatalogen (kode + hjelper).
+  const installRoot = resolve(fileURLToPath(new URL("../../", import.meta.url)));
+  const scrub = /** @type {const} */ ([[config.baseDir, "<jobs>"], [installRoot, "<runner>"]]);
+  const docker = new DockerClient({ exec: dockerExec, registry, scrub });
   const secretOptions = (/** @type {{ label?: string }} */ o) => ({ ...o, ...(t.allowAnyOwner === true ? { skipOwnerCheck: true } : {}) });
   const credentials = options.credentials ?? new FileGitCredentialSource({
     files: config.gitCredentials,
@@ -120,7 +123,7 @@ export async function createRunnerService(options) {
     homeDir, templateDir,
     remote: t.remote ?? { protocol: "https", host: "github.com" },
     allowFile: t.allowFile === true,
-    registry
+    registry, scrub
   });
   const manager = new JobManager({
     config, docker, git, credentials, logger,

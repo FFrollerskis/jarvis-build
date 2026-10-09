@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { credentialHelperArgs, GIT_CREDENTIAL_TOKEN_ENV } from "./credentials.mjs";
 import { RunnerError } from "./errors.mjs";
 import { forceRemoveTree } from "./fsutil.mjs";
+import { scrubPaths } from "./log.mjs";
 import { runProcess } from "./process.mjs";
 
 /**
@@ -119,7 +120,8 @@ export class HostGit {
    *   remote: { protocol: "https" | "http", host: string, urlFor?: (slug: string) => string },
    *   allowFile?: boolean,
    *   run?: typeof runProcess,
-   *   registry: import("./log.mjs").SecretRegistry
+   *   registry: import("./log.mjs").SecretRegistry,
+   *   scrub?: ReadonlyArray<readonly [string, string]>
    * }} options
    */
   constructor(options) {
@@ -132,6 +134,8 @@ export class HostGit {
     this.allowFile = options.allowFile === true;
     this.run = options.run ?? runProcess;
     this.registry = options.registry;
+    /** Interne stier som aldri skal stå i en feildetalj til klienten (jobbkatalogen m.m.). */
+    this.scrub = options.scrub ?? [];
   }
 
   /** Renset basis-env: tom HOME, ingen system/global-config, ingen prompt, kun den ene tillatte protokollen. */
@@ -180,7 +184,7 @@ export class HostGit {
   /** Kort, renset feildetalj fra git (aldri hemmeligheter; kuttet). */
   sanitize(result) {
     const text = `${result.stderr.toString("utf8")} ${result.stdout.toString("utf8")}`.replace(/\s+/g, " ").trim();
-    return this.registry.redact(text).slice(0, 200);
+    return scrubPaths(this.registry.redact(text), this.scrub).slice(0, 200);
   }
 
   /**
