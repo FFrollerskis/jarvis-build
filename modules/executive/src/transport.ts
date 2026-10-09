@@ -79,6 +79,10 @@ export class ExecutiveTransport implements ToolTransport {
         const report = await this.service.getSloReport();
         return { data: report as unknown as JsonValue };
       }
+      case "get_evolution_report": {
+        const report = await this.service.getEvolutionReport();
+        return { data: report as unknown as JsonValue };
+      }
       case "get_connector_status": {
         const status = await this.service.getConnectorStatus();
         return { data: { ...status, summary_no: summarizeConnectorStatusNo(status.connectors) } as unknown as JsonValue };
@@ -225,6 +229,10 @@ export function executiveToolDefinitions(transport: ExecutiveTransport): ToolDef
     read(
       "get_slo_report",
       "Svar på «hvor bra yter du?»/«er du treg?»/«har noe blitt dårligere?» fra EKTE målinger (cost_events, verktøyutførelser, jobber): tjenestemål (SLO) for chat, bakgrunn, verktøy og jobber, gradvis forverring (siste døgn mot uken før) og dataskvalitet i minnet (motstridende, duplikate, utløpte, gamle forslag). For lite data vises som ukjent, aldri som bra. Tallene er forslag til mål, ikke eier-godkjente."
+    ),
+    read(
+      "get_evolution_report",
+      "Svar på «hvordan utvikler du deg?»/«hva kan du forbedre?»/«hva har du lært?»: evolusjonsportene (EV-0…EV-23) slik de står NÅ, fra EKTE målinger (endringsregister, kostnad, tilkoblinger, vedlikeholdsplan, modellvalg i skygge …). KUN observasjon - jeg endrer ingenting av meg selv (selvendring er frosset), og sovende deler sies å være sovende. Ukjent vises som ukjent, aldri som bra."
     ),
     read(
       "get_connector_status",
