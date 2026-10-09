@@ -125,10 +125,14 @@ export function asGitHubAppAuthError(err: unknown): GitHubAppAuthError {
 const PEM_PATTERN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g;
 // ghs_/ghp_/gho_/ghu_/ghr_ (klassisk 40 tegn OG det nye statuløse formatet `ghs_<APPID>_<JWT>` - lengden skal aldri antas) + fine-grained PAT.
 const TOKEN_PATTERN = /(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9_.-]{12,}|github_pat_[A-Za-z0-9_]{12,})/g;
-const JWT_PATTERN = /eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*/g;
+// Review F1 (ReDoS, reprodusert: `"eyJ".repeat(21845)` tok 9,5 s CPU): UTEN lookbehind prøver motoren hvert eneste «eyJ» INNE i en lang
+// `[A-Za-z0-9_-]`-kjede som startpunkt, og hver slik prøve skanner (og backtracker) resten av kjeden - O(n²). Med lookbehind kan en match kun
+// starte der kjeden begynner, så hver kjede skannes høyst én gang (O(n); 6,6 s -> 2 ms). En JWT som en fiendtlig server limer et bokstav-
+// prefiks foran slipper unna mønsteret - derfor maskeres de EKSAKT KJENTE JWT-ene i tillegg (`maskGitHubSecrets(…, [jwt])`, se `#requestWithJwt`).
+const JWT_PATTERN = /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*/g;
 const BEARER_PATTERN = /\b(Bearer|token)\s+[A-Za-z0-9._~+/=-]{12,}/gi;
 
-/** Fjerner alt som ligner PEM-privatnøkkel, GitHub-token, JWT eller Bearer-verdi - pluss eksakte kjente hemmeligheter. */
+/** Fjerner alt som ligner PEM-privatnøkkel, GitHub-token, JWT eller Bearer-verdi - pluss eksakte kjente hemmeligheter. Lineær i inndata-lengden. */
 export function maskGitHubSecrets(text: string, knownSecrets: readonly string[] = []): string {
   let out = text;
   for (const secret of knownSecrets) {
@@ -141,11 +145,16 @@ export function maskGitHubSecrets(text: string, knownSecrets: readonly string[] 
     .replace(BEARER_PATTERN, "$1 [REDACTED]");
 }
 
+/**
+ * Øvre grense (tegn) for tekst som sendes til maskeringen. En feilmelding trenger aldri mer enn en kort detalj (`safeDetail` kutter til 160 tegn
+ * etterpå), så kostnaden mot et ondsinnet, kjempestort svar begrenses FØR regexene kjører - ikke til 64 KB slik det var (review F1).
+ */
+const MASK_INPUT_LIMIT = 2_048;
+
 /** Kort, enlinjes, maskert tekst som trygt kan inngå i en feilmelding/logg. */
 function safeDetail(text: string, max = 160): string {
   let out = "";
-  // Begrens kostnaden mot et ondsinnet, kjempestort svar FØR maskeringen; selve resultatet kuttes til `max` etterpå.
-  for (const ch of maskGitHubSecrets(String(text).slice(0, 65_536))) {
+  for (const ch of maskGitHubSecrets(String(text).slice(0, MASK_INPUT_LIMIT))) {
     const code = ch.charCodeAt(0);
     out += code < 32 || code === 127 ? " " : ch;
   }
@@ -804,6 +813,9 @@ export class GitHubAppAuth {
       }
 
       const message = errorMessageOf(text);
+      // Review F1: det som kan havne i feilmeldingen kuttes til MASK_INPUT_LIMIT og får JWT-en vi selv sendte maskert EKSAKT (uavhengig av hva
+      // serveren limer foran den); stikkordtestene under bruker den ukuttede `message`.
+      const detail = maskGitHubSecrets(message.slice(0, MASK_INPUT_LIMIT), [jwt]);
       if (status === 401) {
         // Klokkeskjev gir 401 på iat/exp. Når Date-headeren viser et avvik vi ikke allerede har rettet for: prøv ÉN gang til umiddelbart.
         if (skewLearned && !skewRetried) {
@@ -811,9 +823,9 @@ export class GitHubAppAuth {
           attempt -= 1;
           continue;
         }
-        throw new GitHubAppAuthError("GITHUB_APP_AUTH_FAILED", `http_401:${message}`, { httpStatus: 401 });
+        throw new GitHubAppAuthError("GITHUB_APP_AUTH_FAILED", `http_401:${detail}`, { httpStatus: 401 });
       }
-      if (status === 404) throw new GitHubAppAuthError("GITHUB_APP_INSTALLATION_NOT_FOUND", `http_404:${message}`, { httpStatus: 404 });
+      if (status === 404) throw new GitHubAppAuthError("GITHUB_APP_INSTALLATION_NOT_FOUND", `http_404:${detail}`, { httpStatus: 404 });
 
       const retryAfterHeader = parseRetryAfterMs(response.headers.get("retry-after"), this.#now() + this.#skewMs);
       const primaryExhausted = response.headers.get("x-ratelimit-remaining") === "0";
@@ -825,17 +837,17 @@ export class GitHubAppAuth {
           if (Number.isFinite(resetSeconds) && resetSeconds > 0) waitMs = Math.max(1_000, resetSeconds * 1000 - (this.#now() + this.#skewMs));
         }
         if (await this.#backoff(attempt, startedAt, waitMs)) continue;
-        throw new GitHubAppAuthError("GITHUB_APP_RATE_LIMITED", `http_${status}:${message}`, { httpStatus: status, retryAfterMs: waitMs ?? 60_000, retryable: true });
+        throw new GitHubAppAuthError("GITHUB_APP_RATE_LIMITED", `http_${status}:${detail}`, { httpStatus: status, retryAfterMs: waitMs ?? 60_000, retryable: true });
       }
       if (status === 403) {
-        if (/suspended/i.test(message)) throw new GitHubAppAuthError("GITHUB_APP_INSTALLATION_SUSPENDED", `http_403:${message}`, { httpStatus: 403 });
-        throw new GitHubAppAuthError("GITHUB_APP_FORBIDDEN", `http_403:${message}`, { httpStatus: 403 });
+        if (/suspended/i.test(message)) throw new GitHubAppAuthError("GITHUB_APP_INSTALLATION_SUSPENDED", `http_403:${detail}`, { httpStatus: 403 });
+        throw new GitHubAppAuthError("GITHUB_APP_FORBIDDEN", `http_403:${detail}`, { httpStatus: 403 });
       }
       if (status >= 500) {
         if (await this.#backoff(attempt, startedAt, retryAfterHeader)) continue;
-        throw new GitHubAppAuthError("GITHUB_APP_UNAVAILABLE", `http_${status}:${message}`, { httpStatus: status, retryable: true });
+        throw new GitHubAppAuthError("GITHUB_APP_UNAVAILABLE", `http_${status}:${detail}`, { httpStatus: status, retryable: true });
       }
-      throw new GitHubAppAuthError("GITHUB_APP_REQUEST_REJECTED", `http_${status}:${message}`, { httpStatus: status });
+      throw new GitHubAppAuthError("GITHUB_APP_REQUEST_REJECTED", `http_${status}:${detail}`, { httpStatus: status });
     }
   }
 
