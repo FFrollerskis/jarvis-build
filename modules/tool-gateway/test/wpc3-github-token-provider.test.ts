@@ -111,13 +111,14 @@ describe("A: valg av metode fra miljøet - ingen konfig = PAT som i dag; delvis/
     expect(noScope.kind === "invalid" && noScope.error.code).toBe("GITHUB_APP_SCOPE_UNDEFINED");
   });
 
-  it("A4: JARVIS_GITHUB_API_BASE må være https - loopback-http kan IKKE slås på fra miljøet, kun via testflagget i koden", () => {
-    for (const bad of ["http://127.0.0.1:4010", "http://api.github.com", "https://localhost", "https://10.0.0.5", "ftp://x.y.z"]) {
+  it("A4: JARVIS_GITHUB_API_BASE er alltid https://api.github.com - ingen annen vert (review F5), og loopback-http kan IKKE slås på fra miljøet, kun via testflagget i koden", () => {
+    for (const bad of ["http://127.0.0.1:4010", "http://api.github.com", "https://localhost", "https://10.0.0.5", "ftp://x.y.z", "https://ghe.firma.no/api/v3", "https://evil.example"]) {
       const settings = resolveGitHubAuthSettings({ ...base, JARVIS_GITHUB_API_BASE: bad });
       expect(settings.kind, bad).toBe("invalid");
     }
     expect(resolveGitHubAuthSettings({ ...base, JARVIS_GITHUB_API_BASE: "http://127.0.0.1:4010" }, { allowLoopbackHttpForTests: true }).kind).toBe("app");
-    expect(resolveGitHubAuthSettings({ ...base, JARVIS_GITHUB_API_BASE: "https://ghe.firma.no/api/v3" }).kind).toBe("app");
+    expect(resolveGitHubAuthSettings({ ...base, JARVIS_GITHUB_API_BASE: "https://api.github.com" }).kind).toBe("app");
+    expect(resolveGitHubAuthSettings({ ...base, JARVIS_GITHUB_API_BASE: "" }).kind).toBe("app");
   });
 
   it("A5: PAT-fallback er AV som standard og slås kun på av eksakt «true» (case-insensitivt) - «1»/«yes»/«on» teller ikke", () => {

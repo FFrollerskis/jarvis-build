@@ -1,14 +1,45 @@
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it } from "vitest";
-import { GitHubAppAuthError, maskGitHubSecrets } from "../src/github-app-auth.ts";
-import { failure, harness, stopFakeServers } from "./support/wpc3-harness.ts";
+import { GitHubAppAuth, GitHubAppAuthError, maskGitHubSecrets, normalizeGitHubApiBase } from "../src/github-app-auth.ts";
+import { resolveGitHubAuthSettings } from "../src/github-token-provider.ts";
+import { APP_ID, INSTALLATION_ID, REPO, failure, harness, keys, stopFakeServers } from "./support/wpc3-harness.ts";
 
 /**
  * WP-C3, rettelser etter den UAVHENGIGE sikkerhetsreviewen (PR #311). Hver `describe` bærer funn-id-en (F1, F4, ...) og er skrevet slik at den
  * FEILER mot koden slik den var før rettelsen (verifisert ved å reversere rettelsen lokalt, se commit-meldingene).
  */
 
-afterEach(stopFakeServers);
+const listeners: Array<{ stop(): Promise<void> }> = [];
+afterEach(async () => {
+  await stopFakeServers();
+  while (listeners.length > 0) await listeners.pop()?.stop();
+});
+
+interface Hit { readonly method: string; readonly path: string; readonly authorization: string | null }
+interface Listener { readonly url: string; readonly hits: Hit[]; stop(): Promise<void> }
+
+/** Minimal HTTP-lytter på 127.0.0.1 som husker hva den ble spurt om (brukes som «mottaker» og som redirect-kilde). */
+async function listen(respond: (req: IncomingMessage, res: ServerResponse, self: { url: string }) => void): Promise<Listener> {
+  const hits: Hit[] = [];
+  const self = { url: "" };
+  const sockets = new Set<import("node:net").Socket>();
+  const server = createServer((req, res) => {
+    hits.push({ method: req.method ?? "GET", path: req.url ?? "/", authorization: typeof req.headers.authorization === "string" ? req.headers.authorization : null });
+    req.resume();
+    respond(req, res, self);
+  });
+  server.on("connection", (socket) => { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  self.url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const listener: Listener = {
+    url: self.url, hits,
+    stop: async () => { for (const socket of sockets) socket.destroy(); await new Promise<void>((resolve) => server.close(() => resolve())); }
+  };
+  listeners.push(listener);
+  return listener;
+}
 
 // PEM-rammer bygges dynamisk, slik at hemmelighetsskannere (gitleaks) ikke tar test-fikstureringen for en ekte nøkkel.
 const BEGIN_PKCS8 = ["-----BEGIN", "PRIVATE KEY-----"].join(" ");
@@ -115,5 +146,76 @@ describe("F1: maskeringen er lineær i inndata-lengden (ReDoS) og kutter inndata
     expect(error.message).not.toContain(jwt.split(".")[1] as string);
     expect(JSON.stringify(error)).not.toContain(jwt.slice(0, 40));
     expect(JSON.stringify(h.auth.state())).not.toContain(jwt.slice(0, 40));
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+describe("F5: API-basen er KUN https://api.github.com - JWT-en kan ikke sendes til en annen vert", () => {
+  it("F5a: standard/tom/«api.github.com» med skråstrek eller store bokstaver i verten godtas; ALT annet avvises (GHES er DEFERRED)", () => {
+    expect(normalizeGitHubApiBase(undefined)).toBe("https://api.github.com");
+    expect(normalizeGitHubApiBase("  ")).toBe("https://api.github.com");
+    expect(normalizeGitHubApiBase("https://api.github.com/")).toBe("https://api.github.com");
+    expect(normalizeGitHubApiBase("https://API.GitHub.COM")).toBe("https://api.github.com");
+    expect(normalizeGitHubApiBase("https://api.github.com:443")).toBe("https://api.github.com");
+    for (const bad of [
+      "https://evil.example", "https://ghe.firma.no/api/v3", "https://github.com", "https://api.githubusercontent.com", "https://xapi.github.com",
+      "https://api.github.com.evil.example", "https://evil.example/api.github.com", "https://api.github.com.", "https://api.github.com:8443",
+      "https://api.github.com/api/v3", "https://api.github.com/x", "https://api.github.com@evil.example", "https://user:pw@api.github.com",
+      "http://api.github.com", "https://api.github.com?x=1", "https://127.0.0.1", "https://[::1]"
+    ]) {
+      expect(() => normalizeGitHubApiBase(bad), bad).toThrow(GitHubAppAuthError);
+    }
+    expect(() => normalizeGitHubApiBase("https://ghe.firma.no/api/v3")).toThrow(/api_base_host_not_allowed/);
+    expect(() => normalizeGitHubApiBase("https://api.github.com:8443")).toThrow(/api_base_port_not_allowed/);
+    expect(() => normalizeGitHubApiBase("https://api.github.com/api/v3")).toThrow(/api_base_path_not_allowed/);
+  });
+
+  it("F5b: konstruktøren og miljøoppløsningen feiler LUKKET for en annen vert - før noe kall er gjort", () => {
+    expect(() => new GitHubAppAuth({ appId: "1", installationId: "2", privateKey: async () => keys.pkcs1, repositories: [REPO], apiBase: "https://evil.example" })).toThrow(/api_base_host_not_allowed/);
+    const env = { JARVIS_GITHUB_APP_ID: APP_ID, JARVIS_GITHUB_APP_INSTALLATION_ID: INSTALLATION_ID, JARVIS_GITHUB_REPO: REPO };
+    const settings = resolveGitHubAuthSettings({ ...env, JARVIS_GITHUB_API_BASE: "https://evil.example" });
+    expect(settings.kind).toBe("invalid");
+    expect(settings.kind === "invalid" && settings.error.message).toContain("api_base_host_not_allowed");
+    expect(resolveGitHubAuthSettings({ ...env, JARVIS_GITHUB_API_BASE: "https://api.github.com" }).kind).toBe("app");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+describe("F5c: redirects følges aldri på kall som bærer JWT eller installasjonstoken", () => {
+  function clientFor(base: string): GitHubAppAuth {
+    return new GitHubAppAuth({
+      appId: APP_ID, installationId: INSTALLATION_ID, privateKey: async () => keys.pkcs1, repositories: [REPO], apiBase: base,
+      allowLoopbackHttpForTests: true, sleep: async () => undefined, log: () => undefined
+    });
+  }
+
+  it("F5c1: en 307 til en ANNEN opprinnelse følges ikke (mottakeren får aldri en forespørsel), ingen retry, presis feilkode", async () => {
+    const recipient = await listen((_req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end("{}"); });
+    const redirector = await listen((_req, res) => { res.writeHead(307, { location: `${recipient.url}/mottaker` }); res.end(); });
+    const auth = clientFor(redirector.url);
+    const error = await failure(auth.token());
+    expect(error.code).toBe("GITHUB_APP_RESPONSE_INVALID");
+    expect(error.message).toContain("unexpected_redirect_http_307");
+    expect(redirector.hits).toHaveLength(1); // 3xx er ikke «nettverksfeil»: ingen backoff-gjentakelse
+    expect(recipient.hits).toHaveLength(0);
+  });
+
+  it("F5c2: en 301/302/308 til SAMME opprinnelse (der Authorization ellers ville fulgt med) følges heller ikke - JWT-en sendes nøyaktig én gang", async () => {
+    for (const status of [301, 302, 308]) {
+      const redirector = await listen((_req, res, self) => { res.writeHead(status, { location: `${self.url}/annet-sted` }); res.end(); });
+      const error = await failure(clientFor(redirector.url).inspectInstallation());
+      expect(error.code, String(status)).toBe("GITHUB_APP_RESPONSE_INVALID");
+      expect(redirector.hits.map((h) => h.path), String(status)).toEqual([`/app/installations/${INSTALLATION_ID}`]);
+    }
+  });
+
+  it("F5c3: revoke() (bærer installasjonstokenet) følger heller ingen redirect", async () => {
+    const recipient = await listen((_req, res) => { res.writeHead(204); res.end(); });
+    const redirector = await listen((_req, res) => { res.writeHead(307, { location: `${recipient.url}/revoke` }); res.end(); });
+    const error = await failure(clientFor(redirector.url).revoke(`${["gh", "s_"].join("")}${"Z9y8X7w6".repeat(5)}`));
+    expect(error.code).toBe("GITHUB_APP_REQUEST_REJECTED");
+    expect(error.message).toContain("revoke_http_307");
+    expect(recipient.hits).toHaveLength(0);
+    expect(redirector.hits).toHaveLength(1);
   });
 });

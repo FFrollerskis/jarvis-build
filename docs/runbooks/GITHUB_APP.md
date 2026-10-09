@@ -128,8 +128,9 @@ Regler Jarvis følger (testet):
   `credential_unavailable`, loggen får `github_app_auth_failed`/`github_app_config_invalid`, og connector-statusen viser feilkoden. Jarvis faller **aldri** stille tilbake til PAT.
 - **PAT-fallback er av.** Slå den på KUN ved behov: `JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK=true` (eksakt «true»). Hver bruk logges (`github_app_pat_fallback_used`), statusen viser
   `pat_fallback.active`, og den gjelder aldri når GitHub ga noe annet enn forespurt (`GITHUB_APP_SCOPE_MISMATCH`).
-- `JARVIS_GITHUB_API_BASE` (standard `https://api.github.com`) må være https. Den styrer kun hvor App-autentiseringen snakker; `GithubTransport` og git bruker fortsatt
-  api.github.com/github.com. **GitHub Enterprise Server er ikke støttet (DEFERRED).**
+- `JARVIS_GITHUB_API_BASE`: KUN `https://api.github.com` godtas (tomt = standard). Alt annet - annen vert, port, sti, http - feiler lukket med `GITHUB_APP_CONFIG_INVALID`, fordi
+  App-JWT-en (som kan utstede installasjonstokens) ellers kunne sendes til en vilkårlig mottaker ved en endret miljøvariabel. Ingen redirects følges på kall som bærer JWT eller
+  installasjonstoken. `GithubTransport` og git bruker uansett api.github.com/github.com. **GitHub Enterprise Server er ikke støttet (DEFERRED).**
 
 ## Steg 7 - Verifiser (dette er det som gjør statusen VERIFIED)
 
@@ -179,7 +180,7 @@ Fjern `JARVIS_GITHUB_APP_ID` og `JARVIS_GITHUB_APP_INSTALLATION_ID` fra `.env` (
 
 | Kode | Årsak | Tiltak |
 |---|---|---|
-| `GITHUB_APP_CONFIG_INVALID` | App-id/installasjons-id/API-base ugyldig, eller bare én av id-ene satt | rett `.env`; API-basen må være https |
+| `GITHUB_APP_CONFIG_INVALID` | App-id/installasjons-id/API-base ugyldig, eller bare én av id-ene satt | rett `.env`; la `JARVIS_GITHUB_API_BASE` stå tom (kun `https://api.github.com` godtas) |
 | `GITHUB_APP_SCOPE_UNDEFINED` | ingen `JARVIS_GITHUB_REPO` / `JARVIS_GIT_ALLOWED_REPOS` | sett `JARVIS_GITHUB_REPO=owner/repo` |
 | `GITHUB_APP_KEY_MISSING` | nøkkelen finnes ikke i vaulten | steg 5 |
 | `GITHUB_APP_KEY_INVALID` | ikke RSA / < 2048 bit / passordbeskyttet / ødelagt innliming | last ned ny nøkkel; bruk base64-varianten |
@@ -191,7 +192,7 @@ Fjern `JARVIS_GITHUB_APP_ID` og `JARVIS_GITHUB_APP_INSTALLATION_ID` fra `.env` (
 | `GITHUB_APP_SCOPE_MISMATCH` | GitHub svarte med noe annet enn forespurt (avvist; aldri PAT-fallback) | meld fra – dette skal ikke skje |
 | `GITHUB_APP_RATE_LIMITED` | GitHub ba oss vente | Jarvis prøver igjen etter `Retry-After`; ingen handling |
 | `GITHUB_APP_UNAVAILABLE` | nettverk/timeout/5xx etter 3 forsøk | sjekk GitHub status og nettverket |
-| `GITHUB_APP_RESPONSE_INVALID` | svaret mangler gyldig token/utløpstid, er ikke JSON, eller er urimelig stort (typisk en mellomvare/proxy som endrer svaret) | sjekk proxy/brannmur mellom NAS og api.github.com; meld fra hvis det vedvarer |
+| `GITHUB_APP_RESPONSE_INVALID` | svaret mangler gyldig token/utløpstid, er ikke JSON, er urimelig stort, eller er en redirect (`unexpected_redirect_http_3xx` - følges aldri) (typisk en mellomvare/proxy som endrer svaret) | sjekk proxy/brannmur mellom NAS og api.github.com; meld fra hvis det vedvarer |
 | `github_api_error_403:Resource not accessible by integration` (i en `github.*`-handling) | App-en mangler rettigheten handlingen krever | tabellen over; godkjenn endringen i installasjonen |
 
 Alt står også i `executive.get_connector_status` (`auth.detail.last_error`) og i api-/worker-loggen som `github_app_*`-linjer.
@@ -202,7 +203,8 @@ Alt står også i `executive.get_connector_status` (`auth.detail.last_error`) og
 - Tokenet er alltid `repositories`-begrenset; svaret kontrolleres mot det som ble forespurt (`repository_selection: selected`, nøyaktig de repoene, rettigheter ikke utover forespurt). Avvik = avvist + ingen fallback.
 - Installasjonstokens caches i minnet til 5 min før `expires_at` (felles pågående utstedelse per scope), og forkastes ved 401. Hverken JWT, nøkkel eller token havner i logg, feilmeldinger, status, audit eller `JSON.stringify`/`inspect`
   (adversarielle tester med en fiendtlig server som ekkoer dem). `withSecretRedaction` i kodejobbene redigerer nylig utstedte tokens ut av feilmeldinger.
-- Utgående kall går via `guardedFetch` (rå-URL-sjekk + timeout); API-basen må være https (loopback-http finnes kun som testflagg i koden, ikke som miljøvariabel).
+- Utgående kall går via `guardedFetch` (rå-URL-sjekk + timeout); API-basen er `https://api.github.com` og ingen annen vert, og redirects følges aldri på kall med JWT/token
+  (loopback-http finnes kun som testflagg i koden, ikke som miljøvariabel).
 - Git: kodejobber får et token scopet til det ene repoet (`tokenFor`), kun i git-underprosessens miljø, og credential-helperen er fortsatt begrenset til github.com + dette repoet.
 - GitHub kan i dag levere installasjonstokens i et nytt, lengre format (`ghs_<APP-ID>_<JWT>`, utrullet fra april 2026). Jarvis antar aldri 40 tegn.
 

@@ -21,14 +21,16 @@ import { UnsafeVendorUrlError, assertGithubRepoSlug, assertSafeVendorUrl, guarde
  *    installasjonen». Svaret kontrolleres mot det som ble forespurt (leverandøren kan ikke utvide scopet stille).
  *  - Privatnøkkelen leses fra vaulten ved HVER signering og holdes aldri i langlevd minne; avvises hvis den ikke er RSA, er < 2048 bit,
  *    er passordbeskyttet eller ikke kan tolkes. JWT, privatnøkkel og token havner aldri i logg, feilmeldinger, `toJSON()` eller status.
- *  - Utgående kall går via `guardedFetch` (D-436: rå-URL-sjekk + timeout). API-basen må være https (unntak kun `http://127.0.0.1` via et
- *    eksplisitt TESTFLAGG i koden - det finnes ingen miljøvariabel som kan slå det på).
+ *  - Utgående kall går via `guardedFetch` (D-436: rå-URL-sjekk + timeout). API-basen er `https://api.github.com` og ingen annen vert (review F5;
+ *    unntak kun `http://127.0.0.1` via et eksplisitt TESTFLAGG i koden - det finnes ingen miljøvariabel som kan slå det på). Redirects følges aldri
+ *    på kall som bærer JWT eller installasjonstoken (review F5b).
  *  - Fornyelse: cache til 5 min før `expires_at`, én felles pågående utstedelse per scope (single-flight), eksponentiell backoff på
  *    5xx/rate limit (respekterer `Retry-After`), kort fail-fast etter en feil (ingen hamring), og et fortsatt gyldig token brukes videre
  *    hvis fornyelsen feiler. Klokkeskjev rettes opp fra `Date`-headeren i GitHub sine svar (én umiddelbar gjentakelse ved 401).
  */
 
-export const DEFAULT_GITHUB_API_BASE = "https://api.github.com";
+const GITHUB_API_HOST = "api.github.com";
+export const DEFAULT_GITHUB_API_BASE = `https://${GITHUB_API_HOST}`;
 /** Vault-/SecretProvider-referansen for App-ens privatnøkkel (PEM). Flerlinje-PEM hører hjemme i vaulten, aldri som vanlig env-verdi i compose. */
 export const GITHUB_APP_PRIVATE_KEY_REF = "JARVIS_GITHUB_APP_PRIVATE_KEY";
 const GITHUB_API_VERSION = "2022-11-28";
@@ -72,7 +74,7 @@ export type GitHubAppAuthErrorCode =
 /** Norsk, eier-vendt forklaring + tiltak per feilkategori (brukes av akseptansescriptet og runbooken - aldri en hemmelighet). */
 export const GITHUB_APP_ERROR_HINTS: Readonly<Record<GitHubAppAuthErrorCode, string>> = {
   GITHUB_APP_NOT_CONFIGURED: "GitHub App er ikke konfigurert (JARVIS_GITHUB_APP_ID og JARVIS_GITHUB_APP_INSTALLATION_ID mangler).",
-  GITHUB_APP_CONFIG_INVALID: "Ugyldig App-konfig (App-id, installasjons-id eller API-base). Sjekk .env - API-basen må være https.",
+  GITHUB_APP_CONFIG_INVALID: "Ugyldig App-konfig (App-id, installasjons-id eller API-base). Sjekk .env - API-basen er alltid https://api.github.com (la JARVIS_GITHUB_API_BASE stå tom).",
   GITHUB_APP_SCOPE_UNDEFINED: "Ingen repo er konfigurert som scope. Sett JARVIS_GITHUB_REPO (eller JARVIS_GIT_ALLOWED_REPOS) - Jarvis ber aldri om «alle repoer i installasjonen».",
   GITHUB_APP_KEY_MISSING: "Privatnøkkelen JARVIS_GITHUB_APP_PRIVATE_KEY finnes ikke i vaulten. Lagre PEM-filen i Infisical (eller dashbordet).",
   GITHUB_APP_KEY_INVALID: "Privatnøkkelen kan ikke brukes (må være en ukryptert RSA-nøkkel på minst 2048 bit i PEM-format).",
@@ -250,9 +252,11 @@ export const isValidGitHubAppId = (value: string): boolean => APP_ID_PATTERN.tes
 export const isValidGitHubInstallationId = (value: string): boolean => INSTALLATION_ID_PATTERN.test(value);
 
 /**
- * `https://host[:port][/sti]` uten brukerinfo/query/fragment. Den RÅ strengen valideres først med samme vakt som alle utgående leverandørkall
- * (`assertSafeVendorUrl`: ingen `.`/`..`/`%2e`-segmenter, ingen stille URL-normalisering), deretter https-/vertsreglene her.
- * Loopback-http kun når testflagget er satt (aldri fra miljøet).
+ * API-basen er `https://api.github.com` - og INGEN annen vert (review F5). App-JWT-en er en bærer-credential som kan utstede installasjonstokens, så en
+ * konfigurerbar vert ville latt en endret miljøvariabel sende den til en vilkårlig https-mottaker. GitHub Enterprise Server er DEFERRED (`GithubTransport` og
+ * git bruker uansett api.github.com/github.com); tomt/ikke satt gir standarden, alt annet feiler LUKKET som `GITHUB_APP_CONFIG_INVALID`.
+ * Den RÅ strengen valideres først med samme vakt som alle utgående leverandørkall (`assertSafeVendorUrl`: ingen `.`/`..`/`%2e`-segmenter, ingen stille
+ * URL-normalisering), deretter https-/vert-/port-/sti-reglene her. Loopback-http (`http://127.0.0.1:<port>`) kun når testflagget er satt (aldri fra miljøet).
  */
 export function normalizeGitHubApiBase(raw: string | undefined, allowLoopbackHttpForTests = false): string {
   const value = (raw ?? "").trim() === "" ? DEFAULT_GITHUB_API_BASE : (raw as string).trim();
@@ -279,11 +283,10 @@ export function normalizeGitHubApiBase(raw: string | undefined, allowLoopbackHtt
     if (!allowLoopbackHttpForTests) throw configInvalid("api_base_must_be_https");
   } else {
     if (url.protocol !== "https:") throw configInvalid("api_base_must_be_https");
-    const host = url.hostname.toLowerCase();
-    // IP-literaler og lokale navn har ikke noe på en offentlig GitHub-API-base å gjøre (JWT-en ville gått til feil mottaker).
-    if (host === "localhost" || host.startsWith("[") || /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.endsWith(".local") || !host.includes(".")) {
-      throw configInvalid("api_base_host_not_allowed");
-    }
+    // Review F5: eksakt vert-allowlist (én vert). `url.hostname` er allerede normalisert til små bokstaver; standardporten (443) blir `""`.
+    if (url.hostname !== GITHUB_API_HOST) throw configInvalid("api_base_host_not_allowed");
+    if (url.port !== "") throw configInvalid("api_base_port_not_allowed");
+    if (url.pathname.replace(/\/+$/, "") !== "") throw configInvalid("api_base_path_not_allowed");
   }
   return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}`;
 }
@@ -407,6 +410,9 @@ export interface GitHubAppAuthState {
   readonly consecutive_failures: number;
   readonly clock_skew_ms: number;
 }
+
+/** 3xx (og fetch sin «opaqueredirect»-type, for plattformer som ikke gir 3xx-svaret rett ut) - en redirect er aldri et gyldig svar på et kall med credential. */
+const isRedirectResponse = (response: Response): boolean => response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400);
 
 const isTimeoutLike = (err: unknown): boolean => err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
 
@@ -598,6 +604,7 @@ export class GitHubAppAuth {
       response = await this.#http(`${this.#apiBase}/installation/token`, {
         method: "DELETE",
         headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "jarvis", "x-github-api-version": GITHUB_API_VERSION },
+        redirect: "manual", // review F5b: tokenet følger aldri med til en annen URL
         signal: AbortSignal.timeout(this.#requestTimeoutMs)
       });
     } catch (err) {
@@ -792,6 +799,8 @@ export class GitHubAppAuth {
             ...(body !== undefined ? { "content-type": "application/json" } : {})
           },
           ...(body !== undefined ? { body } : {}),
+          // Review F5b: en redirect følges ALDRI på et kall som bærer JWT - `manual` gir 3xx-svaret tilbake, som avvises under.
+          redirect: "manual",
           signal: AbortSignal.timeout(Math.max(250, Math.min(this.#requestTimeoutMs, remaining)))
         });
         text = await response.text();
@@ -801,6 +810,10 @@ export class GitHubAppAuth {
         throw new GitHubAppAuthError("GITHUB_APP_UNAVAILABLE", isTimeoutLike(err) ? "timeout" : "network_error", { retryable: true });
       }
 
+      if (isRedirectResponse(response)) {
+        // Verken feil nøkkel, rate limit eller 5xx - en leverandør (eller en mellomvare) som flytter endepunktet. Ingen retry, ingen oppfølging av Location.
+        throw new GitHubAppAuthError("GITHUB_APP_RESPONSE_INVALID", `unexpected_redirect_http_${response.status}`);
+      }
       const skewLearned = this.#learnSkew(response);
       const status = response.status;
       if (status >= 200 && status < 300) {

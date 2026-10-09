@@ -548,11 +548,11 @@ describe("E: klokkeskjev", () => {
 
 // ---------------------------------------------------------------------------------------------------------------------------------
 describe("F: API-base", () => {
-  it("F1: standard er https://api.github.com; https med port/sti godtas; trailing slash fjernes", () => {
+  it("F1: standard er https://api.github.com; trailing slash fjernes; en annen vert/port/sti (GHES) avvises - review F5", () => {
     expect(normalizeGitHubApiBase(undefined)).toBe("https://api.github.com");
     expect(normalizeGitHubApiBase("")).toBe("https://api.github.com");
     expect(normalizeGitHubApiBase("  https://api.github.com/  ")).toBe("https://api.github.com");
-    expect(normalizeGitHubApiBase("https://ghe.firma.no:8443/api/v3/")).toBe("https://ghe.firma.no:8443/api/v3");
+    expect(() => normalizeGitHubApiBase("https://ghe.firma.no:8443/api/v3/")).toThrow(/api_base_host_not_allowed/);
   });
 
   it("F2: http, brukerinfo, query/fragment, IP-literaler, localhost, .local, enkeltnavn, backslash og mellomrom avvises", () => {

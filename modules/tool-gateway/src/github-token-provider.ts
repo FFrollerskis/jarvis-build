@@ -109,8 +109,8 @@ function repositoriesFromEnv(env: Readonly<Record<string, string | undefined>>):
 }
 
 /**
- * Leser App-konfigen fra miljøet. `JARVIS_GITHUB_API_BASE` (standard https://api.github.com) styrer KUN hvor App-autentiseringen snakker -
- * `GithubTransport` og git bruker fortsatt api.github.com/github.com (GitHub Enterprise Server er ikke støttet, DEFERRED). Loopback-http for
+ * Leser App-konfigen fra miljøet. `JARVIS_GITHUB_API_BASE` kan KUN være https://api.github.com (tomt = standard; review F5 - JWT-en sendes aldri til en
+ * annen vert) - `GithubTransport` og git bruker uansett api.github.com/github.com (GitHub Enterprise Server er ikke støttet, DEFERRED). Loopback-http for
  * tester kan KUN slås på via `options.allowLoopbackHttpForTests` i koden, aldri fra miljøet.
  */
 export function resolveGitHubAuthSettings(env: Readonly<Record<string, string | undefined>>, options: { allowLoopbackHttpForTests?: boolean } = {}): GitHubAuthSettings {
