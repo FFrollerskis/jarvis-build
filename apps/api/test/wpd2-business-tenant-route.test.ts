@@ -88,7 +88,7 @@ afterAll(async () => {
 }, 120_000);
 
 const post = (base: string, body: unknown) => fetch(`${base}/owner/business-tenants`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-const json = async (res: Response) => (await res.json()) as Record<string, any>;
+const json = async (res: Response) => (await res.json()) as Record<string, unknown>;
 const businessCount = async () => ((await admin.query("SELECT count(*)::int AS n FROM tenants WHERE kind = 'business'")).rows[0] as { n: number }).n;
 const NAME = "Kundeoppfølging AS";
 
@@ -195,7 +195,7 @@ describe("preview skriver aldri; provision krever TYPET bekreftelse", () => {
       created: { tenant: true, memory_spaces: ["business", "project"], membership: true },
       rls_probe: { enforced: true, foreign_context_rows: { tenants: 0, memory_spaces: 0, person_tenants: 0 } }
     });
-    expect((report.owner_actions as string[]).join("\n")).toContain("JARVIS_OWNER_EXTRA_TENANTS=tenant-kundeoppfolging");
+    expect((report as { owner_actions: string[] }).owner_actions.join("\n")).toContain("JARVIS_OWNER_EXTRA_TENANTS=tenant-kundeoppfolging");
     expect(await listBusinessTenantIds(app, 200)).toEqual(["tenant-kundeoppfolging"]);
     const audit = await admin.query("SELECT payload->>'via' AS via, session_id, device_id FROM audit_events WHERE tenant_id = 'tenant-kundeoppfolging' AND type = 'tenant.business_provisioned'");
     expect(audit.rows).toEqual([{ via: "dashboard", session_id: "s-owner", device_id: "d1" }]);
