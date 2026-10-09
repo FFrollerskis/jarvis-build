@@ -1,0 +1,13 @@
+# Planlagt backup (WP-C2, OPS-RUNTIME) - EKSEMPEL. Installer med `crontab -e` som brukeren som eier backup-mappen og har tilgang til docker.
+# Tikket kjører hvert 15. minutt, men gjør KUN noe når backup / off-site-kopi / restore-verifisering er forfalt (intervall: JARVIS_BACKUP_INTERVAL_HOURS,
+# standard 24 t). Et tikk uten forfall er stille, så cron-mail kommer bare når noe faktisk skjer eller feiler.
+# Erstatter den gamle daglige linjen (`17 2 * * * ... nas-backup.sh ...`). Fjern den gamle når denne er på plass; begge samtidig er trygt (et sett tatt av den
+# gamle teller som ferskt), men gir ekstra sett.
+#
+# Stiene under er fra NAS-oppsettet i docs/runbooks/NAS_UPDATE_2026-10-07.md - tilpass dem. node og docker MÅ ligge i PATH (sjekk: command -v node docker).
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+*/15 * * * * cd /volume1/jarvisbuild-data/jarvisbuild && ops/backup/nas-schedule.sh /volume1/jarvisbuild-data/backups/encrypted >> /volume1/jarvisbuild-data/backups/backup.log 2>&1
+
+# Overvåking (valgfritt, hver time): exit 0 frisk · 3 backup forfalt · 4 restore-verifisering · 5 off-site. Skriv til en egen logg eller bruk i en sjekk.
+# 7 * * * * cd /volume1/jarvisbuild-data/jarvisbuild && ops/backup/nas-schedule.sh /volume1/jarvisbuild-data/backups/encrypted status >> /volume1/jarvisbuild-data/backups/status.log 2>&1
