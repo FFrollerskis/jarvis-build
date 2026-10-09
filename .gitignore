@@ -17,6 +17,10 @@ infra/local/voice-debug-dumps/
 # EV-0 (D-410): privatnøkler (konstitusjon/break-glass) skal ALDRI inn i repoet. Den OFFENTLIGE nøkkelen config/evolution/constitution.pub.pem committes.
 *.key
 *private*.pem
+# WP-C3 (review F10): GitHub App-privatnøkkelen lastes ned som en .pem-fil som eieren kan gi hvilket som helst navn (runbooken bruker `nokkel.pem`, og `*private*.pem` fanger bare GitHubs
+# standardnavn) - ALLE .pem-filer ignoreres. Eneste unntak er den OFFENTLIGE konstitusjonsnøkkelen over (siste treff vinner i .gitignore).
+*.pem
+!config/evolution/constitution.pub.pem
 
 # D-422: evidensfiler fra NAS-akseptansen (lokale, aldri i git)
 ops/acceptance/out/
