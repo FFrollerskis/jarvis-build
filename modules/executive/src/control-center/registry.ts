@@ -139,10 +139,20 @@ function buildFailureReason(err: unknown): string {
   return `målingen feilet (${failureCategory(err)})`;
 }
 
+/**
+ * Nøkkel for «samme bygging»: ALLE identitetsfelt (sortert), ikke bare tenant - rapporten kan avhenge av person, enhet og kanal (Authority Center viser «denne enheten»). Ulik identitet deler aldri en bygging.
+ */
+function identityKey(identity: IdentityContext): string {
+  const record = identity as unknown as Record<string, unknown>;
+  return JSON.stringify(Object.keys(record).sort().map((k) => [k, record[k]]));
+}
+
 export class ControlCenterRegistry {
   private readonly centers = new Map<ControlCenterId, ControlCenterDefinition>();
   private readonly now: () => Date;
   private readonly buildTimeoutMs: number;
+  /** Gjennomgang av PR #316 (L-3): bygginger som pågår akkurat nå, per senter og identitet - se `buildOne`. */
+  private readonly inflight = new Map<string, Promise<ControlCenterReport>>();
 
   constructor(private readonly options: ControlCenterRegistryOptions = {}) {
     if (options.redact !== undefined && !isEffectiveRedactor(options.redact)) throw new Error("control_center_redact_not_effective");
@@ -189,7 +199,23 @@ export class ControlCenterRegistry {
     if (!decision.allowed) throw new ControlCenterAccessError(decision.reason);
   }
 
-  private async buildOne(center: ControlCenterDefinition, identity: IdentityContext): Promise<ControlCenterReport> {
+  /**
+   * Gjennomgang av PR #316 (L-3): SINGLE-FLIGHT. Samtidige forespørsler om samme senter for samme identitet (dobbeltklikk, to faner, oversikt + detalj som overlapper) deler ÉN bygging i stedet for å lese kildene to ganger.
+   * Bevisst IKKE en resultat-cache: en rapport som er noen sekunder gammel rett etter at eieren har trykket Pause ville vist tilstanden FØR handlingen. Bygginger som ikke overlapper bygger alltid på nytt
+   * (presence mot credential-kilden har sin egen, kortlevde cache). En bygging avsluttes alltid (tidsavbrudd), så en hengende bygging holder aldri nøkkelen opptatt.
+   */
+  private buildOne(center: ControlCenterDefinition, identity: IdentityContext): Promise<ControlCenterReport> {
+    const key = `${center.id}\u0000${identityKey(identity)}`;
+    const running = this.inflight.get(key);
+    if (running !== undefined) return running;
+    const attempt = this.buildFresh(center, identity);
+    this.inflight.set(key, attempt);
+    const clear = (): void => { if (this.inflight.get(key) === attempt) this.inflight.delete(key); };
+    attempt.then(clear, clear);
+    return attempt;
+  }
+
+  private async buildFresh(center: ControlCenterDefinition, identity: IdentityContext): Promise<ControlCenterReport> {
     const now = this.now();
     let report: ControlCenterReport;
     try {

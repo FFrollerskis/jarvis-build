@@ -302,6 +302,80 @@ describe("ControlCenterRegistry: fail-soft", () => {
   });
 });
 
+describe("ControlCenterRegistry: single-flight (L-3)", () => {
+  const gate = () => {
+    let release!: () => void;
+    const open = new Promise<void>((resolve) => { release = resolve; });
+    return { open, release };
+  };
+
+  it("samtidige forespørsler om samme senter for samme identitet deler ÉN bygging (rapport og oversikt overlapper), og alle får samme rapport", async () => {
+    let builds = 0;
+    const g = gate();
+    const r = registry();
+    r.register(center("ai", async () => { builds += 1; await g.open; return { sections: [okSection()], actions: [] }; }));
+    const [a, b, overview] = [r.report("ai", owner), r.report("ai", owner), r.overview(owner)];
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    g.release();
+    const [ra, rb] = await Promise.all([a, b]);
+    await overview;
+    expect(builds).toBe(1);
+    expect(ra).toEqual(rb);
+  });
+
+  it("bygginger som IKKE overlapper bygger alltid på nytt (ingen resultat-cache: en rapport rett etter en handling viser ikke tilstanden før den)", async () => {
+    let builds = 0;
+    const r = registry();
+    r.register(center("ai", async () => { builds += 1; return { sections: [okSection()], actions: [] }; }));
+    await r.report("ai", owner);
+    await r.report("ai", owner);
+    expect(builds).toBe(2);
+  });
+
+  it("ulik identitet (annen enhet, annen kanal, annen tenant, annen person) deler ALDRI en bygging - hver bygges for seg med sin egen identitet", async () => {
+    const seen: string[] = [];
+    const g = gate();
+    const r = registry({ isOwner: () => true });
+    r.register(center("ai", async (ctx) => { seen.push(`${ctx.identity.tenant_id}/${ctx.identity.person_id}/${ctx.identity.device_id}/${ctx.identity.channel}`); await g.open; return { sections: [okSection()], actions: [] }; }));
+    const ids: IdentityContext[] = [owner, { ...owner, device_id: "d2" }, { ...owner, channel: "voice" }, otherTenant, stranger];
+    const pending = ids.map((i) => r.report("ai", i));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    g.release();
+    await Promise.all(pending);
+    expect(seen).toHaveLength(ids.length);
+    expect(new Set(seen).size).toBe(ids.length);
+  });
+
+  it("en bygging som feiler eller tidsavbrytes frigjør nøkkelen: neste forespørsel bygger på nytt og kan lykkes", async () => {
+    let builds = 0;
+    const r = registry({ buildTimeoutMs: 20 });
+    r.register(center("ai", async () => {
+      builds += 1;
+      if (builds === 1) throw new Error("boom");
+      if (builds === 2) return new Promise<never>(() => undefined); // henger
+      return { sections: [okSection()], actions: [] };
+    }));
+    expect((await r.report("ai", owner))?.status).toBe("UNKNOWN");
+    expect((await r.report("ai", owner))?.status).toBe("UNKNOWN");
+    expect((await r.report("ai", owner))?.status).toBe("OK");
+    expect(builds).toBe(3);
+  });
+
+  it("en nektet identitet bygger ingenting og blokkerer ikke en eier som bygger samtidig", async () => {
+    let builds = 0;
+    const g = gate();
+    const r = registry();
+    r.register(center("ai", async () => { builds += 1; await g.open; return { sections: [okSection()], actions: [] }; }));
+    const denied = r.report("ai", stranger).catch((e: unknown) => (e as Error).name);
+    const ok = r.report("ai", owner);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    g.release();
+    expect(await denied).toBe("ControlCenterAccessError");
+    expect((await ok)?.status).toBe("OK");
+    expect(builds).toBe(1);
+  });
+});
+
 describe("ControlCenterRegistry: oversikt", () => {
   it("lister de registrerte sentrene og de som ikke er koblet inn - et senter som ikke finnes sies å ikke finnes", async () => {
     const r = registry();
