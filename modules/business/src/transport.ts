@@ -1,8 +1,9 @@
 import type pg from "pg";
 import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts";
 import { DailyBrief } from "@jarvis/tool-gateway";
-import type { BriefSource, ToolGateway, ToolTransport } from "@jarvis/tool-gateway";
+import type { BriefSource, ToolGateway, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import type { BusinessService } from "./service.ts";
+import { BusinessPipelineError, BusinessPipelineService, type PipelineContext } from "./pipeline-service.ts";
 import { businessOpenLoopsSource, generateWeeklyBrief, renderWeeklyBrief } from "./business-brief.ts";
 import type { OpenLoopService } from "./open-loop-service.ts";
 import { BusinessEventSyncService } from "./business-event-sync.ts";
@@ -24,6 +25,7 @@ import type { ScoreEntityType } from "./scoring-types.ts";
  */
 export class BusinessTransport implements ToolTransport {
   private eventSync?: BusinessEventSyncService;
+  private pipeline?: BusinessPipelineService;
 
   constructor(
     private readonly service: BusinessService,
@@ -45,9 +47,22 @@ export class BusinessTransport implements ToolTransport {
     private readonly extraBriefSources: BriefSource[] = []
   ) {}
 
-  async invoke(action: string, parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> {
+  async invoke(
+    action: string,
+    parameters: Record<string, JsonValue>,
+    _credential?: string,
+    context?: ToolInvocationContext
+  ): Promise<{ external_id?: string; data?: JsonValue }> {
     const tenantId = requireString(parameters, "tenant_id");
     const memorySpace = (parameters["memory_space"] !== undefined ? String(parameters["memory_space"]) : "business") as MemorySpace;
+    // WP-D2: pipeline-skrivingene (lead/opportunity) har forsvar i dybden utover gatewayens scope-sjekk - identitetens tenant MÅ være tenanten det skrives i.
+    const pipelineCtx = (): PipelineContext => {
+      if (context?.identity && context.identity.tenant_id !== tenantId) throw new Error("business_pipeline:scope_mismatch");
+      return {
+        actor_person_id: context?.identity?.person_id ?? null,
+        idempotency_key: typeof parameters["idempotency_key"] === "string" ? (parameters["idempotency_key"] as string) : null
+      };
+    };
 
     switch (action) {
       case "create_company": {
@@ -73,45 +88,88 @@ export class BusinessTransport implements ToolTransport {
         return { external_id: row.contact_id, data: row as unknown as JsonValue };
       }
       case "create_lead": {
-        const row = await this.service.createLead(tenantId, memorySpace, {
-          title: requireString(parameters, "title"),
-          ...(parameters["company_id"] !== undefined ? { company_id: String(parameters["company_id"]) } : {}),
-          ...(parameters["contact_id"] !== undefined ? { contact_id: String(parameters["contact_id"]) } : {}),
-          ...(parameters["status"] !== undefined ? { status: parameters["status"] as never } : {}),
-          ...(parameters["source"] !== undefined ? { source: String(parameters["source"]) } : {}),
-          ...(parameters["source_type"] !== undefined ? { source_type: String(parameters["source_type"]) } : {}),
-          ...(parameters["source_instance_id"] !== undefined ? { source_instance_id: String(parameters["source_instance_id"]) } : {}),
-          ...(parameters["external_id"] !== undefined ? { external_id: String(parameters["external_id"]) } : {}),
-          ...(parameters["owner_person_id"] !== undefined ? { owner_person_id: String(parameters["owner_person_id"]) } : {})
-        });
+        const res = await this.requirePipeline().createLead(tenantId, memorySpace, {
+          title: parameters["title"], company_id: parameters["company_id"], contact_id: parameters["contact_id"], status: parameters["status"],
+          source: parameters["source"], source_type: parameters["source_type"], source_instance_id: parameters["source_instance_id"],
+          external_id: parameters["external_id"], owner_person_id: parameters["owner_person_id"]
+        }, pipelineCtx());
+        const row = res.entity as unknown as { lead_id: string };
         return { external_id: row.lead_id, data: row as unknown as JsonValue };
       }
       case "update_lead_status": {
-        const row = await this.service.updateLeadStatus(
-          tenantId, memorySpace, requireString(parameters, "lead_id"), requireString(parameters, "status") as never
-        );
-        return { ...(row ? { external_id: row.lead_id } : {}), data: row as unknown as JsonValue };
+        try {
+          const res = await this.requirePipeline().setLeadStatus(tenantId, memorySpace, requireString(parameters, "lead_id"), parameters["status"], pipelineCtx());
+          const row = res.entity as unknown as { lead_id: string };
+          return { external_id: row.lead_id, data: row as unknown as JsonValue };
+        } catch (err) {
+          if (err instanceof BusinessPipelineError && err.code === "not_found") return { data: null };
+          throw err;
+        }
       }
       case "create_opportunity": {
-        const row = await this.service.createOpportunity(tenantId, memorySpace, {
-          title: requireString(parameters, "title"),
-          ...(parameters["company_id"] !== undefined ? { company_id: String(parameters["company_id"]) } : {}),
-          ...(parameters["contact_id"] !== undefined ? { contact_id: String(parameters["contact_id"]) } : {}),
-          ...(parameters["lead_id"] !== undefined ? { lead_id: String(parameters["lead_id"]) } : {}),
-          ...(parameters["stage"] !== undefined ? { stage: parameters["stage"] as never } : {}),
-          ...(parameters["value_ore"] !== undefined ? { value_ore: Number(parameters["value_ore"]) } : {}),
-          ...(parameters["currency"] !== undefined ? { currency: String(parameters["currency"]) } : {}),
-          ...(parameters["expected_close_date"] !== undefined ? { expected_close_date: String(parameters["expected_close_date"]) } : {}),
-          ...(parameters["owner_person_id"] !== undefined ? { owner_person_id: String(parameters["owner_person_id"]) } : {})
-        });
+        const res = await this.requirePipeline().createOpportunity(tenantId, memorySpace, {
+          title: parameters["title"], company_id: parameters["company_id"], contact_id: parameters["contact_id"], lead_id: parameters["lead_id"],
+          stage: parameters["stage"], value_ore: parameters["value_ore"], currency: parameters["currency"], expected_close_date: parameters["expected_close_date"],
+          owner_person_id: parameters["owner_person_id"]
+        }, pipelineCtx());
+        const row = res.entity as unknown as { opportunity_id: string };
         return { external_id: row.opportunity_id, data: row as unknown as JsonValue };
       }
       case "update_opportunity_stage": {
-        const row = await this.service.updateOpportunityStage(
-          tenantId, memorySpace, requireString(parameters, "opportunity_id"), requireString(parameters, "stage") as never,
-          parameters["value_ore"] !== undefined ? Number(parameters["value_ore"]) : undefined
+        try {
+          const res = await this.requirePipeline().moveOpportunityStage(
+            tenantId, memorySpace, requireString(parameters, "opportunity_id"), parameters["stage"], parameters["value_ore"], pipelineCtx()
+          );
+          const row = res.entity as unknown as { opportunity_id: string };
+          return { external_id: row.opportunity_id, data: row as unknown as JsonValue };
+        } catch (err) {
+          if (err instanceof BusinessPipelineError && err.code === "not_found") return { data: null };
+          throw err;
+        }
+      }
+      // WP-D2 (JARVIS-049): nye pipeline-handlinger. Alle skriver via BusinessPipelineService (kun business-tenant, før/etter-logg, valgfri idempotency_key).
+      case "update_lead": {
+        const res = await this.requirePipeline().updateLead(tenantId, memorySpace, requireString(parameters, "lead_id"), pickPatch(parameters, LEAD_PATCH_KEYS), pipelineCtx());
+        return pipelineData(res, requireString(parameters, "lead_id"));
+      }
+      case "update_opportunity": {
+        const res = await this.requirePipeline().updateOpportunity(tenantId, memorySpace, requireString(parameters, "opportunity_id"), pickPatch(parameters, OPPORTUNITY_PATCH_KEYS), pipelineCtx());
+        return pipelineData(res, requireString(parameters, "opportunity_id"));
+      }
+      case "set_next_action": {
+        const res = await this.requirePipeline().setNextAction(
+          tenantId, memorySpace, requireString(parameters, "entity_type") as never, requireString(parameters, "entity_id"),
+          { next_action: parameters["next_action"] === undefined ? null : parameters["next_action"], next_action_due_at: parameters["next_action_due_at"] }, pipelineCtx()
         );
-        return { ...(row ? { external_id: row.opportunity_id } : {}), data: row as unknown as JsonValue };
+        return pipelineData(res, requireString(parameters, "entity_id"));
+      }
+      case "close_lead": {
+        const res = await this.requirePipeline().closeLead(tenantId, memorySpace, requireString(parameters, "lead_id"), { outcome: parameters["outcome"], reason: parameters["reason"] }, pipelineCtx());
+        return pipelineData(res, requireString(parameters, "lead_id"));
+      }
+      case "close_opportunity": {
+        const res = await this.requirePipeline().closeOpportunity(
+          tenantId, memorySpace, requireString(parameters, "opportunity_id"),
+          { outcome: parameters["outcome"], reason: parameters["reason"], final_value_ore: parameters["final_value_ore"] }, pipelineCtx()
+        );
+        return pipelineData(res, requireString(parameters, "opportunity_id"));
+      }
+      case "delete_lead": {
+        const res = await this.requirePipeline().deleteLead(tenantId, memorySpace, requireString(parameters, "lead_id"), pipelineCtx());
+        return { external_id: res.entity_id, data: res as unknown as JsonValue };
+      }
+      case "delete_opportunity": {
+        const res = await this.requirePipeline().deleteOpportunity(tenantId, memorySpace, requireString(parameters, "opportunity_id"), pipelineCtx());
+        return { external_id: res.entity_id, data: res as unknown as JsonValue };
+      }
+      // Gatewayens klasse C-evidens (`preflight_action`): saneret før/etter-snapshot (ingen fritekst) - se BusinessPipelineService.inspect().
+      case "inspect_lead": {
+        const snap = await this.requirePipeline().inspect(tenantId, memorySpace, "lead", requireString(parameters, "lead_id"));
+        return { data: snap as JsonValue };
+      }
+      case "inspect_opportunity": {
+        const snap = await this.requirePipeline().inspect(tenantId, memorySpace, "opportunity", requireString(parameters, "opportunity_id"));
+        return { data: snap as JsonValue };
       }
       case "record_activity": {
         const row = await this.service.recordActivity(tenantId, memorySpace, {
@@ -296,6 +354,11 @@ export class BusinessTransport implements ToolTransport {
     }
   }
 
+  private requirePipeline(): BusinessPipelineService {
+    this.pipeline ??= new BusinessPipelineService(this.requirePool());
+    return this.pipeline;
+  }
+
   private requireOpenLoops(): OpenLoopService {
     if (!this.openLoops) throw new Error("business_open_loops_not_configured");
     return this.openLoops;
@@ -316,6 +379,23 @@ export class BusinessTransport implements ToolTransport {
     if (!this.scoring) throw new Error("business_scoring_not_configured");
     return this.scoring;
   }
+}
+
+/** Feltene (parameternavn) som `update_lead`/`update_opportunity` kan endre - alt annet i parametrene (id-er, nøkkel, scope) er aldri en del av patchen. */
+const LEAD_PATCH_KEYS = ["title", "company_id", "contact_id", "source", "assign_to_person_id"] as const;
+const OPPORTUNITY_PATCH_KEYS = ["title", "company_id", "contact_id", "lead_id", "value_ore", "currency", "expected_close_date", "assign_to_person_id"] as const;
+
+function pickPatch(parameters: Record<string, JsonValue>, keys: readonly string[]): Record<string, JsonValue> {
+  const patch: Record<string, JsonValue> = {};
+  for (const key of keys) if (parameters[key] !== undefined) patch[key] = parameters[key] as JsonValue;
+  return patch;
+}
+
+function pipelineData(res: { entity: unknown; changed: boolean; replayed: boolean; change_id: string | null; changed_fields: string[] }, entityId: string): { external_id: string; data: JsonValue } {
+  return {
+    external_id: entityId,
+    data: { changed: res.changed, replayed: res.replayed, change_id: res.change_id, changed_fields: res.changed_fields, entity: res.entity } as unknown as JsonValue
+  };
 }
 
 function requireString(parameters: Record<string, JsonValue>, key: string): string {

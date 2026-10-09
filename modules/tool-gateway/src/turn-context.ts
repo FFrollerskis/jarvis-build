@@ -89,7 +89,8 @@ const TOOL_INTENTS: Readonly<Record<string, RegExp>> = {
   pipedrive: /(pipedrive|\bcrm\b|pipeline|\bdeal(s|en|ene)?\b|salgsmulighet)/i,
   contract: /(kontrakt|avtaler\b|fornyelse|oppsigelse|forpliktelse|bindingstid)/i,
   support: /(support|billett|ticket|kundehenvendelse|kundesak|henvendelse)/i,
-  business: /(forretning|selskap|bedrift|åpne saker|oppfølging|metrikk|\blead(s|en|ene)?\b|mulighet(er|ene)?\b|brief)/i,
+  // WP-D2: «muligheten» (bestemt entall) manglet - «lukk salgsmuligheten» traff ingen verktøy; + churn/produktbruk (kundeforhold-signalene).
+  business: /(forretning|selskap|bedrift|åpne saker|oppfølging|metrikk|\blead(s|en|ene)?\b|mulighet(en|er|ene)?\b|brief|churn|frafall|produktbruk)/i,
   operations: /(drift|leverandør|runbook|driftsoppgave|vedlikehold)/i,
   product: /(produkt(et|er|ene)?\b|feature|funksjon(er|ene)?\b|roadmap)/i,
   conversation_graph: /(samtalegraf|hvem er .* (på|i) (slack|discord|telegram|e-?post)|identitet|kanalkobling|på tvers av kanal)/i,

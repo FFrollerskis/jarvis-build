@@ -72,7 +72,9 @@ export class OpenLoopService {
            AND NOT EXISTS (
              SELECT 1 FROM business_followups f
              WHERE f.tenant_id = o.tenant_id AND f.opportunity_id = o.opportunity_id AND f.status = 'open'
-           )`,
+           )
+           -- WP-D2: en PLANLAGT neste handling (satt med business.set_next_action, frist i fremtiden) er nettopp det loopen ber om - da er den ikke stagnert.
+           AND NOT (o.next_action IS NOT NULL AND o.next_action_due_at IS NOT NULL AND o.next_action_due_at > now())`,
         [tenantId, staleDays]
       );
       let detected = 0;

@@ -275,7 +275,7 @@ export class BusinessService {
       if (!company) return null;
       const contacts = (await client.query(`SELECT * FROM business_contacts WHERE tenant_id = $1 AND company_id = $2 ORDER BY name LIMIT 50`, [tenantId, companyId])).rows as BusinessContact[];
       const opportunities = (await client.query(
-        `SELECT opportunity_id, title, stage, value_ore FROM business_opportunities WHERE tenant_id = $1 AND company_id = $2 AND stage NOT IN ('won','lost') ORDER BY updated_at DESC LIMIT 20`,
+        `SELECT opportunity_id, title, stage, value_ore, next_action, next_action_due_at FROM business_opportunities WHERE tenant_id = $1 AND company_id = $2 AND stage NOT IN ('won','lost') ORDER BY updated_at DESC LIMIT 20`,
         [tenantId, companyId]
       )).rows;
       const followups = (await client.query(

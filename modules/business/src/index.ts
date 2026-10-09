@@ -1,5 +1,6 @@
 export * from "./types.ts";
 export * from "./service.ts";
+export * from "./pipeline-service.ts";
 export * from "./transport.ts";
 export * from "./credential.ts";
 export * from "./open-loop-types.ts";

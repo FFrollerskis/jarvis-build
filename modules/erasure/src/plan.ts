@@ -123,6 +123,10 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // `product_item_events` FØR `product_items` (FK -> product_items).
   add(result, "product_item_events", await run(client, mode, "product_item_events", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "product_items", await run(client, mode, "product_items", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // WP-D2 (089_business_pipeline_writes.sql): før/etter-loggen for lead-/opportunity-endringer holder KOPIER av pipeline-radene (tittel, neste handling, lukkegrunn)
+  // og er derfor KUNDEDATA som følger memory-space-slettingen (ikke append-only systemrevisjon som `audit_events`, som aldri får fritekst - se pipeline-service.ts
+  // `inspect()`). Ingen FK inn eller ut (løs entity_id-peker) - rekkefølgen er likegyldig. `jarvis_app` har DELETE kun for dette (089).
+  add(result, "business_change_log", await run(client, mode, "business_change_log", "tenant_id = $1 AND memory_space_id = $2", tv));
   // UA-4 Native Jarvis Growth Core (D-74, 027_growth.sql): registrer
   // vekst-tabellene i erasure-planen (SAMME mønster/begrunnelse som
   // support_*/contract_* over).
