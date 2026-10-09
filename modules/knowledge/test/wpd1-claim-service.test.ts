@@ -18,6 +18,7 @@ import {
   ClaimError,
   ClaimVerificationService,
   MAX_CLAIMS_PER_SPACE,
+  createKnowledgeClaimsPort,
   MAX_EVIDENCE_PER_CLAIM,
   claimHash,
   displayedClaimStatus,
@@ -549,5 +550,75 @@ describe("F: små hjelpere", () => {
     }
     expect(claimHash("Oslo er hovedstaden.")).toBe(claimHash("  OSLO   er hovedstaden  "));
     expect(claimHash("Oslo er hovedstaden")).not.toBe(claimHash("Bergen er hovedstaden"));
+  });
+});
+
+describe("G: createKnowledgeClaimsPort - bindingen mot verktøylaget (skriving AV som standard, rommet kommer ALLTID fra identiteten)", () => {
+  it("uten writes: true finnes KUN lesingen - ingen skrive-metode å kalle", () => {
+    const port = createKnowledgeClaimsPort(service);
+    expect(Object.keys(port)).toEqual(["getClaimStatus"]);
+    expect(port.registerClaim).toBeUndefined();
+    expect(port.addClaimEvidence).toBeUndefined();
+    expect(port.retractClaimEvidence).toBeUndefined();
+    expect(port.proposeClaimPromotion).toBeUndefined();
+  });
+
+  it("lesingen følger identitetens rom (ikke et argument): samme tekst i to rom er to påstander, og en annen tenant ser ingenting", async () => {
+    const port = createKnowledgeClaimsPort(service, { writes: true });
+    const personal = identity("personal");
+    const business = identity("business");
+    const text = uniqueText("port-rom");
+    await port.registerClaim!(personal, { claim: text, start_research: true });
+    const here = (await port.getClaimStatus(personal, { claim: text })) as { found: boolean; status: string };
+    expect(here).toMatchObject({ found: true, status: "RESEARCHING" });
+    expect(await port.getClaimStatus(business, { claim: text })).toMatchObject({ found: false, status: "UNKNOWN" });
+    expect(await port.getClaimStatus(identity("personal", TENANT_B), { claim: text })).toMatchObject({ found: false, status: "UNKNOWN" });
+  });
+
+  it("registrer -> evidens -> VERIFIED -> forslag: hele veien via porten, og promoteringen havner KUN i karantene (aldri autoritativt minne)", async () => {
+    const port = createKnowledgeClaimsPort(service, { writes: true, promotion: writer });
+    const id = identity("personal");
+    const text = uniqueText("port-helhet");
+    const registered = (await port.registerClaim!(id, { claim: text, start_research: true })) as { claim: { claim_id: string } };
+    const claimId = registered.claim.claim_id;
+    const first = (await port.addClaimEvidence!(id, claimId, { stance: "supports", source_ref: url("ssb.no", "/x"), is_primary: true })) as { inserted: boolean; claim: { status: string } };
+    expect(first.inserted).toBe(true);
+    expect(first.claim.status).toBe("PROVISIONAL");
+    const second = (await port.addClaimEvidence!(id, claimId, { stance: "supports", source_ref: url("regjeringen.no", "/y") })) as { claim: { status: string }; transition: string[] };
+    expect(second.claim.status).toBe("VERIFIED");
+    const proposed = (await port.proposeClaimPromotion!(id, claimId)) as { outcome: string; memory_item_id: string | null };
+    expect(proposed.outcome).toBe("proposed");
+    const item = await withMemoryTransaction(appPool, TENANT_A, ["personal"], async (client) =>
+      (await client.query("SELECT status FROM memory_items WHERE memory_item_id = $1", [proposed.memory_item_id])).rows[0] as { status: string } | undefined
+    );
+    expect(item?.status).toBe("quarantined");
+    // Idempotent: samme påstand foreslås ikke på nytt.
+    expect(await port.proposeClaimPromotion!(id, claimId)).toMatchObject({ outcome: "already_proposed" });
+  });
+
+  it("promotering uten konfigurert karantene-vei avvises (promotion_not_configured), og ugyldig input blir ClaimError - aldri en stille tilstandsendring", async () => {
+    const port = createKnowledgeClaimsPort(service, { writes: true });
+    const id = identity("personal");
+    const { claim } = await newClaim("port-feil");
+    await expect(port.proposeClaimPromotion!(id, claim.claim_id)).rejects.toMatchObject({ reason: "promotion_not_configured" });
+    await expect(port.addClaimEvidence!(id, claim.claim_id, { stance: "kanskje", source_ref: url("a.no") })).rejects.toMatchObject({ reason: "stance_invalid" });
+    await expect(port.addClaimEvidence!(id, claim.claim_id, { stance: "supports", source_ref: url("a.no"), is_primary: "ja" as never })).rejects.toMatchObject({ reason: "is_primary_invalid" });
+    await expect(port.addClaimEvidence!(id, claim.claim_id, { stance: "supports", source_ref: 5 as never })).rejects.toMatchObject({ reason: "source_ref_invalid" });
+    await expect(port.addClaimEvidence!(id, claim.claim_id, { stance: "supports" })).rejects.toBeInstanceOf(ClaimError);
+    await expect(port.addClaimEvidence!(id, claim.claim_id, { stance: "supports", source_ref: url("a.no"), excerpt: 5 as never })).rejects.toMatchObject({ reason: "excerpt_invalid" });
+    const after = (await port.getClaimStatus(id, { claim_id: claim.claim_id })) as { claim: { evidence: unknown[]; status: string } };
+    expect(after.claim.evidence).toHaveLength(0);
+    expect(after.claim.status).toBe("RESEARCHING");
+  });
+
+  it("tilbaketrekking går via porten med begrunnelse og beregner statusen på nytt", async () => {
+    const port = createKnowledgeClaimsPort(service, { writes: true });
+    const id = identity("personal");
+    const { claim } = await newClaim("port-tilbake");
+    const added = (await port.addClaimEvidence!(id, claim.claim_id, { stance: "supports", source_ref: url("a.no", "/t") })) as { evidence_id: string; claim: { status: string } };
+    expect(added.claim.status).toBe("PROVISIONAL");
+    await expect(port.retractClaimEvidence!(id, claim.claim_id, added.evidence_id, "   ")).rejects.toMatchObject({ reason: "retraction_reason_required" });
+    const done = (await port.retractClaimEvidence!(id, claim.claim_id, added.evidence_id, "kilden var feil")) as { claim: { status: string } };
+    expect(done.claim.status).toBe("RESEARCHING");
   });
 });

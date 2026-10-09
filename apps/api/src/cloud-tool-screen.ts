@@ -1,7 +1,7 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import { DEFAULT_PROFILES, classifyContentSensitivity, type ToolExecutor } from "@jarvis/model-gateway";
 import type { ToolCallRequest, ToolResultMessage } from "@jarvis/provider-adapters";
-import { screenKnowledgeSearchResult } from "./cloud-knowledge-screen.ts";
+import { screenKnowledgeClaimResult, screenKnowledgeSearchResult } from "./cloud-knowledge-screen.ts";
 
 /**
  * D-449 (Q-50, revisjonsfunn): en delegert jobb på skyruten sender VERKTØYRESULTATENE videre til skymodellen. Minnesøket (`memory.search`) returnerer alle aktive treff i minnerommet uten filter, også elementer
@@ -26,6 +26,9 @@ const SCREENED_MEMORY_TOOL_NAME = "search_my_memory";
 /** WP-D1 (UA-2): kunnskapssøket har strukturerte sensitivitetsmerker per treff og skjermes av `cloud-knowledge-screen.ts`. Mesh-navnet er `${tool_id}__${action}` (chattens lese-nivå). */
 export const SCREENED_KNOWLEDGE_SOURCE = "knowledge.search";
 const SCREENED_KNOWLEDGE_TOOL_NAME = "knowledge__search";
+/** Q-26: påstandsverifisering har egen form (`{ found, status, claim, notice }`) og egen port, men samme prinsipp. */
+export const SCREENED_CLAIM_SOURCE = "knowledge.get_claim_status";
+const SCREENED_CLAIM_TOOL_NAME = "knowledge__get_claim_status";
 
 /**
  * Hvert verktøy på bakgrunnsflaten er enten skjermet (strukturerte merker) eller bevisst vurdert som «samme som chattens verktøyturer». Låst av en test mot `SURFACE_TOOL_GRANTS.background`:
@@ -35,6 +38,7 @@ export const CLOUD_SCREEN_COVERAGE: Readonly<Record<string, "screened" | "review
   "memory.search": "screened",
   // WP-D1: står på chattens lese-nivå (web_chat/voice), IKKE på bakgrunnsflaten - men chattens verktøyturer går til skymodeller (D-431) og resultatene skjermes av samme port.
   "knowledge.search": "screened",
+  "knowledge.get_claim_status": "screened",
   "email.read_inbox": "reviewed_parity_with_chat",
   "calendar.read_events": "reviewed_parity_with_chat",
   "executive.get_capability_status": "reviewed_parity_with_chat",
@@ -107,6 +111,7 @@ const WITHHELD_ALL_NOTE =
 export function screenToolResultForCloud(out: ToolResultMessage, toolName?: string): CloudScreenOutcome {
   // WP-D1: kunnskapssøket har sin egen form (`{ results: [...], notice }`) og sin egen port.
   if (out.source === SCREENED_KNOWLEDGE_SOURCE || (out.source === undefined && toolName === SCREENED_KNOWLEDGE_TOOL_NAME)) return screenKnowledgeSearchResult(out);
+  if (out.source === SCREENED_CLAIM_SOURCE || (out.source === undefined && toolName === SCREENED_CLAIM_TOOL_NAME)) return screenKnowledgeClaimResult(out);
   const isMemorySearch = out.source === SCREENED_MEMORY_SOURCE || (out.source === undefined && toolName === SCREENED_MEMORY_TOOL_NAME);
   if (!isMemorySearch || out.output === null || out.output === undefined) return { result: out, withheld: 0 };
   if (!out.success) {

@@ -3,6 +3,7 @@ import type pg from "pg";
 import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import { scanForSecrets, writeAudit } from "@jarvis/core";
 import { withMemoryTransaction } from "@jarvis/memory";
+import type { KnowledgeClaimsPort } from "@jarvis/tool-gateway";
 import {
   DEFAULT_MAX_EVIDENCE_AGE_DAYS,
   DEFAULT_REVERIFY_AFTER_DAYS,
@@ -690,4 +691,63 @@ export class ClaimVerificationService {
     }
     return { claim: toClaimView(updated.rows[0] as ClaimRow, now), evaluation: result.evaluation, transition: result.path };
   }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// Port mot verktøylaget
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+export interface KnowledgeClaimsPortOptions {
+  /** Karantene-veien for promotering (`MemoryWriter`). Uten den avvises `propose_claim_promotion`. */
+  promotion?: ClaimPromotionPort | undefined;
+  /**
+   * Skrive-handlingene (registrer, evidens, tilbaketrekking, promotering). AV som standard: uten `writes: true` finnes bare lesingen, og verktøyene `register_claim`/`add_claim_evidence`/... avvises av
+   * transporten. Selv med `true` står de på ingen modellflate (se `knowledge-transport.ts`).
+   */
+  writes?: boolean | undefined;
+}
+
+function optionalString(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new ClaimError(`${key}_invalid`);
+  return value;
+}
+
+/**
+ * Binder `ClaimVerificationService` til verktøyportens form. Space kommer ALLTID fra identiteten (aldri fra verktøyargumenter), og feil fra tjenesten (`ClaimError`) går videre som vanlige feil
+ * (ToolGateway gjør dem til `tool_failed:claim_error:<årsak>`, uten innhold).
+ */
+export function createKnowledgeClaimsPort(service: ClaimVerificationService, options: KnowledgeClaimsPortOptions = {}): KnowledgeClaimsPort {
+  const spaceOf = (identity: IdentityContext): MemorySpace => identity.memory_space_id;
+  const read: KnowledgeClaimsPort = { getClaimStatus: (identity, input) => service.getClaimStatus(identity, input) };
+  if (options.writes !== true) return read;
+  return {
+    ...read,
+    registerClaim: async (identity, input) => service.registerClaim(identity, spaceOf(identity), {
+      claim_text: input.claim, time_sensitive: input.time_sensitive, min_independent_sources: input.min_independent_sources, start_research: input.start_research
+    }),
+    addClaimEvidence: async (identity, claimId, evidence) => {
+      const stance = evidence["stance"];
+      if (stance !== "supports" && stance !== "contradicts") throw new ClaimError("stance_invalid");
+      const isPrimary = evidence["is_primary"];
+      if (isPrimary !== undefined && typeof isPrimary !== "boolean") throw new ClaimError("is_primary_invalid");
+      const result = await service.addEvidence(identity, spaceOf(identity), claimId, {
+        stance,
+        source_ref: optionalString(evidence, "source_ref") ?? "",
+        upstream_origin: optionalString(evidence, "upstream_origin"),
+        is_primary: isPrimary,
+        published_at: optionalString(evidence, "published_at"),
+        retrieved_at: optionalString(evidence, "retrieved_at"),
+        excerpt: optionalString(evidence, "excerpt"),
+        knowledge_document_id: optionalString(evidence, "knowledge_document_id")
+      });
+      return { inserted: result.inserted, evidence_id: result.evidence_id, claim: result.claim, transition: result.transition, reasons: result.evaluation.reasons };
+    },
+    retractClaimEvidence: async (identity, claimId, evidenceId, reason) => service.retractEvidence(identity, spaceOf(identity), claimId, evidenceId, reason),
+    proposeClaimPromotion: async (identity, claimId) => {
+      if (options.promotion === undefined) throw new ClaimError("promotion_not_configured");
+      return service.proposePromotion(identity, spaceOf(identity), claimId, options.promotion);
+    }
+  };
 }

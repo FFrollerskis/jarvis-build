@@ -200,8 +200,8 @@ describe("D-449: dekning - hvert bakgrunnsverktøy er vurdert for skyruten", () 
     // Ingen snarvei for en hel leverandør: en ny GitHub-handling på bakgrunnsflaten må også listes eksplisitt.
     expect(isReviewedBackgroundTool("github", "en_helt_ny_handling")).toBe(false);
     expect(isReviewedBackgroundTool("constructor", "")).toBe(false);
-    // Kun verktøyene med strukturerte sensitivitetsmerker er skjermet: minnesøket og (WP-D1) kunnskapssøket.
-    expect(Object.entries(CLOUD_SCREEN_COVERAGE).filter(([, v]) => v === "screened").map(([k]) => k)).toEqual(["memory.search", "knowledge.search"]);
+    // Kun verktøyene med strukturerte sensitivitetsmerker er skjermet: minnesøket og (WP-D1) kunnskapssøket og påstandsstatusen (Q-26).
+    expect(Object.entries(CLOUD_SCREEN_COVERAGE).filter(([, v]) => v === "screened").map(([k]) => k)).toEqual(["memory.search", "knowledge.search", "knowledge.get_claim_status"]);
   });
 
   it("forfatterkrav: hvert oppført verktøy finnes faktisk på bakgrunnsflaten ELLER chattens lese-nivå (ingen døde oppføringer som skjuler en feil)", () => {

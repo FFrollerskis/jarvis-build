@@ -33,7 +33,7 @@ const HINTS: Readonly<Record<string, string>> = {
   business: "selskaper, leads, åpne saker, brief", contract: "kontrakter, frister, fornyelser", support: "billetter/henvendelser",
   operations: "leverandører, runbooks, driftsoppgaver", finance_neonomics: "saldo, transaksjoner (kun lokal modell)",
   finance_spend: "utgifter, abonnementer", brave_search: "nettsøk, nyheter", google_routes: "kjøretid, rute", spotify: "musikk, kø",
-  knowledge: "hva står det i dokumentene/notatene/referatene"
+  knowledge: "hva står det i dokumentene/notatene/referatene, hvilke dokumenter nevner X, er påstanden verifisert"
 };
 
 export interface SurfaceCatalog {
