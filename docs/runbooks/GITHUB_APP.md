@@ -81,6 +81,8 @@ Samme side: **Private keys -> Generate a private key** (nyere UI: **Credentials 
 
 - GitHub lagrer kun den offentlige delen. Mister du filen, generer en ny (maks 25 nøkler; nøkler utløper ikke - de slettes manuelt).
 - Dette er den mest verdifulle hemmeligheten i oppsettet. Den skal ligge i vaulten (steg 5), aldri i repoet, aldri i chat, aldri i `.env`/compose.
+- `.gitignore` ignorerer alle `*.pem`-filer (uansett navn, også `nokkel.pem` i eksemplene under), slik at nøkkelfilen ikke kan committes ved et uhell hvis den ligger i repo-mappen (unntak: den
+  OFFENTLIGE konstitusjonsnøkkelen `config/evolution/constitution.pub.pem`). Det er et sikkerhetsnett, ikke lagringsstedet: legg likevel filen utenfor repoet og slett den etter steg 7.
 
 ## Steg 4 - Installer App-en på ETT repo
 

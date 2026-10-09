@@ -1,6 +1,9 @@
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { performance } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { GitHubAppAuth, GitHubAppAuthError, maskGitHubSecrets, normalizeGitHubApiBase, parseGitHubAppPrivateKey } from "../src/github-app-auth.ts";
 import { createGitHubAuth, resolveGitHubAuthSettings } from "../src/github-token-provider.ts";
@@ -735,5 +738,38 @@ describe("F3a: statuspoll, helse-sveip og «er X konfigurert» utsteder ALDRI et
     } finally {
       await m.stop();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+describe("F10: .gitignore fanger GitHub App-privatnøkkelen uansett filnavn (*.pem), men aldri den OFFENTLIGE konstitusjonsnøkkelen", () => {
+  const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+  // Den virkelige git-semantikken (`--no-index`: uavhengig av om filen er sporet), ikke bare tekstmønstre. Statuser utenom 0/1 er en ødelagt testrigg, ikke et «ikke ignorert».
+  const ignored = (path: string): boolean => {
+    const result = spawnSync("git", ["check-ignore", "-q", "--no-index", path], { cwd: ROOT });
+    if (result.status !== 0 && result.status !== 1) throw new Error(`git check-ignore feilet (${String(result.status)}): ${String(result.stderr)}`);
+    return result.status === 0;
+  };
+
+  it("F10a: nøkkelfiler med eierens eget navn (runbookens nokkel.pem), GitHubs standardnavn og dype stier er ignorert", () => {
+    for (const path of ["nokkel.pem", "jarvis-app.2026-10-09.private-key.pem", "keys/app.pem", "a/b/c/hva-som-helst.pem", "backup/app-key.pem"]) {
+      expect(ignored(path), path).toBe(true);
+    }
+  });
+
+  it("F10b: den OFFENTLIGE konstitusjonsnøkkelen (og signaturen) kan fortsatt committes - eksplisitt unntak, ikke et hull for andre .pem", () => {
+    expect(ignored("config/evolution/constitution.pub.pem")).toBe(false);
+    expect(ignored("config/evolution/constitution.v1.sig")).toBe(false);
+    expect(ignored("config/evolution/constitution.pem")).toBe(true); // unntaket gjelder KUN den ene eksakte stien
+    expect(ignored("other/dir/constitution.pub.pem")).toBe(true);
+  });
+
+  it("F10c: runbooken sier hva som ignoreres, og eksempelfilnavnet i runbooken er dekket av regelen", () => {
+    const gitignore = readFileSync(`${ROOT}.gitignore`, "utf8");
+    expect(gitignore).toMatch(/^\*\.pem$/m);
+    const runbook = readFileSync(`${ROOT}docs/runbooks/GITHUB_APP.md`, "utf8");
+    expect(runbook).toContain("./nokkel.pem");
+    expect(ignored("nokkel.pem")).toBe(true);
+    expect(runbook).toMatch(/\.gitignore/);
   });
 });
