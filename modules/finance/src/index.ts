@@ -6,6 +6,7 @@ export * from "./stripe-webhook.ts";
 export * from "./stripe-transport.ts";
 export * from "./service.ts";
 export * from "./submit-guard.ts";
+export * from "./class-d-checks.ts";
 export * from "./transport.ts";
 export * from "./stripe-tool-transport.ts";
 export * from "./spend-types.ts";

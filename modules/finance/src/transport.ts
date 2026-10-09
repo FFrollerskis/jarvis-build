@@ -57,6 +57,11 @@ export class FinanceTransport implements ToolTransport {
         const row = await this.service.getPaymentIntent(tenantId, memorySpace, requireString(parameters, "payment_intent_id"));
         return { ...(row ? { external_id: row.payment_intent_id } : {}), data: row as unknown as JsonValue };
       }
+      // WP-F1 (D-453): fersk, read-only, REDIGERT tilstandslesing for klasse D-kjeden (preflight + readback for `submit_payment_intent`) - se `class-d-checks.ts`.
+      case "check_submit_payment_intent": {
+        const check = await this.service.checkSubmitPaymentIntent(tenantId, memorySpace, requireString(parameters, "payment_intent_id"));
+        return { ...(check ? { external_id: check.payment_intent.payment_intent_id } : {}), data: check as unknown as JsonValue };
+      }
       case "list_payment_intents": {
         const rows = await this.service.listPaymentIntents(tenantId, memorySpace, {
           ...(parameters["state"] !== undefined ? { state: parameters["state"] as PaymentIntentState } : {}),

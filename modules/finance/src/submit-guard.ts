@@ -9,6 +9,7 @@
  *   3. Leverandører uten Idempotency-Key (Fiken/Neonomics) kan aldri gjenopptas automatisk: utløpt lease = `reconcile_required` (eieravstemming).
  * Tid måles av databasen (`clock_timestamp()`), aldri av applikasjonsklokken, slik at flere prosesser er enige.
  */
+import type pg from "pg";
 
 /** Hvor lenge en reservasjon regnes som pågående. Over leverandørens HTTP-tak (20 s × maks 3 forsøk + backoff) med god margin. */
 export const SUBMIT_INFLIGHT_LEASE_MS = 120_000;
@@ -88,3 +89,25 @@ export function classifyProviderFailure(err: unknown): ProviderFailureClass {
   if (code !== null && CONNECT_FAILED_CODES.has(code)) return "not_executed";
   return "unknown";
 }
+
+/** Tabellene som har en reservasjonsfase (`submitted` før leverandørkallet) - hvitliste, aldri en streng fra utsiden i SQL. */
+export type SubmitTable = "payment_intents" | "stripe_refunds" | "vipps_captures" | "vipps_refunds";
+export const SUBMIT_TABLE_KEYS: Readonly<Record<SubmitTable, string>> = {
+  payment_intents: "payment_intent_id", stripe_refunds: "refund_id", vipps_captures: "capture_id", vipps_refunds: "refund_id"
+};
+
+/** Alder på reservasjonen og på FØRSTE forsøk, målt av databasen (`clock_timestamp()`, ikke transaksjonsstart) - se `submit-guard.ts`. */
+export async function readSubmitAges(client: pg.PoolClient, table: SubmitTable, tenantId: string, id: string): Promise<SubmitAges> {
+  const { rows } = await client.query(
+    `SELECT (EXTRACT(EPOCH FROM (clock_timestamp() - submitted_at)) * 1000)::bigint AS submitted_age_ms,
+            (EXTRACT(EPOCH FROM (clock_timestamp() - first_submit_attempt_at)) * 1000)::bigint AS first_attempt_age_ms
+       FROM ${table} WHERE tenant_id = $1 AND ${SUBMIT_TABLE_KEYS[table]} = $2`,
+    [tenantId, id]
+  );
+  const row = rows[0] as { submitted_age_ms: string | null; first_attempt_age_ms: string | null } | undefined;
+  return {
+    submittedAgeMs: row?.submitted_age_ms == null ? null : Number(row.submitted_age_ms),
+    firstAttemptAgeMs: row?.first_attempt_age_ms == null ? null : Number(row.first_attempt_age_ms)
+  };
+}
+

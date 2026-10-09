@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
+import type { SubmitChildCheck, SubmitIntentCheck } from "@jarvis/tool-gateway";
+import { buildSubmitChildCheck, buildSubmitIntentCheck } from "./class-d-checks.ts";
+import { providerAmountEchoMatches, toOreInteger } from "./ore.ts";
 import { assertValidPaymentIntentTransition, canTransitionPaymentIntent, isTerminalPaymentIntentState } from "./state-machine.ts";
 import { FikenTransport, type FikenGeneralJournalEntryInput, type FikenJournalEntry } from "./fiken-transport.ts";
 import { StripeTransport, type StripeBalanceObject, type StripePaymentIntentObject, type StripeRefundObject } from "./stripe-transport.ts";
@@ -64,10 +67,12 @@ import {
 } from "./types.ts";
 import {
   DEFAULT_SUBMIT_TIMING,
+  SUBMIT_TABLE_KEYS,
   classifyFreshSubmit,
   classifyProviderFailure,
   classifyReservedSubmit,
-  type SubmitAges,
+  readSubmitAges,
+  type SubmitTable,
   type SubmitTiming
 } from "./submit-guard.ts";
 import type {
@@ -285,27 +290,6 @@ async function readForUpdate(client: pg.PoolClient, tenantId: string, paymentInt
   return (rows[0] as PaymentIntent | undefined) ?? null;
 }
 
-/** Tabellene som har en reservasjonsfase (`submitted` før leverandørkallet) - hvitliste, aldri en streng fra utsiden i SQL. */
-type SubmitTable = "payment_intents" | "stripe_refunds" | "vipps_captures" | "vipps_refunds";
-const SUBMIT_TABLE_KEYS: Readonly<Record<SubmitTable, string>> = {
-  payment_intents: "payment_intent_id", stripe_refunds: "refund_id", vipps_captures: "capture_id", vipps_refunds: "refund_id"
-};
-
-/** Alder på reservasjonen og på FØRSTE forsøk, målt av databasen (`clock_timestamp()`, ikke transaksjonsstart) - se `submit-guard.ts`. */
-async function readSubmitAges(client: pg.PoolClient, table: SubmitTable, tenantId: string, id: string): Promise<SubmitAges> {
-  const { rows } = await client.query(
-    `SELECT (EXTRACT(EPOCH FROM (clock_timestamp() - submitted_at)) * 1000)::bigint AS submitted_age_ms,
-            (EXTRACT(EPOCH FROM (clock_timestamp() - first_submit_attempt_at)) * 1000)::bigint AS first_attempt_age_ms
-       FROM ${table} WHERE tenant_id = $1 AND ${SUBMIT_TABLE_KEYS[table]} = $2`,
-    [tenantId, id]
-  );
-  const row = rows[0] as { submitted_age_ms: string | null; first_attempt_age_ms: string | null } | undefined;
-  return {
-    submittedAgeMs: row?.submitted_age_ms == null ? null : Number(row.submitted_age_ms),
-    firstAttemptAgeMs: row?.first_attempt_age_ms == null ? null : Number(row.first_attempt_age_ms)
-  };
-}
-
 /** WP-F1: SQL-fragment som fjerner ett avviksflagg fra en jsonb-liste (strenger) - brukes når en innsending ENDELIG fikk et leverandørsvar. */
 const CLEAR_SUBMIT_UNKNOWN_FLAG = "anomaly_flags = anomaly_flags - 'SUBMIT_OUTCOME_UNKNOWN'";
 
@@ -469,6 +453,29 @@ export class FinanceService {
   }
 
   /**
+   * WP-F1 (D-453): FERSK, READ-ONLY tilstandslesing som klasse D-kjeden bruker som preflight (målvalidering) og readback (postcondition) for
+   * `finance.submit_payment_intent`. Ingen skriving, ingen leverandørkall, ingen credential; redigert (maskerte leverandørreferanser) - se `class-d-checks.ts`.
+   */
+  async checkSubmitPaymentIntent(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string): Promise<SubmitIntentCheck | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => buildSubmitIntentCheck(client, tenantId, paymentIntentId, this.submitTiming));
+  }
+
+  /** WP-F1: samme som over for `finance_stripe.submit_refund` (refusjonen + modell-betalingen + summen av øvrige aktive refusjoner). */
+  async checkSubmitStripeRefund(tenantId: string, memorySpace: MemorySpace, refundId: string): Promise<SubmitChildCheck | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => buildSubmitChildCheck(client, "stripe_refund", tenantId, refundId, this.submitTiming));
+  }
+
+  /** WP-F1: samme som over for `finance_vipps.submit_capture`. */
+  async checkSubmitVippsCapture(tenantId: string, memorySpace: MemorySpace, captureId: string): Promise<SubmitChildCheck | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => buildSubmitChildCheck(client, "vipps_capture", tenantId, captureId, this.submitTiming));
+  }
+
+  /** WP-F1: samme som over for `finance_vipps.submit_refund`. */
+  async checkSubmitVippsRefund(tenantId: string, memorySpace: MemorySpace, refundId: string): Promise<SubmitChildCheck | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => buildSubmitChildCheck(client, "vipps_refund", tenantId, refundId, this.submitTiming));
+  }
+
+  /**
    * Sender intensjonen til leverandøren `current.provider` peker til
    * (Fiken ELLER Stripe - EN handling, provider-dispatchet internt, ALDRI
    * to konkurrerende `finance.*`/`finance_stripe.*`-handlinger for samme
@@ -572,7 +579,7 @@ export class FinanceService {
       if (current.provider === "stripe") {
         const credentials = prefetchedFor.stripe;
         if (!credentials) throw new StripeCredentialsUnavailableError(tenantId);
-        const amountOre = Number(current.amount_ore);
+        const amountOre = toOreInteger(current.amount_ore); // WP-F1: streng normalisering (pg bigint = streng) FØR reservasjon og leverandørkall
         const transport = this.stripeTransportFactory(credentials);
         // Deterministisk idempotens-nøkkel avledet FRA payment_intent_id
         // (ALDRI random per forsøk) - byggeordrens §6 "exactly-once
@@ -627,7 +634,7 @@ export class FinanceService {
       if (current.provider === "vipps") {
         const credentials = prefetchedFor.vipps;
         if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
-        const amountOre = Number(current.amount_ore);
+        const amountOre = toOreInteger(current.amount_ore); // WP-F1: streng normalisering (pg bigint = streng) FØR reservasjon og leverandørkall
         const transport = this.vippsTransportFactory(credentials);
         // Deterministisk idempotens-nøkkel avledet FRA payment_intent_id -
         // SAMME dobbel-idempotens-begrunnelse som Stripe sin gren (Jarvis
@@ -691,7 +698,7 @@ export class FinanceService {
 
         const credentials = prefetchedFor.neonomics;
         if (!credentials) throw new NeonomicsCredentialsUnavailableError(tenantId);
-        const amountOre = Number(current.amount_ore);
+        const amountOre = toOreInteger(current.amount_ore); // WP-F1: streng normalisering (pg bigint = streng) FØR reservasjon og leverandørkall
         const gateway = this.neonomicsGatewayFactory(credentials);
         await reserve();
         // Dobbel idempotens (samme prinsipp som Stripe/Vipps): Jarvis sin DB-reservasjon over + `endToEndReference` = payment_intent_id
@@ -749,7 +756,7 @@ export class FinanceService {
       // OID-20-typeparser registrert i @jarvis/core) - MÅ eksplisitt
       // `Number()`-castes her, ellers ville Fiken-linjene fått en streng-
       // verdi i `amount`-feltet.
-      const amountOre = Number(current.amount_ore);
+      const amountOre = toOreInteger(current.amount_ore); // WP-F1: streng normalisering (pg bigint = streng) FØR reservasjon og leverandørkall
       const transport = this.fikenTransportFactory(credentials);
       await reserve();
       // Fiken har ingen Idempotency-Key: et ubekreftet utfall (tidsavbrudd) lar intensjonen stå som `submitted` uten provider_ref og krever
@@ -1494,7 +1501,7 @@ export class FinanceService {
     const isAckOrDone = (state: string): boolean => state === "provider_acknowledged" || state === "settled";
     // WP-F1 / JARVIS-019: credential-oppslaget (kan være et nettverkskall) skjer FØR transaksjonen med radlåsen; manglende credential kastes på samme sted som før.
     const credentials = await this.stripeCredentialsProvider.getCredentials(tenantId);
-    return this.providerCallOutsideLock<{ current: StripeRefund; providerRef: string; transport: StripePaymentWriter }, StripeRefundObject, StripeRefund>(tenantId, memorySpace, {
+    return this.providerCallOutsideLock<{ current: StripeRefund; amountOre: number; providerRef: string; transport: StripePaymentWriter }, StripeRefundObject, StripeRefund>(tenantId, memorySpace, {
       subjectId: refundId,
       prepare: async (client) => {
         const { rows: refundRows } = await client.query(`SELECT * FROM stripe_refunds WHERE tenant_id = $1 AND refund_id = $2 FOR UPDATE`, [tenantId, refundId]);
@@ -1512,12 +1519,13 @@ export class FinanceService {
         const intent = await this.requireStripePaymentIntent(client, tenantId, current.payment_intent_id, false);
         if (!intent.provider_ref) throw new PaymentIntentNotSettledError(current.payment_intent_id, intent.state);
         if (!credentials) throw new StripeCredentialsUnavailableError(tenantId);
+        const amountOre = toOreInteger(current.amount_ore); // WP-F1: streng normalisering FØR reservasjon (ugyldig beløp reserverer aldri)
         // WP-F1: RESERVER (`draft -> submitted`, committet FØR leverandørkallet) - en parallell innsending ser «pågår» i stedet for å kalle Stripe på nytt.
         await this.reserveChildSubmit(client, "stripe_refunds", tenantId, refundId, current.state);
-        return { kind: "call", plan: { current, providerRef: intent.provider_ref, transport: this.stripeTransportFactory(credentials) } };
+        return { kind: "call", plan: { current, amountOre, providerRef: intent.provider_ref, transport: this.stripeTransportFactory(credentials) } };
       },
-      call: ({ current, providerRef, transport }) => transport.createRefund({
-        stripePaymentIntentId: providerRef, amountOre: current.amount_ore,
+      call: ({ current, amountOre, providerRef, transport }) => transport.createRefund({
+        stripePaymentIntentId: providerRef, amountOre,
         ...(current.reason !== null ? { reason: current.reason } : {}),
         // Deterministisk avledet fra refund_id - SAMME dobbel-idempotens-begrunnelse som `submitPaymentIntent()` sin Stripe-gren.
         idempotencyKey: `stripe-refund:${refundId}`
@@ -1536,7 +1544,7 @@ export class FinanceService {
           [tenantId, refundId, targetState === current.state ? "provider_acknowledged" : targetState, stripeRefund.id]
         );
         // Leverandørens ekko av beløp/valuta MÅ stemme med det vi ba om - ellers er refusjonen utført med feil beløp (synlig avvik, aldri stille).
-        if (Number(stripeRefund.amount) !== Number(current.amount_ore) || String(stripeRefund.currency).toUpperCase() !== current.currency) {
+        if (!providerAmountEchoMatches(stripeRefund.amount, toOreInteger(current.amount_ore)) || String(stripeRefund.currency).toUpperCase() !== current.currency) {
           await this.appendAnomalyFlags(client, "stripe_refunds", "refund_id", refundId, ["REFUND_AMOUNT_CONFLICT"]);
           await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", current.payment_intent_id, ["REFUND_AMOUNT_CONFLICT"]);
         }
@@ -2040,7 +2048,7 @@ export class FinanceService {
     // WP-F1 / JARVIS-019: credential-oppslaget skjer FØR transaksjonen med radlåsen; manglende credential kastes på samme sted som før.
     const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
     const outcome = await this.providerCallOutsideLock<
-      { current: VippsCapture; providerRef: string; transport: VippsPaymentWriter }, unknown, { capture: VippsCapture; performed: boolean }
+      { current: VippsCapture; amountOre: number; providerRef: string; transport: VippsPaymentWriter }, unknown, { capture: VippsCapture; performed: boolean }
     >(tenantId, memorySpace, {
       subjectId: captureId,
       prepare: async (client) => {
@@ -2063,12 +2071,13 @@ export class FinanceService {
         if (!intent.provider_ref) throw new PaymentIntentNotAuthorizedError(current.payment_intent_id, intent.provider_status);
         if (intent.provider_status !== "AUTHORIZED") throw new PaymentIntentNotAuthorizedError(current.payment_intent_id, intent.provider_status);
         if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
+        const amountOre = toOreInteger(current.amount_ore); // WP-F1: streng normalisering FØR reservasjon (ugyldig beløp reserverer aldri)
         // WP-F1: RESERVER (`draft -> submitted`, committet FØR leverandørkallet) - en parallell capture ser «pågår» i stedet for å flytte pengene på nytt.
         await this.reserveChildSubmit(client, "vipps_captures", tenantId, captureId, current.state);
-        return { kind: "call", plan: { current, providerRef: intent.provider_ref, transport: this.vippsTransportFactory(credentials) } };
+        return { kind: "call", plan: { current, amountOre, providerRef: intent.provider_ref, transport: this.vippsTransportFactory(credentials) } };
       },
-      call: ({ current, providerRef, transport }) => transport.capturePayment({
-        reference: providerRef, amountOre: current.amount_ore, currency: current.currency,
+      call: ({ current, amountOre, providerRef, transport }) => transport.capturePayment({
+        reference: providerRef, amountOre, currency: current.currency,
         // SAMME dobbel-idempotens-begrunnelse som Stripe: avledet FRA capture_id, ALDRI random per forsøk.
         idempotencyKey: `vipps-capture:${captureId}`
       }),
@@ -2250,7 +2259,7 @@ export class FinanceService {
     const isAckOrDone = (state: string): boolean => state === "provider_acknowledged" || state === "settled";
     // WP-F1 / JARVIS-019: credential-oppslaget skjer FØR transaksjonen med radlåsen; manglende credential kastes på samme sted som før.
     const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
-    return this.providerCallOutsideLock<{ current: VippsRefund; providerRef: string; transport: VippsPaymentWriter }, unknown, VippsRefund>(tenantId, memorySpace, {
+    return this.providerCallOutsideLock<{ current: VippsRefund; amountOre: number; providerRef: string; transport: VippsPaymentWriter }, unknown, VippsRefund>(tenantId, memorySpace, {
       subjectId: refundId,
       prepare: async (client) => {
         const { rows: refundRows } = await client.query(`SELECT * FROM vipps_refunds WHERE tenant_id = $1 AND refund_id = $2 FOR UPDATE`, [tenantId, refundId]);
@@ -2267,12 +2276,13 @@ export class FinanceService {
         const intent = await this.requireVippsPaymentIntent(client, tenantId, current.payment_intent_id, false);
         if (!intent.provider_ref) throw new PaymentIntentNotSettledError(current.payment_intent_id, intent.state);
         if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
+        const amountOre = toOreInteger(current.amount_ore); // WP-F1: streng normalisering FØR reservasjon (ugyldig beløp reserverer aldri)
         // WP-F1: RESERVER (`draft -> submitted`, committet FØR leverandørkallet) - en parallell refusjon ser «pågår» i stedet for å betale tilbake på nytt.
         await this.reserveChildSubmit(client, "vipps_refunds", tenantId, refundId, current.state);
-        return { kind: "call", plan: { current, providerRef: intent.provider_ref, transport: this.vippsTransportFactory(credentials) } };
+        return { kind: "call", plan: { current, amountOre, providerRef: intent.provider_ref, transport: this.vippsTransportFactory(credentials) } };
       },
-      call: ({ current, providerRef, transport }) => transport.refundPayment({
-        reference: providerRef, amountOre: current.amount_ore, currency: current.currency, idempotencyKey: `vipps-refund:${refundId}`
+      call: ({ current, amountOre, providerRef, transport }) => transport.refundPayment({
+        reference: providerRef, amountOre, currency: current.currency, idempotencyKey: `vipps-refund:${refundId}`
       }),
       apply: async (client, { providerRef }) => {
         const { rows: lockedRows } = await client.query(`SELECT * FROM vipps_refunds WHERE tenant_id = $1 AND refund_id = $2 FOR UPDATE`, [tenantId, refundId]);
