@@ -403,7 +403,7 @@ describe("G: connector-status, EV-17-fakta og redaksjon", () => {
   it("G2: listConnectorStatus({authInfo}) legger auth KUN på github; PAT-ref alene gjør GitHub «konfigurert»; privatnøkkel-refen er valgfri og teller ikke med", async () => {
     const s = await setup();
     const gateway = { hasSecret: async (ref: string) => ref === GITHUB_TOKEN_REF, health: new Map() };
-    const statuses = await listConnectorStatus(gateway, { authInfo: (id) => (id === "github" ? s.auth.connectorAuthInfo() : undefined) });
+    const statuses = await listConnectorStatus(gateway, undefined, { authInfo: (id) => (id === "github" ? s.auth.connectorAuthInfo() : undefined) });
     const github = statuses.find((c) => c.id === "github");
     expect(github?.configured).toBe(true);
     expect(github?.credentials).toEqual([{ ref: GITHUB_TOKEN_REF, configured: true }]);

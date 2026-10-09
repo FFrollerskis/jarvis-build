@@ -1044,10 +1044,13 @@ export interface ListConnectorStatusOptions {
  */
 export async function listConnectorStatus(
   gateway: Pick<ToolGateway, "hasSecret" | "health">,
+  /** WP-C4: begrens til disse connector-id-ene (hvert hvelv-oppslag er et HTTP-kall mot Infisical). Utelatt = hele registeret, som før. */
+  onlyIds?: readonly string[],
   options: ListConnectorStatusOptions = {}
 ): Promise<ConnectorStatus[]> {
+  const defs = onlyIds === undefined ? CONNECTOR_REGISTRY : CONNECTOR_REGISTRY.filter((def) => onlyIds.includes(def.id));
   return Promise.all(
-    CONNECTOR_REGISTRY.map(async (def) => {
+    defs.map(async (def) => {
       const credentials = await Promise.all(
         def.credential_refs.map(async (ref) => ({ ref, configured: await gateway.hasSecret(ref) }))
       );

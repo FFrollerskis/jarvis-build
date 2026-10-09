@@ -227,6 +227,7 @@
   <a href="#sec-memory">Minne <span class="n" data-count="proposals">–</span></a>
   <a href="#sec-connectors">Integrasjoner <span class="n" data-count="connectors">–</span></a>
   <a href="#sec-runrate">Kostnad</a>
+  <a href="#sec-value">Verdi</a>
   <a href="#sec-governance">Styring</a>
 </nav>
 <main>
@@ -354,6 +355,14 @@
         </div>
         <button type="submit">Registrer vedlikehold</button> <span id="maint-status" class="muted"></span>
       </form>
+    </div>
+  </section>
+
+  <section id="sec-value" data-section="value">
+    <!-- WP-C4: Value Center - bruk per verdiløkke (V1-V5) og kjernebruk, kun tall (aldri innhold). Lesing via /value/query (egen lese-rute); ingenting kan skrives herfra. -->
+    <h2><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>Verdi og bruk</h2>
+    <div class="body">
+      <div id="value-summary"><p class="empty">Laster …</p></div>
     </div>
   </section>
 
@@ -1967,6 +1976,18 @@
     try { renderRunRate(await postRunRate("/runrate/query", "get_cost_overview")); }
     catch (err) { document.getElementById("runrate-summary").textContent = "Kunne ikke laste kostnad: " + err.message; }
   }
+  /** WP-C4: Value Center. Ren tekst (textContent) - aldri innerHTML med data; rapporten er ferdig norsk tekst fra serveren (kun tall og faste etiketter). */
+  async function loadValue() {
+    const el = document.getElementById("value-summary");
+    try {
+      const r = await postRunRate("/value/query", "get_value_report");
+      el.textContent = "";
+      const pre = document.createElement("pre");
+      pre.style.whiteSpace = "pre-wrap";
+      pre.textContent = (r && r.summary_no) || "Ingen rapport.";
+      el.appendChild(pre);
+    } catch (err) { el.textContent = "Kunne ikke laste verdirapporten: " + err.message; }
+  }
   document.getElementById("maintenance-form").addEventListener("submit", (e) => {
     e.preventDefault();
     const st = document.getElementById("maint-status");
@@ -2011,6 +2032,7 @@
       void loadMemoryProposals();
       void loadConfirmations();
       void loadRunRate();
+      void loadValue();
     } catch (err) {
       statusEl.textContent = "Feil: " + err.message;
     } finally {

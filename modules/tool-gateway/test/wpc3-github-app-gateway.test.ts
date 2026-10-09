@@ -168,7 +168,7 @@ describe("WP-C3: GitHub App gjennom ToolGateway + GithubTransport", () => {
     expect(fake.requests).toHaveLength(0);
     expect(logs.find((l) => l.msg === "github_app_auth_failed")).toMatchObject({ level: "error", code: "GITHUB_APP_KEY_MISSING" });
     expect(auth.status()).toMatchObject({ method: "app", state: "app_error" });
-    const status = await listConnectorStatus(gateway, { authInfo: (id) => (id === "github" ? auth.connectorAuthInfo() : undefined) });
+    const status = await listConnectorStatus(gateway, undefined, { authInfo: (id) => (id === "github" ? auth.connectorAuthInfo() : undefined) });
     const github = status.find((c) => c.id === "github");
     expect(github?.configured).toBe(false); // JARVIS_GITHUB_TOKEN kan ikke leveres akkurat nå
     expect(github?.auth).toMatchObject({ method: "app", short_lived: false, scoped: false });
@@ -191,7 +191,7 @@ describe("WP-C3: GitHub App gjennom ToolGateway + GithubTransport", () => {
     killSwitch.activate("test");
     try {
       for (let i = 0; i < 15; i += 1) {
-        const github = (await listConnectorStatus(gateway, { authInfo: (id) => (id === "github" ? auth.connectorAuthInfo() : undefined) })).find((c) => c.id === "github");
+        const github = (await listConnectorStatus(gateway, undefined, { authInfo: (id) => (id === "github" ? auth.connectorAuthInfo() : undefined) })).find((c) => c.id === "github");
         expect(github?.configured).toBe(true); // nøkkelen finnes - «konfigurert» er presence, ikke helse
       }
       expect(fake.requests).toHaveLength(0); // før rettelsen: ett POST access_tokens per poll (og opptil ~20 s blokkering ved hengende GitHub)
@@ -209,7 +209,7 @@ describe("WP-C3: GitHub App gjennom ToolGateway + GithubTransport", () => {
   it("F: connector-status for et velfungerende App-oppsett: configured, repo-scopet, kortlevd, med utløp og rettigheter - uten tokenverdi", async () => {
     const { auth, gateway } = await build();
     await gateway.execute({ identity: owner, tool_id: "github", action: "read_repo_meta", parameters: { repo: REPO } });
-    const statuses = await listConnectorStatus(gateway, { authInfo: (id) => (id === "github" ? auth.connectorAuthInfo() : undefined) });
+    const statuses = await listConnectorStatus(gateway, undefined, { authInfo: (id) => (id === "github" ? auth.connectorAuthInfo() : undefined) });
     const github = statuses.find((c) => c.id === "github");
     expect(github?.configured).toBe(true);
     expect(github?.optional_credentials).toEqual([{ ref: "JARVIS_GITHUB_APP_PRIVATE_KEY", configured: true }]); // kun tilstedeværelse (boolean) - aldri PEM-verdien

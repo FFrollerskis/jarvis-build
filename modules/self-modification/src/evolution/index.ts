@@ -13,3 +13,4 @@ export * from "./resource.ts";
 export * from "./credentials.ts";
 export * from "./maintenance-schedule.ts";
 export * from "./security-adaptation.ts";
+export * from "./readiness.ts";

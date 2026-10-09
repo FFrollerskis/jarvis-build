@@ -727,7 +727,7 @@ describe("F3a: statuspoll, helse-sveip og «er X konfigurert» utsteder ALDRI et
     try {
       const gateway = new ToolGateway({} as never, {} as never, m.provider);
       for (let i = 0; i < 40; i += 1) {
-        const github = (await listConnectorStatus(gateway, { authInfo: (id) => (id === "github" ? m.auth.connectorAuthInfo() : undefined) })).find((c) => c.id === "github");
+        const github = (await listConnectorStatus(gateway, undefined, { authInfo: (id) => (id === "github" ? m.auth.connectorAuthInfo() : undefined) })).find((c) => c.id === "github");
         expect(github?.configured).toBe(true);
         expect(github?.optional_credentials).toEqual([{ ref: KEY_REF, configured: true }]);
         expect(github?.auth?.detail["state"]).toBe("app_pending");
