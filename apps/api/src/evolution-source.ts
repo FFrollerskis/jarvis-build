@@ -261,7 +261,9 @@ const CRITICAL_WORKFLOWS = ["CHAT", "BACKGROUND"] as const;
 
 export async function modelRouteSection(ctx: EvolutionContext): Promise<EvolutionSection> {
   const mesh = ctx.deps.mesh();
-  const usable = mesh.providers.filter((p) => p.provider !== "scripted" && p.state !== "NOT_CONFIGURED" && p.state !== "UNAVAILABLE");
+  // WP-H0 (JARVIS-087): en leverandør eieren har pauset/tilbakekalt (`paused`) er ikke brukbar i kjeden - ruteren hopper over den - selv om helsen er god.
+  const paused = mesh.providers.filter((p) => p.provider !== "scripted" && p.paused === true).map((p) => p.provider);
+  const usable = mesh.providers.filter((p) => p.provider !== "scripted" && p.paused !== true && p.state !== "NOT_CONFIGURED" && p.state !== "UNAVAILABLE");
   const down = mesh.providers.filter((p) => p.provider !== "scripted" && p.state === "UNAVAILABLE").map((p) => p.provider);
   // Kjeden per kritisk arbeidsflyt = de brukbare leverandørene (lokal først, slik ruteren gjør). Uttestet inntil mesh-fallbacken er sett i drift.
   const chain = usable.map((p) => ({ provider: p.provider }));
@@ -272,7 +274,7 @@ export async function modelRouteSection(ctx: EvolutionContext): Promise<Evolutio
     ctx.now
   );
   const findings = [
-    `Brukbare leverandører: ${usable.map((p) => p.provider).join(", ") || "ingen"}${down.length > 0 ? ` (nede: ${down.join(", ")})` : ""}.`,
+    `Brukbare leverandører: ${usable.map((p) => p.provider).join(", ") || "ingen"}${down.length > 0 ? ` (nede: ${down.join(", ")})` : ""}${paused.length > 0 ? ` (pauset av eier: ${paused.join(", ")})` : ""}.`,
     `Mesh-ruteren: ${mesh.router}; fallback mellom leverandører: ${mesh.fallback}${tested ? "" : " (ikke sett i drift ennå)"}.`,
     ...audit.map((a) => `${a.workflow}: ${a.issue === "single_provider" ? "bare én leverandør i kjeden (konsentrasjonsrisiko)" : a.issue === "never_tested" ? "fallback-kjeden er aldri testet" : "fallback-testen er gammel"}.`),
     "Skygge: Evolution velger ikke modell og ruter ingenting om. Aktivering krever en eier-godkjent allowlist, bake-off og evals (EV-12) - se modellrådgiveren (D-399)."

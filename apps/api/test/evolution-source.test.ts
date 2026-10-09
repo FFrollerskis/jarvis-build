@@ -200,6 +200,14 @@ describe("EV-12: modellrute i skygge", () => {
     const s = await modelRouteSection(ctxOf(deps({ mesh: () => mesh({ fallback: "VERIFIED" }) })));
     expect(s.status).toBe("OK");
   });
+  it("WP-H0: en leverandør eieren har pauset er ikke brukbar i kjeden (selv med god helse) og nevnes som pauset - to leverandører der én er pauset gir konsentrasjonsrisiko", async () => {
+    const s = await modelRouteSection(ctxOf(deps({ mesh: () => mesh({ fallback: "VERIFIED" }, [{ provider: "gemma_local", model: "g", state: "LIVE", success: 5, failures: 0 }, { provider: "anthropic", model: "c", state: "LIVE", success: 5, failures: 0, paused: true }]) })));
+    const text = s.findings.join("\n");
+    expect(text).toContain("Brukbare leverandører: gemma_local");
+    expect(text).toContain("pauset av eier: anthropic");
+    expect(text).toContain("bare én leverandør i kjeden");
+    expect(s.status).toBe("ATTENTION");
+  });
 });
 
 describe("rapporten", () => {

@@ -389,7 +389,7 @@ export function createAiCenter(deps: AiCenterDeps): ControlCenterDefinition {
         routeItems.push(controlItem({
           id: "gemma_first", label: "Gemma først (lokal modell som standard)", status: chainUsable.length > 0 ? "OK" : "WARN",
           detail_no: [
-            `Standardkjeden ${GEMMA_FIRST_CHAIN.join(" → ")} har ${chainUsable.length} brukbar leverandør${chainUsable.length === 1 ? "" : "er"}${chainUsable.length === 0 ? " - chat faller til øvrig ruting (D-354)" : ""}`,
+            `Standardkjeden ${GEMMA_FIRST_CHAIN.join(" → ")} har ${chainUsable.length === 0 ? "ingen brukbar leverandør - chat faller til øvrig ruting (D-354)" : chainUsable.length === 1 ? "1 brukbar leverandør" : `${chainUsable.length} brukbare leverandører`}`,
             split === null ? "lokal/sky-andel kunne ikke leses" : split.total_ok === 0 ? "ingen vellykkede kall siste 7 døgn" : `siste 7 døgn: ${pct(split.local_share ?? 0)} av ${split.total_ok} vellykkede modellkall var lokale, ${pct(split.cloud_share ?? 0)} sky`
           ].join(" · "),
           facts: {
@@ -417,10 +417,11 @@ export function createAiCenter(deps: AiCenterDeps): ControlCenterDefinition {
         const row = overview.find((r) => r.provider === route.provider);
         const paused = pausedSet.has(route.provider);
         const down = !overviewR.ok ? null : row === undefined || !row.configured || row.health.state === "UNAVAILABLE";
+        const downNo = row === undefined || !row.configured ? "ikke konfigurert" : "utilgjengelig akkurat nå";
         const capReached = dailyCapOre > 0 && dailyR.ok && dailyR.value >= dailyCapOre;
         const problems: string[] = [];
         if (paused) problems.push(`leverandøren «${route.provider}» er pauset av deg`);
-        else if (down === true) problems.push(`leverandøren «${route.provider}» er ikke konfigurert eller utilgjengelig`);
+        else if (down === true) problems.push(`leverandøren «${route.provider}» er ${downNo}`);
         if (capReached) problems.push(`dagstaket (${kr(dailyCapOre)}) er nådd`);
         const status: ControlStatus = problems.length > 0 ? "WARN" : down === null || (dailyCapOre > 0 && !dailyR.ok) ? "UNKNOWN" : "OK";
         return controlItem({

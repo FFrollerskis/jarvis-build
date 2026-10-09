@@ -12,7 +12,12 @@ export type { ControlCenterPool } from "./shared.ts";
  * EGEN fil i denne mappen (`integration.ts`, `authority.ts`, `ai.ts`, ...), slik at flere byggeagenter kan legge til sentre uten å røre hverandres filer.
  *
  * KROKPUNKT FOR NYE SENTRE (Finance, Memory, Agent, Operations, Value, Privacy, Security): legg til én linje i `registerControlCenters()` under, og utvid `ControlCenterWiring` med det senteret trenger
- * (additivt). Value-senteret (WP-C4) registreres her med id `value` når verdiløkke-rapporten finnes på main - til da står `value` i oversiktens `unregistered`-liste.
+ * (additivt). Agent Center: bruk `agents.ts` (`readActiveTasks`, `activeTaskRows` med avbryt-handlingen) i stedet for en egen jobbleser, så to sentre aldri viser samme jobb med to ulike knapper.
+ *
+ * VALUE-KROKPUNKT (WP-C4 er IKKE på main ennå; sjekket mot origin/main 2026-10-09): verdirapporten bygges i grenen `claude/wp-c4-value-center` (`ExecutiveService.getValueReport(tenantId)` →
+ * `ValueReport` med verdiløkker V1-V5, Builder Loop-beredskap og V5-forslag, `modules/executive/src/value/*`). Når den er merget: (1) legg til `valueReport?: (tenantId: string) => Promise<ValueReport>` i
+ * `ControlCenterWiring`, (2) lag `value.ts` i denne mappen (`createValueCenter`: én seksjon per verdiløkke, `measured` fra rapporten, ingen egne handlinger - V2-push og V5-forslag har egne brytere), og
+ * (3) registrer den her med id `value`. Til da står `value` i oversiktens `unregistered`-liste (aldri «i orden»).
  *
  * `main.ts` bygger `ControlCenterWiring` ÉN gang fra de allerede konstruerte tjenestene (ingen nye instanser, ingen ny tilkobling). Sentrene leser kun eksisterende kilder; de skriver ingenting.
  */
