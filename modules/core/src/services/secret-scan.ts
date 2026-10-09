@@ -34,9 +34,11 @@ const PATTERNS: ReadonlyArray<{ kind: string; re: RegExp; group?: number }> = [
   { kind: "named_secret", re: /\b([A-Za-z0-9_.-]{0,64}(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIAL|AUTH)[A-Za-z0-9_.-]{0,64}\s*[:=]\s*["']?)([^\s"']{6,})/gi, group: 2 },
   // Miljøvariabel-stil med KEY i navnet (STORE BOKSTAVER, så «monkey=...» ikke treffer): INFISICAL_ENCRYPTION_KEY=..., AWS_KEY_ID=...
   { kind: "named_secret", re: /\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*(?:_KEY|KEY_[A-Z0-9_]+)\s*[:=]\s*["']?)([^\s"']{6,})/g, group: 2 },
-  // Naturlig språk (norsk/engelsk): «passordet mitt er X», «password: X», «pin-kode er 1234». Gjennomgang av WP-A (D-451): også bestemte former («PIN-koden er …») og BankID-/engangskoder - de ble klassifisert
-  // som hemmelighet (Q-52 A) men aldri redigert bort, så koden ble lagret.
-  { kind: "spoken_password", re: /\b(?:passord(?:et)?(?:\s+mitt)?|password|pin(?:-?kode[a-zæøå]*)?|bankid-?kode[a-zæøå]*|engangskode[a-zæøå]*|kodeord(?:et)?)(?:\s+(?:min|mi|mitt|di|ditt|din|vår))?\s*(?:er|is|[:=])\s*["']?([^\s"',.;]{4,})/gi, group: 1 }
+  // Naturlig språk (norsk/engelsk): «passordet mitt er X», «password: X», «kodeord er X». Vanlige statusord etter «er» («passordet er sendt til deg», «password is required») er ikke hemmeligheter og redigeres ikke (gjennomgang nr. 2 av WP-A, D-451).
+  { kind: "spoken_password", re: /\b(?:passord(?:et)?(?:\s+mitt)?|password|kodeord(?:et)?)(?:\s+(?:min|mi|mitt|di|ditt|din|vår))?\s*(?:er|is|[:=])\s*["']?(?!(?:sendt|satt|endret|påkrevd|krevd|riktig|feil|ugyldig|utløpt|glemt|nullstilt|required|invalid|incorrect|wrong|expired|set|sent|changed|reset|missing|empty|tomt|too|not)(?![A-Za-zæøåÆØÅ0-9]))([^\s"',.;]{4,})/gi, group: 1 },
+  // Gjennomgang av WP-A (D-451): også bestemte former («PIN-koden er …») og BankID-/engangskoder, med valgfritt «fra banken»/«på SMS» før «er» - de ble klassifisert som hemmelighet (Q-52 A) men aldri redigert bort, så koden ble lagret.
+  // Gjennomgang nr. 2: en kode har SIFFER; «engangskoden er sendt til deg» og «Pin er satt til høy» er ikke koder og redigeres ikke.
+  { kind: "spoken_code", re: /\b(?:pin(?:-?kode[a-zæøå]*)?|bankid-?kode[a-zæøå]*|engangskode[a-zæøå]*)(?:\s+(?:min|mi|mitt|di|ditt|din|vår))?(?:\s+(?:fra|på|til|for)\s+[A-Za-zæøåÆØÅ-]{2,20}){0,2}\s*(?:er|is|[:=])\s*["']?((?=[^\s"',.;]*\d)[^\s"',.;]{4,})/gi, group: 1 }
 ];
 
 function luhnValid(digits: string): boolean {
