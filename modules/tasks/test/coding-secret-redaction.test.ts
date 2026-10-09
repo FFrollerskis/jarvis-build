@@ -76,4 +76,40 @@ describe("D-102: withSecretRedaction", () => {
     const wrapped = withSecretRedaction(failingHandler("tests_failed: exit 1"), () => { throw new Error("kilde nede"); });
     await expect(wrapped(fakeTask, fakeCtx)).rejects.toThrow("tests_failed: exit 1");
   });
+
+  // WP-C3 review F12: tidligere ble HELE listen (også de statiske nøklene) hoppet over hvis den ene funksjonen kastet. Nå skjermes hver dynamiske kilde for seg.
+  const boom = (): never => { throw new Error("kilde nede"); };
+  const messageOf = async (wrapped: TaskHandler): Promise<string> => wrapped(fakeTask, fakeCtx).then(() => "OK (kastet ikke)", (err: Error) => err.message);
+
+  it("I (WP-C3 F12): en dynamisk kilde som kaster hopper kun over SEG SELV - de statiske hemmelighetene i samme liste redigeres likevel", async () => {
+    const wrapped = withSecretRedaction(failingHandler("push_failed: sk-ant-STATISK-123 og ghp_STATISK_PAT_456 lekket"), ["sk-ant-STATISK-123", "ghp_STATISK_PAT_456", boom]);
+    expect(await messageOf(wrapped)).toBe("push_failed: [REDACTED] og [REDACTED] lekket");
+  });
+
+  it("J (WP-C3 F12): flere dynamiske kilder - den som kaster hoppes, de andre (før og etter) brukes, og de leses PÅ FEILTIDSPUNKTET", async () => {
+    const early: string[] = [];
+    const late: string[] = [];
+    const wrapped = withSecretRedaction(failingHandler("x ghs_TIDLIG_1 y ghs_SEN_2 z sk-ant-STATISK-9"), [() => early, boom, "sk-ant-STATISK-9", () => late]);
+    early.push("ghs_TIDLIG_1");
+    late.push("ghs_SEN_2"); // begge utstedt ETTER at wrapperen ble laget
+    expect(await messageOf(wrapped)).toBe("x [REDACTED] y [REDACTED] z [REDACTED]");
+  });
+
+  it("K (WP-C3 F12): en kilde som returnerer noe annet enn en liste (undefined/null/tall), eller liste med ikke-strenger, krasjer aldri redaksjonen og skjuler aldri jobbfeilen", async () => {
+    const weird = [() => undefined, () => null, () => 42, () => [undefined, "", 7, null, {}, "sk-ant-OK-5"]] as unknown as Array<() => readonly (string | undefined)[]>;
+    const wrapped = withSecretRedaction(failingHandler("tests_failed: sk-ant-OK-5 i utskrift"), ["", undefined, ...weird]);
+    expect(await messageOf(wrapped)).toBe("tests_failed: [REDACTED] i utskrift");
+  });
+
+  it("L (WP-C3 F12): når ALLE kilder kaster, er jobbfeilen uendret (aldri en redaksjonsfeil i stedet)", async () => {
+    const wrapped = withSecretRedaction(failingHandler("tests_failed: exit 1"), [boom, boom]);
+    expect(await messageOf(wrapped)).toBe("tests_failed: exit 1");
+    expect(await messageOf(withSecretRedaction(failingHandler("tests_failed: exit 1"), boom))).toBe("tests_failed: exit 1");
+  });
+
+  it("M (WP-C3 F12): gammel form (hele listen som én funksjon) virker som før, og en vellykket handler påvirkes ikke av en kastende kilde", async () => {
+    expect(await messageOf(withSecretRedaction(failingHandler("a ghs_X1 b"), () => ["ghs_X1"]))).toBe("a [REDACTED] b");
+    const ok: TaskHandler = async () => ({ tests: "passed" });
+    await expect(withSecretRedaction(ok, ["sk-ant-1", boom])(fakeTask, fakeCtx)).resolves.toEqual({ tests: "passed" });
+  });
 });

@@ -430,24 +430,48 @@ export function createCodingHandler(deps: {
  * når køen - identisk teknikk som den allerede eksisterende, testede
  * `redactSecrets()` i `coding-agent-eval.ts` (D-98), ALDRI en ny mekanisme.
  */
-export function withSecretRedaction(handler: TaskHandler, secrets: readonly (string | undefined)[] | (() => readonly (string | undefined)[])): TaskHandler {
+export function withSecretRedaction(handler: TaskHandler, secrets: readonly RedactionSecret[] | RedactionSecretSource): TaskHandler {
   return async (task, ctx) => {
     try {
       return await handler(task, ctx);
     } catch (err) {
       let message = (err as Error).message;
-      // WP-C3: listen kan være en FUNKSJON, slik at kortlevde credentials (GitHub App-installasjonstokens, nye hver time) også redigeres - en
-      // statisk liste tatt ved oppstart ville aldri kjent dem. En kastende funksjon skal aldri skjule den opprinnelige feilen.
-      let list: readonly (string | undefined)[] = [];
-      try {
-        list = typeof secrets === "function" ? secrets() : secrets;
-      } catch {
-        list = [];
-      }
-      for (const secret of list) {
-        if (secret && secret.length > 0) message = message.split(secret).join("[REDACTED]");
+      for (const secret of collectRedactionSecrets(secrets)) {
+        message = message.split(secret).join("[REDACTED]");
       }
       throw new Error(message);
     }
   };
+}
+
+/** En DYNAMISK kilde til hemmeligheter, lest PÅ FEILTIDSPUNKTET (f.eks. kortlevde GitHub App-installasjonstokens, nye hver time og dermed ukjente ved oppstart). */
+export type RedactionSecretSource = () => readonly (string | undefined)[];
+/** Et element i hemmelighetslisten: en statisk verdi (`undefined`/tom hoppes over) eller en dynamisk kilde. */
+export type RedactionSecret = string | undefined | RedactionSecretSource;
+
+/**
+ * Samler hemmelighetene som skal redigeres. WP-C3 (review F12): hver DYNAMISK kilde skjermes for seg - en kilde som kaster hopper kun over SEG SELV, aldri resten av listen (tidligere ble hele
+ * listen, også de statiske nøklene, hoppet over når funksjonen kastet). En kastende kilde skjuler heller aldri den opprinnelige jobbfeilen. Hele listen kan fortsatt være én funksjon.
+ */
+function collectRedactionSecrets(secrets: readonly RedactionSecret[] | RedactionSecretSource): string[] {
+  const out: string[] = [];
+  const add = (value: unknown): void => {
+    if (typeof value === "string" && value.length > 0) out.push(value);
+  };
+  const readSource = (source: RedactionSecretSource): void => {
+    try {
+      for (const value of source()) add(value);
+    } catch {
+      // Kilden er nede: de øvrige kildene redigeres likevel.
+    }
+  };
+  if (typeof secrets === "function") {
+    readSource(secrets);
+  } else {
+    for (const secret of secrets) {
+      if (typeof secret === "function") readSource(secret);
+      else add(secret);
+    }
+  }
+  return out;
 }

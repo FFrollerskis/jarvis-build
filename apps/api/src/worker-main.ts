@@ -685,8 +685,9 @@ worker.register(
       allowedRepos: allowedReposFromEnv(process.env),
       github: { gateway: toolGateway }
     }),
-    // WP-C3: en FUNKSJON - kortlevde installasjonstokens (nye hver time) utstedes etter oppstart og må redigeres ut av feilmeldinger også.
-    () => [process.env["ANTHROPIC_API_KEY"], process.env["JARVIS_GITHUB_TOKEN"], ...githubAuth.knownTokens()]
+    // WP-C3: de to statiske nøklene + EN DYNAMISK kilde - kortlevde installasjonstokens (nye hver time) utstedes etter oppstart og må redigeres ut av feilmeldinger også. Review F12: kilden skjermes
+    // for seg i `withSecretRedaction` (kaster `knownTokens()`, hoppes kun den over - de statiske nøklene redigeres likevel).
+    [process.env["ANTHROPIC_API_KEY"], process.env["JARVIS_GITHUB_TOKEN"], () => githubAuth.knownTokens()]
   )
 );
 

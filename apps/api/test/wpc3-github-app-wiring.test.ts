@@ -60,7 +60,9 @@ describe("A: komposisjonsrotene (main.ts / worker-main.ts) kobler GitHub-autenti
     // Review F2/F3: git-credentialen er den REPO-SCOPEDE kilden (ikke standard-scope-tokenet via secretProvider), og per-credential-tilbakekalling sjekkes før hver utstedelse.
     expect(block).toMatch(/gitAuth: \{\s*secretProvider: new EnvSecretProvider\(\),\s*credentialSource: githubAuth\.gitCredentialSource\(new EnvSecretProvider\(\)\),\s*isRevoked: \(ref\) => ownerControls\.isRevokedDurable\(ref\)\s*\}/);
     expect(block).not.toContain("githubAuth.secretProvider(");
-    expect(block).toContain('() => [process.env["ANTHROPIC_API_KEY"], process.env["JARVIS_GITHUB_TOKEN"], ...githubAuth.knownTokens()]');
+    // Review F12: de statiske nøklene ligger i listen, og installasjonstokens er en EGEN dynamisk kilde (`() => githubAuth.knownTokens()`) som skjermes for seg - ikke spredt inn i en funksjon som tar hele listen med seg når den kaster.
+    expect(block).toContain('[process.env["ANTHROPIC_API_KEY"], process.env["JARVIS_GITHUB_TOKEN"], () => githubAuth.knownTokens()]');
+    expect(block).not.toContain("...githubAuth.knownTokens()");
   });
 
   it("A6: ingen av de to filene leser App-konfig eller nøkkel direkte fra process.env (alt går via createGitHubAuth / SecretProvider)", () => {
@@ -276,6 +278,18 @@ describe("C: createCodingHandler med App-basert gitAuth.secretProvider (reserves
     const leaky = async (): Promise<Record<string, unknown>> => { throw new Error(`push_failed: remote: invalid credentials ${token ?? ""} for repo`); };
     const wrapped = withSecretRedaction(leaky, () => ["unrelated", ...auth.knownTokens()]);
     await expect(wrapped(claimed(), jobContext)).rejects.toThrow("push_failed: remote: invalid credentials [REDACTED] for repo");
+  });
+
+  it("C6 (review F12): produksjonslistens form - statiske nøkler + EN dynamisk kilde: installasjonstokens redigeres, og kaster kilden redigeres de statiske nøklene likevel", async () => {
+    const github = stubGitHub();
+    const auth = makeAuth(github);
+    const token = (await auth.secretProvider(new MapSecrets({})).get("JARVIS_GITHUB_TOKEN")) ?? "";
+    const leaky = async (): Promise<Record<string, unknown>> => { throw new Error(`push_failed: ${token} og ${PAT} og sk-ant-statisk-nokkel-1 lekket`); };
+    const working = withSecretRedaction(leaky, ["sk-ant-statisk-nokkel-1", PAT, () => auth.knownTokens()]);
+    await expect(working(claimed(), jobContext)).rejects.toThrow("push_failed: [REDACTED] og [REDACTED] og [REDACTED] lekket");
+    const broken = withSecretRedaction(leaky, ["sk-ant-statisk-nokkel-1", PAT, () => { throw new Error("knownTokens nede"); }]);
+    const error = await broken(claimed(), jobContext).then(() => null, (err: Error) => err);
+    expect(error?.message).toBe(`push_failed: ${token} og [REDACTED] og [REDACTED] lekket`); // installasjonstokenet kunne ikke kjennes, men de statiske nøklene er borte
   });
 });
 
