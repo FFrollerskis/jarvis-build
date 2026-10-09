@@ -9,23 +9,63 @@
 const SENSITIVE_KEY = /(^|_)(token|secret|password|passwd|authorization|credential|env|argv|cmdline|value|stdin|stdout|stderr)(_|$)/i;
 const MAX_FIELD_LENGTH = 300;
 
+/**
+ * Register over verdier som aldri skal ut i logg, feilmeldinger eller svar. TELLENDE: samme verdi kan registreres av flere samtidige jobber/kall
+ * (f.eks. samme `ANTHROPIC_API_KEY` i to jobber, eller samme mellomlagrede installasjonstoken i to publiseringer), og én jobb som avsluttes skal
+ * ikke ta bort dekningen for de andre. Hver `add` må derfor ha en `remove` (eller bruk `hold`, som gir en idempotent frigjører).
+ */
 export class SecretRegistry {
-  /** @type {Set<string>} */
-  #secrets = new Set();
+  /** @type {Map<string, number>} */
+  #counts = new Map();
+  /** Verdiene sortert LENGST FØRST (mellomlagret): en verdi som er en delstreng av en annen skal ikke etterlate halen av den lengste. @type {string[] | null} */
+  #ordered = null;
 
   /** Registrerer en hemmelighet som skal fjernes fra all utgående tekst (korte verdier ignoreres: for mange falske treff). */
   add(secret) {
-    if (typeof secret === "string" && secret.length >= 8) this.#secrets.add(secret);
+    if (typeof secret !== "string" || secret.length < 8) return;
+    const count = this.#counts.get(secret);
+    this.#counts.set(secret, (count ?? 0) + 1);
+    if (count === undefined) this.#ordered = null;
   }
 
+  /** Reduserer tellingen; verdien slutter å bli redigert først når ALLE som registrerte den har fjernet den. */
   remove(secret) {
-    this.#secrets.delete(secret);
+    const count = this.#counts.get(secret);
+    if (count === undefined) return;
+    if (count <= 1) {
+      this.#counts.delete(secret);
+      this.#ordered = null;
+    } else {
+      this.#counts.set(secret, count - 1);
+    }
+  }
+
+  /**
+   * Registrerer en kortlevd hemmelighet (f.eks. et git-token sendt i ÉN forespørsel) og returnerer en frigjører som kan kalles flere ganger
+   * uten å telle ned mer enn én gang. Kortlevde tokens skal aldri bli stående i registeret (ubegrenset vekst, og `redact` er O(antall verdier)).
+   * @param {string} secret
+   * @returns {() => void}
+   */
+  hold(secret) {
+    this.add(secret);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.remove(secret);
+    };
+  }
+
+  /** Antall ulike registrerte verdier (diagnostikk/tester - aldri verdiene selv). */
+  get size() {
+    return this.#counts.size;
   }
 
   /** @param {string} text */
   redact(text) {
     let out = String(text);
-    for (const secret of this.#secrets) {
+    this.#ordered ??= [...this.#counts.keys()].sort((a, b) => b.length - a.length);
+    for (const secret of this.#ordered) {
       if (out.includes(secret)) out = out.split(secret).join("[REDACTED]");
     }
     return out;

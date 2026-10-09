@@ -102,6 +102,7 @@ export function apiRequest(socketPath, req = {}) {
  *   runner?: Record<string, unknown>,
  *   remote?: { protocol: "https" | "http", host: string, urlFor?: (slug: string) => string },
  *   slugs?: string[],
+ *   requestTokenSlugs?: string[],
  *   origins?: Record<string, { commits?: number, files?: Record<string, string> }>,
  *   now?: () => number,
  *   credentials?: import("../../lib/credentials.mjs").GitCredentialSource,
@@ -117,14 +118,19 @@ export async function createHarness(options = {}) {
   const tokenFile = join(root, "token");
   await writeFile(tokenFile, `${RUNNER_TOKEN}\n`, { mode: 0o600 });
   const slugs = options.slugs ?? ["owner/repo"];
-  /** @type {Record<string, { token_file: string }>} */
+  /** @type {Record<string, { token_file: string } | { source: "request" }>} */
   const gitCredentials = {};
   /** @type {Record<string, { dir: string, head: string }>} */
   const origins = {};
   for (const slug of slugs) {
-    const file = join(root, `git-token-${slug.replace("/", "__")}`);
-    await writeFile(file, `${GIT_TOKEN}\n`, { mode: 0o600 });
-    gitCredentials[slug] = { token_file: file };
+    if (options.requestTokenSlugs?.includes(slug)) {
+      // `source: request`: ingen fil. Tokenet kommer i HVER klone-/publish-forespørsel fra worker (WP-C3).
+      gitCredentials[slug] = { source: "request" };
+    } else {
+      const file = join(root, `git-token-${slug.replace("/", "__")}`);
+      await writeFile(file, `${GIT_TOKEN}\n`, { mode: 0o600 });
+      gitCredentials[slug] = { token_file: file };
+    }
     if (options.remote === undefined) {
       origins[slug] = await createBareOrigin(join(root, "remotes", `${slug.replace("/", "__")}.git`), options.origins?.[slug] ?? {});
     }

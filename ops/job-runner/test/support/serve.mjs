@@ -10,7 +10,8 @@ const h = await createHarness(options);
 process.stdout.write(`${JSON.stringify({
   ready: true, root: h.root, socketPath: h.socketPath, tokenFile: h.tokenFile, baseDir: h.baseDir,
   origins: Object.fromEntries(Object.entries(h.origins).map(([slug, o]) => [slug, o.dir])),
-  gitTokenFiles: Object.fromEntries(Object.entries(h.config.gitCredentials).map(([slug, c]) => [slug, c.tokenFile]))
+  gitTokenFiles: Object.fromEntries(Object.entries(h.config.gitCredentials).filter(([, c]) => typeof c.tokenFile === "string").map(([slug, c]) => [slug, c.tokenFile])),
+  requestTokenRepos: Object.entries(h.config.gitCredentials).filter(([, c]) => c.source === "request").map(([slug]) => slug)
 })}\n`);
 const stop = async () => { await h.close(); process.exit(0); };
 process.stdin.resume();

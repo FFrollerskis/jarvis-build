@@ -12,6 +12,13 @@ import { readSecretFile } from "./fsutil.mjs";
  * dedupliseres ved merge. Runneren kaller `tokenFor` ved HVER klone og HVER publish (ingen mellomlagring), validerer svaret med
  * `assertWellFormedToken`, og ruller alle andre feil enn RunnerError om til `git_credential_unavailable` uten å gjengi feilmeldingen.
  *
+ * To veier til et token, valgt PER REPO av vertsadmins konfig (`runner.git_credentials[repo].source`), aldri av klienten:
+ *  - `file` (standard): `GitCredentialSource` på verten (PAT i en fil som kun runneren kan lese). Et token i forespørselen nektes.
+ *  - `request`: worker henter et kortlevd, repo-scopet installasjonstoken (WP-C3) og sender det i `POST /v1/jobs` (klone) og `POST /v1/jobs/:id/publish`
+ *    (push) som `git_token`. Det er bearer-autentisert over Unix-socketen, gyldig for ÉN operasjon (aldri mellomlagret, aldri lagret i jobben), kontrollert
+ *    av `assertRequestToken`, holdt i det tellende hemmelighetsregisteret mens det er i bruk, og leveres som før kun som env til ETT git-kall. Det går
+ *    ALDRI inn i jobb-containeren, arbeidsmappen, `.git/config`, argv, loggen eller svaret. Mangler det, eller er det sendt for et `file`-repo: avvist.
+ *
  * @typedef {{ tokenFor(repoSlug: string): Promise<string> }} GitCredentialSource
  */
 
@@ -33,6 +40,27 @@ export function assertWellFormedToken(value) {
   return value;
 }
 
+/**
+ * Et token i en FORESPØRSEL (`source: request`) kommer fra worker og er dermed mindre betrodd enn en root-eid fil. Det må derfor være
+ * (1) velformet som over og (2) se ut som en GitHub-credential: installasjonstoken `ghs_`, klassisk PAT `ghp_` eller fine-grained PAT `github_pat_`,
+ * minst 20 tegn. Det er forsvar i dybden mot at worker ved en feil sender en ANNEN hemmelighet (Anthropic-nøkkel, bearer-token, vault-verdi) som
+ * runneren ellers ville sendt som passord til github.com. Feilen gjengir aldri verdien.
+ */
+export const REQUEST_TOKEN_FORMAT = /^(?:ghs_|ghp_|github_pat_)[A-Za-z0-9_.-]{8,8192}$/;
+export const MIN_REQUEST_TOKEN_CHARS = 20;
+
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
+export function assertRequestToken(value) {
+  if (typeof value !== "string") throw new RunnerError("git_token_invalid", 400, "not_a_string");
+  if (value.length < MIN_REQUEST_TOKEN_CHARS) throw new RunnerError("git_token_invalid", 400, "too_short");
+  if (value.length > MAX_TOKEN_CHARS) throw new RunnerError("git_token_invalid", 400, "too_long");
+  if (!TOKEN_FORMAT.test(value) || !REQUEST_TOKEN_FORMAT.test(value)) throw new RunnerError("git_token_invalid", 400, "format");
+  return value;
+}
+
 /** Hvor lenge runneren venter på at en kilde svarer før jobben feiler lukket (en hengende kilde skal aldri holde en jobbplass). */
 export const TOKEN_SOURCE_TIMEOUT_MS = 30_000;
 
@@ -48,7 +76,7 @@ export const GIT_CREDENTIAL_TOKEN_ENV = "JARVIS_GIT_CREDENTIAL_TOKEN";
 export class FileGitCredentialSource {
   /**
    * @param {{
-   *   files: Readonly<Record<string, { tokenFile: string }>>,
+   *   files: Readonly<Record<string, { tokenFile?: string }>>,
    *   readSecret?: (path: string, options: { label: string }) => Promise<string>
    * }} options
    */
@@ -60,7 +88,8 @@ export class FileGitCredentialSource {
   /** @param {string} repoSlug */
   async tokenFor(repoSlug) {
     const entry = Object.prototype.hasOwnProperty.call(this.files, repoSlug) ? this.files[repoSlug] : undefined;
-    if (!entry) throw new RunnerError("git_credential_unavailable", 403, "repo_not_configured");
+    // Et repo med `source: request` har ingen fil: filkilden skal aldri kunne levere noe for det (token kommer da kun fra forespørselen).
+    if (!entry || typeof entry.tokenFile !== "string") throw new RunnerError("git_credential_unavailable", 403, "repo_not_configured");
     let value;
     try {
       value = await this.readSecret(entry.tokenFile, { label: "git_token_file" });

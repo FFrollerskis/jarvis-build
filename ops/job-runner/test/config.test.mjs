@@ -129,6 +129,39 @@ describe("C: runner-policy valideres fail-closed", () => {
     expect(code(() => parse({ ...runner(), git_credentials: { ...runner().git_credentials, "other/repo": { token_file: "/etc/x" } } }))).toContain("not_in_allowed_repos");
   });
 
+  it("git_credentials[repo].source: `file` (standard) eller `request`; nøyaktig ÉN kilde per repo, aldri en stille standard eller fallback", () => {
+    const withCreds = (git_credentials, allowed_repos = Object.keys(git_credentials)) => ({ ...runner(), allowed_repos, git_credentials });
+    // standard: token_file alene = source file (uendret oppførsel for eksisterende konfiger)
+    const std = parse(runner()).runner.gitCredentials["tsworkflow/jarvisbuild"];
+    expect(std).toEqual({ source: "file", tokenFile: "/etc/jarvis/git-token-jarvisbuild" });
+    expect(parse(withCreds({ "a/b": { source: "file", token_file: "/etc/x" } })).runner.gitCredentials["a/b"]).toEqual({ source: "file", tokenFile: "/etc/x" });
+    // request: ingen fil
+    const req = parse(withCreds({ "a/b": { source: "request" } })).runner.gitCredentials["a/b"];
+    expect(req).toEqual({ source: "request" });
+    expect("tokenFile" in req).toBe(false);
+    expect(Object.isFrozen(req)).toBe(true);
+    // blandet konfig: ett repo per kilde
+    const mixed = parse(withCreds({ "a/b": { source: "request" }, "c/d": { token_file: "/etc/y" } })).runner.gitCredentials;
+    expect(mixed["a/b"].source).toBe("request");
+    expect(mixed["c/d"].source).toBe("file");
+    // tvetydig: request + token_file nektes (ikke «request med fil som reserve»)
+    expect(code(() => parse(withCreds({ "a/b": { source: "request", token_file: "/etc/x" } })))).toContain("token_file_not_allowed_with_source_request");
+    // file uten fil nektes
+    expect(code(() => parse(withCreds({ "a/b": { source: "file" } })))).toContain("token_file");
+    expect(code(() => parse(withCreds({ "a/b": {} })))).toContain("token_file");
+    // ugyldige verdier: ingen stille standard (null, tom streng, feil case, tall, boolsk, liste)
+    for (const source of [null, "", "REQUEST", "Request", "File", "pat", "app", "github-app", "both", 1, true, ["request"], { a: 1 }]) {
+      expect(code(() => parse(withCreds({ "a/b": { source, token_file: "/etc/x" } }))), JSON.stringify(source)).toContain("source:file_or_request");
+    }
+    // ukjente nøkler (stavefeil i et sikkerhetsflagg blir aldri stille ignorert)
+    for (const key of ["accept_request_token", "allow_request_token", "token", "git_token", "request", "fallback", "source_file"]) {
+      expect(code(() => parse(withCreds({ "a/b": { source: "request", [key]: true } }))), key).toContain("config_unknown_key");
+    }
+    // request-repo må fortsatt stå i allowed_repos (og omvendt: hvert allowlistet repo har en kilde)
+    expect(code(() => parse({ ...runner(), git_credentials: { ...runner().git_credentials, "other/repo": { source: "request" } } }))).toContain("not_in_allowed_repos");
+    expect(code(() => parse({ ...runner(), allowed_repos: ["a/b", "c/d"], git_credentials: { "a/b": { source: "request" } } }))).toContain("missing_credential_for_allowed_repo");
+  });
+
   it("branch-prefiks må ende på «/» (main/master/production blir strukturelt umulig)", () => {
     for (const branch_prefix of ["", "jarvis", "/", "jarvis//", "Jarvis/", "../"]) expect(code(() => parse({ ...runner(), branch_prefix })), branch_prefix).toContain("branch_prefix");
     expect(code(() => parse({ ...runner(), branch_prefix: "bots/" }))).toBe("no_error");

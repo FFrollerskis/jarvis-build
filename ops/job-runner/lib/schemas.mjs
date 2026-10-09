@@ -1,3 +1,4 @@
+import { assertRequestToken } from "./credentials.mjs";
 import { RunnerError } from "./errors.mjs";
 import { isHostRunnerEnvNameAllowed } from "./spec.mjs";
 
@@ -6,7 +7,9 @@ import { isHostRunnerEnvNameAllowed } from "./spec.mjs";
  *  - ukjente felt avvises (ikke ignoreres): et nytt/skjult felt kan aldri bli en bakdør,
  *  - API-et tar ALDRI imot docker-flagg, mounts, image, nettverk eller sti - kun repo-slug, branch, env og argv,
  *  - alle strenger har tegnsett og lengdegrenser; NUL og kontrolltegn avvises der de ikke har noe å gjøre,
- *  - jobb-id er serverutstedt UUID; klienten sender aldri en sti.
+ *  - jobb-id er serverutstedt UUID; klienten sender aldri en sti,
+ *  - ET git-token kan kun komme i feltet `git_token` på `POST /v1/jobs` og `POST /v1/jobs/:id/publish` (aldri i `env`, aldri i `exec`), og bare for repoer
+ *    vertsadmin har satt til `source: request` (håndheves i JobManager). Formatet kontrolleres her; verdien gjengis aldri i en feil.
  */
 
 export const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -53,7 +56,7 @@ function parseEnv(value, field, maxEntries, maxValueBytes) {
 
 /** @param {unknown} body @param {{ allowedRepos: readonly string[] }} policy */
 export function parseCreateJob(body, policy) {
-  const b = strictObject(body, ["repo", "base_branch", "env", "task_id", "tenant_id"], ["repo"]);
+  const b = strictObject(body, ["repo", "base_branch", "env", "task_id", "tenant_id", "git_token"], ["repo"]);
   const repoRaw = b["repo"];
   if (typeof repoRaw !== "string" || !SLUG.test(repoRaw) || repoRaw.endsWith(".") || repoRaw.split("/")[1]?.startsWith("-") || repoRaw.endsWith("/.") || repoRaw.endsWith("/..")) {
     throw new RunnerError("invalid_request", 400, "repo_must_be_owner_slash_repo");
@@ -75,12 +78,17 @@ export function parseCreateJob(body, policy) {
     const v = b[key];
     if (v !== undefined && (typeof v !== "string" || !LABEL.test(v))) throw new RunnerError("invalid_request", 400, `${key}_invalid`);
   }
+  const env = parseEnv(b["env"], "env", 32, 8192);
+  const gitToken = b["git_token"] !== undefined ? assertRequestToken(b["git_token"]) : undefined;
+  // Forsvar mot en worker-feil: samme token i `env` ville havnet i jobb-containeren (git-credentialen skal ALDRI dit). Avvises FØR noe opprettes.
+  if (gitToken !== undefined && Object.values(env).some((value) => value.includes(gitToken))) throw new RunnerError("git_token_in_env", 400);
   return {
     repo,
     ...(baseBranch !== undefined ? { baseBranch } : {}),
-    env: parseEnv(b["env"], "env", 32, 8192),
+    env,
     ...(typeof b["task_id"] === "string" ? { taskId: b["task_id"] } : {}),
-    ...(typeof b["tenant_id"] === "string" ? { tenantId: b["tenant_id"] } : {})
+    ...(typeof b["tenant_id"] === "string" ? { tenantId: b["tenant_id"] } : {}),
+    ...(gitToken !== undefined ? { gitToken } : {})
   };
 }
 
@@ -113,8 +121,11 @@ export function parseExec(body, limits) {
 
 /** @param {unknown} body @param {{ branchPrefix: string }} policy */
 export function parsePublish(body, policy) {
-  const b = strictObject(body, ["branch"], ["branch"]);
-  return { branch: assertJobBranch(b["branch"], policy.branchPrefix) };
+  const b = strictObject(body, ["branch", "git_token"], ["branch"]);
+  return {
+    branch: assertJobBranch(b["branch"], policy.branchPrefix),
+    ...(b["git_token"] !== undefined ? { gitToken: assertRequestToken(b["git_token"]) } : {})
+  };
 }
 
 /**

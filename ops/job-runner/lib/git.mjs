@@ -214,20 +214,27 @@ export class HostGit {
     return result;
   }
 
-  /** Kaller git med credential-helperen scopet til nøyaktig dette repoet. Token leveres KUN som env til dette ene kallet. */
+  /**
+   * Kaller git med credential-helperen scopet til nøyaktig dette repoet. Token leveres KUN som env til dette ene kallet. Tokenet er registrert som
+   * hemmelighet (redigeres fra feildetaljer og logg) KUN mens kallet pågår: kortlevde tokens (ett nytt per kall) skal ikke hope seg opp i registeret.
+   */
   async netGit(args, { slug, token, cwd, timeoutMs, cancel, env }) {
     const helper = credentialHelperArgs({
       nodePath: this.nodePath,
       helperScript: this.helperScript,
       scope: { protocol: this.remote.protocol, host: this.remote.host, path: slug }
     });
-    this.registry.add(token);
-    return this.mustGit([...this.hardeningArgs(), ...helper, ...args], {
-      env: { ...(env ?? {}), [GIT_CREDENTIAL_TOKEN_ENV]: token },
-      ...(cwd !== undefined ? { cwd } : {}),
-      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-      ...(cancel ? { cancel } : {})
-    }, "git_network_failed");
+    const release = this.registry.hold(token);
+    try {
+      return await this.mustGit([...this.hardeningArgs(), ...helper, ...args], {
+        env: { ...(env ?? {}), [GIT_CREDENTIAL_TOKEN_ENV]: token },
+        ...(cwd !== undefined ? { cwd } : {}),
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        ...(cancel ? { cancel } : {})
+      }, "git_network_failed");
+    } finally {
+      release();
+    }
   }
 
   async assertVersion() {

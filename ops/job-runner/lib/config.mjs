@@ -105,14 +105,28 @@ function parseRunner(raw) {
   if (allowedRepos.length === 0) throw new ConfigError("config_invalid", "runner.allowed_repos:empty_means_nothing_allowed");
 
   const credsRaw = plainObject(r["git_credentials"], "runner.git_credentials");
-  /** @type {Record<string, { tokenFile: string }>} */
+  /**
+   * Hvor git-credentialen for et repo kommer fra, bestemt AV VERTSADMIN per repo (aldri av klienten):
+   *  - `file` (standard når `token_file` står): PAT i en fil bare runneren kan lese. Et `git_token` i en forespørsel for repoet nektes.
+   *  - `request`: worker sender et kortlevd, repo-scopet token (WP-C3) i HVER klone-/publish-forespørsel; mangler det, nektes forespørselen. Ingen fil.
+   * Nøyaktig ÉN kilde per repo: `source: request` sammen med `token_file` er en konfigfeil (tvetydig = nektet, aldri en stille fallback).
+   * @type {Record<string, Readonly<{ source: "file", tokenFile: string } | { source: "request" }>>}
+   */
   const gitCredentials = {};
   for (const [slug, entry] of Object.entries(credsRaw)) {
     if (!SLUG.test(slug)) throw new ConfigError("config_invalid", "runner.git_credentials:slug_invalid");
     if (!allowedRepos.includes(slug)) throw new ConfigError("config_invalid", `runner.git_credentials.${slug}:not_in_allowed_repos`);
-    const e = plainObject(entry, `runner.git_credentials.${slug}`);
-    onlyKeys(e, ["token_file"], `runner.git_credentials.${slug}`);
-    gitCredentials[slug] = { tokenFile: absPathField(e, "token_file", `runner.git_credentials.${slug}`, undefined) };
+    const path = `runner.git_credentials.${slug}`;
+    const e = plainObject(entry, path);
+    onlyKeys(e, ["token_file", "source"], path);
+    const source = e["source"] === undefined ? "file" : e["source"]; // null/tom streng/andre typer er ugyldige, aldri en stille standard
+    if (source !== "file" && source !== "request") throw new ConfigError("config_invalid", `${path}.source:file_or_request`);
+    if (source === "request") {
+      if (e["token_file"] !== undefined) throw new ConfigError("config_invalid", `${path}:token_file_not_allowed_with_source_request`);
+      gitCredentials[slug] = Object.freeze({ source: /** @type {const} */ ("request") });
+    } else {
+      gitCredentials[slug] = Object.freeze({ source: /** @type {const} */ ("file"), tokenFile: absPathField(e, "token_file", path, undefined) });
+    }
   }
   for (const slug of allowedRepos) {
     if (!gitCredentials[slug]) throw new ConfigError("config_invalid", `runner.git_credentials.${slug}:missing_credential_for_allowed_repo`);

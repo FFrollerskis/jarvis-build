@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { assertWellFormedToken, TOKEN_SOURCE_TIMEOUT_MS } from "./credentials.mjs";
+import { assertRequestToken, assertWellFormedToken, TOKEN_SOURCE_TIMEOUT_MS } from "./credentials.mjs";
 import { CancelToken, ConfigError, RunnerError } from "./errors.mjs";
 import { ensurePrivateDir, forceRemoveTree } from "./fsutil.mjs";
 import { UUID_V4 } from "./schemas.mjs";
@@ -58,14 +58,46 @@ export class JobManager {
   }
 
   /**
-   * Henter et git-token fra kilden FOR ÉN operasjon (klone eller push) - aldri mellomlagret, slik at kortlevde installasjonstokens (WP-C3) alltid er
-   * ferske. Grensen mot kilden er fail-closed: en kilde som kaster noe annet enn RunnerError (nettverksfeil, bug, kompromittert), henger lenger enn
-   * tidsgrensen, eller returnerer noe annet enn et velformet token gir `git_credential_unavailable` - uten å gjengi kildens feilmelding (kan inneholde
-   * hemmeligheter) og uten at tokenet noen gang når git/loggen.
+   * Hvilken git-credential-kilde gjelder for repoet? Bestemt av VERTSADMINS konfig (`runner.git_credentials[repo].source`), aldri av klienten.
    * @param {string} slug
+   * @returns {"file" | "request"}
+   */
+  credentialSourceOf(slug) {
+    const entry = Object.prototype.hasOwnProperty.call(this.config.gitCredentials, slug) ? this.config.gitCredentials[slug] : undefined;
+    return entry?.source === "request" ? "request" : "file";
+  }
+
+  /**
+   * Fail-closed policy for et git-token i forespørselen. Kalles FØR noe reserveres, opprettes eller kjøres (ingen jobbplass, ingen katalog, ingen docker, ingen git):
+   *  - repo med `source: request` MÅ ha et token i forespørselen (ellers 400 `git_token_required`) - ingen stille fallback til en fil eller til et gammelt token,
+   *  - repo med `source: file` NEKTER et token i forespørselen (403 `git_token_not_accepted`) - vertsadmin har ikke åpnet for at worker leverer credentials.
+   * @param {string} slug
+   * @param {string | undefined} supplied
+   */
+  assertTokenPolicy(slug, supplied) {
+    const mode = this.credentialSourceOf(slug);
+    if (mode === "request" && supplied === undefined) throw new RunnerError("git_token_required", 400, "repo_uses_source_request");
+    if (mode === "file" && supplied !== undefined) throw new RunnerError("git_token_not_accepted", 403, "repo_uses_source_file");
+  }
+
+  /**
+   * Henter et git-token FOR ÉN operasjon (klone eller push) - aldri mellomlagret, slik at kortlevde installasjonstokens (WP-C3) alltid er
+   * ferske. To kilder, valgt av konfig per repo (se `credentialSourceOf`):
+   *  - `request`: tokenet kommer fra forespørselen. Det er allerede formkontrollert i API-laget og kontrolleres her på nytt (billig, og gjør at
+   *    denne metoden aldri avhenger av hvem som kalte den). Ingen kilde kalles, ingenting leses fra disk.
+   *  - `file`: kilden (`credentials`). Grensen mot kilden er fail-closed: en kilde som kaster noe annet enn RunnerError (nettverksfeil, bug, kompromittert),
+   *    henger lenger enn tidsgrensen, eller returnerer noe annet enn et velformet token gir `git_credential_unavailable` - uten å gjengi kildens
+   *    feilmelding (kan inneholde hemmeligheter) og uten at tokenet noen gang når git/loggen.
+   * @param {string} slug
+   * @param {string} [supplied] token fra forespørselen (kun brukt for `source: request`)
    * @returns {Promise<string>}
    */
-  async obtainToken(slug) {
+  async obtainToken(slug, supplied) {
+    if (this.credentialSourceOf(slug) === "request") {
+      if (supplied === undefined) throw new RunnerError("git_token_required", 400, "repo_uses_source_request");
+      return assertRequestToken(supplied);
+    }
+    if (supplied !== undefined) throw new RunnerError("git_token_not_accepted", 403, "repo_uses_source_file");
     /** @type {Promise<string>} */
     const pending = Promise.resolve().then(() => this.credentials.tokenFor(slug));
     pending.catch(() => undefined); // en kilde som feiler ETTER tidsgrensen skal aldri bli en ubehandlet rejection
@@ -128,10 +160,12 @@ export class JobManager {
   }
 
   /**
-   * @param {{ repo: string, baseBranch?: string, env: Record<string, string>, taskId?: string, tenantId?: string }} req
+   * @param {{ repo: string, baseBranch?: string, env: Record<string, string>, taskId?: string, tenantId?: string, gitToken?: string }} req
+   *   `gitToken`: kortlevd, repo-scopet token til KLONINGEN (kun for repoer med `source: request`). Brukes til ÉN operasjon og lagres aldri i jobben.
    * @param {CancelToken} [clientGone] avbrytes når klienten kobler fra før svaret er sendt
    */
   async create(req, clientGone) {
+    this.assertTokenPolicy(req.repo, req.gitToken);
     if (this.shuttingDown) throw new RunnerError("shutting_down", 503);
     // Plass reserveres SYNKRONT (før første await): to samtidige POST kan aldri begge ta siste plass.
     if (this.jobs.size >= this.config.maxConcurrentJobs) throw new RunnerError("too_many_jobs", 429);
@@ -151,14 +185,15 @@ export class JobManager {
     this.jobs.set(id, job);
     for (const value of job.secretValues) this.logger.registry.add(value);
     const unsubscribe = clientGone ? clientGone.onCancel(() => job.cancel.cancel()) : () => undefined;
+    // Tokenet holdes i hemmelighetsregisteret så lenge forespørselen behandles (logg/feildetaljer redigeres uansett hvem som skriver) og frigjøres i `finally`.
+    const releaseToken = req.gitToken !== undefined ? this.logger.registry.hold(req.gitToken) : () => undefined;
     try {
       await this.docker.assertNetworkInternal(this.config.policy.network);
       await mkdir(job.dir, { mode: 0o700 });
       await mkdir(job.privateDir, { mode: 0o700 });
-      const token = await this.obtainToken(req.repo);
       const fetched = await this.git.fetchBase({
         slug: req.repo, ...(req.baseBranch !== undefined ? { baseBranch: req.baseBranch } : {}), depth: this.config.cloneDepth,
-        baseGitDir: job.baseGitDir, token, timeoutMs: this.config.cloneTimeoutMs, cancel: job.cancel
+        baseGitDir: job.baseGitDir, token: await this.obtainToken(req.repo, req.gitToken), timeoutMs: this.config.cloneTimeoutMs, cancel: job.cancel
       });
       job.baseBranch = fetched.branch;
       job.baseSha = fetched.baseSha;
@@ -182,7 +217,10 @@ export class JobManager {
       if (job.cancel.cancelled) throw new RunnerError("job_cancelled", 409);
       job.state = "ready";
       job.expiresAtMs = this.now() + this.config.maxJobLifetimeS * 1000;
-      this.logger.info("job_created", { job_id: id, repo: req.repo, base_branch: fetched.branch, task_id: req.taskId, tenant_id: req.tenantId, var_count: Object.keys(req.env).length });
+      this.logger.info("job_created", {
+        job_id: id, repo: req.repo, base_branch: fetched.branch, task_id: req.taskId, tenant_id: req.tenantId, var_count: Object.keys(req.env).length,
+        git_auth: this.credentialSourceOf(req.repo)
+      });
       return {
         job_id: id, workdir: "/work", head_sha: job.baseSha, base_branch: job.baseBranch,
         expires_at: new Date(job.expiresAtMs).toISOString()
@@ -193,6 +231,7 @@ export class JobManager {
       throw error;
     } finally {
       unsubscribe();
+      releaseToken();
     }
   }
 
@@ -235,47 +274,65 @@ export class JobManager {
   /**
    * Publiser jobb-branchen: bundle LAGET I containeren (uten credential) -> verifisert på verten -> push med runnerens credential.
    * @param {string} id
-   * @param {{ branch: string }} req
+   * @param {{ branch: string, gitToken?: string }} req
+   *   `gitToken`: FERSKT token til PUSHEN (kun for repoer med `source: request`). Tokenet fra kloningen gjenbrukes aldri (kortlevd, ikke lagret): mangler det, 400.
    * @param {CancelToken} [clientGone]
    */
   async publish(id, req, clientGone) {
     const job = this.require(id);
     this.assertUsable(job);
+    this.assertTokenPolicy(job.slug, req.gitToken); // FØR noe kjøres i containeren eller markeres som opptatt
     return this.runExclusive(job, "publish", clientGone, async () => {
-      const limits = this.config.publish;
-      const created = await this.docker.execIn(job.containerName, {
-        argv: [
-          "git", "--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", "-c", "core.fsmonitor=false",
-          "bundle", "create", "-", `${job.baseSha}..HEAD`
-        ],
-        env: {}, timeoutMs: limits.timeoutMs, maxOutputBytes: limits.maxBundleBytes + 1, cancel: job.cancel
-      });
-      if (created.cancelled) throw new RunnerError("job_cancelled", 409);
-      if (created.timedOut) {
-        await this.killContainer(job);
-        throw new RunnerError("bundle_timeout", 504);
-      }
-      if (created.truncated || created.stdout.length > limits.maxBundleBytes) throw new RunnerError("bundle_too_large", 422, `max=${limits.maxBundleBytes}`);
-      if (created.status !== 0) {
-        const stderr = created.stderr.toString("utf8");
-        if (/empty bundle/i.test(stderr)) throw new RunnerError("no_changes", 422, "no_commits_beyond_the_base");
-        throw new RunnerError("bundle_create_failed", 422, this.logger.registry.redact(stderr.replace(/\s+/g, " ").trim()).slice(0, 160));
-      }
-      const token = await this.obtainToken(job.slug);
+      const releaseToken = req.gitToken !== undefined ? this.logger.registry.hold(req.gitToken) : () => undefined;
       try {
-        const out = await this.git.verifyAndPush({
-          bundle: created.stdout, baseSha: job.baseSha, baseGitDir: job.baseGitDir, verifyDir: job.verifyDir, privateDir: job.privateDir,
-          slug: job.slug, branch: req.branch,
-          limits: { maxCommits: limits.maxCommits, maxFiles: limits.maxFiles, denyPaths: limits.denyPaths },
-          timeoutMs: limits.timeoutMs, token, cancel: job.cancel
-        });
-        this.logger.info("job_published", { job_id: job.id, repo: job.slug, branch: req.branch, commits: out.commits, files_changed: out.filesChanged, task_id: job.taskId });
-        return { branch: req.branch, commit_sha: out.commitSha, base_sha: out.baseSha, commits: out.commits, files_changed: out.filesChanged };
+        return await this.publishLocked(job, req);
       } finally {
-        await forceRemoveTree(job.verifyDir).catch(() => undefined);
-        await forceRemoveTree(join(job.privateDir, "out.bundle")).catch(() => undefined);
+        releaseToken();
       }
     });
+  }
+
+  /**
+   * @param {any} job
+   * @param {{ branch: string, gitToken?: string }} req
+   */
+  async publishLocked(job, req) {
+    const limits = this.config.publish;
+    const created = await this.docker.execIn(job.containerName, {
+      argv: [
+        "git", "--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", "-c", "core.fsmonitor=false",
+        "bundle", "create", "-", `${job.baseSha}..HEAD`
+      ],
+      env: {}, timeoutMs: limits.timeoutMs, maxOutputBytes: limits.maxBundleBytes + 1, cancel: job.cancel
+    });
+    if (created.cancelled) throw new RunnerError("job_cancelled", 409);
+    if (created.timedOut) {
+      await this.killContainer(job);
+      throw new RunnerError("bundle_timeout", 504);
+    }
+    if (created.truncated || created.stdout.length > limits.maxBundleBytes) throw new RunnerError("bundle_too_large", 422, `max=${limits.maxBundleBytes}`);
+    if (created.status !== 0) {
+      const stderr = created.stderr.toString("utf8");
+      if (/empty bundle/i.test(stderr)) throw new RunnerError("no_changes", 422, "no_commits_beyond_the_base");
+      throw new RunnerError("bundle_create_failed", 422, this.logger.registry.redact(stderr.replace(/\s+/g, " ").trim()).slice(0, 160));
+    }
+    const token = await this.obtainToken(job.slug, req.gitToken);
+    try {
+      const out = await this.git.verifyAndPush({
+        bundle: created.stdout, baseSha: job.baseSha, baseGitDir: job.baseGitDir, verifyDir: job.verifyDir, privateDir: job.privateDir,
+        slug: job.slug, branch: req.branch,
+        limits: { maxCommits: limits.maxCommits, maxFiles: limits.maxFiles, denyPaths: limits.denyPaths },
+        timeoutMs: limits.timeoutMs, token, cancel: job.cancel
+      });
+      this.logger.info("job_published", {
+        job_id: job.id, repo: job.slug, branch: req.branch, commits: out.commits, files_changed: out.filesChanged, task_id: job.taskId,
+        git_auth: this.credentialSourceOf(job.slug)
+      });
+      return { branch: req.branch, commit_sha: out.commitSha, base_sha: out.baseSha, commits: out.commits, files_changed: out.filesChanged };
+    } finally {
+      await forceRemoveTree(job.verifyDir).catch(() => undefined);
+      await forceRemoveTree(join(job.privateDir, "out.bundle")).catch(() => undefined);
+    }
   }
 
   /**
