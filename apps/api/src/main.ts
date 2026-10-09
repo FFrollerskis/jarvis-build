@@ -183,6 +183,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const evolutionRadar = createRadarState(process.env);
   // EV-10: siste nattlige omregning av lagret sensitivitet (D-451) holdes i minnet så rapporten kan vise tallet uten å skanne på nytt.
   let lastResensitize: ResensitizeSweepSummary | null = null;
+  const rememberResensitize = (summary: ResensitizeSweepSummary): ResensitizeSweepSummary => {
+    lastResensitize = summary;
+    return summary;
+  };
   const evolutionReports = createEvolutionReportProvider({
     radar: evolutionRadar,
     resensitize: () => lastResensitize,
@@ -1609,10 +1613,7 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "memory-resensitize-sweep", envHour("JARVIS_MEMORY_RESENSITIZE_SWEEP_HOUR", 3)
   ).start(() =>
-    runMemoryResensitizeSweepForAllTenants(pool, { mode: resensitizeModeFromEnv(process.env["JARVIS_MEMORY_RESENSITIZE"]) }).then((summary) => {
-      lastResensitize = summary;
-      assertNoSweepFailures("memory-resensitize-sweep", summary.failed);
-    })
+    runMemoryResensitizeSweepForAllTenants(pool, { mode: resensitizeModeFromEnv(process.env["JARVIS_MEMORY_RESENSITIZE"]) }).then(rememberResensitize).then((summary) => assertNoSweepFailures("memory-resensitize-sweep", summary.failed))
   );
   // EV-3 (D-452): radar-sveip av KILDER EIEREN SELV HAR VALGT (`JARVIS_RADAR_SOURCES`) - inert uten dem (ingen nettverkskall). Hvert svar går gjennom sikkerhetssonen (ubetrodd forskning, karantene ved mistenkelig innhold);
   // kun status per kilde beholdes i minnet, aldri innholdet. Ett sveip kort etter oppstart (DailyScheduler husker at dagens kjøring er gjort, men det beholdes ikke over en omstart).
