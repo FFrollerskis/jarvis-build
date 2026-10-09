@@ -27,7 +27,8 @@ import { DAY_MS, bySeverityThenLabel, countsNo, relativeNo, riskOf, settle, tena
  *
  * HANDLINGER peker kun på EKSISTERENDE ruter (`/executive/mutate`): pause/gjenoppta en leverandør (`freeze_connector`/`unfreeze_connector` på målet `model:<leverandør>`), tilbakekall/gjenopprett av leverandørens
  * nøkkel (`revoke_credential`/`restore_credential`, for de registrerte leverandørene) og avbryt jobb (`cancel_task`). `ModelGateway` leser pausen LIVE ved hvert kall (se provider-pause.ts). Sensitivitetsrutingen
- * er uendret: SECRET_RESTRICTED er alltid lokal, og en pauset lokal leverandør gir fail-closed for slike turer (aldri sky) - handlingens beskrivelse sier det FØR eieren trykker.
+ * er uendret: SECRET_RESTRICTED er alltid lokal, og en pauset lokal leverandør gir fail-closed for slike turer (aldri sky) - handlingens beskrivelse sier det FØR eieren trykker. PRIVATE og BUSINESS_CONFIDENTIAL er IKKE låst
+ * til lokal modell (D-23): de faller til en betalt sky-leverandør når den lokale er pauset eller nede, og teksten sier også det (gjennomgang av PR #316, L-8).
  */
 
 const WINDOW_MS = 7 * DAY_MS;
@@ -300,7 +301,7 @@ export function createAiCenter(deps: AiCenterDeps): ControlCenterDefinition {
           }
           if (pause.frozen) parts.push("PAUSET av eier");
           if (pause.revoked_refs.length > 0) parts.push(`nøkkel TILBAKEKALT (${pause.revoked_refs.join(", ")})`);
-          if (pause.paused && row.locality === "local") parts.push("sensitive turer har ingen lokal modell å gå til før den gjenopptas (de går aldri til sky)");
+          if (pause.paused && row.locality === "local") parts.push("helse-/økonomi-/hemmelighetsturer (SECRET_RESTRICTED) har ingen lokal modell å gå til før den gjenopptas (aldri sky); private og forretningsfortrolige turer faller til betalt sky (D-23)");
           if (u !== undefined) parts.push(`7 d: ${u.ok_calls + u.failed_calls} kall${u.failed_calls > 0 ? ` (${u.failed_calls} feilet)` : ""}, ${kr(u.ore)}${u.last_fallback_at ? `; sist brukt som fallback ${relativeNo(u.last_fallback_at, nowMs)}` : ""}`);
           items.push(controlItem({
             id: row.provider,
@@ -320,9 +321,11 @@ export function createAiCenter(deps: AiCenterDeps): ControlCenterDefinition {
 
           // --- handlinger: pause/gjenoppta og (for registrerte leverandører) tilbakekall/gjenopprett nøkkel
           const anchor: Anchor = { section_id: "providers", item_id: row.provider };
+          // Gjennomgang av PR #316 (L-8): teksten sa «sensitive turer (helse, økonomi, hemmeligheter) går aldri til sky», men det gjelder KUN SECRET_RESTRICTED. PRIVATE og BUSINESS_CONFIDENTIAL foretrekker lokal modell, men er ikke
+          // låst til den (D-23: «helst lokal … eller en godkjent betalt/privat leverandør»): er den lokale modellen pauset - eller nede - faller de til en betalt sky-leverandør du allerede har tatt i bruk. Regelen er uendret; teksten er presisert.
           const sensitiveNote = row.locality === "local"
-            ? " Sensitive turer (helse, økonomi, hemmeligheter) går ALDRI til sky, så uten en annen lokal modell får de ikke svar før du gjenopptar."
-            : " Turer som ville gått hit faller til lokal modell eller en annen leverandør; sensitive turer berøres ikke.";
+            ? " Helse-/økonomi-/hemmelighetsturer (SECRET_RESTRICTED) går ALDRI til sky og får ikke svar uten en annen lokal modell; PRIVATE/BUSINESS_CONFIDENTIAL faller til betalt sky (D-23, som når lokal modell er nede)."
+            : " Turer som ville gått hit faller til lokal modell eller en annen leverandør; sensitive turer (SECRET_RESTRICTED) berøres ikke.";
           if (pause.frozen) {
             actions.push(controlAction({
               id: `ai.resume:${row.provider}`, label: `Gjenoppta ${row.provider}`, endpoint: "/executive/mutate",
@@ -405,8 +408,8 @@ export function createAiCenter(deps: AiCenterDeps): ControlCenterDefinition {
         routeItems.push(controlItem({
           id: "sensitive_local", label: "Sensitive turer (helse, økonomi, hemmeligheter): kun lokal modell", status: unlessPauseUnknown(locals.length > 0 ? "OK" : "WARN"),
           detail_no: locals.length > 0
-            ? `Går kun til lokal modell, aldri sky (D-378). ${locals.length} lokal leverandør kan svare nå: ${locals.join(", ")}.`
-            : "Går kun til lokal modell, aldri sky (D-378) - og INGEN lokal leverandør er brukbar nå (ikke konfigurert, pauset eller utilgjengelig), så slike turer feiler lukket til en lokal modell er tilbake.",
+            ? `Går kun til lokal modell, aldri sky (D-378). ${locals.length} lokal leverandør kan svare nå: ${locals.join(", ")}. Gjelder SECRET_RESTRICTED; private og forretningsfortrolige turer foretrekker lokal modell, men kan falle til betalt sky (D-23).`
+            : "Går kun til lokal modell, aldri sky (D-378) - og INGEN lokal leverandør er brukbar nå (ikke konfigurert, pauset eller utilgjengelig), så slike turer feiler lukket til en lokal modell er tilbake. Gjelder SECRET_RESTRICTED; private og forretningsfortrolige turer faller til betalt sky (D-23).",
           facts: { rule: "SECRET_RESTRICTED => kun lokal", usable_local: locals.join(", ") || null, paused_local: overview.filter((r) => r.locality === "local" && pausedSet.has(r.provider)).map((r) => r.provider).join(", ") || null }
         }));
       } else {

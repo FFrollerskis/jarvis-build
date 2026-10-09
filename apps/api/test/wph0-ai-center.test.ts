@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
 import { CONTROL_ACTION_ALLOWED, CONTROL_ACTION_ENDPOINTS, ControlCenterRegistry, explainControlCenterNo, type ControlCenterReport, type ControlSection } from "@jarvis/executive";
-import type { ProviderHealthDetail, ProviderOverviewRow } from "@jarvis/model-gateway";
+import { DEFAULT_PROFILES, isSensitivityEligible, type ProviderHealthDetail, type ProviderOverviewRow } from "@jarvis/model-gateway";
 import type { ToolDefinition } from "@jarvis/tool-gateway";
 import {
   DEFAULT_MAX_ACTIVE_JOBS, FAIL_SHARE_MIN_CALLS, GEMMA_FIRST_CHAIN, createAiCenter, localitySplit, pauseInfoFor, providerStatus, usableLocalProviders, usageByProvider,
@@ -38,6 +38,8 @@ const row = (provider: string, over: Partial<Omit<ProviderOverviewRow, "health">
   const local = provider === "gemma_local" || provider === "local_llm" || provider === "ollama";
   return { provider, model: `${provider}-m`, locality: local ? "local" : "cloud", hosted_free_tier: provider === "gemma_hosted", configured: true, health: health(h), ...rest };
 };
+const CLOUD_PROFILE = DEFAULT_PROFILES.find((p) => p.provider === "anthropic") as (typeof DEFAULT_PROFILES)[number];
+const LOCAL_PROFILE = DEFAULT_PROFILES.find((p) => p.provider === "gemma_local") as (typeof DEFAULT_PROFILES)[number];
 const DEFAULT_ROWS = (): ProviderOverviewRow[] => [row("anthropic"), row("openai"), row("gemini", { configured: false, health: { state: "NOT_CONFIGURED" } }), row("gemma_hosted"), row("gemma_local")];
 
 const taskRow = (id: string, over: Record<string, unknown> = {}): Record<string, unknown> => ({
@@ -302,6 +304,36 @@ describe("pause og tilbakekall av leverandør: handlinger", () => {
     expect(actionOf(r, "ai.pause:anthropic").description_no).not.toContain("ALDRI til sky");
   });
 
+  it("L-8: teksten for en LOKAL leverandør skiller SECRET_RESTRICTED (aldri sky, ingen svar) fra PRIVATE/BUSINESS_CONFIDENTIAL (faller til betalt sky, D-23) - og påstår ikke at «helse, økonomi og hemmeligheter» er alt som er sensitivt", async () => {
+    const pause = actionOf(await build().run(), "ai.pause:gemma_local").description_no;
+    expect(pause).toContain("SECRET_RESTRICTED");
+    expect(pause).toContain("ALDRI til sky");
+    expect(pause).toContain("PRIVATE/BUSINESS_CONFIDENTIAL faller til betalt sky");
+    expect(pause).toContain("D-23");
+    // beskrivelsen ble ikke avkortet av kontraktens tak (400 tegn) - hele presiseringen står der
+    expect(pause.endsWith("…")).toBe(false);
+    expect(pause.length).toBeLessThanOrEqual(400);
+    // leverandørraden (når den er pauset) sier det samme
+    const row = item(await build({ frozen: ["model:gemma_local"] }).run(), "providers", "gemma_local").detail_no ?? "";
+    expect(row).toContain("SECRET_RESTRICTED");
+    expect(row).toContain("aldri sky");
+    expect(row).toContain("private og forretningsfortrolige turer faller til betalt sky (D-23)");
+    // rutingpunktet sier det samme, både når en lokal modell er brukbar og når ingen er det
+    for (const scn of [{}, { frozen: ["model:gemma_local"] }]) {
+      const text = item(await build(scn).run(), "routing", "sensitive_local").detail_no ?? "";
+      expect(text).toContain("SECRET_RESTRICTED");
+      expect(text).toContain("D-23");
+      expect(text).toContain("betalt sky");
+    }
+    // en sky-leverandør sier at SECRET_RESTRICTED ikke berøres
+    expect(actionOf(await build().run(), "ai.pause:anthropic").description_no).toContain("SECRET_RESTRICTED");
+    // regelen er uendret: sensitivitetsreglene i ruteren (ikke teksten) avgjør - SECRET_RESTRICTED kun lokal, PRIVATE/BUSINESS_CONFIDENTIAL tillater betalt sky
+    expect(isSensitivityEligible(CLOUD_PROFILE, "SECRET_RESTRICTED")).toBe(false);
+    expect(isSensitivityEligible(CLOUD_PROFILE, "PRIVATE")).toBe(true);
+    expect(isSensitivityEligible(CLOUD_PROFILE, "BUSINESS_CONFIDENTIAL")).toBe(true);
+    expect(isSensitivityEligible(LOCAL_PROFILE, "SECRET_RESTRICTED")).toBe(true);
+  });
+
   it("pauset leverandør: «Gjenoppta» = unfreeze_connector (krever step-up) i stedet for pause; raden er WARN og sier PAUSET", async () => {
     const r = await build({ frozen: ["model:anthropic"] }).run();
     expect(actionIds(r)).toContain("ai.resume:anthropic");
@@ -313,7 +345,7 @@ describe("pause og tilbakekall av leverandør: handlinger", () => {
 
   it("pauset LOKAL leverandør: raden sier at sensitive turer ikke har noen lokal modell, og «sensitive turer»-punktet blir WARN (fail-closed, aldri sky)", async () => {
     const r = await build({ frozen: ["model:gemma_local"] }).run();
-    expect(item(r, "providers", "gemma_local").detail_no).toContain("aldri til sky");
+    expect(item(r, "providers", "gemma_local").detail_no).toContain("aldri sky");
     const sensitive = item(r, "routing", "sensitive_local");
     expect(sensitive.status).toBe("WARN");
     expect(sensitive.detail_no).toContain("feiler lukket");
