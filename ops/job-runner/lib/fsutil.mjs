@@ -1,7 +1,8 @@
 import { constants as fsConstants } from "node:fs";
-import { chmod, lstat, mkdir, open, readdir, rmdir, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, unlink } from "node:fs/promises";
 import { isAbsolute, resolve, sep } from "node:path";
 import { ConfigError } from "./errors.mjs";
+import { runProcess } from "./process.mjs";
 
 /**
  * WP-C1: filsystemhjelpere for en tjeneste som arbeider i kataloger en UBETRODD agent skriver i.
@@ -85,56 +86,59 @@ export async function readSecretFile(path, options = {}) {
   }
 }
 
+/** Verktøyene som fjerner agent-skrevne trær: GNU coreutils (absolutte stier, ingen PATH-oppslag). Kontrolleres av `install-host.sh`. */
+export const RM_BIN = "/bin/rm";
+export const CHMOD_BIN = "/bin/chmod";
+/** Minimalt, fast miljø for verktøyene (ingen arvet env, ingen locale-/temp-variabler). */
+const TOOL_ENV = Object.freeze({ PATH: "/usr/bin:/bin", LC_ALL: "C", LANG: "C" });
+/** Et tre med titalls millioner filer kan ta minutter; en hengende disk skal likevel aldri holde en jobbplass for alltid. */
+export const DEFAULT_REMOVE_TIMEOUT_MS = 15 * 60_000;
+
 /**
- * Fjerner et helt katalogtre som en UBETRODD agent har skrevet i, UTEN å følge symlenker.
- *  - `lstat` på hver oppføring; symlenker/filer/spesialfiler fjernes med `unlink` (selve lenken, aldri målet);
- *  - kataloger får `chmod 0700` først (agenten kan ha satt modus 000 eller fjernet skrivetilgang), deretter tømmes de og fjernes;
- *  - kalles først ETTER at containeren er drept (ingen samtidige skrivere).
- * Kaster hvis noe ikke lot seg fjerne (kalleren beholder da jobben som `cleanup_pending` og prøver igjen).
+ * Fjerner et helt katalogtre som en UBETRODD agent har skrevet i, UTEN å følge symlenker, og uansett HVA agenten har laget.
+ *
+ * Hvorfor GNU `rm`/`chmod` og ikke en egen JavaScript-vandring: agenten kontrollerer navn, dybde og modus i hele treet, og alle tre kan brukes til å hindre opprydding
+ * (en billig tjenestenektelse mot runneren: jobben blir stående som `cleanup_pending` for alltid, holder en jobbplass, og oppstartsavstemmingen klarer det heller ikke):
+ *  - filnavn er BYTES, ikke tekst: en fil kalt `\xff\xfe` kan ikke adresseres via en JavaScript-streng (Node dekoder til U+FFFD og `lstat` finner ikke fila);
+ *  - et tre LENGRE enn Linux sin PATH_MAX (4096 bytes) kan ikke nås via en absolutt sti (ENAMETOOLONG) - og lengden er i bytes, så 3-byte-tegn gir en tredjedel så mange tegn;
+ *  - kataloger med modus 000 / uten skrivetilgang, og millioner av oppføringer i én katalog (minne).
+ * `rm -rf` (gnulib fts) går fd-relativt med `openat`/`unlinkat`, så dybde, bytes-navn og flate kataloger er ikke et problem, og den følger aldri symlenker.
+ * Forpass: `chmod -R u+rwx` (pre-order: katalogen åpnes ETTER at modusen er satt, så 000-kataloger går bra; følger heller ingen symlenker). `--one-file-system`: ryd aldri på
+ * tvers av et monteringspunkt. Kalles først ETTER at containeren er drept (ingen samtidige skrivere). Kaster hvis noe ikke lot seg fjerne (kalleren beholder da jobben som
+ * `cleanup_pending` og prøver igjen). Meldingen inneholder aldri filnavn (agent-kontrollert).
  *
  * @param {string} path absolutt sti
+ * @param {{ timeoutMs?: number, run?: typeof runProcess }} [options] `run`: kun tester
  */
-export async function forceRemoveTree(path) {
-  if (!isAbsolute(path)) throw new Error("force_remove_requires_absolute_path");
-  /** @type {string[]} */
-  const failures = [];
-  /** @param {string} p */
-  const walk = async (p) => {
-    let st;
+export async function forceRemoveTree(path, options = {}) {
+  if (typeof path !== "string" || !isAbsolute(path)) throw new Error("force_remove_requires_absolute_path");
+  const target = resolve(path);
+  // Aldri roten eller en toppnivåkatalog: en feil hos kalleren skal ikke kunne tømme /var, /home eller lignende.
+  if (target.split(sep).filter((part) => part.length > 0).length < 2) throw new Error("force_remove_refuses_shallow_path");
+  const run = options.run ?? runProcess;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_REMOVE_TIMEOUT_MS;
+  let st;
+  try {
+    st = await lstat(target);
+  } catch (error) {
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === "ENOENT") return;
+    throw new Error("force_remove_incomplete:lstat_failed");
+  }
+  if (!st.isDirectory()) {
+    // fil, symlenke (selve lenken, aldri målet), socket, fifo
     try {
-      st = await lstat(p);
+      await unlink(target);
     } catch (error) {
-      if (/** @type {NodeJS.ErrnoException} */ (error).code === "ENOENT") return;
-      failures.push(p);
-      return;
+      if (/** @type {NodeJS.ErrnoException} */ (error).code !== "ENOENT") throw new Error("force_remove_incomplete:unlink_failed");
     }
-    if (!st.isDirectory()) {
-      try {
-        await unlink(p);
-      } catch (error) {
-        if (/** @type {NodeJS.ErrnoException} */ (error).code !== "ENOENT") failures.push(p);
-      }
-      return;
-    }
-    try {
-      await chmod(p, 0o700);
-    } catch {
-      // chmod kan feile for kataloger vi ikke eier - forsøk å lese likevel
-    }
-    let entries;
-    try {
-      entries = await readdir(p);
-    } catch {
-      failures.push(p);
-      return;
-    }
-    for (const name of entries) await walk(`${p}${p.endsWith(sep) ? "" : sep}${name}`);
-    try {
-      await rmdir(p);
-    } catch (error) {
-      if (/** @type {NodeJS.ErrnoException} */ (error).code !== "ENOENT") failures.push(p);
-    }
-  };
-  await walk(resolve(path));
-  if (failures.length > 0) throw new Error(`force_remove_incomplete:${failures.length}`);
+    return;
+  }
+  // Feil i forpasset er ikke fatale i seg selv: `rm` melder det som faktisk ikke lot seg fjerne.
+  await run(CHMOD_BIN, ["-R", "u+rwx", "--", target], { env: { ...TOOL_ENV }, timeoutMs, maxOutputBytes: 4096 });
+  const rm = await run(RM_BIN, ["-rf", "--one-file-system", "--", target], { env: { ...TOOL_ENV }, timeoutMs, maxOutputBytes: 4096 });
+  if (rm.spawnError !== undefined) throw new Error("force_remove_incomplete:rm_not_runnable");
+  if (rm.timedOut) throw new Error("force_remove_incomplete:rm_timeout");
+  if (rm.status !== 0) throw new Error("force_remove_incomplete:rm_failed");
+  const left = await lstat(target).then(() => true, (error) => /** @type {NodeJS.ErrnoException} */ (error).code !== "ENOENT");
+  if (left) throw new Error("force_remove_incomplete:still_exists");
 }

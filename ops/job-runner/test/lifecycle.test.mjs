@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
@@ -174,6 +175,36 @@ describe("C: kansellering (DELETE) dreper containeren umiddelbart", () => {
     expect(h.service.manager.activeJobs).toBe(0);
   }, 30_000);
 
+  /**
+   * Agentens skript (kjøres INNE I «containeren»): ting som hindrer vanlig opprydding på verten - et tre LENGRE enn PATH_MAX (4096 bytes) med relative stier (også med
+   * flerbyte-tegn, der lengden i TEGN lurer en sjekk), filnavn som ikke er gyldig UTF-8 (kan ikke adresseres via en JavaScript-streng), kataloger uten tilgang.
+   */
+  const deepTree = (name) =>
+    `const fs=require("fs");const n=${name};fs.mkdirSync("dypt");process.chdir("dypt");for(let i=0;i<30;i++){fs.mkdirSync(n);process.chdir(n)}fs.writeFileSync("blad.txt","x");fs.chmodSync(".",0o500)`;
+  const HOSTILE_TREES = {
+    "dypere enn PATH_MAX (ASCII)": deepTree('"d".repeat(200)'),
+    "dypere enn PATH_MAX med 3-byte-tegn (kort i tegn, lang i bytes)": deepTree('"\u65e5".repeat(80)'),
+    "filnavn som ikke er gyldig UTF-8, og en katalog uten tilgang": 'const fs=require("fs");fs.writeFileSync(Buffer.concat([Buffer.from(process.cwd()+"/"),Buffer.from([0xff,0xfe])]),"x");fs.mkdirSync(Buffer.from([0xc3,0x28]));fs.writeFileSync(Buffer.concat([Buffer.from([0xc3,0x28]),Buffer.from("/f")]),"y");fs.mkdirSync("last");fs.writeFileSync("last/f","z");fs.chmodSync("last",0)'
+  };
+
+  for (const [label, script] of Object.entries(HOSTILE_TREES)) {
+    it(`agenten lager ${label} i /work: DELETE fjerner likevel jobben helt (deleted:true) og slotten frigjøres - ingen permanent cleanup_pending`, async () => {
+      const h = await harness({ runner: { max_concurrent_jobs: 1 } });
+      const job = await h.createJob();
+      const made = await h.exec(job.job_id, ["node", "-e", script]);
+      expect(made.status, made.text).toBe(200);
+      expect(made.json.code, made.json.stderr).toBe(0);
+      const del = await h.api({ method: "DELETE", path: `/v1/jobs/${job.job_id}` });
+      expect(del.status, del.text).toBe(200);
+      expect(del.json).toEqual({ deleted: true, state: "gone" });
+      expect(await exists(join(h.baseDir, job.job_id))).toBe(false);
+      expect(h.service.manager.activeJobs).toBe(0);
+      expect(h.logLines.join("\n")).not.toContain("remove_failed");
+      // plassen er faktisk fri igjen (maks 1 samtidig jobb)
+      expect((await h.api({ method: "POST", path: "/v1/jobs", body: { repo: "owner/repo" } })).status).toBe(201);
+    }, 60_000);
+  }
+
   it("dobbel DELETE er idempotent; exec etter DELETE gir 404", async () => {
     const h = await harness();
     const job = await h.createJob();
@@ -309,6 +340,24 @@ describe("F: oppstartsavstemming (D-32 port 12: crash/reclaim)", () => {
     expect(h.service.manager.activeJobs).toBe(0);
     expect(h.logLines.some((l) => l.includes("reconcile_done"))).toBe(true);
   });
+
+  it("rester av fiendtlige trær (dypere enn PATH_MAX med 3-byte-tegn, ugyldige UTF-8-navn) fra en krasjet kjøring ryddes ved oppstart", async () => {
+    const stale = "33333333-3333-4333-8333-333333333333";
+    const hostile = (dir) => {
+      const script = 'const fs=require("fs");const n="\u65e5".repeat(80);fs.mkdirSync("dypt");process.chdir("dypt");for(let i=0;i<30;i++){fs.mkdirSync(n);process.chdir(n)}fs.writeFileSync("blad.txt","x");' +
+        'process.chdir(process.argv[1]);fs.writeFileSync(Buffer.concat([Buffer.from(process.argv[1]+"/"),Buffer.from([0xff,0xfe])]),"x")';
+      const r = spawnSync(process.execPath, ["-e", script, dir], { cwd: dir, encoding: "utf8" });
+      if (r.status !== 0) throw new Error(r.stderr);
+    };
+    const h = await harness({
+      beforeStart: async ({ baseDir }) => {
+        await mkdir(join(baseDir, stale, "work"), { recursive: true });
+        hostile(join(baseDir, stale, "work"));
+      }
+    });
+    expect(await exists(join(h.baseDir, stale))).toBe(false);
+    expect(h.logLines.join("\n")).not.toContain("remove_failed");
+  }, 60_000);
 
   it("selv rester med modus 000 og symlenker ut av treet ryddes uten å røre ting utenfor", async () => {
     const stale = "22222222-2222-4222-8222-222222222222";

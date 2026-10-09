@@ -666,6 +666,19 @@ describe("G: install-host.sh --stage (ekte kjøring i en midlertidig prefiks-kat
     expect((await stat(join(state, "sock"))).mode & 0o777).toBe(0o750);
   });
 
+  it("ekte installasjon (ikke --stage) nekter å fortsette uten GNU coreutils: runneren rydder med /bin/rm -rf --one-file-system og /bin/chmod -R", async () => {
+    const text = await readFile(SCRIPT, "utf8");
+    const real = text.slice(text.indexOf('if [ "$STAGE" = "0" ]; then\n  need docker'), text.indexOf("# --- brukere og grupper"));
+    expect(real).toContain("for tool in rm chmod");
+    expect(real).toContain('"/bin/$tool" --version');
+    expect(real).toContain("GNU coreutils");
+    // og stien/flaggene koden faktisk bruker er de samme som skriptet kontrollerer
+    const fsutil = await readFile(join(ROOT, "ops/job-runner/lib/fsutil.mjs"), "utf8");
+    expect(fsutil).toContain('RM_BIN = "/bin/rm"');
+    expect(fsutil).toContain('CHMOD_BIN = "/bin/chmod"');
+    expect(fsutil).toContain('"--one-file-system"');
+  });
+
   it("state-/socket-katalogen slettes ALDRI av en ny installasjon: samme inode og urørt innhold (en bind-mount i worker forblir gyldig)", async () => {
     const { target, w } = await stage();
     const sock = join(target, "var/lib/jarvis-job-runner/sock");

@@ -1,4 +1,5 @@
-import { chmod, lstat, mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { chmod, link as fs_link, lstat, mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -128,6 +129,162 @@ describe("C: forceRemoveTree - rydder agent-skrevet innhold uten å følge symle
     expect(await readFile(join(outsideDir, "sentinel.txt"), "utf8")).toBe("skal-overleve");
     expect(await readFile(outsideFile, "utf8")).toBe("skal-overleve");
     expect((await lstat("/etc")).isDirectory()).toBe(true);
+  });
+
+  /**
+   * Bygger et adversarielt tre i en BARNEPROSESS (chdir/Buffer-stier endrer ikke testprosessen). `script` kjøres med `ROOT` (Buffer) og `fs` i scope.
+   * @param {string} root @param {string} script
+   */
+  const build = (root, script) => {
+    const r = spawnSync(process.execPath, ["-e", `const fs = require("fs"); const ROOT = ${JSON.stringify(root)}; process.chdir(ROOT); ${script}`], { encoding: "utf8" });
+    if (r.status !== 0) throw new Error(`kunne ikke bygge treet: ${r.stderr.slice(0, 300)}`);
+  };
+  /** N nivåer med navn av `name`, en blad-fil nederst og (valgfritt) en symlenke ut av treet; nederste katalog gjøres skrivebeskyttet. */
+  const deepScript = (dirName, levels, name, linkTarget = "") =>
+    `fs.mkdirSync(${JSON.stringify(dirName)}); process.chdir(${JSON.stringify(dirName)}); const n = ${name}; ` +
+    `for (let i = 0; i < ${levels}; i += 1) { fs.mkdirSync(n); process.chdir(n); } fs.writeFileSync("leaf.txt", "x"); ` +
+    `${linkTarget ? `fs.symlinkSync(${JSON.stringify(linkTarget)}, "outlink");` : ""} fs.chmodSync(".", 0o500); process.chdir(ROOT);`;
+
+  it("DYPT tre (lengre enn PATH_MAX, 30 x 200 tegn) fjernes helt", async () => {
+    const base = await tmp();
+    const job = join(base, "job");
+    await mkdir(job);
+    build(job, deepScript("deep", 30, '"d".repeat(200)'));
+    await expect(lstat(join(job, "deep"))).resolves.toBeTruthy();
+    await forceRemoveTree(job);
+    await expect(lstat(job)).rejects.toThrow();
+  }, 60_000);
+
+  it("DYPT tre med FLERBYTE-tegn: 25 x 85 tegn à 3 bytes = 6375 bytes (over PATH_MAX) men bare 2125 tegn - en lengdesjekk i tegn ville latt den stå igjen", async () => {
+    const base = await tmp();
+    const job = join(base, "job");
+    await mkdir(job);
+    build(job, deepScript("deep", 25, '"日".repeat(85)'));
+    await forceRemoveTree(job);
+    await expect(lstat(job)).rejects.toThrow();
+  }, 60_000);
+
+  it("filnavn som IKKE er gyldig UTF-8 (fil, katalog med innhold, navn med linjeskift og ledende bindestrek): alt fjernes - en JavaScript-streng kan ikke adressere dem", async () => {
+    const base = await tmp();
+    const job = join(base, "job");
+    await mkdir(job);
+    build(job, `
+      const at = (...parts) => Buffer.concat([Buffer.from(ROOT + "/"), ...parts]);
+      fs.writeFileSync(at(Buffer.from([0xff, 0xfe, 0x41])), "x");
+      fs.mkdirSync(at(Buffer.from([0xc3, 0x28])));
+      fs.writeFileSync(at(Buffer.from([0xc3, 0x28]), Buffer.from("/"), Buffer.from([0x80, 0x81])), "y");
+      fs.writeFileSync(at(Buffer.from("-rf\\n--no-preserve-root")), "z");
+      fs.writeFileSync(at(Buffer.from("med linjeskift\\nog tab\\t")), "w");
+      fs.mkdirSync(at(Buffer.from([0xed, 0xa0, 0x80])));`); // en enslig surrogat kodet som UTF-8 (ugyldig)
+    expect((await readdir(job)).length).toBe(5);
+    await forceRemoveTree(job);
+    await expect(lstat(job)).rejects.toThrow();
+  });
+
+  it("blanding: dype grener (symlenker ut av treet), 000-kataloger, ugyldige navn og en vanlig fil - ingen symlenke følges, målene utenfor overlever", async () => {
+    const base = await tmp();
+    const outside = join(base, "outside");
+    await mkdir(outside);
+    await writeFile(join(outside, "sentinel.txt"), "skal-overleve");
+    const job = join(base, "job");
+    await mkdir(job);
+    await writeFile(join(job, "vanlig.txt"), "x");
+    build(job, deepScript("a", 25, '"e".repeat(220)', outside));
+    build(job, deepScript("b", 40, '"å".repeat(120)', "/etc"));
+    build(job, `fs.writeFileSync(Buffer.concat([Buffer.from(ROOT + "/"), Buffer.from([0xff])]), "x"); fs.mkdirSync("z"); fs.writeFileSync("z/f", "x"); fs.chmodSync("z", 0);`);
+    await forceRemoveTree(job);
+    await expect(lstat(job)).rejects.toThrow();
+    expect(await readFile(join(outside, "sentinel.txt"), "utf8")).toBe("skal-overleve");
+    expect((await lstat("/etc")).isDirectory()).toBe(true);
+  }, 60_000);
+
+  it("en flat katalog med mange oppføringer (30 000 filer) fjernes uten å lese alt inn i minnet i runneren (rm kjører i egen prosess)", async () => {
+    const base = await tmp();
+    const job = join(base, "job");
+    await mkdir(job);
+    build(job, `fs.mkdirSync("flat"); for (let i = 0; i < 30000; i += 1) fs.writeFileSync("flat/f" + i, "");`);
+    const before = process.memoryUsage().rss;
+    await forceRemoveTree(job);
+    await expect(lstat(job)).rejects.toThrow();
+    expect(process.memoryUsage().rss - before).toBeLessThan(150 * 1024 * 1024);
+  }, 60_000);
+
+  it("special-filer og harde lenker: fifo, socket og hardlenke i treet fjernes; en hardlenke utenfor treet påvirkes bare ved at lenken forsvinner", async () => {
+    const base = await tmp();
+    const outside = join(base, "outside.txt");
+    await writeFile(outside, "skal-overleve");
+    const job = join(base, "job");
+    await mkdir(job);
+    build(job, `
+      require("child_process").execFileSync("mkfifo", ["pipe"]);
+      require("net").createServer().listen("sock.sock");
+      setTimeout(() => process.exit(0), 50);`);
+    await fs_link(outside, join(job, "hardlink"));
+    await forceRemoveTree(job);
+    await expect(lstat(job)).rejects.toThrow();
+    expect(await readFile(outside, "utf8")).toBe("skal-overleve");
+  });
+
+  it("en FIL eller SYMLENKE som rot fjernes (selve lenken, aldri målet)", async () => {
+    const base = await tmp();
+    const target = join(base, "target");
+    await mkdir(target);
+    await writeFile(join(target, "keep.txt"), "x");
+    const link = join(base, "root-link");
+    await symlink(target, link);
+    await forceRemoveTree(link);
+    await expect(lstat(link)).rejects.toThrow();
+    expect(await readFile(join(target, "keep.txt"), "utf8")).toBe("x");
+    const file = join(base, "root-file");
+    await writeFile(file, "x");
+    await forceRemoveTree(file);
+    await expect(lstat(file)).rejects.toThrow();
+  });
+
+  it("nekter roten og toppnivåkataloger (en feil hos kalleren kan ikke tømme / eller /var), og stier med .. normaliseres FØR sjekken", async () => {
+    for (const path of ["/", "/tmp", "/var", "/etc/", "/tmp/..", "/tmp/x/../.."]) {
+      await expect(forceRemoveTree(path), path).rejects.toThrow("force_remove_refuses_shallow_path");
+    }
+    expect((await lstat("/etc")).isDirectory()).toBe(true);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("kan ikke fjerne (foreldrekatalogen er skrivebeskyttet): feiler lukket med en kode uten filnavn, og treet blir stående", async () => {
+    const base = await tmp();
+    const parent = join(base, "parent");
+    const job = join(parent, "job");
+    await mkdir(job, { recursive: true });
+    await writeFile(join(job, "a-hemmelig-fil.txt"), "x");
+    await chmod(parent, 0o500);
+    try {
+      const error = await forceRemoveTree(job).catch((e) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toMatch(/^force_remove_incomplete:(rm_failed|still_exists)$/);
+      expect(error.message).not.toContain("a-hemmelig-fil");
+      expect((await lstat(job)).isDirectory()).toBe(true);
+    } finally {
+      await chmod(parent, 0o700);
+    }
+    await forceRemoveTree(job); // gjenopptakelse etter at årsaken er borte
+    await expect(lstat(job)).rejects.toThrow();
+  });
+
+  it("tidsavbrudd, verktøy som ikke kan startes og feilstatus gir egne stabile koder (injisert prosesskjører)", async () => {
+    const base = await tmp();
+    const job = join(base, "job");
+    await mkdir(job);
+    const ok = { status: 0, signal: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), timedOut: false, truncated: false, cancelled: false };
+    const calls = [];
+    const runWith = (rm) => async (bin, args, options) => { calls.push({ bin, args, env: options.env, timeoutMs: options.timeoutMs }); return bin.endsWith("rm") ? { ...ok, ...rm } : ok; };
+    await expect(forceRemoveTree(job, { run: runWith({ timedOut: true, status: null }), timeoutMs: 1234 })).rejects.toThrow("force_remove_incomplete:rm_timeout");
+    await expect(forceRemoveTree(job, { run: runWith({ spawnError: "ENOENT", status: null }) })).rejects.toThrow("force_remove_incomplete:rm_not_runnable");
+    await expect(forceRemoveTree(job, { run: runWith({ status: 1 }) })).rejects.toThrow("force_remove_incomplete:rm_failed");
+    // rm melder suksess, men treet er der fortsatt: aldri en stille «ferdig»
+    await expect(forceRemoveTree(job, { run: runWith({ status: 0 }) })).rejects.toThrow("force_remove_incomplete:still_exists");
+    // kommandolinjene: absolutte verktøy, `--` før stien, ingen shell, fast miljø, tidsgrensen videreføres
+    const rmCall = calls.find((c) => c.bin === "/bin/rm");
+    expect(rmCall.args).toEqual(["-rf", "--one-file-system", "--", job]);
+    expect(calls[0]).toMatchObject({ bin: "/bin/chmod", args: ["-R", "u+rwx", "--", job], timeoutMs: 1234 });
+    expect(Object.keys(rmCall.env).sort()).toEqual(["LANG", "LC_ALL", "PATH"]);
   });
 
   it("er idempotent for manglende sti og nekter relativ sti", async () => {

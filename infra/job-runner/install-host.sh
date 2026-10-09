@@ -47,6 +47,10 @@ if [ "$STAGE" = "0" ]; then
   read -r GMAJ GMIN <<<"$GITV"
   { [ "${GMAJ:-0}" -gt 2 ] || { [ "${GMAJ:-0}" -eq 2 ] && [ "${GMIN:-0}" -ge 39 ]; }; } || { echo "git >= 2.39 kreves (fant $(git --version))" >&2; exit 2; }
   getent group docker >/dev/null || { echo "docker-gruppen finnes ikke" >&2; exit 2; }
+  # Runneren rydder agent-skrevne trær med «/bin/chmod -R» og «/bin/rm -rf --one-file-system» (fd-relativt, ingen PATH_MAX-/UTF-8-grense). Flagget finnes bare i GNU coreutils.
+  for tool in rm chmod; do
+    "/bin/$tool" --version 2>/dev/null | head -1 | grep -q 'GNU coreutils' || { echo "/bin/$tool må være GNU coreutils (runneren trenger rm -rf --one-file-system); busybox/BSD støttes ikke" >&2; exit 2; }
+  done
 fi
 
 # --- brukere og grupper (kun ekte installasjon) ---
