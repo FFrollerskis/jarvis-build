@@ -1,4 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -154,5 +156,43 @@ describe("C: referanser og ærlighet", () => {
     const lines = runbook.split("\n").filter((l) => /docker compose/.test(l) && /up -d/.test(l) && /worker/.test(l));
     expect(lines.length).toBeGreaterThan(0);
     for (const line of lines) expect(line).toMatch(/-f infra\/local\/docker-compose\.yml -f infra\/job-runner\/docker-compose\.job-runner\.yml/);
+  });
+});
+
+describe("D: nft-eksempelet i runbooken", () => {
+  // Blokken står inne i en punktliste i runbooken (innrykket): finn den uavhengig av innrykk og fjern innrykket før den brukes/sjekkes.
+  const found = /^([ \t]*)```\n\1(table inet jarvis_jobs \{[\s\S]*?\n\1\})\n\1```/m.exec(runbook);
+  const indent = found?.[1] ?? "";
+  const block = (found?.[2] ?? "").split("\n").map((line) => (line.startsWith(indent) ? line.slice(indent.length) : line)).join("\n");
+
+  it("finnes, og verdiene (bridge, gateway, port) er de samme som setup-network.sh og eksempelkonfigen bruker", () => {
+    expect(block.length).toBeGreaterThan(100);
+    const example = JSON.parse(read("infra/job-runner/job-runner.example.json"));
+    const script = read("infra/job-runner/setup-network.sh");
+    const bridge = /^BRIDGE_NAME="([^"]+)"$/m.exec(script)?.[1];
+    expect(block).toContain(`iifname "${bridge}"`);
+    expect(block).toContain(`ip daddr ${example.egress_proxy.listen_host} tcp dport ${example.egress_proxy.listen_port} accept`);
+    expect(block).toMatch(/reject with tcp reset/);
+  });
+
+  it("er gyldig syntaks for ekte nft (-c = kun sjekk, laster ingenting); hoppes over uten nft eller netlink-tilgang", () => {
+    const nft = ["/usr/sbin/nft", "/sbin/nft", "/usr/bin/nft"].find((p) => existsSync(p));
+    if (!nft) return;
+    // nft nekter /dev/stdin som kilde («Not a regular file»): skriv regelteksten til en midlertidig fil (kun lesing/sjekk, ingenting lastes).
+    const dir = mkdtempSync(join(tmpdir(), "jr-nft-"));
+    try {
+      const check = (text) => {
+        const file = join(dir, "rules.nft");
+        writeFileSync(file, text, { mode: 0o600 });
+        return spawnSync(nft, ["-c", "-f", file], { encoding: "utf8", timeout: 30_000 });
+      };
+      const good = check(`${block}\n`);
+      if (good.error || /operation not permitted|cache initialization failed|permission denied/i.test(good.stderr ?? "")) return; // krever netlink (root)
+      expect(good.status, good.stderr).toBe(0);
+      // negativ kontroll: ødelagt syntaks avvises (probeen er følsom)
+      expect(check(`${block.replace("tcp dport 3128 accept", "tcp dport accept")}\n`).status).not.toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

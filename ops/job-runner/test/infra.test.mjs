@@ -534,6 +534,32 @@ describe("E: setup-network.sh (kjørt for ekte mot falsk docker/iptables)", () =
     expect(r3.stderr).toContain("docker finnes ikke");
   });
 
+  it("regelteksten er gyldig syntaks for ekte iptables-restore (--test): root får exit 0; uten root stopper den først ved COMMIT (alle regellinjer er parset)", async () => {
+    const w = await makeWorld();
+    const config = await writeConfig(w.root);
+    expect(w.run(SCRIPT, [], { JARVIS_JOB_RUNNER_CONFIG: config }).status).toBe(0);
+    const text = await readFile(join(w.state, "restore-input.txt"), "utf8");
+    const bin = ["/usr/sbin/iptables-restore", "/sbin/iptables-restore", "/usr/bin/iptables-restore"].find((p) => existsSync(p));
+    if (!bin) return; // verktøyet finnes ikke her
+    const run = (input) => spawnSync(bin, ["--test", "--noflush"], { input, encoding: "utf8", timeout: 30_000 });
+    const lastLine = text.split("\n").filter(Boolean).length; // COMMIT er siste linje
+    /** «ok» = godtatt (root) eller kun avvist av kjernen ved COMMIT (ikke root); «syntax» = parse-feil på en regellinje; «unknown» = ukjent feilformat (hoppes over). */
+    const verdict = (r) => {
+      if (r.error) return "unknown";
+      if (r.status === 0) return "ok";
+      const err = r.stderr ?? "";
+      const atCommit = new RegExp(`line ${lastLine} failed: Permission denied`).test(err);
+      if (atCommit) return "ok";
+      if (/Error occurred at line: \d+|invalid|unknown option|bad argument|unexpected/i.test(err)) return "syntax";
+      return "unknown";
+    };
+    const good = verdict(run(text));
+    if (good === "unknown") return; // ikke mulig å tolke her (annen iptables-variant/miljø)
+    expect(good, run(text).stderr).toBe("ok");
+    // negativ kontroll: en ødelagt regel gir parse-feil (probeen er følsom for syntaksfeil)
+    expect(verdict(run(text.replace("--dport 3128", "--dport")))).toBe("syntax");
+  });
+
   it("kjører mot eksempelkonfigen uten endringer (nettverks-/proxy-verdiene er konsistente med det scriptet forventer)", async () => {
     const w = await makeWorld();
     const r = w.run(SCRIPT, [], { JARVIS_JOB_RUNNER_CONFIG: join(INFRA, "job-runner.example.json") });

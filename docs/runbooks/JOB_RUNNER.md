@@ -331,12 +331,17 @@ Miljøvariabelen `JARVIS_JOB_RUNNER_CONFIG` (satt i enhetene) peker på filen.
   (settes inn først, deretter fjernes eventuelle duplikater - aldri et vindu uten dekning). Reglene røres bare i denne kjeden (`iptables-restore --noflush`).
 * **Etter en brannmur-reload eller NAS-oppdatering** som tømmer `INPUT` (ufw/firewalld/UGOS): kjør `sudo infra/job-runner/setup-network.sh` (eller restart `jarvis-egress-proxy`, som gjør det som `ExecStartPre`) og deretter
   `acceptance.sh` J07. `sudo infra/job-runner/setup-network.sh --check` viser om reglene finnes.
-* **nftables-vert uten `iptables`:** skriptet krever `iptables` (nft-varianten fungerer). Tilsvarende regler i `nft` (**ikke testet**):
+* **nftables-vert uten `iptables`:** skriptet krever `iptables` (nft-varianten fungerer). Tilsvarende regler i `nft` (syntaks sjekket med `nft -c -f` i nftables 1.0.9 i sandboxen - **ikke** lastet inn i en ekte brannmur og ikke testet på verten;
+  verdiene må tilsvare `egress_proxy` i konfigen):
   ```
-  table inet jarvis_jobs { chain input { type filter hook input priority -10; policy accept;
+  table inet jarvis_jobs {
+    chain input {
+      type filter hook input priority -10; policy accept;
       iifname "br-jarvis-jobs" ip daddr 172.30.77.1 tcp dport 3128 accept
       iifname "br-jarvis-jobs" meta l4proto tcp reject with tcp reset
-      iifname "br-jarvis-jobs" reject with icmp type port-unreachable } }
+      iifname "br-jarvis-jobs" reject with icmp type port-unreachable
+    }
+  }
   ```
 * **IPv6:** nettverket opprettes uten `--ipv6`, og reglene dekker IPv4. At containeren ikke har en ikke-loopback IPv6-adresse er **ikke verifisert**; J07 skriver tallet (forventet 0) som observasjon. Er det ikke 0, må tilsvarende `ip6tables`-regler legges til.
 * **Alternativ uten vertsprosess som lytter på bridgen:** kjør proxyen som en container på både jobbnettverket og et vanlig nett, og bruk Dockers `isolated` gateway-modus for jobbnettverket. Det er bare **beskrevet**, ikke bygget eller testet.
