@@ -93,7 +93,7 @@ export function renderValueReportNo(r: Omit<ValueReport, "summary_no">): string 
   } else if (ops.proposals.length === 0) {
     lines.push(`V5 Autonome operasjoner: ingen forslag nå${ops.skipped_no.length > 0 ? ` (${ops.skipped_no.join("; ")})` : ""}. Ingenting utføres uten din bekreftelse.`);
   } else {
-    lines.push("V5 Autonome operasjoner - FORSLAG (ingenting er utført; hvert forslag krever din bekreftelse, klasse D krever signert godkjenning):");
+    lines.push("V5 Autonome operasjoner - FORSLAG (ingenting er utført, og Jarvis utfører dem ikke selv; en handling må gå via vanlig bekreftelse, klasse D via signert godkjenning):");
     for (const p of ops.proposals) lines.push(`- [klasse ${p.risk_class}] ${p.title_no}: ${p.rationale_no}`);
     if (ops.skipped_no.length > 0) lines.push(`  Ikke vurdert: ${ops.skipped_no.join("; ")}`);
   }

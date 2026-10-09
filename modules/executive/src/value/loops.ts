@@ -30,10 +30,10 @@ export function describeValueLoops(facts: ValueRuntimeFacts | null): ValueLoopSt
   };
 
   const v5: ValueLoopStatus = facts === null
-    ? { id: "V5", title_no: "Autonomous Operations", state: "built_unwired", detail_no: "forslagslogikk finnes; ingen kodevei utfører noe (alt går via bekreftelse/step-up)" }
+    ? { id: "V5", title_no: "Autonomous Operations", state: "built_unwired", detail_no: "forslagslogikk finnes; ingen kodevei utfører noe (en handling må senere gå via bekreftelse/step-up, og den leveringen er ikke koblet)" }
     : {
         id: "V5", title_no: "Autonomous Operations", state: "built_unwired",
-        detail_no: `forslagslogikk finnes og er ${facts.v5_proposals_enabled ? "PÅ (viser forslag i rapporten)" : "AV (JARVIS_V5_PROPOSALS_ENABLED)"}; ingen kodevei utfører noe - alt går via bekreftelse/step-up`
+        detail_no: `forslagslogikk finnes og er ${facts.v5_proposals_enabled ? "PÅ (viser forslag i rapporten)" : "AV (JARVIS_V5_PROPOSALS_ENABLED)"}; ingen kodevei utfører noe (en handling må senere gå via bekreftelse/step-up, og den leveringen er ikke koblet)`
       };
 
   return [v1, v2, v3, v4, v5];
