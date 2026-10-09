@@ -125,7 +125,7 @@ import { parseIncidentProducerConfig, startApiIncidentProducers } from "./incide
 import { createInfraStatusSource } from "./infra-status-source.ts";
 import { createRadarState } from "./evolution-radar.ts";
 import { createEvolutionReportProvider } from "./evolution-source.ts";
-import { startFollowUpPush } from "./follow-up-push.ts";
+import { createPushSendGuard, startFollowUpPush } from "./follow-up-push.ts";
 import { buildValueRuntimeFacts } from "./value-facts.ts";
 import { createValueMeasurementSource } from "./value-source.ts";
 import { ChatJobs, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
@@ -1481,9 +1481,9 @@ porter: se docs/RUNTIME_GATES.md`;
       }
     });
     // WP-C4 V2 (DORMANT): planlagt oppfølgingsvarsel til eierens EGEN Telegram via den eksisterende `telegram.notify` (Policy Gateway, kill switch, frys, revisjon, idempotens). Startes KUN når `JARVIS_V2_PUSH_ENABLED=true`;
-    // rolig tid, døgngrense, minsteavstand og dedupe håndheves av ledgeren (se `follow-up-push.ts`). Uten flagget opprettes verken tidtaker eller lesing.
+    // rolig tid, døgngrense, minsteavstand og dedupe håndheves av ledgeren (se `follow-up-push.ts`); kill switch/frys/tilbakekalt credential sjekkes FØR reservasjon (`createPushSendGuard`). Uten flagget opprettes verken tidtaker eller lesing.
     if (v2PushPolicy.enabled) {
-      startFollowUpPush({ pool, graph: conversationGraphService, gateway: toolGateway, ownerIdentity, policy: v2PushPolicy });
+      startFollowUpPush({ pool, graph: conversationGraphService, gateway: toolGateway, ownerIdentity, policy: v2PushPolicy, guard: createPushSendGuard({ killSwitch, controls: ownerControls, infraGate, infraToolIds }) });
     } else {
       console.log(JSON.stringify({ msg: "v2_push_disabled" }));
     }

@@ -6,15 +6,19 @@ import type { ConversationGraphService } from "@jarvis/conversation-graph";
 import {
   FOLLOW_UP_PUSH_TICK_MS, flattenText, reduceLedger, runFollowUpPushTick,
   type FollowUpLedgerPort, type FollowUpNotifier, type FollowUpPushPolicy, type NotifyOutcome, type PushAuditType, type PushCandidate, type PushDecision, type PushLedgerRow, type PushSend,
-  type PushTickResult, type SettleOutcome
+  type PushSendGuard, type PushTickResult, type SettleOutcome
 } from "@jarvis/executive";
+import type { InfraExecutionGate, KillSwitch, OwnerControls } from "@jarvis/policy";
 import type { ToolGateway } from "@jarvis/tool-gateway";
 
 /**
  * WP-C4, V2 Unified Follow-up PUSH: limet mellom den rene planleggeren (`@jarvis/executive`) og kjøretiden. Tre adaptere og en starter, alle uten ny leverandør:
  *  - kandidater: `ConversationGraphService.crossChannelAttention` (forfalte/ventende løkker over de to eksisterende kildene `business_followups` og `business_open_loops`), i eierens egne rom (aldri helse/gjest),
  *  - ledger: revisjonssporet (`audit_events`, append-only) - reservasjon -> sendt/feilet/ukjent. Atomisk claim med advisory-lås per tenant, så to samtidige tikk aldri begge sender. Ingen ny tabell/migrasjon,
- *  - avsender: den EKSISTERENDE `telegram.notify` via `ToolGateway` (policy, kill switch, frys, revisjon, idempotens). Mottakeren er eierens konfigurerte chat - aldri en parameter her.
+ *  - avsender: den EKSISTERENDE `telegram.notify` via `ToolGateway` (policy, kill switch, frys, revisjon, idempotens). Mottakeren er eierens konfigurerte chat - aldri en parameter her,
+ *  - stopp-sjekk (M1): kill switch, frosset connector, tilbakekalt credential og infra-pause leses FØR noe reserveres (`createPushSendGuard`) - samme regler som gatewayen ellers ville avslått med, men uten forsøk og audit-støy.
+ * Utfallsregel (H1, «høyst én gang»): bare et avslag som BEVISER at ingenting gikk ut frigir reservasjonen (se `classifyNotifyFailure` i `@jarvis/executive`). Tidsavbrudd, 5xx, nettverksbrudd og alt ukjent beholder den - en påminnelse kan i
+ * sjeldne tilfeller gå tapt, men kan ikke komme to ganger så lenge ledgeren (revisjonssporet) er intakt.
  * Av som standard (`JARVIS_V2_PUSH_ENABLED`): `startFollowUpPush` kalles bare når policyen er på OG en leveringskanal er konfigurert.
  */
 type Pool = Pick<pg.Pool, "query"> & Partial<Pick<pg.Pool, "connect">>;
@@ -149,9 +153,49 @@ export function createTelegramNotifier(deps: { gateway: Pick<ToolGateway, "execu
         });
         return result.ok ? { ok: true, ...(result.external_id !== undefined ? { external_id: result.external_id } : {}) } : { ok: false, reason: safeDetail(result.reason) };
       } catch (err) {
-        // Et kastet unntak midt i kallet betyr at utfallet er UKJENT (meldingen kan være sendt): merkes tvetydig slik at reservasjonen beholdes (høyst én gang). Teksten hemmelighetsskannes FØR den kuttes.
+        // Et kastet unntak midt i kallet betyr at utfallet er UKJENT (meldingen kan være sendt): merkes tvetydig slik at reservasjonen beholdes (høyst én gang; `classifyNotifyFailure` kjenner ikke denne teksten som bevist «ikke sendt»).
+        // Teksten hemmelighetsskannes FØR den kuttes.
         return { ok: false, reason: `postcondition_unverified:exception:${safeDetail(err, 80)}` };
       }
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// Stopp-sjekk (M1): kill switch, frys, tilbakekalt credential, infra-pause - FØR reservasjon
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+export interface PushGuardDeps {
+  killSwitch: Pick<KillSwitch, "isActiveDurable">;
+  controls: Pick<OwnerControls, "isFrozenDurable" | "isRevokedDurable">;
+  /**
+   * Infra-modus (`infraGate.checkDurable`) gjelder KUN verktøy i `infraToolIds` (i dag `github`/`docker`) - `telegram` er ikke blant dem, så sjekken er et strukturelt no-op akkurat som i `PolicyGateway.authorize()`. Den er likevel
+   * med slik at en framtidig endring av `infraToolIds` også stopper løperen før reservasjon i stedet for å gi et forsøk hvert kvarter.
+   */
+  infraGate?: Pick<InfraExecutionGate, "checkDurable">;
+  infraToolIds?: ReadonlySet<string>;
+  /** Verktøyet og credential-referansen `telegram.notify` bruker (standardene er de samme som i tool-definisjonen). */
+  toolId?: string;
+  credentialRef?: string;
+}
+
+/**
+ * Speiler det gatewayen uansett ville avslått (`PolicyGateway.authorize()` og `ToolGateway.execute()`, i samme rekkefølge: kill switch, frosset connector, infra-modus, tilbakekalt credential), men uten at noe reserveres eller skrives:
+ * ingen `push_reserved`/`push_failed`-rader, ingen `tool.denied`-rader og ingen forsøk mens eieren har stanset systemet. Samme LIVE, delte (`*Durable`) sjekker som gatewayen bruker. En feil her kastes videre og tolkes av tikket som stanset (fail-closed).
+ * Gatewayen sjekker uansett på nytt ved selve kallet, så et løp mellom sjekken og sendingen gir i verste fall ett (frigitt, bevist ikke sendt) forsøk.
+ */
+export function createPushSendGuard(deps: PushGuardDeps): PushSendGuard {
+  const toolId = deps.toolId ?? "telegram";
+  const credentialRef = deps.credentialRef ?? "JARVIS_TELEGRAM_TOKEN";
+  return {
+    async blocked(): Promise<string | null> {
+      if (await deps.killSwitch.isActiveDurable()) return "kill_switch_active";
+      if (await deps.controls.isFrozenDurable(toolId)) return "connector_frozen";
+      if (deps.infraGate !== undefined && deps.infraToolIds?.has(toolId) === true) {
+        const deny = await deps.infraGate.checkDurable("B"); // telegram.notify er klasse B
+        if (deny !== null) return deny;
+      }
+      if (await deps.controls.isRevokedDurable(credentialRef)) return "credential_revoked";
+      return null;
     }
   };
 }
@@ -166,17 +210,35 @@ export interface StartFollowUpPushDeps {
   /** Eierens systemidentitet (samme som morgenbriefen bruker). Sesjonen får et eget suffiks. */
   ownerIdentity: IdentityContext;
   policy: FollowUpPushPolicy;
+  /** M1: stopp-sjekk FØR reservasjon (påkrevd: produksjonskoblingen kan ikke glemme den). */
+  guard: PushSendGuard;
   tickMs?: number;
   now?: () => Date;
   log?: (event: Record<string, unknown>) => void;
 }
 
-/** Rutinemessige utfall som ikke logges hvert kvarter (rolig tid, ingenting nytt, døgngrense, minsteavstand). */
-const QUIET_RESULTS = new Set(["disabled", "quiet_hours", "nothing_new", "rate_limited", "min_gap"]);
+/** Rutinemessige utfall som ikke logges hvert kvarter (rolig tid, ingenting nytt, døgngrense, minsteavstand, ventetid etter en feil). */
+const QUIET_RESULTS = new Set(["disabled", "quiet_hours", "nothing_new", "rate_limited", "min_gap", "backoff"]);
+/** Tilstander som varer: logges KUN når de oppstår eller endrer seg (ikke 96 ganger i døgnet), og vises i `status()`. */
+const STATE_RESULTS = new Set(["attempts_exhausted", "send_blocked"]);
+/** Utfall som kommer FØR forsøkstaket i planleggerens rekkefølge og dermed ikke sier noe om om taket fortsatt gjelder (rolig tid, døgngrense, minsteavstand): de opphever ikke `attempts_exhausted`. */
+const SAYS_NOTHING_ABOUT_EXHAUSTION = new Set(["disabled", "quiet_hours", "rate_limited", "min_gap"]);
+
+export interface FollowUpPushStatus {
+  /** Siste tikks utfall (kort kode, aldri innhold), eller null før første tikk. */
+  last_result: string | null;
+  last_tick_at: string | null;
+  /** Satt mens løperen er stanset før reservasjon (`kill_switch_active`, `connector_frozen`, `credential_revoked`, ...). */
+  blocked_by: string | null;
+  /** Satt når en melding har brukt opp forsøkene sine for døgnet (`attempts_exhausted`): meldingens hash, aldri innhold. */
+  attempts_exhausted_message: string | null;
+}
 
 export interface FollowUpPushHandle {
   /** Ett tikk nå (brukes av testene og kan kalles manuelt). Kaster aldri. */
   tick(): Promise<PushTickResult>;
+  /** M1(c): tilstanden løperen er i, til status og tester (aldri hemmeligheter eller innhold). */
+  status(): FollowUpPushStatus;
   stop(): void;
 }
 
@@ -188,9 +250,12 @@ export function startFollowUpPush(deps: StartFollowUpPushDeps): FollowUpPushHand
   const ports = {
     candidates: createGraphCandidateSource({ graph: deps.graph, tenantId, now, warn: log }),
     ledger: createAuditLedger({ pool: deps.pool, tenantId, sessionId: identity.session_id, now }),
-    notifier: createTelegramNotifier({ gateway: deps.gateway, identity })
+    notifier: createTelegramNotifier({ gateway: deps.gateway, identity }),
+    guard: deps.guard
   };
   let running = false;
+  let lastState: string | null = null;
+  const status: FollowUpPushStatus = { last_result: null, last_tick_at: null, blocked_by: null, attempts_exhausted_message: null };
   const tick = async (): Promise<PushTickResult> => {
     // Aldri to tikk samtidig i denne prosessen (en treg lesing skal ikke stable seg); mellom prosesser sørger ledgerens advisory-lås for det samme.
     if (running) return { sent: false, reason: "min_gap" };
@@ -198,7 +263,22 @@ export function startFollowUpPush(deps: StartFollowUpPushDeps): FollowUpPushHand
     try {
       const result = await runFollowUpPushTick(ports, deps.policy, now);
       const reason = result.sent ? "sent" : result.reason;
-      if (result.sent || !QUIET_RESULTS.has(reason)) log({ msg: "v2_push_tick", result: reason, ...(result.sent ? { items: result.items } : {}) });
+      status.last_result = reason;
+      status.last_tick_at = now().toISOString();
+      status.blocked_by = !result.sent && result.reason === "send_blocked" ? result.blocked_by : null;
+      status.attempts_exhausted_message = !result.sent && result.reason === "attempts_exhausted" ? (result.message_key ?? null) : null;
+      // Varige tilstander (stanset / forsøk brukt opp) logges bare ved endring; ellers logges alt som ikke er rutine. Aldri tittel, tekst eller hemmeligheter.
+      const state = STATE_RESULTS.has(reason) ? `${reason}:${status.blocked_by ?? status.attempts_exhausted_message ?? ""}` : null;
+      if (state !== null) {
+        if (state !== lastState) log({ msg: "v2_push_tick", result: reason, ...(status.blocked_by !== null ? { blocked_by: status.blocked_by } : {}), ...(status.attempts_exhausted_message !== null ? { message_key: status.attempts_exhausted_message } : {}) });
+        lastState = state;
+      } else {
+        const was = lastState?.split(":")[0];
+        // Rolig tid/døgngrense/minsteavstand sier ingenting om forsøkstaket: tilstanden gjelder videre og logges ikke på nytt når den igjen blir synlig.
+        const stillInForce = was === "attempts_exhausted" && SAYS_NOTHING_ABOUT_EXHAUSTION.has(reason);
+        if (lastState !== null && !stillInForce) { log({ msg: "v2_push_state_cleared", was }); lastState = null; }
+        if (result.sent || !QUIET_RESULTS.has(reason)) log({ msg: "v2_push_tick", result: reason, ...(result.sent ? { items: result.items } : {}) });
+      }
       return result;
     } catch (err) {
       log({ msg: "v2_push_tick_failed", error: safeDetail(err) });
@@ -212,6 +292,9 @@ export function startFollowUpPush(deps: StartFollowUpPushDeps): FollowUpPushHand
   // Første tikk etter en kort pause (ikke i oppstartsstien).
   const first = setTimeout(() => void tick(), 60_000);
   first.unref();
-  log({ msg: "v2_push_started", max_per_day: deps.policy.max_messages_per_day, quiet: `${deps.policy.quiet_start_hour}-${deps.policy.quiet_end_hour}`, tick_ms: deps.tickMs ?? FOLLOW_UP_PUSH_TICK_MS });
-  return { tick, stop: () => { clearInterval(interval); clearTimeout(first); } };
+  log({
+    msg: "v2_push_started", max_per_day: deps.policy.max_messages_per_day, quiet: `${deps.policy.quiet_start_hour}-${deps.policy.quiet_end_hour}`, tick_ms: deps.tickMs ?? FOLLOW_UP_PUSH_TICK_MS,
+    titles: deps.policy.include_titles, max_attempts_per_message: deps.policy.max_attempts_per_message, retry_backoff_minutes: deps.policy.retry_backoff_minutes
+  });
+  return { tick, status: () => ({ ...status }), stop: () => { clearInterval(interval); clearTimeout(first); } };
 }
