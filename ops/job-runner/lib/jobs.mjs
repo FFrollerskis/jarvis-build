@@ -190,6 +190,8 @@ export class JobManager {
       createdAtMs: this.now(), expiresAtMs: this.now() + this.config.maxJobLifetimeS * 1000,
       /** @type {JobState} */ state: "creating",
       /** @type {null | "exec" | "publish"} */ busy: null,
+      /** Settes rett FØR `docker create` utstedes: før det finnes det ingen container å fjerne (ingen unødvendige docker-kall når en jobb feiler tidlig). */
+      containerCreated: false,
       cancel: new CancelToken(),
       /** @type {Promise<unknown> | null} */ inflight: null,
       secretValues: Object.values(req.env)
@@ -201,11 +203,13 @@ export class JobManager {
     const releaseToken = req.gitToken !== undefined ? this.logger.registry.hold(req.gitToken) : () => undefined;
     try {
       await this.docker.assertNetworkInternal(this.config.policy.network);
+      // Credentialen hentes FØR noe opprettes: en manglende/ødelagt PAT eller et ugyldig token skal ikke etterlate en katalog og ikke starte et eneste git- eller docker-kall.
+      const token = await this.obtainToken(req.repo, req.gitToken);
       await mkdir(job.dir, { mode: 0o700 });
       await mkdir(job.privateDir, { mode: 0o700 });
       const fetched = await this.git.fetchBase({
         slug: req.repo, ...(req.baseBranch !== undefined ? { baseBranch: req.baseBranch } : {}), depth: this.config.cloneDepth,
-        baseGitDir: job.baseGitDir, token: await this.obtainToken(req.repo, req.gitToken), timeoutMs: this.config.cloneTimeoutMs, cancel: job.cancel
+        baseGitDir: job.baseGitDir, token, timeoutMs: this.config.cloneTimeoutMs, cancel: job.cancel
       });
       job.baseBranch = fetched.branch;
       job.baseSha = fetched.baseSha;
@@ -224,6 +228,7 @@ export class JobManager {
         },
         ...(req.taskId !== undefined ? { taskId: req.taskId } : {})
       });
+      job.containerCreated = true;
       await this.docker.create(createArgs, req.env, job.cancel);
       await this.docker.start(job.containerName, job.cancel);
       if (job.cancel.cancelled) throw new RunnerError("job_cancelled", 409);
@@ -427,7 +432,7 @@ export class JobManager {
     job.destroying = (async () => {
       job.state = "closing";
       job.cancel.cancel();
-      const gone = await this.docker.remove(job.containerName).catch(() => false);
+      const gone = job.containerCreated ? await this.docker.remove(job.containerName).catch(() => false) : true;
       if (job.inflight) {
         await Promise.race([job.inflight, new Promise((resolve) => setTimeout(resolve, 10_000).unref())]);
       }
