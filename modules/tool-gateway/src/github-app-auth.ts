@@ -352,7 +352,7 @@ export interface GitHubInstallationInfo {
 }
 
 export interface GitHubTokenScope {
-  /** Repo-navn eller `owner/navn`. Utelatt = konfigurert standardliste (aldri «alle»). */
+  /** Repo-navn eller `owner/navn`; må være innenfor den konfigurerte allowlisten. Utelatt = hele den konfigurerte listen (aldri «alle»). */
   readonly repositories?: readonly string[] | undefined;
   /** Valgfri nedskalering. Utelatt = alle rettigheter installasjonen er gitt. */
   readonly permissions?: GitHubPermissionRequest | undefined;
@@ -366,7 +366,9 @@ export interface GitHubAppAuthOptions {
   /** Leser PEM fra vaulten ved HVER signering. `null`/tom = nøkkelen mangler. */
   readonly privateKey: () => Promise<string | null | undefined>;
   readonly apiBase?: string | undefined;
-  /** Standard-scope (repo-navn eller `owner/navn`). Påkrevd for utstedelse uten eksplisitt scope. */
+  /**
+   * Standard-scope (repo-navn eller `owner/navn`) OG allowlist (review F14): påkrevd for utstedelse uten eksplisitt scope, og et eksplisitt scope må være en delmengde.
+   */
   readonly repositories?: readonly string[] | undefined;
   /** Valgfri nedskalering av standard-scopet. */
   readonly permissions?: GitHubPermissionRequest | undefined;
@@ -644,6 +646,13 @@ export class GitHubAppAuth {
     try {
       normalized = this.#normalizeScope(scope);
     } catch (err) {
+      const denied = asGitHubAppAuthError(err);
+      if (denied.code === "GITHUB_APP_SCOPE_MISMATCH") {
+        // Policy-avslag (repo utenfor allowlisten) er en KALLERFEIL, ikke en feil i App-oppsettet: status og ventetid røres ikke (et ulovlig kall skal ikke kunne forgifte
+        // statusen til standard-credentialen), men avslaget logges (maks én linje per minutt).
+        this.#log({ level: "warn", msg: "github_app_scope_denied", code: denied.code }, "scope_denied", 60_000);
+        throw denied;
+      }
       // Ingen scope å be om (typisk: JARVIS_GITHUB_REPO mangler) - lokal konfigfeil, men like synlig som en leverandørfeil.
       throw this.#recordFailure(err, null);
     }
@@ -674,8 +683,23 @@ export class GitHubAppAuth {
     }
   }
 
+  /**
+   * Review F14: den konfigurerte repo-listen er en ALLOWLIST, ikke bare et standardvalg. Et eksplisitt scope må være en delmengde av den - ellers kunne enhver kode med
+   * en referanse til klienten utstede et token for hvilket som helst repo i installasjonen. En allowlist-oppføring MED eier binder svaret til den eieren selv om kallet
+   * bare oppga repo-navnet (svaret kontrolleres mot `owner/navn`, se `#parseTokenResponse`). Ingen treff = `GITHUB_APP_SCOPE_MISMATCH` UTEN nettverkskall.
+   */
+  #withinAllowlist(ref: RepoRef): RepoRef {
+    const wantedName = ref.name.toLowerCase();
+    for (const entry of this.#defaultRepositories) {
+      if (entry.name.toLowerCase() !== wantedName) continue;
+      if (entry.owner !== undefined && ref.owner !== undefined && entry.owner.toLowerCase() !== ref.owner.toLowerCase()) continue;
+      return { name: ref.name, owner: ref.owner ?? entry.owner };
+    }
+    throw new GitHubAppAuthError("GITHUB_APP_SCOPE_MISMATCH", "repository_not_in_configured_scope");
+  }
+
   #normalizeScope(scope: GitHubTokenScope | undefined): NormalizedScope {
-    const refs = scope?.repositories !== undefined ? scope.repositories.map(parseRepoRef) : this.#defaultRepositories;
+    const refs = scope?.repositories !== undefined ? scope.repositories.map(parseRepoRef).map((ref) => this.#withinAllowlist(ref)) : this.#defaultRepositories;
     if (refs.length === 0) {
       throw new GitHubAppAuthError("GITHUB_APP_SCOPE_UNDEFINED", "no_repository_scope_configured");
     }
@@ -787,7 +811,8 @@ export class GitHubAppAuth {
     }
     const info: GitHubTokenInfo = {
       issued_at: new Date(now).toISOString(),
-      expires_at: new Date(expiresServerMs).toISOString(),
+      // Review F14: den RAPPORTERTE utløpstiden er den samme som den Jarvis faktisk bruker (kappet til MAX_TOKEN_LIFETIME_MS, i serverens tid) - ikke det leverandøren påstår.
+      expires_at: new Date(expiresAtLocalMs + this.#skewMs).toISOString(),
       repository_selection: "selected",
       repositories: repositories.map((r) => r.fullName),
       permissions

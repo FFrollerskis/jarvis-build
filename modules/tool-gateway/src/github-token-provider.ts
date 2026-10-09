@@ -204,10 +204,8 @@ class AppCredentialCore implements GitHubAppCredentialSource {
     let error: GitHubAppAuthError;
     try {
       if (!this.app) throw this.configError();
-      if (!this.isConfiguredRepository(slug, this.app)) {
-        // Policy, ikke tilgjengelighet: et repo utenfor den konfigurerte listen får aldri et token (og aldri PAT-fallback).
-        throw new GitHubAppAuthError("GITHUB_APP_SCOPE_MISMATCH", "repository_not_in_configured_scope");
-      }
+      // `GitHubAppAuth` håndhever allowlisten selv (review F14): et repo utenfor den konfigurerte listen gir `GITHUB_APP_SCOPE_MISMATCH` uten nettverkskall -
+      // policy, ikke tilgjengelighet, så aldri PAT-fallback (se `recover`).
       const token = await this.app.token({ repositories: [slug] });
       this.fallbackActive = false;
       return token;
@@ -217,14 +215,6 @@ class AppCredentialCore implements GitHubAppCredentialSource {
     const recovered = await this.recover(error, pat);
     if (recovered === null) throw error;
     return recovered;
-  }
-
-  private isConfiguredRepository(slug: string, app: GitHubAppAuth): boolean {
-    const wanted = slug.toLowerCase();
-    return app.defaultRepositories.some((entry) => {
-      const value = entry.toLowerCase();
-      return value === wanted || (!value.includes("/") && value === wanted.split("/")[1]);
-    });
   }
 
   /** Eneste sted PAT kan komme inn i App-modus: eksplisitt flagg, aldri ved scope-avvik, og alltid loggført. */

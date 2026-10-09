@@ -167,7 +167,9 @@ Når steg 7 er VERIFIED og Jarvis har kjørt normalt en stund: fjern `JARVIS_GIT
 ## Nøkkelrotasjon og nødtilbakekalling
 
 - **Rotasjon uten nedetid:** generer en NY privatnøkkel (steg 3), lagre den i Infisical under samme navn, kjør steg 7, og slett den gamle nøkkelen på GitHub. Jarvis leser nøkkelen på nytt
-  ved hver utstedelse (innen ~1 time, eller restart `api`/`worker` for umiddelbar effekt).
+  ved hver utstedelse (innen ~1 time, eller restart `api`/`worker` for umiddelbar effekt). **Kjent begrensning:** `GitHubAppAuth.invalidate()` (forkaster cachede tokens og ventetid) finnes, men er IKKE koblet til noen
+  rotasjonshendelse - tokens som allerede er utstedt med den gamle nøkkelen lever til de utløper (maks ~1 time). Slik rotasjonen er satt opp merker Jarvis ikke at nøkkelen er byttet før neste utstedelse; restart er den eneste
+  måten å få umiddelbar effekt på.
 - **Lekkasje mistenkt:** slett nøkkelen på GitHub (alle tokens den kunne mint, kan ikke fornyes), og vurder **Suspend** av installasjonen (Settings -> Applications/GitHub Apps -> Configure).
   Allerede utstedte tokens dør senest etter 1 time. Du kan også tilbakekalle credentialen i Jarvis (`owner_controls.revoke_credential` på `JARVIS_GITHUB_TOKEN`) – det stopper alle `github.*`-kall
   FØR noe token utstedes.
@@ -206,6 +208,9 @@ Alt står også i `executive.get_connector_status` (`auth.detail.last_error`) og
 
 - JWT: RS256, `iat` = nå − 60 s, `exp` = nå + 9 min (GitHub tillater maks 10), `iss` = App-id/client-id; lages på nytt per forsøk og lagres aldri. Klokkeskjev rettes fra `Date`-headeren (én umiddelbar gjentakelse).
 - Tokenet er alltid `repositories`-begrenset; svaret kontrolleres mot det som ble forespurt (`repository_selection: selected`, nøyaktig de repoene, rettigheter ikke utover forespurt). Avvik = avvist + ingen fallback.
+- Den konfigurerte repo-listen (`JARVIS_GIT_ALLOWED_REPOS`, ellers `JARVIS_GITHUB_REPO`) er en ALLOWLIST som håndheves i selve klienten (`GitHubAppAuth`), ikke bare av kallerne: et eksplisitt scope utenfor
+  listen avvises uten nettverkskall (`GITHUB_APP_SCOPE_MISMATCH`, aldri PAT-fallback) og rører verken status eller ventetid. En oppføring med eier binder svaret til den eieren. Rapportert utløp
+  (`token_expires_at`) er det Jarvis faktisk bruker (kappet til ~65 min), ikke det GitHub eventuelt påstår.
 - Installasjonstokens caches i minnet til 5 min før `expires_at` (felles pågående utstedelse per scope), og forkastes ved 401. Hverken JWT, nøkkel eller token havner i logg, feilmeldinger, status, audit eller `JSON.stringify`/`inspect`
   (adversarielle tester med en fiendtlig server som ekkoer dem). `withSecretRedaction` i kodejobbene redigerer nylig utstedte tokens ut av feilmeldinger.
 - Utgående kall går via `guardedFetch` (rå-URL-sjekk + timeout); API-basen er `https://api.github.com` og ingen annen vert, og redirects følges aldri på kall med JWT/token

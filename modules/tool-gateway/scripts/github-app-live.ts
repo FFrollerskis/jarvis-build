@@ -200,8 +200,15 @@ export async function runGitHubAppLive(options: LiveOptions): Promise<LiveResult
   // ---- 4. token-utstedelse ------------------------------------------------------------------------------------------------------------
   let token: string | undefined;
   try {
-    const scope = sandboxRepo ? { repositories: [sandboxRepo] } : undefined;
-    const issued = await app.issue(scope);
+    // Review F14: produksjonsklienten (`app`) kan KUN utstede for repoene i sin allowlist (JARVIS_GIT_ALLOWED_REPOS / JARVIS_GITHUB_REPO). Test-repoet står bevisst ikke der, så
+    // sandbox-tokenet utstedes av en EGEN klient hvis allowlist er KUN test-repoet - den kan aldri utstede for produksjonsrepoet, og produksjonsklienten aldri for test-repoet.
+    const issuer = sandboxRepo
+      ? new GitHubAppAuth({
+        appId: settings.appId, installationId: settings.installationId, apiBase: settings.apiBase, repositories: [sandboxRepo],
+        privateKey: () => secrets.get(GITHUB_APP_PRIVATE_KEY_REF), allowLoopbackHttpForTests: options.allowLoopbackHttpForTests === true, log: () => undefined
+      })
+      : app;
+    const issued = await issuer.issue();
     token = issued.token;
     issuedTokens.push(issued.token);
     results["token_issue"] = "PASS";

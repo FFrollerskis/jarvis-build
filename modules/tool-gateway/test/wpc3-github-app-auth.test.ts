@@ -195,8 +195,8 @@ describe("B: utstedelse mot fake GitHub - JWT verifisert av serveren, scope som 
     expect(h.auth.state().last_error?.code).toBe("GITHUB_APP_SCOPE_UNDEFINED");
   });
 
-  it("B4: eksplisitt scope overstyrer standarden; ugyldige repo-verdier avvises før nettverket", async () => {
-    h = await harness();
+  it("B4: eksplisitt scope (innenfor allowlisten) overstyrer standarden; ugyldige repo-verdier avvises før nettverket", async () => {
+    h = await harness({ overrides: { repositories: [REPO, "tsworkflow/other-repo"] } });
     const issued = await h.auth.issue({ repositories: ["other-repo"] });
     expect(JSON.parse(h.fake.mintRequests()[0]?.body ?? "{}")).toEqual({ repositories: ["other-repo"] });
     expect(issued.info.repositories).toEqual(["tsworkflow/other-repo"]);
@@ -214,6 +214,7 @@ describe("B: utstedelse mot fake GitHub - JWT verifisert av serveren, scope som 
     for (const bad of [{ "Contents": "write" }, { contents: "root" }, { "../x": "read" }] as unknown as Array<Record<string, "read">>) {
       expect((await failure(h.auth.token({ permissions: bad }))).code).toBe("GITHUB_APP_CONFIG_INVALID");
     }
+    h.auth.invalidate(); // «jarvisbuild» og «tsworkflow/jarvisbuild» er samme scope (allowlisten gir eieren) og ville ellers truffet cachen
     h.fake.script = [{ status: 201, build: () => ({ status: 201, json: { ...h.fake.buildTokenBody({ repositories: ["jarvisbuild"], permissions: { contents: "write", metadata: "read" } }) } }) }];
     const withMeta = await h.auth.issue({ permissions: { contents: "write" }, repositories: ["jarvisbuild"] });
     expect(withMeta.info.permissions["metadata"]).toBe("read");
@@ -284,7 +285,7 @@ describe("C: cache, single-flight og fornyelse", () => {
   });
 
   it("C3: ulike scope caches hver for seg; samme scope i annen rekkefølge/casing treffer samme cache", async () => {
-    const h = await harness();
+    const h = await harness({ installationRepos: ["jarvisbuild", "other-repo", "third-repo"], overrides: { repositories: [REPO, "tsworkflow/other-repo", "tsworkflow/third-repo"] } });
     const a = await h.auth.token();
     const b = await h.auth.token({ repositories: ["other-repo"] });
     expect(a).not.toBe(b);
@@ -359,12 +360,12 @@ describe("D: feilkategorier, backoff og fail-fast", () => {
   });
 
   it("D2: faktiske GitHub-svar for ukjent repo / urettmessige rettigheter gir 422 -> REQUEST_REJECTED med lesbar (maskert) detalj", async () => {
-    const h = await harness({ installationRepos: ["jarvisbuild"] });
+    const h = await harness({ installationRepos: ["jarvisbuild"], overrides: { repositories: [REPO, "tsworkflow/finnes-ikke"] } });
     const unknownRepo = await failure(h.auth.token({ repositories: ["finnes-ikke"] }));
     expect(unknownRepo.code).toBe("GITHUB_APP_REQUEST_REJECTED");
     expect(unknownRepo.message).toContain("does not exist or is not accessible");
     h.clock.t += 60_000;
-    const tooMuch = await failure(h.auth.token({ permissions: { administration: "write" } }));
+    const tooMuch = await failure(h.auth.token({ repositories: [REPO], permissions: { administration: "write" } }));
     expect(tooMuch.code).toBe("GITHUB_APP_REQUEST_REJECTED");
     expect(tooMuch.message).toContain("permissions requested are not granted");
   });

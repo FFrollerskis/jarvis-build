@@ -402,3 +402,72 @@ describe("F9: «kortlevd repo-scopet identitet» (short_lived/scoped/hardened) e
     }
   });
 });
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+describe("F14: allowlisten håndheves i GitHubAppAuth selv (ikke bare i GitHubAuth), og rapportert utløp kappes", () => {
+  it("F14a: et eksplisitt scope utenfor den konfigurerte listen avvises UTEN nettverkskall (SCOPE_MISMATCH) og forgifter ikke status eller ventetid", async () => {
+    const h = await harness(); // allowlist = [REPO]
+    for (const repositories of [[OTHER_REPO], ["other-repo"], ["fremmed/jarvisbuild"], [REPO, OTHER_REPO], ["tsworkflow/jarvisbuild-annet"]]) {
+      const error = await failure(h.auth.token({ repositories }));
+      expect(error.code, repositories.join(",")).toBe("GITHUB_APP_SCOPE_MISMATCH");
+      expect(error.message).toContain("repository_not_in_configured_scope");
+      expect((await failure(h.auth.issue({ repositories }))).code).toBe("GITHUB_APP_SCOPE_MISMATCH");
+    }
+    expect(h.fake.requests).toHaveLength(0);
+    expect(h.auth.state().last_error).toBeNull();
+    expect(h.auth.state().consecutive_failures).toBe(0);
+    expect(h.logs.some((l) => l.msg === "github_app_scope_denied")).toBe(true);
+    // Standard-credentialen virker uforstyrret rett etter avslagene (ingen fail-fast-vindu).
+    expect(await h.auth.token()).toMatch(/^ghs_/);
+    expect(h.fake.mintRequests()).toHaveLength(1);
+  });
+
+  it("F14b: delmengder av allowlisten er lov i alle skrivemåter (navn, owner/navn, store bokstaver) og deler cache - men aldri flere repoer enn listen", async () => {
+    const h = await harness({ installationRepos: ["jarvisbuild", "other-repo"], overrides: { repositories: [REPO, OTHER_REPO] } });
+    const a = await h.auth.token({ repositories: [REPO] });
+    expect(await h.auth.token({ repositories: ["jarvisbuild"] })).toBe(a);
+    expect(await h.auth.token({ repositories: ["TSWORKFLOW/JARVISBUILD"] })).toBe(a);
+    expect(h.fake.mintRequests()).toHaveLength(1);
+    expect(JSON.parse(h.fake.mintRequests()[0]?.body ?? "{}")).toEqual({ repositories: ["jarvisbuild"] });
+    const both = await h.auth.token({ repositories: ["other-repo", REPO] });
+    expect(both).toBe(await h.auth.token()); // hele listen = standard-scopet
+    expect((await failure(h.auth.token({ repositories: [REPO, OTHER_REPO, "tsworkflow/tredje"] }))).code).toBe("GITHUB_APP_SCOPE_MISMATCH");
+    expect(h.auth.state().last_error).toBeNull();
+  });
+
+  it("F14c: en allowlist-oppføring MED eier binder svaret til den eieren selv om kallet bare oppga navnet - en server som svarer med et annet eier-repo avvises", async () => {
+    const h = await harness();
+    h.fake.script = [{ status: 201, build: () => ({ status: 201, json: { ...h.fake.buildTokenBody({ repositories: ["jarvisbuild"] }), repositories: [{ id: 1, name: "jarvisbuild", full_name: "fremmed/jarvisbuild" }] } }) }];
+    const error = await failure(h.auth.token({ repositories: ["jarvisbuild"] })); // bare navn, men listen sier tsworkflow/jarvisbuild
+    expect(error.code).toBe("GITHUB_APP_SCOPE_MISMATCH");
+    expect(error.message).toContain("requested_repository_missing");
+  });
+
+  it("F14d: uten noen konfigurert liste kan INGENTING utstedes - heller ikke et eksplisitt scope (aldri «alle repoer»)", async () => {
+    const h = await harness({ overrides: { repositories: undefined } });
+    expect((await failure(h.auth.token({ repositories: [REPO] }))).code).toBe("GITHUB_APP_SCOPE_MISMATCH");
+    expect((await failure(h.auth.token())).code).toBe("GITHUB_APP_SCOPE_UNDEFINED");
+    expect(h.fake.requests).toHaveLength(0);
+  });
+
+  it("F14e: nedskalering av rettigheter uten eksplisitt repo-liste bruker hele allowlisten og er fortsatt lov", async () => {
+    const h = await harness();
+    const issued = await h.auth.issue({ permissions: { contents: "write" } });
+    expect(issued.info.repositories).toEqual([REPO]);
+    expect(JSON.parse(h.fake.mintRequests()[0]?.body ?? "{}")).toEqual({ repositories: ["jarvisbuild"], permissions: { contents: "write" } });
+  });
+
+  it("F14f: rapportert utløp (info.expires_at, status, connector-metadata) kappes til det Jarvis faktisk bruker - ikke leverandørens påstand (år 2099)", async () => {
+    for (const serverSkewMs of [0, 900_000]) {
+      const h = await harness({ serverSkewMs });
+      h.fake.script = [{ status: 201, build: () => ({ status: 201, json: { ...h.fake.buildTokenBody({ repositories: ["jarvisbuild"] }), expires_at: "2099-01-01T00:00:00Z" } }) }];
+      const issued = await h.auth.issue();
+      const capped = new Date(T0 + serverSkewMs + 65 * 60_000).toISOString(); // serverens tid: nå + 65 min
+      expect(issued.info.expires_at, `skjev ${serverSkewMs}`).toBe(capped);
+      expect(h.auth.state().token?.expires_at).toBe(capped);
+      await stopFakeServers();
+    }
+    const normal = await harness();
+    expect((await normal.auth.issue()).info.expires_at).toBe(new Date(T0 + 3_600_000).toISOString()); // en normal time er uendret
+  });
+});
