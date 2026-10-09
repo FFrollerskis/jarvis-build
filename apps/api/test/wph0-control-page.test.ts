@@ -206,6 +206,19 @@ describe("atferd: autentisering og lesing", () => {
     expect(text).toContain("[skjult]");
     for (const secret of ["sk-ant-api03", "ghp_aaaa", "ffffffff", "AKIAABCD", "abcdefghijklmnopqrstuvwxyz"]) expect(text, secret).not.toContain(secret);
   });
+
+  it("hemmelighetsvask (L-1): URL med passord (https, postgres, redis med tomt brukernavn) vises aldri, men verten gjør det", async () => {
+    const pw = ["hunt", "er2"].join(""); // satt sammen i testen: kildefilen inneholder ingen ferdig «bruker:passord@»-URL
+    const leaky = report("integration", "WARN", {
+      sections: [section({ items: [{ id: "x", label: "Rad", status: "WARN", detail_no: `Koblet til https://admin:${pw}@intern.example.org/panel og postgres://u:${pw}b@db:5432/j og redis://:${pw}c@cache.example.org`, facts: {} }] })]
+    });
+    const page = runPage(SERVED, baseRoute(({ path, body }) => path === "/control/center" && body["center"] === "integration" ? { body: { ok: true, data: { found: true, summary_no: "s", explanation_no: "e", report: leaky } } } : undefined));
+    await loaded(page);
+    const text = allText(page.byId("center-integration"));
+    expect(text).toContain("[skjult]");
+    expect(text).not.toContain(pw);
+    for (const host of ["intern.example.org", "db:5432", "cache.example.org"]) expect(text, host).toContain(host);
+  });
 });
 
 describe("atferd: handlinger", () => {

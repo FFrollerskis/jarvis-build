@@ -301,7 +301,9 @@
   const SECRET_LIKE = [
     /sk-ant-[A-Za-z0-9_-]{10,}/g, /sk-(?:proj-)?[A-Za-z0-9_-]{20,}/g, /gh[pousr]_[A-Za-z0-9]{20,}/g, /github_pat_[A-Za-z0-9_]{20,}/g, /xox[abprs]-[A-Za-z0-9-]{10,}/g,
     /AKIA[0-9A-Z]{16}/g, /AIza[0-9A-Za-z_-]{35}/g, /eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, /Bearer\s+[A-Za-z0-9._~+\/-]{16,}=*/gi,
-    /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*/g, /\b[0-9a-f]{40,}\b/gi
+    /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*/g, /\b[0-9a-f]{40,}\b/gi,
+    // L-1: URL med passord (skjema + «://» + bruker:passord@vert; også tomt brukernavn). Lineært: skjemanavnet er begrenset, brukernavn og passord stopper ved «/», «@» og mellomrom.
+    /\b[a-z][a-z0-9+.-]{0,31}:\/\/[^\s\/:@]*:[^\s\/@]+(?=@)/gi
   ];
   function safeText(value) {
     let text = value === null || value === undefined ? "" : String(value);

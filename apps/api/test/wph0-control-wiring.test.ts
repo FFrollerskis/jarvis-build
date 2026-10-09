@@ -221,6 +221,27 @@ describe("kjøretid: siste forsvarslinje mot hemmeligheter er på i registeret f
     expect(report?.actions[0]?.body).toEqual({ action: "freeze_connector", parameters: { connector_id: "github", reason: "begrunnelse" } });
   });
 
+  it("L-1: en URL med passord i en rapport redigeres av fabrikkens registry (kun passordet; skjema, bruker og vert beholdes)", async () => {
+    const { registry } = fixture();
+    const pw = ["hunt", "er2"].join(""); // satt sammen i testen (gitleaks)
+    const urls = [`https://admin:${pw}@intern.example.org/panel`, `postgres://u:${pw}b@db:5432/jarvis`, `redis://:${pw}c@cache.example.org:6379`];
+    registry.register({
+      id: "integration", title_no: "Integrasjoner", description_no: "Connectorer",
+      build: async () => ({
+        sections: [controlSection({
+          id: "sec-1", title_no: "T", source: "S", summary_no: `Sum ${urls[0]}`,
+          items: [controlItem({ id: "item-1", label: "L", status: "OK", detail_no: `D ${urls[1]} og ${urls[2]}`, facts: { url: urls[0] as string } })]
+        })],
+        actions: []
+      })
+    });
+    const report = await registry.report("integration", owner);
+    const human = JSON.stringify(report?.sections);
+    expect(human).not.toContain(pw);
+    expect(human).toContain("https://admin:[REDACTED:url_credentials]@intern.example.org/panel");
+    expect(human).toContain("redis://:[REDACTED:url_credentials]@cache.example.org:6379");
+  });
+
   it("registeret avviser en redigerer som ikke redigerer (identitetsfunksjonen, store bokstaver, kast, ikke-streng) - allerede ved konstruksjon", () => {
     const bad: Array<[string, (t: string) => string]> = [
       ["identitet", (t) => t], ["store bokstaver", (t) => t.toUpperCase()], ["kaster", () => { throw new Error("x"); }], ["ikke-streng", (() => 42) as never], ["legger til mellomrom", (t) => ` ${t}`]

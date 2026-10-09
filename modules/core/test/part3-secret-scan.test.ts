@@ -109,3 +109,70 @@ describe("gjennomgang av WP-A (D-451): bankkoder og kvadratisk kjøretid", () =>
     expect(r.text).toBe(`${longName}=[REDACTED:named_secret] og ${dotted}: [REDACTED:named_secret]`);
   });
 });
+
+describe("gjennomgang av PR #316 (L-1): URL med passord (bruker:passord@vert)", () => {
+  // Delene settes sammen i testen, så kildefilen ikke inneholder ferdige «bruker:passord@»-URL-er (gitleaks).
+  const url = (scheme: string, user: string, pw: string, rest: string): string => `${scheme}://${user}:${pw}@${rest}`;
+  const cases: Array<[string, string, string, string, string, string]> = [
+    // [beskrivelse, skjema, bruker, passord, resten]
+    ["https med admin", "https", "admin", "hunter" + "2", "example.com/panel"],
+    ["postgres", "postgres", "u", "Sup3r" + "S3cret", "db:5432/jarvis"],
+    ["redis med TOMT brukernavn", "redis", "", "pw" + "1234", "cache:6379"],
+    ["mongodb+srv (pluss i skjemanavnet)", "mongodb+srv", "app", "x9" + "Zq7Lm", "cluster0.example.net/db"],
+    ["amqps med kolon i passordet", "amqps", "guest", "a:b" + "c:d", "mq.example.com:5671/vhost"],
+    ["STORE bokstaver i skjemaet", "HTTPS", "bruker", "Pass" + "ord9", "intern.example.org"]
+  ].map(([label, scheme, user, pw, rest]) => [label as string, scheme as string, user as string, pw as string, rest as string, url(scheme as string, user as string, pw as string, rest as string)]);
+
+  for (const [label, scheme, user, pw, rest, input] of cases) {
+    it(`fjerner KUN passordet i ${label} (skjema, bruker og vert beholdes)`, () => {
+      const r = scanForSecrets(`kobler til ${input} nå`);
+      expect(r.findings.map((f) => f.kind)).toContain("url_credentials");
+      expect(r.text).not.toContain(pw);
+      expect(r.text).toBe(`kobler til ${scheme}://${user}:[REDACTED:url_credentials]@${rest} nå`);
+      expect(containsSecret(input)).toBe(true);
+    });
+  }
+
+  it("flere URL-er i samme tekst telles hver for seg", () => {
+    const a = url("https", "a", "pw" + "one1", "x.example");
+    const b = url("redis", "", "pw" + "two2", "y.example");
+    const r = scanForSecrets(`${a} og ${b}`);
+    expect(r.findings.find((f) => f.kind === "url_credentials")?.count).toBe(2);
+    expect(r.text).not.toMatch(/pwone1|pwtwo2/);
+  });
+
+  it("en URL uten passord, og andre bruk av «:» og «@», røres ikke", () => {
+    for (const text of [
+      "https://example.com:8080/sti", "ssh://git@github.com/org/repo", "git@github.com:org/repo.git", "https://bruker@example.com/sti", "mailto:meg@example.com",
+      "http://localhost:3000/@bruker", "se https://example.com:443 og skriv til meg@example.no", "kl 12:30 @ kontoret", "postgres://db:5432/jarvis?sslmode=require"
+    ]) {
+      expect(scanForSecrets(text), text).toEqual({ text, findings: [] });
+    }
+  });
+
+  it("et token i passordposisjonen redigeres én gang av det spesifikke mønsteret (ikke dobbelttelt som url_credentials)", () => {
+    const token = "ghp_" + "A".repeat(36);
+    const r = scanForSecrets(url("https", "x-access-token", token, "github.com/o/r.git"));
+    expect(r.text).not.toContain(token);
+    expect(r.findings.map((f) => f.kind)).toEqual(["github_token"]);
+  });
+
+  it("tidsvakt: adversarielle former på ~500 KB tar ikke kvadratisk tid (skjemanavnet er begrenset; brukernavn og passord stopper ved «/», «@» og mellomrom)", () => {
+    const shapes: Array<[string, string]> = [
+      ["a.a. (ordgrense overalt)", "a.a.".repeat(125_000)],
+      ["a.a.a:// gjentatt", "a.a.a://".repeat(62_500)],
+      ["a:// gjentatt", "a://".repeat(125_000)],
+      ["a://: gjentatt", "a://:".repeat(100_000)],
+      ["lang brukernavn uten kolon", "http://" + "u".repeat(500_000)],
+      ["lang passord uten @", "http://u:" + "p".repeat(500_000)],
+      ["u: gjentatt etter skjema", "http://" + "u:".repeat(250_000)],
+      ["bare kolon", "https://" + ":".repeat(500_000)],
+      ["lang skjema uten ://", "x".repeat(500_000) + ":/"]
+    ];
+    for (const [label, text] of shapes) {
+      const started = Date.now();
+      scanForSecrets(text);
+      expect(Date.now() - started, label).toBeLessThan(2000);
+    }
+  });
+});
