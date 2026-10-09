@@ -87,6 +87,11 @@ export const MODEL_ENV = [
   "JARVIS_MEMORY_RETENTION_SWEEP_HOUR",
   "JARVIS_MODEL_TIMEOUT_MS",
   "JARVIS_OLLAMA_URL",
+  // WP-D4 (JARVIS-036): valgfri modell-/endepunktoverstyring for Kimi og Hermes (tom = adapterens standard).
+  "JARVIS_KIMI_MODEL",
+  "JARVIS_KIMI_URL",
+  "JARVIS_HERMES_MODEL",
+  "JARVIS_HERMES_URL",
   "JARVIS_JOB_TOOL_TURN_MODEL",
   "JARVIS_TOOL_TURN_DAILY_CAP_ORE",
   "JARVIS_TOOL_TURN_MODEL",

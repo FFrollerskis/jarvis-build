@@ -140,6 +140,23 @@ describe("composeAiMeshReport", () => {
     expect(report.summary_no).toContain("- kimi (sky): LIVE · 7 døgn: ukjent (databasen kunne ikke leses)");
   });
 
+  it("tilstandsteksten motsier aldri konklusjonen: CONFIGURED i denne prosessen MED vellykkede kall siste 7 døgn (røyktesten kjørte i en annen prosess) sies å være bevist, uten kall sies det å være ubevist", () => {
+    const report = composeAiMeshReport({
+      as_of: AS_OF,
+      router: "HEALTHY",
+      providers: [
+        provider("kimi", { usage_7d: usage({ calls: 2, ok_calls: 2, p50_latency_ms: 1200 }) }),
+        provider("hermes", { usage_7d: usage({ calls: 2, ok_calls: 0, failed_calls: 2 }) }),
+        provider("gemma_local", { usage_7d: usage() })
+      ],
+      fallback_verified_in_process: false
+    });
+    expect(report.summary_no).toContain("- kimi (sky): bevist live siste 7 døgn (ingen trafikk i denne prosessen siden oppstart)");
+    expect(report.summary_no).toContain("- hermes (sky): konfigurert, aldri bevist");
+    expect(report.summary_no).toContain("- gemma_local (sky): konfigurert, aldri bevist");
+    expect(report.acceptance.live).toEqual(["kimi"]);
+  });
+
   it("parallell-overhead vises med fortegn bare når den er målt", () => {
     const withOverhead = provider("kimi", { state: "LIVE", healthy: true, runtime: { ...provider("x").runtime, parallel_overhead_ms: 320 } });
     expect(composeAiMeshReport({ as_of: AS_OF, router: "HEALTHY", providers: [withOverhead], fallback_verified_in_process: false }).summary_no).toContain("parallell-overhead +320 ms");

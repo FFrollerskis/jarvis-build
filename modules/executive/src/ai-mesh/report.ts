@@ -60,10 +60,17 @@ const STATE_NO: Record<AiMeshProvider["state"], string> = {
   UNAVAILABLE: "UTILGJENGELIG"
 };
 
+/**
+ * Tilstanden i denne prosessen (`CONFIGURED` = ingen trafikk siden oppstart) sier ikke at leverandøren er ubevist: har den vellykkede kall i cost_events siste 7 døgn (f.eks. fra eierens røyktest, som kjører i en annen
+ * prosess), teller den som bevist live i akseptansen - og teksten må si det samme, ellers motsier linjen konklusjonen.
+ */
+const stateText = (p: AiMeshProvider): string =>
+  p.state === "CONFIGURED" && (p.usage_7d?.ok_calls ?? 0) > 0 ? "bevist live siste 7 døgn (ingen trafikk i denne prosessen siden oppstart)" : STATE_NO[p.state];
+
 function providerLine(p: AiMeshProvider): string {
   const where = p.locality === "local" ? "lokal" : p.hosted_free_tier ? "sky, gratis delt" : "sky";
   if (!p.configured) return `- ${p.provider} (${where}): ikke konfigurert`;
-  const parts: string[] = [STATE_NO[p.state]];
+  const parts: string[] = [stateText(p)];
   const p50 = p.usage_7d?.p50_latency_ms ?? p.runtime.p50_latency_ms;
   if (p50 != null) parts.push(`p50 ${p50} ms`);
   if (p.runtime.parallel_overhead_ms != null) parts.push(`parallell-overhead ${p.runtime.parallel_overhead_ms >= 0 ? "+" : ""}${p.runtime.parallel_overhead_ms} ms`);
