@@ -1276,13 +1276,20 @@ export class FinanceService {
    * naturlig alltid vinner over en eldre lagret webhook-tilstand).
    */
   async refreshStripePaymentState(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, actorPersonId?: string): Promise<PaymentIntent> {
+    // WP-F1 / JARVIS-019: leverandørlesingen skjer UTENFOR enhver DB-transaksjon og uten radlås. Fase 1 (kort tx, ingen lås) leser raden, fase 2 henter credential og
+    // Stripe-tilstand (tidsavbrudd i transporten), fase 3 (kort tx) låser raden på nytt og anvender utfallet via den ENE domenestien (ordens-vokter + tilstandsmaskin).
+    const snapshot = await withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => this.requireStripePaymentIntent(client, tenantId, paymentIntentId, false));
+    if (!snapshot.provider_ref) return snapshot; // aldri innsendt ennå - intet å hente.
+    const credentials = await this.stripeCredentialsProvider.getCredentials(tenantId);
+    if (!credentials) throw new StripeCredentialsUnavailableError(tenantId);
+    const transport = this.stripeTransportFactory(credentials);
+    // Observasjonstidspunktet er TIDEN FØR kallet: svaret gjenspeiler tilstand som er minst like ny som dette. En webhook-hendelse som oppsto mens kallet pågikk (og ble
+    // anvendt før vi fikk låsen i fase 3) er NYERE enn lesingen og vinner i ordens-vokteren - en forsinket lesing overskriver aldri nyere tilstand.
+    const observedAtMs = Date.now();
+    const stripePaymentIntent = await transport.getPaymentIntent(snapshot.provider_ref);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const current = await this.requireStripePaymentIntent(client, tenantId, paymentIntentId, true);
-      if (!current.provider_ref) return current; // aldri innsendt ennå - intet å hente.
-      const credentials = await this.stripeCredentialsProvider.getCredentials(tenantId);
-      if (!credentials) throw new StripeCredentialsUnavailableError(tenantId);
-      const transport = this.stripeTransportFactory(credentials);
-      const stripePaymentIntent = await transport.getPaymentIntent(current.provider_ref);
+      if (current.provider_ref !== snapshot.provider_ref) return current; // referansen endret seg mellom lesing og skriving: aldri anvend et svar for en annen betaling.
       const result = await this.applyStripePaymentOutcome(
         client, tenantId, memorySpace, current,
         {
@@ -1893,18 +1900,22 @@ export class FinanceService {
    * `checkVippsFullSettlement()`/`submitVippsCapture()`.
    */
   async refreshVippsPaymentState(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, actorPersonId?: string): Promise<PaymentIntent> {
+    // WP-F1 / JARVIS-019: samme tre faser som `refreshStripePaymentState()` - leverandørlesingen skjer uten åpen transaksjon og uten radlås.
+    const snapshot = await withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => this.requireVippsPaymentIntent(client, tenantId, paymentIntentId, false));
+    if (!snapshot.provider_ref) return snapshot; // aldri innsendt ennå - intet å hente.
+    const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
+    if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
+    const transport = this.vippsTransportFactory(credentials);
+    const observedAtMs = Date.now(); // tiden FØR kallet - se `refreshStripePaymentState()`: en hendelse som oppsto mens kallet pågikk er nyere enn lesingen.
+    const vippsPayment = await transport.getPayment(snapshot.provider_ref);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const current = await this.requireVippsPaymentIntent(client, tenantId, paymentIntentId, true);
-      if (!current.provider_ref) return current; // aldri innsendt ennå - intet å hente.
-      const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
-      if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
-      const transport = this.vippsTransportFactory(credentials);
-      const vippsPayment = await transport.getPayment(current.provider_ref);
+      if (current.provider_ref !== snapshot.provider_ref) return current; // referansen endret seg mellom lesing og skriving: aldri anvend et svar for en annen betaling.
       const result = await this.applyVippsPaymentOutcome(
         client, tenantId, memorySpace, current,
         {
           vippsState: vippsPayment.state, vippsAmountOre: vippsPayment.amount.value, vippsCurrency: vippsPayment.amount.currency.toUpperCase(),
-          sourceEventKey: null, sourceEventEpochMs: Date.now()
+          sourceEventKey: null, sourceEventEpochMs: observedAtMs
         },
         actorPersonId ?? null
       );
@@ -2628,17 +2639,24 @@ export class FinanceService {
 
   /** Eksplisitt oppfriskings-sti (byggeordrens §13) - leser Neonomics sin GJELDENDE ISO 20022-status via GET payments/{id}. */
   async refreshNeonomicsPaymentState(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, actorPersonId?: string): Promise<PaymentIntent> {
+    // WP-F1 / JARVIS-019: samme tre faser som Stripe/Vipps - samtykke-sesjonen slås opp i en kort tx uten lås, banklesingen skjer uten åpen transaksjon.
+    const prepared = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const snapshot = await this.requireNeonomicsPaymentIntent(client, tenantId, paymentIntentId, false);
+      if (!snapshot.provider_ref) return { snapshot, sessionId: null };
+      return { snapshot, sessionId: await this.requireNeonomicsSession(client, tenantId, snapshot) };
+    });
+    if (!prepared.snapshot.provider_ref || prepared.sessionId === null) return prepared.snapshot; // aldri innsendt ennå - intet å hente.
+    const credentials = await this.neonomicsCredentialsProvider.getCredentials(tenantId);
+    if (!credentials) throw new NeonomicsCredentialsUnavailableError(tenantId);
+    const gateway = this.neonomicsGatewayFactory(credentials);
+    const observedAtMs = Date.now(); // tiden FØR kallet - se `refreshStripePaymentState()`.
+    const payment = await gateway.getPayment(prepared.sessionId, prepared.snapshot.provider_ref);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const current = await this.requireNeonomicsPaymentIntent(client, tenantId, paymentIntentId, true);
-      if (!current.provider_ref) return current; // aldri innsendt ennå - intet å hente.
-      const sessionId = await this.requireNeonomicsSession(client, tenantId, current);
-      const credentials = await this.neonomicsCredentialsProvider.getCredentials(tenantId);
-      if (!credentials) throw new NeonomicsCredentialsUnavailableError(tenantId);
-      const gateway = this.neonomicsGatewayFactory(credentials);
-      const payment = await gateway.getPayment(sessionId, current.provider_ref);
+      if (current.provider_ref !== prepared.snapshot.provider_ref) return current; // referansen endret seg mellom lesing og skriving: aldri anvend et svar for en annen betaling.
       const result = await this.applyNeonomicsPaymentOutcome(
         client, tenantId, memorySpace, current,
-        { isoStatus: payment.status, sourceEventKey: null, sourceEventEpochMs: Date.now() },
+        { isoStatus: payment.status, sourceEventKey: null, sourceEventEpochMs: observedAtMs },
         actorPersonId ?? null
       );
       return result.intent;
@@ -2654,15 +2672,16 @@ export class FinanceService {
    * handler).
    */
   async getNeonomicsPaymentAuthorizationUrl(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, redirectUrl: string): Promise<{ url: string }> {
-    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+    // WP-F1 / JARVIS-019: DB-oppslaget (intensjon + samtykke-sesjon) er en kort lese-tx; selve banklesingen skjer uten åpen transaksjon/DB-forbindelse.
+    const prepared = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const current = await this.requireNeonomicsPaymentIntent(client, tenantId, paymentIntentId, false);
       if (!current.provider_ref) throw new PaymentIntentAlreadySubmittedError(paymentIntentId, current.state);
-      const sessionId = await this.requireNeonomicsSession(client, tenantId, current);
-      const credentials = await this.neonomicsCredentialsProvider.getCredentials(tenantId);
-      if (!credentials) throw new NeonomicsCredentialsUnavailableError(tenantId);
-      const gateway = this.neonomicsGatewayFactory(credentials);
-      return gateway.getPaymentAuthorizeUrl(sessionId, current.provider_ref, redirectUrl);
+      return { providerRef: current.provider_ref, sessionId: await this.requireNeonomicsSession(client, tenantId, current) };
     });
+    const credentials = await this.neonomicsCredentialsProvider.getCredentials(tenantId);
+    if (!credentials) throw new NeonomicsCredentialsUnavailableError(tenantId);
+    const gateway = this.neonomicsGatewayFactory(credentials);
+    return gateway.getPaymentAuthorizeUrl(prepared.sessionId, prepared.providerRef, redirectUrl);
   }
 
   /**
