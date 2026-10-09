@@ -2,9 +2,10 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it } from "vitest";
-import { GitHubAppAuth, GitHubAppAuthError, maskGitHubSecrets, normalizeGitHubApiBase } from "../src/github-app-auth.ts";
+import { GitHubAppAuth, GitHubAppAuthError, maskGitHubSecrets, normalizeGitHubApiBase, parseGitHubAppPrivateKey } from "../src/github-app-auth.ts";
 import { createGitHubAuth, resolveGitHubAuthSettings } from "../src/github-token-provider.ts";
 import type { SecretProvider } from "../src/gateway.ts";
+import { fakeRsaPrivateKeyPem } from "./support/fake-rsa-der.ts";
 import { FakeGitHubApp } from "./support/fake-github-app.ts";
 import { APP_ID, INSTALLATION_ID, OTHER_REPO, REPO, T0, failure, harness, keys, stopFakeServers } from "./support/wpc3-harness.ts";
 
@@ -469,5 +470,137 @@ describe("F14: allowlisten håndheves i GitHubAppAuth selv (ikke bare i GitHubAu
     }
     const normal = await harness();
     expect((await normal.auth.issue()).info.expires_at).toBe(new Date(T0 + 3_600_000).toISOString()); // en normal time er uendret
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// F4: testhull i skopekontrollen. Reviewens mutasjonskjøring (60 mutanter, 50 drept) lot disse syv leve; hver test under er skrevet for å drepe nøyaktig én av dem.
+describe("F4: skopekontrollen av svaret - leverandøren kan ikke utvide scopet stille (mutasjonsfunn M01, M04a, M05, M36, M20, M21, M41)", () => {
+  type Level = "read" | "write" | "admin";
+
+  /** Én utstedelse der serveren svarer med `mutate(korrekt svar)`; returnerer feilen (eller null ved suksess). */
+  async function issueWithResponse(mutate: (body: Record<string, unknown>) => Record<string, unknown>, options: { permissions?: Record<string, Level>; bareNameAllowlist?: boolean } = {}) {
+    const h = await harness({ overrides: { maxAttempts: 1, ...(options.bareNameAllowlist ? { repositories: ["jarvisbuild"] } : {}) } });
+    h.fake.script = [{ status: 201, build: () => ({ status: 201, json: mutate(h.fake.buildTokenBody({ repositories: ["jarvisbuild"], ...(options.permissions ? { permissions: options.permissions } : {}) })) }) }];
+    try {
+      const issued = await h.auth.issue(options.permissions ? { permissions: options.permissions } : undefined);
+      return { error: null as GitHubAppAuthError | null, issued, h };
+    } catch (err) {
+      expect(err).toBeInstanceOf(GitHubAppAuthError);
+      return { error: err as GitHubAppAuthError, issued: null, h };
+    }
+  }
+
+  it("F4a (M01): repository_selection=all avvises SELV OM listen inneholder nøyaktig det forespurte repoet (antall-sjekken alene fanger det ikke)", async () => {
+    const { error, h } = await issueWithResponse((body) => ({ ...body, repository_selection: "all" }));
+    expect(error?.code).toBe("GITHUB_APP_SCOPE_MISMATCH");
+    expect(error?.message).toContain("repository_selection_not_selected");
+    expect(h.auth.state().token).toBeNull(); // ingenting ble cachet
+    const none = await issueWithResponse((body) => ({ ...body, repository_selection: undefined }));
+    expect(none.error?.code).toBe("GITHUB_APP_RESPONSE_INVALID");
+    const ok = await issueWithResponse((body) => body);
+    expect(ok.error).toBeNull();
+  });
+
+  it("F4b (M04a): rettighetsnivået i svaret kan ikke overstige det forespurte (read < write < admin) - men like og lavere nivå er lov", async () => {
+    const cases: Array<{ requested: Record<string, Level>; granted: Record<string, string>; ok: boolean }> = [
+      { requested: { contents: "read" }, granted: { contents: "write" }, ok: false },
+      { requested: { contents: "read" }, granted: { contents: "admin" }, ok: false },
+      { requested: { contents: "write" }, granted: { contents: "admin" }, ok: false },
+      { requested: { contents: "write" }, granted: { contents: "write" }, ok: true },
+      { requested: { contents: "write" }, granted: { contents: "read" }, ok: true },
+      { requested: { contents: "admin" }, granted: { contents: "admin" }, ok: true },
+      { requested: { contents: "admin" }, granted: { contents: "write" }, ok: true },
+      { requested: { contents: "read" }, granted: { contents: "read" }, ok: true },
+      { requested: { contents: "write" }, granted: { contents: "write", issues: "read" }, ok: false } // ikke forespurt i det hele tatt
+    ];
+    for (const { requested, granted, ok } of cases) {
+      const { error } = await issueWithResponse((body) => ({ ...body, permissions: granted }), { permissions: requested });
+      const label = `forespurt ${JSON.stringify(requested)} / gitt ${JSON.stringify(granted)}`;
+      if (ok) expect(error, label).toBeNull();
+      else {
+        expect(error?.code, label).toBe("GITHUB_APP_SCOPE_MISMATCH");
+        expect(error?.message, label).toContain("permissions_exceed_request");
+      }
+    }
+  });
+
+  it("F4c (M05): «metadata» er KUN implisitt tillatt som read - metadata:write/admin (og write når read ble forespurt) avvises", async () => {
+    const cases: Array<{ requested: Record<string, Level>; granted: Record<string, string>; ok: boolean }> = [
+      { requested: { contents: "write" }, granted: { contents: "write", metadata: "read" }, ok: true },
+      { requested: { contents: "write" }, granted: { contents: "write", metadata: "write" }, ok: false },
+      { requested: { contents: "write" }, granted: { contents: "write", metadata: "admin" }, ok: false },
+      { requested: { contents: "write", metadata: "read" }, granted: { contents: "write", metadata: "write" }, ok: false },
+      { requested: { contents: "write", metadata: "read" }, granted: { contents: "write", metadata: "read" }, ok: true }
+    ];
+    for (const { requested, granted, ok } of cases) {
+      const { error } = await issueWithResponse((body) => ({ ...body, permissions: granted }), { permissions: requested });
+      const label = `forespurt ${JSON.stringify(requested)} / gitt ${JSON.stringify(granted)}`;
+      if (ok) expect(error, label).toBeNull();
+      else expect(error?.code, label).toBe("GITHUB_APP_SCOPE_MISMATCH");
+    }
+  });
+
+  it("F4d (M36): et ugyldig full_name i svaret avvises som RESPONSE_INVALID (aldri akseptert og videresendt til status) - også når navnet ellers ville truffet", async () => {
+    // Bare repo-navn i allowlisten: da sammenlignes KUN navnet, så uten slug-valideringen ville en søppel-full_name sluppet gjennom.
+    for (const fullName of ["not a slug", "tsworkflow/jarvis build", "../x/jarvisbuild", "tsworkflow/jarvisbuild\n", "x".repeat(300), "", "tsworkflow", "a/b/c", "<script>/jarvisbuild"]) {
+      const { error } = await issueWithResponse((body) => ({ ...body, repositories: [{ id: 1, name: "jarvisbuild", full_name: fullName }] }), { bareNameAllowlist: true });
+      expect(error?.code, JSON.stringify(fullName)).toBe("GITHUB_APP_RESPONSE_INVALID");
+      expect(error?.message, JSON.stringify(fullName)).toContain("repositories_malformed");
+    }
+    for (const bad of [{ id: 1, name: 42, full_name: "tsworkflow/jarvisbuild" }, { id: 1, name: "jarvisbuild", full_name: 42 }, { id: 1, name: "jarvisbuild" }, "jarvisbuild", null]) {
+      const { error } = await issueWithResponse((body) => ({ ...body, repositories: [bad] }), { bareNameAllowlist: true });
+      expect(error?.code).toBe("GITHUB_APP_RESPONSE_INVALID");
+    }
+    const ok = await issueWithResponse((body) => body, { bareNameAllowlist: true });
+    expect(ok.error).toBeNull();
+    expect(ok.issued?.info.repositories).toEqual(["tsworkflow/jarvisbuild"]);
+  });
+
+  it("F4e (M20): klokkeskjev over 24 timer læres IKKE (ingen gjentakelse, skjev forblir 0) - under 24 timer rettes det opp med én gjentakelse", async () => {
+    for (const skew of [25 * 3_600_000, -25 * 3_600_000]) {
+      const h = await harness({ serverSkewMs: skew });
+      const error = await failure(h.auth.token());
+      expect(error.code, String(skew)).toBe("GITHUB_APP_AUTH_FAILED");
+      expect(h.fake.mintRequests(), String(skew)).toHaveLength(1);
+      expect(h.auth.state().clock_skew_ms, String(skew)).toBe(0);
+      await stopFakeServers();
+    }
+    for (const skew of [23 * 3_600_000, -23 * 3_600_000]) {
+      const h = await harness({ serverSkewMs: skew });
+      expect(await h.auth.token()).toMatch(/^ghs_/);
+      expect(h.fake.mintRequests(), String(skew)).toHaveLength(2);
+      expect(h.auth.state().clock_skew_ms, String(skew)).toBe(skew);
+      await stopFakeServers();
+    }
+  });
+
+  it("F4f (M21): en server hvis Date-header hopper mellom +15 og -15 min gir MAKS én umiddelbar gjentakelse - deretter AUTH_FAILED (ingen uendelig retry-sløyfe)", async () => {
+    let requests = 0;
+    // De seks første forespørslene alternerer; deretter stabil klokke - så en regresjon (ubegrenset gjentakelse) ender i en feilet påstand, ikke en hengende test.
+    const h = await harness({ serverNow: (clockNow) => { requests += 1; return requests > 6 ? clockNow : clockNow + (requests % 2 === 1 ? 900_000 : -900_000); } });
+    const error = await failure(h.auth.token());
+    expect(error.code).toBe("GITHUB_APP_AUTH_FAILED");
+    expect(h.fake.mintRequests()).toHaveLength(2); // første forsøk + nøyaktig ÉN gjentakelse
+    expect(h.sleeps).toEqual([]);
+  });
+
+  it("F4g (M41): nøkkelstørrelsen har både nedre (2048) og øvre (16384) grense - kantene prøves med bygde ASN.1-nøkler (ikke ekte nøkkelpar)", () => {
+    const reason = (bits: number): string | null => {
+      try {
+        parseGitHubAppPrivateKey(fakeRsaPrivateKeyPem(bits));
+        return null;
+      } catch (err) {
+        expect(err).toBeInstanceOf(GitHubAppAuthError);
+        return (err as GitHubAppAuthError).message;
+      }
+    };
+    expect(reason(2047)).toContain("too_small");
+    expect(reason(2048)).toBeNull();
+    expect(reason(4096)).toBeNull();
+    expect(reason(16_384)).toBeNull();
+    expect(reason(16_385)).toContain("too_large");
+    expect(reason(20_000)).toContain("too_large");
+    expect(parseGitHubAppPrivateKey(fakeRsaPrivateKeyPem(16_384)).asymmetricKeyDetails?.modulusLength).toBe(16_384);
   });
 });
