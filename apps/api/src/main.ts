@@ -61,6 +61,7 @@ import {
   runMemoryReembedSweepForAllTenants,
   runMemoryResensitizeSweepForAllTenants,
   resensitizeModeFromEnv,
+  type ResensitizeSweepSummary,
   MemoryRetriever,
   MemoryWriter,
   SummaryService,
@@ -180,8 +181,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // WP-B (D-452): evolusjonsportene (EV-0…EV-23) i OBSERVASJONSMODUS - kun lesing av eksisterende observerbarhet, `acts: false`. Selvendring er fortsatt frosset (D-397).
   // EV-3: radaren er INERT uten `JARVIS_RADAR_SOURCES` (ingen nettverkskall). Kildene velges av eieren; innholdet går gjennom sikkerhetssonen og forlater den aldri (kun status vises).
   const evolutionRadar = createRadarState(process.env);
+  // EV-10: siste nattlige omregning av lagret sensitivitet (D-451) holdes i minnet så rapporten kan vise tallet uten å skanne på nytt.
+  let lastResensitize: ResensitizeSweepSummary | null = null;
   const evolutionReports = createEvolutionReportProvider({
     radar: evolutionRadar,
+    resensitize: () => lastResensitize,
     pool,
     tenantId: owner.tenant_id,
     ev0Status: () => getLastEv0BootStatus(),
@@ -1605,7 +1609,10 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "memory-resensitize-sweep", envHour("JARVIS_MEMORY_RESENSITIZE_SWEEP_HOUR", 3)
   ).start(() =>
-    runMemoryResensitizeSweepForAllTenants(pool, { mode: resensitizeModeFromEnv(process.env["JARVIS_MEMORY_RESENSITIZE"]) }).then((summary) => assertNoSweepFailures("memory-resensitize-sweep", summary.failed))
+    runMemoryResensitizeSweepForAllTenants(pool, { mode: resensitizeModeFromEnv(process.env["JARVIS_MEMORY_RESENSITIZE"]) }).then((summary) => {
+      lastResensitize = summary;
+      assertNoSweepFailures("memory-resensitize-sweep", summary.failed);
+    })
   );
   // EV-3 (D-452): radar-sveip av KILDER EIEREN SELV HAR VALGT (`JARVIS_RADAR_SOURCES`) - inert uten dem (ingen nettverkskall). Hvert svar går gjennom sikkerhetssonen (ubetrodd forskning, karantene ved mistenkelig innhold);
   // kun status per kilde beholdes i minnet, aldri innholdet. Ett sveip kort etter oppstart (DailyScheduler husker at dagens kjøring er gjort, men det beholdes ikke over en omstart).

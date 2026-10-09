@@ -1,3 +1,4 @@
+import type { ResensitizeSweepSummary } from "@jarvis/memory";
 import { describe, expect, it } from "vitest";
 import type { SloReport } from "@jarvis/executive";
 import type { MeshStatus } from "@jarvis/model-gateway";
@@ -383,6 +384,38 @@ describe("EV-10: minnevedlikehold", () => {
     const empty = await memorySection(withRows([]));
     expect(empty.status).toBe("OK");
     expect(empty.findings.join("\n")).toContain("Vurdert: 0 aktive minner");
+  });
+
+  it("sensitivitetsdrift (D-451): ukjent før første omregning; ventende heving gir ATTENTION med råd; apply og off er rolige; kun tellinger", async () => {
+    const rows = [row({ id: "a" }), row({ id: "b", subject: "x", content: "noe helt annet" })];
+    const summary = (over: Partial<ResensitizeSweepSummary>): ResensitizeSweepSummary => ({ mode: "report", scanned: 40, raised: { sensitive: 2, special: 1 }, written: 0, skipped_concurrent: 0, failed: [], truncated: false, ...over });
+    const ctxWith = (resensitize: (() => ResensitizeSweepSummary | null) | undefined) => ctxOf(deps({ handlers: [[/FROM memory_items i JOIN memory_sources/, () => rows]], ...(resensitize ? { resensitize } : {}) }));
+
+    const unknown = await memorySection(ctxWith(undefined));
+    expect(unknown.status).toBe("OK");
+    expect(unknown.findings.join("\n")).toContain("har ikke kjørt siden oppstart");
+
+    const pending = await memorySection(ctxWith(() => summary({})));
+    expect(pending.status).toBe("ATTENTION");
+    expect(pending.summary_no).toContain("3 minner med for lav sensitivitet");
+    expect(pending.findings.join("\n")).toContain("ville blitt hevet (special 1, sensitive 2)");
+    expect(pending.findings.join("\n")).toContain("JARVIS_MEMORY_RESENSITIZE=apply");
+
+    const applied = await memorySection(ctxWith(() => summary({ mode: "apply", written: 3, skipped_concurrent: 1, truncated: true })));
+    expect(applied.status).toBe("OK");
+    const appliedText = applied.findings.join("\n");
+    expect(appliedText).toContain("modus apply");
+    expect(appliedText).toContain("hevet (special 1, sensitive 2)");
+    expect(appliedText).toContain("1 hoppet over fordi de ble endret samtidig");
+    expect(appliedText).toContain("avkortet av radtaket");
+    expect(appliedText).not.toContain("JARVIS_MEMORY_RESENSITIZE=apply");
+
+    const clean = await memorySection(ctxWith(() => summary({ raised: { sensitive: 0, special: 0 } })));
+    expect(clean.status).toBe("OK");
+
+    const off = await memorySection(ctxWith(() => summary({ mode: "off", scanned: 0, raised: { sensitive: 0, special: 0 } })));
+    expect(off.status).toBe("OK");
+    expect(off.findings.join("\n")).toContain("slått av");
   });
 
   it("kildekvalitet utledes av hvordan minnet kom inn, ikke av innholdet", () => {

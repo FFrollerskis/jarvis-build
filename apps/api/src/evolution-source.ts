@@ -1,6 +1,6 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import type pg from "pg";
-import { withMemoryTransaction } from "@jarvis/memory";
+import { withMemoryTransaction, type ResensitizeSweepSummary } from "@jarvis/memory";
 import { withTenantTransaction } from "@jarvis/core";
 import { composeEvolutionReport, unknownSection, type EvolutionReport, type EvolutionSection, type SloReport } from "@jarvis/executive";
 import type { MeshStatus } from "@jarvis/model-gateway";
@@ -37,6 +37,8 @@ export interface EvolutionSourceDeps {
   toolSurface?: () => ReadonlyArray<MeshToolMapping> | null;
   /** EV-3: siste radarsveip (kilder eieren selv har valgt; udefinert/0 kilder = inert). Rapporten leser kun resultatet - selve sveipet kjører planlagt, aldri fra rapporten. */
   radar?: RadarState;
+  /** EV-10: siste nattlige omregning av lagret sensitivitet (D-451 `memory-resensitize-sweep`); null/udefinert = ikke kjørt siden oppstart. Kun tellinger - aldri innhold. */
+  resensitize?: () => ResensitizeSweepSummary | null;
   /** Ekstra seksjoner (senere deler): hver leverer sin egen fail-soft seksjon. */
   extraSections?: ReadonlyArray<(ctx: EvolutionContext) => Promise<EvolutionSection>>;
 }
@@ -384,10 +386,16 @@ export async function memorySection(ctx: EvolutionContext): Promise<EvolutionSec
     dedupe.length === 0 ? "Ingen identiske duplikater." : `${dedupe.length} duplikatgrupper kan slås sammen (${dedupe.reduce((a, d) => a + d.merge.length, 0)} minner); forslagene er reversible og ingenting er slått sammen.`,
     "Kun forslag: ingenting slettes eller slås sammen herfra (sletting har egen policy og din godkjenning). Antall gjentakelser fra ubetrodd kilde og uavhengige bekreftelser spores ikke ennå, så de to forgiftningsreglene som trenger dem er ikke i bruk."
   ];
-  const attention = reverify.length > 0 || poisoning.length > 0 || dedupe.length > 0;
+  // Sensitivitetsdrift: elementer lagret før ordforrådet ble utvidet (Q-52 A) kan stå lavere enn de nå ville blitt merket. Tallet kommer fra det nattlige sveipet (ikke en ny skanning her).
+  const drift = ctx.deps.resensitize?.() ?? null;
+  const driftPending = drift !== null && drift.mode === "report" && drift.raised.special + drift.raised.sensitive > 0;
+  if (drift === null) findings.splice(2, 0, "Sensitivitetsdrift: den nattlige omregningen (kl. 03) har ikke kjørt siden oppstart, så tallet er ukjent.");
+  else if (drift.mode === "off") findings.splice(2, 0, "Sensitivitetsdrift: omregningen er slått av (JARVIS_MEMORY_RESENSITIZE=off).");
+  else findings.splice(2, 0, `Sensitivitetsdrift (siste omregning, modus ${drift.mode}): ${drift.scanned} skannet, ${drift.raised.special + drift.raised.sensitive} ${drift.mode === "apply" ? "hevet" : "ville blitt hevet"} (special ${drift.raised.special}, sensitive ${drift.raised.sensitive})${drift.skipped_concurrent > 0 ? `, ${drift.skipped_concurrent} hoppet over fordi de ble endret samtidig` : ""}${drift.truncated ? "; avkortet av radtaket" : ""}${driftPending ? ". Gamle, feilmerkede elementer holder samtaler lokale til du setter JARVIS_MEMORY_RESENSITIZE=apply." : "."}`);
+  const attention = reverify.length > 0 || poisoning.length > 0 || dedupe.length > 0 || driftPending;
   return {
     ev: "EV-10", title_no: "Minnevedlikehold", mode: "observe", status: attention ? "ATTENTION" : "OK",
-    summary_no: attention ? `${reverify.length} å re-verifisere, ${poisoning.length} forgiftningsmistanker, ${dedupe.length} duplikatgrupper.` : "Ingen funn i minnet som ble vurdert.",
+    summary_no: attention ? `${reverify.length} å re-verifisere, ${poisoning.length} forgiftningsmistanker, ${dedupe.length} duplikatgrupper${driftPending ? `, ${drift.raised.special + drift.raised.sensitive} minner med for lav sensitivitet` : ""}.` : "Ingen funn i minnet som ble vurdert.",
     findings, source: "memory_items + memory_sources (kun metadata og antall)", observed_at: ctx.now.toISOString()
   };
 }
