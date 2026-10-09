@@ -241,7 +241,7 @@ describe("C: App-modus - installasjonstoken under SAMME ref, øvrige refer uendr
 
 // ---------------------------------------------------------------------------------------------------------------------------------
 describe("D: eksplisitt, loggført PAT-fallback (JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK=true)", () => {
-  it("D1: feilet utstedelse + fallback på -> PAT leveres, hver bruk er loggført (warn) og synlig i status; ikke lenger «hardened»", async () => {
+  it("D1: feilet utstedelse + fallback på -> PAT leveres, bruken loggføres (warn, ratebegrenset - se D5) og er synlig i status; ikke lenger «hardened»", async () => {
     const s = await setup({ env: { JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK: "true" } });
     s.fake.script = [{ status: 403, json: { message: "Resource not accessible by integration" } }];
     const provider = s.auth.secretProvider(s.secrets);
@@ -258,6 +258,23 @@ describe("D: eksplisitt, loggført PAT-fallback (JARVIS_GITHUB_APP_ALLOW_PAT_FAL
     expect(await provider.get(GITHUB_TOKEN_REF)).toMatch(/^ghs_/);
     expect(s.auth.status().pat_fallback.active).toBe(false);
     expect(s.auth.status().state).toBe("app_ok");
+  });
+
+  it("D5 (review F7): loggføringen er RATEBEGRENSET, ikke «hver bruk» - 25 fallback-bruk innenfor ett minutt gir nøyaktig én logglinje, neste minutt en ny; statusen viser aktiv hele tiden", async () => {
+    // Nøkkelen mangler i vaulten: en vedvarende, lokal feil (ingen nettverkskall, ingen ventetid) - hver `get` faller tilbake til PAT-en.
+    const s = await setup({ env: { JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK: "true" }, withoutKey: true });
+    const provider = s.auth.secretProvider(s.secrets);
+    const fallbackLines = (): number => s.logs.filter((l) => l.msg === "github_app_pat_fallback_used").length;
+    for (let i = 0; i < 25; i += 1) {
+      expect(await provider.get(GITHUB_TOKEN_REF)).toBe(PAT);
+      s.clock.t += 1_000; // 25 bruk fordelt over 25 sekunder (alle innenfor ett minutt)
+      expect(s.auth.status().pat_fallback.active).toBe(true);
+    }
+    expect(fallbackLines()).toBe(1);
+    s.clock.t += 40_000; // > 60 s siden første linje
+    expect(await provider.get(GITHUB_TOKEN_REF)).toBe(PAT);
+    expect(fallbackLines()).toBe(2);
+    expect(JSON.stringify(s.logs)).not.toContain(PAT);
   });
 
   it("D2: fallback på, men ingen PAT finnes -> fortsatt null (ingenting å falle tilbake til), ikke «aktiv»", async () => {

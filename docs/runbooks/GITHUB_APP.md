@@ -54,13 +54,13 @@ grensesnitt, følg GitHubs egen veiledning og behold nivået.
 | Rettighet i GitHub-UI | Nivå | Brukes til (Jarvis-handling, risikoklasse) | Endepunkter (verifisert) |
 |---|---|---|---|
 | **Metadata** | Read-only (alltid) | `read_repo_meta` (A) | `GET /repos/{o}/{r}` |
-| **Contents** | **Read and write** | lese: `list_branches`, `get_branch`, `get_commit` (A) - skrive: `create_branch` (B), `delete_branch` (D), `merge_pr` (D) - og **git clone/push** i kodejobber (push = `git:push_branch`, C) | `GET branches/commits`: les; `POST/DELETE git/refs`, `PUT pulls/{n}/merge`: **write** |
+| **Contents** | **Read and write** | lese: `list_branches`, `get_branch`, `get_commit` (A) - skrive: `create_branch` (B), `delete_branch` (D), `merge_pr` (D) - og **git clone/push** i kodejobber (push = `git:push_branch`, C; kodejobbens git-token ber KUN om denne rettigheten og er scopet til ETT repo, se «Sikkerhetsmodell») | `GET branches/commits`: les; `POST/DELETE git/refs`, `PUT pulls/{n}/merge`: **write** |
 | **Pull requests** | **Read and write** | `list_pull_requests`, `get_pull_request` (A); `create_pr` (C); `update_pr`, `request_reviewers` (B); kommentarer/etiketter på PR-er | `GET/POST /pulls`, `PATCH /pulls/{n}`, `POST requested_reviewers` |
 | **Issues** | **Read and write** | `read_issues` (A); `create_issue`, `update_issue`, `set_labels` (B); `comment_on_issue` (C) | `GET/POST /issues`, `PATCH /issues/{n}`, `/comments`, `/labels` (Issues ELLER Pull requests, avhengig av om nummeret er en issue eller PR) |
 | **Actions** | **Read and write** | les: `list_workflow_runs`, `get_workflow_run`, `list_workflow_jobs` (A) - skriv: `rerun_workflow_run`, `cancel_workflow_run`, `dispatch_workflow` (C) | `GET actions/runs...`: les; `POST rerun/cancel/dispatches`: **write** |
 | **Commit statuses** | Read-only | kun selvmodifikasjonens CI-sjekk (`getCombinedCiStatus`) - **frosset (D-397), kan utelates nå** | `GET commits/{ref}/status` |
 | **Checks** | Read-only | som over (`check-runs`) - **frosset (D-397), kan utelates nå** | `GET commits/{ref}/check-runs` |
-| **Workflows** | Read and write - **VALGFRI, AV som standard** | skal kodejobber/`create_branch` kunne endre filer under `.github/workflows/`? GitHub krever da denne rettigheten i tillegg (dokumentert som «additional permission» for `POST/PATCH git/refs`, `PUT/DELETE contents`, `releases`). Uten den avvises push av workflow-filer - det er normalt ønsket. | - |
+| **Workflows** | Read and write - **VALGFRI, AV som standard** | skal `github.*`-handlingene (f.eks. `create_branch`) kunne endre filer under `.github/workflows/`? GitHub krever da denne rettigheten i tillegg (dokumentert som «additional permission» for `POST/PATCH git/refs`, `PUT/DELETE contents`, `releases`). Uten den avvises push av workflow-filer - det er normalt ønsket. **Kodejobbens git-token ber aldri om Workflows (kun Contents, review F2): en kodeagent kan dermed ikke pushe workflow-filer, selv om du gir installasjonen rettigheten.** | - |
 
 Risikoklassene (A-D) styrer HVORDAN en handling utføres (preflight, readback, audit, godkjenning) - aldri OM du har kapabiliteten. Sovereign owner-modus for klasse D er
 uendret. Mangler en rettighet, feiler tilsvarende handlinger med `github_api_error_403:Resource not accessible by integration`; akseptansescriptet melder det som WARN
@@ -128,8 +128,8 @@ Regler Jarvis følger (testet):
 - **Ingen konfig = PAT som før.** Er verken `JARVIS_GITHUB_APP_ID` eller `JARVIS_GITHUB_APP_INSTALLATION_ID` satt, er alt uendret (kjeden returneres uendret).
 - **Én av dem satt = App-modus.** Delvis/ugyldig konfig (manglende id, ugyldig API-base, ingen repo-scope, manglende nøkkel) feiler **lukket og høylytt**: `github.*`-kall avvises med
   `credential_unavailable`, loggen får `github_app_auth_failed`/`github_app_config_invalid`, og connector-statusen viser feilkoden. Jarvis faller **aldri** stille tilbake til PAT.
-- **PAT-fallback er av.** Slå den på KUN ved behov: `JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK=true` (eksakt «true» med små bokstaver og uten mellomrom - «TRUE», «1» og «yes» teller ikke). Hver bruk logges (`github_app_pat_fallback_used`), statusen viser
-  `pat_fallback.active`, og den gjelder aldri når GitHub ga noe annet enn forespurt (`GITHUB_APP_SCOPE_MISMATCH`).
+- **PAT-fallback er av.** Slå den på KUN ved behov: `JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK=true` (eksakt «true» med små bokstaver og uten mellomrom - «TRUE», «1» og «yes» teller ikke). Bruken logges (`github_app_pat_fallback_used`, warn) - **ratebegrenset til
+  maks én linje per minutt**, ikke én linje per bruk - og statusen viser løpende `pat_fallback.active`; den gjelder aldri når GitHub ga noe annet enn forespurt (`GITHUB_APP_SCOPE_MISMATCH`).
 - `JARVIS_GITHUB_API_BASE`: KUN `https://api.github.com` godtas (tomt = standard). Alt annet - annen vert, port, sti, http - feiler lukket med `GITHUB_APP_CONFIG_INVALID`, fordi
   App-JWT-en (som kan utstede installasjonstokens) ellers kunne sendes til en vilkårlig mottaker ved en endret miljøvariabel. Ingen redirects følges på kall som bærer JWT eller
   installasjonstoken. `GithubTransport` og git bruker uansett api.github.com/github.com. **GitHub Enterprise Server er ikke støttet (DEFERRED).**
@@ -177,7 +177,9 @@ Når steg 7 er VERIFIED og Jarvis har kjørt normalt en stund: fjern `JARVIS_GIT
   måten å få umiddelbar effekt på.
 - **Lekkasje mistenkt:** slett nøkkelen på GitHub (alle tokens den kunne mint, kan ikke fornyes), og vurder **Suspend** av installasjonen (Settings -> Applications/GitHub Apps -> Configure).
   Allerede utstedte tokens dør senest etter 1 time. Du kan også tilbakekalle credentialen i Jarvis (`owner_controls.revoke_credential` på `JARVIS_GITHUB_TOKEN`) – det stopper alle `github.*`-kall
-  FØR noe token utstedes.
+  OG kodejobbenes git-credential FØR noe token utstedes (kodejobber sjekker tilbakekallingen ved jobbstart, før clone og før push; en jobb som stoppes feiler med `git_auth_revoked`; statusvisninger utsteder aldri et token).
+  Kill switch og frys stopper `github.*`-kall før utstedelse (policy vurderes først), og kodejobber ved jobbstart og PÅ NYTT rett før push – en kill switch som slås på midt i en jobb stopper dermed push, men en clone som
+  allerede pågår fullføres. Tilbakekallingen i Jarvis påvirker ikke tokens som allerede er utstedt (maks 1 time) – de dør av seg selv, eller når du sletter nøkkelen/suspenderer installasjonen på GitHub.
 - **Endre rettigheter:** endrer du App-ens rettigheter på github.com, må installasjonseieren **godkjenne endringen** i installasjonen før tokens får dem. Kjør steg 7 på nytt.
 
 ## Rollback til PAT
@@ -220,15 +222,28 @@ Alt står også i `executive.get_connector_status` (`auth.detail.last_error`) og
   (adversarielle tester med en fiendtlig server som ekkoer dem). `withSecretRedaction` i kodejobbene redigerer nylig utstedte tokens ut av feilmeldinger.
 - Utgående kall går via `guardedFetch` (rå-URL-sjekk + timeout); API-basen er `https://api.github.com` og ingen annen vert, og redirects følges aldri på kall med JWT/token
   (loopback-http finnes kun som testflagg i koden, ikke som miljøvariabel).
-- Git: kodejobber får et token scopet til det ene repoet (`tokenFor`), kun i git-underprosessens miljø, og credential-helperen er fortsatt begrenset til github.com + dette repoet.
+- Git: kodejobber får et token scopet til det ene repoet jobben gjelder (`GitCredentialSource.tokenFor`) med minste rettighet (kun Contents: write; ikke «alle rettigheter installasjonen er gitt»), hentet RETT FØR hver
+  git-nettverksoperasjon (clone og push) – ikke én gang ved jobbstart – kun i git-underprosessens miljø, og credential-helperen er fortsatt begrenset til github.com + dette repoet. Feiler utstedelsen, feiler jobben
+  lukket (`git_auth_unavailable:<kode>`) før noe klones; tilbakekalt credential gir `git_auth_revoked`, og en tilbakekallingssjekk som selv feiler gir `git_auth_revocation_check_failed` (fail-closed).
 - GitHub kan i dag levere installasjonstokens i et nytt, lengre format (`ghs_<APP-ID>_<JWT>`, utrullet fra april 2026). Jarvis antar aldri 40 tegn.
+
+## Kjente begrensninger (ærlig)
+
+- **Connector-tokenet er ikke nedskalert (bevisst, D-41).** `github.*`-handlingene (dashbordet, bekreftede handlinger, chatten) bruker standard-scope-tokenet: alle repoer i `JARVIS_GIT_ALLOWED_REPOS` og alle rettigheter
+  installasjonen er gitt, fordi eieren skal ha maksimal kapabilitet. Det er KUN kodejobbens git-credential (clone/push i en sandbox med en kodeagent) som er nedskalert til ett repo og Contents: write. PR-opprettelsen etter
+  push (`github.create_pr`) går via ToolGateway med connector-credentialen, ikke med git-tokenet.
+- Den frosne `SelfModificationService` (D-397, ikke konstruert i produksjon) har sin egen `resolveGitToken`-søm og ville fått standard-scope-tokenet hvis den tines – kobles til `tokenFor` da.
+- Loggføring av PAT-fallback og utstedelsesfeil er ratebegrenset (maks én linje per kode per minutt); status viser løpende tilstand.
+- `GitHubAppAuth.invalidate()` er ikke koblet til nøkkelrotasjon (se «Nøkkelrotasjon»); restart er veien til umiddelbar effekt.
+- Ikke verifisert mot ekte GitHub (se toppen): alt over er testet mot en lokal fake GitHub og stubbet `api.github.com`.
 
 ## Kilder (offisiell dokumentasjon, lest 2026-10-09 fra GitHubs åpne docs-repo `github/docs`)
 
 - Generating a JSON Web Token (JWT) for a GitHub App - krav til `RS256`, `iat`/`exp`/`iss`.
 - Generating an installation access token for a GitHub App; REST «Create an installation access token for an app» (`POST /app/installations/{installation_id}/access_tokens`: `repositories`, `permissions`, 201/401/403/404/422, utløp 1 time).
 - Managing private keys for GitHub Apps (PKCS#1, opptil 25 nøkler, lagring).
-- Registering a GitHub App; Installing your own GitHub App; Reviewing and modifying installed GitHub Apps; Choosing permissions for a GitHub App.
+- Registering a GitHub App; Installing your own GitHub App; Reviewing and modifying installed GitHub Apps; Choosing permissions for a GitHub App (inkl. «Choosing permissions for Git access»: HTTP-basert Git krever «Contents»,
+  «Workflows» kun for `.github/workflows` - grunnlaget for kodejobbens minste-rettighet-token) og at `permissions` i utstedelsesforespørselen kan snevre inn tokenet men aldri utvide det utover det installasjonen har.
 - Rate limits for the REST API (installasjonstokens: 5 000/t minimum, opptil 12 500/t).
 - Rettighetstabellen (endepunkt -> rettighet) er generert fra `src/github-apps/data/fpt-2022-11-28/server-to-server-permissions.json` i samme repo.
 

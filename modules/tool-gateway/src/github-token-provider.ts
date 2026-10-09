@@ -24,8 +24,9 @@ import { assertGithubRepoSlug } from "./url-safety.ts";
  *    UENDRET (ingen dekoratør i veien): oppførselen er identisk med før WP-C3.
  *  - Minst én satt -> `app`. Delvis/ugyldig konfig (manglende installasjons-id, ugyldig API-base, ingen repo-scope ...) er IKKE «PAT»:
  *    eieren har signalisert App-bruk, så det feiler lukket og høylytt (logg + status), aldri en stille nedgradering.
- *  - PAT brukes i App-modus KUN når eieren eksplisitt har satt `JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK=true`; hver bruk logges og vises i statusen
- *    (`pat_fallback.active`). Aldri fallback ved `GITHUB_APP_SCOPE_MISMATCH` (leverandøren ga noe annet enn forespurt).
+ *  - PAT brukes i App-modus KUN når eieren eksplisitt har satt `JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK=true`. Bruken logges (`github_app_pat_fallback_used`, warn) - RATEBEGRENSET til maks én linje
+ *    per minutt (review F7: ikke «hver bruk», en travel connector ville ellers fylt loggen) - og er hele tiden synlig i statusen (`pat_fallback.active`).
+ *    Aldri fallback ved `GITHUB_APP_SCOPE_MISMATCH` (leverandøren ga noe annet enn forespurt).
  */
 
 export const GITHUB_TOKEN_REF = "JARVIS_GITHUB_TOKEN";
@@ -244,7 +245,7 @@ class AppCredentialCore implements GitHubAppCredentialSource {
     return recovered;
   }
 
-  /** Eneste sted PAT kan komme inn i App-modus: eksplisitt flagg, aldri ved scope-avvik, og alltid loggført. */
+  /** Eneste sted PAT kan komme inn i App-modus: eksplisitt flagg, aldri ved scope-avvik, og logget (ratebegrenset: maks én linje per minutt - statusen viser løpende om fallback er aktiv). */
   private async recover(error: GitHubAppAuthError, pat: GitHubTokenProvider): Promise<string | null> {
     if (this.settings.allowPatFallback && error.code !== "GITHUB_APP_SCOPE_MISMATCH") {
       const token = await pat.getToken();

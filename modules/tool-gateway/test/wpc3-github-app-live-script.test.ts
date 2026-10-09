@@ -320,6 +320,36 @@ describe("D: runbooken (docs/runbooks/GITHUB_APP.md) er i takt med koden", () =>
     expect(runbook).toContain("GITHUB_APP_LIVE_STATUS=VERIFIED");
   });
 
+  it("D4 (review F2/F3): runbooken sier det koden gjør - tilbakekalling stopper også kodejobbens git-credential, git-tokenet er repo-scopet med minste rettighet, og begrensningene står ærlig", () => {
+    expect(runbook).toMatch(/OG kodejobbenes git-credential FØR noe token utstedes/);
+    expect(runbook).toMatch(/minste rettighet \(kun Contents: write/);
+    expect(runbook).toMatch(/RETT FØR hver\s+git-nettverksoperasjon/);
+    expect(runbook).toContain("## Kjente begrensninger (ærlig)");
+    expect(runbook).toMatch(/Connector-tokenet er ikke nedskalert \(bevisst, D-41\)/);
+    expect(runbook).toContain("SelfModificationService");
+  });
+
+  it("D5 (review F7): ingen dokumentasjon påstår «hver bruk logges» om PAT-fallback - loggen er ratebegrenset (maks én linje per minutt), og det står i runbook, .env.example og kildekommentaren", () => {
+    const root = fileURLToPath(new URL("../../../", import.meta.url));
+    const sources: Record<string, string> = {
+      runbook, ".env.example": readFileSync(`${root}.env.example`, "utf8"),
+      "github-token-provider.ts": readFileSync(`${root}modules/tool-gateway/src/github-token-provider.ts`, "utf8")
+    };
+    for (const [name, text] of Object.entries(sources)) {
+      expect(text, name).not.toMatch(/hver bruk logges/i);
+      expect(text, name).not.toMatch(/hver bruk er loggført/i);
+      expect(text, name).toMatch(/ratebegrenset/i);
+      expect(text, name).toMatch(/maks én linje per minutt/);
+    }
+  });
+
+  it("D6 (review F2): runbooken sier at kodejobbens git-token aldri ber om Workflows (kun Contents), og at feilkodene for tilbakekalling finnes", () => {
+    expect(runbook).toMatch(/Kodejobbens git-token ber aldri om Workflows/);
+    expect(runbook).toContain("git_auth_revoked");
+    expect(runbook).toContain("git_auth_revocation_check_failed");
+    expect(runbook).toContain("git_auth_unavailable:<kode>");
+  });
+
   it("D3: rettighetene koden krever for full kapabilitet (D-41) står alle i rettighetstabellen med riktig nivå", () => {
     const names: Record<string, string> = { metadata: "Metadata", contents: "Contents", pull_requests: "Pull requests", issues: "Issues", actions: "Actions" };
     for (const [permission, level] of Object.entries(GITHUB_FULL_CAPABILITY_PERMISSIONS)) {
