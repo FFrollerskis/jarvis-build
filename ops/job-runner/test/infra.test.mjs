@@ -167,6 +167,13 @@ describe("B: jobb-imaget og Claude Code-pinningen", () => {
     expect(code).not.toMatch(/--ignore-scripts|--omit=optional/); // postinstall kopierer plattformbinæren; valgfrie pakker bærer den
   });
 
+  it("setuid/setgid-bitene fjernes fra alle filer i imaget (forsvar i dybden bak no-new-privileges + cap-drop ALL), FØR siste USER", () => {
+    const code = dockerfile.split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
+    expect(code).toMatch(/RUN find \/ -xdev -type f \\\( -perm -4000 -o -perm -2000 \\\) -exec chmod a-s \{\} \+/);
+    expect(code.indexOf("chmod a-s")).toBeGreaterThan(-1);
+    expect(code.indexOf("chmod a-s")).toBeLessThan(code.indexOf("USER 10001:10001"));
+  });
+
   it("telemetri og auto-oppdatering er slått av i imaget (containeren når kun proxyens allowlist)", () => {
     for (const flag of ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", "DISABLE_TELEMETRY=1", "DISABLE_ERROR_REPORTING=1", "GIT_TERMINAL_PROMPT=0"]) {
       expect(dockerfile).toContain(flag);
