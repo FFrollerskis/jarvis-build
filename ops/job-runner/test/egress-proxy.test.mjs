@@ -166,7 +166,11 @@ describe("C: SSRF og DNS-rebinding - proxyen slår opp selv og kobler til den va
 
   it("isPublicAddress: tabell", () => {
     for (const ip of ["140.82.112.3", "8.8.8.8", "1.1.1.1", "2606:4700::1111", "2a00:1450:4001:80b::200e", "::ffff:8.8.8.8"]) expect(isPublicAddress(ip), ip).toBe(true);
-    for (const ip of ["127.0.0.1", "127.255.255.254", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.0.1", "169.254.169.254", "100.64.0.1", "100.127.255.255", "0.0.0.0", "255.255.255.255", "224.0.0.1", "240.0.0.1", "198.18.0.1", "::", "::1", "fc00::", "fd12::1", "fe80::1", "ff02::1", "2001:db8::1", "::ffff:127.0.0.1", "::ffff:10.0.0.1", "2002:0a00:0001::", "64:ff9b::10.0.0.1", "not-an-ip", "", "999.1.1.1", "1.2.3"]) expect(isPublicAddress(ip), ip).toBe(false);
+    for (const ip of ["127.0.0.1", "127.255.255.254", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.0.1", "169.254.169.254", "100.64.0.1", "100.127.255.255", "0.0.0.0", "255.255.255.255", "224.0.0.1", "240.0.0.1", "198.18.0.1", "::", "::1", "fc00::", "fd12::1", "fe80::1", "ff02::1", "2001:db8::1", "::ffff:127.0.0.1", "::ffff:10.0.0.1", "2002:0a00:0001::", "64:ff9b::10.0.0.1", "not-an-ip", "", "999.1.1.1", "1.2.3",
+      // utfasede/lokale IPv6-områder som ellers kunne nådd interne mål: IPv4-kompatible (::a.b.c.d), site-local, lokal NAT64
+      "::7f00:1", "::a00:1", "::a9fe:a9fe", "fec0::1", "feff::1", "64:ff9b:1::1", "64:ff9b:1:ffff::1", "::ffff:0:0", "::ffff:a9fe:a9fe"]) expect(isPublicAddress(ip), ip).toBe(false);
+    // og en ekte offentlig IPv6-adresse blir ikke fanget av de nye områdene
+    for (const ip of ["2606:50c0:8000::154", "2a01:4f8:c17:1::1", "2001:4860:4860::8888"]) expect(isPublicAddress(ip), ip).toBe(true);
   });
 });
 

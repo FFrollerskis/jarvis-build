@@ -29,7 +29,9 @@ for (const [net4, prefix] of [
   blocked.addSubnet(net4, prefix, "ipv4");
 }
 for (const [net6, prefix] of [
-  ["::", 128], ["::1", 128], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8], ["2001:db8::", 32], ["100::", 64], ["2001::", 32]
+  // «::/96» = IPv4-kompatible adresser (::a.b.c.d, utfaset men fortsatt parsbare - f.eks. ::7f00:1), «fec0::/10» = site-local (utfaset), «64:ff9b:1::/48» = lokal NAT64 (RFC 8215).
+  // IPv4-mappede (::ffff:a.b.c.d), 64:ff9b::/96 og 6to4 (2002::/16) vurderes mot den INNEBYGDE IPv4-adressen i `embeddedIpv4`.
+  ["::", 96], ["::", 128], ["::1", 128], ["fc00::", 7], ["fe80::", 10], ["fec0::", 10], ["ff00::", 8], ["2001:db8::", 32], ["100::", 64], ["2001::", 32], ["64:ff9b:1::", 48]
 ]) {
   blocked.addSubnet(net6, prefix, "ipv6");
 }
