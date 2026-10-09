@@ -54,7 +54,8 @@ export interface SmokeOptions {
   timeoutMs: number;
   out: string | null;
   db: boolean;
-  tenant: string;
+  /** `null` = ikke oppgitt: `resolveSmokeTenant` tar eierens tenant fra `JARVIS_TENANT_ID` (aldri en gjettet tenant). */
+  tenant: string | null;
   help: boolean;
 }
 export type ParsedSmokeArgs = { ok: true; options: SmokeOptions } | { ok: false; error: string };
@@ -70,7 +71,7 @@ function intIn(name: string, raw: string, min: number, max: number): number | st
 
 /** Streng parsing: ukjent flagg, manglende verdi, ugyldig tall eller navn gir en feil (aldri en stille standard). */
 export function parseSmokeArgs(argv: readonly string[]): ParsedSmokeArgs {
-  const o: SmokeOptions = { providers: null, block: null, tools: false, parallel: false, soloCalls: 3, parallelCalls: 3, maxCostOre: 100, timeoutMs: 30_000, out: null, db: false, tenant: "tenant-personal", help: false };
+  const o: SmokeOptions = { providers: null, block: null, tools: false, parallel: false, soloCalls: 3, parallelCalls: 3, maxCostOre: 100, timeoutMs: 30_000, out: null, db: false, tenant: null, help: false };
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i] as string;
     if (!token.startsWith("--")) return { ok: false, error: `uventet argument «${token.slice(0, 30)}»` };
@@ -118,6 +119,20 @@ export function parseSmokeArgs(argv: readonly string[]): ParsedSmokeArgs {
   return { ok: true, options: o };
 }
 
+export const SMOKE_DEFAULT_TENANT = "tenant-smoke";
+
+/**
+ * Tenant for kostradene (`--db`) og for gatewaykallene. Eksplisitt `--tenant` vinner; ellers eierens tenant fra miljøet (`JARVIS_TENANT_ID`, satt i api-containeren). Med `--db` og ingen gyldig tenant er det en FEIL - kostradene
+ * må ligge der `executive.get_ai_mesh_status` leser dem, og `cost_events.tenant_id` har fremmednøkkel til `tenants` (en gjettet tenant ville enten feilet eller skrevet bevis ingen leser). Uten `--db` er tenant bare en etikett.
+ */
+export function resolveSmokeTenant(option: string | null, db: boolean, env: Readonly<Record<string, string | undefined>>): { ok: true; tenant: string } | { ok: false; error: string } {
+  if (option !== null) return { ok: true, tenant: option };
+  const fromEnv = (env["JARVIS_TENANT_ID"] ?? "").trim();
+  if (fromEnv !== "" && TENANT.test(fromEnv)) return { ok: true, tenant: fromEnv };
+  if (db) return { ok: false, error: "--db trenger eierens tenant: sett JARVIS_TENANT_ID i miljøet (den er satt i api-containeren) eller oppgi --tenant <id>" };
+  return { ok: true, tenant: SMOKE_DEFAULT_TENANT };
+}
+
 export const SMOKE_USAGE_NO = [
   "mesh-live-smoke - eierens akseptanse for AI Mesh («≥3 live providers med fallback»). Leser nøkler fra miljøet (aldri skrevet ut).",
   "",
@@ -131,9 +146,9 @@ export const SMOKE_USAGE_NO = [
   "  --parallel-calls N   samtidige kall per leverandør i --parallel (2-6, standard 3)",
   "  --max-cost-ore N     kostnadstak for hele kjøringen i øre (1-10000, standard 100); stanser og gir INCOMPLETE",
   "  --timeout-ms N       tidsavbrudd per modellkall (1000-120000, standard 30000)",
-  "  --out fil.json       evidensfil (standard var/mesh-smoke/mesh-smoke-<tid>.json, git-ignorert)",
-  "  --db                 bruk ekte database (kostrader skrives for --tenant, standard tenant-personal) slik at executive.get_ai_mesh_status viser beviset",
-  "  --tenant id          tenant for --db",
+  "  --out fil.json       evidensfil (standard var/mesh-smoke/mesh-smoke-<tid>.json, git-ignorert; i api-containeren er rotfilsystemet skrivebeskyttet - bruk --out /tmp/mesh-smoke.json)",
+  "  --db                 bruk ekte database: fase 1 og fallback-kallet går gjennom den ekte ModelGateway og skrives som vanlige kostrader i cost_events (slik at executive.get_ai_mesh_status viser beviset)",
+  "  --tenant id          tenant for --db (standard: JARVIS_TENANT_ID - eierens tenant, satt i api-containeren; aldri en gjettet verdi)",
   "",
   "Avslutningskode: 0 = PASS, 1 = FAIL, 2 = INCOMPLETE (for få konfigurerte leverandører, kostnadstak) eller ugyldige flagg."
 ].join("\n");
@@ -217,6 +232,34 @@ export class TripwireAdapter implements ModelProviderAdapter {
   }
 }
 
+/**
+ * `--db`: fase 1 går gjennom den ekte `ModelGateway` med EKSAKT leverandør (SPECIFIC_PROVIDER: ingen stille fallback) i stedet for rett mot adapteren, slik at hvert kall blir en vanlig kostrad i `cost_events` (leverandør, modell,
+ * tokens, øre, latens) - det er disse radene `executive.get_ai_mesh_status` leser, så ≥3 live leverandører og kost per leverandør vises der rett etter kjøringen. Samme `ModelProviderAdapter`-form som den ekte adapteren, så
+ * `probeProvider` er uendret. Budsjettvakt, helse og sensitivitetsport gjelder som for all annen trafikk (kallet er `PUBLIC_OR_LOW_SENSITIVITY` - en liten fast testsetning, aldri eierdata).
+ */
+export class GatewayBackedAdapter implements ModelProviderAdapter {
+  readonly name: string;
+  readonly model: string;
+  constructor(private readonly inner: ModelProviderAdapter, private readonly gateway: Pick<ModelGateway, "complete">, private readonly ctx: { tenantId: string; taskId: string }) {
+    this.name = inner.name;
+    this.model = inner.model ?? "ukjent";
+  }
+  available(): boolean {
+    return this.inner.available();
+  }
+  async complete(request: ModelRequest): Promise<ModelResult> {
+    return await this.gateway.complete({
+      tenant_id: this.ctx.tenantId,
+      task_id: this.ctx.taskId,
+      session_id: this.ctx.taskId,
+      purpose: "QUICK_CLASSIFICATION",
+      provider: this.name,
+      sensitivity: "PUBLIC_OR_LOW_SENSITIVITY",
+      request
+    });
+  }
+}
+
 /** Minnebasert `pg.Pool` til `BudgetGuard`/kostbokføring når skriptet kjøres uten `--db`: ingen database, ingen sideeffekter. `inserts` er parameterlistene som ville blitt skrevet til `cost_events`. */
 export function inMemoryCostPool(): { pool: pg.Pool; inserts: unknown[][] } {
   const inserts: unknown[][] = [];
@@ -278,7 +321,11 @@ interface CallOutcome {
   error_code: string | null;
 }
 
-const errorKindOf = (err: unknown): string => (err instanceof ProviderError ? err.kind : "unknown");
+/** Feilklassen: adapterens klassifisering, ellers gatewayens egne feil (`BudgetExceededError`, `NoEligibleProviderError` … - stabile klassenavn uten innhold). Aldri meldingsteksten. */
+const errorKindOf = (err: unknown): string => {
+  if (err instanceof ProviderError) return err.kind;
+  return err instanceof Error && err.name !== "Error" && /^[A-Za-z][A-Za-z0-9]{2,60}$/.test(err.name) ? err.name : "unknown";
+};
 const errorCodeOf = (err: unknown): string | null => redactErrorText(err instanceof Error ? err.message : String(err));
 
 /** Ett kall direkte mot adapteren (ingen ruting). Kaster aldri: feil blir `ok: false` med klasse og redigert kode. */
@@ -622,6 +669,8 @@ export interface SmokeEvidence {
   finished_at: string;
   node: string;
   mode: "no_db" | "db";
+  /** Hvordan fase 1 ble kjørt: `direct_adapter` (rett mot adapteren) eller `gateway_db` (gjennom den ekte ModelGateway, kostrader i cost_events). Fase 3-4 går alltid rett mot adapteren (målinger, ikke trafikk). */
+  probe_route: "direct_adapter" | "gateway_db";
   /** Flaggene som ble brukt (aldri nøkler). */
   options: { providers: string[] | null; block: string | null; tools: boolean; parallel: boolean; max_cost_ore: number; timeout_ms: number; tenant: string | null };
   providers: SmokeProbeRecord[];
@@ -630,6 +679,8 @@ export interface SmokeEvidence {
   tools: SmokeToolRecord[] | null;
   parallel: SmokeParallelRecord[] | null;
   cost: { spent_ore: number; cap_ore: number; cap_hit: boolean };
+  /** Kun med `--db`: antall rader som faktisk ligger i `cost_events` for denne kjøringen mot minimum som skulle vært skrevet (ett per LIVE fase-1-kall). `null` = ikke `--db` eller ikke lesbart. */
+  cost_rows: { written: number; expected_min: number } | null;
   live_providers: string[];
   verdict: SmokeVerdict;
   reasons: string[];

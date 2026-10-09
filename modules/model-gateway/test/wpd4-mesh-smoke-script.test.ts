@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -89,7 +89,7 @@ describe("mesh-live-smoke.ts som prosess (fake leverandører)", () => {
     expect(run.stderr).not.toContain("mesh-live-smoke avbrutt");
     expect(run.code, run.stdout + run.stderr).toBe(0);
     const ev = await evidenceOf(run);
-    expect(ev).toMatchObject({ schema: "jarvis.mesh-smoke/1", verdict: "PASS", mode: "no_db", live_providers: ["gemma_local", "kimi", "hermes"], reasons: [] });
+    expect(ev).toMatchObject({ schema: "jarvis.mesh-smoke/1", verdict: "PASS", mode: "no_db", probe_route: "direct_adapter", live_providers: ["gemma_local", "kimi", "hermes"], reasons: [] });
     expect(ev.providers.map((p) => [p.provider, p.status])).toEqual([["gemma_local", "LIVE"], ["kimi", "LIVE"], ["hermes", "LIVE"]]);
     expect(ev.fallback).toMatchObject({ status: "PROVEN", blocked: "gemma_local", served_by: "kimi", fallback_from: ["gemma_local"], gateway_state: "VERIFIED" });
     expect(ev.fallback.blocked_attempts).toBeGreaterThan(0);
@@ -187,6 +187,32 @@ describe("mesh-live-smoke.ts som prosess (fake leverandører)", () => {
     const help = await runScript(["--help"], {});
     expect(help.code).toBe(0);
     expect(help.stdout).toContain("--max-cost-ore");
+  }, 60_000);
+
+  it("evidensfilen må kunne skrives FØR noe betalt kall gjøres: uskrivbar --out gir avslutningskode 2 med råd om --out, og leverandørene får ingen forespørsler", async () => {
+    const hits: Hit[] = [];
+    const [local, kimi, hermes] = await Promise.all([openAiServer("ok", hits), openAiServer("ok", hits), openAiServer("ok", hits, "hermes")]);
+    // En FIL som «katalog» gir en skrivefeil uavhengig av hvem testen kjører som (samme klasse som api-containerens skrivebeskyttede rotfilsystem). Merk: /proc fungerer ikke her - rekursiv mkdir looper evig mot den.
+    const blocker = join(await mkdtemp(join(tmpdir(), "mesh-smoke-blocker-")), "ikke-en-katalog");
+    await writeFile(blocker, "x");
+    const run = await runScript(["--providers", "gemma_local,kimi,hermes", "--out", join(blocker, "evidens.json")], { JARVIS_GEMMA_LOCAL_URL: local, JARVIS_KIMI_URL: kimi, KIMI_API_KEY: KIMI_KEY, JARVIS_HERMES_URL: hermes, HERMES_API_KEY: HERMES_KEY });
+    expect(run.code, run.stdout + run.stderr).toBe(2);
+    expect(run.stderr).toContain("kan ikke skrive evidensfilen");
+    expect(run.stderr).toContain("--out /tmp/mesh-smoke.json");
+    expect(run.stderr).toContain("Ingen kall er gjort");
+    expect(hits).toHaveLength(0);
+    expect(run.stdout).not.toContain("Fase 1");
+    expect(run.stderr + run.stdout).not.toContain(KIMI_KEY);
+  }, 60_000);
+
+  it("--db uten eierens tenant (verken --tenant eller JARVIS_TENANT_ID): avslutningskode 2 med forklaring, ingen kall og ingen gjettet tenant", async () => {
+    const hits: Hit[] = [];
+    const kimi = await openAiServer("ok", hits);
+    const run = await runScript(["--providers", "kimi", "--db"], { JARVIS_KIMI_URL: kimi, KIMI_API_KEY: KIMI_KEY });
+    expect(run.code, run.stdout + run.stderr).toBe(2);
+    expect(run.stderr).toContain("--db trenger eierens tenant");
+    expect(run.stderr).toContain("JARVIS_TENANT_ID");
+    expect(hits).toHaveLength(0);
   }, 60_000);
 
   it("uten noen konfigurert leverandør: INCOMPLETE, ingen nettkall, og sensitivitetsporten er SKIPPED", async () => {

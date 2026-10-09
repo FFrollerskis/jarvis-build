@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import type pg from "pg";
 import { ProviderError, type ModelProviderAdapter, type ModelRequest, type ModelResult, type ToolCallRequest } from "@jarvis/provider-adapters";
 import {
-  BlockedAdapter, CapabilityRegistry, DEFAULT_PRICING, MemoryTraceSink, ModelGateway, SKIPPED_FALLBACK, SMOKE_PROVIDER_ORDER, SMOKE_TOOL, SmokeCostMeter,
+  BlockedAdapter, BudgetExceededError, CapabilityRegistry, DEFAULT_PRICING, GatewayBackedAdapter, MemoryTraceSink, ModelGateway, NoEligibleProviderError, SKIPPED_FALLBACK, SMOKE_DEFAULT_TENANT, SMOKE_PROVIDER_ORDER, SMOKE_TOOL, SmokeCostMeter,
   assertEvidenceHasNoSecrets, defaultBlocked, evaluateSmoke, fallbackChain, inMemoryCostPool, measureParallel, overheadOf, parseSmokeArgs, probeProvider, probeTools,
-  redactErrorText, renderSmokeSummaryNo, runFallbackCheck, runSensitivityGateCheck, secretEnvNames,
+  redactErrorText, renderSmokeSummaryNo, resolveSmokeTenant, runFallbackCheck, runSensitivityGateCheck, secretEnvNames,
   type SmokeEvidence, type SmokeFallbackCheck, type SmokeGateCheck, type SmokeProbeRecord
 } from "../src/index.ts";
 
@@ -24,7 +24,7 @@ describe("parseSmokeArgs", () => {
   };
 
   it("standardverdier uten flagg", () => {
-    expect(ok([])).toEqual({ providers: null, block: null, tools: false, parallel: false, soloCalls: 3, parallelCalls: 3, maxCostOre: 100, timeoutMs: 30_000, out: null, db: false, tenant: "tenant-personal", help: false });
+    expect(ok([])).toEqual({ providers: null, block: null, tools: false, parallel: false, soloCalls: 3, parallelCalls: 3, maxCostOre: 100, timeoutMs: 30_000, out: null, db: false, tenant: null, help: false });
   });
 
   it("alle flagg parses", () => {
@@ -464,13 +464,13 @@ describe("evaluateSmoke", () => {
 describe("renderSmokeSummaryNo", () => {
   it("viser verdikt, leverandører, fallback, porten og kost - uten hemmeligheter", () => {
     const ev: SmokeEvidence = {
-      schema: "jarvis.mesh-smoke/1", started_at: "2026-10-15T12:00:00.000Z", finished_at: "2026-10-15T12:00:05.000Z", node: "v22.0.0", mode: "no_db",
+      schema: "jarvis.mesh-smoke/1", started_at: "2026-10-15T12:00:00.000Z", finished_at: "2026-10-15T12:00:05.000Z", node: "v22.0.0", mode: "no_db", probe_route: "direct_adapter",
       options: { providers: null, block: null, tools: false, parallel: false, max_cost_ore: 100, timeout_ms: 30_000, tenant: null },
       providers: [probe("gemma_local"), probe("kimi"), probe("hermes", "FAILED", { error_kind: "auth", error_code: "hermes_auth" }), probe("openai", "NOT_CONFIGURED")],
       fallback: proven, sensitivity_gate: gatePass,
       tools: [{ provider: "kimi", call: "TOOL_CALL_OK", roundtrip: "ROUNDTRIP_OK", stream: "STREAM_TOOL_CALL_OK", error_codes: [], cost_ore: 2 }],
       parallel: [{ provider: "kimi", solo_samples: 3, parallel_samples: 3, p50_solo_ms: 300, p50_parallel_ms: 450, overhead_ms: 150, failed_calls: 0, note: null }],
-      cost: { spent_ore: 4, cap_ore: 100, cap_hit: false }, live_providers: ["gemma_local", "kimi"], verdict: "FAIL", reasons: ["Bare 2 av 3 nødvendige leverandører er live."], notes: []
+      cost: { spent_ore: 4, cap_ore: 100, cap_hit: false }, cost_rows: null, live_providers: ["gemma_local", "kimi"], verdict: "FAIL", reasons: ["Bare 2 av 3 nødvendige leverandører er live."], notes: []
     };
     const text = renderSmokeSummaryNo(ev);
     expect(text).toContain("røyktest (uten database): FAIL");
@@ -493,5 +493,75 @@ describe("inMemoryCostPool", () => {
     await client.query("INSERT INTO cost_events (a) VALUES ($1)", ["x"]);
     expect(inserts).toEqual([["x"]]);
     client.release();
+  });
+});
+
+describe("resolveSmokeTenant - kostradene må ligge der executive.get_ai_mesh_status leser dem", () => {
+  it("eksplisitt --tenant vinner over miljøet", () => {
+    expect(resolveSmokeTenant("t-eksplisitt", true, { JARVIS_TENANT_ID: "t-miljo" })).toEqual({ ok: true, tenant: "t-eksplisitt" });
+  });
+
+  it("uten --tenant brukes eierens tenant fra JARVIS_TENANT_ID (med og uten --db)", () => {
+    expect(resolveSmokeTenant(null, true, { JARVIS_TENANT_ID: " t-miljo " })).toEqual({ ok: true, tenant: "t-miljo" });
+    expect(resolveSmokeTenant(null, false, { JARVIS_TENANT_ID: "t-miljo" })).toEqual({ ok: true, tenant: "t-miljo" });
+  });
+
+  it("--db uten noen gyldig tenant er en FEIL (aldri en gjettet tenant): tom, usatt eller ugyldig format", () => {
+    for (const env of [{}, { JARVIS_TENANT_ID: "" }, { JARVIS_TENANT_ID: "   " }, { JARVIS_TENANT_ID: "med mellomrom" }, { JARVIS_TENANT_ID: "x'; DROP TABLE tenants;--" }, { JARVIS_TENANT_ID: "a".repeat(65) }]) {
+      const r = resolveSmokeTenant(null, true, env);
+      expect(r, JSON.stringify(env)).toMatchObject({ ok: false });
+      if (!r.ok) expect(r.error).toContain("JARVIS_TENANT_ID");
+    }
+  });
+
+  it("uten --db er tenant bare en etikett: usatt/ugyldig gir en fast, åpenbart falsk verdi (ingen skriving skjer)", () => {
+    expect(resolveSmokeTenant(null, false, {})).toEqual({ ok: true, tenant: SMOKE_DEFAULT_TENANT });
+    expect(resolveSmokeTenant(null, false, { JARVIS_TENANT_ID: "med mellomrom" })).toEqual({ ok: true, tenant: SMOKE_DEFAULT_TENANT });
+    expect(SMOKE_DEFAULT_TENANT).not.toBe("tenant-personal");
+  });
+});
+
+describe("GatewayBackedAdapter (--db: fase 1 gjennom den ekte ModelGateway)", () => {
+  it("kaller gatewayen med EKSAKT leverandør, lav sensitivitet og egen task_id - og returnerer gatewayens resultat uendret", async () => {
+    const seen: unknown[] = [];
+    const gateway = { complete: async (input: unknown) => { seen.push(input); return { text: "OK", usage: { input_tokens: 3, output_tokens: 1 }, provider: "kimi", model: "kimi-k3" } satisfies ModelResult; } };
+    const inner = fake("kimi", {});
+    const facade = new GatewayBackedAdapter(inner, gateway, { tenantId: "t-1", taskId: "smoke-1-probe" });
+    expect([facade.name, facade.model, facade.available()]).toEqual([inner.name, inner.model, true]);
+    const result = await facade.complete({ messages: [{ role: "user", content: "hei" }], max_tokens: 16 });
+    expect(result.text).toBe("OK");
+    expect(seen).toEqual([{ tenant_id: "t-1", task_id: "smoke-1-probe", session_id: "smoke-1-probe", purpose: "QUICK_CLASSIFICATION", provider: "kimi", sensitivity: "PUBLIC_OR_LOW_SENSITIVITY", request: { messages: [{ role: "user", content: "hei" }], max_tokens: 16 } }]);
+  });
+
+  it("probeProvider via fasaden: LIVE med tall fra gatewayen; gatewayens egne feil får klassenavn (ikke melding) som feilklasse", async () => {
+    const live = new GatewayBackedAdapter(fake("kimi", {}), { complete: async () => ({ text: "OK", usage: { input_tokens: 3, output_tokens: 1 }, provider: "kimi", model: "kimi-m", latency_ms: 123 }) }, { tenantId: "t", taskId: "x" });
+    expect(await probeProvider(live, { pricing, registry, meter: meter() })).toMatchObject({ provider: "kimi", status: "LIVE", latency_ms: 123, input_tokens: 3 });
+    const budget = new GatewayBackedAdapter(fake("kimi", {}), { complete: async () => { throw new BudgetExceededError("hard_blocked", 123_456); } }, { tenantId: "t", taskId: "x" });
+    const refused = await probeProvider(budget, { pricing, registry, meter: meter() });
+    expect(refused).toMatchObject({ status: "FAILED", error_kind: "BudgetExceededError" });
+    // Feilklassen er klassenavnet - gatewayens meldingstekst (beløp o.l.) brukes aldri som klasse.
+    expect(refused.error_kind).not.toMatch(/\d/);
+    const ineligible = new GatewayBackedAdapter(fake("kimi", {}), { complete: async () => { throw new NoEligibleProviderError("override-provider 'kimi' er ikke konfigurert"); } }, { tenantId: "t", taskId: "x" });
+    expect(await probeProvider(ineligible, { pricing, registry, meter: meter() })).toMatchObject({ status: "FAILED", error_kind: "NoEligibleProviderError" });
+    const plain = new GatewayBackedAdapter(fake("kimi", {}), { complete: async () => { throw new Error("rå feil"); } }, { tenantId: "t", taskId: "x" });
+    expect(await probeProvider(plain, { pricing, registry, meter: meter() })).toMatchObject({ status: "FAILED", error_kind: "unknown" });
+  });
+
+  it("ekte ModelGateway: kallet skrives som kostrad med riktig leverandør, tenant og task_id; en leverandør som ikke finnes avvises uten stille fallback", async () => {
+    const inserts: unknown[][] = [];
+    const { pool } = inMemoryCostPool();
+    const recording = { connect: async () => { const c = await pool.connect(); return { query: async (sql: string, params?: unknown[]) => { if (String(sql).includes("INSERT INTO cost_events")) inserts.push(params ?? []); return c.query(sql, params); }, release: () => undefined }; } } as unknown as pg.Pool;
+    const kimi = fake("kimi", {});
+    const hermes = fake("hermes", {});
+    const gateway = new ModelGateway({ pool: recording, trace: new MemoryTraceSink(), providers: [kimi, hermes], pricing });
+    const record = await probeProvider(new GatewayBackedAdapter(hermes, gateway, { tenantId: "t-owner", taskId: "smoke-9-probe" }), { pricing, registry, meter: meter() });
+    expect(record).toMatchObject({ provider: "hermes", status: "LIVE" });
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0]).toContain("t-owner");
+    expect(inserts[0]).toContain("smoke-9-probe");
+    expect(inserts[0]).toContain("hermes");
+    expect(inserts[0]).not.toContain("kimi");
+    const missing = new GatewayBackedAdapter(fake("openai", { available: false }), gateway, { tenantId: "t-owner", taskId: "smoke-9-probe" });
+    expect(await probeProvider(missing, { pricing, registry, meter: meter() })).toMatchObject({ status: "NOT_CONFIGURED" });
   });
 });

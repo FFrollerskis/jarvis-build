@@ -14,20 +14,24 @@
  * JARVIS_GEMMA_LOCAL_URL, LOCAL_LLM_BASE_URL, JARVIS_OLLAMA_URL) - i api-containeren er de allerede satt. Skriptet skriver dem aldri; evidensfilen avvises om den inneholder noe som ligner
  * en hemmelighet eller en verdi fra en hemmelighetsliknende miljøvariabel.
  *
- * Evidens: `var/mesh-smoke/mesh-smoke-<tid>.json` (git-ignorert). Avslutningskode 0 = PASS, 1 = FAIL, 2 = INCOMPLETE/ugyldige flagg.
+ * Evidens: `var/mesh-smoke/mesh-smoke-<tid>.json` (git-ignorert; i api-containeren er rotfilsystemet skrivebeskyttet - bruk `--out /tmp/mesh-smoke.json`). Skrivbarheten sjekkes FØR noe betalt kall gjøres.
+ * Avslutningskode 0 = PASS, 1 = FAIL, 2 = INCOMPLETE/ugyldige flagg.
+ *
+ * `--db`: fase 1 og fallback-kallet går gjennom den ekte `ModelGateway` (eksakt leverandør) og blir vanlige kostrader i `cost_events` for eierens tenant (`JARVIS_TENANT_ID`, eller `--tenant`), så
+ * `executive.get_ai_mesh_status` viser ≥3 live leverandører, kost per leverandør og fallback-beviset rett etterpå. `--tools`/`--parallel` er målinger rett mot adapteren og skrives ikke til cost_events.
  *
  * Kjør: node --experimental-transform-types modules/model-gateway/scripts/mesh-live-smoke.ts [--tools] [--parallel] [--db] [--block <leverandør>] [--max-cost-ore N]
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { accessSync, constants, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { configFromEnv, createPool, withTenantTransaction } from "@jarvis/core";
 import {
   AnthropicAdapter, GeminiAdapter, GemmaHostedAdapter, HermesAdapter, KimiAdapter, LocalOpenAiCompatibleAdapter, OllamaAdapter, OpenAiAdapter, type ModelProviderAdapter
 } from "@jarvis/provider-adapters";
 import {
-  BlockedAdapter, CapabilityRegistry, MemoryTraceSink, ModelGateway, SKIPPED_FALLBACK, SMOKE_PROVIDER_ORDER, SMOKE_USAGE_NO, SmokeCostMeter,
+  BlockedAdapter, CapabilityRegistry, GatewayBackedAdapter, MemoryTraceSink, ModelGateway, SKIPPED_FALLBACK, SMOKE_PROVIDER_ORDER, SMOKE_USAGE_NO, SmokeCostMeter,
   assertEvidenceHasNoSecrets, defaultBlocked, evaluateSmoke, fallbackChain, inMemoryCostPool, measureParallel, parseSmokeArgs, pricingFromEnv, probeProvider, probeTools,
-  renderSmokeSummaryNo, runFallbackCheck, runSensitivityGateCheck,
+  renderSmokeSummaryNo, resolveSmokeTenant, runFallbackCheck, runSensitivityGateCheck,
   type SmokeEvidence, type SmokeFallbackCheck, type SmokeParallelRecord, type SmokeProbeRecord, type SmokeToolRecord
 } from "../src/index.ts";
 
@@ -40,6 +44,24 @@ const opt = parsed.options;
 if (opt.help) {
   console.log(SMOKE_USAGE_NO);
   process.exit(0);
+}
+
+const tenantResolved = resolveSmokeTenant(opt.tenant, opt.db, process.env);
+if (!tenantResolved.ok) {
+  console.error(`mesh-live-smoke: ${tenantResolved.error}`);
+  process.exit(2);
+}
+const tenantId = tenantResolved.tenant;
+
+// Evidensfilen må kunne skrives FØR noe betalt kall gjøres (api-containeren har skrivebeskyttet rotfilsystem): ellers ville kjøringen kostet penger og så mistet beviset.
+const startedAt = new Date();
+const evidencePath = opt.out ?? `var/mesh-smoke/mesh-smoke-${startedAt.toISOString().replace(/[:.]/g, "-")}.json`;
+try {
+  mkdirSync(dirname(evidencePath), { recursive: true });
+  accessSync(dirname(evidencePath), constants.W_OK);
+} catch (err) {
+  console.error(`mesh-live-smoke: kan ikke skrive evidensfilen ${evidencePath} (${(err as NodeJS.ErrnoException).code ?? "ukjent feil"}). Bruk --out <sti>.json på et skrivbart sted (i api-containeren: --out /tmp/mesh-smoke.json). Ingen kall er gjort.`);
+  process.exit(2);
 }
 
 // Adapterne leser JARVIS_MODEL_TIMEOUT_MS i konstruktøren - må settes FØR de bygges.
@@ -64,7 +86,6 @@ const byName = new Map(selected.map((a) => [a.name, a]));
 const registry = new CapabilityRegistry();
 const pricing = pricingFromEnv();
 const meter = new SmokeCostMeter(opt.maxCostOre);
-const startedAt = new Date();
 const runId = `smoke-${startedAt.toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}`;
 
 let dbPool: ReturnType<typeof createPool> | null = null;
@@ -83,7 +104,12 @@ try {
   // -------------------------------------------------------------------------------------------------------------------------------------------------------
   console.log(`Fase 1: ett lite kall per konfigurert leverandør (tak ${opt.maxCostOre} øre, tidsavbrudd ${opt.timeoutMs} ms)…`);
   const probes: SmokeProbeRecord[] = [];
-  for (const adapter of selected) probes.push(await probeProvider(adapter, { pricing, registry, meter }));
+  // `--db`: gjennom den ekte gatewayen (eksakt leverandør) så hvert kall blir en kostrad i cost_events; ellers rett mot adapteren. Egen task_id per fase, så radene kan skilles.
+  const probeGateway = db ? new ModelGateway({ pool: db, trace: new MemoryTraceSink(), providers: selected, pricing }) : null;
+  for (const adapter of selected) {
+    const target = probeGateway ? new GatewayBackedAdapter(adapter, probeGateway, { tenantId, taskId: `${runId}-probe` }) : adapter;
+    probes.push(await probeProvider(target, { pricing, registry, meter }));
+  }
   const liveNames = probes.filter((p) => p.status === "LIVE").map((p) => p.provider);
 
   // -------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -99,11 +125,11 @@ try {
       const providers = chain.map((n) => (n === blocked ? blockedAdapter : (byName.get(n) as ModelProviderAdapter)));
       const gateway = new ModelGateway({ pool, trace: new MemoryTraceSink(), providers, pricing });
       fallback = await runFallbackCheck({
-        gateway, blocked, chain, blockedAdapter, tenantId: opt.tenant, taskId: runId,
+        gateway, blocked, chain, blockedAdapter, tenantId, taskId: `${runId}-fallback`,
         ...(db
           ? {
               readCostRowFallback: async () => {
-                const rows = (await withTenantTransaction(db, opt.tenant, (c) => c.query("SELECT fallback FROM cost_events WHERE tenant_id = $1 AND task_id = $2 AND success ORDER BY at DESC LIMIT 1", [opt.tenant, runId]))).rows as Array<{ fallback: boolean }>;
+                const rows = (await withTenantTransaction(db, tenantId, (c) => c.query("SELECT fallback FROM cost_events WHERE tenant_id = $1 AND task_id = $2 AND success ORDER BY at DESC LIMIT 1", [tenantId, `${runId}-fallback`]))).rows as Array<{ fallback: boolean }>;
                 return rows[0] ? Boolean(rows[0].fallback) : null;
               }
             }
@@ -112,7 +138,7 @@ try {
     }
   }
   const gate = await runSensitivityGateCheck({
-    adapters: selected, registry, tenantId: opt.tenant,
+    adapters: selected, registry, tenantId,
     // Alltid minnebasert pool: stubbene skal aldri skrive kostrader.
     makeGateway: (providers) => new ModelGateway({ pool: inMemoryCostPool().pool, trace: new MemoryTraceSink(), providers, pricing })
   });
@@ -139,19 +165,32 @@ try {
 
   // -------------------------------------------------------------------------------------------------------------------------------------------------------
   const evaluation = evaluateSmoke({ probes, fallback, gate, costCapHit: meter.capHit || meter.exhausted });
+  // `--db`: ærlig om hva som FAKTISK ble skrevet (en tenant som ikke finnes eller en skrivefeil gir en loggført bokføringsfeil, ikke en krasj) - aldri påstå at beviset ligger i cost_events uten å ha sett det.
+  let costRows: SmokeEvidence["cost_rows"] = null;
+  if (db) {
+    try {
+      const written = Number(((await withTenantTransaction(db, tenantId, (c) => c.query("SELECT count(*)::int AS n FROM cost_events WHERE tenant_id = $1 AND task_id IN ($2, $3)", [tenantId, `${runId}-probe`, `${runId}-fallback`]))).rows[0] as { n: number }).n);
+      costRows = { written, expected_min: liveNames.length };
+      if (written < liveNames.length) evaluation.notes.push(`Bare ${written} av minst ${liveNames.length} forventede kostrader ble skrevet til cost_events for ${tenantId}: executive.get_ai_mesh_status vil ikke se hele beviset (finnes tenanten, og er databasen skrivbar? Se model_cost_bookkeeping_failed i utskriften).`);
+    } catch {
+      evaluation.notes.push("Kostradene i cost_events kunne ikke leses tilbake - beviset i executive.get_ai_mesh_status er uverifisert.");
+    }
+  }
   const evidence: SmokeEvidence = {
     schema: "jarvis.mesh-smoke/1",
     started_at: startedAt.toISOString(),
     finished_at: new Date().toISOString(),
     node: process.version,
     mode: opt.db ? "db" : "no_db",
-    options: { providers: opt.providers, block: opt.block, tools: opt.tools, parallel: opt.parallel, max_cost_ore: opt.maxCostOre, timeout_ms: opt.timeoutMs, tenant: opt.db ? opt.tenant : null },
+    probe_route: probeGateway ? "gateway_db" : "direct_adapter",
+    options: { providers: opt.providers, block: opt.block, tools: opt.tools, parallel: opt.parallel, max_cost_ore: opt.maxCostOre, timeout_ms: opt.timeoutMs, tenant: opt.db ? tenantId : null },
     providers: probes,
     fallback,
     sensitivity_gate: gate,
     tools,
     parallel,
     cost: { spent_ore: meter.spent, cap_ore: meter.cap, cap_hit: meter.capHit },
+    cost_rows: costRows,
     live_providers: evaluation.live,
     verdict: evaluation.verdict,
     reasons: evaluation.reasons,
@@ -160,12 +199,10 @@ try {
 
   const text = `${JSON.stringify(evidence, null, 2)}\n`;
   assertEvidenceHasNoSecrets(text, process.env); // kaster FØR noe skrives hvis evidensen skulle inneholde en hemmelighet
-  const out = opt.out ?? `var/mesh-smoke/mesh-smoke-${startedAt.toISOString().replace(/[:.]/g, "-")}.json`;
-  mkdirSync(dirname(out), { recursive: true });
-  writeFileSync(out, text, { mode: 0o600 });
+  writeFileSync(evidencePath, text, { mode: 0o600 });
 
-  console.log(`\n${renderSmokeSummaryNo(evidence)}\n\nEvidens skrevet: ${out}`);
-  if (db) console.log(`Kostrader ligger i cost_events (task_id ${runId}); executive.get_ai_mesh_status viser dem som fallback_ok_calls siste 7 døgn.`);
+  console.log(`\n${renderSmokeSummaryNo(evidence)}\n\nEvidens skrevet: ${evidencePath}`);
+  if (db && costRows) console.log(`Kostrader i cost_events for ${tenantId}: ${costRows.written} rader (task_id ${runId}-probe og ${runId}-fallback); executive.get_ai_mesh_status viser dem som kall/kost per leverandør og fallback_ok_calls siste 7 døgn.`);
   process.exitCode = evaluation.verdict === "PASS" ? 0 : evaluation.verdict === "FAIL" ? 1 : 2;
 } catch (err) {
   // Aldri skriv ut miljø eller forespørselsinnhold - kun klassen og en kort melding.
