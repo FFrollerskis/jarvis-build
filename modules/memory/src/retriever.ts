@@ -419,7 +419,7 @@ export class MemoryRetriever {
     const { profile, upcoming, sensitivityById } = await withMemoryTransaction(this.pool, identity.tenant_id, [space], async (client) => {
       const prof = await client.query("SELECT content FROM memory_profiles WHERE tenant_id = $1 AND space = $2", [identity.tenant_id, space]);
       const up = await client.query(
-        `SELECT memory_item_id, content, valid_from, type FROM memory_items
+        `SELECT memory_item_id, content, valid_from, type, space, sensitivity FROM memory_items
           WHERE tenant_id = $1 AND space = $2 AND status = 'active' AND type IN ('commitment', 'decision')
             AND valid_from > now() AND valid_from < now() + interval '14 days'
           ORDER BY valid_from ASC LIMIT 5`,
@@ -431,7 +431,7 @@ export class MemoryRetriever {
         : await client.query("SELECT memory_item_id, sensitivity FROM memory_items WHERE memory_item_id = ANY($1)", [ids]);
       return {
         profile: (prof.rows[0] as { content: string } | undefined)?.content ?? "",
-        upcoming: up.rows as Array<{ memory_item_id: string; content: string; valid_from: Date; type: string }>,
+        upcoming: up.rows as Array<{ memory_item_id: string; content: string; valid_from: Date; type: string; space: string; sensitivity: string }>,
         sensitivityById: new Map((sens.rows as Array<{ memory_item_id: string; sensitivity: string }>).map((r) => [r.memory_item_id, r.sensitivity]))
       };
     });
@@ -457,10 +457,18 @@ export class MemoryRetriever {
       const trimmed = estimateTokens(profile) > PROFILE_MAX_TOKENS ? `${profile.slice(0, Math.floor(PROFILE_MAX_TOKENS * 3.5))}…` : profile;
       profileIncluded = push(`Profil (det Jarvis vet om eieren, kompilert fra bekreftede minner):\n${trimmed}`);
     }
+    // Gjennomgang av WP-A (D-451, bekreftet mot ekte Postgres): kommende forpliktelser ble lagt i blokken UANSETT sensitivitet og uten rom/sensitivitet i metadataene - en `special`-time hos psykiateren gikk i
+    // systemprompten til en skymodell og turen ble likevel klassifisert som vanlig privat. Samme regel som for treffene: strengt minne (helse-rom, `special`) tas KUN med ved et direkte treff (da står det i `kept`),
+    // og det som tas med oppgir rom og sensitivitet i metadataene.
+    const upcomingShown: typeof upcoming = [];
+    let upcomingWithheld = 0;
     for (const u of upcoming) {
-      if (!kept.some((k) => k.memory_item_id === u.memory_item_id)) {
-        push(`- [kommende ${TYPE_LABEL[u.type] ?? u.type} · ${isoDate(u.valid_from)}] ${u.content}`);
+      if (kept.some((k) => k.memory_item_id === u.memory_item_id)) continue;
+      if (u.space === "health" || u.sensitivity === "special") {
+        upcomingWithheld += 1;
+        continue;
       }
+      if (push(`- [kommende ${TYPE_LABEL[u.type] ?? u.type} · ${isoDate(u.valid_from)}] ${u.content}`)) upcomingShown.push(u);
     }
     const hitLines: string[] = [];
     for (const item of kept) {
@@ -470,10 +478,15 @@ export class MemoryRetriever {
       hitLines.push(line);
       used += cost;
     }
-    const spaces = [...new Set(kept.map((i) => i.space))];
-    const sensitivities = [...new Set(kept.filter((i) => i.kind !== "summary").map((i) => sensitivityById.get(i.memory_item_id) ?? i.sensitivity ?? "normal"))];
+    const spaces = [...new Set([...kept.map((i) => i.space), ...upcomingShown.map((u) => u.space)])];
+    const sensitivities = [
+      ...new Set([
+        ...kept.filter((i) => i.kind !== "summary").map((i) => sensitivityById.get(i.memory_item_id) ?? i.sensitivity ?? "normal"),
+        ...upcomingShown.map((u) => u.sensitivity ?? "normal")
+      ])
+    ];
     if (lines.length === 0 && hitLines.length === 0) {
-      return { text: "", spaces: [], sensitivities: [], withheld_restricted: withheld, profile_included: false, item_count: 0 };
+      return { text: "", spaces: [], sensitivities: [], withheld_restricted: withheld + upcomingWithheld, profile_included: false, item_count: 0 };
     }
     const header = hitLines.length > 0 ? `Relevant minne (med kilde):\n${hitLines.join("\n")}` : "";
     const text = [lines.join("\n"), header].filter((s) => s.length > 0).join("\n\n");
@@ -481,7 +494,7 @@ export class MemoryRetriever {
       text,
       spaces: profileIncluded && spaces.length === 0 ? [space] : spaces,
       sensitivities,
-      withheld_restricted: withheld,
+      withheld_restricted: withheld + upcomingWithheld,
       profile_included: profileIncluded,
       item_count: hitLines.length
     };

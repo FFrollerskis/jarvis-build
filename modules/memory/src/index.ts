@@ -9,4 +9,5 @@ export * from "./summaries.ts";
 export * from "./export.ts";
 export * from "./retention-sweep.ts";
 export * from "./reembed-sweep.ts";
+export * from "./resensitize-sweep.ts";
 export * from "./profile.ts";

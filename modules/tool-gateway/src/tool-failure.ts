@@ -22,6 +22,9 @@ export interface ToolFailureContext {
   surface?: Surface;
   /** Tjenester som finnes på flaten (brukes når verktøyet ikke finnes). */
   available_services?: ReadonlyArray<string>;
+  /** Q-50 B: repoet modellen ba om og repoet samtalen/jobben er låst til (kun for `GITHUB_REPO_LOCKED`). */
+  repo_requested?: string;
+  repo_allowed?: string;
 }
 
 const label = (ctx: ToolFailureContext) => (ctx.tool_id ? serviceLabel(ctx.tool_id) : "tjenesten");
@@ -104,6 +107,18 @@ export function explainToolFailure(category: string, ctx: ToolFailureContext = {
           "(tale og Telegram har bare lesing av et lite utvalg). Si til Tobias at dette gjøres i chatten eller dashbordet.",
         retry: "never"
       };
+    case "GITHUB_REPO_LOCKED": {
+      // Navnet kommer fra modellen: kun et gyldig `eier/navn` gjengis (ingen fritekst inn i en melding som går tilbake til modellen).
+      const slug = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+      const requested = ctx.repo_requested !== undefined && slug.test(ctx.repo_requested) ? `«${ctx.repo_requested}»` : "et annet repo";
+      const allowed = ctx.repo_allowed !== undefined && slug.test(ctx.repo_allowed) ? ctx.repo_allowed : "eierens repo";
+      return {
+        message:
+          `GitHub-kallet${act} gjaldt ${requested}, men samtaler og bakgrunnsjobber er låst til eierens repo «${allowed}». ` +
+          `Prøv én gang til med «${allowed}» (ved lesing kan repo-feltet utelates). Trenger Tobias andre repo, kan han åpne for det i oppsettet (JARVIS_GITHUB_ALLOW_OTHER_REPOS=true).`,
+        retry: "with_corrected_parameters", fix_location: "owner_message"
+      };
+    }
     case "TOOL_CALL_LIMIT":
       return {
         message: "Grensen for verktøykall i denne meldingen er nådd. Svar med det du har, og si at du fortsetter i neste melding om Tobias vil.",

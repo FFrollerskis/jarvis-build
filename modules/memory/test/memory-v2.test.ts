@@ -21,6 +21,8 @@ import {
   orTsQuery,
   queryTerms,
   runMemoryReembedSweepForAllTenants,
+  resensitizeModeFromEnv,
+  runMemoryResensitizeSweepForAllTenants,
   withMemoryTransaction,
   type EmbeddingProvider,
   type SourceRef
@@ -281,6 +283,51 @@ describe("C: gjenfinning v2 - ELLER-fulltekst, nøkkelord, fusjon, episoder, sam
     expect(weak.sensitivities).not.toContain("special");
   });
 
+  it("gjennomgang av WP-A (D-451): kommende forpliktelser følger samme regel som treffene - special/helse tas KUN med ved direkte treff, og det som tas med oppgir rom og sensitivitet", async () => {
+    const upcoming = async (subject: string, content: string): Promise<string> => {
+      const out = await writer.apply(id, TRUSTED, candidate("personal", subject, content, { type: "commitment" }));
+      await adminPool.query("UPDATE memory_items SET valid_from = now() + interval '3 days' WHERE memory_item_id = $1", [out.memory_item_id]);
+      return out.memory_item_id;
+    };
+    const special = await upcoming("plan.psykiater", "Time hos psykiateren onsdag om depresjonen ypsilon88.");
+    const sensitive = await upcoming("plan.faktura", "Betale fakturaen til Elkem ypsilon88 innen fredag.");
+    const normal = await upcoming("plan.mote", "Møte med Kari om nettsiden ypsilon88.");
+    const sensitivities = await adminPool.query("SELECT memory_item_id, sensitivity FROM memory_items WHERE memory_item_id = ANY($1)", [[special, sensitive, normal]]);
+    const levelOf = (itemId: string) => (sensitivities.rows as Array<{ memory_item_id: string; sensitivity: string }>).find((r) => r.memory_item_id === itemId)?.sensitivity;
+    expect(levelOf(special)).toBe("special");
+    expect(levelOf(sensitive)).toBe("sensitive");
+    expect(levelOf(normal)).toBe("normal");
+
+    // Et spørsmål som IKKE treffer noen av dem som direkte søketreff: de kommende kommer med via «kommende»-linjene, men special gjør det ikke.
+    const unrelated = await retriever.contextWithMeta(id, "zzqx77");
+    expect(unrelated.text).toContain("Møte med Kari om nettsiden");
+    expect(unrelated.text).toContain("Betale fakturaen til Elkem");
+    expect(unrelated.text).not.toMatch(/psykiater|depresjon/i);
+    expect(unrelated.withheld_restricted).toBeGreaterThanOrEqual(1);
+    expect(unrelated.sensitivities).toEqual(expect.arrayContaining(["normal", "sensitive"]));
+    expect(unrelated.sensitivities).not.toContain("special");
+    expect(unrelated.spaces).toContain("personal");
+
+    // Uten profil og uten treff er de kommende forpliktelsene det eneste i blokken: metadataene må likevel oppgi rommet (ellers faller romgulvet PRIVAT bort i ruteren).
+    const profile = await adminPool.query("SELECT content FROM memory_profiles WHERE tenant_id = 'tenant-a' AND space = 'personal'");
+    await adminPool.query("DELETE FROM memory_profiles WHERE tenant_id = 'tenant-a' AND space = 'personal'");
+    try {
+      const onlyUpcoming = await retriever.contextWithMeta(id, "zzqx78");
+      expect(onlyUpcoming.profile_included).toBe(false);
+      expect(onlyUpcoming.text).toContain("Møte med Kari om nettsiden");
+      expect(onlyUpcoming.spaces).toEqual(["personal"]);
+    } finally {
+      for (const row of profile.rows as Array<{ content: string }>) {
+        await adminPool.query("INSERT INTO memory_profiles (tenant_id, space, content) VALUES ('tenant-a', 'personal', $1)", [row.content]);
+      }
+    }
+
+    // Et direkte treff på special-elementet tar det med (da står det som treff og metadataene sier special).
+    const direct = await retriever.contextWithMeta(id, "psykiateren depresjonen ypsilon88");
+    expect(direct.text).toMatch(/psykiater/i);
+    expect(direct.sensitivities).toContain("special");
+  });
+
   it("timeref: historiske versjoner kommer med EKTE proveniens (type/kilde fra item), ikke fabrikkert", async () => {
     const first = await writer.apply(id, TRUSTED, candidate("personal", "tobias.jobb", "Tobias jobber hos Alfa AS tau12."));
     await adminPool.query("UPDATE memory_items SET valid_from = now() - interval '30 days' WHERE memory_item_id = $1", [first.memory_item_id]);
@@ -391,5 +438,164 @@ describe("D (slice B): skrivevei v2 - episoder, konfidensgate, negasjon, trivial
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe("gjennomgang av WP-A (D-451): omregning av lagret sensitivitet med dagens ordforråd (report som standard, apply hever aldri senker)", () => {
+  const id = identity("personal");
+  const levelOf = async (itemId: string): Promise<string> => (await adminPool.query("SELECT sensitivity FROM memory_items WHERE memory_item_id = $1", [itemId])).rows[0].sensitivity;
+
+  it("report skriver ingenting; apply hever (stale helsetekst, gammel versjon med økonomi, forretningsord) med revisjonsspor uten innhold, rører ikke special eller harmløse, og er idempotent", async () => {
+    const stale = await writer.apply(id, TRUSTED, candidate("personal", "tobias.noe", "Tobias liker ski zeta91."));
+    await adminPool.query("UPDATE memory_items SET content = 'Tobias har ADHD og går til psykiater zeta91.', sensitivity = 'normal' WHERE memory_item_id = $1", [stale.memory_item_id]);
+    const prev = await writer.apply(id, TRUSTED, candidate("personal", "tobias.lag", "Tobias spiller fotball zeta92."));
+    await adminPool.query(
+      `INSERT INTO memory_versions (memory_item_id, tenant_id, space, version, subject, content, valid_from, valid_to, change_kind)
+       VALUES ($1, 'tenant-a', 'personal', 0, 'tobias.lag', 'Se kontoutskriften for klubben zeta92', now() - interval '60 days', now() - interval '30 days', 'superseded')`,
+      [prev.memory_item_id]
+    );
+    const fine = await writer.apply(id, TRUSTED, candidate("personal", "tobias.mat", "Tobias liker pizza zeta93."));
+    const biz = await writer.apply(id, TRUSTED, candidate("personal", "tobias.arbeid", "Tobias snakker med en kunde zeta94."));
+    await adminPool.query("UPDATE memory_items SET sensitivity = 'normal' WHERE memory_item_id = $1", [biz.memory_item_id]);
+    const special = await writer.apply(id, TRUSTED, candidate("personal", "tobias.hemmelig", "Tobias spiller sjakk zeta95."));
+    await adminPool.query("UPDATE memory_items SET sensitivity = 'special' WHERE memory_item_id = $1", [special.memory_item_id]);
+    // «sensitive» med harmløs tekst senkes ALDRI av sveipet (kun heving).
+    const keeps = await writer.apply(id, TRUSTED, candidate("personal", "tobias.musikk", "Tobias hører på jazz zeta96."));
+    await adminPool.query("UPDATE memory_items SET sensitivity = 'sensitive' WHERE memory_item_id = $1", [keeps.memory_item_id]);
+    expect(await levelOf(stale.memory_item_id)).toBe("normal");
+
+    const report = await runMemoryResensitizeSweepForAllTenants(appPool, { mode: "report" });
+    expect(report.mode).toBe("report");
+    expect(report.written).toBe(0);
+    expect(report.raised.special).toBeGreaterThanOrEqual(2);
+    expect(report.raised.sensitive).toBeGreaterThanOrEqual(1);
+    expect(await levelOf(stale.memory_item_id)).toBe("normal");
+
+    expect((await runMemoryResensitizeSweepForAllTenants(appPool, { mode: "off" })).scanned).toBe(0);
+
+    const applied = await runMemoryResensitizeSweepForAllTenants(appPool, { mode: "apply" });
+    expect(applied.written).toBeGreaterThanOrEqual(3);
+    expect(applied.failed).toEqual([]);
+    expect(await levelOf(stale.memory_item_id)).toBe("special");
+    expect(await levelOf(prev.memory_item_id)).toBe("special");
+    expect(await levelOf(biz.memory_item_id)).toBe("sensitive");
+    expect(await levelOf(fine.memory_item_id)).toBe("normal");
+    expect(await levelOf(special.memory_item_id)).toBe("special");
+    expect(await levelOf(keeps.memory_item_id)).toBe("sensitive");
+
+    const audits = await adminPool.query("SELECT person_id, payload FROM audit_events WHERE type = 'memory.resensitize' AND payload->>'memory_item_id' = ANY($1)", [[stale.memory_item_id, prev.memory_item_id, biz.memory_item_id]]);
+    expect(audits.rowCount).toBe(3);
+    expect(audits.rows.every((r: { person_id: string }) => r.person_id === "system-memory-resensitize")).toBe(true);
+    expect(JSON.stringify(audits.rows)).not.toMatch(/ADHD|psykiater|kontoutskrift|kunde/i);
+
+    const again = await runMemoryResensitizeSweepForAllTenants(appPool, { mode: "apply" });
+    expect(again.written).toBe(0);
+    expect(again.raised).toEqual({ sensitive: 0, special: 0 });
+  });
+  it("apply senker aldri: en samtidig heving til special mellom sveipets lesing og skriving vinner (sammenlign-og-bytt), og hoppet element telles", async () => {
+    const item = await writer.apply(id, TRUSTED, candidate("personal", "tobias.avtale", "Tobias snakker med en kunde om en avtale racez1."));
+    await adminPool.query("UPDATE memory_items SET sensitivity = 'normal' WHERE memory_item_id = $1", [item.memory_item_id]);
+    let injected = false;
+    // Proxy rundt poolen: rett ETTER sveipets SELECT hever en annen tilkobling elementet til special og committer, før sveipet skriver.
+    const racingPool = new Proxy(appPool, {
+      get(target, prop, receiver) {
+        if (prop === "connect") {
+          return async () => {
+            const client = await target.connect();
+            return new Proxy(client, {
+              get(c, p, r) {
+                if (p !== "query") {
+                  const v = Reflect.get(c, p, r);
+                  return typeof v === "function" ? v.bind(c) : v;
+                }
+                return async (...args: unknown[]) => {
+                  const out = await (c.query as (...a: unknown[]) => Promise<unknown>).apply(c, args);
+                  const sql = typeof args[0] === "string" ? args[0] : "";
+                  const params = (args[1] ?? []) as unknown[];
+                  if (!injected && sql.includes("FROM memory_items m") && sql.includes("array_agg") && params[0] === "tenant-a" && params[1] === "personal") {
+                    injected = true;
+                    await adminPool.query("UPDATE memory_items SET sensitivity = 'special' WHERE memory_item_id = $1", [item.memory_item_id]);
+                  }
+                  return out;
+                };
+              }
+            });
+          };
+        }
+        const v = Reflect.get(target, prop, receiver);
+        return typeof v === "function" ? v.bind(target) : v;
+      }
+    }) as pg.Pool;
+    const summary = await runMemoryResensitizeSweepForAllTenants(racingPool, { mode: "apply" });
+    expect(injected).toBe(true);
+    expect(await levelOf(item.memory_item_id)).toBe("special");
+    expect(summary.skipped_concurrent).toBeGreaterThanOrEqual(1);
+    expect(summary.failed).toEqual([]);
+    const audits = await adminPool.query("SELECT 1 FROM audit_events WHERE type = 'memory.resensitize' AND payload->>'memory_item_id' = $1", [item.memory_item_id]);
+    expect(audits.rowCount).toBe(0);
+  });
+
+  it("truncated settes også når det SISTE (eller eneste) rommet avkortes av maxRows - og ikke når alt ble skannet", async () => {
+    for (let i = 0; i < 4; i += 1) {
+      await writer.apply(id, TRUSTED, candidate("personal", `tobias.skann${i}`, `Notat nummer ${i} om turer i skogen truncz${i}.`));
+    }
+    const capped = await runMemoryResensitizeSweepForAllTenants(appPool, { mode: "report", maxRows: 2 });
+    expect(capped.scanned).toBe(2);
+    expect(capped.truncated).toBe(true);
+    const full = await runMemoryResensitizeSweepForAllTenants(appPool, { mode: "report", maxRows: 5000 });
+    expect(full.truncated).toBe(false);
+    expect(full.scanned).toBeGreaterThanOrEqual(4);
+  });
+  it("MemoryWriter.apply senker aldri sensitivitet under samtidighet: en heving mellom lesing og skriving overlever en oppdatering (review nr. 2, funn 2)", async () => {
+    const first = await writer.apply(id, TRUSTED, candidate("personal", "tobias.hobby", "Tobias liker ski zeta97."));
+    expect(await levelOf(first.memory_item_id)).toBe("normal");
+    let injected = false;
+    // Rett FØR writerens UPDATE (etter at den har lest raden) hever en annen tilkobling elementet til special og committer.
+    const racingPool = new Proxy(appPool, {
+      get(target, prop, receiver) {
+        if (prop === "connect") {
+          return async () => {
+            const client = await target.connect();
+            return new Proxy(client, {
+              get(c, p, r) {
+                if (p !== "query") {
+                  const v = Reflect.get(c, p, r);
+                  return typeof v === "function" ? v.bind(c) : v;
+                }
+                return async (...args: unknown[]) => {
+                  const sql = typeof args[0] === "string" ? args[0] : "";
+                  if (!injected && sql.includes("INSERT INTO memory_versions")) {
+                    injected = true;
+                    await adminPool.query("UPDATE memory_items SET sensitivity = 'special' WHERE memory_item_id = $1", [first.memory_item_id]);
+                  }
+                  return (c.query as (...a: unknown[]) => Promise<unknown>).apply(c, args);
+                };
+              }
+            });
+          };
+        }
+        const v = Reflect.get(target, prop, receiver);
+        return typeof v === "function" ? v.bind(target) : v;
+      }
+    }) as pg.Pool;
+    const racingWriter = new MemoryWriter(racingPool, new LocalHashEmbedding(), new RuleBasedExtractor(), policy);
+    const out = await racingWriter.apply(id, TRUSTED, candidate("personal", "tobias.hobby", "Tobias liker langrenn zeta97."));
+    expect(injected).toBe(true);
+    expect(out.op).toBe("UPDATE");
+    expect(await levelOf(first.memory_item_id)).toBe("special");
+    // Og vanlig heving via oppdatering virker fortsatt (normal → sensitive, aldri ned igjen).
+    const second = await writer.apply(id, TRUSTED, candidate("personal", "tobias.arbeid2", "Tobias snakker med en kunde zeta98."));
+    expect(await levelOf(second.memory_item_id)).toBe("sensitive");
+    await writer.apply(id, TRUSTED, candidate("personal", "tobias.arbeid2", "Tobias liker kaffe zeta98."));
+    expect(await levelOf(second.memory_item_id)).toBe("sensitive");
+  });
+
+  it("modus for omregningen: report er standard (også for ukjent verdi), apply og off må velges eksplisitt (mutasjonsfunn m86)", () => {
+    expect(resensitizeModeFromEnv(undefined)).toBe("report");
+    expect(resensitizeModeFromEnv("")).toBe("report");
+    expect(resensitizeModeFromEnv("garbage")).toBe("report");
+    expect(resensitizeModeFromEnv(" Apply ")).toBe("apply");
+    expect(resensitizeModeFromEnv("OFF")).toBe("off");
+    expect(resensitizeModeFromEnv("report")).toBe("report");
   });
 });

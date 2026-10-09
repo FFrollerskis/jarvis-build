@@ -180,6 +180,13 @@ export interface ToolLoopOptions {
   maxRounds?: number;
   /** Del 3 (JARVIS-028): maks verktøykall utført per runde. Overskytende kall forkastes (ikke utført) - aldri en ubegrenset fan-out. */
   maxCallsPerRound?: number;
+  /**
+   * Gjennomgang av WP-A (D-451, bekreftet med ekte gateway): hver runde planlegges på nytt, så en runde kan betjenes av en lokal modell (f.eks. fordi skyen hadde tidsavbrudd) og den NESTE av en skymodell.
+   * Verktøyresultater og -kall fra den lokale runden (som kan inneholde det lokale modeller har lov til å se, men skyen ikke) stod da i `tool_exchanges` til skyen. Med `localStickiness` blir resten av løkken lokal
+   * så snart en runde er betjent av en lokal modell (`mode: "LOCAL"`, og en eventuell preferanseliste snevres inn til lokale leverandører) - skyen får aldri se noe en lokal modell har rørt. Av som standard
+   * (kun chatten bruker den), så øvrige verktøyløkker er uendret.
+   */
+  localStickiness?: boolean;
 }
 
 /** Minimal, deterministisk JSON-Schema-validering (§25): required + ukjente felter. */
@@ -770,6 +777,7 @@ export class ModelGateway {
     let forceFinal = false;
     let honestyApplied = false;
     let result: ModelResult | null = null;
+    let lockedToLocal = false;
 
     for (let round = 1; round <= maxRounds; round++) {
       // Siste runde / loop-vern: uten tools MÅ modellen syntetisere tekstsvar av
@@ -783,7 +791,8 @@ export class ModelGateway {
       const roundInput: CompleteInput = {
         ...input,
         required_capabilities: [...(input.required_capabilities ?? []), "tool_calling"],
-        request
+        request,
+        ...(lockedToLocal ? this.localOnlyRouting(input) : {})
       };
       // D-430: har ingen verktøykall lyktes så langt, bufres runden (ingen tekst strømmes) - modellen kan ennå rette kallet, men en tekst
       // uten data er gjetting og erstattes under av en fast, ærlig melding.
@@ -791,6 +800,7 @@ export class ModelGateway {
       result = opts.onEvent && !failureGuard
         ? await this.stream(roundInput, opts.onEvent, opts.signal)
         : await this.complete(roundInput);
+      if (opts.localStickiness && !lockedToLocal && this.servedLocally(result)) lockedToLocal = true;
       const calls = (result.tool_calls ?? []).slice(0, opts.maxCallsPerRound ?? Number.POSITIVE_INFINITY);
       if (calls.length === 0) {
         if (failureGuard) {
@@ -835,6 +845,17 @@ export class ModelGateway {
     }
     result.metadata = { ...result.metadata, tool_rounds: exchanges.length };
     return result;
+  }
+
+  /** Var runden betjent av en LOKAL leverandør? Ukjent leverandør regnes som sky (fail-closed: den låser ikke løkken, men får heller ikke se mer enn før). */
+  private servedLocally(result: ModelResult): boolean {
+    return this.registry.profileOrGeneric(result.provider, result.model).locality === "local";
+  }
+
+  /** `localStickiness`: ruting som kun slipper lokale leverandører til (preferanselisten snevres inn; en tom liste faller til `mode: "LOCAL"`). */
+  private localOnlyRouting(input: CompleteInput): Pick<CompleteInput, "mode" | "providerPreference"> {
+    const local = (input.providerPreference ?? []).filter((name) => this.registry.profileOrGeneric(name, "ukjent").locality === "local");
+    return { mode: "LOCAL", ...(input.providerPreference !== undefined ? { providerPreference: local } : {}) };
   }
 
   /** Ett verktøykall: ukjent tool → DENY uten utførelse (§26); schema-feil → normalisert feil (§25). */
