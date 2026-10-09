@@ -1,5 +1,6 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
-import { open } from "node:fs/promises";
+import { constants as fsConstants, type Stats } from "node:fs";
+import { lstat, open, type FileHandle } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import type { Observation } from "@jarvis/executive";
 
@@ -11,9 +12,16 @@ import type { Observation } from "@jarvis/executive";
  * Tillit: filen er UBETRODD data (CLAUDE.md regel 7). Den leses med størrelsesgrense, valideres felt for felt mot et lukket skjema, og kun oppramsede
  * verdier (tilstander, tidspunkt, tall, feilKODER) kommer videre. Fritekst fra filen når aldri `Observation.detail` - feilkodene oversettes her.
  * Ukjent eller uleselig er UNKNOWN (aldri «frisk»); alder over terskel er en ærlig advarsel (DEGRADED/DOWN), aldri en skjult feil.
+ *
+ * Lesingen er herdet mot det en fil i en montert mappe kan være i stedet for en vanlig fil (review F10): `lstat` FØR `open` (bare en vanlig fil åpnes - en FIFO uten skriver
+ * lot `open()` blokkere for alltid i trådpoolen), `O_NONBLOCK | O_NOFOLLOW` (en fil som byttes ut mellom `lstat` og `open` blokkerer eller følges heller ikke), `fstat` på det
+ * ÅPNE håndtaket, og en frist rundt det hele: går fristen ut svarer vi `timeout` (UNKNOWN) og starter ikke nye lesinger av samme sti før den hengte er ferdig.
+ * Symlenker følges ikke (mounten er en MAPPE med en vanlig fil, se infra/backup/docker-compose.backup-status.yml). Tidspunkt frem i tid kan aldri bevise ferskhet (F14).
  */
 export const BACKUP_STATUS_SCHEMA = 1;
 export const BACKUP_STATUS_MAX_BYTES = 64 * 1024;
+/** Frist for én lesing av statusfilen (lstat + open + stat + read). Normalt millisekunder; en hengt montering skal ikke henge selvdiagnosen. */
+export const BACKUP_STATUS_READ_TIMEOUT_MS = 5_000;
 
 const SET_NAME = /^jarvis-backup-\d{8}T\d{6}Z$/;
 
@@ -90,7 +98,7 @@ export interface BackupStatusSnapshot {
 export type BackupStatusRead =
   | { kind: "ok"; snapshot: BackupStatusSnapshot }
   | { kind: "missing" }
-  | { kind: "invalid"; reason: "unreadable" | "too_large" | "not_json" | "bad_schema" };
+  | { kind: "invalid"; reason: "unreadable" | "too_large" | "not_json" | "bad_schema" | "timeout" };
 
 // --- validering (lukket skjema; ukjente felt ignoreres, feil type = null/avvist) ----------------------------------------------------------
 type Obj = Record<string, unknown>;
@@ -147,15 +155,36 @@ export function parseBackupStatus(raw: unknown): BackupStatusSnapshot | null {
   };
 }
 
-/** Leser statusfilen: størrelsesgrense FØR parsing, kun vanlige filer. Kaster aldri. */
-export async function readBackupStatusFile(path: string, maxBytes = BACKUP_STATUS_MAX_BYTES): Promise<BackupStatusRead> {
-  let handle;
+/** Filsystem-kallene kan byttes ut i tester (en FIFO som byttes inn mellom `lstat` og `open`, eller en hengt montering, lar seg ikke lage ellers). */
+export interface BackupStatusReadDeps {
+  lstat?: (path: string) => Promise<Pick<Stats, "isFile">>;
+  open?: (path: string, flags: number) => Promise<FileHandle>;
+  /** Overstyrer `BACKUP_STATUS_READ_TIMEOUT_MS` (tester). */
+  timeoutMs?: number;
+}
+
+const errCode = (err: unknown): string | undefined => (err as NodeJS.ErrnoException | null)?.code;
+const missingOrUnreadable = (err: unknown): BackupStatusRead => (errCode(err) === "ENOENT" ? { kind: "missing" } : { kind: "invalid", reason: "unreadable" });
+/** `O_NONBLOCK`/`O_NOFOLLOW` finnes ikke på alle plattformer (Windows): ukjent konstant blir 0 i OR-uttrykket. */
+export const STATUS_OPEN_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0) | (fsConstants.O_NOFOLLOW ?? 0);
+
+/** Selve lesingen (kan henge på en uvanlig montering - fristen ligger i `readBackupStatusFile`). Kaster aldri. */
+async function readStatusOnce(path: string, maxBytes: number, deps: BackupStatusReadDeps): Promise<BackupStatusRead> {
+  // 1. lstat FØRST: bare en vanlig fil åpnes. Symlenke, FIFO, enhet, socket og mappe er uleselige uten at vi har rørt dem.
   try {
-    handle = await open(path, "r");
+    if (!(await (deps.lstat ?? lstat)(path)).isFile()) return { kind: "invalid", reason: "unreadable" };
   } catch (err) {
-    return (err as NodeJS.ErrnoException).code === "ENOENT" ? { kind: "missing" } : { kind: "invalid", reason: "unreadable" };
+    return missingOrUnreadable(err);
+  }
+  // 2. open uten å blokkere og uten å følge en symlenke (filen kan ha blitt byttet ut etter lstat).
+  let handle: FileHandle;
+  try {
+    handle = await (deps.open ?? open)(path, STATUS_OPEN_FLAGS);
+  } catch (err) {
+    return missingOrUnreadable(err);
   }
   try {
+    // 3. fstat på det ÅPNE håndtaket: det vi faktisk har åpnet må være en vanlig fil.
     const st = await handle.stat();
     if (!st.isFile()) return { kind: "invalid", reason: "unreadable" };
     if (st.size > maxBytes) return { kind: "invalid", reason: "too_large" };
@@ -173,6 +202,26 @@ export async function readBackupStatusFile(path: string, maxBytes = BACKUP_STATU
     return { kind: "invalid", reason: "unreadable" };
   } finally {
     await handle.close().catch(() => undefined);
+  }
+}
+
+/** Stier med en lesing som ikke er ferdig etter fristen: en ny lesing legger ikke et nytt kall (og en ny blokkert tråd) oppå den hengte. */
+const hungReads = new Map<string, Promise<unknown>>();
+
+/** Leser statusfilen: lstat før open, størrelsesgrense FØR parsing, kun vanlige filer, frist rundt det hele. Kaster aldri. */
+export async function readBackupStatusFile(path: string, maxBytes = BACKUP_STATUS_MAX_BYTES, deps: BackupStatusReadDeps = {}): Promise<BackupStatusRead> {
+  if (hungReads.has(path)) return { kind: "invalid", reason: "timeout" };
+  const work = readStatusOnce(path, maxBytes, deps).catch((): BackupStatusRead => ({ kind: "invalid", reason: "unreadable" }));
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const expired = new Promise<"expired">((resolve) => { timer = setTimeout(() => resolve("expired"), deps.timeoutMs ?? BACKUP_STATUS_READ_TIMEOUT_MS); });
+    const first = await Promise.race([work, expired]);
+    if (first !== "expired") return first;
+    hungReads.set(path, work);
+    void work.finally(() => { if (hungReads.get(path) === work) hungReads.delete(path); });
+    return { kind: "invalid", reason: "timeout" };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -202,7 +251,16 @@ const nb1 = (n: number): string => (Math.round(n * 10) / 10).toFixed(1).replace(
 const hoursSince = (now: Date, at: string): number => (now.getTime() - Date.parse(at)) / 3_600_000;
 const age = (hours: number): string => (hours >= 48 ? `${nb1(hours / 24)} d` : `${nb1(hours)} t`);
 const label = (c: BackupErrorCode | null): string => (c === null ? "ukjent årsak" : ERROR_LABELS[c]);
-const INVALID_REASON: Record<string, string> = { unreadable: "filen kan ikke leses", too_large: "filen er for stor", not_json: "ugyldig JSON", bad_schema: "ukjent eller ugyldig format" };
+const INVALID_REASON: Record<string, string> = { unreadable: "filen kan ikke leses", too_large: "filen er for stor", not_json: "ugyldig JSON", bad_schema: "ukjent eller ugyldig format", timeout: "lesingen tok for lang tid" };
+/** Klokketoleranse (NAS mot API): et tidspunkt lenger frem enn dette er et avvik, ikke «nå» (samme 5 minutter som backup-tikket bruker for sett). */
+const FUTURE_SKEW_HOURS = 5 / 60;
+/** Timer et tidspunkt ligger FREM i tid utover klokketoleransen, ellers null. Et slikt tidspunkt kan aldri bevise ferskhet (review F14). */
+const hoursAhead = (now: Date, at: string | null): number | null => {
+  if (at === null) return null;
+  const ahead = -hoursSince(now, at);
+  return ahead > FUTURE_SKEW_HOURS ? ahead : null;
+};
+const aheadText = (what: string, ahead: number): string => `${what} er datert ${age(ahead)} frem i tid (klokkeavvik mellom NAS og API, eller en endret fil) - alderen kan ikke bevises`;
 
 export function observeBackupStatus(read: BackupStatusRead, now: Date, thresholds: BackupThresholds = DEFAULT_BACKUP_THRESHOLDS): Observation {
   if (read.kind === "missing") {
@@ -216,22 +274,24 @@ export function observeBackupStatus(read: BackupStatusRead, now: Date, threshold
   const problems: Array<{ level: "DEGRADED" | "DOWN"; text: string }> = [];
   const good: string[] = [];
   const remarks: string[] = [];
-  // Klokkeavvik (fil datert i fremtiden) gir negative aldre: vis 0 og si det rett ut i stedet for «for -3,0 t siden».
-  const rawStatusAgeH = hoursSince(now, s.generated_at);
-  const statusAgeH = Math.max(0, rawStatusAgeH);
-  if (rawStatusAgeH < -0.1) remarks.push("statusfilen er datert i fremtiden (klokkeavvik mellom NAS og API?)");
-  const firstSeenH = s.first_seen_at === null ? 0 : hoursSince(now, s.first_seen_at);
+  // Review F14: et tidspunkt FREM i tid (utover klokketoleransen) er et avvik som sies rett ut og gir DEGRADED - det kan aldri telle som «0 t siden». Tidligere ble alderen klampet til 0,
+  // så en statusfil (eller et sett) datert i 2030 så ut som alltid fersk og ga OK med bare en merknad. Innenfor toleransen (cron-jitter, NTP-justering) klampes alderen fortsatt til 0.
+  const statusAhead = hoursAhead(now, s.generated_at);
+  const statusAgeH = statusAhead === null ? Math.max(0, hoursSince(now, s.generated_at)) : null;
+  const firstSeenH = s.first_seen_at === null ? 0 : Math.max(0, hoursSince(now, s.first_seen_at));
   const interval = s.backup.interval_hours;
 
   // Selve statusfilen: skrives av hvert tikk. Er den eldre enn 1,5 × intervallet, kjører tikket (cron/systemd) ikke.
-  if (statusAgeH > t.backupWarnFactor * interval) problems.push({ level: "DEGRADED", text: `statusfilen er ${age(statusAgeH)} gammel - backup-tikket (cron/systemd) ser ikke ut til å kjøre` });
+  if (statusAhead !== null) problems.push({ level: "DEGRADED", text: aheadText("statusfilen", statusAhead) });
+  else if (statusAgeH !== null && statusAgeH > t.backupWarnFactor * interval) problems.push({ level: "DEGRADED", text: `statusfilen er ${age(statusAgeH)} gammel - backup-tikket (cron/systemd) ser ikke ut til å kjøre` });
 
   // --- backup ---
   const b = s.backup;
-  const rawBackupAgeH = b.last_set_at === null ? null : hoursSince(now, b.last_set_at);
-  const backupAgeH = rawBackupAgeH === null ? null : Math.max(0, rawBackupAgeH);
-  if (rawBackupAgeH !== null && rawBackupAgeH < -0.1) remarks.push("siste sett er datert i fremtiden (klokkeavvik)");
-  if (backupAgeH === null) {
+  const setAhead = hoursAhead(now, b.last_set_at);
+  const backupAgeH = b.last_set_at === null || setAhead !== null ? null : Math.max(0, hoursSince(now, b.last_set_at));
+  if (setAhead !== null) {
+    problems.push({ level: "DEGRADED", text: aheadText("siste backup-sett", setAhead) });
+  } else if (backupAgeH === null) {
     problems.push({ level: b.consecutive_failures >= t.backupDownFailures ? "DOWN" : "DEGRADED", text: `ingen komplett backup finnes${b.consecutive_failures > 0 ? ` (${b.consecutive_failures} mislykkede forsøk: ${label(b.last_error_code)})` : " ennå"}` });
   } else if (backupAgeH > t.backupDownFactor * interval) {
     problems.push({ level: "DOWN", text: `siste backup er ${age(backupAgeH)} gammel (forventet hver ${age(interval)}) - backupen har sviktet${b.last_error_code ? `: ${label(b.last_error_code)}` : ""}` });
@@ -240,7 +300,7 @@ export function observeBackupStatus(read: BackupStatusRead, now: Date, threshold
   } else {
     good.push(`siste backup for ${age(backupAgeH)} siden (intervall ${age(interval)})`);
   }
-  if (b.consecutive_failures > 0 && backupAgeH !== null) {
+  if (b.consecutive_failures > 0 && b.last_set_at !== null) {
     problems.push({ level: b.consecutive_failures >= t.backupDownFailures ? "DOWN" : "DEGRADED", text: `siste backup-forsøk feilet (${b.consecutive_failures} på rad: ${label(b.last_error_code)})` });
   }
 
@@ -251,8 +311,10 @@ export function observeBackupStatus(read: BackupStatusRead, now: Date, threshold
   else if (o.state === "failed") problems.push({ level: "DEGRADED", text: `off-site-kopi feilet (${o.consecutive_failures} på rad: ${label(o.last_error_code)})` });
   else if (o.last_success_at === null) remarks.push("off-site er markert OK uten tidspunkt");
   else {
-    const offsiteAgeH = hoursSince(now, o.last_success_at);
-    if (offsiteAgeH > t.offsiteWarnFactor * interval) problems.push({ level: "DEGRADED", text: `siste vellykkede off-site-kopi er ${age(offsiteAgeH)} gammel` });
+    const offsiteAhead = hoursAhead(now, o.last_success_at);
+    const offsiteAgeH = Math.max(0, hoursSince(now, o.last_success_at));
+    if (offsiteAhead !== null) problems.push({ level: "DEGRADED", text: aheadText("siste off-site-kopi", offsiteAhead) });
+    else if (offsiteAgeH > t.offsiteWarnFactor * interval) problems.push({ level: "DEGRADED", text: `siste vellykkede off-site-kopi er ${age(offsiteAgeH)} gammel` });
     else good.push(`off-site OK (${o.adapter ?? "ukjent adapter"}, ${age(offsiteAgeH)} siden${o.verification === "size_only" ? ", kun størrelse verifisert" : ""})`);
   }
 
@@ -262,9 +324,11 @@ export function observeBackupStatus(read: BackupStatusRead, now: Date, threshold
   const graceExceeded = firstSeenH > t.verifyWarnFactor * verifyIntervalH;
   if (v.state === "failed") problems.push({ level: "DEGRADED", text: `siste restore-verifisering FEILET (${label(v.last_error_code)}) - backupen er ikke bevist gjenopprettbar` });
   else if (v.state === "ok" && v.last_success_at !== null) {
-    const verifyAgeH = hoursSince(now, v.last_success_at);
+    const verifyAhead = hoursAhead(now, v.last_success_at);
+    const verifyAgeH = Math.max(0, hoursSince(now, v.last_success_at));
     const detail = `${v.tables ?? "?"} tabeller, ${v.rows ?? "?"} rader${v.duration_s === null ? "" : `, ${v.duration_s} s`}${v.reported_by === "external_verifier" ? ", meldt av ekstern verifiserer" : ""}`;
-    if (verifyAgeH > t.verifyWarnFactor * verifyIntervalH) problems.push({ level: "DEGRADED", text: `siste vellykkede restore-verifisering er ${age(verifyAgeH)} gammel (${detail})` });
+    if (verifyAhead !== null) problems.push({ level: "DEGRADED", text: aheadText("siste restore-verifisering", verifyAhead) });
+    else if (verifyAgeH > t.verifyWarnFactor * verifyIntervalH) problems.push({ level: "DEGRADED", text: `siste vellykkede restore-verifisering er ${age(verifyAgeH)} gammel (${detail})` });
     else good.push(`restore verifisert for ${age(verifyAgeH)} siden (${detail})`);
   } else if (graceExceeded) problems.push({ level: "DEGRADED", text: `restore er ikke bevist: ingen vellykket restore-verifisering på ${age(firstSeenH)}` });
   else remarks.push("restore er ikke verifisert ennå");
@@ -281,15 +345,16 @@ export function observeBackupStatus(read: BackupStatusRead, now: Date, threshold
     backup_consecutive_failures: b.consecutive_failures,
     offsite_state: o.state,
     restore_verify_state: v.state,
-    restore_verify_age_days: v.last_success_at === null ? null : Math.round((hoursSince(now, v.last_success_at) / 24) * 10) / 10,
+    restore_verify_age_days: v.last_success_at === null || hoursAhead(now, v.last_success_at) !== null ? null : Math.round((Math.max(0, hoursSince(now, v.last_success_at)) / 24) * 10) / 10,
     restore_verify_duration_s: v.duration_s,
     heartbeat_configured: hb.configured,
-    status_age_hours: Math.round(statusAgeH * 10) / 10
+    status_age_hours: statusAgeH === null ? null : Math.round(statusAgeH * 10) / 10
   };
   const level = problems.some((p) => p.level === "DOWN") ? "DOWN" : problems.length > 0 ? "DEGRADED" : "OK";
   const tail = remarks.length > 0 ? ` [${remarks.join("; ")}]` : "";
   const detail = level === "OK" ? `${good.join("; ")}.${tail}` : `${problems.map((p) => p.text).join(" | ")}.${good.length > 0 ? ` I orden: ${good.join("; ")}.` : ""}${tail}`;
-  return { status: level, source: SOURCE, observed_at: s.generated_at, detail, data };
+  // `observed_at` er når VI leste statusen: en fil som påstår et tidspunkt frem i tid får ikke dateringen sin videre til selvdiagnosen.
+  return { status: level, source: SOURCE, observed_at: statusAhead === null ? s.generated_at : now.toISOString(), detail, data };
 }
 
 /**
