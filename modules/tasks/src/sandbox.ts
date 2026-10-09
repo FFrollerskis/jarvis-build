@@ -17,7 +17,43 @@ export interface ExecResult {
  */
 export interface SandboxRunner {
   readonly name: string;
-  create(jobEnv?: Record<string, string>): Promise<Sandbox>;
+  /**
+   * WP-C1 (D-32 / Q-45a): `true` når runneren selv eier git-transporten på VERTSSIDEN (`gitCheckout`/`gitPublish` på `Sandbox`).
+   * `createCodingHandler` henter da ALDRI noe git-token og sender aldri credential-env til sandboxen: credentialen bor kun hos
+   * runner-tjenesten (`ops/job-runner/`) og går aldri inn i worker-prosessen eller jobb-containeren. Utelatt/false = uendret flyt.
+   */
+  readonly hostGit?: boolean;
+  create(jobEnv?: Record<string, string>, meta?: SandboxMeta): Promise<Sandbox>;
+}
+
+/** WP-C1: sporbarhetsmerking (CLAUDE.md regel 4: alle handlinger merkes) som en vertsside runner setter på containeren og i loggen. Øvrige runnere ignorerer den. */
+export interface SandboxMeta {
+  task_id?: string;
+  tenant_id?: string;
+}
+
+/** WP-C1: be den vertsside runneren om en fersk, credential-fri arbeidskopi (klonet på verten, montert som `/work` i containeren). */
+export interface HostGitCheckoutRequest {
+  /** Kanonisk `https://github.com/<owner>/<repo>.git`; allerede validert mot repo-allowlisten av `coding.ts`. Runneren validerer på nytt mot SIN egen allowlist. */
+  repoUrl: string;
+  baseBranch?: string;
+}
+export interface HostGitCheckoutResult {
+  /** Commit-SHA arbeidskopien startet på (basen `publish` måler mot). */
+  headSha: string;
+  baseBranch: string;
+}
+/** WP-C1: be runneren publisere jobb-branchen (verifisert git-bundle -> ferskt bare-repo -> push med runnerens egen credential). */
+export interface HostGitPublishRequest {
+  branch: string;
+}
+export interface HostGitPublishResult {
+  branch: string;
+  /** SHA runneren faktisk verifiserte og pushet (autoritativ - ikke det agenten påstår). */
+  commitSha: string;
+  baseSha: string;
+  commits: number;
+  filesChanged: number;
 }
 
 export interface Sandbox {
@@ -33,6 +69,10 @@ export interface Sandbox {
   /** D-394: kan være asynkron (kjører barneprosessen uten å blokkere event-loopen); synkrone testdobler støttes fortsatt. */
   exec(command: string, args: string[], timeoutMs?: number, extraEnv?: Record<string, string>): ExecResult | Promise<ExecResult>;
   dispose(): Promise<void>;
+  /** WP-C1: KUN på runnere med `hostGit: true`. Klone skjer på verten (aldri i sandboxen), uten at noen credential når worker eller container. */
+  gitCheckout?(request: HostGitCheckoutRequest): Promise<HostGitCheckoutResult>;
+  /** WP-C1: KUN på runnere med `hostGit: true`. Se `HostGitPublishRequest`. */
+  gitPublish?(request: HostGitPublishRequest): Promise<HostGitPublishResult>;
 }
 
 export class ProcessSandboxRunner implements SandboxRunner {
