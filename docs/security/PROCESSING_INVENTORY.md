@@ -91,9 +91,9 @@ uten at det er gjort, eller (4) en DPIA-henvisning peker på en fil som ikke fin
 - **Formål:** Hendelser, diagnoser og infrastrukturkjøringer
 - **Memory space/tenant:** system (alle tabeller tenant-skopet med FORCE RLS unntatt dokumenterte globale: `scheduler_state`, `capabilities`, `evolution_change_ledger`, `self_modification_requests`, `github_rate_limit_state`, `telegram_poll_state`)
 - **Datakategori:** Tekniske data (logger, diagnoser); kan inneholde stedsnavn/IP
-- **Retensjon:** Følger hendelsen; ingen automatisk sletting ennå.
+- **Retensjon:** Følger hendelsen; ingen automatisk sletting ennå. Overgangshistorikken (`incident_transitions`, WP-E1: hvem/når/hvorfor per statusendring, kun sanert kort årsak og pekere) er append-only og forsvinner kun sammen med hendelsen (erasure-kaskade). Produsent-helsen (`incident_producer_runs`) er driftsstatus per tenant uten innhold.
 - **Eksterne mottakere:** Sentry/Grafana m.fl. kun hvis koblet
-- **Tabeller:** `incident_diagnoses`, `incident_diagnosis_evidence`, `incident_evidence`, `incident_repair_tasks`, `incidents`, `infra_executions`, `infra_recovery_actions`
+- **Tabeller:** `incident_diagnoses`, `incident_diagnosis_evidence`, `incident_evidence`, `incident_producer_runs`, `incident_repair_tasks`, `incident_transitions`, `incidents`, `infra_executions`, `infra_recovery_actions`
 
 ### Situasjonsmotor og kontroll
 

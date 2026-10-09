@@ -99,6 +99,9 @@ const BASELINE_REASON: Record<string, string> = {
   session_grants: "CASCADED",
   // Q-44 (D-435, migrasjon 081): koblingstabellen fikk tenant_id; ON DELETE CASCADE fra incident_diagnoses (komposittnøkkel) fjerner lenkene når diagnosene slettes.
   incident_diagnosis_evidence: "CASCADED",
+  // WP-E1 (JARVIS-068, migrasjon 096): varig overgangshistorikk. ON DELETE CASCADE fra incidents (komposittnøkkel) fjerner den når hendelsen slettes; en BEFORE DELETE-vakt
+  // avviser direkte sletting så lenge hendelsen finnes (append-only), så erasure går via hendelsen - aldri ved å skrive om historikken.
+  incident_transitions: "CASCADED",
   // CRM_CORE: Business Graph-kjernen (companies/leads/opportunities/...) - PRE-EKSISTERENDE gap fra UA-3 P0 (se plan.ts-kommentar, D-66)
   business_activities: "CRM_CORE",
   business_companies: "CRM_CORE",
@@ -108,6 +111,7 @@ const BASELINE_REASON: Record<string, string> = {
   business_scores: "CRM_CORE",
   // OPERATIONAL: oppgave-/infra-/hendelsestilstand uten egen person-/space-nøkkel ennå
   deployments: "OPERATIONAL",
+  incident_producer_runs: "OPERATIONAL",
   incident_repair_tasks: "OPERATIONAL",
   infra_executions: "OPERATIONAL",
   infra_recovery_actions: "OPERATIONAL",
