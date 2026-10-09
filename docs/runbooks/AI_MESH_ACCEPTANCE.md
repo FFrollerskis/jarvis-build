@@ -154,6 +154,9 @@ sudo docker exec -it $(sudo docker ps -qf name=postgres) psql -U postgres -d jar
 Forventet: én rad per live leverandør med `task_id` som ender på `-probe`, og under `-fallback` feilede rader for den sperrede leverandøren pluss **én** vellykket rad med `fallback = t` for reserven.
 **Ikke** med i cost_events: `--tools`/`--parallel` (målinger rett mot adapteren, ikke trafikk - kostnaden står i evidensen under `cost`/`tools`/`parallel`).
 
+**Bivirkning du bør kjenne til:** radene er vanlige modellrader (`purpose = QUICK_CLASSIFICATION`, `task_id` starter med `smoke-`), så de teller også i SLO-serien «model:BACKGROUND» (suksessrate og latens), i 30-dagers run-rate og i
+kostnadstallene (noen få øre). Den sperrede leverandørens to feilede forsøk kan gi et kortvarig utslag i SLO-suksessraten når trafikken ellers er lav. Leser du `cost_events` direkte og vil se bort fra røyktesten, bruk `task_id NOT LIKE 'smoke-%'`.
+
 ## 6. Hvis noe feiler
 
 | Utfall | Betyr | Gjør |
@@ -175,6 +178,10 @@ Forventet: én rad per live leverandør med `task_id` som ender på `-probe`, og
 Adapterene for Kimi (OpenAI-kompatibelt `tools`/`tool_calls`, SSE-streaming) og Hermes (modellens eget prompt-protokoll med `<tool_call>`-tagger; hosted `tools` er udokumentert, så adapteren sender aldri `tools`)
 er bevist mot fake-servere i testene. Registeret påstår `tool_calling` for dem **kun** fordi testene beviser det - **mot ekte Moonshot/Nous er det ikke verifisert før du har kjørt `--tools`.**
 Testverktøyet `smoke_get_time` utfører ingenting; skriptet leverer selv et falskt resultat tilbake i «rundtur»-steget.
+
+**Rekkefølge (viktig):** AUTO-ruting velger på registeret, og registeret påstår nå `tool_calling` for Kimi og Hermes. Er nøkkelen satt, kan en bakgrunnsjobb med verktøy (`tools: true`, uten `paid_models_allowed=false`) derfor velge dem
+allerede før du har kjørt `--tools` (begge er registrert som rimelige skymodeller med høy kvalitetsklasse og kan vinne AUTO-poengene). Kjør `--providers kimi,hermes --tools` FØR du legger nøklene inn for bakgrunnsjobber, eller la dem stå tomme til beviset foreligger. Chattens verktøyturer
+er upåvirket: de går til den faste verktøyruten (`JARVIS_TOOL_TURN_MODEL`, D-431) eller den lokale kjeden, med mindre du selv har satt Kimi/Hermes inn i `JARVIS_CHAT_CANDIDATES`.
 
 | Resultat per leverandør | Betyr |
 |---|---|
