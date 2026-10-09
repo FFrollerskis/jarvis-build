@@ -9,6 +9,7 @@ export * from "./pricing.ts";
 export * from "./override-parser.ts";
 export * from "./decision-importance.ts";
 export * from "./council.ts";
+export * from "./council-proposal.ts";
 export * from "./council-limiter.ts";
 export * from "./collaboration.ts";
 export * from "./specialist-delegation.ts";
