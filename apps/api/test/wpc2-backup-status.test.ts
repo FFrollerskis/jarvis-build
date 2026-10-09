@@ -137,6 +137,15 @@ describe("WP-C2 backup-leser: tolkning av statusen (alder over terskel = ærlig 
     expect(o.detail).toContain("statusfilen er 2,1 d gammel - backup-tikket (cron/systemd) ser ikke ut til å kjøre");
   });
 
+  it("klokkeavvik (fil/sett datert i fremtiden): aldri negative aldre eller en falsk «frisk» uten forklaring - alderen vises som 0 og avviket nevnes", () => {
+    const o = observe(exported(() => undefined, { name: "jarvis-backup-20261009T050000Z", createdAt: iso(NOW.getTime() + 3 * H), sizeBytes: 1 }, new Date(NOW.getTime() + 5 * H)));
+    expect(o.detail).toContain("siste backup for 0,0 t siden");
+    expect(o.detail).not.toMatch(/-\d/);
+    expect(o.detail).toContain("siste sett er datert i fremtiden (klokkeavvik)");
+    expect(o.detail).toContain("statusfilen er datert i fremtiden");
+    expect(o.data).toMatchObject({ backup_age_hours: 0, status_age_hours: 0 });
+  });
+
   it("manglende eller ulesbar fil = UNKNOWN (aldri «frisk»), med forklaring", () => {
     expect(observeBackupStatus({ kind: "missing" }, NOW)).toMatchObject({ status: "UNKNOWN", observed_at: null });
     expect(observeBackupStatus({ kind: "missing" }, NOW).detail).toContain("finnes ikke");

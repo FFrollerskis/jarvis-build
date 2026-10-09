@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
 import {
-  chmodSync, closeSync, constants as fsConstants, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync,
+  chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync,
   renameSync, rmSync, statSync, writeFileSync
 } from "node:fs";
+import { copyFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, parse, resolve, sep } from "node:path";
 import { sha256File } from "./backup.mjs";
@@ -505,7 +506,7 @@ class LocalSink {
     try {
       for (const f of prepared.files) {
         const dest = join(tmp, f.name);
-        copyFileSync(join(prepared.dir, f.name), dest, fsConstants.COPYFILE_EXCL);
+        await copyFile(join(prepared.dir, f.name), dest, fsConstants.COPYFILE_EXCL); // asynkront: en kopi på flere GB skal ikke fryse event-løkken (lås-hjerteslag, signaler)
         chmodSync(dest, 0o600);
       }
       const problems = await this.#hashAll(tmp, prepared);
@@ -535,7 +536,7 @@ class LocalSink {
     if (!existsSync(dir)) throw new OffsiteError("offsite_failed", "settet finnes ikke i off-site-målet");
     mkdirSync(destDir, { recursive: true, mode: 0o700 });
     for (const n of listAgeFiles(dir)) {
-      copyFileSync(join(dir, n), join(destDir, n), fsConstants.COPYFILE_EXCL);
+      await copyFile(join(dir, n), join(destDir, n), fsConstants.COPYFILE_EXCL);
       chmodSync(join(destDir, n), 0o600);
     }
     return listAgeFiles(destDir);

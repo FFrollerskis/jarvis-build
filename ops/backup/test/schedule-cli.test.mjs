@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
@@ -146,12 +146,20 @@ describe("WP-C2 schedule.mjs: ekte kjøring med lokal off-site-adapter (ekte pro
     expect(missing.json.newest_in_remote).toBe(false);
   });
 
-  it("to off-site-adaptere samtidig er en konfig-feil (exit 1) - eieren velger ÉN", () => {
-    const { out, env } = setup();
+  it("to off-site-adaptere samtidig er en konfig-feil som rapporteres høylytt (exit 5, status `offsite_config_invalid`) - eieren velger ÉN, og ingenting sendes", async () => {
+    const { out, usb, set, prepare, env } = setup();
+    await prepare();
     const r = run(["tick", "--out", out, "--roles", "offsite"], { ...env, JARVIS_BACKUP_OFFSITE_RCLONE_REMOTE: "b2:x" });
-    expect(r.status).toBe(1);
-    expect(r.stderr).toContain("kun ÉN off-site-adapter");
-    expect(existsSync(join(out, "backup-status.json"))).toBe(false);
+    expect(r.status).toBe(5);
+    expect(r.json).toMatchObject({ outcome: "failed", failed: ["offsite"] });
+    const st = JSON.parse(readFileSync(join(out, "backup-status.json"), "utf8"));
+    expect(st.offsite).toMatchObject({ state: "failed", last_error_code: "offsite_config_invalid" });
+    expect(st.offsite.last_error).toContain("kun ÉN off-site-adapter");
+    expect(readdirSync(usb).filter((n) => n.startsWith("jarvis-backup-"))).toEqual([]);
+    expect(set.name).toBeTruthy();
+    const check = run(["offsite-check", "--out", out], { ...env, JARVIS_BACKUP_OFFSITE_RCLONE_REMOTE: "b2:x" });
+    expect(check.status).toBe(5);
+    expect(check.json).toMatchObject({ configured: true, ok: false, error_code: "offsite_config_invalid" });
   });
 
   it("en lokal sti uten markørfil (avmontert disk) gir feilet off-site (exit 5), ikke en falsk suksess", async () => {

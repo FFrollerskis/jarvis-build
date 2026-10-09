@@ -153,6 +153,10 @@ function statusCommand(argv, env, now) {
 async function offsiteCheckCommand(argv, env, injected) {
   const flags = parseArgs(argv, SPEC["offsite-check"]);
   const config = loadScheduleConfig({ out: flags.out, "state-dir": flags["state-dir"], roles: "offsite" }, env);
+  if (config.offsiteError !== null) {
+    print({ configured: true, ok: false, error_code: "offsite_config_invalid", error: makeRedactor(env)(config.offsiteError, 300) });
+    return EXIT.OFFSITE_FAILED;
+  }
   if (config.offsite === null) {
     print({ configured: false, ok: false, note: "ingen off-site-adapter er satt opp (JARVIS_BACKUP_OFFSITE_*) - BLOCKED_EXTERNAL: mål må velges av eieren" });
     return EXIT.OFFSITE_NOT_CONFIGURED;

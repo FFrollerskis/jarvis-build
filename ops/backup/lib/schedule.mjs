@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { DUE_TOLERANCE_MS, assertRunnable } from "./config.mjs";
 import { createHeartbeat } from "./heartbeat.mjs";
 import { acquireLock } from "./lock.mjs";
-import { SET_NAME_RE, createOffsiteSink, materializeManifest, prepareSetForOffsite } from "./offsite.mjs";
+import { OffsiteError, SET_NAME_RE, createOffsiteSink, materializeManifest, prepareSetForOffsite } from "./offsite.mjs";
 import { runProcess } from "./proc.mjs";
 import { makeRedactor } from "./redact.mjs";
 import {
@@ -47,8 +47,14 @@ export function retryDelayMs(failures, baseMs) {
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 // Sett på disk
 // ---------------------------------------------------------------------------------------------------------------------------------------------
-/** Komplette sett (gyldig manifest.json), eldste først. Et korrupt manifest får ikke lov til å velte hele tikket. */
-export function listCompleteSets(outDir) {
+/** Klokkeavvik vi tåler (cron-jitter, NTP-justering) før noe regnes som «datert i fremtiden». */
+const FUTURE_SKEW_MS = 5 * 60_000;
+
+/**
+ * Komplette sett (gyldig manifest.json), eldste først. Et korrupt manifest får ikke lov til å velte hele tikket. Med `nowMs` hoppes sett som er datert i FREMTIDEN over
+ * (klokkeavvik ved backup-tidspunktet): ellers ville et sett datert i 2030 stå som «nyeste» og enten blokkere alle nye backuper - eller utløse en ny backup hvert tikk.
+ */
+export function listCompleteSets(outDir, { nowMs } = {}) {
   if (!existsSync(outDir)) return [];
   const sets = [];
   for (const name of readdirSync(outDir).filter((n) => SET_NAME_RE.test(n)).sort()) {
@@ -57,6 +63,7 @@ export function listCompleteSets(outDir) {
       const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
       const createdMs = Date.parse(manifest?.created_at_utc);
       if (!Number.isFinite(createdMs)) continue;
+      if (nowMs !== undefined && createdMs > nowMs + FUTURE_SKEW_MS) continue;
       const sizeBytes = Array.isArray(manifest.databases) ? manifest.databases.reduce((sum, d) => sum + (Number.isInteger(d?.size_bytes) ? d.size_bytes : 0), 0) : 0;
       sets.push({ name, dir, manifest, createdMs, createdAt: new Date(createdMs).toISOString(), sizeBytes });
     } catch {
@@ -64,6 +71,29 @@ export function listCompleteSets(outDir) {
     }
   }
   return sets;
+}
+
+/** Navn på komplette sett som er datert i fremtiden (klokkeavvik) - logges som advarsel; de teller ikke som «nyeste». */
+export function findFutureSets(outDir, nowMs) {
+  return listCompleteSets(outDir).filter((s) => s.createdMs > nowMs + FUTURE_SKEW_MS).map((s) => s.name);
+}
+
+/** Tidsstempler i statusfilen som ligger i fremtiden (klokkeavvik/redigert fil) forkastes: ellers ville «sist verifisert i 2030» holde en fornyelse borte i årevis. */
+export function dropFutureTimestamps(status, nowMs) {
+  const dropped = [];
+  const sections = { backup: status.backup, retention: status.retention, offsite: status.offsite, restore_verify: status.restore_verify, heartbeat: status.heartbeat };
+  for (const [section, obj] of Object.entries(sections)) {
+    for (const [key, value] of Object.entries(obj)) {
+      if (typeof value !== "string" || !(key.endsWith("_at") || key === "retry_after")) continue;
+      const t = Date.parse(value);
+      const limit = key === "retry_after" ? nowMs + 24 * 3_600_000 : nowMs + FUTURE_SKEW_MS;
+      if (Number.isFinite(t) && t > limit) {
+        obj[key] = null;
+        dropped.push(`${section}.${key}`);
+      }
+    }
+  }
+  return dropped;
 }
 
 /** Settkataloger UTEN manifest (backup som døde midt i) og eldre enn terskelen: rester som ellers fyller disken stille. Manifest = ferdig, så ferdige sett røres ikke. */
@@ -97,13 +127,16 @@ export function backupDecision({ roleEnabled, force, newestMs, status, nowMs, in
   if (!roleEnabled) return { due: false, reason: "role_disabled" };
   if (force) return { due: true, reason: "forced" };
   if (newestMs === null) return gate(status.backup.retry_after, nowMs, "no_backup_exists");
+  if (newestMs > nowMs + FUTURE_SKEW_MS) return gate(status.backup.retry_after, nowMs, "newest_set_dated_in_future"); // klokkeavvik: et fremtidsdatert sett er ikke «ferskt»
   if (nowMs - newestMs < intervalMs - toleranceMs) return { due: false, reason: "fresh" };
   return gate(status.backup.retry_after, nowMs, "interval_elapsed");
 }
 
 /** Det NYESTE settet sendes alltid (idempotent); gjenta bare når det er nytt, forrige forsøk feilet, eller det er tid for en ny kontroll av kopien. */
-export function offsiteDecision({ roleEnabled, sinkPresent, force, newestName, status, nowMs, reverifyMs, toleranceMs = DUE_TOLERANCE_MS }) {
+export function offsiteDecision({ roleEnabled, sinkPresent, force, newestName, status, nowMs, reverifyMs, configError = false, toleranceMs = DUE_TOLERANCE_MS }) {
   if (!roleEnabled) return { due: false, reason: "role_disabled" };
+  // En ugyldig off-site-konfig rapporteres høylytt (med backoff), men stopper aldri selve backupen.
+  if (configError) return gate(status.offsite.retry_after, nowMs, "config_invalid");
   if (!sinkPresent) return { due: false, reason: "not_configured" };
   if (newestName === null) return { due: false, reason: "no_set" };
   if (force) return { due: true, reason: "forced" };
@@ -114,8 +147,9 @@ export function offsiteDecision({ roleEnabled, sinkPresent, force, newestName, s
   return { due: false, reason: "in_sync" };
 }
 
-export function verifyDecision({ roleEnabled, identityConfigured, force, hasSet, status, nowMs, intervalMs, toleranceMs = DUE_TOLERANCE_MS }) {
+export function verifyDecision({ roleEnabled, identityConfigured, force, hasSet, status, nowMs, intervalMs, configError = false, toleranceMs = DUE_TOLERANCE_MS }) {
   if (!roleEnabled) return { due: false, reason: "role_disabled" };
+  if (configError) return gate(status.restore_verify.retry_after, nowMs, "config_invalid");
   if (!identityConfigured) return { due: false, reason: "not_configured" };
   if (!hasSet) return { due: false, reason: "no_set" };
   if (force) return { due: true, reason: "forced" };
@@ -159,6 +193,8 @@ export function parseJsonObject(text) {
 }
 
 const HERE = (rel) => fileURLToPath(new URL(rel, import.meta.url));
+/** Git Bash på Windows forstår `C:/…` men ikke alltid `C:\\…` som argument (jf. D-372): bruk skråstrek når vi kaller bash. IKKE verifisert på Windows i dette miljøet. */
+const forBash = (p) => (process.platform === "win32" ? p.replace(/\\/g, "/") : p);
 
 /** Backup via den eksisterende CLI-en i en egen prosess: kan drepes ved tidsavbrudd (hele prosessgruppen), og er nøyaktig samme vei som `nas-backup.sh`. */
 export function defaultBackup(config, env, redact) {
@@ -187,7 +223,7 @@ export function defaultVerify(config, env) {
       const args = [HERE("../jarvis-backup.mjs"), "verify", "--set", setDir, "--identity", identityFile, "--scratch-host", s.host, "--scratch-port", String(s.port), "--scratch-user", s.user];
       res = await runProcess(process.execPath, args, { env: { ...env }, timeoutMs: config.verify.timeoutMs });
     } else {
-      res = await runProcess("bash", [HERE("../nas-restore-verify.sh"), setDir, identityFile], { env: { ...env }, timeoutMs: config.verify.timeoutMs });
+      res = await runProcess("bash", [forBash(HERE("../nas-restore-verify.sh")), forBash(setDir), forBash(identityFile)], { env: { ...env }, timeoutMs: config.verify.timeoutMs });
     }
     if (res.timedOut) throw new ScheduleError("verify_timeout", `restore-verifisering brukte mer enn ${Math.round(config.verify.timeoutMs / 60_000)} min og ble stoppet`);
     const report = parseJsonObject(res.stdout);
@@ -245,14 +281,17 @@ export async function runTick(config, deps, env = process.env) {
   const verifyEnabled = config.roles.has("verify") && config.verify.identityFile !== null;
   const sinkPresent = deps.sink !== null && deps.sink !== undefined;
 
-  const readSets = () => listCompleteSets(config.out);
+  const readSets = () => listCompleteSets(config.out, { nowMs: now().getTime() });
   const decide = (status, sets) => {
     const newest = sets.at(-1) ?? null;
     return {
       backup: backupDecision({ roleEnabled: config.roles.has("backup"), force: config.force.backup, newestMs: newest?.createdMs ?? null, status, nowMs: startedMs, intervalMs: config.intervalMs }),
-      offsite: offsiteDecision({ roleEnabled: config.roles.has("offsite"), sinkPresent, force: config.force.offsite, newestName: newest?.name ?? null, status, nowMs: startedMs, reverifyMs: config.verify.intervalMs }),
+      offsite: offsiteDecision({
+        roleEnabled: config.roles.has("offsite"), sinkPresent, force: config.force.offsite, newestName: newest?.name ?? null, status, nowMs: startedMs, reverifyMs: config.verify.intervalMs,
+        configError: config.offsiteError !== null
+      }),
       verify: verifyDecision({
-        roleEnabled: config.roles.has("verify"), identityConfigured: verifyEnabled, force: config.force.verify,
+        roleEnabled: config.roles.has("verify"), identityConfigured: verifyEnabled, force: config.force.verify, configError: config.verifyError !== null,
         // Fra off-site hentes settet først ved kjøring; da trengs ikke et lokalt sett.
         hasSet: newest !== null || config.verify.source === "offsite",
         status, nowMs: startedMs, intervalMs: config.verify.intervalMs
@@ -286,6 +325,9 @@ export async function runTick(config, deps, env = process.env) {
     const read = readStatusFile(config.statusFile);
     const status = read.status;
     if (read.problem !== null) log("warn", "status_file_unusable", { problem: read.problem, note: "starter på nytt fra settene på disk" });
+    const dropped = dropFutureTimestamps(status, startedMs);
+    if (dropped.length > 0) log("warn", "status_timestamps_in_future_dropped", { fields: dropped, note: "klokkeavvik? tidsstempler fremover i tid ble forkastet" });
+    for (const name of findFutureSets(config.out, startedMs)) log("warn", "set_dated_in_future", { set: name, note: "teller ikke som nyeste sett (klokkeavvik ved backup-tidspunktet?)" });
     status.created_at ??= iso(t0);
     status.last_tick_at = iso(t0);
     let storeFailed = false;
@@ -319,7 +361,8 @@ export async function runTick(config, deps, env = process.env) {
     // Baseline for tilstandene som følger av konfigurasjonen (aldri en gammel «ok» for noe som er skrudd av).
     status.heartbeat.configured = heartbeat.configured;
     if (!sinkPresent) {
-      status.offsite.state = "not_configured";
+      // En ugyldig off-site-konfig er IKKE «ikke satt opp»: den feilede tilstanden skal stå i hele backoff-vinduet.
+      if (config.offsiteError === null) status.offsite.state = "not_configured";
       status.offsite.adapter = null;
     } else {
       status.offsite.adapter = deps.sink.adapter;
@@ -382,7 +425,8 @@ export async function runTick(config, deps, env = process.env) {
     // --- 2. off-site ---------------------------------------------------------------------------------------------------------------------------
     // Beslutningen tas på nytt: et nytt sett fra steg 1 gjør off-site forfalt i SAMME tikk.
     const offsiteNow = offsiteDecision({
-      roleEnabled: config.roles.has("offsite"), sinkPresent, force: config.force.offsite, newestName: readSets().at(-1)?.name ?? null, status, nowMs: now().getTime(), reverifyMs: config.verify.intervalMs
+      roleEnabled: config.roles.has("offsite"), sinkPresent, force: config.force.offsite, newestName: readSets().at(-1)?.name ?? null, status, nowMs: now().getTime(), reverifyMs: config.verify.intervalMs,
+      configError: config.offsiteError !== null
     });
     decisions.offsite = offsiteNow;
     if (offsiteNow.due) {
@@ -395,7 +439,7 @@ export async function runTick(config, deps, env = process.env) {
     // --- 3. restore-verifisering ---------------------------------------------------------------------------------------------------------------
     const verifyNow = verifyDecision({
       roleEnabled: config.roles.has("verify"), identityConfigured: verifyEnabled, force: config.force.verify, hasSet: readSets().length > 0 || config.verify.source === "offsite",
-      status, nowMs: now().getTime(), intervalMs: config.verify.intervalMs
+      status, nowMs: now().getTime(), intervalMs: config.verify.intervalMs, configError: config.verifyError !== null
     });
     decisions.verify = verifyNow;
     if (verifyNow.due) {
@@ -455,14 +499,15 @@ export async function runTick(config, deps, env = process.env) {
       const sets3 = readSets();
       const newest3 = sets3.at(-1);
       try {
+        if (config.offsiteError !== null) throw new OffsiteError("offsite_config_invalid", config.offsiteError);
         // Oversikten brukes bare til etterfylling av eldre sett; feiler den, sendes det nyeste settet likevel (og feiler pushen, rapporteres DEN).
-        let remote = new Set();
+        let remote = null;
         try {
           remote = new Set(await deps.sink.list());
         } catch (err) {
           log("warn", "offsite_list_failed", { code: err?.code ?? "offsite_failed", error: deps.redact(err?.message ?? "") });
         }
-        const older = remote.size === 0 ? [] : sets3.slice(0, -1).reverse().filter((s) => !remote.has(s.name)).slice(0, MAX_OFFSITE_SETS_PER_TICK - 1);
+        const older = remote === null ? [] : sets3.slice(0, -1).reverse().filter((s) => !remote.has(s.name)).slice(0, MAX_OFFSITE_SETS_PER_TICK - 1);
         log("info", "offsite_started", { set: newest3.name, adapter: deps.sink.adapter, backfill: older.length });
         const prepared = await deps.prepareSet(newest3.dir, { recipient: deps.recipient });
         const pushed = await deps.sink.push(prepared);
@@ -507,8 +552,12 @@ export async function runTick(config, deps, env = process.env) {
       let fetchSeconds = null;
       let setName = null;
       try {
+        if (config.verifyError !== null) throw new ScheduleError("verify_config_invalid", config.verifyError);
+        if (config.verify.identityFile === null || !existsSync(config.verify.identityFile)) throw new ScheduleError("verify_config_invalid", "JARVIS_BACKUP_VERIFY_IDENTITY_FILE er ikke satt eller peker på en fil som ikke finnes");
+        if (config.verify.scratch !== null && (env.JARVIS_SCRATCH_DB_PASSWORD ?? "") === "") throw new ScheduleError("verify_config_invalid", "JARVIS_SCRATCH_DB_PASSWORD mangler (kreves med JARVIS_BACKUP_VERIFY_SCRATCH_HOST)");
         let setDir;
         if (config.verify.source === "offsite") {
+          if (!sinkPresent) throw new ScheduleError("verify_config_invalid", "kilde off-site krever en off-site-adapter");
           const names = await deps.sink.list();
           const name = names.at(-1);
           if (name === undefined) throw new ScheduleError("verify_failed", "ingen sett i off-site-målet å verifisere");

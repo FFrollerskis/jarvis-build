@@ -216,7 +216,10 @@ export function observeBackupStatus(read: BackupStatusRead, now: Date, threshold
   const problems: Array<{ level: "DEGRADED" | "DOWN"; text: string }> = [];
   const good: string[] = [];
   const remarks: string[] = [];
-  const statusAgeH = hoursSince(now, s.generated_at);
+  // Klokkeavvik (fil datert i fremtiden) gir negative aldre: vis 0 og si det rett ut i stedet for «for -3,0 t siden».
+  const rawStatusAgeH = hoursSince(now, s.generated_at);
+  const statusAgeH = Math.max(0, rawStatusAgeH);
+  if (rawStatusAgeH < -0.1) remarks.push("statusfilen er datert i fremtiden (klokkeavvik mellom NAS og API?)");
   const firstSeenH = s.first_seen_at === null ? 0 : hoursSince(now, s.first_seen_at);
   const interval = s.backup.interval_hours;
 
@@ -225,7 +228,9 @@ export function observeBackupStatus(read: BackupStatusRead, now: Date, threshold
 
   // --- backup ---
   const b = s.backup;
-  const backupAgeH = b.last_set_at === null ? null : hoursSince(now, b.last_set_at);
+  const rawBackupAgeH = b.last_set_at === null ? null : hoursSince(now, b.last_set_at);
+  const backupAgeH = rawBackupAgeH === null ? null : Math.max(0, rawBackupAgeH);
+  if (rawBackupAgeH !== null && rawBackupAgeH < -0.1) remarks.push("siste sett er datert i fremtiden (klokkeavvik)");
   if (backupAgeH === null) {
     problems.push({ level: b.consecutive_failures >= t.backupDownFailures ? "DOWN" : "DEGRADED", text: `ingen komplett backup finnes${b.consecutive_failures > 0 ? ` (${b.consecutive_failures} mislykkede forsøk: ${label(b.last_error_code)})` : " ennå"}` });
   } else if (backupAgeH > t.backupDownFactor * interval) {

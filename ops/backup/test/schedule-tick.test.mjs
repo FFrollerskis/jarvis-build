@@ -5,7 +5,8 @@ import { ConfigError } from "../lib/env.mjs";
 import { OffsiteError, prepareSetForOffsite } from "../lib/offsite.mjs";
 import { loadScheduleConfig } from "../lib/config.mjs";
 import {
-  EXIT, ScheduleError, backupDecision, buildDefaultDeps, findOrphanSets, listCompleteSets, offsiteDecision, retryDelayMs, runTick, setsToPrune, verifyDecision
+  EXIT, ScheduleError, backupDecision, buildDefaultDeps, dropFutureTimestamps, findFutureSets, findOrphanSets, listCompleteSets, offsiteDecision, retryDelayMs, runTick, setsToPrune,
+  verifyDecision
 } from "../lib/schedule.mjs";
 import { emptyStatus, readStatusFile } from "../lib/state.mjs";
 import { RECIPIENT, cleanupTempDirs, fakeEncryptManifest, hoursAgo, makeSet, tempDir } from "./helpers.mjs";
@@ -372,13 +373,12 @@ describe("WP-C2 tick: planlagt backup (falsk backup/klokke, ekte filsystem)", ()
     for (const secret of [PASSWORD, "not-real-not-real-not-real", "AGE-SECRET-KEY-1ABCDEFGHIJKLMNOP"]) expect(everything).not.toContain(secret);
   });
 
-  it("konfig-feil stopper FØR noe kjører: manglende mottaker/passord, docker uten compose-fil, mangler identitetsfil", async () => {
+  it("konfig-feil i kjernen stopper FØR noe kjører: manglende mottaker/passord og docker uten compose-fil (identitetsfil hører til verifiseringssteget og stopper ikke backupen)", async () => {
     const run = (flags, env) => runTick(loadScheduleConfig({ out: tempDir(), ...flags }, env), buildDefaultDeps(loadScheduleConfig({ out: tempDir(), ...flags }, env), env), env);
     await expect(run({ mode: "direct" }, { JARVIS_DB_ADMIN_PASSWORD: PASSWORD })).rejects.toThrow(/JARVIS_BACKUP_AGE_RECIPIENT/);
     await expect(run({ mode: "direct" }, { JARVIS_BACKUP_AGE_RECIPIENT: "age-secret-key-1abc", JARVIS_DB_ADMIN_PASSWORD: PASSWORD })).rejects.toThrow(/OFFENTLIG/);
     await expect(run({ mode: "direct" }, { JARVIS_BACKUP_AGE_RECIPIENT: RECIPIENT })).rejects.toThrow(/JARVIS_DB_ADMIN_PASSWORD/);
     await expect(run({ mode: "docker" }, { JARVIS_BACKUP_AGE_RECIPIENT: RECIPIENT, JARVIS_DB_ADMIN_PASSWORD: PASSWORD })).rejects.toThrow(/--compose-file/);
-    await expect(run({ mode: "direct", roles: "verify" }, { JARVIS_BACKUP_VERIFY_IDENTITY_FILE: "/finnes/ikke.txt" })).rejects.toThrow(ConfigError);
     expect(() => loadScheduleConfig({}, {})).toThrow(/--out/);
     expect(() => loadScheduleConfig({ out: "/x", roles: "backup,rm" }, {})).toThrow(/--roles/);
     expect(() => loadScheduleConfig({ out: "/x", databases: "jarvis;drop" }, {})).toThrow(/--databases/);
@@ -571,6 +571,108 @@ describe("WP-C2 tick: restore-verifisering (scratch, uten å røre produksjon)",
     await h.tick();
     expect(h.status().restore_verify).toMatchObject({ state: "ok", reported_by: "external_verifier", duration_s: 212, fetch_duration_s: 41, tables: 358, rows: 10346, source: "offsite" });
     expect(h.verifyCalls).toEqual([]); // NAS-en verifiserer ikke selv
+  });
+});
+
+describe("WP-C2 tick: valgfrie delsystemer med ugyldig konfig stopper ALDRI selve backupen (men feiler høylytt)", () => {
+  it("ugyldig off-site-konfig (to adaptere): backupen tas likevel, off-site rapporteres som feilet (exit 5, /fail), feilen står i hele backoff-vinduet", async () => {
+    const exportDir = tempDir("wpc2-exp-");
+    const h = harness({ flags: { "status-export-dir": exportDir }, env: { JARVIS_BACKUP_OFFSITE_RCLONE_REMOTE: "b2:x", JARVIS_BACKUP_OFFSITE_LOCAL_DIR: "/mnt/usb/x" } });
+    expect(h.config.offsite).toBeNull();
+    expect(h.config.offsiteError).toContain("kun ÉN off-site-adapter");
+    const r = await h.tick();
+    expect(r).toMatchObject({ exitCode: EXIT.OFFSITE_FAILED, outcome: "failed", actions: ["backup", "offsite"], failed: ["offsite"] });
+    expect(h.backupCalls).toBe(1); // backupen ble tatt
+    expect(listCompleteSets(h.out)).toHaveLength(1);
+    expect(h.hb).toEqual(["start", "fail"]);
+    expect(h.status().offsite).toMatchObject({ state: "failed", last_error_code: "offsite_config_invalid", consecutive_failures: 1 });
+    expect(h.exported().offsite).toMatchObject({ state: "failed", last_error_code: "offsite_config_invalid" });
+    // innenfor backoff: ikke nytt forsøk, og tilstanden er fortsatt «feilet» (ikke tilbakestilt til «ikke satt opp»)
+    h.advance(10 * 60_000);
+    expect((await h.tick()).actions).toEqual([]);
+    expect(h.status().offsite.state).toBe("failed");
+    expect(h.exported().offsite.state).toBe("failed");
+  });
+
+  it("ugyldig restore-verifiserings-konfig (env): backupen tas likevel, verify rapporteres som feilet (exit 4, kode verify_config_invalid)", async () => {
+    const h = harness({ env: { JARVIS_BACKUP_VERIFY_INTERVAL_DAYS: "mange" } });
+    expect(h.config.verifyError).toContain("JARVIS_BACKUP_VERIFY_INTERVAL_DAYS");
+    expect(h.config.verifyError).not.toContain("mange"); // siterer aldri verdien
+    const r = await h.tick();
+    expect(r).toMatchObject({ exitCode: EXIT.VERIFY_FAILED, actions: ["backup", "verify"], failed: ["verify"] });
+    expect(h.backupCalls).toBe(1);
+    expect(h.verifyCalls).toEqual([]);
+    expect(h.status().restore_verify).toMatchObject({ state: "failed", last_error_code: "verify_config_invalid" });
+  });
+
+  it("identitetsfil som ikke finnes, scratch uten passord og kilde off-site uten adapter er verify_config_invalid - ikke et hardt stopp av backupen", async () => {
+    const missing = harness({ env: { JARVIS_BACKUP_VERIFY_IDENTITY_FILE: "/finnes/ikke/identity.txt" } });
+    expect((await missing.tick()).exitCode).toBe(EXIT.VERIFY_FAILED);
+    expect(missing.backupCalls).toBe(1);
+    expect(missing.status().restore_verify).toMatchObject({ state: "failed", last_error_code: "verify_config_invalid" });
+    expect(missing.status().restore_verify.last_error).toContain("IDENTITY_FILE");
+
+    const noPw = harness({ identity: true, env: { JARVIS_BACKUP_VERIFY_SCRATCH_HOST: "127.0.0.1", JARVIS_SCRATCH_DB_PASSWORD: "" } });
+    makeSet(noPw.out, hoursAgo(T0, 1));
+    expect((await noPw.tick()).exitCode).toBe(EXIT.VERIFY_FAILED);
+    expect(noPw.status().restore_verify.last_error).toContain("JARVIS_SCRATCH_DB_PASSWORD");
+
+    const noAdapter = harness({ identity: true, flags: { "verify-source": "offsite" } });
+    expect(noAdapter.config.verifyError).toContain("krever en off-site-adapter");
+    makeSet(noAdapter.out, hoursAgo(T0, 1));
+    expect((await noAdapter.tick()).failed).toContain("verify");
+    expect(noAdapter.verifyCalls).toEqual([]);
+  });
+
+  it("kjernekonfig er fortsatt streng: ugyldig intervall/roller/mappe stopper tikket FØR noe kjører (exit 1)", () => {
+    expect(() => loadScheduleConfig({ out: tempDir() }, { JARVIS_BACKUP_INTERVAL_HOURS: "0" })).toThrow(ConfigError);
+    expect(() => loadScheduleConfig({ out: tempDir(), roles: "backup,rm" }, {})).toThrow(ConfigError);
+    expect(() => loadScheduleConfig({}, {})).toThrow(ConfigError);
+  });
+});
+
+describe("WP-C2 tick: klokkeavvik - fremtidsdaterte sett og tidsstempler kan ikke lamme eller overbelaste backupen", () => {
+  it("et sett datert i fremtiden er ikke «nyeste»: ny backup tas (ikke blokkert i årevis), og fremtidssettet logges som advarsel - uten å utløse backup hvert tikk", async () => {
+    const h = harness();
+    const future = makeSet(h.out, new Date(T0.getTime() + 3 * D));
+    expect(findFutureSets(h.out, T0.getTime())).toEqual([future.name]);
+    expect(listCompleteSets(h.out, { nowMs: T0.getTime() })).toEqual([]);
+    expect(listCompleteSets(h.out)).toHaveLength(1);
+    const first = await h.tick();
+    expect(first.actions).toEqual(["backup"]);
+    expect(h.logs).toContainEqual(expect.objectContaining({ level: "warn", event: "set_dated_in_future", set: future.name }));
+    h.advance(15 * 60_000);
+    const second = await h.tick();
+    expect(second.actions).toEqual([]); // det nye (riktig daterte) settet er ferskt - fremtidssettet utløser ikke noe mer
+    expect(h.backupCalls).toBe(1);
+    expect(h.status().backup.last_set).not.toBe(future.name);
+  });
+
+  it("beslutningen er også robust alene: et fremtidsdatert nyeste sett er aldri «fersk»", () => {
+    const status = emptyStatus();
+    const nowMs = T0.getTime();
+    expect(backupDecision({ roleEnabled: true, force: false, newestMs: nowMs + 3 * D, status, nowMs, intervalMs: D })).toEqual({ due: true, reason: "newest_set_dated_in_future" });
+    expect(backupDecision({ roleEnabled: true, force: false, newestMs: nowMs + 60_000, status, nowMs, intervalMs: D })).toEqual({ due: false, reason: "fresh" }); // 1 min jitter tåles
+  });
+
+  it("tidsstempler i statusfilen som ligger i fremtiden forkastes (en rapport om «verifisert i 2030» holder ikke en fornyelse borte)", async () => {
+    const h = harness({ identity: true });
+    makeSet(h.out, hoursAgo(T0, 1));
+    const st = emptyStatus();
+    Object.assign(st.restore_verify, { state: "ok", last_success_at: "2030-01-01T00:00:00.000Z", last_attempt_at: "2030-01-01T00:00:00.000Z" });
+    Object.assign(st.backup, { retry_after: "2031-01-01T00:00:00.000Z" });
+    writeFileSync(h.config.statusFile, JSON.stringify(st));
+    const r = await h.tick();
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "status_timestamps_in_future_dropped", fields: expect.arrayContaining(["restore_verify.last_success_at", "backup.retry_after"]) }));
+    expect(r.actions).toEqual(["verify"]); // ikke lenger «fersk»: verifiseringen kjører
+    expect(h.status().restore_verify.last_success_at).toBe(T0.toISOString());
+
+    const status = emptyStatus();
+    status.offsite.last_success_at = "2026-10-09T02:03:00.000Z"; // 3 min frem: innenfor jitter, beholdes
+    expect(dropFutureTimestamps(status, T0.getTime())).toEqual([]);
+    status.offsite.last_success_at = "2026-10-09T02:30:00.000Z";
+    expect(dropFutureTimestamps(status, T0.getTime())).toEqual(["offsite.last_success_at"]);
+    expect(status.offsite.last_success_at).toBeNull();
   });
 });
 
