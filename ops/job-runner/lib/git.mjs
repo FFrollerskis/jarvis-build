@@ -23,18 +23,37 @@ const SHA1 = /^[0-9a-f]{40}$/;
 export const BASE_BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/;
 const MIN_GIT = [2, 39, 0];
 
-/** Forbudte sti-komponenter uavhengig av konfig: `.git` (også NTFS-varianter), `.`/`..`. */
+/** Forbudte sti-komponenter uavhengig av konfig: `.git` (også NTFS-/HFS-varianter), `.`/`..`. */
 function normalizeComponent(component) {
   return component.normalize("NFKC").toLowerCase().replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, "").replace(/[. ]+$/u, "");
 }
 
-/** @param {string} p */
+/** Sammenligningsform for nektelisten: NFKC, små bokstaver, ingen usynlige tegn, og ingen etterfølgende punktum/mellomrom på noen komponent (Windows ignorerer dem: `.github./x` = `.github/x`). @param {string} p */
 function normalizePath(p) {
-  return p.normalize("NFKC").toLowerCase().replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, "");
+  return p.normalize("NFKC").toLowerCase().replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, "").split("/").map((part) => part.replace(/[. ]+$/u, "")).join("/");
+}
+
+/**
+ * NTFS-kortnavn (8.3) for et punktnavn: `.github` -> `github~1`, `.gitmodules` -> `gitmod~1`, `.gitattributes` -> `gitatt~1` (de seks første bokstavene/sifrene + `~1`).
+ * På en Windows-sjekkut kan kortnavnet adressere samme oppføring som det lange (derfor har git egne regler for `git~1`). Brukes på den første komponenten i nektelisten.
+ * @param {string} component allerede normalisert (små bokstaver)
+ * @returns {string | null}
+ */
+function ntfsShortName(component) {
+  if (!component.startsWith(".")) return null;
+  const stem = component.slice(1).replace(/[^a-z0-9]/g, "").slice(0, 6);
+  return stem.length > 0 ? `${stem}~1` : null;
+}
+
+/** Treffer sti `p` (normalisert) nektelisteoppføringen `e` (normalisert)? Oppføring på formen `mappe/` dekker mappen og alt under; ellers eksakt sti eller alt under den. */
+function matchesDenyEntry(p, e) {
+  return e.endsWith("/") ? p.startsWith(e) || p === e.slice(0, -1) : p === e || p.startsWith(`${e}/`);
 }
 
 /**
  * Sjekker én endret sti mot de harde reglene og den konfigurerbare nektelisten. Kaster `RunnerError('path_denied')`.
+ * Harde regler (uavhengig av konfig): ingen kontrolltegn/backslash/absolutt sti, ingen tomme/`.`/`..`-komponenter, ingen `.git` (store/små bokstaver, usynlige tegn,
+ * etterfølgende punktum/mellomrom, Unicode-kompatibilitetsformer) og ingen NTFS-varianter av den: kortnavnet `git~1` og alternative datastrømmer (enhver komponent med `:`).
  * @param {string} path
  * @param {readonly string[]} denyPaths
  */
@@ -48,12 +67,16 @@ export function assertPathAllowed(path, denyPaths) {
     if (component === "" || component === "." || component === ".." || c === ".git" || c === "") {
       throw new RunnerError("path_denied", 422, "path_component_forbidden");
     }
+    if (/^git~[0-9]+$/.test(c) || component.includes(":")) throw new RunnerError("path_denied", 422, "path_component_forbidden");
   }
   const p = normalizePath(path);
   for (const entry of denyPaths) {
     const e = normalizePath(entry);
-    const hit = e.endsWith("/") ? p.startsWith(e) || p === e.slice(0, -1) : p === e || p.startsWith(`${e}/`);
-    if (hit) throw new RunnerError("path_denied", 422, `matches_deny_list:${entry.slice(0, 40)}`);
+    const first = e.split("/")[0] ?? "";
+    const alias = ntfsShortName(first);
+    if (matchesDenyEntry(p, e) || (alias !== null && matchesDenyEntry(p, `${alias}${e.slice(first.length)}`))) {
+      throw new RunnerError("path_denied", 422, `matches_deny_list:${entry.slice(0, 40)}`);
+    }
   }
 }
 
@@ -329,7 +352,9 @@ export class HostGit {
     const headerSha = /** @type {string} */ (header.refs[0]?.sha);
 
     const bundlePath = join(p.privateDir, "out.bundle");
-    await writeFile(bundlePath, p.bundle, { mode: 0o600 });
+    // Fjern en gammel (eller plantet) oppføring først - en symlenke fjernes, aldri følges - og opprett deretter eksklusivt (`wx`): runneren skriver aldri GJENNOM en lenke.
+    await forceRemoveTree(bundlePath).catch(() => undefined);
+    await writeFile(bundlePath, p.bundle, { mode: 0o600, flag: "wx" });
     await forceRemoveTree(p.verifyDir).catch(() => undefined);
     await this.mustGit(["init", "--bare", "--quiet", p.verifyDir], { timeoutMs: 30_000, ...(p.cancel ? { cancel: p.cancel } : {}) }, "git_init_failed", 500);
     await writeFile(join(p.verifyDir, "objects", "info", "alternates"), `${join(p.baseGitDir, "objects")}\n`, { mode: 0o600 });
