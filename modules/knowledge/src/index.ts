@@ -10,6 +10,7 @@ export * from "./email-attachment-source.ts";
 export * from "./email-ingest-handler.ts";
 export * from "./sync.ts";
 export * from "./sensitivity.ts";
+export * from "./source-policy.ts";
 export * from "./knowledge-hits.ts";
 export * from "./retriever.ts";
 export * from "./registry.ts";

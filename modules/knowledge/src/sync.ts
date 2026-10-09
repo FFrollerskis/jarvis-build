@@ -4,6 +4,8 @@ import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import { withMemoryTransaction, type EmbeddingProvider } from "@jarvis/memory";
 import { isFingerprintErased } from "@jarvis/core";
 import { KnowledgeSourceError, type KnowledgeRecord, type KnowledgeSource, type SourceErrorClass } from "./source.ts";
+import { classifyKnowledgeSensitivity, type KnowledgeSensitivity, type KnowledgeTrustLevel } from "./sensitivity.ts";
+import { exceedsCeiling, resolveSourcePolicy, type KnowledgeSourcePolicy } from "./source-policy.ts";
 
 /** UA-2 P0 §9: idempotent sync-rapport - en ny kjøring uten kildeendringer skal være nær no-op. */
 export interface SyncReport {
@@ -22,6 +24,30 @@ export interface SyncReport {
   error_class?: SourceErrorClass;
   /** D-396 (JARVIS-032): `partial` når kilden meldte en delvis/vindu-listing - da ble ingenting tombstonet. */
   listing?: "complete" | "partial";
+  /** WP-D1: dokumenter som IKKE ble indeksert fordi de er strengere enn kildens `max_sensitivity` (et allerede indeksert slikt dokument tombstones). Utelatt når 0. */
+  excluded?: number;
+  /** WP-D1: dokumenter der entitetsindekseringen feilet (selve dokumentet er lagret; indekseringen prøves igjen neste synk). Utelatt når 0. */
+  entity_index_failed?: number;
+}
+
+/**
+ * WP-D1: port mot den DETERMINISTISKE entitetsindekseringen (`KnowledgeEntityIndexer`). Kjøres inline i synk-transaksjonen (rask, ingen modellkall) i en egen delsavepoint: en feil her mister aldri
+ * selve dokumentet. Modellassistert uttrekk hører IKKE hjemme her (et modellkall skal aldri holde en databasetransaksjon åpen) - det er et eget pass.
+ */
+export interface KnowledgeEntityIndexPort {
+  /** Versjon av den deterministiske uttrekkeren. Endres den, bygges lenkene på nytt for alle dokumenter ved neste synk (nøkkelen er `<content_hash>:<version>`). */
+  readonly version: string;
+  index(
+    client: pg.PoolClient,
+    input: { tenant_id: string; memory_space_id: MemorySpace; knowledge_document_id: string; title: string; content: string; sensitivity: KnowledgeSensitivity }
+  ): Promise<void>;
+}
+
+export interface KnowledgeSyncOptions {
+  /** Kildens egne valg (sensitivitetsgulv/-tak, tillit). Utelatt = standardene i `resolveSourcePolicy` (privat, ubetrodd, ingen tak). */
+  policy?: KnowledgeSourcePolicy;
+  /** Valgfri deterministisk entitetsindeksering (av som standard). */
+  entity_indexer?: KnowledgeEntityIndexPort;
 }
 
 /**
@@ -50,10 +76,19 @@ const EMPTY_REPORT: SyncReport = {
   scanned: 0, created: 0, updated: 0, unchanged: 0, tombstoned: 0, reactivated: 0, failed: 0, suppressed: 0, skipped: 0
 };
 
+/** Det som utledes per dokument av kildens policy + teksten (se `source-policy.ts`). */
+interface DerivedMarks {
+  sensitivity: KnowledgeSensitivity;
+  trust_level: KnowledgeTrustLevel;
+}
+
 /**
  * UA-2 P0 §4-§6/§9: kilde-uavhengig sync-orkestrering. Kilden vet kun å liste
  * sine records (`KnowledgeSource.list()`); ALL canonical-identity/dedupe/
  * tombstone-logikk bor her, én gang, felles for alle kilder.
+ *
+ * WP-D1 (JARVIS-032): identiteten er nå SPACE-BEVISST - (tenant, memory space, source_type, source_instance_id, external_id) - så en kildeinstans kan finnes i flere rom i
+ * samme tenant (migrasjon 086). Alle oppslag og tombstone-spørringer er eksplisitt skopet til rommet, i tillegg til RLS.
  */
 export class KnowledgeSyncService {
   private pgVectorCache: boolean | undefined;
@@ -63,7 +98,8 @@ export class KnowledgeSyncService {
     private readonly embeddings: EmbeddingProvider
   ) {}
 
-  async sync(identity: IdentityContext, memorySpace: MemorySpace, source: KnowledgeSource): Promise<SyncReport> {
+  async sync(identity: IdentityContext, memorySpace: MemorySpace, source: KnowledgeSource, options: KnowledgeSyncOptions = {}): Promise<SyncReport> {
+    const policy = resolveSourcePolicy(options.policy);
     let records: KnowledgeRecord[];
     let skippedExternalIds: string[] = [];
     let listingPartial = false;
@@ -89,12 +125,22 @@ export class KnowledgeSyncService {
     await withMemoryTransaction(this.pool, identity.tenant_id, [memorySpace], async (client) => {
       for (const record of records) {
         report.scanned += 1;
+        // WP-D1: sensitivitet = strengeste av kildens gulv og klassifiseringen av tittel + innhold (rommet teller: helse er alltid special). Et dokument over kildens tak indekseres ikke, og
+        // regnes bevisst IKKE som «sett»: et allerede indeksert dokument som nå er over taket tombstones av den vanlige mekanismen under (ikke beskyttet som `skipped`).
+        const marks: DerivedMarks = {
+          sensitivity: classifyKnowledgeSensitivity({ memory_space: memorySpace, texts: [record.title, record.content], floor: policy.floor }).sensitivity,
+          trust_level: policy.trust
+        };
+        if (exceedsCeiling(marks.sensitivity, policy.ceiling)) {
+          report.excluded = (report.excluded ?? 0) + 1;
+          continue;
+        }
         seenExternalIds.push(record.external_id);
         // D-396 (JARVIS-032): én mislykket SQL-setning i en Postgres-transaksjon avbryter HELE transaksjonen («current transaction is aborted») -
         // alle påfølgende records og tombstone-spørringen feilet da også. SAVEPOINT per record isolerer feilen til akkurat dette dokumentet.
         await client.query("SAVEPOINT knowledge_record");
         try {
-          await this.upsertOne(client, identity.tenant_id, memorySpace, record, report);
+          await this.upsertOne(client, identity.tenant_id, memorySpace, record, report, marks, options.entity_indexer);
           await client.query("RELEASE SAVEPOINT knowledge_record");
         } catch (err) {
           await client.query("ROLLBACK TO SAVEPOINT knowledge_record");
@@ -124,18 +170,18 @@ export class KnowledgeSyncService {
         }
         const scoped = await client.query(
           `UPDATE knowledge_documents SET deleted = true, deleted_at = now(), updated_at = now()
-           WHERE tenant_id = $1 AND source_type = $2 AND source_instance_id = $3 AND deleted = false
+           WHERE tenant_id = $1 AND memory_space_id = $7 AND source_type = $2 AND source_instance_id = $3 AND deleted = false
              AND (metadata ->> $5) = ANY($6::text[]) AND NOT (external_id = ANY($4::text[]))`,
-          [identity.tenant_id, source.source_type, source.source_instance_id, protectedExternalIds, tombstoneScope.metadata_key, tombstoneScope.values]
+          [identity.tenant_id, source.source_type, source.source_instance_id, protectedExternalIds, tombstoneScope.metadata_key, tombstoneScope.values, memorySpace]
         );
         report.tombstoned = scoped.rowCount ?? 0;
         return;
       }
       const tombstoneResult = await client.query(
         `UPDATE knowledge_documents SET deleted = true, deleted_at = now(), updated_at = now()
-         WHERE tenant_id = $1 AND source_type = $2 AND source_instance_id = $3 AND deleted = false
+         WHERE tenant_id = $1 AND memory_space_id = $5 AND source_type = $2 AND source_instance_id = $3 AND deleted = false
            AND NOT (external_id = ANY($4::text[]))`,
-        [identity.tenant_id, source.source_type, source.source_instance_id, protectedExternalIds]
+        [identity.tenant_id, source.source_type, source.source_instance_id, protectedExternalIds, memorySpace]
       );
       report.tombstoned = tombstoneResult.rowCount ?? 0;
     });
@@ -148,14 +194,16 @@ export class KnowledgeSyncService {
     tenantId: string,
     space: MemorySpace,
     record: KnowledgeRecord,
-    report: SyncReport
+    report: SyncReport,
+    marks: DerivedMarks,
+    indexer: KnowledgeEntityIndexPort | undefined
   ): Promise<void> {
     const existing = await client.query(
-      `SELECT knowledge_document_id, content_hash, deleted FROM knowledge_documents
-       WHERE tenant_id = $1 AND source_type = $2 AND source_instance_id = $3 AND external_id = $4`,
-      [tenantId, record.source_type, record.source_instance_id, record.external_id]
+      `SELECT knowledge_document_id, content_hash, deleted, entities_indexed_key FROM knowledge_documents
+       WHERE tenant_id = $1 AND memory_space_id = $2 AND source_type = $3 AND source_instance_id = $4 AND external_id = $5`,
+      [tenantId, space, record.source_type, record.source_instance_id, record.external_id]
     );
-    const row = existing.rows[0] as { knowledge_document_id: string; content_hash: string; deleted: boolean } | undefined;
+    const row = existing.rows[0] as { knowledge_document_id: string; content_hash: string; deleted: boolean; entities_indexed_key: string | null } | undefined;
 
     if (!row) {
       // Q-20 §5: dette external_id-et finnes ikke i knowledge_documents - enten
@@ -172,15 +220,16 @@ export class KnowledgeSyncService {
       await client.query(
         `INSERT INTO knowledge_documents
            (knowledge_document_id, tenant_id, memory_space_id, source_type, source_instance_id, external_id,
-            canonical_uri, title, content, content_type, content_hash, modified_at, metadata)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+            canonical_uri, title, content, content_type, content_hash, modified_at, metadata, sensitivity, trust_level)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
         [
           id, tenantId, space, record.source_type, record.source_instance_id, record.external_id,
           record.canonical_uri, record.title, record.content, record.content_type, record.content_hash,
-          record.modified_at, JSON.stringify(record.metadata)
+          record.modified_at, JSON.stringify(record.metadata), marks.sensitivity, marks.trust_level
         ]
       );
       await this.embedAndStore(client, id, tenantId, space, record.content);
+      await this.indexEntities(client, indexer, tenantId, space, id, record, marks.sensitivity, report);
       report.created += 1;
       return;
     }
@@ -191,12 +240,14 @@ export class KnowledgeSyncService {
       // UA-2 P1A §25: en Drive-omdøpning endrer `title` men ALDRI
       // `external_id` (stabil fil-id), og skal derfor synes i neste sync
       // uten å telle som et innholds-"updated".
+      // WP-D1: sensitivitet/tillit regnes om hver gang (kildens policy eller ordforrådet kan ha endret seg) - billig, ingen embedding.
       await client.query(
         `UPDATE knowledge_documents
-         SET title = $2, canonical_uri = $3, modified_at = $4, metadata = $5, last_synced_at = now()
+         SET title = $2, canonical_uri = $3, modified_at = $4, metadata = $5, last_synced_at = now(), sensitivity = $6, trust_level = $7
          WHERE knowledge_document_id = $1`,
-        [row.knowledge_document_id, record.title, record.canonical_uri, record.modified_at, JSON.stringify(record.metadata)]
+        [row.knowledge_document_id, record.title, record.canonical_uri, record.modified_at, JSON.stringify(record.metadata), marks.sensitivity, marks.trust_level]
       );
+      await this.indexEntities(client, indexer, tenantId, space, row.knowledge_document_id, record, marks.sensitivity, report, row.entities_indexed_key);
       report.unchanged += 1;
       return;
     }
@@ -208,10 +259,11 @@ export class KnowledgeSyncService {
       await client.query(
         `UPDATE knowledge_documents
          SET deleted = false, deleted_at = NULL, title = $2, canonical_uri = $3, modified_at = $4,
-             metadata = $5, last_synced_at = now(), updated_at = now()
+             metadata = $5, last_synced_at = now(), updated_at = now(), sensitivity = $6, trust_level = $7
          WHERE knowledge_document_id = $1`,
-        [row.knowledge_document_id, record.title, record.canonical_uri, record.modified_at, JSON.stringify(record.metadata)]
+        [row.knowledge_document_id, record.title, record.canonical_uri, record.modified_at, JSON.stringify(record.metadata), marks.sensitivity, marks.trust_level]
       );
+      await this.indexEntities(client, indexer, tenantId, space, row.knowledge_document_id, record, marks.sensitivity, report, row.entities_indexed_key);
       report.reactivated += 1;
       return;
     }
@@ -221,18 +273,51 @@ export class KnowledgeSyncService {
       `UPDATE knowledge_documents
        SET content = $2, content_hash = $3, version = version + 1, deleted = false, deleted_at = NULL,
            title = $4, canonical_uri = $5, content_type = $6, modified_at = $7, metadata = $8,
-           last_synced_at = now(), updated_at = now()
+           last_synced_at = now(), updated_at = now(), sensitivity = $9, trust_level = $10
        WHERE knowledge_document_id = $1`,
       [
         row.knowledge_document_id, record.content, record.content_hash, record.title, record.canonical_uri,
-        record.content_type, record.modified_at, JSON.stringify(record.metadata)
+        record.content_type, record.modified_at, JSON.stringify(record.metadata), marks.sensitivity, marks.trust_level
       ]
     );
     await this.embedAndStore(client, row.knowledge_document_id, tenantId, space, record.content);
+    await this.indexEntities(client, indexer, tenantId, space, row.knowledge_document_id, record, marks.sensitivity, report, null);
     if (row.deleted) {
       report.reactivated += 1;
     } else {
       report.updated += 1;
+    }
+  }
+
+  /**
+   * WP-D1: deterministisk entitetsindeksering inline, i en EGEN delsavepoint (en feil mister aldri dokumentet). Hopper over når nøkkelen (`<content_hash>:<versjon>`) allerede stemmer -
+   * dermed er en uendret synk fortsatt nær no-op, mens endret innhold, en ny uttrekker-versjon eller et dokument som aldri ble indeksert (grafen ble slått på senere) bygges på nytt.
+   * Tombstonede dokumenter indekseres ikke (kun levende innhold skal kunne nås via grafen).
+   */
+  private async indexEntities(
+    client: pg.PoolClient,
+    indexer: KnowledgeEntityIndexPort | undefined,
+    tenantId: string,
+    space: MemorySpace,
+    documentId: string,
+    record: KnowledgeRecord,
+    sensitivity: KnowledgeSensitivity,
+    report: SyncReport,
+    currentKey?: string | null
+  ): Promise<void> {
+    if (indexer === undefined) return;
+    const key = `${record.content_hash}:${indexer.version}`;
+    if (currentKey !== undefined && currentKey === key) return;
+    await client.query("SAVEPOINT knowledge_entities");
+    try {
+      await indexer.index(client, { tenant_id: tenantId, memory_space_id: space, knowledge_document_id: documentId, title: record.title, content: record.content, sensitivity });
+      await client.query("UPDATE knowledge_documents SET entities_indexed_key = $2 WHERE knowledge_document_id = $1", [documentId, key]);
+      await client.query("RELEASE SAVEPOINT knowledge_entities");
+    } catch (err) {
+      await client.query("ROLLBACK TO SAVEPOINT knowledge_entities");
+      await client.query("RELEASE SAVEPOINT knowledge_entities");
+      report.entity_index_failed = (report.entity_index_failed ?? 0) + 1;
+      console.warn(JSON.stringify({ msg: "knowledge_entity_index_failed", source_type: record.source_type, external_id: record.external_id, error: (err as Error).message.slice(0, 200) }));
     }
   }
 
