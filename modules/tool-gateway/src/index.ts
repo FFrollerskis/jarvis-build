@@ -24,6 +24,7 @@ export * from "./chat-delegate-tier.ts";
 export * from "./tool-catalog.ts";
 export * from "./tool-failure.ts";
 export * from "./memory-transport.ts";
+export * from "./knowledge-transport.ts";
 export * from "./connector-registry.ts";
 export * from "./connector-health-sweep.ts";
 export * from "./owner-stated-memory.ts";

@@ -22,7 +22,7 @@ import { DEFAULT_PERSONALITY_CONFIG, type PersonalityConfig } from "@jarvis/self
 import type { TaskService, InProcessWorker } from "@jarvis/tasks";
 import { createTurnContext, surfaceForChannel, type Surface, type SurfaceLimits, type TurnContext } from "@jarvis/tool-gateway";
 import { randomUUID } from "node:crypto";
-import { chatWithheldNote, cloudScreenedExecutor, servedByCloudModel } from "./cloud-tool-screen.ts";
+import { chatKnowledgeWithheldNote, chatWithheldNote, cloudScreenedExecutor, servedByCloudModel } from "./cloud-tool-screen.ts";
 import { LOCAL_FALLBACK_ERROR_KINDS, cloudHistoryNote, isMemoryReserveOnly, jobLocalOnlyNote, localOnlyNote, stripSystemNotes } from "./tool-turn-route.ts";
 
 export interface ConversationDeps {
@@ -638,11 +638,13 @@ export class ConversationEngine {
       // #228 (D-450): verktøyresultatene går videre til modellen som betjener neste runde. Betjenes den av en SKYMODELL (avgjort per kall av leverandøren adapteren stempler, ikke av ruten vi valgte - det dekker også
       // en fallback til en annen skyleverandør og eierens egne modellvalg), holdes minnetreff merket særlig sensitive tilbake (samme port som delegerte jobber, D-449). Lokale modeller får se alt.
       let withheldFromCloud = 0;
+      let withheldKnowledgeFromCloud = 0; // WP-D1: kunnskapstreff har egen merknad (egen prefiks i SYSTEM_NOTE_PREFIXES)
       const screenedExecutor = (): ToolExecutor =>
         cloudScreenedExecutor(
           this.deps.tools!.executorFor(identity, turn),
           ({ tool, withheld }) => {
-            withheldFromCloud += withheld;
+            if (tool.startsWith("knowledge.")) withheldKnowledgeFromCloud += withheld;
+            else withheldFromCloud += withheld;
             console.log(JSON.stringify({ msg: "d450_chat_cloud_tool_output_withheld", tool, withheld }));
           },
           servedByCloudModel
@@ -748,7 +750,7 @@ export class ConversationEngine {
       // D-432 / D-447: er sky-ruten stoppet av dagstaket eller av sensitivitetsregelen, sier svaret det (aldri en stille nedgradering). Q-51 D / #228: det samme når skyturen ble sendt uten noen meldinger, eller
       // når minnetreff ble holdt tilbake fra skymodellen. Ikke på tale (samme som D-447); loggen har alltid kategoriene.
       const variantNote = cloudVariant !== undefined && servedByVariant && cloudVariant.withheld > 0 && surface !== "voice" ? cloudHistoryNote(cloudVariant.withheld) : "";
-      const withheldNote = withheldFromCloud > 0 && surface !== "voice" ? chatWithheldNote() : "";
+      const withheldNote = surface !== "voice" ? `${withheldFromCloud > 0 ? chatWithheldNote() : ""}${withheldKnowledgeFromCloud > 0 ? chatKnowledgeWithheldNote() : ""}` : "";
       const notes = `${routeNote}${variantNote}${withheldNote}`;
       const replyText = notes ? `${result.text}${notes}` : result.text;
       if (notes) onToken?.(notes);

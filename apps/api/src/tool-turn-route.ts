@@ -156,7 +156,8 @@ const SYSTEM_NOTE_PREFIXES: readonly string[] = [
   "Jobben kjører på den lokale modellen:",
   "Dagstaket for sky på",
   "Svart på skymodellen uten",
-  "Deler av minnesøket ble holdt tilbake"
+  "Deler av minnesøket ble holdt tilbake",
+  "Deler av kunnskapssøket ble holdt tilbake"
 ];
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const TRAILING_SYSTEM_NOTE = new RegExp(`(?:\\n\\n|^)\\((?:${SYSTEM_NOTE_PREFIXES.map(escapeRegExp).join("|")})[^()]*\\)\\s*$`);

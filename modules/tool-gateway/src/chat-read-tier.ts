@@ -138,6 +138,8 @@ export const CHAT_READ_TIER: ReadonlyArray<{ readonly tool_id: string; readonly 
   { tool_id: "jira", action: "get_issue" },
   { tool_id: "jira", action: "list_transitions" },
   { tool_id: "jira", action: "search_issues" },
+  // WP-D1 (UA-2): kunnskapslaget (indekserte dokumenter, notater, vedlegg, referater) - klasse A, ubetrodd output (tainter turen), strukturerte sensitivitetsmerker per treff (skyskjermen).
+  { tool_id: "knowledge", action: "search" },
   { tool_id: "linear", action: "get_issue" },
   { tool_id: "linear", action: "list_issues" },
   { tool_id: "linear", action: "list_teams" },

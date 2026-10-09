@@ -9,7 +9,7 @@ import { GovernanceTransport, governanceToolDefinitions } from "@jarvis/governan
 import { OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
 import { SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";
 import {
-  MemorySearchTransport, firstWaveTools, homeAssistantTools, memoryToolDefinitions, resolveModelToolSurface, selectSurfaceTools,
+  KnowledgeSearchTransport, MemorySearchTransport, firstWaveTools, homeAssistantTools, knowledgeToolDefinitions, memoryToolDefinitions, resolveModelToolSurface, selectSurfaceTools,
   type MeshToolMapping, type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
 import { TasksDelegateTransport, cloudToolTurnsAllowed, tasksDelegateToolDefinitions } from "../../src/chat-jobs.ts";
@@ -34,6 +34,7 @@ function productionDefinitions(): ToolDefinition[] {
       ...governanceToolDefinitions(new GovernanceTransport({} as never)),
       ...situationsToolDefinitions(new SituationsTransport({} as never, {} as never)),
       ...memoryToolDefinitions(new MemorySearchTransport({} as never, {} as never)),
+      ...knowledgeToolDefinitions(new KnowledgeSearchTransport({} as never)),
       ...tasksDelegateToolDefinitions(new TasksDelegateTransport({} as never, {} as never)),
       ...runRateToolDefinitions(new RunRateTransport({} as never))
     ]

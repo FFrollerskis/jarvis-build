@@ -7,7 +7,7 @@ import { SURFACE_TOOL_GRANTS, type Surface } from "./tool-manifest.ts";
  * Bygges fra de samme mappingene som utførelsen bruker (aldri en egen liste som kan avvike). Norske etiketter er kun kosmetikk.
  */
 const LABELS: Readonly<Record<string, string>> = {
-  email: "e-post (Gmail)", calendar: "kalender", github: "GitHub", memory: "minne", executive: "egen status/kapabiliteter",
+  email: "e-post (Gmail)", calendar: "kalender", github: "GitHub", memory: "minne", knowledge: "kunnskapsbase (dokumenter, notater, vedlegg, referater)", executive: "egen status/kapabiliteter",
   finance_neonomics: "bank (Neonomics: samtykker, kontoer, saldo, transaksjoner)", finance_stripe: "Stripe", finance_vipps: "Vipps",
   finance_wallester: "Wallester-kort", finance_spend: "utgifter/abonnementer", business: "forretningsregister (selskaper, kontakter, leads, åpne saker)",
   contract: "kontrakter", support: "support/billetter", operations: "drift (leverandører, runbooks, oppgaver)", product: "produkt",
@@ -32,7 +32,8 @@ const HINTS: Readonly<Record<string, string>> = {
   todoist: "gjøremål, huskeliste", github: "issues, PR-er, workflows", vercel: "utrulling, miljøvariabler", n8n: "arbeidsflyter av/på",
   business: "selskaper, leads, åpne saker, brief", contract: "kontrakter, frister, fornyelser", support: "billetter/henvendelser",
   operations: "leverandører, runbooks, driftsoppgaver", finance_neonomics: "saldo, transaksjoner (kun lokal modell)",
-  finance_spend: "utgifter, abonnementer", brave_search: "nettsøk, nyheter", google_routes: "kjøretid, rute", spotify: "musikk, kø"
+  finance_spend: "utgifter, abonnementer", brave_search: "nettsøk, nyheter", google_routes: "kjøretid, rute", spotify: "musikk, kø",
+  knowledge: "hva står det i dokumentene/notatene/referatene"
 };
 
 export interface SurfaceCatalog {

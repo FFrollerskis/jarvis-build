@@ -32,6 +32,7 @@ import {
 } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
 import { DeploymentService, DiagnosisService, IncidentService } from "@jarvis/incidents";
+import { KnowledgeRetriever } from "@jarvis/knowledge";
 import {
   AiCouncil,
   DEFAULT_PROFILES,
@@ -69,6 +70,7 @@ import {
 import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport,
   CHAT_ACT_TIER, CHAT_READ_TIER, GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, assertManifestInvariants, buildToolManifest, describeSurfaceCatalog, memoryToolDefinitions, selectSurfaceTools,
+  KnowledgeSearchTransport, knowledgeToolDefinitions,
   MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, resolveModelToolSurface, PgGithubRateLimitStore,
   PgTelegramOffsetStore, TelegramCommandPoller, createTurnContext, jobIdentityFor, telegramClassDNotifier, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, schedulerSource, DailyScheduler, runConnectorHealthSweep,
@@ -561,6 +563,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     model: memoryEmbedding.model, dim: memoryEmbedding.dim, locality: memoryEmbedding.locality
   }));
   const memoryRetriever = new MemoryRetriever(pool, memoryEmbedding);
+  // WP-D1 (UA-2, JARVIS-060): kunnskapslaget (`KnowledgeRetriever`) er nå koblet til chatten som `knowledge.search` (chattens lese-nivå, klasse A, ubetrodd output). SAMME lokale
+  // embedding-leverandør som minnet og kunnskaps-synken (en sky-provider er avvist ved oppstart av `MemoryWriter`/`MemoryRetriever`; vektorer fra en annen modell filtreres bort i søket).
+  const knowledgeRetriever = new KnowledgeRetriever(pool, memoryEmbedding);
   // D-283 (Tobias direkte i chat, "ja bygg minne-skrivingen", ETTER at D-282
   // sin live-samtale avdekket at minnet var en HELT PASSIV lesestruktur -
   // `MemoryWriter`/ekstraksjon var bygget og enhetstestet, men ALDRI kalt fra
@@ -956,6 +961,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // for bakgrunnskontekst - se `memoryRetriever` sin egen filhode-kommentar
       // lenger opp for hvorfor den ble hevet ut hit.
       ...memoryToolDefinitions(new MemorySearchTransport(memoryRetriever, memoryWriter)),
+      // WP-D1 (UA-2): `knowledge.search` over `knowledgeRetriever` (tenant-/space-skopet via RLS som app-rolle; treffene bærer strukturerte sensitivitetsmerker for skyskjermen).
+      ...knowledgeToolDefinitions(new KnowledgeSearchTransport(knowledgeRetriever)),
       // D-416: delegeringsnivået (opprett lesende bakgrunnsjobb / les jobbstatus) over SAMME `taskService` (policy + kontraktsregler).
       ...tasksDelegateToolDefinitions(new TasksDelegateTransport(taskService, chatJobs)),
       // D-421 (UA0-RUNRATE): run-rate og connector maintenance ledger (kun lesing for modellen; skriving via dashbord-ruten).

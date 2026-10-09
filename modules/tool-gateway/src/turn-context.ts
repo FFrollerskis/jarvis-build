@@ -67,6 +67,9 @@ const TOOL_INTENTS: Readonly<Record<string, RegExp>> = {
   tasks: /(bakgrunn|deleger|sub-?agent|\bagent|\bjobb(en|er)?\b|undersøk|utred|research|analyser|lag en rapport|gjør (det|dette) mens|mens jeg )/i,
   // D-421: kostnad/run-rate («hva koster du», «hvor mye har du brukt»).
   run_rate: /(hva koster (du|det)|run-?rate|hvor mye (har (du|jeg) )?(brukt|koster)|api-?regning|regningen|modellkostnad|vedlikeholdstid|connector-?vedlikehold)/i,
+  // WP-D1 (UA-2): kunnskapslaget («hva står det i dokumentene/notatene/referatene om …»). BEVISST smalt: kun eksplisitte kunnskaps-/dokumentfraser, ikke enkeltordene «dokument»/«fil»/«notat»
+  // som allerede velger Drive/Notion - en tilfeldig ordtreff skal ikke gi turen kunnskapsverktøyet (og dermed skyruten, for det er et ekte verktøy og ikke minne-reserven, Q-53 A).
+  knowledge: /(kunnskapsbas|kunnskapslag|kunnskapsgraf|dokumentbas|obsidian|\bvault|møtereferat|\breferat(?:et|ene|er)?\b|transkrip(?:t|sjon)|(?:i|fra|blant) (?:alle )?(?:dokumentene|notatene|filene|referatene|vedleggene)(?: mine)?\b|søk(?:e)? (?:i|etter) (?:dokument|notat|fil|referat|vedlegg|kunnskap)|finn (?:i|det i|ut i) (?:dokument|notat|fil|referat|vedlegg)|står det noe om|hvilke (?:dokumenter|notater|filer|referater|vedlegg) (?:nevner|omtaler|handler om|inneholder)|hva henger sammen med)/i,
   finance_neonomics: /(bank|konto|saldo|neonomics|transaksjon|samtykke|kontoutskrift|innskudd|uttak)/i,
   finance_stripe: /(stripe|kortbetaling|refusjon)/i,
   finance_vipps: /(vipps)/i,
@@ -196,7 +199,8 @@ export function isMetaComplaint(text: string): boolean {
 
 const OVERVIEW = /(oversikt|hva skjer|brief|morgenbrief|hva har jeg)/i;
 const OVERVIEW_KEYS = new Set(["email.read_inbox", "calendar.read_events", "github.read_issues"]);
-const ALWAYS_PRIORITY = ["memory.search", "email.read_inbox", "calendar.read_events", "github.read_issues", "executive.get_capability_status", "memory.propose"];
+// WP-D1: `knowledge.search` rangeres rett etter minnesøket NÅR den er valgt (smale nøkkelord) - ellers ville tjenester med mange lese-handlinger (kontrakter, forretning) fylt verktøybudsjettet først.
+const ALWAYS_PRIORITY = ["memory.search", "knowledge.search", "email.read_inbox", "calendar.read_events", "github.read_issues", "executive.get_capability_status", "memory.propose"];
 
 export interface SurfaceSelection {
   selected: MeshToolMapping[];
