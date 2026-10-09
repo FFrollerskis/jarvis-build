@@ -161,6 +161,10 @@ export interface GatewayOptions {
    * Utelatt = ingen leverandør er pauset (uendret oppførsel, f.eks. i tester). Se `ProviderPauseSource`.
    */
   providerPause?: ProviderPauseSource;
+  /**
+   * Klokke i millisekunder (standard `Date.now`). Finnes kun slik at tester kan styre alderen på siste kjente pausetilstand; selve aldersgrensen (`PAUSE_STATE_MAX_AGE_MS`) kan IKKE konfigureres.
+   */
+  now?: () => number;
 }
 
 /**
@@ -169,12 +173,21 @@ export interface GatewayOptions {
  * ingen kandidat i AUTO/LOCAL/CHEAP/..., ikke som eksplisitt eier-override (`provider`), ikke i en preferanseliste, ikke som fallback, critic eller Council-medlem. Sensitivitetsreglene røres ikke:
  * SECRET_RESTRICTED slipper fortsatt kun lokale leverandører, så en pauset LOKAL leverandør gir fail-closed for slike turer - aldri en sky-fallback.
  *
- * Fail-closed ved lesefeil: kan tilstanden ikke leses og ingen tidligere lesing finnes (første kall etter oppstart), nektes kallet (`not_configured`). Har en lesing lyktes tidligere, brukes den siste kjente
- * tilstanden (en pause kan uansett ikke endres mens databasen er utilgjengelig) og feilen logges.
+ * Fail-closed ved lesefeil: kan tilstanden ikke leses og ingen tilstrekkelig fersk lesing finnes (første kall etter oppstart, eller siste vellykkede lesing er eldre enn `PAUSE_STATE_MAX_AGE_MS`), nektes
+ * kallet (`not_configured`). Har en lesing lyktes for høyst `PAUSE_STATE_MAX_AGE_MS` siden, brukes den siste kjente tilstanden (en kort databaseblipp skal ikke stanse all modellbruk) og feilen logges.
+ * Gjennomgang av PR #316 (M-3): uten aldersgrensen ble en gammel «ingen er pauset»-tilstand brukt uavgrenset - og en pause satt i en ANNEN prosess (tilbakekall av en lekket nøkkel) ble da aldri sett så
+ * lenge lesingen feilet.
  */
 export interface ProviderPauseSource {
   pausedProviders(): Promise<ReadonlySet<string>>;
 }
+
+/**
+ * Gjennomgang av PR #316 (M-3): hvor gammel siste LESTE pausetilstand kan være og fortsatt brukes når en senere lesing feiler. Målt fra da lesingen STARTET (tilstanden er minst så gammel som det).
+ * Konstant og bevisst IKKE konfigurerbar (hverken via env eller valg): en grense som kan skrus opp i drift er en grense som kan skrus av. 45 s dekker en kort databaseblipp, men er så kort at et
+ * tilbakekall av en lekket nøkkel aldri blir værende usett lenge fordi databasen er utilgjengelig.
+ */
+export const PAUSE_STATE_MAX_AGE_MS = 45_000;
 
 /**
  * UA-1 P1A: trusted executor-grensesnitt. Gateway/modell har ALDRI direkte
@@ -321,11 +334,20 @@ export class ModelGateway {
   /** Runtime-evidens for /status (§25): satt først når hendelsen faktisk har skjedd. */
   private crossProviderFallbackSeen = false;
   private criticRunSeen = false;
-  /** WP-H0: siste LESTE eier-pause (se `ProviderPauseSource`). Oppdateres ved hvert modellkall; synkrone lesere (`listConfiguredProviders`, `meshStatus`) bruker den. */
+  /**
+   * WP-H0: siste LESTE eier-pause (se `ProviderPauseSource`). Oppdateres ved hvert modellkall; synkrone lesere (`listConfiguredProviders`, `meshStatus`) bruker den - de er kun visning/rådgivende,
+   * håndhevelsen skjer i `livePauses()` ved hvert kall.
+   */
   private pausedSnapshot: ReadonlySet<string> = new Set();
-  private pauseStateKnown = false;
+  /** Gjennomgang av PR #316 (L-6): hver lesing får et løpenummer FØR den starter; snapshotet bærer nummeret til lesingen det kommer fra, og en eldre lesing overskriver aldri en nyere. */
+  private pauseReadSeq = 0;
+  private pauseSnapshotSeq = 0;
+  /** Gjennomgang av PR #316 (M-3): når lesingen snapshotet kommer fra STARTET (ms), eller null når ingen lesing har lyktes ennå. Aldersgrensen er `PAUSE_STATE_MAX_AGE_MS`. */
+  private pauseSnapshotReadAt: number | null = null;
+  private readonly now: () => number;
 
   constructor(private readonly opts: GatewayOptions) {
+    this.now = opts.now ?? Date.now;
     this.guard = new BudgetGuard(opts.pool, opts.budget ?? DEFAULT_BUDGET);
     this.registry = opts.registry ?? new CapabilityRegistry();
     this.pricing = opts.pricing ?? DEFAULT_PRICING;
@@ -371,23 +393,36 @@ export class ModelGateway {
   }
 
   /**
-   * WP-H0: leser eierens pause LIVE (se `ProviderPauseSource`). Uten kilde: ingen er pauset. Lesefeil: siste kjente tilstand hvis en lesing har lyktes, ellers fail-closed (`not_configured`).
-   * Kalles i starten av hvert modellkall, så pausen virker fra neste kall - også mellom rundene i en verktøyløkke - uten omstart.
+   * WP-H0: leser eierens pause LIVE (se `ProviderPauseSource`). Uten kilde: ingen er pauset. Kalles i starten av hvert modellkall, så pausen virker fra neste kall - også mellom rundene i en verktøyløkke -
+   * uten omstart.
+   *
+   * Lesefeil (gjennomgang av PR #316, M-3): har en lesing lyktes for høyst `PAUSE_STATE_MAX_AGE_MS` siden, brukes siste kjente tilstand; ellers (aldri lest, eller tilstanden er for gammel, eller klokken har gått
+   * bakover) er svaret det samme som ved første lesefeil - kallet nektes (`not_configured`, fail-closed).
+   *
+   * Samtidige lesinger (L-6): lesingen får et løpenummer før den starter, og et snapshot fra en ELDRE lesing som kommer tilbake sent overskriver aldri et nyere. Kallet bruker alltid det nyeste snapshotet.
    */
   private async livePauses(): Promise<ReadonlySet<string>> {
     const source = this.opts.providerPause;
     if (source === undefined) return this.pausedSnapshot;
+    const seq = ++this.pauseReadSeq;
+    const startedAt = this.now();
     try {
       const paused = await source.pausedProviders();
-      this.pausedSnapshot = paused;
-      this.pauseStateKnown = true;
-      return paused;
+      if (seq > this.pauseSnapshotSeq) {
+        this.pausedSnapshot = paused;
+        this.pauseSnapshotSeq = seq;
+        this.pauseSnapshotReadAt = startedAt;
+      }
+      return this.pausedSnapshot;
     } catch (err) {
-      if (this.pauseStateKnown) {
-        console.error(JSON.stringify({ msg: "provider_pause_read_failed_using_last_known", ...pauseReadFailure(err) }));
+      const ageMs = this.pauseSnapshotReadAt === null ? null : this.now() - this.pauseSnapshotReadAt;
+      if (ageMs !== null && ageMs >= 0 && ageMs <= PAUSE_STATE_MAX_AGE_MS) {
+        console.error(JSON.stringify({ msg: "provider_pause_read_failed_using_last_known", age_ms: ageMs, ...pauseReadFailure(err) }));
         return this.pausedSnapshot;
       }
-      console.error(JSON.stringify({ msg: "provider_pause_read_failed_fail_closed", ...pauseReadFailure(err) }));
+      console.error(JSON.stringify({
+        msg: "provider_pause_read_failed_fail_closed", reason: ageMs === null ? "no_state_yet" : "last_known_stale", ...(ageMs !== null ? { age_ms: ageMs } : {}), ...pauseReadFailure(err)
+      }));
       throw new ProviderError("router", "not_configured", "provider_pause_state_unavailable");
     }
   }

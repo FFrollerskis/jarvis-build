@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it, vi } from "vitest";
 import type pg from "pg";
 import {
   ProviderError,
@@ -9,7 +11,7 @@ import {
   type ToolResultMessage
 } from "@jarvis/provider-adapters";
 import {
-  AiRouter, CapabilityRegistry, CouncilAutoTriggerLimiter, MemoryTraceSink, ModelGateway, NoEligibleProviderError, ProviderHealthTracker, unavailableCooldownMs,
+  AiRouter, CapabilityRegistry, CouncilAutoTriggerLimiter, MemoryTraceSink, ModelGateway, NoEligibleProviderError, PAUSE_STATE_MAX_AGE_MS, ProviderHealthTracker, unavailableCooldownMs,
   type ProviderPauseSource, type ToolExecutor
 } from "../src/index.ts";
 
@@ -62,14 +64,15 @@ class MutablePause implements ProviderPauseSource {
   }
 }
 
-function build(opts: { pause?: MutablePause | null; behaviours?: Record<string, (req: ModelRequest) => ModelResult | Error> } = {}): { gateway: ModelGateway; counters: Counters; pause: MutablePause } {
+function build(opts: { pause?: MutablePause | null; behaviours?: Record<string, (req: ModelRequest) => ModelResult | Error>; now?: () => number; source?: ProviderPauseSource } = {}): { gateway: ModelGateway; counters: Counters; pause: MutablePause } {
   const counters: Counters = { calls: {}, costInserts: 0 };
   const pause = opts.pause ?? new MutablePause();
   const b = opts.behaviours ?? {};
   const gateway = new ModelGateway({
     pool: fakePool(counters), trace: new MemoryTraceSink(),
     providers: [adapter("anthropic", "claude-x", counters, b["anthropic"]), adapter("openai", "gpt-x", counters, b["openai"]), adapter("gemma_local", "gemma3", counters, b["gemma_local"])],
-    ...(opts.pause === null ? {} : { providerPause: pause })
+    ...(opts.pause === null ? {} : { providerPause: opts.source ?? pause }),
+    ...(opts.now !== undefined ? { now: opts.now } : {})
   });
   return { gateway, counters, pause };
 }
@@ -223,6 +226,189 @@ describe("lesefeil på pausekilden", () => {
     expect(r.provider).not.toBe("anthropic");
     await expect(gateway.complete({ ...base, provider: "anthropic" })).rejects.toMatchObject({ kind: "not_configured", message: "anthropic_paused_by_owner" });
     expect(counters.calls["anthropic"] ?? 0).toBe(0);
+  });
+});
+
+describe("aldersgrense på siste kjente pausetilstand (gjennomgang av PR #316, M-3)", () => {
+  /** Styrbar klokke: `set(ms)` er absolutt tid. Første vellykkede lesing skjer ved T0. */
+  const T0 = 1_000_000;
+  function scenario() {
+    let t = T0;
+    const pause = new MutablePause();
+    const env = build({ pause, now: () => t });
+    return { ...env, set: (ms: number) => { t = ms; } };
+  }
+  const total = (c: Counters): number => Object.values(c.calls).reduce((a, b) => a + b, 0);
+
+  it("aldersgrensen er en konstant på 45 s - ikke en parameter, ikke en miljøvariabel", () => {
+    expect(PAUSE_STATE_MAX_AGE_MS).toBe(45_000);
+    const src = readFileSync(fileURLToPath(new URL("../src/model-gateway.ts", import.meta.url)), "utf8");
+    // ingen vei fra miljø eller valg til grensen: konstanten er en bokstav, finnes én gang, og `GatewayOptions` har ingen TTL-parameter
+    expect([...src.matchAll(/PAUSE_STATE_MAX_AGE_MS\s*=\s*([^;]+);/g)].map((m) => m[1])).toEqual(["45_000"]);
+    expect(src).not.toMatch(/(?:pauseStateMaxAge|pauseTtl|pause_ttl|PAUSE_TTL|JARVIS_PAUSE)/i);
+  });
+
+  it("REPRO fra gjennomgangen: kilden gir først «ingen pauset», anthropic pauses i en ANNEN prosess, lesingen kaster - innenfor grensen brukes siste kjente tilstand, etter grensen nektes kallet og anthropic kalles aldri", async () => {
+    const s = scenario();
+    await s.gateway.complete({ ...base, provider: "anthropic" }); // vellykket lesing ved T0: ingen pauset
+    expect(s.counters.calls["anthropic"]).toBe(1);
+    s.pause.paused.add("anthropic"); // eieren tilbakekaller nøkkelen fra en annen prosess ...
+    s.pause.failAlways = new Error("connect ECONNREFUSED 10.0.0.9:5432"); // ... mens lesingen feiler
+    s.set(T0 + 10_000);
+    await s.gateway.complete({ ...base, provider: "anthropic" }); // innenfor grensen: siste kjente tilstand (ingen pauset) brukes
+    expect(s.counters.calls["anthropic"]).toBe(2);
+    const costBefore = s.counters.costInserts;
+    s.set(T0 + PAUSE_STATE_MAX_AGE_MS + 1);
+    const err = await s.gateway.complete({ ...base, provider: "anthropic" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(err).toMatchObject({ kind: "not_configured", provider: "router", message: "provider_pause_state_unavailable" });
+    expect(JSON.stringify(err)).not.toContain("10.0.0.9");
+    expect(s.counters.calls["anthropic"]).toBe(2); // ALDRI kalt etter grensen
+    expect(s.counters.costInserts).toBe(costBefore);
+  });
+
+  it("grensen er presis: nøyaktig 45 000 ms er innenfor, 45 001 ms er utenfor - og det gjelder ALLE leverandører (også lokale), ikke bare den som ble pauset", async () => {
+    const s = scenario();
+    await s.gateway.complete({ ...base });
+    s.pause.failAlways = new Error("db nede");
+    s.set(T0 + PAUSE_STATE_MAX_AGE_MS - 1);
+    await s.gateway.complete({ ...base, provider: "openai" });
+    s.set(T0 + PAUSE_STATE_MAX_AGE_MS);
+    await s.gateway.complete({ ...base, provider: "gemma_local" });
+    const callsInside = total(s.counters);
+    s.set(T0 + PAUSE_STATE_MAX_AGE_MS + 1);
+    for (const provider of ["openai", "gemma_local", "anthropic"]) {
+      await expect(s.gateway.complete({ ...base, provider }), provider).rejects.toMatchObject({ kind: "not_configured", message: "provider_pause_state_unavailable" });
+    }
+    await expect(s.gateway.complete({ ...base }), "AUTO").rejects.toMatchObject({ message: "provider_pause_state_unavailable" });
+    await expect(s.gateway.stream({ ...base }, () => undefined), "stream").rejects.toMatchObject({ message: "provider_pause_state_unavailable" });
+    expect(total(s.counters)).toBe(callsInside);
+  });
+
+  it("en MISLYKKET lesing forlenger aldri tilstandens levetid; en vellykket lesing nullstiller alderen", async () => {
+    const s = scenario();
+    await s.gateway.complete({ ...base }); // vellykket ved T0
+    s.pause.failAlways = new Error("db nede");
+    s.set(T0 + 30_000);
+    await s.gateway.complete({ ...base, provider: "openai" }); // feiler, men innenfor: brukes - uten å fornye alderen
+    s.set(T0 + 46_000);
+    await expect(s.gateway.complete({ ...base, provider: "openai" })).rejects.toMatchObject({ message: "provider_pause_state_unavailable" });
+    // databasen er tilbake: vellykket lesing ved T0+50 000 gir 45 s til
+    s.pause.failAlways = null;
+    s.set(T0 + 50_000);
+    await s.gateway.complete({ ...base, provider: "openai" });
+    s.pause.failAlways = new Error("db nede igjen");
+    s.set(T0 + 50_000 + PAUSE_STATE_MAX_AGE_MS);
+    await s.gateway.complete({ ...base, provider: "openai" });
+    s.set(T0 + 50_000 + PAUSE_STATE_MAX_AGE_MS + 1);
+    await expect(s.gateway.complete({ ...base, provider: "openai" })).rejects.toMatchObject({ message: "provider_pause_state_unavailable" });
+  });
+
+  it("når databasen er tilbake leses den ferske tilstanden: den pausede leverandøren nektes, de andre virker", async () => {
+    const s = scenario();
+    await s.gateway.complete({ ...base });
+    s.pause.paused.add("anthropic");
+    s.pause.failAlways = new Error("db nede");
+    s.set(T0 + PAUSE_STATE_MAX_AGE_MS + 1);
+    await expect(s.gateway.complete({ ...base, provider: "anthropic" })).rejects.toMatchObject({ message: "provider_pause_state_unavailable" });
+    s.pause.failAlways = null;
+    await expect(s.gateway.complete({ ...base, provider: "anthropic" })).rejects.toMatchObject({ kind: "not_configured", message: "anthropic_paused_by_owner" });
+    const ok2 = await s.gateway.complete({ ...base, provider: "openai" });
+    expect(ok2.provider).toBe("openai");
+    expect(s.counters.calls["anthropic"] ?? 0).toBe(0);
+  });
+
+  it("en klokke som har gått BAKOVER (negativ alder) kan ikke bevise at tilstanden er fersk: kallet nektes", async () => {
+    const s = scenario();
+    await s.gateway.complete({ ...base });
+    s.pause.failAlways = new Error("db nede");
+    s.set(T0 - 1);
+    await expect(s.gateway.complete({ ...base, provider: "openai" })).rejects.toMatchObject({ message: "provider_pause_state_unavailable" });
+  });
+
+  it("loggen sier hvorfor kallet ble nektet (aldri lest / for gammel), uten feilmeldingen", async () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((line: unknown) => { lines.push(String(line)); });
+    try {
+      const s = scenario();
+      s.pause.failAlways = new Error("password=hemmelig");
+      await s.gateway.complete({ ...base }).catch(() => undefined);
+      s.pause.failAlways = null;
+      await s.gateway.complete({ ...base });
+      s.pause.failAlways = new Error("password=hemmelig");
+      s.set(T0 + 20_000);
+      await s.gateway.complete({ ...base });
+      s.set(T0 + 20_000 + PAUSE_STATE_MAX_AGE_MS + 1);
+      await s.gateway.complete({ ...base }).catch(() => undefined);
+    } finally {
+      spy.mockRestore();
+    }
+    const parsed = lines.map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(parsed.map((p) => `${String(p["msg"])}:${String(p["reason"] ?? "")}`)).toEqual([
+      "provider_pause_read_failed_fail_closed:no_state_yet",
+      "provider_pause_read_failed_using_last_known:",
+      "provider_pause_read_failed_fail_closed:last_known_stale"
+    ]);
+    expect(lines.join("\n")).not.toContain("hemmelig");
+  });
+});
+
+describe("sekvensnummer på pause-snapshotet: en eldre lesing overskriver aldri en nyere (gjennomgang av PR #316, L-6)", () => {
+  class DeferredPause implements ProviderPauseSource {
+    readonly pending: Array<{ resolve: (s: ReadonlySet<string>) => void; reject: (e: Error) => void }> = [];
+    pausedProviders(): Promise<ReadonlySet<string>> {
+      return new Promise((resolve, reject) => { this.pending.push({ resolve, reject }); });
+    }
+  }
+  async function until(cond: () => boolean): Promise<void> {
+    for (let i = 0; i < 200 && !cond(); i += 1) await new Promise((r) => setImmediate(r));
+    expect(cond()).toBe(true);
+  }
+
+  it("lesing #1 startet først men svarer sist med den GAMLE tilstanden: snapshotet blir stående på den nyere, og den eldre lesingens kall bruker det", async () => {
+    const deferred = new DeferredPause();
+    const { gateway, counters } = build({ source: deferred });
+    const older = gateway.complete({ ...base, provider: "anthropic" }).catch((e: unknown) => e);
+    await until(() => deferred.pending.length === 1);
+    const newer = gateway.complete({ ...base, provider: "openai" }).catch((e: unknown) => e);
+    await until(() => deferred.pending.length === 2);
+    deferred.pending[1]?.resolve(new Set(["anthropic"])); // nyere lesing: eieren har pauset anthropic
+    expect(await newer).toMatchObject({ provider: "openai" });
+    deferred.pending[0]?.resolve(new Set()); // den eldre lesingen (før pausen) kommer sent tilbake med «ingen pauset»
+    expect(await older).toMatchObject({ kind: "not_configured", message: "anthropic_paused_by_owner" });
+    expect(counters.calls["anthropic"] ?? 0).toBe(0);
+    expect(gateway.listConfiguredProviders()).not.toContain("anthropic");
+    expect(gateway.meshStatus().providers.find((p) => p.provider === "anthropic")?.paused).toBe(true);
+  });
+
+  it("rekkefølgen motsatt (eldre først, nyere sist) gir det vanlige: nyeste lesing gjelder", async () => {
+    const deferred = new DeferredPause();
+    const { gateway } = build({ source: deferred });
+    const first = gateway.complete({ ...base, provider: "openai" }).catch((e: unknown) => e);
+    await until(() => deferred.pending.length === 1);
+    const second = gateway.complete({ ...base, provider: "openai" }).catch((e: unknown) => e);
+    await until(() => deferred.pending.length === 2);
+    deferred.pending[0]?.resolve(new Set(["anthropic"]));
+    await first;
+    deferred.pending[1]?.resolve(new Set()); // eieren gjenopptok anthropic i mellomtiden: den nyere lesingen gjelder
+    await second;
+    expect(gateway.listConfiguredProviders()).toContain("anthropic");
+  });
+
+  it("en eldre lesing som FEILER sent hever ikke et nyere snapshot ut av sin aldersgrense (alderen følger den anvendte lesingen)", async () => {
+    let t = 5_000_000;
+    const deferred = new DeferredPause();
+    const { gateway } = build({ source: deferred, now: () => t });
+    const older = gateway.complete({ ...base, provider: "openai" }).catch((e: unknown) => e);
+    await until(() => deferred.pending.length === 1);
+    t += 1_000;
+    const newer = gateway.complete({ ...base, provider: "openai" }).catch((e: unknown) => e);
+    await until(() => deferred.pending.length === 2);
+    deferred.pending[1]?.resolve(new Set());
+    await newer;
+    t += PAUSE_STATE_MAX_AGE_MS + 5_000;
+    deferred.pending[0]?.reject(new Error("db nede")); // eldre lesing feiler, men snapshotet er nå for gammelt
+    expect(await older).toMatchObject({ kind: "not_configured", message: "provider_pause_state_unavailable" });
   });
 });
 
