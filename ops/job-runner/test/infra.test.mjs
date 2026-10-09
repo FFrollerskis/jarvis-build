@@ -229,6 +229,64 @@ describe("C: compose-overriden gir worker KUN socket-katalogen og tokenfilen", (
   });
 });
 
+const COMPOSE_PROBE = spawnSync("docker", ["compose", "version"], { encoding: "utf8" });
+const HAS_COMPOSE = !COMPOSE_PROBE.error && COMPOSE_PROBE.status === 0;
+
+describe.skipIf(!HAS_COMPOSE)("C2: den ekte Compose-CLI-en (uten daemon) fletter basen og overriden riktig", () => {
+  /** `docker compose config --format json` mot basen (+ overriden). Krever ikke daemon; leser ikke .env fra repoet. */
+  async function render(withOverride, extra = {}) {
+    const dir = await mkdtemp(join(tmpdir(), "wpc1-compose-"));
+    const envFile = join(dir, "check.env");
+    const lines = ["INFISICAL_DB_PASSWORD", "JARVIS_BROWSER_GATEWAY_TOKEN_SECRET", "JARVIS_DB_ADMIN_PASSWORD", "LANGFUSE_DB_PASSWORD"].map((n) => `${n}=dummy-verdi-kun-for-config-0123456789abcdef`);
+    for (const [k, v] of Object.entries(extra)) lines.push(`${k}=${v}`);
+    await writeFile(envFile, `${lines.join("\n")}\n`);
+    const files = ["-f", join(ROOT, "infra/local/docker-compose.yml"), ...(withOverride ? ["-f", join(INFRA, "docker-compose.job-runner.yml")] : [])];
+    const r = spawnSync("docker", ["compose", "--env-file", envFile, ...files, "config", "--format", "json"], {
+      encoding: "utf8", timeout: 60_000, env: { PATH: process.env["PATH"], HOME: dir, DOCKER_CONFIG: dir, DOCKER_HOST: "unix:///nonexistent-jarvis-wpc1.sock" }
+    });
+    return { status: r.status, stderr: (r.stderr ?? "").split("\n").filter((l) => !l.includes("level=warning")).join("\n"), json: r.status === 0 ? JSON.parse(r.stdout) : null };
+  }
+
+  it("med overriden: worker får gruppen, host-modus, to read-only binds og beholder hele herdingen; ingen docker.sock noe sted", async () => {
+    const r = await render(true, { JARVIS_JOB_RUNNER_GID: "4242" });
+    expect(r.status, r.stderr).toBe(0);
+    const worker = r.json.services.worker;
+    expect(worker.group_add).toEqual(["4242"]);
+    expect(worker.environment).toMatchObject({
+      JARVIS_JOB_RUNNER: "host", JARVIS_JOB_RUNNER_SOCKET: "/run/jarvis-job-runner/runner.sock", JARVIS_JOB_RUNNER_TOKEN_FILE: "/run/secrets/jarvis-job-runner-token"
+    });
+    expect(worker.volumes).toEqual([
+      { type: "bind", source: "/var/lib/jarvis-job-runner/sock", target: "/run/jarvis-job-runner", read_only: true, bind: { create_host_path: false } },
+      { type: "bind", source: "/etc/jarvis/job-runner.token", target: "/run/secrets/jarvis-job-runner-token", read_only: true, bind: { create_host_path: false } }
+    ]);
+    expect(worker.read_only).toBe(true);
+    expect(worker.cap_drop).toEqual(["ALL"]);
+    expect(worker.security_opt).toEqual(["no-new-privileges:true"]);
+    expect(worker.privileged).toBeUndefined();
+    expect(JSON.stringify(r.json)).not.toContain("docker.sock");
+    // ingen ANNEN tjeneste er berørt av overriden
+    const base = await render(false);
+    for (const [name, service] of Object.entries(r.json.services)) {
+      if (name !== "worker") expect(service, name).toEqual(base.json.services[name]);
+    }
+  });
+
+  it("uten overriden er worker uendret: ingen mounts, ingen ekstra gruppe, JARVIS_JOB_RUNNER tom (lukket)", async () => {
+    const r = await render(false);
+    expect(r.status, r.stderr).toBe(0);
+    const worker = r.json.services.worker;
+    expect(worker.environment.JARVIS_JOB_RUNNER).toBe("");
+    expect(worker.volumes ?? []).toEqual([]);
+    expect(worker.group_add ?? []).toEqual([]);
+  });
+
+  it("uten JARVIS_JOB_RUNNER_GID nekter Compose å lage konfigurasjonen (aldri en stille tom gruppe)", async () => {
+    const r = await render(true);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("JARVIS_JOB_RUNNER_GID");
+  });
+});
+
 describe("D: eksempelkonfigen", () => {
   it("er gyldig bortsett fra den nullede plassholder-image-ID-en: en uendret kopi kan ALDRI starte tjenesten", async () => {
     const example = JSON.parse(await read("infra/job-runner/job-runner.example.json"));
