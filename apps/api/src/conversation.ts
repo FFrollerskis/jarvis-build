@@ -23,7 +23,7 @@ import type { TaskService, InProcessWorker } from "@jarvis/tasks";
 import { createTurnContext, surfaceForChannel, type Surface, type SurfaceLimits, type TurnContext } from "@jarvis/tool-gateway";
 import { randomUUID } from "node:crypto";
 import { chatKnowledgeWithheldNote, chatWithheldNote, cloudScreenedExecutor, servedByCloudModel } from "./cloud-tool-screen.ts";
-import { LOCAL_FALLBACK_ERROR_KINDS, cloudHistoryNote, isMemoryReserveOnly, jobLocalOnlyNote, localOnlyNote, stripSystemNotes } from "./tool-turn-route.ts";
+import { LOCAL_FALLBACK_ERROR_KINDS, cloudHistoryNote, isMemoryReserveOnly, jobLocalOnlyNote, localOnlyNote, stripSourceMarkerIds, stripSystemNotes } from "./tool-turn-route.ts";
 
 export interface ConversationDeps {
   messages: MessageStore;
@@ -40,6 +40,8 @@ export interface ConversationDeps {
   selfDiagnosis?: { run(identity: IdentityContext, opts: { brief: boolean }): Promise<string | null> };
   /** EV-2 (D-417): tjenestemål/forverring/dataskvalitet for hurtigbanen (`executive.get_slo_report` via Tool Gateway). Udefinert = ærlig «kan ikke lese». */
   sloReport?: { run(identity: IdentityContext): Promise<string | null> };
+  /** WP-B (D-452): «hvordan utvikler du deg» for hurtigbanen (`executive.get_evolution_report` via Tool Gateway) - evolusjonsportene i observasjonsmodus. Udefinert = ærlig «kan ikke lese». */
+  evolutionReport?: { run(identity: IdentityContext): Promise<string | null> };
   /** D-424: «hva koster du» for hurtigbanen (`run_rate.get_cost_overview` via Tool Gateway). */
   costReport?: { run(identity: IdentityContext): Promise<string | null> };
   /**
@@ -482,6 +484,13 @@ export class ConversationEngine {
       const catalog = this.deps.tools?.catalog?.(surface) ?? "";
       const systemPrompt = buildSystemPrompt(personality, { surface, catalog });
       const system = memoryContext ? `${systemPrompt}\n\n${memoryContext}` : systemPrompt;
+      // Gjennomgang nr. 2 av WP-A (D-451): faller en verktøytur tilbake til et svar UTEN verktøy (D-380), skal prompten ikke lenger si «kall verktøyet med en gang» og liste tjenester som ikke er vedlagt - en liten modell diktet ellers opp
+      // verktøysvar. Fallbacken får samme persona og minne, men uten katalogen og med en ærlig linje om at verktøy ikke er tilgjengelige.
+      const systemWithoutTools = (): string => {
+        const base = buildSystemPrompt(personality, { surface, catalog: "" });
+        const honest = "Verktøy er IKKE tilgjengelige i dette svaret: du kan ikke slå opp, hente eller utføre noe nå. Ber Tobias om noe som krever et verktøy, si det ærlig i stedet for å gjette eller dikte opp et resultat.";
+        return memoryContext ? `${base}\n\n${memoryContext}\n\n${honest}` : `${base}\n\n${honest}`;
+      };
       // UA-1: Conversation Engine oppgir purpose - aldri provider direkte (§31).
       // P1A (§27): SSE-klienter får normalisert stream; klienten ser aldri provider-format.
       // D-203 (2026-09-20, direkte chat-instruks fra Tobias: "simpel default, lav-sensitiv
@@ -742,7 +751,8 @@ export class ConversationEngine {
           console.error(
             JSON.stringify({ msg: "d380_local_model_rejected_tools_fallback", provider: err.provider, reason: err.message })
           );
-          result = await (onEvent ? this.deps.gateway.stream(input, onEvent, signal) : this.deps.gateway.complete(input));
+          const noToolsInput = { ...input, request: { ...input.request, system: systemWithoutTools() } };
+          result = await (onEvent ? this.deps.gateway.stream(noToolsInput, onEvent, signal) : this.deps.gateway.complete(noToolsInput));
         } else {
           throw err;
         }
@@ -858,7 +868,7 @@ export class ConversationEngine {
     // Gjennomgang av WP-A (D-451, bekreftet): selve minneblokken (profil, kommende forpliktelser, treff) ligger i systemprompten og klassifiseres nå som tekst - ikke bare via rom/`sensitivity`-kolonnen. Kolonnen er regnet ut
     // med ordforrådet da elementet ble skrevet, så et element lagret FØR Q-52 A («Tobias har ADHD …», `normal`) gikk ellers til en skymodell. Gamle rader flyttes til `special` av det nattlige `memory-resensitize-sweep` (`JARVIS_MEMORY_RESENSITIZE=apply`).
     const baseline = classifyContentSensitivity({
-      texts: [text, memoryMeta.text],
+      texts: [text, stripSourceMarkerIds(memoryMeta.text)],
       memory_spaces: memoryMeta.spaces,
       memory_sensitivities: memoryMeta.sensitivities
     });
@@ -881,7 +891,7 @@ export class ConversationEngine {
     // Del 3 (JARVIS-016/035): sensitivitet utledes av INNHOLDET (minne, historikk, melding, verktøykilder) - ikke lenger hardkodet «public».
     // Helse/finans/hemmeligheter ⇒ kun lokal behandler; privat/forretningsminne og verktøyruter ⇒ aldri gratis/delt sky.
     const classified = classifyContentSensitivity({
-      texts: [text, memoryMeta.text, ...history.map((m) => m.content)],
+      texts: [text, stripSourceMarkerIds(memoryMeta.text), ...history.map((m) => m.content)],
       memory_spaces: memoryMeta.spaces,
       memory_sensitivities: memoryMeta.sensitivities,
       private_tool_output: useTools
@@ -923,7 +933,7 @@ export class ConversationEngine {
     const { surface, text, fullHistory, history, memoryMeta } = input;
     const select = this.deps.tools?.select;
     if (!select) return undefined;
-    const own = classifyContentSensitivity({ texts: [text, memoryMeta.text], memory_spaces: memoryMeta.spaces, memory_sensitivities: memoryMeta.sensitivities });
+    const own = classifyContentSensitivity({ texts: [text, stripSourceMarkerIds(memoryMeta.text)], memory_spaces: memoryMeta.spaces, memory_sensitivities: memoryMeta.sensitivities });
     if (own.sensitivity === "SECRET_RESTRICTED") return undefined;
     const ownRow = (() => {
       for (let i = fullHistory.length - 1; i >= 0; i -= 1) if (fullHistory[i]!.role === "user" && fullHistory[i]!.content === text) return fullHistory[i]!;
@@ -940,7 +950,7 @@ export class ConversationEngine {
     if (selection.min_sensitivity !== undefined) return undefined;
     if (selection.definitions.length === 0 || isMemoryReserveOnly(selection.definitions, selection.tool_ids)) return undefined;
     const sensitivityDecision = classifyContentSensitivity({
-      texts: [text, memoryMeta.text, ...cleanHistory.map((m) => m.content)],
+      texts: [text, stripSourceMarkerIds(memoryMeta.text), ...cleanHistory.map((m) => m.content)],
       memory_spaces: memoryMeta.spaces,
       memory_sensitivities: memoryMeta.sensitivities,
       private_tool_output: true
@@ -1013,6 +1023,10 @@ export class ConversationEngine {
       case "slo_report": {
         const text = this.deps.sloReport ? await this.deps.sloReport.run(identity).catch(() => null) : null;
         return { reply: text ?? "Jeg kan ikke lese tjenestemålene akkurat nå, så jeg vil ikke påstå at ytelsen er bra.", routed: "fast" };
+      }
+      case "evolution_report": {
+        const text = this.deps.evolutionReport ? await this.deps.evolutionReport.run(identity).catch(() => null) : null;
+        return { reply: text ?? "Jeg kan ikke lese evolusjonsportene akkurat nå, så jeg vil ikke påstå at utviklingen min er i orden.", routed: "fast" };
       }
       case "cost_report": {
         const text = this.deps.costReport ? await this.deps.costReport.run(identity).catch(() => null) : null;

@@ -31,10 +31,10 @@ export function maxSensitivity(...values: Array<DataSensitivity | undefined>): D
  * JS `\b` kjenner ikke æøå som ordtegn.
  */
 const HEALTH_TERMS: readonly string[] = [
-  "diagnose[a-zæøå]*", "sykdom[a-zæøå]*", "sykemelding[a-zæøå]*", "sykmeld[a-zæøå]*", "medisin[a-zæøå]*", "resept[a-zæøå]*", "legetime[a-zæøå]*", "fastlege[a-zæøå]*", "lege(?:n|ne|r|ns)?",
+  "diagnose[a-zæøå]*", "sykdom[a-zæøå]*", "sykemelding[a-zæøå]*", "syke?meld[a-zæøå]*", "medisin[a-zæøå]*", "resept[a-zæøå]*", "legetime[a-zæøå]*", "fastlege[a-zæøå]*", "lege(?:n|ne|r|ns)?",
   "sykehus[a-zæøå]*", "blodprøve[a-zæøå]*", "psykolog[a-zæøå]*", "psykisk[a-zæøå]*", "depresjon[a-zæøå]*", "angst(?:en|anfall[a-zæøå]*|lidelse[a-zæøå]*)?", "symptom[a-zæøå]*", "allergi[a-zæøå]*", "graviditet[a-zæøå]*",
   "kreft(?:en)?", "kreft(?:syk|svulst|behandl|celle|diagnos)[a-zæøå]*", "helseopplysning[a-zæøå]*", "diabetes(?:en)?", "blodtrykk[a-zæøå]*",
-  "helse(?:n|problem[a-zæøå]*|tilstand[a-zæøå]*)?", "adhd", "psykiater[a-zæøå]*", "tannlege[a-zæøå]*", "terapi(?:en|er|ene)?", "terapeut[a-zæøå]*", "migrene[a-zæøå]*", "kolesterol[a-zæøå]*",
+  "helse(?:n|problem[a-zæøå]*|tilstand[a-zæøå]*)?", "helse(?:plag|hjelp|status|journal|forsikring)[a-zæøå]*", "astma[a-zæøå]*", "metformin[a-zæøå]*", "adhd", "psykiater[a-zæøå]*", "tannlege[a-zæøå]*", "terapi(?:en|er|ene)?", "terapeut[a-zæøå]*", "migrene[a-zæøå]*", "kolesterol[a-zæøå]*",
   "insulin[a-zæøå]*", "kjemoterapi[a-zæøå]*", "antidepressiv[a-zæøå]*", "covid(?:-?19)?", "gravid[a-zæøå]*", "svangerskap[a-zæøå]*", "kolonoskopi[a-zæøå]*",
   "medication", "diagnosis", "prescription", "therapy", "therapist", "medical"
 ];
@@ -46,8 +46,14 @@ const HEALTH = new RegExp(`\\b(?:${HEALTH_TERMS.join("|")})\\b`, "i");
  */
 const TECHNICAL_HEALTH: readonly RegExp[] = [
   /(?<![a-zæøå])(?:system|tjeneste|server|connector|provider|leverandør|nett(?:verk)?|api|endepunkt|jarvis|worker|container|database|db|cluster|node|tilkobling|integrasjon)[a-zæøå]*-?helse[a-zæøå]*/gi,
-  /(?<![a-zæøå])helse[a-zæøå]*-?(?:endepunkt|sjekk|status|kontroll|api|rute|monitor|overvåk|dashbord|probe|ping|logg)[a-zæøå]*/gi,
-  /(?<![a-zæøå])helse(?:n|tilstand(?:en)?)?\s+(?:til|for|i|på|hos)\s+(?:systemet|tjenesten|serveren|nettverket|connectoren|providere?n?|jarvis|api(?:et)?|databasen|workeren|containeren|tilkoblingen|integrasjonen|løsningen)(?![a-zæøå])/gi
+  // «helsestatusen min» er personlig (eiersord rett etter) og fjernes ikke her; «helsestatus for tilkoblingen» er teknisk.
+  /(?<![a-zæøå])helse[a-zæøå]*-?(?:endepunkt|sjekk|status|kontroll|api|rute|monitor|overvåk|dashbord|probe|ping|logg)[a-zæøå]*(?![a-zæøå])(?!\s+(?:min|mi|mitt|mine|din|ditt|di|dine|hans|hennes|vår|våre)(?![a-zæøå]))/gi,
+  /(?<![a-zæøå])helse(?:n|tilstand(?:en)?)?\s+(?:til|for|i|på|hos)\s+(?:systemet|tjenesten|serveren|nettverket|connectoren|providere?n?|jarvis|api(?:et)?|databasen|workeren|containeren|tilkoblingen|integrasjonen|løsningen)(?![a-zæøå])/gi,
+  // Gjennomgang nr. 2 av WP-A (D-451): «Systemets helse er god», «Systemene har god helse», «helsetilstand per tilkoblet system» (Jarvis' egne verktøybeskrivelser bruker det siste). Eiersform («systemets», «Jarvis sin») eller «har/med god helse» kreves, så
+  // «Jarvis helsen min er dårlig» (ingen eiersform) ikke skjuler en personlig helseomtale.
+  /(?<![a-zæøå])(?:(?:system|tjeneste|server|connector|provider|leverandør|nett(?:verk)?|api|endepunkt|worker|container|database|db|cluster|node|tilkobling|integrasjon)[a-zæøå]*s|jarvis(?:['’]s?|s|\s+sin))\s+(?:sin\s+)?helse(?:tilstand(?:en)?|n)?(?![a-zæøå])/gi,
+  /(?<![a-zæøå])(?:system|tjeneste|server|connector|provider|leverandør|nett(?:verk)?|api|endepunkt|jarvis|worker|container|database|db|cluster|node|tilkobling|integrasjon)[a-zæøå]*\s+(?:har|med)\s+(?:god|dårlig|fin|bra|ok)\s+helse(?![a-zæøå])/gi,
+  /(?<![a-zæøå])helse(?:n|tilstand(?:en)?)?\s+(?:per|pr\.?)\s+(?:tilkoblet\s+|enkelt\s+|hver\s+)?(?:system|tjeneste|server|connector|provider|leverandør|integrasjon|tilkobling)[a-zæøå]*/gi
 ];
 /**
  * «HIV» skrives med versaler; små bokstaver er også verbet «å hive» («hiv inn en PR») og teller derfor kun i sammensetninger og faste uttrykk («hiv-positiv», «har hiv», «testet positivt på hiv»).
@@ -142,21 +148,27 @@ export const RECENT_HISTORY_WINDOW = 4;
  * ALENE er strengere enn `ceiling` (nivået turen allerede har fra meldingen og det valgte minnet) holdes UTENFOR konteksten, så de aldri
  * sendes til en modell som ikke har lov til å se dem. Rekkefølgen på de som beholdes er uendret.
  */
-export function partitionHistoryBySensitivity<T extends { content: string }>(
+export function partitionHistoryBySensitivity<T extends { content: string; role?: string }>(
   history: ReadonlyArray<T>,
   ceiling: DataSensitivity,
   recentWindow: number = RECENT_HISTORY_WINDOW
 ): { kept: T[]; withheld: number } {
   const cutoff = Math.max(0, history.length - recentWindow);
+  const drop = history.map((message, index) => index < cutoff && RANK[classifyContentSensitivity({ texts: [message.content] }).sensitivity] > RANK[ceiling]);
+  // Gjennomgang nr. 2 av WP-A (D-451): PARREGELEN gjelder også her. Svaret rett etter en holdt-tilbake brukermelding («Du har 45 000 igjen.») gjengir det følsomme uten at et stikkord står der, og spørsmålet rett før et
+  // holdt-tilbake svar hører til det samme; de følger med ut også når de selv ligger i det nylige vinduet. (Halen fra første følsomme melding gjelder fortsatt bare i det nylige vinduet, se `withholdSensitiveMessages`.)
+  const direct = [...drop];
+  direct.forEach((isDirect, index) => {
+    if (!isDirect) return;
+    const role = history[index]!.role;
+    if (role === "user" && history[index + 1]?.role === "assistant") drop[index + 1] = true;
+    if (role === "assistant" && history[index - 1]?.role === "user") drop[index - 1] = true;
+  });
   const kept: T[] = [];
   let withheld = 0;
   history.forEach((message, index) => {
-    const alone = classifyContentSensitivity({ texts: [message.content] }).sensitivity;
-    if (index < cutoff && RANK[alone] > RANK[ceiling]) {
-      withheld += 1;
-      return;
-    }
-    kept.push(message);
+    if (drop[index]) withheld += 1;
+    else kept.push(message);
   });
   return { kept, withheld };
 }

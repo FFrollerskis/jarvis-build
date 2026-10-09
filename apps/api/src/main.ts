@@ -7,6 +7,8 @@ import { checkEv0Boot, getLastEv0BootStatus, logEv0Boot } from "./ev0-boot.ts";
 import { assertNoSweepFailures, envHour, envInt, envPort, failOnSweepFailures, systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit } from "./owner.ts";
 import { buildSelfModelReaders } from "./self-model-readers.ts";
+import { backupStatusSourceFromEnv } from "./backup-status.ts";
+import { startUptimeHeartbeat } from "./heartbeat-sender.ts";
 import {
   ChannelSessionAuthority,
   ContextBuilder,
@@ -118,6 +120,7 @@ import { ConversationEngine } from "./conversation.ts";
 import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
 import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
+import { createEvolutionReportProvider } from "./evolution-source.ts";
 import { ChatJobs, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
@@ -163,6 +166,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const ownerControls = new OwnerControls(killSwitch, pool, ownerControlAuthority);
   // EV-1 (D-412): leserne selvdiagnosen (`executive.get_self_diagnosis`) komponeres av. `toolGateway` refereres først når en leser kalles (lat).
   const selfModelControls = new OwnerControlsService(killSwitch, ownerControls);
+  // WP-C2: backup-status fra en skrivebeskyttet statusfil (JARVIS_BACKUP_STATUS_FILE); uten den er `backup` UKJENT i selvdiagnosen.
+  const backupStatusSource = backupStatusSourceFromEnv();
   const selfModelReaders = buildSelfModelReaders({
     pool,
     tenantId: owner.tenant_id,
@@ -171,12 +176,23 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     connectorStatus: () => listConnectorStatus(toolGateway),
     // EV-0 oppstartsresultat (konstitusjon + endringsregister); null til sjekken har kjørt -> UKJENT.
     ev0Status: () => getLastEv0BootStatus(),
-    build: () => ({ sha: process.env["JARVIS_BUILD_SHA"]?.trim() || null, version: process.env["JARVIS_VERSION"]?.trim() || "0.1.0" })
+    build: () => ({ sha: process.env["JARVIS_BUILD_SHA"]?.trim() || null, version: process.env["JARVIS_VERSION"]?.trim() || "0.1.0" }),
+    backupStatus: backupStatusSource
   });
   await ownerControls.restore();
   // EV-2 (D-417): SLO/drift/dataskvalitet fra eksisterende observerbarhet (cost_events, tool_executions, tasks, memory_items) - ingen parallell telemetri.
   const sloReports = createSloReportProvider(pool, owner.tenant_id);
   Object.assign(selfModelReaders, buildSloReaders(sloReports));
+  // WP-B (D-452): evolusjonsportene (EV-0…EV-23) i OBSERVASJONSMODUS - kun lesing av eksisterende observerbarhet, `acts: false`. Selvendring er fortsatt frosset (D-397).
+  const evolutionReports = createEvolutionReportProvider({
+    pool,
+    tenantId: owner.tenant_id,
+    ev0Status: () => getLastEv0BootStatus(),
+    slo: sloReports,
+    connectors: () => listConnectorStatus(toolGateway),
+    killSwitchActive: async () => (await selfModelControls.getControlState()).kill_switch.active,
+    mesh: () => gateway.meshStatus()
+  });
   // D-174 (B2): hoistet hit (tidligere konstruert lenger nede, kun for
   // `enrollmentService`) - `OwnerControlsService` sitt nye, eier-vendte
   // `revoke_device` (se under, `additionalTools`) trenger DENNE SAMME
@@ -932,10 +948,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
             forbiddenModelToolIds: FORBIDDEN_MODEL_TOOL_IDS,
             connectors: CONNECTOR_REGISTRY.map((c) => ({ id: c.id, category: c.category, test_method: c.live_test ? "live" : "presence_only" })),
             modelProfiles: DEFAULT_PROFILES,
-            allModelCapabilities: ["text", "reasoning", "vision", "tool_calling", "structured_output", "streaming"]
+            allModelCapabilities: ["text", "reasoning", "vision", "tool_calling", "structured_output", "streaming"],
+            backupStatusReadable: backupStatusSource !== undefined
           }
         },
-        slo: { report: sloReports }
+        slo: { report: sloReports },
+        evolution: { report: evolutionReports }
       }))),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten
@@ -1090,6 +1108,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     sloReport: {
       async run(identity) {
         const result = await toolGateway.execute({ identity, tool_id: "executive", action: "get_slo_report", parameters: {} });
+        const text = result.ok ? (result.data as { summary_no?: unknown } | undefined)?.summary_no : undefined;
+        return typeof text === "string" ? text : null;
+      }
+    },
+    // WP-B (D-452): hurtigbanens «hvordan utvikler du deg» går gjennom Tool Gateway (Policy + revisjon) - samme verktøy modellen kan kalle.
+    evolutionReport: {
+      async run(identity) {
+        const result = await toolGateway.execute({ identity, tool_id: "executive", action: "get_evolution_report", parameters: {} });
         const text = result.ok ? (result.data as { summary_no?: unknown } | undefined)?.summary_no : undefined;
         return typeof text === "string" ? text : null;
       }
@@ -1640,6 +1666,9 @@ porter: se docs/RUNTIME_GATES.md`;
   }).then((status) => logEv0Boot(status)).catch((err: unknown) => {
     console.error(JSON.stringify({ msg: "ev0_boot_check_failed", error: (err as Error).message.slice(0, 200) }));
   });
+  // WP-C2 (OPS-RUNTIME): ekstern oppetids-heartbeat (dead man's switch). AV uten JARVIS_UPTIME_HEARTBEAT_URL; pinger KUN mens en lokal selvsjekk
+  // (databasen + api-prosessen svarer på /health) består - stillhet er alarmen hos eierens monitor. Kun status, aldri innhold; kan ikke velte API-et.
+  startUptimeHeartbeat({ port });
   return deps;
 }
 

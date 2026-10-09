@@ -9,6 +9,8 @@ export type FastIntent =
   | { kind: "self_diagnosis" }
   /** EV-2 (D-417): «hvor bra yter du» - SLO/forverring/dataskvalitet via Policy Gateway (aldri LLM). */
   | { kind: "slo_report" }
+  /** WP-B (D-452): «hvordan utvikler du deg» - evolusjonsportene (EV-0…EV-23) i observasjonsmodus via Policy Gateway (aldri LLM). */
+  | { kind: "evolution_report" }
   /** D-424: «hva koster du» - run-rate fra cost_events via Policy Gateway (aldri LLM). */
   | { kind: "cost_report" }
   /** D-424: «… i bakgrunnen» - eierens egen melding legges som bakgrunnsjobb via Policy Gateway; en svak lokal modell skal ikke måtte velge verktøy. */
@@ -29,6 +31,10 @@ const PATTERNS: Array<[RegExp, (m: RegExpMatchArray) => FastIntent]> = [
   [
     /^(?:hvor (?:bra|rask) yter du|er du treg|ytelse|ytelsesstatus|slo|tjenestemål|har noe blitt dårligere|dataskvalitet|datakvalitet)\s*[?!.]*\s*$/i,
     () => ({ kind: "slo_report" })
+  ],
+  [
+    /^(?:hvordan utvikler du deg|hvordan går det med utviklingen din|evolusjon(?:srapport|sstatus|sportene)?|evolusjonsporter|hva kan du forbedre(?: hos deg selv)?|hva har du lært|selvforbedring(?:srapport)?|self-?improvement)\s*[?!.]*\s*$/i,
+    () => ({ kind: "evolution_report" })
   ],
   [
     /^(?:hva koster (?:du|det)(?: meg)?(?: nå| i måneden| per måned| å kjøre deg)?|hvor mye (?:har du|har jeg|har det) (?:kostet|brukt)(?: .*)?|run-?rate|kostnad(?:er)?|api-?regning(?:en)?|regningen)\s*[?!.]*\s*$/i,

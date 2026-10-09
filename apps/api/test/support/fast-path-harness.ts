@@ -100,6 +100,8 @@ export interface Built {
   toolOptionsSeen: Array<{ localStickiness: boolean | undefined }>;
   /** Navnene på verktøyene hvert `completeWithTools`-kall fikk (utvalget for akkurat den turen/varianten). */
   toolNamesSeen: string[][];
+  /** Kall til gatewayens vanlige `complete`/`stream` (uten verktøyløkke), f.eks. D-380-fallbacken «svar uten verktøy». */
+  plainCalls: CompleteInput[];
   /** Kall til `memory.ingest` (D-283/D-386): eierens ord og de siste turene før (som data). */
   ingestCalls: Array<{ text: string; recent_turns: Array<{ role: string; content: string }> | undefined }>;
 }
@@ -110,6 +112,7 @@ export function buildEngine(opts: BuildOptions): Built {
   const outputs: ToolResultMessage[] = [];
   const toolOptionsSeen: Built["toolOptionsSeen"] = [];
   const ingestCalls: Built["ingestCalls"] = [];
+  const plainCalls: CompleteInput[] = [];
   const toolNamesSeen: string[][] = [];
   const memCalls: Array<{ text: string; options: unknown }> = [];
   const store: Row[] = [...(opts.prior ?? [])];
@@ -123,8 +126,14 @@ export function buildEngine(opts: BuildOptions): Built {
   } as unknown as MessageStore;
   const context = { build: async () => ({ history: rows(20), open_tasks: [] }) } as unknown as ContextBuilder;
   const gateway = {
-    complete: async () => ({ text: "svar", usage: { input_tokens: 1, output_tokens: 1 }, provider: "gemma_local", model: "m" }),
-    stream: async () => ({ text: "svar", usage: { input_tokens: 1, output_tokens: 1 }, provider: "gemma_local", model: "m" }),
+    complete: async (input: CompleteInput) => {
+      plainCalls.push(JSON.parse(JSON.stringify(input)) as CompleteInput);
+      return { text: "svar", usage: { input_tokens: 1, output_tokens: 1 }, provider: "gemma_local", model: "m" };
+    },
+    stream: async (input: CompleteInput) => {
+      plainCalls.push(JSON.parse(JSON.stringify(input)) as CompleteInput);
+      return { text: "svar", usage: { input_tokens: 1, output_tokens: 1 }, provider: "gemma_local", model: "m" };
+    },
     completeWithTools: async (input: CompleteInput, toolOptions?: { executor?: ToolExecutor; localStickiness?: boolean; tools?: Array<{ name: string }> }) => {
       captured.push(JSON.parse(JSON.stringify(input)) as CompleteInput);
       toolOptionsSeen.push({ localStickiness: toolOptions?.localStickiness });
@@ -175,7 +184,7 @@ export function buildEngine(opts: BuildOptions): Built {
       }
     })
   });
-  return { engine, runs, captured, store, memCalls, outputs, toolOptionsSeen, toolNamesSeen, ingestCalls };
+  return { engine, runs, captured, plainCalls, store, memCalls, outputs, toolOptionsSeen, toolNamesSeen, ingestCalls };
 }
 
 function lookup(items: MemItem[], text: string): Meta {
