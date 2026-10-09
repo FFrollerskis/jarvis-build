@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, rmdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DUE_TOLERANCE_MS, assertRunnable } from "./config.mjs";
@@ -159,20 +159,57 @@ export function dropFutureTimestamps(status, nowMs) {
   return dropped;
 }
 
-/** Settkataloger UTEN manifest (backup som døde midt i) og eldre enn terskelen: rester som ellers fyller disken stille. Manifest = ferdig, så ferdige sett røres ikke. */
-export function findOrphanSets(outDir, nowMs, maxAgeMs = ORPHAN_MAX_AGE_MS) {
-  if (!existsSync(outDir)) return [];
-  const orphans = [];
-  for (const name of readdirSync(outDir).filter((n) => SET_NAME_RE.test(n))) {
+const errorCode = (err) => (typeof err?.code === "string" ? err.code : "unknown");
+
+/**
+ * Settkataloger UTEN manifest.json (backup som døde midt i) og eldre enn terskelen. Review runde 2 (M3): tidligere ble hver slik katalog `rm -rf`-et, FØR alle pausene og uten tak, og
+ * «mangler manifest» ble avgjort med `existsSync` - som gir `false` ved ENHVER feil (EACCES/EIO/ESTALE på en ustø NFS-/USB-montering), så et GODT sett (også det siste verifiserte) kunne
+ * slettes av en forbigående feil. Nå:
+ *  - `lstat` med feilkode: BARE `ENOENT` beviser at manifestet mangler; enhver annen feil betyr «vet ikke» og katalogen røres ikke (`unverified`, logges).
+ *  - bare ekte kataloger (aldri en symlenke), eldre enn `maxAgeMs` (mtime), og aldri et navn i `protect` (siste verifiserte / off-site-bekreftede sett).
+ *  - `removable` er KUN helt tomme kataloger. En katalog uten manifest men med innhold (typisk en avkortet `*.dump.age` etter en backup som døde midt i) kan være det eneste som er igjen
+ *    av en backup: den RAPPORTERES (`withData`) og slettes aldri automatisk.
+ * Leser kun; sletting gjøres av kalleren (etter pausene, med taket).
+ * @returns {{ removable: string[], withData: Array<{ name: string, entries: number }>, unverified: Array<{ name: string, code: string }> }}
+ */
+export function scanManifestlessSets(outDir, nowMs, { maxAgeMs = ORPHAN_MAX_AGE_MS, protect = [] } = {}) {
+  const result = { removable: [], withData: [], unverified: [] };
+  let names;
+  try {
+    names = readdirSync(outDir).filter((n) => SET_NAME_RE.test(n)).sort();
+  } catch (err) {
+    if (errorCode(err) !== "ENOENT") result.unverified.push({ name: "(backup-mappen)", code: errorCode(err) });
+    return result;
+  }
+  const protectedNames = new Set(protect.filter((n) => typeof n === "string"));
+  for (const name of names) {
     const dir = join(outDir, name);
     try {
-      if (!statSync(dir).isDirectory() || existsSync(join(dir, "manifest.json"))) continue;
-      if (nowMs - statSync(dir).mtimeMs > maxAgeMs) orphans.push(dir);
-    } catch {
-      // forsvunnet underveis
+      const st = lstatSync(dir);
+      if (!st.isDirectory() || nowMs - st.mtimeMs <= maxAgeMs) continue; // symlenke/fil røres ikke; en ung katalog kan være en backup som pågår
+      try {
+        lstatSync(join(dir, "manifest.json"));
+        continue; // manifestet finnes (gyldig eller ikke): ikke foreldreløst
+      } catch (err) {
+        if (errorCode(err) !== "ENOENT") {
+          result.unverified.push({ name, code: errorCode(err) });
+          continue;
+        }
+      }
+      if (protectedNames.has(name)) continue;
+      const entries = readdirSync(dir).length;
+      if (entries === 0) result.removable.push(dir);
+      else result.withData.push({ name, entries });
+    } catch (err) {
+      if (errorCode(err) !== "ENOENT") result.unverified.push({ name, code: errorCode(err) }); // forsvunnet underveis er greit; alt annet er «vet ikke»
     }
   }
-  return orphans;
+  return result;
+}
+
+/** Tomme settkataloger som kan ryddes (se `scanManifestlessSets`). */
+export function findOrphanSets(outDir, nowMs, maxAgeMs = ORPHAN_MAX_AGE_MS, protect = []) {
+  return scanManifestlessSets(outDir, nowMs, { maxAgeMs, protect }).removable;
 }
 
 /** `.verify-tmp-XXXXXX` (mkdtemp i backup-mappen): arbeidsmappen for en henting fra off-site. Nøyaktig dette mønsteret er vårt. */
@@ -352,6 +389,8 @@ export function buildDefaultDeps(config, env = process.env, overrides = {}) {
     prepareSet: overrides.prepareSet ?? prepareSetForOffsite,
     materializeManifest: overrides.materializeManifest ?? materializeManifest,
     remove: overrides.remove ?? ((dir) => rmSync(dir, { recursive: true, force: true })),
+    // Foreldreløse settkataloger fjernes med `rmdir` (ikke rekursivt): er noe dukket opp i katalogen siden skanningen, feiler fjerningen i stedet for å slette det (review runde 2, M3/L3).
+    removeEmptyDir: overrides.removeEmptyDir ?? ((dir) => rmdirSync(dir)),
     recipient: env.JARVIS_BACKUP_AGE_RECIPIENT
   };
 }
@@ -452,10 +491,24 @@ export async function runTick(config, deps, env = process.env) {
     const read = readStatusFile(config.statusFile);
     const status = read.status;
     if (read.problem !== null) log("warn", "status_file_unusable", { problem: read.problem, note: "starter på nytt fra settene på disk" });
+    // Review runde 2 (M4): F7-vernene (siste verifiserte/off-site-bekreftede sett, forrige tikk) HVILER på statusfilen. Er den borte eller ubrukelig, er de nullstilt - og en klokkehopp
+    // kunne slettet det siste verifiserte settet. Da pauses retensjonen (`status_unusable`) til en verifisering eller off-site-bekreftelse har skrevet gyldig status på nytt (se `retention`).
+    // Gjelder også første kjøring uten status: ingenting slettes før det finnes et bevis, men det blokkerer ikke for alltid (se `retention`).
+    if (read.problem !== null || !read.existed) {
+      status.retention.status_reset_at = iso(t0);
+      if (read.problem === null) {
+        const onDisk = readSets().length;
+        log(onDisk > 0 ? "warn" : "info", "status_file_missing", { sets_on_disk: onDisk, note: onDisk > 0 ? "statusfilen mangler, men det finnes sett på disk (slettet? ny state-mappe?): retensjonen pauses til en verifisering/off-site-bekreftelse er registrert" : "første kjøring: retensjonen pauses til en verifisering/off-site-bekreftelse er registrert" });
+      }
+    }
     const dropped = dropFutureTimestamps(status, startedMs);
     if (dropped.length > 0) log("warn", "status_timestamps_in_future_dropped", { fields: dropped, note: "klokkeavvik? tidsstempler fremover i tid ble forkastet" });
     for (const name of findFutureSets(config.out, startedMs)) log("warn", "set_dated_in_future", { set: name, note: "teller ikke som nyeste sett (klokkeavvik ved backup-tidspunktet?)" });
     for (const { name, problems } of findHollowSets(config.out)) log("warn", "set_incomplete", { set: name, problems: problems.slice(0, 4).join("; "), note: "har manifest, men filene stemmer ikke: teller ikke som komplett sett (og undertrykker ikke neste backup) - røres ikke automatisk" });
+    // Review runde 2 (M3): kataloger uten manifest MED innhold rapporteres hver gang, men slettes aldri (kan være det eneste som er igjen av en backup); `unverified` = en fs-feil (EACCES/EIO/ESTALE) hindret avgjørelsen.
+    const manifestless = scanManifestlessSets(config.out, startedMs);
+    for (const o of manifestless.withData) log("warn", "orphan_set_has_data", { set: o.name, entries: o.entries, note: "ingen manifest.json, men innhold (avkortet dump etter en backup som døde midt i?): slettes ikke automatisk - undersøk og fjern for hånd" });
+    for (const u of manifestless.unverified) log("warn", "orphan_check_unverified", { set: u.name, code: u.code, note: "kunne ikke avgjøre om manifest.json mangler (ustø disk/NFS?): røres ikke" });
     // Review F12: arbeidsmapper fra en off-site-henting som døde midt i. Under låsen finnes ingen levende bruker av dem; alderen (minst 12 t og minst tikk-budsjettet) beskytter mot et
     // tikk vi har tatt over låsen fra og som mot formodning fortsatt kjører.
     for (const dir of findStaleTempDirs(config.out, startedMs, Math.max(ORPHAN_MAX_AGE_MS, budgetMs))) {
@@ -525,10 +578,11 @@ export async function runTick(config, deps, env = process.env) {
 
     const actions = [];
     const failed = [];
+    const retentionSummary = { paused: null, pruned: 0, orphans_removed: 0 }; // hva retensjonen gjorde (eller hvorfor den lot være) i DETTE tikket - synlig i tikkresultatet
     const decisions = decide(status, readSets());
     const work = decisions.backup.due || decisions.offsite.due || decisions.verify.due;
     if (!work) log("debug", "tick_nothing_due", { decisions });
-    const abandonedResult = () => ({ exitCode: EXIT.USAGE, outcome: "abandoned", actions, failed, decisions, newest_set: null, duration_ms: now().getTime() - startedMs });
+    const abandonedResult = () => ({ exitCode: EXIT.USAGE, outcome: "abandoned", actions, failed, decisions, newest_set: null, retention: retentionSummary, duration_ms: now().getTime() - startedMs });
     guard.fire = async () => {
       guard.abandoned = true;
       const hung = stage;
@@ -638,39 +692,58 @@ export async function runTick(config, deps, env = process.env) {
     commit();
     if (storeFailed && exitCode === EXIT.OK) exitCode = EXIT.USAGE;
     const outcome = failed.length > 0 ? "failed" : overdue ? "overdue" : actions.length > 0 ? "ok" : "nothing_due";
-    return { exitCode, outcome, actions, failed, decisions, newest_set: newest?.name ?? null, duration_ms: now().getTime() - startedMs };
+    return { exitCode, outcome, actions, failed, decisions, newest_set: newest?.name ?? null, retention: retentionSummary, duration_ms: now().getTime() - startedMs };
 
     function retention() {
       if (guard.abandoned) return;
       const nowMs2 = now().getTime();
       const sets2 = readSets();
       const newest2 = sets2.at(-1) ?? null;
-      const orphans = findOrphanSets(config.out, nowMs2);
-      for (const dir of orphans) {
-        deps.remove(dir);
-        log("warn", "orphan_set_removed", { set: dir.split(/[\\/]/).at(-1) ?? "" });
-      }
       const r = status.retention;
+      const pause = (reason) => {
+        r.last_skipped_reason = reason;
+        retentionSummary.paused = reason;
+      };
+      // --- PAUSER: i hver av dem slettes ingenting som helst (hverken gamle sett eller foreldreløse kataloger) ---
       // Ingen sletting mens kjeden er stille: gamle sett er det eneste vi har hvis backupene har sluttet å komme.
       if (newest2 === null || nowMs2 - newest2.createdMs > 2 * config.intervalMs) {
-        r.last_skipped_reason = "pipeline_stale";
+        pause("pipeline_stale");
         return;
+      }
+      // Review runde 2 (M4): statusfilen var borte/ubrukelig, så «siste verifiserte/off-site-bekreftede sett» og forrige tikk er glemt. Pauset varer til en vellykket verifisering eller off-site-bekreftelse
+      // har skrevet gyldig status på nytt (da er det siste beviset kjent og beskyttet igjen). Uten noen av dem (kun backup-rollen: det finnes ingen bevis å vente på) varer pausen i et døgn -
+      // samme hold som etter et langt tikk-gap, så en feil klokke kan rettes - og slippes deretter. Første kjøring uten status går samme vei.
+      if (r.status_reset_at !== null) {
+        const proofRecorded = status.restore_verify.last_success_set !== null || status.offsite.last_set !== null;
+        const proofPossible = verifyEnabled || (sinkPresent && config.roles.has("offsite"));
+        const holdOver = nowMs2 >= msOf(r.status_reset_at) + Math.max(config.intervalMs, RETENTION_HOLD_MIN_MS);
+        if (proofRecorded || (!proofPossible && holdOver)) {
+          r.status_reset_at = null;
+          log("info", "retention_status_reset_cleared", { reason: proofRecorded ? "proof_recorded" : "hold_elapsed_without_proof_source" });
+        } else {
+          const announce = r.last_skipped_reason !== "status_unusable"; // én melding når pausen begynner, ikke hvert 15. minutt (et tikk uten forfall skal være stille)
+          pause("status_unusable");
+          if (announce) log(read.problem !== null ? "warn" : "info", "retention_paused_status_unusable", { proof_possible: proofPossible, note: "statusfilen var borte/ubrukelig: ingen sletting før en verifisering eller off-site-bekreftelse er registrert" });
+          return;
+        }
       }
       // Review F7: heller for mange sett enn for få. Slett ingenting mens off-site eller restore-verifisering feiler (da er de lokale settene det eneste bevisste sikkerhetsnettet),
       // eller mens en tidsdiskontinuitet gjør at alt ser gammelt ut.
       if (r.hold_until !== null && nowMs2 < msOf(r.hold_until)) {
-        r.last_skipped_reason = "time_gap_hold";
+        pause("time_gap_hold");
         return;
       }
       if (status.offsite.state === "failed") {
-        r.last_skipped_reason = "offsite_failing";
+        pause("offsite_failing");
         return;
       }
       if (status.restore_verify.state === "failed") {
-        r.last_skipped_reason = "verify_failing";
+        pause("verify_failing");
         return;
       }
-      const candidates = setsToPrune(sets2, config.retainDays, nowMs2, { keepNewest: RETENTION_MIN_KEEP, protect: [status.restore_verify.last_success_set, status.offsite.last_set] });
+      // --- SLETTING: kun etter ALLE pausene, med ÉTT felles tak per tikk (sett først, så foreldreløse) og med de beskyttede settene utelatt ---
+      const protect = [status.restore_verify.last_success_set, status.offsite.last_set];
+      const candidates = setsToPrune(sets2, config.retainDays, nowMs2, { keepNewest: RETENTION_MIN_KEEP, protect });
       const prune = candidates.slice(0, RETENTION_MAX_PRUNE_PER_TICK); // eldste først
       for (const s of prune) deps.remove(s.dir);
       r.last_skipped_reason = null;
@@ -680,7 +753,20 @@ export async function runTick(config, deps, env = process.env) {
       if (prune.length > 0) {
         r.last_pruned_at = iso(now());
         r.last_pruned_count = prune.length;
+        retentionSummary.pruned = prune.length;
         log("info", "retention_pruned", { count: prune.length, sets: prune.map((s) => s.name) });
+      }
+      // Foreldreløse (helt tomme) settkataloger, innenfor det som er igjen av taket. Skannes på nytt her: backupen i dette tikket kan ha tatt timer. Hver fjernes med `rmdir`, så
+      // noe som dukket opp siden skanningen aldri slettes.
+      const budgetLeft = RETENTION_MAX_PRUNE_PER_TICK - prune.length;
+      for (const dir of scanManifestlessSets(config.out, now().getTime(), { protect }).removable.slice(0, Math.max(0, budgetLeft))) {
+        try {
+          deps.removeEmptyDir(dir);
+          retentionSummary.orphans_removed += 1;
+          log("warn", "orphan_set_removed", { set: dir.split(/[\\/]/).at(-1) ?? "" });
+        } catch (err) {
+          log("warn", "orphan_set_remove_failed", { set: dir.split(/[\\/]/).at(-1) ?? "", code: errorCode(err) });
+        }
       }
     }
 
