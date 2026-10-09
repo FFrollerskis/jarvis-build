@@ -116,6 +116,7 @@ import { ConversationEngine } from "./conversation.ts";
 import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
 import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
+import { createRadarState } from "./evolution-radar.ts";
 import { createEvolutionReportProvider } from "./evolution-source.ts";
 import { ChatJobs, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
@@ -177,7 +178,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const sloReports = createSloReportProvider(pool, owner.tenant_id);
   Object.assign(selfModelReaders, buildSloReaders(sloReports));
   // WP-B (D-452): evolusjonsportene (EV-0…EV-23) i OBSERVASJONSMODUS - kun lesing av eksisterende observerbarhet, `acts: false`. Selvendring er fortsatt frosset (D-397).
+  // EV-3: radaren er INERT uten `JARVIS_RADAR_SOURCES` (ingen nettverkskall). Kildene velges av eieren; innholdet går gjennom sikkerhetssonen og forlater den aldri (kun status vises).
+  const evolutionRadar = createRadarState(process.env);
   const evolutionReports = createEvolutionReportProvider({
+    radar: evolutionRadar,
     pool,
     tenantId: owner.tenant_id,
     ev0Status: () => getLastEv0BootStatus(),
@@ -1603,6 +1607,18 @@ porter: se docs/RUNTIME_GATES.md`;
   ).start(() =>
     runMemoryResensitizeSweepForAllTenants(pool, { mode: resensitizeModeFromEnv(process.env["JARVIS_MEMORY_RESENSITIZE"]) }).then((summary) => assertNoSweepFailures("memory-resensitize-sweep", summary.failed))
   );
+  // EV-3 (D-452): radar-sveip av KILDER EIEREN SELV HAR VALGT (`JARVIS_RADAR_SOURCES`) - inert uten dem (ingen nettverkskall). Hvert svar går gjennom sikkerhetssonen (ubetrodd forskning, karantene ved mistenkelig innhold);
+  // kun status per kilde beholdes i minnet, aldri innholdet. Ett sveip kort etter oppstart (DailyScheduler husker at dagens kjøring er gjort, men det beholdes ikke over en omstart).
+  if (evolutionRadar.configured > 0) {
+    const radarSweep = async (): Promise<void> => {
+      const result = await evolutionRadar.run();
+      console.log(JSON.stringify({ msg: "evolution_radar_sweep_done", configured: result.configured, ok: result.ok, quarantined: result.quarantined, failed: result.failed, security_events: result.security_events }));
+    };
+    new DailyScheduler(pool, "evolution-radar-sweep", envHour("JARVIS_RADAR_SWEEP_HOUR", 6)).start(radarSweep);
+    setTimeout(() => {
+      radarSweep().catch((err: unknown) => console.error(JSON.stringify({ msg: "evolution_radar_boot_sweep_failed", error: (err as Error).message.slice(0, 200) })));
+    }, 60_000).unref();
+  }
   // D-386: nattlig rekompilering av den alltid-tilstede eierprofilen per space (deterministisk, ingen LLM).
   new DailyScheduler(
     pool, "memory-profile-sweep", envHour("JARVIS_MEMORY_PROFILE_SWEEP_HOUR", 4)

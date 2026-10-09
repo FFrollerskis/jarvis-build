@@ -11,6 +11,7 @@ import {
 } from "@jarvis/self-modification";
 import { readSchedulerHealth, type ConnectorStatus, type MeshToolMapping } from "@jarvis/tool-gateway";
 import type { Ev0BootStatus } from "./ev0-boot.ts";
+import type { RadarState } from "./evolution-radar.ts";
 import { GOLDEN_SUITE_DIGEST, runGolden, type GoldenRun } from "./golden-suite.ts";
 
 /**
@@ -34,6 +35,8 @@ export interface EvolutionSourceDeps {
   mesh: () => MeshStatus;
   /** Chat-flatens verktøy (for verktøyutvalgs-oppgavene i gull-suiten). Udefinert/null = de oppgavene hoppes over (og sies å være hoppet over). */
   toolSurface?: () => ReadonlyArray<MeshToolMapping> | null;
+  /** EV-3: siste radarsveip (kilder eieren selv har valgt; udefinert/0 kilder = inert). Rapporten leser kun resultatet - selve sveipet kjører planlagt, aldri fra rapporten. */
+  radar?: RadarState;
   /** Ekstra seksjoner (senere deler): hver leverer sin egen fail-soft seksjon. */
   extraSections?: ReadonlyArray<(ctx: EvolutionContext) => Promise<EvolutionSection>>;
 }
@@ -216,14 +219,14 @@ export async function credentialsSection(ctx: EvolutionContext): Promise<Evoluti
   const noHealth = configured.filter((c) => c.health === null).length;
   const findings: string[] = [
     `${configured.length} av ${connectors.length} kjente tilkoblinger er konfigurert; ${notConfigured} er ikke konfigurert (ikke en feil - bare ikke koblet til).`,
-    failing.length === 0 ? "Ingen konfigurert tilkobling har feilende fornyelse eller helse." : `Trenger oppmerksomhet: ${failing.map((a) => `${a.ref} (${a.health}${a.needs !== "none" ? `, ${a.needs}` : ""})`).join("; ")}.`,
-    noHealth > 0 ? `${noHealth} konfigurerte tilkoblinger har ingen helsemåling ennå (ukjent, ikke «frisk»).` : "Alle konfigurerte tilkoblinger har en helsemåling.",
-    "Utløpsdato er ikke målt (leverandørene oppgir den ikke i registeret) - vurderingen dekker helse og fornyelsesfeil, ikke utløp. Fornyelse utføres av tilkoblingene selv; nye nøkler, OAuth-samtykke og kontoer er alltid eier/ekstern port."
+    failing.length === 0 ? "Ingen konfigurert tilkobling har feilende fornyelse eller dårlig tilstand." : `Trenger oppmerksomhet: ${failing.map((a) => `${a.ref} (${a.health}${a.needs !== "none" ? `, ${a.needs}` : ""})`).join("; ")}.`,
+    noHealth > 0 ? `${noHealth} konfigurerte tilkoblinger har ingen tilstandsmåling ennå (ukjent, ikke «frisk»).` : "Alle konfigurerte tilkoblinger har en tilstandsmåling.",
+    "Utløpsdato er ikke målt (leverandørene oppgir den ikke i registeret) - vurderingen dekker tilstand og fornyelsesfeil, ikke utløp. Fornyelse utføres av tilkoblingene selv; nye nøkler, OAuth-samtykke og kontoer er alltid eier/ekstern port."
   ];
   return {
     ev: "EV-17", title_no: "Nøkler og tilkoblinger", mode: "observe", status: failing.length > 0 ? "ATTENTION" : "OK",
     summary_no: failing.length > 0 ? `${failing.length} tilkobling(er) trenger oppmerksomhet.` : `${configured.length} konfigurerte tilkoblinger uten kjente feil.`,
-    findings, source: "connector-registeret (presence + siste helse; aldri verdier)", observed_at: ctx.now.toISOString()
+    findings, source: "connector-registeret (presence + siste tilstand; aldri verdier)", observed_at: ctx.now.toISOString()
   };
 }
 
@@ -375,7 +378,7 @@ export async function memorySection(ctx: EvolutionContext): Promise<EvolutionSec
   const dedupe = proposeDedupe(facts);
   const by = (reason: string) => reverify.filter((r) => r.reason === reason).length;
   const findings = [
-    `Vurdert: ${facts.length} aktive minner (de ${MEMORY_SAMPLE} nyeste; helse- og gjesterom er utelatt).`,
+    `Vurdert: ${facts.length} aktive minner (de ${MEMORY_SAMPLE} nyeste; to private rom er utelatt av personvernhensyn).`,
     `Bør re-verifiseres før bruk: ${reverify.length} (utløpt ${by("expired")}, gamle eksterne ${by("stale_external")}, gamle slutninger ${by("stale_low_quality")}).`,
     poisoning.length === 0 ? "Ingen mistanke om forgiftning (ubetrodd innhold som motsier dine egne utsagn)." : `${poisoning.length} ubetrodde påstander motsier dine egne utsagn om samme emne - se i karantene/dashbordet.`,
     dedupe.length === 0 ? "Ingen identiske duplikater." : `${dedupe.length} duplikatgrupper kan slås sammen (${dedupe.reduce((a, d) => a + d.merge.length, 0)} minner); forslagene er reversible og ingenting er slått sammen.`,
@@ -459,11 +462,44 @@ export async function dormantSection(ctx: EvolutionContext): Promise<EvolutionSe
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
+// EV-3: radar (innhenting fra eierens egne kilder; sikkerhetssonen er `radar.ts`)
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------
+export async function radarSection(ctx: EvolutionContext): Promise<EvolutionSection> {
+  const radar = ctx.deps.radar;
+  if (radar === undefined || (radar.configured === 0 && radar.rejected === 0)) {
+    return unknownSection("EV-3", "Radar (eksterne kilder)", "JARVIS_RADAR_SOURCES", "ingen kilder er valgt (radaren er inert; eieren velger kildene)");
+  }
+  const last = radar.last();
+  const rejected = radar.rejected > 0 ? [`${radar.rejected} kilde(r) i konfigurasjonen ble forkastet (må være https mot et vanlig vertsnavn, gyldig type og navn).`] : [];
+  if (last === null) {
+    return {
+      ev: "EV-3", title_no: "Radar (eksterne kilder)", mode: "observe", status: rejected.length > 0 ? "ATTENTION" : "UNKNOWN",
+      summary_no: `${radar.configured} kilde(r) er valgt, men radaren har ikke kjørt ennå.`,
+      findings: [...rejected, "Sveipet kjører planlagt (JARVIS_RADAR_SWEEP_HOUR); innhold fra kildene er alltid ubetrodd forskning og blir aldri instruks eller evidens."],
+      source: "JARVIS_RADAR_SOURCES", observed_at: ctx.now.toISOString()
+    };
+  }
+  const attention = last.quarantined > 0 || last.failed > 0 || rejected.length > 0;
+  return {
+    ev: "EV-3", title_no: "Radar (eksterne kilder)", mode: "observe", status: attention ? "ATTENTION" : "OK",
+    summary_no: `${last.ok} av ${last.configured} kilde(r) hentet og kontrollert${last.quarantined > 0 ? `, ${last.quarantined} i karantene` : ""}${last.failed > 0 ? `, ${last.failed} feilet` : ""}.`,
+    findings: [
+      ...rejected,
+      ...last.per_source.map((s) => `${s.name} (${s.kind}): ${s.status === "ok" ? "ok" : s.status === "quarantined" ? "karantene" : "kunne ikke hentes"}${s.findings.length > 0 ? ` - ${s.findings.join(", ")}` : ""}.`),
+      last.security_events > 0 ? `${last.security_events} kilde(r) hadde mistenkelig innhold (sikkerhetshendelse); innholdet ble ikke brukt.` : "Ingen mistenkelig innhold funnet.",
+      "Kun status vises - innholdet fra kildene lagres ikke, vises ikke og kan ikke utløse noe."
+    ],
+    source: "JARVIS_RADAR_SOURCES (siste sveip)", observed_at: last.at
+  };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------
 // Rapporten
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
 const BASE_SECTIONS: ReadonlyArray<{ ev: string; title: string; source: string; build: (ctx: EvolutionContext) => Promise<EvolutionSection> }> = [
   { ev: "EV-0/EV-8", title: "Endringsgrenser og frys", source: "konstitusjon + endringsregister", build: boundariesSection },
   { ev: "EV-5", title: "Endringsforslag", source: "evolution_change_ledger", build: proposalsSection },
+  { ev: "EV-3", title: "Radar (eksterne kilder)", source: "JARVIS_RADAR_SOURCES", build: radarSection },
   { ev: "EV-4", title: "Gull-suite (regresjonsvern)", source: "golden-suite", build: goldenSection },
   { ev: "EV-9", title: "Selvhelbredelse (tillatelser)", source: "mesh + connectors + scheduler", build: healSection },
   { ev: "EV-10", title: "Minnevedlikehold", source: "memory_items", build: memorySection },
