@@ -13,6 +13,8 @@ export * from "./gce-target-policy.ts";
 export * from "./mcp-zapier-transport.ts";
 export * from "./browser-transport.ts";
 export * from "./github-rate-limit-controller.ts";
+export * from "./github-app-auth.ts";
+export * from "./github-token-provider.ts";
 export * from "./scheduler.ts";
 export * from "./scheduler-health.ts";
 export * from "./mesh-bridge.ts";
