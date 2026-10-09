@@ -125,7 +125,8 @@ describe("evolusjonskildene mot ekte Postgres", () => {
     const count = async () => Number((await admin.query(`SELECT (SELECT count(*) FROM evolution_change_ledger) + (SELECT count(*) FROM cost_events) + (SELECT count(*) FROM scheduler_state) + (SELECT count(*) FROM incidents) AS n`)).rows[0].n);
     const before = await count();
     const report = await buildEvolutionReport(deps());
-    expect(report.sections.filter((s) => s.status === "UNKNOWN").map((s) => `${s.ev}: ${s.summary_no}`)).toEqual([]);
+    // EV-3 (radar) er UNKNOWN BY DESIGN uten eierens kildeliste (`JARVIS_RADAR_SOURCES`): inert er ikke det samme som feil. Alle andre seksjoner skal kunne måles mot databasen.
+    expect(report.sections.filter((s) => s.status === "UNKNOWN").map((s) => `${s.ev}: ${s.summary_no}`)).toEqual(["EV-3: Ikke målt: ingen kilder er valgt (radaren er inert; eieren velger kildene)"]);
     expect(report.acts).toBe(false);
     expect(await count()).toBe(before);
   });
