@@ -3,6 +3,7 @@
 import "./normalize-env.ts";
 import { envInt, systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit } from "./owner.ts";
+import { createWatchdogIncidentBridge, parseIncidentProducerConfig } from "./incident-producers.ts";
 import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
 import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, dailySpentOre, ModelGateway, pricingFromEnv, traceSinkFromEnv } from "@jarvis/model-gateway";
@@ -580,6 +581,12 @@ watchdog.register(
 );
 // D-395 (JARVIS-039): varsel ved varselgrensen (tidligere kun et internt nivå som aldri nådde eieren).
 watchdog.register(costWarningCheck(pool, owner.tenant_id, budgetConfigFromEnv().warn_ore));
+// WP-E1 (UA-5, JARVIS-068): vakthundens fullførte tikk mates til incident-produsenten (en feilende sjekk -> hendelse, en senere vellykket kjøring av SAMME sjekk -> re-målt som borte).
+// AV som standard (`JARVIS_INCIDENT_PRODUCERS_ENABLED=true`); observatøren er fire-and-forget og kan aldri påvirke vakthunden eller varslingen.
+if (parseIncidentProducerConfig(process.env).enabled) {
+  const watchdogIncidents = createWatchdogIncidentBridge({ pool, tenantId: owner.tenant_id });
+  watchdog.setObserver((report) => watchdogIncidents.observe(report));
+}
 const WATCHDOG_INTERVAL_MS = parseWatchdogIntervalMs(process.env["JARVIS_WATCHDOG_INTERVAL_MS"]);
 setInterval(
   () =>

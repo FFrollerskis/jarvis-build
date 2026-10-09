@@ -121,6 +121,7 @@ import { ConversationEngine } from "./conversation.ts";
 import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
 import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
+import { parseIncidentProducerConfig, startApiIncidentProducers } from "./incident-producers.ts";
 import { createRadarState } from "./evolution-radar.ts";
 import { createEvolutionReportProvider } from "./evolution-source.ts";
 import { startFollowUpPush } from "./follow-up-push.ts";
@@ -1740,6 +1741,17 @@ porter: se docs/RUNTIME_GATES.md`;
       console.error(JSON.stringify({ msg: "connector_health_sweep_completed_with_failures", failed: result.failed }));
     }
   });
+  // WP-E1 (UA-5, JARVIS-068): deterministiske incident-produsenter - bakgrunnsjobber som gir opp, feilede utrullinger, brutte tjenestemål, sviktende tilkoblinger, mislykkede infra-handlinger og
+  // Sentry-feil blir hendelser. KUN observasjon + registrering i Jarvis' egen database (ingen reparasjon, intet eksternt skriv). AV som standard (`JARVIS_INCIDENT_PRODUCERS_ENABLED=true`).
+  const incidentProducerConfig = parseIncidentProducerConfig(process.env);
+  if (incidentProducerConfig.enabled) {
+    startApiIncidentProducers({
+      pool, gateway: toolGateway, identity: ownerIdentity, deployments: deploymentService, sloReport: sloReports,
+      config: incidentProducerConfig, incidents: incidentService, tenantId: owner.tenant_id
+    });
+  } else {
+    console.log(JSON.stringify({ msg: "incident_producers_disabled" }));
+  }
   // D-411 (EV-0): KUN observasjon - logger om Safety Constitution er verifisert og om endringsregisterets hash-kjede er hel. Kaster aldri,
   // blokkerer ikke oppstart, og endrer ingenting (selvendring er fortsatt frosset, D-397).
   void checkEv0Boot({

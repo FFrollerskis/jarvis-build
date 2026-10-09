@@ -47,6 +47,8 @@ export const CORE_ENV = [
   "JARVIS_DESTINATION_HOST_ALLOWLIST",
   "JARVIS_ENV",
   "JARVIS_GIT_ALLOWED_REPOS",
+  // WP-E1 (JARVIS-068): incident-produsentene (observasjon + registrering). AV som standard; api kjører de fleste, worker kjører vakthund-produsenten - begge leser samme bryter.
+  "JARVIS_INCIDENT_PRODUCERS_ENABLED",
   "JARVIS_OWNER_NAME",
   "JARVIS_OWNER_PERSON_ID",
   "JARVIS_TENANT_ID",
@@ -329,6 +331,8 @@ export const SERVICE_ENV = {
     "JARVIS_V2_PUSH_ENABLED", "JARVIS_V2_PUSH_MAX_PER_DAY", "JARVIS_V2_PUSH_QUIET_START", "JARVIS_V2_PUSH_QUIET_END", "JARVIS_V5_PROPOSALS_ENABLED", "JARVIS_VALUE_VERIFIED_GATES",
     // D-395 (JARVIS-092): sveip-klokkeslett main.ts leser (tidligere ikke videresendt til containeren, så compose kunne aldri endre dem).
     "JARVIS_BUSINESS_EVENTS_SYNC_HOUR", "JARVIS_BUSINESS_SCORING_HOUR", "JARVIS_BUSINESS_SWEEP_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_WEEKDAY", "JARVIS_CONNECTOR_HEALTH_SWEEP_HOUR", "JARVIS_CONVERSATION_GRAPH_SYNC_HOUR", "JARVIS_FINANCE_SPEND_SWEEP_HOUR", "JARVIS_GROWTH_RECOMMENDATION_SWEEP_HOUR", "JARVIS_HEALTH_RETENTION_SWEEP_HOUR", "JARVIS_LOCATION_RETENTION_SWEEP_HOUR", "JARVIS_SITUATION_SWEEP_HOUR", "JARVIS_SUPPORT_INBOX_SYNC_HOUR", "JARVIS_VISION_RETENTION_SWEEP_HOUR", "JARVIS_STREAM_DEBUG",
+    // WP-E1 (JARVIS-068): incident-produsentene i api-prosessen - intervall (ms), grener hvis utrullinger teller, og repoer som leses aktivt for nye Actions-kjøringer (tom = ingen polling). Ingen hemmeligheter.
+    "JARVIS_INCIDENT_PRODUCERS_INTERVAL_MS", "JARVIS_INCIDENT_DEPLOY_REFS", "JARVIS_INCIDENT_DEPLOY_REPOS",
     // WP-C2 (OPS-RUNTIME): ekstern oppetids-heartbeat (AV som standard; pinger kun mens en lokal selvsjekk består) og stien til den SKRIVEBESKYTTEDE backup-statusfilen
     // (monteres `:ro` med infra/backup/docker-compose.backup-status.yml - aldri selve backup-mappen).
     "JARVIS_UPTIME_HEARTBEAT_URL", "JARVIS_UPTIME_HEARTBEAT_INTERVAL_SEC", "JARVIS_BACKUP_STATUS_FILE"],
