@@ -7,6 +7,8 @@ import { checkEv0Boot, getLastEv0BootStatus, logEv0Boot } from "./ev0-boot.ts";
 import { assertNoSweepFailures, envHour, envInt, envPort, failOnSweepFailures, systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit, ownerTenantsOrExit } from "./owner.ts";
 import { buildSelfModelReaders } from "./self-model-readers.ts";
+import { backupStatusSourceFromEnv } from "./backup-status.ts";
+import { startUptimeHeartbeat } from "./heartbeat-sender.ts";
 import {
   ChannelSessionAuthority,
   ContextBuilder,
@@ -164,6 +166,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const ownerControls = new OwnerControls(killSwitch, pool, ownerControlAuthority);
   // EV-1 (D-412): leserne selvdiagnosen (`executive.get_self_diagnosis`) komponeres av. `toolGateway` refereres først når en leser kalles (lat).
   const selfModelControls = new OwnerControlsService(killSwitch, ownerControls);
+  // WP-C2: backup-status fra en skrivebeskyttet statusfil (JARVIS_BACKUP_STATUS_FILE); uten den er `backup` UKJENT i selvdiagnosen.
+  const backupStatusSource = backupStatusSourceFromEnv();
   const selfModelReaders = buildSelfModelReaders({
     pool,
     tenantId: owner.tenant_id,
@@ -172,7 +176,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     connectorStatus: () => listConnectorStatus(toolGateway),
     // EV-0 oppstartsresultat (konstitusjon + endringsregister); null til sjekken har kjørt -> UKJENT.
     ev0Status: () => getLastEv0BootStatus(),
-    build: () => ({ sha: process.env["JARVIS_BUILD_SHA"]?.trim() || null, version: process.env["JARVIS_VERSION"]?.trim() || "0.1.0" })
+    build: () => ({ sha: process.env["JARVIS_BUILD_SHA"]?.trim() || null, version: process.env["JARVIS_VERSION"]?.trim() || "0.1.0" }),
+    backupStatus: backupStatusSource
   });
   await ownerControls.restore();
   // EV-2 (D-417): SLO/drift/dataskvalitet fra eksisterende observerbarhet (cost_events, tool_executions, tasks, memory_items) - ingen parallell telemetri.
@@ -940,7 +945,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
             forbiddenModelToolIds: FORBIDDEN_MODEL_TOOL_IDS,
             connectors: CONNECTOR_REGISTRY.map((c) => ({ id: c.id, category: c.category, test_method: c.live_test ? "live" : "presence_only" })),
             modelProfiles: DEFAULT_PROFILES,
-            allModelCapabilities: ["text", "reasoning", "vision", "tool_calling", "structured_output", "streaming"]
+            allModelCapabilities: ["text", "reasoning", "vision", "tool_calling", "structured_output", "streaming"],
+            backupStatusReadable: backupStatusSource !== undefined
           }
         },
         slo: { report: sloReports },
@@ -1657,6 +1663,9 @@ porter: se docs/RUNTIME_GATES.md`;
   }).then((status) => logEv0Boot(status)).catch((err: unknown) => {
     console.error(JSON.stringify({ msg: "ev0_boot_check_failed", error: (err as Error).message.slice(0, 200) }));
   });
+  // WP-C2 (OPS-RUNTIME): ekstern oppetids-heartbeat (dead man's switch). AV uten JARVIS_UPTIME_HEARTBEAT_URL; pinger KUN mens en lokal selvsjekk
+  // (databasen + api-prosessen svarer på /health) består - stillhet er alarmen hos eierens monitor. Kun status, aldri innhold; kan ikke velte API-et.
+  startUptimeHeartbeat({ port });
   return deps;
 }
 
