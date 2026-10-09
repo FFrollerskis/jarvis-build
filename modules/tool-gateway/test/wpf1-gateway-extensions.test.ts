@@ -22,7 +22,7 @@ import {
 } from "@jarvis/tool-gateway";
 
 /**
- * WP-F1 (D-453): de GENERISKE utvidelsene i ToolGateway som klasse D-kjeden for penger bygger på:
+ * WP-F1 (D-462): de GENERISKE utvidelsene i ToolGateway som klasse D-kjeden for penger bygger på:
  *   A. `preflight_validator` - målvalidering med spesifikk årsak, replay-vakt mot ledgeren.
  *   B. `credential_ref_resolver` - credential bestemt per kall (JARVIS-072), fail-closed, samme eier-binding.
  *   C. `outcome_unknown:` - en transport som vet at utfallet er ukjent gir `unverified` (aldri retry-bar) og varsler eieren.

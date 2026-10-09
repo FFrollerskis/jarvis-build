@@ -86,7 +86,7 @@ export interface WallesterEventEnvelope {
   payload: Record<string, unknown>;
   dedupeKey: string;
   /**
-   * WP-F1 (D-453): STRENGT validert beløp i minste enhet for autorisasjons-/transaksjonshendelser (`null` for kort-/ukjente hendelser eller når `rejection` er satt).
+   * WP-F1 (D-462): STRENGT validert beløp i minste enhet for autorisasjons-/transaksjonshendelser (`null` for kort-/ukjente hendelser eller når `rejection` er satt).
    * Aldri `Number(x ?? 0)`: et manglende eller ugyldig beløp er en avvist hendelse, ikke en stille 0.
    */
   amountOre: number | null;

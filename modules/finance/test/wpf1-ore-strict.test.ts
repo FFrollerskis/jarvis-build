@@ -3,7 +3,7 @@ import { MAX_AMOUNT_MINOR_UNITS as GATEWAY_MAX } from "@jarvis/tool-gateway";
 import { MAX_AMOUNT_MINOR_UNITS, isCurrencyCode, parseMinorUnitsStrict, providerAmountEchoMatches, toOreInteger } from "../src/ore.ts";
 
 /**
- * WP-F1 (D-453, JARVIS-020/070): STRENG heltallsparsing av beløp i minste enhet. Ubetrodde kilder (webhook-nyttelast, leverandørsvar) får aldri en
+ * WP-F1 (D-462, JARVIS-020/070): STRENG heltallsparsing av beløp i minste enhet. Ubetrodde kilder (webhook-nyttelast, leverandørsvar) får aldri en
  * `Number()`-coercion som gjør tekst, tomme verdier, eksponent-/heksadesimalformer, NaN eller Infinity til «et beløp».
  */
 describe("A: parseMinorUnitsStrict - kun trygge, ikke-negative heltall", () => {

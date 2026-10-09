@@ -180,7 +180,7 @@ export class PaymentIntentAlreadySubmittedError extends Error {
 }
 
 /**
- * WP-F1 (D-453): en innsending mot leverandøren er RESERVERT (`submitted`) og pågår - eller pågikk for kort tid siden til at vi kan vite at den er
+ * WP-F1 (D-462): en innsending mot leverandøren er RESERVERT (`submitted`) og pågår - eller pågikk for kort tid siden til at vi kan vite at den er
  * død. Et parallelt kall (annen gateway-nøkkel, annen prosess) skal ALDRI kalle leverandøren på nytt mens første kall kan være i flukt: to samtidige
  * kall mot samme objekt gir kun ÉN leverandørhandling (dobbeltbetalingsvern lag 3, i tillegg til gateway-ledgeren og leverandørens Idempotency-Key).
  */

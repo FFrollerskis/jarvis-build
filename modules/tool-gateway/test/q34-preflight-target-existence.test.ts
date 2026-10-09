@@ -83,7 +83,7 @@ const AUDITED_CLASS_D_PREFLIGHT_DECISIONS: ReadonlyArray<{
   { tool_id: "gce", action: "start_instance", requires_target: true },
   { tool_id: "gce", action: "stop_instance", requires_target: true },
   { tool_id: "gce", action: "reset_instance", requires_target: true },
-  // WP-F1 (D-453): pengehandlingene har fersk, read-only tilstandslesing (`check_submit_*`); en ukjent intensjon/refusjon/capture er strukturelt «mål finnes ikke».
+  // WP-F1 (D-462): pengehandlingene har fersk, read-only tilstandslesing (`check_submit_*`); en ukjent intensjon/refusjon/capture er strukturelt «mål finnes ikke».
   { tool_id: "finance", action: "submit_payment_intent", requires_target: true },
   { tool_id: "finance_stripe", action: "submit_refund", requires_target: true },
   { tool_id: "finance_vipps", action: "submit_capture", requires_target: true },

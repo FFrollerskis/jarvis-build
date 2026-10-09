@@ -11,7 +11,7 @@ import { withMemoryTransaction } from "@jarvis/memory";
 import { FinanceService, recipientDigest } from "../src/index.ts";
 
 /**
- * WP-F1 (D-453): pengekolonnene på intensjon/refusjon/capture er uforanderlige på DATABASENIVÅ (migrasjon 101). Eierens step-up-godkjenning er bundet til intensjonens id
+ * WP-F1 (D-462): pengekolonnene på intensjon/refusjon/capture er uforanderlige på DATABASENIVÅ (migrasjon 101). Eierens step-up-godkjenning er bundet til intensjonens id
  * og til beløp + valuta + mottaker-digest; bindingen er bare meningsfull hvis raden ikke kan endres mellom forespørsel og godkjenning. Beviser at ingen rolle (appens egen,
  * superbruker) kan endre en beskyttet kolonne, at all legitim skriving fortsatt virker, og at triggerlistene faktisk peker på eksisterende kolonner (ingen stille skrivefeil).
  */

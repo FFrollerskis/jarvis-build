@@ -27,7 +27,7 @@ import { createApiServer, type ApiDeps } from "../src/server.ts";
 import { FINANCE_MONEY_ACTIONS, isFinanceMoneyAction, parseFinanceActionRequest } from "../src/finance-actions.ts";
 
 /**
- * WP-F1 (D-453, Q-47 a): EIERENS VEI TIL PENGEHANDLINGENE, ende-til-ende mot den ekte API-serveren, ekte ToolGateway (klasse D-pipeline påslått), ekte ConfirmationStore og
+ * WP-F1 (D-462, Q-47 a): EIERENS VEI TIL PENGEHANDLINGENE, ende-til-ende mot den ekte API-serveren, ekte ToolGateway (klasse D-pipeline påslått), ekte ConfirmationStore og
  * ekte FinanceService over embedded Postgres. Leverandørene er testdobler. Beviser at pengehandlingene KUN kan utføres via: eierens step-up -> bundet bekreftelse ->
  * eierens step-up-godkjenning - aldri direkte, aldri fra en svakere økt, aldri av andre enn eieren, og aldri to ganger.
  */

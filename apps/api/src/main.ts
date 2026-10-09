@@ -562,7 +562,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       return { refreshToken, companySlug };
     }
   };
-  // WP-F1 (D-453, UA-6): deterministisk avstemming av penger (intensjon <-> leverandørutfall <-> Fiken-bilag). Observasjon + varsel, ALDRI korreksjon. DORMANT uten Fiken-
+  // WP-F1 (D-462, UA-6): deterministisk avstemming av penger (intensjon <-> leverandørutfall <-> Fiken-bilag). Observasjon + varsel, ALDRI korreksjon. DORMANT uten Fiken-
   // credentials (`checks.fiken = skipped_no_credentials`); varsler eieren via den eksisterende Telegram-banen i ToolGateway (feil gjøres synlig, rulles aldri tilbake).
   const financeReconciliation = new FinanceReconciliationService(pool, {
     fiken: createFikenPostingReader(fikenCredentialsProvider),
@@ -1506,7 +1506,7 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "wallester-sweep", envHour("JARVIS_WALLESTER_SYNC_HOUR", 5)
   ).start(() => failOnSweepFailures("wallester-sweep", (failures) => runWallesterSweepForAllTenants(pool, cardService, failures)));
-  // WP-F1 (D-453, UA-6): daglig finansavstemming (kl. 5 - ETTER leverandørsynkene kl. 3 og utgiftssveipet kl. 4, FØR open-loop-sveipet kl. 6). Observasjon + varsel; dormant
+  // WP-F1 (D-462, UA-6): daglig finansavstemming (kl. 5 - ETTER leverandørsynkene kl. 3 og utgiftssveipet kl. 4, FØR open-loop-sveipet kl. 6). Observasjon + varsel; dormant
   // uten credentials; trygg på en tenant uten betalinger (tom kjøring).
   new DailyScheduler(
     pool, "finance-reconcile-sweep", envHour("JARVIS_FINANCE_RECONCILE_HOUR", 5)

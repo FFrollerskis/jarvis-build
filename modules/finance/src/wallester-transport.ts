@@ -69,7 +69,7 @@ import { financeSignal, isRetrySafe } from "./http.ts";
 import { parseMinorUnitsStrict } from "./ore.ts";
 
 /**
- * WP-F1 (D-453, JARVIS-020/070): beløp og valuta fra leverandøren leses STRENGT - aldri `Number(x ?? 0)` (som gjorde et manglende beløp til 0, tekst til NaN og brøk til en
+ * WP-F1 (D-462, JARVIS-020/070): beløp og valuta fra leverandøren leses STRENGT - aldri `Number(x ?? 0)` (som gjorde et manglende beløp til 0, tekst til NaN og brøk til en
  * bigint-feil i databasen) og aldri en stille standardvaluta. Et ugyldig svar kaster (kortets synk feiler synlig og isoleres av sveipet), det lagres aldri som et gjettet tall.
  * MERK (åpen, ikke verifisert mot primærkilden): Wallesters enhet for `amount` (minste enhet vs. desimal hovedenhet) er ikke bekreftet i dette miljøet - et desimalt beløp
  * AVVISES her i stedet for å bli feilskalert.

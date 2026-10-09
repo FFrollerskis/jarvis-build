@@ -24,7 +24,7 @@ describe("A: finance_vipps.*-handlinger er registrert i firstWaveTools() med kor
         "refresh_payment_state", "get_webhook_event", "run_provider_anomaly_detection",
         // D-242: connector-helsesjekk-probe.
         "check_credentials",
-        // WP-F1 (D-453): fersk, read-only tilstandslesing for klasse D-kjeden (preflight + readback for submit_capture/submit_refund).
+        // WP-F1 (D-462): fersk, read-only tilstandslesing for klasse D-kjeden (preflight + readback for submit_capture/submit_refund).
         "check_submit_capture", "check_submit_refund"
       ])
     );

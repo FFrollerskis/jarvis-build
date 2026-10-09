@@ -987,7 +987,7 @@ export class CardService {
   }
 
   /**
-   * WP-F1 (D-453, JARVIS-020/070): lagrer en AUTENTISERT Wallester-hendelse med permanent ugyldig innhold som dødbrev (`status = 'rejected'`, kort årsakskode - aldri selve
+   * WP-F1 (D-462, JARVIS-020/070): lagrer en AUTENTISERT Wallester-hendelse med permanent ugyldig innhold som dødbrev (`status = 'rejected'`, kort årsakskode - aldri selve
    * innholdet) og returnerer `rejected` (ruten svarer 2xx: ingen evig retry). Samme nøkkel igjen = `duplicate`. Kortstatus/-transaksjoner hentes uansett inn av den
    * planlagte kortsveipen, og avstemmingen (`reconcileFinance`) flagger avviste hendelser.
    */

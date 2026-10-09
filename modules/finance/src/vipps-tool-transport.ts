@@ -37,7 +37,7 @@ export class VippsFinanceTransport implements ToolTransport {
         const row = await this.service.submitVippsCapture(tenantId, memorySpace, requireString(parameters, "capture_id"), actorPersonId);
         return { external_id: row.capture_id, data: row as unknown as JsonValue };
       }
-      // WP-F1 (D-453): fersk, read-only, REDIGERT tilstandslesing for klasse D-kjeden (preflight + readback for `submit_capture`/`submit_refund`) - se `class-d-checks.ts`.
+      // WP-F1 (D-462): fersk, read-only, REDIGERT tilstandslesing for klasse D-kjeden (preflight + readback for `submit_capture`/`submit_refund`) - se `class-d-checks.ts`.
       case "check_submit_capture": {
         const check = await this.service.checkSubmitVippsCapture(tenantId, memorySpace, requireString(parameters, "capture_id"));
         return { ...(check ? { external_id: check.child.id } : {}), data: check as unknown as JsonValue };

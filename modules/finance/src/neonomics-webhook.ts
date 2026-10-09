@@ -48,7 +48,7 @@ export interface ParsedNeonomicsEventEnvelope {
 
 /**
  * Minimal, TRYGG utdrag - ALDRI hele nyttelasten persistert (samme §25-prinsipp som Stripe/Vipps-parserne).
- * WP-F1 (D-453, JARVIS-070): STRENG parsing - ikke et JSON-objekt, mangler trygg betalings-id eller en ISO 20022-lignende statuskode (1..32 tegn av [A-Za-z0-9_.-])
+ * WP-F1 (D-462, JARVIS-070): STRENG parsing - ikke et JSON-objekt, mangler trygg betalings-id eller en ISO 20022-lignende statuskode (1..32 tegn av [A-Za-z0-9_.-])
  * KASTER `neonomics_event_envelope_malformed`; kalleren lagrer da et dødbrev (`rejected`, hash-nøkkel) og svarer 2xx i stedet for en evig 5xx-retry. Ukjente men velformede
  * statuskoder beholdes (observasjonell provider_status, ingen tilstandsovergang) - de gjettes aldri til en kjent.
  */

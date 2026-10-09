@@ -16,7 +16,7 @@ import { FinanceService } from "../../finance/src/service.ts";
 import { FinanceReconciliationService } from "../../finance/src/reconciliation.ts";
 
 /**
- * WP-F1 (D-453, migrasjon 100): avstemmingsfunn har FK -> payment_intents OG -> finance_reconciliation_runs. Erasure av en space med funn, kjøringer og intensjoner
+ * WP-F1 (D-462, migrasjon 100): avstemmingsfunn har FK -> payment_intents OG -> finance_reconciliation_runs. Erasure av en space med funn, kjøringer og intensjoner
  * MÅ lykkes uten FK-brudd (funn FØR både kjøringer og intensjoner), og alt avstemmings-innhold er borte etterpå. Den EKTE `ErasureService.executeErasure()`-APIen.
  */
 let stop: (() => Promise<void>) | undefined;

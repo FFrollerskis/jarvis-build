@@ -4,7 +4,7 @@ import { listBusinessTenantIds } from "@jarvis/core";
 import type { FinanceReconciliationService, ReconciliationReport } from "./reconciliation.ts";
 
 /**
- * WP-F1 (D-453, UA-6 akseptanse): planlagt avstemmingssveip for ALLE bedrifts-tenants - SAMME reboot-durable `DailyScheduler`-mekanisme og «for-alle-tenants»-mønster
+ * WP-F1 (D-462, UA-6 akseptanse): planlagt avstemmingssveip for ALLE bedrifts-tenants - SAMME reboot-durable `DailyScheduler`-mekanisme og «for-alle-tenants»-mønster
  * som `runStripePaymentSyncForAllTenants()`/`runNeonomicsSweepForAllTenants()` (ingen ny scheduler-arkitektur). Kjøres ETTER leverandørsynkene (Stripe/Vipps/Neonomics
  * kl. 3, utgifter kl. 4) og FØR open-loop-sveipet (kl. 6), slik at ferske utfall er avstemt og `RECONCILE_*`-flaggene er satt når avviksflaten leser dem.
  *

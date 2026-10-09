@@ -1097,7 +1097,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       return json(res, 400, { error: "malformed_request", reason: "decision_malformed" });
     }
     if (decision === "approve" && deps.executive) {
-      // WP-F1 (D-453): godkjenning av en handling som flytter penger (`ToolDefinition.step_up_required`) krever eierens step-up - en enhetssignert økt fra en
+      // WP-F1 (D-462): godkjenning av en handling som flytter penger (`ToolDefinition.step_up_required`) krever eierens step-up - en enhetssignert økt fra en
       // eier-kanal - FØR bekreftelsen forbrukes. (Avvisning er unntatt: den reduserer risiko.) ToolGateway håndhever det samme på nytt ved utførelsen.
       const pending = await deps.confirmations.peekPending(resolved.identity, id);
       if (pending && deps.executive.gateway.get(pending.tool_id, pending.action)?.step_up_required === true) {
@@ -1129,7 +1129,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
   }
 
   if (deps.executive && deps.confirmations && deps.owner && req.method === "POST" && url.pathname === "/finance/actions") {
-    // WP-F1 (D-453, Q-47 a): eierens vei til pengehandlingene (se finance-actions.ts). EGEN rute med hardkodet allowlist (`preview`/`request`/`reconciliation_status`) - aldri en utvidelse av
+    // WP-F1 (D-462, Q-47 a): eierens vei til pengehandlingene (se finance-actions.ts). EGEN rute med hardkodet allowlist (`preview`/`request`/`reconciliation_status`) - aldri en utvidelse av
     // /confirmations eller /executive/*. SAMME grant-rekkefølge som de øvrige muterende rutene: avvis ugyldig action/parametre FØR grantet løses, avvis et ugyldig
     // grant FØR step-up, og step-up FØR noe leses eller opprettes. `request` UTFØRER ALDRI - den oppretter kun en bundet, engangs bekreftelse som eieren godkjenner
     // via `/confirmations` (som igjen krever step-up og kjører gjennom klasse D-pipelinen).

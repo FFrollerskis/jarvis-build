@@ -45,7 +45,7 @@ const empty = z.object({}).strict() as unknown as z.ZodType<Record<string, JsonV
 const record = (shape: z.ZodRawShape) => z.object(shape).strict() as unknown as z.ZodType<Record<string, JsonValue>>;
 
 /**
- * WP-F1 (D-453): eierens BUNDNE forventning til en pengehandling - beløp, valuta og mottaker-digest slik eieren SÅ dem da hen ba om handlingen. Ruten `/finance/actions` setter alle tre;
+ * WP-F1 (D-462): eierens BUNDNE forventning til en pengehandling - beløp, valuta og mottaker-digest slik eieren SÅ dem da hen ba om handlingen. Ruten `/finance/actions` setter alle tre;
  * validatoren sammenligner dem med den ferske tilstandslesingen (`boundExpectationReason`) og avviser ved avvik FØR noe reserveres eller sendes. Alt-eller-ingenting.
  */
 const BOUND_EXPECTATION = {
@@ -1922,7 +1922,7 @@ export function firstWaveTools(
       output_trust: "internal", transport: transport("finance")
     },
     {
-      // WP-F1 (D-453, Q-47 a): KLASSE D-KJEDEN er komplett - fersk tilstandslesing (`check_submit_payment_intent`) med målvalidering (intent-tilstand,
+      // WP-F1 (D-462, Q-47 a): KLASSE D-KJEDEN er komplett - fersk tilstandslesing (`check_submit_payment_intent`) med målvalidering (intent-tilstand,
       // beløpsformat, valuta, konto/motkonto, leverandør-binding, nødbryter, mulig duplikat), recovery-plan, idempotency_key (påkrevd av gatewayen),
       // etterbetingelse (leverandør-ID + tilstandsovergang via readback, leverandørens ekko av beløp/valuta) og umiddelbart out-of-band-varsel.
       // Handlingen står IKKE på noen modellflate (eier-eksklusivt navnerom) og nås kun via eierens step-up + bundne bekreftelse (`/finance/actions/request`).
@@ -1960,7 +1960,7 @@ export function firstWaveTools(
       output_trust: "internal", transport: transport("finance")
     },
     {
-      // WP-F1 (D-453, UA-6 akseptanse): rapport over den deterministiske avstemmingen (intensjon <-> leverandørutfall <-> Fiken-bilag). Ren lesing av funn-/kjøringstabellene
+      // WP-F1 (D-462, UA-6 akseptanse): rapport over den deterministiske avstemmingen (intensjon <-> leverandørutfall <-> Fiken-bilag). Ren lesing av funn-/kjøringstabellene
       // (aldri en ny kjøring, aldri en korreksjon). Dormante sjekker (f.eks. Fiken uten credentials) står eksplisitt i `last_run.checks` - aldri som grønne.
       tool_id: "finance", action: "get_reconciliation_status", description: "Les avstemmingsrapporten: siste kjøring, åpne funn (manglende/ekstra/uoverensstemmende beløp, ukjent utfall, mulig dobbeltbetaling) og hvilke sjekker som faktisk kjørte",
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional() }),
@@ -2240,7 +2240,7 @@ export function firstWaveTools(
       tool_id: "finance_stripe", action: "submit_refund", description: "Utfør refusjon mot Stripe for et eksisterende refusjonsutkast (klasse D - reell utgående økonomisk handling, kill-switch-gated, deterministisk provider-idempotens)",
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), refund_id: z.string(), actor_person_id: z.string().optional(), ...BOUND_EXPECTATION }),
       capability_class: "D", scopes: ["finance.write", "finance.stripe"], reversible: false,
-      // WP-F1 (D-453): klasse D-kjeden er komplett - fersk lesing (`check_submit_refund`) med målvalidering (oppgjort Stripe-betaling, beløp innenfor det opprinnelige,
+      // WP-F1 (D-462): klasse D-kjeden er komplett - fersk lesing (`check_submit_refund`) med målvalidering (oppgjort Stripe-betaling, beløp innenfor det opprinnelige,
       // valuta, tilstand, nødbryter), recovery, idempotency_key, etterbetingelse via readback og umiddelbart varsel. Kun via eierens step-up + bundne bekreftelse.
       rollback_procedure: SUBMIT_STRIPE_REFUND_RECOVERY,
       idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_STRIPE_SECRET_KEY",
@@ -2323,7 +2323,7 @@ export function firstWaveTools(
       tool_id: "finance_vipps", action: "submit_capture", description: "Utfør capture mot Vipps for et eksisterende capture-utkast (klasse D - reell økonomisk handling som faktisk flytter reserverte kundepenger, kill-switch-gated, deterministisk provider-idempotens)",
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), capture_id: z.string(), actor_person_id: z.string().optional(), ...BOUND_EXPECTATION }),
       capability_class: "D", scopes: ["finance.write", "finance.vipps"], reversible: false,
-      // WP-F1 (D-453): klasse D-kjeden er komplett - fersk lesing (`check_submit_capture`) med målvalidering (AUTORISERT betaling, beløp innenfor reservasjonen, valuta,
+      // WP-F1 (D-462): klasse D-kjeden er komplett - fersk lesing (`check_submit_capture`) med målvalidering (AUTORISERT betaling, beløp innenfor reservasjonen, valuta,
       // tilstand, nødbryter), recovery, idempotency_key, etterbetingelse via readback (capture oppgjort) og umiddelbart varsel. Kun via eierens step-up + bundne bekreftelse.
       rollback_procedure: SUBMIT_VIPPS_CAPTURE_RECOVERY,
       idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_VIPPS_CLIENT_SECRET",
@@ -2378,7 +2378,7 @@ export function firstWaveTools(
       tool_id: "finance_vipps", action: "submit_refund", description: "Utfør refusjon mot Vipps for et eksisterende refusjonsutkast (klasse D - reell utgående økonomisk handling, kill-switch-gated, deterministisk provider-idempotens)",
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), refund_id: z.string(), actor_person_id: z.string().optional(), ...BOUND_EXPECTATION }),
       capability_class: "D", scopes: ["finance.write", "finance.vipps"], reversible: false,
-      // WP-F1 (D-453): klasse D-kjeden er komplett - fersk lesing (`check_submit_refund`) med målvalidering (oppgjort Vipps-betaling, beløp innenfor det opprinnelige,
+      // WP-F1 (D-462): klasse D-kjeden er komplett - fersk lesing (`check_submit_refund`) med målvalidering (oppgjort Vipps-betaling, beløp innenfor det opprinnelige,
       // valuta, tilstand, nødbryter), recovery, idempotency_key, etterbetingelse via readback og umiddelbart varsel. Kun via eierens step-up + bundne bekreftelse.
       rollback_procedure: SUBMIT_VIPPS_REFUND_RECOVERY,
       idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_VIPPS_CLIENT_SECRET",

@@ -11,7 +11,7 @@ import { BankingService, FinanceService, type NeonomicsCredentials, type Neonomi
 import { Gate } from "./wpf1-fakes.ts";
 
 /**
- * WP-F1 (D-453, JARVIS-019): leverandørlesing (`refresh*PaymentState`, `getNeonomicsPaymentAuthorizationUrl`) skjer UTEN åpen DB-transaksjon og UTEN radlås.
+ * WP-F1 (D-462, JARVIS-019): leverandørlesing (`refresh*PaymentState`, `getNeonomicsPaymentAuthorizationUrl`) skjer UTEN åpen DB-transaksjon og UTEN radlås.
  * Beviset er målt fra innsiden av selve leverandørkallet: testdoblen sjekker mot ekte Postgres (a) at appens forbindelser ikke står `idle in transaction` og
  * (b) at `FOR UPDATE NOWAIT` på intensjonsraden lykkes (ingen lås holdes over nettverkskallet). Negativ kontroll viser at proben faktisk SER både lås og åpen tx.
  */

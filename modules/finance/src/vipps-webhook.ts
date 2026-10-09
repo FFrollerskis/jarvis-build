@@ -141,12 +141,12 @@ export interface ParsedVippsEventEnvelope {
   readonly msn: string | null;
   readonly success: boolean | null;
   readonly timestamp: string | null;
-  /** WP-F1 (D-453): `null` = gyldig. Ellers årsakskoden til permanent ugyldig innhold (beløp/valuta/tidsstempel) - kalleren lagrer hendelsen som `rejected` og svarer 2xx. */
+  /** WP-F1 (D-462): `null` = gyldig. Ellers årsakskoden til permanent ugyldig innhold (beløp/valuta/tidsstempel) - kalleren lagrer hendelsen som `rejected` og svarer 2xx. */
   readonly rejection: string | null;
 }
 
 /**
- * WP-F1 (D-453, JARVIS-020/070): STRENG parsing. Ikke et JSON-objekt / mangler trygg `reference` eller et rent navn KASTER `vipps_event_envelope_malformed`
+ * WP-F1 (D-462, JARVIS-020/070): STRENG parsing. Ikke et JSON-objekt / mangler trygg `reference` eller et rent navn KASTER `vipps_event_envelope_malformed`
  * (kalleren lagrer et dødbrev under en hash-nøkkel). Identifiserbar hendelse med permanent ugyldig beløp (ikke et trygt ikke-negativt heltall i minste enhet),
  * valuta eller tidsstempel (som ellers kastet `RangeError` i `toISOString()` og ga evig 5xx-retry) returneres med `rejection` satt.
  */

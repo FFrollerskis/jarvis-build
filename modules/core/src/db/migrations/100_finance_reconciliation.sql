@@ -1,4 +1,4 @@
--- WP-F1 (D-453, Q-47 a / UA-6 akseptanse «intent -> provider-forespørsel -> utfall -> regnskap/avstemming»): deterministisk avstemming av penger.
+-- WP-F1 (D-462, Q-47 a / UA-6 akseptanse «intent -> provider-forespørsel -> utfall -> regnskap/avstemming»): deterministisk avstemming av penger.
 --
 -- `finance_reconciliation_runs`: én rad per avstemmingskjøring (planlagt sveip eller på forespørsel) med status per sjekk (`ok` / `skipped_no_credentials` /
 -- `incomplete` / `failed:<kode>`) - slik at «dormant uten credentials» er SYNLIG i stedet for en stille grønn. `finance_reconciliation_findings`: funn som

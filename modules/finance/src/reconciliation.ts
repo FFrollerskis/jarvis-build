@@ -5,7 +5,7 @@ import { withMemoryTransaction } from "@jarvis/memory";
 import { SUBMIT_INFLIGHT_LEASE_MS } from "./submit-guard.ts";
 
 /**
- * WP-F1 (D-453, UA-6 akseptanse «hver pengehandling mapper intent -> provider-forespørsel -> utfall -> regnskap/avstemming»): DETERMINISTISK avstemming av penger.
+ * WP-F1 (D-462, UA-6 akseptanse «hver pengehandling mapper intent -> provider-forespørsel -> utfall -> regnskap/avstemming»): DETERMINISTISK avstemming av penger.
  *
  * `reconcileFinance` sammenholder (1) betalingsintensjoner, (2) leverandørutfall slik Jarvis har lagret dem (oppfriskinger + webhooks) og (3) Fiken-bilag, og
  * registrerer avvik som FUNN. Funnene er OBSERVASJONER med varsel - aldri en automatisk korreksjon, aldri en ny pengehandling, aldri en endring av

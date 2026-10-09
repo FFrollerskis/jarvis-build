@@ -23,7 +23,7 @@ import {
 import { FikenFake, Gate, StripeFake, VippsFake, http, timeoutError } from "./wpf1-fakes.ts";
 
 /**
- * WP-F1 (D-453): DOBBELTBETALINGSVERN mot ekte embedded Postgres. Hver test beviser at en pengehandling aldri gir to leverandørhandlinger:
+ * WP-F1 (D-462): DOBBELTBETALINGSVERN mot ekte embedded Postgres. Hver test beviser at en pengehandling aldri gir to leverandørhandlinger:
  *   - to SAMTIDIGE innsendinger (annen gateway-nøkkel, samme objekt) -> kun ÉN leverandørhandling (reservasjon + lease),
  *   - krasj mellom reservasjon og leverandørkall -> gjenopptas bare der leverandøren slår sammen kall (samme Idempotency-Key, innenfor vinduet),
  *   - leverandør-tidsavbrudd med ukjent utfall -> `outcome_unknown:` + flagg, aldri en ny betaling.

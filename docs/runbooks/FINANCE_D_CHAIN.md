@@ -1,7 +1,7 @@
 # Klasse D-kjeden for penger (WP-F1, UA-6) - runbook for eieren
 
 Gjelder: `finance.submit_payment_intent`, `finance_stripe.submit_refund`, `finance_vipps.submit_capture`, `finance_vipps.submit_refund` (de fire handlingene som flytter penger),
-samt avstemming, webhooks og ukjent utfall. Kilder: D-375 (klasse D-minimumspipeline), D-392 (finansintegritet), D-228 (Stripe testmodus), Q-47 (a), D-453 (WP-F1), CLAUDE.md regel 2/8/11.
+samt avstemming, webhooks og ukjent utfall. Kilder: D-375 (klasse D-minimumspipeline), D-392 (finansintegritet), D-228 (Stripe testmodus), Q-47 (a), D-462 (WP-F1), CLAUDE.md regel 2/8/11.
 Prinsipp: **strengeste sikkerhetsregel vinner.** Ingen pengehandling kan nås av modellen, og ingen kan utføres uten hele kjeden under.
 
 ## 0. Status i ett blikk

@@ -3,7 +3,7 @@ import type { FikenCredentials, FikenCredentialsProvider } from "./service.ts";
 import type { FikenPostingEntry, FikenPostingListing, FikenPostingReader } from "./reconciliation.ts";
 
 /**
- * WP-F1 (D-453): produksjonsleseren som gir avstemmingen Fiken-bilag. Bruker EKSISTERENDE `FikenTransport.listJournalEntries()` (`GET /companies/{slug}/journalEntries`) -
+ * WP-F1 (D-462): produksjonsleseren som gir avstemmingen Fiken-bilag. Bruker EKSISTERENDE `FikenTransport.listJournalEntries()` (`GET /companies/{slug}/journalEntries`) -
  * ingen ny Fiken-flate. DORMANT uten credentials: `getCredentials` gir `null` => leseren returnerer `null` og avstemmingen sier `skipped_no_credentials`.
  *
  * NOT VERIFIED (ærlig): Fikens liste-API er ikke verifisert mot primærkilden her (`api.fiken.no` er utilgjengelig fra dette miljøet). Verken pagineringsprotokollen

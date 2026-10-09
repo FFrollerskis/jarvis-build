@@ -23,7 +23,7 @@ import {
 import { malformedWebhookKey, rejectionCode, safeProviderId, safeToken, strictUnixSeconds, strictWebhookAmount, strictWebhookCurrency, strictWebhookTimestamp } from "../src/webhook-guard.ts";
 
 /**
- * WP-F1 (D-453, JARVIS-020/070): webhook-herding for ALLE fire leverandører. Streng heltallsparsing i minste enhet (ingen `Number()`-coercion; NaN/Infinity/negative/brøk/for store
+ * WP-F1 (D-462, JARVIS-020/070): webhook-herding for ALLE fire leverandører. Streng heltallsparsing i minste enhet (ingen `Number()`-coercion; NaN/Infinity/negative/brøk/for store
  * avvises), trygge id-er/tidsstempler, og permanent ugyldig innhold lagres som dødbrev `rejected` (2xx, ingen evig retry) uten å røre domenetilstanden. Wallester får samme
  * tilstandsmaskin som Stripe/Vipps/Neonomics: SAVEPOINT, gjenbehandling av `failed_retryable`, ukjent klasse = `unsupported`. Neonomics: hendelsesorden (forsinket tidligere status
  * overskriver aldri). Ekte embedded Postgres; ingen nettverk.

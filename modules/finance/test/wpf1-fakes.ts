@@ -4,7 +4,7 @@ import type { VippsPaymentObject, VippsPaymentWriter } from "../src/vipps-transp
 import type { FikenGeneralJournalEntryWriter } from "../src/index.ts";
 
 /**
- * WP-F1 (D-453): delte testdobler for dobbeltbetalings- og klasse D-kjede-testene. INGEN nettverk - alle leverandører er fakes som oppfører seg som de
+ * WP-F1 (D-462): delte testdobler for dobbeltbetalings- og klasse D-kjede-testene. INGEN nettverk - alle leverandører er fakes som oppfører seg som de
  * ekte (Stripe/Vipps slår sammen kall med samme Idempotency-Key; Fiken/Neonomics gjør det IKKE), slik at en test faktisk kan telle «effekter hos leverandøren».
  */
 

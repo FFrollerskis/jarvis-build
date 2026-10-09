@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FikenTransport, readCreatedJournalEntry, resetFikenAccessTokenCache } from "../src/index.ts";
 
 /**
- * WP-F1 (D-453): svaret på `POST generalJournalEntries` er ikke verifisert mot Fikens primærdokumentasjon - kropp med `journalEntryId` ELLER kun `Location`. Tolkes konservativt;
+ * WP-F1 (D-462): svaret på `POST generalJournalEntries` er ikke verifisert mot Fikens primærdokumentasjon - kropp med `journalEntryId` ELLER kun `Location`. Tolkes konservativt;
  * uten sikker id er utfallet UKJENT (`outcome_unknown:`), aldri en gjettet id og aldri en ny postering. Ingen nettverk (stubbet `fetch`).
  */
 const input = { description: "Husleie [J:abcdef123456]", date: "2026-10-09" };

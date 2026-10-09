@@ -11,7 +11,7 @@ import { withMemoryTransaction } from "@jarvis/memory";
 import { OpenLoopService } from "../src/open-loop-service.ts";
 
 /**
- * WP-F1 (D-453, JARVIS-072): pengeavvik som blir stående på en TERMINAL intensjon (oppgjort/feilet/kansellert) skal fortsatt vises som open loop - avstemmingens egne funn
+ * WP-F1 (D-462, JARVIS-072): pengeavvik som blir stående på en TERMINAL intensjon (oppgjort/feilet/kansellert) skal fortsatt vises som open loop - avstemmingens egne funn
  * (`RECONCILE_*`) og leverandørkonflikter/ukjent innsendingsutfall/refusjons- og capture-beløp som ikke stemmer. Opprettelsesflagg på en avsluttet intensjon (f.eks. manglende
  * leverandørreferanse ved opprettelse) gir fortsatt INGEN loop (uendret oppførsel, jf. `open-loop-finance.test.ts`). Ren SQL-fixture direkte mot `payment_intents`.
  */

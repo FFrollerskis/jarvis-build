@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { parseMinorUnitsStrict } from "./ore.ts";
 
 /**
- * WP-F1 (D-453, JARVIS-020/070): felles, STRENGE byggeklosser for alle fire webhook-parsere (Stripe, Vipps, Neonomics, Wallester).
+ * WP-F1 (D-462, JARVIS-020/070): felles, STRENGE byggeklosser for alle fire webhook-parsere (Stripe, Vipps, Neonomics, Wallester).
  *
  * En autentisert webhook er likevel UBETRODD DATA: leverandøren (eller en som har hemmeligheten) kan sende et beløp som er NaN/Infinity/negativt/brøk/astronomisk,
  * en dato som ikke finnes, en id med kontrolltegn eller en 2 MB lang streng. Slikt skal aldri nå domenelaget som et gjettet tall - og det skal heller aldri gi en evig

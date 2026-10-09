@@ -37,7 +37,7 @@ import {
 import { FikenFake } from "./wpf1-fakes.ts";
 
 /**
- * WP-F1 (D-453, UA-6 akseptanse): deterministisk avstemming av penger. Rene detektorer og Fiken-sammenligning (A, B), og ekte embedded Postgres som app-rolle (C-F): funn for
+ * WP-F1 (D-462, UA-6 akseptanse): deterministisk avstemming av penger. Rene detektorer og Fiken-sammenligning (A, B), og ekte embedded Postgres som app-rolle (C-F): funn for
  * manglende/ekstra/uoverensstemmende beløp, ukjent utfall, dobbeltbetaling mistenkt og avviste hendelser; idempotens (samme funn oppdateres, aldri duplisert), gjenåpning,
  * autolukking KUN innenfor sjekker som kjørte, varsel kun for nye funn, dormant Fiken (uten credentials / ufullstendig liste) og tenant-isolasjon.
  */

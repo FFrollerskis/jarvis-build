@@ -166,7 +166,7 @@ export class ConfirmationStore {
   }
 
   /**
-   * WP-F1 (D-453): eierens EGEN forespørsel om en konsekvensiell handling (pengehandling). I motsetning til `checkAndConsume` (som utføreren kaller FØR en tainted
+   * WP-F1 (D-462): eierens EGEN forespørsel om en konsekvensiell handling (pengehandling). I motsetning til `checkAndConsume` (som utføreren kaller FØR en tainted
    * handling og som kan FORBRUKE en godkjent bekreftelse og slippe handlingen gjennom) oppretter denne KUN en PENDING bekreftelse bundet til det kanoniske kallet
    * (eller returnerer den allerede ventende for samme kall) - den forbruker aldri noe og gir aldri tillatelse til å utføre. Utføringen skjer først når eieren
    * godkjenner via grant-ruten (`approveAndTake`). Kalles utelukkende fra en step-up-beskyttet, grant-autentisert rute - aldri fra modell/verktøy.

@@ -343,7 +343,7 @@ export class FinanceService {
     private readonly neonomicsGatewayFactory: NeonomicsGatewayFactory = defaultNeonomicsGatewayFactory,
     private readonly neonomicsWebhookApiKeyProvider: NeonomicsWebhookApiKeyProvider = () => null,
     private readonly neonomicsTenantResolver: NeonomicsTenantResolver = () => null,
-    /** WP-F1 (D-453): valgfrie justeringer - sist, slik at ingen eksisterende kallsted påvirkes. */
+    /** WP-F1 (D-462): valgfrie justeringer - sist, slik at ingen eksisterende kallsted påvirkes. */
     options: FinanceServiceOptions = {}
   ) {
     this.submitTiming = { ...DEFAULT_SUBMIT_TIMING, ...options.submitTiming };
@@ -457,7 +457,7 @@ export class FinanceService {
   }
 
   /**
-   * WP-F1 (D-453): FERSK, READ-ONLY tilstandslesing som klasse D-kjeden bruker som preflight (målvalidering) og readback (postcondition) for
+   * WP-F1 (D-462): FERSK, READ-ONLY tilstandslesing som klasse D-kjeden bruker som preflight (målvalidering) og readback (postcondition) for
    * `finance.submit_payment_intent`. Ingen skriving, ingen leverandørkall, ingen credential; redigert (maskerte leverandørreferanser) - se `class-d-checks.ts`.
    */
   async checkSubmitPaymentIntent(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string): Promise<SubmitIntentCheck | null> {
@@ -824,7 +824,7 @@ export class FinanceService {
    * fase 2 `call` kjører uten tx; fase 3 `apply` (ny, kort tx) låser raden på nytt og lagrer utfallet. To samtidige kall sender begge samme
    * Idempotency-Key, som leverandøren slår sammen til én handling; `apply` er selv idempotent (ser den at raden allerede er ferdigstilt, skriver den ikke på nytt).
    *
-   * WP-F1 (D-453): for handlinger med reservasjonsfase (refusjon/capture) reserverer `prepare` raden (`draft -> submitted`, committet FØR kallet) og
+   * WP-F1 (D-462): for handlinger med reservasjonsfase (refusjon/capture) reserverer `prepare` raden (`draft -> submitted`, committet FØR kallet) og
    * `onCallError` rydder opp når leverandørkallet feiler: entydig avvist -> tilbake til `draft`; ukjent utfall -> flagg `SUBMIT_OUTCOME_UNKNOWN`
    * (og tilbake til `draft` kun der leverandøren slår sammen gjentatte kall). Et ukjent utfall kastes som `ProviderOutcomeUnknownError`
    * (`outcome_unknown:` - ToolGateway lagrer det som `unverified`, ikke som en retry-bar feil).
@@ -935,7 +935,7 @@ export class FinanceService {
     try {
       finalizer = await plan.run();
     } catch (err) {
-      // WP-F1 (D-453): tre utfall, aldri en blind antakelse.
+      // WP-F1 (D-462): tre utfall, aldri en blind antakelse.
       //  - entydig IKKE utført (4xx/429/feil før sending) eller bevisst tvetydig-signalert: tilbake til draft og første-forsøk-tidspunktet nullstilles
       //    (leverandøren har ingenting) - en korrigert retry er trygg.
       //  - UKJENT utfall (tidsavbrudd/nettverk/5xx/409): Stripe/Vipps slår sammen gjentatte kall med samme Idempotency-Key -> tilbake til draft (retry er
@@ -1230,7 +1230,7 @@ export class FinanceService {
   }
 
   /**
-   * WP-F1 (D-453, JARVIS-020/070): lagrer en AUTENTISERT webhook-hendelse med permanent ugyldig innhold som dødbrev (`status = 'rejected'`, kort årsakskode - aldri selve
+   * WP-F1 (D-462, JARVIS-020/070): lagrer en AUTENTISERT webhook-hendelse med permanent ugyldig innhold som dødbrev (`status = 'rejected'`, kort årsakskode - aldri selve
    * innholdet) og returnerer `rejected` (ruten svarer 2xx: ingen evig retry). Samme nøkkel igjen = `duplicate`. Hendelser som ikke engang lar seg identifisere får en
    * deterministisk hash-nøkkel (`malformed:<sha256-prefiks>`). Tilstanden hentes uansett inn igjen av den planlagte leverandør-oppfriskingen, og avstemmingen
    * (`reconcileFinance`) flagger avviste hendelser. Kjører i den KONFIGURERTE tenantens kontekst (aldri payload-metadata).

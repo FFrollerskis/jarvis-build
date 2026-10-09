@@ -104,7 +104,7 @@ export function verifyStripeWebhookSignature(
  * hele objektet lagret (kan inneholde betalingsmetode-/kunde-detaljer
  * Jarvis aldri skal persistere, byggeordrens §4/§13).
  *
- * WP-F1 (D-453, JARVIS-020/070): STRENG parsing. En hendelse som ikke lar seg identifisere (ikke et JSON-objekt, mangler trygg `id`/`type`) KASTER
+ * WP-F1 (D-462, JARVIS-020/070): STRENG parsing. En hendelse som ikke lar seg identifisere (ikke et JSON-objekt, mangler trygg `id`/`type`) KASTER
  * `stripe_event_envelope_malformed` (kalleren lagrer et dødbrev under en hash-nøkkel). Er hendelsen identifiserbar men et felt er permanent ugyldig
  * (`created` utenfor [2000, 2100), beløp som ikke er et trygt ikke-negativt heltall i minste enhet, ugyldig valuta/objekt-id/referanse), returneres
  * den med `rejection` satt (årsakskode) - kalleren lagrer den som `rejected` og svarer 2xx (ingen evig retry). Beløp/valuta valideres kun for objekttypene

@@ -7,7 +7,7 @@ import { ownerStepUpDenial } from "@jarvis/tool-gateway";
  * frys, enhetstilbakekall, deaktivering av kill switch) krever et grant bevist med enhetens signatur (`auth_strength === "signed"`)
  * fra en kanal der eieren selv sitter foran en innrullert enhet - ALDRI tale, Telegram, meldingsplattformer eller system.
  * Sikkerhetsbrytere som STOPPER ting (aktivere kill switch, pause) er bevisst unntatt: de skal alltid kunne brukes raskt.
- * WP-F1 (D-453): selve regelen (signert enhet + eier-kanal) bor nå i `@jarvis/tool-gateway` (`ownerStepUpDenial`) og er den SAMME som gatewayen håndhever for
+ * WP-F1 (D-462): selve regelen (signert enhet + eier-kanal) bor nå i `@jarvis/tool-gateway` (`ownerStepUpDenial`) og er den SAMME som gatewayen håndhever for
  * pengehandlinger (`ToolDefinition.step_up_required`) - her ligger kun unntaksmengden for brytere som stopper ting.
  */
 

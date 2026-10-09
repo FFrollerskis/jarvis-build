@@ -1,5 +1,5 @@
 /**
- * WP-F1 (D-453): rene, deterministiske regler for en innsending mot leverandøren som er RESERVERT (`submitted`) uten leverandørsvar.
+ * WP-F1 (D-462): rene, deterministiske regler for en innsending mot leverandøren som er RESERVERT (`submitted`) uten leverandørsvar.
  *
  * Reserve-then-execute (D-392) committer `draft -> submitted` FØR leverandørkallet. En rad som står igjen som `submitted` uten `provider_ref` betyr
  * derfor enten (a) at et kall pågår akkurat nå, eller (b) at prosessen døde/leverandøren ikke svarte (utfall ukjent). Tre lag hindrer dobbel effekt:

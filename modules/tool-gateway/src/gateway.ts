@@ -316,7 +316,7 @@ export interface ToolDefinition {
   /** Del 3: `outbound_message` = ingen forhåndseksisterende tilstand; mottaker valideres i transporten og leverandørens bekreftede ID er etterbetingelsen. */
   class_d_profile?: "outbound_message";
   /**
-   * WP-F1 (D-453, JARVIS-013/043 for penger): MÅLVALIDERING MED SPESIFIKK ÅRSAK. `preflight_target_check` svarer bare ja/nei og gir alltid
+   * WP-F1 (D-462, JARVIS-013/043 for penger): MÅLVALIDERING MED SPESIFIKK ÅRSAK. `preflight_target_check` svarer bare ja/nei og gir alltid
    * `preflight_target_not_found` - for en pengehandling må eieren se HVORFOR den ble stoppet (feil tilstand, beløpsformat, valuta, konto, leverandør,
    * duplikat, nødbryter). Kjøres på den ferske tilstandslesingen FØR noe reserveres/utføres (klasse D). Returnerer `null` når målet er gyldig,
    * ellers en kort årsakskode som gatewayen avviser med som `preflight_invalid:<kode>`. Mangler tilstanden (`null`) avvises det som
@@ -337,7 +337,7 @@ export interface ToolDefinition {
    */
   notification_summary?: (state: JsonValue | null, parameters: Record<string, JsonValue>) => string | null;
   /**
-   * WP-F1 (D-453): handlingen flytter penger og kan KUN utføres med eierens step-up - en enhetssignert økt (`auth_strength: "signed"`) fra en eier-kanal
+   * WP-F1 (D-462): handlingen flytter penger og kan KUN utføres med eierens step-up - en enhetssignert økt (`auth_strength: "signed"`) fra en eier-kanal
    * (web/desktop/api/mobile; se `ownerStepUpDenial`). Håndheves av gatewayen SELV når klasse D-pipelinen er påslått (produksjon: api og worker), rett etter
    * policy-/parameter-portene og FØR noe annet leses - slik at ingen ny rute, jobb eller modellvei kan flytte penger uten step-up, uavhengig av om kalleren
    * husket å sjekke. Avslag: `step_up_required:<årsak>`. Uten påslått pipeline (testhjelpere, host-akseptansescript) er flagget uten effekt.

@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { JsonValue } from "@jarvis/contracts";
 
 /**
- * WP-F1 (D-453, Q-47 a): klasse D-kjeden for de fire pengehandlingene som var DEFERRED i D-375:
+ * WP-F1 (D-462, Q-47 a): klasse D-kjeden for de fire pengehandlingene som var DEFERRED i D-375:
  *   `finance.submit_payment_intent`, `finance_stripe.submit_refund`, `finance_vipps.submit_capture`, `finance_vipps.submit_refund`.
  *
  * Denne filen er DEN rene, deterministiske halvdelen av kjeden (ingen I/O, ingen LLM): validatorer for den ferske tilstandslesingen
@@ -138,7 +138,7 @@ function acknowledgedDuplicates(parameters: Record<string, JsonValue>): Set<stri
 }
 
 /**
- * WP-F1 (D-453): BINDING TIL BELØP + MOTTAKER. Eierens bundne bekreftelse bærer `expected_amount_ore`, `expected_currency` og `expected_recipient` (digest av mottakeren) fra
+ * WP-F1 (D-462): BINDING TIL BELØP + MOTTAKER. Eierens bundne bekreftelse bærer `expected_amount_ore`, `expected_currency` og `expected_recipient` (digest av mottakeren) fra
  * tilstanden eieren SÅ da hen ba om handlingen. Ved utførelsen sammenlignes de med den FERSKE tilstandslesingen: en intensjon/refusjon/capture som er endret mellom forespørsel
  * og godkjenning (også om DB-triggeren som låser pengekolonnene skulle være slått av) avvises FØR noe reserveres eller sendes. Alt-eller-ingenting: oppgis én, må alle tre oppgis.
  * Ingen binding oppgitt = ingen ekstra sjekk (direkte eier-kall med step-up og skriptene); ruten `/finance/actions` setter alltid alle tre.

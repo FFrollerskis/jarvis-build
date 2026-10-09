@@ -24,7 +24,7 @@ describe("A: finance_stripe.*-handlinger er registrert i firstWaveTools() med ko
         "refresh_payment_state", "get_webhook_event", "run_provider_anomaly_detection",
         // D-242: connector-helsesjekk-probe.
         "get_balance",
-        // WP-F1 (D-453): fersk, read-only tilstandslesing for klasse D-kjeden (preflight + readback for submit_refund).
+        // WP-F1 (D-462): fersk, read-only tilstandslesing for klasse D-kjeden (preflight + readback for submit_refund).
         "check_submit_refund"
       ])
     );

@@ -36,7 +36,7 @@ import {
 import { FikenFake, Gate, StripeFake, VippsFake, timeoutError } from "./wpf1-fakes.ts";
 
 /**
- * WP-F1 (D-453, Q-47 a): KLASSE D-KJEDEN FOR PENGER, ende-til-ende. Ekte `ToolGateway` med påslått klasse D-pipeline (som i produksjon), ekte
+ * WP-F1 (D-462, Q-47 a): KLASSE D-KJEDEN FOR PENGER, ende-til-ende. Ekte `ToolGateway` med påslått klasse D-pipeline (som i produksjon), ekte
  * `FinanceService` og ekte embedded Postgres; leverandørene er testdobler som oppfører seg som de ekte (Stripe/Vipps slår sammen kall med samme
  * Idempotency-Key, Fiken gjør det ikke) slik at testen kan TELLE effekter hos leverandøren. Ingen nettverk.
  *

@@ -7,7 +7,7 @@ import type { PaymentIntent } from "./types.ts";
 import type { BankAccount, BankConsent } from "./banking-types.ts";
 
 /**
- * WP-F1 (D-453): den FERSKE, READ-ONLY tilstandslesingen klasse D-kjeden bygger på. Brukes to ganger per pengehandling av `ToolGateway`:
+ * WP-F1 (D-462): den FERSKE, READ-ONLY tilstandslesingen klasse D-kjeden bygger på. Brukes to ganger per pengehandling av `ToolGateway`:
  * FØR (målvalidering: kan dette sendes, og hvorfor ikke?) og ETTER (readback: er leverandør-ID og tilstandsovergang bekreftet?). JSON-kontrakten er
  * `SubmitIntentCheckSchema`/`SubmitChildCheckSchema` i `@jarvis/tool-gateway` (`finance-class-d.ts`), som også eier validatorene - her bygges kun dataene.
  *

@@ -1,4 +1,4 @@
--- WP-F1 (D-453, Q-47 a / JARVIS-019/020/070/072): klasse D-kjeden for penger.
+-- WP-F1 (D-462, Q-47 a / JARVIS-019/020/070/072): klasse D-kjeden for penger.
 --
 -- 1) `first_submit_attempt_at`: tidspunktet for FØRSTE reservasjon av en innsending mot leverandøren. Stripe og Vipps slår sammen gjentatte kall med
 --    samme Idempotency-Key, men bare innenfor leverandørens idempotensvindu (Stripe: 24 t). En gjenopptakelse/retry etter at vinduet er passert

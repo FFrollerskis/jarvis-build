@@ -27,7 +27,7 @@ export function toOreInteger(value: number | string | bigint): number {
 export type MinorUnitsResult = { readonly ok: true; readonly value: number } | { readonly ok: false; readonly reason: string };
 
 /**
- * WP-F1 (D-453, JARVIS-020/070): STRENG parsing av et beløp i minste enhet fra en ubetrodd kilde. Godtar KUN
+ * WP-F1 (D-462, JARVIS-020/070): STRENG parsing av et beløp i minste enhet fra en ubetrodd kilde. Godtar KUN
  *   - `number` som er et trygt, ikke-negativt heltall (JSON-tall),
  *   - `string` som er 1-15 rene sifre (ingen fortegn, mellomrom, desimal, eksponent, heksadesimal, tusenskille), og
  *   - `bigint` innenfor trygt område.

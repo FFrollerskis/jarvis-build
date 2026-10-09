@@ -1,4 +1,4 @@
--- WP-F1 (D-453, Q-47 a): pengekolonnene på en betalingsintensjon / refusjon / capture er UFORANDERLIGE etter opprettelse.
+-- WP-F1 (D-462, Q-47 a): pengekolonnene på en betalingsintensjon / refusjon / capture er UFORANDERLIGE etter opprettelse.
 --
 -- Eierens step-up-godkjenning er bundet til intensjonens ID (og, i tillegg, til beløp + valuta + mottaker-digest slik eieren så dem). Den bindingen er bare meningsfull hvis raden
 -- ikke kan endres mellom forespørsel og godkjenning. Applikasjonen endrer aldri disse kolonnene (kun tilstand, leverandørfelt og avviksflagg), så uforanderligheten håndheves her,

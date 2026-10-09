@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApiServer, type ApiDeps } from "../src/server.ts";
 
 /**
- * WP-F1 (D-453, JARVIS-070): webhook-ruter og hendelsesstatus. `rejected` (autentisert, men permanent ugyldig innhold) og `unsupported`/`duplicate` er ferdige for leverandøren
+ * WP-F1 (D-462, JARVIS-070): webhook-ruter og hendelsesstatus. `rejected` (autentisert, men permanent ugyldig innhold) og `unsupported`/`duplicate` er ferdige for leverandøren
  * og besvares 2xx - ingen evig retry. KUN `failed_retryable` er 502 (midlertidig feil: leverandøren skal prøve igjen). Alle fire ruter følger samme regel.
  */
 let status = "processed";

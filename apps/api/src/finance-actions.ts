@@ -13,7 +13,7 @@ import {
 } from "@jarvis/tool-gateway";
 
 /**
- * WP-F1 (D-453, Q-47 a): EIERENS VEI TIL PENGEHANDLINGENE. De fire handlingene (`finance.submit_payment_intent`, `finance_stripe.submit_refund`,
+ * WP-F1 (D-462, Q-47 a): EIERENS VEI TIL PENGEHANDLINGENE. De fire handlingene (`finance.submit_payment_intent`, `finance_stripe.submit_refund`,
  * `finance_vipps.submit_capture`/`submit_refund`) står på INGEN modellflate og kan ikke utføres av modellen. Eieren når dem slik:
  *   1. `POST /finance/actions` `preview`: fersk, redigert tilstandslesing + målvalidering - «kan dette sendes nå, og hvorfor ikke?» (ingen mutasjon).
  *   2. `POST /finance/actions` `request`: samme validering; er den OK opprettes en BUNDET, engangs, utløpende bekreftelse (`ConfirmationStore.requestPending`) for
@@ -87,7 +87,7 @@ export function parseFinanceActionRequest(parameters: Record<string, unknown>): 
 }
 
 /**
- * WP-F1 (D-453): eierens BUNDNE forventning - beløp, valuta og mottaker-digest slik de står i den ferske tilstandslesingen eieren ser i forhåndsvisningen. Den følger med i den
+ * WP-F1 (D-462): eierens BUNDNE forventning - beløp, valuta og mottaker-digest slik de står i den ferske tilstandslesingen eieren ser i forhåndsvisningen. Den følger med i den
  * bundne bekreftelsen (inngår i kall-fingeravtrykket), og klasse D-pipelinen sammenligner den med en NY tilstandslesing ved utførelsen (`boundExpectationReason`): endres beløp eller
  * mottaker mellom forespørsel og godkjenning, avvises utførelsen FØR noe reserveres eller sendes. Klienten kan aldri oppgi disse selv (ruten avviser `expected_*` som ukjent parameter).
  */

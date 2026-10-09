@@ -22,7 +22,7 @@ import {
 } from "@jarvis/tool-gateway";
 
 /**
- * WP-F1 (D-453): de RENE, deterministiske validatorene/etterbetingelsene for klasse D-kjeden for penger. Ingen I/O - kun JSON inn, årsakskode ut.
+ * WP-F1 (D-462): de RENE, deterministiske validatorene/etterbetingelsene for klasse D-kjeden for penger. Ingen I/O - kun JSON inn, årsakskode ut.
  * Adversarielt: feilformet tilstand (feil type, NaN/Infinity, negative, brøk, for store tall, manglende felt) skal ALDRI tolkes som «ok» (fail-closed).
  * Den ferske tilstandslesingen bygges av `@jarvis/finance` (`class-d-checks.ts`); kontrakten her er det som låser de to sidene sammen.
  */

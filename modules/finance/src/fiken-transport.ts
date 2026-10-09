@@ -251,7 +251,7 @@ export class FikenTransport {
 }
 
 /**
- * WP-F1 (D-453): leser svaret på `POST generalJournalEntries`. Svarformen er IKKE verifisert mot Fikens primærdokumentasjon (en `201 Created` kan komme med JSON-kropp som har
+ * WP-F1 (D-462): leser svaret på `POST generalJournalEntries`. Svarformen er IKKE verifisert mot Fikens primærdokumentasjon (en `201 Created` kan komme med JSON-kropp som har
  * `journalEntryId`, eller kun en `Location`-header uten kropp). Begge tolkes derfor KONSERVATIVT: id-en tas fra `journalEntryId` i kroppen, ellers fra en `Location` hvis sti
  * ender på `/journalEntries/<tall>` eller `/generalJournalEntries/<tall>` (aldri en vilkårlig siste sti-del - den kan være en annen ressurs-id). Finnes ingen id er det et UKJENT
  * utfall (`outcome_unknown:` - posteringen KAN være opprettet): kjeden varsler og krever avstemming i stedet for å anta feil eller prøve på nytt (Fiken har ingen Idempotency-Key).

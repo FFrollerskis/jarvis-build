@@ -60,7 +60,7 @@ export class FinanceTransport implements ToolTransport {
         const row = await this.service.getPaymentIntent(tenantId, memorySpace, requireString(parameters, "payment_intent_id"));
         return { ...(row ? { external_id: row.payment_intent_id } : {}), data: row as unknown as JsonValue };
       }
-      // WP-F1 (D-453): fersk, read-only, REDIGERT tilstandslesing for klasse D-kjeden (preflight + readback for `submit_payment_intent`) - se `class-d-checks.ts`.
+      // WP-F1 (D-462): fersk, read-only, REDIGERT tilstandslesing for klasse D-kjeden (preflight + readback for `submit_payment_intent`) - se `class-d-checks.ts`.
       case "check_submit_payment_intent": {
         const check = await this.service.checkSubmitPaymentIntent(tenantId, memorySpace, requireString(parameters, "payment_intent_id"));
         return { ...(check ? { external_id: check.payment_intent.payment_intent_id } : {}), data: check as unknown as JsonValue };
@@ -145,7 +145,7 @@ export class FinanceTransport implements ToolTransport {
         const rows = await this.service.listFikenCompanies(tenantId, this.credentialsProvider);
         return { data: rows as unknown as JsonValue };
       }
-      // WP-F1 (D-453, UA-6): klasse A-rapport over den deterministiske avstemmingen (siste kjøring, åpne funn, hvilke sjekker som faktisk kjørte). Ren lesing.
+      // WP-F1 (D-462, UA-6): klasse A-rapport over den deterministiske avstemmingen (siste kjøring, åpne funn, hvilke sjekker som faktisk kjørte). Ren lesing.
       case "get_reconciliation_status": {
         if (!this.reconciliation) throw new Error("finance_reconciliation_not_configured");
         const status = await this.reconciliation.getReconciliationStatus(tenantId, memorySpace);

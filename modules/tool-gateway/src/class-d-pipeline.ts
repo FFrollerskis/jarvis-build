@@ -46,7 +46,7 @@ export interface ClassDPipelineOptions {
 }
 
 /**
- * WP-F1 (D-453): kanaler der eieren selv sitter foran en innrullert enhet. ALDRI tale, Telegram, meldingsplattformer, klokke eller system.
+ * WP-F1 (D-462): kanaler der eieren selv sitter foran en innrullert enhet. ALDRI tale, Telegram, meldingsplattformer, klokke eller system.
  * Felles kilde for API-rutenes step-up (`apps/api/src/step-up.ts` delegerer hit) og for gatewayens egen håndhevelse (`ToolDefinition.step_up_required`).
  */
 export const OWNER_STEP_UP_CHANNELS: ReadonlySet<string> = new Set(["web", "desktop", "api", "mobile"]);
