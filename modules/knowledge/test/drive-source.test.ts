@@ -160,10 +160,10 @@ describe("GoogleDriveKnowledgeSource (§25/§29)", () => {
     expect(records).toHaveLength(5);
   });
 
-  it("§29.e Google Docs eksporteres til text/plain, ustøttede Google-native typer (Sheets) hoppes over trygt", async () => {
+  it("§29.e Google Docs eksporteres til text/plain, ustøttede Google-native typer (Forms) hoppes over trygt (WP-D1: Sheets/Slides leses nå, se wpd1-drive-docs-sheets-slides.test.ts)", async () => {
     const files: FakeDriveFile[] = [
       { id: "doc-1", name: "Dokument", mimeType: "application/vnd.google-apps.document", parent: undefined },
-      { id: "sheet-1", name: "Regneark", mimeType: "application/vnd.google-apps.spreadsheet", parent: undefined }
+      { id: "form-1", name: "Skjema", mimeType: "application/vnd.google-apps.form", parent: undefined }
     ];
     const gateway = makeGateway(buildDriveTransport(files));
     const source = new GoogleDriveKnowledgeSource(gateway, identity, { kind: "whole_drive" });
@@ -171,7 +171,7 @@ describe("GoogleDriveKnowledgeSource (§25/§29)", () => {
     expect(records).toHaveLength(1);
     expect(records[0]?.external_id).toBe("doc-1");
     expect(records[0]?.content_type).toBe("text/plain");
-    expect(skipped).toEqual([{ external_id: "sheet-1", reason: "UNSUPPORTED_CONTENT", detail: "application/vnd.google-apps.spreadsheet" }]);
+    expect(skipped).toEqual([{ external_id: "form-1", reason: "UNSUPPORTED_CONTENT", detail: "application/vnd.google-apps.form" }]);
   });
 
   it("§29.f binærfiler/bilder (ukjent MIME) hoppes over trygt - ALDRI lest som søppel-tekst", async () => {
