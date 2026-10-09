@@ -9,9 +9,10 @@ kildetyper. **UA-2 P1B-A (2026-08-17, host-bevist run_id `0f43f39d`)** - MATERIE
 lagt til denne runden: e-post-KROPP og -VEDLEGG (inkl. bilde-BYTES for sider uten native tekst-lag)
 sendes til en EKSTERN modell-leverandør (kun Anthropic denne runden, via `ModelGateway`,
 `purpose:"VISION"`) for OCR/beskrivelse - se ny seksjon "OCR/vision-dataflyt (P1B-A)" under. Kort og
-teknisk, ikke juridisk teater — oppdateres ved hver ny kildetype (møtetranskripsjon: utsatt til UA-7
-Communications Hub finnes; Pieces utsatt, se Q-22 i OPEN_QUESTIONS.md — ingen konkret
-integrasjonsflate funnet).
+teknisk, ikke juridisk teater — oppdateres ved hver ny kildetype (møtetranskripsjon: selve tale→tekst-
+transkripsjonen er utsatt til UA-7 Communications Hub, men INNTAKET av ferdige transkripter er bygget i WP-D1
+— se tillegget «WP-D1» nederst; Pieces utsatt, se Q-22 i OPEN_QUESTIONS.md — ingen konkret
+integrasjonsflate funnet, IKKE bygget).
 
 ## Hvilke data ingestes
 
@@ -19,7 +20,7 @@ integrasjonsflate funnet).
 |---|---|---|
 | GitHub (`GithubKnowledgeSource`) | Repo-metadata (navn, beskrivelse, standard-branch) + åpne issues (tittel, tidsstempel) | Prosjektdokumentasjon, oppgavetekst — **untrusted ingestion** (samme klassifisering som `read_issues` alt hadde i Tool Gateway) |
 | Filesystem/NAS (`FilesystemKnowledgeSource`) | Tekstbaserte filer i eksplisitt allowlistede roots (`.md`, `.txt`, `.json`, `.yaml/yml`, `.ts/js/tsx/jsx`, `.py`, `.sql`, `.html`, `.css`) | Notater, kode, konfigurasjon — kan inneholde persondata Tobias selv har lagret i disse filene |
-| Google Drive (`GoogleDriveKnowledgeSource`, P1A) | Google Docs (eksportert til text/plain) + tekstlige MIME-typer i en EKSPLISITT konfigurert mappe (rekursivt) eller hele driven (bevisst valgt scope, aldri default) | Dokumenter, notater — **untrusted ingestion**. Sheets/Slides/Forms/bilder/PDF/binærformater IKKE lest (§14 P1A — bevisst utsatt, hoppes trygt over). **Ingestion-KILDEN er READ ONLY by design** (sync skal aldri mutere kilden den leser fra) - dette er separat fra Drive-VERKTØYET (`GoogleDriveTransport`), som siden 2026-08-16 (D-41 scope-endring) har full read/write/permissions for generell verktøybruk utenfor ingestion-pipelinen |
+| Google Drive (`GoogleDriveKnowledgeSource`, P1A) | Google Docs (eksportert til text/plain) + tekstlige MIME-typer i en EKSPLISITT konfigurert mappe (rekursivt) eller hele driven (bevisst valgt scope, aldri default) | Dokumenter, notater — **untrusted ingestion**. Forms/bilder/PDF/binærformater IKKE lest (hoppes trygt over). **Oppdatert i WP-D1:** Docs/Slides (tekst) og Sheets (CSV) leses nå, se tillegget nederst. **Ingestion-KILDEN er READ ONLY by design** (sync skal aldri mutere kilden den leser fra) - dette er separat fra Drive-VERKTØYET (`GoogleDriveTransport`), som siden 2026-08-16 (D-41 scope-endring) har full read/write/permissions for generell verktøybruk utenfor ingestion-pipelinen |
 | Obsidian/lokal vault (`ObsidianVaultKnowledgeSource`, P1A) | `.md`-notater i en eksplisitt vault-rot (samme allowlist/traversal-forsvar som filesystem-kilden), inkl. frontmatter (flat parset til metadata) og wiki-lenke-navn | Personlige notater — kan inneholde persondata Tobias selv har skrevet. `.obsidian/`-katalogen (verktøykonfig, ikke notat-innhold) er EKSKLUDERT som default |
 | E-post-vedlegg (`EmailAttachmentKnowledgeSource`, P1B-A, NY) | Gmail-innboks (via `JARVIS_EMAIL_TOKEN`, EGEN credential fra Drive/Calendar sin `JARVIS_GOOGLE_TOKEN` - se D-35): e-postkropp (`text/plain`) + vedlegg (tekst/native-PDF/bilder/skannet-PDF). Arkiver (zip/rar/7z/gzip/tar) og docx/xlsx/pptx hoppes EKSPLISITT over (UNSUPPORTED_CONTENT), ALDRI åpnet/utpakket | E-postinnhold og VEDLEGGSINNHOLD (fakturaer, skjermbilder, skannede dokumenter) — **untrusted ingestion**, kan inneholde tredjeparts persondata (avsender/mottaker-navn, kontonummer på fakturaer, osv.) avhengig av hva som faktisk mottas på kontoen. Fail-closed grenser: maks 25 MB/vedlegg, maks 50 sider/PDF, 60s ekstraksjons-timeout (`extraction-safety.ts`) |
 
@@ -137,3 +138,48 @@ livssyklus, omdøpning-som-slett+ny, Q-20-no-resurrection), `p1a-cross-cutting.t
 memory-space-isolasjon DIREKTE med de nye kildetypene, retrieval via samme FTS/vector/hybrid-vei, INGEN
 dokumentinnhold i `audit_events`, Drive restore), `registry.test.ts` (ingen cross-tenant default),
 `chunking-safeguard.test.ts` (full innhold i `content`/FTS, kun `embed()`-input trunkert).
+
+---
+
+## WP-D1-tillegg (2026-10-09): kunnskapslaget koblet til chatten, flere kilder, entitetsgraf og kildeverifisering
+
+**Status:** BYGGET OG TESTET MOT TESTDOBLER (fake Drive, lokale filer, ekte embedded Postgres som app-rolle). **IKKE verifisert mot en ekte Drive-konto, en ekte NAS-mappe eller ekte
+møteeksporter** (`NOT VERIFIED`; verifiseringskommandoer står i `docs/runbooks/KNOWLEDGE_SOURCES.md`). Ingen ny ekstern behandler er innført: Drive, GitHub, Obsidian/filsystem og e-post er allerede aksepterte
+kilder, og modellkall går som før kun via `ModelGateway`.
+
+### Nye datakategorier (alle i Postgres, tenant- og romskopet med FORCE RLS; med i `docs/security/PROCESSING_INVENTORY.md`)
+
+| Kategori | Hva lagres | Kommentar |
+|---|---|---|
+| Google Docs / Slides / Sheets (`drive`) | Dokumentets TEKST (Docs/Slides → ren tekst, Sheets → CSV; med `sheets: "all"` ett dokument per ark) | Hard byte-grense (5 MiB) og rad-/kolonne-tak per ark; positiv MIME-allowlist; makro-/skript-/kjørbare typer leses ALDRI (Drive-transporten avviser dem også, forsvar i dybden). Kilden forblir skrivebeskyttet. |
+| Møtetranskripter (`meeting_transcript`) | Transkriptets tekst med talere og tidsstempler (txt/vtt/srt/json), deltakere som `{ navn, ref }` | **Tredjeparts persondata** (navn på møtedeltakere, det som ble sagt). E-postadresser lagres ALDRI (redigeres bort fra tekst, deltakere, tittel og filnavn). `canonical_uri` er en nøytral hash-referanse, aldri verts-stien. `modified_at` er filens mtime, så innholdet ikke kan manipulere oppbevaringsfristen. Tale→tekst er UA-7 og ikke bygget. |
+| Strukturerte merker (`knowledge_documents.sensitivity/trust_level`, migrasjon 086) | `normal`/`sensitive`/`special` og `untrusted`/`internal` | Standard `sensitive`/`untrusted` (fail-closed). Sensitivitet = strengeste av kildens gulv (`default_sensitivity`), klassifisering av teksten ved synk og klassifisering på nytt ved levering. Kildens tak (`max_sensitivity`) holder f.eks. helse-/økonomi-/hemmelighetsdokumenter helt utenfor kunnskapsbasen. |
+| Entitetsgraf (`knowledge_entities`, `knowledge_links`, migrasjon 087) | Navn på kjente entiteter (fra minnets `entities`), domener, repo-navn og prosjektnøkler som dokumentene nevner, og lenker dokument↔entitet | **E-postadresser lagres kun som sha256-nøkkel + maskert visning** (aldri i klartekst). Lenkene følger dokumentet (slettes sammen med det, også ved oppbevaringsfrist og erasure); entiteter uten lenker igjen fjernes (navn hentet fra slettet innhold overlever ikke). |
+| Påstandsverifisering (`claim_verifications`, `claim_evidence`, migrasjon 088) | Påstandstekst (≤ 1000 tegn), kildehenvisninger, uavhengighetsnøkler og korte utdrag (≤ 500 tegn), status UNKNOWN/RESEARCHING/PROVISIONAL/VERIFIED/DISPUTED | Påstandstekst kan inneholde persondata eieren selv skriver. Hemmeligheter redigeres bort før lagring, URL med passord/token avvises. Ingen autonom nettsøk: evidens kommer kun fra eier/system. Promotering til etablert kunnskap er KUN et forslag til minnets karantene (D-367). |
+
+### Dataflyt til modeller (endret)
+
+- **`knowledge.search` og `knowledge.get_claim_status` er chat-lese-verktøy** (klasse A, ubetrodd output som tainter turen). Treffene går til en SKYMODELL kun når de er merket `normal`/`sensitive` og passerer skyskjermen
+  (`apps/api/src/cloud-knowledge-screen.ts`, D-449/D-451): ukjent form/felt/kildetype holdes tilbake, ALL tekst klassifiseres på nytt, `special` og helse-rommet forlater aldri en lokal modell. Lokale modeller ser alt.
+  Verktøyene står IKKE på bakgrunns-/Telegram-/kodeflaten.
+- **Modellassistert entitetsuttrekk** er AV som standard (`JARVIS_KNOWLEDGE_ENTITY_LLM=off`). `local` tvinger lokal modell; `on` sender dokumentets sensitivitet med kallet, så `special` går aldri til sky (bevist mot ekte `ModelGateway`).
+  Modellen har ingen verktøy, svaret valideres strengt, og hvert navn må stå ordrett i dokumentet.
+- Ingen nye ekstern-mottakere utover det som allerede gjelder for OCR/vision (e-postvedlegg) og ordinære modellkall.
+
+### Konfigurasjon, oppbevaring og sletting
+
+- Kilder konfigureres deklarativt (`JARVIS_KNOWLEDGE_SOURCES`, alt-eller-ingenting) og er DVALE uten konfig. Filsystemkilder må ligge innenfor eksplisitt allowlistede basemapper (`JARVIS_KNOWLEDGE_FS_ROOTS`), den sanne roten sjekkes
+  rett før hver synk, GitHub er låst til `JARVIS_GITHUB_REPO`, Drive krever eksplisitt mappe eller bevisst `whole_drive`.
+- **Oppbevaring:** `retention_days` per kilde (for gammelt innhold indekseres ikke; utløpt innhold fjernes fysisk sammen med alt avledet: embeddings, lenker, foreldreløse entiteter, evidens-utdrag). Uten frist: så lenge kilden er koblet.
+- **Erasure** (`@jarvis/erasure`, Q-20) dekker de nye tabellene: dokument-/kilde-/rom-/person-/tenant-scope fjerner embeddings, lenker, foreldreløse entiteter og evidensutdrag; en påstand beholdes men vises alltid på nytt fra gjenværende
+  evidens (aldri bedre enn den lagrede statusen).
+- **Identitet:** kildeinstans er nå unik per (tenant, rom, kilde, instans, ekstern id) — samme dokument kan finnes i flere rom, aldri på tvers av dem (migrasjon 086, med pre-flight som lister kollisjoner).
+
+### Gjenstående risiko og åpne punkter (ærlig)
+
+1. Sensitivitetsklassifiseringen er stikkordsbasert (Q-52): falske negativer er mulige. Derfor er standardmerket `sensitive`, treffene klassifiseres på nytt ved levering, og eieren kan sette tak/gulv per kilde. Den bør evalueres mot ekte materiale.
+2. Møtetranskripter inneholder tredjeparts persondata (deltakere). Retensjon er opt-in per kilde (`retention_days`): sett en frist for transkriptkilder. Behovet for informasjon til deltakerne er en juridisk vurdering som IKKE er gjort her.
+3. `filesystem`-kilden lagrer containerstien som `canonical_uri` (vises i treff). Møtetranskript-kilden bruker en nøytral referanse.
+4. Pieces er IKKE bygget (ingen kjent offentlig API, Q-22).
+5. Hele WP-D1-flaten er testet mot fakes; ingen ekte Drive-/NAS-/transkriptkjøring er gjort (`NOT VERIFIED`).
+
