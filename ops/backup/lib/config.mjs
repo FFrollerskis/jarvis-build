@@ -1,5 +1,5 @@
-import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { ConfigError, envInt, envString } from "./env.mjs";
 import { parseHeartbeatConfig } from "./heartbeat.mjs";
 import { OffsiteError, parseOffsiteConfig } from "./offsite.mjs";
@@ -17,6 +17,32 @@ export const ROLES = Object.freeze(["backup", "offsite", "verify"]);
 /** Et tikk som kommer litt FØR fristen (cron-jitter, sekunder) skal likevel gjelde - men mye mindre enn et tikk, ellers driver kjøretidspunktet. */
 export const DUE_TOLERANCE_MS = 120_000;
 const DB_NAME = /^[A-Za-z0-9_]{1,63}$/;
+
+/** Sti med symlenker løst opp så langt den finnes (resten legges på urørt): to navn for samme mappe skal ikke kunne snike seg forbi sammenligningen. */
+function canonicalPath(path) {
+  const rest = [];
+  let current = resolve(path);
+  for (;;) {
+    try {
+      return join(realpathSync(current), ...rest.reverse());
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return resolve(path);
+      rest.push(basename(current));
+      current = parent;
+    }
+  }
+}
+
+/** `child` er `parent` selv eller ligger under den (komponentgrense: «/a/backups-status» ligger IKKE under «/a/backups»; roten «/» har allerede avsluttende skråstrek). */
+const within = (child, parent) => child === parent || child.startsWith(parent.endsWith(sep) ? parent : `${parent}${sep}`);
+
+/** true hvis a og b er samme mappe, eller den ene ligger inni den andre. */
+export function samePathOrNested(a, b) {
+  const x = canonicalPath(a);
+  const y = canonicalPath(b);
+  return within(x, y) || within(y, x);
+}
 
 export function parseRoles(raw) {
   if (raw === undefined) return new Set(ROLES);
@@ -41,6 +67,15 @@ export function loadScheduleConfig(flags, env = process.env) {
   const out = resolve(flags.out);
   const stateDir = resolve(typeof flags["state-dir"] === "string" ? flags["state-dir"] : envString(env, "JARVIS_BACKUP_STATE_DIR") ?? out);
   const exportRaw = typeof flags["status-export-dir"] === "string" ? flags["status-export-dir"] : envString(env, "JARVIS_BACKUP_STATUS_EXPORT_DIR");
+  // Review F9: eksportmappen monteres skrivebeskyttet i api-containeren og skal inneholde KUN den offentlige backup-status.json. Er den lik (eller henger sammen med) backup-mappen eller
+  // state-mappen, overskriver eksporten den INTERNE statusfilen (samme filnavn) og/eller synes de krypterte settene i containeren. Fanges her, før noe kjører.
+  if (exportRaw !== undefined) {
+    for (const [label, other] of [["backup-mappen (--out)", out], ["state-mappen (--state-dir / JARVIS_BACKUP_STATE_DIR)", stateDir]]) {
+      if (samePathOrNested(resolve(exportRaw), other)) {
+        throw new ConfigError(`--status-export-dir / JARVIS_BACKUP_STATUS_EXPORT_DIR må være en EGEN mappe: den kan ikke være ${label}, ligge inni den eller inneholde den (eksporten monteres i api-containeren og har samme filnavn som den interne statusfilen)`);
+      }
+    }
+  }
   const roles = parseRoles(flags.roles);
   const mode = oneOf(typeof flags.mode === "string" ? flags.mode : "docker", ["docker", "direct"], "--mode");
   const databases = typeof flags.databases === "string" ? flags.databases.split(",").map((s) => s.trim()).filter(Boolean) : undefined;

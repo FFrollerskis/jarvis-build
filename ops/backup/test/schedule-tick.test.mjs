@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { ConfigError } from "../lib/env.mjs";
 import { OffsiteError, prepareSetForOffsite } from "../lib/offsite.mjs";
@@ -687,6 +687,35 @@ describe("WP-C2 tick: valgfrie delsystemer med ugyldig konfig stopper ALDRI selv
     expect(viaEnv({ "verify-source": "local" }).verifyError).toBeNull();
     expect(viaEnv({}, { JARVIS_BACKUP_VERIFY_SCRATCH_HOST: "" }).verifyError).toBeNull();
     expect(viaEnv({ "verify-source": "offsite" }, { JARVIS_BACKUP_VERIFY_SCRATCH_HOST: "" }).verifyError).toBeNull(); // engangs-containeren (standard) er tillatt med off-site
+  });
+
+  it("review F9: eksportmappen må være en EGEN mappe - lik, inni eller rundt backup-/state-mappen (også via symlenke) er en konfig-feil før noe kjører", () => {
+    const base = tempDir();
+    const out = join(base, "backups");
+    mkdirSync(out);
+    const state = join(base, "state");
+    mkdirSync(state);
+    const load = (exportDir, extra = {}, env = {}) => loadScheduleConfig({ out, "status-export-dir": exportDir, ...extra }, env);
+    // likt og nøstet, i begge retninger
+    for (const bad of [out, `${out}/`, join(out, "."), join(out, "status"), join(out, "a", "b"), base, dirname(base), "/"]) {
+      expect(() => load(bad), bad).toThrow(ConfigError);
+      expect(() => load(bad), bad).toThrow(/EGEN mappe/);
+    }
+    // state-mappen er ikke backup-mappen: samme regler mot den
+    for (const bad of [state, join(state, "pub")]) expect(() => load(bad, { "state-dir": state }), bad).toThrow(/state-mappen/);
+    expect(() => load(join(state, "pub"), {}, { JARVIS_BACKUP_STATE_DIR: state })).toThrow(/EGEN mappe/);
+    // miljøvariabelen er underlagt samme regel
+    expect(() => loadScheduleConfig({ out }, { JARVIS_BACKUP_STATUS_EXPORT_DIR: out })).toThrow(/EGEN mappe/);
+    // en symlenke til backup-mappen er fortsatt backup-mappen
+    const alias = join(base, "alias");
+    symlinkSync(out, alias);
+    expect(() => load(alias)).toThrow(/EGEN mappe/);
+    expect(() => load(join(alias, "pub"))).toThrow(/EGEN mappe/);
+    // en egen søsken-mappe (også en som ikke finnes ennå) er helt greit, og uten eksport er det ingen sjekk
+    expect(load(join(base, "pub")).exportDir).toBe(join(base, "pub"));
+    expect(load(join(base, "sub", "dypere", "pub")).exportDir).toBe(join(base, "sub", "dypere", "pub"));
+    expect(load(join(base, "backups-status")).exportDir).toBe(join(base, "backups-status")); // felles prefiks er ikke nesting
+    expect(loadScheduleConfig({ out }, {}).exportDir).toBeNull();
   });
 
   it("kjernekonfig er fortsatt streng: ugyldig intervall/roller/mappe stopper tikket FØR noe kjører (exit 1)", () => {

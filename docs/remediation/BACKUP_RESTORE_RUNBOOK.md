@@ -199,7 +199,7 @@ API-et pinger **kun mens en lokal selvsjekk består** (`/health`: databasen svar
 
 ## 6.5 Backup-status i selvdiagnosen (API leser en skrivebeskyttet fil)
 
-Skriptet skriver `backup-status.json` til en **egen mappe** (aldri selve backup-mappen med settene) som api-containeren monterer `:ro`:
+Skriptet skriver `backup-status.json` til en **egen mappe** (aldri selve backup-mappen med settene) som api-containeren monterer `:ro`. Eksportmappen kan verken være backup-mappen, state-mappen (`JARVIS_BACKUP_STATE_DIR`) eller ligge inni/rundt dem (også via symlenke): det er en konfig-feil (`exit 1`, før noe kjører), fordi eksporten har samme filnavn som den interne `backup-status.json` og ellers ville overskrevet den - og vist de krypterte settene til api-containeren:
 ```bash
 mkdir -p /volume1/jarvisbuild-data/backups/status
 echo 'JARVIS_BACKUP_STATUS_EXPORT_DIR=/volume1/jarvisbuild-data/backups/status' >> .env

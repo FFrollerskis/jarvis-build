@@ -38,6 +38,18 @@ describe("WP-C2 schedule.mjs: kommandolinje (streng, uten hemmeligheter på argv
     expect(readdirSync(out)).toEqual([]);
   });
 
+  it("review F9: --status-export-dir lik (eller inni) backup-mappen er en konfig-feil (exit 1) FØR noe kjøres, også med --dry-run - eksporten ville overskrevet den interne statusfilen", () => {
+    const out = tempDir();
+    const same = run(["tick", "--out", out, "--status-export-dir", out, "--dry-run"]);
+    expect(same.status).toBe(1);
+    expect(same.stderr).toContain("EGEN mappe");
+    expect(readdirSync(out)).toEqual([]);
+    const viaEnv = run(["tick", "--out", out, "--dry-run"], { JARVIS_BACKUP_STATUS_EXPORT_DIR: join(out, "pub") });
+    expect(viaEnv.status).toBe(1);
+    expect(viaEnv.stderr).toContain("EGEN mappe");
+    expect(run(["tick", "--out", out, "--status-export-dir", join(tempDir(), "pub"), "--dry-run"]).status).toBe(0);
+  });
+
   it("tikk uten påkrevd miljø feiler høylytt FØR noe kjøres (exit 1), og feilen siterer aldri en hemmelig verdi", () => {
     const r = run(["tick", "--out", tempDir(), "--mode", "direct"], { JARVIS_BACKUP_AGE_RECIPIENT: "AGE-SECRET-KEY-1HEMMELIG" });
     expect(r.status).toBe(1);
