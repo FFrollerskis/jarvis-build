@@ -279,6 +279,12 @@ const RUN_RATE_QUERY_ACTIONS = ["get_cost_overview", "list_connector_maintenance
 const RUN_RATE_MUTATE_ACTIONS = ["record_connector_maintenance"] as const;
 
 /**
+ * WP-C4: Value Center (bruk per verdiløkke, kun tall). EGEN lese-rute med EGET hardkodet allowlist (`/executive/query` forblir uendret og lese-kun): kun `get_value_report`, ingen skriving finnes. Samme grant-baserte
+ * autoritet som `/runrate/query`; tenanten kommer fra det løste grantet (aldri fra body), og kallet går via `ToolGateway.execute()` (policy + revisjon).
+ */
+const VALUE_QUERY_ACTIONS = ["get_value_report"] as const;
+
+/**
  * D-230 (K2 governance-dashboard): `@jarvis/governance` (migrasjon 059) var
  * FERDIG BYGGET og testet (`modules/governance/test/`), men uten HTTP-rute/
  * UI - denne allowlisten er den LESE-KUN halvdelen, SAMME "hardkodet
@@ -1004,6 +1010,24 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       identity: resolved.identity, tool_id: "run_rate", action, parameters,
       ...(mutate ? { idempotency_key: `runrate-maint:${resolved.identity.session_id}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}` } : {})
     });
+    if (!result.ok) return json(res, 403, { error: "tool_denied", reason: result.reason });
+    return json(res, 200, { ok: true, data: result.data });
+  }
+
+  if (deps.executive && req.method === "POST" && url.pathname === "/value/query") {
+    const raw: unknown = await readBodyOrUndefined(req);
+    const parsedBody = grantBodyOrReject(res, raw, EXECUTIVE_QUERY_BODY_KEYS);
+    if (!parsedBody) return;
+    // Standardhandlingen er `get_value_report` (som `/runrate/query`); en eksplisitt handling utenfor allowlisten avvises FØR grantet løses.
+    const action = typeof parsedBody["action"] === "string" ? parsedBody["action"] : "get_value_report";
+    if (!(VALUE_QUERY_ACTIONS as readonly string[]).includes(action)) return json(res, 400, { error: "malformed_request", reason: "action_not_allowed" });
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
+    if (!resolved.ok) {
+      if (resolved.responded) return;
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+    }
+    // Verktøyskjemaet er strengt og uten felt: `parameters` fra kroppen sendes bevisst ALDRI videre.
+    const result = await deps.executive.gateway.execute({ identity: resolved.identity, tool_id: "executive", action, parameters: {} });
     if (!result.ok) return json(res, 403, { error: "tool_denied", reason: result.reason });
     return json(res, 200, { ok: true, data: result.data });
   }

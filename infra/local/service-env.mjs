@@ -303,8 +303,14 @@ export const SERVICE_ENV = {
     "JARVIS_API_DRAINS_EXECUTIVE",
     // EV-1 (D-412): bygg-sha og versjon som selvdiagnosen viser (uten dem vises bygget som UKJENT).
     "JARVIS_BUILD_SHA", "JARVIS_VERSION",
+    // WP-B (D-452): evolusjonsobservatoriet (kun lesing) - porter eieren har verifisert, forhåndsgodkjent failover, og jobb-runner-konfigurasjonen (ikke-hemmelige navn) som aktiveringsberedskapen for EV-6 leser.
+    "JARVIS_EV_VERIFIED_GATES", "JARVIS_EV_PREAPPROVED_FAILOVER", "JARVIS_JOB_RUNNER", "JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY",
+    // EV-3 (D-452): radar-kilder eieren selv velger (inert uten) og klokkeslett for det planlagte sveipet.
+    "JARVIS_RADAR_SOURCES", "JARVIS_RADAR_SWEEP_HOUR",
     // D-414: «chat først» - bakgrunnsformål venter mens chat pågår (maks / stillhet, ms).
     "JARVIS_BACKGROUND_YIELD_MAX_MS", "JARVIS_BACKGROUND_YIELD_QUIET_MS", "JARVIS_TRACE_FILE", "JARVIS_VOICE_URL", "JARVIS_COUNCIL_AUTO_MAX_PER_HOUR",
+    // WP-C4 (Value Center): V2 oppfølgingsvarsel (AV som standard), V5-forslag (AV som standard) og eier-erklærte porter for V3-beredskap. Ingen hemmeligheter - kun flagg, tall og portnavn.
+    "JARVIS_V2_PUSH_ENABLED", "JARVIS_V2_PUSH_MAX_PER_DAY", "JARVIS_V2_PUSH_QUIET_START", "JARVIS_V2_PUSH_QUIET_END", "JARVIS_V5_PROPOSALS_ENABLED", "JARVIS_VALUE_VERIFIED_GATES",
     // D-395 (JARVIS-092): sveip-klokkeslett main.ts leser (tidligere ikke videresendt til containeren, så compose kunne aldri endre dem).
     "JARVIS_BUSINESS_EVENTS_SYNC_HOUR", "JARVIS_BUSINESS_SCORING_HOUR", "JARVIS_BUSINESS_SWEEP_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_WEEKDAY", "JARVIS_CONNECTOR_HEALTH_SWEEP_HOUR", "JARVIS_CONVERSATION_GRAPH_SYNC_HOUR", "JARVIS_FINANCE_RECONCILE_HOUR", "JARVIS_FINANCE_SPEND_SWEEP_HOUR", "JARVIS_GROWTH_RECOMMENDATION_SWEEP_HOUR", "JARVIS_HEALTH_RETENTION_SWEEP_HOUR", "JARVIS_LOCATION_RETENTION_SWEEP_HOUR", "JARVIS_SITUATION_SWEEP_HOUR", "JARVIS_SUPPORT_INBOX_SYNC_HOUR", "JARVIS_VISION_RETENTION_SWEEP_HOUR", "JARVIS_STREAM_DEBUG",
     // WP-C2 (OPS-RUNTIME): ekstern oppetids-heartbeat (AV som standard; pinger kun mens en lokal selvsjekk består) og stien til den SKRIVEBESKYTTEDE backup-statusfilen
