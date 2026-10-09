@@ -8,9 +8,9 @@ import type { IdentityContext } from "@jarvis/contracts";
 import { createPool, runMigrations, withTenantTransaction } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { ConversationGraphService } from "@jarvis/conversation-graph";
-import { localHour, parseFollowUpPushPolicy, planFollowUpPush, reduceLedger, type FollowUpPushPolicy, type PushCandidate, type PushDecision, type PushLedgerState, type PushSend } from "@jarvis/executive";
+import { localHour, parseFollowUpPushPolicy, planFollowUpPush, reduceLedger, type FollowUpPushPolicy, type PushCandidate, type PushDecision, type PushLedgerState, type PushSend, type PushSendGuard } from "@jarvis/executive";
 import type { ToolGateway } from "@jarvis/tool-gateway";
-import { PUSH_SPACES, createAuditLedger, createGraphCandidateSource, createTelegramNotifier, readPushLedgerRows, startFollowUpPush } from "../src/follow-up-push.ts";
+import { PUSH_SPACES, createAuditLedger, createGraphCandidateSource, createPushSendGuard, createTelegramNotifier, readPushLedgerRows, startFollowUpPush } from "../src/follow-up-push.ts";
 
 /**
  * WP-C4, V2 push: kjøretidsadapterne mot ekte Postgres som app-rolle. Beviser: atomisk claim (høyst én melding selv med samtidige tikk/prosesser), ledger i revisjonssporet (kun nøkler og tall, skrevet som system),
@@ -124,8 +124,9 @@ async function seedWorld(t: string, other: string): Promise<void> {
   await openLoop(other, "foreign-loop", "business", -3 * DAY);
 }
 
-const startFor = (tenant: string, gw: Pick<ToolGateway, "execute">, policy: FollowUpPushPolicy, logs: Array<Record<string, unknown>> = []) =>
-  startFollowUpPush({ pool: app, graph, gateway: gw, ownerIdentity: identityFor(tenant), policy, log: (e) => { logs.push(e); }, tickMs: 3_600_000 });
+const OPEN_GUARD: PushSendGuard = { blocked: async () => null };
+const startFor = (tenant: string, gw: Pick<ToolGateway, "execute">, policy: FollowUpPushPolicy, logs: Array<Record<string, unknown>> = [], extra: { now?: () => Date; guard?: PushSendGuard } = {}) =>
+  startFollowUpPush({ pool: app, graph, gateway: gw, ownerIdentity: identityFor(tenant), policy, guard: extra.guard ?? OPEN_GUARD, ...(extra.now !== undefined ? { now: extra.now } : {}), log: (e) => { logs.push(e); }, tickMs: 3_600_000 });
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 // Kandidater
@@ -213,13 +214,15 @@ describe("WP-C4 V2 push - ledger i revisjonssporet", () => {
     expect(JSON.stringify(rows)).not.toContain("Ring Kari");
   });
 
-  it("definitiv feil frigir løkkene (neste claim sender SAMME melding på nytt); ukjent utfall beholder dem (ingen ny sending)", async () => {
+  it("bevist ikke sendt (definitiv feil) frigir løkkene (neste claim sender SAMME melding på nytt etter backoff); ukjent utfall beholder dem (ingen ny sending)", async () => {
     const t = await mkTenant();
     const ledger = createAuditLedger({ pool: app, tenantId: t, sessionId: "sess-x" });
     const cands = [cand("c1")];
     const first = asSend(await ledger.claim(decide(cands)));
     await ledger.settle(first, "failed", "kill_switch_active");
-    const retry = asSend(await ledger.claim(decide(cands)));
+    // M1: rett etter en frigitt feil gjelder backoff (15 min) - og forsøket står i revisjonssporet selv om løkkene er frigitt
+    expect(await ledger.claim(decide(cands))).toEqual({ send: false, reason: "backoff", message_key: first.message_key });
+    const retry = asSend(await ledger.claim(decide(cands, openPolicy({ retry_backoff_minutes: [0] }))));
     expect(retry.message_key).toBe(first.message_key);
     await ledger.settle(retry, "unknown", "postcondition_unverified:tool_timeout_outcome_unknown");
     const after = await ledger.claim(decide(cands));
@@ -496,24 +499,30 @@ describe("WP-C4 V2 push - tikk ende til ende", () => {
     } finally { h.stop(); }
   });
 
-  it("gateway avviser (kill switch/policy): meldingen frigis og forsøkes på nytt i neste tikk med SAMME idempotensnøkkel", async () => {
+  it("gateway avviser (kill switch/policy) før sending: meldingen frigis og forsøkes på nytt etter backoff med SAMME idempotensnøkkel", async () => {
     const t = await mkTenant();
     await followup(t, "f1", "business", -2 * DAY);
     let n = 0;
     const { gw, calls } = fakeGateway(() => (++n === 1 ? { ok: false, reason: "kill_switch_active" } : { ok: true, external_id: "tg-2" }));
     const h = startFor(t, gw, openPolicy());
+    const later = startFor(t, gw, openPolicy(), [], { now: () => new Date(Date.now() + 20 * 60_000) }); // 20 min senere (backoff 15 min er over)
     try {
       expect(await h.tick()).toMatchObject({ sent: false, reason: "send_failed", settled: true });
-      expect(await h.tick()).toMatchObject({ sent: true, settled: true });
+      expect(await h.tick()).toMatchObject({ sent: false, reason: "backoff" }); // ikke samme minutt
+      expect(await later.tick()).toMatchObject({ sent: true, settled: true });
       expect(calls).toHaveLength(2);
       expect(calls[1]!.idempotency_key).toBe(calls[0]!.idempotency_key);
       expect((await ledgerRowsOf(t)).map((r) => r.type)).toEqual(["followup.push_reserved", "followup.push_failed", "followup.push_reserved", "followup.push_sent"]);
-    } finally { h.stop(); }
+    } finally { h.stop(); later.stop(); }
   });
 
   it.each([
     ["postcondition_unverified:readback_missing"],
-    ["execution_in_flight_or_outcome_unknown"]
+    ["execution_in_flight_or_outcome_unknown"],
+    ["tool_failed:telegram_error_502"],
+    ["tool_failed:tool_timeout"],
+    ["tool_failed:fetch failed"],
+    ["noe helt ukjent"]
   ])("tvetydig utfall (%s): reservasjonen beholdes og meldingen sendes ALDRI på nytt (høyst én gang)", async (reason) => {
     const t = await mkTenant();
     await followup(t, "f1", "business", -2 * DAY);
@@ -579,8 +588,8 @@ describe("WP-C4 V2 push - tikk ende til ende", () => {
     const dead = { query: async () => { throw new Error("db nede"); }, connect: async () => { throw new Error("db nede"); } };
     const { gw, calls } = fakeGateway();
     const logs: Array<Record<string, unknown>> = [];
-    const noLedger = startFollowUpPush({ pool: dead as never, graph, gateway: gw, ownerIdentity: identityFor(t), policy: openPolicy(), log: (e) => { logs.push(e); }, tickMs: 3_600_000 });
-    const noSource = startFollowUpPush({ pool: app, graph: { crossChannelAttention: async () => { throw new Error("graf nede"); } }, gateway: gw, ownerIdentity: identityFor(t), policy: openPolicy(), log: (e) => { logs.push(e); }, tickMs: 3_600_000 });
+    const noLedger = startFollowUpPush({ pool: dead as never, graph, gateway: gw, ownerIdentity: identityFor(t), policy: openPolicy(), guard: OPEN_GUARD, log: (e) => { logs.push(e); }, tickMs: 3_600_000 });
+    const noSource = startFollowUpPush({ pool: app, graph: { crossChannelAttention: async () => { throw new Error("graf nede"); } }, gateway: gw, ownerIdentity: identityFor(t), policy: openPolicy(), guard: OPEN_GUARD, log: (e) => { logs.push(e); }, tickMs: 3_600_000 });
     try {
       expect(await noLedger.tick()).toEqual({ sent: false, reason: "ledger_unavailable" });
       expect(await noSource.tick()).toEqual({ sent: false, reason: "source_unavailable" });
@@ -608,5 +617,121 @@ describe("WP-C4 V2 push - tikk ende til ende", () => {
       expect(tb).toContain("Beta-sak");
       expect(tb).not.toContain("Alfa-sak");
     } finally { ha.stop(); hb.stop(); }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// Rettelser etter den uavhengige gjennomgangen (M1/M2): stopp før reservasjon, forsøk i ledgeren, status og logg
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+describe("WP-C4 V2 push - M1: stopp-sjekk, forsøkstak og tilstand (ekte ledger)", () => {
+  it("stoppsjekken speiler gatewayens rekkefølge: kill switch, frosset connector, infra-modus (kun for infra-verktøy), tilbakekalt credential", async () => {
+    const state = { kill: false, frozen: new Set<string>(), revoked: new Set<string>(), infra: null as string | null };
+    const infraCalls: string[] = [];
+    const base = {
+      killSwitch: { isActiveDurable: async () => state.kill },
+      controls: { isFrozenDurable: async (id: string) => state.frozen.has(id), isRevokedDurable: async (ref: string) => state.revoked.has(ref) },
+      infraGate: { checkDurable: async (cls: string) => { infraCalls.push(cls); return state.infra; } }
+    };
+    const guard = createPushSendGuard(base);
+    expect(await guard.blocked()).toBeNull();
+    state.revoked.add("JARVIS_TELEGRAM_TOKEN");
+    expect(await guard.blocked()).toBe("credential_revoked");
+    state.frozen.add("telegram");
+    expect(await guard.blocked()).toBe("connector_frozen"); // frys går foran tilbakekalling (som i gatewayen)
+    state.kill = true;
+    expect(await guard.blocked()).toBe("kill_switch_active"); // kill switch går foran alt
+    // andre verktøy/credentials enn telegram påvirker ikke løperen
+    const other = createPushSendGuard(base);
+    state.kill = false; state.frozen = new Set(["github"]); state.revoked = new Set(["JARVIS_GITHUB_TOKEN"]);
+    expect(await other.blocked()).toBeNull();
+    // infra-modus gjelder bare verktøy i infraToolIds (telegram er det ikke i dag -> aldri spurt)
+    expect(infraCalls).toEqual([]);
+    state.infra = "infra_paused";
+    expect(await createPushSendGuard({ ...base, infraToolIds: new Set(["github", "docker"]) }).blocked()).toBeNull();
+    expect(infraCalls).toEqual([]);
+    expect(await createPushSendGuard({ ...base, infraToolIds: new Set(["telegram"]) }).blocked()).toBe("infra_paused");
+    expect(infraCalls).toEqual(["B"]);
+    // en feil i sjekken kastes videre (tikket tolker det som stanset)
+    await expect(createPushSendGuard({ ...base, killSwitch: { isActiveDurable: async () => { throw new Error("db nede"); } } }).blocked()).rejects.toThrow("db nede");
+  });
+
+  it("kill switch på: seks tikk gir INGEN reservasjon, ingen audit-rad og ingen gateway-kall, loggen sier det én gang, og straks etter at bryteren slås av sendes meldingen (S3)", async () => {
+    const t = await mkTenant();
+    await followup(t, "f1", "business", -2 * DAY);
+    const { gw, calls } = fakeGateway();
+    const logs: Array<Record<string, unknown>> = [];
+    let kill = true;
+    const h = startFor(t, gw, openPolicy(), logs, { guard: createPushSendGuard({ killSwitch: { isActiveDurable: async () => kill }, controls: { isFrozenDurable: async () => false, isRevokedDurable: async () => false } }) });
+    try {
+      for (let i = 0; i < 6; i += 1) expect(await h.tick()).toEqual({ sent: false, reason: "send_blocked", blocked_by: "kill_switch_active" });
+      expect(calls).toHaveLength(0);
+      expect(await ledgerRowsOf(t)).toEqual([]);
+      expect(logs.filter((l) => l["msg"] === "v2_push_tick" && l["result"] === "send_blocked")).toEqual([{ msg: "v2_push_tick", result: "send_blocked", blocked_by: "kill_switch_active" }]);
+      expect(h.status()).toMatchObject({ last_result: "send_blocked", blocked_by: "kill_switch_active", attempts_exhausted_message: null });
+      kill = false;
+      expect(await h.tick()).toMatchObject({ sent: true });
+      expect(calls).toHaveLength(1);
+      expect(logs.some((l) => l["msg"] === "v2_push_state_cleared" && l["was"] === "send_blocked")).toBe(true);
+      expect(h.status()).toMatchObject({ last_result: "sent", blocked_by: null });
+      expect((await ledgerRowsOf(t)).map((r) => r.type)).toEqual(["followup.push_reserved", "followup.push_sent"]);
+    } finally { h.stop(); }
+  });
+
+  it("forsøk teller mot minsteavstanden selv om de ble frigitt: reservert + feilet for 10 min siden gir min_gap", async () => {
+    const t = await mkTenant();
+    await seedLedger(t, "followup.push_reserved", -10 * 60_000, "v2-push:forsok", ["k:forsok"]);
+    await seedLedger(t, "followup.push_failed", -9 * 60_000, "v2-push:forsok", ["k:forsok"], { reason: "kill_switch_active" });
+    const ledger = createAuditLedger({ pool: app, tenantId: t, sessionId: "g" });
+    expect(await ledger.claim(decide([cand("c1")], openPolicy({ min_gap_minutes: 60 })))).toEqual({ send: false, reason: "min_gap" });
+    asSend(await ledger.claim(decide([cand("c1")], openPolicy({ min_gap_minutes: 5 }))));
+  });
+
+  it("tak per melding: tre forsøk siste døgn (alle frigitt) gir attempts_exhausted; status og logg rapporterer det ÉN gang, med hash og uten innhold", async () => {
+    const t = await mkTenant();
+    await followup(t, "f1", "business", -2 * DAY, { title: "Sensitiv tittel som aldri skal i logg" });
+    const probe = asSend(planFollowUpPush({ candidates: [cand(`${t}-f1`, -2 * DAY)], policy: openPolicy(), state: reduceLedger([], new Date()), now: new Date() }));
+    for (const h of [5, 4, 3]) {
+      await seedLedger(t, "followup.push_reserved", -h * HOUR, probe.message_key, probe.item_keys);
+      await seedLedger(t, "followup.push_failed", -h * HOUR + 60_000, probe.message_key, probe.item_keys, { reason: "tool_failed:telegram_error_400" });
+    }
+    const { gw, calls } = fakeGateway();
+    const logs: Array<Record<string, unknown>> = [];
+    const h = startFor(t, gw, openPolicy(), logs);
+    try {
+      for (let i = 0; i < 4; i += 1) expect(await h.tick()).toEqual({ sent: false, reason: "attempts_exhausted", message_key: probe.message_key });
+      expect(calls).toHaveLength(0);
+      expect(logs.filter((l) => l["result"] === "attempts_exhausted")).toEqual([{ msg: "v2_push_tick", result: "attempts_exhausted", message_key: probe.message_key }]);
+      expect(h.status()).toMatchObject({ last_result: "attempts_exhausted", attempts_exhausted_message: probe.message_key, blocked_by: null });
+      expect(JSON.stringify([logs, h.status()])).not.toContain("Sensitiv");
+    } finally { h.stop(); }
+  });
+
+  it("rader eldre enn 24 t teller ikke mot taket: to nylige og to gamle forsøk gir fortsatt et nytt (etter backoff)", async () => {
+    const t = await mkTenant();
+    await followup(t, "f1", "business", -2 * DAY);
+    const probe = asSend(planFollowUpPush({ candidates: [cand(`${t}-f1`, -2 * DAY)], policy: openPolicy(), state: reduceLedger([], new Date()), now: new Date() }));
+    for (const h of [30, 27, 6, 5]) {
+      await seedLedger(t, "followup.push_reserved", -h * HOUR, probe.message_key, probe.item_keys);
+      await seedLedger(t, "followup.push_failed", -h * HOUR + 60_000, probe.message_key, probe.item_keys, { reason: "kill_switch_active" });
+    }
+    const { gw, calls } = fakeGateway();
+    const h = startFor(t, gw, openPolicy());
+    try {
+      expect(await h.tick()).toMatchObject({ sent: true }); // 4 feil bak seg: 240 min backoff er over (siste forsøk for 5 t siden), 2 forsøk siste døgn < 3
+      expect(calls).toHaveLength(1);
+    } finally { h.stop(); }
+  });
+
+  it("M2 ende til ende: med include_titles=false inneholder meldingen kun antall - aldri tittel (selv en uskyldig)", async () => {
+    const t = await mkTenant();
+    await followup(t, "f1", "business", -2 * DAY, { title: "Ring Kari om tilbudet" });
+    await followup(t, "f2", "personal", 10 * HOUR, { title: "Send faktura til Per" });
+    const { gw, calls } = fakeGateway();
+    const h = startFor(t, gw, openPolicy({ include_titles: false }));
+    try {
+      expect(await h.tick()).toMatchObject({ sent: true, items: 2 });
+      const message = (calls[0]!.parameters as { message: string }).message;
+      expect(message).toBe("Oppfølging fra Jarvis: 2 saker trenger deg (1 forfalt, 1 snart forfall).\nDette er en påminnelse fra dine egne lister. Åpne dashbordet eller spør meg om oppfølginger.");
+    } finally { h.stop(); }
   });
 });
