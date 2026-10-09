@@ -15,3 +15,4 @@ export * from "./infra-execution.ts";
 export * from "./cloud-execution.ts";
 export * from "./cloudflare-recovery.ts";
 export * from "./deployment-ingestion.ts";
+export * from "./producers/index.ts";
