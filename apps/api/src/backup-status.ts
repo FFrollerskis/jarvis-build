@@ -1,5 +1,6 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
-import { open } from "node:fs/promises";
+import { constants as fsConstants, type Stats } from "node:fs";
+import { lstat, open, type FileHandle } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import type { Observation } from "@jarvis/executive";
 
@@ -11,9 +12,16 @@ import type { Observation } from "@jarvis/executive";
  * Tillit: filen er UBETRODD data (CLAUDE.md regel 7). Den leses med størrelsesgrense, valideres felt for felt mot et lukket skjema, og kun oppramsede
  * verdier (tilstander, tidspunkt, tall, feilKODER) kommer videre. Fritekst fra filen når aldri `Observation.detail` - feilkodene oversettes her.
  * Ukjent eller uleselig er UNKNOWN (aldri «frisk»); alder over terskel er en ærlig advarsel (DEGRADED/DOWN), aldri en skjult feil.
+ *
+ * Lesingen er herdet mot det en fil i en montert mappe kan være i stedet for en vanlig fil (review F10): `lstat` FØR `open` (bare en vanlig fil åpnes - en FIFO uten skriver
+ * lot `open()` blokkere for alltid i trådpoolen), `O_NONBLOCK | O_NOFOLLOW` (en fil som byttes ut mellom `lstat` og `open` blokkerer eller følges heller ikke), `fstat` på det
+ * ÅPNE håndtaket, og en frist rundt det hele: går fristen ut svarer vi `timeout` (UNKNOWN) og starter ikke nye lesinger av samme sti før den hengte er ferdig.
+ * Symlenker følges ikke (mounten er en MAPPE med en vanlig fil, se infra/backup/docker-compose.backup-status.yml).
  */
 export const BACKUP_STATUS_SCHEMA = 1;
 export const BACKUP_STATUS_MAX_BYTES = 64 * 1024;
+/** Frist for én lesing av statusfilen (lstat + open + stat + read). Normalt millisekunder; en hengt montering skal ikke henge selvdiagnosen. */
+export const BACKUP_STATUS_READ_TIMEOUT_MS = 5_000;
 
 const SET_NAME = /^jarvis-backup-\d{8}T\d{6}Z$/;
 
@@ -90,7 +98,7 @@ export interface BackupStatusSnapshot {
 export type BackupStatusRead =
   | { kind: "ok"; snapshot: BackupStatusSnapshot }
   | { kind: "missing" }
-  | { kind: "invalid"; reason: "unreadable" | "too_large" | "not_json" | "bad_schema" };
+  | { kind: "invalid"; reason: "unreadable" | "too_large" | "not_json" | "bad_schema" | "timeout" };
 
 // --- validering (lukket skjema; ukjente felt ignoreres, feil type = null/avvist) ----------------------------------------------------------
 type Obj = Record<string, unknown>;
@@ -147,15 +155,36 @@ export function parseBackupStatus(raw: unknown): BackupStatusSnapshot | null {
   };
 }
 
-/** Leser statusfilen: størrelsesgrense FØR parsing, kun vanlige filer. Kaster aldri. */
-export async function readBackupStatusFile(path: string, maxBytes = BACKUP_STATUS_MAX_BYTES): Promise<BackupStatusRead> {
-  let handle;
+/** Filsystem-kallene kan byttes ut i tester (en FIFO som byttes inn mellom `lstat` og `open`, eller en hengt montering, lar seg ikke lage ellers). */
+export interface BackupStatusReadDeps {
+  lstat?: (path: string) => Promise<Pick<Stats, "isFile">>;
+  open?: (path: string, flags: number) => Promise<FileHandle>;
+  /** Overstyrer `BACKUP_STATUS_READ_TIMEOUT_MS` (tester). */
+  timeoutMs?: number;
+}
+
+const errCode = (err: unknown): string | undefined => (err as NodeJS.ErrnoException | null)?.code;
+const missingOrUnreadable = (err: unknown): BackupStatusRead => (errCode(err) === "ENOENT" ? { kind: "missing" } : { kind: "invalid", reason: "unreadable" });
+/** `O_NONBLOCK`/`O_NOFOLLOW` finnes ikke på alle plattformer (Windows): ukjent konstant blir 0 i OR-uttrykket. */
+export const STATUS_OPEN_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0) | (fsConstants.O_NOFOLLOW ?? 0);
+
+/** Selve lesingen (kan henge på en uvanlig montering - fristen ligger i `readBackupStatusFile`). Kaster aldri. */
+async function readStatusOnce(path: string, maxBytes: number, deps: BackupStatusReadDeps): Promise<BackupStatusRead> {
+  // 1. lstat FØRST: bare en vanlig fil åpnes. Symlenke, FIFO, enhet, socket og mappe er uleselige uten at vi har rørt dem.
   try {
-    handle = await open(path, "r");
+    if (!(await (deps.lstat ?? lstat)(path)).isFile()) return { kind: "invalid", reason: "unreadable" };
   } catch (err) {
-    return (err as NodeJS.ErrnoException).code === "ENOENT" ? { kind: "missing" } : { kind: "invalid", reason: "unreadable" };
+    return missingOrUnreadable(err);
+  }
+  // 2. open uten å blokkere og uten å følge en symlenke (filen kan ha blitt byttet ut etter lstat).
+  let handle: FileHandle;
+  try {
+    handle = await (deps.open ?? open)(path, STATUS_OPEN_FLAGS);
+  } catch (err) {
+    return missingOrUnreadable(err);
   }
   try {
+    // 3. fstat på det ÅPNE håndtaket: det vi faktisk har åpnet må være en vanlig fil.
     const st = await handle.stat();
     if (!st.isFile()) return { kind: "invalid", reason: "unreadable" };
     if (st.size > maxBytes) return { kind: "invalid", reason: "too_large" };
@@ -173,6 +202,26 @@ export async function readBackupStatusFile(path: string, maxBytes = BACKUP_STATU
     return { kind: "invalid", reason: "unreadable" };
   } finally {
     await handle.close().catch(() => undefined);
+  }
+}
+
+/** Stier med en lesing som ikke er ferdig etter fristen: en ny lesing legger ikke et nytt kall (og en ny blokkert tråd) oppå den hengte. */
+const hungReads = new Map<string, Promise<unknown>>();
+
+/** Leser statusfilen: lstat før open, størrelsesgrense FØR parsing, kun vanlige filer, frist rundt det hele. Kaster aldri. */
+export async function readBackupStatusFile(path: string, maxBytes = BACKUP_STATUS_MAX_BYTES, deps: BackupStatusReadDeps = {}): Promise<BackupStatusRead> {
+  if (hungReads.has(path)) return { kind: "invalid", reason: "timeout" };
+  const work = readStatusOnce(path, maxBytes, deps).catch((): BackupStatusRead => ({ kind: "invalid", reason: "unreadable" }));
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const expired = new Promise<"expired">((resolve) => { timer = setTimeout(() => resolve("expired"), deps.timeoutMs ?? BACKUP_STATUS_READ_TIMEOUT_MS); });
+    const first = await Promise.race([work, expired]);
+    if (first !== "expired") return first;
+    hungReads.set(path, work);
+    void work.finally(() => { if (hungReads.get(path) === work) hungReads.delete(path); });
+    return { kind: "invalid", reason: "timeout" };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -202,7 +251,7 @@ const nb1 = (n: number): string => (Math.round(n * 10) / 10).toFixed(1).replace(
 const hoursSince = (now: Date, at: string): number => (now.getTime() - Date.parse(at)) / 3_600_000;
 const age = (hours: number): string => (hours >= 48 ? `${nb1(hours / 24)} d` : `${nb1(hours)} t`);
 const label = (c: BackupErrorCode | null): string => (c === null ? "ukjent årsak" : ERROR_LABELS[c]);
-const INVALID_REASON: Record<string, string> = { unreadable: "filen kan ikke leses", too_large: "filen er for stor", not_json: "ugyldig JSON", bad_schema: "ukjent eller ugyldig format" };
+const INVALID_REASON: Record<string, string> = { unreadable: "filen kan ikke leses", too_large: "filen er for stor", not_json: "ugyldig JSON", bad_schema: "ukjent eller ugyldig format", timeout: "lesingen tok for lang tid" };
 
 export function observeBackupStatus(read: BackupStatusRead, now: Date, thresholds: BackupThresholds = DEFAULT_BACKUP_THRESHOLDS): Observation {
   if (read.kind === "missing") {
