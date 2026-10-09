@@ -117,7 +117,8 @@ describe("linjegrense (fail-closed)", () => {
     const body = new ReadableStream<Uint8Array>({
       pull(controller) {
         pulls += 1;
-        controller.enqueue(chunk);
+        if (pulls > 300) controller.close(); // endelig strøm (30 MB): en regresjon gir en ren rød test, ikke en minnekrasj
+        else controller.enqueue(chunk);
       },
       cancel() {
         cancelled = true;
