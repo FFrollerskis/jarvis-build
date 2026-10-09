@@ -113,7 +113,28 @@ export const POSTGRES_OPS_PROVIDER: CloudMutationProvider = {
   }
 };
 
-export const CLOUD_MUTATION_PROVIDERS: Readonly<Record<string, CloudMutationProvider>> = { cloudflare: CLOUDFLARE_PROVIDER, postgres_ops: POSTGRES_OPS_PROVIDER };
+/**
+ * Infisical-rotasjon (klasse D, «secrets er klasse D»). Før-tilstanden er rotasjonens STATUS/TIDSPUNKT - aldri verdier. Ærlig «ingen teknisk reversering»:
+ * den forrige verdien ligger i Infisicals egen versjonshistorikk og må gjenopprettes manuelt der.
+ */
+export const INFISICAL_PROVIDER: CloudMutationProvider = {
+  provider: "infisical",
+  tool_id: "infisical",
+  actions: new Set(["rotate_secrets"]),
+  target(_action, p) {
+    return `infisical:rotation:${scalar(p["rotation_id"]).toLowerCase()}`;
+  },
+  recovery() {
+    return {
+      plan: "ingen teknisk reversering - den forrige verdien ligger i Infisicals versjonshistorikk og må gjenopprettes manuelt der; avhengige tjenester må hente ny verdi (før-tilstand er journalført, aldri verdier)",
+      available: false
+    };
+  }
+};
+
+export const CLOUD_MUTATION_PROVIDERS: Readonly<Record<string, CloudMutationProvider>> = {
+  cloudflare: CLOUDFLARE_PROVIDER, postgres_ops: POSTGRES_OPS_PROVIDER, infisical: INFISICAL_PROVIDER
+};
 
 export interface ExecuteCloudMutationInput {
   tenant_id: string;

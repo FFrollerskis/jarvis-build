@@ -229,10 +229,10 @@ export class PostgresOpsTransport implements ToolTransport {
   }
 
   private getLongRunning(parameters: Record<string, JsonValue>, dsn: string): Promise<{ data: JsonValue }> {
-    const minSeconds = parameters["min_seconds"] === undefined ? 30 : Number(parameters["min_seconds"]);
-    const limit = parameters["limit"] === undefined ? 20 : Number(parameters["limit"]);
-    if (!Number.isFinite(minSeconds) || minSeconds < 1 || minSeconds > 86_400) throw new PostgresOpsError("postgres_ops_invalid_min_seconds");
-    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_ROWS) throw new PostgresOpsError("postgres_ops_invalid_limit");
+    const minSeconds = parameters["min_seconds"] === undefined ? 30 : parameters["min_seconds"];
+    const limit = parameters["limit"] === undefined ? 20 : parameters["limit"];
+    if (typeof minSeconds !== "number" || !Number.isFinite(minSeconds) || minSeconds < 1 || minSeconds > 86_400) throw new PostgresOpsError("postgres_ops_invalid_min_seconds");
+    if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > MAX_ROWS) throw new PostgresOpsError("postgres_ops_invalid_limit");
     return this.withClient(dsn, READ_STATEMENT_TIMEOUT_MS, async (client, session, dsnDatabase) => {
       const rows = (await client.query<BackendRow>(
         this.backendSelect(
@@ -302,8 +302,8 @@ export class PostgresOpsTransport implements ToolTransport {
   }
 
   private getTableSizes(parameters: Record<string, JsonValue>, dsn: string): Promise<{ data: JsonValue }> {
-    const limit = parameters["limit"] === undefined ? 20 : Number(parameters["limit"]);
-    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_ROWS) throw new PostgresOpsError("postgres_ops_invalid_limit");
+    const limit = parameters["limit"] === undefined ? 20 : parameters["limit"];
+    if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > MAX_ROWS) throw new PostgresOpsError("postgres_ops_invalid_limit");
     return this.withClient(dsn, READ_STATEMENT_TIMEOUT_MS, async (client, session) => {
       const rows = (await client.query<Record<string, unknown>>(`${this.tableStatsQuery()} ORDER BY total_bytes DESC, s.relname LIMIT ${limit}`)).rows;
       return { data: json({ database: session.database, count: rows.length, tables: rows.map((r) => this.tableView(r)) }) };
@@ -311,10 +311,10 @@ export class PostgresOpsTransport implements ToolTransport {
   }
 
   private getBloat(parameters: Record<string, JsonValue>, dsn: string): Promise<{ data: JsonValue }> {
-    const limit = parameters["limit"] === undefined ? 20 : Number(parameters["limit"]);
-    const minDead = parameters["min_dead_tuples"] === undefined ? 1000 : Number(parameters["min_dead_tuples"]);
-    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_ROWS) throw new PostgresOpsError("postgres_ops_invalid_limit");
-    if (!Number.isInteger(minDead) || minDead < 0 || minDead > 1_000_000_000) throw new PostgresOpsError("postgres_ops_invalid_min_dead_tuples");
+    const limit = parameters["limit"] === undefined ? 20 : parameters["limit"];
+    const minDead = parameters["min_dead_tuples"] === undefined ? 1000 : parameters["min_dead_tuples"];
+    if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > MAX_ROWS) throw new PostgresOpsError("postgres_ops_invalid_limit");
+    if (typeof minDead !== "number" || !Number.isInteger(minDead) || minDead < 0 || minDead > 1_000_000_000) throw new PostgresOpsError("postgres_ops_invalid_min_dead_tuples");
     return this.withClient(dsn, READ_STATEMENT_TIMEOUT_MS, async (client, session) => {
       const rows = (await client.query<Record<string, unknown>>(
         `${this.tableStatsQuery()} WHERE s.n_dead_tup >= $1 ORDER BY (s.n_dead_tup::float8 / GREATEST(s.n_live_tup + s.n_dead_tup, 1)) DESC, s.n_dead_tup DESC LIMIT ${limit}`, [minDead]

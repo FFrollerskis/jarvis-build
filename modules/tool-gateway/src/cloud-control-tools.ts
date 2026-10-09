@@ -1,6 +1,8 @@
 import type { ToolDefinition, ToolTransport } from "./gateway.ts";
 import { UnconfiguredHttpTransport } from "./integrations.ts";
 import { cloudflareToolDefinitions } from "./cloudflare-tools.ts";
+import { infisicalToolDefinitions } from "./infisical-tools.ts";
+import { langfuseToolDefinitions } from "./langfuse-tools.ts";
 import { parsePostgresOpsConfig, type PostgresOpsConfig } from "./postgres-ops-target-policy.ts";
 import { postgresOpsToolDefinitions } from "./postgres-ops-tools.ts";
 
@@ -17,6 +19,8 @@ export interface CloudControlConfig {
   cloudflareMutationZones?: ReadonlySet<string>;
   /** Postgres-drift (`JARVIS_POSTGRES_OPS_DATABASES/SCHEMAS/PROTECTED_ROLES`, parset ved oppstart). Tom `databases` = ingen klasse D-skriving. */
   postgresOps?: PostgresOpsConfig;
+  /** Eksakte Infisical-rotasjons-id-er (UUID) eieren har autorisert for rotasjon (`JARVIS_INFISICAL_ROTATION_IDS`, parset ved oppstart). Tom = ingen rotasjon. */
+  infisicalRotationIds?: ReadonlySet<string>;
 }
 
 export type CloudControlTransports = Partial<Record<"cloudflare" | "langfuse" | "infisical" | "postgres_ops", ToolTransport>>;
@@ -25,6 +29,8 @@ export function cloudControlToolDefinitions(transports: CloudControlTransports =
   const transport = (key: keyof CloudControlTransports): ToolTransport => transports[key] ?? new UnconfiguredHttpTransport(key);
   return [
     ...cloudflareToolDefinitions(transport("cloudflare"), { mutationZones: config.cloudflareMutationZones ?? new Set<string>() }),
+    ...langfuseToolDefinitions(transport("langfuse")),
+    ...infisicalToolDefinitions(transport("infisical"), { rotationIds: config.infisicalRotationIds ?? new Set<string>() }),
     ...postgresOpsToolDefinitions(transport("postgres_ops"), { ops: config.postgresOps ?? parsePostgresOpsConfig() })
   ];
 }
