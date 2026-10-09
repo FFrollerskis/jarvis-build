@@ -158,7 +158,7 @@ miljø), og sletter grenen – alltid, også ved feil. Står det «slett den man
 Sluttlinjen: `GITHUB_APP_LIVE_STATUS=VERIFIED` (exit 0) eller `NOT VERIFIED (...)` (exit 1 = feil, 2 = ikke konfigurert/mangler nøkkel). `VERIFIED (kun autentisering ...)` betyr at
 skrive-/git-kapabilitet ikke er bevist – kjør med `--sandbox-repo`. Lim utskriften (den inneholder ingen hemmeligheter) inn i chatten.
 
-Deretter i dashbordet: Integrasjoner -> GitHub -> **Test tilkobling**. `executive.get_connector_status` viser nå `auth`: metode `app`, installasjons-id, når tokenet utløper, hvilke repoer det
+Deretter i dashbordet: Integrasjoner -> GitHub -> **Test tilkobling**. (Merk: «konfigurert» (✓) i dashbordet betyr at oppsettet er komplett - gyldig konfig og en brukbar privatnøkkel i vaulten - ikke at GitHub svarer akkurat nå. Statusvisninger, helse-sveipen og `get_connector_status` utsteder aldri et installasjonstoken; helsen står i `health` og `auth.detail.last_error`.) `executive.get_connector_status` viser nå `auth`: metode `app`, installasjons-id, når tokenet utløper, hvilke repoer det
 dekker, tildelte rettigheter og siste feilkode – og «kortlevd repo-scopet identitet: ja» (`short_lived` og `scoped`). «Ja» er et bevis, ikke et løfte: det står `app_pending` og `false`
 til en utstedelse faktisk har lyktes siden oppstart, og `false` igjen ved ugyldig konfig, siste utstedelse feilet eller aktiv PAT-fallback. Aldri selve tokenet.
 

@@ -62,6 +62,11 @@ export interface GitHubAuthStatus {
 export interface GitHubTokenProvider {
   readonly method: GitHubAuthMethod;
   getToken(): Promise<string | null>;
+  /**
+   * Finnes det en credential å hente - UTEN å hente/utstede den (review F3)? PAT: verdien finnes. App: gyldig konfig og en brukbar privatnøkkel i vaulten (eller et fortsatt gyldig cachet
+   * token), ellers - kun når eieren eksplisitt har tillatt PAT-fallback - at PAT finnes. Ingen nettverkskall mot GitHub; kaster aldri.
+   */
+  hasCredential(): Promise<boolean>;
   describe(): GitHubAuthStatus;
 }
 
@@ -157,6 +162,10 @@ export class PatTokenProvider implements GitHubTokenProvider {
     return this.secrets.get(this.ref);
   }
 
+  async hasCredential(): Promise<boolean> {
+    return (await this.secrets.get(this.ref)) !== null;
+  }
+
   describe(): GitHubAuthStatus {
     return PAT_STATUS;
   }
@@ -167,6 +176,7 @@ type LogFn = (event: GitHubAuthLogEvent) => void;
 /** Det `AppTokenProvider` trenger av den delte App-logikken (egen eksportert type slik at klassene under kan eksporteres uten private navn). */
 export interface GitHubAppCredentialSource {
   defaultToken(pat: GitHubTokenProvider): Promise<string | null>;
+  hasCredential(pat: GitHubTokenProvider): Promise<boolean>;
 }
 
 /** Delt App-logikk (én instans per `GitHubAuth`): utstedelse, PAT-fallback-policy og logging. Ikke eksportert. */
@@ -197,6 +207,16 @@ class AppCredentialCore implements GitHubAppCredentialSource {
       return token;
     } catch (err) {
       return this.recover(asGitHubAppAuthError(err), pat);
+    }
+  }
+
+  /** Review F3: presence uten utstedelse. Lokal sjekk av App-oppsettet (aldri et kall mot GitHub), og PAT bare når fallback eksplisitt er tillatt. */
+  async hasCredential(pat: GitHubTokenProvider): Promise<boolean> {
+    try {
+      if (this.app && (this.app.state().token !== null || (await this.app.hasUsablePrivateKey()))) return true;
+      return this.settings.allowPatFallback ? await pat.hasCredential() : false;
+    } catch {
+      return false;
     }
   }
 
@@ -254,6 +274,10 @@ export class AppTokenProvider implements GitHubTokenProvider {
     return this.core.defaultToken(this.pat);
   }
 
+  hasCredential(): Promise<boolean> {
+    return this.core.hasCredential(this.pat);
+  }
+
   describe(): GitHubAuthStatus {
     return this.status();
   }
@@ -277,6 +301,19 @@ export class GitHubTokenSecretProvider implements SecretProvider {
       return await this.tokens.getToken();
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Review F3: tilstedeværelse uten utstedelse. `ToolGateway.hasSecret()` kalles av hver statuspoll, helse-sveip og dashbord-visning; uten denne utstedte hver av dem et installasjonstoken
+   * (ett POST mot GitHub, opptil ~20 s blokkering ved hengende GitHub) - også for en tilbakekalt credential, siden tilbakekallingen sjekkes i `execute`, ikke i `hasSecret`.
+   */
+  async has(ref: string): Promise<boolean> {
+    if (ref !== this.ref) return typeof this.inner.has === "function" ? this.inner.has(ref) : (await this.inner.get(ref)) !== null;
+    try {
+      return await this.tokens.hasCredential();
+    } catch {
+      return false;
     }
   }
 }

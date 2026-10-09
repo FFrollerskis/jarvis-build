@@ -579,6 +579,19 @@ export class GitHubAppAuth {
     this.#cooldowns.clear();
   }
 
+  /**
+   * Lokal sjekk (ingen nettverkskall, ingen utstedelse, ingen statusendring): finnes det en BRUKBAR privatnøkkel i vaulten (tilstede, ukryptert RSA >= 2048 bit)? Brukes til «er GitHub konfigurert»-
+   * visningen, som aldri skal utstede et token (review F3).
+   */
+  async hasUsablePrivateKey(): Promise<boolean> {
+    try {
+      await this.#loadKey();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** `GET /app/installations/{id}` med App-JWT: installasjonens egne innstillinger (repoutvalg, rettigheter, suspensjon). Kun JWT - ingen token utstedes. */
   async inspectInstallation(): Promise<GitHubInstallationInfo> {
     const key = await this.#loadKey();

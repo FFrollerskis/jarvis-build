@@ -163,10 +163,15 @@ describe("B: PAT-modus er BYTE-FOR-BYTE uendret", () => {
   });
 
   it("B4: PatTokenProvider og GitHubTokenSecretProvider følger SecretProvider-kontrakten (get kaster aldri)", async () => {
-    const throwing: GitHubTokenProvider = { method: "app", getToken: async () => { throw new Error("boom"); }, describe: () => { throw new Error("n/a"); } };
+    const throwing: GitHubTokenProvider = {
+      method: "app", getToken: async () => { throw new Error("boom"); }, hasCredential: async () => { throw new Error("boom"); }, describe: () => { throw new Error("n/a"); }
+    };
     const decorated = new GitHubTokenSecretProvider(new MapSecrets({ A: "a" }), throwing);
     expect(await decorated.get(GITHUB_TOKEN_REF)).toBeNull();
+    expect(await decorated.has(GITHUB_TOKEN_REF)).toBe(false); // has() kaster heller aldri
     expect(await decorated.get("A")).toBe("a");
+    expect(await decorated.has("A")).toBe(true);
+    expect(await decorated.has("FINNES_IKKE")).toBe(false);
     expect(await new PatTokenProvider(new MapSecrets({ [GITHUB_TOKEN_REF]: PAT })).getToken()).toBe(PAT);
   });
 });

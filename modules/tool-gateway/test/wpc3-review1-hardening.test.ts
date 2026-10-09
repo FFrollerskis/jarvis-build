@@ -4,7 +4,8 @@ import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it } from "vitest";
 import { GitHubAppAuth, GitHubAppAuthError, maskGitHubSecrets, normalizeGitHubApiBase, parseGitHubAppPrivateKey } from "../src/github-app-auth.ts";
 import { createGitHubAuth, resolveGitHubAuthSettings } from "../src/github-token-provider.ts";
-import type { SecretProvider } from "../src/gateway.ts";
+import { listConnectorStatus } from "../src/connector-registry.ts";
+import { ToolGateway, type SecretProvider } from "../src/gateway.ts";
 import { fakeRsaPrivateKeyPem } from "./support/fake-rsa-der.ts";
 import { FakeGitHubApp } from "./support/fake-github-app.ts";
 import { APP_ID, INSTALLATION_ID, OTHER_REPO, REPO, T0, failure, harness, keys, stopFakeServers } from "./support/wpc3-harness.ts";
@@ -602,5 +603,137 @@ describe("F4: skopekontrollen av svaret - leverandøren kan ikke utvide scopet s
     expect(reason(16_385)).toContain("too_large");
     expect(reason(20_000)).toContain("too_large");
     expect(parseGitHubAppPrivateKey(fakeRsaPrivateKeyPem(16_384)).asymmetricKeyDetails?.modulusLength).toBe(16_384);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+describe("F3a: statuspoll, helse-sveip og «er X konfigurert» utsteder ALDRI et installasjonstoken (hasSecret -> SecretProvider.has)", () => {
+  const TOKEN_REF = "JARVIS_GITHUB_TOKEN";
+  const KEY_REF = "JARVIS_GITHUB_APP_PRIVATE_KEY";
+  const PAT = "pat-skal-bare-vaere-synlig-med-fallback-0123456789";
+
+  class CountingSecrets implements SecretProvider {
+    readonly name = "counting";
+    readonly gets: string[] = [];
+    constructor(readonly values: Record<string, string>) {}
+    async get(ref: string): Promise<string | null> { this.gets.push(ref); return this.values[ref] ?? null; }
+  }
+
+  async function appMode(extraEnv: Record<string, string> = {}, values: Record<string, string> = { [KEY_REF]: keys.pkcs1 }) {
+    const fake = await FakeGitHubApp.start({ publicKey: keys.publicKey, appId: APP_ID, installationId: INSTALLATION_ID });
+    const secrets = new CountingSecrets(values);
+    const auth = createGitHubAuth({
+      secrets, allowLoopbackHttpForTests: true, sleep: async () => undefined, maxAttempts: 1, log: () => undefined,
+      env: { JARVIS_GITHUB_APP_ID: APP_ID, JARVIS_GITHUB_APP_INSTALLATION_ID: INSTALLATION_ID, JARVIS_GITHUB_REPO: REPO, JARVIS_GITHUB_API_BASE: fake.baseUrl, ...extraEnv }
+    });
+    return { fake, secrets, auth, provider: auth.secretProvider(secrets), stop: () => fake.stop() };
+  }
+
+  it("F3a1: has() på token-refen er en LOKAL sjekk (konfig + brukbar nøkkel i vaulten) - null forespørsler mot GitHub, uansett hvor mange ganger den kalles", async () => {
+    const m = await appMode();
+    try {
+      for (let i = 0; i < 25; i += 1) expect(await m.provider.has?.(TOKEN_REF)).toBe(true);
+      expect(m.fake.requests).toHaveLength(0);
+      expect(m.auth.status().state).toBe("app_pending"); // ingenting utstedt, ingenting forgiftet
+      expect(m.auth.knownTokens()).toEqual([]);
+    } finally {
+      await m.stop();
+    }
+  });
+
+  it("F3a2: has() er false uten brukbar oppsett: nøkkel mangler/er søppel, ugyldig konfig - og true igjen når eieren retter det (ingen mellomlagret nei)", async () => {
+    const noKey = await appMode({}, {});
+    try {
+      expect(await noKey.provider.has?.(TOKEN_REF)).toBe(false);
+      noKey.secrets.values[KEY_REF] = "dette er ikke en nøkkel";
+      expect(await noKey.provider.has?.(TOKEN_REF)).toBe(false);
+      noKey.secrets.values[KEY_REF] = keys.pkcs1;
+      expect(await noKey.provider.has?.(TOKEN_REF)).toBe(true);
+      expect(noKey.fake.requests).toHaveLength(0);
+    } finally {
+      await noKey.stop();
+    }
+    const invalid = await appMode({ JARVIS_GITHUB_APP_INSTALLATION_ID: "" });
+    try {
+      expect(await invalid.provider.has?.(TOKEN_REF)).toBe(false);
+      expect(invalid.fake.requests).toHaveLength(0);
+    } finally {
+      await invalid.stop();
+    }
+  });
+
+  it("F3a3: PAT teller som «konfigurert» i App-modus KUN når eieren eksplisitt har tillatt fallback (ellers kan Jarvis aldri bruke den)", async () => {
+    const values = { [TOKEN_REF]: PAT };
+    const without = await appMode({}, values);
+    const withFallback = await appMode({ JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK: "true" }, values);
+    const withFallbackNoPat = await appMode({ JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK: "true" }, {});
+    try {
+      expect(await without.provider.has?.(TOKEN_REF)).toBe(false);
+      expect(await withFallback.provider.has?.(TOKEN_REF)).toBe(true);
+      expect(await withFallbackNoPat.provider.has?.(TOKEN_REF)).toBe(false);
+      for (const m of [without, withFallback, withFallbackNoPat]) expect(m.fake.requests).toHaveLength(0);
+    } finally {
+      await Promise.all([without.stop(), withFallback.stop(), withFallbackNoPat.stop()]);
+    }
+  });
+
+  it("F3a4: andre refer forvaltes av inner (get/has uendret); PAT-modus er uendret (secretProvider(inner) er inner, hasSecret bruker get)", async () => {
+    const m = await appMode();
+    try {
+      m.secrets.values["ANNEN_REF"] = "verdi";
+      expect(await m.provider.has?.("ANNEN_REF")).toBe(true);
+      expect(await m.provider.has?.("FINNES_IKKE")).toBe(false);
+    } finally {
+      await m.stop();
+    }
+    const secrets = new CountingSecrets({ [TOKEN_REF]: PAT });
+    const pat = createGitHubAuth({ secrets, env: {}, log: () => undefined });
+    expect(pat.secretProvider(secrets)).toBe(secrets);
+    expect((secrets as SecretProvider).has).toBeUndefined();
+    const gateway = new ToolGateway({} as never, {} as never, secrets);
+    expect(await gateway.hasSecret(TOKEN_REF)).toBe(true);
+    expect(await gateway.hasSecret("FINNES_IKKE")).toBe(false);
+  });
+
+  it("F3a5: ToolGateway.hasSecret bruker has() når leverandøren har den (get() kalles aldri), faller tilbake til get(), og en has() som kaster gir false", async () => {
+    const calls: string[] = [];
+    const withHas: SecretProvider = { name: "x", get: async (ref) => { calls.push(`get:${ref}`); return "hemmelig"; }, has: async (ref) => { calls.push(`has:${ref}`); return ref === "A"; } };
+    const gateway = new ToolGateway({} as never, {} as never, withHas);
+    expect(await gateway.hasSecret("A")).toBe(true);
+    expect(await gateway.hasSecret("B")).toBe(false);
+    expect(calls).toEqual(["has:A", "has:B"]);
+    const throwing = new ToolGateway({} as never, {} as never, { name: "y", get: async () => "v", has: async () => { throw new Error("nede"); } });
+    expect(await throwing.hasSecret("A")).toBe(false);
+  });
+
+  it("F3a6: listConnectorStatus (dashbord/get_connector_status) polles 40 ganger uten at ett eneste token utstedes - GitHub er likevel «konfigurert», og tilbakekalling/kill switch kan ikke omgås via polling", async () => {
+    const m = await appMode();
+    try {
+      const gateway = new ToolGateway({} as never, {} as never, m.provider);
+      for (let i = 0; i < 40; i += 1) {
+        const github = (await listConnectorStatus(gateway, { authInfo: (id) => (id === "github" ? m.auth.connectorAuthInfo() : undefined) })).find((c) => c.id === "github");
+        expect(github?.configured).toBe(true);
+        expect(github?.optional_credentials).toEqual([{ ref: KEY_REF, configured: true }]);
+        expect(github?.auth?.detail["state"]).toBe("app_pending");
+      }
+      expect(m.fake.requests).toHaveLength(0); // før rettelsen: ett POST access_tokens per poll
+      expect(m.secrets.gets.filter((ref) => ref === TOKEN_REF)).toEqual([]); // token-refen ble aldri materialisert
+    } finally {
+      await m.stop();
+    }
+  });
+
+  it("F3a7: en hengende GitHub blokkerer aldri statuspollen (den kontakter ikke GitHub)", async () => {
+    const m = await appMode();
+    try {
+      m.fake.script = [{ hang: true }, { hang: true }, { hang: true }];
+      const gateway = new ToolGateway({} as never, {} as never, m.provider);
+      const started = performance.now();
+      await listConnectorStatus(gateway);
+      expect(performance.now() - started).toBeLessThan(2_000);
+      expect(m.fake.requests).toHaveLength(0);
+    } finally {
+      await m.stop();
+    }
   });
 });

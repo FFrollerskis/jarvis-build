@@ -185,6 +185,27 @@ describe("WP-C3: GitHub App gjennom ToolGateway + GithubTransport", () => {
     expect(auth.connectorAuthInfo().detail).toMatchObject({ pat_fallback_active: true, state: "app_error" });
   });
 
+  it("G (review F3): statuspolling utsteder ALDRI et token - heller ikke mens credentialen er tilbakekalt eller kill switch er aktiv; tilbakekallingen stopper også selve handlingen FØR utstedelse", async () => {
+    const { fake, auth, gateway } = await build();
+    controls.revokeCredential("JARVIS_GITHUB_TOKEN");
+    killSwitch.activate("test");
+    try {
+      for (let i = 0; i < 15; i += 1) {
+        const github = (await listConnectorStatus(gateway, { authInfo: (id) => (id === "github" ? auth.connectorAuthInfo() : undefined) })).find((c) => c.id === "github");
+        expect(github?.configured).toBe(true); // nøkkelen finnes - «konfigurert» er presence, ikke helse
+      }
+      expect(fake.requests).toHaveLength(0); // før rettelsen: ett POST access_tokens per poll (og opptil ~20 s blokkering ved hengende GitHub)
+      const denied = await gateway.execute({ identity: owner, tool_id: "github", action: "read_repo_meta", parameters: { repo: REPO } });
+      expect(denied.ok).toBe(false);
+      expect(fake.requests).toHaveLength(0);
+    } finally {
+      killSwitch.deactivate();
+    }
+    controls.restoreCredential("JARVIS_GITHUB_TOKEN");
+    expect((await gateway.execute({ identity: owner, tool_id: "github", action: "read_repo_meta", parameters: { repo: REPO } })).ok).toBe(true);
+    expect(fake.mintRequests()).toHaveLength(1);
+  });
+
   it("F: connector-status for et velfungerende App-oppsett: configured, repo-scopet, kortlevd, med utløp og rettigheter - uten tokenverdi", async () => {
     const { auth, gateway } = await build();
     await gateway.execute({ identity: owner, tool_id: "github", action: "read_repo_meta", parameters: { repo: REPO } });
