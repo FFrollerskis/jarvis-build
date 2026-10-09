@@ -1,5 +1,8 @@
 import type { CapabilityClass, JsonValue } from "@jarvis/contracts";
-import { scanForSecrets } from "@jarvis/core";
+import {
+  CARD_AMOUNT_KEYS, CARD_PREVIEW_MAX_CHARS, CARD_RECIPIENT_KEYS, CARD_TARGET_KEYS,
+  containsHiddenCharacters, sanitizeDisplayText, sanitizeParameterValue, scanForSecrets
+} from "@jarvis/core";
 import type { ToolDefinition } from "./gateway.ts";
 import { CHAT_ACT_TIER_KEYS } from "./chat-act-tier.ts";
 import { githubRepoLockViolation } from "./github-repo-lock.ts";
@@ -82,7 +85,7 @@ export type CouncilSubmitDenial =
   | "confirmation_unavailable";
 
 export type CouncilSubmitResult =
-  | { ok: true; confirmation_id: string; tool: string; reused: boolean; expires_at: string; ttl_minutes: number }
+  | { ok: true; confirmation_id: string; tool: string; reused: boolean; expires_at: string; ttl_minutes: number; bound_summary: string }
   | { ok: false; reason: CouncilSubmitDenial; detail?: string };
 
 export interface CouncilActionsResult {
@@ -91,13 +94,53 @@ export interface CouncilActionsResult {
   min_sensitivity?: "SECRET_RESTRICTED";
 }
 
-// eslint-disable-next-line no-control-regex -- kontrolltegn skal strippes fra tekst som vises til eieren
-const CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+/** All modellskrevet tekst på kortet går gjennom den FELLES renseren (@jarvis/core): ren tekst uten usynlige tegn, lenker, markdown og HTML (M4, gjennomgang av PR #315). */
+const clean = sanitizeDisplayText;
 
-function clean(raw: unknown, max: number): string {
-  if (typeof raw !== "string") return "";
-  const text = scanForSecrets(raw.replace(CONTROL_CHARS, " ")).text.replace(/\s+/g, " ").trim();
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+const TITLE_KEYS: readonly string[] = ["title", "subject", "name", "summary"];
+const TEXT_KEYS: readonly string[] = ["body", "text", "message", "content", "description", "comment", "note"];
+const SHOWN_VALUE_MAX = 120;
+const SHOWN_TEXT_MAX = 80;
+const SHOWN_LIST_MAX = 4;
+
+function showValue(value: JsonValue | undefined, max: number): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return sanitizeParameterValue(value, max);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    const shown = value.slice(0, SHOWN_LIST_MAX).map((item) => showValue(item, max)).filter((text) => text !== "");
+    return shown.join(", ") + (value.length > SHOWN_LIST_MAX ? ` (+${value.length - SHOWN_LIST_MAX} til)` : "");
+  }
+  return sanitizeParameterValue(JSON.stringify(value), max);
+}
+
+/**
+ * Den FASTE linjen om hva handlingen faktisk gjør (M4, gjennomgang av PR #315): mottaker, mål, beløp, tittel og et kort tekstutdrag, lest direkte fra de BUNDNE parameterne med de samme nøklene som kortet bruker
+ * (`CARD_*_KEYS`) - aldri fra modelltekst. Feltnavnene er faste (fra koden); verdiene er rensede (ingen lenke-/bilde-/HTML-tegn). Står FØR rådets egen, modellskrevne beskrivelse i chat-merknaden og i kortets kontekst.
+ * Finnes ingen av dem, sies det, og feltnavnene vises, slik at eieren ikke tror noe er utelatt.
+ */
+export function describeBoundParameters(parameters: Record<string, JsonValue>): string {
+  const parts: string[] = [];
+  const firstOf = (keys: readonly string[], accept: (value: JsonValue) => boolean = () => true): [string, JsonValue] | null => {
+    for (const key of keys) {
+      const value = parameters[key];
+      if (value !== undefined && value !== null && accept(value)) return [key, value];
+    }
+    return null;
+  };
+  const add = (label: string, found: [string, JsonValue] | null, max: number, quote = false): void => {
+    if (!found) return;
+    const text = showValue(found[1], max);
+    if (text !== "") parts.push(`${label} (${found[0]}): ${quote ? `«${text}»` : text}`);
+  };
+  add("Mottaker", firstOf(CARD_RECIPIENT_KEYS), SHOWN_VALUE_MAX);
+  add("Mål", firstOf(CARD_TARGET_KEYS), SHOWN_VALUE_MAX);
+  add("Beløp", firstOf(CARD_AMOUNT_KEYS), SHOWN_VALUE_MAX);
+  add("Tittel", firstOf(TITLE_KEYS, (v) => typeof v === "string"), SHOWN_VALUE_MAX, true);
+  add("Tekst", firstOf(TEXT_KEYS, (v) => typeof v === "string"), SHOWN_TEXT_MAX, true);
+  if (parts.length > 0) return `Handlingen gjør dette (hentet fra selve kallet, ikke fra rådet): ${parts.join(" · ")}.`;
+  const fields = Object.keys(parameters).slice(0, 8).map((key) => sanitizeParameterValue(key, 40)).filter((key) => key !== "");
+  return `Handlingen har ingen mottaker, mål, beløp eller tittel i parameterne (felt: ${fields.length > 0 ? fields.join(", ") : "ingen"}). Se bekreftelseskortet for alle parametere.`;
 }
 
 /** Farlige nøkler (prototype-forurensning) forkastes også her - porten er den betrodde grensen og stoler ikke på at utkastet allerede er sjekket. */
@@ -129,6 +172,8 @@ export class CouncilProposalGate {
       definitions: ReadonlyArray<Pick<ToolDefinition, "tool_id" | "action" | "input_schema">>;
       confirmations: CouncilConfirmationGate;
       ttlMs?: number;
+      /** Klokken som beregner gjenværende levetid (L7) - injiseres kun i tester; bør være den samme som `ConfirmationStore` bruker. */
+      now?: () => Date;
     }
   ) {
     this.actMappings = deps.mappings.filter((m) => m.kind === "act" && CHAT_ACT_TIER_KEYS.has(`${m.tool_id}.${m.action}`));
@@ -168,6 +213,8 @@ export class CouncilProposalGate {
     if (entry.risk !== proposal.safety.risk || entry.effect !== proposal.safety.effect) return deny("safety_class_mismatch");
 
     if (hasForbiddenKey(proposal.action.arguments)) return deny("invalid_parameters", "forbidden_key");
+    // M4: usynlige/styrende tegn (bidi-overstyring, nullbredde, tag-tegn, kontrolltegn) i et argument gjør at det eieren leser ikke er det som utføres. Avvises i stedet for å vises «renset».
+    if (containsHiddenCharacters(proposal.action.arguments)) return deny("invalid_parameters", "hidden_characters");
     let parameters: Record<string, unknown> = { ...proposal.action.arguments };
     if (mapped.scope_bindings && mapped.scope_bindings.length > 0) parameters = bindScopeFields(parameters, mapped.scope_bindings, identity);
     if (mapped.tool_id === "github") {
@@ -179,15 +226,23 @@ export class CouncilProposalGate {
     const parsed = definition.input_schema.safeParse(parameters);
     // Kun feltnavn i detaljen - aldri verdier (de kan komme fra ubetrodd innhold).
     if (!parsed.success) return deny("invalid_parameters", [...new Set(parsed.error.issues.map((i) => i.path.join(".") || "(rot)"))].slice(0, 6).join(", "));
+    // M4: kortets forhåndsvisning kutter ved `CARD_PREVIEW_MAX_CHARS`. Er de BUNDNE parameterne (inkl. identitetsfelt) lengre, ville eieren godkjenne mer enn kortet viser - da legges ingenting frem. Målt både før og etter hemmelighetsredigeringen.
+    const serialized = JSON.stringify(parameters);
+    if (serialized.length > CARD_PREVIEW_MAX_CHARS || scanForSecrets(serialized).text.length > CARD_PREVIEW_MAX_CHARS) return deny("invalid_parameters", "too_long_for_card");
+    const boundSummary = describeBoundParameters(parameters as Record<string, JsonValue>);
 
     const context: Record<string, JsonValue> = {
       source: "ai_council",
-      council_id: clean(proposal.council_id, 80),
-      proposal_id: clean(proposal.proposal_id, 80),
+      council_id: sanitizeParameterValue(proposal.council_id, 80),
+      proposal_id: sanitizeParameterValue(proposal.proposal_id, 80),
+      // M4: det handlingen FAKTISK gjør (fra de bundne parameterne) står først og er faste felt; rådets beskrivelse er skrevet av en modell og merkes slik på kortet.
+      bound_parameters_no: boundSummary,
+      effect_author: "model",
+      effect_note_no: "Effektbeskrivelsen er skrevet av en modell og er ingen garanti for hva som skjer - godkjenn ut fra parameterne.",
       expected_effect: clean(proposal.expected_effect, 300),
       safety_class: entry.risk,
       effect: entry.effect,
-      consensus: clean(proposal.consensus_status, 40),
+      consensus: sanitizeParameterValue(proposal.consensus_status, 40),
       supporting_models: cleanModelNames(proposal.supporting_models),
       dissenting_models: cleanModelNames(proposal.dissenting_models),
       confidence: Number.isFinite(proposal.confidence) ? Math.max(0, Math.min(100, Math.round(proposal.confidence))) : 0,
@@ -201,6 +256,9 @@ export class CouncilProposalGate {
       return deny("confirmation_unavailable");
     }
     if (!outcome.ok) return deny(outcome.reason === "confirmation_rejected" ? "confirmation_rejected" : "confirmation_unavailable");
-    return { ok: true, confirmation_id: outcome.confirmation_id, tool: key, reused: outcome.reused, expires_at: outcome.expires_at, ttl_minutes: Math.round(this.ttlMs / 60_000) };
+    // L7: en gjenbrukt PENDING-rad kan ha kortere gjenværende levetid enn standarden - meldingen til eieren bruker raden sin egen utløpstid, aldri en hardkodet verdi.
+    const remainingMs = Date.parse(outcome.expires_at) - (this.deps.now ?? (() => new Date()))().getTime();
+    const ttlMinutes = Number.isFinite(remainingMs) ? Math.max(1, Math.min(Math.ceil(remainingMs / 60_000), Math.round(this.ttlMs / 60_000))) : Math.round(this.ttlMs / 60_000);
+    return { ok: true, confirmation_id: outcome.confirmation_id, tool: key, reused: outcome.reused, expires_at: outcome.expires_at, ttl_minutes: ttlMinutes, bound_summary: boundSummary };
   }
 }

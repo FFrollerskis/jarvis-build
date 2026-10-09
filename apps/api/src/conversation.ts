@@ -208,7 +208,7 @@ export interface ChatReply {
   /** §11: streamen ble avbrutt av provider-feil ETTER output-start - aldri skjult. */
   interrupted?: boolean;
   /** D-382: handlinger modellen ba om i denne turen som venter på Tobias' godkjenning (utføres via /confirmations). */
-  confirmations?: Array<{ confirmation_id: string; tool: string; status: string }>;
+  confirmations?: Array<{ confirmation_id: string; tool: string; status: string; /** M4: det handlingen faktisk gjør (mottaker/mål/beløp/tittel), fra de bundne parameterne - vises på kortet. Kun for rådets forslag. */ detail?: string }>;
 }
 
 // Permissions ligger ALDRI i prompten - Policy/Execution Authority er trusted
@@ -906,8 +906,8 @@ export class ConversationEngine {
         submitted = { ok: false, reason: "confirmation_unavailable" };
       }
       if (submitted.ok) {
-        reply += `\n\n${renderProposalNoteNo(result.proposal, submitted.ttl_minutes)}`;
-        confirmations.push({ confirmation_id: submitted.confirmation_id, tool: submitted.tool, status: "confirmation_required" });
+        reply += `\n\n${renderProposalNoteNo(result.proposal, submitted.ttl_minutes, submitted.bound_summary)}`;
+        confirmations.push({ confirmation_id: submitted.confirmation_id, tool: submitted.tool, status: "confirmation_required", ...(submitted.bound_summary ? { detail: submitted.bound_summary } : {}) });
       } else {
         reply += `\n\nRådet foreslo en handling, men den kunne ikke legges frem til godkjenning (${submitted.reason}). Ingenting er utført.`;
       }

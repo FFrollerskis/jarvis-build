@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type pg from "pg";
 import type { ModelProviderAdapter, ModelRequest, ModelResult } from "@jarvis/provider-adapters";
+import { CARD_PREVIEW_MAX_CHARS } from "@jarvis/core";
 import {
-  AiCouncil, MAX_PROPOSABLE_ACTIONS, MemoryTraceSink, ModelGateway, PROPOSAL_ELIGIBLE_CONSENSUS, buildCouncilProposal, cleanDisplayText, describeProposalRejectionNo, parseProposedAction,
+  AiCouncil, MAX_PROPOSABLE_ACTIONS, MAX_PROPOSAL_ARGUMENT_CHARS, MemoryTraceSink, ModelGateway, PROPOSAL_ELIGIBLE_CONSENSUS, buildCouncilProposal, cleanDisplayText, describeProposalRejectionNo, parseProposedAction,
   renderProposalNoteNo, renderProposalPrompt, reviewCouncilProposal,
   type CouncilResult, type ProposableAction
 } from "../src/index.ts";
@@ -98,12 +99,28 @@ describe("parseProposedAction - streng, lukket liste", () => {
     for (let i = 0; i < 8; i += 1) deep = { a: deep };
     const wide = Object.fromEntries(Array.from({ length: 250 }, (_, i) => [`k${i}`, i]));
     const longString = { content: "x".repeat(2001) };
-    // 10 × 1000 tegn = 10 000 > 8 000 samlet, men hver streng er under strenggrensen og antall noder er lavt.
+    // 10 × 1000 tegn = 10 000 > samlet grense, men hver streng er under strenggrensen og antall noder er lavt.
     const big = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`k${i}`, "y".repeat(1000)]));
     for (const args of [deep, wide, longString, big]) {
       expect(parseProposedAction({ ...GOOD, arguments: args }, CATALOG), JSON.stringify(args).slice(0, 40)).toEqual({ ok: false, reason: "arguments_too_large" });
     }
-    expect(parseProposedAction({ ...GOOD, arguments: { content: "x".repeat(2000) } }, CATALOG).ok).toBe(true);
+    expect(parseProposedAction({ ...GOOD, arguments: { content: "x".repeat(900) } }, CATALOG).ok).toBe(true);
+  });
+
+  it("M4: argumentene må kunne vises HELE i bekreftelseskortet - nøyaktig kortets grense passerer, ett tegn mer forkastes (aldri en avkortet visning av det eieren godkjenner)", () => {
+    expect(MAX_PROPOSAL_ARGUMENT_CHARS).toBe(CARD_PREVIEW_MAX_CHARS); // samme tall som kortet bruker, ikke en kopi
+    expect(MAX_PROPOSAL_ARGUMENT_CHARS).toBe(1000);
+    const overhead = JSON.stringify({ content: "" }).length;
+    const fits = { content: "x".repeat(MAX_PROPOSAL_ARGUMENT_CHARS - overhead) };
+    expect(JSON.stringify(fits)).toHaveLength(MAX_PROPOSAL_ARGUMENT_CHARS);
+    expect(parseProposedAction({ ...GOOD, arguments: fits }, CATALOG).ok).toBe(true);
+    const tooLong = { content: "x".repeat(MAX_PROPOSAL_ARGUMENT_CHARS - overhead + 1) };
+    expect(parseProposedAction({ ...GOOD, arguments: tooLong }, CATALOG)).toEqual({ ok: false, reason: "arguments_too_large" });
+    // reviewerens tilfelle: 8000 tegn i argumentene mot en forhåndsvisning på 1000
+    expect(parseProposedAction({ ...GOOD, arguments: { content: "x".repeat(7900) } }, CATALOG)).toEqual({ ok: false, reason: "arguments_too_large" });
+    // flere felt som til sammen overskrider grensen, hvert for seg lite
+    const spread = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`felt${i}`, "z".repeat(90)]));
+    expect(parseProposedAction({ ...GOOD, arguments: spread }, CATALOG)).toEqual({ ok: false, reason: "arguments_too_large" });
   });
 
   it("ikke-JSON-verdier forkastes: NaN/Infinity, funksjon, undefined, symbol, bigint, Date/Map/klasseinstans", () => {
@@ -131,7 +148,7 @@ describe("parseProposedAction - streng, lukket liste", () => {
       // eslint-disable-next-line no-control-regex -- sjekker at kontrolltegn er strippet
       expect(dirty.draft.expected_effect).not.toMatch(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/);
       expect(dirty.draft.expected_effect).not.toContain("ghp_");
-      expect(dirty.draft.expected_effect).toContain("[REDACTED");
+      expect(dirty.draft.expected_effect).toContain("REDACTED"); // M4: ren tekst - redigeringsmerket har ingen klammer
       expect(dirty.draft.expected_effect).not.toContain("\n");
     }
     const long = parseProposedAction({ ...GOOD, expected_effect: "å".repeat(900) }, CATALOG);
@@ -243,6 +260,45 @@ describe("tekster: prompt, notat og avvisning", () => {
     expect(prompt).toContain(`svc${MAX_PROPOSABLE_ACTIONS - 1}__act`);
     expect(prompt).not.toContain(`svc${MAX_PROPOSABLE_ACTIONS}__act`);
     expect(prompt).not.toContain("ghp_");
+  });
+
+  it("M4: rådets visningstekst (effekt og risikosammendrag) er ren tekst - bidi, nullbredde, markdown og HTML overlever ikke, hverken i utkastet eller i det ferdige forslaget", () => {
+    const evil = `Sender ${String.fromCodePoint(0x202e)}moc.liamg${String.fromCodePoint(0x202c)} [trykk her](https://evil.example/x) ![x](http://evil.example/p.png) <img src=x onerror=alert(1)> a${String.fromCodePoint(0x200b)}b ${String.fromCodePoint(0x2066)}c${String.fromCodePoint(0x2069)}`;
+    const parsed = parseProposedAction({ ...GOOD, expected_effect: evil }, CATALOG);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const reviewed = reviewCouncilProposal({ raw: { ...GOOD, expected_effect: evil }, actions: CATALOG, council_id: "c", consensus_status: "MAJORITY", supporting_models: ["anthropic"], dissenting_models: [], confidence: 80, risk_summary: evil });
+    expect(reviewed.review.outcome).toBe("PROPOSED");
+    for (const text of [parsed.draft.expected_effect, reviewed.proposal?.expected_effect ?? "", reviewed.proposal?.risk_summary ?? ""]) {
+      expect(text).not.toMatch(/[[\]()<>`*_#!|\\]/);
+      expect(text).not.toMatch(/[\p{C}\p{Zl}\p{Zp}]/u);
+      expect(text).not.toMatch(/https?:\/\//i);
+      expect(text).toContain("Sender");
+    }
+    expect(cleanDisplayText(evil, 300)).toBe(parsed.draft.expected_effect);
+  });
+
+  it("M4: prompten sier at argumentene må være korte og effekten ren tekst", () => {
+    const prompt = renderProposalPrompt(CATALOG);
+    expect(prompt).toContain(`under ${MAX_PROPOSAL_ARGUMENT_CHARS} tegn`);
+    expect(prompt).toMatch(/ren tekst uten lenker, markdown eller HTML/);
+  });
+
+  it("M4: notatet viser FØRST det handlingen faktisk gjør (fast linje fra parameterne), og merker rådets egen beskrivelse som modellskrevet", () => {
+    const built = buildCouncilProposal({ council_id: "c", draft: { tool: "slack__notify", arguments: { text: "x" }, expected_effect: "Varsler i Slack." }, actions: CATALOG, consensus_status: "MAJORITY", supporting_models: ["anthropic"], dissenting_models: [], confidence: 80, risk_summary: "" });
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    const bound = "Handlingen gjør dette (hentet fra selve kallet, ikke fra rådet): Mottaker (channel): #ops.";
+    const note = renderProposalNoteNo(built.proposal, 15, bound);
+    expect(note.indexOf(bound)).toBeGreaterThan(-1);
+    expect(note.indexOf(bound)).toBeLessThan(note.indexOf("Varsler i Slack."));
+    expect(note).toContain("Rådets beskrivelse av effekten (skrevet av en modell, ikke en garanti): Varsler i Slack.");
+    expect(note.startsWith("Forslag fra rådet (IKKE utført).\n")).toBe(true);
+    // uten fast linje (eldre kaller): ingen tom linje, men beskrivelsen er fortsatt merket
+    const without = renderProposalNoteNo(built.proposal, 15);
+    expect(without).not.toContain("Handlingen gjør dette");
+    expect(without).not.toMatch(/\n\n/);
+    expect(without).toContain("skrevet av en modell");
   });
 
   it("notatet er ærlig: IKKE utført, klasse, støttende/uenige, og at ingenting skjer før godkjenning", () => {

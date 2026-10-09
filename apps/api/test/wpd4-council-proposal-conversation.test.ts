@@ -74,7 +74,7 @@ function build(opts: {
             },
             submit: async (who: IdentityContext, surface: Surface, proposal: CouncilProposal) => {
               submits.push({ surface, proposal });
-              return opts.submit ? opts.submit(who, surface, proposal) : { ok: true as const, confirmation_id: "conf-42", tool: "todoist.create_task", reused: false, expires_at: "2026-10-09T12:15:00.000Z", ttl_minutes: 15 };
+              return opts.submit ? opts.submit(who, surface, proposal) : { ok: true as const, confirmation_id: "conf-42", tool: "todoist.create_task", reused: false, expires_at: "2026-10-09T12:15:00.000Z", ttl_minutes: 15, bound_summary: "Handlingen gjør dette (hentet fra selve kallet, ikke fra rådet): Tekst (content): «Ring leverandøren»." };
             }
           }
         }
@@ -182,11 +182,12 @@ describe("forslaget legges frem KUN via porten", () => {
     const r = await engine.handle(identity, TEXT);
     expect(submits).toEqual([{ surface: "web_chat", proposal }]);
     expect(r.reply).toContain("Rådet anbefaler å gå videre.");
-    expect(r.reply).toContain("Forslag fra rådet (IKKE utført): Oppretter en Todoist-oppgave.");
+    // M4: først hva handlingen faktisk gjør (fra de bundne parameterne), så rådets modellskrevne beskrivelse - merket som det.
+    expect(r.reply).toContain("Forslag fra rådet (IKKE utført).\nHandlingen gjør dette (hentet fra selve kallet, ikke fra rådet): Tekst (content): «Ring leverandøren».\nRådets beskrivelse av effekten (skrevet av en modell, ikke en garanti): Oppretter en Todoist-oppgave.");
     expect(r.reply).toContain("støttet av: anthropic, openai");
     expect(r.reply).toContain("uenig: kimi");
     expect(r.reply).toContain("gyldig i 15 minutter");
-    expect(r.confirmations).toEqual([{ confirmation_id: "conf-42", tool: "todoist.create_task", status: "confirmation_required" }]);
+    expect(r.confirmations).toEqual([{ confirmation_id: "conf-42", tool: "todoist.create_task", status: "confirmation_required", detail: "Handlingen gjør dette (hentet fra selve kallet, ikke fra rådet): Tekst (content): «Ring leverandøren»." }]);
     expect(r.routed).toBe("model");
   });
 

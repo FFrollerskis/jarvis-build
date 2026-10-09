@@ -16,8 +16,8 @@ import type { InProcessWorker, TaskService } from "@jarvis/tasks";
 import { OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
 import { SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";
 import {
-  COUNCIL_PROPOSAL_TAINT, CouncilProposalGate, MemorySearchTransport, buildToolManifest, firstWaveTools, homeAssistantTools, memoryToolDefinitions, resolveModelToolSurface,
-  type CouncilSubmitIdentity, type ToolDefinition, type ToolGateway
+  COUNCIL_PROPOSAL_TAINT, CouncilProposalGate, MemorySearchTransport, describeBoundParameters, buildToolManifest, firstWaveTools, homeAssistantTools, memoryToolDefinitions, resolveModelToolSurface,
+  type CouncilSubmitIdentity, type MeshToolMapping, type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
 import { TasksDelegateTransport, tasksDelegateToolDefinitions } from "../src/chat-jobs.ts";
 import { RunRateTransport, runRateToolDefinitions } from "../src/run-rate.ts";
@@ -518,5 +518,222 @@ describe("ende til ende: rådets forslag utføres kun via eierens godkjenning i 
     // Eierens godkjenning (den ekte ruten) utfører nøyaktig én gang.
     expect((await post("grant-owner", { confirmation_id: card?.confirmation_id, decision: "approve" })).status).toBe(200);
     expect(executed.slice(before)).toEqual([{ tool_id: "todoist", action: "create_task", parameters: { content: "e2e-kjede: ring leverandøren" }, person: OWNER, idempotency_key: `confirmation:${card?.confirmation_id}` }]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------
+// Gjennomgang av PR #315 (M4, L7, M5 ii/iii): kortet viser det handlingen FAKTISK gjør, modelltekst er ren tekst, og vaktene er låst av tester.
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------
+const cpt = (...codes: number[]) => String.fromCodePoint(...codes);
+const MARKUP_CHARS = /[[\]()<>`*_#!|\\]/;
+const HIDDEN_CHARS = /[\p{C}\p{Zl}\p{Zp}]/u;
+
+describe("M4: kortets kontekst - modelltekst er ren tekst, og det handlingen faktisk gjør står først", () => {
+  const todoist = () => offered("legg til en todoist-oppgave: ring leverandøren").actions;
+  const evil = `Sender ${cpt(0x202e)}moc.liamg${cpt(0x202c)} [trykk her](https://evil.example/x) ![x](http://evil.example/p.png) <img src=x onerror=alert(1)> a${cpt(0x200b)}b ${cpt(0x2066)}c${cpt(0x2069)} ${cpt(0xe0041)}`;
+
+  it("reviewerens eksempler i expected_effect og risk_summary lagres som ren tekst (ingen bidi/nullbredde/markdown/HTML/lenke) - porten renser selv, uavhengig av rådet", async () => {
+    const base = proposalFor("todoist__create_task", { content: "m4-evil-text" }, todoist());
+    const res = await gate.submit(identity, "web_chat", { ...base, expected_effect: evil, risk_summary: evil });
+    expect(res.ok, JSON.stringify(res)).toBe(true);
+    if (!res.ok) return;
+    const ctx = ((await rowOf(res.confirmation_id))["summary"] as { context: Record<string, string> }).context;
+    for (const field of ["expected_effect", "risk_summary"] as const) {
+      const text = ctx[field] as string;
+      expect(text, field).not.toMatch(MARKUP_CHARS);
+      expect(text, field).not.toMatch(HIDDEN_CHARS);
+      expect(text, field).not.toMatch(/https?:\/\//i);
+      expect(text, field).toContain("Sender");
+    }
+  });
+
+  it("kortet sier at effektbeskrivelsen er modellskrevet, og har en fast linje med det handlingen faktisk gjør - hentet fra de bundne parameterne, ikke fra modelltekst", async () => {
+    const base = proposalFor("todoist__create_task", { content: "m4-bound-line" }, todoist());
+    // Modellen lyver i effektbeskrivelsen: den påstår en annen handling enn den som er bundet.
+    const res = await gate.submit(identity, "web_chat", { ...base, expected_effect: "Sletter alle oppgaver og sender en e-post til noen@example.com." });
+    expect(res.ok, JSON.stringify(res)).toBe(true);
+    if (!res.ok) return;
+    const ctx = ((await rowOf(res.confirmation_id))["summary"] as { context: Record<string, string> }).context;
+    expect(ctx["effect_author"]).toBe("model");
+    expect(ctx["effect_note_no"]).toBe("Effektbeskrivelsen er skrevet av en modell og er ingen garanti for hva som skjer - godkjenn ut fra parameterne.");
+    expect(ctx["bound_parameters_no"]).toBe("Handlingen gjør dette (hentet fra selve kallet, ikke fra rådet): Tekst (content): «m4-bound-line».");
+    expect(res.bound_summary).toBe(ctx["bound_parameters_no"]);
+    expect(ctx["bound_parameters_no"]).not.toContain("noen@example.com");
+  });
+
+  it("slack__notify: mottaker (kanal) og tekst vises fra parameterne; kanalen modellen nevner i prosa spiller ingen rolle", async () => {
+    const actions = offered("send en melding i slack: møtet er flyttet").actions;
+    expect(actions.some((a) => a.name === "slack__notify")).toBe(true);
+    const base = proposalFor("slack__notify", { channel: "#ops", message: "Møtet er flyttet til 14:00" }, actions);
+    const res = await gate.submit(identity, "web_chat", { ...base, expected_effect: "Varsler #generelt." });
+    expect(res.ok, JSON.stringify(res)).toBe(true);
+    if (!res.ok) return;
+    expect(res.bound_summary).toBe("Handlingen gjør dette (hentet fra selve kallet, ikke fra rådet): Mottaker (channel): #ops · Tekst (message): «Møtet er flyttet til 14:00».");
+  });
+
+  it("usynlige tegn i argumentene AVVISES (invalid_parameters/hidden_characters) i stedet for å vises «renset» - ellers godkjenner eieren noe annet enn det som utføres", async () => {
+    const before = await pendingCount("m4-hidden");
+    for (const [label, bad] of [
+      ["bidi-overstyring", `m4-hidden${cpt(0x202e)}x`], ["bidi-isolat", `m4-hidden${cpt(0x2066)}x${cpt(0x2069)}`], ["nullbredde", `m4-hidden${cpt(0x200b)}x`], ["ZWJ", `m4-hidden${cpt(0x200d)}x`],
+      ["tag-tegn", `m4-hidden${cpt(0xe0041)}x`], ["NUL", "m4-hidden\u0000x"], ["ESC", "m4-hidden\u001bx"], ["løst surrogat", `m4-hidden${String.fromCharCode(0xd800)}x`]
+    ] as const) {
+      const res = await gate.submit(identity, "web_chat", proposalFor("todoist__create_task", { content: bad }, todoist()));
+      expect(res, label).toEqual({ ok: false, reason: "invalid_parameters", detail: "hidden_characters" });
+    }
+    expect(await pendingCount("m4-hidden")).toBe(before);
+    // også i nøkler, og i nøstede verdier
+    const nested = await gate.submit(identity, "web_chat", { ...proposalFor("todoist__create_task", { content: "m4-nested" }, todoist()), action: { tool: "todoist__create_task", arguments: { content: "m4-nested", extra: { a: [`x${cpt(0x200b)}`] } } } });
+    expect(nested).toEqual({ ok: false, reason: "invalid_parameters", detail: "hidden_characters" });
+  });
+
+  it("vanlig innhold passerer: æøå, emoji og linjeskift i teksten", async () => {
+    const res = await gate.submit(identity, "web_chat", proposalFor("todoist__create_task", { content: "m4-ok: Ring Åse 😀\nTakk – Ærlig Ødegård" }, todoist()));
+    expect(res.ok, JSON.stringify(res)).toBe(true);
+  });
+
+  it("argumenter lengre enn kortet kan vise (CARD_PREVIEW_MAX_CHARS) avvises (too_long_for_card) - aldri en avkortet visning; nøyaktig grensen passerer", async () => {
+    const make = (content: string) => ({ ...proposalFor("todoist__create_task", { content: "x" }, todoist()), action: { tool: "todoist__create_task", arguments: { content } } });
+    const overhead = JSON.stringify({ content: "" }).length;
+    const fits = await gate.submit(identity, "web_chat", make(`m4-fit-${"x".repeat(1000 - overhead - 7)}`));
+    expect(fits.ok, JSON.stringify(fits)).toBe(true);
+    if (fits.ok) {
+      const preview = ((await rowOf(fits.confirmation_id))["summary"] as { parameters_preview: string }).parameters_preview;
+      expect(preview).toHaveLength(1000);
+      expect(JSON.parse(preview)).toEqual({ content: `m4-fit-${"x".repeat(1000 - overhead - 7)}` }); // hele handlingen er synlig, ikke kuttet
+    }
+    const tooLong = await gate.submit(identity, "web_chat", make(`m4-long-${"x".repeat(1000 - overhead - 7)}`));
+    expect(tooLong).toEqual({ ok: false, reason: "invalid_parameters", detail: "too_long_for_card" });
+    expect(await pendingCount(`m4-long-${"x".repeat(1000 - overhead - 7)}`)).toBe(0);
+  });
+
+  it("ledetekst og verdier i den faste linjen: rensede (ingen lenke-/bilde-/HTML-tegn), kappet, og lister/objekter/tall vises uten å lekke noe annet", () => {
+    expect(describeBoundParameters({ to: ["a@x.no", "b@x.no", "c@x.no", "d@x.no", "e@x.no", "f@x.no"], subject: "Møte [x](http://evil/p.png) <b>nå</b>", body: "kort" })).toBe(
+      "Handlingen gjør dette (hentet fra selve kallet, ikke fra rådet): Mottaker (to): a@x.no, b@x.no, c@x.no, d@x.no (+2 til) · Tittel (subject): «Møte x http://evil/p.png b nå /b» · Tekst (body): «kort»."
+    );
+    expect(describeBoundParameters({ repo: "tsworkflow/jarvisbuild", amount_ore: 12000, title: "Feil i innlogging" })).toBe(
+      "Handlingen gjør dette (hentet fra selve kallet, ikke fra rådet): Mål (repo): tsworkflow/jarvisbuild · Beløp (amount_ore): 12000 · Tittel (title): «Feil i innlogging»."
+    );
+    const none = describeBoundParameters({ a: 1, b: { c: 2 } });
+    expect(none).toContain("ingen mottaker, mål, beløp eller tittel");
+    expect(none).toContain("felt: a, b");
+    const long = describeBoundParameters({ body: "å".repeat(500), subject: "s".repeat(500) });
+    expect(long.length).toBeLessThan(400);
+    expect(describeBoundParameters({ to: { a: 1 } })).toContain("Mottaker (to): ");
+  });
+});
+
+describe("L7: ttl_minutes følger kortets faktiske utløp (også for et gjenbrukt PENDING-kort)", () => {
+  it("nytt kort: 15 minutter; samme forslag 11 minutter senere gjenbruker kortet og sier 4 (ikke en hardkodet 15)", async () => {
+    const timed = new CouncilProposalGate({ mappings: surface, manifest, definitions: defs, confirmations: store, now: () => new Date(nowMs) });
+    const actions = offered("legg til en todoist-oppgave: ring leverandøren").actions;
+    const proposal = proposalFor("todoist__create_task", { content: "l7-ttl" }, actions);
+    const first = await timed.submit(identity, "web_chat", proposal);
+    expect(first).toMatchObject({ ok: true, reused: false, ttl_minutes: 15 });
+    nowMs += 11 * 60_000;
+    const again = await timed.submit(identity, "web_chat", proposal);
+    expect(again).toMatchObject({ ok: true, reused: true, ttl_minutes: 4 });
+    if (first.ok && again.ok) expect(again.expires_at).toBe(first.expires_at);
+    nowMs += 3 * 60_000 + 30_000; // 30 sekunder igjen: aldri «0 minutter»
+    expect(await timed.submit(identity, "web_chat", proposal)).toMatchObject({ ok: true, reused: true, ttl_minutes: 1 });
+  });
+});
+
+describe("M5 (ii): gate-konstruktørens act-tier-filter - alt utenfor handlingsnivået blir aldri et forslag, selv om kalleren sender det i mappings", () => {
+  const realTodoist = () => surface.find((m) => m.def.name === "todoist__create_task") as MeshToolMapping;
+  const forged = (tool_id: string, action: string, kind: "act" | "read" = "act"): MeshToolMapping => ({ ...realTodoist(), tool_id, action, kind, def: { ...realTodoist().def, name: `${tool_id}__${action}`, description: `${tool_id} ${action} opprett legg til send` } });
+  // klasse D, betaling, kontroll, eier-/sikkerhetsnavnerom og vanlige lesinger som en (feilaktig) bygd mappingliste kunne inneholdt
+  const OUTSIDE: Array<[string, string]> = [
+    ["github", "merge_pull_request"], ["finance", "submit_payment_intent"], ["finance_wallester", "freeze_card"], ["owner_controls", "activate_kill_switch"], ["docker", "stop_container"],
+    ["gce", "delete_instance"], ["self_modification", "apply_change"], ["memory", "propose"], ["tasks", "delegate_background_task"], ["email", "send"], ["todoist", "list_tasks"]
+  ];
+
+  it("actionsFor tilbyr aldri en forfalsket act-mapping utenfor nivået", () => {
+    const withForged = new CouncilProposalGate({ mappings: [...surface, ...OUTSIDE.map(([t, a]) => forged(t, a))], manifest, definitions: defs, confirmations: store });
+    const text = "opprett og legg til og send: todoist, github, finance, docker, gce, email, memory, owner_controls, merge, betaling, kill switch, frys kort";
+    const offeredNames = withForged.actionsFor({ surface: "web_chat", text }).actions.map((a) => a.name);
+    for (const [t, a] of OUTSIDE) expect(offeredNames, `${t}__${a}`).not.toContain(`${t}__${a}`);
+    // og de ekte handlingene er fortsatt der (filteret fjerner kun det som er utenfor nivået)
+    expect(offeredNames.length).toBeGreaterThan(0);
+  });
+
+  it("submit avviser en forfalsket act-mapping med tool_not_proposable (konstruktørfilteret, ikke bare et senere lag), og ingenting legges frem", async () => {
+    const withForged = new CouncilProposalGate({ mappings: [...surface, ...OUTSIDE.map(([t, a]) => forged(t, a))], manifest, definitions: defs, confirmations: store });
+    const before = Number((await admin.query("SELECT count(*)::int AS n FROM action_confirmations")).rows[0].n);
+    for (const [t, a] of OUTSIDE) {
+      const action: ProposableAction = { name: `${t}__${a}`, description: "x", input_schema: {}, risk: "B", effect: "write" };
+      expect(await withForged.submit(identity, "web_chat", proposalFor(`${t}__${a}`, {}, [action])), `${t}__${a}`).toEqual({ ok: false, reason: "tool_not_proposable" });
+    }
+    expect(Number((await admin.query("SELECT count(*)::int AS n FROM action_confirmations")).rows[0].n)).toBe(before);
+  });
+
+  it("et par på handlingsnivået (todoist.create_task) forblir foreslåbart gjennom en gate bygd av en blandet mappingliste", async () => {
+    const mixed = new CouncilProposalGate({ mappings: [...OUTSIDE.map(([t, a]) => forged(t, a)), realTodoist()], manifest, definitions: defs, confirmations: store });
+    const actions = mixed.actionsFor({ surface: "web_chat", text: "legg til en todoist-oppgave: ring leverandøren" }).actions;
+    expect(actions.map((a) => a.name)).toContain("todoist__create_task");
+    const res = await mixed.submit(identity, "web_chat", proposalFor("todoist__create_task", { content: "m5-ii-ok" }, actions));
+    expect(res.ok, JSON.stringify(res)).toBe(true);
+  });
+});
+
+describe("M5 (iii): ConfirmationStore.propose gjenbruker aldri et avvist, utløpt eller forbrukt kort", () => {
+  it("AVVIST: aldri ok/reused - svaret er confirmation_rejected med det avviste kortets id, og INGEN ny rad opprettes", async () => {
+    const first = await store.propose(task("m5iii-rej"), who, [COUNCIL_PROPOSAL_TAINT]);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(await store.decide(who, first.confirmation_id, "reject")).toBe(true);
+    const again = await store.propose(task("m5iii-rej"), who, [COUNCIL_PROPOSAL_TAINT]);
+    expect(again).toEqual({ ok: false, reason: "confirmation_rejected", confirmation_id: first.confirmation_id });
+    expect((again as { reused?: boolean }).reused).toBeUndefined();
+    expect(await pendingCount("m5iii-rej")).toBe(0);
+    expect(Number((await admin.query("SELECT count(*)::int AS n FROM action_confirmations WHERE parameters->>'content' = 'm5iii-rej'")).rows[0].n)).toBe(1);
+    expect((await rowOf(first.confirmation_id))["status"]).toBe("rejected");
+  });
+
+  it("avvist og så utløpt: nytt forslag lager et NYTT kort (aldri det gamle), og det gamle merkes utløpt", async () => {
+    const first = await store.propose(task("m5iii-rej-exp"), who, [COUNCIL_PROPOSAL_TAINT], { ttlMs: 2 * 60_000 });
+    if (!first.ok) throw new Error("forventet ok");
+    expect(await store.decide(who, first.confirmation_id, "reject")).toBe(true);
+    nowMs += 3 * 60_000;
+    const again = await store.propose(task("m5iii-rej-exp"), who, [COUNCIL_PROPOSAL_TAINT]);
+    expect(again).toMatchObject({ ok: true, reused: false });
+    if (!again.ok) return;
+    expect(again.confirmation_id).not.toBe(first.confirmation_id);
+    expect((await rowOf(first.confirmation_id))["status"]).toBe("expired");
+    expect((await rowOf(again.confirmation_id))["status"]).toBe("pending");
+  });
+
+  it("UTLØPT pending: aldri gjenbrukt (reused=false, ny id), selv når utløpet er ett millisekund unna", async () => {
+    const first = await store.propose(task("m5iii-exp"), who, [COUNCIL_PROPOSAL_TAINT], { ttlMs: 60_000 });
+    if (!first.ok) throw new Error("forventet ok");
+    nowMs += 60_000; // nøyaktig utløpstidspunktet: expires_at <= now regnes som utløpt
+    const again = await store.propose(task("m5iii-exp"), who, [COUNCIL_PROPOSAL_TAINT]);
+    expect(again).toMatchObject({ ok: true, reused: false });
+    if (again.ok) expect(again.confirmation_id).not.toBe(first.confirmation_id);
+  });
+
+  it("FORBRUKT (godkjent og utført): propose lager et nytt pending-kort og rører ikke det forbrukte", async () => {
+    const first = await store.propose(task("m5iii-used"), who, [COUNCIL_PROPOSAL_TAINT]);
+    if (!first.ok) throw new Error("forventet ok");
+    expect(await store.approveAndTake(who, first.confirmation_id)).not.toBeNull();
+    const consumed = await rowOf(first.confirmation_id);
+    const again = await store.propose(task("m5iii-used"), who, [COUNCIL_PROPOSAL_TAINT]);
+    expect(again).toMatchObject({ ok: true, reused: false });
+    if (!again.ok) return;
+    expect(again.confirmation_id).not.toBe(first.confirmation_id);
+    expect((await rowOf(first.confirmation_id))["status"]).toBe(consumed["status"]);
+    expect((await rowOf(first.confirmation_id))["consumed_at"]).toEqual(consumed["consumed_at"]);
+  });
+
+  it("GODKJENT (ikke forbrukt): propose forbruker den aldri og gjenbruker den ikke - den forblir 'approved' og et nytt pending-kort opprettes", async () => {
+    const created = await store.checkAndConsume(task("m5iii-appr"), who, ["owner_action_tier"]);
+    const approvedId = (created as { confirmation_id: string }).confirmation_id;
+    expect(await store.decide(who, approvedId, "approve")).toBe(true);
+    const proposed = await store.propose(task("m5iii-appr"), who, [COUNCIL_PROPOSAL_TAINT]);
+    expect(proposed).toMatchObject({ ok: true, reused: false });
+    if (!proposed.ok) return;
+    expect(proposed.confirmation_id).not.toBe(approvedId);
+    const row = await rowOf(approvedId);
+    expect(row["status"]).toBe("approved");
+    expect(row["consumed_at"]).toBeNull();
   });
 });

@@ -12,11 +12,12 @@ import { writeAudit } from "./audit-writer.ts";
 export const CONFIRMATION_TTL_MS = 5 * 60_000;
 
 /** Parametre som uttrykker MOTTAKER/MÅL/BELØP trekkes ut deterministisk (kun for visning + eksplisitt binding; hele parameter-settet hashes uansett). */
-const RECIPIENT_KEYS = ["to", "recipient", "recipients", "channel", "channel_id", "chat_id", "phone", "number"];
-const TARGET_KEYS = ["repo", "spreadsheet_id", "document_id", "file_id", "folder_id", "url", "base_url", "workflow_id", "scenario_id", "container", "instance", "card_id", "payment_id", "issue_number", "pr_number"];
-const AMOUNT_KEYS = ["amount", "amount_ore", "amount_minor", "value", "limit_ore"];
+/** Eksportert (M4) slik at avsendere som viser handlingen for eieren bruker NØYAKTIG de samme nøklene som kortet og bindingen. */
+export const CARD_RECIPIENT_KEYS: readonly string[] = ["to", "recipient", "recipients", "channel", "channel_id", "chat_id", "phone", "number"];
+export const CARD_TARGET_KEYS: readonly string[] = ["repo", "spreadsheet_id", "document_id", "file_id", "folder_id", "url", "base_url", "workflow_id", "scenario_id", "container", "instance", "card_id", "payment_id", "issue_number", "pr_number"];
+export const CARD_AMOUNT_KEYS: readonly string[] = ["amount", "amount_ore", "amount_minor", "value", "limit_ore"];
 
-function pick(parameters: Record<string, JsonValue>, keys: string[]): JsonValue | null {
+function pick(parameters: Record<string, JsonValue>, keys: readonly string[]): JsonValue | null {
   for (const key of keys) if (key in parameters) return parameters[key] as JsonValue;
   return null;
 }
@@ -41,9 +42,9 @@ export function callFingerprint(call: CanonicalCall, who: ConfirmationSubject): 
     tool_id: call.tool_id,
     action: call.action,
     parameters: call.parameters,
-    target: pick(call.parameters, TARGET_KEYS),
-    recipient: pick(call.parameters, RECIPIENT_KEYS),
-    amount: pick(call.parameters, AMOUNT_KEYS),
+    target: pick(call.parameters, CARD_TARGET_KEYS),
+    recipient: pick(call.parameters, CARD_RECIPIENT_KEYS),
+    amount: pick(call.parameters, CARD_AMOUNT_KEYS),
     tenant_id: who.tenant_id,
     person_id: who.person_id,
     device_id: who.device_id ?? null
@@ -56,14 +57,20 @@ export function bindingHash(fingerprint: string, expiresAtIso: string, nonce: st
   return createHash("sha256").update(canonicalStringify({ v: 1, call: fingerprint, expires_at: expiresAtIso, nonce })).digest("hex");
 }
 
+/**
+ * Lengden på parameterforhåndsvisningen i kortet. Lengre parametere KUTTES (kortet viser da bare begynnelsen), så avsendere som må vise hele handlingen til eieren (AI-rådets forslagsvei, M4) avviser parametere som er
+ * lengre enn dette i stedet for å legge frem en avkortet versjon.
+ */
+export const CARD_PREVIEW_MAX_CHARS = 1000;
+
 export function summarizeCall(call: CanonicalCall, taintReasons: string[]): JsonValue {
   // Forhåndsvisning for eieren: hemmeligheter fjernet, kuttet. Selve godkjenningen er hashen, ikke denne teksten.
-  const preview = scanForSecrets(JSON.stringify(call.parameters)).text.slice(0, 1000);
+  const preview = scanForSecrets(JSON.stringify(call.parameters)).text.slice(0, CARD_PREVIEW_MAX_CHARS);
   return {
     tool: `${call.tool_id}.${call.action}`,
-    recipient: pick(call.parameters, RECIPIENT_KEYS),
-    target: pick(call.parameters, TARGET_KEYS),
-    amount: pick(call.parameters, AMOUNT_KEYS),
+    recipient: pick(call.parameters, CARD_RECIPIENT_KEYS),
+    target: pick(call.parameters, CARD_TARGET_KEYS),
+    amount: pick(call.parameters, CARD_AMOUNT_KEYS),
     parameter_keys: Object.keys(call.parameters).sort(),
     parameters_preview: preview,
     taint_reasons: taintReasons
