@@ -70,6 +70,22 @@ export function summarizeCall(call: CanonicalCall, taintReasons: string[]): Json
   };
 }
 
+/** WP-D4 (JARVIS-078): grenser for forslagsveien (`propose`). Utløpet inngår i bindingen, så en lengre levetid er like bundet som standard; klemmen hindrer at en kaller velger en urimelig verdi. */
+export const PROPOSE_MIN_TTL_MS = 60_000;
+export const PROPOSE_MAX_TTL_MS = 30 * 60_000;
+export const PROPOSE_CONTEXT_MAX_CHARS = 4000;
+
+export interface ProposeOptions {
+  /** Levetid i ms (standard `CONFIRMATION_TTL_MS`), klemt til [1 min, 30 min]. */
+  ttlMs?: number;
+  /** Visningskontekst som legges i `summary.context` (f.eks. AI-rådets forslag). Må være redigert tekst: avvises hvis den er for stor eller inneholder noe `scanForSecrets` gjenkjenner. */
+  context?: Record<string, JsonValue>;
+}
+
+export type ProposeResult =
+  | { ok: true; confirmation_id: string; reused: boolean; expires_at: string }
+  | { ok: false; reason: "confirmation_rejected"; confirmation_id: string };
+
 export type ConfirmationCheck =
   | { ok: true; confirmation_id: string }
   | { ok: false; reason: "confirmation_required" | "confirmation_pending" | "confirmation_rejected" | "confirmation_expired" | "confirmation_binding_mismatch"; confirmation_id?: string };
@@ -160,6 +176,64 @@ export class ConfirmationStore {
         payload: { confirmation_id: id, taint_reasons: taintReasons }
       });
       return { ok: false, reason: "confirmation_required", confirmation_id: id } as const;
+    });
+  }
+
+  /**
+   * WP-D4 (JARVIS-078): FORSLAGSVEI for en avsender som aldri selv skal utføre noe (AI-rådet, §30). Oppretter - eller gjenbruker, idempotent - en PENDING bekreftelse bundet til det kanoniske kallet, og gjør ingenting annet:
+   *  - den FORBRUKER aldri en godkjent bekreftelse (`checkAndConsume` gjør det på en eksekutors retry; her finnes ingen retry og ingenting å utføre),
+   *  - en nylig AVVIST identisk handling gir `confirmation_rejected` (rådet maser ikke på samme forslag), en utløpt rad merkes utløpt og erstattes,
+   *  - utførelsen skjer kun når eieren godkjenner kortet via grant-ruten (`approveAndTake`), gjennom samme ToolGateway som enhver bekreftet handling - bindingen (kanonisk kall + utløp + nonce) er identisk.
+   * `context` (redigert visningstekst) lagres i `summary.context`; `taintReasons` merker opprinnelsen (f.eks. `council_proposal`) i kortet og i revisjonssporet.
+   */
+  async propose(call: CanonicalCall, who: ConfirmationSubject, taintReasons: string[], options: ProposeOptions = {}): Promise<ProposeResult> {
+    const ttl = Math.max(PROPOSE_MIN_TTL_MS, Math.min(options.ttlMs ?? CONFIRMATION_TTL_MS, PROPOSE_MAX_TTL_MS));
+    let contextJson: string | undefined;
+    if (options.context !== undefined) {
+      contextJson = JSON.stringify(options.context);
+      if (contextJson.length > PROPOSE_CONTEXT_MAX_CHARS) throw new Error("confirmation_context_too_large");
+      if (scanForSecrets(contextJson).findings.length > 0) throw new Error("confirmation_context_contains_secret");
+    }
+    const fingerprint = callFingerprint(call, who);
+    const now = this.now();
+    return withTenantTransaction(this.pool, who.tenant_id, async (client) => {
+      const found = await client.query(
+        `SELECT confirmation_id, status, expires_at
+           FROM action_confirmations
+          WHERE tenant_id = $1 AND person_id = $2 AND call_fingerprint = $3 AND status IN ('pending', 'rejected')
+          ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
+        [who.tenant_id, who.person_id, fingerprint]
+      );
+      const row = found.rows[0] as { confirmation_id: string; status: string; expires_at: Date } | undefined;
+      if (row) {
+        if (row.expires_at.getTime() <= now.getTime()) {
+          await client.query("UPDATE action_confirmations SET status = 'expired' WHERE confirmation_id = $1 AND status IN ('pending', 'rejected')", [row.confirmation_id]);
+        } else if (row.status === "rejected") {
+          return { ok: false, reason: "confirmation_rejected", confirmation_id: row.confirmation_id } as const;
+        } else {
+          return { ok: true, confirmation_id: row.confirmation_id, reused: true, expires_at: row.expires_at.toISOString() } as const;
+        }
+      }
+      const id = `conf-${randomUUID()}`;
+      const nonce = randomBytes(16).toString("hex");
+      const expires = new Date(now.getTime() + ttl);
+      const summary = { ...(summarizeCall(call, taintReasons) as Record<string, JsonValue>), ...(options.context !== undefined ? { context: options.context } : {}) };
+      await client.query(
+        `INSERT INTO action_confirmations
+           (confirmation_id, tenant_id, person_id, device_id, session_id, tool_id, action, call_fingerprint, binding_hash, nonce, summary, taint_reasons, expires_at, parameters)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+        [id, who.tenant_id, who.person_id, who.device_id ?? null, who.session_id ?? null, call.tool_id, call.action, fingerprint,
+          bindingHash(fingerprint, expires.toISOString(), nonce), nonce, JSON.stringify(summary), taintReasons, expires, JSON.stringify(call.parameters)]
+      );
+      const origin = options.context?.["source"];
+      const councilId = options.context?.["council_id"];
+      await writeAudit(client, { tenant_id: who.tenant_id, person_id: who.person_id, ...(who.session_id ? { session_id: who.session_id } : {}), ...(who.device_id ? { device_id: who.device_id } : {}) }, {
+        type: "confirmation.requested",
+        tool_id: call.tool_id,
+        action: call.action,
+        payload: { confirmation_id: id, taint_reasons: taintReasons, proposed: true, ...(typeof origin === "string" ? { source: origin } : {}), ...(typeof councilId === "string" ? { council_id: councilId } : {}) }
+      });
+      return { ok: true, confirmation_id: id, reused: false, expires_at: expires.toISOString() } as const;
     });
   }
 

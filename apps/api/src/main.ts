@@ -3,6 +3,7 @@ import "./normalize-env.ts";
 import { executiveQueueOwner } from "./queue-owner.ts";
 import { parseDailyCapOre, parseToolTurnRoute, resolveJobToolTurnRoute } from "./tool-turn-route.ts";
 import { parseChatCandidates, unknownChainMembers } from "./chat-candidates.ts";
+import { parseCouncilProposals } from "./council-proposals.ts";
 import { fileURLToPath } from "node:url";
 import { checkEv0Boot, getLastEv0BootStatus, logEv0Boot } from "./ev0-boot.ts";
 import { assertNoSweepFailures, envHour, envInt, envPort, failOnSweepFailures, systemIdentity } from "@jarvis/contracts";
@@ -71,7 +72,7 @@ import {
 } from "@jarvis/memory";
 import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport,
-  CHAT_ACT_TIER, CHAT_READ_TIER, GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, assertManifestInvariants, buildToolManifest, describeSurfaceCatalog, memoryToolDefinitions, selectSurfaceTools,
+  CHAT_ACT_TIER, CHAT_READ_TIER, GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, CouncilProposalGate, MeshToolExecutor, assertManifestInvariants, buildToolManifest, describeSurfaceCatalog, memoryToolDefinitions, selectSurfaceTools,
   MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, resolveModelToolSurface, PgGithubRateLimitStore,
   PgTelegramOffsetStore, TelegramCommandPoller, createTurnContext, jobIdentityFor, telegramClassDNotifier, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, schedulerSource, DailyScheduler, runConnectorHealthSweep,
@@ -1006,6 +1007,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const toolManifest = buildToolManifest(toolGateway.list());
   assertManifestInvariants(toolManifest);
   const confirmationStore = new ConfirmationStore(pool);
+  // WP-D4 (JARVIS-078): rådets forslagsvei - AV som standard (`JARVIS_COUNCIL_PROPOSALS=on` slår den på). Porten har ingen eksekutor: den velger kun ut hvilke handlinger rådet kan foreslå og legger et gyldig forslag frem som en
+  // PENDING bekreftelse i den eksisterende veien; utførelsen skjer først når eieren godkjenner kortet via /confirmations.
+  const councilProposalsEnabled = parseCouncilProposals(process.env["JARVIS_COUNCIL_PROPOSALS"]);
+  const councilProposalGate = councilProposalsEnabled
+    ? new CouncilProposalGate({ mappings: modelToolSurface, manifest: toolManifest, definitions: toolGateway.list(), confirmations: confirmationStore })
+    : undefined;
+  console.log(JSON.stringify({ msg: "council_proposals", enabled: councilProposalsEnabled }));
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
   // registrert med Gmail/Calendar over) - ingen ny transport-vei.
   const businessEventSyncService = new BusinessEventSyncService(toolGateway, businessService, openLoopService);
@@ -1181,6 +1189,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         )
     },
     council: aiCouncil,
+    ...(councilProposalGate
+      ? { councilProposals: { actionsFor: (input) => councilProposalGate.actionsFor(input), submit: (identity, surface, proposal) => councilProposalGate.submit(identity, surface, proposal) } }
+      : {}),
     // D-30 live-funn: samtalebanen (tekst + voice via /chat) har verktøykall.
     // REMEDIERING DEL 1 (JARVIS-002/JARVIS-035): kun det eksplisitte lese-
     // minimumssettet. `delegate_code_task` (nøstet sky-kall med hardkodet

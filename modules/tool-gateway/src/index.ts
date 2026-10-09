@@ -21,6 +21,7 @@ export * from "./model-tool-surface.ts";
 export * from "./chat-read-tier.ts";
 export * from "./chat-act-tier.ts";
 export * from "./chat-delegate-tier.ts";
+export * from "./council-proposal-gate.ts";
 export * from "./tool-catalog.ts";
 export * from "./tool-failure.ts";
 export * from "./memory-transport.ts";

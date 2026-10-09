@@ -307,6 +307,8 @@ export const SERVICE_ENV = {
     "JARVIS_BACKGROUND_YIELD_MAX_MS", "JARVIS_BACKGROUND_YIELD_QUIET_MS", "JARVIS_TRACE_FILE", "JARVIS_VOICE_URL", "JARVIS_COUNCIL_AUTO_MAX_PER_HOUR",
     // WP-D4 (JARVIS-033): kandidatkjeden for vanlig prat og om den siste reserven (D-354/D-404) er tillatt.
     "JARVIS_CHAT_CANDIDATES", "JARVIS_CHAT_AUTO_FALLBACK",
+    // WP-D4 (JARVIS-078): rådets forslagsvei (AV som standard) - rådet kan foreslå én handling fra chattens handlingsnivå, som legges frem som en bekreftelse. Rådet utfører aldri noe.
+    "JARVIS_COUNCIL_PROPOSALS",
     // D-395 (JARVIS-092): sveip-klokkeslett main.ts leser (tidligere ikke videresendt til containeren, så compose kunne aldri endre dem).
     "JARVIS_BUSINESS_EVENTS_SYNC_HOUR", "JARVIS_BUSINESS_SCORING_HOUR", "JARVIS_BUSINESS_SWEEP_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_WEEKDAY", "JARVIS_CONNECTOR_HEALTH_SWEEP_HOUR", "JARVIS_CONVERSATION_GRAPH_SYNC_HOUR", "JARVIS_FINANCE_SPEND_SWEEP_HOUR", "JARVIS_GROWTH_RECOMMENDATION_SWEEP_HOUR", "JARVIS_HEALTH_RETENTION_SWEEP_HOUR", "JARVIS_LOCATION_RETENTION_SWEEP_HOUR", "JARVIS_SITUATION_SWEEP_HOUR", "JARVIS_SUPPORT_INBOX_SYNC_HOUR", "JARVIS_VISION_RETENTION_SWEEP_HOUR", "JARVIS_STREAM_DEBUG",
     // WP-C2 (OPS-RUNTIME): ekstern oppetids-heartbeat (AV som standard; pinger kun mens en lokal selvsjekk består) og stien til den SKRIVEBESKYTTEDE backup-statusfilen

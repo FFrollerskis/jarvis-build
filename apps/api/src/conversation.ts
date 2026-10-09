@@ -10,8 +10,12 @@ import {
   maxSensitivity,
   NoEligibleProviderError,
   parseRoutingOverride,
+  describeProposalRejectionNo,
+  renderProposalNoteNo,
   type AiCouncil,
+  type CouncilProposal,
   type DecisionClassification,
+  type ProposableAction,
   type ModelGateway,
   type RoutingOverrideIntent,
   type AttemptFailure,
@@ -22,7 +26,7 @@ import {
 import { ProviderError, type StreamEvent, type ToolDefinition } from "@jarvis/provider-adapters";
 import { DEFAULT_PERSONALITY_CONFIG, type PersonalityConfig } from "@jarvis/self-modification";
 import type { TaskService, InProcessWorker } from "@jarvis/tasks";
-import { createTurnContext, surfaceForChannel, type Surface, type SurfaceLimits, type TurnContext } from "@jarvis/tool-gateway";
+import { createTurnContext, surfaceForChannel, type CouncilSubmitResult, type Surface, type SurfaceLimits, type TurnContext } from "@jarvis/tool-gateway";
 import { randomUUID } from "node:crypto";
 import { chatWithheldNote, cloudScreenedExecutor, servedByCloudModel } from "./cloud-tool-screen.ts";
 import { LOCAL_FALLBACK_ERROR_KINDS, cloudHistoryNote, isMemoryReserveOnly, jobLocalOnlyNote, localOnlyNote, reserveModelNote, stripSourceMarkerIds, stripSystemNotes } from "./tool-turn-route.ts";
@@ -133,6 +137,15 @@ export interface ConversationDeps {
    * §23 migrasjonssikkerhet).
    */
   council?: AiCouncil;
+  /**
+   * WP-D4 (JARVIS-078, rådets bekreftelsesflyt): forslagsveien for AI-rådet. Udefinert (standard; `JARVIS_COUNCIL_PROPOSALS` av) = rådet gir kun en vurdering, NØYAKTIG som før. Satt: `actionsFor` velger deterministisk (samme
+   * utvalg som chattens handlingsnivå, kun `web_chat`) hvilke handlinger rådet kan foreslå for denne meldingen, og `submit` legger et gyldig forslag frem som en PENDING bekreftelse i den EKSISTERENDE bekreftelsesveien (D-382).
+   * Ingen av dem kan utføre noe: rådet får aldri verktøy (§30), og utførelsen skjer først når eieren godkjenner kortet via grant-ruten `/confirmations`.
+   */
+  councilProposals?: {
+    actionsFor(input: { surface: Surface; text: string }): { actions: ProposableAction[]; min_sensitivity?: "SECRET_RESTRICTED" };
+    submit(identity: IdentityContext, surface: Surface, proposal: CouncilProposal): Promise<CouncilSubmitResult>;
+  };
   /**
    * Task #121 (D-214): valgfri lastefunksjon for den KOSMETISKE delen av
    * systemprompten (se `buildSystemPrompt()` over) - kalles FRISK på hver
@@ -476,7 +489,7 @@ export class ConversationEngine {
         }
       }
       if (triggerSource && councilAllowed) {
-        return this.runCouncil(identity, text, triggerSource, classification, override, onToken);
+        return this.runCouncil(identity, text, triggerSource, classification, override, surface, onToken);
       }
     }
 
@@ -823,6 +836,7 @@ export class ConversationEngine {
     triggerSource: "explicit_user" | "high_impact_classifier",
     classification: DecisionClassification,
     override: RoutingOverrideIntent | null,
+    surface: Surface,
     onToken?: (t: string) => void
   ): Promise<ChatReply> {
     if (!this.deps.council) {
@@ -832,13 +846,29 @@ export class ConversationEngine {
       // D-395: ingen modell kjørte - `routed: "model"` var uriktig (samme semantikk som en blokkert tur).
       return { reply, routed: "blocked" };
     }
+    // WP-D4 (JARVIS-078): forslagsveien. Uten `councilProposals` (standard) er alt under uendret: rådet gir kun en vurdering. Innlimt/ekstern tekst (e-post, dokumenter) er ikke eierens egne ord (JARVIS-013, taint): rådet kan
+    // vurdere den, men legger aldri frem en handling som bygger på den. En feil i utvalget gir ingen forslagsvei (fail-closed), aldri en feilet rådskjøring.
+    const proposals = this.deps.councilProposals;
+    let proposable: ProposableAction[] = [];
+    let minSensitivity: "SECRET_RESTRICTED" | undefined;
+    if (proposals && !looksLikePastedContent(text)) {
+      try {
+        const offered = proposals.actionsFor({ surface, text });
+        proposable = offered.actions;
+        minSensitivity = offered.min_sensitivity;
+      } catch (err) {
+        console.error(JSON.stringify({ msg: "council_proposal_actions_failed", error: err instanceof Error ? scanForSecrets(err.message).text.slice(0, 160) : "ukjent feil" }));
+      }
+    }
+    // Del 3: rådet går gjennom SAMME sensitivitetsregler som chat (innholdsbasert, fail-closed) - aldri udefinert/«public». D-381: velger utvalget finanshandlinger, er rådet SECRET_RESTRICTED (kun lokale modeller), som i chatten.
+    const contentSensitivity = classifyContentSensitivity({ texts: [text], memory_spaces: [identity.memory_space_id] }).sensitivity;
     const result = await this.deps.council.run({
       tenant_id: identity.tenant_id,
       session_id: identity.session_id,
       decision_context: text,
-      // Del 3: rådet går gjennom SAMME sensitivitetsregler som chat (innholdsbasert, fail-closed) - aldri udefinert/«public».
-      sensitivity: classifyContentSensitivity({ texts: [text], memory_spaces: [identity.memory_space_id] }).sensitivity,
+      sensitivity: minSensitivity ? maxSensitivity(contentSensitivity, minSensitivity) : contentSensitivity,
       ...(override?.paid_models_allowed !== undefined ? { paid_models_allowed: override.paid_models_allowed } : {}),
+      ...(proposable.length > 0 ? { proposable_actions: proposable } : {}),
       trigger: {
         trigger_source: triggerSource,
         decision_importance: classification.decision_importance,
@@ -847,12 +877,32 @@ export class ConversationEngine {
         classifier_version: classification.classifier_version
       }
     });
-    const reply =
+    let reply =
       `${result.decision}\n\n(konsensus: ${result.consensus_status}, tillit: ${result.confidence}%` +
       `${result.dissenting_models.length > 0 ? `, uenig: ${result.dissenting_models.join(", ")}` : ""})`;
+    const confirmations: NonNullable<ChatReply["confirmations"]> = [];
+    // Uten forslagsvei (standard) berøres hverken `proposal` eller `provenance` her - svaret er nøyaktig som før.
+    if (proposals && result.proposal) {
+      // Forslaget er ren data: porten legger det frem som en PENDING bekreftelse (bundet, engangs, utløper) og utfører aldri noe. Mislykkes det, får eieren vite det - ingenting er utført uansett.
+      let submitted: CouncilSubmitResult;
+      try {
+        submitted = await proposals.submit(identity, surface, result.proposal);
+      } catch (err) {
+        console.error(JSON.stringify({ msg: "council_proposal_submit_failed", council_id: result.council_id, error: err instanceof Error ? scanForSecrets(err.message).text.slice(0, 160) : "ukjent feil" }));
+        submitted = { ok: false, reason: "confirmation_unavailable" };
+      }
+      if (submitted.ok) {
+        reply += `\n\n${renderProposalNoteNo(result.proposal, submitted.ttl_minutes)}`;
+        confirmations.push({ confirmation_id: submitted.confirmation_id, tool: submitted.tool, status: "confirmation_required" });
+      } else {
+        reply += `\n\nRådet foreslo en handling, men den kunne ikke legges frem til godkjenning (${submitted.reason}). Ingenting er utført.`;
+      }
+    } else if (proposals && result.provenance?.proposal_review?.outcome === "REJECTED") {
+      reply += `\n\nRådet foreslo en handling, men ${describeProposalRejectionNo(result.provenance.proposal_review.reason)}. Ingenting er utført.`;
+    }
     await this.deps.messages.save(identity, "assistant", reply);
     onToken?.(reply);
-    return { reply, routed: "model" };
+    return { reply, routed: "model", ...(confirmations.length > 0 ? { confirmations } : {}) };
   }
 
   /**
