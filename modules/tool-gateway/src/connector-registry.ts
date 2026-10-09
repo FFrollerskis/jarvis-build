@@ -347,6 +347,14 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     id: "vercel", display_name: "Vercel", category: "tool_gateway", credential_refs: ["JARVIS_VERCEL_TOKEN", "JARVIS_VERCEL_TEAM_ID"],
     live_test: { tool_id: "vercel", action: "read_deployments", parameters: () => ({}) }
   },
+  {
+    // WP-E1 (UA-5, D-41 maksimal kapabilitet, D-64: Cloudflare er en ADAPTER, ikke domenekjerne): DNS, WAF/rate limiting, sone-innstillinger, cache-purge
+    // og tilgangs-lesing - se `cloudflare-transport.ts`/`cloudflare-tools.ts` og docs/runbooks/CLOUDFLARE_CONNECTOR.md. SOVENDE til eieren har satt token OG
+    // konto-id. `JARVIS_CLOUDFLARE_MUTATION_ZONES` (hvilke soner som kan SKRIVES) står bevisst IKKE her: det er en autorisasjons-allowlist som kun kan
+    // endres på verten (env + restart), aldri via dashbordet/`set_connector_credential`. `live_test` er den side-effektfrie `check_token`-lesingen.
+    id: "cloudflare", display_name: "Cloudflare", category: "tool_gateway", credential_refs: ["JARVIS_CLOUDFLARE_API_TOKEN", "JARVIS_CLOUDFLARE_ACCOUNT_ID"],
+    live_test: { tool_id: "cloudflare", action: "check_token", parameters: () => ({}) }
+  },
   { id: "anthropic", display_name: "Anthropic API", category: "model_provider", credential_refs: ["ANTHROPIC_API_KEY"] },
   { id: "openai", display_name: "OpenAI API", category: "model_provider", credential_refs: ["OPENAI_API_KEY"] },
   { id: "gemini", display_name: "Gemini API", category: "model_provider", credential_refs: ["GEMINI_API_KEY"] },

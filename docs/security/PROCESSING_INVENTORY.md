@@ -165,6 +165,7 @@ trening, retensjon) er **IKKE VERIFISERT** for alle skyleverandører under, med 
 | `google_drive` | Google Drive/Docs | tool_gateway | ekstern leverandør (eierens konto); IKKE VERIFISERT |
 | `telegram` | Telegram | tool_gateway | ekstern leverandør (eierens konto); IKKE VERIFISERT |
 | `vercel` | Vercel | tool_gateway | ekstern leverandør (eierens konto); IKKE VERIFISERT |
+| `cloudflare` | Cloudflare | tool_gateway | ekstern leverandør (eierens konto; DNS/WAF/sone-innstillinger/cache - Jarvis sender kun infrastrukturkonfigurasjon og API-token, aldri samtale-/minneinnhold; egen rad i `PROCESSOR_REGION_MATRIX.md`); IKKE VERIFISERT |
 | `anthropic` | Anthropic API | model_provider | se 2a; IKKE VERIFISERT |
 | `openai` | OpenAI API | model_provider | se 2a; IKKE VERIFISERT |
 | `gemini` | Gemini API | model_provider | se 2a; IKKE VERIFISERT |

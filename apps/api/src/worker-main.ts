@@ -10,7 +10,8 @@ import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport, GmailTransport,
   GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, MeshToolExecutor, resolveModelToolSurface, chatReadTierMeshTools, BACKGROUND_GITHUB_READ, PgGithubRateLimitStore,
   CHAT_ACT_TIER, CHAT_READ_TIER, MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, memoryToolDefinitions,
-  ToolGateway, assertManifestInvariants, buildToolManifest, createTurnContext, driveTransportsIfConfigured, firstWaveTools, jobIdentityFor, telegramClassDNotifier, parseDockerMutationTargets, parseGceMutationTargets
+  ToolGateway, assertManifestInvariants, buildToolManifest, createTurnContext, driveTransportsIfConfigured, firstWaveTools, jobIdentityFor, telegramClassDNotifier, parseDockerMutationTargets, parseGceMutationTargets,
+  INFRA_GATED_TOOL_IDS
 } from "@jarvis/tool-gateway";
 import { BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
 import { SupportService, SupportTransport } from "@jarvis/support";
@@ -135,8 +136,9 @@ await ownerControls.restore();
 // api-prosessen via `owner_control_state` og leses LIVE av `PolicyGateway` (en pause via api-ets `/infra/pause` stanser derfor også workeren umiddelbart).
 // Workeren har ingen eier-vendt rute som endrer modusen; autoriteten settes likevel likt, så en varig overgang aldri kan skje uten eier.
 const infraGate = new InfraExecutionGate(undefined, createPgInfraModeStore(pool), ownerControlAuthority);
-// D-105: "docker" lagt til (samme rasjonale som apps/api/src/main.ts).
-const infraToolIds = new Set(["github", "docker"]);
+// D-105: "docker" lagt til (samme rasjonale som apps/api/src/main.ts). WP-E1: SAMME ene sannhet som api (`INFRA_GATED_TOOL_IDS`) - ellers kunne en pause
+// stanse et verktøy i api-prosessen men ikke i workeren (JARVIS-025).
+const infraToolIds = new Set(INFRA_GATED_TOOL_IDS);
 const deviceRegistry = new PgDeviceRegistry(pool, owner.tenant_id);
 // D-222: samme fiks som apps/api/src/main.ts - se den for full begrunnelse.
 await deviceRegistry.refresh().catch((err) => {

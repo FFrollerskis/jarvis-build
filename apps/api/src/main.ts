@@ -72,7 +72,8 @@ import {
   MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, resolveModelToolSurface, PgGithubRateLimitStore,
   PgTelegramOffsetStore, TelegramCommandPoller, createTurnContext, jobIdentityFor, telegramClassDNotifier, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, schedulerSource, DailyScheduler, runConnectorHealthSweep,
-  CONNECTOR_REGISTRY, FORBIDDEN_MODEL_TOOL_IDS, listConnectorStatus
+  CONNECTOR_REGISTRY, FORBIDDEN_MODEL_TOOL_IDS, listConnectorStatus,
+  CloudflareTransport, INFRA_GATED_TOOL_IDS, cloudControlToolDefinitions, parseCloudflareMutationZones
 } from "@jarvis/tool-gateway";
 import {
   BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessEventSyncService, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService,
@@ -198,7 +199,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // strengest/uendret). Gjelder KUN registrerte infra-tool_id-er (`infraToolIds` under). D-438 (JARVIS-025): modusen er DELT med worker-prosessen via
   // `owner_control_state` og leses LIVE av `PolicyGateway` (ingen cache/timer); varige overganger krever eier-autoritet (`ownerControlAuthority`).
   const infraGate = new InfraExecutionGate(undefined, createPgInfraModeStore(pool), ownerControlAuthority);
-  const infraToolIds = new Set(["github", "docker"]);
+  // WP-E1: SAMME ene sannhet som worker-main.ts (`INFRA_GATED_TOOL_IDS`): github/docker/gce/vercel + de kontrollerte skymålene (cloudflare/langfuse/infisical/postgres_ops).
+  const infraToolIds = new Set(INFRA_GATED_TOOL_IDS);
   // Enhetsregister fra databasen (fase 8): godkjenninger verifiseres mot registrerte enhetsnøkler.
   const deviceRegistry = new PgDeviceRegistry(pool, owner.tenant_id);
   // D-222: tidligere `.catch(() => undefined)` på begge steder - en vedvarende
@@ -971,7 +973,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // D-416: delegeringsnivået (opprett lesende bakgrunnsjobb / les jobbstatus) over SAMME `taskService` (policy + kontraktsregler).
       ...tasksDelegateToolDefinitions(new TasksDelegateTransport(taskService, chatJobs)),
       // D-421 (UA0-RUNRATE): run-rate og connector maintenance ledger (kun lesing for modellen; skriving via dashbord-ruten).
-      ...runRateToolDefinitions(new RunRateTransport(new RunRateService(pool)))
+      ...runRateToolDefinitions(new RunRateTransport(new RunRateService(pool))),
+      // WP-E1 (UA-5): de kontrollerte skymålene (Cloudflare nå; Langfuse/Infisical/Postgres-drift legges til i samme fabrikk). SOVENDE uten credential;
+      // skriving krever sone i JARVIS_CLOUDFLARE_MUTATION_ZONES (kun på verten) og går alltid gjennom klasse D-kjeden + InfraExecutionGate.
+      ...cloudControlToolDefinitions(
+        { cloudflare: new CloudflareTransport({ accountId: () => readSecretProvider.get("JARVIS_CLOUDFLARE_ACCOUNT_ID") }) },
+        { cloudflareMutationZones: parseCloudflareMutationZones(process.env["JARVIS_CLOUDFLARE_MUTATION_ZONES"]) }
+      )
     ]
   })) toolGateway.register(tool);
   // REMEDIERING DEL 1 (JARVIS-002): `allMeshTools()` (hele registeret) er IKKE
