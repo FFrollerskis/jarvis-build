@@ -535,9 +535,14 @@ export class FinanceReconciliationService {
    */
   async reconcileFinance(tenantId: string, memorySpace: MemorySpace = "business", trigger: "sweep" | "manual" = "sweep"): Promise<ReconciliationReport> {
     const runId = `fin-rec-${randomUUID()}`;
-    await withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) =>
-      client.query(`INSERT INTO finance_reconciliation_runs (run_id, tenant_id, memory_space_id, trigger) VALUES ($1, $2, $3, $4)`, [runId, tenantId, memorySpace, trigger])
-    );
+    await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      // En kjøring som døde midt i (prosessen drept) står igjen som `running` - merk eldre enn en time som forlatt, slik at rapporten aldri viser en evig «pågående» kjøring.
+      await client.query(
+        `UPDATE finance_reconciliation_runs SET status = 'failed', finished_at = now(), error_message = 'abandoned'
+          WHERE tenant_id = $1 AND memory_space_id = $2 AND status = 'running' AND started_at < now() - interval '1 hour'`, [tenantId, memorySpace]
+      );
+      await client.query(`INSERT INTO finance_reconciliation_runs (run_id, tenant_id, memory_space_id, trigger) VALUES ($1, $2, $3, $4)`, [runId, tenantId, memorySpace, trigger]);
+    });
     try {
       const local = await this.readLocal(tenantId, memorySpace);
       const checks: Record<string, CheckStatus> = { local: "ok" };

@@ -278,6 +278,8 @@ describe("D: lokale funn - registrert, flagget, varslet én gang, idempotent, au
     const noRef = await intent(TENANT, {}, "state = 'settled', provider_ref = NULL, settled_at = now(), reconciliation_state = 'matched'");
     const unknown = await intent(TENANT, { provider: "fiken", account_code: "6540", counter_account_code: "1920", vendor_provider_ref: "k-1" }, "state = 'submitted', submitted_at = now() - interval '1 hour'");
     const inFlight = await intent(TENANT, {}, "state = 'submitted', submitted_at = now()");
+    // en draft som ble rullet tilbake etter et ukjent utfall (Stripe/Vipps) bærer flagget - fanges av SQL-uttrykket `anomaly_flags ? 'SUBMIT_OUTCOME_UNKNOWN'`
+    const rolledBack = await intent(TENANT, {}, `anomaly_flags = '["SUBMIT_OUTCOME_UNKNOWN"]'::jsonb`);
     const overRefunded = await intent(TENANT, {}, "state = 'settled', provider_ref = 'pi_over', provider_reported_amount_ore = 10000, provider_reported_currency = 'NOK', settled_at = now(), reconciliation_state = 'matched'");
     await sql("INSERT INTO stripe_refunds (refund_id, tenant_id, payment_intent_id, idempotency_key, state, amount_ore, currency) VALUES ($1, $2, $3, $4, 'settled', 6000, 'NOK'), ($5, $2, $3, $6, 'provider_acknowledged', 5000, 'NOK'), ($7, $2, $3, $8, 'failed', 90000, 'NOK')",
       [`fin-rf-${randomUUID()}`, TENANT, overRefunded, `k-${randomUUID()}`, `fin-rf-${randomUUID()}`, `k-${randomUUID()}`, `fin-rf-${randomUUID()}`, `k-${randomUUID()}`]);
@@ -299,6 +301,8 @@ describe("D: lokale funn - registrert, flagget, varslet én gang, idempotent, au
     expect(await flagsOf(wrongAmount)).toContain("RECONCILE_PROVIDER_AMOUNT_MISMATCH");
     expect(await flagsOf(noRef)).toContain("RECONCILE_PROVIDER_REF_MISSING");
     expect(await flagsOf(unknown)).toContain("RECONCILE_SUBMIT_OUTCOME_UNKNOWN");
+    expect(open.some((f) => f["subject_id"] === rolledBack && f["kind"] === "submit_outcome_unknown")).toBe(true);
+    expect(await flagsOf(rolledBack)).toEqual(expect.arrayContaining(["SUBMIT_OUTCOME_UNKNOWN", "RECONCILE_SUBMIT_OUTCOME_UNKNOWN"]));
     expect(await flagsOf(overRefunded)).toContain("RECONCILE_OVER_REFUNDED");
     expect((await flagsOf(clean)).filter((f) => f.startsWith("RECONCILE_"))).toEqual([]); // ren intensjon: ingen avstemmingsflagg (opprettelsesflagg fra tjenesten røres ikke)
     // ett aggregert varsel for kjøringen, uten kontonummer/KID, med beløp
@@ -479,6 +483,14 @@ describe("F: tenant-isolasjon, app-rolle, verktøy og sveip", () => {
     expect(Object.keys(results)).toEqual(expect.arrayContaining([TENANT, TENANT_B, TENANT_EMPTY]));
     expect(results[TENANT]!.checks["fiken"]).toMatch(/^failed:fiken_503/);
     expect(recorded.some((r) => r.tenant === TENANT && String(r.what).includes("Fiken-avstemming feilet"))).toBe(true);
+  });
+
+  it("en kjøring som døde midt i (står som `running` > 1 time) markeres som forlatt av neste kjøring; en fersk `running` røres ikke", async () => {
+    await sql("INSERT INTO finance_reconciliation_runs (run_id, tenant_id, status, started_at) VALUES ('fin-rec-old-wpf1', $1, 'running', now() - interval '2 hours'), ('fin-rec-fresh-wpf1', $1, 'running', now() - interval '5 minutes')", [TENANT_EMPTY]);
+    await new FinanceReconciliationService(appPool).reconcileFinance(TENANT_EMPTY);
+    const rows = await sql("SELECT run_id, status, error_message FROM finance_reconciliation_runs WHERE run_id IN ('fin-rec-old-wpf1', 'fin-rec-fresh-wpf1') ORDER BY run_id");
+    expect(rows).toEqual([{ run_id: "fin-rec-fresh-wpf1", status: "running", error_message: null }, { run_id: "fin-rec-old-wpf1", status: "failed", error_message: "abandoned" }]);
+    await sql("DELETE FROM finance_reconciliation_runs WHERE run_id = 'fin-rec-fresh-wpf1'"); // fixture-opprydding (så sluttsjekken under ikke ser en ekte hengende kjøring)
   });
 
   it("en kjøring som feiler midt i markeres failed med årsak (aldri hengende `running`) og kaster videre", async () => {
