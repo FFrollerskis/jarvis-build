@@ -19,7 +19,9 @@ Environment=HOME=/home/jarvis
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStart=/volume1/jarvisbuild-data/jarvisbuild/ops/backup/nas-schedule.sh /volume1/jarvisbuild-data/backups/encrypted
 # En backup av en stor database kan ta lang tid; selve låsen i schedule.mjs hindrer overlapp, og JARVIS_BACKUP_MAX_RUN_MINUTES stopper en hengt backup.
-TimeoutStartSec=6h
+# Tikket har selv en vaktbikkje (tak = summen av stegenes frister + 15 min, 375 min med standardene) - dette er siste skanse hvis selve prosessen sitter fast i kjernen (frosset NFS/USB).
+# Hold TimeoutStartSec LENGRE enn taket (JARVIS_BACKUP_MAX_RUN_MINUTES + 2 × JARVIS_BACKUP_OFFSITE_TIMEOUT_MINUTES + JARVIS_BACKUP_VERIFY_TIMEOUT_MINUTES + 15 min).
+TimeoutStartSec=12h
 Nice=10
 IOSchedulingClass=idle
 # Herding (forslag). Fjern ProtectSystem/ReadWritePaths hvis docker-CLI-en eller en off-site-adapter trenger mer enn dette.

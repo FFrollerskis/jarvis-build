@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DUE_TOLERANCE_MS, assertRunnable } from "./config.mjs";
@@ -20,13 +20,24 @@ import {
  *  - Observasjon + planlagt drift - aldri en handling i API-prosessen. API-et leser kun den skrivebeskyttede eksporten.
  *
  * Exit-koder (for cron-mail/overvåking): 0 ok/ingenting forfalt · 1 konfig/intern feil · 2 backup feilet · 3 backup er FORFALT (> 1,5 × intervall) uten at dette
- * tikket tok den · 4 restore-verifisering feilet · 5 off-site feilet · (6 = off-site ikke satt opp, kun `offsite-check`).
+ * tikket tok den - eller låsen holdes av et tikk som har gått langt utover sitt budsjett (hengt kjede) · 4 restore-verifisering feilet · 5 off-site feilet ·
+ * (6 = off-site ikke satt opp, kun `offsite-check`).
  */
 export const EXIT = Object.freeze({ OK: 0, USAGE: 1, BACKUP_FAILED: 2, OVERDUE: 3, VERIFY_FAILED: 4, OFFSITE_FAILED: 5, OFFSITE_NOT_CONFIGURED: 6 });
 export const OVERDUE_FACTOR = 1.5;
 export const MAX_OFFSITE_SETS_PER_TICK = 3;
 export const ORPHAN_MAX_AGE_MS = 12 * 3_600_000;
+/** Retensjon (review F7): de N nyeste settene beholdes ALLTID, og høyst så mange slettes per tikk. */
+export const RETENTION_MIN_KEEP = 7;
+export const RETENTION_MAX_PRUNE_PER_TICK = 3;
+/** Et tikk-gap lengre enn dette (2 × intervall, minst 12 t) regnes som en tidsdiskontinuitet (NAS av, klokke hoppet): retensjonen holdes da i minst et døgn. */
+const RETENTION_GAP_FACTOR = 2;
+const RETENTION_GAP_MIN_MS = 12 * 3_600_000;
+const RETENTION_HOLD_MIN_MS = 24 * 3_600_000;
 const VERIFY_MIN_RETRY_MS = 6 * 3_600_000;
+/** Tikk-budsjett når konfigen ikke oppgir et (tester som bygger config for hånd): lengre enn noe legitimt tikk, men endelig. */
+const DEFAULT_TICK_BUDGET_MS = 10 * 3_600_000;
+const WATCHDOG = Symbol("tick-watchdog");
 
 export class ScheduleError extends Error {
   constructor(code, message) {
@@ -50,9 +61,43 @@ export function retryDelayMs(failures, baseMs) {
 /** Klokkeavvik vi tåler (cron-jitter, NTP-justering) før noe regnes som «datert i fremtiden». */
 const FUTURE_SKEW_MS = 5 * 60_000;
 
+const AGE_FILE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}\.age$/;
+
 /**
- * Komplette sett (gyldig manifest.json), eldste først. Et korrupt manifest får ikke lov til å velte hele tikket. Med `nowMs` hoppes sett som er datert i FREMTIDEN over
- * (klokkeavvik ved backup-tidspunktet): ellers ville et sett datert i 2030 stå som «nyeste» og enten blokkere alle nye backuper - eller utløse en ny backup hvert tikk.
+ * Review F8: et sett er KOMPLETT først når hver fil manifestet lister faktisk finnes (vanlig fil, ikke symlenke), er ikke tom og har størrelsen manifestet oppgir (globals har ingen
+ * størrelse i manifestet: kun «ikke tom»). Bare «gyldig manifest.json» lot et hult sett (filer slettet, kopiert uten dumpene, avkortet) stå som «nyeste» og undertrykke neste backup.
+ * Kun `lstat` (ingen hashing: denne kalles flere ganger per tikk); sjekksummer verifiseres der filene faktisk brukes (off-site-forhåndssjekken og restore-verifiseringen).
+ * @returns {string[]} tom liste = komplett
+ */
+export function setFileProblems(dir, manifest) {
+  const entries = [];
+  if (!Array.isArray(manifest?.databases) || manifest.databases.length === 0) return ["manifestet lister ingen databaser"];
+  for (const d of manifest.databases) entries.push({ file: d?.file, size: Number.isInteger(d?.size_bytes) ? d.size_bytes : null });
+  entries.push({ file: manifest?.globals?.file, size: null });
+  const problems = [];
+  for (const { file, size } of entries) {
+    if (typeof file !== "string" || !AGE_FILE.test(file)) {
+      problems.push("manifestet lister en fil med ugyldig navn");
+      continue;
+    }
+    let st;
+    try {
+      st = lstatSync(join(dir, file));
+    } catch {
+      problems.push(`mangler: ${file}`);
+      continue;
+    }
+    if (!st.isFile()) problems.push(`ikke en vanlig fil: ${file}`);
+    else if (st.size === 0) problems.push(`tom: ${file}`);
+    else if (size !== null && st.size !== size) problems.push(`størrelsen avviker fra manifestet: ${file}`);
+  }
+  return problems;
+}
+
+/**
+ * Komplette sett (gyldig manifest.json OG alle filene det lister på plass, se `setFileProblems`), eldste først. Et korrupt manifest får ikke lov til å velte hele tikket. Med `nowMs`
+ * hoppes sett som er datert i FREMTIDEN over (klokkeavvik ved backup-tidspunktet): ellers ville et sett datert i 2030 stå som «nyeste» og enten blokkere alle nye backuper - eller
+ * utløse en ny backup hvert tikk.
  */
 export function listCompleteSets(outDir, { nowMs } = {}) {
   if (!existsSync(outDir)) return [];
@@ -64,6 +109,7 @@ export function listCompleteSets(outDir, { nowMs } = {}) {
       const createdMs = Date.parse(manifest?.created_at_utc);
       if (!Number.isFinite(createdMs)) continue;
       if (nowMs !== undefined && createdMs > nowMs + FUTURE_SKEW_MS) continue;
+      if (setFileProblems(dir, manifest).length > 0) continue;
       const sizeBytes = Array.isArray(manifest.databases) ? manifest.databases.reduce((sum, d) => sum + (Number.isInteger(d?.size_bytes) ? d.size_bytes : 0), 0) : 0;
       sets.push({ name, dir, manifest, createdMs, createdAt: new Date(createdMs).toISOString(), sizeBytes });
     } catch {
@@ -71,6 +117,23 @@ export function listCompleteSets(outDir, { nowMs } = {}) {
     }
   }
   return sets;
+}
+
+/** Sett MED gyldig manifest som likevel ikke er komplette (hule: filer mangler/er avkortet) - logges som advarsel og rives aldri automatisk (restene kan være det eneste som er igjen). */
+export function findHollowSets(outDir) {
+  if (!existsSync(outDir)) return [];
+  const hollow = [];
+  for (const name of readdirSync(outDir).filter((n) => SET_NAME_RE.test(n)).sort()) {
+    try {
+      const manifest = JSON.parse(readFileSync(join(outDir, name, "manifest.json"), "utf8"));
+      if (!Number.isFinite(Date.parse(manifest?.created_at_utc))) continue;
+      const problems = setFileProblems(join(outDir, name), manifest);
+      if (problems.length > 0) hollow.push({ name, problems });
+    } catch {
+      // uten (lesbart) manifest: foreldreløst/korrupt, håndteres andre steder
+    }
+  }
+  return hollow;
 }
 
 /** Navn på komplette sett som er datert i fremtiden (klokkeavvik) - logges som advarsel; de teller ikke som «nyeste». */
@@ -84,9 +147,9 @@ export function dropFutureTimestamps(status, nowMs) {
   const sections = { backup: status.backup, retention: status.retention, offsite: status.offsite, restore_verify: status.restore_verify, heartbeat: status.heartbeat };
   for (const [section, obj] of Object.entries(sections)) {
     for (const [key, value] of Object.entries(obj)) {
-      if (typeof value !== "string" || !(key.endsWith("_at") || key === "retry_after")) continue;
+      if (typeof value !== "string" || !(key.endsWith("_at") || key === "retry_after" || key === "hold_until")) continue;
       const t = Date.parse(value);
-      const limit = key === "retry_after" ? nowMs + 24 * 3_600_000 : nowMs + FUTURE_SKEW_MS;
+      const limit = key === "retry_after" ? nowMs + 24 * 3_600_000 : key === "hold_until" ? nowMs + 7 * 24 * 3_600_000 : nowMs + FUTURE_SKEW_MS;
       if (Number.isFinite(t) && t > limit) {
         obj[key] = null;
         dropped.push(`${section}.${key}`);
@@ -112,10 +175,47 @@ export function findOrphanSets(outDir, nowMs, maxAgeMs = ORPHAN_MAX_AGE_MS) {
   return orphans;
 }
 
-/** Retensjon: komplette sett eldre enn `retainDays`, men ALLTID det nyeste. */
-export function setsToPrune(sets, retainDays, nowMs) {
+/** `.verify-tmp-XXXXXX` (mkdtemp i backup-mappen): arbeidsmappen for en henting fra off-site. Nøyaktig dette mønsteret er vårt. */
+export const VERIFY_TMP_RE = /^\.verify-tmp-[A-Za-z0-9]{6}$/;
+
+/**
+ * Review F12: arbeidsmapper fra en henting som døde midt i (strøm, kill, vaktbikkje) og aldri ble ryddet - de inneholder krypterte sett og fyller disken stille. Bare ekte kataloger
+ * (aldri en symlenke eller fil med samme navn) som er eldre enn `maxAgeMs`; kalles under tikk-låsen, så ingen levende verifisering i DETTE tikket bruker dem.
+ */
+export function findStaleTempDirs(outDir, nowMs, maxAgeMs = ORPHAN_MAX_AGE_MS) {
+  if (!existsSync(outDir)) return [];
+  const stale = [];
+  for (const name of readdirSync(outDir).filter((n) => VERIFY_TMP_RE.test(n)).sort()) {
+    try {
+      const st = lstatSync(join(outDir, name));
+      if (st.isDirectory() && !st.isSymbolicLink() && nowMs - st.mtimeMs > maxAgeMs) stale.push(join(outDir, name));
+    } catch {
+      // forsvunnet underveis
+    }
+  }
+  return stale;
+}
+
+/** `jarvis-backup-20261009T020000Z` -> epoch-ms (UTC); null hvis navnet ikke er en ekte dato (siffer-mønsteret slipper f.eks. `99999999T999999Z` gjennom). */
+export function setNameMs(name) {
+  const m = /^jarvis-backup-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(String(name));
+  if (m === null) return null;
+  const [y, mo, d, h, mi, se] = m.slice(1).map(Number);
+  const ms = Date.UTC(y, mo - 1, d, h, mi, se);
+  const back = new Date(ms);
+  // Date.UTC ruller over (måned 13, time 25): kun navn som overlever en rundtur er ekte tidspunkt.
+  return Number.isFinite(ms) && back.getUTCFullYear() === y && back.getUTCMonth() === mo - 1 && back.getUTCDate() === d && back.getUTCHours() === h && back.getUTCMinutes() === mi && back.getUTCSeconds() === se ? ms : null;
+}
+
+/**
+ * Retensjon: komplette sett STRENGT eldre enn `retainDays`, men aldri de `keepNewest` nyeste (minst 1) og aldri de navngitte i `protect` (siste verifiserte og siste off-site-bekreftede sett:
+ * de er det eneste beviset på at en restore faktisk virker / at kopien finnes utenfor huset). Settene er sortert eldste først; resultatet også.
+ */
+export function setsToPrune(sets, retainDays, nowMs, { keepNewest = 1, protect = [] } = {}) {
   const cutoff = nowMs - retainDays * 86_400_000;
-  return sets.slice(0, -1).filter((s) => s.createdMs < cutoff);
+  const keep = new Set(sets.slice(Math.max(0, sets.length - Math.max(1, keepNewest))).map((s) => s.name));
+  for (const name of protect) if (typeof name === "string") keep.add(name);
+  return sets.filter((s) => !keep.has(s.name) && s.createdMs < cutoff);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------
@@ -227,7 +327,10 @@ export function defaultVerify(config, env) {
     }
     if (res.timedOut) throw new ScheduleError("verify_timeout", `restore-verifisering brukte mer enn ${Math.round(config.verify.timeoutMs / 60_000)} min og ble stoppet`);
     const report = parseJsonObject(res.stdout);
-    if (report === null) throw new ScheduleError("verify_failed", `restore-verifisering ga ingen rapport (exit ${res.code ?? res.spawnError ?? "?"}) - IKKE verifisert`);
+    if (report === null) {
+      const why = tail(res.stderr, 2);
+      throw new ScheduleError("verify_failed", `restore-verifisering ga ingen rapport (exit ${res.code ?? res.spawnError ?? "?"}) - IKKE verifisert${why === "" ? "" : `: ${why}`}`);
+    }
     return { report, exitCode: res.code };
   };
 }
@@ -263,11 +366,15 @@ function verifyOutcome(result) {
   const ok = report.ok === true && result.exitCode === 0;
   let code = null;
   if (!ok) {
-    if (report.stage === "integrity") code = "verify_integrity";
+    if (report.stage === "integrity" || report.stage === "manifest" || report.stage === "globals") code = "verify_integrity";
+    else if (report.stage === "scratch_guard") code = "verify_config_invalid"; // scratch-serveren er ikke tom/kastbar: feilpekt konfig, ikke en feil i settet
     else if (dbs.some((d) => d?.ok === false)) code = "verify_mismatch";
     else code = "verify_failed";
   }
-  return { ok, code, tables: sum("tables_restored"), rows: sum("total_rows_expected") };
+  // Vaktene (manifest, scratch, globals) har faste norske feiltekster uten innhold fra settet: de vises i den interne statusen - «hvorfor» er hele poenget med vakten.
+  // Annen verktøyfeil (stderr fra pg_restore/psql kan sitere ubetrodd SQL) kommer aldri hit.
+  const guarded = (report.stage === "manifest" || report.stage === "scratch_guard" || report.stage === "globals") && typeof report.error === "string";
+  return { ok, code, tables: sum("tables_restored"), rows: sum("total_rows_expected"), detail: guarded ? `restore-verifisering stoppet (${report.stage}): ${report.error}`.slice(0, 280) : null };
 }
 
 /**
@@ -307,16 +414,36 @@ export async function runTick(config, deps, env = process.env) {
 
   assertRunnable(config, env);
   mkdirSync(config.stateDir, { recursive: true, mode: 0o700 }); // første kjøring på en ny maskin: mappen for lås + status finnes ikke ennå
+  const budgetMs = config.tickBudgetMs ?? DEFAULT_TICK_BUDGET_MS;
   const lock = deps.acquireLock(config.lockFile, { now, staleMs: config.lockStaleMs, log });
   if (!lock.acquired) {
+    // Review F4: en lås som holdes lenger enn et tikk kan vare (og lenger enn 2 × intervallet) er ikke «et annet tikk som jobber» - det er en hengt kjede. Stille exit 0 hver 15. minutt
+    // var nettopp feilen: backupene stoppet uten at noe varslet. Nå: høylytt feil + exit 3 (cron-mail/overvåking), men aldri noe handling uten låsen.
+    const heldSince = Date.parse(lock.holder?.started_at ?? "");
+    const heldMs = Number.isFinite(heldSince) ? startedMs - heldSince : null;
+    const limitMs = Math.max(2 * config.intervalMs, budgetMs);
+    if (heldMs !== null && heldMs > limitMs) {
+      log("error", "lock_held_too_long", {
+        holder_pid: lock.holder?.pid ?? null, holder_host: lock.holder?.host ?? null, held_hours: Math.round((heldMs / 3_600_000) * 10) / 10, limit_hours: Math.round((limitMs / 3_600_000) * 10) / 10,
+        note: "låsen holdes av et tikk som har gått langt utover sitt tidsbudsjett (hengt disk/nettverksmontering/prosess?) - sjekk holderen og avslutt den, eller slett låsfilen hvis prosessen er borte"
+      });
+      return { exitCode: EXIT.OVERDUE, outcome: "lock_held_too_long", actions: [], failed: [], decisions: {}, newest_set: null, duration_ms: 0 };
+    }
     log("debug", "tick_skipped_lock_held", { reason: lock.reason, holder_pid: lock.holder?.pid ?? null });
     return { exitCode: EXIT.OK, outcome: "skipped_lock_held", actions: [], failed: [], decisions: {}, newest_set: null, duration_ms: 0 };
   }
   const lockBeat = setInterval(() => void lock.touch(), 60_000);
   lockBeat.unref();
+  // Review F4: tikk-dekkende vaktbikkje. Hver enkelt operasjon har egen frist, men uansett hva som henger (en prosess som ikke dør, en disk, en avhengighet) skal ETT tikk aldri holde låsen
+  // utover budsjettet: vaktbikkja gir opp, registrerer feilen på steget som hang, sender /fail, og slipper låsen. Timeren er bevisst IKKE unref'd (da kunne prosessen avslutte stille med exit 0).
+  const guard = { abandoned: false, fire: async () => ({ exitCode: EXIT.USAGE, outcome: "failed", actions: [], failed: ["tick"], decisions: {}, newest_set: null, duration_ms: now().getTime() - startedMs }) };
+  let watchdogTimer;
   try {
-    return await tickBody();
+    const timedOut = new Promise((resolve) => { watchdogTimer = setTimeout(() => resolve(WATCHDOG), budgetMs); });
+    const first = await Promise.race([tickBody(), timedOut]);
+    return first === WATCHDOG ? await guard.fire() : first;
   } finally {
+    clearTimeout(watchdogTimer);
     clearInterval(lockBeat);
     lock.release();
   }
@@ -328,11 +455,32 @@ export async function runTick(config, deps, env = process.env) {
     const dropped = dropFutureTimestamps(status, startedMs);
     if (dropped.length > 0) log("warn", "status_timestamps_in_future_dropped", { fields: dropped, note: "klokkeavvik? tidsstempler fremover i tid ble forkastet" });
     for (const name of findFutureSets(config.out, startedMs)) log("warn", "set_dated_in_future", { set: name, note: "teller ikke som nyeste sett (klokkeavvik ved backup-tidspunktet?)" });
+    for (const { name, problems } of findHollowSets(config.out)) log("warn", "set_incomplete", { set: name, problems: problems.slice(0, 4).join("; "), note: "har manifest, men filene stemmer ikke: teller ikke som komplett sett (og undertrykker ikke neste backup) - røres ikke automatisk" });
+    // Review F12: arbeidsmapper fra en off-site-henting som døde midt i. Under låsen finnes ingen levende bruker av dem; alderen (minst 12 t og minst tikk-budsjettet) beskytter mot et
+    // tikk vi har tatt over låsen fra og som mot formodning fortsatt kjører.
+    for (const dir of findStaleTempDirs(config.out, startedMs, Math.max(ORPHAN_MAX_AGE_MS, budgetMs))) {
+      try {
+        deps.remove(dir);
+        log("warn", "stale_tmp_removed", { entry: dir.split(/[\\/]/).at(-1) ?? "", note: "arbeidsmappe fra en avbrutt off-site-henting (ikke ryddet av tikket som laget den)" });
+      } catch (err) {
+        log("warn", "stale_tmp_remove_failed", { entry: dir.split(/[\\/]/).at(-1) ?? "", code: err?.code ?? "unknown" });
+      }
+    }
+    // Review F7: et langt gap siden forrige tikk (NAS av, eller klokken hoppet fremover) får alle sett til å se «gamle» ut på én gang. Retensjonen holdes da i minst et døgn,
+    // så en feil klokke kan rettes (NTP) før noe slettes - et tak per tikk alene stopper det ikke på 15 minutter.
+    const previousTickMs = msOf(status.last_tick_at);
+    const gapMs = Number.isFinite(previousTickMs) ? startedMs - previousTickMs : 0;
+    if (gapMs > Math.max(RETENTION_GAP_FACTOR * config.intervalMs, RETENTION_GAP_MIN_MS)) {
+      const holdMs = Math.max(config.intervalMs, RETENTION_HOLD_MIN_MS);
+      status.retention.hold_until = iso(new Date(startedMs + holdMs));
+      log("warn", "tick_gap_retention_hold", { gap_hours: Math.round((gapMs / 3_600_000) * 10) / 10, hold_hours: Math.round(holdMs / 3_600_000), note: "langt gap siden forrige tikk (NAS av eller klokkehopp?): ingen sletting av gamle sett før holdet utløper" });
+    }
     status.created_at ??= iso(t0);
     status.last_tick_at = iso(t0);
     let storeFailed = false;
+    let stage = "other"; // hvilket steg som kjører nå (for vaktbikkja): backup | offsite | verify | other
 
-    const commit = () => {
+    const writeAll = () => {
       status.updated_at = iso(now());
       try {
         writeJsonAtomic(config.statusFile, status, { mode: 0o600, dirMode: 0o700 });
@@ -353,6 +501,10 @@ export async function runTick(config, deps, env = process.env) {
           log("error", "status_export_failed", { code: err?.code ?? "unknown" });
         }
       }
+    };
+    // Et tikk vaktbikkja har gitt opp skriver ikke lenger (det kunne overskrevet statusen til tikket som har tatt over låsen).
+    const commit = () => {
+      if (!guard.abandoned) writeAll();
     };
     const recordHeartbeat = () => {
       status.heartbeat = { configured: heartbeat.configured, ...heartbeat.last() };
@@ -376,6 +528,23 @@ export async function runTick(config, deps, env = process.env) {
     const decisions = decide(status, readSets());
     const work = decisions.backup.due || decisions.offsite.due || decisions.verify.due;
     if (!work) log("debug", "tick_nothing_due", { decisions });
+    const abandonedResult = () => ({ exitCode: EXIT.USAGE, outcome: "abandoned", actions, failed, decisions, newest_set: null, duration_ms: now().getTime() - startedMs });
+    guard.fire = async () => {
+      guard.abandoned = true;
+      const hung = stage;
+      const minutes = Math.round(budgetMs / 60_000);
+      const why = `tikket brukte mer enn ${minutes} min og ble avbrutt av vaktbikkja (steg: ${hung}) - en hengt prosess, disk eller nettverksmontering?`;
+      log("error", "tick_watchdog_fired", { stage: hung, budget_minutes: minutes });
+      if (hung === "backup") recordBackupFailure(new ScheduleError("backup_timeout", why));
+      else if (hung === "offsite") recordOffsiteFailure(new OffsiteError("offsite_timeout", why));
+      else if (hung === "verify") recordVerifyFailure(new ScheduleError("verify_timeout", why), now().getTime());
+      else failed.push("tick");
+      await heartbeat.fail();
+      recordHeartbeat();
+      writeAll();
+      const exitCode = hung === "backup" ? EXIT.BACKUP_FAILED : hung === "offsite" ? EXIT.OFFSITE_FAILED : hung === "verify" ? EXIT.VERIFY_FAILED : EXIT.USAGE;
+      return { exitCode, outcome: "failed", actions, failed, decisions, newest_set: readSets().at(-1)?.name ?? null, duration_ms: now().getTime() - startedMs };
+    };
     // «start»-pinget sendes ÉN gang, når tikket faktisk skal gjøre noe (også hvis et steg først blir forfalt underveis).
     let started = false;
     const ensureStarted = async () => {
@@ -398,7 +567,9 @@ export async function runTick(config, deps, env = process.env) {
       log("info", "backup_started", { reason: decisions.backup.reason });
       const b0 = now().getTime();
       try {
+        stage = "backup";
         const result = await deps.backup({ now: t0 });
+        stage = "other";
         const done = readSets().find((s) => s.name === result.name);
         if (done === undefined) throw new ScheduleError("backup_failed", "backup meldte OK, men settet har ikke et komplett manifest på disk");
         b.last_success_at = iso(now());
@@ -411,15 +582,12 @@ export async function runTick(config, deps, env = process.env) {
         b.last_error = null;
         log("info", "backup_completed", { set: done.name, size_bytes: done.sizeBytes, duration_s: b.duration_s });
       } catch (err) {
-        b.consecutive_failures += 1;
-        b.retry_after = iso(new Date(now().getTime() + retryDelayMs(b.consecutive_failures, config.retryMs)));
-        b.last_error_code = err instanceof ScheduleError && (err.code === "backup_timeout" || err.code === "backup_failed") ? err.code : "backup_failed";
-        b.last_error = deps.redact(err?.message ?? "backup feilet");
-        failed.push("backup");
-        log("error", "backup_failed", { code: b.last_error_code, consecutive_failures: b.consecutive_failures, error: b.last_error });
+        stage = "other";
+        recordBackupFailure(err);
       }
       commit();
     }
+    if (guard.abandoned) return abandonedResult();
     if (config.roles.has("backup")) retention();
 
     // --- 2. off-site ---------------------------------------------------------------------------------------------------------------------------
@@ -432,9 +600,10 @@ export async function runTick(config, deps, env = process.env) {
     if (offsiteNow.due) {
       actions.push("offsite");
       await ensureStarted();
-      await offsiteStage(status, failed);
+      await offsiteStage(status);
       commit();
     }
+    if (guard.abandoned) return abandonedResult();
 
     // --- 3. restore-verifisering ---------------------------------------------------------------------------------------------------------------
     const verifyNow = verifyDecision({
@@ -445,16 +614,18 @@ export async function runTick(config, deps, env = process.env) {
     if (verifyNow.due) {
       actions.push("verify");
       await ensureStarted();
-      await verifyStage(status, failed);
+      await verifyStage(status);
       commit();
     }
+    if (guard.abandoned) return abandonedResult();
 
     // --- 4. avslutning -------------------------------------------------------------------------------------------------------------------------
     const sets = readSets();
     const newest = sets.at(-1) ?? null;
     const overdue = config.roles.has("backup") && !(backupRan && !failed.includes("backup")) && (newest === null || now().getTime() - newest.createdMs > OVERDUE_FACTOR * config.intervalMs);
     if (actions.length > 0) {
-      if (failed.length === 0) await heartbeat.success();
+      // Review F3: `success` bare når tikket også ender med exit 0. En forfalt backup (exit 3, f.eks. i backoff mens off-site/verify likevel kjørte) er IKKE suksess - monitoren skal få /fail.
+      if (failed.length === 0 && !overdue) await heartbeat.success();
       else await heartbeat.fail();
       recordHeartbeat();
     }
@@ -470,34 +641,89 @@ export async function runTick(config, deps, env = process.env) {
     return { exitCode, outcome, actions, failed, decisions, newest_set: newest?.name ?? null, duration_ms: now().getTime() - startedMs };
 
     function retention() {
+      if (guard.abandoned) return;
+      const nowMs2 = now().getTime();
       const sets2 = readSets();
       const newest2 = sets2.at(-1) ?? null;
-      const orphans = findOrphanSets(config.out, now().getTime());
+      const orphans = findOrphanSets(config.out, nowMs2);
       for (const dir of orphans) {
         deps.remove(dir);
         log("warn", "orphan_set_removed", { set: dir.split(/[\\/]/).at(-1) ?? "" });
       }
+      const r = status.retention;
       // Ingen sletting mens kjeden er stille: gamle sett er det eneste vi har hvis backupene har sluttet å komme.
-      if (newest2 === null || now().getTime() - newest2.createdMs > 2 * config.intervalMs) {
-        status.retention.last_skipped_reason = "pipeline_stale";
+      if (newest2 === null || nowMs2 - newest2.createdMs > 2 * config.intervalMs) {
+        r.last_skipped_reason = "pipeline_stale";
         return;
       }
-      const prune = setsToPrune(sets2, config.retainDays, now().getTime());
+      // Review F7: heller for mange sett enn for få. Slett ingenting mens off-site eller restore-verifisering feiler (da er de lokale settene det eneste bevisste sikkerhetsnettet),
+      // eller mens en tidsdiskontinuitet gjør at alt ser gammelt ut.
+      if (r.hold_until !== null && nowMs2 < msOf(r.hold_until)) {
+        r.last_skipped_reason = "time_gap_hold";
+        return;
+      }
+      if (status.offsite.state === "failed") {
+        r.last_skipped_reason = "offsite_failing";
+        return;
+      }
+      if (status.restore_verify.state === "failed") {
+        r.last_skipped_reason = "verify_failing";
+        return;
+      }
+      const candidates = setsToPrune(sets2, config.retainDays, nowMs2, { keepNewest: RETENTION_MIN_KEEP, protect: [status.restore_verify.last_success_set, status.offsite.last_set] });
+      const prune = candidates.slice(0, RETENTION_MAX_PRUNE_PER_TICK); // eldste først
       for (const s of prune) deps.remove(s.dir);
-      status.retention.last_skipped_reason = null;
+      r.last_skipped_reason = null;
+      if (candidates.length > prune.length) {
+        log("warn", "retention_prune_capped", { candidates: candidates.length, pruned_now: prune.length, cap: RETENTION_MAX_PRUNE_PER_TICK, note: "mange sett er eldre enn retensjonen (klokkeavvik? nylig senket JARVIS_BACKUP_RETAIN_DAYS?) - resten slettes gradvis" });
+      }
       if (prune.length > 0) {
-        status.retention.last_pruned_at = iso(now());
-        status.retention.last_pruned_count = prune.length;
+        r.last_pruned_at = iso(now());
+        r.last_pruned_count = prune.length;
         log("info", "retention_pruned", { count: prune.length, sets: prune.map((s) => s.name) });
       }
     }
 
-    async function offsiteStage(st, failures) {
+    function recordBackupFailure(err) {
+      const b = status.backup;
+      b.consecutive_failures += 1;
+      b.retry_after = iso(new Date(now().getTime() + retryDelayMs(b.consecutive_failures, config.retryMs)));
+      b.last_error_code = err instanceof ScheduleError && (err.code === "backup_timeout" || err.code === "backup_failed") ? err.code : "backup_failed";
+      b.last_error = deps.redact(err?.message ?? "backup feilet");
+      failed.push("backup");
+      log("error", "backup_failed", { code: b.last_error_code, consecutive_failures: b.consecutive_failures, error: b.last_error });
+    }
+
+    function recordOffsiteFailure(err) {
+      const o = status.offsite;
+      o.state = "failed";
+      o.consecutive_failures += 1;
+      o.retry_after = iso(new Date(now().getTime() + retryDelayMs(o.consecutive_failures, config.retryMs)));
+      o.last_error_code = ["offsite_failed", "offsite_timeout", "offsite_ineligible", "offsite_verify_failed", "offsite_config_invalid"].includes(err?.code) ? err.code : "offsite_failed";
+      o.last_error = deps.redact(err?.message ?? "off-site feilet");
+      failed.push("offsite");
+      log("error", "offsite_failed", { code: o.last_error_code, consecutive_failures: o.consecutive_failures, error: o.last_error });
+    }
+
+    function recordVerifyFailure(err, startedAtMs) {
+      const v = status.restore_verify;
+      v.state = "failed";
+      v.consecutive_failures += 1;
+      v.retry_after = iso(new Date(now().getTime() + retryDelayMs(v.consecutive_failures, Math.max(config.retryMs, VERIFY_MIN_RETRY_MS))));
+      v.last_error_code = ["verify_failed", "verify_timeout", "verify_integrity", "verify_mismatch", "verify_config_invalid"].includes(err?.code) ? err.code : "verify_failed";
+      v.last_error = deps.redact(err?.message ?? "verifisering feilet");
+      v.duration_s ??= Math.round((now().getTime() - startedAtMs) / 1000);
+      failed.push("verify");
+      log("error", "verify_failed", { code: v.last_error_code, consecutive_failures: v.consecutive_failures, error: v.last_error });
+    }
+
+    async function offsiteStage(st) {
       const o = st.offsite;
       o.last_attempt_at = iso(now());
       commit();
       const sets3 = readSets();
       const newest3 = sets3.at(-1);
+      stage = "offsite";
       try {
         if (config.offsiteError !== null) throw new OffsiteError("offsite_config_invalid", config.offsiteError);
         // Oversikten brukes bare til etterfylling av eldre sett; feiler den, sendes det nyeste settet likevel (og feiler pushen, rapporteres DEN).
@@ -506,6 +732,15 @@ export async function runTick(config, deps, env = process.env) {
           remote = new Set(await deps.sink.list());
         } catch (err) {
           log("warn", "offsite_list_failed", { code: err?.code ?? "offsite_failed", error: deps.redact(err?.message ?? "") });
+        }
+        // Review F12: egne foreldede rester i målet (`.incoming-*` etter en kopi som døde midt i). Aldri fatalt: oppryddingen er best effort, og pushen skal ikke avhenge av den.
+        if (typeof deps.sink.cleanupStale === "function") {
+          try {
+            const removed = await deps.sink.cleanupStale();
+            if (removed.length > 0) log("warn", "offsite_stale_incoming_removed", { count: removed.length, entries: removed.slice(0, 3).join(","), note: "foreldede rester etter en avbrutt kopi i off-site-målet" });
+          } catch (err) {
+            log("warn", "offsite_cleanup_failed", { code: err?.code ?? "offsite_failed", error: deps.redact(err?.message ?? "") });
+          }
         }
         const older = remote === null ? [] : sets3.slice(0, -1).reverse().filter((s) => !remote.has(s.name)).slice(0, MAX_OFFSITE_SETS_PER_TICK - 1);
         log("info", "offsite_started", { set: newest3.name, adapter: deps.sink.adapter, backfill: older.length });
@@ -523,6 +758,7 @@ export async function runTick(config, deps, env = process.env) {
         o.last_error = null;
         // Etterfyll eldre sett som mangler (nyeste først). Feil her er en advarsel - det nyeste settet er allerede trygt.
         for (const s of older) {
+          if (guard.abandoned) break;
           try {
             await deps.sink.push(await deps.prepareSet(s.dir, { recipient: deps.recipient }));
             log("info", "offsite_backfilled", { set: s.name });
@@ -531,17 +767,41 @@ export async function runTick(config, deps, env = process.env) {
           }
         }
       } catch (err) {
-        o.state = "failed";
-        o.consecutive_failures += 1;
-        o.retry_after = iso(new Date(now().getTime() + retryDelayMs(o.consecutive_failures, config.retryMs)));
-        o.last_error_code = ["offsite_failed", "offsite_timeout", "offsite_ineligible", "offsite_verify_failed", "offsite_config_invalid"].includes(err?.code) ? err.code : "offsite_failed";
-        o.last_error = deps.redact(err?.message ?? "off-site feilet");
-        failures.push("offsite");
-        log("error", "offsite_failed", { code: o.last_error_code, consecutive_failures: o.consecutive_failures, error: o.last_error });
+        recordOffsiteFailure(err);
+      } finally {
+        stage = "other";
       }
     }
 
-    async function verifyStage(st, failures) {
+    /**
+     * Review F11: hvilket sett fra fjernmålet som verifiseres. «Leksikografisk siste navn» lot hvem som helst med skrivetilgang til målet bestemme det: et navn langt frem
+     * (`jarvis-backup-99999999T999999Z`) eller et plausibelt navn rett etter det nyeste sorterte sist og ble det «nyeste». Nå: (1) navn som ikke er en ekte dato eller ligger mer enn
+     * 5 min frem i tid (klokkeavvik/plantet) er aldri kandidater, og nevnes som advarsel; (2) finnes et lokalt komplett sett, SKAL fjernmålets nyeste (plausible) sett være nøyaktig det -
+     * ellers er off-site ikke à jour (eller målet har uventede sett) og ingenting verifiseres i stedet; (3) uten lokale sett (PC med privatnøkkelen) velges det nyeste plausible.
+     */
+    async function chooseOffsiteSet() {
+      const nowMs = now().getTime();
+      const plausible = [];
+      const implausible = [];
+      for (const n of (await deps.sink.list()).slice().sort()) {
+        const ms = setNameMs(n);
+        (ms !== null && ms <= nowMs + FUTURE_SKEW_MS ? plausible : implausible).push(n);
+      }
+      if (implausible.length > 0) log("warn", "offsite_set_name_implausible", { count: implausible.length, sets: implausible.slice(-3).join(","), note: "navn som ikke er en ekte dato eller ligger frem i tid er ikke kandidater for verifisering" });
+      const remoteNewest = plausible.at(-1);
+      const localNewest = readSets().at(-1);
+      if (localNewest === undefined) {
+        if (remoteNewest === undefined) throw new ScheduleError("verify_failed", "ingen sett i off-site-målet å verifisere");
+        return remoteNewest;
+      }
+      if (remoteNewest === localNewest.name) return remoteNewest;
+      if (!plausible.includes(localNewest.name)) {
+        throw new ScheduleError("verify_failed", `det nyeste lokale settet (${localNewest.name}) finnes ikke i off-site-målet - kopien er ikke à jour, så et eldre fjernt sett verifiseres ikke i stedet`);
+      }
+      throw new ScheduleError("verify_failed", `off-site-målet har nyere sett (${remoteNewest}) enn det nyeste lokale (${localNewest.name}) - uventet (annen vert, klokkeavvik eller et plantet navn): ingenting verifiseres`);
+    }
+
+    async function verifyStage(st) {
       const v = st.restore_verify;
       v.last_attempt_at = iso(now());
       v.reported_by = "local";
@@ -551,6 +811,7 @@ export async function runTick(config, deps, env = process.env) {
       let tmpRoot = null;
       let fetchSeconds = null;
       let setName = null;
+      stage = "verify";
       try {
         if (config.verifyError !== null) throw new ScheduleError("verify_config_invalid", config.verifyError);
         if (config.verify.identityFile === null || !existsSync(config.verify.identityFile)) throw new ScheduleError("verify_config_invalid", "JARVIS_BACKUP_VERIFY_IDENTITY_FILE er ikke satt eller peker på en fil som ikke finnes");
@@ -558,9 +819,7 @@ export async function runTick(config, deps, env = process.env) {
         let setDir;
         if (config.verify.source === "offsite") {
           if (!sinkPresent) throw new ScheduleError("verify_config_invalid", "kilde off-site krever en off-site-adapter");
-          const names = await deps.sink.list();
-          const name = names.at(-1);
-          if (name === undefined) throw new ScheduleError("verify_failed", "ingen sett i off-site-målet å verifisere");
+          const name = await chooseOffsiteSet();
           mkdirSync(config.out, { recursive: true, mode: 0o700 });
           tmpRoot = mkdtempSync(join(config.out, ".verify-tmp-"));
           setDir = join(tmpRoot, name);
@@ -584,26 +843,22 @@ export async function runTick(config, deps, env = process.env) {
         v.last_set = setName;
         v.tables = outcome.tables;
         v.rows = outcome.rows;
-        if (!outcome.ok) throw new ScheduleError(outcome.code ?? "verify_failed", "restore-verifisering avdekket avvik (se rapporten fra verktøyet)");
+        if (!outcome.ok) throw new ScheduleError(outcome.code ?? "verify_failed", outcome.detail ?? "restore-verifisering avdekket avvik (se rapporten fra verktøyet)");
         v.state = "ok";
         v.last_success_at = iso(now());
+        v.last_success_set = setName;
         v.consecutive_failures = 0;
         v.retry_after = null;
         v.last_error_code = null;
         v.last_error = null;
         log("info", "verify_completed", { set: setName, duration_s: v.duration_s, tables: v.tables, rows: v.rows });
       } catch (err) {
-        v.state = "failed";
-        v.consecutive_failures += 1;
-        v.retry_after = iso(new Date(now().getTime() + retryDelayMs(v.consecutive_failures, Math.max(config.retryMs, VERIFY_MIN_RETRY_MS))));
-        v.last_error_code = ["verify_failed", "verify_timeout", "verify_integrity", "verify_mismatch", "verify_config_invalid"].includes(err?.code) ? err.code : "verify_failed";
-        v.last_error = deps.redact(err?.message ?? "verifisering feilet");
-        v.duration_s ??= Math.round((now().getTime() - t1) / 1000);
-        failures.push("verify");
-        log("error", "verify_failed", { code: v.last_error_code, consecutive_failures: v.consecutive_failures, error: v.last_error });
+        recordVerifyFailure(err, t1);
       } finally {
+        stage = "other";
         if (tmpRoot !== null) rmSync(tmpRoot, { recursive: true, force: true });
       }
+      if (guard.abandoned) return;
       // `last_attempt_at` = FERDIG-tidspunktet: da flettes ikke vår egen kvittering tilbake som «ekstern» (mergePeerVerifyReport tar kun NYERE rapporter).
       const finishedAt = iso(now());
       v.last_attempt_at = finishedAt;
