@@ -103,8 +103,8 @@ describe("Q-51 D: skyturen sendes uten de enkelte følsomme meldingene (og paren
     // Vinduet (de fire siste av 10 rader) = [CLEAN_Q, CLEAN_A, «Lønnen min kom i dag», PR_ASK]: halen starter ved «Lønnen …»; det eldre paret er borte fordi det er følsomt.
     expect(messagesOf(t.captured[0])).toEqual(["hva heter bilen til naboen", "Det vet jeg ikke.", "hva er klokka", "Den er ti.", CLEAN_Q.content, CLEAN_A.content, PR_ASK]);
     expect(JSON.stringify(t.captured[0])).not.toMatch(/45 000|Lønnen|saldoen/i);
-    // Merknaden teller det skyvarianten tok bort utover D-384 (selve den eldre følsomme meldingen er allerede borte): paret «Du har 45 000 igjen.» + «Lønnen min kom i dag».
-    expect(result.reply).toContain("uten 2 tidligere meldinger");
+    // Merknaden teller det skyvarianten tok bort utover D-384. Det eldre paret (spørsmålet OG «Du har 45 000 igjen.») er allerede borte etter D-384-banen (parregelen gjelder der også, review nr. 2), så varianten tar bare «Lønnen min kom i dag».
+    expect(result.reply).toMatch(/uten 1 tidligere melding/);
   });
 
   it("skyen nede (tidsavbrudd) før noe er utført → lokal reserve får HELE historikken og den strenge sensitiviteten, aldri skymodellens navn, og ingen «uten meldinger»-merknad", async () => {
@@ -567,3 +567,51 @@ describe("WP-A-gjennomgangen: rutemerknader følger heller ikke med til minneutt
     expect(JSON.stringify(turns)).not.toContain("Svart på den lokale modellen");
   });
 });
+
+describe("gjennomgang nr. 2 av WP-A (D-451): funn 1, 3 og 4", () => {
+  it("funn 1: et ELDRE følsomt spørsmål tar svaret rett etter seg ut av skyturen, også når turen ikke er låst og svaret ligger i det nylige vinduet (D-384-banen)", async () => {
+    capture();
+    const prior: Row[] = [CLEAN_Q, CLEAN_A, FIN_Q, { role: "assistant", content: "Du har 45 000 igjen." }, { role: "user", content: "hva er klokka" }, { role: "assistant", content: "Den er ti." }, { role: "user", content: "og været i morgen?" }];
+    const t = build({ prior });
+    await t.engine.handle(base, PR_ASK);
+    const call = t.captured[0]!;
+    expect(call.providerPreference).toEqual(["anthropic"]);
+    expect(call.sensitivity).not.toBe("SECRET_RESTRICTED");
+    expect(messagesOf(call)).toEqual([CLEAN_Q.content, CLEAN_A.content, "hva er klokka", "Den er ti.", "og været i morgen?", PR_ASK]);
+    expect(JSON.stringify(call)).not.toMatch(/45 000|saldo/i);
+  });
+
+  it("funn 3: en tilfeldig økt-ID i kildemarkøren («[kilde: conversation:sess-<uuid>]») med 12 siffer i siste gruppe gir ikke falsk økonomi-treff og låser ikke turen lokalt", async () => {
+    capture();
+    const block = "Det du vet om Tobias:\n- [du sa · 2026-10-01 10:00] «Han liker ski» [kilde: conversation:sess-12345678-1234-4234-8234-123456789012]";
+    const t = build({ meta: { text: block, spaces: ["personal"], sensitivities: ["normal"] } });
+    await t.engine.handle(base, PR_ASK);
+    expect(t.captured[0]!.sensitivity).not.toBe("SECRET_RESTRICTED");
+    expect(t.captured[0]!.providerPreference).toEqual(["anthropic"]);
+  });
+
+  it("funn 3 (motprøve): et kontonummer-lignende tall i SELVE minneinnholdet fanges fortsatt og holder turen lokal", async () => {
+    capture();
+    const block = "Det du vet om Tobias:\n- [du sa · 2026-10-01 10:00] «Kontoen er 1234 56 78901» [kilde: conversation:sess-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee]";
+    const t = build({ meta: { text: block, spaces: ["personal"], sensitivities: ["normal"] } });
+    await t.engine.handle(base, PR_ASK);
+    expect(t.captured[0]!.sensitivity).toBe("SECRET_RESTRICTED");
+    expect(t.captured[0]!.providerPreference).toEqual(LOCAL);
+  });
+
+  it("funn 4: D-380-fallbacken (svar uten verktøy) bruker en systemprompt UTEN verktøykatalogen og sier ærlig at verktøy ikke er tilgjengelige; første forsøk (med verktøy) har katalogen", async () => {
+    capture();
+    const t = build({ failFirstWith: new ProviderError("gemma_local", "bad_request", "registry.ollama.ai/library/gemma3:4b does not support tools") });
+    const result = await t.engine.handle(base, "hva synes du om hytta vår");
+    expect(result.reply).toBe("svar");
+    expect(t.captured[0]!.request.system).toContain("Tjenester du kan bruke");
+    expect(t.plainCalls).toHaveLength(1);
+    const system = t.plainCalls[0]!.request.system ?? "";
+    expect(system).not.toContain("Tjenester du kan bruke");
+    expect(system).not.toContain("kall verktøyet med en gang");
+    expect(system).toContain("Verktøy er IKKE tilgjengelige i dette svaret");
+    // Samme rute som før: ingen ny preferanse og ingen skymodell for en lokal avvisning.
+    expect(t.plainCalls[0]!.providerPreference).toEqual(t.captured[0]!.providerPreference);
+  });
+});
+

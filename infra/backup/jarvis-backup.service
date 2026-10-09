@@ -1,0 +1,30 @@
+# Planlagt backup-tikk (WP-C2) som systemd-tjeneste - EKSEMPEL, ikke verifisert på NAS-en.
+# Installer (som root):
+#   cp infra/backup/jarvis-backup.service infra/backup/jarvis-backup.timer /etc/systemd/system/
+#   # rediger User=, WorkingDirectory=, ExecStart= og ReadWritePaths= under
+#   systemctl daemon-reload && systemctl enable --now jarvis-backup.timer
+#   systemctl list-timers jarvis-backup.timer          # neste kjøring
+#   journalctl -u jarvis-backup.service -n 50          # logg (strukturerte JSON-linjer, aldri hemmeligheter)
+# Tjenesten leser .env og ~/.jarvis-backup-recipient selv (ops/backup/nas-schedule.sh) - legg IKKE hemmeligheter i unit-filen.
+[Unit]
+Description=Jarvis planlagt backup-tikk (tar backup / off-site / restore-verifisering kun når forfalt)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=jarvis
+WorkingDirectory=/volume1/jarvisbuild-data/jarvisbuild
+Environment=HOME=/home/jarvis
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/volume1/jarvisbuild-data/jarvisbuild/ops/backup/nas-schedule.sh /volume1/jarvisbuild-data/backups/encrypted
+# En backup av en stor database kan ta lang tid; selve låsen i schedule.mjs hindrer overlapp, og JARVIS_BACKUP_MAX_RUN_MINUTES stopper en hengt backup.
+TimeoutStartSec=6h
+Nice=10
+IOSchedulingClass=idle
+# Herding (forslag). Fjern ProtectSystem/ReadWritePaths hvis docker-CLI-en eller en off-site-adapter trenger mer enn dette.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/volume1/jarvisbuild-data/backups
+ProtectHome=read-only
