@@ -331,13 +331,14 @@ describe("WP-C2 tick: planlagt backup (falsk backup/klokke, ekte filsystem)", ()
     expect(h.hb).toEqual([]);
   });
 
-  it("retensjon: gamle sett fjernes, det nyeste beholdes; hoppes over når kjeden er stille (gamle sett er alt vi har)", async () => {
+  it("retensjon: gamle sett fjernes, de 7 nyeste beholdes uansett alder; hoppes over når kjeden er stille (gamle sett er alt vi har)", async () => {
     const h = harness();
     for (const d of [40, 35, 10]) makeSet(h.out, new Date(T0.getTime() - d * D));
+    for (const d of [8, 7, 6, 5, 4, 3, 2]) makeSet(h.out, new Date(T0.getTime() - d * D));
     makeSet(h.out, hoursAgo(T0, 1));
     const r = await h.tick();
     expect(r.actions).toEqual([]);
-    expect(listCompleteSets(h.out).map((s) => s.name.slice(14, 22))).toEqual(["20260929", "20261009"]);
+    expect(listCompleteSets(h.out).map((s) => s.name.slice(14, 22))).toEqual(["20260929", "20261001", "20261002", "20261003", "20261004", "20261005", "20261006", "20261007", "20261009"]);
     expect(h.status().retention).toMatchObject({ last_pruned_count: 2, last_skipped_reason: null });
 
     const stale = harness();
@@ -837,6 +838,156 @@ describe("WP-C2 tick (review F4): vaktbikkja og hengt kjede - ETT tikk holder al
     const long = harness({ env: { JARVIS_BACKUP_INTERVAL_HOURS: "168" } });
     writeFileSync(long.config.lockFile, `${JSON.stringify({ token: "annen", pid: process.pid, host: hostname(), started_at: new Date(T0.getTime() - 10 * D).toISOString() })}\n`);
     expect(await long.tick()).toMatchObject({ outcome: "skipped_lock_held" });
+  });
+});
+
+describe("WP-C2 tick (review F7): retensjon beskytter siste verifiserte og off-site-bekreftede sett, pauser ved feil og har tak per tikk", () => {
+  const mk = (days) => ({ name: `s${days}`, dir: `/x/s${days}`, createdMs: T0.getTime() - days * D });
+  const names = (list) => list.map((x) => x.name);
+  /** `n` daglige sett, det nyeste 2 t gammelt (ferskt nok til at backup ikke er forfalt). */
+  const manySets = (h, n) => {
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(makeSet(h.out, new Date(T0.getTime() - (2 / 24 + i) * D)));
+    return out; // [0] = nyeste
+  };
+  const withStatus = (h, mutate) => {
+    const st = emptyStatus();
+    mutate(st);
+    writeFileSync(h.config.statusFile, JSON.stringify(st));
+  };
+
+  it("setsToPrune: de N nyeste og de beskyttede beholdes; grensen er STRENGT eldre enn retainDays (mutant R8: ±1 dag/±1 ms)", () => {
+    const sets = [50, 45, 40, 35, 31, 29, 10, 5, 1].map(mk);
+    expect(names(setsToPrune(sets, 30, T0.getTime()))).toEqual(["s50", "s45", "s40", "s35", "s31"]);
+    expect(names(setsToPrune(sets, 30, T0.getTime(), { keepNewest: 7 }))).toEqual(["s50", "s45"]);
+    expect(names(setsToPrune(sets, 30, T0.getTime(), { protect: ["s45", "s31", null, "finnes-ikke"] }))).toEqual(["s50", "s40", "s35"]);
+    expect(names(setsToPrune(sets, 30, T0.getTime(), { keepNewest: 0 }))).toEqual(["s50", "s45", "s40", "s35", "s31"]); // minst det nyeste, også med 0
+    expect(setsToPrune(sets, 30, T0.getTime(), { keepNewest: 99 })).toEqual([]);
+    // grensen: nøyaktig 30 døgn gammelt beholdes, 1 ms eldre fjernes; 1 døgn feil i hver retning
+    const older = { name: "eldre", dir: "/x/eldre", createdMs: T0.getTime() - 30 * D - 1 };
+    const exact = { name: "noyaktig", dir: "/x/noyaktig", createdMs: T0.getTime() - 30 * D };
+    const newer = { name: "nyere", dir: "/x/nyere", createdMs: T0.getTime() - 29 * D };
+    expect(names(setsToPrune([older, exact, newer, mk(0)], 30, T0.getTime()))).toEqual(["eldre"]);
+    expect(names(setsToPrune([older, exact, newer, mk(0)], 31, T0.getTime()))).toEqual([]); // +1 døgn i retensjon: ingenting er gammelt nok
+    expect(names(setsToPrune([older, exact, newer, mk(0)], 29, T0.getTime()))).toEqual(["eldre", "noyaktig"]); // -1 døgn: også det nøyaktige er gammelt nok
+  });
+
+  it("46 sett og off-site som har feilet 99 ganger: INGENTING slettes (pause `offsite_failing`) - tidligere gikk 16 sett, inkludert det siste verifiserte", async () => {
+    const sink = fakeSink();
+    const h = harness({ sink, flags: { roles: "backup,offsite" } });
+    manySets(h, 46);
+    withStatus(h, (st) => {
+      Object.assign(st.offsite, { state: "failed", adapter: "local", consecutive_failures: 99, retry_after: new Date(T0.getTime() + 3 * H).toISOString(), last_error_code: "offsite_failed" });
+    });
+    const r = await h.tick();
+    expect(r.actions).toEqual([]);
+    expect(listCompleteSets(h.out)).toHaveLength(46);
+    expect(h.status().retention).toMatchObject({ last_skipped_reason: "offsite_failing", last_pruned_count: 0 });
+    expect(h.status().offsite).toMatchObject({ state: "failed", consecutive_failures: 99 });
+  });
+
+  it("restore-verifisering som har feilet: ingen sletting (pause `verify_failing`), også når feilen er meldt av en ekstern verifiserer", async () => {
+    const h = harness({ identity: true });
+    manySets(h, 46);
+    withStatus(h, (st) => {
+      Object.assign(st.restore_verify, { state: "failed", last_attempt_at: new Date(T0.getTime() - H).toISOString(), retry_after: new Date(T0.getTime() + 5 * H).toISOString(), last_error_code: "verify_mismatch", consecutive_failures: 2 });
+    });
+    await h.tick();
+    expect(listCompleteSets(h.out)).toHaveLength(46);
+    expect(h.status().retention.last_skipped_reason).toBe("verify_failing");
+  });
+
+  it("frisk kjede: siste verifiserte og siste off-site-bekreftede sett er beskyttet uansett alder, de 7 nyeste beholdes, og høyst 3 slettes per tikk (eldste først) med en advarsel", async () => {
+    const h = harness();
+    const sets = manySets(h, 46);
+    const verified = sets[40]; // 40 døgn gammelt: utenfor retensjonen, men det siste beviset på at en restore virker
+    const confirmed = sets[35];
+    withStatus(h, (st) => {
+      Object.assign(st.restore_verify, { state: "ok", last_attempt_at: new Date(T0.getTime() - D).toISOString(), last_success_at: new Date(T0.getTime() - D).toISOString(), last_success_set: verified.name, last_set: sets[0].name });
+      Object.assign(st.offsite, { state: "ok", last_set: confirmed.name, last_success_at: new Date(T0.getTime() - D).toISOString() });
+    });
+    await h.tick();
+    // kandidater: sett eldre enn 30 d (i = 30..45, 16 stk) minus de to beskyttede = 14; høyst 3 av dem, de eldste
+    expect(listCompleteSets(h.out).map((x) => x.name)).not.toContain(sets[45].name);
+    expect(listCompleteSets(h.out)).toHaveLength(43);
+    expect(h.status().retention).toMatchObject({ last_pruned_count: 3, last_skipped_reason: null });
+    expect(h.logs).toContainEqual(expect.objectContaining({ level: "warn", event: "retention_prune_capped", candidates: 14, pruned_now: 3, cap: 3 }));
+    // flere tikk: resten (14 totalt) går gradvis, de to beskyttede og alt innenfor retensjonen står
+    for (let i = 0; i < 6; i++) {
+      h.advance(15 * 60_000);
+      await h.tick();
+    }
+    const left = new Set(listCompleteSets(h.out).map((x) => x.name));
+    expect(left.size).toBe(46 - 14);
+    expect(left.has(verified.name) && left.has(confirmed.name)).toBe(true);
+    for (let i = 0; i < 30; i++) expect(left.has(sets[i].name), `sett ${i} d`).toBe(true);
+    for (const i of [30, 31, 32, 33, 34, 36, 37, 38, 39, 41, 42, 43, 44, 45]) expect(left.has(sets[i].name), `sett ${i} d`).toBe(false);
+  });
+
+  it("retensjonsdøgn satt til 1 beholder likevel de 7 nyeste (en feilkonfigurasjon eller klokkefeil tømmer ikke mappen)", async () => {
+    const h = harness({ env: { JARVIS_BACKUP_RETAIN_DAYS: "1" } });
+    const sets = manySets(h, 20);
+    for (let i = 0; i < 8; i++) {
+      await h.tick();
+      h.advance(15 * 60_000);
+    }
+    const left = listCompleteSets(h.out).map((x) => x.name);
+    expect(left).toEqual(sets.slice(0, 7).map((x) => x.name).reverse());
+  });
+
+  it("klokken hopper 20 døgn frem: retensjonen HOLDES i minst et døgn (ingen sletting) i stedet for å tømme mappen på 15 minutter; deretter gradvis", async () => {
+    const h = harness();
+    const sets = [];
+    for (let i = 1; i <= 29; i++) sets.push(makeSet(h.out, new Date(T0.getTime() - i * D)));
+    withStatus(h, (st) => {
+      st.last_tick_at = T0.toISOString(); // forrige tikk, før hoppet
+    });
+    h.set(new Date(T0.getTime() + 20 * D));
+    const first = await h.tick();
+    expect(first.actions).toEqual(["backup"]); // nyeste sett er nå 21 d gammelt: backup tas
+    expect(listCompleteSets(h.out)).toHaveLength(30);
+    expect(h.status().retention).toMatchObject({ last_skipped_reason: "time_gap_hold", hold_until: new Date(T0.getTime() + 21 * D).toISOString() });
+    expect(h.logs).toContainEqual(expect.objectContaining({ level: "warn", event: "tick_gap_retention_hold", gap_hours: 480, hold_hours: 24 }));
+    h.advance(15 * 60_000);
+    await h.tick();
+    expect(listCompleteSets(h.out)).toHaveLength(30);
+    h.advance(25 * H); // holdet har utløpt, og klokken har stått feil lenge nok til at det er den nye virkeligheten
+    await h.tick();
+    expect(h.status().retention.last_skipped_reason).toBeNull();
+    expect(listCompleteSets(h.out).length).toBeLessThan(31); // pruning pågår igjen (høyst 3 per tikk), ikke alt på én gang
+    expect(listCompleteSets(h.out).length).toBeGreaterThan(26);
+    expect(sets.length).toBe(29);
+  });
+
+  it("en hold_until langt frem i tid (redigert/korrupt statusfil) forkastes: pruning blokkeres ikke for alltid", async () => {
+    const h = harness();
+    manySets(h, 40);
+    withStatus(h, (st) => {
+      st.retention.hold_until = "2099-01-01T00:00:00.000Z";
+    });
+    await h.tick();
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "status_timestamps_in_future_dropped", fields: expect.arrayContaining(["retention.hold_until"]) }));
+    expect(h.status().retention.last_skipped_reason).toBeNull();
+    expect(listCompleteSets(h.out).length).toBeLessThan(40);
+  });
+
+  it("mutant R7: uten backup-rollen (verifisering/off-site på en annen maskin eller en drill-mappe) slettes ALDRI sett, uansett alder", async () => {
+    for (const flags of [{ roles: "verify" }, { roles: "offsite" }, { roles: "verify,offsite" }]) {
+      const h = harness({ identity: true, sink: fakeSink(), flags });
+      const old = [];
+      for (const d of [90, 60, 45, 40]) old.push(makeSet(h.out, new Date(T0.getTime() - d * D)));
+      manySets(h, 10);
+      await h.tick();
+      const left = new Set(listCompleteSets(h.out).map((x) => x.name));
+      for (const o of old) expect(left.has(o.name), `${flags.roles}: ${o.name}`).toBe(true);
+      expect(h.status().retention).toMatchObject({ last_pruned_at: null, last_pruned_count: 0 });
+    }
+    // motstykket: med backup-rollen slettes de gamle
+    const h = harness();
+    for (const d of [90, 60]) makeSet(h.out, new Date(T0.getTime() - d * D));
+    manySets(h, 10);
+    await h.tick();
+    expect(listCompleteSets(h.out)).toHaveLength(10);
   });
 });
 

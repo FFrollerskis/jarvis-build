@@ -27,6 +27,13 @@ export const EXIT = Object.freeze({ OK: 0, USAGE: 1, BACKUP_FAILED: 2, OVERDUE: 
 export const OVERDUE_FACTOR = 1.5;
 export const MAX_OFFSITE_SETS_PER_TICK = 3;
 export const ORPHAN_MAX_AGE_MS = 12 * 3_600_000;
+/** Retensjon (review F7): de N nyeste settene beholdes ALLTID, og høyst så mange slettes per tikk. */
+export const RETENTION_MIN_KEEP = 7;
+export const RETENTION_MAX_PRUNE_PER_TICK = 3;
+/** Et tikk-gap lengre enn dette (2 × intervall, minst 12 t) regnes som en tidsdiskontinuitet (NAS av, klokke hoppet): retensjonen holdes da i minst et døgn. */
+const RETENTION_GAP_FACTOR = 2;
+const RETENTION_GAP_MIN_MS = 12 * 3_600_000;
+const RETENTION_HOLD_MIN_MS = 24 * 3_600_000;
 const VERIFY_MIN_RETRY_MS = 6 * 3_600_000;
 /** Tikk-budsjett når konfigen ikke oppgir et (tester som bygger config for hånd): lengre enn noe legitimt tikk, men endelig. */
 const DEFAULT_TICK_BUDGET_MS = 10 * 3_600_000;
@@ -88,9 +95,9 @@ export function dropFutureTimestamps(status, nowMs) {
   const sections = { backup: status.backup, retention: status.retention, offsite: status.offsite, restore_verify: status.restore_verify, heartbeat: status.heartbeat };
   for (const [section, obj] of Object.entries(sections)) {
     for (const [key, value] of Object.entries(obj)) {
-      if (typeof value !== "string" || !(key.endsWith("_at") || key === "retry_after")) continue;
+      if (typeof value !== "string" || !(key.endsWith("_at") || key === "retry_after" || key === "hold_until")) continue;
       const t = Date.parse(value);
-      const limit = key === "retry_after" ? nowMs + 24 * 3_600_000 : nowMs + FUTURE_SKEW_MS;
+      const limit = key === "retry_after" ? nowMs + 24 * 3_600_000 : key === "hold_until" ? nowMs + 7 * 24 * 3_600_000 : nowMs + FUTURE_SKEW_MS;
       if (Number.isFinite(t) && t > limit) {
         obj[key] = null;
         dropped.push(`${section}.${key}`);
@@ -116,10 +123,15 @@ export function findOrphanSets(outDir, nowMs, maxAgeMs = ORPHAN_MAX_AGE_MS) {
   return orphans;
 }
 
-/** Retensjon: komplette sett eldre enn `retainDays`, men ALLTID det nyeste. */
-export function setsToPrune(sets, retainDays, nowMs) {
+/**
+ * Retensjon: komplette sett STRENGT eldre enn `retainDays`, men aldri de `keepNewest` nyeste (minst 1) og aldri de navngitte i `protect` (siste verifiserte og siste off-site-bekreftede sett:
+ * de er det eneste beviset på at en restore faktisk virker / at kopien finnes utenfor huset). Settene er sortert eldste først; resultatet også.
+ */
+export function setsToPrune(sets, retainDays, nowMs, { keepNewest = 1, protect = [] } = {}) {
   const cutoff = nowMs - retainDays * 86_400_000;
-  return sets.slice(0, -1).filter((s) => s.createdMs < cutoff);
+  const keep = new Set(sets.slice(Math.max(0, sets.length - Math.max(1, keepNewest))).map((s) => s.name));
+  for (const name of protect) if (typeof name === "string") keep.add(name);
+  return sets.filter((s) => !keep.has(s.name) && s.createdMs < cutoff);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------
@@ -359,6 +371,15 @@ export async function runTick(config, deps, env = process.env) {
     const dropped = dropFutureTimestamps(status, startedMs);
     if (dropped.length > 0) log("warn", "status_timestamps_in_future_dropped", { fields: dropped, note: "klokkeavvik? tidsstempler fremover i tid ble forkastet" });
     for (const name of findFutureSets(config.out, startedMs)) log("warn", "set_dated_in_future", { set: name, note: "teller ikke som nyeste sett (klokkeavvik ved backup-tidspunktet?)" });
+    // Review F7: et langt gap siden forrige tikk (NAS av, eller klokken hoppet fremover) får alle sett til å se «gamle» ut på én gang. Retensjonen holdes da i minst et døgn,
+    // så en feil klokke kan rettes (NTP) før noe slettes - et tak per tikk alene stopper det ikke på 15 minutter.
+    const previousTickMs = msOf(status.last_tick_at);
+    const gapMs = Number.isFinite(previousTickMs) ? startedMs - previousTickMs : 0;
+    if (gapMs > Math.max(RETENTION_GAP_FACTOR * config.intervalMs, RETENTION_GAP_MIN_MS)) {
+      const holdMs = Math.max(config.intervalMs, RETENTION_HOLD_MIN_MS);
+      status.retention.hold_until = iso(new Date(startedMs + holdMs));
+      log("warn", "tick_gap_retention_hold", { gap_hours: Math.round((gapMs / 3_600_000) * 10) / 10, hold_hours: Math.round(holdMs / 3_600_000), note: "langt gap siden forrige tikk (NAS av eller klokkehopp?): ingen sletting av gamle sett før holdet utløper" });
+    }
     status.created_at ??= iso(t0);
     status.last_tick_at = iso(t0);
     let storeFailed = false;
@@ -526,24 +547,44 @@ export async function runTick(config, deps, env = process.env) {
 
     function retention() {
       if (guard.abandoned) return;
+      const nowMs2 = now().getTime();
       const sets2 = readSets();
       const newest2 = sets2.at(-1) ?? null;
-      const orphans = findOrphanSets(config.out, now().getTime());
+      const orphans = findOrphanSets(config.out, nowMs2);
       for (const dir of orphans) {
         deps.remove(dir);
         log("warn", "orphan_set_removed", { set: dir.split(/[\\/]/).at(-1) ?? "" });
       }
+      const r = status.retention;
       // Ingen sletting mens kjeden er stille: gamle sett er det eneste vi har hvis backupene har sluttet å komme.
-      if (newest2 === null || now().getTime() - newest2.createdMs > 2 * config.intervalMs) {
-        status.retention.last_skipped_reason = "pipeline_stale";
+      if (newest2 === null || nowMs2 - newest2.createdMs > 2 * config.intervalMs) {
+        r.last_skipped_reason = "pipeline_stale";
         return;
       }
-      const prune = setsToPrune(sets2, config.retainDays, now().getTime());
+      // Review F7: heller for mange sett enn for få. Slett ingenting mens off-site eller restore-verifisering feiler (da er de lokale settene det eneste bevisste sikkerhetsnettet),
+      // eller mens en tidsdiskontinuitet gjør at alt ser gammelt ut.
+      if (r.hold_until !== null && nowMs2 < msOf(r.hold_until)) {
+        r.last_skipped_reason = "time_gap_hold";
+        return;
+      }
+      if (status.offsite.state === "failed") {
+        r.last_skipped_reason = "offsite_failing";
+        return;
+      }
+      if (status.restore_verify.state === "failed") {
+        r.last_skipped_reason = "verify_failing";
+        return;
+      }
+      const candidates = setsToPrune(sets2, config.retainDays, nowMs2, { keepNewest: RETENTION_MIN_KEEP, protect: [status.restore_verify.last_success_set, status.offsite.last_set] });
+      const prune = candidates.slice(0, RETENTION_MAX_PRUNE_PER_TICK); // eldste først
       for (const s of prune) deps.remove(s.dir);
-      status.retention.last_skipped_reason = null;
+      r.last_skipped_reason = null;
+      if (candidates.length > prune.length) {
+        log("warn", "retention_prune_capped", { candidates: candidates.length, pruned_now: prune.length, cap: RETENTION_MAX_PRUNE_PER_TICK, note: "mange sett er eldre enn retensjonen (klokkeavvik? nylig senket JARVIS_BACKUP_RETAIN_DAYS?) - resten slettes gradvis" });
+      }
       if (prune.length > 0) {
-        status.retention.last_pruned_at = iso(now());
-        status.retention.last_pruned_count = prune.length;
+        r.last_pruned_at = iso(now());
+        r.last_pruned_count = prune.length;
         log("info", "retention_pruned", { count: prune.length, sets: prune.map((s) => s.name) });
       }
     }
@@ -675,6 +716,7 @@ export async function runTick(config, deps, env = process.env) {
         if (!outcome.ok) throw new ScheduleError(outcome.code ?? "verify_failed", outcome.detail ?? "restore-verifisering avdekket avvik (se rapporten fra verktøyet)");
         v.state = "ok";
         v.last_success_at = iso(now());
+        v.last_success_set = setName;
         v.consecutive_failures = 0;
         v.retry_after = null;
         v.last_error_code = null;
