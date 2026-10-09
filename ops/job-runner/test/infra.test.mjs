@@ -88,7 +88,16 @@ describe("A: systemd-enhetene - herding og minste-privilegium", () => {
     expect(one(runner, "Service", "ReadWritePaths").split(" ").sort()).toEqual(["/run/jarvis-job-runner", "/var/lib/jarvis-job-runner"]);
     expect(one(runner, "Service", "StateDirectoryMode")).toBe("0700");
     expect(one(runner, "Service", "RuntimeDirectoryMode")).toBe("0750");
-    expect(values(runner, "Unit", "Requires").join(" ")).toContain("docker.service");
+    expect(values(runner, "Unit", "Requires").join(" ").split(/\s+/).sort()).toEqual(["docker.service", "jarvis-egress-proxy.service"]);
+    expect(values(runner, "Unit", "After").join(" ")).toContain("jarvis-egress-proxy.service");
+    // proxyen er en HARD avhengighet (Requires, ikke Wants): feiler setup-network.sh, starter ikke runneren uten brannmurreglene
+    expect(values(runner, "Unit", "Wants").join(" ")).not.toContain("jarvis-egress-proxy");
+  });
+
+  it("job-runner: reload = SIGHUP mot hovedprosessen (token roteres uten omstart; kjørende jobber berøres ikke)", async () => {
+    expect(one(runner, "Service", "ExecReload")).toBe("/bin/kill -HUP $MAINPID");
+    const server = await read("ops/job-runner/server.mjs");
+    expect(server).toMatch(/process\.on\("SIGHUP"/);
   });
 
   it("egress-proxy: INGEN docker-gruppe, ingen skrivbare stier, egen bruker; nettverksoppsett kjøres som root via «+»-prefikset", () => {

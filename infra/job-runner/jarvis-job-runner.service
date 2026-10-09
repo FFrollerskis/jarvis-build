@@ -8,8 +8,10 @@
 Description=Jarvis job-runner (vertsside kodejobb-containere, WP-C1)
 Documentation=https://github.com/tsworkflow/jarvisbuild/blob/main/docs/runbooks/JOB_RUNNER.md
 After=network-online.target docker.service jarvis-egress-proxy.service
-Wants=network-online.target jarvis-egress-proxy.service
-Requires=docker.service
+Wants=network-online.target
+# Hard avhengighet av proxyen: dens ExecStartPre (setup-network.sh) oppretter jobbnettverket OG brannmurreglene. Feiler den, starter runneren IKKE
+# (ellers kunne jobber kjøre mot et nett uten INPUT-reglene som holder containerne unna vertstjenestene).
+Requires=docker.service jarvis-egress-proxy.service
 ConditionPathExists=/etc/jarvis/job-runner.json
 
 [Service]
@@ -24,6 +26,8 @@ ExecStart=/usr/bin/env node /opt/jarvis-job-runner/ops/job-runner/server.mjs
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=90
+# `systemctl reload jarvis-job-runner` = SIGHUP: leser bearer-tokenet på nytt uten omstart (kjørende jobber berøres ikke). Konfigfilen leses kun ved start.
+ExecReload=/bin/kill -HUP $MAINPID
 # /run/jarvis-job-runner (socket) og /var/lib/jarvis-job-runner (jobbkataloger) eies av tjenestebrukeren.
 RuntimeDirectory=jarvis-job-runner
 RuntimeDirectoryMode=0750
