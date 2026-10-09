@@ -9,13 +9,16 @@
 #   --with-restart      sender SIGKILL til jarvis-job-runner og restarter (krever root): bevis for reclaim etter krasj (D-32 port 12).
 #   --with-ttl          venter til en jobb passerer runner.max_job_lifetime_s (bør være lav, f.eks. 60) og ser at den fjernes av TTL-rydderen.
 #   --dry-run           skriver kun sjekklisten (ingen docker, ingen nettverk).
+#   ACCEPTANCE_GIT_TOKEN_FILE  PÅKREVD hvis ACCEPTANCE_REPO står som `source: request` i runner.git_credentials (kortlevd token fra worker, WP-C3), og FORBUDT ellers:
+#                       en fil (0600/0400, kun deg) med ETT repo-scopet token (ghs_/ghp_/github_pat_) for sandbox-repoet. Lag det rett før kjøringen (et installasjonstoken
+#                       varer 1 time). Sendes som `git_token` ved hver klone og publish via en 0600 body-fil (aldri i argv). Slett filen etterpå.
 #   Valgfritt: GH_TOKEN (kun LES av sandbox-repoet) for å verifisere den pushede branchen via GitHub API; ACCEPT_LIVE_CLAUDE=1 + ANTHROPIC_API_KEY
 #   for en liten ekte Claude Code-kjøring (beviser containeren -> proxy -> api.anthropic.com); JARVIS_JOB_RUNNER_CONFIG (standard /etc/jarvis/job-runner.json);
 #   ACCEPTANCE_OUT_DIR (standard ops/acceptance/out, git-ignorert).
 #
 # Krever: bash, curl (>= 7.55), node (>= 22), docker. Brukeren må kunne lese tokenfilen og skrive til socketen (gruppen jarvis-job-clients) og bruke docker (root eller
-# docker-gruppen). Skriver ALDRI hemmeligheter (token-verdier, PAT-innhold, API-nøkler): bearer-tokenet sendes via en 0600-headerfil (aldri i argv), og
-# kun modus/eier/navn/statuskoder rapporteres. Exit 1 hvis minst én sjekk er FAIL; SKIP/MANUELL er IKKE bestått.
+# docker-gruppen). Skriver ALDRI hemmeligheter (token-verdier, PAT-innhold, API-nøkler): bearer-tokenet sendes via en 0600-headerfil og JSON-bodyer (som kan inneholde
+# API-nøkkelen eller git-tokenet) via en 0600-fil - aldri i argv -, og kun modus/eier/navn/statuskoder rapporteres. Exit 1 hvis minst én sjekk er FAIL; SKIP/MANUELL er IKKE bestått.
 # Ærlighet: PASS betyr kun at DENNE målingen var som forventet akkurat nå, på akkurat denne verten.
 set -uo pipefail
 
@@ -26,6 +29,8 @@ OUT_DIR="${ACCEPTANCE_OUT_DIR:-$ROOT/ops/acceptance/out}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT_FILE="$OUT_DIR/job-runner-acceptance-$STAMP.md"
 REPO="${ACCEPTANCE_REPO:-}"
+GIT_TOKEN_FILE="${ACCEPTANCE_GIT_TOKEN_FILE:-}"   # kun for repoer med `source: request`
+REPO_MODE=file                                    # file | request (settes av main() fra policyen)
 WITH_RESTART=0; WITH_TTL=0; DRY=0
 PASS=0; FAIL=0; SKIP=0; MANUAL=0
 ROWS=()
@@ -73,18 +78,39 @@ record() { # id status detail
 # Leser én nøkkel (punktum-sti) fra JSON på stdin. Tom streng hvis den mangler.
 jget() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{let v=JSON.parse(s);for(const k of process.argv[1].split(".")){v=v==null?undefined:v[k]}console.log(v===undefined?"":typeof v==="object"?JSON.stringify(v):String(v))}catch{console.log("")}})' "$1"; }
 
-# api METHOD PATH [JSON-BODY]  ->  $HTTP_CODE og $WORK/resp.json. Bearer-tokenet ligger i en 0600-headerfil (curl -H @fil), aldri i argv.
+# api METHOD PATH [JSON-BODY]  ->  $HTTP_CODE og $WORK/resp.json. Bearer-tokenet ligger i en 0600-headerfil (curl -H @fil), og bodyen (som kan inneholde
+# Anthropic-nøkkelen eller git-tokenet) i en 0600-fil (--data-binary @fil): ingen av dem står i argv (synlig for andre via ps/auditd). printf er en shell-innebygd.
 api() {
   local method="$1" path="$2" body="${3:-}"
   local args=(-sS --max-time "${API_MAX_TIME:-1200}" --unix-socket "$SOCKET" -X "$method" -H "@$WORK/auth.hdr" -o "$WORK/resp.json" -w '%{http_code}')
-  if [ -n "$body" ]; then args+=(-H 'Content-Type: application/json' --data-binary "$body"); fi
+  if [ -n "$body" ]; then
+    ( umask 077; printf '%s' "$body" > "$WORK/body.json" )
+    args+=(-H 'Content-Type: application/json' --data-binary "@$WORK/body.json")
+  fi
   HTTP_CODE="$(curl "${args[@]}" "http://localhost$path" 2>"$WORK/curl.err")" || HTTP_CODE="000"
 }
 resp_get() { jget "$1" < "$WORK/resp.json"; }
 
+# JSON-body for opprettelse. env-JSON (kan inneholde en API-nøkkel) går via miljøet til node, git-tokenet leses fra filen inne i node - ingen av dem i argv.
+create_body() { # [env-json]
+  ACCEPT_ENV_JSON="${1:-}" ACCEPT_TOKEN_FILE="$GIT_TOKEN_FILE" node -e '
+    const o = { repo: process.argv[1], task_id: "accept-" + process.argv[2] };
+    if (process.env.ACCEPT_ENV_JSON) o.env = JSON.parse(process.env.ACCEPT_ENV_JSON);
+    if (process.env.ACCEPT_TOKEN_FILE) o.git_token = require("fs").readFileSync(process.env.ACCEPT_TOKEN_FILE, "utf8").trim();
+    process.stdout.write(JSON.stringify(o));' "$REPO" "$STAMP"
+}
+
+# JSON-body for publish: {branch} (+ git_token fra filen for `source: request`-repoer; et FERSKT token leses for hver forespørsel)
+publish_body() { # branch
+  ACCEPT_TOKEN_FILE="$GIT_TOKEN_FILE" node -e '
+    const o = { branch: process.argv[1] };
+    if (process.env.ACCEPT_TOKEN_FILE) o.git_token = require("fs").readFileSync(process.env.ACCEPT_TOKEN_FILE, "utf8").trim();
+    process.stdout.write(JSON.stringify(o));' "$1"
+}
+
 create_job() { # [env-json]  ->  $JOB_ID, $CONTAINER (returnerer 1 ved feil)
   local body
-  body="$(node -e 'const o={repo:process.argv[1],task_id:"accept-"+process.argv[2]};if(process.argv[3])o.env=JSON.parse(process.argv[3]);process.stdout.write(JSON.stringify(o))' "$REPO" "$STAMP" "${1:-}")"
+  body="$(create_body "${1:-}")"
   api POST /v1/jobs "$body"
   if [ "$HTTP_CODE" != "201" ]; then JOB_ID=""; CONTAINER=""; return 1; fi
   JOB_ID="$(resp_get job_id)"
@@ -125,11 +151,12 @@ load_policy() {
     const r = c.runner || {}, p = c.egress_proxy || {};
     const out = [r.socket_path, r.token_file, r.network, r.image, r.user || "10001:10001", r.memory || "1g", r.cpus || "1.0", r.pids_limit || 256,
       r.base_dir || "/var/lib/jarvis-job-runner/jobs", p.listen_host || "", p.listen_port || 3128, r.max_job_lifetime_s || 3600,
-      (r.allowed_repos || []).join(","), Object.values(r.git_credentials || {}).map((x) => x.token_file).join(","), r.branch_prefix || "jarvis/", r.socket_group || ""];
+      (r.allowed_repos || []).join(","), Object.values(r.git_credentials || {}).map((x) => x.token_file).filter(Boolean).join(","), r.branch_prefix || "jarvis/", r.socket_group || "",
+      Object.entries(r.git_credentials || {}).filter(([, x]) => x.source === "request").map(([slug]) => slug).join(",")];
     console.log(out.map((v) => String(v)).join("\n"));
   ' "$CONFIG") || return 1
   SOCKET="${POL[0]}"; TOKEN_FILE="${POL[1]}"; NETWORK="${POL[2]}"; IMAGE="${POL[3]}"; USER_SPEC="${POL[4]}"; MEMORY="${POL[5]}"; CPUS="${POL[6]}"; PIDS="${POL[7]}"
-  BASE_DIR="${POL[8]}"; GATEWAY="${POL[9]}"; PROXY_PORT="${POL[10]}"; LIFETIME="${POL[11]}"; ALLOWED="${POL[12]}"; PAT_FILES="${POL[13]}"; PREFIX="${POL[14]}"; SOCKET_GROUP="${POL[15]}"
+  BASE_DIR="${POL[8]}"; GATEWAY="${POL[9]}"; PROXY_PORT="${POL[10]}"; LIFETIME="${POL[11]}"; ALLOWED="${POL[12]}"; PAT_FILES="${POL[13]}"; PREFIX="${POL[14]}"; SOCKET_GROUP="${POL[15]}"; REQUEST_REPOS="${POL[16]:-}"
   CONTAINER_UID="${USER_SPEC%%:*}"
 }
 
@@ -377,19 +404,19 @@ check_J11() {
   cexec 60000 sh -c "echo 'akseptanse $STAMP' > AKSEPTANSE.txt && git checkout -q -b '$branch' && git add -A && git commit -q -m 'jarvis: job-runner akseptanse $STAMP' && git rev-parse HEAD"
   local sha="${EXEC_OUT//[$'\n']/}"
   [ "$EXEC_CODE" = "0" ] || fails+=("commit i containeren feilet: $EXEC_ERR")
-  api POST "/v1/jobs/$JOB_ID/publish" "$(node -e 'process.stdout.write(JSON.stringify({branch:process.argv[1]}))' "$branch")"
+  api POST "/v1/jobs/$JOB_ID/publish" "$(publish_body "$branch")"
   if [ "$HTTP_CODE" = "200" ] && [ "$(resp_get commit_sha)" = "$sha" ] && [ -n "$sha" ]; then :; else fails+=("publish: http=$HTTP_CODE $(resp_get error) $(resp_get detail)"); fi
   # negative: main, beskyttede navn, ingen prefiks
   local b
   for b in main master production "refs/heads/main" "${PREFIX}../main"; do
-    api POST "/v1/jobs/$JOB_ID/publish" "$(node -e 'process.stdout.write(JSON.stringify({branch:process.argv[1]}))' "$b")"
+    api POST "/v1/jobs/$JOB_ID/publish" "$(publish_body "$b")"
     [ "$HTTP_CODE" = "400" ] || fails+=("publish til '$b' ble ikke avvist (http $HTTP_CODE)")
   done
   delete_job "$JOB_ID"
   # nektet sti
   if create_job; then
     cexec 60000 sh -c "mkdir -p .github/workflows && echo 'name: x' > .github/workflows/x.yml && git checkout -q -b '${PREFIX}accept-denied-$STAMP' && git add -A && git commit -q -m x"
-    api POST "/v1/jobs/$JOB_ID/publish" "$(node -e 'process.stdout.write(JSON.stringify({branch:process.argv[1]}))' "${PREFIX}accept-denied-$STAMP")"
+    api POST "/v1/jobs/$JOB_ID/publish" "$(publish_body "${PREFIX}accept-denied-$STAMP")"
     { [ "$HTTP_CODE" = "422" ] && [ "$(resp_get error)" = "path_denied" ]; } || fails+=(".github/workflows ble ikke nektet (http $HTTP_CODE $(resp_get error))")
     delete_job "$JOB_ID"
   else
@@ -397,7 +424,7 @@ check_J11() {
   fi
   # ingen endringer
   if create_job; then
-    api POST "/v1/jobs/$JOB_ID/publish" "$(node -e 'process.stdout.write(JSON.stringify({branch:process.argv[1]}))' "${PREFIX}accept-empty-$STAMP")"
+    api POST "/v1/jobs/$JOB_ID/publish" "$(publish_body "${PREFIX}accept-empty-$STAMP")"
     { [ "$HTTP_CODE" = "422" ] && [ "$(resp_get error)" = "no_changes" ]; } || fails+=("publish uten endringer ble ikke avvist (http $HTTP_CODE $(resp_get error))")
     delete_job "$JOB_ID"
   else
@@ -421,6 +448,7 @@ check_J12() {
   local pat
   IFS=',' read -ra pats <<<"$PAT_FILES"
   for pat in "${pats[@]}"; do [ -r "$pat" ] && { tr -d '\n' < "$pat" >> "$WORK/secrets"; printf '\n' >> "$WORK/secrets"; }; done
+  [ -n "$GIT_TOKEN_FILE" ] && [ -r "$GIT_TOKEN_FILE" ] && { tr -d '\n' < "$GIT_TOKEN_FILE" >> "$WORK/secrets"; printf '\n' >> "$WORK/secrets"; }
   [ -n "${ANTHROPIC_API_KEY:-}" ] && printf '%s\n' "$ANTHROPIC_API_KEY" >> "$WORK/secrets"
   grep -v '^$' "$WORK/secrets" > "$WORK/secrets.f" || true
   if ! command -v journalctl >/dev/null 2>&1; then record J12_logger_uten_hemmeligheter SKIP "journalctl mangler"; return; fi
@@ -467,6 +495,16 @@ main() {
   [ -r "$CONFIG" ] || { echo "kan ikke lese $CONFIG" >&2; return 2; }
   load_policy || { echo "kunne ikke lese policy fra $CONFIG" >&2; return 2; }
   case ",$ALLOWED," in *",$REPO,"*) : ;; *) echo "ACCEPTANCE_REPO=$REPO står ikke i runner.allowed_repos ($ALLOWED) - avbryter" >&2; return 2 ;; esac
+  # Hvor kommer git-credentialen fra for sandbox-repoet? `request`: et kortlevd token fra filen (som worker ville sendt); `file`: PAT-fil hos runneren (da skal INGEN token sendes).
+  case ",$REQUEST_REPOS," in *",$REPO,"*) REPO_MODE=request ;; *) REPO_MODE=file ;; esac
+  if [ "$REPO_MODE" = "request" ]; then
+    [ -n "$GIT_TOKEN_FILE" ] || { echo "ACCEPTANCE_REPO=$REPO står som source=request i runner.git_credentials: sett ACCEPTANCE_GIT_TOKEN_FILE til en fil (0600) med ETT kortlevd, repo-scopet token for sandbox-repoet - avbryter" >&2; return 2; }
+    [ -r "$GIT_TOKEN_FILE" ] || { echo "kan ikke lese ACCEPTANCE_GIT_TOKEN_FILE - avbryter" >&2; return 2; }
+    local tm; tm="$(mode_of "$GIT_TOKEN_FILE")"
+    has_bits "${tm:-777}" 077 && { echo "ACCEPTANCE_GIT_TOKEN_FILE har for åpne rettigheter ($tm): bruk 0600 eller 0400 - avbryter" >&2; return 2; }
+  else
+    [ -z "$GIT_TOKEN_FILE" ] || { echo "ACCEPTANCE_GIT_TOKEN_FILE er satt, men $REPO står som source=file (PAT-fil): et token skal ikke sendes. Fjern variabelen - avbryter" >&2; return 2; }
+  fi
   [ -r "$TOKEN_FILE" ] || { echo "kan ikke lese tokenfilen (er du medlem av gruppen jarvis-job-clients, eller root?)" >&2; return 2; }
   [ -S "$SOCKET" ] || { echo "finner ikke socketen $SOCKET (kjører jarvis-job-runner?)" >&2; return 2; }
 

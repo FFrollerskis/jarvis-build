@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { createHarness, gitSync } from "./support/harness.mjs";
+import { createHarness, gitSync, syntheticInstallationToken } from "./support/harness.mjs";
 import { apiRequest, RUNNER_TOKEN } from "./support/harness.mjs";
 
 /**
@@ -99,10 +99,10 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
   });
 });
 
-/** Starter tjenesten som egen prosess og returnerer stier + en stoppfunksjon. */
-function startServe() {
+/** Starter tjenesten som egen prosess og returnerer stier + en stoppfunksjon. `options` går uendret til createHarness (f.eks. requestTokenSlugs). */
+function startServe(options) {
   return new Promise((resolveStart, rejectStart) => {
-    const child = spawn(process.execPath, [fileURLToPath(new URL("./support/serve.mjs", import.meta.url))], { stdio: ["pipe", "pipe", "inherit"] });
+    const child = spawn(process.execPath, [fileURLToPath(new URL("./support/serve.mjs", import.meta.url)), ...(options ? [JSON.stringify(options)] : [])], { stdio: ["pipe", "pipe", "inherit"] });
     let buf = "";
     child.stdout.on("data", (d) => {
       buf += d.toString("utf8");
@@ -118,15 +118,16 @@ function startServe() {
 }
 let served = [];
 afterEach(() => { for (const s of served) s.stop(); served = []; });
-async function setupServed() {
-  const info = await startServe();
+async function setupServed(options) {
+  const info = await startServe(options);
   served.push(info);
   const config = join(info.root, "job-runner.json");
   await writeFile(config, JSON.stringify({
     version: 1,
     runner: {
       socket_path: info.socketPath, token_file: info.tokenFile, base_dir: info.baseDir, network: "jarvis-jobs", image: `sha256:${"a".repeat(64)}`,
-      allowed_repos: ["owner/repo"], git_credentials: { "owner/repo": { token_file: info.gitTokenFiles["owner/repo"] } }
+      allowed_repos: ["owner/repo"],
+      git_credentials: { "owner/repo": info.requestTokenRepos.includes("owner/repo") ? { source: "request" } : { token_file: info.gitTokenFiles["owner/repo"] } }
     },
     egress_proxy: { listen_host: "172.30.77.1", listen_port: 3128 }
   }));
@@ -216,3 +217,109 @@ describe("C: hjelpefunksjonene mot den EKTE vertstjenesten over Unix-socket", ()
     expect(r.stdout).toContain("socket-katalogen har modus"); // testkatalogen er 0700, ikke 0750
   });
 });
+
+describe("D: repo med `source: request` (kortlevd token fra worker): scriptet sender tokenet fra en fil - aldri i argv - og nekter tvetydige kall", () => {
+  const REQUEST_TOKEN = syntheticInstallationToken(300, 5);
+  const ANTHROPIC_DUMMY = "sk-ant-api03-AKSEPTANSE-DUMMY-IKKE-EN-EKTE-NOKKEL-0123456789";
+
+  async function tokenFile(info, mode = 0o600, content = `${REQUEST_TOKEN}\n`) {
+    const file = join(info.root, "accept-git-token");
+    await writeFile(file, content);
+    await chmod(file, mode);
+    return file;
+  }
+  const abortRun = (config, env) => run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "owner/repo", ...env });
+
+  it("load_policy leser hvilke repoer som er `request`, og PAT-fil-listen inneholder ingen tomme/udefinerte oppføringer", async () => {
+    const { info: h, config } = await setupServed({ requestTokenSlugs: ["owner/repo"] });
+    const r = await sourceAndRun2(h, config, 'echo "REQ=$REQUEST_REPOS PAT=[$PAT_FILES] ALLOWED=$ALLOWED"');
+    expect(r.stdout.trim()).toBe("REQ=owner/repo PAT=[] ALLOWED=owner/repo");
+    const file = await setupServed();
+    const f = await sourceAndRun2(file.info, file.config, 'echo "REQ=[$REQUEST_REPOS] PAT=$PAT_FILES"');
+    expect(f.stdout.trim()).toBe(`REQ=[] PAT=${file.info.gitTokenFiles["owner/repo"]}`);
+  });
+
+  it("scriptet AVBRYTER (exit 2) uten å røre runneren: request-repo uten token-fil, ulesbar fil, for åpne rettigheter; file-repo med token-fil", async () => {
+    const req = await setupServed({ requestTokenSlugs: ["owner/repo"] });
+    const none = abortRun(req.config, {});
+    expect(none.status).toBe(2);
+    expect(none.stderr).toContain("ACCEPTANCE_GIT_TOKEN_FILE");
+    expect(none.stderr).toContain("source=request");
+    const unreadable = abortRun(req.config, { ACCEPTANCE_GIT_TOKEN_FILE: join(req.info.root, "finnes-ikke") });
+    expect(unreadable.status).toBe(2);
+    expect(unreadable.stderr).toContain("kan ikke lese ACCEPTANCE_GIT_TOKEN_FILE");
+    for (const mode of [0o644, 0o640, 0o604, 0o660, 0o666]) {
+      const open = abortRun(req.config, { ACCEPTANCE_GIT_TOKEN_FILE: await tokenFile(req.info, mode) });
+      expect(open.status, mode.toString(8)).toBe(2);
+      expect(open.stderr).toContain("for åpne rettigheter");
+      expect(open.stdout + open.stderr).not.toContain(REQUEST_TOKEN);
+    }
+    const file = await setupServed();
+    const wrongMode = abortRun(file.config, { ACCEPTANCE_GIT_TOKEN_FILE: await tokenFile(file.info) });
+    expect(wrongMode.status).toBe(2);
+    expect(wrongMode.stderr).toContain("source=file");
+    expect(wrongMode.stdout + wrongMode.stderr).not.toContain(REQUEST_TOKEN);
+    expect((await req.health()).json.active_jobs).toBe(0);
+    expect((await file.health()).json.active_jobs).toBe(0);
+  });
+
+  it("create_job og J11-stegene fungerer mot en `request`-runner med token fra filen; argv til curl OG node inneholder verken git-tokenet eller API-nøkkelen", async () => {
+    const { info: h, config, health } = await setupServed({ requestTokenSlugs: ["owner/repo"] });
+    const file = await tokenFile(h);
+    const shims = await mkdtemp(join(tmpdir(), "wpc1-argvspy-"));
+    const log = join(shims, "argv.log");
+    for (const name of ["curl", "node"]) {
+      const real = spawnSync("sh", ["-c", `command -v ${name}`], { encoding: "utf8", env: { PATH: process.env["PATH"] } }).stdout.trim();
+      await writeFile(join(shims, name), `#!/bin/sh\nprintf '%s\\0' "${name}" "$@" >> '${log}'\nprintf '\\n' >> '${log}'\nexec '${real}' "$@"\n`);
+      await chmod(join(shims, name), 0o755);
+    }
+    const r = await sourceAndRun2(h, config, `
+      create_job '{"ANTHROPIC_API_KEY":"${ANTHROPIC_DUMMY}"}'; echo "CREATE=$? HTTP=$HTTP_CODE"
+      cexec 60000 sh -c "echo x > A.txt && git checkout -q -b jarvis/accept-test && git add -A && git commit -q -m t && git rev-parse HEAD"
+      SHA="\${EXEC_OUT//$'\\n'/}"
+      cexec 20000 sh -c 'printf "%s" "\${#ANTHROPIC_API_KEY}"'; echo "KEY_LENGTH_IN_CONTAINER=$EXEC_OUT"
+      api POST "/v1/jobs/$JOB_ID/publish" "$(publish_body jarvis/accept-test)"; echo "PUBLISH=$HTTP_CODE SAME=$([ "$(resp_get commit_sha)" = "$SHA" ] && echo ja || echo nei)"
+      api POST "/v1/jobs/$JOB_ID/publish" "$(publish_body main)"; echo "MAIN=$HTTP_CODE $(resp_get error)"
+      delete_job "$JOB_ID"; echo "DELETE=$HTTP_CODE"
+    `, { ACCEPTANCE_GIT_TOKEN_FILE: file, PATH: `${shims}:${process.env["PATH"]}` });
+    expect(r.stderr).toBe("");
+    const lines = r.stdout.trim().split("\n");
+    expect(lines).toContain("CREATE=0 HTTP=201");
+    expect(lines).toContain(`KEY_LENGTH_IN_CONTAINER=${ANTHROPIC_DUMMY.length}`); // nøkkelen kom frem i containeren (verdien selv er redigert i svaret, så lengden sammenlignes)
+    expect(lines).toContain("PUBLISH=200 SAME=ja");
+    expect(lines).toContain("MAIN=400 branch_invalid");
+    expect(lines).toContain("DELETE=200");
+    expect((await health()).json.active_jobs).toBe(0);
+    // ingen hemmelighet i noens argv: spionene logget HVER curl- og node-kommando scriptet kjørte
+    const argv = await readFile(log, "utf8");
+    expect(argv.split("\n").filter(Boolean).length).toBeGreaterThan(8);
+    expect(argv).not.toContain(REQUEST_TOKEN);
+    expect(argv).not.toContain(REQUEST_TOKEN.slice(0, 24));
+    expect(argv).not.toContain(ANTHROPIC_DUMMY);
+    expect(argv).not.toContain("ghs_");
+    expect(argv).toContain("--data-binary\u0000@"); // bodyen går via en fil
+    // og runneren la tokenet på de to riktige stedene (klone og publish) - bevist ved at begge lyktes mot en runner som KREVER token
+    expect(r.stdout).not.toContain(REQUEST_TOKEN);
+  });
+
+  it("J12 leter etter git-token-filens innhold i journalen (filen leses inn i hemmelighetslisten uten å skrives ut)", async () => {
+    const text = await readFile(SCRIPT, "utf8");
+    const j12 = text.slice(text.indexOf("check_J12()"), text.indexOf("check_J13()"));
+    expect(j12).toContain('"$GIT_TOKEN_FILE"');
+    expect(j12).toMatch(/tr -d '\\n' < "\$GIT_TOKEN_FILE" >> "\$WORK\/secrets"/);
+  });
+});
+
+/** Som sourceAndRun i gruppe C, men med ekstra miljø og uten antakelser om repo-modus. */
+async function sourceAndRun2(h, config, body, extraEnv = {}) {
+  const program = `
+    set -uo pipefail
+    source "${SCRIPT}"
+    REPO=owner/repo; STAMP=test; WORK="$(mktemp -d)"; chmod 700 "$WORK"
+    CONFIG="${config}"; load_policy
+    ( umask 077; printf 'Authorization: Bearer %s\\n' "$(tr -d '\\n' < "$TOKEN_FILE")" > "$WORK/auth.hdr" )
+    ${body}
+    rm -rf "$WORK"
+  `;
+  return spawnSync("bash", ["-c", program], { env: { ...baseEnv, ACCEPTANCE_SOURCE_ONLY: "1", ...extraEnv }, encoding: "utf8", timeout: 120_000 });
+}
