@@ -2,6 +2,7 @@
 import "./normalize-env.ts";
 import { executiveQueueOwner } from "./queue-owner.ts";
 import { parseDailyCapOre, parseToolTurnRoute, resolveJobToolTurnRoute } from "./tool-turn-route.ts";
+import { parseChatCandidates, unknownChainMembers } from "./chat-candidates.ts";
 import { fileURLToPath } from "node:url";
 import { checkEv0Boot, getLastEv0BootStatus, logEv0Boot } from "./ev0-boot.ts";
 import { assertNoSweepFailures, envHour, envInt, envPort, failOnSweepFailures, systemIdentity } from "@jarvis/contracts";
@@ -1074,6 +1075,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // mot samme pool, altså en stille divergens mellom kanalene.
   // D-431/D-432: ruten og dagstaket er parset tidlig (rett før executive-handleren, D-449) og brukes her uendret.
   console.log(JSON.stringify({ msg: "tool_turn_route", route: toolTurnRoute ? `${toolTurnRoute.provider}:${toolTurnRoute.model}` : "off", daily_cap_ore: toolTurnDailyCapOre }));
+  // WP-D4 (JARVIS-033): kandidatkjeden for vanlig prat. Tom/usatt = som før (`gemma_local, gemma_hosted`, siste reserve på). Navn som ikke er en registrert leverandør er inerte - logges så en skrivefeil ikke gjemmer seg.
+  const chatCandidates = parseChatCandidates(process.env["JARVIS_CHAT_CANDIDATES"], process.env["JARVIS_CHAT_AUTO_FALLBACK"]);
+  console.log(JSON.stringify({ msg: "chat_candidates", chain: chatCandidates.chain, auto_fallback: chatCandidates.autoFallback, source: chatCandidates.source, unknown_members: unknownChainMembers(chatCandidates.chain, gateway.listProviderNames()) }));
   const conversationEngine = new ConversationEngine({
     messages: new MessageStore(pool),
     context: new ContextBuilder(pool),
@@ -1083,6 +1087,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     trace,
     toolTurnRoute,
     toolTurnDayCap: toolTurnRoute !== null && toolTurnDailyCapOre > 0 ? { cap_ore: toolTurnDailyCapOre, spentToday: (tenantId) => dailySpentOre(pool, tenantId) } : null,
+    chatCandidates,
     // EV-1 (D-412): hurtigbanens selvdiagnose går gjennom Tool Gateway (Policy + revisjon) - samme verktøy som modellen kan kalle.
     selfDiagnosis: {
       async run(identity, opts) {

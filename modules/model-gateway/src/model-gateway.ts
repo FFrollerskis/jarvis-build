@@ -98,6 +98,12 @@ export class BudgetExceededError extends Error {
   }
 }
 
+/** WP-D4 (JARVIS-033): ett mislykket leverandørforsøk (se `CompleteInput.onAttemptFailed`). Kun leverandørnavn og feilklasse - aldri innhold eller feilmelding. */
+export interface AttemptFailure {
+  provider: string;
+  kind: string;
+}
+
 export interface CompleteInput {
   tenant_id: string;
   session_id?: string;
@@ -119,6 +125,14 @@ export interface CompleteInput {
   paid_models_allowed?: boolean;
   /** D-106: se `RouteInput.providerPreference`. */
   providerPreference?: string[];
+  /** WP-D4 (JARVIS-033): se `RouteInput.preferenceFailover` - preferanselisten blir en kandidatkjede med failover inne i gatewayen. Udefinert = uendret enkeltvalg. */
+  preferenceFailover?: boolean;
+  /**
+   * WP-D4 (JARVIS-033): kalles for HVERT mislykket leverandørforsøk i hovedkallet (aldri critic, aldri brukeravbrudd) - også når en senere kandidat eller retry lykkes, og også når hele planen til slutt feiler.
+   * Gir flatene (chatten) synlighet i reservebruk: hvem som ikke svarte før noen gjorde det (hvem som svarte står i resultatet). Gjennom verktøyløkker rapporteres alle runder, ikke bare den siste.
+   * En feil i lytteren logges og teller aldri som leverandørfeil.
+   */
+  onAttemptFailed?: (failure: AttemptFailure) => void;
   /**
    * D-106 Council reliability (§ARCHITECTURE DECISION): eksplisitt, generisk
    * arbeidsmengde-spesifikk timeout-overstyring for DETTE kallet (millisekunder).
@@ -427,6 +441,7 @@ export class ModelGateway {
         ...(input.providerPreference !== undefined
           ? { providerPreference: input.providerPreference }
           : {}),
+        ...(input.preferenceFailover !== undefined ? { preferenceFailover: input.preferenceFailover } : {}),
         needs_structured: Boolean(input.request.structured_schema)
       },
       this.providerRuntimes()
@@ -754,6 +769,7 @@ export class ModelGateway {
         ...(input.providerPreference !== undefined
           ? { providerPreference: input.providerPreference }
           : {}),
+        ...(input.preferenceFailover !== undefined ? { preferenceFailover: input.preferenceFailover } : {}),
         needs_structured: Boolean(input.request.structured_schema)
       },
       this.providerRuntimes()
@@ -1167,6 +1183,14 @@ export class ModelGateway {
     err: ProviderError,
     critic: boolean
   ): Promise<void> {
+    // WP-D4 (JARVIS-033): synlighet i reservebruk. Brukeravbrudd er ingen leverandørfeil; criticen er en egen kjøring. En feil i lytteren er konsumentens og må aldri stoppe fallback-kjeden.
+    if (!critic && err.kind !== "cancelled" && input.onAttemptFailed !== undefined) {
+      try {
+        input.onAttemptFailed({ provider, kind: err.kind });
+      } catch (listenerError) {
+        console.error(JSON.stringify({ msg: "attempt_failed_listener_error", error: (listenerError as Error).message.slice(0, 120) }));
+      }
+    }
     try {
       await withTenantTransaction(this.opts.pool, input.tenant_id, (client) =>
         client.query(

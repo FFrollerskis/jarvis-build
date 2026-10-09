@@ -60,6 +60,13 @@ export interface RouteInput {
    * satt - `provider` er alltid mer spesifikk og vinner.
    */
   providerPreference?: string[];
+  /**
+   * WP-D4 (JARVIS-033): kun sammen med `providerPreference`. Av (standard/udefinert) = UENDRET: første kvalifiserte medlem vinner og planen har ÉN kandidat (standardstien hadde derfor
+   * aldri en reserve inne i gatewayen). På = ALLE kvalifiserte medlemmer returneres som kandidater i listerekkefølge, så `ModelGateway.executePlan` kan gå til neste medlem ved en klassifisert
+   * feil FØR noe er sendt. Listen er fortsatt HARD (ingen leverandør utenfor den, ingen scoring), og HVER port gjelder per medlem akkurat som for enkeltvalget: capabilities, sensitivitet
+   * (SECRET_RESTRICTED = kun lokal), `paid_models_allowed`, helse og `mode: "LOCAL"`. Et medlem som feiler en port blir aldri kandidat - failover kan ikke åpne noe et enkeltvalg ville stengt.
+   */
+  preferenceFailover?: boolean;
 }
 
 export interface RouteCandidate {
@@ -234,22 +241,31 @@ export class AiRouter {
       const attempted: string[] = [];
       // D-404: HVILKEN port som avviste hver leverandør (tidligere bare «ingen er konfigurert/kvalifisert» - kostet en hel feilsøkingsrunde).
       const rejected: string[] = [];
+      // WP-D4 (JARVIS-033): med `preferenceFailover` samles ALLE kvalifiserte medlemmer (i listerekkefølge) i stedet for å returnere ved det første.
+      const chain: RouteCandidate[] = [];
       for (const name of input.providerPreference) {
+        if (attempted.includes(name)) continue; // samme leverandør to ganger i listen = ett forsøk (ellers dobbelt betalt kall i failover)
         const rt = providers.get(name);
         attempted.push(name);
         if (!rt?.configured) { rejected.push(`${name}:not_configured`); continue; }
         const profile = this.registry.profileOrGeneric(name, rt.model);
         const missing = [...requiredForPref].filter((c) => !profile.capabilities.includes(c));
         if (missing.length > 0) { rejected.push(`${name}:missing_capabilities=${missing.join("+")}`); continue; }
+        // WP-D4: `mode: "LOCAL"` gjaldt tidligere bare AUTO-grenen; en preferanseliste med en skyleverandør kunne dermed ignorere «kun lokale modeller». Nå gjelder den også her (strengere, aldri løsere).
+        if (mode === "LOCAL" && profile.locality !== "local") { rejected.push(`${name}:not_local`); continue; }
         if (!isSensitivityEligible(profile, input.sensitivity)) { rejected.push(`${name}:sensitivity=${input.sensitivity ?? "undefined"}`); continue; }
         if (!isPaidModelsEligible(profile, input.paid_models_allowed)) { rejected.push(`${name}:paid_models_disabled`); continue; }
         if (this.health.state(name, true) === "UNAVAILABLE") { rejected.push(`${name}:health_unavailable`); continue; }
-        return {
-          mode: "SPECIFIC_PROVIDER",
-          reason: "PROVIDER_PREFERENCE",
-          candidates: [{ provider: name, model: rt.model }]
-        };
+        if (!input.preferenceFailover) {
+          return {
+            mode: "SPECIFIC_PROVIDER",
+            reason: "PROVIDER_PREFERENCE",
+            candidates: [{ provider: name, model: rt.model }]
+          };
+        }
+        chain.push({ provider: name, model: rt.model });
       }
+      if (chain.length > 0) return { mode: "SPECIFIC_PROVIDER", reason: "PROVIDER_PREFERENCE", candidates: chain };
       throw new NoEligibleProviderError(
         `provider_preference_exhausted: ingen av [${attempted.join(",")}] er konfigurert/kvalifisert (${rejected.join("; ")})`
       );

@@ -14,6 +14,8 @@ import {
   type DecisionClassification,
   type ModelGateway,
   type RoutingOverrideIntent,
+  type AttemptFailure,
+  type CompleteInput,
   type ToolExecutor,
   type TraceSink
 } from "@jarvis/model-gateway";
@@ -23,7 +25,8 @@ import type { TaskService, InProcessWorker } from "@jarvis/tasks";
 import { createTurnContext, surfaceForChannel, type Surface, type SurfaceLimits, type TurnContext } from "@jarvis/tool-gateway";
 import { randomUUID } from "node:crypto";
 import { chatWithheldNote, cloudScreenedExecutor, servedByCloudModel } from "./cloud-tool-screen.ts";
-import { LOCAL_FALLBACK_ERROR_KINDS, cloudHistoryNote, isMemoryReserveOnly, jobLocalOnlyNote, localOnlyNote, stripSystemNotes } from "./tool-turn-route.ts";
+import { LOCAL_FALLBACK_ERROR_KINDS, cloudHistoryNote, isMemoryReserveOnly, jobLocalOnlyNote, localOnlyNote, reserveModelNote, stripSystemNotes } from "./tool-turn-route.ts";
+import { DEFAULT_CHAT_CANDIDATES, type ChatCandidates } from "./chat-candidates.ts";
 
 export interface ConversationDeps {
   messages: MessageStore;
@@ -96,6 +99,11 @@ export interface ConversationDeps {
    * modell og svaret får en fast merknad. Udefinert/null = ingen tak.
    */
   toolTurnDayCap?: { cap_ore: number; spentToday(tenantId: string): Promise<number> } | null;
+  /**
+   * WP-D4 (JARVIS-033): kandidatkjeden for vanlig prat (`JARVIS_CHAT_CANDIDATES`) og om den siste reserven (D-354/D-404: kjør om gjennom vanlig ruting) er tillatt (`JARVIS_CHAT_AUTO_FALLBACK`).
+   * Udefinert = nøyaktig det som gjaldt før: `gemma_local, gemma_hosted` og reserven på. Kjeden har failover inne i gatewayen; reservebruk vises bak svaret.
+   */
+  chatCandidates?: ChatCandidates;
   tools?: {
     definitions: ToolDefinition[];
     executorFor(identity: IdentityContext, turn?: TurnContext): ToolExecutor;
@@ -573,7 +581,10 @@ export class ConversationEngine {
       const fullView: TurnView = { history, selection, toolDefinitions, sensitivityDecision };
       const primaryView: TurnView = cloudVariant ?? fullView;
       if (cloudVariant !== undefined) console.log(JSON.stringify({ msg: "q51_cloud_variant_without_sensitive_messages", withheld: cloudVariant.withheld, reasons: sensitivityDecision.reasons }));
-      const input = {
+      // WP-D4 (JARVIS-033): standardkjeden (hard liste, failover inne i gatewayen - hver port gjelder per medlem) og sporet over hvem som feilet før noen svarte, til merknaden bak svaret.
+      const chat = this.deps.chatCandidates ?? DEFAULT_CHAT_CANDIDATES;
+      const reserveFailed = new Set<string>();
+      const input: CompleteInput = {
         tenant_id: identity.tenant_id,
         session_id: identity.session_id,
         purpose: "CHAT" as const,
@@ -582,8 +593,9 @@ export class ConversationEngine {
         ...(provider === undefined && override?.providerPreference !== undefined
           ? { providerPreference: override.providerPreference }
           : usingDefaultGemmaPreference
-            ? { providerPreference: toolsToCloud && toolRoute ? [toolRoute.provider] : ["gemma_local", "gemma_hosted"] }
+            ? { providerPreference: toolsToCloud && toolRoute ? [toolRoute.provider] : [...chat.chain], preferenceFailover: true }
             : {}),
+        onAttemptFailed: (failure: AttemptFailure) => { reserveFailed.add(failure.provider); },
         ...(provider === undefined && override?.mode !== undefined ? { mode: override.mode } : {}),
         ...(override?.paid_models_allowed !== undefined ? { paid_models_allowed: override.paid_models_allowed } : {}),
         // D-382: tale skal være kort (TTS-latens og muntlig form) - teksten styres av prompten, taket er et sikkerhetsnett.
@@ -678,10 +690,12 @@ export class ConversationEngine {
         // enda her - retry-fra-scratch er trygt, ingen duplisert output.
         if (
           usingDefaultGemmaPreference &&
+          chat.autoFallback &&
           err instanceof NoEligibleProviderError &&
           err.message.includes("provider_preference_exhausted")
         ) {
           const { providerPreference: omittedGemmaPreference, ...fallbackInput } = input;
+          for (const name of omittedGemmaPreference ?? []) reserveFailed.add(name);
           // §"ærlighet og sporbarhet": degraderingen skal ALDRI være stille -
           // samme diagnostikk-mønster (`msg`-felt, ingen prompt/svar-innhold)
           // som `stream_debug_conversation` over.
@@ -699,13 +713,17 @@ export class ConversationEngine {
           // tidsavbrudd, serverfeil) FØR noe er sendt eller utført, skal eieren få svar og ikke en feil. Fallbacken kjører gjennom SAMME router uten
           // preferansen, så sensitivitets-/betalingsreglene gjelder uendret (SECRET_RESTRICTED kan aldri havne i sky), og degraderingen logges alltid.
           usingDefaultGemmaPreference &&
+          chat.autoFallback &&
           err instanceof ProviderError &&
-          (err.provider === "gemma_local" || err.provider === "gemma_hosted") &&
+          // WP-D4: «leverandøren i standardkjeden feilet» (tidligere hardkodet gemma_*). Skyruten for verktøyturer hører til D-431-grenen under, ikke hit.
+          chat.chain.includes(err.provider) &&
+          !(toolsToCloud && err.provider === toolRoute?.provider) &&
           LOCAL_FALLBACK_ERROR_KINDS.includes(err.kind) &&
           partial.trim() === "" && // D-444: blanke tegn er ikke synlig output (samme regel som gatewayen)
           !toolsExecuted
         ) {
           const { providerPreference: omittedGemmaPreference, ...fallbackInput } = input;
+          reserveFailed.add(err.provider); // gatewayen melder det allerede via onAttemptFailed; her også, så merknaden ikke avhenger av at gatewayen kaller lytteren
           console.error(
             JSON.stringify({ msg: "d404_gemma_provider_failed_fallback", provider: err.provider, kind: err.kind, omitted_preference: omittedGemmaPreference })
           );
@@ -721,6 +739,7 @@ export class ConversationEngine {
           partial.trim() === "" && // D-444: blanke tegn er ikke synlig output (samme regel som gatewayen)
           !toolsExecuted
         ) {
+          reserveFailed.add(err.provider);
           console.error(JSON.stringify({ msg: "d431_cloud_tools_failed_fallback_local", kind: err.kind }));
           const { model: omittedCloudModel, ...localRequest } = input.request;
           void omittedCloudModel;
@@ -751,7 +770,11 @@ export class ConversationEngine {
       // når minnetreff ble holdt tilbake fra skymodellen. Ikke på tale (samme som D-447); loggen har alltid kategoriene.
       const variantNote = cloudVariant !== undefined && servedByVariant && cloudVariant.withheld > 0 && surface !== "voice" ? cloudHistoryNote(cloudVariant.withheld) : "";
       const withheldNote = withheldFromCloud > 0 && surface !== "voice" ? chatWithheldNote() : "";
-      const notes = `${routeNote}${variantNote}${withheldNote}`;
+      // WP-D4 (JARVIS-033): en reserve svarte (kjedefailover eller siste reserve) - aldri usynlig. Ikke på tale (samme som de øvrige rutemerknadene); loggen har alltid navnene (aldri innhold).
+      const reserveFailedBeforeAnswer = [...reserveFailed].filter((name) => name !== result.provider);
+      const reserveNote = reserveFailedBeforeAnswer.length > 0 && surface !== "voice" ? reserveModelNote(reserveFailedBeforeAnswer, result.provider, servedByCloudModel(result)) : "";
+      if (reserveFailedBeforeAnswer.length > 0) console.log(JSON.stringify({ msg: "wpd4_chat_reserve_used", failed: reserveFailedBeforeAnswer, served: result.provider, cloud: servedByCloudModel(result) }));
+      const notes = `${routeNote}${variantNote}${withheldNote}${reserveNote}`;
       const replyText = notes ? `${result.text}${notes}` : result.text;
       if (notes) onToken?.(notes);
       await this.deps.messages.save(identity, "assistant", replyText);

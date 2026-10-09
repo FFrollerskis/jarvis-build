@@ -148,6 +148,18 @@ export function cloudHistoryNote(withheld: number): string {
 }
 
 /**
+ * WP-D4 (JARVIS-033): merknaden når en RESERVE svarte i stedet for modellen som skulle ha svart (standardkjeden, D-354/D-404/D-431). Samme prinsipp som D-447: aldri en usynlig nedgradering eller sky-reserve - kun
+ * leverandørnavn (aldri innhold, aldri feilmeldinger). Navn som ikke ser ut som leverandør-id-er utelates, og teksten har ingen parenteser inni (se `stripSystemNotes`).
+ */
+const PROVIDER_ID = /^[A-Za-z0-9_.-]{1,40}$/;
+export function reserveModelNote(failed: readonly string[], served: string, cloud: boolean): string {
+  const names = [...new Set(failed)].filter((name) => name !== served && PROVIDER_ID.test(name));
+  if (names.length === 0 || !PROVIDER_ID.test(served)) return "";
+  const where = cloud ? `skymodellen ${served}` : `den lokale modellen ${served}`;
+  return `\n\n(Reservemodell brukt: ${joinNo(names)} var ikke tilgjengelig${names.length === 1 ? "" : "e"}, så svaret kom fra ${where}.)`;
+}
+
+/**
  * Starten på hver rutemerknad Jarvis selv legger bak et svar (chatten: `localOnlyNote`, dagstaket, `cloudHistoryNote`, skjermet minnesøk; hurtigbanen: `jobLocalOnlyNote`). Listen og `stripSystemNotes` hører sammen og er låst av en test
  * mot hver funksjon som lager en merknad.
  */
@@ -156,7 +168,8 @@ const SYSTEM_NOTE_PREFIXES: readonly string[] = [
   "Jobben kjører på den lokale modellen:",
   "Dagstaket for sky på",
   "Svart på skymodellen uten",
-  "Deler av minnesøket ble holdt tilbake"
+  "Deler av minnesøket ble holdt tilbake",
+  "Reservemodell brukt:"
 ];
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const TRAILING_SYSTEM_NOTE = new RegExp(`(?:\\n\\n|^)\\((?:${SYSTEM_NOTE_PREFIXES.map(escapeRegExp).join("|")})[^()]*\\)\\s*$`);
