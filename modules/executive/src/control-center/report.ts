@@ -1,6 +1,6 @@
 import type { JsonValue } from "@jarvis/contracts";
 import {
-  CONTROL_ACTION_BODY_KEYS, CONTROL_ACTION_ENDPOINTS, CONTROL_CENTER_IDS,
+  CONTROL_ACTION_ALLOWED, CONTROL_ACTION_BODY_KEYS, CONTROL_ACTION_ENDPOINTS, CONTROL_CENTER_IDS,
   type ControlAction, type ControlCenterDefinition, type ControlCenterId, type ControlCenterOverview, type ControlCenterParts, type ControlCenterReport,
   type ControlCenterSummary, type ControlFactValue, type ControlItem, type ControlRiskClass, type ControlSection, type ControlStatus
 } from "./types.ts";
@@ -149,6 +149,16 @@ export function controlAction(input: ControlActionInput): ControlAction {
   if (typeof input.body !== "object" || input.body === null || Array.isArray(input.body)) throw new Error("invalid_control_action_body");
   for (const key of Object.keys(input.body)) {
     if (!allowedKeys.includes(key)) throw new Error("invalid_control_action_body_key");
+  }
+  // Handlingsnavnet må stå på rutens egen allowlist (speilet i `CONTROL_ACTION_ALLOWED`) - en knapp skal aldri peke på noe ruten ville avvist, og aldri på `set_connector_credential` (hemmeligheter).
+  const allowedActions = CONTROL_ACTION_ALLOWED[endpoint];
+  if (allowedActions !== null) {
+    const name = (input.body as Record<string, unknown>)["action"];
+    if (typeof name !== "string" || !allowedActions.includes(name)) throw new Error("invalid_control_action_name");
+    const params = (input.body as Record<string, unknown>)["parameters"];
+    if (params !== undefined && (typeof params !== "object" || params === null || Array.isArray(params))) throw new Error("invalid_control_action_parameters");
+  } else if ("action" in input.body) {
+    throw new Error("invalid_control_action_body_key");
   }
   if (!RISK_CLASSES.includes(input.risk_class)) throw new Error("invalid_control_action_risk_class");
   if (typeof input.requires_step_up !== "boolean" || typeof input.reversible !== "boolean") throw new Error("invalid_control_action_flags");

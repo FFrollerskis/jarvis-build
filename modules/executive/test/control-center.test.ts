@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
 import {
-  CONTROL_ACTION_BODY_KEYS, CONTROL_ACTION_ENDPOINTS, CONTROL_CENTER_IDS, CONTROL_CENTER_TITLES_NO, ControlCenterAccessError, ControlCenterRegistry,
+  CONTROL_ACTION_ALLOWED, CONTROL_ACTION_BODY_KEYS, CONTROL_ACTION_ENDPOINTS, CONTROL_CENTER_IDS, CONTROL_CENTER_TITLES_NO, ControlCenterAccessError, ControlCenterRegistry,
   composeControlCenterOverview, composeControlCenterReport, controlAction, controlItem, controlSection, explainControlCenterNo, failureCategory, isControlCenterId,
   redactControlCenterReport, unknownControlSection, worstStatus,
   type ControlCenterBuildContext, type ControlCenterDefinition, type ControlCenterParts, type ControlStatus
@@ -123,6 +123,28 @@ describe("controlAction: peker kun på eksisterende ruter, aldri en ny skrivevei
     }
     expect(() => controlAction({ ...base, body: [] as never })).toThrow("invalid_control_action_body");
     expect(CONTROL_ACTION_BODY_KEYS["/executive/mutate"]).toEqual(["action", "parameters"]);
+  });
+
+  it("handlingsnavnet må stå på rutens allowlist - aldri set_connector_credential (hemmeligheter), en ukjent handling eller en manglende", () => {
+    for (const name of ["set_connector_credential", "delete_everything", "", "FREEZE_CONNECTOR", "freeze_connector ", "test_connector"]) {
+      expect(() => controlAction({ ...base, body: { action: name, parameters: {} } }), name).toThrow("invalid_control_action_name");
+    }
+    expect(() => controlAction({ ...base, body: { parameters: {} } })).toThrow("invalid_control_action_name");
+    expect(() => controlAction({ ...base, body: { action: 5 as never, parameters: {} } })).toThrow("invalid_control_action_name");
+    const secrets = { connector_id: "github", credential_ref: "JARVIS_GITHUB_TOKEN", value: "x" };
+    expect(() => controlAction({ ...base, endpoint: "/owner-controls/connector-credentials", body: { action: "set_connector_credential", parameters: secrets }, risk_class: "C" })).toThrow("invalid_control_action_name");
+    expect(() => controlAction({ ...base, endpoint: "/owner-controls/connector-credentials", body: { action: "freeze_connector", parameters: {} } })).toThrow("invalid_control_action_name");
+    const test = controlAction({ ...base, endpoint: "/owner-controls/connector-credentials", body: { action: "test_connector", parameters: { connector_id: "github" } }, risk_class: "A" });
+    expect(test.body["action"]).toBe("test_connector");
+    expect(CONTROL_ACTION_ALLOWED["/owner-controls/connector-credentials"]).toEqual(["test_connector"]);
+    expect(CONTROL_ACTION_ALLOWED["/executive/mutate"]).toHaveLength(12);
+  });
+
+  it("parametre må være et objekt (ikke liste/streng/null)", () => {
+    for (const parameters of [[], "x", 5, null]) {
+      expect(() => controlAction({ ...base, body: { action: "freeze_connector", parameters: parameters as never } }), JSON.stringify(parameters)).toThrow("invalid_control_action_parameters");
+    }
+    expect(controlAction({ ...base, body: { action: "deactivate_kill_switch" } }).body).toEqual({ action: "deactivate_kill_switch" });
   });
 
   it("ugyldig risikoklasse og ikke-boolske flagg avvises", () => {

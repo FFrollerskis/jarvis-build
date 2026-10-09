@@ -326,7 +326,7 @@ const GOVERNANCE_MUTATE_ACTIONS = [
  * ruten, samme "hardkodet allowlist, ALDRI hele verktøyet"-disiplin som
  * `EXECUTIVE_QUERY_ACTIONS` selv.
  */
-const OWNER_CONTROLS_CONNECTOR_ACTIONS = ["set_connector_credential", "test_connector"] as const;
+export const OWNER_CONTROLS_CONNECTOR_ACTIONS = ["set_connector_credential", "test_connector"] as const;
 
 /**
  * D-367: eierens godkjenning av modellens minneforslag (`memory.propose` -> karantene). EGEN rute og EGET hardkodet
@@ -356,7 +356,7 @@ const MEMORY_PROPOSAL_ACTIONS = ["list_proposals", "approve_proposal", "reject_p
  * autoritetssjekk (samme dobbelt-gatede modell som §2/§6 i design-notatet
  * beskriver - denne ruten legger ALDRI til en tredje, egen autoritetsrunde).
  */
-const EXECUTIVE_MUTATE_ACTIONS = [
+export const EXECUTIVE_MUTATE_ACTIONS = [
   "pause_domain", "resume_domain", "resolve_situation",
   "activate_kill_switch", "deactivate_kill_switch",
   "freeze_connector", "unfreeze_connector",

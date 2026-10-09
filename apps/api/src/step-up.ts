@@ -14,6 +14,14 @@ export const STEP_UP_EXEMPT_ACTIONS: ReadonlySet<string> = new Set([
   "activate_kill_switch", "enable_finance_kill_switch", "pause_domain", "freeze_connector", "test_connector", "resolve_situation"
 ]);
 
+/**
+ * WP-H0: kontrollsentrene viser FØR eieren trykker om en handling krever signert enhetsøkt. Svaret utledes av DENNE ene mengden (samme som `stepUpDenial` bruker), aldri av en egen kopi,
+ * så knappens merke og rutens faktiske krav ikke kan drive fra hverandre.
+ */
+export function actionRequiresStepUp(action: string): boolean {
+  return !STEP_UP_EXEMPT_ACTIONS.has(action);
+}
+
 export function stepUpDenial(identity: Pick<IdentityContext, "auth_strength" | "channel">, action: string): string | undefined {
   if (STEP_UP_EXEMPT_ACTIONS.has(action)) return undefined;
   if (identity.auth_strength !== "signed") return "step_up_required:signed_device_session";

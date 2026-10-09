@@ -1,6 +1,9 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
-import type pg from "pg";
 import type { ControlCenterRegistry } from "@jarvis/executive";
+import { createIntegrationCenter, type IntegrationCenterDeps } from "./integration.ts";
+import type { ControlCenterPool } from "./shared.ts";
+
+export type { ControlCenterPool } from "./shared.ts";
 
 /**
  * WP-H0 (UA-11 Admin Control Center): ÉN plass der kontrollsentrene kobles til registeret. Hvert senter er en `ControlCenterDefinition` (se `@jarvis/executive` sin `control-center/types.ts`) i sin
@@ -11,18 +14,25 @@ import type { ControlCenterRegistry } from "@jarvis/executive";
  *
  * `main.ts` bygger `ControlCenterWiring` ÉN gang fra de allerede konstruerte tjenestene (ingen nye instanser, ingen ny tilkobling). Sentrene leser kun eksisterende kilder; de skriver ingenting.
  */
-export type ControlCenterPool = Pick<pg.Pool, "query"> & Partial<Pick<pg.Pool, "connect">>;
-
 export interface ControlCenterWiring {
   /** App-rollens pool. All tenant-lesing skjer via `withTenantTransaction` under identitetens tenant (RLS). */
   pool: ControlCenterPool;
   /** Miljøet sentrene leser konfigurasjon fra (injiserbart for tester). Verdier av hemmelige variabler leses ALDRI - kun om de er satt. */
   env: Readonly<Record<string, string | undefined>>;
   now?: () => Date;
+  /** Integration Center: den ene ToolGateway-instansen (presence, helse, verktøyregister) og eier-kontrollene (frosset/tilbakekalt). Uten disse registreres ikke senteret (det står da som «ikke koblet inn»). */
+  toolGateway?: IntegrationCenterDeps["toolGateway"];
+  ownerControls?: IntegrationCenterDeps["ownerControls"];
+  /** Modellmeshens kompakte status (leverandørhelse) - gir modellleverandørene i Integration Center og AI Center en helse. */
+  meshStatus?: IntegrationCenterDeps["meshStatus"];
 }
 
 export function registerControlCenters(registry: ControlCenterRegistry, wiring: ControlCenterWiring): void {
-  void registry;
-  void wiring;
-  // Sentrene registreres her, ett per linje, etterhvert som de bygges (WP-H0: Integration, Authority, AI).
+  // Sentrene registreres her, ett per linje, etterhvert som de bygges. Et senter uten sine avhengigheter registreres IKKE (ærlig «ikke koblet inn», aldri en tom OK).
+  if (wiring.toolGateway && wiring.ownerControls) {
+    registry.register(createIntegrationCenter({
+      pool: wiring.pool, toolGateway: wiring.toolGateway, ownerControls: wiring.ownerControls,
+      ...(wiring.meshStatus ? { meshStatus: wiring.meshStatus } : {})
+    }));
+  }
 }

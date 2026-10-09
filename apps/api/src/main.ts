@@ -652,7 +652,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     isOwner: (identity) => resolveAuthorityMode({ owner_person_id: owner.owner_person_id, owner_tenants: [owner.tenant_id] }, identity) === "SOVEREIGN",
     redact: (text) => scanForSecrets(text).text
   });
-  registerControlCenters(controlCenters, { pool, env: process.env });
+  registerControlCenters(controlCenters, { pool, env: process.env, toolGateway, ownerControls, meshStatus: () => gateway.meshStatus() });
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(githubRateLimitController),

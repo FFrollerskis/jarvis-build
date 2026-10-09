@@ -87,6 +87,21 @@ export const CONTROL_ACTION_BODY_KEYS: Readonly<Record<ControlActionEndpoint, re
 };
 
 /**
+ * Hvilke `action`-verdier en handling kan bære per rute. Listene SPEILER rutenes egne hardkodede allowlister i `apps/api/src/server.ts` (en test låser likheten, så en knapp aldri peker på en handling
+ * ruten ville avvist). `null` = ruten har ingen `action`-nøkkel i kroppen. `set_connector_credential` er BEVISST utelatt: kontrollsentre håndterer aldri hemmeligheter (å lime inn en ny verdi skjer i dashbordet).
+ */
+export const CONTROL_ACTION_ALLOWED: Readonly<Record<ControlActionEndpoint, readonly string[] | null>> = {
+  "/executive/mutate": [
+    "pause_domain", "resume_domain", "resolve_situation",
+    "activate_kill_switch", "deactivate_kill_switch",
+    "freeze_connector", "unfreeze_connector",
+    "revoke_credential", "restore_credential", "revoke_device",
+    "enable_finance_kill_switch", "disable_finance_kill_switch"
+  ],
+  "/owner-controls/connector-credentials": ["test_connector"]
+};
+
+/**
  * ÉN handling eieren kan utføre fra kontrollflaten. Rene data - utførelsen skjer ved at webflaten POSTer `{ grant_token, ...body }` til `endpoint`.
  */
 export interface ControlAction {

@@ -86,6 +86,7 @@
   .item-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .item-head .name { font-weight: 600; font-size: 13.5px; flex: 1 1 160px; overflow-wrap: anywhere; }
   .item .detail { color: var(--text-dim); font-size: 12.5px; margin: 3px 0 0; overflow-wrap: anywhere; }
+  .item-facts > summary { cursor: pointer; font-size: 12px; color: var(--text-mute); margin-top: 4px; }
   .facts { display: grid; grid-template-columns: max-content 1fr; gap: 1px 12px; margin: 6px 0 0; font-size: 12px; }
   .facts dt { color: var(--text-mute); font-family: var(--mono); }
   .facts dd { margin: 0; color: var(--text-dim); font-family: var(--mono); overflow-wrap: anywhere; }
@@ -402,12 +403,15 @@
     const children = [el("div", { class: "item-head" }, [el("span", { class: "name", text: item.label }), statusPill(item.status)])];
     if (item.detail_no) children.push(el("p", { class: "detail", text: item.detail_no }));
     if (item.facts && Object.keys(item.facts).length) {
+      // Måledata i en sammenleggbar blokk (et senter kan ha 50+ rader): åpen kun når raden ikke er i orden, så det som trenger oppmerksomhet er synlig uten å lete.
       const dl = el("dl", { class: "facts" });
       for (const [k, v] of Object.entries(item.facts)) {
         dl.appendChild(el("dt", { text: k }));
         dl.appendChild(el("dd", { text: v === null ? "–" : String(v) }));
       }
-      children.push(dl);
+      const wrap = el("details", { class: "item-facts" }, [el("summary", { text: "Måledata (" + Object.keys(item.facts).length + ")" }), dl]);
+      if (item.status !== "OK") wrap.open = true;
+      children.push(wrap);
     }
     if (item.observed_at) children.push(el("p", { class: "detail", text: "Målt " + item.observed_at }));
     if (actions.length) children.push(el("div", { class: "actions" }, actions.map(actionButton)));
