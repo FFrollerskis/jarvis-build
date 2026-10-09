@@ -79,6 +79,9 @@ node --version                      # MÅ være v22 eller nyere PÅ VERTEN (ikke
 git --version                       # >= 2.39
 sudo docker version --format '{{.Server.Version}}'
 sudo docker info --format '{{.SecurityOptions}}'   # skal IKKE inneholde name=userns (uid i containeren må være lik uid på verten for /work) og ikke name=rootless
+ls -l /var/run/docker.sock          # gruppen skal være docker (runneren får tilgang via SupplementaryGroups=docker)
+command -v "$(sudo docker info --format '{{.InitBinary}}')" || echo "docker-init MANGLER - containerne startes med --init"
+sudo docker info 2>&1 | grep -i 'swap'   # «No swap limit support» betyr at --memory-swap ikke kan håndheves (J04 melder «swap tillatt»)
 sudo iptables -V                    # nf_tables- eller legacy-variant er begge greit
 systemctl --version | head -1
 getent group docker                 # må finnes
@@ -197,7 +200,7 @@ Sjekkene (samme ID-er som i `acceptance.sh`; `--dry-run` skriver dem):
 | `J04_docker_inspect` | `privileged=false`, read-only rootfs, `cap-drop ALL`, `no-new-privileges`, ikke-root, minne/CPU/PID, kun jobbnettverket, kun `/work` montert, ingen `docker.sock`, ingen forbudte env | docker |
 | `J05_inne_i_containeren` | uid, `CapEff=0`, ingen `docker.sock`, read-only rootfs, `noexec` tmpfs, ingen vertsmapper/hemmelighets-env, ingen git-remote/credential | docker |
 | `J06_ressursgrenser` | minnegrense (OOM), PID-grense, tidsavbrudd dreper containeren | docker |
-| `J07_nettverk_deny_by_default` | ingen direkte rute ut; vertsporter utilgjengelige unntatt proxyen; github OK, fremmed/privat/metadata nektet; kun CONNECT; jobb-containere når ikke hverandre; IPv6-observasjon | docker, brannmur |
+| `J07_nettverk_deny_by_default` | ingen direkte rute ut; ingen DNS-oppslag av eksterne navn; vertsporter utilgjengelige unntatt proxyen; github OK, fremmed/privat/metadata nektet; kun CONNECT; jobb-containere når ikke hverandre; IPv6-observasjon | docker, brannmur |
 | `J08_kansellering` | DELETE midt i en kjørende `exec` dreper containeren umiddelbart | docker |
 | `J09_reclaim_etter_krasj` | `--with-restart`: SIGKILL på runneren; etter restart er rest-containere og -kataloger borte | root, systemd |
 | `J10_ttl` | `--with-ttl`: TTL-rydderen fjerner en jobb | docker |
@@ -354,6 +357,8 @@ med runnerens credential. Ingenting av dette er kjørt mot ekte GitHub (J11).
 | `git_network_failed` ved opprettelse | proxy/DNS/PAT feil, eller GitHub utilgjengelig fra verten | `sudo journalctl -u jarvis-job-runner -n 50`; test `git ls-remote` manuelt som `jarvis-runner` uten å skrive token noe sted |
 | `path_denied`, `bundle_*`, `no_changes` ved publish | endring rammet en regel (kapittel 11) | les `detail`; fjern `.github/`-endringer, del opp i færre commits/filer |
 | `push_rejected`/`push_failed` | GitHub avviste (branch protection, PAT-rettigheter, eksisterende branch med annen historikk) | sjekk PAT og branchnavn; runneren bruker aldri force |
+| `container_start_failed` med «docker-init» i detaljen | Docker-installasjonen mangler `docker-init` (brukes av `--init`) | installer/gjenopprett `docker-init` ved siden av `dockerd`; ikke fjern `--init` fra koden |
+| J04 melder «swap tillatt» | kjernen mangler swap-accounting, så `--memory-swap` ignoreres (OOM kan utsettes av vertens swap) | aktiver `swapaccount=1` på kjernen eller slå av vertens swap; ellers aksepter og dokumentér avviket |
 | Runner/proxy stopper rett etter oppstart med `git_could_not_start`, `spawn EPERM` eller lignende | systemd-filteret `SystemCallFilter=@system-service` er for stramt for en eldre systemd (mangler `clone3` i `@system-service`) | kontroller `systemctl --version`; som siste utvei kommenter ut de to `SystemCallFilter`/`SystemCallErrorNumber`-linjene i enheten (svekker herdingen - dokumentér det) og `sudo systemctl daemon-reload` |
 | Mange rester av `jarvis-job-…`-containere | runner krasjet midt i opprydding | restart runneren: oppstartsavstemmingen fjerner alt merket `jarvis.role=job` og alle UUID-kataloger |
 

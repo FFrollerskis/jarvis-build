@@ -41,7 +41,7 @@ CHECKLIST=(
   "J04_docker_inspect            (2,3,4,5,6,7,8,9,10) privileged=false, read-only rootfs, cap-drop ALL, no-new-privileges, ikke-root, minne/CPU/PID, kun jobbnettverk, kun /work montert, ingen docker.sock"
   "J05_inne_i_containeren        (3,4,5,6,7,10) uid != 0, CapEff=0, ingen docker.sock, rootfs skrivebeskyttet, tmpfs noexec, ingen vertsmapper, ingen hemmelighets-env"
   "J06_ressursgrenser            (8)           minnegrense (OOM), PID-grense, tidsavbrudd dreper containeren"
-  "J07_nettverk_deny_by_default  (9)           ingen direkte rute ut, vertstjenester utilgjengelige, proxy: github OK, fremmed/privat/metadata nektet, kun CONNECT, jobb-containere når ikke hverandre"
+  "J07_nettverk_deny_by_default  (9)           ingen direkte rute ut, ingen eksterne DNS-oppslag, vertstjenester utilgjengelige, proxy: github OK, fremmed/privat/metadata nektet, kun CONNECT, jobb-containere når ikke hverandre"
   "J08_kansellering              (11)          DELETE midt i en kjørende exec dreper containeren umiddelbart"
   "J09_reclaim_etter_krasj       (12)          [--with-restart] SIGKILL på runner -> ved oppstart fjernes rest-containere og -kataloger"
   "J10_ttl                       (8)           [--with-ttl] jobb fjernes av TTL-rydderen"
@@ -299,6 +299,9 @@ check_J07() {
     case "${EXEC_OUT//[$'\n']/}" in 400|403) : ;; *) fails+=("CONNECT $target ga ${EXEC_OUT//[$'\n']/}, forventet 400/403") ;; esac
   done
   cexec 30000 node -e "$NODE_GET" "$GATEWAY" "$PROXY_PORT"; [ "${EXEC_OUT//[$'\n']/}" = "405" ] || fails+=("vanlig HTTP GET via proxy ga ${EXEC_OUT//[$'\n']/}, forventet 405")
+  # c1) DNS: containeren skal ikke kunne slå opp eksterne navn (proxyen slår opp selv; ellers er DNS en skjult kanal ut, f.eks. eksfiltrering via oppslag)
+  cexec 30000 sh -c 'getent hosts example.com >/dev/null 2>&1 && echo RESOLVED || echo NODNS'
+  [ "${EXEC_OUT//[$'\n']/}" = "NODNS" ] || fails+=("containeren kan slå opp eksterne DNS-navn (DNS er en vei ut)")
   # c2) IPv6 (kun OBSERVASJON, feiler aldri sjekken): jobbnettverket er IPv4-only. En ikke-loopback IPv6-adresse i containeren ville åpnet en vei de IPv4-reglene
   #     over ikke dekker (se runbooken, «IPv6»). Tallet skal være 0; er det ikke det, må eieren legge til tilsvarende ip6tables-regler.
   cexec 20000 sh -c 'grep -vc "^00000000000000000000000000000001 " /proc/net/if_inet6 2>/dev/null; true'
