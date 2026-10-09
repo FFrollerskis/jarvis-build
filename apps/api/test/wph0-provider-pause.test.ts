@@ -2,8 +2,9 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CONNECTOR_REGISTRY } from "@jarvis/tool-gateway";
+import { DEFAULT_PROFILES } from "@jarvis/model-gateway";
 import {
-  MODEL_FREEZE_PREFIX, createProviderPauseSource, modelFreezeTarget, pausedProvidersFrom, providerCredentialRefs, providerOfFreezeTarget
+  MODEL_FREEZE_PREFIX, createProviderPauseSource, freezeTargetError, knownModelProviders, modelFreezeTarget, pausedProvidersFrom, providerCredentialRefs, providerOfFreezeTarget
 } from "../src/provider-pause.ts";
 
 /**
@@ -25,6 +26,39 @@ describe("frys-målet for en modellleverandør", () => {
     for (const bad of ["github", "model:", "model:Anthropic", "model:../etc", "model:a b", "model:a:b", `model:${"x".repeat(41)}`, "MODEL:anthropic", " model:anthropic", "models:anthropic", ""]) {
       expect(providerOfFreezeTarget(bad), bad).toBeNull();
     }
+  });
+});
+
+describe("L-5: frys-målet valideres ved SKRIVING (model:Anthropic ga «Utført» uten at noe ble pauset)", () => {
+  it("kjente leverandører og vanlige verktøy-id-er slipper gjennom; verktøy-id-er røres ikke av modellvalideringen", () => {
+    for (const ok of ["model:anthropic", "model:openai", "model:gemini", "model:gemma_local", "model:gemma_hosted", "model:local_llm", "model:ollama", "model:kimi", "model:hermes", "github", "email", "finance_stripe", "ukjent_verktøy"]) {
+      expect(freezeTargetError(ok), ok).toBeNull();
+    }
+  });
+
+  it("stor bokstav, tomt navn, mellomrom, sti, kolon, for langt navn og en leverandør ingen adapter har avvises med tydelig feilkode - og navnet vises avkortet og uten spesialtegn", () => {
+    expect(freezeTargetError("model:Anthropic")).toBe("invalid_model_freeze_target:Anthropic");
+    expect(freezeTargetError("model:")).toBe("invalid_model_freeze_target:");
+    expect(freezeTargetError("model:a b")).toBe("invalid_model_freeze_target:a?b");
+    expect(freezeTargetError("model:../etc/passwd")).toBe("invalid_model_freeze_target:..?etc?passwd");
+    expect(freezeTargetError("model:a:b")).toBe("invalid_model_freeze_target:a:b");
+    expect(freezeTargetError(`model:${"x".repeat(80)}`)).toBe(`invalid_model_freeze_target:${"x".repeat(40)}`);
+    expect(freezeTargetError("model:finnes_ikke")).toBe("unknown_model_provider:finnes_ikke");
+    expect(freezeTargetError("model:anthropic ")).toBe("invalid_model_freeze_target:anthropic?");
+    expect(freezeTargetError("model:ANTHROPIC<script>")).toBe("invalid_model_freeze_target:ANTHROPIC?script?");
+    // bare «model:»-navnerommet er case-sensitivt: «MODEL:anthropic» er et vanlig (ukjent) tool_id-navn og validering av modellnavn gjelder ikke
+    expect(freezeTargetError("MODEL:anthropic")).toBeNull();
+  });
+
+  it("alle leverandører modellregisteret og connector-registeret kjenner er kjente (knappene i AI Center treffer alltid), og ingen kjent leverandør har et ugyldig navn", () => {
+    const known = knownModelProviders();
+    for (const p of DEFAULT_PROFILES) expect(known.has(p.provider), p.provider).toBe(true);
+    for (const c of CONNECTOR_REGISTRY.filter((x) => x.category === "model_provider")) expect(known.has(c.id), c.id).toBe(true);
+    for (const name of providerCredentialRefs().keys()) expect(known.has(name), name).toBe(true);
+    for (const name of known) expect(providerOfFreezeTarget(modelFreezeTarget(name)), name).toBe(name);
+    // en injisert liste brukes i stedet (testbar uten registeret)
+    expect(freezeTargetError("model:anthropic", new Set(["openai"]))).toBe("unknown_model_provider:anthropic");
+    expect(freezeTargetError("model:openai", new Set(["openai"]))).toBeNull();
   });
 });
 

@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ModelProviderAdapter, ModelResult } from "@jarvis/provider-adapters";
 import { MemoryTraceSink, ModelGateway, NoEligibleProviderError } from "@jarvis/model-gateway";
+import { OwnerControlsService, OwnerControlsTransport } from "@jarvis/owner-controls";
 import { KillSwitch, OwnerControls } from "@jarvis/policy";
-import { createProviderPauseSourceFromPool } from "../src/provider-pause.ts";
+import { createProviderPauseSourceFromPool, freezeTargetError } from "../src/provider-pause.ts";
 import { seedTenants, startH0Db, type H0Db } from "./support/h0-db.ts";
 
 /**
@@ -67,6 +68,36 @@ describe("pausekilden som app-rolle", () => {
   it("kun eieren kan pause: en annen aktør nektes av OwnerControls (autoritet håndheves der, ikke i kontrollsenteret)", async () => {
     await expect(controls().freezeConnectorDurable("model:openai", "x", "person-annen")).rejects.toThrow(/owner_control_unauthorized/);
     expect((await createProviderPauseSourceFromPool(db.appPool).pausedProviders()).size).toBe(0);
+  });
+});
+
+describe("L-5: frys-målet valideres ved skriving (transport + ekte database)", () => {
+  const transport = () => {
+    const killSwitch = new KillSwitch(db.appPool, { owner_person_id: OWNER });
+    const service = new OwnerControlsService(killSwitch, controls(), undefined, { freezeTargetValidator: (t) => freezeTargetError(t) });
+    return new OwnerControlsTransport(service);
+  };
+  const context = { identity: { person_id: OWNER, tenant_id: TENANT, memory_space_id: "personal", session_id: "s", device_id: "d", channel: "web", auth_strength: "signed" } } as never;
+  const frozenRows = async (): Promise<string[]> => (await db.adminPool.query("SELECT control_target FROM owner_control_state WHERE control_kind = 'connector_freeze' ORDER BY control_target")).rows.map((r) => String(r.control_target));
+
+  it("model:Anthropic / model: / en leverandør ingen adapter har avvises med tydelig feil - og INGEN rad skrives (før ga det «Utført» uten pause)", async () => {
+    const t = transport();
+    for (const [target, error] of [["model:Anthropic", "invalid_model_freeze_target:Anthropic"], ["model:", "invalid_model_freeze_target:"], ["model:finnes_ikke", "unknown_model_provider:finnes_ikke"]] as const) {
+      await expect(t.invoke("freeze_connector", { connector_id: target, reason: "x" }, "", context), target).rejects.toThrow(error);
+    }
+    expect(await frozenRows()).toEqual([]);
+  });
+
+  it("model:anthropic skrives og pauser leverandøren; gjenopptak av både gyldig og et gammelt ugyldig mål virker", async () => {
+    const t = transport();
+    await t.invoke("freeze_connector", { connector_id: "model:anthropic", reason: "test" }, "", context);
+    expect(await frozenRows()).toEqual(["model:anthropic"]);
+    expect([...(await createProviderPauseSourceFromPool(db.appPool).pausedProviders())]).toEqual(["anthropic"]);
+    // en gammel, ugyldig rad (skrevet før valideringen fantes) kan fortsatt ryddes bort
+    await controls().freezeConnectorDurable("model:Anthropic", "gammel", OWNER);
+    await t.invoke("unfreeze_connector", { connector_id: "model:Anthropic" }, "", context);
+    await t.invoke("unfreeze_connector", { connector_id: "model:anthropic" }, "", context);
+    expect(await frozenRows()).toEqual([]);
   });
 });
 

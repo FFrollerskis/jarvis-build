@@ -1,6 +1,6 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import type pg from "pg";
-import type { ProviderPauseSource } from "@jarvis/model-gateway";
+import { DEFAULT_PROFILES, type ProviderPauseSource } from "@jarvis/model-gateway";
 import { KillSwitch, OwnerControls } from "@jarvis/policy";
 import { CONNECTOR_REGISTRY, type ConnectorDefinition } from "@jarvis/tool-gateway";
 
@@ -30,6 +30,28 @@ export function providerOfFreezeTarget(target: string): string | null {
   if (!target.startsWith(MODEL_FREEZE_PREFIX)) return null;
   const name = target.slice(MODEL_FREEZE_PREFIX.length);
   return PROVIDER_NAME.test(name) ? name : null;
+}
+
+/**
+ * Kjente modellleverandører = modellregisteret (profilene i `DEFAULT_PROFILES`, som dekker alle adaptere) pluss leverandørene som har en nøkkel (`providerCredentialRefs`). Samme navn som `ModelGateway` ruter på.
+ */
+export function knownModelProviders(registry: readonly ConnectorDefinition[] = CONNECTOR_REGISTRY): ReadonlySet<string> {
+  return new Set<string>([...DEFAULT_PROFILES.map((p) => p.provider), ...providerCredentialRefs(registry).keys()]);
+}
+
+/**
+ * Gjennomgang av PR #316 (L-5): validering av et frys-mål ved SKRIVING. Uten denne ga `model:Anthropic` (stor bokstav), `model:` eller `model:finnes_ikke` «Utført» uten å pause noe: raden ble lagret, men
+ * `providerOfFreezeTarget` leser bare små bokstaver/tall/understrek, og ingen leverandør har navnet, så eieren trodde leverandøren var stanset mens den fortsatt ble brukt.
+ * Returnerer `null` når målet er greit (et vanlig `tool_id` røres ikke - den veien er uendret), ellers en kort feilkode som vises til eieren. Gjelder KUN frysing: å gjenoppta et (gammelt, ugyldig) mål skal
+ * alltid være mulig.
+ */
+export function freezeTargetError(target: string, known: ReadonlySet<string> = knownModelProviders()): string | null {
+  if (!target.startsWith(MODEL_FREEZE_PREFIX)) return null;
+  const name = target.slice(MODEL_FREEZE_PREFIX.length);
+  const shown = name.slice(0, 40).replace(/[^A-Za-z0-9_.:-]/g, "?");
+  if (!PROVIDER_NAME.test(name)) return `invalid_model_freeze_target:${shown}`;
+  if (!known.has(name)) return `unknown_model_provider:${shown}`;
+  return null;
 }
 
 /**

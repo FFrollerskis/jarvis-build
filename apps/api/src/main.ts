@@ -129,6 +129,7 @@ import { ChatJobs, MAX_ACTIVE_JOBS, TasksDelegateTransport, tasksDelegateToolDef
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
 import { createControlCenterRegistry, registerControlCenters } from "./control-center/register.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
+import { freezeTargetError } from "./provider-pause.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
 
 const port = envPort("JARVIS_API_PORT", 3010);
@@ -1017,7 +1018,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         grants: grantService,
         devices: new DeviceService(pool),
         authority: ownerControlAuthority
-      }), toolGateway, (process.env["JARVIS_DESTINATION_HOST_ALLOWLIST"] ?? "").split(",").map((h) => h.trim()).filter((h) => h.length > 0))),
+        // Gjennomgang av PR #316 (L-5): `model:<leverandør>` valideres mot modellregisteret ved frysing (ellers «Utført» uten pause).
+      }, { freezeTargetValidator: (target) => freezeTargetError(target) }), toolGateway, (process.env["JARVIS_DESTINATION_HOST_ALLOWLIST"] ?? "").split(",").map((h) => h.trim()).filter((h) => h.length > 0))),
       // UA-11 Executive Mode "K2" (D-64): decision log/scenarios/risk register/
       // goals-OKRs - RENE journalposter over DEN SAMME `pool`-instansen som
       // resten av denne filen (`withMemoryTransaction`, se `GovernanceService`

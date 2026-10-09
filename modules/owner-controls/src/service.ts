@@ -37,11 +37,20 @@ export interface OwnerControlsDeviceRevocationDeps {
  * betrodde `ToolInvocationContext.identity.person_id` (D-68-disiplinen,
  * se transport.ts).
  */
+/**
+ * Gjennomgang av PR #316 (L-5): valgfri validering av et frys-mål FØR det skrives. Returnerer `null` (greit) eller en feilkode som kastes. Eies av den som kjenner målnavnerommene (`apps/api`: `model:<leverandør>`),
+ * slik at denne modulen ikke avhenger av modellregisteret. Utelatt = ingen validering (som før).
+ */
+export interface OwnerControlsServiceOptions {
+  freezeTargetValidator?: (connectorId: string) => string | null;
+}
+
 export class OwnerControlsService {
   constructor(
     private readonly killSwitch: KillSwitch,
     private readonly ownerControls: OwnerControls,
-    private readonly deviceRevocation?: OwnerControlsDeviceRevocationDeps
+    private readonly deviceRevocation?: OwnerControlsDeviceRevocationDeps,
+    private readonly options: OwnerControlsServiceOptions = {}
   ) {}
 
   async getControlState(): Promise<OwnerControlState> {
@@ -71,6 +80,8 @@ export class OwnerControlsService {
   }
 
   async freezeConnector(connectorId: string, reason: string, actorPersonId: string): Promise<void> {
+    const invalid = this.options.freezeTargetValidator?.(connectorId) ?? null;
+    if (invalid !== null) throw new Error(invalid); // ingen skriving: «Utført» skal aldri bety at ingenting ble stanset
     await this.ownerControls.freezeConnectorDurable(connectorId, reason, actorPersonId);
   }
 
