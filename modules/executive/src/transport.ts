@@ -83,6 +83,11 @@ export class ExecutiveTransport implements ToolTransport {
         const report = await this.service.getEvolutionReport();
         return { data: report as unknown as JsonValue };
       }
+      case "get_value_report": {
+        // WP-C4: tenanten kommer UTELUKKENDE fra den betrodde kontekst-identiteten (D-68), aldri fra parametre.
+        const report = await this.service.getValueReport(identity.tenant_id);
+        return { data: report as unknown as JsonValue };
+      }
       case "get_connector_status": {
         const status = await this.service.getConnectorStatus();
         return { data: { ...status, summary_no: summarizeConnectorStatusNo(status.connectors) } as unknown as JsonValue };
@@ -233,6 +238,10 @@ export function executiveToolDefinitions(transport: ExecutiveTransport): ToolDef
     read(
       "get_evolution_report",
       "Svar på «hvordan utvikler du deg?»/«hva kan du forbedre?»/«hva har du lært?»: evolusjonsportene (EV-0…EV-23) slik de står NÅ, fra EKTE målinger (endringsregister, kostnad, tilkoblinger, vedlikeholdsplan, modellvalg i skygge …). KUN observasjon - jeg endrer ingenting av meg selv (selvendring er frosset), og sovende deler sies å være sovende. Ukjent vises som ukjent, aldri som bra."
+    ),
+    read(
+      "get_value_report",
+      "Svar på «hva har du hjulpet meg med?»/«hvor mye bruker jeg deg?»/«hva er verdien?» fra EKTE tall (kun antall og tidspunkt - aldri innhold): bruk per verdiløkke (Daily Brief, oppfølging, jobber, samtaler, bekreftelser, kost) siste 7 og 30 døgn, pluss status for de sovende løkkene (Builder Loop-beredskap og driftsforslag). Det som ikke kan måles står som «ikke målbart», aldri som 0. Gjengi summary_no."
     ),
     read(
       "get_connector_status",
