@@ -1,6 +1,6 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
-import { classifyContentSensitivity, type ToolExecutor } from "@jarvis/model-gateway";
-import type { ToolResultMessage } from "@jarvis/provider-adapters";
+import { DEFAULT_PROFILES, classifyContentSensitivity, type ToolExecutor } from "@jarvis/model-gateway";
+import type { ToolCallRequest, ToolResultMessage } from "@jarvis/provider-adapters";
 
 /**
  * D-449 (Q-50, revisjonsfunn): en delegert jobb på skyruten sender VERKTØYRESULTATENE videre til skymodellen. Minnesøket (`memory.search`) returnerer alle aktive treff i minnerommet uten filter, også elementer
@@ -121,16 +121,38 @@ export function screenToolResultForCloud(out: ToolResultMessage, toolName?: stri
   };
 }
 
-/** Pakker en executor slik at hvert resultat skjermes før modellen ser det. `onWithheld` kalles kun når noe ble holdt tilbake (aldri med innhold). */
-export function cloudScreenedExecutor(inner: ToolExecutor, onWithheld?: (info: { tool: string; withheld: number }) => void): ToolExecutor {
+/**
+ * Pakker en executor slik at hvert resultat skjermes før modellen ser det. `onWithheld` kalles kun når noe ble holdt tilbake (aldri med innhold).
+ * `appliesTo` (valgfri) begrenser skjermingen til kall der svaret faktisk går til en skymodell: chatten (#228) bruker `servedByCloudModel`, slik at den lokale modellen - som har lov til å se alt - ikke mister minnetreff.
+ */
+export function cloudScreenedExecutor(
+  inner: ToolExecutor,
+  onWithheld?: (info: { tool: string; withheld: number }) => void,
+  appliesTo?: (call: ToolCallRequest) => boolean
+): ToolExecutor {
   return {
     execute: async (call, ctx) => {
       const out = await inner.execute(call, ctx);
+      if (appliesTo !== undefined && !appliesTo(call)) return out;
       const screened = screenToolResultForCloud(out, call.tool_name);
       if (screened.withheld > 0) onWithheld?.({ tool: out.source ?? call.tool_name, withheld: screened.withheld });
       return screened.result;
     }
   };
+}
+
+/**
+ * #228 (D-450): leverandørene som er registrert som LOKALE (`locality: "local"` i modellregisteret) får se alt; alt annet - sky, hostet gratis-tier og leverandører som ikke står i registeret - regnes som sky (fail-closed,
+ * motsatt av `cloudToolTurnsAllowed`, som regner en ukjent leverandør som lokal for sin egen "ikke sky"-vurdering: her er spørsmålet hva som kan lekke, og da er ukjent = sky).
+ */
+const LOCAL_PROVIDERS: ReadonlySet<string> = new Set(DEFAULT_PROFILES.filter((profile) => profile.locality === "local").map((profile) => profile.provider));
+export function servedByCloudModel(call: Pick<ToolCallRequest, "provider">): boolean {
+  return !LOCAL_PROVIDERS.has(call.provider);
+}
+
+/** Merknaden i chatten (bak svaret) når minnetreff ble holdt tilbake fra en skymodell. Samme tekst som for jobber, men med blank linje foran slik rutemerknadene i chatten har. */
+export function chatWithheldNote(): string {
+  return `\n\n${jobWithheldNote()}`;
 }
 
 /**

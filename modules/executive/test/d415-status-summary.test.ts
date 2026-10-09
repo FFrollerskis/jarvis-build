@@ -15,6 +15,9 @@ describe("D-415 summary_no", () => {
     expect(t).toContain("github (2)");
     expect(t).toContain("Mangler oppsett: slack");
     expect(t).toContain("github nede");
+    // Gjennomgang av WP-A (D-451): svaret havner i samtalehistorikken, og «Helseproblemer» (Q-52 A) ville låst de neste fire turene til lokal modell. Eget ord for tilkoblingene.
+    expect(t).toContain("Tilkoblingsproblemer: github nede");
+    expect(t).not.toMatch(/helse/i);
   });
   it("D-437: forbeholdet fra en prosess med snevret miljø står i summary_no (det modellen faktisk videreformidler), og mangler ellers", () => {
     const base = { chat_accessible_tools: [{ tool_id: "slack", actions: ["a"], capability_classes: ["A"], configured: false }], connector_health: [], serving_model: null };

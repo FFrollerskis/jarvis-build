@@ -430,11 +430,16 @@ describe("D-449: delegeringens kontrakt (TasksDelegateTransport)", () => {
       expect(cloudToolTurnsAllowed({ ...base, ...origin, title: "Økonomi", prompt: "hva er saldoen min" })).toBe(false);
       expect(cloudToolTurnsAllowed({ ...base, ...origin, title: "Sjekk saldoen min", prompt: "list åpne PR-er" })).toBe(false); // sensitiv TITTEL, nøytral prompt
       // D-381-paritet (gjennomgang nr. 3): ord som får chatten til å velge et finansverktøy, men som klassifiseringen ikke kjenner, holder også jobben lokal - i tittel eller prompt.
-      for (const text of ["Finn alle e-postene fra banken forrige måned", "Gå gjennom utgiftene og abonnementene mine", "Sjekk kontoutskriften fra DNB", "Finn kvitteringene for bankkortet"]) {
+      for (const text of ["Finn alle e-postene fra banken forrige måned", "Gå gjennom utgiftene og abonnementene mine", "Finn kvitteringene for bankkortet"]) {
         expect(classifyContentSensitivity({ texts: [text] }).sensitivity, text).not.toBe("SECRET_RESTRICTED");
         expect(cloudToolTurnsAllowed({ ...base, ...origin, title: "Oppsummering", prompt: text }), text).toBe(false);
         expect(cloudToolTurnsAllowed({ ...base, ...origin, title: text.slice(0, 60), prompt: "oppsummer det" }), text).toBe(false);
       }
+      // Q-52 A (D-450): «kontoutskriften» er nå også kjent av klassifiseringen (var et kjent hull her); jobben er lokal uansett hvilken av de to portene som fanger den.
+      const statement = "Sjekk kontoutskriften fra DNB";
+      expect(classifyContentSensitivity({ texts: [statement] }).sensitivity).toBe("SECRET_RESTRICTED");
+      expect(cloudToolTurnsAllowed({ ...base, ...origin, title: "Oppsummering", prompt: statement })).toBe(false);
+      expect(cloudToolTurnsAllowed({ ...base, ...origin, title: statement, prompt: "oppsummer det" })).toBe(false);
       expect(cloudToolTurnsAllowed({ ...base, ...origin, prompt: "list PR-er" , memorySpaces: ["health"] })).toBe(false);
       expect(cloudToolTurnsAllowed({ ...base, ...origin, prompt: "list PR-er", memorySpaces: ["personal", "health"] })).toBe(false);
       expect(cloudToolTurnsAllowed({ ...base, ...origin, memorySpaces: ["personal"] })).toBe(true);

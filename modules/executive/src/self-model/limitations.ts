@@ -13,6 +13,8 @@ export interface LimitationInput {
   /** `CapabilityRegistry`-profilene. `all` = alle evner systemet kjenner til. */
   modelProfiles: ReadonlyArray<{ provider: string; capabilities: readonly string[] }>;
   allModelCapabilities: readonly string[];
+  /** WP-C2: sant når en backup-statusfil er montert og leses (`backup`-området har en leser). Da er «ingen heartbeat»-begrensningen byttet ut med en presis. */
+  backupStatusReadable?: boolean;
 }
 
 const HAND_WRITTEN: readonly Limitation[] = [
@@ -66,8 +68,16 @@ const HAND_WRITTEN: readonly Limitation[] = [
   }
 ];
 
+/** WP-C2: med en lesbar statusfil er den gamle påstanden usann - men det jeg ser er fortsatt kun det backup-skriptet selv melder. */
+const BACKUP_STATUS_READABLE: Limitation = {
+  id: "no_backup_heartbeat",
+  statement: "Jeg ser backup kun slik backup-skriptet selv melder det i en statusfil (alder, off-site, restore-verifisering); jeg kan ikke selv ta backup, kjøre en restore eller bevise at kopiene virker.",
+  kind: "technical",
+  source_ref: "ops/backup/schedule.mjs (backup-status.json), apps/api/src/backup-status.ts"
+};
+
 export function buildLimitationRegistry(input: LimitationInput): Limitation[] {
-  const out: Limitation[] = [...HAND_WRITTEN];
+  const out: Limitation[] = HAND_WRITTEN.map((l) => (l.id === "no_backup_heartbeat" && input.backupStatusReadable === true ? BACKUP_STATUS_READABLE : l));
 
   for (const toolId of [...input.forbiddenModelToolIds].sort()) {
     out.push({

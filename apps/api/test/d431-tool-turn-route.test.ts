@@ -23,6 +23,8 @@ const route = { provider: "anthropic", model: "claude-sonnet-5-5" };
 
 function build(opts: {
   tools: string[];
+  /** Q-53 A: `tool_id` for hver verktøydefinisjon (som `select()` i main.ts); udefinert = eldre oppsett som avgjør «reserven» av navnet. */
+  toolIds?: string[];
   toolTurnRoute?: { provider: string; model?: string } | null;
   minSensitivity?: "SECRET_RESTRICTED";
   onTools?: (input: CompleteInput) => Promise<{ text: string }>;
@@ -44,7 +46,7 @@ function build(opts: {
     tools: {
       definitions: opts.tools.map(def),
       executorFor: () => ({ execute: async () => { throw new Error("ikke brukt"); } }) as unknown as ToolExecutor,
-      select: () => ({ definitions: opts.tools.map(def), limits: LIMITS, ...(opts.minSensitivity ? { min_sensitivity: opts.minSensitivity } : {}) })
+      select: () => ({ definitions: opts.tools.map(def), limits: LIMITS, ...(opts.toolIds ? { tool_ids: opts.toolIds } : {}), ...(opts.minSensitivity ? { min_sensitivity: opts.minSensitivity } : {}) })
     }
   });
 }
@@ -63,6 +65,25 @@ describe("D-431: verktøyturer til skymodell, ren prat lokalt", () => {
     await build({ tools: ["memory__search"], toolTurnRoute: route, captured }).handle(identity, ASK);
     expect(captured[0]?.providerPreference).toEqual(["gemma_local", "gemma_hosted"]);
     expect(captured[0]?.request.model).toBeUndefined();
+  });
+
+  it("Q-53 A (D-450): produksjonens minneverktøy (search_my_memory/suggest_memory, tjeneste memory) er reserven → forblir lokal; sammen med et ekte verktøy går turen til sky", async () => {
+    const memoryOnly: CompleteInput[] = [];
+    await build({ tools: ["search_my_memory", "suggest_memory"], toolIds: ["memory", "memory"], toolTurnRoute: route, captured: memoryOnly }).handle(identity, ASK);
+    expect(memoryOnly[0]?.providerPreference).toEqual(["gemma_local", "gemma_hosted"]);
+    expect(memoryOnly[0]?.request.model).toBeUndefined();
+    // Uten tool_ids (eldre oppsett) brukes de kjente navnene.
+    const byName: CompleteInput[] = [];
+    await build({ tools: ["search_my_memory"], toolTurnRoute: route, captured: byName }).handle(identity, ASK);
+    expect(byName[0]?.providerPreference).toEqual(["gemma_local", "gemma_hosted"]);
+    const mixed: CompleteInput[] = [];
+    await build({ tools: ["search_my_memory", "read_calendar"], toolIds: ["memory", "calendar"], toolTurnRoute: route, captured: mixed }).handle(identity, ASK);
+    expect(mixed[0]?.providerPreference).toEqual(["anthropic"]);
+    expect(mixed[0]?.request.model).toBe("claude-sonnet-5-5");
+    // tool_ids vinner over navnet: et verktøy som HETER som minneverktøyet men tilhører en annen tjeneste er ikke reserven.
+    const spoofed: CompleteInput[] = [];
+    await build({ tools: ["search_my_memory"], toolIds: ["email"], toolTurnRoute: route, captured: spoofed }).handle(identity, ASK);
+    expect(spoofed[0]?.providerPreference).toEqual(["anthropic"]);
   });
 
   it("uten toolTurnRoute (av) → alt lokalt som før", async () => {
