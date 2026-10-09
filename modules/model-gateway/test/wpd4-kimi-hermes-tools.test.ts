@@ -90,7 +90,7 @@ describe("Kimi gjennom ModelGateway.completeWithTools", () => {
         : { json: { choices: [{ message: { content: "Det er fem grader i Oslo." }, finish_reason: "stop" }], usage: USAGE } }
     );
     const executed: Executed = { calls: [] };
-    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [new KimiAdapter("k", "kimi-test", s.url, 5000)] });
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [new KimiAdapter("k", "kimi-test", s.url, 5000)], meshToolsVerified: ["kimi"] });
     const out = await gateway.completeWithTools(input(), { tools: [WEATHER], executor: executor(executed) });
     expect(out.text).toBe("Det er fem grader i Oslo.");
     expect(out.provider).toBe("kimi");
@@ -114,7 +114,7 @@ describe("Kimi gjennom ModelGateway.completeWithTools", () => {
     }));
     const executed: Executed = { calls: [] };
     const tokens: string[] = [];
-    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [new KimiAdapter("k", "kimi-test", s.url, 5000)] });
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [new KimiAdapter("k", "kimi-test", s.url, 5000)], meshToolsVerified: ["kimi"] });
     const out = await gateway.completeWithTools(input({ purpose: "CHAT" }), { tools: [WEATHER], executor: executor(executed), onEvent: (e) => { if (e.type === "text_delta") tokens.push(e.text); } });
     expect(tokens.join("")).toBe("Fem grader.");
     expect(out.text).toBe("Fem grader.");
@@ -126,7 +126,7 @@ describe("Kimi gjennom ModelGateway.completeWithTools", () => {
     const s = await serve(() => ({ json: { choices: [{ message: { content: null, tool_calls: [{ id: "k1", type: "function", function: { name: "get_weather", arguments: "{ikke json" } }] }, finish_reason: "tool_calls" }], usage: USAGE } }));
     const executed: Executed = { calls: [] };
     const backup = new ScriptedAdapter(() => "reserve-svar");
-    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [new KimiAdapter("k", "kimi-test", s.url, 5000), backup] });
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [new KimiAdapter("k", "kimi-test", s.url, 5000), backup], meshToolsVerified: ["kimi"] });
     // QUALITY rangerer kimi (kvalitet 4) foran scripted (kvalitet 1); begge har tool_calling, så scripted er neste kandidat i planen.
     const out = await gateway.completeWithTools(input({ mode: "QUALITY" as const }), { tools: [WEATHER], executor: executor(executed) });
     expect(out.provider).toBe("scripted");
@@ -138,7 +138,7 @@ describe("Kimi gjennom ModelGateway.completeWithTools", () => {
   it("uten reserve: invalid_tool_call kastes, executoren kjøres aldri", async () => {
     const s = await serve(() => ({ json: { choices: [{ message: { content: null, tool_calls: [{ id: "k1", type: "function", function: { name: "get_weather", arguments: "[1]" } }] }, finish_reason: "tool_calls" }], usage: USAGE } }));
     const executed: Executed = { calls: [] };
-    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [new KimiAdapter("k", "kimi-test", s.url, 5000)] });
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [new KimiAdapter("k", "kimi-test", s.url, 5000)], meshToolsVerified: ["kimi"] });
     const err = await gateway.completeWithTools(input(), { tools: [WEATHER], executor: executor(executed) }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ProviderError);
     expect((err as ProviderError).kind).toBe("invalid_tool_call");
@@ -154,7 +154,7 @@ describe("Hermes gjennom ModelGateway.completeWithTools", () => {
       json: { choices: [{ message: { content: i === 0 ? tagged("get_weather", { city: "Oslo" }) : "Det er fem grader i Oslo." }, finish_reason: "stop" }], usage: USAGE }
     }));
     const executed: Executed = { calls: [] };
-    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [new HermesAdapter("k", "Hermes-test", s.url, 5000)] });
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [new HermesAdapter("k", "Hermes-test", s.url, 5000)], meshToolsVerified: ["hermes"] });
     const out = await gateway.completeWithTools(input(), { tools: [WEATHER], executor: executor(executed) });
     expect(out.text).toBe("Det er fem grader i Oslo.");
     expect(out.provider).toBe("hermes");
@@ -169,7 +169,7 @@ describe("Hermes gjennom ModelGateway.completeWithTools", () => {
   it("et hallusinert eller injisert kall til et ukjent verktøy når ALDRI executoren", async () => {
     const s = await serve(() => ({ json: { choices: [{ message: { content: tagged("delete_everything", {}) }, finish_reason: "stop" }], usage: USAGE } }));
     const executed: Executed = { calls: [] };
-    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [new HermesAdapter("k", "Hermes-test", s.url, 5000)] });
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [new HermesAdapter("k", "Hermes-test", s.url, 5000)], meshToolsVerified: ["hermes"] });
     const err = await gateway.completeWithTools(input(), { tools: [WEATHER], executor: executor(executed) }).catch((e: unknown) => e);
     expect((err as ProviderError).kind).toBe("invalid_tool_call");
     expect(executed.calls).toHaveLength(0);
@@ -177,7 +177,7 @@ describe("Hermes gjennom ModelGateway.completeWithTools", () => {
 
   it("streaming-banen velger IKKE Hermes (ingen streaming-påstand): kun Hermes konfigurert gir ærlig no_eligible_provider, og ingen forespørsel sendes", async () => {
     const s = await serve(() => ({ json: { choices: [{ message: { content: "x" }, finish_reason: "stop" }], usage: USAGE } }));
-    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [new HermesAdapter("k", "Hermes-test", s.url, 5000)] });
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [new HermesAdapter("k", "Hermes-test", s.url, 5000)], meshToolsVerified: ["hermes"] });
     await expect(
       gateway.completeWithTools(input({ purpose: "CHAT" }), { tools: [WEATHER], executor: executor({ calls: [] }), onEvent: () => undefined })
     ).rejects.toMatchObject({ name: "NoEligibleProviderError" });

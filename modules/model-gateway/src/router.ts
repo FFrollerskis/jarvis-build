@@ -199,9 +199,14 @@ interface ProviderRuntime {
 }
 
 export class AiRouter {
+  /**
+   * `autoVerified` (M3, gjennomgang av PR #315): leverandører eieren har erklært LIVE-verifisert for capabilities registeret bare PÅSTÅR (`ModelProfile.live_unverified`; `JARVIS_MESH_TOOLS_VERIFIED`). Tom (standard) = AUTO-ruting
+   * bruker ikke slike leverandører til kall som krever en uverifisert capability (verktøykall, Kimi-streaming). Gjelder kun den scorede grenen - eierens eksplisitte valg (`provider`, `providerPreference`) er uendret.
+   */
   constructor(
     private readonly registry: CapabilityRegistry,
-    private readonly health: ProviderHealthTracker
+    private readonly health: ProviderHealthTracker,
+    private readonly autoVerified: ReadonlySet<string> = new Set()
   ) {}
 
   plan(input: RouteInput, providers: Map<string, ProviderRuntime>): RoutePlan {
@@ -296,6 +301,8 @@ export class AiRouter {
     let paidExcludedCount = 0;
     const alreadyAttempted = new Set(input.excludeProviders ?? []);
     const skippedAttempted: string[] = [];
+    // M3: leverandører som er hoppet over fordi en capability kallet krever er påstått, men ikke live-verifisert av eieren (navn → capabilities).
+    const skippedUnverified = new Map<string, ModelCapability[]>();
     for (const [name, rt] of providers) {
       if (!rt.configured) continue;
       if (alreadyAttempted.has(name)) { skippedAttempted.push(name); continue; }
@@ -310,6 +317,9 @@ export class AiRouter {
         paidExcludedCount++;
         continue;
       }
+      // M3: siste port - påstått, men ikke live-verifisert capability som dette kallet krever (kun hvis leverandøren ellers ville vært kvalifisert).
+      const unverified = (profile.live_unverified ?? []).filter((c) => required.has(c));
+      if (unverified.length > 0 && !this.autoVerified.has(name)) { skippedUnverified.set(name, unverified); continue; }
       eligible.push({ profile, model: rt.model, state: this.health.state(name, true) });
     }
     if (eligible.length === 0) {
@@ -324,7 +334,10 @@ export class AiRouter {
       }
       throw new NoEligibleProviderError(
         `ingen konfigurert provider dekker [${[...required].join(",")}]` +
-          (input.sensitivity ? ` (sensitivity=${input.sensitivity})` : "")
+          (input.sensitivity ? ` (sensitivity=${input.sensitivity})` : "") +
+          (skippedUnverified.size > 0
+            ? ` (ikke live-verifisert, utelatt fra AUTO-ruting: ${[...skippedUnverified].map(([name, caps]) => `${name}:${caps.join("+")}`).join(", ")} - kjør mesh-live-smoke.ts --tools og sett JARVIS_MESH_TOOLS_VERIFIED)`
+            : "")
       );
     }
 

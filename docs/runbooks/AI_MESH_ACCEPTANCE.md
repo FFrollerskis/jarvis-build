@@ -179,9 +179,13 @@ Adapterene for Kimi (OpenAI-kompatibelt `tools`/`tool_calls`, SSE-streaming) og 
 er bevist mot fake-servere i testene. Registeret påstår `tool_calling` for dem **kun** fordi testene beviser det - **mot ekte Moonshot/Nous er det ikke verifisert før du har kjørt `--tools`.**
 Testverktøyet `smoke_get_time` utfører ingenting; skriptet leverer selv et falskt resultat tilbake i «rundtur»-steget.
 
-**Rekkefølge (viktig):** AUTO-ruting velger på registeret, og registeret påstår nå `tool_calling` for Kimi og Hermes. Er nøkkelen satt, kan en bakgrunnsjobb med verktøy (`tools: true`, uten `paid_models_allowed=false`) derfor velge dem
-allerede før du har kjørt `--tools` (begge er registrert som rimelige skymodeller med høy kvalitetsklasse og kan vinne AUTO-poengene). Kjør `--providers kimi,hermes --tools` FØR du legger nøklene inn for bakgrunnsjobber, eller la dem stå tomme til beviset foreligger. Chattens verktøyturer
-er upåvirket: de går til den faste verktøyruten (`JARVIS_TOOL_TURN_MODEL`, D-431) eller den lokale kjeden, med mindre du selv har satt Kimi/Hermes inn i `JARVIS_CHAT_CANDIDATES`.
+**Erklæring (gjennomgang av PR #315, M3):** registeret påstår `tool_calling` for Kimi og Hermes (Kimi også `streaming`), men AUTO-ruting **bruker det ikke på tillit**. Uten din erklæring velges Kimi/Hermes aldri automatisk til en verktøyløkke
+(bakgrunnsjobber med verktøy, den siste reserven D-354/D-404) og Kimi aldri som reserve for strømmet chat - de rangerer ellers høyt (rimelige skymodeller med høy kvalitetsklasse). Kjør først `--providers kimi,hermes --tools`.
+Når en leverandør ga `kall=TOOL_CALL_OK` og `rundtur=ROUNDTRIP_OK` (Kimi også `streaming=STREAM_TOOL_CALL_OK`), sett `JARVIS_MESH_TOOLS_VERIFIED=kimi` (eller `kimi,hermes`) i `.env` og kjør `docker compose … up -d` (api OG worker leser variabelen).
+Tom/usatt = ingen erklært (standard). Ugyldig verdi (store bokstaver, mellomrom i navn, tomme ledd, mer enn 16 navn) = tom liste og en logglinje `mesh_tools_verified_invalid` - en skrivefeil aktiverer aldri noe.
+Erklæringen åpner ingen annen port: helse/økonomi/hemmeligheter går fortsatt aldri til sky, `paid_models_allowed=false` og `mode: LOCAL` gjelder, og en leverandør som er nede hoppes over som før.
+Dine **eksplisitte** valg påvirkes ikke: står Kimi/Hermes i `JARVIS_CHAT_CANDIDATES`, eller ber du om «bruk Kimi», brukes de uten erklæring. Får AUTO-ruting kun uerklærte leverandører å velge mellom, feiler kallet lukket med
+`no_eligible_provider … ikke live-verifisert, utelatt fra AUTO-ruting: kimi:tool_calling …` - aldri et stille kall. Chattens verktøyturer er ellers upåvirket: de går til den faste verktøyruten (`JARVIS_TOOL_TURN_MODEL`, D-431) eller den lokale kjeden.
 
 | Resultat per leverandør | Betyr |
 |---|---|

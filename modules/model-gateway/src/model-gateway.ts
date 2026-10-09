@@ -23,6 +23,7 @@ import { classifyCompletionOutcome, computeAdaptiveRetryMaxTokens, type Completi
 import { CapabilityRegistry, type ModelCapability } from "./capability-registry.ts";
 import { ProviderHealthTracker, type ProviderHealthDetails, type ProviderHealthState } from "./provider-health.ts";
 import { AiRouter, type RoutePlan } from "./router.ts";
+import { meshToolsVerifiedFromEnv } from "./mesh-verification.ts";
 import { assertExplicitPricing, costOre as computeCostOre, DEFAULT_PRICING, type PricingTable } from "./pricing.ts";
 import { modelCatalogFromEnv, type CatalogModel, type ModelTier } from "./model-catalog.ts";
 import { describeTask, HeuristicRoutingAdvisor, selectModelForTier, type RoutingAdvisor } from "./routing-advisor.ts";
@@ -172,6 +173,11 @@ export interface GatewayOptions {
    * Udefinert = ingen venting (uendret oppførsel, f.eks. i worker-prosessen som ikke ser API-ets chat).
    */
   priorityGate?: InteractivePriorityGate;
+  /**
+   * WP-D4 (M3, gjennomgang av PR #315): leverandører eieren har erklært LIVE-verifisert for verktøykall (og Kimi for streaming) etter `mesh-live-smoke.ts --tools`. AUTO-ruting bruker ikke Kimi/Hermes til verktøyløkker før de står her;
+   * eksplisitte valg (`provider`, `providerPreference`) er uendret. Udefinert = leses fra `JARVIS_MESH_TOOLS_VERIFIED` (standard tom) - samme kilde i api OG worker, så bakgrunnsjobber og D-404-omkjøringen følger det samme.
+   */
+  meshToolsVerified?: Iterable<string>;
 }
 
 /**
@@ -252,6 +258,8 @@ export interface MeshProviderDetail extends ProviderHealthDetails {
   locality: "local" | "cloud";
   capabilities: ModelCapability[];
   hosted_free_tier: boolean;
+  /** M3: capabilities som er PÅSTÅTT men ikke live-verifisert og som AUTO-ruting derfor ikke bruker på tillit (tom = alt påstått brukes). Fjernes ved `JARVIS_MESH_TOOLS_VERIFIED=<leverandør>`. */
+  auto_unverified?: ModelCapability[];
 }
 
 export interface MeshStatus {
@@ -306,6 +314,7 @@ export class ModelGateway {
   private readonly advisorMode: "off" | "shadow" | "active";
   readonly health = new ProviderHealthTracker();
   private readonly router: AiRouter;
+  private readonly toolsVerified: ReadonlySet<string>;
   private readonly byName = new Map<string, ModelProviderAdapter>();
   /** Runtime-evidens for /status (§25): satt først når hendelsen faktisk har skjedd. */
   private crossProviderFallbackSeen = false;
@@ -319,7 +328,9 @@ export class ModelGateway {
     this.pricing = opts.pricing ?? DEFAULT_PRICING;
     // JARVIS-006: ingen registrert modellprofil får falle til `default_rate`.
     assertExplicitPricing(this.pricing, this.registry.list());
-    this.router = new AiRouter(this.registry, this.health);
+    // M3 (gjennomgang av PR #315): leverandørene eieren har erklært live-verifisert for verktøykall/streaming (`JARVIS_MESH_TOOLS_VERIFIED`). Standard tom: AUTO-ruting velger ikke Kimi/Hermes til verktøyløkker.
+    this.toolsVerified = new Set(opts.meshToolsVerified ?? meshToolsVerifiedFromEnv());
+    this.router = new AiRouter(this.registry, this.health, this.toolsVerified);
     this.advisor = opts.advisor ?? new HeuristicRoutingAdvisor();
     this.catalog = opts.catalog ?? modelCatalogFromEnv();
     const envMode = process.env["JARVIS_MODEL_ADVISOR"]?.trim().toLowerCase();
@@ -1010,6 +1021,7 @@ export class ModelGateway {
         locality: profile.locality,
         capabilities: [...profile.capabilities],
         hosted_free_tier: profile.hosted_free_tier === true,
+        auto_unverified: this.toolsVerified.has(name) ? [] : [...(profile.live_unverified ?? [])],
         ...this.health.details(name, rt.configured)
       };
     });

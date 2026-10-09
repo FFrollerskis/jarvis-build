@@ -92,6 +92,8 @@ export const MODEL_ENV = [
   "JARVIS_KIMI_URL",
   "JARVIS_HERMES_MODEL",
   "JARVIS_HERMES_URL",
+  // WP-D4 (gjennomgang av PR #315, M3): leverandører eieren har erklært LIVE-verifisert for verktøykall/streaming etter `mesh-live-smoke.ts --tools` (tom = AUTO-ruting bruker ikke Kimi/Hermes til verktøyløkker). Api OG worker.
+  "JARVIS_MESH_TOOLS_VERIFIED",
   "JARVIS_JOB_TOOL_TURN_MODEL",
   "JARVIS_TOOL_TURN_DAILY_CAP_ORE",
   "JARVIS_TOOL_TURN_MODEL",
