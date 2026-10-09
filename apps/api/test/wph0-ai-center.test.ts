@@ -265,6 +265,17 @@ describe("leverandører", () => {
     expect(item(r, "providers", "gemini").status).toBe("OK"); // ikke konfigurert: ingenting å pause
   });
 
+  it("pause-tilstand som ikke kan leses gjør også RUTINGEN ukjent: «brukbar lokal modell» og «verktøyturer går til Sonnet» kan ikke påstås uten å vite om leverandøren er pauset", async () => {
+    const r = await build({ controlsFail: new Error("db nede") }).run();
+    for (const id of ["gemma_first", "sensitive_local", "tool_turn_route", "job_route"]) expect(item(r, "routing", id).status, id).toBe("UNKNOWN");
+    expect(section(r, "routing").status).toBe("UNKNOWN");
+    expect(section(r, "routing").summary_no).toContain("Pause-tilstanden kunne ikke leses");
+    // Samme scenario med lesbar pause-tilstand: rutingen er målt og i orden (kontrollen over er ikke en generell UKJENT-påvirkning).
+    const ok = await build().run();
+    for (const id of ["gemma_first", "sensitive_local", "tool_turn_route", "job_route"]) expect(item(ok, "routing", id).status, id).toBe("OK");
+    expect(section(ok, "routing").status).toBe("OK");
+  });
+
   it("leverandørvisningen som ikke kan hentes er en UKJENT-seksjon (measured:false) og routing sier det", async () => {
     const r = await build({ rows: new Error("boom") }).run();
     expect(section(r, "providers")).toMatchObject({ status: "UNKNOWN", measured: false });

@@ -381,13 +381,15 @@ export function createAiCenter(deps: AiCenterDeps): ControlCenterDefinition {
       // 2. Ruting
       // =====================================================================================================================
       const routeItems: ControlItem[] = [];
+      // Kan eierens pause/tilbakekall ikke leses, vet vi ikke hvilke leverandører som er brukbare: alt som påstår «brukbar» eller «går til X» er UKJENT (aldri OK).
+      const unlessPauseUnknown = (status: ControlStatus): ControlStatus => (controlsR.ok ? status : worstStatus([status, "UNKNOWN"]));
       if (overviewR.ok) {
         const chainRows = GEMMA_FIRST_CHAIN.map((name) => overview.find((r) => r.provider === name)).filter((r): r is ProviderOverviewRow => r !== undefined);
         const chainUsable = chainRows.filter((r) => r.configured && !pausedSet.has(r.provider) && r.health.state !== "UNAVAILABLE").map((r) => r.provider);
         const split = usageR.ok ? localitySplit(usageR.value, localityOf) : null;
         const chatSplit = usageR.ok ? localitySplit(usageR.value, localityOf, "CHAT") : null;
         routeItems.push(controlItem({
-          id: "gemma_first", label: "Gemma først (lokal modell som standard)", status: chainUsable.length > 0 ? "OK" : "WARN",
+          id: "gemma_first", label: "Gemma først (lokal modell som standard)", status: unlessPauseUnknown(chainUsable.length > 0 ? "OK" : "WARN"),
           detail_no: [
             `Standardkjeden ${GEMMA_FIRST_CHAIN.join(" → ")} har ${chainUsable.length === 0 ? "ingen brukbar leverandør - chat faller til øvrig ruting (D-354)" : chainUsable.length === 1 ? "1 brukbar leverandør" : `${chainUsable.length} brukbare leverandører`}`,
             split === null ? "lokal/sky-andel kunne ikke leses" : split.total_ok === 0 ? "ingen vellykkede kall siste 7 døgn" : `siste 7 døgn: ${pct(split.local_share ?? 0)} av ${split.total_ok} vellykkede modellkall var lokale, ${pct(split.cloud_share ?? 0)} sky`
@@ -400,7 +402,7 @@ export function createAiCenter(deps: AiCenterDeps): ControlCenterDefinition {
         }));
         const locals = usableLocalProviders(overview, pausedSet);
         routeItems.push(controlItem({
-          id: "sensitive_local", label: "Sensitive turer (helse, økonomi, hemmeligheter): kun lokal modell", status: locals.length > 0 ? "OK" : "WARN",
+          id: "sensitive_local", label: "Sensitive turer (helse, økonomi, hemmeligheter): kun lokal modell", status: unlessPauseUnknown(locals.length > 0 ? "OK" : "WARN"),
           detail_no: locals.length > 0
             ? `Går kun til lokal modell, aldri sky (D-378). ${locals.length} lokal leverandør kan svare nå: ${locals.join(", ")}.`
             : "Går kun til lokal modell, aldri sky (D-378) - og INGEN lokal leverandør er brukbar nå (ikke konfigurert, pauset eller utilgjengelig), så slike turer feiler lukket til en lokal modell er tilbake.",
@@ -423,7 +425,7 @@ export function createAiCenter(deps: AiCenterDeps): ControlCenterDefinition {
         if (paused) problems.push(`leverandøren «${route.provider}» er pauset av deg`);
         else if (down === true) problems.push(`leverandøren «${route.provider}» er ${downNo}`);
         if (capReached) problems.push(`dagstaket (${kr(dailyCapOre)}) er nådd`);
-        const status: ControlStatus = problems.length > 0 ? "WARN" : down === null || (dailyCapOre > 0 && !dailyR.ok) ? "UNKNOWN" : "OK";
+        const status: ControlStatus = unlessPauseUnknown(problems.length > 0 ? "WARN" : down === null || (dailyCapOre > 0 && !dailyR.ok) ? "UNKNOWN" : "OK");
         return controlItem({
           id, label, status,
           detail_no: `${route.provider}:${route.model} · ${dailyCapOre === 0 ? "ingen dagstak" : dailyR.ok ? `i dag ${kr(dailyR.value)} av ${kr(dailyCapOre)}` : "dagens kost kunne ikke leses"}${problems.length > 0 ? ` · ${problems.join(", ")} - ${extra} går til lokal modell` : ""}`,
@@ -445,8 +447,8 @@ export function createAiCenter(deps: AiCenterDeps): ControlCenterDefinition {
       const mesh = settleSync(() => deps.gateway.meshStatus());
       sections.push(controlSection({
         id: "routing", title_no: "Ruting", source: "ModelGateway (leverandørvalg, minne) · cost_events (7 d: siste rutevalg per formål, lokal/sky-andel) · miljø (JARVIS_TOOL_TURN_MODEL, JARVIS_JOB_TOOL_TURN_MODEL, JARVIS_TOOL_TURN_DAILY_CAP_ORE)",
-        observed_at: nowIso, status: usageR.ok && lastRouteR.ok ? "OK" : "UNKNOWN",
-        summary_no: `${routeItems.length} ruteopplysninger: ${countsNo(routeItems)}. Ruteren: ${mesh.ok ? mesh.value.router : "ukjent"}; fallback mellom leverandører: ${mesh.ok ? mesh.value.fallback : "ukjent"}. Sensitivitetsrutingen er uendret og kan ikke endres herfra.${usageR.ok && lastRouteR.ok ? "" : " Kostradene kunne ikke leses - andeler og siste rutevalg er ukjente."}`,
+        observed_at: nowIso, status: usageR.ok && lastRouteR.ok && controlsR.ok ? "OK" : "UNKNOWN",
+        summary_no: `${routeItems.length} ruteopplysninger: ${countsNo(routeItems)}. Ruteren: ${mesh.ok ? mesh.value.router : "ukjent"}; fallback mellom leverandører: ${mesh.ok ? mesh.value.fallback : "ukjent"}. Sensitivitetsrutingen er uendret og kan ikke endres herfra.${usageR.ok && lastRouteR.ok ? "" : " Kostradene kunne ikke leses - andeler og siste rutevalg er ukjente."}${controlsR.ok ? "" : " Pause-tilstanden kunne ikke leses - hvilke leverandører som er brukbare er ukjent."}`,
         items: routeItems
       }));
 

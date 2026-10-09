@@ -195,7 +195,7 @@ describe("hele senteret mot ekte data", () => {
     } finally {
       await oc.unfreezeConnectorDurable("model:anthropic", OWNER_A);
     }
-    expect(report(idA).then((r) => r.actions.map((a) => a.id))).resolves.toContain("ai.pause:anthropic");
+    await expect(report(idA).then((r) => r.actions.map((a) => a.id))).resolves.toContain("ai.pause:anthropic");
   });
 
   it("senteret skriver ingenting: radtallet i alle berørte tabeller er uendret etter bygging", async () => {
