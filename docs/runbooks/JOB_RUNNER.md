@@ -258,7 +258,7 @@ Miljøvariabelen `JARVIS_JOB_RUNNER_CONFIG` (satt i enhetene) peker på filen.
 | `socket_group` | (primærgruppen) | gruppenavn eller gid som eier socketen |
 | `token_file` | **påkrevd** | bearer-token (fil, `0640 root:jarvis-job-clients`) |
 | `base_dir` | `/var/lib/jarvis-job-runner/jobs` | jobbkataloger (`0700`); smalt tegnsett (brukes i `--mount`) |
-| `docker_bin`, `git_bin`, `docker_host` | `/usr/bin/docker`, `/usr/bin/git`, (ingen) | kjørbare filer og valgfri `unix:///…`-socket |
+| `docker_bin`, `git_bin`, `docker_host` | `/usr/bin/docker`, `/usr/bin/git`, (ingen) | kjørbare filer og valgfri `unix:///…`-socket. `docker_bin` må være selve CLI-binæren, ikke et skallskript (jobb-env videreføres til docker-prosessen for `-e NAVN`) |
 | `image` | **påkrevd** | `sha256:<64 hex>` (lokal image-ID) eller `navn@sha256:<digest>`; nullet plassholder avvises |
 | `network` | **påkrevd** | dedikert jobbnettverk (aldri `host`/`bridge`/`none`/`default`); må være `--internal` ved oppstart og før hver jobb |
 | `egress_proxy_url` | **påkrevd** | `http://<gateway-ip>:<port>` (IP-literal) |
@@ -350,6 +350,7 @@ med runnerens credential. Ingenting av dette er kjørt mot ekte GitHub (J11).
 | `git_network_failed` ved opprettelse | proxy/DNS/PAT feil, eller GitHub utilgjengelig fra verten | `sudo journalctl -u jarvis-job-runner -n 50`; test `git ls-remote` manuelt som `jarvis-runner` uten å skrive token noe sted |
 | `path_denied`, `bundle_*`, `no_changes` ved publish | endring rammet en regel (kapittel 11) | les `detail`; fjern `.github/`-endringer, del opp i færre commits/filer |
 | `push_rejected`/`push_failed` | GitHub avviste (branch protection, PAT-rettigheter, eksisterende branch med annen historikk) | sjekk PAT og branchnavn; runneren bruker aldri force |
+| Runner/proxy stopper rett etter oppstart med `git_could_not_start`, `spawn EPERM` eller lignende | systemd-filteret `SystemCallFilter=@system-service` er for stramt for en eldre systemd (mangler `clone3` i `@system-service`) | kontroller `systemctl --version`; som siste utvei kommenter ut de to `SystemCallFilter`/`SystemCallErrorNumber`-linjene i enheten (svekker herdingen - dokumentér det) og `sudo systemctl daemon-reload` |
 | Mange rester av `jarvis-job-…`-containere | runner krasjet midt i opprydding | restart runneren: oppstartsavstemmingen fjerner alt merket `jarvis.role=job` og alle UUID-kataloger |
 
 * **Nødstopp:** `sudo systemctl stop jarvis-job-runner jarvis-egress-proxy` og `sudo docker ps -aq --filter label=jarvis.role=job | xargs -r sudo docker rm -f`. Worker feiler da lukket.

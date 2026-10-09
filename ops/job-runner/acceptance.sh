@@ -213,11 +213,11 @@ check_J04() {
       if (h.NanoCpus !== Math.round(Number(cpus) * 1e9)) bad.push("cpus " + h.NanoCpus);
       if (h.NetworkMode !== network) bad.push("nettverk " + h.NetworkMode);
       if (h.PidMode || h.UTSMode || h.UsernsMode) bad.push("delt pid/uts/userns");
-      if (h.IpcMode && h.IpcMode !== "private") bad.push("ipc " + h.IpcMode);
+      if (/^(host|container:)/.test(h.IpcMode || "")) bad.push("ipc " + h.IpcMode); // daemon-standarden (private/shareable) er ufarlig; kun host/container: deler navnerom
       if ((h.Devices || []).length) bad.push("devices");
       if ((h.Binds || []).length) bad.push("binds: " + h.Binds.length);
       if (cfg.User !== user) bad.push("bruker " + cfg.User);
-      const mounts = c.Mounts || [];
+      const mounts = (c.Mounts || []).filter((m) => m.Type !== "tmpfs"); // tmpfs (/tmp, /home/job) er forventet; kun bind/volume skal telles
       if (mounts.length !== 1 || mounts[0].Destination !== "/work" || mounts[0].Type !== "bind" || mounts[0].RW !== true) bad.push("mounts: " + mounts.map((m) => m.Destination).join(","));
       if (mounts.some((m) => /docker\.sock/.test(m.Source || ""))) bad.push("docker.sock montert");
       const names = (cfg.Env || []).map((e) => e.split("=")[0]);
@@ -241,7 +241,9 @@ check_J05() {
   cexec $t sh -c 'touch /work/aksept && rm /work/aksept'; [ "$EXEC_CODE" = "0" ] || fails+=("/work ikke skrivbar")
   cexec $t sh -c 'touch /home/job/aksept && touch /tmp/aksept'; [ "$EXEC_CODE" = "0" ] || fails+=("tmpfs /home/job eller /tmp ikke skrivbar")
   cexec $t sh -c 'cp /bin/true /tmp/aksept-true && /tmp/aksept-true'; [ "$EXEC_CODE" != "0" ] || fails+=("/tmp er ikke noexec")
-  cexec $t sh -c 'cat /proc/mounts'; case "$EXEC_OUT" in *docker.sock*|*/etc/jarvis*|*/var/lib/jarvis*|*/root*) fails+=("uventet mount i /proc/mounts") ;; esac
+  # kun MONTERINGSMÅL (felt 2) vurderes - kildeenheten kan hete «/dev/root» uten at noe av verten er montert
+  cexec $t sh -c "awk '{print \$2}' /proc/mounts"
+  if printf '%s\n' "$EXEC_OUT" | grep -Eq '(docker\.sock|^/(host|mnt/host|root|var/run|run/docker)($|/)|^/etc/jarvis|^/var/lib/jarvis|^/home/[^j]|^/volume)'; then fails+=("uventet monteringsmål i /proc/mounts: $(printf '%s' "$EXEC_OUT" | grep -E 'docker\.sock|^/(host|mnt/host|root|var/run|run/docker)($|/)|^/etc/jarvis|^/var/lib/jarvis|^/home/[^j]|^/volume' | head -3 | tr '\n' ' ')"); fi
   cexec $t sh -c 'test -e /root/.ssh -o -e /home/job/.ssh -o -e /host -o -e /mnt/host'; [ "$EXEC_CODE" != "0" ] || fails+=("vertsmapper synlige (/root/.ssh, /host)")
   cexec $t sh -c 'env | cut -d= -f1 | sort'
   if printf '%s\n' "$EXEC_OUT" | grep -Eq '^(GITHUB_TOKEN|GH_TOKEN|JARVIS_GIT_CREDENTIAL_TOKEN|JARVIS_GITHUB_TOKEN|GIT_ASKPASS|SSH_AUTH_SOCK|INFISICAL_.*|POSTGRES_.*|PGPASSWORD|JARVIS_DB_.*)$'; then fails+=("forbudt env-navn i containeren"); fi

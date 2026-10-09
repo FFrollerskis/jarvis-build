@@ -3,6 +3,8 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { DockerClient } from "../lib/docker.mjs";
+import { SecretRegistry } from "../lib/log.mjs";
 import { buildJobContainerCreateArgs } from "../lib/spec.mjs";
 
 /**
@@ -64,5 +66,24 @@ describe.skipIf(!HAS_DOCKER)("ekte Docker-CLI parser argv-et fra den delte conta
     const args = buildJobContainerCreateArgs(base, job);
     expect(args.slice(args.indexOf("--pull"), args.indexOf("--pull") + 2)).toEqual(["--pull", "never"]);
     expect((await dockerParses(args)).parsed).toBe(true);
+  });
+
+  it("flagg-injeksjon via argv: alt etter containernavnet i `docker exec` tolkes av den ekte CLI-en som KOMMANDO, aldri som docker-flagg", async () => {
+    let captured = [];
+    const docker = new DockerClient({
+      registry: new SecretRegistry(),
+      exec: async (args) => { captured = args; return { status: 0, signal: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), timedOut: false, truncated: false, cancelled: false }; }
+    });
+    const name = job.containerName;
+    // kontroll: et ukjent flagg FØR containernavnet er en parse-feil (probeen er følsom for exec-flagg)
+    const before = await dockerParses(["exec", "--workdir", "/work", "--bogus-flag-fra-test", name, "sh"]);
+    expect(before.parseError, before.stderr).toBe(true);
+    // hostile argv-oppføringer ETTER containernavnet, inkludert ekte exec-flagg (--privileged, --user, -u, -e) og et ukjent flagg
+    await docker.execIn(name, { argv: ["sh", "--privileged", "--user=0", "-u", "root", "-e", "A=B", "--workdir=/", "--bogus-flag-fra-test"], env: {}, timeoutMs: 1000, maxOutputBytes: 1000 });
+    expect(captured.slice(0, 4)).toEqual(["exec", "--workdir", "/work", name]);
+    expect(captured.slice(4)).toEqual(["sh", "--privileged", "--user=0", "-u", "root", "-e", "A=B", "--workdir=/", "--bogus-flag-fra-test"]);
+    const after = await dockerParses(captured);
+    expect(after.parseError, after.stderr).toBe(false);
+    expect(after.reachedDaemon, after.stderr).toBe(true);
   });
 });
