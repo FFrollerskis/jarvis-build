@@ -11,4 +11,6 @@ export * from "./diagnosis.ts";
 export * from "./db-correlation.ts";
 export * from "./observability.ts";
 export * from "./infra-execution.ts";
+export * from "./cloud-execution.ts";
+export * from "./cloudflare-recovery.ts";
 export * from "./deployment-ingestion.ts";

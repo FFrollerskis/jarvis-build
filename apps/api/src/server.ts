@@ -10,7 +10,7 @@ import type {
   SessionGrantService, SessionService, VoiceSessionAuthority
 } from "@jarvis/core";
 import {
-  acquireContainerLogs, attemptRecovery, correlateDbState, correlateIncident, dockerProviderStatus, executeInfraMutation,
+  acquireContainerLogs, attemptRecovery, correlateDbState, correlateIncident, dockerProviderStatus, executeCloudMutation, executeInfraMutation,
   getInfraExecution, ingestGithubDeployment, proposeRepairTask, type DeploymentService, type DiagnosisService, type IncidentService
 } from "@jarvis/incidents";
 import { OwnerControlUnauthorizedError, type InfraExecutionGate, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
@@ -1674,6 +1674,28 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       const execution = await getInfraExecution(pool, authed.identity.tenant_id, fieldString(authed.body, "execution_id"));
       if (!execution) return json(res, 404, { error: "execution_not_found", request_id: requestIdOf(res) });
       return json(res, 200, { execution });
+    }
+
+    if (req.method === "POST" && url.pathname === "/infra/cloud/mutate") {
+      // WP-E1 (UA-5): kritisk mutasjon mot et kontrollert skymål (Cloudflare) med SAMME sammenhengende før/etter-journal som Docker (`infra_executions`).
+      // Selve utførelsen går UTELUKKENDE via `ToolGateway.execute()` (policy, InfraExecutionGate, frys, sone-autorisasjon, klasse D-kjede, varsling) -
+      // ruten omgår ingenting. Identitet fra det verifiserte grantet (som alle kontrollruter); credential-bindingen avviser alle andre enn eieren.
+      const authed = await authedRequest(req, res, deps, ["provider", "action", "parameters", "idempotency_key", "incident_id"]);
+      if (!authed) return;
+      const incidentId = fieldOptionalString(authed.body, "incident_id");
+      try {
+        const execution = await executeCloudMutation({ pool, gateway }, authed.identity, {
+          tenant_id: authed.identity.tenant_id, person_id: authed.identity.person_id, device_id: authed.identity.device_id,
+          provider: fieldString(authed.body, "provider"), action: fieldString(authed.body, "action"),
+          parameters: fieldRecord(authed.body, "parameters") as Record<string, JsonValue>,
+          idempotency_key: fieldString(authed.body, "idempotency_key"),
+          ...(incidentId !== undefined ? { incident_id: incidentId } : {})
+        });
+        return json(res, 200, { execution });
+      } catch (err) {
+        if (err instanceof HttpError) throw err;
+        return domainFailure(res, 400, "cloud_mutation_rejected", err);
+      }
     }
 
     if (req.method === "POST" && url.pathname === "/observability/docker/status") {
