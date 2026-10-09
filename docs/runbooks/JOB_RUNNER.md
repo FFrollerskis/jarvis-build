@@ -37,6 +37,10 @@ jobb-container --HTTPS_PROXY--> jarvis-egress-proxy (bruker jarvis-egress, uten 
   Worker kan **ikke** sende docker-flagg, mounts, image, nettverk, stier eller credentials.
 * Jobb-containeren ser: `/work` (arbeidskopi uten `origin`), en tmpfs `/home/job`, en tmpfs `/tmp`, og nett kun via proxyen. Ingenting annet.
 * `base.git`, `verify.git`, `out.bundle` ligger i `private/` ved siden av `work/` og er **aldri montert** i containeren.
+* **Hva en jobb faktisk kan kjøre:** imaget har Node 22, npm og git (+ Claude Code). Testløpere utover `node --test`/`node <fil>`/`npm test` (`pytest`, `go`, `cargo`, `make`, `pnpm`, `yarn`) finnes **ikke**
+  i imaget, og nettet er begrenset til github.com/api.github.com/api.anthropic.com - så `npm install`/`pnpm install` kan ikke hente pakker. Repoer som trenger installasjon før testene kan ikke testes her uten at du
+  enten legger `registry.npmjs.org:443` til i `egress_proxy.allow` (utvider angrepsflaten: pakkeregisteret blir en mulig kanal ut og kilde til kjørbar kode) eller bygger et eget image med ferdige avhengigheter
+  (**ikke bygget**). Sandbox-repoet til akseptansen skal derfor ha en test uten avhengigheter. En manglende kommando gir exit 127 og en feilet kodejobb (lukket), aldri en stille suksess.
 
 ## 2. Tillitsmodell - les dette før du installerer
 
@@ -88,6 +92,7 @@ getent group docker                 # må finnes
 getent passwd 10001 || echo "uid 10001 er ledig (bra)"
 sudo ss -ltn | grep ':3128 ' || echo "port 3128 er ledig (bra)"
 ip -4 route | grep '172.30.77' || echo "subnett 172.30.77.0/24 er ledig (bra)"
+curl -sSI --max-time 10 https://github.com | head -1    # verten må nå github.com:443 DIREKTE (runneren videreformidler ikke vertens proxy-miljø)
 ```
 
 * **Mangler Node 22 på verten:** installer siste v22 LTS fra <https://nodejs.org/en/download> (Linux x64-tarball), kontroller sjekksummen mot `SHASUMS256.txt`
