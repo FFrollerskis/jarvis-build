@@ -182,7 +182,7 @@ export class ControlCenterRegistry {
     return isControlCenterId(id) && this.centers.has(id);
   }
 
-  /** Eier-kun, fail-closed. Brukes av verktøydefinisjonen (`parameterAuthorizer`) FØR noe bygges, og igjen av `report`/`overview` (forsvar i dybden). */
+  /** Eier-kun, fail-closed (uten krav til autentiseringsstyrke - se `authorizeRead`). Brukes av mutasjonsporten (`cancel_task`). */
   authorize(identity: IdentityContext): { allowed: boolean; reason: string } {
     if (!this.options.isOwner) return { allowed: false, reason: "control_center_owner_check_not_configured" };
     let isOwner = false;
@@ -194,8 +194,19 @@ export class ControlCenterRegistry {
     return isOwner ? { allowed: true, reason: "owner" } : { allowed: false, reason: "control_center_owner_only" };
   }
 
+  /**
+   * Gjennomgang av PR #316 (L-4): LESE-porten = eier OG signert enhetsøkt (`auth_strength === "signed"`). Kontrollsentrene er en eier-flate med enhetssignatur: rapportene er eierens konfigurasjonsmetadata og
+   * handlingene peker på eier-ruter, så en passiv/aktiv økt (tale alene gir aldri forhøyet styrke) leser dem ikke - selv om personen er eieren. `authorize` (kun eier) beholdes for MUTASJONENE
+   * (`cancel_task`): en stopp-handling skal virke selv under redusert autentisering (STEP_UP_EXEMPT_ACTIONS).
+   */
+  authorizeRead(identity: IdentityContext): { allowed: boolean; reason: string } {
+    const owner = this.authorize(identity);
+    if (!owner.allowed) return owner;
+    return identity.auth_strength === "signed" ? owner : { allowed: false, reason: "control_center_requires_signed_device_session" };
+  }
+
   private assertAuthorized(identity: IdentityContext): void {
-    const decision = this.authorize(identity);
+    const decision = this.authorizeRead(identity);
     if (!decision.allowed) throw new ControlCenterAccessError(decision.reason);
   }
 

@@ -80,11 +80,17 @@ describe("modellflaten: chat-lese-nivået, ikke det minimale settet", () => {
     expect(() => resolveModelToolSurface(gw, { includeChatReadTier: true })).not.toThrow();
   });
 
-  it("manifestet merker det `private` og bare chat/tale har det (aldri Telegram, bakgrunn eller koding)", () => {
+  it("manifestet merker det `private` og KUN web-chat har det (aldri tale, Telegram, bakgrunn eller koding) - L-4: tale er ubetrodd inndata uten forhøyet styrke og skal ikke lese opp hele rapporten", () => {
     const entry = buildToolManifest(defs).get(KEY);
     expect(entry).toMatchObject({ risk: "A", effect: "read", owner: "jarvis_core", sensitivity: "private", data_zone: "internal" });
-    expect(entry?.surfaces.sort()).toEqual(["voice", "web_chat"]);
-    for (const surface of ["telegram", "background", "coding"] as const) expect(SURFACE_TOOL_GRANTS[surface].some((g) => `${g.tool_id}.${g.action}` === KEY), surface).toBe(false);
+    expect(entry?.surfaces).toEqual(["web_chat"]);
+    for (const surface of ["voice", "telegram", "background", "coding"] as const) expect(SURFACE_TOOL_GRANTS[surface].some((g) => `${g.tool_id}.${g.action}` === KEY), surface).toBe(false);
+    // tale beholder resten av lese-nivået (uendret bortsett fra finans og kontrollsentrene)
+    expect(SURFACE_TOOL_GRANTS.voice.some((g) => `${g.tool_id}.${g.action}` === "executive.get_slo_report")).toBe(true);
+    expect(SURFACE_TOOL_GRANTS.voice.some((g) => g.tool_id === "executive" && g.action === "get_control_center")).toBe(false);
+    // en stemmeflate som velger verktøy per melding får ikke kontrollsenteret, uansett hva som sies
+    const voiceSurface = resolveModelToolSurface(gw, { includeChatReadTier: true });
+    expect(selectSurfaceTools("voice", "vis kontrollsentrene og hva kan jeg stoppe", voiceSurface).selected.map((m) => `${m.tool_id}.${m.action}`)).not.toContain(KEY);
   });
 
   it("de øvrige executive-lesingene beholder sine merker (kun kontrollsenteret er hevet til private)", () => {
@@ -118,6 +124,17 @@ describe("eier-kun port i verktøydefinisjonen", () => {
     expect(d.parameterAuthorizer?.({}, owner)).toEqual({ allowed: true, reason: "owner" });
     expect(d.parameterAuthorizer?.({}, { ...owner, person_id: "person-other" })).toEqual({ allowed: false, reason: "control_center_owner_only" });
     expect(d.parameterAuthorizer?.({}, { ...owner, delegation_id: "deleg" })).toEqual({ allowed: false, reason: "control_center_owner_only" });
+  });
+
+  it("L-4: eieren uten signert enhetsøkt (passiv/aktiv - tale alene gir aldri forhøyet styrke) nektes lese-porten med en tydelig årsak; kanalen avgjør ikke, signaturen gjør", () => {
+    const d = productionDefinitions(ownerOnly).find((x) => `${x.tool_id}.${x.action}` === KEY) as ToolDefinition;
+    for (const auth_strength of ["passive", "active"] as const) {
+      expect(d.parameterAuthorizer?.({}, { ...owner, auth_strength }), auth_strength).toEqual({ allowed: false, reason: "control_center_requires_signed_device_session" });
+      expect(d.parameterAuthorizer?.({}, { ...owner, auth_strength, channel: "voice" }), `${auth_strength}/voice`).toEqual({ allowed: false, reason: "control_center_requires_signed_device_session" });
+    }
+    // en annen person nektes fortsatt med eier-årsaken (eier-sjekken kommer først)
+    expect(d.parameterAuthorizer?.({}, { ...owner, person_id: "person-other", auth_strength: "passive" })).toEqual({ allowed: false, reason: "control_center_owner_only" });
+    expect(d.parameterAuthorizer?.({}, owner)).toEqual({ allowed: true, reason: "owner" });
   });
 
   it("registeret uten eier-predikat nekter alle (fail-closed)", () => {

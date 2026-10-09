@@ -176,8 +176,13 @@ const TIER_KEYS: ReadonlySet<string> = new Set([...CHAT_READ_TIER_KEYS, ...CHAT_
  * (flaten hadde kun `github.read_issues`). Ubetrodd output (PR-titler/-tekst) er fortsatt data, og jobben kan uansett ikke handle utad.
  */
 export const BACKGROUND_GITHUB_READ = CHAT_READ_TIER.filter((g) => g.tool_id === "github");
-/** D-382: tale er ubetrodd inndata (STT) - lese-nivået uten finans; aldri handlingsnivået. */
-const VOICE_READ_TIER = CHAT_READ_TIER.filter((g) => !/^finance/.test(g.tool_id));
+/**
+ * Gjennomgang av PR #316 (L-4): handlinger tale ALDRI får, utover finans. Kontrollsentrene er en EIER-flate med enhetssignatur (rapportene er eierens konfigurasjonsmetadata, handlingene peker på eier-ruter):
+ * tale er ubetrodd inndata (STT) og gir aldri forhøyet autentiseringsstyrke, så hele rapporten skal ikke kunne leses opp over en stemmeflate.
+ */
+const VOICE_EXCLUDED_KEYS: ReadonlySet<string> = new Set([k("executive", "get_control_center")]);
+/** D-382: tale er ubetrodd inndata (STT) - lese-nivået uten finans (og uten kontrollsentrene, L-4); aldri handlingsnivået. */
+const VOICE_READ_TIER = CHAT_READ_TIER.filter((g) => !/^finance/.test(g.tool_id) && !VOICE_EXCLUDED_KEYS.has(k(g.tool_id, g.action)));
 
 /** Flatene en handling kan stå på. ALT annet er forbudt. Utvidelse er en sikkerhetsendring (ny beslutning + test). */
 export const SURFACE_TOOL_GRANTS: Readonly<Record<Surface, ReadonlyArray<{ tool_id: string; action: string }>>> = {

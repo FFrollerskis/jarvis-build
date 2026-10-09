@@ -424,7 +424,8 @@ export class ExecutiveService {
    * Uten registeret er det ingenting å lekke, så sjekken slipper gjennom.
    */
   authorizeControlCenter(identity: IdentityContext): { allowed: boolean; reason: string } {
-    return this.options.controlCenters ? this.options.controlCenters.authorize(identity) : { allowed: true, reason: "no_control_centers" };
+    // L-4: lese-porten = eier OG signert enhetsøkt (`authorizeRead`); mutasjonsporten under er kun eier.
+    return this.options.controlCenters ? this.options.controlCenters.authorizeRead(identity) : { allowed: true, reason: "no_control_centers" };
   }
 
   /**

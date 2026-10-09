@@ -245,7 +245,11 @@ describe("C: kun den suverene eieren", () => {
   it("direkte mot verktøyet: ukjent senter-id avvises av skjemaet, og en fremmed identitet av porten - før noe bygges", async () => {
     const identity = { person_id: OTHER, tenant_id: TENANT_A, memory_space_id: "personal" as const, session_id: "s", device_id: "h0-dev-other", channel: "api" as const, auth_strength: "active" as const };
     expect(await gateway.execute({ identity, tool_id: "executive", action: "get_control_center", parameters: { center: "ai" } })).toEqual({ ok: false, reason: "control_center_owner_only" });
-    const owner = { ...identity, person_id: OWNER, device_id: "h0-dev-owner" };
+    // L-4: lese-porten er eier OG signert enhetsøkt - eieren uten signatur (aktiv/passiv, f.eks. tale) nektes med en egen årsak, før noe bygges
+    const ownerWeak = { ...identity, person_id: OWNER, device_id: "h0-dev-owner" };
+    expect(await gateway.execute({ identity: ownerWeak, tool_id: "executive", action: "get_control_center", parameters: {} })).toEqual({ ok: false, reason: "control_center_requires_signed_device_session" });
+    expect(await gateway.execute({ identity: { ...ownerWeak, auth_strength: "passive", channel: "voice" }, tool_id: "executive", action: "get_control_center", parameters: {} })).toEqual({ ok: false, reason: "control_center_requires_signed_device_session" });
+    const owner = { ...ownerWeak, auth_strength: "signed" as const };
     expect(await gateway.execute({ identity: owner, tool_id: "executive", action: "get_control_center", parameters: { center: "billing" } })).toEqual({ ok: false, reason: "invalid_parameters" });
     expect(await gateway.execute({ identity: owner, tool_id: "executive", action: "get_control_center", parameters: { center: "ai", extra: 1 } })).toEqual({ ok: false, reason: "invalid_parameters" });
     const ok = await gateway.execute({ identity: owner, tool_id: "executive", action: "get_control_center", parameters: {} });

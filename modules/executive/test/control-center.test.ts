@@ -228,6 +228,31 @@ describe("ControlCenterRegistry: eier-kun og fail-closed", () => {
     }
   });
 
+  it("L-4: lese-porten krever i tillegg signert enhetsøkt - eieren med passiv/aktiv økt (tale alene) nektes rapport, oversikt og forklaring, mens mutasjonsporten (kun eier) er uendret", async () => {
+    const r = withOk();
+    for (const auth_strength of ["passive", "active"] as const) {
+      const weak: IdentityContext = { ...owner, auth_strength };
+      await expect(r.report("ai", weak), auth_strength).rejects.toBeInstanceOf(ControlCenterAccessError);
+      await expect(r.overview(weak), auth_strength).rejects.toBeInstanceOf(ControlCenterAccessError);
+      await expect(r.explain("ai", weak), auth_strength).rejects.toBeInstanceOf(ControlCenterAccessError);
+      expect(r.authorizeRead(weak)).toEqual({ allowed: false, reason: "control_center_requires_signed_device_session" });
+      // stopp-handlingene (cancel_task) er unntatt step-up og bruker eier-porten alene
+      expect(r.authorize(weak)).toEqual({ allowed: true, reason: "owner" });
+    }
+    expect(r.authorizeRead(owner)).toEqual({ allowed: true, reason: "owner" });
+    // en annen person får eier-årsaken, ikke signatur-årsaken (eier-sjekken kommer først)
+    expect(r.authorizeRead({ ...stranger, auth_strength: "passive" })).toEqual({ allowed: false, reason: "control_center_owner_only" });
+    expect(r.authorizeRead({ ...stranger, auth_strength: "signed" })).toEqual({ allowed: false, reason: "control_center_owner_only" });
+  });
+
+  it("L-4: bygging skjer ikke i det hele tatt for en eier uten signert enhetsøkt", async () => {
+    let built = 0;
+    const r = registry();
+    r.register(center("ai", async () => { built += 1; return { sections: [okSection()], actions: [] }; }));
+    await expect(r.report("ai", { ...owner, auth_strength: "active" })).rejects.toThrow();
+    expect(built).toBe(0);
+  });
+
   it("uten eier-predikat nektes ALLE (fail-closed) - en feilkonfigurert kobling lekker aldri konfigurasjon", async () => {
     const r = new ControlCenterRegistry({ now: () => NOW });
     r.register(center("ai", async () => ({ sections: [okSection()], actions: [] })));
