@@ -38,6 +38,10 @@ export declare class ScheduleError extends Error {
 export declare function retryDelayMs(failures: number, baseMs: number): number;
 /** Komplette sett, eldste først. Med `nowMs` hoppes sett datert i fremtiden (klokkeavvik > 5 min) over. */
 export declare function listCompleteSets(outDir: string, options?: { nowMs?: number }): CompleteSet[];
+/** Tom liste = alle filene manifestet lister finnes (vanlig fil, ikke tom, riktig størrelse). */
+export declare function setFileProblems(dir: string, manifest: unknown): string[];
+/** Sett med manifest som likevel ikke er komplette (hule). */
+export declare function findHollowSets(outDir: string): Array<{ name: string; problems: string[] }>;
 /** Navn på komplette sett datert i fremtiden (klokkeavvik). */
 export declare function findFutureSets(outDir: string, nowMs: number): string[];
 export declare function buildDefaultDeps(config: ScheduleConfig, env?: NodeJS.ProcessEnv, overrides?: Record<string, unknown>): TickDeps;

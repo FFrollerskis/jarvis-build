@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DUE_TOLERANCE_MS, assertRunnable } from "./config.mjs";
@@ -61,9 +61,43 @@ export function retryDelayMs(failures, baseMs) {
 /** Klokkeavvik vi tåler (cron-jitter, NTP-justering) før noe regnes som «datert i fremtiden». */
 const FUTURE_SKEW_MS = 5 * 60_000;
 
+const AGE_FILE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}\.age$/;
+
 /**
- * Komplette sett (gyldig manifest.json), eldste først. Et korrupt manifest får ikke lov til å velte hele tikket. Med `nowMs` hoppes sett som er datert i FREMTIDEN over
- * (klokkeavvik ved backup-tidspunktet): ellers ville et sett datert i 2030 stå som «nyeste» og enten blokkere alle nye backuper - eller utløse en ny backup hvert tikk.
+ * Review F8: et sett er KOMPLETT først når hver fil manifestet lister faktisk finnes (vanlig fil, ikke symlenke), er ikke tom og har størrelsen manifestet oppgir (globals har ingen
+ * størrelse i manifestet: kun «ikke tom»). Bare «gyldig manifest.json» lot et hult sett (filer slettet, kopiert uten dumpene, avkortet) stå som «nyeste» og undertrykke neste backup.
+ * Kun `lstat` (ingen hashing: denne kalles flere ganger per tikk); sjekksummer verifiseres der filene faktisk brukes (off-site-forhåndssjekken og restore-verifiseringen).
+ * @returns {string[]} tom liste = komplett
+ */
+export function setFileProblems(dir, manifest) {
+  const entries = [];
+  if (!Array.isArray(manifest?.databases) || manifest.databases.length === 0) return ["manifestet lister ingen databaser"];
+  for (const d of manifest.databases) entries.push({ file: d?.file, size: Number.isInteger(d?.size_bytes) ? d.size_bytes : null });
+  entries.push({ file: manifest?.globals?.file, size: null });
+  const problems = [];
+  for (const { file, size } of entries) {
+    if (typeof file !== "string" || !AGE_FILE.test(file)) {
+      problems.push("manifestet lister en fil med ugyldig navn");
+      continue;
+    }
+    let st;
+    try {
+      st = lstatSync(join(dir, file));
+    } catch {
+      problems.push(`mangler: ${file}`);
+      continue;
+    }
+    if (!st.isFile()) problems.push(`ikke en vanlig fil: ${file}`);
+    else if (st.size === 0) problems.push(`tom: ${file}`);
+    else if (size !== null && st.size !== size) problems.push(`størrelsen avviker fra manifestet: ${file}`);
+  }
+  return problems;
+}
+
+/**
+ * Komplette sett (gyldig manifest.json OG alle filene det lister på plass, se `setFileProblems`), eldste først. Et korrupt manifest får ikke lov til å velte hele tikket. Med `nowMs`
+ * hoppes sett som er datert i FREMTIDEN over (klokkeavvik ved backup-tidspunktet): ellers ville et sett datert i 2030 stå som «nyeste» og enten blokkere alle nye backuper - eller
+ * utløse en ny backup hvert tikk.
  */
 export function listCompleteSets(outDir, { nowMs } = {}) {
   if (!existsSync(outDir)) return [];
@@ -75,6 +109,7 @@ export function listCompleteSets(outDir, { nowMs } = {}) {
       const createdMs = Date.parse(manifest?.created_at_utc);
       if (!Number.isFinite(createdMs)) continue;
       if (nowMs !== undefined && createdMs > nowMs + FUTURE_SKEW_MS) continue;
+      if (setFileProblems(dir, manifest).length > 0) continue;
       const sizeBytes = Array.isArray(manifest.databases) ? manifest.databases.reduce((sum, d) => sum + (Number.isInteger(d?.size_bytes) ? d.size_bytes : 0), 0) : 0;
       sets.push({ name, dir, manifest, createdMs, createdAt: new Date(createdMs).toISOString(), sizeBytes });
     } catch {
@@ -82,6 +117,23 @@ export function listCompleteSets(outDir, { nowMs } = {}) {
     }
   }
   return sets;
+}
+
+/** Sett MED gyldig manifest som likevel ikke er komplette (hule: filer mangler/er avkortet) - logges som advarsel og rives aldri automatisk (restene kan være det eneste som er igjen). */
+export function findHollowSets(outDir) {
+  if (!existsSync(outDir)) return [];
+  const hollow = [];
+  for (const name of readdirSync(outDir).filter((n) => SET_NAME_RE.test(n)).sort()) {
+    try {
+      const manifest = JSON.parse(readFileSync(join(outDir, name, "manifest.json"), "utf8"));
+      if (!Number.isFinite(Date.parse(manifest?.created_at_utc))) continue;
+      const problems = setFileProblems(join(outDir, name), manifest);
+      if (problems.length > 0) hollow.push({ name, problems });
+    } catch {
+      // uten (lesbart) manifest: foreldreløst/korrupt, håndteres andre steder
+    }
+  }
+  return hollow;
 }
 
 /** Navn på komplette sett som er datert i fremtiden (klokkeavvik) - logges som advarsel; de teller ikke som «nyeste». */
@@ -371,6 +423,7 @@ export async function runTick(config, deps, env = process.env) {
     const dropped = dropFutureTimestamps(status, startedMs);
     if (dropped.length > 0) log("warn", "status_timestamps_in_future_dropped", { fields: dropped, note: "klokkeavvik? tidsstempler fremover i tid ble forkastet" });
     for (const name of findFutureSets(config.out, startedMs)) log("warn", "set_dated_in_future", { set: name, note: "teller ikke som nyeste sett (klokkeavvik ved backup-tidspunktet?)" });
+    for (const { name, problems } of findHollowSets(config.out)) log("warn", "set_incomplete", { set: name, problems: problems.slice(0, 4).join("; "), note: "har manifest, men filene stemmer ikke: teller ikke som komplett sett (og undertrykker ikke neste backup) - røres ikke automatisk" });
     // Review F7: et langt gap siden forrige tikk (NAS av, eller klokken hoppet fremover) får alle sett til å se «gamle» ut på én gang. Retensjonen holdes da i minst et døgn,
     // så en feil klokke kan rettes (NTP) før noe slettes - et tak per tikk alene stopper det ikke på 15 minutter.
     const previousTickMs = msOf(status.last_tick_at);

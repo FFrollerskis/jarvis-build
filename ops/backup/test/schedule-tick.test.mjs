@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -6,8 +6,8 @@ import { ConfigError } from "../lib/env.mjs";
 import { OffsiteError, prepareSetForOffsite } from "../lib/offsite.mjs";
 import { loadScheduleConfig } from "../lib/config.mjs";
 import {
-  EXIT, ScheduleError, backupDecision, buildDefaultDeps, dropFutureTimestamps, findFutureSets, findOrphanSets, listCompleteSets, offsiteDecision, retryDelayMs, runTick, setsToPrune,
-  verifyDecision
+  EXIT, ScheduleError, backupDecision, buildDefaultDeps, dropFutureTimestamps, findFutureSets, findHollowSets, findOrphanSets, listCompleteSets, offsiteDecision, retryDelayMs, runTick,
+  setFileProblems, setsToPrune, verifyDecision
 } from "../lib/schedule.mjs";
 import { emptyStatus, readStatusFile } from "../lib/state.mjs";
 import { RECIPIENT, cleanupTempDirs, fakeEncryptManifest, hoursAgo, makeSet, tempDir } from "./helpers.mjs";
@@ -988,6 +988,60 @@ describe("WP-C2 tick (review F7): retensjon beskytter siste verifiserte og off-s
     manySets(h, 10);
     await h.tick();
     expect(listCompleteSets(h.out)).toHaveLength(10);
+  });
+});
+
+describe("WP-C2 tick (review F8): «komplett sett» betyr at filene manifestet lister faktisk finnes - et hult sett undertrykker ikke neste backup", () => {
+  const hollowCases = [
+    ["en dump er slettet", (set) => rmSync(join(set.dir, "jarvis.dump.age")), /mangler: jarvis\.dump\.age/],
+    ["globals er slettet", (set) => rmSync(join(set.dir, "globals.sql.age")), /mangler: globals\.sql\.age/],
+    ["en dump er avkortet (størrelsen avviker fra manifestet)", (set) => writeFileSync(join(set.dir, "infisical.dump.age"), "kort"), /størrelsen avviker fra manifestet: infisical\.dump\.age/],
+    ["en dump er tom", (set) => writeFileSync(join(set.dir, "langfuse.dump.age"), ""), /tom: langfuse\.dump\.age/],
+    ["globals er tom", (set) => writeFileSync(join(set.dir, "globals.sql.age"), ""), /tom: globals\.sql\.age/],
+    ["en dump er byttet ut med en katalog", (set) => { rmSync(join(set.dir, "jarvis.dump.age")); mkdirSync(join(set.dir, "jarvis.dump.age")); }, /ikke en vanlig fil: jarvis\.dump\.age/],
+    ["en dump er byttet ut med en symlenke", (set) => { rmSync(join(set.dir, "jarvis.dump.age")); symlinkSync(join(set.dir, "infisical.dump.age"), join(set.dir, "jarvis.dump.age")); }, /ikke en vanlig fil: jarvis\.dump\.age/],
+    ["manifestet lister en sti utenfor settet", (set) => { const m = JSON.parse(readFileSync(join(set.dir, "manifest.json"), "utf8")); m.databases[0].file = "../../etc/passwd.age"; writeFileSync(join(set.dir, "manifest.json"), JSON.stringify(m)); }, /ugyldig navn/],
+    ["manifestet lister ingen databaser", (set) => { const m = JSON.parse(readFileSync(join(set.dir, "manifest.json"), "utf8")); m.databases = []; writeFileSync(join(set.dir, "manifest.json"), JSON.stringify(m)); }, /ingen databaser/]
+  ];
+
+  it("hvert hult sett er IKKE komplett (setFileProblems forklarer hvorfor) - et helt sett er det, også med ekstra filer (SHA256SUMS, manifest.json.age)", () => {
+    for (const [what, damage, expected] of hollowCases) {
+      const out = tempDir();
+      const set = makeSet(out, hoursAgo(T0, 2));
+      writeFileSync(join(set.dir, "manifest.json.age"), "ekstra");
+      damage(set);
+      const manifest = JSON.parse(readFileSync(join(set.dir, "manifest.json"), "utf8"));
+      expect(setFileProblems(set.dir, manifest).join("; "), what).toMatch(expected);
+      expect(listCompleteSets(out), what).toEqual([]);
+      expect(findHollowSets(out).map((h) => h.name), what).toEqual([set.name]);
+    }
+    const out = tempDir();
+    const whole = makeSet(out, hoursAgo(T0, 2));
+    writeFileSync(join(whole.dir, "manifest.json.age"), "ekstra");
+    expect(listCompleteSets(out).map((x) => x.name)).toEqual([whole.name]);
+    expect(findHollowSets(out)).toEqual([]);
+  });
+
+  it("et HULT sett tatt for 2 t siden undertrykker ikke lenger neste backup: backup tas, det hule settet logges og røres ikke", async () => {
+    const h = harness();
+    const hollow = makeSet(h.out, hoursAgo(T0, 2));
+    rmSync(join(hollow.dir, "jarvis.dump.age"));
+    const r = await h.tick();
+    expect(r).toMatchObject({ exitCode: EXIT.OK, actions: ["backup"], decisions: { backup: { due: true, reason: "no_backup_exists" } } });
+    expect(h.logs).toContainEqual(expect.objectContaining({ level: "warn", event: "set_incomplete", set: hollow.name, problems: expect.stringContaining("mangler: jarvis.dump.age") }));
+    expect(listCompleteSets(h.out).map((x) => x.name)).not.toContain(hollow.name);
+    expect(existsSync(join(hollow.dir, "infisical.dump.age"))).toBe(true); // restene kan være det eneste som er igjen: aldri automatisk sletting
+    expect(h.status().backup.last_set).not.toBe(hollow.name);
+  });
+
+  it("før F8: nyeste sett hult + 2 t gammelt ga `fresh` og null backup; nå vurderes backup-beslutningen fra det nyeste KOMPLETTE settet", async () => {
+    const h = harness();
+    makeSet(h.out, hoursAgo(T0, 30)); // komplett men gammelt
+    const hollow = makeSet(h.out, hoursAgo(T0, 1));
+    writeFileSync(join(hollow.dir, "globals.sql.age"), "");
+    const r = await h.tick();
+    expect(r.actions).toEqual(["backup"]);
+    expect(r.decisions.backup).toMatchObject({ due: true, reason: "interval_elapsed" });
   });
 });
 
