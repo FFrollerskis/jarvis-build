@@ -4,7 +4,7 @@ import { orTsQuery, queryTerms, withMemoryTransaction, type EmbeddingProvider } 
 import type { KnowledgeSourceKind } from "@jarvis/tool-gateway";
 import { documentsMentioning, loadEntitiesForDocuments, mentionTargets } from "./entity-graph.ts";
 import { extractSnippet, neutralizeUntrustedText, sourceKindOf, sourceTypeOf, truncateText, TITLE_MAX_CHARS, URI_MAX_CHARS, type KnowledgeHit } from "./knowledge-hits.ts";
-import { classifyKnowledgeSensitivity } from "./sensitivity.ts";
+import { classifyKnowledgeSensitivity, parseKnowledgeSensitivity, parseKnowledgeTrustLevel } from "./sensitivity.ts";
 
 /** UA-2 P0 §6: hvert retrieval-resultat kan spores tilbake til original kilde - aldri modellgenerert. */
 export interface KnowledgeProvenance {
@@ -249,7 +249,7 @@ export class KnowledgeRetriever {
         .slice(0, limit);
 
       const details = await client.query(
-        `SELECT knowledge_document_id, memory_space_id, source_type, title, content, canonical_uri, modified_at, last_synced_at
+        `SELECT knowledge_document_id, memory_space_id, source_type, title, content, canonical_uri, modified_at, last_synced_at, sensitivity, trust_level
            FROM knowledge_documents WHERE deleted = false AND knowledge_document_id = ANY($1::text[])`,
         [ranked.map((r) => r.id)]
       );
@@ -274,8 +274,11 @@ export class KnowledgeRetriever {
     const space = row["memory_space_id"] as MemorySpace;
     const title = String(row["title"] ?? "");
     const content = String(row["content"] ?? "");
-    // Strengeste av kildens gulv (standard `sensitive`) og klassifiseringen av tittel + HELE innholdet NÅ (ordforrådet vokser; en rad lagret før en utvidelse slipper ikke forbi).
-    const decision = classifyKnowledgeSensitivity({ memory_space: space, texts: [title, content], floor: "sensitive" });
+    // Strengeste av det LAGREDE merket (kildens gulv + klassifiseringen ved synk; en rad uten gyldig merke regnes som `sensitive`, aldri `normal`) og klassifiseringen av tittel + HELE innholdet NÅ
+    // (ordforrådet vokser; en rad lagret før en utvidelse slipper ikke forbi). Eierens `default_sensitivity: "special"` på en kilde gjelder dermed også ved levering til en skymodell, og en eksplisitt
+    // `normal` (offentlig dokumentasjon) vises som `normal` så lenge teksten ikke løfter den.
+    const stored = parseKnowledgeSensitivity(row["sensitivity"]) ?? "sensitive";
+    const decision = classifyKnowledgeSensitivity({ memory_space: space, texts: [title, content], floor: stored });
     const toIso = (value: unknown): string | null => (value instanceof Date ? value.toISOString() : value === null || value === undefined ? null : String(value));
     return {
       document_id: String(row["knowledge_document_id"]),
@@ -285,7 +288,8 @@ export class KnowledgeRetriever {
       uri: truncateText(neutralizeUntrustedText(String(row["canonical_uri"] ?? "")), URI_MAX_CHARS),
       memory_space: space,
       sensitivity: decision.sensitivity,
-      trust_level: "untrusted",
+      // Tillit: kildens lagrede nivå (`internal` kun når eieren selv har satt det på kilden); ukjent/manglende er `untrusted`.
+      trust_level: parseKnowledgeTrustLevel(row["trust_level"]) ?? "untrusted",
       score: Math.round(score * 1000) / 1000,
       observed_at: toIso(row["last_synced_at"]) ?? new Date(0).toISOString(),
       modified_at: toIso(row["modified_at"])
