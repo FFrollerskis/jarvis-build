@@ -28,9 +28,9 @@ RestartSec=5
 TimeoutStopSec=90
 # `systemctl reload jarvis-job-runner` = SIGHUP: leser bearer-tokenet på nytt uten omstart (kjørende jobber berøres ikke). Konfigfilen leses kun ved start.
 ExecReload=/bin/kill -HUP $MAINPID
-# /run/jarvis-job-runner (socket) og /var/lib/jarvis-job-runner (jobbkataloger) eies av tjenestebrukeren.
-RuntimeDirectory=jarvis-job-runner
-RuntimeDirectoryMode=0750
+# /var/lib/jarvis-job-runner (jobbkataloger OG socket-katalogen sock/) eies av tjenestebrukeren. Socket-katalogen er BEVISST persistent og ligger IKKE under
+# /run med RuntimeDirectory=: systemd fjerner en slik katalog ved hver stopp/omstart, og en bind-mount i worker-containeren peker på selve katalog-inoden
+# (den ville pekt på en slettet katalog til worker ble startet på nytt). install-host.sh oppretter katalogen; runneren sletter den aldri.
 StateDirectory=jarvis-job-runner
 StateDirectoryMode=0700
 UMask=0077
@@ -40,7 +40,7 @@ NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 ProtectSystem=strict
-ReadWritePaths=/var/lib/jarvis-job-runner /run/jarvis-job-runner
+ReadWritePaths=/var/lib/jarvis-job-runner
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes

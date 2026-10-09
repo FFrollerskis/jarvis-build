@@ -1,7 +1,7 @@
 {
   "version": 1,
   "runner": {
-    "socket_path": "/run/jarvis-job-runner/runner.sock",
+    "socket_path": "/var/lib/jarvis-job-runner/sock/runner.sock",
     "token_file": "/etc/jarvis/job-runner.token",
     "base_dir": "/var/lib/jarvis-job-runner/jobs",
     "docker_bin": "/usr/bin/docker",

@@ -147,7 +147,9 @@ ip -4 route | grep '172.30.77' || echo "subnett 172.30.77.0/24 er ledig (bra)"
    ```
    Overriden setter `JARVIS_JOB_RUNNER=host`, `JARVIS_JOB_RUNNER_SOCKET` og `JARVIS_JOB_RUNNER_TOKEN_FILE`. **Bruk begge `-f`-flaggene ved hver senere oppdatering**;
    uten overriden faller worker tilbake til lukket tilstand (trygt, men kodejobber feiler med `job_container_runner_not_configured`).
-   Mangler `/run/jarvis-job-runner` eller tokenfilen, nekter compose å starte worker (`create_host_path: false`) - aldri en stille tom mount.
+   Mangler `/var/lib/jarvis-job-runner/sock` eller tokenfilen, nekter compose å starte worker (`create_host_path: false`) - aldri en stille tom mount.
+   **Hvorfor ligger socketen ikke under `/run`?** En bind-mount i worker peker på selve katalog-inoden. Under `/run` med `RuntimeDirectory=` fjerner systemd katalogen ved hver stopp/omstart, og worker ville
+   sett en slettet katalog til den ble startet på nytt. `sock/` er derfor persistent og slettes aldri av runneren eller systemd (reboot, krasj og omstart er trygge, og worker kan starte før runneren).
 
 7. **GitHub (eier):** `main` i sandbox-repoet **og** i produksjonsrepoet skal ha branch protection: krev pull request, blokker force-push og sletting, også for administratorer.
    PR-en skal merges av et menneske. `acceptance.sh` kan ikke sjekke dette for deg (M01 er manuell).
@@ -256,7 +258,7 @@ Miljøvariabelen `JARVIS_JOB_RUNNER_CONFIG` (satt i enhetene) peker på filen.
 
 | Nøkkel | Standard | Betydning |
 |---|---|---|
-| `socket_path` | `/run/jarvis-job-runner/runner.sock` | Unix-socket (modus `0660`); aldri TCP |
+| `socket_path` | `/var/lib/jarvis-job-runner/sock/runner.sock` | Unix-socket (modus `0660`); aldri TCP. Katalogen `sock/` er **persistent** (`0750`, laget av `install-host.sh`, slettes aldri) - se under |
 | `socket_group` | (primærgruppen) | gruppenavn eller gid som eier socketen |
 | `token_file` | **påkrevd** | bearer-token (fil, `0640 root:jarvis-job-clients`) |
 | `base_dir` | `/var/lib/jarvis-job-runner/jobs` | jobbkataloger (`0700`); smalt tegnsett (brukes i `--mount`) |
@@ -342,7 +344,7 @@ med runnerens credential. Ingenting av dette er kjørt mot ekte GitHub (J11).
 | Symptom | Sannsynlig årsak | Tiltak |
 |---|---|---|
 | Kodejobb feiler med `job_container_runner_not_configured:…` | worker mangler `JARVIS_JOB_RUNNER=host`/socket/token (overriden ikke brukt) | kapittel 4, steg 6 |
-| `host_job_runner_error:unreachable` | runner ikke startet, eller worker mangler gruppen/mounten | `systemctl status jarvis-job-runner`; `ls -l /run/jarvis-job-runner`; `JARVIS_JOB_RUNNER_GID` |
+| `host_job_runner_error:unreachable` | runner ikke startet, eller worker mangler gruppen/mounten | `systemctl status jarvis-job-runner`; `sudo ls -ld /var/lib/jarvis-job-runner/sock` (skal være `drwxr-x--- jarvis-runner jarvis-job-clients`); `JARVIS_JOB_RUNNER_GID` |
 | `host_job_runner_error:unauthorized` | token endret uten at worker så det | kapittel 5 |
 | Runner starter ikke: `config_must_be_owned_by_root` / `config_writable_by_group_or_others` | feil eier/modus på `job-runner.json` | `sudo chown root:root …; sudo chmod 0644 …` |
 | `runner.image:placeholder_not_replaced` | eksempelkonfigen er ikke tilpasset | kapittel 4, steg 2 og 4 |
@@ -358,7 +360,7 @@ med runnerens credential. Ingenting av dette er kjørt mot ekte GitHub (J11).
 * **Nødstopp:** `sudo systemctl stop jarvis-job-runner jarvis-egress-proxy` og `sudo docker ps -aq --filter label=jarvis.role=job | xargs -r sudo docker rm -f`. Worker feiler da lukket.
 * **Logger:** `sudo journalctl -u jarvis-job-runner -u jarvis-egress-proxy`. Strukturert JSON; hendelser: `runner_started`, `job_created`, `job_published`, `job_removed`, `reconcile_done`, `request_rejected`,
   `job_create_failed`, `git_credential_source_failed`, `client_gone_during_operation`, `sweep_failed`, `egress_proxy_started`. Env-verdier, argv, tokens og credentials logges aldri (navn med `token/secret/env/argv/…` droppes, kjente hemmeligheter maskeres).
-* **Avinstaller:** stopp og deaktiver enhetene, fjern `/etc/systemd/system/jarvis-*.service`, `/opt/jarvis-job-runner`, `docker network rm jarvis-jobs`, `sudo iptables -D INPUT -i br-jarvis-jobs -j JARVIS-JOBS-IN` (og `-F`/`-X JARVIS-JOBS-IN`),
+* **Avinstaller:** stopp og deaktiver enhetene, fjern `/etc/systemd/system/jarvis-*.service`, `/opt/jarvis-job-runner`, `/var/lib/jarvis-job-runner` (jobbkataloger og socket-katalogen), `docker network rm jarvis-jobs`, `sudo iptables -D INPUT -i br-jarvis-jobs -j JARVIS-JOBS-IN` (og `-F`/`-X JARVIS-JOBS-IN`),
   og slett PAT-filene. Fjern `-f infra/job-runner/docker-compose.job-runner.yml` fra worker-kallet.
 
 ## 13. `container`-modus (`JARVIS_JOB_RUNNER=container`) - ikke anbefalt

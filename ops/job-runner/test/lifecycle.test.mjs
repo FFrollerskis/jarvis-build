@@ -1,9 +1,10 @@
-import { lstat, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import http from "node:http";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CancelToken, RunnerError } from "../lib/errors.mjs";
-import { GIT_TOKEN, RUNNER_TOKEN, createHarness } from "./support/harness.mjs";
+import { GIT_TOKEN, RUNNER_TOKEN, apiRequest, createHarness } from "./support/harness.mjs";
 
 /**
  * WP-C1: livssyklus og robusthet (D-32 porter 1-8, 11, 12): container per jobb, grenser faktisk satt, kansellering dreper umiddelbart,
@@ -437,5 +438,71 @@ describe("I: avslutning", () => {
     expect(h.fake.containers.size).toBe(0);
     expect(await exists(join(h.baseDir, a.job_id))).toBe(false);
     expect(await exists(h.socketPath)).toBe(false);
+  });
+});
+
+describe("J: socket-katalogen er persistent og trygg (bind-mount i worker peker på selve katalog-inoden)", () => {
+  const health = (socketPath) => apiRequest(socketPath, { token: RUNNER_TOKEN, path: "/v1/health" });
+
+  it("en manglende socket-katalog opprettes med modus 0750 (selv om prosessen har umask 0077), og socketen er 0660", async () => {
+    const base = await mkdtemp(join(tmpdir(), "jr-sock-"));
+    const socketPath = join(base, "state", "sock", "runner.sock");
+    const previous = process.umask(0o077); // som UMask=0077 i systemd-enheten
+    let h;
+    try {
+      h = await harness({ runner: { socket_path: socketPath } });
+    } finally {
+      process.umask(previous);
+    }
+    expect((await stat(join(base, "state", "sock"))).mode & 0o777).toBe(0o750);
+    expect((await stat(socketPath)).mode & 0o777).toBe(0o660);
+    expect((await health(socketPath)).status).toBe(200);
+    void h;
+  });
+
+  it("stop og ny start beholder SAMME katalog-inode (en gammel bind-mount forblir gyldig), og den nye socketen virker i samme katalog", async () => {
+    const base = await mkdtemp(join(tmpdir(), "jr-sock-"));
+    const socketPath = join(base, "sock", "runner.sock");
+    const first = await harness({ runner: { socket_path: socketPath } });
+    const before = await stat(join(base, "sock"));
+    await first.service.stop();
+    expect(await exists(socketPath)).toBe(false);          // socket-filen fjernes ved stopp...
+    expect((await stat(join(base, "sock"))).ino).toBe(before.ino); // ...men katalogen blir stående
+    const second = await harness({ runner: { socket_path: socketPath } });
+    const after = await stat(join(base, "sock"));
+    expect({ ino: after.ino, dev: after.dev }).toEqual({ ino: before.ino, dev: before.dev });
+    expect((await health(socketPath)).status).toBe(200);
+    void second;
+  });
+
+  it("en eksisterende katalog som er skrivbar for gruppe/andre nektes (en annen bruker kunne byttet ut socketen)", async () => {
+    for (const mode of [0o770, 0o775, 0o777, 0o722]) {
+      const base = await mkdtemp(join(tmpdir(), "jr-sock-"));
+      await mkdir(join(base, "sock"));
+      await chmod(join(base, "sock"), mode);
+      const h = await harness({ autoStart: false, runner: { socket_path: join(base, "sock", "runner.sock") } });
+      await expect(h.service.start(), mode.toString(8)).rejects.toMatchObject({ code: "socket_dir_writable_by_group_or_others" });
+      expect(await exists(join(base, "sock", "runner.sock"))).toBe(false);
+    }
+  });
+
+  it("socket-katalogen kan ikke være en symlenke (til en katalog agenten/andre kontrollerer)", async () => {
+    const base = await mkdtemp(join(tmpdir(), "jr-sock-"));
+    await mkdir(join(base, "annen"));
+    await symlink(join(base, "annen"), join(base, "sock"));
+    const h = await harness({ autoStart: false, runner: { socket_path: join(base, "sock", "runner.sock") } });
+    await expect(h.service.start()).rejects.toMatchObject({ code: "socket_dir_not_a_plain_directory" });
+    expect(await exists(join(base, "annen", "runner.sock"))).toBe(false);
+  });
+
+  it("en eksisterende 0750-katalog (laget av install-host.sh) beholdes uendret", async () => {
+    const base = await mkdtemp(join(tmpdir(), "jr-sock-"));
+    await mkdir(join(base, "sock"));
+    await chmod(join(base, "sock"), 0o750);
+    const before = await stat(join(base, "sock"));
+    const h = await harness({ runner: { socket_path: join(base, "sock", "runner.sock") } });
+    const after = await stat(join(base, "sock"));
+    expect({ ino: after.ino, mode: after.mode & 0o777 }).toEqual({ ino: before.ino, mode: 0o750 });
+    void h;
   });
 });

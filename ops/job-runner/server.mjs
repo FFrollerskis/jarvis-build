@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { chmod, chown, lstat, readFile, unlink } from "node:fs/promises";
+import { chmod, chown, lstat, mkdir, readFile, unlink } from "node:fs/promises";
 import net from "node:net";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BearerToken, createApiServer } from "./lib/api.mjs";
 import { loadConfigFile } from "./lib/config.mjs";
@@ -38,6 +38,29 @@ async function resolveGroupId(group) {
     if (name === group && /^[0-9]+$/.test(gid ?? "")) return Number(gid);
   }
   throw new ConfigError("socket_group_unknown", group);
+}
+
+/**
+ * Socket-katalogen er en ekte katalog eid av tjenesten, uten skrivetilgang for gruppe/andre (ellers kunne en annen bruker bytte ut socketen). Opprettes (0750,
+ * med socket-gruppen) hvis den mangler - `UMask=0077` i enheten ville ellers gjort den 0700 slik at worker ikke kunne nå socketen. Fjernes ALDRI av runneren:
+ * en bind-mount i worker peker på selve katalog-inoden, så en slettet-og-gjenopprettet katalog ville gjort mounten foreldet.
+ *
+ * @param {string} dir @param {string | undefined} group
+ */
+async function ensureSocketDir(dir, group) {
+  const existed = await lstat(dir).then(() => true, (error) => {
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === "ENOENT") return false;
+    throw error;
+  });
+  await mkdir(dir, { recursive: true, mode: 0o750 });
+  if (!existed) {
+    await chmod(dir, 0o750);
+    if (group !== undefined) await chown(dir, process.getuid?.() ?? 0, await resolveGroupId(group));
+  }
+  const st = await lstat(dir);
+  if (st.isSymbolicLink() || !st.isDirectory()) throw new ConfigError("socket_dir_not_a_plain_directory");
+  if (process.getuid !== undefined && st.uid !== process.getuid()) throw new ConfigError("socket_dir_wrong_owner");
+  if ((st.mode & 0o022) !== 0) throw new ConfigError("socket_dir_writable_by_group_or_others");
 }
 
 /** Fjerner et gammelt socket HVIS ingen lytter på det; nekter å starte hvis en annen instans kjører eller stien er noe annet enn et socket. */
@@ -139,6 +162,7 @@ export async function createRunnerService(options) {
       await loadToken();
       await manager.reconcile();
 
+      await ensureSocketDir(dirname(config.socketPath), config.socketGroup);
       await prepareSocketPath(config.socketPath);
       server = createApiServer({
         manager, bearer: /** @type {BearerToken} */ (bearer), logger,

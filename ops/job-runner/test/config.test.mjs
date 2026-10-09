@@ -29,7 +29,7 @@ const code = (fn) => {
 describe("A: gyldig konfig og standardverdier", () => {
   it("minimal runner-konfig får trygge standardverdier", () => {
     const { runner: r } = parse(runner());
-    expect(r.socketPath).toBe("/run/jarvis-job-runner/runner.sock");
+    expect(r.socketPath).toBe("/var/lib/jarvis-job-runner/sock/runner.sock");
     expect(r.baseDir).toBe("/var/lib/jarvis-job-runner/jobs");
     expect(r.maxConcurrentJobs).toBe(2);
     expect(r.maxJobLifetimeS).toBe(3600);

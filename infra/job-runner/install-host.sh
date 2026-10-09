@@ -11,6 +11,7 @@
 #   /opt/jarvis-job-runner/infra/job-runner/setup-network.sh
 #   /etc/systemd/system/jarvis-job-runner.service, jarvis-egress-proxy.service
 #   /etc/jarvis/job-runner.example.json, /etc/jarvis/job-runner.token (kun hvis den mangler)
+#   /var/lib/jarvis-job-runner (0700) og /var/lib/jarvis-job-runner/sock (0750, socket-katalogen worker monterer; persistent)
 set -euo pipefail
 
 STAGE=0
@@ -59,6 +60,15 @@ if [ "$STAGE" = "0" ]; then
   fi
   id -u jarvis-egress >/dev/null 2>&1 || useradd --system --user-group --no-create-home --shell /usr/sbin/nologin jarvis-egress
 fi
+
+# --- state- og socket-katalog: PERSISTENT, opprettes her og slettes aldri av runneren eller systemd ---
+# Socketen ligger IKKE under /run (RuntimeDirectory= fjernes av systemd ved hver stopp, og en bind-mount i worker peker på selve katalog-inoden: den ville pekt på
+# en slettet katalog til worker ble startet på nytt). sock/ er 0750 med socket-gruppen; state-katalogen over er 0700 (jobbkatalogene ligger der).
+STATE="$PREFIX/var/lib/jarvis-job-runner"
+say "state/socket-katalog -> $STATE"
+install -d -m 0700 "$STATE"
+install -d -m 0750 "$STATE/sock"
+if [ "$STAGE" = "0" ]; then chown "jarvis-runner:$CLIENT_GROUP" "$STATE" "$STATE/sock"; fi
 
 # --- kode: ryddes og kopieres på nytt hver gang (ingen gamle filer blir liggende) ---
 say "kode -> $CODE"

@@ -169,7 +169,7 @@ function parseRunner(raw) {
   if (defaultExec > maxExec) throw new ConfigError("config_invalid", "runner.default_exec_timeout_ms:above_max");
 
   return Object.freeze({
-    socketPath: absPathField(r, "socket_path", "runner", "/run/jarvis-job-runner/runner.sock"),
+    socketPath: absPathField(r, "socket_path", "runner", "/var/lib/jarvis-job-runner/sock/runner.sock"),
     ...(socketGroup !== undefined ? { socketGroup: /** @type {string} */ (socketGroup) } : {}),
     tokenFile: absPathField(r, "token_file", "runner", undefined),
     baseDir: safeMountPath(absPathField(r, "base_dir", "runner", "/var/lib/jarvis-job-runner/jobs")),

@@ -85,9 +85,13 @@ describe("A: systemd-enhetene - herding og minste-privilegium", () => {
     expect(one(runner, "Service", "User")).toBe("jarvis-runner");
     expect(one(runner, "Service", "Group")).toBe("jarvis-job-clients");
     expect(one(runner, "Service", "SupplementaryGroups")).toBe("docker");
-    expect(one(runner, "Service", "ReadWritePaths").split(" ").sort()).toEqual(["/run/jarvis-job-runner", "/var/lib/jarvis-job-runner"]);
+    expect(one(runner, "Service", "ReadWritePaths")).toBe("/var/lib/jarvis-job-runner");
+    expect(one(runner, "Service", "StateDirectory")).toBe("jarvis-job-runner");
     expect(one(runner, "Service", "StateDirectoryMode")).toBe("0700");
-    expect(one(runner, "Service", "RuntimeDirectoryMode")).toBe("0750");
+    // Socket-katalogen er PERSISTENT (under state-katalogen), ikke RuntimeDirectory: systemd fjerner en slik katalog ved hver stopp, og en bind-mount i
+    // worker peker på selve katalog-inoden (ville pekt på en slettet katalog til worker ble startet på nytt).
+    expect(values(runner, "Service", "RuntimeDirectory")).toEqual([]);
+    expect(values(runner, "Service", "RuntimeDirectoryMode")).toEqual([]);
     expect(values(runner, "Unit", "Requires").join(" ").split(/\s+/).sort()).toEqual(["docker.service", "jarvis-egress-proxy.service"]);
     expect(values(runner, "Unit", "After").join(" ")).toContain("jarvis-egress-proxy.service");
     // proxyen er en HARD avhengighet (Requires, ikke Wants): feiler setup-network.sh, starter ikke runneren uten brannmurreglene
@@ -198,7 +202,7 @@ describe("C: compose-overriden gir worker KUN socket-katalogen og tokenfilen", (
   it("de to monteringene er read-only binds som feiler hvis verten mangler stien (aldri en stille tom mount)", () => {
     const binds = [...code.matchAll(/- type: bind\n\s+source: (\S+)\n\s+target: (\S+)\n\s+read_only: true\n\s+bind:\n\s+create_host_path: false/g)].map((m) => [m[1], m[2]]);
     expect(binds).toEqual([
-      ["/run/jarvis-job-runner", "/run/jarvis-job-runner"],
+      ["/var/lib/jarvis-job-runner/sock", "/run/jarvis-job-runner"],
       ["/etc/jarvis/job-runner.token", "/run/secrets/jarvis-job-runner-token"]
     ]);
     expect(code.match(/type: bind/g)).toHaveLength(2);
@@ -212,9 +216,15 @@ describe("C: compose-overriden gir worker KUN socket-katalogen og tokenfilen", (
     expect(code).not.toMatch(/TOKEN: |SECRET|PASSWORD|API_KEY/);
   });
 
-  it("socket-stien i overriden er den samme som runnerens standard og som eksempelkonfigens (én kilde til sannhet)", async () => {
+  it("monteringen peker på katalogen socket_path ligger i (eksempelkonfig OG runnerens standard), og containerstien er mount-målet + samme filnavn", async () => {
     const example = JSON.parse(await read("infra/job-runner/job-runner.example.json"));
-    expect(example.runner.socket_path).toBe("/run/jarvis-job-runner/runner.sock");
+    const source = /source: (\/var\/lib\/jarvis-job-runner\/sock)\n\s+target: (\S+)/.exec(code);
+    expect(source).not.toBeNull();
+    expect(dirname(example.runner.socket_path)).toBe(source[1]);
+    expect(example.runner.socket_path).toBe(`${source[1]}/runner.sock`);
+    expect(validateConfig({ ...example, runner: { ...example.runner, socket_path: undefined, image: `sha256:${"a".repeat(64)}` } }, { require: ["runner"] }).runner.socketPath)
+      .toBe(example.runner.socket_path); // runnerens standard = eksempelets verdi
+    expect(code).toContain(`JARVIS_JOB_RUNNER_SOCKET: "${source[2]}/runner.sock"`);
     expect(example.runner.token_file).toBe("/etc/jarvis/job-runner.token");
   });
 });
@@ -565,6 +575,25 @@ describe("G: install-host.sh --stage (ekte kjøring i en midlertidig prefiks-kat
       expect(await readFile(join(target, "etc/systemd/system", unit), "utf8")).toBe(await readFile(join(INFRA, unit), "utf8"));
     }
     expect(existsSync(join(target, "etc/jarvis/job-runner.example.json"))).toBe(true);
+    // state-katalogen (0700) og den PERSISTENTE socket-katalogen (0750) som worker monterer
+    const state = join(target, "var/lib/jarvis-job-runner");
+    expect((await stat(state)).mode & 0o777).toBe(0o700);
+    expect((await stat(join(state, "sock"))).mode & 0o777).toBe(0o750);
+  });
+
+  it("state-/socket-katalogen slettes ALDRI av en ny installasjon: samme inode og urørt innhold (en bind-mount i worker forblir gyldig)", async () => {
+    const { target, w } = await stage();
+    const sock = join(target, "var/lib/jarvis-job-runner/sock");
+    const before = await stat(sock);
+    await writeFile(join(sock, "runner.sock"), "plassholder for en socket");
+    await mkdir(join(target, "var/lib/jarvis-job-runner/jobs"), { recursive: true });
+    await writeFile(join(target, "var/lib/jarvis-job-runner/jobs/pagaende"), "en jobb");
+    const again = w.run(SCRIPT, ["--stage", "--prefix", target]);
+    expect(again.status, again.stderr).toBe(0);
+    const after = await stat(sock);
+    expect({ ino: after.ino, dev: after.dev, mode: after.mode & 0o777 }).toEqual({ ino: before.ino, dev: before.dev, mode: 0o750 });
+    expect(await readFile(join(sock, "runner.sock"), "utf8")).toBe("plassholder for en socket");
+    expect(await readFile(join(target, "var/lib/jarvis-job-runner/jobs/pagaende"), "utf8")).toBe("en jobb");
   });
 
   it("bearer-tokenet genereres kun hvis det mangler (0640, 64 hex-tegn) og skrives aldri ut; en ny kjøring beholder det", async () => {
