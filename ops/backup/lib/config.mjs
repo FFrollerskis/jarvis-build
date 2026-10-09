@@ -76,6 +76,11 @@ export function loadScheduleConfig(flags, env = process.env) {
   if (verifyError === null && verify.source === "offsite" && roles.has("verify") && offsite === null) {
     verifyError = offsiteError === null ? "--verify-source offsite krever en off-site-adapter (JARVIS_BACKUP_OFFSITE_*)" : "--verify-source offsite, men off-site-konfigurasjonen er ugyldig";
   }
+  // Review F2: et sett fra fjernmålet er ubetrodd (age er ikke autentisert), og dumpen kjører SQL som SUPERUSER på scratch-serveren. Mot en varig, direkte scratch-server
+  // er det ikke akseptabelt - da må restoren gå mot engangs-containeren (nas-restore-verify.sh, uten nettverk) som kastes etterpå.
+  if (verifyError === null && verify.source === "offsite" && roles.has("verify") && verify.scratch !== null) {
+    verifyError = "JARVIS_BACKUP_VERIFY_SCRATCH_HOST (varig, direkte scratch-server) kan ikke kombineres med kilde off-site: settet fra fjernmålet er ubetrodd og dumpen kjører SQL som superuser på scratch-serveren - la JARVIS_BACKUP_VERIFY_SCRATCH_HOST stå tom (engangs-container) eller bruk kilde local";
+  }
   const config = {
     out,
     stateDir,

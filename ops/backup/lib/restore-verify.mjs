@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { createReadStream, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { sha256File } from "./backup.mjs";
+import { GLOBALS_MAX_BYTES, GlobalsRejectedError, sanitizeGlobals } from "./globals-filter.mjs";
 import { INVENTORY_SQL, psqlOnce } from "./psql-session.mjs";
 import { requireBinary, utcStamp } from "./tools.mjs";
 
@@ -92,6 +93,49 @@ function decryptTo(identityFile, encryptedFile, consumerCmd) {
   });
 }
 
+/** `age -d` til minnet (kun små filer som globals.sql). Overskrides `maxBytes`, drepes age og `GlobalsRejectedError` kastes. */
+function decryptToString(identityFile, encryptedFile, maxBytes = GLOBALS_MAX_BYTES) {
+  return new Promise((resolve, reject) => {
+    const age = spawn(requireBinary("age"), ["-d", "-i", identityFile], { stdio: ["pipe", "pipe", "pipe"] });
+    const chunks = [];
+    let size = 0;
+    let tooBig = false;
+    let err = "";
+    age.stdout.on("data", (d) => {
+      size += d.length;
+      if (size > maxBytes) {
+        tooBig = true;
+        age.kill("SIGKILL");
+        return;
+      }
+      chunks.push(d);
+    });
+    age.stderr.on("data", (d) => { err += d; });
+    age.stdin.on("error", () => undefined); // EPIPE hvis age avslutter (feil nøkkel) før all inndata er lest
+    createReadStream(encryptedFile).on("error", reject).pipe(age.stdin);
+    age.on("error", reject);
+    age.on("close", (code) => {
+      if (tooBig) return reject(new GlobalsRejectedError("for stor"));
+      if (code !== 0) return reject(new Error(`restore step failed (age exit ${code}): ${err.trim().slice(0, 300)}`));
+      return resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+  });
+}
+
+/** Kjører ALLEREDE FILTRERT SQL (`sanitizeGlobals`) gjennom psql på stdin. ON_ERROR_STOP=0: en rolle som finnes fra før er greit. */
+function runPsqlScript(runner, sql) {
+  const cmd = runner.command("psql", ["-X", "-q", "-v", "ON_ERROR_STOP=0", "-f", "-"], { database: "postgres" });
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd.file, cmd.args, { env: cmd.env, stdio: ["pipe", "ignore", "pipe"] });
+    let err = "";
+    child.stderr.on("data", (d) => { err = (err + d).slice(-4096); });
+    child.stdin.on("error", () => undefined);
+    child.on("error", reject);
+    child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`restore step failed (psql globals exit ${code}): ${err.trim().slice(0, 300)}`))));
+    child.stdin.end(sql);
+  });
+}
+
 /**
  * Review F1: scratch-vakten kan ikke være en strengsammenligning av endepunktene. `docker-compose:postgres` mot `host:port`, `localhost` mot `127.0.0.1` og
  * en DNS-alias gir alle ulike strenger for SAMME server - og da ville rolle- og passord-restoren gått mot produksjon (reprodusert av reviewer: admin-passordet
@@ -133,9 +177,10 @@ export async function checkScratchServer(scratchRunner, manifest) {
  * (and afterwards drops) databases whose names start with `restore_verify_`. Reports names
  * and counts only - never row data.
  *
- * Rekkefølge (review F1): manifestet valideres → endepunkt-sammenligning (billig førstelinje) → integritet (SHA-256 før dekryptering) →
- * scratch-serveren verifiseres TOM → først da skrives noe (roller, så databasene). `allowSameServer` omgår KUN endepunkt-sammenligningen: tom-sjekken er alltid på.
- * Settet er ubetrodd; `pg_restore` kjører SQL fra dumpen som superuser på scratch-serveren, så scratch MÅ være en kastbar instans (engangs-container).
+ * Rekkefølge (review F1/F2): manifestet valideres → endepunkt-sammenligning (billig førstelinje) → integritet (SHA-256 før dekryptering) →
+ * scratch-serveren verifiseres TOM → først da skrives noe (roller fra det FILTRERTE globals.sql, så databasene). `allowSameServer` omgår KUN endepunkt-sammenligningen:
+ * tom-sjekken er alltid på. Settet er ubetrodd; `pg_restore` kjører SQL fra dumpen som SUPERUSER på scratch-serveren (kan f.eks. `COPY … PROGRAM`), så scratch MÅ være en
+ * kastbar instans (engangs-container uten nettverk) - globals-filteret beskytter verifisererens VERT (psql-metakommandoer), ikke scratch-serveren mot dumpen.
  */
 export async function runRestoreVerify({ setDir, identityFile, scratchRunner, allowSameServer = false, keepScratch = false, now = new Date(), log = () => undefined }) {
   const manifestPath = join(setDir, "manifest.json");
@@ -172,8 +217,12 @@ export async function runRestoreVerify({ setDir, identityFile, scratchRunner, al
   const created = [];
   try {
     // 3. roles first (RLS policies and owners reference them). Pre-existing roles are fine.
+    // Review F2: globals.sql er UBETRODD SQL (age er ikke autentisert). Den dekrypteres til MINNET, whitelist-filtreres (ingen psql-metakommandoer, kun kjente
+    // rolle-setninger, passord-hasher fjernes) og psql får aldri annet enn den gjenoppbygde, validerte teksten.
     log("restoring cluster globals");
-    await decryptTo(identityFile, join(setDir, manifest.globals.file), scratchRunner.command("psql", ["-X", "-q", "-v", "ON_ERROR_STOP=0", "-f", "-"], { database: "postgres" }));
+    const globals = sanitizeGlobals(await decryptToString(identityFile, join(setDir, manifest.globals.file)));
+    report.globals = { statements: globals.statements, passwords_stripped: globals.passwordsStripped };
+    if (globals.sql !== "") await runPsqlScript(scratchRunner, globals.sql);
     for (const entry of manifest.databases) {
       const scratchDb = `${SCRATCH_DB_PREFIX}${entry.database}_${stamp}`.toLowerCase();
       if (!scratchDb.startsWith(SCRATCH_DB_PREFIX)) throw new Error("internal: scratch name guard");
@@ -210,7 +259,7 @@ export async function runRestoreVerify({ setDir, identityFile, scratchRunner, al
     }
   } catch (err) {
     report.ok = false;
-    report.stage = "restore";
+    report.stage = err instanceof GlobalsRejectedError ? "globals" : "restore";
     report.error = String(err.message).slice(0, 400);
   } finally {
     if (!keepScratch) {

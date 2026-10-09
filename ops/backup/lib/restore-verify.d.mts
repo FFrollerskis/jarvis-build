@@ -22,11 +22,13 @@ export interface RestoreVerifyDatabaseReport {
 }
 export interface RestoreVerifyReport {
   ok: boolean;
-  stage: "manifest" | "integrity" | "scratch_guard" | "restore" | "complete";
+  stage: "manifest" | "integrity" | "scratch_guard" | "globals" | "restore" | "complete";
   set?: string;
   source_endpoint?: string;
   scratch_endpoint?: string;
   error?: string;
+  /** Antall setninger fra globals.sql som ble kjørt, og antall passord-hasher som ble FJERNET (roller restores uten passord). */
+  globals?: { statements: number; passwords_stripped: number };
   integrity: Array<{ file: string; ok: boolean }>;
   databases: RestoreVerifyDatabaseReport[];
 }

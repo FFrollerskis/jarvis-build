@@ -266,14 +266,14 @@ function verifyOutcome(result) {
   const ok = report.ok === true && result.exitCode === 0;
   let code = null;
   if (!ok) {
-    if (report.stage === "integrity" || report.stage === "manifest") code = "verify_integrity";
+    if (report.stage === "integrity" || report.stage === "manifest" || report.stage === "globals") code = "verify_integrity";
     else if (report.stage === "scratch_guard") code = "verify_config_invalid"; // scratch-serveren er ikke tom/kastbar: feilpekt konfig, ikke en feil i settet
     else if (dbs.some((d) => d?.ok === false)) code = "verify_mismatch";
     else code = "verify_failed";
   }
-  // Vaktene (manifest, scratch) har faste norske feiltekster uten innhold fra settet: de vises i den interne statusen - «hvorfor» er hele poenget med vakten.
+  // Vaktene (manifest, scratch, globals) har faste norske feiltekster uten innhold fra settet: de vises i den interne statusen - «hvorfor» er hele poenget med vakten.
   // Annen verktøyfeil (stderr fra pg_restore/psql kan sitere ubetrodd SQL) kommer aldri hit.
-  const guarded = (report.stage === "manifest" || report.stage === "scratch_guard") && typeof report.error === "string";
+  const guarded = (report.stage === "manifest" || report.stage === "scratch_guard" || report.stage === "globals") && typeof report.error === "string";
   return { ok, code, tables: sum("tables_restored"), rows: sum("total_rows_expected"), detail: guarded ? `restore-verifisering stoppet (${report.stage}): ${report.error}`.slice(0, 280) : null };
 }
 

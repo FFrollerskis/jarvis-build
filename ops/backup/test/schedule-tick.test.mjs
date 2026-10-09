@@ -646,6 +646,27 @@ describe("WP-C2 tick: valgfrie delsystemer med ugyldig konfig stopper ALDRI selv
     expect(noAdapter.verifyCalls).toEqual([]);
   });
 
+  it("review F2: en varig, direkte scratch-server kan ikke kombineres med kilde off-site (settet fra fjernmålet er ubetrodd) - verify_config_invalid, backupen tas likevel", async () => {
+    const env = { JARVIS_BACKUP_OFFSITE_LOCAL_DIR: "/mnt/usb/jarvis", JARVIS_BACKUP_VERIFY_SCRATCH_HOST: "127.0.0.1", JARVIS_SCRATCH_DB_PASSWORD: "scratch-pw-123" };
+    const h = harness({ identity: true, sink: fakeSink(), env, flags: { "verify-source": "offsite" } });
+    expect(h.config.verifyError).toContain("kan ikke kombineres med kilde off-site");
+    expect(h.config.verifyError).not.toContain("scratch-pw-123");
+    const r = await h.tick();
+    expect(r).toMatchObject({ exitCode: EXIT.VERIFY_FAILED, failed: ["verify"] });
+    expect(r.actions).toEqual(["backup", "offsite", "verify"]);
+    expect(h.verifyCalls).toEqual([]); // verifiseringen ble aldri startet
+    expect(h.status().restore_verify).toMatchObject({ state: "failed", last_error_code: "verify_config_invalid" });
+    expect(h.status().restore_verify.last_error).toContain("engangs-container");
+
+    // samme forbud via miljøvariabelen, og kun når verify-rollen er på og kilden faktisk er off-site
+    const viaEnv = (flags, extra = {}) => loadScheduleConfig({ out: tempDir(), ...flags }, { ...env, ...extra });
+    expect(viaEnv({}, { JARVIS_BACKUP_VERIFY_SOURCE: "offsite" }).verifyError).toContain("kan ikke kombineres");
+    expect(viaEnv({ roles: "backup,offsite", "verify-source": "offsite" }).verifyError).toBeNull();
+    expect(viaEnv({ "verify-source": "local" }).verifyError).toBeNull();
+    expect(viaEnv({}, { JARVIS_BACKUP_VERIFY_SCRATCH_HOST: "" }).verifyError).toBeNull();
+    expect(viaEnv({ "verify-source": "offsite" }, { JARVIS_BACKUP_VERIFY_SCRATCH_HOST: "" }).verifyError).toBeNull(); // engangs-containeren (standard) er tillatt med off-site
+  });
+
   it("kjernekonfig er fortsatt streng: ugyldig intervall/roller/mappe stopper tikket FØR noe kjører (exit 1)", () => {
     expect(() => loadScheduleConfig({ out: tempDir() }, { JARVIS_BACKUP_INTERVAL_HOURS: "0" })).toThrow(ConfigError);
     expect(() => loadScheduleConfig({ out: tempDir(), roles: "backup,rm" }, {})).toThrow(ConfigError);

@@ -127,3 +127,68 @@ export function fakeScratchRunner({ endpoint = "127.0.0.1:55432", databases = ["
     writes: () => readFileSync(logFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((c) => !(typeof c.sql === "string" && /^\s*SELECT\b/i.test(c.sql)))
   };
 }
+
+export const GLOBALS_DUMP_KEY = "4QFRA14JSOLA1lsdR7F8yQbvjm1BXi9OJR95sMdecEbDRQuY8h39i5WpxQLoAdQ";
+const FAKE_HASH = "SCRAM-SHA-256$4096:not-real-salt$not-real-stored-key:not-real-server-key";
+
+/** Faktisk utdata fra `pg_dumpall --globals-only` (PostgreSQL 16, med \restrict-linjene fra ≥ 16.10); passord-hashen er byttet ut med en åpenbar plassholder. */
+export const REAL_GLOBALS_DUMP = String.raw`--
+-- PostgreSQL database cluster dump
+--
+
+\restrict ${GLOBALS_DUMP_KEY}
+
+SET default_transaction_read_only = off;
+
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+
+--
+-- Roles
+--
+
+CREATE ROLE "Weird Role;x";
+ALTER ROLE "Weird Role;x" WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB NOLOGIN NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 5 VALID UNTIL '2030-01-01 00:00:00+00';
+CREATE ROLE jarvis_app;
+ALTER ROLE jarvis_app WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB LOGIN NOREPLICATION NOBYPASSRLS PASSWORD '${FAKE_HASH}';
+COMMENT ON ROLE jarvis_app IS 'Appen: it''s fine -- ø æ å';
+CREATE ROLE postgres;
+ALTER ROLE postgres WITH SUPERUSER INHERIT CREATEROLE CREATEDB LOGIN REPLICATION BYPASSRLS;
+CREATE ROLE reader;
+ALTER ROLE reader WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB NOLOGIN NOREPLICATION NOBYPASSRLS;
+
+--
+-- User Configurations
+--
+
+--
+-- User Config "jarvis_app"
+--
+
+ALTER ROLE jarvis_app SET search_path TO 'myschema', 'public';
+
+--
+-- User Config "reader"
+--
+
+ALTER ROLE reader SET work_mem TO '64MB';
+
+
+--
+-- Role memberships
+--
+
+GRANT pg_read_all_data TO reader WITH INHERIT TRUE GRANTED BY postgres;
+GRANT reader TO jarvis_app WITH ADMIN OPTION, INHERIT TRUE GRANTED BY postgres;
+
+
+
+
+
+
+\unrestrict ${GLOBALS_DUMP_KEY}
+
+--
+-- PostgreSQL database cluster dump complete
+--
+`;
