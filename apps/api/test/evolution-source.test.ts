@@ -10,7 +10,7 @@ import {
 } from "../src/evolution-source.ts";
 import { MAINTENANCE_CATALOG } from "@jarvis/self-modification";
 import { createRadarState } from "../src/evolution-radar.ts";
-import { GOLDEN } from "../src/golden-suite.ts";
+import { GOLDEN, WIRING_LOCKS } from "../src/golden-suite.ts";
 import type { LookupImpl } from "../src/radar-url-guard.ts";
 import { PRODUCTION_SURFACE } from "./support/fast-path-harness.ts";
 
@@ -285,6 +285,13 @@ describe("EV-4 + EV-21: gull-suite og sikkerhetsselvtest", () => {
     expect(red.status).toBe("OK");
     expect(red.summary_no).toMatch(/Ingen brudd i \d+ forsøk/);
     expect(red.findings.join("\n")).toContain("ikke en adversariell red-team-agent");
+    // L4: rapporten sier at suiten tester REGLER, ikke kobling, og peker på testene som låser koblingen (ikke bare en generell frase).
+    expect(red.findings.join("\n")).toContain("Den tester reglene, ikke koblingen");
+    expect(red.summary_no).toContain("mot reglene");
+    const wiring = golden.findings.join("\n");
+    expect(wiring).toContain("beviser IKKE at de er koblet inn i chat- og jobbløpene");
+    for (const lock of WIRING_LOCKS) for (const t of lock.tests) expect(wiring, lock.rule).toContain(t);
+    expect(wiring).toContain("d450-routing-q51-q53-228.test.ts");
   });
 
   it("uten verktøyflate sies det at oppgaver er hoppet over (aldri stille bestått)", async () => {

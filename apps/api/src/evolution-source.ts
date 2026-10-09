@@ -12,7 +12,7 @@ import {
 import { readSchedulerHealth, type ConnectorStatus, type MeshToolMapping } from "@jarvis/tool-gateway";
 import type { Ev0BootStatus } from "./ev0-boot.ts";
 import type { RadarState } from "./evolution-radar.ts";
-import { GOLDEN_SUITE_DIGEST, runGolden, type GoldenRun } from "./golden-suite.ts";
+import { GOLDEN_SUITE_DIGEST, WIRING_LOCKS, runGolden, type GoldenRun } from "./golden-suite.ts";
 
 /**
  * WP-B (D-452): evolusjonsportene (EV-0…EV-23) i OBSERVASJONSMODUS. Denne filen leser kun eksisterende observerbarhet (endringsregisteret, cost_events, scheduler_state, connector-status, SLO-rapporten,
@@ -413,7 +413,9 @@ export async function goldenSection(ctx: EvolutionContext): Promise<EvolutionSec
   const findings = [
     `Gull-suite v1 (digest ${run.digest.slice(0, 12)}): ${passed} av ${total} oppgaver bestått${skipped > 0 ? `, ${skipped} hoppet over (verktøyflaten er ikke tilgjengelig her: ${run.skipped.join(", ")}) - de er IKKE målt` : ""}.`,
     ...(failed > 0 ? [`Ikke bestått: ${run.failed.join(", ")}.`] : []),
-    "Oppgavene er faktiske feil og beslutninger fra Jarvis' egen historie (klassifisering, ruting, verktøyutvalg, skjerming, repo-lås), kjørt mot de deterministiske reglene - ingen modell kalles.",
+    "Oppgavene er faktiske feil og beslutninger fra Jarvis' egen historie (klassifisering, ruting, verktøyutvalg, skjerming, repo-lås, radar-sone, bundne bekreftelser), kjørt mot de deterministiske reglene - ingen modell kalles.",
+    // L4 (gjennomgang av PR #313): suiten tester REGLER, ikke KOBLING. Fjernes en regel fra chat-/jobbløpet forblir suiten grønn - det er disse testene som feiler da.
+    `Suiten kjører REGLENE som funksjoner (taint-porten mot stubber) og beviser IKKE at de er koblet inn i chat- og jobbløpene. Koblingen låses av egne tester: ${WIRING_LOCKS.map((l) => `${l.rule} (${l.tests.join(", ")})`).join("; ")}.`,
     "Ikke koblet ennå: modellevaluering mot representative oppgaver, regresjonsport mot en lagret baseline og blind A/B (krever modellkjøringer og lagret historikk)."
   ];
   // ATTENTION = målt og dårlig (noe som kjørte feilet). UNKNOWN = noe kunne ikke måles (hoppet over) og ingenting målt er dårlig. OK kun når ALLE er kjørt og bestått.
@@ -435,12 +437,12 @@ export async function redTeamSection(ctx: EvolutionContext): Promise<EvolutionSe
     `${attempts} angrepsforsøk mot egne forsvar i ${run.red_team.length} av ${RED_TEAM_CATEGORIES.length} kategorier: ${breaches} brudd.`,
     ...(breached.length > 0 ? [`BRUDD i: ${breached.join(", ")} - sikkerhetsregresjon er en hard stopp som aldri kan veies opp av noe annet.`] : []),
     ...(run.uncovered.length > 0 ? [`Ikke dekket: ${run.uncovered.join(", ")} (aldri tolket som bestått).`] : []),
-    "Dette er en selvtest av eksisterende, deterministiske forsvar (radar-sonen, skjerming, hemmelighetsskanning, repo-lås, ruteinstruks) - ikke en adversariell red-team-agent (EV-21-agenten er ikke bygget)."
+    "Dette er en selvtest av eksisterende, deterministiske forsvar (radar-sonen, skjerming, hemmelighetsskanning, repo-lås, bundne bekreftelser) - ikke en adversariell red-team-agent (EV-21-agenten er ikke bygget). Den tester reglene, ikke koblingen i løpene (se EV-4 for testene som låser koblingen)."
   ];
   const bad = breaches > 0;
   return {
     ev: "EV-21", title_no: "Sikkerhetsselvtest (red team lite)", mode: "observe", status: bad || run.uncovered.length > 0 ? "ATTENTION" : "OK",
-    summary_no: bad ? `${breaches} brudd i selvtesten - hard stopp for all evolusjon.` : run.uncovered.length > 0 ? `Ingen brudd, men ${run.uncovered.length} kategori(er) er ikke dekket.` : `Ingen brudd i ${attempts} forsøk.`,
+    summary_no: bad ? `${breaches} brudd i selvtesten - hard stopp for all evolusjon.` : run.uncovered.length > 0 ? `Ingen brudd, men ${run.uncovered.length} kategori(er) er ikke dekket.` : `Ingen brudd i ${attempts} forsøk mot reglene (koblingen låses av egne tester, se EV-4).`,
     findings, source: "apps/api/src/golden-suite.ts (adversarielle oppgaver) + judgeRedTeam", observed_at: ctx.now.toISOString()
   };
 }
