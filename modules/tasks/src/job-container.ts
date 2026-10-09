@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   ENV_NAME, FORBIDDEN_ENV, JobContainerConfigError, buildJobContainerCreateArgs, validateJobContainerPolicy, type JobContainerPolicy
 } from "./job-container-spec.mjs";
+import { HostJobRunnerConfigError, HostJobSandboxRunner } from "./host-job-runner.ts";
 import { execProcess } from "./process-exec.ts";
 import type { ExecResult, Sandbox, SandboxRunner } from "./sandbox.ts";
 
@@ -26,10 +27,11 @@ export type { JobContainerPolicy };
  *   - INGEN arvede secrets: env er en eksplisitt liste; verdier sendes aldri i argv; vault-/DB-nøkler nektes,
  *   - kill av HELE prosessgruppen (container-PID-namespace) ved timeout og ved dispose.
  *
- * Finnes ikke runneren (`JARVIS_JOB_RUNNER=container` + gyldig konfig), er den ENESTE tilgjengelige
+ * Finnes ikke en gyldig runner (`JARVIS_JOB_RUNNER=host|container` + gyldig konfig), er den ENESTE tilgjengelige
  * implementasjonen `FailClosedSandboxRunner`: jobben feiler med `job_container_runner_not_configured` -
- * den faller ALDRI tilbake til prosess-sandbox. Worker-containeren har ikke Docker-socket; en reell
- * runner krever en egen, vertsside runner-tjeneste (se docs/remediation/PHASE_2_GATE.md, `BLOCKED_EXTERNAL`).
+ * den faller ALDRI tilbake til prosess-sandbox. Worker-containeren har ikke Docker-socket; veien som er bygget for dette er den
+ * tilsynte vertstjenesten `ops/job-runner/` (WP-C1, `JARVIS_JOB_RUNNER=host`, se host-job-runner.ts og docs/runbooks/JOB_RUNNER.md).
+ * `container`-modusen under krever docker i SAMME prosess og er ikke anbefalt.
  */
 
 export interface DockerExecResult {
@@ -129,13 +131,30 @@ export class FailClosedSandboxRunner implements SandboxRunner {
 }
 
 /**
- * Velger kodejobb-runner fra miljøet. `JARVIS_JOB_RUNNER=container` + gyldig `JARVIS_JOB_IMAGE` (digest-pinnet),
- * `JARVIS_JOB_NETWORK` og `JARVIS_JOB_EGRESS_PROXY` gir `DockerJobSandboxRunner`; ALT annet - inkludert det
- * gamle `JARVIS_SANDBOX=process|docker` - gir `FailClosedSandboxRunner`. Aldri en stille nedgradering.
+ * Velger kodejobb-runner fra miljøet. To godkjente veier, alt annet - inkludert det gamle `JARVIS_SANDBOX=process|docker` - gir
+ * `FailClosedSandboxRunner`. Aldri en stille nedgradering.
+ *
+ *  - `JARVIS_JOB_RUNNER=host` (ANBEFALT, WP-C1): worker snakker med den vertsside runner-tjenesten (`ops/job-runner/`) over et Unix-socket
+ *    (`JARVIS_JOB_RUNNER_SOCKET`) med bearer-token fra fil (`JARVIS_JOB_RUNNER_TOKEN_FILE`). Worker trenger INGEN Docker-socket, og
+ *    git-credentialen forlater aldri vertstjenesten. Image/nettverk/proxy/grenser bestemmes av vertsadmins konfigfil - ikke av worker-env.
+ *  - `JARVIS_JOB_RUNNER=container`: `DockerJobSandboxRunner` kjører `docker` i SAMME prosess og krever derfor en docker-klient + socket
+ *    i worker-containeren (som bevisst ikke finnes). Beholdt uendret for tilfeller der worker kjøres direkte på en vert; IKKE anbefalt.
+ *    Krever digest-pinnet `JARVIS_JOB_IMAGE`, `JARVIS_JOB_NETWORK` og `JARVIS_JOB_EGRESS_PROXY`.
  */
 export function resolveJobSandboxRunner(env: Record<string, string | undefined> = process.env): SandboxRunner {
-  if (env["JARVIS_JOB_RUNNER"] !== "container") {
-    return new FailClosedSandboxRunner("JARVIS_JOB_RUNNER_not_container");
+  const mode = env["JARVIS_JOB_RUNNER"];
+  if (mode === "host") {
+    try {
+      return new HostJobSandboxRunner({
+        socketPath: env["JARVIS_JOB_RUNNER_SOCKET"] ?? "",
+        tokenFile: env["JARVIS_JOB_RUNNER_TOKEN_FILE"] ?? ""
+      });
+    } catch (err) {
+      return new FailClosedSandboxRunner(err instanceof HostJobRunnerConfigError ? err.reason : "invalid_configuration");
+    }
+  }
+  if (mode !== "container") {
+    return new FailClosedSandboxRunner("JARVIS_JOB_RUNNER_not_container_or_host");
   }
   const policy: JobContainerPolicy = {
     image: env["JARVIS_JOB_IMAGE"] ?? "",

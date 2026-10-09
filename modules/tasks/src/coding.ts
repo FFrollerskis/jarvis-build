@@ -207,14 +207,18 @@ export function createCodingHandler(deps: {
     if (PROTECTED_BRANCHES.has(branch)) {
       throw new Error("protected_branch_refused");
     }
+    // WP-C1 (D-32 / Q-45a): en runner med `hostGit` (vertsside job-runner) eier git-transporten. Da henter vi ALDRI noe git-token, sender
+    // ingen credential-env, og clone/push skjer HOS runneren med dens egen credential. Alt øvrig (validering, policy, agent, test, commit)
+    // er uendret. Uten `hostGit` er hele flyten byte-for-byte som før.
+    const hostGit = deps.sandbox.hostGit === true;
     // Remediering del 2 (JARVIS-009/063/064): all jobb-input valideres i kode FØR policy/credential/sandbox.
     let cloneUrl: string;
     let credentialSlug: string | undefined;
     let testCmd: string[];
     try {
       assertJobBranch(branch);
-      if (deps.gitAuth) {
-        // Med credential: kun eksakt `https://github.com/<allowlistet owner/repo>` - aldri en fremmed vert/transport.
+      if (deps.gitAuth || hostGit) {
+        // Med credential (eller vertsside git): kun eksakt `https://github.com/<allowlistet owner/repo>` - aldri en fremmed vert/transport.
         const ref = assertRepoAllowed(input.repo_url, deps.allowedRepos ?? []);
         cloneUrl = ref.canonicalUrl;
         credentialSlug = ref.slug;
@@ -258,7 +262,7 @@ export function createCodingHandler(deps: {
     // D-103 (Blokker B): løses FØR sandboxen opprettes - en jobb som ikke kan
     // autentisere git-transport skal ALDRI komme så langt som å klone noe.
     let gitAuth: Awaited<ReturnType<typeof createGitAuthHandle>> | undefined;
-    if (deps.gitAuth) {
+    if (deps.gitAuth && !hostGit) {
       const ref = deps.gitAuth.ref ?? "JARVIS_GITHUB_TOKEN";
       const token = await deps.gitAuth.secretProvider.get(ref);
       if (!token) {
@@ -268,7 +272,7 @@ export function createCodingHandler(deps: {
     }
 
     try {
-      const sandbox = await deps.sandbox.create(jobEnv);
+      const sandbox = await deps.sandbox.create(jobEnv, { task_id: task.task_id, tenant_id: task.tenant_id });
       try {
       // `run` brukes for agent.modify() OG alle LOKALE git-operasjoner (branch/
       // add/commit/status/show/rev-parse) - ALDRI gitAuth.env. Kun de to
@@ -298,7 +302,13 @@ export function createCodingHandler(deps: {
       // ingen submoduler) og credential-scopet (host + repo) - se git-policy.ts / git-auth.ts.
       const netArgs = (args: string[]): string[] =>
         (gitAuth ? [...GIT_CREDENTIAL_ISOLATION_ARGS, ...gitAuth.credentialHelperArgs, ...GIT_HARDENING_ARGS, ...args] : ["-c", "core.hooksPath=/dev/null", "-c", "protocol.ext.allow=never", ...args]);
-      must("clone", await sandbox.exec("git", netArgs(["clone", "--", cloneUrl, "."]), undefined, gitAuth?.env));
+      if (hostGit) {
+        // Klone på VERTEN, med runnerens credential, til en katalog runneren selv oppretter (monteres som /work). Ingenting av dette berører worker.
+        if (!sandbox.gitCheckout || !sandbox.gitPublish) throw new Error("host_git_not_supported_by_sandbox");
+        await sandbox.gitCheckout({ repoUrl: cloneUrl, ...(deps.github?.base ? { baseBranch: deps.github.base } : {}) });
+      } else {
+        must("clone", await sandbox.exec("git", netArgs(["clone", "--", cloneUrl, "."]), undefined, gitAuth?.env));
+      }
       await ctx.assertNotCancelled();
       must("branch", await run("git", ["checkout", "-b", branch]));
       const description = await deps.agent.modify(run, task.contract.goal);
@@ -320,7 +330,7 @@ export function createCodingHandler(deps: {
       }
       must("add", await run("git", ["add", "-A"]));
       must("commit", await run("git", ["commit", "-m", `jarvis: ${task.contract.goal}`]));
-      const commitSha = (await run("git", ["rev-parse", "HEAD"])).stdout.trim();
+      let commitSha = (await run("git", ["rev-parse", "HEAD"])).stdout.trim();
       const diff = await localGit(["show", "--stat", "HEAD"]);
       await deps.artifacts.save(task.tenant_id, task.task_id, "patch", "change.txt", diff.stdout);
       // D-103 §13: kansellering FØR push - den nyeste, første EKSTERNE
@@ -328,7 +338,15 @@ export function createCodingHandler(deps: {
       // en allerede innkommet kanselleringsforespørsel.
       await ctx.assertNotCancelled();
       // Guard i runneren: kun jobb-branchen pushes; aldri beskyttede brancher.
-      must("push", await sandbox.exec("git", netArgs(["push", "origin", `${branch}:${branch}`]), undefined, gitAuth?.env));
+      if (hostGit) {
+        // Publish via verifisert git-bundle: runneren lager bundlen i containeren (uten credential), verifiserer den i et ferskt bare-repo
+        // på verten og pusher KUN den verifiserte committen til denne jobb-branchen. SHA-en runneren faktisk pushet er autoritativ.
+        const published = await (sandbox.gitPublish as NonNullable<typeof sandbox.gitPublish>)({ branch });
+        if (published.commitSha !== commitSha) throw new Error("published_commit_mismatch");
+        commitSha = published.commitSha;
+      } else {
+        must("push", await sandbox.exec("git", netArgs(["push", "origin", `${branch}:${branch}`]), undefined, gitAuth?.env));
+      }
       await deps.artifacts.save(task.tenant_id, task.task_id, "pr-proposal", "pr.json",
         JSON.stringify({ branch, title: `jarvis: ${task.contract.goal}`, body: description, merge: "KREVER MENNESKELIG GODKJENNING" }));
 
