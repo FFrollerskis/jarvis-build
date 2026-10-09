@@ -109,6 +109,7 @@ const EFFECT_OVERRIDES: Record<string, Effect> = {
   [k("executive", "get_self_diagnosis")]: "read",
   [k("executive", "get_slo_report")]: "read",
   [k("executive", "get_evolution_report")]: "read",
+  [k("executive", "get_value_report")]: "read",
   // D-416: delegeringsnivået - oppretter en intern, lesende bakgrunnsjobb (write, klasse B) / leser jobbstatus.
   [k("tasks", "delegate_background_task")]: "write",
   [k("tasks", "get_task_status")]: "read"
