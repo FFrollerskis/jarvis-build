@@ -5,3 +5,4 @@ export * from "./transport.ts";
 export * from "./self-model/index.ts";
 export * from "./slo/index.ts";
 export * from "./evolution/index.ts";
+export * from "./value/index.ts";

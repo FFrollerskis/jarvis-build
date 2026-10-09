@@ -364,7 +364,8 @@ eksplisitt bevise ALLE disse (ikke bare "jobben fullførte"):
 
 | Feil i `last_error` | Betydning |
 |---|---|
-| `git_auth_unavailable` | `JARVIS_GITHUB_TOKEN` ikke satt/lesbar for worker-prosessen |
+| `git_auth_unavailable` (evt. med lukket kode: `git_auth_unavailable:GITHUB_TOKEN_UNAVAILABLE`, `git_auth_unavailable:GITHUB_APP_*`) | `JARVIS_GITHUB_TOKEN` ikke satt/lesbar for worker-prosessen; i GitHub App-modus utstedelsen av repo-tokenet feilet - koden forklares i `docs/runbooks/GITHUB_APP.md` (feilsøking) |
+| `git_auth_revoked` / `git_auth_revocation_check_failed` | credentialen er tilbakekalt i Jarvis (`owner_controls.revoke_credential`) / tilbakekallingssjekken mot databasen feilet (fail-closed, ingenting er klonet eller pushet) |
 | `claude_code_not_configured` | `JARVIS_CLAUDE_BIN` peker ikke på en kjørbar `claude` |
 | `policy_denied:*` | `JARVIS_OWNER_PERSON_ID`/`JARVIS_TENANT_ID` matcher ikke identiteten i steg 4 - sjekk SOVEREIGN-autoritetsoppsettet i `worker-main.ts` |
 | `clone_failed: *` | `$testRepoUrl` feil, eller PAT mangler `repo`-scope, eller repoet finnes ikke |

@@ -222,8 +222,13 @@ export function buildCredentialHelperConfigValue(nodeExecPath: string, scriptPat
 }
 
 export interface GitAuthHandle {
-  /** Ekstra prosess-env KUN for git clone/push - aldri agentens/øvrige git-kall. */
+  /** Ekstra prosess-env KUN for git clone/push - aldri agentens/øvrige git-kall. Inneholder tokenet handlen ble laget med. */
   readonly env: Readonly<Record<string, string>>;
+  /**
+   * WP-C3 (review F13): samme env, men med et NYTT token. Credential-helperen (skriptet) er uavhengig av token-verdien - den leser den fra prosess-env ved hvert kall - så en kortlevd
+   * credential (GitHub App-installasjonstoken: 1 time) kan hentes RETT FØR hver git-nettverksoperasjon i stedet for én gang ved jobbstart og brukt til clone OG et push mange minutter senere.
+   */
+  envFor(token: string): Readonly<Record<string, string>>;
   /**
    * D-103 HOST-FIX v2: den ANDRE `-c`-flagg-tuppelen (etter
    * `GIT_CREDENTIAL_ISOLATION_ARGS`) som legger Jarvis sin ephemere
@@ -249,11 +254,14 @@ export async function createGitAuthHandle(token: string, scope: GitCredentialSco
   await chmod(scriptPath, 0o700).catch(() => undefined);
 
   const configValue = buildCredentialHelperConfigValue(process.execPath, scriptPath);
+  const buildEnv = (value: string): Readonly<Record<string, string>> => ({ GIT_TERMINAL_PROMPT: "0", [GIT_CREDENTIAL_TOKEN_ENV]: value });
 
   return {
-    env: {
-      GIT_TERMINAL_PROMPT: "0",
-      [GIT_CREDENTIAL_TOKEN_ENV]: token
+    env: buildEnv(token),
+    envFor: (value: string): Readonly<Record<string, string>> => {
+      // Aldri en tom credential (helperen gir da ingen credential, og git ville feilet tvetydig): feil høylytt her i stedet.
+      if (typeof value !== "string" || value.length === 0) throw new Error("git_credential_token_empty");
+      return buildEnv(value);
     },
     // `credential.useHttpPath=true`: git sender da `path=` til helperen, slik at scopet kan binde credentialen til ETT repo.
     credentialHelperArgs: ["-c", `credential.helper=${configValue}`, "-c", "credential.useHttpPath=true"],

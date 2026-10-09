@@ -44,6 +44,8 @@ export interface ConversationDeps {
   evolutionReport?: { run(identity: IdentityContext): Promise<string | null> };
   /** D-424: «hva koster du» for hurtigbanen (`run_rate.get_cost_overview` via Tool Gateway). */
   costReport?: { run(identity: IdentityContext): Promise<string | null> };
+  /** WP-C4: «hva har du hjulpet meg med»/«verdi»/«bruk» for hurtigbanen (`executive.get_value_report` via Tool Gateway/Policy). Udefinert = ærlig «kan ikke lese». */
+  valueReport?: { run(identity: IdentityContext): Promise<string | null> };
   /**
    * D-424: «… i bakgrunnen» for hurtigbanen (`tasks.delegate_background_task` via Tool Gateway/Policy - eierens egen melding, ikke modellens valg).
    * D-449: `options.cloudAllowed` er motorens EGEN avgjørelse (samme regler som chatten bruker for en verktøytur: eierens ruteoverstyring, de siste meldingene, minnerommet, innlimt tekst) - kun `true`
@@ -1031,6 +1033,11 @@ export class ConversationEngine {
       case "cost_report": {
         const text = this.deps.costReport ? await this.deps.costReport.run(identity).catch(() => null) : null;
         return { reply: text ?? "Jeg kan ikke lese kostnadene akkurat nå, så jeg vil ikke gjette på hva jeg koster.", routed: "fast" };
+      }
+      case "value_report": {
+        // WP-C4: aldri en hardkodet «jeg har hjulpet deg masse» - kun tallene verktøyet leverte (eller ærlig at de ikke kan leses).
+        const text = this.deps.valueReport ? await this.deps.valueReport.run(identity).catch(() => null) : null;
+        return { reply: text ?? "Jeg kan ikke lese verdi- og bruksrapporten akkurat nå, så jeg vil ikke gjette på hva jeg har hjulpet deg med.", routed: "fast" };
       }
       case "delegate_background": {
         const cloud = this.deps.delegateBackground ? await this.delegationCloudDecision(identity, text, surface, provider) : { allowed: false, reasons: [] as string[] };

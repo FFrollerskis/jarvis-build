@@ -15,11 +15,14 @@ const MAX_ATTEMPTS = DAILY_SCHEDULER_MAX_ATTEMPTS;
 /** D-393: en claim uten fullfoering er overtakbar etter dette (krasj/hengt prosess). Eksportert for D-443 (samme tall i helse-leseren). */
 export const DAILY_SCHEDULER_CLAIM_LEASE_MINUTES = 15;
 
+/** WP-C4: jobbnavnet for den daglige morgenbriefen (standard for `DailyScheduler`) - delt med Value Center-kilden som leser løperens helse i `scheduler_state`. */
+export const DAILY_BRIEF_JOB_NAME = "daily-brief";
+
 export class DailyScheduler {
   readonly instanceId = `sched-${randomUUID().slice(0, 8)}`;
   constructor(
     private readonly pool: pg.Pool,
-    private readonly jobName = "daily-brief",
+    private readonly jobName = DAILY_BRIEF_JOB_NAME,
     private readonly hour = envHour("JARVIS_BRIEF_HOUR", 7),
     private readonly timeZone = "Europe/Oslo"
   ) {}

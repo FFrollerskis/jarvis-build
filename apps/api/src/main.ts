@@ -64,13 +64,14 @@ import {
   runMemoryReembedSweepForAllTenants,
   runMemoryResensitizeSweepForAllTenants,
   resensitizeModeFromEnv,
+  type ResensitizeSweepSummary,
   MemoryRetriever,
   MemoryWriter,
   SummaryService,
   runMemoryRetentionSweepForAllTenants
 } from "@jarvis/memory";
 import {
-  DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport,
+  DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubTransport, createGitHubAuth,
   CHAT_ACT_TIER, CHAT_READ_TIER, GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, assertManifestInvariants, buildToolManifest, describeSurfaceCatalog, memoryToolDefinitions, selectSurfaceTools,
   KnowledgeSearchTransport, knowledgeToolDefinitions,
   MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, resolveModelToolSurface, PgGithubRateLimitStore,
@@ -94,7 +95,7 @@ import {
   DomainPauseRegistry, SituationEngine, SituationsTransport, assertSituationSweepHealthy, runSituationSweepForAllTenants,
   situationsToolDefinitions
 } from "@jarvis/situations";
-import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions, renderSelfDiagnosisNo, type SelfDiagnosis } from "@jarvis/executive";
+import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions, parseFollowUpPushPolicy, renderSelfDiagnosisNo, type SelfDiagnosis } from "@jarvis/executive";
 import { GovernanceService, GovernanceTransport, governanceToolDefinitions } from "@jarvis/governance";
 import { OwnerControlsService, OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
 import {
@@ -120,7 +121,11 @@ import { ConversationEngine } from "./conversation.ts";
 import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
 import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
+import { createRadarState } from "./evolution-radar.ts";
 import { createEvolutionReportProvider } from "./evolution-source.ts";
+import { startFollowUpPush } from "./follow-up-push.ts";
+import { buildValueRuntimeFacts } from "./value-facts.ts";
+import { createValueMeasurementSource } from "./value-source.ts";
 import { ChatJobs, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
@@ -184,15 +189,31 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const sloReports = createSloReportProvider(pool, owner.tenant_id);
   Object.assign(selfModelReaders, buildSloReaders(sloReports));
   // WP-B (D-452): evolusjonsportene (EV-0…EV-23) i OBSERVASJONSMODUS - kun lesing av eksisterende observerbarhet, `acts: false`. Selvendring er fortsatt frosset (D-397).
+  // EV-3: radaren er INERT uten `JARVIS_RADAR_SOURCES` (ingen nettverkskall). Kildene velges av eieren; innholdet går gjennom sikkerhetssonen og forlater den aldri (kun status vises).
+  const evolutionRadar = createRadarState(process.env);
+  // EV-10: siste nattlige omregning av lagret sensitivitet (D-451) holdes i minnet så rapporten kan vise tallet uten å skanne på nytt.
+  let lastResensitize: ResensitizeSweepSummary | null = null;
+  const rememberResensitize = (summary: ResensitizeSweepSummary): ResensitizeSweepSummary => {
+    lastResensitize = summary;
+    return summary;
+  };
   const evolutionReports = createEvolutionReportProvider({
+    radar: evolutionRadar,
+    resensitize: () => lastResensitize,
     pool,
     tenantId: owner.tenant_id,
     ev0Status: () => getLastEv0BootStatus(),
     slo: sloReports,
     connectors: () => listConnectorStatus(toolGateway),
     killSwitchActive: async () => (await selfModelControls.getControlState()).kill_switch.active,
-    mesh: () => gateway.meshStatus()
+    mesh: () => gateway.meshStatus(),
+    toolSurface: () => modelToolSurface
   });
+  // WP-C4 (UA0-RUNRATE): Value Center - bruk per verdiløkke fra eksisterende tabeller (kun aggregater/tidsstempler, lesing som app-rolle under RLS). Den daglige løperens helse (global tabell) vises kun for eierens tenant.
+  const valueSource = createValueMeasurementSource(pool, { schedulerTenantId: owner.tenant_id });
+  // WP-C4 V2: planlagt oppfølgingsvarsel. AV som standard (kun `JARVIS_V2_PUSH_ENABLED=true` slår på); kanalen (Telegram) avgjøres lenger ned når token/chat er lest.
+  const v2PushPolicy = parseFollowUpPushPolicy(process.env);
+  let telegramDeliveryConfigured = false;
   // D-174 (B2): hoistet hit (tidligere konstruert lenger nede, kun for
   // `enrollmentService`) - `OwnerControlsService` sitt nye, eier-vendte
   // `revoke_device` (se under, `additionalTools`) trenger DENNE SAMME
@@ -331,10 +352,15 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // `resolveGitToken` gjenbruker DENNE SAMME kjeden (Infisical PRIMÆR,
   // .env/BusinessInternal fallback, D-211) for å hente `JARVIS_GITHUB_TOKEN`,
   // i stedet for en egen, parallell secret-oppløsningsvei.
-  const readSecretProvider = new FallbackSecretProvider(
+  const baseSecretProvider = new FallbackSecretProvider(
     infisicalSecretProvider,
     new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider())
   );
+  // WP-C3 (Q-45 b / D-35): GitHub App-autentisering - KORTLEVD, REPO-SCOPET installasjonstoken i stedet for en langlevd PAT. Uten
+  // JARVIS_GITHUB_APP_ID/_INSTALLATION_ID i miljøet returnerer `secretProvider()` `baseSecretProvider` UENDRET (PAT som før). Med dem
+  // leverer dekoratøren installasjonstokenet under SAMME ref (`JARVIS_GITHUB_TOKEN`); privatnøkkelen leses fra vaulten ved hver signering.
+  const githubAuth = createGitHubAuth({ secrets: baseSecretProvider, env: process.env });
+  const readSecretProvider = githubAuth.secretProvider(baseSecretProvider);
   // Del 3 (JARVIS-013/043): klasse D-pipelinen er HÅRD i produksjon (nøkkel + full kjede + out-of-band-varsler; varsleren bindes sent under).
   const toolGateway = new ToolGateway(pool, policy, readSecretProvider, ownerControls, infisicalSecretProvider, {
     classDPipeline: { enforce: true },
@@ -547,8 +573,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // SAMME pool/tabell). `onTransition` er en bevisst minimal operativ-
   // synlighet-krok (§24) - IKKE en full EventWriter/tenant-audit-kobling
   // (GitHub-credentialen er global, ikke tenant-scoped, se D-97).
-  const githubRateLimitController = new GithubRateLimitController(
-    new PgGithubRateLimitStore(pool), "JARVIS_GITHUB_TOKEN",
+  const githubRateLimitController = githubAuth.rateLimitController(
+    // WP-C3: nøkkelen er `JARVIS_GITHUB_TOKEN` i PAT-modus (uendret), ellers per installasjon (installasjonstokenet har egen kvote).
+    new PgGithubRateLimitStore(pool),
     (event) => console.warn(`[github-rate-limit] ${event.transition} -> ${event.state}${event.retryAt ? ` retry_at=${event.retryAt.toISOString()} source=${event.source}` : ""}`)
   );
   // Remediering del 2 (JARVIS-065): systemidentitet med unik sesjons-id per oppstart (ingen falsk fast `sess-brief`).
@@ -960,7 +987,17 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
           }
         },
         slo: { report: sloReports },
-        evolution: { report: evolutionReports }
+        // WP-C3 (Q-45 b): autentiseringsmetode (pat/app, installasjons-id, utløp, repo-scope, rettigheter) i get_connector_status - aldri tokenverdier.
+        connectorAuth: (connectorId) => (connectorId === "github" ? githubAuth.connectorAuthInfo() : undefined),
+        evolution: { report: evolutionReports },
+        // WP-C4: Value Center - kilde (aggregater under RLS) + kjøretidsfakta (flagg, EV-0, kill switch, erklærte porter). Ingen innhold, ingen skriving; V3/V5 er sovende og kan aldri aktiveres herfra.
+        value: {
+          source: valueSource,
+          facts: () => buildValueRuntimeFacts({
+            env: process.env, push: v2PushPolicy, deliveryConfigured: () => telegramDeliveryConfigured, ev0Status: () => getLastEv0BootStatus(),
+            killSwitchActive: async () => (await selfModelControls.getControlState()).kill_switch.active
+          })
+        }
       }))),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten
@@ -1125,6 +1162,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     evolutionReport: {
       async run(identity) {
         const result = await toolGateway.execute({ identity, tool_id: "executive", action: "get_evolution_report", parameters: {} });
+        const text = result.ok ? (result.data as { summary_no?: unknown } | undefined)?.summary_no : undefined;
+        return typeof text === "string" ? text : null;
+      }
+    },
+    // WP-C4: hurtigbanens «hva har du hjulpet meg med» går gjennom Tool Gateway (Policy + revisjon) - samme verktøy modellen kan kalle (`executive.get_value_report`, klasse A).
+    valueReport: {
+      async run(identity) {
+        const result = await toolGateway.execute({ identity, tool_id: "executive", action: "get_value_report", parameters: {} });
         const text = result.ok ? (result.data as { summary_no?: unknown } | undefined)?.summary_no : undefined;
         return typeof text === "string" ? text : null;
       }
@@ -1332,6 +1377,7 @@ porter: se docs/RUNTIME_GATES.md`;
   // token limt inn i dashbordet var usynlig for polleren (split-brain mot `telegram.notify`-verktøyet som allerede brukte kjeden).
   const telegramToken = (await readSecretProvider.get("JARVIS_TELEGRAM_TOKEN")) ?? undefined;
   const telegramChatId = (await readSecretProvider.get("JARVIS_TELEGRAM_CHAT_ID")) ?? undefined;
+  telegramDeliveryConfigured = Boolean(telegramToken && telegramChatId);
   if (telegramToken && telegramChatId) {
     // D-125 (UA-7, FEMTE slice): den betrodde server-side eier-autoriteten for
     // inngående Telegram. HVER verdi kommer fra prosessens egen konfigurasjon
@@ -1417,7 +1463,15 @@ porter: se docs/RUNTIME_GATES.md`;
         throw new Error("daily-brief: Telegram-levering feilet");
       }
     });
+    // WP-C4 V2 (DORMANT): planlagt oppfølgingsvarsel til eierens EGEN Telegram via den eksisterende `telegram.notify` (Policy Gateway, kill switch, frys, revisjon, idempotens). Startes KUN når `JARVIS_V2_PUSH_ENABLED=true`;
+    // rolig tid, døgngrense, minsteavstand og dedupe håndheves av ledgeren (se `follow-up-push.ts`). Uten flagget opprettes verken tidtaker eller lesing.
+    if (v2PushPolicy.enabled) {
+      startFollowUpPush({ pool, graph: conversationGraphService, gateway: toolGateway, ownerIdentity, policy: v2PushPolicy });
+    } else {
+      console.log(JSON.stringify({ msg: "v2_push_disabled" }));
+    }
   }
+  if (v2PushPolicy.enabled && !telegramDeliveryConfigured) console.warn(JSON.stringify({ msg: "v2_push_enabled_but_no_channel", detail: "JARVIS_V2_PUSH_ENABLED=true, men Telegram (token + chat) er ikke konfigurert - ingen varsler sendes" }));
   // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2) §12:
   // periodisk intern utgifts-synk (marketing/model_cost) + matching/
   // avstemming + deterministisk avviksdeteksjon - SAMME reboot-durable
@@ -1622,8 +1676,20 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "memory-resensitize-sweep", envHour("JARVIS_MEMORY_RESENSITIZE_SWEEP_HOUR", 3)
   ).start(() =>
-    runMemoryResensitizeSweepForAllTenants(pool, { mode: resensitizeModeFromEnv(process.env["JARVIS_MEMORY_RESENSITIZE"]) }).then((summary) => assertNoSweepFailures("memory-resensitize-sweep", summary.failed))
+    runMemoryResensitizeSweepForAllTenants(pool, { mode: resensitizeModeFromEnv(process.env["JARVIS_MEMORY_RESENSITIZE"]) }).then(rememberResensitize).then((summary) => assertNoSweepFailures("memory-resensitize-sweep", summary.failed))
   );
+  // EV-3 (D-452): radar-sveip av KILDER EIEREN SELV HAR VALGT (`JARVIS_RADAR_SOURCES`) - inert uten dem (ingen nettverkskall). Hvert svar går gjennom sikkerhetssonen (ubetrodd forskning, karantene ved mistenkelig innhold);
+  // kun status per kilde beholdes i minnet, aldri innholdet. Ett sveip kort etter oppstart (DailyScheduler husker at dagens kjøring er gjort, men det beholdes ikke over en omstart).
+  if (evolutionRadar.configured > 0) {
+    const radarSweep = async (): Promise<void> => {
+      const result = await evolutionRadar.run();
+      console.log(JSON.stringify({ msg: "evolution_radar_sweep_done", configured: result.configured, ok: result.ok, quarantined: result.quarantined, failed: result.failed, security_events: result.security_events }));
+    };
+    new DailyScheduler(pool, "evolution-radar-sweep", envHour("JARVIS_RADAR_SWEEP_HOUR", 6)).start(radarSweep);
+    setTimeout(() => {
+      radarSweep().catch((err: unknown) => console.error(JSON.stringify({ msg: "evolution_radar_boot_sweep_failed", error: (err as Error).message.slice(0, 200) })));
+    }, 60_000).unref();
+  }
   // D-386: nattlig rekompilering av den alltid-tilstede eierprofilen per space (deterministisk, ingen LLM).
   new DailyScheduler(
     pool, "memory-profile-sweep", envHour("JARVIS_MEMORY_PROFILE_SWEEP_HOUR", 4)
