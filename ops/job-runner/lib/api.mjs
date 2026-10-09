@@ -141,6 +141,9 @@ export function createApiServer(options) {
     res.on("close", () => {
       if (!res.writableFinished) gone.cancel();
     });
+    // Forbindelsen kan allerede være borte når behandleren kjører (f.eks. en rørlinjet forespørsel bak en som svarte med `Connection: close`): da har `close`-hendelsen
+    // allerede gått, og en mutasjon ville blitt utført uten at noen kunne motta svaret. Aldri behandle en forespørsel uten levende forbindelse.
+    if (res.destroyed || req.destroyed || req.socket === null || req.socket === undefined || req.socket.destroyed) return;
     try {
       try {
         authenticate(req);
@@ -197,9 +200,18 @@ export function createApiServer(options) {
     }
   }
 
+  /** Én forespørsel per forbindelse: ALLE svar har `Connection: close`, så en ekstra (rørlinjet) forespørsel på samme forbindelse kan aldri besvares og skal ikke utføres. */
+  const served = new WeakSet();
   const server = http.createServer(
     { maxHeaderSize: 16 * 1024, requestTimeout: 30_000, headersTimeout: 15_000, keepAliveTimeout: 1_000 },
-    (req, res) => void handle(req, res)
+    (req, res) => {
+      if (served.has(req.socket)) {
+        req.socket.destroy();
+        return;
+      }
+      served.add(req.socket);
+      void handle(req, res);
+    }
   );
   server.maxConnections = options.maxConnections ?? 32;
   server.on("clientError", (_error, socket) => {
