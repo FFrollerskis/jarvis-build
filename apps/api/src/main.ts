@@ -118,6 +118,7 @@ import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
 import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
 import { createEvolutionReportProvider } from "./evolution-source.ts";
+import { createAiMeshReportProvider } from "./ai-mesh-source.ts";
 import { ChatJobs, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
@@ -186,6 +187,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     connectors: () => listConnectorStatus(toolGateway),
     killSwitchActive: async () => (await selfModelControls.getControlState()).kill_switch.active,
     mesh: () => gateway.meshStatus()
+  });
+  // WP-D4 (JARVIS-033/036/078): AI Mesh-status (`executive.get_ai_mesh_status`) - leverandørhelse i prosessen + cost_events siste 7 døgn. Kun lesing; gjør aldri et modellkall.
+  const aiMeshReports = createAiMeshReportProvider({
+    pool,
+    tenantId: owner.tenant_id,
+    details: () => gateway.meshDetails(),
+    mesh: () => gateway.meshStatus(),
+    chain: () => ({ candidates: [...chatCandidates.chain], auto_fallback: chatCandidates.autoFallback })
   });
   // D-174 (B2): hoistet hit (tidligere konstruert lenger nede, kun for
   // `enrollmentService`) - `OwnerControlsService` sitt nye, eier-vendte
@@ -943,7 +952,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
           }
         },
         slo: { report: sloReports },
-        evolution: { report: evolutionReports }
+        evolution: { report: evolutionReports },
+        aiMesh: { report: aiMeshReports }
       }))),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten

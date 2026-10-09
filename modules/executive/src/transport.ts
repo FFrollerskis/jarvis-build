@@ -83,6 +83,10 @@ export class ExecutiveTransport implements ToolTransport {
         const report = await this.service.getEvolutionReport();
         return { data: report as unknown as JsonValue };
       }
+      case "get_ai_mesh_status": {
+        const report = await this.service.getAiMeshStatus();
+        return { data: report as unknown as JsonValue };
+      }
       case "get_connector_status": {
         const status = await this.service.getConnectorStatus();
         return { data: { ...status, summary_no: summarizeConnectorStatusNo(status.connectors) } as unknown as JsonValue };
@@ -233,6 +237,10 @@ export function executiveToolDefinitions(transport: ExecutiveTransport): ToolDef
     read(
       "get_evolution_report",
       "Svar på «hvordan utvikler du deg?»/«hva kan du forbedre?»/«hva har du lært?»: evolusjonsportene (EV-0…EV-23) slik de står NÅ, fra EKTE målinger (endringsregister, kostnad, tilkoblinger, vedlikeholdsplan, modellvalg i skygge …). KUN observasjon - jeg endrer ingenting av meg selv (selvendring er frosset), og sovende deler sies å være sovende. Ukjent vises som ukjent, aldri som bra."
+    ),
+    read(
+      "get_ai_mesh_status",
+      "Svar på «hvilke modeller har du?»/«fungerer Kimi/Hermes/Gemma?»/«hva koster modellene?»/«er fallback i orden?»: AI Mesh slik det står NÅ - per leverandør konfigurert (kun presence), frisk, siste feil, kostnad og p50-latens siste 7 døgn, parallell-delegerings-overhead - og om akseptansen «≥3 live providers med fallback» er oppfylt. KUN lesing: jeg gjør ikke et testkall (eierens røyktest er mesh-live-smoke.ts). Ukjent vises som ukjent, konfigurert er aldri det samme som bevist."
     ),
     read(
       "get_connector_status",

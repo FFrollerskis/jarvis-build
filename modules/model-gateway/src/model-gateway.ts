@@ -21,7 +21,7 @@ import {
 import { BudgetGuard, type BudgetConfig, DEFAULT_BUDGET } from "./budget-guard.ts";
 import { classifyCompletionOutcome, computeAdaptiveRetryMaxTokens, type CompletionOutcome } from "./completion-outcome.ts";
 import { CapabilityRegistry, type ModelCapability } from "./capability-registry.ts";
-import { ProviderHealthTracker, type ProviderHealthState } from "./provider-health.ts";
+import { ProviderHealthTracker, type ProviderHealthDetails, type ProviderHealthState } from "./provider-health.ts";
 import { AiRouter, type RoutePlan } from "./router.ts";
 import { assertExplicitPricing, costOre as computeCostOre, DEFAULT_PRICING, type PricingTable } from "./pricing.ts";
 import { modelCatalogFromEnv, type CatalogModel, type ModelTier } from "./model-catalog.ts";
@@ -241,6 +241,17 @@ export function meshRouterState(providers: Array<{ configured: boolean; state: P
   return usable.some((p) => p.state === "DEGRADED" || p.state === "RATE_LIMITED" || p.state === "UNAVAILABLE") ? "DEGRADED" : "HEALTHY";
 }
 
+/** WP-D4: detaljert, hemmelighetsfri leverandørstatus (kun tall, tilstand og feilklasse) til `executive.get_ai_mesh_status`. Runtime i DENNE prosessen - nullstilles ved omstart. */
+export interface MeshProviderDetail extends ProviderHealthDetails {
+  provider: string;
+  model: string;
+  /** Nøkkel/URL er satt (presence - aldri verdien). */
+  configured: boolean;
+  locality: "local" | "cloud";
+  capabilities: ModelCapability[];
+  hosted_free_tier: boolean;
+}
+
 export interface MeshStatus {
   providers: MeshProviderStatus[];
   /** D-395 (JARVIS-078): beregnet fra faktisk providerhelse (tidligere en hardkodet «HEALTHY»). */
@@ -297,6 +308,8 @@ export class ModelGateway {
   /** Runtime-evidens for /status (§25): satt først når hendelsen faktisk har skjedd. */
   private crossProviderFallbackSeen = false;
   private criticRunSeen = false;
+  /** WP-D4: antall leverandørkall som pågår akkurat nå i denne prosessen (til å skille parallell delegering fra enkeltkall i latensmålingen). */
+  private inFlightCalls = 0;
 
   constructor(private readonly opts: GatewayOptions) {
     this.guard = new BudgetGuard(opts.pool, opts.budget ?? DEFAULT_BUDGET);
@@ -500,6 +513,9 @@ export class ModelGateway {
       const maxTries = 2; // 1 + maks én retry for transient/invalid_response på samme provider
       for (let attempt = 1; attempt <= maxTries; attempt++) {
         const attemptStart = Date.now();
+        // WP-D4: startet dette kallet mens et annet leverandørkall pågikk (council/samarbeid kjører medlemmene parallelt)? Brukes kun til latensmålingen per leverandør (`ProviderHealthTracker.details`).
+        const concurrent = this.inFlightCalls > 0;
+        this.inFlightCalls += 1;
         let outputStarted = false;
         // D-441 (JARVIS-038): `usage`/`finish` holdes tilbake til utfallet er klassifisert. Leveres de FØR (som tidligere), er konsumenten allerede «ferdig» når et tomt
         // eller avkortet resultat avsløres, og vi kan verken prøve neste kandidat eller feile ærlig - da ble et tomt svar returnert som suksess.
@@ -545,7 +561,7 @@ export class ModelGateway {
           const latency = result.latency_ms ?? Date.now() - attemptStart;
           // D-106 PR #53: transport lyktes (ingen kastet feil) - health reflekterer
           // NÅBARHET, ikke innholdskvalitet (§3/§7 - dette gjelder uansett utfall under).
-          this.health.recordSuccess(adapter.name, latency);
+          this.health.recordSuccess(adapter.name, latency, concurrent);
           if (failedProviders.some((p) => p !== adapter.name)) {
             this.crossProviderFallbackSeen = true;
           }
@@ -604,7 +620,7 @@ export class ModelGateway {
                 };
                 const retryResult = await adapter.complete(retryRequest, streamOpts || isCritic ? undefined : input.onToken);
                 const retryLatency = retryResult.latency_ms ?? Date.now() - retryStart;
-                this.health.recordSuccess(adapter.name, retryLatency);
+                this.health.recordSuccess(adapter.name, retryLatency, concurrent);
                 retryResult.metadata = {
                   ...retryResult.metadata,
                   router: {
@@ -703,6 +719,8 @@ export class ModelGateway {
           if (!(pe.retryableSameProvider && attempt < maxTries)) {
             break;
           }
+        } finally {
+          this.inFlightCalls -= 1;
         }
       }
       failedProviders.push(candidate.provider);
@@ -965,6 +983,22 @@ export class ModelGateway {
       // Critic er kvalitetsforsterkning - feil her skal aldri velte primærsvaret.
       primary.metadata = { ...primary.metadata, critic_error: (err as Error).message.slice(0, 120) };
     }
+  }
+
+  /** WP-D4: detaljert status per registrert leverandør (også ikke-konfigurerte) til rapporten `executive.get_ai_mesh_status`. Ingen secrets - kun presence, tall og feilklasse. */
+  meshDetails(): MeshProviderDetail[] {
+    return [...this.providerRuntimes()].map(([name, rt]) => {
+      const profile = this.registry.profileOrGeneric(name, rt.model);
+      return {
+        provider: name,
+        model: rt.model,
+        configured: rt.configured,
+        locality: profile.locality,
+        capabilities: [...profile.capabilities],
+        hosted_free_tier: profile.hosted_free_tier === true,
+        ...this.health.details(name, rt.configured)
+      };
+    });
   }
 
   /** Kompakt mesh-status for /status og /ai (§37-§38). Ingen secrets. */
