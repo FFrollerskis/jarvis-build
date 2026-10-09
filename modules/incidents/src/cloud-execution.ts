@@ -84,7 +84,36 @@ export const CLOUDFLARE_PROVIDER: CloudMutationProvider = {
   }
 };
 
-export const CLOUD_MUTATION_PROVIDERS: Readonly<Record<string, CloudMutationProvider>> = { cloudflare: CLOUDFLARE_PROVIDER };
+const scalar = (v: unknown): string => (typeof v === "string" || typeof v === "number" ? String(v) : "?");
+
+/**
+ * Postgres-drift (terminate/cancel/VACUUM) mot Jarvis' EGEN database. BEVISST ærlig om gjenoppretting: en terminert økt kan ikke gjenopprettes og en avbrutt
+ * spørring kan ikke gjenopptas (`recovery_available=false`, aldri en fabrikkert reversering) - men før-tilstanden (økt, rolle, applikasjon, normalisert spørring,
+ * varighet) er journalført, og gateway-kjeden (preflight av akkurat den økten, readback, varsling) er den samme som for alle andre klasse D-handlinger.
+ */
+export const POSTGRES_OPS_PROVIDER: CloudMutationProvider = {
+  provider: "postgres_ops",
+  tool_id: "postgres_ops",
+  actions: new Set(["terminate_backend", "cancel_query", "vacuum_analyze"]),
+  target(action, p) {
+    const database = scalar(p["database"]);
+    return action === "vacuum_analyze"
+      ? `postgres:${database}:table:${scalar(p["schema"])}.${scalar(p["table"])}`
+      : `postgres:${database}:backend:${scalar(p["pid"])}@${scalar(p["backend_start"])}`;
+  },
+  recovery(action) {
+    switch (action) {
+      case "terminate_backend":
+        return { plan: "ingen teknisk reversering - en terminert økt kan ikke gjenopprettes; applikasjonen kobler til på nytt (før-tilstand er journalført)", available: false };
+      case "cancel_query":
+        return { plan: "ingen teknisk reversering - en avbrutt spørring kan ikke gjenopptas; klienten kan kjøre den på nytt (før-tilstand er journalført)", available: false };
+      default:
+        return { plan: "ingen reversering nødvendig - VACUUM/ANALYZE endrer ikke data og er idempotent (før-statistikk er journalført)", available: false };
+    }
+  }
+};
+
+export const CLOUD_MUTATION_PROVIDERS: Readonly<Record<string, CloudMutationProvider>> = { cloudflare: CLOUDFLARE_PROVIDER, postgres_ops: POSTGRES_OPS_PROVIDER };
 
 export interface ExecuteCloudMutationInput {
   tenant_id: string;

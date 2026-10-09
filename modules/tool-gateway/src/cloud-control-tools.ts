@@ -1,6 +1,8 @@
 import type { ToolDefinition, ToolTransport } from "./gateway.ts";
 import { UnconfiguredHttpTransport } from "./integrations.ts";
 import { cloudflareToolDefinitions } from "./cloudflare-tools.ts";
+import { parsePostgresOpsConfig, type PostgresOpsConfig } from "./postgres-ops-target-policy.ts";
+import { postgresOpsToolDefinitions } from "./postgres-ops-tools.ts";
 
 /**
  * WP-E1 (UA-5 Developer & Cloud Control Plane): ÉN komposisjons-inngang for de kontrollerte skymålene som kommer i tillegg til GitHub/Vercel/GCE/Docker
@@ -13,6 +15,8 @@ import { cloudflareToolDefinitions } from "./cloudflare-tools.ts";
 export interface CloudControlConfig {
   /** Eksakte sone-id-er eieren har autorisert for Cloudflare-skriving (`JARVIS_CLOUDFLARE_MUTATION_ZONES`, parset ved oppstart). Tom = ingen skriving. */
   cloudflareMutationZones?: ReadonlySet<string>;
+  /** Postgres-drift (`JARVIS_POSTGRES_OPS_DATABASES/SCHEMAS/PROTECTED_ROLES`, parset ved oppstart). Tom `databases` = ingen klasse D-skriving. */
+  postgresOps?: PostgresOpsConfig;
 }
 
 export type CloudControlTransports = Partial<Record<"cloudflare" | "langfuse" | "infisical" | "postgres_ops", ToolTransport>>;
@@ -20,7 +24,8 @@ export type CloudControlTransports = Partial<Record<"cloudflare" | "langfuse" | 
 export function cloudControlToolDefinitions(transports: CloudControlTransports = {}, config: CloudControlConfig = {}): ToolDefinition[] {
   const transport = (key: keyof CloudControlTransports): ToolTransport => transports[key] ?? new UnconfiguredHttpTransport(key);
   return [
-    ...cloudflareToolDefinitions(transport("cloudflare"), { mutationZones: config.cloudflareMutationZones ?? new Set<string>() })
+    ...cloudflareToolDefinitions(transport("cloudflare"), { mutationZones: config.cloudflareMutationZones ?? new Set<string>() }),
+    ...postgresOpsToolDefinitions(transport("postgres_ops"), { ops: config.postgresOps ?? parsePostgresOpsConfig() })
   ];
 }
 
