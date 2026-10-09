@@ -193,6 +193,15 @@ describe("safeFollowUpTitle (tittelen er sitert DATA, aldri instruks)", () => {
     }
   });
 
+  it("fjerner også vert.tld/sti med UKJENT toppdomene (en sti etter et punktum-navn er en lenke), men lar versjoner, tall og filnavn være i fred", () => {
+    for (const evil of ["se evil.example/x nå", "a.b.c.example/path?x=1", "bank.neonbank/logg-inn"]) {
+      const t = safeFollowUpTitle(evil);
+      expect(t, evil).toContain("[lenke]");
+      expect(t, evil).not.toMatch(/example|neonbank|path/);
+    }
+    for (const fine of ["Rapport v1.2 og frist 3.5", "Oppdater rapport.pdf", "Kontrakt 2026.10 / revisjon", "bruk 50/50-fordeling"]) expect(safeFollowUpTitle(fine), fine).toBe(fine);
+  });
+
   it("fjerner @-omtaler og /-kommandoer (klikkbare i Telegram) og markup-tegn", () => {
     expect(safeFollowUpTitle("spør @jarvis_bot og /revoke_all nå")).toBe("spør jarvis_bot og revoke_all nå");
     expect(safeFollowUpTitle("`kode` <b>fet</b>")).toBe("kode bfet/b");

@@ -81,8 +81,9 @@ export function isQuietHour(hour: number, start: number, end: number): boolean {
 // -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 const TITLE_MAX_CHARS = 60;
 const RISKY_TLDS = "com|no|org|net|io|app|dev|me|ly|co|info|biz|xyz|ru|cn|tk|ml|ga|cf|gq|top|click|link|site|online|store|shop|cc|to|gl|gd|is|se|dk|fi|de|uk|eu|us|ai|tv|fm|sh|im|cloud|page|zip|mov";
+/** Fire former for noe lenkelignende: skjema (`https://`, `mailto:` ...), `www.`, nakent domene med vanlig toppdomene, og enhver `vert.tld/sti` (også ukjente toppdomener - en sti etter et punktum-navn er en lenke). */
 const URL_LIKE = new RegExp(
-  String.raw`(?:\b[a-z][a-z0-9+.-]{1,15}:\/\/\S+|\b(?:mailto|tel|sms|javascript|data|tg):\S+|\bwww\.\S+|\b(?:[a-z0-9-]+\.)+(?:${RISKY_TLDS})\b(?:[/:?#]\S*)?)`, "gi"
+  String.raw`(?:\b[a-z][a-z0-9+.-]{1,15}:\/\/\S+|\b(?:mailto|tel|sms|javascript|data|tg):\S+|\bwww\.\S+|\b(?:[a-z0-9-]+\.)+(?:${RISKY_TLDS})\b(?:[/:?#]\S*)?|\b(?:[a-z0-9-]+\.)+[a-z]{2,24}\/\S*)`, "gi"
 );
 
 /**
