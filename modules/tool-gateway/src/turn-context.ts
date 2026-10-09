@@ -62,7 +62,7 @@ const INTENT_KEYWORDS: Readonly<Record<string, RegExp>> = {
  */
 const TOOL_INTENTS: Readonly<Record<string, RegExp>> = {
   // EV-1 (D-412): «hva er galt med deg» -> selvdiagnose (+ de øvrige executive-lesingene). WP-C4: «hva har du hjulpet meg med»/«verdirapport» -> Value Center.
-  executive: /(hva er galt|hva feiler|selv-?diagnos|diagnos(er|tiser)|feil med deg|er du frisk|fungerer du|virker du|er alt (ok|greit)|hvordan går det med (deg|systemet)|hva kan du ikke|hvor bra yter|ytelse|er du treg|hvor rask|tjenestemål|\bslo\b|forverring|blitt dårligere|dataskvalitet|datakvalitet|hjulpet meg|verdirapport|value ?center|hvor mye (bruker|har jeg brukt) (jeg )?deg|bruksmetrikk|bruksstatistikk|hvor nyttig)/i,
+  executive: /(hva er galt|hva feiler|selv-?diagnos|diagnos(er|tiser)|feil med deg|er du frisk|fungerer du|virker du|er alt (ok|greit)|hvordan går det med (deg|systemet)|hva kan du ikke|hvor bra yter|ytelse|er du treg|hvor rask|tjenestemål|\bslo\b|forverring|blitt dårligere|dataskvalitet|datakvalitet|hjulpet meg|verdirapport|value ?center|hvor mye (bruker|har jeg brukt) (jeg )?deg|bruksmetrikk|bruksstatistikk|hvor nyttig|evolusjon|utvikler du deg|forbedre deg|selvforbedring|hva har du lært|hva kan du forbedre)/i,
   // D-416: delegering til bakgrunnsagent («gjør det i bakgrunnen», «undersøk», «lag en rapport», «hva er status på jobben»).
   tasks: /(bakgrunn|deleger|sub-?agent|\bagent|\bjobb(en|er)?\b|undersøk|utred|research|analyser|lag en rapport|gjør (det|dette) mens|mens jeg )/i,
   // D-421: kostnad/run-rate («hva koster du», «hvor mye har du brukt»).

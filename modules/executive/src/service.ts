@@ -1,5 +1,6 @@
 import type { SloReport } from "./slo/index.ts";
 import { composeSloReport, SLO_CATALOG } from "./slo/index.ts";
+import { composeEvolutionReport, type EvolutionReport } from "./evolution/index.ts";
 import {
   composeValueReport, deriveChangeFreeze, describeValueLoops, evaluateBuilderLoopReadiness, proposeOpsActions,
   type ValueMeasurementSource, type ValueMeasurement, type ValueReport, type ValueRuntimeFacts, type ValueWindows
@@ -93,6 +94,8 @@ export interface ExecutiveServiceOptions {
   };
   /** EV-2 (D-417): SLO-/drift-/dataskvalitetsrapport (injisert fra `apps/api`; kun lesing av eksisterende observerbarhet). */
   slo?: { report(): Promise<SloReport> };
+  /** WP-B (D-452): evolusjonsporter i observasjonsmodus (injisert fra `apps/api`; kun lesing - utfører aldri en endring). */
+  evolution?: { report(): Promise<EvolutionReport> };
   /**
    * WP-C4: Value Center. `source` måler bruk per verdiløkke (kun aggregater, lesing som app-rolle under RLS); `facts` gir kjøretidsfakta (flagg, EV-0-status, erklærte porter). Uten `value` er alle metrikker
    * `not_measurable` (aldri 0) og løkke-statusene `unknown`.
@@ -370,6 +373,19 @@ export class ExecutiveService {
       slos: SLO_CATALOG.map((d) => ({ id: d.id, label: d.label, status: "UNKNOWN" as const, value: null, target: d.target, metric: d.metric, samples: 0, window_hours: d.window_hours, source: "ingen kilde koblet inn", observed_at: now, detail: "Ingen måling tilgjengelig (kilde ikke koblet inn)." })),
       drift: null,
       data_quality: null
+    });
+  }
+
+  /**
+   * WP-B (D-452): evolusjonsportene (EV-0…EV-23) slik de står nå - kun observasjon, `acts: false`. Uten kilde: én ærlig «ikke koblet inn»-seksjon (aldri en gjetning om at noe er i orden).
+   */
+  async getEvolutionReport(): Promise<EvolutionReport> {
+    const provider = this.options.evolution;
+    if (provider) return provider.report();
+    const now = new Date().toISOString();
+    return composeEvolutionReport({
+      as_of: now,
+      sections: [{ ev: "EV-0…EV-23", title_no: "Evolusjonsporter", mode: "observe", status: "UNKNOWN", summary_no: "Ingen kilde er koblet inn, så ingenting kan vurderes.", findings: [], source: "ingen kilde koblet inn", observed_at: null }]
     });
   }
 

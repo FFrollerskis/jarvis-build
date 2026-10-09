@@ -114,6 +114,7 @@ import { ConversationEngine } from "./conversation.ts";
 import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
 import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
+import { createEvolutionReportProvider } from "./evolution-source.ts";
 import { startFollowUpPush } from "./follow-up-push.ts";
 import { buildValueRuntimeFacts } from "./value-facts.ts";
 import { createValueMeasurementSource } from "./value-source.ts";
@@ -176,6 +177,16 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // EV-2 (D-417): SLO/drift/dataskvalitet fra eksisterende observerbarhet (cost_events, tool_executions, tasks, memory_items) - ingen parallell telemetri.
   const sloReports = createSloReportProvider(pool, owner.tenant_id);
   Object.assign(selfModelReaders, buildSloReaders(sloReports));
+  // WP-B (D-452): evolusjonsportene (EV-0…EV-23) i OBSERVASJONSMODUS - kun lesing av eksisterende observerbarhet, `acts: false`. Selvendring er fortsatt frosset (D-397).
+  const evolutionReports = createEvolutionReportProvider({
+    pool,
+    tenantId: owner.tenant_id,
+    ev0Status: () => getLastEv0BootStatus(),
+    slo: sloReports,
+    connectors: () => listConnectorStatus(toolGateway),
+    killSwitchActive: async () => (await selfModelControls.getControlState()).kill_switch.active,
+    mesh: () => gateway.meshStatus()
+  });
   // WP-C4 (UA0-RUNRATE): Value Center - bruk per verdiløkke fra eksisterende tabeller (kun aggregater/tidsstempler, lesing som app-rolle under RLS). Den daglige løperens helse (global tabell) vises kun for eierens tenant.
   const valueSource = createValueMeasurementSource(pool, { schedulerTenantId: owner.tenant_id });
   // WP-C4 V2: planlagt oppfølgingsvarsel. AV som standard (kun `JARVIS_V2_PUSH_ENABLED=true` slår på); kanalen (Telegram) avgjøres lenger ned når token/chat er lest.
@@ -937,6 +948,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
           }
         },
         slo: { report: sloReports },
+        evolution: { report: evolutionReports },
         // WP-C4: Value Center - kilde (aggregater under RLS) + kjøretidsfakta (flagg, EV-0, kill switch, erklærte porter). Ingen innhold, ingen skriving; V3/V5 er sovende og kan aldri aktiveres herfra.
         value: {
           source: valueSource,
@@ -1097,6 +1109,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     sloReport: {
       async run(identity) {
         const result = await toolGateway.execute({ identity, tool_id: "executive", action: "get_slo_report", parameters: {} });
+        const text = result.ok ? (result.data as { summary_no?: unknown } | undefined)?.summary_no : undefined;
+        return typeof text === "string" ? text : null;
+      }
+    },
+    // WP-B (D-452): hurtigbanens «hvordan utvikler du deg» går gjennom Tool Gateway (Policy + revisjon) - samme verktøy modellen kan kalle.
+    evolutionReport: {
+      async run(identity) {
+        const result = await toolGateway.execute({ identity, tool_id: "executive", action: "get_evolution_report", parameters: {} });
         const text = result.ok ? (result.data as { summary_no?: unknown } | undefined)?.summary_no : undefined;
         return typeof text === "string" ? text : null;
       }

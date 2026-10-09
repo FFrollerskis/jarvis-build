@@ -68,6 +68,7 @@ export const CHAT_READ_TIER: ReadonlyArray<{ readonly tool_id: string; readonly 
   { tool_id: "executive", action: "get_delegation_board" },
   { tool_id: "executive", action: "get_self_diagnosis" },
   { tool_id: "executive", action: "get_slo_report" },
+  { tool_id: "executive", action: "get_evolution_report" },
   // WP-C4: Value Center - bruk per verdiløkke (kun tall, aldri innhold), og status for de sovende løkkene V3/V5 (kun beredskap/forslag, aldri utførelse).
   { tool_id: "executive", action: "get_value_report" },
   // D-421 (UA0-RUNRATE): hva Jarvis koster og hva connectorene koster i vedlikeholdstid (kun lesing; skriving er dashbord-ruten).
