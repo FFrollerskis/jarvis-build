@@ -32,6 +32,7 @@ describe("WP-C2 off-site: konfig - av som standard, ÉN adapter, lukket tegnsett
     for (const bad of [":sftp,host=evil,user=x:/path", "-oProxyCommand=evil:x", "--config=/x:y", "navn", "navn:sti;rm -rf /", "navn:$(id)", "navn:`id`", "navn:a\nb", "navn:../../x", "navn:a\\b", "n a:b", `n:${"a".repeat(400)}`, "navn:'x'", "navn:a*b", "navn:{x}", "navn:a:b", "navn:a|b", "navn:a&b"]) {
       expect(() => validateRcloneRemote(bad), bad).toThrow(OffsiteError);
     }
+    for (const bad of ["-x:sti", "-:sti", "--config:sti", "-b2:sti", ".x:sti"]) expect(() => validateRcloneRemote(bad), bad).toThrow(/forventet «navn:sti»/);
     expect(validateRcloneRemote("b2:")).toBe("b2:");
     expect(validateRcloneRemote("gdrive:Backups/Jarvis")).toBe("gdrive:Backups/Jarvis");
     expect(validateRcloneRemote("gdrive:Mine sikkerhetskopier/Æøå-2026")).toBe("gdrive:Mine sikkerhetskopier/Æøå-2026");
@@ -41,6 +42,11 @@ describe("WP-C2 off-site: konfig - av som standard, ÉN adapter, lukket tegnsett
     for (const bad of ["-oProxyCommand=x@host:/p", "user@-oProxyCommand=x:/p", "user@host:relativ", "user@host:/a/../b", "user@host:/a b", "user@host:/a;b", "user@host:/$(id)", "user@host:/", "host:/p", "user@host", "user@host:/p\n", "@host:/p"]) {
       expect(() => validateSshTarget(bad), bad).toThrow(OffsiteError);
     }
+    // E7 (review): disse inneholder KUN tegn som ellers er lovlige - det er den ledende «-» alene som avvises (en bruker/vert som begynner med «-» blir et ssh-/rsync-flagg)
+    for (const bad of ["-user@host:/p", "-o@host:/p", "-@host:/p", "--@host:/p", "user@-host:/p", "user@-o:/p", "user@--:/p", "u-ser@-h.example:/p", "-F@h:/p"]) {
+      expect(() => validateSshTarget(bad), bad).toThrow(/forventet «bruker@vert:\/absolutt\/sti»/);
+    }
+    for (const ok of ["u-ser@h-ost.example:/p", "_u@h1:/p", "u.s@h:/a-b/c"]) expect(() => validateSshTarget(ok), ok).not.toThrow();
     expect(validateSshTarget("u@[::1]:/srv/x/")).toMatchObject({ host: "[::1]", path: "/srv/x" });
     expect(() => parseOffsiteConfig({ JARVIS_BACKUP_OFFSITE_SSH: "u@h:/p", JARVIS_BACKUP_OFFSITE_SSH_KEY: "/home/x/my key" })).toThrow(/ingen mellomrom/);
     expect(() => parseOffsiteConfig({ JARVIS_BACKUP_OFFSITE_SSH: "u@h:/p", JARVIS_BACKUP_OFFSITE_SSH_KNOWN_HOSTS: "relativ/known_hosts" })).toThrow(OffsiteError);
@@ -145,6 +151,29 @@ describe("WP-C2 off-site: KUN age-chiffertekst forlater maskinen (forhåndssjekk
   it("uten mottaker og uten eksisterende manifest.json.age kan manifestet ikke krypteres - tydelig konfig-feil, ingenting sendes", async () => {
     const { dir } = makeSet(tempDir(), WHEN);
     await expect(prepareSetForOffsite(dir, { encryptManifest: fakeEncryptManifest })).rejects.toMatchObject({ code: "offsite_config_invalid" });
+  });
+
+  it("review E13: en ALLEREDE EKSISTERENDE manifest.json.age som ikke er age-chiffertekst nektes - ellers ville manifestet (tabellnavn + radtall) gått ut i klartekst under et .age-navn", async () => {
+    const bad = {
+      "klartekst-manifest": (dir) => writeFileSync(join(dir, MANIFEST_AGE), readFileSync(join(dir, "manifest.json"))),
+      "tom fil": (dir) => writeFileSync(join(dir, MANIFEST_AGE), ""),
+      "kortere enn age-headeren": (dir) => writeFileSync(join(dir, MANIFEST_AGE), AGE_MAGIC.subarray(0, 8)),
+      "header med feil versjon": (dir) => writeFileSync(join(dir, MANIFEST_AGE), "age-encryption.org/v2\n-> X25519 AAAA\n"),
+      "symlenke til en ekte age-fil": (dir) => { const real = join(tempDir(), "ekte.age"); writeFileSync(real, Buffer.concat([AGE_MAGIC, Buffer.from("\nxx")])); symlinkSync(real, join(dir, MANIFEST_AGE)); },
+      "katalog": (dir) => mkdirSync(join(dir, MANIFEST_AGE))
+    };
+    for (const [what, make] of Object.entries(bad)) {
+      const { dir } = makeSet(tempDir(), WHEN);
+      make(dir);
+      await expect(prep(dir), what).rejects.toMatchObject({ code: "offsite_ineligible" });
+      await expect(prep(dir), what).rejects.toThrow(/manifest\.json\.age er ikke age-chiffertekst/);
+    }
+    // motstykket: en ekte (gyldig) forhåndseksisterende manifest.json.age brukes som den er og krypteres ikke på nytt
+    const { dir } = makeSet(tempDir(), WHEN);
+    const ciphertext = Buffer.concat([Buffer.from(AGE_MAGIC), Buffer.from("\n-> X25519 QQ\nzz\n--- yy\n"), Buffer.alloc(24, 7)]);
+    writeFileSync(join(dir, MANIFEST_AGE), ciphertext);
+    const prepared = await prepareSetForOffsite(dir, { encryptManifest: async () => { throw new Error("skal ikke kryptere på nytt"); } });
+    expect(prepared.files.at(-1)).toMatchObject({ name: MANIFEST_AGE, size: ciphertext.length });
   });
 
   it("rester etter en avbrutt manifest-kryptering ryddes (vår egen tmp-fil blir ikke en «ukjent fil»)", async () => {
