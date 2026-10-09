@@ -330,3 +330,47 @@ describe("E: oppbevaringsfrist og modellpasset", () => {
     expect(failing.logs.some((l) => l["msg"] === "knowledge_source_entity_llm_failed")).toBe(true);
   });
 });
+
+describe("F: omstart - en kilde som nylig ble synket skannes ikke på nytt (API-kvoten), men runNow kjører alltid", () => {
+  it("den PLANLAGTE første synken etter en omstart utsettes til siste synk + intervall; en kilde uten dokumenter kjører som planlagt", async () => {
+    const root = join(base, "notater-f");
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "a.md"), "et notat om kvoter og omstart");
+    const sources = await configure([
+      { id: "notater-f", kind: "filesystem", memory_space: "personal", path: root, sync_interval_minutes: 60 },
+      { id: "tom-f", kind: "filesystem", memory_space: "personal", path: join(base, "tom-f"), sync_interval_minutes: 60 }
+    ]);
+    await mkdir(join(base, "tom-f"), { recursive: true });
+    const before = makeRunner(sources);
+    expect((await before.runner.runNow("notater-f")).status).toBe("synced");
+    const last = (await adminPool.query("SELECT max(last_synced_at) AS at FROM knowledge_documents WHERE tenant_id = $1 AND source_instance_id = 'notater-f'", [TENANT])).rows[0] as { at: Date };
+
+    // «Omstart»: en ny løper (ingen minnetilstand), klokken er 10 minutter etter siste synk.
+    const after = makeRunner(sources);
+    after.clock.now = new Date(last.at.getTime() + 10 * 60_000);
+    after.runner.start();
+    await after.runner.tick();
+    await after.runner.idle();
+    const syncedIds = () => after.logs.filter((l) => l["msg"] === "knowledge_source_synced").map((l) => l["source_id"]);
+    expect(syncedIds()).toEqual(["tom-f"]); // notater-f ble synket nylig; tom-f har aldri lagret et dokument
+    expect(after.runner.status().find((s) => s.id === "notater-f")?.next_due_at).toBe(new Date(last.at.getTime() + 60 * 60_000).toISOString());
+
+    // Intervallet er gått: nå kjører den.
+    after.clock.now = new Date(last.at.getTime() + 61 * 60_000);
+    await after.runner.tick();
+    await after.runner.idle();
+    expect(syncedIds()).toEqual(["tom-f", "notater-f"]);
+    after.runner.stop();
+  });
+
+  it("runNow ignorerer utsettelsen (eieren ber eksplisitt om en synk)", async () => {
+    const root = join(base, "notater-f2");
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "a.md"), "et notat");
+    const sources = await configure([{ id: "notater-f2", kind: "filesystem", memory_space: "personal", path: root, sync_interval_minutes: 60 }]);
+    const { runner, logs } = makeRunner(sources);
+    await runner.runNow("notater-f2");
+    await runner.runNow("notater-f2");
+    expect(logs.filter((l) => l["msg"] === "knowledge_source_synced")).toHaveLength(2);
+  });
+});

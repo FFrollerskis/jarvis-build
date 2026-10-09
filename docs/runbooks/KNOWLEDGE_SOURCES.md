@@ -8,7 +8,7 @@ Gjeldende dokumenthierarki: [ADR-001](../remediation/ADR-001-dokumenthierarki.md
 
 ## 1. Hva som skjer
 
-Worker-containeren leser kildene du konfigurerer (Drive inkl. Docs/Slides/Sheets, Obsidian, filmapper, GitHub-dokumentasjon, e-postvedlegg, ferdige møtetranskripter), indekserer dem i Postgres
+Worker-containeren leser kildene du konfigurerer (Drive inkl. Docs/Slides/Sheets, Obsidian, filmapper, GitHub (repo-beskrivelse og saker - ikke filinnhold), e-postvedlegg, ferdige møtetranskripter), indekserer dem i Postgres
 (`knowledge_documents`, `knowledge_embeddings`, entitetsgrafen) og gjør dem søkbare i chatten med `knowledge.search` («hva står det i dokumentene/notatene/referatene om …», «hvilke dokumenter nevner Acme»).
 Treff er **sitert, ubetrodd data** (aldri instruks) og bærer sensitivitetsmerke; `special`/helse-treff sendes aldri til en skymodell.
 
@@ -56,12 +56,12 @@ Sensitivitet: stikkordsklassifiseringen merker hemmeligheter, helse og økonomi 
 | `obsidian` | `path` | `max_files`, `max_file_bytes`, `max_depth` |
 | `filesystem` | `path` | `extensions` (delmengde av tekstendelsene), `max_files`, `max_file_bytes`, `max_depth` |
 | `meeting_transcript` | `path` | `formats` (`txt|vtt|srt|json`), `max_files`, `max_file_bytes`, `max_depth` |
-| `github` | `repo` (`eier/navn`) | - (skrivebeskyttet) |
+| `github` | `repo` (`eier/navn`) | - (skrivebeskyttet; indekserer repo-beskrivelsen og sakstitler/issues - repo-FILINNHOLD er ikke bygget) |
 | `email_attachment` | - | `max` (1-100), `query` |
 
 Sikkerhetsgrenser som håndheves i kode: stier må være absolutte og normaliserte (ingen `..`), innenfor en allowlistet basemappe, og aldri i systemkataloger eller `.ssh`/`.aws`-lignende kataloger;
 den SANNE (symlink-oppløste) roten sjekkes på nytt før hver synk, og en rot som er blitt en symlink ut av allowlisten synkes ikke (ingenting tombstones). GitHub er låst til `JARVIS_GITHUB_REPO`
-(åpne andre repo bevisst med `JARVIS_GITHUB_ALLOW_OTHER_REPOS=true`). **Endre aldri en kildes `id` etter første synk** - de gamle dokumentene blir da foreldreløse; fjern kilden (se 7) og opprett den på nytt.
+(åpne andre repo bevisst med `JARVIS_GITHUB_ALLOW_OTHER_REPOS=true`). Endring av gulv/tak/tillit gjelder fra neste synk (kildens `sync_interval_minutes`); et dokument som da er strengere enn taket tombstones. **Endre aldri en kildes `id` etter første synk** - de gamle dokumentene blir da foreldreløse; fjern kilden (se 7) og opprett den på nytt.
 
 ## 4. Google Drive (Docs, Slides, Sheets)
 

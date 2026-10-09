@@ -1,6 +1,6 @@
 import type pg from "pg";
 import type { IdentityContext } from "@jarvis/contracts";
-import type { EmbeddingProvider } from "@jarvis/memory";
+import { withMemoryTransaction, type EmbeddingProvider } from "@jarvis/memory";
 import type { LlmPassReport } from "./entity-llm.ts";
 import { KnowledgeRetentionService } from "./retention.ts";
 import type { ConfiguredKnowledgeSource } from "./source-config.ts";
@@ -17,6 +17,8 @@ import { KnowledgeSyncService, type KnowledgeEntityIndexPort, type SyncReport } 
  *  - `preflight` (f.eks. «ligger den sanne roten fortsatt innenfor allowlisten», «finnes Drive-credentialen») avgjør FØR hver synk om kilden kan kjøres nå. En kilde som ikke kan det hoppes over (loggført,
  *    prøves igjen neste runde) - aldri en synk som kan se ut som «alt er slettet».
  *  - Ingen overlapp: en kilde som fortsatt synkes startes ikke på nytt, og høyst `maxConcurrent` kilder går samtidig (Drive er tregt av hensyn til API-begrenseren og skal ikke blokkere lokale kilder).
+ *  - Omstart: tidsplanen holdes kun i minnet, men den PLANLAGTE første synken etter en omstart hoppes over når kilden ble synket innenfor intervallet (siste `last_synced_at` i databasen) - en worker som
+ *    oppdateres/starter flere ganger skal ikke skanne hele Drive på nytt hver gang (API-kvoten). `runNow` kjører alltid.
  *  - En feil i én kilde (eller i oppbevarings-/modellpasset) stopper aldri de andre eller løkka; ved feil prøves kilden igjen etter høyst 30 minutter.
  *  - Loggene bærer kun kilde-id, kildetype, rom, tall og en kort (avkortet) feilmelding fra koden/databasen - aldri filnavn, tittel eller innhold fra dokumentene.
  */
@@ -67,6 +69,8 @@ export class KnowledgeSyncRunner {
   private readonly nextDue = new Map<string, number>();
   private readonly lastOutcome = new Map<string, { status: SyncRunOutcome["status"]; at: number }>();
   private readonly inFlight = new Map<string, Promise<SyncRunOutcome>>();
+  /** Kilder der «synket nylig»-sjekken mot databasen er gjort (høyst én gang per kilde per oppstart). */
+  private readonly resumeChecked = new Set<string>();
   private timer: ReturnType<typeof setInterval> | undefined;
   private readonly clock: () => Date;
   private readonly log: (entry: Record<string, unknown>) => void;
@@ -115,10 +119,40 @@ export class KnowledgeSyncRunner {
       if (this.inFlight.size >= this.maxConcurrent) break;
       const key = this.keyOf(source);
       if (this.inFlight.has(key)) continue;
-      const due = this.nextDue.get(key);
-      if (due === undefined || due > now) continue;
+      if ((this.nextDue.get(key) ?? Number.POSITIVE_INFINITY) > now) continue;
+      // Første gang kilden er forfalt etter oppstart: ble den allerede synket innenfor intervallet (før omstarten), utsettes den til intervallet er gått.
+      await this.deferIfRecentlySynced(source);
+      if ((this.nextDue.get(key) ?? Number.POSITIVE_INFINITY) > now) continue;
       void this.launch(source);
     }
+  }
+
+  private async deferIfRecentlySynced(source: ConfiguredKnowledgeSource): Promise<void> {
+    const key = this.keyOf(source);
+    if (this.resumeChecked.has(key)) return;
+    this.resumeChecked.add(key);
+    try {
+      const last = await this.lastSyncedAt(source);
+      if (last !== null) {
+        const next = last.getTime() + source.sync_interval_minutes * MINUTE_MS;
+        if (next > (this.nextDue.get(key) ?? 0)) this.nextDue.set(key, next);
+      }
+    } catch {
+      // Uten tilstand (databasen utilgjengelig): kjør som planlagt - synk-tjenesten feiler da selv, lukket.
+    }
+  }
+
+  /** Siste synketidspunkt for kildeinstansen i rommet (RLS som app-rolle), eller `null` når den aldri har lagret et dokument. */
+  private async lastSyncedAt(source: ConfiguredKnowledgeSource): Promise<Date | null> {
+    const identity = this.deps.identityFor(source);
+    return withMemoryTransaction(this.deps.pool, identity.tenant_id, [source.memory_space], async (client) => {
+      const result = await client.query(
+        "SELECT max(last_synced_at) AS at FROM knowledge_documents WHERE tenant_id = $1 AND memory_space_id = $2 AND source_type = $3 AND source_instance_id = $4",
+        [identity.tenant_id, source.memory_space, source.config.source_type, source.config.source_instance_id]
+      );
+      const at = (result.rows[0] as { at: Date | null } | undefined)?.at;
+      return at instanceof Date ? at : null;
+    });
   }
 
   /** Venter til alle pågående synker er ferdige. */
