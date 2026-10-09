@@ -2,13 +2,13 @@
 import { BUSINESS_INTERNAL_CREDENTIAL_REF } from "@jarvis/business";
 import {
   controlAction, controlItem, controlSection, unknownControlSection, worstStatus,
-  type ControlAction, type ControlCenterDefinition, type ControlCenterBuildContext, type ControlCenterParts, type ControlItem, type ControlRiskClass, type ControlSection, type ControlStatus
+  type ControlAction, type ControlCenterDefinition, type ControlCenterBuildContext, type ControlCenterParts, type ControlItem, type ControlSection, type ControlStatus
 } from "@jarvis/executive";
 import type { MeshStatus } from "@jarvis/model-gateway";
 import type { OwnerControls } from "@jarvis/policy";
 import { CONNECTOR_REGISTRY, type ConnectorDefinition, type ToolDefinition, type ToolGateway } from "@jarvis/tool-gateway";
 import { actionRequiresStepUp } from "../step-up.ts";
-import { HOUR_MS, ageMs, bySeverityThenLabel, globalRows, joinFact, relativeNo, settle, tenantRead, toIso, type ControlCenterPool, type Settled } from "./shared.ts";
+import { HOUR_MS, ageMs, bySeverityThenLabel, countsNo, globalRows, joinFact, relativeNo, riskOf, settle, tenantRead, toIso, type ControlCenterPool, type Settled } from "./shared.ts";
 
 /**
  * WP-H0 (UA-11 Admin Control Center) - INTEGRATION CENTER.
@@ -380,24 +380,6 @@ export interface IntegrationCenterDeps {
 }
 
 const SOURCE_LIVE = "ToolGateway.health (minne) · audit_events (tool.executed/tool.failed, 7 d) · scheduler_state · owner_control_state · connector-registeret (credential-presence, aldri verdier)";
-
-function statusCount(items: readonly ControlItem[], s: ControlStatus): number {
-  return items.filter((i) => i.status === s).length;
-}
-
-function countsNo(items: readonly ControlItem[]): string {
-  const parts = [
-    statusCount(items, "FAIL") > 0 ? `${statusCount(items, "FAIL")} feil` : "",
-    statusCount(items, "WARN") > 0 ? `${statusCount(items, "WARN")} advarsel` : "",
-    statusCount(items, "UNKNOWN") > 0 ? `${statusCount(items, "UNKNOWN")} ikke målt` : "",
-    statusCount(items, "OK") > 0 ? `${statusCount(items, "OK")} i orden` : ""
-  ].filter((p) => p !== "");
-  return parts.length > 0 ? parts.join(", ") : "ingen";
-}
-
-function riskOf(gateway: Pick<ToolGateway, "get">, toolId: string, action: string): ControlRiskClass {
-  return gateway.get(toolId, action)?.capability_class ?? "D";
-}
 
 export function createIntegrationCenter(deps: IntegrationCenterDeps): ControlCenterDefinition {
   const registry = deps.registry ?? CONNECTOR_REGISTRY;

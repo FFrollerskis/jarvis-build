@@ -1,5 +1,6 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import type { ControlCenterRegistry } from "@jarvis/executive";
+import { createAuthorityCenter, type AuthorityCenterDeps } from "./authority.ts";
 import { createIntegrationCenter, type IntegrationCenterDeps } from "./integration.ts";
 import type { ControlCenterPool } from "./shared.ts";
 
@@ -21,8 +22,12 @@ export interface ControlCenterWiring {
   env: Readonly<Record<string, string | undefined>>;
   now?: () => Date;
   /** Integration Center: den ene ToolGateway-instansen (presence, helse, verktøyregister) og eier-kontrollene (frosset/tilbakekalt). Uten disse registreres ikke senteret (det står da som «ikke koblet inn»). */
-  toolGateway?: IntegrationCenterDeps["toolGateway"];
+  toolGateway?: IntegrationCenterDeps["toolGateway"] & AuthorityCenterDeps["toolGateway"];
   ownerControls?: IntegrationCenterDeps["ownerControls"];
+  /** Authority Center: eier-autoritetskonfigurasjonen (samme objekt som Policy Gateway), kill switch og infra-porten. Uten `killSwitch` registreres ikke Authority Center. */
+  authority?: AuthorityCenterDeps["authority"];
+  killSwitch?: AuthorityCenterDeps["killSwitch"];
+  infraGate?: AuthorityCenterDeps["infraGate"];
   /** Modellmeshens kompakte status (leverandørhelse) - gir modellleverandørene i Integration Center og AI Center en helse. */
   meshStatus?: IntegrationCenterDeps["meshStatus"];
 }
@@ -33,6 +38,13 @@ export function registerControlCenters(registry: ControlCenterRegistry, wiring: 
     registry.register(createIntegrationCenter({
       pool: wiring.pool, toolGateway: wiring.toolGateway, ownerControls: wiring.ownerControls,
       ...(wiring.meshStatus ? { meshStatus: wiring.meshStatus } : {})
+    }));
+  }
+  if (wiring.toolGateway && wiring.ownerControls && wiring.killSwitch) {
+    registry.register(createAuthorityCenter({
+      pool: wiring.pool, env: wiring.env, toolGateway: wiring.toolGateway, ownerControls: wiring.ownerControls, killSwitch: wiring.killSwitch,
+      ...(wiring.authority ? { authority: wiring.authority } : {}),
+      ...(wiring.infraGate ? { infraGate: wiring.infraGate } : {})
     }));
   }
 }

@@ -397,6 +397,17 @@ export class ToolGateway {
   }
 
   /**
+   * WP-H0: LESING for kontrollsenteret - hvilke harde porter som er slått på i DENNE prosessen (kun sannhetsverdier, ingen konfigurasjonsinnhold, ingen hemmeligheter).
+   * Å vise at klasse D-pipelinen og credential-bindingen faktisk er på er en måling, ikke en antakelse om oppstartskoden.
+   */
+  policyFlags(): { class_d_pipeline_enforced: boolean; credential_binding_active: boolean } {
+    return {
+      class_d_pipeline_enforced: this.options?.classDPipeline?.enforce === true,
+      credential_binding_active: this.options?.credentialBinding !== undefined
+    };
+  }
+
+  /**
    * Task #119 (integrasjons-dashboard, D-211): presence-sjekk for eierens
    * "er X konfigurert"-visning - kaller SAMME `SecretProvider` gatewayen
    * allerede injiseres med (aldri en egen, parallell secret-lesevei), men

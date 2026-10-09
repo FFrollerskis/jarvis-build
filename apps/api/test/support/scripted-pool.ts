@@ -10,14 +10,14 @@ export interface ScriptedRule {
   rows: Array<Record<string, unknown>> | ((params: unknown[]) => Array<Record<string, unknown>>) | Error;
 }
 
-export interface RecordedQuery { sql: string; params: unknown[]; tenant: string | null }
+export interface RecordedQuery { sql: string; params: unknown[]; tenant: string | null; spaces: string | null }
 
 export class ScriptedPool {
   readonly queries: RecordedQuery[] = [];
   constructor(private readonly rules: ScriptedRule[]) {}
 
-  private answer(sql: string, params: unknown[], tenant: string | null): { rows: Array<Record<string, unknown>> } {
-    this.queries.push({ sql, params, tenant });
+  private answer(sql: string, params: unknown[], tenant: string | null, spaces: string | null = null): { rows: Array<Record<string, unknown>> } {
+    this.queries.push({ sql, params, tenant, spaces });
     for (const rule of this.rules) {
       if (!rule.match.test(sql)) continue;
       if (rule.rows instanceof Error) throw rule.rows;
@@ -32,11 +32,16 @@ export class ScriptedPool {
 
   async connect(): Promise<{ query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>; release: () => void }> {
     let tenant: string | null = null;
+    let spaces: string | null = null;
     return {
       query: async (sql: string, params: unknown[] = []) => {
         if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(sql.trim())) return { rows: [] };
-        if (/set_config\('jarvis\.tenant_id'/.test(sql)) { tenant = String(params[0]); return { rows: [] }; }
-        return this.answer(sql, params, tenant);
+        if (/set_config\('jarvis\.tenant_id'/.test(sql)) {
+          tenant = String(params[0]);
+          if (/jarvis\.memory_spaces/.test(sql)) spaces = String(params[1]);
+          return { rows: [] };
+        }
+        return this.answer(sql, params, tenant, spaces);
       },
       release: () => undefined
     };
