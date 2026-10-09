@@ -97,11 +97,14 @@ afterAll(async () => {
   await stop?.();
 }, 120_000);
 
+// Svarene er ukjente JSON-former per rute; testen indekserer dem direkte (derfor `any`).
+/* eslint-disable @typescript-eslint/no-explicit-any */
 async function post(path: string, body: Record<string, unknown>, as: typeof identityA | typeof identityB | null = identityA): Promise<{ status: number; body: Record<string, any> }> {
   const grant_token = as ? await grantOf(as) : undefined;
   const response = await fetch(`${baseUrl}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...(grant_token ? { grant_token } : {}), ...body }) });
   return { status: response.status, body: (await response.json()) as Record<string, any> };
 }
+/* eslint-enable @typescript-eslint/no-explicit-any */
 const create = async (title = "Hendelse", as: typeof identityA | typeof identityB = identityA): Promise<string> =>
   (await post("/incidents/create", { title }, as)).body["incident"]["incident_id"] as string;
 
