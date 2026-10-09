@@ -706,6 +706,38 @@ describe("WP-C4 V2 push - M1: stopp-sjekk, forsøkstak og tilstand (ekte ledger)
     } finally { h.stop(); }
   });
 
+  it("attempts_exhausted er en varig tilstand: rolig tid/døgngrense opphever den ikke (ingen ny logglinje når den blir synlig igjen), men den opphører når saken forsvinner - og loggen sier det", async () => {
+    const t = await mkTenant();
+    await followup(t, "f1", "business", -2 * DAY, { title: "Sak som feiler" });
+    const probe = asSend(planFollowUpPush({ candidates: [cand(`${t}-f1`, -2 * DAY)], policy: openPolicy(), state: reduceLedger([], new Date()), now: new Date() }));
+    for (const h of [5, 4, 3]) {
+      await seedLedger(t, "followup.push_reserved", -h * HOUR, probe.message_key, probe.item_keys);
+      await seedLedger(t, "followup.push_failed", -h * HOUR + 60_000, probe.message_key, probe.item_keys, { reason: "tool_failed:telegram_error_400" });
+    }
+    const { gw, calls } = fakeGateway();
+    const logs: Array<Record<string, unknown>> = [];
+    let offset = 0;
+    const h = startFor(t, gw, openPolicy(), logs, { now: () => new Date(Date.now() + offset) });
+    const exhausted = () => logs.filter((l) => l["result"] === "attempts_exhausted").length;
+    const cleared = () => logs.filter((l) => l["msg"] === "v2_push_state_cleared").length;
+    try {
+      expect(await h.tick()).toMatchObject({ sent: false, reason: "attempts_exhausted" });
+      offset = 6 * HOUR; // inn i rolig tid (openPolicy: 6 t fram): tikket sier ingenting om taket
+      expect(await h.tick()).toEqual({ sent: false, reason: "quiet_hours" });
+      expect(cleared()).toBe(0);
+      offset = 0;
+      expect(await h.tick()).toMatchObject({ sent: false, reason: "attempts_exhausted" });
+      expect(exhausted()).toBe(1); // fortsatt ÉN logglinje, ikke to
+      expect(h.status().attempts_exhausted_message).toBe(probe.message_key);
+      await admin.query("UPDATE business_followups SET status = 'completed', completed_at = now() WHERE followup_id = $1", [`${t}-f1`]);
+      expect(await h.tick()).toEqual({ sent: false, reason: "nothing_new" });
+      expect(cleared()).toBe(1);
+      expect(logs.find((l) => l["msg"] === "v2_push_state_cleared")).toEqual({ msg: "v2_push_state_cleared", was: "attempts_exhausted" });
+      expect(h.status()).toMatchObject({ last_result: "nothing_new", attempts_exhausted_message: null, blocked_by: null });
+      expect(calls).toHaveLength(0);
+    } finally { h.stop(); }
+  });
+
   it("rader eldre enn 24 t teller ikke mot taket: to nylige og to gamle forsøk gir fortsatt et nytt (etter backoff)", async () => {
     const t = await mkTenant();
     await followup(t, "f1", "business", -2 * DAY);

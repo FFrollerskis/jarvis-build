@@ -18,7 +18,7 @@ import type { ToolGateway } from "@jarvis/tool-gateway";
  *  - avsender: den EKSISTERENDE `telegram.notify` via `ToolGateway` (policy, kill switch, frys, revisjon, idempotens). Mottakeren er eierens konfigurerte chat - aldri en parameter her,
  *  - stopp-sjekk (M1): kill switch, frosset connector, tilbakekalt credential og infra-pause leses FØR noe reserveres (`createPushSendGuard`) - samme regler som gatewayen ellers ville avslått med, men uten forsøk og audit-støy.
  * Utfallsregel (H1, «høyst én gang»): bare et avslag som BEVISER at ingenting gikk ut frigir reservasjonen (se `classifyNotifyFailure` i `@jarvis/executive`). Tidsavbrudd, 5xx, nettverksbrudd og alt ukjent beholder den - en påminnelse kan i
- * sjeldne tilfeller gå tapt, men aldri komme to ganger.
+ * sjeldne tilfeller gå tapt, men kan ikke komme to ganger så lenge ledgeren (revisjonssporet) er intakt.
  * Av som standard (`JARVIS_V2_PUSH_ENABLED`): `startFollowUpPush` kalles bare når policyen er på OG en leveringskanal er konfigurert.
  */
 type Pool = Pick<pg.Pool, "query"> & Partial<Pick<pg.Pool, "connect">>;
@@ -221,6 +221,8 @@ export interface StartFollowUpPushDeps {
 const QUIET_RESULTS = new Set(["disabled", "quiet_hours", "nothing_new", "rate_limited", "min_gap", "backoff"]);
 /** Tilstander som varer: logges KUN når de oppstår eller endrer seg (ikke 96 ganger i døgnet), og vises i `status()`. */
 const STATE_RESULTS = new Set(["attempts_exhausted", "send_blocked"]);
+/** Utfall som kommer FØR forsøkstaket i planleggerens rekkefølge og dermed ikke sier noe om om taket fortsatt gjelder (rolig tid, døgngrense, minsteavstand): de opphever ikke `attempts_exhausted`. */
+const SAYS_NOTHING_ABOUT_EXHAUSTION = new Set(["disabled", "quiet_hours", "rate_limited", "min_gap"]);
 
 export interface FollowUpPushStatus {
   /** Siste tikks utfall (kort kode, aldri innhold), eller null før første tikk. */
@@ -269,11 +271,14 @@ export function startFollowUpPush(deps: StartFollowUpPushDeps): FollowUpPushHand
       const state = STATE_RESULTS.has(reason) ? `${reason}:${status.blocked_by ?? status.attempts_exhausted_message ?? ""}` : null;
       if (state !== null) {
         if (state !== lastState) log({ msg: "v2_push_tick", result: reason, ...(status.blocked_by !== null ? { blocked_by: status.blocked_by } : {}), ...(status.attempts_exhausted_message !== null ? { message_key: status.attempts_exhausted_message } : {}) });
+        lastState = state;
       } else {
-        if (lastState !== null) log({ msg: "v2_push_state_cleared", was: lastState.split(":")[0] });
+        const was = lastState?.split(":")[0];
+        // Rolig tid/døgngrense/minsteavstand sier ingenting om forsøkstaket: tilstanden gjelder videre og logges ikke på nytt når den igjen blir synlig.
+        const stillInForce = was === "attempts_exhausted" && SAYS_NOTHING_ABOUT_EXHAUSTION.has(reason);
+        if (lastState !== null && !stillInForce) { log({ msg: "v2_push_state_cleared", was }); lastState = null; }
         if (result.sent || !QUIET_RESULTS.has(reason)) log({ msg: "v2_push_tick", result: reason, ...(result.sent ? { items: result.items } : {}) });
       }
-      lastState = state;
       return result;
     } catch (err) {
       log({ msg: "v2_push_tick_failed", error: safeDetail(err) });

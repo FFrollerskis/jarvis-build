@@ -234,6 +234,18 @@ describe("fastRoute: fiendtlig inndata - tidsbudsjett og uendret atferd for norm
     for (const text of ["verdi av bilen min", "bruk av tid i uka", "hva er verdien av huset mitt", "status på livet"]) expect(fastRoute(text), text).toBeNull();
   });
 
+  it("hjelpefunksjonen som kjøres etter en delegering (`delegationRequestVariants`) er også rask på en melding nær taket med et langt mellomromsløp", () => {
+    for (const gap of [" ", "\t", "\n", "\u00a0"]) {
+      const msg = `sjekk kalenderen${gap.repeat(1_900)}x i bakgrunnen${gap.repeat(30)}y`;
+      expect(msg.length).toBeLessThanOrEqual(FAST_ROUTE_MAX_CHARS);
+      expect(fastRoute(msg)?.kind).toBe("delegate_background");
+      const started = performance.now();
+      const variants = delegationRequestVariants(msg);
+      expect(performance.now() - started).toBeLessThan(BUDGET_MS);
+      expect(variants[0]).toBe(msg);
+    }
+  });
+
   it("delegering leser den OPPRINNELIGE teksten ordrett (D-449): flere mellomrom og linjeskift i prompten bevares", () => {
     const prompt = "undersøk   i bakgrunnen\n\nstatus på GitHub-sakene mine,   og gi meg en kort rapport";
     expect(fastRoute(prompt)).toEqual({ kind: "delegate_background", prompt });

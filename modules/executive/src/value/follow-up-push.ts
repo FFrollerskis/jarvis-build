@@ -8,7 +8,7 @@
  *  - Rate-limit: høyst N meldinger per rullerende døgn (standard 3) og minst 60 minutter mellom FORSØK (et mislykket forsøk som ble frigitt teller også - M1). Flere løkker pakkes i ÉN melding (høyst 5), aldri en melding per løkke.
  *  - HØYST ÉN GANG (H1): reservasjonen skrives FØR sending og frigis KUN når utfallet er BEVIST «ikke sendt» - en positiv tillatelsesliste av eksplisitte avslag FØR leverandørkallet (`classifyNotifyFailure`). ALT annet
  *    (tidsavbrudd, 5xx, nettverksfeil etter sending, `postcondition_unverified`, ukjente tekster, kastede unntak) BEHOLDER reservasjonen og teller mot døgngrense og minsteavstand. Restrisiko (bevisst, «høyst én» går foran
- *    «minst én»): et usikkert utfall kan i sjeldne tilfeller TAPE en påminnelse (leverandøren mottok den aldri), men den kan aldri sendes to ganger.
+ *    «minst én»): et usikkert utfall kan i sjeldne tilfeller TAPE en påminnelse (leverandøren mottok den aldri), men den kan ikke sendes to ganger så lenge ledgeren i revisjonssporet er intakt.
  *  - Forsøkstak og backoff (M1): høyst 3 forsøk per melding per rullerende døgn, og ventetid etter siste forsøk som vokser med antall feil (15 min, 1 t, deretter 4 t). Når taket er nådd er løperen stille (`attempts_exhausted`).
  *  - Stopp FØR reservasjon (M1): kill switch, frosset connector, tilbakekalt credential og infra-pause sjekkes via `PushSendGuard` FØR noe reserveres - ingen audit-støy og ingen forsøk mens eieren har stanset systemet.
  *  - Dedupe: samme løkke varsles aldri to ganger for samme forfallsperiode (`kilde:id:forfalt|snart:forfallsdato`). Flyttes fristen, er det en NY periode.
@@ -78,7 +78,7 @@ export function parseFollowUpPushPolicy(env: Readonly<Record<string, string | un
     time_zone: FOLLOW_UP_PUSH_DEFAULTS.time_zone,
     stale_overdue_days: FOLLOW_UP_PUSH_DEFAULTS.stale_overdue_days,
     max_attempts_per_message: FOLLOW_UP_PUSH_DEFAULTS.max_attempts_per_message,
-    retry_backoff_minutes: FOLLOW_UP_PUSH_DEFAULTS.retry_backoff_minutes,
+    retry_backoff_minutes: [...FOLLOW_UP_PUSH_DEFAULTS.retry_backoff_minutes],
     include_titles: titles === undefined || titles === "" || titles === "true"
   };
 }
@@ -161,7 +161,7 @@ function cleanPass(input: string, state: { cut: boolean }): string {
  */
 export function safeFollowUpTitle(raw: string): string {
   // NFKC kan utvide teksten (ligaturer, «㎞»): begrens på nytt etter normalisering. U+3002 (ideografisk punktum) leses som `.` av nettlesere i domenenavn.
-  let t = Array.from(flattenText(raw, 400).normalize("NFKC")).slice(0, 400).join("").replace(/。/g, ".");
+  let t = Array.from(flattenText(raw, 400).normalize("NFKC")).slice(0, 400).join("").replace(/\u3002/g, ".");
   const state = { cut: false };
   let stable = false;
   for (let pass = 0; pass < MAX_CLEAN_PASSES && !stable; pass += 1) {
