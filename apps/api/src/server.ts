@@ -24,7 +24,7 @@ import {
   type CardService, type FinanceService
 } from "@jarvis/finance";
 import type { ConversationEngine } from "./conversation.ts";
-import { FINANCE_ACTION_ROUTE_ACTIONS, moneyActionParameters, parseFinanceActionRequest, previewFinanceAction } from "./finance-actions.ts";
+import { FINANCE_ACTION_ROUTE_ACTIONS, moneyActionParameters, parseFinanceActionRequest, previewFinanceAction, readReconciliationStatus } from "./finance-actions.ts";
 import { submittedContractHasReservedKey, type ChatJobs } from "./chat-jobs.ts";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import {
@@ -1105,7 +1105,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
   }
 
   if (deps.executive && deps.confirmations && deps.owner && req.method === "POST" && url.pathname === "/finance/actions") {
-    // WP-F1 (D-453, Q-47 a): eierens vei til pengehandlingene (se finance-actions.ts). EGEN rute med hardkodet allowlist (`preview`/`request`) - aldri en utvidelse av
+    // WP-F1 (D-453, Q-47 a): eierens vei til pengehandlingene (se finance-actions.ts). EGEN rute med hardkodet allowlist (`preview`/`request`/`reconciliation_status`) - aldri en utvidelse av
     // /confirmations eller /executive/*. SAMME grant-rekkefølge som de øvrige muterende rutene: avvis ugyldig action/parametre FØR grantet løses, avvis et ugyldig
     // grant FØR step-up, og step-up FØR noe leses eller opprettes. `request` UTFØRER ALDRI - den oppretter kun en bundet, engangs bekreftelse som eieren godkjenner
     // via `/confirmations` (som igjen krever step-up og kjører gjennom klasse D-pipelinen).
@@ -1117,10 +1117,16 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       return json(res, 400, { error: "malformed_request", reason: "action_not_allowed" });
     }
     const rawParameters = parsedBody["parameters"];
-    const parsedRequest = parseFinanceActionRequest(
-      typeof rawParameters === "object" && rawParameters !== null && !Array.isArray(rawParameters) ? (rawParameters as Record<string, unknown>) : {}
-    );
-    if (!parsedRequest.ok) return json(res, 400, { error: "malformed_request", reason: parsedRequest.reason });
+    const parameterObject = typeof rawParameters === "object" && rawParameters !== null && !Array.isArray(rawParameters) ? (rawParameters as Record<string, unknown>) : {};
+    // `reconciliation_status` er en ren LESING av avstemmingsrapporten (klasse A, `finance.get_reconciliation_status`) og tar INGEN parametre (tenant kommer fra grantet).
+    let parsedRequest: ReturnType<typeof parseFinanceActionRequest> = { ok: false, reason: "not_applicable" };
+    if (action === "reconciliation_status") {
+      const extra = Object.keys(parameterObject)[0];
+      if (extra !== undefined) return json(res, 400, { error: "malformed_request", reason: `unknown_parameter:${extra.slice(0, 40).replace(/[^A-Za-z0-9_.:-]/g, "_")}` });
+    } else {
+      parsedRequest = parseFinanceActionRequest(parameterObject);
+      if (!parsedRequest.ok) return json(res, 400, { error: "malformed_request", reason: parsedRequest.reason });
+    }
     const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
     if (!resolved.ok) {
       if (resolved.responded) return;
@@ -1134,6 +1140,11 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     if (stepUp) {
       return json(res, 403, { error: "step_up_required", reason: stepUp });
     }
+    if (action === "reconciliation_status") {
+      const status = await readReconciliationStatus(deps.executive.gateway, resolved.identity);
+      return status.ok ? json(res, 200, { ok: true, data: status.data }) : json(res, 403, { error: "tool_denied", reason: status.reason });
+    }
+    if (!parsedRequest.ok) return json(res, 400, { error: "malformed_request", reason: parsedRequest.reason });
     const request = parsedRequest.request;
     const preview = await previewFinanceAction(deps.executive.gateway, resolved.identity, request);
     if (!preview.ok) {
@@ -1142,14 +1153,18 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         : json(res, 403, { error: "tool_denied", reason: preview.reason });
     }
     const tool = `${request.spec.tool_id}.${request.spec.action}`;
-    const view = { tool, target_id: request.targetId, allowed: preview.reason === null, reason: preview.reason, summary: preview.summary, state: preview.state };
+    const view = { tool, target_id: request.targetId, allowed: preview.reason === null && preview.binding !== null, reason: preview.reason, summary: preview.summary, binding: preview.binding, state: preview.state };
     if (action === "preview") return json(res, 200, { ok: true, data: view });
     if (preview.reason !== null) {
       return json(res, 409, { error: "not_submittable", reason: preview.reason, data: view });
     }
+    // Uten beløp/valuta/mottaker-digest i den ferske tilstanden kan beløp + mottaker ikke bindes - da opprettes ingen bekreftelse (fail-closed).
+    if (preview.binding === null) {
+      return json(res, 409, { error: "not_submittable", reason: "binding_unavailable", data: view });
+    }
     const identity = resolved.identity;
     const pending = await deps.confirmations.requestPending(
-      { tool_id: request.spec.tool_id, action: request.spec.action, parameters: moneyActionParameters(identity, request) },
+      { tool_id: request.spec.tool_id, action: request.spec.action, parameters: moneyActionParameters(identity, request, preview.binding) },
       { tenant_id: identity.tenant_id, person_id: identity.person_id, device_id: identity.device_id, session_id: identity.session_id },
       ["owner_finance_action_request"],
       preview.summary ?? undefined

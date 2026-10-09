@@ -317,6 +317,10 @@ async function main(): Promise<void> {
   // arvet derfra - samme falsy-sjekk som `ToolGateway` selv bruker
   // (`if (!credential)`, `gateway.ts`) må derfor speiles her.
   if (!process.env.JARVIS_FIKEN_REFRESH_TOKEN) process.env.JARVIS_FIKEN_REFRESH_TOKEN = "unused-fiken-token-sentinel-stripe-only-acceptance";
+  // WP-F1 (JARVIS-072, D-453): credential-kravet til `finance.submit_payment_intent` bestemmes nå av INTENSJONENS provider (`credential_ref_resolver`), ikke statisk Fiken.
+  // For en Stripe-intensjon sjekker ToolGateway derfor tilstedeværelsen av `JARVIS_STRIPE_SECRET_KEY`. Akseptansen skal ALDRI bruke den ekte (live) nøkkelen - selve
+  // Stripe-kallet bruker den injiserte TEST-nøkkelen via `stripeCredentialsProvider` over. Er den ikke satt, settes en ikke-hemmelig sentinel (kun for tilstedeværelsessjekken).
+  if (!process.env.JARVIS_STRIPE_SECRET_KEY) process.env.JARVIS_STRIPE_SECRET_KEY = "unused-stripe-secret-sentinel-test-mode-acceptance";
 
   const secrets = new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider());
   const toolGateway = new ToolGateway(pool, policy, secrets);
@@ -338,7 +342,7 @@ async function main(): Promise<void> {
   await section("STRIPE_PAYMENT_EXECUTION (EKTE create_payment_intent + EKTE bekreftelse med test-kort + EKTE refresh mot api.stripe.com)", async () => {
     const created = await financeAction("create_payment_intent", {
       tenant_id: TENANT_A, idempotency_key: `stripe-real-${runId}`, purpose: "D-225 real acceptance", amount_ore: 12_345,
-      vendor_name: "D-225 test", account_code: "stripe-category", provider: "stripe"
+      vendor_name: `D-225 test ${runId}`, account_code: "stripe-category", provider: "stripe"
     });
     stripeIntentId = mustExternalId(created, "stripe_create");
 
@@ -412,7 +416,7 @@ async function main(): Promise<void> {
     // STRIPE_PAYMENT_EXECUTION over.
     const webhookIntent = await financeAction("create_payment_intent", {
       tenant_id: TENANT_A, idempotency_key: `stripe-real-webhook-${runId}`, purpose: "D-225 webhook reachability", amount_ore: 1_000,
-      vendor_name: "D-225 webhook test", account_code: "stripe-category", provider: "stripe"
+      vendor_name: `D-225 webhook test ${runId}`, account_code: "stripe-category", provider: "stripe"
     });
     const webhookIntentId = mustExternalId(webhookIntent, "stripe_webhook_create");
     const webhookSubmit = await financeAction("submit_payment_intent", { tenant_id: TENANT_A, payment_intent_id: webhookIntentId });

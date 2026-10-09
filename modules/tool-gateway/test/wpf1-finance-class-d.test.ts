@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { JsonValue } from "@jarvis/contracts";
 import {
   FINANCE_BLOCKING_INTEGRITY_FLAGS,
+  boundExpectationReason,
   FINANCE_PROVIDER_CREDENTIAL_REFS,
   MAX_AMOUNT_MINOR_UNITS,
   financeCredentialRefForProvider,
@@ -335,5 +336,70 @@ describe("E: kontrakter, sammendrag og credential-oppslag", () => {
     expect(summarizeSubmitChild(childCheck("vipps_capture"))).toBe(`capture 40,00 NOK via vipps (betaling ${PI})`);
     expect(summarizeSubmitChild(childCheck("vipps_refund"))).toBe(`refusjon 40,00 NOK via vipps (betaling ${PI})`);
     expect(summarizeSubmitChild(null)).toBeNull();
+  });
+});
+
+describe("F: binding til beløp og mottaker (`expected_*`) - alt-eller-ingenting, sammenlignet med den FERSKE tilstanden", () => {
+  const digest = "0123456789abcdef0123456789abcdef";
+  const state = (over: Json = {}): JsonValue => intentCheck({ pi: { vendor_name: "Utleier AS", recipient_digest: digest, ...over } });
+  const bound = (extra: Json = {}): Record<string, JsonValue> => params({ expected_amount_ore: 10_000, expected_currency: "NOK", expected_recipient: digest, ...extra });
+
+  it("ingen binding oppgitt = ingen ekstra sjekk (uendret oppførsel); riktig binding slipper gjennom", () => {
+    expect(validateSubmitPaymentIntent(state(), params())).toBeNull();
+    expect(validateSubmitPaymentIntent(state(), bound())).toBeNull();
+  });
+
+  it("avvik i beløp, valuta eller mottaker avvises med spesifikk årsak - også når tilstanden ellers er gyldig", () => {
+    expect(validateSubmitPaymentIntent(state({ amount_ore: 10_001 }), bound())).toBe("bound_amount_mismatch");
+    expect(validateSubmitPaymentIntent(state({ currency: "EUR" }), bound())).toBe("bound_currency_mismatch");
+    expect(validateSubmitPaymentIntent(state({ recipient_digest: "ffffffffffffffffffffffffffffffff" }), bound())).toBe("bound_recipient_mismatch");
+    expect(validateSubmitPaymentIntent(state(), bound({ expected_amount_ore: 9_999 }))).toBe("bound_amount_mismatch");
+    // tilstanden mangler digest (ukjent mottaker) men binding er oppgitt: fail-closed
+    expect(validateSubmitPaymentIntent(intentCheck(), bound())).toBe("bound_recipient_mismatch");
+  });
+
+  it("alt-eller-ingenting: oppgis én eller to av tre, avvises hele kallet som `bound_incomplete`", () => {
+    for (const present of [["expected_amount_ore"], ["expected_currency"], ["expected_recipient"], ["expected_amount_ore", "expected_currency"], ["expected_currency", "expected_recipient"]]) {
+      const p = params(Object.fromEntries(present.map((k) => [k, bound()[k]!])));
+      expect(validateSubmitPaymentIntent(state(), p), present.join("+")).toBe("bound_incomplete");
+    }
+  });
+
+  it("feil type/format på bindingen er aldri «ok» (streng, flyttall, NaN, negative, objekt)", () => {
+    for (const bad of ["10000", 10_000.5, Number.NaN, -10_000, null, {}, [10_000], true] as JsonValue[]) {
+      expect(validateSubmitPaymentIntent(state(), bound({ expected_amount_ore: bad })), JSON.stringify(bad)).toBe("bound_amount_mismatch");
+    }
+    for (const bad of [5, null, "nok", ["NOK"]] as JsonValue[]) expect(validateSubmitPaymentIntent(state(), bound({ expected_currency: bad })), JSON.stringify(bad)).toBe("bound_currency_mismatch");
+    for (const bad of [5, null, "", digest.toUpperCase(), [digest]] as JsonValue[]) expect(validateSubmitPaymentIntent(state(), bound({ expected_recipient: bad })), JSON.stringify(bad)).toBe("bound_recipient_mismatch");
+  });
+
+  it("nødbryteren og målet går FØR bindingen (en aktiv nødbryter forklares som nødbryter)", () => {
+    expect(validateSubmitPaymentIntent(intentCheck({ checks: { kill_switch_active: true } }), bound({ expected_amount_ore: 1 }))).toBe("finance_kill_switch_active");
+    expect(validateSubmitPaymentIntent(state(), { ...bound(), payment_intent_id: "annen" })).toBe("target_mismatch");
+  });
+
+  it("refusjon/capture: bindingen gjelder barnets beløp/valuta og foreldrebetalingens mottaker-digest", () => {
+    const refund = (parent: Json = {}, child: Json = {}): JsonValue => childCheck("stripe_refund", { parent: { recipient_digest: digest, vendor_name: "Kunde AS", ...parent }, child });
+    const p = { ...childParams("refund_id"), expected_amount_ore: 4_000, expected_currency: "NOK", expected_recipient: digest };
+    expect(validateSubmitStripeRefund(refund(), p)).toBeNull();
+    expect(validateSubmitStripeRefund(refund({}, { amount_ore: 4_001 }), p)).toBe("bound_amount_mismatch");
+    expect(validateSubmitStripeRefund(refund({ recipient_digest: "ffffffffffffffffffffffffffffffff" }), p)).toBe("bound_recipient_mismatch");
+    expect(validateSubmitStripeRefund(refund(), { ...childParams("refund_id"), expected_amount_ore: 4_000 })).toBe("bound_incomplete");
+    const captureParent = childCheck("vipps_capture", { parent: { recipient_digest: digest } });
+    expect(validateSubmitVippsCapture(captureParent, { ...childParams("capture_id"), expected_amount_ore: 4_000, expected_currency: "NOK", expected_recipient: digest })).toBeNull();
+    expect(validateSubmitVippsCapture(childCheck("vipps_capture", { parent: null }), { ...childParams("capture_id"), expected_amount_ore: 4_000, expected_currency: "NOK", expected_recipient: digest })).toBe("bound_recipient_mismatch");
+  });
+
+  it("boundExpectationReason direkte: ingen parametre = null", () => {
+    expect(boundExpectationReason({}, { amount_ore: 1, currency: "NOK", recipient_digest: undefined })).toBeNull();
+  });
+
+  it("sammendrag: leverandørnavnet vises, referansen vises KUN i eierens bekreftelsesvisning (maskert) og aldri i varselet", () => {
+    const s = state({ vendor_ref_present: true, vendor_ref_masked: "…4321 (11)", counter_account_code: "1920" });
+    expect(summarizeSubmitPaymentIntent(s)).toBe(`betaling 100,00 NOK til Utleier AS via stripe (intensjon ${PI})`);
+    expect(summarizeSubmitPaymentIntent(s, { includeMaskedReference: true })).toBe(`betaling 100,00 NOK til Utleier AS [ref …4321 (11)] via stripe (intensjon ${PI})`);
+    expect(summarizeSubmitPaymentIntent(s)).not.toMatch(/4321|1920/);
+    expect(summarizeSubmitPaymentIntent(state({ vendor_name: "x".repeat(200) }))).toContain(`til ${"x".repeat(60)} via`);
+    expect(summarizeSubmitChild(childCheck("stripe_refund", { parent: { vendor_name: "Kunde AS" } }))).toBe(`refusjon 40,00 NOK via stripe (betaling ${PI}, Kunde AS)`);
   });
 });

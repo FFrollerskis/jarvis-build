@@ -58,6 +58,10 @@ export const SubmitIntentCheckSchema = z.object({
     vendor_ref_present: z.boolean(),
     vendor_ref_masked: z.string().nullable(),
     vendor_id: z.string().nullable(),
+    /** WP-F1: leverandørnavnet (avkortet) - vises til eieren i sammendraget («betaling til X»). Ren visning. */
+    vendor_name: z.string().optional(),
+    /** WP-F1: kort, ikke-sensitiv digest av mottakeren (provider, vendor_id, navn, MASKERT referanse, kontokoder) som bekreftelsen bindes til (`expected_recipient`). */
+    recipient_digest: z.string().optional(),
     provider_status: z.string().nullable(),
     provider_reported_amount_ore: z.number().nullable(),
     provider_reported_currency: z.string().nullable(),
@@ -81,7 +85,10 @@ const ParentSchema = z.object({
   provider_ref_present: z.boolean(),
   provider_status: z.string().nullable(),
   amount_ore: z.number(),
-  currency: z.string()
+  currency: z.string(),
+  /** WP-F1: som for intensjoner - visning og mottaker-digest for foreldrebetalingen (refusjonens/capturens mottaker er foreldrebetalingens motpart). */
+  vendor_name: z.string().optional(),
+  recipient_digest: z.string().optional()
 });
 
 /** `finance_stripe.check_submit_refund` / `finance_vipps.check_submit_refund` / `finance_vipps.check_submit_capture`. */
@@ -130,6 +137,26 @@ function acknowledgedDuplicates(parameters: Record<string, JsonValue>): Set<stri
   return new Set();
 }
 
+/**
+ * WP-F1 (D-453): BINDING TIL BELØP + MOTTAKER. Eierens bundne bekreftelse bærer `expected_amount_ore`, `expected_currency` og `expected_recipient` (digest av mottakeren) fra
+ * tilstanden eieren SÅ da hen ba om handlingen. Ved utførelsen sammenlignes de med den FERSKE tilstandslesingen: en intensjon/refusjon/capture som er endret mellom forespørsel
+ * og godkjenning (også om DB-triggeren som låser pengekolonnene skulle være slått av) avvises FØR noe reserveres eller sendes. Alt-eller-ingenting: oppgis én, må alle tre oppgis.
+ * Ingen binding oppgitt = ingen ekstra sjekk (direkte eier-kall med step-up og skriptene); ruten `/finance/actions` setter alltid alle tre.
+ */
+export function boundExpectationReason(
+  parameters: Record<string, JsonValue>, actual: { amount_ore: number; currency: string; recipient_digest: string | undefined }
+): string | null {
+  const amount = parameters["expected_amount_ore"];
+  const currency = parameters["expected_currency"];
+  const recipient = parameters["expected_recipient"];
+  if (amount === undefined && currency === undefined && recipient === undefined) return null;
+  if (amount === undefined || currency === undefined || recipient === undefined) return "bound_incomplete";
+  if (typeof amount !== "number" || !Number.isSafeInteger(amount) || amount !== actual.amount_ore) return "bound_amount_mismatch";
+  if (typeof currency !== "string" || currency !== actual.currency) return "bound_currency_mismatch";
+  if (typeof recipient !== "string" || actual.recipient_digest === undefined || recipient !== actual.recipient_digest) return "bound_recipient_mismatch";
+  return null;
+}
+
 function reservationReason(reservation: z.infer<typeof Reservation>, state: string, providerRefPresent: boolean): string | null {
   if (state === "submitted" && !providerRefPresent) {
     if (reservation === "in_flight") return "submit_in_flight";
@@ -158,6 +185,8 @@ export function validateSubmitPaymentIntent(data: JsonValue, parameters: Record<
   const pi = check.payment_intent;
   if (pi.payment_intent_id !== stringParam(parameters, "payment_intent_id")) return "target_mismatch";
   if (check.checks.kill_switch_active) return "finance_kill_switch_active";
+  const bound = boundExpectationReason(parameters, { amount_ore: pi.amount_ore, currency: pi.currency, recipient_digest: pi.recipient_digest });
+  if (bound !== null) return bound;
 
   const providerRefPresent = pi.provider_ref !== null && pi.provider_ref.length > 0;
   const stateReason = reservationReason(check.checks.reservation, pi.state, providerRefPresent);
@@ -213,12 +242,19 @@ export function formatMinorUnits(ore: number, currency: string): string {
   return `${major},${String(ore % 100).padStart(2, "0")} ${currency}`;
 }
 
-export function summarizeSubmitPaymentIntent(state: JsonValue | null): string | null {
+/**
+ * Sammendrag av en betaling. Standard (varselet som går ut via Telegram) har leverandørnavnet men ALDRI noen referanse; eierens egen bekreftelsesvisning (`includeMaskedReference`)
+ * viser i tillegg den MASKERTE referansen (siste fire tegn + lengde, aldri hele kontonummeret/KID) slik at eieren kan kjenne igjen mottakerkontoen.
+ */
+export function summarizeSubmitPaymentIntent(state: JsonValue | null, options: { includeMaskedReference?: boolean } = {}): string | null {
   if (state === null) return null;
   const check = parseSubmitIntentCheck(state);
   if (check === null) return null;
   const pi = check.payment_intent;
-  return `betaling ${formatMinorUnits(pi.amount_ore, pi.currency)} via ${pi.provider} (intensjon ${pi.payment_intent_id})`;
+  // WP-F1: eieren skal se HVEM som får pengene, ikke bare en id.
+  const ref = options.includeMaskedReference === true && pi.vendor_ref_masked ? ` [ref ${pi.vendor_ref_masked}]` : "";
+  const to = pi.vendor_name ? ` til ${pi.vendor_name.slice(0, 60)}${ref}` : "";
+  return `betaling ${formatMinorUnits(pi.amount_ore, pi.currency)}${to} via ${pi.provider} (intensjon ${pi.payment_intent_id})`;
 }
 
 function validateChild(
@@ -228,6 +264,8 @@ function validateChild(
   if (check === null || check.kind !== kind) return { reason: "malformed_state" };
   if (check.child.id !== stringParam(parameters, idParam)) return { reason: "target_mismatch" };
   if (check.checks.kill_switch_active) return { reason: "finance_kill_switch_active" };
+  const bound = boundExpectationReason(parameters, { amount_ore: check.child.amount_ore, currency: check.child.currency, recipient_digest: check.parent?.recipient_digest });
+  if (bound !== null) return { reason: bound };
   const providerRefPresent = check.child.provider_ref !== null && check.child.provider_ref.length > 0;
   const stateReason = reservationReason(check.checks.reservation, check.child.state, providerRefPresent);
   if (stateReason !== null) return { reason: stateReason };
@@ -305,7 +343,8 @@ export function summarizeSubmitChild(state: JsonValue | null): string | null {
   if (check === null) return null;
   const what = check.kind === "vipps_capture" ? "capture" : "refusjon";
   const provider = check.kind === "stripe_refund" ? "stripe" : "vipps";
-  return `${what} ${formatMinorUnits(check.child.amount_ore, check.child.currency)} via ${provider} (betaling ${check.child.payment_intent_id})`;
+  const counterparty = check.parent?.vendor_name ? `, ${check.parent.vendor_name.slice(0, 60)}` : "";
+  return `${what} ${formatMinorUnits(check.child.amount_ore, check.child.currency)} via ${provider} (betaling ${check.child.payment_intent_id}${counterparty})`;
 }
 
 /** Gjenopprettingsplaner (kompenserende handling / manuell rutine) - vises i varselet og i `reconcile()`. Aldri en automatisk reversering. */

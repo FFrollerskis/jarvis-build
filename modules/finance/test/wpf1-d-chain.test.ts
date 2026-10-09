@@ -197,7 +197,7 @@ describe("A: hver av de fire pengehandlingene gjennomføres med hele kjeden (fer
     expect(w.notifier.sent).toHaveLength(1);
     expect(w.notifier.sent[0]).toMatchObject({
       outcome: "executed", tool_id: "finance", action: "submit_payment_intent", idempotency_key: k, external_id: intent.payment_intent_id, tenant_id: TENANT, person_id: OWNER,
-      summary: `betaling 100,00 NOK via stripe (intensjon ${intent.payment_intent_id})`
+      summary: `betaling 100,00 NOK til ${intent.vendor_name} via stripe (intensjon ${intent.payment_intent_id})`
     });
     expect(w.notifier.sent[0]!.recovery).toMatch(/Stripe/);
     const audit = (await adminPool.query("SELECT type, payload FROM audit_events WHERE tool_id = 'finance' AND action = 'submit_payment_intent' AND payload->>'external_id' = $1 ORDER BY audit_id DESC LIMIT 1", [intent.payment_intent_id])).rows[0] as { type: string; payload: Record<string, unknown> };
@@ -214,7 +214,7 @@ describe("A: hver av de fire pengehandlingene gjennomføres med hele kjeden (fer
     const rv = await submitIntent(w, vipps.payment_intent_id);
     expect(rv).toMatchObject({ ok: true, notified: true });
     expect(w.vipps.createCalls).toHaveLength(1);
-    expect(w.notifier.sent[0]!.summary).toBe(`betaling 100,00 NOK via vipps (intensjon ${vipps.payment_intent_id})`);
+    expect(w.notifier.sent[0]!.summary).toBe(`betaling 100,00 NOK til ${vipps.vendor_name} via vipps (intensjon ${vipps.payment_intent_id})`);
 
     const fiken = await makeIntent(w, "fiken");
     const kf = key("a2f");
@@ -244,7 +244,7 @@ describe("A: hver av de fire pengehandlingene gjennomføres med hele kjeden (fer
     expect(after["state"]).toBe("settled");
     expect(String(after["provider_ref"])).toMatch(/^re_/);
     expect((await ledgerRow(k))!["status"]).toBe("succeeded");
-    expect(w.notifier.sent[0]).toMatchObject({ outcome: "executed", summary: `refusjon 40,00 NOK via stripe (betaling ${parent.payment_intent_id})` });
+    expect(w.notifier.sent[0]).toMatchObject({ outcome: "executed", summary: `refusjon 40,00 NOK via stripe (betaling ${parent.payment_intent_id}, ${parent.vendor_name})` });
   });
 
   it("Vipps-capture og Vipps-refusjon: samme kjede", async () => {
@@ -255,7 +255,7 @@ describe("A: hver av de fire pengehandlingene gjennomføres med hele kjeden (fer
     expect(rc).toMatchObject({ ok: true, external_id: capture.capture_id, notified: true });
     expect(w.vipps.captureCalls).toEqual([{ amountOre: 3_000, idempotencyKey: `vipps-capture:${capture.capture_id}` }]);
     expect((await row("vipps_captures", "capture_id", capture.capture_id))["state"]).toBe("settled");
-    expect(w.notifier.sent[0]!.summary).toBe(`capture 30,00 NOK via vipps (betaling ${authorized.payment_intent_id})`);
+    expect(w.notifier.sent[0]!.summary).toBe(`capture 30,00 NOK via vipps (betaling ${authorized.payment_intent_id}, ${authorized.vendor_name})`);
 
     const settled = await vippsIntentIn(w, "settled");
     const refund = await w.finance.createVippsRefund(TENANT, "business", { idempotency_key: key("vr"), payment_intent_id: settled.payment_intent_id, amount_ore: 2_000 });
@@ -436,7 +436,7 @@ describe("D: leverandør-tidsavbrudd med ukjent utfall ender i avstemming - aldr
     if (!first.ok) expect(first.reason).toMatch(/^tool_failed:outcome_unknown:/);
     expect((await ledgerRow(k))!["status"]).toBe("unverified");
     expect(w.notifier.sent).toHaveLength(1);
-    expect(w.notifier.sent[0]).toMatchObject({ outcome: "unknown", external_id: null, idempotency_key: k, summary: `betaling 100,00 NOK via stripe (intensjon ${intent.payment_intent_id})` });
+    expect(w.notifier.sent[0]).toMatchObject({ outcome: "unknown", external_id: null, idempotency_key: k, summary: `betaling 100,00 NOK til ${intent.vendor_name} via stripe (intensjon ${intent.payment_intent_id})` });
     expect(w.notifier.sent[0]!.recovery).toMatch(/UKJENT utfall/);
     const flagged = await intentRow(intent.payment_intent_id);
     expect(flagged["state"]).toBe("draft");
@@ -637,11 +637,16 @@ describe("F: feil konto/leverandør/beløpsformat/valuta og duplikater fanges de
     const w = wire();
     const parent = await settledStripeIntent(w);
     const refund = await w.finance.createStripeRefund(TENANT, "business", { idempotency_key: key("rf"), payment_intent_id: parent.payment_intent_id, amount_ore: 4_000 });
-    await adminPool.query("UPDATE stripe_refunds SET amount_ore = 10001 WHERE refund_id = $1", [refund.refund_id]);
+    // Pengekolonnene er uforanderlige (migrasjon 101) - fixturen slår triggeren av KUN mens den tvinger fram en tilstand tjenesten selv aldri ville produsert.
+    const force = async (sqlText: string) => {
+      await adminPool.query("ALTER TABLE stripe_refunds DISABLE TRIGGER stripe_refunds_money_immutable");
+      try { await adminPool.query(sqlText, [refund.refund_id]); } finally { await adminPool.query("ALTER TABLE stripe_refunds ENABLE TRIGGER stripe_refunds_money_immutable"); }
+    };
+    await force("UPDATE stripe_refunds SET amount_ore = 10001 WHERE refund_id = $1");
     expect(await submitStripeRefund(w, refund.refund_id)).toEqual({ ok: false, reason: "preflight_invalid:exceeds_parent_amount" });
-    await adminPool.query("UPDATE stripe_refunds SET amount_ore = 4000, currency = 'EUR' WHERE refund_id = $1", [refund.refund_id]);
+    await force("UPDATE stripe_refunds SET amount_ore = 4000, currency = 'EUR' WHERE refund_id = $1");
     expect(await submitStripeRefund(w, refund.refund_id)).toEqual({ ok: false, reason: "preflight_invalid:currency_mismatch_with_parent" });
-    await adminPool.query("UPDATE stripe_refunds SET currency = 'NOK' WHERE refund_id = $1", [refund.refund_id]);
+    await force("UPDATE stripe_refunds SET currency = 'NOK' WHERE refund_id = $1");
     await adminPool.query("UPDATE payment_intents SET state = 'provider_acknowledged' WHERE payment_intent_id = $1", [parent.payment_intent_id]);
     expect(await submitStripeRefund(w, refund.refund_id)).toEqual({ ok: false, reason: "preflight_invalid:parent_not_settled:provider_acknowledged" });
     expect(w.stripe.refundCalls).toHaveLength(0);
@@ -813,5 +818,57 @@ describe("I: pengehandlingene er IKKE på noen modellflate - kun eierens step-up
     for (const surface of SURFACES) {
       for (const g of SURFACE_TOOL_GRANTS[surface]) expect(all.has(`${g.tool_id}.${g.action}`), `${surface}: ${g.tool_id}.${g.action}`).toBe(false);
     }
+  });
+});
+
+describe("J: bundet forventning (beløp, valuta, mottaker) håndheves av selve pipelinen - også uten ruten", () => {
+  const expectation = async (w: Wired, id: string) => {
+    const check = (await w.finance.checkSubmitPaymentIntent(TENANT, "business", id))!;
+    return { expected_amount_ore: check.payment_intent.amount_ore, expected_currency: check.payment_intent.currency, expected_recipient: check.payment_intent.recipient_digest! };
+  };
+
+  it("riktig binding slipper gjennom; feil beløp/valuta/mottaker og ufullstendig binding avvises FØR reservasjon og leverandørkall (ingen ledger-rad)", async () => {
+    const w = wire();
+    const intent = await makeIntent(w, "stripe");
+    const ok = await expectation(w, intent.payment_intent_id);
+    for (const [bad, reason] of [
+      [{ ...ok, expected_amount_ore: ok.expected_amount_ore + 1 }, "bound_amount_mismatch"],
+      [{ ...ok, expected_currency: "EUR" }, "bound_currency_mismatch"],
+      [{ ...ok, expected_recipient: "f".repeat(32) }, "bound_recipient_mismatch"],
+      [{ expected_amount_ore: ok.expected_amount_ore }, "bound_incomplete"],
+      [{ expected_currency: ok.expected_currency, expected_recipient: ok.expected_recipient }, "bound_incomplete"]
+    ] as const) {
+      const k = key("bound");
+      expect(await submitIntent(w, intent.payment_intent_id, k, bad as unknown as Record<string, JsonValue>), JSON.stringify(bad)).toEqual({ ok: false, reason: `preflight_invalid:${reason}` });
+      expect(await ledgerRow(k)).toBeUndefined();
+    }
+    expect(w.stripe.createCalls).toHaveLength(0);
+    expect(await submitIntent(w, intent.payment_intent_id, key("bound-ok"), ok as unknown as Record<string, JsonValue>)).toMatchObject({ ok: true, external_id: intent.payment_intent_id });
+    expect(w.stripe.createCalls).toHaveLength(1);
+  });
+
+  it("refusjon og capture: samme binding mot barnets beløp/valuta og foreldrebetalingens mottaker", async () => {
+    const w = wire();
+    const parent = await settledStripeIntent(w);
+    const refund = await w.finance.createStripeRefund(TENANT, "business", { idempotency_key: key("rf"), payment_intent_id: parent.payment_intent_id, amount_ore: 4_000 });
+    const check = (await w.finance.checkSubmitStripeRefund(TENANT, "business", refund.refund_id))!;
+    const bound = { expected_amount_ore: 4_000, expected_currency: "NOK", expected_recipient: check.parent!.recipient_digest! };
+    const call = (extra: Record<string, JsonValue>) => w.gateway.execute({ identity: owner, tool_id: "finance_stripe", action: "submit_refund", parameters: { tenant_id: TENANT, refund_id: refund.refund_id, ...extra }, idempotency_key: key("sr") });
+    expect(await call({ ...bound, expected_amount_ore: 3_999 })).toEqual({ ok: false, reason: "preflight_invalid:bound_amount_mismatch" });
+    expect(await call({ ...bound, expected_recipient: "0".repeat(32) })).toEqual({ ok: false, reason: "preflight_invalid:bound_recipient_mismatch" });
+    expect(w.stripe.refundCalls).toHaveLength(0);
+    expect(await call(bound)).toMatchObject({ ok: true });
+    expect(w.stripe.refundCalls).toHaveLength(1);
+  });
+
+  it("skjemaet er strengt: ukjente nøkler og feil format på `expected_*` avvises av parameter-porten før noe leses", async () => {
+    const w = wire();
+    const intent = await makeIntent(w, "stripe");
+    for (const bad of [{ expected_amount_ore: "10000" }, { expected_amount_ore: -1 }, { expected_amount_ore: 1.5 }, { expected_currency: "nok" }, { expected_recipient: "ikke-hex" }, { expected_extra: 1 }]) {
+      const r = await submitIntent(w, intent.payment_intent_id, key("schema"), bad as unknown as Record<string, JsonValue>);
+      expect(r.ok, JSON.stringify(bad)).toBe(false);
+      expect(String((r as { reason: string }).reason), JSON.stringify(bad)).not.toMatch(/^preflight_/);
+    }
+    expect(w.stripe.createCalls).toHaveLength(0);
   });
 });

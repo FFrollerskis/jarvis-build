@@ -9,8 +9,7 @@ import {
   SUBMIT_PAYMENT_INTENT_RECOVERY, SUBMIT_STRIPE_REFUND_RECOVERY, SUBMIT_VIPPS_CAPTURE_RECOVERY, SUBMIT_VIPPS_REFUND_RECOVERY,
   submitPaymentIntentPostcondition, submitStripeRefundPostcondition, submitVippsCapturePostcondition, submitVippsRefundPostcondition,
   summarizeSubmitChild, summarizeSubmitPaymentIntent,
-  validateSubmitPaymentIntent, validateSubmitStripeRefund, validateSubmitVippsCapture, validateSubmitVippsRefund
-} from "./finance-class-d.ts";
+  validateSubmitPaymentIntent, validateSubmitStripeRefund, validateSubmitVippsCapture, validateSubmitVippsRefund, MAX_AMOUNT_MINOR_UNITS } from "./finance-class-d.ts";
 
 /**
  * Første bølge-adaptere (INTEGRATIONS.md §3). Reelle HTTP-transporter krever
@@ -44,6 +43,16 @@ export class UnconfiguredHttpTransport implements ToolTransport {
 
 const empty = z.object({}).strict() as unknown as z.ZodType<Record<string, JsonValue>>;
 const record = (shape: z.ZodRawShape) => z.object(shape).strict() as unknown as z.ZodType<Record<string, JsonValue>>;
+
+/**
+ * WP-F1 (D-453): eierens BUNDNE forventning til en pengehandling - beløp, valuta og mottaker-digest slik eieren SÅ dem da hen ba om handlingen. Ruten `/finance/actions` setter alle tre;
+ * validatoren sammenligner dem med den ferske tilstandslesingen (`boundExpectationReason`) og avviser ved avvik FØR noe reserveres eller sendes. Alt-eller-ingenting.
+ */
+const BOUND_EXPECTATION = {
+  expected_amount_ore: z.number().int().positive().max(MAX_AMOUNT_MINOR_UNITS).optional(),
+  expected_currency: z.string().regex(/^[A-Z]{3}$/).optional(),
+  expected_recipient: z.string().regex(/^[0-9a-f]{32}$/).optional()
+};
 
 /**
  * Q-34 P1-oppfølging (uavhengig arkitektkontroll av PR #82): `read_permissions`
@@ -1924,7 +1933,8 @@ export function firstWaveTools(
       input_schema: record({
         tenant_id: z.string(), memory_space: z.string().optional(), payment_intent_id: z.string(), actor_person_id: z.string().optional(),
         // Eierens eksplisitte kvittering på at en mulig duplikat (samme leverandør/beløp/valuta/provider siste døgn) er kontrollert - id-ene fra avslaget `possible_duplicate_of:<id>`.
-        confirm_possible_duplicate_of: z.array(z.string().min(1).max(100)).max(10).optional()
+        confirm_possible_duplicate_of: z.array(z.string().min(1).max(100)).max(10).optional(),
+        ...BOUND_EXPECTATION
       }),
       capability_class: "D", scopes: ["finance.execute"], reversible: false,
       rollback_procedure: SUBMIT_PAYMENT_INTENT_RECOVERY,
@@ -2228,7 +2238,7 @@ export function firstWaveTools(
     },
     {
       tool_id: "finance_stripe", action: "submit_refund", description: "Utfør refusjon mot Stripe for et eksisterende refusjonsutkast (klasse D - reell utgående økonomisk handling, kill-switch-gated, deterministisk provider-idempotens)",
-      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), refund_id: z.string(), actor_person_id: z.string().optional() }),
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), refund_id: z.string(), actor_person_id: z.string().optional(), ...BOUND_EXPECTATION }),
       capability_class: "D", scopes: ["finance.write", "finance.stripe"], reversible: false,
       // WP-F1 (D-453): klasse D-kjeden er komplett - fersk lesing (`check_submit_refund`) med målvalidering (oppgjort Stripe-betaling, beløp innenfor det opprinnelige,
       // valuta, tilstand, nødbryter), recovery, idempotency_key, etterbetingelse via readback og umiddelbart varsel. Kun via eierens step-up + bundne bekreftelse.
@@ -2311,7 +2321,7 @@ export function firstWaveTools(
     },
     {
       tool_id: "finance_vipps", action: "submit_capture", description: "Utfør capture mot Vipps for et eksisterende capture-utkast (klasse D - reell økonomisk handling som faktisk flytter reserverte kundepenger, kill-switch-gated, deterministisk provider-idempotens)",
-      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), capture_id: z.string(), actor_person_id: z.string().optional() }),
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), capture_id: z.string(), actor_person_id: z.string().optional(), ...BOUND_EXPECTATION }),
       capability_class: "D", scopes: ["finance.write", "finance.vipps"], reversible: false,
       // WP-F1 (D-453): klasse D-kjeden er komplett - fersk lesing (`check_submit_capture`) med målvalidering (AUTORISERT betaling, beløp innenfor reservasjonen, valuta,
       // tilstand, nødbryter), recovery, idempotency_key, etterbetingelse via readback (capture oppgjort) og umiddelbart varsel. Kun via eierens step-up + bundne bekreftelse.
@@ -2366,7 +2376,7 @@ export function firstWaveTools(
     },
     {
       tool_id: "finance_vipps", action: "submit_refund", description: "Utfør refusjon mot Vipps for et eksisterende refusjonsutkast (klasse D - reell utgående økonomisk handling, kill-switch-gated, deterministisk provider-idempotens)",
-      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), refund_id: z.string(), actor_person_id: z.string().optional() }),
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), refund_id: z.string(), actor_person_id: z.string().optional(), ...BOUND_EXPECTATION }),
       capability_class: "D", scopes: ["finance.write", "finance.vipps"], reversible: false,
       // WP-F1 (D-453): klasse D-kjeden er komplett - fersk lesing (`check_submit_refund`) med målvalidering (oppgjort Vipps-betaling, beløp innenfor det opprinnelige,
       // valuta, tilstand, nødbryter), recovery, idempotency_key, etterbetingelse via readback og umiddelbart varsel. Kun via eierens step-up + bundne bekreftelse.

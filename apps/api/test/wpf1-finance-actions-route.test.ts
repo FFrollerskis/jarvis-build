@@ -13,6 +13,7 @@ import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, firstWaveTools, type ClassDNotification, type ClassDNotifier } from "@jarvis/tool-gateway";
 import {
+  FinanceReconciliationService,
   FinanceService,
   FinanceTransport,
   StripeFinanceTransport,
@@ -127,7 +128,7 @@ beforeAll(async () => {
     credentialBinding: { owner_person_id: OWNER, owner_tenants: [TENANT], internalRefs: new Set(["JARVIS_BUSINESS_INTERNAL_TOKEN"]) }
   });
   for (const tool of firstWaveTools({
-    finance: new FinanceTransport(finance, { getCredentials: async () => ({ refreshToken: "t", companySlug: "firma" }) }),
+    finance: new FinanceTransport(finance, { getCredentials: async () => ({ refreshToken: "t", companySlug: "firma" }) }, new FinanceReconciliationService(appPool)),
     finance_stripe: new StripeFinanceTransport(finance),
     finance_vipps: new VippsFinanceTransport(finance)
   })) gateway.register(tool);
@@ -293,7 +294,7 @@ describe("C: ende-til-ende - preview -> request -> godkjenn (step-up) -> utført
 
     const preview = await fin("owner-signed", "preview", params);
     expect(preview.status, JSON.stringify(preview.body)).toBe(200);
-    expect(data(preview)).toMatchObject({ tool: "finance.submit_payment_intent", target_id: intent.payment_intent_id, allowed: true, reason: null, summary: `betaling 100,00 NOK via stripe (intensjon ${intent.payment_intent_id})` });
+    expect(data(preview)).toMatchObject({ tool: "finance.submit_payment_intent", target_id: intent.payment_intent_id, allowed: true, reason: null, summary: `betaling 100,00 NOK til ${intent.vendor_name} via stripe (intensjon ${intent.payment_intent_id})` });
     expect((data(preview)["state"] as { kind: string }).kind).toBe("payment_intent");
 
     const req = await fin("owner-desktop", "request", params);
@@ -305,8 +306,9 @@ describe("C: ende-til-ende - preview -> request -> godkjenn (step-up) -> utført
     expect(stored["status"]).toBe("pending");
     expect(stored["tool_id"]).toBe("finance");
     expect(stored["action"]).toBe("submit_payment_intent");
-    expect(stored["parameters"]).toEqual({ tenant_id: TENANT, payment_intent_id: intent.payment_intent_id }); // tenant fra identiteten, aldri fra klienten
-    expect((stored["summary"] as { display: string }).display).toBe(`betaling 100,00 NOK via stripe (intensjon ${intent.payment_intent_id})`);
+    // tenant fra identiteten (aldri fra klienten) + eierens BUNDNE forventning til beløp, valuta og mottaker slik de stod i den ferske tilstanden
+    expect(stored["parameters"]).toEqual({ tenant_id: TENANT, payment_intent_id: intent.payment_intent_id, expected_amount_ore: 10_000, expected_currency: "NOK", expected_recipient: expect.stringMatching(/^[0-9a-f]{32}$/) });
+    expect((stored["summary"] as { display: string }).display).toBe(`betaling 100,00 NOK til ${intent.vendor_name} via stripe (intensjon ${intent.payment_intent_id})`);
     expect(stored["taint_reasons"]).toEqual(["owner_finance_action_request"]);
     // INGENTING er utført ennå
     expect(submitActions().length).toBe(submitsBefore);
@@ -321,7 +323,7 @@ describe("C: ende-til-ende - preview -> request -> godkjenn (step-up) -> utført
     // eierens bekreftelsesliste viser det lesbare sammendraget
     const list = await post("/confirmations", { grant_token: "owner-signed", action: "list", parameters: {} });
     const pending = (list.body["data"] as Array<{ confirmation_id: string; summary: { display?: string } }>).find((c) => c.confirmation_id === confirmationId);
-    expect(pending?.summary.display).toContain("100,00 NOK via stripe");
+    expect(pending?.summary.display).toContain(`100,00 NOK til ${intent.vendor_name} via stripe`);
 
     // godkjenning fra en svakere økt eller feil kanal nektes - og bekreftelsen er fortsatt ventende (ikke brent)
     for (const [token, reason] of [["owner-active", "step_up_required:signed_device_session"], ["owner-passive", "step_up_required:signed_device_session"], ["owner-telegram", "step_up_required:channel_telegram_not_allowed"], ["owner-voice", "step_up_required:channel_voice_not_allowed"]] as const) {
@@ -366,7 +368,7 @@ describe("C: ende-til-ende - preview -> request -> godkjenn (step-up) -> utført
     const capturesBefore = vipps.captureCalls;
     const req = await fin("owner-signed", "request", { tool: "finance_stripe.submit_refund", refund_id: refund.refund_id });
     expect(req.status).toBe(200);
-    expect(data(req)["summary"]).toBe(`refusjon 20,00 NOK via stripe (betaling ${parent.payment_intent_id})`);
+    expect(data(req)["summary"]).toBe(`refusjon 20,00 NOK via stripe (betaling ${parent.payment_intent_id}, ${parent.vendor_name})`);
     expect(stripe.refundCalls).toBe(refundsBefore);
     const ok = await decide("owner-signed", String(data(req)["confirmation_id"]), "approve");
     expect(ok.status).toBe(200);
@@ -400,7 +402,10 @@ describe("C: ende-til-ende - preview -> request -> godkjenn (step-up) -> utført
     // eieren kvitterer eksplisitt for duplikat-id-en -> bekreftelse kan opprettes, og kvitteringen er en del av det BUNDNE kallet
     const ack = await fin("owner-signed", "request", { tool: "finance.submit_payment_intent", payment_intent_id: b.payment_intent_id, confirm_possible_duplicate_of: [a.payment_intent_id] });
     expect(ack.status).toBe(200);
-    expect((await confRow(String(data(ack)["confirmation_id"])))!["parameters"]).toEqual({ tenant_id: TENANT, payment_intent_id: b.payment_intent_id, confirm_possible_duplicate_of: [a.payment_intent_id] });
+    expect((await confRow(String(data(ack)["confirmation_id"])))!["parameters"]).toEqual({
+      tenant_id: TENANT, payment_intent_id: b.payment_intent_id, confirm_possible_duplicate_of: [a.payment_intent_id],
+      expected_amount_ore: 55_500, expected_currency: "NOK", expected_recipient: expect.stringMatching(/^[0-9a-f]{32}$/)
+    });
   });
 });
 
@@ -474,6 +479,97 @@ describe("D: avvisning, utløp, nødbryter og tilstand som endrer seg etter fore
     expect(gateway.get("finance_vipps", "submit_refund")?.step_up_required).toBe(true);
     expect(gateway.get("finance_stripe", "request_refund")?.step_up_required).toBeUndefined();
     expect(gateway.get("finance", "create_payment_intent")?.step_up_required).toBeUndefined();
+  });
+});
+
+describe("G: binding til beløp og mottaker - endring mellom forespørsel og godkjenning stoppes før noe reserveres eller sendes", () => {
+  const withTriggerOff = async (fn: () => Promise<void>) => {
+    await adminPool.query("ALTER TABLE payment_intents DISABLE TRIGGER payment_intents_money_immutable");
+    try { await fn(); } finally { await adminPool.query("ALTER TABLE payment_intents ENABLE TRIGGER payment_intents_money_immutable"); }
+  };
+
+  it("forhåndsvisningen viser den bundne forventningen; klienten kan aldri oppgi den selv; databasen avviser endring av beløp og mottaker", async () => {
+    const intent = await newStripeIntent();
+    const params = { tool: "finance.submit_payment_intent", payment_intent_id: intent.payment_intent_id };
+    const preview = await fin("owner-signed", "preview", params);
+    expect(data(preview)["binding"]).toEqual({ expected_amount_ore: 10_000, expected_currency: "NOK", expected_recipient: expect.stringMatching(/^[0-9a-f]{32}$/) });
+    for (const key of ["expected_amount_ore", "expected_currency", "expected_recipient"]) {
+      const forged = await fin("owner-signed", "request", { ...params, [key]: key === "expected_amount_ore" ? 1 : "NOK" });
+      expect(forged.status, key).toBe(400);
+      expect(forged.body["reason"], key).toBe(`unknown_parameter:${key}`);
+    }
+    await expect(adminPool.query("UPDATE payment_intents SET amount_ore = 20000 WHERE payment_intent_id = $1", [intent.payment_intent_id])).rejects.toMatchObject({ code: "23514" });
+    await expect(adminPool.query("UPDATE payment_intents SET vendor_name = 'Angriper AS' WHERE payment_intent_id = $1", [intent.payment_intent_id])).rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("TOCTOU: beløpet endres (triggeren bevisst av) mellom forespørsel og godkjenning -> avvist av den bundne forventningen, null leverandørkall, intensjonen uendret", async () => {
+    const intent = await newStripeIntent();
+    const before = stripe.createCalls;
+    const req = await fin("owner-signed", "request", { tool: "finance.submit_payment_intent", payment_intent_id: intent.payment_intent_id });
+    const id = String(data(req)["confirmation_id"]);
+    await withTriggerOff(async () => { await adminPool.query("UPDATE payment_intents SET amount_ore = 20000 WHERE payment_intent_id = $1", [intent.payment_intent_id]); });
+    const approved = await decide("owner-signed", id, "approve");
+    expect(approved.status).toBe(409);
+    expect(data(approved)["result"]).toMatchObject({ ok: false, reason: "preflight_invalid:bound_amount_mismatch" });
+    expect(stripe.createCalls).toBe(before);
+    expect(await intentState(intent.payment_intent_id)).toBe("draft");
+  });
+
+  it("TOCTOU: mottakeren byttes (leverandørnavn) mellom forespørsel og godkjenning -> avvist; valuta byttet -> avvist", async () => {
+    const swapped = await newStripeIntent();
+    const before = stripe.createCalls;
+    const req = await fin("owner-signed", "request", { tool: "finance.submit_payment_intent", payment_intent_id: swapped.payment_intent_id });
+    await withTriggerOff(async () => { await adminPool.query("UPDATE payment_intents SET vendor_name = 'Angriper AS' WHERE payment_intent_id = $1", [swapped.payment_intent_id]); });
+    const approved = await decide("owner-signed", String(data(req)["confirmation_id"]), "approve");
+    expect(data(approved)["result"]).toMatchObject({ ok: false, reason: "preflight_invalid:bound_recipient_mismatch" });
+
+    const currency = await newStripeIntent();
+    const req2 = await fin("owner-signed", "request", { tool: "finance.submit_payment_intent", payment_intent_id: currency.payment_intent_id });
+    await withTriggerOff(async () => { await adminPool.query("UPDATE payment_intents SET currency = 'EUR' WHERE payment_intent_id = $1", [currency.payment_intent_id]); });
+    const approved2 = await decide("owner-signed", String(data(req2)["confirmation_id"]), "approve");
+    expect(data(approved2)["result"]).toMatchObject({ ok: false, reason: "preflight_invalid:bound_currency_mismatch" });
+    expect(stripe.createCalls).toBe(before);
+  });
+
+  it("refusjon: beløpet endres mellom forespørsel og godkjenning -> avvist (null leverandørkall)", async () => {
+    const parent = await newStripeIntent();
+    await adminPool.query("UPDATE payment_intents SET state = 'settled', provider_ref = 'pi_bind', provider_status = 'succeeded', settled_at = now() WHERE payment_intent_id = $1", [parent.payment_intent_id]);
+    const refund = await finance.createStripeRefund(TENANT, "business", { idempotency_key: `rf-${randomUUID()}`, payment_intent_id: parent.payment_intent_id, amount_ore: 1_000 });
+    const before = stripe.refundCalls;
+    const req = await fin("owner-signed", "request", { tool: "finance_stripe.submit_refund", refund_id: refund.refund_id });
+    expect((await confRow(String(data(req)["confirmation_id"])))!["parameters"]).toMatchObject({ expected_amount_ore: 1_000, expected_currency: "NOK" });
+    await adminPool.query("ALTER TABLE stripe_refunds DISABLE TRIGGER stripe_refunds_money_immutable");
+    try { await adminPool.query("UPDATE stripe_refunds SET amount_ore = 9000 WHERE refund_id = $1", [refund.refund_id]); } finally { await adminPool.query("ALTER TABLE stripe_refunds ENABLE TRIGGER stripe_refunds_money_immutable"); }
+    const approved = await decide("owner-signed", String(data(req)["confirmation_id"]), "approve");
+    expect(data(approved)["result"]).toMatchObject({ ok: false, reason: "preflight_invalid:bound_amount_mismatch" });
+    expect(stripe.refundCalls).toBe(before);
+  });
+});
+
+describe("H: avstemmingsrapporten til eieren (`reconciliation_status`) - ren lesing, samme eier-/step-up-regler", () => {
+  it("eier med step-up får rapporten (tenant fra grantet); ingen mutasjon, ingen bekreftelse, ingen pengehandling kjørt", async () => {
+    const confBefore = await confCount("finance.submit_payment_intent");
+    const submitsBefore = submitActions().length;
+    const r = await fin("owner-signed", "reconciliation_status", {});
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body["ok"]).toBe(true);
+    expect(data(r)).toMatchObject({ ever_run: expect.any(Boolean), open_counts: { critical: expect.any(Number), warning: expect.any(Number), info: expect.any(Number) }, open_findings: expect.any(Array) });
+    expect(executedActions.at(-1)).toBe("finance.get_reconciliation_status");
+    expect(await confCount("finance.submit_payment_intent")).toBe(confBefore);
+    expect(submitActions().length).toBe(submitsBefore);
+  });
+
+  it("samme avslag som de øvrige handlingene: svak økt/feil kanal -> step-up, gjest/annen eier -> owner_only, ukjent parameter -> 400 før grant løses, uten grant -> 401", async () => {
+    for (const [token, reason] of [["owner-active", "step_up_required:signed_device_session"], ["owner-telegram", "step_up_required:channel_telegram_not_allowed"]] as const) {
+      const denied = await fin(token, "reconciliation_status", {});
+      expect(denied.status, token).toBe(403);
+      expect(denied.body, token).toMatchObject({ error: "step_up_required", reason });
+    }
+    for (const token of ["guest-signed", "otherowner-signed"]) expect((await fin(token, "reconciliation_status", {})).body["error"], token).toBe("owner_only");
+    const extra = await fin("owner-signed", "reconciliation_status", { tenant_id: TENANT_B });
+    expect(extra.status).toBe(400);
+    expect(extra.body["reason"]).toBe("unknown_parameter:tenant_id");
+    expect((await post("/finance/actions", { action: "reconciliation_status", parameters: {} })).status).toBe(401);
   });
 });
 

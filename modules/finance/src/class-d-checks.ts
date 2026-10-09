@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type pg from "pg";
 import type { SubmitChildCheck, SubmitIntentCheck } from "@jarvis/tool-gateway";
 import { assertValidVendorBinding } from "./vendor-registry.ts";
@@ -26,6 +27,16 @@ export function maskReference(value: string | null): string | null {
   const v = value.trim();
   if (v.length === 0) return null;
   return v.length <= 6 ? `***(${v.length})` : `…${v.slice(-4)} (${v.length})`;
+}
+
+/**
+ * WP-F1: kort, IKKE-sensitiv digest av mottakeren som bekreftelsen bindes til (`expected_recipient`): provider, canonical vendor-id, leverandørnavn (normalisert), MASKERT referanse
+ * (siste fire tegn + lengde), kontokode og motkonto. Den hashes IKKE over hele kontonummeret/KID (lav entropi - en usaltet hash ville lekket det): selve referansen er låst av DB-triggeren
+ * som gjør pengekolonnene uforanderlige (migrasjon 101), digesten er et andre, uavhengig lag mot at mottakeren er byttet mellom forespørsel og godkjenning.
+ */
+export function recipientDigest(i: Pick<PaymentIntent, "provider" | "vendor_id" | "vendor_name" | "vendor_provider_ref" | "account_code" | "counter_account_code">): string {
+  const canonical = JSON.stringify([i.provider, i.vendor_id ?? null, i.vendor_name.trim().toLowerCase(), maskReference(i.vendor_provider_ref), i.account_code, i.counter_account_code ?? null]);
+  return createHash("sha256").update(canonical).digest("hex").slice(0, 32);
 }
 
 type Reservation = SubmitIntentCheck["checks"]["reservation"];
@@ -110,6 +121,8 @@ export async function buildSubmitIntentCheck(client: pg.PoolClient, tenantId: st
       vendor_ref_present: Boolean(intent.vendor_provider_ref),
       vendor_ref_masked: maskReference(intent.vendor_provider_ref),
       vendor_id: intent.vendor_id,
+      vendor_name: intent.vendor_name.slice(0, 80),
+      recipient_digest: recipientDigest(intent),
       provider_status: intent.provider_status,
       provider_reported_amount_ore: nullableNumber(intent.provider_reported_amount_ore),
       provider_reported_currency: intent.provider_reported_currency,
@@ -164,7 +177,9 @@ export async function buildSubmitChildCheck(client: pg.PoolClient, kind: ChildKi
           provider_ref_present: Boolean(parent.provider_ref),
           provider_status: parent.provider_status,
           amount_ore: Number(parent.amount_ore),
-          currency: parent.currency
+          currency: parent.currency,
+          vendor_name: parent.vendor_name.slice(0, 80),
+          recipient_digest: recipientDigest(parent)
         }
       : null,
     checks: {
