@@ -525,13 +525,16 @@ export class GitHubAuth {
       return { ref: GITHUB_TOKEN_REF, kind: "api_key", expires_at: null, last_refresh_ok: null, scopes_granted: [], scopes_required: [], revoked: false, short_lived: false, repo_scoped: false, auth_method: "pat" };
     }
     const fallback = s.pat_fallback.active;
+    // Kjente tildelte rettigheter kommer fra siste utstedte token, ellers fra en eksplisitt inspisert installasjon. Er ingen av dem kjent,
+    // påstås heller ingen scope-mangel (tom «påkrevd»-liste = ukjent): en feilet utstedelse er `refresh_failing`, ikke `scope_shortfall`.
+    const granted = s.app.token?.permissions ?? s.app.installation?.permissions ?? null;
     return {
       ref: GITHUB_TOKEN_REF,
       kind: fallback ? "api_key" : "short_lived_token",
       expires_at: fallback ? null : s.app.token?.expires_at ?? null,
       last_refresh_ok: s.app.last_error ? false : s.app.token ? true : null,
-      scopes_granted: s.app.token ? expandScopes(s.app.token.permissions) : [],
-      scopes_required: expandScopes(GITHUB_FULL_CAPABILITY_PERMISSIONS),
+      scopes_granted: granted ? expandScopes(granted) : [],
+      scopes_required: granted ? expandScopes(GITHUB_FULL_CAPABILITY_PERMISSIONS) : [],
       revoked: false,
       short_lived: s.short_lived,
       repo_scoped: s.scoped,

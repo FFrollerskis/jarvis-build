@@ -64,4 +64,16 @@ describe("D-102: withSecretRedaction", () => {
     const wrapped = withSecretRedaction(failingHandler("no_changes_to_commit"), []);
     await expect(wrapped(fakeTask, fakeCtx)).rejects.toThrow("no_changes_to_commit");
   });
+
+  it("G (WP-C3): hemmelighetslisten kan være en funksjon som leses PÅ FEILTIDSPUNKTET - kortlevde tokens (utstedt etter oppstart) redigeres også", async () => {
+    const issuedLater: string[] = [];
+    const wrapped = withSecretRedaction(failingHandler("push_failed: remote said token ghs_RotatedInstallationToken123 is bad"), () => issuedLater);
+    issuedLater.push("ghs_RotatedInstallationToken123"); // utstedt ETTER at wrapperen ble laget
+    await expect(wrapped(fakeTask, fakeCtx)).rejects.toThrow("push_failed: remote said token [REDACTED] is bad");
+  });
+
+  it("H (WP-C3): en funksjon som kaster skjuler aldri den opprinnelige feilen (fail-open for redaksjon, fail-closed for feilmeldingen)", async () => {
+    const wrapped = withSecretRedaction(failingHandler("tests_failed: exit 1"), () => { throw new Error("kilde nede"); });
+    await expect(wrapped(fakeTask, fakeCtx)).rejects.toThrow("tests_failed: exit 1");
+  });
 });

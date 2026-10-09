@@ -380,13 +380,21 @@ export function createCodingHandler(deps: {
  * når køen - identisk teknikk som den allerede eksisterende, testede
  * `redactSecrets()` i `coding-agent-eval.ts` (D-98), ALDRI en ny mekanisme.
  */
-export function withSecretRedaction(handler: TaskHandler, secrets: readonly (string | undefined)[]): TaskHandler {
+export function withSecretRedaction(handler: TaskHandler, secrets: readonly (string | undefined)[] | (() => readonly (string | undefined)[])): TaskHandler {
   return async (task, ctx) => {
     try {
       return await handler(task, ctx);
     } catch (err) {
       let message = (err as Error).message;
-      for (const secret of secrets) {
+      // WP-C3: listen kan være en FUNKSJON, slik at kortlevde credentials (GitHub App-installasjonstokens, nye hver time) også redigeres - en
+      // statisk liste tatt ved oppstart ville aldri kjent dem. En kastende funksjon skal aldri skjule den opprinnelige feilen.
+      let list: readonly (string | undefined)[] = [];
+      try {
+        list = typeof secrets === "function" ? secrets() : secrets;
+      } catch {
+        list = [];
+      }
+      for (const secret of list) {
         if (secret && secret.length > 0) message = message.split(secret).join("[REDACTED]");
       }
       throw new Error(message);

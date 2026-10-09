@@ -87,7 +87,9 @@ describe("worker-main.ts registrerer 'coding' produksjonshandleren korrekt (D-10
   it("L: D-103 Blokker B - gitAuth er konfigurert med SAMME EnvSecretProvider-arkitektur, ATSKILT fra claudeCodeCredential (HELT egen secret-referanse)", () => {
     const callIdx = source.indexOf('worker.register(\n  "coding"');
     const callBlock = source.slice(callIdx, source.indexOf("\n);", callIdx) + 3);
-    expect(callBlock).toMatch(/gitAuth:\s*\{\s*secretProvider:\s*new EnvSecretProvider\(\)/);
+    // WP-C3: i PAT-modus returnerer `githubAuth.secretProvider(inner)` `inner` (= `EnvSecretProvider`) UENDRET (bevist i wpc3-github-app-wiring.test.ts);
+    // i App-modus leveres installasjonstokenet under samme ref, med EnvSecretProvider som eksplisitt, loggført PAT-fallback-kilde.
+    expect(callBlock).toMatch(/gitAuth:\s*\{\s*secretProvider:\s*githubAuth\.secretProvider\(new EnvSecretProvider\(\)\)/);
   });
 
   it("M: D-103 Blokker B - JARVIS_GITHUB_TOKEN er OGSÅ med i withSecretRedaction sin hemmelighetsliste (forsvar-i-dybden dekker nå BEGGE secrets)", () => {

@@ -65,7 +65,7 @@ import {
   runMemoryRetentionSweepForAllTenants
 } from "@jarvis/memory";
 import {
-  DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport,
+  DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubTransport, createGitHubAuth,
   CHAT_ACT_TIER, CHAT_READ_TIER, GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, assertManifestInvariants, buildToolManifest, describeSurfaceCatalog, memoryToolDefinitions, selectSurfaceTools,
   MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, resolveModelToolSurface, PgGithubRateLimitStore,
   PgTelegramOffsetStore, TelegramCommandPoller, createTurnContext, jobIdentityFor, telegramClassDNotifier, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, buildStatusSource, calendarSource, driveTransportsIfConfigured,
@@ -311,10 +311,15 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // `resolveGitToken` gjenbruker DENNE SAMME kjeden (Infisical PRIMÆR,
   // .env/BusinessInternal fallback, D-211) for å hente `JARVIS_GITHUB_TOKEN`,
   // i stedet for en egen, parallell secret-oppløsningsvei.
-  const readSecretProvider = new FallbackSecretProvider(
+  const baseSecretProvider = new FallbackSecretProvider(
     infisicalSecretProvider,
     new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider())
   );
+  // WP-C3 (Q-45 b / D-35): GitHub App-autentisering - KORTLEVD, REPO-SCOPET installasjonstoken i stedet for en langlevd PAT. Uten
+  // JARVIS_GITHUB_APP_ID/_INSTALLATION_ID i miljøet returnerer `secretProvider()` `baseSecretProvider` UENDRET (PAT som før). Med dem
+  // leverer dekoratøren installasjonstokenet under SAMME ref (`JARVIS_GITHUB_TOKEN`); privatnøkkelen leses fra vaulten ved hver signering.
+  const githubAuth = createGitHubAuth({ secrets: baseSecretProvider, env: process.env });
+  const readSecretProvider = githubAuth.secretProvider(baseSecretProvider);
   // Del 3 (JARVIS-013/043): klasse D-pipelinen er HÅRD i produksjon (nøkkel + full kjede + out-of-band-varsler; varsleren bindes sent under).
   const toolGateway = new ToolGateway(pool, policy, readSecretProvider, ownerControls, infisicalSecretProvider, {
     classDPipeline: { enforce: true },
@@ -527,8 +532,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // SAMME pool/tabell). `onTransition` er en bevisst minimal operativ-
   // synlighet-krok (§24) - IKKE en full EventWriter/tenant-audit-kobling
   // (GitHub-credentialen er global, ikke tenant-scoped, se D-97).
-  const githubRateLimitController = new GithubRateLimitController(
-    new PgGithubRateLimitStore(pool), "JARVIS_GITHUB_TOKEN",
+  const githubRateLimitController = githubAuth.rateLimitController(
+    // WP-C3: nøkkelen er `JARVIS_GITHUB_TOKEN` i PAT-modus (uendret), ellers per installasjon (installasjonstokenet har egen kvote).
+    new PgGithubRateLimitStore(pool),
     (event) => console.warn(`[github-rate-limit] ${event.transition} -> ${event.state}${event.retryAt ? ` retry_at=${event.retryAt.toISOString()} source=${event.source}` : ""}`)
   );
   // Remediering del 2 (JARVIS-065): systemidentitet med unik sesjons-id per oppstart (ingen falsk fast `sess-brief`).
@@ -928,7 +934,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
             allModelCapabilities: ["text", "reasoning", "vision", "tool_calling", "structured_output", "streaming"]
           }
         },
-        slo: { report: sloReports }
+        slo: { report: sloReports },
+        // WP-C3 (Q-45 b): autentiseringsmetode (pat/app, installasjons-id, utløp, repo-scope, rettigheter) i get_connector_status - aldri tokenverdier.
+        connectorAuth: (connectorId) => (connectorId === "github" ? githubAuth.connectorAuthInfo() : undefined)
       }))),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten

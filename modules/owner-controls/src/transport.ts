@@ -115,7 +115,8 @@ export class OwnerControlsTransport implements ToolTransport {
         const value = requireString(parameters, "value");
         const definition = CONNECTOR_REGISTRY.find((c) => c.id === connectorId);
         if (!definition) throw new Error(`unknown_connector:${connectorId}`);
-        if (!definition.credential_refs.includes(credentialRef)) {
+        // WP-C3: også connectorens VALGFRIE refs (GitHub: App-ens privatnøkkel) kan skrives her - fortsatt kun refer som står i registeret.
+        if (!definition.credential_refs.includes(credentialRef) && !(definition.optional_credential_refs ?? []).includes(credentialRef)) {
           throw new Error(`credential_ref_not_registered_for_connector:${connectorId}`);
         }
         // D-345: backlog/backlog_d64_gate connectorer har `credential_refs` KUN
