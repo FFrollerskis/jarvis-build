@@ -1,0 +1,17 @@
+# Valgfri compose-overstyring (WP-C2): monter backup-STATUS-mappen skrivebeskyttet i api-containeren, så selvdiagnosen kan vise alder på siste backup,
+# restore-verifisering, off-site og heartbeat. Mappen inneholder KUN backup-status.json (skrevet av ops/backup/schedule.mjs når
+# JARVIS_BACKUP_STATUS_EXPORT_DIR er satt) - ALDRI selve backup-mappen med de krypterte settene.
+#
+# Bruk (fra repoets rot på NAS-en), i tillegg til den vanlige compose-filen:
+#   docker compose -f infra/local/docker-compose.yml -f infra/backup/docker-compose.backup-status.yml up -d api
+# Krever JARVIS_BACKUP_STATUS_EXPORT_DIR i .env (absolutt sti, f.eks. /volume1/jarvisbuild-data/backups/status). Monterer MAPPEN, ikke filen: filen
+# skrives atomisk (rename), og en fil-montering ville pekt på den gamle, slettede inoden.
+services:
+  api:
+    volumes:
+      - type: bind
+        source: ${JARVIS_BACKUP_STATUS_EXPORT_DIR:?sett JARVIS_BACKUP_STATUS_EXPORT_DIR (absolutt sti) i .env}
+        target: /var/lib/jarvis-backup-status
+        read_only: true
+    environment:
+      JARVIS_BACKUP_STATUS_FILE: "/var/lib/jarvis-backup-status/backup-status.json"

@@ -1,0 +1,14 @@
+# Tikk hvert 15. minutt (WP-C2) - EKSEMPEL. Selve «forfalt?»-avgjørelsen tas av schedule.mjs; timeren bare kaller.
+[Unit]
+Description=Jarvis planlagt backup - tikk hvert 15. minutt
+
+[Timer]
+OnBootSec=5min
+OnCalendar=*:0/15
+# Tar igjen et tikk som ble forsert mens maskinen var av (backupen avgjør uansett selv om noe er forfalt).
+Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=timers.target
