@@ -45,6 +45,22 @@ export interface ClassDPipelineOptions {
   notifier?: ClassDNotifier;
 }
 
+/**
+ * WP-F1 (D-453): kanaler der eieren selv sitter foran en innrullert enhet. ALDRI tale, Telegram, meldingsplattformer, klokke eller system.
+ * Felles kilde for API-rutenes step-up (`apps/api/src/step-up.ts` delegerer hit) og for gatewayens egen håndhevelse (`ToolDefinition.step_up_required`).
+ */
+export const OWNER_STEP_UP_CHANNELS: ReadonlySet<string> = new Set(["web", "desktop", "api", "mobile"]);
+
+/**
+ * Step-up for eierens kontroll- og pengehandlinger: kun en enhetssignert økt (`auth_strength === "signed"`) fra en eier-kanal. `undefined` = oppfylt, ellers årsakskode.
+ * Ren og deterministisk - ingen modell, prompt eller konfigurasjon kan lempe på den.
+ */
+export function ownerStepUpDenial(identity: Pick<IdentityContext, "auth_strength" | "channel">): string | undefined {
+  if (identity.auth_strength !== "signed") return "step_up_required:signed_device_session";
+  if (!OWNER_STEP_UP_CHANNELS.has(identity.channel)) return `step_up_required:channel_${identity.channel}_not_allowed`;
+  return undefined;
+}
+
 /** Sikkerhetsbrytere: aldri blokkert av pipeline-kravene (de MÅ virke også når alt annet er nede). */
 export const CLASS_D_EXEMPT_ACTIONS: ReadonlySet<string> = new Set([
   "owner_controls:activate_kill_switch",

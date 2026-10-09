@@ -10,9 +10,11 @@ import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import {
   OUTCOME_UNKNOWN_PREFIX,
+  OWNER_STEP_UP_CHANNELS,
   ToolGateway,
   assessClassDPipeline,
   isOutcomeUnknownMessage,
+  ownerStepUpDenial,
   type ClassDNotification,
   type ClassDNotifier,
   type ToolDefinition,
@@ -385,5 +387,75 @@ describe("D: notification_summary", () => {
     expect(r2.ok).toBe(true);
     expect(n2.sent).toHaveLength(1);
     expect(n2.sent[0]?.summary).toBeUndefined();
+  });
+});
+
+describe("E: step_up_required - pengehandlinger krever eierens step-up i gatewayen selv", () => {
+  const signed = (channel: IdentityContext["channel"]): IdentityContext => ({ ...identity, channel, auth_strength: "signed" });
+
+  it("ownerStepUpDenial: kun signert enhetsøkt fra web/desktop/api/mobile (samme regel som API-rutene)", () => {
+    expect([...OWNER_STEP_UP_CHANNELS].sort()).toEqual(["api", "desktop", "mobile", "web"]);
+    for (const channel of ["web", "desktop", "api", "mobile"] as const) expect(ownerStepUpDenial({ auth_strength: "signed", channel })).toBeUndefined();
+    for (const strength of ["active", "passive"] as const) {
+      for (const channel of ["web", "desktop", "api", "mobile", "voice", "telegram"] as const) {
+        expect(ownerStepUpDenial({ auth_strength: strength, channel }), `${strength}/${channel}`).toBe("step_up_required:signed_device_session");
+      }
+    }
+    for (const channel of ["voice", "telegram", "slack", "discord", "twilio", "system", "watch"] as const) {
+      expect(ownerStepUpDenial({ auth_strength: "signed", channel }), channel).toBe(`step_up_required:channel_${channel}_not_allowed`);
+    }
+  });
+
+  it("uten signert enhetsøkt avvises kallet FØR noe leses eller reserveres (ingen tilstandslesing, ingen ledger-rad, ingen varsel)", async () => {
+    const t = new ScriptTransport();
+    const n = new FakeNotifier();
+    const g = gw(n);
+    g.register(def({ step_up_required: true }, t));
+    const key = nextKey("e1");
+    const r = await exec(g, key, {}, identity); // active + api
+    expect(r).toEqual({ ok: false, reason: "step_up_required:signed_device_session" });
+    expect(t.calls).toEqual([]);
+    expect(n.sent).toEqual([]);
+    expect((await adminPool.query("SELECT 1 FROM tool_executions WHERE idempotency_key = $1", [key])).rowCount).toBe(0);
+    const audit = (await adminPool.query("SELECT reason FROM audit_events WHERE type = 'tool.denied' AND tool_id = 'wpf1-gen' ORDER BY audit_id DESC LIMIT 1")).rows[0] as { reason: string };
+    expect(audit.reason).toBe("step_up_required:signed_device_session");
+  });
+
+  it("signert, men fra tale/Telegram/system/klokke/meldingsplattform: avvist; fra web/desktop/api/mobile: gjennomført", async () => {
+    const t = new ScriptTransport();
+    const g = gw(new FakeNotifier());
+    g.register(def({ step_up_required: true }, t));
+    for (const channel of ["voice", "telegram", "system", "watch", "slack", "discord", "twilio"] as const) {
+      const r = await exec(g, nextKey("e2"), {}, signed(channel));
+      expect(r, channel).toEqual({ ok: false, reason: `step_up_required:channel_${channel}_not_allowed` });
+    }
+    expect(t.mutations).toBe(0);
+    for (const channel of ["web", "desktop", "api", "mobile"] as const) {
+      const r = await exec(g, nextKey("e2b"), {}, signed(channel));
+      expect(r.ok, channel).toBe(true);
+    }
+    expect(t.mutations).toBe(4);
+  });
+
+  it("flagget har INGEN effekt uten påslått klasse D-pipeline (host-akseptansescript/testhjelpere uendret) og er av som standard", async () => {
+    const t = new ScriptTransport();
+    const lax = new ToolGateway(appPool, policy, secrets); // ingen classDPipeline
+    lax.register(def({ step_up_required: true }, t));
+    expect((await exec(lax, nextKey("e3"))).ok).toBe(true);
+
+    const t2 = new ScriptTransport();
+    const g = gw(new FakeNotifier());
+    g.register(def({ tool_id: "wpf1-gen-noflag" }, t2));
+    expect((await g.execute({ identity, tool_id: "wpf1-gen-noflag", action: "mutate", parameters: {}, idempotency_key: nextKey("e3b") })).ok).toBe(true);
+  });
+
+  it("rekkefølge: policy-avslag kommer FØR step-up (en ikke-eier får policy-årsaken, ikke en hint om step-up)", async () => {
+    const t = new ScriptTransport();
+    const g = gw(new FakeNotifier());
+    g.register(def({ step_up_required: true }, t));
+    const guest: IdentityContext = { ...identity, person_id: "person-guest", channel: "telegram", auth_strength: "passive" };
+    const r = await exec(g, nextKey("e4"), {}, guest);
+    expect(r).toEqual({ ok: false, reason: "class_d_missing_approval" });
+    expect(t.calls).toEqual([]);
   });
 });

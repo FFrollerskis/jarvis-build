@@ -4,6 +4,13 @@ import type { MemoryWriter } from "@jarvis/memory";
 import { authorizeDockerTarget, type DockerMutationAction } from "./docker-target-policy.ts";
 import { authorizeGceTarget, type GceMutationAction } from "./gce-target-policy.ts";
 import type { ToolDefinition, ToolTransport } from "./gateway.ts";
+import {
+  financeCredentialRefForProvider,
+  SUBMIT_PAYMENT_INTENT_RECOVERY, SUBMIT_STRIPE_REFUND_RECOVERY, SUBMIT_VIPPS_CAPTURE_RECOVERY, SUBMIT_VIPPS_REFUND_RECOVERY,
+  submitPaymentIntentPostcondition, submitStripeRefundPostcondition, submitVippsCapturePostcondition, submitVippsRefundPostcondition,
+  summarizeSubmitChild, summarizeSubmitPaymentIntent,
+  validateSubmitPaymentIntent, validateSubmitStripeRefund, validateSubmitVippsCapture, validateSubmitVippsRefund
+} from "./finance-class-d.ts";
 
 /**
  * Første bølge-adaptere (INTEGRATIONS.md §3). Reelle HTTP-transporter krever
@@ -1906,12 +1913,40 @@ export function firstWaveTools(
       output_trust: "internal", transport: transport("finance")
     },
     {
+      // WP-F1 (D-453, Q-47 a): KLASSE D-KJEDEN er komplett - fersk tilstandslesing (`check_submit_payment_intent`) med målvalidering (intent-tilstand,
+      // beløpsformat, valuta, konto/motkonto, leverandør-binding, nødbryter, mulig duplikat), recovery-plan, idempotency_key (påkrevd av gatewayen),
+      // etterbetingelse (leverandør-ID + tilstandsovergang via readback, leverandørens ekko av beløp/valuta) og umiddelbart out-of-band-varsel.
+      // Handlingen står IKKE på noen modellflate (eier-eksklusivt navnerom) og nås kun via eierens step-up + bundne bekreftelse (`/finance/actions/request`).
+      // JARVIS-072: credential bestemmes av intensjonens provider (Fiken/Stripe/Vipps/Neonomics) - den STATISKE refen under er kun eier-binding-markør
+      // (ikke-intern ref => kun den autentiserte eieren) og standard for visning; selve kravet løses per kall av `credential_ref_resolver`.
       tool_id: "finance", action: "submit_payment_intent",
-      description: "Send en betalingsintensjon til Fiken (postering av en ekte regnskapspost) - fail-closed mot kill switch/manglende vendor-/motkonto FØR noe providerkall, idempotent no-op ved gjentatt kall på en allerede innsendt intensjon",
-      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), payment_intent_id: z.string(), actor_person_id: z.string().optional() }),
+      description: "Send en betalingsintensjon til intensjonens leverandør (Fiken-postering, Stripe PaymentIntent, Vipps-betaling, Neonomics bankbetaling) - fail-closed mot kill switch/feil tilstand/beløp/valuta/konto/leverandør/duplikat FØR noe providerkall, aldri en ny leverandørhandling ved retry",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), payment_intent_id: z.string(), actor_person_id: z.string().optional(),
+        // Eierens eksplisitte kvittering på at en mulig duplikat (samme leverandør/beløp/valuta/provider siste døgn) er kontrollert - id-ene fra avslaget `possible_duplicate_of:<id>`.
+        confirm_possible_duplicate_of: z.array(z.string().min(1).max(100)).max(10).optional()
+      }),
       capability_class: "D", scopes: ["finance.execute"], reversible: false,
-      rollback_procedure: "ingen automatisk reversering bygget denne sliceen - krever en manuell korrigerende journalpost direkte i Fiken",
+      rollback_procedure: SUBMIT_PAYMENT_INTENT_RECOVERY,
       idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_FIKEN_REFRESH_TOKEN",
+      output_trust: "internal", transport: transport("finance"),
+      preflight_action: "check_submit_payment_intent", preflight_requires_target: true,
+      preflight_validator: validateSubmitPaymentIntent,
+      postcondition_predicate: submitPaymentIntentPostcondition,
+      step_up_required: true,
+      notification_summary: (state) => summarizeSubmitPaymentIntent(state),
+      credential_ref_resolver: async (parameters, context) => {
+        const found = await transport("finance").invoke("get_payment_intent", parameters, "", context);
+        return financeCredentialRefForProvider((found.data as { provider?: unknown } | null)?.provider);
+      }
+    },
+    {
+      // WP-F1: den ferske, READ-ONLY tilstandslesingen som både målvalideringen (før) og etterbetingelsen (readback, etter) bygger på - også tilgjengelig som
+      // tørrkjøring for eieren («kan denne betalingen sendes nå, og hvorfor ikke?»). Redigert: leverandørreferanser er maskert, aldri kontonummer/KID.
+      tool_id: "finance", action: "check_submit_payment_intent", description: "Les fersk tilstand og målvalidering for en betalingsintensjon FØR innsending (ingen mutasjon)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), payment_intent_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("finance")
     },
     {
@@ -2186,8 +2221,22 @@ export function firstWaveTools(
       tool_id: "finance_stripe", action: "submit_refund", description: "Utfør refusjon mot Stripe for et eksisterende refusjonsutkast (klasse D - reell utgående økonomisk handling, kill-switch-gated, deterministisk provider-idempotens)",
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), refund_id: z.string(), actor_person_id: z.string().optional() }),
       capability_class: "D", scopes: ["finance.write", "finance.stripe"], reversible: false,
-      rollback_procedure: "ikke reverserbar hos Stripe - ny motsatt-rettet finansoperasjon kreves ved feil, ALDRI en stille reversering",
+      // WP-F1 (D-453): klasse D-kjeden er komplett - fersk lesing (`check_submit_refund`) med målvalidering (oppgjort Stripe-betaling, beløp innenfor det opprinnelige,
+      // valuta, tilstand, nødbryter), recovery, idempotency_key, etterbetingelse via readback og umiddelbart varsel. Kun via eierens step-up + bundne bekreftelse.
+      rollback_procedure: SUBMIT_STRIPE_REFUND_RECOVERY,
       idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_STRIPE_SECRET_KEY",
+      output_trust: "internal", transport: transport("finance_stripe"),
+      preflight_action: "check_submit_refund", preflight_requires_target: true,
+      preflight_validator: validateSubmitStripeRefund,
+      postcondition_predicate: submitStripeRefundPostcondition,
+      step_up_required: true,
+      notification_summary: (state) => summarizeSubmitChild(state)
+    },
+    {
+      tool_id: "finance_stripe", action: "check_submit_refund", description: "Les fersk tilstand og målvalidering for en Stripe-refusjon FØR innsending (ingen mutasjon)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), refund_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("finance_stripe")
     },
     {
@@ -2255,8 +2304,22 @@ export function firstWaveTools(
       tool_id: "finance_vipps", action: "submit_capture", description: "Utfør capture mot Vipps for et eksisterende capture-utkast (klasse D - reell økonomisk handling som faktisk flytter reserverte kundepenger, kill-switch-gated, deterministisk provider-idempotens)",
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), capture_id: z.string(), actor_person_id: z.string().optional() }),
       capability_class: "D", scopes: ["finance.write", "finance.vipps"], reversible: false,
-      rollback_procedure: "ikke reverserbar hos Vipps - en fanget betaling korrigeres kun via en NY, separat refusjon (request_refund/submit_refund), ALDRI en stille reversering",
+      // WP-F1 (D-453): klasse D-kjeden er komplett - fersk lesing (`check_submit_capture`) med målvalidering (AUTORISERT betaling, beløp innenfor reservasjonen, valuta,
+      // tilstand, nødbryter), recovery, idempotency_key, etterbetingelse via readback (capture oppgjort) og umiddelbart varsel. Kun via eierens step-up + bundne bekreftelse.
+      rollback_procedure: SUBMIT_VIPPS_CAPTURE_RECOVERY,
       idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_VIPPS_CLIENT_SECRET",
+      output_trust: "internal", transport: transport("finance_vipps"),
+      preflight_action: "check_submit_capture", preflight_requires_target: true,
+      preflight_validator: validateSubmitVippsCapture,
+      postcondition_predicate: submitVippsCapturePostcondition,
+      step_up_required: true,
+      notification_summary: (state) => summarizeSubmitChild(state)
+    },
+    {
+      tool_id: "finance_vipps", action: "check_submit_capture", description: "Les fersk tilstand og målvalidering for en Vipps-capture FØR innsending (ingen mutasjon)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), capture_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("finance_vipps")
     },
     {
@@ -2296,8 +2359,22 @@ export function firstWaveTools(
       tool_id: "finance_vipps", action: "submit_refund", description: "Utfør refusjon mot Vipps for et eksisterende refusjonsutkast (klasse D - reell utgående økonomisk handling, kill-switch-gated, deterministisk provider-idempotens)",
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), refund_id: z.string(), actor_person_id: z.string().optional() }),
       capability_class: "D", scopes: ["finance.write", "finance.vipps"], reversible: false,
-      rollback_procedure: "ikke reverserbar hos Vipps - ny motsatt-rettet finansoperasjon kreves ved feil, ALDRI en stille reversering",
+      // WP-F1 (D-453): klasse D-kjeden er komplett - fersk lesing (`check_submit_refund`) med målvalidering (oppgjort Vipps-betaling, beløp innenfor det opprinnelige,
+      // valuta, tilstand, nødbryter), recovery, idempotency_key, etterbetingelse via readback og umiddelbart varsel. Kun via eierens step-up + bundne bekreftelse.
+      rollback_procedure: SUBMIT_VIPPS_REFUND_RECOVERY,
       idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_VIPPS_CLIENT_SECRET",
+      output_trust: "internal", transport: transport("finance_vipps"),
+      preflight_action: "check_submit_refund", preflight_requires_target: true,
+      preflight_validator: validateSubmitVippsRefund,
+      postcondition_predicate: submitVippsRefundPostcondition,
+      step_up_required: true,
+      notification_summary: (state) => summarizeSubmitChild(state)
+    },
+    {
+      tool_id: "finance_vipps", action: "check_submit_refund", description: "Les fersk tilstand og målvalidering for en Vipps-refusjon FØR innsending (ingen mutasjon)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), refund_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("finance_vipps")
     },
     {

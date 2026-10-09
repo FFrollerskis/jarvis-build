@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { CapabilityClass, IdentityContext, JobContract, JsonValue, TrustLevel } from "@jarvis/contracts";
 import { withTenantTransaction, writeAudit } from "@jarvis/core";
 import { UnsafeVendorUrlError, guardedFetch } from "./url-safety.ts";
-import { assessClassDPipeline, isClassDExempt, isNotFoundError, type ClassDNotifier, type ClassDPipelineOptions } from "./class-d-pipeline.ts";
+import { assessClassDPipeline, isClassDExempt, isNotFoundError, ownerStepUpDenial, type ClassDNotifier, type ClassDPipelineOptions } from "./class-d-pipeline.ts";
 import { isSelfRecoveryAction, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
 
 /** Secrets bak adapter (D-16): env/SOPS nå; Infisical/OpenBao (Q-05, krever Docker) senere. */
@@ -336,6 +336,13 @@ export interface ToolDefinition {
    * at noe ble gjort. Kastet feil = intet sammendrag (varselet sendes uansett).
    */
   notification_summary?: (state: JsonValue | null, parameters: Record<string, JsonValue>) => string | null;
+  /**
+   * WP-F1 (D-453): handlingen flytter penger og kan KUN utføres med eierens step-up - en enhetssignert økt (`auth_strength: "signed"`) fra en eier-kanal
+   * (web/desktop/api/mobile; se `ownerStepUpDenial`). Håndheves av gatewayen SELV når klasse D-pipelinen er påslått (produksjon: api og worker), rett etter
+   * policy-/parameter-portene og FØR noe annet leses - slik at ingen ny rute, jobb eller modellvei kan flytte penger uten step-up, uavhengig av om kalleren
+   * husket å sjekke. Avslag: `step_up_required:<årsak>`. Uten påslått pipeline (testhjelpere, host-akseptansescript) er flagget uten effekt.
+   */
+  step_up_required?: boolean;
 }
 
 /**
@@ -566,6 +573,13 @@ export class ToolGateway {
         return this.deny(request, paramDecision.reason);
       }
     }
+    // Del 3 (JARVIS-013/043): klasse D-pipelinen er en HARD port i produksjon (påslått i api og worker).
+    const classDGoverned = this.classDPipeline?.enforce === true && definition.capability_class === "D" && !isClassDExempt(definition);
+    // WP-F1: pengehandlinger krever eierens step-up (signert enhet + eier-kanal) - håndhevet her, ikke bare i rutene.
+    if (classDGoverned && definition.step_up_required === true) {
+      const stepUp = ownerStepUpDenial(request.identity);
+      if (stepUp !== undefined) return this.deny(request, stepUp);
+    }
     if (!this.withinRateLimit(definition, request.identity.tenant_id)) {
       return this.deny(request, "rate_limited");
     }
@@ -659,7 +673,6 @@ export class ToolGateway {
     }
 
     // Del 3 (JARVIS-013/043): klasse D-pipelinen er en HARD port - uten hele kjeden er handlingen utilgjengelig (fail-closed).
-    const classDGoverned = this.classDPipeline?.enforce === true && definition.capability_class === "D" && !isClassDExempt(definition);
     if (classDGoverned) {
       const assessment = assessClassDPipeline(definition);
       if (!assessment.complete) {

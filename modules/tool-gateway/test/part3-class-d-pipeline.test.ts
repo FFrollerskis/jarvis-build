@@ -28,12 +28,12 @@ import {
  * manglende nøkkel/varsler/kjede → avslag FØR noen mutasjon, varslingsfeil gjøres synlig, uverifisert utfall kan avstemmes.
  */
 
-/** Eksplisitt DEFERRED-liste: klasse D-handlinger som IKKE har hele kjeden og derfor er utilgjengelige under håndhevelse. */
+/**
+ * Eksplisitt DEFERRED-liste: klasse D-handlinger som IKKE har hele kjeden og derfor er utilgjengelige under håndhevelse.
+ * WP-F1 (D-453): de fire pengehandlingene (`finance.submit_payment_intent`, `finance_stripe.submit_refund`, `finance_vipps.submit_capture`/`submit_refund`)
+ * er BEVISST tatt ut - de har nå hele kjeden (fersk lesing + målvalidering + etterbetingelse + varsel + idempotens), jf. `wpf1-d-chain.test.ts`.
+ */
 const EXPECTED_DEFERRED: ReadonlyArray<string> = [
-  "finance.submit_payment_intent",
-  "finance_stripe.submit_refund",
-  "finance_vipps.submit_capture",
-  "finance_vipps.submit_refund",
   "mcp_zapier.call_tool",
   "microsoft_outlook.send_mail"
 ];
