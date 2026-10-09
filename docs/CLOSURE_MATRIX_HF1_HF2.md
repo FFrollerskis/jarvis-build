@@ -92,7 +92,7 @@ HF2-PDF-en ligger ikke i repoet; radene bygger på beslutningsloggen D-406…D-4
 | V1 Daily Executive Brief | `WIRED` (Daily Brief, `DailyScheduler`) | Bruksmetrikk; observere daglig bruk |
 | V2 Unified Follow-up | `BUILT_UNWIRED` (conversation-graph, pull) | Push-levering → WP-C |
 | V3 Builder Loop | `NOT_BUILT` (selvmodifikasjon frosset, D-397) | Sovende løkke bak D-32 og EV-0 → WP-B/C |
-| V4 Business Operating Loop | delvis | Business-tenant (Q-48) → WP-E |
+| V4 Business Operating Loop | `PARTIAL` | Business-tenant (Q-48) → WP-D2 |
 | V5 Autonomous Operations | `NOT_BUILT` | Bak bekreftelse/step-up → WP-C/F |
 
 ## 6. Definition of Done, kap. 28 (15 punkter)
