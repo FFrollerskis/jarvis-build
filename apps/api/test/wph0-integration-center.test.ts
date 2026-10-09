@@ -33,6 +33,9 @@ const refsOf = (id: string): string[] => CONNECTOR_REGISTRY.find((c) => c.id ===
 interface Scenario {
   secrets?: string[];
   secretsThrow?: string[];
+  /** Refer kilden ikke kunne spørre om (presence = null), eller `"all"` (hele credential-kilden er nede, som Infisical uten kontakt). */
+  secretsUnknown?: string[] | "all";
+  secretsHealth?: "healthy" | "unavailable" | "unconfigured";
   health?: Record<string, { state: string; hoursAgo: number }>;
   frozen?: string[];
   revoked?: string[];
@@ -76,7 +79,13 @@ function build(scn: Scenario = {}): { gateway: ReturnType<typeof makeGateway>; p
 
 function makeGateway(have: Set<string>, scn: Scenario) {
   return {
-    hasSecret: async (ref: string) => { if (scn.secretsThrow?.includes(ref)) throw new Error(`infisical unreachable ${ref}`); return have.has(ref); },
+    // TRI-STATE presence (gjennomgang av PR #316, M-1): true = finnes, false = kilden svarte og har den ikke, null = kunne ikke spørres. `hasSecret` (to-state) brukes ikke lenger av senteret.
+    secretPresence: async (ref: string) => {
+      if (scn.secretsThrow?.includes(ref)) throw new Error(`infisical unreachable ${ref}`);
+      if (scn.secretsUnknown === "all" || (Array.isArray(scn.secretsUnknown) && scn.secretsUnknown.includes(ref))) return null;
+      return have.has(ref);
+    },
+    secretsHealth: () => scn.secretsHealth ?? "healthy",
     health: new Map(Object.entries(scn.health ?? {}).map(([tool, v]) => [tool, { state: v.state, at: ago(v.hoursAgo * H) }])),
     list: () => defs,
     get: (tool: string, action: string) => defs.find((d) => d.tool_id === tool && d.action === action)
@@ -379,6 +388,70 @@ describe("rapporten: seksjoner og status per connector", () => {
     expect(item(r, "live", "gmail")).toBeDefined();
   });
 
+  it("M-1: HELE credential-kilden er nede (presence null + helse utilgjengelig): ingen bygd tilkobling er OK, seksjonene er UKJENT og senteret sier hvorfor", async () => {
+    const r = await build({ secretsUnknown: "all", secretsHealth: "unavailable", health: { github: { state: "healthy", hoursAgo: 1 } } }).run();
+    const builtIds = CONNECTOR_REGISTRY.filter((c) => !c.category.startsWith("backlog")).map((c) => c.id).sort();
+    const built = ["live", "configured_other", "not_configured"].flatMap((s) => section(r, s).items);
+    expect(built.map((i) => i.id).sort()).toEqual(builtIds);
+    for (const i of built) {
+      expect(i.status, i.id).toBe("UNKNOWN");
+      expect(i.facts, i.id).toMatchObject({ configured: null, configuration: "unknown", auth_health: "ikke målt" });
+      expect(i.detail_no, i.id).toContain("kunne ikke leses");
+    }
+    for (const id of ["live", "configured_other", "not_configured"]) expect(section(r, id).status, id).toBe("UNKNOWN");
+    expect(section(r, "live").summary_no).toContain("kilden er utilgjengelig");
+    expect(section(r, "not_configured").summary_no).toContain("IKKE målt som ukonfigurerte");
+    expect(section(r, "not_configured").summary_no).not.toMatch(/^0 /);
+    expect(r.status).toBe("UNKNOWN");
+    // også en tilkobling med frisk helse i minnet (github) blir ikke OK når vi ikke vet om den er konfigurert
+    expect(item(r, "not_configured", "github").status).toBe("UNKNOWN");
+    // backlog er statisk registerinnhold (ingen tilkobling å måle) og forblir som før
+    expect(section(r, "backlog").items.every((i) => i.status === "OK")).toBe(true);
+  });
+
+  it("M-1: en presence-kilde som kaster eller svarer noe annet enn ja/nei gir ukjent - verdien passerer aldri, og ingenting blir OK", async () => {
+    const all = [...new Set(CONNECTOR_REGISTRY.flatMap((c) => c.credential_refs))];
+    const throwing = await build({ secretsThrow: all }).run();
+    for (const s of ["live", "configured_other", "not_configured"]) expect(section(throwing, s).items.every((i) => i.status === "UNKNOWN"), s).toBe(true);
+    // en feilkoblet kilde som returnerer en STRENG (en secret-verdi) behandles som ukjent og vises aldri
+    const SECRET_VALUE = "ghp_SUPERSECRETVALUE1234567890";
+    const have = new Set(BASE_SECRETS);
+    const gateway = { ...makeGateway(have, {}), secretPresence: async () => SECRET_VALUE as never };
+    const center = createIntegrationCenter({
+      pool: new ScriptedPool([]).asPool(), toolGateway: gateway as never,
+      ownerControls: { listFrozenConnectorsDurable: async () => [], listRevokedCredentialsDurable: async () => [] }
+    });
+    const registry = new ControlCenterRegistry({ isOwner: () => true, now: () => NOW });
+    registry.register(center);
+    const r = (await registry.report("integration", identity)) as ControlCenterReport;
+    expect(JSON.stringify(r)).not.toContain(SECRET_VALUE);
+    for (const s of ["live", "configured_other", "not_configured"]) expect(section(r, s).items.every((i) => i.status === "UNKNOWN"), s).toBe(true);
+  });
+
+  it("M-1: kun noen refer er ukjente - bare de tilkoblingene blir UKJENTE; en målt mangel er fortsatt OK og en målt tilstedeværelse fortsatt konfigurert", async () => {
+    const r = await build({ secretsUnknown: refsOf("telegram"), health: { github: { state: "healthy", hoursAgo: 1 } } }).run();
+    expect(item(r, "not_configured", "telegram")).toMatchObject({ status: "UNKNOWN", facts: { configured: null } });
+    expect(item(r, "live", "github").status).toBe("OK");
+    expect(item(r, "not_configured", "slack").status).toBe("OK"); // målt mangel (false) er ikke det samme som ukjent (null)
+    expect(item(r, "not_configured", "slack").facts).toMatchObject({ configured: false });
+    // kilden svarte ikke for noen refer: seksjonene som kun viser konfigurerte tilkoblinger er ufullstendige, ikke «tomme og i orden»
+    expect(section(r, "live").status).toBe("UNKNOWN");
+    expect(section(r, "live").summary_no).toContain("kunne ikke måles");
+  });
+
+  it("M-1: eier-kontrolltilstanden som ikke kan leses gjør HVER bygd tilkobling ukjent (også en ukonfigurert: frys og tilbakekall er egne tilstander), og faktaene sier null - ikke «ikke pauset»", async () => {
+    const r = await build({ failSources: { controls: new Error("down") } }).run();
+    const built = ["live", "configured_other", "not_configured"].flatMap((s) => section(r, s).items);
+    for (const i of built) {
+      // vipps er DELVIS konfigurert i grunnscenarioet (WARN er verre enn UKJENT og står igjen); alle andre er ukjente
+      expect(i.status, i.id).toBe(i.id === "vipps" ? "WARN" : "UNKNOWN");
+      expect(i.facts, i.id).toMatchObject({ paused: null, credential_revoked: null });
+    }
+    expect(item(r, "not_configured", "slack").detail_no).toContain("pause-/tilbakekall-status kunne ikke leses");
+    expect(section(r, "not_configured").status).toBe("WARN"); // verste av vipps (delvis konfigurert: WARN) og de ukjente
+    expect(section(r, "live").status).toBe("UNKNOWN");
+  });
+
   it("en kilde som feiler gjør berørte tall ukjente med feilKATEGORI (aldri meldingen), mens resten av senteret fortsatt leses", async () => {
     const r = await build({
       health: { github: { state: "healthy", hoursAgo: 1 } },
@@ -529,9 +602,6 @@ describe("kun lesing, identitetsbundet, og aldri hemmeligheter", () => {
 
   it("rapporten inneholder aldri verdier av hemmeligheter - bare credential-NAVN", async () => {
     const VALUE = "ghp_SUPERSECRETVALUE1234567890";
-    const gateway = makeGateway(new Set(BASE_SECRETS), {}) as Record<string, unknown>;
-    // et gateway som (ved en feil) ville lekket verdien via get/hasSecret-svar: verifiser at kun boolske svar brukes
-    (gateway as { hasSecret: (ref: string) => Promise<unknown> }).hasSecret = async (ref: string) => (BASE_SECRETS.includes(ref) ? true : false);
     const { run } = build({ health: { github: { state: "healthy", hoursAgo: 1 } } });
     const json = JSON.stringify(await run());
     expect(json).not.toContain(VALUE);

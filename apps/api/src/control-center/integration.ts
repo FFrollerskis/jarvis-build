@@ -9,12 +9,13 @@ import type { OwnerControls } from "@jarvis/policy";
 import { CONNECTOR_REGISTRY, type ConnectorDefinition, type ToolDefinition, type ToolGateway } from "@jarvis/tool-gateway";
 import { modelFreezeTarget } from "../provider-pause.ts";
 import { actionRequiresStepUp } from "../step-up.ts";
-import { HOUR_MS, ageMs, bySeverityThenLabel, countsNo, globalRows, joinFact, relativeNo, riskOf, settle, tenantRead, toIso, type ControlCenterPool, type Settled } from "./shared.ts";
+import { PresenceReader } from "./presence.ts";
+import { HOUR_MS, ageMs, bySeverityThenLabel, countsNo, globalRows, joinFact, relativeNo, riskOf, settle, tenantRead, toIso, type ControlCenterPool } from "./shared.ts";
 
 /**
  * WP-H0 (UA-11 Admin Control Center) - INTEGRATION CENTER.
  *
- * Per connector i `CONNECTOR_REGISTRY` (57 oppføringer): er den konfigurert (credential-PRESENCE, aldri verdier), auth-helse, scopes (der kjent), siste vellykkede kall og synk-forsinkelse, API-versjon/utfasing (kun der koden vet
+ * Per connector i `CONNECTOR_REGISTRY` (57 oppføringer): er den konfigurert (credential-PRESENCE som TRI-STATE: finnes / målt fraværende / kunne ikke måles - aldri verdier), auth-helse, scopes (der kjent), siste vellykkede kall og synk-forsinkelse, API-versjon/utfasing (kun der koden vet
  * det - ellers ukjent), vedlikeholdstid og -eier (connector maintenance ledger, D-421), siste feil (KATEGORI - aldri innhold) og om eieren har pauset (frosset) eller tilbakekalt den. Alt er LESING av eksisterende kilder:
  *  - `ToolGateway.health` (BO-03, i minnet) og `audit_events` (`tool.executed`/`tool.failed`, tenant-RLS) - siste måling vinner; en gammel «i orden» er ikke «i orden nå»;
  *  - `scheduler_state` (daglige jobber: helsesveip og synk) og `connector_maintenance_log` (migrasjon 077);
@@ -372,7 +373,11 @@ export async function readMaintenance(pool: ControlCenterPool, tenantId: string,
 
 export interface IntegrationCenterDeps {
   pool: ControlCenterPool;
-  toolGateway: Pick<ToolGateway, "hasSecret" | "health" | "list" | "get">;
+  /**
+   * `secretPresence` er TRI-STATE (gjennomgang av PR #316, M-1): `true` finnes, `false` kilden svarte og har den ikke, `null` kilden kunne ikke spørres. `hasSecret` (to-state) brukes ikke her: den kunne ikke skille
+   * «Infisical nede» fra «ikke konfigurert». `secretsHealth` er valgfri (kun for visning/utfallsvern).
+   */
+  toolGateway: Pick<ToolGateway, "secretPresence" | "health" | "list" | "get"> & Partial<Pick<ToolGateway, "secretsHealth">>;
   ownerControls: Pick<OwnerControls, "listFrozenConnectorsDurable" | "listRevokedCredentialsDurable">;
   /** Mesh-status for modellleverandørene (anthropic/openai/gemini har ingen ToolGateway-live-test). Utelatt = deres helse er ukjent. */
   meshStatus?: () => Pick<MeshStatus, "providers">;
@@ -384,6 +389,11 @@ const SOURCE_LIVE = "ToolGateway.health (minne) · audit_events (tool.executed/t
 
 export function createIntegrationCenter(deps: IntegrationCenterDeps): ControlCenterDefinition {
   const registry = deps.registry ?? CONNECTOR_REGISTRY;
+  // L-3: ÉN leser per senter (cache 30 s, single-flight per ref, maks 8 samtidige, utfallsvern) - ikke ~87 uavhengige oppslag per bygging.
+  const presenceReader = new PresenceReader({
+    secretPresence: (ref) => deps.toolGateway.secretPresence(ref),
+    ...(deps.toolGateway.secretsHealth ? { secretsHealth: () => deps.toolGateway.secretsHealth!() } : {})
+  });
   return {
     id: "integration",
     title_no: "Integrasjoner",
@@ -394,11 +404,11 @@ export function createIntegrationCenter(deps: IntegrationCenterDeps): ControlCen
       const tenantId = ctx.identity.tenant_id;
       const defs = deps.toolGateway.list();
 
-      // 1. Presence for unike credential-refs til BYGDE connectorer (backlog har ingen mottaker for en verdi). Hver ref leses fail-soft: en feil gjør kun den refen «ukjent».
+      // 1. Presence for unike credential-refs til BYGDE connectorer (backlog har ingen mottaker for en verdi). TRI-STATE og fail-soft: en ref kilden ikke kunne svare på er «ukjent» (null), aldri «mangler».
       const builtRefs = [...new Set(registry.filter((c) => c.category !== "backlog" && c.category !== "backlog_d64_gate").flatMap((c) => c.credential_refs))];
       const jobNames = [...new Set([CONNECTOR_HEALTH_SWEEP_JOB, ...Object.values(CONNECTOR_SYNC_JOBS).flat()])];
       const [presenceR, controlsR, auditR, providerR, jobsR, maintR] = await Promise.all([
-        Promise.all(builtRefs.map(async (ref) => [ref, (await settle(() => deps.toolGateway.hasSecret(ref))) as Settled<boolean>] as const)),
+        settle(() => presenceReader.readAll(builtRefs, nowMs)),
         settle(async () => ({ frozen: await deps.ownerControls.listFrozenConnectorsDurable(), revoked: await deps.ownerControls.listRevokedCredentialsDurable() })),
         settle(() => readToolAudit(deps.pool, tenantId, nowMs)),
         settle(() => readProviderCalls(deps.pool, tenantId, nowMs)),
@@ -407,7 +417,8 @@ export function createIntegrationCenter(deps: IntegrationCenterDeps): ControlCen
       ]);
 
       const presence = new Map<string, boolean | null>();
-      for (const [ref, r] of presenceR) presence.set(ref, r.ok ? r.value : null);
+      for (const ref of builtRefs) presence.set(ref, presenceR.ok ? (presenceR.value.get(ref) ?? null) : null);
+      const unknownRefs = [...presence.values()].filter((v) => v === null).length;
       const views = connectorViews(registry, defs, presence);
 
       const frozen = new Map<string, string>(); // tool_id -> changed_at
@@ -519,7 +530,11 @@ export function createIntegrationCenter(deps: IntegrationCenterDeps): ControlCen
         // --- eierbrytere
         const paused = frozenAt !== undefined;
         if (paused || revokedRefs.length > 0) status = worstStatus([status, "WARN"]);
-        if (v.configured === "partial") status = "WARN";
+        // Gjennomgang av PR #316 (M-1): kan frys/tilbakekall ikke leses, VET vi ikke om en tilkobling er stanset (heller ikke en ukonfigurert: pause og tilbakekall er egne tilstander) - da er raden ukjent (aldri «i orden»),
+        // og faktaene sier null i stedet for «ikke pauset».
+        const controlsUnknown = !controlsR.ok;
+        if (controlsUnknown) status = worstStatus([status, "UNKNOWN"]);
+        if (v.configured === "partial") status = worstStatus(["WARN", status]);
         if (v.configured === "unknown") status = "UNKNOWN";
 
         const maint = maintById.get(def.id);
@@ -536,12 +551,13 @@ export function createIntegrationCenter(deps: IntegrationCenterDeps): ControlCen
         } else if (v.configured === "partial") {
           parts.push(`delvis konfigurert - mangler: ${v.missing_refs.join(", ")}`);
         } else if (v.configured === "unknown") {
-          parts.push("konfigurasjon kunne ikke leses (credential-kilden svarte ikke)");
+          parts.push(`konfigurasjon kunne ikke leses (credential-kilden svarte ikke${v.refs.filter((r) => r.present === null).length > 0 ? `: ${v.refs.filter((r) => r.present === null).length} av ${v.refs.length} legitimasjoner ukjent` : ""})`);
         } else {
           parts.push(`ikke konfigurert - mangler: ${v.missing_refs.join(", ")}`);
         }
         if (paused) parts.push(`PAUSET (frosset ${relativeNo(frozenAt, nowMs)})`);
         if (revokedRefs.length > 0) parts.push(`legitimasjon TILBAKEKALT: ${revokedRefs.join(", ")}`);
+        if (controlsUnknown) parts.push("pause-/tilbakekall-status kunne ikke leses");
         if (v.configured === "yes" && !hasProbe && !isModelProvider && health === null) parts.push("live-test finnes ikke");
 
         const item = controlItem({
@@ -552,12 +568,12 @@ export function createIntegrationCenter(deps: IntegrationCenterDeps): ControlCen
           observed_at: health?.at ?? null,
           facts: {
             category: def.category,
-            configured: v.configured === "yes",
+            configured: v.configured === "yes" ? true : v.configured === "unknown" ? null : false,
             configuration: v.configured,
-            credentials_present: `${v.refs.filter((r) => r.present === true).length}/${v.refs.length}`,
+            credentials_present: `${v.refs.filter((r) => r.present === true).length}/${v.refs.length}${v.refs.some((r) => r.present === null) ? ` (${v.refs.filter((r) => r.present === null).length} ukjent)` : ""}`,
             missing_credentials: v.missing_refs.length > 0 ? joinFact(v.missing_refs) : null,
             test_method: hasProbe ? "live" : "presence_only",
-            auth_health: v.configured !== "yes" ? "ikke aktuelt" : health === null ? "ikke målt" : healthStatus(health, nowMs) === "UNKNOWN" ? "gammel måling" : health.state,
+            auth_health: v.configured === "unknown" ? "ikke målt" : v.configured !== "yes" ? "ikke aktuelt" : health === null ? "ikke målt" : healthStatus(health, nowMs) === "UNKNOWN" ? "gammel måling" : health.state,
             auth_health_at: health?.at ?? null,
             last_success_at: okAt,
             last_failure_at: failAt,
@@ -570,10 +586,10 @@ export function createIntegrationCenter(deps: IntegrationCenterDeps): ControlCen
             required_scopes: v.required_scopes.length > 0 ? joinFact(v.required_scopes) : null,
             api_version: apiFact?.api_version ?? "ukjent (koden oppgir ikke versjon)",
             api_deprecation: apiFact?.deprecation_no ?? "ukjent (koden kjenner ingen utfasingsdato)",
-            maintenance_minutes_30d: maint?.minutes ?? 0,
+            maintenance_minutes_30d: maintR.ok ? (maint?.minutes ?? 0) : null,
             maintenance_owner: maint?.last_by ?? null,
-            paused,
-            credential_revoked: revokedRefs.length > 0
+            paused: controlsR.ok ? paused : null,
+            credential_revoked: controlsR.ok ? revokedRefs.length > 0 : null
           }
         });
         const section = v.configured === "yes" ? (hasProbe ? "live" : "configured_other") : "not_configured";
@@ -636,9 +652,18 @@ export function createIntegrationCenter(deps: IntegrationCenterDeps): ControlCen
       if (!auditR.ok) sourceFailures.push(`revisjonssporet (${auditR.category})`);
       if (!controlsR.ok) sourceFailures.push(`eier-kontrolltilstanden (${controlsR.category})`);
       if (!jobsR.ok) sourceFailures.push(`jobbtilstanden (${jobsR.category})`);
+      if (!providerR.ok) sourceFailures.push(`kostradene (${providerR.category})`);
       if (deps.meshStatus && meshR && !meshR.ok) sourceFailures.push(`modellmeshen (${meshR.category})`);
+      // Gjennomgang av PR #316 (M-1): kan credential-kilden ikke svare, er det ukjent hvilke tilkoblinger som er konfigurert - og seksjonene over (som kun viser KONFIGURERTE tilkoblinger) er da ufullstendige, ikke «tomme og i orden».
+      const credentialSourceNote = presenceR.ok
+        ? unknownRefs > 0 ? `credential-kilden (${unknownRefs} av ${builtRefs.length} legitimasjoner kunne ikke måles${deps.toolGateway.secretsHealth?.() === "unavailable" ? "; kilden er utilgjengelig" : ""})` : null
+        : `credential-kilden (${presenceR.category})`;
+      if (credentialSourceNote !== null) sourceFailures.push(credentialSourceNote);
       const failNote = sourceFailures.length > 0 ? ` Kunne ikke leses: ${sourceFailures.join(", ")} - berørte tall er ukjente.` : "";
       const floor: ControlStatus = sourceFailures.length > 0 ? "UNKNOWN" : "OK";
+      // «Ikke (fullt) konfigurert» avhenger kun av credential-kilden (hva som er målt fraværende) og frys/tilbakekall (en ukonfigurert connector kan likevel være pauset).
+      const notConfiguredFloor: ControlStatus = credentialSourceNote !== null || !controlsR.ok ? "UNKNOWN" : "OK";
+      const unmeasuredCount = notConfigured.filter((i) => i.facts?.["configuration"] === "unknown").length;
 
       const sections: ControlSection[] = [];
       sections.push(controlSection({
@@ -650,8 +675,13 @@ export function createIntegrationCenter(deps: IntegrationCenterDeps): ControlCen
         summary_no: `${other.length} tilkoblinger: ${countsNo(other)}. Uten live-test er auth-helse kun kjent fra faktisk bruk.`, items: other
       }));
       sections.push(controlSection({
-        id: "not_configured", title_no: "Ikke (fullt) konfigurert", source: "connector-registeret + credential-presence (ToolGateway.hasSecret; aldri verdier)", observed_at: nowIso,
-        summary_no: notConfigured.length === 0 ? "Alle bygde tilkoblinger er konfigurert." : `${notConfigured.length} bygde tilkoblinger mangler hele eller deler av legitimasjonen: ${joinFact(notConfigured.map((i) => i.label), 400)}.`,
+        id: "not_configured", title_no: "Ikke (fullt) konfigurert eller ikke målt", source: "connector-registeret + credential-presence (ToolGateway.secretPresence, tri-state, cachet 30 s; aldri verdier)", observed_at: nowIso, status: notConfiguredFloor,
+        summary_no: notConfigured.length === 0
+          ? (notConfiguredFloor === "OK" ? "Alle bygde tilkoblinger er konfigurert." : `Ingen tilkoblinger er målt som ukonfigurerte.${failNote}`)
+          : `${[
+            notConfigured.length - unmeasuredCount > 0 ? `${notConfigured.length - unmeasuredCount} bygde tilkoblinger mangler hele eller deler av legitimasjonen` : "",
+            unmeasuredCount > 0 ? `${unmeasuredCount} kunne ikke måles (credential-kilden svarte ikke - de er IKKE målt som ukonfigurerte)` : ""
+          ].filter((p) => p !== "").join("; ")}: ${joinFact(notConfigured.map((i) => i.label), 400)}.`,
         items: notConfigured
       }));
 

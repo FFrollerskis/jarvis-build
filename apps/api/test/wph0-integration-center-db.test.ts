@@ -54,7 +54,7 @@ afterAll(async () => { await db?.stop(); }, 120_000);
 
 const center = () => createIntegrationCenter({
   pool: db.appPool,
-  toolGateway: { hasSecret: async (ref: string) => allRefs.has(ref), health: new Map(), list: () => defs, get: (t: string, a: string) => defs.find((d) => d.tool_id === t && d.action === a) } as never,
+  toolGateway: { secretPresence: async (ref: string) => allRefs.has(ref), health: new Map(), list: () => defs, get: (t: string, a: string) => defs.find((d) => d.tool_id === t && d.action === a) } as never,
   ownerControls: { listFrozenConnectorsDurable: async () => [], listRevokedCredentialsDurable: async () => [] }
 });
 async function report(identity: IdentityContext): Promise<ControlCenterReport> {
