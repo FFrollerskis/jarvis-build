@@ -96,7 +96,7 @@ import {
 } from "@jarvis/situations";
 import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions, parseFollowUpPushPolicy, renderSelfDiagnosisNo, type SelfDiagnosis } from "@jarvis/executive";
 import { GovernanceService, GovernanceTransport, governanceToolDefinitions } from "@jarvis/governance";
-import { OwnerControlsService, OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
+import { OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
 import {
   FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
   BankingService, NeonomicsFinanceTransport, runNeonomicsSweepForAllTenants,
@@ -129,7 +129,7 @@ import { ChatJobs, MAX_ACTIVE_JOBS, TasksDelegateTransport, tasksDelegateToolDef
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
 import { createControlCenterRegistry, registerControlCenters } from "./control-center/register.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
-import { freezeTargetError } from "./provider-pause.ts";
+import { createOwnerControlsService } from "./provider-pause.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
 
 const port = envPort("JARVIS_API_PORT", 3010);
@@ -172,7 +172,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   await killSwitch.restore();
   const ownerControls = new OwnerControls(killSwitch, pool, ownerControlAuthority);
   // EV-1 (D-412): leserne selvdiagnosen (`executive.get_self_diagnosis`) komponeres av. `toolGateway` refereres først når en leser kalles (lat).
-  const selfModelControls = new OwnerControlsService(killSwitch, ownerControls);
+  const selfModelControls = createOwnerControlsService(killSwitch, ownerControls);
   // WP-C2: backup-status fra en skrivebeskyttet statusfil (JARVIS_BACKUP_STATUS_FILE); uten den er `backup` UKJENT i selvdiagnosen.
   const backupStatusSource = backupStatusSourceFromEnv();
   const selfModelReaders = buildSelfModelReaders({
@@ -1013,13 +1013,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // Task #122 (D-213): andre konstruktør-argument - DEN SAMME `toolGateway`-
       // instansen (allerede konstruert over) - kobler `set_connector_credential`/
       // `test_connector` til `ToolGateway.setSecret()`/nøstet `execute()`.
-      ...ownerControlsToolDefinitions(new OwnerControlsTransport(new OwnerControlsService(killSwitch, ownerControls, {
+      // Gjennomgang av PR #316 (L-5): `createOwnerControlsService` kobler alltid frys-validatoren (`model:<leverandør>` valideres mot modellregisteret ved frysing, ellers «Utført» uten pause).
+      ...ownerControlsToolDefinitions(new OwnerControlsTransport(createOwnerControlsService(killSwitch, ownerControls, {
         pool,
         grants: grantService,
         devices: new DeviceService(pool),
         authority: ownerControlAuthority
-        // Gjennomgang av PR #316 (L-5): `model:<leverandør>` valideres mot modellregisteret ved frysing (ellers «Utført» uten pause).
-      }, { freezeTargetValidator: (target) => freezeTargetError(target) }), toolGateway, (process.env["JARVIS_DESTINATION_HOST_ALLOWLIST"] ?? "").split(",").map((h) => h.trim()).filter((h) => h.length > 0))),
+      }), toolGateway, (process.env["JARVIS_DESTINATION_HOST_ALLOWLIST"] ?? "").split(",").map((h) => h.trim()).filter((h) => h.length > 0))),
       // UA-11 Executive Mode "K2" (D-64): decision log/scenarios/risk register/
       // goals-OKRs - RENE journalposter over DEN SAMME `pool`-instansen som
       // resten av denne filen (`withMemoryTransaction`, se `GovernanceService`

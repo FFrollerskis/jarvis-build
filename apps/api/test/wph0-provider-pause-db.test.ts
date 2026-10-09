@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ModelProviderAdapter, ModelResult } from "@jarvis/provider-adapters";
 import { MemoryTraceSink, ModelGateway, NoEligibleProviderError } from "@jarvis/model-gateway";
-import { OwnerControlsService, OwnerControlsTransport } from "@jarvis/owner-controls";
+import { OwnerControlsTransport } from "@jarvis/owner-controls";
 import { KillSwitch, OwnerControls } from "@jarvis/policy";
-import { createProviderPauseSourceFromPool, freezeTargetError } from "../src/provider-pause.ts";
+import { createOwnerControlsService, createProviderPauseSourceFromPool } from "../src/provider-pause.ts";
 import { seedTenants, startH0Db, type H0Db } from "./support/h0-db.ts";
 
 /**
@@ -74,8 +74,8 @@ describe("pausekilden som app-rolle", () => {
 describe("L-5: frys-målet valideres ved skriving (transport + ekte database)", () => {
   const transport = () => {
     const killSwitch = new KillSwitch(db.appPool, { owner_person_id: OWNER });
-    const service = new OwnerControlsService(killSwitch, controls(), undefined, { freezeTargetValidator: (t) => freezeTargetError(t) });
-    return new OwnerControlsTransport(service);
+    // samme fabrikk som main.ts bruker: validatoren kan ikke glemmes
+    return new OwnerControlsTransport(createOwnerControlsService(killSwitch, controls()));
   };
   const context = { identity: { person_id: OWNER, tenant_id: TENANT, memory_space_id: "personal", session_id: "s", device_id: "d", channel: "web", auth_strength: "signed" } } as never;
   const frozenRows = async (): Promise<string[]> => (await db.adminPool.query("SELECT control_target FROM owner_control_state WHERE control_kind = 'connector_freeze' ORDER BY control_target")).rows.map((r) => String(r.control_target));

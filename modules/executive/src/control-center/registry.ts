@@ -18,7 +18,7 @@ import {
  *  - SISTE FORSVARSLINJE MOT HEMMELIGHETER: `redact` (i drift `scanForSecrets`) kjøres over alle menneskelesbare strenger i den ferdige rapporten - ikke over id-er, endepunkt eller handlingskropper (strukturelle felt).
  *
  * KROKPUNKT FOR NYE SENTRE: et senter (Finance, Memory, Agent, Operations, Value, Privacy, Security) bygges som en `ControlCenterDefinition` og registreres i
- * `registerControlCenters()` (`apps/api/src/control-center/register.ts`). Value-senteret (WP-C4) registreres der med id `value` så snart verdiløkke-rapporten finnes på main; til da står
+ * `registerControlCenters()` (`apps/api/src/control-center/register.ts`). Value-senteret (WP-C4-rapporten er på main; koblingen er utsatt til H1/H2) registreres der med id `value`; til da står
  * `value` i oversiktens `unregistered`-liste - aldri som «OK».
  */
 

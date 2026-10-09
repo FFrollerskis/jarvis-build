@@ -1,6 +1,7 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import type pg from "pg";
 import { DEFAULT_PROFILES, type ProviderPauseSource } from "@jarvis/model-gateway";
+import { OwnerControlsService, type OwnerControlsDeviceRevocationDeps } from "@jarvis/owner-controls";
 import { KillSwitch, OwnerControls } from "@jarvis/policy";
 import { CONNECTOR_REGISTRY, type ConnectorDefinition } from "@jarvis/tool-gateway";
 
@@ -52,6 +53,14 @@ export function freezeTargetError(target: string, known: ReadonlySet<string> = k
   if (!PROVIDER_NAME.test(name)) return `invalid_model_freeze_target:${shown}`;
   if (!known.has(name)) return `unknown_model_provider:${shown}`;
   return null;
+}
+
+/**
+ * Gjennomgang av PR #316 (L-5, wiring-vakt): ENESTE måte produksjonskoden lager en `OwnerControlsService` på. Den kobler alltid `freezeTargetValidator` (`model:<leverandør>` valideres mot modellregisteret ved frysing), slik at
+ * en ny konstruksjon i `main.ts` ikke stille kan hoppe over validatoren (en test leser kildefilene og avviser enhver `new OwnerControlsService(` utenfor denne filen - samme mønster som `createControlCenterRegistry`, M-2).
+ */
+export function createOwnerControlsService(killSwitch: KillSwitch, ownerControls: OwnerControls, deviceRevocation?: OwnerControlsDeviceRevocationDeps): OwnerControlsService {
+  return new OwnerControlsService(killSwitch, ownerControls, deviceRevocation, { freezeTargetValidator: (target) => freezeTargetError(target) });
 }
 
 /**

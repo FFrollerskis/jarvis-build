@@ -57,8 +57,8 @@ export function createControlCenterRegistry(wiring: ControlCenterRegistryWiring)
  * KROKPUNKT FOR NYE SENTRE (Finance, Memory, Agent, Operations, Value, Privacy, Security): legg til én linje i `registerControlCenters()` under, og utvid `ControlCenterWiring` med det senteret trenger
  * (additivt). Agent Center: bruk `agents.ts` (`readActiveTasks`, `activeTaskRows` med avbryt-handlingen) i stedet for en egen jobbleser, så to sentre aldri viser samme jobb med to ulike knapper.
  *
- * VALUE-KROKPUNKT (WP-C4 er IKKE på main ennå; sjekket mot origin/main 2026-10-09): verdirapporten bygges i grenen `claude/wp-c4-value-center` (`ExecutiveService.getValueReport(tenantId)` →
- * `ValueReport` med verdiløkker V1-V5, Builder Loop-beredskap og V5-forslag, `modules/executive/src/value/*`). Når den er merget: (1) legg til `valueReport?: (tenantId: string) => Promise<ValueReport>` i
+ * VALUE-KROKPUNKT (WP-C4 ER på main, merget 2026-10-09; koblingen hit er bevisst utsatt til H1/H2): verdirapporten kommer fra `ExecutiveService.getValueReport(tenantId)` → `ValueReport` med verdiløkker V1-V5,
+ * Builder Loop-beredskap og V5-forslag (`modules/executive/src/value/*`; `main.ts` gir tjenesten `value: { source, facts }`). Når den kobles: (1) legg til `valueReport?: (tenantId: string) => Promise<ValueReport>` i
  * `ControlCenterWiring`, (2) lag `value.ts` i denne mappen (`createValueCenter`: én seksjon per verdiløkke, `measured` fra rapporten, ingen egne handlinger - V2-push og V5-forslag har egne brytere), og
  * (3) registrer den her med id `value`. Til da står `value` i oversiktens `unregistered`-liste (aldri «i orden»).
  *

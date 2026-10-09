@@ -180,6 +180,18 @@ describe("KILDEVAKT: hver ModelGateway i api-koden kjenner eierens pause", () =>
     }
   });
 
+  it("L-5 (wiring): ingen produksjonskode i apps/api/src lager en OwnerControlsService utenom fabrikken (som alltid kobler frys-validatoren), og main.ts bruker fabrikken for verktøyflaten og selvmodellen", () => {
+    const offenders = sources(SRC).filter((f) => /new\s+OwnerControlsService\s*\(/.test(readFileSync(f, "utf8"))).map((f) => f.replace(SRC, "src"));
+    expect(offenders).toEqual(["src/provider-pause.ts"]);
+    const main = readFileSync(resolve(SRC, "main.ts"), "utf8");
+    expect(main).toContain('import { createOwnerControlsService } from "./provider-pause.ts";');
+    expect(main).toMatch(/ownerControlsToolDefinitions\(new OwnerControlsTransport\(createOwnerControlsService\(killSwitch, ownerControls, \{/);
+    expect(main).toContain("const selfModelControls = createOwnerControlsService(killSwitch, ownerControls);");
+    // fabrikken selv kobler validatoren til den samme funksjonen testene låser
+    const factory = readFileSync(resolve(SRC, "provider-pause.ts"), "utf8");
+    expect(factory).toMatch(/new OwnerControlsService\(killSwitch, ownerControls, deviceRevocation, \{ freezeTargetValidator: \(target\) => freezeTargetError\(target\) \}\)/);
+  });
+
   it("begge prosessene importerer kilden fra provider-pause.ts", () => {
     for (const f of ["main.ts", "worker-main.ts"]) {
       expect(readFileSync(resolve(SRC, f), "utf8"), f).toContain('import { createProviderPauseSourceFromPool } from "./provider-pause.ts";');
