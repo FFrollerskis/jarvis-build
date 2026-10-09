@@ -40,9 +40,17 @@ describe("A: readSecretFile - en hemmelighet andre kan lese er ingen hemmelighet
     await symlink(real.file, link);
     expect(await err(readSecretFile(link))).toBe("secret_file_is_symlink");
     expect(await err(readSecretFile(real.dir))).toMatch(/secret_file_(not_a_regular_file|unreadable)/);
-    expect(await err(readSecretFile((await make(0o600, "x".repeat(9000))).file))).toBe("secret_file_too_large");
+    expect(await err(readSecretFile((await make(0o600, "x".repeat(17_000))).file))).toBe("secret_file_too_large");
+    expect(await err(readSecretFile((await make(0o600, "x".repeat(16_385))).file))).toBe("secret_file_too_large");
     expect(await err(readSecretFile(join(real.dir, "nope")))).toBe("secret_file_unreadable");
     expect(await err(readSecretFile("relative"))).toBe("secret_file_path_not_absolute");
+  });
+
+  it("godtar et langt token (opp mot filtaket 16 KiB), for eksempel en installasjonstoken-lignende verdi på 8192 tegn + linjeskift", async () => {
+    const { file } = await make(0o600, `${"a".repeat(8192)}\n`);
+    expect(await readSecretFile(file)).toBe("a".repeat(8192));
+    const big = await make(0o600, "b".repeat(16_384));
+    expect(await readSecretFile(big.file)).toHaveLength(16_384);
   });
 
   it("nekter feil eier (tjenestebruker/root er de eneste tillatte), med mindre eier-sjekken eksplisitt hoppes over (KUN tester)", async () => {

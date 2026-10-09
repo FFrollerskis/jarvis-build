@@ -7,12 +7,34 @@ import { readSecretFile } from "./fsutil.mjs";
  * arbeidsmappen, `.git/config`, argv eller loggen.
  *
  * Grensesnittet er bevisst enkelt (`tokenFor(repoSlug) -> Promise<string>`) slik at en kortlevd GitHub App-installasjons-
- * token-kilde (WP-C3) kan byttes inn uten å røre resten. Denne filen bygger IKKE App-auth.
+ * token-kilde (WP-C3) kan byttes inn uten å røre resten. Denne filen bygger IKKE App-auth. Typedefen er STRUKTURELT lik
+ * `GitCredentialSource` i packages/contracts/src/git-credential.ts (WP-C3, egen branch): ikke importert herfra, men like, slik at de kan
+ * dedupliseres ved merge. Runneren kaller `tokenFor` ved HVER klone og HVER publish (ingen mellomlagring), validerer svaret med
+ * `assertWellFormedToken`, og ruller alle andre feil enn RunnerError om til `git_credential_unavailable` uten å gjengi feilmeldingen.
  *
  * @typedef {{ tokenFor(repoSlug: string): Promise<string> }} GitCredentialSource
  */
 
-const TOKEN_FORMAT = /^[A-Za-z0-9_.-]{8,512}$/;
+/**
+ * Gyldig git-token: PAT (`ghp_...`, `github_pat_...`) OG installasjonstokens (`ghs_<APPID>_<JWT>`), som kan bli lange uten dokumentert maks.
+ * Lengdetaket er derfor romslig (8192), men tegnsettet er SMALT: ingen mellomrom, kontrolltegn, `:`, `@`, `/` eller anførselstegn. Det hindrer at
+ * en feilaktig eller kompromittert kilde kan endre meningen til credential-protokollen (linjeskift!), env-overføringen eller en URL.
+ */
+export const TOKEN_FORMAT = /^[A-Za-z0-9_.-]{8,8192}$/;
+export const MAX_TOKEN_CHARS = 8192;
+
+/**
+ * Kontrollerer et token fra HVILKEN SOM HELST kilde (fil, eller en injisert kilde som WP-C3 sin GitHub App) før det brukes.
+ * @param {unknown} value
+ * @returns {string}
+ */
+export function assertWellFormedToken(value) {
+  if (typeof value !== "string" || !TOKEN_FORMAT.test(value)) throw new RunnerError("git_credential_unavailable", 502, "token_format_invalid");
+  return value;
+}
+
+/** Hvor lenge runneren venter på at en kilde svarer før jobben feiler lukket (en hengende kilde skal aldri holde en jobbplass). */
+export const TOKEN_SOURCE_TIMEOUT_MS = 30_000;
 
 /** Flyktig per-kall-kanal (env på ETT git-kall) som `credential-helper.mjs` leser. Samme interne navn som git-auth.ts (worker-siden). */
 export const GIT_CREDENTIAL_TOKEN_ENV = "JARVIS_GIT_CREDENTIAL_TOKEN";
@@ -45,8 +67,7 @@ export class FileGitCredentialSource {
     } catch (error) {
       throw new RunnerError("git_credential_unavailable", 502, error instanceof Error ? error.message.slice(0, 80) : "unreadable");
     }
-    if (!TOKEN_FORMAT.test(value)) throw new RunnerError("git_credential_unavailable", 502, "token_format_invalid");
-    return value;
+    return assertWellFormedToken(value);
   }
 }
 

@@ -68,7 +68,7 @@ async function prepareSocketPath(path) {
  *   testOverrides?: {
  *     remote?: { protocol: "https" | "http", host: string, urlFor?: (slug: string) => string },
  *     allowFile?: boolean, skipUidCheck?: boolean, allowAnyOwner?: boolean,
- *     now?: () => number, randomId?: () => string, authFailureDelayMs?: number
+ *     now?: () => number, randomId?: () => string, authFailureDelayMs?: number, tokenTimeoutMs?: number
  *   }
  * }} options
  */
@@ -101,7 +101,7 @@ export async function createRunnerService(options) {
   });
   const manager = new JobManager({
     config, docker, git, credentials, logger,
-    ...(t.now ? { now: t.now } : {}), ...(t.randomId ? { randomId: t.randomId } : {})
+    ...(t.now ? { now: t.now } : {}), ...(t.randomId ? { randomId: t.randomId } : {}), ...(t.tokenTimeoutMs ? { tokenTimeoutMs: t.tokenTimeoutMs } : {})
   });
 
   /** @type {BearerToken | undefined} */

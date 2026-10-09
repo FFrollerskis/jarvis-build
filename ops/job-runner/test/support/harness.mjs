@@ -17,6 +17,21 @@ export const RUNNER_TOKEN = "runner-test-token-0123456789abcdefABCDEF";
 export const GIT_TOKEN = "ghp_RunnerGitTokenNeverReal0123456789";
 export const IMAGE_ID = `sha256:${"a".repeat(64)}`;
 
+/**
+ * Syntetisk installasjonstoken-lignende verdi (INGEN ekte hemmelighet): `ghs_<APPID>_<header>.<nyttelast>.<signatur>`, nøyaktig `length` tegn.
+ * Bygges ved kjøring (ingen lange litteraler i kildekoden). `seed` gir ulike verdier.
+ * @param {number} [length]
+ * @param {number} [seed]
+ */
+export function syntheticInstallationToken(length = 900, seed = 0) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const filler = (/** @type {number} */ n, /** @type {number} */ salt) => Array.from({ length: n }, (_, i) => alphabet[(i * 7 + salt + seed) % alphabet.length]).join("");
+  const head = `ghs_${1234567 + seed}_${filler(36, 3)}.`;
+  const payloadLength = Math.floor((length - head.length - 1) / 2);
+  const signatureLength = length - head.length - payloadLength - 1;
+  return `${head}${filler(payloadLength, 11)}.${filler(signatureLength, 29)}`;
+}
+
 /** Ren git med tom config; kaster ved feil. */
 export function gitSync(cwd, args, extraEnv = {}) {
   const r = spawnSync("git", args, {
@@ -89,6 +104,8 @@ export function apiRequest(socketPath, req = {}) {
  *   slugs?: string[],
  *   origins?: Record<string, { commits?: number, files?: Record<string, string> }>,
  *   now?: () => number,
+ *   credentials?: import("../../lib/credentials.mjs").GitCredentialSource,
+ *   tokenTimeoutMs?: number,
  *   beforeStart?: (ctx: { root: string, baseDir: string, fake: ReturnType<typeof createFakeDocker> }) => Promise<void> | void,
  *   autoStart?: boolean
  * }} [options]
@@ -132,10 +149,12 @@ export async function createHarness(options = {}) {
     config: /** @type {NonNullable<typeof validated.runner>} */ (validated.runner),
     dockerExec: fake.exec,
     logger,
+    ...(options.credentials ? { credentials: options.credentials } : {}),
     testOverrides: {
       remote,
       allowFile: options.remote === undefined, skipUidCheck: true, allowAnyOwner: true, authFailureDelayMs: 0,
-      ...(options.now ? { now: options.now } : {})
+      ...(options.now ? { now: options.now } : {}),
+      ...(options.tokenTimeoutMs ? { tokenTimeoutMs: options.tokenTimeoutMs } : {})
     }
   });
   if (options.beforeStart) await options.beforeStart({ root, baseDir, fake });

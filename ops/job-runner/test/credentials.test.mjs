@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { startGitSmartHttpServer } from "../../../modules/tasks/test/support/git-smart-http-server.ts";
-import { credentialHelperArgs, FileGitCredentialSource, GIT_CREDENTIAL_TOKEN_ENV } from "../lib/credentials.mjs";
+import { assertWellFormedToken, credentialHelperArgs, FileGitCredentialSource, GIT_CREDENTIAL_TOKEN_ENV, MAX_TOKEN_CHARS } from "../lib/credentials.mjs";
 import { RunnerError } from "../lib/errors.mjs";
-import { GIT_TOKEN, createHarness, gitSync } from "./support/harness.mjs";
+import { GIT_TOKEN, createHarness, gitSync, syntheticInstallationToken } from "./support/harness.mjs";
 import { startProbeServer } from "./support/probe-server.mjs";
 
 /**
@@ -131,6 +131,37 @@ describe("C: FileGitCredentialSource (PAT per repo, fil med strenge rettigheter)
     const missing = new FileGitCredentialSource({ files: { "owner/repo": { tokenFile: join(bad.dir, "finnes-ikke") } } });
     expect(await failure(missing.tokenFor("owner/repo"))).toMatchObject({ code: "git_credential_unavailable" });
   });
+
+  it("installasjonstokens (ghs_<APPID>_<JWT>, 900 tegn) og tokens helt opp til taket godtas UBESKÅRET", async () => {
+    const long = syntheticInstallationToken(900);
+    expect(long).toHaveLength(900);
+    expect(long).toMatch(/^ghs_\d+_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+    expect(await source((await make(0o600, `${long}\n`)).file).tokenFor("owner/repo")).toBe(long);
+    expect(MAX_TOKEN_CHARS).toBe(8192);
+    const edge = "ghs_".concat("a".repeat(MAX_TOKEN_CHARS - 4));
+    expect(await source((await make(0o600, `${edge}\n`)).file).tokenFor("owner/repo")).toHaveLength(MAX_TOKEN_CHARS);
+  });
+
+  it("over taket (8193) og alt med ulovlige tegn avvises: mellomrom, kontrolltegn, linjeskift midt i, `:` `@` `/` anførselstegn, ikke-ASCII, for kort", async () => {
+    const long = syntheticInstallationToken(900);
+    const rejected = [
+      `ghs_${"a".repeat(MAX_TOKEN_CHARS - 3)}`, `${long}:x`, `${long}@host`, `${long}/x`, `${long} x`, `${long}\tx`, `ghs_abcd\nhost=evil.example`,
+      `${long}\u0000`, `${long}\u00e5`, `${long}"`, `${long}'`, `${long}\\`, `${long}%41`, "kort", ""
+    ];
+    for (const value of rejected) {
+      const { file } = await make(0o600, `${value}\n`);
+      expect(await failure(source(file).tokenFor("owner/repo")), JSON.stringify(value.slice(0, 40))).toMatchObject({ code: "git_credential_unavailable", detail: "token_format_invalid" });
+    }
+  });
+
+  it("assertWellFormedToken er felles port for ALLE kilder: kun velformede strenger slipper gjennom, alt annet er token_format_invalid", () => {
+    expect(assertWellFormedToken(syntheticInstallationToken(900))).toHaveLength(900);
+    for (const value of [undefined, null, 12345678, {}, [], ["abcdefgh"], Buffer.from("abcdefgh"), "abc1234\n", " abcdefgh", "abcdefgh\r\nhost=x"]) {
+      let thrown;
+      try { assertWellFormedToken(value); } catch (e) { thrown = e; }
+      expect(thrown, String(value)).toMatchObject({ code: "git_credential_unavailable", status: 502, detail: "token_format_invalid" });
+    }
+  });
 });
 
 describe("D: ende-til-ende mot ekte git ↔ lokal HTTP (produksjonens protokollrestriksjoner: kun én protokoll)", () => {
@@ -169,6 +200,37 @@ describe("D: ende-til-ende mot ekte git ↔ lokal HTTP (produksjonens protokollr
       expect(JSON.stringify(call.env)).not.toContain(GIT_TOKEN);
     }
     expect(h.logLines.join("\n")).not.toContain(GIT_TOKEN);
+  });
+
+  it("et 900-tegns installasjonstoken (ghs_<APPID>_<JWT>) overlever hele veien: fil -> env -> credential-helper -> git -> Authorization, og finnes ingen steder etterpå", async () => {
+    const long = syntheticInstallationToken(900);
+    const srv = await startGitSmartHttpServer([{ user: "x-access-token", pass: long }]);
+    try {
+      srv.createBareRepo("owner/repo.git");
+      const seed = await mkdtemp(join(tmpdir(), "jr-seed-long-"));
+      gitSync(seed, ["init", "--quiet", "--initial-branch=main", "."]);
+      gitSync(seed, ["commit", "--allow-empty", "-q", "-m", "c1"]);
+      gitSync(seed, ["push", "--quiet", join(srv.reposRoot, "owner/repo.git"), "main"]);
+      const h = await harness({ remote: { protocol: "http", host: new URL(srv.url("x")).host } });
+      await writeFile(h.config.gitCredentials["owner/repo"].tokenFile, `${long}\n`);
+      const job = await h.createJob({ task_id: "task-long" });
+      await h.exec(job.job_id, ["sh", "-c", "echo hello > ny.txt && git checkout -q -b jarvis/task-long && git add -A && git commit -q -m agent"]);
+      const pub = await h.api({ method: "POST", path: `/v1/jobs/${job.job_id}/publish`, body: { branch: "jarvis/task-long" } });
+      expect(pub.status, pub.text).toBe(200);
+      await new Promise((r) => setTimeout(r, 200));
+      expect(srv.authenticatedUsernames.length).toBeGreaterThanOrEqual(3); // ls-remote, fetch, push
+      expect(gitSync(join(srv.reposRoot, "owner/repo.git"), ["rev-parse", "jarvis/task-long"])).toBe(pub.json.commit_sha);
+      const grep = spawnSync("grep", ["-rIlF", long, h.baseDir], { encoding: "utf8" });
+      expect(grep.stdout).toBe("");
+      for (const call of h.fake.calls) {
+        expect(call.args.join(" ")).not.toContain(long);
+        expect(JSON.stringify(call.env)).not.toContain(long);
+      }
+      expect(h.logLines.join("\n")).not.toContain(long);
+      expect(pub.text).not.toContain(long);
+    } finally {
+      await srv.close();
+    }
   });
 
   it("feil token hos runneren: klone feiler lukket (502 git_network_failed), ingen jobb, ingen rester, token ikke i feilen", async () => {

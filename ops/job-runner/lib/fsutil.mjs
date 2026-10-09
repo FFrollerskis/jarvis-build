@@ -38,9 +38,12 @@ export async function assertPrivateDir(dir, options = {}) {
   }
 }
 
+/** Øvre størrelse på en hemmelighetsfil (bytes). */
+export const MAX_SECRET_FILE_BYTES = 16 * 1024;
+
 /**
  * Leser en hemmelighetsfil (bearer-token, git-PAT) med strenge krav:
- *  - ingen symlenke (O_NOFOLLOW), vanlig fil, maks 8 KiB;
+ *  - ingen symlenke (O_NOFOLLOW), vanlig fil, maks 16 KiB (et git-token kan bli langt, f.eks. installasjonstokens `ghs_<APPID>_<JWT>`);
  *  - eid av root ELLER tjenestebrukeren;
  *  - INGEN tilgang for andre (0o007) og ikke skrivbar/kjørbar for gruppe (0o137): en token andre kan lese er ikke en hemmelighet.
  * Returnerer innholdet uten avsluttende whitespace. Kaster ConfigError (aldri med filinnhold i meldingen).
@@ -66,7 +69,7 @@ export async function readSecretFile(path, options = {}) {
       const allowed = options.allowedOwnerUids ?? [0, ...(process.getuid ? [process.getuid()] : [])];
       if (!allowed.includes(st.uid)) throw new ConfigError(`${label}_wrong_owner`);
     }
-    if (st.size > 8192) throw new ConfigError(`${label}_too_large`);
+    if (st.size > MAX_SECRET_FILE_BYTES) throw new ConfigError(`${label}_too_large`);
     const buffer = Buffer.alloc(st.size);
     let offset = 0;
     while (offset < st.size) {

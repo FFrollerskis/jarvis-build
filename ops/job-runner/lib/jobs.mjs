@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { assertWellFormedToken, TOKEN_SOURCE_TIMEOUT_MS } from "./credentials.mjs";
 import { CancelToken, ConfigError, RunnerError } from "./errors.mjs";
 import { ensurePrivateDir, forceRemoveTree } from "./fsutil.mjs";
 import { UUID_V4 } from "./schemas.mjs";
@@ -33,7 +34,8 @@ export class JobManager {
    *   credentials: import("./credentials.mjs").GitCredentialSource,
    *   logger: ReturnType<typeof import("./log.mjs").createLogger>,
    *   now?: () => number,
-   *   randomId?: () => string
+   *   randomId?: () => string,
+   *   tokenTimeoutMs?: number
    * }} options
    */
   constructor(options) {
@@ -45,6 +47,7 @@ export class JobManager {
     this.logger = options.logger;
     this.now = options.now ?? (() => Date.now());
     this.randomId = options.randomId ?? randomUUID;
+    this.tokenTimeoutMs = options.tokenTimeoutMs ?? TOKEN_SOURCE_TIMEOUT_MS;
     /** @type {Map<string, any>} */
     this.jobs = new Map();
     this.shuttingDown = false;
@@ -52,6 +55,34 @@ export class JobManager {
 
   get activeJobs() {
     return this.jobs.size;
+  }
+
+  /**
+   * Henter et git-token fra kilden FOR ÉN operasjon (klone eller push) - aldri mellomlagret, slik at kortlevde installasjonstokens (WP-C3) alltid er
+   * ferske. Grensen mot kilden er fail-closed: en kilde som kaster noe annet enn RunnerError (nettverksfeil, bug, kompromittert), henger lenger enn
+   * tidsgrensen, eller returnerer noe annet enn et velformet token gir `git_credential_unavailable` - uten å gjengi kildens feilmelding (kan inneholde
+   * hemmeligheter) og uten at tokenet noen gang når git/loggen.
+   * @param {string} slug
+   * @returns {Promise<string>}
+   */
+  async obtainToken(slug) {
+    /** @type {Promise<string>} */
+    const pending = Promise.resolve().then(() => this.credentials.tokenFor(slug));
+    pending.catch(() => undefined); // en kilde som feiler ETTER tidsgrensen skal aldri bli en ubehandlet rejection
+    /** @type {NodeJS.Timeout | undefined} */
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new RunnerError("git_credential_unavailable", 504, "source_timeout")), this.tokenTimeoutMs);
+    });
+    try {
+      return assertWellFormedToken(await Promise.race([pending, timeout]));
+    } catch (error) {
+      if (error instanceof RunnerError) throw error;
+      this.logger.warn("git_credential_source_failed", { repo: slug, error_name: error instanceof Error ? error.name : "unknown" });
+      throw new RunnerError("git_credential_unavailable", 502, "source_failed");
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** Oppstart: runner-eide kataloger (0700) + avstemming av alt en forrige kjøring etterlot. */
@@ -124,7 +155,7 @@ export class JobManager {
       await this.docker.assertNetworkInternal(this.config.policy.network);
       await mkdir(job.dir, { mode: 0o700 });
       await mkdir(job.privateDir, { mode: 0o700 });
-      const token = await this.credentials.tokenFor(req.repo);
+      const token = await this.obtainToken(req.repo);
       const fetched = await this.git.fetchBase({
         slug: req.repo, ...(req.baseBranch !== undefined ? { baseBranch: req.baseBranch } : {}), depth: this.config.cloneDepth,
         baseGitDir: job.baseGitDir, token, timeoutMs: this.config.cloneTimeoutMs, cancel: job.cancel
@@ -230,7 +261,7 @@ export class JobManager {
         if (/empty bundle/i.test(stderr)) throw new RunnerError("no_changes", 422, "no_commits_beyond_the_base");
         throw new RunnerError("bundle_create_failed", 422, this.logger.registry.redact(stderr.replace(/\s+/g, " ").trim()).slice(0, 160));
       }
-      const token = await this.credentials.tokenFor(job.slug);
+      const token = await this.obtainToken(job.slug);
       try {
         const out = await this.git.verifyAndPush({
           bundle: created.stdout, baseSha: job.baseSha, baseGitDir: job.baseGitDir, verifyDir: job.verifyDir, privateDir: job.privateDir,
