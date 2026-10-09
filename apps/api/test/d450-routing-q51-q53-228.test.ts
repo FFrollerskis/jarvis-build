@@ -157,6 +157,33 @@ describe("Q-51 D: skyturen sendes uten de enkelte følsomme meldingene (og paren
     expect(messagesOf(off.captured[0])).toContain(FIN_Q.content);
   });
 
+  it("kun SECRET_RESTRICTED holdes utenfor: en PRIVAT melding (en regning) i det nylige vinduet følger med skyturen", async () => {
+    capture();
+    const privateQ: Row = { role: "user", content: "Faktura fra Elkem kommer i morgen" };
+    const t = build({ prior: [CLEAN_Q, CLEAN_A, privateQ, FIN_Q, FIN_A] });
+    const result = await t.engine.handle(base, PR_ASK);
+    expect(t.captured[0]!.providerPreference).toEqual(["anthropic"]);
+    expect(messagesOf(t.captured[0])).toEqual([CLEAN_Q.content, CLEAN_A.content, privateQ.content, PR_ASK]);
+    expect(result.reply).toContain("uten 2 tidligere meldinger");
+  });
+
+  it("en følsom leveringsmelding rett etter eierens melding ville ved paring fjernet selve spørsmålet → turen forblir lokal med hele konteksten (aldri en skytur uten spørsmålet)", async () => {
+    capture();
+    const t = build({ prior: [CLEAN_Q, CLEAN_A], afterUserSave: "Bakgrunnsjobben «Regnskap» er ferdig: lånet er på 2 mill." });
+    const result = await t.engine.handle(base, PR_ASK);
+    expect(t.captured[0]!.providerPreference).toEqual(LOCAL);
+    expect(t.captured[0]!.sensitivity).toBe("SECRET_RESTRICTED");
+    expect(messagesOf(t.captured[0])).toContain(PR_ASK);
+    expect(result.reply).toContain("Svart på den lokale modellen");
+  });
+
+  it("en bad_request fra skyen på skyvarianten gir en ærlig feil: D-380-grenen («lokal modell avviste verktøy») er kun for lokale forsøk", async () => {
+    capture();
+    const t = build({ prior: [CLEAN_Q, CLEAN_A, FIN_Q, FIN_A], failFirstWith: new ProviderError("anthropic", "bad_request", "ugyldig forespørsel") });
+    await expect(t.engine.handle(base, PR_ASK)).rejects.toThrow("ugyldig forespørsel");
+    expect(t.captured).toHaveLength(1);
+  });
+
   it("alt som ikke er følsomt sendes som før (ingen merknad, ingen variant-logg)", async () => {
     const lines = capture();
     const t = build({ prior: [CLEAN_Q, CLEAN_A] });
