@@ -436,3 +436,26 @@ dobbelttelles aldri; samme id med annet innhold telles som konflikt og anvendes 
 (etter `situations`, som peker på loopen). **Q-21/RLS:** FORCE RLS + tenant- og memory-space-RESTRICTIVE-policy; fremmednøkler er tenant-skopede komposittnøkler. **Ikke i scope:**
 person-nivå atferdsanalyse, profilering av sluttbrukere, kobling av pseudonymer til personer, automatiske kundehandlinger. **Kalibrering:** terskler og vekter (`churn_risk_v1`) er
 FORSLAG (NEEDS_TOBIAS); kalibreringsrapporten (JARVIS-045) sammenligner forutsagt mot utfall og er grunnlaget for en v2.
+
+## Confidence-kalibrering og svarfrist (WP-D2, migrasjon 091, JARVIS-045/082, FIXED_SUITE / IKKE HOST VERIFIED)
+
+**Formål:** (1) gjøre `business_open_loops.confidence` evidensbasert i stedet for en konstant per regeltype, og gi eieren en kalibreringsrapport som sammenligner forutsagt
+mot faktisk utfall (JARVIS-045); (2) koble regelen `support_ticket_overdue` til faktiske support-data (JARVIS-082). Ingen modellkall, ingen ekstern tjeneste, ingen automatisk handling.
+
+**Hva som lagres (nye kolonner på `business_open_loops`, ingen ny tabell):** `resolution_outcome` (`acted`/`dismissed` satt av eieren/operatøren ved manuell lukking, `condition_cleared` satt av
+sveipet), `confidence_basis` (hvorfor tallet ble som det ble: grunnverdi, hver justering med kode/delta/begrunnelse, tak, kalibrering) og `closure_history` (tidligere MERKEDE lukkinger
+av en loop som siden er gjenåpnet: utfall, confidence ved lukking og tidspunkt, maks 100). Kolonnene bærer ingen persondata - kun kategorier, tall og tidspunkt - og følger raden (FORCE
+RLS, tenant + memory space) og memory space-slettingen (Q-20). `closure_history` finnes bevisst: uten den ville et merket utfall forsvunnet da samme vilkår gjenåpnet loopen, og kun
+lukkinger som faktisk løste saken ville overlevd som kalibreringsgrunnlag (survivorship - «avvist, men vilkåret holder» ville blitt usynlig og treffraten overvurdert).
+
+**Hvordan confidence beregnes (`loop_confidence_v1`, forslag - NEEDS_TOBIAS):** grunnverdi (0.9 hardt faktum / 0.7 heuristikk) + kun tillegg for persistens, forfallsstørrelse, uavhengig
+bekreftelse fra ANDRE domener hos samme kunde og flere uavhengige signalfamilier i regelen selv. En heuristikk kan IKKE nå situasjonsmotorens SUGGEST-terskel (0.75) på tilleggene alene
+(tak 0.74) - retten til å foreslå må fortjenes av data (minst 20 merkede utfall og observert treffrate >= 0.75). Kalibreringen kan også SENKE confidence (observert treffrate lavere enn
+forutsagt). Utfall er eierens egen merking; en loop lukket uten utfall, eller som forsvant av seg selv, teller verken som treff eller bom. Rapporten endrer ingenting av seg selv.
+
+**Automatiserte beslutninger (GDPR art. 22):** ikke utløst - tallene prioriterer oppmerksomhet for eieren; SUGGEST/INFORM er forslag, og auto-ACT finnes kun via en autonomi-policy EIEREN selv har bundet.
+
+**Svarfrist («SLA») for supportsaker:** `support_ticket_overdue` utleder fristen fra siste UBESVARTE kundemelding i `support_ticket_events` (ingen `agent_reply` etter den; et internt notat
+besvarer ikke kunden; `waiting_customer` har ingen klokke) + et vindu per prioritet (kalenderstimer; forslag urgent 4 t, high 8 t, normal 24 t, low 72 t; `JARVIS_SUPPORT_SLA_HOURS`
+overstyrer, `off` slår av utledningen). Regelen leser data den allerede behandler (supportsaker) og lagrer ingenting nytt; den utledede fristen blir loopens `due_at`. Ingen ny
+behandling, ingen ny mottaker.

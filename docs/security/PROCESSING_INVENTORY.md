@@ -77,6 +77,15 @@ uten at det er gjort, eller (4) en DPIA-henvisning peker på en fil som ikke fin
 - **Eksterne mottakere:** Ingen. Hendelsene kommer inn fra eierens egne produkter (signert webhook, CSV/JSONL); ingenting sendes ut
 - **Tabeller:** `business_churn_assessments`, `product_usage_accounts`, `product_usage_events`
 
+### Open-loop-kalibrering og svarfrist (WP-D2, 091)
+
+- **Formål:** Confidence på åpne loops fra flere signaler, og en kalibreringsrapport (forutsagt mot utfall) som lar eieren justere terskler; svarfrist for supportsaker utledet fra faktiske kundemeldinger
+- **Memory space/tenant:** business (nye kolonner `resolution_outcome`, `confidence_basis`, `closure_history` på `business_open_loops` - ingen ny tabell; samme FORCE RLS)
+- **Datakategori:** Ingen persondata i de nye kolonnene - utfallskategori (`acted`/`dismissed`/`condition_cleared`), tall (confidence, justeringer) og tidspunkt. Svarfristen leser eksisterende `support_ticket_events` (hendelsestype og tidspunkt) og lagrer kun en frist på loopen. Se «Confidence-kalibrering og svarfrist» i `docs/UA3_BUSINESS_DPIA.md`
+- **Retensjon:** Følger loopen (som dens øvrige felt); `closure_history` er begrenset til de 100 nyeste merkede lukkingene per loop. Sletting via memory space-sletting (erasure-flyten, ikke koblet i produksjon, JARVIS-060)
+- **Eksterne mottakere:** Ingen
+- **Tabeller:** (ingen nye - `business_open_loops`, `support_ticket_events` er oppført under «Forretning»)
+
 ### Vekst og markedsføring
 
 - **Formål:** Kampanjer, attribusjon og samtykke
