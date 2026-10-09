@@ -139,4 +139,33 @@ describe("WP-A: localStickiness i verktøyløkken", () => {
     expect(out.provider).toBe("gemma_local");
     expect(seen.anthropicRequests).toHaveLength(0);
   });
+  it("stickiness SNEVRER INN preferanselisten til lokale oppføringer: faller den lokale modellen bort etter runde 1, får skyen (neste i listen) IKKE verktøyresultatene - løkken feiler lukket (mutasjonsfunn m54)", async () => {
+    const run = async (localStickiness: boolean) => {
+      const anthropicSeen: ModelRequest[] = [];
+      let localDown = false;
+      const anthropic: ModelProviderAdapter = {
+        name: "anthropic", model: "claude-x", available: () => true,
+        complete: async (req) => { anthropicSeen.push(req); return result("anthropic", "claude-x", { text: "skyens svar" }); }
+      };
+      const local: ModelProviderAdapter = {
+        name: "gemma_local", model: "gemma3", available: () => !localDown,
+        complete: async () => { localDown = true; return result("gemma_local", "gemma3", { finish_reason: "tool_calls", tool_calls: [memoryCall("gemma_local", "gemma3")] }); }
+      };
+      const executor: ToolExecutor = {
+        execute: async (call): Promise<ToolResultMessage> => ({ tool_call_id: call.tool_call_id, tool_name: call.tool_name, execution_id: "e1", success: true, at: new Date().toISOString(), source: "memory.search", output: [{ content: SECRET, sensitivity: "special" }] })
+      };
+      const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [anthropic, local] });
+      const outcome = await gateway.completeWithTools({ ...baseInput, providerPreference: ["gemma_local", "anthropic"] }, { tools: TOOLS, executor, ...(localStickiness ? { localStickiness: true } : {}) }).then((r) => ({ ok: r }), (e: unknown) => ({ error: e }));
+      return { outcome, anthropicSeen };
+    };
+    // Kontroll: uten stickiness overtar skyen (neste i listen) runde 2 og får det den lokale runden så.
+    const control = await run(false);
+    expect("ok" in control.outcome && control.outcome.ok.provider).toBe("anthropic");
+    expect(JSON.stringify(control.anthropicSeen)).toContain("SPECIAL-HEMMELIG");
+    // Med stickiness er listen snevret inn til [gemma_local]: ingen kandidat er igjen, og skyen ser aldri noe.
+    const sticky = await run(true);
+    expect("error" in sticky.outcome).toBe(true);
+    expect(String((sticky.outcome as { error: Error }).error)).toMatch(/provider_preference_exhausted|ikke konfigurert|NoEligible/i);
+    expect(sticky.anthropicSeen).toEqual([]);
+  });
 });
