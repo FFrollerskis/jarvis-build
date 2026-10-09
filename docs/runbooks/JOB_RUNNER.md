@@ -12,9 +12,11 @@ Inntil da gjelder D-32 som før: workers er utviklings-/testklare, ikke produksj
 |---|---|
 | Runner-tjenesten (API, livssyklus, publisering), egress-proxy, worker-klient, `coding.ts`-integrasjon | **BYGGET**, tester i `ops/job-runner/test/` og `modules/tasks/test/wpc1-*.test.ts` |
 | `docker create`-argv parses av ekte Docker-CLI (uten daemon) | **BEVIST** (`docker-cli-argv.test.mjs`; hoppes over der `docker` mangler) |
+| Containerkonfigurasjonen den EKTE Docker-CLI-en bygger av runnerens flagg (privileged=false, cap-drop ALL, read-only, kun `/work`, ingen docker.sock, grenser, exec-`Cmd` ordrett) | **BEVIST mot en falsk Engine API** (`docker-engine.test.mjs`; hoppes over uten `docker`) - fortsatt IKKE mot en ekte daemon |
 | Container faktisk isolert, OOM/PID/tidsavbrudd, nettverk deny-by-default, brannmurregler, reclaim etter ekte krasj, systemd-oppstart, image-bygging | **NOT VERIFIED** - `acceptance.sh` J03-J10 på verten |
 | Ekte Claude Code-kjøring fra containeren via proxyen | **NOT VERIFIED** - `ACCEPT_LIVE_CLAUDE=1 ... acceptance.sh` (J13) |
 | Ekte push til GitHub, branch protection, PAT-rettigheter | **NOT VERIFIED / EIER** - J11 og M01 |
+| Kortlevd git-token fra worker i jobbforespørselen (`source: request`, GitHub App/WP-C3; **AV som standard**, valgt per repo av deg) | **BYGGET**, tester i `ops/job-runner/test/request-token.test.mjs` og `modules/tasks/test/wpc1-host-job-runner-token.test.ts` (ekte git mot en autentiserende smart-HTTP-server); **NOT VERIFIED** mot ekte GitHub App, ekte Docker og ekte worker-container - kapittel 15 |
 
 ---
 
@@ -34,7 +36,8 @@ jobb-container --HTTPS_PROXY--> jarvis-egress-proxy (bruker jarvis-egress, uten 
 ```
 
 * Worker kan be om: opprett jobb for **ett repo i allowlisten**, kjør en kommando (argv, ingen shell), publiser en `jarvis/…`-branch, slett jobben.
-  Worker kan **ikke** sende docker-flagg, mounts, image, nettverk, stier eller credentials.
+  Worker kan **ikke** sende docker-flagg, mounts, image, nettverk, stier eller credentials i `env`. Den ENESTE credentialen som kan komme fra worker er et kortlevd `git_token` i klone-/publish-forespørselen,
+  og kun for repoer du selv har satt til `source: request` i den root-eide konfigen (kapittel 15); standard er at worker aldri håndterer en git-credential.
 * Jobb-containeren ser: `/work` (arbeidskopi uten `origin`), en tmpfs `/home/job`, en tmpfs `/tmp`, og nett kun via proxyen. Ingenting annet.
 * `base.git`, `verify.git`, `out.bundle` ligger i `private/` ved siden av `work/` og er **aldri montert** i containeren.
 * **Hva en jobb faktisk kan kjøre:** imaget har Node 22, npm og git (+ Claude Code). Testløpere utover `node --test`/`node <fil>`/`npm test` (`pytest`, `go`, `cargo`, `make`, `pnpm`, `yarn`) finnes **ikke**
@@ -53,9 +56,10 @@ jobb-container --HTTPS_PROXY--> jarvis-egress-proxy (bruker jarvis-egress, uten 
 3. **Agenten (Claude Code i containeren) er ubetrodd.** Den kan skrive hva som helst i `/work`, inkludert `.git/config` og `.git/hooks`. Derfor kjører
    verten **aldri** `git` i `work/`: publisering = `git bundle` laget *inne i containeren*, hentet inn i et fersk bare-repo (`verify.git`) som låner
    basens objekter, `fsck --strict`, og kun den verifiserte SHA-en pushes.
-4. **git-credentialen** (fine-grained PAT, ett repo) leses fra en fil som kun `jarvis-runner` kan lese, ved hver bruk, og leveres som env til **ett**
+4. **git-credentialen** (standard, `source: file`: fine-grained PAT, ett repo) leses fra en fil som kun `jarvis-runner` kan lese (modus `0400`; åpnere filer nektes), ved hver bruk, og leveres som env til **ett**
    git-kall via runnerens egen `credential.helper` (scopet til eksakt protokoll + vert + repo-sti; følger ingen redirect). Den skrives aldri til disk,
-   argv, `.git/config`, logg eller container.
+   argv, `.git/config`, logg eller container. Valgfritt per repo (`source: request`, kapittel 15) leverer worker i stedet et kortlevd, repo-scopet installasjonstoken i selve forespørselen;
+   da gjelder de samme reglene for hvor det kan havne, og i tillegg: det brukes til **én** operasjon, mellomlagres aldri og lagres aldri i jobben.
 5. **Nettverk:** jobbnettverket er `--internal` (ingen rute ut) med `enable_icc=false`. Docker lar likevel containere på et internt nett nå tjenester på
    *verten* via bridge-adressen; derfor setter `setup-network.sh` en INPUT-kjede som slipper inn **kun** `tcp <gateway>:<proxy-port>`.
 
@@ -69,8 +73,10 @@ jobb-container --HTTPS_PROXY--> jarvis-egress-proxy (bruker jarvis-egress, uten 
 | SSRF via proxyen | `CONNECT 169.254.169.254:80`, `localhost:5432`, DNS-rebinding | kun allowlist `vert:port`; proxyen slår opp DNS selv, krever kun offentlige adresser og kobler til den validerte IP-en |
 | Nå verten fra containeren | SSH/SMB/NAS-grensesnitt på bridge-adressen | INPUT-kjeden i `setup-network.sh` (NOT VERIFIED til J07) |
 | Tømme ressurser | minnebombe, fork-bombe, evig prosess, enorm output | `--memory` uten swap, `--pids-limit`, tidsavbrudd dreper hele containeren, output-tak, maks samtidige jobber, TTL |
+| Blokkere en jobbplass for alltid | lage noe verten ikke kan rydde: et katalogtre dypere enn PATH_MAX (4096 **bytes**, også med flerbyte-tegn), filnavn som ikke er gyldig UTF-8 (kan ikke adresseres som en JavaScript-streng), kataloger uten tilgang, millioner av filer i én katalog - jobben ville blitt `cleanup_pending` for alltid | `forceRemoveTree` (`lib/fsutil.mjs`) bruker GNU `chmod -R u+rwx` + `rm -rf --one-file-system` (fd-relativt, ingen sti-/UTF-8-grense, følger aldri symlenker, krysser aldri filsystemgrenser) i stedet for en egen vandring; nekter roten og toppnivåkataloger; tidsavbrudd 15 min. Fortsatt **ikke** bygget: diskkvote (neste rad) |
 | Fylle disken | skrive uendelig mye (eller millioner av filer) i `/work` | **IKKE begrenset av runneren** - en bind-mount har ingen kvote og `docker --storage-opt` gjelder ikke den. Tak finnes bare for `/tmp` og `/home/job` (tmpfs). Legg `base_dir` på et eget volum/filsystem med kvote (kapittel 14) |
 | Utnytte worker→runner | gjette socket/token | socket `0660` (gruppe `jarvis-job-clients`), bearer i konstant tid, ingen feilsvar som skiller ukjente ruter før autentisering |
+| Worker (feil eller kompromittert) sender et git-token | levere en credential runneren ikke skal ta imot, sende en annen hemmelighet som «token», få tokenet inn i containeren/loggen/svaret | tas kun imot for repoer med `source: request` (ellers 403); formkontroll `ghs_`/`ghp_`/`github_pat_` 20-8192 tegn; avvises i `env`; én operasjon, aldri mellomlagret/lagret; kun env til `ls-remote`/`fetch`/`push`; redigert fra feildetaljer og logg også når git skriver det på stderr (kapittel 15) |
 
 ## 3. Forutsetninger på NAS-en (kontroller før du begynner)
 
@@ -81,6 +87,7 @@ utdata, og stopp ved første avvik.
 cd /volume1/jarvisbuild-data/jarvisbuild && git pull
 node --version                      # MÅ være v22 eller nyere PÅ VERTEN (ikke bare i containerne)
 git --version                       # >= 2.39
+/bin/rm --version | head -1         # MÅ være «GNU coreutils» (runneren rydder agent-skrevne trær med /bin/rm og /bin/chmod; busybox/BSD støtter ikke --one-file-system)
 sudo docker version --format '{{.Server.Version}}'
 sudo docker info --format '{{.SecurityOptions}}'   # skal IKKE inneholde name=userns (uid i containeren må være lik uid på verten for /work) og ikke name=rootless
 ls -l /var/run/docker.sock          # gruppen skal være docker (runneren får tilgang via SupplementaryGroups=docker)
@@ -192,6 +199,9 @@ sudo chown -R "$(id -u):$(id -g)" ops/acceptance/out              # evidensfilen
 
 * `ACCEPTANCE_REPO` er **påkrevd** og må stå i `runner.allowed_repos`. Scriptet nekter alt annet (aldri et stille standardrepo, aldri produksjonsrepoet): J11 pusher en ekte
   branch `jarvis/accept-<tid>` til sandbox-repoet. Slett den etterpå.
+* **Står sandbox-repoet som `{ "source": "request" }`** i `git_credentials` (kapittel 15), må du også sette `ACCEPTANCE_GIT_TOKEN_FILE=<fil>`: en fil (`0600`/`0400`, bare du) med ETT kortlevd, repo-scopet
+  token for sandbox-repoet (`ghs_…`; lag det rett før kjøringen, et installasjonstoken varer 1 time og `--with-ttl` kan vare lenger). Scriptet sender det som `git_token` ved hver klone og publish via en `0600`
+  body-fil (aldri i argv), og J12 leter etter det i journalen. Slett filen etterpå. For et `file`-repo er variabelen en feil (scriptet avbryter): slik kan et token aldri sendes til et repo som ikke har bedt om det.
 * Kjøres som root (`sudo -E`): scriptet trenger å lese tokenfilen og `base_dir`, skrive til socketen, bruke docker og (for J09) styre systemd. Uten root gir enkelte sjekker `FAIL`/`SKIP` med forklaring. API-nøkkelen og `ACCEPTANCE_REPO` leses fra miljøet og skrives aldri ut; legg aldri nøkkelen på kommandolinjen.
 * Evidens skrives til `ops/acceptance/out/job-runner-acceptance-<tid>.md` (git-ignorert, ingen hemmeligheter - bearer-tokenet sendes via en `0600`-headerfil, aldri i argv).
   Exit 1 hvis minst én sjekk er `FAIL`. **`SKIP` og `MANUELL` er ikke bestått.** Lim utskriften inn i chatten, så vurderer jeg den.
@@ -228,20 +238,20 @@ Ingen port er «lukket» før vertsbeviset er kjørt og lest.
 | Port | D-32-krav | Repo-bevis | Vertsbevis | Status |
 |---|---|---|---|---|
 | 1 | Egen kastbar container per jobb | `ops/job-runner/test/lifecycle.test.mjs`, `ops/job-runner/test/container-spec.test.mjs` | `J03_container_per_jobb` | BYGGET |
-| 2 | Uten privileged | `ops/job-runner/test/container-spec.test.mjs`, `ops/job-runner/test/docker-cli-argv.test.mjs` | `J04_docker_inspect` | BYGGET |
-| 3 | Ingen Docker-socket montert | `ops/job-runner/test/container-spec.test.mjs`, `ops/job-runner/test/infra.test.mjs` | `J04_docker_inspect`, `J05_inne_i_containeren` | BYGGET |
-| 4 | Ingen host-home/SSH/generelle secrets montert | `ops/job-runner/test/container-spec.test.mjs`, `ops/job-runner/test/api.test.mjs`, `ops/job-runner/test/credentials.test.mjs` | `J01_filrettigheter`, `J04_docker_inspect`, `J05_inne_i_containeren` | BYGGET |
-| 5 | Kun jobb-workspace tilgjengelig | `ops/job-runner/test/container-spec.test.mjs`, `ops/job-runner/test/lifecycle.test.mjs` | `J04_docker_inspect`, `J05_inne_i_containeren` | BYGGET |
+| 2 | Uten privileged | `ops/job-runner/test/container-spec.test.mjs`, `ops/job-runner/test/docker-cli-argv.test.mjs`, `ops/job-runner/test/docker-engine.test.mjs` | `J04_docker_inspect` | BYGGET |
+| 3 | Ingen Docker-socket montert | `ops/job-runner/test/container-spec.test.mjs`, `ops/job-runner/test/infra.test.mjs`, `ops/job-runner/test/docker-engine.test.mjs` | `J04_docker_inspect`, `J05_inne_i_containeren` | BYGGET |
+| 4 | Ingen host-home/SSH/generelle secrets montert | `ops/job-runner/test/container-spec.test.mjs`, `ops/job-runner/test/api.test.mjs`, `ops/job-runner/test/credentials.test.mjs`, `ops/job-runner/test/docker-engine.test.mjs`, `ops/job-runner/test/adversarial.test.mjs` | `J01_filrettigheter`, `J04_docker_inspect`, `J05_inne_i_containeren` | BYGGET |
+| 5 | Kun jobb-workspace tilgjengelig | `ops/job-runner/test/container-spec.test.mjs`, `ops/job-runner/test/lifecycle.test.mjs`, `ops/job-runner/test/docker-engine.test.mjs` | `J04_docker_inspect`, `J05_inne_i_containeren` | BYGGET |
 | 6 | Ikke-root der praktisk | `ops/job-runner/test/container-spec.test.mjs`, `ops/job-runner/test/infra.test.mjs`, `ops/job-runner/test/lifecycle.test.mjs` | `J04_docker_inspect`, `J05_inne_i_containeren` | BYGGET |
-| 7 | Unødvendige capabilities fjernet | `ops/job-runner/test/container-spec.test.mjs`, `ops/job-runner/test/docker-cli-argv.test.mjs` | `J04_docker_inspect`, `J05_inne_i_containeren` | BYGGET |
-| 8 | CPU/minne/PID/timeout-grenser testet | `ops/job-runner/test/container-spec.test.mjs`, `ops/job-runner/test/lifecycle.test.mjs`, `ops/job-runner/test/api.test.mjs` | `J04_docker_inspect`, `J06_ressursgrenser`, `J10_ttl` | BYGGET |
-| 9 | Nettverk deny-by-default eller jobb-allowlist | `ops/job-runner/test/egress-proxy.test.mjs`, `ops/job-runner/test/infra.test.mjs`, `ops/job-runner/test/lifecycle.test.mjs`, `ops/job-runner/test/config.test.mjs` | `J04_docker_inspect`, `J07_nettverk_deny_by_default` | BYGGET |
-| 10 | Kun jobbspesifikke tokens injisert | `ops/job-runner/test/credentials.test.mjs`, `ops/job-runner/test/credential-source.test.mjs`, `ops/job-runner/test/api.test.mjs` | `J01_filrettigheter`, `J04_docker_inspect`, `J05_inne_i_containeren`, `J12_logger_uten_hemmeligheter` | BYGGET |
-| 11 | Cancellation stopper faktisk container/prosess | `ops/job-runner/test/lifecycle.test.mjs` | `J08_kansellering` | BYGGET |
-| 12 | Crash/reclaim testet i ekte runtime | `ops/job-runner/test/lifecycle.test.mjs` | `J09_reclaim_etter_krasj` | DELVIS |
+| 7 | Unødvendige capabilities fjernet | `ops/job-runner/test/container-spec.test.mjs`, `ops/job-runner/test/docker-cli-argv.test.mjs`, `ops/job-runner/test/docker-engine.test.mjs` | `J04_docker_inspect`, `J05_inne_i_containeren` | BYGGET |
+| 8 | CPU/minne/PID/timeout-grenser testet | `ops/job-runner/test/container-spec.test.mjs`, `ops/job-runner/test/lifecycle.test.mjs`, `ops/job-runner/test/api.test.mjs`, `ops/job-runner/test/docker-engine.test.mjs`, `ops/job-runner/test/adversarial.test.mjs` | `J04_docker_inspect`, `J06_ressursgrenser`, `J10_ttl` | BYGGET |
+| 9 | Nettverk deny-by-default eller jobb-allowlist | `ops/job-runner/test/egress-proxy.test.mjs`, `ops/job-runner/test/infra.test.mjs`, `ops/job-runner/test/lifecycle.test.mjs`, `ops/job-runner/test/config.test.mjs`, `ops/job-runner/test/docker-engine.test.mjs`, `ops/job-runner/test/adversarial.test.mjs` | `J04_docker_inspect`, `J07_nettverk_deny_by_default` | BYGGET |
+| 10 | Kun jobbspesifikke tokens injisert | `ops/job-runner/test/credentials.test.mjs`, `ops/job-runner/test/credential-source.test.mjs`, `ops/job-runner/test/api.test.mjs`, `ops/job-runner/test/adversarial.test.mjs` | `J01_filrettigheter`, `J04_docker_inspect`, `J05_inne_i_containeren`, `J12_logger_uten_hemmeligheter` | BYGGET |
+| 11 | Cancellation stopper faktisk container/prosess | `ops/job-runner/test/lifecycle.test.mjs`, `ops/job-runner/test/adversarial.test.mjs`, `ops/job-runner/test/docker-engine.test.mjs` | `J08_kansellering` | BYGGET |
+| 12 | Crash/reclaim testet i ekte runtime | `ops/job-runner/test/lifecycle.test.mjs`, `ops/job-runner/test/fsutil.test.mjs`, `ops/job-runner/test/docker-engine.test.mjs` | `J09_reclaim_etter_krasj` | DELVIS |
 | 13 | To workers kan ikke ferdigstille samme lease | `modules/tasks/test/d393-worker-lease.test.ts`, `modules/tasks/test/fase6-worker.test.ts` | — | UTENFOR_WP |
 | 14 | Minst én ekte kodejobb job→sandbox→agent→branch→tests→commit→push→PR | `ops/job-runner/test/publish.test.mjs`, `modules/tasks/test/wpc1-coding-host-runner.test.ts`, `modules/tasks/test/wpc1-host-job-runner-client.test.ts` | `J11_ende_til_ende_publish`, `J13_live_claude` | DELVIS |
-| 15 | Kun jobb-branch kan pushes | `ops/job-runner/test/publish.test.mjs`, `ops/job-runner/test/api.test.mjs` | `J11_ende_til_ende_publish` | BYGGET |
+| 15 | Kun jobb-branch kan pushes | `ops/job-runner/test/publish.test.mjs`, `ops/job-runner/test/api.test.mjs`, `ops/job-runner/test/adversarial.test.mjs` | `J11_ende_til_ende_publish` | BYGGET |
 | 16 | `main` beskyttet mot autonom push/merge | `ops/job-runner/test/publish.test.mjs` | `J11_ende_til_ende_publish`, `M01_github_beskyttelse` | EIER |
 | 17 | PR krever menneskelig merge | `modules/tasks/test/pr-publisher.test.ts`, `modules/tasks/test/fase6-worker.test.ts` | `M01_github_beskyttelse` | EIER |
 | 18 | Force-push/sletting av beskyttet branch utilgjengelig for worker-mandat | `ops/job-runner/test/publish.test.mjs` | `M01_github_beskyttelse` | EIER |
@@ -251,7 +261,8 @@ Ingen port er «lukket» før vertsbeviset er kjørt og lest.
 
 Merknader til tabellen:
 
-* **12** er bevist med fake docker (oppstartsavstemming fjerner containere merket `jarvis.role=job` og UUID-kataloger). Ekte krasj mot ekte Docker er J09 (`--with-restart`).
+* **12** er bevist med fake docker (oppstartsavstemming fjerner containere merket `jarvis.role=job` og UUID-kataloger, også trær agenten har gjort uryddelige: ugyldige UTF-8-navn, dypere enn PATH_MAX, modus 000). Ekte krasj mot ekte Docker er J09 (`--with-restart`).
+* **2-8, 11** har i tillegg et bevis mot den EKTE Docker-CLI-en (`docker-engine.test.mjs`): CLI-en kjøres mot en falsk Engine API og vi leser containerkonfigurasjonen den sender (privileged=false, cap-drop ALL, read-only, no-new-privileges, grenser, kun `/work` bind-montert, ingen docker.sock, exec-`Cmd` ordrett, `rm -f -v`). Det er fortsatt IKKE bevis for at en ekte daemon håndhever det (J04-J08).
 * **13, 19, 21** er ikke runner-ansvar: lease er allerede bevist i Fase 6-testene (kjøres mot embedded Postgres), policy-/kill-switch-regresjon i ekte miljø hører til UA-0/UA-5-akseptansen
   (`ops/acceptance/nas-ua0-gate.sh`), og PROJECT_STATUS oppdateres av koordinator (levert som DOCS_FRAGMENT).
 * **14** er DELVIS: hele kjeden worker → runner → container → bundle → verifisert push er bevist i repoet med fake docker og ekte git; en ekte Claude Code-kjøring, ekte GitHub-push og PR er J11/J13 + «én ekte kodejobb» (kapittel 6).
@@ -283,15 +294,19 @@ Miljøvariabelen `JARVIS_JOB_RUNNER_CONFIG` (satt i enhetene) peker på filen.
 | `default_exec_timeout_ms`, `max_exec_timeout_ms` | `60000`, `900000` | tidsavbrudd per `exec`; overskridelse dreper hele containeren |
 | `max_output_bytes` | `2097152` | tak på stdout/stderr per `exec` (2 MiB) |
 | `max_body_bytes` | `262144` | tak på API-forespørsel (256 KiB) |
-| `allowed_repos` | **påkrevd** | liste `owner/repo` (små bokstaver); alt annet gir 403 |
-| `git_credentials` | **påkrevd** | `{ "owner/repo": { "token_file": "/etc/jarvis/git-token-…" } }` - ett PAT per allowlistet repo |
+| `allowed_repos` | **påkrevd** | liste `owner/repo` (små bokstaver; repo-navnet kan ikke starte med `-`, det ville vært et git-flagg); alt annet gir 403 |
+| `git_credentials` | **påkrevd** | én oppføring per allowlistet repo: `{ "token_file": "/etc/jarvis/git-token-…" }` (PAT i fil = `source: file`, **standard**) eller `{ "source": "request" }` (kortlevd token fra worker, kapittel 15). Nøyaktig én kilde per repo |
 | `branch_prefix` | `jarvis/` | publiserte branches må starte med dette (ender alltid på `/`, så `main` er umulig) |
+| `env_allow` | `["ANTHROPIC_API_KEY"]` | allow-liste over env-NAVN en jobb kan få (create og exec); alt annet gir `env_name_forbidden`. Hvert navn må i tillegg bestå deny-listen (`PATH`, `LD_*`, `DOCKER_*`, proxy, credentials ... kan aldri åpnes). Tom liste = ingen env. Se kapittel 16, punkt 2 |
 | `clone_depth`, `clone_timeout_ms` | `50`, `300000` | grunn henting av base-branchen |
 | `publish` | se under | grenser for publisering |
 | `git_identity` | `jarvis-worker`, `worker@jarvis.local` | forfatter/committer i containeren |
 | `sweep_interval_s` | `15` | hvor ofte TTL-rydderen kjører |
 
 **`runner.publish`:** `max_bundle_bytes` (67108864), `max_commits` (20), `max_files` (500), `deny_paths` (`.github/`, `.gitmodules`, `.gitattributes`), `timeout_ms` (180000).
+
+**`runner.git_credentials[repo]`:** `source` (`file` er standard når `token_file` står; `request` = worker leverer et kortlevd token i forespørselen) og `token_file` (påkrevd for `file`, **forbudt** for `request`: tvetydig = nektet, aldri en
+stille fallback fra den ene kilden til den andre). Ukjente nøkler og alle andre verdier for `source` (også `null`/tom streng/annen case) gir `ConfigError`, og tjenesten starter ikke. Endring krever `sudo systemctl restart jarvis-job-runner`.
 
 **`egress_proxy`** (proxy-tjenesten)
 
@@ -312,14 +327,17 @@ Miljøvariabelen `JARVIS_JOB_RUNNER_CONFIG` (satt i enhetene) peker på filen.
 | Kall | Body | Svar |
 |---|---|---|
 | `GET /v1/health` | - | `200 {status:"ok", api_version, active_jobs, max_jobs}` |
-| `POST /v1/jobs` | `{repo, base_branch?, env?, task_id?, tenant_id?}` | `201 {job_id, workdir:"/work", head_sha, base_branch, expires_at}` |
+| `POST /v1/jobs` | `{repo, base_branch?, env?, task_id?, tenant_id?, git_token?}` | `201 {job_id, workdir:"/work", head_sha, base_branch, expires_at}` |
 | `POST /v1/jobs/:id/exec` | `{argv:[…], timeout_ms?, env?}` | `200 {code, stdout, stderr, truncated, timed_out}` (tidsavbrudd: `code` 124, containeren er drept og jobben `terminated`) |
-| `POST /v1/jobs/:id/publish` | `{branch}` | `200 {branch, commit_sha, base_sha, commits, files_changed}` |
+| `POST /v1/jobs/:id/publish` | `{branch, git_token?}` | `200 {branch, commit_sha, base_sha, commits, files_changed}` |
 | `DELETE /v1/jobs/:id` | - | `200 {deleted:true,state:"gone"}` (idempotent) eller `202 {deleted:false,state:"cleanup_pending"}` |
 
-`env`-navn kan ikke være credentials/git-konfig/proxy/`PATH`/`HOME`/`LD_*`/`DOCKER_*`/vault-navn; verdier legges i containeren som miljø (aldri i argv). Feil har alltid formen
+`env`-navn må stå i `runner.env_allow` (standard: KUN `ANTHROPIC_API_KEY`) og i tillegg bestå deny-listen (credentials/git-konfig/proxy/`PATH`/`HOME`/`LD_*`/`DOCKER_*`/vault-navn kan aldri åpnes); verdier legges i containeren som miljø (aldri i argv).
+**Én forespørsel per forbindelse:** alle svar har `Connection: close`, så en ekstra (rørlinjet) forespørsel på samme forbindelse behandles aldri - den kunne ikke blitt besvart og ville etterlatt en jobb ingen kjenner id-en til.
+`git_token` finnes KUN i `POST /v1/jobs` (klone) og `POST /v1/jobs/:id/publish` (push) - aldri i `exec`, `DELETE` eller `env` (ukjent felt) - og er **påkrevd** for repoer med `source: request` og **forbudt** for `file`-repoer. Form: `ghs_`/`ghp_`/`github_pat_` + `[A-Za-z0-9_.-]`,
+20-8192 tegn. Det brukes til ÉN operasjon: tokenet fra klonen gjenbrukes aldri til publish (worker sender et fersk). Verdien ekkoes aldri i et svar eller en feil. Feil har alltid formen
 `{error:"<stabil kode>", detail?:"<renset>"}`: `unauthorized` 401, `unknown_field`/`invalid_request`/`env_name_forbidden`/`branch_invalid` 400, `repo_not_allowed` 403, `job_not_found` 404,
-`job_busy`/`job_terminated`/`job_not_ready` 409, `too_many_jobs` 429, `no_changes`/`path_denied`/`bundle_*` 422, `git_credential_unavailable` 403/502/504, `git_network_failed`/`push_failed`/`push_rejected`/
+`job_busy`/`job_terminated`/`job_not_ready` 409, `too_many_jobs` 429, `git_token_invalid`/`git_token_required`/`git_token_in_env` 400, `git_token_not_accepted` 403, `no_changes`/`path_denied`/`bundle_*` 422, `git_credential_unavailable` 403/502/504, `git_network_failed`/`push_failed`/`push_rejected`/
 `container_*_failed` 502, `docker_unavailable`/`job_network_not_internal`/`job_network_missing` 503, `bundle_timeout` 504.
 
 ## 10. Nettverk og brannmur (D-32 port 9) - detaljer
@@ -343,6 +361,7 @@ Miljøvariabelen `JARVIS_JOB_RUNNER_CONFIG` (satt i enhetene) peker på filen.
     }
   }
   ```
+* **Adressevalidering i proxyen:** DNS-svaret vurderes på BYTENE, ikke teksten: IPv4 innebygd i IPv6 (IPv4-mappet `::ffff:a.b.c.d`, NAT64 `64:ff9b::/96`, SIIT `::ffff:0:a.b.c.d`, 6to4 `2002::/16`) sjekkes mot IPv4-reglene uansett om adressen skrives i hex, full form eller punktdesimal (en tidligere tekst-regex slapp `64:ff9b::7f00:1` gjennom). I tillegg er hele `2001::/23` (Teredo, benchmarking, ORCHID m.fl.), dokumentasjon, SRv6, lokal NAT64, site-local og IPv4-kompatible adresser nektet.
 * **IPv6:** nettverket opprettes uten `--ipv6`, og reglene dekker IPv4. At containeren ikke har en ikke-loopback IPv6-adresse er **ikke verifisert**; J07 skriver tallet (forventet 0) som observasjon. Er det ikke 0, må tilsvarende `ip6tables`-regler legges til.
 * **Alternativ uten vertsprosess som lytter på bridgen:** kjør proxyen som en container på både jobbnettverket og et vanlig nett, og bruk Dockers `isolated` gateway-modus for jobbnettverket. Det er bare **beskrevet**, ikke bygget eller testet.
 * Proxyen svarer kun på `CONNECT vert:port` (200 for allowlist, 403/400 ellers, 405 for vanlig HTTP). Den logger aldri innhold, kun `vert:port` og årsak.
@@ -351,7 +370,7 @@ Miljøvariabelen `JARVIS_JOB_RUNNER_CONFIG` (satt i enhetene) peker på filen.
 
 Hvert trinn feiler lukket, og ingen git kjøres mot agentens katalog: (1) headeren i bundlen parses strengt (versjon 2, nøyaktig én ref `HEAD`, nøyaktig én forutsetning = basecommit, `PACK`-signatur);
 (2) bundlen hentes inn i et ferskt bare-repo; (3) `git fsck --strict` (fetch fsck-er *ikke* bundler - målt); (4) SHA = headerens, etterkommer av basen, ingen merge-commits, ≤ `max_commits`;
-(5) endrede stier: `.git`-komponenter (også NTFS-varianter/usynlige tegn), nekteliste (`.github/` osv.), submodul/gitlink avvist, ≤ `max_files`, ingen tomme endringer; (6) `git push <sha>:refs/heads/<prefiks><id>` uten force, uten sletting,
+(5) endrede stier: `.git`-komponenter (store/små bokstaver, usynlige tegn, etterfølgende punktum/mellomrom, NTFS-kortnavnet `git~1`, alternative datastrømmer = enhver komponent med `:`), nekteliste (`.github/` osv. - også etterfølgende punktum/mellomrom og NTFS-kortnavn som `github~1`, `gitmod~1`, `gitatt~1`), submodul/gitlink avvist, ≤ `max_files`, ingen tomme endringer; (6) `git push <sha>:refs/heads/<prefiks><id>` uten force, uten sletting,
 med runnerens credential. Ingenting av dette er kjørt mot ekte GitHub (J11).
 
 ## 12. Drift og feilsøking
@@ -365,14 +384,21 @@ med runnerens credential. Ingenting av dette er kjørt mot ekte GitHub (J11).
 | `runner.image:placeholder_not_replaced` | eksempelkonfigen er ikke tilpasset | kapittel 4, steg 2 og 4 |
 | `container_user_must_equal_service_uid` | `runner.user` har annen uid enn `jarvis-runner` | sett `user` til `<uid for jarvis-runner>:<gid>` (`id jarvis-runner`) |
 | `job_network_not_internal` / `job_network_missing` | nettverket mangler eller er omkonfigurert | `sudo infra/job-runner/setup-network.sh`; ikke-internt nett må fjernes manuelt (`docker network rm jarvis-jobs`) |
-| `git_credential_unavailable` (403/502) | PAT-fil mangler, feil eier/modus, feil format, repo ikke i `git_credentials` | `ls -l /etc/jarvis/git-token-*` (skal være `-r-------- jarvis-runner`) |
+| `git_credential_unavailable` (403/502) | PAT-fil mangler, feil eier/modus (åpnere enn `0400`/`0600` nektes), feil format, repo ikke i `git_credentials` | `ls -l /etc/jarvis/git-token-*` (skal være `-r-------- jarvis-runner`) |
+| `git_token_required` (400) | repoet står som `source: request`, men worker sendte ikke token (worker uten `gitCredentialSource`, eller GitHub App ikke aktiv) | kapittel 15; eller sett repoet tilbake til `token_file` og restart runneren |
+| `git_token_not_accepted` (403) | worker sendte token for et repo som står som `source: file` (standard) | sett repoet til `{ "source": "request" }` og restart runneren, eller fjern kilden hos worker |
+| `git_token_invalid` / `git_token_in_env` (400) | tokenet er ikke `ghs_`/`ghp_`/`github_pat_` 20-8192 tegn, eller samme verdi lå i jobb-`env` | worker-bug: tokenet ekkoes aldri, så se worker-loggen (`host_job_runner_error:…`) |
+| `host_job_runner_error:git_credential_unavailable:<kode>` (fra worker, status 0) | kilden hos worker (GitHub App) kastet, hang (30 s) eller ga et uvelformet token; ingenting ble sendt til runneren | `<kode>` er en stabil kode (f.eks. `GITHUB_APP_…`), aldri kildens melding; se WP-C3-runbooken for GitHub App |
+| `env_name_forbidden` (400) ved opprettelse eller `exec` | worker sendte et env-navn som ikke står i `runner.env_allow` (standard kun `ANTHROPIC_API_KEY`), eller navnet stoppes av deny-listen | åpne navnet i `env_allow` KUN hvis det er ufarlig, og `sudo systemctl restart jarvis-job-runner`; `PATH`/`HOME`/`LD_*`/`DOCKER_*`/proxy/credential-navn kan aldri åpnes (oppstart nektes) |
+| `bundle_fsck_failed` (422) ved HVER publish | `fsck --strict` sjekker også basens objekter (lånt via alternates): et gammelt objekt med f.eks. gruppe-skrivbar filmodus (100664) i de siste `clone_depth` commitene feiler strengt | se `detail`; skriv aldri om historikk for dette. Sett `clone_depth` lavere, eller rapporter det - dette er en funksjonell begrensning, ikke en sikkerhetsfeil |
 | `git_network_failed` ved opprettelse | proxy/DNS/PAT feil, eller GitHub utilgjengelig fra verten | `sudo journalctl -u jarvis-job-runner -n 50`; test `git ls-remote` manuelt som `jarvis-runner` uten å skrive token noe sted |
 | `path_denied`, `bundle_*`, `no_changes` ved publish | endring rammet en regel (kapittel 11) | les `detail`; fjern `.github/`-endringer, del opp i færre commits/filer |
 | `push_rejected`/`push_failed` | GitHub avviste (branch protection, PAT-rettigheter, eksisterende branch med annen historikk) | sjekk PAT og branchnavn; runneren bruker aldri force |
 | `container_start_failed` med «docker-init» i detaljen | Docker-installasjonen mangler `docker-init` (brukes av `--init`) | installer/gjenopprett `docker-init` ved siden av `dockerd`; ikke fjern `--init` fra koden |
 | J04 melder «swap tillatt» | kjernen mangler swap-accounting, så `--memory-swap` ignoreres (OOM kan utsettes av vertens swap) | aktiver `swapaccount=1` på kjernen eller slå av vertens swap; ellers aksepter og dokumentér avviket |
 | Runner/proxy stopper rett etter oppstart med `git_could_not_start`, `spawn EPERM` eller lignende | systemd-filteret `SystemCallFilter=@system-service` er for stramt for en eldre systemd (mangler `clone3` i `@system-service`) | kontroller `systemctl --version`; som siste utvei kommenter ut de to `SystemCallFilter`/`SystemCallErrorNumber`-linjene i enheten (svekker herdingen - dokumentér det) og `sudo systemctl daemon-reload` |
-| Mange rester av `jarvis-job-…`-containere | runner krasjet midt i opprydding | restart runneren: oppstartsavstemmingen fjerner alt merket `jarvis.role=job` og alle UUID-kataloger |
+| Mange rester av `jarvis-job-…`-containere | runner krasjet midt i opprydding | restart runneren: oppstartsavstemmingen fjerner alt merket `jarvis.role=job` og alle UUID-kataloger i `base_dir` |
+| Jobb blir stående som `cleanup_pending` (DELETE gir 202) | `docker rm -f` feilet (daemon henger), eller `rm` feilet/ble tidsavbrutt (disk, rettigheter) | `sudo journalctl -u jarvis-job-runner \| grep -E 'job_(container|dir)_remove_failed'` (årsaken er en stabil kode: `rm_failed`, `rm_timeout`, `rm_not_runnable`, `still_exists`; aldri filnavn); TTL-rydderen prøver hvert `sweep_interval_s`. Ugyldige navn og dype trær er ikke lenger en årsak |
 
 * **Nødstopp:** `sudo systemctl stop jarvis-job-runner jarvis-egress-proxy` og `sudo docker ps -aq --filter label=jarvis.role=job | xargs -r sudo docker rm -f`. Worker feiler da lukket.
 * **Logger:** `sudo journalctl -u jarvis-job-runner -u jarvis-egress-proxy`. Strukturert JSON; hendelser: `runner_started`, `job_created`, `job_published`, `job_removed`, `reconcile_done`, `request_rejected`,
@@ -387,11 +413,80 @@ mens git kjøres via `docker exec` i en annen container (Q-46 punkt 5: «latent 
 
 ## 14. Åpne punkter (ingenting av dette er bygget)
 
-* **GitHub App-identitet (Q-45b / WP-C3):** i dag en fine-grained PAT per repo. `GitCredentialSource { tokenFor(repoSlug) -> Promise<string> }` er et injiserbart grensesnitt (strukturelt likt WP-C3 sin kontrakt), og tokens opp til 8192 tegn
-  godtas (`ghs_<APPID>_<JWT>`). To veier til en kortlevd App-token er mulige og **ikke valgt**: (a) en vertsside kilde som leser App-privatnøkkelen fra en `0400`-fil hos `jarvis-runner`, eller (b) at worker/api henter tokenet og sender det i jobbforespørselen.
-  (b) gjør at worker igjen håndterer en git-credential (om enn kortlevd) og krever en API-utvidelse - en eier-/arkitektbeslutning.
+* **GitHub App-identitet (Q-45b / WP-C3):** standard er fortsatt en fine-grained PAT per repo (`source: file`). `GitCredentialSource { tokenFor(repoSlug) -> Promise<string> }` er et injiserbart grensesnitt (strukturelt likt WP-C3 sin kontrakt), og tokens opp til 8192 tegn
+  godtas (`ghs_<APPID>_<JWT>`). Av de to veiene til en kortlevd App-token er **(b) bygget som opt-in per repo** (kapittel 15: worker henter tokenet og sender det i jobbforespørselen); **(a)** (en vertsside kilde som leser App-privatnøkkelen fra en `0400`-fil hos `jarvis-runner`) er
+  **ikke bygget** - den ville holdt App-nøkkelen utenfor worker helt, men gjort runneren til en GitHub-klient. Koblingen i `apps/api/src/worker-main.ts` er **ikke gjort** i WP-C1 (GitHub App-koden ligger på WP-C3-grenen): se kapittel 15, «Slik kobler du det».
 * **Diskkvote per jobb finnes ikke.** Agenten kan fylle `/work` (bind-mount) til volumet er fullt, og samme volum kan være delt med Postgres/backup på NAS-en. Minimum: sett `runner.base_dir` (og dermed `StateDirectory`)
   på et eget filsystem/dataset med fast størrelse eller prosjektkvote (ext4/xfs `prjquota`), og kjør `df` mot det i overvåkingen. Å la runneren måle og drepe jobber over en grense er **ikke bygget** (et raskt skrivende program fyller disken mellom to målinger).
 * Ingen støtte for Windows/PC-utvikling (kun Linux med systemd/Docker); utviklingsmaskinen bruker fortsatt prosess-sandboxen.
 * Per-repo egress-allowlist og per-repo ressursgrenser finnes ikke (én policy for alle repoer).
 * Ekte Docker-isolasjon, brannmur, systemd og GitHub er ikke verifisert (se toppen). Verifiser med `acceptance.sh`.
+
+## 15. Kortlevd git-token fra worker (GitHub App, `source: request`) - valgfritt, AV som standard
+
+**Hva det er.** Standard (`source: file`) holder git-credentialen helt utenfor worker: en PAT i en fil bare runneren leser. Med GitHub App-autentisering (WP-C3, runbooken `GITHUB_APP.md` på WP-C3-grenen) finnes det en bedre credential:
+et installasjonstoken som varer 1 time og er scopet til ETT repo. Det henter worker, og runneren kan ikke selv utstede det uten å få App-privatnøkkelen. Derfor kan du **per repo** sette `{ "source": "request" }` i `git_credentials`:
+worker sender da et fersk token som `git_token` i `POST /v1/jobs` (klone) og et NYTT i `POST /v1/jobs/:id/publish` (push).
+
+**Hva du godtar ved å slå det på.** Worker håndterer igjen en (kortlevd) git-credential. Worker har allerede App-nøkkelen (den ligger i vaulten worker leser), så runneren mister ingen sikkerhet den hadde, men det er en tillitsutvidelse du velger selv, repo for repo, i en root-eid fil.
+Runneren kan IKKE kontrollere at tokenet faktisk er scopet til repoet (ingen introspeksjon mot GitHub): det er GitHubs ansvar. Runneren bruker det uansett kun til å klone akkurat det allowlistede repoet og pushe `refs/heads/jarvis/<id>` dit.
+
+**Hva som er bevist i repoet** (`ops/job-runner/test/request-token.test.mjs`, `modules/tasks/test/wpc1-host-job-runner-token.test.ts`; ekte git mot en lokal smart-HTTP-server som krever Basic-auth og logger et fingeravtrykk av passordet per operasjon):
+
+* policyen er fail-closed og sjekkes FØR noe reserveres: `request`-repo uten token = 400, `file`-repo med token = 403; ingen jobb, katalog, container, docker-kall eller nettverkskall ved avvisning;
+* klone bruker token A og push bruker token B (aldri A til push); tokenet fra klonen gjenbrukes ikke, og ligger ikke i jobbtilstanden;
+* tokenet står aldri i argv til noe git-kall, og leveres kun som env til `ls-remote`, `fetch` mot remote og `push` - ikke til `init`, lokal klone, `fsck`, `rev-list` e.l.;
+* tokenet finnes ikke i docker-argv/-env, containeren, arbeidsmappen, `.git/config`, filsystemet, loggen eller noe svar - heller ikke når en server **reflekterer passordet** i en git-protokollfeil slik at git skriver hele tokenet på stderr (da er det `[REDACTED]`);
+* et token for ett repo virker ikke mot et annet (serveren binder credentials til repo-sti), også med to samtidige jobber;
+* 900 og 8192 tegn gjennom hele kjeden body -> env -> credential-helper -> git -> `Authorization`;
+* formkontroll: kun `ghs_`/`ghp_`/`github_pat_` (en feilsendt Anthropic-nøkkel, bearer-token e.l. blir aldri et passord til github.com), 20-8192 tegn, smalt tegnsett (ingen linjeskift/`:`/`@`/`/`), samme verdi i `env` avvises;
+* hemmelighetsregisteret er tellende: kortlevde tokens hoper seg ikke opp, og en avsluttet jobb tar ikke bort redigeringen for en annen jobb med samme env-hemmelighet;
+* worker-klienten feiler lukket ved enhver kildefeil (kaster, henger, uvelformet svar) uten å gjengi kildens melding.
+
+**Slik slår du det på (alle fire steg):**
+
+1. GitHub App-autentisering er aktiv hos worker (WP-C3: `JARVIS_GITHUB_APP_ID`, `JARVIS_GITHUB_APP_INSTALLATION_ID`, privatnøkkel i vaulten) og akseptert med WP-C3-scriptet. Appen må ha minst *Contents: Read and write* og *Pull requests: Read and write* på sandbox-/produksjonsrepoet.
+2. `/etc/jarvis/job-runner.json`: `"git_credentials": { "owner/repo": { "source": "request" } }` - **uten** `token_file` for det repoet. PAT-filen for det repoet kan slettes når du er fornøyd.
+3. `sudo systemctl restart jarvis-job-runner` (konfigen leses kun ved oppstart; en feil i den nektes med en stabil kode i journalen).
+4. **Slik kobler du det** (ikke gjort i WP-C1, fordi GitHub App-koden ligger på WP-C3-grenen): i `apps/api/src/worker-main.ts` gis kilden til runner-oppløseren, **kun når App-modus faktisk er aktiv**:
+   `resolveJobSandboxRunner(process.env, { gitCredentialSource: <App-modus aktiv> ? githubAuth.gitCredentialSource() : undefined })`. Gis en kilde i PAT-modus (WP-C3 sin `gitCredentialSource()` returnerer da PAT-en), sender worker PAT-en til runneren, og et `file`-repo avviser den
+   (`git_token_not_accepted`) - jobben feiler lukket, aldri et stille bytte. Verdien av `JARVIS_JOB_RUNNER_*` er uendret.
+
+**Slik slår du det av:** sett repoet tilbake til `{ "token_file": "/etc/jarvis/git-token-…" }` (ny PAT-fil, `0400`, eid av `jarvis-runner`), restart runneren, og la worker mangle kilden. Kjørende jobber berøres ikke av en konfigendring før restarten.
+
+**Ikke verifisert / ikke bygget:**
+
+* **NOT VERIFIED** mot en ekte GitHub App (installasjonstoken, scope, utløp, 401 midt i en lang jobb), ekte Docker og en ekte worker-container. Verifiser ved å sette sandbox-repoet til `source: request`, lage et token med WP-C3-scriptet og kjøre
+  `ACCEPTANCE_GIT_TOKEN_FILE=<fil> ACCEPTANCE_REPO=… sudo -E ops/job-runner/acceptance.sh` (kapittel 6), og deretter én ekte kodejobb gjennom Jarvis.
+* Tokenet er i prosessminnet hos runneren (og i env hos git-/helper-barneprosessene) mens operasjonen pågår; JavaScript kan ikke nullstille strenger. Enheten har `LimitCORE=0`, så en krasj skriver ingen minnedump med tokenet.
+* Redigeringen er verdibasert (nøyaktig streng): et token som git skriver i en annen koding (base64/URL-kodet) ville ikke bli fanget. Git kjøres uten `GIT_TRACE*`/`GIT_CURL_VERBOSE` (renset env), så det skjer ikke i dag.
+* Et token utløper etter 1 time. En kodejobb som tar lenger enn det mellom klone og publish er uproblematisk (publish får et NYTT token), men én enkelt operasjon som varer > 1 time (klone/push av en enorm bundle) ville feile; grensene `clone_timeout_ms`/`publish.timeout_ms` (5 / 3 min) ligger langt under.
+
+## 16. Sikkerhetsantagelser - angrip disse først (til den uavhengige gjennomgangen)
+
+Dette er hva sikkerheten FAKTISK hviler på, og hva som med vilje IKKE er løst. Alt er `NOT VERIFIED` mot ekte Docker/systemd/brannmur/GitHub til `acceptance.sh` er kjørt (kapittel 6).
+
+1. **Tillitsgrensen er runner-koden, ikke systemd-herdingen.** `jarvis-runner` er i `docker`-gruppen = effektivt root. Ingen API-felt kan bli docker-flagg, mount, image, nettverk eller sti (flaggene bygges av `buildJobContainerCreateArgs` fra root-eid policy;
+   ukjente felt avvises). En ny rute, et nytt felt eller en `exec`-variant som tar flagg bryter hele isolasjonen. Koden og policyen er root-eide og skrivebeskyttet for tjenestebrukeren. Kildekodevaktene i `adversarial.test.mjs` (gruppe J) låser at kun
+   `lib/process.mjs` starter prosesser (uten shell), at ingen flagg-literaler finnes utenfor den delte spesifikasjonen, og at ruteflaten er nøyaktig de fem dokumenterte.
+2. **Jobb-env settes i miljøet til den vertsside `docker`-klienten** (`-e NAVN` leser verdien derfra, så den holdes utenfor argv). Et navn klienten eller libc tolker (`LD_PRELOAD`, `GCONV_PATH`, `LOCPATH`, `GODEBUG`, `TMPDIR` ...) kunne påvirket en prosess med
+   docker-gruppe. Forsvaret er nå to lag: (a) en **allow-liste** (`runner.env_allow`, standard kun `ANTHROPIC_API_KEY`) som vertsadmin eier, og (b) den delte **deny-listen** (`HOST_RUNNER_FORBIDDEN_ENV` i `modules/tasks/src/job-container-spec.mjs`), som også gjelder hvert navn
+   i allow-listen ved oppstart (en admin kan ikke ved en feil åpne for `PATH`/`LD_*`/`DOCKER_*`/credentials). Åpner du flere navn, eier du risikoen. **Verdiene** er ikke et problem (docker-klienten tolker dem ikke). Det ryddigste ville vært å holde verdiene helt utenfor
+   klientens miljø med `--env-file`, men `--env-file /dev/stdin` VIRKER IKKE fra Node (måling: `spawn` gir barneprosessen en socketpair, og `open("/dev/stdin")` på en socket gir ENXIO); en env-fil må være en vanlig fil (helst tmpfs), og det er **ikke bygget**.
+3. **Container-uid = runner-uid (10001)** (påkrevd for at runneren kan rydde filene agenten skriver). PID-navnerommet skiller prosessene, men en kjerne-/runtime-escape gir runnerens uid, dvs. docker-gruppen og lesetilgang til PAT-filene (`0400`) og prosessminnet.
+4. **Vertens git leser agent-kontrollert pakkedata** (`fetch` av bundle, `fsck --strict`, `diff-tree`, `rev-list`) i et ferskt bare-repo uten hooks/config/checkout. En minnefeil i git ville gitt kode som runner-uid. Nedmildring: git >= 2.39, `transfer.fsckObjects`, bundle-/commit-/fil-grenser og
+   tidsavbrudd. **Ikke** nedmildret: en pakke med delta-eksplosjon kan fylle disken (ingen kvote, kapittel 14). Selv om «containeren» fikk skrive i runnerens private mappe (worst case, testet i `adversarial.test.mjs` F), leser verts-git aldri `base.git/config`/hooks under publish.
+5. **Opprydding av agent-skrevne trær** skjer med `/bin/chmod -R u+rwx` og `/bin/rm -rf --one-file-system` (GNU coreutils, fd-relativt). Det er det eneste vertsprogrammet som røres av hvordan agenten har strukturert filsystemet (ugyldige UTF-8-navn, dybde > PATH_MAX, modus 000, millioner av filer er testet).
+   Antagelsen er at coreutils håndterer dette riktig og at `install-host.sh` fant GNU-varianten; en feil gir `cleanup_pending` (jobbplassen holdes), aldri en sti utenfor treet. Roten og toppnivåkataloger nektes.
+6. **Socket-autorisasjon = filrettigheter + delt bearer.** Alle i gruppen `jarvis-job-clients` kan kalle alle endepunkt; jobb-id (UUIDv4) er eneste skille mellom jobber (ingen eierskap per klient), og alle kan fylle `max_concurrent_jobs` eller holde de 32 tilkoblingene åpne (30 s tidsavbrudd per forespørsel).
+7. **Kortlevd token fra worker (`source: request`, kapittel 15):** runneren kan ikke kontrollere scope/utløp (ingen introspeksjon); redigeringen er verdibasert; tokenet ligger i prosessminnet hos runneren og i env hos git-/helper-barnene mens operasjonen pågår;
+   en kompromittert worker kan allerede lage tokens (den har App-nøkkelen), så runneren begrenser KUN hva den selv bruker tokenet til (klone det allowlistede repoet, pushe `refs/heads/jarvis/<id>`, aldri force/sletting).
+8. **Egress-proxyen slipper `CONNECT` til `github.com`, `api.github.com` og `api.anthropic.com` fra containeren** (anonymt mot GitHub; med jobbens egen nøkkel mot Anthropic). Dette er mulige utgangskanaler for data fra en kompromittert agent (lav båndbredde); allowlisten er den eneste begrensningen.
+   **Runnerens egen** utgående trafikk (git mot github.com, docker mot sin socket) er ikke begrenset av brannmur: en kompromittert runner kan nå hva verten kan nå.
+9. **Logg og feil er sanitert, ikke bevist tomme for alle kodinger.** Kjente hemmeligheter (bearer, env-verdier, git-token) redigeres som eksakte strenger i logg, feildetaljer og `exec`-output; en hemmelighet i annen koding (base64/URL-kodet) fanges ikke.
+   Interne stier (`base_dir`, installasjonskatalogen) erstattes i git-/docker-feildetaljer med `<jobs>`/`<runner>`; det er best-effort (agentens egen `exec`-output er agentens og scrubbes ikke).
+10. **Repoet kjører agentens kode i CI.** Runneren nekter endringer i `.github/` (workflows), men agenten kan endre `package.json`-skript, testfiler og byggekonfig som en eksisterende workflow kjører på pull request / push. `.github/workflows/ci.yml` bruker i dag ingen `secrets.*` og har begrenset `permissions`;
+    holder du det slik (og krever menneskelig merge + branch protection), er CI en uskyldig mottaker. Legger du secrets i en workflow som kjører på `jarvis/**`-branches, er det en angrepsvei runneren ikke kan stenge.
+11. **Én runner per Docker-daemon.** Oppstartsavstemmingen fjerner ALLE containere merket `jarvis.role=job`; en andre runner mot samme daemon ville fått sine jobber fjernet.
+12. **Nettverket kontrolleres før hver jobb, ikke under den.** `--internal` verifiseres ved oppstart og før hver `create`; en omkonfigurering midt i en kjørende jobb fanges først ved neste. Brannmurreglene (INPUT-kjeden) må gjenopprettes etter en brannmur-reload (kapittel 10).
+13. **Én forespørsel per forbindelse.** Node kan ha lest en rørlinjet forespørsel før forbindelsen ble lukket; den behandles ikke (testet), men en klient som bevisst åpner mange forbindelser kan holde alle 32 opptatt (se punkt 6).

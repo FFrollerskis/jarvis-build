@@ -106,15 +106,17 @@ describe("B: konfigurasjonsreferansen dekker hver nøkkel skjemaet godtar", () =
   const runnerKeys = keysOf("onlyKeys(r, [");
   const publishKeys = keysOf('onlyKeys(publishRaw, [');
   const proxyKeys = keysOf("onlyKeys(p, [");
+  const credentialKeys = keysOf("onlyKeys(e, [");
 
   it("skjemaet har de forventede nøkkelgruppene (sanity: parseren finner noe)", () => {
     expect(runnerKeys.length).toBeGreaterThan(20);
     expect(publishKeys).toEqual(["max_bundle_bytes", "max_commits", "max_files", "deny_paths", "timeout_ms"]);
     expect(proxyKeys.length).toBeGreaterThanOrEqual(9);
+    expect(credentialKeys).toEqual(["token_file", "source"]);
   });
 
-  it("hver nøkkel i runner-, publish- og egress_proxy-skjemaet står i runbooken som `nøkkel`", () => {
-    for (const key of [...runnerKeys, ...publishKeys, ...proxyKeys]) expect(runbook, key).toContain(`\`${key}\``);
+  it("hver nøkkel i runner-, publish-, git_credentials- og egress_proxy-skjemaet står i runbooken som `nøkkel`", () => {
+    for (const key of [...runnerKeys, ...publishKeys, ...credentialKeys, ...proxyKeys]) expect(runbook, key).toContain(`\`${key}\``);
   });
 
   it("miljøvariablene runneren og worker bruker er dokumentert", () => {
@@ -194,5 +196,57 @@ describe("D: nft-eksempelet i runbooken", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("E: kapittel 15 (kortlevd git-token fra worker) stemmer med koden", () => {
+  const lib = (name) => read(`ops/job-runner/lib/${name}`);
+  const sources = `${lib("jobs.mjs")}\n${lib("schemas.mjs")}\n${lib("credentials.mjs")}`;
+  const chapter = runbook.slice(runbook.indexOf("## 15. "));
+
+  it("kapittelet finnes, er AV som standard og sier ærlig hva som ikke er verifisert", () => {
+    expect(chapter.length).toBeGreaterThan(1500);
+    expect(chapter).toMatch(/AV som standard/);
+    expect(chapter).toContain("NOT VERIFIED");
+    expect(chapter).toContain("tillitsutvidelse");
+    expect(chapter).toContain("ikke gjort i WP-C1");
+  });
+
+  it("hver feilkode runbooken nevner for git_token finnes i koden, og hver slik kode i koden står i runbooken", () => {
+    // `git_token_file` er etiketten på PAT-fil-lesingen (ikke en feilkode)
+    const inCode = new Set([...sources.matchAll(/"(git_token_[a-z_]+)"/g)].map((m) => m[1]).filter((x) => x !== "git_token_file"));
+    expect([...inCode].sort()).toEqual(["git_token_in_env", "git_token_invalid", "git_token_not_accepted", "git_token_required"]);
+    for (const code of inCode) expect(runbook, code).toContain(code);
+    const inDoc = new Set([...runbook.matchAll(/\bgit_token_[a-z_]+\b/g)].map((m) => m[0]).filter((x) => !["git_token_file"].includes(x)));
+    for (const code of inDoc) expect(inCode.has(code), `${code} står i runbooken men ikke i koden`).toBe(true);
+  });
+
+  it("standarden i koden er `file` (PAT-fil), og `request` er en eksplisitt, per-repo opt-in som kapittelet beskriver", async () => {
+    const { validateConfig } = await import("../lib/config.mjs");
+    const base = { token_file: "/etc/jarvis/job-runner.token", image: `sha256:${"a".repeat(64)}`, network: "jarvis-jobs", egress_proxy_url: "http://172.30.77.1:3128", allowed_repos: ["a/b"] };
+    expect(validateConfig({ version: 1, runner: { ...base, git_credentials: { "a/b": { token_file: "/etc/x" } } } }, { require: ["runner"] }).runner.gitCredentials["a/b"].source).toBe("file");
+    expect(chapter).toContain('{ "source": "request" }');
+    expect(chapter).toContain("sudo systemctl restart jarvis-job-runner");
+  });
+
+  it("ACCEPTANCE_GIT_TOKEN_FILE finnes i scriptet og i runbooken; enhetene har LimitCORE=0 som kapittelet sier", () => {
+    expect(acceptance).toContain("ACCEPTANCE_GIT_TOKEN_FILE");
+    expect(runbook).toContain("ACCEPTANCE_GIT_TOKEN_FILE");
+    for (const unit of ["jarvis-job-runner.service", "jarvis-egress-proxy.service"]) expect(read(`infra/job-runner/${unit}`)).toMatch(/^LimitCORE=0$/m);
+    expect(chapter).toContain("LimitCORE=0");
+  });
+
+  it("kapittelet viser aldri et ekte token (bare plassholdere som ghs_…)", () => {
+    expect(chapter).not.toMatch(/gh[sp]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}/);
+  });
+
+  it("kapittel 16 (sikkerhetsantagelser) finnes, nevner deny-listen for env-navn ærlig og peker på koden som håndhever den", () => {
+    const section = runbook.slice(runbook.indexOf("## 16. "));
+    expect(section.length).toBeGreaterThan(2000);
+    expect(section).toContain("deny-liste");
+    expect(section).toContain("--env-file");
+    expect(section).toContain("HOST_RUNNER_FORBIDDEN_ENV");
+    expect(read("modules/tasks/src/job-container-spec.mjs")).toContain("HOST_RUNNER_FORBIDDEN_ENV");
+    expect(section).toContain("NOT VERIFIED");
   });
 });

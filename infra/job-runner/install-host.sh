@@ -120,6 +120,7 @@ Installert. Neste steg (se docs/runbooks/JOB_RUNNER.md for detaljer):
      og rediger: image (fra build-job-image.sh), allowed_repos, git_credentials.
   2. Legg PAT-filen (fine-grained, ETT repo, Contents: write + Pull requests: write) i $ETC/git-token-<repo>
      med: chown jarvis-runner og chmod 0400 (KUN runner-brukeren; worker skal aldri kunne lese den). Selve tokenet skal ALDRI limes inn i chat eller env.
+     (Valgfritt for GitHub App: sett repoet til { "source": "request" } i git_credentials i stedet for token_file - se kapittel 15 i runbooken.)
   3. sudo systemctl enable --now jarvis-egress-proxy jarvis-job-runner
   4. ACCEPTANCE_REPO=<sandbox-repo> ops/job-runner/acceptance.sh
 MSG
