@@ -5,11 +5,13 @@ import { withTenantTransaction } from "@jarvis/core";
 import { composeEvolutionReport, unknownSection, type EvolutionReport, type EvolutionSection, type SloReport } from "@jarvis/executive";
 import type { MeshStatus } from "@jarvis/model-gateway";
 import {
-  MAINTENANCE_CATALOG, assessCredential, auditFallbackChains, changeFreeze, creditRunway, detectCostAnomalies, dueMaintenance, forecastBreach,
-  type CostPoint, type CredentialState, type MaintenanceTask
+  MAINTENANCE_CATALOG, assessCredential, auditFallbackChains, changeFreeze, creditRunway, decideHeal, detectCostAnomalies, detectPoisoning, dueMaintenance, evaluateAllReadiness, forecastBreach, needsReverification, parseDeclaredGates,
+  proposeDedupe, RED_TEAM_CATEGORIES,
+  type CostPoint, type CredentialState, type FreezeVerdict, type MaintenanceTask, type MemoryFact, type MemorySourceKind, type ReadinessFacts
 } from "@jarvis/self-modification";
-import type { ConnectorStatus } from "@jarvis/tool-gateway";
+import { readSchedulerHealth, type ConnectorStatus, type MeshToolMapping } from "@jarvis/tool-gateway";
 import type { Ev0BootStatus } from "./ev0-boot.ts";
+import { GOLDEN_SUITE_DIGEST, runGolden, type GoldenRun } from "./golden-suite.ts";
 
 /**
  * WP-B (D-452): evolusjonsportene (EV-0…EV-23) i OBSERVASJONSMODUS. Denne filen leser kun eksisterende observerbarhet (endringsregisteret, cost_events, scheduler_state, connector-status, SLO-rapporten,
@@ -30,17 +32,20 @@ export interface EvolutionSourceDeps {
   connectors: () => Promise<ConnectorStatus[]>;
   killSwitchActive: () => Promise<boolean>;
   mesh: () => MeshStatus;
-  /** Ekstra seksjoner (B2 og senere): hver leverer sin egen fail-soft seksjon. */
+  /** Chat-flatens verktøy (for verktøyutvalgs-oppgavene i gull-suiten). Udefinert/null = de oppgavene hoppes over (og sies å være hoppet over). */
+  toolSurface?: () => ReadonlyArray<MeshToolMapping> | null;
+  /** Ekstra seksjoner (senere deler): hver leverer sin egen fail-soft seksjon. */
   extraSections?: ReadonlyArray<(ctx: EvolutionContext) => Promise<EvolutionSection>>;
 }
 
-/** Felles kontekst for alle seksjoner. */
+/** Felles kontekst for alle seksjoner. `shared` memoiserer det flere seksjoner trenger (én beregning per rapport). */
 export interface EvolutionContext {
   pool: Pool;
   tenantId: string;
   now: Date;
   env: Env;
   deps: EvolutionSourceDeps;
+  shared?: { freeze?: Promise<{ verdict: FreezeVerdict; incidents: number | null }>; golden?: Promise<GoldenRun> };
 }
 
 const dayOf = (d: Date): string => d.toISOString().slice(0, 10);
@@ -70,17 +75,27 @@ async function openIncidentCount(ctx: EvolutionContext): Promise<number | null> 
   }
 }
 
+/** Change freeze-vurderingen (delt av flere seksjoner; beregnes én gang per rapport). */
+export function computeFreeze(ctx: EvolutionContext): Promise<{ verdict: FreezeVerdict; incidents: number | null }> {
+  ctx.shared ??= {};
+  ctx.shared.freeze ??= (async () => {
+    const { deps } = ctx;
+    const [sloResult, killResult, incidents] = await Promise.all([
+      deps.slo().then((v) => ({ ok: true as const, v }), () => ({ ok: false as const })),
+      deps.killSwitchActive().then((v) => ({ ok: true as const, v }), () => ({ ok: false as const })),
+      openIncidentCount(ctx)
+    ]);
+    const breaches = sloResult.ok ? sloResult.v.slos.filter((s) => s.status === "BREACH").length : 0;
+    const verdict = changeFreeze({ incident_open: (incidents ?? 0) > 0, observability_ok: sloResult.ok, slo_breaches: breaches, kill_switch_active: killResult.ok ? killResult.v : false });
+    return { verdict, incidents };
+  })();
+  return ctx.shared.freeze;
+}
+
 export async function boundariesSection(ctx: EvolutionContext): Promise<EvolutionSection> {
   const { deps } = ctx;
   const ev0 = deps.ev0Status();
-  const [sloResult, killResult, incidents] = await Promise.all([deps.slo().then((v) => ({ ok: true as const, v }), () => ({ ok: false as const })), deps.killSwitchActive().then((v) => ({ ok: true as const, v }), () => ({ ok: false as const })), openIncidentCount(ctx)]);
-  const breaches = sloResult.ok ? sloResult.v.slos.filter((s) => s.status === "BREACH").length : 0;
-  const freeze = changeFreeze({
-    incident_open: (incidents ?? 0) > 0,
-    observability_ok: sloResult.ok,
-    slo_breaches: breaches,
-    kill_switch_active: killResult.ok ? killResult.v : false
-  });
+  const { verdict: freeze, incidents } = await computeFreeze(ctx);
   const findings: string[] = [];
   let attention = false;
   if (!ev0) findings.push("Oppstartssjekken av konstitusjon og endringsregister har ikke kjørt (ukjent).");
@@ -237,8 +252,7 @@ export async function maintenanceSection(ctx: EvolutionContext): Promise<Evoluti
     if (c.by === "report") last_run[t.id] = ctx.now.toISOString();
     else { const last = lastByJob.get(c.job); if (last) last_run[t.id] = new Date(last).toISOString(); }
   }
-  const sloResult = await ctx.deps.slo().then((v) => v, () => null);
-  const freeze = changeFreeze({ incident_open: false, observability_ok: sloResult !== null, slo_breaches: sloResult ? sloResult.slos.filter((s) => s.status === "BREACH").length : 0, kill_switch_active: await ctx.deps.killSwitchActive().catch(() => false) });
+  const { verdict: freeze } = await computeFreeze(ctx);
   const plan = dueMaintenance({ now: ctx.now, last_run, change_freeze: freeze.frozen, cap_usage: {}, caps: MONTHLY_CAPS }, covered);
   const uncovered = MAINTENANCE_CATALOG.filter((t) => !(t.id in MAINTENANCE_COVERAGE));
   const findings = [
@@ -285,21 +299,186 @@ export async function modelRouteSection(ctx: EvolutionContext): Promise<Evolutio
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
+// EV-4 + EV-21: gull-suite og selvtest av forsvaret (deterministisk; ingen modell kalles)
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------
+function goldenRun(ctx: EvolutionContext): Promise<GoldenRun> {
+  ctx.shared ??= {};
+  ctx.shared.golden ??= runGolden({ surface: ctx.deps.toolSurface?.() ?? null });
+  return ctx.shared.golden;
+}
+
+export async function goldenSection(ctx: EvolutionContext): Promise<EvolutionSection> {
+  const run = await goldenRun(ctx);
+  const passed = run.metrics.tasks - run.failed.length;
+  const findings = [
+    `Gull-suite v1 (digest ${run.digest.slice(0, 12)}): ${passed} av ${run.metrics.tasks} oppgaver bestått${run.skipped.length > 0 ? `; ${run.skipped.length} hoppet over (verktøyflaten er ikke tilgjengelig her)` : ""}.`,
+    ...(run.failed.length > 0 ? [`Ikke bestått: ${run.failed.join(", ")}.`] : []),
+    "Oppgavene er faktiske feil og beslutninger fra Jarvis' egen historie (klassifisering, ruting, verktøyutvalg, skjerming, repo-lås), kjørt mot de deterministiske reglene - ingen modell kalles.",
+    "Ikke koblet ennå: modellevaluering mot representative oppgaver, regresjonsport mot en lagret baseline og blind A/B (krever modellkjøringer og lagret historikk)."
+  ];
+  return {
+    ev: "EV-4", title_no: "Gull-suite (regresjonsvern)", mode: "observe", status: run.failed.length > 0 ? "ATTENTION" : "OK",
+    summary_no: run.failed.length > 0 ? `${run.failed.length} av ${run.metrics.tasks} gull-oppgaver er ikke bestått - en regel Jarvis allerede har fungerer ikke lenger.` : `Alle ${run.metrics.tasks} gull-oppgaver er bestått.`,
+    findings, source: `apps/api/src/golden-suite.ts (versjon 1, ${GOLDEN_SUITE_DIGEST().slice(0, 12)})`, observed_at: ctx.now.toISOString()
+  };
+}
+
+export async function redTeamSection(ctx: EvolutionContext): Promise<EvolutionSection> {
+  const run = await goldenRun(ctx);
+  const attempts = run.red_team.reduce((a, r) => a + r.attempts, 0);
+  const breaches = run.red_team.reduce((a, r) => a + r.breaches, 0);
+  const breached = run.red_team.filter((r) => r.breaches > 0).map((r) => r.category);
+  const findings = [
+    `${attempts} angrepsforsøk mot egne forsvar i ${run.red_team.length} av ${RED_TEAM_CATEGORIES.length} kategorier: ${breaches} brudd.`,
+    ...(breached.length > 0 ? [`BRUDD i: ${breached.join(", ")} - sikkerhetsregresjon er en hard stopp som aldri kan veies opp av noe annet.`] : []),
+    ...(run.uncovered.length > 0 ? [`Ikke dekket: ${run.uncovered.join(", ")} (aldri tolket som bestått).`] : []),
+    "Dette er en selvtest av eksisterende, deterministiske forsvar (radar-sonen, skjerming, hemmelighetsskanning, repo-lås, ruteinstruks) - ikke en adversariell red-team-agent (EV-21-agenten er ikke bygget)."
+  ];
+  const bad = breaches > 0;
+  return {
+    ev: "EV-21", title_no: "Sikkerhetsselvtest (red team lite)", mode: "observe", status: bad || run.uncovered.length > 0 ? "ATTENTION" : "OK",
+    summary_no: bad ? `${breaches} brudd i selvtesten - hard stopp for all evolusjon.` : run.uncovered.length > 0 ? `Ingen brudd, men ${run.uncovered.length} kategori(er) er ikke dekket.` : `Ingen brudd i ${attempts} forsøk.`,
+    findings, source: "apps/api/src/golden-suite.ts (adversarielle oppgaver) + judgeRedTeam", observed_at: ctx.now.toISOString()
+  };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------
+// EV-10: minnevedlikehold (forslag; ingenting slettes eller slås sammen)
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------
+/** Helse- og gjesterommet er bevisst utelatt (helse kan aldri kombineres med andre rom, MEMORY_ARCHITECTURE §4); kun ANTALL og id-er rapporteres, aldri innhold. */
+const MEMORY_SPACES = ["personal", "business", "project", "home", "shared"] as const;
+const MEMORY_SAMPLE = 2000;
+
+/** Kildekvalitet utledet av hvordan minnet kom inn (aldri av innholdet). */
+export function memorySourceKind(kind: string, trust: string, ref: string): MemorySourceKind {
+  if (kind === "manual") return "owner_statement";
+  if (kind === "conversation") return trust === "trusted" ? "owner_statement" : "external";
+  if (kind === "tool") return ref.startsWith("memory.propose.owner:") ? "owner_statement" : trust === "trusted" ? "tool" : "inference";
+  return "document";
+}
+
+export async function memorySection(ctx: EvolutionContext): Promise<EvolutionSection> {
+  const rows = await withMemoryTransaction(ctx.pool as pg.Pool, ctx.tenantId, MEMORY_SPACES, async (client) =>
+    (await client.query(
+      `SELECT i.memory_item_id AS id, i.space, i.subject, i.content, i.observed_at, i.valid_to, i.trust_level AS trust, i.has_conflict, s.kind AS source_kind, s.ref AS source_ref
+         FROM memory_items i JOIN memory_sources s ON s.source_id = i.source_id AND s.tenant_id = i.tenant_id
+        WHERE i.status = 'active' ORDER BY i.observed_at DESC LIMIT ${MEMORY_SAMPLE}`
+    )).rows as Array<{ id: string; space: string; subject: string; content: string; observed_at: Date | string; valid_to: Date | string | null; trust: string; has_conflict: boolean; source_kind: string; source_ref: string }>
+  );
+  const iso = (d: Date | string): string => (d instanceof Date ? d : new Date(d)).toISOString();
+  const facts: MemoryFact[] = rows.map((r) => ({
+    id: r.id, space: r.space, subject: r.subject, content: r.content, source_kind: memorySourceKind(r.source_kind, r.trust, r.source_ref),
+    trust: r.trust === "trusted" || r.trust === "internal" ? r.trust : "untrusted", observed_at: iso(r.observed_at), valid_to: r.valid_to === null ? null : iso(r.valid_to), has_conflict: r.has_conflict
+  }));
+  const reverify = needsReverification(facts, ctx.now);
+  const poisoning = detectPoisoning(facts);
+  const dedupe = proposeDedupe(facts);
+  const by = (reason: string) => reverify.filter((r) => r.reason === reason).length;
+  const findings = [
+    `Vurdert: ${facts.length} aktive minner (de ${MEMORY_SAMPLE} nyeste; helse- og gjesterom er utelatt).`,
+    `Bør re-verifiseres før bruk: ${reverify.length} (utløpt ${by("expired")}, gamle eksterne ${by("stale_external")}, gamle slutninger ${by("stale_low_quality")}).`,
+    poisoning.length === 0 ? "Ingen mistanke om forgiftning (ubetrodd innhold som motsier dine egne utsagn)." : `${poisoning.length} ubetrodde påstander motsier dine egne utsagn om samme emne - se i karantene/dashbordet.`,
+    dedupe.length === 0 ? "Ingen identiske duplikater." : `${dedupe.length} duplikatgrupper kan slås sammen (${dedupe.reduce((a, d) => a + d.merge.length, 0)} minner); forslagene er reversible og ingenting er slått sammen.`,
+    "Kun forslag: ingenting slettes eller slås sammen herfra (sletting har egen policy og din godkjenning). Antall gjentakelser fra ubetrodd kilde og uavhengige bekreftelser spores ikke ennå, så de to forgiftningsreglene som trenger dem er ikke i bruk."
+  ];
+  const attention = reverify.length > 0 || poisoning.length > 0 || dedupe.length > 0;
+  return {
+    ev: "EV-10", title_no: "Minnevedlikehold", mode: "observe", status: attention ? "ATTENTION" : "OK",
+    summary_no: attention ? `${reverify.length} å re-verifisere, ${poisoning.length} forgiftningsmistanker, ${dedupe.length} duplikatgrupper.` : "Ingen funn i minnet som ble vurdert.",
+    findings, source: "memory_items + memory_sources (kun metadata og antall)", observed_at: ctx.now.toISOString()
+  };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------
+// EV-9: selvhelbredelse - tillatelsesmodellen mot ekte signaler (ingenting repareres herfra)
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------
+export async function healSection(ctx: EvolutionContext): Promise<EvolutionSection> {
+  const [mesh, connectors, scheduler, kill] = await Promise.all([
+    Promise.resolve().then(() => ctx.deps.mesh()),
+    ctx.deps.connectors().catch(() => null),
+    readSchedulerHealth(ctx.pool).catch(() => null),
+    ctx.deps.killSwitchActive().catch(() => false)
+  ]);
+  const base = { attempts: 0, max_attempts: 2, repair_class: null, owner_approved: false, kill_switch_active: kill };
+  const failoverPreapproved = (ctx.env["JARVIS_EV_PREAPPROVED_FAILOVER"] ?? "").trim().toLowerCase() === "true";
+  const findings: string[] = [];
+  let anySignal = false;
+  const down = mesh.providers.filter((p) => p.provider !== "scripted" && p.state === "UNAVAILABLE");
+  for (const p of down) {
+    anySignal = true;
+    const v = decideHeal({ ...base, action: "switch_provider", preapproved_failover: failoverPreapproved, ua_gate_live: mesh.fallback === "VERIFIED" });
+    findings.push(`Leverandør ${p.provider} er nede → bytte til annen leverandør er ${v.level}: ${v.allowed ? "tillatt automatisk" : `krever eier (${v.reasons.join(", ")})`}.`);
+  }
+  const failing = (connectors ?? []).filter((c) => c.configured && c.health !== null && c.health.state !== "healthy");
+  for (const c of failing.slice(0, 5)) {
+    anySignal = true;
+    const v = decideHeal({ ...base, action: "reconnect", preapproved_failover: failoverPreapproved, ua_gate_live: false });
+    findings.push(`Tilkobling ${c.id} svikter → gjenoppkobling er ${v.level}: ${v.allowed ? "tillatt automatisk" : "krever eier"}.`);
+  }
+  if (scheduler && scheduler.problems.length > 0) {
+    anySignal = true;
+    findings.push(`${scheduler.problems.length} planlagte jobber har problemer → kun deteksjon (H0) er tillatt automatisk; reparasjon følger jobbens egen nytt-forsøk-logikk.`);
+  }
+  if (!anySignal) findings.push("Ingen feilsignaler å vurdere akkurat nå (leverandører, tilkoblinger og jobber).");
+  findings.push("Evolution utfører ingen reparasjon: H0 (deteksjon) er alt som er aktivt. Watchdog og restart (fase 10) er laveste lag og er uberørt; H1+ er DEFERRED.");
+  const owner = findings.filter((f) => f.includes("krever eier")).length;
+  return {
+    ev: "EV-9", title_no: "Selvhelbredelse (tillatelser)", mode: "observe", status: owner > 0 ? "ATTENTION" : "OK",
+    summary_no: owner > 0 ? `${owner} signal(er) ville kreve eier om noe skulle repareres.` : anySignal ? "Signalene er innenfor det som kan håndteres uten eier - men ingenting repareres herfra." : "Ingen feilsignaler.",
+    findings, source: "modellmeshen, connector-registeret, scheduler_state + decideHeal (EV-9)", observed_at: ctx.now.toISOString()
+  };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------
+// Sovende deler: hva mangler før eieren kan ta en navngitt D-beslutning om aktivering
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------
+export async function dormantSection(ctx: EvolutionContext): Promise<EvolutionSection> {
+  const [{ verdict: freeze }, connectors] = await Promise.all([computeFreeze(ctx), ctx.deps.connectors().catch(() => [] as ConnectorStatus[])]);
+  const ev0 = ctx.deps.ev0Status();
+  const env = ctx.env;
+  const facts: ReadinessFacts = {
+    constitution_verified: ev0?.constitution.status === "verified",
+    ledger_ok: ev0?.ledger.status === "ok",
+    change_freeze_off: !freeze.frozen,
+    proven_connectors: connectors.filter((c) => c.configured && c.test_method === "live" && c.health?.state === "healthy").length,
+    job_runner_configured: env["JARVIS_JOB_RUNNER"] === "container" && ["JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY"].every((k) => (env[k] ?? "").trim() !== ""),
+    declared_gates: parseDeclaredGates(env["JARVIS_EV_VERIFIED_GATES"])
+  };
+  const verdicts = evaluateAllReadiness(facts);
+  const findings = verdicts.map((v) =>
+    v.ready_for_owner_decision
+      ? `${v.ev} ${v.title_no}: alle tekniske krav er oppfylt - klar for en navngitt D-beslutning (ikke aktivert).`
+      : `${v.ev} ${v.title_no} (${v.why_dormant_no}): mangler ${v.missing.length} - ${v.missing.map((m) => m.label_no).slice(0, 3).join("; ")}${v.missing.length > 3 ? "; …" : ""}.`
+  );
+  findings.push("Ingenting av dette er aktivert, og ingen kodevei aktiverer det: aktivering krever en navngitt D-beslutning fra deg (porter du har verifisert oppgis i JARVIS_EV_VERIFIED_GATES).");
+  return {
+    ev: "EV-6/11/13/14/15/18/20/22/23", title_no: "Sovende deler", mode: "dormant", status: "DORMANT",
+    summary_no: `${verdicts.length} deler er bygget som beslutningsregler, men sover: ${verdicts.filter((v) => v.ready_for_owner_decision).length} har alle tekniske krav oppfylt.`,
+    findings, source: "kjøretidsfakta + eierens erklærte porter (JARVIS_EV_VERIFIED_GATES)", observed_at: ctx.now.toISOString()
+  };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------
 // Rapporten
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
 const BASE_SECTIONS: ReadonlyArray<{ ev: string; title: string; source: string; build: (ctx: EvolutionContext) => Promise<EvolutionSection> }> = [
   { ev: "EV-0/EV-8", title: "Endringsgrenser og frys", source: "konstitusjon + endringsregister", build: boundariesSection },
   { ev: "EV-5", title: "Endringsforslag", source: "evolution_change_ledger", build: proposalsSection },
+  { ev: "EV-4", title: "Gull-suite (regresjonsvern)", source: "golden-suite", build: goldenSection },
+  { ev: "EV-9", title: "Selvhelbredelse (tillatelser)", source: "mesh + connectors + scheduler", build: healSection },
+  { ev: "EV-10", title: "Minnevedlikehold", source: "memory_items", build: memorySection },
   { ev: "EV-12", title: "Modellrute i skygge", source: "modellmeshen", build: modelRouteSection },
   { ev: "EV-16", title: "Kostnad og kapasitet", source: "cost_events", build: costSection },
   { ev: "EV-17", title: "Nøkler og tilkoblinger", source: "connector-registeret", build: credentialsSection },
-  { ev: "EV-19", title: "Vedlikeholdsplan", source: "scheduler_state", build: maintenanceSection }
+  { ev: "EV-19", title: "Vedlikeholdsplan", source: "scheduler_state", build: maintenanceSection },
+  { ev: "EV-21", title: "Sikkerhetsselvtest (red team lite)", source: "golden-suite (adversarielle)", build: redTeamSection },
+  { ev: "EV-6/11/13/14/15/18/20/22/23", title: "Sovende deler", source: "kjøretidsfakta", build: dormantSection }
 ];
 
 /** Bygger rapporten NÅ (hver seksjon fail-soft). */
 export async function buildEvolutionReport(deps: EvolutionSourceDeps): Promise<EvolutionReport> {
   const now = (deps.now ?? (() => new Date()))();
-  const ctx: EvolutionContext = { pool: deps.pool, tenantId: deps.tenantId, now, env: deps.env ?? process.env, deps };
+  const ctx: EvolutionContext = { pool: deps.pool, tenantId: deps.tenantId, now, env: deps.env ?? process.env, deps, shared: {} };
   const base = await Promise.all(BASE_SECTIONS.map((s) => safely(s.ev, s.title, s.source, () => s.build(ctx))));
   const extra = await Promise.all((deps.extraSections ?? []).map((build, i) => safely(`EV-extra-${i + 1}`, "Seksjon", "ukjent", () => build(ctx))));
   return composeEvolutionReport({ as_of: now.toISOString(), sections: [...base, ...extra] });

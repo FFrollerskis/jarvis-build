@@ -184,7 +184,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     slo: sloReports,
     connectors: () => listConnectorStatus(toolGateway),
     killSwitchActive: async () => (await selfModelControls.getControlState()).kill_switch.active,
-    mesh: () => gateway.meshStatus()
+    mesh: () => gateway.meshStatus(),
+    toolSurface: () => modelToolSurface
   });
   // D-174 (B2): hoistet hit (tidligere konstruert lenger nede, kun for
   // `enrollmentService`) - `OwnerControlsService` sitt nye, eier-vendte

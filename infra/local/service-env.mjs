@@ -303,6 +303,8 @@ export const SERVICE_ENV = {
     "JARVIS_API_DRAINS_EXECUTIVE",
     // EV-1 (D-412): bygg-sha og versjon som selvdiagnosen viser (uten dem vises bygget som UKJENT).
     "JARVIS_BUILD_SHA", "JARVIS_VERSION",
+    // WP-B (D-452): evolusjonsobservatoriet (kun lesing) - porter eieren har verifisert, forhåndsgodkjent failover, og jobb-runner-konfigurasjonen (ikke-hemmelige navn) som aktiveringsberedskapen for EV-6 leser.
+    "JARVIS_EV_VERIFIED_GATES", "JARVIS_EV_PREAPPROVED_FAILOVER", "JARVIS_JOB_RUNNER", "JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY",
     // D-414: «chat først» - bakgrunnsformål venter mens chat pågår (maks / stillhet, ms).
     "JARVIS_BACKGROUND_YIELD_MAX_MS", "JARVIS_BACKGROUND_YIELD_QUIET_MS", "JARVIS_TRACE_FILE", "JARVIS_VOICE_URL", "JARVIS_COUNCIL_AUTO_MAX_PER_HOUR",
     // D-395 (JARVIS-092): sveip-klokkeslett main.ts leser (tidligere ikke videresendt til containeren, så compose kunne aldri endre dem).

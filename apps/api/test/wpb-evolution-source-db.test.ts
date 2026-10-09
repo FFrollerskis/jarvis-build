@@ -9,7 +9,7 @@ import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { ChangeLedger } from "@jarvis/self-modification";
 import type { SloReport } from "@jarvis/executive";
 import type { MeshStatus } from "@jarvis/model-gateway";
-import { boundariesSection, buildEvolutionReport, costSection, maintenanceSection, proposalsSection, type EvolutionContext, type EvolutionSourceDeps } from "../src/evolution-source.ts";
+import { boundariesSection, buildEvolutionReport, costSection, maintenanceSection, memorySection, proposalsSection, type EvolutionContext, type EvolutionSourceDeps } from "../src/evolution-source.ts";
 
 /**
  * WP-B (D-452): evolusjonskildene mot ekte Postgres som `jarvis_app`-avledet rolle (RLS): SQL-en mot endringsregisteret, cost_events, scheduler_state og incidents er riktig, tenant-skopet og kun lesende.
@@ -46,6 +46,22 @@ beforeAll(async () => {
   const ledger = new ChangeLedger(admin);
   await ledger.append({ change_id: "p1", change_class: "E1", decision: "proposed", constitution_digest: DIGEST, subject: "Ny tone", paths: ["config/charlie-personality.json"], branch: "", head_sha: null, evidence: {}, recorded_by: "test" });
   await ledger.append({ change_id: "p2", change_class: "E2", decision: "blocked", constitution_digest: DIGEST, subject: "Avhengighet", paths: ["package.json"], branch: "", head_sha: null, evidence: {}, recorded_by: "test" });
+  // Minne: to identiske aktive minner (duplikat), ett utløpt-men-aktivt, ett i helse-rommet (skal ikke vurderes), og ett hos en annen tenant.
+  await admin.query(`INSERT INTO people (person_id, display_name) VALUES ('person-tobias','Tobias')`);
+  await admin.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('person-tobias','${T}')`);
+  await admin.query(`INSERT INTO memory_sources (source_id, tenant_id, kind, ref, trust_level) VALUES ('src-1','${T}','conversation','s1','trusted'), ('src-2','tenant-annen','conversation','s2','trusted')`);
+  const mem = (id: string, tenant: string, space: string, subject: string, content: string, source: string, validTo: string | null = null) =>
+    admin.query(
+      `INSERT INTO memory_items (memory_item_id, tenant_id, space, owner_person_id, type, subject, content, source_id, observed_at, valid_from, valid_to, trust_level, status, has_conflict)
+       VALUES ($1,$2,$3,'person-tobias','semantic',$4,$5,$6, now(), now() - interval '30 days', $7, 'trusted', 'active', false)`,
+      [id, tenant, space, subject, content, source, validTo]
+    );
+  await admin.query(`INSERT INTO people (person_id, display_name) VALUES ('person-annen','Annen') ON CONFLICT DO NOTHING`);
+  await mem("m1", T, "personal", "a.1", "Tobias liker kaffe", "src-1");
+  await mem("m2", T, "personal", "a.2", "Tobias liker kaffe", "src-1");
+  await mem("m3", T, "personal", "a.3", "Gammel avtale", "src-1", "2020-01-01T00:00:00Z");
+  await mem("m4", T, "health", "h.1", "Helse-innhold som aldri skal vurderes", "src-1");
+  await mem("m5", "tenant-annen", "personal", "z.1", "Annens minne", "src-2");
   app = createPool({ ...base, user: "jarvis_wpb", password: "pw2" });
 }, 240_000);
 
@@ -94,6 +110,15 @@ describe("evolusjonskildene mot ekte Postgres", () => {
     expect(s.findings.join("\n")).toContain("incident_open");
     expect(s.status).toBe("ATTENTION");
     expect(s.findings.join("\n")).toContain("constitution_unsigned");
+  });
+
+  it("EV-10: kun denne tenantens aktive minner i tillatte rom vurderes (helse utelatt); duplikat og utløpt oppdages; innhold lekker ikke", async () => {
+    const s = await memorySection(ctx(deps()));
+    const text = s.findings.join("\n");
+    expect(text).toContain("Vurdert: 3 aktive minner");
+    expect(text).toContain("utløpt 1");
+    expect(text).toContain("1 duplikatgrupper kan slås sammen");
+    expect(JSON.stringify(s)).not.toMatch(/kaffe|Helse-innhold|Annens/);
   });
 
   it("hele rapporten bygges mot databasen uten at noen seksjon blir UNKNOWN, og ingenting skrives (rader før = rader etter)", async () => {
