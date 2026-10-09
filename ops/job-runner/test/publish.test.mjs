@@ -1,0 +1,397 @@
+import { spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { createHarness, gitSync } from "./support/harness.mjs";
+
+/**
+ * WP-C1: publish = bundle laget INNE I containeren -> verifisert på verten i et ferskt bare-repo -> push med runnerens credential.
+ * Adversarielle tester: bundler med flere refs, feil prerequisite, for mange commits/filer, nektede stier, submodul, malformede
+ * objekter (`.git` i tre), ikke-etterkommer, merge-commits, for stor, søppel/avkuttet, og en agent som planter hooks/config i /work.
+ */
+
+let harnesses = [];
+const harness = async (options) => { const h = await createHarness(options); harnesses.push(h); return h; };
+afterEach(async () => { await Promise.all(harnesses.map((h) => h.close())); harnesses = []; });
+
+const publish = (h, id, branch = "jarvis/task-1") => h.api({ method: "POST", path: `/v1/jobs/${id}/publish`, body: { branch } });
+const sh = (h, id, script) => h.exec(id, ["sh", "-c", script]);
+const commitAs = (h, id, script) => sh(h, id, `${script} && git add -A && git commit -q -m agent`);
+const refs = (dir) => gitSync(dir, ["for-each-ref", "--format=%(refname) %(objectname)"]).split("\n").filter(Boolean);
+
+/** Lager en bundle fra en scratch-klone av origin (agentens «ondsinnede» side), og får runneren til å motta den som svar på `git bundle create`. */
+async function craft(h, base, build) {
+  const scratch = await mkdtemp(join(tmpdir(), "jr-craft-"));
+  gitSync(scratch, ["clone", "--quiet", h.origins["owner/repo"].dir, "."]);
+  const revArgs = await build(scratch);
+  const r = spawnSync("git", ["bundle", "create", "-", ...revArgs], { cwd: scratch, env: { PATH: process.env["PATH"], HOME: scratch, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+  if (r.status !== 0) throw new Error(`craft feilet: ${r.stderr}`);
+  return { bundle: r.stdout, scratch, base };
+}
+const intercept = (h, bundleBytes) => {
+  h.fake.state.onExec = ({ argv }) => (argv.includes("bundle") && argv.includes("create") ? { status: 0, stdout: Buffer.from(bundleBytes), stderr: Buffer.alloc(0) } : undefined);
+};
+
+describe("A: happy path og push-semantikk", () => {
+  it("branch pushes med EXAKT den verifiserte committen; main og øvrige refs er urørt; ingen credential i origin", async () => {
+    const h = await harness();
+    const origin = h.origins["owner/repo"].dir;
+    const before = refs(origin);
+    const job = await h.createJob();
+    expect((await commitAs(h, job.job_id, "echo hello > nytt.txt && git checkout -q -b jarvis/task-1")).json.code).toBe(0);
+    const head = (await sh(h, job.job_id, "git rev-parse HEAD")).json.stdout.trim();
+    const pub = await publish(h, job.job_id);
+    expect(pub.status).toBe(200);
+    expect(pub.json).toMatchObject({ branch: "jarvis/task-1", commit_sha: head, base_sha: job.head_sha, commits: 1, files_changed: 1 });
+    const after = refs(origin);
+    expect(after.filter((r) => !before.includes(r))).toEqual([`refs/heads/jarvis/task-1 ${head}`]);
+    expect(before.every((r) => after.includes(r))).toBe(true); // main og alt annet uendret
+    expect(gitSync(origin, ["log", "-1", "--format=%an <%ae>", "jarvis/task-1"])).toBe("jarvis-worker <worker@jarvis.local>");
+    expect(await readFile(join(origin, "config"), "utf8")).not.toContain(h.gitToken);
+    // verify-kopien og bundle-filen er ryddet
+    expect(await readdir(join(h.baseDir, job.job_id, "private"))).toEqual(["base.git"]);
+  });
+
+  it("ingen endringer: 422 no_changes; ingen branch opprettes", async () => {
+    const h = await harness();
+    const origin = h.origins["owner/repo"].dir;
+    const before = refs(origin);
+    const job = await h.createJob();
+    const pub = await publish(h, job.job_id);
+    expect(pub.status).toBe(422);
+    expect(pub.json.error).toBe("no_changes");
+    expect(refs(origin)).toEqual(before);
+  });
+
+  it("samme commit publisert to ganger er idempotent (up to date); fast-forward til eksisterende jobb-branch går bra", async () => {
+    const h = await harness();
+    const job = await h.createJob();
+    await commitAs(h, job.job_id, "echo 1 > a.txt");
+    const p1 = await publish(h, job.job_id, "jarvis/ff");
+    const p2 = await publish(h, job.job_id, "jarvis/ff");
+    expect([p1.status, p2.status]).toEqual([200, 200]);
+    expect(p2.json.commit_sha).toBe(p1.json.commit_sha);
+    await commitAs(h, job.job_id, "echo 2 > b.txt");
+    const p3 = await publish(h, job.job_id, "jarvis/ff");
+    expect(p3.status).toBe(200);
+    expect(p3.json.commits).toBe(2);
+    expect(gitSync(h.origins["owner/repo"].dir, ["rev-parse", "jarvis/ff"])).toBe(p3.json.commit_sha);
+  });
+
+  it("aldri force: en eksisterende branch som ikke kan fast-forwardes avvises, og forblir uendret", async () => {
+    const h = await harness();
+    const origin = h.origins["owner/repo"].dir;
+    // en «annen» historie ligger allerede på jarvis/taken
+    const other = await mkdtemp(join(tmpdir(), "jr-other-"));
+    gitSync(other, ["init", "--quiet", "--initial-branch=main", "."]);
+    gitSync(other, ["commit", "--allow-empty", "-q", "-m", "annen"]);
+    gitSync(other, ["push", "--quiet", origin, "HEAD:refs/heads/jarvis/taken"]);
+    const existing = gitSync(origin, ["rev-parse", "jarvis/taken"]);
+    const job = await h.createJob();
+    await commitAs(h, job.job_id, "echo 1 > a.txt");
+    const pub = await publish(h, job.job_id, "jarvis/taken");
+    expect(pub.status).toBe(502);
+    expect(pub.json.error).toMatch(/push_(failed|rejected)/);
+    expect(gitSync(origin, ["rev-parse", "jarvis/taken"])).toBe(existing);
+  });
+
+  it("kildekode: push-refspec har aldri + (force) eller tom kilde (sletting), og git push får aldri --force/--delete/--mirror", async () => {
+    const src = await readFile(new URL("../lib/git.mjs", import.meta.url), "utf8");
+    const pushArgs = /\["push",([^\]]*)\]/.exec(src)?.[1] ?? "";
+    expect(pushArgs).toContain("--porcelain");
+    expect(pushArgs).not.toMatch(/--force|-f\b|--delete|--mirror|--all|--tags|\+/);
+    expect(src).toContain("`${sha}:refs/heads/${p.branch}`");
+  });
+});
+
+describe("B: grenser og nektede stier (verifisert på verten, ikke stolt på fra containeren)", () => {
+  it("for mange commits", async () => {
+    const h = await harness({ runner: { publish: { max_commits: 2 } } });
+    const job = await h.createJob();
+    for (const n of [1, 2, 3]) await commitAs(h, job.job_id, `echo ${n} > f${n}.txt`);
+    const pub = await publish(h, job.job_id);
+    expect(pub.json).toMatchObject({ error: "bundle_too_many_commits" });
+    expect(pub.status).toBe(422);
+  });
+
+  it("for mange filer", async () => {
+    const h = await harness({ runner: { publish: { max_files: 3 } } });
+    const job = await h.createJob();
+    await commitAs(h, job.job_id, "for i in 1 2 3 4 5; do echo $i > f$i.txt; done");
+    expect((await publish(h, job.job_id)).json.error).toBe("bundle_too_many_files");
+  });
+
+  it("for stor bundle (maks bytes)", async () => {
+    const h = await harness({ runner: { publish: { max_bundle_bytes: 4096 } } });
+    const job = await h.createJob();
+    await commitAs(h, job.job_id, "head -c 40000 /dev/urandom > big.bin");
+    const pub = await publish(h, job.job_id);
+    expect(pub.status).toBe(422);
+    expect(pub.json.error).toBe("bundle_too_large");
+  });
+
+  it("nektede stier: .github/, .gitmodules, .gitattributes - uansett skrivemåte (store/små bokstaver, usynlige tegn), også sletting", async () => {
+    const h = await harness({ origins: { "owner/repo": { files: { ".github/workflows/base.yml": "name: base\n" } } } });
+    const origin = h.origins["owner/repo"].dir;
+    const zw = String.fromCharCode(0x200b); // usynlig tegn
+    const cases = [
+      ["mkdir -p .github/workflows && echo x > .github/workflows/ci.yml", ".github/"],
+      ["mkdir -p .GitHub/Workflows && echo x > .GitHub/Workflows/ci.yml", ".github/"],
+      [`mkdir -p ".gith${zw}ub/workflows" && echo x > ".gith${zw}ub/workflows/ci.yml"`, ".github/"],
+      ["echo x >> .github/workflows/base.yml", ".github/"],
+      ["git rm -q -r .github", ".github/"],
+      ["printf '[submodule \"s\"]\\n\\tpath = s\\n\\turl = https://evil.example/x\\n' > .gitmodules", ".gitmodules"],
+      ["echo '* filter=evil' > .gitattributes", ".gitattributes"]
+    ];
+    for (const [script, rule] of cases) {
+      const job = await h.createJob();
+      await commitAs(h, job.job_id, script);
+      const pub = await publish(h, job.job_id, `jarvis/t${Math.abs(script.length)}`);
+      expect(pub.status, script).toBe(422);
+      expect(pub.json.error, script).toBe("path_denied");
+      expect(pub.json.detail ?? "", script).toContain(`matches_deny_list:${rule}`);
+      await h.api({ method: "DELETE", path: `/v1/jobs/${job.job_id}` });
+    }
+    expect(refs(origin).filter((r) => r.includes("jarvis/"))).toEqual([]); // ingenting pushet
+  });
+
+  it("nektelisten er konfigurerbar (vertsadmin): en tillatt sti går gjennom, en ny nektet blokkeres", async () => {
+    const h = await harness({ runner: { max_concurrent_jobs: 4, publish: { deny_paths: ["secrets/", "terraform"] } } });
+    const a = await h.createJob();
+    await commitAs(h, a.job_id, "mkdir -p .github && echo ok > .github/CODEOWNERS"); // .github er ikke lenger nektet her
+    expect((await publish(h, a.job_id, "jarvis/allowed")).status).toBe(200);
+    const b = await h.createJob();
+    await commitAs(h, b.job_id, "mkdir -p secrets && echo x > secrets/k.txt");
+    expect((await publish(h, b.job_id, "jarvis/denied1")).json.error).toBe("path_denied");
+    const c = await h.createJob();
+    await commitAs(h, c.job_id, "mkdir -p terraform && echo x > terraform/main.tf");
+    expect((await publish(h, c.job_id, "jarvis/denied2")).json.error).toBe("path_denied");
+  });
+
+  it("submodul-endring (gitlink 160000) nektes", async () => {
+    const h = await harness({ runner: { publish: { deny_paths: ["secrets/"] } } });
+    const job = await h.createJob();
+    await sh(h, job.job_id, "git update-index --add --cacheinfo 160000,0123456789012345678901234567890123456789,vendor/sub && git commit -q -m sub");
+    const pub = await publish(h, job.job_id);
+    expect(pub.status).toBe(422);
+    expect(pub.json).toMatchObject({ error: "path_denied", detail: "submodule_changes_not_allowed" });
+  });
+
+  it("symlenker er vanlige tre-oppføringer (ikke fulgt på verten) - en lenke til /etc/passwd publiseres som lenke, ikke som innhold", async () => {
+    const h = await harness();
+    const job = await h.createJob();
+    await commitAs(h, job.job_id, "ln -s /etc/passwd passwd-link");
+    const pub = await publish(h, job.job_id);
+    expect(pub.status).toBe(200);
+    const blob = gitSync(h.origins["owner/repo"].dir, ["cat-file", "-p", `${pub.json.commit_sha}:passwd-link`]);
+    expect(blob).toBe("/etc/passwd"); // selve lenkeblobben, aldri filinnholdet
+  });
+});
+
+describe("C: bundler fra en ondsinnet agent (laget direkte, utenom runnerens egen `git bundle create`)", () => {
+  it("flere refs i bundlen avvises", async () => {
+    const h = await harness();
+    const job = await h.createJob();
+    const { bundle } = await craft(h, job.head_sha, async (s) => {
+      gitSync(s, ["checkout", "-q", "-b", "a"]); gitSync(s, ["commit", "--allow-empty", "-q", "-m", "a"]);
+      gitSync(s, ["checkout", "-q", "-b", "extra"]); gitSync(s, ["commit", "--allow-empty", "-q", "-m", "e"]);
+      gitSync(s, ["checkout", "-q", "a"]);
+      return [`${job.head_sha}..HEAD`, `${job.head_sha}..extra`];
+    });
+    intercept(h, bundle);
+    const pub = await publish(h, job.job_id);
+    expect(pub.json).toMatchObject({ error: "bundle_invalid", detail: "must_contain_exactly_one_ref_HEAD" });
+  });
+
+  it("feil prerequisite (bundlen bygger på agentens egen commit, ikke basen) avvises", async () => {
+    const h = await harness();
+    const job = await h.createJob();
+    const { bundle } = await craft(h, job.head_sha, async (s) => {
+      gitSync(s, ["commit", "--allow-empty", "-q", "-m", "ett"]); gitSync(s, ["commit", "--allow-empty", "-q", "-m", "to"]);
+      return ["HEAD~1..HEAD"];
+    });
+    intercept(h, bundle);
+    expect((await publish(h, job.job_id)).json).toMatchObject({ error: "bundle_invalid", detail: "prerequisite_must_be_the_base_commit" });
+  });
+
+  it("ingen prerequisite (hel ny historie / orphan) avvises", async () => {
+    const h = await harness();
+    const job = await h.createJob();
+    await sh(h, job.job_id, "git checkout -q --orphan fresh && git rm -rq --cached . && echo x > only.txt && git add only.txt && git commit -q -m orphan");
+    const pub = await publish(h, job.job_id);
+    expect(pub.status).toBe(422);
+    expect(pub.json.error).toBe("bundle_invalid");
+  });
+
+  it("merge-commits avvises (lineær historie kreves)", async () => {
+    const h = await harness();
+    const job = await h.createJob();
+    await sh(h, job.job_id, "git checkout -q -b side && echo s > s.txt && git add -A && git commit -q -m side && git checkout -q - && echo m > m.txt && git add -A && git commit -q -m main2 && git merge -q --no-ff side -m merge");
+    const pub = await publish(h, job.job_id);
+    expect(pub.status).toBe(422);
+    expect(pub.json).toMatchObject({ error: "bundle_invalid", detail: "merge_commits_not_allowed" });
+  });
+
+  it("malformert tre-objekt (oppføring kalt .git) stoppes av fsck --strict (git fetch fsck-er IKKE bundler)", async () => {
+    const h = await harness();
+    const job = await h.createJob();
+    const { bundle } = await craft(h, job.head_sha, async (s) => {
+      const blobSha = spawnSync("git", ["hash-object", "-w", "--stdin"], { cwd: s, input: "x\n", encoding: "utf8", env: { PATH: process.env["PATH"], HOME: s, GIT_CONFIG_GLOBAL: "/dev/null" } }).stdout.trim();
+      const raw = Buffer.concat([Buffer.from("100644 .git\0"), Buffer.from(blobSha, "hex")]);
+      const tree = spawnSync("git", ["hash-object", "-t", "tree", "-w", "--stdin", "--literally"], { cwd: s, input: raw, env: { PATH: process.env["PATH"], HOME: s, GIT_CONFIG_GLOBAL: "/dev/null" } }).stdout.toString().trim();
+      const commit = gitSync(s, ["commit-tree", tree, "-p", job.head_sha, "-m", "evil"]);
+      gitSync(s, ["update-ref", "refs/heads/evil", commit]);
+      gitSync(s, ["symbolic-ref", "HEAD", "refs/heads/evil"]);
+      return [`${job.head_sha}..HEAD`];
+    });
+    intercept(h, bundle);
+    const pub = await publish(h, job.job_id);
+    expect(pub.status).toBe(422);
+    expect(pub.json.error).toBe("bundle_fsck_failed");
+    expect(refs(h.origins["owner/repo"].dir).some((r) => r.includes("jarvis/"))).toBe(false);
+  });
+
+  it("søppel, feil signatur, avkuttet pakke, manglende tom linje, enorm headerlinje og SHA-256-lignende hash avvises", async () => {
+    const h = await harness();
+    const job = await h.createJob();
+    const { bundle } = await craft(h, job.head_sha, async (s) => { gitSync(s, ["commit", "--allow-empty", "-q", "-m", "ok"]); return [`${job.head_sha}..HEAD`]; });
+    const sha = job.head_sha;
+    const bad = {
+      garbage: Buffer.from("dette er ikke en bundle"),
+      emptyBytes: Buffer.alloc(0),
+      v3: Buffer.concat([Buffer.from("# v3 git bundle\n"), bundle.subarray(bundle.indexOf("\n") + 1)]),
+      truncatedPack: bundle.subarray(0, bundle.length - 25),
+      noBlankLine: Buffer.from(`# v2 git bundle\n-${sha} x\n${"b".repeat(40)} HEAD\nPACK`),
+      hugeLine: Buffer.concat([Buffer.from("# v2 git bundle\n"), Buffer.from(`-${sha} ${"x".repeat(10_000)}\n\n`), Buffer.from("PACK")]),
+      sha256Hash: Buffer.from(`# v2 git bundle\n-${sha} x\n${"b".repeat(64)} HEAD\n\nPACK`),
+      refWithSpaces: Buffer.from(`# v2 git bundle\n-${sha} x\n${"b".repeat(40)} HEAD extra\n\nPACK`),
+      badPrereq: Buffer.from(`# v2 git bundle\n-${"z".repeat(40)} x\n${"b".repeat(40)} HEAD\n\nPACK`),
+      noPackMagic: Buffer.from(`# v2 git bundle\n-${sha} x\n${"b".repeat(40)} HEAD\n\nNOTAPACK`),
+      crlf: Buffer.from(`# v2 git bundle\r\n-${sha} x\r\n${"b".repeat(40)} HEAD\r\n\r\nPACK`)
+    };
+    for (const [name, bytes] of Object.entries(bad)) {
+      intercept(h, bytes);
+      const pub = await publish(h, job.job_id, "jarvis/bad");
+      expect(pub.status, name).toBe(422);
+      expect(pub.json.error, name).toMatch(/^(bundle_invalid|bundle_fetch_failed|bundle_fsck_failed|bundle_create_failed)$/);
+    }
+    h.fake.state.onExec = null;
+    expect(refs(h.origins["owner/repo"].dir).some((r) => r.includes("jarvis/"))).toBe(false);
+  });
+
+  it("bundle-kommandoen feiler i containeren: 422 bundle_create_failed uten interne detaljer", async () => {
+    const h = await harness();
+    const job = await h.createJob();
+    h.fake.state.onExec = ({ argv }) => (argv.includes("bundle") ? { status: 128, stdout: Buffer.alloc(0), stderr: Buffer.from("fatal: noe gikk galt") } : undefined);
+    const pub = await publish(h, job.job_id);
+    expect(pub.status).toBe(422);
+    expect(pub.json.error).toBe("bundle_create_failed");
+  });
+});
+
+describe("D: agenten planter hooks/config i /work - ingenting kjøres på VERTEN under publish", () => {
+  /** Skriver en `.git/config` + hooks som ville kjørt en kommando hvis en host-git kjørte i katalogen. */
+  async function plant(h, jobId, markerFile) {
+    const work = join(h.baseDir, jobId, "work");
+    const hooks = join(work, "hooks-evil");
+    await mkdir(hooks, { recursive: true });
+    const script = (name) => `#!/bin/sh\necho ${name} >> '${markerFile}'\n`;
+    for (const hook of ["post-checkout", "pre-push", "reference-transaction", "pre-commit", "post-commit", "post-merge", "pre-auto-gc"]) {
+      await writeFile(join(hooks, hook), script(hook), { mode: 0o755 });
+    }
+    await writeFile(join(work, "evil.sh"), script("config-command"), { mode: 0o755 });
+    await writeFile(join(work, ".git", "evil-include"), `[core]\n\tfsmonitor = ${join(work, "evil.sh")}\n`);
+    const config = [
+      "[core]",
+      `\thooksPath = ${hooks}`,
+      `\tfsmonitor = ${join(work, "evil.sh")}`,
+      `\tsshCommand = ${join(work, "evil.sh")}`,
+      `\tpager = ${join(work, "evil.sh")}`,
+      "[uploadpack]",
+      `\tpackObjectsHook = ${join(work, "evil.sh")}`,
+      "[credential]",
+      `\thelper = !${join(work, "evil.sh")}`,
+      "[diff]",
+      `\texternal = ${join(work, "evil.sh")}`,
+      "[url \"file:///does/not/exist/\"]",
+      "\tinsteadOf = https://github.com/",
+      "[include]",
+      `\tpath = ${join(work, ".git", "evil-include")}`,
+      "[gc]",
+      "\tauto = 1",
+      ""
+    ].join("\n");
+    const existing = await readFile(join(work, ".git", "config"), "utf8");
+    await writeFile(join(work, ".git", "config"), existing + config);
+    for (const hook of ["post-checkout", "pre-push", "reference-transaction", "post-commit", "post-merge", "pre-commit"]) {
+      await mkdir(join(work, ".git", "hooks"), { recursive: true });
+      await writeFile(join(work, ".git", "hooks", hook), script(`dot-git-hooks/${hook}`), { mode: 0o755 });
+    }
+    return work;
+  }
+
+  it("publish lykkes, og INGEN planter-nyttelast kjørte (markørfilen finnes ikke); runneren kjører aldri git i /work", async () => {
+    const h = await harness();
+    const marker = join(h.root, "MARKER-publish");
+    const job = await h.createJob();
+    await commitAs(h, job.job_id, "echo ok > fil.txt");
+    await plant(h, job.job_id, marker);
+    const pub = await publish(h, job.job_id);
+    expect(pub.status).toBe(200);
+    await expect(readFile(marker, "utf8")).rejects.toThrow(); // ingen nyttelast kjørte
+    // og remoten fikk kun den ene committen (planter-konfigen påvirket ikke pushen: ingen insteadOf-omskriving)
+    expect(gitSync(h.origins["owner/repo"].dir, ["rev-parse", "jarvis/task-1"])).toBe(pub.json.commit_sha);
+  });
+
+  it("positiv kontroll: samme planter-nyttelast KJØRER hvis git kjøres i katalogen (beviser at testen er diskriminerende)", async () => {
+    const h = await harness();
+    const marker = join(h.root, "MARKER-control");
+    const job = await h.createJob();
+    const work = await plant(h, job.job_id, marker);
+    const env = { PATH: process.env["PATH"], HOME: h.root, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+    spawnSync("git", ["status"], { cwd: work, env });                    // core.fsmonitor
+    spawnSync("git", ["checkout", "-q", "-b", "kontroll"], { cwd: work, env }); // hooks (post-checkout / reference-transaction)
+    const scratch = await mkdtemp(join(tmpdir(), "jr-ctl-"));
+    gitSync(scratch, ["init", "--quiet", "."]);
+    spawnSync("git", ["fetch", "--quiet", work, "HEAD"], { cwd: scratch, env });    // uploadpack.packObjectsHook ved henting FRA agent-katalogen
+    const fired = (await readFile(marker, "utf8").catch(() => "")).split("\n").filter(Boolean);
+    expect(fired.join(",")).toMatch(/config-command/);
+    expect(fired.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("agenten bytter ut .git/config med en symlenke til en fil utenfor: runneren leser/skriver den aldri, og rydding følger ikke lenken", async () => {
+    const h = await harness();
+    const outside = join(h.root, "verts-hemmelighet.txt");
+    await writeFile(outside, "VERTSHEMMELIGHET");
+    const job = await h.createJob();
+    await commitAs(h, job.job_id, "echo ok > fil.txt");
+    const { symlink } = await import("node:fs/promises");
+    await symlink(outside, join(h.baseDir, job.job_id, "work", "lenke-til-vertsfil"));
+    await symlink(h.root, join(h.baseDir, job.job_id, "work", "lenke-til-rot"));
+    expect((await publish(h, job.job_id)).status).toBe(200);
+    expect((await h.api({ method: "DELETE", path: `/v1/jobs/${job.job_id}` })).status).toBe(200);
+    expect(await readFile(outside, "utf8")).toBe("VERTSHEMMELIGHET");
+  });
+});
+
+describe("E: kappløp og tilstand", () => {
+  it("to samtidige publish på samme jobb: ett lykkes, det andre får 409 job_busy (aldri to pushes samtidig)", async () => {
+    const h = await harness();
+    const job = await h.createJob();
+    await commitAs(h, job.job_id, "echo 1 > a.txt");
+    const [a, b] = await Promise.all([publish(h, job.job_id, "jarvis/race"), publish(h, job.job_id, "jarvis/race")]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+  });
+
+  it("publish etter DELETE: 404; publish mens exec kjører: 409", async () => {
+    const h = await harness();
+    const job = await h.createJob();
+    const slow = h.exec(job.job_id, ["sleep", "2"]);
+    await new Promise((r) => setTimeout(r, 300));
+    expect((await publish(h, job.job_id)).status).toBe(409);
+    await slow;
+    await h.api({ method: "DELETE", path: `/v1/jobs/${job.job_id}` });
+    expect((await publish(h, job.job_id)).status).toBe(404);
+  }, 20_000);
+});
