@@ -151,8 +151,10 @@ curl -sSI --max-time 10 https://github.com | head -1    # verten må nå github.
 6. **Koble worker til runneren** (valgfri compose-override som KUN monterer socket-katalogen og tokenfilen read-only; ingen Docker-socket):
    ```
    echo "JARVIS_JOB_RUNNER_GID=$(getent group jarvis-job-clients | cut -d: -f3)" >> .env
+   grep -E '^JARVIS_CLAUDE_BIN=' .env || echo "JARVIS_CLAUDE_BIN=claude" >> .env     # stien gjelder INNE I jobb-containeren (imaget har /usr/local/bin/claude); en vertssti virker ikke
    docker compose --env-file .env -f infra/local/docker-compose.yml -f infra/job-runner/docker-compose.job-runner.yml up -d worker
    ```
+   `JARVIS_CLAUDE_BIN` er navnet på Claude Code-programmet slik det kjøres **inne i jobb-containeren** (`claude`); står den tom eller peker på en vertssti, feiler hver jobb med `claude_code_not_configured` eller exit 127. `ANTHROPIC_API_KEY` leveres av worker til containeren som env ved opprettelse (aldri i argv eller logg).
    Overriden setter `JARVIS_JOB_RUNNER=host`, `JARVIS_JOB_RUNNER_SOCKET` og `JARVIS_JOB_RUNNER_TOKEN_FILE`. **Bruk begge `-f`-flaggene ved hver senere oppdatering**;
    uten overriden faller worker tilbake til lukket tilstand (trygt, men kodejobber feiler med `job_container_runner_not_configured`).
    Mangler `/var/lib/jarvis-job-runner/sock` eller tokenfilen, nekter compose å starte worker (`create_host_path: false`) - aldri en stille tom mount.
