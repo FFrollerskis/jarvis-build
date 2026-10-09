@@ -1335,8 +1335,8 @@ interface UpsertOpenLoopInput {
   intrinsic_signals?: number;
 }
 
-/** En lukket loop gjenåpnes av neste deteksjon: auto-lukket (vilkåret forsvant) umiddelbart, ellers først etter 7-dagers-undertrykkelsen (D-396). Samme vilkår som status/opened_at/resolved_at under. */
-const REOPENS_SQL = `(business_open_loops.status = 'resolved' AND (business_open_loops.resolution_reason IS NOT DISTINCT FROM 'condition_no_longer_true' OR business_open_loops.resolved_at <= now() - interval '7 days'))`;
+/** En lukket loop gjenåpnes av neste deteksjon: auto-lukket (vilkåret forsvant) umiddelbart, ellers først etter 7-dagers-undertrykkelsen (D-396). Eksakt komplement av status-CASE under (også ved manglende resolved_at). */
+const REOPENS_SQL = `(business_open_loops.status = 'resolved' AND NOT COALESCE(business_open_loops.resolution_reason IS DISTINCT FROM 'condition_no_longer_true' AND business_open_loops.resolved_at > now() - interval '7 days', false))`;
 /** Maks antall tidligere merkede lukkinger (utfall + confidence ved lukking) som beholdes per loop - de nyeste. */
 const CLOSURE_HISTORY_MAX = 100;
 

@@ -101,7 +101,10 @@ describe("registrering: alle business-handlinger er registrert med riktig risiko
     const business = new Map(defs.filter((d) => d.tool_id === "business").map((d) => [d.action, d.capability_class]));
     // UA-3 profiling/scoring-slice (D-61): 8 nye score-handlinger lagt til på SLUTTEN (22 -> 30); D-396 (JARVIS-049): +3 lese-/oppslagshandlinger (30 -> 33).
     // WP-D2 (JARVIS-049): +7 pipeline-handlinger (update_lead/update_opportunity/set_next_action = B; close_*/delete_* = C) (33 -> 40). Tellelåsen er bevisst.
-    expect(business.size).toBe(40);
+    // WP-D2 (churn/produktbruk, JARVIS-045): +3 (get_churn_overview/get_calibration_report = A, link_product_account = B) (40 -> 43). Tellelåsen er bevisst.
+    expect(business.size).toBe(43);
+    for (const a of ["get_churn_overview", "get_calibration_report"]) expect(business.get(a), a).toBe("A");
+    expect(business.get("link_product_account")).toBe("B");
     for (const a of ["update_lead", "update_opportunity", "set_next_action"]) expect(business.get(a), a).toBe("B");
     for (const a of ["close_lead", "close_opportunity", "delete_lead", "delete_opportunity"]) expect(business.get(a), a).toBe("C");
     for (const a of ["find_companies", "find_contacts", "get_customer_overview"]) expect(business.get(a)).toBe("A");
