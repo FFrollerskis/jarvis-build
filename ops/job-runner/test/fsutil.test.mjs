@@ -34,6 +34,15 @@ describe("A: readSecretFile - en hemmelighet andre kan lese er ingen hemmelighet
     }
   });
 
+  it("forbiddenModeBits 0o177 (git-PAT): kun eier kan lese - 0600/0400 godtas, ALL gruppe-/andre-tilgang nektes (også gruppe-lesing som bearer-tokenet har)", async () => {
+    for (const mode of [0o600, 0o400]) expect(await readSecretFile((await make(mode)).file, { forbiddenModeBits: 0o177 }), mode.toString(8)).toContain("tok-");
+    for (const mode of [0o640, 0o440, 0o604, 0o644, 0o660, 0o700, 0o500, 0o777]) {
+      expect(await err(readSecretFile((await make(mode)).file, { forbiddenModeBits: 0o177 })), mode.toString(8)).toBe("secret_file_permissions_too_open");
+    }
+    // uten parameteren er standarden uendret (bearer-tokenet deles med worker via gruppen)
+    expect(await readSecretFile((await make(0o640)).file)).toContain("tok-");
+  });
+
   it("nekter symlenke (O_NOFOLLOW), katalog, for stor fil, manglende fil og relativ sti", async () => {
     const real = await make(0o600);
     const link = join(real.dir, "link");

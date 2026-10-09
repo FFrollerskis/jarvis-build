@@ -62,6 +62,8 @@ SystemCallErrorNumber=EPERM
 # Node/V8 trenger JIT (skrivbart+kjørbart minne): MemoryDenyWriteExecute kan derfor ikke slås på.
 MemoryDenyWriteExecute=no
 LimitNOFILE=4096
+# Ingen minnedump: prosessminnet inneholder bearer-token, git-PAT og kortlevde installasjonstokens (JavaScript kan ikke nullstille strenger).
+LimitCORE=0
 TasksMax=512
 
 [Install]

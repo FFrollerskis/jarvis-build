@@ -57,7 +57,7 @@ export function assertRequestToken(value) {
   if (typeof value !== "string") throw new RunnerError("git_token_invalid", 400, "not_a_string");
   if (value.length < MIN_REQUEST_TOKEN_CHARS) throw new RunnerError("git_token_invalid", 400, "too_short");
   if (value.length > MAX_TOKEN_CHARS) throw new RunnerError("git_token_invalid", 400, "too_long");
-  if (!TOKEN_FORMAT.test(value) || !REQUEST_TOKEN_FORMAT.test(value)) throw new RunnerError("git_token_invalid", 400, "format");
+  if (!REQUEST_TOKEN_FORMAT.test(value)) throw new RunnerError("git_token_invalid", 400, "format");
   return value;
 }
 
@@ -77,7 +77,7 @@ export class FileGitCredentialSource {
   /**
    * @param {{
    *   files: Readonly<Record<string, { tokenFile?: string }>>,
-   *   readSecret?: (path: string, options: { label: string }) => Promise<string>
+   *   readSecret?: (path: string, options: { label: string, forbiddenModeBits?: number }) => Promise<string>
    * }} options
    */
   constructor(options) {
@@ -92,7 +92,8 @@ export class FileGitCredentialSource {
     if (!entry || typeof entry.tokenFile !== "string") throw new RunnerError("git_credential_unavailable", 403, "repo_not_configured");
     let value;
     try {
-      value = await this.readSecret(entry.tokenFile, { label: "git_token_file" });
+      // PAT-filen skal kun være lesbar for eieren (0400/0600): ikke engang gruppen (worker) - strengere enn bearer-tokenet, som deles via gruppen.
+      value = await this.readSecret(entry.tokenFile, { label: "git_token_file", forbiddenModeBits: 0o177 });
     } catch (error) {
       throw new RunnerError("git_credential_unavailable", 502, error instanceof Error ? error.message.slice(0, 80) : "unreadable");
     }

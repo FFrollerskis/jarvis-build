@@ -121,6 +121,19 @@ describe("C: FileGitCredentialSource (PAT per repo, fil med strenge rettigheter)
     expect((await failure(s.tokenFor("constructor")))?.code).toBe("git_credential_unavailable");
   });
 
+  it("PAT-filen kan IKKE være gruppe-lesbar (0640 nektes - worker deler gruppe med bearer-tokenet, men skal aldri se PAT-en); 0600/0400 godtas", async () => {
+    for (const mode of [0o640, 0o440, 0o604, 0o660]) {
+      const { file } = await make(mode);
+      expect(await failure(source(file).tokenFor("owner/repo")), mode.toString(8)).toMatchObject({ code: "git_credential_unavailable", status: 502 });
+    }
+    for (const mode of [0o600, 0o400]) expect(await source((await make(mode)).file).tokenFor("owner/repo")).toBe(GIT_TOKEN);
+  });
+
+  it("repo med source `request` har ingen fil: filkilden nekter (repo_not_configured, 403) i stedet for å lese noe", async () => {
+    const s = new FileGitCredentialSource({ files: { "owner/repo": { source: "request" } } });
+    expect(await failure(s.tokenFor("owner/repo"))).toMatchObject({ code: "git_credential_unavailable", status: 403, detail: "repo_not_configured" });
+  });
+
   it("nekter åpne rettigheter, feil format og manglende fil - uten å lekke filinnhold i feilen", async () => {
     const open = await make(0o644, "ghp_AapenFilNeverReal0123456789\n");
     const e1 = await failure(source(open.file).tokenFor("owner/repo"));

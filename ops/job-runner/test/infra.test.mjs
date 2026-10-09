@@ -76,6 +76,7 @@ describe("A: systemd-enhetene - herding og minste-privilegium", () => {
       expect(one(unit, "Service", "ProtectControlGroups"), name).toBe("yes");
       expect(one(unit, "Service", "SystemCallFilter"), name).toBe("@system-service");
       expect(one(unit, "Service", "UMask"), name).toBe("0077");
+      expect(one(unit, "Service", "LimitCORE"), name).toBe("0"); // ingen minnedump: bearer-token, PAT og kortlevde installasjonstokens ligger i prosessminnet
       expect(one(unit, "Service", "Restart"), name).toBe("on-failure");
       expect(values(unit, "Install", "WantedBy"), name).toEqual(["multi-user.target"]);
     }

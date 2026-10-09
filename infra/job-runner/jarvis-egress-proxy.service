@@ -50,6 +50,8 @@ SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 MemoryDenyWriteExecute=no
 LimitNOFILE=4096
+# Ingen minnedump (som job-runner-enheten; proxyen holder ingen hemmeligheter, men ingenting skal skrive prosessminne til disk).
+LimitCORE=0
 TasksMax=256
 # Valgfri ekstra SSRF-forsvar på kjernenivå (kommentert ut: krever at du kjenner verts-DNS-adressen). Proxyen nekter allerede private adresser i kode.
 # IPAddressDeny=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 127.0.0.0/8

@@ -45,11 +45,13 @@ export const MAX_SECRET_FILE_BYTES = 16 * 1024;
  * Leser en hemmelighetsfil (bearer-token, git-PAT) med strenge krav:
  *  - ingen symlenke (O_NOFOLLOW), vanlig fil, maks 16 KiB (et git-token kan bli langt, f.eks. installasjonstokens `ghs_<APPID>_<JWT>`);
  *  - eid av root ELLER tjenestebrukeren;
- *  - INGEN tilgang for andre (0o007) og ikke skrivbar/kjørbar for gruppe (0o137): en token andre kan lese er ikke en hemmelighet.
+ *  - modusbitene i `forbiddenModeBits` må være AV. Standard 0o137: ingen tilgang for andre og ikke skrivbar/kjørbar for gruppe - gruppen KAN lese, fordi bearer-tokenet
+ *    er delt med worker via gruppen `jarvis-job-clients`. Git-PAT-en skal derimot IKKE kunne leses av noen gruppe (worker skal aldri se den): den leses med 0o177
+ *    (kun eier, 0600/0400). En token andre kan lese er ikke en hemmelighet.
  * Returnerer innholdet uten avsluttende whitespace. Kaster ConfigError (aldri med filinnhold i meldingen).
  *
  * @param {string} path
- * @param {{ label?: string, allowedOwnerUids?: number[], skipOwnerCheck?: boolean }} [options]
+ * @param {{ label?: string, allowedOwnerUids?: number[], skipOwnerCheck?: boolean, forbiddenModeBits?: number }} [options]
  */
 export async function readSecretFile(path, options = {}) {
   const label = options.label ?? "secret_file";
@@ -64,7 +66,7 @@ export async function readSecretFile(path, options = {}) {
   try {
     const st = await handle.stat();
     if (!st.isFile()) throw new ConfigError(`${label}_not_a_regular_file`);
-    if ((st.mode & 0o137) !== 0) throw new ConfigError(`${label}_permissions_too_open`);
+    if ((st.mode & (options.forbiddenModeBits ?? 0o137)) !== 0) throw new ConfigError(`${label}_permissions_too_open`);
     if (options.skipOwnerCheck !== true) {
       const allowed = options.allowedOwnerUids ?? [0, ...(process.getuid ? [process.getuid()] : [])];
       if (!allowed.includes(st.uid)) throw new ConfigError(`${label}_wrong_owner`);
