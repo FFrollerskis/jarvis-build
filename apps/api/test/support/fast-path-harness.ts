@@ -2,6 +2,7 @@ import { vi } from "vitest";
 import type { ContextBuilder, MessageStore } from "@jarvis/core";
 import type { IdentityContext } from "@jarvis/contracts";
 import { MemoryTraceSink, type CompleteInput, type ModelGateway, type ToolExecutor } from "@jarvis/model-gateway";
+import type { ToolCallRequest, ToolResultMessage } from "@jarvis/provider-adapters";
 import type { InProcessWorker, TaskService } from "@jarvis/tasks";
 import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "@jarvis/executive";
 import { GovernanceTransport, governanceToolDefinitions } from "@jarvis/governance";
@@ -74,6 +75,16 @@ export interface BuildOptions {
   runResult?: { started: boolean; reply: string; cloud: boolean } | null;
   /** En assistentrad som lagres RETT ETTER eierens melding (en leveringsmelding fra en ferdig bakgrunnsjobb som kommer inn før historikken leses). */
   afterUserSave?: string;
+  /** Q-51 D / #228: verktøykall «modellen» ber om i første runde; utføres gjennom motorens EGEN executor (som i ekte `completeWithTools`) og resultatene samles i `outputs`. */
+  roundCalls?: ToolCallRequest[];
+  /** Verktøyutføreren motoren gir gatewayen (standard: kaster - ikke brukt). */
+  executor?: ToolExecutor;
+  /** Det første `completeWithTools`-kallet feiler med denne (resten lykkes) - for å teste fallback til den lokale reserveruten. */
+  failFirstWith?: Error;
+  /** Dagstak for skyturer (D-432); udefinert = ingen. */
+  dayCap?: { cap_ore: number; spentToday(tenantId: string): Promise<number> };
+  /** Chattens verktøyrute (standard: Sonnet 5.5); `null` = av. */
+  toolTurnRoute?: { provider: string; model: string } | null;
 }
 
 export interface Built {
@@ -82,11 +93,14 @@ export interface Built {
   captured: CompleteInput[];
   store: Row[];
   memCalls: Array<{ text: string; options: unknown }>;
+  /** Resultatene motorens executor ga tilbake for `roundCalls` (etter eventuell skjerming). */
+  outputs: ToolResultMessage[];
 }
 
 export function buildEngine(opts: BuildOptions): Built {
   const runs: FastPathRun[] = [];
   const captured: CompleteInput[] = [];
+  const outputs: ToolResultMessage[] = [];
   const memCalls: Array<{ text: string; options: unknown }> = [];
   const store: Row[] = [...(opts.prior ?? [])];
   const rows = (limit: number) => store.slice(-limit).map((m, i) => ({ message_id: `m${i}`, role: m.role, content: m.content, created_at: new Date().toISOString() }));
@@ -101,7 +115,14 @@ export function buildEngine(opts: BuildOptions): Built {
   const gateway = {
     complete: async () => ({ text: "svar", usage: { input_tokens: 1, output_tokens: 1 }, provider: "gemma_local", model: "m" }),
     stream: async () => ({ text: "svar", usage: { input_tokens: 1, output_tokens: 1 }, provider: "gemma_local", model: "m" }),
-    completeWithTools: async (input: CompleteInput) => { captured.push(JSON.parse(JSON.stringify(input)) as CompleteInput); return { text: "svar", usage: { input_tokens: 1, output_tokens: 1 }, provider: "x", model: "m" }; }
+    completeWithTools: async (input: CompleteInput, toolOptions?: { executor?: ToolExecutor }) => {
+      captured.push(JSON.parse(JSON.stringify(input)) as CompleteInput);
+      if (opts.failFirstWith && captured.length === 1) throw opts.failFirstWith;
+      for (const call of opts.roundCalls ?? []) {
+        if (toolOptions?.executor) outputs.push(await toolOptions.executor.execute(call, { tenant_id: "t1", idempotency_key: `k-${call.tool_call_id}` }));
+      }
+      return { text: "svar", usage: { input_tokens: 1, output_tokens: 1 }, provider: "x", model: "m" };
+    }
   } as unknown as ModelGateway;
   const memory = opts.mem === null ? undefined : {
     contextFor: async (_id: IdentityContext, text: string) => (opts.meta ?? { text: "" }).text || (opts.mem ? lookup(opts.mem, text).text : ""),
@@ -115,15 +136,16 @@ export function buildEngine(opts: BuildOptions): Built {
   const engine = new ConversationEngine({
     messages, context, gateway,
     tasks: {} as unknown as TaskService, worker: {} as unknown as InProcessWorker, trace: new MemoryTraceSink(),
-    toolTurnRoute: route,
+    toolTurnRoute: opts.toolTurnRoute === undefined ? route : opts.toolTurnRoute,
+    ...(opts.dayCap ? { toolTurnDayCap: opts.dayCap } : {}),
     ...(memory ? { memory } : {}),
     tools: {
       definitions: PRODUCTION_SURFACE.map((m) => m.def) as never,
-      executorFor: () => ({ execute: async () => { throw new Error("ikke brukt"); } }) as unknown as ToolExecutor,
+      executorFor: () => opts.executor ?? ({ execute: async () => { throw new Error("ikke brukt"); } }) as unknown as ToolExecutor,
       catalog: () => "katalog",
       select: ({ surface, text, recent_owner_messages }) => {
         const sel = selectSurfaceTools(surface, text, PRODUCTION_SURFACE, { recent_owner_messages: recent_owner_messages ?? [] });
-        return { definitions: sel.selected.map((m) => m.def) as never, limits: sel.limits, ...(sel.min_sensitivity ? { min_sensitivity: sel.min_sensitivity } : {}) };
+        return { definitions: sel.selected.map((m) => m.def) as never, limits: sel.limits, tool_ids: sel.selected.map((m) => m.tool_id), ...(sel.min_sensitivity ? { min_sensitivity: sel.min_sensitivity } : {}) };
       }
     },
     ...(opts.withDelegate === false ? {} : {
@@ -138,7 +160,7 @@ export function buildEngine(opts: BuildOptions): Built {
       }
     })
   });
-  return { engine, runs, captured, store, memCalls };
+  return { engine, runs, captured, store, memCalls, outputs };
 }
 
 function lookup(items: MemItem[], text: string): Meta {

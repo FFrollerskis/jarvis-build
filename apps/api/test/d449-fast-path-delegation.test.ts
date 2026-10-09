@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
 import type { CompleteInput } from "@jarvis/model-gateway";
 import { classifyContentSensitivity } from "@jarvis/model-gateway";
-import { jobLocalOnlyNote } from "../src/tool-turn-route.ts";
+import { jobLocalOnlyNote, stripSystemNotes } from "../src/tool-turn-route.ts";
 import { STARTED, baseIdentity as base, buildEngine as build, captureLogs, type Row } from "./support/fast-path-harness.ts";
 
 /**
@@ -51,8 +51,11 @@ const CASES: Case[] = [
   { name: "utgifter/abonnement (finansverktøy valgt)", message: "Gå gjennom utgiftene og abonnementene mine i e-posten", cloud: false },
   { name: "kontoutskrift (finansverktøy valgt)", message: "Sjekk kontoutskriften fra DNB i e-posten min", cloud: false },
   { name: "kontoen/banken (finansverktøy valgt)", message: "Hva står på kontoen min ifølge e-postene fra banken", cloud: false },
-  { name: "finans nylig i samtalen (D-384-vinduet)", message: PR_ASK, prior: [FINANCE_PRIOR], cloud: false },
-  { name: "helse nylig i samtalen", message: PR_ASK, prior: [HEALTH_PRIOR], cloud: false },
+  // Q-51 D (D-450): en følsom melding i historikken låser ikke lenger hele turen - skyturen sendes UTEN den meldingen (se d450-q51-cloud-variant.test.ts for hva som faktisk sendes). Samme i hurtigbanen.
+  { name: "finans nylig i samtalen (D-384-vinduet): skyturen sendes uten meldingen (Q-51 D)", message: PR_ASK, prior: [FINANCE_PRIOR], cloud: true },
+  { name: "helse nylig i samtalen: skyturen sendes uten meldingen (Q-51 D)", message: PR_ASK, prior: [HEALTH_PRIOR], cloud: true },
+  { name: "finans i selve meldingen låser fortsatt (kan ikke utelates)", message: "Sjekk saldoen min i e-posten", cloud: false },
+  { name: "helse i selve meldingen låser fortsatt", message: "Sjekk legetimen min i kalenderen", cloud: false },
   { name: "sensitiv melding eldre enn vinduet låser ikke", message: PR_ASK, prior: [FINANCE_PRIOR, ...filler(4)], cloud: true },
   { name: "finansverktøy arves fra eierens tidligere melding (D-389), eldre enn vinduet", message: "og den neste da?", prior: [BANK_PRIOR, ...filler(4)], cloud: false },
   { name: "eksplisitt provider (API/tale-enhet)", message: PR_ASK, provider: "gemma_local", cloud: false },
@@ -88,20 +91,31 @@ describe("D-449: paritet - hurtigbanen og chatten treffer samme ruteavgjørelse 
 describe("D-449: hurtigbanens øvrige regler", () => {
   it("lokalt-tvang gir synlig merknad (ikke på tale) med kategorier, og logglinjen d449_fast_delegate_local uten innhold", async () => {
     const lines = capture();
-    const t = build({ prior: [FINANCE_PRIOR] });
-    const result = await t.engine.handle(base, `${PR_ASK}${BG}`);
+    // Q-51 D (D-450): en følsom melding i historikken kan utelates fra skyturen, så låsen må komme fra selve meldingen (som ikke kan utelates).
+    const ask = "Sjekk saldoen min i e-posten";
+    const t = build({});
+    const result = await t.engine.handle(base, `${ask}${BG}`);
     expect(result.reply).toContain(STARTED);
     expect(result.reply).toContain("Jobben kjører på den lokale modellen");
     expect(result.reply).toContain("økonomi");
     const local = lines("d449_fast_delegate_local");
     expect(local).toHaveLength(1);
     expect(local[0]!.reasons).toContain("text:finance");
-    expect(JSON.stringify(local)).not.toMatch(/saldo|lån|jarvisbuild/i);
+    expect(JSON.stringify(local)).not.toMatch(/saldo|e-posten/i);
 
-    const voice = build({ prior: [FINANCE_PRIOR] });
-    const spoken = await voice.engine.handle({ ...base, channel: "voice" }, `${PR_ASK}${BG}`);
+    const voice = build({});
+    const spoken = await voice.engine.handle({ ...base, channel: "voice" }, `${ask}${BG}`);
     expect(voice.runs[0]!.options).toEqual({ cloudAllowed: false });
     expect(spoken.reply).toBe(STARTED);
+  });
+
+  it("Q-51 D: en følsom melding i historikken (ikke i selve meldingen) gir skyjobb uten merknad - jobben får bare oppgaveteksten, aldri samtalen", async () => {
+    const lines = capture();
+    const t = build({ prior: [FINANCE_PRIOR] });
+    const result = await t.engine.handle(base, `${PR_ASK}${BG}`);
+    expect(t.runs[0]!.options).toEqual({ cloudAllowed: true });
+    expect(result.reply).toBe(STARTED);
+    expect(lines("d449_fast_delegate_local")).toEqual([]);
   });
 
   it("verktøyutvalgets finansnivå gir kategorien «økonomitjenester» i merknaden (uten ord klassifiseringen kjenner)", async () => {
@@ -151,7 +165,7 @@ describe("D-449: hurtigbanens øvrige regler", () => {
     expect((await none.engine.handle(base, `${PR_ASK}${BG}`)).reply).toContain("Jeg fikk ikke startet bakgrunnsjobben");
   });
 
-  it("merknaden (som lagres i samtalen) kan aldri selv låse samtalen lokalt: ingen reasons-kombinasjon gir ord klassifiseringen reagerer på", () => {
+  it("merknaden (som lagres i samtalen) kan aldri selv låse samtalen lokalt: den fjernes strukturelt fra historikken (Q-52 A: «helse» står i ordforrådet, så teksten kan ikke garanteres nøytral)", () => {
     const combos = [
       ["text:finance"], ["text:health"], ["text:secret"], ["memory_space:health"], ["memory_sensitivity:special"], ["tool_selection:SECRET_RESTRICTED"],
       ["text:finance", "text:health", "text:secret", "memory_space:health", "memory_sensitivity:special", "tool_selection:SECRET_RESTRICTED", "job_text_gate"],
@@ -160,8 +174,10 @@ describe("D-449: hurtigbanens øvrige regler", () => {
     ];
     for (const reasons of combos) {
       const note = jobLocalOnlyNote(reasons);
-      expect(classifyContentSensitivity({ texts: [note] }).sensitivity, reasons.join(",")).toBe("PUBLIC_OR_LOW_SENSITIVITY");
       expect(note).toContain("Jobben kjører på den lokale modellen");
+      const stored = `${STARTED}${note}`;
+      expect(stripSystemNotes(stored), reasons.join(",")).toBe(STARTED);
+      expect(classifyContentSensitivity({ texts: [stripSystemNotes(stored)] }).sensitivity, reasons.join(",")).toBe("PUBLIC_OR_LOW_SENSITIVITY");
     }
   });
 });

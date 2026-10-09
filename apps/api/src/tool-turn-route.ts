@@ -49,9 +49,9 @@ export function parseDailyCapOre(raw: string | undefined): number {
  * tvinger til den lokale modellen, SKAL si det. Uten merknaden fikk eieren et uleselig svar fra en liten lokal modell uten å vite hvorfor - Jarvis' eget forrige
  * svar hadde nevnt et økonomiord, og de siste meldingene i samtalen teller med (D-384). Reglene er uendret; dette gjør bare valget synlig.
  *
- * Teksten må selv ALDRI inneholde et ord sensitivitetsklassifiseringen reagerer på (ellers ville merknaden holdt samtalen låst lokalt videre) - låst av en test.
- * NB: det gjelder også ord som ikke handler om penger. Mønsteret `gjeld…` fanger verbet «gjelder/gjelde/gjeldende», så ordet unngås her (testen fanget det).
- * Kun kategorier vises, aldri innhold.
+ * Merknaden lagres i samtalen som en del av svaret og må ikke selv låse samtalen lokalt videre. Q-52 A (D-450) la «helse» til i klassifiseringens ordforråd, og merknaden bruker nettopp det ordet for å si hva som ble beskyttet.
+ * Derfor garanteres nøytraliteten nå STRUKTURELT: `stripSystemNotes` fjerner en slik avsluttende merknad fra assistent-radene FØR historikken klassifiseres og sendes til noen modell (låst av tester), i stedet for å
+ * love at ordforrådet aldri vokser inn i teksten. Kun kategorier vises, aldri innhold.
  */
 const LOCAL_ONLY_AREAS: Readonly<Record<string, { area: string; from: "text" | "memory" }>> = {
   "text:finance": { area: "økonomi", from: "text" },
@@ -123,4 +123,55 @@ export function jobDayCapNote(capOre: number): string {
 export function resolveJobToolTurnRoute(rawJobRoute: string | undefined, chatRoute: ToolTurnRoute | null): ToolTurnRoute | null {
   if ((rawJobRoute ?? "").trim() === "") return chatRoute;
   return parseToolTurnRoute(rawJobRoute);
+}
+
+/**
+ * Q-53 A (D-450, Tobias 2026-10-09: «Ja til alle Q»): D-431 sier at ren prat - turer der KUN minne-reserven er valgt - forblir på den lokale modellen, og at først et ekte verktøy sender turen til skymodellen.
+ * Koden sjekket tidligere `name.startsWith("memory__")`, men minneverktøyene heter `search_my_memory` og `suggest_memory` i produksjon (tjeneste `memory`, handlingene `search` og `propose`), så «reserven» ble aldri gjenkjent og
+ * nesten alle meldinger som ikke var småprat gikk til Sonnet. Nå avgjøres det STRUKTURELT: utvalget oppgir `tool_id` for hvert valgte verktøy (`tool_ids`, samme rekkefølge som definisjonene), og turen er «kun minne»
+ * når alle tilhører tjenesten `memory`. Uten `tool_ids` (eldre/testoppsett) brukes de kjente navnene (`search_my_memory`, `suggest_memory`) og det eldre `memory__`-prefikset. Ingen definisjoner = ingen verktøytur.
+ */
+const MEMORY_RESERVE_TOOL_NAMES: ReadonlySet<string> = new Set(["search_my_memory", "suggest_memory"]);
+export function isMemoryReserveOnly(definitions: ReadonlyArray<{ name: string }>, toolIds?: ReadonlyArray<string>): boolean {
+  if (definitions.length === 0) return true;
+  if (toolIds !== undefined && toolIds.length === definitions.length) return toolIds.every((id) => id === "memory");
+  return definitions.every((d) => d.name.startsWith("memory__") || MEMORY_RESERVE_TOOL_NAMES.has(d.name));
+}
+
+/**
+ * Q-51 D (D-450): merknaden i svaret når en skybundet verktøytur ble sendt UTEN de enkelte følsomme meldingene (og parene deres) i stedet for å låses til den lokale modellen. Samme prinsipp som D-447: aldri en usynlig
+ * endring, kun antall (aldri innhold). Ingen parenteser inne i teksten (se `stripSystemNotes`).
+ */
+export function cloudHistoryNote(withheld: number): string {
+  const what = withheld === 1 ? "1 tidligere melding" : `${withheld} tidligere meldinger`;
+  return `\n\n(Svart på skymodellen uten ${what}: de berører følsomme emner, og slikt sendes aldri til skyen. Nevn emnet i spørsmålet hvis du vil ha dem med, så svarer den lokale modellen.)`;
+}
+
+/**
+ * Starten på hver rutemerknad Jarvis selv legger bak et svar (chatten: `localOnlyNote`, dagstaket, `cloudHistoryNote`, skjermet minnesøk; hurtigbanen: `jobLocalOnlyNote`). Listen og `stripSystemNotes` hører sammen og er låst av en test
+ * mot hver funksjon som lager en merknad.
+ */
+const SYSTEM_NOTE_PREFIXES: readonly string[] = [
+  "Svart på den lokale modellen:",
+  "Jobben kjører på den lokale modellen:",
+  "Dagstaket for sky på",
+  "Svart på skymodellen uten",
+  "Deler av minnesøket ble holdt tilbake"
+];
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const TRAILING_SYSTEM_NOTE = new RegExp(`(?:\\n\\n|^)\\((?:${SYSTEM_NOTE_PREFIXES.map(escapeRegExp).join("|")})[^()]*\\)\\s*$`);
+
+/**
+ * Fjerner avsluttende rutemerknader fra et assistent-svar slik det ligger i samtalehistorikken. Merknadene er til EIEREN (hvorfor svaret kom fra en bestemt modell); de er ikke en del av samtalen modellen skal se, og de skal
+ * heller ikke telle med når historikken klassifiseres (Q-52 A la «helse» til ordforrådet, og merknaden bruker det ordet for å si hva som ble beskyttet - uten stripping ville merknaden selv holdt samtalen låst lokalt).
+ * Sikkert ved konstruksjon: det som fjernes sendes heller ikke til noen modell, så en modell som later som den skriver en merknad kan ikke skjule innhold FOR klassifiseringen mens det likevel når en modell.
+ */
+export function stripSystemNotes(content: string): string {
+  let out = content;
+  for (let round = 0; round < 4; round += 1) {
+    const next = out.replace(TRAILING_SYSTEM_NOTE, "");
+    if (next === out) break;
+    out = next;
+  }
+  return out;
 }

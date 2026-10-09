@@ -5,6 +5,7 @@ import {
   CouncilAutoTriggerLimiter,
   classifyContentSensitivity,
   partitionHistoryBySensitivity,
+  withholdSensitiveMessages,
   classifyDecisionImportance,
   maxSensitivity,
   NoEligibleProviderError,
@@ -21,7 +22,8 @@ import { DEFAULT_PERSONALITY_CONFIG, type PersonalityConfig } from "@jarvis/self
 import type { TaskService, InProcessWorker } from "@jarvis/tasks";
 import { createTurnContext, surfaceForChannel, type Surface, type SurfaceLimits, type TurnContext } from "@jarvis/tool-gateway";
 import { randomUUID } from "node:crypto";
-import { LOCAL_FALLBACK_ERROR_KINDS, jobLocalOnlyNote, localOnlyNote } from "./tool-turn-route.ts";
+import { chatWithheldNote, cloudScreenedExecutor, servedByCloudModel } from "./cloud-tool-screen.ts";
+import { LOCAL_FALLBACK_ERROR_KINDS, cloudHistoryNote, isMemoryReserveOnly, jobLocalOnlyNote, localOnlyNote, stripSystemNotes } from "./tool-turn-route.ts";
 
 export interface ConversationDeps {
   messages: MessageStore;
@@ -99,7 +101,13 @@ export interface ConversationDeps {
      * Del 3 (JARVIS-002/028): deterministisk per-flate utvalg av verktøy for DENNE turen (hard allowlist per flate + intensjon + grenser).
      * Når satt brukes den i stedet for `definitions` (som da kun er referansen/øvre grense). Tomt utvalg => ingen verktøy i runden.
      */
-    select?(input: { surface: Surface; text: string; recent_owner_messages?: string[] }): { definitions: ToolDefinition[]; limits: SurfaceLimits; min_sensitivity?: "SECRET_RESTRICTED" };
+    select?(input: { surface: Surface; text: string; recent_owner_messages?: string[] }): {
+      definitions: ToolDefinition[];
+      limits: SurfaceLimits;
+      min_sensitivity?: "SECRET_RESTRICTED";
+      /** Q-53 A (D-450): `tool_id` (tjenesten) til hver valgte definisjon, i samme rekkefølge. Brukes til å avgjøre om turen KUN har minne-reserven (`isMemoryReserveOnly`). */
+      tool_ids?: string[];
+    };
     /** D-383: kompakt katalog over tjenestene modellen kan bruke på flaten (settes i systemprompten hver tur). */
     catalog?(surface: Surface): string;
   };
@@ -126,15 +134,35 @@ export interface ConversationDeps {
   personality?: () => PersonalityConfig;
 }
 
+type HistoryRow = { role: "assistant" | "user"; content: string };
+type ToolSelection = ReturnType<NonNullable<NonNullable<ConversationDeps["tools"]>["select"]>>;
+
+/**
+ * Q-51 D (D-450): skyvarianten av en tur som ellers ville vært låst til den lokale modellen KUN på grunn av enkeltmeldinger i historikken. `history` er historikken uten de følsomme meldingene og parene deres
+ * (`withheld` = hvor mange), `selection`/`toolDefinitions` er verktøyutvalget regnet på nytt uten tjenester arvet fra de utelatte meldingene, og `sensitivityDecision` er klassifiseringen av det som faktisk sendes.
+ * Finnes bare når meldingen selv og minnet er trygge, utvalget ikke låser turen (finansverktøy, D-381) og utvalget har et ekte verktøy (ikke bare minne-reserven, Q-53 A).
+ */
+interface CloudVariant {
+  history: HistoryRow[];
+  withheld: number;
+  selection: ToolSelection;
+  toolDefinitions: ToolDefinition[];
+  sensitivityDecision: { sensitivity: DataSensitivity; reasons: string[] };
+}
+
 /** D-449: resultatet av den delte ruteberegningen (`ConversationEngine.resolveTurnRouting`). */
 interface TurnRouting {
   memoryMeta: { text: string; spaces: string[]; sensitivities: string[] };
-  history: Array<{ role: "assistant" | "user"; content: string }>;
+  history: HistoryRow[];
   usingDefaultGemmaPreference: boolean;
-  selection: ReturnType<NonNullable<NonNullable<ConversationDeps["tools"]>["select"]>> | undefined;
+  selection: ToolSelection | undefined;
   toolDefinitions: ToolDefinition[];
   useTools: boolean;
   sensitivityDecision: { sensitivity: DataSensitivity; reasons: string[] };
+  /** Q-51 D: se `CloudVariant`. Udefinert når turen ikke er låst lokalt, eller når ingen trygg skyvariant finnes. */
+  cloudVariant?: CloudVariant;
+  /** Q-52 A: ordnøkler fra meldingen som BEVISST ikke påvirker klassifiseringen (kun for måling; aldri tekst). */
+  ambiguousTerms: string[];
 }
 
 /** Del 3 (JARVIS-013): innlimt/ekstern tekst (lang, flere e-post-/dokument-headere, store kodeblokker) er ikke eierens egne ord. */
@@ -498,21 +526,22 @@ export class ConversationEngine {
       // eierforespørsel - var kilden til preferansen.
       // (`usingDefaultGemmaPreference`, verktøyutvalget og `sensitivityDecision` beregnes i `resolveTurnRouting` - se over.)
       // D-431 (Tobias: «bruk ollama bare til prating - når jeg ber om tools, send ut Sonnet 5.5»): ren prat går til den lokale modellen; når et
-      // ekte verktøy er valgt for turen (alt annet enn minne-reserven `memory__*`), går turen til Sonnet 5.5 (anthropic) - en 8B-modell
+      // ekte verktøy er valgt for turen (alt annet enn minne-reserven), går turen til Sonnet 5.5 (anthropic) - en 8B-modell
       // bruker verktøy upålitelig. Aldri for SECRET_RESTRICTED (helse/finans: kun lokal, D-378) og aldri over en eksplisitt eier-override.
+      // Q-53 A (D-450): «minne-reserven» gjenkjennes nå strukturelt (`isMemoryReserveOnly`); tidligere sjekket koden et prefiks (`memory__`) som ikke finnes i produksjon, så nesten alt som ikke var småprat gikk til Sonnet.
       const toolRoute = this.deps.toolTurnRoute ?? null;
-      const cloudToolsWanted =
-        toolRoute !== null &&
-        usingDefaultGemmaPreference &&
-        useTools &&
-        toolDefinitions.some((d) => !d.name.startsWith("memory__"));
+      const cloudRouteOpen = toolRoute !== null && usingDefaultGemmaPreference;
+      const cloudToolsWanted = cloudRouteOpen && useTools && !isMemoryReserveOnly(toolDefinitions, selection?.tool_ids);
       const sensitivityLocalOnly = sensitivityDecision.sensitivity === "SECRET_RESTRICTED";
-      let toolsToCloud = cloudToolsWanted && !sensitivityLocalOnly;
+      // Q-51 D (D-450): er turen låst lokalt KUN på grunn av enkeltmeldinger i historikken, sendes den i stedet til skyen uten de meldingene og parene deres (`routing.cloudVariant`). Den lokale reserveruten (skyen nede,
+      // dagstaket) får alltid hele historikken og den opprinnelige, strenge sensitiviteten.
+      let cloudVariant = cloudRouteOpen && sensitivityLocalOnly ? routing.cloudVariant : undefined;
+      let toolsToCloud = (cloudToolsWanted && !sensitivityLocalOnly) || cloudVariant !== undefined;
       // D-447 (NAS-test 2026-10-08): en verktøytur som ville gått til sky, men som sensitivitetsregelen (D-378) tvinger lokalt, skal ikke skje usynlig. Eieren fikk et uleselig
       // svar fra en liten lokal modell uten å vite hvorfor (Jarvis' eget forrige svar nevnte et økonomiord, og de siste meldingene teller med, D-384). Regelen er UENDRET - dette gjør
       // bare valget synlig: en merknad i svaret (ikke på tale) og en logglinje med kategoriene, aldri innhold.
       let routeNote = "";
-      if (cloudToolsWanted && sensitivityLocalOnly) {
+      if (cloudToolsWanted && sensitivityLocalOnly && cloudVariant === undefined) {
         console.log(JSON.stringify({ msg: "d447_tool_turn_local_sensitivity", reasons: sensitivityDecision.reasons }));
         if (surface !== "voice") routeNote = localOnlyNote(sensitivityDecision.reasons);
       }
@@ -528,15 +557,23 @@ export class ConversationEngine {
         }
         if (capped) {
           toolsToCloud = false;
+          cloudVariant = undefined;
           routeNote = `\n\n(Dagstaket for sky på ${Math.round(dayCap.cap_ore / 100)} kr er nådd i dag, så dette svaret kom fra den lokale modellen. Taket nullstilles i morgen.)`;
           console.log(JSON.stringify({ msg: "d432_tool_turn_day_cap_reached", cap_ore: dayCap.cap_ore }));
         }
       }
+      // Q-52 A (D-450): måling av de tvetydige ordene (kun nøkler, aldri tekst) - de påvirker ikke ruten ennå.
+      if (routing.ambiguousTerms.length > 0) console.log(JSON.stringify({ msg: "q52_ambiguous_terms", terms: routing.ambiguousTerms }));
+      // Det som FAKTISK sendes i første forsøk: skyvarianten (Q-51 D) eller hele turen. `fullView` er alltid den lokale reserven.
+      type TurnView = { history: HistoryRow[]; selection: typeof selection; toolDefinitions: ToolDefinition[]; sensitivityDecision: typeof sensitivityDecision };
+      const fullView: TurnView = { history, selection, toolDefinitions, sensitivityDecision };
+      const primaryView: TurnView = cloudVariant ?? fullView;
+      if (cloudVariant !== undefined) console.log(JSON.stringify({ msg: "q51_cloud_variant_without_sensitive_messages", withheld: cloudVariant.withheld, reasons: sensitivityDecision.reasons }));
       const input = {
         tenant_id: identity.tenant_id,
         session_id: identity.session_id,
         purpose: "CHAT" as const,
-        sensitivity: sensitivityDecision.sensitivity,
+        sensitivity: primaryView.sensitivityDecision.sensitivity,
         ...(provider !== undefined ? { provider } : override?.provider !== undefined ? { provider: override.provider } : {}),
         ...(provider === undefined && override?.providerPreference !== undefined
           ? { providerPreference: override.providerPreference }
@@ -547,7 +584,7 @@ export class ConversationEngine {
         ...(override?.paid_models_allowed !== undefined ? { paid_models_allowed: override.paid_models_allowed } : {}),
         // D-382: tale skal være kort (TTS-latens og muntlig form) - teksten styres av prompten, taket er et sikkerhetsnett.
         request: {
-          system, messages: history, max_tokens: surface === "voice" ? 320 : 1024,
+          system, messages: primaryView.history, max_tokens: surface === "voice" ? 320 : 1024,
           ...(toolsToCloud && toolRoute?.model ? { model: toolRoute.model } : {})
         }
       };
@@ -596,18 +633,34 @@ export class ConversationEngine {
         void omittedRouteModel;
         return { ...i, request: rest } as T;
       };
-      const callGateway = (callInput: typeof input) =>
-        this.deps.tools && useTools
+      // #228 (D-450): verktøyresultatene går videre til modellen som betjener neste runde. Betjenes den av en SKYMODELL (avgjort per kall av leverandøren adapteren stempler, ikke av ruten vi valgte - det dekker også
+      // en fallback til en annen skyleverandør og eierens egne modellvalg), holdes minnetreff merket særlig sensitive tilbake (samme port som delegerte jobber, D-449). Lokale modeller får se alt.
+      let withheldFromCloud = 0;
+      const screenedExecutor = (): ToolExecutor =>
+        cloudScreenedExecutor(
+          this.deps.tools!.executorFor(identity, turn),
+          ({ tool, withheld }) => {
+            withheldFromCloud += withheld;
+            console.log(JSON.stringify({ msg: "d450_chat_cloud_tool_output_withheld", tool, withheld }));
+          },
+          servedByCloudModel
+        );
+      const callGateway = (callInput: typeof input, view: TurnView = primaryView) =>
+        this.deps.tools && view.toolDefinitions.length > 0
           ? this.deps.gateway.completeWithTools(callInput, {
-              tools: toolDefinitions,
-              executor: trackedExecutor(this.deps.tools.executorFor(identity, turn)),
-              ...(selection ? { maxRounds: selection.limits.max_rounds, maxCallsPerRound: selection.limits.max_calls_per_round } : {}),
+              tools: view.toolDefinitions,
+              executor: trackedExecutor(screenedExecutor()),
+              ...(view.selection ? { maxRounds: view.selection.limits.max_rounds, maxCallsPerRound: view.selection.limits.max_calls_per_round } : {}),
               ...(onEvent ? { onEvent } : {}),
               ...(signal ? { signal } : {})
             })
           : onEvent
             ? this.deps.gateway.stream(callInput, onEvent, signal)
             : this.deps.gateway.complete(callInput);
+      // Q-51 D: en lokal reserve etter at skyvarianten feilet får ALLTID hele historikken og den opprinnelige, strenge sensitiviteten (SECRET_RESTRICTED → routeren slipper kun lokale modeller).
+      let servedByVariant = cloudVariant !== undefined;
+      const toFullView = <T extends typeof input>(i: T): T =>
+        cloudVariant === undefined ? i : { ...i, sensitivity: sensitivityDecision.sensitivity, request: { ...i.request, messages: fullView.history } };
       let result;
       try {
         result = await callGateway(input);
@@ -633,7 +686,8 @@ export class ConversationEngine {
               reason: err.message
             })
           );
-          result = await callGateway(stripRouteModel(fallbackInput));
+          servedByVariant = false;
+          result = await callGateway(toFullView(stripRouteModel(fallbackInput)), fullView);
         } else if (
           // D-404: «Gemma først» er en HARD preferanse (ingen stille sky-fallback ved planlegging), men når den lokale leverandøren er nede (PC av,
           // tidsavbrudd, serverfeil) FØR noe er sendt eller utført, skal eieren få svar og ikke en feil. Fallbacken kjører gjennom SAMME router uten
@@ -649,7 +703,8 @@ export class ConversationEngine {
           console.error(
             JSON.stringify({ msg: "d404_gemma_provider_failed_fallback", provider: err.provider, kind: err.kind, omitted_preference: omittedGemmaPreference })
           );
-          result = await callGateway(stripRouteModel(fallbackInput));
+          servedByVariant = false;
+          result = await callGateway(toFullView(stripRouteModel(fallbackInput)), fullView);
         } else if (
           // D-431: Sonnet er nede (tidsavbrudd, nett, kvote, ikke konfigurert) FØR noe er sendt eller utført → svar på lokal modell
           // (samme sensitivitetsregler, ingen stille skylekkasje) i stedet for en feil. Degraderingen logges alltid.
@@ -663,10 +718,11 @@ export class ConversationEngine {
           console.error(JSON.stringify({ msg: "d431_cloud_tools_failed_fallback_local", kind: err.kind }));
           const { model: omittedCloudModel, ...localRequest } = input.request;
           void omittedCloudModel;
-          result = await callGateway({ ...input, request: localRequest, providerPreference: ["gemma_local", "gemma_hosted"] });
+          servedByVariant = false;
+          result = await callGateway(toFullView({ ...input, request: localRequest, providerPreference: ["gemma_local", "gemma_hosted"] }), fullView);
         } else if (
           useTools &&
-          sensitivityDecision.sensitivity === "SECRET_RESTRICTED" &&
+          input.sensitivity === "SECRET_RESTRICTED" && // kun for lokale forsøk: skyvarianten (Q-51 D) er aldri SECRET_RESTRICTED
           err instanceof ProviderError &&
           err.kind === "bad_request" &&
           partial === "" &&
@@ -683,9 +739,13 @@ export class ConversationEngine {
           throw err;
         }
       }
-      // D-432 / D-447: er sky-ruten stoppet av dagstaket eller av sensitivitetsregelen, sier svaret det (aldri en stille nedgradering).
-      const replyText = routeNote ? `${result.text}${routeNote}` : result.text;
-      if (routeNote) onToken?.(routeNote);
+      // D-432 / D-447: er sky-ruten stoppet av dagstaket eller av sensitivitetsregelen, sier svaret det (aldri en stille nedgradering). Q-51 D / #228: det samme når skyturen ble sendt uten noen meldinger, eller
+      // når minnetreff ble holdt tilbake fra skymodellen. Ikke på tale (samme som D-447); loggen har alltid kategoriene.
+      const variantNote = cloudVariant !== undefined && servedByVariant && cloudVariant.withheld > 0 && surface !== "voice" ? cloudHistoryNote(cloudVariant.withheld) : "";
+      const withheldNote = withheldFromCloud > 0 && surface !== "voice" ? chatWithheldNote() : "";
+      const notes = `${routeNote}${variantNote}${withheldNote}`;
+      const replyText = notes ? `${result.text}${notes}` : result.text;
+      if (notes) onToken?.(notes);
       await this.deps.messages.save(identity, "assistant", replyText);
       return { reply: replyText, routed: "model", ...(confirmations.length > 0 ? { confirmations } : {}) };
     } catch (err) {
@@ -772,10 +832,12 @@ export class ConversationEngine {
     touchMemory: boolean;
   }): Promise<TurnRouting> {
     const { identity, text, surface, provider, override } = input;
-    const fullHistory = input.historyRows.slice(-20).map((m) => ({
-      role: (m.role === "assistant" ? "assistant" : "user") as "assistant" | "user",
-      content: m.content
-    }));
+    // Rutemerknadene Jarvis selv la bak tidligere svar (D-447, dagstak, Q-51 D) er til eieren; de fjernes før historikken klassifiseres og sendes til noen modell (se `stripSystemNotes`).
+    const fullHistory: HistoryRow[] = input.historyRows.slice(-20).flatMap((m) => {
+      const role: HistoryRow["role"] = m.role === "assistant" ? "assistant" : "user";
+      const content = role === "assistant" ? stripSystemNotes(m.content) : m.content;
+      return role === "assistant" && content.trim() === "" ? [] : [{ role, content }];
+    });
     const memoryMeta: TurnRouting["memoryMeta"] = this.deps.memory
       ? this.deps.memory.contextWithMeta
         // D-386: tokenbudsjett per flate - tale er latens-sensitiv og svarer kort (max_tokens 320), chat får full blokk.
@@ -785,12 +847,12 @@ export class ConversationEngine {
           : { text: "", spaces: [identity.memory_space_id], sensitivities: [] as string[] }
       : { text: "", spaces: [] as string[], sensitivities: [] as string[] };
     // D-384: eldre meldinger som alene er strengere enn det denne turen ellers krever, sendes ikke med (i stedet for å låse samtalen lokalt).
-    const turnBaseline = classifyContentSensitivity({
+    const baseline = classifyContentSensitivity({
       texts: [text],
       memory_spaces: memoryMeta.spaces,
       memory_sensitivities: memoryMeta.sensitivities
-    }).sensitivity;
-    const { kept: history } = partitionHistoryBySensitivity(fullHistory, turnBaseline);
+    });
+    const { kept: history } = partitionHistoryBySensitivity(fullHistory, baseline.sensitivity);
     const usingDefaultGemmaPreference =
       provider === undefined &&
       override?.provider === undefined &&
@@ -798,9 +860,12 @@ export class ConversationEngine {
       override?.mode === undefined;
     // Del 3: per-flate utvalg + grenser (runder/kall per runde). Uten `select` brukes hele `definitions` (legacy/test).
     // D-389: eierens egne forrige meldinger (aldri modell-/verktøytekst) følger med, så et oppfølgingsspørsmål beholder tjenesten.
-    const ownerTurns = fullHistory.filter((m) => m.role === "user").map((m) => m.content);
-    if (ownerTurns.length > 0 && ownerTurns[ownerTurns.length - 1] === text) ownerTurns.pop();
-    const selection = this.deps.tools?.select?.({ surface, text, recent_owner_messages: ownerTurns.slice(-3) });
+    const ownerTurnsOf = (rows: ReadonlyArray<HistoryRow>): string[] => {
+      const turns = rows.filter((m) => m.role === "user").map((m) => m.content);
+      if (turns.length > 0 && turns[turns.length - 1] === text) turns.pop();
+      return turns;
+    };
+    const selection = this.deps.tools?.select?.({ surface, text, recent_owner_messages: ownerTurnsOf(fullHistory).slice(-3) });
     const toolDefinitions = selection ? selection.definitions : this.deps.tools?.definitions ?? [];
     const useTools = this.deps.tools !== undefined && toolDefinitions.length > 0;
     // Del 3 (JARVIS-016/035): sensitivitet utledes av INNHOLDET (minne, historikk, melding, verktøykilder) - ikke lenger hardkodet «public».
@@ -819,7 +884,63 @@ export class ConversationEngine {
           reasons: [...classified.reasons, `tool_selection:${selection.min_sensitivity}`]
         }
       : classified;
-    return { memoryMeta, history, usingDefaultGemmaPreference, selection, toolDefinitions, useTools, sensitivityDecision };
+    const cloudVariant =
+      sensitivityDecision.sensitivity === "SECRET_RESTRICTED" && useTools
+        ? this.cloudVariantFor({ surface, text, fullHistory, history, memoryMeta, ownerTurnsOf })
+        : undefined;
+    return { memoryMeta, history, usingDefaultGemmaPreference, selection, toolDefinitions, useTools, sensitivityDecision, ...(cloudVariant ? { cloudVariant } : {}), ambiguousTerms: baseline.ambiguous_terms ?? [] };
+  }
+
+  /**
+   * Q-51 D (D-450): kan en tur som er SECRET_RESTRICTED bare på grunn av enkeltmeldinger i historikken likevel gå til skyen UTEN de meldingene? Alle disse må stemme (fail-closed ellers → turen forblir lokal som før):
+   *  - selve meldingen og minnet (rom/sensitivitet) er ikke SECRET_RESTRICTED - de kan ikke utelates,
+   *  - noe faktisk ble holdt utenfor (ellers kommer låsen fra noe annet, f.eks. et finansverktøy valgt av selve meldingen),
+   *  - selve meldingen er ikke blant de utelatte (kan skje kun som par til et følsomt svar som kom etter den, f.eks. en leveringsmelding),
+   *  - verktøyutvalget, regnet på nytt uten tjenester arvet fra de utelatte brukermeldingene (D-389), ikke låser turen (D-381) og har et ekte verktøy - en oppfølging som bare arver kontekst fra de følsomme meldingene
+   *    ender dermed fortsatt lokalt, med hele konteksten,
+   *  - det som faktisk sendes (meldingen + resten av historikken + minnet) klassifiseres ikke som SECRET_RESTRICTED (kan ikke skje ved konstruksjon, kontrollert likevel).
+   */
+  private cloudVariantFor(input: {
+    surface: Surface;
+    text: string;
+    fullHistory: HistoryRow[];
+    history: HistoryRow[];
+    memoryMeta: TurnRouting["memoryMeta"];
+    ownerTurnsOf: (rows: ReadonlyArray<HistoryRow>) => string[];
+  }): CloudVariant | undefined {
+    const { surface, text, fullHistory, history, memoryMeta } = input;
+    const select = this.deps.tools?.select;
+    if (!select) return undefined;
+    const own = classifyContentSensitivity({ texts: [text], memory_spaces: memoryMeta.spaces, memory_sensitivities: memoryMeta.sensitivities });
+    if (own.sensitivity === "SECRET_RESTRICTED") return undefined;
+    // Parene beregnes på hele den (rensede) historikken, ikke bare på det D-384 beholdt, så svaret på en eldre følsom melding som D-384 allerede fjernet heller ikke blir stående igjen alene.
+    const { withheld: dropped } = withholdSensitiveMessages(fullHistory);
+    if (dropped.length === 0) return undefined;
+    const droppedSet = new Set<HistoryRow>(dropped);
+    const cleanFull = fullHistory.filter((m) => !droppedSet.has(m));
+    const cleanHistory = history.filter((m) => !droppedSet.has(m));
+    const ownRow = (() => {
+      for (let i = fullHistory.length - 1; i >= 0; i -= 1) if (fullHistory[i]!.role === "user" && fullHistory[i]!.content === text) return fullHistory[i]!;
+      return undefined;
+    })();
+    if (ownRow !== undefined && droppedSet.has(ownRow)) return undefined;
+    const selection = select({ surface, text, recent_owner_messages: input.ownerTurnsOf(cleanFull).slice(-3) });
+    if (selection.min_sensitivity !== undefined) return undefined;
+    if (selection.definitions.length === 0 || isMemoryReserveOnly(selection.definitions, selection.tool_ids)) return undefined;
+    const sensitivityDecision = classifyContentSensitivity({
+      texts: [text, ...cleanHistory.map((m) => m.content)],
+      memory_spaces: memoryMeta.spaces,
+      memory_sensitivities: memoryMeta.sensitivities,
+      private_tool_output: true
+    });
+    if (sensitivityDecision.sensitivity === "SECRET_RESTRICTED") return undefined;
+    return {
+      history: cleanHistory,
+      withheld: history.length - cleanHistory.length,
+      selection,
+      toolDefinitions: selection.definitions,
+      sensitivityDecision: { sensitivity: sensitivityDecision.sensitivity, reasons: sensitivityDecision.reasons }
+    };
   }
 
   /**
@@ -851,7 +972,8 @@ export class ConversationEngine {
       for (const variant of variants) {
         const rows = ownRow < 0 ? historyRows : historyRows.map((m, i) => (i === ownRow ? { ...m, content: variant } : m));
         const routing = await this.resolveTurnRouting({ identity, text: variant, surface, provider, override: null, historyRows: rows, touchMemory: false });
-        if (routing.sensitivityDecision.sensitivity === "SECRET_RESTRICTED") return { allowed: false, reasons: routing.sensitivityDecision.reasons };
+        // Q-51 D (D-450): kan chatten sende denne forespørselen til skyen uten de enkelte følsomme meldingene (`cloudVariant`), kan jobben det også (jobben får uansett kun selve oppgaveteksten, ikke samtalen).
+        if (routing.sensitivityDecision.sensitivity === "SECRET_RESTRICTED" && routing.cloudVariant === undefined) return { allowed: false, reasons: routing.sensitivityDecision.reasons };
       }
       return { allowed: true, reasons: [] };
     } catch {

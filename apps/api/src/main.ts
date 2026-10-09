@@ -1166,6 +1166,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         return {
           definitions: selection.selected.map((m) => m.def),
           limits: selection.limits,
+          // Q-53 A (D-450): tjenesten (`tool_id`) til hver valgte definisjon - samtalemotoren avgjør «kun minne-reserven» strukturelt av dette (ikke av verktøynavn).
+          tool_ids: selection.selected.map((m) => m.tool_id),
           ...(selection.min_sensitivity ? { min_sensitivity: selection.min_sensitivity } : {})
         };
       }
