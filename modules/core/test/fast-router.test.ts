@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { delegationRequestVariants, fastRoute } from "@jarvis/core";
+import { FAST_ROUTE_MAX_CHARS, FAST_ROUTE_PATTERNS, delegationRequestVariants, fastRoute } from "@jarvis/core";
 
 describe("Fast Router v1 (deterministisk, uten LLM)", () => {
   it("matcher kjente kommandoer", () => {
@@ -153,5 +153,90 @@ describe("delegationRequestVariants (D-449)", () => {
       }
       expect(variants.length, text).toBeGreaterThan(1);
     }
+  });
+});
+
+// L4 (gjennomgang av PR #312): «verdi» + 32 000 mellomrom + «x» blokkerte hendelsesløkken i 2,5 s (O(n²) i `\s*[?!.]*\s*$`), også de eldre mønstrene (`kostnad` 1,9 s). Forsvaret gjelder HELE klassen: lengdetak + mellomrom-normalisering ved inngangen.
+describe("fastRoute: fiendtlig inndata - tidsbudsjett og uendret atferd for normale meldinger (L4)", () => {
+  /** ÉN gyldig kommando per mønster. Testen under krever at HVERT eksporterte mønster treffes av minst én av dem, så et nytt mønster uten fiendtlig dekning feiler her. */
+  const STEMS: ReadonlyArray<readonly [string, string]> = [
+    ["status", "system_status"], ["hva er galt med deg", "self_diagnosis"], ["hvor bra yter du", "slo_report"], ["hvordan utvikler du deg", "evolution_report"],
+    ["hva koster du", "cost_report"], ["hvor mye har du kostet", "cost_report"], ["kostnad", "cost_report"], ["hva har du hjulpet meg med", "value_report"], ["verdi", "value_report"], ["bruk", "value_report"],
+    ["jobbstatus task-123", "task_status"], ["opprett jobb: skriv rapport", "create_task"], ["avbryt jobb task-9", "cancel_task"], ["hjelp", "help"], ["skru på lyset", "home_light"],
+    ["deleger: sjekk kalenderen min neste uke", "delegate_background"], ["sjekk e-posten min i bakgrunnen", "delegate_background"]
+  ];
+  const BUDGET_MS = 100;
+  const timed = (input: string): number => {
+    const started = performance.now();
+    fastRoute(input);
+    return performance.now() - started;
+  };
+
+  it("stammene dekker ALLE hurtigbanemønstrene (et nytt mønster uten dekning feiler her) og gir riktig intensjon", () => {
+    expect(FAST_ROUTE_PATTERNS.length).toBeGreaterThanOrEqual(10);
+    for (const pattern of FAST_ROUTE_PATTERNS) expect(STEMS.some(([stem]) => pattern.test(stem)), String(pattern)).toBe(true);
+    for (const [stem, kind] of STEMS) expect(fastRoute(stem)?.kind, stem).toBe(kind);
+  });
+
+  it("alle mønstre × fiendtlige mellomromsløp (32 000 tegn av hvert slag + et tegn som ikke passer) svarer under 100 ms", () => {
+    const fillers: ReadonlyArray<readonly [string, string]> = [
+      ["mellomrom", " ".repeat(32_000)], ["tabulator", "\t".repeat(32_000)], ["NBSP", "\u00a0".repeat(32_000)], ["linjeskift", "\n".repeat(32_000)],
+      ["blandet", " \t\n\u00a0".repeat(8_000)], ["tegnsetting+mellomrom", " ?".repeat(16_000)], ["utropstegn", "!".repeat(32_000)], ["punktum+mellomrom", ". ".repeat(16_000)]
+    ];
+    const worst: string[] = [];
+    outer: for (const [stem] of STEMS) {
+      for (const [name, filler] of fillers) {
+        for (const input of [`${stem}${filler}x`, `${filler}${stem}${filler}x`, `${stem}${filler}`]) {
+          const ms = timed(input);
+          if (ms > BUDGET_MS) worst.push(`${stem} + ${name}: ${ms.toFixed(0)} ms`);
+          if (worst.length >= 3) break outer; // uten rettelsen tar hvert slikt kall sekunder: stopp tidlig i stedet for å vente i minutter
+        }
+      }
+    }
+    expect(worst).toEqual([]);
+  });
+
+  it("også innenfor lengdetaket (≈ 1 990 tegn mellomrom) er hvert mønster lineært: under 100 ms", () => {
+    const near = " ".repeat(FAST_ROUTE_MAX_CHARS - 40);
+    for (const [stem] of STEMS) {
+      for (const input of [`${stem}${near}x`, `${stem}${near}\n?`, `${stem} ${" ?".repeat(900)}x`]) expect(timed(input), stem).toBeLessThan(BUDGET_MS);
+    }
+  });
+
+  it("andre fiendtlige former: lange tegnsetningsløp, lange ord og dypt nøstede parenteser er også raske", () => {
+    for (const input of ["verdi" + "?".repeat(30_000) + "x", "a".repeat(100_000), "opprett jobb: " + "a ".repeat(40_000), ("(".repeat(10_000)) + "status", "hvor mye har du kostet " + "ord ".repeat(20_000) + "\nx", "deleger:" + " ".repeat(30_000) + "x"]) {
+      expect(timed(input), input.slice(0, 30)).toBeLessThan(BUDGET_MS);
+    }
+  });
+
+  it("meldinger over 2 000 tegn er aldri hurtigkommandoer (de går til den intelligente banen); nøyaktig 2 000 tegn kan fortsatt være det", () => {
+    expect(FAST_ROUTE_MAX_CHARS).toBe(2000);
+    expect(fastRoute("status" + " ".repeat(2000))).toBeNull();
+    expect(fastRoute("opprett jobb: " + "a".repeat(2000))).toBeNull();
+    expect(fastRoute("deleger: " + "undersøk ".repeat(300))).toBeNull();
+    expect(fastRoute("status" + " ".repeat(FAST_ROUTE_MAX_CHARS - "status".length))).toEqual({ kind: "system_status" });
+    expect(fastRoute(" ".repeat(FAST_ROUTE_MAX_CHARS - 6) + "status")).toEqual({ kind: "system_status" });
+    for (const v of [undefined, null, 42, {}] as unknown[]) expect(fastRoute(v as string)).toBeNull();
+  });
+
+  it("normale meldinger oppfører seg som før: ankrene, linjeskift-regelen og de eksisterende kommandoene er uendret", () => {
+    // flere mellomrom/tabulatorer mellom ordene gjenkjennes nå (kollapset til ett), med samme intensjon
+    expect(fastRoute("hva  er   galt\tmed deg")).toEqual({ kind: "self_diagnosis" });
+    expect(fastRoute("  hva har du   hjulpet meg med  ?  ")).toEqual({ kind: "value_report" });
+    expect(fastRoute("jobbstatus   task-123  ")).toEqual({ kind: "task_status", task_id: "task-123" });
+    expect(fastRoute("opprett jobb:  skriv rapport")).toEqual({ kind: "create_task", goal: "skriv rapport" });
+    // et linjeskift er fortsatt et linjeskift: `.` krysser det ikke, og en kommando etterfulgt av en ny linje med tekst er ikke en kommando
+    expect(fastRoute("opprett jobb: A\nB")).toBeNull();
+    expect(fastRoute("hva koster du\nsiste måned")).toBeNull();
+    expect(fastRoute("verdi\n\n\nfor huset")).toBeNull();
+    expect(fastRoute("status\n")).toEqual({ kind: "system_status" });
+    // setninger som bare nevner ordene går fortsatt ikke hit
+    for (const text of ["verdi av bilen min", "bruk av tid i uka", "hva er verdien av huset mitt", "status på livet"]) expect(fastRoute(text), text).toBeNull();
+  });
+
+  it("delegering leser den OPPRINNELIGE teksten ordrett (D-449): flere mellomrom og linjeskift i prompten bevares", () => {
+    const prompt = "undersøk   i bakgrunnen\n\nstatus på GitHub-sakene mine,   og gi meg en kort rapport";
+    expect(fastRoute(prompt)).toEqual({ kind: "delegate_background", prompt });
+    expect(fastRoute("deleger:   sjekk  kalenderen   min neste uke")).toEqual({ kind: "delegate_background", prompt: "sjekk  kalenderen   min neste uke" });
   });
 });
