@@ -44,6 +44,20 @@ describe("evaluateReadiness", () => {
     expect(evaluateReadiness("EV-6", facts({ job_runner_configured: true, declared_gates: new Set(["D-32"]) })).ready_for_owner_decision).toBe(true);
   });
 
+  it("L6: API-et ser ikke worker-oppsettet - «jobb-runner konfigurert» er da UKJENT (null), ikke «nei», og eierens erklæring JOB_RUNNER_CONFIGURED oppfyller kravet", () => {
+    const unknown = evaluateReadiness("EV-6", facts({ job_runner_configured: null, declared_gates: new Set(["D-32"]) }));
+    expect(unknown.ready_for_owner_decision).toBe(false);
+    expect(unknown.missing.map((m) => [m.id, m.unknown])).toEqual([["job_runner_configured", true]]);
+    expect(unknown.unknown_signals).toEqual(["job_runner_configured"]);
+    // Målt «nei» er noe annet enn ukjent.
+    expect(evaluateReadiness("EV-6", facts({ job_runner_configured: false, declared_gates: new Set(["D-32"]) })).missing.map((m) => [m.id, m.unknown])).toEqual([["job_runner_configured", false]]);
+    // Erklæringen oppfyller kravet selv når faktumet er ukjent - men D-32 kreves fortsatt, og aktivering er fortsatt aldri besluttet av kode.
+    const declared = evaluateReadiness("EV-6", facts({ job_runner_configured: null, declared_gates: new Set(["D-32", "JOB_RUNNER_CONFIGURED"]) }));
+    expect(declared).toMatchObject({ ready_for_owner_decision: true, activation_decision: false, unknown_signals: [] });
+    expect(evaluateReadiness("EV-6", facts({ job_runner_configured: null, declared_gates: new Set(["JOB_RUNNER_CONFIGURED"]) })).missing.map((m) => m.id)).toEqual(["gate:D-32"]);
+    expect(parseDeclaredGates("JOB_RUNNER_CONFIGURED, d-32").has("JOB_RUNNER_CONFIGURED")).toBe(true);
+  });
+
   it("EV-18 krever minst tre beviste connectorer (målt) og fabrikkporten (erklært)", () => {
     const gates = new Set(["CONNECTOR_FACTORY"]);
     expect(evaluateReadiness("EV-18", facts({ proven_connectors: 2, declared_gates: gates })).missing.map((m) => m.id)).toEqual(["proven_connectors>=3"]);
@@ -73,5 +87,60 @@ describe("parseDeclaredGates", () => {
     expect([...parseDeclaredGates(" D-32 , OFFSITE_RESTORE ,NOE_UKJENT,, d-32")].sort()).toEqual(["D-32", "OFFSITE_RESTORE"]);
     expect(parseDeclaredGates(undefined).size).toBe(0);
     expect(parseDeclaredGates("").size).toBe(0);
+  });
+});
+
+/**
+ * M2 (gjennomgang av PR #313): readiness for sovende deler kan ALDRI si «klar» når et innsignal er ukjent. Et målt innsignal som ikke kunne måles er `null`; kravet som hviler på det er ikke oppfylt og står i
+ * `missing` med `unknown: true`. (Før rettelsen kunne en kill switch som ikke lot seg lese gi `change_freeze_off: true` og «klar for en navngitt D-beslutning».)
+ */
+describe("evaluateReadiness: ukjente innsignal", () => {
+  const MEASURED = ["constitution_verified", "ledger_ok", "change_freeze_off", "proven_connectors", "job_runner_configured"] as const;
+  const readyFacts = (over: Partial<ReadinessFacts> = {}): ReadinessFacts => facts({ proven_connectors: 5, job_runner_configured: true, declared_gates: allGates, ...over });
+
+  it("hvert målt innsignal som er ukjent (null, undefined eller feil type) hindrer ALLE deler som hviler på det i å bli klare - og activation_decision er fortsatt false", () => {
+    for (const key of MEASURED) {
+      for (const unknown of [null, undefined, "ja", Number.NaN]) {
+        // Erklæringen JOB_RUNNER_CONFIGURED er den bevisste veien rundt et ukjent runner-faktum (L6) og testes for seg selv - her fjernes den for å se det ukjente faktumet alene.
+        const gates = key === "job_runner_configured" ? new Set([...allGates].filter((g) => g !== "JOB_RUNNER_CONFIGURED")) : allGates;
+        const verdicts = evaluateAllReadiness(readyFacts({ [key]: unknown, declared_gates: gates } as Partial<ReadinessFacts>));
+        for (const v of verdicts) {
+          expect(v.activation_decision, `${key}=${String(unknown)} ${v.ev}`).toBe(false);
+          const dependsOn = READINESS[v.ev].requirements.some((r) => r.needs?.includes(key));
+          if (dependsOn) {
+            expect(v.ready_for_owner_decision, `${key}=${String(unknown)} ${v.ev}`).toBe(false);
+            expect(v.unknown_signals, `${key}=${String(unknown)} ${v.ev}`).toContain(key);
+            expect(v.missing.some((m) => m.unknown), `${key}=${String(unknown)} ${v.ev}`).toBe(true);
+          } else {
+            expect(v.ready_for_owner_decision, `${key}=${String(unknown)} ${v.ev} (hviler ikke på ${key})`).toBe(true);
+          }
+        }
+      }
+    }
+  });
+
+  it("de tre grunnkravene gjelder ALLE deler: ukjent konstitusjon, register eller frys gjør hele rekken uklar; ukjent connector-tall rammer kun EV-18", () => {
+    for (const key of ["constitution_verified", "ledger_ok", "change_freeze_off"] as const) {
+      for (const v of evaluateAllReadiness(readyFacts({ [key]: null }))) expect(v.ready_for_owner_decision, `${key} ${v.ev}`).toBe(false);
+    }
+    const noConnectorCount = evaluateAllReadiness(readyFacts({ proven_connectors: null }));
+    expect(noConnectorCount.filter((v) => !v.ready_for_owner_decision).map((v) => v.ev)).toEqual(["EV-18"]);
+  });
+
+  it("ukjent er noe annet enn «målt og ikke oppfylt»: false/0 gir unknown: false, null gir unknown: true", () => {
+    const measuredBad = evaluateReadiness("EV-18", readyFacts({ proven_connectors: 0, change_freeze_off: false }));
+    expect(measuredBad.missing.map((m) => [m.id, m.unknown])).toEqual([["change_freeze_off", false], ["proven_connectors>=3", false]]);
+    expect(measuredBad.unknown_signals).toEqual([]);
+    const unknown = evaluateReadiness("EV-18", readyFacts({ proven_connectors: null, change_freeze_off: null }));
+    expect(unknown.missing.map((m) => [m.id, m.unknown])).toEqual([["change_freeze_off", true], ["proven_connectors>=3", true]]);
+    expect([...unknown.unknown_signals].sort()).toEqual(["change_freeze_off", "proven_connectors"]);
+  });
+
+  it("alle innsignal kjent og oppfylt gir klar uten ukjente - og aldri aktivering", () => {
+    for (const v of evaluateAllReadiness(readyFacts())) {
+      expect(v.ready_for_owner_decision, v.ev).toBe(true);
+      expect(v.unknown_signals, v.ev).toEqual([]);
+      expect(v.activation_decision, v.ev).toBe(false);
+    }
   });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  changeFreeze, decideHeal, decideRelease, detectPoisoning, freshnessScore, levelOfAction, needsReverification, nextIncidentStep, proposeDedupe,
+  FREEZE_UNKNOWN_REASONS, changeFreeze, decideHeal, decideRelease, detectPoisoning, freshnessScore, levelOfAction, needsReverification, nextIncidentStep, proposeDedupe,
   shouldRollback, sourceQualityScore, type HealContext, type MemoryFact, type ReleaseRequest
 } from "../src/index.ts";
 
@@ -144,5 +144,56 @@ describe("EV-10 minne-vedlikehold", () => {
     ];
     expect(proposeDedupe(facts)).toEqual([{ keep: "b", merge: ["a"], space: "personal", reason: "identical_content", irreversible: false }]);
     expect(proposeDedupe([])).toEqual([]);
+  });
+});
+
+/**
+ * M2 (gjennomgang av PR #313): KJENT-IKKE-LIK-OK. Et innsignal som ikke kunne måles (`null`/`undefined`/feil type) er UKJENT, og ukjent utelukker aldri en freeze. Før rettelsen ble ukjent kill switch og ukjent
+ * hendelsestall fabrikkert til `false`/`0` av kalleren, og `if (s.kill_switch_active)` leste `undefined` som «av».
+ */
+describe("EV-8 change freeze og EV-9 selvhelbredelse: ukjent er aldri «nei»", () => {
+  it("ukjent kill switch, hendelsestall og observerbarhet gir hver sin årsak og frozen: true", () => {
+    expect(changeFreeze({ ...okSignals, kill_switch_active: null })).toEqual({ frozen: true, reasons: ["kill_switch_unknown"] });
+    expect(changeFreeze({ ...okSignals, incident_open: null })).toEqual({ frozen: true, reasons: ["incident_state_unknown"] });
+    expect(changeFreeze({ ...okSignals, observability_ok: false })).toEqual({ frozen: true, reasons: ["observability_missing"] });
+    expect(changeFreeze({ incident_open: null, observability_ok: false, slo_breaches: 0, kill_switch_active: null }).reasons).toEqual(["kill_switch_unknown", "incident_state_unknown", "observability_missing"]);
+    // Kjent PÅ og ukjent kan forekomme sammen: begge sies.
+    expect(changeFreeze({ ...okSignals, kill_switch_active: true, incident_open: null }).reasons).toEqual(["kill_switch_active", "incident_state_unknown"]);
+  });
+
+  it("verdier som ikke er ekte svar (undefined, tekst, tall) er ukjente - aldri «av»; ugyldig SLO-tall er manglende observerbarhet", () => {
+    for (const bad of [undefined, "false", "", 0, 1, Number.NaN]) {
+      const v = changeFreeze({ ...okSignals, kill_switch_active: bad as never, incident_open: bad as never });
+      expect(v, String(bad)).toEqual({ frozen: true, reasons: ["kill_switch_unknown", "incident_state_unknown"] });
+    }
+    for (const bad of [Number.NaN, -1, Number.POSITIVE_INFINITY, undefined, "3"]) {
+      expect(changeFreeze({ ...okSignals, slo_breaches: bad as never }), String(bad)).toEqual({ frozen: true, reasons: ["observability_missing"] });
+    }
+  });
+
+  it("kun når ALT er målt og friskt er freeze av", () => {
+    expect(changeFreeze(okSignals)).toEqual({ frozen: false, reasons: [] });
+  });
+
+  it("utrullingsporten stopper på ukjent (freeze:*_unknown), og FREEZE_UNKNOWN_REASONS navngir nøyaktig de «kunne ikke måles»-årsakene", () => {
+    for (const s of [{ kill_switch_active: null }, { incident_open: null }]) {
+      const v = decideRelease(rel({ signals: { ...okSignals, ...s } }));
+      expect(v.allowed).toBe(false);
+      expect(v.reasons.some((r) => /^freeze:.*_unknown$/.test(r))).toBe(true);
+    }
+    expect([...FREEZE_UNKNOWN_REASONS].sort()).toEqual(["incident_state_unknown", "kill_switch_unknown", "observability_missing"]);
+  });
+
+  it("selvhelbredelse: ukjent kill switch behandles som PÅ med egen årsak (alt unntatt deteksjon stoppes), aldri som av", () => {
+    for (const action of ["reconnect", "restart_container", "switch_provider", "code_repair", "restore_db_over_prod"]) {
+      for (const unknownKill of [null, undefined as never]) {
+        expect(decideHeal(heal(action, { kill_switch_active: unknownKill, owner_approved: true, preapproved_failover: true, ua_gate_live: true, repair_class: "E0" })), action).toEqual({
+          level: levelOfAction(action), allowed: false, mode: "none", reasons: ["kill_switch_unknown"]
+        });
+      }
+    }
+    expect(decideHeal(heal("detect_stuck_lease", { kill_switch_active: null }))).toMatchObject({ level: "H0", allowed: true, mode: "auto" });
+    expect(decideHeal(heal("reconnect", { kill_switch_active: true })).reasons).toEqual(["kill_switch_active"]);
+    expect(decideHeal(heal("reconnect", { kill_switch_active: false })).allowed).toBe(true);
   });
 });
