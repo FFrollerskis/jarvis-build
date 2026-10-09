@@ -168,7 +168,7 @@ export async function createRunnerService(options) {
         manager, bearer: /** @type {BearerToken} */ (bearer), logger,
         limits: {
           maxBodyBytes: config.maxBodyBytes, defaultExecTimeoutMs: config.defaultExecTimeoutMs, maxExecTimeoutMs: config.maxExecTimeoutMs,
-          allowedRepos: config.allowedRepos, branchPrefix: config.branchPrefix
+          allowedRepos: config.allowedRepos, branchPrefix: config.branchPrefix, envAllow: config.envAllow
         },
         ...(t.authFailureDelayMs !== undefined ? { authFailureDelayMs: t.authFailureDelayMs } : {})
       });

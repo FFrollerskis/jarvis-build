@@ -3,7 +3,7 @@ import { open } from "node:fs/promises";
 import { BlockList, isIP } from "node:net";
 import { isAbsolute } from "node:path";
 import { ConfigError } from "./errors.mjs";
-import { JobContainerConfigError, validateJobContainerPolicy } from "./spec.mjs";
+import { ENV_NAME, JobContainerConfigError, isHostRunnerEnvNameAllowed, validateJobContainerPolicy } from "./spec.mjs";
 
 /**
  * WP-C1: policy-konfigurasjon for vertstjenestene. Filen (`/etc/jarvis/job-runner.json`) EIES AV VERTSADMIN (root) og leses
@@ -16,7 +16,7 @@ import { JobContainerConfigError, validateJobContainerPolicy } from "./spec.mjs"
  */
 
 const ABS_PATH = /^\/[A-Za-z0-9._/@+-]{1,198}$/;
-const SLUG = /^[a-z0-9](?:[a-z0-9-]{0,38})\/[a-z0-9._-]{1,100}$/;
+const SLUG = /^[a-z0-9](?:[a-z0-9-]{0,38})\/[a-z0-9._][a-z0-9._-]{0,99}$/; // repo-navn kan aldri starte med «-» (ville blitt tolket som et git-flagg)
 const GROUP_NAME = /^[a-z_][a-z0-9_-]{0,31}$/;
 const PREFIX = /^[a-z0-9][a-z0-9-]{0,30}\/$/;
 const DENY_PATH = /^[A-Za-z0-9._/-]{1,200}$/;
@@ -24,6 +24,8 @@ const ALLOW_ENTRY = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-
 const IDENT = /^[A-Za-z0-9 ._@+-]{1,100}$/;
 const DEFAULT_ALLOW = ["github.com:443", "api.github.com:443", "api.anthropic.com:443"];
 const DEFAULT_DENY_PATHS = [".github/", ".gitmodules", ".gitattributes"];
+/** Eneste env-navn en jobb får som standard: Anthropic-nøkkelen worker leverer til Claude Code. Alt annet må vertsadmin åpne eksplisitt (`runner.env_allow`). */
+const DEFAULT_ENV_ALLOW = ["ANTHROPIC_API_KEY"];
 
 /** @param {unknown} value @param {string} path */
 function plainObject(value, path) {
@@ -89,7 +91,7 @@ function parseRunner(raw) {
     "socket_path", "socket_group", "token_file", "base_dir", "docker_bin", "docker_host", "git_bin", "image", "network",
     "egress_proxy_url", "user", "memory", "cpus", "pids_limit", "tmpfs_size", "max_concurrent_jobs", "max_job_lifetime_s",
     "default_exec_timeout_ms", "max_exec_timeout_ms", "max_output_bytes", "max_body_bytes", "allowed_repos", "git_credentials",
-    "branch_prefix", "clone_depth", "clone_timeout_ms", "publish", "git_identity", "sweep_interval_s"
+    "branch_prefix", "clone_depth", "clone_timeout_ms", "publish", "git_identity", "sweep_interval_s", "env_allow"
   ], "runner");
 
   const socketGroup = r["socket_group"];
@@ -130,6 +132,14 @@ function parseRunner(raw) {
   }
   for (const slug of allowedRepos) {
     if (!gitCredentials[slug]) throw new ConfigError("config_invalid", `runner.git_credentials.${slug}:missing_credential_for_allowed_repo`);
+  }
+
+  // Allow-listen over env-NAVN en jobb kan få (create og exec). Jobb-env settes i miljøet til den vertsside docker-klienten (`-e NAVN` leser verdien derfra), så et navn
+  // klienten eller libc tolker kunne påvirket en prosess med docker-gruppe (= effektivt root). Deny-listen i den delte spesifikasjonen er derfor kun andre lag: standarden er
+  // «bare ANTHROPIC_API_KEY», og hvert navn her må i tillegg bestå deny-listen (en admin kan ikke ved en feil åpne for PATH/LD_PRELOAD/DOCKER_*/credentials).
+  const envAllow = stringList(r, "env_allow", "runner", DEFAULT_ENV_ALLOW, ENV_NAME, 16);
+  for (const name of envAllow) {
+    if (name.length > 100 || !isHostRunnerEnvNameAllowed(name)) throw new ConfigError("config_invalid", `runner.env_allow:name_forbidden`);
   }
 
   const branchPrefix = r["branch_prefix"] ?? "jarvis/";
@@ -198,6 +208,7 @@ function parseRunner(raw) {
     maxOutputBytes: intField(r, "max_output_bytes", "runner", 1_024, 16 * 1024 * 1024, 2 * 1024 * 1024),
     maxBodyBytes: intField(r, "max_body_bytes", "runner", 4_096, 4 * 1024 * 1024, 256 * 1024),
     allowedRepos: Object.freeze(allowedRepos),
+    envAllow: Object.freeze(envAllow),
     gitCredentials: Object.freeze(gitCredentials),
     branchPrefix,
     cloneDepth: intField(r, "clone_depth", "runner", 0, 1_000, 50),

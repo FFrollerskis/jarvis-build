@@ -5,7 +5,7 @@ import { assertRequestToken, assertWellFormedToken, TOKEN_SOURCE_TIMEOUT_MS } fr
 import { CancelToken, ConfigError, RunnerError } from "./errors.mjs";
 import { ensurePrivateDir, forceRemoveTree } from "./fsutil.mjs";
 import { UUID_V4 } from "./schemas.mjs";
-import { buildJobContainerCreateArgs } from "./spec.mjs";
+import { buildJobContainerCreateArgs, isHostRunnerEnvNameAllowed } from "./spec.mjs";
 
 /**
  * WP-C1: jobbens livssyklus. En jobb = (runner-eid katalog, én container). Tilstand holdes KUN i minnet: etter krasj/omstart finnes
@@ -78,6 +78,17 @@ export class JobManager {
     const mode = this.credentialSourceOf(slug);
     if (mode === "request" && supplied === undefined) throw new RunnerError("git_token_required", 400, "repo_uses_source_request");
     if (mode === "file" && supplied !== undefined) throw new RunnerError("git_token_not_accepted", 403, "repo_uses_source_file");
+  }
+
+  /**
+   * Env-navn en jobb kan få: vertsadmins allow-liste (`runner.env_allow`) OG deny-listen. API-skjemaet sjekker det samme, men denne porten gjelder uavhengig av hvem som kalte
+   * manageren (jobb-env havner i miljøet til den vertsside docker-klienten, ikke bare i containeren).
+   * @param {Record<string, string>} env
+   */
+  assertEnvAllowed(env) {
+    for (const name of Object.keys(env)) {
+      if (!this.config.envAllow.includes(name) || !isHostRunnerEnvNameAllowed(name)) throw new RunnerError("env_name_forbidden", 400, name.slice(0, 60));
+    }
   }
 
   /**
@@ -166,6 +177,7 @@ export class JobManager {
    */
   async create(req, clientGone) {
     this.assertTokenPolicy(req.repo, req.gitToken);
+    this.assertEnvAllowed(req.env);
     if (this.shuttingDown) throw new RunnerError("shutting_down", 503);
     // Plass reserveres SYNKRONT (før første await): to samtidige POST kan aldri begge ta siste plass.
     if (this.jobs.size >= this.config.maxConcurrentJobs) throw new RunnerError("too_many_jobs", 429);
@@ -250,6 +262,7 @@ export class JobManager {
   async exec(id, req, clientGone) {
     const job = this.require(id);
     this.assertUsable(job);
+    this.assertEnvAllowed(req.env);
     for (const value of Object.values(req.env)) {
       this.logger.registry.add(value);
       job.secretValues.push(value);

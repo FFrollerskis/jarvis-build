@@ -37,7 +37,9 @@ describe("A: gyldig konfig og standardverdier", () => {
     expect(r.policy).toMatchObject({ user: "10001:10001", memory: "1g", cpus: "1.0", pidsLimit: 256, pull: "never" });
     expect(r.publish.denyPaths).toContain(".github/");
     expect(r.publish.maxCommits).toBe(20);
+    expect(r.envAllow).toEqual(["ANTHROPIC_API_KEY"]); // standard: KUN Anthropic-nøkkelen worker leverer til Claude Code
     expect(Object.isFrozen(r)).toBe(true);
+    expect(Object.isFrozen(r.envAllow)).toBe(true);
   });
 
   it("minimal proxy-konfig har standard allowlist (github.com, api.github.com, api.anthropic.com :443)", () => {
@@ -160,6 +162,19 @@ describe("C: runner-policy valideres fail-closed", () => {
     // request-repo må fortsatt stå i allowed_repos (og omvendt: hvert allowlistet repo har en kilde)
     expect(code(() => parse({ ...runner(), git_credentials: { ...runner().git_credentials, "other/repo": { source: "request" } } }))).toContain("not_in_allowed_repos");
     expect(code(() => parse({ ...runner(), allowed_repos: ["a/b", "c/d"], git_credentials: { "a/b": { source: "request" } } }))).toContain("missing_credential_for_allowed_repo");
+  });
+
+  it("env_allow: standard er KUN ANTHROPIC_API_KEY; vertsadmin kan åpne flere ufarlige navn, men aldri et navn deny-listen stopper (PATH, LD_*, DOCKER_*, git-/credential-navn)", () => {
+    expect(parse(runner()).runner.envAllow).toEqual(["ANTHROPIC_API_KEY"]);
+    expect(parse({ ...runner(), env_allow: ["ANTHROPIC_API_KEY", "CI", "ANTHROPIC_API_KEY"] }).runner.envAllow).toEqual(["ANTHROPIC_API_KEY", "CI"]); // duplikater slås sammen
+    expect(parse({ ...runner(), env_allow: [] }).runner.envAllow).toEqual([]); // ingen env i det hele tatt er lov
+    for (const name of ["PATH", "HOME", "LD_PRELOAD", "DOCKER_HOST", "HTTPS_PROXY", "GITHUB_TOKEN", "GH_TOKEN", "JARVIS_GIT_CREDENTIAL_TOKEN", "GIT_SSH_COMMAND", "GCONV_PATH", "LOCPATH", "TMPDIR", "GODEBUG", "BASH_ENV", "INFISICAL_CLIENT_SECRET", "POSTGRES_PASSWORD", "path"]) {
+      expect(code(() => parse({ ...runner(), env_allow: ["ANTHROPIC_API_KEY", name] })), name).toBe("config_invalid:runner.env_allow:name_forbidden");
+    }
+    for (const bad of ["1BAD", "A=B", "a b", "", "A-B", "ÆØÅ", "A".repeat(101) + "_"]) expect(code(() => parse({ ...runner(), env_allow: [bad] })), bad).toContain("config_invalid");
+    expect(code(() => parse({ ...runner(), env_allow: "ANTHROPIC_API_KEY" }))).toContain("env_allow:list");
+    expect(code(() => parse({ ...runner(), env_allow: Array.from({ length: 17 }, (_, i) => `NAME_${i}`) }))).toContain("env_allow:list");
+    expect(code(() => parse({ ...runner(), env_allow: [null] }))).toContain("env_allow");
   });
 
   it("branch-prefiks må ende på «/» (main/master/production blir strukturelt umulig)", () => {

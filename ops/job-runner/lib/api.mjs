@@ -50,7 +50,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  *   manager: import("./jobs.mjs").JobManager,
  *   bearer: BearerToken,
  *   logger: ReturnType<typeof import("./log.mjs").createLogger>,
- *   limits: { maxBodyBytes: number, defaultExecTimeoutMs: number, maxExecTimeoutMs: number, allowedRepos: readonly string[], branchPrefix: string },
+ *   limits: { maxBodyBytes: number, defaultExecTimeoutMs: number, maxExecTimeoutMs: number, allowedRepos: readonly string[], branchPrefix: string, envAllow: readonly string[] },
  *   maxConnections?: number,
  *   authFailureDelayMs?: number
  * }} options

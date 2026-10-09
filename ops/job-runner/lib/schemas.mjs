@@ -34,8 +34,12 @@ function strictObject(value, allowed, required) {
   return obj;
 }
 
-/** @param {unknown} value @param {string} field @param {number} maxEntries @param {number} maxValueBytes */
-function parseEnv(value, field, maxEntries, maxValueBytes) {
+/**
+ * Env til jobben: NAVN må stå i vertsadmins allow-liste (`runner.env_allow`, standard kun ANTHROPIC_API_KEY) OG bestå deny-listen (andre lag). Verdien må være en
+ * velformet streng uten NUL.
+ * @param {unknown} value @param {string} field @param {number} maxEntries @param {number} maxValueBytes @param {readonly string[]} allowedNames
+ */
+function parseEnv(value, field, maxEntries, maxValueBytes, allowedNames) {
   if (value === undefined) return {};
   if (value === null || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) {
     throw new RunnerError("invalid_request", 400, `${field}_must_be_an_object`);
@@ -45,7 +49,7 @@ function parseEnv(value, field, maxEntries, maxValueBytes) {
   /** @type {Record<string, string>} */
   const out = Object.create(null);
   for (const [name, val] of entries) {
-    if (!isHostRunnerEnvNameAllowed(name)) throw new RunnerError("env_name_forbidden", 400, name.slice(0, 60).replace(CONTROL, "?"));
+    if (!allowedNames.includes(name) || !isHostRunnerEnvNameAllowed(name)) throw new RunnerError("env_name_forbidden", 400, name.slice(0, 60).replace(CONTROL, "?"));
     if (typeof val !== "string" || val.length > maxValueBytes || val.includes("\u0000")) {
       throw new RunnerError("invalid_request", 400, `${field}_value_invalid`);
     }
@@ -54,7 +58,7 @@ function parseEnv(value, field, maxEntries, maxValueBytes) {
   return out;
 }
 
-/** @param {unknown} body @param {{ allowedRepos: readonly string[] }} policy */
+/** @param {unknown} body @param {{ allowedRepos: readonly string[], envAllow: readonly string[] }} policy */
 export function parseCreateJob(body, policy) {
   const b = strictObject(body, ["repo", "base_branch", "env", "task_id", "tenant_id", "git_token"], ["repo"]);
   const repoRaw = b["repo"];
@@ -78,7 +82,7 @@ export function parseCreateJob(body, policy) {
     const v = b[key];
     if (v !== undefined && (typeof v !== "string" || !LABEL.test(v))) throw new RunnerError("invalid_request", 400, `${key}_invalid`);
   }
-  const env = parseEnv(b["env"], "env", 32, 8192);
+  const env = parseEnv(b["env"], "env", 32, 8192, policy.envAllow);
   const gitToken = b["git_token"] !== undefined ? assertRequestToken(b["git_token"]) : undefined;
   // Forsvar mot en worker-feil: samme token i `env` ville havnet i jobb-containeren (git-credentialen skal ALDRI dit). Avvises FØR noe opprettes.
   if (gitToken !== undefined && Object.values(env).some((value) => value.includes(gitToken))) throw new RunnerError("git_token_in_env", 400);
@@ -92,7 +96,7 @@ export function parseCreateJob(body, policy) {
   };
 }
 
-/** @param {unknown} body @param {{ defaultExecTimeoutMs: number, maxExecTimeoutMs: number }} limits */
+/** @param {unknown} body @param {{ defaultExecTimeoutMs: number, maxExecTimeoutMs: number, envAllow: readonly string[] }} limits */
 export function parseExec(body, limits) {
   const b = strictObject(body, ["argv", "timeout_ms", "env"], ["argv"]);
   const argv = b["argv"];
@@ -116,7 +120,7 @@ export function parseExec(body, limits) {
     if (typeof t !== "number" || !Number.isInteger(t) || t < 1_000 || t > limits.maxExecTimeoutMs) throw new RunnerError("invalid_request", 400, "timeout_ms_out_of_range");
     timeoutMs = t;
   }
-  return { argv: out, timeoutMs, env: parseEnv(b["env"], "env", 16, 8192) };
+  return { argv: out, timeoutMs, env: parseEnv(b["env"], "env", 16, 8192, limits.envAllow) };
 }
 
 /** @param {unknown} body @param {{ branchPrefix: string }} policy */

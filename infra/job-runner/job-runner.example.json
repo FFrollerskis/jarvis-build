@@ -25,6 +25,7 @@
       "tsworkflow/jarvis-d103-acceptance": { "token_file": "/etc/jarvis/git-token-jarvis-d103-acceptance" }
     },
     "branch_prefix": "jarvis/",
+    "env_allow": ["ANTHROPIC_API_KEY"],
     "clone_depth": 50,
     "clone_timeout_ms": 300000,
     "publish": {

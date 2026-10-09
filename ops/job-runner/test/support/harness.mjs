@@ -140,7 +140,10 @@ export async function createHarness(options = {}) {
     runner: {
       socket_path: socketPath, token_file: tokenFile, base_dir: baseDir, image: IMAGE_ID, network: "jarvis-jobs",
       egress_proxy_url: "http://172.30.77.1:3128", allowed_repos: slugs, git_credentials: gitCredentials,
-      sweep_interval_s: 600, ...(options.runner ?? {})
+      sweep_interval_s: 600,
+      // Testene bruker noen ekstra, ufarlige navn; standarden i produksjon er KUN ANTHROPIC_API_KEY (testet eksplisitt i config.test.mjs og adversarial.test.mjs).
+      env_allow: ["ANTHROPIC_API_KEY", "PER_CALL_SECRET", "CALL_VAR", "EXTRA_VAR", "MY_SETTING", "SOMETHING", "A", "CI", "TZ", "FOO"],
+      ...(options.runner ?? {})
     }
   }, { require: ["runner"] });
   const fake = createFakeDocker();

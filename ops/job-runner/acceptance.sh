@@ -221,7 +221,7 @@ check_J03() {
 }
 
 check_J04() {
-  create_job '{"ANTHROPIC_API_KEY":"akseptanse-dummy-ikke-en-ekte-nokkel"}' || { record J04_docker_inspect FAIL "kunne ikke opprette jobb (http=$HTTP_CODE)"; return; }
+  create_job '{"ANTHROPIC_API_KEY":"akseptanse-dummy-ikke-en-ekte-nokkel"}' || { record J04_docker_inspect FAIL "kunne ikke opprette jobb (http=$HTTP_CODE $(resp_get error); env_name_forbidden betyr at runner.env_allow ikke inneholder ANTHROPIC_API_KEY)"; return; }
   local json; json="$(docker inspect "$CONTAINER" 2>/dev/null)"
   local verdict
   verdict="$(printf '%s' "$json" | node -e '
