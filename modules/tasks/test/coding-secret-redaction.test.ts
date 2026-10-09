@@ -97,8 +97,9 @@ describe("D-102: withSecretRedaction", () => {
 
   it("K (WP-C3 F12): en kilde som returnerer noe annet enn en liste (undefined/null/tall), eller liste med ikke-strenger, krasjer aldri redaksjonen og skjuler aldri jobbfeilen", async () => {
     const weird = [() => undefined, () => null, () => 42, () => [undefined, "", 7, null, {}, "sk-ant-OK-5"]] as unknown as Array<() => readonly (string | undefined)[]>;
-    const wrapped = withSecretRedaction(failingHandler("tests_failed: sk-ant-OK-5 i utskrift"), ["", undefined, ...weird]);
-    expect(await messageOf(wrapped)).toBe("tests_failed: [REDACTED] i utskrift");
+    // Meldingen inneholder «7», «42» og «[object Object]» - tekstene en ikke-streng ville blitt til hvis den ble brukt som hemmelighet; de skal IKKE redigeres bort.
+    const wrapped = withSecretRedaction(failingHandler("tests_failed (7 av 42) [object Object]: sk-ant-OK-5 i utskrift"), ["", undefined, ...weird]);
+    expect(await messageOf(wrapped)).toBe("tests_failed (7 av 42) [object Object]: [REDACTED] i utskrift");
   });
 
   it("L (WP-C3 F12): når ALLE kilder kaster, er jobbfeilen uendret (aldri en redaksjonsfeil i stedet)", async () => {

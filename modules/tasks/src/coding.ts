@@ -192,6 +192,7 @@ export function createCodingHandler(deps: {
    */
   gitAuth?: {
     secretProvider: { get(ref: string): Promise<string | null> };
+    /** Credential-refen (standard `JARVIS_GITHUB_TOKEN`): nøkkelen `secretProvider.get(ref)` leser, og refen `isRevoked(ref)` sjekkes mot. Med `credentialSource` brukes den KUN til tilbakekallingssjekken. */
     ref?: string;
     /**
      * WP-C3 (review F2/F13): kortlevd, REPO-SCOPET git-credential - `tokenFor(<repoet DENNE jobben gjelder>)`, med minste rettighet for clone + push av jobb-branchen. Når den er satt, brukes den i
