@@ -110,6 +110,11 @@ export interface KnowledgeListResult {
    * er blant `values` (f.eks. e-post: meldinger som faktisk ble listet - et vedlegg/en side som mangler i en listet melding er borte; meldinger utenfor vinduet røres ikke).
    */
   tombstone_scope?: { metadata_key: string; values: string[] };
+  /**
+   * WP-D1: `external_id`-prefikser kilden IKKE fikk talt opp denne runden (f.eks. alle arkene i et regneark der arklisten midlertidig feilet). Allerede lagrede dokumenter hvis `external_id` STARTER med en av dem
+   * tombstones aldri - samme prinsipp som `skipped`, men for underelementer kilden ikke kjenner id-ene til. Utelatt = ingen prefikser (uendret kontrakt).
+   */
+  protected_prefixes?: string[];
 }
 
 /**

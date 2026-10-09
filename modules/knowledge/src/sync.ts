@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
-import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
+import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts";
 import { withMemoryTransaction, type EmbeddingProvider } from "@jarvis/memory";
 import { isFingerprintErased } from "@jarvis/core";
 import { KnowledgeSourceError, type KnowledgeRecord, type KnowledgeSource, type SourceErrorClass } from "./source.ts";
@@ -28,6 +28,8 @@ export interface SyncReport {
   excluded?: number;
   /** WP-D1: dokumenter der entitetsindekseringen feilet (selve dokumentet er lagret; indekseringen prøves igjen neste synk). Utelatt når 0. */
   entity_index_failed?: number;
+  /** WP-D1: dokumenter eldre enn kildens oppbevaringsfrist (`retention_days`) - ikke indeksert (et allerede indeksert slikt dokument tombstones). Utelatt når 0. */
+  expired?: number;
 }
 
 /**
@@ -39,13 +41,29 @@ export interface KnowledgeEntityIndexPort {
   readonly version: string;
   index(
     client: pg.PoolClient,
-    input: { tenant_id: string; memory_space_id: MemorySpace; knowledge_document_id: string; title: string; content: string; sensitivity: KnowledgeSensitivity }
+    input: {
+      tenant_id: string;
+      memory_space_id: MemorySpace;
+      knowledge_document_id: string;
+      title: string;
+      content: string;
+      /** Kildens egne (betrodde) proveniens-felt, f.eks. deltakerlisten i et møtereferat. Aldri modellgenerert. */
+      metadata: Record<string, JsonValue>;
+      sensitivity: KnowledgeSensitivity;
+    }
   ): Promise<void>;
 }
 
 export interface KnowledgeSyncOptions {
   /** Kildens egne valg (sensitivitetsgulv/-tak, tillit). Utelatt = standardene i `resolveSourcePolicy` (privat, ubetrodd, ingen tak). */
   policy?: KnowledgeSourcePolicy;
+  /**
+   * Kildens oppbevaringsfrist i dager: et dokument hvis `modified_at` er eldre enn fristen indekseres ikke (og et allerede indeksert tombstones av den vanlige mekanismen). Selve fjerningen av innholdet
+   * (hard sletting) gjør `KnowledgeRetentionService.purgeExpired`. Utelatt = ingen frist. Et levende dokument uten `modified_at` regnes aldri som utløpt (alderen er ikke kjent); det fjernes først når det er tombstonet og tombstonen er eldre enn fristen.
+   */
+  retention_days?: number;
+  /** Tidspunkt «nå» for fristberegningen (kun for tester). */
+  now?: Date;
   /** Valgfri deterministisk entitetsindeksering (av som standard). */
   entity_indexer?: KnowledgeEntityIndexPort;
 }
@@ -71,6 +89,26 @@ const MAX_EMBEDDING_INPUT_CHARS = 24_000;
 function truncateForEmbedding(content: string): string {
   return content.length > MAX_EMBEDDING_INPUT_CHARS ? content.slice(0, MAX_EMBEDDING_INPUT_CHARS) : content;
 }
+
+/** Korte, ikke-reverserbare referanser i logger: en ekstern id kan være et filnavn (møtereferat, personnavn) og skal ikke stå i klartekst i driftsloggen. */
+function logRef(externalId: string): string {
+  return createHash("sha256").update(externalId).digest("hex").slice(0, 12);
+}
+
+/** Frist -> avskjæringstidspunkt (ms siden epoch); ugyldig/utelatt frist = ingen frist. */
+function retentionCutoffOf(days: number | undefined, now: Date): number | undefined {
+  if (days === undefined || !Number.isFinite(days) || days <= 0) return undefined;
+  return now.getTime() - days * 86_400_000;
+}
+
+function isOlderThan(modifiedAt: string | null, cutoffMs: number): boolean {
+  if (modifiedAt === null) return false;
+  const t = Date.parse(modifiedAt);
+  return Number.isFinite(t) && t < cutoffMs;
+}
+
+/** Øvre grense for `protected_prefixes` fra en kilde (en feilaktig kilde kan ikke gjøre tombstone-spørringen vilkårlig dyr). */
+const MAX_PROTECTED_PREFIXES = 1000;
 
 const EMPTY_REPORT: SyncReport = {
   scanned: 0, created: 0, updated: 0, unchanged: 0, tombstoned: 0, reactivated: 0, failed: 0, suppressed: 0, skipped: 0
@@ -104,12 +142,14 @@ export class KnowledgeSyncService {
     let skippedExternalIds: string[] = [];
     let listingPartial = false;
     let tombstoneScope: { metadata_key: string; values: string[] } | undefined;
+    let protectedPrefixes: string[] = [];
     try {
       const result = await source.list();
       records = result.records;
       listingPartial = result.listing === "partial";
       tombstoneScope = result.tombstone_scope;
       skippedExternalIds = result.skipped.map((s) => s.external_id);
+      protectedPrefixes = (result.protected_prefixes ?? []).filter((p) => typeof p === "string" && p.length > 0).slice(0, MAX_PROTECTED_PREFIXES);
     } catch (err) {
       // Hele kilden feilet (f.eks. nettverk/credential) - ingen dokumenter ble
       // sett, derfor INGEN tombstoning (§5: vi skal aldri tombstone pga. en
@@ -121,10 +161,16 @@ export class KnowledgeSyncService {
 
     const report: SyncReport = { ...EMPTY_REPORT, skipped: skippedExternalIds.length, ...(listingPartial ? { listing: "partial" as const } : {}) };
     const seenExternalIds: string[] = [];
+    const retentionCutoff = retentionCutoffOf(options.retention_days, options.now ?? new Date());
 
     await withMemoryTransaction(this.pool, identity.tenant_id, [memorySpace], async (client) => {
       for (const record of records) {
         report.scanned += 1;
+        // WP-D1: oppbevaringsfrist - for gammelt innhold indekseres ikke (og regnes ikke som «sett», så et indeksert dokument tombstones og senere fjernes av purge).
+        if (retentionCutoff !== undefined && isOlderThan(record.modified_at, retentionCutoff)) {
+          report.expired = (report.expired ?? 0) + 1;
+          continue;
+        }
         // WP-D1: sensitivitet = strengeste av kildens gulv og klassifiseringen av tittel + innhold (rommet teller: helse er alltid special). Et dokument over kildens tak indekseres ikke, og
         // regnes bevisst IKKE som «sett»: et allerede indeksert dokument som nå er over taket tombstones av den vanlige mekanismen under (ikke beskyttet som `skipped`).
         const marks: DerivedMarks = {
@@ -148,7 +194,7 @@ export class KnowledgeSyncService {
           report.failed += 1;
           // Kun feilmelding (aldri innhold) - tidligere ble årsaken svelget helt.
           console.warn(JSON.stringify({
-            msg: "knowledge_sync_record_failed", source_type: source.source_type, external_id: record.external_id,
+            msg: "knowledge_sync_record_failed", source_type: source.source_type, external_id_ref: logRef(record.external_id),
             error: (err as Error).message.slice(0, 200)
           }));
         }
@@ -171,8 +217,9 @@ export class KnowledgeSyncService {
         const scoped = await client.query(
           `UPDATE knowledge_documents SET deleted = true, deleted_at = now(), updated_at = now()
            WHERE tenant_id = $1 AND memory_space_id = $7 AND source_type = $2 AND source_instance_id = $3 AND deleted = false
-             AND (metadata ->> $5) = ANY($6::text[]) AND NOT (external_id = ANY($4::text[]))`,
-          [identity.tenant_id, source.source_type, source.source_instance_id, protectedExternalIds, tombstoneScope.metadata_key, tombstoneScope.values, memorySpace]
+             AND (metadata ->> $5) = ANY($6::text[]) AND NOT (external_id = ANY($4::text[]))
+             AND NOT EXISTS (SELECT 1 FROM unnest($8::text[]) AS p(prefix) WHERE left(external_id, length(p.prefix)) = p.prefix)`,
+          [identity.tenant_id, source.source_type, source.source_instance_id, protectedExternalIds, tombstoneScope.metadata_key, tombstoneScope.values, memorySpace, protectedPrefixes]
         );
         report.tombstoned = scoped.rowCount ?? 0;
         return;
@@ -180,8 +227,9 @@ export class KnowledgeSyncService {
       const tombstoneResult = await client.query(
         `UPDATE knowledge_documents SET deleted = true, deleted_at = now(), updated_at = now()
          WHERE tenant_id = $1 AND memory_space_id = $5 AND source_type = $2 AND source_instance_id = $3 AND deleted = false
-           AND NOT (external_id = ANY($4::text[]))`,
-        [identity.tenant_id, source.source_type, source.source_instance_id, protectedExternalIds, memorySpace]
+           AND NOT (external_id = ANY($4::text[]))
+           AND NOT EXISTS (SELECT 1 FROM unnest($6::text[]) AS p(prefix) WHERE left(external_id, length(p.prefix)) = p.prefix)`,
+        [identity.tenant_id, source.source_type, source.source_instance_id, protectedExternalIds, memorySpace, protectedPrefixes]
       );
       report.tombstoned = tombstoneResult.rowCount ?? 0;
     });
@@ -310,14 +358,16 @@ export class KnowledgeSyncService {
     if (currentKey !== undefined && currentKey === key) return;
     await client.query("SAVEPOINT knowledge_entities");
     try {
-      await indexer.index(client, { tenant_id: tenantId, memory_space_id: space, knowledge_document_id: documentId, title: record.title, content: record.content, sensitivity });
+      await indexer.index(client, {
+        tenant_id: tenantId, memory_space_id: space, knowledge_document_id: documentId, title: record.title, content: record.content, metadata: record.metadata, sensitivity
+      });
       await client.query("UPDATE knowledge_documents SET entities_indexed_key = $2 WHERE knowledge_document_id = $1", [documentId, key]);
       await client.query("RELEASE SAVEPOINT knowledge_entities");
     } catch (err) {
       await client.query("ROLLBACK TO SAVEPOINT knowledge_entities");
       await client.query("RELEASE SAVEPOINT knowledge_entities");
       report.entity_index_failed = (report.entity_index_failed ?? 0) + 1;
-      console.warn(JSON.stringify({ msg: "knowledge_entity_index_failed", source_type: record.source_type, external_id: record.external_id, error: (err as Error).message.slice(0, 200) }));
+      console.warn(JSON.stringify({ msg: "knowledge_entity_index_failed", source_type: record.source_type, external_id_ref: logRef(record.external_id), error: (err as Error).message.slice(0, 200) }));
     }
   }
 
