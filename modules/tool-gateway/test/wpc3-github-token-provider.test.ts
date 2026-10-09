@@ -284,11 +284,11 @@ describe("D: eksplisitt, loggført PAT-fallback (JARVIS_GITHUB_APP_ALLOW_PAT_FAL
 
 // ---------------------------------------------------------------------------------------------------------------------------------
 describe("E: GitCredentialSource - repo-scopet token til git clone/push (kontrakten WP-C1 bruker)", () => {
-  it("E1: tokenFor(slug) utsteder et token scopet til NØYAKTIG det ene repoet (ikke hele standardlisten), cachet per repo", async () => {
+  it("E1: tokenFor(slug) utsteder et token scopet til NØYAKTIG det ene repoet (ikke hele standardlisten) og med MINSTE rettighet (contents:write - review F2), cachet per repo", async () => {
     const s = await setup({ env: { JARVIS_GIT_ALLOWED_REPOS: "tsworkflow/jarvisbuild,tsworkflow/other-repo" } });
     const source: GitCredentialSource = s.auth.gitCredentialSource();
     const a = await source.tokenFor("tsworkflow/jarvisbuild");
-    expect(JSON.parse(s.fake.mintRequests()[0]?.body ?? "{}")).toEqual({ repositories: ["jarvisbuild"] });
+    expect(JSON.parse(s.fake.mintRequests()[0]?.body ?? "{}")).toEqual({ repositories: ["jarvisbuild"], permissions: { contents: "write" } });
     expect(await source.tokenFor("TSWORKFLOW/JarvisBuild")).toBe(a);
     const b = await source.tokenFor("tsworkflow/other-repo");
     expect(b).not.toBe(a);

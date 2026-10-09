@@ -78,6 +78,13 @@ export const GITHUB_FULL_CAPABILITY_PERMISSIONS: Readonly<Record<string, "read" 
   metadata: "read", contents: "write", pull_requests: "write", issues: "write", actions: "write"
 };
 
+/**
+ * Minste rettighet for en GIT-credential (review F2): `git clone` av et privat repo trenger Contents:read og `git push` av jobb-branchen Contents:write - ingenting annet (Metadata:read følger
+ * alltid med). Kodejobbens git-credential ber derfor om NØYAKTIG dette, ikke om «alle rettigheter installasjonen er gitt» slik standard-scopet (connectoren, D-41) gjør. PR-opprettelsen går
+ * ikke via git, men via `github.create_pr` i ToolGateway (connector-credentialen). Mangler installasjonen Contents:write, feiler utstedelsen (`GITHUB_APP_REQUEST_REJECTED`) - jobben feiler lukket.
+ */
+export const GITHUB_GIT_CREDENTIAL_PERMISSIONS: Readonly<Record<string, "read" | "write">> = { contents: "write" };
+
 const PAT_STATUS: GitHubAuthStatus = {
   method: "pat", state: "pat", short_lived: false, scoped: false, hardened: false, app: null, pat_fallback: { allowed: false, active: false }
 };
@@ -226,7 +233,7 @@ class AppCredentialCore implements GitHubAppCredentialSource {
       if (!this.app) throw this.configError();
       // `GitHubAppAuth` håndhever allowlisten selv (review F14): et repo utenfor den konfigurerte listen gir `GITHUB_APP_SCOPE_MISMATCH` uten nettverkskall -
       // policy, ikke tilgjengelighet, så aldri PAT-fallback (se `recover`).
-      const token = await this.app.token({ repositories: [slug] });
+      const token = await this.app.token({ repositories: [slug], permissions: GITHUB_GIT_CREDENTIAL_PERMISSIONS });
       this.fallbackActive = false;
       return token;
     } catch (err) {
@@ -452,7 +459,10 @@ export class GitHubAuth {
     return new GitHubTokenSecretProvider(inner, this.tokenProvider(inner));
   }
 
-  /** `tokenFor(repoSlug)`: repo-scopert installasjonstoken for git clone/push (WP-C1 sin vertsside job-runner). I PAT-modus: PAT-en (som i dag). */
+  /**
+   * `tokenFor(repoSlug)`: repo-scopert installasjonstoken for git clone/push med MINSTE rettighet (`contents: write`, se `GITHUB_GIT_CREDENTIAL_PERMISSIONS`) - brukes av kodejobb-handleren
+   * (`createCodingHandler`, review F2) og av WP-C1 sin vertsside job-runner. Repoet må være i den konfigurerte allowlisten. I PAT-modus: PAT-en (som i dag).
+   */
   gitCredentialSource(patSecrets?: SecretProvider): GitCredentialSource {
     const pat = new PatTokenProvider(patSecrets ?? this.#secrets);
     const core = this.#core;
