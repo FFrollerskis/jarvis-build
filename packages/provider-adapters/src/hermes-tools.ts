@@ -115,14 +115,23 @@ export function parseHermesOutput(raw: string, tools: readonly ToolDefinition[] 
   const visible = stripThinking(raw);
   if (tools === undefined || tools.length === 0) {
     // Ingen verktøy tilbudt: tagger er aldri kall. Fullstendige blokker fjernes (telles); en uavsluttet tagg i vanlig tekst får stå.
+    // Lineær skanning med indexOf, ikke `/<tool_call>[\s\S]*?<\/tool_call>/g`: mange uavsluttede `<tool_call>` ga kvadratisk tid på en lang respons (220 000 tegn ≈ 1,7 s synkront). Samme resultat som regex-en
+    // (låst av differensialtesten i `wpd4-linear-parsers.test.ts`): finnes ingen avslutning etter en åpning, finnes den heller ikke etter noen senere åpning.
     let ignored = 0;
-    const text = visible
-      .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, () => {
-        ignored += 1;
-        return "";
-      })
-      .trim();
-    return { text, calls: [], ignored_blocks: ignored };
+    const kept: string[] = [];
+    let skipFrom = 0;
+    for (;;) {
+      const open = visible.indexOf(OPEN, skipFrom);
+      const close = open === -1 ? -1 : visible.indexOf(CLOSE, open + OPEN.length);
+      if (close === -1) {
+        kept.push(visible.slice(skipFrom));
+        break;
+      }
+      kept.push(visible.slice(skipFrom, open));
+      ignored += 1;
+      skipFrom = close + CLOSE.length;
+    }
+    return { text: kept.join("").trim(), calls: [], ignored_blocks: ignored };
   }
   const known = new Set(tools.map((t) => t.name));
   const pieces: string[] = [];
