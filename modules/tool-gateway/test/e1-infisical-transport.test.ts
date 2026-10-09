@@ -27,6 +27,7 @@ beforeEach(() => {
   fx.revokeTokens();
   sleeps = [];
   nowMs = Date.now();
+  fx.clock = () => nowMs; // samme klokke for seeding og transport: alder i hele døgn er deterministisk
 });
 
 const transport = (over: Partial<{ baseUrl: string | null; clientId: string | null; projectId: string | null; env: string | null }> = {}): InfisicalTransport =>

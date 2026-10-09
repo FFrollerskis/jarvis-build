@@ -41,8 +41,11 @@ export class FakeInfisical {
     await new Promise<void>((resolve) => (this.server ? this.server.close(() => resolve()) : resolve()));
   }
 
+  /** Klokken `seedSecret` regner alder mot. Testen setter den til SAMME klokke som transporten bruker, ellers blir `age_days` timing-avhengig (ett ms forskjell gir 9 i stedet for 10). */
+  clock: () => number = () => Date.now();
+
   seedSecret(key: string, value: string, opts: { ageDays?: number; tags?: string[]; rotationId?: string; comment?: string } = {}): void {
-    const updated = new Date(Date.now() - (opts.ageDays ?? 0) * 86_400_000).toISOString();
+    const updated = new Date(this.clock() - (opts.ageDays ?? 0) * 86_400_000).toISOString();
     this.secrets.set(key, { key, value, version: 1, createdAt: updated, updatedAt: updated, ...(opts.tags ? { tags: opts.tags } : {}), ...(opts.rotationId ? { rotationId: opts.rotationId } : {}), ...(opts.comment ? { comment: opts.comment } : {}) });
   }
 
