@@ -140,6 +140,19 @@ describe("F1: maskeringen er lineær i inndata-lengden (ReDoS) og kutter inndata
     expect(behind.message).not.toContain(jwt.slice(0, 20));
   });
 
+  it("F1g: inndata kuttes til ca. 2 KB FØR maskering (MASK_INPUT_LIMIT) - tekst bak vinduet når aldri meldingen, selv om maskeringen krymper det som står foran", () => {
+    // En 5000 tegn lang PEM-blokk (masker -> «[REDACTED_KEY]») fulgt av en hale. Med kutt FØR maskering er blokken avkortet ved 2048 tegn (uavsluttet blokk maskeres ut til slutten, halen er borte);
+    // uten kutt (eller med et vindu på 64 KB) ville blokken blitt maskert hel og halen kommet med i den korte detaljen.
+    const block = `${BEGIN_PKCS8}\n${"A".repeat(5_000)}\n${["-----END", "PRIVATE KEY-----"].join(" ")}`;
+    const error = new GitHubAppAuthError("GITHUB_APP_FORBIDDEN", `${block} SYNLIG_HALE`);
+    expect(error.message).toContain("[REDACTED_KEY]");
+    expect(error.message).not.toContain("AAAA");
+    expect(error.message).not.toContain("SYNLIG_HALE");
+    // Kortere inndata (innenfor vinduet) beholder halen - kuttet er altså ikke bare «alltid tomt».
+    const short = new GitHubAppAuthError("GITHUB_APP_FORBIDDEN", `${BEGIN_PKCS8}\nAAAA\n${["-----END", "PRIVATE KEY-----"].join(" ")} SYNLIG_HALE`);
+    expect(short.message).toContain("SYNLIG_HALE");
+  });
+
   it("F1f: en server som limer et bokstavprefiks foran JWT-en vi sendte (slipper unna lookbehind-mønsteret) får den likevel maskert - eksakt kjent JWT", async () => {
     const h = await harness({ overrides: { maxAttempts: 1 } });
     const seen: string[] = [];
