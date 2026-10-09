@@ -748,7 +748,14 @@ export class ConversationEngine {
             JSON.stringify({ msg: "d404_gemma_provider_failed_fallback", provider: err.provider, kind: err.kind, omitted_preference: omittedGemmaPreference })
           );
           servedByVariant = false;
-          result = await callGateway(toFullView(stripRouteModel(fallbackInput)), fullView);
+          // L6 (gjennomgang av PR #315): omkjøringen gjennom vanlig ruting skal ikke gjenta leverandørene som allerede er forsøkt i kjeden (hver prøvde opptil to ganger; målt: opptil 4 kall til samme leverandør og 11 per tur).
+          // Er alt som ellers kvalifiserer allerede forsøkt, er den ærligste feilen den opprinnelige fra kjeden - ikke «ingen kvalifisert leverandør».
+          try {
+            result = await callGateway(toFullView(stripRouteModel({ ...fallbackInput, excludeProviders: [...reserveFailed] })), fullView);
+          } catch (rerunError) {
+            if (rerunError instanceof NoEligibleProviderError && rerunError.message.includes("already_attempted")) throw err;
+            throw rerunError;
+          }
         } else if (
           // D-431: Sonnet er nede (tidsavbrudd, nett, kvote, ikke konfigurert) FØR noe er sendt eller utført → svar på lokal modell
           // (samme sensitivitetsregler, ingen stille skylekkasje) i stedet for en feil. Degraderingen logges alltid.
@@ -792,9 +799,14 @@ export class ConversationEngine {
       const variantNote = cloudVariant !== undefined && servedByVariant && cloudVariant.withheld > 0 && surface !== "voice" ? cloudHistoryNote(cloudVariant.withheld) : "";
       const withheldNote = withheldFromCloud > 0 && surface !== "voice" ? chatWithheldNote() : "";
       // WP-D4 (JARVIS-033): en reserve svarte (kjedefailover eller siste reserve) - aldri usynlig. Ikke på tale (samme som de øvrige rutemerknadene); loggen har alltid navnene (aldri innhold).
+      // L11 (gjennomgang av PR #315): en verktøytur har flere runder, og ruten kan skifte mellom dem. Skyleverandører som betjente en TIDLIGERE runde enn den som ga svaret (gatewayen setter `served_providers` når flere betjente turen)
+      // nevnes også, og en leverandør som feilet i én runde men ga det siste svaret utløser fortsatt merknaden når en skyreserve tok en annen runde.
+      const roundProviders = result.metadata?.["served_providers"];
+      const earlierCloud = (Array.isArray(roundProviders) ? roundProviders.filter((p): p is string => typeof p === "string") : []).filter((name) => name !== result.provider && servedByCloudModel({ provider: name }));
       const reserveFailedBeforeAnswer = [...reserveFailed].filter((name) => name !== result.provider);
-      const reserveNote = reserveFailedBeforeAnswer.length > 0 && surface !== "voice" ? reserveModelNote(reserveFailedBeforeAnswer, result.provider, servedByCloudModel(result)) : "";
-      if (reserveFailedBeforeAnswer.length > 0) console.log(JSON.stringify({ msg: "wpd4_chat_reserve_used", failed: reserveFailedBeforeAnswer, served: result.provider, cloud: servedByCloudModel(result) }));
+      const reserveUsed = reserveFailedBeforeAnswer.length > 0 || (reserveFailed.size > 0 && earlierCloud.length > 0);
+      const reserveNote = reserveUsed && surface !== "voice" ? reserveModelNote([...reserveFailed], result.provider, servedByCloudModel(result), earlierCloud) : "";
+      if (reserveUsed) console.log(JSON.stringify({ msg: "wpd4_chat_reserve_used", failed: reserveFailedBeforeAnswer.length > 0 ? reserveFailedBeforeAnswer : [...reserveFailed], served: result.provider, cloud: servedByCloudModel(result), ...(earlierCloud.length > 0 ? { earlier_cloud: earlierCloud } : {}) }));
       const notes = `${routeNote}${variantNote}${withheldNote}${reserveNote}`;
       const replyText = notes ? `${result.text}${notes}` : result.text;
       if (notes) onToken?.(notes);

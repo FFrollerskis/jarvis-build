@@ -150,13 +150,25 @@ export function cloudHistoryNote(withheld: number): string {
 /**
  * WP-D4 (JARVIS-033): merknaden når en RESERVE svarte i stedet for modellen som skulle ha svart (standardkjeden, D-354/D-404/D-431). Samme prinsipp som D-447: aldri en usynlig nedgradering eller sky-reserve - kun
  * leverandørnavn (aldri innhold, aldri feilmeldinger). Navn som ikke ser ut som leverandør-id-er utelates, og teksten har ingen parenteser inni (se `stripSystemNotes`).
+ *
+ * Gjennomgang av PR #315 (L11): en verktøytur har flere runder, og ruten kan skifte mellom dem (runde 1 på en skyreserve fordi den lokale var nede, siste runde på den lokale som kom tilbake). `earlierCloud` er skyleverandørene
+ * som betjente en TIDLIGERE runde enn den som ga svaret: de nevnes alltid når noe feilet i turen, også når leverandøren som ga det siste svaret selv var en av dem som feilet (da var det forrige note tomt).
  */
 const PROVIDER_ID = /^[A-Za-z0-9_.-]{1,40}$/;
-export function reserveModelNote(failed: readonly string[], served: string, cloud: boolean): string {
-  const names = [...new Set(failed)].filter((name) => name !== served && PROVIDER_ID.test(name));
-  if (names.length === 0 || !PROVIDER_ID.test(served)) return "";
-  const where = cloud ? `skymodellen ${served}` : `den lokale modellen ${served}`;
-  return `\n\n(Reservemodell brukt: ${joinNo(names)} var ikke tilgjengelig${names.length === 1 ? "" : "e"}, så svaret kom fra ${where}.)`;
+export function reserveModelNote(failed: readonly string[], served: string, cloud: boolean, earlierCloud: readonly string[] = []): string {
+  if (!PROVIDER_ID.test(served)) return "";
+  const failedAll = [...new Set(failed)].filter((name) => PROVIDER_ID.test(name));
+  const names = failedAll.filter((name) => name !== served);
+  const earlier = [...new Set(earlierCloud)].filter((name) => name !== served && PROVIDER_ID.test(name));
+  if (names.length > 0) {
+    const where = cloud ? `skymodellen ${served}` : `den lokale modellen ${served}`;
+    const rounds = earlier.length > 0 ? ` Tidligere runder i turen ble besvart av skymodellen ${joinNo(earlier)}.` : "";
+    return `\n\n(Reservemodell brukt: ${joinNo(names)} var ikke tilgjengelig${names.length === 1 ? "" : "e"}, så svaret kom fra ${where}.${rounds})`;
+  }
+  if (failedAll.length > 0 && earlier.length > 0) {
+    return `\n\n(Reservemodell brukt: ${joinNo(failedAll)} var ikke tilgjengelig i en runde, så en del av svaret kom fra skymodellen ${joinNo(earlier)}.)`;
+  }
+  return "";
 }
 
 /**

@@ -67,6 +67,13 @@ export interface RouteInput {
    * (SECRET_RESTRICTED = kun lokal), `paid_models_allowed`, helse og `mode: "LOCAL"`. Et medlem som feiler en port blir aldri kandidat - failover kan ikke åpne noe et enkeltvalg ville stengt.
    */
   preferenceFailover?: boolean;
+  /**
+   * WP-D4 (gjennomgang av PR #315, L6): leverandører som allerede er FORSØKT i denne turen og ikke skal prøves igjen. Gjelder kun den scorede (AUTO/FAST/…) grenen - ikke eksakt `provider` og ikke `providerPreference`, som er
+   * eierens eksplisitte valg. Brukes av samtalemotorens siste reserve (D-354/D-404): omkjøringen gjennom vanlig ruting gjentok tidligere leverandørene i kjeden (opptil 4 kall til samme leverandør og 11 totalt per tur).
+   * Alle øvrige porter (sensitivitet, betaling, `mode: LOCAL`, helse) gjelder uendret - utelukking kan bare gjøre utvalget mindre. Er alt som ellers kvalifiserte allerede forsøkt, kastes
+   * `NoEligibleProviderError` med `already_attempted` (kalleren kaster da den opprinnelige feilen, som er den ærligste).
+   */
+  excludeProviders?: readonly string[];
 }
 
 export interface RouteCandidate {
@@ -79,6 +86,12 @@ export interface RoutePlan {
   reason: RoutingReason;
   /** Primær først; resten er deterministisk fallback-rekkefølge. */
   candidates: RouteCandidate[];
+  /**
+   * WP-D4 (gjennomgang av PR #315, M2): medlemmer av en preferanseliste som bestod ALLE porter (konfigurert, capabilities, sensitivitet, betaling, `mode: LOCAL`), men ble hoppet over FØR noe kall fordi helsen er UNAVAILABLE
+   * (halv-åpen krets etter gjentatte feil). Å bytte til neste medlem er reservebruk like mye som etter en kastet feil, så gatewayen melder dem til `CompleteInput.onAttemptFailed` (ellers ble reserven stille de
+   * neste 30 s-5 min etter et utfall). Kun satt for preferanselister.
+   */
+  unavailable?: string[];
 }
 
 /** LOCAL krevd men ingen egnet lokal modell live → tydelig feil, aldri sky bak ryggen (§26). */
@@ -243,6 +256,7 @@ export class AiRouter {
       const rejected: string[] = [];
       // WP-D4 (JARVIS-033): med `preferenceFailover` samles ALLE kvalifiserte medlemmer (i listerekkefølge) i stedet for å returnere ved det første.
       const chain: RouteCandidate[] = [];
+      const unavailable: string[] = [];
       for (const name of input.providerPreference) {
         if (attempted.includes(name)) continue; // samme leverandør to ganger i listen = ett forsøk (ellers dobbelt betalt kall i failover)
         const rt = providers.get(name);
@@ -255,17 +269,18 @@ export class AiRouter {
         if (mode === "LOCAL" && profile.locality !== "local") { rejected.push(`${name}:not_local`); continue; }
         if (!isSensitivityEligible(profile, input.sensitivity)) { rejected.push(`${name}:sensitivity=${input.sensitivity ?? "undefined"}`); continue; }
         if (!isPaidModelsEligible(profile, input.paid_models_allowed)) { rejected.push(`${name}:paid_models_disabled`); continue; }
-        if (this.health.state(name, true) === "UNAVAILABLE") { rejected.push(`${name}:health_unavailable`); continue; }
+        if (this.health.state(name, true) === "UNAVAILABLE") { rejected.push(`${name}:health_unavailable`); unavailable.push(name); continue; }
         if (!input.preferenceFailover) {
           return {
             mode: "SPECIFIC_PROVIDER",
             reason: "PROVIDER_PREFERENCE",
-            candidates: [{ provider: name, model: rt.model }]
+            candidates: [{ provider: name, model: rt.model }],
+            ...(unavailable.length > 0 ? { unavailable } : {})
           };
         }
         chain.push({ provider: name, model: rt.model });
       }
-      if (chain.length > 0) return { mode: "SPECIFIC_PROVIDER", reason: "PROVIDER_PREFERENCE", candidates: chain };
+      if (chain.length > 0) return { mode: "SPECIFIC_PROVIDER", reason: "PROVIDER_PREFERENCE", candidates: chain, ...(unavailable.length > 0 ? { unavailable } : {}) };
       throw new NoEligibleProviderError(
         `provider_preference_exhausted: ingen av [${attempted.join(",")}] er konfigurert/kvalifisert (${rejected.join("; ")})`
       );
@@ -279,8 +294,11 @@ export class AiRouter {
     const eligible: Array<{ profile: ModelProfile; model: string; state: string }> = [];
     let sensitivityExcludedCount = 0;
     let paidExcludedCount = 0;
+    const alreadyAttempted = new Set(input.excludeProviders ?? []);
+    const skippedAttempted: string[] = [];
     for (const [name, rt] of providers) {
       if (!rt.configured) continue;
+      if (alreadyAttempted.has(name)) { skippedAttempted.push(name); continue; }
       const profile = this.registry.profileOrGeneric(name, rt.model);
       if (mode === "LOCAL" && profile.locality !== "local") continue;
       if (![...required].every((c) => profile.capabilities.includes(c))) continue;
@@ -295,6 +313,9 @@ export class AiRouter {
       eligible.push({ profile, model: rt.model, state: this.health.state(name, true) });
     }
     if (eligible.length === 0) {
+      if (skippedAttempted.length > 0) {
+        throw new NoEligibleProviderError(`all_remaining_providers_already_attempted: [${skippedAttempted.join(",")}] er allerede forsøkt i denne turen`);
+      }
       if (mode === "LOCAL") throw new LocalModelUnavailableError();
       if (input.paid_models_allowed === false && paidExcludedCount > 0) {
         throw new PaidModelsDisabledError(

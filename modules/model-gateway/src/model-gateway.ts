@@ -127,6 +127,8 @@ export interface CompleteInput {
   providerPreference?: string[];
   /** WP-D4 (JARVIS-033): se `RouteInput.preferenceFailover` - preferanselisten blir en kandidatkjede med failover inne i gatewayen. Udefinert = uendret enkeltvalg. */
   preferenceFailover?: boolean;
+  /** WP-D4 (L6): se `RouteInput.excludeProviders` - leverandører som allerede er forsøkt i turen og ikke skal prøves igjen i den scorede ruten (samtalemotorens siste reserve). Udefinert = uendret. */
+  excludeProviders?: readonly string[];
   /**
    * WP-D4 (JARVIS-033): kalles for HVERT mislykket leverandørforsøk i hovedkallet (aldri critic, aldri brukeravbrudd) - også når en senere kandidat eller retry lykkes, og også når hele planen til slutt feiler.
    * Gir flatene (chatten) synlighet i reservebruk: hvem som ikke svarte før noen gjorde det (hvem som svarte står i resultatet). Gjennom verktøyløkker rapporteres alle runder, ikke bare den siste.
@@ -455,6 +457,7 @@ export class ModelGateway {
           ? { providerPreference: input.providerPreference }
           : {}),
         ...(input.preferenceFailover !== undefined ? { preferenceFailover: input.preferenceFailover } : {}),
+        ...(input.excludeProviders !== undefined ? { excludeProviders: input.excludeProviders } : {}),
         needs_structured: Boolean(input.request.structured_schema)
       },
       this.providerRuntimes()
@@ -488,6 +491,8 @@ export class ModelGateway {
     const baseRequest = requestOverride ?? input.request;
     const failedProviders: string[] = [];
     let lastError: Error | null = null;
+    // WP-D4 (M2): preferansemedlemmer som ble hoppet over fordi helsen er UNAVAILABLE er reservebruk som aldri ble et forsøk - flaten skal likevel få vite det.
+    for (const name of plan.unavailable ?? []) this.notifyAttemptFailed(input, name, "unavailable", isCritic);
     // D-441: retry-kallet (`adapter.complete`) tar ikke imot et avbruddssignal, så en avbrutt tur (barge-in, lukket SSE) må sjekkes eksplisitt FØR et nytt betalt kall
     // starter og FØR et svar spilles av - ellers lever en «zombie»-generering videre og et avbrutt svar lagres som et vanlig svar (D-30: ingen zombie-generering).
     const throwIfCancelled = (adapterName: string): void => {
@@ -658,6 +663,7 @@ export class ModelGateway {
                 }
                 // Retry-forsøket var OGSÅ ubrukelig - ærlig feil, aldri stille suksess (§4).
                 lastError = new ProviderError(adapter.name, "invalid_response", `${adapter.name}_no_usable_output_after_retry`);
+                this.notifyAttemptFailed(input, adapter.name, "invalid_response", isCritic); // WP-D4 (M2): en reserve som tar over etter et ubrukelig svar skal være synlig
                 break;
               } catch (retryErr) {
                 // Selve retry-kallet feilet på transportnivå (§5: begge forsøk er ekte,
@@ -682,6 +688,8 @@ export class ModelGateway {
           // Ikke brukbart, ingen (eller uttømt) retry: gå videre til neste kandidat
           // UTEN å straffe provider-helsen (§3/§7 - transporten lyktes faktisk).
           lastError = new ProviderError(adapter.name, "invalid_response", `${adapter.name}_no_usable_output`);
+          // WP-D4 (M2): helsen straffes ikke, men reservebruk skal alltid være synlig (D-447) - også når reserven tok over etter et TOMT eller AVKORTET svar, ikke bare etter en kastet feil.
+          this.notifyAttemptFailed(input, adapter.name, "invalid_response", isCritic);
           break;
         } catch (err) {
           const pe =
@@ -788,6 +796,7 @@ export class ModelGateway {
           ? { providerPreference: input.providerPreference }
           : {}),
         ...(input.preferenceFailover !== undefined ? { preferenceFailover: input.preferenceFailover } : {}),
+        ...(input.excludeProviders !== undefined ? { excludeProviders: input.excludeProviders } : {}),
         needs_structured: Boolean(input.request.structured_schema)
       },
       this.providerRuntimes()
@@ -812,6 +821,9 @@ export class ModelGateway {
     let honestyApplied = false;
     let result: ModelResult | null = null;
     let lockedToLocal = false;
+    // WP-D4 (L11): hver leverandør som betjente en runde (i rekkefølge). Ruten kan skifte mellom runder (runde 1 reserve i skyen, siste runde den lokale som kom tilbake), og flaten skal få vite om en skyleverandør
+    // har rørt turen selv om den ikke var den som ga det siste svaret.
+    const servedProviders: string[] = [];
 
     for (let round = 1; round <= maxRounds; round++) {
       // Siste runde / loop-vern: uten tools MÅ modellen syntetisere tekstsvar av
@@ -834,6 +846,7 @@ export class ModelGateway {
       result = opts.onEvent && !failureGuard
         ? await this.stream(roundInput, opts.onEvent, opts.signal)
         : await this.complete(roundInput);
+      if (!servedProviders.includes(result.provider)) servedProviders.push(result.provider);
       if (opts.localStickiness && !lockedToLocal && this.servedLocally(result)) lockedToLocal = true;
       const calls = (result.tool_calls ?? []).slice(0, opts.maxCallsPerRound ?? Number.POSITIVE_INFINITY);
       if (calls.length === 0) {
@@ -877,7 +890,8 @@ export class ModelGateway {
       result = { ...result, text: `${result.text}${partialNote}`, metadata: { ...result.metadata, tool_honesty: "partial" } };
       opts.onEvent?.({ type: "text_delta", text: partialNote });
     }
-    result.metadata = { ...result.metadata, tool_rounds: exchanges.length };
+    // `served_providers` settes kun når FLERE leverandører betjente turen (vanlig tur: én leverandør, metadata uendret).
+    result.metadata = { ...result.metadata, tool_rounds: exchanges.length, ...(servedProviders.length > 1 ? { served_providers: servedProviders } : {}) };
     return result;
   }
 
@@ -1211,20 +1225,27 @@ export class ModelGateway {
     );
   }
 
+  /**
+   * WP-D4 (JARVIS-033, gjennomgang av PR #315 M2): meld ÉN kandidat som ikke svarte til flatens lytter (`CompleteInput.onAttemptFailed`). Brukes av ALLE veier der en kandidat ikke ble den som svarte: kastet feil
+   * (`recordFailedAttempt`), tomt/avkortet/ubrukelig svar (`executePlan`, «Ikke brukbart»-grenene - transporten lyktes, så helsen straffes ikke, men eieren skal likevel få vite at en reserve svarte) og en kandidat som
+   * ble hoppet over fordi helsen er UNAVAILABLE (`plan.unavailable`). Brukeravbrudd er ingen leverandørfeil, og criticen er en egen kjøring. En feil i lytteren er konsumentens og må aldri stoppe fallback-kjeden.
+   */
+  private notifyAttemptFailed(input: CompleteInput, provider: string, kind: string, critic: boolean): void {
+    if (critic || kind === "cancelled" || input.onAttemptFailed === undefined) return;
+    try {
+      input.onAttemptFailed({ provider, kind });
+    } catch (listenerError) {
+      console.error(JSON.stringify({ msg: "attempt_failed_listener_error", error: (listenerError as Error).message.slice(0, 120) }));
+    }
+  }
+
   private async recordFailedAttempt(
     input: CompleteInput,
     provider: string,
     err: ProviderError,
     critic: boolean
   ): Promise<void> {
-    // WP-D4 (JARVIS-033): synlighet i reservebruk. Brukeravbrudd er ingen leverandørfeil; criticen er en egen kjøring. En feil i lytteren er konsumentens og må aldri stoppe fallback-kjeden.
-    if (!critic && err.kind !== "cancelled" && input.onAttemptFailed !== undefined) {
-      try {
-        input.onAttemptFailed({ provider, kind: err.kind });
-      } catch (listenerError) {
-        console.error(JSON.stringify({ msg: "attempt_failed_listener_error", error: (listenerError as Error).message.slice(0, 120) }));
-      }
-    }
+    this.notifyAttemptFailed(input, provider, err.kind, critic);
     try {
       await withTenantTransaction(this.opts.pool, input.tenant_id, (client) =>
         client.query(
