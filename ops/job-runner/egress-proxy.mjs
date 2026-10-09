@@ -30,40 +30,76 @@ for (const [net4, prefix] of [
 }
 for (const [net6, prefix] of [
   // «::/96» = IPv4-kompatible adresser (::a.b.c.d, utfaset men fortsatt parsbare - f.eks. ::7f00:1), «fec0::/10» = site-local (utfaset), «64:ff9b:1::/48» = lokal NAT64 (RFC 8215).
-  // IPv4-mappede (::ffff:a.b.c.d), 64:ff9b::/96 og 6to4 (2002::/16) vurderes mot den INNEBYGDE IPv4-adressen i `embeddedIpv4`.
-  ["::", 96], ["::", 128], ["::1", 128], ["fc00::", 7], ["fe80::", 10], ["fec0::", 10], ["ff00::", 8], ["2001:db8::", 32], ["100::", 64], ["2001::", 32], ["64:ff9b:1::", 48]
+  // «2001::/23» = hele IETF-protokolltildelingen (Teredo, benchmarking, ORCHID/ORCHIDv2, AMT ...: ingen av dem er en offentlig tjeneste vi skal nå), «3fff::/20» = dokumentasjon (RFC 9637),
+  // «5f00::/16» = SRv6 SID-er (RFC 9602). GitHub, Anthropic og de store CDN-ene ligger utenfor disse områdene.
+  // IPv4-mappede (::ffff:a.b.c.d), NAT64 (64:ff9b::/96), SIIT-oversatte (::ffff:0:a.b.c.d) og 6to4 (2002::/16) vurderes mot den INNEBYGDE IPv4-adressen i `embeddedIpv4`.
+  ["::", 96], ["::", 128], ["::1", 128], ["fc00::", 7], ["fe80::", 10], ["fec0::", 10], ["ff00::", 8], ["2001:db8::", 32], ["100::", 64], ["2001::", 23], ["64:ff9b:1::", 48], ["3fff::", 20], ["5f00::", 16]
 ]) {
   blocked.addSubnet(net6, prefix, "ipv6");
 }
 
-/** Trekker ut innebygd IPv4 fra IPv4-mappet/-kompatibel IPv6 (::ffff:a.b.c.d, 64:ff9b::a.b.c.d, 2002:ab:cd::). Speiler apps/browser-gateway/src/egress-policy.ts. */
-function embeddedIpv4(ip) {
-  const lower = ip.toLowerCase();
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(lower) ?? /^64:ff9b::(\d+\.\d+\.\d+\.\d+)$/.exec(lower);
-  if (mapped) return mapped[1] ?? null;
-  const hexMapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(lower);
-  if (hexMapped) {
-    const hi = parseInt(hexMapped[1] ?? "0", 16);
-    const lo = parseInt(hexMapped[2] ?? "0", 16);
-    return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+/**
+ * Utvider en IPv6-adresse (gyldig etter `isIP`) til 16 bytes, i ALLE skrivemåter: komprimert (`::`), full, store/små bokstaver, ledende nuller, punktdesimal hale (`::ffff:1.2.3.4`)
+ * og sone-id (`%eth0`, fjernes). `null` hvis noe ikke lar seg tolke (da regnes adressen som ikke-offentlig).
+ * @param {string} ip @returns {Uint8Array | null}
+ */
+function ipv6Bytes(ip) {
+  let text = ip.toLowerCase();
+  const zone = text.indexOf("%");
+  if (zone !== -1) text = text.slice(0, zone);
+  const lastColon = text.lastIndexOf(":");
+  const tail = text.slice(lastColon + 1);
+  if (tail.includes(".")) {
+    const octets = tail.split(".").map((part) => (/^[0-9]{1,3}$/.test(part) ? Number(part) : Number.NaN));
+    if (octets.length !== 4 || octets.some((n) => !(n >= 0 && n <= 255))) return null;
+    text = `${text.slice(0, lastColon + 1)}${((octets[0] << 8) | octets[1]).toString(16)}:${((octets[2] << 8) | octets[3]).toString(16)}`;
   }
-  const sixToFour = /^2002:([0-9a-f]{1,4}):([0-9a-f]{1,4})::?/.exec(lower);
-  if (sixToFour) {
-    const hi = parseInt(sixToFour[1] ?? "0", 16);
-    const lo = parseInt(sixToFour[2] ?? "0", 16);
-    return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+  const groupsOf = (/** @type {string} */ part) => (part === "" ? [] : part.split(":"));
+  const head = groupsOf(halves[0] ?? "");
+  const rest = halves.length === 2 ? groupsOf(halves[1] ?? "") : [];
+  const fill = 8 - head.length - rest.length;
+  if (halves.length === 1 ? head.length !== 8 : fill < 1) return null;
+  const groups = halves.length === 2 ? [...head, ...Array.from({ length: fill }, () => "0"), ...rest] : head;
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 8; i += 1) {
+    const group = groups[i] ?? "";
+    if (!/^[0-9a-f]{1,4}$/.test(group)) return null;
+    const value = parseInt(group, 16);
+    bytes[i * 2] = value >> 8;
+    bytes[i * 2 + 1] = value & 255;
   }
+  return bytes;
+}
+
+/**
+ * Trekker ut innebygd IPv4 fra IPv6-former som bærer en: IPv4-mappet (::ffff:a.b.c.d), NAT64 (64:ff9b::a.b.c.d), SIIT-oversatt (::ffff:0:a.b.c.d) og 6to4 (2002:ab:cd::).
+ * Arbeider på BYTENE, ikke på tekst: `64:ff9b::7f00:1` (hex, slik Node og de fleste resolvere skriver den) er SAMME adresse som `64:ff9b::127.0.0.1`.
+ * Speiler apps/browser-gateway/src/egress-policy.ts, men uten at skrivemåten kan lure den.
+ * @param {Uint8Array} bytes @returns {string | null}
+ */
+function embeddedIpv4(bytes) {
+  const zero = (/** @type {number} */ from, /** @type {number} */ to) => bytes.subarray(from, to).every((b) => b === 0);
+  const v4 = (/** @type {number} */ at) => `${bytes[at]}.${bytes[at + 1]}.${bytes[at + 2]}.${bytes[at + 3]}`;
+  if (zero(0, 10) && bytes[10] === 0xff && bytes[11] === 0xff) return v4(12); // ::ffff:0:0/96
+  if (bytes[0] === 0x00 && bytes[1] === 0x64 && bytes[2] === 0xff && bytes[3] === 0x9b && zero(4, 12)) return v4(12); // 64:ff9b::/96
+  if (zero(0, 8) && bytes[8] === 0xff && bytes[9] === 0xff && bytes[10] === 0 && bytes[11] === 0) return v4(12); // ::ffff:0:0:0/96
+  if (bytes[0] === 0x20 && bytes[1] === 0x02) return v4(2); // 2002::/16
   return null;
 }
 
 /** `true` KUN for en offentlig rutbar adresse. Alt ukjent/uparsbart er `false` (fail-closed). */
 export function isPublicAddress(ip) {
+  if (typeof ip !== "string") return false;
   const family = isIP(ip);
   if (family === 0) return false;
   if (family === 6) {
-    const embedded = embeddedIpv4(ip);
+    const bytes = ipv6Bytes(ip);
+    if (bytes === null) return false;
+    const embedded = embeddedIpv4(bytes);
     if (embedded !== null) return isPublicAddress(embedded);
-    return !blocked.check(ip, "ipv6");
+    return !blocked.check(ip.includes("%") ? ip.slice(0, ip.indexOf("%")) : ip, "ipv6");
   }
   return !blocked.check(ip, "ipv4");
 }

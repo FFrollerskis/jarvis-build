@@ -172,6 +172,32 @@ describe("C: SSRF og DNS-rebinding - proxyen slår opp selv og kobler til den va
     // og en ekte offentlig IPv6-adresse blir ikke fanget av de nye områdene
     for (const ip of ["2606:50c0:8000::154", "2a01:4f8:c17:1::1", "2001:4860:4860::8888"]) expect(isPublicAddress(ip), ip).toBe(true);
   });
+
+  it("innebygd IPv4 i ALLE skrivemåter (byte-basert): NAT64/SIIT/mappet/6to4 i hex, full form, store bokstaver, ledende nuller og punktdesimal gir samme svar som IPv4-adressen", () => {
+    // Node og de fleste resolvere skriver slike adresser i HEX (64:ff9b::7f00:1), ikke punktdesimal - en tekst-regex for punktdesimal slapp hex-formen gjennom
+    const embedded = {
+      "7f00:1": "127.0.0.1", "a00:1": "10.0.0.1", "c0a8:101": "192.168.1.1", "a9fe:a9fe": "169.254.169.254", "ac10:1": "172.16.0.1", "6440:1": "100.64.0.1", "0:0": "0.0.0.0", "8c52:7003": "140.82.112.3", "808:808": "8.8.8.8"
+    };
+    for (const [hex, dotted] of Object.entries(embedded)) {
+      const expected = isPublicAddress(dotted);
+      const forms = [
+        `64:ff9b::${hex}`, `0064:ff9b:0000:0000:0000:0000:${hex.replace(/^([0-9a-f]+):([0-9a-f]+)$/, (_, a, b) => `${a.padStart(4, "0")}:${b.padStart(4, "0")}`)}`, `64:FF9B::${hex.toUpperCase()}`, `64:ff9b::${dotted}`, `64:ff9b:0:0:0:0:${dotted}`,
+        `::ffff:${hex}`, `::FFFF:${hex}`, `0:0:0:0:0:ffff:${hex}`, `0000:0000:0000:0000:0000:ffff:${hex.replace(/^([0-9a-f]+):([0-9a-f]+)$/, (_, a, b) => `${a.padStart(4, "0")}:${b.padStart(4, "0")}`)}`, `::ffff:${dotted}`,
+        `::ffff:0:${hex}`, `::ffff:0:${dotted}`, `0:0:0:0:ffff:0:${hex}`
+      ];
+      for (const ip of forms) expect(isPublicAddress(ip), `${ip} (${dotted})`).toBe(expected);
+    }
+    // 6to4 (2002:AABB:CCDD::) bærer IPv4-adressen i biter 16-47
+    expect(isPublicAddress("2002:7f00:1::")).toBe(false);
+    expect(isPublicAddress("2002:a9fe:a9fe::1")).toBe(false);
+    expect(isPublicAddress("2002:8c52:7003::1")).toBe(true);
+    // ikke-offentlige områder som ellers ligner offentlige: IETF-protokolltildelingen, dokumentasjon, SRv6
+    for (const ip of ["2001::1", "2001:1::1", "2001:2::1", "2001:3::1", "2001:10::1", "2001:20::1", "2001:1ff::1", "3fff::1", "3fff:fff::1", "5f00::1", "5f00:1::1", "::ffff:0:0", "2001:db8:1::1"]) expect(isPublicAddress(ip), ip).toBe(false);
+    // og områdene rett utenfor er fortsatt offentlige (GitHub, Cloudflare, Google ligger her)
+    for (const ip of ["2001:200::1", "2001:4860:4860::8888", "2606:50c0:8000::154", "2606:4700::6810:84e5", "2600::1", "2a00:1450:4001:80b::200e", "4000::1"]) expect(isPublicAddress(ip), ip).toBe(true);
+    // uparsbart er aldri offentlig, uansett hva isIP mener om sone-id
+    for (const ip of ["fe80::1%eth0", "::1%lo", "1:2:3:4:5:6:7:8:9", ":::", "1::2::3", "g::1", 1, null, undefined, {}]) expect(isPublicAddress(ip), String(ip)).toBe(false);
+  });
 });
 
 describe("D: ingen vanlig HTTP-videresending - alt som ikke er CONNECT avvises", () => {
