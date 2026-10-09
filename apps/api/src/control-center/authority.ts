@@ -199,8 +199,9 @@ export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterD
           facts: { configured: deps.authority !== undefined, owner_tenants: deps.authority?.owner_tenants.length ?? 0, viewer_mode: viewerMode }
         }),
         controlItem({
-          id: "delegates", label: "Delegert autoritet", status: "OK",
-          detail_no: "Identiteter med delegasjon arver ALDRI eier-autoritet: de er alltid SCOPED og må gjennom mandat/godkjenning for klasse C og D (resolveAuthorityMode).",
+          // Gjennomgang av PR #316 (M-1): reglen er alltid i kraft, men elementet viser også hvor mange andre enheter som har tilgang - kan enhetsoversikten ikke leses, er det ukjent (aldri «i orden»).
+          id: "delegates", label: "Delegert autoritet", status: devicesR.ok ? "OK" : "UNKNOWN",
+          detail_no: `Identiteter med delegasjon arver ALDRI eier-autoritet: de er alltid SCOPED og må gjennom mandat/godkjenning for klasse C og D (resolveAuthorityMode).${devicesR.ok ? "" : " Enhetsoversikten kunne ikke leses, så antall enheter med delegert tilgang er ukjent."}`,
           facts: {
             rule: "delegation_id => SCOPED",
             other_person_devices: otherPeople === null ? null : otherPeople.length,
@@ -263,10 +264,12 @@ export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterD
       if (autonomyR.ok) {
         const items: ControlItem[] = autonomyR.value.rows.map((p) => {
           const paused = allPaused || pausedDomains.has(p.domain);
+          // Gjennomgang av PR #316 (M-1): kan domene-pausene ikke leses, VET vi ikke om en aktiv binding er stanset - da er den ukjent (aldri «i orden»), og faktaet sier null i stedet for «ikke pauset».
+          const pauseUnknown = !pausesR.ok && p.enabled;
           return controlItem({
-            id: `${p.memory_space_id}:${p.domain}`, label: `${p.domain} (${p.memory_space_id})`, status: p.enabled && paused ? "WARN" : "OK", observed_at: p.updated_at,
-            detail_no: `${p.tool_id}.${p.action} - ${p.enabled ? "aktiv" : "av"}${paused ? " · domenet er PAUSET (auto-ACT stanset)" : ""} · endret ${rel(p.updated_at)}`,
-            facts: { tool: p.tool_id, action: p.action, risk_class: deps.toolGateway.get(p.tool_id, p.action)?.capability_class ?? "ukjent", enabled: p.enabled, domain_paused: paused, space: p.memory_space_id }
+            id: `${p.memory_space_id}:${p.domain}`, label: `${p.domain} (${p.memory_space_id})`, status: pauseUnknown ? "UNKNOWN" : p.enabled && paused ? "WARN" : "OK", observed_at: p.updated_at,
+            detail_no: `${p.tool_id}.${p.action} - ${p.enabled ? "aktiv" : "av"}${paused ? " · domenet er PAUSET (auto-ACT stanset)" : ""}${pauseUnknown ? " · domene-pausene kunne ikke leses (ukjent om domenet er pauset)" : ""} · endret ${rel(p.updated_at)}`,
+            facts: { tool: p.tool_id, action: p.action, risk_class: deps.toolGateway.get(p.tool_id, p.action)?.capability_class ?? "ukjent", enabled: p.enabled, domain_paused: pausesR.ok ? paused : null, space: p.memory_space_id }
           });
         });
         items.sort(bySeverityThenLabel);

@@ -284,7 +284,8 @@ export function createAiCenter(deps: AiCenterDeps): ControlCenterDefinition {
         for (const row of overview) {
           const pause = pauseInfoFor(row.provider, frozenTargets, revokedRefs, refsByProvider);
           const u = usage.get(row.provider);
-          const inUse = routeProviders.has(row.provider) || (u?.ok_calls ?? 0) > 0;
+          // Gjennomgang av PR #316 (M-1): kan kostradene ikke leses, vet vi ikke om en leverandør er i bruk - da regnes den som i bruk (en konfigurert, ubevist leverandør blir UKJENT, aldri OK).
+          const inUse = routeProviders.has(row.provider) || (usageR.ok ? (u?.ok_calls ?? 0) > 0 : true);
           const status = controlsR.ok || !row.configured ? providerStatus(row, pause, inUse, u) : worstStatus([providerStatus(row, pause, inUse, u), "UNKNOWN"]);
           const h = row.health;
           const parts: string[] = [];
@@ -313,7 +314,7 @@ export function createAiCenter(deps: AiCenterDeps): ControlCenterDefinition {
               health_state: h.state, circuit: h.circuit, consecutive_failures: h.consecutive_failures, last_error_kind: h.last_error_kind ?? null,
               last_success_at: h.last_success_at ?? null, last_failure_at: h.last_failure_at ?? null, retry_after_ms: h.retry_after_ms ?? null, avg_latency_ms: h.avg_latency_ms ?? null,
               calls_ok_7d: usageR.ok ? (u?.ok_calls ?? 0) : null, calls_failed_7d: usageR.ok ? (u?.failed_calls ?? 0) : null, cost_7d_ore: usageR.ok ? (u?.ore ?? 0) : null,
-              last_fallback_at: u?.last_fallback_at ?? null, in_use: inUse
+              last_fallback_at: u?.last_fallback_at ?? null, in_use: usageR.ok || routeProviders.has(row.provider) ? inUse : null
             }
           }));
 
@@ -586,6 +587,12 @@ export function createAiCenter(deps: AiCenterDeps): ControlCenterDefinition {
           id: "extra_calls", label: "Ekstra modellkall: kritikk, fallback og feil (7 d)", status: ok + failed >= FAIL_SHARE_MIN_CALLS && failed / (ok + failed) >= FAIL_SHARE_WARN ? "WARN" : "OK",
           detail_no: `${critic} kritikkkall, ${fallback} svar via fallback, ${failed} feilede forsøk (0 øre, men sløser tid) av ${ok + failed + critic} kall.`,
           facts: { critic_calls_7d: critic, fallback_calls_7d: fallback, failed_calls_7d: failed, ok_calls_7d: ok }
+        }));
+      } else {
+        // Gjennomgang av PR #316 (M-1): kostradene kunne ikke leses - elementet utelates ikke stille (da kunne seksjonen stå som «i orden» uten at ekstra kall er målt), men står som ukjent.
+        delegationItems.push(controlItem({
+          id: "extra_calls", label: "Ekstra modellkall: kritikk, fallback og feil (7 d)", status: "UNKNOWN", detail_no: `Kunne ikke leses (${usageR.category}).`,
+          facts: { critic_calls_7d: null, fallback_calls_7d: null, failed_calls_7d: null, ok_calls_7d: null }
         }));
       }
       delegationItems.push(controlItem({
