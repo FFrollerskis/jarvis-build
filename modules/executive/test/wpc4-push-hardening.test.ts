@@ -509,11 +509,13 @@ describe("L1: ubetrodd nøkkel i ordbok-oppslag gir aldri en prototype-funksjon"
     expect(toPushItem(cand({ source_kind: "business_open_loop", source_id: "ol-2", provenance: "deterministic", title: "stalled_opportunity" }), NOON, 14)?.label).toBe("Salgsmulighet står stille");
   });
 
-  it("prioritet fra databasen: `constructor` ødelegger ikke sorteringen (deterministisk rekkefølge)", () => {
-    const cands = [cand({ source_id: "b", priority: "constructor" as never }), cand({ source_id: "a", priority: "high" }), cand({ source_id: "c", priority: "__proto__" as never })];
+  it("prioritet fra databasen: `constructor`/`__proto__` ødelegger ikke sorteringen - en ukjent prioritet regnes som «normal», og høy prioritet går først selv om den kommer sist alfabetisk", () => {
+    // Uten `Object.hasOwn` blir sammenligningen `function - tall` = NaN, som faller tilbake på alfabetisk nøkkel: «a-ctor» ville gått foran «z-high».
+    const cands = [cand({ source_id: "a-ctor", priority: "constructor" as never }), cand({ source_id: "z-high", priority: "high" }), cand({ source_id: "m-proto", priority: "__proto__" as never })];
     const first = sendOf(planFollowUpPush({ candidates: cands, policy: ON, state: EMPTY_PUSH_LEDGER, now: NOON }));
     const second = sendOf(planFollowUpPush({ candidates: [...cands].reverse(), policy: ON, state: EMPTY_PUSH_LEDGER, now: NOON }));
-    expect(first.items.map((i) => i.source_id)).toEqual(second.items.map((i) => i.source_id));
+    expect(first.items.map((i) => i.source_id)).toEqual(["z-high", "a-ctor", "m-proto"]);
+    expect(second.items.map((i) => i.source_id)).toEqual(["z-high", "a-ctor", "m-proto"]);
   });
 
   it("SLO-id fra rapporten: `constructor` er ikke en tjeneste og gir ingen omstartsforslag (V5)", () => {
