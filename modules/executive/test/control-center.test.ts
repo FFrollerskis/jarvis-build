@@ -3,7 +3,7 @@ import type { IdentityContext } from "@jarvis/contracts";
 import {
   CONTROL_ACTION_ALLOWED, CONTROL_ACTION_BODY_KEYS, CONTROL_ACTION_ENDPOINTS, CONTROL_CENTER_IDS, CONTROL_CENTER_TITLES_NO, ControlCenterAccessError, ControlCenterRegistry,
   composeControlCenterOverview, composeControlCenterReport, controlAction, controlItem, controlSection, explainControlCenterNo, failureCategory, isControlCenterId,
-  redactControlCenterReport, unknownControlSection, worstStatus,
+  isEffectiveRedactor, redactControlCenterReport, unknownControlSection, worstStatus,
   type ControlCenterBuildContext, type ControlCenterDefinition, type ControlCenterParts, type ControlStatus
 } from "../src/index.ts";
 
@@ -369,6 +369,16 @@ describe("hemmelighetsvern: siste forsvarslinje i registeret", () => {
     expect(report?.actions[0]?.endpoint).toBe("/executive/mutate");
     expect(report?.actions[0]?.body).toEqual({ action: "freeze_connector", parameters: { connector_id: "github", reason: "sk-ant-api03-IBODY" } });
     expect(report?.sections[0]?.items[0]?.facts).toMatchObject({ tall: 7, ja: true });
+  });
+
+  it("registeret avviser en redigerer som ikke redigerer (identitetsfunksjonen m.fl.) allerede ved konstruksjon - «redigeringen er på» er ikke bare en påstand om oppstartskoden (gjennomgang av PR #316, M-2)", () => {
+    for (const [label, bad] of [["identitet", (t: string) => t], ["bare store bokstaver", (t: string) => t.toUpperCase()], ["kaster", () => { throw new Error("x"); }], ["ikke-streng", (() => 1) as never]] as const) {
+      expect(isEffectiveRedactor(bad), label).toBe(false);
+      expect(() => new ControlCenterRegistry({ isOwner, redact: bad }), label).toThrow("control_center_redact_not_effective");
+    }
+    expect(isEffectiveRedactor(redact)).toBe(true);
+    expect(() => new ControlCenterRegistry({ isOwner, redact })).not.toThrow();
+    expect(() => new ControlCenterRegistry({ isOwner })).not.toThrow();
   });
 
   it("redactControlCenterReport muterer ikke inndata", () => {

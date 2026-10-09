@@ -10,10 +10,11 @@ import {
 } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import {
-  ControlCenterRegistry, ExecutiveService, ExecutiveTransport, controlAction, controlItem, controlSection, executiveToolDefinitions
+  ExecutiveService, ExecutiveTransport, controlAction, controlItem, controlSection, executiveToolDefinitions
 } from "@jarvis/executive";
-import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway, resolveAuthorityMode } from "@jarvis/policy";
+import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, type SecretProvider } from "@jarvis/tool-gateway";
+import { createControlCenterRegistry } from "../src/control-center/register.ts";
 import { createApiServer } from "../src/server.ts";
 import { generateDeviceKey, mintGrant, type TestDeviceKey } from "./support/grant-client.ts";
 
@@ -81,7 +82,8 @@ beforeAll(async () => {
   const secrets: SecretProvider = { name: "fake", get: async () => "fake" };
   gateway = new ToolGateway(appPool, policy, secrets);
 
-  const registry = new ControlCenterRegistry({ isOwner: (identity) => resolveAuthorityMode(authority, identity) === "SOVEREIGN" });
+  // Gjennomgang av PR #316 (M-2): samme fabrikk og SAMME AuthorityConfig som PolicyGateway over - akkurat som main.ts.
+  const registry = createControlCenterRegistry({ authority });
   registry.register({
     id: "ai", title_no: "AI", description_no: "Leverandører og ruting",
     build: async () => ({

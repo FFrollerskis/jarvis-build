@@ -5,6 +5,7 @@ import {
   CHAT_ACT_TIER, CHAT_DELEGATE_TIER, CHAT_READ_TIER, MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, SURFACE_TOOL_GRANTS, assertManifestInvariants, buildToolManifest, inferEffect,
   type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
+import { createControlCenterRegistry } from "../src/control-center/register.ts";
 import { EXECUTIVE_MUTATE_ACTIONS } from "../src/server.ts";
 import { STEP_UP_EXEMPT_ACTIONS, actionRequiresStepUp, stepUpDenial } from "../src/step-up.ts";
 
@@ -20,7 +21,8 @@ function defsWith(service: ExecutiveService): ToolDefinition[] {
   return executiveToolDefinitions(new ExecutiveTransport(service));
 }
 const fakeGw = { list: () => [], health: new Map(), hasSecret: async () => true } as unknown as ToolGateway;
-const ownerOnly = new ControlCenterRegistry({ isOwner: (i) => i.person_id === "person-owner" && i.delegation_id === undefined });
+// Gjennomgang av PR #316 (M-2): samme fabrikk som main.ts bruker (eier-predikat fra en AuthorityConfig, redigering av hemmeligheter fast) - ikke et eget predikat i testen.
+const ownerOnly = createControlCenterRegistry({ authority: { owner_person_id: "person-owner", owner_tenants: ["tenant-owner"] } });
 const def = defsWith(new ExecutiveService(fakeGw, { controlCenters: ownerOnly })).find((d) => `${d.tool_id}.${d.action}` === KEY) as ToolDefinition;
 
 describe("registrering", () => {

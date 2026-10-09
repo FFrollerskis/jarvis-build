@@ -10,6 +10,7 @@ import {
   type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
 import { TasksDelegateTransport, tasksDelegateToolDefinitions } from "../src/chat-jobs.ts";
+import { createControlCenterRegistry } from "../src/control-center/register.ts";
 import { RunRateTransport, runRateToolDefinitions } from "../src/run-rate.ts";
 
 /**
@@ -109,7 +110,8 @@ describe("utvalg per melding", () => {
 });
 
 describe("eier-kun port i verktøydefinisjonen", () => {
-  const ownerOnly = new ControlCenterRegistry({ isOwner: (i) => i.person_id === "person-owner" && i.delegation_id === undefined });
+  // Gjennomgang av PR #316 (M-2): samme fabrikk som main.ts bruker.
+  const ownerOnly = createControlCenterRegistry({ authority: { owner_person_id: "person-owner", owner_tenants: ["tenant-owner"] } });
 
   it("med registeret: eieren slipper gjennom, en annen person og en delegat nektes - parameterAuthorizer kalles av ToolGateway FØR transporten", () => {
     const d = productionDefinitions(ownerOnly).find((x) => `${x.tool_id}.${x.action}` === KEY) as ToolDefinition;

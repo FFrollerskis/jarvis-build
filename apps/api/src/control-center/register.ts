@@ -1,11 +1,54 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
-import type { ControlCenterRegistry } from "@jarvis/executive";
+import type { IdentityContext } from "@jarvis/contracts";
+import { scanForSecrets } from "@jarvis/core";
+import { ControlCenterRegistry } from "@jarvis/executive";
+import { resolveAuthorityMode, type AuthorityConfig } from "@jarvis/policy";
 import { createAiCenter, type AiCenterDeps } from "./ai.ts";
 import { createAuthorityCenter, type AuthorityCenterDeps } from "./authority.ts";
 import { createIntegrationCenter, type IntegrationCenterDeps } from "./integration.ts";
 import type { ControlCenterPool } from "./shared.ts";
 
 export type { ControlCenterPool } from "./shared.ts";
+
+/**
+ * Gjennomgang av PR #316 (M-2) - EIER-PORTEN OG SISTE FORSVARSLINJE ER ÉN FABRIKK, brukt av BÅDE `main.ts` og testene.
+ *
+ * Tidligere satt `main.ts` sammen eier-predikatet (`resolveAuthorityMode(...) === "SOVEREIGN"`) og redigereren (`scanForSecrets`) inline, og INGEN test låste den koblingen: å endre predikatet til
+ * `!== "DENIED"` (`resolveAuthorityMode` returnerer aldri DENIED, så alle SCOPED-identiteter ville sluppet inn) eller redigereren til `(t) => t` ga fortsatt grønne tester. Konsekvens hvis koblingen glir:
+ * enhver innrullert person kunne lest sentrene og kalt `executive.cancel_task` (klasse B, uten step-up).
+ *
+ * Nå: `ownerPredicate(authority)` er eneste sted predikatet finnes, bygget fra DEN SAMME `AuthorityConfig`-en som `PolicyGateway` får; `createControlCenterRegistry` er eneste måte produksjonskoden lager
+ * registeret på, og redigereren (`scanForSecrets`) er FAST der - den er ikke en parameter, så `main.ts` kan ikke overstyre den (registeret avviser i tillegg enhver redigerer som ikke redigerer,
+ * `isEffectiveRedactor`). Wiring-testen (`wph0-control-wiring.test.ts`) leser `main.ts` som tekst og kjører ikke-eier-identiteter mot registeret.
+ */
+export function ownerPredicate(authority: AuthorityConfig): (identity: IdentityContext) => boolean {
+  return (identity) => resolveAuthorityMode(authority, identity) === "SOVEREIGN";
+}
+
+/** Redigerer hemmeligheter i alle menneskelesbare strenger i en rapport (siste forsvarslinje). FAST: ikke en parameter noe sted. */
+const redactSecrets = (text: string): string => scanForSecrets(text).text;
+
+export interface ControlCenterRegistryWiring {
+  /** Samme eier-autoritetskonfigurasjon som `PolicyGateway` (ett objekt i `main.ts`). Ingen redigerer og ingen eier-predikat kan oppgis her. */
+  authority: AuthorityConfig;
+  now?: () => Date;
+  buildTimeoutMs?: number;
+}
+
+/** Eneste måte produksjonskoden lager kontrollsenter-registeret på. Fail-closed: en eier-konfigurasjon uten eier-person eller uten eier-tenant gir ingen eier (og avvises ved oppstart). */
+export function createControlCenterRegistry(wiring: ControlCenterRegistryWiring): ControlCenterRegistry {
+  const { authority } = wiring;
+  if (typeof authority?.owner_person_id !== "string" || authority.owner_person_id.trim() === "") throw new Error("control_center_authority_missing_owner_person");
+  if (!Array.isArray(authority.owner_tenants) || authority.owner_tenants.length === 0 || authority.owner_tenants.some((t) => typeof t !== "string" || t.trim() === "")) {
+    throw new Error("control_center_authority_missing_owner_tenant");
+  }
+  return new ControlCenterRegistry({
+    isOwner: ownerPredicate(authority),
+    redact: redactSecrets,
+    ...(wiring.now !== undefined ? { now: wiring.now } : {}),
+    ...(wiring.buildTimeoutMs !== undefined ? { buildTimeoutMs: wiring.buildTimeoutMs } : {})
+  });
+}
 
 /**
  * WP-H0 (UA-11 Admin Control Center): ÉN plass der kontrollsentrene kobles til registeret. Hvert senter er en `ControlCenterDefinition` (se `@jarvis/executive` sin `control-center/types.ts`) i sin

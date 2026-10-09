@@ -39,13 +39,38 @@ class ControlCenterTimeoutError extends Error {
 export interface ControlCenterRegistryOptions {
   /**
    * Er identiteten den suverene eieren? FAIL-CLOSED: uten predikat nektes alle. I drift: `resolveAuthorityMode(...) === "SOVEREIGN"` (eier-person, eier-tenant, ingen delegasjon).
+   * Gjennomgang av PR #316 (M-2): produksjonskoden lager registeret KUN via `createControlCenterRegistry` (`apps/api/src/control-center/register.ts`), som bygger predikatet fra den samme
+   * `AuthorityConfig`-en som Policy Gateway bruker - aldri et eget, inline predikat i `main.ts`.
    */
   isOwner?: (identity: IdentityContext) => boolean;
   now?: () => Date;
   /** Maks tid per senterbygging (ms). Standard 7000. Over grensen blir senteret UNKNOWN. */
   buildTimeoutMs?: number;
-  /** Redigerer hemmeligheter i menneskelesbare strenger (se klassekommentaren). Standard: ingen. */
+  /**
+   * Redigerer hemmeligheter i menneskelesbare strenger (se klassekommentaren). Standard: ingen (kun for rene enhetstester av byggerne).
+   * Gjennomgang av PR #316 (M-2): en redigerer som IKKE faktisk redigerer (f.eks. identitetsfunksjonen `(t) => t`) avvises ved konstruksjon (`control_center_redact_not_effective`) - se `isEffectiveRedactor`.
+   * I drift settes den av `createControlCenterRegistry` (`scanForSecrets`) og er ikke en parameter kallerne kan overstyre.
+   */
   redact?: (text: string) => string;
+}
+
+/**
+ * En syntetisk, IKKE-ekte nøkkel i anthropic-format, bygd under kjøring slik at kildekoden ikke inneholder noe som ligner en hemmelighet. Brukes kun av `isEffectiveRedactor`.
+ */
+const REDACTION_CANARY = ["sk", "ant", "Kanarifugl", "0123456789"].join("-");
+
+/**
+ * Selvtest av en redigerer: fjerner den et kjent nøkkelformat fra en tekst? Identitetsfunksjonen og enhver annen redigerer som lar nøkkelen stå består ikke. Registeret krever dette av hver `redact`
+ * det får, slik at «redigeringen er på» ikke bare er en påstand om oppstartskoden (gjennomgang av PR #316, M-2: `redact: (t) => t` i `main.ts` passerte alle tester).
+ */
+export function isEffectiveRedactor(redact: (text: string) => string): boolean {
+  try {
+    const out = redact(`nøkkel ${REDACTION_CANARY} slutt`);
+    // Uavhengig av store/små bokstaver: en «redigerer» som bare endrer skrivemåten på nøkkelen har ikke fjernet den.
+    return typeof out === "string" && !out.toLowerCase().includes(REDACTION_CANARY.toLowerCase());
+  } catch {
+    return false;
+  }
 }
 
 export interface RegisteredControlCenter {
@@ -120,6 +145,7 @@ export class ControlCenterRegistry {
   private readonly buildTimeoutMs: number;
 
   constructor(private readonly options: ControlCenterRegistryOptions = {}) {
+    if (options.redact !== undefined && !isEffectiveRedactor(options.redact)) throw new Error("control_center_redact_not_effective");
     this.now = options.now ?? (() => new Date());
     this.buildTimeoutMs = options.buildTimeoutMs ?? DEFAULT_BUILD_TIMEOUT_MS;
   }

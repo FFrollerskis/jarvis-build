@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
 import { PgApprovalStore } from "@jarvis/core";
-import { ControlCenterRegistry, ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "@jarvis/executive";
-import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway, resolveAuthorityMode } from "@jarvis/policy";
+import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "@jarvis/executive";
+import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { PgTaskQueue, TaskService } from "@jarvis/tasks";
 import { ToolGateway, type SecretProvider } from "@jarvis/tool-gateway";
+import { createControlCenterRegistry } from "../src/control-center/register.ts";
 import { seedTenants, startH0Db, type H0Db } from "./support/h0-db.ts";
 
 /**
@@ -48,7 +49,8 @@ beforeAll(async () => {
   const policy = new PolicyGateway({ devices: new InMemoryDeviceRegistry(), nonces: new PgApprovalStore(db.appPool), killSwitch, authority });
   const taskService = new TaskService(db.appPool, new PgTaskQueue(db.appPool), policy);
   gateway = new ToolGateway(db.appPool, policy, secrets);
-  const registry = new ControlCenterRegistry({ isOwner: (identity) => resolveAuthorityMode(authority, identity) === "SOVEREIGN" });
+  // Gjennomgang av PR #316 (M-2): samme fabrikk og SAMME AuthorityConfig som PolicyGateway over - akkurat som main.ts.
+  const registry = createControlCenterRegistry({ authority });
   const service = new ExecutiveService(gateway, { controlCenters: registry, tasks: { cancel: (identity, taskId) => taskService.cancel(identity, taskId) } });
   for (const tool of executiveToolDefinitions(new ExecutiveTransport(service))) gateway.register(tool);
 }, 240_000);

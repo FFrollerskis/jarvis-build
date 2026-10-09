@@ -29,11 +29,10 @@ import {
   ConfirmationStore,
   runMigrationsAsAdmin,
   runOperationalRetentionSweep,
-  scanForSecrets,
   withTenantTransaction,
   writeAudit
 } from "@jarvis/core";
-import { InfraExecutionGate, KillSwitch, PolicyGateway, createPgInfraModeStore, resolveAuthorityMode } from "@jarvis/policy";
+import { InfraExecutionGate, KillSwitch, PolicyGateway, createPgInfraModeStore, type AuthorityConfig } from "@jarvis/policy";
 import { DeploymentService, DiagnosisService, IncidentService } from "@jarvis/incidents";
 import {
   AiCouncil,
@@ -94,7 +93,7 @@ import {
   DomainPauseRegistry, SituationEngine, SituationsTransport, assertSituationSweepHealthy, runSituationSweepForAllTenants,
   situationsToolDefinitions
 } from "@jarvis/situations";
-import { ControlCenterRegistry, ExecutiveService, ExecutiveTransport, executiveToolDefinitions, renderSelfDiagnosisNo, type SelfDiagnosis } from "@jarvis/executive";
+import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions, renderSelfDiagnosisNo, type SelfDiagnosis } from "@jarvis/executive";
 import { GovernanceService, GovernanceTransport, governanceToolDefinitions } from "@jarvis/governance";
 import { OwnerControlsService, OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
 import {
@@ -123,7 +122,7 @@ import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
 import { createEvolutionReportProvider } from "./evolution-source.ts";
 import { ChatJobs, MAX_ACTIVE_JOBS, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
-import { registerControlCenters } from "./control-center/register.ts";
+import { createControlCenterRegistry, registerControlCenters } from "./control-center/register.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
 
@@ -226,6 +225,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       error: err instanceof Error ? err.message : String(err)
     }));
   }), 30_000).unref();
+  // Gjennomgang av PR #316 (M-2): ÉN eier-autoritetskonfigurasjon, delt av Policy Gateway og kontrollsentrene (eier-porten og Authority Center), så de aldri kan være uenige om hvem eieren er.
+  const ownerAuthority: AuthorityConfig = { owner_person_id: owner.owner_person_id, owner_tenants: [owner.tenant_id] };
   const policy = new PolicyGateway({
     devices: deviceRegistry,
     nonces: new PgApprovalStore(pool),
@@ -241,10 +242,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // SCOPED-modus og krevde approval for owners D-kall. A-D er risikoklasser -
     // for owner gir SOVEREIGN autonom utførelse; sikkerheten ligger i D-pipelinen
     // (preflight/readback/evidens/recovery) + owner-kontrollene, ikke approval.
-    authority: {
-      owner_person_id: owner.owner_person_id,
-      owner_tenants: [owner.tenant_id]
-    }
+    authority: ownerAuthority
   });
   const queue = new PgTaskQueue(pool);
   const worker = new InProcessWorker(queue);
@@ -656,16 +654,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     persist: (value) => toolGateway.setSecret("JARVIS_MICROSOFT_REFRESH_TOKEN", value)
   });
   // WP-H0 (UA-11 Admin Control Center): registeret over de ti kontrollsentrene. EIER-KUN og fail-closed: kun den suverene eieren (eier-person i eier-tenant, ingen delegasjon) får rapporter, samme
-  // `resolveAuthorityMode` som Policy Gateway bruker. `scanForSecrets` kjøres som siste forsvarslinje over alle menneskelesbare strenger. Sentrene leser kun eksisterende kilder; de skriver ingenting.
-  const controlCenters = new ControlCenterRegistry({
-    isOwner: (identity) => resolveAuthorityMode({ owner_person_id: owner.owner_person_id, owner_tenants: [owner.tenant_id] }, identity) === "SOVEREIGN",
-    redact: (text) => scanForSecrets(text).text
-  });
+  // `resolveAuthorityMode` og SAMME `ownerAuthority` som Policy Gateway. Fabrikken (control-center/register.ts) eier både eier-predikatet og redigeringen av hemmeligheter - ingen av dem er en parameter her
+  // (gjennomgang av PR #316, M-2; låst av wph0-control-wiring.test.ts). Sentrene leser kun eksisterende kilder; de skriver ingenting.
+  const controlCenters = createControlCenterRegistry({ authority: ownerAuthority });
   // WP-H0 (AI Center): ÉN delt begrenser for AI-rådets automatiske trigger - samme instans i chatten (`ConversationEngine`) og i kontrollsenteret, så tellerne som vises er de som faktisk håndheves.
   const councilAutoLimiter = new CouncilAutoTriggerLimiter(envInt("JARVIS_COUNCIL_AUTO_MAX_PER_HOUR", 3, { min: 1, max: 100 }));
   registerControlCenters(controlCenters, {
     pool, env: process.env, toolGateway, ownerControls, meshStatus: () => gateway.meshStatus(),
-    authority: { owner_person_id: owner.owner_person_id, owner_tenants: [owner.tenant_id] }, killSwitch, infraGate,
+    authority: ownerAuthority, killSwitch, infraGate,
     modelGateway: gateway, runRate: new RunRateService(pool), councilLimiter: councilAutoLimiter, evolutionReport: evolutionReports, maxActiveJobs: MAX_ACTIVE_JOBS
   });
   for (const tool of firstWaveTools({
