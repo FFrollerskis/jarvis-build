@@ -21,7 +21,7 @@ import {
 import { BudgetGuard, type BudgetConfig, DEFAULT_BUDGET } from "./budget-guard.ts";
 import { classifyCompletionOutcome, computeAdaptiveRetryMaxTokens, type CompletionOutcome } from "./completion-outcome.ts";
 import { CapabilityRegistry, type ModelCapability } from "./capability-registry.ts";
-import { ProviderHealthTracker, type ProviderHealthState } from "./provider-health.ts";
+import { ProviderHealthTracker, type ProviderHealthDetail, type ProviderHealthState } from "./provider-health.ts";
 import { AiRouter, type RoutePlan } from "./router.ts";
 import { assertExplicitPricing, costOre as computeCostOre, DEFAULT_PRICING, type PricingTable } from "./pricing.ts";
 import { modelCatalogFromEnv, type CatalogModel, type ModelTier } from "./model-catalog.ts";
@@ -156,6 +156,24 @@ export interface GatewayOptions {
    * Udefinert = ingen venting (uendret oppførsel, f.eks. i worker-prosessen som ikke ser API-ets chat).
    */
   priorityGate?: InteractivePriorityGate;
+  /**
+   * WP-H0 / JARVIS-087: eierens pause eller tilbakekall av en MODELLLEVERANDØR. Kilden leses LIVE ved hvert kall (varig og delt mellom api og worker), så en pause virker umiddelbart og uten omstart.
+   * Utelatt = ingen leverandør er pauset (uendret oppførsel, f.eks. i tester). Se `ProviderPauseSource`.
+   */
+  providerPause?: ProviderPauseSource;
+}
+
+/**
+ * WP-H0 / JARVIS-087 (UA-11): eierens pause eller tilbakekall av en MODELLLEVERANDØR - kontrollsenterets «stopp enhver leverandør fra én flate». Implementasjonen (apps/api) leser den varige, delte
+ * eier-tilstanden (`owner_control_state`) og returnerer navnene på leverandørene som IKKE skal brukes akkurat nå. Gatewayen behandler en pauset leverandør som «ikke konfigurert» i ALL ruting:
+ * ingen kandidat i AUTO/LOCAL/CHEAP/..., ikke som eksplisitt eier-override (`provider`), ikke i en preferanseliste, ikke som fallback, critic eller Council-medlem. Sensitivitetsreglene røres ikke:
+ * SECRET_RESTRICTED slipper fortsatt kun lokale leverandører, så en pauset LOKAL leverandør gir fail-closed for slike turer - aldri en sky-fallback.
+ *
+ * Fail-closed ved lesefeil: kan tilstanden ikke leses og ingen tidligere lesing finnes (første kall etter oppstart), nektes kallet (`not_configured`). Har en lesing lyktes tidligere, brukes den siste kjente
+ * tilstanden (en pause kan uansett ikke endres mens databasen er utilgjengelig) og feilen logges.
+ */
+export interface ProviderPauseSource {
+  pausedProviders(): Promise<ReadonlySet<string>>;
 }
 
 /**
@@ -215,6 +233,20 @@ export interface MeshProviderStatus {
   success: number;
   failures: number;
   avg_latency_ms?: number;
+  /** WP-H0: `true` når eieren har pauset/tilbakekalt leverandøren (siste kjente tilstand i DENNE prosessen; oppdateres ved hvert modellkall). `state` er helsen, uavhengig av pausen. */
+  paused?: boolean;
+}
+
+/** WP-H0 (JARVIS-087): kontrollsenterets rike visning av én leverandør. Ingen feiltekst - kun kategori (se `ProviderHealthDetail`). */
+export interface ProviderOverviewRow {
+  provider: string;
+  model: string;
+  locality: "local" | "cloud";
+  /** Gratis-tier-hostet sky (kun `gemma_hosted`): krever eksplisitt lav sensitivitet. */
+  hosted_free_tier: boolean;
+  /** Adapteren har nøkkel/URL (`available()`), uavhengig av en eventuell eier-pause. */
+  configured: boolean;
+  health: ProviderHealthDetail;
 }
 
 /**
@@ -269,6 +301,12 @@ function replayResultAsStreamEvents(onEvent: StreamHandler, r: ModelResult): voi
   deliverStreamEvent(onEvent, { type: "finish", finish_reason: r.finish_reason ?? "stop" });
 }
 
+/** WP-H0: logger kun feilens klasse (og SQLSTATE), aldri meldingen - en tilkoblingsfeil kan inneholde verter eller tilkoblingsdetaljer. */
+function pauseReadFailure(err: unknown): { error: string; code?: string } {
+  const code = (err as { code?: unknown } | null)?.code;
+  return { error: err instanceof Error ? err.name : "unknown", ...(typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? { code } : {}) };
+}
+
 export class ModelGateway {
   private readonly guard: BudgetGuard;
   private readonly callTimestamps = new Map<string, number[]>();
@@ -283,6 +321,9 @@ export class ModelGateway {
   /** Runtime-evidens for /status (§25): satt først når hendelsen faktisk har skjedd. */
   private crossProviderFallbackSeen = false;
   private criticRunSeen = false;
+  /** WP-H0: siste LESTE eier-pause (se `ProviderPauseSource`). Oppdateres ved hvert modellkall; synkrone lesere (`listConfiguredProviders`, `meshStatus`) bruker den. */
+  private pausedSnapshot: ReadonlySet<string> = new Set();
+  private pauseStateKnown = false;
 
   constructor(private readonly opts: GatewayOptions) {
     this.guard = new BudgetGuard(opts.pool, opts.budget ?? DEFAULT_BUDGET);
@@ -312,15 +353,50 @@ export class ModelGateway {
 
   /** D-106: providernavn med `available()===true` akkurat nå - AI Council/Collaboration bruker denne til å avgjøre kandidater/`unavailable_members` FØR kall gjøres. */
   listConfiguredProviders(): string[] {
-    return this.opts.providers.filter((p) => p.available()).map((p) => p.name);
+    return this.opts.providers.filter((p) => p.available() && !this.pausedSnapshot.has(p.name)).map((p) => p.name);
   }
 
-  private providerRuntimes(): Map<string, { configured: boolean; model: string }> {
-    const map = new Map<string, { configured: boolean; model: string }>();
+  /**
+   * `configured` = kan brukes NÅ (nøkkel/URL satt OG ikke pauset av eieren); `available` = adapteren har nøkkel/URL uavhengig av pausen (helse og visning); `paused` = eierens pause.
+   * Ruteren ser kun `configured`/`paused`/`model`.
+   */
+  private providerRuntimes(paused: ReadonlySet<string> = this.pausedSnapshot): Map<string, { configured: boolean; available: boolean; paused: boolean; model: string }> {
+    const map = new Map<string, { configured: boolean; available: boolean; paused: boolean; model: string }>();
     for (const p of this.opts.providers) {
-      map.set(p.name, { configured: p.available(), model: p.model ?? "ukjent" });
+      const available = p.available();
+      const isPaused = paused.has(p.name);
+      map.set(p.name, { configured: available && !isPaused, available, paused: isPaused, model: p.model ?? "ukjent" });
     }
     return map;
+  }
+
+  /**
+   * WP-H0: leser eierens pause LIVE (se `ProviderPauseSource`). Uten kilde: ingen er pauset. Lesefeil: siste kjente tilstand hvis en lesing har lyktes, ellers fail-closed (`not_configured`).
+   * Kalles i starten av hvert modellkall, så pausen virker fra neste kall - også mellom rundene i en verktøyløkke - uten omstart.
+   */
+  private async livePauses(): Promise<ReadonlySet<string>> {
+    const source = this.opts.providerPause;
+    if (source === undefined) return this.pausedSnapshot;
+    try {
+      const paused = await source.pausedProviders();
+      this.pausedSnapshot = paused;
+      this.pauseStateKnown = true;
+      return paused;
+    } catch (err) {
+      if (this.pauseStateKnown) {
+        console.error(JSON.stringify({ msg: "provider_pause_read_failed_using_last_known", ...pauseReadFailure(err) }));
+        return this.pausedSnapshot;
+      }
+      console.error(JSON.stringify({ msg: "provider_pause_read_failed_fail_closed", ...pauseReadFailure(err) }));
+      throw new ProviderError("router", "not_configured", "provider_pause_state_unavailable");
+    }
+  }
+
+  /** WP-H0: en eksplisitt `provider` (eier-override, verktøyrute, Council-medlem) som er pauset feiler som `not_configured` for DEN leverandøren - så eksisterende «skyen er nede → lokal modell»-fallback (D-431/D-449) gjelder også en pause. */
+  private assertNotPaused(provider: string | undefined, paused: ReadonlySet<string>): void {
+    if (provider !== undefined && paused.has(provider)) {
+      throw new ProviderError(provider, "not_configured", `${provider}_paused_by_owner`);
+    }
   }
 
   /**
@@ -412,6 +488,8 @@ export class ModelGateway {
       throw new BudgetExceededError(budget.level, budget.spent_ore);
     }
 
+    const paused = await this.livePauses();
+    this.assertNotPaused(input.provider, paused);
     const routerPlan = this.router.plan(
       {
         ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
@@ -429,7 +507,7 @@ export class ModelGateway {
           : {}),
         needs_structured: Boolean(input.request.structured_schema)
       },
-      this.providerRuntimes()
+      this.providerRuntimes(paused)
     );
     const plan = await this.applyModelAdvice(input, routerPlan, budget.level, traceId);
 
@@ -468,7 +546,7 @@ export class ModelGateway {
 
     for (const candidate of plan.candidates) {
       const adapter = this.byName.get(candidate.provider);
-      if (!adapter || !adapter.available()) {
+      if (!adapter || !adapter.available() || this.pausedSnapshot.has(candidate.provider)) {
         continue;
       }
       // D-399: per-kall modell for DENNE kandidaten (kun når rådgiveren valgte en annen enn adapterens standard).
@@ -734,6 +812,8 @@ export class ModelGateway {
     if (budget.level === "hard_blocked" || budget.level === "needs_approval") {
       throw new BudgetExceededError(budget.level, budget.spent_ore);
     }
+    const paused = await this.livePauses();
+    this.assertNotPaused(input.provider, paused);
     const routerPlan = this.router.plan(
       {
         ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
@@ -756,7 +836,7 @@ export class ModelGateway {
           : {}),
         needs_structured: Boolean(input.request.structured_schema)
       },
-      this.providerRuntimes()
+      this.providerRuntimes(paused)
     );
     const plan = await this.applyModelAdvice(input, routerPlan, budget.level, traceId);
     return this.executePlan(input, plan, traceId, started, budget.level, false, undefined, { onEvent, ...(signal ? { signal } : {}) });
@@ -903,7 +983,7 @@ export class ModelGateway {
   /** Critic (§18-§19): separat modellkjøring, egen kostrad, aldri koblet til D-godkjenning. */
   private async runCritic(input: CompleteInput, primary: ModelResult, traceId: string): Promise<void> {
     try {
-      const runtimes = this.providerRuntimes();
+      const runtimes = this.providerRuntimes(this.pausedSnapshot);
       // Foretrekk annen provider enn primær for uavhengig blikk; ellers samme.
       const others = new Map([...runtimes].filter(([name, rt]) => rt.configured && name !== primary.provider));
       const pool = others.size > 0 ? others : runtimes;
@@ -954,7 +1034,8 @@ export class ModelGateway {
   /** Kompakt mesh-status for /status og /ai (§37-§38). Ingen secrets. */
   meshStatus(): MeshStatus {
     const runtimes = this.providerRuntimes();
-    const snapshot = this.health.snapshot(new Map([...runtimes].map(([k, v]) => [k, v.configured])));
+    // Helsen (`state`) ignorerer pausen: den sier hvordan leverandøren faktisk har det. Hvem som kan brukes (ruter, fallback) regnes med `configured` (= tilgjengelig og ikke pauset).
+    const snapshot = this.health.snapshot(new Map([...runtimes].map(([k, v]) => [k, v.available])));
     return {
       providers: [...runtimes].map(([name, rt]) => {
         const s = snapshot[name] as NonNullable<(typeof snapshot)[string]>;
@@ -964,7 +1045,8 @@ export class ModelGateway {
           state: s.state,
           success: s.success,
           failures: s.failures,
-          ...(s.avg_latency_ms !== undefined ? { avg_latency_ms: s.avg_latency_ms } : {})
+          ...(s.avg_latency_ms !== undefined ? { avg_latency_ms: s.avg_latency_ms } : {}),
+          ...(rt.paused ? { paused: true } : {})
         };
       }),
       router: meshRouterState([...runtimes].map(([name, rt]) => ({ configured: rt.configured, state: (snapshot[name] as NonNullable<(typeof snapshot)[string]>).state }))),
@@ -975,6 +1057,36 @@ export class ModelGateway {
           : "LOGIC_ONLY",
       critic: this.criticRunSeen ? "VERIFIED" : "READY_SELECTIVE"
     };
+  }
+
+  /**
+   * WP-H0 (JARVIS-087): kontrollsenterets rike visning av hver registrert leverandør (lokalitet, konfigurasjon, helse inkl. krets). Ren lesing av gatewayens egen bokføring - ingen nettverkskall, ingen
+   * feiltekster. Eier-pausen er IKKE med her: kontrollsenteret leser den LIVE fra den varige tilstanden (en pause satt av den andre prosessen er da synlig umiddelbart).
+   */
+  providerOverview(): ProviderOverviewRow[] {
+    return this.opts.providers.map((p) => {
+      const available = p.available();
+      const model = p.model ?? "ukjent";
+      const profile = this.registry.profileOrGeneric(p.name, model);
+      return {
+        provider: p.name,
+        model,
+        locality: profile.locality,
+        hosted_free_tier: profile.hosted_free_tier === true,
+        configured: available,
+        health: this.health.detail(p.name, available)
+      };
+    });
+  }
+
+  /** WP-H0: modellrådgiverens modus (off/shadow/active, D-399) - kontrollsenteret viser den. */
+  get routingAdvisorMode(): "off" | "shadow" | "active" {
+    return this.advisorMode;
+  }
+
+  /** WP-H0: har en fallback mellom ULIKE leverandører faktisk skjedd i denne prosessen (§25)? */
+  get crossProviderFallbackVerified(): boolean {
+    return this.crossProviderFallbackSeen;
   }
 
   /**
