@@ -119,7 +119,7 @@ import { ConversationEngine } from "./conversation.ts";
 import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
 import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
-import { createRadarState } from "./evolution-radar.ts";
+import { createRadarState, radarSweepFailures } from "./evolution-radar.ts";
 import { createEvolutionReportProvider } from "./evolution-source.ts";
 import { ChatJobs, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
@@ -1622,16 +1622,11 @@ porter: se docs/RUNTIME_GATES.md`;
     runMemoryResensitizeSweepForAllTenants(pool, { mode: resensitizeModeFromEnv(process.env["JARVIS_MEMORY_RESENSITIZE"]) }).then(rememberResensitize).then((summary) => assertNoSweepFailures("memory-resensitize-sweep", summary.failed))
   );
   // EV-3 (D-452): radar-sveip av KILDER EIEREN SELV HAR VALGT (`JARVIS_RADAR_SOURCES`) - inert uten dem (ingen nettverkskall). Hvert svar går gjennom sikkerhetssonen (ubetrodd forskning, karantene ved mistenkelig innhold);
-  // kun status per kilde beholdes i minnet, aldri innholdet. Ett sveip kort etter oppstart (DailyScheduler husker at dagens kjøring er gjort, men det beholdes ikke over en omstart).
+  // kun status per kilde beholdes i minnet, aldri innholdet. L6 (gjennomgang av PR #313): sveipet kjører KUN via den persisterte DailyScheduler, så det går høyst én gang per døgn også ved omstart/crash-loop (tidligere
+  // et ubetinget sveip 60 s etter HVER oppstart = tung trafikk mot kildene). Prisen er ærlig: statusen holdes i minnet, så etter en omstart står EV-3 som «ikke kjørt ennå» til neste planlagte kjøring.
+  // Feiler ALLE kilder (nett/DNS nede) kaster sveipet via assertNoSweepFailures (D-442): nytt forsøk med backoff, og synlig oppgitt til slutt. En delvis svikt er et funn i EV-3, ikke en feilet kjøring (et nytt forsøk ville hentet de friske kildene på nytt).
   if (evolutionRadar.configured > 0) {
-    const radarSweep = async (): Promise<void> => {
-      const result = await evolutionRadar.run();
-      console.log(JSON.stringify({ msg: "evolution_radar_sweep_done", configured: result.configured, ok: result.ok, quarantined: result.quarantined, failed: result.failed, security_events: result.security_events }));
-    };
-    new DailyScheduler(pool, "evolution-radar-sweep", envHour("JARVIS_RADAR_SWEEP_HOUR", 6)).start(radarSweep);
-    setTimeout(() => {
-      radarSweep().catch((err: unknown) => console.error(JSON.stringify({ msg: "evolution_radar_boot_sweep_failed", error: (err as Error).message.slice(0, 200) })));
-    }, 60_000).unref();
+    new DailyScheduler(pool, "evolution-radar-sweep", envHour("JARVIS_RADAR_SWEEP_HOUR", 6)).start(() => evolutionRadar.run().then((summary) => { console.log(JSON.stringify({ msg: "evolution_radar_sweep_done", configured: summary.configured, ok: summary.ok, quarantined: summary.quarantined, failed: summary.failed, security_events: summary.security_events })); return summary; }).then((summary) => assertNoSweepFailures("evolution-radar-sweep", radarSweepFailures(summary, owner.tenant_id))));
   }
   // D-386: nattlig rekompilering av den alltid-tilstede eierprofilen per space (deterministisk, ingen LLM).
   new DailyScheduler(

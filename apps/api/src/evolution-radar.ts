@@ -257,6 +257,15 @@ export async function runRadarSweep(deps: RadarSweepDeps): Promise<RadarSweepRes
 }
 
 /** Prosess-lokal holder for siste sveip (rapporten leser den; sveipet kjører planlagt, aldri fra rapporten). */
+/**
+ * Hva en planlagt kjøring skal feile høyt på (D-442, L6): KUN når ALLE kilder feilet - da er nett/DNS eller konfigurasjonen nede, og scheduleren kan prøve igjen med backoff og til slutt gi opp synlig. En
+ * delvis svikt (noen kilder hentet) er et funn i EV-3-seksjonen, ikke en feilet kjøring. Feilen bærer kun kildenavn (eierens eget) og feilkoder - aldri innhold, URL eller meldingstekst.
+ */
+export function radarSweepFailures(result: RadarSweepResult, tenantId: string): Array<{ tenant_id: string; scope: string; error: string }> {
+  if (result.configured === 0 || result.failed === 0 || result.ok + result.quarantined > 0) return [];
+  return result.per_source.filter((s) => s.status === "fetch_failed").map((s) => ({ tenant_id: tenantId, scope: s.name, error: s.findings.join(",") || "fetch_failed" }));
+}
+
 export interface RadarState {
   configured: number;
   rejected: number;
