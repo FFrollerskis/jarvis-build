@@ -568,18 +568,21 @@ export async function readinessFacts(ctx: EvolutionContext): Promise<ReadinessFa
   const connectors = connectorsRead.ok && Array.isArray(connectorsRead.v) && connectorsRead.v.length > 0 ? connectorsRead.v : null;
   // Frys: KJENT på hvis en målt årsak finnes; ellers ukjent hvis noe ikke kunne måles; kun «av» når alle innsignal er målt og friske.
   const frozenForKnownReason = freeze.reasons.some((r) => !FREEZE_UNKNOWN_REASONS.includes(r));
+  // Jobb-runner-variablene går kun til worker-containeren (L6): synlige her (lokal kjøring) gir et kjent svar, ellers er faktumet UKJENT og eieren erklærer `JOB_RUNNER_CONFIGURED`.
+  const runnerVars = ["JARVIS_JOB_RUNNER", "JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY"] as const;
+  const runnerVisible = runnerVars.every((k) => env[k] !== undefined);
   return {
     constitution_verified: ev0 === null ? null : ev0.constitution.status === "verified",
     ledger_ok: ev0 === null ? null : ev0.ledger.status === "ok",
     change_freeze_off: frozenForKnownReason ? false : freeze.frozen ? null : true,
     proven_connectors: connectors === null ? null : connectors.filter((c) => c.configured && c.test_method === "live" && c.health?.state === "healthy").length,
-    job_runner_configured: env["JARVIS_JOB_RUNNER"] === "container" && ["JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY"].every((k) => (env[k] ?? "").trim() !== ""),
+    job_runner_configured: runnerVisible ? env["JARVIS_JOB_RUNNER"] === "container" && runnerVars.slice(1).every((k) => (env[k] ?? "").trim() !== "") : null,
     declared_gates: parseDeclaredGates(env["JARVIS_EV_VERIFIED_GATES"])
   };
 }
 
 const MEASURED_FACT_LABEL: Readonly<Record<MeasuredFact, string>> = {
-  constitution_verified: "konstitusjonen", ledger_ok: "endringsregisteret", change_freeze_off: "change freeze", proven_connectors: "beviste connectorer"
+  constitution_verified: "konstitusjonen", ledger_ok: "endringsregisteret", change_freeze_off: "change freeze", proven_connectors: "beviste connectorer", job_runner_configured: "jobb-runneren (worker-oppsettet er ikke synlig for API-et)"
 };
 
 export async function dormantSection(ctx: EvolutionContext): Promise<EvolutionSection> {

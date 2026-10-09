@@ -209,7 +209,10 @@ describe("M2: reviewerens reproduksjoner, én og én", () => {
     expect(text).toMatch(/EV-22 [^\n]*mangler \d+ \(ukjent, kunne ikke måles: change freeze\)/);
     expect(text).toContain("Innsignal som ikke kunne måles");
     expect(s.summary_no).toContain("0 har alle tekniske krav oppfylt");
-    expect(s.summary_no).toContain("1 innsignal kunne ikke måles");
+    // To ukjente innsignal: change freeze (rammer alle deler) og jobb-runneren (rammer bare EV-6: env uten JARVIS_JOB_* - API-et ser ikke worker-oppsettet, L6).
+    expect(s.summary_no).toContain("2 innsignal kunne ikke måles");
+    expect(text).toMatch(/EV-6 [^\n]*\(ukjent, kunne ikke måles: change freeze, jobb-runneren/);
+    expect(text).not.toMatch(/EV-22 [^\n]*jobb-runneren/);
   });
 
   it("ukjent er noe annet enn kjent-dårlig i de sovende delene: en usignert konstitusjon er «mangler» uten «ukjent»", async () => {
@@ -334,5 +337,37 @@ describe("L2: rapporten lekker ikke rå feilmelding", () => {
     for (const fragment of SECRET_FRAGMENTS) expect(json, fragment).not.toContain(fragment);
     expect(byEv(report.sections, "EV-3").summary_no).toBe("Ikke målt: målingen feilet (Error/ECONNREFUSED)");
     expect(report.sections.at(-1)!.summary_no).toBe("Ikke målt: målingen feilet (Error/ECONNREFUSED)");
+  });
+});
+
+/**
+ * L6 (gjennomgang av PR #313): `JARVIS_JOB_*` går kun til worker-containeren. I API-et er «jobb-runner konfigurert» derfor UKJENT (ikke «nei») med mindre variablene tilfeldigvis er synlige (lokal kjøring),
+ * og eieren erklærer det med `JOB_RUNNER_CONFIGURED` etter å ha verifisert det på verten.
+ */
+describe("L6: jobb-runner-faktumet når API-et ikke ser worker-oppsettet", () => {
+  const RUNNER = { JARVIS_JOB_RUNNER: "container", JARVIS_JOB_IMAGE: "jarvis-job@sha256:abc", JARVIS_JOB_NETWORK: "jarvis-jobs", JARVIS_JOB_EGRESS_PROXY: "http://egress:3128" };
+  const factFor = async (env: Record<string, string>): Promise<boolean | null> => {
+    const w = await healthyWorld();
+    return (await readinessFacts(ctxOf(w.deps({ env })))).job_runner_configured;
+  };
+
+  it("ikke synlig (normalt i produksjon) → ukjent; delvis synlig → ukjent; synlig og komplett → ja; synlig men ikke container/ufullstendig → nei", async () => {
+    expect(await factFor({})).toBeNull();
+    expect(await factFor({ JARVIS_JOB_RUNNER: "container", JARVIS_JOB_IMAGE: "x" })).toBeNull();
+    expect(await factFor(RUNNER)).toBe(true);
+    expect(await factFor({ ...RUNNER, JARVIS_JOB_RUNNER: "" })).toBe(false);
+    expect(await factFor({ ...RUNNER, JARVIS_JOB_RUNNER: "process" })).toBe(false);
+    expect(await factFor({ ...RUNNER, JARVIS_JOB_EGRESS_PROXY: "  " })).toBe(false);
+  });
+
+  it("EV-6 uten synlig oppsett: «mangler … (ukjent: jobb-runneren)» - og kun eierens erklæring JOB_RUNNER_CONFIGURED (i tillegg til D-32) gjør den klar", async () => {
+    const w = await healthyWorld();
+    const lineOf = async (gates: string): Promise<string> => (await dormantSection(ctxOf(w.deps({ env: { JARVIS_EV_VERIFIED_GATES: gates } })))).findings.find((f) => f.startsWith("EV-6 "))!;
+    expect(await lineOf("D-32")).toMatch(/mangler 1 \(ukjent, kunne ikke måles: jobb-runneren/);
+    expect(await lineOf("D-32,JOB_RUNNER_CONFIGURED")).toContain("alle tekniske krav er oppfylt - klar for en navngitt D-beslutning");
+    expect(await lineOf("JOB_RUNNER_CONFIGURED")).toMatch(/mangler 1 - Worker-isolasjon er verifisert/);
+    // Synlig og komplett: kravet er målt oppfylt uten erklæring.
+    const measured = await dormantSection(ctxOf(w.deps({ env: { JARVIS_EV_VERIFIED_GATES: "D-32", ...RUNNER } })));
+    expect(measured.findings.find((f) => f.startsWith("EV-6 "))).toContain("klar for en navngitt D-beslutning");
   });
 });

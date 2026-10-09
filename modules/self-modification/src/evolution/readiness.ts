@@ -10,11 +10,11 @@
 export type DormantEv = "EV-6" | "EV-11" | "EV-13" | "EV-14" | "EV-15" | "EV-18" | "EV-20" | "EV-22" | "EV-23";
 
 /** Porter som kan erklæres verifisert av eieren (aldri utledet av kode): `JARVIS_EV_VERIFIED_GATES=D-32,OFFSITE_RESTORE,...` */
-export const EXTERNAL_GATES = ["D-32", "OFFSITE_RESTORE", "ADMIN_CONTROL_CENTER", "UA-10_LIVE", "OUTCOME_TRACKING", "PERSONALITY_SLIDERS_WIRED", "EXPRESSION_STATE_WIRED", "CONNECTOR_FACTORY"] as const;
+export const EXTERNAL_GATES = ["D-32", "OFFSITE_RESTORE", "ADMIN_CONTROL_CENTER", "UA-10_LIVE", "OUTCOME_TRACKING", "PERSONALITY_SLIDERS_WIRED", "EXPRESSION_STATE_WIRED", "CONNECTOR_FACTORY", "JOB_RUNNER_CONFIGURED"] as const;
 export type ExternalGate = (typeof EXTERNAL_GATES)[number];
 
 /** Innsignalene som måles i kjøretiden og derfor kan være UKJENT (`null`). Resten (`job_runner_configured`, `declared_gates`) kommer fra eierens egen konfigurasjon og er alltid kjent. */
-export type MeasuredFact = "constitution_verified" | "ledger_ok" | "change_freeze_off" | "proven_connectors";
+export type MeasuredFact = "constitution_verified" | "ledger_ok" | "change_freeze_off" | "proven_connectors" | "job_runner_configured";
 
 export interface ReadinessFacts {
   /** Safety Constitution verifisert (signatur + festet nøkkel) - fra oppstartssjekken. `null` = ukjent. */
@@ -25,8 +25,11 @@ export interface ReadinessFacts {
   change_freeze_off: boolean | null;
   /** Antall tilkoblinger som er konfigurert, har live-test og siste helse «healthy» (beviste connectorer). `null` = ukjent (registeret kunne ikke leses). */
   proven_connectors: number | null;
-  /** Er jobb-container-runneren konfigurert i denne kjøringen (`JARVIS_JOB_RUNNER=container` + gyldig image/nettverk/proxy)? Konfigurert er ikke det samme som verifisert (D-32). */
-  job_runner_configured: boolean;
+  /**
+   * Er jobb-container-runneren konfigurert (`JARVIS_JOB_RUNNER=container` + image/nettverk/proxy)? Konfigurert er ikke det samme som verifisert (D-32). Variablene går kun til worker-containeren (L6, gjennomgang av PR #313),
+   * så API-et ser dem normalt ikke: da er faktumet `null` (UKJENT) og kravet oppfylles i stedet av eierens erklæring `JOB_RUNNER_CONFIGURED`.
+   */
+  job_runner_configured: boolean | null;
   /** Porter eieren har erklært verifisert. */
   declared_gates: ReadonlySet<string>;
 }
@@ -55,7 +58,10 @@ export const READINESS: Readonly<Record<DormantEv, { title_no: string; why_dorma
     requirements: [
       ...BASE,
       gate("D-32", "Worker-isolasjon er verifisert på ekte vert (D-32: ressurs-/nettverksisolasjon, ekte branch/PR)"),
-      { id: "job_runner_configured", label_no: "Jobb-container-runneren er konfigurert (JARVIS_JOB_RUNNER=container)", met: (f) => f.job_runner_configured }
+      {
+        id: "job_runner_configured", label_no: "Jobb-container-runneren er konfigurert (JARVIS_JOB_RUNNER=container; API-et ser ikke worker-oppsettet - erklær JOB_RUNNER_CONFIGURED når du har verifisert det på verten)",
+        met: (f) => f.job_runner_configured === true || f.declared_gates.has("JOB_RUNNER_CONFIGURED"), needs: ["job_runner_configured"]
+      }
     ]
   },
   "EV-11": {

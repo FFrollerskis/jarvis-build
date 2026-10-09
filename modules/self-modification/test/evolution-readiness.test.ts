@@ -44,6 +44,20 @@ describe("evaluateReadiness", () => {
     expect(evaluateReadiness("EV-6", facts({ job_runner_configured: true, declared_gates: new Set(["D-32"]) })).ready_for_owner_decision).toBe(true);
   });
 
+  it("L6: API-et ser ikke worker-oppsettet - «jobb-runner konfigurert» er da UKJENT (null), ikke «nei», og eierens erklæring JOB_RUNNER_CONFIGURED oppfyller kravet", () => {
+    const unknown = evaluateReadiness("EV-6", facts({ job_runner_configured: null, declared_gates: new Set(["D-32"]) }));
+    expect(unknown.ready_for_owner_decision).toBe(false);
+    expect(unknown.missing.map((m) => [m.id, m.unknown])).toEqual([["job_runner_configured", true]]);
+    expect(unknown.unknown_signals).toEqual(["job_runner_configured"]);
+    // Målt «nei» er noe annet enn ukjent.
+    expect(evaluateReadiness("EV-6", facts({ job_runner_configured: false, declared_gates: new Set(["D-32"]) })).missing.map((m) => [m.id, m.unknown])).toEqual([["job_runner_configured", false]]);
+    // Erklæringen oppfyller kravet selv når faktumet er ukjent - men D-32 kreves fortsatt, og aktivering er fortsatt aldri besluttet av kode.
+    const declared = evaluateReadiness("EV-6", facts({ job_runner_configured: null, declared_gates: new Set(["D-32", "JOB_RUNNER_CONFIGURED"]) }));
+    expect(declared).toMatchObject({ ready_for_owner_decision: true, activation_decision: false, unknown_signals: [] });
+    expect(evaluateReadiness("EV-6", facts({ job_runner_configured: null, declared_gates: new Set(["JOB_RUNNER_CONFIGURED"]) })).missing.map((m) => m.id)).toEqual(["gate:D-32"]);
+    expect(parseDeclaredGates("JOB_RUNNER_CONFIGURED, d-32").has("JOB_RUNNER_CONFIGURED")).toBe(true);
+  });
+
   it("EV-18 krever minst tre beviste connectorer (målt) og fabrikkporten (erklært)", () => {
     const gates = new Set(["CONNECTOR_FACTORY"]);
     expect(evaluateReadiness("EV-18", facts({ proven_connectors: 2, declared_gates: gates })).missing.map((m) => m.id)).toEqual(["proven_connectors>=3"]);
@@ -81,13 +95,15 @@ describe("parseDeclaredGates", () => {
  * `missing` med `unknown: true`. (Før rettelsen kunne en kill switch som ikke lot seg lese gi `change_freeze_off: true` og «klar for en navngitt D-beslutning».)
  */
 describe("evaluateReadiness: ukjente innsignal", () => {
-  const MEASURED = ["constitution_verified", "ledger_ok", "change_freeze_off", "proven_connectors"] as const;
+  const MEASURED = ["constitution_verified", "ledger_ok", "change_freeze_off", "proven_connectors", "job_runner_configured"] as const;
   const readyFacts = (over: Partial<ReadinessFacts> = {}): ReadinessFacts => facts({ proven_connectors: 5, job_runner_configured: true, declared_gates: allGates, ...over });
 
   it("hvert målt innsignal som er ukjent (null, undefined eller feil type) hindrer ALLE deler som hviler på det i å bli klare - og activation_decision er fortsatt false", () => {
     for (const key of MEASURED) {
       for (const unknown of [null, undefined, "ja", Number.NaN]) {
-        const verdicts = evaluateAllReadiness(readyFacts({ [key]: unknown } as Partial<ReadinessFacts>));
+        // Erklæringen JOB_RUNNER_CONFIGURED er den bevisste veien rundt et ukjent runner-faktum (L6) og testes for seg selv - her fjernes den for å se det ukjente faktumet alene.
+        const gates = key === "job_runner_configured" ? new Set([...allGates].filter((g) => g !== "JOB_RUNNER_CONFIGURED")) : allGates;
+        const verdicts = evaluateAllReadiness(readyFacts({ [key]: unknown, declared_gates: gates } as Partial<ReadinessFacts>));
         for (const v of verdicts) {
           expect(v.activation_decision, `${key}=${String(unknown)} ${v.ev}`).toBe(false);
           const dependsOn = READINESS[v.ev].requirements.some((r) => r.needs?.includes(key));

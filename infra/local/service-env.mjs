@@ -303,8 +303,10 @@ export const SERVICE_ENV = {
     "JARVIS_API_DRAINS_EXECUTIVE",
     // EV-1 (D-412): bygg-sha og versjon som selvdiagnosen viser (uten dem vises bygget som UKJENT).
     "JARVIS_BUILD_SHA", "JARVIS_VERSION",
-    // WP-B (D-452): evolusjonsobservatoriet (kun lesing) - porter eieren har verifisert, forhåndsgodkjent failover, og jobb-runner-konfigurasjonen (ikke-hemmelige navn) som aktiveringsberedskapen for EV-6 leser.
-    "JARVIS_EV_VERIFIED_GATES", "JARVIS_EV_PREAPPROVED_FAILOVER", "JARVIS_JOB_RUNNER", "JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY",
+    // WP-B (D-452): evolusjonsobservatoriet (kun lesing) - porter eieren har verifisert og forhåndsgodkjent failover. L6 (gjennomgang av PR #313): jobb-runner-variablene (`JARVIS_JOB_RUNNER/IMAGE/NETWORK/EGRESS_PROXY`) går
+    // KUN til worker (se under): API-et utfører ingen kodejobber, og egress-proxyen kan avsløre intern topologi/legitimasjon. Aktiveringsberedskapen for EV-6 ser derfor «jobb-runner konfigurert» som UKJENT i API-et,
+    // og eieren erklærer det med `JOB_RUNNER_CONFIGURED` i `JARVIS_EV_VERIFIED_GATES` når han har verifisert det på verten.
+    "JARVIS_EV_VERIFIED_GATES", "JARVIS_EV_PREAPPROVED_FAILOVER",
     // EV-3 (D-452): radar-kilder eieren selv velger (inert uten) og klokkeslett for det planlagte sveipet.
     "JARVIS_RADAR_SOURCES", "JARVIS_RADAR_SWEEP_HOUR",
     // D-414: «chat først» - bakgrunnsformål venter mens chat pågår (maks / stillhet, ms).
