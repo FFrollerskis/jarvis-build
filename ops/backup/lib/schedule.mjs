@@ -20,13 +20,17 @@ import {
  *  - Observasjon + planlagt drift - aldri en handling i API-prosessen. API-et leser kun den skrivebeskyttede eksporten.
  *
  * Exit-koder (for cron-mail/overvåking): 0 ok/ingenting forfalt · 1 konfig/intern feil · 2 backup feilet · 3 backup er FORFALT (> 1,5 × intervall) uten at dette
- * tikket tok den · 4 restore-verifisering feilet · 5 off-site feilet · (6 = off-site ikke satt opp, kun `offsite-check`).
+ * tikket tok den - eller låsen holdes av et tikk som har gått langt utover sitt budsjett (hengt kjede) · 4 restore-verifisering feilet · 5 off-site feilet ·
+ * (6 = off-site ikke satt opp, kun `offsite-check`).
  */
 export const EXIT = Object.freeze({ OK: 0, USAGE: 1, BACKUP_FAILED: 2, OVERDUE: 3, VERIFY_FAILED: 4, OFFSITE_FAILED: 5, OFFSITE_NOT_CONFIGURED: 6 });
 export const OVERDUE_FACTOR = 1.5;
 export const MAX_OFFSITE_SETS_PER_TICK = 3;
 export const ORPHAN_MAX_AGE_MS = 12 * 3_600_000;
 const VERIFY_MIN_RETRY_MS = 6 * 3_600_000;
+/** Tikk-budsjett når konfigen ikke oppgir et (tester som bygger config for hånd): lengre enn noe legitimt tikk, men endelig. */
+const DEFAULT_TICK_BUDGET_MS = 10 * 3_600_000;
+const WATCHDOG = Symbol("tick-watchdog");
 
 export class ScheduleError extends Error {
   constructor(code, message) {
@@ -314,16 +318,36 @@ export async function runTick(config, deps, env = process.env) {
 
   assertRunnable(config, env);
   mkdirSync(config.stateDir, { recursive: true, mode: 0o700 }); // første kjøring på en ny maskin: mappen for lås + status finnes ikke ennå
+  const budgetMs = config.tickBudgetMs ?? DEFAULT_TICK_BUDGET_MS;
   const lock = deps.acquireLock(config.lockFile, { now, staleMs: config.lockStaleMs, log });
   if (!lock.acquired) {
+    // Review F4: en lås som holdes lenger enn et tikk kan vare (og lenger enn 2 × intervallet) er ikke «et annet tikk som jobber» - det er en hengt kjede. Stille exit 0 hver 15. minutt
+    // var nettopp feilen: backupene stoppet uten at noe varslet. Nå: høylytt feil + exit 3 (cron-mail/overvåking), men aldri noe handling uten låsen.
+    const heldSince = Date.parse(lock.holder?.started_at ?? "");
+    const heldMs = Number.isFinite(heldSince) ? startedMs - heldSince : null;
+    const limitMs = Math.max(2 * config.intervalMs, budgetMs);
+    if (heldMs !== null && heldMs > limitMs) {
+      log("error", "lock_held_too_long", {
+        holder_pid: lock.holder?.pid ?? null, holder_host: lock.holder?.host ?? null, held_hours: Math.round((heldMs / 3_600_000) * 10) / 10, limit_hours: Math.round((limitMs / 3_600_000) * 10) / 10,
+        note: "låsen holdes av et tikk som har gått langt utover sitt tidsbudsjett (hengt disk/nettverksmontering/prosess?) - sjekk holderen og avslutt den, eller slett låsfilen hvis prosessen er borte"
+      });
+      return { exitCode: EXIT.OVERDUE, outcome: "lock_held_too_long", actions: [], failed: [], decisions: {}, newest_set: null, duration_ms: 0 };
+    }
     log("debug", "tick_skipped_lock_held", { reason: lock.reason, holder_pid: lock.holder?.pid ?? null });
     return { exitCode: EXIT.OK, outcome: "skipped_lock_held", actions: [], failed: [], decisions: {}, newest_set: null, duration_ms: 0 };
   }
   const lockBeat = setInterval(() => void lock.touch(), 60_000);
   lockBeat.unref();
+  // Review F4: tikk-dekkende vaktbikkje. Hver enkelt operasjon har egen frist, men uansett hva som henger (en prosess som ikke dør, en disk, en avhengighet) skal ETT tikk aldri holde låsen
+  // utover budsjettet: vaktbikkja gir opp, registrerer feilen på steget som hang, sender /fail, og slipper låsen. Timeren er bevisst IKKE unref'd (da kunne prosessen avslutte stille med exit 0).
+  const guard = { abandoned: false, fire: async () => ({ exitCode: EXIT.USAGE, outcome: "failed", actions: [], failed: ["tick"], decisions: {}, newest_set: null, duration_ms: now().getTime() - startedMs }) };
+  let watchdogTimer;
   try {
-    return await tickBody();
+    const timedOut = new Promise((resolve) => { watchdogTimer = setTimeout(() => resolve(WATCHDOG), budgetMs); });
+    const first = await Promise.race([tickBody(), timedOut]);
+    return first === WATCHDOG ? await guard.fire() : first;
   } finally {
+    clearTimeout(watchdogTimer);
     clearInterval(lockBeat);
     lock.release();
   }
@@ -338,8 +362,9 @@ export async function runTick(config, deps, env = process.env) {
     status.created_at ??= iso(t0);
     status.last_tick_at = iso(t0);
     let storeFailed = false;
+    let stage = "other"; // hvilket steg som kjører nå (for vaktbikkja): backup | offsite | verify | other
 
-    const commit = () => {
+    const writeAll = () => {
       status.updated_at = iso(now());
       try {
         writeJsonAtomic(config.statusFile, status, { mode: 0o600, dirMode: 0o700 });
@@ -360,6 +385,10 @@ export async function runTick(config, deps, env = process.env) {
           log("error", "status_export_failed", { code: err?.code ?? "unknown" });
         }
       }
+    };
+    // Et tikk vaktbikkja har gitt opp skriver ikke lenger (det kunne overskrevet statusen til tikket som har tatt over låsen).
+    const commit = () => {
+      if (!guard.abandoned) writeAll();
     };
     const recordHeartbeat = () => {
       status.heartbeat = { configured: heartbeat.configured, ...heartbeat.last() };
@@ -383,6 +412,23 @@ export async function runTick(config, deps, env = process.env) {
     const decisions = decide(status, readSets());
     const work = decisions.backup.due || decisions.offsite.due || decisions.verify.due;
     if (!work) log("debug", "tick_nothing_due", { decisions });
+    const abandonedResult = () => ({ exitCode: EXIT.USAGE, outcome: "abandoned", actions, failed, decisions, newest_set: null, duration_ms: now().getTime() - startedMs });
+    guard.fire = async () => {
+      guard.abandoned = true;
+      const hung = stage;
+      const minutes = Math.round(budgetMs / 60_000);
+      const why = `tikket brukte mer enn ${minutes} min og ble avbrutt av vaktbikkja (steg: ${hung}) - en hengt prosess, disk eller nettverksmontering?`;
+      log("error", "tick_watchdog_fired", { stage: hung, budget_minutes: minutes });
+      if (hung === "backup") recordBackupFailure(new ScheduleError("backup_timeout", why));
+      else if (hung === "offsite") recordOffsiteFailure(new OffsiteError("offsite_timeout", why));
+      else if (hung === "verify") recordVerifyFailure(new ScheduleError("verify_timeout", why), now().getTime());
+      else failed.push("tick");
+      await heartbeat.fail();
+      recordHeartbeat();
+      writeAll();
+      const exitCode = hung === "backup" ? EXIT.BACKUP_FAILED : hung === "offsite" ? EXIT.OFFSITE_FAILED : hung === "verify" ? EXIT.VERIFY_FAILED : EXIT.USAGE;
+      return { exitCode, outcome: "failed", actions, failed, decisions, newest_set: readSets().at(-1)?.name ?? null, duration_ms: now().getTime() - startedMs };
+    };
     // «start»-pinget sendes ÉN gang, når tikket faktisk skal gjøre noe (også hvis et steg først blir forfalt underveis).
     let started = false;
     const ensureStarted = async () => {
@@ -405,7 +451,9 @@ export async function runTick(config, deps, env = process.env) {
       log("info", "backup_started", { reason: decisions.backup.reason });
       const b0 = now().getTime();
       try {
+        stage = "backup";
         const result = await deps.backup({ now: t0 });
+        stage = "other";
         const done = readSets().find((s) => s.name === result.name);
         if (done === undefined) throw new ScheduleError("backup_failed", "backup meldte OK, men settet har ikke et komplett manifest på disk");
         b.last_success_at = iso(now());
@@ -418,15 +466,12 @@ export async function runTick(config, deps, env = process.env) {
         b.last_error = null;
         log("info", "backup_completed", { set: done.name, size_bytes: done.sizeBytes, duration_s: b.duration_s });
       } catch (err) {
-        b.consecutive_failures += 1;
-        b.retry_after = iso(new Date(now().getTime() + retryDelayMs(b.consecutive_failures, config.retryMs)));
-        b.last_error_code = err instanceof ScheduleError && (err.code === "backup_timeout" || err.code === "backup_failed") ? err.code : "backup_failed";
-        b.last_error = deps.redact(err?.message ?? "backup feilet");
-        failed.push("backup");
-        log("error", "backup_failed", { code: b.last_error_code, consecutive_failures: b.consecutive_failures, error: b.last_error });
+        stage = "other";
+        recordBackupFailure(err);
       }
       commit();
     }
+    if (guard.abandoned) return abandonedResult();
     if (config.roles.has("backup")) retention();
 
     // --- 2. off-site ---------------------------------------------------------------------------------------------------------------------------
@@ -439,9 +484,10 @@ export async function runTick(config, deps, env = process.env) {
     if (offsiteNow.due) {
       actions.push("offsite");
       await ensureStarted();
-      await offsiteStage(status, failed);
+      await offsiteStage(status);
       commit();
     }
+    if (guard.abandoned) return abandonedResult();
 
     // --- 3. restore-verifisering ---------------------------------------------------------------------------------------------------------------
     const verifyNow = verifyDecision({
@@ -452,9 +498,10 @@ export async function runTick(config, deps, env = process.env) {
     if (verifyNow.due) {
       actions.push("verify");
       await ensureStarted();
-      await verifyStage(status, failed);
+      await verifyStage(status);
       commit();
     }
+    if (guard.abandoned) return abandonedResult();
 
     // --- 4. avslutning -------------------------------------------------------------------------------------------------------------------------
     const sets = readSets();
@@ -478,6 +525,7 @@ export async function runTick(config, deps, env = process.env) {
     return { exitCode, outcome, actions, failed, decisions, newest_set: newest?.name ?? null, duration_ms: now().getTime() - startedMs };
 
     function retention() {
+      if (guard.abandoned) return;
       const sets2 = readSets();
       const newest2 = sets2.at(-1) ?? null;
       const orphans = findOrphanSets(config.out, now().getTime());
@@ -500,12 +548,46 @@ export async function runTick(config, deps, env = process.env) {
       }
     }
 
-    async function offsiteStage(st, failures) {
+    function recordBackupFailure(err) {
+      const b = status.backup;
+      b.consecutive_failures += 1;
+      b.retry_after = iso(new Date(now().getTime() + retryDelayMs(b.consecutive_failures, config.retryMs)));
+      b.last_error_code = err instanceof ScheduleError && (err.code === "backup_timeout" || err.code === "backup_failed") ? err.code : "backup_failed";
+      b.last_error = deps.redact(err?.message ?? "backup feilet");
+      failed.push("backup");
+      log("error", "backup_failed", { code: b.last_error_code, consecutive_failures: b.consecutive_failures, error: b.last_error });
+    }
+
+    function recordOffsiteFailure(err) {
+      const o = status.offsite;
+      o.state = "failed";
+      o.consecutive_failures += 1;
+      o.retry_after = iso(new Date(now().getTime() + retryDelayMs(o.consecutive_failures, config.retryMs)));
+      o.last_error_code = ["offsite_failed", "offsite_timeout", "offsite_ineligible", "offsite_verify_failed", "offsite_config_invalid"].includes(err?.code) ? err.code : "offsite_failed";
+      o.last_error = deps.redact(err?.message ?? "off-site feilet");
+      failed.push("offsite");
+      log("error", "offsite_failed", { code: o.last_error_code, consecutive_failures: o.consecutive_failures, error: o.last_error });
+    }
+
+    function recordVerifyFailure(err, startedAtMs) {
+      const v = status.restore_verify;
+      v.state = "failed";
+      v.consecutive_failures += 1;
+      v.retry_after = iso(new Date(now().getTime() + retryDelayMs(v.consecutive_failures, Math.max(config.retryMs, VERIFY_MIN_RETRY_MS))));
+      v.last_error_code = ["verify_failed", "verify_timeout", "verify_integrity", "verify_mismatch", "verify_config_invalid"].includes(err?.code) ? err.code : "verify_failed";
+      v.last_error = deps.redact(err?.message ?? "verifisering feilet");
+      v.duration_s ??= Math.round((now().getTime() - startedAtMs) / 1000);
+      failed.push("verify");
+      log("error", "verify_failed", { code: v.last_error_code, consecutive_failures: v.consecutive_failures, error: v.last_error });
+    }
+
+    async function offsiteStage(st) {
       const o = st.offsite;
       o.last_attempt_at = iso(now());
       commit();
       const sets3 = readSets();
       const newest3 = sets3.at(-1);
+      stage = "offsite";
       try {
         if (config.offsiteError !== null) throw new OffsiteError("offsite_config_invalid", config.offsiteError);
         // Oversikten brukes bare til etterfylling av eldre sett; feiler den, sendes det nyeste settet likevel (og feiler pushen, rapporteres DEN).
@@ -531,6 +613,7 @@ export async function runTick(config, deps, env = process.env) {
         o.last_error = null;
         // Etterfyll eldre sett som mangler (nyeste først). Feil her er en advarsel - det nyeste settet er allerede trygt.
         for (const s of older) {
+          if (guard.abandoned) break;
           try {
             await deps.sink.push(await deps.prepareSet(s.dir, { recipient: deps.recipient }));
             log("info", "offsite_backfilled", { set: s.name });
@@ -539,17 +622,13 @@ export async function runTick(config, deps, env = process.env) {
           }
         }
       } catch (err) {
-        o.state = "failed";
-        o.consecutive_failures += 1;
-        o.retry_after = iso(new Date(now().getTime() + retryDelayMs(o.consecutive_failures, config.retryMs)));
-        o.last_error_code = ["offsite_failed", "offsite_timeout", "offsite_ineligible", "offsite_verify_failed", "offsite_config_invalid"].includes(err?.code) ? err.code : "offsite_failed";
-        o.last_error = deps.redact(err?.message ?? "off-site feilet");
-        failures.push("offsite");
-        log("error", "offsite_failed", { code: o.last_error_code, consecutive_failures: o.consecutive_failures, error: o.last_error });
+        recordOffsiteFailure(err);
+      } finally {
+        stage = "other";
       }
     }
 
-    async function verifyStage(st, failures) {
+    async function verifyStage(st) {
       const v = st.restore_verify;
       v.last_attempt_at = iso(now());
       v.reported_by = "local";
@@ -559,6 +638,7 @@ export async function runTick(config, deps, env = process.env) {
       let tmpRoot = null;
       let fetchSeconds = null;
       let setName = null;
+      stage = "verify";
       try {
         if (config.verifyError !== null) throw new ScheduleError("verify_config_invalid", config.verifyError);
         if (config.verify.identityFile === null || !existsSync(config.verify.identityFile)) throw new ScheduleError("verify_config_invalid", "JARVIS_BACKUP_VERIFY_IDENTITY_FILE er ikke satt eller peker på en fil som ikke finnes");
@@ -601,17 +681,12 @@ export async function runTick(config, deps, env = process.env) {
         v.last_error = null;
         log("info", "verify_completed", { set: setName, duration_s: v.duration_s, tables: v.tables, rows: v.rows });
       } catch (err) {
-        v.state = "failed";
-        v.consecutive_failures += 1;
-        v.retry_after = iso(new Date(now().getTime() + retryDelayMs(v.consecutive_failures, Math.max(config.retryMs, VERIFY_MIN_RETRY_MS))));
-        v.last_error_code = ["verify_failed", "verify_timeout", "verify_integrity", "verify_mismatch", "verify_config_invalid"].includes(err?.code) ? err.code : "verify_failed";
-        v.last_error = deps.redact(err?.message ?? "verifisering feilet");
-        v.duration_s ??= Math.round((now().getTime() - t1) / 1000);
-        failures.push("verify");
-        log("error", "verify_failed", { code: v.last_error_code, consecutive_failures: v.consecutive_failures, error: v.last_error });
+        recordVerifyFailure(err, t1);
       } finally {
+        stage = "other";
         if (tmpRoot !== null) rmSync(tmpRoot, { recursive: true, force: true });
       }
+      if (guard.abandoned) return;
       // `last_attempt_at` = FERDIG-tidspunktet: da flettes ikke vår egen kvittering tilbake som «ekstern» (mergePeerVerifyReport tar kun NYERE rapporter).
       const finishedAt = iso(now());
       v.last_attempt_at = finishedAt;

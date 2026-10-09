@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { ConfigError } from "../lib/env.mjs";
@@ -736,6 +737,106 @@ describe("WP-C2 tick: klokkeavvik - fremtidsdaterte sett og tidsstempler kan ikk
     status.offsite.last_success_at = "2026-10-09T02:30:00.000Z";
     expect(dropFutureTimestamps(status, T0.getTime())).toEqual(["offsite.last_success_at"]);
     expect(status.offsite.last_success_at).toBeNull();
+  });
+});
+
+describe("WP-C2 tick (review F4): vaktbikkja og hengt kjede - ETT tikk holder aldri låsen utover budsjettet, og en hengt lås varsles", () => {
+  const never = () => new Promise(() => undefined);
+  /** Samme tikk, men med et lite budsjett slik at vaktbikkja slår til i løpet av millisekunder. */
+  const tiny = (h, ms = 150) => ({ ...h.config, tickBudgetMs: ms });
+
+  it("off-site som henger for alltid: vaktbikkja gir opp, offsite_timeout i statusen, /fail, exit 5, og låsen er sluppet - neste tikk går som normalt", async () => {
+    const sink = fakeSink();
+    let resume;
+    sink.push = () => new Promise((resolve) => { resume = () => resolve({ verification: "sha256", files: 5, bytes: 1 }); });
+    const h = harness({ sink, flags: { roles: "backup,offsite", "status-export-dir": tempDir("wpc2-exp-") } });
+    const t0 = Date.now();
+    const r = await runTick(tiny(h), h.deps(), h.env);
+    expect(Date.now() - t0).toBeLessThan(5000);
+    expect(r).toMatchObject({ exitCode: EXIT.OFFSITE_FAILED, outcome: "failed", failed: ["offsite"], actions: ["backup", "offsite"] });
+    expect(h.logs).toContainEqual(expect.objectContaining({ level: "error", event: "tick_watchdog_fired", stage: "offsite" }));
+    expect(h.hb).toEqual(["start", "fail"]);
+    expect(existsSync(h.config.lockFile)).toBe(false); // låsen er sluppet: ingen skal vente på det hengte tikket
+    expect(h.status().offsite).toMatchObject({ state: "failed", last_error_code: "offsite_timeout", consecutive_failures: 1 });
+    expect(h.status().backup).toMatchObject({ consecutive_failures: 0 }); // backupen i samme tikk lyktes og står
+    expect(h.exported().offsite).toMatchObject({ state: "failed", last_error_code: "offsite_timeout" });
+
+    // Det hengte tikket våkner senere: det skal IKKE kunne skrive status, kjøre verify, pinge eller slette noe.
+    const before = readFileSync(h.config.statusFile, "utf8");
+    const hbBefore = [...h.hb];
+    resume();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(readFileSync(h.config.statusFile, "utf8")).toBe(before);
+    expect(h.hb).toEqual(hbBefore);
+
+    // neste tikk (etter backoff) tar over uten å bli blokkert
+    sink.push = async (prepared) => { sink.state.pushes.push(prepared); sink.state.remote.add(prepared.name); return { verification: "sha256", files: 5, bytes: 1 }; };
+    h.advance(31 * 60_000);
+    expect(await h.tick()).toMatchObject({ exitCode: EXIT.OK, actions: ["offsite"] });
+  });
+
+  it("backup som henger: backup_timeout, exit 2, /fail; retensjon kjører ikke; ingen halv suksess i statusen", async () => {
+    const h = harness();
+    for (const d of [40, 35]) makeSet(h.out, new Date(T0.getTime() - d * D)); // gamle sett som retensjonen ville fjernet
+    const r = await runTick(tiny(h), h.deps({ backup: never }), h.env);
+    expect(r).toMatchObject({ exitCode: EXIT.BACKUP_FAILED, outcome: "failed", failed: ["backup"], actions: ["backup"] });
+    expect(h.status().backup).toMatchObject({ consecutive_failures: 1, last_error_code: "backup_timeout" });
+    expect(h.hb).toEqual(["start", "fail"]);
+    expect(existsSync(h.config.lockFile)).toBe(false);
+    expect(listCompleteSets(h.out)).toHaveLength(2);
+  });
+
+  it("verify som henger: verify_timeout, exit 4; steg etter det hengte kjører ikke; en hengt heartbeat-start (utenfor steg) gir exit 1 uten å lyve om hvilket steg", async () => {
+    const h = harness({ identity: true });
+    makeSet(h.out, hoursAgo(T0, 1));
+    const r = await runTick(tiny(h), h.deps({ verify: never }), h.env);
+    expect(r).toMatchObject({ exitCode: EXIT.VERIFY_FAILED, outcome: "failed", failed: ["verify"] });
+    expect(h.status().restore_verify).toMatchObject({ state: "failed", last_error_code: "verify_timeout" });
+
+    const g = harness();
+    const hung = { configured: true, start: never, success: async () => ({ ok: true }), fail: async () => { g.hb.push("fail"); return { ok: true }; }, last: () => ({ last_ping_at: null, last_ping_kind: null, last_ping_ok: null, last_error_code: null }) };
+    const r2 = await runTick(tiny(g), g.deps({ heartbeat: hung }), g.env);
+    expect(r2).toMatchObject({ exitCode: EXIT.USAGE, outcome: "failed", failed: ["tick"] });
+    expect(g.backupCalls).toBe(0);
+    expect(existsSync(g.config.lockFile)).toBe(false);
+  });
+
+  it("et tikk innenfor budsjettet påvirkes ikke (vaktbikkja er bare et tak)", async () => {
+    const h = harness();
+    const r = await runTick({ ...h.config, tickBudgetMs: 60_000 }, h.deps(), h.env);
+    expect(r).toMatchObject({ exitCode: EXIT.OK, outcome: "ok" });
+    expect(h.logs.filter((l) => l.event === "tick_watchdog_fired")).toEqual([]);
+  });
+
+  it("tikk-budsjettet i konfigen er summen av de påslåtte stegenes frister + slark", () => {
+    const cfg = (flags, env = {}) => loadScheduleConfig({ out: tempDir(), ...flags }, env).tickBudgetMs / 60_000;
+    expect(cfg({})).toBe(240 + 120 + 15); // backup + verify (off-site ikke satt opp)
+    expect(cfg({ roles: "backup" })).toBe(240 + 15);
+    expect(cfg({ roles: "verify" })).toBe(120 + 15);
+    expect(cfg({}, { JARVIS_BACKUP_OFFSITE_LOCAL_DIR: "/mnt/usb/x", JARVIS_BACKUP_OFFSITE_TIMEOUT_MINUTES: "30", JARVIS_BACKUP_MAX_RUN_MINUTES: "60", JARVIS_BACKUP_VERIFY_TIMEOUT_MINUTES: "10" })).toBe(60 + 2 * 30 + 10 + 15);
+  });
+
+  it("en lås som har vært holdt lenger enn 2 × intervallet (og tikk-budsjettet) er en HENGT kjede: høylytt feil + exit 3, men aldri noe handling uten låsen", async () => {
+    const h = harness();
+    const holder = (startedMsAgo) => writeFileSync(h.config.lockFile, `${JSON.stringify({ token: "annen", pid: process.pid, host: hostname(), started_at: new Date(T0.getTime() - startedMsAgo).toISOString() })}\n`);
+    holder(3 * D);
+    const r = await h.tick();
+    expect(r).toMatchObject({ exitCode: EXIT.OVERDUE, outcome: "lock_held_too_long", actions: [] });
+    expect(h.logs).toContainEqual(expect.objectContaining({ level: "error", event: "lock_held_too_long", holder_pid: process.pid, held_hours: 72, limit_hours: 48 }));
+    expect(h.backupCalls).toBe(0);
+    expect(existsSync(h.config.statusFile)).toBe(false);
+    expect(existsSync(h.config.lockFile)).toBe(true); // den andres lås røres ikke
+
+    // innenfor 2 × intervall er det et vanlig, stille hopp over (et langt, men legitimt tikk)
+    holder(47 * H);
+    expect(await h.tick()).toMatchObject({ exitCode: EXIT.OK, outcome: "skipped_lock_held" });
+    // ukjent starttid: kan ikke vurderes, så stille hopp over (alder på hjerteslaget avgjør foreldelse som før)
+    writeFileSync(h.config.lockFile, `${JSON.stringify({ token: "annen", pid: process.pid, host: hostname() })}\n`);
+    expect(await h.tick()).toMatchObject({ exitCode: EXIT.OK, outcome: "skipped_lock_held" });
+    // et langt intervall hever terskelen tilsvarende
+    const long = harness({ env: { JARVIS_BACKUP_INTERVAL_HOURS: "168" } });
+    writeFileSync(long.config.lockFile, `${JSON.stringify({ token: "annen", pid: process.pid, host: hostname(), started_at: new Date(T0.getTime() - 10 * D).toISOString() })}\n`);
+    expect(await long.tick()).toMatchObject({ outcome: "skipped_lock_held" });
   });
 });
 

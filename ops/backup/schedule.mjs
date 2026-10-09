@@ -63,7 +63,7 @@ async function tickCommand(argv, env, injected) {
   const config = loadScheduleConfig(flags, env);
   const deps = buildDefaultDeps(config, env, injected.deps ?? {});
   const result = await runTick(config, deps, env);
-  if (config.json || config.dryRun || result.actions.length > 0 || result.outcome === "overdue" || config.verbose) {
+  if (config.json || config.dryRun || result.actions.length > 0 || result.outcome === "overdue" || result.outcome === "lock_held_too_long" || config.verbose) {
     const { exitCode, ...rest } = result;
     print({ ok: exitCode === EXIT.OK, exit_code: exitCode, ...rest });
   }
@@ -199,8 +199,14 @@ export async function main(argv = process.argv.slice(2), env = process.env, inje
 // D-372: sammenlign file://-URL-er (Windows ga ellers `main()` som aldri kjørte og en falsk grønn exit 0).
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 if (isMain) {
-  main().then((code) => { process.exitCode = code; }).catch((err) => {
+  const forceExit = (code) => {
+    // Review F4: en operasjon tikket har gitt opp (hengt disk/nettverksmontering) kan holde event-løkken i live. Tving avslutning etter en kort frist - utskriften er da for lengst
+    // skrevet. Timeren er unref'd: en prosess som avslutter av seg selv påvirkes ikke.
+    setTimeout(() => process.exit(code), 10_000).unref();
+  };
+  main().then((code) => { process.exitCode = code; forceExit(code); }).catch((err) => {
     console.error(`[schedule] FEILET: ${String(err?.message ?? err).slice(0, 400)}`);
     process.exitCode = EXIT.USAGE;
+    forceExit(EXIT.USAGE);
   });
 }

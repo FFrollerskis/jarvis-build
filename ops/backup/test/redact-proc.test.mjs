@@ -69,6 +69,23 @@ describe("WP-C2 proc: underprosesser uten shell, med tidsavbrudd og minimalt mil
     expect(Date.now() - t0).toBeLessThan(10_000);
   });
 
+  it("review F4: en prosess som ikke dør av SIGKILL (hengt I/O) gir opp etter fristen i stedet for å henge tikket for alltid", async () => {
+    const kills = [];
+    const t0 = Date.now();
+    const res = await runProcess("sleep", ["30"], { timeoutMs: 100, killGraceMs: 50, abandonGraceMs: 100, kill: (child, signal) => kills.push({ pid: child.pid, signal }) });
+    expect(res).toMatchObject({ timedOut: true, code: null });
+    expect(kills.map((k) => k.signal)).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(Date.now() - t0).toBeLessThan(5000);
+    process.kill(-kills[0].pid, "SIGKILL"); // rydd opp den «ukillbare» prosessen testen lot stå igjen
+  });
+
+  it("en prosess som dør ved SIGTERM avslutter som før (ingen ekstra ventetid)", async () => {
+    const t0 = Date.now();
+    const res = await runProcess("sleep", ["30"], { timeoutMs: 100, killGraceMs: 5_000, abandonGraceMs: 10_000 });
+    expect(res.timedOut).toBe(true);
+    expect(Date.now() - t0).toBeLessThan(2000);
+  });
+
   it("manglende binær gir spawnError i stedet for et kast", async () => {
     const res = await runProcess("finnes-ikke-wpc2-xyz", []);
     expect(res.spawnError).toBe("ENOENT");

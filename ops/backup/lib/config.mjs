@@ -81,6 +81,10 @@ export function loadScheduleConfig(flags, env = process.env) {
   if (verifyError === null && verify.source === "offsite" && roles.has("verify") && verify.scratch !== null) {
     verifyError = "JARVIS_BACKUP_VERIFY_SCRATCH_HOST (varig, direkte scratch-server) kan ikke kombineres med kilde off-site: settet fra fjernmålet er ubetrodd og dumpen kjører SQL som superuser på scratch-serveren - la JARVIS_BACKUP_VERIFY_SCRATCH_HOST stå tom (engangs-container) eller bruk kilde local";
   }
+  const maxRunMs = envInt(env, "JARVIS_BACKUP_MAX_RUN_MINUTES", 240, { min: 5, max: 2880 }) * 60_000;
+  // Review F4: tikk-dekkende budsjett for vaktbikkja i runTick - summen av stegene som er på (backup, off-site med liste+push+kontroll, verifisering) pluss slark. Hver enkelt operasjon har egen,
+  // kortere frist; dette er det endelige taket som sørger for at ETT tikk aldri kan holde låsen for alltid uansett hva som henger.
+  const tickBudgetMs = (roles.has("backup") ? maxRunMs : 0) + (roles.has("offsite") && offsite !== null ? 2 * offsite.timeoutMs : 0) + (roles.has("verify") ? verify.timeoutMs : 0) + 15 * 60_000;
   const config = {
     out,
     stateDir,
@@ -97,7 +101,8 @@ export function loadScheduleConfig(flags, env = process.env) {
     intervalMs: envInt(env, "JARVIS_BACKUP_INTERVAL_HOURS", 24, { min: 1, max: 720 }) * 3_600_000,
     retainDays: envInt(env, "JARVIS_BACKUP_RETAIN_DAYS", 30, { min: 1, max: 3650 }),
     retryMs: envInt(env, "JARVIS_BACKUP_RETRY_MINUTES", 30, { min: 5, max: 1440 }) * 60_000,
-    maxRunMs: envInt(env, "JARVIS_BACKUP_MAX_RUN_MINUTES", 240, { min: 5, max: 2880 }) * 60_000,
+    maxRunMs,
+    tickBudgetMs,
     lockStaleMs: envInt(env, "JARVIS_BACKUP_LOCK_STALE_MINUTES", 360, { min: 10, max: 4320 }) * 60_000,
     verify,
     verifyError,

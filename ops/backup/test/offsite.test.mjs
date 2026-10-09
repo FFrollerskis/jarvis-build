@@ -192,7 +192,7 @@ describe("WP-C2 off-site: lokal sti (USB/annen disk) - atomisk, aldri overskrivi
     const target = tempDir("wpc2-usb-");
     if (marker) writeFileSync(join(target, LOCAL_MARKER), "");
     const set = makeSet(out, WHEN);
-    const sink = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice, timeoutMs: 1000 }, { sourceDir: out });
+    const sink = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice, timeoutMs: 30_000 }, { sourceDir: out });
     return { out, target, set, sink, prepared: await prep(set.dir) };
   };
 
@@ -209,7 +209,7 @@ describe("WP-C2 off-site: lokal sti (USB/annen disk) - atomisk, aldri overskrivi
     const inside = join(out, "off");
     mkdirSync(inside);
     writeFileSync(join(inside, LOCAL_MARKER), "");
-    const nested = createOffsiteSink({ adapter: "local", dir: inside, allowSameDevice: true, timeoutMs: 1 }, { sourceDir: out });
+    const nested = createOffsiteSink({ adapter: "local", dir: inside, allowSameDevice: true, timeoutMs: 30_000 }, { sourceDir: out });
     await expect(nested.list()).rejects.toThrow(/inne i backup-mappen/);
   });
 
@@ -249,6 +249,71 @@ describe("WP-C2 off-site: lokal sti (USB/annen disk) - atomisk, aldri overskrivi
     rmSync(join(target, set.name, "globals.sql.age"));
     await expect(sink.verify(prepared)).rejects.toThrow(/mangler: globals\.sql\.age/);
     await expect(sink.fetch("../../etc", join(tempDir(), "x"))).rejects.toThrow(/ugyldig settnavn/);
+  });
+});
+
+describe("WP-C2 off-site (review F4): en hengt disk/NFS-montering blokkerer aldri tikket - hver operasjon har en frist", () => {
+  const never = () => new Promise(() => undefined);
+  const setup = async (fs, { timeoutMs = 150, cleanupMs = 100 } = {}) => {
+    const out = tempDir();
+    const target = tempDir("wpc2-usb-");
+    writeFileSync(join(target, LOCAL_MARKER), "");
+    const set = makeSet(out, WHEN);
+    const sink = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs }, { sourceDir: out, fs, cleanupMs });
+    return { target, set, sink, prepared: await prep(set.dir) };
+  };
+
+  it("en kopi som aldri ferdigstilles gir `offsite_timeout` innen fristen (ikke en evig ventetid), og resten av tikket kan gå videre", async () => {
+    const { sink, prepared, target } = await setup({ copyFile: never });
+    const t0 = Date.now();
+    await expect(sink.push(prepared)).rejects.toMatchObject({ code: "offsite_timeout" });
+    expect(Date.now() - t0).toBeLessThan(3000);
+    expect(readdirSync(target).filter((n) => n.startsWith("jarvis-backup-"))).toEqual([]); // ingenting ble publisert
+    expect(readdirSync(target).filter((n) => n.startsWith(".incoming"))).toEqual([]); // og den halve kopien ble ryddet (best effort)
+  });
+
+  it("hengt oppryddingen også, gir den opp etter sin egen korte frist: feilen rapporteres likevel, resten (.incoming-*) ryddes senere", async () => {
+    const { sink, prepared, target } = await setup({ copyFile: never, rm: never }, { cleanupMs: 100 });
+    const t0 = Date.now();
+    await expect(sink.push(prepared)).rejects.toMatchObject({ code: "offsite_timeout" });
+    expect(Date.now() - t0).toBeLessThan(3000);
+    expect(readdirSync(target).filter((n) => n.startsWith(".incoming"))).toHaveLength(1); // resten ligger igjen; F12 fjerner den når den er foreldet
+  });
+
+  it("selve målet som henger (stat av montering): list, push, verify og fetch gir alle `offsite_timeout`", async () => {
+    const { sink, prepared } = await setup({ stat: never });
+    for (const op of [() => sink.list(), () => sink.push(prepared), () => sink.verify(prepared), () => sink.fetch(prepared.name, join(tempDir(), "x"))]) {
+      await expect(op()).rejects.toMatchObject({ code: "offsite_timeout" });
+    }
+  });
+
+  it("sjekksum-lesing som henger er tidsavbrudd, ikke «mangler» (en hengt disk skal ikke se ut som en tom disk)", async () => {
+    const { sink, prepared } = await setup({});
+    await sink.push(prepared);
+    const hung = createOffsiteSink({ adapter: "local", dir: sink.config.dir, allowSameDevice: true, timeoutMs: 150 }, { sourceDir: sink.deps.sourceDir, fs: { lstat: never } });
+    await expect(hung.verify(prepared)).rejects.toMatchObject({ code: "offsite_timeout" });
+  });
+
+  it("en operasjon som svikter ETTER at fristen er gått gir ingen uhåndtert avvisning (race-vinneren er allerede avgjort)", async () => {
+    const late = () => new Promise((_, reject) => setTimeout(() => reject(new Error("sent")), 300));
+    const { sink, prepared } = await setup({ copyFile: late }, { timeoutMs: 100 });
+    await expect(sink.push(prepared)).rejects.toMatchObject({ code: "offsite_timeout" });
+    await new Promise((resolve) => setTimeout(resolve, 500)); // vitest feiler kjøringen hvis en uhåndtert avvisning dukker opp i mellomtiden
+  });
+
+  it("fristen er TOTAL for ett kall: mange små, trege steg summeres (ikke 120 min per fil)", async () => {
+    const slow = (real) => async (...args) => { await new Promise((resolve) => setTimeout(resolve, 60)); return real(...args); };
+    const { copyFile, chmod } = await import("node:fs/promises");
+    const { sink, prepared } = await setup({ copyFile: slow(copyFile), chmod: slow(chmod) }, { timeoutMs: 250 });
+    await expect(sink.push(prepared)).rejects.toMatchObject({ code: "offsite_timeout" }); // 5 filer × (kopi + chmod) × 60 ms > 250 ms
+  });
+
+  it("uten hengt disk er oppførselen uendret (full rundtur), og feil FØR fristen beholder sin egen kode", async () => {
+    const { sink, prepared, target, set } = await setup({}, { timeoutMs: 20_000 });
+    expect(await sink.push(prepared)).toMatchObject({ verification: "sha256", files: 5 });
+    expect(await sink.list()).toEqual([set.name]);
+    rmSync(join(target, set.name, "globals.sql.age"));
+    await expect(sink.verify(prepared)).rejects.toMatchObject({ code: "offsite_verify_failed" });
   });
 });
 

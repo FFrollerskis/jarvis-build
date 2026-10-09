@@ -1,9 +1,9 @@
 import { randomBytes } from "node:crypto";
 import {
   chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync,
-  renameSync, rmSync, statSync, writeFileSync
+  renameSync, rmSync, writeFileSync
 } from "node:fs";
-import { copyFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, parse, resolve, sep } from "node:path";
 import { sha256File } from "./backup.mjs";
@@ -439,25 +439,81 @@ class RsyncSshSink {
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 // Lokal sti (USB / annen disk)
 // ---------------------------------------------------------------------------------------------------------------------------------------------
+/**
+ * Frist for ÉN sink-operasjon (review F4). En hengt USB-disk eller NFS-montering kan ikke avbrytes i Node - kallet sitter i kjernen - men tikket skal ikke vente på det for
+ * alltid: vi gir opp, rapporterer `offsite_timeout` og går videre. Uten dette ble en kopi som aldri ferdigstilles stående med låsen, og alle senere tikk gjorde ingenting.
+ * Selve kallet blir stående i bakgrunnen (trådpoolen) til kjernen slipper det; resultatet ignoreres.
+ */
+class Budget {
+  constructor(totalMs, label) {
+    this.endsAt = Date.now() + totalMs;
+    this.label = label;
+  }
+
+  async run(what, op) {
+    const left = this.endsAt - Date.now();
+    const timeout = () => new OffsiteError("offsite_timeout", `${this.label}: ${what} brukte for lang tid (hengt disk eller nettverksmontering?)`);
+    if (left <= 0) throw timeout();
+    let timer;
+    try {
+      return await Promise.race([
+        Promise.resolve().then(op),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(timeout()), left); })
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/** Opprydding etter en feilet/avbrutt kopi: best effort med egen, kort frist - en hengt disk skal ikke også henge oppryddingen. */
+async function bestEffort(promiseFactory, ms = 15_000) {
+  let timer;
+  try {
+    await Promise.race([Promise.resolve().then(promiseFactory), new Promise((resolve) => { timer = setTimeout(resolve, ms); })]);
+  } catch {
+    // restene ryddes av en senere kjøring (foreldede .incoming-*)
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 class LocalSink {
   constructor(config, deps) {
     this.adapter = "local";
     this.config = config;
     this.deps = deps;
     this.label = `local:${basename(config.dir)}`;
+    // Filsystem-kallene kan byttes ut i tester (en hengt disk lar seg ikke lage ellers).
+    this.fs = { stat, lstat, readdir, mkdir, copyFile, chmod, rename, rm, ...(deps.fs ?? {}) };
+  }
+
+  #budget() {
+    return new Budget(this.config.timeoutMs, "off-site (lokal sti)");
+  }
+
+  async #exists(budget, path) {
+    try {
+      await budget.run(`stat ${basename(path)}`, () => this.fs.stat(path));
+      return true;
+    } catch (err) {
+      if (err instanceof OffsiteError) throw err; // tidsavbrudd er ikke «finnes ikke»
+      return false;
+    }
   }
 
   /** En avmontert USB-disk er bare en tom katalog på systemdisken: uten markørfil og (som standard) en ANNEN enhet enn backup-mappen «lykkes» ingenting. */
-  #assertTarget() {
+  async #assertTarget(budget) {
     const dir = this.config.dir;
     let st;
     try {
-      st = statSync(dir);
-    } catch {
+      st = await budget.run("stat av målet", () => this.fs.stat(dir));
+    } catch (err) {
+      if (err instanceof OffsiteError) throw err;
       throw configError("off-site-målet (lokal sti) finnes ikke - er disken montert?");
     }
     if (!st.isDirectory()) throw configError("off-site-målet (lokal sti) er ikke en katalog");
-    if (!existsSync(join(dir, LOCAL_MARKER))) {
+    if (!(await this.#exists(budget, join(dir, LOCAL_MARKER)))) {
       throw configError(`off-site-målet mangler markørfilen ${LOCAL_MARKER} (opprett den én gang på den riktige disken: touch <sti>/${LOCAL_MARKER}) - er disken montert?`);
     }
     const source = this.deps.sourceDir;
@@ -465,7 +521,7 @@ class LocalSink {
       const s = resolve(source);
       const d = resolve(dir);
       if (d === s || d.startsWith(`${s}${sep}`)) throw configError("off-site-målet ligger inne i backup-mappen");
-      if (!this.config.allowSameDevice && statSync(source).dev === st.dev) {
+      if (!this.config.allowSameDevice && (await budget.run("stat av backup-mappen", () => this.fs.stat(source))).dev === st.dev) {
         throw configError("off-site-målet ligger på SAMME enhet som backup-mappen (ingen beskyttelse mot diskfeil) - sett JARVIS_BACKUP_OFFSITE_LOCAL_ALLOW_SAME_DEVICE=true kun hvis det er bevisst");
       }
     }
@@ -473,19 +529,33 @@ class LocalSink {
   }
 
   async list() {
-    const dir = this.#assertTarget();
-    return readdirSync(dir).filter((n) => SET_NAME_RE.test(n) && lstatSync(join(dir, n)).isDirectory()).sort();
+    const budget = this.#budget();
+    const dir = await this.#assertTarget(budget);
+    const sets = [];
+    for (const n of (await budget.run("lese målet", () => this.fs.readdir(dir))).filter((name) => SET_NAME_RE.test(name)).sort()) {
+      if ((await budget.run(`lstat ${n}`, () => this.fs.lstat(join(dir, n)))).isDirectory()) sets.push(n);
+    }
+    return sets;
   }
 
-  async #hashAll(dir, prepared) {
+  async #listAgeFiles(budget, dir) {
+    const names = [];
+    for (const n of await budget.run("lese settet", () => this.fs.readdir(dir))) {
+      if (AGE_FILE.test(n) && (await budget.run(`lstat ${n}`, () => this.fs.lstat(join(dir, n)))).isFile()) names.push(n);
+    }
+    return names;
+  }
+
+  async #hashAll(budget, dir, prepared) {
     const problems = [];
     for (const f of prepared.files) {
       const path = join(dir, f.name);
       try {
-        const st = lstatSync(path);
+        const st = await budget.run(`lstat ${f.name}`, () => this.fs.lstat(path));
         if (!st.isFile() || st.isSymbolicLink() || st.size !== f.size) problems.push(`størrelsen avviker: ${f.name}`);
-        else if ((await sha256File(path)) !== f.sha256) problems.push(`sjekksummen avviker: ${f.name}`);
-      } catch {
+        else if ((await budget.run(`sjekksum ${f.name}`, () => sha256File(path))) !== f.sha256) problems.push(`sjekksummen avviker: ${f.name}`);
+      } catch (err) {
+        if (err instanceof OffsiteError) throw err; // tidsavbrudd er ikke «mangler»
         problems.push(`mangler: ${f.name}`);
       }
     }
@@ -493,27 +563,29 @@ class LocalSink {
   }
 
   async push(prepared) {
-    const root = this.#assertTarget();
+    const budget = this.#budget();
+    const root = await this.#assertTarget(budget);
     const finalDir = join(root, prepared.name);
-    if (existsSync(finalDir)) {
+    if (await this.#exists(budget, finalDir)) {
       // Atomisk publisert tidligere: skal være identisk. Vi overskriver aldri.
-      const problems = await this.#hashAll(finalDir, prepared);
+      const problems = await this.#hashAll(budget, finalDir, prepared);
       if (problems.length > 0) throw new OffsiteError("offsite_verify_failed", `settet finnes allerede i off-site-målet, men avviker (overskrives ikke): ${problems.slice(0, 4).join("; ")}`);
       return { verification: "sha256", files: prepared.files.length, bytes: prepared.bytes };
     }
     const tmp = join(root, `.incoming-${prepared.name}-${randomBytes(4).toString("hex")}`);
-    mkdirSync(tmp, { mode: 0o700 });
+    await budget.run("opprette midlertidig katalog", () => this.fs.mkdir(tmp, { mode: 0o700 }));
     try {
       for (const f of prepared.files) {
         const dest = join(tmp, f.name);
-        await copyFile(join(prepared.dir, f.name), dest, fsConstants.COPYFILE_EXCL); // asynkront: en kopi på flere GB skal ikke fryse event-løkken (lås-hjerteslag, signaler)
-        chmodSync(dest, 0o600);
+        // asynkront: en kopi på flere GB skal ikke fryse event-løkken (lås-hjerteslag, signaler)
+        await budget.run(`kopiere ${f.name}`, () => this.fs.copyFile(join(prepared.dir, f.name), dest, fsConstants.COPYFILE_EXCL));
+        await budget.run(`chmod ${f.name}`, () => this.fs.chmod(dest, 0o600));
       }
-      const problems = await this.#hashAll(tmp, prepared);
+      const problems = await this.#hashAll(budget, tmp, prepared);
       if (problems.length > 0) throw new OffsiteError("offsite_verify_failed", `kopien til off-site-målet er ikke identisk: ${problems.slice(0, 4).join("; ")}`);
-      renameSync(tmp, finalDir);
+      await budget.run("publisere (rename)", () => this.fs.rename(tmp, finalDir));
     } catch (err) {
-      rmSync(tmp, { recursive: true, force: true });
+      await bestEffort(() => this.fs.rm(tmp, { recursive: true, force: true }), this.deps.cleanupMs);
       if (err instanceof OffsiteError) throw err;
       throw new OffsiteError("offsite_failed", `kunne ikke kopiere til off-site-målet: ${err?.code ?? "feil"}`);
     }
@@ -521,23 +593,25 @@ class LocalSink {
   }
 
   async verify(prepared) {
-    const root = this.#assertTarget();
+    const budget = this.#budget();
+    const root = await this.#assertTarget(budget);
     const dir = join(root, prepared.name);
-    if (!existsSync(dir)) throw new OffsiteError("offsite_verify_failed", "settet finnes ikke i off-site-målet");
-    const problems = await this.#hashAll(dir, prepared);
+    if (!(await this.#exists(budget, dir))) throw new OffsiteError("offsite_verify_failed", "settet finnes ikke i off-site-målet");
+    const problems = await this.#hashAll(budget, dir, prepared);
     if (problems.length > 0) throw new OffsiteError("offsite_verify_failed", `off-site-kopien avviker fra det lokale settet: ${problems.slice(0, 6).join("; ")}`);
     return { verification: "sha256", files: prepared.files.length, bytes: prepared.bytes };
   }
 
   async fetch(name, destDir) {
     if (!SET_NAME_RE.test(name)) throw ineligible("ugyldig settnavn");
-    const root = this.#assertTarget();
+    const budget = this.#budget();
+    const root = await this.#assertTarget(budget);
     const dir = join(root, name);
-    if (!existsSync(dir)) throw new OffsiteError("offsite_failed", "settet finnes ikke i off-site-målet");
+    if (!(await this.#exists(budget, dir))) throw new OffsiteError("offsite_failed", "settet finnes ikke i off-site-målet");
     mkdirSync(destDir, { recursive: true, mode: 0o700 });
-    for (const n of listAgeFiles(dir)) {
-      await copyFile(join(dir, n), join(destDir, n), fsConstants.COPYFILE_EXCL);
-      chmodSync(join(destDir, n), 0o600);
+    for (const n of await this.#listAgeFiles(budget, dir)) {
+      await budget.run(`kopiere ${n}`, () => this.fs.copyFile(join(dir, n), join(destDir, n), fsConstants.COPYFILE_EXCL));
+      await budget.run(`chmod ${n}`, () => this.fs.chmod(join(destDir, n), 0o600));
     }
     return listAgeFiles(destDir);
   }
@@ -546,9 +620,9 @@ class LocalSink {
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 /**
  * @param config resultatet av `parseOffsiteConfig` (ikke null)
- * @param options `run` (injiserbar prosesskjører for tester), `redact` (feiltekst), `sourceDir` (backup-mappen, for «annen enhet»-sjekken)
+ * @param options `run` (injiserbar prosesskjører for tester), `redact` (feiltekst), `sourceDir` (backup-mappen, for «annen enhet»-sjekken), `fs`/`cleanupMs` (filsystem-kall og oppryddingsfrist for den lokale adapteren; kun tester)
  */
-export function createOffsiteSink(config, { run, redact = (s) => String(s), sourceDir } = {}) {
+export function createOffsiteSink(config, { run, redact = (s) => String(s), sourceDir, fs, cleanupMs } = {}) {
   const runner = run ?? ((file, args, o) => runProcess(file, args, { env: minimalEnv(), ...o }));
   const check = (res, what) => {
     if (res.spawnError) throw new OffsiteError("offsite_failed", `${what}: kunne ikke starte (${res.spawnError}) - er verktøyet installert og i PATH?`);
@@ -556,7 +630,7 @@ export function createOffsiteSink(config, { run, redact = (s) => String(s), sour
     if (res.code !== 0) throw new OffsiteError("offsite_failed", `${what}: exit ${res.code}: ${redact(String(res.stderr).split("\n").filter(Boolean).slice(-3).join(" "), 200)}`);
     return res;
   };
-  const deps = { run: runner, check, sourceDir };
+  const deps = { run: runner, check, sourceDir, fs, cleanupMs };
   if (config.adapter === "rclone") return new RcloneSink(config, deps);
   if (config.adapter === "rsync_ssh") return new RsyncSshSink(config, deps);
   return new LocalSink(config, deps);

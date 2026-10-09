@@ -7,6 +7,8 @@ export interface ScheduleConfig {
   readonly roles: ReadonlySet<string>;
   readonly mode: "docker" | "direct";
   readonly intervalMs: number;
+  /** Tak for ETT tikk (vaktbikkja): summen av de påslåtte stegenes frister + slark. */
+  readonly tickBudgetMs: number;
 }
 export declare const ROLES: readonly string[];
 export declare const DUE_TOLERANCE_MS: number;
