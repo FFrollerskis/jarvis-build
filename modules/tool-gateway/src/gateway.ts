@@ -11,6 +11,13 @@ export interface SecretProvider {
   readonly name: string;
   /** Returnerer credential eller null. Verdien går ALDRI i logg/trace/modellkontekst. */
   get(ref: string): Promise<string | null>;
+  /**
+   * VALGFRI (WP-C3 review F3): tilstedeværelse UTEN å materialisere verdien. `ToolGateway.hasSecret()` bruker den hvis den finnes, ellers `get(ref) !== null`. Trengs av leverandører der
+   * `get` har en SIDEEFFEKT eller kostnad - i dag GitHub App-dekoratøren, hvor `get` utsteder et installasjonstoken (et kall mot GitHub): uten `has` ville hver statuspoll, helse-sveip
+   * og dashbord-visning («er X konfigurert») utstedt et token, selv for en tilbakekalt credential. Skal aldri kaste (`false` = ikke tilgjengelig) og aldri gjøre nettverkskall mot
+   * selve tjenesten credentialen gjelder. En wrapper som ikke videresender `has` faller trygt tilbake til `get`.
+   */
+  has?(ref: string): Promise<boolean>;
 }
 export class EnvSecretProvider implements SecretProvider {
   readonly name = "env-sops";
@@ -449,6 +456,14 @@ export class ToolGateway {
    * `SecretProvider.get()` sin egen kontrakt (se filhode over).
    */
   async hasSecret(ref: string): Promise<boolean> {
+    // WP-C3 review F3: leverandører med en `get` som utsteder noe (GitHub App-installasjonstoken) tilbyr `has`, slik at en statuspoll aldri utsteder en credential.
+    if (typeof this.secrets.has === "function") {
+      try {
+        return await this.secrets.has(ref);
+      } catch {
+        return false; // kontrakten: kaster aldri - en leverandør som likevel gjør det er «ikke tilgjengelig», ikke en feil som velter statusen
+      }
+    }
     return (await this.secrets.get(ref)) !== null;
   }
 

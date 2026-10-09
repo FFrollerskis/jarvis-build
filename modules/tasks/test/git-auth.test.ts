@@ -201,6 +201,46 @@ describe("D-103 HOST-FIX v2: git-auth.ts - ephemer git credential.helper-mekanis
       await handle.cleanup();
     }
   });
+
+  // WP-C3 review F13: et kortlevd installasjonstoken hentes rett før HVER git-nettverksoperasjon, så handlen må kunne lage env for et NYTT token uten å røre det opprinnelige.
+  it("P (WP-C3 F13): envFor(nyttToken) gir samme env-form med det nye tokenet, uten å endre handle.env eller andre env-nøkler", async () => {
+    const handle = await createGitAuthHandle("token-p-start", TEST_SCOPE);
+    try {
+      const fresh = handle.envFor("token-p-fresh");
+      expect(fresh).toEqual({ GIT_TERMINAL_PROMPT: "0", [GIT_CREDENTIAL_TOKEN_ENV]: "token-p-fresh" });
+      expect(handle.env[GIT_CREDENTIAL_TOKEN_ENV]).toBe("token-p-start");
+      expect(handle.envFor("token-p-second")[GIT_CREDENTIAL_TOKEN_ENV]).toBe("token-p-second");
+      expect(fresh[GIT_CREDENTIAL_TOKEN_ENV]).toBe("token-p-fresh");
+      // Aldri tokenet i argv (credential-helper-argumentene er uavhengige av token-verdien).
+      expect(JSON.stringify(handle.credentialHelperArgs)).not.toContain("token-p-");
+    } finally {
+      await handle.cleanup();
+    }
+  });
+
+  it("P2 (WP-C3 F13): envFor() avviser tom/ikke-streng-credential høylytt (git_credential_token_empty) - aldri en tom credential til git", async () => {
+    const handle = await createGitAuthHandle("token-p2", TEST_SCOPE);
+    try {
+      for (const bad of ["", undefined, null, 42, {}] as unknown as string[]) {
+        expect(() => handle.envFor(bad), String(bad)).toThrow("git_credential_token_empty");
+      }
+    } finally {
+      await handle.cleanup();
+    }
+  });
+
+  it("P3 (WP-C3 F13): credential-helperen svarer med tokenet fra DEN env-en den kjøres med - samme skript, nytt token, ingen gjenbruk av det gamle", async () => {
+    const handle = await createGitAuthHandle("token-p3-start", TEST_SCOPE);
+    try {
+      const scriptPath = handle.credentialHelperArgs[1].match(/"([^"]+credential-helper\.cjs)"/)?.[1] as string;
+      const ask = (env: Readonly<Record<string, string>>) =>
+        spawnSync(process.execPath, [scriptPath, "get"], { encoding: "utf8", input: "protocol=https\nhost=github.com\npath=acme/repo.git\n\n", env: { ...process.env, ...env } }).stdout;
+      expect(ask(handle.env)).toBe("username=x-access-token\npassword=token-p3-start\n");
+      expect(ask(handle.envFor("token-p3-fresh"))).toBe("username=x-access-token\npassword=token-p3-fresh\n");
+    } finally {
+      await handle.cleanup();
+    }
+  });
 });
 
 describe("Remediering del 2 (JARVIS-064): credentialen utleveres KUN til eksakt protokoll + vert + repo", () => {

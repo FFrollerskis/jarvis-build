@@ -87,6 +87,8 @@ describe("worker-main.ts registrerer 'coding' produksjonshandleren korrekt (D-10
   it("L: D-103 Blokker B - gitAuth er konfigurert med SAMME EnvSecretProvider-arkitektur, ATSKILT fra claudeCodeCredential (HELT egen secret-referanse)", () => {
     const callIdx = source.indexOf('worker.register(\n  "coding"');
     const callBlock = source.slice(callIdx, source.indexOf("\n);", callIdx) + 3);
+    // WP-C3 (review F2): `secretProvider` er fortsatt den uendrede EnvSecretProvider (PAT-/reservekilden); i tillegg kommer `credentialSource` (repo-scopet, kortlevd i App-modus - se
+    // wpc3-github-app-wiring.test.ts) og `isRevoked`. Den opprinnelige D-103-kontrakten under gjelder derfor uendret.
     expect(callBlock).toMatch(/gitAuth:\s*\{\s*secretProvider:\s*new EnvSecretProvider\(\)/);
   });
 

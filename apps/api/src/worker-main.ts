@@ -7,7 +7,7 @@ import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEn
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
 import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, dailySpentOre, ModelGateway, pricingFromEnv, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
-  DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport, GmailTransport,
+  DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubTransport, createGitHubAuth, GmailTransport,
   GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, MeshToolExecutor, resolveModelToolSurface, chatReadTierMeshTools, BACKGROUND_GITHUB_READ, PgGithubRateLimitStore,
   CHAT_ACT_TIER, CHAT_READ_TIER, MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, memoryToolDefinitions,
   ToolGateway, assertManifestInvariants, buildToolManifest, createTurnContext, driveTransportsIfConfigured, firstWaveTools, jobIdentityFor, telegramClassDNotifier, parseDockerMutationTargets, parseGceMutationTargets
@@ -173,10 +173,15 @@ const policy = new PolicyGateway({
 // instans også gis inn som `ToolGateway` sitt separate `writableSecrets`-
 // argument (5. posisjon) - ALDRI en ny, parallell Infisical-tilkobling.
 const infisicalSecretProvider = new InfisicalSecretProvider();
-const toolSecretProvider = new FallbackSecretProvider(
+const baseToolSecretProvider = new FallbackSecretProvider(
   infisicalSecretProvider,
   new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider())
 );
+// WP-C3 (Q-45 b / D-35): SAMME GitHub App-autentisering som apps/api/src/main.ts (API/worker-parity). Uten JARVIS_GITHUB_APP_ID/_INSTALLATION_ID
+// returnerer `secretProvider()` kjeden UENDRET (PAT som før); med dem leveres et kortlevd, repo-scopet installasjonstoken under SAMME ref, og
+// privatnøkkelen leses fra vaulten (workeren beholder Infisical-maskinidentiteten) - aldri fra container-env.
+const githubAuth = createGitHubAuth({ secrets: baseToolSecretProvider, env: process.env });
+const toolSecretProvider = githubAuth.secretProvider(baseToolSecretProvider);
 // Del 3 (JARVIS-013/043): samme HÅRDE klasse D-pipeline som API-prosessen (API/worker-parity); varsleren bindes rett under.
 const toolGateway = new ToolGateway(pool, policy, toolSecretProvider, ownerControls, infisicalSecretProvider, {
   classDPipeline: { enforce: true },
@@ -306,8 +311,9 @@ const fikenCredentialsProvider: FikenCredentialsProvider = {
 };
 // D-97: identisk wiring-mønster som apps/api/src/main.ts - SAMME pool, altsaa
 // SAMME delte github_rate_limit_state-rad paa tvers av api/worker-prosessene.
-const githubRateLimitController = new GithubRateLimitController(
-  new PgGithubRateLimitStore(pool), "JARVIS_GITHUB_TOKEN",
+const githubRateLimitController = githubAuth.rateLimitController(
+  // WP-C3: `JARVIS_GITHUB_TOKEN` i PAT-modus (uendret), ellers nøkkel per installasjon (samme som api-prosessen).
+  new PgGithubRateLimitStore(pool),
   (event) => console.warn(`[github-rate-limit] ${event.transition} -> ${event.state}${event.retryAt ? ` retry_at=${event.retryAt.toISOString()} source=${event.source}` : ""}`)
 );
 // D-181 (BLOCKER B1, D184): hoistet (var tidligere inline i firstWaveTools()
@@ -666,13 +672,23 @@ worker.register(
       // vertsmaskin-tilstand (Git Credential Manager e.l.). Mangler tokenet:
       // jobben feiler FØR clone forsøkes (`git_auth_unavailable`), ALDRI et
       // stille fall til uautentisert git.
-      gitAuth: { secretProvider: new EnvSecretProvider() },
+      // WP-C3 (review F2/F13): git-credentialen er `githubAuth.gitCredentialSource(...)` - i App-modus et kortlevd installasjonstoken scopet til NØYAKTIG repoet jobben gjelder, med minste rettighet
+      // (Contents), hentet rett før hver git-nettverksoperasjon (clone, push) - IKKE standard-scope-tokenet (alle konfigurerte repoer, alle rettigheter) som connectoren bruker. I PAT-modus gir kilden
+      // PAT-en fra `EnvSecretProvider`, akkurat som før (`secretProvider` under er den uendrede PAT-/reservekilden og leses ikke når `credentialSource` er satt). PAT i App-modus: kun eksplisitt, loggført fallback.
+      // WP-C3 (review F3): `isRevoked` = den delte, varige per-credential-tilbakekallingen (`owner_controls.revoke_credential`) - sjekkes før hver utstedelse.
+      gitAuth: {
+        secretProvider: new EnvSecretProvider(),
+        credentialSource: githubAuth.gitCredentialSource(new EnvSecretProvider()),
+        isRevoked: (ref) => ownerControls.isRevokedDurable(ref)
+      },
       // Remediering del 2 (JARVIS-064): credentialen gjelder KUN github.com + disse eksakte repoene
       // (JARVIS_GIT_ALLOWED_REPOS, ellers JARVIS_GITHUB_REPO). Tom allowlist = hver kodejobb feiler lukket.
       allowedRepos: allowedReposFromEnv(process.env),
       github: { gateway: toolGateway }
     }),
-    [process.env["ANTHROPIC_API_KEY"], process.env["JARVIS_GITHUB_TOKEN"]]
+    // WP-C3: de to statiske nøklene + EN DYNAMISK kilde - kortlevde installasjonstokens (nye hver time) utstedes etter oppstart og må redigeres ut av feilmeldinger også. Review F12: kilden skjermes
+    // for seg i `withSecretRedaction` (kaster `knownTokens()`, hoppes kun den over - de statiske nøklene redigeres likevel).
+    [process.env["ANTHROPIC_API_KEY"], process.env["JARVIS_GITHUB_TOKEN"], () => githubAuth.knownTokens()]
   )
 );
 
