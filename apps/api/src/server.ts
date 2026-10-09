@@ -15,7 +15,7 @@ import {
 } from "@jarvis/incidents";
 import { OwnerControlUnauthorizedError, type InfraExecutionGate, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
 import type { InProcessWorker, TaskService } from "@jarvis/tasks";
-import type { DockerMutationAction, ToolGateway } from "@jarvis/tool-gateway";
+import { CLOUD_CONTROL_TOOL_IDS, type DockerMutationAction, type ToolGateway } from "@jarvis/tool-gateway";
 import {
   InvalidWebhookSignatureError, StripeCredentialsUnavailableError, StripeTenantNotConfiguredError,
   VippsCredentialsUnavailableError, VippsTenantNotConfiguredError,
@@ -1694,8 +1694,30 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         return json(res, 200, { execution });
       } catch (err) {
         if (err instanceof HttpError) throw err;
+        // Kun VÅRE egne, bevisste feilkoder (ukjent leverandør/handling, nøkkelkonflikt) vises til eieren; alt annet logges og blir generisk.
+        const reason = (err as Error).message;
+        if (/^(cloud_mutation_[a-z_]+|infra_idempotency_key_conflict)(?::|$)/.test(reason)) return json(res, 400, { error: "cloud_mutation_rejected", reason: reason.slice(0, 80), request_id: requestIdOf(res) });
         return domainFailure(res, 400, "cloud_mutation_rejected", err);
       }
+    }
+
+    if (req.method === "POST" && url.pathname === "/infra/cloud/read") {
+      // WP-E1 (UA-5): klasse A-lesing av de kontrollerte skymålene (Cloudflare/Langfuse/Infisical/Postgres-drift) for eieren - bl.a. økt-identiteten (pid + backend_start) en
+      // terminate/cancel krever. Går UTELUKKENDE via `ToolGateway.execute()` (policy, credential-binding til eieren, infra-gate, revisjon); kun registrerte klasse A-handlinger
+      // i de fire verktøy-id-ene kan nås - aldri en skrivehandling, aldri et annet verktøy. Utdata er ubetrodd data (merket som sådan), aldri instruksjoner.
+      const authed = await authedRequest(req, res, deps, ["provider", "action", "parameters"]);
+      if (!authed) return;
+      const provider = fieldString(authed.body, "provider");
+      const action = fieldString(authed.body, "action");
+      const definition = CLOUD_CONTROL_TOOL_IDS.has(provider) ? gateway.get(provider, action) : undefined;
+      if (!definition) return json(res, 400, { error: "cloud_read_unknown_action", request_id: requestIdOf(res) });
+      if (definition.capability_class !== "A") return json(res, 400, { error: "cloud_read_not_a_read_action", request_id: requestIdOf(res) });
+      const result = await gateway.execute({
+        identity: authed.identity, tool_id: provider, action,
+        parameters: (authed.body["parameters"] === undefined ? {} : fieldRecord(authed.body, "parameters")) as Record<string, JsonValue>
+      });
+      if (!result.ok) return json(res, 200, { ok: false, reason: result.reason.slice(0, 120), request_id: requestIdOf(res) });
+      return json(res, 200, { ok: true, output_trust: result.output_trust, data: result.data ?? null });
     }
 
     if (req.method === "POST" && url.pathname === "/observability/docker/status") {

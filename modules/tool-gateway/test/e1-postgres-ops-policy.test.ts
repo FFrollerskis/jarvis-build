@@ -131,9 +131,11 @@ describe("E: tilkoblingsstreng (hemmelighet) valideres uten å eksponere passord
 });
 
 describe("F: kapabilitetsmatrisen (D-41) er ærlig", () => {
-  it("hver rad har klasse og status; alle D-handlinger er IMPLEMENTED, farlige vedlikeholdsoperasjoner er DEFERRED med begrunnelse", () => {
-    const implemented = POSTGRES_OPS_CAPABILITIES.filter((c) => c.status === "IMPLEMENTED").map((c) => c.risk);
-    expect(implemented.filter((r) => r === "D")).toHaveLength(3);
+  it("hver rad har klasse og status; de tre D-handlingene er bygget (VACUUM er PARTIAL: krever tabell-eierskap), farlige vedlikeholdsoperasjoner er DEFERRED med begrunnelse", () => {
+    const built = POSTGRES_OPS_CAPABILITIES.filter((c) => c.status !== "DEFERRED" && c.risk === "D");
+    expect(built).toHaveLength(3);
+    expect(built.filter((c) => c.status === "PARTIAL").map((c) => c.capability)).toEqual([expect.stringMatching(/VACUUM/)]);
+    expect(built.find((c) => /VACUUM/.test(c.capability))!.note).toMatch(/eier tabellen/);
     const deferred = POSTGRES_OPS_CAPABILITIES.filter((c) => c.status === "DEFERRED");
     expect(deferred.some((c) => /VACUUM FULL/.test(c.capability))).toBe(true);
     for (const c of deferred) expect(c.note.length, c.capability).toBeGreaterThan(20);

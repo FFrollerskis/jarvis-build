@@ -23,6 +23,9 @@ export interface CloudControlConfig {
   infisicalRotationIds?: ReadonlySet<string>;
 }
 
+/** Verktøy-id-ene som `POST /infra/cloud/read` (klasse A-lesing) og `POST /infra/cloud/mutate` (journalført klasse D) kan nå - ingen andre. */
+export const CLOUD_CONTROL_TOOL_IDS: ReadonlySet<string> = new Set(["cloudflare", "langfuse", "infisical", "postgres_ops"]);
+
 export type CloudControlTransports = Partial<Record<"cloudflare" | "langfuse" | "infisical" | "postgres_ops", ToolTransport>>;
 
 export function cloudControlToolDefinitions(transports: CloudControlTransports = {}, config: CloudControlConfig = {}): ToolDefinition[] {

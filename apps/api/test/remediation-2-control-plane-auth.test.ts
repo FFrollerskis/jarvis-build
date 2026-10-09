@@ -65,6 +65,8 @@ const CONTROL_ROUTES: Array<{ path: string; body: Record<string, unknown> }> = [
   { path: "/deployments/ingest/github", body: { repo: "a/b", workflow_run_id: "1" } },
   { path: "/infra/execution/mutate", body: { target: "c", action: "stop_container", idempotency_key: "k" } },
   { path: "/infra/execution/get", body: { execution_id: "x" } },
+  { path: "/infra/cloud/mutate", body: { provider: "cloudflare", action: "purge_cache", parameters: {}, idempotency_key: "k" } },
+  { path: "/infra/cloud/read", body: { provider: "langfuse", action: "get_health", parameters: {} } },
   { path: "/infra/recovery/attempt", body: { tool_id: "docker", action: "restart_container", idempotency_key: "k" } },
   { path: "/infra/pause", body: {} },
   { path: "/infra/resume", body: {} },

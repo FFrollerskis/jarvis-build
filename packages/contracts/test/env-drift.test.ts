@@ -59,6 +59,7 @@ const NOT_IN_CONTAINER: Record<string, string> = {
   JARVIS_DB_RUN_MIGRATIONS: "migrasjoner kjøres av `migrate`-tjenesten; flagget er kun for lokal kjøring utenfor compose og krever admin-passord (api/worker får det aldri)",
   JARVIS_VOICE_DEVICE_ID: "seed-parameter for migrate-jobben (apps/api/src/seed.ts), ikke runtime",
   JARVIS_DB_HOST: "fast verdi satt av compose (FIXED_ENV)",
+  INFISICAL_URL: "WP-E1: fast verdi satt av compose (FIXED_ENV: http://infisical:8080) - Infisical-transporten (kontrollert mål) leser den samme vertskonfigen som InfisicalSecretProvider; ikke en operatør-innstilling",
   JARVIS_PROCESS: "D-394: satt av prosessen selv (`??=` i main.ts/worker-main.ts) - compose trenger ikke videresende den",
   JARVIS_STRIPE_WEBHOOK_SECRET: "webhook-hemmeligheter leses av api (WEBHOOK_ENV); worker-main refererer dem kun i en kommentar/feilmelding",
   JARVIS_VIPPS_WEBHOOK_SECRET: "se JARVIS_STRIPE_WEBHOOK_SECRET",

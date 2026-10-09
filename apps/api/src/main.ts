@@ -75,7 +75,8 @@ import {
   PgTelegramOffsetStore, TelegramCommandPoller, createTurnContext, jobIdentityFor, telegramClassDNotifier, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, schedulerSource, DailyScheduler, runConnectorHealthSweep,
   CONNECTOR_REGISTRY, FORBIDDEN_MODEL_TOOL_IDS, listConnectorStatus,
-  CloudflareTransport, INFRA_GATED_TOOL_IDS, cloudControlToolDefinitions, parseCloudflareMutationZones
+  CloudflareTransport, INFRA_GATED_TOOL_IDS, cloudControlToolDefinitions, parseCloudflareMutationZones,
+  InfisicalTransport, LangfuseTransport, PostgresOpsTransport, parseInfisicalRotationIds, parsePostgresOpsConfig
 } from "@jarvis/tool-gateway";
 import {
   BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessEventSyncService, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService,
@@ -206,6 +207,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const infraGate = new InfraExecutionGate(undefined, createPgInfraModeStore(pool), ownerControlAuthority);
   // WP-E1: SAMME ene sannhet som worker-main.ts (`INFRA_GATED_TOOL_IDS`): github/docker/gce/vercel + de kontrollerte skymålene (cloudflare/langfuse/infisical/postgres_ops).
   const infraToolIds = new Set(INFRA_GATED_TOOL_IDS);
+  // WP-E1: Postgres-drift (diagnostikk + terminate/cancel/VACUUM) mot Jarvis' EGEN database. Listene er eier-konfigurert vertskonfig (kun `.env` + restart): tom `databases` = ingen
+  // klasse D-skriving; selve tilkoblingen (`JARVIS_POSTGRES_OPS_URL`, en dedikert minste-privilegium-rolle) er en credential og gjør hele connectoren sovende når den mangler.
+  const postgresOpsConfig = parsePostgresOpsConfig({
+    databases: process.env["JARVIS_POSTGRES_OPS_DATABASES"], schemas: process.env["JARVIS_POSTGRES_OPS_SCHEMAS"], protectedRoles: process.env["JARVIS_POSTGRES_OPS_PROTECTED_ROLES"]
+  });
   // Enhetsregister fra databasen (fase 8): godkjenninger verifiseres mot registrerte enhetsnøkler.
   const deviceRegistry = new PgDeviceRegistry(pool, owner.tenant_id);
   // D-222: tidligere `.catch(() => undefined)` på begge steder - en vedvarende
@@ -983,8 +989,18 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // WP-E1 (UA-5): de kontrollerte skymålene (Cloudflare nå; Langfuse/Infisical/Postgres-drift legges til i samme fabrikk). SOVENDE uten credential;
       // skriving krever sone i JARVIS_CLOUDFLARE_MUTATION_ZONES (kun på verten) og går alltid gjennom klasse D-kjeden + InfraExecutionGate.
       ...cloudControlToolDefinitions(
-        { cloudflare: new CloudflareTransport({ accountId: () => readSecretProvider.get("JARVIS_CLOUDFLARE_ACCOUNT_ID") }) },
-        { cloudflareMutationZones: parseCloudflareMutationZones(process.env["JARVIS_CLOUDFLARE_MUTATION_ZONES"]) }
+        {
+          cloudflare: new CloudflareTransport({ accountId: () => readSecretProvider.get("JARVIS_CLOUDFLARE_ACCOUNT_ID") }),
+          // Langfuse/Infisical/Postgres-drift: basis-URL, klient-id, prosjekt og miljø er ikke-hemmelig VERTSKONFIG (aldri modellstyrt, aldri dashbord-redigerbar);
+          // selve hemmelighetene (secret key / klient-hemmelighet / ops-tilkoblingsstreng) hentes av ToolGateway via credential_ref og når bare transporten.
+          langfuse: new LangfuseTransport({ baseUrl: async () => process.env["LANGFUSE_BASE_URL"] ?? null, publicKey: async () => process.env["LANGFUSE_PUBLIC_KEY"] ?? null }),
+          infisical: new InfisicalTransport({
+            baseUrl: async () => process.env["INFISICAL_URL"] ?? null, clientId: async () => process.env["INFISICAL_CLIENT_ID"] ?? null,
+            projectId: async () => process.env["INFISICAL_PROJECT_ID"] ?? null, environment: async () => process.env["INFISICAL_ENV"] || "dev"
+          }),
+          postgres_ops: new PostgresOpsTransport({ config: postgresOpsConfig })
+        },
+        { cloudflareMutationZones: parseCloudflareMutationZones(process.env["JARVIS_CLOUDFLARE_MUTATION_ZONES"]), postgresOps: postgresOpsConfig, infisicalRotationIds: parseInfisicalRotationIds(process.env["JARVIS_INFISICAL_ROTATION_IDS"]) }
       )
     ]
   })) toolGateway.register(tool);
