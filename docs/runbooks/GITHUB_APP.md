@@ -143,7 +143,10 @@ node --env-file=.env --experimental-transform-types modules/tool-gateway/scripts
 Standardmodus skriver ingenting i noe repo: validerer nøkkelen, leser installasjonen (repoutvalg, rettigheter), utsteder ETT repo-scopet token og kontrollerer at det dekker nøyaktig
 repoet ditt, sammenligner rettighetene mot full kapabilitet (manglende = WARN), kaller `GET /rate_limit`, **revokerer** tokenet og skanner egen utskrift etter token/JWT/privatnøkkel.
 
-Vil du også bevise skriving og git: pek på et **TEST-repo** App-en er installert på (helst ikke produksjonsrepoet):
+Vil du også bevise skriving og git: pek på et **TEST-repo** App-en er installert på. Scriptet **nekter produksjonsrepoet** (alt i `JARVIS_GIT_ALLOWED_REPOS`/`JARVIS_GITHUB_REPO` og standardrepoet
+`tsworkflow/jarvisbuild`, uansett skrivemåte) og avslutter med `NOT VERIFIED (--sandbox-repo er et produksjonsrepo)` uten å kontakte GitHub - det finnes ingen overstyring (D-41: akseptanseløp begrenses til
+sandbox-ressurser). Legg derfor et eget, tomt test-repo til i installasjonen (Configure -> Repository access) FØR du kjører dette, og fjern det igjen etterpå. Sandbox-tokenet utstedes av en egen klient som
+KUN kan utstede for test-repoet:
 
 ```
 node --env-file=.env --experimental-transform-types modules/tool-gateway/scripts/github-app-live.ts --key-file ./nokkel.pem --sandbox-repo tsworkflow/test-repo

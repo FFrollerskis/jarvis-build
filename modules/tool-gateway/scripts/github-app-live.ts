@@ -9,7 +9,7 @@
 //   4. sammenligner tildelte rettigheter med D-41 full kapabilitet (manglende = WARN, ikke feil: eieren kan ha valgt det bevisst)
 //   5. `GET /rate_limit` med installasjonstokenet (teller ikke mot kvoten) - beviser at tokenet fungerer
 //   6. revokerer tokenet (`DELETE /installation/token`) og bekrefter at det er dødt, og skanner egen utskrift for token/JWT/privatnøkkel
-// Med `--sandbox-repo <owner/repo>` (et TEST-repo App-en er installert på - ALDRI produksjonsrepoet ditt hvis du kan unngå det) gjøres i tillegg:
+// Med `--sandbox-repo <owner/repo>` (et TEST-repo App-en er installert på - scriptet NEKTER produksjonsrepoet, det finnes ingen overstyring) gjøres i tillegg:
 //   lese-sjekker via den ekte `GithubTransport` (repo, grener, PR-er, workflow-kjøringer), opprettelse og sletting av EN kjøre-unik test-gren
 //   (`jarvis-app-live-<ts>`, aldri main/master/production) og `git ls-remote` med tokenet i miljøet (aldri i argv). Test-grenen ryddes alltid.
 //
@@ -28,6 +28,7 @@ import {
   GITHUB_APP_ERROR_HINTS, GITHUB_APP_PRIVATE_KEY_REF, GitHubAppAuth, GitHubAppAuthError, asGitHubAppAuthError, maskGitHubSecrets, normalizeGitHubApiBase,
   parseGitHubAppPrivateKey
 } from "../src/github-app-auth.ts";
+import { configuredGithubRepo } from "../src/github-repo-lock.ts";
 import { GITHUB_FULL_CAPABILITY_PERMISSIONS, createGitHubAuth, type GitHubAuth } from "../src/github-token-provider.ts";
 import { GithubTransport } from "../src/live-transports.ts";
 import { assertGithubRepoSlug, guardedFetch } from "../src/url-safety.ts";
@@ -155,6 +156,17 @@ export async function runGitHubAppLive(options: LiveOptions): Promise<LiveResult
   }
   results["app_config"] = "PASS";
   log(`app_config: app_id=${settings.appId} installation_id=${settings.installationId} repoer=${settings.repositories.join(",")} api_base=${settings.apiBase}`);
+  // Review F14: --sandbox-repo SKRIVER (test-gren) og er derfor aldri et produksjonsrepo - D-41: test-/akseptanseløp begrenses til sandbox-ressurser (blast radius). Produksjonsrepoene er
+  // allowlisten (JARVIS_GIT_ALLOWED_REPOS / JARVIS_GITHUB_REPO), repoet connectoren er konfigurert mot, og standardrepoet Jarvis alltid regner som eierens. Ingen overstyring finnes med vilje.
+  if (sandboxRepo) {
+    const production = new Set([...settings.repositories, configuredGithubRepo(options.env), configuredGithubRepo({})].map((r) => r.toLowerCase()));
+    if (production.has(sandboxRepo.toLowerCase())) {
+      results["app_config"] = "FAIL";
+      diagnostics["app_config"] = `--sandbox-repo ${sandboxRepo} er et produksjonsrepo (${[...production].join(", ")}) - bruk et eget TEST-repo App-en er installert på`;
+      log(`FEIL: ${diagnostics["app_config"]}. Ingenting er kjørt mot GitHub.`);
+      return finish(1, "NOT VERIFIED (--sandbox-repo er et produksjonsrepo)");
+    }
+  }
   const app = auth.app;
   if (!app) {
     fail("app_config", new Error("App-klienten kunne ikke opprettes"));

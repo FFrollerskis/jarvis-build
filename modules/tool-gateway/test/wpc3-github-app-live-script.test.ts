@@ -260,6 +260,47 @@ describe("C: --sandbox-repo - lese-sjekker, test-gren som ALLTID ryddes, git ls-
   });
 });
 
+describe("C5: --sandbox-repo NEKTER produksjonsrepoet (review F14) - scriptet skriver aldri en test-gren i et produksjonsrepo", () => {
+  it("C5a: allowlisten (JARVIS_GITHUB_REPO), JARVIS_GIT_ALLOWED_REPOS og standardrepoet nektes i alle skrivemåter - ingen kall mot GitHub i det hele tatt (heller ikke token-utstedelse)", async () => {
+    const cases: Array<[string, string, Record<string, string>]> = [
+      ["JARVIS_GITHUB_REPO", "tsworkflow/jarvisbuild", {}],
+      ["store/små bokstaver", "TSWORKFLOW/JarvisBuild", {}],
+      ["JARVIS_GIT_ALLOWED_REPOS", "tsworkflow/andre", { JARVIS_GIT_ALLOWED_REPOS: "tsworkflow/jarvisbuild,tsworkflow/andre" }],
+      ["repoet connectoren er konfigurert mot, utenfor allowlisten", "tsworkflow/connector-repo", { JARVIS_GITHUB_REPO: "tsworkflow/connector-repo", JARVIS_GIT_ALLOWED_REPOS: "tsworkflow/jarvisbuild" }],
+      ["standardrepoet når JARVIS_GITHUB_REPO peker et annet sted", "tsworkflow/jarvisbuild", { JARVIS_GITHUB_REPO: "tsworkflow/annet" }]
+    ];
+    for (const [name, sandbox, env] of cases) {
+      const fake = await fakeGitHub();
+      const gitCalls: unknown[] = [];
+      const { result, output } = await run({ fake, env, argv: ["--sandbox-repo", sandbox], runGit: (args) => { gitCalls.push(args); return { status: 0, stdout: "" }; } });
+      expect(result, name).toMatchObject({ exitCode: 1, verified: false });
+      expect(result.status, name).toContain("NOT VERIFIED (--sandbox-repo er et produksjonsrepo)");
+      expect(result.checks["app_config"], name).toBe("FAIL");
+      expect(result.diagnostics["app_config"], name).toContain("produksjonsrepo");
+      expect(output, name).toContain("GITHUB_APP_LIVE_STATUS=NOT VERIFIED");
+      expect(fake.requests, name).toHaveLength(0); // verken installasjonslesing eller token-utstedelse
+      expect(gitCalls, name).toHaveLength(0);
+      expect(Object.values(result.checks).filter((v) => v === "PASS"), name).toHaveLength(0);
+    }
+  });
+
+  it("C5b: et ekte test-repo (ikke i produksjonslisten) går fortsatt gjennom, og sandbox-tokenet utstedes av en klient som KUN kan utstede for test-repoet", async () => {
+    const fake = await fakeGitHub();
+    const realFetchStub = vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (!url.startsWith("https://api.github.com/")) return realFetch(input as string, init);
+      return new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
+    });
+    vi.stubGlobal("fetch", realFetchStub);
+    const { result } = await run({ fake, argv: ["--sandbox-repo", "tsworkflow/other-repo"], runGit: () => ({ status: 0, stdout: "" }) });
+    expect(result.checks["token_issue"]).toBe("PASS");
+    expect(result.checks["token_scope_exact"]).toBe("PASS");
+    const bodies = fake.mintRequests().map((r) => JSON.parse(r.body) as { repositories: string[] });
+    expect(bodies).toEqual([{ repositories: ["other-repo"] }]);
+    expect(result.diagnostics["app_config"]).toBeUndefined();
+  });
+});
+
 describe("D: runbooken (docs/runbooks/GITHUB_APP.md) er i takt med koden", () => {
   const runbook = readFileSync(fileURLToPath(new URL("../../../docs/runbooks/GITHUB_APP.md", import.meta.url)), "utf8");
 
