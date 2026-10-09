@@ -73,6 +73,8 @@ export interface PaymentIntent {
   settled_at: string | null;
   failed_at: string | null;
   cancelled_at: string | null;
+  /** WP-F1: første reservasjon av en innsending mot leverandøren (se 099) - bærer leverandørens idempotensvindu. */
+  first_submit_attempt_at: string | null;
 }
 
 export interface PaymentIntentEvent {
@@ -176,6 +178,36 @@ export class PaymentIntentAlreadySubmittedError extends Error {
     this.name = "PaymentIntentAlreadySubmittedError";
   }
 }
+
+/**
+ * WP-F1 (D-453): en innsending mot leverandøren er RESERVERT (`submitted`) og pågår - eller pågikk for kort tid siden til at vi kan vite at den er
+ * død. Et parallelt kall (annen gateway-nøkkel, annen prosess) skal ALDRI kalle leverandøren på nytt mens første kall kan være i flukt: to samtidige
+ * kall mot samme objekt gir kun ÉN leverandørhandling (dobbeltbetalingsvern lag 3, i tillegg til gateway-ledgeren og leverandørens Idempotency-Key).
+ */
+export class SubmitInFlightError extends Error {
+  constructor(readonly subjectId: string) {
+    super(`submit_in_flight:${subjectId}`);
+    this.name = "SubmitInFlightError";
+  }
+}
+
+/**
+ * WP-F1: leverandørutfallet er UKJENT (tidsavbrudd/nettverk/5xx/409 etter at kallet kan ha nådd leverandøren). Meldingen begynner med `outcome_unknown`
+ * slik at ToolGateway behandler den som et ukjent utfall (ledger `unverified`, aldri retry-bar med samme nøkkel, `reconcile()`, varsel til eieren) -
+ * i motsetning til en entydig avvisning (`failed`, retry tillatt). Den opprinnelige feilen beholdes som `cause` (aldri som tekst - kan bære leverandørdetaljer).
+ */
+export class ProviderOutcomeUnknownError extends Error {
+  constructor(readonly subjectId: string, detail: string, cause?: unknown) {
+    super(`outcome_unknown:${detail}`.slice(0, 160), cause === undefined ? undefined : { cause });
+    this.name = "ProviderOutcomeUnknownError";
+  }
+}
+
+/**
+ * WP-F1: avvik som settes av innsendings-/avstemmingskjeden (ikke av leverandør-sveipene). `SUBMIT_OUTCOME_UNKNOWN` = en innsending endte uten et
+ * entydig leverandørsvar (utfallet er ukjent); fjernes først når en senere innsending faktisk får leverandørens svar.
+ */
+export type FinanceChainAnomalyType = "SUBMIT_OUTCOME_UNKNOWN";
 
 /** Akseptansekriterium 3 ("Wrong account/vendor... deterministically caught"): Jarvis GJETTER ALDRI Tobias sin bankkontokode - se D-41-kommentaren i migrasjonen. */
 export class MissingCounterAccountError extends Error {
@@ -314,6 +346,7 @@ export interface StripeRefund {
   settled_at: string | null;
   failed_at: string | null;
   cancelled_at: string | null;
+  first_submit_attempt_at: string | null;
 }
 
 export interface CreateStripeRefundInput {
@@ -483,6 +516,7 @@ export interface VippsCapture {
   settled_at: string | null;
   failed_at: string | null;
   cancelled_at: string | null;
+  first_submit_attempt_at: string | null;
 }
 
 export interface CreateVippsCaptureInput {
@@ -512,6 +546,7 @@ export interface VippsRefund {
   settled_at: string | null;
   failed_at: string | null;
   cancelled_at: string | null;
+  first_submit_attempt_at: string | null;
 }
 
 export interface CreateVippsRefundInput {
