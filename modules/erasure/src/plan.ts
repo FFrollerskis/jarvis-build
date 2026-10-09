@@ -437,6 +437,18 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   add(result, "scenarios", await run(client, mode, "scenarios", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "decision_log", await run(client, mode, "decision_log", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "situations", await run(client, mode, "situations", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // WP-D2 (UA-3 «churn/product usage», 090): produktbruk + churn-vurderinger. Churn-loopen er REN DERIVERT state av bruksdataene (detection_key bærer konto-pseudonymet,
+  // reason bærer tall utledet av dem) og slettes sammen med dem - snevert avgrenset til loop_type = 'customer_churn_risk' (rører aldri andre loops). Plassert ETTER
+  // `situations`: `situations.source_open_loop_id` peker (sammensatt FK, 056) til loopen og ville ellers blokkert slettingen. Vurderinger og hendelser har FK -> kontoer
+  // (ON DELETE CASCADE) men registreres eksplisitt FØR kontoene; kontoene (pseudonym -> selskap-koblingen) slettes sist.
+  add(
+    result,
+    "business_open_loops",
+    await run(client, mode, "business_open_loops", "tenant_id = $1 AND memory_space_id = $2 AND loop_type = 'customer_churn_risk'", tv)
+  );
+  add(result, "business_churn_assessments", await run(client, mode, "business_churn_assessments", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "product_usage_events", await run(client, mode, "product_usage_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "product_usage_accounts", await run(client, mode, "product_usage_accounts", "tenant_id = $1 AND memory_space_id = $2", tv));
   return result;
 }
 

@@ -227,6 +227,8 @@ export const WORKER_CONNECTOR_ENV = [
 /** Webhook-hemmeligheter - KUN api (mottar webhooks). */
 export const WEBHOOK_ENV = [
   "JARVIS_NEONOMICS_WEBHOOK_API_KEY",
+  // WP-D2 (UA-3 «churn/product usage»): HMAC-hemmelighet for POST /webhooks/product-usage (eierens egne produkter). Tom = ruten svarer 503 selv om tenanten er satt.
+  "JARVIS_PRODUCT_USAGE_WEBHOOK_SECRET",
   "JARVIS_STRIPE_WEBHOOK_SECRET",
   "JARVIS_VIPPS_WEBHOOK_SECRET",
   "JARVIS_WALLESTER_WEBHOOK_BASIC_PASSWORD",
@@ -310,6 +312,8 @@ export const SERVICE_ENV = {
     "JARVIS_BUSINESS_EVENTS_SYNC_HOUR", "JARVIS_BUSINESS_SCORING_HOUR", "JARVIS_BUSINESS_SWEEP_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_WEEKDAY", "JARVIS_CONNECTOR_HEALTH_SWEEP_HOUR", "JARVIS_CONVERSATION_GRAPH_SYNC_HOUR", "JARVIS_FINANCE_SPEND_SWEEP_HOUR", "JARVIS_GROWTH_RECOMMENDATION_SWEEP_HOUR", "JARVIS_HEALTH_RETENTION_SWEEP_HOUR", "JARVIS_LOCATION_RETENTION_SWEEP_HOUR", "JARVIS_SITUATION_SWEEP_HOUR", "JARVIS_SUPPORT_INBOX_SYNC_HOUR", "JARVIS_VISION_RETENTION_SWEEP_HOUR", "JARVIS_STREAM_DEBUG",
     // WP-D2 (JARVIS-044/Q-48): dashbord-ruten for å opprette en bedrifts-tenant er AV som standard (api-only; CLI-en trenger ikke flagget).
     "JARVIS_BUSINESS_TENANT_PROVISIONING",
+    // WP-D2 (UA-3 «churn/product usage»): bedrifts-tenanten produktbruk-webhooken skriver til (api-only; tom = ruten finnes ikke, 404).
+    "JARVIS_PRODUCT_USAGE_TENANT_ID",
     // WP-C2 (OPS-RUNTIME): ekstern oppetids-heartbeat (AV som standard; pinger kun mens en lokal selvsjekk består) og stien til den SKRIVEBESKYTTEDE backup-statusfilen
     // (monteres `:ro` med infra/backup/docker-compose.backup-status.yml - aldri selve backup-mappen).
     "JARVIS_UPTIME_HEARTBEAT_URL", "JARVIS_UPTIME_HEARTBEAT_INTERVAL_SEC", "JARVIS_BACKUP_STATUS_FILE"],

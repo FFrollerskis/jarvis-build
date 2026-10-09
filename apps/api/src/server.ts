@@ -23,6 +23,7 @@ import {
   WallesterCredentialsUnavailableError, WallesterTenantNotConfiguredError,
   type CardService, type FinanceService
 } from "@jarvis/finance";
+import { ProductUsageError, UsageImportError, USAGE_LIMITS, USAGE_WEBHOOK_SIGNATURE_HEADER, type ProductUsageService } from "@jarvis/business";
 import type { ConversationEngine } from "./conversation.ts";
 import { submittedContractHasReservedKey, type ChatJobs } from "./chat-jobs.ts";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
@@ -154,6 +155,13 @@ export interface ApiDeps {
    * ALDRI et modellverktøy. Poolen er runtime-poolen (RLS håndheves) - tjenesten trenger ingen admin-rolle.
    */
   businessTenants?: { pool: pg.Pool };
+  /**
+   * WP-D2 (UA-3 «churn/product usage»): innkommende webhook for produktbruk-hendelser fra eierens egne produkter (`POST /webhooks/product-usage`). DORMANT: uten verdien
+   * svarer ruten 404; `main.ts` setter den KUN når `JARVIS_PRODUCT_USAGE_TENANT_ID` er satt. Det finnes ingen identitet å oppløse her: autentiseringen ER HMAC-signaturen
+   * (`X-Jarvis-Signature: t=<unix>,v1=<hex>` over `<t>.<rå kropp>`, ±300 s replay-vindu, konstant-tid-sammenligning) som `ProductUsageService.ingestWebhook()` håndhever FØR
+   * noe parses eller skrives. Tenanten er eier-konfigurert, aldri avledet fra innholdet.
+   */
+  productUsage?: { service: ProductUsageService };
   /**
    * Remediering del 2 (JARVIS-065): den ENE validerte eier-identiteten (fra `loadOwnerConfig`). Brukes KUN til å fylle
    * visningsfeltene (`person_id`/`tenant_id`) i de statiske sidene - aldri som autoritet (autoritet kommer alltid fra
@@ -548,7 +556,9 @@ interface RateLimiters {
 }
 
 const AUTH_ROUTES: ReadonlySet<string> = new Set([
-  "/devices/challenge", "/devices/register", "/session/authorize", "/voice/session/authorize"
+  "/devices/challenge", "/devices/register", "/session/authorize", "/voice/session/authorize",
+  // WP-D2: HMAC-autentisert, offentlig nåbar rute - samme strenge per-IP-grense som de andre autentiseringsflatene (en gyldig avsender trenger få, store kall).
+  "/webhooks/product-usage"
 ]);
 
 const limiterRegistry = new WeakMap<ServerResponse, RateLimiters>();
@@ -1467,6 +1477,37 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       }
       if (err instanceof VippsCredentialsUnavailableError || err instanceof VippsTenantNotConfiguredError) {
         return json(res, 503, { error: "not_configured", request_id: requestIdOf(res) });
+      }
+      throw err;
+    }
+  }
+
+  if (deps.productUsage && req.method === "POST" && url.pathname === "/webhooks/product-usage") {
+    // WP-D2: SAMME «signatur ER autentisering»-prinsipp som /webhooks/stripe. Kroppen leses som RÅ bytes med en HARD størrelsesgrense FØR signaturen vurderes (413 ved
+    // overskridelse). Svaret ekkoer aldri hendelsesinnhold: kun tellere og (posisjon, årsakskode) for avviste hendelser.
+    const rawBody = await readRawBodyLimited(req, USAGE_LIMITS.webhook_max_bytes);
+    const signatureHeader = req.headers[USAGE_WEBHOOK_SIGNATURE_HEADER];
+    try {
+      const summary = await deps.productUsage.service.ingestWebhook(rawBody, typeof signatureHeader === "string" ? signatureHeader : undefined);
+      return json(res, 200, {
+        received: true,
+        events: { received: summary.received, inserted: summary.inserted, duplicates: summary.duplicates, conflicts: summary.conflicts, rejected: summary.rejected },
+        rejected_detail: summary.rejected_detail,
+        request_id: requestIdOf(res)
+      });
+    } catch (err) {
+      if (err instanceof ProductUsageError) {
+        // Årsaken til en avvist signatur logges (kode, aldri kropp/hemmelighet) men svares aldri - ingen orakel for en angriper.
+        if (err.code === "invalid_signature") {
+          console.error(JSON.stringify({ msg: "product_usage_webhook_rejected", request_id: requestIdOf(res), reason: err.message.split(":").pop() }));
+          return json(res, 401, { error: "invalid_signature", request_id: requestIdOf(res) });
+        }
+        // Manglende/for kort hemmelighet, manglende tenant eller en tenant som ikke er en bedrifts-tenant: eierens konfigurasjonsfeil, ikke avsenderens.
+        console.error(JSON.stringify({ msg: "product_usage_webhook_not_configured", request_id: requestIdOf(res), reason: err.code }));
+        return json(res, 503, { error: "not_configured", request_id: requestIdOf(res) });
+      }
+      if (err instanceof UsageImportError) {
+        return json(res, 400, { error: err.code, request_id: requestIdOf(res) });
       }
       throw err;
     }

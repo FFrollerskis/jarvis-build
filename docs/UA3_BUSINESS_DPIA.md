@@ -377,3 +377,62 @@ tracking-infrastruktur; samtykke-/cookie-/databehandlingsdokumentasjon for produ
 budsjett-/bud-endringer; kreativ intelligens/markedsføringsminne; UA-5/UA-6. **Ekte host-
 verifisering IKKE fullført i denne økten** (Docker/Windows-host ikke tilgjengelig her) - status
 forblir FIXED_SUITE til `ua4-growth-core-host-run.ts` faktisk er kjørt av Tobias.
+
+## Lead-/mulighetsoppdatering og endringslogg (WP-D2, migrasjon 089, FIXED_SUITE / IKKE HOST VERIFIED)
+
+**Formål:** lukke JARVIS-049 (ingen oppdaterings-/produsentverktøy for leads/opportunities) uten å svekke noen sikkerhetsinvariant: opprett, oppdater, flytt mellom
+stadier/statuser, sett neste handling, lukk med utfall og slett - alt som TJENESTE (`BusinessPipelineService`) med før/etter-registrering i samme transaksjon.
+
+**Hva som lagres (`business_change_log`):** for HVER faktisk endring én rad med full før- og etter-tilstand (kopier av lead-/opportunity-raden: tittel, selskaps-/kontakt-id,
+kilde, beløp, neste handling, lukkegrunn), endrede felt, aktørens person-id (fra den autentiserte identiteten - aldri noe modellen kan oppgi), valgfri `idempotency_key` og en
+hash av forespørselen. Raden er en KOPI av kundedata og klassifiseres derfor som kundedata (ikke som append-only systemrevisjon): den følger memory-space-slettingen
+(Q-20, `modules/erasure/src/plan.ts`), og `jarvis_app` har DELETE kun for det formålet (ingen UPDATE - raden er uforanderlig for runtime). `audit_events` (append-only, kan ikke
+slettes) får derimot ALDRI fritekst: klasse C-handlingene logger en saneret før/etter-snapshot (id-er, status, beløp, datoer og en kort hash av tittelen - aldri tittel,
+neste-handling-tekst eller lukkegrunn).
+
+**Hvem kan skrive:** KUN i en bedrifts-tenant (`tenants.kind = 'business'`) og memory space `business`. Handlingene står i chattens HANDLINGSNIVÅ (utføres først etter eierens
+bundne bekreftelse), aldri på `MODEL_SURFACE_ALLOWLIST`, og tale/Telegram/bakgrunn/kode har dem ikke. Klasse B: opprett/oppdater/sett neste handling. Klasse C: lukk og slett
+(`class_c_no_mandate` for alle andre enn en suveren eier). Sletting detacher avhengige rader (oppfølginger/aktiviteter/muligheter beholdes uten pekeren) og fjerner kun
+deriverte rader (open loops, score); polymorfe løse pekere berøres ikke.
+
+**Datakategori/grunnlag/retensjon:** uendret fra Business Graph (kunde-/lead-data, DPIA over); endringsloggen følger kundeforholdet og slettes sammen med memory space.
+**Ikke i scope:** ingen automatisk endring - ingenting her kjører uten at eieren har bekreftet handlingen.
+
+## Produktbruk og churn (WP-D2, migrasjon 090, FIXED_SUITE / IKKE HOST VERIFIED)
+
+**Formål:** gi eieren et deterministisk, forklarbart forslag/en opplysning om kundekontoer som risikerer å forlate produktet (churn): inaktivitet, fall i bruk, åpne
+supportsaker og forfalte fakturaer. Vurderingen gjelder en KUNDEKONTO (konto -> selskap), aldri en person. Det finnes ingen modellkall, ingen ekstern tjeneste og ingen
+automatisk handling: resultatet er en open loop `customer_churn_risk` som situasjonsbroen viser som INFORM (SUGGEST kun ved høy prioritet og confidence >= 0.75). ACT kan bare
+komme fra en autonomi-policy EIEREN selv har bundet til domenet `retention` (fravær av policy = ingen auto-ACT).
+
+**Hva som lagres:**
+- `product_usage_events`: avsenderens hendelses-id, kilde (`webhook` eller `import:<etikett>`), type (`usage`/`billing_status`), `account_ref`, valgfri `user_ref`, funksjonsnøkkel
+  (f.eks. `chat.send`), antall og tidspunkt. `billing_status` bærer antall FORFALTE fakturaer på kontoen (0 = ingen) - ingen beløp, ingen fakturadata.
+- `product_usage_accounts`: konto-referanse -> (valgfritt) kundeselskap. Koblingen er eierens valg; en ukoblet konto får ingen vurdering og ingen loop.
+- `business_churn_assessments`: siste beregnede vurdering per konto (score 0-100, nivå, signalene som ga den med vekt og begrunnelse, rå aggregerte mål).
+
+**Personvern (dataminimering):** `account_ref` og `user_ref` er PSEUDONYMER avsenderen selv hasher (anbefalt: HMAC-SHA256 med eget salt) - Jarvis kan ikke reversere dem og har
+ingen tabell som kobler dem til navn/e-post. Ingen navn, e-post, telefon, IP eller fritekst kan lagres: ukjente felt/kolonner avvises (hele CSV-filen avvises ved en ukjent kolonne),
+referanser som ser ut som e-post/telefon-/fødselsnummer/IPv4 avvises i appkoden OG av CHECK-er i databasen (forsvar i dybden). `user_ref` leses av INGEN churn-regel (kun lagret for
+«glem bruker» og fremtidig ikke-personlig bruksstatistikk). Faktorkodene er hvitelistet og passerer samme forbudsvakt som lead-/opportunity-scoring (ingen beskyttet trekk-kategori kan
+refereres). Churn-vurderingen er kundenivå-prioritering for eieren, ikke automatisert beslutning med rettsvirkning for enkeltpersoner (GDPR art. 22 er ikke utløst); den kan ikke
+brukes til å nekte eller endre en tjeneste uten at eieren selv handler.
+
+**Rettslig grunnlag (utkast, IKKE juridisk vurdert):** berettiget interesse (kundeoppfølging/forebygge frafall) for B2B-kontoer; for én-manns-foretak der kontoen i praksis er en
+person bør eieren vurdere informasjon til kunden. `PROCESSING_INVENTORY.md` fører raden.
+
+**Retensjon:** rå hendelser slettes automatisk etter 400 dager (`ProductUsageService.purgeExpired`, kjørt i churn-sveipet; eldre hendelser avvises uansett ved innhenting, så
+sletting åpner ikke for gjeninnlegging). Vurderingene overskrives ved hver kjøring og slettes når kontoen kobles fra. «Glem bruker» (`forgetUserRef`) nuller `user_ref` på alle
+hendelser (volum per konto beholdes). Revisjonsraden (`audit_events`, append-only) bærer kun tellere og en kort hash av konto-pseudonymet - aldri pseudonymet selv - slik at en
+sletting av kontoen ikke etterlater pseudonymet i uforanderlig revisjon.
+
+**Innhenting (autentisert, dormant):** (a) `POST /webhooks/product-usage` - HMAC-SHA256-signatur (`X-Jarvis-Signature: t=<unix>,v1=<hex>` over `<t>.<rå kropp>`), ±300 s replay-vindu,
+konstant-tid-sammenligning, kropp maks 512 KiB lest FØR signaturen, strengere per-IP-grense, tenant er eier-konfigurert (`JARVIS_PRODUCT_USAGE_TENANT_ID`, må være en bedrifts-tenant) og
+aldri avledet fra innholdet; ruten finnes ikke (404) uten tenant-konfigurasjon og svarer 503 uten hemmelighet (minst 32 tegn). (b) CSV/JSONL via `ops/nas/product-usage.sh`
+(eierens egen vertshandling, filen på stdin, dry-run som standard). Idempotens: avsenderens hendelses-id er unik per tenant uavhengig av kilde - replay og overlappende import
+dobbelttelles aldri; samme id med annet innhold telles som konflikt og anvendes ikke.
+
+**Q-20-interaksjon:** `product_usage_events`, `product_usage_accounts`, `business_churn_assessments` og churn-loops (`loop_type = 'customer_churn_risk'`) er registrert i erasure-planen
+(etter `situations`, som peker på loopen). **Q-21/RLS:** FORCE RLS + tenant- og memory-space-RESTRICTIVE-policy; fremmednøkler er tenant-skopede komposittnøkler. **Ikke i scope:**
+person-nivå atferdsanalyse, profilering av sluttbrukere, kobling av pseudonymer til personer, automatiske kundehandlinger. **Kalibrering:** terskler og vekter (`churn_risk_v1`) er
+FORSLAG (NEEDS_TOBIAS); kalibreringsrapporten (JARVIS-045) sammenligner forutsagt mot utfall og er grunnlaget for en v2.

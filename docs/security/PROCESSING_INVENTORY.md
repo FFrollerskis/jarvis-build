@@ -68,6 +68,15 @@ uten at det er gjort, eller (4) en DPIA-henvisning peker på en fil som ikke fin
 - **Eksterne mottakere:** Gmail/Calendar m.fl. som kilder; ingen sending uten bekreftelse
 - **Tabeller:** `business_activities`, `business_change_log`, `business_companies`, `business_contacts`, `business_followups`, `business_leads`, `business_open_loops`, `business_opportunities`, `business_scores`, `contract_events`, `contract_obligations`, `contract_versions`, `contracts`, `conversation_channel_links`, `conversation_identities`, `conversation_identity_merges`, `decision_log`, `goal_key_results`, `goals`, `operations_runbooks`, `operations_task_events`, `operations_tasks`, `operations_vendors`, `product_item_events`, `product_items`, `projects`, `risks`, `scenarios`, `support_ticket_events`, `support_tickets`
 
+### Produktbruk og churn (kundekonti, WP-D2)
+
+- **Formål:** Deterministisk churn-risiko på KUNDEKONTO-nivå (inaktivitet, fall i bruk, åpne supportsaker, forfalte fakturaer) som forslag/opplysning til eieren - aldri person-profilering og aldri en automatisk handling
+- **Memory space/tenant:** business (kun bedrifts-tenant; alle tabeller tenant-skopet med FORCE RLS)
+- **Datakategori:** Pseudonyme konto-/bruker-referanser (avsenderen hasher selv), funksjonsnøkkel, tidspunkt og antall. Ingen navn, e-post, telefon, IP eller fritekst - kolonner og CHECK-er (090) forbyr det; `user_ref` leses av ingen regel. Se «Produktbruk og churn» i `docs/UA3_BUSINESS_DPIA.md`
+- **Retensjon:** Rå hendelser slettes automatisk etter 400 dager (churn-sveipet; eldre avvises ved innhenting). Vurderinger overskrives ved hver kjøring. «Glem bruker» nuller `user_ref`. Sletting av memory space `business` via erasure-flyten (ikke koblet i produksjon, JARVIS-060)
+- **Eksterne mottakere:** Ingen. Hendelsene kommer inn fra eierens egne produkter (signert webhook, CSV/JSONL); ingenting sendes ut
+- **Tabeller:** `business_churn_assessments`, `product_usage_accounts`, `product_usage_events`
+
 ### Vekst og markedsføring
 
 - **Formål:** Kampanjer, attribusjon og samtykke

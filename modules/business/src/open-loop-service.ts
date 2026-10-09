@@ -4,6 +4,8 @@ import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
 import type { AttentionQueueEntry, BusinessOpenLoop, OpenLoopPriority, OpenLoopType, SweepResult } from "./open-loop-types.ts";
 import { classifyAttentionBucket, deterministicLoopConfidence } from "./open-loop-types.ts";
+import { churnNextAction, describeChurnRisk } from "./churn-rules.ts";
+import { ChurnService } from "./churn-service.ts";
 
 /**
  * UA-3 next slice (D-53): automatisk open-loop-deteksjon. Gjenbruker
@@ -495,6 +497,39 @@ export class OpenLoopService {
   }
 
   /**
+   * WP-D2 (UA-3 «churn/product usage», migrasjon 090): koblede kundekontoer med forhøyet churn-risiko (middels/høy) blir en open loop `customer_churn_risk`. Regelen er
+   * deterministisk og forklarbar (churn-rules.ts); `reason` lister signalene. Loopen er et FORSLAG/en opplysning til eieren (situasjonsbroen gir INFORM, SUGGEST kun ved
+   * høy prioritet og confidence >= 0.75) og utløser ALDRI en handling selv - ACT kan kun komme fra en autonomi-policy EIEREN har bundet til domenet `retention`
+   * (fravær av policy = ingen auto-ACT). Nøkkelen er KONTOEN (ikke selskapet): to produkter hos samme kunde vurderes hver for seg. Vurderingen beregnes på nytt her
+   * (samme transaksjonsgrense som resten av sveipet) og loops hvis vilkår ikke lenger er sant lukkes automatisk.
+   */
+  async detectChurnRisk(tenantId: string, memorySpace: MemorySpace, options: { now?: Date } = {}): Promise<SweepResult> {
+    const sweep = await new ChurnService(this.pool).assessTenant(tenantId, memorySpace, options);
+    const atRisk = sweep.assessments.filter((a) => a.risk_level !== "low");
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      let detected = 0;
+      let updated = 0;
+      const currentKeys: string[] = [];
+      for (const a of atRisk) {
+        const detectionKey = `customer_churn_risk:${a.account_ref}`;
+        currentKeys.push(detectionKey);
+        const calc = { score: a.risk_score, level: a.risk_level, factors: a.signals };
+        const result = await upsertOpenLoop(client, {
+          open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
+          company_id: a.company_id, contact_id: null, opportunity_id: null, lead_id: null, followup_id: null,
+          activity_id: null, ticket_id: null, contract_id: null, campaign_id: null,
+          loop_type: "customer_churn_risk", detection_key: detectionKey,
+          reason: describeChurnRisk(calc), next_action: churnNextAction(calc),
+          priority: a.risk_level === "high" ? "high" : "normal", owner_person_id: null, due_at: null
+        });
+        if (result === "inserted") detected++; else updated++;
+      }
+      const autoResolved = await autoResolveStale(client, tenantId, "customer_churn_risk", currentKeys);
+      return { detected, updated, auto_resolved: autoResolved };
+    });
+  }
+
+  /**
    * UA-4 Native Jarvis Growth Core (D-74): "Reuse OpenLoopService... No
    * second task/reminder engine" - deterministisk utgifts-avviksdeteksjon
    * for aktive kampanjer. En kampanjes SISTE registrerte utgiftsdag
@@ -921,6 +956,10 @@ export class OpenLoopService {
       // kjøres i DENNE sveipen, krever `operations_tasks` (048_operations.sql).
       await this.detectOverdueOperationsTasks(tenantId, memorySpace),
       await this.detectOperationsTasksNeedingEscalation(tenantId, memorySpace),
+      // WP-D2 (UA-3 «churn/product usage»): samme prinsipp - regelen kjøres i DENNE
+      // sveipen, krever `product_usage_*`/`business_churn_assessments` (090). Uten
+      // koblede kontoer er den en no-op (ingen produktbruk-kilde er på som standard).
+      await this.detectChurnRisk(tenantId, memorySpace),
       // UA-4 Native Jarvis Growth Core (D-74): samme prinsipp - regelen
       // kjøres i DENNE sveipen, krever `marketing_campaigns`/
       // `marketing_spend_events` (027_growth.sql).

@@ -77,7 +77,7 @@ import {
   CONNECTOR_REGISTRY, FORBIDDEN_MODEL_TOOL_IDS, listConnectorStatus
 } from "@jarvis/tool-gateway";
 import {
-  BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessEventSyncService, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService,
+  BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessEventSyncService, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ProductUsageService,
   ScoringService, isWeeklyBriefDay, runBusinessEventSyncForAllTenants, runBusinessWeeklyBriefForAllTenants,
   runOpenLoopSweepForAllTenants, runScoringSweepForAllTenants
 } from "@jarvis/business";
@@ -1248,7 +1248,20 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     confirmations: confirmationStore,
     chatJobs,
     // WP-D2 (JARVIS-044/Q-48): eier-ruten for å opprette en bedrifts-tenant er AV som standard - kun eksakt `true` åpner den (ellers 404). Ingenting provisjoneres automatisk.
-    ...(process.env["JARVIS_BUSINESS_TENANT_PROVISIONING"] === "true" ? { businessTenants: { pool } } : {})
+    ...(process.env["JARVIS_BUSINESS_TENANT_PROVISIONING"] === "true" ? { businessTenants: { pool } } : {}),
+    // WP-D2 (UA-3 «churn/product usage»): produktbruk-webhooken er AV som standard - ruten finnes først når eieren har satt JARVIS_PRODUCT_USAGE_TENANT_ID (en bedrifts-tenant;
+    // tjenesten avviser alt annet). Hemmeligheten leses ved HVERT kall via den delte kjeden (Infisical-primær, .env-fallback), slik at rotasjon gjelder umiddelbart; er den
+    // borte eller kortere enn 32 tegn svarer ruten 503 (fail closed).
+    ...(process.env["JARVIS_PRODUCT_USAGE_TENANT_ID"]
+      ? {
+          productUsage: {
+            service: new ProductUsageService(pool, {
+              webhookSecretProvider: async () => (await readSecretProvider.get("JARVIS_PRODUCT_USAGE_WEBHOOK_SECRET")) ?? null,
+              tenantResolver: () => process.env["JARVIS_PRODUCT_USAGE_TENANT_ID"] ?? null
+            })
+          }
+        }
+      : {})
   };
   // D-416: lever ferdige bakgrunnsjobber tilbake til samtalen (nøyaktig én gang). Feil logges, stopper aldri prosessen.
   setInterval(

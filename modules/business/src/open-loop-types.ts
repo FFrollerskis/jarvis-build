@@ -36,7 +36,9 @@ export type OpenLoopType =
   | "product_item_high_priority_stalled"
   // UA-3 Native Jarvis Operations Core (D-129) - speiler 048_operations.sql sin utvidede CHECK.
   | "operations_task_overdue"
-  | "operations_task_escalation_needed";
+  | "operations_task_escalation_needed"
+  // WP-D2 (UA-3 «churn/product usage», migrasjon 090) - speiler 090_business_product_usage_churn.sql sin utvidede CHECK.
+  | "customer_churn_risk";
 export type OpenLoopDetectionMethod = "deterministic" | "ai_assisted";
 
 /**
@@ -45,7 +47,9 @@ export type OpenLoopDetectionMethod = "deterministic" | "ai_assisted";
  * (dager uten aktivitet, utgiftsavvik mot glidende snitt) = 0.7. Verdiene er KALIBRERINGSFORSLAG - eier kan justere (NEEDS_TOBIAS: kalibrering mot faktiske data).
  */
 export const HEURISTIC_LOOP_TYPES: ReadonlySet<OpenLoopType> = new Set<OpenLoopType>([
-  "stalled_opportunity", "contract_review_required", "marketing_spend_anomaly", "product_item_needs_triage", "product_item_high_priority_stalled"
+  "stalled_opportunity", "contract_review_required", "marketing_spend_anomaly", "product_item_needs_triage", "product_item_high_priority_stalled",
+  // WP-D2: churn-risiko er en regelbasert PROGNOSE (signaler om atferd), ikke et hardt faktum.
+  "customer_churn_risk"
 ]);
 export function deterministicLoopConfidence(loopType: string): number {
   return HEURISTIC_LOOP_TYPES.has(loopType as OpenLoopType) ? 0.7 : 0.9;

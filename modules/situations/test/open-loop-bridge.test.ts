@@ -39,7 +39,8 @@ describe("A: domene-kartleggingen er uttømmende og deterministisk", () => {
     finance_recurring_charge_duplicate: "spend", finance_spend_correction_conflict: "spend", bank_transaction_unmatched: "spend",
     bank_consent_attention: "spend", card_anomaly_attention: "spend", finance_procurement_missing: "spend",
     product_item_needs_triage: "product", product_item_high_priority_stalled: "product",
-    operations_task_overdue: "operations", operations_task_escalation_needed: "operations"
+    operations_task_overdue: "operations", operations_task_escalation_needed: "operations",
+    customer_churn_risk: "retention"
   };
   it("hver kjent loop-type får et eksplisitt domene", () => {
     for (const [type, domain] of Object.entries(expectations)) {
