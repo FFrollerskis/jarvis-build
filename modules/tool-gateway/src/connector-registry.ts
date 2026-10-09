@@ -285,6 +285,12 @@ export interface ConnectorDefinition {
   /** Secret-referanser (env/vault-nøkler) DENNE connectoren trenger - ALDRI verdiene selv. */
   credential_refs: string[];
   /**
+   * WP-C3 (Q-45 b): VALGFRIE referanser for en ALTERNATIV autentiseringsmetode (GitHub: App-ens privatnøkkel). De kan skrives via
+   * `owner_controls.set_connector_credential` og vises som `optional_credentials` i statusen, men teller IKKE med i `configured`
+   * (en PAT-kun-oppsett er fortsatt «konfigurert») og i helse-sveipens konfigurert-sjekk. Verdien er like hemmelig som en vanlig ref.
+   */
+  optional_credential_refs?: string[];
+  /**
    * `parameters` er en FUNKSJON (samme presedens som `MeshToolMapping.
    * parameters` i `mesh-bridge.ts`), IKKE en statisk verdi - for
    * tidsvinduer (f.eks. kalender sin "i dag") må parametrene bygges FRISKT
@@ -299,7 +305,11 @@ export interface ConnectorDefinition {
 export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   {
     id: "github", display_name: "GitHub", category: "tool_gateway",
+    // WP-C3 (Q-45 b): `JARVIS_GITHUB_TOKEN` er fortsatt DEN ene credential_ref-en for alle github.*-handlinger. Er GitHub App konfigurert
+    // (`JARVIS_GITHUB_APP_ID`/`_INSTALLATION_ID`) leverer `SecretProvider`-dekoratøren et kortlevd, repo-scopet installasjonstoken under
+    // SAMME ref (se `github-token-provider.ts`); privatnøkkelen er en valgfri ref, lagret i vaulten (aldri som compose-env).
     credential_refs: ["JARVIS_GITHUB_TOKEN"],
+    optional_credential_refs: ["JARVIS_GITHUB_APP_PRIVATE_KEY"],
     live_test: { tool_id: "github", action: "read_issues", parameters: () => ({ repo: process.env["JARVIS_GITHUB_REPO"] ?? "tsworkflow/jarvisbuild" }) }
   },
   {
@@ -988,6 +998,19 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   { id: "apple_watch", display_name: "Apple Watch", category: "backlog", credential_refs: ["JARVIS_APPLE_WATCH_TOKEN"] }
 ];
 
+/**
+ * WP-C3 (Q-45 b): hvordan en connector autentiserer - KUN metadata, aldri credential-verdier. `short_lived` = credentialen utløper av seg selv
+ * (GitHub App installasjonstoken: 1 time); `scoped` = den er begrenset til utvalgte ressurser (GitHub: bestemte repoer). `detail` er fri,
+ * JSON-sikker metadata (utløpstid, repo-liste, tildelte rettigheter, siste feilkode) som `executive.get_connector_status` og Evolution EV-17
+ * kan rapportere «kortlevd repo-scopet identitet: ja/nei» fra.
+ */
+export interface ConnectorAuthInfo {
+  method: string;
+  short_lived: boolean;
+  scoped: boolean;
+  detail: { [key: string]: JsonValue };
+}
+
 export interface ConnectorStatus {
   id: string;
   display_name: string;
@@ -996,8 +1019,17 @@ export interface ConnectorStatus {
   configured: boolean;
   /** Per-referanse presence, i SAMME rekkefølge som `credential_refs` - ALDRI selve verdien. */
   credentials: Array<{ ref: string; configured: boolean }>;
+  /** WP-C3: presence for VALGFRIE refs (`optional_credential_refs`); teller ikke med i `configured`. Utelatt når connectoren ikke har noen. */
+  optional_credentials?: Array<{ ref: string; configured: boolean }>;
+  /** WP-C3: autentiseringsmetode, når en kilde er koblet inn (GitHub). Utelatt ellers. */
+  auth?: ConnectorAuthInfo;
   test_method: "live" | "presence_only";
   health: { state: string; at: string; detail?: string } | null;
+}
+
+export interface ListConnectorStatusOptions {
+  /** WP-C3: autentiseringsmetadata per connector-id (synkron og nettverksfri). Returnerer `undefined` for connectorer uten kilde. */
+  authInfo?: (connectorId: string) => ConnectorAuthInfo | undefined;
 }
 
 /**
@@ -1013,7 +1045,8 @@ export interface ConnectorStatus {
 export async function listConnectorStatus(
   gateway: Pick<ToolGateway, "hasSecret" | "health">,
   /** WP-C4: begrens til disse connector-id-ene (hvert hvelv-oppslag er et HTTP-kall mot Infisical). Utelatt = hele registeret, som før. */
-  onlyIds?: readonly string[]
+  onlyIds?: readonly string[],
+  options: ListConnectorStatusOptions = {}
 ): Promise<ConnectorStatus[]> {
   const defs = onlyIds === undefined ? CONNECTOR_REGISTRY : CONNECTOR_REGISTRY.filter((def) => onlyIds.includes(def.id));
   return Promise.all(
@@ -1021,10 +1054,16 @@ export async function listConnectorStatus(
       const credentials = await Promise.all(
         def.credential_refs.map(async (ref) => ({ ref, configured: await gateway.hasSecret(ref) }))
       );
+      const optional_credentials = def.optional_credential_refs
+        ? await Promise.all(def.optional_credential_refs.map(async (ref) => ({ ref, configured: await gateway.hasSecret(ref) })))
+        : undefined;
+      const auth = options.authInfo?.(def.id);
       return {
         id: def.id, display_name: def.display_name, category: def.category,
         configured: credentials.every((c) => c.configured),
         credentials,
+        ...(optional_credentials ? { optional_credentials } : {}),
+        ...(auth ? { auth } : {}),
         test_method: def.live_test ? "live" : "presence_only",
         health: gateway.health.get(def.live_test?.tool_id ?? def.id) ?? null
       };

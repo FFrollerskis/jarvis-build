@@ -14,7 +14,7 @@ import type {
   SituationAutonomyPolicy,
   SituationNotificationPolicy
 } from "@jarvis/situations";
-import { listConnectorStatus, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
+import { listConnectorStatus, type ConnectorAuthInfo, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
 import { rankAttentionQueue } from "./ranking.ts";
 import type {
   AttentionItem, AttentionItemDetail, CapabilityStatus, ConnectorStatusReport, ControlSurfaceStatus, DelegationBoard
@@ -94,6 +94,11 @@ export interface ExecutiveServiceOptions {
   };
   /** EV-2 (D-417): SLO-/drift-/dataskvalitetsrapport (injisert fra `apps/api`; kun lesing av eksisterende observerbarhet). */
   slo?: { report(): Promise<SloReport> };
+  /**
+   * WP-C3 (Q-45 b): autentiseringsmetadata per connector (GitHub: `pat`/`app`, installasjons-id, utløp, repo-scope, rettigheter) - synkron og
+   * nettverksfri, injisert fra `apps/api`. Havner som `auth` i `get_connector_status`; aldri credential-verdier.
+   */
+  connectorAuth?: (connectorId: string) => ConnectorAuthInfo | undefined;
   /** WP-B (D-452): evolusjonsporter i observasjonsmodus (injisert fra `apps/api`; kun lesing - utfører aldri en endring). */
   evolution?: { report(): Promise<EvolutionReport> };
   /**
@@ -511,6 +516,6 @@ export class ExecutiveService {
    * aldri verdi) og leser `gateway.health` direkte.
    */
   async getConnectorStatus(onlyIds?: readonly string[]): Promise<ConnectorStatusReport> {
-    return { connectors: await listConnectorStatus(this.gateway, onlyIds) };
+    return { connectors: await listConnectorStatus(this.gateway, onlyIds, this.options.connectorAuth ? { authInfo: this.options.connectorAuth } : {}) };
   }
 }
