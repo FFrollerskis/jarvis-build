@@ -345,8 +345,7 @@ export function sanitizeGlobals(text, { loginRole = "postgres" } = {}) {
   // eslint-disable-next-line no-control-regex
   const bad = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.exec(text);
   if (bad !== null) throw new GlobalsRejectedError("kontrolltegn", text.slice(0, bad.index).split("\n").length);
-  const statements = tokenize(text);
-  if (statements.length > MAX_STATEMENTS) throw new GlobalsRejectedError("for mange setninger", null, "too_many_statements");
+  const statements = tokenize(text); // håndhever også MAX_STATEMENTS (underveis, så en 4 MiB-fil med 500 000 setninger ikke bygges opp først)
   const out = [];
   let passwordsStripped = 0;
   let skippedLoginRole = 0;
