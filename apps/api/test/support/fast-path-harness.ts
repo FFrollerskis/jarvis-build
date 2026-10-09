@@ -95,12 +95,21 @@ export interface Built {
   memCalls: Array<{ text: string; options: unknown }>;
   /** Resultatene motorens executor ga tilbake for `roundCalls` (etter eventuell skjerming). */
   outputs: ToolResultMessage[];
+  /** Valgene motoren ga hvert `completeWithTools`-kall (kun de som er relevante for rutingen). */
+  toolOptionsSeen: Array<{ localStickiness: boolean | undefined }>;
+  /** Navnene på verktøyene hvert `completeWithTools`-kall fikk (utvalget for akkurat den turen/varianten). */
+  toolNamesSeen: string[][];
+  /** Kall til `memory.ingest` (D-283/D-386): eierens ord og de siste turene før (som data). */
+  ingestCalls: Array<{ text: string; recent_turns: Array<{ role: string; content: string }> | undefined }>;
 }
 
 export function buildEngine(opts: BuildOptions): Built {
   const runs: FastPathRun[] = [];
   const captured: CompleteInput[] = [];
   const outputs: ToolResultMessage[] = [];
+  const toolOptionsSeen: Built["toolOptionsSeen"] = [];
+  const ingestCalls: Built["ingestCalls"] = [];
+  const toolNamesSeen: string[][] = [];
   const memCalls: Array<{ text: string; options: unknown }> = [];
   const store: Row[] = [...(opts.prior ?? [])];
   const rows = (limit: number) => store.slice(-limit).map((m, i) => ({ message_id: `m${i}`, role: m.role, content: m.content, created_at: new Date().toISOString() }));
@@ -115,8 +124,10 @@ export function buildEngine(opts: BuildOptions): Built {
   const gateway = {
     complete: async () => ({ text: "svar", usage: { input_tokens: 1, output_tokens: 1 }, provider: "gemma_local", model: "m" }),
     stream: async () => ({ text: "svar", usage: { input_tokens: 1, output_tokens: 1 }, provider: "gemma_local", model: "m" }),
-    completeWithTools: async (input: CompleteInput, toolOptions?: { executor?: ToolExecutor }) => {
+    completeWithTools: async (input: CompleteInput, toolOptions?: { executor?: ToolExecutor; localStickiness?: boolean; tools?: Array<{ name: string }> }) => {
       captured.push(JSON.parse(JSON.stringify(input)) as CompleteInput);
+      toolOptionsSeen.push({ localStickiness: toolOptions?.localStickiness });
+      toolNamesSeen.push((toolOptions?.tools ?? []).map((t) => t.name));
       if (opts.failFirstWith && captured.length === 1) throw opts.failFirstWith;
       for (const call of opts.roundCalls ?? []) {
         if (toolOptions?.executor) outputs.push(await toolOptions.executor.execute(call, { tenant_id: "t1", idempotency_key: `k-${call.tool_call_id}` }));
@@ -125,6 +136,9 @@ export function buildEngine(opts: BuildOptions): Built {
     }
   } as unknown as ModelGateway;
   const memory = opts.mem === null ? undefined : {
+    ingest: async (_id: IdentityContext, text: string, options?: { recent_turns?: Array<{ role: string; content: string }> }) => {
+      ingestCalls.push({ text, recent_turns: options?.recent_turns });
+    },
     contextFor: async (_id: IdentityContext, text: string) => (opts.meta ?? { text: "" }).text || (opts.mem ? lookup(opts.mem, text).text : ""),
     contextWithMeta: async (_id: IdentityContext, text: string, options?: unknown) => {
       memCalls.push({ text, options });
@@ -160,7 +174,7 @@ export function buildEngine(opts: BuildOptions): Built {
       }
     })
   });
-  return { engine, runs, captured, store, memCalls, outputs };
+  return { engine, runs, captured, store, memCalls, outputs, toolOptionsSeen, toolNamesSeen, ingestCalls };
 }
 
 function lookup(items: MemItem[], text: string): Meta {

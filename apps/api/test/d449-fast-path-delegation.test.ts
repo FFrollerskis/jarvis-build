@@ -51,7 +51,7 @@ const CASES: Case[] = [
   { name: "utgifter/abonnement (finansverktøy valgt)", message: "Gå gjennom utgiftene og abonnementene mine i e-posten", cloud: false },
   { name: "kontoutskrift (finansverktøy valgt)", message: "Sjekk kontoutskriften fra DNB i e-posten min", cloud: false },
   { name: "kontoen/banken (finansverktøy valgt)", message: "Hva står på kontoen min ifølge e-postene fra banken", cloud: false },
-  // Q-51 D (D-450): en følsom melding i historikken låser ikke lenger hele turen - skyturen sendes UTEN den meldingen (se d450-q51-cloud-variant.test.ts for hva som faktisk sendes). Samme i hurtigbanen.
+  // Q-51 D (D-450): en følsom melding i historikken låser ikke lenger hele turen - skyturen sendes UTEN den meldingen (se d450-routing-q51-q53-228.test.ts for hva som faktisk sendes). Samme i hurtigbanen.
   { name: "finans nylig i samtalen (D-384-vinduet): skyturen sendes uten meldingen (Q-51 D)", message: PR_ASK, prior: [FINANCE_PRIOR], cloud: true },
   { name: "helse nylig i samtalen: skyturen sendes uten meldingen (Q-51 D)", message: PR_ASK, prior: [HEALTH_PRIOR], cloud: true },
   { name: "finans i selve meldingen låser fortsatt (kan ikke utelates)", message: "Sjekk saldoen min i e-posten", cloud: false },

@@ -144,7 +144,7 @@ export function isMemoryReserveOnly(definitions: ReadonlyArray<{ name: string }>
  */
 export function cloudHistoryNote(withheld: number): string {
   const what = withheld === 1 ? "1 tidligere melding" : `${withheld} tidligere meldinger`;
-  return `\n\n(Svart på skymodellen uten ${what}: de berører følsomme emner, og slikt sendes aldri til skyen. Nevn emnet i spørsmålet hvis du vil ha dem med, så svarer den lokale modellen.)`;
+  return `\n\n(Svart på skymodellen uten ${what}: noen berører følsomme emner, og meldingene som kom etter dem holdes også utenfor. Slikt sendes aldri til skyen. Nevn emnet i spørsmålet hvis du vil ha dem med, så svarer den lokale modellen.)`;
 }
 
 /**

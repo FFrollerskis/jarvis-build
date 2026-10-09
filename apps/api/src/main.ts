@@ -59,6 +59,8 @@ import {
   createEmbeddingProviderFromEnv,
   runMemoryProfileSweepForAllTenants,
   runMemoryReembedSweepForAllTenants,
+  runMemoryResensitizeSweepForAllTenants,
+  resensitizeModeFromEnv,
   MemoryRetriever,
   MemoryWriter,
   SummaryService,
@@ -1573,6 +1575,13 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "memory-reembed-sweep", envHour("JARVIS_MEMORY_REEMBED_SWEEP_HOUR", 3)
   ).start(() => runMemoryReembedSweepForAllTenants(pool, memoryEmbedding).then((summary) => assertNoSweepFailures("memory-reembed-sweep", summary.failed)));
+  // Gjennomgang av WP-A (D-451): regn sensitiviteten på nytt for elementer lagret FØR ordforrådet ble utvidet (Q-52 A). Standard er `report` (kun tellinger i loggen); `JARVIS_MEMORY_RESENSITIZE=apply` hever
+  // nivået (aldri senker) med revisjonsspor, `off` slår sveipet av. Kjører før profilsveipet, så profilen rekompileres uten nye `special`-elementer.
+  new DailyScheduler(
+    pool, "memory-resensitize-sweep", envHour("JARVIS_MEMORY_RESENSITIZE_SWEEP_HOUR", 3)
+  ).start(() =>
+    runMemoryResensitizeSweepForAllTenants(pool, { mode: resensitizeModeFromEnv(process.env["JARVIS_MEMORY_RESENSITIZE"]) }).then((summary) => assertNoSweepFailures("memory-resensitize-sweep", summary.failed))
+  );
   // D-386: nattlig rekompilering av den alltid-tilstede eierprofilen per space (deterministisk, ingen LLM).
   new DailyScheduler(
     pool, "memory-profile-sweep", envHour("JARVIS_MEMORY_PROFILE_SWEEP_HOUR", 4)

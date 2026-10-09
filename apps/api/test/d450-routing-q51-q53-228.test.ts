@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ToolCallRequest, ToolResultMessage } from "@jarvis/provider-adapters";
 import { ProviderError } from "@jarvis/provider-adapters";
 import type { CompleteInput, ToolExecutor } from "@jarvis/model-gateway";
-import { classifyContentSensitivity } from "@jarvis/model-gateway";
+import { NoEligibleProviderError, classifyContentSensitivity } from "@jarvis/model-gateway";
 import { STARTED, baseIdentity as base, buildEngine as build, captureLogs, type Row } from "./support/fast-path-harness.ts";
 import { chatWithheldNote } from "../src/cloud-tool-screen.ts";
 import { cloudHistoryNote, isMemoryReserveOnly, localOnlyNote, stripSystemNotes } from "../src/tool-turn-route.ts";
@@ -52,7 +52,7 @@ describe("Q-51 D: skyturen sendes uten de enkelte følsomme meldingene (og paren
     expect(lines("d447_tool_turn_local_sensitivity")).toEqual([]);
   });
 
-  it("paret gjelder begge veier: et følsomt SVAR tar med spørsmålet rett foran, og det går ikke kjedereaksjon videre", async () => {
+  it("paret gjelder begge veier OG halen følger med: et følsomt SVAR tar med spørsmålet rett foran, og alt som kom etter det følsomme i det nylige vinduet holdes også utenfor (WP-A-gjennomgangen)", async () => {
     capture();
     const prior: Row[] = [
       CLEAN_Q, CLEAN_A,
@@ -63,16 +63,48 @@ describe("Q-51 D: skyturen sendes uten de enkelte følsomme meldingene (og paren
     ];
     const t = build({ prior });
     const result = await t.engine.handle(base, PR_ASK);
-    expect(messagesOf(t.captured[0])).toEqual([CLEAN_Q.content, CLEAN_A.content, "takk for hjelpen i dag", "Bare hyggelig.", PR_ASK]);
-    expect(result.reply).toContain("uten 2 tidligere meldinger");
+    expect(messagesOf(t.captured[0])).toEqual([CLEAN_Q.content, CLEAN_A.content, PR_ASK]);
+    expect(result.reply).toContain("uten 4 tidligere meldinger");
   });
 
-  it("én melding uten par (ingen assistent-rad rett etter) → «1 tidligere melding»", async () => {
+  it("et ELDRE følsomt SVAR tar med spørsmålet rett foran seg (paret gjelder begge veier også utenfor vinduet)", async () => {
+    capture();
+    const prior: Row[] = [
+      { role: "user", content: "hvordan ligger vi an med den store greia" }, { role: "assistant", content: "Lånet ditt er på 2 mill." },
+      { role: "user", content: "hva er klokka" }, { role: "assistant", content: "Den er ti." },
+      CLEAN_Q, CLEAN_A,
+      { role: "user", content: "Lønnen min kom i dag" }
+    ];
+    const t = build({ prior });
+    await t.engine.handle(base, PR_ASK);
+    expect(messagesOf(t.captured[0])).toEqual(["hva er klokka", "Den er ti.", CLEAN_Q.content, CLEAN_A.content, PR_ASK]);
+    expect(JSON.stringify(t.captured[0])).not.toMatch(/store greia|Lånet|Lønnen/);
+  });
+
+  it("én følsom melding uten par: også alt etter den i det nylige vinduet holdes utenfor → «3 tidligere meldinger»", async () => {
     capture();
     const t = build({ prior: [FIN_Q, CLEAN_Q, CLEAN_A] });
     const result = await t.engine.handle(base, PR_ASK);
-    expect(messagesOf(t.captured[0])).toEqual([CLEAN_Q.content, CLEAN_A.content, PR_ASK]);
-    expect(result.reply).toContain("Svart på skymodellen uten 1 tidligere melding:");
+    expect(messagesOf(t.captured[0])).toEqual([PR_ASK]);
+    expect(result.reply).toContain("Svart på skymodellen uten 3 tidligere meldinger:");
+  });
+
+  it("en ELDRE følsom melding (utenfor det nylige vinduet) fjernes sammen med paret sitt, uten at resten av samtalen mister konteksten (ingen hale, ingen kjedereaksjon)", async () => {
+    capture();
+    const prior: Row[] = [
+      { role: "user", content: "hva heter bilen til naboen" }, { role: "assistant", content: "Det vet jeg ikke." },
+      FIN_Q, { role: "assistant", content: "Du har 45 000 igjen." }, // eldre følsomt par (utenfor vinduet av de fire siste)
+      { role: "user", content: "hva er klokka" }, { role: "assistant", content: "Den er ti." },
+      CLEAN_Q, CLEAN_A,
+      { role: "user", content: "Lønnen min kom i dag" } // nylig, følsom → utløser varianten
+    ];
+    const t = build({ prior });
+    const result = await t.engine.handle(base, PR_ASK);
+    // Vinduet (de fire siste av 10 rader) = [CLEAN_Q, CLEAN_A, «Lønnen min kom i dag», PR_ASK]: halen starter ved «Lønnen …»; det eldre paret er borte fordi det er følsomt.
+    expect(messagesOf(t.captured[0])).toEqual(["hva heter bilen til naboen", "Det vet jeg ikke.", "hva er klokka", "Den er ti.", CLEAN_Q.content, CLEAN_A.content, PR_ASK]);
+    expect(JSON.stringify(t.captured[0])).not.toMatch(/45 000|Lønnen|saldoen/i);
+    // Merknaden teller det skyvarianten tok bort utover D-384 (selve den eldre følsomme meldingen er allerede borte): paret «Du har 45 000 igjen.» + «Lønnen min kom i dag».
+    expect(result.reply).toContain("uten 2 tidligere meldinger");
   });
 
   it("skyen nede (tidsavbrudd) før noe er utført → lokal reserve får HELE historikken og den strenge sensitiviteten, aldri skymodellens navn, og ingen «uten meldinger»-merknad", async () => {
@@ -309,5 +341,229 @@ describe("hurtigbanen deler skyvarianten (Q-51 D) med chatten", () => {
     const result = await t.engine.handle(base, `${PR_ASK} i bakgrunnen`);
     expect(t.runs[0]!.options).toEqual({ cloudAllowed: true });
     expect(result.reply).toBe(STARTED);
+  });
+});
+
+/**
+ * Uavhengig gjennomgang av WP-A (D-451): bekreftede funn mot koden, nå låst som tester. Hver test beskriver scenarioet gjennomgangen kjørte. Mutasjonssveipen (`mutate.py`) fjerner hver av reglene og verifiserer at
+ * minst én av disse feiler.
+ */
+describe("WP-A-gjennomgangen: oppfølginger uten stikkord etter en følsom melding når aldri skyen (funn 1)", () => {
+  const cloudCalls = (t: ReturnType<typeof build>): CompleteInput[] => t.captured.filter((c) => (c.providerPreference ?? []).includes("anthropic"));
+
+  it("a) et svar som nevner «diagnosen» og eierens oppfølging med medisinnavn uten stikkord: medisinen sendes aldri til skyen", async () => {
+    capture();
+    const prior: Row[] = [
+      { role: "assistant", content: "Vi snakket om diagnosen din i går." },
+      { role: "user", content: "Det er kronisk, jeg skal ta Metformin 500 mg to ganger daglig" },
+      { role: "assistant", content: "Greit, notert." }
+    ];
+    const t = build({ prior });
+    await t.engine.handle(base, "list åpne PR-er og legg inn en påminnelse i kalenderen");
+    expect(cloudCalls(t)).toHaveLength(1);
+    // Kun meldingene (systemprompten nevner selv «get_self_diagnosis»).
+    for (const c of cloudCalls(t)) expect(messagesOf(c).join("\n"), "skyen så medisinraden").not.toMatch(/metformin|kronisk|diagnos/i);
+    expect(messagesOf(cloudCalls(t)[0])).toEqual(["list åpne PR-er og legg inn en påminnelse i kalenderen"]);
+  });
+
+  it("b) eierens svar ETTER et følsomt svar («bonusen på 30 000») følger ikke med skyen", async () => {
+    capture();
+    const prior: Row[] = [
+      { role: "user", content: "hvordan ligger jeg an" },
+      { role: "assistant", content: "Saldoen din er 12 000 kr." },
+      { role: "user", content: "Uff, da må jeg vente med bilen til bonusen på 30 000 kommer i mars" },
+      { role: "assistant", content: "Skjønner." }
+    ];
+    const t = build({ prior });
+    await t.engine.handle(base, PR_ASK);
+    expect(cloudCalls(t)).toHaveLength(1);
+    expect(JSON.stringify(cloudCalls(t)[0])).not.toMatch(/bonus|30 000|bilen|12 000|saldo/i);
+    expect(messagesOf(cloudCalls(t)[0])).toEqual([PR_ASK]);
+  });
+
+  it("c) følsom brukerrad, så en ny brukerrad (forrige tur feilet), og et svar som gjengir innholdet uten stikkord: svaret holdes utenfor", async () => {
+    capture();
+    const prior: Row[] = [
+      { role: "user", content: "Hva sa legen om blodprøvene mine?" },
+      { role: "user", content: "hallo?" },
+      { role: "assistant", content: "Det var kronisk astma, og du skal ta Ventoline hver morgen." }
+    ];
+    const t = build({ prior });
+    await t.engine.handle(base, PR_ASK);
+    expect(cloudCalls(t)).toHaveLength(1);
+    expect(JSON.stringify(cloudCalls(t)[0])).not.toMatch(/astma|ventoline|blodprøve|hallo/i);
+  });
+
+  it("en rad som bare var en rutemerknad (strippet til tom) skaper ikke en usynlig rad som flytter hvor halen starter", async () => {
+    capture();
+    const prior: Row[] = [
+      { role: "user", content: "Hva sa legen om blodprøvene mine?" },
+      { role: "assistant", content: localOnlyNote(["text:health"]) }, // bare merknad → strippes bort
+      { role: "assistant", content: "Det var kronisk astma." }
+    ];
+    const t = build({ prior });
+    await t.engine.handle(base, PR_ASK);
+    expect(JSON.stringify(cloudCalls(t)[0] ?? {})).not.toMatch(/astma|blodprøve/i);
+  });
+});
+
+describe("WP-A-gjennomgangen: skyvarianten bryter ikke Q-53 A / D-431 (funn 5)", () => {
+  it("en ren pratetur (kun minne) med en eldre GitHub-forespørsel utenfor eierturvinduet forblir lokal: den glir ikke inn og gir ikke GitHub-verktøy", async () => {
+    capture();
+    const prior: Row[] = [
+      { role: "user", content: "list åpne PR-er på github" }, { role: "assistant", content: "Her er de." },
+      { role: "user", content: "hvordan går det" }, { role: "assistant", content: "Bra." },
+      { role: "user", content: "jeg var hos legen i dag" }, { role: "assistant", content: "Ok." },
+      { role: "user", content: "og så har jeg migrene" }, { role: "assistant", content: "Uff." }
+    ];
+    const t = build({ prior });
+    const result = await t.engine.handle(base, "hva mener du om det?");
+    expect(t.captured[0]!.providerPreference).toEqual(LOCAL);
+    expect(t.captured[0]!.request.model).toBeUndefined();
+    expect(messagesOf(t.captured[0])).toContain("og så har jeg migrene");
+    expect(result.reply).not.toContain("uten");
+  });
+
+  it("varianten arver ikke tjenester fra en UTELATT eiermelding (D-389): «og den neste da?» etter en følsom e-postmelding forblir lokal med hele konteksten", async () => {
+    capture();
+    const prior: Row[] = [
+      { role: "user", content: "Hva sa legen i e-posten fra sykehuset?" },
+      { role: "assistant", content: "Her er e-posten." }
+    ];
+    const t = build({ prior });
+    const result = await t.engine.handle(base, "og den neste da?");
+    expect(t.captured[0]!.providerPreference).toEqual(LOCAL);
+    expect(t.captured[0]!.sensitivity).toBe("SECRET_RESTRICTED");
+    expect(messagesOf(t.captured[0])).toContain("Hva sa legen i e-posten fra sykehuset?");
+    expect(result.reply).toContain("Svart på den lokale modellen");
+  });
+
+  it("verktøyutvalget til skyvarianten er aldri større enn det den opprinnelige turen hadde (kun eierturer fra det opprinnelige vinduet minus de utelatte)", async () => {
+    capture();
+    // GitHub-meldingen er den 4. siste eiermeldingen: utenfor de tre som regnes, og skal forbli utenfor selv når to av de tre utelates.
+    const prior: Row[] = [
+      { role: "user", content: "list åpne PR-er på github" }, { role: "assistant", content: "Her er de." },
+      { role: "user", content: "hvordan er været" }, { role: "assistant", content: "Pent." },
+      { role: "user", content: "Lønnen min kom i dag" }, { role: "assistant", content: "Fint." },
+      { role: "user", content: "jeg har migrene" }, { role: "assistant", content: "Uff." }
+    ];
+    const t = build({ prior });
+    await t.engine.handle(base, "og hva tenker du om det?");
+    expect(t.captured[0]!.providerPreference).toEqual(LOCAL);
+  });
+});
+
+describe("WP-A-gjennomgangen: skyvariantens verktøyutvalg arver kun fra det opprinnelige eierturvinduet (funn 5, mutant M15)", () => {
+  it("en eldre e-postforespørsel (4. siste eiermelding) glir ikke inn når to av de tre siste utelates: varianten får GitHub-verktøy (fra den ene gjenværende), ikke e-postverktøy", async () => {
+    capture();
+    const prior: Row[] = [
+      { role: "user", content: "sjekk e-posten min" }, { role: "assistant", content: "Ingen nye." },
+      { role: "user", content: "list åpne PR-er på github" }, { role: "assistant", content: "Her er de." },
+      { role: "user", content: "Lønnen min kom i dag" }, { role: "assistant", content: "Fint." },
+      { role: "user", content: "jeg har migrene" }, { role: "assistant", content: "Uff." }
+    ];
+    const t = build({ prior });
+    await t.engine.handle(base, "og hva tenker du om det?");
+    expect(t.captured[0]!.providerPreference).toEqual(["anthropic"]);
+    const tools = t.toolNamesSeen[0]!;
+    expect(tools.some((n) => /github/i.test(n))).toBe(true);
+    expect(tools.some((n) => /gmail|email|mail/i.test(n))).toBe(false);
+  });
+});
+
+describe("WP-A-gjennomgangen: minneblokken klassifiseres som tekst (funn 3)", () => {
+  it("en minneblokk med helseord merket «normal» (lagret før Q-52 A) gir en lokal tur, og teksten når aldri skyen", async () => {
+    capture();
+    const meta = { text: "Profil (det Jarvis vet om eieren):\n- Tobias har ADHD og går til psykiater.", spaces: ["personal"], sensitivities: ["normal"] };
+    const t = build({ meta });
+    const result = await t.engine.handle(base, PR_ASK);
+    expect(t.captured[0]!.providerPreference).toEqual(LOCAL);
+    expect(t.captured[0]!.sensitivity).toBe("SECRET_RESTRICTED");
+    expect(result.reply).toContain("Svart på den lokale modellen");
+    expect(t.captured.every((c) => !(c.providerPreference ?? []).includes("anthropic"))).toBe(true);
+  });
+
+  it("en nøytral minneblokk (profil, kommende forpliktelse, treff med kilde) holder turen på skyruten", async () => {
+    capture();
+    const meta = {
+      text: "Profil (det Jarvis vet om eieren, kompilert fra bekreftede minner):\nTobias liker å gå på ski.\n- [kommende forpliktelse · 2026-10-12] Møte med Kari om nettsiden\n\nRelevant minne (med kilde):\n- [fakta · 2026-10-01] Hytta ligger ved sjøen [kilde: conversation:m1]",
+      spaces: ["personal"], sensitivities: ["normal"]
+    };
+    const t = build({ meta });
+    await t.engine.handle(base, PR_ASK);
+    expect(t.captured[0]!.providerPreference).toEqual(["anthropic"]);
+  });
+
+  it("en sensitiv minneblokk hindrer også skyvarianten: følsomt minne kan ikke utelates som en melding", async () => {
+    capture();
+    const meta = { text: "- [fakta] Tobias har ADHD", spaces: ["personal"], sensitivities: ["normal"] };
+    const t = build({ prior: [CLEAN_Q, CLEAN_A, FIN_Q, FIN_A], meta });
+    await t.engine.handle(base, PR_ASK);
+    expect(t.captured[0]!.providerPreference).toEqual(LOCAL);
+    expect(messagesOf(t.captured[0])).toContain(FIN_Q.content);
+  });
+});
+
+describe("WP-A-gjennomgangen: lokal modell som avviser verktøy (D-380 gjelder alle lokale verktøyforsøk, funn 6)", () => {
+  it("en kun-minne-tur (PRIVAT, Q-53 A) der gemma3 svarer bad_request («does not support tools») gir et tekstsvar, ikke en kastet feil", async () => {
+    capture();
+    const t = build({ failFirstWith: new ProviderError("gemma_local", "bad_request", "registry.ollama.ai/library/gemma3:4b does not support tools") });
+    const result = await t.engine.handle(base, "hva synes du om hytta vår");
+    expect(result.reply).toBe("svar");
+    expect(t.captured).toHaveLength(1); // første forsøk (med verktøy) feilet; tekstsvaret går via gateway.complete/stream
+  });
+
+  it("en skymodells bad_request er fortsatt en ekte feil (ikke et tekstsvar)", async () => {
+    capture();
+    const t = build({ failFirstWith: new ProviderError("anthropic", "bad_request", "ugyldig forespørsel") });
+    await expect(t.engine.handle(base, PR_ASK)).rejects.toThrow("ugyldig forespørsel");
+  });
+});
+
+describe("WP-A-gjennomgangen: lokale reserver etter skyvarianten (mutasjonsfunn M1/M13)", () => {
+  it("D-354: skyens preferanse er uttømt (ikke konfigurert) → den lokale reserven får HELE historikken, SECRET_RESTRICTED, ingen skymodell-navn og ingen «uten N meldinger»-merknad", async () => {
+    capture();
+    const t = build({
+      prior: [CLEAN_Q, CLEAN_A, FIN_Q, FIN_A],
+      failFirstWith: new NoEligibleProviderError("provider_preference_exhausted: ingen av [anthropic] er konfigurert/kvalifisert (anthropic:not_configured)")
+    });
+    const result = await t.engine.handle(base, PR_ASK);
+    expect(t.captured).toHaveLength(2);
+    const fallback = t.captured[1]!;
+    expect(fallback.sensitivity).toBe("SECRET_RESTRICTED");
+    expect(fallback.providerPreference).toBeUndefined();
+    expect(fallback.request.model).toBeUndefined();
+    expect(messagesOf(fallback)).toEqual([CLEAN_Q.content, CLEAN_A.content, FIN_Q.content, FIN_A.content, PR_ASK]);
+    expect(result.reply).toBe("svar");
+  });
+
+  it("lokal reserve etter at skyen feilet bruker heller aldri varianten som kilde til merknaden", async () => {
+    capture();
+    const t = build({ prior: [CLEAN_Q, CLEAN_A, FIN_Q, FIN_A], failFirstWith: new ProviderError("anthropic", "server", "5xx") });
+    const result = await t.engine.handle(base, PR_ASK);
+    expect(result.reply).not.toContain("uten");
+  });
+});
+
+describe("WP-A-gjennomgangen: verktøyløkken blir værende lokal når en lokal modell har vært innom (funn 4)", () => {
+  it("chatten ber gatewayen om localStickiness på hver verktøyløkke", async () => {
+    capture();
+    const t = build({});
+    await t.engine.handle(base, PR_ASK);
+    expect(t.toolOptionsSeen).toEqual([{ localStickiness: true }]);
+  });
+});
+
+describe("WP-A-gjennomgangen: rutemerknader følger heller ikke med til minneuttrekket (funn 11)", () => {
+  it("de siste turene som sendes med til uttrekket (D-386) er strippet for Jarvis' egne merknader, så merknaden ikke låser uttrekket lokalt", async () => {
+    capture();
+    const stored = `Her er svaret.${localOnlyNote(["text:health", "text:finance"])}`;
+    const t = build({ prior: [CLEAN_Q, { role: "assistant", content: stored }] });
+    await t.engine.handle(base, "Pappa heter Henrik og bor i Bergen.");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(t.ingestCalls).toHaveLength(1);
+    const turns = t.ingestCalls[0]!.recent_turns ?? [];
+    expect(turns.map((m) => m.content)).toEqual([CLEAN_Q.content, "Her er svaret."]);
+    expect(JSON.stringify(turns)).not.toContain("Svart på den lokale modellen");
   });
 });
