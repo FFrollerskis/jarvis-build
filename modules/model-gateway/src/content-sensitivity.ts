@@ -24,20 +24,42 @@ export function maxSensitivity(...values: Array<DataSensitivity | undefined>): D
 }
 
 /**
- * Q-52 A (D-450, Tobias 2026-10-09: «Ja til alle Q»): utvidet med bestemte former av ord som allerede fanges i ubestemt form («legen», «fastlegen», «legetimen», «kreften», «blodtrykket») og med entydige
- * helseord som tidligere slapp gjennom (helse, ADHD, tannlege, psykiater, terapi/terapeut, migrene, kolesterol, insulin, kjemoterapi, antidepressiva, covid, sykmelding/sykmeldt, gravid, svangerskap, kolonoskopi, HIV).
+ * Q-52 A (D-450, Tobias 2026-10-09: «Ja til alle Q»): utvidet med bestemte former av ord som allerede fanges i ubestemt form («legen», «fastlegen», «legetimen», «kreften», «blodtrykket», «angsten», «diabetesen») og med
+ * entydige helseord som tidligere slapp gjennom (helse, ADHD, tannlege, psykiater, terapi/terapeut, migrene, kolesterol, insulin, kjemoterapi, antidepressiva, covid, sykmelding/sykmeldt, gravid, svangerskap, kolonoskopi, HIV).
  * BEVISST IKKE med (tvetydige i Jarvis' egen hverdag, jf. «gjelder» i D-448): `behandling` (saks-/databehandling), `operasjon`, `abort` (programvare: abort/AbortController), `helsesjekk`/`helsestatus`
- * (systemets egen helse - kun «helse»/«helsen»/«helseproblem…»/«helsetilstand…» fanges), og skatt/konto/penger/økonomi (se AMBIGUOUS_TERMS). Alle mønstre er mot ASCII-startende ord: JS `\b` kjenner ikke æøå som ordtegn.
+ * (systemets egen helse - se `TECHNICAL_HEALTH`), og skatt/konto/penger/økonomi (se AMBIGUOUS_TERMS). «hiv» med små bokstaver er også verbet «å hive» (se `HIV_UPPER`). Alle mønstre er mot ASCII-startende ord:
+ * JS `\b` kjenner ikke æøå som ordtegn.
  */
 const HEALTH_TERMS: readonly string[] = [
   "diagnose[a-zæøå]*", "sykdom[a-zæøå]*", "sykemelding[a-zæøå]*", "sykmeld[a-zæøå]*", "medisin[a-zæøå]*", "resept[a-zæøå]*", "legetime[a-zæøå]*", "fastlege[a-zæøå]*", "lege(?:n|ne|r|ns)?",
-  "sykehus[a-zæøå]*", "blodprøve[a-zæøå]*", "psykolog[a-zæøå]*", "psykisk[a-zæøå]*", "depresjon[a-zæøå]*", "angst", "symptom[a-zæøå]*", "allergi[a-zæøå]*", "graviditet[a-zæøå]*",
-  "kreft(?:en)?", "kreft(?:syk|svulst|behandl|celle|diagnos)[a-zæøå]*", "helseopplysning[a-zæøå]*", "diabetes", "blodtrykk[a-zæøå]*",
+  "sykehus[a-zæøå]*", "blodprøve[a-zæøå]*", "psykolog[a-zæøå]*", "psykisk[a-zæøå]*", "depresjon[a-zæøå]*", "angst(?:en|anfall[a-zæøå]*|lidelse[a-zæøå]*)?", "symptom[a-zæøå]*", "allergi[a-zæøå]*", "graviditet[a-zæøå]*",
+  "kreft(?:en)?", "kreft(?:syk|svulst|behandl|celle|diagnos)[a-zæøå]*", "helseopplysning[a-zæøå]*", "diabetes(?:en)?", "blodtrykk[a-zæøå]*",
   "helse(?:n|problem[a-zæøå]*|tilstand[a-zæøå]*)?", "adhd", "psykiater[a-zæøå]*", "tannlege[a-zæøå]*", "terapi(?:en|er|ene)?", "terapeut[a-zæøå]*", "migrene[a-zæøå]*", "kolesterol[a-zæøå]*",
-  "insulin[a-zæøå]*", "kjemoterapi[a-zæøå]*", "antidepressiv[a-zæøå]*", "covid(?:-?19)?", "gravid[a-zæøå]*", "svangerskap[a-zæøå]*", "kolonoskopi[a-zæøå]*", "hiv",
+  "insulin[a-zæøå]*", "kjemoterapi[a-zæøå]*", "antidepressiv[a-zæøå]*", "covid(?:-?19)?", "gravid[a-zæøå]*", "svangerskap[a-zæøå]*", "kolonoskopi[a-zæøå]*",
   "medication", "diagnosis", "prescription", "therapy", "therapist", "medical"
 ];
 const HEALTH = new RegExp(`\\b(?:${HEALTH_TERMS.join("|")})\\b`, "i");
+/**
+ * Gjennomgang av WP-A (D-451): «helse» er også systemets eget ord - Jarvis snakker selv om helsesjekker, tilkoblingshelse og endepunkter («connector-helse», «helse-endepunktet», «helsen til systemet»), og slike svar
+ * stod i historikken og låste de neste turene til lokal modell. Teknisk bruk fjernes derfor FØR helseordene sjekkes. Personlig bruk («helsen min», «dårlig helse», «helseproblemer») berøres ikke. Mellomrom tillates
+ * bare i «helsen til/for <teknisk objekt>» (med navngitt objekt) - ellers kunne «… på serveren helsen min er dårlig» skjule en ekte helseomtale.
+ */
+const TECHNICAL_HEALTH: readonly RegExp[] = [
+  /(?<![a-zæøå])(?:system|tjeneste|server|connector|provider|leverandør|nett(?:verk)?|api|endepunkt|jarvis|worker|container|database|db|cluster|node|tilkobling|integrasjon)[a-zæøå]*-?helse[a-zæøå]*/gi,
+  /(?<![a-zæøå])helse[a-zæøå]*-?(?:endepunkt|sjekk|status|kontroll|api|rute|monitor|overvåk|dashbord|probe|ping|logg)[a-zæøå]*/gi,
+  /(?<![a-zæøå])helse(?:n|tilstand(?:en)?)?\s+(?:til|for|i|på|hos)\s+(?:systemet|tjenesten|serveren|nettverket|connectoren|providere?n?|jarvis|api(?:et)?|databasen|workeren|containeren|tilkoblingen|integrasjonen|løsningen)(?![a-zæøå])/gi
+];
+/**
+ * «HIV» skrives med versaler; små bokstaver er også verbet «å hive» («hiv inn en PR») og teller derfor kun i sammensetninger og faste uttrykk («hiv-positiv», «har hiv», «testet positivt på hiv»).
+ */
+const HIV_UPPER = /(?<![A-Za-zæøåÆØÅ])HIV(?![A-Za-zæøåÆØÅ])/;
+const HIV_CONTEXT = /(?<![a-zæøå])hiv-?(?:positiv|smitt|test|medisin|behandling)[a-zæøå]*|(?<![a-zæøå])(?:har|fikk|testet\s+positivt\s+på|smittet\s+av|diagnostisert\s+med)\s+hiv(?![a-zæøå])/i;
+function healthHit(text: string): boolean {
+  if (HIV_UPPER.test(text) || HIV_CONTEXT.test(text)) return true;
+  let cleaned = text;
+  for (const pattern of TECHNICAL_HEALTH) cleaned = cleaned.replace(pattern, " ");
+  return HEALTH.test(cleaned);
+}
 // Q-49 (NAS-test 2026-10-08): `gjeld` og `bic` er IKKE lenger prefiksmønstre. `gjeld[a-zæøå]*` fanget også verbet «gjelder/gjelde/gjeldende/gjeldt» (svært vanlige ord),
 // og `bic[a-zæøå]*` fanget «bicycle». Gjeld fanges fortsatt som gjeld/gjelden/gjeldene/gjeldsbrev/gjeldsgrad/gjeldfri, og BIC kun som eget ord.
 // Q-52 A (D-450): + kontoutskrift, pensjon, bankkonto, kredittkort, inkasso (alle former), aksje/aksjer/aksjene (ikke «aksjeselskap»/«aksjon»), aksjefond, aksjekurs.
@@ -102,7 +124,7 @@ export function classifyContentSensitivity(input: SensitivityInput): Sensitivity
   for (const text of input.texts ?? []) {
     for (const [key, pattern] of AMBIGUOUS_TERMS) if (pattern.test(text)) ambiguous.add(key);
     if (containsSecret(text) || SECRET_HINT.test(text)) raise("SECRET_RESTRICTED", "text:secret");
-    if (HEALTH.test(text)) raise("SECRET_RESTRICTED", "text:health");
+    if (healthHit(text)) raise("SECRET_RESTRICTED", "text:health");
     if (FINANCE_STRONG.test(text)) raise("SECRET_RESTRICTED", "text:finance");
     else if (FINANCE_WEAK.test(text)) raise("PRIVATE", "text:finance_weak");
     if (BUSINESS.test(text)) raise("BUSINESS_CONFIDENTIAL", "text:business");
@@ -141,16 +163,21 @@ export function partitionHistoryBySensitivity<T extends { content: string }>(
 
 /**
  * Q-51 D (D-450, Tobias 2026-10-09: «Ja til alle Q»): i stedet for å låse HELE verktøyturen til den lokale modellen fordi én melding i det nylige vinduet berører helse/økonomi/hemmeligheter, kan en
- * SKYBUNDET tur sendes uten akkurat de meldingene. Denne funksjonen velger hva som holdes utenfor: hver melding som ALENE er strengere enn `ceiling` (standard `BUSINESS_CONFIDENTIAL`, altså kun
- * `SECRET_RESTRICTED`), og PARET deres - svaret rett etter en følsom brukermelding og spørsmålet rett før et følsomt svar - fordi den ene siden ofte gjengir den andre uten at et stikkord står der
- * (et svar som «Du har 45 000 igjen» har ikke noe økonomiord, men hører til en melding som har det). Paret utvides ikke videre (ingen kjedereaksjon). Rekkefølgen på de som beholdes er uendret.
- * Personvernet er likt som før: det som holdes utenfor går aldri til skyen. Prisen er at oppfølgingskontekst fra de meldingene mangler i skyturen; den lokale reserveruten får fortsatt hele historikken.
+ * SKYBUNDET tur sendes uten de meldingene. Hva som holdes utenfor (gjennomgang av WP-A, D-451: «ikke bare naboen»):
+ *  - hver melding som ALENE er strengere enn `ceiling` (standard `BUSINESS_CONFIDENTIAL`, altså kun `SECRET_RESTRICTED`) og PARET deres (svaret rett etter en følsom brukermelding, spørsmålet rett før et følsomt svar) -
+ *    gjelder også eldre meldinger utenfor det nylige vinduet, som D-384 ellers fjerner enkeltvis;
+ *  - og HELE HALEN fra den første følsomme meldingen i det nylige vinduet (de `recentWindow` siste, som D-384): en oppfølging uten stikkord («Det er kronisk, jeg tar Metformin», «da må jeg vente med bilen til bonusen
+ *    kommer») gjengir eller bygger på det følsomme uten at et ord står der, og parregelen alene slapp slike meldinger gjennom til skyen. Det gjør at skyvarianten aldri inneholder noe som kom ETTER at samtalen
+ *    berørte det følsomme i det nylige vinduet - prisen er mindre kontekst, ikke svakere personvern.
+ * `protect` kan peke ut meldinger som aldri tas med av halen (eierens nåværende melding, som sendes uansett); en melding som likevel parres bort av en følsom nabo vises i `withheld`, så kalleren kan stoppe.
+ * Rekkefølgen på de som beholdes er uendret. Det som holdes utenfor går aldri til skyen; den lokale reserveruten får fortsatt hele historikken.
  */
 export function withholdSensitiveMessages<T extends { role: string; content: string }>(
   messages: ReadonlyArray<T>,
-  options: { ceiling?: DataSensitivity } = {}
+  options: { ceiling?: DataSensitivity; recentWindow?: number; protect?: (message: T, index: number) => boolean } = {}
 ): { kept: T[]; withheld: T[] } {
   const ceiling = options.ceiling ?? "BUSINESS_CONFIDENTIAL";
+  const recentWindow = options.recentWindow ?? RECENT_HISTORY_WINDOW;
   const direct = messages.map((message) => RANK[classifyContentSensitivity({ texts: [message.content] }).sensitivity] > RANK[ceiling]);
   const drop = [...direct];
   direct.forEach((isDirect, index) => {
@@ -159,6 +186,15 @@ export function withholdSensitiveMessages<T extends { role: string; content: str
     if (role === "user" && messages[index + 1]?.role === "assistant") drop[index + 1] = true;
     if (role === "assistant" && messages[index - 1]?.role === "user") drop[index - 1] = true;
   });
+  const cutoff = Math.max(0, messages.length - recentWindow);
+  const firstRecent = direct.findIndex((isDirect, index) => index >= cutoff && isDirect);
+  if (firstRecent >= 0) {
+    // Halen starter ved den første følsomme meldingen i det nylige vinduet (eller dens brukerpartner rett foran, som parregelen allerede har tatt).
+    const tailStart = firstRecent > 0 && drop[firstRecent - 1] ? firstRecent - 1 : firstRecent;
+    for (let index = tailStart; index < messages.length; index += 1) {
+      if (!(options.protect?.(messages[index]!, index) ?? false)) drop[index] = true;
+    }
+  }
   const kept: T[] = [];
   const withheld: T[] = [];
   messages.forEach((message, index) => (drop[index] ? withheld : kept).push(message));

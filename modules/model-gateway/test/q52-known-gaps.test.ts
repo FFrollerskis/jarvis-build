@@ -90,3 +90,53 @@ describe("Q-52 A (D-450): de tvetydige ordene er BEVISST ikke sensitive - men te
     expect(decision.ambiguous_terms).toContain("konto");
   });
 });
+
+describe("Gjennomgang av WP-A (D-451): Jarvis' egen driftsprat om «helse» er ikke helse", () => {
+  const technical = [
+    "hvordan er helsen til systemet?", "helse-endepunktet svarer ikke", "connector-helse for github", "kjør helse-sjekken nå", "provider-helse er svekket", "api-helsen ser ok ut",
+    "helsetilstanden til connectoren", "helsen for tjenesten er god", "Tilkoblingsproblemer: github svekket, vercel nede.", "systemhelse og helsestatus", "helsen i nettverket"
+  ];
+  for (const phrase of technical) {
+    it(`«${phrase}» → ikke SECRET_RESTRICTED`, () => {
+      expect(classifyContentSensitivity({ texts: [phrase] }).sensitivity, phrase).not.toBe("SECRET_RESTRICTED");
+    });
+  }
+
+  it("«hiv» med små bokstaver er verbet «å hive» («hiv inn en PR»); «HIV» og faste uttrykk er helse", () => {
+    for (const phrase of ["hiv inn en PR i main", "Hiv den over til meg", "hiv det i søpla"]) {
+      expect(classifyContentSensitivity({ texts: [phrase] }).sensitivity, phrase).not.toBe("SECRET_RESTRICTED");
+    }
+    for (const phrase of ["HIV", "jeg har HIV", "jeg har hiv", "hiv-positiv", "hivtest i morgen", "testet positivt på hiv", "smittet av hiv"]) {
+      expect(classifyContentSensitivity({ texts: [phrase] }).sensitivity, phrase).toBe("SECRET_RESTRICTED");
+    }
+  });
+
+  it("personlig bruk av «helse» og bestemte former av angst/diabetes fanges fortsatt", () => {
+    for (const phrase of ["helsen min er dårlig", "dårlig helse", "jeg bekymrer meg for helsen", "helseproblemer i familien", "angsten tok meg", "angstanfall i natt", "diabetesen min", "diabetes"]) {
+      expect(classifyContentSensitivity({ texts: [phrase] }).sensitivity, phrase).toBe("SECRET_RESTRICTED");
+    }
+  });
+
+  it("unntaket for teknisk bruk kan ikke skjule en ekte helseomtale i samme melding (mellomrom gir ikke unntak; kun «helsen til <teknisk objekt>»)", () => {
+    for (const phrase of [
+      "jeg jobber på serveren helsen min er dårlig",
+      "systemet er bra, men helsen min er dårlig",
+      "connector helsen min er dårlig",
+      "helse-endepunktet er ok, og jeg har ADHD",
+      "helsen til legen min er ikke bra"
+    ]) {
+      expect(classifyContentSensitivity({ texts: [phrase] }).sensitivity, phrase).toBe("SECRET_RESTRICTED");
+    }
+  });
+});
+
+describe("gjennomgang av WP-A (D-451): klassifiseringen er lineær på lange, fiendtlige tekster", () => {
+  it("500 KB med gjentatte teknisk-helse-, HIV- og bindestrekmønstre klassifiseres på under 1,5 sekunder hver (ingen kvadratisk/katastrofal backtracking)", () => {
+    for (const unit of ["system", "systemhelse ", "helse-", "helsen til ", "tilkobling-helse", "lege-", "a.b.", "hiv ", "har ", "connector-helse helse-sjekk helsen til systemet "]) {
+      const text = unit.repeat(Math.ceil(500_000 / unit.length));
+      const started = Date.now();
+      classifyContentSensitivity({ texts: [text] });
+      expect(Date.now() - started, unit).toBeLessThan(1500);
+    }
+  });
+});

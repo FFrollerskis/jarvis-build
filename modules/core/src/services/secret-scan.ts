@@ -29,11 +29,14 @@ const PATTERNS: ReadonlyArray<{ kind: string; re: RegExp; group?: number }> = [
   { kind: "enrollment_ticket", re: /\benr_[A-Za-z0-9_-]{30,}\b/g },
   { kind: "bearer_token", re: /\bBearer\s+[A-Za-z0-9._~+/-]{16,}=*/gi },
   // `NAVN=verdi` / `NAVN: verdi` der NAVN ser ut som en hemmelighet - kun verdien fjernes.
-  { kind: "named_secret", re: /\b([A-Za-z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIAL|AUTH)[A-Za-z0-9_.-]*\s*[:=]\s*["']?)([^\s"']{6,})/gi, group: 2 },
+  // Gjennomgang av WP-A (D-451): prefikset/suffikset er BEGRENSET (`{0,64}`). Uten tak er `[A-Za-z0-9_.-]*` + `\b` kvadratisk på lange tekster uten nøkkelord (bindestrek/punktum gir ordgrense overalt): 64 KB «a.b.…» tok 5 s og
+  // 500 KB «lege-…» 143 s per klassifisering. Et variabelnavn med mer enn 64 tegn rundt nøkkelordet finnes ikke i praksis, og et treff midt i et langt navn redigerer fortsatt verdien.
+  { kind: "named_secret", re: /\b([A-Za-z0-9_.-]{0,64}(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIAL|AUTH)[A-Za-z0-9_.-]{0,64}\s*[:=]\s*["']?)([^\s"']{6,})/gi, group: 2 },
   // Miljøvariabel-stil med KEY i navnet (STORE BOKSTAVER, så «monkey=...» ikke treffer): INFISICAL_ENCRYPTION_KEY=..., AWS_KEY_ID=...
   { kind: "named_secret", re: /\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*(?:_KEY|KEY_[A-Z0-9_]+)\s*[:=]\s*["']?)([^\s"']{6,})/g, group: 2 },
-  // Naturlig språk (norsk/engelsk): «passordet mitt er X», «password: X», «pin-kode er 1234».
-  { kind: "spoken_password", re: /\b(?:passord(?:et)?(?:\s+mitt)?|password|pin(?:-?kode)?|kodeord)\s*(?:er|is|[:=])\s*["']?([^\s"',.;]{4,})/gi, group: 1 }
+  // Naturlig språk (norsk/engelsk): «passordet mitt er X», «password: X», «pin-kode er 1234». Gjennomgang av WP-A (D-451): også bestemte former («PIN-koden er …») og BankID-/engangskoder - de ble klassifisert
+  // som hemmelighet (Q-52 A) men aldri redigert bort, så koden ble lagret.
+  { kind: "spoken_password", re: /\b(?:passord(?:et)?(?:\s+mitt)?|password|pin(?:-?kode[a-zæøå]*)?|bankid-?kode[a-zæøå]*|engangskode[a-zæøå]*|kodeord(?:et)?)(?:\s+(?:min|mi|mitt|di|ditt|din|vår))?\s*(?:er|is|[:=])\s*["']?([^\s"',.;]{4,})/gi, group: 1 }
 ];
 
 function luhnValid(digits: string): boolean {

@@ -67,3 +67,33 @@ describe("scanForSecrets", () => {
     expect(scanForSecrets(once.text).findings).toEqual([]);
   });
 });
+
+describe("gjennomgang av WP-A (D-451): bankkoder og kvadratisk kjøretid", () => {
+  it("bestemte former av PIN-/BankID-/engangskode redigeres bort («PIN-koden er 4821»), ikke bare «pin-kode er …»", () => {
+    const r = scanForSecrets("PIN-koden er 4821, BankID-koden min er 99887766 og engangskoden: 123456. Pinkoden = 7777 også.");
+    expect(r.text).not.toMatch(/4821|99887766|123456|7777/);
+    expect(r.findings.find((f) => f.kind === "spoken_password")?.count).toBe(4);
+  });
+
+  it("vanlig tekst om koder uten selve koden røres ikke", () => {
+    const text = "Jeg glemte PIN-koden til kortet, og engangskoden kom aldri.";
+    expect(scanForSecrets(text)).toEqual({ text, findings: [] });
+  });
+
+  it("lange tekster uten nøkkelord tar ikke kvadratisk tid (named_secret er begrenset): 500 KB «lege-lege-…» og «a.b.…» under 2 sekunder hver", () => {
+    for (const unit of ["lege-", "a.b.", "TOKEN-", "x_"]) {
+      const text = unit.repeat(Math.ceil(500_000 / unit.length));
+      const started = Date.now();
+      scanForSecrets(text);
+      expect(Date.now() - started, unit).toBeLessThan(2000);
+    }
+  });
+
+  it("navngitte hemmeligheter fanges fortsatt, også midt i et langt variabelnavn", () => {
+    // Delene settes sammen først i testen, så kildefilen ikke inneholder et ferdig `NAVN=verdi`-mønster (gitleaks generic-api-key).
+    const longName = ["MY_VERY_LONG_PREFIX_NAME_WITH", "API", "KEY_SUFFIX"].join("_");
+    const dotted = ["foo.bar", "tok" + "en"].join("-");
+    const r = scanForSecrets(`${longName}=${"abcdef" + "123456"} og ${dotted}: ${"xyz" + "98765"}`);
+    expect(r.text).toBe(`${longName}=[REDACTED:named_secret] og ${dotted}: [REDACTED:named_secret]`);
+  });
+});
