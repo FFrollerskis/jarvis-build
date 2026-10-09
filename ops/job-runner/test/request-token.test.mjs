@@ -3,6 +3,8 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { assertRequestToken, MAX_TOKEN_CHARS, MIN_REQUEST_TOKEN_CHARS, REQUEST_TOKEN_FORMAT } from "../lib/credentials.mjs";
+import { RunnerError } from "../lib/errors.mjs";
+import { HostGit } from "../lib/git.mjs";
 import { SecretRegistry } from "../lib/log.mjs";
 import { RUNNER_TOKEN, createHarness, gitSync, syntheticInstallationToken } from "./support/harness.mjs";
 import { createGitSpy } from "./support/git-spy.mjs";
@@ -543,6 +545,63 @@ describe("D: hemmelighetsregisteret (tellende, kortlevd) - kortlevde tokens hope
     const log = h.logLines.join("\n");
     for (const t of tokens) expect(log).not.toContain(t);
   }, 120_000);
+
+  it("JobManager.obtainToken/assertTokenPolicy er egne porter: de validerer og avviser UAVHENGIG av hvem som kalte dem (ikke bare API-skjemaet)", async () => {
+    const h = await harness({ slugs: ["owner/req", "owner/file"], requestTokenSlugs: ["owner/req"] });
+    const m = h.service.manager;
+    const code = async (promiseOrFn) => {
+      try { await (typeof promiseOrFn === "function" ? promiseOrFn() : promiseOrFn); } catch (e) { return e instanceof RunnerError ? `${e.code}:${e.status}` : `other:${e}`; }
+      return "ok";
+    };
+    // request-repo: formkontrollen gjentas, og manglende token nektes
+    expect(await code(m.obtainToken("owner/req", TOKEN_A))).toBe("ok");
+    expect(await code(m.obtainToken("owner/req", undefined))).toBe("git_token_required:400");
+    for (const bad of ["sk-ant-api03-aaaaaaaaaaaaaaaaaaaaaaaa", "ghs_kort", `${TOKEN_A}\n`, 12345678, null, "", RUNNER_TOKEN]) {
+      expect(await code(m.obtainToken("owner/req", bad)), String(bad).slice(0, 20)).toBe("git_token_invalid:400");
+    }
+    // file-repo: et token nektes, og kilden kalles ikke
+    expect(await code(m.obtainToken("owner/file", TOKEN_A))).toBe("git_token_not_accepted:403");
+    // policyen alene (kalles før noe reserveres)
+    expect(await code(() => m.assertTokenPolicy("owner/req", undefined))).toBe("git_token_required:400");
+    expect(await code(() => m.assertTokenPolicy("owner/file", TOKEN_A))).toBe("git_token_not_accepted:403");
+    expect(await code(() => m.assertTokenPolicy("owner/req", TOKEN_A))).toBe("ok");
+    expect(await code(() => m.assertTokenPolicy("owner/file", undefined))).toBe("ok");
+    // ukjent/skadelig repo-nøkkel faller aldri til request-modus og treffer aldri prototypen
+    for (const slug of ["__proto__", "constructor", "toString", "owner/unknown"]) expect(m.credentialSourceOf(slug), slug).toBe("file");
+  });
+
+  it("HostGit.netGit holder tokenet i registeret KUN mens git kjører, og frigjør det også når git feiler eller ikke kan startes (enhet, uavhengig av manageren)", async () => {
+    const registry = new SecretRegistry();
+    const seen = [];
+    const result = (status, stderr) => ({ status, signal: null, stdout: Buffer.alloc(0), stderr: Buffer.from(stderr), timedOut: false, truncated: false, cancelled: false });
+    let mode = "fail";
+    const run = async (_bin, _args, options) => {
+      seen.push({ env: options.env, registered: registry.redact(TOKEN_A) });
+      if (mode === "spawn") return { ...result(null, ""), spawnError: "ENOENT" };
+      return mode === "ok" ? result(0, "") : result(128, `fatal: remote error: ${TOKEN_A} avvist`);
+    };
+    const git = new HostGit({
+      gitBin: "/usr/bin/git", nodePath: "/usr/bin/node", helperScript: "/opt/x/credential-helper.mjs", homeDir: "/tmp/h", templateDir: "/tmp/t",
+      remote: { protocol: "https", host: "github.com" }, run, registry
+    });
+    const netGit = () => git.netGit(["ls-remote", "https://github.com/owner/repo.git", "HEAD"], { slug: "owner/repo", token: TOKEN_A });
+    const err = await netGit().catch((e) => e);
+    expect(err).toBeInstanceOf(RunnerError);
+    expect(err.code).toBe("git_network_failed");
+    expect(err.detail).toContain("[REDACTED]"); // redigert fordi det er registrert mens git kjørte
+    expect(err.detail).not.toContain(TOKEN_A.slice(0, 20));
+    expect(seen[0].registered).toBe("[REDACTED]");          // registrert UNDER kallet
+    expect(seen[0].env["JARVIS_GIT_CREDENTIAL_TOKEN"]).toBe(TOKEN_A); // og levert som env til dette ene kallet
+    expect(registry.size).toBe(0);                          // frigjort etterpå
+    mode = "spawn";
+    const spawnErr = await netGit().catch((e) => e);
+    expect(spawnErr.code).toBe("git_network_failed");
+    expect(registry.size).toBe(0);
+    mode = "ok";
+    await netGit();
+    expect(registry.size).toBe(0);
+    expect(seen.every((s) => !JSON.stringify(s.env).includes("x-access-token"))).toBe(true); // brukernavnet kommer fra helperen, ikke fra env
+  });
 
   it("samme token i to samtidige forespørsler: dekningen består til BEGGE er ferdige", async () => {
     const h = await harness({ ...REQ, runner: { max_concurrent_jobs: 4 } });

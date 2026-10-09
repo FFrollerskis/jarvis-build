@@ -7,12 +7,13 @@ import { UUID_V4, parseCreateJob, parseExec, parsePublish } from "./schemas.mjs"
  * WP-C1: HTTP-API over Unix-domene-socket. API-et er SMALT med vilje:
  *
  *   GET    /v1/health
- *   POST   /v1/jobs                {repo, base_branch?, env?, task_id?, tenant_id?}
+ *   POST   /v1/jobs                {repo, base_branch?, env?, task_id?, tenant_id?, git_token?}
  *   POST   /v1/jobs/:id/exec       {argv, timeout_ms?, env?}
- *   POST   /v1/jobs/:id/publish    {branch}
+ *   POST   /v1/jobs/:id/publish    {branch, git_token?}
  *   DELETE /v1/jobs/:id
  *
- * Det tar ALDRI imot docker-flagg, mounts, image, nettverk eller stier. Autentisering (bearer, konstant-tid) skjer FØR ruting og
+ * Det tar ALDRI imot docker-flagg, mounts, image, nettverk eller stier. Eneste credential som kan komme i en forespørsel er `git_token` (kortlevd, repo-scopet,
+ * kun klone/publish, kun for repoer vertsadmin har satt til `source: request`; se schemas.mjs/jobs.mjs). Autentisering (bearer, konstant-tid) skjer FØR ruting og
  * kroppslesing, så en uautentisert klient ikke kan skille ukjente ruter fra kjente. Ukjente felt avvises, body har hard grense,
  * og feil returnerer en stabil kode - aldri interne feilmeldinger.
  */
