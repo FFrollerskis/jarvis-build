@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   EMPTY_PUSH_LEDGER, FOLLOW_UP_PUSH_DEFAULTS, isQuietHour, localHour, parseFollowUpPushPolicy, planFollowUpPush, reduceLedger, runFollowUpPushTick, safeFollowUpTitle, toPushItem,
-  type FollowUpLedgerPort, type FollowUpNotifier, type FollowUpPushPolicy, type NotifyOutcome, type PushCandidate, type PushDecision, type PushLedgerRow, type PushLedgerState, type PushSend, type SettleOutcome
+  type FollowUpLedgerPort, type FollowUpNotifier, type FollowUpPushPolicy, type NotifyOutcome, type PushCandidate, type PushDecision, type PushLedgerRow, type PushLedgerState, type PushSend, type PushSendGuard, type SettleOutcome
 } from "../src/index.ts";
 
 /**
@@ -37,7 +37,10 @@ describe("policy fra miljøet", () => {
   it("er AV som standard og med dokumenterte standardverdier", () => {
     const p = parseFollowUpPushPolicy({});
     expect(p.enabled).toBe(false);
-    expect(p).toMatchObject({ max_messages_per_day: 3, max_items_per_message: 5, min_gap_minutes: 60, quiet_start_hour: 22, quiet_end_hour: 7, time_zone: "Europe/Oslo", stale_overdue_days: 14 });
+    expect(p).toMatchObject({
+      max_messages_per_day: 3, max_items_per_message: 5, min_gap_minutes: 60, quiet_start_hour: 22, quiet_end_hour: 7, time_zone: "Europe/Oslo", stale_overdue_days: 14,
+      max_attempts_per_message: 3, retry_backoff_minutes: [15, 60, 240], include_titles: true
+    });
   });
 
   it("slås kun på av den eksakte verdien «true» (ikke 1/yes/TRUE/on/ja)", () => {
@@ -105,7 +108,10 @@ describe("av, ugyldig policy, døgngrense og minsteavstand", () => {
   });
 
   it("ugyldig policy (0 per døgn, NaN, ugyldig time) sender ikke", () => {
-    for (const bad of [{ max_messages_per_day: 0 }, { max_messages_per_day: Number.NaN }, { max_items_per_message: 0 }, { quiet_start_hour: 24 }, { quiet_end_hour: -1 }, { min_gap_minutes: -5 }, { stale_overdue_days: 0 }]) {
+    for (const bad of [
+      { max_messages_per_day: 0 }, { max_messages_per_day: Number.NaN }, { max_items_per_message: 0 }, { quiet_start_hour: 24 }, { quiet_end_hour: -1 }, { min_gap_minutes: -5 }, { stale_overdue_days: 0 },
+      { max_attempts_per_message: 0 }, { max_attempts_per_message: 1.5 }, { retry_backoff_minutes: [] }, { retry_backoff_minutes: [15, -1] }, { retry_backoff_minutes: [Number.NaN] }, { include_titles: undefined as never }
+    ]) {
       expect(plan([cand()], { policy: bad }), JSON.stringify(bad)).toEqual({ send: false, reason: "invalid_policy" });
     }
   });
@@ -193,18 +199,23 @@ describe("safeFollowUpTitle (tittelen er sitert DATA, aldri instruks)", () => {
     }
   });
 
-  it("fjerner også vert.tld/sti med UKJENT toppdomene (en sti etter et punktum-navn er en lenke), men lar versjoner, tall og filnavn være i fred", () => {
+  it("fjerner også vert.tld/sti med UKJENT toppdomene (en sti etter et punktum-navn er en lenke), men lar versjoner og tall være i fred", () => {
     for (const evil of ["se evil.example/x nå", "a.b.c.example/path?x=1", "bank.neonbank/logg-inn"]) {
       const t = safeFollowUpTitle(evil);
       expect(t, evil).toContain("[lenke]");
       expect(t, evil).not.toMatch(/example|neonbank|path/);
     }
-    for (const fine of ["Rapport v1.2 og frist 3.5", "Oppdater rapport.pdf", "Kontrakt 2026.10 / revisjon", "bruk 50/50-fordeling"]) expect(safeFollowUpTitle(fine), fine).toBe(fine);
+    for (const fine of ["Rapport v1.2 og frist 3.5", "Kontrakt 2026.10 revisjon", "Ring Ola om tilbudet på kr 12 500 (haster)", "Frist: fredag", "data: nye tall"]) expect(safeFollowUpTitle(fine), fine).toBe(fine);
   });
 
-  it("fjerner @-omtaler og /-kommandoer (klikkbare i Telegram) og markup-tegn", () => {
-    expect(safeFollowUpTitle("spør @jarvis_bot og /revoke_all nå")).toBe("spør jarvis_bot og revoke_all nå");
-    expect(safeFollowUpTitle("`kode` <b>fet</b>")).toBe("kode bfet/b");
+  it("M2: ethvert «ord.ord» der siste ledd er 2-24 bokstaver (eller xn--) er en lenke - også filnavn og forkortelser (trygg side)", () => {
+    for (const evil of ["Oppdater rapport.pdf", "f.eks. dette", "Ola.Han svarer", "se a.bc-d"]) expect(safeFollowUpTitle(evil), evil).toContain("[lenke]");
+  });
+
+  it("fjerner @-omtaler, /-kommandoer og markup-tegn uansett posisjon (klikkbare i Telegram)", () => {
+    expect(safeFollowUpTitle("spør @jarvis_bot og /revoke_all nå")).toBe("spør jarvisbot og revokeall nå");
+    expect(safeFollowUpTitle("`kode` <b>fet</b>")).toBe("kode bfetb");
+    expect(safeFollowUpTitle("bruk 50/50-fordeling")).toBe("bruk 5050-fordeling");
   });
 
   it("fjerner usynlige tegn, retningsoverstyring, tag-tegn og kontrolltegn - og slår linjer sammen til én", () => {
@@ -219,9 +230,10 @@ describe("safeFollowUpTitle (tittelen er sitert DATA, aldri instruks)", () => {
     const long = safeFollowUpTitle("ab".repeat(100));
     expect(Array.from(long).length).toBeLessThanOrEqual(60);
     expect(long.endsWith("…")).toBe(true);
-    const emoji = safeFollowUpTitle("😀".repeat(100));
-    expect(Array.from(emoji).length).toBeLessThanOrEqual(60);
-    expect(() => encodeURIComponent(emoji)).not.toThrow(); // ingen løst surrogat
+    const astral = safeFollowUpTitle("\u{20000}".repeat(100)); // CJK utvidelse B: bokstaver utenfor BMP (to surrogater per tegn)
+    expect(Array.from(astral).length).toBeLessThanOrEqual(60);
+    expect(() => encodeURIComponent(astral)).not.toThrow(); // ingen løst surrogat
+    expect(safeFollowUpTitle("😀".repeat(100))).toBe("uten tittel"); // emoji er ikke på hvitelisten
     expect(safeFollowUpTitle("   \n\t ")).toBe("uten tittel");
     expect(safeFollowUpTitle(RLO + ZWSP)).toBe("uten tittel");
     expect(safeFollowUpTitle("https://evil.example")).toBe("[lenke]");
@@ -321,7 +333,7 @@ describe("reduceLedger", () => {
   const row = (seq: number, type: PushLedgerRow["type"], min: number, key: string, items: string[] = []): PushLedgerRow => ({ seq, type, at: T(min), message_key: key, item_keys: items });
 
   it("tom ledger: ingenting forbrukt, ingen meldinger", () => {
-    expect(reduceLedger([], NOON)).toEqual({ consumed_keys: new Set(), messages_last_24h: 0, last_reserved_at: null });
+    expect(reduceLedger([], NOON)).toEqual({ consumed_keys: new Set(), messages_last_24h: 0, last_reserved_at: null, attempts: new Map() });
   });
 
   it("reservert/sendt/ukjent holder løkkene og teller mot døgngrensen; definitiv feil frigir dem", () => {
@@ -398,9 +410,11 @@ class FakeNotifier implements FollowUpNotifier {
   }
 }
 
-function setup(candidates: PushCandidate[] | (() => Promise<PushCandidate[]>), notifier = new FakeNotifier(), now = () => NOON) {
+const OPEN_GUARD: PushSendGuard = { blocked: async () => null };
+
+function setup(candidates: PushCandidate[] | (() => Promise<PushCandidate[]>), notifier = new FakeNotifier(), now = () => NOON, guard: PushSendGuard = OPEN_GUARD) {
   const ledger = new FakeLedger(now);
-  const ports = { candidates: typeof candidates === "function" ? candidates : async () => candidates, ledger, notifier };
+  const ports = { candidates: typeof candidates === "function" ? candidates : async () => candidates, ledger, notifier, guard };
   return { ledger, notifier, ports, run: () => runFollowUpPushTick(ports, ON, now) };
 }
 
@@ -456,13 +470,13 @@ describe("runFollowUpPushTick", () => {
     expect(notifier.calls).toHaveLength(1);
   });
 
-  it("definitiv sendefeil frigir løkkene (neste tikk kan prøve igjen), og meldingsnøkkelen er den samme (gateway-idempotens)", async () => {
+  it("BEVIST ikke sendt (avslag før leverandørkallet) frigir løkkene (neste tikk kan prøve igjen), og meldingsnøkkelen er den samme (gateway-idempotens)", async () => {
     let fail = true;
-    const notifier = new FakeNotifier(() => (fail ? { ok: false, reason: "tool_failed:telegram_error_500" } : { ok: true }));
+    const notifier = new FakeNotifier(() => (fail ? { ok: false, reason: "kill_switch_active" } : { ok: true }));
     let t = NOON.getTime();
     const { run, ledger } = setup([cand()], notifier, () => new Date(t));
     expect(await run()).toMatchObject({ sent: false, reason: "send_failed", settled: true });
-    expect(ledger.settled[0]).toMatchObject({ outcome: "failed", detail: "tool_failed:telegram_error_500" });
+    expect(ledger.settled[0]).toMatchObject({ outcome: "failed", detail: "kill_switch_active" });
     fail = false;
     t += 61 * 60_000;
     expect(await run()).toMatchObject({ sent: true });
@@ -470,10 +484,15 @@ describe("runFollowUpPushTick", () => {
     expect(notifier.calls[0]?.key).toBe(notifier.calls[1]?.key);
   });
 
-  it("uklart utfall (tidsavbrudd/uverifisert/kastet feil) beholder reservasjonen: løkken varsles aldri en gang til", async () => {
+  it("uklart utfall (tidsavbrudd/5xx/nettverksbrudd/uverifisert/ukjent tekst/kastet feil) beholder reservasjonen: løkken varsles aldri en gang til", async () => {
     for (const make of [
       () => ({ ok: false, reason: "postcondition_unverified:tool_timeout_outcome_unknown" }) as NotifyOutcome,
       () => ({ ok: false, reason: "execution_in_flight_or_outcome_unknown" }) as NotifyOutcome,
+      () => ({ ok: false, reason: "tool_failed:telegram_error_500" }) as NotifyOutcome,
+      () => ({ ok: false, reason: "tool_failed:telegram_error_502" }) as NotifyOutcome,
+      () => ({ ok: false, reason: "tool_failed:tool_timeout" }) as NotifyOutcome,
+      () => ({ ok: false, reason: "tool_failed:fetch failed" }) as NotifyOutcome,
+      () => ({ ok: false, reason: "noe helt ukjent" }) as NotifyOutcome,
       () => { throw new Error("socket hang up"); }
     ]) {
       let t = NOON.getTime();

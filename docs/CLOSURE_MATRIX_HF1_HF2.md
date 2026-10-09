@@ -66,7 +66,7 @@ HF2-PDF-en ligger ikke i repoet; radene bygger på beslutningsloggen D-406…D-4
 | OPS-RUNTIME | backup/restore-skript, watchdog. **WP-C2 (D-453):** planlagt tikk/lås/retensjon/status `DORMANT` til cron installeres; off-site-sinks (rclone, rsync+ssh, lokal sti) `DORMANT` + `BLOCKED_EXTERNAL` (eier velger mål); backup-heartbeat `DORMANT` + `BLOCKED_EXTERNAL`; API-oppetids-heartbeat `DORMANT` (kablet i `main.ts`, av uten URL); selvdiagnose-område «Backup» `WIRED` (`UNKNOWN` til statusmappen er montert); restore-drill med RTO/RPO `DORMANT`. Uavhengig gjennomgang: 15 funn + 8 testgap rettet i oppfølgings-PR (F15 = erklært begrensning) | Off-site-retensjon `DEFERRED`; EV-19-kobling `BUILT_UNWIRED` (`backupMaintenanceLastRun` finnes, ikke koblet til `maintenanceSection`); `C13` i UA-0-gaten ikke lagt inn; `nas-restore-verify.sh --network none` `NOT VERIFIED` (ingen Docker-daemon i byggemiljøet) | `ops/backup/acceptance-ops.sh nas /volume1/jarvisbuild-data/backups/encrypted` på NAS (exit 0 = alt bestått, 3 = ikke lukket); på maskinen med privatnøkkelen: `ops/backup/acceptance-ops.sh drill ~/jarvis-drill --identity <nøkkelfil> --from-offsite` |
 | UA0-AUTHORITY | `authority.ts`, klasse D-pipeline | Fullfør D-kjede for finans/Zapier/Outlook bak step-up → WP-F | Pause/revoke/preflight/recovery i NAS-runtime |
 | UA0-PRIVACY | `PROCESSING_INVENTORY.md` + CI-vakt (D-420) | – | DPIA godkjent av eier |
-| UA0-RUNRATE | run-rate-rapport + maintenance ledger (D-421) | Value-loop-bruksmetrikk → WP-C | Se tallene i dashbordet på NAS |
+| UA0-RUNRATE | run-rate-rapport + maintenance ledger (D-421) + Value Center-bruksmetrikk per verdiløkke (`executive.get_value_report`, hurtigbane, `POST /value/query`, dashbord «Verdi og bruk», D-456): `WIRED`, testet mot ekte Postgres, IKKE kjørt på NAS | – | Åpne «Verdi og bruk» (eller si «hva har du hjulpet meg med») på NAS og sammenlign tallene (briefer, jobber, godkjenninger) med virkeligheten |
 
 ## 4. HF1 UA-0 … UA-11 (kap. 8) – hva som gjenstår å bygge
 
@@ -89,11 +89,11 @@ HF2-PDF-en ligger ikke i repoet; radene bygger på beslutningsloggen D-406…D-4
 
 | Løkke | Status | Gjenstår |
 |---|---|---|
-| V1 Daily Executive Brief | `WIRED` (Daily Brief, `DailyScheduler`) | Bruksmetrikk; observere daglig bruk |
-| V2 Unified Follow-up | `BUILT_UNWIRED` (conversation-graph, pull) | Push-levering → WP-C |
-| V3 Builder Loop | `NOT_BUILT` (selvmodifikasjon frosset, D-397) | Sovende løkke bak D-32 og EV-0 → WP-B/C |
-| V4 Business Operating Loop | `PARTIAL` | Business-tenant (Q-48) → WP-D2 |
-| V5 Autonomous Operations | `NOT_BUILT` | Bak bekreftelse/step-up → WP-C/F |
+| V1 Daily Executive Brief | `WIRED` (Daily Brief, `DailyScheduler`) + bruksmetrikk i Value Center (genererte/leverte briefer, daglig løper; «åpnet/besvart» kan ikke måles) | Observere daglig bruk på NAS |
+| V2 Unified Follow-up | pull `WIRED` (conversation-graph); push `DORMANT` (`JARVIS_V2_PUSH_ENABLED=true`: høyst én gang, forsøkstak/backoff, stopp før reservasjon, vasket tittel, D-456) | Verifiser på NAS: sett flagget, se én melding som ikke gjentas (`SELECT … FROM audit_events WHERE type LIKE 'followup.push_%'`) |
+| V3 Builder Loop | `DORMANT` (kun ren beredskapsvurdering; `activation_decision` er alltid false; selvmodifikasjon frosset, D-397) | D-32, EV-0, worker-isolasjon og eierens navngitte D-beslutning |
+| V4 Business Operating Loop | `PARTIAL` (Business OS-verktøyene finnes; selve løkken ikke) | Business-tenant (Q-48) → WP-D2 |
+| V5 Autonomous Operations | `BUILT_UNWIRED` (ren forslagslogikk, `executes: false`, AV som standard) | Levering via bekreftelsesvei (TTL 5 min) og signert D-løp for omstart → WP-C/F |
 
 ## 6. Definition of Done, kap. 28 (15 punkter)
 

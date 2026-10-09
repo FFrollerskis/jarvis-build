@@ -35,6 +35,14 @@ export function flattenText(raw: unknown, max: number): string {
   return truncateChars(stripInvisible(raw).replace(/\s+/g, " ").trim(), max);
 }
 
+/**
+ * L1 (gjennomgang av PR #312): oppslag i en ordbok med en nøkkel som kan stamme fra en kilde utenfor koden (en løkketype fra databasen, en id fra en rapport). `table[key]` slår også opp i prototypekjeden:
+ * `constructor`/`toString`/`__proto__` gir en FUNKSJON (som havnet i meldingen som «function Object() …» eller ga NaN i en sortering). Kun egne felt gjelder; alt annet er `undefined`.
+ */
+export function ownValue<T>(table: Readonly<Record<string, T>>, key: unknown): T | undefined {
+  return typeof key === "string" && Object.hasOwn(table, key) ? table[key] : undefined;
+}
+
 /** Ekstern årsak -> trygg, kort norsk linje. Tom/ugyldig gir «ukjent årsak» (aldri en tom forklaring). */
 export function cleanReason(raw: unknown, max = 160): string {
   const flat = flattenText(raw, max);
