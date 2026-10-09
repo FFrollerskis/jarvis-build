@@ -96,7 +96,8 @@ export const CONTROL_ACTION_ALLOWED: Readonly<Record<ControlActionEndpoint, read
     "activate_kill_switch", "deactivate_kill_switch",
     "freeze_connector", "unfreeze_connector",
     "revoke_credential", "restore_credential", "revoke_device",
-    "enable_finance_kill_switch", "disable_finance_kill_switch"
+    "enable_finance_kill_switch", "disable_finance_kill_switch",
+    "cancel_task"
   ],
   "/owner-controls/connector-credentials": ["test_connector"]
 };

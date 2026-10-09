@@ -11,7 +11,9 @@ export const STEP_UP_CHANNELS: ReadonlySet<string> = new Set(["web", "desktop", 
 
 /** Handlinger som ALDRI krever step-up: de reduserer risiko og må virke selv under stress/redusert autentisering. */
 export const STEP_UP_EXEMPT_ACTIONS: ReadonlySet<string> = new Set([
-  "activate_kill_switch", "enable_finance_kill_switch", "pause_domain", "freeze_connector", "test_connector", "resolve_situation"
+  "activate_kill_switch", "enable_finance_kill_switch", "pause_domain", "freeze_connector", "test_connector", "resolve_situation",
+  // WP-H0 (JARVIS-087): å avbryte en bakgrunnsjobb/agent STOPPER noe og må virke raskt. Fortsatt eier-kun (verktøydefinisjonens parameterAuthorizer) og aldri på en modellflate.
+  "cancel_task"
 ]);
 
 /**

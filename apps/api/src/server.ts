@@ -355,13 +355,17 @@ const MEMORY_PROPOSAL_ACTIONS = ["list_proposals", "approve_proposal", "reject_p
  * `ToolGateway.execute()` sin EGEN, allerede eksisterende klasse D-preflight/
  * autoritetssjekk (samme dobbelt-gatede modell som §2/§6 i design-notatet
  * beskriver - denne ruten legger ALDRI til en tredje, egen autoritetsrunde).
+ *
+ * WP-H0 (JARVIS-087): den 13. handlingen, `cancel_task`, er kontrollsenterets avbryt-handling for en bakgrunnsjobb/agent. Den er et gjennomslag til den EKSISTERENDE kanselleringsveien (`TaskService.cancel`, samme som
+ * chatens «avbryt jobb <id>»), eier-kun (verktøydefinisjonens parameterAuthorizer), klasse B og en stopp-handling uten step-up (se `STEP_UP_EXEMPT_ACTIONS`). Allowlisten er ellers uendret.
  */
 export const EXECUTIVE_MUTATE_ACTIONS = [
   "pause_domain", "resume_domain", "resolve_situation",
   "activate_kill_switch", "deactivate_kill_switch",
   "freeze_connector", "unfreeze_connector",
   "revoke_credential", "restore_credential", "revoke_device",
-  "enable_finance_kill_switch", "disable_finance_kill_switch"
+  "enable_finance_kill_switch", "disable_finance_kill_switch",
+  "cancel_task"
 ] as const;
 
 /**

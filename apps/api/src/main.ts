@@ -964,7 +964,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         },
         slo: { report: sloReports },
         evolution: { report: evolutionReports },
-        controlCenters
+        controlCenters,
+        // WP-H0 (JARVIS-087): kontrollsenterets avbryt-handling bruker den EKSISTERENDE kanselleringsveien (samme `taskService` som chatens «avbryt jobb <id>»).
+        tasks: { cancel: (identity, taskId) => taskService.cancel(identity, taskId) }
       }))),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten

@@ -123,7 +123,7 @@ describe("eier-kun port i verktøydefinisjonen", () => {
     expect(d.parameterAuthorizer?.({}, owner)).toEqual({ allowed: false, reason: "control_center_owner_check_not_configured" });
   });
 
-  it("ingen andre executive-lesinger har fått en slik port ved et uhell", () => {
-    for (const d of defs.filter((x) => x.tool_id === "executive" && x.action !== "get_control_center")) expect(d.parameterAuthorizer, d.action).toBeUndefined();
+  it("ingen andre executive-handlinger har fått en slik port ved et uhell (unntak: `cancel_task`, kontrollsenterets avbryt-handling, som er eier-kun - se wph0-cancel-task.test.ts)", () => {
+    for (const d of defs.filter((x) => x.tool_id === "executive" && x.action !== "get_control_center" && x.action !== "cancel_task")) expect(d.parameterAuthorizer, d.action).toBeUndefined();
   });
 });

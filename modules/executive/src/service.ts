@@ -98,6 +98,13 @@ export interface ExecutiveServiceOptions {
    * Uten registeret: oversikten sier ærlig at ingen sentre er koblet inn (aldri en gjetning om at alt er i orden).
    */
   controlCenters?: ControlCenterRegistry;
+  /**
+   * WP-H0 (JARVIS-087): avbryt en bakgrunnsjobb/agent fra kontrollsenteret. Den EKSISTERENDE kanselleringsveien (`TaskService.cancel`: klasse B-policy, `requestCancel`, revisjon `task.cancelled`) injiseres fra
+   * `apps/api`; executive-laget har ingen egen kanselleringslogikk. Uten denne avvises handlingen (`executive_tasks_not_configured`).
+   */
+  tasks?: {
+    cancel(identity: IdentityContext, taskId: string): Promise<{ ok: true; value: { cancelled: boolean; outcome: "cancelled" | "requested" | "not_cancellable" } } | { ok: false; reason: string }>;
+  };
 }
 
 export class ExecutiveService {
@@ -266,6 +273,18 @@ export class ExecutiveService {
   }
 
   /**
+   * WP-H0 (JARVIS-087): gjennomslag til den EKSISTERENDE kanselleringsveien for en bakgrunnsjobb/agent. Eier-kun håndheves av verktøydefinisjonen (`parameterAuthorizer`) FØR dette kalles; policy (klasse B),
+   * tenant-RLS og revisjon (`task.cancelled`) skjer i `TaskService.cancel`. Et avslag fra policy kastes (blir et `ok:false` på det ytre kallet), aldri en stille «ok».
+   */
+  async cancelTask(identity: IdentityContext, taskId: string): Promise<{ task_id: string; cancelled: boolean; outcome: "cancelled" | "requested" | "not_cancellable" }> {
+    const tasks = this.options.tasks;
+    if (!tasks) throw new Error("executive_tasks_not_configured");
+    const result = await tasks.cancel(identity, taskId);
+    if (!result.ok) throw new ExecutiveAccessDeniedError("cancel_task", result.reason);
+    return { task_id: taskId, cancelled: result.value.cancelled, outcome: result.value.outcome };
+  }
+
+  /**
    * K1 (Sovereign graduation, D-164): ÉN samlet lesing av HELE eier-
    * kontrolloverflaten - komponerer `owner_controls.get_control_state`
    * (global kill switch + navngitte frosne connectorer/tilbakekalte
@@ -392,6 +411,16 @@ export class ExecutiveService {
    */
   authorizeControlCenter(identity: IdentityContext): { allowed: boolean; reason: string } {
     return this.options.controlCenters ? this.options.controlCenters.authorize(identity) : { allowed: true, reason: "no_control_centers" };
+  }
+
+  /**
+   * WP-H0 (JARVIS-087): eier-kun-porten for kontrollsenterets MUTASJONER (`cancel_task`). I motsetning til lesingen over er den FAIL-CLOSED også uten register: en skrivehandling slippes aldri gjennom fordi
+   * «det ikke er noe å lekke». Samme eier-predikat (`isOwner`, i drift `resolveAuthorityMode(...) === "SOVEREIGN"`) som kontrollsentrene bruker.
+   */
+  authorizeOwnerControl(identity: IdentityContext): { allowed: boolean; reason: string } {
+    const registry = this.options.controlCenters;
+    if (!registry) return { allowed: false, reason: "control_center_owner_check_not_configured" };
+    return registry.authorize(identity);
   }
 
   /** WP-H0: oversikt over de ti kontrollsentrene (registrerte bygges, øvrige listes som ikke koblet inn). RENT lesende. */

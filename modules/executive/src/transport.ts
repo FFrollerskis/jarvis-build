@@ -28,6 +28,11 @@ export class ExecutiveTransport implements ToolTransport {
     return this.service.authorizeControlCenter(identity);
   }
 
+  /** WP-H0 (JARVIS-087): eier-kun-porten for kontrollsenterets mutasjoner (`cancel_task`) - fail-closed også uten register. */
+  authorizeOwnerControl(identity: Parameters<ExecutiveService["authorizeOwnerControl"]>[0]): { allowed: boolean; reason: string } {
+    return this.service.authorizeOwnerControl(identity);
+  }
+
   async invoke(
     action: string,
     parameters: Record<string, JsonValue>,
@@ -116,6 +121,11 @@ export class ExecutiveTransport implements ToolTransport {
       case "deactivate_kill_switch": {
         const result = await this.service.deactivateKillSwitch(identity);
         return toolResultToTransportResult(result);
+      }
+      case "cancel_task": {
+        // WP-H0 (JARVIS-087): kontrollsenterets avbryt-handling - gjennomslag til den eksisterende kanselleringsveien (TaskService.cancel). Eier-kun håndheves FØR dette kalles (`parameterAuthorizer`).
+        const taskId = requireString(parameters, "task_id");
+        return { external_id: taskId, data: (await this.service.cancelTask(identity, taskId)) as unknown as JsonValue };
       }
       case "freeze_connector": {
         const result = await this.service.freezeConnector(identity, requireString(parameters, "connector_id"), requireString(parameters, "reason"));
@@ -276,6 +286,16 @@ export function executiveToolDefinitions(transport: ExecutiveTransport): ToolDef
       input_schema: record({ situation_id: z.string() }),
       capability_class: "B", scopes: ["executive.write"], reversible: true,
       rollback_procedure: "en ny deteksjon gjenåpner situasjonen automatisk", idempotent_external: true, ...common
+    },
+    {
+      // WP-H0 (JARVIS-087): avbryt ÉN bakgrunnsjobb/agent fra kontrollsenteret. Klasse B (samme som `tasks.cancel_task` selv). Stopp-handling: krever ikke step-up (se STEP_UP_EXEMPT_ACTIONS), men er EIER-KUN
+      // (samme port som kontrollsentrene) og står aldri på en modellflate. Det er ingen angrefunksjon: en avbrutt jobb kan ikke gjenopptas.
+      tool_id: "executive", action: "cancel_task",
+      description: "Avbryt ÉN bakgrunnsjobb/agent (gjennomslag til den eksisterende kanselleringsveien tasks.cancel): en jobb som ikke er startet avbrytes umiddelbart, en kjørende stopper ved neste trygge punkt. Sideeffekter som allerede er utført rulles ikke tilbake.",
+      input_schema: record({ task_id: z.string().min(1).max(100) }),
+      capability_class: "B", scopes: ["executive.write"], reversible: false,
+      rollback_procedure: "en avbrutt jobb kan ikke gjenopptas - send den inn på nytt", idempotent_external: true, ...common,
+      parameterAuthorizer: (_parameters, identity) => transport.authorizeOwnerControl(identity)
     },
     critical("activate_kill_switch", "Stans HELE systemet umiddelbart (gjennomslag til owner_controls.activate_kill_switch)", { reason: z.string() }, "deactivate_kill_switch"),
     critical("deactivate_kill_switch", "Opphev kill switch og gjenoppta normal drift (gjennomslag til owner_controls.deactivate_kill_switch)", {}, "activate_kill_switch"),
