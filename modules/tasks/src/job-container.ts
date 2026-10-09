@@ -5,7 +5,7 @@ import { join } from "node:path";
 import {
   ENV_NAME, FORBIDDEN_ENV, JobContainerConfigError, buildJobContainerCreateArgs, validateJobContainerPolicy, type JobContainerPolicy
 } from "./job-container-spec.mjs";
-import { HostJobRunnerConfigError, HostJobSandboxRunner } from "./host-job-runner.ts";
+import { HostJobRunnerConfigError, HostJobSandboxRunner, type HostGitCredentialSource } from "./host-job-runner.ts";
 import { execProcess } from "./process-exec.ts";
 import type { ExecResult, Sandbox, SandboxRunner } from "./sandbox.ts";
 
@@ -140,14 +140,22 @@ export class FailClosedSandboxRunner implements SandboxRunner {
  *  - `JARVIS_JOB_RUNNER=container`: `DockerJobSandboxRunner` kjører `docker` i SAMME prosess og krever derfor en docker-klient + socket
  *    i worker-containeren (som bevisst ikke finnes). Beholdt uendret for tilfeller der worker kjøres direkte på en vert; IKKE anbefalt.
  *    Krever digest-pinnet `JARVIS_JOB_IMAGE`, `JARVIS_JOB_NETWORK` og `JARVIS_JOB_EGRESS_PROXY`.
+ *
+ * `options.gitCredentialSource` (WP-C3, kun `host`): kilde til kortlevde, repo-scopede git-tokens som sendes i hver klone-/publish-forespørsel. Settes KUN
+ * når GitHub App-autentisering faktisk er aktiv OG vertsadmin har satt repoet til `source: request` i runner-konfigen; ellers avviser runneren tokenet
+ * (`git_token_not_accepted`) og jobben feiler lukket. Ignoreres av `container`-modusen (den har ingen vertsside runner).
  */
-export function resolveJobSandboxRunner(env: Record<string, string | undefined> = process.env): SandboxRunner {
+export function resolveJobSandboxRunner(
+  env: Record<string, string | undefined> = process.env,
+  options: { gitCredentialSource?: HostGitCredentialSource } = {}
+): SandboxRunner {
   const mode = env["JARVIS_JOB_RUNNER"];
   if (mode === "host") {
     try {
       return new HostJobSandboxRunner({
         socketPath: env["JARVIS_JOB_RUNNER_SOCKET"] ?? "",
-        tokenFile: env["JARVIS_JOB_RUNNER_TOKEN_FILE"] ?? ""
+        tokenFile: env["JARVIS_JOB_RUNNER_TOKEN_FILE"] ?? "",
+        ...(options.gitCredentialSource !== undefined ? { gitCredentialSource: options.gitCredentialSource } : {})
       });
     } catch (err) {
       return new FailClosedSandboxRunner(err instanceof HostJobRunnerConfigError ? err.reason : "invalid_configuration");

@@ -12,9 +12,14 @@ import type {
  * bearer-token LEST FRA FIL (aldri en env-verdi i klartekst).
  *
  * Det som gjør denne veien trygg (og som `coding.ts` bygger på via `hostGit: true`):
- *  - git-credentialen finnes IKKE her. Klone og push skjer på verten med runnerens egen credential; worker henter aldri et
- *    git-token, sender aldri credential-env, og jobb-containeren ser aldri noe.
- *  - API-et er smalt: repo (slug), env, argv, branch. Klienten kan ikke sende docker-flagg, mounts, image, nettverk eller stier.
+ *  - git-credentialen finnes IKKE her som standard. Klone og push skjer på verten med runnerens egen credential (PAT i en fil bare runneren kan lese);
+ *    worker henter da aldri et git-token, sender aldri credential-env, og jobb-containeren ser aldri noe.
+ *  - UNNTAK, kun når vertsadmin har satt repoet til `source: request` i den root-eide runner-konfigen OG denne klienten er gitt en `gitCredentialSource`
+ *    (WP-C3: GitHub App): klienten henter et KORTLEVD, REPO-SCOPET token rett før klonen og et FERSKT rett før pushen og sender det som `git_token` i
+ *    jobbforespørselen over det bearer-autentiserte Unix-socketet. Tokenet formkontrolleres her først (en feilsendt annen hemmelighet forlater aldri
+ *    worker), mellomlagres ikke, ligger aldri i jobb-env, går aldri inn i jobb-containeren (runneren leverer det kun som env til ett git-kall) og
+ *    gjengis aldri i feil eller logg. Uten kilde sendes aldri noe token. Feil kilde/feil konfig hos runneren lukker jobben (ingen stille fallback).
+ *  - API-et er smalt: repo (slug), env, argv, branch (+ det valgfrie git-tokenet). Klienten kan ikke sende docker-flagg, mounts, image, nettverk eller stier.
  *  - Alle feil lukkes: ugyldig konfig/utilgjengelig runner/avvist token gir en jobbfeil med stabil kode, aldri en stille fallback.
  *
  * Jobben opprettes først ved `gitCheckout` (runneren trenger repoet for å klone); `exec` før det kaster.
@@ -29,6 +34,25 @@ const FILE_PATH = /^\/[A-Za-z0-9._/@+-]{1,198}$/;
 const TOKEN_FORMAT = /^[A-Za-z0-9._~+/=-]{32,256}$/;
 const LABEL = /^[A-Za-z0-9._:-]{1,100}$/;
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+/**
+ * Et git-token som skal sendes til runneren: GitHub-credential (installasjonstoken `ghs_`, klassisk PAT `ghp_`, fine-grained PAT `github_pat_`), 20-8192 tegn,
+ * smalt tegnsett. SAMME regel som runneren håndhever (`ops/job-runner/lib/credentials.mjs`): feiler den her, forlater verdien aldri worker.
+ */
+const GIT_TOKEN_FORMAT = /^(?:ghs_|ghp_|github_pat_)[A-Za-z0-9_.-]{8,8192}$/;
+const GIT_TOKEN_MIN_CHARS = 20;
+const GIT_TOKEN_MAX_CHARS = 8192;
+const DEFAULT_CREDENTIAL_TIMEOUT_MS = 30_000;
+/** Feilkoder fra en kilde som er trygge å vise (kun konstant-lignende koder, aldri fritekst som kan inneholde en hemmelighet). */
+const SAFE_SOURCE_ERROR_CODE = /^[A-Z][A-Z0-9_]{2,59}$/;
+
+/**
+ * Kilde til KORTLEVDE, REPO-SCOPEDE git-credentials. STRUKTURELT identisk med `GitCredentialSource` i `@jarvis/contracts` (WP-C3, egen branch,
+ * `GitHubAuth.gitCredentialSource()`): ikke importert herfra slik at denne filen ikke avhenger av en annen gren, men en WP-C3-kilde kan sendes inn
+ * direkte. `repoSlug` er `owner/repo`; returverdien er en HEMMELIGHET som kun brukes som HTTP-passord for git mot nøyaktig det repoet.
+ */
+export interface HostGitCredentialSource {
+  tokenFor(repoSlug: string): Promise<string>;
+}
 
 export class HostJobRunnerConfigError extends Error {
   constructor(readonly reason: string) {
@@ -54,6 +78,14 @@ export interface HostJobRunnerOptions {
   readToken?: () => Promise<string>;
   /** Slingringsmonn utover jobbens egen tidsgrense før klienten gir opp en forespørsel. */
   requestSlackMs?: number;
+  /**
+   * Valgfri kilde til kortlevde, repo-scopede git-tokens (WP-C3). Når den er satt sender klienten et FERSKT token i hver klone- og publish-forespørsel
+   * (`git_token`), og runneren godtar det kun for repoer vertsadmin har satt til `source: request`; for øvrige repoer avviser runneren forespørselen
+   * (`git_token_not_accepted`, jobben feiler lukket). Utelatt = aldri noe token i forespørselene (PAT-fil hos runneren, som før).
+   */
+  gitCredentialSource?: HostGitCredentialSource;
+  /** Maks ventetid på kilden før jobben feiler lukket (standard 30 s). En hengende kilde skal aldri holde en jobb. */
+  credentialTimeoutMs?: number;
 }
 
 interface RunnerResponse {
@@ -65,6 +97,7 @@ export class HostJobSandboxRunner implements SandboxRunner {
   readonly name = "host-job-runner";
   readonly hostGit = true;
   private readonly slackMs: number;
+  private readonly credentialTimeoutMs: number;
 
   constructor(private readonly options: HostJobRunnerOptions) {
     if (typeof options.socketPath !== "string" || !SOCKET_PATH.test(options.socketPath) || options.socketPath.includes("..") || options.socketPath.includes("//")) {
@@ -73,7 +106,42 @@ export class HostJobSandboxRunner implements SandboxRunner {
     if (options.readToken === undefined && (typeof options.tokenFile !== "string" || !FILE_PATH.test(options.tokenFile) || options.tokenFile.includes("..") || options.tokenFile.includes("//"))) {
       throw new HostJobRunnerConfigError("token_file_invalid");
     }
+    if (options.gitCredentialSource !== undefined && typeof options.gitCredentialSource.tokenFor !== "function") {
+      throw new HostJobRunnerConfigError("git_credential_source_invalid");
+    }
     this.slackMs = options.requestSlackMs ?? 30_000;
+    this.credentialTimeoutMs = options.credentialTimeoutMs ?? DEFAULT_CREDENTIAL_TIMEOUT_MS;
+  }
+
+  /**
+   * Henter et FERSKT git-token for `slug` rett før ÉN git-operasjon (klone eller push) - aldri mellomlagret her, slik at et kortlevd installasjonstoken
+   * alltid har full levetid igjen. Fail-closed: en kilde som kaster, henger, eller svarer med noe annet enn et velformet GitHub-token gir
+   * `git_credential_unavailable` UTEN å gjengi kildens feilmelding (kan inneholde hemmeligheter) og uten at noe sendes til runneren.
+   * Returnerer `undefined` når ingen kilde er satt (da sendes aldri noe token).
+   */
+  private async gitToken(slug: string): Promise<string | undefined> {
+    const source = this.options.gitCredentialSource;
+    if (source === undefined) return undefined;
+    const pending: Promise<unknown> = Promise.resolve().then(() => source.tokenFor(slug));
+    pending.catch(() => undefined); // en kilde som feiler ETTER tidsgrensen skal aldri bli en ubehandlet rejection
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new HostJobRunnerError("git_credential_unavailable", 0, "source_timeout")), this.credentialTimeoutMs);
+    });
+    let value: unknown;
+    try {
+      value = await Promise.race([pending, timeout]);
+    } catch (error) {
+      if (error instanceof HostJobRunnerError) throw error;
+      const code = (error as { code?: unknown } | null)?.code;
+      throw new HostJobRunnerError("git_credential_unavailable", 0, typeof code === "string" && SAFE_SOURCE_ERROR_CODE.test(code) ? code : "source_failed");
+    } finally {
+      clearTimeout(timer);
+    }
+    if (typeof value !== "string" || value.length < GIT_TOKEN_MIN_CHARS || value.length > GIT_TOKEN_MAX_CHARS || !GIT_TOKEN_FORMAT.test(value)) {
+      throw new HostJobRunnerError("git_credential_unavailable", 0, "token_format_invalid");
+    }
+    return value;
   }
 
   private async token(): Promise<string> {
@@ -139,11 +207,12 @@ export class HostJobSandboxRunner implements SandboxRunner {
     });
   }
 
-  /** HTTP-feil fra runneren -> typet feil. */
-  private static fail(res: RunnerResponse): never {
+  /** HTTP-feil fra runneren -> typet feil. `secret` (git-tokenet i forespørselen) fjernes fra kode og detalj hvis runneren mot formodning skulle ekko det. */
+  private static fail(res: RunnerResponse, secret?: string): never {
     if (res.status === 401) throw new HostJobRunnerError("unauthorized", 401);
-    const code = typeof res.json["error"] === "string" ? res.json["error"] : "unexpected_response";
-    const detail = typeof res.json["detail"] === "string" ? res.json["detail"] : undefined;
+    const scrub = (text: string): string => (secret !== undefined && secret.length > 0 ? text.split(secret).join("[REDACTED]") : text);
+    const code = typeof res.json["error"] === "string" ? scrub(res.json["error"]) : "unexpected_response";
+    const detail = typeof res.json["detail"] === "string" ? scrub(res.json["detail"]) : undefined;
     throw new HostJobRunnerError(code, res.status, detail);
   }
 
@@ -153,8 +222,10 @@ export class HostJobSandboxRunner implements SandboxRunner {
       if (!isHostRunnerEnvNameAllowed(name)) throw new Error(`job_env_forbidden:${name}`);
     }
     const call = (method: "POST" | "DELETE", path: string, body: unknown, timeoutMs: number): Promise<RunnerResponse> => this.request(method, path, body, timeoutMs);
+    const tokenFor = (slug: string): Promise<string | undefined> => this.gitToken(slug);
     const slackMs = this.slackMs;
     let jobId: string | undefined;
+    let repoSlug: string | undefined;
     let dead = false;
 
     const sandbox: Sandbox = {
@@ -164,20 +235,27 @@ export class HostJobSandboxRunner implements SandboxRunner {
       async gitCheckout(request: HostGitCheckoutRequest): Promise<HostGitCheckoutResult> {
         if (jobId !== undefined) throw new Error("host_job_already_checked_out");
         const ref = parseGitHubRepoUrl(request.repoUrl); // kaster GitPolicyError ved alt annet enn eksakt https://github.com/<owner>/<repo>
+        // Fersk, repo-scopet token rett FØR klonen (kun når en kilde er satt). Samme verdi i jobb-env ville havnet i containeren: stoppes her.
+        const gitToken = await tokenFor(ref.slug);
+        if (gitToken !== undefined && Object.values(jobEnv).some((value) => typeof value === "string" && value.includes(gitToken))) {
+          throw new HostJobRunnerError("git_token_in_env", 0);
+        }
         const body = {
           repo: ref.slug,
           env: jobEnv,
           ...(request.baseBranch !== undefined ? { base_branch: request.baseBranch } : {}),
           ...(meta?.task_id !== undefined && LABEL.test(meta.task_id) ? { task_id: meta.task_id } : {}),
-          ...(meta?.tenant_id !== undefined && LABEL.test(meta.tenant_id) ? { tenant_id: meta.tenant_id } : {})
+          ...(meta?.tenant_id !== undefined && LABEL.test(meta.tenant_id) ? { tenant_id: meta.tenant_id } : {}),
+          ...(gitToken !== undefined ? { git_token: gitToken } : {})
         };
         const res = await call("POST", "/v1/jobs", body, 600_000);
-        if (res.status !== 201) HostJobSandboxRunner.fail(res);
+        if (res.status !== 201) HostJobSandboxRunner.fail(res, gitToken);
         const id = res.json["job_id"];
         const headSha = res.json["head_sha"];
         const baseBranch = res.json["base_branch"];
         if (typeof id !== "string" || typeof headSha !== "string" || typeof baseBranch !== "string") throw new HostJobRunnerError("malformed_response", res.status);
         jobId = id;
+        repoSlug = ref.slug;
         return { headSha, baseBranch };
       },
 
@@ -211,9 +289,11 @@ export class HostJobSandboxRunner implements SandboxRunner {
       },
 
       async gitPublish(request: HostGitPublishRequest): Promise<HostGitPublishResult> {
-        if (jobId === undefined) throw new Error("host_job_not_checked_out");
-        const res = await call("POST", `/v1/jobs/${jobId}/publish`, { branch: request.branch }, 600_000);
-        if (res.status !== 200) HostJobSandboxRunner.fail(res);
+        if (jobId === undefined || repoSlug === undefined) throw new Error("host_job_not_checked_out");
+        // Et NYTT token rett før pushen: tokenet fra klonen er ikke gjenbrukt (kortlevd, aldri mellomlagret).
+        const gitToken = await tokenFor(repoSlug);
+        const res = await call("POST", `/v1/jobs/${jobId}/publish`, { branch: request.branch, ...(gitToken !== undefined ? { git_token: gitToken } : {}) }, 600_000);
+        if (res.status !== 200) HostJobSandboxRunner.fail(res, gitToken);
         const j = res.json;
         if (typeof j["branch"] !== "string" || typeof j["commit_sha"] !== "string" || typeof j["base_sha"] !== "string" || typeof j["commits"] !== "number" || typeof j["files_changed"] !== "number") {
           throw new HostJobRunnerError("malformed_response", res.status);
