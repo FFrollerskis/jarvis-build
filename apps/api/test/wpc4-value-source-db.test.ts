@@ -8,7 +8,8 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
-import { VALUE_METRIC_CATALOG, composeValueReport, describeValueLoops, evaluateBuilderLoopReadiness, proposeOpsActions, type ValueMeasurement, type ValueReport } from "@jarvis/executive";
+import { ExecutiveService, ExecutiveTransport, VALUE_METRIC_CATALOG, composeValueReport, describeValueLoops, evaluateBuilderLoopReadiness, proposeOpsActions, type ValueMeasurement, type ValueReport, type ValueRuntimeFacts } from "@jarvis/executive";
+import type { ToolGateway } from "@jarvis/tool-gateway";
 import { VALUE_PROBES, VALUE_SOURCE_IDS, createValueMeasurementSource } from "../src/value-source.ts";
 
 /**
@@ -413,6 +414,24 @@ describe("ingen innhold i rapporten (sensitive data i kildene gir kun tall)", ()
     const haystack = JSON.stringify(set) + JSON.stringify(report) + report.summary_no;
     for (const secret of SENSITIVE) expect(haystack, secret).not.toContain(secret);
     for (const word of ["Passordet", "Jeg har", "mål:", "create_followup", "docker.stop_container", "business-weekly"]) expect(haystack, word).not.toContain(word);
+  });
+
+  it("hele produksjonsveien (ExecutiveService + ExecutiveTransport + ekte kilde): rapporten for tenanten med sensitive data har alle katalogmetrikker, kun tall og faste tekster", async () => {
+    const facts: ValueRuntimeFacts = {
+      v1_delivery_configured: true, v2_push: { enabled: false, channel_configured: true, max_per_day: 3, quiet_hours: "22-07" }, v5_proposals_enabled: false,
+      ev0: { constitution_verified: true, ledger_ok: true }, kill_switch_active: false, declared_gates: []
+    };
+    const gw = { list: () => [], health: new Map(), hasSecret: async () => false } as unknown as ToolGateway;
+    const transport = new ExecutiveTransport(new ExecutiveService(gw, { value: { source: source(), facts: () => facts } }));
+    const identity = { person_id: "person-tobias", tenant_id: T, memory_space_id: "personal", session_id: "s1", device_id: "d1", channel: "web", auth_strength: "active" };
+    // parametre (også en annen tenant) leses aldri: tenanten kommer fra den betrodde konteksten
+    const out = await transport.invoke("get_value_report", { tenant_id: OTHER }, "tok", { identity } as never);
+    const report = out.data as unknown as ValueReport;
+    expect(report.metrics.map((m) => m.id)).toEqual(VALUE_METRIC_CATALOG.map((d) => d.id));
+    expect(report.metrics.find((m) => m.id === "chat.user_messages")).toMatchObject({ state: "measured", last_7d: 5, last_30d: 7 });
+    const haystack = JSON.stringify(out.data) + report.summary_no;
+    for (const secret of SENSITIVE) expect(haystack, secret).not.toContain(secret);
+    for (const word of ["Passordet", "mål:", "create_followup", "docker.stop_container", T, OTHER, "person-tobias"]) expect(haystack, word).not.toContain(word);
   });
 
   it("alle verdier i målingene er tall eller null; alle tekster er faste (id-er og årsaker fra koden)", async () => {
