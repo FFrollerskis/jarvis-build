@@ -1,9 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, closeSync, constants, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { rm as realRm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
-  AGE_MAGIC, LOCAL_MARKER, MANIFEST_AGE, OffsiteError, compareRemoteListing, createOffsiteSink, materializeManifest, parseLsjson, parseOffsiteConfig, prepareSetForOffsite,
+  AGE_MAGIC, LOCAL_MARKER, MANIFEST_AGE, OffsiteError, compareRemoteListing, copyRegularNoFollow, createOffsiteSink, materializeManifest, parseLsjson, parseOffsiteConfig, prepareSetForOffsite,
   rcloneCopyArgs, rsyncDifferences, rsyncPushArgs, rsyncVerifyArgs, sshCommand, validateLocalDir, validateRcloneRemote, validateSshTarget
 } from "../lib/offsite.mjs";
 import { findBinary } from "../lib/tools.mjs";
@@ -317,7 +319,7 @@ describe("WP-C2 off-site (review F4): en hengt disk/NFS-montering blokkerer aldr
   });
 
   it("sjekksum-lesing som henger er tidsavbrudd, ikke «mangler» (en hengt disk skal ikke se ut som en tom disk)", async () => {
-    const { sink, prepared } = await setup({});
+    const { sink, prepared } = await setup({}, { timeoutMs: 20_000 }); // den friske pushen skal ikke selv kunne tidsavbrytes (fsync på en tregere disk)
     await sink.push(prepared);
     const hung = createOffsiteSink({ adapter: "local", dir: sink.config.dir, allowSameDevice: true, timeoutMs: 150 }, { sourceDir: sink.deps.sourceDir, fs: { lstat: never } });
     await expect(hung.verify(prepared)).rejects.toMatchObject({ code: "offsite_timeout" });
@@ -332,8 +334,8 @@ describe("WP-C2 off-site (review F4): en hengt disk/NFS-montering blokkerer aldr
 
   it("fristen er TOTAL for ett kall: mange små, trege steg summeres (ikke 120 min per fil)", async () => {
     const slow = (real) => async (...args) => { await new Promise((resolve) => setTimeout(resolve, 60)); return real(...args); };
-    const { copyFile, chmod } = await import("node:fs/promises");
-    const { sink, prepared } = await setup({ copyFile: slow(copyFile), chmod: slow(chmod) }, { timeoutMs: 250 });
+    const { chmod } = await import("node:fs/promises");
+    const { sink, prepared } = await setup({ copyFile: slow(copyRegularNoFollow), chmod: slow(chmod) }, { timeoutMs: 250 });
     await expect(sink.push(prepared)).rejects.toMatchObject({ code: "offsite_timeout" }); // 5 filer × (kopi + chmod) × 60 ms > 250 ms
   });
 
@@ -343,6 +345,143 @@ describe("WP-C2 off-site (review F4): en hengt disk/NFS-montering blokkerer aldr
     expect(await sink.list()).toEqual([set.name]);
     rmSync(join(target, set.name, "globals.sql.age"));
     await expect(sink.verify(prepared)).rejects.toMatchObject({ code: "offsite_verify_failed" });
+  });
+});
+
+describe("WP-C2 off-site (review F13): kopiering fra et ÅPNET håndtak uten å følge symlenker - en fil som byttes ut etter forhåndssjekken kommer ikke ut", () => {
+  const onLinux = process.platform === "linux";
+  const ageBytes = (n = 300) => Buffer.concat([AGE_MAGIC, Buffer.from("\n-> X25519 AA\nBB\n--- CC\n"), Buffer.alloc(n, 9)]);
+  const unblock = (fifo) => { try { chmodSync(fifo, 0o600); const fd = openSync(fifo, constants.O_WRONLY | constants.O_NONBLOCK); closeSync(fd); } catch { /* ingen blokkert leser */ } };
+  const guarded = (p, ms = 3000) => Promise.race([p, new Promise((resolve) => setTimeout(() => resolve("HUNG"), ms))]);
+  const sha = (buf) => createHash("sha256").update(buf).digest("hex");
+
+  it("copyRegularNoFollow: vanlig fil kopieres (0600), eksisterende mål overskrives ALDRI (wx), og hash/størrelse/header sjekkes mot det som faktisk ble lest", async () => {
+    const dir = tempDir();
+    const body = ageBytes();
+    writeFileSync(join(dir, "a.age"), body);
+    await copyRegularNoFollow(join(dir, "a.age"), join(dir, "b.age"), { size: body.length, sha256: sha(body), ageHeader: true });
+    expect(readFileSync(join(dir, "b.age")).equals(body)).toBe(true);
+    expect(statSync(join(dir, "b.age")).mode & 0o777).toBe(0o600);
+    await expect(copyRegularNoFollow(join(dir, "a.age"), join(dir, "b.age"))).rejects.toMatchObject({ code: "EEXIST" });
+    expect(readFileSync(join(dir, "b.age")).equals(body)).toBe(true); // urørt
+    // avvik fra forhåndssjekken: kopien fjernes, og feilen er offsite_verify_failed
+    await expect(copyRegularNoFollow(join(dir, "a.age"), join(dir, "c.age"), { size: body.length + 1 })).rejects.toMatchObject({ code: "offsite_verify_failed" });
+    await expect(copyRegularNoFollow(join(dir, "a.age"), join(dir, "d.age"), { sha256: "0".repeat(64) })).rejects.toMatchObject({ code: "offsite_verify_failed" });
+    expect(existsSync(join(dir, "c.age")) || existsSync(join(dir, "d.age"))).toBe(false);
+    // uten forventninger kopieres også en tom fil
+    writeFileSync(join(dir, "tom.age"), "");
+    await copyRegularNoFollow(join(dir, "tom.age"), join(dir, "tom-kopi.age"));
+    expect(statSync(join(dir, "tom-kopi.age")).size).toBe(0);
+    // store filer går i flere blokker
+    const big = Buffer.concat([AGE_MAGIC, Buffer.alloc(9 * 1024 * 1024, 5)]);
+    writeFileSync(join(dir, "stor.age"), big);
+    await copyRegularNoFollow(join(dir, "stor.age"), join(dir, "stor-kopi.age"), { size: big.length, sha256: sha(big), ageHeader: true });
+    expect(readFileSync(join(dir, "stor-kopi.age")).equals(big)).toBe(true);
+  });
+
+  it("symlenke (også til en identisk fil), mappe og FIFO som kilde avvises - uten å skrive noe og uten å henge", async () => {
+    const dir = tempDir();
+    const body = ageBytes();
+    writeFileSync(join(dir, "ekte.age"), body);
+    symlinkSync(join(dir, "ekte.age"), join(dir, "lenke.age"));
+    await expect(copyRegularNoFollow(join(dir, "lenke.age"), join(dir, "u1.age"), { size: body.length, sha256: sha(body) })).rejects.toMatchObject({ code: "offsite_ineligible" });
+    await expect(copyRegularNoFollow(join(dir, "lenke.age"), join(dir, "u1.age"))).rejects.toThrow(/symlenke/);
+    mkdirSync(join(dir, "mappe.age"));
+    await expect(copyRegularNoFollow(join(dir, "mappe.age"), join(dir, "u2.age"))).rejects.toThrow();
+    if (onLinux) {
+      const fifo = join(dir, "fifo.age");
+      execFileSync("mkfifo", [fifo]);
+      try {
+        const r = await guarded(copyRegularNoFollow(fifo, join(dir, "u3.age")).then(() => "KOPIERT", (err) => err));
+        expect(r).not.toBe("HUNG");
+        expect(r).not.toBe("KOPIERT");
+        expect(r).toMatchObject({ code: "offsite_ineligible" });
+      } finally {
+        unblock(fifo);
+      }
+    }
+    expect(readdirSync(dir).filter((n) => n.startsWith("u"))).toEqual([]);
+  });
+
+  it("klartekst bak et .age-navn: INGENTING opprettes i målet (første blokk må ha age-headeren), og en tom fil er heller ikke chiffertekst", async () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "klartekst.age"), "-- PostgreSQL database dump\nINSERT INTO secrets VALUES ('x');\n".repeat(20));
+    writeFileSync(join(dir, "kort.age"), AGE_MAGIC.subarray(0, 10));
+    writeFileSync(join(dir, "tom.age"), "");
+    for (const n of ["klartekst.age", "kort.age", "tom.age"]) {
+      await expect(copyRegularNoFollow(join(dir, n), join(dir, `ut-${n}`), { ageHeader: true }), n).rejects.toMatchObject({ code: "offsite_ineligible" });
+      expect(existsSync(join(dir, `ut-${n}`)), n).toBe(false);
+    }
+    // rekkefølgen er selve poenget: i en skrivebeskyttet mappe ville et forsøk på å OPPRETTE målfilen gitt EACCES - avvisningen skal komme FØR (ikke-rot; rot ignorerer rettigheter)
+    if (process.getuid?.() !== 0) {
+      const ro = tempDir();
+      chmodSync(ro, 0o500);
+      try {
+        await expect(copyRegularNoFollow(join(dir, "klartekst.age"), join(ro, "ut.age"), { ageHeader: true })).rejects.toMatchObject({ code: "offsite_ineligible" });
+      } finally {
+        chmodSync(ro, 0o700);
+      }
+    }
+  });
+
+  it("push: kilden byttes ut med en symlenke ETTER forhåndssjekken (til en fil med nøyaktig samme innhold) - settet publiseres ikke, og resten ryddes", async () => {
+    const out = tempDir();
+    const target = tempDir("wpc2-usb-");
+    writeFileSync(join(target, LOCAL_MARKER), "");
+    const set = makeSet(out, WHEN);
+    const prepared = await prep(set.dir);
+    const sink = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs: 20_000 }, { sourceDir: out });
+    const victim = join(set.dir, "jarvis.dump.age");
+    const copyOfIt = join(tempDir(), "identisk.age");
+    writeFileSync(copyOfIt, readFileSync(victim));
+    rmSync(victim);
+    symlinkSync(copyOfIt, victim);
+    // gammel copyFile ville fulgt lenken: størrelse og sjekksum stemmer, og settet ville blitt publisert
+    await expect(sink.push(prepared)).rejects.toMatchObject({ code: "offsite_ineligible" });
+    expect(readdirSync(target).filter((n) => n.startsWith("jarvis-backup-") || n.startsWith(".incoming"))).toEqual([]);
+  });
+
+  it("push: kilden byttes ut med KLARTEKST ETTER forhåndssjekken - ingenting klartekst skrives til målet, ikke et øyeblikk (katalogen er tom når den ryddes)", async () => {
+    const out = tempDir();
+    const target = tempDir("wpc2-usb-");
+    writeFileSync(join(target, LOCAL_MARKER), "");
+    const set = makeSet(out, WHEN);
+    const prepared = await prep(set.dir);
+    const seen = [];
+    const spyRm = async (path, options) => { if (path.includes(".incoming-")) seen.push(readdirSync(path)); return realRm(path, options); };
+    const sink = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs: 20_000 }, { sourceDir: out, fs: { rm: spyRm } });
+    const first = prepared.files[0];
+    writeFileSync(join(set.dir, first.name), Buffer.alloc(first.size, "S")); // samme størrelse, klartekst
+    await expect(sink.push(prepared)).rejects.toMatchObject({ code: "offsite_ineligible" });
+    expect(seen).toEqual([[]]); // .incoming-* var TOM da den ble fjernet: klartekstfilen ble aldri opprettet
+    expect(readdirSync(target).filter((n) => n.startsWith("jarvis-backup-") || n.startsWith(".incoming"))).toEqual([]);
+
+    // age-header men annet innhold (samme størrelse): fanges av sjekksummen før kopien beholdes, og kopien fjernes
+    const sink2 = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs: 20_000 }, { sourceDir: out });
+    writeFileSync(join(set.dir, first.name), Buffer.concat([AGE_MAGIC, Buffer.alloc(first.size - AGE_MAGIC.length, "S")]));
+    await expect(sink2.push(prepared)).rejects.toMatchObject({ code: "offsite_verify_failed" });
+    expect(readdirSync(target).filter((n) => n.startsWith("jarvis-backup-") || n.startsWith(".incoming"))).toEqual([]);
+  });
+
+  it("fetch: en symlenke i off-site-målet (byttet inn etter oppslaget) følges ikke", async () => {
+    const out = tempDir();
+    const target = tempDir("wpc2-usb-");
+    writeFileSync(join(target, LOCAL_MARKER), "");
+    const set = makeSet(out, WHEN);
+    const prepared = await prep(set.dir);
+    const plain = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs: 20_000 }, { sourceDir: out });
+    await plain.push(prepared);
+    const outside = join(tempDir(), "hemmelig.txt");
+    writeFileSync(outside, "KLARTEKST-HEMMELIGHET");
+    rmSync(join(target, set.name, "infisical.dump.age"));
+    symlinkSync(outside, join(target, set.name, "infisical.dump.age"));
+    // oppslaget (lstat) lyver: «alt er vanlige filer» - slik en fil som byttes ut ETTER oppslaget ville sett ut
+    const { lstat } = await import("node:fs/promises");
+    const lying = async (path) => { const st = await lstat(path); return { isFile: () => true, isDirectory: () => st.isDirectory(), isSymbolicLink: () => false, size: st.size, mtimeMs: st.mtimeMs }; };
+    const sink = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs: 20_000 }, { sourceDir: out, fs: { lstat: lying } });
+    const dest = join(tempDir(), "hentet");
+    await expect(sink.fetch(set.name, dest)).rejects.toMatchObject({ code: "offsite_ineligible" });
+    for (const n of existsSync(dest) ? readdirSync(dest) : []) expect(readFileSync(join(dest, n), "utf8")).not.toContain("KLARTEKST-HEMMELIGHET");
   });
 });
 

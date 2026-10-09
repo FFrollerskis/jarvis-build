@@ -1,9 +1,9 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync,
   renameSync, rmSync, writeFileSync
 } from "node:fs";
-import { chmod, copyFile, lstat, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
+import { chmod, lstat, mkdir, open as openFile, readdir, rename, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, parse, resolve, sep } from "node:path";
 import { sha256File } from "./backup.mjs";
@@ -29,6 +29,8 @@ import { assertAgeRecipient, requireBinary } from "./tools.mjs";
  *  - Ingen arbitrær kommando fra konfig (ingen `..._CMD`), ingen shell: alltid `spawn(fil, argv[])`. Verdiene valideres mot et lukket tegnsett, og
  *    kan aldri begynne med `-` (ingen flagginjeksjon). Underprosessene får et MINIMALT miljø - aldri DB-passordet.
  *  - Ingen sletting av fjerndata (`copy`, aldri `sync`/`--delete`). Opprydding av gamle off-site-sett er eierens (leverandørens livssyklusregler).
+ *  - Den lokale adapteren kopierer fra et ÅPNET håndtak med O_NOFOLLOW (`copyRegularNoFollow`): en fil som byttes ut med en symlenke etter forhåndssjekken følges ikke, og
+ *    ingenting skrives til målet før første blokk har age-headeren.
  */
 export const SET_NAME_RE = /^jarvis-backup-\d{8}T\d{6}Z$/;
 export const AGE_MAGIC = Buffer.from("age-encryption.org/v1");
@@ -439,6 +441,65 @@ class RsyncSshSink {
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 // Lokal sti (USB / annen disk)
 // ---------------------------------------------------------------------------------------------------------------------------------------------
+const COPY_CHUNK = 4 * 1024 * 1024;
+/** O_NOFOLLOW: en symlenke gir ELOOP i stedet for å bli fulgt. O_NONBLOCK: open() på en FIFO uten skriver venter ikke for alltid. (Begge mangler på Windows: ukjent konstant blir 0.) */
+const SOURCE_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0) | (fsConstants.O_NOFOLLOW ?? 0);
+/**
+ * Kopierer ÉN fil fra et ÅPNET håndtak (review F13). `copyFile(src, dest)` slår opp stien på nytt og FØLGER en symlenke: byttes `src` ut mellom forhåndssjekken og kopieringen
+ * (TOCTOU) kopieres det symlenken peker på - f.eks. en klartekstfil - til off-site-målet. Her åpnes kilden med O_NOFOLLOW (symlenke -> ELOOP -> `offsite_ineligible`) og O_NONBLOCK,
+ * `fstat` på det ÅPNE håndtaket må si «vanlig fil», og det er DET håndtaket som leses: bytene vi hasher og skriver er nøyaktig de vi åpnet, ikke det stien peker på et øyeblikk senere.
+ * Med `expect` avvises avvik FØR noe skrives (størrelse, age-header i første blokk) eller før kopien beholdes (lengde og SHA-256 av det som faktisk ble skrevet); en avvist kopi fjernes.
+ * @param {{ size?: number, sha256?: string, ageHeader?: boolean }} [expect] fra forhåndssjekken (`prepareSetForOffsite`)
+ */
+export async function copyRegularNoFollow(src, dest, expect = {}) {
+  const label = safeEntry(basename(src));
+  let source;
+  try {
+    source = await openFile(src, SOURCE_FLAGS);
+  } catch (err) {
+    if (err?.code === "ELOOP" || err?.code === "EMLINK") throw ineligible(`kilden er en symlenke og følges ikke: ${label}`);
+    throw err;
+  }
+  let target = null;
+  try {
+    const st = await source.stat();
+    if (!st.isFile()) throw ineligible(`kilden er ikke en vanlig fil: ${label}`);
+    if (expect.size !== undefined && st.size !== expect.size) throw new OffsiteError("offsite_verify_failed", `størrelsen avviker fra forhåndssjekken: ${label}`);
+    const hash = createHash("sha256");
+    const buf = Buffer.allocUnsafe(Math.min(COPY_CHUNK, Math.max(st.size, 1)));
+    let total = 0;
+    for (;;) {
+      const { bytesRead } = await source.read(buf, 0, buf.length, null);
+      if (bytesRead === 0) break;
+      if (target === null) {
+        // Ingenting opprettes i målet før første blokk er sett: en omdøpt klartekstfil kommer aldri inn i off-site-målet, heller ikke et øyeblikk.
+        if (expect.ageHeader === true && (bytesRead < AGE_MAGIC.length || !buf.subarray(0, AGE_MAGIC.length).equals(AGE_MAGIC))) throw ineligible(`ikke age-chiffertekst: ${label}`);
+        target = await openFile(dest, "wx", 0o600);
+      }
+      hash.update(buf.subarray(0, bytesRead));
+      for (let written = 0; written < bytesRead;) written += (await target.write(buf, written, bytesRead - written)).bytesWritten;
+      total += bytesRead;
+    }
+    if (target === null) {
+      if (expect.ageHeader === true) throw ineligible(`ikke age-chiffertekst (tom fil): ${label}`);
+      target = await openFile(dest, "wx", 0o600);
+    }
+    if ((expect.size !== undefined && total !== expect.size) || (expect.sha256 !== undefined && hash.digest("hex") !== expect.sha256)) {
+      throw new OffsiteError("offsite_verify_failed", `kilden endret seg etter forhåndssjekken eller avviker fra den: ${label}`);
+    }
+    await target.sync();
+  } catch (err) {
+    if (target !== null) {
+      await target.close().catch(() => undefined);
+      target = null;
+      await rm(dest, { force: true }).catch(() => undefined);
+    }
+    throw err;
+  } finally {
+    if (target !== null) await target.close().catch(() => undefined);
+    await source.close().catch(() => undefined);
+  }
+}
 /**
  * Frist for ÉN sink-operasjon (review F4). En hengt USB-disk eller NFS-montering kan ikke avbrytes i Node - kallet sitter i kjernen - men tikket skal ikke vente på det for
  * alltid: vi gir opp, rapporterer `offsite_timeout` og går videre. Uten dette ble en kopi som aldri ferdigstilles stående med låsen, og alle senere tikk gjorde ingenting.
@@ -485,7 +546,7 @@ class LocalSink {
     this.deps = deps;
     this.label = `local:${basename(config.dir)}`;
     // Filsystem-kallene kan byttes ut i tester (en hengt disk lar seg ikke lage ellers).
-    this.fs = { stat, lstat, readdir, mkdir, copyFile, chmod, rename, rm, ...(deps.fs ?? {}) };
+    this.fs = { stat, lstat, readdir, mkdir, copyFile: copyRegularNoFollow, chmod, rename, rm, ...(deps.fs ?? {}) };
   }
 
   #budget() {
@@ -577,8 +638,8 @@ class LocalSink {
     try {
       for (const f of prepared.files) {
         const dest = join(tmp, f.name);
-        // asynkront: en kopi på flere GB skal ikke fryse event-løkken (lås-hjerteslag, signaler)
-        await budget.run(`kopiere ${f.name}`, () => this.fs.copyFile(join(prepared.dir, f.name), dest, fsConstants.COPYFILE_EXCL));
+        // asynkront: en kopi på flere GB skal ikke fryse event-løkken (lås-hjerteslag, signaler). Fra et åpnet håndtak uten å følge symlenker (F13), mot det forhåndssjekken målte.
+        await budget.run(`kopiere ${f.name}`, () => this.fs.copyFile(join(prepared.dir, f.name), dest, { size: f.size, sha256: f.sha256, ageHeader: true }));
         await budget.run(`chmod ${f.name}`, () => this.fs.chmod(dest, 0o600));
       }
       const problems = await this.#hashAll(budget, tmp, prepared);
@@ -610,7 +671,7 @@ class LocalSink {
     if (!(await this.#exists(budget, dir))) throw new OffsiteError("offsite_failed", "settet finnes ikke i off-site-målet");
     mkdirSync(destDir, { recursive: true, mode: 0o700 });
     for (const n of await this.#listAgeFiles(budget, dir)) {
-      await budget.run(`kopiere ${n}`, () => this.fs.copyFile(join(dir, n), join(destDir, n), fsConstants.COPYFILE_EXCL));
+      await budget.run(`kopiere ${n}`, () => this.fs.copyFile(join(dir, n), join(destDir, n)));
       await budget.run(`chmod ${n}`, () => this.fs.chmod(join(destDir, n), 0o600));
     }
     return listAgeFiles(destDir);
