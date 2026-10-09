@@ -12,7 +12,7 @@ import {
   CHAT_ACT_TIER, CHAT_READ_TIER, MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, memoryToolDefinitions,
   ToolGateway, assertManifestInvariants, buildToolManifest, createTurnContext, driveTransportsIfConfigured, firstWaveTools, jobIdentityFor, telegramClassDNotifier, parseDockerMutationTargets, parseGceMutationTargets
 } from "@jarvis/tool-gateway";
-import { BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
+import { BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService, parseSupportSlaHours } from "@jarvis/business";
 import { SupportService, SupportTransport } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
 import { ProductService, ProductTransport } from "@jarvis/product";
@@ -187,7 +187,14 @@ const toolGateway = new ToolGateway(pool, policy, toolSecretProvider, ownerContr
 const businessService = new BusinessService(pool);
 // UA-3 next slice (D-53): samme OpenLoopService-wiring som api - workeren sin
 // mesh-tool-executor maa kunne kalle de nye business-handlingene identisk.
-const openLoopService = new OpenLoopService(pool);
+// WP-D2 (JARVIS-082): samme SLA-policy som api (API/worker-parity) - ugyldig JARVIS_SUPPORT_SLA_HOURS stopper oppstarten (fail closed), aldri en stille standard.
+let supportSla: ReturnType<typeof parseSupportSlaHours>;
+try {
+  supportSla = parseSupportSlaHours(process.env["JARVIS_SUPPORT_SLA_HOURS"]);
+} catch (err) {
+  failStartup(err);
+}
+const openLoopService = new OpenLoopService(pool, { supportSla });
 // UA-3 profiling/scoring-slice (D-61): samme ScoringService-wiring som api -
 // workeren sin mesh-tool-executor maa kunne kalle score-handlingene identisk.
 const scoringService = new ScoringService(pool);

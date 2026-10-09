@@ -78,7 +78,7 @@ import {
 } from "@jarvis/tool-gateway";
 import {
   BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessEventSyncService, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ProductUsageService,
-  ScoringService, isWeeklyBriefDay, runBusinessEventSyncForAllTenants, runBusinessWeeklyBriefForAllTenants,
+  ScoringService, isWeeklyBriefDay, parseSupportSlaHours, runBusinessEventSyncForAllTenants, runBusinessWeeklyBriefForAllTenants,
   runOpenLoopSweepForAllTenants, runScoringSweepForAllTenants
 } from "@jarvis/business";
 import { SupportEmailService, SupportService, SupportTransport, runSupportInboxSyncForAllTenants } from "@jarvis/support";
@@ -352,7 +352,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const businessService = new BusinessService(pool);
   // UA-3 next slice (D-53): open-loop-deteksjon - egen tjeneste over samme runtime-pool,
   // ingen ny kø/motor (§4/§19/§20 i byggeordren).
-  const openLoopService = new OpenLoopService(pool);
+  // WP-D2 (JARVIS-082): svarfrist («SLA») for support_ticket_overdue. Ugyldig JARVIS_SUPPORT_SLA_HOURS KASTER her (fail closed ved oppstart) - aldri en stille standard.
+  const openLoopService = new OpenLoopService(pool, { supportSla: parseSupportSlaHours(process.env["JARVIS_SUPPORT_SLA_HOURS"]) });
   // UA-3 profiling/scoring-slice (D-61): egen tjeneste over samme runtime-pool,
   // ingen ny kø/motor (§14/§23 i byggeordren) - gjenbruker Business Graph uendret.
   const scoringService = new ScoringService(pool);
