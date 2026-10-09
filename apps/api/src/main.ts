@@ -123,6 +123,7 @@ import { createEvolutionReportProvider } from "./evolution-source.ts";
 import { ChatJobs, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
 import { registerControlCenters } from "./control-center/register.ts";
+import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
 
 const port = envPort("JARVIS_API_PORT", 3010);
@@ -300,7 +301,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // (router.ts) - en strukturert, auditerbar feil, ALDRI et falskt svar.
     ],
     // D-395 (JARVIS-039): samme budsjettkilde som workeren (`budgetConfigFromEnv`) - tidligere hardkodet her og med `DEFAULT_BUDGET` i workeren.
-    budget: budgetConfigFromEnv()
+    budget: budgetConfigFromEnv(),
+    // WP-H0 (JARVIS-087): eierens pause/tilbakekall av en modellleverandør, lest LIVE fra `owner_control_state` ved hvert kall (samme kilde i worker-main.ts) - se provider-pause.ts.
+    providerPause: createProviderPauseSourceFromPool(pool)
   });
   // JARVIS-006: hver konstruert adapter MÅ ha eksplisitt pris - ingen stille `default_rate`.
   assertProvidersHaveExplicitPricing(pricingFromEnv(), gateway.listProviderNames());
