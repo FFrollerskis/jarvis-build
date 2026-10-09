@@ -329,7 +329,7 @@ describe("D-442: main.ts forkaster aldri et sveipresultat (kildenivå-vakt, main
   it("retensjons-/minnesveipene (som returnerer failed[]) kaster via assertNoSweepFailures med riktig jobbnavn og IKKE en tom liste", () => {
     const viaFailedList = [...mainSource.matchAll(/assertNoSweepFailures\("([a-z-]+)", summary\.failed\)/g)].map((m) => m[1]);
     expect(viaFailedList.sort()).toEqual([
-      "health-retention-sweep", "location-retention-sweep", "memory-profile-sweep", "memory-reembed-sweep", "memory-retention-sweep",
+      "health-retention-sweep", "location-retention-sweep", "memory-profile-sweep", "memory-reembed-sweep", "memory-resensitize-sweep", "memory-retention-sweep",
       "vision-retention-sweep"
     ]);
     for (const job of viaFailedList) expect(mainSource, `DailyScheduler for ${job}`).toMatch(new RegExp(`new DailyScheduler\\(\\s*pool, "${job}"`));

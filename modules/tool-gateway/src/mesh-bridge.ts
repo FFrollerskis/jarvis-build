@@ -7,6 +7,7 @@ import { SURFACE_TOOL_GRANTS, requiresConfirmationWhenTainted, scopeFieldsOf, ty
 import type { TurnContext } from "./turn-context.ts";
 import { CHAT_ACT_TIER_KEYS } from "./chat-act-tier.ts";
 import { explainToolFailure, type ToolFailureContext } from "./tool-failure.ts";
+import { githubRepoLockViolation } from "./github-repo-lock.ts";
 
 /**
  * UA-1 P1A (§13, §16-§17): trusted bro mellom AI Mesh og Tool Gateway.
@@ -488,6 +489,11 @@ export class MeshToolExecutor {
         return this.failure(call, "TOOL_CALL_LIMIT", at, failCtx);
       }
       turn.calls.total += 1;
+    }
+    // 2b. Q-50 B (D-450): modellstyrte GitHub-kall er låst til eierens konfigurerte repo (`JARVIS_GITHUB_ALLOW_OTHER_REPOS=true` åpner). Sjekkes FØR bekreftelsesporten, så et låst kall aldri lager et bekreftelseskort.
+    if (mapped.tool_id === "github") {
+      const violation = githubRepoLockViolation(mapped.action, parameters["repo"] as JsonValue | undefined);
+      if (violation) return this.failure(call, "GITHUB_REPO_LOCKED", at, { ...failCtx, repo_requested: violation.requested, repo_allowed: violation.allowed });
     }
     // 3. Manifest + taint-port: i en tainted tur krever C/D og utgående/betalt/ekstern skriving en NY, bundet eier-bekreftelse.
     if (this.guards) {
