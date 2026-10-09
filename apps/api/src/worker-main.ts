@@ -671,8 +671,15 @@ worker.register(
       // vertsmaskin-tilstand (Git Credential Manager e.l.). Mangler tokenet:
       // jobben feiler FØR clone forsøkes (`git_auth_unavailable`), ALDRI et
       // stille fall til uautentisert git.
-      // WP-C3: PAT-modus = `EnvSecretProvider` UENDRET; App-modus = repo-scopet installasjonstoken (PAT fra env kun som eksplisitt, loggført fallback).
-      gitAuth: { secretProvider: githubAuth.secretProvider(new EnvSecretProvider()) },
+      // WP-C3 (review F2/F13): git-credentialen er `githubAuth.gitCredentialSource(...)` - i App-modus et kortlevd installasjonstoken scopet til NØYAKTIG repoet jobben gjelder, med minste rettighet
+      // (Contents), hentet rett før hver git-nettverksoperasjon (clone, push) - IKKE standard-scope-tokenet (alle konfigurerte repoer, alle rettigheter) som connectoren bruker. I PAT-modus gir kilden
+      // PAT-en fra `EnvSecretProvider`, akkurat som før (`secretProvider` under er den uendrede PAT-/reservekilden og leses ikke når `credentialSource` er satt). PAT i App-modus: kun eksplisitt, loggført fallback.
+      // WP-C3 (review F3): `isRevoked` = den delte, varige per-credential-tilbakekallingen (`owner_controls.revoke_credential`) - sjekkes før hver utstedelse.
+      gitAuth: {
+        secretProvider: new EnvSecretProvider(),
+        credentialSource: githubAuth.gitCredentialSource(new EnvSecretProvider()),
+        isRevoked: (ref) => ownerControls.isRevokedDurable(ref)
+      },
       // Remediering del 2 (JARVIS-064): credentialen gjelder KUN github.com + disse eksakte repoene
       // (JARVIS_GIT_ALLOWED_REPOS, ellers JARVIS_GITHUB_REPO). Tom allowlist = hver kodejobb feiler lukket.
       allowedRepos: allowedReposFromEnv(process.env),
