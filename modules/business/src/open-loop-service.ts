@@ -2,10 +2,16 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
-import type { AttentionQueueEntry, BusinessOpenLoop, OpenLoopPriority, OpenLoopType, SweepResult } from "./open-loop-types.ts";
-import { classifyAttentionBucket, deterministicLoopConfidence } from "./open-loop-types.ts";
+import { canonicalStringify } from "@jarvis/contracts";
+import type { AttentionQueueEntry, BusinessOpenLoop, LoopResolutionOutcome, OpenLoopPriority, OpenLoopType, SweepResult } from "./open-loop-types.ts";
+import { MANUAL_RESOLUTION_OUTCOMES, classifyAttentionBucket, deterministicLoopConfidence } from "./open-loop-types.ts";
 import { churnNextAction, describeChurnRisk } from "./churn-rules.ts";
 import { ChurnService } from "./churn-service.ts";
+import {
+  buildCalibrationReport, calibrationByType, computeLoopConfidence, corroboratesEachOther, loopFamily,
+  type CalibrationObservation, type CalibrationReport, type LoopOutcome
+} from "./confidence.ts";
+import { DEFAULT_SUPPORT_SLA_HOURS, type SupportSlaPolicy } from "./support-sla.ts";
 
 /**
  * UA-3 next slice (D-53): automatisk open-loop-deteksjon. Gjenbruker
@@ -27,8 +33,20 @@ import { ChurnService } from "./churn-service.ts";
  * sette status/opened_at tilbake til "open" paa SAMME rad (aldri en ny rad
  * for samme detection_key) - historikken foer/etter ligger i audit_events.
  */
+export interface OpenLoopServiceOptions {
+  /**
+   * WP-D2 (JARVIS-082): svarfrist («SLA») per prioritet for `support_ticket_overdue`. `undefined` = forslagene (`DEFAULT_SUPPORT_SLA_HOURS`, NEEDS_TOBIAS), `null` = AV (da gjelder kun
+   * eksplisitte frister). Parses fra `JARVIS_SUPPORT_SLA_HOURS` av app-laget (`parseSupportSlaHours`).
+   */
+  supportSla?: SupportSlaPolicy | null;
+}
+
 export class OpenLoopService {
-  constructor(private readonly pool: pg.Pool) {}
+  private readonly supportSla: SupportSlaPolicy | null;
+
+  constructor(private readonly pool: pg.Pool, options: OpenLoopServiceOptions = {}) {
+    this.supportSla = options.supportSla === undefined ? { ...DEFAULT_SUPPORT_SLA_HOURS } : options.supportSla;
+  }
 
   async detectOverdueFollowups(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
@@ -142,23 +160,52 @@ export class OpenLoopService {
     });
   }
 
-  /** §18: forfalt naar `next_response_due_at`/`next_action_due_at` har passert og ticket ikke er resolved/closed. */
+  /**
+   * §18: forfalt naar en frist har passert og ticket ikke er resolved/closed. Fristene er (1) eksplisitte `next_response_due_at`/`next_action_due_at` og, fra WP-D2 (JARVIS-082),
+   * (2) en UTLEDET svarfrist: siste UBESVARTE kundemelding (`support_ticket_events`: ingen `agent_reply` etter den; et internt notat besvarer ikke kunden) + et vindu per prioritet
+   * (`supportSla`, forslag: urgent 4 t, high 8 t, normal 24 t, low 72 t - NEEDS_TOBIAS). Regelen var tidligere et spøkelse: ingen produksjonskode satte noen frist, så den kunne aldri
+   * slå ut. Den er nå koblet til faktiske support-data (ikke fjernet). Den tidligste gjeldende fristen blir loopens `due_at` (attention-bøtta «critical» krever en frist).
+   * `waiting_customer` har ingen klokke (vi venter på kunden); uten kundemelding (manuell ticket) finnes ingen utledet frist. `supportSla: null` slår utledningen av.
+   */
   async detectOverdueSupportTickets(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
+    const sla = this.supportSla;
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const rows = await client.query(
-        `SELECT ticket_id, company_id, contact_id, subject, priority, assignee_person_id,
-                LEAST(COALESCE(next_response_due_at, next_action_due_at), COALESCE(next_action_due_at, next_response_due_at)) AS due_at
-         FROM support_tickets
-         WHERE tenant_id = $1 AND status NOT IN ('resolved', 'closed')
+        `SELECT t.ticket_id, t.company_id, t.contact_id, t.subject, t.priority, t.assignee_person_id,
+                LEAST(COALESCE(t.next_response_due_at, t.next_action_due_at), COALESCE(t.next_action_due_at, t.next_response_due_at), sla.sla_due_at) AS due_at,
+                (sla.sla_due_at IS NOT NULL AND sla.sla_due_at < now()) AS sla_breach
+         FROM support_tickets t
+         LEFT JOIN LATERAL (
+           SELECT lm.occurred_at + make_interval(hours => CASE t.priority WHEN 'urgent' THEN $2::int WHEN 'high' THEN $3::int WHEN 'normal' THEN $4::int ELSE $5::int END) AS sla_due_at
+             FROM (
+               SELECT e.occurred_at FROM support_ticket_events e
+                WHERE e.tenant_id = t.tenant_id AND e.ticket_id = t.ticket_id AND e.event_type = 'customer_message'
+                ORDER BY e.occurred_at DESC LIMIT 1
+             ) lm
+            WHERE $6::boolean AND t.status <> 'waiting_customer'
+              AND NOT EXISTS (
+                SELECT 1 FROM support_ticket_events a
+                 WHERE a.tenant_id = t.tenant_id AND a.ticket_id = t.ticket_id AND a.event_type = 'agent_reply' AND a.occurred_at > lm.occurred_at
+              )
+         ) sla ON true
+         WHERE t.tenant_id = $1 AND t.status NOT IN ('resolved', 'closed')
            AND (
-             (next_response_due_at IS NOT NULL AND next_response_due_at < now())
-             OR (next_action_due_at IS NOT NULL AND next_action_due_at < now())
+             (t.next_response_due_at IS NOT NULL AND t.next_response_due_at < now())
+             OR (t.next_action_due_at IS NOT NULL AND t.next_action_due_at < now())
+             OR (sla.sla_due_at IS NOT NULL AND sla.sla_due_at < now())
            )`,
-        [tenantId]
+        [tenantId, sla?.urgent ?? 1, sla?.high ?? 1, sla?.normal ?? 1, sla?.low ?? 1, sla !== null]
       );
       return this.upsertSupportLoop(
         client, tenantId, memorySpace, rows.rows as SupportTicketRow[], "support_ticket_overdue",
-        (row) => ({ reason: `Ticket "${row.subject}" er forfalt`, next_action: `Foelg opp forfalt ticket ${row.ticket_id}`, priority: "high" })
+        (row) => ({
+          reason: row.sla_breach && sla
+            ? `Ticket "${row.subject}" har ikke fått svar innen svarfristen (${sla[row.priority]} t for ${row.priority} prioritet)`
+            : `Ticket "${row.subject}" er forfalt`,
+          next_action: `Foelg opp forfalt ticket ${row.ticket_id}`,
+          priority: "high",
+          due_at: row.due_at ? new Date(row.due_at).toISOString() : null
+        })
       );
     });
   }
@@ -199,7 +246,7 @@ export class OpenLoopService {
     memorySpace: MemorySpace,
     rows: SupportTicketRow[],
     loopType: OpenLoopType,
-    build: (row: SupportTicketRow) => { reason: string; next_action: string; priority: OpenLoopPriority }
+    build: (row: SupportTicketRow) => { reason: string; next_action: string; priority: OpenLoopPriority; due_at?: string | null }
   ): Promise<SweepResult> {
     let detected = 0;
     let updated = 0;
@@ -213,7 +260,7 @@ export class OpenLoopService {
         company_id: row.company_id, contact_id: row.contact_id, opportunity_id: null,
         lead_id: null, followup_id: null, activity_id: null, ticket_id: row.ticket_id, contract_id: null, campaign_id: null,
         loop_type: loopType, detection_key: detectionKey, reason: built.reason, next_action: built.next_action,
-        priority: built.priority, owner_person_id: row.assignee_person_id, due_at: null
+        priority: built.priority, owner_person_id: row.assignee_person_id, due_at: built.due_at ?? null
       });
       if (result === "inserted") detected++; else updated++;
     }
@@ -520,7 +567,9 @@ export class OpenLoopService {
           activity_id: null, ticket_id: null, contract_id: null, campaign_id: null,
           loop_type: "customer_churn_risk", detection_key: detectionKey,
           reason: describeChurnRisk(calc), next_action: churnNextAction(calc),
-          priority: a.risk_level === "high" ? "high" : "normal", owner_person_id: null, due_at: null
+          priority: a.risk_level === "high" ? "high" : "normal", owner_person_id: null, due_at: null,
+          // WP-D2 (JARVIS-045): flere UAVHENGIGE signalfamilier (bruk, support, fakturering) som slår ut samtidig gir høyere sikkerhet.
+          intrinsic_signals: Math.max(0, a.signal_families.length - 1)
         });
         if (result === "inserted") detected++; else updated++;
       }
@@ -994,6 +1043,9 @@ export class OpenLoopService {
       await this.detectBankConsentAttention(tenantId, memorySpace),
       await this.detectCardAnomalies(tenantId, memorySpace)
     ];
+    // WP-D2 (JARVIS-045): confidence fra flere signaler skrives SIST, etter at alle detektorene har (re)skrevet basisverdien. Feiler den, feiler sveipet synlig (deteksjonene er allerede
+    // committet) - aldri en stille manglende justering.
+    await this.refineConfidence(tenantId, memorySpace);
     return results.reduce(
       (acc, r) => ({ detected: acc.detected + r.detected, updated: acc.updated + r.updated, auto_resolved: acc.auto_resolved + r.auto_resolved }),
       { detected: 0, updated: 0, auto_resolved: 0 }
@@ -1029,14 +1081,100 @@ export class OpenLoopService {
     return loops.map((loop) => ({ bucket: classifyAttentionBucket(loop.priority, loop.due_at, now), loop }));
   }
 
-  async resolveOpenLoop(tenantId: string, memorySpace: MemorySpace, openLoopId: string, resolutionReason: string): Promise<BusinessOpenLoop | null> {
+  /**
+   * Lukker en loop manuelt. WP-D2 (JARVIS-045): valgfritt `outcome` (`acted` = du handlet på den, `dismissed` = irrelevant) gjør lukkingen til kalibreringsgrunnlag; uten utfall er
+   * loopen umerket (teller verken som treff eller bom). Ugyldig utfall avvises FØR noe skrives.
+   */
+  async resolveOpenLoop(
+    tenantId: string, memorySpace: MemorySpace, openLoopId: string, resolutionReason: string, outcome?: Extract<LoopResolutionOutcome, "acted" | "dismissed">
+  ): Promise<BusinessOpenLoop | null> {
+    if (outcome !== undefined && !(MANUAL_RESOLUTION_OUTCOMES as readonly string[]).includes(outcome)) throw new Error(`open_loop_outcome_invalid: ${String(outcome)}`);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(
-        `UPDATE business_open_loops SET status = 'resolved', resolved_at = now(), resolution_reason = $1, updated_at = now()
+        `UPDATE business_open_loops SET status = 'resolved', resolved_at = now(), resolution_reason = $1, resolution_outcome = $4, updated_at = now()
          WHERE tenant_id = $2 AND open_loop_id = $3 AND status = 'open' RETURNING *`,
-        [resolutionReason, tenantId, openLoopId]
+        [resolutionReason, tenantId, openLoopId, outcome ?? null]
       );
       return (rows[0] as BusinessOpenLoop) ?? null;
+    });
+  }
+
+  /**
+   * WP-D2 (JARVIS-045): kalibreringsrapport - forutsagt confidence mot faktisk utfall, samlet og per loop-type (treffrate, gap, Brier, pålitelighetsbøtter). Ren lesing. Kun loops
+   * åpnet de siste `sinceDays` dagene (standard 365). Umerkede utfall (`condition_cleared`, lukket uten utfall) og åpne loops telles separat - aldri som treff eller bom.
+   */
+  async calibrationReport(tenantId: string, memorySpace: MemorySpace, options: { sinceDays?: number } = {}): Promise<CalibrationReport> {
+    const sinceDays = Math.min(Math.max(Math.trunc(options.sinceDays ?? 365), 7), 1095);
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      // Levende rader (åpnet i vinduet) + tidligere MERKEDE lukkinger av loops som siden er gjenåpnet (closure_history, vindu på lukketidspunktet): uten det ville «avvist, men vilkåret
+      // holdt» forsvunnet fra kalibreringen ved gjenåpning (survivorship).
+      const { rows } = await client.query(
+        `SELECT loop_type, confidence::float8 AS confidence, status, resolution_outcome
+           FROM business_open_loops WHERE tenant_id = $1 AND opened_at > now() - make_interval(days => $2)
+         UNION ALL
+         SELECT l.loop_type, (h.e->>'confidence')::float8, 'resolved', h.e->>'outcome'
+           FROM business_open_loops l CROSS JOIN LATERAL jsonb_array_elements(l.closure_history) AS h(e)
+          WHERE l.tenant_id = $1 AND (h.e->>'closed_at')::timestamptz > now() - make_interval(days => $2)`,
+        [tenantId, sinceDays]
+      );
+      const observations = (rows as Array<{ loop_type: string; confidence: number | null; status: string; resolution_outcome: LoopResolutionOutcome | null }>).map((r): CalibrationObservation => ({
+        loop_type: r.loop_type,
+        confidence: r.confidence,
+        outcome: (r.status === "open" ? "open" : r.resolution_outcome ?? "unlabelled") as LoopOutcome
+      }));
+      return buildCalibrationReport(observations);
+    });
+  }
+
+  /**
+   * WP-D2 (JARVIS-045): skriver `confidence` for ALLE åpne deterministiske loops fra flere signaler (se confidence.ts): persistens, forfallsstørrelse, uavhengig bekreftelse fra andre
+   * domener hos samme kunde, regelens egne signalfamilier og - når nok merkede utfall finnes - observert treffrate for loop-typen. Detektorene skriver fortsatt basisverdien ved
+   * hver (re)deteksjon; denne passeringen (kjørt sist i `runSweep`) legger evidensen oppå. Idempotent: returnerer antall loops som faktisk ble endret (andre kjøring = 0).
+   */
+  async refineConfidence(tenantId: string, memorySpace: MemorySpace): Promise<number> {
+    const calibration = calibrationByType(await this.calibrationReport(tenantId, memorySpace));
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT open_loop_id, loop_type, company_id, confidence::float8 AS confidence, confidence_basis,
+                EXTRACT(EPOCH FROM (now() - opened_at)) / 86400 AS persisted_days,
+                CASE WHEN due_at IS NOT NULL AND due_at < now() THEN EXTRACT(EPOCH FROM (now() - due_at)) / 86400 END AS overdue_days
+           FROM business_open_loops WHERE tenant_id = $1 AND status = 'open' AND detection_method = 'deterministic'`,
+        [tenantId]
+      );
+      const loops = rows as Array<{
+        open_loop_id: string; loop_type: string; company_id: string | null; confidence: number | null; confidence_basis: Record<string, unknown> | null;
+        persisted_days: string | number; overdue_days: string | number | null;
+      }>;
+      // Hvilke domenefamilier har åpne loops hos hver kunde? (distinkte familier - to loops i samme domene bekrefter ikke hverandre)
+      const familiesByCompany = new Map<string, Set<string>>();
+      for (const l of loops) {
+        if (l.company_id === null) continue;
+        const set = familiesByCompany.get(l.company_id) ?? new Set<string>();
+        set.add(loopFamily(l.loop_type));
+        familiesByCompany.set(l.company_id, set);
+      }
+      let changed = 0;
+      for (const l of loops) {
+        const own = loopFamily(l.loop_type);
+        const corroborating = l.company_id === null ? 0 : [...(familiesByCompany.get(l.company_id) ?? [])].filter((f) => corroboratesEachOther(own, f)).length;
+        const intrinsic = Number((l.confidence_basis as { intrinsic_signals?: unknown } | null)?.intrinsic_signals ?? 0);
+        const result = computeLoopConfidence({
+          loop_type: l.loop_type,
+          persisted_days: Number(l.persisted_days),
+          overdue_days: l.overdue_days === null ? null : Number(l.overdue_days),
+          corroborating_domains: corroborating,
+          intrinsic_signals: Number.isFinite(intrinsic) ? intrinsic : 0,
+          calibration: calibration.get(l.loop_type) ?? null
+        });
+        const sameBasis = l.confidence_basis !== null && canonicalStringify(l.confidence_basis as never) === canonicalStringify(result.basis as never);
+        if (l.confidence !== null && Math.abs(l.confidence - result.confidence) < 0.0001 && sameBasis) continue;
+        await client.query(
+          `UPDATE business_open_loops SET confidence = $1, confidence_basis = $2::jsonb WHERE tenant_id = $3 AND open_loop_id = $4 AND status = 'open'`,
+          [result.confidence, JSON.stringify(result.basis), tenantId, l.open_loop_id]
+        );
+        changed += 1;
+      }
+      return changed;
     });
   }
 
@@ -1078,6 +1216,9 @@ interface SupportTicketRow {
   subject: string;
   priority: "low" | "normal" | "high" | "urgent";
   assignee_person_id: string | null;
+  /** WP-D2 (JARVIS-082): tidligste gjeldende frist og om den utledede svarfristen er brutt (kun satt av `detectOverdueSupportTickets`). */
+  due_at?: string | Date | null;
+  sla_breach?: boolean;
 }
 
 interface ContractRow {
@@ -1190,7 +1331,14 @@ interface UpsertOpenLoopInput {
   priority: OpenLoopPriority;
   owner_person_id: string | null;
   due_at: string | null;
+  /** WP-D2 (JARVIS-045): ekstra uavhengige signalfamilier regelen selv fant (0/utelatt = én). Lagres i `confidence_basis` og leses av `refineConfidence`. */
+  intrinsic_signals?: number;
 }
+
+/** En lukket loop gjenåpnes av neste deteksjon: auto-lukket (vilkåret forsvant) umiddelbart, ellers først etter 7-dagers-undertrykkelsen (D-396). Samme vilkår som status/opened_at/resolved_at under. */
+const REOPENS_SQL = `(business_open_loops.status = 'resolved' AND (business_open_loops.resolution_reason IS NOT DISTINCT FROM 'condition_no_longer_true' OR business_open_loops.resolved_at <= now() - interval '7 days'))`;
+/** Maks antall tidligere merkede lukkinger (utfall + confidence ved lukking) som beholdes per loop - de nyeste. */
+const CLOSURE_HISTORY_MAX = 100;
 
 async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput): Promise<"inserted" | "updated"> {
   const { rows } = await client.query(
@@ -1198,8 +1346,8 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
        (open_loop_id, tenant_id, memory_space_id, company_id, contact_id, opportunity_id, lead_id, followup_id, activity_id,
         ticket_id, contract_id, campaign_id, payment_intent_id, finance_spend_record_id, finance_recurring_commitment_id,
         finance_procurement_item_id, product_item_id, operations_task_id, loop_type, detection_key, reason, next_action, priority, owner_person_id, due_at,
-        detection_method, confidence)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, 'deterministic', $26)
+        detection_method, confidence, confidence_basis)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, 'deterministic', $26, $27::jsonb)
      ON CONFLICT (tenant_id, detection_key) DO UPDATE SET
        -- Gjenaapning (§9 i byggeordren): en tidligere resolved loop for SAMME vilkaar settes
        -- eksplisitt tilbake til 'open' med ny opened_at - historikken bevares i audit_events,
@@ -1223,7 +1371,29 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
                                  AND (business_open_loops.resolution_reason IS NOT DISTINCT FROM 'condition_no_longer_true'
                                       OR business_open_loops.resolved_at <= now() - interval '7 days')
                                 THEN NULL ELSE business_open_loops.resolution_reason END,
-       reason = EXCLUDED.reason, priority = EXCLUDED.priority, due_at = EXCLUDED.due_at, confidence = EXCLUDED.confidence, updated_at = now()
+       -- WP-D2 (091): et utfall hører til lukkingen - gjenåpning nullstiller det sammen med grunnen.
+       resolution_outcome = CASE WHEN business_open_loops.status = 'resolved'
+                                  AND (business_open_loops.resolution_reason IS NOT DISTINCT FROM 'condition_no_longer_true'
+                                       OR business_open_loops.resolved_at <= now() - interval '7 days')
+                                 THEN NULL ELSE business_open_loops.resolution_outcome END,
+       -- WP-D2 (091, JARVIS-045): et MERKET utfall (acted/dismissed) forsvinner ikke når samme vilkår gjenåpner loopen - da ville kun lukkinger som faktisk løste saken overlevd
+       -- som kalibreringsgrunnlag (survivorship: «avvist, men vilkåret holder» ble usynlig og treffraten overvurdert). Utfallet og confidence ved lukking flyttes til closure_history.
+       closure_history = CASE WHEN ${REOPENS_SQL} AND business_open_loops.resolution_outcome IN ('acted', 'dismissed') AND business_open_loops.confidence IS NOT NULL
+                              THEN (SELECT COALESCE(jsonb_agg(x.e ORDER BY x.ord), '[]'::jsonb)
+                                      FROM (SELECT t.e, t.ord
+                                              FROM jsonb_array_elements(business_open_loops.closure_history || jsonb_build_array(jsonb_build_object(
+                                                     'outcome', business_open_loops.resolution_outcome, 'confidence', business_open_loops.confidence, 'closed_at', business_open_loops.resolved_at
+                                                   ))) WITH ORDINALITY AS t(e, ord)
+                                             ORDER BY t.ord DESC LIMIT ${CLOSURE_HISTORY_MAX}) x)
+                              ELSE business_open_loops.closure_history END,
+       -- WP-D2 (091): detektoren skriver KUN grunnverdien ved ny/gjenåpnet loop. En vanlig re-deteksjon nullstiller ikke lenger confidence til grunnverdien (en enkeltdetektor kjørt utenom
+       -- runSweep ville ellers løftet en kalibrert/nedjustert verdi tilbake til 0.9 til neste fulle sveip), og en loop som holdes lukket (7-dagers-undertrykkelsen) beholder verdien den ble
+       -- lukket med. refineConfidence er eneste skriver ellers; churn-loopens signalfamilie-tall (hint) flettes inn i forklaringen uten å slette resten.
+       confidence = CASE WHEN ${REOPENS_SQL} OR business_open_loops.confidence IS NULL THEN EXCLUDED.confidence ELSE business_open_loops.confidence END,
+       confidence_basis = CASE WHEN ${REOPENS_SQL} THEN EXCLUDED.confidence_basis
+                               WHEN EXCLUDED.confidence_basis IS NULL THEN business_open_loops.confidence_basis
+                               ELSE COALESCE(business_open_loops.confidence_basis, '{}'::jsonb) || EXCLUDED.confidence_basis END,
+       reason = EXCLUDED.reason, priority = EXCLUDED.priority, due_at = EXCLUDED.due_at, updated_at = now()
      RETURNING (xmax = 0) AS inserted`,
     [
       input.open_loop_id, input.tenant_id, input.memory_space, input.company_id, input.contact_id,
@@ -1231,7 +1401,8 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
       input.payment_intent_id ?? null, input.finance_spend_record_id ?? null, input.finance_recurring_commitment_id ?? null,
       input.finance_procurement_item_id ?? null, input.product_item_id ?? null, input.operations_task_id ?? null,
       input.loop_type, input.detection_key, input.reason, input.next_action, input.priority, input.owner_person_id, input.due_at,
-      deterministicLoopConfidence(input.loop_type)
+      deterministicLoopConfidence(input.loop_type),
+      input.intrinsic_signals !== undefined ? JSON.stringify({ intrinsic_signals: Math.max(0, Math.trunc(input.intrinsic_signals)) }) : null
     ]
   );
   return (rows[0] as { inserted: boolean }).inserted ? "inserted" : "updated";
@@ -1240,7 +1411,7 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
 /** §9: en tidligere aapen loop hvis vilkaar IKKE lenger er sant (ikke i currentKeys) resolves automatisk. */
 async function autoResolveStale(client: pg.PoolClient, tenantId: string, loopType: string, currentKeys: string[]): Promise<number> {
   const { rowCount } = await client.query(
-    `UPDATE business_open_loops SET status = 'resolved', resolved_at = now(), resolution_reason = 'condition_no_longer_true', updated_at = now()
+    `UPDATE business_open_loops SET status = 'resolved', resolved_at = now(), resolution_reason = 'condition_no_longer_true', resolution_outcome = 'condition_cleared', updated_at = now()
      WHERE tenant_id = $1 AND loop_type = $2 AND status = 'open' AND NOT (detection_key = ANY($3))`,
     [tenantId, loopType, currentKeys]
   );

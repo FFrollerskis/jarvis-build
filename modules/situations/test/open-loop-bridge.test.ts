@@ -21,9 +21,9 @@ function loop(overrides: Partial<BusinessOpenLoop> = {}): BusinessOpenLoop {
     company_id: null, contact_id: null, opportunity_id: null, lead_id: null, followup_id: null, activity_id: null,
     ticket_id: null, contract_id: null, campaign_id: null, payment_intent_id: null, finance_spend_record_id: null,
     finance_recurring_commitment_id: null, finance_procurement_item_id: null, product_item_id: null, operations_task_id: null,
-    loop_type: "overdue_followup", detection_key: "followup:abc", detection_method: "deterministic", confidence: null,
+    loop_type: "overdue_followup", detection_key: "followup:abc", detection_method: "deterministic", confidence: null, confidence_basis: null,
     reason: "Oppfølging er forfalt", next_action: null, canonical_uri: null, priority: "normal", status: "open",
-    owner_person_id: "person-x", opened_at: "2026-09-16T00:00:00Z", due_at: null, resolved_at: null, resolution_reason: null,
+    owner_person_id: "person-x", opened_at: "2026-09-16T00:00:00Z", due_at: null, resolved_at: null, resolution_reason: null, resolution_outcome: null,
     created_at: "2026-09-16T00:00:00Z", updated_at: "2026-09-16T00:00:00Z",
     ...overrides
   };

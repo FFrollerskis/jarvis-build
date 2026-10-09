@@ -56,6 +56,12 @@ export function deterministicLoopConfidence(loopType: string): number {
 }
 export type OpenLoopPriority = "low" | "normal" | "high";
 export type OpenLoopStatus = "open" | "resolved";
+/**
+ * WP-D2 (091, JARVIS-045): hva som skjedde da loopen ble lukket. `acted` = eieren/operatøren handlet, `dismissed` = avvist som irrelevant, `condition_cleared` = vilkåret forsvant av
+ * seg selv (satt av sveipet). `null` på en lukket loop = lukket uten utfall (umerket).
+ */
+export type LoopResolutionOutcome = "acted" | "dismissed" | "condition_cleared";
+export const MANUAL_RESOLUTION_OUTCOMES = ["acted", "dismissed"] as const;
 
 export interface BusinessOpenLoop {
   open_loop_id: string;
@@ -89,6 +95,8 @@ export interface BusinessOpenLoop {
   detection_key: string;
   detection_method: OpenLoopDetectionMethod;
   confidence: number | null;
+  /** WP-D2 (091, JARVIS-045): hvorfor `confidence` ble som den ble (se confidence.ts `ConfidenceBasis`); null til første sveip etter 091. */
+  confidence_basis: Record<string, unknown> | null;
   reason: string;
   next_action: string | null;
   canonical_uri: string | null;
@@ -99,6 +107,10 @@ export interface BusinessOpenLoop {
   due_at: string | null;
   resolved_at: string | null;
   resolution_reason: string | null;
+  /** WP-D2 (091): se `LoopResolutionOutcome`. */
+  resolution_outcome: LoopResolutionOutcome | null;
+  /** WP-D2 (091): tidligere MERKEDE lukkinger av denne loopen (utfall + confidence ved lukking) etter at vilkåret gjenåpnet den - kalibreringsgrunnlag som ikke skal forsvinne ved gjenåpning. */
+  closure_history?: Array<{ outcome: "acted" | "dismissed"; confidence: number; closed_at: string }>;
   created_at: string;
   updated_at: string;
 }
