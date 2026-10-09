@@ -7,6 +7,7 @@ import {
   EnvSecretProvider, FallbackSecretProvider, InfisicalSecretProvider, ToolGateway, secretPresenceOf,
   type SecretPresence, type SecretProvider, type SecretSourceHealth
 } from "../src/gateway.ts";
+import { GITHUB_TOKEN_REF, GitHubTokenSecretProvider, type GitHubTokenProvider } from "../src/github-token-provider.ts";
 
 /**
  * WP-H0, gjennomgang av PR #316 (M-1 + L-3): TRI-STATE presence for credential-kilder.
@@ -300,5 +301,53 @@ describe("L-3: samtidige oppslag deler ÉN innlogging", () => {
     const again = await Promise.all(Array.from({ length: 12 }, () => p.get("JARVIS_REF_0")));
     expect(again.every((v) => v === "v")).toBe(true);
     expect(fake.logins).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------
+// WP-C3-dekoratøren (GitHub App/PAT) mellom ToolGateway og kjeden: M-1 må overleve den (main.ts: githubAuth.secretProvider(baseSecretProvider))
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------
+describe("GitHubTokenSecretProvider viderefører tri-state og helse (M-1 gjennom WP-C3-dekoratøren)", () => {
+  const tokens = (has: boolean, spy: { issued: number } = { issued: 0 }): GitHubTokenProvider => ({
+    method: "pat", getToken: async () => { spy.issued += 1; return has ? "ghs_utstedt" : null; }, hasCredential: async () => has, describe: () => ({}) as never
+  });
+  const down: SecretProvider = { name: "infisical", get: async () => null, health: "unavailable" };
+  const healthyEmpty: SecretProvider = { name: "infisical", get: async () => null, health: "healthy" };
+
+  it("andre refer: kjedens tri-state går uendret gjennom (Infisical nede = ukjent, frisk uten verdi = absent)", async () => {
+    expect(await new GitHubTokenSecretProvider(down, tokens(false)).presence("JARVIS_EMAIL_TOKEN")).toBe("unknown");
+    expect(await new GitHubTokenSecretProvider(healthyEmpty, tokens(false)).presence("JARVIS_EMAIL_TOKEN")).toBe("absent");
+    const have: SecretProvider = { name: "x", get: async () => "v" };
+    expect(await new GitHubTokenSecretProvider(have, tokens(false)).presence("JARVIS_EMAIL_TOKEN")).toBe("present");
+  });
+
+  it("GitHub-refen: finnes en brukbar credential er den present - UTEN å utstede et token; ellers avgjør kjeden om det er en måling (absent) eller ukjent", async () => {
+    const spy = { issued: 0 };
+    expect(await new GitHubTokenSecretProvider(down, tokens(true, spy)).presence(GITHUB_TOKEN_REF)).toBe("present");
+    expect(spy.issued).toBe(0);
+    expect(await new GitHubTokenSecretProvider(down, tokens(false, spy)).presence(GITHUB_TOKEN_REF)).toBe("unknown");
+    expect(await new GitHubTokenSecretProvider(healthyEmpty, tokens(false, spy)).presence(GITHUB_TOKEN_REF)).toBe("absent");
+    expect(spy.issued).toBe(0);
+  });
+
+  it("helsen til kjeden under er synlig utenfra, og ToolGateway over dekoratøren gir null (ukjent) når Infisical er nede - ikke false", async () => {
+    const decorated = new GitHubTokenSecretProvider(down, tokens(false));
+    expect(decorated.health).toBe("unavailable");
+    const gateway = gatewayOver(decorated);
+    expect(gateway.secretsHealth()).toBe("unavailable");
+    expect(await gateway.secretPresence("JARVIS_EMAIL_TOKEN")).toBeNull();
+    expect(await gateway.secretPresence(GITHUB_TOKEN_REF)).toBeNull();
+    expect(await gateway.hasSecret(GITHUB_TOKEN_REF)).toBe(false); // to-state uendret
+  });
+
+  it("en kilde med has() (uten presence) brukes uten å materialisere verdien: has=true er present, has=false avgjøres av helsen", async () => {
+    const issued = { n: 0 };
+    const issuing: SecretProvider = { name: "utsteder", get: async () => { issued.n += 1; return "token"; }, has: async () => true };
+    expect(await secretPresenceOf(issuing, "REF")).toBe("present");
+    expect(issued.n).toBe(0);
+    const noHasDown: SecretProvider = { name: "n", get: async () => null, has: async () => false, health: "unavailable" };
+    expect(await secretPresenceOf(noHasDown, "REF")).toBe("unknown");
+    const throwingHas: SecretProvider = { name: "t", get: async () => "v", has: async () => { throw new Error("x"); } };
+    expect(await secretPresenceOf(throwingHas, "REF")).toBe("absent");
   });
 });

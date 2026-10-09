@@ -8,33 +8,33 @@
 
 ## 1. HF2 Evolution v1.2 (EV-0 … EV-23)
 
-HF2-PDF-en ligger ikke i repoet; radene bygger på beslutningsloggen D-406…D-419 og koden.
+HF2-PDF-en ligger ikke i repoet; radene bygger på beslutningsloggen D-406…D-419, D-452 og koden. **Alle `WIRED`-rader er observasjon (`acts: false`): ingenting skrives eller utføres, selvendring er frosset (D-397), og ingenting er `VERIFIED` før det er observert på NAS.**
 
 | EV | Innhold | Kode | Status | For å verifisere/aktivere |
 |---|---|---|---|---|
-| EV-0 | Safety Constitution (Ed25519, E0–E3), endringsregister (hash-kjede, migr. 075), budsjettlåser, break-glass, oppstartssjekk | `modules/self-modification/src/{constitution,change-ledger,budget-lock}.ts`, `ops/break-glass/`, `apps/api/src/ev0-boot.ts` | `DORMANT` (oppstartssjekken er `WIRED` som observasjon) | **Tobias:** generer nøkkel offline, signer, fest fingeravtrykk i NAS-`.env` (`EV0_CONSTITUTION_SIGNING.md`); vurder budsjettlås-utkast; øv break-glass (`EV0_BREAK_GLASS.md`). NAS viser `constitution_unsigned` (WARN). |
+| EV-0 | Safety Constitution (Ed25519, E0–E3), endringsregister (hash-kjede, migr. 075), budsjettlåser, break-glass, oppstartssjekk | `modules/self-modification/src/{constitution,change-ledger,budget-lock}.ts`, `ops/break-glass/`, `apps/api/src/ev0-boot.ts`; rapportseksjon `evolution-source.ts` (EV-0/EV-8) | `DORMANT` (oppstartssjekken og endringsgrensene er `WIRED` som observasjon) | **Tobias:** generer nøkkel offline, signer, fest fingeravtrykk i NAS-`.env` (`EV0_CONSTITUTION_SIGNING.md`); vurder budsjettlås-utkast; øv break-glass (`EV0_BREAK_GLASS.md`). NAS viser `constitution_unsigned` (WARN). |
 | EV-1 | Selvmodell: selvdiagnose, begrensningsregister, confidence-gate | `modules/executive/src/self-model/` | `WIRED` (chat «hva er galt med deg», `executive.get_self_diagnosis`) | Observer svaret i chat på NAS. |
 | EV-2 | Telemetri, SLO, drift, dataskvalitet | `modules/executive/src/slo/`, `apps/api/src/slo-source.ts` | `WIRED` (chat «hvor bra yter du», `executive.get_slo_report`) | **Tobias:** godkjenn SLO-målene (forslag). |
-| EV-3 | Radar-sikkerhetssone | `evolution/radar.ts` | `BUILT_UNWIRED` → kobles i WP-B | Kjøres mot ekte kilder først når en radar-henter finnes. |
-| EV-4 | Eval-versjonering, regresjonsport, blind A/B | `evolution/evals.ts` | `BUILT_UNWIRED` → WP-B | Golden-task-bibliotek fra ekte oppgaver. |
-| EV-5 | Forslagsskjema | `evolution/proposal.ts` | `BUILT_UNWIRED` → WP-B (forslag inn i endringsregisteret) | Eier gjennomgår første forslag. |
-| EV-6 | Selvkoding | – | `NOT_BUILT` (plan: venter bevist worker-isolasjon, D-32) → WP-B bygger sovende bak D-32 | D-32 må være `VERIFIED` først. |
-| EV-7 | Avhengighetsport | `evolution/supply-chain.ts` | `BUILT_UNWIRED` → WP-B | – |
-| EV-8 | Utrulling shadow→staging→canary→full, tilbakerulling | `evolution/release-gate.ts` | `BUILT_UNWIRED` → WP-B | Shadow/canary-infrastruktur finnes ikke ennå. |
-| EV-9 | Selvhelbredelse H0–H4, hendelsesløkke | `evolution/heal.ts` | `BUILT_UNWIRED` → WP-B (observasjon mot watchdog) | H2 krever forhåndsgodkjenning og UA-port live. |
-| EV-10 | Minnevedlikehold (ferskhet, kildekvalitet, forgiftning) | `evolution/memory-maintenance.ts` | `BUILT_UNWIRED` → WP-B | – |
-| EV-11 | Utfallslæring | – | `NOT_BUILT` (plan: venter sporbare utfall fra UA-3/4/7) → WP-B bygger sovende | Utfall må finnes. |
-| EV-12 | Modellruting innen eierens allowlist | `evolution/model-autopilot.ts` (+ modellrådgiveren D-399 i shadow) | `BUILT_UNWIRED` → WP-B (shadow) | Bake-off (D-439) kjøres. |
-| EV-13 | Personlighet som versjonert tone-lag | `evolution/personality.ts` | `BUILT_UNWIRED` → WP-B | – |
-| EV-14 | Uttrykkstilstand | `evolution/expression-state.ts` | `BUILT_UNWIRED` → WP-B | – |
-| EV-15 | Mål-autonomi | – | `NOT_BUILT` (plan: venter UA-10/11) → WP-B bygger sovende | – |
-| EV-16 | Ressurs-/kostprognose | `evolution/resource.ts` | `BUILT_UNWIRED` → WP-B (rapport) | – |
-| EV-17 | Credential-vurdering | `evolution/credentials.ts` | `BUILT_UNWIRED` → WP-B (rapport) | – |
-| EV-18 | – | – | `NOT_BUILT` (plan: etter 3–5 beviste connectors) → WP-B/I | Connectors må være beviste. |
-| EV-19 | Vedlikeholdsplan | `evolution/maintenance-schedule.ts` | `BUILT_UNWIRED` → WP-B (scheduler) | – |
-| EV-20 | – | – | `NOT_BUILT` (plan: venter bevist off-site-restore, UA-0) → WP-B/C | Off-site restore må være bevist. |
-| EV-21 | Sikkerhetstilpasning, red-team-dom | `evolution/security-adaptation.ts` | `BUILT_UNWIRED` → WP-B | Red-team-korpus. |
-| EV-22 / EV-23 | Bygger på Admin Control Center | – | `NOT_BUILT` (plan: avhenger UA Admin Control Center) → WP-H | – |
+| EV-3 | Radar: innhenting fra eierens egne kilder gjennom sikkerhetssonen (ubetrodd forskning, karantene, sikkerhetshendelse) | `evolution/radar.ts` (sone), `apps/api/src/evolution-radar.ts` (henting), rapportseksjon EV-3 | `WIRED` (D-452 B2; **inert uten `JARVIS_RADAR_SOURCES`** - ingen nettverkskall; kun status per kilde, aldri innhold) | **Tobias:** velg kildene (https, vanlig vertsnavn) i `JARVIS_RADAR_SOURCES`; observer første sveip i rapporten. |
+| EV-4 | Gylden suite (regresjonsport) | `apps/api/src/golden-suite.ts` (~32 deterministiske oppgaver med proveniens og suite-digest), `evolution/evals.ts` | `WIRED` (rapportseksjon; en deterministisk selvtest av Jarvis' egne regler, IKKE en LLM-basert eval) | Golden-task-bibliotek fra ekte oppgaver (blind A/B krever modellkjøring - ikke bygget). |
+| EV-5 | Forslagsskjema | `evolution/proposal.ts`, `evolution_change_ledger` | `WIRED` (rapportseksjon: forslag og endringsregister) | Eier gjennomgår første forslag. |
+| EV-6 | Selvkoding | `readiness.ts` (kun beredskap) | `DORMANT` (beredskapsvisning; `activation_decision` er ALLTID false; selvendring er frosset, D-397) | D-32 må være `VERIFIED` først, så navngitt D-beslutning. |
+| EV-7 | Avhengighetsport | `evolution/supply-chain.ts`, `ops/evolution/dependency-check.ts` | `WIRED` som skript (kjøres av en person eller CI mellom to commits; exit 1 ved treff - aldri av Jarvis selv) | Kjør skriptet i CI/før merge. |
+| EV-8 | Utrulling shadow→staging→canary→full, tilbakerulling | `evolution/release-gate.ts`; change freeze i rapporten | `WIRED` (change freeze fra oppstartssjekk, SLO, kill switch og åpne hendelser) | Shadow/canary-infrastruktur finnes ikke ennå. |
+| EV-9 | Selvhelbredelse H0–H4, hendelsesløkke | `evolution/heal.ts`, rapportseksjon EV-9 | `WIRED` som visning (stigen mot ekte funn; ingen reparasjon utføres) | H2 krever forhåndsgodkjenning (`JARVIS_EV_PREAPPROVED_FAILOVER`) og UA-port live. |
+| EV-10 | Minnevedlikehold (ferskhet, kildekvalitet, forgiftning, sensitivitetsdrift) | `evolution/memory-maintenance.ts`, rapportseksjon EV-10 (leser som app-rolle, helse/gjest utelatt) | `WIRED` (observasjon; ingenting slettes eller slås sammen) | Se «sensitivitetsdrift» og sett `JARVIS_MEMORY_RESENSITIZE=apply` etter å ha sett tallet. |
+| EV-11 | Utfallslæring | `readiness.ts` | `DORMANT` (beredskap) | Sporbare utfall fra UA-3/4/7 må finnes. |
+| EV-12 | Modellruting innen eierens allowlist | `evolution/model-autopilot.ts` (+ modellrådgiveren D-399 i shadow), `meshStatus()` | `WIRED` i skygge (velger/ruter ingenting) | Bake-off (D-439) kjøres. |
+| EV-13 | Personlighet som versjonert tone-lag | `evolution/personality.ts`, `readiness.ts` | `DORMANT` (beredskap) | – |
+| EV-14 | Uttrykkstilstand | `evolution/expression-state.ts`, `readiness.ts` | `DORMANT` (beredskap) | – |
+| EV-15 | Mål-autonomi | `readiness.ts` | `DORMANT` (beredskap; venter UA-10/11) | – |
+| EV-16 | Ressurs-/kostprognose | `evolution/resource.ts`, `cost_events` | `WIRED` (rapportseksjon: avvik og månedsprognose) | – |
+| EV-17 | Credential-vurdering | `evolution/credentials.ts`, connector-registeret | `WIRED` (rapportseksjon; utløpsdato er IKKE målt) | – |
+| EV-18 | Connector-fabrikk | `readiness.ts` | `DORMANT` (beredskap; etter 3–5 beviste connectors) | Connectors må være beviste (`JARVIS_EV_VERIFIED_GATES=CONNECTOR_FACTORY`). |
+| EV-19 | Vedlikeholdsplan | `evolution/maintenance-schedule.ts`, `scheduler_state` | `WIRED` (rapportseksjon, ærlig dekning av hvilke oppgaver som har en utfører) | – |
+| EV-20 | Uavhengig nødtilbakekall / off-site | `readiness.ts` | `DORMANT` (beredskap; venter bevist off-site-restore, WP-C2) | Off-site restore må være bevist (`OFFSITE_RESTORE`). |
+| EV-21 | Sikkerhetstilpasning, red-team-dom | `evolution/security-adaptation.ts`, `golden-suite.ts` (gruppert på angrepsklasse) | `WIRED` (red-team-lite: deterministisk selvtest av KJENTE angrepsklasser, ikke en LLM-red-team-agent) | Red-team-korpus fra ekte hendelser. |
+| EV-22 / EV-23 | Bygger på Admin Control Center | `readiness.ts` | `DORMANT` (beredskap; avhenger av kontrollsentrene, WP-H) | – |
 
 ## 2. HF1 grunnprogrammet, Fase 0–10 (kap. 6)
 
@@ -60,7 +60,7 @@ HF2-PDF-en ligger ikke i repoet; radene bygger på beslutningsloggen D-406…D-4
 | D-28 pgvector/HNSW | migr. 014/068, eval-skript | – | Kjør `ops/memory/embedding-eval-live.ts` på NAS |
 | D-30 Voice-benchmark | `benchmark.ts` | – | ≥100 norske lydprøver |
 | D-32 Worker Docker/GitHub | policy, `DockerJobSandboxRunner`, `pr-publisher` | Vertsside runner + jobbimage + egress → WP-C | Ekte branch/PR, ressurs-/nettverksisolasjon |
-| D-35 Vault + live | Infisical i compose, `oauth-refresh`, host-skript | GitHub-App-autentisering (Q-45b) → WP-C | Machine identity, rotasjon, Google OAuth live |
+| D-35 Vault + live | Infisical i compose, `oauth-refresh`, host-skript; **GitHub-App-autentisering (Q-45b, D-454): `WIRED/DORMANT`** - uten `JARVIS_GITHUB_APP_ID`/`_INSTALLATION_ID` er alt PAT uendret (`modules/tool-gateway/src/github-app-auth.ts`, `github-token-provider.ts`; kodejobbens git-credential er repo-scopet via `GitCredentialSource.tokenFor`) | – (GHES, releases, branch protection, rulesets, webhooks, secrets: `DEFERRED`) | Machine identity, rotasjon, Google OAuth live; **GitHub App (ikke verifisert mot ekte GitHub):** eier følger `docs/runbooks/GITHUB_APP.md` og kjører `node --env-file=.env --experimental-transform-types modules/tool-gateway/scripts/github-app-live.ts --key-file ./nokkel.pem [--sandbox-repo owner/test]` til `GITHUB_APP_LIVE_STATUS=VERIFIED` |
 | D-36 Apple | skjelett | Swift-konfig, APNs-kontrakt → WP-G | Mac/Xcode/enhet |
 | HA-RUNTIME | HA-transport | – | Fysisk HA |
 | OPS-RUNTIME | backup/restore-skript, watchdog | Planlagt drift + ekstern overvåking → WP-C | Off-site, drill, uptime |
@@ -77,7 +77,7 @@ HF2-PDF-en ligger ikke i repoet; radene bygger på beslutningsloggen D-406…D-4
 | UA-2 Knowledge | Flere kilder i produksjon, `KnowledgeRetriever` i chat, Docs/Sheets/Slides, møtetranskripter, entitetsgraf, Q-26 (truth promotion), Pieces (ingen kjent API) | Fem kilder i samme retrieval, cross-tenant=0 |
 | UA-3 Business OS | Business-tenant-provisjonering (044, topologi: Q-48), lead/opportunity-oppdatering, churn/product usage | Kjøring mot ekte kundedata |
 | UA-4 Growth | Skriveaksjoner (idempotent, før/etter) mot Ads, GA4/Search Console/GBP/LinkedIn/YouTube/TikTok, eksperiment/kreativ-intelligens | Google Ads developer token, Meta-verifisering |
-| UA-5 Dev/Cloud | Cloudflare, Langfuse/Infisical/Postgres som mål, incident-produsenter, GitHub App | Live GitHub/Vercel/GCP/Cloudflare |
+| UA-5 Dev/Cloud | Cloudflare, Langfuse/Infisical/Postgres som mål, incident-produsenter. *GitHub App er bygget (`DORMANT`, D-454); EV-17-faktaene `GitHubAuth.credentialFacts()` er `BUILT_UNWIRED` til de kobles til `assessCredential`* | Live GitHub (App-akseptansescriptet over)/Vercel/GCP/Cloudflare |
 | UA-6 Finance | D-kjede for betaling/refund/capture bak step-up, Wallester-/banking-webhooks, avstemming | Live Vipps/Neonomics/Wallester, BankID/KYC |
 | UA-7 Comms | Contacts, Teams, Messenger/Instagram, møtetranskripsjon-pipeline, utgående AI-ringing (regler), push-oppfølging | Identitet mot ekte data |
 | UA-8 Personal | Lokalagenter (Mac/Windows), Apple Calendar/Reminders/Contacts/Health-inntak, bil (provider-nøytral), familie/delte rom, personlig økonomi-lesing | Fysisk iPhone/Watch/bil |
@@ -92,7 +92,7 @@ HF2-PDF-en ligger ikke i repoet; radene bygger på beslutningsloggen D-406…D-4
 | V1 Daily Executive Brief | `WIRED` (Daily Brief, `DailyScheduler`) | Bruksmetrikk; observere daglig bruk |
 | V2 Unified Follow-up | `BUILT_UNWIRED` (conversation-graph, pull) | Push-levering → WP-C |
 | V3 Builder Loop | `NOT_BUILT` (selvmodifikasjon frosset, D-397) | Sovende løkke bak D-32 og EV-0 → WP-B/C |
-| V4 Business Operating Loop | delvis | Business-tenant (Q-48) → WP-E |
+| V4 Business Operating Loop | `PARTIAL` | Business-tenant (Q-48) → WP-D2 |
 | V5 Autonomous Operations | `NOT_BUILT` | Bak bekreftelse/step-up → WP-C/F |
 
 ## 6. Definition of Done, kap. 28 (15 punkter)

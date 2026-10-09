@@ -110,6 +110,11 @@ export class ExecutiveTransport implements ToolTransport {
         // `summary_no` og `explanation_no` først: chat-executoren kutter lange svar bakfra, og det er disse modellen skal relayere.
         return { data: { found: true, summary_no: result.report.summary_no, explanation_no: result.explanation_no, report: result.report } as unknown as JsonValue };
       }
+      case "get_value_report": {
+        // WP-C4: tenanten kommer UTELUKKENDE fra den betrodde kontekst-identiteten (D-68), aldri fra parametre.
+        const report = await this.service.getValueReport(identity.tenant_id);
+        return { data: report as unknown as JsonValue };
+      }
       case "get_connector_status": {
         const status = await this.service.getConnectorStatus();
         return { data: { ...status, summary_no: summarizeConnectorStatusNo(status.connectors) } as unknown as JsonValue };
@@ -275,6 +280,10 @@ export function executiveToolDefinitions(transport: ExecutiveTransport): ToolDef
       // WP-H0: eier-kun FØR noe bygges (avslaget er en vanlig `tool.denied`-revisjonsrad). Rapportene er konfigurasjonsmetadata og handlingene peker på eier-ruter.
       parameterAuthorizer: (_parameters, identity) => transport.authorizeControlCenter(identity)
     },
+    read(
+      "get_value_report",
+      "Svar på «hva har du hjulpet meg med?»/«hvor mye bruker jeg deg?»/«hva er verdien?» fra EKTE tall (kun antall og tidspunkt - aldri innhold): bruk per verdiløkke (Daily Brief, oppfølging, jobber, samtaler, bekreftelser, kost) siste 7 og 30 døgn, pluss status for de sovende løkkene (Builder Loop-beredskap og driftsforslag). Det som ikke kan måles står som «ikke målbart», aldri som 0. Gjengi summary_no."
+    ),
     read(
       "get_connector_status",
       "Les eierens integrasjons-oversikt: hver kjente connector (GitHub/Kalender/Gmail/Drive/Telegram/Vercel/modell-leverandører/finans), er den konfigurert (credential-presence, ALDRI selve verdien) og siste kjente tilkoblingshelse - D-211"

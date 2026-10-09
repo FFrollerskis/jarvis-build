@@ -30,6 +30,13 @@ export interface SecretProvider {
    * og `health` (null + `health === "unavailable"` er `unknown`, ikke `absent`). Skal aldri kaste og aldri returnere verdien.
    */
   presence?(ref: string): Promise<SecretPresence>;
+  /**
+   * VALGFRI (WP-C3 review F3): tilstedeværelse UTEN å materialisere verdien. `ToolGateway.hasSecret()` bruker den hvis den finnes, ellers `get(ref) !== null`. Trengs av leverandører der
+   * `get` har en SIDEEFFEKT eller kostnad - i dag GitHub App-dekoratøren, hvor `get` utsteder et installasjonstoken (et kall mot GitHub): uten `has` ville hver statuspoll, helse-sveip
+   * og dashbord-visning («er X konfigurert») utstedt et token, selv for en tilbakekalt credential. Skal aldri kaste (`false` = ikke tilgjengelig) og aldri gjøre nettverkskall mot
+   * selve tjenesten credentialen gjelder. En wrapper som ikke videresender `has` faller trygt tilbake til `get`.
+   */
+  has?(ref: string): Promise<boolean>;
 }
 
 /**
@@ -38,6 +45,17 @@ export interface SecretProvider {
  */
 export async function secretPresenceOf(provider: SecretProvider, ref: string): Promise<SecretPresence> {
   if (typeof provider.presence === "function") return provider.presence(ref);
+  // WP-C3 (review F3): en kilde med `has` (GitHub App-dekoratøren: `get` utsteder et installasjonstoken) svarer på presence uten å materialisere noe.
+  if (typeof provider.has === "function") {
+    let has = false;
+    try {
+      has = await provider.has(ref);
+    } catch {
+      has = false;
+    }
+    if (has) return "present";
+    return provider.health === "unavailable" ? "unknown" : "absent";
+  }
   const value = await provider.get(ref);
   if (value) return "present";
   return provider.health === "unavailable" ? "unknown" : "absent";
@@ -517,6 +535,14 @@ export class ToolGateway {
    * `SecretProvider.get()` sin egen kontrakt (se filhode over).
    */
   async hasSecret(ref: string): Promise<boolean> {
+    // WP-C3 review F3: leverandører med en `get` som utsteder noe (GitHub App-installasjonstoken) tilbyr `has`, slik at en statuspoll aldri utsteder en credential.
+    if (typeof this.secrets.has === "function") {
+      try {
+        return await this.secrets.has(ref);
+      } catch {
+        return false; // kontrakten: kaster aldri - en leverandør som likevel gjør det er «ikke tilgjengelig», ikke en feil som velter statusen
+      }
+    }
     return (await this.secrets.get(ref)) !== null;
   }
 
