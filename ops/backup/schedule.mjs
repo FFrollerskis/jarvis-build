@@ -13,6 +13,7 @@
  * heartbeat (JARVIS_BACKUP_HEARTBEAT_URL) og restore-verifisering (JARVIS_BACKUP_VERIFY_IDENTITY_FILE) er AV til eieren setter dem. Se
  * docs/remediation/BACKUP_RESTORE_RUNBOOK.md §6 for oppsett, exit-koder og akseptanse (ops/backup/acceptance-ops.sh).
  */
+import { readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { loadScheduleConfig } from "./lib/config.mjs";
@@ -20,7 +21,7 @@ import { ConfigError, envInt, envString } from "./lib/env.mjs";
 import { OffsiteError, createOffsiteSink, prepareSetForOffsite } from "./lib/offsite.mjs";
 import { makeRedactor } from "./lib/redact.mjs";
 import { EXIT, buildDefaultDeps, createLogger, listCompleteSets, runTick } from "./lib/schedule.mjs";
-import { STATUS_FILE, mergePeerVerifyReport, readPeerVerifyReport, readStatusFile } from "./lib/state.mjs";
+import { EXPORT_FILE, STATUS_FILE, mergePeerVerifyReport, readPeerVerifyReport, readStatusFile } from "./lib/state.mjs";
 
 class UsageError extends Error {}
 
@@ -69,6 +70,29 @@ async function tickCommand(argv, env, injected) {
   return result.exitCode;
 }
 
+/** Den offentlige statuseksporten (den API-containeren monterer `:ro`): finnes den, er den lesbar for andre, og hvor fersk er den? Kun metadata - innholdet skrives ikke ut. */
+function exportInfo(env, now) {
+  const dir = envString(env, "JARVIS_BACKUP_STATUS_EXPORT_DIR");
+  if (dir === undefined) return { configured: false };
+  const file = join(resolve(dir), EXPORT_FILE);
+  try {
+    const st = statSync(file);
+    let generatedAt = null;
+    try {
+      const raw = JSON.parse(readFileSync(file, "utf8"));
+      generatedAt = typeof raw?.generated_at === "string" ? raw.generated_at : null;
+    } catch {
+      generatedAt = null;
+    }
+    return {
+      configured: true, present: true, mode: (st.mode & 0o777).toString(8).padStart(4, "0"), world_readable: (st.mode & 0o004) !== 0, generated_at: generatedAt,
+      age_minutes: generatedAt === null ? null : Math.round((now.getTime() - Date.parse(generatedAt)) / 60_000)
+    };
+  } catch {
+    return { configured: true, present: false };
+  }
+}
+
 /** Overvåkingsvennlig status (exit 0 frisk · 3 backup forfalt · 4 restore-verifisering feilet/for gammel · 5 off-site feilet/for gammel). Leser kun; skriver ingenting. */
 function statusCommand(argv, env, now) {
   const flags = parseArgs(argv, SPEC.status);
@@ -77,7 +101,8 @@ function statusCommand(argv, env, now) {
   const stateDir = resolve(typeof flags["state-dir"] === "string" ? flags["state-dir"] : envString(env, "JARVIS_BACKUP_STATE_DIR") ?? out);
   const intervalH = envInt(env, "JARVIS_BACKUP_INTERVAL_HOURS", 24, { min: 1, max: 720 });
   const maxBackupAgeH = flags["max-backup-age-hours"] === undefined ? intervalH * 1.5 : Number(flags["max-backup-age-hours"]);
-  const maxVerifyAgeD = flags["max-verify-age-days"] === undefined ? envInt(env, "JARVIS_BACKUP_VERIFY_INTERVAL_DAYS", 7, { min: 1, max: 365 }) * 2 : Number(flags["max-verify-age-days"]);
+  const verifyIntervalD = envInt(env, "JARVIS_BACKUP_VERIFY_INTERVAL_DAYS", 7, { min: 1, max: 365 });
+  const maxVerifyAgeD = flags["max-verify-age-days"] === undefined ? verifyIntervalD * 2 : Number(flags["max-verify-age-days"]);
   if (!Number.isFinite(maxBackupAgeH) || maxBackupAgeH <= 0 || !Number.isFinite(maxVerifyAgeD) || maxVerifyAgeD <= 0) throw new UsageError("--max-backup-age-hours/--max-verify-age-days må være positive tall");
 
   const { status } = readStatusFile(join(stateDir, STATUS_FILE));
@@ -118,7 +143,9 @@ function statusCommand(argv, env, now) {
       state: v.state, last_success_at: v.last_success_at, age_days: verifyAgeD, last_set: v.last_set, duration_s: v.duration_s, fetch_duration_s: v.fetch_duration_s, source: v.source,
       reported_by: v.reported_by, last_error_code: v.last_error_code
     },
-    heartbeat: status.heartbeat
+    heartbeat: status.heartbeat,
+    config: { backup_interval_hours: intervalH, restore_verify_interval_days: verifyIntervalD },
+    export: exportInfo(env, now)
   });
   return exit;
 }

@@ -267,6 +267,7 @@ export async function runTick(config, deps, env = process.env) {
   }
 
   assertRunnable(config, env);
+  mkdirSync(config.stateDir, { recursive: true, mode: 0o700 }); // første kjøring på en ny maskin: mappen for lås + status finnes ikke ennå
   const lock = deps.acquireLock(config.lockFile, { now, staleMs: config.lockStaleMs, log });
   if (!lock.acquired) {
     log("debug", "tick_skipped_lock_held", { reason: lock.reason, holder_pid: lock.holder?.pid ?? null });
