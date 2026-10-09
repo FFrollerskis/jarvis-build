@@ -76,3 +76,7 @@ POST /infra/cloud/read
 ## 6. Avvikling
 
 Tøm `JARVIS_INFISICAL_ROTATION_IDS` + restart for å stoppe rotasjon. Lesing slås av ved å fryse connectoren (`owner_controls.freeze_connector` med `infisical`/`langfuse`) eller fjerne credential. Maskin-identiteten kan alltid tilbakekalles i Infisical.
+
+## 7. Driftsstatus og hendelser
+
+Helse og siste journalførte endring for alle skymål (og åpne hendelser, produsentenes helse) leses samlet med `executive.get_infra_status` (chat) / `POST /infra/overview`. Hendelsesprodusentene, livssyklusen og sannhetsregimet er beskrevet i `docs/runbooks/INCIDENT_LIFECYCLE.md`.
