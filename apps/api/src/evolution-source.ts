@@ -83,12 +83,26 @@ export function rowNumber(rows: unknown, field: string): number | null {
 }
 const ore = (n: number): string => `${Math.round(n / 100)} kr`;
 
-/** Én seksjon kan aldri velte hele rapporten: en feil blir UNKNOWN med årsaken (kun klasse, aldri innhold). */
+/**
+ * Feilklassen til en feil, til rapporten (L2, gjennomgang av PR #313). Rapporten går til modellen (som kan være en skymodell), så meldingsteksten tas ALDRI med: den kan inneholde vert, port, databasenavn, rolle
+ * eller passordfeil (`connect ECONNREFUSED 10.0.0.5:5432 (db=jarvis, user=jarvis_app)`). Kun tre ting slipper gjennom, hver låst til et fast mønster: navnet (`TypeError`), en Node-systemkode (`ECONNREFUSED`,
+ * `ERR_*`) og SQLSTATE-KLASSEN (de to første tegnene av pg sin 5-tegns kode, f.eks. `28` for innlogging, `08` for tilkobling).
+ */
+export function errorClass(err: unknown): string {
+  const e = (typeof err === "object" && err !== null ? err : {}) as { name?: unknown; code?: unknown };
+  const name = typeof e.name === "string" && /^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(e.name) ? e.name : "Error";
+  const code = typeof e.code === "string" ? e.code : "";
+  if (/^(?:E[A-Z0-9_]{2,30}|ERR_[A-Z0-9_]{1,40})$/.test(code)) return `${name}/${code}`;
+  if (/^[0-9A-Z]{5}$/.test(code)) return `${name}/sqlstate_${code.slice(0, 2)}`;
+  return name;
+}
+
+/** Én seksjon kan aldri velte hele rapporten: en feil blir UNKNOWN med årsaken (kun feilklasse - aldri meldingstekst, L2). */
 async function safely(ev: string, title: string, source: string, fn: () => Promise<EvolutionSection>): Promise<EvolutionSection> {
   try {
     return await fn();
   } catch (err) {
-    return unknownSection(ev, title, source, `målingen feilet (${(err as Error).message.slice(0, 100)})`);
+    return unknownSection(ev, title, source, `målingen feilet (${errorClass(err)})`);
   }
 }
 

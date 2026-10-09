@@ -236,7 +236,9 @@ describe("rapporten", () => {
     const report = await buildEvolutionReport(deps({ handlers, connectors: async () => { throw new Error("registeret svarte ikke"); } }));
     const credentials = report.sections.find((s) => s.ev === "EV-17")!;
     expect(credentials.status).toBe("UNKNOWN");
-    expect(credentials.summary_no).toContain("registeret svarte ikke");
+    // L2: kun feilklassen vises - aldri meldingsteksten (den kan bære vert, rolle eller passordfeil og rapporten går til modellen).
+    expect(credentials.summary_no).toContain("målingen feilet (Error)");
+    expect(credentials.summary_no).not.toContain("registeret svarte ikke");
     expect(report.sections.find((s) => s.ev === "EV-5")!.status).toBe("OK");
   });
 

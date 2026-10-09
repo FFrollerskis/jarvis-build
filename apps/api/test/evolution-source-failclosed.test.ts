@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { evaluateAllReadiness, type DormantEv } from "@jarvis/self-modification";
 import type { EvolutionSection } from "@jarvis/executive";
-import { boundariesSection, buildEvolutionReport, dormantSection, healSection, modelRouteSection, readinessFacts, type EvolutionSourceDeps } from "../src/evolution-source.ts";
-import { HEALTHY_HANDLERS, connector, ctxOf, fakePool, healthy, healthyWorld, mesh, secretError, sloReport, type OptionalDep, type World } from "./support/evolution-world.ts";
+import { boundariesSection, buildEvolutionReport, dormantSection, errorClass, healSection, modelRouteSection, readinessFacts, type EvolutionSourceDeps } from "../src/evolution-source.ts";
+import { HEALTHY_HANDLERS, SECRET_FRAGMENTS, SECRET_TEXT, connector, ctxOf, fakePool, healthy, healthyWorld, mesh, secretError, sloReport, type OptionalDep, type World } from "./support/evolution-world.ts";
 
 /**
  * M2 (gjennomgang av PR #313): seksjonene feilet ÅPENT - «alt nede» ga `OK – Grensene er på plass` fordi kill switch ble fabrikkert til `false`, hendelsestallet til `0` og manglende oppstartssjekk ikke ga noe funn. Her er
@@ -111,6 +111,9 @@ describe("M2: svikt i HVER avhengighet gir aldri OK i seksjonene som hviler på 
       const report = await buildEvolutionReport(d);
       expect(report.acts).toBe(false);
       expect(report.sections.map((s) => s.ev), "ingen seksjon forsvinner").toEqual(ORDER);
+      // L2: avhengighetene kaster en feil full av vert/port/rolle/passord - ingenting av det skal ende i rapporten (som går til modellen).
+      const json = JSON.stringify(report);
+      for (const fragment of SECRET_FRAGMENTS) expect(json, `${sc.name}: «${fragment}» lekket til rapporten`).not.toContain(fragment);
       for (const ev of OBSERVE) {
         const s = byEv(report.sections, ev);
         if (sc.broken.includes(ev)) expect(["UNKNOWN", "ATTENTION"], `${ev} hviler på det som sviktet, men sa: ${s.status} - ${s.summary_no}`).toContain(s.status);
@@ -276,5 +279,57 @@ describe("M2: reviewerens reproduksjoner, én og én", () => {
       for (const ev of ["EV-5", "EV-16"]) expect(byEv(report.sections, ev).status, `${ev} ${JSON.stringify(bad)}`).toBe("UNKNOWN");
       expect(byEv(report.sections, "EV-0/EV-8").status, JSON.stringify(bad)).toBe("UNKNOWN");
     }
+  });
+});
+
+/**
+ * L2 (gjennomgang av PR #313): `safely` la `err.message.slice(0, 100)` i `summary_no`. Rapporten går til modellen (kan være sky), og meldingene fra pg/Node bærer vert, port, databasenavn, rolle og passordfeil.
+ * Nå vises kun feilklassen (navn / Node-kode / SQLSTATE-klasse).
+ */
+describe("L2: rapporten lekker ikke rå feilmelding", () => {
+  it("errorClass: kun navn, Node-systemkode og SQLSTATE-klasse - aldri meldingstekst, vert, adresse eller en kode med fritekst", () => {
+    expect(errorClass(new TypeError("Cannot read properties of null (reading 'x')"))).toBe("TypeError");
+    expect(errorClass(secretError())).toBe("Error/ECONNREFUSED");
+    expect(errorClass(Object.assign(new Error('password authentication failed for user "jarvis_ro"'), { name: "error", code: "28P01" }))).toBe("error/sqlstate_28");
+    expect(errorClass(Object.assign(new Error("x"), { code: "ERR_INVALID_ARG_TYPE" }))).toBe("Error/ERR_INVALID_ARG_TYPE");
+    // Navn og koder som ikke ser ut som korte identifikatorer slipper aldri gjennom.
+    expect(errorClass(Object.assign(new Error("x"), { name: "ECONNREFUSED 10.0.0.5:5432" }))).toBe("Error");
+    expect(errorClass(Object.assign(new Error("x"), { code: "password for hunter2" }))).toBe("Error");
+    expect(errorClass(Object.assign(new Error("x"), { code: "connect to 10.0.0.5" }))).toBe("Error");
+    expect(errorClass(Object.assign(new Error("x"), { code: 42 }))).toBe("Error");
+    expect(errorClass(Object.assign(new Error("x"), { name: "N".repeat(41) }))).toBe("Error");
+    for (const odd of [null, undefined, "streng med 10.0.0.5", 42, {}, []]) expect(errorClass(odd), String(odd)).toBe("Error");
+    for (const fragment of SECRET_FRAGMENTS) expect(errorClass(secretError())).not.toContain(fragment);
+  });
+
+  it("reviewerens eksempler: avviste pool-spørringer gir UNKNOWN med feilklasse, og hverken vert, port, rolle eller passordtekst er i rapport-JSON", async () => {
+    const w = await healthyWorld();
+    const messages = [
+      Object.assign(new Error("connect ECONNREFUSED 10.0.0.5:5432 (db=jarvis, user=jarvis_app)"), { code: "ECONNREFUSED" }),
+      Object.assign(new Error('password authentication failed for user "jarvis_ro"'), { name: "error", code: "28P01" }),
+      new Error(SECRET_TEXT)
+    ];
+    for (const err of messages) {
+      const reject = async (): Promise<never> => { throw err; };
+      const report = await buildEvolutionReport(w.deps({ pool: { query: reject, connect: reject } as never }));
+      const proposals = byEv(report.sections, "EV-5");
+      expect(proposals.status).toBe("UNKNOWN");
+      expect(proposals.summary_no).toMatch(/^Ikke målt: målingen feilet \((Error|error)(\/ECONNREFUSED|\/sqlstate_28)?\)$/);
+      const json = JSON.stringify(report);
+      for (const fragment of [...SECRET_FRAGMENTS, "db=jarvis", "jarvis_ro", "authentication failed", "connect ECONNREFUSED"]) expect(json, fragment).not.toContain(fragment);
+    }
+  });
+
+  it("feil fra ekstra seksjoner, verktøyflate og radar-leser lekker heller ikke", async () => {
+    const w = await healthyWorld();
+    const report = await buildEvolutionReport(w.deps({
+      extraSections: [async () => { throw secretError(); }],
+      toolSurface: () => { throw secretError(); },
+      radar: { ...w.radar, last: () => { throw secretError(); } }
+    }));
+    const json = JSON.stringify(report);
+    for (const fragment of SECRET_FRAGMENTS) expect(json, fragment).not.toContain(fragment);
+    expect(byEv(report.sections, "EV-3").summary_no).toBe("Ikke målt: målingen feilet (Error/ECONNREFUSED)");
+    expect(report.sections.at(-1)!.summary_no).toBe("Ikke målt: målingen feilet (Error/ECONNREFUSED)");
   });
 });
