@@ -28,7 +28,8 @@ import { assertAgeRecipient, requireBinary } from "./tools.mjs";
  *  - Manifestet (tabellnavn + radtall) sendes IKKE i klartekst: det krypteres med samme offentlige nøkkel til `manifest.json.age`. Krypteringsmodellen er uendret.
  *  - Ingen arbitrær kommando fra konfig (ingen `..._CMD`), ingen shell: alltid `spawn(fil, argv[])`. Verdiene valideres mot et lukket tegnsett, og
  *    kan aldri begynne med `-` (ingen flagginjeksjon). Underprosessene får et MINIMALT miljø - aldri DB-passordet.
- *  - Ingen sletting av fjerndata (`copy`, aldri `sync`/`--delete`). Opprydding av gamle off-site-sett er eierens (leverandørens livssyklusregler).
+ *  - Ingen sletting av fjerndata (`copy`, aldri `sync`/`--delete`). Opprydding av gamle off-site-sett er eierens (leverandørens livssyklusregler). ENESTE unntak: den lokale
+ *    adapteren fjerner sine EGNE foreldede `.incoming-<sett>-<hex>`-kataloger (rester etter en kopi som døde midt i), kun nøyaktig det mønsteret og kun ekte kataloger.
  *  - Den lokale adapteren kopierer fra et ÅPNET håndtak med O_NOFOLLOW (`copyRegularNoFollow`): en fil som byttes ut med en symlenke etter forhåndssjekken følges ikke, og
  *    ingenting skrives til målet før første blokk har age-headeren.
  */
@@ -444,6 +445,11 @@ class RsyncSshSink {
 const COPY_CHUNK = 4 * 1024 * 1024;
 /** O_NOFOLLOW: en symlenke gir ELOOP i stedet for å bli fulgt. O_NONBLOCK: open() på en FIFO uten skriver venter ikke for alltid. (Begge mangler på Windows: ukjent konstant blir 0.) */
 const SOURCE_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0) | (fsConstants.O_NOFOLLOW ?? 0);
+/** Egne rester etter en kopi som døde midt i: `.incoming-<sett>-<8 hex>` (se `LocalSink.push`). */
+export const INCOMING_RE = /^\.incoming-jarvis-backup-\d{8}T\d{6}Z-[0-9a-f]{8}$/;
+/** En `.incoming-*` yngre enn dette kan tilhøre et tikk som fortsatt kopierer; eldre er en rest (se også 2 × off-site-fristen). */
+export const STALE_INCOMING_MIN_MS = 12 * 3_600_000;
+
 /**
  * Kopierer ÉN fil fra et ÅPNET håndtak (review F13). `copyFile(src, dest)` slår opp stien på nytt og FØLGER en symlenke: byttes `src` ut mellom forhåndssjekken og kopieringen
  * (TOCTOU) kopieres det symlenken peker på - f.eks. en klartekstfil - til off-site-målet. Her åpnes kilden med O_NOFOLLOW (symlenke -> ELOOP -> `offsite_ineligible`) og O_NONBLOCK,
@@ -587,6 +593,27 @@ class LocalSink {
       }
     }
     return dir;
+  }
+
+  /**
+   * Review F12: fjerner EGNE foreldede `.incoming-<sett>-<hex>`-kataloger - rester etter en kopi som døde midt i (strømbrudd, kill). Bare nøyaktig dette mønsteret, bare ekte
+   * kataloger (en symlenke eller fil med samme navn røres ikke), og bare eldre enn max(12 t, 2 × fristen) - en yngre kan tilhøre et tikk som fortsatt kopierer. Publiserte sett
+   * (`jarvis-backup-*`) og alt annet i målet er urørt. Kalles under tikk-låsen, før pushen.
+   * @returns {Promise<string[]>} navnene som ble fjernet
+   */
+  async cleanupStale() {
+    const budget = this.#budget();
+    const root = await this.#assertTarget(budget);
+    const maxAgeMs = Math.max(STALE_INCOMING_MIN_MS, 2 * this.config.timeoutMs);
+    const removed = [];
+    for (const n of (await budget.run("lese målet", () => this.fs.readdir(root))).filter((name) => INCOMING_RE.test(name)).sort()) {
+      const path = join(root, n);
+      const st = await budget.run(`lstat ${n}`, () => this.fs.lstat(path));
+      if (!st.isDirectory() || st.isSymbolicLink() || Date.now() - st.mtimeMs <= maxAgeMs) continue;
+      await budget.run(`rydde ${n}`, () => this.fs.rm(path, { recursive: true, force: true }));
+      removed.push(n);
+    }
+    return removed;
   }
 
   async list() {

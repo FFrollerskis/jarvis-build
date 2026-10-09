@@ -6,7 +6,7 @@ import { ConfigError } from "../lib/env.mjs";
 import { OffsiteError, prepareSetForOffsite } from "../lib/offsite.mjs";
 import { loadScheduleConfig } from "../lib/config.mjs";
 import {
-  EXIT, ScheduleError, backupDecision, buildDefaultDeps, dropFutureTimestamps, findFutureSets, findHollowSets, findOrphanSets, listCompleteSets, offsiteDecision, retryDelayMs,
+  EXIT, ScheduleError, backupDecision, buildDefaultDeps, dropFutureTimestamps, findFutureSets, findHollowSets, findOrphanSets, findStaleTempDirs, listCompleteSets, offsiteDecision, retryDelayMs,
   runTick, setFileProblems, setNameMs, setsToPrune, verifyDecision
 } from "../lib/schedule.mjs";
 import { emptyStatus, readStatusFile } from "../lib/state.mjs";
@@ -1150,6 +1150,79 @@ describe("WP-C2 tick (review F11): kilde off-site verifiserer settet som hører 
     const r = await h.tick();
     expect(r.exitCode).toBe(EXIT.OK);
     expect(sink.state.fetches).toEqual(["jarvis-backup-20261008T020000Z"]);
+  });
+});
+
+describe("WP-C2 tick (review F12): rester etter et tikk som døde midt i en off-site-henting ryddes under låsen", () => {
+  const mk = (out, name, ageH, { kind = "dir" } = {}) => {
+    const path = join(out, name);
+    if (kind === "dir") {
+      mkdirSync(path);
+      writeFileSync(join(path, "jarvis-backup-20261001T000000Z"), "halv henting");
+    } else if (kind === "file") {
+      writeFileSync(path, "en fil");
+    }
+    const t = new Date(T0.getTime() - ageH * H);
+    if (kind !== "symlink") utimesSync(path, t, t);
+    return path;
+  };
+
+  it("foreldede .verify-tmp-* fjernes UAVHENGIG av rolle (PC-en har bare verify); ferske, filer, symlenker og andre navn røres ikke; --dry-run sletter ingenting", async () => {
+    const h = harness({ flags: { roles: "verify" } });
+    const old = mk(h.out, ".verify-tmp-abc123", 13);
+    const fresh = mk(h.out, ".verify-tmp-fresh1", 1);
+    const middle = mk(h.out, ".verify-tmp-mid001", 5); // eldre enn tikk-budsjettet (135 min), men yngre enn gulvet på 12 t
+    const file = mk(h.out, ".verify-tmp-file01", 30, { kind: "file" });
+    const outside = tempDir();
+    writeFileSync(join(outside, "canary.txt"), "må overleve");
+    const t = new Date(T0.getTime() - 30 * H);
+    utimesSync(outside, t, t);
+    symlinkSync(outside, join(h.out, ".verify-tmp-link01"));
+    const other = mk(h.out, ".verify-tmp-toolong", 30);
+    const other2 = mk(h.out, ".verify-tmpabc123", 30);
+    expect(findStaleTempDirs(h.out, T0.getTime())).toEqual([old]);
+
+    const dry = harness({ flags: { roles: "verify", "dry-run": true } });
+    const dryOld = mk(dry.out, ".verify-tmp-abc123", 30);
+    await dry.tick();
+    expect(existsSync(dryOld)).toBe(true);
+
+    await h.tick();
+    expect(existsSync(old)).toBe(false);
+    for (const keep of [fresh, middle, file, other, other2, join(h.out, ".verify-tmp-link01")]) expect(existsSync(keep), keep).toBe(true);
+    expect(readFileSync(join(outside, "canary.txt"), "utf8")).toBe("må overleve");
+    expect(h.logs).toContainEqual(expect.objectContaining({ level: "warn", event: "stale_tmp_removed", entry: ".verify-tmp-abc123" }));
+    expect(h.logs.filter((l) => l.event === "stale_tmp_removed")).toHaveLength(1);
+  });
+
+  it("terskelen er minst tikk-budsjettet: med en verifiseringsfrist på 24 t er en 20 t gammel arbeidsmappe fortsatt «kan være i bruk», en 26 t gammel er en rest", async () => {
+    const h = harness({ identity: true, flags: { roles: "verify" }, env: { JARVIS_BACKUP_VERIFY_TIMEOUT_MINUTES: "1440" } });
+    expect(h.config.tickBudgetMs).toBe(24 * H + 15 * 60_000); // kun verify-rollen: verifiseringsfristen + slark
+    const young = mk(h.out, ".verify-tmp-young1", 20); // eldre enn 12 t, men innenfor budsjettet: kan tilhøre et tikk som fortsatt kjører
+    const old = mk(h.out, ".verify-tmp-old001", 26); // eldre enn budsjettet: ingen levende tikk kan eie den
+    makeSet(h.out, hoursAgo(T0, 1));
+    await h.tick();
+    expect(existsSync(young)).toBe(true);
+    expect(existsSync(old)).toBe(false);
+  });
+
+  it("off-site-steget rydder målets egne rester først: sink.cleanupStale kalles før pushen, resultatet logges, og en feil der stopper aldri kopien", async () => {
+    const calls = [];
+    const sink = { ...fakeSink(), cleanupStale: async () => { calls.push("cleanup"); return [".incoming-jarvis-backup-20260101T000000Z-0123abcd"]; } };
+    const origPush = sink.push;
+    sink.push = async (prepared) => { calls.push("push"); return origPush(prepared); };
+    const h = harness({ sink, flags: { roles: "backup,offsite" } });
+    const r = await h.tick();
+    expect(r).toMatchObject({ exitCode: EXIT.OK, actions: ["backup", "offsite"] });
+    expect(calls).toEqual(["cleanup", "push"]);
+    expect(h.logs).toContainEqual(expect.objectContaining({ level: "warn", event: "offsite_stale_incoming_removed", count: 1 }));
+
+    const failing = { ...fakeSink(), cleanupStale: async () => { throw new OffsiteError("offsite_failed", "disken svarer ikke"); } };
+    const h2 = harness({ sink: failing, flags: { roles: "backup,offsite" } });
+    const r2 = await h2.tick();
+    expect(r2).toMatchObject({ exitCode: EXIT.OK, failed: [] });
+    expect(failing.state.pushes).toHaveLength(1); // kopien ble tatt likevel
+    expect(h2.logs).toContainEqual(expect.objectContaining({ level: "warn", event: "offsite_cleanup_failed", code: "offsite_failed" }));
   });
 });
 

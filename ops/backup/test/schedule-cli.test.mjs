@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
@@ -179,6 +179,26 @@ describe("WP-C2 schedule.mjs: ekte kjøring med lokal off-site-adapter (ekte pro
     const bad = run(["offsite-check", "--out", out], env);
     expect(bad.status).toBe(5);
     expect(bad.json).toMatchObject({ ok: false, error_code: "offsite_verify_failed" });
+  });
+
+  it("review F12: tick --roles offsite rydder foreldede .incoming-* i målet (ekte lokal sink, ekte prosess) før kopien - ferske rester og publiserte sett røres ikke", async () => {
+    const { out, usb, set, prepare, env } = setup();
+    await prepare();
+    const stale = join(usb, ".incoming-jarvis-backup-20260101T000000Z-0123abcd");
+    const fresh = join(usb, ".incoming-jarvis-backup-20260102T000000Z-aaaaaaaa");
+    for (const dir of [stale, fresh]) {
+      mkdirSync(dir);
+      writeFileSync(join(dir, "jarvis.dump.age"), "halv kopi");
+    }
+    const threeDaysAgo = new Date(Date.now() - 3 * 86_400_000);
+    utimesSync(stale, threeDaysAgo, threeDaysAgo);
+    const r = run(["tick", "--out", out, "--roles", "offsite"], env);
+    expect(r.status, r.stderr).toBe(0);
+    expect(existsSync(stale)).toBe(false);
+    expect(existsSync(fresh)).toBe(true);
+    expect(existsSync(join(usb, set.name, "manifest.json.age"))).toBe(true); // kopien ble tatt som vanlig
+    expect(r.stderr).toContain("offsite_stale_incoming_removed");
+    expect(r.stderr).toContain(".incoming-jarvis-backup-20260101T000000Z-0123abcd"); // navnet (alltid vårt strenge mønster) står i loggen, slik at eieren ser hva som ble fjernet
   });
 
   it("offsite-check uten adapter = exit 6 (BLOCKED_EXTERNAL, ikke en feil i koden); med et sett som mangler fjernt = exit 5", () => {

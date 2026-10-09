@@ -175,6 +175,27 @@ export function findOrphanSets(outDir, nowMs, maxAgeMs = ORPHAN_MAX_AGE_MS) {
   return orphans;
 }
 
+/** `.verify-tmp-XXXXXX` (mkdtemp i backup-mappen): arbeidsmappen for en henting fra off-site. Nøyaktig dette mønsteret er vårt. */
+export const VERIFY_TMP_RE = /^\.verify-tmp-[A-Za-z0-9]{6}$/;
+
+/**
+ * Review F12: arbeidsmapper fra en henting som døde midt i (strøm, kill, vaktbikkje) og aldri ble ryddet - de inneholder krypterte sett og fyller disken stille. Bare ekte kataloger
+ * (aldri en symlenke eller fil med samme navn) som er eldre enn `maxAgeMs`; kalles under tikk-låsen, så ingen levende verifisering i DETTE tikket bruker dem.
+ */
+export function findStaleTempDirs(outDir, nowMs, maxAgeMs = ORPHAN_MAX_AGE_MS) {
+  if (!existsSync(outDir)) return [];
+  const stale = [];
+  for (const name of readdirSync(outDir).filter((n) => VERIFY_TMP_RE.test(n)).sort()) {
+    try {
+      const st = lstatSync(join(outDir, name));
+      if (st.isDirectory() && !st.isSymbolicLink() && nowMs - st.mtimeMs > maxAgeMs) stale.push(join(outDir, name));
+    } catch {
+      // forsvunnet underveis
+    }
+  }
+  return stale;
+}
+
 /** `jarvis-backup-20261009T020000Z` -> epoch-ms (UTC); null hvis navnet ikke er en ekte dato (siffer-mønsteret slipper f.eks. `99999999T999999Z` gjennom). */
 export function setNameMs(name) {
   const m = /^jarvis-backup-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(String(name));
@@ -435,6 +456,16 @@ export async function runTick(config, deps, env = process.env) {
     if (dropped.length > 0) log("warn", "status_timestamps_in_future_dropped", { fields: dropped, note: "klokkeavvik? tidsstempler fremover i tid ble forkastet" });
     for (const name of findFutureSets(config.out, startedMs)) log("warn", "set_dated_in_future", { set: name, note: "teller ikke som nyeste sett (klokkeavvik ved backup-tidspunktet?)" });
     for (const { name, problems } of findHollowSets(config.out)) log("warn", "set_incomplete", { set: name, problems: problems.slice(0, 4).join("; "), note: "har manifest, men filene stemmer ikke: teller ikke som komplett sett (og undertrykker ikke neste backup) - røres ikke automatisk" });
+    // Review F12: arbeidsmapper fra en off-site-henting som døde midt i. Under låsen finnes ingen levende bruker av dem; alderen (minst 12 t og minst tikk-budsjettet) beskytter mot et
+    // tikk vi har tatt over låsen fra og som mot formodning fortsatt kjører.
+    for (const dir of findStaleTempDirs(config.out, startedMs, Math.max(ORPHAN_MAX_AGE_MS, budgetMs))) {
+      try {
+        deps.remove(dir);
+        log("warn", "stale_tmp_removed", { entry: dir.split(/[\\/]/).at(-1) ?? "", note: "arbeidsmappe fra en avbrutt off-site-henting (ikke ryddet av tikket som laget den)" });
+      } catch (err) {
+        log("warn", "stale_tmp_remove_failed", { entry: dir.split(/[\\/]/).at(-1) ?? "", code: err?.code ?? "unknown" });
+      }
+    }
     // Review F7: et langt gap siden forrige tikk (NAS av, eller klokken hoppet fremover) får alle sett til å se «gamle» ut på én gang. Retensjonen holdes da i minst et døgn,
     // så en feil klokke kan rettes (NTP) før noe slettes - et tak per tikk alene stopper det ikke på 15 minutter.
     const previousTickMs = msOf(status.last_tick_at);
@@ -701,6 +732,15 @@ export async function runTick(config, deps, env = process.env) {
           remote = new Set(await deps.sink.list());
         } catch (err) {
           log("warn", "offsite_list_failed", { code: err?.code ?? "offsite_failed", error: deps.redact(err?.message ?? "") });
+        }
+        // Review F12: egne foreldede rester i målet (`.incoming-*` etter en kopi som døde midt i). Aldri fatalt: oppryddingen er best effort, og pushen skal ikke avhenge av den.
+        if (typeof deps.sink.cleanupStale === "function") {
+          try {
+            const removed = await deps.sink.cleanupStale();
+            if (removed.length > 0) log("warn", "offsite_stale_incoming_removed", { count: removed.length, entries: removed.slice(0, 3).join(","), note: "foreldede rester etter en avbrutt kopi i off-site-målet" });
+          } catch (err) {
+            log("warn", "offsite_cleanup_failed", { code: err?.code ?? "offsite_failed", error: deps.redact(err?.message ?? "") });
+          }
         }
         const older = remote === null ? [] : sets3.slice(0, -1).reverse().filter((s) => !remote.has(s.name)).slice(0, MAX_OFFSITE_SETS_PER_TICK - 1);
         log("info", "offsite_started", { set: newest3.name, adapter: deps.sink.adapter, backfill: older.length });
