@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +7,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
-import { runBackup } from "../../../ops/backup/lib/backup.mjs";
+import { runBackup, sha256File } from "../../../ops/backup/lib/backup.mjs";
 import { SCRATCH_DB_PREFIX, backupAgeHours, listBackupSets, pruneBackupSets, runRestoreVerify } from "../../../ops/backup/lib/restore-verify.mjs";
 import { makeRunner } from "../../../ops/backup/lib/runner.mjs";
 import { findBinary } from "../../../ops/backup/lib/tools.mjs";
@@ -182,6 +182,70 @@ describe.skipIf(!haveTools)("kryptert backup + restore-verifisering (ekte Postgr
     const out = join(work, "out7");
     const { setDir } = await runBackup({ runner: runnerFor(sourcePort), outDir: out, recipient, now: new Date("2026-10-01T22:30:00Z") });
     await expect(runRestoreVerify({ setDir, identityFile, scratchRunner: runnerFor(sourcePort) })).rejects.toThrow(/refusing to restore into the source server/);
+  }, 240_000);
+
+  it("review F1: en feilpekt scratch (samme server under et annet navn) nektes av tom-sjekken - ingenting skrives, kildens roller og passord er urørt", async () => {
+    await exec(sourcePort, "postgres", "CREATE ROLE f1_probe LOGIN PASSWORD 'gammelt-passord'");
+    try {
+      const out = join(work, "out7b");
+      const { setDir } = await runBackup({ runner: runnerFor(sourcePort), outDir: out, recipient, now: new Date("2026-10-01T22:31:00Z") });
+      await exec(sourcePort, "postgres", "ALTER ROLE f1_probe PASSWORD 'nytt-passord'"); // produksjonen har gått videre siden backupen
+      const hash = async () => (await exec(sourcePort, "postgres", "SELECT rolpassword FROM pg_authid WHERE rolname = 'f1_probe'")).rows[0]?.rolpassword as string;
+      const before = await hash();
+      expect(before).toMatch(/^SCRAM-SHA-256\$/);
+      // `localhost` ≠ `127.0.0.1` som streng, men er samme server: bare tom-sjekken kan stoppe dette
+      const alias = makeRunner({ mode: "direct", host: "localhost", port: sourcePort, user: "postgres", password: "pw" });
+      expect(alias.endpoint).not.toBe(runnerFor(sourcePort).endpoint);
+      const report = await runRestoreVerify({ setDir, identityFile, scratchRunner: alias, now: new Date("2026-10-01T22:32:00Z") });
+      expect(report).toMatchObject({ ok: false, stage: "scratch_guard" });
+      expect(report.error).toContain("ikke en tom, kastbar instans");
+      expect(await hash()).toBe(before); // passordet er IKKE overskrevet til backup-tidens
+      expect((await exec(sourcePort, "postgres", `SELECT datname FROM pg_database WHERE datname LIKE '${SCRATCH_DB_PREFIX}%'`)).rows).toEqual([]);
+      expect((await exec(sourcePort, "jarvis", "SELECT count(*)::int AS n FROM tenants")).rows[0]?.n).toBe(2);
+    } finally {
+      await exec(sourcePort, "postgres", "DROP ROLE IF EXISTS f1_probe");
+    }
+  }, 240_000);
+
+  it("review F2: en ondsinnet globals.sql (konsistent mot sitt eget manifest) kjører ALDRI psql-metakommandoer på verifisererens vert - positiv kontroll: ubeskyttet psql ville gjort det", async () => {
+    const marker = join(work, "pwned-marker");
+    const hostile = `\\! touch ${marker}\nCREATE ROLE f2_probe;\n`;
+    // Positiv kontroll: ekte psql kjører metakommandoen når den får teksten rett inn (slik koden gjorde før F2). Uten denne kontrollen beviser testen ingenting.
+    const direct = runnerFor(scratchPort).command("psql", ["-X", "-q", "-v", "ON_ERROR_STOP=0", "-f", "-"], { database: "postgres" });
+    execFileSync(direct.file, direct.args, { env: direct.env, input: hostile, stdio: ["pipe", "pipe", "pipe"] });
+    expect(existsSync(marker)).toBe(true);
+    rmSync(marker);
+    await exec(scratchPort, "postgres", "DROP ROLE IF EXISTS f2_probe");
+
+    // Samme innhold, kryptert med den offentlige nøkkelen i et sett hvis manifest stemmer med filen (age er ikke autentisert)
+    const { setDir, manifest } = await runBackup({ runner: runnerFor(sourcePort), outDir: join(work, "out7c"), recipient, now: new Date("2026-10-01T22:33:00Z") });
+    const file = join(setDir, "globals.sql.age");
+    rmSync(file);
+    execFileSync(findBinary("age")!, ["-r", recipient, "-o", file], { input: hostile });
+    manifest.globals.sha256 = await sha256File(file);
+    writeFileSync(join(setDir, "manifest.json"), JSON.stringify(manifest));
+    const report = await runRestoreVerify({ setDir, identityFile, scratchRunner: runnerFor(scratchPort), now: new Date("2026-10-01T22:34:00Z") });
+    expect(report).toMatchObject({ ok: false, stage: "globals" });
+    expect(existsSync(marker)).toBe(false);
+    expect((await exec(scratchPort, "postgres", "SELECT 1 FROM pg_roles WHERE rolname = 'f2_probe'")).rows).toEqual([]);
+    expect((await exec(scratchPort, "postgres", `SELECT datname FROM pg_database WHERE datname LIKE '${SCRATCH_DB_PREFIX}%'`)).rows).toEqual([]);
+  }, 240_000);
+
+  it("review F2: roller restores til scratch UTEN passord-hasher (en scratch skal ikke arve produksjonens passord, og en feilpekt skal aldri få dem overskrevet)", async () => {
+    await exec(sourcePort, "postgres", "CREATE ROLE f2_pw LOGIN PASSWORD 'produksjons-passord'");
+    try {
+      const { setDir } = await runBackup({ runner: runnerFor(sourcePort), outDir: join(work, "out7d"), recipient, now: new Date("2026-10-01T22:35:00Z") });
+      const report = await runRestoreVerify({ setDir, identityFile, scratchRunner: runnerFor(scratchPort), now: new Date("2026-10-01T22:36:00Z") });
+      expect(report.ok).toBe(true);
+      expect(report.globals?.passwords_stripped).toBeGreaterThanOrEqual(2); // f2_pw og postgres-rollen
+      const onScratch = await exec(scratchPort, "postgres", "SELECT rolcanlogin, rolpassword FROM pg_authid WHERE rolname = 'f2_pw'");
+      expect(onScratch.rows).toEqual([{ rolcanlogin: true, rolpassword: null }]);
+      // verifisereren kan fortsatt logge inn etter globals-restoren (begge klyngene bruker samme passord i testen, så dette beviser ikke selve stripping - det gjør raden over)
+      expect((await exec(scratchPort, "postgres", "SELECT 1 AS ok")).rows).toEqual([{ ok: 1 }]);
+    } finally {
+      await exec(sourcePort, "postgres", "DROP ROLE IF EXISTS f2_pw");
+      await exec(scratchPort, "postgres", "DROP ROLE IF EXISTS f2_pw");
+    }
   }, 240_000);
 
   it("ingen ukryptert backup: manglende/ugyldig age-mottaker avvises FØR noe skrives", async () => {

@@ -7,6 +7,9 @@ import { spawn, spawnSync } from "node:child_process";
  */
 const DEFAULT_MAX_STDOUT = 4 * 1024 * 1024;
 const DEFAULT_MAX_STDERR = 64 * 1024;
+/** SIGTERM → SIGKILL etter dette; deretter gis det OPP etter ABANDON (en prosess i uavbrytelig I/O-ventetid, f.eks. hengt NFS/USB, dør ikke av SIGKILL heller). */
+const KILL_GRACE_MS = 5_000;
+const ABANDON_GRACE_MS = 10_000;
 
 /** Positivliste: kun det rclone/rsync/ssh/age faktisk trenger. DB-passord og andre JARVIS_*-hemmeligheter følger ALDRI med til disse prosessene. */
 const ENV_ALLOW = [
@@ -45,7 +48,10 @@ function killTree(child, signal) {
  * @returns {Promise<{ code: number | null, signal: string | null, stdout: string, stderr: string, timedOut: boolean, truncated: boolean, spawnError: string | null }>}
  */
 export function runProcess(file, args, options = {}) {
-  const { env = minimalEnv(), cwd, timeoutMs = 0, input, maxStdout = DEFAULT_MAX_STDOUT, maxStderr = DEFAULT_MAX_STDERR } = options;
+  const {
+    env = minimalEnv(), cwd, timeoutMs = 0, input, maxStdout = DEFAULT_MAX_STDOUT, maxStderr = DEFAULT_MAX_STDERR,
+    killGraceMs = KILL_GRACE_MS, abandonGraceMs = ABANDON_GRACE_MS, kill = killTree
+  } = options;
   return new Promise((resolve) => {
     let settled = false;
     let timedOut = false;
@@ -55,11 +61,13 @@ export function runProcess(file, args, options = {}) {
     let stderr = "";
     let timer;
     let killTimer;
+    let abandonTimer;
     const done = (code, signal) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       clearTimeout(killTimer);
+      clearTimeout(abandonTimer);
       resolve({ code, signal, stdout, stderr, timedOut, truncated, spawnError });
     };
     let child;
@@ -92,8 +100,12 @@ export function runProcess(file, args, options = {}) {
     if (timeoutMs > 0) {
       timer = setTimeout(() => {
         timedOut = true;
-        killTree(child, "SIGTERM");
-        killTimer = setTimeout(() => killTree(child, "SIGKILL"), 5_000);
+        kill(child, "SIGTERM");
+        killTimer = setTimeout(() => {
+          kill(child, "SIGKILL");
+          // Review F4: kommer 'close' aldri (prosessen sitter fast i kjernen), gir vi opp og rapporterer tidsavbrudd - ellers henger hele tikket (og dermed låsen) for alltid.
+          abandonTimer = setTimeout(() => done(null, "SIGKILL"), abandonGraceMs);
+        }, killGraceMs);
       }, timeoutMs);
     }
   });

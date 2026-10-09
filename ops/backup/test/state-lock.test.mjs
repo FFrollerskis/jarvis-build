@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -181,6 +181,66 @@ describe("WP-C2 lock: kappløpssikker med foreldet-deteksjon", () => {
     utimesSync(`${lockOf(dir)}.takeover`, old, old);
     acquireLock(lockOf(dir), { staleMs: 3_600_000, host: "h", alive: () => false }); // rydder den gamle mutexen
     expect(acquireLock(lockOf(dir), { staleMs: 3_600_000, host: "h", alive: () => false }).acquired).toBe(true);
+  });
+});
+
+describe("WP-C2 lock (review L1): overtakelsen leser låsen PÅ NYTT under mutexen - en lås som er fornyet eller byttet i mellomtiden røres aldri", () => {
+  const lockOf = (dir) => join(dir, ".backup-schedule.lock");
+  const body = (token, pid) => `${JSON.stringify({ token, pid, host: "h", started_at: NOW.toISOString() })}\n`;
+  const WHOLE = new Date("2026-10-01T00:00:00.000Z"); // hele sekunder: mtimeMs er et eksakt tall, så «samme mtime» kan gjenskapes nøyaktig
+  /**
+   * En foreldet lås (død pid på samme vert). `during` kjøres MIDT i overtakelsen: `alive` kalles av classifyLock etter at låsen er lest, men FØR mutexen tas og låsen leses på nytt -
+   * nøyaktig vinduet reviewet fant utestet. Det er der en levende holder (hjerteslag), en annen overtaker eller en frigjøring kan slå til.
+   */
+  const attempt = (during) => {
+    const dir = tempDir();
+    const file = lockOf(dir);
+    writeFileSync(file, body("gammel", 99_999_999));
+    utimesSync(file, WHOLE, WHOLE);
+    const warnings = [];
+    const result = acquireLock(file, { staleMs: 3_600_000, host: "h", alive: () => { during(file); return false; }, log: (_l, e) => warnings.push(e) });
+    return { dir, file, result, warnings, tokenOnDisk: () => JSON.parse(readFileSync(file, "utf8")).token, mutexLeft: existsSync(`${file}.takeover`) };
+  };
+
+  it("kontroll: uforandret foreldet lås tas over (advarsel logges, mutexen er borte)", () => {
+    const r = attempt(() => undefined);
+    expect(r.result.acquired).toBe(true);
+    expect(r.warnings).toContain("lock_stale_taken_over");
+    expect(r.tokenOnDisk()).toBe(r.result.token);
+    expect(r.mutexLeft).toBe(false);
+  });
+
+  it("holderen fornyer hjerteslaget (SAMME token, ny mtime) mellom lesingene: ikke overtatt, låsen står urørt - mtime-sammenligningen er det som fanger dette", () => {
+    const renewed = new Date(WHOLE.getTime() + 60_000);
+    const r = attempt((file) => utimesSync(file, renewed, renewed));
+    expect(r.result).toMatchObject({ acquired: false, reason: "lost_takeover_race", holder: { pid: 99_999_999 } });
+    expect(r.tokenOnDisk()).toBe("gammel");
+    expect(statSync(r.file).mtimeMs).toBe(renewed.getTime());
+    expect(r.warnings).not.toContain("lock_stale_taken_over");
+    expect(r.mutexLeft).toBe(false);
+  });
+
+  it("en annen overtaker rakk det først (ANNEN token, ny mtime): ikke overtatt, holderen i svaret er den NYE eieren, og dens lås står urørt", () => {
+    const r = attempt((file) => writeFileSync(file, body("ny-eier", 4242)));
+    expect(r.result).toMatchObject({ acquired: false, reason: "lost_takeover_race", holder: { pid: 4242, host: "h" } });
+    expect(r.tokenOnDisk()).toBe("ny-eier");
+    expect(r.warnings).not.toContain("lock_stale_taken_over");
+    expect(r.mutexLeft).toBe(false);
+  });
+
+  it("ANNEN token men NØYAKTIG samme mtime (en erstatter som gjenskaper tidsstemplet): token-sammenligningen fanger det - mtime alene er ikke nok", () => {
+    const r = attempt((file) => { writeFileSync(file, body("ny-eier", 4242)); utimesSync(file, WHOLE, WHOLE); });
+    expect(r.result).toMatchObject({ acquired: false, reason: "lost_takeover_race", holder: { pid: 4242 } });
+    expect(r.tokenOnDisk()).toBe("ny-eier");
+    expect(r.mutexLeft).toBe(false);
+  });
+
+  it("låsen ble frigjort mellom lesingene: ingenting å slette, vi publiserer vår egen - uten å påstå at vi tok over en foreldet lås", () => {
+    const r = attempt((file) => rmSync(file));
+    expect(r.result.acquired).toBe(true);
+    expect(r.warnings).not.toContain("lock_stale_taken_over");
+    expect(r.tokenOnDisk()).toBe(r.result.token);
+    expect(r.mutexLeft).toBe(false);
   });
 });
 

@@ -1,9 +1,9 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync, closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync,
-  renameSync, rmSync, statSync, writeFileSync
+  renameSync, rmSync, writeFileSync
 } from "node:fs";
-import { copyFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open as openFile, readdir, rename, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, parse, resolve, sep } from "node:path";
 import { sha256File } from "./backup.mjs";
@@ -28,7 +28,10 @@ import { assertAgeRecipient, requireBinary } from "./tools.mjs";
  *  - Manifestet (tabellnavn + radtall) sendes IKKE i klartekst: det krypteres med samme offentlige nøkkel til `manifest.json.age`. Krypteringsmodellen er uendret.
  *  - Ingen arbitrær kommando fra konfig (ingen `..._CMD`), ingen shell: alltid `spawn(fil, argv[])`. Verdiene valideres mot et lukket tegnsett, og
  *    kan aldri begynne med `-` (ingen flagginjeksjon). Underprosessene får et MINIMALT miljø - aldri DB-passordet.
- *  - Ingen sletting av fjerndata (`copy`, aldri `sync`/`--delete`). Opprydding av gamle off-site-sett er eierens (leverandørens livssyklusregler).
+ *  - Ingen sletting av fjerndata (`copy`, aldri `sync`/`--delete`). Opprydding av gamle off-site-sett er eierens (leverandørens livssyklusregler). ENESTE unntak: den lokale
+ *    adapteren fjerner sine EGNE foreldede `.incoming-<sett>-<hex>`-kataloger (rester etter en kopi som døde midt i), kun nøyaktig det mønsteret og kun ekte kataloger.
+ *  - Den lokale adapteren kopierer fra et ÅPNET håndtak med O_NOFOLLOW (`copyRegularNoFollow`): en fil som byttes ut med en symlenke etter forhåndssjekken følges ikke, og
+ *    ingenting skrives til målet før første blokk har age-headeren.
  */
 export const SET_NAME_RE = /^jarvis-backup-\d{8}T\d{6}Z$/;
 export const AGE_MAGIC = Buffer.from("age-encryption.org/v1");
@@ -439,25 +442,145 @@ class RsyncSshSink {
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 // Lokal sti (USB / annen disk)
 // ---------------------------------------------------------------------------------------------------------------------------------------------
+const COPY_CHUNK = 4 * 1024 * 1024;
+/** O_NOFOLLOW: en symlenke gir ELOOP i stedet for å bli fulgt. O_NONBLOCK: open() på en FIFO uten skriver venter ikke for alltid. (Begge mangler på Windows: ukjent konstant blir 0.) */
+const SOURCE_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0) | (fsConstants.O_NOFOLLOW ?? 0);
+/** Egne rester etter en kopi som døde midt i: `.incoming-<sett>-<8 hex>` (se `LocalSink.push`). */
+export const INCOMING_RE = /^\.incoming-jarvis-backup-\d{8}T\d{6}Z-[0-9a-f]{8}$/;
+/** En `.incoming-*` yngre enn dette kan tilhøre et tikk som fortsatt kopierer; eldre er en rest (se også 2 × off-site-fristen). */
+export const STALE_INCOMING_MIN_MS = 12 * 3_600_000;
+
+/**
+ * Kopierer ÉN fil fra et ÅPNET håndtak (review F13). `copyFile(src, dest)` slår opp stien på nytt og FØLGER en symlenke: byttes `src` ut mellom forhåndssjekken og kopieringen
+ * (TOCTOU) kopieres det symlenken peker på - f.eks. en klartekstfil - til off-site-målet. Her åpnes kilden med O_NOFOLLOW (symlenke -> ELOOP -> `offsite_ineligible`) og O_NONBLOCK,
+ * `fstat` på det ÅPNE håndtaket må si «vanlig fil», og det er DET håndtaket som leses: bytene vi hasher og skriver er nøyaktig de vi åpnet, ikke det stien peker på et øyeblikk senere.
+ * Med `expect` avvises avvik FØR noe skrives (størrelse, age-header i første blokk) eller før kopien beholdes (lengde og SHA-256 av det som faktisk ble skrevet); en avvist kopi fjernes.
+ * @param {{ size?: number, sha256?: string, ageHeader?: boolean }} [expect] fra forhåndssjekken (`prepareSetForOffsite`)
+ */
+export async function copyRegularNoFollow(src, dest, expect = {}) {
+  const label = safeEntry(basename(src));
+  let source;
+  try {
+    source = await openFile(src, SOURCE_FLAGS);
+  } catch (err) {
+    if (err?.code === "ELOOP" || err?.code === "EMLINK") throw ineligible(`kilden er en symlenke og følges ikke: ${label}`);
+    throw err;
+  }
+  let target = null;
+  try {
+    const st = await source.stat();
+    if (!st.isFile()) throw ineligible(`kilden er ikke en vanlig fil: ${label}`);
+    if (expect.size !== undefined && st.size !== expect.size) throw new OffsiteError("offsite_verify_failed", `størrelsen avviker fra forhåndssjekken: ${label}`);
+    const hash = createHash("sha256");
+    const buf = Buffer.allocUnsafe(Math.min(COPY_CHUNK, Math.max(st.size, 1)));
+    let total = 0;
+    for (;;) {
+      const { bytesRead } = await source.read(buf, 0, buf.length, null);
+      if (bytesRead === 0) break;
+      if (target === null) {
+        // Ingenting opprettes i målet før første blokk er sett: en omdøpt klartekstfil kommer aldri inn i off-site-målet, heller ikke et øyeblikk.
+        if (expect.ageHeader === true && (bytesRead < AGE_MAGIC.length || !buf.subarray(0, AGE_MAGIC.length).equals(AGE_MAGIC))) throw ineligible(`ikke age-chiffertekst: ${label}`);
+        target = await openFile(dest, "wx", 0o600);
+      }
+      hash.update(buf.subarray(0, bytesRead));
+      for (let written = 0; written < bytesRead;) written += (await target.write(buf, written, bytesRead - written)).bytesWritten;
+      total += bytesRead;
+    }
+    if (target === null) {
+      if (expect.ageHeader === true) throw ineligible(`ikke age-chiffertekst (tom fil): ${label}`);
+      target = await openFile(dest, "wx", 0o600);
+    }
+    if ((expect.size !== undefined && total !== expect.size) || (expect.sha256 !== undefined && hash.digest("hex") !== expect.sha256)) {
+      throw new OffsiteError("offsite_verify_failed", `kilden endret seg etter forhåndssjekken eller avviker fra den: ${label}`);
+    }
+    await target.sync();
+  } catch (err) {
+    if (target !== null) {
+      await target.close().catch(() => undefined);
+      target = null;
+      await rm(dest, { force: true }).catch(() => undefined);
+    }
+    throw err;
+  } finally {
+    if (target !== null) await target.close().catch(() => undefined);
+    await source.close().catch(() => undefined);
+  }
+}
+/**
+ * Frist for ÉN sink-operasjon (review F4). En hengt USB-disk eller NFS-montering kan ikke avbrytes i Node - kallet sitter i kjernen - men tikket skal ikke vente på det for
+ * alltid: vi gir opp, rapporterer `offsite_timeout` og går videre. Uten dette ble en kopi som aldri ferdigstilles stående med låsen, og alle senere tikk gjorde ingenting.
+ * Selve kallet blir stående i bakgrunnen (trådpoolen) til kjernen slipper det; resultatet ignoreres.
+ */
+class Budget {
+  constructor(totalMs, label) {
+    this.endsAt = Date.now() + totalMs;
+    this.label = label;
+  }
+
+  async run(what, op) {
+    const left = this.endsAt - Date.now();
+    const timeout = () => new OffsiteError("offsite_timeout", `${this.label}: ${what} brukte for lang tid (hengt disk eller nettverksmontering?)`);
+    if (left <= 0) throw timeout();
+    let timer;
+    try {
+      return await Promise.race([
+        Promise.resolve().then(op),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(timeout()), left); })
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/** Opprydding etter en feilet/avbrutt kopi: best effort med egen, kort frist - en hengt disk skal ikke også henge oppryddingen. */
+async function bestEffort(promiseFactory, ms = 15_000) {
+  let timer;
+  try {
+    await Promise.race([Promise.resolve().then(promiseFactory), new Promise((resolve) => { timer = setTimeout(resolve, ms); })]);
+  } catch {
+    // restene ryddes av en senere kjøring (foreldede .incoming-*)
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 class LocalSink {
   constructor(config, deps) {
     this.adapter = "local";
     this.config = config;
     this.deps = deps;
     this.label = `local:${basename(config.dir)}`;
+    // Filsystem-kallene kan byttes ut i tester (en hengt disk lar seg ikke lage ellers).
+    this.fs = { stat, lstat, readdir, mkdir, copyFile: copyRegularNoFollow, chmod, rename, rm, ...(deps.fs ?? {}) };
+  }
+
+  #budget() {
+    return new Budget(this.config.timeoutMs, "off-site (lokal sti)");
+  }
+
+  async #exists(budget, path) {
+    try {
+      await budget.run(`stat ${basename(path)}`, () => this.fs.stat(path));
+      return true;
+    } catch (err) {
+      if (err instanceof OffsiteError) throw err; // tidsavbrudd er ikke «finnes ikke»
+      return false;
+    }
   }
 
   /** En avmontert USB-disk er bare en tom katalog på systemdisken: uten markørfil og (som standard) en ANNEN enhet enn backup-mappen «lykkes» ingenting. */
-  #assertTarget() {
+  async #assertTarget(budget) {
     const dir = this.config.dir;
     let st;
     try {
-      st = statSync(dir);
-    } catch {
+      st = await budget.run("stat av målet", () => this.fs.stat(dir));
+    } catch (err) {
+      if (err instanceof OffsiteError) throw err;
       throw configError("off-site-målet (lokal sti) finnes ikke - er disken montert?");
     }
     if (!st.isDirectory()) throw configError("off-site-målet (lokal sti) er ikke en katalog");
-    if (!existsSync(join(dir, LOCAL_MARKER))) {
+    if (!(await this.#exists(budget, join(dir, LOCAL_MARKER)))) {
       throw configError(`off-site-målet mangler markørfilen ${LOCAL_MARKER} (opprett den én gang på den riktige disken: touch <sti>/${LOCAL_MARKER}) - er disken montert?`);
     }
     const source = this.deps.sourceDir;
@@ -465,27 +588,62 @@ class LocalSink {
       const s = resolve(source);
       const d = resolve(dir);
       if (d === s || d.startsWith(`${s}${sep}`)) throw configError("off-site-målet ligger inne i backup-mappen");
-      if (!this.config.allowSameDevice && statSync(source).dev === st.dev) {
+      if (!this.config.allowSameDevice && (await budget.run("stat av backup-mappen", () => this.fs.stat(source))).dev === st.dev) {
         throw configError("off-site-målet ligger på SAMME enhet som backup-mappen (ingen beskyttelse mot diskfeil) - sett JARVIS_BACKUP_OFFSITE_LOCAL_ALLOW_SAME_DEVICE=true kun hvis det er bevisst");
       }
     }
     return dir;
   }
 
-  async list() {
-    const dir = this.#assertTarget();
-    return readdirSync(dir).filter((n) => SET_NAME_RE.test(n) && lstatSync(join(dir, n)).isDirectory()).sort();
+  /**
+   * Review F12: fjerner EGNE foreldede `.incoming-<sett>-<hex>`-kataloger - rester etter en kopi som døde midt i (strømbrudd, kill). Bare nøyaktig dette mønsteret, bare ekte
+   * kataloger (en symlenke eller fil med samme navn røres ikke), og bare eldre enn max(12 t, 2 × fristen) - en yngre kan tilhøre et tikk som fortsatt kopierer. Publiserte sett
+   * (`jarvis-backup-*`) og alt annet i målet er urørt. Kalles under tikk-låsen, før pushen.
+   * @returns {Promise<string[]>} navnene som ble fjernet
+   */
+  async cleanupStale() {
+    const budget = this.#budget();
+    const root = await this.#assertTarget(budget);
+    const maxAgeMs = Math.max(STALE_INCOMING_MIN_MS, 2 * this.config.timeoutMs);
+    const removed = [];
+    for (const n of (await budget.run("lese målet", () => this.fs.readdir(root))).filter((name) => INCOMING_RE.test(name)).sort()) {
+      const path = join(root, n);
+      const st = await budget.run(`lstat ${n}`, () => this.fs.lstat(path));
+      if (!st.isDirectory() || st.isSymbolicLink() || Date.now() - st.mtimeMs <= maxAgeMs) continue;
+      await budget.run(`rydde ${n}`, () => this.fs.rm(path, { recursive: true, force: true }));
+      removed.push(n);
+    }
+    return removed;
   }
 
-  async #hashAll(dir, prepared) {
+  async list() {
+    const budget = this.#budget();
+    const dir = await this.#assertTarget(budget);
+    const sets = [];
+    for (const n of (await budget.run("lese målet", () => this.fs.readdir(dir))).filter((name) => SET_NAME_RE.test(name)).sort()) {
+      if ((await budget.run(`lstat ${n}`, () => this.fs.lstat(join(dir, n)))).isDirectory()) sets.push(n);
+    }
+    return sets;
+  }
+
+  async #listAgeFiles(budget, dir) {
+    const names = [];
+    for (const n of await budget.run("lese settet", () => this.fs.readdir(dir))) {
+      if (AGE_FILE.test(n) && (await budget.run(`lstat ${n}`, () => this.fs.lstat(join(dir, n)))).isFile()) names.push(n);
+    }
+    return names;
+  }
+
+  async #hashAll(budget, dir, prepared) {
     const problems = [];
     for (const f of prepared.files) {
       const path = join(dir, f.name);
       try {
-        const st = lstatSync(path);
+        const st = await budget.run(`lstat ${f.name}`, () => this.fs.lstat(path));
         if (!st.isFile() || st.isSymbolicLink() || st.size !== f.size) problems.push(`størrelsen avviker: ${f.name}`);
-        else if ((await sha256File(path)) !== f.sha256) problems.push(`sjekksummen avviker: ${f.name}`);
-      } catch {
+        else if ((await budget.run(`sjekksum ${f.name}`, () => sha256File(path))) !== f.sha256) problems.push(`sjekksummen avviker: ${f.name}`);
+      } catch (err) {
+        if (err instanceof OffsiteError) throw err; // tidsavbrudd er ikke «mangler»
         problems.push(`mangler: ${f.name}`);
       }
     }
@@ -493,27 +651,29 @@ class LocalSink {
   }
 
   async push(prepared) {
-    const root = this.#assertTarget();
+    const budget = this.#budget();
+    const root = await this.#assertTarget(budget);
     const finalDir = join(root, prepared.name);
-    if (existsSync(finalDir)) {
+    if (await this.#exists(budget, finalDir)) {
       // Atomisk publisert tidligere: skal være identisk. Vi overskriver aldri.
-      const problems = await this.#hashAll(finalDir, prepared);
+      const problems = await this.#hashAll(budget, finalDir, prepared);
       if (problems.length > 0) throw new OffsiteError("offsite_verify_failed", `settet finnes allerede i off-site-målet, men avviker (overskrives ikke): ${problems.slice(0, 4).join("; ")}`);
       return { verification: "sha256", files: prepared.files.length, bytes: prepared.bytes };
     }
     const tmp = join(root, `.incoming-${prepared.name}-${randomBytes(4).toString("hex")}`);
-    mkdirSync(tmp, { mode: 0o700 });
+    await budget.run("opprette midlertidig katalog", () => this.fs.mkdir(tmp, { mode: 0o700 }));
     try {
       for (const f of prepared.files) {
         const dest = join(tmp, f.name);
-        await copyFile(join(prepared.dir, f.name), dest, fsConstants.COPYFILE_EXCL); // asynkront: en kopi på flere GB skal ikke fryse event-løkken (lås-hjerteslag, signaler)
-        chmodSync(dest, 0o600);
+        // asynkront: en kopi på flere GB skal ikke fryse event-løkken (lås-hjerteslag, signaler). Fra et åpnet håndtak uten å følge symlenker (F13), mot det forhåndssjekken målte.
+        await budget.run(`kopiere ${f.name}`, () => this.fs.copyFile(join(prepared.dir, f.name), dest, { size: f.size, sha256: f.sha256, ageHeader: true }));
+        await budget.run(`chmod ${f.name}`, () => this.fs.chmod(dest, 0o600));
       }
-      const problems = await this.#hashAll(tmp, prepared);
+      const problems = await this.#hashAll(budget, tmp, prepared);
       if (problems.length > 0) throw new OffsiteError("offsite_verify_failed", `kopien til off-site-målet er ikke identisk: ${problems.slice(0, 4).join("; ")}`);
-      renameSync(tmp, finalDir);
+      await budget.run("publisere (rename)", () => this.fs.rename(tmp, finalDir));
     } catch (err) {
-      rmSync(tmp, { recursive: true, force: true });
+      await bestEffort(() => this.fs.rm(tmp, { recursive: true, force: true }), this.deps.cleanupMs);
       if (err instanceof OffsiteError) throw err;
       throw new OffsiteError("offsite_failed", `kunne ikke kopiere til off-site-målet: ${err?.code ?? "feil"}`);
     }
@@ -521,23 +681,25 @@ class LocalSink {
   }
 
   async verify(prepared) {
-    const root = this.#assertTarget();
+    const budget = this.#budget();
+    const root = await this.#assertTarget(budget);
     const dir = join(root, prepared.name);
-    if (!existsSync(dir)) throw new OffsiteError("offsite_verify_failed", "settet finnes ikke i off-site-målet");
-    const problems = await this.#hashAll(dir, prepared);
+    if (!(await this.#exists(budget, dir))) throw new OffsiteError("offsite_verify_failed", "settet finnes ikke i off-site-målet");
+    const problems = await this.#hashAll(budget, dir, prepared);
     if (problems.length > 0) throw new OffsiteError("offsite_verify_failed", `off-site-kopien avviker fra det lokale settet: ${problems.slice(0, 6).join("; ")}`);
     return { verification: "sha256", files: prepared.files.length, bytes: prepared.bytes };
   }
 
   async fetch(name, destDir) {
     if (!SET_NAME_RE.test(name)) throw ineligible("ugyldig settnavn");
-    const root = this.#assertTarget();
+    const budget = this.#budget();
+    const root = await this.#assertTarget(budget);
     const dir = join(root, name);
-    if (!existsSync(dir)) throw new OffsiteError("offsite_failed", "settet finnes ikke i off-site-målet");
+    if (!(await this.#exists(budget, dir))) throw new OffsiteError("offsite_failed", "settet finnes ikke i off-site-målet");
     mkdirSync(destDir, { recursive: true, mode: 0o700 });
-    for (const n of listAgeFiles(dir)) {
-      await copyFile(join(dir, n), join(destDir, n), fsConstants.COPYFILE_EXCL);
-      chmodSync(join(destDir, n), 0o600);
+    for (const n of await this.#listAgeFiles(budget, dir)) {
+      await budget.run(`kopiere ${n}`, () => this.fs.copyFile(join(dir, n), join(destDir, n)));
+      await budget.run(`chmod ${n}`, () => this.fs.chmod(join(destDir, n), 0o600));
     }
     return listAgeFiles(destDir);
   }
@@ -546,9 +708,9 @@ class LocalSink {
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 /**
  * @param config resultatet av `parseOffsiteConfig` (ikke null)
- * @param options `run` (injiserbar prosesskjører for tester), `redact` (feiltekst), `sourceDir` (backup-mappen, for «annen enhet»-sjekken)
+ * @param options `run` (injiserbar prosesskjører for tester), `redact` (feiltekst), `sourceDir` (backup-mappen, for «annen enhet»-sjekken), `fs`/`cleanupMs` (filsystem-kall og oppryddingsfrist for den lokale adapteren; kun tester)
  */
-export function createOffsiteSink(config, { run, redact = (s) => String(s), sourceDir } = {}) {
+export function createOffsiteSink(config, { run, redact = (s) => String(s), sourceDir, fs, cleanupMs } = {}) {
   const runner = run ?? ((file, args, o) => runProcess(file, args, { env: minimalEnv(), ...o }));
   const check = (res, what) => {
     if (res.spawnError) throw new OffsiteError("offsite_failed", `${what}: kunne ikke starte (${res.spawnError}) - er verktøyet installert og i PATH?`);
@@ -556,7 +718,7 @@ export function createOffsiteSink(config, { run, redact = (s) => String(s), sour
     if (res.code !== 0) throw new OffsiteError("offsite_failed", `${what}: exit ${res.code}: ${redact(String(res.stderr).split("\n").filter(Boolean).slice(-3).join(" "), 200)}`);
     return res;
   };
-  const deps = { run: runner, check, sourceDir };
+  const deps = { run: runner, check, sourceDir, fs, cleanupMs };
   if (config.adapter === "rclone") return new RcloneSink(config, deps);
   if (config.adapter === "rsync_ssh") return new RsyncSshSink(config, deps);
   return new LocalSink(config, deps);

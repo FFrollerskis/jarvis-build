@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -81,3 +81,114 @@ export function fakeBinDir(binaries) {
   }
   return dir;
 }
+
+/**
+ * En falsk Postgres-KLIENT for tester av restore-verifiseringen uten Postgres: `runner.command()` peker på et node-skript som svarer på de få spørringene
+ * verifisereren stiller (databaselisten, tabelloversikten, radtall) og LOGGER hvert kall - også teksten som mates til `psql -f -`. `calls()` er beviset på hva som
+ * ble skrevet til «serveren» og i hvilken rekkefølge. `state` kan endres underveis (`setState`).
+ */
+export function fakeScratchRunner({ endpoint = "127.0.0.1:55432", databases = ["postgres", "template0", "template1"], tables = {}, counts = {}, fail = false } = {}) {
+  const dir = tempDir("wpc2-fakepg-");
+  const script = join(dir, "fake-pg.mjs");
+  const stateFile = join(dir, "state.json");
+  const logFile = join(dir, "calls.jsonl");
+  writeFileSync(logFile, "");
+  writeFileSync(script, `
+    import { appendFileSync, readFileSync } from "node:fs";
+    const [tool, ...args] = process.argv.slice(2);
+    const state = JSON.parse(readFileSync(process.env.FAKE_PG_STATE, "utf8"));
+    const flag = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : undefined; };
+    const sql = flag("-c");
+    const stdin = flag("-f") === "-" ? readFileSync(0, "utf8") : "";
+    appendFileSync(process.env.FAKE_PG_LOG, JSON.stringify({ tool, database: flag("-d"), sql: sql ?? null, stdin }) + "\\n");
+    if (state.fail) { console.error("psql: error: connection to server failed"); process.exit(2); }
+    if (sql && /FROM pg_database/.test(sql)) { console.log(state.databases.join("\\n")); process.exit(0); }
+    if (sql && /FROM pg_class/.test(sql)) { console.log((state.tables[flag("-d")] ?? []).join("\\n")); process.exit(0); }
+    if (sql && /^SELECT count/.test(sql)) { console.log(String(state.counts[sql.replace(/^SELECT count\\(\\*\\) FROM /, "")] ?? 0)); process.exit(0); }
+    process.exit(0);
+  `);
+  const state = { databases, tables, counts, fail };
+  const save = () => writeFileSync(stateFile, JSON.stringify(state));
+  save();
+  const runner = {
+    mode: "direct",
+    endpoint,
+    command: (tool, args, { database } = {}) => ({
+      file: process.execPath,
+      args: [script, tool, ...(database ? ["-d", database] : []), ...args],
+      env: { ...process.env, FAKE_PG_STATE: stateFile, FAKE_PG_LOG: logFile }
+    })
+  };
+  return {
+    runner,
+    setState: (patch) => { Object.assign(state, patch); save(); },
+    calls: () => readFileSync(logFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)),
+    /** Kall som ikke er rene lesespørringer (SELECT): CREATE/DROP/`-f -`-skript og alt annet som kan endre serveren. */
+    writes: () => readFileSync(logFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((c) => !(typeof c.sql === "string" && /^\s*SELECT\b/i.test(c.sql)))
+  };
+}
+
+export const GLOBALS_DUMP_KEY = "4QFRA14JSOLA1lsdR7F8yQbvjm1BXi9OJR95sMdecEbDRQuY8h39i5WpxQLoAdQ";
+const FAKE_HASH = "SCRAM-SHA-256$4096:not-real-salt$not-real-stored-key:not-real-server-key";
+
+/** Faktisk utdata fra `pg_dumpall --globals-only` (PostgreSQL 16, med \restrict-linjene fra ≥ 16.10); passord-hashen er byttet ut med en åpenbar plassholder. */
+export const REAL_GLOBALS_DUMP = String.raw`--
+-- PostgreSQL database cluster dump
+--
+
+\restrict ${GLOBALS_DUMP_KEY}
+
+SET default_transaction_read_only = off;
+
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+
+--
+-- Roles
+--
+
+CREATE ROLE "Weird Role;x";
+ALTER ROLE "Weird Role;x" WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB NOLOGIN NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 5 VALID UNTIL '2030-01-01 00:00:00+00';
+CREATE ROLE jarvis_app;
+ALTER ROLE jarvis_app WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB LOGIN NOREPLICATION NOBYPASSRLS PASSWORD '${FAKE_HASH}';
+COMMENT ON ROLE jarvis_app IS 'Appen: it''s fine -- ø æ å';
+CREATE ROLE postgres;
+ALTER ROLE postgres WITH SUPERUSER INHERIT CREATEROLE CREATEDB LOGIN REPLICATION BYPASSRLS;
+CREATE ROLE reader;
+ALTER ROLE reader WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB NOLOGIN NOREPLICATION NOBYPASSRLS;
+
+--
+-- User Configurations
+--
+
+--
+-- User Config "jarvis_app"
+--
+
+ALTER ROLE jarvis_app SET search_path TO 'myschema', 'public';
+
+--
+-- User Config "reader"
+--
+
+ALTER ROLE reader SET work_mem TO '64MB';
+
+
+--
+-- Role memberships
+--
+
+GRANT pg_read_all_data TO reader WITH INHERIT TRUE GRANTED BY postgres;
+GRANT reader TO jarvis_app WITH ADMIN OPTION, INHERIT TRUE GRANTED BY postgres;
+
+
+
+
+
+
+\unrestrict ${GLOBALS_DUMP_KEY}
+
+--
+-- PostgreSQL database cluster dump complete
+--
+`;
