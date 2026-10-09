@@ -92,6 +92,17 @@ describe("WP-C2 schedule.mjs status: overvåkingsvennlige exit-koder", () => {
     expect(r.json.restore_verify).toMatchObject({ state: "ok", reported_by: "external_verifier", duration_s: 120, source: "offsite" });
   });
 
+  it("review F6: status --json oppgir restore_verify.tables/rows/last_attempt_at/reported_by (acceptance-ops.sh leser dem; før manglet de og meldingen viste tomme tall)", () => {
+    const out = tempDir();
+    makeSet(out, hoursAgo(NOW, 1));
+    const finished = hoursAgo(NOW, 2).toISOString();
+    stateWith(out, (st) => {
+      Object.assign(st.restore_verify, { state: "ok", last_attempt_at: finished, last_success_at: finished, last_set: "jarvis-backup-20261001T000000Z", tables: 358, rows: 10346, reported_by: "local", source: "local", duration_s: 90 });
+    });
+    const r = run(["status", "--out", out, "--json"]);
+    expect(r.json.restore_verify).toMatchObject({ state: "ok", tables: 358, rows: 10346, last_attempt_at: finished, last_success_at: finished, reported_by: "local", source: "local", duration_s: 90 });
+  });
+
   it("review F5: et sett datert i FREMTIDEN er aldri «nyeste» - status gir exit 3 med egen årsak (ikke ok:true med negativ alder), også ved siden av et friskt sett", () => {
     const only = tempDir();
     const future = makeSet(only, new Date(NOW.getTime() + 400 * 86_400_000));

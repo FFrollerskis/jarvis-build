@@ -266,7 +266,7 @@ ops/backup/acceptance-ops.sh report <backup-mappe>        # kun les status
 | `O05`/`O06` | statuseksporten finnes, er lesbar for andre (0644), og api-containeren kan lese den |
 | `O07` | API-oppetids-heartbeat er startet uten feil i loggen - *stopp api og bekreft varselet selv* |
 | `O08` | RPO verste tilfelle mot ditt mål |
-| `D01`–`D04` | restore til scratch lik manifestet (tabeller + eksakte radtall), målt RTO, målt RPO, kvittering til NAS |
+| `D01`–`D04` | restore til scratch lik manifestet (tabeller + eksakte radtall) **utført av dette tikket** (D01 krever handlingen `verify`, `reported_by=local` og en suksess nyere enn drillens start - en gammel grønn statusfil godtas ikke, og D02-D04 feiler da også), målt RTO, målt RPO, fersk kvittering til NAS (D04) |
 
 **Exit:** `0` = alt bestått · `1` = minst én `FAIL` · `3` = ingen `FAIL`, men noe er `NOT_CONFIGURED`/`UNKNOWN` - **ikke lukket**. Evidensen (uten hemmeligheter) skrives til `ops/acceptance/out/ops-acceptance-<modus>-<tid>.md` (git-ignorert); lim utskriften inn i chatten. `ops/acceptance/nas-ua0-gate.sh` er uendret (C10 sjekker fortsatt kun alder ≤ 25 t); en fremtidig `C13` kan lese `ops/backup/…/status --json`, men er bevisst ikke lagt inn her for å unngå konflikt med andre UA-0-endringer.
 

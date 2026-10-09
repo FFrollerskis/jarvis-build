@@ -144,8 +144,8 @@ function statusCommand(argv, env, now) {
     backup: { newest_set: newest?.name ?? null, newest_at: newest?.createdAt ?? null, age_hours: ageH, limit_hours: maxBackupAgeH, future_dated_sets: future, consecutive_failures: status.backup.consecutive_failures, last_error_code: status.backup.last_error_code },
     offsite: { state: o.state, adapter: o.adapter, last_set: o.last_set, last_success_at: o.last_success_at, verification: o.verification, hours_since_success: offsiteAgeH, last_error_code: o.last_error_code },
     restore_verify: {
-      state: v.state, last_success_at: v.last_success_at, age_days: verifyAgeD, last_set: v.last_set, duration_s: v.duration_s, fetch_duration_s: v.fetch_duration_s, source: v.source,
-      reported_by: v.reported_by, last_error_code: v.last_error_code
+      state: v.state, last_attempt_at: v.last_attempt_at, last_success_at: v.last_success_at, age_days: verifyAgeD, last_set: v.last_set, tables: v.tables, rows: v.rows, duration_s: v.duration_s,
+      fetch_duration_s: v.fetch_duration_s, source: v.source, reported_by: v.reported_by, last_error_code: v.last_error_code
     },
     heartbeat: status.heartbeat,
     config: { backup_interval_hours: intervalH, restore_verify_interval_days: verifyIntervalD },
