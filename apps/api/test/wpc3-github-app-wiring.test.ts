@@ -302,7 +302,7 @@ const OTHER_ALLOWED = "tsworkflow/andre-repo";
 interface Mint { readonly repositories: string[]; readonly permissions: Record<string, string> | undefined }
 
 /** Stubbet GitHub med injisert klokke: utløp følger `clock` (ikke Date.now), og hver utstedelse registrerer nøyaktig hva som ble forespurt (repoer + rettigheter). */
-function clockedStubGitHub(clock: { t: number }): { http: (url: string, init: RequestInit) => Promise<Response>; issued: string[]; mints: Mint[] } {
+function clockedStubGitHub(clock: { t: number }, options: { rejectNarrowed?: boolean } = {}): { http: (url: string, init: RequestInit) => Promise<Response>; issued: string[]; mints: Mint[] } {
   const issued: string[] = [];
   const mints: Mint[] = [];
   return {
@@ -310,6 +310,10 @@ function clockedStubGitHub(clock: { t: number }): { http: (url: string, init: Re
     http: async (_url, init) => {
       const body = JSON.parse(String(init.body ?? "{}")) as { repositories?: string[]; permissions?: Record<string, string> };
       mints.push({ repositories: body.repositories ?? [], permissions: body.permissions });
+      // `rejectNarrowed`: en installasjon som IKKE har rettigheten det snevre git-tokenet ber om (f.eks. Contents: write) - GitHub svarer 422 på forespørselen med `permissions`, mens standard-scope (uten `permissions`) lykkes.
+      if (options.rejectNarrowed === true && body.permissions !== undefined) {
+        return new Response(JSON.stringify({ message: "The permissions requested are not granted to this installation." }), { status: 422, headers: { date: new Date(clock.t).toUTCString() } });
+      }
       const token = `ghs_${randomBytes(24).toString("hex")}`;
       issued.push(token);
       return new Response(JSON.stringify({
@@ -437,5 +441,38 @@ describe("D: kodejobbens git-credential (createCodingHandler + GitHubAuth.gitCre
     const withoutPat = { secretProvider: new MapSecrets({}), credentialSource: auth.gitCredentialSource(new MapSecrets({})) };
     await expect(codingHandler(missing, withoutPat)(claimed(), jobContext)).rejects.toThrow("git_auth_unavailable:GITHUB_TOKEN_UNAVAILABLE");
     expect(missing.calls).toHaveLength(0);
+  }, 60_000);
+
+  it("D6 (F2): installasjonen mangler rettigheten det snevre git-tokenet ber om (Contents: write) -> jobben feiler LUKKET før sandbox med den lukkede koden; connectorens standard-scope virker fortsatt, og PAT-en brukes ikke", async () => {
+    const clock = { t: Date.now() };
+    const stub = clockedStubGitHub(clock, { rejectNarrowed: true });
+    const auth = clockedAuth(stub, clock);
+    const sandbox = new CapturingRedirectingSandboxRunner(new ProcessSandboxRunner(), GITHUB_SHAPED_URL, bareRepo);
+    const gitAuth = { secretProvider: new MapSecrets({ JARVIS_GITHUB_TOKEN: PAT }), credentialSource: auth.gitCredentialSource(new MapSecrets({ JARVIS_GITHUB_TOKEN: PAT })) };
+    await expect(codingHandler(sandbox, gitAuth)(claimed(), jobContext)).rejects.toThrow("git_auth_unavailable:GITHUB_APP_REQUEST_REJECTED");
+    expect(sandbox.calls).toHaveLength(0); // ingen git-kall, ingen clone
+    expect(JSON.stringify(sandbox.calls)).not.toContain(PAT);
+    expect(stub.mints).toEqual([{ repositories: ["jarvisbuild-wpc3-test"], permissions: { contents: "write" } }]);
+    expect(auth.status().app?.last_error?.code).toBe("GITHUB_APP_REQUEST_REJECTED");
+    // Feilen er isolert til git-credentialen: standard-scope-tokenet (github.*-handlingene) utstedes fortsatt.
+    expect(await auth.secretProvider(new MapSecrets({})).get("JARVIS_GITHUB_TOKEN")).toMatch(/^ghs_/);
+  }, 60_000);
+
+  it("D7 (F2): samme installasjon, men eieren har eksplisitt tillatt PAT-fallback -> jobben fullføres med PAT-en (loggført fallback, aldri stille), og statusen viser at fallback er aktiv", async () => {
+    const clock = { t: Date.now() };
+    const stub = clockedStubGitHub(clock, { rejectNarrowed: true });
+    const logs: Array<{ msg?: string }> = [];
+    const auth = createGitHubAuth({
+      secrets: new MapSecrets({ JARVIS_GITHUB_APP_PRIVATE_KEY: PEM }), log: (event) => { logs.push(event as { msg?: string }); }, http: stub.http, now: () => clock.t, sleep: async () => undefined, maxAttempts: 1,
+      env: { JARVIS_GITHUB_APP_ID: "123456", JARVIS_GITHUB_APP_INSTALLATION_ID: "42", JARVIS_GIT_ALLOWED_REPOS: `${ALLOWED_REPO},${OTHER_ALLOWED}`, JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK: "true" }
+    });
+    const sandbox = new CapturingRedirectingSandboxRunner(new ProcessSandboxRunner(), GITHUB_SHAPED_URL, bareRepo);
+    const gitAuth = { secretProvider: new MapSecrets({}), credentialSource: auth.gitCredentialSource(new MapSecrets({ JARVIS_GITHUB_TOKEN: PAT })) };
+    expect((await codingHandler(sandbox, gitAuth)(claimed(), jobContext))["tests"]).toBe("passed");
+    expect(sandbox.calls.find((c) => c.args.includes("clone"))?.extraEnv?.[GIT_CREDENTIAL_TOKEN_ENV]).toBe(PAT);
+    expect(sandbox.calls.find((c) => c.args.includes("push"))?.extraEnv?.[GIT_CREDENTIAL_TOKEN_ENV]).toBe(PAT);
+    expect(auth.status().pat_fallback).toEqual({ allowed: true, active: true });
+    expect(logs.some((l) => l.msg === "github_app_pat_fallback_used")).toBe(true);
+    expect(JSON.stringify(logs)).not.toContain(PAT);
   }, 60_000);
 });
