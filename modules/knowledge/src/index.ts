@@ -17,6 +17,8 @@ export * from "./source-policy.ts";
 export * from "./knowledge-hits.ts";
 export * from "./retriever.ts";
 export * from "./registry.ts";
+export * from "./source-config.ts";
+export * from "./sync-runner.ts";
 export * from "./claim-verification.ts";
 export * from "./claim-service.ts";
 export * from "./entity-extractor.ts";
