@@ -72,12 +72,13 @@ describe.skipIf(!haveAge)("WP-C2 review F2: runRestoreVerify gir psql kun FILTRE
     const scratch = fakeScratchRunner();
     const report = await verify(set, scratch);
     // dumpene i denne testen er ikke ekte age-filer, så restoren stopper først på selve databasen - ETTER at roller og CREATE DATABASE er kjørt
-    expect(report).toMatchObject({ ok: false, stage: "restore", globals: { statements: 16, passwords_stripped: 1 } });
+    expect(report).toMatchObject({ ok: false, stage: "restore", globals: { statements: 14, passwords_stripped: 1, login_role_statements_skipped: 2 } });
     const [script, create] = scratch.writes();
     expect(script.tool).toBe("psql");
     expect(script.stdin).toBe(sanitizeGlobals(REAL_GLOBALS_DUMP).sql);
     expect(script.stdin).not.toMatch(/\\|restrict|PASSWORD|SCRAM|not-real/i);
     expect(script.stdin).toContain("CREATE ROLE jarvis_app;");
+    expect(script.stdin).not.toMatch(/ROLE postgres/); // innloggingsrollen (fake-runneren har ingen `user` => standard postgres) røres aldri (runde 2 M1)
     expect(create.sql).toMatch(/^CREATE DATABASE "restore_verify_jarvis_20261009t020000z"$/);
   });
 

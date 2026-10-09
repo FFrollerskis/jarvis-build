@@ -27,8 +27,8 @@ export interface RestoreVerifyReport {
   source_endpoint?: string;
   scratch_endpoint?: string;
   error?: string;
-  /** Antall setninger fra globals.sql som ble kjørt, og antall passord-hasher som ble FJERNET (roller restores uten passord). */
-  globals?: { statements: number; passwords_stripped: number };
+  /** Antall setninger fra globals.sql som ble kjørt, antall passord-hasher som ble FJERNET (roller restores uten passord), og antall setninger om verifisererens egen innloggingsrolle som ble hoppet over. */
+  globals?: { statements: number; passwords_stripped: number; login_role_statements_skipped: number };
   integrity: Array<{ file: string; ok: boolean }>;
   databases: RestoreVerifyDatabaseReport[];
 }

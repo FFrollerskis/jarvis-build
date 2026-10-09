@@ -220,8 +220,9 @@ export async function runRestoreVerify({ setDir, identityFile, scratchRunner, al
     // Review F2: globals.sql er UBETRODD SQL (age er ikke autentisert). Den dekrypteres til MINNET, whitelist-filtreres (ingen psql-metakommandoer, kun kjente
     // rolle-setninger, passord-hasher fjernes) og psql får aldri annet enn den gjenoppbygde, validerte teksten.
     log("restoring cluster globals");
-    const globals = sanitizeGlobals(await decryptToString(identityFile, join(setDir, manifest.globals.file)));
-    report.globals = { statements: globals.statements, passwords_stripped: globals.passwordsStripped };
+    // M1 (runde 2): filteret får rollen vi selv logger inn som og slipper aldri setninger som angår den gjennom (ellers kunne `ALTER ROLE postgres WITH NOLOGIN` låst oss ute midt i kjøringen).
+    const globals = sanitizeGlobals(await decryptToString(identityFile, join(setDir, manifest.globals.file)), { loginRole: scratchRunner.user ?? "postgres" });
+    report.globals = { statements: globals.statements, passwords_stripped: globals.passwordsStripped, login_role_statements_skipped: globals.skippedLoginRole };
     if (globals.sql !== "") await runPsqlScript(scratchRunner, globals.sql);
     for (const entry of manifest.databases) {
       const scratchDb = `${SCRATCH_DB_PREFIX}${entry.database}_${stamp}`.toLowerCase();
