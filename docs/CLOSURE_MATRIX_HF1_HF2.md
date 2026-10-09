@@ -60,7 +60,7 @@ HF2-PDF-en ligger ikke i repoet; radene bygger på beslutningsloggen D-406…D-4
 | D-28 pgvector/HNSW | migr. 014/068, eval-skript | – | Kjør `ops/memory/embedding-eval-live.ts` på NAS |
 | D-30 Voice-benchmark | `benchmark.ts` | – | ≥100 norske lydprøver |
 | D-32 Worker Docker/GitHub | policy, `DockerJobSandboxRunner`, `pr-publisher` | Vertsside runner + jobbimage + egress → WP-C | Ekte branch/PR, ressurs-/nettverksisolasjon |
-| D-35 Vault + live | Infisical i compose, `oauth-refresh`, host-skript | GitHub-App-autentisering (Q-45b) → WP-C | Machine identity, rotasjon, Google OAuth live |
+| D-35 Vault + live | Infisical i compose, `oauth-refresh`, host-skript; **GitHub-App-autentisering (Q-45b, D-454): `WIRED/DORMANT`** - uten `JARVIS_GITHUB_APP_ID`/`_INSTALLATION_ID` er alt PAT uendret (`modules/tool-gateway/src/github-app-auth.ts`, `github-token-provider.ts`; kodejobbens git-credential er repo-scopet via `GitCredentialSource.tokenFor`) | – (GHES, releases, branch protection, rulesets, webhooks, secrets: `DEFERRED`) | Machine identity, rotasjon, Google OAuth live; **GitHub App (ikke verifisert mot ekte GitHub):** eier følger `docs/runbooks/GITHUB_APP.md` og kjører `node --env-file=.env --experimental-transform-types modules/tool-gateway/scripts/github-app-live.ts --key-file ./nokkel.pem [--sandbox-repo owner/test]` til `GITHUB_APP_LIVE_STATUS=VERIFIED` |
 | D-36 Apple | skjelett | Swift-konfig, APNs-kontrakt → WP-G | Mac/Xcode/enhet |
 | HA-RUNTIME | HA-transport | – | Fysisk HA |
 | OPS-RUNTIME | backup/restore-skript, watchdog | Planlagt drift + ekstern overvåking → WP-C | Off-site, drill, uptime |
@@ -77,7 +77,7 @@ HF2-PDF-en ligger ikke i repoet; radene bygger på beslutningsloggen D-406…D-4
 | UA-2 Knowledge | Flere kilder i produksjon, `KnowledgeRetriever` i chat, Docs/Sheets/Slides, møtetranskripter, entitetsgraf, Q-26 (truth promotion), Pieces (ingen kjent API) | Fem kilder i samme retrieval, cross-tenant=0 |
 | UA-3 Business OS | Business-tenant-provisjonering (044, topologi: Q-48), lead/opportunity-oppdatering, churn/product usage | Kjøring mot ekte kundedata |
 | UA-4 Growth | Skriveaksjoner (idempotent, før/etter) mot Ads, GA4/Search Console/GBP/LinkedIn/YouTube/TikTok, eksperiment/kreativ-intelligens | Google Ads developer token, Meta-verifisering |
-| UA-5 Dev/Cloud | Cloudflare, Langfuse/Infisical/Postgres som mål, incident-produsenter, GitHub App | Live GitHub/Vercel/GCP/Cloudflare |
+| UA-5 Dev/Cloud | Cloudflare, Langfuse/Infisical/Postgres som mål, incident-produsenter. *GitHub App er bygget (`DORMANT`, D-454); EV-17-faktaene `GitHubAuth.credentialFacts()` er `BUILT_UNWIRED` til de kobles til `assessCredential`* | Live GitHub (App-akseptansescriptet over)/Vercel/GCP/Cloudflare |
 | UA-6 Finance | D-kjede for betaling/refund/capture bak step-up, Wallester-/banking-webhooks, avstemming | Live Vipps/Neonomics/Wallester, BankID/KYC |
 | UA-7 Comms | Contacts, Teams, Messenger/Instagram, møtetranskripsjon-pipeline, utgående AI-ringing (regler), push-oppfølging | Identitet mot ekte data |
 | UA-8 Personal | Lokalagenter (Mac/Windows), Apple Calendar/Reminders/Contacts/Health-inntak, bil (provider-nøytral), familie/delte rom, personlig økonomi-lesing | Fysisk iPhone/Watch/bil |
