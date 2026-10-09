@@ -194,7 +194,7 @@ export class FikenTransport {
     return fikenAccessToken(this.refreshToken);
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown, onSuccess?: (response: Response) => Promise<T>): Promise<T> {
     const token = await this.accessToken();
     let lastError: FikenApiError | null = null;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -209,6 +209,7 @@ export class FikenTransport {
         ...(body !== undefined ? { body: JSON.stringify(body) } : {})
       });
       if (response.ok) {
+        if (onSuccess) return onSuccess(response);
         if (response.status === 204) return undefined as T;
         return (await response.json()) as T;
       }
@@ -245,6 +246,36 @@ export class FikenTransport {
    * transporten gjetter ALDRI et manglende felt.
    */
   async createGeneralJournalEntry(input: FikenGeneralJournalEntryInput): Promise<FikenJournalEntry> {
-    return this.request("POST", `/companies/${this.companySlug}/generalJournalEntries`, input);
+    return this.request("POST", `/companies/${this.companySlug}/generalJournalEntries`, input, (response) => readCreatedJournalEntry(response, input));
   }
+}
+
+/**
+ * WP-F1 (D-453): leser svaret på `POST generalJournalEntries`. Svarformen er IKKE verifisert mot Fikens primærdokumentasjon (en `201 Created` kan komme med JSON-kropp som har
+ * `journalEntryId`, eller kun en `Location`-header uten kropp). Begge tolkes derfor KONSERVATIVT: id-en tas fra `journalEntryId` i kroppen, ellers fra en `Location` hvis sti
+ * ender på `/journalEntries/<tall>` eller `/generalJournalEntries/<tall>` (aldri en vilkårlig siste sti-del - den kan være en annen ressurs-id). Finnes ingen id er det et UKJENT
+ * utfall (`outcome_unknown:` - posteringen KAN være opprettet): kjeden varsler og krever avstemming i stedet for å anta feil eller prøve på nytt (Fiken har ingen Idempotency-Key).
+ */
+export async function readCreatedJournalEntry(
+  response: { text(): Promise<string>; headers?: { get(name: string): string | null } },
+  input: Pick<FikenGeneralJournalEntryInput, "description" | "date">
+): Promise<FikenJournalEntry> {
+  const text = await response.text().catch(() => "");
+  let id: number | null = null;
+  if (text.trim().length > 0) {
+    try {
+      const value = (JSON.parse(text) as { journalEntryId?: unknown } | null)?.journalEntryId;
+      if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) id = value;
+      else if (typeof value === "string" && /^\d{1,15}$/.test(value) && Number(value) > 0) id = Number(value);
+    } catch {
+      // ikke JSON - prøv Location under
+    }
+  }
+  if (id === null) {
+    const location = response.headers?.get("location") ?? null;
+    const match = location === null ? null : /\/(?:generalJournalEntries|journalEntries)\/(\d{1,15})\/?$/.exec(location.split("?")[0]!);
+    if (match && Number(match[1]) > 0) id = Number(match[1]);
+  }
+  if (id === null) throw new Error("outcome_unknown:fiken_created_without_journal_entry_id");
+  return { journalEntryId: id, description: input.description, date: input.date };
 }
