@@ -10,8 +10,9 @@ import type {
   SessionGrantService, SessionService, VoiceSessionAuthority
 } from "@jarvis/core";
 import {
-  acquireContainerLogs, attemptRecovery, correlateDbState, correlateIncident, dockerProviderStatus, executeCloudMutation, executeInfraMutation,
-  getInfraExecution, ingestGithubDeployment, proposeRepairTask, type DeploymentService, type DiagnosisService, type IncidentService
+  OWNER_LIFECYCLE_ACTIONS, acquireContainerLogs, attemptRecovery, correlateDbState, correlateIncident, dockerProviderStatus, executeCloudMutation, executeInfraMutation,
+  getInfraExecution, incidentPhase, incidentPhaseNo, ingestGithubDeployment, proposeRepairTask, truthLabelNo,
+  type DeploymentService, type DiagnosisService, type IncidentService, type IncidentStatus
 } from "@jarvis/incidents";
 import { OwnerControlUnauthorizedError, type InfraExecutionGate, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
 import type { InProcessWorker, TaskService } from "@jarvis/tasks";
@@ -699,6 +700,24 @@ function fieldRecord(body: Record<string, unknown>, key: string): Record<string,
 function domainFailure(res: ServerResponse, status: number, code: string, err: unknown): void {
   console.error(JSON.stringify({ msg: "route_domain_failure", request_id: requestIdOf(res), code, error: (err as Error).message }));
   json(res, status, { error: code, request_id: requestIdOf(res) });
+}
+
+/**
+ * WP-E1 (JARVIS-068): som `domainFailure`, men VÅRE egne, bevisste feilkoder (sannhetsregime `truth_*`, livssyklus `incident_*`, ulovlig overgang) vises til eieren som `reason`
+ * (maks 80 tegn) - eieren må få vite HVORFOR «VERIFIED» eller en overgang avvises. Alt annet (pg-feil, stack) forblir generisk og kun i loggen.
+ */
+const OWN_INCIDENT_REASON = /^(truth_[a-z_]+|incident_[a-z_]+|diagnosis_[a-z_]+|invalid_incident_transition:[a-z_]+->[a-z_]+)$/;
+function incidentDomainFailure(res: ServerResponse, status: number, code: string, err: unknown): void {
+  const message = (err as Error).message ?? "";
+  if (!OWN_INCIDENT_REASON.test(message)) return domainFailure(res, status, code, err);
+  console.error(JSON.stringify({ msg: "route_domain_failure", request_id: requestIdOf(res), code, error: message }));
+  json(res, status, { error: code, reason: message.slice(0, 80), request_id: requestIdOf(res) });
+}
+
+const INCIDENT_STATUSES: readonly IncidentStatus[] = ["open", "diagnosing", "repair_proposed", "repair_in_progress", "resolved", "wont_fix"];
+/** WP-E1: hendelsen slik eieren ser den - fase (åpen/anerkjent/avbøtende/løst/lukket) i tillegg til den lagrede statusen, samme oversettelse overalt. */
+function withPhase<T extends { status: IncidentStatus }>(incident: T): T & { phase: string; phase_no: string } {
+  return { ...incident, phase: incidentPhase(incident.status), phase_no: incidentPhaseNo(incident.status) };
 }
 
 
@@ -1541,16 +1560,21 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       const incident = await service.getIncident(authed.identity.tenant_id, authed.identity.memory_space_id, incidentId);
       if (!incident) return json(res, 404, { error: "incident_not_found", request_id: requestIdOf(res) });
       const evidence = await service.listEvidence(authed.identity.tenant_id, authed.identity.memory_space_id, incidentId);
-      return json(res, 200, { incident, evidence });
+      // WP-E1: varig overgangshistorikk (hvem/når/hvorfor) og sannhetsmerking per bevis (bekreftet / observert, ikke bekreftet / påstått) følger med.
+      const transitions = await service.listTransitions(authed.identity.tenant_id, authed.identity.memory_space_id, incidentId);
+      return json(res, 200, {
+        incident: withPhase(incident), transitions,
+        evidence: evidence.map((e) => ({ ...e, truth_no: truthLabelNo(e.status) }))
+      });
     }
 
     if (req.method === "POST" && url.pathname === "/incidents/list") {
       const authed = await authedRequest(req, res, deps, ["status"]);
       if (!authed) return;
-      const status = (fieldOptionalString(authed.body, "status") ?? "open") as
-        "open" | "diagnosing" | "repair_proposed" | "repair_in_progress" | "resolved" | "wont_fix" | "all";
-      const incidents = await service.listIncidents(authed.identity.tenant_id, authed.identity.memory_space_id, status);
-      return json(res, 200, { incidents });
+      const requested = fieldOptionalString(authed.body, "status") ?? "open";
+      if (requested !== "all" && !INCIDENT_STATUSES.includes(requested as IncidentStatus)) throw new HttpError(400, "malformed_request", "status");
+      const incidents = await service.listIncidents(authed.identity.tenant_id, authed.identity.memory_space_id, requested as IncidentStatus | "all");
+      return json(res, 200, { incidents: incidents.map(withPhase) });
     }
 
     if (req.method === "POST" && url.pathname === "/incidents/evidence/add") {
@@ -1573,7 +1597,35 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         return json(res, 200, { evidence });
       } catch (err) {
         if (err instanceof HttpError) throw err;
-        return domainFailure(res, 400, "evidence_rejected", err);
+        // WP-E1: sannhetstype-regimet - `status: "VERIFIED"` fra avsenderen avvises (ingen kan bekrefte sin egen påstand); `asserted_by` kan ikke oppgis (rutens kropp har ikke feltet), eieren er alltid `owner`.
+        return incidentDomainFailure(res, 400, "evidence_rejected", err);
+      }
+    }
+
+    if (req.method === "POST" && url.pathname === "/incidents/transition") {
+      // WP-E1 (JARVIS-068): eierens livssyklus-handlinger - anerkjenn, foreslå/start avbøting, løs, lukk uten tiltak, gjenåpne. Eneste HTTP-vei til en statusendring; aktøren er ALLTID den verifiserte
+      // eieren fra grantet (aldri en kropps-oppgitt aktør), årsak er påkrevd, og lovligheten avgjøres av tilstandsmaskinen. Klasse B (intern bokføring, reversibel via «gjenåpne») bak vanlig policy.
+      const authed = await authedRequest(req, res, deps, ["incident_id", "action", "reason", "evidence_ref"]);
+      if (!authed) return;
+      const action = fieldString(authed.body, "action");
+      if (!Object.prototype.hasOwnProperty.call(OWNER_LIFECYCLE_ACTIONS, action)) throw new HttpError(400, "malformed_request", "action");
+      const decision = await deps.policy.authorize({
+        identity: authed.identity,
+        toolCall: { tool_id: "incidents", action: "transition", capability_class: "B", parameters: { action } }
+      });
+      if (decision.decision !== "ALLOW") return json(res, 403, { decision: decision.decision, reason: decision.reason });
+      const evidenceRef = fieldOptionalString(authed.body, "evidence_ref");
+      try {
+        const incident = await service.transition(
+          authed.identity.tenant_id, authed.identity.memory_space_id, fieldString(authed.body, "incident_id"),
+          OWNER_LIFECYCLE_ACTIONS[action as keyof typeof OWNER_LIFECYCLE_ACTIONS], { kind: "owner", person_id: authed.identity.person_id },
+          { reason: fieldString(authed.body, "reason"), ...(evidenceRef !== undefined ? { evidence_ref: evidenceRef } : {}) }
+        );
+        if (!incident) return json(res, 404, { error: "incident_not_found", request_id: requestIdOf(res) });
+        return json(res, 200, { incident: withPhase(incident) });
+      } catch (err) {
+        if (err instanceof HttpError) throw err;
+        return incidentDomainFailure(res, 409, "transition_rejected", err);
       }
     }
 
@@ -1645,6 +1697,8 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       const supersedes = fieldOptionalString(authed.body, "supersedes_diagnosis_id");
       const supporting = fieldOptionalStringArray(authed.body, "supporting_evidence_ids");
       const contradicting = fieldOptionalStringArray(authed.body, "contradicting_evidence_ids");
+      // WP-E1: en `deterministic` diagnose kommer fra KODE, aldri fra en HTTP-kaller (ellers kunne avsenderen selv gi sin påstand deterministisk status). Over HTTP: kun eier eller modell-assistert.
+      if (!["owner", "model_assisted"].includes(fieldString(authed.body, "source"))) throw new HttpError(400, "malformed_request", "source");
       try {
         const diagnosis = await diagnosisService.createDiagnosis(
           authed.identity.tenant_id, authed.identity.memory_space_id, fieldString(authed.body, "incident_id"), {
@@ -1658,7 +1712,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         return json(res, 200, { diagnosis });
       } catch (err) {
         if (err instanceof HttpError) throw err;
-        return domainFailure(res, 400, "diagnosis_rejected", err);
+        return incidentDomainFailure(res, 400, "diagnosis_rejected", err);
       }
     }
 
@@ -1760,7 +1814,8 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         authed.identity.tenant_id, authed.identity.memory_space_id, fieldString(authed.body, "incident_id")
       );
       if (!incident) return json(res, 404, { error: "incident_not_found", request_id: requestIdOf(res) });
-      const testCommand = fieldOptionalStringArray(authed.body, "test_command");
+      // WP-E1 (JARVIS-068): `test_command` er PÅKREVD (validert mot testløper-allowlisten i `proposeRepairTask`) - aldri en vakuøs standardtest som alltid består.
+      const testCommand = fieldOptionalStringArray(authed.body, "test_command") ?? [];
       const publishPr = fieldOptionalBoolean(authed.body, "publish_pr");
       const budget = fieldOptionalNumber(authed.body, "model_budget_ore");
       const result = await proposeRepairTask(
@@ -1768,7 +1823,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         authed.identity, authed.identity.memory_space_id, incident,
         {
           repo_url: fieldString(authed.body, "repo_url"), goal: fieldString(authed.body, "goal"),
-          ...(testCommand !== undefined ? { test_command: testCommand } : {}),
+          test_command: testCommand,
           ...(publishPr !== undefined ? { publishPr } : {}),
           ...(budget !== undefined ? { model_budget_ore: budget } : {})
         }
