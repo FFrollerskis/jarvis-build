@@ -122,11 +122,13 @@ describe("getValueReport", () => {
     const looked: string[] = [];
     const counting = { list: () => [], hasSecret: async (ref: string) => { looked.push(ref); return true; }, health: new Map([["github", { state: "healthy", at: NOW }]]) } as unknown as ToolGateway;
     await service({ gw: counting, measurements: [measured("ops.incidents_open_now", 0)], slo: slo(["OK"]) }).svc.getValueReport("tenant-A");
-    expect(new Set(looked)).toEqual(new Set(GITHUB?.credential_refs ?? []));
-    expect(looked.length).toBe(GITHUB?.credential_refs.length);
+    // WP-C3: GitHub har også en VALGFRI credential-ref (App-privatnøkkelen) som `listConnectorStatus` slår opp; begge er GitHubs egne referanser.
+    const githubRefs = [...(GITHUB?.credential_refs ?? []), ...(GITHUB?.optional_credential_refs ?? [])];
+    expect(new Set(looked)).toEqual(new Set(githubRefs));
+    expect(looked.length).toBe(githubRefs.length);
     looked.length = 0;
     await service({ gw: counting, selfModel: true, slo: slo(["OK"]), facts: { ...FACTS, v5_proposals_enabled: true } }).svc.getValueReport("tenant-A");
-    expect(looked.length).toBeGreaterThan((GITHUB?.credential_refs.length ?? 0) * 5);
+    expect(looked.length).toBeGreaterThan(githubRefs.length * 5);
   });
 
   it("D-32/worker-isolasjon kommer KUN fra erklærte porter, aldri fra noe kode kan utlede", async () => {

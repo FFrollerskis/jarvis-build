@@ -1291,10 +1291,11 @@
     const isBacklog = c.category === "backlog" || c.category === "backlog_d64_gate";
     const isLive = c.test_method === "live";
     const testMethod = isLive ? "live-testbar" : "kun presence-sjekk";
+    // WP-C3: VALGFRIE refer (GitHub: App-ens privatnøkkel, lagres i vaulten) vises som egne rader, men teller ikke med i «konfigurert».
     const credRows = isBacklog
       ? '<div class="meta">Ikke bygget ennå - Jarvis har ingen verktøykobling for denne connectoren. ' +
         "Lagring av credentials her har INGEN effekt før den er bygget.</div>"
-      : (Array.isArray(c.credentials) ? c.credentials : []).map((cred) => {
+      : (Array.isArray(c.credentials) ? c.credentials : []).concat(Array.isArray(c.optional_credentials) ? c.optional_credentials : []).map((cred) => {
           const ref = escapeHtml(cred.ref);
           return '<div class="cred-row">' +
             '<label title="' + ref + '">' + ref + (cred.configured ? " ✓" : "") + '</label>' +
