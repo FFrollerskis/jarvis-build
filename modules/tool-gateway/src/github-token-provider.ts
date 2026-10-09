@@ -117,7 +117,9 @@ export function resolveGitHubAuthSettings(env: Readonly<Record<string, string | 
   const appId = readEnv(env, "JARVIS_GITHUB_APP_ID");
   const installationId = readEnv(env, "JARVIS_GITHUB_APP_INSTALLATION_ID");
   if (appId === undefined && installationId === undefined) return { kind: "pat" };
-  const allowPatFallback = readEnv(env, "JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK")?.toLowerCase() === "true";
+  // Review F6: EKSAKT «true» (små bokstaver, ingen mellomrom) - slik .env.example og runbooken alltid har sagt. «TRUE», «True» og « true» åpner IKKE for
+  // PAT-nedgradering: flagget åpner en vei tilbake til en langlevd credential, så tvil er alltid «av».
+  const allowPatFallback = env["JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK"] === "true";
   const invalid = (error: GitHubAppAuthError): GitHubAuthSettings => ({ kind: "invalid", error, allowPatFallback, appId: appId ?? null, installationId: installationId ?? null });
   const config = (reason: string): GitHubAppAuthError => new GitHubAppAuthError("GITHUB_APP_CONFIG_INVALID", reason);
   if (appId === undefined) return invalid(config("JARVIS_GITHUB_APP_ID_missing"));

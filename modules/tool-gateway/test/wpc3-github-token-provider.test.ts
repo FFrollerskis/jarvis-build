@@ -121,8 +121,8 @@ describe("A: valg av metode fra miljøet - ingen konfig = PAT som i dag; delvis/
     expect(resolveGitHubAuthSettings({ ...base, JARVIS_GITHUB_API_BASE: "" }).kind).toBe("app");
   });
 
-  it("A5: PAT-fallback er AV som standard og slås kun på av eksakt «true» (case-insensitivt) - «1»/«yes»/«on» teller ikke", () => {
-    for (const [value, expected] of [[undefined, false], ["", false], ["false", false], ["1", false], ["yes", false], ["on", false], ["TRUE", true], [" true ", true]] as const) {
+  it("A5: PAT-fallback er AV som standard og slås kun på av eksakt «true» (små bokstaver, ingen mellomrom - review F6) - «TRUE»/«1»/«yes»/«on» teller ikke", () => {
+    for (const [value, expected] of [[undefined, false], ["", false], ["false", false], ["1", false], ["yes", false], ["on", false], ["TRUE", false], ["True", false], [" true ", false], ["true", true]] as const) {
       const settings = resolveGitHubAuthSettings({ ...base, ...(value === undefined ? {} : { JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK: value }) });
       expect(settings.kind === "app" && settings.allowPatFallback, String(value)).toBe(expected);
     }

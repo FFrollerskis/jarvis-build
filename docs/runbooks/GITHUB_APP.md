@@ -126,7 +126,7 @@ Regler Jarvis følger (testet):
 - **Ingen konfig = PAT som før.** Er verken `JARVIS_GITHUB_APP_ID` eller `JARVIS_GITHUB_APP_INSTALLATION_ID` satt, er alt uendret (kjeden returneres uendret).
 - **Én av dem satt = App-modus.** Delvis/ugyldig konfig (manglende id, ugyldig API-base, ingen repo-scope, manglende nøkkel) feiler **lukket og høylytt**: `github.*`-kall avvises med
   `credential_unavailable`, loggen får `github_app_auth_failed`/`github_app_config_invalid`, og connector-statusen viser feilkoden. Jarvis faller **aldri** stille tilbake til PAT.
-- **PAT-fallback er av.** Slå den på KUN ved behov: `JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK=true` (eksakt «true»). Hver bruk logges (`github_app_pat_fallback_used`), statusen viser
+- **PAT-fallback er av.** Slå den på KUN ved behov: `JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK=true` (eksakt «true» med små bokstaver og uten mellomrom - «TRUE», «1» og «yes» teller ikke). Hver bruk logges (`github_app_pat_fallback_used`), statusen viser
   `pat_fallback.active`, og den gjelder aldri når GitHub ga noe annet enn forespurt (`GITHUB_APP_SCOPE_MISMATCH`).
 - `JARVIS_GITHUB_API_BASE`: KUN `https://api.github.com` godtas (tomt = standard). Alt annet - annen vert, port, sti, http - feiler lukket med `GITHUB_APP_CONFIG_INVALID`, fordi
   App-JWT-en (som kan utstede installasjonstokens) ellers kunne sendes til en vilkårlig mottaker ved en endret miljøvariabel. Ingen redirects følges på kall som bærer JWT eller

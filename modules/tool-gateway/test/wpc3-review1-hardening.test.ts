@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it } from "vitest";
 import { GitHubAppAuth, GitHubAppAuthError, maskGitHubSecrets, normalizeGitHubApiBase } from "../src/github-app-auth.ts";
-import { resolveGitHubAuthSettings } from "../src/github-token-provider.ts";
+import { createGitHubAuth, resolveGitHubAuthSettings } from "../src/github-token-provider.ts";
 import { APP_ID, INSTALLATION_ID, REPO, failure, harness, keys, stopFakeServers } from "./support/wpc3-harness.ts";
 
 /**
@@ -217,5 +217,31 @@ describe("F5c: redirects følges aldri på kall som bærer JWT eller installasjo
     expect(error.message).toContain("revoke_http_307");
     expect(recipient.hits).toHaveLength(0);
     expect(redirector.hits).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+describe("F6: PAT-fallback slås kun på av EKSAKT «true» (docs sier det - koden var case-insensitiv)", () => {
+  const env = { JARVIS_GITHUB_APP_ID: APP_ID, JARVIS_GITHUB_APP_INSTALLATION_ID: INSTALLATION_ID, JARVIS_GITHUB_REPO: REPO };
+
+  it("F6a: bare «true» gir allowPatFallback; alle andre varianter (store bokstaver, mellomrom, tegn rundt) gjør det ikke", () => {
+    for (const value of ["TRUE", "True", "tRue", " true", "true ", "\ttrue", "true\n", "'true'", "\"true\"", "yes", "1", "on", "enabled", "truee", ""]) {
+      const settings = resolveGitHubAuthSettings({ ...env, JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK: value });
+      expect(settings.kind === "app" && settings.allowPatFallback, JSON.stringify(value)).toBe(false);
+    }
+    const exact = resolveGitHubAuthSettings({ ...env, JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK: "true" });
+    expect(exact.kind === "app" && exact.allowPatFallback).toBe(true);
+  });
+
+  it("F6b: med «TRUE» faller Jarvis IKKE tilbake til PAT når utstedelsen feiler - fail-closed i praksis, ikke bare i innstillingene", async () => {
+    const h = await harness();
+    const secrets = { name: "map", get: async (ref: string) => (ref === "JARVIS_GITHUB_TOKEN" ? "pat-skal-aldri-brukes-0123456789" : ref === "JARVIS_GITHUB_APP_PRIVATE_KEY" ? keys.pkcs1 : null) };
+    const auth = createGitHubAuth({
+      secrets, allowLoopbackHttpForTests: true, log: () => undefined, sleep: async () => undefined, maxAttempts: 1,
+      env: { ...env, JARVIS_GITHUB_API_BASE: h.fake.baseUrl, JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK: "TRUE" }
+    });
+    h.fake.script = [{ status: 404, json: { message: "Not Found" } }];
+    expect(await auth.secretProvider(secrets).get("JARVIS_GITHUB_TOKEN")).toBeNull();
+    expect(auth.status().pat_fallback).toEqual({ allowed: false, active: false });
   });
 });
