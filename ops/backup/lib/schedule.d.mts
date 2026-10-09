@@ -36,6 +36,9 @@ export declare class ScheduleError extends Error {
   constructor(code: string, message: string);
 }
 export declare function retryDelayMs(failures: number, baseMs: number): number;
-export declare function listCompleteSets(outDir: string): CompleteSet[];
+/** Komplette sett, eldste først. Med `nowMs` hoppes sett datert i fremtiden (klokkeavvik > 5 min) over. */
+export declare function listCompleteSets(outDir: string, options?: { nowMs?: number }): CompleteSet[];
+/** Navn på komplette sett datert i fremtiden (klokkeavvik). */
+export declare function findFutureSets(outDir: string, nowMs: number): string[];
 export declare function buildDefaultDeps(config: ScheduleConfig, env?: NodeJS.ProcessEnv, overrides?: Record<string, unknown>): TickDeps;
 export declare function runTick(config: ScheduleConfig, deps: TickDeps, env?: NodeJS.ProcessEnv): Promise<TickResult>;

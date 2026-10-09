@@ -20,7 +20,7 @@ import { loadScheduleConfig } from "./lib/config.mjs";
 import { ConfigError, envInt, envString } from "./lib/env.mjs";
 import { OffsiteError, createOffsiteSink, prepareSetForOffsite } from "./lib/offsite.mjs";
 import { makeRedactor } from "./lib/redact.mjs";
-import { EXIT, buildDefaultDeps, createLogger, listCompleteSets, runTick } from "./lib/schedule.mjs";
+import { EXIT, buildDefaultDeps, createLogger, findFutureSets, listCompleteSets, runTick } from "./lib/schedule.mjs";
 import { EXPORT_FILE, STATUS_FILE, mergePeerVerifyReport, readPeerVerifyReport, readStatusFile } from "./lib/state.mjs";
 
 class UsageError extends Error {}
@@ -107,7 +107,10 @@ function statusCommand(argv, env, now) {
 
   const { status } = readStatusFile(join(stateDir, STATUS_FILE));
   mergePeerVerifyReport(status, readPeerVerifyReport(stateDir), now);
-  const newest = listCompleteSets(out).at(-1) ?? null;
+  // Review F5: samme klokkeavvik-vern som tikket. Uten `nowMs` ble et sett datert +400 d «nyeste» med alder -9600 t og `ok: true`. Fremtidsdaterte sett teller ikke som nyeste,
+  // og rapporteres som EGEN årsak (de står igjen til eieren fjerner dem: retensjon rører dem ikke).
+  const future = findFutureSets(out, now.getTime());
+  const newest = listCompleteSets(out, { nowMs: now.getTime() }).at(-1) ?? null;
   const reasons = [];
   const codes = new Set();
   const flag = (code, reason) => {
@@ -116,6 +119,7 @@ function statusCommand(argv, env, now) {
   };
 
   const ageH = newest === null ? null : hours(now.getTime() - newest.createdMs);
+  for (const name of future.slice(-3)) flag(EXIT.OVERDUE, `set_dated_in_future:${name}`);
   if (newest === null) flag(EXIT.OVERDUE, "no_complete_backup_set");
   else if (ageH > maxBackupAgeH) flag(EXIT.OVERDUE, `newest_backup_${ageH}h_old_limit_${maxBackupAgeH}h`);
 
@@ -137,7 +141,7 @@ function statusCommand(argv, env, now) {
     ok: exit === EXIT.OK,
     exit_code: exit,
     reasons,
-    backup: { newest_set: newest?.name ?? null, newest_at: newest?.createdAt ?? null, age_hours: ageH, limit_hours: maxBackupAgeH, consecutive_failures: status.backup.consecutive_failures, last_error_code: status.backup.last_error_code },
+    backup: { newest_set: newest?.name ?? null, newest_at: newest?.createdAt ?? null, age_hours: ageH, limit_hours: maxBackupAgeH, future_dated_sets: future, consecutive_failures: status.backup.consecutive_failures, last_error_code: status.backup.last_error_code },
     offsite: { state: o.state, adapter: o.adapter, last_set: o.last_set, last_success_at: o.last_success_at, verification: o.verification, hours_since_success: offsiteAgeH, last_error_code: o.last_error_code },
     restore_verify: {
       state: v.state, last_success_at: v.last_success_at, age_days: verifyAgeD, last_set: v.last_set, duration_s: v.duration_s, fetch_duration_s: v.fetch_duration_s, source: v.source,
@@ -152,6 +156,7 @@ function statusCommand(argv, env, now) {
 
 async function offsiteCheckCommand(argv, env, injected) {
   const flags = parseArgs(argv, SPEC["offsite-check"]);
+  const nowMs = (injected.now ?? (() => new Date()))().getTime();
   const config = loadScheduleConfig({ out: flags.out, "state-dir": flags["state-dir"], roles: "offsite" }, env);
   if (config.offsiteError !== null) {
     print({ configured: true, ok: false, error_code: "offsite_config_invalid", error: makeRedactor(env)(config.offsiteError, 300) });
@@ -163,11 +168,13 @@ async function offsiteCheckCommand(argv, env, injected) {
   }
   const redact = makeRedactor(env);
   const sink = injected.sink ?? createOffsiteSink(config.offsite, { redact, sourceDir: config.out });
-  const newest = listCompleteSets(config.out).at(-1) ?? null;
-  const report = { configured: true, adapter: sink.adapter, target: sink.label, newest_local: newest?.name ?? null, remote_sets: [], newest_in_remote: false, ok: false, verification: null, files: null, bytes: null, error_code: null };
+  // Review F5: fremtidsdaterte sett (klokkeavvik) er aldri «nyeste lokale sett» - og nevnes eksplisitt i stedet for å se ut som «ingen sett».
+  const future = findFutureSets(config.out, nowMs);
+  const newest = listCompleteSets(config.out, { nowMs }).at(-1) ?? null;
+  const report = { configured: true, adapter: sink.adapter, target: sink.label, newest_local: newest?.name ?? null, future_dated_sets: future, remote_sets: [], newest_in_remote: false, ok: false, verification: null, files: null, bytes: null, error_code: null };
   try {
     report.remote_sets = await sink.list();
-    if (newest === null) throw new OffsiteError("offsite_failed", "ingen lokale sett å sammenligne med");
+    if (newest === null) throw new OffsiteError("offsite_failed", future.length > 0 ? "ingen lokale sett å sammenligne med: kun sett datert i fremtiden (klokkeavvik ved backup-tidspunktet?)" : "ingen lokale sett å sammenligne med");
     report.newest_in_remote = report.remote_sets.includes(newest.name);
     const prepared = await prepareSetForOffsite(newest.dir, { ...(env.JARVIS_BACKUP_AGE_RECIPIENT ? { recipient: env.JARVIS_BACKUP_AGE_RECIPIENT } : {}) });
     const result = await sink.verify(prepared);

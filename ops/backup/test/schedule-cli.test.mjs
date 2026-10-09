@@ -92,6 +92,30 @@ describe("WP-C2 schedule.mjs status: overvåkingsvennlige exit-koder", () => {
     expect(r.json.restore_verify).toMatchObject({ state: "ok", reported_by: "external_verifier", duration_s: 120, source: "offsite" });
   });
 
+  it("review F5: et sett datert i FREMTIDEN er aldri «nyeste» - status gir exit 3 med egen årsak (ikke ok:true med negativ alder), også ved siden av et friskt sett", () => {
+    const only = tempDir();
+    const future = makeSet(only, new Date(NOW.getTime() + 400 * 86_400_000));
+    const a = run(["status", "--out", only]);
+    expect(a.status).toBe(3);
+    expect(a.json.ok).toBe(false);
+    expect(a.json.reasons).toEqual([`set_dated_in_future:${future.name}`, "no_complete_backup_set"]);
+    expect(a.json.backup).toMatchObject({ newest_set: null, age_hours: null, future_dated_sets: [future.name] });
+
+    const both = tempDir();
+    const fresh = makeSet(both, hoursAgo(NOW, 3));
+    const skewed = makeSet(both, new Date(NOW.getTime() + 20 * 86_400_000));
+    const b = run(["status", "--out", both]);
+    expect(b.status).toBe(3);
+    expect(b.json.reasons).toEqual([`set_dated_in_future:${skewed.name}`]);
+    expect(b.json.backup).toMatchObject({ newest_set: fresh.name, future_dated_sets: [skewed.name] });
+    expect(b.json.backup.age_hours).toBeGreaterThan(2.9); // alderen er ekte og positiv - ikke -480 t fra fremtidssettet
+
+    // jitter innenfor 5 min regnes ikke som fremtid
+    const jitter = tempDir();
+    makeSet(jitter, new Date(NOW.getTime() + 2 * 60_000));
+    expect(run(["status", "--out", jitter]).json.backup.future_dated_sets).toEqual([]);
+  });
+
   it("ugyldige tall for terskler er en brukerfeil (exit 1)", () => {
     const out = tempDir();
     expect(run(["status", "--out", out, "--max-backup-age-hours", "-5"]).status).toBe(1);
@@ -144,6 +168,16 @@ describe("WP-C2 schedule.mjs: ekte kjøring med lokal off-site-adapter (ekte pro
     const missing = run(["offsite-check", "--out", out], { JARVIS_BACKUP_OFFSITE_LOCAL_DIR: usb, JARVIS_BACKUP_OFFSITE_LOCAL_ALLOW_SAME_DEVICE: "1", JARVIS_BACKUP_AGE_RECIPIENT: RECIPIENT });
     expect(missing.status).toBe(5);
     expect(missing.json.newest_in_remote).toBe(false);
+  });
+
+  it("review F5: offsite-check sammenligner aldri mot et fremtidsdatert sett, og sier det rett ut", () => {
+    const { env } = setup();
+    const onlyFuture = tempDir();
+    const skewed = makeSet(onlyFuture, new Date(NOW.getTime() + 400 * 86_400_000));
+    const r = run(["offsite-check", "--out", onlyFuture], env);
+    expect(r.status).toBe(5);
+    expect(r.json).toMatchObject({ ok: false, newest_local: null, future_dated_sets: [skewed.name] });
+    expect(r.json.error).toContain("kun sett datert i fremtiden");
   });
 
   it("to off-site-adaptere samtidig er en konfig-feil som rapporteres høylytt (exit 5, status `offsite_config_invalid`) - eieren velger ÉN, og ingenting sendes", async () => {
