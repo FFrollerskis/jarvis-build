@@ -202,7 +202,14 @@ check_J02() {
   local code_ok="$HTTP_CODE" status; status="$(resp_get status)"
   printf 'Authorization: Bearer feil-token-feil-token-feil-token-xx\n' > "$WORK/bad.hdr"
   local bad; bad="$(curl -sS --unix-socket "$SOCKET" -H "@$WORK/bad.hdr" -o /dev/null -w '%{http_code}' http://localhost/v1/health 2>/dev/null || echo 000)"
-  if [ "$code_ok" = "200" ] && [ "$status" = "ok" ] && [ "$bad" = "401" ]; then record J02_helse PASS "health 200/ok med riktig token; feil token gir 401"; else record J02_helse FAIL "health=$code_ok status=$status feil-token=$bad"; fi
+  # policyen kan ikke overstyres fra API-et: et ukjent felt (image) og et env-navn utenfor allow-listen (PATH) avvises 400 FØR noe opprettes (ingen jobb, ingen container)
+  api POST /v1/jobs "$(node -e 'process.stdout.write(JSON.stringify({repo:process.argv[1],image:"alpine:latest"}))' "$REPO")"; local field_code="$HTTP_CODE" field_err; field_err="$(resp_get error)"
+  api POST /v1/jobs "$(node -e 'process.stdout.write(JSON.stringify({repo:process.argv[1],env:{PATH:"/evil"}}))' "$REPO")"; local env_code="$HTTP_CODE" env_err; env_err="$(resp_get error)"
+  if [ "$code_ok" = "200" ] && [ "$status" = "ok" ] && [ "$bad" = "401" ] && [ "$field_code $field_err" = "400 unknown_field" ] && [ "$env_code $env_err" = "400 env_name_forbidden" ]; then
+    record J02_helse PASS "health 200/ok med riktig token; feil token gir 401; ukjent felt (image) og env-navn utenfor allow-listen (PATH) avvises 400"
+  else
+    record J02_helse FAIL "health=$code_ok status=$status feil-token=$bad ukjent-felt=$field_code/$field_err env-PATH=$env_code/$env_err"
+  fi
 }
 
 check_J03() {

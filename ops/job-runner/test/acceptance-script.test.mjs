@@ -206,6 +206,14 @@ describe("C: hjelpefunksjonene mot den EKTE vertstjenesten over Unix-socket", ()
     expect(gitSync(h.origins["owner/repo"], ["for-each-ref", "--format=%(refname)"])).toBe("refs/heads/jarvis/accept-test\nrefs/heads/main");
   });
 
+  it("helse-sjekken J02 mot den ekte tjenesten: PASS, og den bekrefter at policyen ikke kan overstyres (ukjent felt og env-navn utenfor allow-listen avvises uten bivirkning)", async () => {
+    const { info: h, config, health } = await setupServed();
+    const r = await sourceAndRun(h, config, "ROWS=(); check_J02 | sed 's/^/J02: /'");
+    expect(r.stdout).toMatch(/J02: J02_helse\s+PASS/);
+    expect(r.stdout).toContain("ukjent felt (image) og env-navn utenfor allow-listen (PATH) avvises 400");
+    expect((await health()).json.active_jobs).toBe(0);
+  });
+
   it("filrettighets-sjekken J01 oppdager åpne moduser (PAT/token/config/socket) og godtar riktige", async () => {
     const { info: h, config } = await setupServed();
     await chmod(h.tokenFile, 0o644);

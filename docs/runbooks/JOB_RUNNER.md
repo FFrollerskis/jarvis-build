@@ -212,7 +212,7 @@ Sjekkene (samme ID-er som i `acceptance.sh`; `--dry-run` skriver dem):
 | Sjekk | Viser | Krever |
 |---|---|---|
 | `J01_filrettigheter` | config root-eid; token/PAT uten tilgang for andre; socket `0660`; kataloger private | root |
-| `J02_helse` | API svarer med riktig token; feil token gir 401 | - |
+| `J02_helse` | API svarer med riktig token; feil token gir 401; et ukjent felt (`image`) og et env-navn utenfor allow-listen (`PATH`) avvises 400 før noe opprettes | - |
 | `J03_container_per_jobb` | to jobber = to separate, kjørende containere merket `jarvis.role=job`; borte etter DELETE | docker |
 | `J04_docker_inspect` | `privileged=false`, read-only rootfs, `cap-drop ALL`, `no-new-privileges`, ikke-root, minne/CPU/PID, kun jobbnettverket, kun `/work` montert, ingen `docker.sock`, ingen forbudte env | docker |
 | `J05_inne_i_containeren` | uid, `CapEff=0`, ingen `docker.sock`, read-only rootfs, `noexec` tmpfs, ingen vertsmapper/hemmelighets-env, ingen git-remote/credential | docker |
