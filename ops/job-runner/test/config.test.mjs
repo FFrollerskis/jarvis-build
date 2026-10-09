@@ -89,6 +89,12 @@ describe("C: runner-policy valideres fail-closed", () => {
     expect(code(() => parse({ ...runner(), image: `jarvis-job@sha256:${"c".repeat(64)}` }))).toBe("no_error");
   });
 
+  it("den nullede plassholder-image-ID-en fra eksempelkonfigen avvises (en uendret kopi kan aldri starte tjenesten)", () => {
+    for (const image of [`sha256:${"0".repeat(64)}`, `jarvis-job@sha256:${"0".repeat(64)}`]) {
+      expect(code(() => parse({ ...runner(), image })), image).toBe("config_invalid:runner.image:placeholder_not_replaced");
+    }
+  });
+
   it("nettverk må være dedikert (aldri host/bridge/none/default)", () => {
     for (const network of ["host", "bridge", "none", "default", "A B"]) expect(code(() => parse({ ...runner(), network })), network).toContain("config_invalid");
   });

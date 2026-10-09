@@ -156,6 +156,8 @@ function parseRunner(raw) {
     if (error instanceof JobContainerConfigError) throw new ConfigError("config_invalid", `runner.policy:${error.reason}`);
     throw error;
   }
+  // Eksempelkonfigen har en nullet plassholder-image-ID: en uendret kopi skal aldri kunne starte tjenesten (feil lukket, med tydelig årsak).
+  if (/(?:^|@)sha256:0{64}$/.test(policy.image)) throw new ConfigError("config_invalid", "runner.image:placeholder_not_replaced");
   // Den vertsside runneren kan ikke fungere med en HTTPS-proxy-URL uten vert-literal: containeren har ingen DNS på det interne nettet.
   const proxyUrl = new URL(policy.egressProxyUrl);
   if (isIP(proxyUrl.hostname.replace(/^\[|\]$/g, "")) === 0) {
