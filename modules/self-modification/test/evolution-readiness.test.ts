@@ -75,3 +75,56 @@ describe("parseDeclaredGates", () => {
     expect(parseDeclaredGates("").size).toBe(0);
   });
 });
+
+/**
+ * M2 (gjennomgang av PR #313): readiness for sovende deler kan ALDRI si «klar» når et innsignal er ukjent. Et målt innsignal som ikke kunne måles er `null`; kravet som hviler på det er ikke oppfylt og står i
+ * `missing` med `unknown: true`. (Før rettelsen kunne en kill switch som ikke lot seg lese gi `change_freeze_off: true` og «klar for en navngitt D-beslutning».)
+ */
+describe("evaluateReadiness: ukjente innsignal", () => {
+  const MEASURED = ["constitution_verified", "ledger_ok", "change_freeze_off", "proven_connectors"] as const;
+  const readyFacts = (over: Partial<ReadinessFacts> = {}): ReadinessFacts => facts({ proven_connectors: 5, job_runner_configured: true, declared_gates: allGates, ...over });
+
+  it("hvert målt innsignal som er ukjent (null, undefined eller feil type) hindrer ALLE deler som hviler på det i å bli klare - og activation_decision er fortsatt false", () => {
+    for (const key of MEASURED) {
+      for (const unknown of [null, undefined, "ja", Number.NaN]) {
+        const verdicts = evaluateAllReadiness(readyFacts({ [key]: unknown } as Partial<ReadinessFacts>));
+        for (const v of verdicts) {
+          expect(v.activation_decision, `${key}=${String(unknown)} ${v.ev}`).toBe(false);
+          const dependsOn = READINESS[v.ev].requirements.some((r) => r.needs?.includes(key));
+          if (dependsOn) {
+            expect(v.ready_for_owner_decision, `${key}=${String(unknown)} ${v.ev}`).toBe(false);
+            expect(v.unknown_signals, `${key}=${String(unknown)} ${v.ev}`).toContain(key);
+            expect(v.missing.some((m) => m.unknown), `${key}=${String(unknown)} ${v.ev}`).toBe(true);
+          } else {
+            expect(v.ready_for_owner_decision, `${key}=${String(unknown)} ${v.ev} (hviler ikke på ${key})`).toBe(true);
+          }
+        }
+      }
+    }
+  });
+
+  it("de tre grunnkravene gjelder ALLE deler: ukjent konstitusjon, register eller frys gjør hele rekken uklar; ukjent connector-tall rammer kun EV-18", () => {
+    for (const key of ["constitution_verified", "ledger_ok", "change_freeze_off"] as const) {
+      for (const v of evaluateAllReadiness(readyFacts({ [key]: null }))) expect(v.ready_for_owner_decision, `${key} ${v.ev}`).toBe(false);
+    }
+    const noConnectorCount = evaluateAllReadiness(readyFacts({ proven_connectors: null }));
+    expect(noConnectorCount.filter((v) => !v.ready_for_owner_decision).map((v) => v.ev)).toEqual(["EV-18"]);
+  });
+
+  it("ukjent er noe annet enn «målt og ikke oppfylt»: false/0 gir unknown: false, null gir unknown: true", () => {
+    const measuredBad = evaluateReadiness("EV-18", readyFacts({ proven_connectors: 0, change_freeze_off: false }));
+    expect(measuredBad.missing.map((m) => [m.id, m.unknown])).toEqual([["change_freeze_off", false], ["proven_connectors>=3", false]]);
+    expect(measuredBad.unknown_signals).toEqual([]);
+    const unknown = evaluateReadiness("EV-18", readyFacts({ proven_connectors: null, change_freeze_off: null }));
+    expect(unknown.missing.map((m) => [m.id, m.unknown])).toEqual([["change_freeze_off", true], ["proven_connectors>=3", true]]);
+    expect([...unknown.unknown_signals].sort()).toEqual(["change_freeze_off", "proven_connectors"]);
+  });
+
+  it("alle innsignal kjent og oppfylt gir klar uten ukjente - og aldri aktivering", () => {
+    for (const v of evaluateAllReadiness(readyFacts())) {
+      expect(v.ready_for_owner_decision, v.ev).toBe(true);
+      expect(v.unknown_signals, v.ev).toEqual([]);
+      expect(v.activation_decision, v.ev).toBe(false);
+    }
+  });
+});

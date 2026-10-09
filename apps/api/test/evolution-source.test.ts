@@ -42,19 +42,23 @@ const mesh = (over: Partial<MeshStatus> = {}, providers: MeshStatus["providers"]
 ]): MeshStatus => ({ providers, router: "HEALTHY", fallback: "READY", critic: "READY_SELECTIVE", ...over });
 const connector = (id: string, configured: boolean, health: ConnectorStatus["health"] = null): ConnectorStatus =>
   ({ id, display_name: id, category: "integration" as never, configured, credentials: [], test_method: "presence_only", health });
+/** Standardverdenen er FRISK og fullt lesbar (M2: tomme svar er ikke «frisk» lenger): registeret har innhold, jobbene har kjørt, omregningen av sensitivitet har kjørt. */
+const cleanDrift: ResensitizeSweepSummary = { mode: "report", scanned: 10, raised: { sensitive: 0, special: 0 }, written: 0, skipped_concurrent: 0, failed: [], truncated: false };
+const healthyJobRow = { job_name: "daily-brief", run_date: "2026-10-15", attempts: 1, completed_at: NOW.toISOString(), retry_after: null, last_error: null, past_day: false, claim_stale: false };
 
 function deps(over: Partial<EvolutionSourceDeps> & { handlers?: Handler[] } = {}): EvolutionSourceDeps {
   const { handlers, ...rest } = over;
   return {
-    pool: fakePool(handlers ?? []),
+    pool: fakePool([...(handlers ?? []), [/DISTINCT ON \(job_name\)/, () => [healthyJobRow]]]),
     tenantId: "t1",
     now: () => NOW,
     env: {},
     ev0Status: () => verified,
     slo: async () => okSlo(),
-    connectors: async () => [],
+    connectors: async () => [connector("github", true, { state: "healthy", at: NOW.toISOString() })],
     killSwitchActive: async () => false,
     mesh: () => mesh(),
+    resensitize: () => cleanDrift,
     ...rest
   };
 }
@@ -85,14 +89,18 @@ describe("EV-0/EV-8: endringsgrenser og frys", () => {
     expect(text).toContain("Change freeze er PÅ");
     for (const reason of ["kill_switch_active", "incident_open", "slo_breached"]) expect(text).toContain(reason);
     const unknown = await boundariesSection(ctxOf(deps({ ev0Status: () => null, handlers: [[/FROM incidents/, () => [{ n: 0 }]]] })));
-    expect(unknown.findings.join("\n")).toContain("har ikke kjørt (ukjent)");
+    expect(unknown.findings.join("\n")).toContain("kunne ikke leses (ukjent)");
+    expect(unknown.status).toBe("UNKNOWN");
   });
 
   it("SLO-rapporten utilgjengelig → observerbarhet mangler, som gir frys (aldri «OK» uten måling); hendelser som ikke kan telles sies", async () => {
     const s = await boundariesSection(ctxOf(deps({ slo: async () => { throw new Error("nede"); }, pool: { query: async () => ({ rows: [] }), connect: async () => { throw new Error("db nede"); } } as never })));
     expect(s.findings.join("\n")).toContain("observability_missing");
     expect(s.findings.join("\n")).toContain("Åpne hendelser kunne ikke telles");
-    expect(s.status).toBe("ATTENTION");
+    // Ingenting KJENT står i veien, men freeze kan ikke utelukkes: UNKNOWN (aldri OK), og oppsummeringen sier hva som ikke kunne måles.
+    expect(s.status).toBe("UNKNOWN");
+    expect(s.summary_no).toContain("tjenestemål (SLO)");
+    expect(s.summary_no).toContain("åpne hendelser");
   });
 });
 
@@ -394,9 +402,16 @@ describe("EV-10: minnevedlikehold", () => {
     const summary = (over: Partial<ResensitizeSweepSummary>): ResensitizeSweepSummary => ({ mode: "report", scanned: 40, raised: { sensitive: 2, special: 1 }, written: 0, skipped_concurrent: 0, failed: [], truncated: false, ...over });
     const ctxWith = (resensitize: (() => ResensitizeSweepSummary | null) | undefined) => ctxOf(deps({ handlers: [[/FROM memory_items i JOIN memory_sources/, () => rows]], ...(resensitize ? { resensitize } : {}) }));
 
-    const unknown = await memorySection(ctxWith(undefined));
-    expect(unknown.status).toBe("OK");
-    expect(unknown.findings.join("\n")).toContain("har ikke kjørt siden oppstart");
+    // Ukjent drift er IKKE OK (M2): tallet er en del av det seksjonen påstår å måle. Gjelder både «ikke kjørt ennå» (null) og en leser som kaster.
+    for (const unknownDrift of [() => null, () => { throw new Error("leser nede"); }]) {
+      const unknown = await memorySection(ctxWith(unknownDrift));
+      expect(unknown.status).toBe("UNKNOWN");
+      expect(unknown.summary_no).toContain("sensitivitetsdriften er ikke målt");
+      expect(unknown.findings.join("\n")).toContain("har ikke kjørt siden oppstart");
+    }
+    // Ukjent drift skjuler ikke et KJENT funn: ATTENTION vinner over UNKNOWN.
+    const knownProblem = await memorySection(ctxOf(deps({ handlers: [[/FROM memory_items i JOIN memory_sources/, () => [row({ id: "m1" }), row({ id: "m2" })]]], resensitize: () => null })));
+    expect(knownProblem.status).toBe("ATTENTION");
 
     const pending = await memorySection(ctxWith(() => summary({})));
     expect(pending.status).toBe("ATTENTION");

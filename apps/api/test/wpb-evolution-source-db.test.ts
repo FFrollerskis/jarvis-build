@@ -8,7 +8,9 @@ import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { ChangeLedger } from "@jarvis/self-modification";
 import type { SloReport } from "@jarvis/executive";
+import type { ResensitizeSweepSummary } from "@jarvis/memory";
 import type { MeshStatus } from "@jarvis/model-gateway";
+import type { ConnectorStatus } from "@jarvis/tool-gateway";
 import { boundariesSection, buildEvolutionReport, costSection, maintenanceSection, memorySection, proposalsSection, type EvolutionContext, type EvolutionSourceDeps } from "../src/evolution-source.ts";
 
 /**
@@ -40,6 +42,8 @@ beforeAll(async () => {
   await admin.query(`INSERT INTO cost_events (at, tenant_id, kind, amount_ore, provider, model) VALUES ($1,'tenant-annen','model',999999,'anthropic','claude')`, ["2026-10-15T09:00:00.000Z"]);
   // Planlagte jobber: connector-helse kjørt for 3 timer siden; daglig brief aldri.
   await admin.query(`INSERT INTO scheduler_state (job_name, run_date, claimed_by, completed_at) VALUES ('connector-health-sweep', '2026-10-15', 'test', $1)`, [new Date(NOW.getTime() - 3 * 3_600_000).toISOString()]);
+  // EV-9 leser jobbhelsen med DATABASENS klokke (`now()`), ikke fixturens: en rad for «i dag» sørger for at jobbhelsen er lesbar uansett når testen kjører (ingen tidsbombe). Jobben er ikke koblet til EV-19.
+  await admin.query(`INSERT INTO scheduler_state (job_name, run_date, claimed_by, completed_at) VALUES ('wpb-fixture-job', (now() AT TIME ZONE 'Europe/Oslo')::date, 'test', now())`);
   // Hendelse: én åpen i prosjekt-rommet for denne tenanten, én løst, og én åpen hos en annen tenant.
   await admin.query(`INSERT INTO incidents (incident_id, tenant_id, memory_space_id, title, status) VALUES ('i1','${T}','project','Åpen','open'), ('i2','${T}','project','Løst','resolved'), ('i3','tenant-annen','project','Annens','open')`);
   // Endringsregister: ett forslag som venter, ett avvist (blocked).
@@ -71,13 +75,19 @@ afterAll(async () => {
   await stop?.();
 }, 120_000);
 
-const slo: SloReport = { as_of: NOW.toISOString(), slos: [], not_measured: [], drift: null, data_quality: null, summary_no: "" };
+// M2: en tom SLO-liste har ikke målt noe (observerbarhet mangler), så fixturen har ett ekte tjenestemål. Samme for connector-registeret og omregningen av sensitivitet.
+const slo: SloReport = {
+  as_of: NOW.toISOString(), not_measured: [], drift: null, data_quality: null, summary_no: "",
+  slos: [{ id: "chat-success", label: "Chat", status: "OK", value: 1, target: 0.9, metric: "success_rate", samples: 50, window_hours: 24, source: "x", observed_at: NOW.toISOString(), detail: "d" }]
+};
+const github: ConnectorStatus = { id: "github", display_name: "github", category: "integration" as never, configured: true, credentials: [], test_method: "presence_only", health: { state: "healthy", at: NOW.toISOString() } };
+const drift: ResensitizeSweepSummary = { mode: "report", scanned: 4, raised: { sensitive: 0, special: 0 }, written: 0, skipped_concurrent: 0, failed: [], truncated: false };
 const mesh: MeshStatus = { providers: [{ provider: "gemma_local", model: "g", state: "LIVE", success: 1, failures: 0 }], router: "HEALTHY", fallback: "LOGIC_ONLY", critic: "READY_SELECTIVE" };
 function deps(over: Partial<EvolutionSourceDeps> = {}): EvolutionSourceDeps {
   return {
     pool: app, tenantId: T, now: () => NOW, env: {},
     ev0Status: () => ({ constitution: { status: "not_verified", code: "constitution_unsigned" }, ledger: { status: "ok", count: 2, head_hash: "h" } }),
-    slo: async () => slo, connectors: async () => [], killSwitchActive: async () => false, mesh: () => mesh, ...over
+    slo: async () => slo, connectors: async () => [github], killSwitchActive: async () => false, mesh: () => mesh, resensitize: () => drift, ...over
   };
 }
 const ctx = (d: EvolutionSourceDeps): EvolutionContext => ({ pool: d.pool, tenantId: d.tenantId, now: NOW, env: d.env ?? {}, deps: d });
