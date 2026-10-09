@@ -182,9 +182,11 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
     // gjeldende flaggskip med 1M-token kontekst (uendret fra 256k-antakelsen).
     provider: "kimi",
     model: "kimi-k3",
-    // D-393 (JARVIS-036): `KimiAdapter` sender kun tekst (ingen `tools`/`tool_calls`-støtte) - registeret påstår ikke mer enn adapteren kan.
-    // Å påstå `tool_calling` ga verktøykall som ble stille droppet og jobber merket som vellykkede. Gjeninnføres når adapteren faktisk støtter det.
-    capabilities: ["text", "reasoning"],
+    // D-393 (JARVIS-036): registeret påstår ikke mer enn adapteren kan - å påstå `tool_calling` før adapteren sendte `tools` ga verktøykall som ble stille droppet og jobber merket som
+    // vellykkede. WP-D4: `KimiAdapter` har nå OpenAI-kompatible `tools`/`tool_calls` (streng parsing, `invalid_tool_call` ved ugyldig kall) OG ekte SSE-streaming, bevist mot fake server
+    // (`packages/provider-adapters/test/kimi-tools.test.ts`) og gjennom en ekte `ModelGateway`-løkke (`modules/model-gateway/test/wpd4-kimi-hermes-tools.test.ts`), så `tool_calling` og
+    // `streaming` påstås nå. IKKE live-verifisert mot Moonshot (ingen nøkkel/nettverk i bygg-miljøet) - eieren kjører `mesh-live-smoke.ts --tools`. `structured_output` påstås fortsatt IKKE.
+    capabilities: ["text", "reasoning", "tool_calling", "streaming"],
     context_tokens: 1_000_000,
     locality: "cloud",
     cost_class: 2,
@@ -203,9 +205,11 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
     // denne økten) inntil faktisk bruk/evaluering foreligger.
     provider: "hermes",
     model: "Hermes-4-70B",
-    // D-393 (JARVIS-036): `HermesAdapter` sender kun tekst (ingen `tools`, ingen `response_format`) - ærlig registry (D-80): modellen KAN
-    // verktøy/JSON, men adapteren eksponerer det ikke, og routeren velger på adapterens evne.
-    capabilities: ["text", "reasoning"],
+    // D-393 (JARVIS-036): `HermesAdapter` sendte kun tekst (ingen `tools`, ingen `response_format`) - ærlig registry (D-80): modellen KAN verktøy/JSON, men routeren velger på adapterens evne.
+    // WP-D4: adapteren har nå verktøykall via Hermes' eget prompt-protokoll (`<tools>`/`<tool_call>`, streng deterministisk parser, ukjent verktøy/ugyldig JSON ⇒ `invalid_tool_call`;
+    // `hermes-tools.ts`), bevist mot fake server (`hermes-tools.test.ts`) og gjennom en ekte `ModelGateway`-løkke, så `tool_calling` påstås. IKKE live-verifisert mot Nous' API.
+    // `streaming` påstås BEVISST ikke (taggene måtte filtreres ut av en løpende strøm - ikke bygget) og `structured_output` heller ikke (ingen `response_format` i adapteren).
+    capabilities: ["text", "reasoning", "tool_calling"],
     context_tokens: 131_072,
     locality: "cloud",
     cost_class: 1,

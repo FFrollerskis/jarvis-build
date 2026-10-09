@@ -43,6 +43,12 @@ export interface ToolCallRequest {
   arguments: Record<string, unknown>;
   provider: string;
   model: string;
+  /**
+   * JARVIS-036 (WP-D4): adapter-privat, ugjennomsiktig tilstand som KUN samme leverandørs adapter leser tilbake når runden spilles av på nytt i neste verktøyrunde
+   * (Kimi: `reasoning_content` - tenkemodeller avviser en oppfølgingsrunde der resonneringen fra verktøykall-meldingen mangler). Vises aldri for eieren, logges aldri
+   * og sendes aldri til en annen leverandør (alle andre adaptere ignorerer feltet). Trusted lag (executor/gateway) leser den ikke.
+   */
+  provider_state?: { readonly reasoning_content?: string };
 }
 
 /** Normalisert verktøyresultat tilbake til modellen. Aldri credentials/intern metadata. */

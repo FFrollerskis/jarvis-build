@@ -54,10 +54,10 @@ describe("stream(): SECRET_RESTRICTED uten native streaming (D-379)", () => {
     expect(calls).toEqual([]);
   });
 
-  it("andre sensitiviteter krever fortsatt native streaming (uendret): en provider uten streaming i registeret (kimi) er ikke kvalifisert", async () => {
-    // D-404: gemma_local har nå ekte .stream() og `streaming` i registeret; kimi er en provider som fortsatt mangler det.
+  it("andre sensitiviteter krever fortsatt native streaming (uendret): en provider uten streaming i registeret (hermes) er ikke kvalifisert", async () => {
+    // D-404: gemma_local har nå ekte .stream() og `streaming` i registeret; WP-D4: det har kimi også (ekte SSE) - hermes er en provider som fortsatt mangler det.
     const calls: string[] = [];
-    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [adapter("kimi", calls)] });
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [adapter("hermes", calls)] });
     await expect(
       gateway.stream({ tenant_id: "t", purpose: "CHAT", sensitivity: "PRIVATE", request: REQUEST }, () => undefined)
     ).rejects.toBeInstanceOf(NoEligibleProviderError);
