@@ -106,6 +106,7 @@ export function apiRequest(socketPath, req = {}) {
  *   origins?: Record<string, { commits?: number, files?: Record<string, string> }>,
  *   now?: () => number,
  *   credentials?: import("../../lib/credentials.mjs").GitCredentialSource,
+ *   dockerExec?: import("../../lib/docker.mjs").DockerExec,
  *   tokenTimeoutMs?: number,
  *   beforeStart?: (ctx: { root: string, baseDir: string, fake: ReturnType<typeof createFakeDocker> }) => Promise<void> | void,
  *   autoStart?: boolean
@@ -156,7 +157,7 @@ export async function createHarness(options = {}) {
   const logger = createLogger({ registry, write: (line) => logLines.push(line) });
   const service = await createRunnerService({
     config: /** @type {NonNullable<typeof validated.runner>} */ (validated.runner),
-    dockerExec: fake.exec,
+    dockerExec: options.dockerExec ?? fake.exec,
     logger,
     ...(options.credentials ? { credentials: options.credentials } : {}),
     testOverrides: {
