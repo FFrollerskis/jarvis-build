@@ -283,6 +283,11 @@ const RUN_RATE_MUTATE_ACTIONS = ["record_connector_maintenance"] as const;
  * autoritet som `/runrate/query`; tenanten kommer fra det løste grantet (aldri fra body), og kallet går via `ToolGateway.execute()` (policy + revisjon).
  */
 const VALUE_QUERY_ACTIONS = ["get_value_report"] as const;
+/**
+ * WP-E1 (UA-5, JARVIS-068): driftsstatus (åpne hendelser, skymål, produsenthelse). EGEN lese-rute med EGET hardkodet allowlist - `/executive/query` forblir uendret og lese-kun (en test låser den til fire handlinger).
+ * Kun `get_infra_status`; verktøyskjemaet har ingen parametre, så ingenting fra kroppen (tenant/person/rom) videresendes.
+ */
+const INFRA_OVERVIEW_ACTIONS = ["get_infra_status"] as const;
 
 /**
  * D-230 (K2 governance-dashboard): `@jarvis/governance` (migrasjon 059) var
@@ -1045,6 +1050,22 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
     }
     // Verktøyskjemaet er strengt og uten felt: `parameters` fra kroppen sendes bevisst ALDRI videre.
+    const result = await deps.executive.gateway.execute({ identity: resolved.identity, tool_id: "executive", action, parameters: {} });
+    if (!result.ok) return json(res, 403, { error: "tool_denied", reason: result.reason });
+    return json(res, 200, { ok: true, data: result.data });
+  }
+
+  if (deps.executive && req.method === "POST" && url.pathname === "/infra/overview") {
+    const raw: unknown = await readBodyOrUndefined(req);
+    const parsedBody = grantBodyOrReject(res, raw, EXECUTIVE_QUERY_BODY_KEYS);
+    if (!parsedBody) return;
+    const action = typeof parsedBody["action"] === "string" ? parsedBody["action"] : "get_infra_status";
+    if (!(INFRA_OVERVIEW_ACTIONS as readonly string[]).includes(action)) return json(res, 400, { error: "malformed_request", reason: "action_not_allowed" });
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
+    if (!resolved.ok) {
+      if (resolved.responded) return;
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+    }
     const result = await deps.executive.gateway.execute({ identity: resolved.identity, tool_id: "executive", action, parameters: {} });
     if (!result.ok) return json(res, 403, { error: "tool_denied", reason: result.reason });
     return json(res, 200, { ok: true, data: result.data });

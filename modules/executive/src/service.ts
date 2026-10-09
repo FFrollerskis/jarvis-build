@@ -6,6 +6,7 @@ import {
   type ValueMeasurementSource, type ValueMeasurement, type ValueReport, type ValueRuntimeFacts, type ValueWindows
 } from "./value/index.ts";
 import { buildLimitationRegistry, composeSelfDiagnosis, type LimitationInput, type ObservationReader, type SelfDiagnosis } from "./self-model/index.ts";
+import { INFRA_TARGETS, composeInfraStatus, type InfraStatusReport, type InfraStatusSource, type InfraTargetFacts } from "./infra/index.ts";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import type { FinanceKillSwitch } from "@jarvis/finance";
 import type { OwnerControlState } from "@jarvis/owner-controls";
@@ -106,6 +107,11 @@ export interface ExecutiveServiceOptions {
    * `not_measurable` (aldri 0) og løkke-statusene `unknown`.
    */
   value?: { source: ValueMeasurementSource; facts: () => Promise<ValueRuntimeFacts> | ValueRuntimeFacts };
+  /**
+   * WP-E1 (UA-5, JARVIS-068): driftsstatus - åpne hendelser, skymål og produsentenes helse. `source` leser databasen (under RLS, kun tall/titler/pekere - aldri bevistekst); `producers_enabled`/`producer_names`/
+   * `producers_interval_ms` kommer fra kjøretidskonfig; `mode` er den delte infra-modusen (NORMAL/DEGRADED/PAUSED). Uten `infra` er hendelser og endringer `not_measured` (aldri 0).
+   */
+  infra?: { source: InfraStatusSource; producers_enabled: boolean; producer_names: readonly string[]; producers_interval_ms: number; mode?: () => Promise<string | null> };
 }
 
 export class ExecutiveService {
@@ -452,6 +458,34 @@ export class ExecutiveService {
     return composeValueReport({
       as_of: asOf, windows, measurements, ...(sourceError !== undefined ? { source_error_no: sourceError } : {}),
       loops: describeValueLoops(facts), builder_loop: builder, ops_proposals: ops
+    });
+  }
+
+  /**
+   * WP-E1 (UA-5, JARVIS-068): driftsstatus - åpne hendelser (fase, alvorlighet, sannhetsmerking, siste endring), de kontrollerte skymålene (Cloudflare/Vercel/GCP/Docker/Langfuse/Infisical/Postgres: helse + siste
+   * journalførte endring) og hendelsesprodusentenes helse. RENT lesende: ingen nøstede `execute()`-kall, ingen hvelv-VERDIER (kun `hasSecret()`-presence), intet hendelsesinnhold. `tenantId` kommer fra den
+   * betrodde konteksten (transporten), aldri fra parametre. Hver del feiler for seg: en kilde som svikter gir `not_measured`, aldri et påstått «alt er bra» og aldri en kastet feil.
+   */
+  async getInfraStatus(tenantId: string): Promise<InfraStatusReport> {
+    const infra = this.options.infra;
+    const registered = this.gateway.list();
+    const targets: InfraTargetFacts[] = await Promise.all(
+      INFRA_TARGETS.map(async (def): Promise<InfraTargetFacts> => {
+        const defs = registered.filter((d) => d.tool_id === def.tool_id);
+        if (defs.length === 0) return { tool_id: def.tool_id, registered: false, configured: false, health: null };
+        const refs = [...new Set(defs.map((d) => d.credential_ref))];
+        const configured = await Promise.all(refs.map((ref) => this.gateway.hasSecret(ref))).then((all) => all.every(Boolean), () => null);
+        const h = this.gateway.health.get(def.tool_id);
+        return { tool_id: def.tool_id, registered: true, configured, health: h ? { state: h.state, at: h.at } : null };
+      })
+    );
+    const measurements = infra === undefined
+      ? { error: "ingen kilde koblet inn" }
+      : await infra.source.measure(tenantId).then((m) => m, () => ({ error: "målingen feilet" }));
+    const infraMode = infra?.mode ? await infra.mode().then((m) => m, () => null) : null;
+    return composeInfraStatus({
+      as_of: new Date(), targets, measurements, producers_enabled: infra?.producers_enabled ?? false, producers_interval_ms: infra?.producers_interval_ms ?? 300_000,
+      producer_names: infra?.producer_names ?? [], infra_mode: infraMode
     });
   }
 

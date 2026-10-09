@@ -88,6 +88,11 @@ export class ExecutiveTransport implements ToolTransport {
         const report = await this.service.getValueReport(identity.tenant_id);
         return { data: report as unknown as JsonValue };
       }
+      case "get_infra_status": {
+        // WP-E1: tenanten kommer UTELUKKENDE fra den betrodde kontekst-identiteten (D-68), aldri fra parametre.
+        const report = await this.service.getInfraStatus(identity.tenant_id);
+        return { data: report as unknown as JsonValue };
+      }
       case "get_connector_status": {
         const status = await this.service.getConnectorStatus();
         return { data: { ...status, summary_no: summarizeConnectorStatusNo(status.connectors) } as unknown as JsonValue };
@@ -242,6 +247,10 @@ export function executiveToolDefinitions(transport: ExecutiveTransport): ToolDef
     read(
       "get_value_report",
       "Svar på «hva har du hjulpet meg med?»/«hvor mye bruker jeg deg?»/«hva er verdien?» fra EKTE tall (kun antall og tidspunkt - aldri innhold): bruk per verdiløkke (Daily Brief, oppfølging, jobber, samtaler, bekreftelser, kost) siste 7 og 30 døgn, pluss status for de sovende løkkene (Builder Loop-beredskap og driftsforslag). Det som ikke kan måles står som «ikke målbart», aldri som 0. Gjengi summary_no."
+    ),
+    read(
+      "get_infra_status",
+      "Svar på «hva er status på driften?»/«er noe nede?»/«har vi åpne hendelser?»/«hvordan går det med skyen?» fra EKTE data: åpne hendelser (fase åpen/anerkjent/avbøtende, alvorlighet, hvor mye som er bekreftet vs. observert vs. påstått, siste endring), de tilkoblede skymålene (Cloudflare, Vercel, Google Cloud, Docker, Langfuse, Infisical, Postgres) med helse og siste journalførte endring, og om hendelsesprodusentene selv kjører. Ingen hemmeligheter eller hendelsestekst. Sier ifra når automatisk oppdagelse er AV (da betyr «ingen hendelser» kun «ingen registrert manuelt»). Ukjent vises som ukjent. Gjengi summary_no."
     ),
     read(
       "get_connector_status",

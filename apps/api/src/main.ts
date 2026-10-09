@@ -33,7 +33,7 @@ import {
   writeAudit
 } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
-import { DeploymentService, DiagnosisService, IncidentService } from "@jarvis/incidents";
+import { DeploymentService, DiagnosisService, INCIDENT_PRODUCER_NAMES, IncidentService } from "@jarvis/incidents";
 import {
   AiCouncil,
   DEFAULT_PROFILES,
@@ -122,6 +122,7 @@ import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
 import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
 import { parseIncidentProducerConfig, startApiIncidentProducers } from "./incident-producers.ts";
+import { createInfraStatusSource } from "./infra-status-source.ts";
 import { createRadarState } from "./evolution-radar.ts";
 import { createEvolutionReportProvider } from "./evolution-source.ts";
 import { startFollowUpPush } from "./follow-up-push.ts";
@@ -144,6 +145,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   assertRuntimeCredentialsConfigured();
   // Remediering del 2 (JARVIS-065): ÉN validert eier-identitet for hele prosessen (fail closed uten).
   const owner = ownerConfigOrExit();
+  // WP-E1 (UA-5, JARVIS-068): incident-produsentene (AV som standard) - parses tidlig, fordi driftsstatus-verktøyet (`executive.get_infra_status`) og produsent-løkka begge leser den.
+  const incidentProducerConfig = parseIncidentProducerConfig(process.env);
   process.env["JARVIS_PROCESS"] ??= "api"; // D-394 (JARVIS-054): audit-rader merkes med hvilken prosess som skrev dem
   const pool = createPool(configFromEnv());
   // Migrasjoner kjøres av admin-bruker i drift (compose: `migrate`-tjenesten); her antas app-bruker å ha skjema fra før.
@@ -987,6 +990,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         // WP-C3 (Q-45 b): autentiseringsmetode (pat/app, installasjons-id, utløp, repo-scope, rettigheter) i get_connector_status - aldri tokenverdier.
         connectorAuth: (connectorId) => (connectorId === "github" ? githubAuth.connectorAuthInfo() : undefined),
         evolution: { report: evolutionReports },
+        // WP-E1 (UA-5, JARVIS-068): driftsstatus - åpne hendelser (fase/alvorlighet/sannhetsmerking), skymål (helse + siste journalførte endring) og produsentenes helse. Kun lesing under RLS, ingen hemmeligheter.
+        infra: {
+          source: createInfraStatusSource(pool), producers_enabled: incidentProducerConfig.enabled, producers_interval_ms: incidentProducerConfig.intervalMs,
+          producer_names: INCIDENT_PRODUCER_NAMES, mode: async () => (await infraGate.statusDurable()).state.mode
+        },
         // WP-C4: Value Center - kilde (aggregater under RLS) + kjøretidsfakta (flagg, EV-0, kill switch, erklærte porter). Ingen innhold, ingen skriving; V3/V5 er sovende og kan aldri aktiveres herfra.
         value: {
           source: valueSource,
@@ -1743,7 +1751,6 @@ porter: se docs/RUNTIME_GATES.md`;
   });
   // WP-E1 (UA-5, JARVIS-068): deterministiske incident-produsenter - bakgrunnsjobber som gir opp, feilede utrullinger, brutte tjenestemål, sviktende tilkoblinger, mislykkede infra-handlinger og
   // Sentry-feil blir hendelser. KUN observasjon + registrering i Jarvis' egen database (ingen reparasjon, intet eksternt skriv). AV som standard (`JARVIS_INCIDENT_PRODUCERS_ENABLED=true`).
-  const incidentProducerConfig = parseIncidentProducerConfig(process.env);
   if (incidentProducerConfig.enabled) {
     startApiIncidentProducers({
       pool, gateway: toolGateway, identity: ownerIdentity, deployments: deploymentService, sloReport: sloReports,
