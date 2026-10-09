@@ -112,6 +112,23 @@ describe("getValueReport", () => {
     expect(await run({ githubConfigured: false })).toMatchObject({ met: false, unknown: false });
   });
 
+  it("tilkoblingsstatus som ikke kan leses gir ukjent GitHub-krav (null), ikke «ikke konfigurert»", async () => {
+    const broken = { list: () => [], hasSecret: async () => { throw new Error("hvelv nede"); }, health: new Map() } as unknown as ToolGateway;
+    const r = await service({ gw: broken, measurements: [measured("ops.incidents_open_now", 0)], slo: slo(["OK"]) }).svc.getValueReport("tenant-A");
+    expect(r.builder_loop.requirements.find((q) => q.id === "github_connector_healthy")).toMatchObject({ met: false, unknown: true });
+  });
+
+  it("kostnadsgrense: uten V5 slås KUN GitHubs credential-referanser opp i hvelvet (ikke hele connector-registeret); med V5 på leses hele registeret", async () => {
+    const looked: string[] = [];
+    const counting = { list: () => [], hasSecret: async (ref: string) => { looked.push(ref); return true; }, health: new Map([["github", { state: "healthy", at: NOW }]]) } as unknown as ToolGateway;
+    await service({ gw: counting, measurements: [measured("ops.incidents_open_now", 0)], slo: slo(["OK"]) }).svc.getValueReport("tenant-A");
+    expect(new Set(looked)).toEqual(new Set(GITHUB?.credential_refs ?? []));
+    expect(looked.length).toBe(GITHUB?.credential_refs.length);
+    looked.length = 0;
+    await service({ gw: counting, selfModel: true, slo: slo(["OK"]), facts: { ...FACTS, v5_proposals_enabled: true } }).svc.getValueReport("tenant-A");
+    expect(looked.length).toBeGreaterThan((GITHUB?.credential_refs.length ?? 0) * 5);
+  });
+
   it("D-32/worker-isolasjon kommer KUN fra erklærte porter, aldri fra noe kode kan utlede", async () => {
     const { svc } = service({ facts: { ...FACTS, declared_gates: [] }, measurements: [measured("ops.incidents_open_now", 0)], slo: slo(["OK"]) });
     const r = await svc.getValueReport("tenant-A");

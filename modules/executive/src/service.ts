@@ -403,9 +403,12 @@ export class ExecutiveService {
     const freeze = incidentsOpen === null || killSwitch === null || slo === null
       ? null
       : deriveChangeFreeze({ incident_open: incidentsOpen > 0, observability_ok: observabilityOk, slo_breaches: slo.slos.filter((s) => s.status === "BREACH").length, kill_switch_active: killSwitch });
-    const connectors = await this.getConnectorStatus().then((r) => r.connectors, () => null);
+    // V3 trenger bare GitHub-tilkoblingen; hele registeret (flere hvelv-oppslag per connector) leses KUN når V5-forslag er på og faktisk skal vurderes.
+    const proposalsEnabled = facts?.v5_proposals_enabled === true;
+    const connectors = await this.getConnectorStatus(proposalsEnabled ? undefined : ["github"]).then((r) => r.connectors, () => null);
     const github = connectors?.find((c) => c.id === "github");
-    const githubHealthy: boolean | null = github === undefined || !github.configured ? false : github.health === null ? null : github.health.state === "healthy";
+    // Kunne ikke lese tilkoblingene -> ukjent (null), ikke «ikke konfigurert». Satt opp men aldri kalt (ingen helse) -> også ukjent.
+    const githubHealthy: boolean | null = connectors === null ? null : github === undefined || !github.configured ? false : github.health === null ? null : github.health.state === "healthy";
     const builder = evaluateBuilderLoopReadiness({
       constitution_verified: facts?.ev0.constitution_verified ?? null,
       ledger_ok: facts?.ev0.ledger_ok ?? null,
@@ -416,7 +419,6 @@ export class ExecutiveService {
 
     // V5: forslag KUN når flagget er på. Selvdiagnosen leses bare da (den kjører flere lesere).
     const waiting = measurements.find((m) => m.id === "ops.tasks_waiting_over_15m_now");
-    const proposalsEnabled = facts?.v5_proposals_enabled === true;
     const diagnosis = proposalsEnabled ? await this.getSelfDiagnosis().then((d) => d, () => null) : null;
     const ops = proposeOpsActions({
       enabled: proposalsEnabled,
@@ -492,7 +494,7 @@ export class ExecutiveService {
    * `@jarvis/tool-gateway`) kaller KUN `gateway.hasSecret()` (presence,
    * aldri verdi) og leser `gateway.health` direkte.
    */
-  async getConnectorStatus(): Promise<ConnectorStatusReport> {
-    return { connectors: await listConnectorStatus(this.gateway) };
+  async getConnectorStatus(onlyIds?: readonly string[]): Promise<ConnectorStatusReport> {
+    return { connectors: await listConnectorStatus(this.gateway, onlyIds) };
   }
 }
