@@ -55,14 +55,45 @@ const INTENT_KEYWORDS: Readonly<Record<string, RegExp>> = {
   "memory.propose": /(husk\b|ikke glem|lagre|noter|ta vare|remember|foreslå)/i
 };
 /**
+ * WP-D4 (gjennomgang av PR #315, M1): AI Mesh-spørsmål til `executive.get_ai_mesh_status` («hvordan står AI-mesh-en?», «er Kimi oppe?», «hvilken modell er reserve?»). HVER gren krever samtidig modell-/leverandør-/AI-kontekst:
+ * de nakne ordene `kimi`, `hermes`, `fallback` og `hvilke modeller` traff «Jeg møtte Kimi i går», «Hermes er en fin lommebok-merkevare», «Hva er en fallback i JavaScript?» og «hvilke modeller av bil bør jeg kjøpe». Utvalget valgte da
+ * executive-verktøyene, turen var ikke lenger «kun minne-reserve» (`isMemoryReserveOnly`), og D-431 sendte ordinær prat til skymodellen (Sonnet). Å velge for få er trygt (modellen får minnesøk og kan be om presisering); å velge for mange koster en skytur.
+ * Bevisst smalt: `svarer`/`virker` etter et navn er utelatt («Kimi svarer ikke på meldingene mine» er oftere en person enn en modell). Låst av `modules/tool-gateway/test/wpd4-ai-mesh-intent.test.ts` og `apps/api/test/wpd4-ai-mesh-intent-route.test.ts`.
+ */
+const AI_MESH_INTENT_PARTS: readonly string[] = [
+  String.raw`\bai[-\s]?mesh|modell-?mesh`,
+  // navn + modell-/API-ord: «Kimi-modellen», «Hermes API», «kimi k3», «hermes-nøkkelen»
+  String.raw`\b(?:kimi|hermes)[-\s]*(?:k\d|modell(?:en|er|ene)?|api(?:et)?|nøkkel(?:en)?|endepunkt(?:et)?|leverandør(?:en)?|llm|ai)\b`,
+  // navn + driftstilstand: «Kimi er oppe», «er Kimi oppe?», «fungerer Hermes?»
+  String.raw`\b(?:kimi|hermes)\s+(?:er\s+)?(?:oppe|nede|tilkoblet|koblet\s+til|i\s+drift|konfigurert|aktivert)\b`,
+  String.raw`\ber\s+(?:kimi|hermes)\s+(?:oppe|nede|tilkoblet|koblet\s+til|i\s+drift|konfigurert|aktivert)\b`,
+  String.raw`\bfungerer\s+(?:kimi|hermes)\b|\b(?:kimi|hermes)\s+fungerer\b`,
+  // modell-/leverandørstatus og -kjede: «modellstatus», «modellkjeden», «status på modellene», «reservemodell»
+  String.raw`\bmodell(?:en|er|ene)?[-\s]?(?:leverandør\w*|status\w*|kjede\w*|helse\b)`,
+  String.raw`status\s+(?:på|for|over)\s+(?:ai[-\s]?)?(?:modell\w*|leverandør\w*)`,
+  String.raw`reserve[-\s]?(?:modell|leverandør)\w*`,
+  // fallback/failover KUN sammen med modell-/leverandørord («modell-fallback», «fallback-kjeden»), aldri «fallback-plan» eller «fallback i JavaScript»
+  String.raw`\b(?:modell|ai|llm|språkmodell\w*|leverandør)[-\s]?(?:fallback|failover)|\b(?:fallback|failover)[-\s]?(?:modell|kjede|leverandør|rekkefølge|mesh)\w*`,
+  // lister og spørsmål om hvilke modeller Jarvis bruker: «hvilke leverandører er konfigurert?», «hvilke modeller bruker du?» (ikke «hvilke modeller av bil …»)
+  String.raw`hvilke\s+(?:ai[-\s]?|llm[-\s]?|språk)?(?:modeller|leverandører)\s+(?:er\s+(?:konfigurert|koblet|tilkoblet|aktive?|oppe|nede|satt\s+opp|tilgjengelige)|brukes|bruker\s+du|har\s+du|kjører\s+du|støtter\s+du)\b`,
+  String.raw`modellene\s+dine|modeller\s+du\s+(?:bruker|har|kjører|støtter)\b`,
+  String.raw`(?:hvilken|hva\s+slags)\s+(?:ai[-\s]?|llm[-\s]?|språk)?modell\s+(?:er\s+du|snakker\s+jeg\s+med|bruker\s+du|kjører\s+du)\b`,
+  String.raw`hvilken\s+(?:ai[-\s]?|llm[-\s]?|språk)?modell\s+(?:er|brukes)\s+(?:som\s+)?(?:reserve|reserven|primær|hoved\w*|i\s+bruk|aktiv)\b`
+];
+const AI_MESH_INTENT: RegExp = new RegExp(`(?:${AI_MESH_INTENT_PARTS.join("|")})`, "i");
+
+/** EV-1 (D-412): selvdiagnose, ytelse, tjenestemål og evolusjon («hva er galt med deg», «er du treg», «hva har du lært»). */
+const EXECUTIVE_SELF_INTENT = /(hva er galt|hva feiler|selv-?diagnos|diagnos(er|tiser)|feil med deg|er du frisk|fungerer du|virker du|er alt (ok|greit)|hvordan går det med (deg|systemet)|hva kan du ikke|hvor bra yter|ytelse|er du treg|hvor rask|tjenestemål|\bslo\b|forverring|blitt dårligere|dataskvalitet|datakvalitet|evolusjon|utvikler du deg|forbedre deg|selvforbedring|hva har du lært|hva kan du forbedre)/i;
+
+/**
  * D-381: intensjonsord per verktøy-id for chattens lese-nivå (norsk + engelsk). Kun UTVALG (hva modellen får se denne runden) - aldri
  * autorisasjon; hele nivået er allerede låst av `SURFACE_TOOL_GRANTS`. Uten oppføring brukes selve verktøy-id-en som nøkkelord.
  * D-389: dekker ALLE tjenester på chat-nivåene (også hjemmet, n8n/Make, Jira/Linear/Trello, HubSpot/Pipedrive, Sentry/Grafana/
  * Prometheus, Telnyx, drift/produkt/samtalegraf) med norske hverdagsord - Tobias skal slippe å kjenne tjenestenavnet.
  */
 const TOOL_INTENTS: Readonly<Record<string, RegExp>> = {
-  // EV-1 (D-412): «hva er galt med deg» -> selvdiagnose (+ de øvrige executive-lesingene).
-  executive: /(hva er galt|hva feiler|selv-?diagnos|diagnos(er|tiser)|feil med deg|er du frisk|fungerer du|virker du|er alt (ok|greit)|hvordan går det med (deg|systemet)|hva kan du ikke|hvor bra yter|ytelse|er du treg|hvor rask|tjenestemål|\bslo\b|forverring|blitt dårligere|dataskvalitet|datakvalitet|evolusjon|utvikler du deg|forbedre deg|selvforbedring|hva har du lært|hva kan du forbedre|ai-?mesh|modellmesh|hvilke modeller|modellene dine|modell-?leverandør|\bkimi\b|\bhermes\b|fallback)/i,
+  // EV-1 (D-412) + WP-D4: «hva er galt med deg» -> selvdiagnose (+ de øvrige executive-lesingene), og AI Mesh-spørsmål («er Kimi oppe?») via den smale `AI_MESH_INTENT`.
+  executive: new RegExp(`(?:${EXECUTIVE_SELF_INTENT.source}|${AI_MESH_INTENT.source})`, "i"),
   // D-416: delegering til bakgrunnsagent («gjør det i bakgrunnen», «undersøk», «lag en rapport», «hva er status på jobben»).
   tasks: /(bakgrunn|deleger|sub-?agent|\bagent|\bjobb(en|er)?\b|undersøk|utred|research|analyser|lag en rapport|gjør (det|dette) mens|mens jeg )/i,
   // D-421: kostnad/run-rate («hva koster du», «hvor mye har du brukt»).
