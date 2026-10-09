@@ -197,6 +197,20 @@ describe("B: lesing - soner, DNS, rulesets, innstillinger og konto", () => {
     await expect(call("list_audit_logs", { since: "ikke-en-dato" })).rejects.toThrow("cloudflare_invalid_since");
     await expect(call("list_audit_logs", { limit: 1000 })).rejects.toThrow("cloudflare_invalid_limit");
   });
+
+  it("audit-logg v2 KREVER både since og before hos Cloudflare: uten parametre sendes siste 24 timer, og et omvendt vindu avvises før kallet", async () => {
+    cf.requests.length = 0;
+    const fixed = Date.parse("2026-10-09T12:00:00Z");
+    const t = new CloudflareTransport({ baseUrl: cf.baseUrl, accountId: async () => cf.accountId, sleep: async () => undefined, now: () => fixed });
+    await call("list_audit_logs", {}, cf.token, t);
+    expect(cf.requestsMatching("GET", /logs\/audit/)[0]!.query).toMatchObject({ before: "2026-10-09T12:00:00.000Z", since: "2026-10-08T12:00:00.000Z" });
+    await call("list_audit_logs", { before: "2026-10-05T00:00:00Z" }, cf.token, t);
+    expect(cf.requestsMatching("GET", /logs\/audit/)[1]!.query).toMatchObject({ before: "2026-10-05T00:00:00.000Z", since: "2026-10-04T00:00:00.000Z" });
+    cf.requests.length = 0;
+    await expect(call("list_audit_logs", { since: "2026-10-09T13:00:00Z" }, cf.token, t)).rejects.toThrow("cloudflare_invalid_since");
+    await expect(call("list_audit_logs", { since: "2026-10-02T00:00:00Z", before: "2026-10-01T00:00:00Z" }, cf.token, t)).rejects.toThrow("cloudflare_invalid_since");
+    expect(cf.requestsMatching("GET", /logs\/audit/)).toHaveLength(0);
+  });
 });
 
 describe("C: retry-regler og svarvalidering", () => {

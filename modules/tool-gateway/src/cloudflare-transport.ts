@@ -504,6 +504,10 @@ export class CloudflareTransport implements ToolTransport {
       if (typeof value !== "string" || Number.isNaN(Date.parse(value))) throw new Error(`cloudflare_invalid_${key}`);
       query[key] = new Date(value).toISOString();
     }
+    // Audit-logg v2 KREVER både `since` og `before` (verifisert 2026-10-09: yyyy-mm-dd eller RFC3339) - uten dem avviser Cloudflare kallet. Standardvindu: siste 24 timer.
+    query["before"] ??= new Date(this.now()).toISOString();
+    query["since"] ??= new Date(Date.parse(query["before"]) - 24 * 3_600_000).toISOString();
+    if (Date.parse(query["since"]) >= Date.parse(query["before"])) throw new Error("cloudflare_invalid_since:maa_vaere_foer_before");
     const limit = parameters["limit"];
     if (limit !== undefined) {
       if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("cloudflare_invalid_limit");
