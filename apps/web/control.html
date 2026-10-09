@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="no">
+<head>
+<meta charset="utf-8">
+<!--JARVIS_OWNER_META-->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jarvis · Kontrollsentre</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='48' fill='%2305070c'/%3E%3Ccircle cx='50' cy='50' r='40' fill='none' stroke='%2322d3ee' stroke-width='3' opacity='0.55'/%3E%3Ccircle cx='50' cy='50' r='27' fill='none' stroke='%2367e8f9' stroke-width='2.5' opacity='0.85'/%3E%3Ccircle cx='50' cy='50' r='9' fill='%2367e8f9'/%3E%3C/svg%3E">
+<style>
+  /*
+   * WP-H0 (UA-11 Admin Control Center, masterplan v4.0 kap. 21): ÉN kontrollflate for alle ti kontrollsentre (integrasjoner, autoritet, AI, finans, minne, agenter, drift, verdi, personvern, sikkerhet).
+   * Eieren skal kunne STOPPE, TILBAKEKALLE og REKONFIGURERE enhver connector, leverandør, agent eller autonomidomene herfra. Siden:
+   *  - bygger ALDRI egne skriveveier: hver handling i rapporten peker på en EKSISTERENDE, grant-autentisert rute (/executive/mutate m.fl.), som håndhever step-up, policy, klasse D-pipeline og revisjon som før;
+   *  - viser tydelig FØR trykk om handlingen krever step-up (signert enhetsøkt) og om den kan angres, og viser alltid en bekreftelsesdialog (klasse D krever i tillegg at handlingsnavnet skrives);
+   *  - viser kun det rapportene inneholder (antall, kategorier, tidsstempler, kilde) - aldri hemmeligheter. All tekst settes med textContent (aldri innerHTML) og går i tillegg gjennom en klientside
+   *    sikkerhetsvask som skjuler kjente token-former;
+   *  - er tilgjengelig: semantiske overskrifter, tastatur (Tab/Enter/Escape, fokus tilbake til knappen etter dialogen), tydelig fokusring, status med TEKST og symbol (ikke bare farge), aria-live-region,
+   *    kontrast ≥ 4,5:1, respekterer prefers-reduced-motion og fungerer på smal skjerm.
+   * Ingen byggesteg, ingen ekstern font/CDN. Enhetsautentiseringen er den samme som dashboard.html (samme localStorage-nøkler, samme /devices/challenge → /session/authorize).
+   */
+  :root {
+    color-scheme: dark;
+    --bg: #05070c; --panel: #0c121e; --panel-2: #101a2b; --panel-3: #15213a; --border: #2a3d63; --border-soft: #1c2942;
+    --text: #e9eefb; --text-dim: #a3aec9; --text-mute: #8b97b5;
+    --accent: #22d3ee; --accent-strong: #67e8f9;
+    --ok-bg: #0c2a20; --ok-fg: #6ee7b7; --warn-bg: #3a2a06; --warn-fg: #fbbf24; --fail-bg: #3d1220; --fail-fg: #fb7185; --unk-bg: #1b2236; --unk-fg: #c0c9e0;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", "Inter", Roboto, system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; line-height: 1.45; -webkit-font-smoothing: antialiased; }
+  a { color: var(--accent-strong); }
+  :focus-visible { outline: 3px solid var(--accent-strong); outline-offset: 2px; border-radius: 4px; }
+  .skip { position: absolute; left: -9999px; top: 0; background: var(--panel-3); color: var(--text); padding: 8px 14px; z-index: 20; }
+  .skip:focus { left: 8px; top: 8px; }
+  header { position: sticky; top: 0; z-index: 6; padding: 10px 16px; background: rgba(12,18,30,0.95); border-bottom: 1px solid var(--border-soft); display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  header h1 { font-size: 17px; margin: 0; letter-spacing: 0.02em; }
+  header .sub { color: var(--text-dim); font-size: 12.5px; margin: 2px 0 0; }
+  header .right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  #updated { font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
+  main { max-width: 1180px; margin: 0 auto; padding: 18px 16px 70px; display: flex; flex-direction: column; gap: 20px; }
+  h2 { font-size: 15px; margin: 0; }
+  h3 { font-size: 13px; margin: 0; color: var(--text); }
+  .btn { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit; min-height: 36px; }
+  .btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-strong); }
+  .btn:disabled { opacity: 0.55; cursor: default; }
+  .btn.primary { background: var(--accent); color: #022; border-color: transparent; }
+  .btn.primary:hover:not(:disabled) { background: var(--accent-strong); color: #022; }
+  .btn.risk-C { border-color: #8a6a14; }
+  .btn.risk-D { background: var(--fail-bg); color: var(--fail-fg); border-color: #7a2c42; }
+  .btn.small { padding: 5px 10px; font-size: 12px; min-height: 30px; }
+  .pill { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; background: var(--panel-3); color: var(--text-dim); white-space: nowrap; }
+  .pill.ok { background: var(--ok-bg); color: var(--ok-fg); }
+  .pill.warn { background: var(--warn-bg); color: var(--warn-fg); }
+  .pill.fail { background: var(--fail-bg); color: var(--fail-fg); }
+  .pill.unknown { background: var(--unk-bg); color: var(--unk-fg); }
+  .pill.mono { font-family: var(--mono); font-weight: 600; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+  .tile { display: block; background: var(--panel); border: 1px solid var(--border-soft); border-left-width: 5px; border-radius: var(--radius); padding: 12px 14px; color: inherit; text-decoration: none; }
+  .tile:hover { border-color: var(--border); }
+  .tile.ok { border-left-color: var(--ok-fg); } .tile.warn { border-left-color: var(--warn-fg); } .tile.fail { border-left-color: var(--fail-fg); } .tile.unknown { border-left-color: var(--unk-fg); }
+  .tile .k { font-weight: 700; font-size: 14px; margin-bottom: 6px; display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+  .tile .s { font-size: 12.5px; color: var(--text-dim); }
+  .notice { background: var(--panel); border: 1px solid var(--border-soft); border-radius: var(--radius); padding: 12px 14px; color: var(--text-dim); font-size: 13px; }
+  .notice.error { border-color: #7a2c42; color: var(--fail-fg); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .chip { background: var(--panel-2); border: 1px dashed var(--border); border-radius: 999px; padding: 3px 11px; font-size: 12.5px; color: var(--text-dim); }
+  details.center { background: var(--panel); border: 1px solid var(--border-soft); border-radius: var(--radius); }
+  details.center > summary { cursor: pointer; padding: 14px 16px; list-style: none; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; border-radius: var(--radius); }
+  details.center > summary::-webkit-details-marker { display: none; }
+  details.center > summary::before { content: "▸"; color: var(--accent); font-size: 13px; }
+  details.center[open] > summary::before { content: "▾"; }
+  details.center > summary h2 { flex: 1 1 200px; }
+  details.center > summary .desc { flex: 1 1 100%; color: var(--text-dim); font-size: 12.5px; margin: 0; }
+  .center-body { padding: 4px 16px 16px; display: flex; flex-direction: column; gap: 14px; }
+  .why { background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: 10px; padding: 8px 12px; }
+  .why summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+  .why pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; font-size: 13px; margin: 8px 0 0; color: var(--text); }
+  .section { border: 1px solid var(--border-soft); border-radius: 10px; padding: 12px 14px; background: var(--panel-2); }
+  .section-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .section-head h3 { flex: 1 1 180px; }
+  .section .sum { color: var(--text); font-size: 13px; margin: 6px 0 0; overflow-wrap: anywhere; }
+  .section .src { color: var(--text-mute); font-size: 12px; margin: 4px 0 0; overflow-wrap: anywhere; }
+  .items { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .item { border-top: 1px solid var(--border-soft); padding-top: 8px; }
+  .item-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .item-head .name { font-weight: 600; font-size: 13.5px; flex: 1 1 160px; overflow-wrap: anywhere; }
+  .item .detail { color: var(--text-dim); font-size: 12.5px; margin: 3px 0 0; overflow-wrap: anywhere; }
+  .facts { display: grid; grid-template-columns: max-content 1fr; gap: 1px 12px; margin: 6px 0 0; font-size: 12px; }
+  .facts dt { color: var(--text-mute); font-family: var(--mono); }
+  .facts dd { margin: 0; color: var(--text-dim); font-family: var(--mono); overflow-wrap: anywhere; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .action { display: inline-flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+  .badges { display: flex; flex-wrap: wrap; gap: 4px; }
+  .badges .pill { font-size: 11px; padding: 1px 7px; font-weight: 600; }
+  .center-actions { border: 1px solid var(--border-soft); border-radius: 10px; padding: 10px 14px; }
+  .empty { color: var(--text-dim); font-style: italic; font-size: 13px; }
+  #status { position: fixed; bottom: 0; left: 0; right: 0; z-index: 8; padding: 8px 16px; background: rgba(12,18,30,0.97); border-top: 1px solid var(--border-soft); font-size: 12.5px; color: var(--text-dim); font-family: var(--mono); }
+  #enroll { display: none; padding: 14px 16px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius); }
+  #enroll.open { display: block; }
+  #enroll p { margin: 0 0 8px; color: var(--text-dim); font-size: 13px; }
+  #enroll form { display: flex; gap: 8px; flex-wrap: wrap; }
+  input[type="text"], input:not([type]) { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; font-size: 14px; font-family: inherit; width: 100%; }
+  #enroll input { flex: 1 1 240px; width: auto; }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; max-width: 520px; width: calc(100% - 32px); }
+  dialog::backdrop { background: rgba(2,4,8,0.78); }
+  dialog h2 { font-size: 16px; margin-bottom: 10px; }
+  dialog p { margin: 8px 0; font-size: 13.5px; }
+  dialog label { display: block; margin-top: 12px; font-size: 13px; }
+  dialog label span { display: block; margin-bottom: 4px; color: var(--text-dim); }
+  dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }
+  .hidden { display: none; }
+  @media (max-width: 760px) { main { padding: 14px 12px 70px; } .facts { grid-template-columns: 1fr; } }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Hopp til innholdet</a>
+<header>
+  <div>
+    <h1>Kontrollsentre</h1>
+    <p class="sub">Én flate for å se, stoppe og tilbakekalle · privat: kun konfigurasjonsmetadata, aldri hemmeligheter</p>
+  </div>
+  <div class="right">
+    <span id="updated" aria-live="off"></span>
+    <button class="btn primary" id="refresh" type="button">Oppdater</button>
+  </div>
+</header>
+<main id="main" tabindex="-1">
+  <noscript><div class="notice error">Kontrollsentrene krever JavaScript.</div></noscript>
+  <section id="enroll" aria-labelledby="enroll-title">
+    <h2 id="enroll-title">Enheten er ikke innrullert</h2>
+    <p>Lim inn engangsbilletten fra <code>enroll-ticket</code> for å innrullere denne enheten. Uten innrullert enhet kan ikke kontrollsentrene leses.</p>
+    <form id="enroll-form" autocomplete="off">
+      <input id="enroll-ticket" type="text" placeholder="innrulleringsbillett" aria-label="Innrulleringsbillett" autocomplete="off">
+      <button class="btn primary" type="submit">Innrullér</button>
+    </form>
+  </section>
+  <section aria-labelledby="overview-title">
+    <h2 id="overview-title">Oversikt</h2>
+    <div id="overview" class="tiles"><p class="empty">Laster …</p></div>
+    <div id="unregistered" class="notice hidden"></div>
+  </section>
+  <section aria-labelledby="centers-title">
+    <h2 id="centers-title" class="hidden">Kontrollsentre</h2>
+    <div id="centers"></div>
+  </section>
+</main>
+<div id="status" role="status" aria-live="polite"></div>
+
+<dialog id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-desc">
+  <form method="dialog" id="confirm-form">
+    <h2 id="confirm-title">Bekreft</h2>
+    <p class="badges"><span class="pill" id="confirm-class"></span> <span class="pill" id="confirm-stepup"></span> <span class="pill" id="confirm-reversible"></span></p>
+    <p id="confirm-desc"></p>
+    <p id="confirm-rollback" class="empty"></p>
+    <label id="confirm-reason-wrap" class="hidden"><span>Begrunnelse (lagres i revisjonssporet)</span><input id="confirm-reason" type="text" maxlength="200" autocomplete="off"></label>
+    <label id="confirm-typed-wrap" class="hidden"><span id="confirm-typed-label"></span><input id="confirm-typed" type="text" autocomplete="off"></label>
+    <div class="row">
+      <button class="btn" type="submit" value="cancel" id="confirm-cancel" formnovalidate>Avbryt</button>
+      <button class="btn primary" type="submit" value="ok" id="confirm-ok">Bekreft og utfør</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+(() => {
+  "use strict";
+
+  // ---------------------------------------------------------------------------------------------------------------------------------------------------------
+  // Enhetsautentisering: SAMME flyt og localStorage-nøkler som dashboard.html (jarvis.deviceid / jarvis.devicekey). Se der for D-131/D-252/D-342/D-347-bakgrunnen.
+  // ---------------------------------------------------------------------------------------------------------------------------------------------------------
+  const statusEl = document.getElementById("status");
+  const enrollPanel = document.getElementById("enroll");
+  const enrollForm = document.getElementById("enroll-form");
+  const enrollTicket = document.getElementById("enroll-ticket");
+
+  function randomUUID() {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+      const r = (Math.random() * 16) | 0;
+      const v = c === "x" ? r : (r & 0x3) | 0x8;
+      return v.toString(16);
+    });
+  }
+  function loadOrCreateDeviceId() {
+    const stored = localStorage.getItem("jarvis.deviceid");
+    if (stored) return stored;
+    const id = "web-" + randomUUID();
+    localStorage.setItem("jarvis.deviceid", id);
+    return id;
+  }
+  // Eier-identiteten injiseres av serveren fra validert konfig (<meta name="jarvis-owner">) - aldri hardkodet her. Kun en visnings-/forespørselsetikett; autoriteten er serverens grant-verifisering.
+  const JARVIS_OWNER = (() => {
+    const el = document.querySelector('meta[name="jarvis-owner"]');
+    try { const o = JSON.parse(el ? el.content : "null"); if (o && o.person_id && o.tenant_id) return o; } catch (e) { /* faller til feil under */ }
+    throw new Error("owner_not_configured");
+  })();
+  const identity = { person_id: JARVIS_OWNER.person_id, tenant_id: JARVIS_OWNER.tenant_id, device_id: loadOrCreateDeviceId(), memory_space: "personal", channel: "web" };
+  let grant = null;
+  let deviceKey = null;
+
+  function base64FromBuffer(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+  }
+  function pemFromSpki(spkiBuffer) {
+    const lines = base64FromBuffer(spkiBuffer).match(/.{1,64}/g) || [];
+    return "-----BEGIN PUBLIC KEY-----\n" + lines.join("\n") + "\n-----END PUBLIC KEY-----\n";
+  }
+  async function loadOrCreateDeviceKey() {
+    const stored = localStorage.getItem("jarvis.devicekey");
+    if (stored) {
+      const jwk = JSON.parse(stored);
+      const privateKey = await crypto.subtle.importKey("jwk", jwk, { name: "Ed25519" }, true, ["sign"]);
+      const publicKey = await crypto.subtle.importKey("jwk", { kty: "OKP", crv: "Ed25519", x: jwk.x }, { name: "Ed25519" }, true, ["verify"]);
+      return { privateKey, publicKey };
+    }
+    const pair = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+    localStorage.setItem("jarvis.devicekey", JSON.stringify(await crypto.subtle.exportKey("jwk", pair.privateKey)));
+    return { privateKey: pair.privateKey, publicKey: pair.publicKey };
+  }
+  async function signChallenge(privateKey, deviceId) {
+    const res = await fetch("/devices/challenge", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: deviceId }) });
+    if (!res.ok) throw new Error("devices/challenge: " + res.status);
+    const { challenge } = await res.json();
+    const signature = base64FromBuffer(await crypto.subtle.sign({ name: "Ed25519" }, privateKey, new TextEncoder().encode(challenge)));
+    return { challenge, signature };
+  }
+  async function authorize(privateKey) {
+    const { challenge, signature } = await signChallenge(privateKey, identity.device_id);
+    const res = await fetch("/session/authorize", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        channel: identity.channel, person_id: identity.person_id, tenant_id: identity.tenant_id,
+        device_id: identity.device_id, memory_space: identity.memory_space, device_proof: { challenge, signature }
+      })
+    });
+    const body = await res.json();
+    if (res.ok && body.ok) return body.grant;
+    if (body.reason === "device_proof_invalid" || body.reason === "unknown_device") return null;
+    throw new Error("session/authorize: " + (body.reason || res.status));
+  }
+  async function enrollDevice(privateKey, publicKey, ticket) {
+    const pem = pemFromSpki(await crypto.subtle.exportKey("spki", publicKey));
+    const res = await fetch("/devices/register", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        tenant_id: identity.tenant_id, person_id: identity.person_id,
+        device: { device_id: identity.device_id, kind: "web", public_key_pem: pem }, enrollment: { kind: "enrollment_ticket", ticket }
+      })
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.ok) throw new Error("devices/register: " + (body.reason || res.status));
+  }
+  async function ensureGrant() {
+    if (grant && grant.expires_at_ms - 30000 > Date.now()) return grant;
+    if (!deviceKey) deviceKey = await loadOrCreateDeviceKey();
+    grant = await authorize(deviceKey.privateKey);
+    if (!grant) {
+      enrollPanel.classList.add("open");
+      throw new Error("enhet ikke innrullert");
+    }
+    enrollPanel.classList.remove("open");
+    return grant;
+  }
+  async function submitEnrollment(ticket) {
+    try {
+      if (!deviceKey) deviceKey = await loadOrCreateDeviceKey();
+      await enrollDevice(deviceKey.privateKey, deviceKey.publicKey, ticket);
+      await ensureGrant();
+      say("Enheten er innrullert.");
+      await loadAll();
+    } catch (err) {
+      say("Innrullering feilet: " + err.message);
+    }
+  }
+  enrollForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const ticket = enrollTicket.value.trim();
+    if (!ticket) return;
+    enrollTicket.value = "";
+    void submitEnrollment(ticket);
+  });
+  (function tryAutoEnrollFromUrl() {
+    const ticket = new URLSearchParams(location.search).get("enroll");
+    if (!ticket) return;
+    history.replaceState(null, "", location.pathname + location.hash); // billetten (engangs) skal aldri bli stående i adresselinjen/historikken
+    say("Innrullerer enheten automatisk …");
+    void submitEnrollment(ticket);
+  })();
+
+  // ---------------------------------------------------------------------------------------------------------------------------------------------------------
+  // Sikker visning: ALL tekst settes med textContent. I tillegg skjules kjente token-former (siste forsvarslinje - rapportene inneholder aldri hemmeligheter, og serveren redigerer dem også).
+  // ---------------------------------------------------------------------------------------------------------------------------------------------------------
+  const SECRET_LIKE = [
+    /sk-ant-[A-Za-z0-9_-]{10,}/g, /sk-(?:proj-)?[A-Za-z0-9_-]{20,}/g, /gh[pousr]_[A-Za-z0-9]{20,}/g, /github_pat_[A-Za-z0-9_]{20,}/g, /xox[abprs]-[A-Za-z0-9-]{10,}/g,
+    /AKIA[0-9A-Z]{16}/g, /AIza[0-9A-Za-z_-]{35}/g, /eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, /Bearer\s+[A-Za-z0-9._~+\/-]{16,}=*/gi,
+    /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*/g, /\b[0-9a-f]{40,}\b/gi
+  ];
+  function safeText(value) {
+    let text = value === null || value === undefined ? "" : String(value);
+    for (const re of SECRET_LIKE) text = text.replace(re, "[skjult]");
+    return text;
+  }
+  function el(tag, props, children) {
+    const node = document.createElement(tag);
+    if (props) {
+      if (props.class) node.className = props.class;
+      if (props.text !== undefined) node.textContent = safeText(props.text);
+      if (props.attrs) for (const [k, v] of Object.entries(props.attrs)) node.setAttribute(k, v);
+    }
+    for (const child of children || []) if (child) node.appendChild(child);
+    return node;
+  }
+  function say(text) { statusEl.textContent = safeText(text); }
+
+  const STATUS = {
+    OK: { sym: "✓", text: "i orden", cls: "ok" },
+    WARN: { sym: "!", text: "advarsel", cls: "warn" },
+    FAIL: { sym: "✕", text: "feil", cls: "fail" },
+    UNKNOWN: { sym: "?", text: "ikke målt", cls: "unknown" }
+  };
+  function statusInfo(status) { return STATUS[status] || STATUS.UNKNOWN; }
+  function statusPill(status) {
+    const info = statusInfo(status);
+    return el("span", { class: "pill " + info.cls, text: info.sym + " " + info.text });
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------------------------------------------------
+  // Lesing: /control/centers (oversikt) og /control/center (ett senter) - lese-kun, samme grant som /executive/query.
+  // ---------------------------------------------------------------------------------------------------------------------------------------------------------
+  async function post(path, payload) {
+    const active = await ensureGrant();
+    const res = await fetch(path, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify(Object.assign({ grant_token: active.grant_token }, payload))
+    });
+    const body = await res.json().catch(() => ({}));
+    return { res, body };
+  }
+  async function readControl(path, payload) {
+    const { res, body } = await post(path, payload);
+    if (!res.ok || !body.ok) throw new Error(path + ": " + (body.reason || body.error || res.status));
+    return body.data;
+  }
+
+  const openCenters = new Set();
+  const centersEl = document.getElementById("centers");
+  const overviewEl = document.getElementById("overview");
+  const unregisteredEl = document.getElementById("unregistered");
+  const updatedEl = document.getElementById("updated");
+  let busy = false;
+  let actionBusy = false;
+
+  function renderOverview(overview) {
+    overviewEl.textContent = "";
+    if (!overview.centers.length) {
+      overviewEl.appendChild(el("p", { class: "empty", text: overview.summary_no }));
+    }
+    for (const c of overview.centers) {
+      const info = statusInfo(c.status);
+      const tile = el("a", { class: "tile " + info.cls, attrs: { href: "#center-" + c.center } }, [
+        el("div", { class: "k" }, [el("span", { text: c.title_no }), statusPill(c.status)]),
+        el("div", { class: "s", text: c.sections.length + " seksjoner" + (c.action_count ? " · " + c.action_count + " handlinger" : "") })
+      ]);
+      tile.addEventListener("click", () => { openCenters.add(c.center); const d = document.getElementById("center-" + c.center); if (d) d.open = true; });
+      overviewEl.appendChild(tile);
+    }
+    if (overview.unregistered.length) {
+      unregisteredEl.classList.remove("hidden");
+      unregisteredEl.textContent = "";
+      unregisteredEl.appendChild(el("div", { text: "Ikke koblet inn ennå (vises ikke som «i orden», de finnes bare ikke ennå):" }));
+      unregisteredEl.appendChild(el("div", { class: "chips" }, overview.unregistered.map((id) => el("span", { class: "chip", text: TITLES[id] || id }))));
+    } else {
+      unregisteredEl.classList.add("hidden");
+    }
+  }
+  const TITLES = { integration: "Integrasjoner", authority: "Autoritet", ai: "AI", finance: "Finans", memory: "Minne", agent: "Agenter", operations: "Drift", value: "Verdi", privacy: "Personvern", security: "Sikkerhet" };
+
+  // ---------------------------------------------------------------------------------------------------------------------------------------------------------
+  // Handlinger: peker KUN på eksisterende ruter. Lokal allowlist speiler CONTROL_ACTION_ENDPOINTS (testet) - alt annet vises ikke som knapp.
+  // ---------------------------------------------------------------------------------------------------------------------------------------------------------
+  const ACTION_ENDPOINTS = new Set(["/executive/mutate", "/owner-controls/connector-credentials"]);
+
+  function actionButton(action) {
+    const label = action.label;
+    const button = el("button", { class: "btn small risk-" + action.risk_class, text: label, attrs: { type: "button", "data-action-id": action.id } });
+    const badges = el("span", { class: "badges" }, [
+      el("span", { class: "pill mono", text: "klasse " + action.risk_class }),
+      el("span", { class: "pill " + (action.requires_step_up ? "warn" : "ok"), text: action.requires_step_up ? "krever signert enhet" : "ingen step-up" }),
+      el("span", { class: "pill", text: action.reversible ? "kan angres" : "kan ikke angres" })
+    ]);
+    button.setAttribute("aria-label", label + " (klasse " + action.risk_class + (action.requires_step_up ? ", krever signert enhet" : "") + (action.reversible ? "" : ", kan ikke angres") + ")");
+    button.addEventListener("click", () => { void runAction(action, button); });
+    return el("span", { class: "action" }, [button, badges]);
+  }
+
+  function itemNode(item, actions) {
+    const children = [el("div", { class: "item-head" }, [el("span", { class: "name", text: item.label }), statusPill(item.status)])];
+    if (item.detail_no) children.push(el("p", { class: "detail", text: item.detail_no }));
+    if (item.facts && Object.keys(item.facts).length) {
+      const dl = el("dl", { class: "facts" });
+      for (const [k, v] of Object.entries(item.facts)) {
+        dl.appendChild(el("dt", { text: k }));
+        dl.appendChild(el("dd", { text: v === null ? "–" : String(v) }));
+      }
+      children.push(dl);
+    }
+    if (item.observed_at) children.push(el("p", { class: "detail", text: "Målt " + item.observed_at }));
+    if (actions.length) children.push(el("div", { class: "actions" }, actions.map(actionButton)));
+    return el("li", { class: "item" }, children);
+  }
+
+  function sectionNode(section, actions) {
+    const own = actions.filter((a) => a.section_id === section.id);
+    const sectionLevel = own.filter((a) => a.item_id === undefined);
+    const kids = [
+      el("div", { class: "section-head" }, [el("h3", { text: section.title_no }), statusPill(section.status)]),
+      el("p", { class: "sum", text: section.summary_no }),
+      el("p", { class: "src", text: "Kilde: " + section.source + (section.measured && section.observed_at ? " · målt " + section.observed_at : section.measured ? "" : " · kunne ikke måles (ukjent, ikke «i orden»)") })
+    ];
+    if (sectionLevel.length) kids.push(el("div", { class: "actions" }, sectionLevel.map(actionButton)));
+    if (section.items.length) {
+      kids.push(el("ul", { class: "items" }, section.items.map((item) => itemNode(item, own.filter((a) => a.item_id === item.id)))));
+    }
+    return el("div", { class: "section" }, kids);
+  }
+
+  function centerBody(report, explanation) {
+    const nodes = [];
+    nodes.push(el("details", { class: "why" }, [el("summary", { text: "Hvorfor " + statusInfo(report.status).text + "?" }), el("pre", { text: explanation || report.summary_no })]));
+    const centerLevel = report.actions.filter((a) => a.section_id === undefined);
+    if (centerLevel.length) {
+      nodes.push(el("div", { class: "center-actions" }, [el("h3", { text: "Handlinger for hele senteret" }), el("div", { class: "actions" }, centerLevel.map(actionButton))]));
+    }
+    for (const section of report.sections) nodes.push(sectionNode(section, report.actions));
+    return nodes;
+  }
+
+  function renderCenter(summary, loaded) {
+    const id = summary.center;
+    let details = document.getElementById("center-" + id);
+    if (!details) {
+      details = el("details", { class: "center", attrs: { id: "center-" + id } });
+      details.addEventListener("toggle", () => { if (details.open) openCenters.add(id); else openCenters.delete(id); });
+      centersEl.appendChild(details);
+    }
+    details.textContent = "";
+    const status = loaded && loaded.report ? loaded.report.status : summary.status;
+    details.appendChild(el("summary", {}, [
+      el("h2", { text: summary.title_no }), statusPill(status), el("p", { class: "desc", text: summary.description_no + " · " + summary.summary_no })
+    ]));
+    const body = el("div", { class: "center-body" });
+    if (!loaded) body.appendChild(el("p", { class: "empty", text: "Laster …" }));
+    else if (loaded.error) body.appendChild(el("div", { class: "notice error", text: "Kunne ikke hente senteret: " + loaded.error }));
+    else for (const n of centerBody(loaded.report, loaded.explanation_no)) body.appendChild(n);
+    details.appendChild(body);
+    if (openCenters.has(id) || status === "FAIL" || status === "WARN") details.open = true;
+  }
+
+  async function loadCenter(summary) {
+    try {
+      const data = await readControl("/control/center", { center: summary.center });
+      renderCenter(summary, { report: data.report, explanation_no: data.explanation_no });
+    } catch (err) {
+      renderCenter(summary, { error: err.message });
+    }
+  }
+
+  async function loadAll() {
+    if (busy) return;
+    busy = true;
+    document.getElementById("refresh").disabled = true;
+    say("Henter kontrollsentre …");
+    try {
+      const overview = await readControl("/control/centers", {});
+      renderOverview(overview);
+      // Fjern sentre som ikke lenger er registrert; vis de registrerte med «Laster …» til detaljene er hentet.
+      const known = new Set(overview.centers.map((c) => "center-" + c.center));
+      for (const child of Array.from(centersEl.children)) if (!known.has(child.id)) child.remove();
+      for (const c of overview.centers) if (!document.getElementById("center-" + c.center)) renderCenter(c, null);
+      await Promise.all(overview.centers.map(loadCenter));
+      updatedEl.textContent = "Oppdatert " + new Date().toLocaleTimeString("no-NO");
+      say("Samlet status: " + statusInfo(overview.status).text + ". " + overview.centers.length + " av 10 sentre er koblet inn.");
+    } catch (err) {
+      overviewEl.textContent = "";
+      overviewEl.appendChild(el("div", { class: "notice error", text: "Kunne ikke hente kontrollsentrene: " + err.message }));
+      say("Feil: " + err.message);
+    } finally {
+      busy = false;
+      document.getElementById("refresh").disabled = false;
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------------------------------------------------
+  // Bekreftelsesdialog (<dialog>: fokusfelle og Escape følger med) + utførelse mot den eksisterende ruten.
+  // ---------------------------------------------------------------------------------------------------------------------------------------------------------
+  const dialog = document.getElementById("confirm-dialog");
+  const confirmForm = document.getElementById("confirm-form");
+  const confirmOk = document.getElementById("confirm-ok");
+  const confirmTyped = document.getElementById("confirm-typed");
+  const confirmReason = document.getElementById("confirm-reason");
+
+  function confirmAction(action) {
+    const reasonParam = action.body && action.body.parameters && typeof action.body.parameters.reason === "string" ? action.body.parameters.reason : null;
+    const typedName = action.risk_class === "D" ? String((action.body && action.body.action) || action.id) : null;
+    document.getElementById("confirm-title").textContent = safeText(action.label);
+    const cls = document.getElementById("confirm-class");
+    cls.textContent = "klasse " + action.risk_class;
+    cls.className = "pill mono " + (action.risk_class === "D" ? "fail" : action.risk_class === "C" ? "warn" : "");
+    const step = document.getElementById("confirm-stepup");
+    step.textContent = action.requires_step_up ? "krever signert enhetsøkt (step-up)" : "ingen step-up (stopp-handling)";
+    step.className = "pill " + (action.requires_step_up ? "warn" : "ok");
+    const rev = document.getElementById("confirm-reversible");
+    rev.textContent = action.reversible ? "kan angres" : "kan IKKE angres";
+    rev.className = "pill " + (action.reversible ? "" : "fail");
+    document.getElementById("confirm-desc").textContent = safeText(action.description_no);
+    document.getElementById("confirm-rollback").textContent = action.rollback_no ? "Angre: " + safeText(action.rollback_no) : "";
+    document.getElementById("confirm-reason-wrap").classList.toggle("hidden", reasonParam === null);
+    confirmReason.value = reasonParam === null ? "" : reasonParam;
+    document.getElementById("confirm-typed-wrap").classList.toggle("hidden", typedName === null);
+    document.getElementById("confirm-typed-label").textContent = typedName === null ? "" : "Skriv «" + typedName + "» for å bekrefte";
+    confirmTyped.value = "";
+    confirmOk.disabled = typedName !== null;
+    const onType = () => { confirmOk.disabled = confirmTyped.value.trim() !== typedName; };
+    if (typedName !== null) confirmTyped.addEventListener("input", onType);
+    return new Promise((resolve) => {
+      const done = () => {
+        confirmTyped.removeEventListener("input", onType);
+        dialog.removeEventListener("close", done);
+        resolve(dialog.returnValue === "ok" ? { confirmed: true, reason: reasonParam === null ? null : confirmReason.value.trim() } : { confirmed: false });
+      };
+      dialog.addEventListener("close", done);
+      dialog.returnValue = "";
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else resolve({ confirmed: window.confirm(action.label + "\n\n" + action.description_no), reason: reasonParam });
+    });
+  }
+
+  function failureMessage(res, body) {
+    if (res.status === 403 && body.error === "step_up_required") {
+      const code = safeText(body.reason || "step_up_required");
+      const channel = /channel_([a-z]+)_not_allowed/.exec(code);
+      const why = code.indexOf("signed_device_session") !== -1 ? "handlingen krever en signert enhetsøkt" : channel ? "kanalen «" + channel[1] + "» er ikke tillatt for denne handlingen" : "handlingen krever en sterkere autentisering";
+      return "Krever step-up: " + why + " (" + code + "). Åpne kontrollsentrene fra en innrullert enhet (nettleser/app), ikke fra tale eller Telegram.";
+    }
+    if (res.status === 403 && body.error === "tool_denied") return "Avvist av policy: " + safeText(body.reason || "ukjent årsak");
+    if (res.status === 403 && body.error === "identity_denied") return "Avvist: enheten/grantet er ikke gyldig (" + safeText(body.reason || "ukjent") + ").";
+    if (res.status === 429) return "For mange forespørsler - vent litt og prøv igjen.";
+    return "Feilet (" + res.status + (body.error ? ": " + safeText(body.error) : "") + ")";
+  }
+
+  async function runAction(action, button) {
+    if (actionBusy) return;
+    if (!ACTION_ENDPOINTS.has(action.endpoint)) { say("Handlingen peker på en rute siden ikke kjenner - ikke utført."); return; }
+    actionBusy = true;
+    const outcome = await confirmAction(action);
+    if (!outcome.confirmed) { actionBusy = false; button.focus(); return; }
+    button.disabled = true;
+    say("Utfører «" + action.label + "» …");
+    try {
+      const payload = JSON.parse(JSON.stringify(action.body));
+      if (outcome.reason && payload.parameters) payload.parameters.reason = outcome.reason;
+      const { res, body } = await post(action.endpoint, payload);
+      if (res.ok && body.ok) {
+        say("Utført: " + action.label + ". Oppdaterer …");
+      } else {
+        say("Ikke utført: " + failureMessage(res, body));
+      }
+    } catch (err) {
+      say("Ikke utført: " + err.message);
+    } finally {
+      button.disabled = false;
+      actionBusy = false;
+    }
+    await loadAll();
+  }
+
+  document.getElementById("refresh").addEventListener("click", () => { void loadAll(); });
+  confirmForm.addEventListener("submit", () => { /* method=dialog lukker dialogen; returnValue settes av knappen */ });
+  setInterval(() => { if (document.visibilityState === "visible" && !dialog.open && !actionBusy) void loadAll(); }, 60000);
+  void loadAll();
+})();
+</script>
+</body>
+</html>

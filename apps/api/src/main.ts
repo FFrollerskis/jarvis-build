@@ -27,10 +27,11 @@ import {
   ConfirmationStore,
   runMigrationsAsAdmin,
   runOperationalRetentionSweep,
+  scanForSecrets,
   withTenantTransaction,
   writeAudit
 } from "@jarvis/core";
-import { InfraExecutionGate, KillSwitch, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
+import { InfraExecutionGate, KillSwitch, PolicyGateway, createPgInfraModeStore, resolveAuthorityMode } from "@jarvis/policy";
 import { DeploymentService, DiagnosisService, IncidentService } from "@jarvis/incidents";
 import {
   AiCouncil,
@@ -90,7 +91,7 @@ import {
   DomainPauseRegistry, SituationEngine, SituationsTransport, assertSituationSweepHealthy, runSituationSweepForAllTenants,
   situationsToolDefinitions
 } from "@jarvis/situations";
-import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions, renderSelfDiagnosisNo, type SelfDiagnosis } from "@jarvis/executive";
+import { ControlCenterRegistry, ExecutiveService, ExecutiveTransport, executiveToolDefinitions, renderSelfDiagnosisNo, type SelfDiagnosis } from "@jarvis/executive";
 import { GovernanceService, GovernanceTransport, governanceToolDefinitions } from "@jarvis/governance";
 import { OwnerControlsService, OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
 import {
@@ -119,6 +120,7 @@ import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
 import { createEvolutionReportProvider } from "./evolution-source.ts";
 import { ChatJobs, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
+import { registerControlCenters } from "./control-center/register.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
 
 const port = envPort("JARVIS_API_PORT", 3010);
@@ -644,6 +646,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     tenant: () => readSecretProvider.get("JARVIS_MICROSOFT_TENANT_ID"),
     persist: (value) => toolGateway.setSecret("JARVIS_MICROSOFT_REFRESH_TOKEN", value)
   });
+  // WP-H0 (UA-11 Admin Control Center): registeret over de ti kontrollsentrene. EIER-KUN og fail-closed: kun den suverene eieren (eier-person i eier-tenant, ingen delegasjon) får rapporter, samme
+  // `resolveAuthorityMode` som Policy Gateway bruker. `scanForSecrets` kjøres som siste forsvarslinje over alle menneskelesbare strenger. Sentrene leser kun eksisterende kilder; de skriver ingenting.
+  const controlCenters = new ControlCenterRegistry({
+    isOwner: (identity) => resolveAuthorityMode({ owner_person_id: owner.owner_person_id, owner_tenants: [owner.tenant_id] }, identity) === "SOVEREIGN",
+    redact: (text) => scanForSecrets(text).text
+  });
+  registerControlCenters(controlCenters, { pool, env: process.env });
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(githubRateLimitController),
@@ -942,7 +951,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
           }
         },
         slo: { report: sloReports },
-        evolution: { report: evolutionReports }
+        evolution: { report: evolutionReports },
+        controlCenters
       }))),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten

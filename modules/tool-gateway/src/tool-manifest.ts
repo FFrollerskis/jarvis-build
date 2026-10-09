@@ -107,6 +107,7 @@ const EFFECT_OVERRIDES: Record<string, Effect> = {
   [k("executive", "get_self_diagnosis")]: "read",
   [k("executive", "get_slo_report")]: "read",
   [k("executive", "get_evolution_report")]: "read",
+  [k("executive", "get_control_center")]: "read",
   // D-416: delegeringsnivået - oppretter en intern, lesende bakgrunnsjobb (write, klasse B) / leser jobbstatus.
   [k("tasks", "delegate_background_task")]: "write",
   [k("tasks", "get_task_status")]: "read"
@@ -129,6 +130,14 @@ function inferDataZone(tool_id: string): DataZone {
   if (JARVIS_CORE_NAMESPACES.has(tool_id)) return "internal";
   return "vendor_cloud";
 }
+
+/**
+ * WP-H0: eksplisitte sensitivitetsmerker per HANDLING (overstyrer utledningen fra navnerommet). `executive.get_control_center` leverer eierens konfigurasjonsmetadata (hvilke tjenester som er koblet til,
+ * kostnad, autoritet, leverandørhelse) - aldri «public», selv om resten av executive-lesingene er det.
+ */
+const SENSITIVITY_OVERRIDES: Record<string, Sensitivity> = {
+  [k("executive", "get_control_center")]: "private"
+};
 
 function inferSensitivity(tool_id: string): Sensitivity {
   if (FINANCIAL_NAMESPACES.test(tool_id)) return "restricted";
@@ -247,7 +256,7 @@ export function buildToolManifest(defs: ReadonlyArray<ToolDefinition>): ToolMani
       risk,
       effect,
       data_zone: inferDataZone(def.tool_id),
-      sensitivity: inferSensitivity(def.tool_id),
+      sensitivity: SENSITIVITY_OVERRIDES[key] ?? inferSensitivity(def.tool_id),
       cost: inferCost(def.tool_id, effect),
       network: inferNetwork(def.tool_id, def),
       idempotency: risk === "D" || effect === "pay" || effect === "send" ? "required" : effect === "read" ? "none" : "recommended",

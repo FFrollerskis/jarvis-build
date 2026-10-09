@@ -1,6 +1,7 @@
 import type { SloReport } from "./slo/index.ts";
 import { composeSloReport, SLO_CATALOG } from "./slo/index.ts";
 import { composeEvolutionReport, type EvolutionReport } from "./evolution/index.ts";
+import { composeControlCenterOverview, explainControlCenterNo, type ControlCenterOverview, type ControlCenterRegistry, type ControlCenterReport } from "./control-center/index.ts";
 import { buildLimitationRegistry, composeSelfDiagnosis, type LimitationInput, type ObservationReader, type SelfDiagnosis } from "./self-model/index.ts";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import type { FinanceKillSwitch } from "@jarvis/finance";
@@ -92,6 +93,11 @@ export interface ExecutiveServiceOptions {
   slo?: { report(): Promise<SloReport> };
   /** WP-B (D-452): evolusjonsporter i observasjonsmodus (injisert fra `apps/api`; kun lesing - utfører aldri en endring). */
   evolution?: { report(): Promise<EvolutionReport> };
+  /**
+   * WP-H0 (UA-11 Admin Control Center): registeret over de ti kontrollsentrene (injisert fra `apps/api`; kun lesing - sentrene skriver ingenting, handlingene deres peker på eksisterende ruter).
+   * Uten registeret: oversikten sier ærlig at ingen sentre er koblet inn (aldri en gjetning om at alt er i orden).
+   */
+  controlCenters?: ControlCenterRegistry;
 }
 
 export class ExecutiveService {
@@ -378,6 +384,29 @@ export class ExecutiveService {
       as_of: now,
       sections: [{ ev: "EV-0…EV-23", title_no: "Evolusjonsporter", mode: "observe", status: "UNKNOWN", summary_no: "Ingen kilde er koblet inn, så ingenting kan vurderes.", findings: [], source: "ingen kilde koblet inn", observed_at: null }]
     });
+  }
+
+  /**
+   * WP-H0: eier-kun-sjekken for `executive.get_control_center` (brukes av verktøydefinisjonens `parameterAuthorizer`, slik at et avslag blir en vanlig `tool.denied`-revisjonsrad FØR noe bygges).
+   * Uten registeret er det ingenting å lekke, så sjekken slipper gjennom.
+   */
+  authorizeControlCenter(identity: IdentityContext): { allowed: boolean; reason: string } {
+    return this.options.controlCenters ? this.options.controlCenters.authorize(identity) : { allowed: true, reason: "no_control_centers" };
+  }
+
+  /** WP-H0: oversikt over de ti kontrollsentrene (registrerte bygges, øvrige listes som ikke koblet inn). RENT lesende. */
+  async getControlCenterOverview(identity: IdentityContext): Promise<ControlCenterOverview> {
+    const registry = this.options.controlCenters;
+    if (registry) return registry.overview(identity);
+    return composeControlCenterOverview([], new Date());
+  }
+
+  /** WP-H0: full rapport for ETT senter + deterministisk forklaring, eller `null` når senteret ikke er koblet inn. RENT lesende. */
+  async getControlCenterReport(identity: IdentityContext, center: string): Promise<{ report: ControlCenterReport; explanation_no: string } | null> {
+    const registry = this.options.controlCenters;
+    if (!registry) return null;
+    const report = await registry.report(center, identity);
+    return report === null ? null : { report, explanation_no: explainControlCenterNo(report) };
   }
 
   async getCapabilityStatus(servingModel?: { provider: string; model: string }): Promise<CapabilityStatus> {
