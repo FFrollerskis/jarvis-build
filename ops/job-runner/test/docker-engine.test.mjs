@@ -46,6 +46,9 @@ async function realDocker(engine) {
   return { exec, calls };
 }
 
+/** Nyere Docker-CLI-er serialiserer et utelatt felt som `[]`/`{}`/`""` der eldre utelater det (null/undefined). Sikkerhetsinnholdet er det samme: ingen oppføringer. */
+const absentOrEmpty = (v) => v == null || (Array.isArray(v) ? v.length === 0 : typeof v === "object" ? Object.keys(v).length === 0 : v === "");
+
 async function setup(runner = {}) {
   const engine = await startFakeEngine();
   cleanups.push(() => engine.stop());
@@ -90,7 +93,7 @@ describe.skipIf(!HAS_DOCKER)("ekte Docker-CLI -> falsk Engine API: containerkonf
     expect(host.Privileged).toBe(false);
     expect(host.ReadonlyRootfs).toBe(true);
     expect(host.CapDrop).toEqual(["ALL"]);
-    expect(host.CapAdd ?? null).toBeNull();
+    expect(absentOrEmpty(host.CapAdd), `host.CapAdd=${JSON.stringify(host.CapAdd)}`).toBe(true);
     expect(host.SecurityOpt).toEqual(["no-new-privileges:true"]);
     expect(c.User).toBe("10001:10001");
     expect(host.Init).toBe(true);
@@ -103,18 +106,18 @@ describe.skipIf(!HAS_DOCKER)("ekte Docker-CLI -> falsk Engine API: containerkonf
     expect(host.NetworkMode).toBe("jarvis-jobs");
     expect(host.PortBindings).toEqual({});
     expect(host.PublishAllPorts).toBe(false);
-    expect(host.Dns ?? null).toBeNull();
-    expect(host.ExtraHosts ?? null).toBeNull();
+    expect(absentOrEmpty(host.Dns), `host.Dns=${JSON.stringify(host.Dns)}`).toBe(true);
+    expect(absentOrEmpty(host.ExtraHosts), `host.ExtraHosts=${JSON.stringify(host.ExtraHosts)}`).toBe(true);
     expect(host.PidMode).toBe("");
     expect(host.IpcMode).toBe("");
     expect(host.UsernsMode).toBe("");
     expect(host.UTSMode).toBe("");
     expect(host.CgroupnsMode).toBe("");
     expect(host.Devices).toEqual([]);
-    expect(host.DeviceRequests ?? null).toBeNull();
+    expect(absentOrEmpty(host.DeviceRequests), `host.DeviceRequests=${JSON.stringify(host.DeviceRequests)}`).toBe(true);
     // filsystem (D-32 port 3-5): nøyaktig ÉN bind-mount (/work), ellers kun tmpfs; ingen Binds, ingen volumer, ingen docker.sock noe sted
     expect(host.Mounts).toEqual([{ Type: "bind", Source: join(h.baseDir, job.job_id, "work"), Target: "/work" }]);
-    expect(host.Binds ?? null).toBeNull();
+    expect(absentOrEmpty(host.Binds), `host.Binds=${JSON.stringify(host.Binds)}`).toBe(true);
     expect(c.Volumes).toEqual({});
     expect(Object.keys(host.Tmpfs).sort()).toEqual(["/home/job", "/tmp"]);
     expect(host.Tmpfs["/tmp"]).toBe("rw,noexec,nosuid,nodev,size=256m");
@@ -123,7 +126,7 @@ describe.skipIf(!HAS_DOCKER)("ekte Docker-CLI -> falsk Engine API: containerkonf
     // identitet og merking
     expect(c.Image).toBe(IMAGE_ID);
     expect(c.Cmd).toEqual(["sleep", "infinity"]);
-    expect(c.Entrypoint ?? null).toBeNull();
+    expect(absentOrEmpty(c.Entrypoint), `c.Entrypoint=${JSON.stringify(c.Entrypoint)}`).toBe(true);
     expect(c.WorkingDir).toBe("/work");
     expect(c.Labels).toEqual({ "jarvis.role": "job", "jarvis.task_id": "task-42" });
     // env: proxy + HOME + git-identitet (konstanter) + EXAKT de navngitte jobb-variablene; INGEN credentials
@@ -167,7 +170,9 @@ describe.skipIf(!HAS_DOCKER)("ekte Docker-CLI -> falsk Engine API: containerkonf
     expect(cfg.WorkingDir).toBe("/work");
     expect(cfg.Env).toEqual(["CI=1"]);
     expect(cfg.DetachKeys).toBe("");
-    expect(Object.keys(cfg).sort()).toEqual(["AttachStderr", "AttachStdin", "AttachStdout", "Cmd", "DetachKeys", "Env", "Privileged", "Tty", "User", "WorkingDir"]);
+    // Nyere Docker-CLI-er sender i tillegg `Detach` (false for en tilknyttet exec). Nøkkelsettet ellers er låst; `Detach` tillates kun som false/utelatt (true ville frikoblet prosessen fra runneren).
+    expect(cfg.Detach === undefined || cfg.Detach === false, `Detach=${String(cfg.Detach)}`).toBe(true);
+    expect(Object.keys(cfg).filter((k) => k !== "Detach").sort()).toEqual(["AttachStderr", "AttachStdin", "AttachStdout", "Cmd", "DetachKeys", "Env", "Privileged", "Tty", "User", "WorkingDir"]);
     // containernavnet i URL-en er runnerens eget
     expect(execs[0].path).toBe(`/containers/jarvis-job-${job.job_id}/exec`);
   }, 60_000);
