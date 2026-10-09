@@ -63,6 +63,7 @@ import {
   runMemoryReembedSweepForAllTenants,
   runMemoryResensitizeSweepForAllTenants,
   resensitizeModeFromEnv,
+  type ResensitizeSweepSummary,
   MemoryRetriever,
   MemoryWriter,
   SummaryService,
@@ -118,6 +119,7 @@ import { ConversationEngine } from "./conversation.ts";
 import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
 import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
+import { createRadarState } from "./evolution-radar.ts";
 import { createEvolutionReportProvider } from "./evolution-source.ts";
 import { startFollowUpPush } from "./follow-up-push.ts";
 import { buildValueRuntimeFacts } from "./value-facts.ts";
@@ -185,14 +187,25 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const sloReports = createSloReportProvider(pool, owner.tenant_id);
   Object.assign(selfModelReaders, buildSloReaders(sloReports));
   // WP-B (D-452): evolusjonsportene (EV-0…EV-23) i OBSERVASJONSMODUS - kun lesing av eksisterende observerbarhet, `acts: false`. Selvendring er fortsatt frosset (D-397).
+  // EV-3: radaren er INERT uten `JARVIS_RADAR_SOURCES` (ingen nettverkskall). Kildene velges av eieren; innholdet går gjennom sikkerhetssonen og forlater den aldri (kun status vises).
+  const evolutionRadar = createRadarState(process.env);
+  // EV-10: siste nattlige omregning av lagret sensitivitet (D-451) holdes i minnet så rapporten kan vise tallet uten å skanne på nytt.
+  let lastResensitize: ResensitizeSweepSummary | null = null;
+  const rememberResensitize = (summary: ResensitizeSweepSummary): ResensitizeSweepSummary => {
+    lastResensitize = summary;
+    return summary;
+  };
   const evolutionReports = createEvolutionReportProvider({
+    radar: evolutionRadar,
+    resensitize: () => lastResensitize,
     pool,
     tenantId: owner.tenant_id,
     ev0Status: () => getLastEv0BootStatus(),
     slo: sloReports,
     connectors: () => listConnectorStatus(toolGateway),
     killSwitchActive: async () => (await selfModelControls.getControlState()).kill_switch.active,
-    mesh: () => gateway.meshStatus()
+    mesh: () => gateway.meshStatus(),
+    toolSurface: () => modelToolSurface
   });
   // WP-C4 (UA0-RUNRATE): Value Center - bruk per verdiløkke fra eksisterende tabeller (kun aggregater/tidsstempler, lesing som app-rolle under RLS). Den daglige løperens helse (global tabell) vises kun for eierens tenant.
   const valueSource = createValueMeasurementSource(pool, { schedulerTenantId: owner.tenant_id });
@@ -1639,8 +1652,20 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "memory-resensitize-sweep", envHour("JARVIS_MEMORY_RESENSITIZE_SWEEP_HOUR", 3)
   ).start(() =>
-    runMemoryResensitizeSweepForAllTenants(pool, { mode: resensitizeModeFromEnv(process.env["JARVIS_MEMORY_RESENSITIZE"]) }).then((summary) => assertNoSweepFailures("memory-resensitize-sweep", summary.failed))
+    runMemoryResensitizeSweepForAllTenants(pool, { mode: resensitizeModeFromEnv(process.env["JARVIS_MEMORY_RESENSITIZE"]) }).then(rememberResensitize).then((summary) => assertNoSweepFailures("memory-resensitize-sweep", summary.failed))
   );
+  // EV-3 (D-452): radar-sveip av KILDER EIEREN SELV HAR VALGT (`JARVIS_RADAR_SOURCES`) - inert uten dem (ingen nettverkskall). Hvert svar går gjennom sikkerhetssonen (ubetrodd forskning, karantene ved mistenkelig innhold);
+  // kun status per kilde beholdes i minnet, aldri innholdet. Ett sveip kort etter oppstart (DailyScheduler husker at dagens kjøring er gjort, men det beholdes ikke over en omstart).
+  if (evolutionRadar.configured > 0) {
+    const radarSweep = async (): Promise<void> => {
+      const result = await evolutionRadar.run();
+      console.log(JSON.stringify({ msg: "evolution_radar_sweep_done", configured: result.configured, ok: result.ok, quarantined: result.quarantined, failed: result.failed, security_events: result.security_events }));
+    };
+    new DailyScheduler(pool, "evolution-radar-sweep", envHour("JARVIS_RADAR_SWEEP_HOUR", 6)).start(radarSweep);
+    setTimeout(() => {
+      radarSweep().catch((err: unknown) => console.error(JSON.stringify({ msg: "evolution_radar_boot_sweep_failed", error: (err as Error).message.slice(0, 200) })));
+    }, 60_000).unref();
+  }
   // D-386: nattlig rekompilering av den alltid-tilstede eierprofilen per space (deterministisk, ingen LLM).
   new DailyScheduler(
     pool, "memory-profile-sweep", envHour("JARVIS_MEMORY_PROFILE_SWEEP_HOUR", 4)
