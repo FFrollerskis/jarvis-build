@@ -47,6 +47,8 @@ docker compose logs worker | grep knowledge_sources
 Felt som gjelder alle kilder: `id` (små bokstaver/sifre/`._:-`, 1-63 tegn, unik per rom), `kind`, `memory_space` (påkrevd, et kjent rom), `enabled` (false = valideres men kjører ikke), `default_sensitivity`
 (gulv: `normal|sensitive|special`, standard `sensitive`), `max_sensitivity` (tak: dokumenter strengere enn dette indekseres IKKE), `trust` (`untrusted` standard | `internal`), `retention_days` (1-3650),
 `sync_interval_minutes` (15-10080, standard 360). Ukjente felt avvises (også `tenant_id` - tenant kommer alltid fra eieren).
+Sensitivitet: stikkordsklassifiseringen merker hemmeligheter, helse og økonomi som `special` (aldri til en skymodell, men fortsatt lagret og synlig for lokal modell). For kilder som kan inneholde slikt
+(kode, konfigurasjon, private notater) kan du sette `"max_sensitivity": "sensitive"` - da indekseres `special`-dokumenter slett ikke. `default_sensitivity: "special"` holder en hel kilde borte fra skymodeller.
 
 | kind | Påkrevd | Valgfritt |
 |---|---|---|
