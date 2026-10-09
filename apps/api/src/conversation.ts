@@ -38,6 +38,8 @@ export interface ConversationDeps {
   selfDiagnosis?: { run(identity: IdentityContext, opts: { brief: boolean }): Promise<string | null> };
   /** EV-2 (D-417): tjenestemål/forverring/dataskvalitet for hurtigbanen (`executive.get_slo_report` via Tool Gateway). Udefinert = ærlig «kan ikke lese». */
   sloReport?: { run(identity: IdentityContext): Promise<string | null> };
+  /** WP-B (D-452): «hvordan utvikler du deg» for hurtigbanen (`executive.get_evolution_report` via Tool Gateway) - evolusjonsportene i observasjonsmodus. Udefinert = ærlig «kan ikke lese». */
+  evolutionReport?: { run(identity: IdentityContext): Promise<string | null> };
   /** D-424: «hva koster du» for hurtigbanen (`run_rate.get_cost_overview` via Tool Gateway). */
   costReport?: { run(identity: IdentityContext): Promise<string | null> };
   /** WP-C4: «hva har du hjulpet meg med»/«verdi»/«bruk» for hurtigbanen (`executive.get_value_report` via Tool Gateway/Policy). Udefinert = ærlig «kan ikke lese». */
@@ -881,6 +883,10 @@ export class ConversationEngine {
       case "slo_report": {
         const text = this.deps.sloReport ? await this.deps.sloReport.run(identity).catch(() => null) : null;
         return { reply: text ?? "Jeg kan ikke lese tjenestemålene akkurat nå, så jeg vil ikke påstå at ytelsen er bra.", routed: "fast" };
+      }
+      case "evolution_report": {
+        const text = this.deps.evolutionReport ? await this.deps.evolutionReport.run(identity).catch(() => null) : null;
+        return { reply: text ?? "Jeg kan ikke lese evolusjonsportene akkurat nå, så jeg vil ikke påstå at utviklingen min er i orden.", routed: "fast" };
       }
       case "cost_report": {
         const text = this.deps.costReport ? await this.deps.costReport.run(identity).catch(() => null) : null;

@@ -50,6 +50,19 @@ describe("fastRoute: slo_report (EV-2, D-417)", () => {
   });
 });
 
+describe("fastRoute: evolution_report (WP-B, D-452)", () => {
+  it("gjenkjenner spørsmål om egen utvikling", () => {
+    for (const text of ["hvordan utvikler du deg", "Hvordan utvikler du deg?", "evolusjon", "evolusjonsrapport", "evolusjonsstatus", "evolusjonsporter", "hva kan du forbedre", "hva kan du forbedre hos deg selv?", "hva har du lært", "selvforbedring", "self-improvement"]) {
+      expect(fastRoute(text), text).toEqual({ kind: "evolution_report" });
+    }
+  });
+  it("er presis: setninger som bare nevner ordene går ikke hit", () => {
+    for (const text of ["evolusjon av arter i boken jeg leser", "hvordan utvikler du deg selv hvis jeg ber om et nytt API", "hva har du lært av e-posten fra Ola", "hva kan du forbedre i koden"]) {
+      expect(fastRoute(text)?.kind, text).not.toBe("evolution_report");
+    }
+  });
+});
+
 describe("fastRoute: cost_report og delegate_background (D-424)", () => {
   it("«hva koster du» og varianter gir cost_report", () => {
     for (const text of ["hva koster du", "Hva koster du?", "hva koster det", "hva koster du i måneden", "run-rate", "kostnader", "api-regning", "hvor mye har du kostet", "regningen"]) {
