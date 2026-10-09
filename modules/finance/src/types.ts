@@ -192,6 +192,18 @@ export class SubmitInFlightError extends Error {
 }
 
 /**
+ * WP-F1 (D-462; review M-F1): duplikatvakten INNE i reservasjonstransaksjonen. En annen intensjon mot samme leverandør (provider + navn), beløp og valuta er allerede sendt
+ * (siste døgn) eller står reservert/med ukjent utfall, og eieren har ikke kvittert den (`confirm_possible_duplicate_of`). Kastes FØR `draft -> submitted` og FØR noe leverandørkall.
+ * Meldingen er den samme koden som den tidlige validatoren avviser med (`possible_duplicate_of:<id>`).
+ */
+export class PossibleDuplicatePaymentError extends Error {
+  constructor(readonly paymentIntentId: string, readonly duplicateOfId: string) {
+    super(`possible_duplicate_of:${duplicateOfId}`);
+    this.name = "PossibleDuplicatePaymentError";
+  }
+}
+
+/**
  * WP-F1: leverandørutfallet er UKJENT (tidsavbrudd/nettverk/5xx/409 etter at kallet kan ha nådd leverandøren). Meldingen begynner med `outcome_unknown`
  * slik at ToolGateway behandler den som et ukjent utfall (ledger `unverified`, aldri retry-bar med samme nøkkel, `reconcile()`, varsel til eieren) -
  * i motsetning til en entydig avvisning (`failed`, retry tillatt). Den opprinnelige feilen beholdes som `cause` (aldri som tekst - kan bære leverandørdetaljer).

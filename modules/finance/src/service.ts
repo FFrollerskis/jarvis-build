@@ -3,7 +3,7 @@ import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
 import type { SubmitChildCheck, SubmitIntentCheck } from "@jarvis/tool-gateway";
-import { buildSubmitChildCheck, buildSubmitIntentCheck } from "./class-d-checks.ts";
+import { buildSubmitChildCheck, buildSubmitIntentCheck, lockAndFindUnacknowledgedDuplicate } from "./class-d-checks.ts";
 import { providerAmountEchoMatches, toOreInteger } from "./ore.ts";
 import { malformedWebhookKey, rejectionCode } from "./webhook-guard.ts";
 import { fikenPostingDescription } from "./reconciliation.ts";
@@ -66,6 +66,7 @@ import {
   CaptureNotFoundError,
   SubmitInFlightError,
   ProviderOutcomeUnknownError,
+  PossibleDuplicatePaymentError,
   VIPPS_STATUS_TO_JARVIS_STATE,
   VIPPS_MODIFICATION_EVENTS
 } from "./types.ts";
@@ -297,6 +298,15 @@ async function readForUpdate(client: pg.PoolClient, tenantId: string, paymentInt
 /** WP-F1: SQL-fragment som fjerner ett avviksflagg fra en jsonb-liste (strenger) - brukes når en innsending ENDELIG fikk et leverandørsvar. */
 const CLEAR_SUBMIT_UNKNOWN_FLAG = "anomaly_flags = anomaly_flags - 'SUBMIT_OUTCOME_UNKNOWN'";
 
+/**
+ * WP-F1 (review M-F1): valg for `submitPaymentIntent`. `duplicateGuard` slår på duplikatvakten INNE i reservasjonstransaksjonen (advisory-lås + ny kandidatspørring, se
+ * `lockAndFindUnacknowledgedDuplicate`). `FinanceTransport` (ToolGateway-veien - den ENESTE produksjonsveien til en pengehandling) setter den ALLTID, med de kandidat-id-ene
+ * eieren har kvittert via `confirm_possible_duplicate_of` (tom liste = ingen kvittert). Direkte kall uten valget (tester, interne skript som ikke går via gatewayen) får ikke vakten.
+ */
+export interface SubmitPaymentIntentOptions {
+  duplicateGuard?: { confirmedDuplicateOf: readonly string[] };
+}
+
 export interface FinanceServiceOptions {
   /** Overstyrer lease/idempotensvindu (kun tester og drift-tuning) - standard i `submit-guard.ts`. */
   submitTiming?: Partial<SubmitTiming>;
@@ -499,7 +509,9 @@ export class FinanceService {
    * leverandør som faktisk trengs først er kjent FØRST etter at raden er
    * lest (`current.provider`).
    */
-  async submitPaymentIntent(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, credentialsProvider: FikenCredentialsProvider, actorPersonId?: string): Promise<PaymentIntent> {
+  async submitPaymentIntent(
+    tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, credentialsProvider: FikenCredentialsProvider, actorPersonId?: string, options: SubmitPaymentIntentOptions = {}
+  ): Promise<PaymentIntent> {
     // D-392 (JARVIS-019): reserve-then-execute. Fase 1 (kort transaksjon) validerer og REserverer intensjonen (`draft -> submitted`) og
     // committer FØR leverandørkallet; fase 2 kaller leverandøren UTEN åpen DB-transaksjon/radlås; fase 3 (kort transaksjon) lagrer utfallet.
     // En `submitted`-intent uten `provider_ref` betyr «innsending startet, utfall ukjent»: Stripe/Vipps gjenopptas trygt (deterministisk
@@ -578,6 +590,14 @@ export class FinanceService {
       // vendor-fri intent) omgår denne HELT - "ukjent forblir ukjent".
       if (current.vendor_id) {
         await assertValidVendorBinding(client, tenantId, paymentIntentId, current.vendor_id, current.provider, current.vendor_provider_ref);
+      }
+
+      // WP-F1 (review M-F1): duplikatvakten PÅ NYTT, serialisert, i SAMME transaksjon som reservasjonen (`reserve()` under). Den tidlige validatoren i ToolGateway leste kandidatene FØR
+      // dette, så to samtidige innsendinger av ulike intensjoner (samme leverandør/beløp/valuta) kunne begge slippe gjennom og begge kalle leverandøren. Advisory-låsen holdes til
+      // commit (da er `submitted` synlig), så den andre ser den første som «sendt» og avvises med samme `possible_duplicate_of:<id>`-kode - FØR noe leverandørkall.
+      if (options.duplicateGuard) {
+        const duplicateOf = await lockAndFindUnacknowledgedDuplicate(client, tenantId, current, options.duplicateGuard.confirmedDuplicateOf);
+        if (duplicateOf !== null) throw new PossibleDuplicatePaymentError(paymentIntentId, duplicateOf);
       }
 
       if (current.provider === "stripe") {
@@ -856,7 +876,19 @@ export class FinanceService {
       }
       throw err;
     }
-    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => steps.apply(client, prepared.plan, result));
+    try {
+      return await withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => steps.apply(client, prepared.plan, result));
+    } catch (applyErr) {
+      // WP-F1 (review M-F2): leverandørkallet er FULLFØRT - vi HAR svaret - men lagringen av utfallet feilet (DB-feil, trigger, tilkobling, COMMIT). Penger kan ha beveget seg, så dette er
+      // et UKJENT utfall, aldri en vanlig `failed` (retry-bar, ingen varsel): `ProviderOutcomeUnknownError` gir ledger `unverified`, umiddelbart «UTFALL UKJENT»-varsel til eieren og
+      // aldri en ny blind handling. Raden flagges `SUBMIT_OUTCOME_UNKNOWN` best-effort på EGEN tilkobling (sekundærfeil svelges og logges - den opprinnelige feilen skjules aldri: den er `cause`).
+      // Handlinger uten reservasjonsfase (`onCallError` mangler, f.eks. Vipps-kansellering, klasse C) beholder gammel oppførsel.
+      if (!steps.onCallError) throw applyErr;
+      await withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => steps.onCallError!(client, prepared.plan, "unknown", applyErr)).catch((cleanupErr) => {
+        console.error(JSON.stringify({ msg: "finance_submit_cleanup_failed", subject_id: steps.subjectId ?? null, phase: "after_provider_call", error: (cleanupErr as Error).message.slice(0, 120) }));
+      });
+      throw new ProviderOutcomeUnknownError(steps.subjectId ?? "unknown", `provider_call_completed_local_write_failed:${applyErr instanceof Error ? applyErr.message : String(applyErr)}`.slice(0, 110), applyErr);
+    }
   }
 
   /**
@@ -902,12 +934,13 @@ export class FinanceService {
       );
       return;
     }
-    await client.query(
+    const reverted = await client.query(
       `UPDATE ${table} SET state = 'draft', submitted_at = NULL, failure_reason = $3, updated_at = now()
        WHERE tenant_id = $1 AND ${idColumn} = $2 AND state = 'submitted'${refGuard}`,
       [tenantId, id, `outcome_unknown:${reason}`.slice(0, 200)]
     );
-    await this.appendChainAnomalyFlags(client, table, idColumn, id, ["SUBMIT_OUTCOME_UNKNOWN"]);
+    // Flagges kun når raden FAKTISK var uferdig: er leverandørsvaret allerede lagret (samtidig gjenopptakelse) finnes det intet ukjent utfall å varsle om.
+    if ((reverted.rowCount ?? 0) === 1) await this.appendChainAnomalyFlags(client, table, idColumn, id, ["SUBMIT_OUTCOME_UNKNOWN"]);
   }
 
   private async appendChainAnomalyFlags(client: pg.PoolClient, table: SubmitTable, idColumn: string, id: string, flags: readonly FinanceChainAnomalyType[]): Promise<void> {
@@ -944,50 +977,78 @@ export class FinanceService {
       //    `outcome_unknown:` slik at ToolGateway lagrer den som `unverified` i stedet for en retry-bar feil.
       const ambiguous = err instanceof AmbiguousProviderResponseError;
       const failureClass = ambiguous ? "not_executed" : classifyProviderFailure(err);
-      await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-        if (failureClass === "not_executed") {
+      if (failureClass === "not_executed") {
+        await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
           await client.query(
             `UPDATE payment_intents SET state = 'draft', submitted_at = NULL, first_submit_attempt_at = NULL, updated_at = now()
              WHERE tenant_id = $1 AND payment_intent_id = $2 AND state = 'submitted' AND provider_ref IS NULL`,
             [tenantId, paymentIntentId]
           );
-          return;
-        }
-        // Kallet er avsluttet (med ukjent utfall), så reservasjonen er IKKE lenger «pågående»: `submitted_at = NULL` regnes som utløpt lease. For Fiken/Neonomics
-        // gir en retry da umiddelbart `submit_outcome_unknown_reconcile_required` (ikke et misvisende «pågår»); for Stripe/Vipps rulles den tilbake til draft.
-        await client.query(
-          plan.idempotentAtProvider
-            ? `UPDATE payment_intents SET state = 'draft', submitted_at = NULL, updated_at = now()
-               WHERE tenant_id = $1 AND payment_intent_id = $2 AND state = 'submitted' AND provider_ref IS NULL`
-            : `UPDATE payment_intents SET submitted_at = NULL, updated_at = now()
-               WHERE tenant_id = $1 AND payment_intent_id = $2 AND state = 'submitted' AND provider_ref IS NULL`,
-          [tenantId, paymentIntentId]
-        );
-        await this.appendChainAnomalyFlags(client, "payment_intents", "payment_intent_id", paymentIntentId, ["SUBMIT_OUTCOME_UNKNOWN"]);
-        await insertEvent(client, tenantId, memorySpace, {
-          payment_intent_id: paymentIntentId, event_type: "anomaly_flagged",
-          summary: plan.idempotentAtProvider
-            ? "Innsending: utfall hos leverandøren er UKJENT (tidsavbrudd/nettverk) - en ny innsending gjenbruker samme Idempotency-Key"
-            : "Innsending: utfall hos leverandøren er UKJENT (tidsavbrudd/nettverk) - sjekk leverandøren og avstem FØR noe sendes på nytt",
-          actor_person_id: null, metadata: { anomaly_flags: ["SUBMIT_OUTCOME_UNKNOWN"], resubmittable_with_same_key: plan.idempotentAtProvider }
+        }).catch((cleanupErr) => {
+          console.error(JSON.stringify({ msg: "finance_submit_revert_failed", payment_intent_id: paymentIntentId, error: (cleanupErr as Error).message.slice(0, 120) }));
         });
-      }).catch((cleanupErr) => {
-        console.error(JSON.stringify({ msg: "finance_submit_revert_failed", payment_intent_id: paymentIntentId, error: (cleanupErr as Error).message.slice(0, 120) }));
-      });
-      if (failureClass === "unknown") {
-        throw new ProviderOutcomeUnknownError(paymentIntentId, (err instanceof Error ? err.message : String(err)).slice(0, 110), err);
+        throw err;
       }
-      throw err;
+      await this.recordUnknownSubmitOutcome(tenantId, memorySpace, paymentIntentId, plan.idempotentAtProvider, "call");
+      throw new ProviderOutcomeUnknownError(paymentIntentId, (err instanceof Error ? err.message : String(err)).slice(0, 110), err);
     }
-    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-      const current = await readForUpdate(client, tenantId, paymentIntentId, true);
-      if (!current) throw new PaymentIntentNotFoundError(paymentIntentId);
-      // En samtidig gjenopptakelse har allerede ferdigstilt den (leverandør-ID satt / terminal) -> ikke skriv på nytt. Er raden derimot rullet tilbake til
-      // `draft` av et parallelt, feilet kall MENS dette kallet hadde leverandørens svar, anvendes svaret likevel: leverandøren HAR objektet, og å forkaste
-      // det ville etterlatt en betaling Jarvis ikke vet om.
-      if (current.provider_ref || (current.state !== "submitted" && current.state !== "draft")) return current;
-      await client.query(`UPDATE payment_intents SET ${CLEAR_SUBMIT_UNKNOWN_FLAG} WHERE tenant_id = $1 AND payment_intent_id = $2`, [tenantId, paymentIntentId]);
-      return finalizer(client);
+    try {
+      return await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+        const current = await readForUpdate(client, tenantId, paymentIntentId, true);
+        if (!current) throw new PaymentIntentNotFoundError(paymentIntentId);
+        // En samtidig gjenopptakelse har allerede ferdigstilt den (leverandør-ID satt / terminal) -> ikke skriv på nytt. Er raden derimot rullet tilbake til
+        // `draft` av et parallelt, feilet kall MENS dette kallet hadde leverandørens svar, anvendes svaret likevel: leverandøren HAR objektet, og å forkaste
+        // det ville etterlatt en betaling Jarvis ikke vet om.
+        if (current.provider_ref || (current.state !== "submitted" && current.state !== "draft")) return current;
+        await client.query(`UPDATE payment_intents SET ${CLEAR_SUBMIT_UNKNOWN_FLAG} WHERE tenant_id = $1 AND payment_intent_id = $2`, [tenantId, paymentIntentId]);
+        return finalizer(client);
+      });
+    } catch (finalizeErr) {
+      // WP-F1 (review M-F2): leverandørkallet er FULLFØRT (vi har svaret - Stripe/Vipps-objektet eller Fiken-bilaget finnes), men lagringen av utfallet feilet (DB-feil, trigger,
+      // tilkobling, COMMIT). Penger kan ha beveget seg: dette er et UKJENT utfall - ikke en vanlig `failed` (retry-bar, uten varsel). `ProviderOutcomeUnknownError` gir ledger `unverified`,
+      // umiddelbart «UTFALL UKJENT»-varsel og aldri en ny blind handling; `SUBMIT_OUTCOME_UNKNOWN` settes best-effort på EGEN tilkobling (sekundærfeil svelges og logges - den
+      // opprinnelige feilen skjules aldri, den er `cause`). Stripe/Vipps gjenopptas senere med samme Idempotency-Key; Fiken/Neonomics krever avstemming (Fiken-markøren finner bilaget).
+      await this.recordUnknownSubmitOutcome(tenantId, memorySpace, paymentIntentId, plan.idempotentAtProvider, "local_write");
+      throw new ProviderOutcomeUnknownError(
+        paymentIntentId, `provider_call_completed_local_write_failed:${finalizeErr instanceof Error ? finalizeErr.message : String(finalizeErr)}`.slice(0, 110), finalizeErr
+      );
+    }
+  }
+
+  /**
+   * WP-F1: bokføringen når utfallet hos leverandøren er UKJENT (enten selve kallet endte uten entydig svar, eller kallet LYKTES og lagringen av svaret feilet - review M-F2).
+   * Egen transaksjon på egen tilkobling, best-effort: en sekundærfeil logges og svelges (kallestedet kaster uansett `ProviderOutcomeUnknownError`).
+   * Kallet er avsluttet, så reservasjonen er IKKE lenger «pågående»: `submitted_at = NULL` regnes som utløpt lease. For Fiken/Neonomics gir en retry da umiddelbart
+   * `submit_outcome_unknown_reconcile_required` (ikke et misvisende «pågår»); for Stripe/Vipps rulles den tilbake til draft (samme Idempotency-Key gjenbrukes innenfor vinduet).
+   * Flagges kun når raden FAKTISK var uferdig: er leverandørsvaret allerede lagret (samtidig gjenopptakelse, eller et COMMIT som gikk gjennom men hvis kvittering gikk tapt) finnes
+   * det intet ukjent utfall å varsle om.
+   */
+  private async recordUnknownSubmitOutcome(
+    tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, idempotentAtProvider: boolean, cause: "call" | "local_write"
+  ): Promise<void> {
+    await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const reverted = await client.query(
+        idempotentAtProvider
+          ? `UPDATE payment_intents SET state = 'draft', submitted_at = NULL, updated_at = now()
+             WHERE tenant_id = $1 AND payment_intent_id = $2 AND state = 'submitted' AND provider_ref IS NULL`
+          : `UPDATE payment_intents SET submitted_at = NULL, updated_at = now()
+             WHERE tenant_id = $1 AND payment_intent_id = $2 AND state = 'submitted' AND provider_ref IS NULL`,
+        [tenantId, paymentIntentId]
+      );
+      if ((reverted.rowCount ?? 0) !== 1) return;
+      await this.appendChainAnomalyFlags(client, "payment_intents", "payment_intent_id", paymentIntentId, ["SUBMIT_OUTCOME_UNKNOWN"]);
+      const what = cause === "call"
+        ? "utfall hos leverandøren er UKJENT (tidsavbrudd/nettverk)"
+        : "leverandøren HAR svart, men lagringen av svaret feilet - utfallet er UKJENT lokalt";
+      await insertEvent(client, tenantId, memorySpace, {
+        payment_intent_id: paymentIntentId, event_type: "anomaly_flagged",
+        summary: idempotentAtProvider
+          ? `Innsending: ${what} - en ny innsending gjenbruker samme Idempotency-Key`
+          : `Innsending: ${what} - sjekk leverandøren og avstem FØR noe sendes på nytt`,
+        actor_person_id: null, metadata: { anomaly_flags: ["SUBMIT_OUTCOME_UNKNOWN"], resubmittable_with_same_key: idempotentAtProvider, cause }
+      });
+    }).catch((cleanupErr) => {
+      console.error(JSON.stringify({ msg: "finance_submit_revert_failed", payment_intent_id: paymentIntentId, cause, error: (cleanupErr as Error).message.slice(0, 120) }));
     });
   }
 

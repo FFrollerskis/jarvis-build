@@ -73,7 +73,12 @@ export class FinanceTransport implements ToolTransport {
         return { data: rows as unknown as JsonValue };
       }
       case "submit_payment_intent": {
-        const row = await this.service.submitPaymentIntent(tenantId, memorySpace, requireString(parameters, "payment_intent_id"), this.credentialsProvider, actorPersonId);
+        // WP-F1 (review M-F1): duplikatvakten kjøres ALLTID inne i reservasjonen når kallet kommer via gatewayen. `confirm_possible_duplicate_of` (zod-validert array av id-er)
+        // er eierens eksplisitte kvittering; er verdien noe annet enn en streng-liste, feiler kallet lukket i stedet for å tolkes som «ingen kvittert».
+        const row = await this.service.submitPaymentIntent(
+          tenantId, memorySpace, requireString(parameters, "payment_intent_id"), this.credentialsProvider, actorPersonId,
+          { duplicateGuard: { confirmedDuplicateOf: optionalStringArray(parameters, "confirm_possible_duplicate_of") } }
+        );
         return { external_id: row.payment_intent_id, data: row as unknown as JsonValue };
       }
       case "settle_payment_intent": {
@@ -162,6 +167,13 @@ function requireString(parameters: Record<string, JsonValue>, key: string): stri
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(`finance_missing_parameter:${key}`);
   }
+  return value;
+}
+
+function optionalStringArray(parameters: Record<string, JsonValue>, key: string): string[] {
+  const value = parameters[key];
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.every((x): x is string => typeof x === "string" && x.length > 0)) throw new Error(`finance_invalid_parameter:${key}`);
   return value;
 }
 

@@ -79,22 +79,46 @@ async function vendorBindingStatus(client: pg.PoolClient, tenantId: string, inte
 }
 
 /**
- * Mulige duplikater: ANDRE intensjoner mot samme leverandørtype med samme beløp, valuta og leverandørnavn som allerede er sendt (siste døgn) eller står
- * fast som «innsending startet, utfall ukjent» (uansett alder - de kan ha gått gjennom). Eieren kvitterer eksplisitt (`confirm_possible_duplicate_of`).
+ * Predikatet for «mulig duplikat» (delt av den tidlige validatoren og av vakten inne i reservasjonen - EN definisjon, aldri to som kan drifte fra hverandre):
+ * ANDRE intensjoner mot samme leverandørtype med samme beløp, valuta og leverandørnavn som allerede er sendt (siste døgn) eller står fast som
+ * «innsending startet, utfall ukjent» (uansett alder - de kan ha gått gjennom). Parametre: $1 tenant, $2 egen intensjon, $3 provider, $4 beløp, $5 valuta, $6 leverandørnavn.
  */
-async function duplicateCandidates(client: pg.PoolClient, tenantId: string, intent: PaymentIntent): Promise<Array<{ payment_intent_id: string; state: string; created_at: string }>> {
-  const { rows } = await client.query(
-    `SELECT payment_intent_id, state, created_at FROM payment_intents
-      WHERE tenant_id = $1 AND payment_intent_id <> $2 AND provider = $3 AND amount_ore = $4 AND currency = $5
+const DUPLICATE_PREDICATE = `tenant_id = $1 AND payment_intent_id <> $2 AND provider = $3 AND amount_ore = $4 AND currency = $5
         AND lower(btrim(vendor_name)) = lower(btrim($6))
         AND state IN ('submitted', 'provider_acknowledged', 'settled')
-        AND (state = 'submitted' OR COALESCE(submitted_at, created_at) > now() - interval '24 hours')
-      ORDER BY created_at DESC LIMIT 5`,
+        AND (state = 'submitted' OR COALESCE(submitted_at, created_at) > now() - interval '24 hours')`;
+
+/** Kandidatene den tidlige validatoren/forhåndsvisningen viser (nyeste først, maks 5). Eieren kvitterer eksplisitt for hver (`confirm_possible_duplicate_of`). */
+async function duplicateCandidates(client: pg.PoolClient, tenantId: string, intent: PaymentIntent): Promise<Array<{ payment_intent_id: string; state: string; created_at: string }>> {
+  const { rows } = await client.query(
+    `SELECT payment_intent_id, state, created_at FROM payment_intents WHERE ${DUPLICATE_PREDICATE} ORDER BY created_at DESC LIMIT 5`,
     [tenantId, intent.payment_intent_id, intent.provider, intent.amount_ore, intent.currency, intent.vendor_name]
   );
   return (rows as Array<{ payment_intent_id: string; state: string; created_at: Date | string }>).map((r) => ({
     payment_intent_id: r.payment_intent_id, state: r.state, created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at)
   }));
+}
+
+/**
+ * WP-F1 (review M-F1): duplikatvakten som TRANSAKSJONSSKOPET, SERIALISERT sjekk inne i reservasjonen. Den tidlige validatoren (preview/preflight) leser kandidatene FØR reservasjonen,
+ * så to samtidige innsendinger av ulike intensjoner for samme leverandør/beløp/valuta kunne begge se «ingen duplikat» og begge kalle leverandøren (TOCTOU, bekreftet 20 av 20).
+ * Her tas først en `pg_advisory_xact_lock` på (tenant, provider, beløp, valuta, normalisert leverandørnavn) - NØYAKTIG feltene predikatet over matcher på, og normaliseringen gjøres av
+ * SAMME SQL-uttrykk (`lower(btrim(...))`), slik at to intensjoner som predikatet regner som duplikater alltid får samme lås. Låsen holdes til reservasjonstransaksjonen COMMIT-er
+ * (`draft -> submitted` er da synlig), så den neste i køen ser den første som «sendt» når kandidatspørringen kjøres på nytt. Returnerer id-en til en ukvittert kandidat, ellers `null`.
+ * Kvitterte kandidater (`acknowledged`) regnes ikke: de ekskluderes i SQL (ingen avkorting av kandidatlisten kan skjule en ukvittert) og den nyeste av resten returneres.
+ */
+export async function lockAndFindUnacknowledgedDuplicate(
+  client: pg.PoolClient, tenantId: string, intent: PaymentIntent, acknowledged: readonly string[]
+): Promise<string | null> {
+  await client.query(
+    `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('finance-duplicate-guard'::text, $1::text, $2::text, $3::text, $4::text, lower(btrim($5::text)))::text, 0))`,
+    [tenantId, intent.provider, String(intent.amount_ore), intent.currency, intent.vendor_name]
+  );
+  const { rows } = await client.query(
+    `SELECT payment_intent_id FROM payment_intents WHERE ${DUPLICATE_PREDICATE} AND payment_intent_id <> ALL($7::text[]) ORDER BY created_at DESC LIMIT 1`,
+    [tenantId, intent.payment_intent_id, intent.provider, intent.amount_ore, intent.currency, intent.vendor_name, [...acknowledged]]
+  );
+  return (rows[0] as { payment_intent_id: string } | undefined)?.payment_intent_id ?? null;
 }
 
 const nullableNumber = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
