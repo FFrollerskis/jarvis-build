@@ -2,6 +2,7 @@ import type pg from "pg";
 import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import { orTsQuery, queryTerms, withMemoryTransaction, type EmbeddingProvider } from "@jarvis/memory";
 import type { KnowledgeSourceKind } from "@jarvis/tool-gateway";
+import { documentsMentioning, loadEntitiesForDocuments, mentionTargets } from "./entity-graph.ts";
 import { extractSnippet, neutralizeUntrustedText, sourceKindOf, sourceTypeOf, truncateText, TITLE_MAX_CHARS, URI_MAX_CHARS, type KnowledgeHit } from "./knowledge-hits.ts";
 import { classifyKnowledgeSensitivity } from "./sensitivity.ts";
 
@@ -38,6 +39,11 @@ export interface KnowledgeHitSearchOptions {
   limit?: number;
   /** Begrens til disse kildetypene (konfigurert `kind`, f.eks. `drive`). */
   source_kinds?: readonly KnowledgeSourceKind[];
+  /**
+   * Entitetsgrafen: kun dokumenter som NEVNER denne entiteten (navn, e-postadresse, domene, `eier/repo` eller prosjektnøkkel). Kandidatene er de lenkede dokumentene (også de som ikke treffer
+   * søketeksten, med lav rang), rangert etter søketeksten og deretter antall omtaler. Ingen kjent entitet = ingen treff.
+   */
+  mentions?: string | undefined;
 }
 
 /** Hvor mange kandidater hver gren (fulltekst/vektor) henter før fusjonen. */
@@ -167,32 +173,67 @@ export class KnowledgeRetriever {
 
     return withMemoryTransaction(this.pool, identity.tenant_id, options.spaces, async (client) => {
       const scores = new Map<string, { fts: number; sim: number }>();
-      const typeFilter = (n: number, column: string): string => (sourceTypes ? ` AND ${column} = ANY($${n}::text[])` : "");
+
+      // Entitetsfilter: kandidatene er de lenkede (ikke-slettede) dokumentene. Kildetype-filteret gjelder også dem.
+      let mentionCounts: Map<string, number> | undefined;
+      let mentionIds: string[] | undefined;
+      if (options.mentions !== undefined) {
+        const linked = await documentsMentioning(client, identity.tenant_id, options.spaces, mentionTargets(options.mentions));
+        if (linked.length === 0) return [];
+        const allowed = await client.query(
+          `SELECT knowledge_document_id FROM knowledge_documents WHERE deleted = false AND knowledge_document_id = ANY($1::text[])${sourceTypes ? " AND source_type = ANY($2::text[])" : ""}`,
+          sourceTypes ? [linked.map((d) => d.knowledge_document_id), sourceTypes] : [linked.map((d) => d.knowledge_document_id)]
+        );
+        const allowedIds = new Set((allowed.rows as Array<{ knowledge_document_id: string }>).map((r) => r.knowledge_document_id));
+        mentionIds = [...allowedIds];
+        if (mentionIds.length === 0) return [];
+        mentionCounts = new Map(linked.filter((d) => allowedIds.has(d.knowledge_document_id)).map((d) => [d.knowledge_document_id, d.mention_count]));
+        for (const id of mentionIds) scores.set(id, { fts: 0, sim: 0 });
+      }
+
+      // Felles tilleggsfiltre (kildetype og entitetsfilter) med løpende parameternummer etter de faste parameterne.
+      const filters = (typeColumn: string, idColumn: string, firstFree: number): { sql: string; params: unknown[] } => {
+        const params: unknown[] = [];
+        let sql = "";
+        if (sourceTypes) {
+          params.push(sourceTypes);
+          sql += ` AND ${typeColumn} = ANY($${firstFree + params.length - 1}::text[])`;
+        }
+        if (mentionIds) {
+          params.push(mentionIds);
+          sql += ` AND ${idColumn} = ANY($${firstFree + params.length - 1}::text[])`;
+        }
+        return { sql, params };
+      };
 
       if (tsQuery !== "") {
+        const f = filters("source_type", "knowledge_document_id", 2);
         const fts = await client.query(
           `SELECT knowledge_document_id, ts_rank_cd(fts, to_tsquery('norwegian', $1)) AS fts_rank
              FROM knowledge_documents
-            WHERE deleted = false AND fts @@ to_tsquery('norwegian', $1)${typeFilter(2, "source_type")}
+            WHERE deleted = false AND fts @@ to_tsquery('norwegian', $1)${f.sql}
             ORDER BY fts_rank DESC LIMIT ${CANDIDATE_LIMIT}`,
-          sourceTypes ? [tsQuery, sourceTypes] : [tsQuery]
+          [tsQuery, ...f.params]
         );
         for (const row of fts.rows as Array<{ knowledge_document_id: string; fts_rank: number | string }>) {
-          scores.set(row.knowledge_document_id, { fts: Number(row.fts_rank), sim: 0 });
+          const entry = scores.get(row.knowledge_document_id) ?? { fts: 0, sim: 0 };
+          entry.fts = Number(row.fts_rank);
+          scores.set(row.knowledge_document_id, entry);
         }
       }
 
       const pgv = await this.usesPgVector(client);
       const simExpr = pgv ? "1 - (e.vec <=> ($1::text)::vector)" : "cosine_sim(e.embedding, $1::real[])";
       const vecArg = pgv ? JSON.stringify(queryVector) : queryVector;
+      const vf = filters("d.source_type", "d.knowledge_document_id", 4);
       const vec = await client.query(
         `SELECT d.knowledge_document_id, ${simExpr} AS sim
            FROM knowledge_embeddings e
            JOIN knowledge_documents d ON d.knowledge_document_id = e.knowledge_document_id
-          WHERE d.deleted = false AND e.model = $2 AND e.dim = $3${pgv ? " AND e.vec IS NOT NULL" : ""} AND ${simExpr} >= 0.4${typeFilter(4, "d.source_type")}
+          WHERE d.deleted = false AND e.model = $2 AND e.dim = $3${pgv ? " AND e.vec IS NOT NULL" : ""} AND ${simExpr} >= 0.4${vf.sql}
           ORDER BY sim DESC LIMIT ${CANDIDATE_LIMIT}`,
         // D-396 (JARVIS-031): kun vektorer fra SAMME embedding-modell/dimensjon som spørringen.
-        sourceTypes ? [vecArg, this.embeddings.model, this.embeddings.dim, sourceTypes] : [vecArg, this.embeddings.model, this.embeddings.dim]
+        [vecArg, this.embeddings.model, this.embeddings.dim, ...vf.params]
       );
       for (const row of vec.rows as Array<{ knowledge_document_id: string; sim: number | string }>) {
         const entry = scores.get(row.knowledge_document_id) ?? { fts: 0, sim: 0 };
@@ -204,7 +245,7 @@ export class KnowledgeRetriever {
       const maxFts = Math.max(0.001, ...[...scores.values()].map((e) => e.fts));
       const ranked = [...scores.entries()]
         .map(([id, e]) => ({ id, score: 0.5 * (e.fts / maxFts) + 0.5 * e.sim }))
-        .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
+        .sort((a, b) => b.score - a.score || (mentionCounts?.get(b.id) ?? 0) - (mentionCounts?.get(a.id) ?? 0) || a.id.localeCompare(b.id))
         .slice(0, limit);
 
       const details = await client.query(
@@ -218,6 +259,12 @@ export class KnowledgeRetriever {
         const row = byId.get(id);
         if (!row) continue;
         hits.push(this.toHit(row, score, terms));
+      }
+      // Entitetsgrafen: hvilke entiteter hvert treff nevner (tom når grafen er av/ikke bygget for dokumentet).
+      const entities = await loadEntitiesForDocuments(client, identity.tenant_id, options.spaces, hits.map((h) => h.document_id));
+      for (const hit of hits) {
+        const list = entities.get(hit.document_id);
+        if (list !== undefined && list.length > 0) hit.entities = list;
       }
       return hits;
     });

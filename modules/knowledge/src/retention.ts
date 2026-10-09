@@ -1,6 +1,7 @@
 import type pg from "pg";
 import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import { withMemoryTransaction } from "@jarvis/memory";
+import { pruneOrphanEntities } from "./entity-graph.ts";
 
 /**
  * WP-D1 (UA-2): oppbevaring. En kilde kan ha en `retention_days`-frist (møtetranskripter og andre kilder med innhold som ikke skal ligge for alltid). Tre deler:
@@ -34,14 +35,8 @@ export async function deleteDocumentsWithDerived(client: pg.PoolClient, tenantId
   const entityIds = (candidates.rows as Array<{ entity_id: string }>).map((r) => r.entity_id);
   const links = await client.query("DELETE FROM knowledge_links WHERE tenant_id = $1 AND memory_space_id = $2 AND knowledge_document_id = ANY($3::text[])", [tenantId, space, idList]);
   counts.links = links.rowCount ?? 0;
-  if (entityIds.length > 0) {
-    const entities = await client.query(
-      `DELETE FROM knowledge_entities e WHERE e.tenant_id = $1 AND e.memory_space_id = $2 AND e.entity_id = ANY($3::text[])
-         AND NOT EXISTS (SELECT 1 FROM knowledge_links l WHERE l.tenant_id = e.tenant_id AND l.memory_space_id = e.memory_space_id AND l.entity_id = e.entity_id)`,
-      [tenantId, space, entityIds]
-    );
-    counts.entities = entities.rowCount ?? 0;
-  }
+  // (låser entitetsradene før lenkesjekken - en samtidig synk som nettopp lenket til en av dem skal ikke få lenken stille slettet av kaskaden)
+  counts.entities = await pruneOrphanEntities(client, tenantId, space, entityIds);
   const evidence = await client.query("DELETE FROM claim_evidence WHERE tenant_id = $1 AND memory_space_id = $2 AND knowledge_document_id = ANY($3::text[])", [tenantId, space, idList]);
   counts.evidence = evidence.rowCount ?? 0;
   const embeddings = await client.query("DELETE FROM knowledge_embeddings WHERE tenant_id = $1 AND memory_space_id = $2 AND knowledge_document_id = ANY($3::text[])", [tenantId, space, idList]);

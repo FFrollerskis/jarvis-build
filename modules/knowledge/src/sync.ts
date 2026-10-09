@@ -45,6 +45,8 @@ export interface KnowledgeEntityIndexPort {
       tenant_id: string;
       memory_space_id: MemorySpace;
       knowledge_document_id: string;
+      /** Kildetypen (`google_drive`, `meeting_transcript` ...): bestemmer hvilke metadata-felt uttrekkeren kan stole på (f.eks. deltakerlisten i et møtereferat). */
+      source_type: string;
       title: string;
       content: string;
       /** Kildens egne (betrodde) proveniens-felt, f.eks. deltakerlisten i et møtereferat. Aldri modellgenerert. */
@@ -359,7 +361,7 @@ export class KnowledgeSyncService {
     await client.query("SAVEPOINT knowledge_entities");
     try {
       await indexer.index(client, {
-        tenant_id: tenantId, memory_space_id: space, knowledge_document_id: documentId, title: record.title, content: record.content, metadata: record.metadata, sensitivity
+        tenant_id: tenantId, memory_space_id: space, knowledge_document_id: documentId, source_type: record.source_type, title: record.title, content: record.content, metadata: record.metadata, sensitivity
       });
       await client.query("UPDATE knowledge_documents SET entities_indexed_key = $2 WHERE knowledge_document_id = $1", [documentId, key]);
       await client.query("RELEASE SAVEPOINT knowledge_entities");
