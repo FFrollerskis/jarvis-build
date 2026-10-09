@@ -5,7 +5,7 @@ import { parseDailyCapOre, parseToolTurnRoute, resolveJobToolTurnRoute } from ".
 import { fileURLToPath } from "node:url";
 import { checkEv0Boot, getLastEv0BootStatus, logEv0Boot } from "./ev0-boot.ts";
 import { assertNoSweepFailures, envHour, envInt, envPort, failOnSweepFailures, systemIdentity } from "@jarvis/contracts";
-import { ownerConfigOrExit } from "./owner.ts";
+import { ownerConfigOrExit, ownerTenantsOrExit } from "./owner.ts";
 import { buildSelfModelReaders } from "./self-model-readers.ts";
 import {
   ChannelSessionAuthority,
@@ -134,6 +134,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   assertRuntimeCredentialsConfigured();
   // Remediering del 2 (JARVIS-065): ÉN validert eier-identitet for hele prosessen (fail closed uten).
   const owner = ownerConfigOrExit();
+  // WP-D2 (Q-44/Q-48 C): standard `[JARVIS_TENANT_ID]`; `JARVIS_OWNER_EXTRA_TENANTS` er en dormant, eier-satt utvidelse (kun eieren selv, aldri system/delegat).
+  const ownerTenants = ownerTenantsOrExit(owner);
   process.env["JARVIS_PROCESS"] ??= "api"; // D-394 (JARVIS-054): audit-rader merkes med hvilken prosess som skrev dem
   const pool = createPool(configFromEnv());
   // Migrasjoner kjøres av admin-bruker i drift (compose: `migrate`-tjenesten); her antas app-bruker å ha skjema fra før.
@@ -234,7 +236,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // (preflight/readback/evidens/recovery) + owner-kontrollene, ikke approval.
     authority: {
       owner_person_id: owner.owner_person_id,
-      owner_tenants: [owner.tenant_id]
+      owner_tenants: ownerTenants
     }
   });
   const queue = new PgTaskQueue(pool);
@@ -332,7 +334,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const toolGateway = new ToolGateway(pool, policy, readSecretProvider, ownerControls, infisicalSecretProvider, {
     classDPipeline: { enforce: true },
     // Del 3 (JARVIS-003/005): eier-tilkoblede leverandør-credentials bindes til den autentiserte eieren i eierens tenant.
-    credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: [owner.tenant_id], internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) }
+    credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: ownerTenants, internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) }
   });
   // D-104: egen tjeneste over SAMME runtime-pool, ingen ny motor - gjenbruker
   // DEN SAMME `toolGateway`-instansen (registrert med github under) for
@@ -1238,7 +1240,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // allowlist, ingen ny autorisasjonsmekanisme her.
     executive: { gateway: toolGateway },
     confirmations: confirmationStore,
-    chatJobs
+    chatJobs,
+    // WP-D2 (JARVIS-044/Q-48): eier-ruten for å opprette en bedrifts-tenant er AV som standard - kun eksakt `true` åpner den (ellers 404). Ingenting provisjoneres automatisk.
+    ...(process.env["JARVIS_BUSINESS_TENANT_PROVISIONING"] === "true" ? { businessTenants: { pool } } : {})
   };
   // D-416: lever ferdige bakgrunnsjobber tilbake til samtalen (nøyaktig én gang). Feil logges, stopper aldri prosessen.
   setInterval(

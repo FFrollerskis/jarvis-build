@@ -2,7 +2,7 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import "./normalize-env.ts";
 import { envInt, systemIdentity } from "@jarvis/contracts";
-import { ownerConfigOrExit } from "./owner.ts";
+import { ownerConfigOrExit, ownerTenantsOrExit } from "./owner.ts";
 import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
 import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, dailySpentOre, ModelGateway, pricingFromEnv, traceSinkFromEnv } from "@jarvis/model-gateway";
@@ -71,6 +71,8 @@ try {
 }
 // Remediering del 2 (JARVIS-065): ÉN validert eier-identitet (fail closed uten) - ingen env-defaults for eier/tenant.
 const owner = ownerConfigOrExit();
+// WP-D2 (Q-44/Q-48 C): samme dormante eier-tenant-liste som api (standard `[JARVIS_TENANT_ID]`).
+const ownerTenants = ownerTenantsOrExit(owner);
 process.env["JARVIS_PROCESS"] ??= "worker"; // D-394 (JARVIS-054): audit-rader merkes med hvilken prosess som skrev dem
 const pool = createPool(configFromEnv());
 try {
@@ -157,7 +159,7 @@ const policy = new PolicyGateway({
   infraToolIds,
   authority: {
     owner_person_id: owner.owner_person_id,
-    owner_tenants: [owner.tenant_id]
+    owner_tenants: ownerTenants
   }
 });
 // D-181 (BLOCKER B1, D184): hoistet til en NAVNGITT konstant (var tidligere
@@ -180,7 +182,7 @@ const toolSecretProvider = new FallbackSecretProvider(
 // Del 3 (JARVIS-013/043): samme HÅRDE klasse D-pipeline som API-prosessen (API/worker-parity); varsleren bindes rett under.
 const toolGateway = new ToolGateway(pool, policy, toolSecretProvider, ownerControls, infisicalSecretProvider, {
   classDPipeline: { enforce: true },
-  credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: [owner.tenant_id], internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) }
+  credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: ownerTenants, internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) }
 });
 const businessService = new BusinessService(pool);
 // UA-3 next slice (D-53): samme OpenLoopService-wiring som api - workeren sin

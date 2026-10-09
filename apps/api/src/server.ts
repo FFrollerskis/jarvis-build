@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import type pg from "pg";
-import { ChallengeLimitError, type ConfirmationStore } from "@jarvis/core";
+import { BusinessTenantProvisioningError, ChallengeLimitError, previewBusinessTenant, provisionBusinessTenant, type ConfirmationStore } from "@jarvis/core";
 import type {
   ChannelSessionAuthority, DeviceEnrollmentService, DeviceService, IdentityService,
   SessionGrantService, SessionService, VoiceSessionAuthority
@@ -148,6 +148,12 @@ export interface ApiDeps {
   enableDevRoutes?: boolean;
   /** Remediering del 2 (JARVIS-063): overstyr rate-limit-tallene (tester). Standard: se `DEFAULT_RATE_LIMITS`. */
   rateLimits?: Partial<ApiRateLimits>;
+  /**
+   * WP-D2 (JARVIS-044/Q-48): eierens dashbord-handling for å opprette en bedrifts-tenant (`POST /owner/business-tenants`). DORMANT: uten verdien svarer ruten 404;
+   * `main.ts` setter den KUN når `JARVIS_BUSINESS_TENANT_PROVISIONING=true`. Ruten krever eier-grant, signert enhet (step-up) og typet bekreftelse, og er
+   * ALDRI et modellverktøy. Poolen er runtime-poolen (RLS håndheves) - tjenesten trenger ingen admin-rolle.
+   */
+  businessTenants?: { pool: pg.Pool };
   /**
    * Remediering del 2 (JARVIS-065): den ENE validerte eier-identiteten (fra `loadOwnerConfig`). Brukes KUN til å fylle
    * visningsfeltene (`person_id`/`tenant_id`) i de statiske sidene - aldri som autoritet (autoritet kommer alltid fra
@@ -317,6 +323,18 @@ const GOVERNANCE_MUTATE_ACTIONS = [
  * `EXECUTIVE_QUERY_ACTIONS` selv.
  */
 const OWNER_CONTROLS_CONNECTOR_ACTIONS = ["set_connector_credential", "test_connector"] as const;
+/**
+ * WP-D2 (JARVIS-044/Q-48): `POST /owner/business-tenants`. Egen rute med egen, hardkodet kropp: `preview` skriver ALDRI; `provision` skriver først når
+ * `confirm === true` OG `confirm_tenant_id` er NØYAKTIG den tenant-id-en `preview` viste (typet bekreftelse - en blind `confirm: true` er ikke nok).
+ * `confirm_tenant_id` er bevisst ikke i `FORBIDDEN_IDENTITY_BODY_KEYS` (eksakt nøkkelmatch): den er en bekreftelse, aldri en identitet.
+ */
+const BUSINESS_TENANT_BODY_KEYS = ["grant_token", "action", "name", "slug", "confirm", "confirm_tenant_id"] as const;
+const BUSINESS_TENANT_ACTIONS = ["preview", "provision"] as const;
+const BUSINESS_TENANT_STATUS: Record<string, number> = {
+  name_invalid: 400, slug_invalid: 400, owner_invalid: 400,
+  tenant_exists_with_other_kind: 409, tenant_name_mismatch: 409, owner_person_not_found: 409
+};
+
 
 /**
  * D-367: eierens godkjenning av modellens minneforslag (`memory.propose` -> karantene). EGEN rute og EGET hardkodet
@@ -1042,6 +1060,62 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       return json(res, 403, { error: "tool_denied", reason: result.reason });
     }
     return json(res, 200, { ok: true, data: result.data, session_id: resolved.identity.session_id });
+  }
+
+  if (deps.businessTenants && req.method === "POST" && url.pathname === "/owner/business-tenants") {
+    // WP-D2 (JARVIS-044/Q-48): eier-initiert, idempotent, dormant. Rekkefølge: kropp (felt/typer) -> grant -> KUN konfigurert eier i eierens tenant (ingen delegat) ->
+    // step-up (signert enhet, egnet kanal) -> plan (ren validering) -> `preview` svarer her, `provision` krever typet bekreftelse FØR noe skrives.
+    const raw: unknown = await readBodyOrUndefined(req);
+    const parsedBody = grantBodyOrReject(res, raw, BUSINESS_TENANT_BODY_KEYS);
+    if (!parsedBody) return;
+    const action = parsedBody["action"];
+    if (typeof action !== "string" || !(BUSINESS_TENANT_ACTIONS as readonly string[]).includes(action)) {
+      return json(res, 400, { error: "malformed_request", reason: "action_not_allowed", request_id: requestIdOf(res) });
+    }
+    const name = parsedBody["name"];
+    const slug = parsedBody["slug"];
+    if (typeof name !== "string" || (slug !== undefined && typeof slug !== "string")
+      || (parsedBody["confirm"] !== undefined && typeof parsedBody["confirm"] !== "boolean")
+      || (parsedBody["confirm_tenant_id"] !== undefined && typeof parsedBody["confirm_tenant_id"] !== "string")) {
+      return json(res, 400, { error: "malformed_request", reason: "field_types", request_id: requestIdOf(res) });
+    }
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
+    if (!resolved.ok) {
+      if (resolved.responded) return;
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+    }
+    if (!deps.owner) return json(res, 503, { error: "owner_not_configured", request_id: requestIdOf(res) });
+    const identity = resolved.identity;
+    if (identity.person_id !== deps.owner.person_id || identity.tenant_id !== deps.owner.tenant_id || identity.delegation_id !== undefined) {
+      return json(res, 403, { error: "owner_only", request_id: requestIdOf(res) });
+    }
+    const stepUp = stepUpDenial(identity, "provision_business_tenant");
+    if (stepUp) return json(res, 403, { error: "step_up_required", reason: stepUp });
+    let plan;
+    try {
+      plan = previewBusinessTenant({ name, ...(slug !== undefined ? { slug } : {}) });
+    } catch (err) {
+      if (err instanceof BusinessTenantProvisioningError) return json(res, BUSINESS_TENANT_STATUS[err.code] ?? 400, { error: err.code, request_id: requestIdOf(res) });
+      throw err;
+    }
+    if (action === "preview") {
+      return json(res, 200, { ok: true, data: { plan, writes: false, confirm_tenant_id_required: plan.tenant_id } });
+    }
+    if (parsedBody["confirm"] !== true || parsedBody["confirm_tenant_id"] !== plan.tenant_id) {
+      return json(res, 409, { error: "confirmation_required", data: { plan, writes: false, confirm_tenant_id_required: plan.tenant_id }, request_id: requestIdOf(res) });
+    }
+    try {
+      const report = await provisionBusinessTenant(
+        deps.businessTenants.pool,
+        { owner_person_id: identity.person_id, owner_tenant_id: identity.tenant_id },
+        { name, ...(slug !== undefined ? { slug } : {}) },
+        { via: "dashboard", session_id: identity.session_id, device_id: identity.device_id }
+      );
+      return json(res, 200, { ok: true, data: report, session_id: identity.session_id });
+    } catch (err) {
+      if (err instanceof BusinessTenantProvisioningError) return json(res, BUSINESS_TENANT_STATUS[err.code] ?? 400, { error: err.code, request_id: requestIdOf(res) });
+      throw err;
+    }
   }
 
   if (deps.confirmations && req.method === "POST" && url.pathname === "/confirmations") {

@@ -46,6 +46,29 @@ export function loadOwnerConfig(env: Record<string, string | undefined> = proces
   return { tenant_id, owner_person_id, owner_display_name };
 }
 
+/** Øvre grense: eieren har et fåtall bedrifts-tenants, ikke hundrevis. Flere enn dette er nesten sikkert en feil (og en større sikkerhetsflate). */
+export const MAX_OWNER_EXTRA_TENANTS = 10;
+
+/**
+ * WP-D2 (Q-44/Q-48 C, JARVIS-044): tenantene der eieren er SUVEREN (`PolicyGateway.authority.owner_tenants`) og kan bruke eier-tilkoblede
+ * connector-credentials (`ToolGateway.credentialBinding.owner_tenants`). Standard er NØYAKTIG `[JARVIS_TENANT_ID]` - uendret fra før.
+ *
+ * `JARVIS_OWNER_EXTRA_TENANTS` (kommaseparert) er en DORMANT, eier-satt utvidelse: den utvider KUN hvor den autentiserte eieren (samme person,
+ * ingen delegat) er suveren, og gir ingenting til andre personer, til `person_id: "system"` eller til noen bakgrunnsjobb (planlagte jobber er et eget
+ * valg - Q-48 A/B). Den provisjonerer ingenting og gir ingen tilgang uten at tenanten allerede finnes og eieren har en innrullert enhet der.
+ * Feil verdi stopper oppstarten (samme fail-closed-regel som resten av eier-konfigurasjonen) - aldri en stille delvis liste.
+ */
+export function ownerTenantsFromEnv(owner: OwnerConfig, env: Record<string, string | undefined> = process.env): readonly string[] {
+  const raw = env["JARVIS_OWNER_EXTRA_TENANTS"];
+  if (raw === undefined || raw.trim() === "") return [owner.tenant_id];
+  const extras = raw.split(/[,\s]+/).map((t) => t.trim()).filter((t) => t.length > 0);
+  if (extras.length > MAX_OWNER_EXTRA_TENANTS) throw new OwnerConfigError("owner_config_invalid", "JARVIS_OWNER_EXTRA_TENANTS");
+  for (const tenant of extras) {
+    if (!ID_PATTERN.test(tenant)) throw new OwnerConfigError("owner_config_invalid", "JARVIS_OWNER_EXTRA_TENANTS");
+  }
+  return [...new Set([owner.tenant_id, ...extras])];
+}
+
 /** Maskinlesbar oppstartsmelding uten verdier. */
 export function describeOwnerConfigError(err: unknown): string {
   return err instanceof OwnerConfigError
