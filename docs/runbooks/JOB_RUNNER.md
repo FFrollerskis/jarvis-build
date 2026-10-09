@@ -65,6 +65,7 @@ jobb-container --HTTPS_PROXY--> jarvis-egress-proxy (bruker jarvis-egress, uten 
 | SSRF via proxyen | `CONNECT 169.254.169.254:80`, `localhost:5432`, DNS-rebinding | kun allowlist `vert:port`; proxyen slår opp DNS selv, krever kun offentlige adresser og kobler til den validerte IP-en |
 | Nå verten fra containeren | SSH/SMB/NAS-grensesnitt på bridge-adressen | INPUT-kjeden i `setup-network.sh` (NOT VERIFIED til J07) |
 | Tømme ressurser | minnebombe, fork-bombe, evig prosess, enorm output | `--memory` uten swap, `--pids-limit`, tidsavbrudd dreper hele containeren, output-tak, maks samtidige jobber, TTL |
+| Fylle disken | skrive uendelig mye (eller millioner av filer) i `/work` | **IKKE begrenset av runneren** - en bind-mount har ingen kvote og `docker --storage-opt` gjelder ikke den. Tak finnes bare for `/tmp` og `/home/job` (tmpfs). Legg `base_dir` på et eget volum/filsystem med kvote (kapittel 14) |
 | Utnytte worker→runner | gjette socket/token | socket `0660` (gruppe `jarvis-job-clients`), bearer i konstant tid, ingen feilsvar som skiller ukjente ruter før autentisering |
 
 ## 3. Forutsetninger på NAS-en (kontroller før du begynner)
@@ -77,6 +78,7 @@ cd /volume1/jarvisbuild-data/jarvisbuild && git pull
 node --version                      # MÅ være v22 eller nyere PÅ VERTEN (ikke bare i containerne)
 git --version                       # >= 2.39
 sudo docker version --format '{{.Server.Version}}'
+sudo docker info --format '{{.SecurityOptions}}'   # skal IKKE inneholde name=userns (uid i containeren må være lik uid på verten for /work) og ikke name=rootless
 sudo iptables -V                    # nf_tables- eller legacy-variant er begge greit
 systemctl --version | head -1
 getent group docker                 # må finnes
@@ -369,6 +371,8 @@ mens git kjøres via `docker exec` i en annen container (Q-46 punkt 5: «latent 
 * **GitHub App-identitet (Q-45b / WP-C3):** i dag en fine-grained PAT per repo. `GitCredentialSource { tokenFor(repoSlug) -> Promise<string> }` er et injiserbart grensesnitt (strukturelt likt WP-C3 sin kontrakt), og tokens opp til 8192 tegn
   godtas (`ghs_<APPID>_<JWT>`). To veier til en kortlevd App-token er mulige og **ikke valgt**: (a) en vertsside kilde som leser App-privatnøkkelen fra en `0400`-fil hos `jarvis-runner`, eller (b) at worker/api henter tokenet og sender det i jobbforespørselen.
   (b) gjør at worker igjen håndterer en git-credential (om enn kortlevd) og krever en API-utvidelse - en eier-/arkitektbeslutning.
+* **Diskkvote per jobb finnes ikke.** Agenten kan fylle `/work` (bind-mount) til volumet er fullt, og samme volum kan være delt med Postgres/backup på NAS-en. Minimum: sett `runner.base_dir` (og dermed `StateDirectory`)
+  på et eget filsystem/dataset med fast størrelse eller prosjektkvote (ext4/xfs `prjquota`), og kjør `df` mot det i overvåkingen. Å la runneren måle og drepe jobber over en grense er **ikke bygget** (et raskt skrivende program fyller disken mellom to målinger).
 * Ingen støtte for Windows/PC-utvikling (kun Linux med systemd/Docker); utviklingsmaskinen bruker fortsatt prosess-sandboxen.
 * Per-repo egress-allowlist og per-repo ressursgrenser finnes ikke (én policy for alle repoer).
 * Ekte Docker-isolasjon, brannmur, systemd og GitHub er ikke verifisert (se toppen). Verifiser med `acceptance.sh`.

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createHarness, gitSync } from "./support/harness.mjs";
+import { GIT_TOKEN, createHarness, gitSync } from "./support/harness.mjs";
 
 /**
  * WP-C1: publish = bundle laget INNE I containeren -> verifisert på verten i et ferskt bare-repo -> push med runnerens credential.
@@ -278,6 +278,28 @@ describe("C: bundler fra en ondsinnet agent (laget direkte, utenom runnerens ege
     }
     h.fake.state.onExec = null;
     expect(refs(h.origins["owner/repo"].dir).some((r) => r.includes("jarvis/"))).toBe(false);
+  });
+
+  it("bundlen blir liggende som PAKKE i verify.git (aldri eksplodert til løse objekter): mange små objekter kan ikke tømme inoder", async () => {
+    // git sin unbundle() kjører alltid `index-pack` (ikke unpack-objects). Testen låser antakelsen, siden en git-oppgradering som endrer den ville gjort en
+    // hostil bundle med hundretusener av små objekter til hundretusener av filer på vertens volum.
+    const h = await harness();
+    const job = await h.createJob();
+    const { bundle } = await craft(h, job.head_sha, async (s) => {
+      for (let i = 0; i < 160; i += 1) await writeFile(join(s, `fil${i}.txt`), `innhold ${i}\n`);
+      gitSync(s, ["add", "-A"]);
+      gitSync(s, ["commit", "-q", "-m", "mange objekter"]);
+      return [`${job.head_sha}..HEAD`];
+    });
+    const privateDir = join(h.baseDir, job.job_id, "private");
+    const verifyDir = join(privateDir, "verify.git");
+    await expect(h.service.manager.git.verifyAndPush({
+      bundle, baseSha: job.head_sha, baseGitDir: join(privateDir, "base.git"), verifyDir, privateDir, slug: "owner/repo", branch: "jarvis/mange",
+      limits: { maxCommits: 20, maxFiles: 5, denyPaths: [] }, timeoutMs: 60_000, token: GIT_TOKEN
+    })).rejects.toMatchObject({ code: "bundle_too_many_files" }); // stopper ETTER fetch + fsck, og verify.git blir stående for inspeksjon
+    const objects = join(verifyDir, "objects");
+    expect((await readdir(objects)).filter((d) => /^[0-9a-f]{2}$/.test(d))).toEqual([]);
+    expect((await readdir(join(objects, "pack"))).filter((f) => f.endsWith(".pack")).length).toBeGreaterThanOrEqual(1);
   });
 
   it("bundle-kommandoen feiler i containeren: 422 bundle_create_failed uten interne detaljer", async () => {
