@@ -33,13 +33,16 @@ export type GitHubAuthMethod = "pat" | "app";
 
 export interface GitHubAuthStatus {
   readonly method: GitHubAuthMethod;
-  /** `pat`; `app_pending` = konfigurert, ingen utstedelse ennå; `app_ok`; `app_error` = ugyldig konfig, siste utstedelse feilet, eller PAT-fallback i bruk. */
+  /**
+   * `pat`; `app_pending` = konfigurert, men INGEN vellykket utstedelse siden oppstart (oppsettet er ikke bevist å virke); `app_ok` = det finnes et gyldig token, eller
+   * siste utstedelse lyktes og ingen feil har kommet siden; `app_error` = ugyldig konfig, siste utstedelse feilet, eller PAT-fallback i bruk.
+   */
   readonly state: "pat" | "app_pending" | "app_ok" | "app_error";
-  /** Credentialen som faktisk brukes utløper av seg selv (installasjonstoken). PAT og aktiv PAT-fallback: false. */
+  /** Credentialen som faktisk brukes utløper av seg selv (installasjonstoken) - BEVIST ved en vellykket utstedelse (review F9). PAT, `app_pending`, `app_error` og aktiv PAT-fallback: false. */
   readonly short_lived: boolean;
-  /** Credentialen er begrenset til utvalgte repoer. PAT kan i praksis være fine-grained, men Jarvis kan ikke bevise det -> false. */
+  /** Credentialen er begrenset til utvalgte repoer - bevist på samme måte (utstedelsen verifiserer svaret mot det som ble forespurt). PAT kan i praksis være fine-grained, men Jarvis kan ikke bevise det -> false. */
   readonly scoped: boolean;
-  /** `short_lived && scoped` - «kortlevd repo-scopet identitet: ja/nei». */
+  /** `short_lived && scoped` - «kortlevd repo-scopet identitet: ja/nei». Aldri «ja» før en utstedelse har lyktes. */
   readonly hardened: boolean;
   readonly app: null | {
     readonly app_id: string | null;
@@ -469,16 +472,19 @@ export class GitHubAuth {
     const lastError = appState?.last_error ?? (configError ? { code: configError.code, at: this.#startedAt, http_status: null } : null);
     const token = appState?.token ?? null;
     const fallbackActive = this.#core?.fallbackActive === true;
+    const issuedBefore = appState?.last_issued_at != null;
+    // Review F9: «kortlevd repo-scopet identitet: ja» er et BEVIS, ikke et løfte - `app_pending` (ingenting utstedt ennå) var før feilaktig `true` på alle tre flaggene.
+    // En utløpt cache uten feil siden forrige vellykkede utstedelse er fortsatt `app_ok`: fornyelsen skjer automatisk ved neste bruk.
     const state: GitHubAuthStatus["state"] = configError !== null || fallbackActive
       ? "app_error"
-      : token !== null ? "app_ok" : lastError !== null ? "app_error" : "app_pending";
-    const inUse = state === "app_ok" || state === "app_pending";
+      : token !== null ? "app_ok" : lastError !== null ? "app_error" : issuedBefore ? "app_ok" : "app_pending";
+    const verified = state === "app_ok";
     return {
       method: "app",
       state,
-      short_lived: inUse,
-      scoped: inUse,
-      hardened: inUse,
+      short_lived: verified,
+      scoped: verified,
+      hardened: verified,
       app: {
         app_id: s.appId,
         installation_id: s.installationId,

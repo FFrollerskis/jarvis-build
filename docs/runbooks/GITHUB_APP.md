@@ -156,7 +156,8 @@ Sluttlinjen: `GITHUB_APP_LIVE_STATUS=VERIFIED` (exit 0) eller `NOT VERIFIED (...
 skrive-/git-kapabilitet ikke er bevist – kjør med `--sandbox-repo`. Lim utskriften (den inneholder ingen hemmeligheter) inn i chatten.
 
 Deretter i dashbordet: Integrasjoner -> GitHub -> **Test tilkobling**. `executive.get_connector_status` viser nå `auth`: metode `app`, installasjons-id, når tokenet utløper, hvilke repoer det
-dekker, tildelte rettigheter og siste feilkode – og «kortlevd repo-scopet identitet: ja» (`short_lived` og `scoped`). Aldri selve tokenet.
+dekker, tildelte rettigheter og siste feilkode – og «kortlevd repo-scopet identitet: ja» (`short_lived` og `scoped`). «Ja» er et bevis, ikke et løfte: det står `app_pending` og `false`
+til en utstedelse faktisk har lyktes siden oppstart, og `false` igjen ved ugyldig konfig, siste utstedelse feilet eller aktiv PAT-fallback. Aldri selve tokenet.
 
 ## Steg 8 - Fase ut PAT-en
 

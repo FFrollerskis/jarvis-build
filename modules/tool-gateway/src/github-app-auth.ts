@@ -407,6 +407,8 @@ export interface GitHubAppAuthState {
   readonly token: GitHubTokenInfo | null;
   readonly installation: GitHubInstallationInfo | null;
   readonly last_error: { readonly code: GitHubAppAuthErrorCode; readonly at: string; readonly http_status: number | null } | null;
+  /** Tidspunktet for siste VELLYKKEDE utstedelse siden oppstart (review F9: det eneste beviset på at App-oppsettet faktisk virker). `null` = aldri utstedt ennå. */
+  readonly last_issued_at: string | null;
   readonly consecutive_failures: number;
   readonly clock_skew_ms: number;
 }
@@ -493,6 +495,7 @@ export class GitHubAppAuth {
   #installation: GitHubInstallationInfo | null = null;
   #lastError: { code: GitHubAppAuthErrorCode; at: string; http_status: number | null } | null = null;
   #consecutiveFailures = 0;
+  #lastIssuedAt: string | null = null;
   #skewMs = 0;
 
   constructor(options: GitHubAppAuthOptions) {
@@ -549,6 +552,7 @@ export class GitHubAppAuth {
       token: cached && cached.expiresAtLocalMs > now ? cached.info : null,
       installation: this.#installation,
       last_error: this.#lastError,
+      last_issued_at: this.#lastIssuedAt,
       consecutive_failures: this.#consecutiveFailures,
       clock_skew_ms: this.#skewMs
     };
@@ -696,6 +700,7 @@ export class GitHubAppAuth {
       this.#cache.set(scope.key, entry);
       this.#cooldowns.delete(scope.key);
       this.#lastError = null;
+      this.#lastIssuedAt = new Date(this.#now()).toISOString();
       this.#consecutiveFailures = 0;
       this.#rememberToken(entry.token, entry.expiresAtLocalMs);
       this.#log({

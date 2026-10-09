@@ -4,6 +4,8 @@ import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it } from "vitest";
 import { GitHubAppAuth, GitHubAppAuthError, maskGitHubSecrets, normalizeGitHubApiBase } from "../src/github-app-auth.ts";
 import { createGitHubAuth, resolveGitHubAuthSettings } from "../src/github-token-provider.ts";
+import type { SecretProvider } from "../src/gateway.ts";
+import { FakeGitHubApp } from "./support/fake-github-app.ts";
 import { APP_ID, INSTALLATION_ID, OTHER_REPO, REPO, T0, failure, harness, keys, stopFakeServers } from "./support/wpc3-harness.ts";
 
 /**
@@ -315,5 +317,88 @@ describe("F8: fail-fast-vinduet dobles for PERMANENTE feil (5, 10, 20, ... s, ta
     key = keys.pkcs1;
     expect(await h.auth.token()).toMatch(/^ghs_/);
     expect(h.clock.t).toBe(T0); // ingen ventetid i det hele tatt
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+describe("F9: «kortlevd repo-scopet identitet» (short_lived/scoped/hardened) er et BEVIS - aldri sann før en utstedelse har lyktes", () => {
+  class MapSecrets implements SecretProvider {
+    readonly name = "map";
+    constructor(readonly values: Record<string, string>) {}
+    async get(ref: string): Promise<string | null> { return this.values[ref] ?? null; }
+  }
+
+  async function appMode(extra: Record<string, string> = {}, values: Record<string, string> = { JARVIS_GITHUB_APP_PRIVATE_KEY: keys.pkcs1 }) {
+    const clock = { t: T0 };
+    const fake = await FakeGitHubApp.start({ publicKey: keys.publicKey, appId: APP_ID, installationId: INSTALLATION_ID, serverNow: () => clock.t });
+    const secrets = new MapSecrets(values);
+    const auth = createGitHubAuth({
+      secrets, allowLoopbackHttpForTests: true, now: () => clock.t, sleep: async () => undefined, maxAttempts: 1, log: () => undefined,
+      env: { JARVIS_GITHUB_APP_ID: APP_ID, JARVIS_GITHUB_APP_INSTALLATION_ID: INSTALLATION_ID, JARVIS_GITHUB_REPO: REPO, JARVIS_GITHUB_API_BASE: fake.baseUrl, ...extra }
+    });
+    const stop = async (): Promise<void> => { await fake.stop(); };
+    return { fake, clock, auth, secrets, stop };
+  }
+
+  const FLAGS_OFF = { short_lived: false, scoped: false, hardened: false };
+  const FLAGS_ON = { short_lived: true, scoped: true, hardened: true };
+
+  it("F9a: konfigurert App-modus UTEN noen utstedelse ennå (app_pending) påstår hverken kortlevd, scopet eller hardened - i status, connector-metadata og EV-17-fakta", async () => {
+    const m = await appMode();
+    try {
+      expect(m.auth.status()).toMatchObject({ method: "app", state: "app_pending", ...FLAGS_OFF });
+      const info = m.auth.connectorAuthInfo();
+      expect(info).toMatchObject({ method: "app", short_lived: false, scoped: false });
+      expect(info.detail).toMatchObject({ state: "app_pending", hardened: false });
+      expect(m.auth.credentialFacts()).toMatchObject({ auth_method: "app", short_lived: false, repo_scoped: false, last_refresh_ok: null });
+      expect(m.fake.requests).toHaveLength(0); // statusavlesning utsteder ingenting
+    } finally {
+      await m.stop();
+    }
+  });
+
+  it("F9b: først etter en VELLYKKET utstedelse blir alle tre flaggene sanne (og forblir det når cachen utløper uten feil - fornyelse skjer ved neste bruk)", async () => {
+    const m = await appMode();
+    try {
+      const provider = m.auth.secretProvider(m.secrets);
+      expect(await provider.get("JARVIS_GITHUB_TOKEN")).toMatch(/^ghs_/);
+      expect(m.auth.status()).toMatchObject({ state: "app_ok", ...FLAGS_ON });
+      expect(m.auth.connectorAuthInfo()).toMatchObject({ short_lived: true, scoped: true });
+      expect(m.auth.credentialFacts()).toMatchObject({ short_lived: true, repo_scoped: true });
+      m.clock.t += 2 * 3_600_000; // cachen er utløpt, men det har ikke vært noen feil
+      const idle = m.auth.status();
+      expect(idle.app?.token).toBeNull();
+      expect(idle).toMatchObject({ state: "app_ok", ...FLAGS_ON });
+    } finally {
+      await m.stop();
+    }
+  });
+
+  it("F9c: feil før første utstedelse, ugyldig konfig og en feilet fornyelse etter utløp gir app_error med alle flaggene av", async () => {
+    const failing = await appMode();
+    try {
+      failing.fake.script = [{ status: 404, json: { message: "Not Found" } }];
+      expect(await failing.auth.secretProvider(failing.secrets).get("JARVIS_GITHUB_TOKEN")).toBeNull();
+      expect(failing.auth.status()).toMatchObject({ state: "app_error", ...FLAGS_OFF });
+    } finally {
+      await failing.stop();
+    }
+    const invalid = await appMode({ JARVIS_GITHUB_APP_INSTALLATION_ID: "" });
+    try {
+      expect(invalid.auth.status()).toMatchObject({ state: "app_error", ...FLAGS_OFF });
+    } finally {
+      await invalid.stop();
+    }
+    const renewal = await appMode();
+    try {
+      const provider = renewal.auth.secretProvider(renewal.secrets);
+      expect(await provider.get("JARVIS_GITHUB_TOKEN")).toMatch(/^ghs_/);
+      renewal.clock.t += 2 * 3_600_000;
+      renewal.fake.script = [{ status: 401, json: { message: "Bad credentials" } }];
+      expect(await provider.get("JARVIS_GITHUB_TOKEN")).toBeNull();
+      expect(renewal.auth.status()).toMatchObject({ state: "app_error", ...FLAGS_OFF });
+    } finally {
+      await renewal.stop();
+    }
   });
 });

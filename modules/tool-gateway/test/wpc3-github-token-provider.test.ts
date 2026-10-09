@@ -363,7 +363,7 @@ describe("G: connector-status, EV-17-fakta og redaksjon", () => {
   it("G1: connectorAuthInfo() viser metode, installasjons-id, utløp, repo-scope og tildelte rettigheter - aldri tokenet; «kortlevd repo-scopet identitet: ja»", async () => {
     const s = await setup();
     const provider = s.auth.secretProvider(s.secrets);
-    expect(s.auth.status()).toMatchObject({ state: "app_pending", short_lived: true, scoped: true, hardened: true });
+    expect(s.auth.status()).toMatchObject({ state: "app_pending", short_lived: false, scoped: false, hardened: false }); // review F9: ikke bevist før første utstedelse
     const token = (await provider.get(GITHUB_TOKEN_REF)) ?? "";
     const info = s.auth.connectorAuthInfo();
     expect(info).toMatchObject({ method: "app", short_lived: true, scoped: true });
