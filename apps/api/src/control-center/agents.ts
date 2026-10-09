@@ -143,12 +143,13 @@ export function activeTaskRows(rows: readonly ActiveTaskRow[], nowMs: number, to
     }));
     if ((t.status === "created" || t.status === "running") && !t.cancel_requested) {
       actions.push(controlAction({
-        id: `agent.cancel:${t.task_id}`, label: `Avbryt ${profileNo(t.agent_profile).toLowerCase()}`, endpoint: "/executive/mutate",
+        // Gjennomgang av PR #316 (L-2): bekreftelsesdialogen viser KUN etikett og beskrivelse - uten jobb-id visste eieren ikke hvilken av flere jobber hun avbrøt. Den korte id-en står i begge (hele id-en står på raden).
+        id: `agent.cancel:${t.task_id}`, label: `Avbryt ${profileNo(t.agent_profile).toLowerCase()} ${shortId(t.task_id)}`, endpoint: "/executive/mutate",
         body: { action: "cancel_task", parameters: { task_id: t.task_id } },
         risk_class: riskOf(toolGateway, "executive", "cancel_task"), requires_step_up: actionRequiresStepUp("cancel_task"), reversible: false,
         description_no: t.status === "created"
-          ? "Avbryter jobben umiddelbart - den er ikke startet."
-          : "Ber den kjørende jobben stoppe ved neste trygge punkt. Sideeffekter den allerede har utført (verktøykall, kodeendringer) rulles IKKE tilbake.",
+          ? `Avbryter ${profileNo(t.agent_profile).toLowerCase()} «${shortId(t.task_id)}» umiddelbart - den er ikke startet.`
+          : `Ber den kjørende ${profileNo(t.agent_profile).toLowerCase()} «${shortId(t.task_id)}» stoppe ved neste trygge punkt. Sideeffekter den allerede har utført (verktøykall, kodeendringer) rulles IKKE tilbake.`,
         rollback_no: "Kan ikke angres: en avbrutt jobb kan ikke gjenopptas. Send den inn på nytt om du vil kjøre den igjen.",
         section_id: sectionId, item_id: t.task_id
       }));

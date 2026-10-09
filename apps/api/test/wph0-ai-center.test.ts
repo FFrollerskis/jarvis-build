@@ -549,6 +549,20 @@ describe("kjørende agenter og jobber", () => {
     expect(actionOf(r, "agent.cancel:task-run").description_no).toContain("rulles IKKE tilbake");
   });
 
+  it("L-2: avbryt-dialogen viser kun etikett og beskrivelse, så BEGGE identifiserer jobben (profil + kort id) - to jobber av samme profil kan skilles, og en lang id forkortes", async () => {
+    const long = "3f2a1b9c-d6e4-4c1a-9a77-0b5f3c2d1e00";
+    const r = await build({ tasks: [taskRow("task-run"), taskRow(long, { status: "created", claimed_at: null, lease_expires_at: null, agent_profile: "coding" })] }).run();
+    const run = actionOf(r, "agent.cancel:task-run");
+    const created = actionOf(r, `agent.cancel:${long}`);
+    expect(run.label).toBe("Avbryt assistentjobb task-run");
+    expect(run.description_no).toContain("«task-run»");
+    expect(created.label).toBe("Avbryt kodejobb 3f2a1b9c-d6e4…");
+    expect(created.description_no).toContain("«3f2a1b9c-d6e4…»");
+    expect(new Set([run.label, created.label]).size).toBe(2);
+    // hele id-en står i kroppen (det som sendes) og på raden, aldri avkortet der
+    expect(created.body).toMatchObject({ parameters: { task_id: long } });
+  });
+
   it("tegn på at en jobb ikke er frisk gir WARN: utløpt lease, kjørt lenge, i kø uten å bli tatt, tidligere feil", async () => {
     const r = await build({
       tasks: [
