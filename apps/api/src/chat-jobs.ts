@@ -19,7 +19,8 @@ import { financeToolIntent, type ToolDefinition, type ToolInvocationContext, typ
 const DELEGATED_JOB_TOOLS = ["email", "calendar", "github", "memory", "executive"] as const;
 /** Øre. Settes i kontraktens `model_budget_ore`, men INGEN kode leser den i dag (eksisterende forhold) - den reelle kostnadsgrensen er dagstaket (D-432/D-449), ikke dette tallet. */
 export const DELEGATED_JOB_BUDGET_ORE = 300;
-const MAX_ACTIVE_JOBS = 5;
+/** Maks samtidige delegerte bakgrunnsjobber per eier (eksportert: AI Center viser taket i parallell-delegasjonsoverheaden og må aldri ha en egen kopi). */
+export const MAX_ACTIVE_JOBS = 5;
 const RESULT_PREVIEW_CHARS = 1500;
 
 /**

@@ -37,6 +37,7 @@ import { InfraExecutionGate, KillSwitch, PolicyGateway, createPgInfraModeStore, 
 import { DeploymentService, DiagnosisService, IncidentService } from "@jarvis/incidents";
 import {
   AiCouncil,
+  CouncilAutoTriggerLimiter,
   DEFAULT_PROFILES,
   assertProvidersHaveExplicitPricing,
   pricingFromEnv,
@@ -120,7 +121,7 @@ import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
 import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
 import { createEvolutionReportProvider } from "./evolution-source.ts";
-import { ChatJobs, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
+import { ChatJobs, MAX_ACTIVE_JOBS, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
 import { registerControlCenters } from "./control-center/register.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
@@ -660,9 +661,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     isOwner: (identity) => resolveAuthorityMode({ owner_person_id: owner.owner_person_id, owner_tenants: [owner.tenant_id] }, identity) === "SOVEREIGN",
     redact: (text) => scanForSecrets(text).text
   });
+  // WP-H0 (AI Center): ÉN delt begrenser for AI-rådets automatiske trigger - samme instans i chatten (`ConversationEngine`) og i kontrollsenteret, så tellerne som vises er de som faktisk håndheves.
+  const councilAutoLimiter = new CouncilAutoTriggerLimiter(envInt("JARVIS_COUNCIL_AUTO_MAX_PER_HOUR", 3, { min: 1, max: 100 }));
   registerControlCenters(controlCenters, {
     pool, env: process.env, toolGateway, ownerControls, meshStatus: () => gateway.meshStatus(),
-    authority: { owner_person_id: owner.owner_person_id, owner_tenants: [owner.tenant_id] }, killSwitch, infraGate
+    authority: { owner_person_id: owner.owner_person_id, owner_tenants: [owner.tenant_id] }, killSwitch, infraGate,
+    modelGateway: gateway, runRate: new RunRateService(pool), councilLimiter: councilAutoLimiter, evolutionReport: evolutionReports, maxActiveJobs: MAX_ACTIVE_JOBS
   });
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
@@ -1099,6 +1103,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // D-431/D-432: ruten og dagstaket er parset tidlig (rett før executive-handleren, D-449) og brukes her uendret.
   console.log(JSON.stringify({ msg: "tool_turn_route", route: toolTurnRoute ? `${toolTurnRoute.provider}:${toolTurnRoute.model}` : "off", daily_cap_ore: toolTurnDailyCapOre }));
   const conversationEngine = new ConversationEngine({
+    councilAutoLimiter,
     messages: new MessageStore(pool),
     context: new ContextBuilder(pool),
     gateway,

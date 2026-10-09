@@ -1,5 +1,6 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import type { ControlCenterRegistry } from "@jarvis/executive";
+import { createAiCenter, type AiCenterDeps } from "./ai.ts";
 import { createAuthorityCenter, type AuthorityCenterDeps } from "./authority.ts";
 import { createIntegrationCenter, type IntegrationCenterDeps } from "./integration.ts";
 import type { ControlCenterPool } from "./shared.ts";
@@ -30,6 +31,13 @@ export interface ControlCenterWiring {
   infraGate?: AuthorityCenterDeps["infraGate"];
   /** Modellmeshens kompakte status (leverandørhelse) - gir modellleverandørene i Integration Center og AI Center en helse. */
   meshStatus?: IntegrationCenterDeps["meshStatus"];
+  /** AI Center: ModelGateway (kun lesing: leverandørvisning, mesh, rådgivermodus). Uten gatewayen, verktøyregisteret og eier-kontrollene registreres ikke senteret. */
+  modelGateway?: AiCenterDeps["gateway"];
+  /** AI Center: run-rate (D-421), AI-rådets begrenser, evolusjonsrapporten (EV-12) og taket for samtidige bakgrunnsjobber. Utelatt = den delen står som ukjent. */
+  runRate?: AiCenterDeps["runRate"];
+  councilLimiter?: AiCenterDeps["councilLimiter"];
+  evolutionReport?: AiCenterDeps["evolutionReport"];
+  maxActiveJobs?: AiCenterDeps["maxActiveJobs"];
 }
 
 export function registerControlCenters(registry: ControlCenterRegistry, wiring: ControlCenterWiring): void {
@@ -38,6 +46,15 @@ export function registerControlCenters(registry: ControlCenterRegistry, wiring: 
     registry.register(createIntegrationCenter({
       pool: wiring.pool, toolGateway: wiring.toolGateway, ownerControls: wiring.ownerControls,
       ...(wiring.meshStatus ? { meshStatus: wiring.meshStatus } : {})
+    }));
+  }
+  if (wiring.modelGateway && wiring.toolGateway && wiring.ownerControls) {
+    registry.register(createAiCenter({
+      pool: wiring.pool, env: wiring.env, gateway: wiring.modelGateway, ownerControls: wiring.ownerControls, toolGateway: wiring.toolGateway,
+      ...(wiring.runRate ? { runRate: wiring.runRate } : {}),
+      ...(wiring.councilLimiter ? { councilLimiter: wiring.councilLimiter } : {}),
+      ...(wiring.evolutionReport ? { evolutionReport: wiring.evolutionReport } : {}),
+      ...(wiring.maxActiveJobs !== undefined ? { maxActiveJobs: wiring.maxActiveJobs } : {})
     }));
   }
   if (wiring.toolGateway && wiring.ownerControls && wiring.killSwitch) {

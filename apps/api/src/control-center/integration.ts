@@ -7,6 +7,7 @@ import {
 import type { MeshStatus } from "@jarvis/model-gateway";
 import type { OwnerControls } from "@jarvis/policy";
 import { CONNECTOR_REGISTRY, type ConnectorDefinition, type ToolDefinition, type ToolGateway } from "@jarvis/tool-gateway";
+import { modelFreezeTarget } from "../provider-pause.ts";
 import { actionRequiresStepUp } from "../step-up.ts";
 import { HOUR_MS, ageMs, bySeverityThenLabel, countsNo, globalRows, joinFact, relativeNo, riskOf, settle, tenantRead, toIso, type ControlCenterPool, type Settled } from "./shared.ts";
 
@@ -468,9 +469,13 @@ export function createIntegrationCenter(deps: IntegrationCenterDeps): ControlCen
         const apiFact = CONNECTOR_API_FACTS[def.id];
         const probeKey = def.live_test?.tool_id ?? def.id;
         const hasProbe = def.live_test !== undefined;
-        const frozenAt = v.freeze_target !== null ? frozen.get(v.freeze_target) : v.tool_ids.map((t) => frozen.get(t)).find((x) => x !== undefined);
-        const revokedRefs = v.effective_refs.filter((r) => revoked.has(r));
         const isModelProvider = def.category === "model_provider";
+        // WP-H0 (JARVIS-087): en modellleverandør pauses med målet `model:<id>` (ikke et tool_id) og stanses også av et tilbakekall av nøkkelen - ModelGateway leser begge live (se provider-pause.ts).
+        // Pause/tilbakekall tilbys fra AI Center; her vises kun tilstanden, så to sentre aldri har hver sin knapp for det samme.
+        const frozenAt = isModelProvider
+          ? frozen.get(modelFreezeTarget(def.id))
+          : v.freeze_target !== null ? frozen.get(v.freeze_target) : v.tool_ids.map((t) => frozen.get(t)).find((x) => x !== undefined);
+        const revokedRefs = (isModelProvider ? def.credential_refs : v.effective_refs).filter((r) => revoked.has(r));
 
         // --- helse: siste måling vinner (minne, revisjon, modellmesh, kostnadsrader)
         const evidence: Array<HealthEvidence | null> = [memoryHealth(deps.toolGateway.health.get(probeKey))];

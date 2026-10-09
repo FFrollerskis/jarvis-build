@@ -662,3 +662,30 @@ describe("drift: det senteret påstår må stå i koden", () => {
     for (const strict of ["unfreeze_connector", "revoke_credential", "restore_credential", "revoke_device", "resume_domain", "deactivate_kill_switch", "disable_finance_kill_switch"]) expect(actionRequiresStepUp(strict), strict).toBe(true);
   });
 });
+
+describe("modellleverandører: pause og tilbakekall vises her (WP-H0/JARVIS-087), knappene bor i AI Center", () => {
+  it("et frosset model:<id>-mål gir PAUSET og WARN, og kun den leverandøren; frosne VERKTØY rører ingen modell", async () => {
+    const r = await build({ frozen: ["model:anthropic", "github"] }).run();
+    const anthropic = item(r, "configured_other", "anthropic");
+    expect(anthropic.status).toBe("WARN");
+    expect(anthropic.facts).toMatchObject({ paused: true });
+    expect(anthropic.detail_no).toContain("PAUSET");
+    const clean = await build({ frozen: ["github"] }).run();
+    expect(item(clean, "configured_other", "anthropic").facts).toMatchObject({ paused: false });
+  });
+
+  it("en tilbakekalt modellnøkkel vises som tilbakekalt på leverandøren (ModelGateway stanser den)", async () => {
+    const r = await build({ revoked: refsOf("anthropic") }).run();
+    const anthropic = item(r, "configured_other", "anthropic");
+    expect(anthropic.facts).toMatchObject({ credential_revoked: true });
+    expect(anthropic.status).toBe("WARN");
+    expect(anthropic.detail_no).toContain("TILBAKEKALT");
+  });
+
+  it("senteret tilbyr ingen pause-/tilbakekallsknapp for modellleverandørene (de bor i AI Center - ingen duplikate knapper for det samme)", async () => {
+    const r = await build({}).run();
+    for (const id of ["anthropic", "openai", "gemini"]) {
+      expect(r.actions.filter((a) => a.item_id === id && (a.body["action"] === "freeze_connector" || a.body["action"] === "revoke_credential")), id).toEqual([]);
+    }
+  });
+});

@@ -75,6 +75,21 @@ export function relativeNo(iso: string | null | undefined, nowMs: number): strin
   return `for ${Math.floor(hours / 24)} d siden`;
 }
 
+/** «om 3 min» - deterministisk norsk tid frem til et fremtidig tidspunkt. Passert eller manglende tidspunkt gir «nå»/«ukjent». */
+export function untilNo(iso: string | null | undefined, nowMs: number): string {
+  if (!iso) return "ukjent";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "ukjent";
+  const sec = Math.floor((t - nowMs) / 1000);
+  if (sec <= 0) return "nå";
+  if (sec < 90) return `om ${sec} s`;
+  const min = Math.round(sec / 60);
+  if (min < 90) return `om ${min} min`;
+  const hours = Math.round(min / 60);
+  if (hours < 48) return `om ${hours} t`;
+  return `om ${Math.round(hours / 24)} d`;
+}
+
 export const HOUR_MS = 3_600_000;
 export const DAY_MS = 24 * HOUR_MS;
 
