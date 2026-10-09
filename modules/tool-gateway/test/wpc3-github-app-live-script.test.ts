@@ -1,6 +1,9 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SecretProvider } from "../src/gateway.ts";
-import { GITHUB_APP_PRIVATE_KEY_REF } from "../src/github-app-auth.ts";
+import { GITHUB_APP_ERROR_HINTS, GITHUB_APP_PRIVATE_KEY_REF } from "../src/github-app-auth.ts";
+import { GITHUB_FULL_CAPABILITY_PERMISSIONS } from "../src/github-token-provider.ts";
 import { runGitHubAppLive, type LiveOptions, type LiveResult } from "../scripts/github-app-live.ts";
 import { FakeGitHubApp, testKeys } from "./support/fake-github-app.ts";
 
@@ -254,5 +257,34 @@ describe("C: --sandbox-repo - lese-sjekker, test-gren som ALLTID ryddes, git ls-
     expect(calls).toEqual([]);
     expect(fake.requests.every((r) => ["GET", "POST", "DELETE"].includes(r.method))).toBe(true);
     expect(fake.requests.filter((r) => r.method === "POST").map((r) => r.path)).toEqual([`/app/installations/${INSTALLATION_ID}/access_tokens`]);
+  });
+});
+
+describe("D: runbooken (docs/runbooks/GITHUB_APP.md) er i takt med koden", () => {
+  const runbook = readFileSync(fileURLToPath(new URL("../../../docs/runbooks/GITHUB_APP.md", import.meta.url)), "utf8");
+
+  it("D1: hver feilkategori som kan nå eieren, hver miljøvariabel og vault-refen står i runbooken", () => {
+    for (const code of Object.keys(GITHUB_APP_ERROR_HINTS)) {
+      if (code === "GITHUB_APP_NOT_CONFIGURED" || code === "GITHUB_TOKEN_UNAVAILABLE") continue; // interne: PAT-modus / git-kilde uten PAT
+      expect(runbook, code).toContain(code);
+    }
+    for (const name of ["JARVIS_GITHUB_APP_ID", "JARVIS_GITHUB_APP_INSTALLATION_ID", "JARVIS_GITHUB_REPO", "JARVIS_GIT_ALLOWED_REPOS", "JARVIS_GITHUB_APP_ALLOW_PAT_FALLBACK", "JARVIS_GITHUB_API_BASE", GITHUB_APP_PRIVATE_KEY_REF]) {
+      expect(runbook, name).toContain(name);
+    }
+  });
+
+  it("D2: runbooken sier ærlig at ingenting er verifisert mot ekte GitHub, og at akseptansescriptet er NOT VERIFIED til det er kjørt", () => {
+    expect(runbook).toMatch(/IKKE VERIFISERT MOT EKTE GITHUB/);
+    expect(runbook).toContain("NOT VERIFIED");
+    expect(runbook).toContain("GITHUB_APP_LIVE_STATUS=VERIFIED");
+  });
+
+  it("D3: rettighetene koden krever for full kapabilitet (D-41) står alle i rettighetstabellen med riktig nivå", () => {
+    const names: Record<string, string> = { metadata: "Metadata", contents: "Contents", pull_requests: "Pull requests", issues: "Issues", actions: "Actions" };
+    for (const [permission, level] of Object.entries(GITHUB_FULL_CAPABILITY_PERMISSIONS)) {
+      const row = runbook.split("\n").find((line) => line.startsWith(`| **${names[permission]}**`));
+      expect(row, permission).toBeDefined();
+      expect(row, permission).toContain(level === "write" ? "Read and write" : "Read-only");
+    }
   });
 });
