@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { chmod, lstat, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import net from "node:net";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { EgressProxy, parseConnectTarget } from "../egress-proxy.mjs";
@@ -506,6 +507,45 @@ describe("D: fail-closed - ugyldig token-fil, ødelagt PAT og utilgjengelig dock
       expect(String(error?.message)).not.toContain(RUNNER_TOKEN);
     }
   }, 60_000);
+
+  it("selve prosessene (server.mjs og egress-proxy.mjs): manglende, relativ, ikke-vanlig, symlenke, for stor, verdensskrivbar eller ikke-root-eid policy-fil gir exit 1 med en stabil kode som JSON på stderr - ingen socket, ingen lytting", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jr-main-"));
+    const write = async (name, content, mode) => { const f = join(dir, name); await writeFile(f, content); await chmod(f, mode); return f; };
+    const valid = JSON.stringify({ version: 1, runner: { token_file: join(dir, "t"), image: `sha256:${"a".repeat(64)}`, network: "jarvis-jobs", egress_proxy_url: "http://172.30.77.1:3128", allowed_repos: ["o/r"], git_credentials: { "o/r": { token_file: join(dir, "p") } }, socket_path: join(dir, "x.sock") }, egress_proxy: { listen_host: "127.0.0.1", listen_port: 39999, allowed_client_cidrs: ["127.0.0.0/8"] } });
+    const real = await write("real.json", valid, 0o644);
+    await symlink(real, join(dir, "link.json"));
+    await mkdir(join(dir, "dir.json"));
+    const cases = {
+      "mangler": [join(dir, "finnes-ikke.json"), ["config_unreadable"]],
+      "relativ sti": ["job-runner.json", ["config_path_not_absolute"]],
+      "katalog": [join(dir, "dir.json"), ["config_not_a_regular_file"]],
+      "symlenke (O_NOFOLLOW)": [join(dir, "link.json"), ["config_unreadable"]],
+      "for stor (65 KiB)": [await write("big.json", ` ${"x".repeat(65 * 1024)}`, 0o644), ["config_too_large"]],
+      "verdensskrivbar": [await write("world.json", valid, 0o666), ["config_writable_by_group_or_others"]],
+      "gruppeskrivbar": [await write("group.json", valid, 0o664), ["config_writable_by_group_or_others"]],
+      "ikke-root-eid (tjenesten kan ikke eie sin egen policy)": [real, ["config_must_be_owned_by_root", "config_unreadable"]],
+      "ugyldig JSON": [await write("bad.json", "{ikke json", 0o644), ["config_must_be_owned_by_root", "config_not_valid_json"]],
+      "ukjent nøkkel": [await write("unknown.json", JSON.stringify({ version: 1, runner: {}, image: "x" }), 0o644), ["config_must_be_owned_by_root", "config_unknown_key"]]
+    };
+    for (const entry of ["server.mjs", "egress-proxy.mjs"]) {
+      for (const [label, [configPath, codes]] of Object.entries(cases)) {
+        const r = spawnSync(process.execPath, [new URL(`../${entry}`, import.meta.url).pathname], { env: { PATH: "/usr/bin:/bin", JARVIS_JOB_RUNNER_CONFIG: configPath }, encoding: "utf8", timeout: 30_000 });
+        expect(r.status, `${entry} ${label}: ${r.stderr}`).toBe(1);
+        const fatal = JSON.parse(r.stderr.trim().split("\n").pop() ?? "{}");
+        expect(fatal.event, `${entry} ${label}`).toBe("fatal");
+        expect(codes, `${entry} ${label}: ${fatal.code}`).toContain(fatal.code);
+        expect(r.stdout, `${entry} ${label}`).toBe("");
+        expect(r.stderr, `${entry} ${label}`).not.toMatch(/at \w+.*\(.*:\d+:\d+\)|node:internal/); // ingen stacktrace
+      }
+    }
+    await expect(lstat(join(dir, "x.sock"))).rejects.toThrow(); // ingen socket ble laget av noen av dem
+    // uten JARVIS_JOB_RUNNER_CONFIG brukes /etc/jarvis/job-runner.json: finnes den ikke her, starter ingenting
+    if (!(await lstat("/etc/jarvis/job-runner.json").then(() => true, () => false))) {
+      const r = spawnSync(process.execPath, [new URL("../server.mjs", import.meta.url).pathname], { env: { PATH: "/usr/bin:/bin" }, encoding: "utf8", timeout: 30_000 });
+      expect(r.status).toBe(1);
+      expect(JSON.parse(r.stderr.trim().split("\n").pop() ?? "{}").code).toBe("config_unreadable");
+    }
+  }, 120_000);
 
   it("uid-sjekken er PÅ i produksjon: container-brukeren må ha tjenestens uid (runneren må eie filene agenten skriver), ellers starter ingenting", async () => {
     const h = await harness({ autoStart: false });
