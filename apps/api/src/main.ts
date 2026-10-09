@@ -102,6 +102,7 @@ import {
   type WallesterCredentials, type WallesterCredentialsProvider,
   type NeonomicsCredentials, type NeonomicsCredentialsProvider,
   runFinanceSpendIntegritySweepForAllTenants, runStripePaymentSyncForAllTenants, runVippsPaymentSyncForAllTenants,
+  FinanceReconciliationService, createFikenPostingReader, runFinanceReconciliationForAllTenants,
   type FikenCredentials, type FikenCredentialsProvider, type StripeCredentials, type StripeCredentialsProvider,
   type VippsCredentials, type VippsCredentialsProvider
 } from "@jarvis/finance";
@@ -540,6 +541,19 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       return { refreshToken, companySlug };
     }
   };
+  // WP-F1 (D-453, UA-6): deterministisk avstemming av penger (intensjon <-> leverandørutfall <-> Fiken-bilag). Observasjon + varsel, ALDRI korreksjon. DORMANT uten Fiken-
+  // credentials (`checks.fiken = skipped_no_credentials`); varsler eieren via den eksisterende Telegram-banen i ToolGateway (feil gjøres synlig, rulles aldri tilbake).
+  const financeReconciliation = new FinanceReconciliationService(pool, {
+    fiken: createFikenPostingReader(fikenCredentialsProvider),
+    notifier: {
+      async notify({ run_id, text }) {
+        const sent = await toolGateway.execute({
+          identity: ownerIdentity as never, tool_id: "telegram", action: "notify", parameters: { message: text.slice(0, 3900) }, idempotency_key: `finance-reconcile:${run_id}`
+        });
+        if (!sent.ok) throw new Error(`notify_failed:${sent.reason}`);
+      }
+    }
+  });
   // D-97: sentralisert GitHub rate-limit-kontroller - Postgres-baaret delt
   // tilstand (SHARED_RUNTIME, deles med worker-main.ts sin egen instans over
   // SAMME pool/tabell). `onTransition` er en bevisst minimal operativ-
@@ -856,7 +870,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // INGEN toolGateway/ToolInvocationContext (ingen nøstet klasse D-
     // handling i denne sliceen - `submit_payment_intent` sin klasse D er
     // selve handlingen, ikke en nøstet under-handling).
-    finance: new FinanceTransport(financeService, fikenCredentialsProvider),
+    finance: new FinanceTransport(financeService, fikenCredentialsProvider, financeReconciliation),
     // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2): eget
     // `finance_spend.*`-namespace, SEPARAT fra `finance` over - SAMME
     // lat/enkel-avhengighet-mønster som GrowthTransport (INGEN
@@ -1446,6 +1460,11 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "wallester-sweep", envHour("JARVIS_WALLESTER_SYNC_HOUR", 5)
   ).start(() => failOnSweepFailures("wallester-sweep", (failures) => runWallesterSweepForAllTenants(pool, cardService, failures)));
+  // WP-F1 (D-453, UA-6): daglig finansavstemming (kl. 5 - ETTER leverandørsynkene kl. 3 og utgiftssveipet kl. 4, FØR open-loop-sveipet kl. 6). Observasjon + varsel; dormant
+  // uten credentials; trygg på en tenant uten betalinger (tom kjøring).
+  new DailyScheduler(
+    pool, "finance-reconcile-sweep", envHour("JARVIS_FINANCE_RECONCILE_HOUR", 5)
+  ).start(() => failOnSweepFailures("finance-reconcile-sweep", (failures) => runFinanceReconciliationForAllTenants(pool, financeReconciliation, failures)));
   // UA-3 next slice (D-53) §19/§20: periodisk open-loop-sveip - gjenbruker SAMME
   // reboot-durable DailyScheduler-mekanisme (eget job_name, egen klokkeslett-env),
   // uavhengig av om Telegram er konfigurert (deteksjon != levering).

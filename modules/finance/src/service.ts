@@ -6,6 +6,7 @@ import type { SubmitChildCheck, SubmitIntentCheck } from "@jarvis/tool-gateway";
 import { buildSubmitChildCheck, buildSubmitIntentCheck } from "./class-d-checks.ts";
 import { providerAmountEchoMatches, toOreInteger } from "./ore.ts";
 import { malformedWebhookKey, rejectionCode } from "./webhook-guard.ts";
+import { fikenPostingDescription } from "./reconciliation.ts";
 import { assertValidPaymentIntentTransition, canTransitionPaymentIntent, isTerminalPaymentIntentState } from "./state-machine.ts";
 import { FikenTransport, type FikenGeneralJournalEntryInput, type FikenJournalEntry } from "./fiken-transport.ts";
 import { StripeTransport, type StripeBalanceObject, type StripePaymentIntentObject, type StripeRefundObject } from "./stripe-transport.ts";
@@ -765,7 +766,9 @@ export class FinanceService {
       // Fiken har ingen Idempotency-Key: et ubekreftet utfall (tidsavbrudd) lar intensjonen stå som `submitted` uten provider_ref og krever
       // eieravstemming - en blind retry kunne postert journalen to ganger.
       return this.submitPlan(false, () => transport.createGeneralJournalEntry({
-        description: current.purpose,
+        // WP-F1: formålet + en kort Jarvis-markør (`[J:<12 tegn av intensjons-id>]`). Fiken har ingen Idempotency-Key og returnerer ikke vår id, så markøren er det
+        // som lar avstemmingen (og eieren) finne igjen bilaget etter et ukjent utfall og oppdage dobbeltpostering. Avkortet til konservativ lengde.
+        description: fikenPostingDescription(current.purpose, paymentIntentId),
         // D-398 (JARVIS-097): bokføringsdato er norsk kalenderdato (Europe/Oslo) - UTC ga feil dato mellom 22:00/23:00 og midnatt lokal tid.
         date: osloCalendarDate(),
         lines: [

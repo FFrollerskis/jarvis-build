@@ -1950,6 +1950,15 @@ export function firstWaveTools(
       output_trust: "internal", transport: transport("finance")
     },
     {
+      // WP-F1 (D-453, UA-6 akseptanse): rapport over den deterministiske avstemmingen (intensjon <-> leverandørutfall <-> Fiken-bilag). Ren lesing av funn-/kjøringstabellene
+      // (aldri en ny kjøring, aldri en korreksjon). Dormante sjekker (f.eks. Fiken uten credentials) står eksplisitt i `last_run.checks` - aldri som grønne.
+      tool_id: "finance", action: "get_reconciliation_status", description: "Les avstemmingsrapporten: siste kjøring, åpne funn (manglende/ekstra/uoverensstemmende beløp, ukjent utfall, mulig dobbeltbetaling) og hvilke sjekker som faktisk kjørte",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance")
+    },
+    {
       tool_id: "finance", action: "settle_payment_intent", description: "Marker en innsendt/bekreftet intensjon som endelig oppgjort (f.eks. etter manuell bankavstemming) - ren intern disposisjon",
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), payment_intent_id: z.string(), actor_person_id: z.string().optional() }),
       capability_class: "B", scopes: ["finance.write"], reversible: false,

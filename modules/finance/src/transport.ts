@@ -1,6 +1,7 @@
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { ToolTransport } from "@jarvis/tool-gateway";
 import type { FinanceService, FikenCredentialsProvider } from "./service.ts";
+import type { FinanceReconciliationService } from "./reconciliation.ts";
 import type { CreatePaymentIntentInput, PaymentIntentState, PaymentProvider } from "./types.ts";
 
 /**
@@ -17,7 +18,9 @@ import type { CreatePaymentIntentInput, PaymentIntentState, PaymentProvider } fr
 export class FinanceTransport implements ToolTransport {
   constructor(
     private readonly service: FinanceService,
-    private readonly credentialsProvider: FikenCredentialsProvider
+    private readonly credentialsProvider: FikenCredentialsProvider,
+    /** WP-F1: avstemmingsrapporten (`get_reconciliation_status`). Valgfri - uten den svarer handlingen `finance_reconciliation_not_configured` (fail-closed, aldri en tom «grønn» rapport). */
+    private readonly reconciliation?: FinanceReconciliationService
   ) {}
 
   async invoke(action: string, parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> {
@@ -141,6 +144,12 @@ export class FinanceTransport implements ToolTransport {
       case "list_companies": {
         const rows = await this.service.listFikenCompanies(tenantId, this.credentialsProvider);
         return { data: rows as unknown as JsonValue };
+      }
+      // WP-F1 (D-453, UA-6): klasse A-rapport over den deterministiske avstemmingen (siste kjøring, åpne funn, hvilke sjekker som faktisk kjørte). Ren lesing.
+      case "get_reconciliation_status": {
+        if (!this.reconciliation) throw new Error("finance_reconciliation_not_configured");
+        const status = await this.reconciliation.getReconciliationStatus(tenantId, memorySpace);
+        return { data: status as unknown as JsonValue };
       }
       default:
         throw new Error(`finance_action_not_implemented:${action}`);

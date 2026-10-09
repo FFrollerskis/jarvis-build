@@ -20,7 +20,7 @@ import { OperationsService, OperationsTransport } from "@jarvis/operations";
 import {
   FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
   BankingService, NeonomicsFinanceTransport,
-  CardService, WallesterFinanceTransport, createRsaJwtSigner,
+  CardService, WallesterFinanceTransport, createRsaJwtSigner, FinanceReconciliationService,
   type WallesterCredentials, type WallesterCredentialsProvider,
   type NeonomicsCredentials, type NeonomicsCredentialsProvider,
   type FikenCredentials, type FikenCredentialsProvider, type StripeCredentials, type StripeCredentialsProvider,
@@ -444,7 +444,8 @@ for (const tool of firstWaveTools({
   // D-335 (UA-4 Meta Ads-slice): identisk wiring-mønster som apps/api/src/main.ts.
   metaads: new MetaAdsTransport(growthService),
   // UA-6 Finance & Spend Integrity Gateway (D-107): identisk wiring-mønster som apps/api/src/main.ts.
-  finance: new FinanceTransport(financeService, fikenCredentialsProvider),
+  // WP-F1: avstemmingsrapporten (`finance.get_reconciliation_status`) er en ren lesing - workeren trenger ingen Fiken-leser eller varsler (sveipet kjører i api).
+  finance: new FinanceTransport(financeService, fikenCredentialsProvider, new FinanceReconciliationService(pool)),
   // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2): identisk wiring-mønster som apps/api/src/main.ts.
   finance_spend: new SpendTransport(spendService),
   // D-109 (UA-6 Slice 3): identisk wiring-mønster som apps/api/src/main.ts.
