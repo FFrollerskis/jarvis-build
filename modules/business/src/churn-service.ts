@@ -2,7 +2,7 @@ import type pg from "pg";
 import type { MemorySpace } from "@jarvis/contracts";
 import { withMemoryTransaction } from "@jarvis/memory";
 import { CHURN_RISK_RULE_VERSION, CHURN_V1, calculateChurnRiskV1 } from "./churn-rules.ts";
-import type { ChurnAssessment, ChurnLevel, ChurnMetrics, ChurnSignals, ChurnSweepResult } from "./churn-types.ts";
+import type { ChurnAssessment, ChurnLevel, ChurnMetrics, ChurnOverview, ChurnSignals, ChurnSweepResult } from "./churn-types.ts";
 import { ProductUsageService } from "./product-usage-service.ts";
 import type { ScoreFactor } from "./scoring-types.ts";
 
@@ -156,6 +156,34 @@ export class ChurnService {
       );
       return r.rows.map(mapAssessment);
     });
+  }
+
+  /** «Hvem risikerer vi å miste?» - kun lesing, uten pseudonymer. `at_risk` er middels/høy risiko, høyest først. */
+  async overview(tenantId: string, space: MemorySpace, options: { minLevel?: Exclude<ChurnLevel, "low">; limit?: number } = {}): Promise<ChurnOverview> {
+    const atRisk = await this.listAtRisk(tenantId, space, options);
+    const counts = await withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
+      const r = await client.query(
+        `SELECT count(*) FILTER (WHERE company_id IS NOT NULL)::int AS linked,
+                count(*) FILTER (WHERE company_id IS NULL AND last_event_at IS NOT NULL)::int AS unlinked,
+                (SELECT count(*)::int FROM business_churn_assessments WHERE tenant_id = $1 AND rule_version = $2) AS assessed
+           FROM product_usage_accounts WHERE tenant_id = $1`,
+        [tenantId, CHURN_RISK_RULE_VERSION]
+      );
+      return r.rows[0] as { linked: number; unlinked: number; assessed: number };
+    });
+    return {
+      rule_version: CHURN_RISK_RULE_VERSION,
+      at_risk: atRisk.map((a) => ({
+        company_id: a.company_id, company_name: a.company_name, risk_score: a.risk_score, risk_level: a.risk_level, signals: a.signals.map((s) => s.label),
+        metrics: {
+          days_since_last_usage: a.metrics.days_since_last_usage, usage_drop_pct: a.metrics.usage_drop_pct,
+          open_support_tickets: a.metrics.open_support_tickets, overdue_invoices: a.metrics.overdue_invoices
+        },
+        calculated_at: a.calculated_at
+      })),
+      linked_accounts: counts.linked, assessed_accounts: counts.assessed, unlinked_accounts: counts.unlinked,
+      note: "Vurderingene er regelbaserte forslag til oppmerksomhet (churn_risk_v1, terskler er forslag) - ikke avgjørelser. Kontoer uten kobling til et kundeselskap vurderes ikke."
+    };
   }
 
   /** Kunder med forhøyet risiko (middels/høy), høyest først, med selskapsnavn. Kun lesing - grunnlaget for «hvem risikerer vi å miste?». */

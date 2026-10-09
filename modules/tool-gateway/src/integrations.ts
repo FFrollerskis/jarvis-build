@@ -569,8 +569,8 @@ export function firstWaveTools(
       output_trust: "internal", transport: transport("business")
     },
     {
-      tool_id: "business", action: "resolve_open_loop", description: "Marker et open loop som loest (manuell resolusjon)",
-      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), open_loop_id: z.string(), resolution_reason: z.string() }),
+      tool_id: "business", action: "resolve_open_loop", description: "Marker et open loop som loest (manuell resolusjon). Oppgi outcome: 'acted' = du handlet paa den, 'dismissed' = irrelevant/avvist - uten outcome blir lukkingen umerket og kan ikke brukes til kalibrering av treffsikkerhet",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), open_loop_id: z.string(), resolution_reason: z.string(), outcome: z.enum(["acted", "dismissed"]).optional() }),
       capability_class: "C", scopes: ["business.write"], reversible: false,
       rollback_procedure: "ikke reverserbar tilstandsovergang - deteksjon gjenaapner automatisk hvis vilkaaret fortsatt er sant", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
@@ -4172,11 +4172,37 @@ export function firstWaveTools(
       output_trust: "internal", transport: transport("business")
     },
     {
-      tool_id: "business", action: "get_customer_overview", description: "Samlet kundebilde for ett selskap: kontakter, åpne muligheter/oppfølginger/loops og siste aktiviteter",
+      tool_id: "business", action: "get_customer_overview", description: "Samlet kundebilde for ett selskap: kontakter, åpne muligheter/oppfølginger/loops, siste aktiviteter og churn-risiko (hvis en produktkonto er koblet til selskapet)",
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), company_id: z.string() }),
       capability_class: "A", scopes: ["business.read"], reversible: true,
       rollback_procedure: "ingen (lesing)", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    // WP-D2 (UA-3 «churn/product usage», JARVIS-045): churn-oversikt og kalibreringsrapport er ren LESING (klasse A). Oversikten viser selskapsnavn, score og signalene i klartekst -
+    // aldri konto-/bruker-pseudonymer (de er ubetrodd innhold fra en webhook og trenger ikke nå modellen). Koblingen konto -> selskap er eierens valg (klasse B, bak bekreftelse).
+    {
+      tool_id: "business", action: "get_churn_overview", description: "Hvilke kunder risikerer vi aa miste? Kunder med middels/hoey churn-risiko (score, signaler, maal) fra produktbruk, supportsaker og forfalte fakturaer, og hvor mange produktkontoer som mangler kobling til et kundeselskap. Kun lesing.",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), min_level: z.enum(["medium", "high"]).optional(), limit: z.number().int().min(1).max(50).optional() }),
+      capability_class: "A", scopes: ["business.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "get_calibration_report", description: "Hvor treffsikre er open-loop-forslagene? Forutsagt confidence mot faktisk utfall (acted/dismissed) per loop-type: treffrate, avvik, Brier-score og paalitelighet. Endrer ingenting. Kun lesing.",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), since_days: z.number().int().min(7).max(1095).optional() }),
+      capability_class: "A", scopes: ["business.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "link_product_account", description: "Koble en produktkonto (pseudonym `account_ref` fra produktbruk-kilden) til et kundeselskap, slik at churn-risiko kan vurderes for kunden. Flytter en eksisterende kobling hvis kontoen var koblet til et annet selskap. Slettes ikke noe.",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), account_ref: z.string().min(6).max(128), company_id: z.string().min(1).max(128) }),
+      capability_class: "B", scopes: ["business.write"], reversible: true,
+      rollback_procedure: "koble kontoen til forrige selskap igjen (forrige company_id vises i svaret og ligger i revisjonen)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("business")
     },
     // WP-D2 (JARVIS-049, mandat D-450): lead-/mulighetsoppdatering. Skriver KUN via BusinessPipelineService (kun business-tenant + business-space, før/etter-logg i

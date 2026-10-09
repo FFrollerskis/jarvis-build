@@ -76,3 +76,24 @@ export interface ChurnSweepResult {
   purged_events: number;
   assessments: ChurnAssessment[];
 }
+
+/** Modell-/eiervendt oversikt: kun selskapsnavn, score, signaler i klartekst og aggregerte mål - ALDRI konto-/bruker-pseudonymer (ubetrodd webhook-innhold trenger ikke nå modellen). */
+export interface ChurnOverviewEntry {
+  company_id: string;
+  company_name: string | null;
+  risk_score: number;
+  risk_level: ChurnLevel;
+  signals: string[];
+  metrics: Pick<ChurnMetrics, "days_since_last_usage" | "usage_drop_pct" | "open_support_tickets" | "overdue_invoices">;
+  calculated_at: string;
+}
+
+export interface ChurnOverview {
+  rule_version: string;
+  at_risk: ChurnOverviewEntry[];
+  /** Antall koblede kontoer / antall med en vurdering / antall kontoer med hendelser som mangler kobling til et selskap (eieren må koble dem før de kan vurderes). */
+  linked_accounts: number;
+  assessed_accounts: number;
+  unlinked_accounts: number;
+  note: string;
+}

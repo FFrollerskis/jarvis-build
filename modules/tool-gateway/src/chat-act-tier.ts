@@ -24,8 +24,11 @@ export const CHAT_ACT_TIER: ReadonlyArray<{ readonly tool_id: string; readonly a
   { tool_id: "business", action: "defer_open_loop" },
   { tool_id: "business", action: "delete_lead" },
   { tool_id: "business", action: "delete_opportunity" },
+  { tool_id: "business", action: "link_product_account" },
   { tool_id: "business", action: "recalculate_score" },
   { tool_id: "business", action: "record_activity" },
+  // WP-D2 (JARVIS-045): å lukke en loop MED utfall (acted/dismissed) er det som gir kalibreringsgrunnlag. Klasse C (ikke reverserbar) bak eierens bundne bekreftelse som alle andre skrivinger i nivået.
+  { tool_id: "business", action: "resolve_open_loop" },
   { tool_id: "business", action: "set_manual_override" },
   { tool_id: "business", action: "set_next_action" },
   { tool_id: "business", action: "set_open_loop_next_action" },

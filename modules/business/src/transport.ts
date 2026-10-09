@@ -4,6 +4,8 @@ import { DailyBrief } from "@jarvis/tool-gateway";
 import type { BriefSource, ToolGateway, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import type { BusinessService } from "./service.ts";
 import { BusinessPipelineError, BusinessPipelineService, type PipelineContext } from "./pipeline-service.ts";
+import { ChurnService } from "./churn-service.ts";
+import { ProductUsageService } from "./product-usage-service.ts";
 import { businessOpenLoopsSource, generateWeeklyBrief, renderWeeklyBrief } from "./business-brief.ts";
 import type { OpenLoopService } from "./open-loop-service.ts";
 import { BusinessEventSyncService } from "./business-event-sync.ts";
@@ -26,6 +28,8 @@ import type { ScoreEntityType } from "./scoring-types.ts";
 export class BusinessTransport implements ToolTransport {
   private eventSync?: BusinessEventSyncService;
   private pipeline?: BusinessPipelineService;
+  private churn?: ChurnService;
+  private usage?: ProductUsageService;
 
   constructor(
     private readonly service: BusinessService,
@@ -270,10 +274,31 @@ export class BusinessTransport implements ToolTransport {
         return { data: { ...brief, rendered: DailyBrief.render(brief) } as unknown as JsonValue };
       }
       case "resolve_open_loop": {
+        // WP-D2 (JARVIS-045): valgfritt utfall (acted/dismissed) = kalibreringsgrunnlag; tjenesten avviser alt annet FØR noe skrives.
+        const outcome = parameters["outcome"] === undefined ? undefined : String(parameters["outcome"]);
         const row = await this.requireOpenLoops().resolveOpenLoop(
-          tenantId, memorySpace, requireString(parameters, "open_loop_id"), requireString(parameters, "resolution_reason")
+          tenantId, memorySpace, requireString(parameters, "open_loop_id"), requireString(parameters, "resolution_reason"), outcome as "acted" | "dismissed" | undefined
         );
         return { ...(row ? { external_id: row.open_loop_id } : {}), data: row as unknown as JsonValue };
+      }
+      // WP-D2 (UA-3 «churn/product usage», JARVIS-045): lesing av churn-oversikt og kalibreringsrapport, og eierens kobling konto -> selskap (klasse B, bak bekreftelse).
+      case "get_churn_overview": {
+        const minLevel = parameters["min_level"] === undefined ? "medium" : String(parameters["min_level"]);
+        if (minLevel !== "medium" && minLevel !== "high") throw new Error("business_churn:min_level_invalid");
+        const limit = parameters["limit"] !== undefined ? Number(parameters["limit"]) : 20;
+        const overview = await this.requireChurn().overview(tenantId, memorySpace, { minLevel, limit });
+        return { data: overview as unknown as JsonValue };
+      }
+      case "get_calibration_report": {
+        const sinceDays = parameters["since_days"] !== undefined ? Number(parameters["since_days"]) : undefined;
+        const report = await this.requireOpenLoops().calibrationReport(tenantId, memorySpace, sinceDays !== undefined ? { sinceDays } : {});
+        return { data: report as unknown as JsonValue };
+      }
+      case "link_product_account": {
+        // Forsvar i dybden utover gatewayens scope-sjekk: identitetens tenant MÅ være tenanten det skrives i.
+        if (context?.identity && context.identity.tenant_id !== tenantId) throw new Error("business_usage:scope_mismatch");
+        const r = await this.requireUsage().linkAccount(tenantId, memorySpace, parameters["account_ref"], parameters["company_id"], context?.identity?.person_id ?? null);
+        return { data: { changed: r.changed, company_id: r.company_id, previous_company_id: r.previous_company_id } as unknown as JsonValue };
       }
       case "defer_open_loop": {
         const row = await this.requireOpenLoops().deferOpenLoop(
@@ -352,6 +377,16 @@ export class BusinessTransport implements ToolTransport {
       default:
         throw new Error(`business_action_not_implemented:${action}`);
     }
+  }
+
+  private requireChurn(): ChurnService {
+    this.churn ??= new ChurnService(this.requirePool());
+    return this.churn;
+  }
+
+  private requireUsage(): ProductUsageService {
+    this.usage ??= new ProductUsageService(this.requirePool());
+    return this.usage;
   }
 
   private requirePipeline(): BusinessPipelineService {

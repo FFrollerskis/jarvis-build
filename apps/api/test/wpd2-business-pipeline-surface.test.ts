@@ -141,3 +141,113 @@ describe("executor: HVER av dem krever bundet eierbekreftelse - utføres aldri d
     });
   }
 });
+
+/**
+ * WP-D2 (UA-3 «churn/product usage», JARVIS-045): churn-oversikt og kalibreringsrapport er klasse A og står i chattens LESE-nivå; koblingen konto -> selskap (B) og lukking av en loop med
+ * utfall (C) står i HANDLINGSNIVÅET bak eierens bundne bekreftelse. ALDRI på MODEL_SURFACE_ALLOWLIST (ADR-001 §2.3 pkt 1).
+ */
+const NEW_READ_KEYS = ["business.get_churn_overview", "business.get_calibration_report"];
+const CHURN_ACT_KEYS = ["business.link_product_account", "business.resolve_open_loop"];
+
+describe("churn/kalibrering: lese- og handlingsnivå med riktig risikoklasse og effekt", () => {
+  it("lesing (A/read) står i lese-nivået og er ikke skrivbare; skriving står kun i handlingsnivået - og INGEN av dem på MODEL_SURFACE_ALLOWLIST", () => {
+    const read = new Set(CHAT_READ_TIER.map(key));
+    const act = new Set(CHAT_ACT_TIER.map(key));
+    for (const k of NEW_READ_KEYS) {
+      expect(read.has(k), k).toBe(true);
+      expect(act.has(k), k).toBe(false);
+      const e = manifest.get(k)!;
+      expect(e.risk, k).toBe("A");
+      expect(e.effect, k).toBe("read");
+      expect(e.owner, k).toBe("jarvis_core");
+    }
+    for (const k of CHURN_ACT_KEYS) {
+      expect(act.has(k), k).toBe(true);
+      expect(read.has(k), k).toBe(false);
+      expect(MODEL_SURFACE_ALLOWLIST.map(key), k).not.toContain(k);
+      expect(MODEL_SURFACE_QUARANTINE_WRITES.map(key), k).not.toContain(k);
+      expect(manifest.get(k)!.surfaces, k).toEqual(["web_chat"]);
+    }
+    for (const k of NEW_READ_KEYS) expect(MODEL_SURFACE_ALLOWLIST.map(key), k).not.toContain(k);
+    expect(() => assertReadOnlyModelSurface(gw)).not.toThrow();
+    expect(() => assertChatActTier(gw)).not.toThrow();
+    expect(() => assertManifestInvariants(manifest)).not.toThrow();
+  });
+
+  it("koblingen er B/write; å lukke en loop er C/write (ikke lenger feilklassifisert som lesing pga. «resolve»-prefikset)", () => {
+    expect(manifest.get("business.link_product_account")).toMatchObject({ risk: "B", effect: "write" });
+    expect(manifest.get("business.resolve_open_loop")).toMatchObject({ risk: "C", effect: "write" });
+    for (const k of CHURN_ACT_KEYS) expect(["pay", "control", "send", "delete"]).not.toContain(manifest.get(k)!.effect);
+  });
+
+  it("tale, Telegram, bakgrunn og kode har ALDRI de skrivende; lese-handlingene er ikke i tale/Telegram/kode-nivå heller", () => {
+    for (const s of ["voice", "telegram", "background", "coding"] as const) {
+      const granted = SURFACE_TOOL_GRANTS[s].map(key);
+      for (const k of CHURN_ACT_KEYS) expect(granted, `${s}: ${k}`).not.toContain(k);
+    }
+  });
+
+  it("modellens skjema har ikke identitetsfelt; resolve_open_loop kan kun oppgi acted/dismissed (condition_cleared er forbeholdt sveipet)", () => {
+    for (const k of [...NEW_READ_KEYS, ...CHURN_ACT_KEYS]) {
+      const mapping = surface.find((m) => key(m) === k)!;
+      expect(mapping, k).toBeDefined();
+      const props = Object.keys((mapping.def.input_schema as { properties: Record<string, unknown> }).properties);
+      for (const forbidden of ["tenant_id", "memory_space", "owner_person_id", "person_id", "actor_person_id"]) expect(props, `${k}: ${forbidden}`).not.toContain(forbidden);
+      expect(mapping.scope_bindings, k).toEqual(expect.arrayContaining(["tenant_id", "memory_space"]));
+    }
+    const resolve = surface.find((m) => key(m) === "business.resolve_open_loop")!;
+    const outcome = (resolve.def.input_schema as { properties: Record<string, { enum?: string[] }> }).properties["outcome"];
+    expect(outcome?.enum).toEqual(["acted", "dismissed"]);
+  });
+});
+
+describe("churn/kalibrering: utvalg - det eieren ber om rangeres først, og lesing velger aldri skriving", () => {
+  const pick = (text: string) => selectSurfaceTools("web_chat", text, surface).selected.filter((m) => m.tool_id === "business").map(key);
+  it("«hvem risikerer vi å miste?» -> churn-oversikt; «hvor treffsikre er forslagene?» -> kalibreringsrapport; kundebildet nevner churn", () => {
+    expect(pick("hvem risikerer vi å miste?")).toContain("business.get_churn_overview");
+    expect(pick("hvilke kunder har churn-risiko")).toContain("business.get_churn_overview");
+    expect(pick("hvor treffsikre er forslagene dine? vis kalibreringen")).toContain("business.get_calibration_report");
+    expect(manifest.get("business.get_customer_overview")).toBeDefined();
+  });
+  it("«koble produktkontoen til kunden» -> link_product_account; «lukk loopen, jeg handlet» -> resolve_open_loop - kun med handlingsord", () => {
+    expect(pick("koble produktkontoen acct-123456 til Risiko AS")).toContain("business.link_product_account");
+    expect(pick("lukk loopen, jeg har ringt kunden")).toContain("business.resolve_open_loop");
+    for (const read of ["hvem risikerer vi å miste?", "vis kundekontoene og kalibreringen"]) {
+      const sel = pick(read);
+      for (const k of CHURN_ACT_KEYS) expect(sel, `${read}: ${k}`).not.toContain(k);
+    }
+  });
+  it("tale velger aldri de skrivende, selv med handlingsord", () => {
+    const sel = selectSurfaceTools("voice", "koble produktkontoen og lukk loopen", surface).selected.map(key);
+    for (const k of CHURN_ACT_KEYS) expect(sel).not.toContain(k);
+  });
+});
+
+describe("churn/kalibrering: executor - HVER skrivende krever bundet eierbekreftelse", () => {
+  for (const k of CHURN_ACT_KEYS) {
+    it(`${k}: bekreftelse opprettes (owner_action_tier), ingenting kjøres, og modellens tenant/space overstyres`, async () => {
+      const mapping = surface.find((m) => key(m) === k)!;
+      const executed: string[] = [];
+      const gateway = { execute: async (req: { tool_id: string; action: string }) => { executed.push(`${req.tool_id}.${req.action}`); return { ok: true, data: {}, output_trust: "internal" }; } } as unknown as ToolGateway;
+      const seen: Array<{ tool: string; reasons: string[]; parameters: Record<string, unknown> }> = [];
+      const gate: ConfirmationGate = {
+        checkAndConsume: async (c, _who, reasons) => { seen.push({ tool: `${c.tool_id}.${c.action}`, reasons, parameters: c.parameters }); return { ok: false, reason: "confirmation_required", confirmation_id: "conf-2" }; }
+      };
+      const turn = createTurnContext("web_chat", "lukk loopen og koble kontoen");
+      const ex = new MeshToolExecutor(gateway, identity, 20_000, surface, turn, { manifest, confirmations: gate });
+      const res = await ex.execute({
+        tool_call_id: "c2", tool_name: mapping.def.name,
+        arguments: { open_loop_id: "ol-1", resolution_reason: "ringte", outcome: "acted", account_ref: "acct-123456", company_id: "biz-co-1", tenant_id: "tenant-EVIL", memory_space: "personal" },
+        provider: "gemma_local", model: "m"
+      }, { tenant_id: "tenant-1", idempotency_key: "k2" });
+      expect(res.success).toBe(false);
+      expect(res.error_category).toBe("CONFIRMATION_REQUIRED");
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.tool).toBe(k);
+      expect(seen[0]!.reasons).toEqual(["owner_action_tier"]);
+      expect(seen[0]!.parameters["tenant_id"]).toBe("tenant-1");
+      expect(seen[0]!.parameters["memory_space"]).toBe("business");
+      expect(executed).toEqual([]);
+    });
+  }
+});
