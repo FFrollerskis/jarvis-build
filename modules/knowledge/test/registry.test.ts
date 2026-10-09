@@ -188,7 +188,10 @@ describe("KnowledgeSourceRegistry - github-fabrikk med ekte ToolGateway (Postgre
     ]);
     const source = registry.build("tenant-reg-gh", "project", "gh1", { toolGateway, identity });
     expect(source).toBeInstanceOf(GithubKnowledgeSource);
-    expect(source.source_instance_id).toBe("github:org/repo");
+    // WP-D1: en konfigurert kilde (`JARVIS_KNOWLEDGE_SOURCES`) har sin EGEN instans-id for alle kildetyper (tidligere ble den stille ignorert for GitHub og erstattet av `github:<repo>`).
+    expect(source.source_instance_id).toBe("gh1");
+    // Direkte konstruksjon uten id beholder den gamle avledede identiteten.
+    expect(new GithubKnowledgeSource(toolGateway, identity, "org/repo").source_instance_id).toBe("github:org/repo");
     const { records } = await source.list();
     expect(records).toHaveLength(1);
     expect(records[0]?.external_id).toBe("repo:org/repo");
