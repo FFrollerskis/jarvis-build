@@ -66,6 +66,31 @@ const BUSINESS_JWT_LIFETIME_SECONDS = 5;
 const RECORDS_COUNT = 100;
 
 import { financeSignal, isRetrySafe } from "./http.ts";
+import { parseMinorUnitsStrict } from "./ore.ts";
+
+/**
+ * WP-F1 (D-453, JARVIS-020/070): beløp og valuta fra leverandøren leses STRENGT - aldri `Number(x ?? 0)` (som gjorde et manglende beløp til 0, tekst til NaN og brøk til en
+ * bigint-feil i databasen) og aldri en stille standardvaluta. Et ugyldig svar kaster (kortets synk feiler synlig og isoleres av sveipet), det lagres aldri som et gjettet tall.
+ * MERK (åpen, ikke verifisert mot primærkilden): Wallesters enhet for `amount` (minste enhet vs. desimal hovedenhet) er ikke bekreftet i dette miljøet - et desimalt beløp
+ * AVVISES her i stedet for å bli feilskalert.
+ */
+export class WallesterPayloadError extends Error {
+  constructor(readonly what: string, readonly reason: string) {
+    super(`wallester_payload_invalid:${what}:${reason}`);
+    this.name = "WallesterPayloadError";
+  }
+}
+
+function strictProviderAmount(value: unknown, what: string): number {
+  const parsed = parseMinorUnitsStrict(value);
+  if (!parsed.ok) throw new WallesterPayloadError(what, parsed.reason);
+  return parsed.value;
+}
+
+function strictProviderCurrency(value: unknown, what: string): string {
+  if (typeof value !== "string" || !/^[A-Za-z]{3}$/.test(value)) throw new WallesterPayloadError(what, "currency_invalid");
+  return value.toUpperCase();
+}
 
 export class WallesterApiError extends Error {
   constructor(
@@ -406,8 +431,8 @@ export class WallesterTransport implements WallesterGateway {
       id: String(raw["id"]),
       cardId: String(raw["card_id"] ?? raw["cardId"] ?? ""),
       status: knownStatus ? (status as WallesterAuthorizationObject["status"]) : "unknown",
-      amountOre: Number(raw["amount"] ?? 0),
-      currency: String(raw["currency"] ?? "EUR").toUpperCase(),
+      amountOre: strictProviderAmount(raw["amount"], "authorization"),
+      currency: strictProviderCurrency(raw["currency"], "authorization"),
       merchantName: str(raw["merchant_name"]),
       merchantCategoryCode: str(raw["merchant_category_code"]),
       channel: toChannel(raw["channel"]),
@@ -436,8 +461,8 @@ export class WallesterTransport implements WallesterGateway {
       cardId: String(raw["card_id"] ?? raw["cardId"] ?? ""),
       authorizationId: str(raw["authorization_id"]),
       type: knownType ? (type as WallesterTransactionObject["type"]) : "unknown",
-      amountOre: Number(raw["amount"] ?? 0),
-      currency: String(raw["currency"] ?? "EUR").toUpperCase(),
+      amountOre: strictProviderAmount(raw["amount"], "transaction"),
+      currency: strictProviderCurrency(raw["currency"], "transaction"),
       merchantName: str(raw["merchant_name"]),
       merchantCategoryCode: str(raw["merchant_category_code"]),
       channel: toChannel(raw["channel"]),
@@ -460,8 +485,8 @@ export class WallesterTransport implements WallesterGateway {
     const raw = await this.request<Record<string, unknown>>("GET", `/v1/accounts/${encodeURIComponent(this.accountId)}`);
     return {
       accountId: this.accountId,
-      availableAmountOre: Number(raw["available_amount"] ?? 0),
-      currency: String(raw["currency"] ?? "EUR").toUpperCase()
+      availableAmountOre: strictProviderAmount(raw["available_amount"], "balance"),
+      currency: strictProviderCurrency(raw["currency"], "balance")
     };
   }
 }

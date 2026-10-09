@@ -5,6 +5,7 @@ import type { MemorySpace } from "@jarvis/contracts";
 import type { SubmitChildCheck, SubmitIntentCheck } from "@jarvis/tool-gateway";
 import { buildSubmitChildCheck, buildSubmitIntentCheck } from "./class-d-checks.ts";
 import { providerAmountEchoMatches, toOreInteger } from "./ore.ts";
+import { malformedWebhookKey, rejectionCode } from "./webhook-guard.ts";
 import { assertValidPaymentIntentTransition, canTransitionPaymentIntent, isTerminalPaymentIntentState } from "./state-machine.ts";
 import { FikenTransport, type FikenGeneralJournalEntryInput, type FikenJournalEntry } from "./fiken-transport.ts";
 import { StripeTransport, type StripeBalanceObject, type StripePaymentIntentObject, type StripeRefundObject } from "./stripe-transport.ts";
@@ -19,6 +20,8 @@ import {
   PaymentIntentNotNeonomicsError,
   BankAccountNotFoundError,
   BankConsentNotActiveError,
+  NEONOMICS_SETTLEMENT_RANK,
+  NEONOMICS_STATUS_RANK,
   NEONOMICS_STATUS_TO_JARVIS_STATE
 } from "./banking-types.ts";
 import type { BankAccount, BankConsent } from "./banking-types.ts";
@@ -1223,6 +1226,42 @@ export class FinanceService {
     );
   }
 
+  /**
+   * WP-F1 (D-453, JARVIS-020/070): lagrer en AUTENTISERT webhook-hendelse med permanent ugyldig innhold som dødbrev (`status = 'rejected'`, kort årsakskode - aldri selve
+   * innholdet) og returnerer `rejected` (ruten svarer 2xx: ingen evig retry). Samme nøkkel igjen = `duplicate`. Hendelser som ikke engang lar seg identifisere får en
+   * deterministisk hash-nøkkel (`malformed:<sha256-prefiks>`). Tilstanden hentes uansett inn igjen av den planlagte leverandør-oppfriskingen, og avstemmingen
+   * (`reconcileFinance`) flagger avviste hendelser. Kjører i den KONFIGURERTE tenantens kontekst (aldri payload-metadata).
+   */
+  private async recordRejectedWebhook(
+    provider: "stripe" | "vipps" | "neonomics", tenantId: string,
+    e: { key: string; kind: string; reason: string; epochSeconds?: number | null; summary?: Record<string, unknown> }
+  ): Promise<{ status: "rejected" | "duplicate"; eventId: string }> {
+    const reason = rejectionCode(e.reason);
+    const kind = e.kind.slice(0, 120);
+    const summary = JSON.stringify(e.summary ?? {});
+    return withMemoryTransaction(this.pool, tenantId, ["business"], async (client) => {
+      const inserted = provider === "stripe"
+        ? await client.query(
+            `INSERT INTO stripe_webhook_events (stripe_event_id, tenant_id, memory_space_id, event_type, status, payload_summary, error_message, stripe_created_at, processed_at)
+             VALUES ($1, $2, 'business', $3, 'rejected', $4::jsonb, $5, COALESCE(to_timestamp($6::double precision), now()), now())
+             ON CONFLICT (stripe_event_id) DO NOTHING RETURNING stripe_event_id`,
+            [e.key, tenantId, kind, summary, reason, e.epochSeconds ?? null]
+          )
+        : provider === "vipps"
+          ? await client.query(
+              `INSERT INTO vipps_webhook_events (dedupe_key, tenant_id, memory_space_id, event_name, status, payload_summary, error_message, processed_at)
+               VALUES ($1, $2, 'business', $3, 'rejected', $4::jsonb, $5, now()) ON CONFLICT (dedupe_key) DO NOTHING RETURNING dedupe_key`,
+              [e.key, tenantId, kind, summary, reason]
+            )
+          : await client.query(
+              `INSERT INTO neonomics_webhook_events (dedupe_key, tenant_id, memory_space_id, provider_payment_id, payment_status, status, payload_summary, error_message, processed_at)
+               VALUES ($1, $2, 'business', $3, $4, 'rejected', $5::jsonb, $6, now()) ON CONFLICT (dedupe_key) DO NOTHING RETURNING dedupe_key`,
+              [e.key, tenantId, kind === "malformed" ? "malformed" : kind, "malformed", summary, reason]
+            );
+      return { status: inserted.rows.length === 1 ? ("rejected" as const) : ("duplicate" as const), eventId: e.key };
+    });
+  }
+
   private async requireStripePaymentIntent(client: pg.PoolClient, tenantId: string, paymentIntentId: string, forUpdate: boolean): Promise<PaymentIntent> {
     const current = await readForUpdate(client, tenantId, paymentIntentId, forUpdate);
     if (!current) throw new PaymentIntentNotFoundError(paymentIntentId);
@@ -1259,12 +1298,12 @@ export class FinanceService {
           // FØR den allerede lagrede `provider_status_updated_at` (som har
           // sekundets millisekunder med), og dermed feilaktig avvist som
           // `stale_event`. `ceil` garanterer det beregnede tidsstempelet
-          // ALLTID er >= det faktiske "nå" - og dermed >= ethvert tidligere
-          // lagret tidsstempel - siden en eksplisitt oppfrisking (i
-          // motsetning til en ekte Stripe-webhook-hendelse med sitt eget
-          // historiske `created`-tidsstempel) pr. definisjon ALLTID skal
+          // ALLTID er >= observasjonstidspunktet - og dermed >= ethvert
+          // lagret tidsstempel fra FØR lesingen startet - siden en eksplisitt
+          // oppfrisking (i motsetning til en ekte Stripe-webhook-hendelse med
+          // sitt eget historiske `created`-tidsstempel) pr. definisjon skal
           // vinne over hva som helst lagret tidligere (se JSDoc over).
-          sourceEventEpochSeconds: Math.ceil(Date.now() / 1000),
+          sourceEventEpochSeconds: Math.ceil(observedAtMs / 1000),
           lastPaymentErrorMessage: stripePaymentIntent.last_payment_error?.message?.slice(0, 500) ?? null
         },
         actorPersonId ?? null
@@ -1318,7 +1357,15 @@ export class FinanceService {
     try {
       envelope = parseStripeEventEnvelope(rawBody);
     } catch {
-      throw new Error("stripe_event_envelope_malformed");
+      // WP-F1 (JARVIS-070): autentisert, men ikke identifiserbar nyttelast -> dødbrev under en hash-nøkkel + 2xx, aldri en evig 5xx-retry.
+      return this.recordRejectedWebhook("stripe", stripeTenantId, { key: malformedWebhookKey(rawBody), kind: "malformed", reason: "envelope_malformed" });
+    }
+    if (envelope.rejection !== null) {
+      // WP-F1 (JARVIS-020/070): identifiserbar hendelse med permanent ugyldig innhold (beløp/valuta/dato/referanse) -> dødbrev med årsak + 2xx.
+      return this.recordRejectedWebhook("stripe", stripeTenantId, {
+        key: envelope.id, kind: envelope.type, reason: envelope.rejection, epochSeconds: envelope.created > 0 ? envelope.created : null,
+        summary: { object_type: envelope.object_type, status: envelope.status }
+      });
     }
 
     // `withMemoryTransaction` (IKKE `withTenantContext`) - `payment_intents`/
@@ -1907,7 +1954,12 @@ export class FinanceService {
     try {
       envelope = parseVippsEventEnvelope(rawBody);
     } catch {
-      throw new Error("vipps_event_envelope_malformed");
+      return this.recordRejectedWebhook("vipps", vippsTenantId, { key: malformedWebhookKey(rawBody), kind: "malformed", reason: "envelope_malformed" });
+    }
+    if (envelope.rejection !== null) {
+      return this.recordRejectedWebhook("vipps", vippsTenantId, {
+        key: envelope.dedupeKey, kind: envelope.name, reason: envelope.rejection, summary: { reference: envelope.reference }
+      });
     }
 
     return withMemoryTransaction(this.pool, vippsTenantId, ["business"], async (client) => {
@@ -1918,7 +1970,7 @@ export class FinanceService {
          RETURNING *`,
         [envelope.dedupeKey, vippsTenantId, envelope.name, JSON.stringify({
           reference: envelope.reference, amount_ore: envelope.amount_ore, currency: envelope.currency, success: envelope.success
-        }), envelope.timestamp ? new Date(envelope.timestamp).toISOString() : null]
+        }), envelope.timestamp]
       );
       if (inserted.rows.length === 0) {
         // D-392 (JARVIS-070): en `failed_retryable`-hendelse er IKKE «ferdig» - leverandørens retry skal behandle den på nytt (tidligere svarte
@@ -1949,7 +2001,7 @@ export class FinanceService {
           return { status: "failed_retryable" as const, eventId: envelope.dedupeKey };
         }
 
-        const sourceEpochMs = envelope.timestamp ? new Date(envelope.timestamp).getTime() : Date.now();
+        const sourceEpochMs = envelope.timestamp ? Date.parse(envelope.timestamp) : Date.now(); // tidsstempelet er strengt validert av parseren
         await this.applyVippsPaymentOutcome(
           client, intentRow.tenant_id, intentRow.memory_space_id as MemorySpace, intentRow,
           { vippsState: envelope.name, vippsAmountOre: envelope.amount_ore, vippsCurrency: envelope.currency, sourceEventKey: envelope.dedupeKey, sourceEventEpochMs: sourceEpochMs },
@@ -2533,6 +2585,13 @@ export class FinanceService {
       }
     }
 
+    // WP-F1 (hendelsesorden): Neonomics sender ingen hendelses-id/-tidsstempel (kun betalings-id + ISO 20022-status), så mottakstid er eneste klokke. Når oppgjør er
+    // i gang/fullført (ACSP og høyere) kan en FORSINKET tidligere valideringsstatus (RCVD/ACTC/PDNG/PATC/ACCP/ACWC) aldri overskrive den lagrede provider_status.
+    const incomingRank = NEONOMICS_STATUS_RANK[outcome.isoStatus];
+    const storedRank = current.provider_status ? NEONOMICS_STATUS_RANK[current.provider_status] : undefined;
+    if (incomingRank !== undefined && storedRank !== undefined && storedRank >= NEONOMICS_SETTLEMENT_RANK && incomingRank < storedRank) {
+      return { applied: false, reason: "stale_event", intent: current };
+    }
     const targetState = NEONOMICS_STATUS_TO_JARVIS_STATE[outcome.isoStatus] ?? null;
     let stateChanges = "";
     const values: unknown[] = [tenantId, current.payment_intent_id, outcome.isoStatus, new Date(outcome.sourceEventEpochMs).toISOString(), outcome.sourceEventKey];
@@ -2612,7 +2671,7 @@ export class FinanceService {
    * portalen), IKKE HMAC-signatur - se neonomics-webhook.ts. SAMME
    * dedup-/tenant-vokter-/ordens-struktur som Stripe-/Vipps-mottakene.
    */
-  async ingestNeonomicsWebhookEvent(rawBody: Buffer, apiKeyHeader: string | undefined, nowMs: number = Date.now()): Promise<{ status: "received" | "verified" | "processed" | "failed_retryable" | "unsupported" | "duplicate"; eventId?: string }> {
+  async ingestNeonomicsWebhookEvent(rawBody: Buffer, apiKeyHeader: string | undefined, nowMs: number = Date.now()): Promise<{ status: "received" | "verified" | "processed" | "failed_retryable" | "unsupported" | "rejected" | "duplicate"; eventId?: string }> {
     const configuredKey = await this.neonomicsWebhookApiKeyProvider();
     if (!configuredKey) throw new NeonomicsCredentialsUnavailableError("(webhook-API-nøkkel ikke konfigurert)");
     const auth = verifyNeonomicsWebhookApiKey(apiKeyHeader, configuredKey);
@@ -2627,7 +2686,7 @@ export class FinanceService {
     try {
       envelope = parseNeonomicsEventEnvelope(rawBody);
     } catch {
-      throw new Error("neonomics_event_envelope_malformed");
+      return this.recordRejectedWebhook("neonomics", neonomicsTenantId, { key: malformedWebhookKey(rawBody), kind: "malformed", reason: "envelope_malformed" });
     }
 
     return withMemoryTransaction(this.pool, neonomicsTenantId, ["business"], async (client) => {

@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { requiredWebhookAmount, requiredWebhookCurrency, safeProviderId, safeToken } from "./webhook-guard.ts";
 
 /**
  * UA-6 Slice 6 (D-112, korrigert D-11x runde 4): Wallester webhook-
@@ -84,6 +85,15 @@ export interface WallesterEventEnvelope {
   status: string;
   payload: Record<string, unknown>;
   dedupeKey: string;
+  /**
+   * WP-F1 (D-453): STRENGT validert beløp i minste enhet for autorisasjons-/transaksjonshendelser (`null` for kort-/ukjente hendelser eller når `rejection` er satt).
+   * Aldri `Number(x ?? 0)`: et manglende eller ugyldig beløp er en avvist hendelse, ikke en stille 0.
+   */
+  amountOre: number | null;
+  /** WP-F1: STRENGT validert valutakode (store bokstaver) for autorisasjons-/transaksjonshendelser; aldri en stille standard («EUR»). */
+  currency: string | null;
+  /** WP-F1: `null` = gyldig. Ellers årsakskoden til permanent ugyldig innhold - kalleren lagrer hendelsen som `rejected` og svarer 2xx. */
+  rejection: string | null;
 }
 
 export class WallesterEventEnvelopeError extends Error {
@@ -118,29 +128,54 @@ function classifyKind(eventType: string): WallesterEventKind {
 export function parseWallesterEventEnvelope(rawBody: Buffer): WallesterEventEnvelope {
   let parsed: Record<string, unknown>;
   try {
-    parsed = JSON.parse(rawBody.toString("utf8")) as Record<string, unknown>;
-  } catch {
+    const json: unknown = JSON.parse(rawBody.toString("utf8"));
+    if (typeof json !== "object" || json === null || Array.isArray(json)) throw new WallesterEventEnvelopeError("not_an_object");
+    parsed = json as Record<string, unknown>;
+  } catch (err) {
+    if (err instanceof WallesterEventEnvelopeError) throw err;
     throw new WallesterEventEnvelopeError("invalid_json");
   }
   const envelopeMarker = typeof parsed["event"] === "string" ? (parsed["event"] as string) : null;
   if (envelopeMarker !== WALLESTER_ENVELOPE_EVENT) throw new WallesterEventEnvelopeError("unexpected_envelope_event");
-  const eventType = typeof parsed["type"] === "string" ? (parsed["type"] as string) : null;
+  const eventType = safeToken(parsed["type"], 64);
   if (!eventType) throw new WallesterEventEnvelopeError("missing_type");
-  const data = (parsed["data"] as Record<string, unknown> | undefined) ?? parsed;
-  const providerObjectId = typeof data["id"] === "string" ? (data["id"] as string) : null;
+  const rawData = parsed["data"];
+  const data = rawData === undefined ? parsed : typeof rawData === "object" && rawData !== null && !Array.isArray(rawData) ? (rawData as Record<string, unknown>) : null;
+  if (data === null) throw new WallesterEventEnvelopeError("data_not_an_object");
+  const providerObjectId = safeProviderId(data["id"]);
   if (!providerObjectId) throw new WallesterEventEnvelopeError("missing_object_id");
-  const status = typeof data["status"] === "string" ? (data["status"] as string) : "unknown";
-  const eventId = typeof parsed["event_id"] === "string" ? (parsed["event_id"] as string) : null;
-  const providerCardId =
-    typeof data["card_id"] === "string" ? (data["card_id"] as string) : typeof parsed["card_id"] === "string" ? (parsed["card_id"] as string) : null;
+  const status = safeToken(data["status"], 64) ?? "unknown";
+  let rejection: string | null = null;
+  const reject = (code: string): void => { rejection ??= code; };
+  const rawEventId = parsed["event_id"];
+  const eventId = safeProviderId(rawEventId);
+  if (rawEventId !== undefined && rawEventId !== null && eventId === null) reject("event_id_invalid");
+  const rawCardId = data["card_id"] ?? parsed["card_id"];
+  const providerCardId = safeProviderId(rawCardId);
+  if (rawCardId !== undefined && rawCardId !== null && providerCardId === null) reject("card_id_invalid");
+  const kind = classifyKind(eventType);
+
+  // Beløp/valuta er påkrevd (og strengt validert) for hendelser som oppretter/endrer pengeobjekter. Mangler beløpet, avvises hendelsen (den planlagte oppfriskingen henter inn tilstanden).
+  let amountOre: number | null = null;
+  let currency: string | null = null;
+  if (kind === "authorization" || kind === "authorization_release" || kind === "transaction") {
+    const a = requiredWebhookAmount(data["amount"]);
+    if (a.ok) amountOre = a.value; else reject(a.rejection);
+    const c = requiredWebhookCurrency(data["currency"]);
+    if (c.ok) currency = c.value; else reject(c.rejection);
+  }
+
   return {
     eventId,
     eventType,
-    kind: classifyKind(eventType),
+    kind,
     providerObjectId,
     providerCardId,
     status,
     payload: data,
-    dedupeKey: eventId ?? `${eventType}:${providerObjectId}:${status}`
+    dedupeKey: eventId ?? `${eventType}:${providerObjectId}:${status}`,
+    amountOre,
+    currency,
+    rejection
   };
 }

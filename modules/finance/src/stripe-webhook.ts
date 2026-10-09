@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { safeProviderId, safeToken, strictUnixSeconds, strictWebhookAmount, strictWebhookCurrency } from "./webhook-guard.ts";
 
 /**
  * D-109 (UA-6 Slice 3): rene, avhengighetsfrie Stripe-webhook-signatur-
@@ -101,15 +102,19 @@ export function verifyStripeWebhookSignature(
 /**
  * Minimal, TRYGG utdrag fra en rå Stripe-webhook-JSON-nyttelast - ALDRI
  * hele objektet lagret (kan inneholde betalingsmetode-/kunde-detaljer
- * Jarvis aldri skal persistere, byggeordrens §4/§13). Kaster
- * `TypeError`-lignende ved uventet form - kalleren (FinanceService)
- * fanger og markerer hendelsen `failed_retryable` i stedet for å anta en
- * form som ikke faktisk ble bevist.
+ * Jarvis aldri skal persistere, byggeordrens §4/§13).
+ *
+ * WP-F1 (D-453, JARVIS-020/070): STRENG parsing. En hendelse som ikke lar seg identifisere (ikke et JSON-objekt, mangler trygg `id`/`type`) KASTER
+ * `stripe_event_envelope_malformed` (kalleren lagrer et dødbrev under en hash-nøkkel). Er hendelsen identifiserbar men et felt er permanent ugyldig
+ * (`created` utenfor [2000, 2100), beløp som ikke er et trygt ikke-negativt heltall i minste enhet, ugyldig valuta/objekt-id/referanse), returneres
+ * den med `rejection` satt (årsakskode) - kalleren lagrer den som `rejected` og svarer 2xx (ingen evig retry). Beløp/valuta valideres kun for objekttypene
+ * Jarvis faktisk anvender (`payment_intent`/`charge`/`refund`); andre objekttyper kan ha negative beløp (saldo-/utbetalingsobjekter) og ignoreres uansett.
  */
 export interface ParsedStripeEventEnvelope {
   readonly id: string;
   readonly type: string;
   readonly api_version: string | null;
+  /** Unix-sekunder; `0` når `created` er ugyldig (da er `rejection` satt og kalleren bruker mottakstidspunktet). */
   readonly created: number;
   readonly object_id: string | null;
   readonly object_type: string | null;
@@ -118,37 +123,74 @@ export interface ParsedStripeEventEnvelope {
   readonly status: string | null;
   readonly payment_intent_ref: string | null;
   readonly last_payment_error_message: string | null;
+  /** `null` = gyldig. Ellers årsakskoden til permanent ugyldig innhold. */
+  readonly rejection: string | null;
+}
+
+const MONEY_OBJECT_TYPES: ReadonlySet<string> = new Set(["payment_intent", "charge", "refund"]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function parseStripeEventEnvelope(rawBody: Buffer): ParsedStripeEventEnvelope {
-  const json = JSON.parse(rawBody.toString("utf8")) as Record<string, unknown>;
-  if (typeof json["id"] !== "string" || typeof json["type"] !== "string" || typeof json["created"] !== "number") {
-    throw new Error("stripe_event_envelope_malformed");
+  const json: unknown = JSON.parse(rawBody.toString("utf8"));
+  if (!isRecord(json)) throw new Error("stripe_event_envelope_malformed");
+  const id = safeProviderId(json["id"]);
+  const type = typeof json["type"] === "string" && /^[a-z][a-z0-9_.]{0,119}$/.test(json["type"]) ? json["type"] : null;
+  if (id === null || type === null) throw new Error("stripe_event_envelope_malformed");
+
+  let rejection: string | null = null;
+  const reject = (code: string): void => { rejection ??= code; };
+
+  const created = strictUnixSeconds(json["created"]);
+  if (!created.ok) reject(created.rejection);
+
+  const object = isRecord(json["data"]) && isRecord(json["data"]["object"]) ? json["data"]["object"] : undefined;
+  let objectId: string | null = null;
+  if (object && object["id"] !== undefined && object["id"] !== null) {
+    objectId = safeProviderId(object["id"]);
+    if (objectId === null) reject("object_id_invalid");
   }
-  const data = json["data"] as Record<string, unknown> | undefined;
-  const object = (data?.["object"] as Record<string, unknown> | undefined) ?? undefined;
-  const objectId = typeof object?.["id"] === "string" ? (object["id"] as string) : null;
-  const objectType = typeof object?.["object"] === "string" ? (object["object"] as string) : null;
-  const amount = typeof object?.["amount"] === "number" ? (object["amount"] as number) : null;
-  const currency = typeof object?.["currency"] === "string" ? (object["currency"] as string) : null;
-  const status = typeof object?.["status"] === "string" ? (object["status"] as string) : null;
+  let objectType: string | null = null;
+  if (object && object["object"] !== undefined && object["object"] !== null) {
+    objectType = safeToken(object["object"], 64);
+    if (objectType === null) reject("object_type_invalid");
+  }
+
+  let amount: number | null = null;
+  let currency: string | null = null;
+  if (object && objectType !== null && MONEY_OBJECT_TYPES.has(objectType)) {
+    const a = strictWebhookAmount(object["amount"]);
+    if (a.ok) amount = a.value; else reject(a.rejection);
+    const c = strictWebhookCurrency(object["currency"]);
+    if (c.ok) currency = c.value; else reject(c.rejection);
+  }
+
   // For et charge/refund-objekt peker "payment_intent" til den overordnede PaymentIntent - for selve PaymentIntent-objektet ER objectId denne pekeren.
-  const paymentIntentRef =
-    typeof object?.["payment_intent"] === "string" ? (object["payment_intent"] as string) : objectType === "payment_intent" ? objectId : null;
-  const lastError = object?.["last_payment_error"] as Record<string, unknown> | undefined;
-  const lastErrorMessage = typeof lastError?.["message"] === "string" ? (lastError["message"] as string).slice(0, 500) : null;
+  let paymentIntentRef: string | null = null;
+  if (object && object["payment_intent"] !== undefined && object["payment_intent"] !== null && typeof object["payment_intent"] === "string") {
+    paymentIntentRef = safeProviderId(object["payment_intent"]);
+    if (paymentIntentRef === null) reject("payment_intent_ref_invalid");
+  } else if (objectType === "payment_intent") {
+    paymentIntentRef = objectId;
+  }
+
+  const lastError = object?.["last_payment_error"];
+  const lastErrorMessage = isRecord(lastError) && typeof lastError["message"] === "string" ? lastError["message"].slice(0, 500) : null;
 
   return {
-    id: json["id"],
-    type: json["type"],
-    api_version: typeof json["api_version"] === "string" ? (json["api_version"] as string) : null,
-    created: json["created"],
+    id,
+    type,
+    api_version: safeToken(json["api_version"], 40),
+    created: created.ok ? created.value : 0,
     object_id: objectId,
     object_type: objectType,
     amount_ore: amount,
-    currency: currency ? currency.toUpperCase() : null,
-    status,
+    currency,
+    status: object ? safeToken(object["status"], 64) : null,
     payment_intent_ref: paymentIntentRef,
-    last_payment_error_message: lastErrorMessage
+    last_payment_error_message: lastErrorMessage,
+    rejection
   };
 }

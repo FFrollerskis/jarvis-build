@@ -358,7 +358,8 @@ export interface CreateStripeRefundInput {
   actor_person_id?: string;
 }
 
-export type StripeWebhookEventStatus = "received" | "verified" | "processed" | "failed_retryable" | "unsupported";
+/** WP-F1: `rejected` = autentisert hendelse med permanent ugyldig innhold (dødbrev med årsak, besvart 2xx - ingen evig retry). */
+export type StripeWebhookEventStatus = "received" | "verified" | "processed" | "failed_retryable" | "unsupported" | "rejected";
 
 export interface StripeWebhookEventRecord {
   stripe_event_id: string;
@@ -557,7 +558,7 @@ export interface CreateVippsRefundInput {
   actor_person_id?: string;
 }
 
-export type VippsWebhookEventStatus = "received" | "verified" | "processed" | "failed_retryable" | "unsupported";
+export type VippsWebhookEventStatus = "received" | "verified" | "processed" | "failed_retryable" | "unsupported" | "rejected";
 
 export interface VippsWebhookEventRecord {
   dedupe_key: string;

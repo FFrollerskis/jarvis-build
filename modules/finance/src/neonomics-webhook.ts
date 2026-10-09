@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { safeProviderId, safeToken } from "./webhook-guard.ts";
 
 /**
  * D-111 (UA-6 Slice 5): Neonomics webhook-autentisering + envelope-parsing.
@@ -45,11 +46,18 @@ export interface ParsedNeonomicsEventEnvelope {
   readonly status: string;
 }
 
-/** Minimal, TRYGG utdrag - ALDRI hele nyttelasten persistert (samme §25-prinsipp som Stripe/Vipps-parserne). Kaster deterministisk på malformert form. */
+/**
+ * Minimal, TRYGG utdrag - ALDRI hele nyttelasten persistert (samme §25-prinsipp som Stripe/Vipps-parserne).
+ * WP-F1 (D-453, JARVIS-070): STRENG parsing - ikke et JSON-objekt, mangler trygg betalings-id eller en ISO 20022-lignende statuskode (1..32 tegn av [A-Za-z0-9_.-])
+ * KASTER `neonomics_event_envelope_malformed`; kalleren lagrer da et dødbrev (`rejected`, hash-nøkkel) og svarer 2xx i stedet for en evig 5xx-retry. Ukjente men velformede
+ * statuskoder beholdes (observasjonell provider_status, ingen tilstandsovergang) - de gjettes aldri til en kjent.
+ */
 export function parseNeonomicsEventEnvelope(rawBody: Buffer): ParsedNeonomicsEventEnvelope {
-  const json = JSON.parse(rawBody.toString("utf8")) as Record<string, unknown>;
-  const paymentId = typeof json["paymentId"] === "string" ? json["paymentId"] : typeof json["id"] === "string" ? (json["id"] as string) : null;
-  const status = typeof json["status"] === "string" ? (json["status"] as string) : null;
-  if (!paymentId || !status) throw new Error("neonomics_event_envelope_malformed");
+  const json: unknown = JSON.parse(rawBody.toString("utf8"));
+  if (typeof json !== "object" || json === null || Array.isArray(json)) throw new Error("neonomics_event_envelope_malformed");
+  const obj = json as Record<string, unknown>;
+  const paymentId = safeProviderId(obj["paymentId"]) ?? safeProviderId(obj["id"]);
+  const status = safeToken(obj["status"], 32);
+  if (paymentId === null || status === null) throw new Error("neonomics_event_envelope_malformed");
   return { dedupeKey: `${paymentId}:${status}`, paymentId, status };
 }
