@@ -263,7 +263,10 @@ describe.skipIf(!HAS_COMPOSE)("C2: den ekte Compose-CLI-en (uten daemon) fletter
     expect(worker.environment).toMatchObject({
       JARVIS_JOB_RUNNER: "host", JARVIS_JOB_RUNNER_SOCKET: "/run/jarvis-job-runner/runner.sock", JARVIS_JOB_RUNNER_TOKEN_FILE: "/run/secrets/jarvis-job-runner-token"
     });
-    expect(worker.volumes).toEqual([
+    // Compose-versjoner skriver `create_host_path: false` ulikt (noen utelater en `false`-verdi og gir `bind: {}`, andre skriver den ut). Verdien betyr det samme (aldri opprette vertssti), så en
+    // utelatt verdi leses som false; en eksplisitt `true` (Docker lager stien selv) er fortsatt en feil og gir fortsatt rødt.
+    const withDefaultBind = (volume) => ({ ...volume, bind: { create_host_path: false, ...(volume.bind ?? {}) } });
+    expect(worker.volumes.map(withDefaultBind)).toEqual([
       { type: "bind", source: "/var/lib/jarvis-job-runner/sock", target: "/run/jarvis-job-runner", read_only: true, bind: { create_host_path: false } },
       { type: "bind", source: "/etc/jarvis/job-runner.token", target: "/run/secrets/jarvis-job-runner-token", read_only: true, bind: { create_host_path: false } }
     ]);
