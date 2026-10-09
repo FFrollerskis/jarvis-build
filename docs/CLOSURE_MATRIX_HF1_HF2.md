@@ -103,10 +103,10 @@ Per audit 2026-10-05: DONE_IN_CODE 2 (Situation Engine, Executive Mode), PARTIAL
 
 | Q | Disposisjon |
 |---|---|
-| Q-53 | **A** (ja): håndhev D-431 minne-only-unntaket → WP-A |
-| Q-52 | **A** (ja): utvid mønstre; tvetydige ord kun målt → WP-A |
-| Q-51 | **D** (ja): hold sensitive meldinger utenfor skybundet tur → WP-A |
-| Q-50 B | **ja**: repo-lås med eier-opt-out → WP-A |
+| Q-53 | **A** (ja): håndhev D-431 minne-only-unntaket → `CODE_FIXED` i WP-A (D-451) |
+| Q-52 | **A** (ja): utvid mønstre; tvetydige ord kun målt → `CODE_FIXED` i WP-A (D-451); nattlig resensitize-sveip (`report`) rydder gamle minnerader |
+| Q-51 | **D** (ja): hold sensitive meldinger (+ par + hale) utenfor skybundet tur → `CODE_FIXED` i WP-A (D-451) |
+| Q-50 B | **ja**: repo-lås med eier-opt-out → `CODE_FIXED` i WP-A (D-451) |
 | Q-48 | **C nå**; A/B avgjøres med tenant-topologien (JARVIS-044) |
 | Q-47 (a) | akseptert: D-klasse utilgjengelig for modellen til kjeden er komplett (WP-F bygger kjeden bak step-up) |
 | Q-47 (c)(e), Q-45 (b), Q-43, Q-23 | **eier-handling** (env, nøkkelrotasjon, GitHub App, HF6-fil, testkonto) |

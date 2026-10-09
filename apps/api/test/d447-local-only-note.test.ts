@@ -5,7 +5,7 @@ import { ContextBuilder, MessageStore } from "@jarvis/core";
 import { MemoryTraceSink, classifyContentSensitivity, type CompleteInput, type ModelGateway, type ToolExecutor } from "@jarvis/model-gateway";
 import type { InProcessWorker, TaskService } from "@jarvis/tasks";
 import { ConversationEngine } from "../src/conversation.ts";
-import { localOnlyNote } from "../src/tool-turn-route.ts";
+import { localOnlyNote, stripSystemNotes } from "../src/tool-turn-route.ts";
 
 /**
  * D-447 (NAS-test 2026-10-08): en verktøytur som ellers ville gått til sky, men som sensitivitetsregelen (D-378) tvinger til den lokale modellen,
@@ -161,14 +161,15 @@ describe("D-447: localOnlyNote", () => {
     expect(localOnlyNote([])).toContain("innholdet er klassifisert som følsomt");
   });
 
-  it("merknaden er selv aldri følsom for klassifiseringen (ellers ville den holdt samtalen låst lokalt videre)", () => {
+  it("merknaden fjernes strukturelt fra historikken, så den aldri holder samtalen låst lokalt videre (Q-52 A: «helse» står i ordforrådet og i merknadens eget navn på kategorien)", () => {
     const reasonSets = [
       ["text:finance"], ["text:health"], ["text:secret"], ["text:finance", "text:health", "text:secret"],
       ["memory_space:health"], ["memory_sensitivity:special"], ["text:finance", "memory_space:health"], ["ukjent"], []
     ];
     for (const reasons of reasonSets) {
       const note = localOnlyNote(reasons);
-      expect(classifyContentSensitivity({ texts: [note] }).sensitivity, note).toBe("PUBLIC_OR_LOW_SENSITIVITY");
+      expect(stripSystemNotes(`svar${note}`), reasons.join(",")).toBe("svar");
+      expect(classifyContentSensitivity({ texts: [stripSystemNotes(`svar${note}`)] }).sensitivity, note).toBe("PUBLIC_OR_LOW_SENSITIVITY");
     }
   });
 });

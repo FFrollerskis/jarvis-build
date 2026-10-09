@@ -7,6 +7,8 @@ import { checkEv0Boot, getLastEv0BootStatus, logEv0Boot } from "./ev0-boot.ts";
 import { assertNoSweepFailures, envHour, envInt, envPort, failOnSweepFailures, systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit } from "./owner.ts";
 import { buildSelfModelReaders } from "./self-model-readers.ts";
+import { backupStatusSourceFromEnv } from "./backup-status.ts";
+import { startUptimeHeartbeat } from "./heartbeat-sender.ts";
 import {
   ChannelSessionAuthority,
   ContextBuilder,
@@ -59,6 +61,8 @@ import {
   createEmbeddingProviderFromEnv,
   runMemoryProfileSweepForAllTenants,
   runMemoryReembedSweepForAllTenants,
+  runMemoryResensitizeSweepForAllTenants,
+  resensitizeModeFromEnv,
   MemoryRetriever,
   MemoryWriter,
   SummaryService,
@@ -160,6 +164,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const ownerControls = new OwnerControls(killSwitch, pool, ownerControlAuthority);
   // EV-1 (D-412): leserne selvdiagnosen (`executive.get_self_diagnosis`) komponeres av. `toolGateway` refereres først når en leser kalles (lat).
   const selfModelControls = new OwnerControlsService(killSwitch, ownerControls);
+  // WP-C2: backup-status fra en skrivebeskyttet statusfil (JARVIS_BACKUP_STATUS_FILE); uten den er `backup` UKJENT i selvdiagnosen.
+  const backupStatusSource = backupStatusSourceFromEnv();
   const selfModelReaders = buildSelfModelReaders({
     pool,
     tenantId: owner.tenant_id,
@@ -168,7 +174,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     connectorStatus: () => listConnectorStatus(toolGateway),
     // EV-0 oppstartsresultat (konstitusjon + endringsregister); null til sjekken har kjørt -> UKJENT.
     ev0Status: () => getLastEv0BootStatus(),
-    build: () => ({ sha: process.env["JARVIS_BUILD_SHA"]?.trim() || null, version: process.env["JARVIS_VERSION"]?.trim() || "0.1.0" })
+    build: () => ({ sha: process.env["JARVIS_BUILD_SHA"]?.trim() || null, version: process.env["JARVIS_VERSION"]?.trim() || "0.1.0" }),
+    backupStatus: backupStatusSource
   });
   await ownerControls.restore();
   // EV-2 (D-417): SLO/drift/dataskvalitet fra eksisterende observerbarhet (cost_events, tool_executions, tasks, memory_items) - ingen parallell telemetri.
@@ -942,7 +949,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
             forbiddenModelToolIds: FORBIDDEN_MODEL_TOOL_IDS,
             connectors: CONNECTOR_REGISTRY.map((c) => ({ id: c.id, category: c.category, test_method: c.live_test ? "live" : "presence_only" })),
             modelProfiles: DEFAULT_PROFILES,
-            allModelCapabilities: ["text", "reasoning", "vision", "tool_calling", "structured_output", "streaming"]
+            allModelCapabilities: ["text", "reasoning", "vision", "tool_calling", "structured_output", "streaming"],
+            backupStatusReadable: backupStatusSource !== undefined
           }
         },
         slo: { report: sloReports },
@@ -1194,6 +1202,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         return {
           definitions: selection.selected.map((m) => m.def),
           limits: selection.limits,
+          // Q-53 A (D-450): tjenesten (`tool_id`) til hver valgte definisjon - samtalemotoren avgjør «kun minne-reserven» strukturelt av dette (ikke av verktøynavn).
+          tool_ids: selection.selected.map((m) => m.tool_id),
           ...(selection.min_sensitivity ? { min_sensitivity: selection.min_sensitivity } : {})
         };
       }
@@ -1599,6 +1609,13 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "memory-reembed-sweep", envHour("JARVIS_MEMORY_REEMBED_SWEEP_HOUR", 3)
   ).start(() => runMemoryReembedSweepForAllTenants(pool, memoryEmbedding).then((summary) => assertNoSweepFailures("memory-reembed-sweep", summary.failed)));
+  // Gjennomgang av WP-A (D-451): regn sensitiviteten på nytt for elementer lagret FØR ordforrådet ble utvidet (Q-52 A). Standard er `report` (kun tellinger i loggen); `JARVIS_MEMORY_RESENSITIZE=apply` hever
+  // nivået (aldri senker) med revisjonsspor, `off` slår sveipet av. Kjører før profilsveipet, så profilen rekompileres uten nye `special`-elementer.
+  new DailyScheduler(
+    pool, "memory-resensitize-sweep", envHour("JARVIS_MEMORY_RESENSITIZE_SWEEP_HOUR", 3)
+  ).start(() =>
+    runMemoryResensitizeSweepForAllTenants(pool, { mode: resensitizeModeFromEnv(process.env["JARVIS_MEMORY_RESENSITIZE"]) }).then((summary) => assertNoSweepFailures("memory-resensitize-sweep", summary.failed))
+  );
   // D-386: nattlig rekompilering av den alltid-tilstede eierprofilen per space (deterministisk, ingen LLM).
   new DailyScheduler(
     pool, "memory-profile-sweep", envHour("JARVIS_MEMORY_PROFILE_SWEEP_HOUR", 4)
@@ -1650,6 +1667,9 @@ porter: se docs/RUNTIME_GATES.md`;
   }).then((status) => logEv0Boot(status)).catch((err: unknown) => {
     console.error(JSON.stringify({ msg: "ev0_boot_check_failed", error: (err as Error).message.slice(0, 200) }));
   });
+  // WP-C2 (OPS-RUNTIME): ekstern oppetids-heartbeat (dead man's switch). AV uten JARVIS_UPTIME_HEARTBEAT_URL; pinger KUN mens en lokal selvsjekk
+  // (databasen + api-prosessen svarer på /health) består - stillhet er alarmen hos eierens monitor. Kun status, aldri innhold; kan ikke velte API-et.
+  startUptimeHeartbeat({ port });
   return deps;
 }
 

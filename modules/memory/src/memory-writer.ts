@@ -413,13 +413,17 @@ export class MemoryWriter {
                trust_level = $5, confidence = $6, has_conflict = $9, updated_at = now(),
                status = $7, valid_to = NULL,
                importance = COALESCE($10, importance), keywords = $11, event_time_raw = COALESCE($12, event_time_raw),
-               evidence_episode_id = COALESCE($13, evidence_episode_id), sensitivity = $14
+               evidence_episode_id = COALESCE($13, evidence_episode_id),
+               -- Race-fritt (review nr. 2, D-451): det strengeste av RADENS NÅVÆRENDE nivå og den nye tekstens - aldri en verdi regnet ut fra en tidligere lesing, så en samtidig heving (sveip, manuell merking) kan ikke overskrives.
+               sensitivity = CASE WHEN sensitivity = 'special' OR $14 = 'special' THEN 'special'
+                                  WHEN sensitivity = 'sensitive' OR $14 = 'sensitive' THEN 'sensitive'
+                                  ELSE 'normal' END
          WHERE memory_item_id = $1`,
         [
           row.memory_item_id, candidate.content, newVersion, observedAt, source.trust, candidate.confidence, newStatus,
           candidate.event_time ?? null, candidate.contradicts_existing ?? true, candidate.importance ?? null,
           normalizeKeywords(candidate.keywords), candidate.event_time_raw ?? null, meta.evidenceEpisodeId ?? null,
-          stricterItemSensitivity(row.sensitivity, itemSensitivity(space, { subject: row.subject, content: candidate.content }))
+          itemSensitivity(space, { subject: row.subject, content: candidate.content })
         ]
       );
       if (candidate.entities && candidate.entities.length > 0 && newStatus === "active") {
