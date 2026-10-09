@@ -1,3 +1,4 @@
+import { PRODUCTION_SURFACE } from "./support/fast-path-harness.ts";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -87,7 +88,9 @@ function deps(over: Partial<EvolutionSourceDeps> = {}): EvolutionSourceDeps {
   return {
     pool: app, tenantId: T, now: () => NOW, env: {},
     ev0Status: () => ({ constitution: { status: "not_verified", code: "constitution_unsigned" }, ledger: { status: "ok", count: 2, head_hash: "h" } }),
-    slo: async () => slo, connectors: async () => [github], killSwitchActive: async () => false, mesh: () => mesh, resensitize: () => drift, ...over
+    slo: async () => slo, connectors: async () => [github], killSwitchActive: async () => false, mesh: () => mesh, resensitize: () => drift,
+    // L3 (gjennomgang av #313): uten verktøyflate hoppes 4 gull-oppgaver over og EV-4 er UNKNOWN (aldri «alle bestått»); produksjonsflaten gir full måling.
+    toolSurface: () => PRODUCTION_SURFACE, ...over
   };
 }
 const ctx = (d: EvolutionSourceDeps): EvolutionContext => ({ pool: d.pool, tenantId: d.tenantId, now: NOW, env: d.env ?? {}, deps: d });
