@@ -139,13 +139,55 @@ describe("WP-C2 backup-leser: tolkning av statusen (alder over terskel = ærlig 
     expect(o.detail).toContain("statusfilen er 2,1 d gammel - backup-tikket (cron/systemd) ser ikke ut til å kjøre");
   });
 
-  it("klokkeavvik (fil/sett datert i fremtiden): aldri negative aldre eller en falsk «frisk» uten forklaring - alderen vises som 0 og avviket nevnes", () => {
-    const o = observe(exported(() => undefined, { name: "jarvis-backup-20261009T050000Z", createdAt: iso(NOW.getTime() + 3 * H), sizeBytes: 1 }, new Date(NOW.getTime() + 5 * H)));
-    expect(o.detail).toContain("siste backup for 0,0 t siden");
-    expect(o.detail).not.toMatch(/-\d/);
-    expect(o.detail).toContain("siste sett er datert i fremtiden (klokkeavvik)");
-    expect(o.detail).toContain("statusfilen er datert i fremtiden");
-    expect(o.data).toMatchObject({ backup_age_hours: 0, status_age_hours: 0 });
+  it("review F14: klokkeavvik innenfor 5 min er jitter (alder 0, OK) - men et tidspunkt FREM i tid utover det er DEGRADED med årsaken, aldri en falsk «0 t siden»", () => {
+    const MIN = 60_000;
+    // jitter: filen skrevet 4 min «frem» og siste sett 3 min frem er helt greit
+    const jitter = observe(exported(() => undefined, { name: "jarvis-backup-20261009T030300Z", createdAt: iso(NOW.getTime() + 3 * MIN), sizeBytes: 1 }, new Date(NOW.getTime() + 4 * MIN)));
+    expect(jitter.status).toBe("OK");
+    expect(jitter.detail).toContain("siste backup for 0,0 t siden");
+    expect(jitter.data).toMatchObject({ backup_age_hours: 0, status_age_hours: 0 });
+    // 6 min frem er over toleransen
+    const six = observe(exported(() => undefined, undefined, new Date(NOW.getTime() + 6 * MIN)));
+    expect(six.status).toBe("DEGRADED");
+    expect(six.detail).toContain("statusfilen er datert 0,1 t frem i tid");
+
+    // statusfilen +5 t: DEGRADED (før F14: OK med bare en merknad, alder klampet til 0)
+    const file = observe(exported(() => undefined, undefined, new Date(NOW.getTime() + 5 * H)));
+    expect(file.status).toBe("DEGRADED");
+    expect(file.detail).toContain("statusfilen er datert 5,0 t frem i tid (klokkeavvik mellom NAS og API, eller en endret fil) - alderen kan ikke bevises");
+    expect(file.detail).not.toMatch(/-\d/);
+    expect(file.data).toMatchObject({ status_age_hours: null });
+    expect(file.observed_at).toBe(NOW.toISOString()); // dateringen fra en fil som påstår fremtiden går ikke videre til selvdiagnosen
+
+    // siste sett +3 t: DEGRADED, og «siste backup for … siden» står IKKE som godt
+    const set = observe(exported(() => undefined, { name: "jarvis-backup-20261009T060000Z", createdAt: iso(NOW.getTime() + 3 * H), sizeBytes: 1 }));
+    expect(set.status).toBe("DEGRADED");
+    expect(set.detail).toContain("siste backup-sett er datert 3,0 t frem i tid");
+    expect(set.detail).not.toContain("siste backup for");
+    expect(set.data).toMatchObject({ backup_age_hours: null });
+    // et fremtidsdatert sett skjuler ikke at forsøkene feiler: begge årsakene står der, og 3 feil på rad er DOWN som ellers
+    const failing = observe(exported((s) => { s.backup.consecutive_failures = 3; s.backup.last_error_code = "backup_failed"; }, { name: "jarvis-backup-20261009T060000Z", createdAt: iso(NOW.getTime() + 3 * H), sizeBytes: 1 }));
+    expect(failing.status).toBe("DOWN");
+    expect(failing.detail).toContain("siste backup-sett er datert 3,0 t frem i tid");
+    expect(failing.detail).toContain("siste backup-forsøk feilet (3 på rad: backup feilet)");
+
+    // off-site og restore-verifisering datert frem i tid kan heller ikke bevise noe
+    const off = observe(exported((s) => { s.offsite.last_success_at = iso(NOW.getTime() + 10 * 24 * H); }));
+    expect(off.status).toBe("DEGRADED");
+    expect(off.detail).toContain("siste off-site-kopi er datert 10,0 d frem i tid");
+    expect(off.detail).not.toContain("off-site OK");
+    const ver = observe(exported((s) => { s.restore_verify.last_success_at = iso(NOW.getTime() + 100 * 24 * H); }));
+    expect(ver.status).toBe("DEGRADED");
+    expect(ver.detail).toContain("siste restore-verifisering er datert 100,0 d frem i tid");
+    expect(ver.detail).not.toContain("restore verifisert for");
+    expect(ver.data).toMatchObject({ restore_verify_age_days: null });
+
+    // alt på en gang: fortsatt ingen negative tall noe sted
+    const all = observe(exported((s) => { s.offsite.last_success_at = iso(NOW.getTime() + 2 * H); s.restore_verify.last_success_at = iso(NOW.getTime() + 2 * H); }, { name: "jarvis-backup-20261009T050000Z", createdAt: iso(NOW.getTime() + 2 * H), sizeBytes: 1 }, new Date(NOW.getTime() + 2 * H)));
+    expect(all.status).toBe("DEGRADED");
+    expect(all.detail).not.toMatch(/-\d/);
+    expect(JSON.stringify(all.data)).not.toMatch(/-\d/);
+    expect(all.detail.match(/frem i tid/g)).toHaveLength(4);
   });
 
   it("manglende eller ulesbar fil = UNKNOWN (aldri «frisk»), med forklaring", () => {
