@@ -1,6 +1,6 @@
 import { copyFile, lstat, mkdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { credentialHelperArgs } from "./credentials.mjs";
+import { credentialHelperArgs, GIT_CREDENTIAL_TOKEN_ENV } from "./credentials.mjs";
 import { RunnerError } from "./errors.mjs";
 import { forceRemoveTree } from "./fsutil.mjs";
 import { runProcess } from "./process.mjs";
@@ -223,7 +223,7 @@ export class HostGit {
     });
     this.registry.add(token);
     return this.mustGit([...this.hardeningArgs(), ...helper, ...args], {
-      env: { ...(env ?? {}), JARVIS_GIT_CREDENTIAL_TOKEN: token },
+      env: { ...(env ?? {}), [GIT_CREDENTIAL_TOKEN_ENV]: token },
       ...(cwd !== undefined ? { cwd } : {}),
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       ...(cancel ? { cancel } : {})

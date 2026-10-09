@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { startGitSmartHttpServer } from "../../../modules/tasks/test/support/git-smart-http-server.ts";
-import { credentialHelperArgs, FileGitCredentialSource } from "../lib/credentials.mjs";
+import { credentialHelperArgs, FileGitCredentialSource, GIT_CREDENTIAL_TOKEN_ENV } from "../lib/credentials.mjs";
 import { RunnerError } from "../lib/errors.mjs";
 import { GIT_TOKEN, createHarness, gitSync } from "./support/harness.mjs";
 import { startProbeServer } from "./support/probe-server.mjs";
@@ -17,6 +17,15 @@ import { startProbeServer } from "./support/probe-server.mjs";
 const HELPER = new URL("../credential-helper.mjs", import.meta.url).pathname;
 const helper = (stdin, { args = ["https", "github.com", "owner/repo", "get"], token = GIT_TOKEN } = {}) =>
   spawnSync(process.execPath, [HELPER, ...args], { input: stdin, encoding: "utf8", env: { PATH: process.env["PATH"], ...(token === null ? {} : { JARVIS_GIT_CREDENTIAL_TOKEN: token }) } });
+
+describe("A0: kanalnavnet er ett og samme begge steder", () => {
+  it("helperens TOKEN_ENV er identisk med GIT_CREDENTIAL_TOKEN_ENV (runneren setter, helperen leser) og med worker-siden", async () => {
+    const helperSource = await readFile(HELPER, "utf8");
+    expect(helperSource).toContain(`const TOKEN_ENV = ${JSON.stringify(GIT_CREDENTIAL_TOKEN_ENV)};`);
+    const workerSide = await readFile(new URL("../../../modules/tasks/src/git-auth.ts", import.meta.url), "utf8");
+    expect(workerSide).toContain(`GIT_CREDENTIAL_TOKEN_ENV = ${JSON.stringify(GIT_CREDENTIAL_TOKEN_ENV)}`);
+  });
+});
 
 describe("A: credential-helperen svarer KUN for nøyaktig scope", () => {
   it("riktig protokoll + vert + repo (med .git, stor/liten bokstav, ledende skråstrek) gir x-access-token + token", () => {

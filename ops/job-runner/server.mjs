@@ -125,10 +125,11 @@ export async function createRunnerService(options) {
     /** Oppstartssjekker (fail-closed) + avstemming + lytt på socket. Kaster ConfigError/RunnerError hvis noe er galt: tjenesten starter ikke. */
     async start() {
       if (t.skipUidCheck !== true) {
-        const [uid, gid] = config.policy.user.split(":").map(Number);
-        if (process.getuid?.() !== uid || process.getgid?.() !== gid) {
-          // Containeren kjører som policy.user og skriver i /work; runneren må kunne rydde filene (samme uid) uten root.
-          throw new ConfigError("container_user_must_equal_service_uid", `${config.policy.user} vs ${process.getuid?.()}:${process.getgid?.()}`);
+        const uid = Number(config.policy.user.split(":")[0]);
+        if (process.getuid?.() !== uid) {
+          // Containeren kjører som policy.user (uid) og skriver filer i /work; runneren må EIE disse filene (samme uid) for å kunne rydde dem uten root.
+          // Gid trenger ikke være lik (eierskap, ikke gruppe, avgjør sletting).
+          throw new ConfigError("container_user_must_equal_service_uid", `uid ${uid} vs ${process.getuid?.()}`);
         }
       }
       const dockerVersion = await docker.version();

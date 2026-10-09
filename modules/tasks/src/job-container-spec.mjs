@@ -126,6 +126,9 @@ function buildJobContainerCreateArgs(policy, job) {
     throw new JobContainerConfigError("task_id_label_invalid");
   }
   const proxy = policy.egressProxyUrl;
+  const user = policy.user ?? "10001:10001";
+  // /home/job (tmpfs) må eies av samme uid:gid som prosessen i containeren, ellers kan ikke HOME skrives (Claude Code/git).
+  const [homeUid, homeGid] = user.split(":");
   return [
     "create",
     "--name", job.containerName,
@@ -133,10 +136,10 @@ function buildJobContainerCreateArgs(policy, job) {
     ...(policy.pull === "never" ? ["--pull", "never"] : []),
     "--read-only",
     "--tmpfs", `/tmp:rw,noexec,nosuid,nodev,size=${policy.tmpfsSize ?? "256m"}`,
-    "--tmpfs", `/home/job:rw,noexec,nosuid,nodev,size=${policy.tmpfsSize ?? "256m"},uid=10001,gid=10001`,
+    "--tmpfs", `/home/job:rw,noexec,nosuid,nodev,size=${policy.tmpfsSize ?? "256m"},uid=${homeUid},gid=${homeGid}`,
     "--mount", `type=bind,source=${job.workdir},target=/work`,
     "--workdir", "/work",
-    "--user", policy.user ?? "10001:10001",
+    "--user", user,
     "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges:true",
     "--memory", policy.memory ?? "1g",

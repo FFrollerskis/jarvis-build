@@ -80,6 +80,18 @@ describe("B: docker create-argv for vertsside runner - grensene er faktisk til s
     expect(args[i + 1]).toBe("ANTHROPIC_API_KEY");
     expect(args.join(" ")).not.toMatch(/ANTHROPIC_API_KEY=/);
   });
+
+  it("/home/job (tmpfs) eies av samme uid:gid som prosessen i containeren - også når policy.user ikke er standarden", () => {
+    const tmpfsFor = (user) => {
+      const a = sharedSpec.buildJobContainerCreateArgs({ ...policy, ...(user ? { user } : {}) }, job);
+      return a.find((x) => x.startsWith("/home/job:"));
+    };
+    expect(tmpfsFor(undefined)).toMatch(/,uid=10001,gid=10001$/);
+    expect(tmpfsFor("1001:1002")).toMatch(/,uid=1001,gid=1002$/);
+    expect(tmpfsFor("1001:1002")).toContain("noexec,nosuid,nodev");
+    const a = sharedSpec.buildJobContainerCreateArgs({ ...policy, user: "1001:1002" }, job);
+    expect(a[a.indexOf("--user") + 1]).toBe("1001:1002");
+  });
 });
 
 describe("C: policy-validering (fail-closed)", () => {

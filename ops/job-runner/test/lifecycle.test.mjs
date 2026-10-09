@@ -359,6 +359,24 @@ describe("G: oppstartssjekker og docker-feil (fail-closed)", () => {
     await expect(strict.start()).rejects.toMatchObject({ code: "container_user_must_equal_service_uid" });
   });
 
+  it("kun uid må være lik tjenestens uid - gid kan avvike (eierskap, ikke gruppe, avgjør om runneren kan rydde)", async () => {
+    const uid = process.getuid?.();
+    const gid = process.getgid?.();
+    if (uid === undefined || gid === undefined || uid === 0) return; // root som jobbbruker avvises uansett av policyen; testen trenger en vanlig bruker
+    const { createRunnerService } = await import("../server.mjs");
+    const h = await harness({ autoStart: false, runner: { user: `${uid}:${gid + 7}` } });
+    const strict = await createRunnerService({ config: h.config, dockerExec: h.fake.exec, testOverrides: { allowAnyOwner: true } });
+    try {
+      await strict.start(); // kaster hvis uid-sjekken (fortsatt) også krever lik gid
+    } finally {
+      await strict.stop().catch(() => undefined);
+    }
+    // og feil uid avvises fortsatt, uansett gid
+    const wrong = await harness({ autoStart: false, runner: { user: `${uid + 1}:${gid}` } });
+    const strictWrong = await createRunnerService({ config: wrong.config, dockerExec: wrong.fake.exec, testOverrides: { allowAnyOwner: true } });
+    await expect(strictWrong.start()).rejects.toMatchObject({ code: "container_user_must_equal_service_uid" });
+  });
+
   it("docker create feiler: 502, ingen rester (katalog og container fjernet), slot frigjort", async () => {
     const h = await harness();
     h.fake.state.failCreate = true;

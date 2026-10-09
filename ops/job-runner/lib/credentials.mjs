@@ -14,6 +14,9 @@ import { readSecretFile } from "./fsutil.mjs";
 
 const TOKEN_FORMAT = /^[A-Za-z0-9_.-]{8,512}$/;
 
+/** Flyktig per-kall-kanal (env på ETT git-kall) som `credential-helper.mjs` leser. Samme interne navn som git-auth.ts (worker-siden). */
+export const GIT_CREDENTIAL_TOKEN_ENV = "JARVIS_GIT_CREDENTIAL_TOKEN";
+
 /**
  * Fil-basert PAT-kilde (Q-45b-fallback): én fine-grained PAT per repo (begrenset til ETT repo hos GitHub), i en fil eid av
  * root/tjenestebrukeren uten tilgang for andre. Filen leses ved HVER bruk (rotasjon krever ikke omstart).

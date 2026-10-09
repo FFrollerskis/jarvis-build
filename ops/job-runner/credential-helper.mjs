@@ -9,6 +9,12 @@
  * ber om NØYAKTIG dette scopet: en fremmed vert, et annet repo eller en annen protokoll får ingenting (git feiler da lukket).
  * Speiler scope-logikken i modules/tasks/src/git-auth.ts (JARVIS-064). Ingen filskriving, ingen nettverk, ingen logging.
  */
+/**
+ * Navnet på den flyktige per-kall-kanalen runneren legger token i (samme interne navn som `GIT_CREDENTIAL_TOKEN_ENV` i
+ * modules/tasks/src/git-auth.ts - IKKE en operatørinnstilling, derfor leses den via konstant og står ikke i `.env.example`).
+ * Må være lik `GIT_CREDENTIAL_TOKEN_ENV` i lib/credentials.mjs (egen test låser likheten).
+ */
+const TOKEN_ENV = "JARVIS_GIT_CREDENTIAL_TOKEN";
 const [protocol, host, scopePath, operation] = process.argv.slice(2);
 
 if (operation !== "get") {
@@ -36,7 +42,7 @@ if (operation !== "get") {
       && String(req["host"] ?? "").toLowerCase() === host.toLowerCase()
       && path === scopePath.toLowerCase();
     if (!ok) process.exit(0); // ingen svar = ingen credential til fremmed vert/repo
-    const token = process.env["JARVIS_GIT_CREDENTIAL_TOKEN"] ?? "";
+    const token = process.env[TOKEN_ENV] ?? "";
     if (token.length === 0) process.exit(0); // aldri et tomt passord
     process.stdout.write("username=x-access-token\n");
     process.stdout.write(`password=${token}\n`);
