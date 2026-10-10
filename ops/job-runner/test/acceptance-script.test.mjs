@@ -240,6 +240,9 @@ describe("C: hjelpefunksjonene mot den EKTE vertstjenesten over Unix-socket", ()
     const j09 = part("check_J09() {", "check_J10() {");
     expect(j09.indexOf("active_jobs")).toBeGreaterThan(-1);
     expect(j09.indexOf("active_jobs")).toBeLessThan(j09.indexOf("systemctl kill"));
+    // betingelsen selv (ikke bare at feltet leses): aktive jobber > 0, uleselig helse eller ikke-tall gir SKIP uten å røre runneren
+    expect(j09).toContain('if [ "$HTTP_CODE" != "200" ] || ! [[ "$active" =~ ^[0-9]+$ ]] || [ "$active" -gt 0 ]; then record J09_reclaim_etter_krasj SKIP');
+    expect(j09.indexOf("record J09_reclaim_etter_krasj SKIP \"runneren har")).toBeLessThan(j09.indexOf("create_job"));
   });
 
   it("api/create_job/cexec/delete_job fungerer mot ekte tjeneste; bearer-tokenet står aldri i prosessens argv", async () => {

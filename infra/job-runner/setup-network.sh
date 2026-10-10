@@ -107,5 +107,28 @@ JUMP_LINE="$(input_rules | grep -n -x -- "$JUMP" | head -1 | cut -d: -f1 || true
 GENERIC_ACCEPT_LINE="$(input_rules | awk '/ -j ACCEPT/ { generic = 1; if ($0 ~ / -i [^ +]+ / && $0 !~ / ! -i /) generic = 0; if (generic) { print NR; exit } }' || true)"
 if [ -n "$JUMP_LINE" ] && { [ -z "$GENERIC_ACCEPT_LINE" ] || [ "$JUMP_LINE" -lt "$GENERIC_ACCEPT_LINE" ]; }; then ok "hoppet ligger foran generelle ACCEPT-regler"; else fail "hoppet ligger IKKE foran generelle ACCEPT-regler i INPUT (kjør uten --check for å legge det først)"; fi
 
+# --- 3. IPv6 (B-L3): nettverket opprettes uten --ipv6, men verten kan ha IPv6 på bridgen (link-local). Alt fra jobbnettverkets bridge til VERTEN over IPv6 avvises (DROP) i en egen kjede, med samme
+#        oppsett (hopp øverst i INPUT, idempotent, --check). Proxyen lytter kun på IPv4, så det finnes ingenting å slippe inn. Mangler ip6tables, advares det (ikke fatalt: IPv6 kan være av).
+CHAIN6="JARVIS-JOBS-IN6"
+JUMP6="-A INPUT -i $BRIDGE -j $CHAIN6"
+if command -v ip6tables >/dev/null 2>&1 && command -v ip6tables-restore >/dev/null 2>&1; then
+  input6_rules() { ip6tables -w -S INPUT 2>/dev/null || true; }
+  jump6_count() { input6_rules | grep -c -x -- "$JUMP6" || true; }
+  if [ "$CHECK_ONLY" = "0" ]; then
+    printf '*filter\n:%s - [0:0]\n-A %s -j DROP\nCOMMIT\n' "$CHAIN6" "$CHAIN6" | ip6tables-restore --noflush || fail "ip6tables-restore feilet: IPv6-reglene for $BRIDGE er IKKE satt (fjern ip6tables, eller slå av IPv6, hvis det er bevisst)"
+    if [ "$(input6_rules | sed -n '2p')" != "$JUMP6" ]; then ip6tables -w -I INPUT 1 -i "$BRIDGE" -j "$CHAIN6" || fail "ip6tables: kunne ikke sette inn hoppet til $CHAIN6"; fi
+    while [ "$(jump6_count)" -gt 1 ]; do
+      LAST_LINE6="$(input6_rules | grep -n -x -- "$JUMP6" | tail -1 | cut -d: -f1)"
+      ip6tables -w -D INPUT "$((LAST_LINE6 - 1))" || break
+    done
+  fi
+  JUMPS6="$(jump6_count)"
+  if [ "$JUMPS6" = "1" ]; then ok "IPv6: INPUT -i $BRIDGE -> $CHAIN6 (nøyaktig ett hopp)"; else fail "IPv6: INPUT-hoppet fra $BRIDGE til $CHAIN6 finnes $JUMPS6 ganger (forventet 1)"; fi
+  if ip6tables -w -S "$CHAIN6" 2>/dev/null | grep -Fxq -- "-A $CHAIN6 -j DROP"; then ok "IPv6: alt fra $BRIDGE mot verten avvises"; else fail "IPv6: DROP-regelen i $CHAIN6 mangler"; fi
+  if [ "$(input6_rules | sed -n '2p')" = "$JUMP6" ]; then ok "IPv6: hoppet ligger øverst i INPUT"; else fail "IPv6: hoppet ligger IKKE øverst i INPUT (kjør uten --check for å legge det først)"; fi
+else
+  echo "ADVARSEL: ip6tables/ip6tables-restore finnes ikke: IPv6 fra $BRIDGE mot verten er IKKE filtrert. Nettverket har ikke --ipv6 (J07 observerer IPv6 i containeren, forventet 0), men har verten IPv6 bør ip6tables installeres." >&2
+fi
+
 if [ "$FAILED" = "0" ]; then echo "jobbnettverket er klart ($NETWORK, bridge $BRIDGE)"; exit 0; fi
 exit 1

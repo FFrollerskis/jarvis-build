@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -414,6 +414,62 @@ describe("E: setup-network.sh (kjørt for ekte mot falsk docker/iptables)", () =
     expect(state.chains["JARVIS-JOBS-IN"][0]).toBe("-A JARVIS-JOBS-IN -d 172.30.77.1/32 -p tcp -m tcp --dport 3128 -j ACCEPT");
   });
 
+  describe("IPv6 (B-L3): ip6tables-kjeden avviser alt fra jobbnettverkets bridge mot verten", () => {
+    const TOOLS6 = ["docker", "iptables", "iptables-restore", "ip6tables", "ip6tables-restore"];
+    const ip6 = async (w) => JSON.parse(await readFile(join(w.state, "ip6tables.json"), "utf8"));
+
+    it("første kjøring: egen kjede med KUN DROP + hopp øverst i INPUT; idempotent (ingen dupliserte hopp); --check godtar tilstanden", async () => {
+      const w = await makeWorld({ tools: TOOLS6 });
+      const config = await writeConfig(w.root);
+      const r = w.run(SCRIPT, [], { JARVIS_JOB_RUNNER_CONFIG: config });
+      expect(r.status, r.stderr + r.stdout).toBe(0);
+      expect(r.stdout).toContain("IPv6: INPUT -i br-jarvis-jobs -> JARVIS-JOBS-IN6");
+      expect((await readFile(join(w.state, "restore-input6.txt"), "utf8")).split("\n").filter(Boolean)).toEqual(["*filter", ":JARVIS-JOBS-IN6 - [0:0]", "-A JARVIS-JOBS-IN6 -j DROP", "COMMIT"]);
+      const state = await ip6(w);
+      expect(state.input).toEqual(["-A INPUT -i br-jarvis-jobs -j JARVIS-JOBS-IN6"]);
+      expect(state.chains["JARVIS-JOBS-IN6"]).toEqual(["-A JARVIS-JOBS-IN6 -j DROP"]);
+      expect(w.run(SCRIPT, [], { JARVIS_JOB_RUNNER_CONFIG: config }).status).toBe(0);
+      expect((await ip6(w)).input).toEqual(["-A INPUT -i br-jarvis-jobs -j JARVIS-JOBS-IN6"]);
+      const check = w.run(SCRIPT, ["--check"], { JARVIS_JOB_RUNNER_CONFIG: config });
+      expect(check.status, check.stderr + check.stdout).toBe(0);
+      expect((await w.calls()).filter((c) => c.startsWith("ip6tables-restore")).length).toBe(2); // --check endrer ingenting
+    });
+
+    it("--check feiler når IPv6-hoppet eller DROP-regelen er borte (f.eks. etter en brannmur-reload), og en vanlig kjøring reparerer det", async () => {
+      const w = await makeWorld({ tools: TOOLS6 });
+      const config = await writeConfig(w.root);
+      expect(w.run(SCRIPT, [], { JARVIS_JOB_RUNNER_CONFIG: config }).status).toBe(0);
+      const state = await ip6(w);
+      state.input = [];
+      await writeFile(join(w.state, "ip6tables.json"), JSON.stringify(state));
+      const check = w.run(SCRIPT, ["--check"], { JARVIS_JOB_RUNNER_CONFIG: config });
+      expect(check.status).toBe(1);
+      expect(check.stderr).toContain("IPv6: INPUT-hoppet");
+      expect(w.run(SCRIPT, [], { JARVIS_JOB_RUNNER_CONFIG: config }).status).toBe(0);
+      expect((await ip6(w)).input).toEqual(["-A INPUT -i br-jarvis-jobs -j JARVIS-JOBS-IN6"]);
+      const emptied = await ip6(w);
+      emptied.chains["JARVIS-JOBS-IN6"] = [];
+      await writeFile(join(w.state, "ip6tables.json"), JSON.stringify(emptied));
+      const check2 = w.run(SCRIPT, ["--check"], { JARVIS_JOB_RUNNER_CONFIG: config });
+      expect(check2.status).toBe(1);
+      expect(check2.stderr).toContain("DROP-regelen");
+    });
+
+    it("ip6tables-restore som feiler gjør hele scriptet rødt (proxyen starter ikke med et hull), og uten ip6tables advares det men IPv4-reglene settes som før", async () => {
+      const w = await makeWorld({ tools: TOOLS6 });
+      const config = await writeConfig(w.root);
+      const failing = w.run(SCRIPT, [], { JARVIS_JOB_RUNNER_CONFIG: config, FAKE_FAIL: "ip6tables-restore" });
+      expect(failing.status).toBe(1);
+      expect(failing.stderr).toContain("IPv6-reglene for br-jarvis-jobs er IKKE satt");
+      const bare = await makeWorld();
+      const bareConfig = await writeConfig(bare.root);
+      const r = bare.run(SCRIPT, [], { JARVIS_JOB_RUNNER_CONFIG: bareConfig });
+      expect(r.status, r.stderr + r.stdout).toBe(0);
+      expect(r.stderr).toContain("ADVARSEL: ip6tables/ip6tables-restore finnes ikke");
+      expect((await bare.iptables()).input).toEqual(["-A INPUT -i br-jarvis-jobs -j JARVIS-JOBS-IN"]);
+    });
+  });
+
   it("idempotent: andre kjøring oppretter ikke nettverket på nytt og lager ingen dupliserte INPUT-hopp", async () => {
     const w = await makeWorld();
     const config = await writeConfig(w.root);
@@ -687,6 +743,38 @@ describe("G: install-host.sh --stage (ekte kjøring i en midlertidig prefiks-kat
     const state = join(target, "var/lib/jarvis-job-runner");
     expect((await stat(state)).mode & 0o777).toBe(0o700);
     expect((await stat(join(state, "sock"))).mode & 0o777).toBe(0o750);
+  });
+
+  it("B-L2: en symlenke i stedet for sock/ eller state-katalogen avvises (exit 2) FØR noe røres - målet får ikke ny modus, og ingenting skrives dit", async () => {
+    for (const where of ["sock", "state"]) {
+      const w = await makeWorld({ tools: [] });
+      const victim = join(w.root, `victim-${where}`);
+      await mkdir(victim, { mode: 0o777 });
+      await chmod(victim, 0o777);
+      const target = join(w.root, `prefix-${where}`);
+      const state = join(target, "var/lib/jarvis-job-runner");
+      if (where === "sock") {
+        await mkdir(state, { recursive: true });
+        await symlink(victim, join(state, "sock"));
+      } else {
+        await mkdir(join(target, "var/lib"), { recursive: true });
+        await symlink(victim, state);
+      }
+      const r = w.run(SCRIPT, ["--stage", "--prefix", target]);
+      expect(r.status, `${where}: ${r.stderr}${r.stdout}`).toBe(2);
+      expect(r.stderr, where).toContain("er en symlenke: avviser");
+      expect((await stat(victim)).mode & 0o777, where).toBe(0o777); // install -d ville satt 0750/0700 på målet
+      expect(await readdir(victim), where).toEqual([]);
+      expect(existsSync(join(target, "opt")), where).toBe(false); // ingenting installert etter avvisningen
+    }
+  });
+
+  it("B-L2 (statisk): chown bruker -h, og symlenke-avvisningen står FØR hver install -d av state/sock", async () => {
+    const text = await readFile(SCRIPT, "utf8");
+    expect(text).toContain('chown -h "jarvis-runner:$CLIENT_GROUP" "$STATE" "$STATE/sock"');
+    expect(text).not.toMatch(/\bchown "jarvis-runner/);
+    expect(text.indexOf('refuse_symlink "$STATE"')).toBeLessThan(text.indexOf('install -d -m 0700 "$STATE"'));
+    expect(text.indexOf('refuse_symlink "$STATE/sock"')).toBeLessThan(text.indexOf('install -d -m 0750 "$STATE/sock"'));
   });
 
   it("ekte installasjon (ikke --stage) nekter å fortsette uten /usr/bin/prlimit (A-F3: samme sti som runner.prlimit_bin-standarden)", async () => {

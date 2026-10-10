@@ -72,9 +72,22 @@ fi
 # en slettet katalog til worker ble startet på nytt). sock/ er 0750 med socket-gruppen; state-katalogen over er 0700 (jobbkatalogene ligger der).
 STATE="$PREFIX/var/lib/jarvis-job-runner"
 say "state/socket-katalog -> $STATE"
+# B-L2: state- og socket-katalogen EIES av tjenestebrukeren (jarvis-runner), så en kompromittert tjeneste kan bytte dem ut med en symlenke (sock -> /etc). `install -d` og `chown` følger lenker, og dette
+# skriptet kjører som root: målet ville fått ny modus og eier. Lenker avvises FØR noe røres, og chown bruker -h. (Et kappløp mellom sjekk og bruk krever at tjenesten selv bytter under kjøringen:
+# stopp tjenestene før du kjører skriptet på nytt.)
+refuse_symlink() {
+  if [ -L "$1" ]; then
+    echo "$1 er en symlenke: avviser. En kompromittert tjeneste kunne ellers fått dette root-skriptet til å endre modus/eier på et annet sted. Undersøk hvorfor lenken finnes, fjern den manuelt og kjør på nytt." >&2
+    exit 2
+  fi
+}
+refuse_symlink "$STATE"
 install -d -m 0700 "$STATE"
+refuse_symlink "$STATE"
+refuse_symlink "$STATE/sock"
 install -d -m 0750 "$STATE/sock"
-if [ "$STAGE" = "0" ]; then chown "jarvis-runner:$CLIENT_GROUP" "$STATE" "$STATE/sock"; fi
+refuse_symlink "$STATE/sock"
+if [ "$STAGE" = "0" ]; then chown -h "jarvis-runner:$CLIENT_GROUP" "$STATE" "$STATE/sock"; fi
 
 # --- kode: ryddes og kopieres på nytt hver gang (ingen gamle filer blir liggende) ---
 say "kode -> $CODE"
