@@ -136,7 +136,7 @@ export const CLOUDFLARE_CAPABILITIES: readonly CloudflareCapability[] = [
   { capability: "DNS-poster: opprett/endre/slett (POST/PATCH/DELETE)", status: "IMPLEMENTED", risk: "D", token_permission: "DNS Write", note: "A/AAAA/CNAME/TXT/MX/NS; navn og type kan ikke endres på eksisterende post; snapshot av posten før endring/sletting; kompensasjon via recovery" },
   { capability: "DNS-poster: strukturerte typer (SRV/CAA/HTTPS/LOC/SSHFP/TLSA …), tags, batch, import/eksport", status: "DEFERRED", risk: "-", token_permission: "DNS Write", note: "krever per-type `data`-skjema som ikke er verifisert enkeltvis; byggs når eieren trenger en bestemt type" },
   { capability: "WAF custom rules + rate limiting rules: les entrypoint (GET /zones/{id}/rulesets/phases/{fase}/entrypoint)", status: "IMPLEMENTED", risk: "A", token_permission: "Zone WAF Read (eller Zone WAF Write)", note: "faser http_request_firewall_custom, http_ratelimit, http_request_firewall_managed (kun lesing)" },
-  { capability: "WAF custom rules + rate limiting rules: opprett/endre/slett regel (POST/PATCH/DELETE …/rulesets/{id}/rules)", status: "IMPLEMENTED", risk: "D", token_permission: "Zone WAF Write", note: "faser http_request_firewall_custom og http_ratelimit; handlinger block/challenge/managed_challenge/js_challenge/log; deterministisk vakt mot regler som treffer all trafikk" },
+  { capability: "WAF custom rules + rate limiting rules: opprett/endre/slett regel (POST/PATCH/DELETE …/rulesets/{id}/rules)", status: "IMPLEMENTED", risk: "D", token_permission: "Zone WAF Write", note: "faser http_request_firewall_custom og http_ratelimit; handlinger block/challenge/managed_challenge/js_challenge/log; BEST-EFFORT vakt som fanger åpenbare literal-/tautologi-uttrykk (konstant-sanne uttrykk og noen kjente alltid-sanne idiomer) for ikke-log-handlinger - IKKE et bevis: wirefilter-uttrykk er ugjennomsiktige for oss, og en regel kan treffe nesten all trafikk uten å være en tautologi (se docs/runbooks/CLOUDFLARE_CONNECTOR.md)" },
   { capability: "WAF: skip/execute-regler, managed ruleset-overstyringer, custom block-respons", status: "DEFERRED", risk: "-", token_permission: "Zone WAF Write", note: "krever action_parameters-skjema som ikke er verifisert; legacy Firewall Rules/Filters-API er deprecated siden 2025-06-15 og brukes ikke" },
   { capability: "Sone-innstillinger: les/skriv per innstilling (GET/PATCH /zones/{id}/settings/{setting})", status: "PARTIAL", risk: "D", token_permission: "Zone Settings Read / Zone Settings Write", note: "kun ssl, min_tls_version, always_use_https, development_mode, security_level, tls_1_3 (verifiserte id-er og verdier); batch-endepunktet er deprecated og brukes ikke" },
   { capability: "Cache-purge (POST /zones/{id}/purge_cache)", status: "IMPLEMENTED", risk: "C", token_permission: "Cache Purge", note: "everything/files/hosts/prefixes/tags; klasse C fordi det flytter produksjonslast mot opprinnelsen og ikke kan angres (cachen fylles på igjen)" },
@@ -251,13 +251,206 @@ export function assertDnsComment(value: unknown): string {
   return value as string;
 }
 
-/** Regel-uttrykk (wirefilter) er ugjennomsiktig for oss; vi sjekker kun lengde/tegn og at det ikke er en åpenbar «treffer alt»-regel for en blokkerende handling. */
+/**
+ * Gjennomgang av PR #324 (L1): VAKTEN «treffer all trafikk» er BEST-EFFORT, ikke et bevis. Wirefilter-uttrykk er ugjennomsiktige for oss (vi kjenner ikke feltene, datatypene eller Cloudflares evaluering), så vi
+ * kan bare fange det ÅPENBARE: (1) rene konstantuttrykk som evalueres til sant uten noe feltoppslag (`true`, `1 == 1`, `not false`, `"a" ne "b"`, `(true) or (false)`, `true and true` …), (2) en tautologi gjennom
+ * `or`/`and`/`not` (`ip.src eq 1.2.3.4 or 1 == 1`), og (3) en kort liste kjente alltid-sanne idiomer (`http.host ne ""`, `len(http.request.uri.path) >= 0`, `ip.src ne 0.0.0.0`, `cf.threat_score ge 0` …). Den
+ * fanger IKKE en regel som treffer «nesten all» trafikk uten å være en tautologi (`http.request.uri.path ne "/x"`, `ip.src ne 1.2.3.4`), og kan ikke bevise at et uttrykk ikke treffer alt. En blokkerende regel som treffer
+ * alt er et selvpåført utfall (nettstedet tar seg selv av lufta); de reelle sikkerhetsnettene er klasse D-kjeden (snapshot, readback, umiddelbar varsling) og kompensasjonen (recovery sletter/tilbakestiller regelen).
+ * `log`-regler er unntatt (en logg-regel som treffer alt er lovlig og ufarlig). Analysen er ren, deterministisk og avgrenset (dybde ≤ 20, uttrykk ≤ 4096 tegn); et uttrykk den ikke kan tokenisere regnes som «ukjent» (ikke avvist).
+ */
+interface ExprToken { kind: "str" | "word" | "op" | "open" | "close"; text: string }
+type ExprTruth = "always" | "never" | "unknown";
+
+function tokenizeExpression(src: string): ExprToken[] | null {
+  const out: ExprToken[] = [];
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i] as string;
+    if (/\s/.test(c)) { i += 1; continue; }
+    if (c === '"') {
+      let j = i + 1;
+      let closed = false;
+      while (j < src.length) {
+        if (src[j] === "\\") { j += 2; continue; }
+        if (src[j] === '"') { closed = true; break; }
+        j += 1;
+      }
+      if (!closed) return null;
+      out.push({ kind: "str", text: src.slice(i, j + 1) });
+      i = j + 1;
+      continue;
+    }
+    if (c === "(" || c === "{" || c === "[") { out.push({ kind: "open", text: c }); i += 1; continue; }
+    if (c === ")" || c === "}" || c === "]") { out.push({ kind: "close", text: c }); i += 1; continue; }
+    const two = src.slice(i, i + 2);
+    if (two === "==" || two === "!=" || two === ">=" || two === "<=" || two === "&&" || two === "||" || two === "^^") { out.push({ kind: "op", text: two }); i += 2; continue; }
+    if (c === "<" || c === ">" || c === "!" || c === "~" || c === ",") { out.push({ kind: "op", text: c }); i += 1; continue; }
+    let j = i;
+    while (j < src.length && !/[\s()[\]{}"=!<>&|^~,]/.test(src[j] as string)) j += 1;
+    if (j === i) return null; // enkelt «=», «&», «|» eller «^»: ikke noe vi forstår
+    out.push({ kind: "word", text: src.slice(i, j) });
+    i = j;
+  }
+  return out;
+}
+
+const isOpen = (t: ExprToken): boolean => t.kind === "open";
+const isClose = (t: ExprToken): boolean => t.kind === "close";
+const keyword = (t: ExprToken | undefined): string => (t !== undefined && (t.kind === "word" || t.kind === "op") ? t.text.toLowerCase() : "");
+
+/** Fjerner ytre parenteser som omslutter HELE sekvensen (`( ( a ) )` -> `a`), men ikke `(a) or (b)`. */
+function stripOuterParens(tokens: ExprToken[]): ExprToken[] {
+  let t = tokens;
+  while (t.length >= 2 && t[0]!.kind === "open" && t[0]!.text === "(" && t[t.length - 1]!.kind === "close") {
+    let depth = 0;
+    let wrapsAll = true;
+    for (let i = 0; i < t.length; i += 1) {
+      if (isOpen(t[i]!)) depth += 1;
+      else if (isClose(t[i]!)) depth -= 1;
+      if (depth === 0 && i < t.length - 1) { wrapsAll = false; break; }
+    }
+    if (!wrapsAll) break;
+    t = t.slice(1, -1);
+  }
+  return t;
+}
+
+/** Deler på operatorer på toppnivå (dybde 0). Ubalansert -> `null`. */
+function splitTopLevel(tokens: ExprToken[], separators: ReadonlySet<string>): ExprToken[][] | null {
+  const parts: ExprToken[][] = [[]];
+  let depth = 0;
+  for (const t of tokens) {
+    if (isOpen(t)) depth += 1;
+    else if (isClose(t)) depth -= 1;
+    if (depth < 0) return null;
+    if (depth === 0 && (t.kind === "word" || t.kind === "op") && separators.has(t.text.toLowerCase())) { parts.push([]); continue; }
+    parts[parts.length - 1]!.push(t);
+  }
+  return depth === 0 ? parts : null;
+}
+
+const OR_WORDS: ReadonlySet<string> = new Set(["or", "||"]);
+const XOR_WORDS: ReadonlySet<string> = new Set(["xor", "^^"]);
+const AND_WORDS: ReadonlySet<string> = new Set(["and", "&&"]);
+const COMPARATORS: Readonly<Record<string, "eq" | "ne" | "lt" | "le" | "gt" | "ge">> = {
+  eq: "eq", "==": "eq", ne: "ne", "!=": "ne", lt: "lt", "<": "lt", le: "le", "<=": "le", gt: "gt", ">": "gt", ge: "ge", ">=": "ge"
+};
+
+/** Eget-egenskap-oppslag: `constructor`/`__proto__` er ikke operatorer (et vanlig objekt-oppslag ville returnert en funksjon). */
+const comparatorOf = (word: string): "eq" | "ne" | "lt" | "le" | "gt" | "ge" | undefined => (Object.hasOwn(COMPARATORS, word) ? COMPARATORS[word] : undefined);
+
+type Literal = { type: "bool"; value: boolean } | { type: "num"; value: number } | { type: "str"; value: string } | { type: "ip"; value: string };
+
+function literalOf(t: ExprToken): Literal | null {
+  if (t.kind === "str") return { type: "str", value: t.text.slice(1, -1) };
+  if (t.kind !== "word") return null;
+  const w = t.text.toLowerCase();
+  if (w === "true") return { type: "bool", value: true };
+  if (w === "false") return { type: "bool", value: false };
+  if (/^-?\d+(?:\.\d+)?$/.test(w)) return { type: "num", value: Number(w) };
+  if (/^0x[0-9a-f]+$/.test(w)) return { type: "num", value: Number.parseInt(w, 16) };
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(w)) return { type: "ip", value: w };
+  return null;
+}
+
+function compareLiterals(a: Literal, op: "eq" | "ne" | "lt" | "le" | "gt" | "ge", b: Literal): ExprTruth {
+  if (a.type !== b.type) return "unknown";
+  if (a.type === "bool" || a.type === "ip") {
+    if (op !== "eq" && op !== "ne") return "unknown";
+    return (a.value === b.value) === (op === "eq") ? "always" : "never";
+  }
+  const [x, y] = [a.value, b.value] as [string | number, string | number];
+  const result = op === "eq" ? x === y : op === "ne" ? x !== y : op === "lt" ? x < y : op === "le" ? x <= y : op === "gt" ? x > y : x >= y;
+  return result ? "always" : "never";
+}
+
+/** Felt som i praksis aldri er tomme i en HTTP-forespørsel (verten, metoden, stien, URI-en). */
+const NONEMPTY_FIELD = "(?:http\\.host|http\\.request\\.(?:method|uri|uri\\.path|full_uri|version))";
+/** Kjente alltid-sanne idiomer, mot den NORMALISERTE teksten (ord/operatorer adskilt av ett mellomrom, små bokstaver, `==`->`eq`, `!=`->`ne`, `>=`->`ge` …). */
+const ALWAYS_IDIOMS: readonly RegExp[] = [
+  new RegExp(`^${NONEMPTY_FIELD} ne ""$`),
+  new RegExp(`^len \\( [a-z0-9_.]+ \\) ge 0$`),
+  new RegExp(`^len \\( ${NONEMPTY_FIELD} \\) (?:gt 0|ge 1)$`),
+  /^ip\.src ne 0\.0\.0\.0$/,
+  /^cf\.threat_score ge 0$/,
+  /^http\.request\.uri\.path contains "\/"$/,
+  /^starts_with \( http\.request\.uri\.path , "\/" \)$/,
+  /^[a-z0-9_.]+ matches "(?:\.\*|\^|\.\*\$|\^\.\*\$)"$/
+];
+const NEVER_IDIOMS: readonly RegExp[] = [
+  new RegExp(`^${NONEMPTY_FIELD} eq ""$`),
+  /^len \( [a-z0-9_.]+ \) lt 0$/,
+  /^ip\.src eq 0\.0\.0\.0$/
+];
+
+function normalizedText(tokens: ExprToken[]): string {
+  return tokens.map((t) => {
+    const w = t.text.toLowerCase();
+    if (t.kind === "str") return t.text;
+    return comparatorOf(w) ?? w;
+  }).join(" ");
+}
+
+function atomTruth(tokens: ExprToken[]): ExprTruth {
+  if (tokens.length === 1) {
+    const lit = literalOf(tokens[0]!);
+    if (lit?.type === "bool") return lit.value ? "always" : "never";
+  }
+  if (tokens.length === 3) {
+    const op = comparatorOf(keyword(tokens[1]));
+    const left = literalOf(tokens[0]!);
+    const right = literalOf(tokens[2]!);
+    if (op !== undefined && left !== null && right !== null) return compareLiterals(left, op, right);
+  }
+  const text = normalizedText(tokens);
+  if (ALWAYS_IDIOMS.some((re) => re.test(text))) return "always";
+  if (NEVER_IDIOMS.some((re) => re.test(text))) return "never";
+  return "unknown";
+}
+
+function expressionTruth(tokens: ExprToken[], depth = 0): ExprTruth {
+  if (depth > 20 || tokens.length === 0) return "unknown";
+  const t = stripOuterParens(tokens);
+  const ors = splitTopLevel(t, OR_WORDS);
+  if (ors === null) return "unknown";
+  if (ors.length > 1) {
+    const r = ors.map((p) => expressionTruth(p, depth + 1));
+    return r.includes("always") ? "always" : r.every((x) => x === "never") ? "never" : "unknown";
+  }
+  const xors = splitTopLevel(t, XOR_WORDS);
+  if (xors !== null && xors.length > 1) {
+    const r = xors.map((p) => expressionTruth(p, depth + 1));
+    if (r.includes("unknown")) return "unknown";
+    return r.filter((x) => x === "always").length % 2 === 1 ? "always" : "never";
+  }
+  const ands = splitTopLevel(t, AND_WORDS);
+  if (ands === null) return "unknown";
+  if (ands.length > 1) {
+    const r = ands.map((p) => expressionTruth(p, depth + 1));
+    return r.includes("never") ? "never" : r.every((x) => x === "always") ? "always" : "unknown";
+  }
+  const first = keyword(t[0]);
+  if (t.length > 1 && (first === "not" || first === "!")) {
+    const inner = expressionTruth(t.slice(1), depth + 1);
+    return inner === "always" ? "never" : inner === "never" ? "always" : "unknown";
+  }
+  return atomTruth(t);
+}
+
+/** `true` når uttrykket er en ÅPENBAR tautologi (se blokkommentaren over). Ukjent/uanalyserbart -> `false`. */
+export function isObviousMatchAllExpression(expression: string): boolean {
+  const tokens = tokenizeExpression(expression);
+  return tokens !== null && expressionTruth(tokens) === "always";
+}
+
+/** Regel-uttrykk (wirefilter) er ugjennomsiktig for oss; vi sjekker lengde/tegn og avviser ÅPENBARE «treffer alt»-uttrykk for en blokkerende handling (best-effort, ikke et bevis - se `isObviousMatchAllExpression`). */
 export function assertWafExpression(value: unknown, action: string): string {
   if (typeof value !== "string") reject("expression");
   const expression = (value as string).trim();
   if (expression.length === 0 || expression.length > 4096 || CONTROL.test(expression.replace(/[\n\t]/g, " "))) reject("expression");
   const compact = expression.replace(/\s+/g, "").toLowerCase();
-  const matchesAll = compact === "true" || compact === "(true)" || /^\(*true\)*$/.test(compact);
+  const matchesAll = /^\(*true\)*$/.test(compact) || isObviousMatchAllExpression(expression);
   if (matchesAll && action !== "log") reject("expression", "treffer_all_trafikk");
   return expression;
 }
