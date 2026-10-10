@@ -19,8 +19,8 @@ function readSource(relativePath: string): string {
 
 const serverSource = readSource("../src/server.ts");
 
-describe("A: EXECUTIVE_MUTATE_ACTIONS inneholder NØYAKTIG de 12 executive.*-mutasjonshandlingene", () => {
-  it("inneholder alle 12 forventede handlinger, ingen flere, ingen færre", () => {
+describe("A: EXECUTIVE_MUTATE_ACTIONS inneholder NØYAKTIG de 13 executive.*-mutasjonshandlingene (12 + WP-H0 cancel_task)", () => {
+  it("inneholder alle 13 forventede handlinger, ingen flere, ingen færre", () => {
     const match = serverSource.match(/const EXECUTIVE_MUTATE_ACTIONS = \[([\s\S]*?)\] as const;/);
     expect(match).not.toBeNull();
     const actions = (match?.[1] ?? "")
@@ -33,7 +33,8 @@ describe("A: EXECUTIVE_MUTATE_ACTIONS inneholder NØYAKTIG de 12 executive.*-mut
         "activate_kill_switch", "deactivate_kill_switch",
         "freeze_connector", "unfreeze_connector",
         "revoke_credential", "restore_credential", "revoke_device",
-        "enable_finance_kill_switch", "disable_finance_kill_switch"
+        "enable_finance_kill_switch", "disable_finance_kill_switch",
+        "cancel_task"
       ].sort()
     );
   });

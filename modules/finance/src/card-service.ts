@@ -20,6 +20,7 @@ import {
   type ProviderCard
 } from "./card-types.ts";
 import { FinanceKillSwitchActiveError, InvalidWebhookSignatureError } from "./types.ts";
+import { malformedWebhookKey, rejectionCode } from "./webhook-guard.ts";
 
 /**
  * UA-6 Slice 6 (D-112): kanonisk programmerbar kort-domenetjeneste
@@ -856,23 +857,28 @@ export class CardService {
    * tenant-isolasjon (ingestionen kjører i den KONFIGURERTE tenantens
    * kontekst - et kort utenfor den er usynlig -> 'unsupported').
    */
-  async ingestWallesterWebhookEvent(rawBody: Buffer, authorizationHeader: string | undefined): Promise<{ status: "processed" | "duplicate" | "unsupported" | "failed_retryable"; eventId: string }> {
+  async ingestWallesterWebhookEvent(rawBody: Buffer, authorizationHeader: string | undefined): Promise<{ status: "processed" | "duplicate" | "unsupported" | "failed_retryable" | "rejected"; eventId: string }> {
     const basicAuth = this.webhookAuthProvider();
     if (!basicAuth) throw new InvalidWebhookSignatureError("wallester_webhook_auth_unconfigured");
     const verdict = verifyWallesterWebhookBasicAuth(authorizationHeader, basicAuth.username, basicAuth.password);
     if (!verdict.valid) throw new InvalidWebhookSignatureError(`wallester_webhook_${verdict.reason ?? "invalid"}`);
 
+    const tenantId = this.tenantResolver();
+    if (!tenantId) throw new WallesterTenantNotConfiguredError();
+    const memorySpace: MemorySpace = "business";
+
     let envelope: WallesterEventEnvelope;
     try {
       envelope = parseWallesterEventEnvelope(rawBody);
     } catch (err) {
-      if (err instanceof WallesterEventEnvelopeError) throw err;
-      throw new WallesterEventEnvelopeError("unparseable");
+      // WP-F1 (JARVIS-070): autentisert, men ikke identifiserbar nyttelast -> dødbrev under en hash-nøkkel + 2xx, aldri en evig 5xx-retry.
+      const detail = err instanceof WallesterEventEnvelopeError ? err.message.replace(/^wallester_event_envelope_malformed:/, "") : "unparseable";
+      return this.recordRejectedWebhook(tenantId, malformedWebhookKey(rawBody), "malformed", "malformed", rejectionCode("envelope_malformed", detail));
     }
-
-    const tenantId = this.tenantResolver();
-    if (!tenantId) throw new WallesterTenantNotConfiguredError();
-    const memorySpace: MemorySpace = "business";
+    if (envelope.rejection !== null) {
+      // WP-F1 (JARVIS-020/070): identifiserbar hendelse med permanent ugyldig innhold (manglende/ugyldig beløp eller valuta, ugyldig id) -> dødbrev med årsak + 2xx.
+      return this.recordRejectedWebhook(tenantId, envelope.dedupeKey, envelope.eventType, envelope.providerObjectId, envelope.rejection);
+    }
 
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const inserted = await client.query(
@@ -880,7 +886,19 @@ export class CardService {
          VALUES ($1, $2, $3, $4, $5, 'verified') ON CONFLICT (dedupe_key) DO NOTHING RETURNING dedupe_key`,
         [envelope.dedupeKey, tenantId, memorySpace, envelope.eventType, envelope.providerObjectId]
       );
-      if (inserted.rows.length === 0) return { status: "duplicate" as const, eventId: envelope.dedupeKey };
+      if (inserted.rows.length === 0) {
+        // D-392 (JARVIS-070), nå også for Wallester: en `failed_retryable`-hendelse er IKKE «ferdig» - leverandørens retry skal behandle den på nytt (tidligere svarte
+        // retry `duplicate` og hendelsen ble liggende for alltid i dødbrevkøen uten noen reprosessor).
+        const prior = await client.query(`SELECT status FROM wallester_webhook_events WHERE dedupe_key = $1 FOR UPDATE`, [envelope.dedupeKey]);
+        if ((prior.rows[0] as { status: string } | undefined)?.status !== "failed_retryable") return { status: "duplicate" as const, eventId: envelope.dedupeKey };
+        await client.query(`UPDATE wallester_webhook_events SET status = 'verified', error_message = NULL WHERE dedupe_key = $1`, [envelope.dedupeKey]);
+      }
+
+      // En ukjent hendelsesklasse anvendes aldri (og er ikke «processed»): fail-safe, aldri gjettet til en kjent klasse.
+      if (envelope.kind === "unknown") {
+        await client.query(`UPDATE wallester_webhook_events SET status = 'unsupported', processed_at = now() WHERE dedupe_key = $1`, [envelope.dedupeKey]);
+        return { status: "unsupported" as const, eventId: envelope.dedupeKey };
+      }
 
       const providerCardId = envelope.providerCardId ?? (envelope.kind === "card" ? envelope.providerObjectId : null);
       const cardRow = providerCardId
@@ -892,6 +910,9 @@ export class CardService {
       }
       const cardId = (cardRow.rows[0] as { card_id: string }).card_id;
 
+      // D-392 (JARVIS-070): SAVEPOINT - en SQL-feil under anvendelsen avbryter ellers hele transaksjonen («current transaction is aborted»), slik at selve dødbrev-skrivingen
+      // under feilet, svaret ble 502 og hendelsen forsvant sporløst. Nå rulles kun anvendelsen tilbake (hendelsesraden over består).
+      await client.query("SAVEPOINT webhook_apply");
       try {
         // "authorization_release" (owner-provided primary-source-audit, PR #62
         // runde 4) rapporterer et senere utfall for en EKSISTERENDE
@@ -909,7 +930,8 @@ export class CardService {
              ON CONFLICT (tenant_id, provider, provider_authorization_id) DO NOTHING RETURNING authorization_id`,
             [
               `cauth-${randomUUID()}`, tenantId, memorySpace, cardId, envelope.providerObjectId, mapped,
-              Number(p["amount"] ?? 0), String(p["currency"] ?? "EUR").toUpperCase(),
+              // WP-F1: strengt validert av parseren (påkrevd heltall i minste enhet og valuta) - aldri `Number(x ?? 0)` / «EUR»-standard.
+              envelope.amountOre, envelope.currency,
               typeof p["merchant_name"] === "string" ? p["merchant_name"] : null,
               typeof p["merchant_category_code"] === "string" ? p["merchant_category_code"] : null,
               ["pos", "online", "atm", "contactless"].includes(String(p["channel"])) ? String(p["channel"]) : "unknown",
@@ -935,8 +957,8 @@ export class CardService {
             id: envelope.providerObjectId,
             authorizationId: typeof p["authorization_id"] === "string" ? (p["authorization_id"] as string) : null,
             type: type === "purchase" || type === "refund" || type === "reversal" || type === "fee" ? (type as "purchase" | "refund" | "reversal" | "fee") : "unknown",
-            amountOre: Number(p["amount"] ?? 0),
-            currency: String(p["currency"] ?? "EUR").toUpperCase(),
+            amountOre: envelope.amountOre as number,
+            currency: envelope.currency as string,
             merchantName: typeof p["merchant_name"] === "string" ? (p["merchant_name"] as string) : null,
             merchantCategoryCode: typeof p["merchant_category_code"] === "string" ? (p["merchant_category_code"] as string) : null,
             channel: ["pos", "online", "atm", "contactless"].includes(String(p["channel"])) ? String(p["channel"]) : "unknown",
@@ -955,11 +977,30 @@ export class CardService {
         await client.query(`UPDATE wallester_webhook_events SET status = 'processed', card_id = $2, processed_at = now() WHERE dedupe_key = $1`, [envelope.dedupeKey, cardId]);
         return { status: "processed" as const, eventId: envelope.dedupeKey };
       } catch (err) {
+        await client.query("ROLLBACK TO SAVEPOINT webhook_apply");
         await client.query(`UPDATE wallester_webhook_events SET status = 'failed_retryable', error_message = $2, processed_at = now() WHERE dedupe_key = $1`, [
           envelope.dedupeKey, (err as Error).message.slice(0, 500)
         ]);
         return { status: "failed_retryable" as const, eventId: envelope.dedupeKey };
       }
+    });
+  }
+
+  /**
+   * WP-F1 (D-462, JARVIS-020/070): lagrer en AUTENTISERT Wallester-hendelse med permanent ugyldig innhold som dødbrev (`status = 'rejected'`, kort årsakskode - aldri selve
+   * innholdet) og returnerer `rejected` (ruten svarer 2xx: ingen evig retry). Samme nøkkel igjen = `duplicate`. Kortstatus/-transaksjoner hentes uansett inn av den
+   * planlagte kortsveipen, og avstemmingen (`reconcileFinance`) flagger avviste hendelser.
+   */
+  private async recordRejectedWebhook(
+    tenantId: string, key: string, eventType: string, objectId: string, reason: string
+  ): Promise<{ status: "rejected" | "duplicate"; eventId: string }> {
+    return withMemoryTransaction(this.pool, tenantId, ["business"], async (client) => {
+      const inserted = await client.query(
+        `INSERT INTO wallester_webhook_events (dedupe_key, tenant_id, memory_space_id, event_type, provider_object_id, status, error_message, processed_at)
+         VALUES ($1, $2, 'business', $3, $4, 'rejected', $5, now()) ON CONFLICT (dedupe_key) DO NOTHING RETURNING dedupe_key`,
+        [key, tenantId, eventType.slice(0, 120), objectId.slice(0, 255), rejectionCode(reason)]
+      );
+      return { status: inserted.rows.length === 1 ? ("rejected" as const) : ("duplicate" as const), eventId: key };
     });
   }
 

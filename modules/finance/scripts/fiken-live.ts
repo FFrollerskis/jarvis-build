@@ -33,6 +33,7 @@ import { BusinessInternalSecretProvider } from "@jarvis/business";
 import { FinanceService, FinanceTransport, type FikenCredentials, type FikenCredentialsProvider } from "../src/index.ts";
 import { FikenTransport } from "../src/fiken-transport.ts";
 import { checkRequiredEnv, computeCanonicalDomainVerified, computeFikenLiveVerified, computeHardFail, evaluateSecretSafety, isLiveWriteOptedIn, type Verdict } from "./lib/fiken-live-lib.ts";
+import { deleteMoneyRows } from "./lib/money-cleanup.ts";
 
 const results: Record<string, Verdict> = {
   q21_runtime_role_safe: "NOT_RUN",
@@ -88,14 +89,14 @@ const OWNER_PERSON = `person-finance-live-${runId}`;
 function ownerIdentityFor(tenantId: string): IdentityContext {
   return {
     person_id: OWNER_PERSON, tenant_id: tenantId, memory_space_id: "business",
-    session_id: `sess-finance-live-${runId}`, device_id: "jarvis-core", channel: "api", auth_strength: "active"
+    session_id: `sess-finance-live-${runId}`, device_id: "jarvis-host-acceptance", channel: "api", auth_strength: "signed" /* review F4: step_up_required håndheves alltid; host-akseptanse kjøres av eieren selv med denne eksplisitte, merkede identiteten */
   };
 }
 
 async function cleanupTenant(tenantId: string): Promise<void> {
   await adminPool.query("DELETE FROM business_open_loops WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM payment_intent_events WHERE tenant_id = $1", [tenantId]);
-  await adminPool.query("DELETE FROM payment_intents WHERE tenant_id = $1", [tenantId]);
+  await deleteMoneyRows(adminPool, "payment_intents", tenantId);
   await adminPool.query("DELETE FROM finance_kill_switch WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM tool_executions WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM memory_spaces WHERE tenant_id = $1", [tenantId]);

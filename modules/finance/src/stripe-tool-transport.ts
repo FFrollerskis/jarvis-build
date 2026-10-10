@@ -37,6 +37,11 @@ export class StripeFinanceTransport implements ToolTransport {
         const row = await this.service.submitStripeRefund(tenantId, memorySpace, requireString(parameters, "refund_id"), actorPersonId);
         return { external_id: row.refund_id, data: row as unknown as JsonValue };
       }
+      // WP-F1 (D-462): fersk, read-only, REDIGERT tilstandslesing for klasse D-kjeden (preflight + readback for `submit_refund`) - se `class-d-checks.ts`.
+      case "check_submit_refund": {
+        const check = await this.service.checkSubmitStripeRefund(tenantId, memorySpace, requireString(parameters, "refund_id"));
+        return { ...(check ? { external_id: check.child.id } : {}), data: check as unknown as JsonValue };
+      }
       case "get_refund": {
         const row = await this.service.getStripeRefund(tenantId, memorySpace, requireString(parameters, "refund_id"));
         return { ...(row ? { external_id: row.refund_id } : {}), data: row as unknown as JsonValue };

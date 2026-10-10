@@ -1,6 +1,6 @@
 import type { GitCredentialSource, JsonValue } from "@jarvis/contracts";
 import type { ConnectorAuthInfo } from "./connector-registry.ts";
-import type { SecretProvider } from "./gateway.ts";
+import { secretPresenceOf, type SecretPresence, type SecretProvider, type SecretSourceHealth } from "./gateway.ts";
 import {
   GithubRateLimitController, type GithubHeaderReader, type GithubResponseClassification
 } from "./github-rate-limit-controller.ts";
@@ -323,6 +323,28 @@ export class GitHubTokenSecretProvider implements SecretProvider {
     } catch {
       return false;
     }
+  }
+
+  /** WP-H0 (gjennomgang av PR #316, M-1): dekoratøren skjuler ikke helsen til kjeden under (Infisical → env): «Infisical er nede» må kunne leses av kontrollsentrene også gjennom denne. */
+  get health(): SecretSourceHealth | undefined {
+    return this.inner.health;
+  }
+
+  /**
+   * WP-H0 (M-1): TRI-STATE presence gjennom dekoratøren. Uten denne ville `secretPresenceOf` falt tilbake til `get` (som UTSTEDER et installasjonstoken for GitHub-refen) og mistet kjedens tri-state
+   * (Infisical nede ble igjen «finnes ikke»). Andre refer går uendret til kjeden. GitHub-refen: finnes en brukbar credential (`has`, ingen utstedelse) er den `present`; ellers avgjør kjeden under om «ikke
+   * funnet» er en måling (`absent`) eller om kilden for PAT/privatnøkkel ikke kunne spørres (`unknown`).
+   */
+  async presence(ref: string): Promise<SecretPresence> {
+    if (ref !== this.ref) return secretPresenceOf(this.inner, ref);
+    if (await this.has(ref)) return "present";
+    let source: SecretPresence;
+    try {
+      source = await secretPresenceOf(this.inner, ref);
+    } catch {
+      source = "unknown";
+    }
+    return source === "unknown" ? "unknown" : "absent";
   }
 }
 
