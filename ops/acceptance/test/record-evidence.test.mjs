@@ -414,6 +414,51 @@ describe("redact(): realistiske former fra gjennomgangen (H1)", () => {
   });
 });
 
+describe("redact(): tillegg etter kjøring av reviewerens 100-forms-korpus (62 lekket før, 26 etter; rest er dokumentert som kjent grense)", () => {
+  it("URL-passord som inneholder @ redigeres helt (siste @ før stien avslutter brukerinfo), og vanlige URL-er står uendret", () => {
+    const tail = "ssb2Il7SvAEh";
+    const { text } = redact(`postgres://jarvis:pa@${tail}@db:5432/jarvis`);
+    expect(text).not.toContain(tail);
+    expect(text).toContain("@db:5432/jarvis");
+    for (const url of ["https://example.com:8080/path", "ssh://git@github.com/x/y.git", "https://github.com:443/a@b", "git clone https://github.com/tsworkflow/jarvisbuild.git"]) expect(redact(url).text, url).toBe(url);
+  });
+
+  it("Slack-/Discord-webhook-URL-er og Discord bot-tokens fjernes (selve URL-en er hemmeligheten)", () => {
+    const slack = ["https://hooks.slack", ".com/services/T0123ABCD/B0123ABCD/", "b2Il7SvAEh5Or0zd3Kn8UY1G"].join("");
+    const discord = ["https://discord", ".com/api/webhooks/123456789012345678/", "b2Il7SvAEh5Or0zd3Kn8UY1Gj6QtxCf4Mp9Wb2Il7S"].join("");
+    const bot = ["MTAyb2Il7SvAEh5Or0zd3Kn8", ".", "b2Il7S", ".", "b2Il7SvAEh5Or0zd3Kn8UY1Gj6Q"].join("");
+    for (const [secret, rule] of [[slack, "slack_webhook_url"], [discord, "discord_webhook_url"], [bot, "discord_bot_token"]]) {
+      const { text, counts } = redact(`sendte til ${secret} ok`);
+      expect(text, rule).not.toContain(secret.slice(-20));
+      expect(counts[rule], rule).toBe(1);
+    }
+    expect(redact("se https://discord.com/developers/docs og hooks.slack.com/ i dokumentasjonen").text).toContain("https://discord.com/developers/docs");
+  });
+
+  it("«passord» (norsk nøkkelord) og Unicode-mellomrom rundt «=» omgår ikke redigeringen", () => {
+    expect(redact("passord: Correct-Horse-Battery-9").text).not.toContain("Correct-Horse");
+    expect(redact("passord: ikke satt").text).toBe("passord: ikke satt");
+    const nb = String.fromCharCode(0xa0);
+    const { text } = redact(sanitize(`TOKEN${nb}=${nb}Correct-Horse-Battery-9`));
+    expect(text).not.toContain("Correct-Horse");
+    expect(sanitize(`a${nb}b${String.fromCharCode(0x3000)}c`)).toBe("a b c");
+  });
+
+  it("JSON-verdi med escapet anførselstegn (\\\") avsluttes ikke for tidlig - hele passordet redigeres", () => {
+    const { text } = redact(String.raw`{"password": "ab\"Correct-Horse-Battery-9", "ok": 1}`);
+    expect(text).not.toContain("Correct-Horse");
+    expect(text).toContain('"ok": 1');
+  });
+
+  it("er fortsatt lineær på fiendtlige URL-former (passord uten @, mange @, bare kolon)", () => {
+    for (const input of ["x://u:" + "a".repeat(190_000), "x://" + ":".repeat(100_000), "https://a:" + "b@".repeat(80_000), "ab://".repeat(40_000)]) {
+      const t0 = Date.now();
+      redact(input);
+      expect(Date.now() - t0, input.slice(0, 16)).toBeLessThan(2000);
+    }
+  });
+});
+
 describe("--scan (delt mønsterliste for NAS-porten)", () => {
   it("skriver KUN regelnavn og antall - aldri teksten - og gir exit 1 ved treff", () => {
     const secret = fake.ghp();

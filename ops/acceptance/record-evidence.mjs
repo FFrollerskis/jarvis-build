@@ -28,7 +28,7 @@ const R = "«REDIGERT»";
 /** Verdier som aldri er hemmeligheter selv om nøkkelen heter token/secret: «ikke-satt», tall for token-budsjetter, plassholdere og miljøvariabel-referanser. */
 const BENIGN_VALUE = /^(?:ikke[ _-]?satt|satt|ukjent|unknown|true|false|on|off|none|null|nil|yes|no|ok|set|unset|bearer|basic|digest|redacted|n\/a|\*+|x+|-+|\.{3}|<[^<>\r\n]{0,60}>|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)$/i;
 const NUMERIC_KEY = /(?:max|min|limit|count|total|usage|used|expir|ttl|length|size|num|remaining|rate|budget|quota)/i;
-const KV_KEYWORDS = /(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|apikey|private[_-]?key|access[_-]?key|account[_-]?key|signing[_-]?key|encryption[_-]?key|master[_-]?key|session[_-]?key|subscription[_-]?key|client[_-]?key|app[_-]?key|license[_-]?key|webhook[_-]?key|credentials?)/gi;
+const KV_KEYWORDS = /(?:password|passwd|passphrase|passord|pwd|secret|token|api[_-]?key|apikey|private[_-]?key|access[_-]?key|account[_-]?key|signing[_-]?key|encryption[_-]?key|master[_-]?key|session[_-]?key|subscription[_-]?key|client[_-]?key|app[_-]?key|license[_-]?key|webhook[_-]?key|credentials?)/gi;
 const IDENT = /[A-Za-z0-9_.-]/;
 
 /**
@@ -64,7 +64,7 @@ function redactKeyValue(text) {
       vStart = k + 1;
       let e = vStart;
       const cap = Math.min(text.length, vStart + 300);
-      while (e < cap && text[e] !== q && text[e] !== "\n" && text[e] !== "\r") e += 1;
+      while (e < cap && text[e] !== q && text[e] !== "\n" && text[e] !== "\r") e += text[e] === "\\" && e + 1 < cap ? 2 : 1; // \" i JSON-verdien avslutter ikke verdien
       vEnd = e; // lukkende apostrof (eller slutten av linjen/taket hvis den mangler - da redigerer vi resten av linjen)
       if (vEnd - vStart < 4) continue;
     } else {
@@ -113,6 +113,9 @@ export const REDACTIONS = [
   ["sendgrid_key", /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b/g],
   ["notion_token", /\b(?:secret_|ntn_)[A-Za-z0-9]{30,}\b/g],
   ["mailgun_key", /\bkey-[0-9a-f]{32}\b/g],
+  ["slack_webhook_url", /\bhooks\.slack\.com\/services\/[A-Z0-9]{6,}\/[A-Z0-9]{6,}\/[A-Za-z0-9]{16,}/g],
+  ["discord_webhook_url", /\bdiscord(?:app)?\.com\/api\/webhooks\/\d{15,22}\/[A-Za-z0-9_-]{30,}/g],
+  ["discord_bot_token", /\b[MNO][A-Za-z0-9_-]{23,25}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,38}\b/g],
   ["digitalocean_token", /\bdop_v1_[0-9a-f]{40,}\b/g],
   ["shopify_token", /\bshp(?:at|ca|pa|ss)_[0-9a-f]{32}\b/g],
   // Cookie-hoder (sesjonsidentitet) redigeres helt. Alle Authorization-skjemaer (Basic/Digest/Token/...), ikke bare Bearer. Verdier som allerede er redigert telles ikke på nytt.
@@ -122,7 +125,7 @@ export const REDACTIONS = [
   ["secret_header", /^([ \t]*[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+){0,5}-(?:key|token|secret|password|signature|auth)[ \t]*:[ \t]*)(?!«)([^\r\n]{6,})/gim, `$1${R}`],
   ["api_key_header", /\b(x-api-key|x-auth-token|x-access-token|x-goog-api-key|private-token|api-key|apikey)\s*[:=]\s*(?!«)[^\s"',;]{8,}/gi, `$1: ${R}`],
   // URL med credentials (også tom bruker: redis://:PASS@host) og hemmelige spørreparametre (?token=, ?key=, ?sig=, ?code= ...).
-  ["url_credentials", /\b([a-z][a-z0-9+.-]{1,12}:\/\/)[^\s/@:]{0,100}:[^\s/@]{1,200}@/g, `$1${R}@`],
+  ["url_credentials", /\b([a-z][a-z0-9+.-]{1,12}:\/\/)[^\s/@:]{0,100}:[^\s/]{1,200}@/g, `$1${R}@`],
   ["url_secret_param", /([?&][A-Za-z0-9_.-]{0,30}(?:key|token|secret|password|passwd|pwd|sig|signature|auth|code|credential)[A-Za-z0-9_.-]{0,20}=)(?!«)[^&\s"'#]{6,}/gi, `$1${R}`],
   // Nøkkel=verdi i alle former (shell, ini, yaml, JSON, JS-objekter), se redactKeyValue.
   ["kv_secret", redactKeyValue],
@@ -141,6 +144,7 @@ export function sanitize(text) {
   return text
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
+    .replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, " ")
     .replace(/\x1b\][^\x07\x1b]{0,2000}(?:\x07|\x1b\\)/g, "")
     .replace(/\x1b\[[0-9;?]{0,40}[ -/]{0,4}[@-~]/g, "")
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f\u200b-\u200f\u2028\u2029\u2060\ufeff]/g, "");
