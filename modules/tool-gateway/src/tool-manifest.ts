@@ -53,7 +53,7 @@ const k = (tool_id: string, action: string) => `${tool_id}.${action}`;
 /** DB-baserte domenenavnerom (Jarvis eier tilstanden, ingen ekstern leverandør). */
 const JARVIS_CORE_NAMESPACES = new Set([
   "business", "support", "contract", "agreements", "growth", "consent", "finance", "finance_spend", "product", "operations",
-  "governance", "situations", "executive", "owner_controls", "memory", "tasks", "incidents", "conversation_graph", "self_modification", "run_rate"
+  "governance", "situations", "executive", "owner_controls", "memory", "knowledge", "tasks", "incidents", "conversation_graph", "self_modification", "run_rate"
 ]);
 const FINANCIAL_NAMESPACES = /^(finance|finance_[a-z]+)$/;
 
@@ -67,7 +67,7 @@ const PAID_MEDIA = new Set(["openai_images", "runway", "kling", "google_veo", "h
 const SMS_LIKE = new Set(["twilio", "telnyx", "whatsapp"]);
 const METERED = new Set(["brave_search", "tavily", "exa", "google_maps", "google_places", "google_routes"]);
 const OWNER_CONFIGURED_URL = new Set(["jira", "pipedrive", "grafana", "prometheus", "n8n", "make", "finance_wallester", "home-assistant"]);
-const PRIVATE_NAMESPACES = new Set(["email", "calendar", "drive", "gmail", "microsoft_outlook", "memory", "dropbox", "onedrive", "notion", "slack", "discord", "telegram", "whatsapp", "twilio", "telnyx", "google_sheets", "spotify", "home-assistant"]);
+const PRIVATE_NAMESPACES = new Set(["email", "calendar", "drive", "gmail", "microsoft_outlook", "memory", "knowledge", "dropbox", "onedrive", "notion", "slack", "discord", "telegram", "whatsapp", "twilio", "telnyx", "google_sheets", "spotify", "home-assistant"]);
 
 const READ_VERB = /^(read|get|list|search|query|find|fetch|lookup|describe|inspect|check|status|test|health|count|summar|show|view|browse|explain|rank|evaluate|resolve|upcoming|due|overdue|cancellable|campaign_performance|geocode|reverse_geocode|web_search|news_search|extract|screenshot|navigate)/;
 const SEND_VERB = /(^|_)(send|notify|reply|forward|publish|broadcast|invite|call_tool|run_scenario|activate_workflow|dispatch_workflow|comment_on_issue|rerun_workflow_run|cancel_workflow_run)(_|$)/;

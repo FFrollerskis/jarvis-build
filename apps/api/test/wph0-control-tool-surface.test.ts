@@ -6,7 +6,7 @@ import { OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/ow
 import { SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";
 import {
   CHAT_ACT_TIER, CHAT_DELEGATE_TIER, CHAT_READ_TIER, MODEL_SURFACE_ALLOWLIST, MemorySearchTransport, SURFACE_TOOL_GRANTS, assertChatReadTier, assertManifestInvariants,
-  buildToolManifest, chatReadTierMeshTools, firstWaveTools, homeAssistantTools, inferEffect, memoryToolDefinitions, resolveModelToolSurface, scopeFieldsOf, selectSurfaceTools,
+  KnowledgeSearchTransport, buildToolManifest, chatReadTierMeshTools, firstWaveTools, homeAssistantTools, inferEffect, knowledgeToolDefinitions, memoryToolDefinitions, resolveModelToolSurface, scopeFieldsOf, selectSurfaceTools,
   type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
 import { TasksDelegateTransport, tasksDelegateToolDefinitions } from "../src/chat-jobs.ts";
@@ -30,6 +30,7 @@ function productionDefinitions(registry?: ControlCenterRegistry): ToolDefinition
       ...governanceToolDefinitions(new GovernanceTransport({} as never)),
       ...situationsToolDefinitions(new SituationsTransport({} as never, {} as never)),
       ...memoryToolDefinitions(new MemorySearchTransport({} as never, {} as never)),
+      ...knowledgeToolDefinitions(new KnowledgeSearchTransport({} as never)),
       ...tasksDelegateToolDefinitions(new TasksDelegateTransport({} as never, {} as never)),
       ...runRateToolDefinitions(new RunRateTransport({} as never))
     ]

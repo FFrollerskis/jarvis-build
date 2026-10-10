@@ -581,8 +581,63 @@ export class GoogleCalendarTransport implements ToolTransport {
  * `update_permission`/`delete_permission` (deling/tilgangsstyring).
  */
 const GOOGLE_DOC_EXPORT_MIME = "application/vnd.google-apps.document";
+const GOOGLE_SHEET_EXPORT_MIME = "application/vnd.google-apps.spreadsheet";
+const GOOGLE_SLIDES_EXPORT_MIME = "application/vnd.google-apps.presentation";
 const GOOGLE_FOLDER_MIME = "application/vnd.google-apps.folder";
 const GOOGLE_NATIVE_MIME_PREFIX = "application/vnd.google-apps.";
+/**
+ * WP-D1 (UA-2): øvre grense for hva ÉN lesing (rå fil eller eksport) får laste inn - Google selv avviser eksport over 10 MB, men en rå tekstfil kan være vilkårlig stor, og alt leses ellers inn i minnet.
+ * Overskridelse kaster `drive_content_too_large` (kilden hopper over filen), aldri en avkortet tekst som ser komplett ut.
+ */
+export const DRIVE_READ_MAX_BYTES = 5 * 1024 * 1024;
+
+/**
+ * WP-D1 (UA-2): MIME-typer som aldri leses inn som kunnskap uansett hva allowlisten ellers sier - Apps Script-prosjekter, makro-aktiverte Office-formater (docm/xlsm/pptm ...), kjørbare filer og skriptspråk.
+ * Dette er forsvar i dybden: allowlisten (Google-dokumenter + tekst + JSON) slipper dem allerede ikke gjennom, men en senere utvidelse av allowlisten skal ikke kunne la dem inn ved et uhell. Kode som ren
+ * tekst indekseres via GitHub-/filsystem-kildene, ikke via Drive.
+ */
+const DRIVE_DENIED_MIME: readonly RegExp[] = [
+  /^application\/vnd\.google-apps\.script/i,
+  /macroenabled/i,
+  /vbaproject/i,
+  /^application\/(?:x-)?(?:msdownload|msdos-program|executable|sh|shellscript|bat|csh|perl|python|python-code|php|httpd-php|javascript|ecmascript|vbscript|powershell|msi)$/i,
+  /^application\/vnd\.microsoft\.portable-executable$/i,
+  /^text\/(?:x-)?(?:shellscript|sh|bat|batch|csh|perl|python|php|javascript|ecmascript|vbscript|powershell)$/i
+];
+export function isDriveMacroOrScriptMime(mimeType: string): boolean {
+  return DRIVE_DENIED_MIME.some((re) => re.test(mimeType));
+}
+
+/**
+ * Leser en respons som tekst med en HARD byte-grense: `content-length` sjekkes først, deretter telles bytes mens kroppen strømmes, og lesingen avbrytes (kroppen kanselleres) så snart grensen er passert.
+ * Fungerer også for responser uten strømmet kropp (test-/stub-objekter med bare `text()`).
+ */
+export async function readResponseTextCapped(response: Response, maxBytes: number): Promise<string> {
+  const declared = Number(response.headers?.get?.("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await response.body?.cancel?.().catch(() => undefined);
+    throw new Error("drive_content_too_large");
+  }
+  if (!response.body) {
+    const text = await response.text();
+    if (Buffer.byteLength(text, "utf8") > maxBytes) throw new Error("drive_content_too_large");
+    return text;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error("drive_content_too_large");
+    }
+    chunks.push(value);
+  }
+  return new TextDecoder("utf-8").decode(Buffer.concat(chunks));
+}
 const DRIVE_SUPPORTED_RAW_MIME = new Set([
   "text/plain", "text/markdown", "text/x-markdown", "text/csv",
   "application/json", "text/html", "text/css", "application/x-yaml", "text/yaml"
@@ -704,24 +759,31 @@ export class GoogleDriveTransport implements ToolTransport {
     };
   }
 
+  /**
+   * `files.export` (Drive API v3) for Google-egne dokumenttyper. WP-D1 (UA-2): Docs -> `text/plain`, Sheets -> `text/csv` (Drive eksporterer KUN første ark som CSV; flere ark leses via `google_sheets`-verktøyet
+   * i kunnskapskilden), Slides -> `text/plain`. Alt annet Google-nativt (Forms, Drawings, Apps Script, Sites, snarveier ...) og alle binærformater/makro-/skriptfiler avvises (`drive_unsupported_content_<mime>`):
+   * kun en eksplisitt allowlist leses, aldri «alt unntatt det vi vet er farlig». Lesingen er byte-begrenset (`DRIVE_READ_MAX_BYTES`).
+   */
   private async readDocument(parameters: Record<string, JsonValue>, auth: Record<string, string>) {
     const documentId = String(parameters["document_id"]);
     const mimeType = String(parameters["mime_type"] ?? "");
-    if (mimeType === GOOGLE_DOC_EXPORT_MIME) {
+    const exportMime = mimeType === GOOGLE_DOC_EXPORT_MIME || mimeType === GOOGLE_SLIDES_EXPORT_MIME ? "text/plain" : mimeType === GOOGLE_SHEET_EXPORT_MIME ? "text/csv" : undefined;
+    if (exportMime !== undefined) {
       const response = await guardedFetch(
-        `https://www.googleapis.com/drive/v3/files/${encodePathSegment(documentId, "document_id")}/export?mimeType=text%2Fplain`,
+        `https://www.googleapis.com/drive/v3/files/${encodePathSegment(documentId, "document_id")}/export?mimeType=${encodeURIComponent(exportMime)}`,
         { headers: auth }
       );
       await this.assertOk(response, documentId);
-      return { data: { content: await response.text(), content_type: "text/plain" } };
+      return { data: { content: await readResponseTextCapped(response, DRIVE_READ_MAX_BYTES), content_type: exportMime } };
     }
+    if (isDriveMacroOrScriptMime(mimeType)) throw new Error(`drive_macro_or_script_denied_${mimeType}`);
     if (mimeType.startsWith(GOOGLE_NATIVE_MIME_PREFIX) || !isDriveSupportedRawMime(mimeType)) {
-      // Sheets/Slides/Forms/binærformater/bilder/PDF - eksplisitt utenfor P1A-scope (§14).
+      // Forms/Drawings/binærformater/bilder/PDF - utenfor allowlisten.
       throw new Error(`drive_unsupported_content_${mimeType || "unknown"}`);
     }
     const response = await guardedFetch(`https://www.googleapis.com/drive/v3/files/${encodePathSegment(documentId, "document_id")}?alt=media`, { headers: auth });
     await this.assertOk(response, documentId);
-    return { data: { content: await response.text(), content_type: mimeType } };
+    return { data: { content: await readResponseTextCapped(response, DRIVE_READ_MAX_BYTES), content_type: mimeType } };
   }
 
   private async readPermissions(parameters: Record<string, JsonValue>, auth: Record<string, string>) {

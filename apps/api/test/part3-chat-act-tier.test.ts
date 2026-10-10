@@ -8,6 +8,7 @@ import { RunRateTransport, runRateToolDefinitions } from "../src/run-rate.ts";
 import {
   CHAT_ACT_TIER,
   CHAT_READ_TIER,
+  KnowledgeSearchTransport,
   MemorySearchTransport,
   MeshToolExecutor,
   ModelSurfaceViolationError,
@@ -19,6 +20,7 @@ import {
   describeSurfaceCatalog,
   firstWaveTools,
   homeAssistantTools,
+  knowledgeToolDefinitions,
   memoryToolDefinitions,
   resolveModelToolSurface,
   selectSurfaceTools,
@@ -39,6 +41,8 @@ function productionDefinitions(): ToolDefinition[] {
       ...governanceToolDefinitions(new GovernanceTransport({} as never)),
       ...situationsToolDefinitions(new SituationsTransport({} as never, {} as never)),
       ...memoryToolDefinitions(new MemorySearchTransport({} as never, {} as never)),
+      // WP-D1 (UA-2): kunnskapssøket er på chattens lese-nivå og må være registrert for at nivået skal bestå.
+      ...knowledgeToolDefinitions(new KnowledgeSearchTransport({} as never)),
       ...tasksDelegateToolDefinitions(new TasksDelegateTransport({} as never, {} as never)),
       ...runRateToolDefinitions(new RunRateTransport({} as never))
     ]

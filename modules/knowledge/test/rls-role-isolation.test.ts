@@ -189,7 +189,8 @@ describe("§5.J: tombstone + isolasjon samtidig", () => {
 
     await sync.sync(tenantA, "personal", new FilesystemKnowledgeSource(rootA, "fs:rls-tomb-a"));
     await sync.sync(tenantB, "personal", new FilesystemKnowledgeSource(rootB, "fs:rls-tomb-b"));
-    // Tombstone tenant A sitt dokument (kilden er nå tom).
+    // Tombstone tenant A sitt dokument. En anker-fil holder kilden ikke-tom: en helt tom rot tombstoner aldri (kan være en umontert NAS-mappe, PR #325 funn 6).
+    await writeFile(join(rootA, "anker.md"), "RlsAnkerNeutralTekst");
     await rm(filePathA);
     await sync.sync(tenantA, "personal", new FilesystemKnowledgeSource(rootA, "fs:rls-tomb-a"));
 

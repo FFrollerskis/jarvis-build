@@ -135,10 +135,12 @@ describe("UA-2 P0: sync/dedupe/tombstone/reactivation (§4-§5/§7.A-D/F/K/O) vi
     const found3 = await retriever.search(tenantA, { query: "NyDatabaseTeknologiXYZ", spaces: ["personal"] });
     expect(found3.some((r) => r.content.includes("NyDatabaseTeknologiXYZ"))).toBe(true);
 
-    // §7.D: slettet kilde -> tombstone (IKKE hard delete).
+    // §7.D: slettet kilde -> tombstone (IKKE hard delete). En ANKER-fil holder roten ikke-tom: en helt tom rot kan være en NAS-mappe som ikke er montert og tombstoner derfor aldri
+    // (gjennomgang av PR #325, funn 6 - se `wpd1-review-fixes.test.ts`).
+    await writeFile(join(root, "anker.md"), "Anker som holder kilden ikke-tom.");
     await rm(filePath);
     const r4 = await sync.sync(tenantA, "personal", source());
-    expect(r4).toMatchObject({ scanned: 0, created: 0, updated: 0, unchanged: 0, tombstoned: 1, reactivated: 0, failed: 0 });
+    expect(r4).toMatchObject({ scanned: 1, created: 1, updated: 0, unchanged: 0, tombstoned: 1, reactivated: 0, failed: 0 });
     const tombstoned = await adminPool.query(
       "SELECT deleted, deleted_at FROM knowledge_documents WHERE knowledge_document_id = $1",
       [idBefore.knowledge_document_id]
@@ -153,7 +155,7 @@ describe("UA-2 P0: sync/dedupe/tombstone/reactivation (§4-§5/§7.A-D/F/K/O) vi
     // §7.F: reappearing document (SAMME innhold som før sletting) -> deterministisk reaktivering.
     await writeFile(filePath, "Jarvis bruker PostgreSQL og har byttet til NyDatabaseTeknologiXYZ.");
     const r5 = await sync.sync(tenantA, "personal", source());
-    expect(r5).toMatchObject({ scanned: 1, created: 0, updated: 0, unchanged: 0, tombstoned: 0, reactivated: 1, failed: 0 });
+    expect(r5).toMatchObject({ scanned: 2, created: 0, updated: 0, unchanged: 1, tombstoned: 0, reactivated: 1, failed: 0 });
     const reactivated = await adminPool.query(
       "SELECT knowledge_document_id, deleted FROM knowledge_documents WHERE tenant_id='tenant-know-a' AND external_id='fakta.md'"
     );
