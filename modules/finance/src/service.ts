@@ -2,6 +2,11 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
+import type { SubmitChildCheck, SubmitIntentCheck } from "@jarvis/tool-gateway";
+import { buildSubmitChildCheck, buildSubmitIntentCheck, lockAndFindUnacknowledgedDuplicate } from "./class-d-checks.ts";
+import { providerAmountEchoMatches, toOreInteger } from "./ore.ts";
+import { malformedWebhookKey, rejectionCode } from "./webhook-guard.ts";
+import { fikenPostingDescription } from "./reconciliation.ts";
 import { assertValidPaymentIntentTransition, canTransitionPaymentIntent, isTerminalPaymentIntentState } from "./state-machine.ts";
 import { FikenTransport, type FikenGeneralJournalEntryInput, type FikenJournalEntry } from "./fiken-transport.ts";
 import { StripeTransport, type StripeBalanceObject, type StripePaymentIntentObject, type StripeRefundObject } from "./stripe-transport.ts";
@@ -16,6 +21,8 @@ import {
   PaymentIntentNotNeonomicsError,
   BankAccountNotFoundError,
   BankConsentNotActiveError,
+  NEONOMICS_SETTLEMENT_RANK,
+  NEONOMICS_STATUS_RANK,
   NEONOMICS_STATUS_TO_JARVIS_STATE
 } from "./banking-types.ts";
 import type { BankAccount, BankConsent } from "./banking-types.ts";
@@ -57,14 +64,28 @@ import {
   ExcessiveCaptureAmountError,
   CaptureAlreadySubmittedError,
   CaptureNotFoundError,
+  SubmitInFlightError,
+  ProviderOutcomeUnknownError,
+  PossibleDuplicatePaymentError,
   VIPPS_STATUS_TO_JARVIS_STATE,
   VIPPS_MODIFICATION_EVENTS
 } from "./types.ts";
+import {
+  DEFAULT_SUBMIT_TIMING,
+  SUBMIT_TABLE_KEYS,
+  classifyFreshSubmit,
+  classifyProviderFailure,
+  classifyReservedSubmit,
+  readSubmitAges,
+  type SubmitTable,
+  type SubmitTiming
+} from "./submit-guard.ts";
 import type {
   CreatePaymentIntentInput,
   CreateStripeRefundInput,
   CreateVippsCaptureInput,
   CreateVippsRefundInput,
+  FinanceChainAnomalyType,
   FinanceKillSwitch,
   PaymentIntent,
   PaymentIntentEventType,
@@ -257,18 +278,38 @@ type SubmitPlan =
   | { kind: "blocked"; error: FinanceKillSwitchActiveError }
   | { kind: "call"; idempotentAtProvider: boolean; run: () => Promise<(client: pg.PoolClient) => Promise<PaymentIntent>> };
 
-/** 4xx (unntatt 408/429) fra leverandøren = tydelig avvist FØR noen bivirkning; alt annet (tidsavbrudd, nettverk, 5xx) er et ukjent utfall. */
-export function isDefinitiveProviderRejection(err: unknown): boolean {
-  const status = (err as { httpStatus?: unknown; status?: unknown } | null)?.httpStatus ?? (err as { status?: unknown } | null)?.status;
-  return typeof status === "number" && status >= 400 && status < 500 && status !== 408 && status !== 429;
-}
-
 async function readForUpdate(client: pg.PoolClient, tenantId: string, paymentIntentId: string, forUpdate: boolean): Promise<PaymentIntent | null> {
   const { rows } = await client.query(
     `SELECT * FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2${forUpdate ? " FOR UPDATE" : ""}`,
     [tenantId, paymentIntentId]
   );
   return (rows[0] as PaymentIntent | undefined) ?? null;
+}
+
+/** WP-F1: SQL-fragment som fjerner ett avviksflagg fra en jsonb-liste (strenger) - brukes når en innsending ENDELIG fikk et leverandørsvar. */
+const CLEAR_SUBMIT_UNKNOWN_FLAG = "anomaly_flags = anomaly_flags - 'SUBMIT_OUTCOME_UNKNOWN'";
+
+/**
+ * WP-F1 (review M-F1): valg for `submitPaymentIntent`. `duplicateGuard` slår på duplikatvakten INNE i reservasjonstransaksjonen (advisory-lås + ny kandidatspørring, se
+ * `lockAndFindUnacknowledgedDuplicate`). `FinanceTransport` (ToolGateway-veien - den ENESTE produksjonsveien til en pengehandling) setter den ALLTID, med de kandidat-id-ene
+ * eieren har kvittert via `confirm_possible_duplicate_of` (tom liste = ingen kvittert). Direkte kall uten valget (tester, interne skript som ikke går via gatewayen) får ikke vakten.
+ */
+export interface SubmitPaymentIntentOptions {
+  duplicateGuard?: { confirmedDuplicateOf: readonly string[] };
+}
+
+export interface FinanceServiceOptions {
+  /** Overstyrer lease/idempotensvindu (kun tester og drift-tuning) - standard i `submit-guard.ts`. */
+  submitTiming?: Partial<SubmitTiming>;
+}
+
+/** WP-F1: credentials forhåndshentet UTENFOR radlåsen for leverandøren til én intensjon (kun feltet for riktig provider er fylt). */
+interface PrefetchedCredentials {
+  provider: PaymentProvider | null;
+  fiken: FikenCredentials | null;
+  stripe: StripeCredentials | null;
+  vipps: VippsCredentials | null;
+  neonomics: NeonomicsCredentials | null;
 }
 
 /**
@@ -302,8 +343,14 @@ export class FinanceService {
     private readonly neonomicsCredentialsProvider: NeonomicsCredentialsProvider = { getCredentials: async () => null },
     private readonly neonomicsGatewayFactory: NeonomicsGatewayFactory = defaultNeonomicsGatewayFactory,
     private readonly neonomicsWebhookApiKeyProvider: NeonomicsWebhookApiKeyProvider = () => null,
-    private readonly neonomicsTenantResolver: NeonomicsTenantResolver = () => null
-  ) {}
+    private readonly neonomicsTenantResolver: NeonomicsTenantResolver = () => null,
+    /** WP-F1 (D-462): valgfrie justeringer - sist, slik at ingen eksisterende kallsted påvirkes. */
+    options: FinanceServiceOptions = {}
+  ) {
+    this.submitTiming = { ...DEFAULT_SUBMIT_TIMING, ...options.submitTiming };
+  }
+
+  private readonly submitTiming: SubmitTiming;
 
   private validateCreateInput(input: CreatePaymentIntentInput): void {
     if (!Number.isInteger(input.amount_ore) || input.amount_ore <= 0) throw new InvalidAmountError(input.amount_ore);
@@ -411,6 +458,29 @@ export class FinanceService {
   }
 
   /**
+   * WP-F1 (D-462): FERSK, READ-ONLY tilstandslesing som klasse D-kjeden bruker som preflight (målvalidering) og readback (postcondition) for
+   * `finance.submit_payment_intent`. Ingen skriving, ingen leverandørkall, ingen credential; redigert (maskerte leverandørreferanser) - se `class-d-checks.ts`.
+   */
+  async checkSubmitPaymentIntent(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string): Promise<SubmitIntentCheck | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => buildSubmitIntentCheck(client, tenantId, paymentIntentId, this.submitTiming));
+  }
+
+  /** WP-F1: samme som over for `finance_stripe.submit_refund` (refusjonen + modell-betalingen + summen av øvrige aktive refusjoner). */
+  async checkSubmitStripeRefund(tenantId: string, memorySpace: MemorySpace, refundId: string): Promise<SubmitChildCheck | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => buildSubmitChildCheck(client, "stripe_refund", tenantId, refundId, this.submitTiming));
+  }
+
+  /** WP-F1: samme som over for `finance_vipps.submit_capture`. */
+  async checkSubmitVippsCapture(tenantId: string, memorySpace: MemorySpace, captureId: string): Promise<SubmitChildCheck | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => buildSubmitChildCheck(client, "vipps_capture", tenantId, captureId, this.submitTiming));
+  }
+
+  /** WP-F1: samme som over for `finance_vipps.submit_refund`. */
+  async checkSubmitVippsRefund(tenantId: string, memorySpace: MemorySpace, refundId: string): Promise<SubmitChildCheck | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => buildSubmitChildCheck(client, "vipps_refund", tenantId, refundId, this.submitTiming));
+  }
+
+  /**
    * Sender intensjonen til leverandøren `current.provider` peker til
    * (Fiken ELLER Stripe - EN handling, provider-dispatchet internt, ALDRI
    * to konkurrerende `finance.*`/`finance_stripe.*`-handlinger for samme
@@ -430,29 +500,51 @@ export class FinanceService {
    * leverandør som faktisk trengs først er kjent FØRST etter at raden er
    * lest (`current.provider`).
    */
-  async submitPaymentIntent(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, credentialsProvider: FikenCredentialsProvider, actorPersonId?: string): Promise<PaymentIntent> {
+  async submitPaymentIntent(
+    tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, credentialsProvider: FikenCredentialsProvider, actorPersonId?: string, options: SubmitPaymentIntentOptions = {}
+  ): Promise<PaymentIntent> {
     // D-392 (JARVIS-019): reserve-then-execute. Fase 1 (kort transaksjon) validerer og REserverer intensjonen (`draft -> submitted`) og
     // committer FØR leverandørkallet; fase 2 kaller leverandøren UTEN åpen DB-transaksjon/radlås; fase 3 (kort transaksjon) lagrer utfallet.
     // En `submitted`-intent uten `provider_ref` betyr «innsending startet, utfall ukjent»: Stripe/Vipps gjenopptas trygt (deterministisk
     // Idempotency-Key hos leverandøren), Fiken/Neonomics krever eieravstemming - ALDRI en blind ny økonomisk handling.
+    // WP-F1 / JARVIS-019: credential-oppslaget (kan være et nettverkskall mot Infisical) skjer FØR transaksjonen med `FOR UPDATE`-låsen åpnes - aldri under en radlås.
+    const prefetched = await this.prefetchCredentialsFor(tenantId, memorySpace, paymentIntentId, credentialsProvider);
     const outcome = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client): Promise<SubmitPlan> => {
       const current = await readForUpdate(client, tenantId, paymentIntentId, true);
       if (!current) throw new PaymentIntentNotFoundError(paymentIntentId);
+      // Leverandøren kan ikke ha endret seg siden forhåndslesingen (provider settes ved opprettelse); hvis noe likevel skurrer er credentialen vi har ikke for denne.
+      const prefetchedFor = prefetched.provider === current.provider ? prefetched : { provider: current.provider, fiken: null, stripe: null, vipps: null, neonomics: null };
 
+      const idempotentAtProvider = current.provider === "stripe" || current.provider === "vipps";
       const resuming = current.state === "submitted" && !current.provider_ref;
-      if (resuming && current.provider !== "stripe" && current.provider !== "vipps") {
-        throw new AmbiguousProviderResponseError(paymentIntentId, "submit_outcome_unknown_reconcile_required");
-      }
       if (!resuming && (current.state === "submitted" || current.state === "provider_acknowledged" || current.state === "settled")) {
         return { kind: "noop", intent: current }; // idempotent no-op: ALDRI en ny provider-mutasjon for en allerede-innsendt intent.
       }
       if (isTerminalPaymentIntentState(current.state)) {
         throw new PaymentIntentAlreadySubmittedError(paymentIntentId, current.state);
       }
+      // WP-F1: reservert uten leverandørsvar = enten pågående (lease) eller ukjent utfall. ALDRI et nytt leverandørkall mens et annet kan være i flukt,
+      // og aldri en automatisk gjenopptakelse hos en leverandør uten Idempotency-Key eller utenfor leverandørens idempotensvindu.
+      const ages = await readSubmitAges(client, "payment_intents", tenantId, paymentIntentId);
+      if (resuming) {
+        const verdict = classifyReservedSubmit(ages, idempotentAtProvider, this.submitTiming);
+        if (verdict === "in_flight") throw new SubmitInFlightError(paymentIntentId);
+        if (verdict === "reconcile_required") throw new AmbiguousProviderResponseError(paymentIntentId, "submit_outcome_unknown_reconcile_required");
+      } else if (classifyFreshSubmit(ages, idempotentAtProvider, this.submitTiming) === "reconcile_required") {
+        throw new AmbiguousProviderResponseError(paymentIntentId, "submit_window_expired_reconcile_required");
+      }
       const reserve = async (): Promise<void> => {
-        if (resuming) return;
+        if (resuming) {
+          // Fornyer leasen: en tredje samtidig innsending skal også se «pågår».
+          await client.query(
+            `UPDATE payment_intents SET submitted_at = now(), updated_at = now()
+             WHERE tenant_id = $1 AND payment_intent_id = $2 AND state = 'submitted' AND provider_ref IS NULL`,
+            [tenantId, paymentIntentId]
+          );
+          return;
+        }
         await client.query(
-          `UPDATE payment_intents SET state = 'submitted', submitted_at = now(), updated_at = now()
+          `UPDATE payment_intents SET state = 'submitted', submitted_at = now(), first_submit_attempt_at = COALESCE(first_submit_attempt_at, now()), updated_at = now()
            WHERE tenant_id = $1 AND payment_intent_id = $2 AND state = 'draft'`,
           [tenantId, paymentIntentId]
         );
@@ -491,10 +583,18 @@ export class FinanceService {
         await assertValidVendorBinding(client, tenantId, paymentIntentId, current.vendor_id, current.provider, current.vendor_provider_ref);
       }
 
+      // WP-F1 (review M-F1): duplikatvakten PÅ NYTT, serialisert, i SAMME transaksjon som reservasjonen (`reserve()` under). Den tidlige validatoren i ToolGateway leste kandidatene FØR
+      // dette, så to samtidige innsendinger av ulike intensjoner (samme leverandør/beløp/valuta) kunne begge slippe gjennom og begge kalle leverandøren. Advisory-låsen holdes til
+      // commit (da er `submitted` synlig), så den andre ser den første som «sendt» og avvises med samme `possible_duplicate_of:<id>`-kode - FØR noe leverandørkall.
+      if (options.duplicateGuard) {
+        const duplicateOf = await lockAndFindUnacknowledgedDuplicate(client, tenantId, current, options.duplicateGuard.confirmedDuplicateOf);
+        if (duplicateOf !== null) throw new PossibleDuplicatePaymentError(paymentIntentId, duplicateOf);
+      }
+
       if (current.provider === "stripe") {
-        const credentials = await this.stripeCredentialsProvider.getCredentials(tenantId);
+        const credentials = prefetchedFor.stripe;
         if (!credentials) throw new StripeCredentialsUnavailableError(tenantId);
-        const amountOre = Number(current.amount_ore);
+        const amountOre = toOreInteger(current.amount_ore); // WP-F1: streng normalisering (pg bigint = streng) FØR reservasjon og leverandørkall
         const transport = this.stripeTransportFactory(credentials);
         // Deterministisk idempotens-nøkkel avledet FRA payment_intent_id
         // (ALDRI random per forsøk) - byggeordrens §6 "exactly-once
@@ -547,9 +647,9 @@ export class FinanceService {
       }
 
       if (current.provider === "vipps") {
-        const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
+        const credentials = prefetchedFor.vipps;
         if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
-        const amountOre = Number(current.amount_ore);
+        const amountOre = toOreInteger(current.amount_ore); // WP-F1: streng normalisering (pg bigint = streng) FØR reservasjon og leverandørkall
         const transport = this.vippsTransportFactory(credentials);
         // Deterministisk idempotens-nøkkel avledet FRA payment_intent_id -
         // SAMME dobbel-idempotens-begrunnelse som Stripe sin gren (Jarvis
@@ -611,9 +711,9 @@ export class FinanceService {
           throw new BankConsentNotActiveError(debtorAccount.consent_id, consent?.state ?? "created");
         }
 
-        const credentials = await this.neonomicsCredentialsProvider.getCredentials(tenantId);
+        const credentials = prefetchedFor.neonomics;
         if (!credentials) throw new NeonomicsCredentialsUnavailableError(tenantId);
-        const amountOre = Number(current.amount_ore);
+        const amountOre = toOreInteger(current.amount_ore); // WP-F1: streng normalisering (pg bigint = streng) FØR reservasjon og leverandørkall
         const gateway = this.neonomicsGatewayFactory(credentials);
         await reserve();
         // Dobbel idempotens (samme prinsipp som Stripe/Vipps): Jarvis sin DB-reservasjon over + `endToEndReference` = payment_intent_id
@@ -662,7 +762,7 @@ export class FinanceService {
       if (!current.vendor_provider_ref) throw new MissingVendorProviderRefError(paymentIntentId);
       if (!current.counter_account_code) throw new MissingCounterAccountError(paymentIntentId);
 
-      const credentials = await credentialsProvider.getCredentials(tenantId);
+      const credentials = prefetchedFor.fiken;
       if (!credentials) throw new FikenCredentialsUnavailableError(tenantId);
 
       // `amount_ore` er `bigint` i Postgres - `pg` returnerer bigint-kolonner
@@ -671,13 +771,15 @@ export class FinanceService {
       // OID-20-typeparser registrert i @jarvis/core) - MÅ eksplisitt
       // `Number()`-castes her, ellers ville Fiken-linjene fått en streng-
       // verdi i `amount`-feltet.
-      const amountOre = Number(current.amount_ore);
+      const amountOre = toOreInteger(current.amount_ore); // WP-F1: streng normalisering (pg bigint = streng) FØR reservasjon og leverandørkall
       const transport = this.fikenTransportFactory(credentials);
       await reserve();
       // Fiken har ingen Idempotency-Key: et ubekreftet utfall (tidsavbrudd) lar intensjonen stå som `submitted` uten provider_ref og krever
       // eieravstemming - en blind retry kunne postert journalen to ganger.
       return this.submitPlan(false, () => transport.createGeneralJournalEntry({
-        description: current.purpose,
+        // WP-F1: formålet + en kort Jarvis-markør (`[J:<12 tegn av intensjons-id>]`). Fiken har ingen Idempotency-Key og returnerer ikke vår id, så markøren er det
+        // som lar avstemmingen (og eieren) finne igjen bilaget etter et ukjent utfall og oppdage dobbeltpostering. Avkortet til konservativ lengde.
+        description: fikenPostingDescription(current.purpose, paymentIntentId),
         // D-398 (JARVIS-097): bokføringsdato er norsk kalenderdato (Europe/Oslo) - UTC ga feil dato mellom 22:00/23:00 og midnatt lokal tid.
         date: osloCalendarDate(),
         lines: [
@@ -709,10 +811,34 @@ export class FinanceService {
   }
 
   /**
+   * WP-F1 / JARVIS-019: credential-oppslag kan være et NETTVERKSKALL (Infisical, 5 s tak) og skal aldri skje mens en `FOR UPDATE`-radlås holdes.
+   * Leverandøren til intensjonen leses først uten lås (rask lesetransaksjon), credentialen hentes, og først deretter åpnes transaksjonen som låser
+   * raden. Manglende credential kastes fortsatt på samme sted som før (inne i transaksjonen, etter tilstands-/nødbryter-sjekkene) - kun selve oppslaget flyttes.
+   */
+  private async prefetchCredentialsFor(
+    tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, fikenProvider: FikenCredentialsProvider
+  ): Promise<PrefetchedCredentials> {
+    const preview = await withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => readForUpdate(client, tenantId, paymentIntentId, false));
+    const provider = preview?.provider ?? null;
+    return {
+      provider,
+      fiken: provider === "fiken" ? await fikenProvider.getCredentials(tenantId) : null,
+      stripe: provider === "stripe" ? await this.stripeCredentialsProvider.getCredentials(tenantId) : null,
+      vipps: provider === "vipps" ? await this.vippsCredentialsProvider.getCredentials(tenantId) : null,
+      neonomics: provider === "neonomics" ? await this.neonomicsCredentialsProvider.getCredentials(tenantId) : null
+    };
+  }
+
+  /**
    * D-392 (JARVIS-019): leverandørkall UTEN åpen DB-transaksjon/radlås for operasjoner som er idempotente hos leverandøren (deterministisk
    * Idempotency-Key). Fase 1 `prepare` (kort tx, med FOR UPDATE) validerer og returnerer enten et ferdig utfall, en blokkering eller en plan;
    * fase 2 `call` kjører uten tx; fase 3 `apply` (ny, kort tx) låser raden på nytt og lagrer utfallet. To samtidige kall sender begge samme
    * Idempotency-Key, som leverandøren slår sammen til én handling; `apply` er selv idempotent (ser den at raden allerede er ferdigstilt, skriver den ikke på nytt).
+   *
+   * WP-F1 (D-462): for handlinger med reservasjonsfase (refusjon/capture) reserverer `prepare` raden (`draft -> submitted`, committet FØR kallet) og
+   * `onCallError` rydder opp når leverandørkallet feiler: entydig avvist -> tilbake til `draft`; ukjent utfall -> flagg `SUBMIT_OUTCOME_UNKNOWN`
+   * (og tilbake til `draft` kun der leverandøren slår sammen gjentatte kall). Et ukjent utfall kastes som `ProviderOutcomeUnknownError`
+   * (`outcome_unknown:` - ToolGateway lagrer det som `unverified`, ikke som en retry-bar feil).
    */
   private async providerCallOutsideLock<TPlan, R, Out>(
     tenantId: string, memorySpace: MemorySpace,
@@ -720,13 +846,101 @@ export class FinanceService {
       prepare: (client: pg.PoolClient) => Promise<{ kind: "done"; out: Out } | { kind: "blocked"; error: Error } | { kind: "call"; plan: TPlan }>;
       call: (plan: TPlan) => Promise<R>;
       apply: (client: pg.PoolClient, plan: TPlan, result: R) => Promise<Out>;
+      onCallError?: (client: pg.PoolClient, plan: TPlan, failureClass: "not_executed" | "unknown", err: unknown) => Promise<void>;
+      /** Identifikator som settes på `ProviderOutcomeUnknownError` (refusjon-/capture-id). */
+      subjectId?: string;
     }
   ): Promise<Out> {
     const prepared = await withMemoryTransaction(this.pool, tenantId, [memorySpace], steps.prepare);
     if (prepared.kind === "blocked") throw prepared.error;
     if (prepared.kind === "done") return prepared.out;
-    const result = await steps.call(prepared.plan);
-    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => steps.apply(client, prepared.plan, result));
+    let result: R;
+    try {
+      result = await steps.call(prepared.plan);
+    } catch (err) {
+      if (steps.onCallError) {
+        const failureClass = classifyProviderFailure(err);
+        await withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => steps.onCallError!(client, prepared.plan, failureClass, err)).catch((cleanupErr) => {
+          console.error(JSON.stringify({ msg: "finance_submit_cleanup_failed", subject_id: steps.subjectId ?? null, error: (cleanupErr as Error).message.slice(0, 120) }));
+        });
+        if (failureClass === "unknown") throw new ProviderOutcomeUnknownError(steps.subjectId ?? "unknown", `${err instanceof Error ? err.message : String(err)}`.slice(0, 110), err);
+      }
+      throw err;
+    }
+    try {
+      return await withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => steps.apply(client, prepared.plan, result));
+    } catch (applyErr) {
+      // WP-F1 (review M-F2): leverandørkallet er FULLFØRT - vi HAR svaret - men lagringen av utfallet feilet (DB-feil, trigger, tilkobling, COMMIT). Penger kan ha beveget seg, så dette er
+      // et UKJENT utfall, aldri en vanlig `failed` (retry-bar, ingen varsel): `ProviderOutcomeUnknownError` gir ledger `unverified`, umiddelbart «UTFALL UKJENT»-varsel til eieren og
+      // aldri en ny blind handling. Raden flagges `SUBMIT_OUTCOME_UNKNOWN` best-effort på EGEN tilkobling (sekundærfeil svelges og logges - den opprinnelige feilen skjules aldri: den er `cause`).
+      // Handlinger uten reservasjonsfase (`onCallError` mangler, f.eks. Vipps-kansellering, klasse C) beholder gammel oppførsel.
+      if (!steps.onCallError) throw applyErr;
+      await withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => steps.onCallError!(client, prepared.plan, "unknown", applyErr)).catch((cleanupErr) => {
+        console.error(JSON.stringify({ msg: "finance_submit_cleanup_failed", subject_id: steps.subjectId ?? null, phase: "after_provider_call", error: (cleanupErr as Error).message.slice(0, 120) }));
+      });
+      throw new ProviderOutcomeUnknownError(steps.subjectId ?? "unknown", `provider_call_completed_local_write_failed:${applyErr instanceof Error ? applyErr.message : String(applyErr)}`.slice(0, 110), applyErr);
+    }
+  }
+
+  /**
+   * WP-F1: felles reservasjon for refusjon/capture (`draft -> submitted`, committet av kalleren FØR leverandørkallet). En rad som allerede står som
+   * `submitted` er enten pågående (lease -> `SubmitInFlightError`), ukjent utfall hos en leverandør uten idempotens eller utenfor idempotensvinduet
+   * (`submit_outcome_unknown_reconcile_required`), eller trygt gjenopptakbar (Stripe/Vipps: samme Idempotency-Key). Leasen fornyes ved gjenopptakelse.
+   */
+  private async reserveChildSubmit(
+    client: pg.PoolClient, table: Exclude<SubmitTable, "payment_intents">, tenantId: string, id: string, currentState: PaymentIntentState
+  ): Promise<void> {
+    const idColumn = SUBMIT_TABLE_KEYS[table];
+    const ages = await readSubmitAges(client, table, tenantId, id);
+    if (currentState === "submitted") {
+      const verdict = classifyReservedSubmit(ages, true, this.submitTiming);
+      if (verdict === "in_flight") throw new SubmitInFlightError(id);
+      if (verdict === "reconcile_required") throw new AmbiguousProviderResponseError(id, "submit_outcome_unknown_reconcile_required");
+      await client.query(`UPDATE ${table} SET submitted_at = now(), updated_at = now() WHERE tenant_id = $1 AND ${idColumn} = $2 AND state = 'submitted'`, [tenantId, id]);
+      return;
+    }
+    if (classifyFreshSubmit(ages, true, this.submitTiming) === "reconcile_required") {
+      throw new AmbiguousProviderResponseError(id, "submit_window_expired_reconcile_required");
+    }
+    assertValidPaymentIntentTransition(currentState, "submitted");
+    await client.query(
+      `UPDATE ${table} SET state = 'submitted', submitted_at = now(), first_submit_attempt_at = COALESCE(first_submit_attempt_at, now()), updated_at = now()
+       WHERE tenant_id = $1 AND ${idColumn} = $2 AND state = 'draft'`,
+      [tenantId, id]
+    );
+  }
+
+  /** WP-F1: opprydding etter et feilet leverandørkall for en refusjon/capture (se `providerCallOutsideLock`). Stripe/Vipps slår sammen gjentatte kall -> `draft` er trygt. */
+  private async releaseChildReservation(
+    client: pg.PoolClient, table: Exclude<SubmitTable, "payment_intents">, tenantId: string, id: string, failureClass: "not_executed" | "unknown", reason: string
+  ): Promise<void> {
+    const idColumn = SUBMIT_TABLE_KEYS[table];
+    const hasProviderRef = table !== "vipps_captures";
+    const refGuard = hasProviderRef ? " AND provider_ref IS NULL" : "";
+    if (failureClass === "not_executed") {
+      await client.query(
+        `UPDATE ${table} SET state = 'draft', submitted_at = NULL, first_submit_attempt_at = NULL, failure_reason = $3, updated_at = now()
+         WHERE tenant_id = $1 AND ${idColumn} = $2 AND state = 'submitted'${refGuard}`,
+        [tenantId, id, reason.slice(0, 200)]
+      );
+      return;
+    }
+    const reverted = await client.query(
+      `UPDATE ${table} SET state = 'draft', submitted_at = NULL, failure_reason = $3, updated_at = now()
+       WHERE tenant_id = $1 AND ${idColumn} = $2 AND state = 'submitted'${refGuard}`,
+      [tenantId, id, `outcome_unknown:${reason}`.slice(0, 200)]
+    );
+    // Flagges kun når raden FAKTISK var uferdig: er leverandørsvaret allerede lagret (samtidig gjenopptakelse) finnes det intet ukjent utfall å varsle om.
+    if ((reverted.rowCount ?? 0) === 1) await this.appendChainAnomalyFlags(client, table, idColumn, id, ["SUBMIT_OUTCOME_UNKNOWN"]);
+  }
+
+  private async appendChainAnomalyFlags(client: pg.PoolClient, table: SubmitTable, idColumn: string, id: string, flags: readonly FinanceChainAnomalyType[]): Promise<void> {
+    await client.query(
+      `UPDATE ${table} SET anomaly_flags = (
+         SELECT jsonb_agg(DISTINCT v) FROM jsonb_array_elements_text(anomaly_flags || $2::jsonb) AS v
+       ), updated_at = now() WHERE ${idColumn} = $1`,
+      [id, JSON.stringify(flags)]
+    );
   }
 
   /** D-392: bygger en leverandørkall-plan (kjøres UTENFOR transaksjon) + en ferdigstillings-skriver (kjøres i en ny, kort transaksjon). */
@@ -745,26 +959,87 @@ export class FinanceService {
     try {
       finalizer = await plan.run();
     } catch (err) {
-      // Idempotent hos leverandør (Stripe/Vipps), tydelig avvist (4xx) eller bevisst tvetydig-signalert: sett tilbake til draft slik at en
-      // korrigert/gjentatt retry er trygg. Ellers (tidsavbrudd/nettverk/5xx) forblir intensjonen reservert = utfall ukjent (fail-closed).
-      if (plan.idempotentAtProvider || err instanceof AmbiguousProviderResponseError || isDefinitiveProviderRejection(err)) {
+      // WP-F1 (D-462): tre utfall, aldri en blind antakelse.
+      //  - entydig IKKE utført (4xx/429/feil før sending) eller bevisst tvetydig-signalert: tilbake til draft og første-forsøk-tidspunktet nullstilles
+      //    (leverandøren har ingenting) - en korrigert retry er trygg.
+      //  - UKJENT utfall (tidsavbrudd/nettverk/5xx/409): Stripe/Vipps slår sammen gjentatte kall med samme Idempotency-Key -> tilbake til draft (retry er
+      //    trygg INNENFOR leverandørens idempotensvindu, `first_submit_attempt_at` beholdes); Fiken/Neonomics har ingen slik nøkkel -> intensjonen STÅR IGJEN som
+      //    `submitted` (aldri en blind ny postering). I begge tilfeller flagges `SUBMIT_OUTCOME_UNKNOWN` (synlig i open loops/avstemming) og feilen kastes som
+      //    `outcome_unknown:` slik at ToolGateway lagrer den som `unverified` i stedet for en retry-bar feil.
+      const ambiguous = err instanceof AmbiguousProviderResponseError;
+      const failureClass = ambiguous ? "not_executed" : classifyProviderFailure(err);
+      if (failureClass === "not_executed") {
         await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
           await client.query(
-            `UPDATE payment_intents SET state = 'draft', submitted_at = NULL, updated_at = now()
+            `UPDATE payment_intents SET state = 'draft', submitted_at = NULL, first_submit_attempt_at = NULL, updated_at = now()
              WHERE tenant_id = $1 AND payment_intent_id = $2 AND state = 'submitted' AND provider_ref IS NULL`,
             [tenantId, paymentIntentId]
           );
-        }).catch((revertErr) => {
-          console.error(JSON.stringify({ msg: "finance_submit_revert_failed", payment_intent_id: paymentIntentId, error: (revertErr as Error).message.slice(0, 120) }));
+        }).catch((cleanupErr) => {
+          console.error(JSON.stringify({ msg: "finance_submit_revert_failed", payment_intent_id: paymentIntentId, error: (cleanupErr as Error).message.slice(0, 120) }));
         });
+        throw err;
       }
-      throw err;
+      await this.recordUnknownSubmitOutcome(tenantId, memorySpace, paymentIntentId, plan.idempotentAtProvider, "call");
+      throw new ProviderOutcomeUnknownError(paymentIntentId, (err instanceof Error ? err.message : String(err)).slice(0, 110), err);
     }
-    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-      const current = await readForUpdate(client, tenantId, paymentIntentId, true);
-      if (!current) throw new PaymentIntentNotFoundError(paymentIntentId);
-      if (current.state !== "submitted") return current; // en samtidig gjenopptakelse har allerede ferdigstilt den.
-      return finalizer(client);
+    try {
+      return await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+        const current = await readForUpdate(client, tenantId, paymentIntentId, true);
+        if (!current) throw new PaymentIntentNotFoundError(paymentIntentId);
+        // En samtidig gjenopptakelse har allerede ferdigstilt den (leverandør-ID satt / terminal) -> ikke skriv på nytt. Er raden derimot rullet tilbake til
+        // `draft` av et parallelt, feilet kall MENS dette kallet hadde leverandørens svar, anvendes svaret likevel: leverandøren HAR objektet, og å forkaste
+        // det ville etterlatt en betaling Jarvis ikke vet om.
+        if (current.provider_ref || (current.state !== "submitted" && current.state !== "draft")) return current;
+        await client.query(`UPDATE payment_intents SET ${CLEAR_SUBMIT_UNKNOWN_FLAG} WHERE tenant_id = $1 AND payment_intent_id = $2`, [tenantId, paymentIntentId]);
+        return finalizer(client);
+      });
+    } catch (finalizeErr) {
+      // WP-F1 (review M-F2): leverandørkallet er FULLFØRT (vi har svaret - Stripe/Vipps-objektet eller Fiken-bilaget finnes), men lagringen av utfallet feilet (DB-feil, trigger,
+      // tilkobling, COMMIT). Penger kan ha beveget seg: dette er et UKJENT utfall - ikke en vanlig `failed` (retry-bar, uten varsel). `ProviderOutcomeUnknownError` gir ledger `unverified`,
+      // umiddelbart «UTFALL UKJENT»-varsel og aldri en ny blind handling; `SUBMIT_OUTCOME_UNKNOWN` settes best-effort på EGEN tilkobling (sekundærfeil svelges og logges - den
+      // opprinnelige feilen skjules aldri, den er `cause`). Stripe/Vipps gjenopptas senere med samme Idempotency-Key; Fiken/Neonomics krever avstemming (Fiken-markøren finner bilaget).
+      await this.recordUnknownSubmitOutcome(tenantId, memorySpace, paymentIntentId, plan.idempotentAtProvider, "local_write");
+      throw new ProviderOutcomeUnknownError(
+        paymentIntentId, `provider_call_completed_local_write_failed:${finalizeErr instanceof Error ? finalizeErr.message : String(finalizeErr)}`.slice(0, 110), finalizeErr
+      );
+    }
+  }
+
+  /**
+   * WP-F1: bokføringen når utfallet hos leverandøren er UKJENT (enten selve kallet endte uten entydig svar, eller kallet LYKTES og lagringen av svaret feilet - review M-F2).
+   * Egen transaksjon på egen tilkobling, best-effort: en sekundærfeil logges og svelges (kallestedet kaster uansett `ProviderOutcomeUnknownError`).
+   * Kallet er avsluttet, så reservasjonen er IKKE lenger «pågående»: `submitted_at = NULL` regnes som utløpt lease. For Fiken/Neonomics gir en retry da umiddelbart
+   * `submit_outcome_unknown_reconcile_required` (ikke et misvisende «pågår»); for Stripe/Vipps rulles den tilbake til draft (samme Idempotency-Key gjenbrukes innenfor vinduet).
+   * Flagges kun når raden FAKTISK var uferdig: er leverandørsvaret allerede lagret (samtidig gjenopptakelse, eller et COMMIT som gikk gjennom men hvis kvittering gikk tapt) finnes
+   * det intet ukjent utfall å varsle om.
+   */
+  private async recordUnknownSubmitOutcome(
+    tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, idempotentAtProvider: boolean, cause: "call" | "local_write"
+  ): Promise<void> {
+    await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const reverted = await client.query(
+        idempotentAtProvider
+          ? `UPDATE payment_intents SET state = 'draft', submitted_at = NULL, updated_at = now()
+             WHERE tenant_id = $1 AND payment_intent_id = $2 AND state = 'submitted' AND provider_ref IS NULL`
+          : `UPDATE payment_intents SET submitted_at = NULL, updated_at = now()
+             WHERE tenant_id = $1 AND payment_intent_id = $2 AND state = 'submitted' AND provider_ref IS NULL`,
+        [tenantId, paymentIntentId]
+      );
+      if ((reverted.rowCount ?? 0) !== 1) return;
+      await this.appendChainAnomalyFlags(client, "payment_intents", "payment_intent_id", paymentIntentId, ["SUBMIT_OUTCOME_UNKNOWN"]);
+      const what = cause === "call"
+        ? "utfall hos leverandøren er UKJENT (tidsavbrudd/nettverk)"
+        : "leverandøren HAR svart, men lagringen av svaret feilet - utfallet er UKJENT lokalt";
+      await insertEvent(client, tenantId, memorySpace, {
+        payment_intent_id: paymentIntentId, event_type: "anomaly_flagged",
+        summary: idempotentAtProvider
+          ? `Innsending: ${what} - en ny innsending gjenbruker samme Idempotency-Key`
+          : `Innsending: ${what} - sjekk leverandøren og avstem FØR noe sendes på nytt`,
+        actor_person_id: null, metadata: { anomaly_flags: ["SUBMIT_OUTCOME_UNKNOWN"], resubmittable_with_same_key: idempotentAtProvider, cause }
+      });
+    }).catch((cleanupErr) => {
+      console.error(JSON.stringify({ msg: "finance_submit_revert_failed", payment_intent_id: paymentIntentId, cause, error: (cleanupErr as Error).message.slice(0, 120) }));
     });
   }
 
@@ -1006,6 +1281,42 @@ export class FinanceService {
     );
   }
 
+  /**
+   * WP-F1 (D-462, JARVIS-020/070): lagrer en AUTENTISERT webhook-hendelse med permanent ugyldig innhold som dødbrev (`status = 'rejected'`, kort årsakskode - aldri selve
+   * innholdet) og returnerer `rejected` (ruten svarer 2xx: ingen evig retry). Samme nøkkel igjen = `duplicate`. Hendelser som ikke engang lar seg identifisere får en
+   * deterministisk hash-nøkkel (`malformed:<sha256-prefiks>`). Tilstanden hentes uansett inn igjen av den planlagte leverandør-oppfriskingen, og avstemmingen
+   * (`reconcileFinance`) flagger avviste hendelser. Kjører i den KONFIGURERTE tenantens kontekst (aldri payload-metadata).
+   */
+  private async recordRejectedWebhook(
+    provider: "stripe" | "vipps" | "neonomics", tenantId: string,
+    e: { key: string; kind: string; reason: string; epochSeconds?: number | null; summary?: Record<string, unknown> }
+  ): Promise<{ status: "rejected" | "duplicate"; eventId: string }> {
+    const reason = rejectionCode(e.reason);
+    const kind = e.kind.slice(0, 120);
+    const summary = JSON.stringify(e.summary ?? {});
+    return withMemoryTransaction(this.pool, tenantId, ["business"], async (client) => {
+      const inserted = provider === "stripe"
+        ? await client.query(
+            `INSERT INTO stripe_webhook_events (stripe_event_id, tenant_id, memory_space_id, event_type, status, payload_summary, error_message, stripe_created_at, processed_at)
+             VALUES ($1, $2, 'business', $3, 'rejected', $4::jsonb, $5, COALESCE(to_timestamp($6::double precision), now()), now())
+             ON CONFLICT (stripe_event_id) DO NOTHING RETURNING stripe_event_id`,
+            [e.key, tenantId, kind, summary, reason, e.epochSeconds ?? null]
+          )
+        : provider === "vipps"
+          ? await client.query(
+              `INSERT INTO vipps_webhook_events (dedupe_key, tenant_id, memory_space_id, event_name, status, payload_summary, error_message, processed_at)
+               VALUES ($1, $2, 'business', $3, 'rejected', $4::jsonb, $5, now()) ON CONFLICT (dedupe_key) DO NOTHING RETURNING dedupe_key`,
+              [e.key, tenantId, kind, summary, reason]
+            )
+          : await client.query(
+              `INSERT INTO neonomics_webhook_events (dedupe_key, tenant_id, memory_space_id, provider_payment_id, payment_status, status, payload_summary, error_message, processed_at)
+               VALUES ($1, $2, 'business', $3, $4, 'rejected', $5::jsonb, $6, now()) ON CONFLICT (dedupe_key) DO NOTHING RETURNING dedupe_key`,
+              [e.key, tenantId, kind === "malformed" ? "malformed" : kind, "malformed", summary, reason]
+            );
+      return { status: inserted.rows.length === 1 ? ("rejected" as const) : ("duplicate" as const), eventId: e.key };
+    });
+  }
+
   private async requireStripePaymentIntent(client: pg.PoolClient, tenantId: string, paymentIntentId: string, forUpdate: boolean): Promise<PaymentIntent> {
     const current = await readForUpdate(client, tenantId, paymentIntentId, forUpdate);
     if (!current) throw new PaymentIntentNotFoundError(paymentIntentId);
@@ -1020,13 +1331,20 @@ export class FinanceService {
    * naturlig alltid vinner over en eldre lagret webhook-tilstand).
    */
   async refreshStripePaymentState(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, actorPersonId?: string): Promise<PaymentIntent> {
+    // WP-F1 / JARVIS-019: leverandørlesingen skjer UTENFOR enhver DB-transaksjon og uten radlås. Fase 1 (kort tx, ingen lås) leser raden, fase 2 henter credential og
+    // Stripe-tilstand (tidsavbrudd i transporten), fase 3 (kort tx) låser raden på nytt og anvender utfallet via den ENE domenestien (ordens-vokter + tilstandsmaskin).
+    const snapshot = await withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => this.requireStripePaymentIntent(client, tenantId, paymentIntentId, false));
+    if (!snapshot.provider_ref) return snapshot; // aldri innsendt ennå - intet å hente.
+    const credentials = await this.stripeCredentialsProvider.getCredentials(tenantId);
+    if (!credentials) throw new StripeCredentialsUnavailableError(tenantId);
+    const transport = this.stripeTransportFactory(credentials);
+    // Observasjonstidspunktet er TIDEN FØR kallet: svaret gjenspeiler tilstand som er minst like ny som dette. En webhook-hendelse som oppsto mens kallet pågikk (og ble
+    // anvendt før vi fikk låsen i fase 3) er NYERE enn lesingen og vinner i ordens-vokteren - en forsinket lesing overskriver aldri nyere tilstand.
+    const observedAtMs = Date.now();
+    const stripePaymentIntent = await transport.getPaymentIntent(snapshot.provider_ref);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const current = await this.requireStripePaymentIntent(client, tenantId, paymentIntentId, true);
-      if (!current.provider_ref) return current; // aldri innsendt ennå - intet å hente.
-      const credentials = await this.stripeCredentialsProvider.getCredentials(tenantId);
-      if (!credentials) throw new StripeCredentialsUnavailableError(tenantId);
-      const transport = this.stripeTransportFactory(credentials);
-      const stripePaymentIntent = await transport.getPaymentIntent(current.provider_ref);
+      if (current.provider_ref !== snapshot.provider_ref) return current; // referansen endret seg mellom lesing og skriving: aldri anvend et svar for en annen betaling.
       const result = await this.applyStripePaymentOutcome(
         client, tenantId, memorySpace, current,
         {
@@ -1042,12 +1360,12 @@ export class FinanceService {
           // FØR den allerede lagrede `provider_status_updated_at` (som har
           // sekundets millisekunder med), og dermed feilaktig avvist som
           // `stale_event`. `ceil` garanterer det beregnede tidsstempelet
-          // ALLTID er >= det faktiske "nå" - og dermed >= ethvert tidligere
-          // lagret tidsstempel - siden en eksplisitt oppfrisking (i
-          // motsetning til en ekte Stripe-webhook-hendelse med sitt eget
-          // historiske `created`-tidsstempel) pr. definisjon ALLTID skal
+          // ALLTID er >= observasjonstidspunktet - og dermed >= ethvert
+          // lagret tidsstempel fra FØR lesingen startet - siden en eksplisitt
+          // oppfrisking (i motsetning til en ekte Stripe-webhook-hendelse med
+          // sitt eget historiske `created`-tidsstempel) pr. definisjon skal
           // vinne over hva som helst lagret tidligere (se JSDoc over).
-          sourceEventEpochSeconds: Math.ceil(Date.now() / 1000),
+          sourceEventEpochSeconds: Math.ceil(observedAtMs / 1000),
           lastPaymentErrorMessage: stripePaymentIntent.last_payment_error?.message?.slice(0, 500) ?? null
         },
         actorPersonId ?? null
@@ -1101,7 +1419,15 @@ export class FinanceService {
     try {
       envelope = parseStripeEventEnvelope(rawBody);
     } catch {
-      throw new Error("stripe_event_envelope_malformed");
+      // WP-F1 (JARVIS-070): autentisert, men ikke identifiserbar nyttelast -> dødbrev under en hash-nøkkel + 2xx, aldri en evig 5xx-retry.
+      return this.recordRejectedWebhook("stripe", stripeTenantId, { key: malformedWebhookKey(rawBody), kind: "malformed", reason: "envelope_malformed" });
+    }
+    if (envelope.rejection !== null) {
+      // WP-F1 (JARVIS-020/070): identifiserbar hendelse med permanent ugyldig innhold (beløp/valuta/dato/referanse) -> dødbrev med årsak + 2xx.
+      return this.recordRejectedWebhook("stripe", stripeTenantId, {
+        key: envelope.id, kind: envelope.type, reason: envelope.rejection, epochSeconds: envelope.created > 0 ? envelope.created : null,
+        summary: { object_type: envelope.object_type, status: envelope.status }
+      });
     }
 
     // `withMemoryTransaction` (IKKE `withTenantContext`) - `payment_intents`/
@@ -1281,30 +1607,34 @@ export class FinanceService {
     // actorPersonId` over) - en fremtidig slice kan koble den til en
     // dedikert refusjons-hendelseslogg om behovet faktisk oppstår.
     void actorPersonId;
-    const isInFlightOrDone = (state: string): boolean => state === "submitted" || state === "provider_acknowledged" || state === "settled";
-    return this.providerCallOutsideLock<{ current: StripeRefund; providerRef: string; transport: StripePaymentWriter }, StripeRefundObject, StripeRefund>(tenantId, memorySpace, {
+    const isAckOrDone = (state: string): boolean => state === "provider_acknowledged" || state === "settled";
+    // WP-F1 / JARVIS-019: credential-oppslaget (kan være et nettverkskall) skjer FØR transaksjonen med radlåsen; manglende credential kastes på samme sted som før.
+    const credentials = await this.stripeCredentialsProvider.getCredentials(tenantId);
+    return this.providerCallOutsideLock<{ current: StripeRefund; amountOre: number; providerRef: string; transport: StripePaymentWriter }, StripeRefundObject, StripeRefund>(tenantId, memorySpace, {
+      subjectId: refundId,
       prepare: async (client) => {
         const { rows: refundRows } = await client.query(`SELECT * FROM stripe_refunds WHERE tenant_id = $1 AND refund_id = $2 FOR UPDATE`, [tenantId, refundId]);
         const current = refundRows[0] as StripeRefund | undefined;
         if (!current) throw new RefundNotFoundError(refundId);
 
-        if (isInFlightOrDone(current.state)) return { kind: "done", out: current }; // idempotent no-op.
-        if (isTerminalPaymentIntentState(current.state)) throw new RefundAlreadySubmittedError(refundId, current.state);
+        if (isAckOrDone(current.state)) return { kind: "done", out: current }; // idempotent no-op.
+        if (current.state === "failed" || current.state === "cancelled") throw new RefundAlreadySubmittedError(refundId, current.state);
 
         const killSwitch = await client.query(`SELECT enabled FROM finance_kill_switch WHERE tenant_id = $1`, [tenantId]);
         if ((killSwitch.rows[0] as { enabled: boolean } | undefined)?.enabled === true) {
           return { kind: "blocked", error: new FinanceKillSwitchActiveError(tenantId) };
         }
 
-        assertValidPaymentIntentTransition(current.state, "submitted");
         const intent = await this.requireStripePaymentIntent(client, tenantId, current.payment_intent_id, false);
         if (!intent.provider_ref) throw new PaymentIntentNotSettledError(current.payment_intent_id, intent.state);
-        const credentials = await this.stripeCredentialsProvider.getCredentials(tenantId);
         if (!credentials) throw new StripeCredentialsUnavailableError(tenantId);
-        return { kind: "call", plan: { current, providerRef: intent.provider_ref, transport: this.stripeTransportFactory(credentials) } };
+        const amountOre = toOreInteger(current.amount_ore); // WP-F1: streng normalisering FØR reservasjon (ugyldig beløp reserverer aldri)
+        // WP-F1: RESERVER (`draft -> submitted`, committet FØR leverandørkallet) - en parallell innsending ser «pågår» i stedet for å kalle Stripe på nytt.
+        await this.reserveChildSubmit(client, "stripe_refunds", tenantId, refundId, current.state);
+        return { kind: "call", plan: { current, amountOre, providerRef: intent.provider_ref, transport: this.stripeTransportFactory(credentials) } };
       },
-      call: ({ current, providerRef, transport }) => transport.createRefund({
-        stripePaymentIntentId: providerRef, amountOre: current.amount_ore,
+      call: ({ current, amountOre, providerRef, transport }) => transport.createRefund({
+        stripePaymentIntentId: providerRef, amountOre,
         ...(current.reason !== null ? { reason: current.reason } : {}),
         // Deterministisk avledet fra refund_id - SAMME dobbel-idempotens-begrunnelse som `submitPaymentIntent()` sin Stripe-gren.
         idempotencyKey: `stripe-refund:${refundId}`
@@ -1312,16 +1642,25 @@ export class FinanceService {
       apply: async (client, { current }, stripeRefund) => {
         const { rows: lockedRows } = await client.query(`SELECT * FROM stripe_refunds WHERE tenant_id = $1 AND refund_id = $2 FOR UPDATE`, [tenantId, refundId]);
         const locked = lockedRows[0] as StripeRefund | undefined;
-        if (locked && isInFlightOrDone(locked.state)) return locked; // en samtidig innsending (samme Idempotency-Key) har allerede lagret utfallet.
+        // En samtidig innsending (samme Idempotency-Key) har allerede lagret utfallet, eller raden er avsluttet på annen måte -> aldri skriv på nytt.
+        if (locked && (isAckOrDone(locked.state) || locked.provider_ref || (locked.state !== "submitted" && locked.state !== "draft"))) return locked;
         const targetState: StripeRefundState = STRIPE_REFUND_STATUS_TO_STATE[stripeRefund.status] ?? "provider_acknowledged";
         const timestampColumn = targetState === "settled" ? "settled_at" : targetState === "failed" ? "failed_at" : targetState === "cancelled" ? "cancelled_at" : null;
         const { rows } = await client.query(
-          `UPDATE stripe_refunds SET state = $3, provider_ref = $4${timestampColumn ? `, ${timestampColumn} = now()` : ""}, submitted_at = now(), updated_at = now()
+          `UPDATE stripe_refunds SET state = $3, provider_ref = $4${timestampColumn ? `, ${timestampColumn} = now()` : ""}, failure_reason = NULL,
+                  ${CLEAR_SUBMIT_UNKNOWN_FLAG}, submitted_at = now(), updated_at = now()
            WHERE tenant_id = $1 AND refund_id = $2 RETURNING *`,
           [tenantId, refundId, targetState === current.state ? "provider_acknowledged" : targetState, stripeRefund.id]
         );
+        // Leverandørens ekko av beløp/valuta MÅ stemme med det vi ba om - ellers er refusjonen utført med feil beløp (synlig avvik, aldri stille).
+        if (!providerAmountEchoMatches(stripeRefund.amount, toOreInteger(current.amount_ore)) || String(stripeRefund.currency).toUpperCase() !== current.currency) {
+          await this.appendAnomalyFlags(client, "stripe_refunds", "refund_id", refundId, ["REFUND_AMOUNT_CONFLICT"]);
+          await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", current.payment_intent_id, ["REFUND_AMOUNT_CONFLICT"]);
+        }
         return rows[0] as StripeRefund;
-      }
+      },
+      onCallError: (client, _plan, failureClass, err) =>
+        this.releaseChildReservation(client, "stripe_refunds", tenantId, refundId, failureClass, err instanceof Error ? err.message : String(err))
     });
   }
 
@@ -1616,18 +1955,22 @@ export class FinanceService {
    * `checkVippsFullSettlement()`/`submitVippsCapture()`.
    */
   async refreshVippsPaymentState(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, actorPersonId?: string): Promise<PaymentIntent> {
+    // WP-F1 / JARVIS-019: samme tre faser som `refreshStripePaymentState()` - leverandørlesingen skjer uten åpen transaksjon og uten radlås.
+    const snapshot = await withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => this.requireVippsPaymentIntent(client, tenantId, paymentIntentId, false));
+    if (!snapshot.provider_ref) return snapshot; // aldri innsendt ennå - intet å hente.
+    const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
+    if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
+    const transport = this.vippsTransportFactory(credentials);
+    const observedAtMs = Date.now(); // tiden FØR kallet - se `refreshStripePaymentState()`: en hendelse som oppsto mens kallet pågikk er nyere enn lesingen.
+    const vippsPayment = await transport.getPayment(snapshot.provider_ref);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const current = await this.requireVippsPaymentIntent(client, tenantId, paymentIntentId, true);
-      if (!current.provider_ref) return current; // aldri innsendt ennå - intet å hente.
-      const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
-      if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
-      const transport = this.vippsTransportFactory(credentials);
-      const vippsPayment = await transport.getPayment(current.provider_ref);
+      if (current.provider_ref !== snapshot.provider_ref) return current; // referansen endret seg mellom lesing og skriving: aldri anvend et svar for en annen betaling.
       const result = await this.applyVippsPaymentOutcome(
         client, tenantId, memorySpace, current,
         {
           vippsState: vippsPayment.state, vippsAmountOre: vippsPayment.amount.value, vippsCurrency: vippsPayment.amount.currency.toUpperCase(),
-          sourceEventKey: null, sourceEventEpochMs: Date.now()
+          sourceEventKey: null, sourceEventEpochMs: observedAtMs
         },
         actorPersonId ?? null
       );
@@ -1677,7 +2020,12 @@ export class FinanceService {
     try {
       envelope = parseVippsEventEnvelope(rawBody);
     } catch {
-      throw new Error("vipps_event_envelope_malformed");
+      return this.recordRejectedWebhook("vipps", vippsTenantId, { key: malformedWebhookKey(rawBody), kind: "malformed", reason: "envelope_malformed" });
+    }
+    if (envelope.rejection !== null) {
+      return this.recordRejectedWebhook("vipps", vippsTenantId, {
+        key: envelope.dedupeKey, kind: envelope.name, reason: envelope.rejection, summary: { reference: envelope.reference }
+      });
     }
 
     return withMemoryTransaction(this.pool, vippsTenantId, ["business"], async (client) => {
@@ -1688,7 +2036,7 @@ export class FinanceService {
          RETURNING *`,
         [envelope.dedupeKey, vippsTenantId, envelope.name, JSON.stringify({
           reference: envelope.reference, amount_ore: envelope.amount_ore, currency: envelope.currency, success: envelope.success
-        }), envelope.timestamp ? new Date(envelope.timestamp).toISOString() : null]
+        }), envelope.timestamp]
       );
       if (inserted.rows.length === 0) {
         // D-392 (JARVIS-070): en `failed_retryable`-hendelse er IKKE «ferdig» - leverandørens retry skal behandle den på nytt (tidligere svarte
@@ -1719,7 +2067,7 @@ export class FinanceService {
           return { status: "failed_retryable" as const, eventId: envelope.dedupeKey };
         }
 
-        const sourceEpochMs = envelope.timestamp ? new Date(envelope.timestamp).getTime() : Date.now();
+        const sourceEpochMs = envelope.timestamp ? Date.parse(envelope.timestamp) : Date.now(); // tidsstempelet er strengt validert av parseren
         await this.applyVippsPaymentOutcome(
           client, intentRow.tenant_id, intentRow.memory_space_id as MemorySpace, intentRow,
           { vippsState: envelope.name, vippsAmountOre: envelope.amount_ore, vippsCurrency: envelope.currency, sourceEventKey: envelope.dedupeKey, sourceEventEpochMs: sourceEpochMs },
@@ -1814,50 +2162,57 @@ export class FinanceService {
    * mellomtilstand som faktisk ikke eksisterer for denne handlingen).
    */
   async submitVippsCapture(tenantId: string, memorySpace: MemorySpace, captureId: string, actorPersonId?: string): Promise<VippsCapture> {
-    const inFlightOrDone = (state: string): boolean => state === "submitted" || state === "provider_acknowledged" || state === "settled";
+    const isAckOrDone = (state: string): boolean => state === "provider_acknowledged" || state === "settled";
+    // WP-F1 / JARVIS-019: credential-oppslaget skjer FØR transaksjonen med radlåsen; manglende credential kastes på samme sted som før.
+    const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
     const outcome = await this.providerCallOutsideLock<
-      { current: VippsCapture; providerRef: string; transport: VippsPaymentWriter }, unknown, { capture: VippsCapture; performed: boolean }
+      { current: VippsCapture; amountOre: number; providerRef: string; transport: VippsPaymentWriter }, unknown, { capture: VippsCapture; performed: boolean }
     >(tenantId, memorySpace, {
+      subjectId: captureId,
       prepare: async (client) => {
         const { rows: captureRows } = await client.query(`SELECT * FROM vipps_captures WHERE tenant_id = $1 AND capture_id = $2 FOR UPDATE`, [tenantId, captureId]);
         const current = captureRows[0] as VippsCapture | undefined;
         if (!current) throw new CaptureNotFoundError(captureId);
 
-        if (inFlightOrDone(current.state)) {
+        if (isAckOrDone(current.state)) {
           // Idempotent no-op - `performed: false` slik at blokken under ALDRI logger et nytt 'captured'-event for en retry.
           return { kind: "done", out: { capture: current, performed: false } };
         }
-        if (isTerminalPaymentIntentState(current.state)) throw new CaptureAlreadySubmittedError(captureId, current.state);
+        if (current.state === "failed" || current.state === "cancelled") throw new CaptureAlreadySubmittedError(captureId, current.state);
 
         const killSwitch = await client.query(`SELECT enabled FROM finance_kill_switch WHERE tenant_id = $1`, [tenantId]);
         if ((killSwitch.rows[0] as { enabled: boolean } | undefined)?.enabled === true) {
           return { kind: "blocked", error: new FinanceKillSwitchActiveError(tenantId) };
         }
 
-        assertValidPaymentIntentTransition(current.state, "submitted");
         const intent = await this.requireVippsPaymentIntent(client, tenantId, current.payment_intent_id, false);
         if (!intent.provider_ref) throw new PaymentIntentNotAuthorizedError(current.payment_intent_id, intent.provider_status);
         if (intent.provider_status !== "AUTHORIZED") throw new PaymentIntentNotAuthorizedError(current.payment_intent_id, intent.provider_status);
-        const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
         if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
-        return { kind: "call", plan: { current, providerRef: intent.provider_ref, transport: this.vippsTransportFactory(credentials) } };
+        const amountOre = toOreInteger(current.amount_ore); // WP-F1: streng normalisering FØR reservasjon (ugyldig beløp reserverer aldri)
+        // WP-F1: RESERVER (`draft -> submitted`, committet FØR leverandørkallet) - en parallell capture ser «pågår» i stedet for å flytte pengene på nytt.
+        await this.reserveChildSubmit(client, "vipps_captures", tenantId, captureId, current.state);
+        return { kind: "call", plan: { current, amountOre, providerRef: intent.provider_ref, transport: this.vippsTransportFactory(credentials) } };
       },
-      call: ({ current, providerRef, transport }) => transport.capturePayment({
-        reference: providerRef, amountOre: current.amount_ore, currency: current.currency,
+      call: ({ current, amountOre, providerRef, transport }) => transport.capturePayment({
+        reference: providerRef, amountOre, currency: current.currency,
         // SAMME dobbel-idempotens-begrunnelse som Stripe: avledet FRA capture_id, ALDRI random per forsøk.
         idempotencyKey: `vipps-capture:${captureId}`
       }),
       apply: async (client) => {
         const { rows: lockedRows } = await client.query(`SELECT * FROM vipps_captures WHERE tenant_id = $1 AND capture_id = $2 FOR UPDATE`, [tenantId, captureId]);
         const locked = lockedRows[0] as VippsCapture | undefined;
-        if (locked && inFlightOrDone(locked.state)) return { capture: locked, performed: false };
+        // En samtidig capture (samme Idempotency-Key) har allerede lagret utfallet, eller raden er avsluttet på annen måte -> aldri skriv på nytt.
+        if (locked && (isAckOrDone(locked.state) || (locked.state !== "submitted" && locked.state !== "draft"))) return { capture: locked, performed: false };
         const { rows } = await client.query(
-          `UPDATE vipps_captures SET state = 'settled', submitted_at = now(), settled_at = now(), updated_at = now()
+          `UPDATE vipps_captures SET state = 'settled', failure_reason = NULL, ${CLEAR_SUBMIT_UNKNOWN_FLAG}, submitted_at = now(), settled_at = now(), updated_at = now()
            WHERE tenant_id = $1 AND capture_id = $2 RETURNING *`,
           [tenantId, captureId]
         );
         return { capture: rows[0] as VippsCapture, performed: true };
-      }
+      },
+      onCallError: (client, _plan, failureClass, err) =>
+        this.releaseChildReservation(client, "vipps_captures", tenantId, captureId, failureClass, err instanceof Error ? err.message : String(err))
     });
 
     if (outcome.performed) {
@@ -2019,41 +2374,47 @@ export class FinanceService {
   /** Vipps sin refund-respons er, SAMME begrunnelse som capture, SYNKRON og ENDELIG - `state` settes DIREKTE til `settled` ved 2xx. */
   async submitVippsRefund(tenantId: string, memorySpace: MemorySpace, refundId: string, actorPersonId?: string): Promise<VippsRefund> {
     void actorPersonId; // SAMME begrunnelse som `submitStripeRefund()` sin `void actorPersonId` - radens egen tidsstempel-historikk ER audit-stien.
-    const inFlightOrDone = (state: string): boolean => state === "submitted" || state === "provider_acknowledged" || state === "settled";
-    return this.providerCallOutsideLock<{ current: VippsRefund; providerRef: string; transport: VippsPaymentWriter }, unknown, VippsRefund>(tenantId, memorySpace, {
+    const isAckOrDone = (state: string): boolean => state === "provider_acknowledged" || state === "settled";
+    // WP-F1 / JARVIS-019: credential-oppslaget skjer FØR transaksjonen med radlåsen; manglende credential kastes på samme sted som før.
+    const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
+    return this.providerCallOutsideLock<{ current: VippsRefund; amountOre: number; providerRef: string; transport: VippsPaymentWriter }, unknown, VippsRefund>(tenantId, memorySpace, {
+      subjectId: refundId,
       prepare: async (client) => {
         const { rows: refundRows } = await client.query(`SELECT * FROM vipps_refunds WHERE tenant_id = $1 AND refund_id = $2 FOR UPDATE`, [tenantId, refundId]);
         const current = refundRows[0] as VippsRefund | undefined;
         if (!current) throw new RefundNotFoundError(refundId);
-        if (inFlightOrDone(current.state)) return { kind: "done", out: current };
-        if (isTerminalPaymentIntentState(current.state)) throw new RefundAlreadySubmittedError(refundId, current.state);
+        if (isAckOrDone(current.state)) return { kind: "done", out: current };
+        if (current.state === "failed" || current.state === "cancelled") throw new RefundAlreadySubmittedError(refundId, current.state);
 
         const killSwitch = await client.query(`SELECT enabled FROM finance_kill_switch WHERE tenant_id = $1`, [tenantId]);
         if ((killSwitch.rows[0] as { enabled: boolean } | undefined)?.enabled === true) {
           return { kind: "blocked", error: new FinanceKillSwitchActiveError(tenantId) };
         }
 
-        assertValidPaymentIntentTransition(current.state, "submitted");
         const intent = await this.requireVippsPaymentIntent(client, tenantId, current.payment_intent_id, false);
         if (!intent.provider_ref) throw new PaymentIntentNotSettledError(current.payment_intent_id, intent.state);
-        const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
         if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
-        return { kind: "call", plan: { current, providerRef: intent.provider_ref, transport: this.vippsTransportFactory(credentials) } };
+        const amountOre = toOreInteger(current.amount_ore); // WP-F1: streng normalisering FØR reservasjon (ugyldig beløp reserverer aldri)
+        // WP-F1: RESERVER (`draft -> submitted`, committet FØR leverandørkallet) - en parallell refusjon ser «pågår» i stedet for å betale tilbake på nytt.
+        await this.reserveChildSubmit(client, "vipps_refunds", tenantId, refundId, current.state);
+        return { kind: "call", plan: { current, amountOre, providerRef: intent.provider_ref, transport: this.vippsTransportFactory(credentials) } };
       },
-      call: ({ current, providerRef, transport }) => transport.refundPayment({
-        reference: providerRef, amountOre: current.amount_ore, currency: current.currency, idempotencyKey: `vipps-refund:${refundId}`
+      call: ({ current, amountOre, providerRef, transport }) => transport.refundPayment({
+        reference: providerRef, amountOre, currency: current.currency, idempotencyKey: `vipps-refund:${refundId}`
       }),
       apply: async (client, { providerRef }) => {
         const { rows: lockedRows } = await client.query(`SELECT * FROM vipps_refunds WHERE tenant_id = $1 AND refund_id = $2 FOR UPDATE`, [tenantId, refundId]);
         const locked = lockedRows[0] as VippsRefund | undefined;
-        if (locked && inFlightOrDone(locked.state)) return locked;
+        if (locked && (isAckOrDone(locked.state) || (locked.state !== "submitted" && locked.state !== "draft"))) return locked;
         const { rows } = await client.query(
-          `UPDATE vipps_refunds SET state = 'settled', provider_ref = $3, submitted_at = now(), settled_at = now(), updated_at = now()
+          `UPDATE vipps_refunds SET state = 'settled', provider_ref = $3, failure_reason = NULL, ${CLEAR_SUBMIT_UNKNOWN_FLAG}, submitted_at = now(), settled_at = now(), updated_at = now()
            WHERE tenant_id = $1 AND refund_id = $2 RETURNING *`,
           [tenantId, refundId, providerRef]
         );
         return rows[0] as VippsRefund;
-      }
+      },
+      onCallError: (client, _plan, failureClass, err) =>
+        this.releaseChildReservation(client, "vipps_refunds", tenantId, refundId, failureClass, err instanceof Error ? err.message : String(err))
     });
   }
 
@@ -2290,6 +2651,13 @@ export class FinanceService {
       }
     }
 
+    // WP-F1 (hendelsesorden): Neonomics sender ingen hendelses-id/-tidsstempel (kun betalings-id + ISO 20022-status), så mottakstid er eneste klokke. Når oppgjør er
+    // i gang/fullført (ACSP og høyere) kan en FORSINKET tidligere valideringsstatus (RCVD/ACTC/PDNG/PATC/ACCP/ACWC) aldri overskrive den lagrede provider_status.
+    const incomingRank = NEONOMICS_STATUS_RANK[outcome.isoStatus];
+    const storedRank = current.provider_status ? NEONOMICS_STATUS_RANK[current.provider_status] : undefined;
+    if (incomingRank !== undefined && storedRank !== undefined && storedRank >= NEONOMICS_SETTLEMENT_RANK && incomingRank < storedRank) {
+      return { applied: false, reason: "stale_event", intent: current };
+    }
     const targetState = NEONOMICS_STATUS_TO_JARVIS_STATE[outcome.isoStatus] ?? null;
     let stateChanges = "";
     const values: unknown[] = [tenantId, current.payment_intent_id, outcome.isoStatus, new Date(outcome.sourceEventEpochMs).toISOString(), outcome.sourceEventKey];
@@ -2326,17 +2694,24 @@ export class FinanceService {
 
   /** Eksplisitt oppfriskings-sti (byggeordrens §13) - leser Neonomics sin GJELDENDE ISO 20022-status via GET payments/{id}. */
   async refreshNeonomicsPaymentState(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, actorPersonId?: string): Promise<PaymentIntent> {
+    // WP-F1 / JARVIS-019: samme tre faser som Stripe/Vipps - samtykke-sesjonen slås opp i en kort tx uten lås, banklesingen skjer uten åpen transaksjon.
+    const prepared = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const snapshot = await this.requireNeonomicsPaymentIntent(client, tenantId, paymentIntentId, false);
+      if (!snapshot.provider_ref) return { snapshot, sessionId: null };
+      return { snapshot, sessionId: await this.requireNeonomicsSession(client, tenantId, snapshot) };
+    });
+    if (!prepared.snapshot.provider_ref || prepared.sessionId === null) return prepared.snapshot; // aldri innsendt ennå - intet å hente.
+    const credentials = await this.neonomicsCredentialsProvider.getCredentials(tenantId);
+    if (!credentials) throw new NeonomicsCredentialsUnavailableError(tenantId);
+    const gateway = this.neonomicsGatewayFactory(credentials);
+    const observedAtMs = Date.now(); // tiden FØR kallet - se `refreshStripePaymentState()`.
+    const payment = await gateway.getPayment(prepared.sessionId, prepared.snapshot.provider_ref);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const current = await this.requireNeonomicsPaymentIntent(client, tenantId, paymentIntentId, true);
-      if (!current.provider_ref) return current; // aldri innsendt ennå - intet å hente.
-      const sessionId = await this.requireNeonomicsSession(client, tenantId, current);
-      const credentials = await this.neonomicsCredentialsProvider.getCredentials(tenantId);
-      if (!credentials) throw new NeonomicsCredentialsUnavailableError(tenantId);
-      const gateway = this.neonomicsGatewayFactory(credentials);
-      const payment = await gateway.getPayment(sessionId, current.provider_ref);
+      if (current.provider_ref !== prepared.snapshot.provider_ref) return current; // referansen endret seg mellom lesing og skriving: aldri anvend et svar for en annen betaling.
       const result = await this.applyNeonomicsPaymentOutcome(
         client, tenantId, memorySpace, current,
-        { isoStatus: payment.status, sourceEventKey: null, sourceEventEpochMs: Date.now() },
+        { isoStatus: payment.status, sourceEventKey: null, sourceEventEpochMs: observedAtMs },
         actorPersonId ?? null
       );
       return result.intent;
@@ -2352,15 +2727,16 @@ export class FinanceService {
    * handler).
    */
   async getNeonomicsPaymentAuthorizationUrl(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, redirectUrl: string): Promise<{ url: string }> {
-    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+    // WP-F1 / JARVIS-019: DB-oppslaget (intensjon + samtykke-sesjon) er en kort lese-tx; selve banklesingen skjer uten åpen transaksjon/DB-forbindelse.
+    const prepared = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const current = await this.requireNeonomicsPaymentIntent(client, tenantId, paymentIntentId, false);
       if (!current.provider_ref) throw new PaymentIntentAlreadySubmittedError(paymentIntentId, current.state);
-      const sessionId = await this.requireNeonomicsSession(client, tenantId, current);
-      const credentials = await this.neonomicsCredentialsProvider.getCredentials(tenantId);
-      if (!credentials) throw new NeonomicsCredentialsUnavailableError(tenantId);
-      const gateway = this.neonomicsGatewayFactory(credentials);
-      return gateway.getPaymentAuthorizeUrl(sessionId, current.provider_ref, redirectUrl);
+      return { providerRef: current.provider_ref, sessionId: await this.requireNeonomicsSession(client, tenantId, current) };
     });
+    const credentials = await this.neonomicsCredentialsProvider.getCredentials(tenantId);
+    if (!credentials) throw new NeonomicsCredentialsUnavailableError(tenantId);
+    const gateway = this.neonomicsGatewayFactory(credentials);
+    return gateway.getPaymentAuthorizeUrl(prepared.sessionId, prepared.providerRef, redirectUrl);
   }
 
   /**
@@ -2369,7 +2745,7 @@ export class FinanceService {
    * portalen), IKKE HMAC-signatur - se neonomics-webhook.ts. SAMME
    * dedup-/tenant-vokter-/ordens-struktur som Stripe-/Vipps-mottakene.
    */
-  async ingestNeonomicsWebhookEvent(rawBody: Buffer, apiKeyHeader: string | undefined, nowMs: number = Date.now()): Promise<{ status: "received" | "verified" | "processed" | "failed_retryable" | "unsupported" | "duplicate"; eventId?: string }> {
+  async ingestNeonomicsWebhookEvent(rawBody: Buffer, apiKeyHeader: string | undefined, nowMs: number = Date.now()): Promise<{ status: "received" | "verified" | "processed" | "failed_retryable" | "unsupported" | "rejected" | "duplicate"; eventId?: string }> {
     const configuredKey = await this.neonomicsWebhookApiKeyProvider();
     if (!configuredKey) throw new NeonomicsCredentialsUnavailableError("(webhook-API-nøkkel ikke konfigurert)");
     const auth = verifyNeonomicsWebhookApiKey(apiKeyHeader, configuredKey);
@@ -2384,7 +2760,7 @@ export class FinanceService {
     try {
       envelope = parseNeonomicsEventEnvelope(rawBody);
     } catch {
-      throw new Error("neonomics_event_envelope_malformed");
+      return this.recordRejectedWebhook("neonomics", neonomicsTenantId, { key: malformedWebhookKey(rawBody), kind: "malformed", reason: "envelope_malformed" });
     }
 
     return withMemoryTransaction(this.pool, neonomicsTenantId, ["business"], async (client) => {

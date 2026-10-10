@@ -56,7 +56,7 @@ export function bindingHash(fingerprint: string, expiresAtIso: string, nonce: st
   return createHash("sha256").update(canonicalStringify({ v: 1, call: fingerprint, expires_at: expiresAtIso, nonce })).digest("hex");
 }
 
-export function summarizeCall(call: CanonicalCall, taintReasons: string[]): JsonValue {
+export function summarizeCall(call: CanonicalCall, taintReasons: string[], display?: string): JsonValue {
   // Forhåndsvisning for eieren: hemmeligheter fjernet, kuttet. Selve godkjenningen er hashen, ikke denne teksten.
   const preview = scanForSecrets(JSON.stringify(call.parameters)).text.slice(0, 1000);
   return {
@@ -66,7 +66,9 @@ export function summarizeCall(call: CanonicalCall, taintReasons: string[]): Json
     amount: pick(call.parameters, AMOUNT_KEYS),
     parameter_keys: Object.keys(call.parameters).sort(),
     parameters_preview: preview,
-    taint_reasons: taintReasons
+    taint_reasons: taintReasons,
+    // WP-F1: eierens lesbare, REDIGERTE sammendrag av hva handlingen gjelder (beløp/leverandørtype) - aldri en del av bindingen, kun visning.
+    ...(display !== undefined ? { display: scanForSecrets(display).text.slice(0, 400) } : {})
   };
 }
 
@@ -160,6 +162,62 @@ export class ConfirmationStore {
         payload: { confirmation_id: id, taint_reasons: taintReasons }
       });
       return { ok: false, reason: "confirmation_required", confirmation_id: id } as const;
+    });
+  }
+
+  /**
+   * WP-F1 (D-462): eierens EGEN forespørsel om en konsekvensiell handling (pengehandling). I motsetning til `checkAndConsume` (som utføreren kaller FØR en tainted
+   * handling og som kan FORBRUKE en godkjent bekreftelse og slippe handlingen gjennom) oppretter denne KUN en PENDING bekreftelse bundet til det kanoniske kallet
+   * (eller returnerer den allerede ventende for samme kall) - den forbruker aldri noe og gir aldri tillatelse til å utføre. Utføringen skjer først når eieren
+   * godkjenner via grant-ruten (`approveAndTake`). Kalles utelukkende fra en step-up-beskyttet, grant-autentisert rute - aldri fra modell/verktøy.
+   */
+  async requestPending(
+    call: CanonicalCall, who: ConfirmationSubject, reasons: string[], display?: string
+  ): Promise<{ confirmation_id: string; expires_at: string; created: boolean }> {
+    const fingerprint = callFingerprint(call, who);
+    const now = this.now();
+    return withTenantTransaction(this.pool, who.tenant_id, async (client) => {
+      const found = await client.query(
+        `SELECT confirmation_id, expires_at FROM action_confirmations
+          WHERE tenant_id = $1 AND person_id = $2 AND call_fingerprint = $3 AND status = 'pending' AND expires_at > $4
+          ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
+        [who.tenant_id, who.person_id, fingerprint, now]
+      );
+      const existing = found.rows[0] as { confirmation_id: string; expires_at: Date } | undefined;
+      if (existing) return { confirmation_id: existing.confirmation_id, expires_at: existing.expires_at.toISOString(), created: false };
+      const id = `conf-${randomUUID()}`;
+      const nonce = randomBytes(16).toString("hex");
+      const expires = new Date(now.getTime() + CONFIRMATION_TTL_MS);
+      await client.query(
+        `INSERT INTO action_confirmations
+           (confirmation_id, tenant_id, person_id, device_id, session_id, tool_id, action, call_fingerprint, binding_hash, nonce, summary, taint_reasons, expires_at, parameters)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+        [id, who.tenant_id, who.person_id, who.device_id ?? null, who.session_id ?? null, call.tool_id, call.action, fingerprint,
+          bindingHash(fingerprint, expires.toISOString(), nonce), nonce, JSON.stringify(summarizeCall(call, reasons, display)), reasons, expires,
+          JSON.stringify(call.parameters)]
+      );
+      await writeAudit(client, { tenant_id: who.tenant_id, person_id: who.person_id, ...(who.session_id ? { session_id: who.session_id } : {}), ...(who.device_id ? { device_id: who.device_id } : {}) }, {
+        type: "confirmation.requested",
+        tool_id: call.tool_id,
+        action: call.action,
+        payload: { confirmation_id: id, taint_reasons: reasons, requested_by: "owner" }
+      });
+      return { confirmation_id: id, expires_at: expires.toISOString(), created: true };
+    });
+  }
+
+  /**
+   * WP-F1: hvilken handling en VENTENDE bekreftelse gjelder (kun for samme person, ikke utløpt) - uten å røre den. Brukes av grant-ruten for å kreve step-up FØR en
+   * pengehandling godkjennes (bekreftelsen forbrukes først når step-up er oppfylt). `null` = ingen slik ventende bekreftelse.
+   */
+  async peekPending(identity: Pick<IdentityContext, "tenant_id" | "person_id">, confirmationId: string): Promise<{ tool_id: string; action: string } | null> {
+    return withTenantTransaction(this.pool, identity.tenant_id, async (client) => {
+      const res = await client.query(
+        `SELECT tool_id, action FROM action_confirmations
+          WHERE confirmation_id = $1 AND tenant_id = $2 AND person_id = $3 AND status = 'pending' AND expires_at > now()`,
+        [confirmationId, identity.tenant_id, identity.person_id]
+      );
+      return (res.rows[0] as { tool_id: string; action: string } | undefined) ?? null;
     });
   }
 

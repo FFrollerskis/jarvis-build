@@ -74,7 +74,11 @@ export class TaskService {
     return task ? { ok: true, value: task } : { ok: false, reason: "task_not_found" };
   }
 
-  async cancel(identity: IdentityContext, taskId: string): Promise<TaskServiceResult<{ cancelled: boolean }>> {
+  /**
+   * Avbryter en jobb (EKSISTERENDE kanselleringsvei: chatens «avbryt jobb <id>» og, fra WP-H0, kontrollsenterets avbryt-handling via `executive.cancel_task`). `outcome` (additivt) sier hva som skjedde:
+   * `cancelled` = ikke startet og avbrutt med en gang, `requested` = kjører og stopper ved neste trygge punkt, `not_cancellable` = ferdig/pauset/finnes ikke.
+   */
+  async cancel(identity: IdentityContext, taskId: string): Promise<TaskServiceResult<{ cancelled: boolean; outcome: "cancelled" | "requested" | "not_cancellable" }>> {
     const decision = await this.policy.authorize({
       identity,
       toolCall: { tool_id: "tasks", action: "cancel_task", capability_class: "B", parameters: { task_id: taskId } }
@@ -86,7 +90,7 @@ export class TaskService {
     await withTenantTransaction(this.pool, identity.tenant_id, (client) =>
       writeAudit(client, identity, { type: "task.cancelled", payload: { task_id: taskId, outcome } })
     );
-    return { ok: true, value: { cancelled: outcome !== "not_cancellable" } };
+    return { ok: true, value: { cancelled: outcome !== "not_cancellable", outcome } };
   }
 
   /**

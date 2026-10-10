@@ -190,3 +190,12 @@ export const NEONOMICS_STATUS_TO_JARVIS_STATE: Readonly<Record<string, PaymentIn
   RJCT: "failed",
   CANC: "cancelled"
 };
+
+/**
+ * WP-F1 (D-462): ISO 20022-livsløpsrangering (stigende) for hendelsesorden. RJCT/CANC er terminale negative utfall (ikke rangert; tilstandsmaskinen vokter dem).
+ * Fra `NEONOMICS_SETTLEMENT_RANK` (ACSP) og opp er oppgjør i gang - da overskrives ikke provider_status av en forsinket tidligere status.
+ */
+export const NEONOMICS_STATUS_RANK: Readonly<Record<string, number>> = {
+  RCVD: 1, ACTC: 2, PDNG: 2, PATC: 2, ACCP: 3, ACWC: 3, ACSP: 4, ACSC: 5, ACCC: 6
+};
+export const NEONOMICS_SETTLEMENT_RANK = 4;
