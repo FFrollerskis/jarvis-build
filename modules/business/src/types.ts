@@ -54,6 +54,11 @@ export interface BusinessLead {
   source_instance_id: string | null;
   external_id: string | null;
   owner_person_id: string | null;
+  /** WP-D2 (089_business_pipeline_writes.sql): neste steg + valgfri frist, og lukketidspunkt/-grunn ved terminal status. */
+  next_action: string | null;
+  next_action_due_at: string | null;
+  closed_at: string | null;
+  close_reason: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -71,6 +76,11 @@ export interface BusinessOpportunity {
   currency: string;
   expected_close_date: string | null;
   owner_person_id: string | null;
+  /** WP-D2 (089_business_pipeline_writes.sql): neste steg + valgfri frist, og lukketidspunkt/-grunn ved won/lost. */
+  next_action: string | null;
+  next_action_due_at: string | null;
+  closed_at: string | null;
+  close_reason: string | null;
   created_at: string;
   updated_at: string;
 }

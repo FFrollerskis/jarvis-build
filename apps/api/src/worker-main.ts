@@ -2,7 +2,7 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import "./normalize-env.ts";
 import { envInt, systemIdentity } from "@jarvis/contracts";
-import { ownerConfigOrExit } from "./owner.ts";
+import { ownerConfigOrExit, ownerTenantsOrExit } from "./owner.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
@@ -14,7 +14,7 @@ import {
   ToolGateway, assertManifestInvariants, buildToolManifest, createTurnContext, driveTransportsIfConfigured, firstWaveTools, jobIdentityFor, telegramClassDNotifier, parseDockerMutationTargets, parseGceMutationTargets,
   configuredGithubRepo, githubReposUnlocked
 } from "@jarvis/tool-gateway";
-import { BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
+import { BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService, parseSupportSlaHours } from "@jarvis/business";
 import { SupportService, SupportTransport } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
 import { ProductService, ProductTransport } from "@jarvis/product";
@@ -76,6 +76,8 @@ try {
 }
 // Remediering del 2 (JARVIS-065): ÉN validert eier-identitet (fail closed uten) - ingen env-defaults for eier/tenant.
 const owner = ownerConfigOrExit();
+// WP-D2 (Q-44/Q-48 C): samme dormante eier-tenant-liste som api (standard `[JARVIS_TENANT_ID]`).
+const ownerTenants = ownerTenantsOrExit(owner);
 process.env["JARVIS_PROCESS"] ??= "worker"; // D-394 (JARVIS-054): audit-rader merkes med hvilken prosess som skrev dem
 const pool = createPool(configFromEnv());
 try {
@@ -164,7 +166,7 @@ const policy = new PolicyGateway({
   infraToolIds,
   authority: {
     owner_person_id: owner.owner_person_id,
-    owner_tenants: [owner.tenant_id]
+    owner_tenants: ownerTenants
   }
 });
 // D-181 (BLOCKER B1, D184): hoistet til en NAVNGITT konstant (var tidligere
@@ -192,12 +194,19 @@ const toolSecretProvider = githubAuth.secretProvider(baseToolSecretProvider);
 // Del 3 (JARVIS-013/043): samme HÅRDE klasse D-pipeline som API-prosessen (API/worker-parity); varsleren bindes rett under.
 const toolGateway = new ToolGateway(pool, policy, toolSecretProvider, ownerControls, infisicalSecretProvider, {
   classDPipeline: { enforce: true },
-  credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: [owner.tenant_id], internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) }
+  credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: ownerTenants, internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) }
 });
 const businessService = new BusinessService(pool);
 // UA-3 next slice (D-53): samme OpenLoopService-wiring som api - workeren sin
 // mesh-tool-executor maa kunne kalle de nye business-handlingene identisk.
-const openLoopService = new OpenLoopService(pool);
+// WP-D2 (JARVIS-082): samme SLA-policy som api (API/worker-parity) - ugyldig JARVIS_SUPPORT_SLA_HOURS stopper oppstarten (fail closed), aldri en stille standard.
+let supportSla: ReturnType<typeof parseSupportSlaHours>;
+try {
+  supportSla = parseSupportSlaHours(process.env["JARVIS_SUPPORT_SLA_HOURS"]);
+} catch (err) {
+  failStartup(err);
+}
+const openLoopService = new OpenLoopService(pool, { supportSla });
 // UA-3 profiling/scoring-slice (D-61): samme ScoringService-wiring som api -
 // workeren sin mesh-tool-executor maa kunne kalle score-handlingene identisk.
 const scoringService = new ScoringService(pool);

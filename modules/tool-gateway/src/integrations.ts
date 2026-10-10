@@ -464,7 +464,7 @@ export function firstWaveTools(
     },
     {
       tool_id: "business", action: "create_lead", description: "Opprett/idempotent-oppdater en lead (idempotent naar source_type+source_instance_id+external_id oppgis)",
-      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), title: z.string(), company_id: z.string().optional(), contact_id: z.string().optional(), status: z.string().optional(), source: z.string().optional(), source_type: z.string().optional(), source_instance_id: z.string().optional(), external_id: z.string().optional(), owner_person_id: z.string().optional() }),
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), title: z.string(), company_id: z.string().optional(), contact_id: z.string().optional(), status: z.string().optional(), source: z.string().optional(), source_type: z.string().optional(), source_instance_id: z.string().optional(), external_id: z.string().optional(), owner_person_id: z.string().optional(), idempotency_key: z.string().optional() }),
       capability_class: "B", scopes: ["business.write"], reversible: true,
       rollback_procedure: "sett status til 'disqualified'", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
@@ -472,15 +472,15 @@ export function firstWaveTools(
     },
     {
       tool_id: "business", action: "update_lead_status", description: "Endre status-stadiet til en lead",
-      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), lead_id: z.string(), status: z.string() }),
-      capability_class: "C", scopes: ["business.write"], reversible: true,
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), lead_id: z.string(), status: z.string(), idempotency_key: z.string().optional() }),
+      capability_class: "C", scopes: ["business.write"], reversible: true, preflight_action: "inspect_lead",
       rollback_procedure: "sett status tilbake til forrige verdi", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("business")
     },
     {
       tool_id: "business", action: "create_opportunity", description: "Opprett en salgsmulighet/deal",
-      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), title: z.string(), company_id: z.string().optional(), contact_id: z.string().optional(), lead_id: z.string().optional(), stage: z.string().optional(), value_ore: z.number().optional(), currency: z.string().optional(), expected_close_date: z.string().optional(), owner_person_id: z.string().optional() }),
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), title: z.string(), company_id: z.string().optional(), contact_id: z.string().optional(), lead_id: z.string().optional(), stage: z.string().optional(), value_ore: z.number().optional(), currency: z.string().optional(), expected_close_date: z.string().optional(), owner_person_id: z.string().optional(), idempotency_key: z.string().optional() }),
       capability_class: "B", scopes: ["business.write"], reversible: true,
       rollback_procedure: "sett stage til 'lost'", idempotent_external: false,
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
@@ -488,8 +488,8 @@ export function firstWaveTools(
     },
     {
       tool_id: "business", action: "update_opportunity_stage", description: "Flytt en salgsmulighet til et nytt pipeline-stadium (og valgfritt oppdater endelig verdi)",
-      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), opportunity_id: z.string(), stage: z.string(), value_ore: z.number().optional() }),
-      capability_class: "C", scopes: ["business.write"], reversible: true,
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), opportunity_id: z.string(), stage: z.string(), value_ore: z.number().optional(), idempotency_key: z.string().optional() }),
+      capability_class: "C", scopes: ["business.write"], reversible: true, preflight_action: "inspect_opportunity",
       rollback_procedure: "sett stage (og value_ore) tilbake til forrige verdi", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("business")
@@ -586,8 +586,8 @@ export function firstWaveTools(
       output_trust: "internal", transport: transport("business")
     },
     {
-      tool_id: "business", action: "resolve_open_loop", description: "Marker et open loop som loest (manuell resolusjon)",
-      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), open_loop_id: z.string(), resolution_reason: z.string() }),
+      tool_id: "business", action: "resolve_open_loop", description: "Marker et open loop som loest (manuell resolusjon). Oppgi outcome: 'acted' = du handlet paa den, 'dismissed' = irrelevant/avvist - uten outcome blir lukkingen umerket og kan ikke brukes til kalibrering av treffsikkerhet",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), open_loop_id: z.string(), resolution_reason: z.string(), outcome: z.enum(["acted", "dismissed"]).optional() }),
       capability_class: "C", scopes: ["business.write"], reversible: false,
       rollback_procedure: "ikke reverserbar tilstandsovergang - deteksjon gjenaapner automatisk hvis vilkaaret fortsatt er sant", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
@@ -4278,11 +4278,97 @@ export function firstWaveTools(
       output_trust: "internal", transport: transport("business")
     },
     {
-      tool_id: "business", action: "get_customer_overview", description: "Samlet kundebilde for ett selskap: kontakter, åpne muligheter/oppfølginger/loops og siste aktiviteter",
+      tool_id: "business", action: "get_customer_overview", description: "Samlet kundebilde for ett selskap: kontakter, åpne muligheter/oppfølginger/loops, siste aktiviteter og churn-risiko (hvis en produktkonto er koblet til selskapet)",
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), company_id: z.string() }),
       capability_class: "A", scopes: ["business.read"], reversible: true,
       rollback_procedure: "ingen (lesing)", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    // WP-D2 (UA-3 «churn/product usage», JARVIS-045): churn-oversikt og kalibreringsrapport er ren LESING (klasse A). Oversikten viser selskapsnavn, score og signalene i klartekst -
+    // aldri konto-/bruker-pseudonymer (de er ubetrodd innhold fra en webhook og trenger ikke nå modellen). Koblingen konto -> selskap er eierens valg (klasse B, bak bekreftelse).
+    {
+      tool_id: "business", action: "get_churn_overview", description: "Hvilke kunder risikerer vi aa miste? Kunder med middels/hoey churn-risiko (score, signaler, maal) fra produktbruk, supportsaker og forfalte fakturaer, og hvor mange produktkontoer som mangler kobling til et kundeselskap. Kun lesing.",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), min_level: z.enum(["medium", "high"]).optional(), limit: z.number().int().min(1).max(50).optional() }),
+      capability_class: "A", scopes: ["business.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "get_calibration_report", description: "Hvor treffsikre er open-loop-forslagene? Forutsagt confidence mot faktisk utfall (acted/dismissed) per loop-type: treffrate, avvik, Brier-score og paalitelighet. Endrer ingenting. Kun lesing.",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), since_days: z.number().int().min(7).max(1095).optional() }),
+      capability_class: "A", scopes: ["business.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "link_product_account", description: "Koble en produktkonto (pseudonym `account_ref` fra produktbruk-kilden) til et kundeselskap, slik at churn-risiko kan vurderes for kunden. Flytter en eksisterende kobling hvis kontoen var koblet til et annet selskap. Slettes ikke noe.",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), account_ref: z.string().min(6).max(128), company_id: z.string().min(1).max(128) }),
+      capability_class: "B", scopes: ["business.write"], reversible: true,
+      rollback_procedure: "koble kontoen til forrige selskap igjen (forrige company_id vises i svaret og ligger i revisjonen)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    // WP-D2 (JARVIS-049, mandat D-450): lead-/mulighetsoppdatering. Skriver KUN via BusinessPipelineService (kun business-tenant + business-space, før/etter-logg i
+    // business_change_log, valgfri `idempotency_key` per kall). Står i chattens HANDLINGSNIVÅ (utføres først etter eierens bundne bekreftelse) - ALDRI på
+    // MODEL_SURFACE_ALLOWLIST. `assign_to_person_id` heter bevisst ikke `owner_person_id`: det er et scope-felt chat-executoren binder til aktøren, noe som ville gjort
+    // hver oppdatering til «tildel til meg». Klasse C-handlingene har `preflight_action` (saneret før/etter-snapshot uten fritekst i audit_events).
+    {
+      tool_id: "business", action: "update_lead", description: "Oppdater felter på en lead (tittel, selskap, kontakt, kilde, ansvarlig via assign_to_person_id). Bare oppgitte felt endres; null fjerner et valgfritt felt. Status/lukking har egne handlinger.",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), lead_id: z.string(), title: z.string().min(1).max(300).optional(), company_id: z.string().nullable().optional(), contact_id: z.string().nullable().optional(), source: z.string().max(200).nullable().optional(), assign_to_person_id: z.string().nullable().optional(), idempotency_key: z.string().min(8).max(128).optional() }),
+      capability_class: "B", scopes: ["business.write"], reversible: true,
+      rollback_procedure: "ny update_lead med forrige verdier (full før-tilstand ligger i business_change_log)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "update_opportunity", description: "Oppdater felter på en salgsmulighet (tittel, selskap, kontakt, lead, verdi i øre, valuta, forventet lukkedato, ansvarlig via assign_to_person_id). Bare oppgitte felt endres; null fjerner et valgfritt felt. Stadium/lukking har egne handlinger.",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), opportunity_id: z.string(), title: z.string().min(1).max(300).optional(), company_id: z.string().nullable().optional(), contact_id: z.string().nullable().optional(), lead_id: z.string().nullable().optional(), value_ore: z.number().int().min(0).nullable().optional(), currency: z.string().length(3).optional(), expected_close_date: z.string().nullable().optional(), assign_to_person_id: z.string().nullable().optional(), idempotency_key: z.string().min(8).max(128).optional() }),
+      capability_class: "B", scopes: ["business.write"], reversible: true,
+      rollback_procedure: "ny update_opportunity med forrige verdier (full før-tilstand ligger i business_change_log)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "set_next_action", description: "Sett (eller fjern med next_action: null) neste handling for en lead eller salgsmulighet, med valgfri frist. Erstatter hele paret og starter stagnasjonsvinduet på nytt.",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), entity_type: z.enum(["lead", "opportunity"]), entity_id: z.string(), next_action: z.string().min(1).max(500).nullable(), next_action_due_at: z.string().nullable().optional(), idempotency_key: z.string().min(8).max(128).optional() }),
+      capability_class: "B", scopes: ["business.write"], reversible: true,
+      rollback_procedure: "sett forrige neste-handling tilbake (ligger i business_change_log)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "close_lead", description: "Lukk en lead med utfall (converted eller disqualified) og valgfri grunn. Setter lukketidspunkt og legger en hendelse i kundens tidslinje.",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), lead_id: z.string(), outcome: z.enum(["converted", "disqualified"]), reason: z.string().min(1).max(500).optional(), idempotency_key: z.string().min(8).max(128).optional() }),
+      capability_class: "C", scopes: ["business.write"], reversible: true, preflight_action: "inspect_lead",
+      rollback_procedure: "gjenåpne med update_lead_status til et ikke-terminalt status (nullstiller lukketidspunkt og grunn)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "close_opportunity", description: "Lukk en salgsmulighet med utfall (won eller lost), valgfri grunn og valgfri endelig verdi i øre. Setter lukketidspunkt og legger en hendelse i kundens tidslinje.",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), opportunity_id: z.string(), outcome: z.enum(["won", "lost"]), reason: z.string().min(1).max(500).optional(), final_value_ore: z.number().int().min(0).optional(), idempotency_key: z.string().min(8).max(128).optional() }),
+      capability_class: "C", scopes: ["business.write"], reversible: true, preflight_action: "inspect_opportunity",
+      rollback_procedure: "gjenåpne med update_opportunity_stage til et ikke-terminalt stadium (nullstiller lukketidspunkt og grunn); forrige verdi ligger i business_change_log", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "delete_lead", description: "Slett en lead PERMANENT (oppfølginger/aktiviteter/muligheter beholdes uten pekeren; deriverte open loops og score fjernes). Krever eierens bekreftelse. Foretrekk close_lead når du bare vil avslutte.",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), lead_id: z.string(), idempotency_key: z.string().min(8).max(128).optional() }),
+      capability_class: "C", scopes: ["business.write"], reversible: false, preflight_action: "inspect_lead",
+      rollback_procedure: "ikke reverserbar som sletting - gjenopprett manuelt fra business_change_log.before_state (full før-tilstand); detachede rader beholdes", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "delete_opportunity", description: "Slett en salgsmulighet PERMANENT (oppfølginger/aktiviteter beholdes uten pekeren; deriverte open loops og score fjernes). Krever eierens bekreftelse. Foretrekk close_opportunity når du bare vil avslutte.",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), opportunity_id: z.string(), idempotency_key: z.string().min(8).max(128).optional() }),
+      capability_class: "C", scopes: ["business.write"], reversible: false, preflight_action: "inspect_opportunity",
+      rollback_procedure: "ikke reverserbar som sletting - gjenopprett manuelt fra business_change_log.before_state (full før-tilstand); detachede rader beholdes", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("business")
     },
     ...(config.additionalTools ?? [])

@@ -42,11 +42,13 @@ function blockAfter(source: string, marker: string): string {
 }
 
 describe("kildevakt: main.ts kobler eier-porten og redigeringen via fabrikken, med det samme eier-objektet som Policy Gateway", () => {
-  it("ÉN `ownerAuthority`-definisjon med eierens person og tenant - ingen annen inline eier-konfigurasjon for kontrollsentrene", () => {
+  it("ÉN `ownerAuthority`-definisjon med eierens person og eierens tenanter (WP-D2: `ownerTenantsOrExit`, inkl. bedrifts-tenanter) - ingen annen inline eier-konfigurasjon for kontrollsentrene", () => {
     expect(MAIN.match(/const ownerAuthority\b/g)).toHaveLength(1);
-    expect(MAIN).toMatch(/const ownerAuthority: AuthorityConfig = \{ owner_person_id: owner\.owner_person_id, owner_tenants: \[owner\.tenant_id\] \};/);
+    expect(MAIN).toMatch(/const ownerAuthority: AuthorityConfig = \{ owner_person_id: owner\.owner_person_id, owner_tenants: ownerTenants \};/);
+    // eierens tenanter regnes ut ÉN gang (`ownerTenantsOrExit`) og deles av Policy Gateway, kontrollsentrene og ToolGateway sin credentialBinding
+    expect(MAIN.match(/const ownerTenants = ownerTenantsOrExit\(owner\);/g)).toHaveLength(1);
     // ingen inline `{ owner_person_id: ..., owner_tenants: [...] }`-literal igjen i kallene til PolicyGateway/kontrollsentrene
-    expect(MAIN.match(/owner_tenants:\s*\[owner\.tenant_id\]/g)?.length).toBe(2); // definisjonen + ToolGateway sin credentialBinding (en annen type, uendret)
+    expect(MAIN.match(/owner_tenants:\s*\[/g) ?? []).toHaveLength(0);
   });
 
   it("Policy Gateway, registeret og registerControlCenters får ALLE `ownerAuthority`", () => {

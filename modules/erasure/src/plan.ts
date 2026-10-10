@@ -172,6 +172,10 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // `product_item_events` FØR `product_items` (FK -> product_items).
   add(result, "product_item_events", await run(client, mode, "product_item_events", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "product_items", await run(client, mode, "product_items", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // WP-D2 (089_business_pipeline_writes.sql): før/etter-loggen for lead-/opportunity-endringer holder KOPIER av pipeline-radene (tittel, neste handling, lukkegrunn)
+  // og er derfor KUNDEDATA som følger memory-space-slettingen (ikke append-only systemrevisjon som `audit_events`, som aldri får fritekst - se pipeline-service.ts
+  // `inspect()`). Ingen FK inn eller ut (løs entity_id-peker) - rekkefølgen er likegyldig. `jarvis_app` har DELETE kun for dette (089).
+  add(result, "business_change_log", await run(client, mode, "business_change_log", "tenant_id = $1 AND memory_space_id = $2", tv));
   // UA-4 Native Jarvis Growth Core (D-74, 027_growth.sql): registrer
   // vekst-tabellene i erasure-planen (SAMME mønster/begrunnelse som
   // support_*/contract_* over).
@@ -486,6 +490,18 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   add(result, "scenarios", await run(client, mode, "scenarios", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "decision_log", await run(client, mode, "decision_log", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "situations", await run(client, mode, "situations", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // WP-D2 (UA-3 «churn/product usage», 090): produktbruk + churn-vurderinger. Churn-loopen er REN DERIVERT state av bruksdataene (detection_key bærer konto-pseudonymet,
+  // reason bærer tall utledet av dem) og slettes sammen med dem - snevert avgrenset til loop_type = 'customer_churn_risk' (rører aldri andre loops). Plassert ETTER
+  // `situations`: `situations.source_open_loop_id` peker (sammensatt FK, 056) til loopen og ville ellers blokkert slettingen. Vurderinger og hendelser har FK -> kontoer
+  // (ON DELETE CASCADE) men registreres eksplisitt FØR kontoene; kontoene (pseudonym -> selskap-koblingen) slettes sist.
+  add(
+    result,
+    "business_open_loops",
+    await run(client, mode, "business_open_loops", "tenant_id = $1 AND memory_space_id = $2 AND loop_type = 'customer_churn_risk'", tv)
+  );
+  add(result, "business_churn_assessments", await run(client, mode, "business_churn_assessments", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "product_usage_events", await run(client, mode, "product_usage_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "product_usage_accounts", await run(client, mode, "product_usage_accounts", "tenant_id = $1 AND memory_space_id = $2", tv));
   return result;
 }
 

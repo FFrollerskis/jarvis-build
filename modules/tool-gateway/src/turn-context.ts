@@ -123,7 +123,8 @@ const TOOL_INTENTS: Readonly<Record<string, RegExp>> = {
   pipedrive: /(pipedrive|\bcrm\b|pipeline|\bdeal(s|en|ene)?\b|salgsmulighet)/i,
   contract: /(kontrakt|avtaler\b|fornyelse|oppsigelse|forpliktelse|bindingstid)/i,
   support: /(support|billett|ticket|kundehenvendelse|kundesak|henvendelse)/i,
-  business: /(forretning|selskap|bedrift|åpne saker|oppfølging|metrikk|\blead(s|en|ene)?\b|mulighet(er|ene)?\b|brief)/i,
+  // WP-D2: «muligheten» (bestemt entall) manglet - «lukk salgsmuligheten» traff ingen verktøy; + churn/produktbruk (kundeforhold-signalene).
+  business: /(forretning|selskap|bedrift|åpne saker|oppfølging|metrikk|\blead(s|en|ene)?\b|mulighet(en|er|ene)?\b|brief|churn|frafall|produktbruk|kalibrer|treffsikker|konfidens|lukk(e|et)? (saken|loopen)|risikerer vi|mister vi|miste (en |våre |noen |flere )?kund|kundeavgang|kunderisiko|produktkonto|kundekonto)/i,
   operations: /(drift|leverandør|runbook|driftsoppgave|vedlikehold)/i,
   product: /(produkt(et|er|ene)?\b|feature|funksjon(er|ene)?\b|roadmap)/i,
   conversation_graph: /(samtalegraf|hvem er .* (på|i) (slack|discord|telegram|e-?post)|identitet|kanalkobling|på tvers av kanal)/i,
@@ -183,15 +184,15 @@ function toolIntent(tool_id: string): RegExp | null {
   return cached;
 }
 /** D-382: handlingsnivået velges kun når meldingen uttrykker en handling (ikke bare nevner tjenesten). */
-const ACTION_VERBS = /(send|sende|opprett|lag\b|lage|legg (til|inn)|oppdater|endre|flytt|slett|fjern|arkiver|lukk|åpne? (igjen|på nytt)|svar\b|svare|synk|synkroniser|book|bestill|sett\b|registrer|fullfør|marker|tildel|eskaler|avbryt|kanseller|pause|gjenoppta|aktiver|deaktiver|kommenter|publiser|kjør|start|stopp|create|update|add|move|delete|remove|reply|sync|close|assign|schedule|post|slå (på|av)|skru (på|av|opp|ned)|tenn|slukk|slokk|dimm|lås (opp|døra|døren)|lås\b|spill (av )?|sett på|legg (i|til) kø|rull tilbake|promoter)/i;
+const ACTION_VERBS = /(send|sende|opprett|lag\b|lage|legg (til|inn)|oppdater|endre|flytt|slett|fjern|arkiver|lukk|koble|kople|knytt|åpne? (igjen|på nytt)|svar\b|svare|synk|synkroniser|book|bestill|sett\b|registrer|fullfør|marker|tildel|eskaler|avbryt|kanseller|pause|gjenoppta|aktiver|deaktiver|kommenter|publiser|kjør|start|stopp|create|update|add|move|delete|remove|reply|sync|close|assign|schedule|post|slå (på|av)|skru (på|av|opp|ned)|tenn|slukk|slokk|dimm|lås (opp|døra|døren)|lås\b|spill (av )?|sett på|legg (i|til) kø|rull tilbake|promoter)/i;
 /** D-382: handlingsord → handlingsnavn-prefiks, så den handlingen eieren faktisk ber om rangeres først innenfor budsjettet. */
 const VERB_TO_ACTION: ReadonlyArray<[RegExp, RegExp]> = [
   [/synk|synkroniser|sync|avstem/i, /^(sync|reconcile)/],
   [/opprett|lag\b|lage|legg (til|inn)|registrer|create|add|book|bestill|ny\b/i, /^(create|add|append|record|register|ingest)/],
-  [/oppdater|endre|sett\b|update|set\b|marker|tildel|assign|link/i, /^(update|set|assign|link|transition|rename)/],
+  [/oppdater|endre|sett\b|update|set\b|marker|tildel|assign|link|koble|kople|knytt/i, /^(update|set|assign|link|transition|rename)/],
   [/slett|fjern|arkiver|delete|remove|trash|papirkurv/i, /^(trash|delete|remove|archive)/],
   [/send|svar|kommenter|notify|reply|post|varsle|si fra/i, /^(notify|send|reply|comment|publish|dispatch)/],
-  [/lukk|fullfør|close|complete|ferdig/i, /^(close|complete)/],
+  [/lukk|fullfør|close|complete|ferdig/i, /^(close|complete|resolve)/],
   [/åpne? (igjen|på nytt)|reopen|gjenoppta|resume/i, /^(reopen|resume)/],
   [/flytt|move/i, /^move/],
   [/pause|avbryt|kanseller|cancel|stopp/i, /^(pause|cancel|defer)/],

@@ -15,6 +15,8 @@ export const CHAT_READ_TIER: ReadonlyArray<{ readonly tool_id: string; readonly 
   { tool_id: "business", action: "find_companies" },
   { tool_id: "business", action: "find_contacts" },
   { tool_id: "business", action: "get_attention_queue" },
+  { tool_id: "business", action: "get_calibration_report" },
+  { tool_id: "business", action: "get_churn_overview" },
   { tool_id: "business", action: "get_customer_overview" },
   { tool_id: "business", action: "get_business_brief" },
   { tool_id: "business", action: "get_lead_score" },

@@ -127,3 +127,14 @@ f0fd3eaef6f1a80f2eb8d9d66a3ef1631348173e:.gitleaksignore:generic-api-key:105
 # og den opprinnelige commit-en er en del av grenens publiserte historikk (aldri force push, jf. CLAUDE.md), derfor fingeravtrykk.
 b6e8306e5588e0eb348ab95efebbd8f20db56e82:ops/nas/test/enroll-device.test.mjs:generic-api-key:18
 b6e8306e5588e0eb348ab95efebbd8f20db56e82:ops/nas/test/enroll-device.test.mjs:generic-api-key:99
+
+# ops/acceptance/test/nas-hf1-hf2-gate.test.mjs (WP-J3, PR #327): testens falske miljøblokk for NAS-porten brukte et variabelnavn som inneholder «api» foran en verdi med nok entropi;
+# regelen generic-api-key slo til. Verifisert manuelt: ingen hemmelighet, kun fiktive JARVIS_*-flagg og PATH. Variabelen er omdøpt i en senere commit, men gitleaks skanner ALLE grener og hele
+# historikken, og den opprinnelige commit-en er en del av grenens publiserte historikk (aldri force push).
+45cd85d1bf53ac761aff1399ee9bbffccd2d919a:ops/acceptance/test/nas-hf1-hf2-gate.test.mjs:generic-api-key:28
+# Det første forsøket på å dokumentere unntaket ovenfor siterte selve det utløsende uttrykket i denne filen (kommentarlinje 131) og ble dermed flagget i fire grener (én commit per gren).
+# Kommentaren er skrevet om uten sitat; fingeravtrykkene under dekker de fire historiske commit-ene.
+d7bc5074616bb59a9b52234a342f4aaaa72041b0:.gitleaksignore:generic-api-key:131
+5c7a5fc7f8ec3396ac0292553e358e90f464a0af:.gitleaksignore:generic-api-key:131
+b7d403a9ab1b979dfd72cf882f65df28399f60a4:.gitleaksignore:generic-api-key:131
+573c5c8cc4a09ee719de075b5de6cc043c06dd14:.gitleaksignore:generic-api-key:131
