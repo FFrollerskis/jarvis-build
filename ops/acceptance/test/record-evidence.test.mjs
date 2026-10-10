@@ -45,7 +45,15 @@ const fake = {
   slack: () => ["xo", "xb-"].join("") + "1234567890-abcdefghij",
   jwt: () => ["ey", "Jhbgcioij9"].join("") + "." + ["ey", "Jzdwiioixmjm0"].join("") + "." + "c2lnbmF0dXJl",
   pem: () => ["-----BEGIN ", "PRIVATE KEY-----"].join("") + "\nMIIEvQIBADANBgkq\nabc\n" + ["-----END ", "PRIVATE KEY-----"].join(""),
-  age: () => ["AGE-SECRET", "-KEY-1"].join("") + "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"
+  age: () => ["AGE-SECRET", "-KEY-1"].join("") + "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ",
+  stripeLive: () => ["sk", "_live_"].join("") + "A1b2C3d4E5f6G7h8I9",
+  stripeTest: () => ["sk", "_test_"].join("") + "A1b2C3d4E5f6G7h8I9",
+  stripeRestricted: () => ["rk", "_live_"].join("") + "A1b2C3d4E5f6G7h8I9",
+  stripeWebhook: () => ["wh", "sec_"].join("") + "A1b2C3d4E5f6G7h8I9",
+  telegram: () => "123456789:" + ["AA", "E"].join("") + "_abcdefghijklmnopqrstuvwxyz012345",
+  npm: () => ["np", "m_"].join("") + "abcdefghijklmnopqrstuvwxyz0123456789",
+  vault: () => ["hv", "s."].join("") + "CAESIJlWPabcdefghijklmnopqrstu",
+  infisical: () => ["s", "t."].join("") + "abcdef.0123456789abcdef.0123456789abcdef"
 };
 
 describe("redact()", () => {
@@ -84,6 +92,73 @@ describe("redact()", () => {
       expect(Date.now() - t0, input.slice(0, 20)).toBeLessThan(2000);
     }
     expect(REDACTIONS.length).toBeGreaterThan(10);
+  });
+
+  // Gjennomgang av PR #320: formene verifiseringsøkten faktisk møter (Stripe-testnøkkel i blokk 8, Telegram, Cloudflare/Infisical i blokk 7, JSON-svar fra API-er, Basic-header).
+  it("fjerner Stripe-, Telegram-, npm-, Vault- og Infisical-former (også nakne, uten nøkkelord)", () => {
+    const samples = {
+      stripe_key: [fake.stripeLive(), fake.stripeTest(), fake.stripeRestricted()],
+      stripe_webhook_secret: [fake.stripeWebhook()],
+      telegram_bot_token: [fake.telegram(), "bot" + fake.telegram()],
+      npm_token: [fake.npm()],
+      vault_token: [fake.vault()],
+      infisical_service_token: [fake.infisical()]
+    };
+    for (const [name, secrets] of Object.entries(samples)) {
+      for (const secret of secrets) {
+        const { text, counts } = redact(`linje før ${secret} linje etter`);
+        expect(text, name).not.toContain(secret.replace(/^bot/, ""));
+        expect(counts[name], name).toBe(1);
+      }
+    }
+  });
+
+  it("redigerer alle Authorization-skjemaer (Basic, Digest, Token), API-nøkkel-headere og JSON-felt - men ikke allerede redigerte verdier to ganger", () => {
+    const pw = "Hunter2-" + "x".repeat(12);
+    const { text, counts } = redact(
+      [`Authorization: Basic ${Buffer.from("ola:" + pw).toString("base64")}`, `Proxy-Authorization: Digest username="ola", response="${pw}"`, `X-Api-Key: ${pw}`, `x-auth-token=${pw}`,
+        `{"password": "${pw}", "user": "ola"}`, `{"access_token" : "${pw}"}`, `{"client_secret":"${pw}"}`, `{ "some_api_key": "${pw}" }`, `Authorization: Bearer ${pw}${pw}`].join("\n")
+    );
+    expect(text).not.toContain(pw);
+    expect(text).not.toContain("T2xh"); // base64 av «ola:...»
+    expect(text).toContain('"user": "ola"');
+    expect(counts["bearer"]).toBe(1);
+    expect(counts["authorization_header"]).toBe(2); // Basic + Digest; Bearer-linjen er allerede redigert og telles ikke på nytt
+    expect(counts["json_secret_field"]).toBe(4);
+  });
+
+  it("redigerer Azure/SQL-lignende nøkler og et nøkkelord med en lang, blandet streng uten kjent format", () => {
+    const key = "Zm9vYmFy" + "AbC123xYz0".repeat(6) + "==";
+    const hex = "3f9a" + "0e1d2c3b".repeat(4);
+    const { text } = redact([`DefaultEndpointsProtocol=https;AccountName=x;AccountKey=${key};EndpointSuffix=core.windows.net`, `Cloudflare token ${hex}Q9`, `webhook_secret ${hex}`, `api key: ${hex}x1`].join("\n"));
+    expect(text).not.toContain(key);
+    expect(text).not.toContain(hex);
+    expect(text).toContain("AccountName=x");
+  });
+
+  it("lar vanlig tekst, git-SHA-er, fingeravtrykk og feilkoder stå (ingen falske positive på det vi faktisk skriver i evidens)", () => {
+    const benign = [
+      "commit 3a7bd3e2360a3d29eea436fcfb7e44c735d117c4 på claude/wp-j3-verification-pack",
+      "Basic information about the setup is in the runbook",
+      "error: credential_not_bound_to_identity",
+      '"max_tokens": 4096, "token_type": "x"',
+      "fingerprint sha256:3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b",
+      "the token expires in 3600 seconds",
+      "secret rotation: 3 hendelser siste døgn",
+      "Test Files  3 passed (3)  12:34:56",
+      "migrasjon 096_incident_transitions.sql anvendt",
+      "a-very-long-identifier-without-digits-or-anything-else-abcdefghijklmnopqrstuvwxyz token"
+    ];
+    for (const line of benign) expect(redact(line).text, line).toBe(line);
+  });
+
+  it("de nye mønstrene er lineære på fiendtlig input", () => {
+    const hostile = ["token " + "a1".repeat(60_000), ("token" + "a".repeat(31) + " ").repeat(20_000), "Authorization: " + "x".repeat(150_000), '"password": "' + "y".repeat(150_000), fake.stripeLive().slice(0, 8) + "A".repeat(100_000), "123456:" + "a".repeat(100_000), "secret " + "z9".repeat(40_000) + "!"];
+    for (const input of hostile) {
+      const t0 = Date.now();
+      redact(input);
+      expect(Date.now() - t0, input.slice(0, 20)).toBeLessThan(2000);
+    }
   });
 });
 

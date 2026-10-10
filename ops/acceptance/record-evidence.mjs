@@ -34,16 +34,32 @@ export const REDACTIONS = [
   ["google_api_key", /\bAIza[0-9A-Za-z_-]{35}\b/g],
   ["jwt", /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\b/g],
   ["bearer", /\b[Bb]earer\s+[A-Za-z0-9._~+/=-]{16,}/g],
+  // Leverandørformer vi faktisk møter i verifiseringsøkten (gjennomgang av PR #320): Stripe (underscore, ikke bindestrek som OpenAI), Telegram-bot, npm, Vault, Infisical-servicetoken.
+  ["stripe_key", /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}\b/g],
+  ["stripe_webhook_secret", /\bwhsec_[A-Za-z0-9]{16,}\b/g],
+  ["telegram_bot_token", /(?<!\d)\d{6,12}:[A-Za-z0-9_-]{30,}\b/g],
+  ["npm_token", /\bnpm_[A-Za-z0-9]{30,}\b/g],
+  ["vault_token", /\bhv[sbr]\.[A-Za-z0-9_-]{20,}\b/g],
+  ["infisical_service_token", /\bst\.[A-Za-z0-9]{6,}\.[A-Za-z0-9]{16,}\.[A-Za-z0-9]{16,}\b/g],
+  // Alle Authorization-skjemaer (Basic/Digest/Token/...), ikke bare Bearer. Verdier som allerede er redigert telles ikke på nytt.
+  ["authorization_header", /\b((?:proxy-)?authorization)\s*[:=][ \t]*(?![ \t]|(?:Bearer[ \t]+)?«)[^\r\n]{6,}/gi, "$1: «REDIGERT»"],
+  ["api_key_header", /\b(x-api-key|x-auth-token|x-access-token|x-goog-api-key|private-token|api-key|apikey)\s*[:=]\s*(?!«)[^\s"',;]{8,}/gi, "$1: «REDIGERT»"],
+  // JSON-former: "password": "verdi" (nøkkelen står i anførselstegn, så kv_secret under treffer ikke).
+  ["json_secret_field", /("[A-Za-z0-9_.-]{0,40}(?:password|passwd|secret|token|api[_-]?key|private[_-]?key)[A-Za-z0-9_.-]{0,40}"\s*:\s*)"(?!«)[^"\r\n]{6,}"/gi, '$1"«REDIGERT»"'],
   ["url_credentials", /\b([a-z][a-z0-9+.-]{1,12}:\/\/)[^\s/@:]{1,100}:[^\s/@]{1,200}@/g, "$1«REDIGERT»@"],
-  ["kv_secret", /\b((?:[A-Z][A-Z0-9_]*_)?(?:PASSWORD|PASSWD|SECRET|TOKEN|API_KEY|PRIVATE_KEY|ACCESS_KEY)[A-Z0-9_]*)\s*[=:]\s*(?!«)[^\s"',;]{6,}/gi, "$1=«REDIGERT»"]
+  ["kv_secret", /\b((?:[A-Z][A-Z0-9_]*_)?(?:PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY|ACCOUNT_?KEY|SHARED_?ACCESS_?KEY|SIGNING_?KEY|ENCRYPTION_?KEY|MASTER_?KEY|SESSION_?KEY)[A-Z0-9_]*)\s*[=:]\s*(?!«)[^\s"',;]{6,}/gi, "$1=«REDIGERT»"],
+  // Siste sikring: et nøkkelord (token/secret/password/api key) med en lang, blandet streng rett etter («Cloudflare token abc…», «webhook_secret 3f9a…») - uten kjent format. Krever både bokstaver og siffer
+  // (en vanlig lang identifikator redigeres ikke), maks 12 tegn mellom ordet og strengen, og strengen må være minst 32 tegn.
+  ["keyword_long_secret", /(?<![A-Za-z0-9])((?:token|secret|password|passwd|api[ _-]?key)s?\b[^\n«]{0,12}?)(?<![A-Za-z0-9_+/=-])([A-Za-z0-9_+/=-]{32,})(?![A-Za-z0-9_+/=»-])/gi, "$1«REDIGERT»", (_m, _kw, candidate) => /[A-Za-z]/.test(candidate) && /\d/.test(candidate)]
 ];
 
 export function redact(text) {
   let out = text;
   const counts = {};
-  for (const [name, re, replacement] of REDACTIONS) {
+  for (const [name, re, replacement, guard] of REDACTIONS) {
     let n = 0;
     out = out.replace(re, (...args) => {
+      if (guard !== undefined && !guard(...args)) return args[0];
       n += 1;
       if (replacement === undefined) return "«REDIGERT»";
       // enkel $1-støtte (JS-replace-strenger støtter det, men vi bruker callback for å telle)
