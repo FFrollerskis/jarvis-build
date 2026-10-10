@@ -163,7 +163,12 @@ describe("hele senteret mot ekte data", () => {
     expect(item(r, "routing", "gemma_first").facts).toMatchObject({ ok_calls_7d: 5 });
     expect(Number(item(r, "routing", "gemma_first").facts?.["local_share_7d"])).toBeCloseTo(3 / 5, 5);
     expect(item(r, "cost", "budget")).toMatchObject({ status: "OK" });
-    expect(item(r, "cost", "run_rate").facts).toMatchObject({ today_ore: 1100 });
+    // «i dag» = siden databasens midnatt (run-rate.ts: `at >= date_trunc('day', now())`). Seed-radene er relative til NOW (1/4/6 t siden), så testen kan ikke anta at alle er «i dag»:
+    // en kjøring mellom 00:00 og 06:00 (UTC) har rader fra i går. Forventet verdi utledes derfor fra samme døgngrense.
+    const dayRows = await db.adminPool.query<{ d: Date }>("SELECT date_trunc('day', now()) AS d");
+    const dayStart = (dayRows.rows[0] as { d: Date }).d.getTime();
+    const expectedToday = ([[H, 400], [4 * H, 600], [6 * H, 100]] as const).filter(([age]) => NOW.getTime() - age >= dayStart).reduce((sum, [, ore]) => sum + ore, 0);
+    expect(item(r, "cost", "run_rate").facts).toMatchObject({ today_ore: expectedToday });
     expect(item(r, "delegation", "task_cost").facts).toMatchObject({ task_calls_7d: 2, all_calls_7d: 7 });
     expect(item(r, "delegation", "background_jobs").facts).toMatchObject({ active_delegated: 2 }); // task-run + task-err (delegated, ikke pauset)
     expect(item(r, "agents", "task-run").facts).toMatchObject({ agent_profile: "coding", network_targets: 2 });
