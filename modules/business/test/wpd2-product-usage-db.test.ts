@@ -176,7 +176,8 @@ describe("C: forsvar i dybden i databasen - PII og uforanderlighet", () => {
   };
 
   it("kontoreferanse med e-post, telefonlignende tall, IPv4, mellomrom eller for kort avvises av databasen", async () => {
-    for (const ref of ["ola@example.com", "4791234567", "192.168.1.10", "has space 1", "kort1", "æøåæøåæøå"]) {
+    // PR #326 F3: også tall med skilletegn (fødselsnummer, telefon, kortnummer, IP med bindestrek) og IPv6-lignende verdier avvises av CHECK-en, ikke bare av appkoden
+    for (const ref of ["ola@example.com", "4791234567", "192.168.1.10", "has space 1", "kort1", "æøåæøåæøå", "010190-12345", "98-76-54-32", "4111-1111-1111-1111", "192-168-1-10", "2001:db8::1", "fe80::1ff:fe23:4567:890a"]) {
       await expect(insertAccount(ref), ref).rejects.toThrow(/product_usage_accounts_ref_pseudonymous|violates check constraint/);
     }
     await expect(insertAccount("acct-ok-123456")).resolves.toBeDefined();
@@ -186,6 +187,8 @@ describe("C: forsvar i dybden i databasen - PII og uforanderlighet", () => {
     await expect(insertEvent({ user: "ola@example.com" })).rejects.toThrow(/user_ref_pseudonymous/);
     await expect(insertEvent({ user: "4791234567" })).rejects.toThrow(/user_ref_pseudonymous/);
     await expect(insertEvent({ user: "10.0.0.1" })).rejects.toThrow(/user_ref_pseudonymous/);
+    await expect(insertEvent({ user: "010190-12345" })).rejects.toThrow(/user_ref_pseudonymous/); // PR #326 F3
+    await expect(insertEvent({ user: "2001:db8::1" })).rejects.toThrow(/user_ref_pseudonymous/);
     await expect(insertEvent({ feature: "Chat Send" })).rejects.toThrow(/product_usage_events_shape/);
     await expect(insertEvent({ feature: null })).rejects.toThrow(/product_usage_events_shape/);
     await expect(insertEvent({ qty: 0 })).rejects.toThrow(/product_usage_events_shape/);
