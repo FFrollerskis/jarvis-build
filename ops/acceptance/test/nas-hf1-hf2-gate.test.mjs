@@ -319,6 +319,19 @@ describe("nas-hf1-hf2-gate.sh: rettelser etter uavhengig review (M4-M8, L6-L7) o
     expect(rowOf(noGit.text, "H00_code_version")).toContain("UNKNOWN");
   });
 
+  it("H00: en evidensfil i docs/evidence (reservert av opptakeren før porten kjører) er ikke «lokale endringer» - andre uspora filer er det fortsatt", () => {
+    const onlyEvidence = tempRepo();
+    mkdirSync(join(onlyEvidence, "docs", "evidence"), { recursive: true });
+    writeFileSync(join(onlyEvidence, "docs", "evidence", "2026-10-10-hf-0-gate.md"), "");
+    const clean = run({ env: { JARVIS_ACCEPTANCE_GIT_ROOT: onlyEvidence } });
+    expect(rowOf(clean.text, "H00_code_version")).toContain("INFO");
+    expect(rowOf(clean.text, "H00_code_version")).toContain("ren arbeidskatalog");
+    const evidenceAndOther = tempRepo({ dirty: true });
+    mkdirSync(join(evidenceAndOther, "docs", "evidence"), { recursive: true });
+    writeFileSync(join(evidenceAndOther, "docs", "evidence", "x.md"), "");
+    expect(rowOf(run({ env: { JARVIS_ACCEPTANCE_GIT_ROOT: evidenceAndOther } }).text, "H00_code_version")).toContain("WARN");
+  });
+
   it("M7: UA-0 med exit 0 men WARN/UNKNOWN i sammendraget er IKKE PASS - linjene vises og havner i evidensfilen; uten sammendragslinje er det UNKNOWN", () => {
     const res = run({ ua0: fakeUa0(0, "Sammendrag: PASS=6 WARN=4 UNKNOWN=5 FAIL=0", ["C07_constitution WARN constitution_unsigned", "C09_embedding UNKNOWN ikke målt"]) });
     expect(rowOf(res.text, "H01_ua0_gate")).toContain("WARN");

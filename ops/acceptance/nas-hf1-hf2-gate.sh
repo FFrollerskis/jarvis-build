@@ -57,8 +57,9 @@ if ! dc ps -q >/dev/null 2>&1; then
   exit 2
 fi
 
-# H00: hvilken kode evidensen gjelder (git-SHA står også i evidensfilene fra record-evidence.mjs)
-sha="$(git -C "$GIT_ROOT" rev-parse --short HEAD 2>/dev/null)"; branch="$(git -C "$GIT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null)"; dirty="$(git -C "$GIT_ROOT" status --porcelain 2>/dev/null | head -n1)"
+# H00: hvilken kode evidensen gjelder (git-SHA står også i evidensfilene fra record-evidence.mjs). docs/evidence regnes ikke som lokale endringer: opptakeren reserverer evidensfilen FØR porten kjører, så uten unntaket
+# ville hver kjøring via opptakeren gitt en falsk WARN (samme unntak som i opptakerens egen sjekk).
+sha="$(git -C "$GIT_ROOT" rev-parse --short HEAD 2>/dev/null)"; branch="$(git -C "$GIT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null)"; dirty="$(git -C "$GIT_ROOT" status --porcelain -- . ':(exclude)docs/evidence' 2>/dev/null | head -n1)"
 if [ -z "$sha" ]; then record H00_code_version UNKNOWN "fikk ikke lest git-versjon (er dette et git-uttrekk?)"
 elif [ -n "$dirty" ]; then record H00_code_version WARN "$branch @ $sha - arbeidskatalogen har lokale endringer (evidensen gjelder ikke ren kode)"
 else record H00_code_version INFO "$branch @ $sha (ren arbeidskatalog)"; fi
