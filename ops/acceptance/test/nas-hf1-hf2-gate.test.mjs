@@ -229,6 +229,16 @@ describe("nas-hf1-hf2-gate.sh", () => {
     expect(row).toContain("open_loop_sweep_tenant_failed");
   });
 
+  it("H08 dekker hele familien av feilmeldinger i koden (sweep/sync/purge/kunnskapskilde), ikke bare en håndskrevet liste - og ikke ubeslektede feil", () => {
+    const names = ["vipps_sweep_tenant_failed", "stripe_sweep_tenant_failed", "support_inbox_sync_tenant_failed", "vision_retention_purge_failed", "situation_sweep_failed", "knowledge_source_timeout", "product_usage_purge_failed"];
+    const res = run({ overrides: { logs: [...names.map((n) => `{"msg":"${n}"}`), '{"msg":"telegram_poll_failed"}', '{"msg":"heartbeat"}'].join("\n") } });
+    const row = rowOf(res.text, "H08_sweep_failures_24h");
+    expect(row).toContain("WARN");
+    for (const n of names) expect(row, n).toContain(n);
+    expect(row).not.toContain("telegram_poll_failed");
+    expect(rowOf(run({ overrides: { logs: '{"msg":"telegram_poll_failed"}\n{"msg":"heartbeat"}' } }).text, "H08_sweep_failures_24h")).toContain("PASS");
+  });
+
   it("hemmelighetsformer i loggene gir FAIL med antall per mønster - og selve verdien står aldri i utdataene eller evidensfilen", () => {
     const res = run({ overrides: { logs: `{"msg":"x","token":"${FAKE_GH_TOKEN}"}\nAuthorization: Bearer ${"a".repeat(40)}\n{"msg":"ok"}` } });
     const row = rowOf(res.text, "H12_secrets_in_logs");

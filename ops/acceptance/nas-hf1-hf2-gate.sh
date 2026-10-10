@@ -193,13 +193,14 @@ case "$bstat" in
   *) classify_backup "$bstat"; record H07_backup_status "$BK_STATUS" "$BK_DETAIL";;
 esac
 
-# H08: sveip/jobber som feilet siste døgn (D-442/D-443: feilede planlagte jobber skal ikke være stille). Bare meldingsnavnet (snake_case) og antall vises - en treffende linje uten JSON-«msg» telles som
+# H08: sveip/synkroniseringer/utrenskinger/kunnskapskilder som feilet siste døgn (D-442/D-443: feilede planlagte jobber skal ikke være stille). Mønsteret er en FAMILIE (…sweep…/…sync…/…purge…/knowledge_source… + _failed/_failure/_timeout),
+# kontrollert mot kodens faktiske meldingsnavn (situation_sweep_failed, vipps_sweep_tenant_failed, support_inbox_sync_tenant_failed, vision_retention_purge_failed, knowledge_source_failed ...) - ikke en håndskrevet liste som kan bli vakuøs. Bare meldingsnavnet (snake_case) og antall vises - en treffende linje uten JSON-«msg» telles som
 # «annen_loggrad» i stedet for å bli skrevet ut. Uleselige eller tomme logger gir UNKNOWN, aldri PASS.
 LOGS24="$(dc logs --no-log-prefix --since 24h api worker 2>/dev/null)"; logs24_rc=$?
 if [ -z "$(dc ps -q api 2>/dev/null)" ]; then record H08_sweep_failures_24h UNKNOWN "fikk ikke lest loggene (api kjører ikke?)"
 elif [ "$logs24_rc" -ne 0 ] || [ -z "$LOGS24" ]; then record H08_sweep_failures_24h UNKNOWN "fikk ikke lest loggene (docker logs ga exit $logs24_rc eller tomt utdrag)"
 else
-  sweep="$(printf '%s\n' "$LOGS24" | grep -E '_sweep_failed|sweep_failure|knowledge_source_failed|knowledge_source_timeout|open_loop_sweep_tenant_failed|product_usage_purge_failed' | sed -E 's/.*"msg":"([a-z_]+)".*/\1/; t; s/.*/annen_loggrad/' | sort | uniq -c | sort -rn | head -n 8 | tr '\n' ';' | sed 's/  */ /g')"
+  sweep="$(printf '%s\n' "$LOGS24" | grep -E '[a-z0-9_]*(sweep|sync|purge|knowledge_source)[a-z0-9_]*_(failed|failure|timeout)' | sed -E 's/.*"msg":"([a-z_]+)".*/\1/; t; s/.*/annen_loggrad/' | sort | uniq -c | sort -rn | head -n 8 | tr '\n' ';' | sed 's/  */ /g')"
   if [ -z "$sweep" ]; then record H08_sweep_failures_24h PASS "ingen sveip-/kildefeil i loggene siste 24 t"
   else record H08_sweep_failures_24h WARN "feil siste 24 t (antall melding): $sweep"; fi
 fi
