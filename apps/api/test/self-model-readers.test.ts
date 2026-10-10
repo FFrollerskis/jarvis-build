@@ -76,6 +76,16 @@ describe("A: database / providers / controls / connectors / build", () => {
     expect(list.map((o) => `${o.source.split(":")[1]}=${o.status}`)).toEqual(["anthropic=DOWN", "gemma_local=OK", "openai=DEGRADED", "kimi=OK"]);
   });
 
+  it("A3b (WP-H0): en leverandør eieren har pauset er DEGRADED (eier-valg, ikke «nåbar») - uavhengig av god helse - og sier det", async () => {
+    const readers = buildSelfModelReaders(baseDeps({
+      meshStatus: () => ({ providers: [{ provider: "anthropic", state: "LIVE", failures: 0, success: 9, paused: true }, { provider: "gemma_local", state: "LIVE", failures: 0, success: 40 }] })
+    }));
+    const list = (await readers.providers!()) as unknown as Array<{ status: string; source: string; detail: string }>;
+    expect(list.map((o) => `${o.source.split(":")[1]}=${o.status}`)).toEqual(["anthropic=DEGRADED", "gemma_local=OK"]);
+    expect(list[0]?.detail).toContain("pauset av deg");
+    expect(list[0]?.detail).not.toContain("nåbar");
+  });
+
   it("A4: kill switch på -> DOWN; frosne/tilbakekalte -> DEGRADED; ellers OK", async () => {
     const mk = (s: { active: boolean }, frozen: number, revoked: number) =>
       buildSelfModelReaders(baseDeps({ controlState: async () => ({ kill_switch: s, frozen_connectors: new Array(frozen).fill({}), revoked_credentials: new Array(revoked).fill({}) }) })).controls!();

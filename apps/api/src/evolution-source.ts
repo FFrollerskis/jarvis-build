@@ -5,19 +5,23 @@ import { withTenantTransaction } from "@jarvis/core";
 import { composeEvolutionReport, unknownSection, type EvolutionReport, type EvolutionSection, type SloReport } from "@jarvis/executive";
 import type { MeshStatus } from "@jarvis/model-gateway";
 import {
-  MAINTENANCE_CATALOG, assessCredential, auditFallbackChains, changeFreeze, creditRunway, decideHeal, detectCostAnomalies, detectPoisoning, dueMaintenance, evaluateAllReadiness, forecastBreach, needsReverification, parseDeclaredGates,
-  proposeDedupe, RED_TEAM_CATEGORIES,
-  type CostPoint, type CredentialState, type FreezeVerdict, type MaintenanceTask, type MemoryFact, type MemorySourceKind, type ReadinessFacts
+  FREEZE_UNKNOWN_REASONS, MAINTENANCE_CATALOG, assessCredential, auditFallbackChains, changeFreeze, creditRunway, decideHeal, detectCostAnomalies, detectPoisoning, dueMaintenance, evaluateAllReadiness, forecastBreach, needsReverification,
+  parseDeclaredGates, proposeDedupe, RED_TEAM_CATEGORIES,
+  type CostPoint, type CredentialState, type FreezeVerdict, type MaintenanceTask, type MeasuredFact, type MemoryFact, type MemorySourceKind, type ReadinessFacts
 } from "@jarvis/self-modification";
 import { readSchedulerHealth, type ConnectorStatus, type MeshToolMapping } from "@jarvis/tool-gateway";
 import type { Ev0BootStatus } from "./ev0-boot.ts";
 import type { RadarState } from "./evolution-radar.ts";
-import { GOLDEN_SUITE_DIGEST, runGolden, type GoldenRun } from "./golden-suite.ts";
+import { GOLDEN_SUITE_DIGEST, WIRING_LOCKS, runGolden, type GoldenRun } from "./golden-suite.ts";
 
 /**
  * WP-B (D-452): evolusjonsportene (EV-0…EV-23) i OBSERVASJONSMODUS. Denne filen leser kun eksisterende observerbarhet (endringsregisteret, cost_events, scheduler_state, connector-status, SLO-rapporten,
  * modellmeshen) og kjører de RENE beslutningsreglene i `@jarvis/self-modification/evolution` mot tallene. Ingenting skrives, ingenting utføres: rapporten har `acts: false`, og en seksjon som ikke kan måles blir
  * UNKNOWN (aldri «OK» ved feil). Kun antall og kategorier - aldri innhold fra minne/e-post, aldri hemmelige verdier.
+ *
+ * KJENT-IKKE-LIK-OK (M2, gjennomgang av PR #313): en avhengighet som kaster, svarer `null`/`undefined`/feil form eller et tomt svar der et tall må finnes gir ALDRI en fabrikkert `false`/`0` videre til beslutningsreglene -
+ * ukjent bæres som `null` ("kunne ikke måles") og gir UNKNOWN (eller ATTENTION hvis noe KJENT i tillegg står i veien). Ukjent kill switch / hendelsestall / observerbarhet = «freeze kan ikke utelukkes»,
+ * og et ukjent innsignal gjør at en sovende del aldri kan stå som «klar» (se `readiness.ts`).
  */
 type Pool = Pick<pg.Pool, "query"> & Partial<Pick<pg.Pool, "connect">>;
 type Env = Readonly<Record<string, string | undefined>>;
@@ -50,18 +54,55 @@ export interface EvolutionContext {
   now: Date;
   env: Env;
   deps: EvolutionSourceDeps;
-  shared?: { freeze?: Promise<{ verdict: FreezeVerdict; incidents: number | null }>; golden?: Promise<GoldenRun> };
+  shared?: { freeze?: Promise<FreezeState>; golden?: Promise<GoldenRun> };
+}
+
+/** Delt frysevurdering. Innsignalene er `null` når de ikke kunne måles (aldri fabrikkert `false`/`0`). */
+export interface FreezeState {
+  verdict: FreezeVerdict;
+  /** Antall åpne hendelser; `null` = kunne ikke telles. */
+  incidents: number | null;
+  /** Kill switch; `null` = kunne ikke leses. */
+  kill_switch: boolean | null;
+  /** SLO-rapporten kunne leses og inneholder minst ett tjenestemål. */
+  slo_readable: boolean;
 }
 
 const dayOf = (d: Date): string => d.toISOString().slice(0, 10);
+
+type Settled<T> = { ok: true; v: T } | { ok: false };
+/** Kjører en avhengighet slik at både synkrone kast og avviste løfter blir «ikke lest» (aldri et kast som velter resten, aldri en fabrikkert verdi). */
+const settle = <T>(read: () => Promise<T> | T): Promise<Settled<T>> => Promise.resolve().then(read).then((v) => ({ ok: true as const, v }), () => ({ ok: false as const }));
+
+/** Et tall fra første rad i et aggregat-svar (`count(*)`/`sum`; pg leverer bigint som tekst). `null` = raden/feltet mangler eller er ikke et helt tall: UKJENT, aldri `?? 0` (M2). */
+export function rowNumber(rows: unknown, field: string): number | null {
+  const row = Array.isArray(rows) ? (rows[0] as Record<string, unknown> | null | undefined) : undefined;
+  const raw = row?.[field];
+  const n = typeof raw === "number" ? raw : typeof raw === "string" && /^-?\d{1,15}$/.test(raw.trim()) ? Number(raw) : Number.NaN;
+  return Number.isSafeInteger(n) ? n : null;
+}
 const ore = (n: number): string => `${Math.round(n / 100)} kr`;
 
-/** Én seksjon kan aldri velte hele rapporten: en feil blir UNKNOWN med årsaken (kun klasse, aldri innhold). */
+/**
+ * Feilklassen til en feil, til rapporten (L2, gjennomgang av PR #313). Rapporten går til modellen (som kan være en skymodell), så meldingsteksten tas ALDRI med: den kan inneholde vert, port, databasenavn, rolle
+ * eller passordfeil (`connect ECONNREFUSED 10.0.0.5:5432 (db=jarvis, user=jarvis_app)`). Kun tre ting slipper gjennom, hver låst til et fast mønster: navnet (`TypeError`), en Node-systemkode (`ECONNREFUSED`,
+ * `ERR_*`) og SQLSTATE-KLASSEN (de to første tegnene av pg sin 5-tegns kode, f.eks. `28` for innlogging, `08` for tilkobling).
+ */
+export function errorClass(err: unknown): string {
+  const e = (typeof err === "object" && err !== null ? err : {}) as { name?: unknown; code?: unknown };
+  const name = typeof e.name === "string" && /^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(e.name) ? e.name : "Error";
+  const code = typeof e.code === "string" ? e.code : "";
+  if (/^(?:E[A-Z0-9_]{2,30}|ERR_[A-Z0-9_]{1,40})$/.test(code)) return `${name}/${code}`;
+  if (/^[0-9A-Z]{5}$/.test(code)) return `${name}/sqlstate_${code.slice(0, 2)}`;
+  return name;
+}
+
+/** Én seksjon kan aldri velte hele rapporten: en feil blir UNKNOWN med årsaken (kun feilklasse - aldri meldingstekst, L2). */
 async function safely(ev: string, title: string, source: string, fn: () => Promise<EvolutionSection>): Promise<EvolutionSection> {
   try {
     return await fn();
   } catch (err) {
-    return unknownSection(ev, title, source, `målingen feilet (${(err as Error).message.slice(0, 100)})`);
+    return unknownSection(ev, title, source, `målingen feilet (${errorClass(err)})`);
   }
 }
 
@@ -72,52 +113,86 @@ const INCIDENT_SPACES = ["personal", "business", "project", "home", "shared"] as
 
 async function openIncidentCount(ctx: EvolutionContext): Promise<number | null> {
   try {
-    return await withMemoryTransaction(ctx.pool as pg.Pool, ctx.tenantId, INCIDENT_SPACES, async (client) =>
-      Number((await client.query(`SELECT count(*)::int AS n FROM incidents WHERE status IN ('open', 'diagnosing', 'repair_proposed', 'repair_in_progress')`)).rows[0]?.n ?? 0)
+    const count = await withMemoryTransaction(ctx.pool as pg.Pool, ctx.tenantId, INCIDENT_SPACES, async (client) =>
+      rowNumber((await client.query(`SELECT count(*)::int AS n FROM incidents WHERE status IN ('open', 'diagnosing', 'repair_proposed', 'repair_in_progress')`)).rows, "n")
     );
+    return count !== null && count >= 0 ? count : null;
   } catch {
     return null;
   }
 }
 
-/** Change freeze-vurderingen (delt av flere seksjoner; beregnes én gang per rapport). */
-export function computeFreeze(ctx: EvolutionContext): Promise<{ verdict: FreezeVerdict; incidents: number | null }> {
+/** Oppstartssjekken slik rapporten kan stole på den: en gyldig form, ellers ukjent (`null`). At leseren kaster er også «ukjent», ikke en feil som velter seksjonen. */
+function readEv0(deps: EvolutionSourceDeps): Ev0BootStatus | null {
+  try {
+    const v = deps.ev0Status();
+    return v && typeof v === "object" && v.constitution && typeof v.constitution === "object" && v.ledger && typeof v.ledger === "object" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Feilkoder fra oppstartssjekken vises kun hvis de ser ut som en kort kode (aldri en setning). */
+const safeCode = (code: unknown): string => (typeof code === "string" && /^[A-Za-z0-9_.:-]{1,64}$/.test(code) ? code : "ukjent_kode");
+
+/**
+ * Change freeze-vurderingen (delt av flere seksjoner; beregnes én gang per rapport). Ukjent kill switch, ukjent hendelsestall og ulesbar/tom SLO-rapport gir `null`-innsignal -> `frozen: true` med en `*_unknown`/
+ * `observability_missing`-årsak (M2): en freeze som ikke kan utelukkes er en freeze.
+ */
+export function computeFreeze(ctx: EvolutionContext): Promise<FreezeState> {
   ctx.shared ??= {};
   ctx.shared.freeze ??= (async () => {
     const { deps } = ctx;
-    const [sloResult, killResult, incidents] = await Promise.all([
-      deps.slo().then((v) => ({ ok: true as const, v }), () => ({ ok: false as const })),
-      deps.killSwitchActive().then((v) => ({ ok: true as const, v }), () => ({ ok: false as const })),
-      openIncidentCount(ctx)
-    ]);
-    const breaches = sloResult.ok ? sloResult.v.slos.filter((s) => s.status === "BREACH").length : 0;
-    const verdict = changeFreeze({ incident_open: (incidents ?? 0) > 0, observability_ok: sloResult.ok, slo_breaches: breaches, kill_switch_active: killResult.ok ? killResult.v : false });
-    return { verdict, incidents };
+    const [sloResult, killResult, incidents] = await Promise.all([settle(() => deps.slo()), settle(() => deps.killSwitchActive()), openIncidentCount(ctx)]);
+    // Kun et ekte svar teller: en SLO-rapport uten tjenestemål har ikke målt noe, og en kill switch som ikke svarer med true/false er ukjent.
+    const slos = sloResult.ok && Array.isArray(sloResult.v?.slos) && sloResult.v.slos.length > 0 ? sloResult.v.slos : null;
+    const kill_switch = killResult.ok && typeof killResult.v === "boolean" ? killResult.v : null;
+    const verdict = changeFreeze({
+      incident_open: incidents === null ? null : incidents > 0,
+      observability_ok: slos !== null,
+      slo_breaches: slos === null ? 0 : slos.filter((x) => x?.status === "BREACH").length,
+      kill_switch_active: kill_switch
+    });
+    return { verdict, incidents, kill_switch, slo_readable: slos !== null };
   })();
   return ctx.shared.freeze;
 }
 
 export async function boundariesSection(ctx: EvolutionContext): Promise<EvolutionSection> {
-  const { deps } = ctx;
-  const ev0 = deps.ev0Status();
-  const { verdict: freeze, incidents } = await computeFreeze(ctx);
+  const ev0 = readEv0(ctx.deps);
+  const { verdict: freeze, incidents, slo_readable } = await computeFreeze(ctx);
   const findings: string[] = [];
+  /** Noe KJENT som står i veien. */
   let attention = false;
-  if (!ev0) findings.push("Oppstartssjekken av konstitusjon og endringsregister har ikke kjørt (ukjent).");
-  else {
+  /** Det som ikke kunne måles. */
+  const unknown: string[] = [];
+  if (!ev0) {
+    unknown.push("oppstartssjekken av konstitusjon og endringsregister");
+    findings.push("Oppstartssjekken av konstitusjon og endringsregister har ikke kjørt eller kunne ikke leses (ukjent).");
+  } else {
     if (ev0.constitution.status === "verified") findings.push(`Safety Constitution er verifisert (versjon ${ev0.constitution.version}).`);
-    else { findings.push(`Safety Constitution er ikke verifisert (${ev0.constitution.code}) - Evolution kan ikke aktiveres før eieren har signert den (EV-0).`); attention = true; }
+    else { findings.push(`Safety Constitution er ikke verifisert (${safeCode(ev0.constitution.code)}) - Evolution kan ikke aktiveres før eieren har signert den (EV-0).`); attention = true; }
     if (ev0.ledger.status === "ok") findings.push(`Endringsregisteret: hash-kjeden er intakt (${ev0.ledger.count} rader).`);
     else if (ev0.ledger.status === "broken") { findings.push(`Endringsregisteret: hash-kjeden er ØDELAGT${ev0.ledger.broken_seq ? ` fra rad ${ev0.ledger.broken_seq}` : ""}.`); attention = true; }
     else { findings.push("Endringsregisteret er utilgjengelig akkurat nå."); attention = true; }
   }
-  findings.push(freeze.frozen ? `Change freeze er PÅ: ${freeze.reasons.join(", ")}.` : "Change freeze er av (ingen hendelse, kill switch eller brutte tjenestemål).");
-  if (incidents === null) findings.push("Åpne hendelser kunne ikke telles (ikke med i frysevurderingen).");
-  if (freeze.frozen) attention = true;
+  const knownReasons = freeze.reasons.filter((r) => !FREEZE_UNKNOWN_REASONS.includes(r));
+  const unknownReasons = freeze.reasons.filter((r) => FREEZE_UNKNOWN_REASONS.includes(r));
+  if (knownReasons.length > 0) {
+    findings.push(`Change freeze er PÅ: ${freeze.reasons.join(", ")}.`);
+    attention = true;
+  } else if (unknownReasons.length > 0) findings.push(`Change freeze kan ikke utelukkes (ukjent regnes som frys): ${unknownReasons.join(", ")}.`);
+  else findings.push("Change freeze er av (ingen hendelse, kill switch eller brutte tjenestemål).");
+  if (freeze.reasons.includes("kill_switch_unknown")) { unknown.push("kill switch"); findings.push("Kill switch kunne ikke leses (ukjent) - freeze kan ikke utelukkes."); }
+  if (incidents === null) { unknown.push("åpne hendelser"); findings.push("Åpne hendelser kunne ikke telles (ukjent) - freeze kan ikke utelukkes."); }
+  if (!slo_readable) { unknown.push("tjenestemål (SLO)"); findings.push("SLO-rapporten kunne ikke leses eller er tom (ukjent) - observerbarhet mangler, så freeze kan ikke utelukkes."); }
   findings.push("Selvendring er frosset (D-397): ingen kodevei lar Evolution endre produksjon.");
+  const missing = unknown.join(", ");
   return {
-    ev: "EV-0/EV-8", title_no: "Endringsgrenser og frys", mode: "observe", status: attention ? "ATTENTION" : "OK",
-    summary_no: attention ? "Noe står i veien for (eller bør sees på før) at Evolution kan aktiveres." : "Grensene er på plass; ingenting står i veien.",
+    ev: "EV-0/EV-8", title_no: "Endringsgrenser og frys", mode: "observe", status: attention ? "ATTENTION" : unknown.length > 0 ? "UNKNOWN" : "OK",
+    summary_no: attention
+      ? `Noe står i veien for (eller bør sees på før) at Evolution kan aktiveres.${unknown.length > 0 ? ` I tillegg kunne ikke ${missing} måles.` : ""}`
+      : unknown.length > 0 ? `Ikke fullt målt: ${missing} kunne ikke leses - kan ikke si at grensene er på plass.` : "Grensene er på plass; ingenting står i veien.",
     findings, source: "konstitusjon + endringsregister (oppstartssjekk), SLO-rapport, kill switch, hendelser", observed_at: ctx.now.toISOString()
   };
 }
@@ -131,8 +206,12 @@ export async function proposalsSection(ctx: EvolutionContext): Promise<Evolution
     ctx.pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM (SELECT DISTINCT ON (change_id) change_id, decision FROM evolution_change_ledger ORDER BY change_id, seq DESC) t WHERE decision = 'proposed'`)
   ]);
   const counts = new Map(byDecision.rows.map((r) => [r.decision, Number(r.n)]));
+  const waiting = rowNumber(pending.rows, "n");
+  // Antall som venter kommer fra en aggregering som alltid gir én rad: manglende rad/felt er et ugyldig svar (UKJENT), ikke «0 venter».
+  if (waiting === null || waiting < 0 || [...counts.values()].some((n) => !Number.isFinite(n))) {
+    return unknownSection("EV-5", "Endringsforslag", "evolution_change_ledger", "endringsregisteret ga ikke et gyldig antall (tomt eller ugyldig svar)");
+  }
   const total = [...counts.values()].reduce((a, b) => a + b, 0);
-  const waiting = Number(pending.rows[0]?.n ?? 0);
   const findings = [
     total === 0 ? "Ingen forslag registrert siste 30 dager." : `Registrert siste 30 dager: ${[...counts].map(([d, n]) => `${n} ${d}`).join(", ")}.`,
     waiting > 0 ? `${waiting} forslag venter på eierens avgjørelse.` : "Ingen forslag venter på eier.",
@@ -163,9 +242,13 @@ export async function costSection(ctx: EvolutionContext): Promise<EvolutionSecti
          FROM cost_events WHERE at >= $1::timestamptz GROUP BY 1, 2`,
       [new Date(now.getTime() - 15 * 86_400_000).toISOString()]
     )).rows as Array<{ day: string; provider: string; ore: number }>;
-    const mtd = Number((await client.query(`SELECT coalesce(sum(amount_ore), 0)::bigint AS n FROM cost_events WHERE at >= $1::timestamptz`, [monthStart])).rows[0]?.n ?? 0);
+    const mtd = rowNumber((await client.query(`SELECT coalesce(sum(amount_ore), 0)::bigint AS n FROM cost_events WHERE at >= $1::timestamptz`, [monthStart])).rows, "n");
     return { daily: dailyRows, monthToDate: mtd };
   });
+  // Månedssummen kommer fra en aggregering som alltid gir én rad: mangler den (eller et dagstall er ugyldig) er kostnaden UKJENT - aldri `0 kr` og «innenfor grensene» (M2).
+  if (monthToDate === null || daily.some((r) => !Number.isFinite(Number(r.ore)))) {
+    return unknownSection("EV-16", "Kostnad og kapasitet", "cost_events", "kostnadstallene mangler eller er ugyldige i svaret fra databasen");
+  }
   const points: CostPoint[] = daily.map((r) => ({ key: r.provider, day: r.day, ore: Number(r.ore) }));
   const anomalies = detectCostAnomalies(points, today);
   const hardLimit = envNumber(ctx.env, "JARVIS_COST_HARD_LIMIT_ORE", 300_000);
@@ -204,6 +287,10 @@ const OAUTH_CONNECTOR = /^(google|gmail|calendar|drive|sheets|docs|youtube|micro
 
 export async function credentialsSection(ctx: EvolutionContext): Promise<EvolutionSection> {
   const connectors = await ctx.deps.connectors();
+  // Registeret lister ALLE kjente tilkoblinger (også ikke-konfigurerte), så et tomt/ugyldig svar betyr at registeret ikke ble lest - ikke «ingen tilkoblinger, ingen feil».
+  if (!Array.isArray(connectors) || connectors.length === 0) {
+    return unknownSection("EV-17", "Nøkler og tilkoblinger", "connector-registeret", "tilkoblingsregisteret ga ingen tilkoblinger (tomt eller ugyldig svar)");
+  }
   const configured = connectors.filter((c) => c.configured);
   const states: CredentialState[] = configured.map((c) => ({
     ref: c.id,
@@ -280,7 +367,12 @@ const CRITICAL_WORKFLOWS = ["CHAT", "BACKGROUND"] as const;
 
 export async function modelRouteSection(ctx: EvolutionContext): Promise<EvolutionSection> {
   const mesh = ctx.deps.mesh();
-  const usable = mesh.providers.filter((p) => p.provider !== "scripted" && p.state !== "NOT_CONFIGURED" && p.state !== "UNAVAILABLE");
+  if (!mesh || !Array.isArray(mesh.providers) || mesh.providers.length === 0) {
+    return unknownSection("EV-12", "Modellrute i skygge", "modellmeshen", "modellmeshen oppga ingen leverandører (tomt eller ugyldig svar)");
+  }
+  // WP-H0 (JARVIS-087): en leverandør eieren har pauset/tilbakekalt (`paused`) er ikke brukbar i kjeden - ruteren hopper over den - selv om helsen er god.
+  const paused = mesh.providers.filter((p) => p.provider !== "scripted" && p.paused === true).map((p) => p.provider);
+  const usable = mesh.providers.filter((p) => p.provider !== "scripted" && p.paused !== true && p.state !== "NOT_CONFIGURED" && p.state !== "UNAVAILABLE");
   const down = mesh.providers.filter((p) => p.provider !== "scripted" && p.state === "UNAVAILABLE").map((p) => p.provider);
   // Kjeden per kritisk arbeidsflyt = de brukbare leverandørene (lokal først, slik ruteren gjør). Uttestet inntil mesh-fallbacken er sett i drift.
   const chain = usable.map((p) => ({ provider: p.provider }));
@@ -291,7 +383,7 @@ export async function modelRouteSection(ctx: EvolutionContext): Promise<Evolutio
     ctx.now
   );
   const findings = [
-    `Brukbare leverandører: ${usable.map((p) => p.provider).join(", ") || "ingen"}${down.length > 0 ? ` (nede: ${down.join(", ")})` : ""}.`,
+    `Brukbare leverandører: ${usable.map((p) => p.provider).join(", ") || "ingen"}${down.length > 0 ? ` (nede: ${down.join(", ")})` : ""}${paused.length > 0 ? ` (pauset av eier: ${paused.join(", ")})` : ""}.`,
     `Mesh-ruteren: ${mesh.router}; fallback mellom leverandører: ${mesh.fallback}${tested ? "" : " (ikke sett i drift ennå)"}.`,
     ...audit.map((a) => `${a.workflow}: ${a.issue === "single_provider" ? "bare én leverandør i kjeden (konsentrasjonsrisiko)" : a.issue === "never_tested" ? "fallback-kjeden er aldri testet" : "fallback-testen er gammel"}.`),
     "Skygge: Evolution velger ikke modell og ruter ingenting om. Aktivering krever en eier-godkjent allowlist, bake-off og evals (EV-12) - se modellrådgiveren (D-399)."
@@ -314,16 +406,26 @@ function goldenRun(ctx: EvolutionContext): Promise<GoldenRun> {
 
 export async function goldenSection(ctx: EvolutionContext): Promise<EvolutionSection> {
   const run = await goldenRun(ctx);
-  const passed = run.metrics.tasks - run.failed.length;
+  // `metrics.tasks` er antallet som faktisk ble KJØRT. «Alle bestått» sies bare når ingenting er hoppet over (L3, gjennomgang av PR #313): en oppgave som ikke er kjørt er verken bestått eller strøket.
+  const ran = run.metrics.tasks;
+  const skipped = run.skipped.length;
+  const total = ran + skipped;
+  const passed = ran - run.failed.length;
+  const failed = run.failed.length;
   const findings = [
-    `Gull-suite v1 (digest ${run.digest.slice(0, 12)}): ${passed} av ${run.metrics.tasks} oppgaver bestått${run.skipped.length > 0 ? `; ${run.skipped.length} hoppet over (verktøyflaten er ikke tilgjengelig her)` : ""}.`,
-    ...(run.failed.length > 0 ? [`Ikke bestått: ${run.failed.join(", ")}.`] : []),
-    "Oppgavene er faktiske feil og beslutninger fra Jarvis' egen historie (klassifisering, ruting, verktøyutvalg, skjerming, repo-lås), kjørt mot de deterministiske reglene - ingen modell kalles.",
+    `Gull-suite v1 (digest ${run.digest.slice(0, 12)}): ${passed} av ${total} oppgaver bestått${skipped > 0 ? `, ${skipped} hoppet over (verktøyflaten er ikke tilgjengelig her: ${run.skipped.join(", ")}) - de er IKKE målt` : ""}.`,
+    ...(failed > 0 ? [`Ikke bestått: ${run.failed.join(", ")}.`] : []),
+    "Oppgavene er faktiske feil og beslutninger fra Jarvis' egen historie (klassifisering, ruting, verktøyutvalg, skjerming, repo-lås, radar-sone, bundne bekreftelser), kjørt mot de deterministiske reglene - ingen modell kalles.",
+    // L4 (gjennomgang av PR #313): suiten tester REGLER, ikke KOBLING. Fjernes en regel fra chat-/jobbløpet forblir suiten grønn - det er disse testene som feiler da.
+    `Suiten kjører REGLENE som funksjoner (taint-porten mot stubber) og beviser IKKE at de er koblet inn i chat- og jobbløpene. Koblingen låses av egne tester: ${WIRING_LOCKS.map((l) => `${l.rule} (${l.tests.join(", ")})`).join("; ")}.`,
     "Ikke koblet ennå: modellevaluering mot representative oppgaver, regresjonsport mot en lagret baseline og blind A/B (krever modellkjøringer og lagret historikk)."
   ];
+  // ATTENTION = målt og dårlig (noe som kjørte feilet). UNKNOWN = noe kunne ikke måles (hoppet over) og ingenting målt er dårlig. OK kun når ALLE er kjørt og bestått.
   return {
-    ev: "EV-4", title_no: "Gull-suite (regresjonsvern)", mode: "observe", status: run.failed.length > 0 ? "ATTENTION" : "OK",
-    summary_no: run.failed.length > 0 ? `${run.failed.length} av ${run.metrics.tasks} gull-oppgaver er ikke bestått - en regel Jarvis allerede har fungerer ikke lenger.` : `Alle ${run.metrics.tasks} gull-oppgaver er bestått.`,
+    ev: "EV-4", title_no: "Gull-suite (regresjonsvern)", mode: "observe", status: failed > 0 ? "ATTENTION" : skipped > 0 ? "UNKNOWN" : "OK",
+    summary_no: failed > 0
+      ? `${failed} av ${ran} kjørte gull-oppgaver er ikke bestått - en regel Jarvis allerede har fungerer ikke lenger.${skipped > 0 ? ` I tillegg er ${skipped} hoppet over (ikke målt).` : ""}`
+      : skipped > 0 ? `${passed} av ${total} gull-oppgaver bestått, ${skipped} hoppet over (verktøyflaten er ikke tilgjengelig) - ikke alle er målt.` : `Alle ${total} gull-oppgaver er bestått.`,
     findings, source: `apps/api/src/golden-suite.ts (versjon 1, ${GOLDEN_SUITE_DIGEST().slice(0, 12)})`, observed_at: ctx.now.toISOString()
   };
 }
@@ -337,12 +439,12 @@ export async function redTeamSection(ctx: EvolutionContext): Promise<EvolutionSe
     `${attempts} angrepsforsøk mot egne forsvar i ${run.red_team.length} av ${RED_TEAM_CATEGORIES.length} kategorier: ${breaches} brudd.`,
     ...(breached.length > 0 ? [`BRUDD i: ${breached.join(", ")} - sikkerhetsregresjon er en hard stopp som aldri kan veies opp av noe annet.`] : []),
     ...(run.uncovered.length > 0 ? [`Ikke dekket: ${run.uncovered.join(", ")} (aldri tolket som bestått).`] : []),
-    "Dette er en selvtest av eksisterende, deterministiske forsvar (radar-sonen, skjerming, hemmelighetsskanning, repo-lås, ruteinstruks) - ikke en adversariell red-team-agent (EV-21-agenten er ikke bygget)."
+    "Dette er en selvtest av eksisterende, deterministiske forsvar (radar-sonen, skjerming, hemmelighetsskanning, repo-lås, bundne bekreftelser) - ikke en adversariell red-team-agent (EV-21-agenten er ikke bygget). Den tester reglene, ikke koblingen i løpene (se EV-4 for testene som låser koblingen)."
   ];
   const bad = breaches > 0;
   return {
     ev: "EV-21", title_no: "Sikkerhetsselvtest (red team lite)", mode: "observe", status: bad || run.uncovered.length > 0 ? "ATTENTION" : "OK",
-    summary_no: bad ? `${breaches} brudd i selvtesten - hard stopp for all evolusjon.` : run.uncovered.length > 0 ? `Ingen brudd, men ${run.uncovered.length} kategori(er) er ikke dekket.` : `Ingen brudd i ${attempts} forsøk.`,
+    summary_no: bad ? `${breaches} brudd i selvtesten - hard stopp for all evolusjon.` : run.uncovered.length > 0 ? `Ingen brudd, men ${run.uncovered.length} kategori(er) er ikke dekket.` : `Ingen brudd i ${attempts} forsøk mot reglene (koblingen låses av egne tester, se EV-4).`,
     findings, source: "apps/api/src/golden-suite.ts (adversarielle oppgaver) + judgeRedTeam", observed_at: ctx.now.toISOString()
   };
 }
@@ -387,15 +489,19 @@ export async function memorySection(ctx: EvolutionContext): Promise<EvolutionSec
     "Kun forslag: ingenting slettes eller slås sammen herfra (sletting har egen policy og din godkjenning). Antall gjentakelser fra ubetrodd kilde og uavhengige bekreftelser spores ikke ennå, så de to forgiftningsreglene som trenger dem er ikke i bruk."
   ];
   // Sensitivitetsdrift: elementer lagret før ordforrådet ble utvidet (Q-52 A) kan stå lavere enn de nå ville blitt merket. Tallet kommer fra det nattlige sveipet (ikke en ny skanning her).
-  const drift = ctx.deps.resensitize?.() ?? null;
+  const drift = ((): ResensitizeSweepSummary | null => { try { return ctx.deps.resensitize?.() ?? null; } catch { return null; } })();
   const driftPending = drift !== null && drift.mode === "report" && drift.raised.special + drift.raised.sensitive > 0;
   if (drift === null) findings.splice(2, 0, "Sensitivitetsdrift: den nattlige omregningen (kl. 03) har ikke kjørt siden oppstart, så tallet er ukjent.");
   else if (drift.mode === "off") findings.splice(2, 0, "Sensitivitetsdrift: omregningen er slått av (JARVIS_MEMORY_RESENSITIZE=off).");
   else findings.splice(2, 0, `Sensitivitetsdrift (siste omregning, modus ${drift.mode}): ${drift.scanned} skannet, ${drift.raised.special + drift.raised.sensitive} ${drift.mode === "apply" ? "hevet" : "ville blitt hevet"} (special ${drift.raised.special}, sensitive ${drift.raised.sensitive})${drift.skipped_concurrent > 0 ? `, ${drift.skipped_concurrent} hoppet over fordi de ble endret samtidig` : ""}${drift.truncated ? "; avkortet av radtaket" : ""}${driftPending ? ". Gamle, feilmerkede elementer holder samtaler lokale til du setter JARVIS_MEMORY_RESENSITIZE=apply." : "."}`);
   const attention = reverify.length > 0 || poisoning.length > 0 || dedupe.length > 0 || driftPending;
+  // Sensitivitetsdriften er en del av det EV-10 påstår å måle: er tallet ukjent (omregningen har ikke kjørt, eller kunne ikke leses) kan seksjonen ikke stå som OK (M2).
+  const driftUnknown = drift === null;
   return {
-    ev: "EV-10", title_no: "Minnevedlikehold", mode: "observe", status: attention ? "ATTENTION" : "OK",
-    summary_no: attention ? `${reverify.length} å re-verifisere, ${poisoning.length} forgiftningsmistanker, ${dedupe.length} duplikatgrupper${driftPending ? `, ${drift.raised.special + drift.raised.sensitive} minner med for lav sensitivitet` : ""}.` : "Ingen funn i minnet som ble vurdert.",
+    ev: "EV-10", title_no: "Minnevedlikehold", mode: "observe", status: attention ? "ATTENTION" : driftUnknown ? "UNKNOWN" : "OK",
+    summary_no: attention
+      ? `${reverify.length} å re-verifisere, ${poisoning.length} forgiftningsmistanker, ${dedupe.length} duplikatgrupper${driftPending ? `, ${drift.raised.special + drift.raised.sensitive} minner med for lav sensitivitet` : ""}.`
+      : driftUnknown ? "Ingen funn i minnet som ble vurdert, men sensitivitetsdriften er ikke målt (omregningen har ikke kjørt siden oppstart)." : "Ingen funn i minnet som ble vurdert.",
     findings, source: "memory_items + memory_sources (kun metadata og antall)", observed_at: ctx.now.toISOString()
   };
 }
@@ -404,38 +510,48 @@ export async function memorySection(ctx: EvolutionContext): Promise<EvolutionSec
 // EV-9: selvhelbredelse - tillatelsesmodellen mot ekte signaler (ingenting repareres herfra)
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
 export async function healSection(ctx: EvolutionContext): Promise<EvolutionSection> {
-  const [mesh, connectors, scheduler, kill] = await Promise.all([
-    Promise.resolve().then(() => ctx.deps.mesh()),
-    ctx.deps.connectors().catch(() => null),
-    readSchedulerHealth(ctx.pool).catch(() => null),
-    ctx.deps.killSwitchActive().catch(() => false)
+  const [meshRead, connectorsRead, schedulerRead, freezeState] = await Promise.all([
+    settle(() => ctx.deps.mesh()), settle(() => ctx.deps.connectors()), settle(() => readSchedulerHealth(ctx.pool)), computeFreeze(ctx)
   ]);
-  const base = { attempts: 0, max_attempts: 2, repair_class: null, owner_approved: false, kill_switch_active: kill };
+  // Kjent-ikke-lik-OK (M2): det som ikke kunne leses sies eksplisitt (aldri svelget som «ingen feil»). Tomt svar fra et register som alltid har innhold regnes også som ikke lest.
+  const unreadable: string[] = [];
+  const mesh = meshRead.ok && meshRead.v && Array.isArray(meshRead.v.providers) && meshRead.v.providers.length > 0 ? meshRead.v : null;
+  if (mesh === null) unreadable.push("modellmeshen");
+  const connectors = connectorsRead.ok && Array.isArray(connectorsRead.v) && connectorsRead.v.length > 0 ? connectorsRead.v : null;
+  if (connectors === null) unreadable.push("tilkoblingsregisteret");
+  const scheduler = schedulerRead.ok && schedulerRead.v && Array.isArray(schedulerRead.v.problems) && schedulerRead.v.jobs_seen > 0 ? schedulerRead.v : null;
+  if (scheduler === null) unreadable.push("planlagte jobber");
+  // Ukjent kill switch (`null`) behandles av `decideHeal` som PÅ med egen årsak - aldri som av.
+  const base = { attempts: 0, max_attempts: 2, repair_class: null, owner_approved: false, kill_switch_active: freezeState.kill_switch };
   const failoverPreapproved = (ctx.env["JARVIS_EV_PREAPPROVED_FAILOVER"] ?? "").trim().toLowerCase() === "true";
   const findings: string[] = [];
   let anySignal = false;
-  const down = mesh.providers.filter((p) => p.provider !== "scripted" && p.state === "UNAVAILABLE");
+  const down = (mesh?.providers ?? []).filter((p) => p.provider !== "scripted" && p.state === "UNAVAILABLE");
   for (const p of down) {
     anySignal = true;
-    const v = decideHeal({ ...base, action: "switch_provider", preapproved_failover: failoverPreapproved, ua_gate_live: mesh.fallback === "VERIFIED" });
+    const v = decideHeal({ ...base, action: "switch_provider", preapproved_failover: failoverPreapproved, ua_gate_live: mesh?.fallback === "VERIFIED" });
     findings.push(`Leverandør ${p.provider} er nede → bytte til annen leverandør er ${v.level}: ${v.allowed ? "tillatt automatisk" : `krever eier (${v.reasons.join(", ")})`}.`);
   }
   const failing = (connectors ?? []).filter((c) => c.configured && c.health !== null && c.health.state !== "healthy");
   for (const c of failing.slice(0, 5)) {
     anySignal = true;
     const v = decideHeal({ ...base, action: "reconnect", preapproved_failover: failoverPreapproved, ua_gate_live: false });
-    findings.push(`Tilkobling ${c.id} svikter → gjenoppkobling er ${v.level}: ${v.allowed ? "tillatt automatisk" : "krever eier"}.`);
+    findings.push(`Tilkobling ${c.id} svikter → gjenoppkobling er ${v.level}: ${v.allowed ? "tillatt automatisk" : `krever eier (${v.reasons.join(", ")})`}.`);
   }
   if (scheduler && scheduler.problems.length > 0) {
     anySignal = true;
     findings.push(`${scheduler.problems.length} planlagte jobber har problemer → kun deteksjon (H0) er tillatt automatisk; reparasjon følger jobbens egen nytt-forsøk-logikk.`);
   }
-  if (!anySignal) findings.push("Ingen feilsignaler å vurdere akkurat nå (leverandører, tilkoblinger og jobber).");
+  if (unreadable.length > 0) findings.push(`Kunne ikke leses: ${unreadable.join(", ")} - signaler derfra er ikke vurdert (ukjent, ikke «ingen feil»).`);
+  else if (!anySignal) findings.push("Ingen feilsignaler å vurdere akkurat nå (leverandører, tilkoblinger og jobber).");
   findings.push("Evolution utfører ingen reparasjon: H0 (deteksjon) er alt som er aktivt. Watchdog og restart (fase 10) er laveste lag og er uberørt; H1+ er DEFERRED.");
   const owner = findings.filter((f) => f.includes("krever eier")).length;
   return {
-    ev: "EV-9", title_no: "Selvhelbredelse (tillatelser)", mode: "observe", status: owner > 0 ? "ATTENTION" : "OK",
-    summary_no: owner > 0 ? `${owner} signal(er) ville kreve eier om noe skulle repareres.` : anySignal ? "Signalene er innenfor det som kan håndteres uten eier - men ingenting repareres herfra." : "Ingen feilsignaler.",
+    ev: "EV-9", title_no: "Selvhelbredelse (tillatelser)", mode: "observe", status: owner > 0 ? "ATTENTION" : unreadable.length > 0 ? "UNKNOWN" : "OK",
+    summary_no: owner > 0
+      ? `${owner} signal(er) ville kreve eier om noe skulle repareres.${unreadable.length > 0 ? ` I tillegg kunne ikke ${unreadable.join(", ")} leses.` : ""}`
+      : unreadable.length > 0 ? `Ikke fullt målt: ${unreadable.join(", ")} kunne ikke leses.`
+      : anySignal ? "Signalene er innenfor det som kan håndteres uten eier - men ingenting repareres herfra." : "Ingen feilsignaler.",
     findings, source: "modellmeshen, connector-registeret, scheduler_state + decideHeal (EV-9)", observed_at: ctx.now.toISOString()
   };
 }
@@ -443,28 +559,47 @@ export async function healSection(ctx: EvolutionContext): Promise<EvolutionSecti
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
 // Sovende deler: hva mangler før eieren kan ta en navngitt D-beslutning om aktivering
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
-export async function dormantSection(ctx: EvolutionContext): Promise<EvolutionSection> {
-  const [{ verdict: freeze }, connectors] = await Promise.all([computeFreeze(ctx), ctx.deps.connectors().catch(() => [] as ConnectorStatus[])]);
-  const ev0 = ctx.deps.ev0Status();
+/**
+ * Innsignalene til aktiveringsberedskapen. Kun KJENTE verdier er `true`/tall; alt som ikke kunne måles er `null` (M2) - og `evaluateAllReadiness` lar aldri en del stå som klar på grunn av et ukjent innsignal.
+ * Eksportert så testene kan kjøre beslutningsfunksjonen direkte mot hver svikt.
+ */
+export async function readinessFacts(ctx: EvolutionContext): Promise<ReadinessFacts> {
+  const [{ verdict: freeze }, connectorsRead] = await Promise.all([computeFreeze(ctx), settle(() => ctx.deps.connectors())]);
+  const ev0 = readEv0(ctx.deps);
   const env = ctx.env;
-  const facts: ReadinessFacts = {
-    constitution_verified: ev0?.constitution.status === "verified",
-    ledger_ok: ev0?.ledger.status === "ok",
-    change_freeze_off: !freeze.frozen,
-    proven_connectors: connectors.filter((c) => c.configured && c.test_method === "live" && c.health?.state === "healthy").length,
-    job_runner_configured: env["JARVIS_JOB_RUNNER"] === "container" && ["JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY"].every((k) => (env[k] ?? "").trim() !== ""),
+  const connectors = connectorsRead.ok && Array.isArray(connectorsRead.v) && connectorsRead.v.length > 0 ? connectorsRead.v : null;
+  // Frys: KJENT på hvis en målt årsak finnes; ellers ukjent hvis noe ikke kunne måles; kun «av» når alle innsignal er målt og friske.
+  const frozenForKnownReason = freeze.reasons.some((r) => !FREEZE_UNKNOWN_REASONS.includes(r));
+  // Jobb-runner-variablene går kun til worker-containeren (L6): synlige her (lokal kjøring) gir et kjent svar, ellers er faktumet UKJENT og eieren erklærer `JOB_RUNNER_CONFIGURED`.
+  const runnerVars = ["JARVIS_JOB_RUNNER", "JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY"] as const;
+  const runnerVisible = runnerVars.every((k) => env[k] !== undefined);
+  return {
+    constitution_verified: ev0 === null ? null : ev0.constitution.status === "verified",
+    ledger_ok: ev0 === null ? null : ev0.ledger.status === "ok",
+    change_freeze_off: frozenForKnownReason ? false : freeze.frozen ? null : true,
+    proven_connectors: connectors === null ? null : connectors.filter((c) => c.configured && c.test_method === "live" && c.health?.state === "healthy").length,
+    job_runner_configured: runnerVisible ? env["JARVIS_JOB_RUNNER"] === "container" && runnerVars.slice(1).every((k) => (env[k] ?? "").trim() !== "") : null,
     declared_gates: parseDeclaredGates(env["JARVIS_EV_VERIFIED_GATES"])
   };
-  const verdicts = evaluateAllReadiness(facts);
+}
+
+const MEASURED_FACT_LABEL: Readonly<Record<MeasuredFact, string>> = {
+  constitution_verified: "konstitusjonen", ledger_ok: "endringsregisteret", change_freeze_off: "change freeze", proven_connectors: "beviste connectorer", job_runner_configured: "jobb-runneren (worker-oppsettet er ikke synlig for API-et)"
+};
+
+export async function dormantSection(ctx: EvolutionContext): Promise<EvolutionSection> {
+  const verdicts = evaluateAllReadiness(await readinessFacts(ctx));
   const findings = verdicts.map((v) =>
     v.ready_for_owner_decision
       ? `${v.ev} ${v.title_no}: alle tekniske krav er oppfylt - klar for en navngitt D-beslutning (ikke aktivert).`
-      : `${v.ev} ${v.title_no} (${v.why_dormant_no}): mangler ${v.missing.length} - ${v.missing.map((m) => m.label_no).slice(0, 3).join("; ")}${v.missing.length > 3 ? "; …" : ""}.`
+      : `${v.ev} ${v.title_no} (${v.why_dormant_no}): mangler ${v.missing.length}${v.unknown_signals.length > 0 ? ` (ukjent, kunne ikke måles: ${v.unknown_signals.map((k) => MEASURED_FACT_LABEL[k]).join(", ")})` : ""} - ${v.missing.map((m) => m.label_no).slice(0, 3).join("; ")}${v.missing.length > 3 ? "; …" : ""}.`
   );
+  const unknownSignals = [...new Set(verdicts.flatMap((v) => v.unknown_signals))];
+  if (unknownSignals.length > 0) findings.push(`Innsignal som ikke kunne måles (regnes som IKKE oppfylt - ingen del står som klar på grunn av dem): ${unknownSignals.map((k) => MEASURED_FACT_LABEL[k]).join(", ")}.`);
   findings.push("Ingenting av dette er aktivert, og ingen kodevei aktiverer det: aktivering krever en navngitt D-beslutning fra deg (porter du har verifisert oppgis i JARVIS_EV_VERIFIED_GATES).");
   return {
     ev: "EV-6/11/13/14/15/18/20/22/23", title_no: "Sovende deler", mode: "dormant", status: "DORMANT",
-    summary_no: `${verdicts.length} deler er bygget som beslutningsregler, men sover: ${verdicts.filter((v) => v.ready_for_owner_decision).length} har alle tekniske krav oppfylt.`,
+    summary_no: `${verdicts.length} deler er bygget som beslutningsregler, men sover: ${verdicts.filter((v) => v.ready_for_owner_decision).length} har alle tekniske krav oppfylt.${unknownSignals.length > 0 ? ` ${unknownSignals.length} innsignal kunne ikke måles.` : ""}`,
     findings, source: "kjøretidsfakta + eierens erklærte porter (JARVIS_EV_VERIFIED_GATES)", observed_at: ctx.now.toISOString()
   };
 }

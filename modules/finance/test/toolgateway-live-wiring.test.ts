@@ -55,7 +55,7 @@ const fakeFikenFactory = (_credentials: FikenCredentials): FikenGeneralJournalEn
 function identityFor(tenantId: string): IdentityContext {
   return {
     person_id: OWNER_PERSON, tenant_id: tenantId, memory_space_id: "business",
-    session_id: "sess-fin-tgw", device_id: "jarvis-core", channel: "api", auth_strength: "active"
+    session_id: "sess-fin-tgw", device_id: "jarvis-host-acceptance", channel: "api", auth_strength: "signed"
   };
 }
 

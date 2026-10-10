@@ -32,7 +32,7 @@ CREATE UNIQUE INDEX incidents_active_dedupe_idx ON incidents (tenant_id, memory_
 CREATE INDEX incidents_dedupe_lookup_idx ON incidents (tenant_id, memory_space_id, dedupe_key, updated_at DESC) WHERE dedupe_key IS NOT NULL;
 CREATE INDEX incidents_correlation_idx ON incidents (tenant_id, correlation_id) WHERE correlation_id IS NOT NULL;
 
--- Varig overgangshistorikk. `reason` er kort fritekst (≤ 500) og redigeres for hemmeligheter før lagring; `evidence_ref` er en PEKER (evidens-/diagnose-/eksekusjons-/jobb-id), aldri innhold.
+-- Varig overgangshistorikk. `reason` er kort fritekst (maks 500 tegn) og redigeres for hemmeligheter før lagring; `evidence_ref` er en PEKER (evidens-/diagnose-/eksekusjons-/jobb-id), aldri innhold.
 -- `from_status IS NULL` = opprettelsesraden. `txid` binder raden til transaksjonen som endret statusen (se constraint-triggeren under).
 -- `actor_kind`: owner = eieren (actor_person_id satt), producer = en deterministisk produsent, repair = reparasjonsflyten (kodejobb), system = bakfyll/øvrig systemhandling.
 CREATE TABLE incident_transitions (

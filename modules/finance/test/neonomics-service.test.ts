@@ -147,12 +147,25 @@ beforeEach(async () => {
   // deteksjon/betalingssynk) skal ALDRI se forrige tests rader i den delte
   // embedded-databasen. adminPool = test-fixture-manipulasjon (RLS-bypass).
   // Rekkefølge: barn-FK før forelder (samme regel som erasure-planen).
-  for (const table of [
-    "bank_transactions", "bank_account_balances", "bank_accounts", "bank_consents",
-    "neonomics_webhook_events", "stripe_refunds", "vipps_refunds",
-    "payment_intent_events", "payment_intents"
-  ]) {
-    await adminPool.query(`DELETE FROM ${table}`);
+  // WP-F1 (review M-F3, migrasjon 101): sendte penge-rader (payment_intents/stripe_refunds/vipps_*) slettes kun i en erasure-transaksjon - fixturen rydder derfor i én transaksjon med
+  // SAMME transaksjonslokale GUC som `ErasureService` setter (forsvinner ved COMMIT, gjelder kun disse DELETE-ene).
+  const client = await adminPool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT set_config('jarvis.erasure_in_progress', 'true', true)");
+    for (const table of [
+      "bank_transactions", "bank_account_balances", "bank_accounts", "bank_consents",
+      "neonomics_webhook_events", "stripe_refunds", "vipps_refunds",
+      "payment_intent_events", "payment_intents"
+    ]) {
+      await client.query(`DELETE FROM ${table}`);
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
   }
 });
 

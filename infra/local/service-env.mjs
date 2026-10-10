@@ -321,8 +321,10 @@ export const SERVICE_ENV = {
     "JARVIS_API_DRAINS_EXECUTIVE",
     // EV-1 (D-412): bygg-sha og versjon som selvdiagnosen viser (uten dem vises bygget som UKJENT).
     "JARVIS_BUILD_SHA", "JARVIS_VERSION",
-    // WP-B (D-452): evolusjonsobservatoriet (kun lesing) - porter eieren har verifisert, forhåndsgodkjent failover, og jobb-runner-konfigurasjonen (ikke-hemmelige navn) som aktiveringsberedskapen for EV-6 leser.
-    "JARVIS_EV_VERIFIED_GATES", "JARVIS_EV_PREAPPROVED_FAILOVER", "JARVIS_JOB_RUNNER", "JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY",
+    // WP-B (D-452): evolusjonsobservatoriet (kun lesing) - porter eieren har verifisert og forhåndsgodkjent failover. L6 (gjennomgang av PR #313): jobb-runner-variablene (`JARVIS_JOB_RUNNER/IMAGE/NETWORK/EGRESS_PROXY`) går
+    // KUN til worker (se under): API-et utfører ingen kodejobber, og egress-proxyen kan avsløre intern topologi/legitimasjon. Aktiveringsberedskapen for EV-6 ser derfor «jobb-runner konfigurert» som UKJENT i API-et,
+    // og eieren erklærer det med `JOB_RUNNER_CONFIGURED` i `JARVIS_EV_VERIFIED_GATES` når han har verifisert det på verten.
+    "JARVIS_EV_VERIFIED_GATES", "JARVIS_EV_PREAPPROVED_FAILOVER",
     // EV-3 (D-452): radar-kilder eieren selv velger (inert uten) og klokkeslett for det planlagte sveipet.
     "JARVIS_RADAR_SOURCES", "JARVIS_RADAR_SWEEP_HOUR",
     // D-414: «chat først» - bakgrunnsformål venter mens chat pågår (maks / stillhet, ms).
@@ -330,7 +332,7 @@ export const SERVICE_ENV = {
     // WP-C4 (Value Center): V2 oppfølgingsvarsel (AV som standard), V5-forslag (AV som standard) og eier-erklærte porter for V3-beredskap. Ingen hemmeligheter - kun flagg, tall og portnavn.
     "JARVIS_V2_PUSH_ENABLED", "JARVIS_V2_PUSH_MAX_PER_DAY", "JARVIS_V2_PUSH_QUIET_START", "JARVIS_V2_PUSH_QUIET_END", "JARVIS_V2_PUSH_TITLES", "JARVIS_V5_PROPOSALS_ENABLED", "JARVIS_VALUE_VERIFIED_GATES",
     // D-395 (JARVIS-092): sveip-klokkeslett main.ts leser (tidligere ikke videresendt til containeren, så compose kunne aldri endre dem).
-    "JARVIS_BUSINESS_EVENTS_SYNC_HOUR", "JARVIS_BUSINESS_SCORING_HOUR", "JARVIS_BUSINESS_SWEEP_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_WEEKDAY", "JARVIS_CONNECTOR_HEALTH_SWEEP_HOUR", "JARVIS_CONVERSATION_GRAPH_SYNC_HOUR", "JARVIS_FINANCE_SPEND_SWEEP_HOUR", "JARVIS_GROWTH_RECOMMENDATION_SWEEP_HOUR", "JARVIS_HEALTH_RETENTION_SWEEP_HOUR", "JARVIS_LOCATION_RETENTION_SWEEP_HOUR", "JARVIS_SITUATION_SWEEP_HOUR", "JARVIS_SUPPORT_INBOX_SYNC_HOUR", "JARVIS_VISION_RETENTION_SWEEP_HOUR", "JARVIS_STREAM_DEBUG",
+    "JARVIS_BUSINESS_EVENTS_SYNC_HOUR", "JARVIS_BUSINESS_SCORING_HOUR", "JARVIS_BUSINESS_SWEEP_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_WEEKDAY", "JARVIS_CONNECTOR_HEALTH_SWEEP_HOUR", "JARVIS_CONVERSATION_GRAPH_SYNC_HOUR", "JARVIS_FINANCE_RECONCILE_HOUR", "JARVIS_FINANCE_SPEND_SWEEP_HOUR", "JARVIS_GROWTH_RECOMMENDATION_SWEEP_HOUR", "JARVIS_HEALTH_RETENTION_SWEEP_HOUR", "JARVIS_LOCATION_RETENTION_SWEEP_HOUR", "JARVIS_SITUATION_SWEEP_HOUR", "JARVIS_SUPPORT_INBOX_SYNC_HOUR", "JARVIS_VISION_RETENTION_SWEEP_HOUR", "JARVIS_STREAM_DEBUG",
     // WP-E1 (JARVIS-068): incident-produsentene i api-prosessen - intervall (ms), grener hvis utrullinger teller, og repoer som leses aktivt for nye Actions-kjøringer (tom = ingen polling). Ingen hemmeligheter.
     "JARVIS_INCIDENT_PRODUCERS_INTERVAL_MS", "JARVIS_INCIDENT_DEPLOY_REFS", "JARVIS_INCIDENT_DEPLOY_REPOS",
     // WP-C2 (OPS-RUNTIME): ekstern oppetids-heartbeat (AV som standard; pinger kun mens en lokal selvsjekk består) og stien til den SKRIVEBESKYTTEDE backup-statusfilen

@@ -16,6 +16,8 @@ const fakeDeps = {
   identity: { resolveIdentity: async (i: Record<string, string>) => ({ ok: true, identity: { ...i, memory_space_id: i["memory_space"] } }) },
   executive: {
     gateway: {
+      // WP-F1: ruten slår opp definisjonen for å avgjøre om godkjenning krever step-up (pengehandlinger) - ingen av disse testverktøyene gjør det.
+      get: () => undefined,
       execute: async (call: { identity: { person_id: string }; tool_id: string; action: string; parameters: unknown; idempotency_key: string }) => {
         executed.push({ tool_id: call.tool_id, action: call.action, parameters: call.parameters, person: call.identity.person_id, idempotency_key: call.idempotency_key });
         return call.action === "fails" ? { ok: false, reason: "policy_denied" } : { ok: true, data: { id: "t1" }, external_id: "ext-1" };
@@ -23,6 +25,7 @@ const fakeDeps = {
     }
   },
   confirmations: {
+    peekPending: async () => null,
     listPending: async () => [],
     approveAndTake: async (_who: unknown, id: string) => {
       if (taken.includes(id) || id === "conf-gone") return null;

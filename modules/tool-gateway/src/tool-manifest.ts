@@ -109,6 +109,7 @@ const EFFECT_OVERRIDES: Record<string, Effect> = {
   [k("executive", "get_self_diagnosis")]: "read",
   [k("executive", "get_slo_report")]: "read",
   [k("executive", "get_evolution_report")]: "read",
+  [k("executive", "get_control_center")]: "read",
   [k("executive", "get_value_report")]: "read",
   // WP-E1 (UA-5): driftsstatus (åpne hendelser, skymål, produsenthelse) - ren lesing.
   [k("executive", "get_infra_status")]: "read",
@@ -134,6 +135,14 @@ function inferDataZone(tool_id: string): DataZone {
   if (JARVIS_CORE_NAMESPACES.has(tool_id)) return "internal";
   return "vendor_cloud";
 }
+
+/**
+ * WP-H0: eksplisitte sensitivitetsmerker per HANDLING (overstyrer utledningen fra navnerommet). `executive.get_control_center` leverer eierens konfigurasjonsmetadata (hvilke tjenester som er koblet til,
+ * kostnad, autoritet, leverandørhelse) - aldri «public», selv om resten av executive-lesingene er det.
+ */
+const SENSITIVITY_OVERRIDES: Record<string, Sensitivity> = {
+  [k("executive", "get_control_center")]: "private"
+};
 
 function inferSensitivity(tool_id: string): Sensitivity {
   if (FINANCIAL_NAMESPACES.test(tool_id)) return "restricted";
@@ -171,8 +180,13 @@ const TIER_KEYS: ReadonlySet<string> = new Set([...CHAT_READ_TIER_KEYS, ...CHAT_
  * (flaten hadde kun `github.read_issues`). Ubetrodd output (PR-titler/-tekst) er fortsatt data, og jobben kan uansett ikke handle utad.
  */
 export const BACKGROUND_GITHUB_READ = CHAT_READ_TIER.filter((g) => g.tool_id === "github");
-/** D-382: tale er ubetrodd inndata (STT) - lese-nivået uten finans; aldri handlingsnivået. */
-const VOICE_READ_TIER = CHAT_READ_TIER.filter((g) => !/^finance/.test(g.tool_id));
+/**
+ * Gjennomgang av PR #316 (L-4): handlinger tale ALDRI får, utover finans. Kontrollsentrene er en EIER-flate med enhetssignatur (rapportene er eierens konfigurasjonsmetadata, handlingene peker på eier-ruter):
+ * tale er ubetrodd inndata (STT) og gir aldri forhøyet autentiseringsstyrke, så hele rapporten skal ikke kunne leses opp over en stemmeflate.
+ */
+const VOICE_EXCLUDED_KEYS: ReadonlySet<string> = new Set([k("executive", "get_control_center")]);
+/** D-382: tale er ubetrodd inndata (STT) - lese-nivået uten finans (og uten kontrollsentrene, L-4); aldri handlingsnivået. */
+const VOICE_READ_TIER = CHAT_READ_TIER.filter((g) => !/^finance/.test(g.tool_id) && !VOICE_EXCLUDED_KEYS.has(k(g.tool_id, g.action)));
 
 /** Flatene en handling kan stå på. ALT annet er forbudt. Utvidelse er en sikkerhetsendring (ny beslutning + test). */
 export const SURFACE_TOOL_GRANTS: Readonly<Record<Surface, ReadonlyArray<{ tool_id: string; action: string }>>> = {
@@ -252,7 +266,7 @@ export function buildToolManifest(defs: ReadonlyArray<ToolDefinition>): ToolMani
       risk,
       effect,
       data_zone: inferDataZone(def.tool_id),
-      sensitivity: inferSensitivity(def.tool_id),
+      sensitivity: SENSITIVITY_OVERRIDES[key] ?? inferSensitivity(def.tool_id),
       cost: inferCost(def.tool_id, effect),
       network: inferNetwork(def.tool_id, def),
       idempotency: risk === "D" || effect === "pay" || effect === "send" ? "required" : effect === "read" ? "none" : "recommended",

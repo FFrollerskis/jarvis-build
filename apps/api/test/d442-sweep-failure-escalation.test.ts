@@ -317,7 +317,7 @@ describe("D-442: main.ts forkaster aldri et sveipresultat (kildenivå-vakt, main
     const viaCollector = [...mainSource.matchAll(/failOnSweepFailures\("([a-z-]+)", \(failures\) => (run\w+)\(([^)]*)\)\)/g)];
     expect(viaCollector.map((m) => m[1]).sort()).toEqual([
       "business-events-sync", "business-open-loop-sweep", "business-scoring-recalc", "conversation-graph-sync",
-      "finance-spend-integrity-sweep", "growth-action-recommendation-sweep", "neonomics-sweep", "stripe-payment-sync",
+      "finance-reconcile-sweep", "finance-spend-integrity-sweep", "growth-action-recommendation-sweep", "neonomics-sweep", "stripe-payment-sync",
       "support-inbox-sync", "vipps-payment-sync", "wallester-sweep"
     ]);
     for (const [, job, , args] of viaCollector) {

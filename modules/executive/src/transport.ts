@@ -4,6 +4,7 @@ import type { JsonValue } from "@jarvis/contracts";
 import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import type { ExecutiveService } from "./service.ts";
 import { summarizeCapabilityStatusNo, summarizeConnectorStatusNo, summarizeSelfDiagnosisNo } from "./status-summary.ts";
+import { CONTROL_CENTER_IDS } from "./control-center/index.ts";
 
 /**
  * UA-11 Executive Mode (P0, D-162): eierens SAMLEDE kontrollflate, eksponert
@@ -21,6 +22,16 @@ import { summarizeCapabilityStatusNo, summarizeConnectorStatusNo, summarizeSelfD
  */
 export class ExecutiveTransport implements ToolTransport {
   constructor(private readonly service: ExecutiveService) {}
+
+  /** WP-H0: eier-kun-porten for `get_control_center` (kobles på verktøydefinisjonen som `parameterAuthorizer`). */
+  authorizeControlCenter(identity: Parameters<ExecutiveService["authorizeControlCenter"]>[0]): { allowed: boolean; reason: string } {
+    return this.service.authorizeControlCenter(identity);
+  }
+
+  /** WP-H0 (JARVIS-087): eier-kun-porten for kontrollsenterets mutasjoner (`cancel_task`) - fail-closed også uten register. */
+  authorizeOwnerControl(identity: Parameters<ExecutiveService["authorizeOwnerControl"]>[0]): { allowed: boolean; reason: string } {
+    return this.service.authorizeOwnerControl(identity);
+  }
 
   async invoke(
     action: string,
@@ -83,6 +94,22 @@ export class ExecutiveTransport implements ToolTransport {
         const report = await this.service.getEvolutionReport();
         return { data: report as unknown as JsonValue };
       }
+      case "get_control_center": {
+        // WP-H0: uten `center` = oversikt over alle ti sentre (kompakt); med `center` = full rapport + forklaring. Et ikke-koblet senter er et ærlig, strukturert svar (`found: false`) -
+        // IKKE et kastet unntak, som ToolGateway ellers ville tolket som at hele executive-verktøyet er utilgjengelig (helse).
+        const center = parameters["center"];
+        if (center === undefined) {
+          const overview = await this.service.getControlCenterOverview(identity);
+          const { summary_no, ...rest } = overview;
+          return { data: { summary_no, ...rest } as unknown as JsonValue }; // `summary_no` først (se under)
+        }
+        const result = await this.service.getControlCenterReport(identity, String(center));
+        if (result === null) {
+          return { data: { found: false, center: String(center), summary_no: "Dette kontrollsenteret er ikke koblet inn ennå, så ingenting kan vurderes." } as unknown as JsonValue };
+        }
+        // `summary_no` og `explanation_no` først: chat-executoren kutter lange svar bakfra, og det er disse modellen skal relayere.
+        return { data: { found: true, summary_no: result.report.summary_no, explanation_no: result.explanation_no, report: result.report } as unknown as JsonValue };
+      }
       case "get_value_report": {
         // WP-C4: tenanten kommer UTELUKKENDE fra den betrodde kontekst-identiteten (D-68), aldri fra parametre.
         const report = await this.service.getValueReport(identity.tenant_id);
@@ -104,6 +131,11 @@ export class ExecutiveTransport implements ToolTransport {
       case "deactivate_kill_switch": {
         const result = await this.service.deactivateKillSwitch(identity);
         return toolResultToTransportResult(result);
+      }
+      case "cancel_task": {
+        // WP-H0 (JARVIS-087): kontrollsenterets avbryt-handling - gjennomslag til den eksisterende kanselleringsveien (TaskService.cancel). Eier-kun håndheves FØR dette kalles (`parameterAuthorizer`).
+        const taskId = requireString(parameters, "task_id");
+        return { external_id: taskId, data: (await this.service.cancelTask(identity, taskId)) as unknown as JsonValue };
       }
       case "freeze_connector": {
         const result = await this.service.freezeConnector(identity, requireString(parameters, "connector_id"), requireString(parameters, "reason"));
@@ -244,6 +276,15 @@ export function executiveToolDefinitions(transport: ExecutiveTransport): ToolDef
       "get_evolution_report",
       "Svar på «hvordan utvikler du deg?»/«hva kan du forbedre?»/«hva har du lært?»: evolusjonsportene (EV-0…EV-23) slik de står NÅ, fra EKTE målinger (endringsregister, kostnad, tilkoblinger, vedlikeholdsplan, modellvalg i skygge …). KUN observasjon - jeg endrer ingenting av meg selv (selvendring er frosset), og sovende deler sies å være sovende. Ukjent vises som ukjent, aldri som bra."
     ),
+    {
+      ...read(
+        "get_control_center",
+        "Les eierens kontrollsentre (UA-11 Admin Control Center): uten `center` en oversikt over alle ti sentre med status per seksjon (integrasjoner, autoritet, AI, finans, minne, agenter, drift, verdi, personvern, sikkerhet); med `center` full rapport for ett senter med hvert tall kildeforankret (tabell/kilde og når det ble målt), en norsk forklaring av hvorfor noe er advarsel/feil, og hvilke eksisterende kontrollhandlinger eieren kan ta (pause/tilbakekall). KUN lesing - jeg utfører ingenting herfra. Ukjent vises som ukjent, aldri som i orden. Kun eieren får svar, og kun fra en signert enhetsøkt (nettleser/app) - aldri over tale eller Telegram.",
+        { center: z.enum(CONTROL_CENTER_IDS).optional() }
+      ),
+      // WP-H0: eier-kun FØR noe bygges (avslaget er en vanlig `tool.denied`-revisjonsrad). Rapportene er konfigurasjonsmetadata og handlingene peker på eier-ruter.
+      parameterAuthorizer: (_parameters, identity) => transport.authorizeControlCenter(identity)
+    },
     read(
       "get_value_report",
       "Svar på «hva har du hjulpet meg med?»/«hvor mye bruker jeg deg?»/«hva er verdien?» fra EKTE tall (kun antall og tidspunkt - aldri innhold): bruk per verdiløkke (Daily Brief, oppfølging, jobber, samtaler, bekreftelser, kost) siste 7 og 30 døgn, pluss status for de sovende løkkene (Builder Loop-beredskap og driftsforslag). Det som ikke kan måles står som «ikke målbart», aldri som 0. Gjengi summary_no."
@@ -263,6 +304,16 @@ export function executiveToolDefinitions(transport: ExecutiveTransport): ToolDef
       input_schema: record({ situation_id: z.string() }),
       capability_class: "B", scopes: ["executive.write"], reversible: true,
       rollback_procedure: "en ny deteksjon gjenåpner situasjonen automatisk", idempotent_external: true, ...common
+    },
+    {
+      // WP-H0 (JARVIS-087): avbryt ÉN bakgrunnsjobb/agent fra kontrollsenteret. Klasse B (samme som `tasks.cancel_task` selv). Stopp-handling: krever ikke step-up (se STEP_UP_EXEMPT_ACTIONS), men er EIER-KUN
+      // (samme port som kontrollsentrene) og står aldri på en modellflate. Det er ingen angrefunksjon: en avbrutt jobb kan ikke gjenopptas.
+      tool_id: "executive", action: "cancel_task",
+      description: "Avbryt ÉN bakgrunnsjobb/agent (gjennomslag til den eksisterende kanselleringsveien tasks.cancel): en jobb som ikke er startet avbrytes umiddelbart, en kjørende stopper ved neste trygge punkt. Sideeffekter som allerede er utført rulles ikke tilbake.",
+      input_schema: record({ task_id: z.string().min(1).max(100) }),
+      capability_class: "B", scopes: ["executive.write"], reversible: false,
+      rollback_procedure: "en avbrutt jobb kan ikke gjenopptas - send den inn på nytt", idempotent_external: true, ...common,
+      parameterAuthorizer: (_parameters, identity) => transport.authorizeOwnerControl(identity)
     },
     critical("activate_kill_switch", "Stans HELE systemet umiddelbart (gjennomslag til owner_controls.activate_kill_switch)", { reason: z.string() }, "deactivate_kill_switch"),
     critical("deactivate_kill_switch", "Opphev kill switch og gjenoppta normal drift (gjennomslag til owner_controls.deactivate_kill_switch)", {}, "activate_kill_switch"),
