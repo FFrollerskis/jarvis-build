@@ -10,7 +10,7 @@
 # Leser aldri .env og skriver aldri passord/tokens: miljøvariabler rapporteres som «satt/ikke satt» (verdien vises KUN for en lukket liste ufarlige verdier: on/off/true/false/host/tall);
 # Postgres nås via lokal socket i containeren; kun antall/navn/tilstand rapporteres. Kjør aldri scriptet med `bash -x`: sporingen skriver miljøet til skjermen.
 # Utdata: stdout + ops/acceptance/out/nas-hf1-hf2-gate-<tid>.md (git-ignorert). INFO er opplysninger (ingen vurdering); UNKNOWN/WARN er IKKE bestått.
-# Exit: 0 = ingen FAIL og minst én PASS; 1 = minst én FAIL; 2 = kan ikke kjøre (docker/compose utilgjengelig); 3 = ingen FAIL, men heller ingen sjekk kunne bekreftes (alt UNKNOWN/WARN/INFO).
+# Exit: 0 = ingen FAIL, minst én PASS og ikke flere UNKNOWN enn PASS; 1 = minst én FAIL; 2 = kan ikke kjøre (docker/compose utilgjengelig); 3 = ingen FAIL, men de fleste sjekkene kunne ikke bekreftes (ingen PASS, eller flere UNKNOWN enn PASS).
 # Ærlighet: «PASS» betyr bare at DENNE målingen var som forventet akkurat nå - ikke at en UA-/EV-rad er lukket. Rader i lukkingsmatrisen blir først VERIFIED når en evidensfil (record-evidence.mjs) lenker til dem.
 set -uo pipefail
 
@@ -289,7 +289,9 @@ echo "Sammendrag: PASS=$PASS WARN=$WARN UNKNOWN=$UNKNOWN FAIL=$FAIL INFO=$INFO"
 if [ $((WARN + UNKNOWN)) -gt 0 ]; then
   echo "OBS: $WARN WARN og $UNKNOWN UNKNOWN er IKKE bestått - les radene over før noe kalles verifisert."
 fi
-if [ "$UNKNOWN" -ge 3 ] && [ "$UNKNOWN" -gt "$PASS" ]; then
+# «De fleste sjekkene kunne ikke måles»: samme vilkår for advarselen og for exit 3, så meldingen og koden aldri er uenige.
+mostly_unknown=0; if [ "$UNKNOWN" -ge 3 ] && [ "$UNKNOWN" -gt "$PASS" ]; then mostly_unknown=1; fi
+if [ "$mostly_unknown" = "1" ]; then
   echo "ADVARSEL: de fleste sjekkene kunne ikke måles (docker-, database- eller loggtilgang?). Kjør som en bruker med docker-tilgang (for eksempel med sudo), og kjør på nytt." >&2
 fi
 if [ "$evidence_ok" = "1" ]; then
@@ -298,5 +300,5 @@ else
   echo "ADVARSEL: evidensfilen ble IKKE skrevet ($OUT_DIR er ikke skrivbar for $(id -un)). Eies mappen av en annen bruker (for eksempel root etter en tidligere sudo-kjøring), rett den med: sudo chown -R $(id -un):$(id -gn) $OUT_DIR - eller sett JARVIS_ACCEPTANCE_OUT_DIR til en skrivbar mappe. Utdataene over er eneste evidens fra denne kjøringen." >&2
 fi
 if [ "$FAIL" -gt 0 ]; then exit 1; fi
-if [ "$PASS" -eq 0 ]; then exit 3; fi
+if [ "$PASS" -eq 0 ] || [ "$mostly_unknown" = "1" ]; then exit 3; fi
 exit 0

@@ -288,6 +288,18 @@ describe("nas-hf1-hf2-gate.sh: rettelser etter uavhengig review (M4-M8, L6-L7) o
     expect(rowOf(res.text, "H11_business_state")).not.toContain("ikke utrullet");
   });
 
+  it("L7: selv med en PASS (UA-0) er exit 3 når flere sjekker er UNKNOWN enn PASS - meldingen og exit-koden bruker samme vilkår", () => {
+    const res = run({ overrides: { select1: "", webEnv: "", workerEnv: "", bstat: "", logs: "" } });
+    expect(rowOf(res.text, "H01_ua0_gate")).toContain("PASS");
+    expect(res.text).toMatch(/Sammendrag: PASS=1 .*UNKNOWN=1\d/);
+    expect(res.stderr).toContain("de fleste sjekkene kunne ikke måles");
+    expect(res.status, res.text).toBe(3);
+    const fine = run({ overrides: { bstat: "ERR" } }); // én UNKNOWN blant mange PASS: fortsatt exit 0
+    expect(rowOf(fine.text, "H07_backup_status")).toContain("UNKNOWN");
+    expect(fine.status, fine.text).toBe(0);
+    expect(fine.stderr).not.toContain("de fleste sjekkene");
+  });
+
   it("G11/L7: databasen svarer ikke = UNKNOWN i H02/H03/H09/H10/H11 (aldri FAIL/«ikke utrullet»); tom migrasjonsliste med levende database er også UNKNOWN", () => {
     const down = run({ overrides: { select1: "" } });
     for (const id of ["H02_migrations_applied", "H03_rls_global_tables", "H09_incident_state", "H10_knowledge_state", "H11_business_state"]) expect(rowOf(down.text, id), id).toContain("UNKNOWN");
