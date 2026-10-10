@@ -1,4 +1,4 @@
-import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { lutimesSync, mkdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { cleanupTempDirs, makeSet, tempDir } from "./helpers.mjs";
@@ -47,6 +47,21 @@ describe("WP-C2 review runde 2 M3: foreldreløs-skanningen skiller ENOENT fra «
     expect(scanManifestlessSets(out, NOW, { protect: ["jarvis-backup-20260101T000000Z"] }).removable).toEqual([]);
     expect(findOrphanSets(out, NOW, 31 * H)).toEqual([]); // yngre enn terskelen
     expect(scanManifestlessSets(join(out, "finnes-ikke"), NOW)).toEqual({ removable: [], withData: [], unverified: [] }); // ENOENT på selve mappen er ikke en feil
+  });
+
+  it("en symlenke (eller fil) med settnavn røres aldri, selv om den peker på en tom, gammel katalog", () => {
+    const out = tempDir("wpc2-orph-");
+    const target = join(tempDir("wpc2-orph-target-"), "tom");
+    mkdirSync(target);
+    const t = new Date(NOW - 30 * H);
+    utimesSync(target, t, t);
+    const link = join(out, "jarvis-backup-20260101T000000Z");
+    symlinkSync(target, link);
+    lutimesSync(link, t, t); // symlenkens EGEN alder er også høy: kun type-sjekken (ikke alderen) kan stoppe den
+    const file = join(out, "jarvis-backup-20260102T000000Z");
+    writeFileSync(file, "en fil");
+    utimesSync(file, t, t);
+    expect(scanManifestlessSets(out, NOW)).toEqual({ removable: [], withData: [], unverified: [] });
   });
 
   for (const code of ["EACCES", "EIO", "ESTALE", "ETIMEDOUT", "ELOOP", "ENOTDIR", "EPERM"]) {
