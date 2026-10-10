@@ -6,6 +6,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
 import { createPool, runMigrations } from "@jarvis/core";
+import { withMemoryTransaction } from "@jarvis/memory";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { FallbackSecretProvider, ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
@@ -97,6 +98,18 @@ describe("A: skriving KUN i en bedrifts-tenant og business-space", () => {
     for (const space of ["project", "shared", "health"] as const) await rejects(pipeline.createLead(BIZ, space, { title: "x" }, ctx), "not_business_space");
     expect(await count("SELECT count(*)::int AS n FROM business_leads WHERE tenant_id = $1", [PERSON_TENANT])).toBe(0);
     expect(await count("SELECT count(*)::int AS n FROM business_change_log WHERE tenant_id IN ($1, $2)", [PERSON_TENANT, BIZ])).toBe(0);
+  });
+});
+
+describe("A2: RLS på business_change_log som APP-rolle (gjennomgang av PR #326, F7)", () => {
+  it("uten tenant-kontekst 0 rader, en annen tenant ser ikke raden, eieren ser den, og UPDATE nektes (42501)", async () => {
+    const created = await pipeline.createLead(BIZ, SP, { title: "RLS-lead for endringsloggen" }, { actor_person_id: OWNER });
+    const id = (created.entity as unknown as { lead_id: string }).lead_id;
+    expect((await app.query("SELECT count(*)::int AS n FROM business_change_log WHERE entity_id = $1", [id])).rows[0]).toEqual({ n: 0 }); // FORCE RLS: uten kontekst er alt skjult
+    const sql = "SELECT count(*)::int AS n FROM business_change_log WHERE entity_id = $1";
+    expect(await withMemoryTransaction(app, BIZ_B, [SP], async (client) => (await client.query(sql, [id])).rows[0])).toEqual({ n: 0 });
+    expect(await withMemoryTransaction(app, BIZ, [SP], async (client) => (await client.query(sql, [id])).rows[0])).toEqual({ n: 1 });
+    await expect(withMemoryTransaction(app, BIZ, [SP], (client) => client.query("UPDATE business_change_log SET action = 'create' WHERE entity_id = $1", [id]))).rejects.toMatchObject({ code: "42501" });
   });
 });
 

@@ -459,3 +459,10 @@ forutsagt). Utfall er eierens egen merking; en loop lukket uten utfall, eller so
 besvarer ikke kunden; `waiting_customer` har ingen klokke) + et vindu per prioritet (kalenderstimer; forslag urgent 4 t, high 8 t, normal 24 t, low 72 t; `JARVIS_SUPPORT_SLA_HOURS`
 overstyrer, `off` slår av utledningen). Regelen leser data den allerede behandler (supportsaker) og lagrer ingenting nytt; den utledede fristen blir loopens `due_at`. Ingen ny
 behandling, ingen ny mottaker.
+
+## Tillegg etter uavhengig sikkerhetsgjennomgang (PR #326)
+
+- Pseudonymmasken er skjerpet (tall på 8-19 siffer også med skilletegn, IPv4, IPv6-lignende verdier; app OG database-CHECK). Den oppdager ikke navn-lignende verdier - kun hashing hos avsender beskytter mot det.
+- Open-loop-nøkkelen for churn er en digest av konto-pseudonymet (ikke pseudonymet selv); pseudonymet når ikke modellen via oppmerksomhetskøen.
+- `occurred_at` tolkes strengt (eksplisitt tidssone, eksisterende dato); et ukjent feltnavn ekkoes/lagres bare hvis det ser ut som et vanlig feltnavn (ikke fritekst).
+- Rå hendelser slettes etter 400 dager i et eget sveipsteg. `product_usage_accounts` beholdes til koblingen fjernes eller erasure kjøres; `business_change_log` har ingen automatisk oppbevaring (erasure-kandidat) og kan slettes av app-rollen (se runbooken).

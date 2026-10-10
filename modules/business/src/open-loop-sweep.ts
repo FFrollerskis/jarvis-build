@@ -2,6 +2,7 @@ import type pg from "pg";
 import type { SweepFailureCollector } from "@jarvis/contracts";
 import { listBusinessTenantIds } from "@jarvis/core";
 import type { OpenLoopService } from "./open-loop-service.ts";
+import { ProductUsageService } from "./product-usage-service.ts";
 import type { SweepResult } from "./open-loop-types.ts";
 
 /**
@@ -25,7 +26,16 @@ export async function runOpenLoopSweepForAllTenants(
 ): Promise<Record<string, SweepResult>> {
   const tenantIds = await listBusinessTenantIds(pool, 200);
   const results: Record<string, SweepResult> = {};
+  const usage = new ProductUsageService(pool);
   for (const tenantId of tenantIds) {
+    // Retensjon av rå produktbruk-hendelser (400 dager) er et EGET steg (PR #326, F6): tidligere kjørte den kun inne i churn-detektoren, så en kastende tidligere detektor i samme sveip hoppet over slettingen.
+    // Best effort: en feil her stopper hverken sveipet eller de andre tenantene, men meldes (D-227/D-442).
+    try {
+      await usage.purgeExpired(tenantId, "business");
+    } catch (err) {
+      console.error(JSON.stringify({ msg: "product_usage_purge_failed", tenant_id: tenantId, error: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200) }));
+      failures?.record(tenantId, err);
+    }
     try {
       results[tenantId] = await openLoops.runSweep(tenantId, "business");
     } catch (err) {

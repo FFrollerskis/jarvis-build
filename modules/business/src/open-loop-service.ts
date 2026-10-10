@@ -5,7 +5,7 @@ import type { MemorySpace } from "@jarvis/contracts";
 import { canonicalStringify } from "@jarvis/contracts";
 import type { AttentionQueueEntry, BusinessOpenLoop, LoopResolutionOutcome, OpenLoopPriority, OpenLoopType, SweepResult } from "./open-loop-types.ts";
 import { MANUAL_RESOLUTION_OUTCOMES, classifyAttentionBucket, deterministicLoopConfidence } from "./open-loop-types.ts";
-import { churnNextAction, describeChurnRisk } from "./churn-rules.ts";
+import { churnDetectionKey, churnNextAction, describeChurnRisk } from "./churn-rules.ts";
 import { ChurnService } from "./churn-service.ts";
 import {
   buildCalibrationReport, calibrationByType, computeLoopConfidence, corroboratesEachOther, loopFamily,
@@ -558,7 +558,7 @@ export class OpenLoopService {
       let updated = 0;
       const currentKeys: string[] = [];
       for (const a of atRisk) {
-        const detectionKey = `customer_churn_risk:${a.account_ref}`;
+        const detectionKey = churnDetectionKey(a.account_ref); // digest, ikke referansen selv (PR #326 F2)
         currentKeys.push(detectionKey);
         const calc = { score: a.risk_score, level: a.risk_level, factors: a.signals };
         const result = await upsertOpenLoop(client, {

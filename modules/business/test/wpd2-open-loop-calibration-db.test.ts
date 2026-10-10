@@ -6,7 +6,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
-import { BusinessService, CONFIDENCE_V1, OpenLoopService, ProductUsageService, type ConfidenceBasis } from "../src/index.ts";
+import { BusinessService, CONFIDENCE_V1, OpenLoopService, ProductUsageService, churnDetectionKey, type ConfidenceBasis } from "../src/index.ts";
 
 /**
  * WP-D2 (JARVIS-045, migrasjon 091): confidence skrevet fra flere signaler + kalibreringsrapport mot faktiske utfall, mot ekte Postgres som app-rolle (RLS).
@@ -57,6 +57,8 @@ type Row = Record<string, unknown>;
 const one = async (sql: string, params: unknown[] = []) => (await admin.query(sql, params)).rows[0] as Row;
 const count = async (sql: string, params: unknown[] = []) => Number((await one(sql, params))["n"]);
 const loopRow = async (id: string) => one("SELECT status, confidence::float8 AS confidence, confidence_basis, resolution_outcome, resolution_reason FROM business_open_loops WHERE open_loop_id = $1", [id]);
+/** Churn-loopens detection_key inneholder en digest av kontoreferansen (PR #326 F2) - aldri selve referansen. */
+const churnLoop = (tenant: string, accountRef: string) => openLoop(tenant, "customer_churn_risk", churnDetectionKey(accountRef).split(":")[1]);
 const openLoop = async (tenant: string, type: string, key?: string) =>
   (await loops.listOpenLoops(tenant, SP, "open")).find((l) => l.loop_type === type && (key === undefined || l.detection_key.endsWith(key)));
 const basis = (r: Row): ConfidenceBasis => r["confidence_basis"] as ConfidenceBasis;
@@ -178,7 +180,7 @@ describe("B: confidence fra flere signaler (refineConfidence i runSweep)", () =>
     await usage.linkAccount(A, SP, ref, co.company_id, OWNER);
     await admin.query(`INSERT INTO support_tickets (ticket_id, tenant_id, company_id, subject, status, priority) VALUES ('tkt-cal-churn', $1, $2, 'Churn-sak', 'open', 'high')`, [A, co.company_id]);
     await loops.runSweep(A, SP);
-    const loop = (await openLoop(A, "customer_churn_risk", ref))!;
+    const loop = (await churnLoop(A, ref))!;
     const row = await loopRow(loop.open_loop_id);
     // tre uavhengige familier (bruk, support, fakturering) = +0.06, men en heuristikk er kappet under SUGGEST-terskelen
     expect(basis(row).intrinsic_signals).toBe(2);
@@ -369,7 +371,7 @@ describe("F: merkede utfall overlever gjenåpning (survivorship), og en vanlig r
 
   it("churn: antall uavhengige signalfamilier kan gå NED mellom sveip (hintet flettes inn uten å slette resten av forklaringen)", async () => {
     const ref = "acct-cal-churn-1"; // fra test B: bruk + support + fakturering = intrinsic_signals 2
-    const loop = (await openLoop(A, "customer_churn_risk", ref))!;
+    const loop = (await churnLoop(A, ref))!;
     expect(basis(await loopRow(loop.open_loop_id)).intrinsic_signals).toBe(2);
     await admin.query("UPDATE support_tickets SET status = 'closed' WHERE ticket_id = 'tkt-cal-churn'");
     await loops.runSweep(A, SP);

@@ -149,7 +149,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   assertRuntimeCredentialsConfigured();
   // Remediering del 2 (JARVIS-065): ÉN validert eier-identitet for hele prosessen (fail closed uten).
   const owner = ownerConfigOrExit();
-  // WP-D2 (Q-44/Q-48 C): standard `[JARVIS_TENANT_ID]`; `JARVIS_OWNER_EXTRA_TENANTS` er en dormant, eier-satt utvidelse (kun eieren selv, aldri system/delegat).
+  // WP-D2 (Q-44/Q-48 C): standard `[JARVIS_TENANT_ID]`; `JARVIS_OWNER_EXTRA_TENANTS` er en dormant, eier-satt utvidelse (kun eierens person-id; aldri `system`/delegat/andre personer - men planlagte jobber som kjører som eieren, f.eks. brief og situasjonssveip, er suverene der som i primær-tenanten, PR #326 F1).
   const ownerTenants = ownerTenantsOrExit(owner);
   process.env["JARVIS_PROCESS"] ??= "api"; // D-394 (JARVIS-054): audit-rader merkes med hvilken prosess som skrev dem
   const pool = createPool(configFromEnv());

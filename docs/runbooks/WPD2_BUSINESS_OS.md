@@ -25,8 +25,10 @@ ops/nas/provision-business-tenant.sh "Kundeoppfølging AS" --confirm tenant-kund
 
 ### 1.1 Det du MÅ gjøre etterpå (ingenting av det skjer automatisk)
 
-1. **Eier-autoritet i tenanten:** sett `JARVIS_OWNER_EXTRA_TENANTS=tenant-kundeoppfolging-as` i `.env` (api OG worker) og start dem på nytt. Utvider KUN hvor du som autentisert eier er
-   suveren og kan bruke eier-tilkoblede connectorer; gir ingenting til andre personer, til `system` eller til planlagte jobber. Kode: `ownerTenantsFromEnv` (`packages/contracts/src/owner-config.ts`).
+1. **Eier-autoritet i tenanten:** sett `JARVIS_OWNER_EXTRA_TENANTS=tenant-kundeoppfolging-as` i `.env` (api OG worker) og start dem på nytt. Utvider hvor du som eier er
+   suveren og kan bruke eier-tilkoblede connectorer; gir ingenting til andre personer, delegater eller `system`-jobber. **Merk (uavhengig review, F1):** planlagte jobber som kjører med din egen person-id
+   (`business-weekly-brief` og `situation-sweep`) blir også suverene i tenanten - akkurat som de er i `JARVIS_TENANT_ID` - fordi autoriteten avgjøres av person + tenant, ikke av kanal; en autonomi-policy
+   du selv binder til et domene er fortsatt det som skal til for at sveipet handler automatisk. **NEEDS_TOBIAS:** vil du i stedet at utvidede tenants bare gir suverenitet til signerte økter? (Én linje i `resolveAuthorityMode`; sveip og brief ville da kreve Q-48 først.) Kode: `ownerTenantsFromEnv` (`packages/contracts/src/owner-config.ts`).
 2. **Enhet i tenanten** (chat/dashbord er per tenant): `ops/nas/enroll-device.sh <https-adresse> dashboard tenant-kundeoppfolging-as`.
 3. **Planlagte jobber** (`business-events-sync`, `conversation-graph-sync`, `support-inbox-sync`) kaller Gmail/Kalender som `system` og avvises med `credential_not_bound_to_identity` (D-377)
    inntil du velger A eller B i Q-48. De vises som feilet (D-442/D-443) – det er ærlig, ikke en feil i provisjoneringen. **Ingen kodeendring av credentialBinding i denne PR-en.**
@@ -45,10 +47,10 @@ høy prioritet og confidence ≥ 0.75; auto-ACT kun via en autonomi-policy du se
 
 ### 3.1 Hendelsesformat (webhook og fil)
 
-Felt: `event_id` (din unike id, ≥ 6 tegn), `account_ref` (pseudonym), `feature` (`chat.send`, små bokstaver), `occurred_at` (ISO 8601), `quantity` (heltall, standard 1), valgfritt `user_ref`
+Felt: `event_id` (din unike id, ≥ 6 tegn), `account_ref` (pseudonym), `feature` (`chat.send`, små bokstaver), `occurred_at` (ISO 8601 med tidssone `Z`/`±hh:mm`, eller bare en dato som tolkes som UTC midnatt; en dato som ikke finnes, f.eks. `2026-02-30`, avvises), `quantity` (heltall, standard 1), valgfritt `user_ref`
 (pseudonym) og `kind: "billing_status"` (da kreves `quantity` = antall forfalte fakturaer, 0 = ingen, og `feature`/`user_ref` er forbudt).
 
-- `account_ref`/`user_ref` MÅ være pseudonymer: **du** hasher id-ene (f.eks. `HMAC-SHA256(eget salt, intern id)` som hex). e-post, telefon, fødselsnummer-lignende tall og IP-adresser avvises; ukjente felt
+- `account_ref`/`user_ref` MÅ være pseudonymer: **du** hasher id-ene (f.eks. `HMAC-SHA256(eget salt, intern id)` som hex). e-post, tall som ligner telefon/fødselsnummer/kortnummer (8-19 siffer, også med `-_.:` som skilletegn), IPv4 og IPv6-lignende verdier avvises (masken oppdager IKKE navn-lignende verdier som `ola.nordmann` - bruk hele HMAC-hex-strengen, minst 32 tegn, ikke korte fragmenter); ukjente felt
   avvises (og en CSV med ukjent kolonne avvises i sin helhet).
 - `event_id` er idempotensnøkkelen **på tvers av kilder** (webhook, CSV, JSONL): samme id teller aldri to ganger; samme id med annet innhold telles som konflikt og anvendes ikke.
   Bruk et prefiks per produkt hvis to produkter kan finne på samme id.
@@ -136,9 +138,17 @@ Nuller `user_ref` på alle hendelser (volum per konto beholdes). Revisjonen bær
 4. Webhook (kun hvis slått på): signert `curl` over gir `200`; samme kall med endret kropp gir `401`.
 5. Sveip: etter at en konto er koblet og har ≥ 30 dagers stillhet, vises en `customer_churn_risk`-loop i brifen/«åpne saker».
 
+## 5b. Etter uavhengig sikkerhetsgjennomgang (PR #326)
+
+- **Churn-loopens nøkkel er en digest:** `detection_key` = `customer_churn_risk:` + de 16 første hex-tegnene av SHA-256 over `account_ref`. Avsenderens egen streng (kan være instruksjonslignende tekst) når dermed aldri modellen via `get_attention_queue`/`list_open_loops`.
+- **Webhook-avvisninger ekkoer ikke fritekst:** et ukjent feltnavn vises bare hvis det ser ut som et vanlig feltnavn (`[a-z][a-z0-9_]{0,31}`), ellers `unknown_field:invalid_name`.
+- **Retensjon er et eget steg:** rå produktbruk-hendelser eldre enn 400 dager slettes først i hvert tenant-sveip, uavhengig av detektorene (en kastende detektor hopper ikke lenger over slettingen); en feil meldes til sveip-samleren. `product_usage_accounts` (pseudonym → selskap) slettes aldri automatisk - fjern koblingen eller bruk erasure.
+- **`business_change_log` er append-only for UPDATE, men app-rollen har DELETE** (trengs for erasure/oppbevaring). Historikken kan dermed omskrives av en kompromittert app-prosess; den primære, uforanderlige revisjonen er `audit_events`. Egen sletterolle/trigger er ikke bygget.
+- **Webhooken:** 503 (ikke konfigurert) skiller seg fra 401 (feil signatur) for uautentiserte kall - den eneste lekkasjen er «hemmelighet finnes/ikke»; en lekket hemmelighet har ingen kvote per tenant utover 500 hendelser per kall og 30 kall/min/IP - roter hemmeligheten ved mistanke.
+
 ## 6. Ærlige begrensninger
 
 - Ingenting her er kjørt mot NAS, Docker eller eksterne tjenester; sandkasse-tester bruker ekte Postgres men ingen eksterne API-er.
 - Terskler, vekter, SLA-vinduer og confidence-justeringer er forslag. Kalibreringsrapporten er verktøyet for å justere dem, men trenger merkede utfall over tid.
-- Q-48 (credentialBinding for planlagte jobber) er uendret; `JARVIS_OWNER_EXTRA_TENANTS` løser kun eierens egen suverenitet.
+- Q-48 (credentialBinding for `person_id: "system"`-jobber) er uendret; `JARVIS_OWNER_EXTRA_TENANTS` gir eierens egen person-id suverenitet i tenanten - også for planlagte jobber som kjører med den (brief, situasjonssveip), se 1.1.
 - Webhooken har ikke persistent replay-ledger utover hendelses-id-idempotens og 300 s-vinduet (replay innen vinduet er harmløst: samme hendelse teller aldri to ganger).

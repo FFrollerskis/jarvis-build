@@ -23,14 +23,19 @@ describe("A: pseudonyme referanser - e-post, telefon, IP og mellomrom kommer ald
   it("avviser e-post, telefon-/fødselsnummerlignende tall, IPv4, mellomrom, for kort/lang, kontrolltegn og unicode", () => {
     const bad = [
       "tobias@example.com", "ola.nordmann@firma.no", "4791234567", "12345678", "123456789012345", "192.168.1.10", "10.0.0.1",
+      // PR #326 F3: tall med skilletegn, kortnummer og IPv6
+      "010190-12345", "98-76-54-32", "192-168-1-10", "4111-1111-1111-1111", "4111111111111111", "2001:db8::1", "fe80::1:2:3:4", "2001:db8:0:0:0:0:0:1",
       "has space", "kort1", "x".repeat(129), "line\nbreak", "tab\there", "æøåæøåæøå", "-leading-dash", ".leading-dot", "", "  "
     ];
     for (const v of bad) expect(isPseudonymousRef(v), JSON.stringify(v)).toBe(false);
   });
-  it("kun 8-15 siffer avvises som tall - 16+ siffer eller blandet med bokstaver er en gyldig hash-lignende id", () => {
-    expect(isPseudonymousRef("1234567890123456")).toBe(true);
+  it("kun 8-19 siffer (også med skilletegn) avvises som tall - 20+ siffer, 7 siffer eller blandet med bokstaver er en gyldig hash-lignende id", () => {
+    expect(isPseudonymousRef("12345678901234567890")).toBe(true); // 20 siffer: lenger enn et kortnummer (19) - en ren tallstreng av den lengden er en hash/ID, ikke PII
     expect(isPseudonymousRef("1234567a")).toBe(true);
     expect(isPseudonymousRef("1234567")).toBe(true); // 7 siffer: under telefon-/fødselsnummergrensen (6-tegnsminimum oppfylt)
+    expect(isPseudonymousRef("1234567890123456")).toBe(false); // 16 siffer = kortnummer-lengde (PR #326 F3)
+    expect(isPseudonymousRef("123-4567")).toBe(true); // 7 siffer med skilletegn: under grensen
+    expect(isPseudonymousRef("deadbeef:acct1")).toBe(true); // kolon, men ikke en ren heksadesimal gruppe-streng (har 'tt')
   });
   it("en hendelse med PII-lik account_ref/user_ref avvises med kode (aldri verdien)", () => {
     for (const v of ["tobias@example.com", "4791234567", "192.168.1.10"]) {
@@ -61,10 +66,17 @@ describe("B: normalizeUsageEvent - streng validering, fail-closed", () => {
     expect(reasonOf({ ...base, quantity: 1, user_ref: "usr_abcdef12" })).toBe("billing_status_takes_no_feature_or_user");
   });
   it("ukjente felt avvises - e-post, navn og fritekst kan ikke snike seg inn som ekstra felt", () => {
-    for (const field of ["email", "name", "ip", "user_agent", "message", "notes", "__proto__x", "constructor"]) {
+    for (const field of ["email", "name", "ip", "user_agent", "message", "notes", "constructor"]) {
       expect(reasonOf(ok({ [field]: "x" })), field).toBe(`unknown_field:${field}`);
     }
-    expect(reasonOf(ok({ ["f".repeat(200)]: 1 }))).toBe(`unknown_field:${"f".repeat(40)}`); // feltnavnet kappes i svaret
+    // ... også navn som begynner med understrek (prototype-lignende nøkler) ekkoes ikke
+    expect(reasonOf(ok({ ["__proto__x"]: "x" }))).toBe("unknown_field:invalid_name");
+    // Et feltnavn som ikke ser ut som et vanlig feltnavn ekkoes ALDRI (PR #326 F4): det kan være en e-postadresse, et navn eller fritekst fra avsenderen.
+    expect(reasonOf(ok({ ["f".repeat(200)]: 1 }))).toBe("unknown_field:invalid_name");
+    expect(reasonOf(ok({ "ola.nordmann@example.com": 1 }))).toBe("unknown_field:invalid_name");
+    expect(reasonOf(ok({ "Ola Nordmann": 1 }))).toBe("unknown_field:invalid_name");
+    expect(reasonOf(ok({ ["f".repeat(33)]: 1 }))).toBe("unknown_field:invalid_name"); // over 32 tegn
+    expect(reasonOf(ok({ ["f".repeat(32)]: 1 }))).toBe(`unknown_field:${"f".repeat(32)}`);
   });
   it("ikke-objekter avvises", () => {
     for (const raw of [null, undefined, 5, "str", [], [ok()], true]) expect(reasonOf(raw)).toBe("not_an_object");
@@ -84,12 +96,30 @@ describe("B: normalizeUsageEvent - streng validering, fail-closed", () => {
     expect(reasonOf(ok({ occurred_at: "2026-13-45T00:00:00Z" }))).toBe("occurred_at_invalid");
     expect(reasonOf(ok({ occurred_at: 1760000000 }))).toBe("occurred_at_invalid");
     expect(reasonOf(ok({ occurred_at: "2026-10-09T12:00:00Z".padEnd(41, "0") }))).toBe("occurred_at_invalid");
+    // PR #326 F4: tidssone er påkrevd når klokkeslett oppgis (aldri serverens tidssone), og en dato som ikke finnes ruller ikke videre
+    expect(reasonOf(ok({ occurred_at: "2026-10-09T12:00:00" }))).toBe("occurred_at_invalid");
+    expect(reasonOf(ok({ occurred_at: "2026-10-09 12:00:00Z" }))).toBe("occurred_at_invalid");
+    expect(reasonOf(ok({ occurred_at: "2026-02-30" }))).toBe("occurred_at_invalid");
+    expect(reasonOf(ok({ occurred_at: "2026-02-30T10:00:00Z" }))).toBe("occurred_at_invalid");
+    expect(reasonOf(ok({ occurred_at: "2026-10-09T25:00:00Z" }))).toBe("occurred_at_invalid");
+    expect(reasonOf(ok({ occurred_at: "2026-10-09T12:61:00Z" }))).toBe("occurred_at_invalid");
+    expect(reasonOf(ok({ occurred_at: "2026-10-09T12:00:00+25:00" }))).toBe("occurred_at_invalid");
+    expect(reasonOf(ok({ occurred_at: "2026-10-09" }))).toBe("OK"); // kun dato = UTC midnatt
+    expect(reasonOf(ok({ occurred_at: "2026-10-09T12:00:00.123+02:00" }))).toBe("OK");
     const future = (ms: number) => new Date(NOW + ms).toISOString();
     expect(reasonOf(ok({ occurred_at: future(USAGE_LIMITS.max_future_ms) }))).toBe("OK");
     expect(reasonOf(ok({ occurred_at: future(USAGE_LIMITS.max_future_ms + 1) }))).toBe("occurred_at_out_of_range");
     const past = (ms: number) => new Date(NOW - ms).toISOString();
     expect(reasonOf(ok({ occurred_at: past(USAGE_LIMITS.max_age_days * 86_400_000) }))).toBe("OK");
     expect(reasonOf(ok({ occurred_at: past(USAGE_LIMITS.max_age_days * 86_400_000 + 1) }))).toBe("occurred_at_out_of_range");
+  });
+  it("vinduene er festet med bokstavelige tall, ikke bare konstantene (PR #326 F7): 400 dager tilbake og 5 minutter frem", () => {
+    expect(USAGE_LIMITS.max_age_days).toBe(400);
+    expect(USAGE_LIMITS.max_future_ms).toBe(5 * 60 * 1000);
+    expect(reasonOf(ok({ occurred_at: new Date(NOW - 399 * 86_400_000).toISOString() }))).toBe("OK");
+    expect(reasonOf(ok({ occurred_at: new Date(NOW - 401 * 86_400_000).toISOString() }))).toBe("occurred_at_out_of_range");
+    expect(reasonOf(ok({ occurred_at: new Date(NOW + 4 * 60_000).toISOString() }))).toBe("OK");
+    expect(reasonOf(ok({ occurred_at: new Date(NOW + 6 * 60_000).toISOString() }))).toBe("occurred_at_out_of_range");
   });
   it("antall: heltall innenfor grensene; tall som streng godtas, alt annet avvises", () => {
     expect(reasonOf(ok({ quantity: 100_000 }))).toBe("OK");
@@ -222,7 +252,7 @@ describe("F: CSV-import", () => {
     expect(() => parseCsvUsage("", NOW)).toThrowError(/csv_empty/);
     const extra = parseCsvUsage(`${header}\nevt-000001,${REF},chat.send,2026-10-09T10:00:00Z,1,SURPLUS\n`, NOW);
     expect(extra.accepted).toHaveLength(0);
-    expect(extra.rejected).toEqual([{ position: 2, reason: "unknown_field:__too_many_cells" }]);
+    expect(extra.rejected).toEqual([{ position: 2, reason: "unknown_field:too_many_cells" }]);
   });
   it("for stor fil avvises", () => {
     expect(() => parseCsvUsage("x".repeat(USAGE_LIMITS.import_max_bytes + 1), NOW)).toThrowError(/file_too_large/);

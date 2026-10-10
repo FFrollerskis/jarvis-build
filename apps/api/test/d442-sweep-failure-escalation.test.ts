@@ -31,6 +31,12 @@ function fakePool(tenants: string[] = TENANTS): pg.Pool {
   return { query: async () => ({ rows: tenants.map((tenant_id) => ({ tenant_id })) }) } as unknown as pg.Pool;
 }
 
+/** Pool med en tillatende klient: open-loop-sveipet har et eget retensjonssteg (produktbruk) som åpner en transaksjon per tenant (PR #326, F6). */
+function fakePoolWithClient(tenants: string[] = TENANTS): pg.Pool {
+  const client = { query: async () => ({ rows: [], rowCount: 0 }), release: () => undefined };
+  return { ...(fakePool(tenants) as unknown as object), connect: async () => client } as unknown as pg.Pool;
+}
+
 const boom = (tenant: string): void => { if (tenant === "bad") throw new Error(`${tenant} feilet`); };
 
 beforeEach(() => {
@@ -60,9 +66,23 @@ describe("D-442: per-tenant-sveip registrerer tenant-feil uten å velte de andre
 
   it("business-open-loop-sweep", async () => {
     const openLoops = { runSweep: async (t: string) => { boom(t); return { detected: 3, updated: 1, auto_resolved: 0 }; } };
-    const { failures, results } = await failuresOf((f) => runOpenLoopSweepForAllTenants(fakePool(), openLoops as never, f));
+    const { failures, results } = await failuresOf((f) => runOpenLoopSweepForAllTenants(fakePoolWithClient(), openLoops as never, f));
     expect(failures).toEqual([{ tenant_id: "bad", error: "bad feilet" }]);
     expect(results["good"]).toEqual({ detected: 3, updated: 1, auto_resolved: 0 });
+  });
+
+  it("business-open-loop-sweep: feil i retensjonssteget for produktbruk registreres per tenant, men stopper verken open-loop-sveipet eller de andre tenantene (F6)", async () => {
+    const swept: string[] = [];
+    const openLoops = { runSweep: async (t: string) => { swept.push(t); return { detected: 1, updated: 0, auto_resolved: 0 }; } };
+    const brokenPool = { ...(fakePool() as unknown as object), connect: async () => { throw new Error("pool nede"); } } as unknown as pg.Pool;
+    const collector = new SweepFailureCollector();
+    const results = await runOpenLoopSweepForAllTenants(brokenPool, openLoops as never, collector);
+    expect(swept.sort()).toEqual(["bad", "good"]); // selve sveipet kjørte for begge, til tross for at retensjonen feilet
+    expect(results["good"]).toEqual({ detected: 1, updated: 0, auto_resolved: 0 });
+    expect(collector.failures.map((f) => f.tenant_id).sort()).toEqual(["bad", "good"]);
+    expect(collector.failures.every((f) => f.error.includes("pool nede"))).toBe(true);
+    const logged = vi.mocked(console.error).mock.calls.map((c) => String(c[0]));
+    expect(logged.some((line) => line.includes("product_usage_purge_failed"))).toBe(true);
   });
 
   it("growth-action-recommendation-sweep", async () => {

@@ -53,9 +53,10 @@ export const MAX_OWNER_EXTRA_TENANTS = 10;
  * WP-D2 (Q-44/Q-48 C, JARVIS-044): tenantene der eieren er SUVEREN (`PolicyGateway.authority.owner_tenants`) og kan bruke eier-tilkoblede
  * connector-credentials (`ToolGateway.credentialBinding.owner_tenants`). Standard er NØYAKTIG `[JARVIS_TENANT_ID]` - uendret fra før.
  *
- * `JARVIS_OWNER_EXTRA_TENANTS` (kommaseparert) er en DORMANT, eier-satt utvidelse: den utvider KUN hvor den autentiserte eieren (samme person,
- * ingen delegat) er suveren, og gir ingenting til andre personer, til `person_id: "system"` eller til noen bakgrunnsjobb (planlagte jobber er et eget
- * valg - Q-48 A/B). Den provisjonerer ingenting og gir ingen tilgang uten at tenanten allerede finnes og eieren har en innrullert enhet der.
+ * `JARVIS_OWNER_EXTRA_TENANTS` (kommaseparert) er en DORMANT, eier-satt utvidelse: den utvider KUN hvor eieren (samme person,
+ * ingen delegat) er suveren, og gir ingenting til andre personer (heller ikke delegater) eller til `person_id: "system"`-jobber (Q-48 A/B). MERK (gjennomgang av PR #326, F1):
+ * planlagte jobber som kjører med EIERENS egen person-id (ukentlig forretningsbrief, situasjonssveipet) er suverene i en utvidet tenant på samme måte som i primær-tenanten -
+ * `resolveAuthorityMode` avgjør på person + tenant, ikke på kanal. Den provisjonerer ingenting og gir ingen tilgang uten at tenanten allerede finnes og eieren har en innrullert enhet der.
  * Feil verdi stopper oppstarten (samme fail-closed-regel som resten av eier-konfigurasjonen) - aldri en stille delvis liste.
  */
 export function ownerTenantsFromEnv(owner: OwnerConfig, env: Record<string, string | undefined> = process.env): readonly string[] {

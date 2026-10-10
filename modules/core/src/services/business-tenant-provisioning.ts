@@ -150,7 +150,7 @@ export function previewBusinessTenant(input: ProvisionBusinessTenantInput): Busi
  */
 export function ownerActionsFor(tenantId: string): string[] {
   return [
-    `Eier-autoritet i den nye tenanten er IKKE gitt av dette steget. For at du som eier skal være suveren og kunne bruke eier-tilkoblede connectorer (Gmail, Kalender, GitHub …) i ${tenantId}: sett JARVIS_OWNER_EXTRA_TENANTS=${tenantId} i .env (api OG worker) og start dem på nytt. Uten den gjelder eier-autoriteten kun i JARVIS_TENANT_ID.`,
+    `Eier-autoritet i den nye tenanten er IKKE gitt av dette steget. For at du som eier skal være suveren og kunne bruke eier-tilkoblede connectorer (Gmail, Kalender, GitHub …) i ${tenantId}: sett JARVIS_OWNER_EXTRA_TENANTS=${tenantId} i .env (api OG worker) og start dem på nytt. Uten den gjelder eier-autoriteten kun i JARVIS_TENANT_ID. Merk: planlagte jobber som kjører med din egen person-id (ukentlig forretningsbrief, situasjonssveip) blir også suverene i ${tenantId} - som de allerede er i JARVIS_TENANT_ID.`,
     `Chat/dashbord i ${tenantId} krever en innrullert enhet i tenanten: ops/nas/enroll-device.sh <https-adresse> dashboard ${tenantId}. Enheter er per tenant.`,
     `Planlagte jobber (business-events-sync, conversation-graph-sync, support-inbox-sync) kaller Gmail/Kalender som «system» og avvises med credential_not_bound_to_identity inntil du velger A eller B i Q-48. De vises som feilet (D-442/D-443) - det er ærlig, ikke en feil i provisjoneringen.`,
     `Produktbruk-kilden (webhook/import) er av: sett JARVIS_PRODUCT_USAGE_TENANT_ID=${tenantId} og JARVIS_PRODUCT_USAGE_WEBHOOK_SECRET (eller bruk CSV/JSONL-importen) når du vil ta den i bruk.`,

@@ -15,15 +15,32 @@ const REF_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{5,127}$/;
 const FEATURE_RE = /^[a-z0-9][a-z0-9_.:-]{0,63}$/;
 
 /**
- * En pseudonym referanse: 6-128 tegn av `A-Za-z0-9_.:-`, ikke e-post (@), ikke mellomrom, IKKE rene tall på 8-15 siffer (telefonnummer/fødselsnummer-lignende)
- * og ikke en IPv4-adresse. Avsenderen forventes å hashe id-ene (f.eks. HMAC-SHA256 med eget salt, hex) - dette er en sikkerhetsmaske mot utilsiktet PII, ikke et bevis
- * på hashing.
+ * En pseudonym referanse: 6-128 tegn av `A-Za-z0-9_.:-`, ikke e-post (@), ikke mellomrom, og IKKE noe som ligner personidentifiserende tall (gjennomgang av PR #326, F3):
+ *  - kun siffer (etter at skilletegnene `-_.:` er fjernet) på 8-19 siffer: telefonnummer, fødselsnummer og kortnummer, også med skilletegn (`010190-12345`, `98-76-54-32`, `4111-1111-1111-1111`, `192-168-1-10`),
+ *  - en IPv4-adresse med punktum, og IPv6-lignende verdier (heksadesimale grupper skilt av kolon, `2001:db8::1`).
+ * Avsenderen forventes å hashe id-ene (f.eks. HMAC-SHA256 med eget salt, hel hex-streng på minst 32 tegn) - dette er en sikkerhetsmaske mot UTILSIKTET PII, ikke et bevis på hashing: navn-lignende
+ * verdier (`ola.nordmann`) kan den ikke oppdage. Kun hashing beskytter mot det.
  */
 export function isPseudonymousRef(value: string): boolean {
   if (!REF_RE.test(value)) return false;
-  if (/^\d{8,15}$/.test(value)) return false;
+  if (/^\d{8,19}$/.test(value.replace(/[-_.:]/g, ""))) return false;
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) return false;
+  if (value.includes(":") && /^[0-9a-fA-F:]+$/.test(value)) return false;
   return true;
+}
+
+/** Strengt `occurred_at` (PR #326, F4): dato (tolkes som UTC midnatt) eller dato+klokkeslett MED eksplisitt tidssone (`Z`/`±hh:mm`) - aldri serverens tidssone - og en dato som finnes (`2026-02-30` ruller ikke videre til mars). */
+const OCCURRED_AT_RE = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2}))?$/;
+export function parseOccurredAt(raw: string): number | null {
+  const m = OCCURRED_AT_RE.exec(raw);
+  if (m === null) return null;
+  const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day) return null;
+  if (m[4] !== undefined && (Number(m[4]) > 23 || Number(m[5]) > 59 || (m[6] !== undefined && Number(m[6]) > 59))) return null;
+  if (m[7] !== undefined && m[7] !== "Z" && (Number(m[7].slice(1, 3)) > 14 || Number(m[7].slice(4, 6)) > 59)) return null;
+  const ms = new Date(m[4] === undefined ? `${m[1]}-${m[2]}-${m[3]}T00:00:00Z` : raw).getTime();
+  return Number.isNaN(ms) ? null : ms;
 }
 
 export type NormalizeResult = { ok: true; event: NormalizedUsageEvent } | { ok: false; reason: string };
@@ -33,7 +50,8 @@ export function normalizeUsageEvent(raw: unknown, nowMs: number): NormalizeResul
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { ok: false, reason: "not_an_object" };
   const obj = raw as Record<string, unknown>;
   for (const key of Object.keys(obj)) {
-    if (!ALLOWED_KEYS.has(key)) return { ok: false, reason: `unknown_field:${key.slice(0, 40)}` };
+    // Feltnavnet ekkoes bare når det ser ut som et vanlig feltnavn (PR #326, F4): et nøkkelnavn kan være fritekst (en e-postadresse, et navn) og skal ikke lagres/ekkoes.
+    if (!ALLOWED_KEYS.has(key)) return { ok: false, reason: `unknown_field:${/^[a-z][a-z0-9_]{0,31}$/.test(key) ? key : "invalid_name"}` };
   }
   const str = (k: string): string | undefined => {
     const v = obj[k];
@@ -55,9 +73,8 @@ export function normalizeUsageEvent(raw: unknown, nowMs: number): NormalizeResul
     return { ok: false, reason: "billing_status_takes_no_feature_or_user" };
   }
   const occurredRaw = str("occurred_at");
-  if (occurredRaw === undefined || occurredRaw.length > 40 || !/^\d{4}-\d{2}-\d{2}/.test(occurredRaw)) return { ok: false, reason: "occurred_at_invalid" };
-  const occurredMs = new Date(occurredRaw).getTime();
-  if (Number.isNaN(occurredMs)) return { ok: false, reason: "occurred_at_invalid" };
+  const occurredMs = occurredRaw === undefined ? null : parseOccurredAt(occurredRaw);
+  if (occurredMs === null) return { ok: false, reason: "occurred_at_invalid" };
   if (occurredMs > nowMs + USAGE_LIMITS.max_future_ms || occurredMs < nowMs - USAGE_LIMITS.max_age_days * 86_400_000) return { ok: false, reason: "occurred_at_out_of_range" };
   let quantity: number;
   const q = obj["quantity"];
@@ -238,7 +255,7 @@ export function parseCsvUsage(text: string, nowMs: number): ParsedUsageBatch {
   if (all.length - 1 > USAGE_LIMITS.import_max_events) throw new UsageImportError("too_many_events");
   const rows = all.slice(1).map((cells, i) => {
     const raw: Record<string, unknown> = {};
-    if (cells.length > header.length) return { position: i + 2, raw: { __too_many_cells: true } };
+    if (cells.length > header.length) return { position: i + 2, raw: { too_many_cells: true } };
     header.forEach((h, c) => { const v = (cells[c] ?? "").trim(); if (v !== "") raw[h] = v; });
     return { position: i + 2, raw };
   });

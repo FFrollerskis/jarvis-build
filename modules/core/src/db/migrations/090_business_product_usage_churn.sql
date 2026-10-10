@@ -31,8 +31,9 @@ CREATE TABLE product_usage_accounts (
   PRIMARY KEY (tenant_id, account_ref),
   CONSTRAINT product_usage_accounts_ref_pseudonymous CHECK (
     account_ref ~ '^[A-Za-z0-9][A-Za-z0-9_.:-]{5,127}$'
-    AND account_ref !~ '^[0-9]{8,15}$'
+    AND regexp_replace(account_ref, '[-_.:]', '', 'g') !~ '^[0-9]{8,19}$'
     AND account_ref !~ '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'
+    AND NOT (position(':' in account_ref) > 0 AND account_ref ~ '^[0-9a-fA-F:]+$')
   ),
   CONSTRAINT product_usage_accounts_link_consistent CHECK ((company_id IS NULL) = (linked_at IS NULL))
 );
@@ -60,8 +61,9 @@ CREATE TABLE product_usage_events (
   CONSTRAINT product_usage_events_user_ref_pseudonymous CHECK (
     user_ref IS NULL OR (
       user_ref ~ '^[A-Za-z0-9][A-Za-z0-9_.:-]{5,127}$'
-      AND user_ref !~ '^[0-9]{8,15}$'
+      AND regexp_replace(user_ref, '[-_.:]', '', 'g') !~ '^[0-9]{8,19}$'
       AND user_ref !~ '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'
+      AND NOT (position(':' in user_ref) > 0 AND user_ref ~ '^[0-9a-fA-F:]+$')
     )
   ),
   CONSTRAINT product_usage_events_shape CHECK (

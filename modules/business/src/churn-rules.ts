@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { assertNoProhibitedFactorCodes } from "./scoring-rules.ts";
 import type { ScoreFactor } from "./scoring-types.ts";
 import type { ChurnCalculation, ChurnEvidenceRef, ChurnFamily, ChurnLevel, ChurnMetrics, ChurnSignals } from "./churn-types.ts";
@@ -163,4 +164,13 @@ export function churnNextAction(calc: Pick<ChurnCalculation, "factors">): string
   if (codes.has("overdue_invoice") || codes.has("many_overdue_invoices")) parts.push("følg opp forfalte fakturaer");
   if (codes.has("open_support_tickets") || codes.has("many_open_support_tickets") || codes.has("high_priority_ticket_open")) parts.push("løs de åpne supportsakene");
   return `${parts.join("; ")}.`;
+}
+
+/**
+ * Gjennomgang av PR #326 (F2): open-loop-nøkkelen for en kundekonto. `account_ref` er AVSENDERENS egen streng (produktets webhook/fil) og nøkkelen leveres videre til modellen
+ * (`get_attention_queue`, `list_open_loops`), så den skal aldri bære referansen selv: en kort, stabil SHA-256-digest gir samme dedupe-/auto-lukk-oppførsel uten at avsenderkontrollert tekst
+ * (instruksjonslignende, personidentifiserende) når modellens kontekst. Eieren ser kontoen via selskapet løkken er koblet til.
+ */
+export function churnDetectionKey(accountRef: string): string {
+  return `customer_churn_risk:${createHash("sha256").update(accountRef).digest("hex").slice(0, 16)}`;
 }

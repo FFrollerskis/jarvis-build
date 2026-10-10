@@ -9,7 +9,7 @@ import type { IdentityContext } from "@jarvis/contracts";
 import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { LocalHashEmbedding } from "@jarvis/memory";
-import { BusinessService, OpenLoopService, ProductUsageService } from "@jarvis/business";
+import { BusinessService, OpenLoopService, ProductUsageService, churnDetectionKey } from "@jarvis/business";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { ErasureService } from "../src/erasure-service.ts";
 
@@ -97,8 +97,9 @@ describe("produktbruk + churn og Q-20-erasure", () => {
     expect(await n("SELECT count(*)::int AS n FROM business_open_loops WHERE tenant_id = $1 AND loop_type = 'customer_churn_risk'", [A])).toBe(1);
     expect(await n("SELECT count(*)::int AS n FROM situations WHERE tenant_id = $1", [A])).toBe(1);
     const bBefore = await Promise.all(tables.map((t) => n(`SELECT count(*)::int AS n FROM ${t} WHERE tenant_id = $1`, [B])));
-    // pseudonymene finnes i dag i revisjonsloggen? (aldri: kun tellere) - og i loop-nøkkelen
-    expect(await n("SELECT count(*)::int AS n FROM business_open_loops WHERE tenant_id = $1 AND detection_key LIKE $2", [A, `%${SENTINEL_ACCT}%`])).toBe(1);
+    // Kontopseudonymet når aldri loop-nøkkelen eller begrunnelsen (PR #326 F2): nøkkelen er en digest, så en sletting av kontoen ikke etterlater det i noen loop-rad.
+    expect(await n("SELECT count(*)::int AS n FROM business_open_loops WHERE tenant_id = $1 AND (detection_key LIKE $2 OR reason LIKE $2)", [A, `%${SENTINEL_ACCT}%`])).toBe(0);
+    expect(await n("SELECT count(*)::int AS n FROM business_open_loops WHERE tenant_id = $1 AND detection_key = $2", [A, churnDetectionKey(SENTINEL_ACCT)])).toBe(1);
 
     const result = await erasure.executeErasure({
       scope: { type: "memory_space", tenant_id: A, memory_space_id: "business" },
