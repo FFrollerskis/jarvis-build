@@ -41,7 +41,7 @@
   "egress_proxy": {
     "listen_host": "172.30.77.1",
     "listen_port": 3128,
-    "allow": ["github.com:443", "api.github.com:443", "api.anthropic.com:443"],
+    "allow": ["api.anthropic.com:443"],
     "allowed_client_cidrs": ["172.30.77.0/24"],
     "max_connections": 64,
     "max_connections_per_client": 16,

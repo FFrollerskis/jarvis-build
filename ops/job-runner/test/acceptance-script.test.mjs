@@ -79,11 +79,53 @@ describe("B: avviser farlige/ufullstendige kall FØR noe røres", () => {
     expect(r.stderr).toContain("ACCEPTANCE_REPO er påkrevd");
   });
 
-  it("repo som ikke står i runner.allowed_repos (f.eks. produksjonsrepoet) -> exit 2, ingen jobb opprettet", async () => {
+  it("repo som ikke står i runner.allowed_repos -> exit 2, ingen jobb opprettet; produksjonsrepoet nektes enda tidligere og tydeligere (B-L5)", async () => {
     const { h, config } = await setup();
-    const r = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "tsworkflow/jarvisbuild" });
+    const r = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "owner/annet" });
     expect(r.status).toBe(2);
     expect(r.stderr).toContain("står ikke i runner.allowed_repos");
+    const prod = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "tsworkflow/jarvisbuild" });
+    expect(prod.status).toBe(2);
+    expect(prod.stderr).toContain("PRODUKSJONSREPOET");
+    expect(h.service.manager.activeJobs).toBe(0);
+  });
+
+  it("B-L5: produksjonsrepoet nektes HARDT selv om det står i runner.allowed_repos (også med annen skrivemåte) - exit 2 før noe røres", async () => {
+    const h = await createHarness({ slugs: ["tsworkflow/jarvisbuild"] });
+    harnesses.push(h);
+    const config = join(h.root, "job-runner.json");
+    await writeFile(config, JSON.stringify({
+      version: 1,
+      runner: {
+        socket_path: h.socketPath, token_file: h.tokenFile, base_dir: h.baseDir, network: "jarvis-jobs", image: `sha256:${"a".repeat(64)}`,
+        allowed_repos: ["tsworkflow/jarvisbuild"], git_credentials: { "tsworkflow/jarvisbuild": { token_file: join(h.root, "git-token-tsworkflow__jarvisbuild") } }
+      },
+      egress_proxy: { listen_host: "172.30.77.1", listen_port: 3128 }
+    }));
+    for (const repo of ["tsworkflow/jarvisbuild", "TSWorkflow/JarvisBuild"]) {
+      const r = run([], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: repo });
+      expect(r.status, repo).toBe(2);
+      expect(r.stderr, repo).toContain("PRODUKSJONSREPOET");
+    }
+    expect(h.service.manager.activeJobs).toBe(0);
+    expect(h.fake.calls.filter((c) => ["create", "start", "exec", "rm"].includes(c.args[0] ?? "")).length).toBe(0);
+  });
+
+  it("B-L5: --with-restart krever bekreftelse (ACCEPT_CONFIRM_RESTART=yes, eller RESTART på terminal) - uten den er svaret exit 2 med advarsel, og ingenting røres", async () => {
+    const { h, config } = await setup();
+    const refused = run(["--with-restart"], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "owner/repo" });
+    expect(refused.status).toBe(2);
+    expect(refused.stderr).toContain("ADVARSEL: --with-restart sender SIGKILL til den LEVENDE jarvis-job-runner");
+    expect(refused.stderr).toContain("--with-restart krever bekreftelse");
+    // feil svar er ikke bekreftelse (stdin er ikke en terminal i testen, så eneste vei er miljøvariabelen - kun nøyaktig «yes»)
+    for (const value of ["1", "true", "YES", "ja", ""]) {
+      expect(run(["--with-restart"], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "owner/repo", ACCEPT_CONFIRM_RESTART: value }).status, value).toBe(2);
+    }
+    // med bekreftelse går scriptet videre til NESTE grind (her: repoet står ikke på allowlisten) - beviser at det var bekreftelsen som stoppet
+    const passed = run(["--with-restart"], { JARVIS_JOB_RUNNER_CONFIG: config, ACCEPTANCE_REPO: "owner/annet", ACCEPT_CONFIRM_RESTART: "yes" });
+    expect(passed.status).toBe(2);
+    expect(passed.stderr).toContain("står ikke i runner.allowed_repos");
+    expect(passed.stderr).not.toContain("krever bekreftelse");
     expect(h.service.manager.activeJobs).toBe(0);
   });
 
@@ -153,6 +195,51 @@ describe("C: hjelpefunksjonene mot den EKTE vertstjenesten over Unix-socket", ()
     const { info: h, config } = await setupServed();
     const r = await sourceAndRun(h, config, 'echo "SOCKET=$SOCKET NETWORK=$NETWORK USER=$USER_SPEC MEM=$MEMORY PIDS=$PIDS GW=$GATEWAY PORT=$PROXY_PORT PREFIX=$PREFIX ALLOWED=$ALLOWED"');
     expect(r.stdout.trim()).toBe(`SOCKET=${h.socketPath} NETWORK=jarvis-jobs USER=10001:10001 MEM=1g PIDS=256 GW=172.30.77.1 PORT=3128 PREFIX=jarvis/ ALLOWED=owner/repo`);
+  });
+
+  it("B-M3: load_policy leser egress_proxy.allow fra den FAKTISKE konfigen (standard KUN api.anthropic.com:443 når den mangler), som J07 sjekker mot", async () => {
+    const { info: h, config } = await setupServed();
+    const standard = await sourceAndRun(h, config, 'echo "ALLOW=$PROXY_ALLOW"');
+    expect(standard.stdout.trim()).toBe("ALLOW=api.anthropic.com:443");
+    const explicit = JSON.parse(await readFile(config, "utf8"));
+    explicit.egress_proxy.allow = ["api.anthropic.com:443", "github.com:443"];
+    const withGithub = join(h.root, "med-github.json");
+    await writeFile(withGithub, JSON.stringify(explicit));
+    const opened = await sourceAndRun(h, withGithub, 'echo "ALLOW=$PROXY_ALLOW"');
+    expect(opened.stdout.trim()).toBe("ALLOW=api.anthropic.com:443,github.com:443");
+  });
+
+  it("B-L5: J06 (minne- og gaffelbombe) kjøres KUN når J04 har bevist grensene - uten J04 PASS er svaret SKIP og ingen jobb opprettes", async () => {
+    const text = await readFile(SCRIPT, "utf8");
+    const body = text.slice(text.indexOf("check_J06() {"), text.indexOf("check_J07() {"));
+    // grinden står FØR første jobb opprettes (bomben kjøres i en jobb): sjekkes statisk først, så koden under aldri kjører en bombe hvis grinden er fjernet
+    expect(body.indexOf('J04_OK:-0')).toBeGreaterThan(-1);
+    expect(body.indexOf('J04_OK:-0')).toBeLessThan(body.indexOf("create_job"));
+    expect(text).toContain("J04_OK=1; record J04_docker_inspect PASS");
+    const { info: h, config, health } = await setupServed();
+    const r = await sourceAndRun(h, config, "ROWS=(); J04_OK=0; check_J06 | sed 's/^/J06: /'");
+    expect(r.stdout).toMatch(/J06: J06_ressursgrenser\s+SKIP\s+krever J04 PASS/);
+    expect((await health()).json.active_jobs).toBe(0);
+  });
+
+  it("B-M3/B-L4/B-L5 (statisk): J07 sjekker allowlisten fra konfigen og forventer 403 for github med standardkonfig; J04/J05 sjekker seccomp, apparmor og NoNewPrivs; J09 nekter å drepe en runner med andre aktive jobber", async () => {
+    const text = await readFile(SCRIPT, "utf8");
+    const part = (from, to) => text.slice(text.indexOf(from), text.indexOf(to));
+    const j07 = part("check_J07() {", "check_J08() {");
+    expect(j07).toContain("IFS=',' read -ra allow_entries <<<\"$PROXY_ALLOW\"");
+    expect(j07).toContain("forventet 403 (står ikke i egress_proxy.allow)");
+    expect(j07).toContain("ADVARSEL: en angriper-PAT kan pushe repoet ut");
+    expect(j07).not.toMatch(/github\.com:443"[^\n]*forventet 200/); // den gamle, hardkodede «github OK»
+    const j04 = part("check_J04() {", "check_J05() {");
+    expect(j04).toContain("docker info --format '{{.SecurityOptions}}'");
+    expect(j04).toContain("*name=seccomp*");
+    expect(j04).toContain("seccomp/apparmor unconfined");
+    const j05 = part("check_J05() {", "check_J06() {");
+    expect(j05).toMatch(/Seccomp:\[\[:space:\]\]\*2/);
+    expect(j05).toMatch(/NoNewPrivs:\[\[:space:\]\]\*1/);
+    const j09 = part("check_J09() {", "check_J10() {");
+    expect(j09.indexOf("active_jobs")).toBeGreaterThan(-1);
+    expect(j09.indexOf("active_jobs")).toBeLessThan(j09.indexOf("systemctl kill"));
   });
 
   it("api/create_job/cexec/delete_job fungerer mot ekte tjeneste; bearer-tokenet står aldri i prosessens argv", async () => {

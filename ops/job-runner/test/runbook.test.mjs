@@ -147,6 +147,17 @@ describe("C: referanser og ærlighet", () => {
     expect(runbook).not.toMatch(/produksjonsklar|produksjonsverifisert(?!e autonome workers)/i);
   });
 
+  it("B-M3: standard allowlist er KUN api.anthropic.com:443 i kode, eksempel og runbook, og §16.8 beskriver eksfiltrering ærlig (angriper-PAT, høy båndbredde, restrisiko også med api.anthropic.com)", () => {
+    expect(config).toContain('const DEFAULT_ALLOW = ["api.anthropic.com:443"];');
+    expect(JSON.parse(read("infra/job-runner/job-runner.example.json")).egress_proxy.allow).toEqual(["api.anthropic.com:443"]);
+    expect(runbook).toMatch(/\| `allow` \| `api\.anthropic\.com:443` \|/);
+    expect(runbook).not.toContain("allowlist github.com / api.github.com / api.anthropic.com");
+    const section = runbook.slice(runbook.indexOf("8. **Egress-proxyen er den eneste veien ut"), runbook.indexOf("9. **Logg og feil"));
+    expect(section.length).toBeGreaterThan(1500);
+    for (const phrase of ["angriper-eid", "HVILKEN SOM HELST PAT", "Båndbredden er høy", "Files-API", "ikke bygget", "ADVARSEL"]) expect(section, phrase).toContain(phrase);
+    expect(section).not.toContain("lav båndbredde");
+  });
+
   it("ingen hemmeligheter eller ekte tokens i runbooken; PAT/API-nøkkel leses interaktivt, aldri på kommandolinjen", () => {
     expect(runbook).not.toMatch(/ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9-]{20,}|Bearer [A-Za-z0-9._~+/=-]{20,}/);
     expect(runbook).toMatch(/read -rsp "Lim inn PAT/);

@@ -321,7 +321,7 @@ describe("D: eksempelkonfigen", () => {
     expect(parsed.runner.publish.denyPaths).toEqual([".github/", ".gitmodules", ".gitattributes", ".lfsconfig"]);
     expect(example.runner.env_allow).toEqual(["ANTHROPIC_API_KEY"]); // eksempelet viser standarden eksplisitt: kun Anthropic-nøkkelen worker leverer
     expect(parsed.runner.envAllow).toEqual(["ANTHROPIC_API_KEY"]);
-    expect([...parsed.egressProxy.allow].sort()).toEqual(["api.anthropic.com:443", "api.github.com:443", "github.com:443"]);
+    expect([...parsed.egressProxy.allow]).toEqual(["api.anthropic.com:443"]); // B-M3: github.com/api.github.com er IKKE med i eksempelet (klone/push skjer på verten)
   });
 
   it("proxyens gateway-adresse er innenfor jobbnettverkets subnett, og proxy-URL-en i runner-seksjonen peker på nøyaktig den", async () => {

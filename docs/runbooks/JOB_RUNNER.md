@@ -32,7 +32,7 @@ Jarvis worker (container, ingen docker.sock)                    VERTEN (NAS), ti
                                                               |  3. publish: git bundle LAGET I CONTAINEREN -> verifisert i ferskt bare-repo
                                                               |       -> push <sha>:refs/heads/jarvis/<id> med runnerens credential
 jobb-container --HTTPS_PROXY--> jarvis-egress-proxy (bruker jarvis-egress, uten docker)
-                                   CONNECT-only, allowlist github.com / api.github.com / api.anthropic.com :443, SSRF-/DNS-rebinding-sikker
+                                   CONNECT-only, allowlist (standard KUN api.anthropic.com:443), SSRF-/DNS-rebinding-sikker
 ```
 
 * Worker kan be om: opprett jobb for **ett repo i allowlisten**, kjør en kommando (argv, ingen shell), publiser en `jarvis/…`-branch, slett jobben.
@@ -41,7 +41,7 @@ jobb-container --HTTPS_PROXY--> jarvis-egress-proxy (bruker jarvis-egress, uten 
 * Jobb-containeren ser: `/work` (arbeidskopi uten `origin`), en tmpfs `/home/job`, en tmpfs `/tmp`, og nett kun via proxyen. Ingenting annet.
 * `base.git`, `verify.git`, `out.bundle` ligger i `private/` ved siden av `work/` og er **aldri montert** i containeren.
 * **Hva en jobb faktisk kan kjøre:** imaget har Node 22, npm og git (+ Claude Code). Testløpere utover `node --test`/`node <fil>`/`npm test` (`pytest`, `go`, `cargo`, `make`, `pnpm`, `yarn`) finnes **ikke**
-  i imaget, og nettet er begrenset til github.com/api.github.com/api.anthropic.com - så `npm install`/`pnpm install` kan ikke hente pakker. Repoer som trenger installasjon før testene kan ikke testes her uten at du
+  i imaget, og nettet er begrenset til api.anthropic.com (standard) - så `npm install`/`pnpm install` kan ikke hente pakker. Repoer som trenger installasjon før testene kan ikke testes her uten at du
   enten legger `registry.npmjs.org:443` til i `egress_proxy.allow` (utvider angrepsflaten: pakkeregisteret blir en mulig kanal ut og kilde til kjørbar kode) eller bygger et eget image med ferdige avhengigheter
   (**ikke bygget**). Sandbox-repoet til akseptansen skal derfor ha en test uten avhengigheter. En manglende kommando gir exit 127 og en feilet kodejobb (lukket), aldri en stille suksess.
 
@@ -219,7 +219,7 @@ Sjekkene (samme ID-er som i `acceptance.sh`; `--dry-run` skriver dem):
 | `J04_docker_inspect` | `privileged=false`, read-only rootfs, `cap-drop ALL`, `no-new-privileges`, ikke-root, minne/CPU/PID, kun jobbnettverket, kun `/work` montert, ingen `docker.sock`, ingen forbudte env | docker |
 | `J05_inne_i_containeren` | uid, `CapEff=0`, ingen `docker.sock`, read-only rootfs, `noexec` tmpfs, ingen vertsmapper/hemmelighets-env, ingen git-remote/credential | docker |
 | `J06_ressursgrenser` | minnegrense (OOM), PID-grense, tidsavbrudd dreper containeren | docker |
-| `J07_nettverk_deny_by_default` | ingen direkte rute ut; ingen DNS-oppslag av eksterne navn; vertsporter utilgjengelige unntatt proxyen; github OK, fremmed/privat/metadata nektet; kun CONNECT; jobb-containere når ikke hverandre; IPv6-observasjon | docker, brannmur |
+| `J07_nettverk_deny_by_default` | ingen direkte rute ut; ingen DNS-oppslag av eksterne navn; vertsporter utilgjengelige unntatt proxyen; hver oppføring i `egress_proxy.allow` (standard `api.anthropic.com:443`) gir 200, `github.com:443`/`api.github.com:443` gir 403 med mindre DU har åpnet dem (da rapporteres det som ADVARSEL); fremmed/privat/metadata nektet; kun CONNECT; jobb-containere når ikke hverandre; IPv6-observasjon | docker, brannmur |
 | `J08_kansellering` | DELETE midt i en kjørende `exec` dreper containeren umiddelbart | docker |
 | `J09_reclaim_etter_krasj` | `--with-restart`: SIGKILL på runneren; etter restart er rest-containere og -kataloger borte | root, systemd |
 | `J10_ttl` | `--with-ttl`: TTL-rydderen fjerner en jobb | docker |
@@ -320,9 +320,9 @@ stille fallback fra den ene kilden til den andre). Ukjente nøkler og alle andre
 |---|---|---|
 | `listen_host` | **påkrevd** | jobbnettverkets gateway-IP (aldri `0.0.0.0`) |
 | `listen_port` | `3128` | 1024-65535 |
-| `allow` | `github.com:443`, `api.github.com:443`, `api.anthropic.com:443` | eksakte `vert:port` (kun DNS-navn, aldri IP-literal) |
+| `allow` | `api.anthropic.com:443` | eksakte `vert:port` (kun DNS-navn, aldri IP-literal). **Standard er KUN Anthropic (B-M3):** `github.com:443`/`api.github.com:443` må du legge til selv, og det åpner en eksfiltreringsvei (kapittel 16, punkt 8) |
+| `max_connections`, `max_connections_per_client` | `64`, `16` | samtidige tunneler. I tillegg (ikke konfigurerbart): tak på RÅ tilkoblinger per klient-IP = 2 x `max_connections_per_client` (avvises før noe er lest), header-timeout 5 s og request-timeout 10 s (B-L1), så én jobb ikke kan fylle alle plasser med halvsendte forespørsler |
 | `allowed_client_cidrs` | **påkrevd** | jobbnettverkets subnett (første oppføring leses også av `setup-network.sh`) |
-| `max_connections`, `max_connections_per_client` | `64`, `16` | samtidige tunneler |
 | `idle_timeout_ms`, `connect_timeout_ms`, `max_tunnel_ms` | `120000`, `10000`, `3600000` | tidsavbrudd |
 
 **Miljøvariabler (worker-siden)** - kun stier og modus, aldri hemmeligheter: `JARVIS_JOB_RUNNER` (`host`), `JARVIS_JOB_RUNNER_SOCKET`, `JARVIS_JOB_RUNNER_TOKEN_FILE`;
@@ -493,7 +493,13 @@ Dette er hva sikkerheten FAKTISK hviler på, og hva som med vilje IKKE er løst.
 6. **Socket-autorisasjon = filrettigheter + delt bearer.** Alle i gruppen `jarvis-job-clients` kan kalle alle endepunkt; jobb-id (UUIDv4) er eneste skille mellom jobber (ingen eierskap per klient), og alle kan fylle `max_concurrent_jobs` eller holde de 32 tilkoblingene åpne (30 s tidsavbrudd per forespørsel).
 7. **Kortlevd token fra worker (`source: request`, kapittel 15):** runneren kan ikke kontrollere scope/utløp (ingen introspeksjon); redigeringen er verdibasert; tokenet ligger i prosessminnet hos runneren og i env hos git-/helper-barnene mens operasjonen pågår;
    en kompromittert worker kan allerede lage tokens (den har App-nøkkelen), så runneren begrenser KUN hva den selv bruker tokenet til (klone det allowlistede repoet, pushe `refs/heads/jarvis/<id>`, aldri force/sletting).
-8. **Egress-proxyen slipper `CONNECT` til `github.com`, `api.github.com` og `api.anthropic.com` fra containeren** (anonymt mot GitHub; med jobbens egen nøkkel mot Anthropic). Dette er mulige utgangskanaler for data fra en kompromittert agent (lav båndbredde); allowlisten er den eneste begrensningen.
+8. **Egress-proxyen er den eneste veien ut av jobb-containeren, og hva den slipper gjennom er en eksfiltreringsflate (B-M3 - tidligere undervurdert).** Standard allowlist er nå KUN `api.anthropic.com:443`; `github.com`/`api.github.com` er **ikke** med, fordi klone og push skjer
+   på verten og containeren ikke trenger dem. Proxyen ser bare `CONNECT vert:port` (TLS er ugjennomsiktig): den kan ikke se eller begrense HVILKEN nøkkel/token som brukes eller HVA som sendes, bare hvilken vert. Konsekvenser, ærlig:
+   * **Åpner du `github.com`/`api.github.com` (`egress_proxy.allow`)**: en prompt-injisert agent, eller repo-kode som `test_command` kjører i containeren, kan bruke HVILKEN SOM HELST PAT/API-nøkkel den finner i injisert tekst (en angriper-eid, ikke jobbens) til å pushe hele det private repoet - med full historikk - til en angriper-eid GitHub-repo, eller laste opp via API-et. Båndbredden er høy (hele repoet), ikke lav.
+     J07 rapporterer det som ADVARSEL hvis du har åpnet dem. Åpne dem bare for et repo der dette er akseptabelt.
+   * **`api.anthropic.com` alene har samme restrisiko, mindre åpenbar:** jobbens egen `ANTHROPIC_API_KEY` er i containerens miljø (Claude Code trenger den), og en angriper-nøkkel fra injisert tekst kan brukes mot Messages-API-et eller Files-API-et med vedlegg (opptil hundrevis av MB per fil) til å lagre kode i en angriper-eid Anthropic-konto.
+     Allowlisten kan ikke skille nøkler fra hverandre; det eneste tekniske svaret ville vært en TLS-terminerende proxy som kun slipper Messages-endepunktet med jobbens egen nøkkel - **ikke bygget**. Ubetrodd kode/tekst som agenten leser (issues, filer, avhengigheter) er derfor en reell vei for å få kode ut. Mildnende: kun repoer der dette er akseptabelt i `allowed_repos`; ingen secrets i repoet; kort levetid på nøkkelen; lav `max_job_lifetime_s`.
+   * Det finnes ingen per-repo egress-allowlist (kapittel 14): allowlisten gjelder alle jobber.
    **Runnerens egen** utgående trafikk (git mot github.com, docker mot sin socket) er ikke begrenset av brannmur: en kompromittert runner kan nå hva verten kan nå.
 9. **Logg og feil er sanitert, ikke bevist tomme for alle kodinger.** Kjente hemmeligheter (bearer, env-verdier, git-token) redigeres som eksakte strenger i logg, feildetaljer og `exec`-output; en hemmelighet i annen koding (base64/URL-kodet) fanges ikke.
    Interne stier (`base_dir`, installasjonskatalogen) erstattes i git-/docker-feildetaljer med `<jobs>`/`<runner>`; det er best-effort (agentens egen `exec`-output er agentens og scrubbes ikke).

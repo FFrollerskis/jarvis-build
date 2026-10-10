@@ -4,9 +4,10 @@
 #
 #   ACCEPTANCE_REPO=<owner/repo> ops/job-runner/acceptance.sh [--with-restart] [--with-ttl] [--dry-run]
 #
-#   ACCEPTANCE_REPO     PÅKREVD (unntatt --dry-run): et SANDBOX-/test-repo som står i runner.allowed_repos. Aldri produksjonsrepoet:
-#                       publiseringssteget pusher en ekte branch `jarvis/accept-<tid>` dit (blast radius, D-41). Slettes manuelt etterpå.
-#   --with-restart      sender SIGKILL til jarvis-job-runner og restarter (krever root): bevis for reclaim etter krasj (D-32 port 12).
+#   ACCEPTANCE_REPO     PÅKREVD (unntatt --dry-run): et SANDBOX-/test-repo som står i runner.allowed_repos. Aldri produksjonsrepoet (tsworkflow/jarvisbuild nektes HARDT,
+#                       også om det står i allowed_repos): publiseringssteget pusher en ekte branch `jarvis/accept-<tid>` dit (blast radius, D-41). Slettes manuelt etterpå.
+#   --with-restart      sender SIGKILL til jarvis-job-runner og restarter (krever root): bevis for reclaim etter krasj (D-32 port 12). ADVARSEL: dreper den LEVENDE runneren og alle
+#                       jobbene på den. Krever ACCEPT_CONFIRM_RESTART=yes (eller at du skriver RESTART når du blir spurt), og J09 hoppes over hvis andre jobber enn akseptansens egen er aktive.
 #   --with-ttl          venter til en jobb passerer runner.max_job_lifetime_s (bør være lav, f.eks. 60) og ser at den fjernes av TTL-rydderen.
 #   --dry-run           skriver kun sjekklisten (ingen docker, ingen nettverk).
 #   ACCEPTANCE_GIT_TOKEN_FILE  PÅKREVD hvis ACCEPTANCE_REPO står som `source: request` i runner.git_credentials (kortlevd token fra worker, WP-C3), og FORBUDT ellers:
@@ -33,6 +34,7 @@ GIT_TOKEN_FILE="${ACCEPTANCE_GIT_TOKEN_FILE:-}"   # kun for repoer med `source: 
 REPO_MODE=file                                    # file | request (settes av main() fra policyen)
 WITH_RESTART=0; WITH_TTL=0; DRY=0
 PASS=0; FAIL=0; SKIP=0; MANUAL=0
+J04_OK=0    # settes til 1 av J04 når grensene er bevist; J06 (minne-/gaffelbombe) krever det
 ROWS=()
 CREATED_JOBS=()
 WORK=""
@@ -43,10 +45,10 @@ CHECKLIST=(
   "J01_filrettigheter            (port 4, 10)  config root-eid, tokenfil/PAT uten tilgang for andre, socket 0660, kataloger private"
   "J02_helse                     (--)          API svarer med riktig token; feil token gir 401"
   "J03_container_per_jobb        (port 1)      én container per jobb (navn/merkelapp), borte etter DELETE"
-  "J04_docker_inspect            (2,3,4,5,6,7,8,9,10) privileged=false, read-only rootfs, cap-drop ALL, no-new-privileges, ikke-root, minne/CPU/PID, kun jobbnettverk, kun /work montert, ingen docker.sock"
-  "J05_inne_i_containeren        (3,4,5,6,7,10) uid != 0, CapEff=0, ingen docker.sock, rootfs skrivebeskyttet, tmpfs noexec, ingen vertsmapper, ingen hemmelighets-env"
-  "J06_ressursgrenser            (8)           minnegrense (OOM), PID-grense, tidsavbrudd dreper containeren"
-  "J07_nettverk_deny_by_default  (9)           ingen direkte rute ut, ingen eksterne DNS-oppslag, vertstjenester utilgjengelige, proxy: github OK, fremmed/privat/metadata nektet, kun CONNECT, jobb-containere når ikke hverandre"
+  "J04_docker_inspect            (2,3,4,5,6,7,8,9,10) privileged=false, read-only rootfs, cap-drop ALL, no-new-privileges, ikke-root, minne/CPU/PID, kun jobbnettverk, kun /work montert, ingen docker.sock, seccomp/apparmor ikke unconfined, daemon har seccomp"
+  "J05_inne_i_containeren        (3,4,5,6,7,10) uid != 0, CapEff=0, Seccomp=2 (filter), NoNewPrivs=1, ingen docker.sock, rootfs skrivebeskyttet, tmpfs noexec, ingen vertsmapper, ingen hemmelighets-env"
+  "J06_ressursgrenser            (8)           [krever J04 PASS] minnegrense (OOM), PID-grense, tidsavbrudd dreper containeren"
+  "J07_nettverk_deny_by_default  (9)           ingen direkte rute ut, ingen eksterne DNS-oppslag, vertstjenester utilgjengelige, proxy: allowlisten fra config OK (standard KUN api.anthropic.com), github NEKTET med mindre eieren åpnet det, fremmed/privat/metadata nektet, kun CONNECT, jobb-containere når ikke hverandre"
   "J08_kansellering              (11)          DELETE midt i en kjørende exec dreper containeren umiddelbart"
   "J09_reclaim_etter_krasj       (12)          [--with-restart] SIGKILL på runner -> ved oppstart fjernes rest-containere og -kataloger"
   "J10_ttl                       (8)           [--with-ttl] jobb fjernes av TTL-rydderen"
@@ -152,11 +154,12 @@ load_policy() {
     const out = [r.socket_path, r.token_file, r.network, r.image, r.user || "10001:10001", r.memory || "1g", r.cpus || "1.0", r.pids_limit || 256,
       r.base_dir || "/var/lib/jarvis-job-runner/jobs", p.listen_host || "", p.listen_port || 3128, r.max_job_lifetime_s || 3600,
       (r.allowed_repos || []).join(","), Object.values(r.git_credentials || {}).map((x) => x.token_file).filter(Boolean).join(","), r.branch_prefix || "jarvis/", r.socket_group || "",
-      Object.entries(r.git_credentials || {}).filter(([, x]) => x.source === "request").map(([slug]) => slug).join(",")];
+      Object.entries(r.git_credentials || {}).filter(([, x]) => x.source === "request").map(([slug]) => slug).join(","),
+      (p.allow || ["api.anthropic.com:443"]).join(",")];
     console.log(out.map((v) => String(v)).join("\n"));
   ' "$CONFIG") || return 1
   SOCKET="${POL[0]}"; TOKEN_FILE="${POL[1]}"; NETWORK="${POL[2]}"; IMAGE="${POL[3]}"; USER_SPEC="${POL[4]}"; MEMORY="${POL[5]}"; CPUS="${POL[6]}"; PIDS="${POL[7]}"
-  BASE_DIR="${POL[8]}"; GATEWAY="${POL[9]}"; PROXY_PORT="${POL[10]}"; LIFETIME="${POL[11]}"; ALLOWED="${POL[12]}"; PAT_FILES="${POL[13]}"; PREFIX="${POL[14]}"; SOCKET_GROUP="${POL[15]}"; REQUEST_REPOS="${POL[16]:-}"
+  BASE_DIR="${POL[8]}"; GATEWAY="${POL[9]}"; PROXY_PORT="${POL[10]}"; LIFETIME="${POL[11]}"; ALLOWED="${POL[12]}"; PAT_FILES="${POL[13]}"; PREFIX="${POL[14]}"; SOCKET_GROUP="${POL[15]}"; REQUEST_REPOS="${POL[16]:-}"; PROXY_ALLOW="${POL[17]:-api.anthropic.com:443}"
   CONTAINER_UID="${USER_SPEC%%:*}"
 }
 
@@ -249,6 +252,7 @@ check_J04() {
       if (h.PidMode || h.UTSMode || h.UsernsMode) bad.push("delt pid/uts/userns");
       if (/^(host|container:)/.test(h.IpcMode || "")) bad.push("ipc " + h.IpcMode); // daemon-standarden (private/shareable) er ufarlig; kun host/container: deler navnerom
       if ((h.Devices || []).length) bad.push("devices");
+      if ((h.SecurityOpt || []).some((x) => /^(seccomp|apparmor)[=:]unconfined$/.test(x))) bad.push("seccomp/apparmor unconfined (beskyttelsen hviler på Docker-standardprofilene)");
       if ((h.Binds || []).length) bad.push("binds: " + h.Binds.length);
       if (cfg.User !== user) bad.push("bruker " + cfg.User);
       const mounts = (c.Mounts || []).filter((m) => m.Type !== "tmpfs"); // tmpfs (/tmp, /home/job) er forventet; kun bind/volume skal telles
@@ -260,7 +264,12 @@ check_J04() {
       if (cfg.Labels["jarvis.role"] !== "job") bad.push("merkelapp jarvis.role");
       console.log(bad.length ? "FAIL " + bad.join("; ") : "PASS ok");
     });' "$MEMORY" "$CPUS" "$PIDS" "$NETWORK" "$USER_SPEC" 2>&1)"
-  if [ "${verdict%% *}" = "PASS" ]; then record J04_docker_inspect PASS "privileged=false, ro rootfs, cap-drop ALL, no-new-privileges, $USER_SPEC, minne $MEMORY (ingen swap), pids $PIDS, cpus $CPUS, nett $NETWORK, kun /work montert, ingen docker.sock, ingen forbudte env"; else record J04_docker_inspect FAIL "${verdict#FAIL }"; fi
+  # B-L4: beskyttelsen mot syscalls/prosess-escape hviler på Docker-standardprofilene (seccomp, apparmor) og på at uid i containeren er lik uid på verten (ingen userns). Daemonens innstillinger leses her.
+  local secopts; secopts="$(docker info --format '{{.SecurityOptions}}' 2>/dev/null)"
+  case "$secopts" in *name=seccomp*) : ;; *) verdict="FAIL docker-daemonen har ikke seccomp aktivert (docker info: ${secopts:-ukjent}); containerne mangler syscall-filteret" ;; esac
+  case "$secopts" in *name=userns*|*name=rootless*) verdict="FAIL docker bruker ${secopts}: uid i containeren er ikke lik uid på verten (runneren kan ikke rydde /work)" ;; esac
+  local apparmor; case "$secopts" in *name=apparmor*) apparmor="apparmor aktiv i daemonen" ;; *) apparmor="apparmor IKKE aktiv i daemonen (observasjon; seccomp er hovedvernet)" ;; esac
+  if [ "${verdict%% *}" = "PASS" ]; then J04_OK=1; record J04_docker_inspect PASS "privileged=false, ro rootfs, cap-drop ALL, no-new-privileges, $USER_SPEC, minne $MEMORY (ingen swap), pids $PIDS, cpus $CPUS, nett $NETWORK, kun /work montert, ingen docker.sock, ingen forbudte env, ikke seccomp/apparmor=unconfined, daemon: seccomp aktiv, $apparmor"; else record J04_docker_inspect FAIL "${verdict#FAIL }"; fi
   KEEP_JOB="$JOB_ID"
 }
 
@@ -270,6 +279,10 @@ check_J05() {
   if [ -z "$JOB_ID" ]; then record J05_inne_i_containeren SKIP "ingen jobb fra J04"; return; fi
   cexec $t id -u; { [ "$EXEC_CODE" = "0" ] && [ "${EXEC_OUT//[$'\n']/}" = "$CONTAINER_UID" ]; } || fails+=("uid=${EXEC_OUT//[$'\n']/} (forventet $CONTAINER_UID)")
   cexec $t sh -c 'grep CapEff /proc/self/status'; case "$EXEC_OUT" in *"0000000000000000"*) : ;; *) fails+=("CapEff ikke null: ${EXEC_OUT//[$'\n']/}") ;; esac
+  # B-L4: seccomp-filteret (Seccomp: 2 = filter) og no-new-privileges (NoNewPrivs: 1) er faktisk i kraft for prosessene i containeren, ikke bare bedt om i docker inspect
+  cexec $t sh -c 'grep -E "^(Seccomp|NoNewPrivs):" /proc/self/status'
+  [[ "$EXEC_OUT" =~ Seccomp:[[:space:]]*2([^0-9]|$) ]] || fails+=("Seccomp er ikke 2 (filter) i containeren: ${EXEC_OUT//[$'\n']/ }")
+  [[ "$EXEC_OUT" =~ NoNewPrivs:[[:space:]]*1([^0-9]|$) ]] || fails+=("NoNewPrivs er ikke 1 i containeren: ${EXEC_OUT//[$'\n']/ }")
   cexec $t sh -c 'test -e /var/run/docker.sock || test -e /run/docker.sock'; [ "$EXEC_CODE" != "0" ] || fails+=("docker.sock finnes i containeren")
   cexec $t sh -c 'touch /usr/aksept-test 2>&1'; [ "$EXEC_CODE" != "0" ] || fails+=("rootfs er skrivbar")
   cexec $t sh -c 'touch /work/aksept && rm /work/aksept'; [ "$EXEC_CODE" = "0" ] || fails+=("/work ikke skrivbar")
@@ -286,10 +299,12 @@ check_J05() {
   cexec $t sh -c 'cd /work && git remote -v'
   [ -z "${EXEC_OUT//[$'\n']/}" ] || fails+=("arbeidskopien har en remote")
   delete_job "$JOB_ID"; KEEP_JOB=""
-  if [ "${#fails[@]}" -eq 0 ]; then record J05_inne_i_containeren PASS "uid $CONTAINER_UID, CapEff=0, ingen docker.sock, ro rootfs, noexec tmpfs, ingen vertsmapper/hemmelighets-env, ingen git-remote/credential"; else record J05_inne_i_containeren FAIL "${fails[*]}"; fi
+  if [ "${#fails[@]}" -eq 0 ]; then record J05_inne_i_containeren PASS "uid $CONTAINER_UID, CapEff=0, Seccomp=2, NoNewPrivs=1, ingen docker.sock, ro rootfs, noexec tmpfs, ingen vertsmapper/hemmelighets-env, ingen git-remote/credential"; else record J05_inne_i_containeren FAIL "${fails[*]}"; fi
 }
 
 check_J06() {
+  # B-L5: minne- og gaffelbomben kjøres KUN når J04 har bevist at grensene faktisk er satt på containeren (docker inspect). Uten det kunne bomben ta verten.
+  if [ "${J04_OK:-0}" != "1" ]; then record J06_ressursgrenser SKIP "krever J04 PASS (håndhevet minne-/pids-/swap-grense bevist med docker inspect) - minne- og gaffelbomben kjøres ikke uten bevist grense"; return; fi
   create_job || { record J06_ressursgrenser FAIL "kunne ikke opprette jobb"; return; }
   local fails=() name="$CONTAINER"
   # minne: allokér til OOM (grensen er $MEMORY, ingen swap)
@@ -326,8 +341,19 @@ check_J07() {
     cexec 30000 node -e "$NODE_PROBE" "$GATEWAY" "$port"; [ "${EXEC_OUT//[$'\n']/}" = "BLOCKED" ] || fails+=("verts-port $GATEWAY:$port nåbar fra jobb-container")
   done
   cexec 30000 node -e "$NODE_PROBE" "$GATEWAY" "$PROXY_PORT"; [ "${EXEC_OUT//[$'\n']/}" = "CONNECTED" ] || fails+=("proxyen $GATEWAY:$PROXY_PORT er IKKE nåbar (kontroll)")
-  # c) proxy-oppførsel sett fra containeren
-  cexec 30000 node -e "$NODE_CONNECT" github.com:443 "$GATEWAY" "$PROXY_PORT"; [ "${EXEC_OUT//[$'\n']/}" = "200" ] || fails+=("CONNECT github.com:443 ga ${EXEC_OUT//[$'\n']/}, forventet 200")
+  # c) proxy-oppførsel sett fra containeren. Allowlisten leses fra den FAKTISKE konfigen (egress_proxy.allow; standard KUN api.anthropic.com:443): hver oppføring skal gi 200. github.com:443 og
+  #    api.github.com:443 skal gi 403 MED MINDRE eieren selv har åpnet dem (B-M3): klone/push skjer på verten, og åpne dem betyr at en angriper-PAT kan pushe hele repoet ut av containeren.
+  local entry allow_entries github_open=""
+  IFS=',' read -ra allow_entries <<<"$PROXY_ALLOW"
+  for entry in "${allow_entries[@]}"; do
+    cexec 30000 node -e "$NODE_CONNECT" "$entry" "$GATEWAY" "$PROXY_PORT"; [ "${EXEC_OUT//[$'\n']/}" = "200" ] || fails+=("CONNECT $entry (står i egress_proxy.allow) ga ${EXEC_OUT//[$'\n']/}, forventet 200")
+  done
+  for entry in github.com:443 api.github.com:443; do
+    case ",$PROXY_ALLOW," in
+      *",$entry,"*) github_open="$github_open $entry" ;;
+      *) cexec 30000 node -e "$NODE_CONNECT" "$entry" "$GATEWAY" "$PROXY_PORT"; [ "${EXEC_OUT//[$'\n']/}" = "403" ] || fails+=("CONNECT $entry ga ${EXEC_OUT//[$'\n']/}, forventet 403 (står ikke i egress_proxy.allow)") ;;
+    esac
+  done
   for target in example.com:443 169.254.169.254:80 10.0.0.1:443 localhost:5432 github.com:22 127.0.0.1:443; do
     cexec 30000 node -e "$NODE_CONNECT" "$target" "$GATEWAY" "$PROXY_PORT"
     case "${EXEC_OUT//[$'\n']/}" in 400|403) : ;; *) fails+=("CONNECT $target ga ${EXEC_OUT//[$'\n']/}, forventet 400/403") ;; esac
@@ -351,7 +377,7 @@ check_J07() {
     fails+=("ICC-test kunne ikke kjøres (ip=$a_ip)")
   fi
   delete_job "$a_id"
-  if [ "${#fails[@]}" -eq 0 ]; then record J07_nettverk_deny_by_default PASS "ingen direkte rute ut; ingen vertsporter nåbare unntatt proxyen $GATEWAY:$PROXY_PORT; github OK, fremmed/privat/metadata nektet, GET=405; jobb-containere når ikke hverandre; ikke-loopback IPv6-adresser i containeren: $v6 (forventet 0)"; else record J07_nettverk_deny_by_default FAIL "${fails[*]}"; fi
+  if [ "${#fails[@]}" -eq 0 ]; then record J07_nettverk_deny_by_default PASS "ingen direkte rute ut; ingen vertsporter nåbare unntatt proxyen $GATEWAY:$PROXY_PORT; allowlisten ($PROXY_ALLOW) OK, github ${github_open:+ÅPNET AV EIER:$github_open (ADVARSEL: en angriper-PAT kan pushe repoet ut)}${github_open:-nektet}, fremmed/privat/metadata nektet, GET=405; jobb-containere når ikke hverandre; ikke-loopback IPv6-adresser i containeren: $v6 (forventet 0)"; else record J07_nettverk_deny_by_default FAIL "${fails[*]}"; fi
 }
 
 check_J08() {
@@ -378,6 +404,10 @@ check_J08() {
 check_J09() {
   if [ "$WITH_RESTART" != "1" ]; then record J09_reclaim_etter_krasj SKIP "kjør med --with-restart (krever root)"; return; fi
   [ "$(id -u)" = "0" ] || { record J09_reclaim_etter_krasj SKIP "--with-restart krever root"; return; }
+  # B-L5: SIGKILL på den LEVENDE runneren dreper alle jobber på den. Aldri hvis noen andre enn akseptansen har aktive jobber.
+  api GET /v1/health
+  local active; active="$(resp_get active_jobs)"
+  if [ "$HTTP_CODE" != "200" ] || ! [[ "$active" =~ ^[0-9]+$ ]] || [ "$active" -gt 0 ]; then record J09_reclaim_etter_krasj SKIP "runneren har $active aktive jobber (http=$HTTP_CODE): J09 dreper runneren og ville avbrutt dem - kjør når den er tom"; return; fi
   create_job || { record J09_reclaim_etter_krasj FAIL "kunne ikke opprette jobb"; return; }
   local name="$CONTAINER" id="$JOB_ID"
   systemctl kill --signal=SIGKILL jarvis-job-runner.service
@@ -499,6 +529,21 @@ main() {
   fi
   for tool in docker curl node; do command -v "$tool" >/dev/null 2>&1 || { echo "mangler $tool - kjør dette på NAS-en" >&2; return 2; }; done
   [ -n "$REPO" ] || { echo "ACCEPTANCE_REPO er påkrevd (et SANDBOX-repo i runner.allowed_repos - aldri produksjonsrepoet)" >&2; return 2; }
+  # B-L5: produksjonsrepoet nektes HARDT, uavhengig av runner.allowed_repos (en eier som har lagt det der kan ikke bruke akseptansen mot det: J11 pusher en ekte branch).
+  case "$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')" in
+    tsworkflow/jarvisbuild) echo "ACCEPTANCE_REPO=$REPO er PRODUKSJONSREPOET: akseptansen pusher en ekte branch dit og nektes uansett runner.allowed_repos. Bruk et sandbox-repo - avbryter" >&2; return 2 ;;
+  esac
+  if [ "$WITH_RESTART" = "1" ]; then
+    echo "ADVARSEL: --with-restart sender SIGKILL til den LEVENDE jarvis-job-runner og restarter den. Alle jobber på runneren avbrytes." >&2
+    if [ "${ACCEPT_CONFIRM_RESTART:-}" != "yes" ]; then
+      if [ -t 0 ]; then
+        local answer; read -r -p "Skriv RESTART for å fortsette: " answer
+        [ "$answer" = "RESTART" ] || { echo "ikke bekreftet - avbryter" >&2; return 2; }
+      else
+        echo "--with-restart krever bekreftelse: sett ACCEPT_CONFIRM_RESTART=yes (ikke-interaktivt) - avbryter" >&2; return 2
+      fi
+    fi
+  fi
   [ -r "$CONFIG" ] || { echo "kan ikke lese $CONFIG" >&2; return 2; }
   load_policy || { echo "kunne ikke lese policy fra $CONFIG" >&2; return 2; }
   case ",$ALLOWED," in *",$REPO,"*) : ;; *) echo "ACCEPTANCE_REPO=$REPO står ikke i runner.allowed_repos ($ALLOWED) - avbryter" >&2; return 2 ;; esac

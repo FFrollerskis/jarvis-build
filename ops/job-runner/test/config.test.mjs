@@ -42,9 +42,9 @@ describe("A: gyldig konfig og standardverdier", () => {
     expect(Object.isFrozen(r.envAllow)).toBe(true);
   });
 
-  it("minimal proxy-konfig har standard allowlist (github.com, api.github.com, api.anthropic.com :443)", () => {
+  it("B-M3: minimal proxy-konfig har standard allowlist KUN api.anthropic.com:443 (github.com/api.github.com må eieren legge til eksplisitt: klone/push skjer på verten)", () => {
     const { egressProxy: p } = parse(undefined, proxy());
-    expect([...p.allow].sort()).toEqual(["api.anthropic.com:443", "api.github.com:443", "github.com:443"]);
+    expect([...p.allow]).toEqual(["api.anthropic.com:443"]);
     expect(p.listenPort).toBe(3128);
   });
 

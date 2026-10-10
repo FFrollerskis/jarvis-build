@@ -8,7 +8,7 @@ export interface JobContainerPolicy {
   image: string;
   /** Eksisterende docker-nettverk for jobber (internal; når kun egress-proxyen). `host`/`bridge`/`none` nektes. */
   network: string;
-  /** `http(s)://host:port` til egress-proxyen med vert-allowlist (github.com, api.anthropic.com). */
+  /** `http(s)://host:port` til egress-proxyen med vert-allowlist (host-runner: standard kun api.anthropic.com). */
   egressProxyUrl: string;
   user?: string;
   memory?: string;

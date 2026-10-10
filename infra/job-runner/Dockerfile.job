@@ -10,7 +10,7 @@
 #    no-new-privileges, minne/CPU/PID-grenser og kun /work montert - dette imaget antar ingenting annet (se job-container-spec.mjs).
 #  - Ingen hemmeligheter i imaget: verken git-credential, Anthropic-nøkkel eller konfig bakes inn. ANTHROPIC_API_KEY kommer som env ved
 #    opprettelse; git-credentialen finnes ikke i containeren i det hele tatt (klone/push skjer på verten).
-#  - Telemetri/auto-oppdatering av: containeren når kun egress-proxyens allowlist (github.com, api.github.com, api.anthropic.com).
+#  - Telemetri/auto-oppdatering av: containeren når kun egress-proxyens allowlist (standard KUN api.anthropic.com; github.com/api.github.com er bevisst ikke med - klone/push skjer på verten).
 #
 # Claude Code-versjon: 2.1.286 = npm-dist-tag `stable` per 2026-10-09 (publisert 2026-09-30); verifisert mot npm-metadata (integritet i
 # claude-code/package-lock.json). KOMPATIBILITET med flaggene ClaudeCodeAgent bruker (-p, --bare, --output-format json, --permission-mode

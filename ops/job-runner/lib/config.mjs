@@ -22,7 +22,12 @@ const PREFIX = /^[a-z0-9][a-z0-9-]{0,30}\/$/;
 const DENY_PATH = /^[A-Za-z0-9._/-]{1,200}$/;
 const ALLOW_ENTRY = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+:[0-9]{1,5}$/;
 const IDENT = /^[A-Za-z0-9 ._@+-]{1,100}$/;
-const DEFAULT_ALLOW = ["github.com:443", "api.github.com:443", "api.anthropic.com:443"];
+/**
+ * Standard allowlist for jobb-containerens egress: KUN Claude Code mot api.anthropic.com. github.com/api.github.com er IKKE med (B-M3): klone og push skjer på VERTEN med runnerens credential, så containeren
+ * trenger dem ikke, og med dem åpne kunne en prompt-injisert agent (eller repo-kode i `test_command`) bruke en angriper-PAT fra injisert tekst til å pushe hele det private repoet til en angriper-eid
+ * GitHub-repo. Vil eieren åpne dem likevel, må det legges til eksplisitt i `egress_proxy.allow` (runbook, kapittel 16 punkt 8, beskriver risikoen).
+ */
+const DEFAULT_ALLOW = ["api.anthropic.com:443"];
 /** Standard nekteliste for publish. Oppføringer med ÉN komponent gjelder på ALLE nivåer (som i `.gitignore`), oppføringer med sti er forankret i roten - se `compileDenyPaths` i git.mjs (A-F1). `.lfsconfig` kan peke Git LFS mot en fremmed server. */
 const DEFAULT_DENY_PATHS = [".github/", ".gitmodules", ".gitattributes", ".lfsconfig"];
 /** Eneste env-navn en jobb får som standard: Anthropic-nøkkelen worker leverer til Claude Code. Alt annet må vertsadmin åpne eksplisitt (`runner.env_allow`). */

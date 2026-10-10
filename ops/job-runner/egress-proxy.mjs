@@ -13,7 +13,7 @@ import { createLogger } from "./lib/log.mjs";
  * containerne når KUN denne proxyen (på nettverkets gateway-adresse) og proxyen slipper kun gjennom en eksplisitt allowlist.
  *
  *   - KUN `CONNECT host:port` (HTTPS-tunneler). Vanlig HTTP-videresending finnes ikke: alt annet svarer 405.
- *   - Allowlist på eksakt `vert:port` (standard github.com:443, api.github.com:443, api.anthropic.com:443). Kun DNS-navn - aldri IP-literaler.
+ *   - Allowlist på eksakt `vert:port` (standard KUN api.anthropic.com:443; github.com/api.github.com er bevisst ikke med: klone/push skjer på verten, og de åpne en eksfiltreringsvei, B-M3). Kun DNS-navn - aldri IP-literaler.
  *   - SSRF/DNS-rebinding: proxyen slår opp DNS SELV, krever at ALLE svar er offentlige adresser (loopback/privat/link-local/ULA/CGNAT/
  *     metadata nektes) og kobler til den VALIDERTE IP-en - aldri et nytt oppslag mellom sjekk og tilkobling.
  *   - Kun klienter fra jobbnettverkets CIDR (forsvar i dybden hvis gateway-adressen skulle nås utenfra).
