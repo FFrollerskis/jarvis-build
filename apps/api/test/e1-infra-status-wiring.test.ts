@@ -7,7 +7,7 @@ import { OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/ow
 import { SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";
 import {
   CHAT_READ_TIER, MemorySearchTransport, ModelSurfaceViolationError, SURFACE_TOOL_GRANTS, assertChatReadTier, assertManifestInvariants, buildToolManifest, firstWaveTools, homeAssistantTools,
-  memoryToolDefinitions, selectSurfaceTools, type ToolDefinition, type ToolGateway
+  KnowledgeSearchTransport, knowledgeToolDefinitions, memoryToolDefinitions, selectSurfaceTools, type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
 import { TasksDelegateTransport, tasksDelegateToolDefinitions } from "../src/chat-jobs.ts";
 import { RunRateTransport, runRateToolDefinitions } from "../src/run-rate.ts";
@@ -32,6 +32,7 @@ function productionDefinitions(): ToolDefinition[] {
       ...governanceToolDefinitions(new GovernanceTransport({} as never)),
       ...situationsToolDefinitions(new SituationsTransport({} as never, {} as never)),
       ...memoryToolDefinitions(new MemorySearchTransport({} as never, {} as never)),
+      ...knowledgeToolDefinitions(new KnowledgeSearchTransport({} as never)),
       ...tasksDelegateToolDefinitions(new TasksDelegateTransport({} as never, {} as never)),
       ...runRateToolDefinitions(new RunRateTransport({} as never))
     ]

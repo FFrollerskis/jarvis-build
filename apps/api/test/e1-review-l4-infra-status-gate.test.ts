@@ -5,7 +5,7 @@ import { GovernanceTransport, governanceToolDefinitions } from "@jarvis/governan
 import { OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
 import { SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";
 import {
-  CHAT_READ_TIER, MemorySearchTransport, SURFACE_TOOL_GRANTS, assertManifestInvariants, buildToolManifest, firstWaveTools, homeAssistantTools, memoryToolDefinitions,
+  CHAT_READ_TIER, MemorySearchTransport, SURFACE_TOOL_GRANTS, assertManifestInvariants, buildToolManifest, firstWaveTools, homeAssistantTools, KnowledgeSearchTransport, knowledgeToolDefinitions, memoryToolDefinitions,
   resolveModelToolSurface, selectSurfaceTools, type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
 import { TasksDelegateTransport, tasksDelegateToolDefinitions } from "../src/chat-jobs.ts";
@@ -31,6 +31,7 @@ function definitionsWith(registry?: ReturnType<typeof createControlCenterRegistr
       ...governanceToolDefinitions(new GovernanceTransport({} as never)),
       ...situationsToolDefinitions(new SituationsTransport({} as never, {} as never)),
       ...memoryToolDefinitions(new MemorySearchTransport({} as never, {} as never)),
+      ...knowledgeToolDefinitions(new KnowledgeSearchTransport({} as never)),
       ...tasksDelegateToolDefinitions(new TasksDelegateTransport({} as never, {} as never)),
       ...runRateToolDefinitions(new RunRateTransport({} as never))
     ]
