@@ -278,15 +278,6 @@ type SubmitPlan =
   | { kind: "blocked"; error: FinanceKillSwitchActiveError }
   | { kind: "call"; idempotentAtProvider: boolean; run: () => Promise<(client: pg.PoolClient) => Promise<PaymentIntent>> };
 
-/**
- * 4xx (unntatt 408/409/429) fra leverandøren = tydelig avvist FØR noen bivirkning; alt annet (tidsavbrudd, nettverk, 5xx) er et ukjent utfall.
- * WP-F1: 409 er UKJENT, ikke avvist - hos Stripe betyr `idempotency_key_in_use` at et tidligere kall med samme nøkkel fortsatt pågår.
- */
-export function isDefinitiveProviderRejection(err: unknown): boolean {
-  const status = (err as { httpStatus?: unknown; status?: unknown } | null)?.httpStatus ?? (err as { status?: unknown } | null)?.status;
-  return typeof status === "number" && status >= 400 && status < 500 && status !== 408 && status !== 409 && status !== 429;
-}
-
 async function readForUpdate(client: pg.PoolClient, tenantId: string, paymentIntentId: string, forUpdate: boolean): Promise<PaymentIntent | null> {
   const { rows } = await client.query(
     `SELECT * FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2${forUpdate ? " FOR UPDATE" : ""}`,

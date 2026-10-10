@@ -5,7 +5,7 @@ import { authorizeDockerTarget, type DockerMutationAction } from "./docker-targe
 import { authorizeGceTarget, type GceMutationAction } from "./gce-target-policy.ts";
 import type { ToolDefinition, ToolTransport } from "./gateway.ts";
 import {
-  financeCredentialRefForProvider,
+  financeConnectorIdsForCredentialRef, financeCredentialRefForProvider,
   SUBMIT_PAYMENT_INTENT_RECOVERY, SUBMIT_STRIPE_REFUND_RECOVERY, SUBMIT_VIPPS_CAPTURE_RECOVERY, SUBMIT_VIPPS_REFUND_RECOVERY,
   submitPaymentIntentPostcondition, submitStripeRefundPostcondition, submitVippsCapturePostcondition, submitVippsRefundPostcondition,
   summarizeSubmitChild, summarizeSubmitPaymentIntent,
@@ -1945,6 +1945,7 @@ export function firstWaveTools(
       preflight_validator: validateSubmitPaymentIntent,
       postcondition_predicate: submitPaymentIntentPostcondition,
       step_up_required: true,
+      connector_ids_for: financeConnectorIdsForCredentialRef,
       notification_summary: (state) => summarizeSubmitPaymentIntent(state),
       credential_ref_resolver: async (parameters, context) => {
         const found = await transport("finance").invoke("get_payment_intent", parameters, "", context);
@@ -1958,7 +1959,8 @@ export function firstWaveTools(
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), payment_intent_id: z.string() }),
       capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
-      output_trust: "internal", transport: transport("finance")
+      output_trust: "internal", transport: transport("finance"),
+      owner_only: true
     },
     {
       // WP-F1 (D-462, UA-6 akseptanse): rapport over den deterministiske avstemmingen (intensjon <-> leverandørutfall <-> Fiken-bilag). Ren lesing av funn-/kjøringstabellene
@@ -1967,7 +1969,8 @@ export function firstWaveTools(
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional() }),
       capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
-      output_trust: "internal", transport: transport("finance")
+      output_trust: "internal", transport: transport("finance"),
+      owner_only: true
     },
     {
       tool_id: "finance", action: "settle_payment_intent", description: "Marker en innsendt/bekreftet intensjon som endelig oppgjort (f.eks. etter manuell bankavstemming) - ren intern disposisjon",
@@ -2250,6 +2253,7 @@ export function firstWaveTools(
       preflight_validator: validateSubmitStripeRefund,
       postcondition_predicate: submitStripeRefundPostcondition,
       step_up_required: true,
+      connector_ids_for: financeConnectorIdsForCredentialRef,
       notification_summary: (state) => summarizeSubmitChild(state)
     },
     {
@@ -2257,7 +2261,8 @@ export function firstWaveTools(
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), refund_id: z.string() }),
       capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
-      output_trust: "internal", transport: transport("finance_stripe")
+      output_trust: "internal", transport: transport("finance_stripe"),
+      owner_only: true
     },
     {
       tool_id: "finance_stripe", action: "get_refund", description: "Les én Stripe-refusjonsrad",
@@ -2333,6 +2338,7 @@ export function firstWaveTools(
       preflight_validator: validateSubmitVippsCapture,
       postcondition_predicate: submitVippsCapturePostcondition,
       step_up_required: true,
+      connector_ids_for: financeConnectorIdsForCredentialRef,
       notification_summary: (state) => summarizeSubmitChild(state)
     },
     {
@@ -2340,7 +2346,8 @@ export function firstWaveTools(
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), capture_id: z.string() }),
       capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
-      output_trust: "internal", transport: transport("finance_vipps")
+      output_trust: "internal", transport: transport("finance_vipps"),
+      owner_only: true
     },
     {
       tool_id: "finance_vipps", action: "get_capture", description: "Les én Vipps-capture-rad",
@@ -2388,6 +2395,7 @@ export function firstWaveTools(
       preflight_validator: validateSubmitVippsRefund,
       postcondition_predicate: submitVippsRefundPostcondition,
       step_up_required: true,
+      connector_ids_for: financeConnectorIdsForCredentialRef,
       notification_summary: (state) => summarizeSubmitChild(state)
     },
     {
@@ -2395,7 +2403,8 @@ export function firstWaveTools(
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), refund_id: z.string() }),
       capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
-      output_trust: "internal", transport: transport("finance_vipps")
+      output_trust: "internal", transport: transport("finance_vipps"),
+      owner_only: true
     },
     {
       tool_id: "finance_vipps", action: "get_refund", description: "Les én Vipps-refusjonsrad",

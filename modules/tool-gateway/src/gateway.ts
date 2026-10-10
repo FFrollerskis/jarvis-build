@@ -345,11 +345,24 @@ export interface ToolDefinition {
   notification_summary?: (state: JsonValue | null, parameters: Record<string, JsonValue>) => string | null;
   /**
    * WP-F1 (D-462): handlingen flytter penger og kan KUN utføres med eierens step-up - en enhetssignert økt (`auth_strength: "signed"`) fra en eier-kanal
-   * (web/desktop/api/mobile; se `ownerStepUpDenial`). Håndheves av gatewayen SELV når klasse D-pipelinen er påslått (produksjon: api og worker), rett etter
-   * policy-/parameter-portene og FØR noe annet leses - slik at ingen ny rute, jobb eller modellvei kan flytte penger uten step-up, uavhengig av om kalleren
-   * husket å sjekke. Avslag: `step_up_required:<årsak>`. Uten påslått pipeline (testhjelpere, host-akseptansescript) er flagget uten effekt.
+   * (web/desktop/api/mobile; se `ownerStepUpDenial`). Håndheves av gatewayen SELV, rett etter policy-/parameter-portene og FØR noe annet leses - slik at ingen ny rute, jobb
+   * eller modellvei kan flytte penger uten step-up, uavhengig av om kalleren husket å sjekke. Avslag: `step_up_required:<årsak>`.
+   * Review F4: håndheves UAVHENGIG av `classDPipeline.enforce` (en `ToolGateway` uten options lot tidligere en `active/api`-identitet sende en Stripe-intensjon). Host-akseptansescript
+   * kjøres med en eksplisitt, merket eier-/enhetsidentitet (`device_id: "jarvis-host-acceptance"`, signert), ikke ved at kontrollen er av.
    */
   step_up_required?: boolean;
+  /**
+   * WP-F1 (review F8): CONNECTOR-id-ene (f.eks. `stripe`, `vipps`, `fiken`, `neonomics`) en frys skal gjelde for, utledet av den LØSTE credential-referansen. Frys-sjekken (`isFrozenDurable`)
+   * gjaldt bare `tool_id` (namespacet `finance`/`finance_stripe`/`finance_vipps`), så en eier som frøs connectoren `stripe` stoppet ikke pengehandlingene. Sjekkes både ved start og
+   * på nytt rett før leverandørkallet. Utelatt = kun `tool_id` (uendret oppførsel for alle andre verktøy).
+   */
+  connector_ids_for?: (credentialRef: string) => readonly string[];
+  /**
+   * WP-F1 (review F9): KUN den autentiserte eieren (ikke gjest, ikke delegat) i eierens tenant kan kalle handlingen via gatewayen - også for klasse A-lesinger. Uten dette kunne en gjest i
+   * samme tenant lese f.eks. `finance.check_submit_*` og `finance.get_reconciliation_status` (klasse A, intern credential-ref = ingen eier-binding). Krever `credentialBinding` (uten den kjenner
+   * ikke gatewayen eieren, og flagget har ingen effekt - som resten av eier-bindingen). Avslag: `owner_only`. Gatewayens egne preflight-/readback-lesinger går direkte via transporten og påvirkes ikke.
+   */
+  owner_only?: boolean;
 }
 
 /**
@@ -567,6 +580,10 @@ export class ToolGateway {
     if (binding && definition.credential_ref !== "" && !binding.internalRefs.has(definition.credential_ref) && !isOwner) {
       return this.deny(request, "credential_not_bound_to_identity");
     }
+    // WP-F1 (review F9): eier-eksklusive handlinger (finans-lesinger) også for klasse A.
+    if (definition.owner_only === true && binding && !isOwner) {
+      return this.deny(request, "owner_only");
+    }
     const decision = await this.policy.authorize({
       identity: request.identity,
       toolCall: {
@@ -591,7 +608,8 @@ export class ToolGateway {
     // Del 3 (JARVIS-013/043): klasse D-pipelinen er en HARD port i produksjon (påslått i api og worker).
     const classDGoverned = this.classDPipeline?.enforce === true && definition.capability_class === "D" && !isClassDExempt(definition);
     // WP-F1: pengehandlinger krever eierens step-up (signert enhet + eier-kanal) - håndhevet her, ikke bare i rutene.
-    if (classDGoverned && definition.step_up_required === true) {
+    // Review F4: UAVHENGIG av `classDPipeline.enforce` - en gateway uten options (testhjelper, host-skript) skal ikke la en svakere økt flytte penger.
+    if (definition.step_up_required === true) {
       const stepUp = ownerStepUpDenial(request.identity);
       if (stepUp !== undefined) return this.deny(request, stepUp);
     }
@@ -679,6 +697,12 @@ export class ToolGateway {
         return this.deny(request, "credential_not_bound_to_identity");
       }
     }
+    // WP-F1 (review F8): frys gjelder også CONNECTOR-id-en (stripe/vipps/fiken/neonomics) utledet av den løste credential-referansen, ikke bare tool-namespacet.
+    if (this.controls && request.tool_id !== "owner_controls") {
+      for (const connectorId of definition.connector_ids_for?.(credentialRef) ?? []) {
+        if (await this.controls.isFrozenDurable(connectorId)) return this.deny(request, "connector_frozen");
+      }
+    }
     if (!isCredentialRevocationSelfRecovery && (await this.controls?.isRevokedDurable(credentialRef))) {
       return this.deny(request, "credential_revoked");
     }
@@ -725,6 +749,9 @@ export class ToolGateway {
     // grunnlag) og PÅ NYTT etterpå (readback/before-after-evidens).
     // Preflight-feil på klasse D er fail-closed.
     let beforeState: JsonValue | null = null;
+    // WP-F1 (review F6): true når validatoren ble hoppet over fordi replay-peeken så en eksisterende ledger-rad. Blir den raden `failed` hos et samtidig kall og re-armes av oss,
+    // MÅ validatoren kjøres på fersk tilstand før noe utføres (se re-arm under).
+    let validatorSkipped = false;
     const needsEvidence = (definition.capability_class === "C" || definition.capability_class === "D") && definition.preflight_action;
     if (needsEvidence) {
       try {
@@ -763,6 +790,8 @@ export class ToolGateway {
               invalid = "validator_error";
             }
             if (invalid !== null) return this.deny(request, `preflight_invalid:${sanitizeReasonCode(invalid)}`);
+          } else {
+            validatorSkipped = true;
           }
         }
       } catch (err) {
@@ -786,7 +815,7 @@ export class ToolGateway {
     // D-392 (JARVIS-004/022) fase 1 - RESERVER: raden committes FØR leverandørkallet, og ingen DB-forbindelse holdes åpen over nettverket.
     // Står raden igjen som 'reserved' (krasj/SIGKILL/audit-feil midt i kallet) er utfallet UKJENT og en retry utfører ALDRI en ny mutasjon.
     if (ledgerKey !== undefined) {
-      const gate = await withTenantTransaction<ToolResult | null>(this.pool, tenantId, async (client) => {
+      const gate = await withTenantTransaction<ToolResult | "rearmed_unvalidated" | null>(this.pool, tenantId, async (client) => {
         const inserted = await client.query(
           `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, status, before_state)
            VALUES ($1, $2, $3, $4, 'reserved', $5) ON CONFLICT DO NOTHING`,
@@ -829,7 +858,8 @@ export class ToolGateway {
               WHERE idempotency_key = $1 AND status = 'failed'`,
             [ledgerKey, JSON.stringify(beforeState)]
           );
-          if (rearmed.rowCount === 1) return null;
+          // Review F6: validatoren ble hoppet over ved replay-peeken (raden var da `reserved` hos et samtidig kall som siden feilet) - signaliser at den må kjøres nå.
+          if (rearmed.rowCount === 1) return validatorSkipped ? "rearmed_unvalidated" as const : null;
         }
         await writeAudit(client, request.identity, { ...corr,
           type: "tool.execution_in_flight", decision: "DENY", reason: "execution_in_flight_or_outcome_unknown",
@@ -838,7 +868,30 @@ export class ToolGateway {
         });
         return { ok: false, reason: "execution_in_flight_or_outcome_unknown" } as const;
       });
-      if (gate !== null) return gate;
+      if (gate === "rearmed_unvalidated") {
+        // WP-F1 (review F6): re-arm av en feilet rad uten at validatoren har kjørt. Kjør den på FERSK tilstand (utenfor transaksjonen) før noe utføres; feiler den,
+        // frigis reservasjonen uten leverandørkall (raden tilbake til `failed`, ikke ukjent utfall).
+        const revalidated = await this.revalidateAfterRearm(definition, request, credential, invocationContext);
+        if (revalidated.reason !== null) {
+          await this.releaseLedgerReservation(tenantId, ledgerKey, `rearm_${revalidated.reason}`);
+          return this.deny(request, revalidated.reason);
+        }
+        beforeState = revalidated.beforeState;
+        await this.updateLedgerBeforeState(tenantId, ledgerKey, beforeState);
+      } else if (gate !== null) {
+        return gate;
+      }
+    }
+
+    // WP-F1 (review F8): global kill switch, frys (tool-namespace OG connector) og tilbakekalling av den løste credentialen kan ha slått inn siden start - sjekk dem PÅ NYTT rett
+    // FØR leverandørkallet, etter at reservasjonen er tatt (analogt med C3 sin `authorizePush()` rett før push). Feiler det, frigis reservasjonen uten leverandørkall
+    // (raden tilbake til `failed` - ingenting er sendt, så dette er ikke et ukjent utfall).
+    if (classDGoverned && ledgerKey !== undefined) {
+      const denial = await this.liveControlDenial(request.tool_id, definition, credentialRef, isCredentialRevocationSelfRecovery);
+      if (denial !== null) {
+        await this.releaseLedgerReservation(tenantId, ledgerKey, `recheck_${denial}`);
+        return this.deny(request, denial);
+      }
     }
 
     // Fase 2 - UTFØR utenfor transaksjon (JARVIS-022): leverandørkall, preflight og readback holder ingen pool-forbindelse, så nøstede
@@ -1001,6 +1054,73 @@ export class ToolGateway {
       const res = await client.query("SELECT status FROM tool_executions WHERE idempotency_key = $1", [ledgerKey]);
       return (res.rows[0] as { status: string } | undefined)?.status ?? null;
     });
+  }
+
+  /**
+   * WP-F1 (review F6): validatoren på FERSK tilstand etter at vi re-armet en feilet ledger-rad uten å ha validert (peeken så `reserved`). Samme rekkefølge som den vanlige preflight:
+   * finnes målet, målsjekken, så validatoren. Kastet feil er fail-closed. Returnerer avslagsårsaken (eller `null`) og den ferske før-tilstanden.
+   */
+  private async revalidateAfterRearm(
+    definition: ToolDefinition, request: { parameters: Record<string, JsonValue> }, credential: string, invocationContext: ToolInvocationContext
+  ): Promise<{ reason: string | null; beforeState: JsonValue | null }> {
+    try {
+      const pre = await definition.transport.invoke(definition.preflight_action!, request.parameters, credential, invocationContext);
+      const state = pre.data ?? null;
+      if (state === null) return { reason: "preflight_target_not_found", beforeState: null };
+      if (definition.preflight_target_check && !definition.preflight_target_check(state, request.parameters)) return { reason: "preflight_target_not_found", beforeState: null };
+      let invalid: string | null;
+      try {
+        invalid = definition.preflight_validator!(state, request.parameters);
+      } catch {
+        invalid = "validator_error";
+      }
+      return invalid === null ? { reason: null, beforeState: state } : { reason: `preflight_invalid:${sanitizeReasonCode(invalid)}`, beforeState: null };
+    } catch (err) {
+      return { reason: `preflight_failed:${(err as Error).message.slice(0, 60)}`, beforeState: null };
+    }
+  }
+
+  /** WP-F1 (review F6/F8): frigir en ledger-reservasjon FØR noe leverandørkall er gjort (`reserved -> failed`, retry med samme nøkkel tillatt). Best-effort: feiler skrivingen står raden som `reserved` (fail-closed). */
+  private async releaseLedgerReservation(tenantId: string, ledgerKey: string, reason: string): Promise<void> {
+    try {
+      await withTenantTransaction<void>(this.pool, tenantId, async (client) => {
+        await client.query(
+          `UPDATE tool_executions SET status = 'failed', postcondition_reason = $2, executed_at = now() WHERE idempotency_key = $1 AND status = 'reserved'`,
+          [ledgerKey, reason.slice(0, 200)]
+        );
+      });
+    } catch (err) {
+      console.error(JSON.stringify({ msg: "tool_ledger_release_failed", error: err instanceof Error ? err.message.slice(0, 80) : String(err).slice(0, 80) }));
+    }
+  }
+
+  /** WP-F1 (review F6): oppdaterer før-tilstanden på en re-armet rad med den ferske lesingen (bevismateriale; best-effort). */
+  private async updateLedgerBeforeState(tenantId: string, ledgerKey: string, beforeState: JsonValue | null): Promise<void> {
+    try {
+      await withTenantTransaction<void>(this.pool, tenantId, async (client) => {
+        await client.query(`UPDATE tool_executions SET before_state = $2 WHERE idempotency_key = $1 AND status = 'reserved'`, [ledgerKey, JSON.stringify(beforeState)]);
+      });
+    } catch {
+      /* bevismateriale - aldri en grunn til å stoppe en validert handling */
+    }
+  }
+
+  /**
+   * WP-F1 (review F8): de LIVE eierkontrollene (global kill switch, frys for tool-namespace OG connector-id-er, tilbakekalling av den løste credentialen) - samme koder som
+   * startsjekkene, kjørt på nytt rett før leverandørkallet. `null` = ingenting er slått inn. Selvgjenopprettings-handlingene (`isSelfRecoveryAction`) er unntatt som ved start.
+   */
+  private async liveControlDenial(toolId: string, definition: ToolDefinition, credentialRef: string, selfRecovery: boolean): Promise<string | null> {
+    const controls = this.controls;
+    if (!controls) return null;
+    if (!selfRecovery && (await controls.killSwitch.isActiveDurable())) return "kill_switch_active";
+    if (toolId !== "owner_controls") {
+      if (await controls.isFrozenDurable(toolId)) return "connector_frozen";
+      for (const connectorId of definition.connector_ids_for?.(credentialRef) ?? []) {
+        if (await controls.isFrozenDurable(connectorId)) return "connector_frozen";
+      }
+    }
+    if (!selfRecovery && (await controls.isRevokedDurable(credentialRef))) return "credential_revoked";
+    return null;
   }
 
   /**

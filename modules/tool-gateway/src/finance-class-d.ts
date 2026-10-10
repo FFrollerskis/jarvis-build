@@ -32,6 +32,16 @@ export function financeCredentialRefForProvider(provider: unknown): string | nul
   return typeof provider === "string" && Object.hasOwn(FINANCE_PROVIDER_CREDENTIAL_REFS, provider) ? (FINANCE_PROVIDER_CREDENTIAL_REFS[provider] as string) : null;
 }
 
+/**
+ * WP-F1 (review F8): connector-id-en(e) en eierfrys skal gjelde for, utledet av den LØSTE credential-referansen. Connector-id-ene i `CONNECTOR_REGISTRY` (fiken/stripe/vipps/neonomics)
+ * er identiske med providernavnene. En ukjent referanse gir ingen connector (kun `tool_id`-frysen gjelder, som før).
+ */
+export function financeConnectorIdsForCredentialRef(ref: string): readonly string[] {
+  const ids: string[] = [];
+  for (const [provider, credentialRef] of Object.entries(FINANCE_PROVIDER_CREDENTIAL_REFS)) if (credentialRef === ref) ids.push(provider);
+  return ids;
+}
+
 /** Avviksflagg som betyr at leverandørobjektet ikke kan stoles på som mål for en NY pengehandling (blokkerer innsending til eieren har ryddet). */
 export const FINANCE_BLOCKING_INTEGRITY_FLAGS: ReadonlySet<string> = new Set([
   "PROVIDER_OBJECT_TENANT_CONFLICT", "PROVIDER_DUPLICATE_OBJECT_CONFLICT", "PROVIDER_REFERENCE_CONFLICT"

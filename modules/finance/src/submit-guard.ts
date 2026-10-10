@@ -29,15 +29,22 @@ export type ReservedSubmitVerdict = "resume" | "in_flight" | "reconcile_required
 export interface SubmitAges {
   /** Alder på reservasjonen (`submitted_at`); `null` = ukjent (eldre rad uten tidsstempel) og regnes som utløpt lease. */
   readonly submittedAgeMs: number | null;
-  /** Alder på FØRSTE forsøk mot leverandøren; `null` = ikke registrert (eldre rad). */
+  /** Alder på FØRSTE forsøk mot leverandøren; `null` = ikke registrert (eldre rad, opprettet før migrasjon 099) - se `classifyReservedSubmit`. */
   readonly firstAttemptAgeMs: number | null;
 }
 
-/** Hva skal skje med en rad som står som `submitted` uten leverandørsvar? */
+/**
+ * Hva skal skje med en rad som står som `submitted` uten leverandørsvar?
+ *
+ * Review F5: en rad uten `first_submit_attempt_at` (opprettet før migrasjon 099 - nye rader får den alltid ved reservasjon) ga tidligere `resume` uansett alder, også etter 10 dager.
+ * Alderen på første forsøk er da ukjent og må ikke tolkes som «innenfor vinduet»: reservasjonens alder brukes som beste bevis (en eldre rad kan ikke ha fått leasen fornyet,
+ * fornyelse finnes først fra 099), og kan heller ikke den bevises er raden innenfor leverandørens idempotensvindu er svaret `reconcile_required` (eieravstemming).
+ */
 export function classifyReservedSubmit(ages: SubmitAges, idempotentAtProvider: boolean, timing: SubmitTiming = DEFAULT_SUBMIT_TIMING): ReservedSubmitVerdict {
   if (ages.submittedAgeMs !== null && ages.submittedAgeMs < timing.leaseMs) return "in_flight";
   if (!idempotentAtProvider) return "reconcile_required";
-  if (ages.firstAttemptAgeMs !== null && ages.firstAttemptAgeMs >= timing.idempotencyWindowMs) return "reconcile_required";
+  const attemptAgeMs = ages.firstAttemptAgeMs ?? ages.submittedAgeMs;
+  if (attemptAgeMs === null || attemptAgeMs >= timing.idempotencyWindowMs) return "reconcile_required";
   return "resume";
 }
 

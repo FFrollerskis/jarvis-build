@@ -96,7 +96,12 @@ describe("A: rene regler (submit-guard)", () => {
     expect(classifyReservedSubmit({ submittedAgeMs: 10, firstAttemptAgeMs: 10 }, true, t)).toBe("in_flight");
     expect(classifyReservedSubmit({ submittedAgeMs: 10, firstAttemptAgeMs: 10 }, false, t)).toBe("in_flight");
     expect(classifyReservedSubmit({ submittedAgeMs: 5_000, firstAttemptAgeMs: 5_000 }, true, t)).toBe("resume");
-    expect(classifyReservedSubmit({ submittedAgeMs: null, firstAttemptAgeMs: null }, true, t)).toBe("resume");
+    // Review F5: ukjent alder på første forsøk (eldre rad uten `first_submit_attempt_at`) er IKKE «innenfor vinduet» - reservasjonens alder brukes, og kan heller ikke den bevises er svaret avstemming.
+    expect(classifyReservedSubmit({ submittedAgeMs: null, firstAttemptAgeMs: null }, true, t)).toBe("reconcile_required");
+    expect(classifyReservedSubmit({ submittedAgeMs: 5_000, firstAttemptAgeMs: null }, true, t)).toBe("resume");
+    expect(classifyReservedSubmit({ submittedAgeMs: 10_000, firstAttemptAgeMs: null }, true, t)).toBe("reconcile_required");
+    expect(classifyReservedSubmit({ submittedAgeMs: 10 * 86_400_000, firstAttemptAgeMs: null }, true)).toBe("reconcile_required"); // standardvindu (23 t), rad på 10 dager
+    expect(classifyReservedSubmit({ submittedAgeMs: 100, firstAttemptAgeMs: null }, true, t)).toBe("in_flight"); // en ny lease er alltid «pågår»
     expect(classifyReservedSubmit({ submittedAgeMs: 5_000, firstAttemptAgeMs: 10_000 }, true, t)).toBe("reconcile_required");
     expect(classifyReservedSubmit({ submittedAgeMs: 5_000, firstAttemptAgeMs: 5_000 }, false, t)).toBe("reconcile_required");
     expect(classifyReservedSubmit({ submittedAgeMs: null, firstAttemptAgeMs: null }, false, t)).toBe("reconcile_required");

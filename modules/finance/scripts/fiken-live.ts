@@ -89,7 +89,7 @@ const OWNER_PERSON = `person-finance-live-${runId}`;
 function ownerIdentityFor(tenantId: string): IdentityContext {
   return {
     person_id: OWNER_PERSON, tenant_id: tenantId, memory_space_id: "business",
-    session_id: `sess-finance-live-${runId}`, device_id: "jarvis-core", channel: "api", auth_strength: "active"
+    session_id: `sess-finance-live-${runId}`, device_id: "jarvis-host-acceptance", channel: "api", auth_strength: "signed" /* review F4: step_up_required håndheves alltid; host-akseptanse kjøres av eieren selv med denne eksplisitte, merkede identiteten */
   };
 }
 

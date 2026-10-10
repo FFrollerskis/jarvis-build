@@ -8,9 +8,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
-import { KillSwitch, PolicyGateway } from "@jarvis/policy";
+import { KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, firstWaveTools, type ClassDNotification, type ClassDNotifier } from "@jarvis/tool-gateway";
 import {
+  AmbiguousProviderResponseError,
+  FinanceReconciliationService,
   FinanceService,
   FinanceTransport,
   PossibleDuplicatePaymentError,
@@ -40,6 +42,7 @@ let poolA: pg.Pool;
 let poolB: pg.Pool;
 const TENANT = "tenant-wpf1-rev";
 const OWNER = "person-wpf1-rev-owner";
+const GUEST = "person-wpf1-rev-guest";
 
 const stripeCreds: StripeCredentials = { secretKey: "sk_test_fixture_not_real" };
 const vippsCreds: VippsCredentials = { clientId: "c", clientSecret: "s-fixture", subscriptionKey: "k", merchantSerialNumber: "1", environment: "test" };
@@ -68,8 +71,8 @@ beforeAll(async () => {
   await adminPool.query("GRANT jarvis_app TO jarvis_wpf1_rev");
   await adminPool.query(`
     INSERT INTO tenants (tenant_id, name, kind) VALUES ('${TENANT}', 'WPF1 review', 'business');
-    INSERT INTO people (person_id, display_name) VALUES ('${OWNER}', 'Eier');
-    INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${OWNER}', '${TENANT}');
+    INSERT INTO people (person_id, display_name) VALUES ('${OWNER}', 'Eier'), ('${GUEST}', 'Gjest');
+    INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${OWNER}', '${TENANT}'), ('${GUEST}', '${TENANT}');
   `);
   // To SEPARATE pooler = to «prosesser» (hver sin tilkoblingsgruppe mot samme database).
   poolA = createPool({ ...base, user: "jarvis_wpf1_rev", password: "pw2" });
@@ -94,7 +97,7 @@ function secrets() {
 interface Wired { stripe: StripeFake; vipps: VippsFake; fiken: FikenFake; finance: FinanceService; gateway: ToolGateway; notifier: FakeNotifier }
 
 /** Én «prosess»: egen ToolGateway (egen rate-limit-teller), eget FinanceService og egen pool; leverandørdoblene kan deles mellom prosesser. */
-function wire(opts: { pool?: pg.Pool; stripe?: StripeFake; vipps?: VippsFake; fiken?: FikenFake } = {}): Wired {
+function wire(opts: { pool?: pg.Pool; stripe?: StripeFake; vipps?: VippsFake; fiken?: FikenFake; controls?: OwnerControls; killSwitch?: KillSwitch } = {}): Wired {
   const pool = opts.pool ?? poolA;
   const stripe = opts.stripe ?? new StripeFake();
   const vipps = opts.vipps ?? new VippsFake();
@@ -105,10 +108,10 @@ function wire(opts: { pool?: pg.Pool; stripe?: StripeFake; vipps?: VippsFake; fi
     { getCredentials: async () => vippsCreds }, () => vipps, () => "vipps-fixture", () => TENANT
   );
   const policy = new PolicyGateway({
-    devices: { approverFor: async () => undefined }, nonces: { consume: async () => true }, killSwitch: new KillSwitch(),
+    devices: { approverFor: async () => undefined }, nonces: { consume: async () => true }, killSwitch: opts.killSwitch ?? new KillSwitch(),
     authority: { owner_person_id: OWNER, owner_tenants: [TENANT] }
   });
-  const gateway = new ToolGateway(pool, policy, secrets(), undefined, undefined, {
+  const gateway = new ToolGateway(pool, policy, secrets(), opts.controls, undefined, {
     classDPipeline: { enforce: true, notifier },
     credentialBinding: { owner_person_id: OWNER, owner_tenants: [TENANT], internalRefs: new Set(["JARVIS_BUSINESS_INTERNAL_TOKEN"]) }
   });
@@ -482,5 +485,207 @@ describe("M-F3: mottakerbindingen gjennom ekte gateway - samme siste fire tegn o
     }
     expect((await submitIntent(w, intent.payment_intent_id, key("m3ok"), bound)).ok).toBe(true);
     expect(w.fiken.calls).toBe(1);
+  });
+});
+
+describe("F4: step-up håndheves uavhengig av `classDPipeline.enforce` (review) - en ToolGateway uten options kan ikke sende en Stripe-intensjon med en active/api-identitet", () => {
+  it("REVIEW-SCENARIOET: plain ToolGateway + FinanceTransport + active/api -> step_up_required, ingen leverandørkall; signert eier-økt fra api slipper gjennom", async () => {
+    const stripe = new StripeFake();
+    const w = wire({ stripe });
+    const intent = await makeIntent(w, "stripe");
+    const policy = new PolicyGateway({
+      devices: { approverFor: async () => undefined }, nonces: { consume: async () => true }, killSwitch: new KillSwitch(), authority: { owner_person_id: OWNER, owner_tenants: [TENANT] }
+    });
+    const plain = new ToolGateway(poolA, policy, secrets()); // ingen options: classDPipeline.enforce er av
+    for (const tool of firstWaveTools({
+      finance: new FinanceTransport(w.finance, { getCredentials: async () => fikenCreds }),
+      finance_stripe: new StripeFinanceTransport(w.finance),
+      finance_vipps: new VippsFinanceTransport(w.finance)
+    })) plain.register(tool);
+    const weak: IdentityContext = { ...owner, channel: "api", auth_strength: "active" };
+    const call = (who: IdentityContext) => plain.execute({ identity: who, tool_id: "finance", action: "submit_payment_intent", parameters: { tenant_id: TENANT, payment_intent_id: intent.payment_intent_id }, idempotency_key: key("f4") });
+    expect(await call(weak)).toEqual({ ok: false, reason: "step_up_required:signed_device_session" });
+    expect(await call({ ...owner, channel: "telegram" })).toEqual({ ok: false, reason: "step_up_required:channel_telegram_not_allowed" });
+    expect(stripe.createCalls).toHaveLength(0);
+    expect((await intentRow(intent.payment_intent_id))["state"]).toBe("draft");
+    expect((await call({ ...owner, channel: "api", auth_strength: "signed" })).ok).toBe(true);
+    expect(stripe.createCalls).toHaveLength(1);
+  });
+});
+
+describe("F5: eldre rad uten `first_submit_attempt_at` gir ikke lenger `resume` uansett alder", () => {
+  it("Stripe-rad reservert for 10 dager siden uten første-forsøk-tidspunkt: forhåndsvisning/preflight og service krever avstemming; en ung rad uten tidspunkt kan fortsatt gjenopptas", async () => {
+    const stripe = new StripeFake();
+    const w = wire({ stripe });
+    const old = await makeIntent(w, "stripe");
+    await adminPool.query("UPDATE payment_intents SET state = 'submitted', submitted_at = now() - interval '10 days', first_submit_attempt_at = NULL WHERE payment_intent_id = $1", [old.payment_intent_id]);
+    expect((await w.finance.checkSubmitPaymentIntent(TENANT, "business", old.payment_intent_id))!.checks.reservation).toBe("reconcile_required");
+    expect(await submitIntent(w, old.payment_intent_id)).toEqual({ ok: false, reason: "preflight_invalid:submit_outcome_unknown_reconcile_required" });
+    await expect(w.finance.submitPaymentIntent(TENANT, "business", old.payment_intent_id, { getCredentials: async () => null })).rejects.toBeInstanceOf(AmbiguousProviderResponseError);
+    expect(stripe.createCalls).toHaveLength(0); // aldri en ny leverandørhandling for en rad vi ikke kan bevise er innenfor Stripes idempotensvindu
+
+    const young = await makeIntent(w, "stripe");
+    await adminPool.query("UPDATE payment_intents SET state = 'submitted', submitted_at = now() - interval '10 minutes', first_submit_attempt_at = NULL WHERE payment_intent_id = $1", [young.payment_intent_id]);
+    expect((await w.finance.checkSubmitPaymentIntent(TENANT, "business", young.payment_intent_id))!.checks.reservation).toBe("resumable");
+    expect((await submitIntent(w, young.payment_intent_id)).ok).toBe(true);
+  });
+});
+
+describe("F7: syncIntentFlags mister ikke flagg som et samtidig kall la til (atomisk oppdatering)", () => {
+  it("et flagg som commit-es MENS avstemmingen venter på radlåsen overlever; RECONCILE-flagget settes likevel", async () => {
+    const w = wire();
+    const intent = await makeIntent(w, "stripe");
+    await adminPool.query("UPDATE payment_intents SET state = 'provider_acknowledged', provider_ref = $2, provider_reported_amount_ore = 1, provider_reported_currency = 'NOK' WHERE payment_intent_id = $1", [intent.payment_intent_id, `pi_${randomUUID().slice(0, 8)}`]);
+    const holder = await adminPool.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query(`UPDATE payment_intents SET anomaly_flags = anomaly_flags || '["WEBHOOK_STATE_CONFLICT"]'::jsonb WHERE payment_intent_id = $1`, [intent.payment_intent_id]);
+      let done = false;
+      const reconcile = new FinanceReconciliationService(poolA).reconcileFinance(TENANT).then((r) => { done = true; return r; });
+      await new Promise((r) => setTimeout(r, 700)); // avstemmingen er nå blokkert på radlåsen i flagg-oppdateringen
+      expect(done).toBe(false);
+      await holder.query("COMMIT");
+      await reconcile;
+    } finally {
+      await holder.query("ROLLBACK").catch(() => undefined);
+      holder.release();
+    }
+    const flags = (await intentRow(intent.payment_intent_id))["anomaly_flags"] as string[];
+    expect(flags).toContain("WEBHOOK_STATE_CONFLICT"); // FØR fiksen: overskrevet av avstemmingens absolutte skriving
+    expect(flags.some((f) => f.startsWith("RECONCILE_"))).toBe(true);
+    expect([...flags].sort()).toEqual(flags); // fortsatt sortert som før
+  });
+});
+
+describe("F8: frys av CONNECTOR-id-en (stripe/vipps/fiken) stopper pengehandlingene, og kontrollene sjekkes på nytt rett før leverandørkallet", () => {
+  function controlled() {
+    const killSwitch = new KillSwitch();
+    const controls = new OwnerControls(killSwitch);
+    return { killSwitch, controls };
+  }
+
+  it("connector `stripe` frosset: Stripe-intensjon og Stripe-refusjon avslås (connector_frozen) uten leverandørkall; Fiken-intensjon og Vipps er upåvirket; opphevet frys slipper gjennom", async () => {
+    const { killSwitch, controls } = controlled();
+    const w = wire({ controls, killSwitch });
+    const stripeIntent = await makeIntent(w, "stripe");
+    const fikenIntent = await makeIntent(w, "fiken");
+    const parent = await makeIntent(w, "stripe");
+    await adminPool.query("UPDATE payment_intents SET state = 'settled', provider_ref = $2, provider_status = 'succeeded', settled_at = now() WHERE payment_intent_id = $1", [parent.payment_intent_id, `pi_${randomUUID().slice(0, 8)}`]);
+    const refund = await w.finance.createStripeRefund(TENANT, "business", { idempotency_key: key("rf"), payment_intent_id: parent.payment_intent_id, amount_ore: 1_000 });
+
+    controls.freezeConnector("stripe");
+    const k1 = key("f8a");
+    expect(await submitIntent(w, stripeIntent.payment_intent_id, k1)).toEqual({ ok: false, reason: "connector_frozen" });
+    expect(await submitStripeRefund(w, refund.refund_id)).toEqual({ ok: false, reason: "connector_frozen" });
+    expect(w.stripe.createCalls).toHaveLength(0);
+    expect(w.stripe.refundCalls).toHaveLength(0);
+    expect(await ledgerRow(k1)).toBeUndefined(); // avslått ved start: ingen ledger-rad
+    expect((await submitIntent(w, fikenIntent.payment_intent_id)).ok).toBe(true); // annen connector
+    expect(w.fiken.calls).toBe(1);
+
+    controls.unfreezeConnector("stripe");
+    expect((await submitIntent(w, stripeIntent.payment_intent_id)).ok).toBe(true);
+    expect((await submitStripeRefund(w, refund.refund_id)).ok).toBe(true);
+  });
+
+  it("connector `vipps` frosset stopper capture og refusjon; `fiken` frosset stopper Fiken-posteringen", async () => {
+    const { killSwitch, controls } = controlled();
+    const w = wire({ controls, killSwitch });
+    const vp = await makeIntent(w, "vipps");
+    await adminPool.query("UPDATE payment_intents SET state = 'provider_acknowledged', provider_ref = $2, provider_status = 'AUTHORIZED', provider_status_updated_at = now() WHERE payment_intent_id = $1", [vp.payment_intent_id, vp.payment_intent_id]);
+    const capture = await w.finance.createVippsCapture(TENANT, "business", { idempotency_key: key("cap"), payment_intent_id: vp.payment_intent_id, amount_ore: 500 });
+    const fikenIntent = await makeIntent(w, "fiken");
+    controls.freezeConnector("vipps");
+    controls.freezeConnector("fiken");
+    expect(await submitCapture(w, capture.capture_id)).toEqual({ ok: false, reason: "connector_frozen" });
+    expect(await submitIntent(w, fikenIntent.payment_intent_id)).toEqual({ ok: false, reason: "connector_frozen" });
+    expect(w.vipps.captureCalls).toHaveLength(0);
+    expect(w.fiken.calls).toBe(0);
+  });
+
+  it("frys som slår inn ETTER startsjekkene men før leverandørkallet (midt i kallet) avslås på nytt, reservasjonen frigis (`failed`), intet leverandørkall og intet UKJENT-varsel", async () => {
+    const { killSwitch, controls } = controlled();
+    const w = wire({ controls, killSwitch });
+    const intent = await makeIntent(w, "stripe");
+    // Preflight-lesingen kjører etter startsjekkene og før re-sjekken: eieren fryser connectoren akkurat der.
+    const original = w.finance.checkSubmitPaymentIntent.bind(w.finance);
+    let flipped = false;
+    w.finance.checkSubmitPaymentIntent = async (...args) => {
+      const result = await original(...args);
+      if (!flipped) { flipped = true; controls.freezeConnector("stripe"); }
+      return result;
+    };
+    const k = key("f8mid");
+    expect(await submitIntent(w, intent.payment_intent_id, k)).toEqual({ ok: false, reason: "connector_frozen" });
+    expect(w.stripe.createCalls).toHaveLength(0);
+    expect(w.notifier.sent).toEqual([]);
+    expect(await ledgerRow(k)).toMatchObject({ status: "failed", postcondition_reason: "recheck_connector_frozen" });
+    expect((await intentRow(intent.payment_intent_id))["state"]).toBe("draft");
+    controls.unfreezeConnector("stripe");
+    expect((await submitIntent(w, intent.payment_intent_id, k)).ok).toBe(true); // samme nøkkel re-armes etter at kontrollen er opphevet
+  });
+
+  it("global kill switch midt i kallet (alle fire handlinger deler re-sjekken): avslås før leverandørkallet", async () => {
+    const { killSwitch, controls } = controlled();
+    const w = wire({ controls, killSwitch });
+    const intent = await makeIntent(w, "stripe");
+    const original = w.finance.checkSubmitPaymentIntent.bind(w.finance);
+    w.finance.checkSubmitPaymentIntent = async (...args) => {
+      const result = await original(...args);
+      killSwitch.activate("test");
+      return result;
+    };
+    expect(await submitIntent(w, intent.payment_intent_id)).toEqual({ ok: false, reason: "kill_switch_active" });
+    expect(w.stripe.createCalls).toHaveLength(0);
+    expect(w.notifier.sent).toEqual([]);
+  });
+});
+
+describe("M31 (testgap): utkast-søsken regnes som AKTIVE i other_active_ore - to utkast som til sammen overstiger betalingen kan ikke begge sendes", () => {
+  it("et draft-søsken teller (6 000 + 6 000 > 10 000 -> exceeds_parent_amount); et kansellert/feilet søsken teller ikke", async () => {
+    const w = wire();
+    const parent = await makeIntent(w, "stripe");
+    await adminPool.query("UPDATE payment_intents SET state = 'settled', provider_ref = $2, provider_status = 'succeeded', settled_at = now() WHERE payment_intent_id = $1", [parent.payment_intent_id, `pi_${randomUUID().slice(0, 8)}`]);
+    const a = await w.finance.createStripeRefund(TENANT, "business", { idempotency_key: key("rf"), payment_intent_id: parent.payment_intent_id, amount_ore: 6_000 });
+    // Søsken B settes inn direkte som admin: omgår opprettelsesvakten (simulerer to samtidige opprettelser som begge slapp gjennom) - sendingen må da stoppes av den ferske lesingen.
+    const bId = `fin-rf-${randomUUID()}`;
+    await adminPool.query("INSERT INTO stripe_refunds (refund_id, tenant_id, payment_intent_id, idempotency_key, state, amount_ore, currency) VALUES ($1, $2, $3, $4, 'draft', 6000, 'NOK')", [bId, TENANT, parent.payment_intent_id, key("k")]);
+
+    const check = (await w.finance.checkSubmitStripeRefund(TENANT, "business", a.refund_id))!;
+    expect(check.checks.other_active_ore).toBe(6_000); // utkastet B er med
+    expect(await submitStripeRefund(w, a.refund_id)).toEqual({ ok: false, reason: "preflight_invalid:exceeds_parent_amount" });
+    expect(w.stripe.refundCalls).toHaveLength(0);
+
+    for (const terminal of ["cancelled", "failed"]) {
+      await adminPool.query("UPDATE stripe_refunds SET state = $2 WHERE refund_id = $1", [bId, terminal]);
+      expect((await w.finance.checkSubmitStripeRefund(TENANT, "business", a.refund_id))!.checks.other_active_ore, terminal).toBe(0);
+    }
+    expect((await submitStripeRefund(w, a.refund_id)).ok).toBe(true);
+    expect(w.stripe.refundCalls).toHaveLength(1);
+  });
+});
+
+describe("F9: finans-lesingene (klasse A) er eier-eksklusive i gatewayen - en gjest/delegat i samme tenant får `owner_only`", () => {
+  it("check_submit_* og get_reconciliation_status avvises for gjest og delegat, men virker for eieren (gatewayens egen preflight/readback er upåvirket)", async () => {
+    const w = wire();
+    const intent = await makeIntent(w, "stripe");
+    const guest: IdentityContext = { ...owner, person_id: GUEST, channel: "web", auth_strength: "signed" };
+    const delegate: IdentityContext = { ...owner, delegation_id: "deleg-1" } as IdentityContext;
+    const reads: Array<[string, string, Record<string, JsonValue>]> = [
+      ["finance", "check_submit_payment_intent", { tenant_id: TENANT, payment_intent_id: intent.payment_intent_id }],
+      ["finance", "get_reconciliation_status", { tenant_id: TENANT }],
+      ["finance_stripe", "check_submit_refund", { tenant_id: TENANT, refund_id: "fin-rf-x" }],
+      ["finance_vipps", "check_submit_capture", { tenant_id: TENANT, capture_id: "fin-cap-x" }],
+      ["finance_vipps", "check_submit_refund", { tenant_id: TENANT, refund_id: "fin-vr-x" }]
+    ];
+    for (const [tool, action, parameters] of reads) {
+      for (const [label, who] of [["gjest", guest], ["delegat", delegate]] as const) {
+        expect(await w.gateway.execute({ identity: who, tool_id: tool, action, parameters }), `${tool}.${action} som ${label}`).toEqual({ ok: false, reason: "owner_only" });
+      }
+    }
+    const asOwner = await w.gateway.execute({ identity: owner, tool_id: "finance", action: "check_submit_payment_intent", parameters: { tenant_id: TENANT, payment_intent_id: intent.payment_intent_id } });
+    expect(asOwner.ok).toBe(true);
+    // Gatewayens egen preflight/readback for en pengehandling går via transporten, ikke execute(): hele kjeden virker fortsatt for eieren.
+    expect((await submitIntent(w, intent.payment_intent_id)).ok).toBe(true);
   });
 });

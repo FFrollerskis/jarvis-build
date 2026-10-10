@@ -437,12 +437,23 @@ describe("E: step_up_required - pengehandlinger krever eierens step-up i gateway
     expect(t.mutations).toBe(4);
   });
 
-  it("flagget har INGEN effekt uten påslått klasse D-pipeline (host-akseptansescript/testhjelpere uendret) og er av som standard", async () => {
+  it("REVIEW F4: step-up håndheves UAVHENGIG av `classDPipeline.enforce` - en gateway uten options avviser en active/api-identitet og slipper kun signert eier-økt; flagget er av som standard", async () => {
     const t = new ScriptTransport();
-    const lax = new ToolGateway(appPool, policy, secrets); // ingen classDPipeline
+    const lax = new ToolGateway(appPool, policy, secrets); // ingen classDPipeline (testhjelper/host-skript) - før F4 var flagget da uten effekt
     lax.register(def({ step_up_required: true }, t));
-    expect((await exec(lax, nextKey("e3"))).ok).toBe(true);
+    const key = nextKey("e3");
+    expect(await exec(lax, key)).toEqual({ ok: false, reason: "step_up_required:signed_device_session" }); // identity = active + api
+    expect(t.calls).toEqual([]);
+    expect(t.mutations).toBe(0);
+    expect((await adminPool.query("SELECT 1 FROM tool_executions WHERE idempotency_key = $1", [key])).rowCount).toBe(0);
+    for (const channel of ["voice", "telegram", "system"] as const) {
+      expect(await exec(lax, nextKey("e3c"), {}, signed(channel)), channel).toEqual({ ok: false, reason: `step_up_required:channel_${channel}_not_allowed` });
+    }
+    // En eksplisitt, signert eier-økt fra en eier-kanal slipper gjennom også uten pipeline (host-akseptanse bruker slik en merket identitet).
+    expect((await exec(lax, nextKey("e3d"), {}, signed("api"))).ok).toBe(true);
+    expect(t.mutations).toBe(1);
 
+    // Verktøy UTEN flagget er uendret: ingen step-up-krav.
     const t2 = new ScriptTransport();
     const g = gw(new FakeNotifier());
     g.register(def({ tool_id: "wpf1-gen-noflag" }, t2));
@@ -457,5 +468,143 @@ describe("E: step_up_required - pengehandlinger krever eierens step-up i gateway
     const r = await exec(g, nextKey("e4"), {}, guest);
     expect(r).toEqual({ ok: false, reason: "class_d_missing_approval" });
     expect(t.calls).toEqual([]);
+  });
+});
+
+describe("F: REVIEW F6 - validatoren kjøres også når en feilet rad re-armes (replay-peeken så `reserved`, raden ble `failed` før ledger-porten)", () => {
+  /** Simulerer at et samtidig kall med samme nøkkel feiler MELLOM vår replay-peek og ledger-porten: peeken svarer med den ekte statusen (`reserved`), og raden settes så til `failed`. */
+  function flipToFailedAfterPeek(g: ToolGateway): void {
+    const target = g as unknown as { peekLedgerStatus: (tenantId: string, key: string) => Promise<string | null> };
+    const original = target.peekLedgerStatus.bind(g);
+    target.peekLedgerStatus = async (tenantId, key) => {
+      const status = await original(tenantId, key);
+      await adminPool.query("UPDATE tool_executions SET status = 'failed' WHERE idempotency_key = $1", [key]);
+      return status;
+    };
+  }
+  const seedReserved = (key: string) =>
+    adminPool.query("INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, status, before_state) VALUES ('tenant-a', $1, 'wpf1-gen', 'mutate', 'reserved', '{}'::jsonb)", [key]);
+  const validator = (_data: JsonValue, params: Record<string, JsonValue>): string | null => (params["bind"] === "wrong" ? "bound_amount_mismatch" : null);
+
+  it("validatoren avviser ved re-arm: ingen mutasjon, ledger-raden frigis til `failed` (ikke ukjent utfall), og ingen varsel", async () => {
+    const t = new ScriptTransport();
+    const n = new FakeNotifier();
+    const g = gw(n);
+    g.register(def({ preflight_validator: validator }, t));
+    flipToFailedAfterPeek(g);
+    const key = nextKey("f6a");
+    await seedReserved(key);
+    expect(await exec(g, key, { bind: "wrong" })).toEqual({ ok: false, reason: "preflight_invalid:bound_amount_mismatch" });
+    expect(t.mutations).toBe(0); // FØR fiksen: validatoren ble hoppet over, re-arm slapp raden gjennom og mutasjonen ble utført
+    expect(n.sent).toEqual([]);
+    const row = (await adminPool.query("SELECT status, postcondition_reason FROM tool_executions WHERE idempotency_key = $1", [key])).rows[0] as { status: string; postcondition_reason: string };
+    expect(row.status).toBe("failed");
+    expect(row.postcondition_reason).toBe("rearm_preflight_invalid:bound_amount_mismatch");
+  });
+
+  it("gyldig tilstand ved re-arm: kjører videre som vanlig (validatoren er presis), og før-tilstanden på raden er den ferske lesingen", async () => {
+    const t = new ScriptTransport();
+    const g = gw(new FakeNotifier());
+    g.register(def({ preflight_validator: validator }, t));
+    flipToFailedAfterPeek(g);
+    const key = nextKey("f6b");
+    await seedReserved(key);
+    expect((await exec(g, key, { bind: "right" })).ok).toBe(true);
+    expect(t.mutations).toBe(1);
+    const row = (await adminPool.query("SELECT status, before_state FROM tool_executions WHERE idempotency_key = $1", [key])).rows[0] as { status: string; before_state: unknown };
+    expect(row.status).toBe("succeeded");
+    expect(row.before_state).toEqual({ phase: "before" }); // ikke seed-verdien `{}`
+  });
+
+  it("kastet feil i re-valideringen er fail-closed (preflight_failed), og en vanlig førstegangskjøring uten replay påvirkes ikke", async () => {
+    const t = new ScriptTransport();
+    const g = gw(new FakeNotifier());
+    g.register(def({ preflight_validator: () => { throw new Error("boom"); } }, t));
+    expect(await exec(g, nextKey("f6c"))).toEqual({ ok: false, reason: "preflight_invalid:validator_error" }); // uendret sti
+    const key = nextKey("f6d");
+    await seedReserved(key);
+    flipToFailedAfterPeek(g);
+    expect(await exec(g, key)).toEqual({ ok: false, reason: "preflight_invalid:validator_error" });
+    expect(t.mutations).toBe(0);
+  });
+});
+
+describe("G: REVIEW F8 - kill switch, frys (tool-namespace OG connector) og tilbakekalling sjekkes PÅ NYTT rett før leverandørkallet", () => {
+  /** Verktøy hvis `read` (preflight, kjøres ETTER startsjekkene men FØR re-sjekken) endrer en eierkontroll - simulerer at eieren trykker på bryteren midt i kallet. */
+  class FlippingTransport extends ScriptTransport {
+    onRead: (() => void) | null = null;
+    override async invoke(action: string): Promise<{ external_id?: string; data?: JsonValue }> {
+      if (action === "read" && this.onRead) { const f = this.onRead; this.onRead = null; f(); }
+      return super.invoke(action);
+    }
+  }
+  const CONNECTOR_REF = "WPF1_STATIC_REF";
+  function stack(): { controls: OwnerControls; killSwitch: KillSwitch; g: ToolGateway; t: FlippingTransport; n: FakeNotifier } {
+    const killSwitch = new KillSwitch();
+    const controls = new OwnerControls(killSwitch);
+    const p = new PolicyGateway({ devices: { approverFor: async () => undefined }, nonces: { consume: async () => true }, killSwitch, authority: { owner_person_id: "person-tobias", owner_tenants: ["tenant-a"] } });
+    const n = new FakeNotifier();
+    const g = new ToolGateway(appPool, p, secrets, controls, undefined, { classDPipeline: { enforce: true, notifier: n } });
+    const t = new FlippingTransport();
+    g.register(def({ connector_ids_for: (ref) => (ref === CONNECTOR_REF ? ["wpf1-connector"] : []) }, t));
+    return { controls, killSwitch, g, t, n };
+  }
+  const ledger = async (key: string) => (await adminPool.query("SELECT status, postcondition_reason FROM tool_executions WHERE idempotency_key = $1", [key])).rows[0] as { status: string; postcondition_reason: string } | undefined;
+
+  it("kill switch slått på etter startsjekkene: avslås FØR leverandørkallet, reservasjonen frigis (`failed`, ikke ukjent utfall) og samme nøkkel kan prøves igjen", async () => {
+    const { killSwitch, g, t, n } = stack();
+    t.onRead = () => killSwitch.activate("test");
+    const key = nextKey("g1");
+    expect(await exec(g, key)).toEqual({ ok: false, reason: "kill_switch_active" });
+    expect(t.mutations).toBe(0);
+    expect(n.sent).toEqual([]);
+    expect(await ledger(key)).toEqual({ status: "failed", postcondition_reason: "recheck_kill_switch_active" });
+    killSwitch.deactivate();
+    expect((await exec(g, key)).ok).toBe(true); // re-arm av den frigitte raden
+    expect(t.mutations).toBe(1);
+  });
+
+  it("frys av tool-namespacet etter startsjekkene, og frys av CONNECTOR-id-en (utledet av credential-refen), avslås før leverandørkallet", async () => {
+    for (const [label, target] of [["tool-namespace", "wpf1-gen"], ["connector-id", "wpf1-connector"]] as const) {
+      const { controls, g, t } = stack();
+      t.onRead = () => controls.freezeConnector(target);
+      const key = nextKey("g2");
+      expect(await exec(g, key), label).toEqual({ ok: false, reason: "connector_frozen" });
+      expect(t.mutations, label).toBe(0);
+      expect((await ledger(key))?.postcondition_reason, label).toBe("recheck_connector_frozen");
+    }
+  });
+
+  it("connector-frys gjelder også ved START (ingen ledger-rad, ingen tilstandslesing) - tidligere sjekket gatewayen bare `tool_id`", async () => {
+    const { controls, g, t } = stack();
+    controls.freezeConnector("wpf1-connector");
+    const key = nextKey("g3");
+    expect(await exec(g, key)).toEqual({ ok: false, reason: "connector_frozen" });
+    expect(t.calls).toEqual([]);
+    expect(await ledger(key)).toBeUndefined();
+    controls.unfreezeConnector("wpf1-connector");
+    expect((await exec(g, nextKey("g3b"))).ok).toBe(true);
+  });
+
+  it("tilbakekalt credential etter startsjekkene avslås før leverandørkallet; verktøy uten connector_ids_for er upåvirket av connector-frys", async () => {
+    const { controls, g, t } = stack();
+    t.onRead = () => controls.revokeCredential(CONNECTOR_REF);
+    const key = nextKey("g4");
+    expect(await exec(g, key)).toEqual({ ok: false, reason: "credential_revoked" });
+    expect(t.mutations).toBe(0);
+    expect((await ledger(key))?.postcondition_reason).toBe("recheck_credential_revoked");
+
+    const plain = stack();
+    plain.g.register(def({ tool_id: "wpf1-plain", connector_ids_for: undefined }, plain.t));
+    plain.controls.freezeConnector("wpf1-connector");
+    const r = await plain.g.execute({ identity, tool_id: "wpf1-plain", action: "mutate", parameters: {}, idempotency_key: nextKey("g4b") });
+    expect(r.ok).toBe(true);
+  });
+
+  it("uten eierkontroller (testhjelper) er re-sjekken et no-op - uendret oppførsel", async () => {
+    const t = new ScriptTransport();
+    const g = gw(new FakeNotifier());
+    g.register(def({}, t));
+    expect((await exec(g, nextKey("g5"))).ok).toBe(true);
   });
 });

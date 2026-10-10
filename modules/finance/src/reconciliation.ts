@@ -684,7 +684,21 @@ export class FinanceReconciliationService {
       const next = [...new Set([...kept, ...(desired.get(c.payment_intent_id) ?? [])])].sort();
       const same = next.length === current.length && [...current].sort().every((f, i) => f === next[i]);
       if (same) continue;
-      await client.query(`UPDATE payment_intents SET anomaly_flags = $3::jsonb, updated_at = now() WHERE tenant_id = $1 AND payment_intent_id = $2`, [tenantId, c.payment_intent_id, JSON.stringify(next)]);
+      // Review F7: ÉN atomisk setning i stedet for les-modifiser-skriv. Den forrige versjonen skrev hele `anomaly_flags` fra en lesing uten radlås, så et flagg som et samtidig kall la til
+      // (f.eks. SUBMIT_OUTCOME_UNKNOWN, WEBHOOK_STATE_CONFLICT) mellom lesingen og skrivingen gikk tapt. Her utledes den nye listen av radens SISTE committede flagg inne i selve UPDATE-en
+      // (under radlåsen, korrelert mot `payment_intents.anomaly_flags` slik at READ COMMITTED re-evaluerer mot den nyeste versjonen): alle ikke-RECONCILE-flagg beholdes, RECONCILE-flaggene settes til
+      // det avstemmingen vil ha. `COLLATE "C"` gir samme (kodepunkt-)rekkefølge som JS-sorteringen over.
+      await client.query(
+        `UPDATE payment_intents SET anomaly_flags = (
+             SELECT COALESCE(jsonb_agg(merged.flag ORDER BY merged.flag COLLATE "C"), '[]'::jsonb) FROM (
+               SELECT v.flag FROM jsonb_array_elements_text(payment_intents.anomaly_flags) AS v(flag) WHERE v.flag NOT LIKE 'RECONCILE\\_%'
+               UNION
+               SELECT w.flag FROM unnest($3::text[]) AS w(flag)
+             ) merged
+           ), updated_at = now()
+         WHERE tenant_id = $1 AND payment_intent_id = $2`,
+        [tenantId, c.payment_intent_id, [...(desired.get(c.payment_intent_id) ?? [])]]
+      );
     }
   }
 
