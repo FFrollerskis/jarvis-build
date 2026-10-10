@@ -24,12 +24,14 @@ står i §5 som `DEFERRED`/`PARTIAL`.
 
 **Spørringstekst er data, ikke instruksjon.** Den normaliseres (kommentarer, streng-/dollar-literaler og tall erstattes med `?`, IN-lister slås sammen, teksten avkortes til 200 tegn og skannes for
 hemmeligheter) og vises kun for økter i databaser du har autorisert; økter i andre databaser får ingen tekst. Utdata merkes `untrusted`.
+**Avkortede spørringer (gjennomgang av PR #324, L5):** Postgres kutter `pg_stat_activity.query` ved `track_activity_query_size` (standard 1024 byte), så en literal kan være UAVSLUTTET (`$$…`, `$tag$…`, `'…`, `/* …`). Normaliseringen kutter da alt fra første gjenstående åpner (`$$`/`$tag$`/`'`/`/*`) - aldri halen. Feilmeldinger fra Postgres og `application_name` (klient-satt fritekst) går gjennom den sentrale hemmelighetsskanneren (M1).
 
 ## 2. Klasse D-kjeden og «tenant-eide mål»
 
 - **Mål-autorisasjon FØR noen I/O** (`ToolGateway.parameterAuthorizer`): databasen MÅ stå i `JARVIS_POSTGRES_OPS_DATABASES` (tom = ingen skriving), skjemaet for VACUUM i `JARVIS_POSTGRES_OPS_SCHEMAS` (standard `public`). Infisical- og Langfuse-databasene er tredjeparts-eide og er bevisst IKKE «tenant-eide mål» med mindre du selv legger dem inn.
 - **Akkurat den økten du så:** terminate krever `pid` + `backend_start`, cancel i tillegg `query_start`. PID-er gjenbrukes av operativsystemet - uten `backend_start` kunne en uskyldig ny økt blitt rammet. Sjekken og signalet sitter i ÉN atomisk SQL-setning, så det finnes intet vindu mellom «sjekk» og «handling».
-- **Aldri rammet:** superbruker-økter, ikke-klient-prosesser (autovacuum, WAL-sendere, checkpointer …), ops-tilkoblingen selv, og roller i `JARVIS_POSTGRES_OPS_PROTECTED_ROLES`.
+- **Aldri rammet:** superbruker-økter, ikke-klient-prosesser (autovacuum, WAL-sendere, checkpointer …), ops-tilkoblingen selv, og roller i `JARVIS_POSTGRES_OPS_PROTECTED_ROLES` (standard `jarvis_runtime,jarvis_migrate`).
+- **Step-up (gjennomgang av PR #324, M2):** de tre klasse D-handlingene har `step_up_required: true` - `ToolGateway` nekter uten enhetssignert økt fra web/desktop/api/mobile (aldri tale/Telegram/meldingsplattform/system), og `POST /infra/cloud/mutate` gir `403 step_up_required` / `403 owner_required` før noe journalføres. Standard = strengest; kan lempes av Tobias per handling med en navngitt D-beslutning. Diagnostikken (klasse A) krever aldri step-up.
 - **Preflight** leser økten på nytt og avviser hvis den ikke lenger er den samme; **snapshot** (økt, rolle, applikasjon, normalisert spørring, varighet) journalføres; **idempotens-nøkkel** er påkrevd; **readback** bekrefter at økten er borte / spørringen ikke lenger kjører / tabellen er nylig vacuumet; **umiddelbar varsling** (Telegram).
 - **Ærlig gjenoppretting:** en terminert økt kan ikke gjenopprettes og en avbrutt spørring kan ikke gjenopptas - `recovery_available=false` og planteksten sier det (applikasjonen kobler til på nytt). VACUUM/ANALYZE trenger ingen reversering.
 - `PAUSED` (infra-pause) stanser all skriving, `DEGRADED` stanser klasse D, lesing stanses aldri. Kun eieren kan bruke verktøyet (credential-binding); en delegert identitet får `credential_not_bound_to_identity`.
@@ -55,7 +57,7 @@ Sett deretter i `.env` på verten (aldri via dashbordet) og restart `api`:
 | `JARVIS_POSTGRES_OPS_URL` | tom | `postgresql://jarvis_ops:<passord>@postgres:5432/jarvis`. Tom = hele connectoren er `credential_unavailable` (sovende). Kun ren `postgres(ql)://`-URL; `options=`/`application_name=`/`search_path=` avvises. |
 | `JARVIS_POSTGRES_OPS_DATABASES` | tom | f.eks. `jarvis`. Databaser klasse D-drift er tillatt mot. Tom = ingen skriving. |
 | `JARVIS_POSTGRES_OPS_SCHEMAS` | `public` | skjema VACUUM/ANALYZE får røre |
-| `JARVIS_POSTGRES_OPS_PROTECTED_ROLES` | tom | roller hvis økter aldri røres, f.eks. `jarvis_migrate` (superbrukere er alltid beskyttet) |
+| `JARVIS_POSTGRES_OPS_PROTECTED_ROLES` | `jarvis_runtime,jarvis_migrate` | roller hvis økter aldri røres (superbrukere er alltid beskyttet). **Gjennomgang av PR #324 (L6):** standarden gjelder i KODEN også når variabelen er tom/utelatt/uten gyldige oppføringer, så appens egen tilkobling og migratoren ikke kan termineres ved et uhell. En eksplisitt liste ERSTATTER standarden - sett den bare hvis du bevisst vil kunne terminere en av dem |
 
 Passordet i `.env` er en hemmelighet som alle andre connector-nøkler (git-ignorert; lekker det, endre `jarvis_ops`-passordet med `ALTER ROLE` og oppdater `.env`).
 

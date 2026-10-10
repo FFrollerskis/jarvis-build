@@ -35,9 +35,18 @@ export interface PostgresOpsConfig {
   databases: ReadonlySet<string>;
   /** Skjemaer VACUUM/ANALYZE får røre (`JARVIS_POSTGRES_OPS_SCHEMAS`, standard `public`). */
   schemas: ReadonlySet<string>;
-  /** Roller hvis forbindelser aldri kan avbrytes/termineres (`JARVIS_POSTGRES_OPS_PROTECTED_ROLES`) - i tillegg til ALLE superbrukere. */
+  /**
+   * Roller hvis forbindelser aldri kan avbrytes/termineres (`JARVIS_POSTGRES_OPS_PROTECTED_ROLES`) - i tillegg til ALLE superbrukere. Gjennomgang av PR #324 (L6): standarden er `DEFAULT_PROTECTED_ROLES`
+   * (appens egen runtime- og migrasjonsrolle) når variabelen er tom/utelatt/uten gyldige oppføringer; en eksplisitt liste ERSTATTER standarden (eierens bevisste valg).
+   */
   protectedRoles: ReadonlySet<string>;
 }
+
+/**
+ * Gjennomgang av PR #324 (L6): `PROTECTED_ROLES` var tom som standard, så `jarvis_runtime` (appens egen tilkobling) og `jarvis_migrate` (migratoren) kunne termineres av et feilaktig kall. Nå er de beskyttet som standard
+ * (kode-default, ikke bare dokumentasjon). Vil du bevisst kunne terminere en av dem, sett `JARVIS_POSTGRES_OPS_PROTECTED_ROLES` til en annen liste (f.eks. kun `jarvis_migrate`).
+ */
+export const DEFAULT_PROTECTED_ROLES: readonly string[] = ["jarvis_runtime", "jarvis_migrate"];
 
 function parseList(raw: string | undefined | null, pattern: RegExp): ReadonlySet<string> {
   const out = new Set<string>();
@@ -52,10 +61,12 @@ function parseList(raw: string | undefined | null, pattern: RegExp): ReadonlySet
 
 export function parsePostgresOpsConfig(raw: { databases?: string | undefined; schemas?: string | undefined; protectedRoles?: string | undefined } = {}): PostgresOpsConfig {
   const schemas = parseList(raw.schemas, IDENT);
+  const protectedRoles = parseList(raw.protectedRoles, IDENT);
   return {
     databases: parseList(raw.databases, DB_NAME),
     schemas: schemas.size > 0 ? schemas : new Set(["public"]),
-    protectedRoles: parseList(raw.protectedRoles, IDENT)
+    // L6: tom/utelatt/kun ugyldige oppføringer -> standardlisten (aldri «ingen beskyttet rolle» ved et uhell).
+    protectedRoles: protectedRoles.size > 0 ? protectedRoles : new Set(DEFAULT_PROTECTED_ROLES)
   };
 }
 
@@ -158,8 +169,15 @@ export function normalizeSqlForDiagnostics(sql: string | null | undefined, max =
   if (sql.startsWith("<")) return sql.slice(0, 40); // «<insufficient privilege>» o.l.
   let text = sql;
   text = text.replace(/\/\*[\s\S]*?\*\//g, " ");
+  // Gjennomgang av PR #324 (L5): en UAVSLUTTET blokkommentar (spørringen kuttet av `track_activity_query_size`) lot hodet stå igjen - kutt fra «/*».
+  const openComment = text.indexOf("/*");
+  if (openComment >= 0) text = `${text.slice(0, openComment)} ?`;
   text = text.replace(/--[^\n\r]*/g, " ");
   text = text.replace(/\$([A-Za-z_][A-Za-z0-9_]*)?\$[\s\S]*?\$\1\$/g, "?");
+  // L5: en UAVSLUTTET dollar-literal (`$$HEMMELIG`, `$tag$HEMMELIG` - realistisk når `track_activity_query_size` kutter en lang spørring) lot hodet slippe gjennom. Åpneren kan ikke stå rett etter et
+  // identifikatortegn (`a$b$c` er ett navn i Postgres), og `$1`/`$2` er parametere, ikke åpnere. Kutt alt fra første gjenstående åpner - aldri vis halen.
+  const openDollar = /(?<![\w$])\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(text);
+  if (openDollar) text = `${text.slice(0, openDollar.index)}?`;
   // E'…' kan inneholde \' (escapet sitat) - egen regel FØRST, ellers lekker halen av literalen.
   text = text.replace(/[eE]'(?:[^'\\]|\\[\s\S]|'')*'/g, "?");
   text = text.replace(/[bBxXnN]?'(?:[^']|'')*'/g, "?");

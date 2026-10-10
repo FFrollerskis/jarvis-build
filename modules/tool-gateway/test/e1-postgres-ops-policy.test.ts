@@ -25,7 +25,8 @@ describe("A: konfig (JARVIS_POSTGRES_OPS_*)", () => {
     const c = parsePostgresOpsConfig();
     expect([...c.databases]).toEqual([]);
     expect([...c.schemas]).toEqual(["public"]);
-    expect([...c.protectedRoles]).toEqual([]);
+    // Gjennomgang av PR #324 (L6): tom/utelatt liste = standardlisten (appens runtime- og migrasjonsrolle), aldri «ingen beskyttet rolle».
+    expect([...c.protectedRoles].sort()).toEqual(["jarvis_migrate", "jarvis_runtime"]);
   });
 
   it("ugyldige enkeltoppføringer hoppes over (aldri en løs autorisasjon), gyldige beholdes", () => {
