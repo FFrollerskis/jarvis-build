@@ -5,6 +5,7 @@ import net, { BlockList, isIP } from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfigFile } from "./lib/config.mjs";
+import { CancelToken } from "./lib/errors.mjs";
 import { createLogger } from "./lib/log.mjs";
 
 /**
@@ -209,29 +210,28 @@ export class EgressProxy {
 
   /**
    * @param {string[]} addresses @param {number} port
-   * @param {AbortSignal} [signal] avbrytes når klienten forsvinner: en oppkobling som pågår rives umiddelbart, og ingen flere adresser prøves (B-M1)
+   * @param {CancelToken} [gone] avbrytes når klienten forsvinner: en oppkobling som pågår rives umiddelbart, og ingen flere adresser prøves (B-M1)
    * @returns {Promise<net.Socket>}
    */
-  async connectValidated(addresses, port, signal) {
+  async connectValidated(addresses, port, gone) {
     let lastError;
     for (const ip of addresses) {
-      if (signal?.aborted) throw new ClientGoneError();
+      if (gone?.cancelled) throw new ClientGoneError();
       try {
         return await new Promise((resolveConn, rejectConn) => {
           const socket = this.dial(ip, port);
-          const onAbort = () => socket.destroy(new ClientGoneError());
-          const settle = () => { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); };
+          const unsubscribe = gone ? gone.onCancel(() => socket.destroy(new ClientGoneError())) : () => undefined;
+          const settle = () => { clearTimeout(timer); unsubscribe(); };
           const timer = setTimeout(() => socket.destroy(new Error("connect_timeout")), this.connectTimeoutMs);
-          signal?.addEventListener("abort", onAbort, { once: true });
           socket.once("connect", () => { settle(); resolveConn(socket); });
           socket.once("error", (error) => { settle(); rejectConn(error); });
         });
       } catch (error) {
         lastError = error;
-        if (signal?.aborted) break;
+        if (gone?.cancelled) break;
       }
     }
-    if (signal?.aborted) throw new ClientGoneError();
+    if (gone?.cancelled) throw new ClientGoneError();
     throw lastError instanceof Error ? lastError : new Error("connect_failed");
   }
 
@@ -270,11 +270,11 @@ export class EgressProxy {
     // B-M1: lytteren settes FØR første await. Klienten kan forsvinne (RST/lukking) mens vi slår opp DNS eller kobler til; da må alt vi har åpnet rives umiddelbart. Registrert først ETTER
     // oppkoblingen (som før) ville den aldri fyrt: `close` har da allerede gått, og upstream-socketen hang til idle-tidsavbruddet mens slot-regnskapet (`active`, `perClient`) var frigitt -
     // en jobb kunne dermed omgå `maxConnections` og fylle fd-grensen.
-    const gone = new AbortController();
+    const gone = new CancelToken();
     /** @type {net.Socket | undefined} */
     let upstream;
     clientSocket.once("close", () => {
-      gone.abort();
+      gone.cancel();
       upstream?.destroy();
     });
 
@@ -283,7 +283,7 @@ export class EgressProxy {
       target = parseConnectTarget(req.url ?? "");
       const addresses = await this.validate(target.host, target.port);
       if (clientSocket.destroyed) throw new ClientGoneError();
-      upstream = await this.connectValidated(addresses, target.port, gone.signal);
+      upstream = await this.connectValidated(addresses, target.port, gone);
       // Oppkoblingen kan ha lyktes i samme øyeblikk klienten forsvant (`close` er ikke nødvendigvis levert ennå): riv og frigi.
       if (clientSocket.destroyed) {
         upstream.destroy();
