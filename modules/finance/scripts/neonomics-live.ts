@@ -49,6 +49,7 @@ import type {
 } from "../src/neonomics-transport.ts";
 import { createApiServer } from "../../../apps/api/src/server.ts";
 import { evaluateSecretSafety, type Verdict } from "./lib/fiken-live-lib.ts";
+import { deleteMoneyRows } from "./lib/money-cleanup.ts";
 
 const results: Record<string, Verdict> = {
   q21_runtime_role_safe: "NOT_RUN",
@@ -134,12 +135,12 @@ async function cleanupTenant(tenantId: string): Promise<void> {
   await adminPool.query("DELETE FROM bank_consents WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM neonomics_webhook_events WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM vipps_webhook_events WHERE tenant_id = $1", [tenantId]);
-  await adminPool.query("DELETE FROM vipps_captures WHERE tenant_id = $1", [tenantId]);
-  await adminPool.query("DELETE FROM vipps_refunds WHERE tenant_id = $1", [tenantId]);
+  await deleteMoneyRows(adminPool, "vipps_captures", tenantId);
+  await deleteMoneyRows(adminPool, "vipps_refunds", tenantId);
   await adminPool.query("DELETE FROM stripe_webhook_events WHERE tenant_id = $1", [tenantId]);
-  await adminPool.query("DELETE FROM stripe_refunds WHERE tenant_id = $1", [tenantId]);
+  await deleteMoneyRows(adminPool, "stripe_refunds", tenantId);
   await adminPool.query("DELETE FROM payment_intent_events WHERE tenant_id = $1", [tenantId]);
-  await adminPool.query("DELETE FROM payment_intents WHERE tenant_id = $1", [tenantId]);
+  await deleteMoneyRows(adminPool, "payment_intents", tenantId);
   await adminPool.query("DELETE FROM finance_kill_switch WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM finance_spend_records WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM tool_executions WHERE tenant_id = $1", [tenantId]);

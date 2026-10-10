@@ -307,7 +307,7 @@ describe("C: ende-til-ende - preview -> request -> godkjenn (step-up) -> utført
     expect(stored["tool_id"]).toBe("finance");
     expect(stored["action"]).toBe("submit_payment_intent");
     // tenant fra identiteten (aldri fra klienten) + eierens BUNDNE forventning til beløp, valuta og mottaker slik de stod i den ferske tilstanden
-    expect(stored["parameters"]).toEqual({ tenant_id: TENANT, payment_intent_id: intent.payment_intent_id, expected_amount_ore: 10_000, expected_currency: "NOK", expected_recipient: expect.stringMatching(/^[0-9a-f]{32}$/) });
+    expect(stored["parameters"]).toEqual({ tenant_id: TENANT, payment_intent_id: intent.payment_intent_id, expected_amount_ore: 10_000, expected_currency: "NOK", expected_recipient: expect.stringMatching(/^[0-9a-f]{64}$/) });
     expect((stored["summary"] as { display: string }).display).toBe(`betaling 100,00 NOK til ${intent.vendor_name} via stripe (intensjon ${intent.payment_intent_id})`);
     expect(stored["taint_reasons"]).toEqual(["owner_finance_action_request"]);
     // INGENTING er utført ennå
@@ -404,7 +404,7 @@ describe("C: ende-til-ende - preview -> request -> godkjenn (step-up) -> utført
     expect(ack.status).toBe(200);
     expect((await confRow(String(data(ack)["confirmation_id"])))!["parameters"]).toEqual({
       tenant_id: TENANT, payment_intent_id: b.payment_intent_id, confirm_possible_duplicate_of: [a.payment_intent_id],
-      expected_amount_ore: 55_500, expected_currency: "NOK", expected_recipient: expect.stringMatching(/^[0-9a-f]{32}$/)
+      expected_amount_ore: 55_500, expected_currency: "NOK", expected_recipient: expect.stringMatching(/^[0-9a-f]{64}$/)
     });
   });
 });
@@ -492,7 +492,7 @@ describe("G: binding til beløp og mottaker - endring mellom forespørsel og god
     const intent = await newStripeIntent();
     const params = { tool: "finance.submit_payment_intent", payment_intent_id: intent.payment_intent_id };
     const preview = await fin("owner-signed", "preview", params);
-    expect(data(preview)["binding"]).toEqual({ expected_amount_ore: 10_000, expected_currency: "NOK", expected_recipient: expect.stringMatching(/^[0-9a-f]{32}$/) });
+    expect(data(preview)["binding"]).toEqual({ expected_amount_ore: 10_000, expected_currency: "NOK", expected_recipient: expect.stringMatching(/^[0-9a-f]{64}$/) });
     for (const key of ["expected_amount_ore", "expected_currency", "expected_recipient"]) {
       const forged = await fin("owner-signed", "request", { ...params, [key]: key === "expected_amount_ore" ? 1 : "NOK" });
       expect(forged.status, key).toBe(400);

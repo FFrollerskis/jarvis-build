@@ -834,7 +834,7 @@ describe("J: bundet forventning (beløp, valuta, mottaker) håndheves av selve p
     for (const [bad, reason] of [
       [{ ...ok, expected_amount_ore: ok.expected_amount_ore + 1 }, "bound_amount_mismatch"],
       [{ ...ok, expected_currency: "EUR" }, "bound_currency_mismatch"],
-      [{ ...ok, expected_recipient: "f".repeat(32) }, "bound_recipient_mismatch"],
+      [{ ...ok, expected_recipient: "f".repeat(64) }, "bound_recipient_mismatch"],
       [{ expected_amount_ore: ok.expected_amount_ore }, "bound_incomplete"],
       [{ expected_currency: ok.expected_currency, expected_recipient: ok.expected_recipient }, "bound_incomplete"]
     ] as const) {
@@ -855,7 +855,7 @@ describe("J: bundet forventning (beløp, valuta, mottaker) håndheves av selve p
     const bound = { expected_amount_ore: 4_000, expected_currency: "NOK", expected_recipient: check.parent!.recipient_digest! };
     const call = (extra: Record<string, JsonValue>) => w.gateway.execute({ identity: owner, tool_id: "finance_stripe", action: "submit_refund", parameters: { tenant_id: TENANT, refund_id: refund.refund_id, ...extra }, idempotency_key: key("sr") });
     expect(await call({ ...bound, expected_amount_ore: 3_999 })).toEqual({ ok: false, reason: "preflight_invalid:bound_amount_mismatch" });
-    expect(await call({ ...bound, expected_recipient: "0".repeat(32) })).toEqual({ ok: false, reason: "preflight_invalid:bound_recipient_mismatch" });
+    expect(await call({ ...bound, expected_recipient: "0".repeat(64) })).toEqual({ ok: false, reason: "preflight_invalid:bound_recipient_mismatch" });
     expect(w.stripe.refundCalls).toHaveLength(0);
     expect(await call(bound)).toMatchObject({ ok: true });
     expect(w.stripe.refundCalls).toHaveLength(1);

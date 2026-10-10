@@ -24,13 +24,15 @@ import {
 import { FikenFake, Gate, StripeFake, VippsFake } from "./wpf1-fakes.ts";
 
 /**
- * WP-F1, uavhengig review (PR #321) - M-F1 og M-F2, mot ekte embedded Postgres og ekte ToolGateway med påslått klasse D-pipeline:
+ * WP-F1, uavhengig review (PR #321) - rettelser M-F1, M-F2, M-F3 og F4-F8, mot ekte embedded Postgres og ekte ToolGateway med påslått klasse D-pipeline:
  *
  *  M-F1  Duplikatvakten var et TOCTOU: validatoren leste kandidatene FØR reservasjonen, og reservasjonen kjørte ikke vakten på nytt. To samtidige innsendinger av ULIKE
  *        intensjoner (samme leverandør/beløp/valuta) ga to leverandørkall (bekreftet 20 av 20 par). Nå tar reservasjonstransaksjonen en `pg_advisory_xact_lock` og kjører
  *        kandidatspørringen på nytt - NØYAKTIG ett leverandørkall per par.
  *  M-F2  Leverandørkallet LYKTES, men lagringen av svaret feilet (DB-trigger) -> stille `failed` uten varsel. Nå: `unverified`, umiddelbart «UTFALL UKJENT»-varsel og
  *        `SUBMIT_OUTCOME_UNKNOWN` - for alle fire handlinger. Et kall som feiler FØR leverandøren er fortsatt en vanlig `failed`.
+ *  M-F3  Mottaker-digesten var siste fire tegn + lengde: en endret mottakerreferanse med samme slutt og lengde passerte bindingen. Nå SHA-256 over hele referansen
+ *        (DELETE-vernet i migrasjon 101 testes i wpf1-immutable-money.test.ts og modules/erasure; her testes bindingen gjennom ekte gateway).
  */
 let stop: (() => Promise<void>) | undefined;
 let adminPool: pg.Pool;
@@ -443,5 +445,42 @@ describe("M-F2: leverandørkallet LYKTES, men lagringen av svaret feilet -> UKJE
     const after = await intentRow(intent.payment_intent_id);
     expect(after["state"]).toBe("submitted"); // fortsatt reservert -> lease/avstemming hindrer en ny postering
     expect(after["provider_ref"]).toBeNull();
+  });
+});
+
+describe("M-F3: mottakerbindingen gjennom ekte gateway - samme siste fire tegn og samme lengde er IKKE lenger samme mottaker", () => {
+  async function boundParams(w: Wired, id: string): Promise<Record<string, JsonValue>> {
+    const check = (await w.finance.checkSubmitPaymentIntent(TENANT, "business", id))!;
+    return { expected_amount_ore: check.payment_intent.amount_ore, expected_currency: check.payment_intent.currency, expected_recipient: check.payment_intent.recipient_digest! };
+  }
+
+  it("uendret mottaker: bundet innsending går gjennom; mottakerreferansen byttet til en med samme siste fire tegn og lengde (1111111111 -> 9999991111) gir bound_recipient_mismatch FØR leverandørkall", async () => {
+    const w = wire();
+    const intent = await makeIntent(w, "fiken", { vendor_provider_ref: "1111111111" });
+    const bound = await boundParams(w, intent.payment_intent_id);
+    expect(bound["expected_recipient"]).toMatch(/^[0-9a-f]{64}$/);
+
+    // Angrepet fra reviewen: mottakerreferansen byttes mellom forespørsel og godkjenning. Den maskerte visningen er identisk (…1111 (10)) - digesten er det ikke.
+    // (Normalt stoppes selve endringen av UPDATE-/DELETE-triggerne i migrasjon 101; her bypasses de som tabelleier for å bevise at BINDINGEN er et uavhengig andre lag.)
+    await adminPool.query("ALTER TABLE payment_intents DISABLE TRIGGER payment_intents_money_immutable");
+    try {
+      await adminPool.query("UPDATE payment_intents SET vendor_provider_ref = '9999991111' WHERE payment_intent_id = $1", [intent.payment_intent_id]);
+    } finally {
+      await adminPool.query("ALTER TABLE payment_intents ENABLE TRIGGER payment_intents_money_immutable");
+    }
+    const after = (await w.finance.checkSubmitPaymentIntent(TENANT, "business", intent.payment_intent_id))!.payment_intent;
+    expect(after.vendor_ref_masked).toBe("…1111 (10)"); // samme visning som før endringen
+    expect(await submitIntent(w, intent.payment_intent_id, key("m3"), bound)).toEqual({ ok: false, reason: "preflight_invalid:bound_recipient_mismatch" });
+    expect(w.fiken.calls).toBe(0);
+
+    // Settes referansen tilbake, går den bundne innsendingen gjennom (bindingen er presis, ikke bare «alt avvises»).
+    await adminPool.query("ALTER TABLE payment_intents DISABLE TRIGGER payment_intents_money_immutable");
+    try {
+      await adminPool.query("UPDATE payment_intents SET vendor_provider_ref = '1111111111' WHERE payment_intent_id = $1", [intent.payment_intent_id]);
+    } finally {
+      await adminPool.query("ALTER TABLE payment_intents ENABLE TRIGGER payment_intents_money_immutable");
+    }
+    expect((await submitIntent(w, intent.payment_intent_id, key("m3ok"), bound)).ok).toBe(true);
+    expect(w.fiken.calls).toBe(1);
   });
 });

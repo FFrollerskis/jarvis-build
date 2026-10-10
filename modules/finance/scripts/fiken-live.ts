@@ -33,6 +33,7 @@ import { BusinessInternalSecretProvider } from "@jarvis/business";
 import { FinanceService, FinanceTransport, type FikenCredentials, type FikenCredentialsProvider } from "../src/index.ts";
 import { FikenTransport } from "../src/fiken-transport.ts";
 import { checkRequiredEnv, computeCanonicalDomainVerified, computeFikenLiveVerified, computeHardFail, evaluateSecretSafety, isLiveWriteOptedIn, type Verdict } from "./lib/fiken-live-lib.ts";
+import { deleteMoneyRows } from "./lib/money-cleanup.ts";
 
 const results: Record<string, Verdict> = {
   q21_runtime_role_safe: "NOT_RUN",
@@ -95,7 +96,7 @@ function ownerIdentityFor(tenantId: string): IdentityContext {
 async function cleanupTenant(tenantId: string): Promise<void> {
   await adminPool.query("DELETE FROM business_open_loops WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM payment_intent_events WHERE tenant_id = $1", [tenantId]);
-  await adminPool.query("DELETE FROM payment_intents WHERE tenant_id = $1", [tenantId]);
+  await deleteMoneyRows(adminPool, "payment_intents", tenantId);
   await adminPool.query("DELETE FROM finance_kill_switch WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM tool_executions WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM memory_spaces WHERE tenant_id = $1", [tenantId]);

@@ -340,7 +340,7 @@ describe("E: kontrakter, sammendrag og credential-oppslag", () => {
 });
 
 describe("F: binding til beløp og mottaker (`expected_*`) - alt-eller-ingenting, sammenlignet med den FERSKE tilstanden", () => {
-  const digest = "0123456789abcdef0123456789abcdef";
+  const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
   const state = (over: Json = {}): JsonValue => intentCheck({ pi: { vendor_name: "Utleier AS", recipient_digest: digest, ...over } });
   const bound = (extra: Json = {}): Record<string, JsonValue> => params({ expected_amount_ore: 10_000, expected_currency: "NOK", expected_recipient: digest, ...extra });
 

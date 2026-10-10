@@ -78,6 +78,7 @@ import type { Readable } from "node:stream";
 import type { IdentityContext } from "@jarvis/contracts";
 import { adminConfigFromEnv, assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool } from "@jarvis/core";
 import { PolicyGateway, InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch } from "@jarvis/policy";
+import { deleteMoneyRows } from "./lib/money-cleanup.ts";
 import { EnvSecretProvider, FallbackSecretProvider, ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, OpenLoopService } from "@jarvis/business";
 import {
@@ -188,9 +189,9 @@ function ownerIdentityFor(tenantId: string): IdentityContext {
 
 async function cleanupTenant(tenantId: string): Promise<void> {
   await adminPool.query("DELETE FROM stripe_webhook_events WHERE tenant_id = $1", [tenantId]);
-  await adminPool.query("DELETE FROM stripe_refunds WHERE tenant_id = $1", [tenantId]);
+  await deleteMoneyRows(adminPool, "stripe_refunds", tenantId);
   await adminPool.query("DELETE FROM payment_intent_events WHERE tenant_id = $1", [tenantId]);
-  await adminPool.query("DELETE FROM payment_intents WHERE tenant_id = $1", [tenantId]);
+  await deleteMoneyRows(adminPool, "payment_intents", tenantId);
   await adminPool.query("DELETE FROM finance_kill_switch WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM tool_executions WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM memory_spaces WHERE tenant_id = $1", [tenantId]);

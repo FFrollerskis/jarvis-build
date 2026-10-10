@@ -30,13 +30,29 @@ export function maskReference(value: string | null): string | null {
 }
 
 /**
- * WP-F1: kort, IKKE-sensitiv digest av mottakeren som bekreftelsen bindes til (`expected_recipient`): provider, canonical vendor-id, leverandørnavn (normalisert), MASKERT referanse
- * (siste fire tegn + lengde), kontokode og motkonto. Den hashes IKKE over hele kontonummeret/KID (lav entropi - en usaltet hash ville lekket det): selve referansen er låst av DB-triggeren
- * som gjør pengekolonnene uforanderlige (migrasjon 101), digesten er et andre, uavhengig lag mot at mottakeren er byttet mellom forespørsel og godkjenning.
+ * Normalisert leverandørreferanse til digesten: KUN trimming (tom = ingen referanse). Aldri avkortet, aldri omskrevet (ingen fjerning av skilletegn, ingen endring av store/små bokstaver):
+ * enhver forskjell i selve referansen gir en annen digest.
+ */
+function normalizedReference(value: string | null): string | null {
+  if (value === null) return null;
+  const v = value.trim();
+  return v.length === 0 ? null : v;
+}
+
+/**
+ * WP-F1 (D-462; rettet etter uavhengig review M-F3): digest av mottakeren som eierens bekreftelse bindes til (`expected_recipient`) - SHA-256 over en ENTYDIG serialisering
+ * (JSON-tuppel med versjonsmerke) av provider, canonical vendor-id, leverandørnavn (normalisert), den FULLE leverandørreferansen (kontonummer/KID/Fiken-kontakt - IKKE avkortet), kontokode og motkonto.
+ * Hele 64-tegns hex-digesten brukes (ingen avkorting). Den maskerte visningen (`maskReference`: «…1234 (11)») er KUN til visning for mennesker og inngår ALDRI i digesten:
+ * den forrige versjonen hashet bare de fire siste tegnene + lengden, så en endret mottakerreferanse med samme slutt og lengde ga samme digest og passerte bindingen.
+ *
+ * Ærlig avgrensning: en usaltet hash av en laventropi-referanse (kontonummer) kan brute-forces av den som sitter med digesten alene. Digesten lagres kun der referansen allerede
+ * ligger i klartekst (samme database, samme tenant-RLS: `payment_intents.vendor_provider_ref`) og vises kun til den autentiserte eieren - den er en INTEGRITETSBINDING, ikke en hemmelighet.
  */
 export function recipientDigest(i: Pick<PaymentIntent, "provider" | "vendor_id" | "vendor_name" | "vendor_provider_ref" | "account_code" | "counter_account_code">): string {
-  const canonical = JSON.stringify([i.provider, i.vendor_id ?? null, i.vendor_name.trim().toLowerCase(), maskReference(i.vendor_provider_ref), i.account_code, i.counter_account_code ?? null]);
-  return createHash("sha256").update(canonical).digest("hex").slice(0, 32);
+  const canonical = JSON.stringify([
+    "jarvis.finance.recipient.v2", i.provider, i.vendor_id ?? null, i.vendor_name.trim().toLowerCase(), normalizedReference(i.vendor_provider_ref), i.account_code, i.counter_account_code ?? null
+  ]);
+  return createHash("sha256").update(canonical, "utf8").digest("hex");
 }
 
 type Reservation = SubmitIntentCheck["checks"]["reservation"];

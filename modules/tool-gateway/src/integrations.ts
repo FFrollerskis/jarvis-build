@@ -51,7 +51,8 @@ const record = (shape: z.ZodRawShape) => z.object(shape).strict() as unknown as 
 const BOUND_EXPECTATION = {
   expected_amount_ore: z.number().int().positive().max(MAX_AMOUNT_MINOR_UNITS).optional(),
   expected_currency: z.string().regex(/^[A-Z]{3}$/).optional(),
-  expected_recipient: z.string().regex(/^[0-9a-f]{32}$/).optional()
+  // SHA-256 (64 hex) over hele den normaliserte mottakerreferansen (review M-F3) - se `recipientDigest` i finance/src/class-d-checks.ts.
+  expected_recipient: z.string().regex(/^[0-9a-f]{64}$/).optional()
 };
 
 /**
