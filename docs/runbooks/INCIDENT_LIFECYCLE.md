@@ -22,6 +22,8 @@ Lagrede statusverdier er uendret (CHECK, data og situasjonsmotorens infra-bro av
   (`trace_id` = hendelsens korrelasjons-id) i samme transaksjon. Årsak er påkrevd (≤ 500 tegn, redigert for hemmeligheter).
 * **Databasen håndhever det også:** en utsatt trigger avviser enhver statusendring uten en matchende overgangsrad i samme transaksjon (også rå SQL fra app-rollen); overgangsraden kan bare være et lovlig par
   (CHECK; en test holder SQL-parene identiske med `INCIDENT_TRANSITIONS`); historikken er append-only (ingen UPDATE-grant, direkte DELETE avvises - den forsvinner kun med hendelsen ved erasure).
+* **Kun den suverene eieren (gjennomgang av PR #324, M3):** `POST /incidents/transition` krever eieren - SAMME predikat som kontrollsentrene (`ownerPredicate` fra `apps/api/src/control-center/register.ts`, bygget fra samme `AuthorityConfig` som Policy Gateway). En annen person, en delegat, en gjest eller en annen tenant får
+  `403 owner_required` (og en `tool.denied`-revisjonsrad i sin egen tenant) FØR hendelsen slås opp; uten `ownerGate` (fail-closed) nektes alle. `actor_kind: "owner"` i historikken er derfor alltid sant.
 * **Aktør-regler:** `owner` (alltid personen fra grantet, aldri fra kroppen) kan gjøre enhver lovlig overgang. En **produsent** kan kun (a) løse sin egen hendelse med en peker til et **VERIFIED bevis for samme hendelse**,
   og (b) gjenåpne en løst hendelse (regresjon) - aldri en manuell hendelse, aldri «lukk uten tiltak», aldri gjenåpne en hendelse eieren har lukket. Reparasjonsflyten kan kun foreslå tiltak. `system` brukes bare til opprettelses-/bakfyllsraden.
 * `GET`-flaten: `POST /incidents/get` returnerer hendelse (med `phase`/`phase_no`), **overgangshistorikk** og bevis med sannhetsmerking (`truth_no`). `POST /incidents/list` validerer status.
@@ -44,6 +46,7 @@ Lagrede statusverdier er uendret (CHECK, data og situasjonsmotorens infra-bro av
 Ett fingeravtrykk `<kilde>:<emne>` gir én aktiv hendelse (unik indeks + advisory-lås, api og worker kan kjøre samtidig). Samme fakta oppdaterer hendelsen (teller, alvorlighet kun **opp**, nytt bevis kun hvis det skiller seg, maks 50 bevis).
 En løst hendelse som kommer tilbake innen 24 t **gjenåpnes** (samme rad); senere gir den en ny rad med **samme korrelasjons-id**. Eierens «lukk uten tiltak» **demper** samme faktum i 7 døgn (kun telleren øker). Maks 25 aktive hendelser per produsent (en støyende kilde fyller ikke tabellen).
 **Løsning skjer kun etter positiv re-måling** (nytt `VERIFIED` bevis + overgang atomisk) - aldri fordi noe «ikke er sett», aldri når kilden er nede, aldri på en gammel vakthund-rapport.
+**Eneste unntak (gjennomgang av PR #324, L3):** `IncidentService.resolveByCheck({ confirmation: "PROVISIONAL" })` - kildens EGEN påstand (Sentry `resolved`) lukker hendelsen med et `PROVISIONAL` bevis (observert, ikke bekreftet; ingen verifiseringsfelt). Unntaket gjelder kun denne stien og kontrollens eget bevis; den generelle `transition()` krever fortsatt `VERIFIED` for en produsent.
 
 | Produsent | Åpner når | Løses når | Merknad |
 |---|---|---|---|
@@ -52,7 +55,7 @@ En løst hendelse som kommer tilbake innen 24 t **gjenåpnes** (samme rad); sene
 | `slo` | tjenestemål er `BREACH` | tjenestemål er `OK` (`UNKNOWN` gjør ingenting) | alvorlighet `normal` (målene er forslag) |
 | `provider` | konfigurert tilkobling er `unavailable`/`auth_failed` i `ToolGateway.health` | helse målt `healthy` etter siste observerte svikt | leser helsekartet, ingen hvelv-oppslag |
 | `infra_execution` | journalført eksekusjon `FAILED`/`PARTIAL`/`UNKNOWN` siste døgn, ikke knyttet til en hendelse og ikke gjenopprettet | gjenoppretting journalført `SUCCESS` for eksekusjonen | én hendelse per eksekusjon |
-| `sentry` | uløst `error`/`fatal`-issue sist sett siste time (krever `JARVIS_SENTRY_API_TOKEN`) | `get_issue` for akkurat dette issuet sier `resolved`/`ignored` | **ubetrodd kilde:** tittel er en fast mal, bevis kun validerte felt og `UNVERIFIED`, maks 10 per kjøring, dormant uten token |
+| `sentry` | uløst `error`/`fatal`-issue sist sett siste time (krever `JARVIS_SENTRY_API_TOKEN`) | `get_issue` for akkurat dette issuet sier `resolved` - **ikke** `ignored` (en menneskelig «jeg bryr meg ikke»). Lukkingsbeviset er kildens egen påstand og merkes `PROVISIONAL`, aldri `VERIFIED` (L3) | **ubetrodd kilde:** tittel er en fast mal, bevis kun validerte felt og `UNVERIFIED`, maks 10 per kjøring, dormant uten token |
 | `watchdog` | en vakthundsjekk feilet i siste fullførte tikk (worker) | samme sjekk lyktes i et senere tikk | `Watchdog.setObserver()`; gammel/manglende rapport hoppes over |
 
 Hver kjøring registreres i `incident_producer_runs` (start, slutt, utfall, tall, feil på rad) og vises i driftsstatusen. En produsent kan ikke åpne en annen produsents hendelser (kjøreren avviser, databasen krever riktig prefiks).
@@ -68,7 +71,7 @@ Restart api og worker. Hendelsene lages for eier-tenanten i `business`-rommet (s
 
 ## 4. Driftsstatus (klasse A)
 
-* Chat: `executive.get_infra_status` («har vi åpne hendelser?», «er noe nede?», «skystatus»). HTTP: `POST /infra/overview { grant_token }`.
+* Chat: `executive.get_infra_status` («har vi åpne hendelser?», «er noe nede?», «skystatus») - **kun eieren fra en signert enhetsøkt** (web-chat; ikke tale/Telegram, gjennomgang av PR #324 L4). HTTP: `POST /infra/overview { grant_token }` (`403 owner_required` for andre enn den suverene eieren, M3).
 * Innhold: åpne hendelser (fase, alvorlighet, bekreftet/observert/påstått, antall observasjoner, siste endring), de sju skymålene (Cloudflare, Vercel, Google Cloud, Docker, Langfuse, Infisical, Postgres: sovende/ukjent/ok/redusert/nede + siste journalførte endring),
   produsentenes helse og infra-modus. **Aldri** bevistekst, årsaker, credential-verdier eller -navn. Ukjent vises som ukjent; er produsentene AV, står det uttrykkelig at «ingen hendelser» bare betyr «ingen registrert manuelt».
 
@@ -76,11 +79,13 @@ Restart api og worker. Hendelsene lages for eier-tenanten i `business`-rommet (s
 
 `test_command` er **påkrevd** og må være en kjent testløper (`assertTestCommand`): tidligere ble en tom liste til `node -e process.exit(0)` (en test som alltid består, så en reparasjon kunne meldes `tests: passed` uten at noe var testet). Hendelsen må være `open`/`diagnosing`/`repair_proposed`,
 det kan ikke finnes en uferdig reparasjonsjobb fra før (ingen dobbel agentkjøring), og overgangen til `repair_proposed` går via `transition()` med aktør `repair`. Ingen auto-merge (D-95/D-102 uendret).
+**Gjennomgang av PR #324 (M3):** ruten krever den suverene eieren (`403 owner_required`) OG step-up (`403 step_up_required:*` uten enhetssignert økt fra web/desktop/api/mobile), og `model_budget_ore` har et tak på serverens side (`REPAIR_MODEL_BUDGET_CAP_ORE` = 20 000 øre, også standarden): kalleren kan senke budsjettet, aldri øke det
+(`400 repair_budget_exceeds_cap`; ugyldig tall `repair_budget_invalid`).
 
 ## 6. Verifisering (kjør selv)
 
 1. Migrasjon på din database: `node --experimental-transform-types apps/api/src/migrate-main.ts --plan` viser 096-098 før du anvender dem (se også `docs/runbooks/D103_HOST_ACCEPTANCE.md`); ta backup først (forover-kun, ingen ned-migrasjon).
-2. `POST /incidents/create` → `POST /incidents/transition {action:"acknowledge", reason:"…"}` → `POST /incidents/get` viser historikken med deg som aktør.
+2. `POST /incidents/create` → `POST /incidents/transition {action:"acknowledge", reason:"…"}` → `POST /incidents/get` viser historikken med deg som aktør. En annen person (eller en delegat) skal få `403 owner_required`.
 3. Forsøk `POST /incidents/evidence/add {…, status:"VERIFIED"}` → 400 `truth_verified_requires_deterministic_basis`.
 4. Slå på produsentene, få en jobb til å feile (eller bruk `POST /deployments/ingest/github` mot en feilet kjøring på `main`) og se hendelsen i `POST /infra/overview` og i oppmerksomhetskøen. Fiks årsaken og se at hendelsen løses med `VERIFIED` bevis i historikken.
 5. Kjør testene: `npx vitest run modules/incidents modules/watchdog modules/executive modules/situations apps/api/test/e1-*`.

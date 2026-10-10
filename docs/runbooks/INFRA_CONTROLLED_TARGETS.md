@@ -34,6 +34,12 @@ revisjon, ledger, journal eller varsel inneholder en verdi. Rotasjonens før-/et
 Bruker maskin-identiteten som allerede er i api/worker (`INFISICAL_URL`, `INFISICAL_CLIENT_ID`, `INFISICAL_CLIENT_SECRET`, `INFISICAL_PROJECT_ID`, `INFISICAL_ENV`) via universal-auth - samme identitet som `InfisicalSecretProvider`. Tokenet caches kun i minnet
 og fornyes ved 401. Hva identiteten faktisk får gjøre bestemmes av rollen du har gitt den i Infisical (**EIERHANDLING:** for rotasjon må identiteten ha tilgang til Secret Rotation i prosjektet - **NOT VERIFIED** hvilke eksakte rettigheter som kreves).
 
+**Step-up (gjennomgang av PR #324, M2).** `rotate_secrets` har `step_up_required: true`: `ToolGateway` nekter uten en enhetssignert økt fra web/desktop/api/mobile (aldri tale/Telegram/meldingsplattform/system), og `POST /infra/cloud/mutate` gir `403 step_up_required` / `403 owner_required` før noe journalføres.
+Standard = strengest; kan lempes av Tobias med en navngitt D-beslutning. Lesing (klasse A) krever aldri step-up.
+
+**Leverandørtekst (gjennomgang av PR #324, M1).** `lastRotationJobError`, rotasjonsnavn/-status, statusmeldinger, tagger og Langfuses prosjekt-/organisasjonsnavn og feilmeldinger går gjennom den sentrale hemmelighetsskanneren (`vendor-text.ts`) FØR de forlater transporten (en rotasjonsfeil kan sitere en
+tilkoblingsstreng med passord eller et Bearer-token, og svaret havner i `tool_executions` og `audit_events`); tidsstempel-, dato- og id-felt godtas kun i sin egen form. Bevist av tester med fiendtlige seed-verdier i alle fake-serverne. Ingen redirects følges (L2).
+
 **Rotasjon (klasse D) - kjeden:** mål-autorisasjon (id står i `JARVIS_INFISICAL_ROTATION_IDS`) FØR noen I/O → preflight (rotasjonen finnes) → snapshot av status/tidspunkt → idempotens-nøkkel påkrevd → rotasjon → readback (ny listing: ikke feilet, `lastRotatedAt` innenfor 10 minutter) → umiddelbar Telegram-varsling → journal i `infra_executions`.
 Ærlig gjenoppretting: **ingen teknisk reversering** - forrige verdi ligger i Infisicals versjonshistorikk og må gjenopprettes manuelt der; avhengige tjenester må hente ny verdi. `PAUSED` stanser rotasjon, `DEGRADED` stanser klasse D, lesing stanses aldri.
 
@@ -65,6 +71,9 @@ og fornyes ved 401. Hva identiteten faktisk får gjøre bestemmes av rollen du h
 POST /infra/cloud/read
 { "grant_token": "<session-grant>", "provider": "infisical", "action": "list_secret_metadata", "parameters": { "max_age_days": 90 } }
 ```
+`/infra/cloud/read` når KUN registrerte klasse A-handlinger i de fire verktøy-id-ene (`cloudflare`, `langfuse`, `infisical`, `postgres_ops`): en skrive-handling (f.eks. `cloudflare.purge_cache`) gir `400 cloud_read_not_a_read_action` og et annet verktøy-id `400 cloud_read_unknown_action`, begge FØR gatewayen eller leverandøren røres
+(gjennomgang av PR #324, M33 - tabelltest utledet fra de registrerte definisjonene). Skriving går alltid via `/infra/cloud/mutate` (eier + step-up + journal). `/infra/cloud/mutate` med et ukjent leverandørnavn (også `constructor`/`__proto__`) gir `cloud_mutation_unknown_provider:<navn>` (L8).
+
 1. `langfuse.get_health` → `healthy: true`; `langfuse.get_project` → riktig prosjekt og maskert nøkkel; `langfuse.get_trace_counts` → tall som stemmer med Langfuse-dashbordet.
 2. `infisical.get_health` → `healthy: true`; `list_secret_metadata` → dine connector-nøkler med alder; **kontroller at ingen verdi står i svaret** (søk etter en kjent verdi).
 3. `list_secret_rotations` → `available: true/false` (hvis `false`: ingen rotasjon er konfigurert eller funksjonen er ikke tilgjengelig - det er OK).
@@ -80,3 +89,5 @@ Tøm `JARVIS_INFISICAL_ROTATION_IDS` + restart for å stoppe rotasjon. Lesing sl
 ## 7. Driftsstatus og hendelser
 
 Helse og siste journalførte endring for alle skymål (og åpne hendelser, produsentenes helse) leses samlet med `executive.get_infra_status` (chat) / `POST /infra/overview`. Hendelsesprodusentene, livssyklusen og sannhetsregimet er beskrevet i `docs/runbooks/INCIDENT_LIFECYCLE.md`.
+**Kun eieren fra en signert enhetsøkt (gjennomgang av PR #324, M3/L4):** `get_infra_status` har samme lese-port som kontrollsentrene (eier OG `auth_strength: signed`, fail-closed også uten eier-register; avslaget er en vanlig `tool.denied`-revisjonsrad), står ikke på tale (`VOICE_EXCLUDED_KEYS`) og er sensitivitetsmerket `private`.
+`POST /infra/overview` gir i tillegg `403 owner_required` for alle andre enn den suverene eieren.

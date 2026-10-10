@@ -47,8 +47,22 @@ For hver skrivehandling i klasse D håndhever `ToolGateway.execute()` (ikke tran
 Mutasjoner gjentas ALDRI automatisk på 5xx (bivirkningen kan ha skjedd); bare 429 (avslag før behandling) og lesing gjentas. Tokenet vaskes ut av alle feilmeldinger.
 Utdata er hvitlistet per ressurs, e-post i medlemslisten maskeres, og audit-loggen leveres uten aktørens e-post/IP.
 
+**Leverandørtekst og hemmeligheter (gjennomgang av PR #324, M1).** Cloudflares feilmeldinger og visningstekster (konto-/plan-/rolle-/token-navn, audit-felt, statuser) er ubetrodd fritekst og går gjennom den sentrale hemmelighetsskanneren
+(`scanForSecrets`, `modules/tool-gateway/src/vendor-text.ts`) FØR de forlater transporten - skann først, så kutt - slik at en melding som siterer et token, en URL med passord, en PEM-blokk eller en JWT aldri havner i verktøysvar,
+`tool_executions` eller `audit_events`. Tidsstempelfelt godtas kun som rene tidsstempler. **Bevisst IKKE redigert:** konfigurasjon DU selv skriver og som er gjenopprettingsgrunnlaget (DNS-innhold/-kommentar, regeluttrykk/-beskrivelse) -
+innholdet vises slik det står, fordi etterbetingelsene sammenligner det eksakt og recovery gjenoppretter fra snapshotet. Står det en hemmelighet i en TXT-post, er den i journalen; legg aldri hemmeligheter i DNS.
+
+**Ingen redirects (gjennomgang av PR #324, L2).** Cloudflare-transporten (og Langfuse/Infisical) avviser enhver 3xx-respons med `unsafe_vendor_url:unexpected_redirect_http_<status>` for ALLE metoder; en 307/308 følges aldri med kropp og
+`Authorization`. Felles `guardedFetch` følger heller ikke redirects for mutasjoner (POST/PUT/PATCH/DELETE) som standard; GET/HEAD uendret.
+
 **Eier- og delegert oppførsel:** kun den autentiserte eieren kan bruke connectoren (credential-binding, D-377); en delegert identitet får `credential_not_bound_to_identity`.
 Modellen har INGEN direkte tilgang til tokenet eller til verktøyet (`cloudflare` står i `FORBIDDEN_MODEL_TOOL_IDS`/`OWNER_ONLY_NAMESPACES`); verktøyet utfører, ikke modellen.
+
+**Step-up (gjennomgang av PR #324, M2 - BESLUTNING: standard = strengest).** ALLE skrivehandlinger (klasse C og D, inkl. `purge_cache`) har `step_up_required: true`: `ToolGateway` nekter uten en **enhetssignert økt**
+(`auth_strength: signed`) fra en eier-kanal (web/desktop/api/mobile) med `step_up_required:signed_device_session` / `step_up_required:channel_<kanal>_not_allowed` - aldri tale, Telegram, meldingsplattform eller system, og uavhengig av om klasse D-kjeden er påslått.
+SOVEREIGN-modus alene er IKKE nok: en stjålet eller svak eier-grant (passiv, tale) kunne ellers endre produksjons-DNS, WAF og SSL. `POST /infra/cloud/mutate` og `POST /infra/recovery/attempt` gir et tydelig
+`403 step_up_required` FØR noe journalføres, og `403 owner_required` for alle andre enn den suverene eieren (samme predikat som kontrollsentrene). Ren lesing (klasse A) krever aldri step-up. Dette er en D-41/D-192-avveining:
+**Tobias kan lempe kravet per handling med en navngitt D-beslutning** (standarden skal ikke lempes stille). Dashbordet/UI-et kaller ikke disse rutene i dag; en klient må hente grantet via `/session/authorize` med enhetsbevis.
 
 ## 3. EIERHANDLING - opprett ET token med minste nødvendige rettigheter
 
@@ -105,10 +119,10 @@ INGENTING utføres), og den:
 
 | Mutasjon | Kompensasjon | Begrensning |
 |---|---|---|
-| `create_dns_record` | sletter posten mutasjonen selv opprettet | angres aldri hvis posten fantes fra før |
+| `create_dns_record` | sletter posten mutasjonen selv opprettet | angres aldri hvis posten fantes fra før - også en identisk post en tredjepart opprettet mellom preflight og kallet: `create` returnerer da `already_existed:true` UTEN `external_id`, journalen får `provider_receipt.already_existed`, og recovery er en no-op (`record_not_created_by_jarvis`). Jarvis sletter aldri en post det ikke selv opprettet (L7) |
 | `update_dns_record` | setter tilbake innhold/ttl/proxied/kommentar/prioritet fra før-tilstand | ttl på proxiede poster er alltid automatisk (1) hos Cloudflare |
 | `delete_dns_record` | gjenskaper posten fra snapshot | **posten får NY id** |
-| `create_waf_rule` / `update_waf_rule` | sletter / setter tilbake regelen | |
+| `create_waf_rule` / `update_waf_rule` | sletter / setter tilbake regelen | en identisk regel som fantes fra før gir `already_existed:true` uten `external_id` og recovery er en no-op (L7). Regler med ukjente felt over 4000 tegn kan ikke endres/slettes (M4, §7) |
 | `delete_waf_rule` | gjenskaper regelen fra snapshot | **regelen får NY id**; regler med `action_parameters` (skip/execute/egen respons) gjenskapes IKKE automatisk - `PARTIAL` med snapshotet i svaret, gjenopprett manuelt |
 | `update_zone_setting` | setter tilbake verdien | |
 | `purge_cache` | **ingen** (`UNKNOWN`/`no_recovery_strategy_registered`) | cachen fylles på igjen fra opprinnelsen; ved belastningsproblem: bruk mindre purge eller `development_mode` |
@@ -135,6 +149,14 @@ Lim utfallet (uten token) inn i chatten; først da regnes Cloudflare-connectoren
 - **DEFERRED:** strukturerte DNS-typer (SRV/CAA/HTTPS/LOC/SSHFP/TLSA …), DNS-batch/import/eksport og tags (krever per-type `data`-skjema som ikke er verifisert enkeltvis); WAF `skip`/`execute`/managed-ruleset-overstyringer og egen blokkeringsrespons (krever `action_parameters`-skjema som ikke er verifisert; legacy Firewall Rules/Filters er deprecated siden 2025-06-15 og brukes ikke); øvrige sone-innstillinger enn de seks verifiserte (batch-endepunktet er deprecated, EOL 2027-03-31, og brukes ikke).
 - **DEFERRED (tilgangsstyring skriv):** opprette/endre/slette medlemmer og roller, og opprette/tilbakekalle API-tokens. Et token som kan opprette tokens er privilegie-eskalering, og rot-credentials skal aldri nås av modellen; krever en egen eierbeslutning og et eget isolert token.
 - **DEFERRED:** Workers/Pages/R2/Tunnel/Zero Trust/Load Balancing/Page Rules/Cache Rules/Transform Rules/Logpush/GraphQL-analyse - utenfor masterplanens «Cloudflare (DNS/WAF)»-avgrensning; hver krever egen D-41-verifisering.
+- **WAF-vakten er BEST-EFFORT, ikke et bevis (gjennomgang av PR #324, L1).** `create_waf_rule`/`update_waf_rule` avviser en ikke-`log`-regel hvis uttrykket er en ÅPENBAR tautologi: konstantuttrykk som evalueres til sant uten feltoppslag (`true`, `1 == 1`, `not false`, `true == true`, `(true) or (false)` …),
+  en tautologi gjennom `or`/`and`/`not`/`xor` (`ip.src eq 1.2.3.4 or 1 == 1`), og en kort liste kjente alltid-sanne idiomer (`http.host ne ""`, `len(http.request.uri.path) >= 0`, `ip.src ne 0.0.0.0`, `cf.threat_score ge 0` …). Den fanger IKKE en regel som treffer «nesten all» trafikk uten å være en tautologi
+  (`ip.src ne 1.2.3.4`), og kan ikke bevise at et uttrykk ikke treffer alt - wirefilter er ugjennomsiktig for oss. En blokkerende regel som treffer alt er et selvpåført utfall; de reelle sikkerhetsnettene er klasse D-kjeden (snapshot, readback, umiddelbar varsling) og kompensasjonen (§5). `log`-regler er unntatt.
+- **WAF-regler med felt som ikke kan round-trippes (gjennomgang av PR #324, M4).** En PATCH sender hele regelen (antatt «replace»-semantikk = verste tilfelle; **NOT VERIFIED mot ekte Cloudflare**). Ukjente regelfelt over 4000 tegn (JSON, f.eks. `action_parameters.response.content`) kan ikke bevares i snapshotet; de
+  står som feltNAVN i `extra_omitted` (aldri verdier) i `get_ruleset`, og `update_waf_rule`/`delete_waf_rule` på en slik regel avvises (`preflight_invalid:rule_has_unroundtrippable_fields` / `cloudflare_rule_unroundtrippable_fields`) - endre den i Cloudflare-dashbordet. Etter en endring må hvert sendt ukjent felt finnes igjen i svaret
+  (kanonisk dyp likhet), ellers er utfallet `outcome_unknown` (uverifisert + varsling), aldri `SUCCESS`.
+- **Kompensasjonen er konservativ ved tvil (gjennomgang av PR #324, L7).** Jarvis sletter aldri en post/regel det ikke KAN BEVISE at det selv opprettet. Treffer `create_*` en identisk ressurs (fra før, eller lagt inn av andre mellom preflight og kallet), returneres `already_existed:true` uten ekstern id,
+  journalen får `provider_receipt.already_existed`, `recovery_available=false` og planen «ingenting å reversere». Konsekvens: hvis et første forsøk faktisk opprettet posten, men svaret gikk tapt, og et nytt forsøk finner den, regnes den som «fantes fra før» og blir stående - fjern den manuelt ved behov.
 - **PARTIAL:** `list_account_roles` (tillatelse for listeendepunktet ikke bekreftet); audit-logg leses kun første side (cursor-paginering ikke bygget; `since`/`before` er påkrevd av Cloudflare, standard er siste 24 timer); `list_dns_records` er begrenset til 10 sider à 100 poster (avkorting meldes).
 - Rate limit hos Cloudflare: 1200 forespørsler / 5 min per bruker (429 + `Retry-After` respekteres, begrenset til 10 s). Purge-listen er begrenset til 30 elementer per kall (konservativt, ikke bekreftet maks).
 - Cloudflare som sone-leverandør er proxy for trafikken din uavhengig av Jarvis hvis sonen er proxiet; Jarvis sender kun infrastrukturkonfigurasjon og API-token (rad i `docs/security/PROCESSOR_REGION_MATRIX.md`, region/DPA/retensjon `IKKE VERIFISERT`, `NEEDS_TOBIAS`).
