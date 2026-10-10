@@ -75,6 +75,7 @@ Rader som ikke er merget på din commit (se punkt 0) gjelder ikke ennå.
 - **Skyskjermen:** kunnskapstreff med `special`/helse holdes tilbake fra skymodeller; merknaden «Deler av kunnskapssøket ble holdt tilbake …» kan dukke opp i svar når kunnskapskilder er i bruk.
 - **Pengehandlinger:** godkjenning av de fire pengehandlingene krever step-up (enhetssignert økt); en eksisterende ventende bekreftelse for dem må godkjennes på nytt fra en signert økt.
 - **Kontrollsentre:** nye lesinger/handlinger i dashbordet er kun for den suverene eieren med signert enhetsøkt.
+- **Hendelser og skymål (E1):** overgang, reparasjon og driftsoversikt for hendelser (`/incidents/transition|repair`, `/infra/overview`) og alle skymål-mutasjoner (Cloudflare, Postgres-tiltak, Infisical-rotasjon) krever den suverene eieren, og mutasjonene i tillegg en enhetssignert økt (ikke tale/Telegram/system). `executive.get_infra_status` ligger bare på web-chatten og velges kun når du spør om drift, hendelser eller skyen. Ingenting av dette endrer noe før en skymål-credential er satt.
 - **Sensitivitet:** klassifiseringen leser nå en normalisert utgave av teksten (usynlige tegn, bredformat, spredte bokstaver) og kjenner «cancer». Noe flere meldinger kan derfor låses til lokal modell.
 
 ## 5. Akseptanseportene
