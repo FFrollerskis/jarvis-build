@@ -14,6 +14,7 @@ import {
 import { RUNNER_TOKEN, createHarness, gitSync, syntheticInstallationToken } from "../../../ops/job-runner/test/support/harness.mjs";
 // @ts-expect-error - .mjs uten typer (git smart-HTTP-server som egen barneprosess; logger token-fingeravtrykk per operasjon)
 import { fingerprint, startTokenGitServer } from "../../../ops/job-runner/test/support/token-git-server.mjs";
+// @ts-expect-error - .mjs uten typer (ops/job-runner)
 import { makeTempDir } from "../../../ops/job-runner/test/support/tmp.mjs";
 
 /**

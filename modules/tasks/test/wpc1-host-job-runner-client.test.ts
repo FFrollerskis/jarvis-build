@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { GitPolicyError, HostJobRunnerConfigError, HostJobRunnerError, HostJobSandboxRunner, FailClosedSandboxRunner, resolveJobSandboxRunner } from "@jarvis/tasks";
 // @ts-expect-error - .mjs uten typer (ops/job-runner; samme mønster som ops/security i andre tester)
 import { RUNNER_TOKEN, createHarness, gitSync } from "../../../ops/job-runner/test/support/harness.mjs";
+// @ts-expect-error - .mjs uten typer (ops/job-runner)
 import { makeTempDir } from "../../../ops/job-runner/test/support/tmp.mjs";
 
 /**
