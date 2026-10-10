@@ -116,7 +116,8 @@ export interface SensitivityDecision {
  * toveistegn, tagg-tegn) og variasjonsvelgere/fyllertegn fjernet, og en utgave der løpende enkeltbokstaver (4 eller flere, skilt av ett mellomrom/punktum/bindestrek/understrek/stjerne) er slått sammen til ett ord.
  * Det strengeste signalet fra noen av utgavene vinner (som ellers). Dette lukker KJENTE omgåelser; det er fortsatt mønsterbasert (ikke en garanti): homoglyfer (kyrilliske bokstaver som ligner latinske) og andre språk enn norsk/engelsk dekkes ikke.
  */
-const INVISIBLE_IN_TEXT = /[\p{Cf}\u034f\u115f\u1160\u3164\uffa0\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/gu;
+// (alternativer i stedet for én tegnklasse: ESLint `no-misleading-character-class` avviser kombinerende tegn (U+034F, variasjonsvelgere) i en klasse)
+const INVISIBLE_IN_TEXT = /\p{Cf}|\u034f|\u115f|\u1160|\u3164|\uffa0|[\ufe00-\ufe0f]|[\u{e0100}-\u{e01ef}]/gu;
 const SPACED_LETTERS = /(?<![\p{L}\p{N}])(?:\p{L}[\s.\-_*]){3,}\p{L}(?![\p{L}\p{N}])/gu;
 export function classificationVariants(text: string): string[] {
   const variants = new Set<string>([text]);
