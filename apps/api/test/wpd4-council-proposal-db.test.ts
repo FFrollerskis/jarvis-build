@@ -16,7 +16,7 @@ import type { InProcessWorker, TaskService } from "@jarvis/tasks";
 import { OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
 import { SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";
 import {
-  COUNCIL_PROPOSAL_TAINT, CouncilProposalGate, MemorySearchTransport, describeBoundParameters, buildToolManifest, firstWaveTools, homeAssistantTools, memoryToolDefinitions, resolveModelToolSurface,
+  COUNCIL_PROPOSAL_TAINT, CouncilProposalGate, KnowledgeSearchTransport, MemorySearchTransport, describeBoundParameters, buildToolManifest, firstWaveTools, homeAssistantTools, knowledgeToolDefinitions, memoryToolDefinitions, resolveModelToolSurface,
   type CouncilSubmitIdentity, type MeshToolMapping, type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
 import { TasksDelegateTransport, tasksDelegateToolDefinitions } from "../src/chat-jobs.ts";
@@ -43,6 +43,7 @@ function productionDefinitions(): ToolDefinition[] {
       ...governanceToolDefinitions(new GovernanceTransport({} as never)),
       ...situationsToolDefinitions(new SituationsTransport({} as never, {} as never)),
       ...memoryToolDefinitions(new MemorySearchTransport({} as never, {} as never)),
+      ...knowledgeToolDefinitions(new KnowledgeSearchTransport({} as never)),
       ...tasksDelegateToolDefinitions(new TasksDelegateTransport({} as never, {} as never)),
       ...runRateToolDefinitions(new RunRateTransport({} as never))
     ]

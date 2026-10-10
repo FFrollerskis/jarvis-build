@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { classifyContentSensitivity } from "@jarvis/model-gateway";
 import type { ToolCallRequest, ToolResultMessage } from "@jarvis/provider-adapters";
-import { SURFACE_TOOL_GRANTS } from "@jarvis/tool-gateway";
+import { CHAT_READ_TIER_KEYS, SURFACE_TOOL_GRANTS } from "@jarvis/tool-gateway";
 import {
   CLOUD_SCREEN_COVERAGE,
   KNOWN_MEMORY_ITEM_FIELDS,
@@ -200,13 +200,15 @@ describe("D-449: dekning - hvert bakgrunnsverktøy er vurdert for skyruten", () 
     // Ingen snarvei for en hel leverandør: en ny GitHub-handling på bakgrunnsflaten må også listes eksplisitt.
     expect(isReviewedBackgroundTool("github", "en_helt_ny_handling")).toBe(false);
     expect(isReviewedBackgroundTool("constructor", "")).toBe(false);
-    // Bare ett verktøy har strukturerte sensitivitetsmerker i dag, og det er skjermet.
-    expect(Object.entries(CLOUD_SCREEN_COVERAGE).filter(([, v]) => v === "screened").map(([k]) => k)).toEqual(["memory.search"]);
+    // Kun verktøyene med strukturerte sensitivitetsmerker er skjermet: minnesøket og (WP-D1) kunnskapssøket og påstandsstatusen (Q-26).
+    expect(Object.entries(CLOUD_SCREEN_COVERAGE).filter(([, v]) => v === "screened").map(([k]) => k)).toEqual(["memory.search", "knowledge.search", "knowledge.get_claim_status"]);
   });
 
-  it("forfatterkrav: hvert oppført verktøy finnes faktisk på bakgrunnsflaten (ingen døde oppføringer som skjuler en feil)", () => {
-    const granted = new Set(SURFACE_TOOL_GRANTS.background.map((g) => `${g.tool_id}.${g.action}`));
+  it("forfatterkrav: hvert oppført verktøy finnes faktisk på bakgrunnsflaten ELLER chattens lese-nivå (ingen døde oppføringer som skjuler en feil)", () => {
+    const granted = new Set([...SURFACE_TOOL_GRANTS.background.map((g) => `${g.tool_id}.${g.action}`), ...CHAT_READ_TIER_KEYS]);
     for (const key of Object.keys(CLOUD_SCREEN_COVERAGE)) expect(granted.has(key), key).toBe(true);
+    // WP-D1: kunnskapssøket står bevisst IKKE på bakgrunnsflaten (kun chattens lese-nivå) - skyskjermen gjelder chattens verktøyturer.
+    expect(SURFACE_TOOL_GRANTS.background.some((g) => g.tool_id === "knowledge")).toBe(false);
   });
 });
 
