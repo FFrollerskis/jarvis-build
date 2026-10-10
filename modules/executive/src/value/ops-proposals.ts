@@ -73,7 +73,7 @@ export function proposeOpsActions(signals: OpsSignals): OpsProposalReport {
   else {
     for (const s of signals.slo) {
       if (s.status !== "BREACH") continue;
-      const service = SLO_SERVICE[s.id];
+      const service = Object.hasOwn(SLO_SERVICE, s.id) ? SLO_SERVICE[s.id] : undefined; // L1: kun egne felt (`constructor`/`__proto__` er ikke en tjeneste). Inline: denne filen importerer bare typer (statisk vakt).
       if (service === undefined) skipped.push("et brutt tjenestemål har ukjent tjeneste (ingen regel)");
       else restart[service].push({ area: "slo", status: "BREACH", why: `tjenestemålet ${s.id} er brutt` });
     }

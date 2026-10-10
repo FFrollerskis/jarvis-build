@@ -3,6 +3,7 @@
 import "./normalize-env.ts";
 import { envInt, systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit } from "./owner.ts";
+import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
 import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, dailySpentOre, ModelGateway, pricingFromEnv, traceSinkFromEnv } from "@jarvis/model-gateway";
@@ -107,7 +108,9 @@ const gateway = new ModelGateway({
   ],
   // D-395 (JARVIS-039): workeren hadde INGEN egen budsjettkonfig (falt tilbake til DEFAULT_BUDGET med spend_approved=false) - en godkjenning eieren ga
   // i api gjaldt ikke her. Samme kilde som api: `budgetConfigFromEnv()`.
-  budget: budgetConfigFromEnv()
+  budget: budgetConfigFromEnv(),
+  // WP-H0 (JARVIS-087): eierens pause/tilbakekall av en modellleverandør, lest LIVE fra `owner_control_state` ved hvert kall - en pause satt via api stanser også workerens modellkall (se provider-pause.ts).
+  providerPause: createProviderPauseSourceFromPool(pool)
 });
 // JARVIS-006: hver konstruert adapter MÅ ha eksplisitt pris - ingen stille `default_rate`.
 try {

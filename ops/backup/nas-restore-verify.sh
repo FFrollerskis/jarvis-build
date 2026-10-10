@@ -24,7 +24,10 @@ export JARVIS_SCRATCH_DB_PASSWORD="$POSTGRES_PASSWORD"
 cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-docker run -d --name "$NAME" -e POSTGRES_PASSWORD --tmpfs /var/lib/postgresql/data "$IMAGE" >/dev/null
+# --network none (review F2): settet er UBETRODD (age er ikke autentisert) og pg_restore kjører SQL fra dumpen som superuser i denne containeren (f.eks. COPY ... PROGRAM).
+# Uten nettverk kan en ondsinnet dump ikke nå ut; data kommer inn via `docker exec -i` (stdin) og unix-socketen inne i containeren. NOT VERIFIED mot en ekte Docker-daemon i
+# byggemiljøet (ingen daemon der): kjør `ops/backup/acceptance-ops.sh drill ...` på maskinen med den private nøkkelen.
+docker run -d --name "$NAME" --network none -e POSTGRES_PASSWORD --tmpfs /var/lib/postgresql/data "$IMAGE" >/dev/null
 
 # Imaget starter en midlertidig server under initdb og restarter - vent til den ER oppe to ganger på rad.
 ready=0

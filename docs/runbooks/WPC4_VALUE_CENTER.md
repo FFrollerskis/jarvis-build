@@ -40,6 +40,7 @@ Helse- og gjesterom leses aldri. Den daglige løperen (`scheduler_state`, én de
 | `JARVIS_V2_PUSH_ENABLED` | av | kun eksakt `true` slår på V2-varsling (krever også Telegram token + chat-id) |
 | `JARVIS_V2_PUSH_MAX_PER_DAY` | 3 | høyst N meldinger per rullerende døgn (1-20); ugyldig verdi stopper oppstarten |
 | `JARVIS_V2_PUSH_QUIET_START` / `_QUIET_END` | 22 / 7 | rolig tid, lokal time Europe/Oslo. Start = slutt betyr HELE døgnet rolig (fail-closed) |
+| `JARVIS_V2_PUSH_TITLES` | `true` | tom/usatt/`true` = oppfølgingstitler vises (vasket, se under). ALT annet (`false`, `FALSE`, `0`, skrivefeil) = meldingen har KUN antall og «åpne dashbordet» - den sikreste varianten |
 | `JARVIS_V5_PROPOSALS_ENABLED` | av | kun eksakt `true` viser driftsforslag i rapporten. Forslag utfører aldri noe |
 | `JARVIS_VALUE_VERIFIED_GATES` | tom | porter DU erklærer verifisert for V3-beredskapen (`D-32`, `WORKER_ISOLATION`; ukjente navn forkastes). Kode utleder dem aldri |
 
@@ -47,25 +48,60 @@ Variablene står i `infra/local/service-env.mjs` (kun api-tjenesten), den genere
 
 ## V2 push - slik fungerer den (og slik slår du den på)
 **Hva sendes:** én kort melding til din egen Telegram-chat (via den eksisterende `telegram.notify`: Policy Gateway, kill switch, frys, revisjon og idempotens gjelder) med opptil 5 forfalte eller snart forfalne saker fra
-dine egne lister (`personal`/`business`/`project`). Oppfølgingstitler vises som sitert DATA (lenker, @-omtaler, /-kommandoer og markup fjernes, maks 60 tegn); systemdetekterte løkker vises med en fast etikett.
-AI-foreslåtte løkker og helse-/gjesterom varsles aldri. Løkker forfalt >14 dager varsles ikke (de står i morgenbriefen).
+dine egne lister (`personal`/`business`/`project`). Oppfølgingstitler er DATA, ikke instruks, og vaskes etter hvitelisteprinsippet (de kan komme fra modellopprettede oppfølginger): alt som kan bli klikkbart - lenker, domener med
+hvilket som helst toppdomene (`evil.pro`, `evil.xn--p1ai`), e-postadresser, telefon-/kortnumre og IBAN - blir `[lenke]`, og kun bokstaver, sifre, mellomrom og `.,:;!?()-–'’%` beholdes (maks 60 tegn); `/ \ @ # * _ [ ] < >`,
+backticks, emoji og retningstegn fjernes uansett posisjon. Systemdetekterte løkker vises med en fast etikett. AI-foreslåtte løkker og helse-/gjesterom varsles aldri. Løkker forfalt >14 dager varsles ikke (de står i morgenbriefen).
+**Enda sikrere:** `JARVIS_V2_PUSH_TITLES=false` gir en melding med kun antall («3 saker trenger deg (2 forfalt, 1 snart forfall)») og «åpne dashbordet» - ingen fritekst fra noen kilde når meldingen.
 
-**Garantier:** rolig tid; høyst N per døgn og minst 60 min mellom meldinger; samme sak varsles ikke to ganger for samme forfallsdato (flyttes fristen, er det en ny periode); reservasjon skrives FØR sending
-(høyst én gang - ved usikkert utfall sendes meldingen ikke på nytt); to samtidige tikk/prosesser kan aldri begge sende (advisory-lås per tenant). Uten kilde eller ledger sendes ingenting.
+**Garantier:**
+- Rolig tid; høyst N meldinger per rullerende døgn og minst 60 min mellom FORSØK (også et forsøk som ble avvist og frigitt teller); samme sak varsles ikke to ganger for samme forfallsdato (flyttes fristen, er det en ny periode);
+  to samtidige tikk/prosesser kan aldri begge sende (advisory-lås per tenant). Uten kilde eller ledger sendes ingenting.
+- **Høyst én gang (ikke «minst én»).** Reservasjonen skrives FØR sending og frigis KUN når utfallet er BEVIST «ikke sendt» (tabellen under). Alt annet - tidsavbrudd, 5xx (også «502» der Telegram faktisk leverte), nettverksbrudd, ugyldig svar,
+  ukjent feil - regnes som SENDT og forsøkes aldri på nytt. **Restrisiko:** i sjeldne tilfeller (Telegram mottok aldri meldingen, men svarte med 5xx eller tidsavbrudd) går en påminnelse TAPT - den står som `push_unknown` i revisjonssporet.
+  Den kan ikke komme to ganger så lenge revisjonssporet (`audit_events`) er intakt - det er ledgeren som husker at saken er varslet.
+- **Forsøkstak og backoff.** En melding som bevisst ikke ble sendt forsøkes på nytt etter 15 min, så 1 t, så 4 t (antall feil på meldingen avgjør trinnet; minsteavstanden på 60 min mellom forsøk gjelder i tillegg), og høyst 3 forsøk per melding
+  per rullerende døgn. Deretter er løperen stille for den meldingen (`attempts_exhausted`) til det eldste forsøket er 24 timer gammelt.
+- **Stopp før noe forsøkes.** Kill switch, frosset connector `telegram`, tilbakekalt `JARVIS_TELEGRAM_TOKEN` og infra-pause sjekkes FØR noe reserveres. Mens systemet er stanset skjer ingenting (ingen audit-rader, ingen Telegram-kall); loggen
+  sier `send_blocked` én gang (ikke hvert kvarter), og meldingen sendes straks etter at bryteren er av.
+
+**Hvilke utfall frigir reservasjonen?** (positiv tillatelsesliste i `classifyNotifyFailure`; strengene er hentet fra `ToolGateway`/`PolicyGateway`/`TelegramTransport` og låst av `apps/api/test/wpc4-follow-up-push-gateway.test.ts`)
+
+| Utfall fra gatewayen | Frigis? | Hvorfor |
+|---|---|---|
+| `kill_switch_active`, `connector_frozen`, `credential_revoked`, `credential_unavailable`, `credential_not_bound_to_identity`, `class_b_requires_active_auth`, `invalid_identity_context`, `invalid_tool_call`, `unknown_tool`, `invalid_parameters`, `rate_limited`, `infra_paused`, `infra_degraded_blocks_class_d`, `infra_mode_unavailable`, `scope_mismatch:*` | **ja** | avslag FØR leverandørkallet - ingenting gikk ut |
+| `tool_failed:telegram_chat_id_not_configured`, `tool_failed:unsafe_vendor_url:*` | **ja** | transporten avviste før noen forespørsel ble sendt |
+| `tool_failed:telegram_error_400/401/403/404/429` | **ja** | Telegram avviste selve kallet; ingen melding opprettet |
+| `tool_failed:tool_timeout` | nei | gatewayens 10 s-frist: Telegram kan levere etterpå |
+| `tool_failed:telegram_error_5xx` (500, 502, 503, 504 ...) | nei | Telegram/mellomledd kan ha lagret meldingen og svart feil |
+| `tool_failed:telegram_error_<annen 4xx>` (408, 409, 499 ...) | nei | kan komme fra mellomledd - ikke bevis |
+| `tool_failed:fetch failed`, `tool_failed:The operation was aborted due to timeout`, ugyldig svarkropp | nei | nettverksbrudd/frist kan skje etter sending |
+| `postcondition_unverified:*`, `postcondition_mismatch`, `execution_in_flight_or_outcome_unknown` | nei | gatewayen selv sier at utfallet er ukjent |
+| kastet unntak, tom/ukjent tekst, alt som ikke står i listen over | nei | standarden er «ukjent» |
 
 **Aktivering (du):**
 1. Sjekk at morgenbriefen kommer på Telegram i dag (V1) - V2 bruker samme kanal.
 2. Les gjennom rolig tid og døgngrense over; sett om nødvendig `JARVIS_V2_PUSH_QUIET_START/_END` og `_MAX_PER_DAY` i `.env`.
 3. Sett `JARVIS_V2_PUSH_ENABLED=true`, start `api` på nytt. Loggen viser `v2_push_started` (eller `v2_push_disabled` / `v2_push_enabled_but_no_channel`).
-4. Første tikk kommer ca. ett minutt etter oppstart, deretter hvert kvarter. **Slå av igjen:** fjern flagget og start `api` på nytt (eller aktiver kill switch - `telegram.notify` nektes da).
+4. Første tikk kommer ca. ett minutt etter oppstart, deretter hvert kvarter.
+
+**Slik stanser du V2-pushen** (det finnes ingen egen «pause»-bryter; dette er veiene, fra mykest til hardest):
+1. **Slå den av alene:** fjern `JARVIS_V2_PUSH_ENABLED` (eller sett noe annet enn `true`) i `.env` og kjør `docker compose --env-file .env -f infra/local/docker-compose.yml up -d api`. Loggen viser `v2_push_disabled`. Morgenbrief og andre varsler er uberørt.
+2. **Frys connector `telegram`:** dashbordet -> Kontroll -> «Frys connector» (connector_id `telegram`, begrunnelse påkrevd). Stanser ALL utsendelse på Telegram, også morgenbriefen. Opphev med «Opphev» på samme sted.
+   (Det samme gjelder «Tilbakekall credential» for `JARVIS_TELEGRAM_TOKEN`.)
+3. **Kill switch:** dashbordet -> Kontroll -> «Aktiver kill switch» (klasse D) stanser ALT. Opphev med «Opphev kill switch».
+Fra og med rettelsene etter gjennomgangen sjekker V2-løperen punkt 2 og 3 FØR noe reserveres: ingen forsøk, ingen audit-rader og ingen Telegram-kall mens bryteren er på (loggen sier `send_blocked` én gang). Når bryteren er av igjen,
+sendes en fortsatt forfalt sak ved neste tikk (innenfor døgngrensen) - ikke etter en lang kø av mislykkede forsøk.
 
 **Revisjonsspor** (append-only `audit_events`, kun nøkler og tall - aldri tekst), som databaseadmin:
 ```sql
 SELECT at, type, payload->>'message_key' AS melding, payload->>'count' AS antall, reason
 FROM audit_events WHERE type LIKE 'followup.push_%' ORDER BY audit_id DESC LIMIT 20;
 ```
-`push_reserved` -> `push_sent` (levert), `push_failed` (avvist/feilet - saken frigis og forsøkes igjen), `push_unknown` (usikkert utfall, f.eks. tidsavbrudd - saken regnes som varslet og sendes IKKE på nytt).
-Logglinjen `v2_push_tick` viser kun utfallet (`sent`, `source_unavailable`, `ledger_unavailable`, `send_failed`, `send_unknown`) - rolige utfall (rolig tid, ingenting nytt, døgngrense, minsteavstand) logges ikke.
+`push_reserved` -> `push_sent` (levert), `push_failed` (BEVIST ikke sendt, tabellen over - saken frigis og forsøkes igjen etter backoff, høyst 3 per melding per døgn), `push_unknown` (usikkert utfall: tidsavbrudd, 5xx, nettverksbrudd,
+ukjent feil - saken regnes som varslet og sendes IKKE på nytt). Hvert forsøk er en `push_reserved`-rad, også de som senere frigis; de teller mot minsteavstanden og forsøkstaket.
+Logglinjen `v2_push_tick` viser kun utfallet (`sent`, `source_unavailable`, `ledger_unavailable`, `send_failed`, `send_unknown`). `send_blocked` (kill switch/frys/tilbakekalt credential) og `attempts_exhausted` (tre forsøk brukt, stille til
+døgnet er rundt) logges bare når tilstanden oppstår eller endres, med `blocked_by` eller meldingens hash - aldri tittel eller innhold; `v2_push_state_cleared` når den er over. Rolige utfall (rolig tid, ingenting nytt, døgngrense,
+minsteavstand, ventetid etter en feil) logges ikke.
 
 ## V3 Builder Loop (sover) og V5 (forslag)
 - **V3:** rapporten viser 6 tekniske krav (EV-0-konstitusjon verifisert, endringsregister intakt, ingen change freeze, GitHub-tilkobling frisk, D-32, worker-isolasjon) og ett krav som ingen kode kan oppfylle (`owner_decision:V3`).
@@ -82,12 +118,17 @@ cd /volume1/jarvisbuild-data/jarvisbuild && git pull
 ```
 Testkommandoene (kjøres som ikke-root fordi embedded Postgres ikke starter som root):
 ```
-npx vitest run modules/executive apps/api/test/wpc4-value-source-db.test.ts apps/api/test/wpc4-follow-up-push-db.test.ts apps/api/test/wpc4-value-wiring.test.ts apps/api/test/wpc4-value-query-e2e.test.ts modules/core/test/fast-router.test.ts
+npx vitest run modules/executive apps/api/test/wpc4-value-source-db.test.ts apps/api/test/wpc4-follow-up-push-db.test.ts apps/api/test/wpc4-follow-up-push-gateway.test.ts apps/api/test/wpc4-value-wiring.test.ts apps/api/test/wpc4-value-query-e2e.test.ts modules/core/test/fast-router.test.ts
 ```
+`wpc4-follow-up-push-gateway.test.ts` kjører pushen mot den EKTE `ToolGateway`/`PolicyGateway`/`TelegramTransport` (kun Telegram-HTTP er en mock) og viser at 502-med-levering, nettverksbrudd etter sending og gateway-timeout ikke gir mer enn én levert melding.
+**Ikke verifisert mot ekte Telegram.** På NAS-en, etter at du har slått på V2: frys connector `telegram` en stund og se `docker compose ... logs api | grep v2_push` (forventet: ÉN `send_blocked`, ingen `followup.push_*`-rader i `audit_events`); opphev frysen og se én melding.
 
 ## Kjente begrensninger
 - Vinduene dekkes av dagens oppbevaring (D-395): `tool_executions` beholdes 180 døgn, `scheduler_state` 90 døgn og `approvals` 30 døgn etter utløp - alle lengre enn 30-døgnsvinduet. Skulle oppbevaringen senkes til under 30 døgn, vil 30-døgnstallene for levering, daglig løper og signerte godkjenninger undertelle uten at rapporten selv ser det.
 - «Daily Brief levert» teller første del av planlagte morgenlevering (nøkkel `brief-…-0`); en brief hentet i chat teller ikke. Daglig løper er global (én løper), derfor kun synlig for eierens tenant.
 - «Andel chat-kall som ba om verktøy» er på modellkall-nivå, ikke tur-nivå.
 - Modellkost dekker ikke stemme (STT/TTS) eller connector-/API-kostnader (se run-rate-rapporten).
-- V2 ledger bruker `audit_events` (ingen ny tabell/migrasjon); et usikkert sendeutfall regnes som sendt (høyst én gang) - du kan derfor i sjeldne tilfeller miste en påminnelse, men aldri få den to ganger.
+- V2 ledger bruker `audit_events` (ingen ny tabell/migrasjon). Reglen er **høyst én gang**: et usikkert sendeutfall (tidsavbrudd, 5xx, nettverksbrudd) regnes som sendt, så du kan i sjeldne tilfeller MISTE en påminnelse (den står som `push_unknown`), men aldri få den to ganger.
+- Titler: datoer med skilletegn (`15.10.2026`), beløp over 7 sifre (`1 250 000`), filnavn (`rapport.pdf`) og forkortelser som `f.eks.` kan bli `[lenke]` i meldingen - trygg side. Forfallet står uansett i meldingen («forfalt 2 d»), og `JARVIS_V2_PUSH_TITLES=false` fjerner titlene helt.
+- Tilgang: `executive.get_value_report` og `POST /value/query` gir tall (ikke innhold) til enhver identitet med et gyldig grant, på linje med `get_slo_report` og `get_cost_overview`. Gjest-/delegert-grants kan altså lese tellingene; det finnes ikke et etablert eier-krav
+  for lesing av `executive.*`, og det er ikke innført bare for denne rapporten.

@@ -39,7 +39,8 @@ const fx = ${JSON.stringify(fx)};
 const [cmd, ...rest] = process.argv.slice(2);
 appendFileSync(fx + "/calls.log", cmd + " " + rest.join(" ") + "\\n");
 const out = rest[rest.indexOf("--out") + 1];
-const read = (n) => (existsSync(fx + "/" + n) ? readFileSync(fx + "/" + n, "utf8") : "");
+// "@NOW@" i en fixture byttes ut med tidspunktet verktøyet KJØRER (ikke da fixturen ble skrevet) - slik ser en ferdig, fersk måling ut.
+const read = (n) => (existsSync(fx + "/" + n) ? readFileSync(fx + "/" + n, "utf8").replaceAll("@NOW@", new Date().toISOString()) : "");
 if (cmd === "tick") {
   if (existsSync(fx + "/tick.report")) writeFileSync(out + "/restore-verify-report.json", read("tick.report"));
   process.stdout.write(read("tick.json"));
@@ -189,8 +190,8 @@ describe("acceptance-ops.sh", () => {
     writeFileSync(identity, "AGE-SECRET-KEY-1TEST\n");
     const setName = `jarvis-backup-${new Date(NOW.getTime() - 6 * 3_600_000).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z")}`;
     t.put("tick.json", { exit_code: 0, outcome: "ok", actions: ["verify"], failed: [], newest_set: null });
-    t.put("tick.report", { schema: 1, finished_at: new Date().toISOString(), ok: true, set: setName, duration_s: 212, fetch_duration_s: 41, tables: 358, rows: 10346, source: "offsite" });
-    t.put("status.json", statusFixture(null, { restore_verify: { state: "ok", last_set: setName, duration_s: 212, fetch_duration_s: 41, tables: 358, rows: 10346, source: "offsite" } }));
+    t.put("tick.report", { schema: 1, finished_at: "@NOW@", ok: true, set: setName, duration_s: 212, fetch_duration_s: 41, tables: 358, rows: 10346, source: "offsite" });
+    t.put("status.json", statusFixture(null, { restore_verify: { state: "ok", reported_by: "local", last_success_at: "@NOW@", last_set: setName, duration_s: 212, fetch_duration_s: 41, tables: 358, rows: 10346, source: "offsite" } }));
     const ok = t.run(["drill", dir, "--identity", identity, "--from-offsite"], { JARVIS_RTO_TARGET_MINUTES: "10", JARVIS_RPO_TARGET_HOURS: "26" });
     expect(ok.stdout).toMatch(/D01_restore_verify\s+PASS.*358 tabeller, 10346 rader/);
     expect(ok.stdout).toMatch(/D02_rto\s+PASS.*MÅLT RTO \(scratch\) = 4\.2 min.*henting 41 s \+ restore\/verifisering 212 s.*mål 10 min oppfylt/);
@@ -209,6 +210,49 @@ describe("acceptance-ops.sh", () => {
     expect(noTargets.stdout).toMatch(/D02_rto\s+UNKNOWN.*RTO-mål er ikke satt/);
     expect(noTargets.stdout).toMatch(/D03_rpo\s+UNKNOWN.*RPO-mål er ikke satt/);
     expect(noTargets.status).toBe(3);
+  });
+
+  it("review F6: en GAMMEL grønn statusfil er ikke bevis - D01-D04 feiler når DETTE tikket ikke kjørte verify, selv med exit 0 og state `ok`", () => {
+    const t = tree();
+    const dir = join(t.root, "pc-copy");
+    const identity = join(t.root, "identity.txt");
+    writeFileSync(identity, "AGE-SECRET-KEY-1TEST\n");
+    const setName = `jarvis-backup-${new Date(NOW.getTime() - 6 * 3_600_000).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z")}`;
+    const okStatus = (over = {}) => statusFixture(null, {
+      restore_verify: { state: "ok", reported_by: "local", last_success_at: "@NOW@", last_set: setName, duration_s: 212, fetch_duration_s: 41, tables: 358, rows: 10346, source: "local", ...over }
+    });
+    const drill = () => t.run(["drill", dir, "--identity", identity], { JARVIS_RTO_TARGET_MINUTES: "30", JARVIS_RPO_TARGET_HOURS: "26" });
+
+    // (a) tikket gjorde ingenting (ingen handling), men statusfilen fra en tidligere drill er grønn: tidligere D01 PASS uten at noe ble restoret
+    t.put("tick.json", { exit_code: 0, outcome: "nothing_due", actions: [], failed: [], newest_set: null });
+    t.put("status.json", okStatus({ last_success_at: "2020-01-01T00:00:00.000Z" }));
+    const a = drill();
+    expect(a.stdout).toMatch(/D01_restore_verify\s+FAIL.*kjørte IKKE restore-verifisering/);
+    expect(a.stdout).toMatch(/D02_rto\s+FAIL.*ingen ferske målinger/);
+    expect(a.stdout).toMatch(/D03_rpo\s+FAIL.*ingen fersk måling/);
+    expect(a.status).toBe(1);
+    expect(a.stdout).not.toMatch(/PASS\s+alle databaser restoret/);
+
+    // (b) verify kjørte, men statusen er en flettet kvittering fra en annen verifiserer
+    t.put("tick.json", { exit_code: 0, outcome: "ok", actions: ["verify"], failed: [], newest_set: null });
+    t.put("status.json", okStatus({ reported_by: "external_verifier" }));
+    expect(drill().stdout).toMatch(/D01_restore_verify\s+FAIL.*meldt av 'external_verifier'/);
+
+    // (c) verify kjørte og er `local`, men siste suksess er eldre enn drillen startet
+    t.put("status.json", okStatus({ last_success_at: "2020-01-01T00:00:00.000Z" }));
+    expect(drill().stdout).toMatch(/D01_restore_verify\s+FAIL.*eldre enn denne drillen/);
+
+    // (d) alt ferskt og lokalt: PASS, med tabell-/radtall fra statusen
+    t.put("status.json", okStatus());
+    t.put("tick.report", { schema: 1, finished_at: "@NOW@", ok: true, set: setName, duration_s: 212, tables: 358, rows: 10346, source: "local" });
+    const d = drill();
+    expect(d.stdout).toMatch(/D01_restore_verify\s+PASS.*358 tabeller, 10346 rader/);
+    expect(d.stdout).toMatch(/D04_report_for_nas\s+PASS/);
+    expect(d.status, d.stdout + d.stderr).toBe(0);
+
+    // (e) kvitteringen på disk er gammel (ikke skrevet av denne kjøringen): ikke kopier den til NAS-en
+    t.put("tick.report", { schema: 1, finished_at: "2020-01-01T00:00:00.000Z", ok: true, set: setName, duration_s: 212, tables: 358, rows: 10346, source: "local" });
+    expect(drill().stdout).toMatch(/D04_report_for_nas\s+FAIL.*ikke fra denne kjøringen/);
   });
 
   it("drill: uten privatnøkkel (eller med en verifisering som feilet) er det FAIL - aldri en stille bestått", () => {

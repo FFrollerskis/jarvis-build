@@ -27,7 +27,7 @@ describe("stepUpDenial", () => {
     for (const action of STEP_UP_EXEMPT_ACTIONS) {
       expect(stepUpDenial({ auth_strength: "passive", channel: "voice" }, action)).toBeUndefined();
     }
-    expect([...STEP_UP_EXEMPT_ACTIONS].sort()).toEqual(["activate_kill_switch", "enable_finance_kill_switch", "freeze_connector", "pause_domain", "resolve_situation", "test_connector"]);
+    expect([...STEP_UP_EXEMPT_ACTIONS].sort()).toEqual(["activate_kill_switch", "cancel_task", "enable_finance_kill_switch", "freeze_connector", "pause_domain", "resolve_situation", "test_connector"]);
     for (const sensitive of ["deactivate_kill_switch", "disable_finance_kill_switch", "unfreeze_connector", "revoke_credential", "restore_credential", "revoke_device", "resume_domain", "set_connector_credential"]) {
       expect(stepUpDenial({ auth_strength: "active", channel: "web" }, sensitive), sensitive).toBeDefined();
     }

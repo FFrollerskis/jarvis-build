@@ -75,6 +75,8 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 now_s() { date -u +%s; }
+# is_not_before <iso-a> <iso-b>: "1" hvis a >= b (begge ISO 8601, UTC), ellers "0" (også ved ugyldig dato)
+is_not_before() { node -e 'const a=Date.parse(process.argv[1]),b=Date.parse(process.argv[2]);process.stdout.write(Number.isFinite(a)&&Number.isFinite(b)&&a>=b?"1":"0")' "$1" "$2"; }
 # minutter siden et settnavn (jarvis-backup-YYYYMMDDTHHMMSSZ) ble tatt
 set_age_minutes() { node -e 'const m=/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(process.argv[1]);if(!m)process.exit(0);const t=Date.UTC(+m[1],+m[2]-1,+m[3],+m[4],+m[5],+m[6]);process.stdout.write(String(Math.round((Date.now()-t)/60000)))' "$1"; }
 
@@ -175,17 +177,36 @@ if [ "$MODE" = "drill" ]; then
     if [ "$FROM_OFFSITE" = "1" ]; then extra=(--verify-source offsite); fi
     mkdir -p "$DIR"
     start_s="$(now_s)"
+    start_iso="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" # avrundet NED til hele sekund: alt som skjer i DENNE kjøringen er >= dette
     node "$SCHED" tick --out "$DIR" --roles verify --force-verify --json "${extra[@]+"${extra[@]}"}" > "$TMP/tick.json" 2> "$TMP/tick.err"; rc=$?
     status_json
     vstate="$(jget "$TMP/status.json" restore_verify.state)"
-    if [ "$rc" -eq 0 ] && [ "$vstate" = "ok" ]; then
-      record D01_restore_verify PASS "alle databaser restoret til scratch og lik manifestet: $(jget "$TMP/status.json" restore_verify.tables) tabeller, $(jget "$TMP/status.json" restore_verify.rows) rader (sett $(jget "$TMP/status.json" restore_verify.last_set), kilde $(jget "$TMP/status.json" restore_verify.source))"
-    else
+    tick_actions="$(jget "$TMP/tick.json" actions)"
+    reported_by="$(jget "$TMP/status.json" restore_verify.reported_by)"
+    last_ok="$(jget "$TMP/status.json" restore_verify.last_success_at)"
+    ran_verify=0; echo "$tick_actions" | grep -qw verify && ran_verify=1
+    fresh=0; [ -n "$last_ok" ] && fresh="$(is_not_before "$last_ok" "$start_iso")"
+    d01_ok=0
+    # Review F6: `rc==0 && state==ok` alene er ikke bevis - en GAMMEL statusfil (fra en tidligere drill eller en ekstern kvittering) oppfyller den uten at noe er restoret nå.
+    # D01 krever at DENNE kjøringen kjørte verify, at statusen er satt av dette tikket (ikke en flettet kvittering), og at suksessen er nyere enn drillens start.
+    if [ "$rc" -ne 0 ] || [ "$vstate" != "ok" ]; then
       record D01_restore_verify FAIL "exit $rc, tilstand '$vstate', feilkode '$(jget "$TMP/status.json" restore_verify.last_error_code)'. Siste feillinje: $(tail -n1 "$TMP/tick.err" 2>/dev/null | cut -c1-200)"
+    elif [ "$ran_verify" != "1" ]; then
+      record D01_restore_verify FAIL "tikket kjørte IKKE restore-verifisering (handlinger: '${tick_actions:-ingen}', utfall '$(jget "$TMP/tick.json" outcome)') - tilstanden 'ok' i statusen er fra en eldre kjøring og beviser ingenting nå. Er JARVIS_BACKUP_VERIFY_IDENTITY_FILE lesbar?"
+    elif [ "$reported_by" != "local" ]; then
+      record D01_restore_verify FAIL "statusen er meldt av '${reported_by:-ukjent}', ikke av dette tikket (en gammel eller ekstern kvittering kan ha vært flettet inn) - ikke bevist av denne drillen"
+    elif [ "$fresh" != "1" ]; then
+      record D01_restore_verify FAIL "siste vellykkede verifisering (${last_ok:-ingen}) er eldre enn denne drillen (startet $start_iso) - ikke bevist av denne kjøringen"
+    else
+      d01_ok=1
+      record D01_restore_verify PASS "alle databaser restoret til scratch og lik manifestet: $(jget "$TMP/status.json" restore_verify.tables) tabeller, $(jget "$TMP/status.json" restore_verify.rows) rader (sett $(jget "$TMP/status.json" restore_verify.last_set), kilde $(jget "$TMP/status.json" restore_verify.source), verifisert $last_ok)"
     fi
 
     fetch_s="$(jget "$TMP/status.json" restore_verify.fetch_duration_s)"; restore_s="$(jget "$TMP/status.json" restore_verify.duration_s)"
-    if [ -n "$restore_s" ]; then
+    if [ "$d01_ok" != "1" ]; then
+      # Tall fra en kjøring som ikke ble bevist nå er IKKE en måling av denne drillen.
+      record D02_rto FAIL "ingen ferske målinger: D01 er ikke bestått, så restore-/hentetiden i statusen er fra en eldre kjøring og brukes ikke"
+    elif [ -n "$restore_s" ]; then
       rto_min="$(node -e 'process.stdout.write(String(Math.round(((Number(process.argv[1]||0)+Number(process.argv[2]))/60)*10)/10))' "${fetch_s:-0}" "$restore_s")"
       msg="MÅLT RTO (scratch) = $rto_min min (henting ${fetch_s:-0} s + restore/verifisering ${restore_s} s). Dekker IKKE: start av stacken, repeke API/klienter, menneskelig tid - legg til i runbook §6.6"
       if [ -n "${JARVIS_RTO_TARGET_MINUTES:-}" ]; then
@@ -196,7 +217,9 @@ if [ "$MODE" = "drill" ]; then
 
     last_set="$(jget "$TMP/status.json" restore_verify.last_set)"
     age_min="$(set_age_minutes "$last_set")"
-    if [ -n "$age_min" ]; then
+    if [ "$d01_ok" != "1" ]; then
+      record D03_rpo FAIL "ingen fersk måling: D01 er ikke bestått, så settet i statusen (${last_set:-ukjent}) er ikke bevist gjenopprettet av denne drillen"
+    elif [ -n "$age_min" ]; then
       rpo_h="$(node -e 'process.stdout.write(String(Math.round((Number(process.argv[1])/60)*10)/10))' "$age_min")"
       msg="MÅLT RPO = $rpo_h t (alderen på settet du faktisk gjenopprettet: $last_set)"
       if [ -n "${JARVIS_RPO_TARGET_HOURS:-}" ]; then
@@ -205,9 +228,11 @@ if [ "$MODE" = "drill" ]; then
       else record D03_rpo UNKNOWN "$msg; eierens RPO-mål er ikke satt (JARVIS_RPO_TARGET_HOURS)"; fi
     else record D03_rpo FAIL "fant ikke settnavn å måle RPO mot"; fi
 
-    if [ -f "$DIR/restore-verify-report.json" ]; then
-      record D04_report_for_nas PASS "kopier $DIR/restore-verify-report.json til NAS-ens state-mappe (standard: backup-mappen), f.eks. scp/rsync - da viser selvdiagnosen der at restore er bevist"
-    else record D04_report_for_nas FAIL "restore-verify-report.json ble ikke skrevet i $DIR"; fi
+    report_file="$DIR/restore-verify-report.json"
+    report_at="$(jget "$report_file" finished_at)"
+    if [ ! -f "$report_file" ]; then record D04_report_for_nas FAIL "restore-verify-report.json ble ikke skrevet i $DIR"
+    elif [ "$(is_not_before "${report_at:-x}" "$start_iso")" != "1" ]; then record D04_report_for_nas FAIL "restore-verify-report.json i $DIR er ikke fra denne kjøringen (finished_at ${report_at:-mangler}, drillen startet $start_iso) - ikke kopier en gammel kvittering til NAS-en"
+    else record D04_report_for_nas PASS "kopier $report_file til NAS-ens state-mappe (standard: backup-mappen), f.eks. scp/rsync - da viser selvdiagnosen der at restore er bevist"; fi
     echo "(drill brukte $(( $(now_s) - start_s )) s totalt)"
   fi
 fi

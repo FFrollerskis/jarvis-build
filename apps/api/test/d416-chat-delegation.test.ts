@@ -112,7 +112,7 @@ describe("transport", () => {
     submitted.length = 0;
     await transport.invoke("delegate_background_task", { title: "Med verktøy", prompt: "Se i kalenderen. sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", use_tools: true }, "", { identity: identity as never });
     const c = submitted[0] as { allowed_tools: string[]; input: { data: { prompt: string; tools: boolean } } };
-    expect(c.allowed_tools).toEqual(["email", "calendar", "github", "memory", "executive"]);
+    expect(c.allowed_tools).toEqual(["email", "calendar", "github", "memory", "executive.get_capability_status"]);
     expect(c.input.data.tools).toBe(true);
     expect(c.input.data.prompt).not.toContain("sk-ant-api03");
   });
@@ -122,7 +122,7 @@ describe("transport", () => {
     await transport.invoke("delegate_background_task", { title: "Uten verktøy", prompt: "Skriv et dikt om høsten uten verktøy.", use_tools: false }, "", { identity: identity as never });
     const [withTools, without] = submitted as Array<{ allowed_tools: string[]; input: { data: { tools?: boolean } } }>;
     expect(withTools!.input.data.tools).toBe(true);
-    expect(withTools!.allowed_tools).toEqual(["email", "calendar", "github", "memory", "executive"]);
+    expect(withTools!.allowed_tools).toEqual(["email", "calendar", "github", "memory", "executive.get_capability_status"]);
     expect(without!.input.data.tools).toBeUndefined();
     expect(without!.allowed_tools).toEqual([]);
   });
