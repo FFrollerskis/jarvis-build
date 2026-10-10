@@ -104,6 +104,10 @@ describe.skipIf(!haveTools)("kryptert backup + restore-verifisering (ekte Postgr
     const out = join(work, "out1");
     const { setDir, manifest } = await runBackup({ runner: runnerFor(sourcePort), outDir: out, recipient, now: new Date("2026-10-01T22:00:00Z") });
     expect(manifest.set).toBe("jarvis-backup-20261001T220000Z");
+    // runde 2 (L1): kildeklyngens system_identifier følger settet (alias-sikkert «samme klynge»-bevis), og er IKKE scratch-klyngens
+    const idOf = async (port: number) => (await exec(port, "postgres", "SELECT system_identifier::text AS id FROM pg_control_system()")).rows[0]?.id as string;
+    expect(manifest.source.system_identifier).toBe(await idOf(sourcePort));
+    expect(manifest.source.system_identifier).not.toBe(await idOf(scratchPort));
     expect(manifest.databases.map((d) => d.database)).toEqual(DBS);
     const jarvis = manifest.databases.find((d) => d.database === "jarvis");
     expect(jarvis).toBeDefined();
@@ -407,6 +411,52 @@ describe.skipIf(!haveTools)("kryptert backup + restore-verifisering (ekte Postgr
     expect(rejected).toBeGreaterThan(100);
     expect(skipped).toBeGreaterThan(10);
     expect(accepted - skipped).toBeGreaterThan(50);
+  }, 240_000);
+
+  it("review L1 (ekte Postgres): samme system_identifier nektes selv mot en TOM scratch - fjernes feltet (eldre sett), passerer den samme tomme scratchen (så det var kun identifikatoren som stoppet)", async () => {
+    const { setDir, manifest } = await runBackup({ runner: runnerFor(sourcePort), databases: ["langfuse"], outDir: join(work, "out-l1a"), recipient, now: new Date("2026-10-02T00:00:00Z") });
+    const scratchId = (await exec(scratchPort, "postgres", "SELECT system_identifier::text AS id FROM pg_control_system()")).rows[0]?.id as string;
+    manifest.source.system_identifier = scratchId; // «scratch-klyngen ER kilden, under et annet navn»
+    writeFileSync(join(setDir, "manifest.json"), JSON.stringify(manifest));
+    const refused = await runRestoreVerify({ setDir, identityFile, scratchRunner: runnerFor(scratchPort), now: new Date("2026-10-02T00:01:00Z") });
+    expect(refused).toMatchObject({ ok: false, stage: "scratch_guard" });
+    expect(refused.error).toContain("samme system_identifier");
+    expect((await exec(scratchPort, "postgres", `SELECT datname FROM pg_database WHERE datname LIKE '${SCRATCH_DB_PREFIX}%'`)).rows).toEqual([]);
+    delete manifest.source.system_identifier; // eldre sett: ingen identifikator, kun tom-sjekken
+    writeFileSync(join(setDir, "manifest.json"), JSON.stringify(manifest));
+    const logs: string[] = [];
+    const ok = await runRestoreVerify({ setDir, identityFile, scratchRunner: runnerFor(scratchPort), now: new Date("2026-10-02T00:02:00Z"), log: (m: string) => logs.push(m) });
+    expect(ok).toMatchObject({ ok: true, stage: "complete" });
+    expect(logs.some((m) => m.includes("ingen system_identifier i manifestet"))).toBe(true);
+  }, 240_000);
+
+  it("review L1 (ekte Postgres): en database som heter « postgres» og views/matviews i postgres-databasen gjør scratch ikke-kastbar (tidligere passerte begge)", async () => {
+    const { setDir } = await runBackup({ runner: runnerFor(sourcePort), databases: ["langfuse"], outDir: join(work, "out-l1b"), recipient, now: new Date("2026-10-02T00:10:00Z") });
+    const verify = (minute: number) => runRestoreVerify({ setDir, identityFile, scratchRunner: runnerFor(scratchPort), now: new Date(`2026-10-02T00:${String(11 + minute).padStart(2, "0")}:00Z`) });
+    await exec(scratchPort, "postgres", 'CREATE DATABASE " postgres"');
+    try {
+      const report = await verify(0);
+      expect(report).toMatchObject({ ok: false, stage: "scratch_guard" });
+      expect(report.error).toContain("1 database(r)");
+    } finally {
+      await exec(scratchPort, "postgres", 'DROP DATABASE IF EXISTS " postgres"');
+    }
+    let minute = 1;
+    for (const [create, drop] of [
+      ["CREATE VIEW public.l1_view AS SELECT 1 AS x", "DROP VIEW IF EXISTS public.l1_view"],
+      ["CREATE MATERIALIZED VIEW public.l1_mv AS SELECT 1 AS x", "DROP MATERIALIZED VIEW IF EXISTS public.l1_mv"],
+      ["CREATE SEQUENCE public.l1_seq", "DROP SEQUENCE IF EXISTS public.l1_seq"]
+    ] as const) {
+      await exec(scratchPort, "postgres", create);
+      try {
+        const report = await verify(minute++);
+        expect(report, create).toMatchObject({ ok: false, stage: "scratch_guard" });
+        expect(report.error, create).toContain("tabell(er)/visning(er)/sekvens(er)");
+      } finally {
+        await exec(scratchPort, "postgres", drop);
+      }
+    }
+    expect(await verify(minute)).toMatchObject({ ok: true, stage: "complete" }); // kontroll: ryddet scratch passerer igjen
   }, 240_000);
 
   it("ingen ukryptert backup: manglende/ugyldig age-mottaker avvises FØR noe skrives", async () => {

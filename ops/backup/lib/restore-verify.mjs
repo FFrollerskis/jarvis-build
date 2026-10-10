@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createReadStream, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { sha256File } from "./backup.mjs";
+import { SYSTEM_IDENTIFIER_RE, sha256File } from "./backup.mjs";
 import { GLOBALS_MAX_BYTES, GlobalsRejectedError, sanitizeGlobals } from "./globals-filter.mjs";
 import { INVENTORY_SQL, psqlOnce } from "./psql-session.mjs";
 import { requireBinary, utcStamp } from "./tools.mjs";
@@ -37,6 +37,7 @@ export function manifestProblems(manifest) {
   const problems = [];
   if (typeof manifest.set !== "string" || !SET_NAME.test(manifest.set)) problems.push("set har ugyldig navn");
   if (!isObj(manifest.source) || typeof manifest.source.endpoint !== "string") problems.push("source.endpoint mangler");
+  else if (manifest.source.system_identifier !== undefined && (typeof manifest.source.system_identifier !== "string" || !SYSTEM_IDENTIFIER_RE.test(manifest.source.system_identifier))) problems.push("source.system_identifier er ugyldig");
   if (!isObj(manifest.globals) || typeof manifest.globals.file !== "string" || !AGE_FILE.test(manifest.globals.file) || !SHA256.test(String(manifest.globals.sha256))) {
     problems.push("globals har ugyldig fil eller sjekksum");
   }
@@ -137,18 +138,45 @@ function runPsqlScript(runner, sql) {
 }
 
 /**
+ * Det som regnes som «innhold» i `postgres`-databasen på scratch-serveren: tabeller, partisjonerte tabeller, VISNINGER, materialiserte visninger, fremmede tabeller og sekvenser
+ * utenfor systemskjemaene (review runde 2, L1: en server med kun views/matviews i `postgres` passerte vakten når bare `r`/`p` ble talt).
+ */
+const GUARD_INVENTORY_SQL = `SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname)
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE c.relkind IN ('r','p','v','m','f','S') AND n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'
+  ORDER BY 1`;
+
+/**
  * Review F1: scratch-vakten kan ikke være en strengsammenligning av endepunktene. `docker-compose:postgres` mot `host:port`, `localhost` mot `127.0.0.1` og
  * en DNS-alias gir alle ulike strenger for SAMME server - og da ville rolle- og passord-restoren gått mot produksjon (reprodusert av reviewer: admin-passordet
  * ble overskrevet til backup-tidens). FØR noe skrives kreves derfor at serveren faktisk ER en tom, kastbar instans: ingen databaser utenfor
- * postgres/template0/template1/restore_verify_* (og ingen med samme navn som en database i settet), og ingen tabeller i `postgres`-databasen.
+ * postgres/template0/template1/restore_verify_* (og ingen med samme navn som en database i settet), og ingen tabeller/visninger/sekvenser i `postgres`-databasen.
  * Kun lesing. Svaret inneholder aldri verdier fra settet (databasenavnene kommer fra scratch-serveren).
- * @returns {Promise<{ ok: true } | { ok: false, error: string }>}
+ *
+ * Review runde 2 (L1): to lag til. (1) Har manifestet kildeklyngens `system_identifier`, nektes en scratch-server med SAMME identifikator - alias-sikkert bevis for «samme klynge», uavhengig av
+ * hva som ligger i den. Manglende felt (eldre sett) er ikke et krav; kallerens logg sier at kun tom-sjekken beskytter da. (2) Databasenavnene leses som `quote_ident(datname)` og sammenlignes UTEN
+ * normalisering: en database som heter « postgres» (med mellomrom) ble tidligere trimmet til `postgres` og passerte. Roller sjekkes ikke: en varig scratch samler roller fra tidligere kjøringer
+ * (CREATE ROLE kjøres med ON_ERROR_STOP=0), så rolle-tomhet kan ikke kreves.
+ * @returns {Promise<{ ok: true, systemIdentifier: "checked" | "absent" } | { ok: false, error: string }>}
  */
 export async function checkScratchServer(scratchRunner, manifest) {
   const short = (err) => String(err?.message ?? err).slice(0, 200);
+  const expectedId = manifest.source?.system_identifier;
+  if (typeof expectedId === "string") {
+    let actualId;
+    try {
+      actualId = (await psqlOnce(scratchRunner, "postgres", "SELECT system_identifier FROM pg_control_system()")).trim();
+    } catch (err) {
+      return { ok: false, error: `kunne ikke lese system_identifier på scratch-serveren: ${short(err)}` };
+    }
+    if (!SYSTEM_IDENTIFIER_RE.test(actualId)) return { ok: false, error: "scratch-serveren ga ingen gyldig system_identifier - ikke en kjent Postgres-klynge" };
+    if (actualId === expectedId) {
+      return { ok: false, error: "scratch-serveren er SAMME Postgres-klynge som kilden (samme system_identifier) - ikke en tom, kastbar instans; peker JARVIS_BACKUP_VERIFY_SCRATCH_HOST på produksjon?" };
+    }
+  }
   let names;
   try {
-    names = (await psqlOnce(scratchRunner, "postgres", "SELECT datname FROM pg_database ORDER BY 1")).split("\n").map((n) => n.trim()).filter(Boolean);
+    names = (await psqlOnce(scratchRunner, "postgres", "SELECT quote_ident(datname) FROM pg_database ORDER BY 1")).split("\n").filter(Boolean);
   } catch (err) {
     return { ok: false, error: `kunne ikke lese databaselisten på scratch-serveren: ${short(err)}` };
   }
@@ -163,12 +191,12 @@ export async function checkScratchServer(scratchRunner, manifest) {
     };
   }
   try {
-    const tables = (await psqlOnce(scratchRunner, "postgres", INVENTORY_SQL)).split("\n").filter(Boolean);
-    if (tables.length > 0) return { ok: false, error: `postgres-databasen på scratch-serveren inneholder ${tables.length} tabell(er) - ikke en tom, kastbar instans` };
+    const objects = (await psqlOnce(scratchRunner, "postgres", GUARD_INVENTORY_SQL)).split("\n").filter(Boolean);
+    if (objects.length > 0) return { ok: false, error: `postgres-databasen på scratch-serveren inneholder ${objects.length} tabell(er)/visning(er)/sekvens(er) - ikke en tom, kastbar instans` };
   } catch (err) {
     return { ok: false, error: `kunne ikke lese tabelloversikten på scratch-serveren: ${short(err)}` };
   }
-  return { ok: true };
+  return { ok: true, systemIdentifier: typeof expectedId === "string" ? "checked" : "absent" };
 }
 
 /**
@@ -212,6 +240,7 @@ export async function runRestoreVerify({ setDir, identityFile, scratchRunner, al
   // 2. the scratch server must PROVE that it is disposable before anything is written to it (review F1)
   const guard = await checkScratchServer(scratchRunner, manifest);
   if (!guard.ok) return early("scratch_guard", guard.error, { set: manifest.set, integrity });
+  if (guard.systemIdentifier === "absent") log("ingen system_identifier i manifestet (eldre sett): kun tom-sjekken beskytter mot en feilpekt scratch-server");
   const stamp = utcStamp(now);
   const report = { ok: true, stage: "complete", set: manifest.set, source_endpoint: manifest.source.endpoint.slice(0, 120), scratch_endpoint: scratchRunner.endpoint, integrity, databases: [] };
   const created = [];
