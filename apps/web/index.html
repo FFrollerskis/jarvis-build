@@ -108,6 +108,7 @@
              padding:12px 14px; max-width: min(80%, 680px); }
   .confirm .title { font-weight:700; font-size:12px; color: var(--warn); text-transform:uppercase; letter-spacing:0.1em; margin-bottom:4px; font-family: var(--mono); }
   .confirm .what { font-size:14px; margin-bottom:8px; }
+  .confirm .detail { font-size:13px; color: var(--text-dim); margin-bottom:8px; }
   .confirm .what code { font-size:12px; font-family: var(--mono); background: rgba(0,0,0,0.35); border:1px solid var(--border); border-radius:5px; padding:1px 5px; }
   .confirm .actions { display:flex; gap:8px; flex-wrap:wrap; }
   .confirm button { border:0; border-radius:9px; padding:7px 14px; font-weight:700; cursor:pointer; font-size:13px; font-family:inherit; }
@@ -454,8 +455,11 @@
     card.innerHTML =
       '<div class="title">Venter på din godkjenning</div>' +
       '<div class="what">Charlie vil <b>' + escapeHtml(toolHuman(c.tool)) + "</b> <code>" + escapeHtml(c.tool || "") + "</code></div>" +
+      (c.detail ? '<div class="detail"></div>' : "") +
       '<div class="actions"><button type="button" class="approve">Godkjenn og utfør</button><button type="button" class="reject">Avvis</button></div>' +
       '<div class="result"></div>';
+    // M4: det handlingen faktisk gjør (fra de bundne parameterne) - satt som ren tekst, aldri som HTML.
+    if (c.detail) card.querySelector(".detail").textContent = String(c.detail);
     log.appendChild(card);
     scrollDown();
   }

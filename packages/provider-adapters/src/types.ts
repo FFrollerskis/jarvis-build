@@ -43,6 +43,12 @@ export interface ToolCallRequest {
   arguments: Record<string, unknown>;
   provider: string;
   model: string;
+  /**
+   * JARVIS-036 (WP-D4): adapter-privat, ugjennomsiktig tilstand som KUN samme leverandørs adapter leser tilbake når runden spilles av på nytt i neste verktøyrunde
+   * (Kimi: `reasoning_content` - tenkemodeller avviser en oppfølgingsrunde der resonneringen fra verktøykall-meldingen mangler). Vises aldri for eieren, logges aldri
+   * og sendes aldri til en annen leverandør (alle andre adaptere ignorerer feltet). Trusted lag (executor/gateway) leser den ikke.
+   */
+  provider_state?: { readonly reasoning_content?: string };
 }
 
 /** Normalisert verktøyresultat tilbake til modellen. Aldri credentials/intern metadata. */
@@ -400,20 +406,56 @@ export interface ModelProviderAdapter {
   stream?(request: ModelRequest, onEvent: StreamHandler, signal?: AbortSignal): Promise<ModelResult>;
 }
 
-/** Deler SSE-bytes til datalinjer ("data: {...}") - felles for OpenAI/Anthropic-streams. */
-export async function* sseLines(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+/** L9 (gjennomgang av PR #315): lengste SSE-linje vi leser. En lengre linje er en defekt eller fiendtlig strøm og avvises (fail-closed) i stedet for å bufres ubegrenset. Ekte svar-linjer er på noen få KB. */
+export const SSE_MAX_LINE_CHARS = 1_000_000;
+
+export class SseLineTooLongError extends Error {
+  constructor(readonly limit: number) {
+    super(`sse_line_too_long: over ${limit} tegn`);
+    this.name = "SseLineTooLongError";
+  }
+}
+
+/**
+ * Deler SSE-bytes til datalinjer ("data: {...}") - felles for OpenAI/Anthropic-streams.
+ *
+ * L9: LINEÆR i inputstørrelsen. Tidligere ble hele den ufullstendige bufferen skannet etter linjeskift på nytt for hver chunk, og strengen limt sammen og flatet ut hver gang (en linje på 2 MB i 1 KB-chunker kostet 3,5 s CPU,
+ * og med små chunker vokser det kvadratisk). Nå leses hver chunk ÉN gang; deler av en ufullstendig linje samles i en liste og limes sammen først når linjen er fullført. Linjer over `maxLineChars` avvises med
+ * `SseLineTooLongError` (adapterne gjør den om til `stream_interrupted`); en strøm uten linjeskift kan heller ikke bufres forbi grensen. Atferden for normale strømmer er uendret (en siste linje uten avsluttende linjeskift
+ * leveres fortsatt ikke, som før).
+ */
+export async function* sseLines(body: ReadableStream<Uint8Array>, maxLineChars: number = SSE_MAX_LINE_CHARS): AsyncGenerator<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
-  let buffer = "";
+  let pending: string[] = []; // deler av linjen som ikke er fullført ennå
+  let pendingChars = 0;
+  const tooLong = async (): Promise<never> => {
+    await reader.cancel().catch(() => undefined); // slipp tilkoblingen: resten av en fiendtlig strøm skal ikke lastes ned
+    throw new SseLineTooLongError(maxLineChars);
+  };
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let idx: number;
-      while ((idx = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, idx).replace(/\r$/, "");
-        buffer = buffer.slice(idx + 1);
+      const text = decoder.decode(value, { stream: true });
+      let start = 0;
+      for (;;) {
+        const newline = text.indexOf("\n", start);
+        if (newline < 0) {
+          const rest = text.length - start;
+          if (rest > 0) {
+            pending.push(start === 0 ? text : text.slice(start));
+            pendingChars += rest;
+            if (pendingChars > maxLineChars) return await tooLong();
+          }
+          break;
+        }
+        if (pendingChars + (newline - start) > maxLineChars) return await tooLong();
+        const head = text.slice(start, newline);
+        const line = (pending.length > 0 ? pending.join("") + head : head).replace(/\r$/, "");
+        pending = [];
+        pendingChars = 0;
+        start = newline + 1;
         if (line.startsWith("data:")) yield line.slice(5).trim();
       }
     }

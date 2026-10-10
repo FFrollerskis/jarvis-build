@@ -10,20 +10,27 @@ import {
   maxSensitivity,
   NoEligibleProviderError,
   parseRoutingOverride,
+  describeProposalRejectionNo,
+  renderProposalNoteNo,
   type AiCouncil,
+  type CouncilProposal,
   type DecisionClassification,
+  type ProposableAction,
   type ModelGateway,
   type RoutingOverrideIntent,
+  type AttemptFailure,
+  type CompleteInput,
   type ToolExecutor,
   type TraceSink
 } from "@jarvis/model-gateway";
 import { ProviderError, type StreamEvent, type ToolDefinition } from "@jarvis/provider-adapters";
 import { DEFAULT_PERSONALITY_CONFIG, type PersonalityConfig } from "@jarvis/self-modification";
 import type { TaskService, InProcessWorker } from "@jarvis/tasks";
-import { createTurnContext, surfaceForChannel, type Surface, type SurfaceLimits, type TurnContext } from "@jarvis/tool-gateway";
+import { createTurnContext, surfaceForChannel, type CouncilSubmitResult, type Surface, type SurfaceLimits, type TurnContext } from "@jarvis/tool-gateway";
 import { randomUUID } from "node:crypto";
 import { chatKnowledgeWithheldNote, chatWithheldNote, cloudScreenedExecutor, servedByCloudModel } from "./cloud-tool-screen.ts";
-import { LOCAL_FALLBACK_ERROR_KINDS, cloudHistoryNote, isMemoryReserveOnly, jobLocalOnlyNote, localOnlyNote, stripSourceMarkerIds, stripSystemNotes } from "./tool-turn-route.ts";
+import { LOCAL_FALLBACK_ERROR_KINDS, cloudHistoryNote, isMemoryReserveOnly, jobLocalOnlyNote, localOnlyNote, reserveModelNote, stripSourceMarkerIds, stripSystemNotes } from "./tool-turn-route.ts";
+import { DEFAULT_CHAT_CANDIDATES, type ChatCandidates } from "./chat-candidates.ts";
 
 export interface ConversationDeps {
   messages: MessageStore;
@@ -98,6 +105,11 @@ export interface ConversationDeps {
    * modell og svaret får en fast merknad. Udefinert/null = ingen tak.
    */
   toolTurnDayCap?: { cap_ore: number; spentToday(tenantId: string): Promise<number> } | null;
+  /**
+   * WP-D4 (JARVIS-033): kandidatkjeden for vanlig prat (`JARVIS_CHAT_CANDIDATES`) og om den siste reserven (D-354/D-404: kjør om gjennom vanlig ruting) er tillatt (`JARVIS_CHAT_AUTO_FALLBACK`).
+   * Udefinert = nøyaktig det som gjaldt før: `gemma_local, gemma_hosted` og reserven på. Kjeden har failover inne i gatewayen; reservebruk vises bak svaret.
+   */
+  chatCandidates?: ChatCandidates;
   tools?: {
     definitions: ToolDefinition[];
     executorFor(identity: IdentityContext, turn?: TurnContext): ToolExecutor;
@@ -127,6 +139,15 @@ export interface ConversationDeps {
    * §23 migrasjonssikkerhet).
    */
   council?: AiCouncil;
+  /**
+   * WP-D4 (JARVIS-078, rådets bekreftelsesflyt): forslagsveien for AI-rådet. Udefinert (standard; `JARVIS_COUNCIL_PROPOSALS` av) = rådet gir kun en vurdering, NØYAKTIG som før. Satt: `actionsFor` velger deterministisk (samme
+   * utvalg som chattens handlingsnivå, kun `web_chat`) hvilke handlinger rådet kan foreslå for denne meldingen, og `submit` legger et gyldig forslag frem som en PENDING bekreftelse i den EKSISTERENDE bekreftelsesveien (D-382).
+   * Ingen av dem kan utføre noe: rådet får aldri verktøy (§30), og utførelsen skjer først når eieren godkjenner kortet via grant-ruten `/confirmations`.
+   */
+  councilProposals?: {
+    actionsFor(input: { surface: Surface; text: string }): { actions: ProposableAction[]; min_sensitivity?: "SECRET_RESTRICTED" };
+    submit(identity: IdentityContext, surface: Surface, proposal: CouncilProposal): Promise<CouncilSubmitResult>;
+  };
   /**
    * Task #121 (D-214): valgfri lastefunksjon for den KOSMETISKE delen av
    * systemprompten (se `buildSystemPrompt()` over) - kalles FRISK på hver
@@ -187,7 +208,7 @@ export interface ChatReply {
   /** §11: streamen ble avbrutt av provider-feil ETTER output-start - aldri skjult. */
   interrupted?: boolean;
   /** D-382: handlinger modellen ba om i denne turen som venter på Tobias' godkjenning (utføres via /confirmations). */
-  confirmations?: Array<{ confirmation_id: string; tool: string; status: string }>;
+  confirmations?: Array<{ confirmation_id: string; tool: string; status: string; /** M4: det handlingen faktisk gjør (mottaker/mål/beløp/tittel), fra de bundne parameterne - vises på kortet. Kun for rådets forslag. */ detail?: string }>;
 }
 
 // Permissions ligger ALDRI i prompten - Policy/Execution Authority er trusted
@@ -470,7 +491,7 @@ export class ConversationEngine {
         }
       }
       if (triggerSource && councilAllowed) {
-        return this.runCouncil(identity, text, triggerSource, classification, override, onToken);
+        return this.runCouncil(identity, text, triggerSource, classification, override, surface, onToken);
       }
     }
 
@@ -582,7 +603,10 @@ export class ConversationEngine {
       const fullView: TurnView = { history, selection, toolDefinitions, sensitivityDecision };
       const primaryView: TurnView = cloudVariant ?? fullView;
       if (cloudVariant !== undefined) console.log(JSON.stringify({ msg: "q51_cloud_variant_without_sensitive_messages", withheld: cloudVariant.withheld, reasons: sensitivityDecision.reasons }));
-      const input = {
+      // WP-D4 (JARVIS-033): standardkjeden (hard liste, failover inne i gatewayen - hver port gjelder per medlem) og sporet over hvem som feilet før noen svarte, til merknaden bak svaret.
+      const chat = this.deps.chatCandidates ?? DEFAULT_CHAT_CANDIDATES;
+      const reserveFailed = new Set<string>();
+      const input: CompleteInput = {
         tenant_id: identity.tenant_id,
         session_id: identity.session_id,
         purpose: "CHAT" as const,
@@ -591,8 +615,9 @@ export class ConversationEngine {
         ...(provider === undefined && override?.providerPreference !== undefined
           ? { providerPreference: override.providerPreference }
           : usingDefaultGemmaPreference
-            ? { providerPreference: toolsToCloud && toolRoute ? [toolRoute.provider] : ["gemma_local", "gemma_hosted"] }
+            ? { providerPreference: toolsToCloud && toolRoute ? [toolRoute.provider] : [...chat.chain], preferenceFailover: true }
             : {}),
+        onAttemptFailed: (failure: AttemptFailure) => { reserveFailed.add(failure.provider); },
         ...(provider === undefined && override?.mode !== undefined ? { mode: override.mode } : {}),
         ...(override?.paid_models_allowed !== undefined ? { paid_models_allowed: override.paid_models_allowed } : {}),
         // D-382: tale skal være kort (TTS-latens og muntlig form) - teksten styres av prompten, taket er et sikkerhetsnett.
@@ -689,10 +714,12 @@ export class ConversationEngine {
         // enda her - retry-fra-scratch er trygt, ingen duplisert output.
         if (
           usingDefaultGemmaPreference &&
+          chat.autoFallback &&
           err instanceof NoEligibleProviderError &&
           err.message.includes("provider_preference_exhausted")
         ) {
           const { providerPreference: omittedGemmaPreference, ...fallbackInput } = input;
+          for (const name of omittedGemmaPreference ?? []) reserveFailed.add(name);
           // §"ærlighet og sporbarhet": degraderingen skal ALDRI være stille -
           // samme diagnostikk-mønster (`msg`-felt, ingen prompt/svar-innhold)
           // som `stream_debug_conversation` over.
@@ -710,18 +737,29 @@ export class ConversationEngine {
           // tidsavbrudd, serverfeil) FØR noe er sendt eller utført, skal eieren få svar og ikke en feil. Fallbacken kjører gjennom SAMME router uten
           // preferansen, så sensitivitets-/betalingsreglene gjelder uendret (SECRET_RESTRICTED kan aldri havne i sky), og degraderingen logges alltid.
           usingDefaultGemmaPreference &&
+          chat.autoFallback &&
           err instanceof ProviderError &&
-          (err.provider === "gemma_local" || err.provider === "gemma_hosted") &&
+          // WP-D4: «leverandøren i standardkjeden feilet» (tidligere hardkodet gemma_*). Skyruten for verktøyturer hører til D-431-grenen under, ikke hit.
+          chat.chain.includes(err.provider) &&
+          !(toolsToCloud && err.provider === toolRoute?.provider) &&
           LOCAL_FALLBACK_ERROR_KINDS.includes(err.kind) &&
           partial.trim() === "" && // D-444: blanke tegn er ikke synlig output (samme regel som gatewayen)
           !toolsExecuted
         ) {
           const { providerPreference: omittedGemmaPreference, ...fallbackInput } = input;
+          reserveFailed.add(err.provider); // gatewayen melder det allerede via onAttemptFailed; her også, så merknaden ikke avhenger av at gatewayen kaller lytteren
           console.error(
             JSON.stringify({ msg: "d404_gemma_provider_failed_fallback", provider: err.provider, kind: err.kind, omitted_preference: omittedGemmaPreference })
           );
           servedByVariant = false;
-          result = await callGateway(toFullView(stripRouteModel(fallbackInput)), fullView);
+          // L6 (gjennomgang av PR #315): omkjøringen gjennom vanlig ruting skal ikke gjenta leverandørene som allerede er forsøkt i kjeden (hver prøvde opptil to ganger; målt: opptil 4 kall til samme leverandør og 11 per tur).
+          // Er alt som ellers kvalifiserer allerede forsøkt, er den ærligste feilen den opprinnelige fra kjeden - ikke «ingen kvalifisert leverandør».
+          try {
+            result = await callGateway(toFullView(stripRouteModel({ ...fallbackInput, excludeProviders: [...reserveFailed] })), fullView);
+          } catch (rerunError) {
+            if (rerunError instanceof NoEligibleProviderError && rerunError.message.includes("already_attempted")) throw err;
+            throw rerunError;
+          }
         } else if (
           // D-431: Sonnet er nede (tidsavbrudd, nett, kvote, ikke konfigurert) FØR noe er sendt eller utført → svar på lokal modell
           // (samme sensitivitetsregler, ingen stille skylekkasje) i stedet for en feil. Degraderingen logges alltid.
@@ -732,6 +770,7 @@ export class ConversationEngine {
           partial.trim() === "" && // D-444: blanke tegn er ikke synlig output (samme regel som gatewayen)
           !toolsExecuted
         ) {
+          reserveFailed.add(err.provider);
           console.error(JSON.stringify({ msg: "d431_cloud_tools_failed_fallback_local", kind: err.kind }));
           const { model: omittedCloudModel, ...localRequest } = input.request;
           void omittedCloudModel;
@@ -763,7 +802,16 @@ export class ConversationEngine {
       // når minnetreff ble holdt tilbake fra skymodellen. Ikke på tale (samme som D-447); loggen har alltid kategoriene.
       const variantNote = cloudVariant !== undefined && servedByVariant && cloudVariant.withheld > 0 && surface !== "voice" ? cloudHistoryNote(cloudVariant.withheld) : "";
       const withheldNote = surface !== "voice" ? `${withheldFromCloud > 0 ? chatWithheldNote() : ""}${withheldKnowledgeFromCloud > 0 ? chatKnowledgeWithheldNote() : ""}` : "";
-      const notes = `${routeNote}${variantNote}${withheldNote}`;
+      // WP-D4 (JARVIS-033): en reserve svarte (kjedefailover eller siste reserve) - aldri usynlig. Ikke på tale (samme som de øvrige rutemerknadene); loggen har alltid navnene (aldri innhold).
+      // L11 (gjennomgang av PR #315): en verktøytur har flere runder, og ruten kan skifte mellom dem. Skyleverandører som betjente en TIDLIGERE runde enn den som ga svaret (gatewayen setter `served_providers` når flere betjente turen)
+      // nevnes også, og en leverandør som feilet i én runde men ga det siste svaret utløser fortsatt merknaden når en skyreserve tok en annen runde.
+      const roundProviders = result.metadata?.["served_providers"];
+      const earlierCloud = (Array.isArray(roundProviders) ? roundProviders.filter((p): p is string => typeof p === "string") : []).filter((name) => name !== result.provider && servedByCloudModel({ provider: name }));
+      const reserveFailedBeforeAnswer = [...reserveFailed].filter((name) => name !== result.provider);
+      const reserveUsed = reserveFailedBeforeAnswer.length > 0 || (reserveFailed.size > 0 && earlierCloud.length > 0);
+      const reserveNote = reserveUsed && surface !== "voice" ? reserveModelNote([...reserveFailed], result.provider, servedByCloudModel(result), earlierCloud) : "";
+      if (reserveUsed) console.log(JSON.stringify({ msg: "wpd4_chat_reserve_used", failed: reserveFailedBeforeAnswer.length > 0 ? reserveFailedBeforeAnswer : [...reserveFailed], served: result.provider, cloud: servedByCloudModel(result), ...(earlierCloud.length > 0 ? { earlier_cloud: earlierCloud } : {}) }));
+      const notes = `${routeNote}${variantNote}${withheldNote}${reserveNote}`;
       const replyText = notes ? `${result.text}${notes}` : result.text;
       if (notes) onToken?.(notes);
       await this.deps.messages.save(identity, "assistant", replyText);
@@ -804,6 +852,7 @@ export class ConversationEngine {
     triggerSource: "explicit_user" | "high_impact_classifier",
     classification: DecisionClassification,
     override: RoutingOverrideIntent | null,
+    surface: Surface,
     onToken?: (t: string) => void
   ): Promise<ChatReply> {
     if (!this.deps.council) {
@@ -813,13 +862,29 @@ export class ConversationEngine {
       // D-395: ingen modell kjørte - `routed: "model"` var uriktig (samme semantikk som en blokkert tur).
       return { reply, routed: "blocked" };
     }
+    // WP-D4 (JARVIS-078): forslagsveien. Uten `councilProposals` (standard) er alt under uendret: rådet gir kun en vurdering. Innlimt/ekstern tekst (e-post, dokumenter) er ikke eierens egne ord (JARVIS-013, taint): rådet kan
+    // vurdere den, men legger aldri frem en handling som bygger på den. En feil i utvalget gir ingen forslagsvei (fail-closed), aldri en feilet rådskjøring.
+    const proposals = this.deps.councilProposals;
+    let proposable: ProposableAction[] = [];
+    let minSensitivity: "SECRET_RESTRICTED" | undefined;
+    if (proposals && !looksLikePastedContent(text)) {
+      try {
+        const offered = proposals.actionsFor({ surface, text });
+        proposable = offered.actions;
+        minSensitivity = offered.min_sensitivity;
+      } catch (err) {
+        console.error(JSON.stringify({ msg: "council_proposal_actions_failed", error: err instanceof Error ? scanForSecrets(err.message).text.slice(0, 160) : "ukjent feil" }));
+      }
+    }
+    // Del 3: rådet går gjennom SAMME sensitivitetsregler som chat (innholdsbasert, fail-closed) - aldri udefinert/«public». D-381: velger utvalget finanshandlinger, er rådet SECRET_RESTRICTED (kun lokale modeller), som i chatten.
+    const contentSensitivity = classifyContentSensitivity({ texts: [text], memory_spaces: [identity.memory_space_id] }).sensitivity;
     const result = await this.deps.council.run({
       tenant_id: identity.tenant_id,
       session_id: identity.session_id,
       decision_context: text,
-      // Del 3: rådet går gjennom SAMME sensitivitetsregler som chat (innholdsbasert, fail-closed) - aldri udefinert/«public».
-      sensitivity: classifyContentSensitivity({ texts: [text], memory_spaces: [identity.memory_space_id] }).sensitivity,
+      sensitivity: minSensitivity ? maxSensitivity(contentSensitivity, minSensitivity) : contentSensitivity,
       ...(override?.paid_models_allowed !== undefined ? { paid_models_allowed: override.paid_models_allowed } : {}),
+      ...(proposable.length > 0 ? { proposable_actions: proposable } : {}),
       trigger: {
         trigger_source: triggerSource,
         decision_importance: classification.decision_importance,
@@ -828,12 +893,32 @@ export class ConversationEngine {
         classifier_version: classification.classifier_version
       }
     });
-    const reply =
+    let reply =
       `${result.decision}\n\n(konsensus: ${result.consensus_status}, tillit: ${result.confidence}%` +
       `${result.dissenting_models.length > 0 ? `, uenig: ${result.dissenting_models.join(", ")}` : ""})`;
+    const confirmations: NonNullable<ChatReply["confirmations"]> = [];
+    // Uten forslagsvei (standard) berøres hverken `proposal` eller `provenance` her - svaret er nøyaktig som før.
+    if (proposals && result.proposal) {
+      // Forslaget er ren data: porten legger det frem som en PENDING bekreftelse (bundet, engangs, utløper) og utfører aldri noe. Mislykkes det, får eieren vite det - ingenting er utført uansett.
+      let submitted: CouncilSubmitResult;
+      try {
+        submitted = await proposals.submit(identity, surface, result.proposal);
+      } catch (err) {
+        console.error(JSON.stringify({ msg: "council_proposal_submit_failed", council_id: result.council_id, error: err instanceof Error ? scanForSecrets(err.message).text.slice(0, 160) : "ukjent feil" }));
+        submitted = { ok: false, reason: "confirmation_unavailable" };
+      }
+      if (submitted.ok) {
+        reply += `\n\n${renderProposalNoteNo(result.proposal, submitted.ttl_minutes, submitted.bound_summary)}`;
+        confirmations.push({ confirmation_id: submitted.confirmation_id, tool: submitted.tool, status: "confirmation_required", ...(submitted.bound_summary ? { detail: submitted.bound_summary } : {}) });
+      } else {
+        reply += `\n\nRådet foreslo en handling, men den kunne ikke legges frem til godkjenning (${submitted.reason}). Ingenting er utført.`;
+      }
+    } else if (proposals && result.provenance?.proposal_review?.outcome === "REJECTED") {
+      reply += `\n\nRådet foreslo en handling, men ${describeProposalRejectionNo(result.provenance.proposal_review.reason)}. Ingenting er utført.`;
+    }
     await this.deps.messages.save(identity, "assistant", reply);
     onToken?.(reply);
-    return { reply, routed: "model" };
+    return { reply, routed: "model", ...(confirmations.length > 0 ? { confirmations } : {}) };
   }
 
   /**

@@ -94,6 +94,10 @@ export class ExecutiveTransport implements ToolTransport {
         const report = await this.service.getEvolutionReport();
         return { data: report as unknown as JsonValue };
       }
+      case "get_ai_mesh_status": {
+        const report = await this.service.getAiMeshStatus();
+        return { data: report as unknown as JsonValue };
+      }
       case "get_control_center": {
         // WP-H0: uten `center` = oversikt over alle ti sentre (kompakt); med `center` = full rapport + forklaring. Et ikke-koblet senter er et ærlig, strukturert svar (`found: false`) -
         // IKKE et kastet unntak, som ToolGateway ellers ville tolket som at hele executive-verktøyet er utilgjengelig (helse).
@@ -280,6 +284,10 @@ export function executiveToolDefinitions(transport: ExecutiveTransport): ToolDef
       // WP-H0: eier-kun FØR noe bygges (avslaget er en vanlig `tool.denied`-revisjonsrad). Rapportene er konfigurasjonsmetadata og handlingene peker på eier-ruter.
       parameterAuthorizer: (_parameters, identity) => transport.authorizeControlCenter(identity)
     },
+    read(
+      "get_ai_mesh_status",
+      "Svar på «hvilke modeller har du?»/«fungerer Kimi/Hermes/Gemma?»/«hva koster modellene?»/«er fallback i orden?»: AI Mesh slik det står NÅ - per leverandør konfigurert (kun presence), frisk, siste feil, kostnad og p50-latens siste 7 døgn, parallell-delegerings-overhead - og om akseptansen «≥3 live providers med fallback» er oppfylt. KUN lesing: jeg gjør ikke et testkall (eierens røyktest er mesh-live-smoke.ts). Ukjent vises som ukjent, konfigurert er aldri det samme som bevist."
+    ),
     read(
       "get_value_report",
       "Svar på «hva har du hjulpet meg med?»/«hvor mye bruker jeg deg?»/«hva er verdien?» fra EKTE tall (kun antall og tidspunkt - aldri innhold): bruk per verdiløkke (Daily Brief, oppfølging, jobber, samtaler, bekreftelser, kost) siste 7 og 30 døgn, pluss status for de sovende løkkene (Builder Loop-beredskap og driftsforslag). Det som ikke kan måles står som «ikke målbart», aldri som 0. Gjengi summary_no."

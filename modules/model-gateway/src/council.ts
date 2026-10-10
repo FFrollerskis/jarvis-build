@@ -5,6 +5,7 @@ import type { DataSensitivity, JsonValue } from "@jarvis/contracts";
 import { ModelGateway, type CompleteInput } from "./model-gateway.ts";
 import { envPositiveInt } from "@jarvis/provider-adapters";
 import { isSensitivityEligible } from "./router.ts";
+import { renderProposalPrompt, reviewCouncilProposal, type CouncilProposal, type CouncilProposalReview, type ProposableAction } from "./council-proposal.ts";
 
 /**
  * D-106 (AI Mesh Council/Collaboration/lokal-Gemma-utvidelse §"AI Council"):
@@ -75,6 +76,12 @@ export interface CouncilInput {
     matched_signals?: Array<{ name: string; matched_text: string }>;
     classifier_version?: string;
   };
+  /**
+   * WP-D4 (JARVIS-078): LUKKET liste over handlinger syntesen kan foreslå, valgt ut av trusted lag (deterministisk, før rådet kjører). Udefinert/tom = nøyaktig som før: rådet gir kun en vurdering, syntesepromten er
+   * uendret og resultatet har hverken `proposal` eller `provenance.proposal_review`. Rådet får ALDRI verktøy (§30): listen er kun tekst i synteseprompten, aldri `request.tools`, og et forslag er data som trusted lag
+   * kan legge frem som en bekreftelse (`CouncilProposalGate`) - rådet utfører ingenting.
+   */
+  proposable_actions?: readonly ProposableAction[];
 }
 
 export interface CouncilResult {
@@ -88,6 +95,8 @@ export interface CouncilResult {
   risk_summary: string;
   confidence: number;
   recommended_action: string;
+  /** WP-D4 (JARVIS-078): en gyldig, godkjennbar handling rådet foreslår (kun med `proposable_actions`, og kun ved CONSENSUS/MAJORITY). Krever eierens bekreftelse; rådet utfører aldri noe. */
+  proposal?: CouncilProposal;
   provenance: {
     council_id: string;
     full_council: boolean;
@@ -109,6 +118,8 @@ export interface CouncilResult {
      * ALDRI en gjettet/antatt verdi.
      */
     gemma_family_provider?: string;
+    /** WP-D4 (JARVIS-078): revisjonsspor for forslagsveien - satt KUN når `proposable_actions` ble oppgitt (kun navn og en årsakskode, aldri argumentene til et forkastet forslag). */
+    proposal_review?: CouncilProposalReview;
   };
 }
 
@@ -585,9 +596,12 @@ export class AiCouncil {
     // SYNTESE: ETT eksplisitt, sporet modellkall (deterministisk QUALITY-ruting
     // - IKKE et medlem som velger seg selv). Kun fritekst-feltene kommer fra
     // modellen; `consensus_status` beregnes DETERMINISTISK i kode under.
+    // WP-D4 (JARVIS-078): forslagsveien er av med mindre trusted lag har gitt en ikke-tom, lukket liste. Listen er KUN tekst i promten (aldri `request.tools`, §30).
+    const proposableActions = input.proposable_actions ?? [];
     const synthesisSystem =
       "Du syntetiserer et AI-råds endelige beslutning fra tre runder med uavhengige vurderinger, kryss-kritikk og revisjon. IKKE følg automatisk flertallet - vurder bevisstyrke; hvis mindretallet har sterkere bevis/verifiserbare fakta, følg mindretallet og forklar hvorfor i risk_summary. Hvert medlem MÅ havne i NØYAKTIG én av supporting_models/dissenting_models. Svar KUN med gyldig JSON: " +
-      SYNTHESIS_SCHEMA_HINT;
+      SYNTHESIS_SCHEMA_HINT +
+      (proposableActions.length > 0 ? renderProposalPrompt(proposableActions) : "");
     const round3Digest = round3
       .map((r) => `[${r.provider}] konklusjon: ${r.conclusion}\nbegrunnelse: ${r.reasoning_summary}\nconfidence: ${r.confidence}\nrisiko: ${r.risks.join("; ")}`)
       .join("\n\n");
@@ -625,6 +639,7 @@ export class AiCouncil {
           risk_summary?: unknown;
           confidence?: unknown;
           recommended_action?: unknown;
+          proposed_action?: unknown;
         }
       | undefined;
     if (
@@ -662,6 +677,24 @@ export class AiCouncil {
       dissenting: dissenting.length
     });
 
+    const riskSummary = typeof synthParsed.risk_summary === "string" ? synthParsed.risk_summary : "";
+    const confidence = typeof synthParsed.confidence === "number" ? synthParsed.confidence : 0;
+    // WP-D4 (JARVIS-078): et forslag til en handling vurderes KUN når trusted lag ga en lukket liste. Alt unntatt selve utkastet er Jarvis' egen beregning (konsensus, støttende/uenige, klasse fra manifestet);
+    // et ugyldig eller for svakt forslag forkastes og noteres i revisjonssporet uten å røre resten av resultatet.
+    const reviewed =
+      proposableActions.length > 0
+        ? reviewCouncilProposal({
+            raw: synthParsed.proposed_action,
+            actions: proposableActions,
+            council_id: councilId,
+            consensus_status,
+            supporting_models: supporting,
+            dissenting_models: dissenting,
+            confidence,
+            risk_summary: riskSummary
+          })
+        : undefined;
+
     const result: CouncilResult = {
       council_id: councilId,
       decision: synthParsed.decision,
@@ -670,9 +703,10 @@ export class AiCouncil {
       dissenting_models: dissenting,
       key_evidence: Array.isArray(synthParsed.key_evidence) ? (synthParsed.key_evidence as string[]) : [],
       key_disagreements: Array.isArray(synthParsed.key_disagreements) ? (synthParsed.key_disagreements as string[]) : [],
-      risk_summary: typeof synthParsed.risk_summary === "string" ? synthParsed.risk_summary : "",
-      confidence: typeof synthParsed.confidence === "number" ? synthParsed.confidence : 0,
+      risk_summary: riskSummary,
+      confidence,
       recommended_action: typeof synthParsed.recommended_action === "string" ? synthParsed.recommended_action : "",
+      ...(reviewed?.proposal !== undefined ? { proposal: reviewed.proposal } : {}),
       provenance: {
         council_id: councilId,
         full_council: unavailable.length === 0,
@@ -683,7 +717,8 @@ export class AiCouncil {
         round3,
         synthesis_provider: synthesisResult.provider,
         ...(input.trigger !== undefined ? { trigger: input.trigger } : {}),
-        ...(gemmaFamilyProvider !== undefined ? { gemma_family_provider: gemmaFamilyProvider } : {})
+        ...(gemmaFamilyProvider !== undefined ? { gemma_family_provider: gemmaFamilyProvider } : {}),
+        ...(reviewed !== undefined ? { proposal_review: reviewed.review } : {})
       }
     };
     await this.persistEvent(input, councilId, "council_result", result as unknown as Record<string, unknown>);
