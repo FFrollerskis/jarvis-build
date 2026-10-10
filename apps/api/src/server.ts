@@ -4,18 +4,19 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import type pg from "pg";
-import { BusinessTenantProvisioningError, ChallengeLimitError, previewBusinessTenant, provisionBusinessTenant, type ConfirmationStore } from "@jarvis/core";
+import { BusinessTenantProvisioningError, ChallengeLimitError, previewBusinessTenant, provisionBusinessTenant, withTenantTransaction, writeAudit, type ConfirmationStore } from "@jarvis/core";
 import type {
   ChannelSessionAuthority, DeviceEnrollmentService, DeviceService, IdentityService,
   SessionGrantService, SessionService, VoiceSessionAuthority
 } from "@jarvis/core";
 import {
-  acquireContainerLogs, attemptRecovery, correlateDbState, correlateIncident, dockerProviderStatus, executeInfraMutation,
-  getInfraExecution, ingestGithubDeployment, proposeRepairTask, type DeploymentService, type DiagnosisService, type IncidentService
+  OWNER_LIFECYCLE_ACTIONS, acquireContainerLogs, attemptRecovery, correlateDbState, correlateIncident, dockerProviderStatus, executeCloudMutation, executeInfraMutation,
+  getInfraExecution, incidentPhase, incidentPhaseNo, ingestGithubDeployment, proposeRepairTask, truthLabelNo,
+  type DeploymentService, type DiagnosisService, type IncidentService, type IncidentStatus
 } from "@jarvis/incidents";
 import { OwnerControlUnauthorizedError, type InfraExecutionGate, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
 import type { InProcessWorker, TaskService } from "@jarvis/tasks";
-import type { DockerMutationAction, ToolGateway } from "@jarvis/tool-gateway";
+import { CLOUD_CONTROL_TOOL_IDS, type DockerMutationAction, type ToolGateway } from "@jarvis/tool-gateway";
 import {
   InvalidWebhookSignatureError, StripeCredentialsUnavailableError, StripeTenantNotConfiguredError,
   VippsCredentialsUnavailableError, VippsTenantNotConfiguredError,
@@ -170,6 +171,12 @@ export interface ApiDeps {
    * en verifisert grant). Uten verdien svarer de brukervendte sidene 503 `owner_not_configured`.
    */
   owner?: { tenant_id: string; person_id: string };
+  /**
+   * Gjennomgang av PR #324 (M3): EIER-PORTEN for incident-livssyklusen (`/incidents/transition`), reparasjon (`/incidents/repair`), driftsoversikten (`/infra/overview`) og skymutasjonene (`/infra/cloud/mutate`).
+   * I drift: `ownerPredicate(ownerAuthority)` (apps/api/src/control-center/register.ts) - DET SAMME predikatet som kontrollsentrene og Policy Gateway bruker (`resolveAuthorityMode(...) === "SOVEREIGN"`: eier-person,
+   * eier-tenant, ingen delegasjon), aldri en egen sammenligning her. FAIL-CLOSED: uten verdien (eller ved en kastet feil) nektes alle med `owner_required`.
+   */
+  ownerGate?: (identity: IdentityContext) => boolean;
 }
 
 export interface HealthStatus {
@@ -307,6 +314,11 @@ const RUN_RATE_MUTATE_ACTIONS = ["record_connector_maintenance"] as const;
  * autoritet som `/runrate/query`; tenanten kommer fra det løste grantet (aldri fra body), og kallet går via `ToolGateway.execute()` (policy + revisjon).
  */
 const VALUE_QUERY_ACTIONS = ["get_value_report"] as const;
+/**
+ * WP-E1 (UA-5, JARVIS-068): driftsstatus (åpne hendelser, skymål, produsenthelse). EGEN lese-rute med EGET hardkodet allowlist - `/executive/query` forblir uendret og lese-kun (en test låser den til fire handlinger).
+ * Kun `get_infra_status`; verktøyskjemaet har ingen parametre, så ingenting fra kroppen (tenant/person/rom) videresendes.
+ */
+const INFRA_OVERVIEW_ACTIONS = ["get_infra_status"] as const;
 
 /**
  * D-230 (K2 governance-dashboard): `@jarvis/governance` (migrasjon 059) var
@@ -687,6 +699,34 @@ async function authedRequest(
   return { identity: resolved.identity, body: rest };
 }
 
+/**
+ * Gjennomgang av PR #324 (M3): `authedRequest` bekrefter bare at grantet er gyldig - IKKE at innehaveren er eieren. `/incidents/transition` merket derfor enhver autentisert person som `actor_kind: "owner"` (en
+ * delegert/sekundær person i eierens tenant kunne lukke eierens hendelser og dermed dempe produsentene), og `/incidents/repair` og `/infra/overview` hadde ingen eier-sjekk. Denne porten bruker
+ * `deps.ownerGate` (= kontrollsentrenes `ownerPredicate`, ingen ny logikk). Avslag: `403 owner_required` og en vanlig `tool.denied`-revisjonsrad (som H0), skrevet i AKTØRENS egen tenant. Fail-closed.
+ */
+async function requireOwner(
+  res: ServerResponse, deps: ApiDeps, identity: IdentityContext, subject: { tool_id: string; action: string }
+): Promise<boolean> {
+  let allowed = false;
+  try {
+    allowed = deps.ownerGate !== undefined && deps.ownerGate(identity) === true;
+  } catch {
+    allowed = false;
+  }
+  if (allowed) return true;
+  const reason = deps.ownerGate === undefined ? "owner_gate_not_configured" : "owner_required";
+  const pool = deps.incidents?.pool;
+  if (pool) {
+    await withTenantTransaction(pool, identity.tenant_id, (client) =>
+      writeAudit(client, identity, { type: "tool.denied", decision: "DENY", reason, tool_id: subject.tool_id, action: subject.action })
+    ).catch((err: unknown) => {
+      console.error(JSON.stringify({ msg: "owner_gate_audit_write_failed", tool_id: subject.tool_id, action: subject.action, error: err instanceof Error ? err.message.slice(0, 80) : "unknown" }));
+    });
+  }
+  json(res, 403, { error: "owner_required", reason, request_id: requestIdOf(res) });
+  return false;
+}
+
 function fieldString(body: Record<string, unknown>, key: string): string {
   const value = body[key];
   if (typeof value !== "string" || value.length === 0 || value.length > 4_000) {
@@ -744,6 +784,24 @@ function fieldRecord(body: Record<string, unknown>, key: string): Record<string,
 function domainFailure(res: ServerResponse, status: number, code: string, err: unknown): void {
   console.error(JSON.stringify({ msg: "route_domain_failure", request_id: requestIdOf(res), code, error: (err as Error).message }));
   json(res, status, { error: code, request_id: requestIdOf(res) });
+}
+
+/**
+ * WP-E1 (JARVIS-068): som `domainFailure`, men VÅRE egne, bevisste feilkoder (sannhetsregime `truth_*`, livssyklus `incident_*`, ulovlig overgang) vises til eieren som `reason`
+ * (maks 80 tegn) - eieren må få vite HVORFOR «VERIFIED» eller en overgang avvises. Alt annet (pg-feil, stack) forblir generisk og kun i loggen.
+ */
+const OWN_INCIDENT_REASON = /^(truth_[a-z_]+|incident_[a-z_]+|diagnosis_[a-z_]+|invalid_incident_transition:[a-z_]+->[a-z_]+)$/;
+function incidentDomainFailure(res: ServerResponse, status: number, code: string, err: unknown): void {
+  const message = (err as Error).message ?? "";
+  if (!OWN_INCIDENT_REASON.test(message)) return domainFailure(res, status, code, err);
+  console.error(JSON.stringify({ msg: "route_domain_failure", request_id: requestIdOf(res), code, error: message }));
+  json(res, status, { error: code, reason: message.slice(0, 80), request_id: requestIdOf(res) });
+}
+
+const INCIDENT_STATUSES: readonly IncidentStatus[] = ["open", "diagnosing", "repair_proposed", "repair_in_progress", "resolved", "wont_fix"];
+/** WP-E1: hendelsen slik eieren ser den - fase (åpen/anerkjent/avbøtende/løst/lukket) i tillegg til den lagrede statusen, samme oversettelse overalt. */
+function withPhase<T extends { status: IncidentStatus }>(incident: T): T & { phase: string; phase_no: string } {
+  return { ...incident, phase: incidentPhase(incident.status), phase_no: incidentPhaseNo(incident.status) };
 }
 
 
@@ -1110,6 +1168,24 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
     }
     // Verktøyskjemaet er strengt og uten felt: `parameters` fra kroppen sendes bevisst ALDRI videre.
+    const result = await deps.executive.gateway.execute({ identity: resolved.identity, tool_id: "executive", action, parameters: {} });
+    if (!result.ok) return json(res, 403, { error: "tool_denied", reason: result.reason });
+    return json(res, 200, { ok: true, data: result.data });
+  }
+
+  if (deps.executive && req.method === "POST" && url.pathname === "/infra/overview") {
+    const raw: unknown = await readBodyOrUndefined(req);
+    const parsedBody = grantBodyOrReject(res, raw, EXECUTIVE_QUERY_BODY_KEYS);
+    if (!parsedBody) return;
+    const action = typeof parsedBody["action"] === "string" ? parsedBody["action"] : "get_infra_status";
+    if (!(INFRA_OVERVIEW_ACTIONS as readonly string[]).includes(action)) return json(res, 400, { error: "malformed_request", reason: "action_not_allowed" });
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
+    if (!resolved.ok) {
+      if (resolved.responded) return;
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+    }
+    // M3: driftsoversikten (hendelsestitler, skymål-tilstand) er en EIER-flate - samme port som kontrollsentrene. Verktøydefinisjonen har i tillegg SIN EGEN eier + signert-økt-port (gjelder også chat).
+    if (!(await requireOwner(res, deps, resolved.identity, { tool_id: "executive", action }))) return;
     const result = await deps.executive.gateway.execute({ identity: resolved.identity, tool_id: "executive", action, parameters: {} });
     if (!result.ok) return json(res, 403, { error: "tool_denied", reason: result.reason });
     return json(res, 200, { ok: true, data: result.data });
@@ -1787,16 +1863,21 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       const incident = await service.getIncident(authed.identity.tenant_id, authed.identity.memory_space_id, incidentId);
       if (!incident) return json(res, 404, { error: "incident_not_found", request_id: requestIdOf(res) });
       const evidence = await service.listEvidence(authed.identity.tenant_id, authed.identity.memory_space_id, incidentId);
-      return json(res, 200, { incident, evidence });
+      // WP-E1: varig overgangshistorikk (hvem/når/hvorfor) og sannhetsmerking per bevis (bekreftet / observert, ikke bekreftet / påstått) følger med.
+      const transitions = await service.listTransitions(authed.identity.tenant_id, authed.identity.memory_space_id, incidentId);
+      return json(res, 200, {
+        incident: withPhase(incident), transitions,
+        evidence: evidence.map((e) => ({ ...e, truth_no: truthLabelNo(e.status) }))
+      });
     }
 
     if (req.method === "POST" && url.pathname === "/incidents/list") {
       const authed = await authedRequest(req, res, deps, ["status"]);
       if (!authed) return;
-      const status = (fieldOptionalString(authed.body, "status") ?? "open") as
-        "open" | "diagnosing" | "repair_proposed" | "repair_in_progress" | "resolved" | "wont_fix" | "all";
-      const incidents = await service.listIncidents(authed.identity.tenant_id, authed.identity.memory_space_id, status);
-      return json(res, 200, { incidents });
+      const requested = fieldOptionalString(authed.body, "status") ?? "open";
+      if (requested !== "all" && !INCIDENT_STATUSES.includes(requested as IncidentStatus)) throw new HttpError(400, "malformed_request", "status");
+      const incidents = await service.listIncidents(authed.identity.tenant_id, authed.identity.memory_space_id, requested as IncidentStatus | "all");
+      return json(res, 200, { incidents: incidents.map(withPhase) });
     }
 
     if (req.method === "POST" && url.pathname === "/incidents/evidence/add") {
@@ -1819,7 +1900,37 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         return json(res, 200, { evidence });
       } catch (err) {
         if (err instanceof HttpError) throw err;
-        return domainFailure(res, 400, "evidence_rejected", err);
+        // WP-E1: sannhetstype-regimet - `status: "VERIFIED"` fra avsenderen avvises (ingen kan bekrefte sin egen påstand); `asserted_by` kan ikke oppgis (rutens kropp har ikke feltet), eieren er alltid `owner`.
+        return incidentDomainFailure(res, 400, "evidence_rejected", err);
+      }
+    }
+
+    if (req.method === "POST" && url.pathname === "/incidents/transition") {
+      // WP-E1 (JARVIS-068): eierens livssyklus-handlinger - anerkjenn, foreslå/start avbøting, løs, lukk uten tiltak, gjenåpne. Eneste HTTP-vei til en statusendring; aktøren er ALLTID den verifiserte
+      // eieren fra grantet (aldri en kropps-oppgitt aktør), årsak er påkrevd, og lovligheten avgjøres av tilstandsmaskinen. Klasse B (intern bokføring, reversibel via «gjenåpne») bak vanlig policy.
+      const authed = await authedRequest(req, res, deps, ["incident_id", "action", "reason", "evidence_ref"]);
+      if (!authed) return;
+      // M3: `actor_kind: "owner"` er bare sant for den SUVERENE eieren (samme predikat som kontrollsentrene) - ikke for enhver autentisert person i eierens tenant.
+      if (!(await requireOwner(res, deps, authed.identity, { tool_id: "incidents", action: "transition" }))) return;
+      const action = fieldString(authed.body, "action");
+      if (!Object.prototype.hasOwnProperty.call(OWNER_LIFECYCLE_ACTIONS, action)) throw new HttpError(400, "malformed_request", "action");
+      const decision = await deps.policy.authorize({
+        identity: authed.identity,
+        toolCall: { tool_id: "incidents", action: "transition", capability_class: "B", parameters: { action } }
+      });
+      if (decision.decision !== "ALLOW") return json(res, 403, { decision: decision.decision, reason: decision.reason });
+      const evidenceRef = fieldOptionalString(authed.body, "evidence_ref");
+      try {
+        const incident = await service.transition(
+          authed.identity.tenant_id, authed.identity.memory_space_id, fieldString(authed.body, "incident_id"),
+          OWNER_LIFECYCLE_ACTIONS[action as keyof typeof OWNER_LIFECYCLE_ACTIONS], { kind: "owner", person_id: authed.identity.person_id },
+          { reason: fieldString(authed.body, "reason"), ...(evidenceRef !== undefined ? { evidence_ref: evidenceRef } : {}) }
+        );
+        if (!incident) return json(res, 404, { error: "incident_not_found", request_id: requestIdOf(res) });
+        return json(res, 200, { incident: withPhase(incident) });
+      } catch (err) {
+        if (err instanceof HttpError) throw err;
+        return incidentDomainFailure(res, 409, "transition_rejected", err);
       }
     }
 
@@ -1891,6 +2002,8 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       const supersedes = fieldOptionalString(authed.body, "supersedes_diagnosis_id");
       const supporting = fieldOptionalStringArray(authed.body, "supporting_evidence_ids");
       const contradicting = fieldOptionalStringArray(authed.body, "contradicting_evidence_ids");
+      // WP-E1: en `deterministic` diagnose kommer fra KODE, aldri fra en HTTP-kaller (ellers kunne avsenderen selv gi sin påstand deterministisk status). Over HTTP: kun eier eller modell-assistert.
+      if (!["owner", "model_assisted"].includes(fieldString(authed.body, "source"))) throw new HttpError(400, "malformed_request", "source");
       try {
         const diagnosis = await diagnosisService.createDiagnosis(
           authed.identity.tenant_id, authed.identity.memory_space_id, fieldString(authed.body, "incident_id"), {
@@ -1904,7 +2017,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         return json(res, 200, { diagnosis });
       } catch (err) {
         if (err instanceof HttpError) throw err;
-        return domainFailure(res, 400, "diagnosis_rejected", err);
+        return incidentDomainFailure(res, 400, "diagnosis_rejected", err);
       }
     }
 
@@ -1946,6 +2059,55 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       return json(res, 200, { execution });
     }
 
+    if (req.method === "POST" && url.pathname === "/infra/cloud/mutate") {
+      // WP-E1 (UA-5): kritisk mutasjon mot et kontrollert skymål (Cloudflare) med SAMME sammenhengende før/etter-journal som Docker (`infra_executions`).
+      // Selve utførelsen går UTELUKKENDE via `ToolGateway.execute()` (policy, InfraExecutionGate, frys, sone-autorisasjon, klasse D-kjede, varsling) -
+      // ruten omgår ingenting. Identitet fra det verifiserte grantet (som alle kontrollruter); credential-bindingen avviser alle andre enn eieren.
+      const authed = await authedRequest(req, res, deps, ["provider", "action", "parameters", "idempotency_key", "incident_id"]);
+      if (!authed) return;
+      // M2/M3: skymutasjoner (DNS/WAF/SSL, Postgres-økter, Infisical-rotasjon) er EIER-kun og krever step-up (enhetssignert økt fra web/desktop/api/mobile). Svaret er et tydelig `step_up_required`
+      // FØR noe journalføres - gatewayen håndhever det samme på verktøynivå (`ToolDefinition.step_up_required`) uavhengig av denne ruten.
+      if (!(await requireOwner(res, deps, authed.identity, { tool_id: "infra", action: "cloud_mutate" }))) return;
+      const cloudStepUp = stepUpDenial(authed.identity, "cloud_mutate");
+      if (cloudStepUp) return json(res, 403, { error: "step_up_required", reason: cloudStepUp, request_id: requestIdOf(res) });
+      const incidentId = fieldOptionalString(authed.body, "incident_id");
+      try {
+        const execution = await executeCloudMutation({ pool, gateway }, authed.identity, {
+          tenant_id: authed.identity.tenant_id, person_id: authed.identity.person_id, device_id: authed.identity.device_id,
+          provider: fieldString(authed.body, "provider"), action: fieldString(authed.body, "action"),
+          parameters: fieldRecord(authed.body, "parameters") as Record<string, JsonValue>,
+          idempotency_key: fieldString(authed.body, "idempotency_key"),
+          ...(incidentId !== undefined ? { incident_id: incidentId } : {})
+        });
+        return json(res, 200, { execution });
+      } catch (err) {
+        if (err instanceof HttpError) throw err;
+        // Kun VÅRE egne, bevisste feilkoder (ukjent leverandør/handling, nøkkelkonflikt) vises til eieren; alt annet logges og blir generisk.
+        const reason = (err as Error).message;
+        if (/^(cloud_mutation_[a-z_]+|infra_idempotency_key_conflict)(?::|$)/.test(reason)) return json(res, 400, { error: "cloud_mutation_rejected", reason: reason.slice(0, 80), request_id: requestIdOf(res) });
+        return domainFailure(res, 400, "cloud_mutation_rejected", err);
+      }
+    }
+
+    if (req.method === "POST" && url.pathname === "/infra/cloud/read") {
+      // WP-E1 (UA-5): klasse A-lesing av de kontrollerte skymålene (Cloudflare/Langfuse/Infisical/Postgres-drift) for eieren - bl.a. økt-identiteten (pid + backend_start) en
+      // terminate/cancel krever. Går UTELUKKENDE via `ToolGateway.execute()` (policy, credential-binding til eieren, infra-gate, revisjon); kun registrerte klasse A-handlinger
+      // i de fire verktøy-id-ene kan nås - aldri en skrivehandling, aldri et annet verktøy. Utdata er ubetrodd data (merket som sådan), aldri instruksjoner.
+      const authed = await authedRequest(req, res, deps, ["provider", "action", "parameters"]);
+      if (!authed) return;
+      const provider = fieldString(authed.body, "provider");
+      const action = fieldString(authed.body, "action");
+      const definition = CLOUD_CONTROL_TOOL_IDS.has(provider) ? gateway.get(provider, action) : undefined;
+      if (!definition) return json(res, 400, { error: "cloud_read_unknown_action", request_id: requestIdOf(res) });
+      if (definition.capability_class !== "A") return json(res, 400, { error: "cloud_read_not_a_read_action", request_id: requestIdOf(res) });
+      const result = await gateway.execute({
+        identity: authed.identity, tool_id: provider, action,
+        parameters: (authed.body["parameters"] === undefined ? {} : fieldRecord(authed.body, "parameters")) as Record<string, JsonValue>
+      });
+      if (!result.ok) return json(res, 200, { ok: false, reason: result.reason.slice(0, 120), request_id: requestIdOf(res) });
+      return json(res, 200, { ok: true, output_trust: result.output_trust, data: result.data ?? null });
+    }
+
     if (req.method === "POST" && url.pathname === "/observability/docker/status") {
       const authed = await authedRequest(req, res, deps, []);
       if (!authed) return;
@@ -1958,11 +2120,16 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         "incident_id", "repo_url", "goal", "test_command", "publish_pr", "model_budget_ore"
       ]);
       if (!authed) return;
+      // M3: reparasjon setter i gang en betalt agentkjøring som kan pushe/åpne en PR - EIER-kun og step-up (enhetssignert økt fra en eier-kanal), og budsjettet kan aldri økes utover serverens tak (`proposeRepairTask`).
+      if (!(await requireOwner(res, deps, authed.identity, { tool_id: "incidents", action: "repair" }))) return;
+      const repairStepUp = stepUpDenial(authed.identity, "incident_repair");
+      if (repairStepUp) return json(res, 403, { error: "step_up_required", reason: repairStepUp, request_id: requestIdOf(res) });
       const incident = await service.getIncident(
         authed.identity.tenant_id, authed.identity.memory_space_id, fieldString(authed.body, "incident_id")
       );
       if (!incident) return json(res, 404, { error: "incident_not_found", request_id: requestIdOf(res) });
-      const testCommand = fieldOptionalStringArray(authed.body, "test_command");
+      // WP-E1 (JARVIS-068): `test_command` er PÅKREVD (validert mot testløper-allowlisten i `proposeRepairTask`) - aldri en vakuøs standardtest som alltid består.
+      const testCommand = fieldOptionalStringArray(authed.body, "test_command") ?? [];
       const publishPr = fieldOptionalBoolean(authed.body, "publish_pr");
       const budget = fieldOptionalNumber(authed.body, "model_budget_ore");
       const result = await proposeRepairTask(
@@ -1970,7 +2137,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         authed.identity, authed.identity.memory_space_id, incident,
         {
           repo_url: fieldString(authed.body, "repo_url"), goal: fieldString(authed.body, "goal"),
-          ...(testCommand !== undefined ? { test_command: testCommand } : {}),
+          test_command: testCommand,
           ...(publishPr !== undefined ? { publishPr } : {}),
           ...(budget !== undefined ? { model_budget_ore: budget } : {})
         }
@@ -1986,6 +2153,11 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       if (!authed) return;
       const toolId = fieldString(authed.body, "tool_id");
       const recoveryAction = fieldString(authed.body, "action");
+      // M2: gjenoppretting av en skymutasjon (Cloudflare/Postgres-drift/Infisical) er selv en skrivehandling mot skyen og krever samme step-up som selve mutasjonen (gatewayen håndhever det uansett).
+      if (CLOUD_CONTROL_TOOL_IDS.has(toolId)) {
+        const recoveryStepUp = stepUpDenial(authed.identity, "cloud_recovery");
+        if (recoveryStepUp) return json(res, 403, { error: "step_up_required", reason: recoveryStepUp, request_id: requestIdOf(res) });
+      }
       const decision = await deps.policy.authorize({
         identity: authed.identity,
         toolCall: { tool_id: "infra", action: "attempt_recovery", capability_class: "B", parameters: { tool_id: toolId, action: recoveryAction } }

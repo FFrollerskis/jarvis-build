@@ -43,3 +43,43 @@ export function assertValidIncidentTransition(from: IncidentStatus, to: Incident
 export function isTerminalIncidentStatus(status: IncidentStatus): boolean {
   return status === "resolved" || status === "wont_fix";
 }
+
+/**
+ * WP-E1 (JARVIS-068): livssyklus-FASEN eieren ser. Statusverdiene i databasen er uendret (CHECK-begrensninger, lagrede data og situasjonsmotorens infra-bro avhenger av dem);
+ * dette er kun den stabile, ene oversettelsen til begrepene åpen -> anerkjent -> avbøtende -> løst/lukket. Brukes av API-et, rapporten og postmortem-en, så ingen flate finner opp sitt eget ordvalg.
+ */
+export type IncidentPhase = "open" | "acknowledged" | "mitigating" | "resolved" | "closed";
+
+export function incidentPhase(status: IncidentStatus): IncidentPhase {
+  switch (status) {
+    case "open": return "open";
+    case "diagnosing": return "acknowledged";
+    case "repair_proposed":
+    case "repair_in_progress": return "mitigating";
+    case "resolved": return "resolved";
+    case "wont_fix": return "closed";
+  }
+}
+
+export function incidentPhaseNo(status: IncidentStatus): string {
+  switch (incidentPhase(status)) {
+    case "open": return "åpen";
+    case "acknowledged": return "anerkjent";
+    case "mitigating": return status === "repair_in_progress" ? "avbøting pågår" : "avbøting foreslått";
+    case "resolved": return "løst";
+    case "closed": return "lukket uten tiltak";
+  }
+}
+
+/**
+ * Eier-handlingene på livssyklusen og hvilken status de gir. `mitigate` har to trinn (foreslått -> pågår) fordi kodejobben (`repair.ts`) ender i `repair_proposed` og eieren selv
+ * markerer `repair_in_progress` når tiltaket faktisk er i gang. Selve lovligheten avgjøres fortsatt av `INCIDENT_TRANSITIONS`.
+ */
+export const OWNER_LIFECYCLE_ACTIONS: Readonly<Record<"acknowledge" | "mitigate" | "start_mitigation" | "resolve" | "close" | "reopen", IncidentStatus>> = {
+  acknowledge: "diagnosing",
+  mitigate: "repair_proposed",
+  start_mitigation: "repair_in_progress",
+  resolve: "resolved",
+  close: "wont_fix",
+  reopen: "open"
+};

@@ -28,6 +28,11 @@ export class ExecutiveTransport implements ToolTransport {
     return this.service.authorizeControlCenter(identity);
   }
 
+  /** Gjennomgang av PR #324 (M3/L4): eier + signert økt-porten for `get_infra_status` - fail-closed også uten register. */
+  authorizeInfraStatus(identity: Parameters<ExecutiveService["authorizeInfraStatus"]>[0]): { allowed: boolean; reason: string } {
+    return this.service.authorizeInfraStatus(identity);
+  }
+
   /** WP-H0 (JARVIS-087): eier-kun-porten for kontrollsenterets mutasjoner (`cancel_task`) - fail-closed også uten register. */
   authorizeOwnerControl(identity: Parameters<ExecutiveService["authorizeOwnerControl"]>[0]): { allowed: boolean; reason: string } {
     return this.service.authorizeOwnerControl(identity);
@@ -117,6 +122,11 @@ export class ExecutiveTransport implements ToolTransport {
       case "get_value_report": {
         // WP-C4: tenanten kommer UTELUKKENDE fra den betrodde kontekst-identiteten (D-68), aldri fra parametre.
         const report = await this.service.getValueReport(identity.tenant_id);
+        return { data: report as unknown as JsonValue };
+      }
+      case "get_infra_status": {
+        // WP-E1: tenanten kommer UTELUKKENDE fra den betrodde kontekst-identiteten (D-68), aldri fra parametre.
+        const report = await this.service.getInfraStatus(identity.tenant_id);
         return { data: report as unknown as JsonValue };
       }
       case "get_connector_status": {
@@ -292,6 +302,14 @@ export function executiveToolDefinitions(transport: ExecutiveTransport): ToolDef
       "get_value_report",
       "Svar på «hva har du hjulpet meg med?»/«hvor mye bruker jeg deg?»/«hva er verdien?» fra EKTE tall (kun antall og tidspunkt - aldri innhold): bruk per verdiløkke (Daily Brief, oppfølging, jobber, samtaler, bekreftelser, kost) siste 7 og 30 døgn, pluss status for de sovende løkkene (Builder Loop-beredskap og driftsforslag). Det som ikke kan måles står som «ikke målbart», aldri som 0. Gjengi summary_no."
     ),
+    {
+      ...read(
+        "get_infra_status",
+        "Svar på «hva er status på driften?»/«er noe nede?»/«har vi åpne hendelser?»/«hvordan går det med skyen?» fra EKTE data: åpne hendelser (fase åpen/anerkjent/avbøtende, alvorlighet, hvor mye som er bekreftet vs. observert vs. påstått, siste endring), de tilkoblede skymålene (Cloudflare, Vercel, Google Cloud, Docker, Langfuse, Infisical, Postgres) med helse og siste journalførte endring, og om hendelsesprodusentene selv kjører. Ingen hemmeligheter eller hendelsestekst. Sier ifra når automatisk oppdagelse er AV (da betyr «ingen hendelser» kun «ingen registrert manuelt»). Ukjent vises som ukjent. Gjengi summary_no. Kun eieren får svar, og kun fra en signert enhetsøkt (nettleser/app) - aldri over tale eller Telegram."
+      ),
+      // Gjennomgang av PR #324 (M3/L4): eier OG signert økt FØR noe leses (samme port som kontrollsentrene) - avslaget er en vanlig `tool.denied`-revisjonsrad. Gjelder alle veier (`/infra/overview`, chat).
+      parameterAuthorizer: (_parameters, identity) => transport.authorizeInfraStatus(identity)
+    },
     read(
       "get_connector_status",
       "Les eierens integrasjons-oversikt: hver kjente connector (GitHub/Kalender/Gmail/Drive/Telegram/Vercel/modell-leverandører/finans), er den konfigurert (credential-presence, ALDRI selve verdien) og siste kjente tilkoblingshelse - D-211"

@@ -89,9 +89,10 @@ describe("eier-kun port (fail-closed)", () => {
     expect(readDef.parameterAuthorizer?.({}, owner).allowed).toBe(true);
   });
 
-  it("ingen annen executive-handling enn kontrollsenter-lesingen og avbryt har fått en slik port ved et uhell", () => {
+  it("ingen annen executive-handling enn kontrollsenter-lesingen, driftsstatusen og avbryt har fått en slik port ved et uhell", () => {
     const withPort = defsWith(new ExecutiveService(fakeGw, { controlCenters: ownerOnly })).filter((d) => d.parameterAuthorizer !== undefined).map((d) => d.action).sort();
-    expect(withPort).toEqual(["cancel_task", "get_control_center"]);
+    // `get_infra_status` fikk BEVISST samme lese-port som kontrollsentrene i gjennomgangen av PR #324 (L4/M3): eier + signert enhetsøkt, fail-closed (se `e1-review-l4-infra-status-gate.test.ts`).
+    expect(withPort).toEqual(["cancel_task", "get_control_center", "get_infra_status"]);
   });
 });
 

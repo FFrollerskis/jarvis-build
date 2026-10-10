@@ -70,9 +70,11 @@ describe("D-104: IncidentService - lifecycle + bevis (EKTE Postgres)", () => {
     expect(fetched?.title).toBe("API 500-feil");
   });
 
-  it("B: setStatus håndhever state-machine - ugyldig overgang kaster, endrer ingenting", async () => {
+  it("B: transition() håndhever state-machine - ugyldig overgang kaster, endrer ingenting", async () => {
     const incident = await incidents.createIncident(TENANT_A, "business", { title: "test" });
-    await expect(incidents.setStatus(TENANT_A, "business", incident.incident_id, "repair_in_progress")).rejects.toThrow();
+    await expect(
+      incidents.transition(TENANT_A, "business", incident.incident_id, "repair_in_progress", { kind: "owner", person_id: "person-a" }, { reason: "ugyldig hopp" })
+    ).rejects.toThrow();
     const unchanged = await incidents.getIncident(TENANT_A, "business", incident.incident_id);
     expect(unchanged?.status).toBe("open");
   });

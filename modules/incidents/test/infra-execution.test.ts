@@ -310,6 +310,26 @@ describe("D-105: kritisk infra-eksekusjonsjournal v2 (EKTE ToolGateway, in-memor
     expect(recovery.status).toBe("FAILED");
   });
 
+  it("H2 (JARVIS-068/TSK-033): recovery mot et ANNET containernavn enn den journalførte eksekusjonen nektes (recovery_target_mismatch) - ingen container røres", async () => {
+    const transport = new FakeDockerTransport();
+    const gateway = buildGateway(transport);
+    await executeInfraMutation({ pool: appPool, gateway }, identityA, {
+      tenant_id: TENANT_A, target: "jarvis-sentinel-h2", action: "redeploy_container", target_image: "alpine:3.19", idempotency_key: "infra-key-h2-1"
+    });
+    await executeInfraMutation({ pool: appPool, gateway }, identityA, {
+      tenant_id: TENANT_A, target: "jarvis-sentinel-h2", action: "redeploy_container", target_image: "alpine:3.20", idempotency_key: "infra-key-h2-2"
+    });
+    transport.seed("jarvis-sentinel-other", "alpine:9.9", "running");
+    const recovery = await attemptRecovery({ pool: appPool, gateway }, identityA, {
+      tenant_id: TENANT_A, tool_id: "docker", action: "redeploy_container", idempotency_key: "infra-key-h2-2",
+      parameters: { name: "jarvis-sentinel-other", image: "alpine:3.20" } // kallerens mål er ikke eksekusjonens mål
+    });
+    expect(recovery.status).toBe("FAILED");
+    expect(recovery.recovery_result).toMatchObject({ reason: "recovery_target_mismatch" });
+    expect(transport.containers.get("jarvis-sentinel-other")?.image).toBe("alpine:9.9"); // urørt
+    expect(transport.containers.get("jarvis-sentinel-h2")?.image).toBe("alpine:3.20"); // heller ikke det opprinnelige målet ble rullet tilbake
+  });
+
   it("I: InfraExecutionGate PAUSED blokkerer nye docker-mutasjoner (samme håndhevelse som github)", async () => {
     const transport = new FakeDockerTransport();
     const infraGate = new InfraExecutionGate();

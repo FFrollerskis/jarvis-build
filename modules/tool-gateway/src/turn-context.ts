@@ -45,8 +45,15 @@ export function createTurnContext(surface: Surface, userMessage: string): TurnCo
   return { user_message: userMessage, surface, taint, limits: SURFACE_LIMITS[surface], calls: { total: 0 } };
 }
 
+/**
+ * WP-E1 (UA-5, JARVIS-068): driftsstatus, åpne hendelser og skyen -> KUN `executive.get_infra_status` (per verktøy, ikke hele executive-familien). Etter sammenslåingen med D4/H0/C4 har familien så mange lesinger at de
+ * utkonkurrerte driftsstatusen innenfor `max_tools_per_round` når alle traff på samme familie-regex; et eget treff på nøyaktig dette verktøyet gjør utvalget både smalere og stabilt.
+ */
+const INFRA_STATUS_INTENT = /(åpne hendelser|hendelsesstatus|incident|driftsstatus|status på driften|infra-?status|skystatus|cloud-?status|er noe nede|hva er nede|produksjonsfeil|feilet utrulling|hvordan går det med skyen)/i;
+
 /** Intensjons-nøkkelord per handling. Kun handlinger som er tildelt flaten kan velges - dette er IKKE en autorisasjon, bare utvalg. */
 const INTENT_KEYWORDS: Readonly<Record<string, RegExp>> = {
+  "executive.get_infra_status": INFRA_STATUS_INTENT,
   "email.read_inbox": /(e-?post|\bmail\b|innboks|inbox|melding|brev)/i,
   "calendar.read_events": /(kalender|møte|avtale|timeplan|calendar|schedule|\bi dag\b|dagens|\bi morgen\b)/i,
   "github.read_issues": /(github|issue|repo\b|pull request|\bpr\b|\bbug\b|kodebase)/i,

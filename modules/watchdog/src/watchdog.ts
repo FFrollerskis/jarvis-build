@@ -109,6 +109,15 @@ export class WatchdogEmergencyAlertSink implements AlertSink {
   }
 }
 
+/**
+ * WP-E1 (JARVIS-068): resultatet av ETT FULLFØRT tikk - alle sjekker, ok og feil. Brukes av incident-produsenten (`@jarvis/incidents`, `WatchdogIncidentProducer`) til å åpne en hendelse for en
+ * feilende sjekk og til å løse den når en senere kjøring av SAMME sjekk lykkes (vakthundens egen kjøring er re-målingen). Et hoppet overlappende tikk produserer ingen rapport.
+ */
+export interface WatchdogTickReport {
+  at: string;
+  results: Array<{ check: string; ok: boolean; severity: Severity; message: string; runbook: string }>;
+}
+
 export interface HealthCheck {
   name: string;
   runbook: string;
@@ -133,6 +142,8 @@ export class Watchdog {
   private ticking = false;
   /** D-395 (JARVIS-039): siste sendte varsel per sjekk - et vedvarende avvik varslet tidligere HVERT tick (hvert minutt) i det uendelige. */
   private readonly lastAlert = new Map<string, { message: string; at: number }>();
+  /** WP-E1: valgfri observatør av hvert fullførte tikk. Feil i observatøren påvirker ALDRI vakthunden (logges, aldri kastet), og tikket venter ikke på den. */
+  private observer: ((report: WatchdogTickReport) => void | Promise<void>) | undefined;
 
   constructor(
     private readonly alerts: AlertSink,
@@ -146,6 +157,11 @@ export class Watchdog {
 
   register(check: HealthCheck): void {
     this.checks.push(check);
+  }
+
+  /** WP-E1: registrer (ÉN) observatør av fullførte tikk - se `WatchdogTickReport`. */
+  setObserver(observer: (report: WatchdogTickReport) => void | Promise<void>): void {
+    this.observer = observer;
   }
 
   /** Reversibelt tiltak (f.eks. restart av ÉN tjeneste), aldri destruktivt. */
@@ -168,6 +184,7 @@ export class Watchdog {
     this.ticking = true;
     try {
       const fired: Alert[] = [];
+      const report: WatchdogTickReport = { at: new Date().toISOString(), results: [] };
       for (const check of this.checks) {
         let result: { ok: boolean; severity: Severity; message: string };
         try {
@@ -183,6 +200,7 @@ export class Watchdog {
         } catch (err) {
           result = { ok: false, severity: "critical", message: `sjekk feilet: ${(err as Error).message}` };
         }
+        report.results.push({ check: check.name, ok: result.ok, severity: result.severity, message: result.ok ? "" : result.message, runbook: check.runbook });
         if (result.ok) {
           this.lastAlert.delete(check.name); // avviket er borte - neste avvik varsles umiddelbart
           continue;
@@ -223,6 +241,13 @@ export class Watchdog {
               msg: "watchdog_action_failed", check: check.name, error: (err as Error).message
             }));
           }
+        }
+      }
+      if (this.observer) {
+        try {
+          void Promise.resolve(this.observer(report)).catch((err) => console.error(JSON.stringify({ msg: "watchdog_observer_failed", error: (err as Error).message })));
+        } catch (err) {
+          console.error(JSON.stringify({ msg: "watchdog_observer_failed", error: (err as Error).message }));
         }
       }
       return fired;
