@@ -333,6 +333,22 @@ describe("H: klient som forsvinner midt i oppslag/oppkobling lekker ingen upstre
     expect(events.some((e) => e.event === "connect_allowed")).toBe(false); // aldri en tunnel, aldri et 200-svar til en klient som er borte
   });
 
+  it("klienten forsvinner i SAMME øyeblikk som DNS-oppslaget svarer (destroyed, men close ikke levert): ingen oppkobling forsøkes i det hele tatt", async () => {
+    let answer;
+    await startProxy({ resolve: () => new Promise((r) => { answer = () => r(["140.82.112.3"]); }), connect: tracked });
+    const client = net.connect(proxyPort, "127.0.0.1");
+    cleanup.push(client);
+    client.on("error", () => undefined);
+    client.on("connect", () => client.write(connectReq("github.com:443")));
+    for (let i = 0; i < 100 && answer === undefined; i += 1) await sleep(10);
+    expect(answer).toBeDefined();
+    for (const server of proxy.sockets) server.destroy();
+    answer();
+    await sleep(300);
+    expect(upstreams).toHaveLength(0); // proxyen sjekker clientSocket.destroyed før den dialer (close-hendelsen kommer først senere fra libuv)
+    expect(proxy.active).toBe(0);
+  });
+
   it("klienten forsvinner ETTER at tunnelen er etablert: upstream rives umiddelbart (ikke ved idle-tidsavbruddet)", async () => {
     await startProxy({ connect: tracked, idleTimeoutMs: 60_000 });
     const r = await rawRequest(connectReq("github.com:443"), { keepOpen: true });
