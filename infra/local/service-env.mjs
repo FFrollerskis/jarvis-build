@@ -326,7 +326,10 @@ export const SERVICE_ENV = {
     // WP-C2 (OPS-RUNTIME): ekstern oppetids-heartbeat (AV som standard; pinger kun mens en lokal selvsjekk består) og stien til den SKRIVEBESKYTTEDE backup-statusfilen
     // (monteres `:ro` med infra/backup/docker-compose.backup-status.yml - aldri selve backup-mappen).
     "JARVIS_UPTIME_HEARTBEAT_URL", "JARVIS_UPTIME_HEARTBEAT_INTERVAL_SEC", "JARVIS_BACKUP_STATUS_FILE"],
-  worker: [...CORE_ENV.filter((n) => !WORKER_EXCLUDES.has(n)), ...MODEL_ENV, ...WORKER_CONNECTOR_ENV, "LANGFUSE_BASE_URL", "JARVIS_TRACE_FILE", "JARVIS_CLAUDE_BIN", "JARVIS_JOB_RUNNER", "JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY"],
+  worker: [...CORE_ENV.filter((n) => !WORKER_EXCLUDES.has(n)), ...MODEL_ENV, ...WORKER_CONNECTOR_ENV, "LANGFUSE_BASE_URL", "JARVIS_TRACE_FILE", "JARVIS_CLAUDE_BIN", "JARVIS_JOB_RUNNER", "JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY",
+    // WP-C1 (D-32 / Q-45a): vertsside job-runner (JARVIS_JOB_RUNNER=host). Socket-katalogen og tokenfilen monteres inn via infra/job-runner/docker-compose.job-runner.yml
+    // (valgfri override) - uten den, og med tomme verdier her, feiler hver kodejobb lukket som før.
+    "JARVIS_JOB_RUNNER_SOCKET", "JARVIS_JOB_RUNNER_TOKEN_FILE"],
   // migrate: engangs-jobb med ADMIN-rollen (CREATE ROLE/EXTENSION/RLS) - IKKE en runtime-tjeneste. Får den distinkte
   // runtime-rollens passord for å opprette rollen, men ingen connector-/modellnøkler.
   migrate: ["JARVIS_DB_ADMIN_USER", "JARVIS_DB_ADMIN_PASSWORD", "JARVIS_DB_USER", "JARVIS_DB_PASSWORD", "JARVIS_ENV", "JARVIS_TENANT_ID", "JARVIS_OWNER_PERSON_ID", "JARVIS_OWNER_NAME"],

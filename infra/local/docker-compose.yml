@@ -25,6 +25,8 @@
 #    allowlistet proxy inne i gatewayen (RFC1918/loopback/link-local/metadata blokkert).
 #  - KODEJOBBER kjører IKKE i worker-containeren: ingen Docker-socket monteres, `JARVIS_JOB_RUNNER` er ikke satt ->
 #    HVER kodejobb feiler lukket (`job_container_runner_not_configured`) til en vertsside runner finnes.
+#    WP-C1: den vertsside runneren er ops/job-runner (valgfri override infra/job-runner/docker-compose.job-runner.yml monterer KUN
+#    socket-katalogen + tokenfilen; fortsatt ingen Docker-socket). Se docs/runbooks/JOB_RUNNER.md.
 #  Strukturelt vakt: ops/security/check-containment.mjs + modules/core/test/remediation-2-compose-isolation.test.ts.
 #  seccomp-profilen under refereres relativt til compose-filens mappe (Compose v2 løser stien mot prosjektmappen), så
 #  `docker compose -f infra/local/docker-compose.yml ...` virker uavhengig av arbeidskatalog.
@@ -522,6 +524,8 @@ services:
       JARVIS_JOB_IMAGE: "${JARVIS_JOB_IMAGE:-}"
       JARVIS_JOB_NETWORK: "${JARVIS_JOB_NETWORK:-}"
       JARVIS_JOB_RUNNER: "${JARVIS_JOB_RUNNER:-}"
+      JARVIS_JOB_RUNNER_SOCKET: "${JARVIS_JOB_RUNNER_SOCKET:-}"
+      JARVIS_JOB_RUNNER_TOKEN_FILE: "${JARVIS_JOB_RUNNER_TOKEN_FILE:-}"
       JARVIS_JOB_TOOL_TURN_MODEL: "${JARVIS_JOB_TOOL_TURN_MODEL:-}"
       JARVIS_LOCAL_LLM_THINKING: "${JARVIS_LOCAL_LLM_THINKING:-}"
       JARVIS_MEMORY_AUTO_APPROVE: "${JARVIS_MEMORY_AUTO_APPROVE:-}"

@@ -2,8 +2,17 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  ENV_NAME, FORBIDDEN_ENV, JobContainerConfigError, buildJobContainerCreateArgs, validateJobContainerPolicy, type JobContainerPolicy
+} from "./job-container-spec.mjs";
+import { HostJobRunnerConfigError, HostJobSandboxRunner, type HostGitCredentialSource } from "./host-job-runner.ts";
 import { execProcess } from "./process-exec.ts";
 import type { ExecResult, Sandbox, SandboxRunner } from "./sandbox.ts";
+
+// WP-C1: flaggene (policy-validering + `docker create`-argv) bor i EN delt .mjs-fil, slik at worker-siden og den vertsside runneren
+// (`ops/job-runner/`) aldri kan drive fra hverandre. Re-eksporteres uendret herfra (samme funksjonsobjekter).
+export { JobContainerConfigError, buildJobContainerCreateArgs, validateJobContainerPolicy };
+export type { JobContainerPolicy };
 
 /**
  * Remediering del 2 (JARVIS-010): eksplisitt PER-JOBB CONTAINERGRENSESNITT for kodejobber.
@@ -18,111 +27,12 @@ import type { ExecResult, Sandbox, SandboxRunner } from "./sandbox.ts";
  *   - INGEN arvede secrets: env er en eksplisitt liste; verdier sendes aldri i argv; vault-/DB-nøkler nektes,
  *   - kill av HELE prosessgruppen (container-PID-namespace) ved timeout og ved dispose.
  *
- * Finnes ikke runneren (`JARVIS_JOB_RUNNER=container` + gyldig konfig), er den ENESTE tilgjengelige
+ * Finnes ikke en gyldig runner (`JARVIS_JOB_RUNNER=host|container` + gyldig konfig), er den ENESTE tilgjengelige
  * implementasjonen `FailClosedSandboxRunner`: jobben feiler med `job_container_runner_not_configured` -
- * den faller ALDRI tilbake til prosess-sandbox. Worker-containeren har ikke Docker-socket; en reell
- * runner krever en egen, vertsside runner-tjeneste (se docs/remediation/PHASE_2_GATE.md, `BLOCKED_EXTERNAL`).
+ * den faller ALDRI tilbake til prosess-sandbox. Worker-containeren har ikke Docker-socket; veien som er bygget for dette er den
+ * tilsynte vertstjenesten `ops/job-runner/` (WP-C1, `JARVIS_JOB_RUNNER=host`, se host-job-runner.ts og docs/runbooks/JOB_RUNNER.md).
+ * `container`-modusen under krever docker i SAMME prosess og er ikke anbefalt.
  */
-
-const DIGEST_PINNED_IMAGE = /^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$/;
-const NETWORK_NAME = /^[a-z0-9][a-z0-9_.-]{0,62}$/;
-const FORBIDDEN_NETWORKS: ReadonlySet<string> = new Set(["host", "bridge", "none", "default"]);
-const SAFE_PATH = /^\/[A-Za-z0-9._/-]+$/;
-const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-/** Navn som ALDRI kan inn i en jobb-container (vault-hovednøkkel, DB-superbruker, observability-hemmeligheter m.m.). */
-const FORBIDDEN_ENV =
-  /^(INFISICAL_|JARVIS_DB_|POSTGRES_|PG|NEXTAUTH_|SALT$|LANGFUSE_|AUTH_SECRET$|ENCRYPTION_KEY$|JARVIS_BROWSER_GATEWAY_TOKEN_SECRET$)|(_ENCRYPTION_KEY|_MASTER_KEY|_PRIVATE_KEY_PEM)$/;
-
-export class JobContainerConfigError extends Error {
-  constructor(readonly reason: string) {
-    super(`job_container_config_invalid:${reason}`);
-    this.name = "JobContainerConfigError";
-  }
-}
-
-export interface JobContainerPolicy {
-  /** Image PINNET til digest (`...@sha256:<64 hex>`). Flytende tagger nektes. */
-  image: string;
-  /** Eksisterende docker-nettverk for jobber (internal; når kun egress-proxyen). `host`/`bridge`/`none` nektes. */
-  network: string;
-  /** `http(s)://host:port` til egress-proxyen med vert-allowlist (github.com, api.anthropic.com). */
-  egressProxyUrl: string;
-  user?: string;
-  memory?: string;
-  cpus?: string;
-  pidsLimit?: number;
-  tmpfsSize?: string;
-  dockerBin?: string;
-  /** KUN tester: tillat uten digest. */
-  allowUnpinnedImage?: boolean;
-}
-
-export function validateJobContainerPolicy(policy: JobContainerPolicy): void {
-  if (!(policy.allowUnpinnedImage === true) && !DIGEST_PINNED_IMAGE.test(policy.image)) {
-    throw new JobContainerConfigError("image_not_digest_pinned");
-  }
-  if (!NETWORK_NAME.test(policy.network) || FORBIDDEN_NETWORKS.has(policy.network)) {
-    throw new JobContainerConfigError("network_must_be_a_dedicated_jobs_network");
-  }
-  let proxy: URL;
-  try {
-    proxy = new URL(policy.egressProxyUrl);
-  } catch {
-    throw new JobContainerConfigError("egress_proxy_url_invalid");
-  }
-  if (!(proxy.protocol === "http:" || proxy.protocol === "https:") || proxy.username !== "" || proxy.password !== "") {
-    throw new JobContainerConfigError("egress_proxy_url_invalid");
-  }
-  const user = policy.user ?? "10001:10001";
-  if (!/^\d+:\d+$/.test(user) || user.startsWith("0:") || user === "0") {
-    throw new JobContainerConfigError("user_must_be_non_root_numeric");
-  }
-}
-
-/** Ren, deterministisk bygging av `docker create`-argv. Returnerer aldri hemmelige VERDIER - kun env-NAVN. */
-export function buildJobContainerCreateArgs(
-  policy: JobContainerPolicy,
-  job: { containerName: string; workdir: string; envNames: readonly string[] }
-): string[] {
-  validateJobContainerPolicy(policy);
-  if (!SAFE_PATH.test(job.workdir) || job.workdir.includes("..")) {
-    throw new JobContainerConfigError("workdir_path_unsafe");
-  }
-  if (!/^jarvis-job-[a-f0-9-]{36}$/.test(job.containerName)) {
-    throw new JobContainerConfigError("container_name_invalid");
-  }
-  for (const name of job.envNames) {
-    if (!ENV_NAME.test(name) || FORBIDDEN_ENV.test(name)) {
-      throw new JobContainerConfigError(`env_name_forbidden:${name}`);
-    }
-  }
-  const proxy = policy.egressProxyUrl;
-  return [
-    "create",
-    "--name", job.containerName,
-    "--init", // PID 1 høster zombier og videresender signaler
-    "--read-only",
-    "--tmpfs", `/tmp:rw,noexec,nosuid,nodev,size=${policy.tmpfsSize ?? "256m"}`,
-    "--tmpfs", `/home/job:rw,noexec,nosuid,nodev,size=${policy.tmpfsSize ?? "256m"},uid=10001,gid=10001`,
-    "--mount", `type=bind,source=${job.workdir},target=/work`,
-    "--workdir", "/work",
-    "--user", policy.user ?? "10001:10001",
-    "--cap-drop", "ALL",
-    "--security-opt", "no-new-privileges:true",
-    "--memory", policy.memory ?? "1g",
-    "--memory-swap", policy.memory ?? "1g",
-    "--cpus", policy.cpus ?? "1.0",
-    "--pids-limit", String(policy.pidsLimit ?? 256),
-    "--network", policy.network,
-    "--label", "jarvis.role=job",
-    "-e", `HTTP_PROXY=${proxy}`, "-e", `HTTPS_PROXY=${proxy}`, "-e", `http_proxy=${proxy}`, "-e", `https_proxy=${proxy}`,
-    "-e", "NO_PROXY=", "-e", "no_proxy=",
-    "-e", "HOME=/home/job",
-    ...job.envNames.flatMap((name) => ["-e", name]),
-    policy.image,
-    "sleep", "infinity"
-  ];
-}
 
 export interface DockerExecResult {
   status: number | null;
@@ -221,13 +131,38 @@ export class FailClosedSandboxRunner implements SandboxRunner {
 }
 
 /**
- * Velger kodejobb-runner fra miljøet. `JARVIS_JOB_RUNNER=container` + gyldig `JARVIS_JOB_IMAGE` (digest-pinnet),
- * `JARVIS_JOB_NETWORK` og `JARVIS_JOB_EGRESS_PROXY` gir `DockerJobSandboxRunner`; ALT annet - inkludert det
- * gamle `JARVIS_SANDBOX=process|docker` - gir `FailClosedSandboxRunner`. Aldri en stille nedgradering.
+ * Velger kodejobb-runner fra miljøet. To godkjente veier, alt annet - inkludert det gamle `JARVIS_SANDBOX=process|docker` - gir
+ * `FailClosedSandboxRunner`. Aldri en stille nedgradering.
+ *
+ *  - `JARVIS_JOB_RUNNER=host` (ANBEFALT, WP-C1): worker snakker med den vertsside runner-tjenesten (`ops/job-runner/`) over et Unix-socket
+ *    (`JARVIS_JOB_RUNNER_SOCKET`) med bearer-token fra fil (`JARVIS_JOB_RUNNER_TOKEN_FILE`). Worker trenger INGEN Docker-socket, og
+ *    git-credentialen forlater aldri vertstjenesten. Image/nettverk/proxy/grenser bestemmes av vertsadmins konfigfil - ikke av worker-env.
+ *  - `JARVIS_JOB_RUNNER=container`: `DockerJobSandboxRunner` kjører `docker` i SAMME prosess og krever derfor en docker-klient + socket
+ *    i worker-containeren (som bevisst ikke finnes). Beholdt uendret for tilfeller der worker kjøres direkte på en vert; IKKE anbefalt.
+ *    Krever digest-pinnet `JARVIS_JOB_IMAGE`, `JARVIS_JOB_NETWORK` og `JARVIS_JOB_EGRESS_PROXY`.
+ *
+ * `options.gitCredentialSource` (WP-C3, kun `host`): kilde til kortlevde, repo-scopede git-tokens som sendes i hver klone-/publish-forespørsel. Settes KUN
+ * når GitHub App-autentisering faktisk er aktiv OG vertsadmin har satt repoet til `source: request` i runner-konfigen; ellers avviser runneren tokenet
+ * (`git_token_not_accepted`) og jobben feiler lukket. Ignoreres av `container`-modusen (den har ingen vertsside runner).
  */
-export function resolveJobSandboxRunner(env: Record<string, string | undefined> = process.env): SandboxRunner {
-  if (env["JARVIS_JOB_RUNNER"] !== "container") {
-    return new FailClosedSandboxRunner("JARVIS_JOB_RUNNER_not_container");
+export function resolveJobSandboxRunner(
+  env: Record<string, string | undefined> = process.env,
+  options: { gitCredentialSource?: HostGitCredentialSource } = {}
+): SandboxRunner {
+  const mode = env["JARVIS_JOB_RUNNER"];
+  if (mode === "host") {
+    try {
+      return new HostJobSandboxRunner({
+        socketPath: env["JARVIS_JOB_RUNNER_SOCKET"] ?? "",
+        tokenFile: env["JARVIS_JOB_RUNNER_TOKEN_FILE"] ?? "",
+        ...(options.gitCredentialSource !== undefined ? { gitCredentialSource: options.gitCredentialSource } : {})
+      });
+    } catch (err) {
+      return new FailClosedSandboxRunner(err instanceof HostJobRunnerConfigError ? err.reason : "invalid_configuration");
+    }
+  }
+  if (mode !== "container") {
+    return new FailClosedSandboxRunner("JARVIS_JOB_RUNNER_not_container_or_host");
   }
   const policy: JobContainerPolicy = {
     image: env["JARVIS_JOB_IMAGE"] ?? "",

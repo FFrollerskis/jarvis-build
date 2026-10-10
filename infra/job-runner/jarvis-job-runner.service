@@ -1,0 +1,81 @@
+# WP-C1 (D-32 / Q-45a): vertsside job-runner for kodejobber. Installeres til /etc/systemd/system/ av infra/job-runner/install-host.sh.
+#
+# VIKTIG - tillitsgrense: brukeren er i docker-gruppen (SupplementaryGroups=docker) og er dermed EFFEKTIVT ROOT på verten via docker-daemonen.
+# systemd-herdingen under begrenser derfor kun hva SELVE Node-prosessen kan gjøre; sikkerheten hviler på at koden i ops/job-runner/ aldri
+# tar imot flagg, mounts, image, nettverk eller stier fra API-et (se docs/runbooks/JOB_RUNNER.md, «Tillitsmodell»). Koden installeres
+# root-eid og skrivebeskyttet for tjenestebrukeren, slik at en kompromittert prosess ikke kan endre sin egen kode eller policy.
+[Unit]
+Description=Jarvis job-runner (vertsside kodejobb-containere, WP-C1)
+Documentation=https://github.com/tsworkflow/jarvisbuild/blob/main/docs/runbooks/JOB_RUNNER.md
+After=network-online.target docker.service jarvis-egress-proxy.service
+Wants=network-online.target
+# Hard avhengighet av proxyen: dens ExecStartPre (setup-network.sh) oppretter jobbnettverket OG brannmurreglene. Feiler den, starter runneren IKKE
+# (ellers kunne jobber kjøre mot et nett uten INPUT-reglene som holder containerne unna vertstjenestene).
+Requires=docker.service jarvis-egress-proxy.service
+ConditionPathExists=/etc/jarvis/job-runner.json
+
+[Service]
+Type=simple
+# Primærgruppen er socket-gruppen: medlemmer (worker-containeren via group_add) kan koble til socketen; ingen andre.
+User=jarvis-runner
+Group=jarvis-job-clients
+SupplementaryGroups=docker
+Environment=JARVIS_JOB_RUNNER_CONFIG=/etc/jarvis/job-runner.json
+WorkingDirectory=/opt/jarvis-job-runner
+ExecStart=/usr/bin/env node /opt/jarvis-job-runner/ops/job-runner/server.mjs
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=90
+# `systemctl reload jarvis-job-runner` = SIGHUP: leser bearer-tokenet på nytt uten omstart (kjørende jobber berøres ikke). Konfigfilen leses kun ved start.
+ExecReload=/bin/kill -HUP $MAINPID
+# /var/lib/jarvis-job-runner (jobbkataloger OG socket-katalogen sock/) eies av tjenestebrukeren. Socket-katalogen er BEVISST persistent og ligger IKKE under
+# /run med RuntimeDirectory=: systemd fjerner en slik katalog ved hver stopp/omstart, og en bind-mount i worker-containeren peker på selve katalog-inoden
+# (den ville pekt på en slettet katalog til worker ble startet på nytt). install-host.sh oppretter katalogen; runneren sletter den aldri.
+StateDirectory=jarvis-job-runner
+StateDirectoryMode=0700
+UMask=0077
+
+# --- herding ---
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ReadWritePaths=/var/lib/jarvis-job-runner
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# Node/V8 trenger JIT (skrivbart+kjørbart minne): MemoryDenyWriteExecute kan derfor ikke slås på.
+MemoryDenyWriteExecute=no
+LimitNOFILE=4096
+# Ingen minnedump: prosessminnet inneholder bearer-token, git-PAT og kortlevde installasjonstokens (JavaScript kan ikke nullstille strenger).
+LimitCORE=0
+TasksMax=512
+# Minne (A-F3): agenten velger innholdet i pakken vertens git parser. En delta-bombe (16 kB pakke som ekspanderer til 1,5 GiB) tok i en måling all ledig vertsminne. To lag: (1) hver git som
+# leser agentens objekter kjører under `prlimit --as` (runner.git_memory_limit_mb, standard 1024) og feiler rent; (2) enheten som helhet (Node + alle git-barn) har et tak her.
+# MemoryHigh strupes først (reclaim) og MemoryMax er det harde taket; ingen swap (en bombe skal ikke begynne å swappe NAS-en i senk). Tallene dekker standardoppsettet (2 samtidige jobber,
+# 64 MiB bundle): øker du max_concurrent_jobs, publish.max_bundle_bytes eller git_memory_limit_mb, øk disse tilsvarende. OOMPolicy=continue: kjernens OOM-killer tar det største barnet (git),
+# og runneren overlever (publish feiler med bundle_fetch_failed) i stedet for at hele enheten stoppes og ALLE kjørende jobber ryddes. NOT VERIFIED mot ekte systemd/cgroup: sjekk med
+# `systemctl show jarvis-job-runner -p MemoryMax -p MemoryHigh -p MemorySwapMax -p OOMPolicy` (runbooken, kapittel 16 punkt 4).
+MemoryAccounting=yes
+MemoryHigh=1536M
+MemoryMax=2G
+MemorySwapMax=0
+OOMPolicy=continue
+
+[Install]
+WantedBy=multi-user.target
