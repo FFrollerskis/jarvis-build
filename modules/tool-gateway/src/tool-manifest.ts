@@ -107,6 +107,7 @@ const EFFECT_OVERRIDES: Record<string, Effect> = {
   [k("executive", "get_self_diagnosis")]: "read",
   [k("executive", "get_slo_report")]: "read",
   [k("executive", "get_evolution_report")]: "read",
+  [k("executive", "get_ai_mesh_status")]: "read",
   [k("executive", "get_control_center")]: "read",
   [k("executive", "get_value_report")]: "read",
   // WP-D2: «resolve» står i READ_VERB (DNS-/oppslagsbetydning), men å lukke en open loop er en SKRIVING (klasse C).

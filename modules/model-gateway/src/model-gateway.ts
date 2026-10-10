@@ -21,8 +21,9 @@ import {
 import { BudgetGuard, type BudgetConfig, DEFAULT_BUDGET } from "./budget-guard.ts";
 import { classifyCompletionOutcome, computeAdaptiveRetryMaxTokens, type CompletionOutcome } from "./completion-outcome.ts";
 import { CapabilityRegistry, type ModelCapability } from "./capability-registry.ts";
-import { ProviderHealthTracker, type ProviderHealthDetail, type ProviderHealthState } from "./provider-health.ts";
+import { ProviderHealthTracker, type ProviderHealthDetail, type ProviderHealthDetails, type ProviderHealthState } from "./provider-health.ts";
 import { AiRouter, type RoutePlan } from "./router.ts";
+import { meshToolsVerifiedFromEnv } from "./mesh-verification.ts";
 import { assertExplicitPricing, costOre as computeCostOre, DEFAULT_PRICING, type PricingTable } from "./pricing.ts";
 import { modelCatalogFromEnv, type CatalogModel, type ModelTier } from "./model-catalog.ts";
 import { describeTask, HeuristicRoutingAdvisor, selectModelForTier, type RoutingAdvisor } from "./routing-advisor.ts";
@@ -98,6 +99,12 @@ export class BudgetExceededError extends Error {
   }
 }
 
+/** WP-D4 (JARVIS-033): ett mislykket leverandørforsøk (se `CompleteInput.onAttemptFailed`). Kun leverandørnavn og feilklasse - aldri innhold eller feilmelding. */
+export interface AttemptFailure {
+  provider: string;
+  kind: string;
+}
+
 export interface CompleteInput {
   tenant_id: string;
   session_id?: string;
@@ -119,6 +126,16 @@ export interface CompleteInput {
   paid_models_allowed?: boolean;
   /** D-106: se `RouteInput.providerPreference`. */
   providerPreference?: string[];
+  /** WP-D4 (JARVIS-033): se `RouteInput.preferenceFailover` - preferanselisten blir en kandidatkjede med failover inne i gatewayen. Udefinert = uendret enkeltvalg. */
+  preferenceFailover?: boolean;
+  /** WP-D4 (L6): se `RouteInput.excludeProviders` - leverandører som allerede er forsøkt i turen og ikke skal prøves igjen i den scorede ruten (samtalemotorens siste reserve). Udefinert = uendret. */
+  excludeProviders?: readonly string[];
+  /**
+   * WP-D4 (JARVIS-033): kalles for HVERT mislykket leverandørforsøk i hovedkallet (aldri critic, aldri brukeravbrudd) - også når en senere kandidat eller retry lykkes, og også når hele planen til slutt feiler.
+   * Gir flatene (chatten) synlighet i reservebruk: hvem som ikke svarte før noen gjorde det (hvem som svarte står i resultatet). Gjennom verktøyløkker rapporteres alle runder, ikke bare den siste.
+   * En feil i lytteren logges og teller aldri som leverandørfeil.
+   */
+  onAttemptFailed?: (failure: AttemptFailure) => void;
   /**
    * D-106 Council reliability (§ARCHITECTURE DECISION): eksplisitt, generisk
    * arbeidsmengde-spesifikk timeout-overstyring for DETTE kallet (millisekunder).
@@ -156,6 +173,11 @@ export interface GatewayOptions {
    * Udefinert = ingen venting (uendret oppførsel, f.eks. i worker-prosessen som ikke ser API-ets chat).
    */
   priorityGate?: InteractivePriorityGate;
+  /**
+   * WP-D4 (M3, gjennomgang av PR #315): leverandører eieren har erklært LIVE-verifisert for verktøykall (og Kimi for streaming) etter `mesh-live-smoke.ts --tools`. AUTO-ruting bruker ikke Kimi/Hermes til verktøyløkker før de står her;
+   * eksplisitte valg (`provider`, `providerPreference`) er uendret. Udefinert = leses fra `JARVIS_MESH_TOOLS_VERIFIED` (standard tom) - samme kilde i api OG worker, så bakgrunnsjobber og D-404-omkjøringen følger det samme.
+   */
+  meshToolsVerified?: Iterable<string>;
   /**
    * WP-H0 / JARVIS-087: eierens pause eller tilbakekall av en MODELLLEVERANDØR. Kilden leses LIVE ved hvert kall (varig og delt mellom api og worker), så en pause virker umiddelbart og uten omstart.
    * Utelatt = ingen leverandør er pauset (uendret oppførsel, f.eks. i tester). Se `ProviderPauseSource`.
@@ -272,6 +294,21 @@ export function meshRouterState(providers: Array<{ configured: boolean; state: P
   return usable.some((p) => p.state === "DEGRADED" || p.state === "RATE_LIMITED" || p.state === "UNAVAILABLE") ? "DEGRADED" : "HEALTHY";
 }
 
+/** WP-D4: detaljert, hemmelighetsfri leverandørstatus (kun tall, tilstand og feilklasse) til `executive.get_ai_mesh_status`. Runtime i DENNE prosessen - nullstilles ved omstart. */
+export interface MeshProviderDetail extends ProviderHealthDetails {
+  provider: string;
+  model: string;
+  /** Kan brukes NÅ: nøkkel/URL er satt (presence - aldri verdien) OG eieren har ikke pauset leverandøren (WP-H0). */
+  configured: boolean;
+  /** WP-H0: eieren har pauset/tilbakekalt leverandøren (siste kjente tilstand i denne prosessen). Da er `configured` false selv om nøkkel/URL er satt; `state` er likevel den faktiske helsen. */
+  paused?: boolean;
+  locality: "local" | "cloud";
+  capabilities: ModelCapability[];
+  hosted_free_tier: boolean;
+  /** M3: capabilities som er PÅSTÅTT men ikke live-verifisert og som AUTO-ruting derfor ikke bruker på tillit (tom = alt påstått brukes). Fjernes ved `JARVIS_MESH_TOOLS_VERIFIED=<leverandør>`. */
+  auto_unverified?: ModelCapability[];
+}
+
 export interface MeshStatus {
   providers: MeshProviderStatus[];
   /** D-395 (JARVIS-078): beregnet fra faktisk providerhelse (tidligere en hardkodet «HEALTHY»). */
@@ -330,10 +367,13 @@ export class ModelGateway {
   private readonly advisorMode: "off" | "shadow" | "active";
   readonly health = new ProviderHealthTracker();
   private readonly router: AiRouter;
+  private readonly toolsVerified: ReadonlySet<string>;
   private readonly byName = new Map<string, ModelProviderAdapter>();
   /** Runtime-evidens for /status (§25): satt først når hendelsen faktisk har skjedd. */
   private crossProviderFallbackSeen = false;
   private criticRunSeen = false;
+  /** WP-D4: antall leverandørkall som pågår akkurat nå i denne prosessen (til å skille parallell delegering fra enkeltkall i latensmålingen). */
+  private inFlightCalls = 0;
   /**
    * WP-H0: siste LESTE eier-pause (se `ProviderPauseSource`). Oppdateres ved hvert modellkall; synkrone lesere (`listConfiguredProviders`, `meshStatus`) bruker den - de er kun visning/rådgivende,
    * håndhevelsen skjer i `livePauses()` ved hvert kall.
@@ -353,7 +393,9 @@ export class ModelGateway {
     this.pricing = opts.pricing ?? DEFAULT_PRICING;
     // JARVIS-006: ingen registrert modellprofil får falle til `default_rate`.
     assertExplicitPricing(this.pricing, this.registry.list());
-    this.router = new AiRouter(this.registry, this.health);
+    // M3 (gjennomgang av PR #315): leverandørene eieren har erklært live-verifisert for verktøykall/streaming (`JARVIS_MESH_TOOLS_VERIFIED`). Standard tom: AUTO-ruting velger ikke Kimi/Hermes til verktøyløkker.
+    this.toolsVerified = new Set(opts.meshToolsVerified ?? meshToolsVerifiedFromEnv());
+    this.router = new AiRouter(this.registry, this.health, this.toolsVerified);
     this.advisor = opts.advisor ?? new HeuristicRoutingAdvisor();
     this.catalog = opts.catalog ?? modelCatalogFromEnv();
     const envMode = process.env["JARVIS_MODEL_ADVISOR"]?.trim().toLowerCase();
@@ -540,6 +582,8 @@ export class ModelGateway {
         ...(input.providerPreference !== undefined
           ? { providerPreference: input.providerPreference }
           : {}),
+        ...(input.preferenceFailover !== undefined ? { preferenceFailover: input.preferenceFailover } : {}),
+        ...(input.excludeProviders !== undefined ? { excludeProviders: input.excludeProviders } : {}),
         needs_structured: Boolean(input.request.structured_schema)
       },
       this.providerRuntimes(paused)
@@ -573,6 +617,8 @@ export class ModelGateway {
     const baseRequest = requestOverride ?? input.request;
     const failedProviders: string[] = [];
     let lastError: Error | null = null;
+    // WP-D4 (M2): preferansemedlemmer som ble hoppet over fordi helsen er UNAVAILABLE er reservebruk som aldri ble et forsøk - flaten skal likevel få vite det.
+    for (const name of plan.unavailable ?? []) this.notifyAttemptFailed(input, name, "unavailable", isCritic);
     // D-441: retry-kallet (`adapter.complete`) tar ikke imot et avbruddssignal, så en avbrutt tur (barge-in, lukket SSE) må sjekkes eksplisitt FØR et nytt betalt kall
     // starter og FØR et svar spilles av - ellers lever en «zombie»-generering videre og et avbrutt svar lagres som et vanlig svar (D-30: ingen zombie-generering).
     const throwIfCancelled = (adapterName: string): void => {
@@ -598,6 +644,9 @@ export class ModelGateway {
       const maxTries = 2; // 1 + maks én retry for transient/invalid_response på samme provider
       for (let attempt = 1; attempt <= maxTries; attempt++) {
         const attemptStart = Date.now();
+        // WP-D4: startet dette kallet mens et annet leverandørkall pågikk (council/samarbeid kjører medlemmene parallelt)? Brukes kun til latensmålingen per leverandør (`ProviderHealthTracker.details`).
+        const concurrent = this.inFlightCalls > 0;
+        this.inFlightCalls += 1;
         let outputStarted = false;
         // D-441 (JARVIS-038): `usage`/`finish` holdes tilbake til utfallet er klassifisert. Leveres de FØR (som tidligere), er konsumenten allerede «ferdig» når et tomt
         // eller avkortet resultat avsløres, og vi kan verken prøve neste kandidat eller feile ærlig - da ble et tomt svar returnert som suksess.
@@ -643,7 +692,7 @@ export class ModelGateway {
           const latency = result.latency_ms ?? Date.now() - attemptStart;
           // D-106 PR #53: transport lyktes (ingen kastet feil) - health reflekterer
           // NÅBARHET, ikke innholdskvalitet (§3/§7 - dette gjelder uansett utfall under).
-          this.health.recordSuccess(adapter.name, latency);
+          this.health.recordSuccess(adapter.name, latency, concurrent);
           if (failedProviders.some((p) => p !== adapter.name)) {
             this.crossProviderFallbackSeen = true;
           }
@@ -655,6 +704,11 @@ export class ModelGateway {
               ...(failedProviders.length > 0 ? { fallback_from: failedProviders } : {})
             }
           };
+          // L10 (gjennomgang av PR #315): adapteren har nullet ugyldige tokentall (aldri en streng/NaN inn i kostformelen) og merket svaret - kostnaden er UKJENT, ikke gratis. Kun kategorier logges, aldri verdiene.
+          const usageProblems = result.metadata["usage_problems"];
+          if (Array.isArray(usageProblems) && usageProblems.length > 0) {
+            console.error(JSON.stringify({ msg: "provider_usage_invalid", provider: adapter.name, problems: usageProblems.filter((p): p is string => typeof p === "string").slice(0, 6) }));
+          }
           const outcome = classifyCompletionOutcome(result);
           // Brukbart (eller synlig output allerede levert): slipp ut de tilbakeholdte `usage`/`finish` nå, FØR den (tregere) DB-skrivingen under.
           if (streamOpts && (outcome === "USABLE_SUCCESS" || visibleOutputStarted)) {
@@ -702,7 +756,7 @@ export class ModelGateway {
                 };
                 const retryResult = await adapter.complete(retryRequest, streamOpts || isCritic ? undefined : input.onToken);
                 const retryLatency = retryResult.latency_ms ?? Date.now() - retryStart;
-                this.health.recordSuccess(adapter.name, retryLatency);
+                this.health.recordSuccess(adapter.name, retryLatency, concurrent);
                 retryResult.metadata = {
                   ...retryResult.metadata,
                   router: {
@@ -740,6 +794,7 @@ export class ModelGateway {
                 }
                 // Retry-forsøket var OGSÅ ubrukelig - ærlig feil, aldri stille suksess (§4).
                 lastError = new ProviderError(adapter.name, "invalid_response", `${adapter.name}_no_usable_output_after_retry`);
+                this.notifyAttemptFailed(input, adapter.name, "invalid_response", isCritic); // WP-D4 (M2): en reserve som tar over etter et ubrukelig svar skal være synlig
                 break;
               } catch (retryErr) {
                 // Selve retry-kallet feilet på transportnivå (§5: begge forsøk er ekte,
@@ -764,6 +819,8 @@ export class ModelGateway {
           // Ikke brukbart, ingen (eller uttømt) retry: gå videre til neste kandidat
           // UTEN å straffe provider-helsen (§3/§7 - transporten lyktes faktisk).
           lastError = new ProviderError(adapter.name, "invalid_response", `${adapter.name}_no_usable_output`);
+          // WP-D4 (M2): helsen straffes ikke, men reservebruk skal alltid være synlig (D-447) - også når reserven tok over etter et TOMT eller AVKORTET svar, ikke bare etter en kastet feil.
+          this.notifyAttemptFailed(input, adapter.name, "invalid_response", isCritic);
           break;
         } catch (err) {
           const pe =
@@ -801,6 +858,8 @@ export class ModelGateway {
           if (!(pe.retryableSameProvider && attempt < maxTries)) {
             break;
           }
+        } finally {
+          this.inFlightCalls -= 1;
         }
       }
       failedProviders.push(candidate.provider);
@@ -869,6 +928,8 @@ export class ModelGateway {
         ...(input.providerPreference !== undefined
           ? { providerPreference: input.providerPreference }
           : {}),
+        ...(input.preferenceFailover !== undefined ? { preferenceFailover: input.preferenceFailover } : {}),
+        ...(input.excludeProviders !== undefined ? { excludeProviders: input.excludeProviders } : {}),
         needs_structured: Boolean(input.request.structured_schema)
       },
       this.providerRuntimes(paused)
@@ -893,6 +954,9 @@ export class ModelGateway {
     let honestyApplied = false;
     let result: ModelResult | null = null;
     let lockedToLocal = false;
+    // WP-D4 (L11): hver leverandør som betjente en runde (i rekkefølge). Ruten kan skifte mellom runder (runde 1 reserve i skyen, siste runde den lokale som kom tilbake), og flaten skal få vite om en skyleverandør
+    // har rørt turen selv om den ikke var den som ga det siste svaret.
+    const servedProviders: string[] = [];
 
     for (let round = 1; round <= maxRounds; round++) {
       // Siste runde / loop-vern: uten tools MÅ modellen syntetisere tekstsvar av
@@ -915,6 +979,7 @@ export class ModelGateway {
       result = opts.onEvent && !failureGuard
         ? await this.stream(roundInput, opts.onEvent, opts.signal)
         : await this.complete(roundInput);
+      if (!servedProviders.includes(result.provider)) servedProviders.push(result.provider);
       if (opts.localStickiness && !lockedToLocal && this.servedLocally(result)) lockedToLocal = true;
       const calls = (result.tool_calls ?? []).slice(0, opts.maxCallsPerRound ?? Number.POSITIVE_INFINITY);
       if (calls.length === 0) {
@@ -958,7 +1023,8 @@ export class ModelGateway {
       result = { ...result, text: `${result.text}${partialNote}`, metadata: { ...result.metadata, tool_honesty: "partial" } };
       opts.onEvent?.({ type: "text_delta", text: partialNote });
     }
-    result.metadata = { ...result.metadata, tool_rounds: exchanges.length };
+    // `served_providers` settes kun når FLERE leverandører betjente turen (vanlig tur: én leverandør, metadata uendret).
+    result.metadata = { ...result.metadata, tool_rounds: exchanges.length, ...(servedProviders.length > 1 ? { served_providers: servedProviders } : {}) };
     return result;
   }
 
@@ -1064,6 +1130,25 @@ export class ModelGateway {
       // Critic er kvalitetsforsterkning - feil her skal aldri velte primærsvaret.
       primary.metadata = { ...primary.metadata, critic_error: (err as Error).message.slice(0, 120) };
     }
+  }
+
+  /** WP-D4: detaljert status per registrert leverandør (også ikke-konfigurerte) til rapporten `executive.get_ai_mesh_status`. Ingen secrets - kun presence, tall og feilklasse. */
+  meshDetails(): MeshProviderDetail[] {
+    return [...this.providerRuntimes()].map(([name, rt]) => {
+      const profile = this.registry.profileOrGeneric(name, rt.model);
+      return {
+        provider: name,
+        model: rt.model,
+        configured: rt.configured,
+        ...(rt.paused ? { paused: true } : {}),
+        locality: profile.locality,
+        capabilities: [...profile.capabilities],
+        hosted_free_tier: profile.hosted_free_tier === true,
+        auto_unverified: this.toolsVerified.has(name) ? [] : [...(profile.live_unverified ?? [])],
+        // Helsen (`state`) ignorerer pausen (som i `meshStatus`): den sier hvordan leverandøren faktisk har det, ikke om eieren har stengt den.
+        ...this.health.details(name, rt.available)
+      };
+    });
   }
 
   /** Kompakt mesh-status for /status og /ai (§37-§38). Ingen secrets. */
@@ -1308,12 +1393,27 @@ export class ModelGateway {
     );
   }
 
+  /**
+   * WP-D4 (JARVIS-033, gjennomgang av PR #315 M2): meld ÉN kandidat som ikke svarte til flatens lytter (`CompleteInput.onAttemptFailed`). Brukes av ALLE veier der en kandidat ikke ble den som svarte: kastet feil
+   * (`recordFailedAttempt`), tomt/avkortet/ubrukelig svar (`executePlan`, «Ikke brukbart»-grenene - transporten lyktes, så helsen straffes ikke, men eieren skal likevel få vite at en reserve svarte) og en kandidat som
+   * ble hoppet over fordi helsen er UNAVAILABLE (`plan.unavailable`). Brukeravbrudd er ingen leverandørfeil, og criticen er en egen kjøring. En feil i lytteren er konsumentens og må aldri stoppe fallback-kjeden.
+   */
+  private notifyAttemptFailed(input: CompleteInput, provider: string, kind: string, critic: boolean): void {
+    if (critic || kind === "cancelled" || input.onAttemptFailed === undefined) return;
+    try {
+      input.onAttemptFailed({ provider, kind });
+    } catch (listenerError) {
+      console.error(JSON.stringify({ msg: "attempt_failed_listener_error", error: (listenerError as Error).message.slice(0, 120) }));
+    }
+  }
+
   private async recordFailedAttempt(
     input: CompleteInput,
     provider: string,
     err: ProviderError,
     critic: boolean
   ): Promise<void> {
+    this.notifyAttemptFailed(input, provider, err.kind, critic);
     try {
       await withTenantTransaction(this.opts.pool, input.tenant_id, (client) =>
         client.query(

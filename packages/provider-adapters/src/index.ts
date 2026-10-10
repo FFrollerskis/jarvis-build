@@ -8,4 +8,6 @@ export * from "./gemma.ts";
 export * from "./local-llm.ts";
 export * from "./kimi.ts";
 export * from "./hermes.ts";
+export * from "./hermes-tools.ts";
+export * from "./openai-compat-tools.ts";
 export * from "./tool-result-envelope.ts";

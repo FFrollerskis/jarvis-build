@@ -54,10 +54,10 @@ describe("D-404: streamet chat med «Gemma først»", () => {
 
   it("manglende evne, sensitivitet og paid_models_disabled får hver sin årsak", async () => {
     const calls: string[] = [];
-    // kimi mangler `streaming` i registeret => missing_capabilities
-    const gw1 = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [streamingAdapter("kimi", calls)] });
-    const e1 = await gw1.stream({ tenant_id: "t", purpose: "CHAT", providerPreference: ["kimi"], request: REQUEST }, () => undefined).catch((e: unknown) => e);
-    expect((e1 as Error).message).toContain("kimi:missing_capabilities=streaming");
+    // hermes mangler `streaming` i registeret (kimi har det siden WP-D4) => missing_capabilities
+    const gw1 = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [streamingAdapter("hermes", calls)] });
+    const e1 = await gw1.stream({ tenant_id: "t", purpose: "CHAT", providerPreference: ["hermes"], request: REQUEST }, () => undefined).catch((e: unknown) => e);
+    expect((e1 as Error).message).toContain("hermes:missing_capabilities=streaming");
     // betalt sky-leverandør med paid_models_allowed=false
     const gw2 = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [streamingAdapter("anthropic", calls)] });
     const e2 = await gw2.stream({ tenant_id: "t", purpose: "CHAT", paid_models_allowed: false, providerPreference: ["anthropic"], request: REQUEST }, () => undefined).catch((e: unknown) => e);

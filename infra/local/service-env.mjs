@@ -88,6 +88,13 @@ export const MODEL_ENV = [
   "JARVIS_MEMORY_RETENTION_SWEEP_HOUR",
   "JARVIS_MODEL_TIMEOUT_MS",
   "JARVIS_OLLAMA_URL",
+  // WP-D4 (JARVIS-036): valgfri modell-/endepunktoverstyring for Kimi og Hermes (tom = adapterens standard).
+  "JARVIS_KIMI_MODEL",
+  "JARVIS_KIMI_URL",
+  "JARVIS_HERMES_MODEL",
+  "JARVIS_HERMES_URL",
+  // WP-D4 (gjennomgang av PR #315, M3): leverandører eieren har erklært LIVE-verifisert for verktøykall/streaming etter `mesh-live-smoke.ts --tools` (tom = AUTO-ruting bruker ikke Kimi/Hermes til verktøyløkker). Api OG worker.
+  "JARVIS_MESH_TOOLS_VERIFIED",
   "JARVIS_JOB_TOOL_TURN_MODEL",
   "JARVIS_TOOL_TURN_DAILY_CAP_ORE",
   "JARVIS_TOOL_TURN_MODEL",
@@ -324,6 +331,10 @@ export const SERVICE_ENV = {
     "JARVIS_RADAR_SOURCES", "JARVIS_RADAR_SWEEP_HOUR",
     // D-414: «chat først» - bakgrunnsformål venter mens chat pågår (maks / stillhet, ms).
     "JARVIS_BACKGROUND_YIELD_MAX_MS", "JARVIS_BACKGROUND_YIELD_QUIET_MS", "JARVIS_TRACE_FILE", "JARVIS_VOICE_URL", "JARVIS_COUNCIL_AUTO_MAX_PER_HOUR",
+    // WP-D4 (JARVIS-033): kandidatkjeden for vanlig prat og om den siste reserven (D-354/D-404) er tillatt.
+    "JARVIS_CHAT_CANDIDATES", "JARVIS_CHAT_AUTO_FALLBACK",
+    // WP-D4 (JARVIS-078): rådets forslagsvei (AV som standard) - rådet kan foreslå én handling fra chattens handlingsnivå, som legges frem som en bekreftelse. Rådet utfører aldri noe.
+    "JARVIS_COUNCIL_PROPOSALS",
     // WP-C4 (Value Center): V2 oppfølgingsvarsel (AV som standard), V5-forslag (AV som standard) og eier-erklærte porter for V3-beredskap. Ingen hemmeligheter - kun flagg, tall og portnavn.
     "JARVIS_V2_PUSH_ENABLED", "JARVIS_V2_PUSH_MAX_PER_DAY", "JARVIS_V2_PUSH_QUIET_START", "JARVIS_V2_PUSH_QUIET_END", "JARVIS_V2_PUSH_TITLES", "JARVIS_V5_PROPOSALS_ENABLED", "JARVIS_VALUE_VERIFIED_GATES",
     // D-395 (JARVIS-092): sveip-klokkeslett main.ts leser (tidligere ikke videresendt til containeren, så compose kunne aldri endre dem).
