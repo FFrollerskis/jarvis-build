@@ -180,7 +180,8 @@ export class HostGit {
    *   run?: typeof runProcess,
    *   registry: import("./log.mjs").SecretRegistry,
    *   scrub?: ReadonlyArray<readonly [string, string]>,
-   *   diffEntryBytes?: number
+   *   diffEntryBytes?: number,
+   *   memoryLimit?: { prlimitBin: string, bytes: number }
    * }} options
    */
   constructor(options) {
@@ -197,6 +198,8 @@ export class HostGit {
     this.scrub = options.scrub ?? [];
     /** Byte per diff-tree-oppføring som utdatataket regnes med (KUN tester senker den, for å kunne avkorte uten 8 MiB; produksjon bruker alltid DIFF_ENTRY_MAX_BYTES). */
     this.diffEntryBytes = options.diffEntryBytes ?? DIFF_ENTRY_MAX_BYTES;
+    /** A-F3: adresserom-grense (`prlimit --as`) for git-kall som parser agent-kontrollert pakkedata (`options.limited`). */
+    this.memoryLimit = options.memoryLimit;
   }
 
   /** Renset basis-env: tom HOME, ingen system/global-config, ingen prompt, kun den ene tillatte protokollen. */
@@ -249,11 +252,21 @@ export class HostGit {
   }
 
   /**
+   * `limited`: kjør git under `prlimit --as=<byte>` (A-F3) - for ethvert LOKALT kall som leser/parser objekter agenten har laget (ikke nettverkskall: credential-helperen er Node og trenger ca. 750 MiB adresserom). En delta-bombe (liten pakke som ekspanderer til GiB) feiler da
+   * rent med «Out of memory» i stedet for å ta vertens minne. `pack.threads=1`: glibc reserverer 64 MiB adresserom per tråd-arena, som ellers spiser av grensen uten å bruke minne.
+   * Mangler grensen i oppsettet, feiler kallet lukket (aldri et stille ubegrenset kall).
    * @param {string[]} args
-   * @param {{ cwd?: string, env?: Record<string, string>, timeoutMs?: number, cancel?: import("./errors.mjs").CancelToken, input?: Buffer | string, maxOutputBytes?: number }} [options]
+   * @param {{ cwd?: string, env?: Record<string, string>, timeoutMs?: number, cancel?: import("./errors.mjs").CancelToken, input?: Buffer | string, maxOutputBytes?: number, limited?: boolean }} [options]
    */
   async git(args, options = {}) {
-    return this.run(this.gitBin, args, {
+    let bin = this.gitBin;
+    let argv = args;
+    if (options.limited === true) {
+      if (this.memoryLimit === undefined) throw new RunnerError("git_memory_limit_not_configured", 500);
+      bin = this.memoryLimit.prlimitBin;
+      argv = [`--as=${this.memoryLimit.bytes}`, "--", this.gitBin, "-c", "pack.threads=1", ...args];
+    }
+    return this.run(bin, argv, {
       ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
       env: this.env(options.env ?? {}),
       timeoutMs: options.timeoutMs ?? 60_000,
@@ -312,6 +325,17 @@ export class HostGit {
       throw new RunnerError("git_too_old", 500, `need>=${MIN_GIT.join(".")}`);
     }
     return v.join(".");
+  }
+
+  /**
+   * Oppstartskontroll (A-F3): `prlimit` finnes, kan sette grensen, og git kjører under den. Ellers ville HVER publish feilet senere; tjenesten nekter heller å starte.
+   */
+  async assertMemoryLimit() {
+    if (this.memoryLimit === undefined) throw new RunnerError("git_memory_limit_not_configured", 500);
+    const result = await this.git(["--version"], { timeoutMs: 10_000, limited: true });
+    if (result.spawnError !== undefined || result.status !== 0 || parseGitVersion(result.stdout.toString("utf8")) === null) {
+      throw new RunnerError("git_memory_limit_unusable", 500, result.spawnError !== undefined ? "prlimit_could_not_start" : this.sanitize(result));
+    }
   }
 
   /**
@@ -402,7 +426,10 @@ export class HostGit {
     const shallow = join(p.baseGitDir, "shallow");
     if (await stat(shallow).then(() => true, () => false)) await copyFile(shallow, join(p.verifyDir, "shallow"));
 
-    const inRepo = { cwd: p.verifyDir, env: { GIT_DIR: p.verifyDir }, ...(p.cancel ? { cancel: p.cancel } : {}) };
+    // Alt LOKALT som leser agentens objekter (fetch av bundle = index-pack, fsck, rev-parse, merge-base, rev-list, diff-tree) kjører under minnegrensen (A-F3). Selve `push` gjør IKKE det:
+    // den kjører først ETTER `fsck --strict` (som har lest hvert objekt under grensen) og `git-remote-https` kaller credential-helperen, som er Node (V8 reserverer ca. 750 MiB adresserom
+    // bare for å starte - en grense som stopper en delta-bombe ville stoppet autentiseringen). Nettverkskallene mot GitHub (base-henting, ls-remote, push) er derfor uten grense.
+    const inRepo = { cwd: p.verifyDir, env: { GIT_DIR: p.verifyDir }, limited: true, ...(p.cancel ? { cancel: p.cancel } : {}) };
     const hardened = (args) => ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "gc.auto=0", ...args];
 
     // En bundle-fil regnes av git som `file`-transport. `file` åpnes KUN for dette ene lokale kallet (en runner-skrevet vanlig fil i

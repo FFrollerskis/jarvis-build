@@ -65,6 +65,17 @@ LimitNOFILE=4096
 # Ingen minnedump: prosessminnet inneholder bearer-token, git-PAT og kortlevde installasjonstokens (JavaScript kan ikke nullstille strenger).
 LimitCORE=0
 TasksMax=512
+# Minne (A-F3): agenten velger innholdet i pakken vertens git parser. En delta-bombe (16 kB pakke som ekspanderer til 1,5 GiB) tok i en måling all ledig vertsminne. To lag: (1) hver git som
+# leser agentens objekter kjører under `prlimit --as` (runner.git_memory_limit_mb, standard 1024) og feiler rent; (2) enheten som helhet (Node + alle git-barn) har et tak her.
+# MemoryHigh strupes først (reclaim) og MemoryMax er det harde taket; ingen swap (en bombe skal ikke begynne å swappe NAS-en i senk). Tallene dekker standardoppsettet (2 samtidige jobber,
+# 64 MiB bundle): øker du max_concurrent_jobs, publish.max_bundle_bytes eller git_memory_limit_mb, øk disse tilsvarende. OOMPolicy=continue: kjernens OOM-killer tar det største barnet (git),
+# og runneren overlever (publish feiler med bundle_fetch_failed) i stedet for at hele enheten stoppes og ALLE kjørende jobber ryddes. NOT VERIFIED mot ekte systemd/cgroup: sjekk med
+# `systemctl show jarvis-job-runner -p MemoryMax -p MemoryHigh -p MemorySwapMax -p OOMPolicy` (runbooken, kapittel 16 punkt 4).
+MemoryAccounting=yes
+MemoryHigh=1536M
+MemoryMax=2G
+MemorySwapMax=0
+OOMPolicy=continue
 
 [Install]
 WantedBy=multi-user.target

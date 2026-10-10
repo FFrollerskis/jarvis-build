@@ -124,6 +124,7 @@ export async function createRunnerService(options) {
     remote: t.remote ?? { protocol: "https", host: "github.com" },
     allowFile: t.allowFile === true,
     registry, scrub,
+    memoryLimit: { prlimitBin: config.prlimitBin, bytes: config.gitMemoryLimitMb * 1024 * 1024 },
     ...(t.diffEntryBytes !== undefined ? { diffEntryBytes: t.diffEntryBytes } : {})
   });
   const manager = new JobManager({
@@ -161,6 +162,7 @@ export async function createRunnerService(options) {
       }
       const dockerVersion = await docker.version();
       const gitVersion = await git.assertVersion();
+      await git.assertMemoryLimit(); // A-F3: prlimit må virke FØR vi tar imot jobber (ellers ville hver publish feilet)
       await manager.prepare();
       await docker.assertNetworkInternal(config.policy.network);
       await loadToken();

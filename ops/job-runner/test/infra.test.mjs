@@ -82,6 +82,17 @@ describe("A: systemd-enhetene - herding og minste-privilegium", () => {
     }
   });
 
+  it("job-runner: minnegrenser for hele enheten (A-F3) - MemoryHigh under MemoryMax, ingen swap, OOMPolicy=continue (git-barnet drepes, runneren overlever), og ingen LimitAS som ville truffet V8", () => {
+    const mib = (text) => { const m = /^(\d+)([MG])$/.exec(text ?? ""); if (!m) throw new Error(`ugyldig størrelse: ${text}`); return Number(m[1]) * (m[2] === "G" ? 1024 : 1); };
+    expect(one(runner, "Service", "MemoryAccounting")).toBe("yes");
+    expect(mib(one(runner, "Service", "MemoryHigh"))).toBeLessThan(mib(one(runner, "Service", "MemoryMax")));
+    expect(mib(one(runner, "Service", "MemoryMax"))).toBeLessThanOrEqual(8192);
+    expect(mib(one(runner, "Service", "MemoryMax"))).toBeGreaterThanOrEqual(1024); // Node + git-barn under standardoppsettet må få plass
+    expect(one(runner, "Service", "MemorySwapMax")).toBe("0");
+    expect(one(runner, "Service", "OOMPolicy")).toBe("continue");
+    expect(values(runner, "Service", "LimitAS")).toEqual([]); // adresserom-grensen settes KUN på git-barna (prlimit), ikke på Node (V8 reserverer GiB adresserom)
+  });
+
   it("job-runner: docker-gruppen er KUN her; socket-gruppen er primærgruppe; skriver bare til state- og runtime-katalogen", () => {
     expect(one(runner, "Service", "User")).toBe("jarvis-runner");
     expect(one(runner, "Service", "Group")).toBe("jarvis-job-clients");
@@ -676,6 +687,15 @@ describe("G: install-host.sh --stage (ekte kjøring i en midlertidig prefiks-kat
     const state = join(target, "var/lib/jarvis-job-runner");
     expect((await stat(state)).mode & 0o777).toBe(0o700);
     expect((await stat(join(state, "sock"))).mode & 0o777).toBe(0o750);
+  });
+
+  it("ekte installasjon (ikke --stage) nekter å fortsette uten /usr/bin/prlimit (A-F3: samme sti som runner.prlimit_bin-standarden)", async () => {
+    const text = await readFile(SCRIPT, "utf8");
+    const real = text.slice(text.indexOf('if [ "$STAGE" = "0" ]; then\n  need docker'), text.indexOf("# --- brukere og grupper"));
+    expect(real).toContain("[ -x /usr/bin/prlimit ] ||");
+    expect(real).toMatch(/prlimit mangler[^\n]*>&2; exit 2/);
+    const config = await readFile(join(ROOT, "ops/job-runner/lib/config.mjs"), "utf8");
+    expect(config).toMatch(/absPathField\(r, "prlimit_bin", "runner", "\/usr\/bin\/prlimit"\)/);
   });
 
   it("ekte installasjon (ikke --stage) nekter å fortsette uten GNU coreutils: runneren rydder med /bin/rm -rf --one-file-system og /bin/chmod -R", async () => {

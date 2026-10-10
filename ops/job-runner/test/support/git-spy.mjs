@@ -14,7 +14,7 @@ import { join } from "node:path";
 /** @param {string} dir */
 const quote = (dir) => `'${dir.replace(/'/g, "'\\''")}'`;
 
-/** @returns {Promise<{ dir: string, gitBin: string, calls: () => Promise<Array<{ tokenHash: string | null, argv: string[], subcommand: string }>> }>} */
+/** @returns {Promise<{ dir: string, gitBin: string, calls: () => Promise<Array<{ tokenHash: string | null, addressSpace: string, argv: string[], subcommand: string }>> }>} */
 export async function createGitSpy() {
   const dir = await mkdtemp(join(tmpdir(), "jr-gitspy-"));
   const log = join(dir, "calls.log");
@@ -23,7 +23,8 @@ export async function createGitSpy() {
   await writeFile(gitBin, `#!/bin/sh
 H=none
 if [ -n "\${JARVIS_GIT_CREDENTIAL_TOKEN:-}" ]; then H=$(printf %s "$JARVIS_GIT_CREDENTIAL_TOKEN" | sha256sum | cut -c1-12); fi
-{ printf 'T=%s' "$H"; for a in "$@"; do printf '\\t%s' "$a"; done; printf '\\n'; } >> ${quote(log)}
+A=$(awk '/Max address space/ { print $4 }' /proc/$$/limits)
+{ printf 'T=%s\\tA=%s' "$H" "$A"; for a in "$@"; do printf '\\t%s' "$a"; done; printf '\\n'; } >> ${quote(log)}
 exec /usr/bin/git "$@"
 `);
   await chmod(gitBin, 0o755);
@@ -33,12 +34,13 @@ exec /usr/bin/git "$@"
     async calls() {
       const text = await readFile(log, "utf8");
       return text.split("\n").filter((l) => l.startsWith("T=")).map((line) => {
-        const [first = "T=none", ...argv] = line.split("\t");
+        const [first = "T=none", second = "A=unlimited", ...argv] = line.split("\t");
         const tokenHash = first.slice(2) === "none" ? null : first.slice(2);
+        const addressSpace = second.slice(2); // «unlimited» eller byte (RLIMIT_AS, målt i selve git-prosessen: prlimit setter den før exec)
         // delkommandoen = første argument som ikke er `-c <verdi>` eller `-C <sti>`
         let i = 0;
         while (i < argv.length && (argv[i] === "-c" || argv[i] === "-C")) i += 2;
-        return { tokenHash, argv, subcommand: argv[i] ?? "" };
+        return { tokenHash, addressSpace, argv, subcommand: argv[i] ?? "" };
       });
     }
   };

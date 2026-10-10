@@ -189,6 +189,20 @@ describe("C: runner-policy valideres fail-closed", () => {
     expect(parse({ ...runner(), publish: { deny_paths: [".github/", "secrets/"] } }).runner.publish.denyPaths).toEqual([".github/", "secrets/"]);
   });
 
+  it("A-F3: git_memory_limit_mb (adresserom-grense for vertsside git som parser agentens pakke) og prlimit_bin - standard, grenser og krysskontroll mot bundle-taket", () => {
+    const r = parse(runner()).runner;
+    expect(r.gitMemoryLimitMb).toBe(1024);
+    expect(r.prlimitBin).toBe("/usr/bin/prlimit");
+    expect(parse({ ...runner(), git_memory_limit_mb: 4096, prlimit_bin: "/usr/local/bin/prlimit" }).runner).toMatchObject({ gitMemoryLimitMb: 4096, prlimitBin: "/usr/local/bin/prlimit" });
+    for (const git_memory_limit_mb of [0, 255, 65_537, 1.5, "1024", null, -1]) expect(code(() => parse({ ...runner(), git_memory_limit_mb })), String(git_memory_limit_mb)).toContain("git_memory_limit_mb");
+    for (const prlimit_bin of ["prlimit", "../prlimit", "/usr/bin/../bin/prlimit", "/usr//bin/prlimit", 5, "", "/bin/pr limit"]) expect(code(() => parse({ ...runner(), prlimit_bin })), String(prlimit_bin)).toContain("prlimit_bin");
+    // grensen må rekke over bundle-taket + 256 MiB arbeidsminne, ellers ville legitime publish feilet med «Out of memory»
+    expect(code(() => parse({ ...runner(), publish: { max_bundle_bytes: 512 * 1024 * 1024 } }))).toBe("no_error"); // 512 + 256 = 768 <= 1024
+    expect(code(() => parse({ ...runner(), git_memory_limit_mb: 512, publish: { max_bundle_bytes: 512 * 1024 * 1024 } }))).toContain("must_cover_max_bundle_bytes_plus_256_mb");
+    expect(code(() => parse({ ...runner(), git_memory_limit_mb: 320, publish: { max_bundle_bytes: 64 * 1024 * 1024 } }))).toBe("no_error"); // 64 + 256 = 320
+    expect(code(() => parse({ ...runner(), git_memory_limit_mb: 319, publish: { max_bundle_bytes: 64 * 1024 * 1024 } }))).toContain("must_cover_max_bundle_bytes_plus_256_mb");
+  });
+
   it("git-identitet: smalt tegnsett", () => {
     expect(code(() => parse({ ...runner(), git_identity: { name: 'x"; rm -rf /', email: "a@b.c" } }))).toContain("git_identity");
     expect(code(() => parse({ ...runner(), git_identity: { name: "ok", email: "not-an-email" } }))).toContain("git_identity");

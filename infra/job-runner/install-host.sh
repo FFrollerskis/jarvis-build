@@ -43,6 +43,8 @@ need node
 node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' || { echo "Node >= 22 kreves (fant $(node --version))" >&2; exit 2; }
 if [ "$STAGE" = "0" ]; then
   need docker; need git; need iptables; need iptables-restore
+  # A-F3: vertsside git som parser agentens pakke kjøres under «prlimit --as» (runner.prlimit_bin, standard /usr/bin/prlimit; util-linux). Uten den nekter runneren å starte.
+  [ -x /usr/bin/prlimit ] || { echo "/usr/bin/prlimit mangler (pakken util-linux): runneren begrenser minnet til vertsside git med den (A-F3)" >&2; exit 2; }
   GITV="$(git --version | sed -n 's/^git version \([0-9]*\)\.\([0-9]*\).*/\1 \2/p')"
   read -r GMAJ GMIN <<<"$GITV"
   { [ "${GMAJ:-0}" -gt 2 ] || { [ "${GMAJ:-0}" -eq 2 ] && [ "${GMIN:-0}" -ge 39 ]; }; } || { echo "git >= 2.39 kreves (fant $(git --version))" >&2; exit 2; }

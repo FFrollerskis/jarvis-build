@@ -92,7 +92,7 @@ function parseRunner(raw) {
     "socket_path", "socket_group", "token_file", "base_dir", "docker_bin", "docker_host", "git_bin", "image", "network",
     "egress_proxy_url", "user", "memory", "cpus", "pids_limit", "tmpfs_size", "max_concurrent_jobs", "max_job_lifetime_s",
     "default_exec_timeout_ms", "max_exec_timeout_ms", "max_output_bytes", "max_body_bytes", "allowed_repos", "git_credentials",
-    "branch_prefix", "clone_depth", "clone_timeout_ms", "publish", "git_identity", "sweep_interval_s", "env_allow"
+    "branch_prefix", "clone_depth", "clone_timeout_ms", "publish", "git_identity", "sweep_interval_s", "env_allow", "git_memory_limit_mb", "prlimit_bin"
   ], "runner");
 
   const socketGroup = r["socket_group"];
@@ -154,6 +154,12 @@ function parseRunner(raw) {
     if (entry.startsWith("/") || entry.includes("..") || entry.includes("//") || entry.split("/").includes(".")) throw new ConfigError("config_invalid", "runner.publish.deny_paths:entry_unsafe");
   }
 
+  // A-F3: vertsside git som PARSER agentens pakke (fetch av bundle = index-pack, fsck, rev-list, diff-tree, push) kjøres under `prlimit --as=<byte>`. En delta-bombe (16 kB pakke -> 1,5 GiB) kan
+  // ellers ta all vertens minne; med grensen feiler git rent («Out of memory, malloc failed») FØR det allokeres. Grensen må rekke over bundle-taket + arbeidsminne, ellers feiler legitime publish.
+  const gitMemoryLimitMb = intField(r, "git_memory_limit_mb", "runner", 256, 65_536, 1_024);
+  const maxBundleBytes = intField(publishRaw, "max_bundle_bytes", "runner.publish", 1_024, 512 * 1024 * 1024, 64 * 1024 * 1024);
+  if (gitMemoryLimitMb < Math.ceil(maxBundleBytes / (1024 * 1024)) + 256) throw new ConfigError("config_invalid", "runner.git_memory_limit_mb:must_cover_max_bundle_bytes_plus_256_mb");
+
   const identityRaw = r["git_identity"] === undefined ? {} : plainObject(r["git_identity"], "runner.git_identity");
   onlyKeys(identityRaw, ["name", "email"], "runner.git_identity");
   const identityName = identityRaw["name"] ?? "jarvis-worker";
@@ -202,6 +208,8 @@ function parseRunner(raw) {
     dockerBin: absPathField(r, "docker_bin", "runner", "/usr/bin/docker"),
     ...(dockerHost !== undefined ? { dockerHost: /** @type {string} */ (dockerHost) } : {}),
     gitBin: absPathField(r, "git_bin", "runner", "/usr/bin/git"),
+    prlimitBin: absPathField(r, "prlimit_bin", "runner", "/usr/bin/prlimit"),
+    gitMemoryLimitMb,
     policy: Object.freeze(policy),
     maxConcurrentJobs: intField(r, "max_concurrent_jobs", "runner", 1, 16, 2),
     maxJobLifetimeS: intField(r, "max_job_lifetime_s", "runner", 60, 86_400, 3_600),
@@ -216,7 +224,7 @@ function parseRunner(raw) {
     cloneDepth: intField(r, "clone_depth", "runner", 0, 1_000, 50),
     cloneTimeoutMs: intField(r, "clone_timeout_ms", "runner", 10_000, 1_800_000, 300_000),
     publish: Object.freeze({
-      maxBundleBytes: intField(publishRaw, "max_bundle_bytes", "runner.publish", 1_024, 512 * 1024 * 1024, 64 * 1024 * 1024),
+      maxBundleBytes,
       maxCommits: intField(publishRaw, "max_commits", "runner.publish", 1, 500, 20),
       maxFiles: intField(publishRaw, "max_files", "runner.publish", 1, 20_000, 500),
       denyPaths: Object.freeze(denyPaths),
