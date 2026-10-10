@@ -223,7 +223,7 @@ AI-rådet er en vurderingsrolle og får **aldri verktøy** (§30). Tidligere ga 
 eksisterende bekreftelsesveien (D-382) - **ingenting skjer før du godkjenner kortet.**
 
 ```
-JARVIS_COUNCIL_PROPOSALS=on      # standard: av (tom/usatt/ugyldig = av)
+JARVIS_COUNCIL_PROPOSALS=on      # standard: av. KUN eksakt «on» slår den på («true»/«1»/«yes»/«ON» gir av + en logglinje)
 ```
 
 Prøv i chatten: «bruk AI-rådet: legg til en todoist-oppgave om å ringe leverandøren». Du får rådets vurdering og, hvis rådet er enig (CONSENSUS/MAJORITY) og foreslår en handling:

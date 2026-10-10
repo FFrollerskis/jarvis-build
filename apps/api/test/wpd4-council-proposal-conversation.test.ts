@@ -109,11 +109,13 @@ describe("forslagsveien AV (standard): rådet gir kun en vurdering - nøyaktig s
     expect(r.confirmations).toBeUndefined();
   });
 
-  it("bryteren JARVIS_COUNCIL_PROPOSALS: tom/usatt/off/ugyldig = av; on/true/1/yes = på (ugyldig logges, aldri en stille aktivering)", () => {
-    for (const raw of [undefined, "", "  ", "off", "false", "0", "no", "OFF", "kanskje", "onn", "2"]) expect(parseCouncilProposals(raw), String(raw)).toBe(false);
-    for (const raw of ["on", "ON", "true", "1", "yes", " On "]) expect(parseCouncilProposals(raw), raw).toBe(true);
-    expect(errors.some((e) => e.includes("council_proposals_invalid"))).toBe(true);
-    expect(errors.filter((e) => e.includes("council_proposals_invalid"))).toHaveLength(3); // kanskje, onn, 2
+  it("bryteren JARVIS_COUNCIL_PROPOSALS (L13): KUN eksakt «on» slår den på; tom/usatt/off = av uten støy; alt annet = av og logges (aldri en stille aktivering)", () => {
+    for (const raw of [undefined, "", "off"]) expect(parseCouncilProposals(raw), String(raw)).toBe(false);
+    expect(errors.some((e) => e.includes("council_proposals_invalid"))).toBe(false); // tom/usatt/off er gyldige og stille
+    expect(parseCouncilProposals("on")).toBe(true);
+    const nearMisses = ["ON", "On", " on", "on ", " On ", "true", "TRUE", "1", "yes", "Yes", "false", "0", "no", "OFF", "  ", "kanskje", "onn", "2", "on\r", "o n"];
+    for (const raw of nearMisses) expect(parseCouncilProposals(raw), JSON.stringify(raw)).toBe(false);
+    expect(errors.filter((e) => e.includes("council_proposals_invalid"))).toHaveLength(nearMisses.length); // hver eneste gir en logglinje
   });
 });
 
