@@ -52,6 +52,8 @@ export class FakeCloudflare {
   /** Visningsnavn i sone-svaret (M1: testene setter dem til fiendtlig tekst, se `hostile.ts`). */
   accountName = "Test account";
   planName = "Free";
+  /** L2: de neste forespørslene hvis «METHOD /sti» matcher `pattern` svarer med en redirect (`status` + `location`). */
+  private readonly redirects: Array<{ pattern: RegExp; status: number; location: string; remaining: number }> = [];
   private rateLimited = 0;
   private rateLimitRetryAfter: string | null = null;
   private readonly failures: Array<{ pattern: RegExp; status: number; body?: unknown; remaining: number }> = [];
@@ -101,6 +103,10 @@ export class FakeCloudflare {
     const id = hex32();
     rs.rules.push({ id, version: "1", last_updated: new Date().toISOString(), description: "", enabled: true, ...rule });
     return { rulesetId: rs.id, ruleId: id };
+  }
+
+  redirectNext(pattern: RegExp, status: number, location: string, times = 1): void {
+    this.redirects.push({ pattern, status, location, remaining: times });
   }
 
   /** De neste `n` forespørslene svarer 429 (med valgfri Retry-After). */
@@ -179,6 +185,13 @@ export class FakeCloudflare {
     const path = url.pathname.replace(/^\/client\/v4/, "");
     this.requests.push({ method, path, query, body, auth });
 
+    for (const r of this.redirects) {
+      if (r.remaining > 0 && r.pattern.test(`${method} ${path}`)) {
+        r.remaining -= 1;
+        res.writeHead(r.status, { location: r.location });
+        return void res.end();
+      }
+    }
     if (auth !== "ok") return this.send(res, 401, this.error(10000, "Authentication error"));
     if (this.rateLimited > 0) {
       this.rateLimited -= 1;

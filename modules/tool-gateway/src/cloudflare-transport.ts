@@ -305,6 +305,8 @@ export class CloudflareTransport implements ToolTransport {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const response = await guardedFetch(url, {
         method,
+        // L2 (review PR #324): Cloudflare-API-et redirecter aldri legitimt - en 3xx (også på GET) er en feil, og Authorization/kropp følges aldri til en annen URL.
+        redirect: "reject",
         headers: {
           authorization: `Bearer ${credential}`, accept: "application/json",
           ...(init.body !== undefined ? { "content-type": "application/json" } : {})

@@ -88,6 +88,8 @@ export async function jsonRequest(req: JsonRequest): Promise<JsonResponse> {
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     const response = await guardedFetch(req.url, {
       method: req.method,
+      // L2 (review PR #324): «ingen redirects» er nå håndhevet - en 3xx fra et kontrollert skymål (Langfuse/Infisical) kaster `unsafe_vendor_url:unexpected_redirect_http_<status>` i stedet for å følges med Authorization/kropp.
+      redirect: "reject",
       headers: { accept: "application/json", ...(req.body !== undefined ? { "content-type": "application/json" } : {}), ...req.headers },
       ...(req.body !== undefined ? { body: JSON.stringify(req.body) } : {})
     });
