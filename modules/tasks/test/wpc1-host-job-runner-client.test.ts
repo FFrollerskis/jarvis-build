@@ -62,6 +62,21 @@ describe("A: full syklus (create -> gitCheckout -> exec -> gitPublish -> dispose
     expect(h.service.manager.activeJobs).toBe(0);
   }, 30_000);
 
+  it("expectedSha (B-L6): runneren avviser en avvikende verifisert commit FØR pushen, ugyldig format kastes i klienten uten kall, og riktig SHA publiserer", async () => {
+    const h = await harness();
+    const sandbox = await runnerFor(h).create({}, { task_id: "task-esha", tenant_id: "tenant-a" });
+    await sandbox.gitCheckout!({ repoUrl: REPO });
+    const r = await sandbox.exec("sh", ["-c", "echo hei > ny.txt && git checkout -q -b jarvis/task-1 && git add -A && git commit -q -m agent && git rev-parse HEAD"]);
+    const sha = r.stdout.trim();
+    const refsBefore = gitSync(h.origins["owner/repo"].dir, ["for-each-ref", "--format=%(refname)"]);
+    await expect(sandbox.gitPublish!({ branch: "jarvis/task-1", expectedSha: "ikke-hex" })).rejects.toThrow("expected_sha_invalid");
+    await expect(sandbox.gitPublish!({ branch: "jarvis/task-1", expectedSha: "1".repeat(40) })).rejects.toThrow(/expected_sha_mismatch/);
+    expect(gitSync(h.origins["owner/repo"].dir, ["for-each-ref", "--format=%(refname)"])).toBe(refsBefore); // ingenting pushet
+    const published = await sandbox.gitPublish!({ branch: "jarvis/task-1", expectedSha: sha });
+    expect(published.commitSha).toBe(sha);
+    await sandbox.dispose();
+  });
+
   it("exec før gitCheckout og dobbel gitCheckout kaster; ingen jobb opprettes av create() alene", async () => {
     const h = await harness();
     const sandbox = await runnerFor(h).create();

@@ -315,7 +315,12 @@ export class HostJobSandboxRunner implements SandboxRunner {
         if (jobId === undefined || repoSlug === undefined) throw new Error("host_job_not_checked_out");
         // Et NYTT token rett før pushen: tokenet fra klonen er ikke gjenbrukt (kortlevd, aldri mellomlagret).
         const gitToken = await tokenFor(repoSlug);
-        const res = await call("POST", `/v1/jobs/${jobId}/publish`, { branch: request.branch, ...(gitToken !== undefined ? { git_token: gitToken } : {}) }, 600_000);
+        if (request.expectedSha !== undefined && !/^[0-9a-f]{40}$/.test(request.expectedSha)) throw new Error("expected_sha_invalid");
+        const res = await call(
+          "POST", `/v1/jobs/${jobId}/publish`,
+          { branch: request.branch, ...(request.expectedSha !== undefined ? { expected_sha: request.expectedSha } : {}), ...(gitToken !== undefined ? { git_token: gitToken } : {}) },
+          600_000
+        );
         if (res.status !== 200) HostJobSandboxRunner.fail(res, gitToken);
         const j = res.json;
         if (typeof j["branch"] !== "string" || typeof j["commit_sha"] !== "string" || typeof j["base_sha"] !== "string" || typeof j["commits"] !== "number" || typeof j["files_changed"] !== "number") {

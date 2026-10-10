@@ -46,6 +46,11 @@ export interface HostGitCheckoutResult {
 /** WP-C1: be runneren publisere jobb-branchen (verifisert git-bundle -> ferskt bare-repo -> push med runnerens egen credential). */
 export interface HostGitPublishRequest {
   branch: string;
+  /**
+   * WP-C1 review B-L6: SHA-en handleren selv leste i containeren (`git rev-parse HEAD`). Sendes til runneren, som avviser publiseringen FØR pushen (409 `expected_sha_mismatch`) hvis den verifiserte
+   * committen er en annen - ellers oppdages en avvikende SHA først ETTER at branchen ligger på GitHub (`published_commit_mismatch`). Valgfritt (bakoverkompatibelt): uten feltet er oppførselen som før.
+   */
+  expectedSha?: string;
 }
 export interface HostGitPublishResult {
   branch: string;

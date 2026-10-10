@@ -408,7 +408,7 @@ export class HostGit {
    *
    * @param {{
    *   bundle: Buffer, baseSha: string, baseGitDir: string, verifyDir: string, privateDir: string, slug: string, branch: string,
-   *   identity: { name: string, email: string },
+   *   identity: { name: string, email: string }, expectedSha?: string,
    *   limits: { maxCommits: number, maxFiles: number, denyPaths: readonly string[] },
    *   timeoutMs: number, token: string, cancel?: import("./errors.mjs").CancelToken
    * }} p
@@ -449,6 +449,8 @@ export class HostGit {
     const rev = await this.mustGit(hardened(["rev-parse", "--verify", "refs/jarvis/candidate^{commit}"]), { ...inRepo, timeoutMs: 15_000 }, "bundle_invalid", 422);
     const sha = rev.stdout.toString("utf8").trim();
     if (sha !== headerSha || !SHA1.test(sha)) throw new RunnerError("bundle_invalid", 422, "head_does_not_match_header");
+    // B-L6: klienten kan si hvilken commit den forventer å publisere. Avviker den verifiserte SHA-en, stopper vi FØR noe er pushet (ellers oppdages det først etterpå, når branchen allerede ligger på GitHub).
+    if (p.expectedSha !== undefined && p.expectedSha !== sha) throw new RunnerError("expected_sha_mismatch", 409, "verified_commit_differs_from_expected");
 
     const ancestor = await this.git(hardened(["merge-base", "--is-ancestor", p.baseSha, sha]), { ...inRepo, timeoutMs: 15_000 });
     if (ancestor.status !== 0) throw new RunnerError("bundle_invalid", 422, "not_a_descendant_of_the_base");

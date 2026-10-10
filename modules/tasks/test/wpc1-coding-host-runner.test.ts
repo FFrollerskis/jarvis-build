@@ -144,6 +144,7 @@ describe("A: ende-til-ende i host-modus", () => {
   it("kloning skjer på verten: arbeidskopien i containeren har verken remote, credential eller runner-sti", async () => {
     const w = await wire();
     let seenConfig = "";
+    let seenExpectedSha: string | undefined;
     const spy: SandboxRunner = {
       name: "spy", hostGit: true,
       create: async (env, meta) => {
@@ -152,6 +153,7 @@ describe("A: ende-til-ende i host-modus", () => {
           ...s,
           gitPublish: async (r) => {
             seenConfig = (await s.exec("cat", [".git/config"])).stdout;
+            seenExpectedSha = r.expectedSha;
             return (s.gitPublish as NonNullable<Sandbox["gitPublish"]>)(r);
           }
         } as Sandbox;
@@ -168,6 +170,7 @@ describe("A: ende-til-ende i host-modus", () => {
     expect(seenConfig).not.toMatch(/\[remote /);
     expect(seenConfig).not.toContain(workerSideValue);
     expect(seenConfig).not.toContain(w.h.root);
+    expect(seenExpectedSha, "B-L6: handleren sender SHA-en den selv leste i containeren").toMatch(/^[0-9a-f]{40}$/);
   }, 60_000);
 });
 

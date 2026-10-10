@@ -404,7 +404,8 @@ export function createCodingHandler(deps: {
         // Publish via verifisert git-bundle: runneren lager bundlen i containeren (uten credential), verifiserer den i et ferskt bare-repo
         // på verten og pusher KUN den verifiserte committen til denne jobb-branchen. SHA-en runneren faktisk pushet er autoritativ.
         await assertNotRevoked(); // B-M2: en credential som er tilbakekalt MIDT i jobben stopper publiseringen (samme sjekk som før klonen)
-        const published = await (sandbox.gitPublish as NonNullable<typeof sandbox.gitPublish>)({ branch });
+        // B-L6: runneren avviser FØR pushen hvis den verifiserte committen ikke er den vi leste i containeren (`expectedSha`). Sjekken under er beholdt som siste skanse (eldre runner uten feltet).
+        const published = await (sandbox.gitPublish as NonNullable<typeof sandbox.gitPublish>)({ branch, expectedSha: commitSha });
         if (published.commitSha !== commitSha) throw new Error("published_commit_mismatch");
         commitSha = published.commitSha;
       } else {

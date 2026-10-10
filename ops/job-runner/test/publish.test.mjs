@@ -614,3 +614,46 @@ describe("E: kappløp og tilstand", () => {
     expect((await publish(h, job.job_id)).status).toBe(404);
   }, 20_000);
 });
+
+describe("F: expected_sha (B-L6) - runneren avviser FØR pushen når den verifiserte committen ikke er den klienten leste", () => {
+  async function ready(h) {
+    const job = await h.createJob();
+    expect((await commitAs(h, job.job_id, "echo hello > nytt.txt && git checkout -q -b jarvis/task-1")).json.code).toBe(0);
+    const head = (await sh(h, job.job_id, "git rev-parse HEAD")).json.stdout.trim();
+    return { job, head };
+  }
+  const publishWith = (h, id, expected_sha) => h.api({ method: "POST", path: `/v1/jobs/${id}/publish`, body: { branch: "jarvis/task-1", expected_sha } });
+
+  it("avvikende expected_sha: 409 expected_sha_mismatch, og INGEN ref opprettes i origin", async () => {
+    const h = await harness();
+    const origin = h.origins["owner/repo"].dir;
+    const { job } = await ready(h);
+    const before = refs(origin);
+    const res = await publishWith(h, job.job_id, "1".repeat(40));
+    expect(res.status).toBe(409);
+    expect(res.json.error).toBe("expected_sha_mismatch");
+    expect(refs(origin)).toEqual(before);
+  });
+
+  it("riktig expected_sha: 200 og branchen pushes med NØYAKTIG den committen", async () => {
+    const h = await harness();
+    const origin = h.origins["owner/repo"].dir;
+    const { job, head } = await ready(h);
+    const before = refs(origin);
+    const res = await publishWith(h, job.job_id, head);
+    expect(res.status).toBe(200);
+    expect(res.json.commit_sha).toBe(head);
+    expect(refs(origin).filter((r) => !before.includes(r))).toEqual([`refs/heads/jarvis/task-1 ${head}`]);
+  });
+
+  it.each([["for kort", "abc123"], ["store bokstaver", "A".repeat(40)], ["ikke-streng", 1234], ["tom streng", ""], ["objekt", { sha: "x" }]])("ugyldig expected_sha (%s): 400 invalid_request, ingenting pushet", async (_label, value) => {
+    const h = await harness();
+    const origin = h.origins["owner/repo"].dir;
+    const { job } = await ready(h);
+    const before = refs(origin);
+    const res = await publishWith(h, job.job_id, value);
+    expect(res.status).toBe(400);
+    expect(res.json.error).toBe("invalid_request");
+    expect(refs(origin)).toEqual(before);
+  });
+});

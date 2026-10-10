@@ -125,9 +125,12 @@ export function parseExec(body, limits) {
 
 /** @param {unknown} body @param {{ branchPrefix: string }} policy */
 export function parsePublish(body, policy) {
-  const b = strictObject(body, ["branch", "git_token"], ["branch"]);
+  const b = strictObject(body, ["branch", "git_token", "expected_sha"], ["branch"]);
+  // B-L6: valgfri forventet SHA (40 hex) - runneren avviser FØR push hvis den verifiserte committen er en annen.
+  if (b["expected_sha"] !== undefined && !(typeof b["expected_sha"] === "string" && /^[0-9a-f]{40}$/.test(b["expected_sha"]))) throw new RunnerError("invalid_request", 400, "expected_sha_invalid");
   return {
     branch: assertJobBranch(b["branch"], policy.branchPrefix),
+    ...(typeof b["expected_sha"] === "string" ? { expectedSha: b["expected_sha"] } : {}),
     ...(b["git_token"] !== undefined ? { gitToken: assertRequestToken(b["git_token"]) } : {})
   };
 }

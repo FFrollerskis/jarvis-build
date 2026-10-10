@@ -313,7 +313,8 @@ export class JobManager {
   /**
    * Publiser jobb-branchen: bundle LAGET I containeren (uten credential) -> verifisert på verten -> push med runnerens credential.
    * @param {string} id
-   * @param {{ branch: string, gitToken?: string }} req
+   * @param {{ branch: string, gitToken?: string, expectedSha?: string }} req
+   *   `expectedSha` (B-L6): avvis FØR pushen hvis den verifiserte committen er en annen.
    *   `gitToken`: FERSKT token til PUSHEN (kun for repoer med `source: request`). Tokenet fra kloningen gjenbrukes aldri (kortlevd, ikke lagret): mangler det, 400.
    * @param {CancelToken} [clientGone]
    */
@@ -359,7 +360,7 @@ export class JobManager {
     try {
       const out = await this.git.verifyAndPush({
         bundle: created.stdout, baseSha: job.baseSha, baseGitDir: job.baseGitDir, verifyDir: job.verifyDir, privateDir: job.privateDir,
-        slug: job.slug, branch: req.branch, identity: this.config.gitIdentity,
+        slug: job.slug, branch: req.branch, identity: this.config.gitIdentity, ...(req.expectedSha !== undefined ? { expectedSha: req.expectedSha } : {}),
         limits: { maxCommits: limits.maxCommits, maxFiles: limits.maxFiles, denyPaths: limits.denyPaths },
         timeoutMs: limits.timeoutMs, token, cancel: job.cancel
       });
