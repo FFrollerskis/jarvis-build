@@ -8,7 +8,7 @@ import { RunRateTransport, runRateToolDefinitions } from "../src/run-rate.ts";
 import {
   CHAT_ACT_TIER, CHAT_READ_TIER, MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, MemorySearchTransport, MeshToolExecutor, SURFACE_TOOL_GRANTS,
   assertChatActTier, assertManifestInvariants, assertReadOnlyModelSurface, buildToolManifest, createTurnContext, firstWaveTools, homeAssistantTools,
-  memoryToolDefinitions, resolveModelToolSurface, selectSurfaceTools, type ConfirmationGate, type ToolDefinition, type ToolGateway
+  KnowledgeSearchTransport, knowledgeToolDefinitions, memoryToolDefinitions, resolveModelToolSurface, selectSurfaceTools, type ConfirmationGate, type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
 
 /**
@@ -31,6 +31,7 @@ function productionDefinitions(): ToolDefinition[] {
       ...governanceToolDefinitions(new GovernanceTransport({} as never)),
       ...situationsToolDefinitions(new SituationsTransport({} as never, {} as never)),
       ...memoryToolDefinitions(new MemorySearchTransport({} as never, {} as never)),
+      ...knowledgeToolDefinitions(new KnowledgeSearchTransport({} as never)),
       ...tasksDelegateToolDefinitions(new TasksDelegateTransport({} as never, {} as never)),
       ...runRateToolDefinitions(new RunRateTransport({} as never))
     ]
