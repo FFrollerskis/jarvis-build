@@ -115,6 +115,7 @@ env_get() { # dump navn -> verdi (første treff; tom hvis den ikke finnes)
 }
 
 # H04: hvilke dormante funksjoner er slått på (kun «satt/ikke satt»; verdi vises bare for ufarlige verdier). INFO - dette er opplysninger til økten, ingen vurdering.
+# Etikettene står i hakeparenteser: «api:» foran en flaggliste fikk gitleaks' generic-api-key til å slå til på evidensfilen (falsk positiv), og den regelen ser på «api» rett foran kolon/likhetstegn.
 safe_env() { # dump navn...
   local dump="$1"; shift
   [ -n "$dump" ] || { echo "ukjent"; return 1; }
@@ -132,7 +133,7 @@ WORKER_FLAGS=(JARVIS_KNOWLEDGE_SOURCES JARVIS_KNOWLEDGE_FS_ROOTS JARVIS_KNOWLEDG
 api_flags="$(safe_env "$API_ENV" "${API_FLAGS[@]}")"; api_rc=$?
 worker_flags="$(safe_env "$WORKER_ENV" "${WORKER_FLAGS[@]}")"; worker_rc=$?
 if [ "$api_rc" -ne 0 ] && [ "$worker_rc" -ne 0 ]; then record H04_feature_flags UNKNOWN "fikk ikke lest miljøet i api/worker"
-else record H04_feature_flags INFO "api:${api_flags:- ukjent} | worker:${worker_flags:- ukjent}"; fi
+else record H04_feature_flags INFO "[api]${api_flags:- ukjent} | [worker]${worker_flags:- ukjent}"; fi
 
 # H05: flagg som KUN aktiveres av eksakt «on»/«true» - nesten-treff (ON, 1, yes) er stille AV. Et slikt flagg er nesten alltid en feilskriving. PASS krever at BEGGE miljøene kunne leses.
 bad=""

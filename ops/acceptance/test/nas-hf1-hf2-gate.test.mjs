@@ -167,7 +167,9 @@ describe("nas-hf1-hf2-gate.sh", () => {
     const res = run();
     const row = rowOf(res.text, "H04_feature_flags");
     expect(row).toContain("INFO");
-    expect(row).toContain("JARVIS_COUNCIL_PROPOSALS=off");
+    expect(row).toContain("[api] JARVIS_COUNCIL_PROPOSALS=off"); // hakeparentes-etikett: «api:» foran en flaggliste utløste gitleaks (generic-api-key) på evidensfilen
+    expect(row).toContain("| [worker]");
+    expect(row).not.toMatch(/\bapi:/);
     expect(row).toContain("JARVIS_KNOWLEDGE_CLAIM_MIN_SOURCES=2");
     expect(row).toContain("JARVIS_OWNER_EXTRA_TENANTS=satt");
     expect(row).toContain("JARVIS_GITHUB_APP_ID=satt"); // rene tall vises bare opp til 6 siffer; en lengre id (GitHub App-id) er «satt», aldri verdien
