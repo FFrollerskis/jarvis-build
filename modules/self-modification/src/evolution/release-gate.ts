@@ -10,12 +10,14 @@ export type ReleaseStage = "shadow" | "staging" | "canary" | "full";
 export type ChangeKind = "code" | "prompt" | "personality" | "routing" | "config";
 
 export interface SystemSignals {
-  incident_open: boolean;
+  /** Er en hendelse åpen? `null` = UKJENT (kunne ikke telles). Ukjent utelukker ikke en freeze (M2, gjennomgang av PR #313): aldri en fabrikkert `false`. */
+  incident_open: boolean | null;
   /** Observerbarhet (SLO-/drift-måling) tilgjengelig? Uten den fryses endringer. */
   observability_ok: boolean;
   /** Antall SLO-brudd akkurat nå. */
   slo_breaches: number;
-  kill_switch_active: boolean;
+  /** Er kill switch på? `null` = UKJENT (kunne ikke leses). Ukjent utelukker ikke en freeze. */
+  kill_switch_active: boolean | null;
 }
 
 export interface DeployUsage {
@@ -28,13 +30,25 @@ export interface FreezeVerdict {
   reasons: string[];
 }
 
-/** Change freeze: ustabilt system, hendelse, mangler observerbarhet eller kill switch. */
+/**
+ * Årsaker som betyr «kunne ikke måles» (ikke «målt og dårlig»). De gir også `frozen: true` - en freeze som ikke kan utelukkes er en freeze - men en rapport skal kunne sette dem
+ * i riktig bås («freeze kan ikke utelukkes») i stedet for å påstå at kill switch eller en hendelse er på.
+ */
+export const FREEZE_UNKNOWN_REASONS: readonly string[] = ["kill_switch_unknown", "incident_state_unknown", "observability_missing"];
+
+/**
+ * Change freeze: ustabilt system, hendelse, mangler observerbarhet eller kill switch. KJENT-IKKE-LIK-OK (M2): alt som ikke er et ekte svar (`null`, `undefined`, ikke-boolsk, ikke-endelig tall) er UKJENT,
+ * og ukjent utelukker ikke freeze. Eneste vei til `frozen: false` er at ALLE innsignal er målt og friske.
+ */
 export function changeFreeze(s: SystemSignals): FreezeVerdict {
   const reasons: string[] = [];
-  if (s.kill_switch_active) reasons.push("kill_switch_active");
-  if (s.incident_open) reasons.push("incident_open");
-  if (!s.observability_ok) reasons.push("observability_missing");
-  if (s.slo_breaches > 0) reasons.push("slo_breached");
+  if (s.kill_switch_active === true) reasons.push("kill_switch_active");
+  else if (s.kill_switch_active !== false) reasons.push("kill_switch_unknown");
+  if (s.incident_open === true) reasons.push("incident_open");
+  else if (s.incident_open !== false) reasons.push("incident_state_unknown");
+  const breachesKnown = typeof s.slo_breaches === "number" && Number.isFinite(s.slo_breaches) && s.slo_breaches >= 0;
+  if (s.observability_ok !== true || !breachesKnown) reasons.push("observability_missing");
+  if (breachesKnown && s.slo_breaches > 0) reasons.push("slo_breached");
   return { frozen: reasons.length > 0, reasons };
 }
 

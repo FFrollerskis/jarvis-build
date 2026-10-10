@@ -33,7 +33,8 @@ export interface HealContext {
   /** H3: E-klassen for kodereparasjonen (bestemt av EV-0/EV-5). */
   repair_class: EvChangeClass | null;
   owner_approved: boolean;
-  kill_switch_active: boolean;
+  /** `null` = UKJENT (kunne ikke leses). Ukjent behandles som PÅ (fail-closed) med egen årsak - aldri som «av» (M2, gjennomgang av PR #313). */
+  kill_switch_active: boolean | null;
 }
 
 export interface HealVerdict {
@@ -47,7 +48,7 @@ export interface HealVerdict {
 export function decideHeal(c: HealContext): HealVerdict {
   const level = levelOfAction(c.action);
   const reasons: string[] = [];
-  if (c.kill_switch_active && level !== "H0") return { level, allowed: false, mode: "none", reasons: ["kill_switch_active"] };
+  if (c.kill_switch_active !== false && level !== "H0") return { level, allowed: false, mode: "none", reasons: [c.kill_switch_active === true ? "kill_switch_active" : "kill_switch_unknown"] };
   switch (level) {
     case "H0":
       return { level, allowed: true, mode: "auto", reasons };

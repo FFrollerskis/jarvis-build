@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,11 +52,23 @@ describe("break-glass: Jarvis holder aldri eierens nøkkel", () => {
     expect(offenders.map((p) => relative(ROOT, p))).toEqual([]);
   });
 
-  it(".gitignore ignorerer privatnøkler (*.key, *private*.pem), men ikke den offentlige nøkkelen", () => {
+  it(".gitignore ignorerer privatnøkler (*.key, *private*.pem og - WP-C3 review F10 - alle *.pem), men ikke den offentlige nøkkelen", () => {
     const gi = readFileSync(join(ROOT, ".gitignore"), "utf8");
     expect(gi).toMatch(/^\*\.key$/m);
     expect(gi).toMatch(/^\*private\*\.pem$/m);
-    expect(gi).not.toMatch(/^\*\.pem$/m);
+    // F10: `*.pem` er nå ignorert (GitHub App-nøkkelen kan hete hva som helst), så den offentlige konstitusjonsnøkkelen holdes committbar av et eksplisitt unntak - og vi sjekker git-semantikken
+    // (siste treff vinner), ikke bare tekstmønstre. `--no-index`: uavhengig av om filen allerede er sporet.
+    expect(gi).toMatch(/^\*\.pem$/m);
+    expect(gi).toMatch(/^!config\/evolution\/constitution\.pub\.pem$/m);
+    const ignored = (path: string): boolean => {
+      const r = spawnSync("git", ["check-ignore", "-q", "--no-index", path], { cwd: ROOT });
+      if (r.status !== 0 && r.status !== 1) throw new Error(`git check-ignore feilet (${String(r.status)}): ${String(r.stderr)}`);
+      return r.status === 0;
+    };
+    expect(ignored("config/evolution/constitution.pub.pem")).toBe(false);
+    expect(ignored("config/evolution/constitution.v1.sig")).toBe(false);
+    expect(ignored("config/evolution/constitution.key")).toBe(true);
+    expect(ignored("jarvis-constitution.private.pem")).toBe(true);
   });
 
   it("break-glass-skriptet leser ingen nøkler og skriver ingen .env-verdier ut", () => {

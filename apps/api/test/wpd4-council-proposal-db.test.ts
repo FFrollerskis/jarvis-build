@@ -398,6 +398,8 @@ describe("ende til ende: rådets forslag utføres kun via eierens godkjenning i 
       identity: { resolveIdentity: async (i: Record<string, string>) => ({ ok: true, identity: { ...i, memory_space_id: i["memory_space"] } }) },
       executive: {
         gateway: {
+          // WP-F1: godkjenningsruten slår opp definisjonen for å avgjøre om step-up kreves (pengehandlinger) - rådets forslag (todoist) er ingen pengehandling.
+          get: () => undefined,
           execute: async (call: { identity: { person_id: string }; tool_id: string; action: string; parameters: unknown; idempotency_key: string }) => {
             executed.push({ tool_id: call.tool_id, action: call.action, parameters: call.parameters, person: call.identity.person_id, idempotency_key: call.idempotency_key });
             return { ok: true, data: { id: "t-e2e" }, external_id: "ext-e2e" };

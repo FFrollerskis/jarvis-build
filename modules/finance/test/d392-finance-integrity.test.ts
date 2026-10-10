@@ -140,9 +140,21 @@ describe("JARVIS-019: leverandørkall uten radlås og åpen transaksjon", () => 
     const writer = new VippsWriter();
     const service = vippsService(writer);
     const intent = await vippsIntent(service);
-    await adminPool.query("UPDATE payment_intents SET state = 'submitted' WHERE payment_intent_id = $1", [intent.payment_intent_id]);
+    // Slik reservasjonen faktisk ser ut etter en krasj (WP-F1): `submitted_at` og `first_submit_attempt_at` er satt ved reservasjonen, og leasen (2 min) er utløpt.
+    await adminPool.query("UPDATE payment_intents SET state = 'submitted', submitted_at = now() - interval '10 minutes', first_submit_attempt_at = now() - interval '10 minutes' WHERE payment_intent_id = $1", [intent.payment_intent_id]);
     const resumed = await service.submitPaymentIntent(TENANT, "business", intent.payment_intent_id, noFiken);
     expect(resumed.state).toBe("provider_acknowledged");
+  });
+
+  it("Vipps (review F5): en gammel `submitted`-rad uten NOEN tidsstempler (eldre enn migrasjon 099) kan ikke bevises å være innenfor leverandørens idempotensvindu - krever avstemming, ingen ny leverandørhandling", async () => {
+    const writer = new VippsWriter();
+    const service = vippsService(writer);
+    let creates = 0;
+    writer.onCreate = async (i) => { creates += 1; return { reference: i.reference, state: "CREATED", amount: { currency: i.currency, value: i.amountOre } }; };
+    const intent = await vippsIntent(service);
+    await adminPool.query("UPDATE payment_intents SET state = 'submitted', submitted_at = NULL, first_submit_attempt_at = NULL WHERE payment_intent_id = $1", [intent.payment_intent_id]);
+    await expect(service.submitPaymentIntent(TENANT, "business", intent.payment_intent_id, noFiken)).rejects.toThrow("submit_outcome_unknown_reconcile_required");
+    expect(creates).toBe(0);
   });
 
   it("Vipps capture: gjentatt submit er idempotent og sender leverandørkallet med en NUMERISK beløpsverdi (JARVIS-021)", async () => {

@@ -29,12 +29,14 @@ export function evaluateAcceptance(providers: readonly AiMeshProvider[], opts: {
   const fallbackOk = real.reduce((n, p) => n + (p.usage_7d?.fallback_ok_calls ?? 0), 0);
   const dbUnreadable = real.length > 0 && real.every((p) => p.usage_7d === null);
   const fallbackEvidence = fallbackOk > 0 || opts.fallback_verified_in_process;
+  const pausedByOwner = providers.filter((p) => isRealProvider(p) && p.paused === true).map((p) => p.provider);
   const missing: string[] = [];
-  if (real.length === 0) missing.push("Ingen leverandør er konfigurert.");
+  if (real.length === 0) missing.push(pausedByOwner.length > 0 ? "Ingen leverandør kan brukes nå." : "Ingen leverandør er konfigurert.");
   else if (live.length < REQUIRED_LIVE) {
     const unproven = real.filter((p) => !provenLive(p)).map((p) => p.provider);
     missing.push(`Bare ${live.length} av ${REQUIRED_LIVE} nødvendige leverandører er bevist live${unproven.length > 0 ? ` (konfigurert, men aldri bevist: ${unproven.join(", ")})` : ""}.`);
   }
+  if (pausedByOwner.length > 0) missing.push(`Pauset av eier (teller ikke før pausen er opphevet): ${pausedByOwner.join(", ")}.`);
   if (!fallbackEvidence) missing.push("Ingen vellykket fallback er observert (en kandidat som feilet og en annen som svarte) - kjør mesh-live-smoke.ts.");
   if (dbUnreadable) missing.push("Databasen kunne ikke leses, så tallene siste 7 døgn mangler.");
   const met = live.length >= REQUIRED_LIVE && fallbackEvidence;
@@ -69,6 +71,7 @@ const stateText = (p: AiMeshProvider): string =>
 
 function providerLine(p: AiMeshProvider): string {
   const where = p.locality === "local" ? "lokal" : p.hosted_free_tier ? "sky, gratis delt" : "sky";
+  if (p.paused === true) return `- ${p.provider} (${where}): pauset av eier (brukes ikke før eieren opphever pausen)`;
   if (!p.configured) return `- ${p.provider} (${where}): ikke konfigurert`;
   const parts: string[] = [stateText(p)];
   const p50 = p.usage_7d?.p50_latency_ms ?? p.runtime.p50_latency_ms;

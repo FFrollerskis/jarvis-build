@@ -82,8 +82,8 @@ const AI_MESH_INTENT_PARTS: readonly string[] = [
 ];
 const AI_MESH_INTENT: RegExp = new RegExp(`(?:${AI_MESH_INTENT_PARTS.join("|")})`, "i");
 
-/** EV-1 (D-412): selvdiagnose, ytelse, tjenestemål og evolusjon («hva er galt med deg», «er du treg», «hva har du lært»). WP-C4: «hva har du hjulpet meg med»/«verdirapport» -> Value Center. */
-const EXECUTIVE_SELF_INTENT = /(hva er galt|hva feiler|selv-?diagnos|diagnos(er|tiser)|feil med deg|er du frisk|fungerer du|virker du|er alt (ok|greit)|hvordan går det med (deg|systemet)|hva kan du ikke|hvor bra yter|ytelse|er du treg|hvor rask|tjenestemål|\bslo\b|forverring|blitt dårligere|dataskvalitet|datakvalitet|hjulpet meg|verdirapport|value ?center|hvor mye (bruker|har jeg brukt) (jeg )?deg|bruksmetrikk|bruksstatistikk|hvor nyttig|evolusjon|utvikler du deg|forbedre deg|selvforbedring|hva har du lært|hva kan du forbedre)/i;
+/** EV-1 (D-412): selvdiagnose, ytelse, tjenestemål og evolusjon («hva er galt med deg», «er du treg», «hva har du lært»). WP-C4: «hva har du hjulpet meg med»/«verdirapport» -> Value Center. WP-H0: «kontrollsenter»/«hva kan jeg stoppe» -> kontrollsentrene. */
+const EXECUTIVE_SELF_INTENT = /(hva er galt|hva feiler|selv-?diagnos|diagnos(er|tiser)|feil med deg|er du frisk|fungerer du|virker du|er alt (ok|greit)|hvordan går det med (deg|systemet)|hva kan du ikke|hvor bra yter|ytelse|er du treg|hvor rask|tjenestemål|\bslo\b|forverring|blitt dårligere|dataskvalitet|datakvalitet|hjulpet meg|verdirapport|value ?center|hvor mye (bruker|har jeg brukt) (jeg )?deg|bruksmetrikk|bruksstatistikk|hvor nyttig|evolusjon|utvikler du deg|forbedre deg|selvforbedring|hva har du lært|hva kan du forbedre|kontrollsent(er|re)|kontrollpanel|admin(istrasjon)?-?sent(er|re)|hva kan jeg (stoppe|pause|tilbakekalle))/i;
 
 /**
  * D-381: intensjonsord per verktøy-id for chattens lese-nivå (norsk + engelsk). Kun UTVALG (hva modellen får se denne runden) - aldri
@@ -92,7 +92,7 @@ const EXECUTIVE_SELF_INTENT = /(hva er galt|hva feiler|selv-?diagnos|diagnos(er|
  * Prometheus, Telnyx, drift/produkt/samtalegraf) med norske hverdagsord - Tobias skal slippe å kjenne tjenestenavnet.
  */
 const TOOL_INTENTS: Readonly<Record<string, RegExp>> = {
-  // EV-1 (D-412) + WP-C4 (verdirapport) + WP-D4: «hva er galt med deg» -> selvdiagnose (+ de øvrige executive-lesingene), og AI Mesh-spørsmål («er Kimi oppe?») via den smale `AI_MESH_INTENT`.
+  // EV-1 (D-412) + WP-C4 (verdirapport) + WP-H0 (kontrollsentrene) + WP-D4: «hva er galt med deg» -> selvdiagnose (+ de øvrige executive-lesingene), og AI Mesh-spørsmål («er Kimi oppe?») via den smale `AI_MESH_INTENT`.
   executive: new RegExp(`(?:${EXECUTIVE_SELF_INTENT.source}|${AI_MESH_INTENT.source})`, "i"),
   // D-416: delegering til bakgrunnsagent («gjør det i bakgrunnen», «undersøk», «lag en rapport», «hva er status på jobben»).
   tasks: /(bakgrunn|deleger|sub-?agent|\bagent|\bjobb(en|er)?\b|undersøk|utred|research|analyser|lag en rapport|gjør (det|dette) mens|mens jeg )/i,

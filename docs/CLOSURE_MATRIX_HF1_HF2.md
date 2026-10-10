@@ -19,7 +19,7 @@ HF2-PDF-en ligger ikke i repoet; radene bygger på beslutningsloggen D-406…D-4
 | EV-4 | Gylden suite (regresjonsport) | `apps/api/src/golden-suite.ts` (~32 deterministiske oppgaver med proveniens og suite-digest), `evolution/evals.ts` | `WIRED` (rapportseksjon; en deterministisk selvtest av Jarvis' egne regler, IKKE en LLM-basert eval) | Golden-task-bibliotek fra ekte oppgaver (blind A/B krever modellkjøring - ikke bygget). |
 | EV-5 | Forslagsskjema | `evolution/proposal.ts`, `evolution_change_ledger` | `WIRED` (rapportseksjon: forslag og endringsregister) | Eier gjennomgår første forslag. |
 | EV-6 | Selvkoding | `readiness.ts` (kun beredskap) | `DORMANT` (beredskapsvisning; `activation_decision` er ALLTID false; selvendring er frosset, D-397) | D-32 må være `VERIFIED` først, så navngitt D-beslutning. |
-| EV-7 | Avhengighetsport | `evolution/supply-chain.ts`, `ops/evolution/dependency-check.ts` | `WIRED` som skript (kjøres av en person eller CI mellom to commits; exit 1 ved treff - aldri av Jarvis selv) | Kjør skriptet i CI/før merge. |
+| EV-7 | Avhengighetsport | `evolution/supply-chain.ts`, `ops/evolution/dependency-check.ts` | `WIRED` som skript (kjøres av en person mellom to commits, IKKE koblet til CI; exit 0 = ingen funn, 1 = funn som krever eierens oppmerksomhet, 2 = kan ikke kjøre - aldri av Jarvis selv) | Kjør skriptet før merge; kobling til CI er ikke gjort (`DEFERRED`). |
 | EV-8 | Utrulling shadow→staging→canary→full, tilbakerulling | `evolution/release-gate.ts`; change freeze i rapporten | `WIRED` (change freeze fra oppstartssjekk, SLO, kill switch og åpne hendelser) | Shadow/canary-infrastruktur finnes ikke ennå. |
 | EV-9 | Selvhelbredelse H0–H4, hendelsesløkke | `evolution/heal.ts`, rapportseksjon EV-9 | `WIRED` som visning (stigen mot ekte funn; ingen reparasjon utføres) | H2 krever forhåndsgodkjenning (`JARVIS_EV_PREAPPROVED_FAILOVER`) og UA-port live. |
 | EV-10 | Minnevedlikehold (ferskhet, kildekvalitet, forgiftning, sensitivitetsdrift) | `evolution/memory-maintenance.ts`, rapportseksjon EV-10 (leser som app-rolle, helse/gjest utelatt) | `WIRED` (observasjon; ingenting slettes eller slås sammen) | Se «sensitivitetsdrift» og sett `JARVIS_MEMORY_RESENSITIZE=apply` etter å ha sett tallet. |
@@ -50,7 +50,7 @@ HF2-PDF-en ligger ikke i repoet; radene bygger på beslutningsloggen D-406…D-4
 | 7 Første integrasjoner | ja | – | Google OAuth/Gmail/Drive/GitHub live fra NAS (D-35) |
 | 8 Mobil/Watch | delvis | APNs-kontrakt, Swift-konfig i stedet for hardkodet identitet (Q-46) → WP-G | Xcode, signering, fysisk iPhone/Watch, TestFlight (D-36) |
 | 9 Home Assistant | ja | Romkart, state-readback-øvelse | Ekte HA-instans + token |
-| 10 Operations | delvis | Planlagt backup + restore-verify + off-site + ekstern heartbeat → WP-C | Off-site-kopi, restore-drill, RTO/RPO |
+| 10 Operations | delvis: planlagt backup, restore-verify, off-site og ekstern heartbeat er bygget og `DORMANT` (WP-C2, D-453; uavhengig gjennomgang rettet i oppfølgings-PR) | Off-site-retensjon `DEFERRED` (leverandørens livssyklusregler); full produksjons-restore er ikke skriptet; EV-19-kobling `BUILT_UNWIRED` | Eier velger off-site-mål og monitor (`BLOCKED_EXTERNAL`), installerer cron, kjører `acceptance-ops.sh nas` og `drill --from-offsite`, fyller RTO/RPO. Ingenting er `VERIFIED` før det er kjørt |
 
 ## 3. HF1 åpne runtime-/produksjonsporter (kap. 7)
 
@@ -60,13 +60,13 @@ HF2-PDF-en ligger ikke i repoet; radene bygger på beslutningsloggen D-406…D-4
 | D-28 pgvector/HNSW | migr. 014/068, eval-skript | – | Kjør `ops/memory/embedding-eval-live.ts` på NAS |
 | D-30 Voice-benchmark | `benchmark.ts` | – | ≥100 norske lydprøver |
 | D-32 Worker Docker/GitHub | policy, `DockerJobSandboxRunner`, `pr-publisher` | Vertsside runner + jobbimage + egress → WP-C | Ekte branch/PR, ressurs-/nettverksisolasjon |
-| D-35 Vault + live | Infisical i compose, `oauth-refresh`, host-skript | GitHub-App-autentisering (Q-45b) → WP-C | Machine identity, rotasjon, Google OAuth live |
+| D-35 Vault + live | Infisical i compose, `oauth-refresh`, host-skript; **GitHub-App-autentisering (Q-45b, D-454): `WIRED/DORMANT`** - uten `JARVIS_GITHUB_APP_ID`/`_INSTALLATION_ID` er alt PAT uendret (`modules/tool-gateway/src/github-app-auth.ts`, `github-token-provider.ts`; kodejobbens git-credential er repo-scopet via `GitCredentialSource.tokenFor`) | – (GHES, releases, branch protection, rulesets, webhooks, secrets: `DEFERRED`) | Machine identity, rotasjon, Google OAuth live; **GitHub App (ikke verifisert mot ekte GitHub):** eier følger `docs/runbooks/GITHUB_APP.md` og kjører `node --env-file=.env --experimental-transform-types modules/tool-gateway/scripts/github-app-live.ts --key-file ./nokkel.pem [--sandbox-repo owner/test]` til `GITHUB_APP_LIVE_STATUS=VERIFIED` |
 | D-36 Apple | skjelett | Swift-konfig, APNs-kontrakt → WP-G | Mac/Xcode/enhet |
 | HA-RUNTIME | HA-transport | – | Fysisk HA |
-| OPS-RUNTIME | backup/restore-skript, watchdog | Planlagt drift + ekstern overvåking → WP-C | Off-site, drill, uptime |
+| OPS-RUNTIME | backup/restore-skript, watchdog. **WP-C2 (D-453):** planlagt tikk/lås/retensjon/status `DORMANT` til cron installeres; off-site-sinks (rclone, rsync+ssh, lokal sti) `DORMANT` + `BLOCKED_EXTERNAL` (eier velger mål); backup-heartbeat `DORMANT` + `BLOCKED_EXTERNAL`; API-oppetids-heartbeat `DORMANT` (kablet i `main.ts`, av uten URL); selvdiagnose-område «Backup» `WIRED` (`UNKNOWN` til statusmappen er montert); restore-drill med RTO/RPO `DORMANT`. Uavhengig gjennomgang: 15 funn + 8 testgap rettet i oppfølgings-PR (F15 = erklært begrensning) | Off-site-retensjon `DEFERRED`; EV-19-kobling `BUILT_UNWIRED` (`backupMaintenanceLastRun` finnes, ikke koblet til `maintenanceSection`); `C13` i UA-0-gaten ikke lagt inn; `nas-restore-verify.sh --network none` `NOT VERIFIED` (ingen Docker-daemon i byggemiljøet) | `ops/backup/acceptance-ops.sh nas /volume1/jarvisbuild-data/backups/encrypted` på NAS (exit 0 = alt bestått, 3 = ikke lukket); på maskinen med privatnøkkelen: `ops/backup/acceptance-ops.sh drill ~/jarvis-drill --identity <nøkkelfil> --from-offsite` |
 | UA0-AUTHORITY | `authority.ts`, klasse D-pipeline | Fullfør D-kjede for finans/Zapier/Outlook bak step-up → WP-F | Pause/revoke/preflight/recovery i NAS-runtime |
 | UA0-PRIVACY | `PROCESSING_INVENTORY.md` + CI-vakt (D-420) | – | DPIA godkjent av eier |
-| UA0-RUNRATE | run-rate-rapport + maintenance ledger (D-421) | Value-loop-bruksmetrikk → WP-C | Se tallene i dashbordet på NAS |
+| UA0-RUNRATE | run-rate-rapport + maintenance ledger (D-421) + Value Center-bruksmetrikk per verdiløkke (`executive.get_value_report`, hurtigbane, `POST /value/query`, dashbord «Verdi og bruk», D-456): `WIRED`, testet mot ekte Postgres, IKKE kjørt på NAS | – | Åpne «Verdi og bruk» (eller si «hva har du hjulpet meg med») på NAS og sammenlign tallene (briefer, jobber, godkjenninger) med virkeligheten |
 
 ## 4. HF1 UA-0 … UA-11 (kap. 8) – hva som gjenstår å bygge
 
@@ -77,7 +77,7 @@ HF2-PDF-en ligger ikke i repoet; radene bygger på beslutningsloggen D-406…D-4
 | UA-2 Knowledge | Flere kilder i produksjon, `KnowledgeRetriever` i chat, Docs/Sheets/Slides, møtetranskripter, entitetsgraf, Q-26 (truth promotion), Pieces (ingen kjent API) | Fem kilder i samme retrieval, cross-tenant=0 |
 | UA-3 Business OS | Business-tenant-provisjonering (044, topologi: Q-48), lead/opportunity-oppdatering, churn/product usage | Kjøring mot ekte kundedata |
 | UA-4 Growth | Skriveaksjoner (idempotent, før/etter) mot Ads, GA4/Search Console/GBP/LinkedIn/YouTube/TikTok, eksperiment/kreativ-intelligens | Google Ads developer token, Meta-verifisering |
-| UA-5 Dev/Cloud | Cloudflare, Langfuse/Infisical/Postgres som mål, incident-produsenter, GitHub App | Live GitHub/Vercel/GCP/Cloudflare |
+| UA-5 Dev/Cloud | Cloudflare, Langfuse/Infisical/Postgres som mål, incident-produsenter. *GitHub App er bygget (`DORMANT`, D-454); EV-17-faktaene `GitHubAuth.credentialFacts()` er `BUILT_UNWIRED` til de kobles til `assessCredential`* | Live GitHub (App-akseptansescriptet over)/Vercel/GCP/Cloudflare |
 | UA-6 Finance | D-kjede for betaling/refund/capture bak step-up, Wallester-/banking-webhooks, avstemming | Live Vipps/Neonomics/Wallester, BankID/KYC |
 | UA-7 Comms | Contacts, Teams, Messenger/Instagram, møtetranskripsjon-pipeline, utgående AI-ringing (regler), push-oppfølging | Identitet mot ekte data |
 | UA-8 Personal | Lokalagenter (Mac/Windows), Apple Calendar/Reminders/Contacts/Health-inntak, bil (provider-nøytral), familie/delte rom, personlig økonomi-lesing | Fysisk iPhone/Watch/bil |
@@ -89,11 +89,11 @@ HF2-PDF-en ligger ikke i repoet; radene bygger på beslutningsloggen D-406…D-4
 
 | Løkke | Status | Gjenstår |
 |---|---|---|
-| V1 Daily Executive Brief | `WIRED` (Daily Brief, `DailyScheduler`) | Bruksmetrikk; observere daglig bruk |
-| V2 Unified Follow-up | `BUILT_UNWIRED` (conversation-graph, pull) | Push-levering → WP-C |
-| V3 Builder Loop | `NOT_BUILT` (selvmodifikasjon frosset, D-397) | Sovende løkke bak D-32 og EV-0 → WP-B/C |
-| V4 Business Operating Loop | `PARTIAL` | Business-tenant (Q-48) → WP-D2 |
-| V5 Autonomous Operations | `NOT_BUILT` | Bak bekreftelse/step-up → WP-C/F |
+| V1 Daily Executive Brief | `WIRED` (Daily Brief, `DailyScheduler`) + bruksmetrikk i Value Center (genererte/leverte briefer, daglig løper; «åpnet/besvart» kan ikke måles) | Observere daglig bruk på NAS |
+| V2 Unified Follow-up | pull `WIRED` (conversation-graph); push `DORMANT` (`JARVIS_V2_PUSH_ENABLED=true`: høyst én gang, forsøkstak/backoff, stopp før reservasjon, vasket tittel, D-456) | Verifiser på NAS: sett flagget, se én melding som ikke gjentas (`SELECT … FROM audit_events WHERE type LIKE 'followup.push_%'`) |
+| V3 Builder Loop | `DORMANT` (kun ren beredskapsvurdering; `activation_decision` er alltid false; selvmodifikasjon frosset, D-397) | D-32, EV-0, worker-isolasjon og eierens navngitte D-beslutning |
+| V4 Business Operating Loop | `PARTIAL` (Business OS-verktøyene finnes; selve løkken ikke) | Business-tenant (Q-48) → WP-D2 |
+| V5 Autonomous Operations | `BUILT_UNWIRED` (ren forslagslogikk, `executes: false`, AV som standard) | Levering via bekreftelsesvei (TTL 5 min) og signert D-løp for omstart → WP-C/F |
 
 ## 6. Definition of Done, kap. 28 (15 punkter)
 

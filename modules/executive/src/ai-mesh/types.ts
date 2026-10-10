@@ -49,8 +49,10 @@ export interface AiMeshProvider {
   locality: "local" | "cloud";
   hosted_free_tier: boolean;
   capabilities: string[];
-  /** Nøkkel/URL er satt (presence - aldri verdien). */
+  /** Kan brukes nå: nøkkel/URL er satt (presence - aldri verdien) og leverandøren er ikke pauset av eieren. */
   configured: boolean;
+  /** WP-H0: eieren har pauset/tilbakekalt leverandøren (da er `configured` false og leverandøren teller ikke i akseptansen). Utelatt = ikke pauset. */
+  paused?: boolean;
   state: AiMeshProviderState;
   /** Frisk = `LIVE` akkurat nå (nylig bevist suksess). `CONFIGURED` (aldri bevist) og alt annet er ikke frisk. */
   healthy: boolean;

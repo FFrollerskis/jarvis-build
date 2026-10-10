@@ -196,6 +196,12 @@ function isPaidModelsEligible(profile: ModelProfile, paidModelsAllowed: boolean 
 interface ProviderRuntime {
   configured: boolean;
   model: string;
+  /**
+   * WP-H0 (JARVIS-087): eieren har pauset/tilbakekalt leverandøren. En pauset leverandør er alltid `configured: false` (ingen kandidat i noen modus, heller ikke som eksplisitt eier-override
+   * eller i en preferanseliste); flagget gjør kun at avslaget SIER hvorfor («pauset av eier», ikke «ikke konfigurert»). Sensitivitetsreglene er uendret: SECRET_RESTRICTED slipper fortsatt kun lokale
+   * leverandører, så en pauset lokal leverandør gir fail-closed for slike turer - aldri en sky-fallback.
+   */
+  paused?: boolean;
 }
 
 export class AiRouter {
@@ -218,7 +224,7 @@ export class AiRouter {
       const name = input.provider as string;
       const rt = providers.get(name);
       if (!rt?.configured) {
-        throw new NoEligibleProviderError(`override-provider '${name}' er ikke konfigurert`);
+        throw new NoEligibleProviderError(rt?.paused ? `override-provider '${name}' er pauset av eier` : `override-provider '${name}' er ikke konfigurert`);
       }
       const requiredForOverride = new Set<ModelCapability>(input.required_capabilities ?? []);
       if (input.needs_structured) requiredForOverride.add("structured_output");
@@ -266,7 +272,7 @@ export class AiRouter {
         if (attempted.includes(name)) continue; // samme leverandør to ganger i listen = ett forsøk (ellers dobbelt betalt kall i failover)
         const rt = providers.get(name);
         attempted.push(name);
-        if (!rt?.configured) { rejected.push(`${name}:not_configured`); continue; }
+        if (!rt?.configured) { rejected.push(`${name}:${rt?.paused ? "paused_by_owner" : "not_configured"}`); continue; }
         const profile = this.registry.profileOrGeneric(name, rt.model);
         const missing = [...requiredForPref].filter((c) => !profile.capabilities.includes(c));
         if (missing.length > 0) { rejected.push(`${name}:missing_capabilities=${missing.join("+")}`); continue; }
@@ -303,7 +309,10 @@ export class AiRouter {
     const skippedAttempted: string[] = [];
     // M3: leverandører som er hoppet over fordi en capability kallet krever er påstått, men ikke live-verifisert av eieren (navn → capabilities).
     const skippedUnverified = new Map<string, ModelCapability[]>();
+    // WP-H0: leverandører eieren har pauset/tilbakekalt (er alltid `configured: false`; navnene brukes kun til å SI hvorfor avslaget kom).
+    const pausedByOwner: string[] = [];
     for (const [name, rt] of providers) {
+      if (rt.paused) pausedByOwner.push(name);
       if (!rt.configured) continue;
       if (alreadyAttempted.has(name)) { skippedAttempted.push(name); continue; }
       const profile = this.registry.profileOrGeneric(name, rt.model);
@@ -337,7 +346,8 @@ export class AiRouter {
           (input.sensitivity ? ` (sensitivity=${input.sensitivity})` : "") +
           (skippedUnverified.size > 0
             ? ` (ikke live-verifisert, utelatt fra AUTO-ruting: ${[...skippedUnverified].map(([name, caps]) => `${name}:${caps.join("+")}`).join(", ")} - kjør mesh-live-smoke.ts --tools og sett JARVIS_MESH_TOOLS_VERIFIED)`
-            : "")
+            : "") +
+          (pausedByOwner.length > 0 ? ` (pauset av eier: ${pausedByOwner.join(",")})` : "")
       );
     }
 

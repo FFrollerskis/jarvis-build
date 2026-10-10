@@ -1,4 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { safeProviderId, safeToken, strictWebhookAmount, strictWebhookCurrency, strictWebhookTimestamp } from "./webhook-guard.ts";
 
 /**
  * D-110 (UA-6 Slice 4): rene, avhengighetsfrie Vipps MobilePay webhook-
@@ -140,28 +141,50 @@ export interface ParsedVippsEventEnvelope {
   readonly msn: string | null;
   readonly success: boolean | null;
   readonly timestamp: string | null;
+  /** WP-F1 (D-462): `null` = gyldig. Ellers årsakskoden til permanent ugyldig innhold (beløp/valuta/tidsstempel) - kalleren lagrer hendelsen som `rejected` og svarer 2xx. */
+  readonly rejection: string | null;
 }
 
+/**
+ * WP-F1 (D-462, JARVIS-020/070): STRENG parsing. Ikke et JSON-objekt / mangler trygg `reference` eller et rent navn KASTER `vipps_event_envelope_malformed`
+ * (kalleren lagrer et dødbrev under en hash-nøkkel). Identifiserbar hendelse med permanent ugyldig beløp (ikke et trygt ikke-negativt heltall i minste enhet),
+ * valuta eller tidsstempel (som ellers kastet `RangeError` i `toISOString()` og ga evig 5xx-retry) returneres med `rejection` satt.
+ */
 export function parseVippsEventEnvelope(rawBody: Buffer): ParsedVippsEventEnvelope {
-  const json = JSON.parse(rawBody.toString("utf8")) as Record<string, unknown>;
-  if (typeof json["reference"] !== "string" || typeof json["name"] !== "string") {
-    throw new Error("vipps_event_envelope_malformed");
-  }
-  const amountObj = json["amount"] as Record<string, unknown> | undefined;
-  const amount = typeof amountObj?.["value"] === "number" ? (amountObj["value"] as number) : null;
-  const currency = typeof amountObj?.["currency"] === "string" ? (amountObj["currency"] as string) : null;
-  const timestamp = typeof json["timestamp"] === "string" ? (json["timestamp"] as string) : null;
-  const idempotencyKey = typeof json["idempotencyKey"] === "string" ? (json["idempotencyKey"] as string) : null;
-  const dedupeKey = idempotencyKey ?? `${json["reference"]}:${json["name"]}:${timestamp ?? "no-timestamp"}`;
+  const json: unknown = JSON.parse(rawBody.toString("utf8"));
+  if (typeof json !== "object" || json === null || Array.isArray(json)) throw new Error("vipps_event_envelope_malformed");
+  const obj = json as Record<string, unknown>;
+  const reference = safeProviderId(obj["reference"]);
+  const name = typeof obj["name"] === "string" && /^[A-Za-z][A-Za-z_]{1,39}$/.test(obj["name"]) ? obj["name"] : null;
+  if (reference === null || name === null) throw new Error("vipps_event_envelope_malformed");
+
+  let rejection: string | null = null;
+  const reject = (code: string): void => { rejection ??= code; };
+
+  const amountObj = typeof obj["amount"] === "object" && obj["amount"] !== null && !Array.isArray(obj["amount"]) ? (obj["amount"] as Record<string, unknown>) : undefined;
+  if (obj["amount"] !== undefined && obj["amount"] !== null && amountObj === undefined) reject("amount_invalid:wrong_type");
+  const amount = strictWebhookAmount(amountObj?.["value"]);
+  let amountOre: number | null = null;
+  if (amount.ok) amountOre = amount.value; else reject(amount.rejection);
+  const currencyResult = strictWebhookCurrency(amountObj?.["currency"]);
+  let currency: string | null = null;
+  if (currencyResult.ok) currency = currencyResult.value; else reject(currencyResult.rejection);
+  const ts = strictWebhookTimestamp(obj["timestamp"]);
+  let timestamp: string | null = null;
+  if (ts.ok) timestamp = ts.value; else reject(ts.rejection);
+
+  const idempotencyKey = safeProviderId(obj["idempotencyKey"]);
+  const dedupeKey = idempotencyKey ?? `${reference}:${name}:${timestamp ?? "no-timestamp"}`;
 
   return {
     dedupeKey,
-    reference: json["reference"],
-    name: json["name"],
-    amount_ore: amount,
-    currency: currency ? currency.toUpperCase() : null,
-    msn: typeof json["msn"] === "string" ? (json["msn"] as string) : null,
-    success: typeof json["success"] === "boolean" ? (json["success"] as boolean) : null,
-    timestamp
+    reference,
+    name,
+    amount_ore: amountOre,
+    currency,
+    msn: safeToken(obj["msn"], 32),
+    success: typeof obj["success"] === "boolean" ? obj["success"] : null,
+    timestamp,
+    rejection
   };
 }

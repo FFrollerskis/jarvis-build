@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
-import type { IdentityContext } from "@jarvis/contracts";
+import type { GitCredentialSource, IdentityContext } from "@jarvis/contracts";
 import { scanForSecrets, withTenantTransaction } from "@jarvis/core";
 import type { PolicyGateway } from "@jarvis/policy";
 import { createGitAuthHandle, GIT_CREDENTIAL_ISOLATION_ARGS, githubCredentialScope } from "./git-auth.ts";
@@ -190,7 +190,24 @@ export function createCodingHandler(deps: {
    * (default) er sandbox-git-oppførselen 100% uendret fra før D-103 (lokale
    * bare-repo-tester som ikke trenger nettverksautentisering).
    */
-  gitAuth?: { secretProvider: { get(ref: string): Promise<string | null> }; ref?: string };
+  gitAuth?: {
+    secretProvider: { get(ref: string): Promise<string | null> };
+    /** Credential-refen (standard `JARVIS_GITHUB_TOKEN`): nøkkelen `secretProvider.get(ref)` leser, og refen `isRevoked(ref)` sjekkes mot. Med `credentialSource` brukes den KUN til tilbakekallingssjekken. */
+    ref?: string;
+    /**
+     * WP-C3 (review F2/F13): kortlevd, REPO-SCOPET git-credential - `tokenFor(<repoet DENNE jobben gjelder>)`, med minste rettighet for clone + push av jobb-branchen. Når den er satt, brukes den i
+     * stedet for `secretProvider` (som da ikke leses), og tokenet hentes RETT FØR hver git-nettverksoperasjon (clone og push) i stedet for én gang ved jobbstart: et installasjonstoken lever
+     * 1 time, og en jobb kan bruke lengre tid mellom clone og push enn det. Uten feltet er oppførselen uendret (`secretProvider.get(ref)`, men også da hentet på nytt før hver operasjon).
+     * Feiler utstedelsen, feiler jobben LUKKET (`git_auth_unavailable[:KODE]`) - aldri et bredere token, aldri uautentisert git.
+     */
+    credentialSource?: GitCredentialSource;
+    /**
+     * WP-C3 (review F3): per-credential tilbakekalling (`owner_controls.revoke_credential` på `ref`, delt via `owner_control_state`). Sjekkes FØR hver utstedelse (jobbstart, clone, push); `true`
+     * stopper jobben (`git_auth_revoked`) uten at noe token utstedes. En sjekk som selv feiler regnes som «ikke bevist ikke-tilbakekalt» og stopper også (`git_auth_revocation_check_failed`).
+     * Kill switch/frys/policy dekkes av `policy.authorize`, som nå kjøres på nytt rett før push.
+     */
+    isRevoked?: (ref: string) => Promise<boolean>;
+  };
   /**
    * Remediering del 2 (JARVIS-064): eksakt allowlist av `owner/repo` (små bokstaver) git-credentialen kan brukes mot.
    * PÅKREVD når `gitAuth` er satt - tom/manglende liste feiler lukket (`git_repo_allowlist_empty`). `repo_url` må være
@@ -207,14 +224,18 @@ export function createCodingHandler(deps: {
     if (PROTECTED_BRANCHES.has(branch)) {
       throw new Error("protected_branch_refused");
     }
+    // WP-C1 (D-32 / Q-45a): en runner med `hostGit` (vertsside job-runner) eier git-transporten. Da henter vi ALDRI noe git-token, sender
+    // ingen credential-env, og clone/push skjer HOS runneren med dens egen credential. Alt øvrig (validering, policy, agent, test, commit)
+    // er uendret. Uten `hostGit` er hele flyten byte-for-byte som før.
+    const hostGit = deps.sandbox.hostGit === true;
     // Remediering del 2 (JARVIS-009/063/064): all jobb-input valideres i kode FØR policy/credential/sandbox.
     let cloneUrl: string;
     let credentialSlug: string | undefined;
     let testCmd: string[];
     try {
       assertJobBranch(branch);
-      if (deps.gitAuth) {
-        // Med credential: kun eksakt `https://github.com/<allowlistet owner/repo>` - aldri en fremmed vert/transport.
+      if (deps.gitAuth || hostGit) {
+        // Med credential (eller vertsside git): kun eksakt `https://github.com/<allowlistet owner/repo>` - aldri en fremmed vert/transport.
         const ref = assertRepoAllowed(input.repo_url, deps.allowedRepos ?? []);
         cloneUrl = ref.canonicalUrl;
         credentialSlug = ref.slug;
@@ -235,18 +256,23 @@ export function createCodingHandler(deps: {
     }
 
     // Policy-mandat for utgående push (klasse C) - delegert agent omgår aldri policy.
-    const decision = await deps.policy.authorize({
-      identity: deps.identityFor(task),
-      toolCall: {
-        tool_id: "git",
-        action: "push_branch",
-        capability_class: "C",
-        parameters: { repo: input.repo_url, branch }
+    // WP-C3 (review F3): en funksjon, fordi samme avgjørelse kjøres PÅ NYTT rett før push - kill switch, frys eller endret policy kan ha slått inn i løpet av agentkjøringen og testene.
+    const repoUrl: string = input.repo_url;
+    const authorizePush = async (): Promise<void> => {
+      const decision = await deps.policy.authorize({
+        identity: deps.identityFor(task),
+        toolCall: {
+          tool_id: "git",
+          action: "push_branch",
+          capability_class: "C",
+          parameters: { repo: repoUrl, branch }
+        }
+      });
+      if (decision.decision !== "ALLOW") {
+        throw new Error(`policy_denied:${decision.reason}`);
       }
-    });
-    if (decision.decision !== "ALLOW") {
-      throw new Error(`policy_denied:${decision.reason}`);
-    }
+    };
+    await authorizePush();
 
     const jobEnv: Record<string, string> = {};
     if (deps.claudeCodeCredential) {
@@ -258,17 +284,54 @@ export function createCodingHandler(deps: {
     // D-103 (Blokker B): løses FØR sandboxen opprettes - en jobb som ikke kan
     // autentisere git-transport skal ALDRI komme så langt som å klone noe.
     let gitAuth: Awaited<ReturnType<typeof createGitAuthHandle>> | undefined;
-    if (deps.gitAuth) {
-      const ref = deps.gitAuth.ref ?? "JARVIS_GITHUB_TOKEN";
-      const token = await deps.gitAuth.secretProvider.get(ref);
-      if (!token) {
-        throw new Error("git_auth_unavailable");
+    /**
+     * WP-C1 review B-M2: per-credential-tilbakekalling (`owner_controls.revoke_credential` på git-refen, WP-C3 F3) som EN delt sjekk. I host-modus utsteder worker ikke noe token (runnerens egen
+     * credential brukes), så `issueGitToken` kjøres aldri der - uten denne sjekken hadde eierens tilbakekalling ingen virkning på kodejobber i host-modus (både PAT-fil og `source: request`).
+     * Kalles derfor FØR klone og FØR publish i host-modus, og FØR hver utstedelse ellers. Fail-closed: feiler selve sjekken regnes credentialen som «ikke bevist ikke-tilbakekalt».
+     * Uten `gitAuth.isRevoked` finnes det ingenting å sjekke mot (lokale repoer, tester).
+     */
+    const assertNotRevoked = async (): Promise<void> => {
+      const auth = deps.gitAuth;
+      if (!auth?.isRevoked) return;
+      let revoked: boolean;
+      try {
+        revoked = await auth.isRevoked(auth.ref ?? "JARVIS_GITHUB_TOKEN");
+      } catch {
+        throw new Error("git_auth_revocation_check_failed"); // fail-closed: kan ikke bevise at credentialen ikke er tilbakekalt
       }
-      gitAuth = await createGitAuthHandle(token, githubCredentialScope(credentialSlug as string));
+      if (revoked) throw new Error("git_auth_revoked");
+    };
+    /**
+     * WP-C3 (review F2/F3/F13): ÉN utstedelse av git-credential. Kalles FØR sandboxen opprettes (tilgjengelighet bevises før noe klones) OG rett før hver git-nettverksoperasjon, så et kortlevd,
+     * repo-scopet token aldri er eldre enn selve operasjonen. Hver utstedelse sjekker først per-credential-tilbakekalling (ingen utstedelse for en tilbakekalt credential).
+     */
+    const issueGitToken = async (): Promise<string> => {
+      const auth = deps.gitAuth as NonNullable<typeof deps.gitAuth>;
+      const ref = auth.ref ?? "JARVIS_GITHUB_TOKEN";
+      await assertNotRevoked();
+      let token: string | null = null;
+      let code = "";
+      try {
+        token = auth.credentialSource ? await auth.credentialSource.tokenFor(credentialSlug as string) : await auth.secretProvider.get(ref);
+      } catch (err) {
+        // Kun en lukket feilkode (aldri meldingen): kilden kan i prinsippet bære detaljer fra leverandøren.
+        const raw = (err as { code?: unknown } | null)?.code;
+        code = typeof raw === "string" && /^[A-Z][A-Z0-9_]{2,63}$/.test(raw) ? raw : "";
+      }
+      if (!token) {
+        throw new Error(code ? `git_auth_unavailable:${code}` : "git_auth_unavailable");
+      }
+      return token;
+    };
+    // WP-C1: i host-git-modus (jobb-runneren) bruker RUNNEREN sin egen per-repo-credential på verten - worker utsteder/ser aldri et git-token.
+    if (deps.gitAuth && !hostGit) {
+      gitAuth = await createGitAuthHandle(await issueGitToken(), githubCredentialScope(credentialSlug as string));
     }
+    /** Env med et NYTT token for ÉN git-nettverksoperasjon (clone eller push) - `undefined` uten gitAuth (lokale repoer, uendret). */
+    const networkEnv = async (): Promise<Readonly<Record<string, string>> | undefined> => (gitAuth ? gitAuth.envFor(await issueGitToken()) : undefined);
 
     try {
-      const sandbox = await deps.sandbox.create(jobEnv);
+      const sandbox = await deps.sandbox.create(jobEnv, { task_id: task.task_id, tenant_id: task.tenant_id });
       try {
       // `run` brukes for agent.modify() OG alle LOKALE git-operasjoner (branch/
       // add/commit/status/show/rev-parse) - ALDRI gitAuth.env. Kun de to
@@ -298,7 +361,14 @@ export function createCodingHandler(deps: {
       // ingen submoduler) og credential-scopet (host + repo) - se git-policy.ts / git-auth.ts.
       const netArgs = (args: string[]): string[] =>
         (gitAuth ? [...GIT_CREDENTIAL_ISOLATION_ARGS, ...gitAuth.credentialHelperArgs, ...GIT_HARDENING_ARGS, ...args] : ["-c", "core.hooksPath=/dev/null", "-c", "protocol.ext.allow=never", ...args]);
-      must("clone", await sandbox.exec("git", netArgs(["clone", "--", cloneUrl, "."]), undefined, gitAuth?.env));
+      if (hostGit) {
+        // Klone på VERTEN, med runnerens credential, til en katalog runneren selv oppretter (monteres som /work). Ingenting av dette berører worker.
+        if (!sandbox.gitCheckout || !sandbox.gitPublish) throw new Error("host_git_not_supported_by_sandbox");
+        await assertNotRevoked(); // B-M2: eierens tilbakekalling stopper også en host-jobb - FØR runneren får beskjed om å klone (og før noe token hentes for `source: request`)
+        await sandbox.gitCheckout({ repoUrl: cloneUrl, ...(deps.github?.base ? { baseBranch: deps.github.base } : {}) });
+      } else {
+        must("clone", await sandbox.exec("git", netArgs(["clone", "--", cloneUrl, "."]), undefined, await networkEnv()));
+      }
       await ctx.assertNotCancelled();
       must("branch", await run("git", ["checkout", "-b", branch]));
       const description = await deps.agent.modify(run, task.contract.goal);
@@ -320,15 +390,27 @@ export function createCodingHandler(deps: {
       }
       must("add", await run("git", ["add", "-A"]));
       must("commit", await run("git", ["commit", "-m", `jarvis: ${task.contract.goal}`]));
-      const commitSha = (await run("git", ["rev-parse", "HEAD"])).stdout.trim();
+      let commitSha = (await run("git", ["rev-parse", "HEAD"])).stdout.trim();
       const diff = await localGit(["show", "--stat", "HEAD"]);
       await deps.artifacts.save(task.tenant_id, task.task_id, "patch", "change.txt", diff.stdout);
       // D-103 §13: kansellering FØR push - den nyeste, første EKSTERNE
       // sideeffekten (en ekte branch synlig på GitHub) skal ALDRI skje etter
       // en allerede innkommet kanselleringsforespørsel.
       await ctx.assertNotCancelled();
+      // WP-C3 (review F3): policy (kill switch, frys) vurderes på nytt rett før den eksterne bivirkningen - den første vurderingen er mange minutter gammel.
+      await authorizePush();
       // Guard i runneren: kun jobb-branchen pushes; aldri beskyttede brancher.
-      must("push", await sandbox.exec("git", netArgs(["push", "origin", `${branch}:${branch}`]), undefined, gitAuth?.env));
+      if (hostGit) {
+        // Publish via verifisert git-bundle: runneren lager bundlen i containeren (uten credential), verifiserer den i et ferskt bare-repo
+        // på verten og pusher KUN den verifiserte committen til denne jobb-branchen. SHA-en runneren faktisk pushet er autoritativ.
+        await assertNotRevoked(); // B-M2: en credential som er tilbakekalt MIDT i jobben stopper publiseringen (samme sjekk som før klonen)
+        // B-L6: runneren avviser FØR pushen hvis den verifiserte committen ikke er den vi leste i containeren (`expectedSha`). Sjekken under er beholdt som siste skanse (eldre runner uten feltet).
+        const published = await (sandbox.gitPublish as NonNullable<typeof sandbox.gitPublish>)({ branch, expectedSha: commitSha });
+        if (published.commitSha !== commitSha) throw new Error("published_commit_mismatch");
+        commitSha = published.commitSha;
+      } else {
+        must("push", await sandbox.exec("git", netArgs(["push", "origin", `${branch}:${branch}`]), undefined, await networkEnv()));
+      }
       await deps.artifacts.save(task.tenant_id, task.task_id, "pr-proposal", "pr.json",
         JSON.stringify({ branch, title: `jarvis: ${task.contract.goal}`, body: description, merge: "KREVER MENNESKELIG GODKJENNING" }));
 
@@ -380,16 +462,48 @@ export function createCodingHandler(deps: {
  * når køen - identisk teknikk som den allerede eksisterende, testede
  * `redactSecrets()` i `coding-agent-eval.ts` (D-98), ALDRI en ny mekanisme.
  */
-export function withSecretRedaction(handler: TaskHandler, secrets: readonly (string | undefined)[]): TaskHandler {
+export function withSecretRedaction(handler: TaskHandler, secrets: readonly RedactionSecret[] | RedactionSecretSource): TaskHandler {
   return async (task, ctx) => {
     try {
       return await handler(task, ctx);
     } catch (err) {
       let message = (err as Error).message;
-      for (const secret of secrets) {
-        if (secret && secret.length > 0) message = message.split(secret).join("[REDACTED]");
+      for (const secret of collectRedactionSecrets(secrets)) {
+        message = message.split(secret).join("[REDACTED]");
       }
       throw new Error(message);
     }
   };
+}
+
+/** En DYNAMISK kilde til hemmeligheter, lest PÅ FEILTIDSPUNKTET (f.eks. kortlevde GitHub App-installasjonstokens, nye hver time og dermed ukjente ved oppstart). */
+export type RedactionSecretSource = () => readonly (string | undefined)[];
+/** Et element i hemmelighetslisten: en statisk verdi (`undefined`/tom hoppes over) eller en dynamisk kilde. */
+export type RedactionSecret = string | undefined | RedactionSecretSource;
+
+/**
+ * Samler hemmelighetene som skal redigeres. WP-C3 (review F12): hver DYNAMISK kilde skjermes for seg - en kilde som kaster hopper kun over SEG SELV, aldri resten av listen (tidligere ble hele
+ * listen, også de statiske nøklene, hoppet over når funksjonen kastet). En kastende kilde skjuler heller aldri den opprinnelige jobbfeilen. Hele listen kan fortsatt være én funksjon.
+ */
+function collectRedactionSecrets(secrets: readonly RedactionSecret[] | RedactionSecretSource): string[] {
+  const out: string[] = [];
+  const add = (value: unknown): void => {
+    if (typeof value === "string" && value.length > 0) out.push(value);
+  };
+  const readSource = (source: RedactionSecretSource): void => {
+    try {
+      for (const value of source()) add(value);
+    } catch {
+      // Kilden er nede: de øvrige kildene redigeres likevel.
+    }
+  };
+  if (typeof secrets === "function") {
+    readSource(secrets);
+  } else {
+    for (const secret of secrets) {
+      if (typeof secret === "function") readSource(secret);
+      else add(secret);
+    }
+  }
+  return out;
 }

@@ -227,7 +227,10 @@ describe("HOST FIX #1: normal API/worker-runtime wirer EnvSecretProvider inn i S
     // navngitte `toolSecretProvider`-konvensjon (se testen under) - regex-en oppdatert til
     // å matche variabelnavnet i stedet for et inline `new`-uttrykk, SAMME instans-identitet
     // fortsatt bevist (gitt inn TO ganger, som `readSecretProvider` OG `infisicalSecretProvider`).
-    expect(mainSource).toMatch(/const infisicalSecretProvider = new InfisicalSecretProvider\(\);[\s\S]*?const readSecretProvider = new FallbackSecretProvider\(\s*infisicalSecretProvider,\s*new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)\s*\);\s*(?:\/\/[^\n]*\s*)*const toolGateway = new ToolGateway\(pool, policy, readSecretProvider, ownerControls, infisicalSecretProvider(?:, \{[\s\S]*?\})?\);/);
+    // WP-C3 (Q-45 b / D-35): Infisical-primær/env-fallback-kjeden heter nå `baseSecretProvider` og er UENDRET innholdsmessig; `readSecretProvider`
+    // er GitHub App-dekoratøren rundt DEN (`githubAuth.secretProvider(baseSecretProvider)` - uten App-konfig returnerer den kjeden uendret,
+    // PAT som før). `toolGateway` får fortsatt `readSecretProvider` + `infisicalSecretProvider`, og BusinessTransport SAMME toolGateway.
+    expect(mainSource).toMatch(/const infisicalSecretProvider = new InfisicalSecretProvider\(\);[\s\S]*?const baseSecretProvider = new FallbackSecretProvider\(\s*infisicalSecretProvider,\s*new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)\s*\);\s*(?:\/\/[^\n]*\s*)*const githubAuth = createGitHubAuth\(\{ secrets: baseSecretProvider, env: process\.env \}\);\s*const readSecretProvider = githubAuth\.secretProvider\(baseSecretProvider\);\s*(?:\/\/[^\n]*\s*)*const toolGateway = new ToolGateway\(pool, policy, readSecretProvider, ownerControls, infisicalSecretProvider(?:, \{[\s\S]*?\})?\);/);
     // D-90: BusinessTransport-konstruktørkallet ble flerlinjet for å romme den
     // injiserte `marketingMemoryBriefSource(growthService)`-argumentet - samme
     // fem første argumenter (businessService/openLoopService/pool/toolGateway/
@@ -239,7 +242,8 @@ describe("HOST FIX #1: normal API/worker-runtime wirer EnvSecretProvider inn i S
     // Task #122 (D-213): samme hoisting som main.ts - `infisicalSecretProvider`
     // er nå en navngitt konstant, gitt inn i BÅDE lese-kjeden og `ToolGateway`
     // sitt `writableSecrets`-argument.
-    expect(workerSource).toMatch(/const infisicalSecretProvider = new InfisicalSecretProvider\(\);\s*const toolSecretProvider = new FallbackSecretProvider\(\s*infisicalSecretProvider,\s*new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)\s*\);\s*(?:\/\/[^\n]*\s*)*const toolGateway = new ToolGateway\(pool, policy, toolSecretProvider, ownerControls, infisicalSecretProvider(?:, \{[\s\S]*?\})?\);/);
+    // WP-C3: samme GitHub App-dekoratør som i main.ts (`baseToolSecretProvider` = den uendrede kjeden, `toolSecretProvider` = dekoratøren rundt den).
+    expect(workerSource).toMatch(/const infisicalSecretProvider = new InfisicalSecretProvider\(\);\s*const baseToolSecretProvider = new FallbackSecretProvider\(\s*infisicalSecretProvider,\s*new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)\s*\);\s*(?:\/\/[^\n]*\s*)*const githubAuth = createGitHubAuth\(\{ secrets: baseToolSecretProvider, env: process\.env \}\);\s*const toolSecretProvider = githubAuth\.secretProvider\(baseToolSecretProvider\);\s*(?:\/\/[^\n]*\s*)*const toolGateway = new ToolGateway\(pool, policy, toolSecretProvider, ownerControls, infisicalSecretProvider(?:, \{[\s\S]*?\})?\);/);
     expect(workerSource).toMatch(/business: new BusinessTransport\(\s*businessService, openLoopService, pool, toolGateway, scoringService,\s*\[marketingMemoryBriefSource\(growthService\)\]\s*\)/);
   });
 });

@@ -1,5 +1,6 @@
 export * from "./gateway.ts";
 export * from "./class-d-pipeline.ts";
+export * from "./finance-class-d.ts";
 export * from "./integrations.ts";
 export * from "./home-assistant.ts";
 export * from "./home-assistant-transport.ts";
@@ -14,6 +15,8 @@ export * from "./mcp-zapier-transport.ts";
 export * from "./browser-transport.ts";
 export * from "./github-rate-limit-controller.ts";
 export * from "./github-repo-lock.ts";
+export * from "./github-app-auth.ts";
+export * from "./github-token-provider.ts";
 export * from "./scheduler.ts";
 export * from "./scheduler-health.ts";
 export * from "./mesh-bridge.ts";

@@ -3,11 +3,12 @@
 import "./normalize-env.ts";
 import { envInt, systemIdentity } from "@jarvis/contracts";
 import { ownerConfigOrExit } from "./owner.ts";
+import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
 import { assertProvidersHaveExplicitPricing, budgetConfigFromEnv, dailySpentOre, ModelGateway, pricingFromEnv, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
-  DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubRateLimitController, GithubTransport, GmailTransport,
+  DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubTransport, createGitHubAuth, GmailTransport,
   GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, MeshToolExecutor, resolveModelToolSurface, chatReadTierMeshTools, BACKGROUND_GITHUB_READ, PgGithubRateLimitStore,
   CHAT_ACT_TIER, CHAT_READ_TIER, MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, memoryToolDefinitions,
   ToolGateway, assertManifestInvariants, buildToolManifest, createTurnContext, driveTransportsIfConfigured, firstWaveTools, jobIdentityFor, telegramClassDNotifier, parseDockerMutationTargets, parseGceMutationTargets
@@ -20,7 +21,7 @@ import { OperationsService, OperationsTransport } from "@jarvis/operations";
 import {
   FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
   BankingService, NeonomicsFinanceTransport,
-  CardService, WallesterFinanceTransport, createRsaJwtSigner,
+  CardService, WallesterFinanceTransport, createRsaJwtSigner, FinanceReconciliationService,
   type WallesterCredentials, type WallesterCredentialsProvider,
   type NeonomicsCredentials, type NeonomicsCredentialsProvider,
   type FikenCredentials, type FikenCredentialsProvider, type StripeCredentials, type StripeCredentialsProvider,
@@ -107,7 +108,9 @@ const gateway = new ModelGateway({
   ],
   // D-395 (JARVIS-039): workeren hadde INGEN egen budsjettkonfig (falt tilbake til DEFAULT_BUDGET med spend_approved=false) - en godkjenning eieren ga
   // i api gjaldt ikke her. Samme kilde som api: `budgetConfigFromEnv()`.
-  budget: budgetConfigFromEnv()
+  budget: budgetConfigFromEnv(),
+  // WP-H0 (JARVIS-087): eierens pause/tilbakekall av en modellleverandør, lest LIVE fra `owner_control_state` ved hvert kall - en pause satt via api stanser også workerens modellkall (se provider-pause.ts).
+  providerPause: createProviderPauseSourceFromPool(pool)
 });
 // JARVIS-006: hver konstruert adapter MÅ ha eksplisitt pris - ingen stille `default_rate`.
 try {
@@ -173,10 +176,15 @@ const policy = new PolicyGateway({
 // instans også gis inn som `ToolGateway` sitt separate `writableSecrets`-
 // argument (5. posisjon) - ALDRI en ny, parallell Infisical-tilkobling.
 const infisicalSecretProvider = new InfisicalSecretProvider();
-const toolSecretProvider = new FallbackSecretProvider(
+const baseToolSecretProvider = new FallbackSecretProvider(
   infisicalSecretProvider,
   new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider())
 );
+// WP-C3 (Q-45 b / D-35): SAMME GitHub App-autentisering som apps/api/src/main.ts (API/worker-parity). Uten JARVIS_GITHUB_APP_ID/_INSTALLATION_ID
+// returnerer `secretProvider()` kjeden UENDRET (PAT som før); med dem leveres et kortlevd, repo-scopet installasjonstoken under SAMME ref, og
+// privatnøkkelen leses fra vaulten (workeren beholder Infisical-maskinidentiteten) - aldri fra container-env.
+const githubAuth = createGitHubAuth({ secrets: baseToolSecretProvider, env: process.env });
+const toolSecretProvider = githubAuth.secretProvider(baseToolSecretProvider);
 // Del 3 (JARVIS-013/043): samme HÅRDE klasse D-pipeline som API-prosessen (API/worker-parity); varsleren bindes rett under.
 const toolGateway = new ToolGateway(pool, policy, toolSecretProvider, ownerControls, infisicalSecretProvider, {
   classDPipeline: { enforce: true },
@@ -306,8 +314,9 @@ const fikenCredentialsProvider: FikenCredentialsProvider = {
 };
 // D-97: identisk wiring-mønster som apps/api/src/main.ts - SAMME pool, altsaa
 // SAMME delte github_rate_limit_state-rad paa tvers av api/worker-prosessene.
-const githubRateLimitController = new GithubRateLimitController(
-  new PgGithubRateLimitStore(pool), "JARVIS_GITHUB_TOKEN",
+const githubRateLimitController = githubAuth.rateLimitController(
+  // WP-C3: `JARVIS_GITHUB_TOKEN` i PAT-modus (uendret), ellers nøkkel per installasjon (samme som api-prosessen).
+  new PgGithubRateLimitStore(pool),
   (event) => console.warn(`[github-rate-limit] ${event.transition} -> ${event.state}${event.retryAt ? ` retry_at=${event.retryAt.toISOString()} source=${event.source}` : ""}`)
 );
 // D-181 (BLOCKER B1, D184): hoistet (var tidligere inline i firstWaveTools()
@@ -444,7 +453,8 @@ for (const tool of firstWaveTools({
   // D-335 (UA-4 Meta Ads-slice): identisk wiring-mønster som apps/api/src/main.ts.
   metaads: new MetaAdsTransport(growthService),
   // UA-6 Finance & Spend Integrity Gateway (D-107): identisk wiring-mønster som apps/api/src/main.ts.
-  finance: new FinanceTransport(financeService, fikenCredentialsProvider),
+  // WP-F1: avstemmingsrapporten (`finance.get_reconciliation_status`) er en ren lesing - workeren trenger ingen Fiken-leser eller varsler (sveipet kjører i api).
+  finance: new FinanceTransport(financeService, fikenCredentialsProvider, new FinanceReconciliationService(pool)),
   // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2): identisk wiring-mønster som apps/api/src/main.ts.
   finance_spend: new SpendTransport(spendService),
   // D-109 (UA-6 Slice 3): identisk wiring-mønster som apps/api/src/main.ts.
@@ -665,13 +675,23 @@ worker.register(
       // vertsmaskin-tilstand (Git Credential Manager e.l.). Mangler tokenet:
       // jobben feiler FØR clone forsøkes (`git_auth_unavailable`), ALDRI et
       // stille fall til uautentisert git.
-      gitAuth: { secretProvider: new EnvSecretProvider() },
+      // WP-C3 (review F2/F13): git-credentialen er `githubAuth.gitCredentialSource(...)` - i App-modus et kortlevd installasjonstoken scopet til NØYAKTIG repoet jobben gjelder, med minste rettighet
+      // (Contents), hentet rett før hver git-nettverksoperasjon (clone, push) - IKKE standard-scope-tokenet (alle konfigurerte repoer, alle rettigheter) som connectoren bruker. I PAT-modus gir kilden
+      // PAT-en fra `EnvSecretProvider`, akkurat som før (`secretProvider` under er den uendrede PAT-/reservekilden og leses ikke når `credentialSource` er satt). PAT i App-modus: kun eksplisitt, loggført fallback.
+      // WP-C3 (review F3): `isRevoked` = den delte, varige per-credential-tilbakekallingen (`owner_controls.revoke_credential`) - sjekkes før hver utstedelse.
+      gitAuth: {
+        secretProvider: new EnvSecretProvider(),
+        credentialSource: githubAuth.gitCredentialSource(new EnvSecretProvider()),
+        isRevoked: (ref) => ownerControls.isRevokedDurable(ref)
+      },
       // Remediering del 2 (JARVIS-064): credentialen gjelder KUN github.com + disse eksakte repoene
       // (JARVIS_GIT_ALLOWED_REPOS, ellers JARVIS_GITHUB_REPO). Tom allowlist = hver kodejobb feiler lukket.
       allowedRepos: allowedReposFromEnv(process.env),
       github: { gateway: toolGateway }
     }),
-    [process.env["ANTHROPIC_API_KEY"], process.env["JARVIS_GITHUB_TOKEN"]]
+    // WP-C3: de to statiske nøklene + EN DYNAMISK kilde - kortlevde installasjonstokens (nye hver time) utstedes etter oppstart og må redigeres ut av feilmeldinger også. Review F12: kilden skjermes
+    // for seg i `withSecretRedaction` (kaster `knownTokens()`, hoppes kun den over - de statiske nøklene redigeres likevel).
+    [process.env["ANTHROPIC_API_KEY"], process.env["JARVIS_GITHUB_TOKEN"], () => githubAuth.knownTokens()]
   )
 );
 

@@ -2,6 +2,7 @@ import type { SloReport } from "./slo/index.ts";
 import { composeSloReport, SLO_CATALOG } from "./slo/index.ts";
 import { composeEvolutionReport, type EvolutionReport } from "./evolution/index.ts";
 import { composeAiMeshReport, type AiMeshReport } from "./ai-mesh/index.ts";
+import { composeControlCenterOverview, explainControlCenterNo, type ControlCenterOverview, type ControlCenterRegistry, type ControlCenterReport } from "./control-center/index.ts";
 import {
   composeValueReport, deriveChangeFreeze, describeValueLoops, evaluateBuilderLoopReadiness, proposeOpsActions,
   type ValueMeasurementSource, type ValueMeasurement, type ValueReport, type ValueRuntimeFacts, type ValueWindows
@@ -15,7 +16,7 @@ import type {
   SituationAutonomyPolicy,
   SituationNotificationPolicy
 } from "@jarvis/situations";
-import { listConnectorStatus, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
+import { listConnectorStatus, type ConnectorAuthInfo, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
 import { rankAttentionQueue } from "./ranking.ts";
 import type {
   AttentionItem, AttentionItemDetail, CapabilityStatus, ConnectorStatusReport, ControlSurfaceStatus, DelegationBoard
@@ -95,10 +96,27 @@ export interface ExecutiveServiceOptions {
   };
   /** EV-2 (D-417): SLO-/drift-/dataskvalitetsrapport (injisert fra `apps/api`; kun lesing av eksisterende observerbarhet). */
   slo?: { report(): Promise<SloReport> };
+  /**
+   * WP-C3 (Q-45 b): autentiseringsmetadata per connector (GitHub: `pat`/`app`, installasjons-id, utløp, repo-scope, rettigheter) - synkron og
+   * nettverksfri, injisert fra `apps/api`. Havner som `auth` i `get_connector_status`; aldri credential-verdier.
+   */
+  connectorAuth?: (connectorId: string) => ConnectorAuthInfo | undefined;
   /** WP-B (D-452): evolusjonsporter i observasjonsmodus (injisert fra `apps/api`; kun lesing - utfører aldri en endring). */
   evolution?: { report(): Promise<EvolutionReport> };
   /** WP-D4 (JARVIS-033/036/078): AI Mesh-status (injisert fra `apps/api`; kun lesing - gjør aldri et modellkall). */
   aiMesh?: { report(): Promise<AiMeshReport> };
+  /**
+   * WP-H0 (UA-11 Admin Control Center): registeret over de ti kontrollsentrene (injisert fra `apps/api`; kun lesing - sentrene skriver ingenting, handlingene deres peker på eksisterende ruter).
+   * Uten registeret: oversikten sier ærlig at ingen sentre er koblet inn (aldri en gjetning om at alt er i orden).
+   */
+  controlCenters?: ControlCenterRegistry;
+  /**
+   * WP-H0 (JARVIS-087): avbryt en bakgrunnsjobb/agent fra kontrollsenteret. Den EKSISTERENDE kanselleringsveien (`TaskService.cancel`: klasse B-policy, `requestCancel`, revisjon `task.cancelled`) injiseres fra
+   * `apps/api`; executive-laget har ingen egen kanselleringslogikk. Uten denne avvises handlingen (`executive_tasks_not_configured`).
+   */
+  tasks?: {
+    cancel(identity: IdentityContext, taskId: string): Promise<{ ok: true; value: { cancelled: boolean; outcome: "cancelled" | "requested" | "not_cancellable" } } | { ok: false; reason: string }>;
+  };
   /**
    * WP-C4: Value Center. `source` måler bruk per verdiløkke (kun aggregater, lesing som app-rolle under RLS); `facts` gir kjøretidsfakta (flagg, EV-0-status, erklærte porter). Uten `value` er alle metrikker
    * `not_measurable` (aldri 0) og løkke-statusene `unknown`.
@@ -272,6 +290,18 @@ export class ExecutiveService {
   }
 
   /**
+   * WP-H0 (JARVIS-087): gjennomslag til den EKSISTERENDE kanselleringsveien for en bakgrunnsjobb/agent. Eier-kun håndheves av verktøydefinisjonen (`parameterAuthorizer`) FØR dette kalles; policy (klasse B),
+   * tenant-RLS og revisjon (`task.cancelled`) skjer i `TaskService.cancel`. Et avslag fra policy kastes (blir et `ok:false` på det ytre kallet), aldri en stille «ok».
+   */
+  async cancelTask(identity: IdentityContext, taskId: string): Promise<{ task_id: string; cancelled: boolean; outcome: "cancelled" | "requested" | "not_cancellable" }> {
+    const tasks = this.options.tasks;
+    if (!tasks) throw new Error("executive_tasks_not_configured");
+    const result = await tasks.cancel(identity, taskId);
+    if (!result.ok) throw new ExecutiveAccessDeniedError("cancel_task", result.reason);
+    return { task_id: taskId, cancelled: result.value.cancelled, outcome: result.value.outcome };
+  }
+
+  /**
    * K1 (Sovereign graduation, D-164): ÉN samlet lesing av HELE eier-
    * kontrolloverflaten - komponerer `owner_controls.get_control_state`
    * (global kill switch + navngitte frosne connectorer/tilbakekalte
@@ -409,6 +439,40 @@ export class ExecutiveService {
   }
 
   /**
+   * WP-H0: eier-kun-sjekken for `executive.get_control_center` (brukes av verktøydefinisjonens `parameterAuthorizer`, slik at et avslag blir en vanlig `tool.denied`-revisjonsrad FØR noe bygges).
+   * Uten registeret er det ingenting å lekke, så sjekken slipper gjennom.
+   */
+  authorizeControlCenter(identity: IdentityContext): { allowed: boolean; reason: string } {
+    // L-4: lese-porten = eier OG signert enhetsøkt (`authorizeRead`); mutasjonsporten under er kun eier.
+    return this.options.controlCenters ? this.options.controlCenters.authorizeRead(identity) : { allowed: true, reason: "no_control_centers" };
+  }
+
+  /**
+   * WP-H0 (JARVIS-087): eier-kun-porten for kontrollsenterets MUTASJONER (`cancel_task`). I motsetning til lesingen over er den FAIL-CLOSED også uten register: en skrivehandling slippes aldri gjennom fordi
+   * «det ikke er noe å lekke». Samme eier-predikat (`isOwner`, i drift `resolveAuthorityMode(...) === "SOVEREIGN"`) som kontrollsentrene bruker.
+   */
+  authorizeOwnerControl(identity: IdentityContext): { allowed: boolean; reason: string } {
+    const registry = this.options.controlCenters;
+    if (!registry) return { allowed: false, reason: "control_center_owner_check_not_configured" };
+    return registry.authorize(identity);
+  }
+
+  /** WP-H0: oversikt over de ti kontrollsentrene (registrerte bygges, øvrige listes som ikke koblet inn). RENT lesende. */
+  async getControlCenterOverview(identity: IdentityContext): Promise<ControlCenterOverview> {
+    const registry = this.options.controlCenters;
+    if (registry) return registry.overview(identity);
+    return composeControlCenterOverview([], new Date());
+  }
+
+  /** WP-H0: full rapport for ETT senter + deterministisk forklaring, eller `null` når senteret ikke er koblet inn. RENT lesende. */
+  async getControlCenterReport(identity: IdentityContext, center: string): Promise<{ report: ControlCenterReport; explanation_no: string } | null> {
+    const registry = this.options.controlCenters;
+    if (!registry) return null;
+    const report = await registry.report(center, identity);
+    return report === null ? null : { report, explanation_no: explainControlCenterNo(report) };
+  }
+
+  /**
    * WP-C4: Value Center - bruksmetrikk per verdiløkke (V1-V5) og kjernebruk, V3 Builder Loop-beredskap (sovende, `activation_decision` alltid false) og V5-forslag (kun når `JARVIS_V5_PROPOSALS_ENABLED`; ingenting utføres).
    * RENT lesende, ingen nøstede `gateway.execute()`-kall. `tenantId` kommer fra den betrodde konteksten (transporten), aldri fra parametre. Hver del feiler for seg: en kilde som svikter gir `not_measurable`/`unknown`,
    * aldri et påstått 0 og aldri en kastet feil.
@@ -530,6 +594,6 @@ export class ExecutiveService {
    * aldri verdi) og leser `gateway.health` direkte.
    */
   async getConnectorStatus(onlyIds?: readonly string[]): Promise<ConnectorStatusReport> {
-    return { connectors: await listConnectorStatus(this.gateway, onlyIds) };
+    return { connectors: await listConnectorStatus(this.gateway, onlyIds, this.options.connectorAuth ? { authInfo: this.options.connectorAuth } : {}) };
   }
 }

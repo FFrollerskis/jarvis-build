@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "runner": {
+    "socket_path": "/var/lib/jarvis-job-runner/sock/runner.sock",
+    "token_file": "/etc/jarvis/job-runner.token",
+    "base_dir": "/var/lib/jarvis-job-runner/jobs",
+    "docker_bin": "/usr/bin/docker",
+    "git_bin": "/usr/bin/git",
+    "image": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "network": "jarvis-jobs",
+    "egress_proxy_url": "http://172.30.77.1:3128",
+    "user": "10001:10001",
+    "memory": "1g",
+    "cpus": "1.0",
+    "pids_limit": 256,
+    "tmpfs_size": "256m",
+    "max_concurrent_jobs": 2,
+    "max_job_lifetime_s": 3600,
+    "default_exec_timeout_ms": 60000,
+    "max_exec_timeout_ms": 900000,
+    "max_output_bytes": 2097152,
+    "max_body_bytes": 262144,
+    "allowed_repos": ["tsworkflow/jarvis-d103-acceptance"],
+    "git_credentials": {
+      "tsworkflow/jarvis-d103-acceptance": { "token_file": "/etc/jarvis/git-token-jarvis-d103-acceptance" }
+    },
+    "branch_prefix": "jarvis/",
+    "env_allow": ["ANTHROPIC_API_KEY"],
+    "clone_depth": 50,
+    "clone_timeout_ms": 300000,
+    "publish": {
+      "max_bundle_bytes": 67108864,
+      "max_commits": 20,
+      "max_files": 500,
+      "deny_paths": [".github/", ".gitmodules", ".gitattributes", ".lfsconfig"],
+      "timeout_ms": 180000
+    },
+    "git_identity": { "name": "jarvis-worker", "email": "worker@jarvis.local" },
+    "sweep_interval_s": 15
+  },
+  "egress_proxy": {
+    "listen_host": "172.30.77.1",
+    "listen_port": 3128,
+    "allow": ["api.anthropic.com:443"],
+    "allowed_client_cidrs": ["172.30.77.0/24"],
+    "max_connections": 64,
+    "max_connections_per_client": 16,
+    "idle_timeout_ms": 120000,
+    "connect_timeout_ms": 10000,
+    "max_tunnel_ms": 3600000
+  }
+}

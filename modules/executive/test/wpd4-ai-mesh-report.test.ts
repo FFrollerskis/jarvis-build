@@ -89,6 +89,26 @@ describe("evaluateAcceptance (≥3 live providers med fallback)", () => {
     expect(a.missing[0]).toBe("Ingen leverandør er konfigurert.");
   });
 
+  it("WP-H0: en leverandør eieren har pauset teller ikke i akseptansen, og rapporten sier «pauset av eier» (ikke «ikke konfigurert»)", () => {
+    const pausedKimi = live("kimi", { configured: false, paused: true, healthy: false });
+    const providers = [live("a"), live("b"), pausedKimi];
+    const a = evaluateAcceptance(providers, { fallback_verified_in_process: true });
+    expect(a.live_providers).toBe(2);
+    expect(a.live).not.toContain("kimi");
+    expect(a.verdict).toBe("NOT_MET");
+    expect(a.missing.join(" ")).toContain("Pauset av eier (teller ikke før pausen er opphevet): kimi.");
+    const report = composeAiMeshReport({ as_of: AS_OF, router: "HEALTHY", providers, fallback_verified_in_process: true });
+    expect(report.summary_no).toContain("- kimi (sky): pauset av eier");
+    expect(report.summary_no).not.toContain("- kimi (sky): ikke konfigurert");
+  });
+
+  it("WP-H0: er ALLE leverandører pauset, sier årsaken at ingen kan brukes nå - ikke at ingen er konfigurert", () => {
+    const a = evaluateAcceptance([provider("a", { configured: false, paused: true }), provider("b", { configured: false, paused: true })], { fallback_verified_in_process: false });
+    expect(a.verdict).toBe("NOT_MET");
+    expect(a.missing[0]).toBe("Ingen leverandør kan brukes nå.");
+    expect(a.missing.join(" ")).toContain("a, b");
+  });
+
   it("ulesbar database (usage_7d null overalt) uten annet bevis gir UKJENT - aldri MET og aldri en gjetning om feil", () => {
     const a = evaluateAcceptance([provider("a", { usage_7d: null }), provider("b", { usage_7d: null })], { fallback_verified_in_process: false });
     expect(a.verdict).toBe("UNKNOWN");

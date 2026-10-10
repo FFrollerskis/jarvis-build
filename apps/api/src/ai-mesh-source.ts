@@ -113,8 +113,10 @@ export function toMeshProvider(d: MeshProviderDetail, usage: Map<string, AiMeshU
     hosted_free_tier: d.hosted_free_tier,
     capabilities: [...d.capabilities],
     configured: d.configured,
+    ...(d.paused === true ? { paused: true } : {}),
     state: d.state,
-    healthy: d.state === "LIVE",
+    // En pauset leverandør er aldri «frisk» i denne rapporten, selv om helsen er LIVE (eieren har stengt den).
+    healthy: d.state === "LIVE" && d.paused !== true,
     runtime: {
       success: d.success,
       failures: d.failures,

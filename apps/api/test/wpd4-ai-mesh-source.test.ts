@@ -38,6 +38,16 @@ const row = (over: Record<string, unknown> = {}) => ({
   provider: "kimi", calls: 10, ok_calls: 8, failed_calls: 2, fallback_ok_calls: 1, cost_ore: "1234", tokens_in: "5000", tokens_out: "900", p50: "812.4", last_success_at: new Date("2026-10-14T08:30:00.000Z"), ...over
 });
 
+describe("toMeshProvider: eierens pause (WP-H0)", () => {
+  it("en pauset leverandør bærer paused:true og er aldri «frisk», selv om helsen er LIVE; en ikke-pauset har ikke feltet", () => {
+    const pausedView = toMeshProvider(detail({ configured: false, paused: true, state: "LIVE" }), null);
+    expect(pausedView).toMatchObject({ configured: false, paused: true, state: "LIVE", healthy: false });
+    const normal = toMeshProvider(detail({ state: "LIVE" }), null);
+    expect(normal).toMatchObject({ configured: true, healthy: true });
+    expect(normal).not.toHaveProperty("paused");
+  });
+});
+
 describe("redactedErrorCode", () => {
   it("udefinert og tom/blank tekst gir null", () => {
     expect(redactedErrorCode(undefined)).toBeNull();

@@ -137,6 +137,28 @@ describe("ModelGateway.meshDetails", () => {
   });
 });
 
+describe("ModelGateway.meshDetails: eierens pause (WP-H0)", () => {
+  it("en pauset leverandør står som ikke brukbar (configured:false, paused:true) men helsen er den faktiske; pausen oppheves uten omstart", async () => {
+    const paused = new Set<string>();
+    const gateway = new ModelGateway({
+      pool: fakePool(), trace: new MemoryTraceSink(), providers: [adapter("gemma_local"), adapter("kimi")],
+      providerPause: { pausedProviders: async () => new Set(paused) }
+    });
+    await gateway.complete({ ...base, providerPreference: ["kimi"] });
+    paused.add("kimi");
+    await gateway.complete({ ...base, providerPreference: ["gemma_local"] }); // hvert kall leser pausen på nytt
+    const pausedView = Object.fromEntries(gateway.meshDetails().map((d) => [d.provider, d]));
+    expect(pausedView["kimi"]).toMatchObject({ configured: false, paused: true, state: "LIVE", success: 1 });
+    expect(pausedView["gemma_local"]).toMatchObject({ configured: true });
+    expect(pausedView["gemma_local"]).not.toHaveProperty("paused");
+    paused.clear();
+    await gateway.complete({ ...base, providerPreference: ["gemma_local"] });
+    const resumed = gateway.meshDetails().find((d) => d.provider === "kimi");
+    expect(resumed).toMatchObject({ configured: true, state: "LIVE" });
+    expect(resumed).not.toHaveProperty("paused");
+  });
+});
+
 describe("ModelGateway: parallell vs. enkeltkall i latensmålingen", () => {
   it("to kall som overlapper: det første er alene, det andre startet mens et annet pågikk", async () => {
     let release!: () => void;

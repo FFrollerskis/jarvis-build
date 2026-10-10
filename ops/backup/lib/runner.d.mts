@@ -6,6 +6,8 @@ export interface PgCommand {
 export interface PgRunner {
   mode: "direct" | "docker" | "container";
   endpoint: string;
+  /** Rollen klientverktøyene logger inn som (`-U`). */
+  user?: string;
   command(tool: string, args: string[], opts?: { database?: string | undefined }): PgCommand;
 }
 export declare function makeRunner(opts: {
