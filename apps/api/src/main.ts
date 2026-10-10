@@ -132,7 +132,7 @@ import { buildValueRuntimeFacts } from "./value-facts.ts";
 import { createValueMeasurementSource } from "./value-source.ts";
 import { ChatJobs, MAX_ACTIVE_JOBS, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
-import { createControlCenterRegistry, registerControlCenters } from "./control-center/register.ts";
+import { createControlCenterRegistry, ownerPredicate, registerControlCenters } from "./control-center/register.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { createOwnerControlsService } from "./provider-pause.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
@@ -1323,6 +1323,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // Del 2 (JARVIS-065): den validerte eier-identiteten fyller visningsfeltene i /chat, /dashboard og /voice
     // (aldri autoritet - den kommer fra et verifisert grant). Uten denne svarer sidene 503 `owner_not_configured`.
     owner: { tenant_id: owner.tenant_id, person_id: owner.owner_person_id },
+    // WP-E1 review (M3): eier-porten for incident-livssyklus, reparasjon, driftsoversikt og skymutasjoner = DET SAMME predikatet som kontrollsentrene (`ownerPredicate`), bygget fra DEN SAMME `ownerAuthority`
+    // som Policy Gateway. Ingen egen sammenligning her - uten verdien nektes alle (`owner_required`).
+    ownerGate: ownerPredicate(ownerAuthority),
     identity: identityService,
     devices: deviceService,
     grants: grantService,

@@ -16,6 +16,7 @@ import { ScriptedAdapter } from "@jarvis/provider-adapters";
 import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
 import { ToolGateway, type SecretProvider } from "@jarvis/tool-gateway";
 import { ConversationEngine } from "../src/conversation.ts";
+import { ownerPredicate } from "../src/control-center/register.ts";
 import { createApiServer } from "../src/server.ts";
 import { generateDeviceKey, mintGrant, type TestDeviceKey } from "./support/grant-client.ts";
 
@@ -64,9 +65,9 @@ beforeAll(async () => {
     identityA.device_id, A, identityA.person_id, keys[identityA.device_id]!.publicKeyPem, identityB.device_id, B, identityB.person_id, keys[identityB.device_id]!.publicKeyPem
   ]);
   app = createPool({ host: "127.0.0.1", port: leased.port, database: "jarvis_test", user: "jarvis_test_e1api", password: "pw2" });
+  const authority = { owner_person_id: identityA.person_id, owner_tenants: [A, B] };
   const policy = new PolicyGateway({
-    devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch: new KillSwitch(), infraGate: new InfraExecutionGate(),
-    authority: { owner_person_id: identityA.person_id, owner_tenants: [A, B] }
+    devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch: new KillSwitch(), infraGate: new InfraExecutionGate(), authority
   });
   const secrets: SecretProvider = { name: "fake", get: async () => "fake" };
   const gateway = new ToolGateway(app, policy, secrets);
@@ -83,6 +84,8 @@ beforeAll(async () => {
     identity: identityService, sessions: sessionService, devices: deviceService, grants: grantService,
     channelAuthority: new ChannelSessionAuthority({ pool: app, devices: deviceService, sessions: sessionService, identity: identityService, grants: grantService }),
     policy, worker, tasks: taskService,
+    // Gjennomgang av PR #324 (M3): eier-porten = kontrollsentrenes predikat, bygget fra SAMME AuthorityConfig som PolicyGateway (se e1-review-m3-owner-gate.test.ts for ikke-eier-bevisene).
+    ownerGate: ownerPredicate(authority),
     conversation: new ConversationEngine({ messages: new MessageStore(app), context: new ContextBuilder(app), gateway: modelGateway, tasks: taskService, worker, trace }),
     incidents: { service: new IncidentService(app), deployments: new DeploymentService(app), diagnosis: new DiagnosisService(app), gateway, infraGate: new InfraExecutionGate(), pool: app }
   });

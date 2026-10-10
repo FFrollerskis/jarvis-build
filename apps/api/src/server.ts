@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import type pg from "pg";
-import { ChallengeLimitError, type ConfirmationStore } from "@jarvis/core";
+import { ChallengeLimitError, withTenantTransaction, writeAudit, type ConfirmationStore } from "@jarvis/core";
 import type {
   ChannelSessionAuthority, DeviceEnrollmentService, DeviceService, IdentityService,
   SessionGrantService, SessionService, VoiceSessionAuthority
@@ -157,6 +157,12 @@ export interface ApiDeps {
    * en verifisert grant). Uten verdien svarer de brukervendte sidene 503 `owner_not_configured`.
    */
   owner?: { tenant_id: string; person_id: string };
+  /**
+   * Gjennomgang av PR #324 (M3): EIER-PORTEN for incident-livssyklusen (`/incidents/transition`), reparasjon (`/incidents/repair`), driftsoversikten (`/infra/overview`) og skymutasjonene (`/infra/cloud/mutate`).
+   * I drift: `ownerPredicate(ownerAuthority)` (apps/api/src/control-center/register.ts) - DET SAMME predikatet som kontrollsentrene og Policy Gateway bruker (`resolveAuthorityMode(...) === "SOVEREIGN"`: eier-person,
+   * eier-tenant, ingen delegasjon), aldri en egen sammenligning her. FAIL-CLOSED: uten verdien (eller ved en kastet feil) nektes alle med `owner_required`.
+   */
+  ownerGate?: (identity: IdentityContext) => boolean;
 }
 
 export interface HealthStatus {
@@ -665,6 +671,34 @@ async function authedRequest(
   return { identity: resolved.identity, body: rest };
 }
 
+/**
+ * Gjennomgang av PR #324 (M3): `authedRequest` bekrefter bare at grantet er gyldig - IKKE at innehaveren er eieren. `/incidents/transition` merket derfor enhver autentisert person som `actor_kind: "owner"` (en
+ * delegert/sekundær person i eierens tenant kunne lukke eierens hendelser og dermed dempe produsentene), og `/incidents/repair` og `/infra/overview` hadde ingen eier-sjekk. Denne porten bruker
+ * `deps.ownerGate` (= kontrollsentrenes `ownerPredicate`, ingen ny logikk). Avslag: `403 owner_required` og en vanlig `tool.denied`-revisjonsrad (som H0), skrevet i AKTØRENS egen tenant. Fail-closed.
+ */
+async function requireOwner(
+  res: ServerResponse, deps: ApiDeps, identity: IdentityContext, subject: { tool_id: string; action: string }
+): Promise<boolean> {
+  let allowed = false;
+  try {
+    allowed = deps.ownerGate !== undefined && deps.ownerGate(identity) === true;
+  } catch {
+    allowed = false;
+  }
+  if (allowed) return true;
+  const reason = deps.ownerGate === undefined ? "owner_gate_not_configured" : "owner_required";
+  const pool = deps.incidents?.pool;
+  if (pool) {
+    await withTenantTransaction(pool, identity.tenant_id, (client) =>
+      writeAudit(client, identity, { type: "tool.denied", decision: "DENY", reason, tool_id: subject.tool_id, action: subject.action })
+    ).catch((err: unknown) => {
+      console.error(JSON.stringify({ msg: "owner_gate_audit_write_failed", tool_id: subject.tool_id, action: subject.action, error: err instanceof Error ? err.message.slice(0, 80) : "unknown" }));
+    });
+  }
+  json(res, 403, { error: "owner_required", reason, request_id: requestIdOf(res) });
+  return false;
+}
+
 function fieldString(body: Record<string, unknown>, key: string): string {
   const value = body[key];
   if (typeof value !== "string" || value.length === 0 || value.length > 4_000) {
@@ -1122,6 +1156,8 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       if (resolved.responded) return;
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
     }
+    // M3: driftsoversikten (hendelsestitler, skymål-tilstand) er en EIER-flate - samme port som kontrollsentrene. Verktøydefinisjonen har i tillegg SIN EGEN eier + signert-økt-port (gjelder også chat).
+    if (!(await requireOwner(res, deps, resolved.identity, { tool_id: "executive", action }))) return;
     const result = await deps.executive.gateway.execute({ identity: resolved.identity, tool_id: "executive", action, parameters: {} });
     if (!result.ok) return json(res, 403, { error: "tool_denied", reason: result.reason });
     return json(res, 200, { ok: true, data: result.data });
@@ -1759,6 +1795,8 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       // eieren fra grantet (aldri en kropps-oppgitt aktør), årsak er påkrevd, og lovligheten avgjøres av tilstandsmaskinen. Klasse B (intern bokføring, reversibel via «gjenåpne») bak vanlig policy.
       const authed = await authedRequest(req, res, deps, ["incident_id", "action", "reason", "evidence_ref"]);
       if (!authed) return;
+      // M3: `actor_kind: "owner"` er bare sant for den SUVERENE eieren (samme predikat som kontrollsentrene) - ikke for enhver autentisert person i eierens tenant.
+      if (!(await requireOwner(res, deps, authed.identity, { tool_id: "incidents", action: "transition" }))) return;
       const action = fieldString(authed.body, "action");
       if (!Object.prototype.hasOwnProperty.call(OWNER_LIFECYCLE_ACTIONS, action)) throw new HttpError(400, "malformed_request", "action");
       const decision = await deps.policy.authorize({
@@ -1912,6 +1950,11 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       // ruten omgår ingenting. Identitet fra det verifiserte grantet (som alle kontrollruter); credential-bindingen avviser alle andre enn eieren.
       const authed = await authedRequest(req, res, deps, ["provider", "action", "parameters", "idempotency_key", "incident_id"]);
       if (!authed) return;
+      // M2/M3: skymutasjoner (DNS/WAF/SSL, Postgres-økter, Infisical-rotasjon) er EIER-kun og krever step-up (enhetssignert økt fra web/desktop/api/mobile). Svaret er et tydelig `step_up_required`
+      // FØR noe journalføres - gatewayen håndhever det samme på verktøynivå (`ToolDefinition.step_up_required`) uavhengig av denne ruten.
+      if (!(await requireOwner(res, deps, authed.identity, { tool_id: "infra", action: "cloud_mutate" }))) return;
+      const cloudStepUp = stepUpDenial(authed.identity, "cloud_mutate");
+      if (cloudStepUp) return json(res, 403, { error: "step_up_required", reason: cloudStepUp, request_id: requestIdOf(res) });
       const incidentId = fieldOptionalString(authed.body, "incident_id");
       try {
         const execution = await executeCloudMutation({ pool, gateway }, authed.identity, {
@@ -1962,6 +2005,10 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         "incident_id", "repo_url", "goal", "test_command", "publish_pr", "model_budget_ore"
       ]);
       if (!authed) return;
+      // M3: reparasjon setter i gang en betalt agentkjøring som kan pushe/åpne en PR - EIER-kun og step-up (enhetssignert økt fra en eier-kanal), og budsjettet kan aldri økes utover serverens tak (`proposeRepairTask`).
+      if (!(await requireOwner(res, deps, authed.identity, { tool_id: "incidents", action: "repair" }))) return;
+      const repairStepUp = stepUpDenial(authed.identity, "incident_repair");
+      if (repairStepUp) return json(res, 403, { error: "step_up_required", reason: repairStepUp, request_id: requestIdOf(res) });
       const incident = await service.getIncident(
         authed.identity.tenant_id, authed.identity.memory_space_id, fieldString(authed.body, "incident_id")
       );
@@ -1991,6 +2038,11 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       if (!authed) return;
       const toolId = fieldString(authed.body, "tool_id");
       const recoveryAction = fieldString(authed.body, "action");
+      // M2: gjenoppretting av en skymutasjon (Cloudflare/Postgres-drift/Infisical) er selv en skrivehandling mot skyen og krever samme step-up som selve mutasjonen (gatewayen håndhever det uansett).
+      if (CLOUD_CONTROL_TOOL_IDS.has(toolId)) {
+        const recoveryStepUp = stepUpDenial(authed.identity, "cloud_recovery");
+        if (recoveryStepUp) return json(res, 403, { error: "step_up_required", reason: recoveryStepUp, request_id: requestIdOf(res) });
+      }
       const decision = await deps.policy.authorize({
         identity: authed.identity,
         toolCall: { tool_id: "infra", action: "attempt_recovery", capability_class: "B", parameters: { tool_id: toolId, action: recoveryAction } }

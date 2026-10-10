@@ -16,6 +16,12 @@ export interface ProposeRepairTaskInput {
   model_budget_ore?: number;
 }
 
+/**
+ * Gjennomgang av PR #324 (M3): SERVERENS tak for modellbudsjettet til en reparasjonsjobb (øre) - og standarden. Kalleren kan senke budsjettet, aldri øke det: `model_budget_ore` kom tidligere
+ * urørt fra HTTP-kroppen inn i jobbkontrakten, så en eier-grant kunne bestille en vilkårlig dyr agentkjøring. Over taket avvises forespørselen (`repair_budget_exceeds_cap`), den klippes ikke stille.
+ */
+export const REPAIR_MODEL_BUDGET_CAP_ORE = 20_000;
+
 export type ProposeRepairTaskResult =
   | { ok: true; task_id: string }
   | { ok: false; reason: string };
@@ -59,6 +65,9 @@ export async function proposeRepairTask(
   } catch (err) {
     return { ok: false, reason: err instanceof GitPolicyError ? `repair_${err.reason}` : "repair_test_command_invalid" };
   }
+  const budget = input.model_budget_ore ?? REPAIR_MODEL_BUDGET_CAP_ORE;
+  if (typeof budget !== "number" || !Number.isInteger(budget) || budget < 0) return { ok: false, reason: "repair_budget_invalid" };
+  if (budget > REPAIR_MODEL_BUDGET_CAP_ORE) return { ok: false, reason: "repair_budget_exceeds_cap" };
   if (!REPAIRABLE.has(incident.status)) return { ok: false, reason: "repair_incident_not_repairable" };
 
   const unfinished = await withTenantTransaction(deps.pool, incident.tenant_id, (client) =>
@@ -87,7 +96,7 @@ export async function proposeRepairTask(
     allowed_memory_spaces: [memorySpace],
     allowed_network_targets: [],
     agent_profile: "coding",
-    model_budget_ore: input.model_budget_ore ?? 20_000,
+    model_budget_ore: budget,
     retry_policy: { max_attempts: 1, backoff_seconds: 0 },
     max_steps: 5
   };
