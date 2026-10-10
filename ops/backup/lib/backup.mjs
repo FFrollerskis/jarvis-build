@@ -2,10 +2,12 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, createReadStream, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { INVENTORY_SQL, PsqlSession } from "./psql-session.mjs";
+import { INVENTORY_SQL, PsqlSession, psqlOnce } from "./psql-session.mjs";
 import { assertAgeRecipient, requireBinary, utcStamp } from "./tools.mjs";
 
 export const MANIFEST_VERSION = 1;
+/** Postgres sin `system_identifier` (pg_control): 64-bit heltall som er unikt per initdb og følger klyngen (også en fysisk standby). Heltall som tekst, evt. negativt (bigint). */
+export const SYSTEM_IDENTIFIER_RE = /^-?\d{1,20}$/;
 export const DEFAULT_DATABASES = ["jarvis", "infisical", "langfuse"];
 
 export function sha256File(path) {
@@ -38,6 +40,20 @@ function pipeEncrypted(dumpCmd, recipient, outFile) {
     dump.on("close", (c) => { dumpCode = c; finish(); });
     age.on("close", (c) => { ageCode = c; finish(); });
   });
+}
+
+/**
+ * Review runde 2 (L1): kildeklyngens `system_identifier` lagres i manifestet, slik at restore-verifiseringen kan NEKTE en scratch-server som er SAMME klynge (alias-sikkert bevis -
+ * `localhost`, DNS-navn og `docker-compose:postgres` mot `host:port` er alle samme `system_identifier`). Best effort: kan den ikke leses, utelates feltet (eldre sett har det ikke heller)
+ * og backupen tas likevel - verifiseringen faller da tilbake på tom-sjekken alene.
+ */
+async function readSystemIdentifier(runner, database) {
+  try {
+    const out = (await psqlOnce(runner, database, "SELECT system_identifier FROM pg_control_system()")).trim();
+    return SYSTEM_IDENTIFIER_RE.test(out) ? out : null;
+  } catch {
+    return null;
+  }
 }
 
 async function snapshotAndInventory(runner, database) {
@@ -97,6 +113,8 @@ export async function runBackup({ runner, databases = DEFAULT_DATABASES, outDir,
         tables: counts
       });
     }
+    const systemIdentifier = await readSystemIdentifier(runner, databases[0] ?? "postgres");
+    if (systemIdentifier === null) log("could not read system_identifier from the source cluster - the manifest will not carry one");
     log("backing up cluster globals (roles)");
     const globalsFile = "globals.sql.age";
     await pipeEncrypted(runner.command("pg_dumpall", ["--globals-only"]), recipient, join(setDir, globalsFile));
@@ -105,7 +123,7 @@ export async function runBackup({ runner, databases = DEFAULT_DATABASES, outDir,
       manifest_version: MANIFEST_VERSION,
       created_at_utc: now.toISOString(),
       set: setName,
-      source: { endpoint: runner.endpoint, mode: runner.mode },
+      source: { endpoint: runner.endpoint, mode: runner.mode, ...(systemIdentifier === null ? {} : { system_identifier: systemIdentifier }) },
       recipient_fingerprint: createHash("sha256").update(recipient).digest("hex").slice(0, 16),
       globals: { file: globalsFile, sha256: await sha256File(join(setDir, globalsFile)) },
       databases: entries

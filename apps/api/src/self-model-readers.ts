@@ -14,7 +14,7 @@ export interface SelfModelReaderDeps {
   pool: Pick<pg.Pool, "query"> & Partial<Pick<pg.Pool, "connect">>;
   tenantId: string;
   /** `ModelGateway.meshStatus()` (kun strukturen vi trenger). */
-  meshStatus: () => { providers: Array<{ provider: string; state: string; failures: number; success: number; avg_latency_ms?: number }> };
+  meshStatus: () => { providers: Array<{ provider: string; state: string; failures: number; success: number; avg_latency_ms?: number; paused?: boolean }> };
   /** `OwnerControls.getControlState()` (kill switch, frosne connectorer, tilbakekalte credentials). */
   controlState: () => Promise<{ kill_switch: { active: boolean }; frozen_connectors: ReadonlyArray<unknown>; revoked_credentials: ReadonlyArray<unknown> }>;
   /** `listConnectorStatus(gateway)`: kun feltene vi trenger. */
@@ -62,6 +62,8 @@ export function buildSelfModelReaders(deps: SelfModelReaderDeps): Record<string,
       const providers = deps.meshStatus().providers.filter((p) => p.provider !== "scripted");
       return providers.map((p): Observation => {
         const base = { source: `ModelGateway.meshStatus:${p.provider}`, observed_at: at, data: { state: p.state, success: p.success, failures: p.failures, ...(p.avg_latency_ms !== undefined ? { avg_latency_ms: p.avg_latency_ms } : {}) } };
+        // WP-H0 (JARVIS-087): eierens pause/tilbakekall er et bevisst valg, ikke en feil - men leverandøren er ikke brukbar, så den vises som svekket (aldri «nåbar»).
+        if (p.paused === true) return { ...base, status: "DEGRADED", detail: `Modellen ${p.provider} er pauset av deg (eier-valg) og brukes ikke i ruting.` };
         if (p.state === "UNAVAILABLE") return { ...base, status: "DOWN", detail: `Modellen ${p.provider} er utilgjengelig (${p.failures} feil på rad/totalt).` };
         if (p.state === "DEGRADED" || p.state === "RATE_LIMITED") return { ...base, status: "DEGRADED", detail: `Modellen ${p.provider} er ${p.state === "RATE_LIMITED" ? "rate-begrenset" : "svekket"}.` };
         if (p.state === "NOT_CONFIGURED") return { ...base, status: "OK", detail: `Modellen ${p.provider} er ikke konfigurert (bevisst).` };

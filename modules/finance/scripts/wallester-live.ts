@@ -68,6 +68,7 @@ import type {
 } from "../src/wallester-transport.ts";
 import { createApiServer } from "../../../apps/api/src/server.ts";
 import { evaluateSecretSafety } from "./lib/fiken-live-lib.ts";
+import { deleteMoneyRows } from "./lib/money-cleanup.ts";
 
 const results: Record<string, string> = {
   q21_runtime_role_safe: "NOT_RUN",
@@ -159,7 +160,7 @@ function basicHeader(user = FAKE_WEBHOOK_USER, pass = FAKE_WEBHOOK_PASSWORD): st
 function ownerIdentityFor(tenantId: string): IdentityContext {
   return {
     person_id: OWNER_PERSON, tenant_id: tenantId, memory_space_id: "business",
-    session_id: `sess-wallester-live-${runId}`, device_id: "jarvis-core", channel: "api", auth_strength: "active"
+    session_id: `sess-wallester-live-${runId}`, device_id: "jarvis-host-acceptance", channel: "api", auth_strength: "signed" /* review F4: step_up_required håndheves alltid; host-akseptanse kjøres av eieren selv med denne eksplisitte, merkede identiteten */
   };
 }
 
@@ -178,12 +179,12 @@ async function cleanupTenant(tenantId: string): Promise<void> {
   await adminPool.query("DELETE FROM bank_consents WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM neonomics_webhook_events WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM vipps_webhook_events WHERE tenant_id = $1", [tenantId]);
-  await adminPool.query("DELETE FROM vipps_captures WHERE tenant_id = $1", [tenantId]);
-  await adminPool.query("DELETE FROM vipps_refunds WHERE tenant_id = $1", [tenantId]);
+  await deleteMoneyRows(adminPool, "vipps_captures", tenantId);
+  await deleteMoneyRows(adminPool, "vipps_refunds", tenantId);
   await adminPool.query("DELETE FROM stripe_webhook_events WHERE tenant_id = $1", [tenantId]);
-  await adminPool.query("DELETE FROM stripe_refunds WHERE tenant_id = $1", [tenantId]);
+  await deleteMoneyRows(adminPool, "stripe_refunds", tenantId);
   await adminPool.query("DELETE FROM payment_intent_events WHERE tenant_id = $1", [tenantId]);
-  await adminPool.query("DELETE FROM payment_intents WHERE tenant_id = $1", [tenantId]);
+  await deleteMoneyRows(adminPool, "payment_intents", tenantId);
   await adminPool.query("DELETE FROM finance_recurring_commitments WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM finance_kill_switch WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM finance_spend_records WHERE tenant_id = $1", [tenantId]);

@@ -25,6 +25,8 @@
 #    allowlistet proxy inne i gatewayen (RFC1918/loopback/link-local/metadata blokkert).
 #  - KODEJOBBER kjører IKKE i worker-containeren: ingen Docker-socket monteres, `JARVIS_JOB_RUNNER` er ikke satt ->
 #    HVER kodejobb feiler lukket (`job_container_runner_not_configured`) til en vertsside runner finnes.
+#    WP-C1: den vertsside runneren er ops/job-runner (valgfri override infra/job-runner/docker-compose.job-runner.yml monterer KUN
+#    socket-katalogen + tokenfilen; fortsatt ingen Docker-socket). Se docs/runbooks/JOB_RUNNER.md.
 #  Strukturelt vakt: ops/security/check-containment.mjs + modules/core/test/remediation-2-compose-isolation.test.ts.
 #  seccomp-profilen under refereres relativt til compose-filens mappe (Compose v2 løser stien mot prosjektmappen), så
 #  `docker compose -f infra/local/docker-compose.yml ...` virker uavhengig av arbeidskatalog.
@@ -273,6 +275,7 @@ services:
       JARVIS_FIKEN_CLIENT_SECRET: "${JARVIS_FIKEN_CLIENT_SECRET:-}"
       JARVIS_FIKEN_COMPANY_SLUG: "${JARVIS_FIKEN_COMPANY_SLUG:-}"
       JARVIS_FIKEN_REFRESH_TOKEN: "${JARVIS_FIKEN_REFRESH_TOKEN:-}"
+      JARVIS_FINANCE_RECONCILE_HOUR: "${JARVIS_FINANCE_RECONCILE_HOUR:-}"
       JARVIS_FINANCE_SPEND_SWEEP_HOUR: "${JARVIS_FINANCE_SPEND_SWEEP_HOUR:-}"
       JARVIS_FOLIO_API_KEY: "${JARVIS_FOLIO_API_KEY:-}"
       JARVIS_GCE_MUTATION_TARGETS: "${JARVIS_GCE_MUTATION_TARGETS:-}"
@@ -320,10 +323,6 @@ services:
       JARVIS_JIRA_API_TOKEN: "${JARVIS_JIRA_API_TOKEN:-}"
       JARVIS_JIRA_BASE_URL: "${JARVIS_JIRA_BASE_URL:-}"
       JARVIS_JIRA_EMAIL: "${JARVIS_JIRA_EMAIL:-}"
-      JARVIS_JOB_EGRESS_PROXY: "${JARVIS_JOB_EGRESS_PROXY:-}"
-      JARVIS_JOB_IMAGE: "${JARVIS_JOB_IMAGE:-}"
-      JARVIS_JOB_NETWORK: "${JARVIS_JOB_NETWORK:-}"
-      JARVIS_JOB_RUNNER: "${JARVIS_JOB_RUNNER:-}"
       JARVIS_JOB_TOOL_TURN_MODEL: "${JARVIS_JOB_TOOL_TURN_MODEL:-}"
       JARVIS_KLING_ACCESS_KEY: "${JARVIS_KLING_ACCESS_KEY:-}"
       JARVIS_KLING_SECRET_KEY: "${JARVIS_KLING_SECRET_KEY:-}"
@@ -420,6 +419,7 @@ services:
       JARVIS_V2_PUSH_MAX_PER_DAY: "${JARVIS_V2_PUSH_MAX_PER_DAY:-}"
       JARVIS_V2_PUSH_QUIET_END: "${JARVIS_V2_PUSH_QUIET_END:-}"
       JARVIS_V2_PUSH_QUIET_START: "${JARVIS_V2_PUSH_QUIET_START:-}"
+      JARVIS_V2_PUSH_TITLES: "${JARVIS_V2_PUSH_TITLES:-}"
       JARVIS_V5_PROPOSALS_ENABLED: "${JARVIS_V5_PROPOSALS_ENABLED:-}"
       JARVIS_VALUE_VERIFIED_GATES: "${JARVIS_VALUE_VERIFIED_GATES:-}"
       JARVIS_VERCEL_TEAM_ID: "${JARVIS_VERCEL_TEAM_ID:-}"
@@ -529,6 +529,8 @@ services:
       JARVIS_JOB_IMAGE: "${JARVIS_JOB_IMAGE:-}"
       JARVIS_JOB_NETWORK: "${JARVIS_JOB_NETWORK:-}"
       JARVIS_JOB_RUNNER: "${JARVIS_JOB_RUNNER:-}"
+      JARVIS_JOB_RUNNER_SOCKET: "${JARVIS_JOB_RUNNER_SOCKET:-}"
+      JARVIS_JOB_RUNNER_TOKEN_FILE: "${JARVIS_JOB_RUNNER_TOKEN_FILE:-}"
       JARVIS_JOB_TOOL_TURN_MODEL: "${JARVIS_JOB_TOOL_TURN_MODEL:-}"
       JARVIS_LOCAL_LLM_THINKING: "${JARVIS_LOCAL_LLM_THINKING:-}"
       JARVIS_MEMORY_AUTO_APPROVE: "${JARVIS_MEMORY_AUTO_APPROVE:-}"

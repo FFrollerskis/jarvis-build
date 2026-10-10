@@ -24,6 +24,25 @@ export interface ProviderStats {
   latencies_ms: number[];
 }
 
+/** Kretsens tilstand (D-393): `closed` = normal, `open` = utestengt i en begrenset pause, `half_open` = pausen er over og ett prøvekall slippes gjennom. */
+export type CircuitState = "closed" | "open" | "half_open";
+
+/** Kontrollsenterets visning av en leverandørs helse (WP-H0). Ingen feiltekst, kun kategori. */
+export interface ProviderHealthDetail {
+  state: ProviderHealthState;
+  success: number;
+  failures: number;
+  consecutive_failures: number;
+  circuit: CircuitState;
+  last_error_kind?: ProviderErrorKind;
+  last_success_at?: string;
+  last_failure_at?: string;
+  /** Millisekunder til en åpen krets går til halv-åpen. */
+  retry_after_ms?: number;
+  rate_limited_until?: string;
+  avg_latency_ms?: number;
+}
+
 const RATE_LIMIT_BACKOFF_MS = 60_000;
 const UNAVAILABLE_THRESHOLD = 3;
 /** D-393 (JARVIS-033): UNAVAILABLE er en BEGRENSET pause (halv-åpen krets), ikke en dom til neste omstart. */
@@ -104,6 +123,41 @@ export class ProviderHealthTracker {
       return undefined;
     }
     return Math.round(l.reduce((a, b) => a + b, 0) / l.length);
+  }
+
+  /**
+   * WP-H0 (UA-11 / JARVIS-087): kontrollsenterets lesing av leverandørens helse, inkl. kretsens tilstand (D-393: «åpen» = pause etter 3 sammenhengende feil, «halv-åpen» = ett prøvekall slippes gjennom).
+   * KUN kategorier og tidspunkt - aldri feilmeldingen (`last_error` kan inneholde leverandørdetaljer) og aldri innhold. Ren lesing: endrer ingen teller.
+   */
+  detail(provider: string, configured: boolean): ProviderHealthDetail {
+    const s = this.stats.get(provider);
+    const state = this.state(provider, configured);
+    const consecutive = s?.consecutive_failures ?? 0;
+    let circuit: CircuitState = "closed";
+    let retryAfterMs: number | undefined;
+    if (configured && s !== undefined && consecutive >= UNAVAILABLE_THRESHOLD) {
+      const remaining = unavailableCooldownMs(consecutive) - (this.now() - (s.last_failure_at ?? 0));
+      if (remaining > 0) {
+        circuit = "open";
+        retryAfterMs = remaining;
+      } else {
+        circuit = "half_open";
+      }
+    }
+    const avg = this.avgLatencyMs(provider);
+    return {
+      state,
+      success: s?.success ?? 0,
+      failures: s?.failures ?? 0,
+      consecutive_failures: consecutive,
+      circuit,
+      ...(s?.last_error_kind !== undefined ? { last_error_kind: s.last_error_kind } : {}),
+      ...(s?.last_success_at !== undefined ? { last_success_at: new Date(s.last_success_at).toISOString() } : {}),
+      ...(s?.last_failure_at !== undefined ? { last_failure_at: new Date(s.last_failure_at).toISOString() } : {}),
+      ...(retryAfterMs !== undefined ? { retry_after_ms: retryAfterMs } : {}),
+      ...(s?.rate_limited_until !== undefined && s.rate_limited_until > this.now() ? { rate_limited_until: new Date(s.rate_limited_until).toISOString() } : {}),
+      ...(avg !== undefined ? { avg_latency_ms: avg } : {})
+    };
   }
 
   snapshot(configured: Map<string, boolean>): Record<string, { state: ProviderHealthState; success: number; failures: number; avg_latency_ms?: number; last_error?: string }> {

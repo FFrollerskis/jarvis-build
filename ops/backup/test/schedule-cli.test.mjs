@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
@@ -38,6 +38,18 @@ describe("WP-C2 schedule.mjs: kommandolinje (streng, uten hemmeligheter på argv
     expect(readdirSync(out)).toEqual([]);
   });
 
+  it("review F9: --status-export-dir lik (eller inni) backup-mappen er en konfig-feil (exit 1) FØR noe kjøres, også med --dry-run - eksporten ville overskrevet den interne statusfilen", () => {
+    const out = tempDir();
+    const same = run(["tick", "--out", out, "--status-export-dir", out, "--dry-run"]);
+    expect(same.status).toBe(1);
+    expect(same.stderr).toContain("EGEN mappe");
+    expect(readdirSync(out)).toEqual([]);
+    const viaEnv = run(["tick", "--out", out, "--dry-run"], { JARVIS_BACKUP_STATUS_EXPORT_DIR: join(out, "pub") });
+    expect(viaEnv.status).toBe(1);
+    expect(viaEnv.stderr).toContain("EGEN mappe");
+    expect(run(["tick", "--out", out, "--status-export-dir", join(tempDir(), "pub"), "--dry-run"]).status).toBe(0);
+  });
+
   it("tikk uten påkrevd miljø feiler høylytt FØR noe kjøres (exit 1), og feilen siterer aldri en hemmelig verdi", () => {
     const r = run(["tick", "--out", tempDir(), "--mode", "direct"], { JARVIS_BACKUP_AGE_RECIPIENT: "AGE-SECRET-KEY-1HEMMELIG" });
     expect(r.status).toBe(1);
@@ -52,6 +64,20 @@ describe("WP-C2 schedule.mjs status: overvåkingsvennlige exit-koder", () => {
     mutate(st);
     writeJsonAtomic(join(out, "backup-status.json"), st);
   };
+
+  it("review runde 2 M4: `status` viser om statusfilen er borte/ubrukelig og hvorfor retensjonen er pauset (kun informasjon - exit-koden er uendret)", () => {
+    const out = tempDir();
+    makeSet(out, hoursAgo(NOW, 5));
+    expect(run(["status", "--out", out]).json).toMatchObject({ status_file: { exists: false, problem: null }, retention: { last_skipped_reason: null, status_reset_at: null } });
+    writeFileSync(join(out, "backup-status.json"), "{ikke json");
+    const corrupt = run(["status", "--out", out]);
+    expect(corrupt.status).toBe(0);
+    expect(corrupt.json.status_file).toEqual({ exists: true, problem: "corrupt" });
+    writeFileSync(join(out, "backup-status.json"), JSON.stringify({ schema: 7 }));
+    expect(run(["status", "--out", out]).json.status_file).toEqual({ exists: true, problem: "unsupported_schema" });
+    stateWith(out, (st) => { Object.assign(st.retention, { last_skipped_reason: "status_unusable", status_reset_at: "2026-10-09T01:00:00.000Z" }); });
+    expect(run(["status", "--out", out]).json).toMatchObject({ status_file: { exists: true, problem: null }, retention: { last_skipped_reason: "status_unusable", status_reset_at: "2026-10-09T01:00:00.000Z" } });
+  });
 
   it("frisk = 0; ingen backup eller for gammel = 3; feilet/gammel restore-verify = 4; feilet off-site = 5 (prioritet 3 > 4 > 5)", () => {
     const out = tempDir();
@@ -90,6 +116,41 @@ describe("WP-C2 schedule.mjs status: overvåkingsvennlige exit-koder", () => {
     const r = run(["status", "--out", out, "--require-verify"]);
     expect(r.status).toBe(0);
     expect(r.json.restore_verify).toMatchObject({ state: "ok", reported_by: "external_verifier", duration_s: 120, source: "offsite" });
+  });
+
+  it("review F6: status --json oppgir restore_verify.tables/rows/last_attempt_at/reported_by (acceptance-ops.sh leser dem; før manglet de og meldingen viste tomme tall)", () => {
+    const out = tempDir();
+    makeSet(out, hoursAgo(NOW, 1));
+    const finished = hoursAgo(NOW, 2).toISOString();
+    stateWith(out, (st) => {
+      Object.assign(st.restore_verify, { state: "ok", last_attempt_at: finished, last_success_at: finished, last_set: "jarvis-backup-20261001T000000Z", tables: 358, rows: 10346, reported_by: "local", source: "local", duration_s: 90 });
+    });
+    const r = run(["status", "--out", out, "--json"]);
+    expect(r.json.restore_verify).toMatchObject({ state: "ok", tables: 358, rows: 10346, last_attempt_at: finished, last_success_at: finished, reported_by: "local", source: "local", duration_s: 90 });
+  });
+
+  it("review F5: et sett datert i FREMTIDEN er aldri «nyeste» - status gir exit 3 med egen årsak (ikke ok:true med negativ alder), også ved siden av et friskt sett", () => {
+    const only = tempDir();
+    const future = makeSet(only, new Date(NOW.getTime() + 400 * 86_400_000));
+    const a = run(["status", "--out", only]);
+    expect(a.status).toBe(3);
+    expect(a.json.ok).toBe(false);
+    expect(a.json.reasons).toEqual([`set_dated_in_future:${future.name}`, "no_complete_backup_set"]);
+    expect(a.json.backup).toMatchObject({ newest_set: null, age_hours: null, future_dated_sets: [future.name] });
+
+    const both = tempDir();
+    const fresh = makeSet(both, hoursAgo(NOW, 3));
+    const skewed = makeSet(both, new Date(NOW.getTime() + 20 * 86_400_000));
+    const b = run(["status", "--out", both]);
+    expect(b.status).toBe(3);
+    expect(b.json.reasons).toEqual([`set_dated_in_future:${skewed.name}`]);
+    expect(b.json.backup).toMatchObject({ newest_set: fresh.name, future_dated_sets: [skewed.name] });
+    expect(b.json.backup.age_hours).toBeGreaterThan(2.9); // alderen er ekte og positiv - ikke -480 t fra fremtidssettet
+
+    // jitter innenfor 5 min regnes ikke som fremtid
+    const jitter = tempDir();
+    makeSet(jitter, new Date(NOW.getTime() + 2 * 60_000));
+    expect(run(["status", "--out", jitter]).json.backup.future_dated_sets).toEqual([]);
   });
 
   it("ugyldige tall for terskler er en brukerfeil (exit 1)", () => {
@@ -134,6 +195,26 @@ describe("WP-C2 schedule.mjs: ekte kjøring med lokal off-site-adapter (ekte pro
     expect(bad.json).toMatchObject({ ok: false, error_code: "offsite_verify_failed" });
   });
 
+  it("review F12: tick --roles offsite rydder foreldede .incoming-* i målet (ekte lokal sink, ekte prosess) før kopien - ferske rester og publiserte sett røres ikke", async () => {
+    const { out, usb, set, prepare, env } = setup();
+    await prepare();
+    const stale = join(usb, ".incoming-jarvis-backup-20260101T000000Z-0123abcd");
+    const fresh = join(usb, ".incoming-jarvis-backup-20260102T000000Z-aaaaaaaa");
+    for (const dir of [stale, fresh]) {
+      mkdirSync(dir);
+      writeFileSync(join(dir, "jarvis.dump.age"), "halv kopi");
+    }
+    const threeDaysAgo = new Date(Date.now() - 3 * 86_400_000);
+    utimesSync(stale, threeDaysAgo, threeDaysAgo);
+    const r = run(["tick", "--out", out, "--roles", "offsite"], env);
+    expect(r.status, r.stderr).toBe(0);
+    expect(existsSync(stale)).toBe(false);
+    expect(existsSync(fresh)).toBe(true);
+    expect(existsSync(join(usb, set.name, "manifest.json.age"))).toBe(true); // kopien ble tatt som vanlig
+    expect(r.stderr).toContain("offsite_stale_incoming_removed");
+    expect(r.stderr).toContain(".incoming-jarvis-backup-20260101T000000Z-0123abcd"); // navnet (alltid vårt strenge mønster) står i loggen, slik at eieren ser hva som ble fjernet
+  });
+
   it("offsite-check uten adapter = exit 6 (BLOCKED_EXTERNAL, ikke en feil i koden); med et sett som mangler fjernt = exit 5", () => {
     const out = tempDir();
     makeSet(out, hoursAgo(NOW, 1));
@@ -144,6 +225,16 @@ describe("WP-C2 schedule.mjs: ekte kjøring med lokal off-site-adapter (ekte pro
     const missing = run(["offsite-check", "--out", out], { JARVIS_BACKUP_OFFSITE_LOCAL_DIR: usb, JARVIS_BACKUP_OFFSITE_LOCAL_ALLOW_SAME_DEVICE: "1", JARVIS_BACKUP_AGE_RECIPIENT: RECIPIENT });
     expect(missing.status).toBe(5);
     expect(missing.json.newest_in_remote).toBe(false);
+  });
+
+  it("review F5: offsite-check sammenligner aldri mot et fremtidsdatert sett, og sier det rett ut", () => {
+    const { env } = setup();
+    const onlyFuture = tempDir();
+    const skewed = makeSet(onlyFuture, new Date(NOW.getTime() + 400 * 86_400_000));
+    const r = run(["offsite-check", "--out", onlyFuture], env);
+    expect(r.status).toBe(5);
+    expect(r.json).toMatchObject({ ok: false, newest_local: null, future_dated_sets: [skewed.name] });
+    expect(r.json.error).toContain("kun sett datert i fremtiden");
   });
 
   it("to off-site-adaptere samtidig er en konfig-feil som rapporteres høylytt (exit 5, status `offsite_config_invalid`) - eieren velger ÉN, og ingenting sendes", async () => {

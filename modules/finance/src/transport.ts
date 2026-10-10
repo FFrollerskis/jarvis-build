@@ -1,6 +1,7 @@
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { ToolTransport } from "@jarvis/tool-gateway";
 import type { FinanceService, FikenCredentialsProvider } from "./service.ts";
+import type { FinanceReconciliationService } from "./reconciliation.ts";
 import type { CreatePaymentIntentInput, PaymentIntentState, PaymentProvider } from "./types.ts";
 
 /**
@@ -17,7 +18,9 @@ import type { CreatePaymentIntentInput, PaymentIntentState, PaymentProvider } fr
 export class FinanceTransport implements ToolTransport {
   constructor(
     private readonly service: FinanceService,
-    private readonly credentialsProvider: FikenCredentialsProvider
+    private readonly credentialsProvider: FikenCredentialsProvider,
+    /** WP-F1: avstemmingsrapporten (`get_reconciliation_status`). Valgfri - uten den svarer handlingen `finance_reconciliation_not_configured` (fail-closed, aldri en tom «grønn» rapport). */
+    private readonly reconciliation?: FinanceReconciliationService
   ) {}
 
   async invoke(action: string, parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> {
@@ -57,6 +60,11 @@ export class FinanceTransport implements ToolTransport {
         const row = await this.service.getPaymentIntent(tenantId, memorySpace, requireString(parameters, "payment_intent_id"));
         return { ...(row ? { external_id: row.payment_intent_id } : {}), data: row as unknown as JsonValue };
       }
+      // WP-F1 (D-462): fersk, read-only, REDIGERT tilstandslesing for klasse D-kjeden (preflight + readback for `submit_payment_intent`) - se `class-d-checks.ts`.
+      case "check_submit_payment_intent": {
+        const check = await this.service.checkSubmitPaymentIntent(tenantId, memorySpace, requireString(parameters, "payment_intent_id"));
+        return { ...(check ? { external_id: check.payment_intent.payment_intent_id } : {}), data: check as unknown as JsonValue };
+      }
       case "list_payment_intents": {
         const rows = await this.service.listPaymentIntents(tenantId, memorySpace, {
           ...(parameters["state"] !== undefined ? { state: parameters["state"] as PaymentIntentState } : {}),
@@ -65,7 +73,12 @@ export class FinanceTransport implements ToolTransport {
         return { data: rows as unknown as JsonValue };
       }
       case "submit_payment_intent": {
-        const row = await this.service.submitPaymentIntent(tenantId, memorySpace, requireString(parameters, "payment_intent_id"), this.credentialsProvider, actorPersonId);
+        // WP-F1 (review M-F1): duplikatvakten kjøres ALLTID inne i reservasjonen når kallet kommer via gatewayen. `confirm_possible_duplicate_of` (zod-validert array av id-er)
+        // er eierens eksplisitte kvittering; er verdien noe annet enn en streng-liste, feiler kallet lukket i stedet for å tolkes som «ingen kvittert».
+        const row = await this.service.submitPaymentIntent(
+          tenantId, memorySpace, requireString(parameters, "payment_intent_id"), this.credentialsProvider, actorPersonId,
+          { duplicateGuard: { confirmedDuplicateOf: optionalStringArray(parameters, "confirm_possible_duplicate_of") } }
+        );
         return { external_id: row.payment_intent_id, data: row as unknown as JsonValue };
       }
       case "settle_payment_intent": {
@@ -137,6 +150,12 @@ export class FinanceTransport implements ToolTransport {
         const rows = await this.service.listFikenCompanies(tenantId, this.credentialsProvider);
         return { data: rows as unknown as JsonValue };
       }
+      // WP-F1 (D-462, UA-6): klasse A-rapport over den deterministiske avstemmingen (siste kjøring, åpne funn, hvilke sjekker som faktisk kjørte). Ren lesing.
+      case "get_reconciliation_status": {
+        if (!this.reconciliation) throw new Error("finance_reconciliation_not_configured");
+        const status = await this.reconciliation.getReconciliationStatus(tenantId, memorySpace);
+        return { data: status as unknown as JsonValue };
+      }
       default:
         throw new Error(`finance_action_not_implemented:${action}`);
     }
@@ -148,6 +167,13 @@ function requireString(parameters: Record<string, JsonValue>, key: string): stri
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(`finance_missing_parameter:${key}`);
   }
+  return value;
+}
+
+function optionalStringArray(parameters: Record<string, JsonValue>, key: string): string[] {
+  const value = parameters[key];
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.every((x): x is string => typeof x === "string" && x.length > 0)) throw new Error(`finance_invalid_parameter:${key}`);
   return value;
 }
 

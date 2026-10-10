@@ -659,7 +659,14 @@ export class OpenLoopService {
              (jsonb_array_length(anomaly_flags) > 0 AND (
                state IN ('draft','submitted','provider_acknowledged')
                -- D-392 (JARVIS-072): leverandørkonflikter på en allerede avsluttet intensjon (f.eks. sen TERMINATED mot settled) er ekte pengeavvik
-               OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(anomaly_flags) AS f(flag) WHERE f.flag LIKE 'PROVIDER\\_%')
+               -- WP-F1 (JARVIS-072): det gjelder også avstemmingens egne funn (RECONCILE_*) og de øvrige pengeavvikene som kan stå igjen på en terminal intensjon
+               -- (sen/motstridende leverandørhendelse, ukjent innsendingsutfall, refusjons-/capture-beløp som ikke stemmer, duplisert leverandøreffekt).
+               -- Opprettelsesflagg (f.eks. manglende leverandørreferanse ved opprettelse) forblir uten loop på en avsluttet intensjon.
+               OR EXISTS (
+                 SELECT 1 FROM jsonb_array_elements_text(anomaly_flags) AS f(flag)
+                  WHERE f.flag LIKE 'PROVIDER\\_%' OR f.flag LIKE 'RECONCILE\\_%'
+                     OR f.flag IN ('WEBHOOK_STATE_CONFLICT', 'UNKNOWN_PROVIDER_OUTCOME', 'SUBMIT_OUTCOME_UNKNOWN', 'REFUND_AMOUNT_CONFLICT', 'CAPTURE_AMOUNT_CONFLICT', 'DUPLICATE_PROVIDER_EFFECT')
+               )
              ))
              OR reconciliation_state = 'mismatched'
            )`,

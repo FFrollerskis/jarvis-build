@@ -28,6 +28,10 @@ const PATTERNS: ReadonlyArray<{ kind: string; re: RegExp; group?: number }> = [
   { kind: "telegram_bot_token", re: /\b\d{8,10}:[A-Za-z0-9_-]{35}\b/g },
   { kind: "enrollment_ticket", re: /\benr_[A-Za-z0-9_-]{30,}\b/g },
   { kind: "bearer_token", re: /\bBearer\s+[A-Za-z0-9._~+/-]{16,}=*/gi },
+  // Gjennomgang av PR #316 (L-1): URL med passord i «bruker:passord@vert» (https://admin:…@…, postgres://u:…@db/…, redis://:pw@…, også tomt brukernavn). Kun PASSORDET fjernes (skjema, bruker og vert beholdes).
+  // LINEÆRT: skjemanavnet er begrenset (`{0,31}` - uten tak er `[a-z0-9+.-]*` + `\b` kvadratisk på «a.a.a.…», jf. named_secret under), brukernavnet kan ikke inneholde «/», «:» eller «@», og passordet stopper ved «/», «@» eller mellomrom.
+  // `https://example.com:8080/sti`, `ssh://git@github.com` og `git@github.com:org/repo` har ikke «bruker:passord@» og treffes ikke.
+  { kind: "url_credentials", re: /(\b[a-z][a-z0-9+.-]{0,31}:\/\/[^\s/:@]*:)([^\s/@]+)(?=@)/gi, group: 2 },
   // `NAVN=verdi` / `NAVN: verdi` der NAVN ser ut som en hemmelighet - kun verdien fjernes.
   // Gjennomgang av WP-A (D-451): prefikset/suffikset er BEGRENSET (`{0,64}`). Uten tak er `[A-Za-z0-9_.-]*` + `\b` kvadratisk på lange tekster uten nøkkelord (bindestrek/punktum gir ordgrense overalt): 64 KB «a.b.…» tok 5 s og
   // 500 KB «lege-…» 143 s per klassifisering. Et variabelnavn med mer enn 64 tegn rundt nøkkelordet finnes ikke i praksis, og et treff midt i et langt navn redigerer fortsatt verdien.

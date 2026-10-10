@@ -1,10 +1,11 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { mkdtemp } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -197,13 +198,18 @@ describe.skipIf(!haveTools)("WP-C2: planlagt backup → off-site → restore-ver
       JARVIS_BACKUP_OFFSITE_LOCAL_DIR: usb,
       JARVIS_BACKUP_OFFSITE_LOCAL_ALLOW_SAME_DEVICE: "true",
       JARVIS_BACKUP_VERIFY_IDENTITY_FILE: identityFile,
-      JARVIS_BACKUP_VERIFY_SCRATCH_HOST: "127.0.0.1",
-      JARVIS_BACKUP_VERIFY_SCRATCH_PORT: String(scratchPort),
       JARVIS_BACKUP_VERIFY_SOURCE: "offsite"
     });
     delete env["JARVIS_DB_ADMIN_PASSWORD"]; // verifisereren trenger verken DB-admin-passord eller backup-rollen
     const config = loadScheduleConfig({ out: pcOut, roles: "verify" }, env);
-    const r = await runTick(config, buildDefaultDeps(config, env), env);
+    // Review F2: kilde off-site kan i drift IKKE kombineres med en varig, direkte scratch-server (konfig-feil, testet i ops/backup/test) - der går restoren mot engangs-containeren.
+    // Docker finnes ikke her, så testen bytter ut kun SELVE restore-steget med samme CLI direkte mot scratch-klyngen; henting fra off-site, manifest-dekryptering og rydding er ekte.
+    const cli = fileURLToPath(new URL("../../../ops/backup/jarvis-backup.mjs", import.meta.url));
+    const verifyViaScratchCluster = async ({ setDir, identityFile: id }: { setDir: string; identityFile: string }) => {
+      const res = spawnSync(process.execPath, [cli, "verify", "--set", setDir, "--identity", id, "--scratch-host", "127.0.0.1", "--scratch-port", String(scratchPort), "--scratch-user", "postgres"], { env, encoding: "utf8" });
+      return { report: JSON.parse(res.stdout) as unknown, exitCode: res.status };
+    };
+    const r = await runTick(config, buildDefaultDeps(config, env, { verify: verifyViaScratchCluster }), env);
     expect(r).toMatchObject({ exitCode: EXIT.OK, actions: ["verify"] });
     const status = readStatusFile(config.statusFile).status;
     expect(status.restore_verify).toMatchObject({ state: "ok", source: "offsite", tables: 4, rows: 141 });
