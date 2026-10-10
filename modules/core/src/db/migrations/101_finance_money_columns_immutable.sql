@@ -16,7 +16,7 @@
 --
 -- ÆRLIG AVGRENSNING - hva triggerne beskytter mot og ikke: de stopper utilsiktet/feilaktig endring og sletting, applikasjonsfeil og feilbruk fra modell/HTTP-lagene (ingen vei dit er
 -- nåbar fra modell eller HTTP; dette er et andre, uavhengig lag bak bindingen). De er IKKE en barriere mot en app-rolle med FRI SQL (den kan selv sette erasure-GUC-en i en
--- transaksjon) og heller ikke mot tabelleieren/superbrukeren (kan `ALTER TABLE ... DISABLE TRIGGER`, `session_replication_role = replica`) - det er bevisste DDL-/administratorhandlinger,
+-- transaksjon, eller først skrive `state`/`submitted_at`/`first_submit_attempt_at` tilbake til et «aldri sendt» utkast og så slette det - tilstandsmaskinen håndheves av applikasjonen, ikke av databasen) og heller ikke mot tabelleieren/superbrukeren (kan `ALTER TABLE ... DISABLE TRIGGER`, `session_replication_role = replica`) - det er bevisste DDL-/administratorhandlinger,
 -- ikke noe appen kan gjøre; testfixturer og operatør-opprydding bruker dem. TRUNCATE nås ikke av appen (ingen TRUNCATE-grant).
 
 CREATE FUNCTION finance_money_columns_immutable() RETURNS trigger
