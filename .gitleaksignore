@@ -138,3 +138,8 @@ d7bc5074616bb59a9b52234a342f4aaaa72041b0:.gitleaksignore:generic-api-key:131
 5c7a5fc7f8ec3396ac0292553e358e90f464a0af:.gitleaksignore:generic-api-key:131
 b7d403a9ab1b979dfd72cf882f65df28399f60a4:.gitleaksignore:generic-api-key:131
 573c5c8cc4a09ee719de075b5de6cc043c06dd14:.gitleaksignore:generic-api-key:131
+
+# docs/evidence/2026-10-10-hf-0-gate.md (første ekte NAS-evidens): H04-raden i porten listet flaggnavn med verdien «ikke-satt» bak etiketten for api-tjenesten; regelen generic-api-key slo til på
+# etikett + flaggliste. Verifisert manuelt: ingen hemmelighet (kun JARVIS_*-flaggnavn og «ikke-satt»). Etiketten i porten er endret (se neste commit), men evidensfilen er den ekte utskriften og
+# endres ikke, og commit-en er allerede publisert (aldri force push).
+c98488190cb505052121112a15568171a873a1ef:docs/evidence/2026-10-10-hf-0-gate.md:generic-api-key:22
