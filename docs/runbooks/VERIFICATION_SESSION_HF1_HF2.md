@@ -13,6 +13,7 @@ Lukkingsmatrisen ([../CLOSURE_MATRIX_HF1_HF2.md](../CLOSURE_MATRIX_HF1_HF2.md)) 
 6. **`HARD_EXTERNAL_BLOCKER`** (manglende credential som ikke finnes trygt, betaling/kjøp, fysisk handling bare du kan gjøre, ekstern juridisk aksept): blokken hoppes over og raden står som `BLOCKED_EXTERNAL`. Resten av økten fortsetter.
 7. **Kostnad varsles før den oppstår.** De få stegene som koster penger (ekte Claude-kjøring i job-runneren J13, mesh-røyktest mot skymodeller) står merket «kostnad» under; kostnadstakene er uendret.
 8. **NAS-en må stå på den merget commit-en** (`main`), ikke på en feature-branch: git-SHA står i hver evidensfil, og en evidens fra feil kode beviser ingenting om koden vi lukker.
+9. **`node` (Node 22) på NAS-en** trengs for evidens-opptakeren og for full H12-skanning (`node --version`). Mangler den: kjør `ops/acceptance/nas-hf1-hf2-gate.sh` direkte (H12 blir da `WARN`, aldri `PASS`) og lim kun den hemmelighetsfrie utdataen i chat – evidensfilen lages i så fall fra `--stdin`, merket «håndlimt av eier».
 
 ## 1. Slik tas evidens
 
@@ -35,7 +36,7 @@ node ops/acceptance/record-evidence.mjs <id> --note "kort merknad" -- <kommando>
 |---|---|---|---|---|
 | **A – les-økten** | 0 baseline · 1 chat-observasjon · 2 backup · 4 Value Center · 10 kontrollsentre · 11 Evolution-rapport | 60–90 min | lav (kun lesing og dormant-flagg som kan rulles tilbake) | ingen |
 | **B – sandbox-skriving** | 3 job-runner · 5 GitHub App · 6 AI Mesh · 7 hendelser og Cloudflare · 8 finans (testmodus) | 2–3 t | middels (skriver mot test-ressurser; kan stoppes med `/infra/pause` og kill switch) | noen øre (J13, mesh-røyktest) |
-| **C – virkelige data** | 9 kunnskapskilder · 12 Business OS | 60–90 min | middels (ekte dokumenter/kundedata – kun rom og tenanter du velger) | ingen |
+| **C – kunnskap og business, kun testdata** | 9 kunnskapskilder · 12 Business OS | 60–90 min | middels (blokk 9: kun syntetiske testdokumenter i et eget rom; blokk 12: kun testdata i en egen test-tenant – aldri ekte dokumenter eller kundedata) | ingen |
 
 Du kan ta dem i andre rekkefølger, men Blokk 0 er alltid først og kjøres på nytt hvis noe er endret mellom øktene.
 
@@ -48,9 +49,9 @@ Hver blokk: **Mål** · **Krever** (fra OWNER_ACTIONS) · **Slik** · **Bestått
 - **Mål:** vite at NAS-en kjører den merget koden, at migrasjonene er anvendt og at ingenting hemmelig står i loggene, FØR vi slår på noe.
 - **Krever:** NAS-oppdateringen i [NAS_UPDATE_HF1_HF2.md](NAS_UPDATE_HF1_HF2.md) er gjort.
 - **Slik:** `JARVIS_BACKUP_DIR=/volume1/jarvisbuild-data/backups/encrypted node ops/acceptance/record-evidence.mjs hf-0-gate -- ops/acceptance/nas-hf1-hf2-gate.sh` (porten kjører UA-0-porten først, `H01`).
-- **Bestått når:** exit 0, ingen `FAIL`, `H02` (migrasjoner) og `H12` (ingen hemmelighetsformer i loggene) er `PASS`. `WARN`/`UNKNOWN` leses linje for linje og forklares – kjent og akseptert (f.eks. `constitution_unsigned` før EV-0 er signert) vs. nytt.
+- **Bestått når:** exit 0 (ingen `FAIL` og minst én `PASS`), `H02` (migrasjoner) og `H12` (ingen hemmelighetsformer i loggene – full skanning med opptakerens mønsterliste, krever `node` på verten; uten den er H12 bare `WARN`) er `PASS`. `WARN`/`UNKNOWN` er IKKE bestått og leses linje for linje og forklares – kjent og akseptert (f.eks. `constitution_unsigned` før EV-0 er signert) vs. nytt. UA-0-linjene som ikke er `PASS` vises med prefikset `UA-0>` og ligger også i evidensfilen; et grønt UA-0-sammendrag med `WARN`/`UNKNOWN` gir `H01` = `WARN`. `H07` er `PASS` bare når backup, restore-verifisering og off-site alle er `ok` og statusfilen er under 36 timer gammel (`failed`/`failing` = `FAIL`; `never`/`never_run`/`not_configured`/`pending` = `WARN`).
 - **Evidens:** `hf-0-gate`.
-- **Hvis det feiler:** stopp økten. `H12` med treff = rotér det som lekket før noe annet. `H02` rød = migrasjon mangler (les `migrate`-loggen).
+- **Hvis det feiler:** stopp økten. `H12` med treff = rotér det som lekket før noe annet. `H02` rød = migrasjon mangler (les `migrate`-loggen). Exit 2 = docker/compose svarer ikke (kjør som en bruker med docker-tilgang, for eksempel med `sudo`); exit 3 = ingen sjekk kunne bekreftes (alt `UNKNOWN`) – ikke en kjøring å bygge på.
 - **Rader:** UA0-RUNRATE (delvis), generell «NAS kjører HF1/HF2-koden».
 
 ### Blokk 1 – Chat-observasjon av det som er `WIRED`
@@ -128,13 +129,13 @@ Hver blokk: **Mål** · **Krever** (fra OWNER_ACTIONS) · **Slik** · **Bestått
 - **Evidens:** `hf-8-stripe-test-chain`, `hf-8-reconcile`.
 - **Rader:** UA-6 Finance (D-kjeden), UA0-AUTHORITY.
 
-### Blokk 9 – Kunnskapskilder (WP-D1) – ekte dokumenter, valgte rom
+### Blokk 9 – Kunnskapskilder (WP-D1) – syntetiske testdokumenter i et eget rom
 
 - **Mål:** fem kilder i samme retrieval, rom-isolasjon og skyskjerm (helse/`special` holdes tilbake), uten tverr-tenant-treff.
-- **Krever:** `JARVIS_KNOWLEDGE_SOURCES` + `JARVIS_KNOWLEDGE_FS_ROOTS` (+ montering), Drive-OAuth hvis Drive brukes; velg selv hvilke mapper/rom – start med en testmappe.
-- **Slik:** [KNOWLEDGE_SOURCES.md](KNOWLEDGE_SOURCES.md) §8 (6 steg): loggene `knowledge_source_synced`; spør «hva står det i dokumentene mine om …?»; spør fra et annet rom (forventet ingen treff); legg en helse-aktig tekst i testmappen og se «holdt tilbake»-merknaden for skymodell; ugyldig konfig → `knowledge_sources_config_rejected`; telling i databasen.
+- **Krever:** `JARVIS_KNOWLEDGE_SOURCES` + `JARVIS_KNOWLEDGE_FS_ROOTS` (+ montering), Drive-OAuth hvis Drive brukes; bruk KUN en egen testmappe og et eget rom med **syntetiske dokumenter** (finn på innholdet; ingen ekte dokumenter, ingen helse-, økonomi- eller kundeinnhold).
+- **Slik:** [KNOWLEDGE_SOURCES.md](KNOWLEDGE_SOURCES.md) §8 (6 steg): loggene `knowledge_source_synced`; spør «hva står det i dokumentene mine om …?»; spør fra et annet rom (forventet ingen treff); legg en oppdiktet helse-aktig tekst i testmappen og se «holdt tilbake»-merknaden for skymodell; ugyldig konfig → `knowledge_sources_config_rejected`; telling i databasen.
 - **Bestått når:** første sync `created > 0`, deretter `unchanged`; ingen treff på tvers av rom eller tenant; helse-treff vises ikke for sky. Å tømme en kilde krever å fjerne den (runbook §7) – en tom/umontert rot tombstoner ingenting.
-- **Evidens:** `hf-9-knowledge-sync`, `hf-9-knowledge-search` (håndlimt chat-utdrag + loggutdrag).
+- **Evidens:** `hf-9-knowledge-sync`, `hf-9-knowledge-search` (håndlimt chat-utdrag + loggutdrag). Evidensfiler committes til git, og redigeringen fanger ikke personopplysninger: lim aldri utdrag fra ekte dokumenter, bare de syntetiske testdokumentene, tellinger, tilstander og loggnavn.
 - **Rader:** UA-2 Knowledge, Q-26 (påstandsverifisering – skrive-handlingene har ingen eier-rute ennå).
 
 ### Blokk 10 – Kontrollsentre (WP-H0)
