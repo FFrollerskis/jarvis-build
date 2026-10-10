@@ -23,7 +23,7 @@ export const stampOf = (date) => date.toISOString().replace(/[-:]/g, "").replace
 export const hoursAgo = (now, h) => new Date(now.getTime() - h * 3_600_000);
 
 /** Et realistisk, KOMPLETT backup-sett (age-header + manifest med ekte SHA-256) uten Postgres/age. */
-export function makeSet(outDir, createdAt, { databases = ["jarvis", "infisical", "langfuse"], withSums = true } = {}) {
+export function makeSet(outDir, createdAt, { databases = ["jarvis", "infisical", "langfuse"], withSums = true, systemIdentifier } = {}) {
   const name = `jarvis-backup-${stampOf(createdAt)}`;
   const dir = join(outDir, name);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -37,7 +37,7 @@ export function makeSet(outDir, createdAt, { databases = ["jarvis", "infisical",
   const globals = Buffer.concat([Buffer.from(AGE_HEADER), randomBytes(80)]);
   writeFileSync(join(dir, "globals.sql.age"), globals, { mode: 0o600 });
   const manifest = {
-    manifest_version: 1, created_at_utc: createdAt.toISOString(), set: name, source: { endpoint: "docker-compose:postgres", mode: "docker" },
+    manifest_version: 1, created_at_utc: createdAt.toISOString(), set: name, source: { endpoint: "docker-compose:postgres", mode: "docker", ...(systemIdentifier === undefined ? {} : { system_identifier: systemIdentifier }) },
     recipient_fingerprint: "0123456789abcdef", globals: { file: "globals.sql.age", sha256: sha256(globals) }, databases: entries
   };
   writeFileSync(join(dir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
@@ -87,7 +87,7 @@ export function fakeBinDir(binaries) {
  * verifisereren stiller (databaselisten, tabelloversikten, radtall) og LOGGER hvert kall - også teksten som mates til `psql -f -`. `calls()` er beviset på hva som
  * ble skrevet til «serveren» og i hvilken rekkefølge. `state` kan endres underveis (`setState`).
  */
-export function fakeScratchRunner({ endpoint = "127.0.0.1:55432", databases = ["postgres", "template0", "template1"], tables = {}, counts = {}, fail = false } = {}) {
+export function fakeScratchRunner({ endpoint = "127.0.0.1:55432", databases = ["postgres", "template0", "template1"], tables = {}, counts = {}, fail = false, systemIdentifier = "5000000000000000001" } = {}) {
   const dir = tempDir("wpc2-fakepg-");
   const script = join(dir, "fake-pg.mjs");
   const stateFile = join(dir, "state.json");
@@ -102,12 +102,13 @@ export function fakeScratchRunner({ endpoint = "127.0.0.1:55432", databases = ["
     const stdin = flag("-f") === "-" ? readFileSync(0, "utf8") : "";
     appendFileSync(process.env.FAKE_PG_LOG, JSON.stringify({ tool, database: flag("-d"), sql: sql ?? null, stdin }) + "\\n");
     if (state.fail) { console.error("psql: error: connection to server failed"); process.exit(2); }
+    if (sql && /pg_control_system/.test(sql)) { if (state.systemIdentifier === null) { console.error("psql: error: function pg_control_system() does not exist"); process.exit(2); } console.log(state.systemIdentifier); process.exit(0); }
     if (sql && /FROM pg_database/.test(sql)) { console.log(state.databases.join("\\n")); process.exit(0); }
     if (sql && /FROM pg_class/.test(sql)) { console.log((state.tables[flag("-d")] ?? []).join("\\n")); process.exit(0); }
     if (sql && /^SELECT count/.test(sql)) { console.log(String(state.counts[sql.replace(/^SELECT count\\(\\*\\) FROM /, "")] ?? 0)); process.exit(0); }
     process.exit(0);
   `);
-  const state = { databases, tables, counts, fail };
+  const state = { databases, tables, counts, fail, systemIdentifier };
   const save = () => writeFileSync(stateFile, JSON.stringify(state));
   save();
   const runner = {

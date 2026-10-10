@@ -20,6 +20,8 @@ export interface TickResult {
   failed: string[];
   decisions: Record<string, Decision>;
   newest_set: string | null;
+  /** Hva retensjonen gjorde i dette tikket: `paused` = årsaken til at den lot være (`pipeline_stale`, `status_unusable`, `time_gap_hold`, `offsite_failing`, `verify_failing`), ellers antall slettede sett/tomme kataloger. */
+  retention?: { paused: string | null; pruned: number; orphans_removed: number };
   duration_ms: number;
 }
 /** Avhengigheter til et tikk (opak her; bygges av `buildDefaultDeps`). */
@@ -44,6 +46,17 @@ export declare function setFileProblems(dir: string, manifest: unknown): string[
 export declare function findHollowSets(outDir: string): Array<{ name: string; problems: string[] }>;
 /** Navn på komplette sett datert i fremtiden (klokkeavvik). */
 export declare function findFutureSets(outDir: string, nowMs: number): string[];
+/**
+ * Settkataloger uten manifest.json (review runde 2, M3): `removable` = bare helt TOMME kataloger eldre enn terskelen (bevist `ENOENT` på manifestet, aldri et beskyttet navn), `withData` = har innhold og
+ * slettes ikke (rapporteres), `unverified` = en annen fs-feil enn ENOENT hindret avgjørelsen (røres ikke).
+ */
+export declare function scanManifestlessSets(
+  outDir: string,
+  nowMs: number,
+  options?: { maxAgeMs?: number; protect?: Array<string | null> }
+): { removable: string[]; withData: Array<{ name: string; entries: number }>; unverified: Array<{ name: string; code: string }> };
+/** Tomme foreldreløse settkataloger som kan ryddes (se `scanManifestlessSets`). */
+export declare function findOrphanSets(outDir: string, nowMs: number, maxAgeMs?: number, protect?: Array<string | null>): string[];
 /** `jarvis-backup-<UTC>` -> epoch-ms, eller null når navnet ikke er en ekte dato (også `99999999T999999Z`, måned 00, 30. februar). */
 export declare function setNameMs(name: unknown): number | null;
 /** Mønsteret for arbeidsmappene en off-site-henting lager i backup-mappen (`.verify-tmp-XXXXXX`). */

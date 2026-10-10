@@ -65,6 +65,20 @@ describe("WP-C2 schedule.mjs status: overvåkingsvennlige exit-koder", () => {
     writeJsonAtomic(join(out, "backup-status.json"), st);
   };
 
+  it("review runde 2 M4: `status` viser om statusfilen er borte/ubrukelig og hvorfor retensjonen er pauset (kun informasjon - exit-koden er uendret)", () => {
+    const out = tempDir();
+    makeSet(out, hoursAgo(NOW, 5));
+    expect(run(["status", "--out", out]).json).toMatchObject({ status_file: { exists: false, problem: null }, retention: { last_skipped_reason: null, status_reset_at: null } });
+    writeFileSync(join(out, "backup-status.json"), "{ikke json");
+    const corrupt = run(["status", "--out", out]);
+    expect(corrupt.status).toBe(0);
+    expect(corrupt.json.status_file).toEqual({ exists: true, problem: "corrupt" });
+    writeFileSync(join(out, "backup-status.json"), JSON.stringify({ schema: 7 }));
+    expect(run(["status", "--out", out]).json.status_file).toEqual({ exists: true, problem: "unsupported_schema" });
+    stateWith(out, (st) => { Object.assign(st.retention, { last_skipped_reason: "status_unusable", status_reset_at: "2026-10-09T01:00:00.000Z" }); });
+    expect(run(["status", "--out", out]).json).toMatchObject({ status_file: { exists: true, problem: null }, retention: { last_skipped_reason: "status_unusable", status_reset_at: "2026-10-09T01:00:00.000Z" } });
+  });
+
   it("frisk = 0; ingen backup eller for gammel = 3; feilet/gammel restore-verify = 4; feilet off-site = 5 (prioritet 3 > 4 > 5)", () => {
     const out = tempDir();
     expect(run(["status", "--out", out]).status).toBe(3);

@@ -17,6 +17,8 @@ export function makeRunner(opts) {
   return {
     mode,
     endpoint,
+    /** Rollen klientverktøyene logger inn som (`-U`). Restore-verifiseringen bruker den til å aldri la globals.sql røre sin egen innloggingsrolle. */
+    user,
     command(tool, args, { database } = {}) {
       const dbArgs = database ? ["-d", database] : [];
       if (mode === "container") {

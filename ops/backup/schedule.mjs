@@ -105,7 +105,7 @@ function statusCommand(argv, env, now) {
   const maxVerifyAgeD = flags["max-verify-age-days"] === undefined ? verifyIntervalD * 2 : Number(flags["max-verify-age-days"]);
   if (!Number.isFinite(maxBackupAgeH) || maxBackupAgeH <= 0 || !Number.isFinite(maxVerifyAgeD) || maxVerifyAgeD <= 0) throw new UsageError("--max-backup-age-hours/--max-verify-age-days må være positive tall");
 
-  const { status } = readStatusFile(join(stateDir, STATUS_FILE));
+  const { status, problem: statusProblem, existed: statusExisted } = readStatusFile(join(stateDir, STATUS_FILE));
   mergePeerVerifyReport(status, readPeerVerifyReport(stateDir), now);
   // Review F5: samme klokkeavvik-vern som tikket. Uten `nowMs` ble et sett datert +400 d «nyeste» med alder -9600 t og `ok: true`. Fremtidsdaterte sett teller ikke som nyeste,
   // og rapporteres som EGEN årsak (de står igjen til eieren fjerner dem: retensjon rører dem ikke).
@@ -148,6 +148,12 @@ function statusCommand(argv, env, now) {
       fetch_duration_s: v.fetch_duration_s, source: v.source, reported_by: v.reported_by, last_error_code: v.last_error_code
     },
     heartbeat: status.heartbeat,
+    // Review runde 2 (M4): en borte/ubrukelig statusfil (`problem`) nullstiller historikken retensjonen bygger på; `retention` viser om og hvorfor retensjonen er pauset (kun informasjon: endrer ikke exit-koden).
+    status_file: { exists: statusExisted, problem: statusProblem },
+    retention: {
+      last_skipped_reason: status.retention.last_skipped_reason, status_reset_at: status.retention.status_reset_at, hold_until: status.retention.hold_until,
+      last_pruned_at: status.retention.last_pruned_at, last_pruned_count: status.retention.last_pruned_count
+    },
     config: { backup_interval_hours: intervalH, restore_verify_interval_days: verifyIntervalD },
     export: exportInfo(env, now)
   });

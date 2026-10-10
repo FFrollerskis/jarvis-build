@@ -8,6 +8,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { runBackup, sha256File } from "../../../ops/backup/lib/backup.mjs";
+import { ROLE_SET_ALLOWLIST, sanitizeGlobals } from "../../../ops/backup/lib/globals-filter.mjs";
 import { SCRATCH_DB_PREFIX, backupAgeHours, listBackupSets, pruneBackupSets, runRestoreVerify } from "../../../ops/backup/lib/restore-verify.mjs";
 import { makeRunner } from "../../../ops/backup/lib/runner.mjs";
 import { findBinary } from "../../../ops/backup/lib/tools.mjs";
@@ -34,6 +35,16 @@ async function startCluster() {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-pg-backup-"));
   const leased = await startLeasedEmbeddedPostgres((port) => new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false }));
   return leased;
+}
+
+async function execAs(port: number, database: string, sql: string, user: string, password: string) {
+  const client = new pg.Client({ host: "127.0.0.1", port, user, password, database });
+  await client.connect();
+  try {
+    return await client.query(sql);
+  } finally {
+    await client.end();
+  }
 }
 
 const runnerFor = (port: number) => makeRunner({ mode: "direct", host: "127.0.0.1", port, user: "postgres", password: "pw" });
@@ -93,6 +104,10 @@ describe.skipIf(!haveTools)("kryptert backup + restore-verifisering (ekte Postgr
     const out = join(work, "out1");
     const { setDir, manifest } = await runBackup({ runner: runnerFor(sourcePort), outDir: out, recipient, now: new Date("2026-10-01T22:00:00Z") });
     expect(manifest.set).toBe("jarvis-backup-20261001T220000Z");
+    // runde 2 (L1): kildeklyngens system_identifier følger settet (alias-sikkert «samme klynge»-bevis), og er IKKE scratch-klyngens
+    const idOf = async (port: number) => (await exec(port, "postgres", "SELECT system_identifier::text AS id FROM pg_control_system()")).rows[0]?.id as string;
+    expect(manifest.source.system_identifier).toBe(await idOf(sourcePort));
+    expect(manifest.source.system_identifier).not.toBe(await idOf(scratchPort));
     expect(manifest.databases.map((d) => d.database)).toEqual(DBS);
     const jarvis = manifest.databases.find((d) => d.database === "jarvis");
     expect(jarvis).toBeDefined();
@@ -246,6 +261,202 @@ describe.skipIf(!haveTools)("kryptert backup + restore-verifisering (ekte Postgr
       await exec(sourcePort, "postgres", "DROP ROLE IF EXISTS f2_pw");
       await exec(scratchPort, "postgres", "DROP ROLE IF EXISTS f2_pw");
     }
+  }, 240_000);
+
+  /**
+   * WP-C2 re-review runde 2, M1 - mot EKTE psql/Postgres. `m1_verifier` er en egen superbruker-rolle på scratch-klyngen som verifisereren logger inn som (slik `postgres` er det i produksjon):
+   * å bruke den i stedet for `postgres` lar oss bevise utelåsing uten å risikere å bricke selve klyngen. Hver positiv kontroll viser at den URENSEDE setningen faktisk har effekten
+   * reviewer påviste (uten dem beviser testene ingenting); deretter at den samme teksten gjennom koden ikke har det.
+   */
+  const verifierRunner = () => makeRunner({ mode: "direct", host: "127.0.0.1", port: scratchPort, user: "m1_verifier", password: "vpw" });
+  const canLogin = async (user: string, password: string) => {
+    try {
+      await execAs(scratchPort, "postgres", "SELECT 1", user, password);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const rawPsql = (runner: ReturnType<typeof makeRunner>, input: string) => {
+    const cmd = runner.command("psql", ["-X", "-q", "-v", "ON_ERROR_STOP=0", "-f", "-"], { database: "postgres" });
+    execFileSync(cmd.file, cmd.args, { env: cmd.env, input, stdio: ["pipe", "pipe", "pipe"] });
+  };
+  const roleSettings = async () => (await exec(scratchPort, "postgres", "SELECT coalesce(r.rolname, '<ALL>') AS role, s.setconfig::text AS setconfig FROM pg_db_role_setting s LEFT JOIN pg_roles r ON r.oid = s.setrole ORDER BY 1, 2")).rows.map((row: { role: string; setconfig: string }) => ({ role: row.role, setconfig: row.setconfig.replace(/[\\"]/g, "") })) as Array<{ role: string; setconfig: string }>; // Postgres siterer verdier med skråstrek: normaliseres bort
+  /** Et backup-sett av `langfuse` (liten) der globals.sql er byttet ut med `globalsText(original)`, kryptert og konsistent mot sitt eget manifest (age er ikke autentisert). */
+  async function setWithGlobals(name: string, when: string, globalsText: (original: string) => string) {
+    const { setDir, manifest } = await runBackup({ runner: runnerFor(sourcePort), databases: ["langfuse"], outDir: join(work, name), recipient, now: new Date(when) });
+    const file = join(setDir, "globals.sql.age");
+    const original = execFileSync(findBinary("age")!, ["-d", "-i", identityFile, file], { encoding: "utf8" });
+    rmSync(file);
+    execFileSync(findBinary("age")!, ["-r", recipient, "-o", file], { input: globalsText(original) });
+    manifest.globals.sha256 = await sha256File(file);
+    writeFileSync(join(setDir, "manifest.json"), JSON.stringify(manifest));
+    return setDir;
+  }
+
+  it("review M1 (ekte psql): `ALTER ROLE <verifisereren> WITH NOLOGIN` låser den ute uten filteret - gjennom filteret rører verifisereren seg ikke, mens andre roller får attributtene sine", async () => {
+    await exec(scratchPort, "postgres", "CREATE ROLE m1_verifier LOGIN SUPERUSER PASSWORD 'vpw'");
+    try {
+      // positiv kontroll: ubeskyttet psql (slik koden gjorde før) låser verifisereren ute - også via CURRENT_USER
+      for (const hostile of ["ALTER ROLE m1_verifier WITH NOLOGIN;\n", "ALTER ROLE CURRENT_USER WITH NOSUPERUSER NOLOGIN;\n"]) {
+        expect(await canLogin("m1_verifier", "vpw")).toBe(true);
+        rawPsql(verifierRunner(), hostile);
+        expect(await canLogin("m1_verifier", "vpw"), hostile).toBe(false);
+        await exec(scratchPort, "postgres", "ALTER ROLE m1_verifier WITH LOGIN SUPERUSER");
+      }
+      // samme angrep gjennom koden, pakket inn i et ellers ekte uttrekk
+      const setDir = await setWithGlobals("out-m1a", "2026-10-01T23:00:00Z", (original) =>
+        `${original}\nALTER ROLE m1_verifier WITH NOLOGIN NOSUPERUSER;\nALTER ROLE "M1_VERIFIER" WITH NOLOGIN;\nALTER ROLE m1_verifier SET statement_timeout TO '1ms';\nCOMMENT ON ROLE m1_verifier IS 'x';\nCREATE ROLE m1_other;\nALTER ROLE m1_other WITH LOGIN CREATEDB;\nALTER ROLE m1_other SET statement_timeout TO '5s';\n`);
+      const report = await runRestoreVerify({ setDir, identityFile, scratchRunner: verifierRunner(), now: new Date("2026-10-01T23:01:00Z") });
+      expect(report).toMatchObject({ ok: true, stage: "complete" });
+      expect(report.globals?.login_role_statements_skipped).toBe(4); // NOLOGIN, "M1_VERIFIER" (case-over-match), SET statement_timeout og COMMENT - alle om verifisereren
+      expect(await canLogin("m1_verifier", "vpw")).toBe(true);
+      expect((await exec(scratchPort, "postgres", "SELECT rolcanlogin, rolsuper FROM pg_roles WHERE rolname = 'm1_verifier'")).rows).toEqual([{ rolcanlogin: true, rolsuper: true }]);
+      // andre roller får det filteret slipper gjennom (attributter og allowlistede innstillinger) - det er hele poenget med å restore roller
+      expect((await exec(scratchPort, "postgres", "SELECT rolcanlogin, rolcreatedb FROM pg_roles WHERE rolname = 'm1_other'")).rows).toEqual([{ rolcanlogin: true, rolcreatedb: true }]);
+      expect(await roleSettings()).toEqual([{ role: "m1_other", setconfig: "{statement_timeout=5s}" }]);
+    } finally {
+      await exec(scratchPort, "postgres", "DROP ROLE IF EXISTS m1_other");
+      await exec(scratchPort, "postgres", "DROP ROLE IF EXISTS m1_verifier");
+    }
+  }, 240_000);
+
+  it("review M1 (ekte psql): `ALTER ROLE ALL SET`, `CURRENT_USER` og `SET session_preload_libraries` har klyngeglobal effekt uten filteret - med filteret stopper filen på trinn `globals`, ingenting skrives", async () => {
+    await exec(scratchPort, "postgres", "CREATE ROLE m1_verifier LOGIN SUPERUSER PASSWORD 'vpw'");
+    await exec(scratchPort, "postgres", "CREATE ROLE m1_other");
+    try {
+      // positive kontroller med harmløse verdier som likevel viser omfanget: ALL = rad uten rolle (gjelder ALLE tilkoblinger), og preload-biblioteket lagres klyngeglobalt for rollen
+      rawPsql(runnerFor(scratchPort), "ALTER ROLE ALL SET application_name TO 'm1_all';\nALTER ROLE m1_other SET session_preload_libraries TO '/tmp/x.so';\n");
+      expect(await roleSettings()).toEqual([
+        { role: "<ALL>", setconfig: "{application_name=m1_all}" },
+        { role: "m1_other", setconfig: "{session_preload_libraries=/tmp/x.so}" }
+      ]);
+      await exec(scratchPort, "postgres", "ALTER ROLE ALL RESET application_name");
+      await exec(scratchPort, "postgres", "ALTER ROLE m1_other RESET session_preload_libraries");
+      expect(await roleSettings()).toEqual([]);
+
+      let n = 0;
+      for (const hostile of [
+        "ALTER ROLE ALL SET statement_timeout TO '1ms';", "ALTER ROLE ALL IN DATABASE postgres SET application_name TO 'x';", "ALTER ROLE CURRENT_USER WITH NOSUPERUSER NOLOGIN;",
+        "ALTER ROLE postgres SET session_preload_libraries TO '/tmp/x.so';", "ALTER ROLE m1_other SET session_preload_libraries TO '/tmp/x.so';", "ALTER ROLE m1_other SET dynamic_library_path TO '/tmp';",
+        "ALTER ROLE m1_other SET session_replication_role TO replica;", "GRANT pg_monitor TO PUBLIC;"
+      ]) {
+        const setDir = await setWithGlobals(`out-m1b${n}`, `2026-10-01T23:1${n}:00Z`, (original) => `${original}\n${hostile}\n`);
+        const report = await runRestoreVerify({ setDir, identityFile, scratchRunner: verifierRunner(), now: new Date(`2026-10-01T23:1${n}:30Z`) });
+        n += 1;
+        expect(report, hostile).toMatchObject({ ok: false, stage: "globals" });
+        expect(await roleSettings(), hostile).toEqual([]);
+        expect((await exec(scratchPort, "postgres", `SELECT datname FROM pg_database WHERE datname LIKE '${SCRATCH_DB_PREFIX}%'`)).rows, hostile).toEqual([]);
+        expect(await canLogin("m1_verifier", "vpw"), hostile).toBe(true);
+        expect((await exec(scratchPort, "postgres", "SELECT rolcanlogin FROM pg_roles WHERE rolname = 'm1_verifier'")).rows).toEqual([{ rolcanlogin: true }]);
+      }
+    } finally {
+      await exec(scratchPort, "postgres", "ALTER ROLE ALL RESET ALL").catch(() => undefined);
+      await exec(scratchPort, "postgres", "DROP ROLE IF EXISTS m1_other");
+      await exec(scratchPort, "postgres", "DROP ROLE IF EXISTS m1_verifier");
+    }
+  }, 240_000);
+
+  it("review M1, differensialtest mot ekte psql: ALLE setninger filteret godtar (roller x skjemaer x parametere) kan verken låse ute verifisereren eller endre noe annet enn attributter/allowlistede innstillinger for andre roller", async () => {
+    await exec(scratchPort, "postgres", "CREATE ROLE m1_verifier LOGIN SUPERUSER PASSWORD 'vpw'");
+    const roles = ["m1_verifier", "M1_VERIFIER", '"m1_verifier"', "m1_other", '"M1_Other"', "CURRENT_USER", "SESSION_USER", "CURRENT_ROLE", "ALL", "PUBLIC", "NONE", '"all"'];
+    // [parameter, gyldig verdi]: de ufarlige får effekt hos andre roller; de farlige skal aldri komme gjennom (en gyldig verdi sikrer at Postgres HADDE godtatt dem)
+    const gucs: Array<[string, string]> = [
+      ["application_name", "'x'"], ["statement_timeout", "'5s'"], ["lock_timeout", "'5s'"], ["timezone", "'UTC'"], ["search_path", "public"], ["default_transaction_read_only", "on"],
+      ["session_preload_libraries", "'/tmp/x.so'"], ["dynamic_library_path", "'/tmp'"], ["session_replication_role", "replica"], ["role", "postgres"], ["plperl.on_plperl_init", "'1'"]
+    ];
+    const corpus: string[] = [];
+    for (const r of roles) {
+      corpus.push(`CREATE ROLE ${r};`, `ALTER ROLE ${r} WITH NOLOGIN NOSUPERUSER;`, `ALTER ROLE ${r} WITH LOGIN CREATEDB PASSWORD 'p';`, `COMMENT ON ROLE ${r} IS 'x';`, `GRANT pg_monitor TO ${r};`, `GRANT m1_other TO ${r} GRANTED BY ${r};`);
+      for (const [g, v] of gucs) corpus.push(`ALTER ROLE ${r} SET ${g} TO ${v};`, `ALTER ROLE ${r} IN DATABASE postgres SET ${g} = ${v};`);
+    }
+    const allowed = new Set(["m1_other", "M1_Other"]);
+    let accepted = 0;
+    let rejected = 0;
+    let skipped = 0;
+    try {
+      for (const text of corpus) {
+        let sql: string;
+        try {
+          const r = sanitizeGlobals(`${text}\n`, { loginRole: "m1_verifier" });
+          sql = r.sql;
+          if (sql === "") skipped += 1;
+        } catch {
+          rejected += 1;
+          continue;
+        }
+        accepted += 1;
+        await exec(scratchPort, "postgres", `CREATE ROLE m1_other LOGIN; CREATE ROLE "M1_Other" LOGIN;`);
+        try {
+          if (sql !== "") rawPsql(verifierRunner(), sql);
+          expect(await canLogin("m1_verifier", "vpw"), text).toBe(true);
+          expect((await exec(scratchPort, "postgres", "SELECT a.rolcanlogin, a.rolsuper, a.rolcreatedb, a.rolcreaterole, a.rolreplication, a.rolbypassrls, a.rolpassword IS NULL AS nopw FROM pg_authid a WHERE a.rolname = 'm1_verifier'")).rows, text)
+            .toEqual([{ rolcanlogin: true, rolsuper: true, rolcreatedb: false, rolcreaterole: false, rolreplication: false, rolbypassrls: false, nopw: false }]);
+          for (const row of await roleSettings()) {
+            expect(allowed.has(row.role), `${text} -> ${JSON.stringify(row)}`).toBe(true); // aldri ALL, aldri verifisereren
+            const key = (/^\{"?([A-Za-z_.]+)=/.exec(row.setconfig)?.[1] ?? "").toLowerCase(); // Postgres lagrer kanonisk case (TimeZone)
+            expect(ROLE_SET_ALLOWLIST.has(key), `${text} -> ${row.setconfig}`).toBe(true); // aldri preload/library/replication_role/role/dotted - kontrollert mot det Postgres faktisk lagret
+          }
+          // ingen nye databaser/roller utenfor de forventede
+          expect((await exec(scratchPort, "postgres", "SELECT datname FROM pg_database WHERE datname NOT IN ('postgres','template0','template1') AND datname NOT LIKE 'restore_verify_%'")).rows, text).toEqual([]);
+        } finally {
+          await exec(scratchPort, "postgres", `DROP ROLE IF EXISTS m1_other, "M1_Other", "all"`);
+        }
+      }
+    } finally {
+      await exec(scratchPort, "postgres", "DROP ROLE IF EXISTS m1_verifier");
+    }
+    // korpuset må treffe alle tre utfall, ellers beviser det lite
+    expect(corpus.length).toBeGreaterThan(300);
+    expect(rejected).toBeGreaterThan(100);
+    expect(skipped).toBeGreaterThan(10);
+    expect(accepted - skipped).toBeGreaterThan(50);
+  }, 240_000);
+
+  it("review L1 (ekte Postgres): samme system_identifier nektes selv mot en TOM scratch - fjernes feltet (eldre sett), passerer den samme tomme scratchen (så det var kun identifikatoren som stoppet)", async () => {
+    const { setDir, manifest } = await runBackup({ runner: runnerFor(sourcePort), databases: ["langfuse"], outDir: join(work, "out-l1a"), recipient, now: new Date("2026-10-02T00:00:00Z") });
+    const scratchId = (await exec(scratchPort, "postgres", "SELECT system_identifier::text AS id FROM pg_control_system()")).rows[0]?.id as string;
+    manifest.source.system_identifier = scratchId; // «scratch-klyngen ER kilden, under et annet navn»
+    writeFileSync(join(setDir, "manifest.json"), JSON.stringify(manifest));
+    const refused = await runRestoreVerify({ setDir, identityFile, scratchRunner: runnerFor(scratchPort), now: new Date("2026-10-02T00:01:00Z") });
+    expect(refused).toMatchObject({ ok: false, stage: "scratch_guard" });
+    expect(refused.error).toContain("samme system_identifier");
+    expect((await exec(scratchPort, "postgres", `SELECT datname FROM pg_database WHERE datname LIKE '${SCRATCH_DB_PREFIX}%'`)).rows).toEqual([]);
+    delete manifest.source.system_identifier; // eldre sett: ingen identifikator, kun tom-sjekken
+    writeFileSync(join(setDir, "manifest.json"), JSON.stringify(manifest));
+    const logs: string[] = [];
+    const ok = await runRestoreVerify({ setDir, identityFile, scratchRunner: runnerFor(scratchPort), now: new Date("2026-10-02T00:02:00Z"), log: (m: string) => logs.push(m) });
+    expect(ok).toMatchObject({ ok: true, stage: "complete" });
+    expect(logs.some((m) => m.includes("ingen system_identifier i manifestet"))).toBe(true);
+  }, 240_000);
+
+  it("review L1 (ekte Postgres): en database som heter « postgres» og views/matviews i postgres-databasen gjør scratch ikke-kastbar (tidligere passerte begge)", async () => {
+    const { setDir } = await runBackup({ runner: runnerFor(sourcePort), databases: ["langfuse"], outDir: join(work, "out-l1b"), recipient, now: new Date("2026-10-02T00:10:00Z") });
+    const verify = (minute: number) => runRestoreVerify({ setDir, identityFile, scratchRunner: runnerFor(scratchPort), now: new Date(`2026-10-02T00:${String(11 + minute).padStart(2, "0")}:00Z`) });
+    await exec(scratchPort, "postgres", 'CREATE DATABASE " postgres"');
+    try {
+      const report = await verify(0);
+      expect(report).toMatchObject({ ok: false, stage: "scratch_guard" });
+      expect(report.error).toContain("1 database(r)");
+    } finally {
+      await exec(scratchPort, "postgres", 'DROP DATABASE IF EXISTS " postgres"');
+    }
+    let minute = 1;
+    for (const [create, drop] of [
+      ["CREATE VIEW public.l1_view AS SELECT 1 AS x", "DROP VIEW IF EXISTS public.l1_view"],
+      ["CREATE MATERIALIZED VIEW public.l1_mv AS SELECT 1 AS x", "DROP MATERIALIZED VIEW IF EXISTS public.l1_mv"],
+      ["CREATE SEQUENCE public.l1_seq", "DROP SEQUENCE IF EXISTS public.l1_seq"]
+    ] as const) {
+      await exec(scratchPort, "postgres", create);
+      try {
+        const report = await verify(minute++);
+        expect(report, create).toMatchObject({ ok: false, stage: "scratch_guard" });
+        expect(report.error, create).toContain("tabell(er)/visning(er)/sekvens(er)");
+      } finally {
+        await exec(scratchPort, "postgres", drop);
+      }
+    }
+    expect(await verify(minute)).toMatchObject({ ok: true, stage: "complete" }); // kontroll: ryddet scratch passerer igjen
   }, 240_000);
 
   it("ingen ukryptert backup: manglende/ugyldig age-mottaker avvises FØR noe skrives", async () => {
