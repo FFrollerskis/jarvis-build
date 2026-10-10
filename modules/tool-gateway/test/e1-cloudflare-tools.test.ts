@@ -26,7 +26,7 @@ let adminPool: pg.Pool;
 let appPool: pg.Pool;
 let cf: FakeCloudflare;
 const TENANT = "tenant-e1-cf";
-const owner: IdentityContext = { person_id: "person-e1-owner", tenant_id: TENANT, memory_space_id: "business", session_id: "sess-e1", device_id: "dev-e1", channel: "api", auth_strength: "active" };
+const owner: IdentityContext = { person_id: "person-e1-owner", tenant_id: TENANT, memory_space_id: "business", session_id: "sess-e1", device_id: "dev-e1", channel: "api", auth_strength: "signed" };
 const delegate: IdentityContext = { ...owner, person_id: "person-e1-delegate", session_id: "sess-e1-d" };
 
 beforeAll(async () => {

@@ -10,6 +10,9 @@ import { isRotationId } from "./infisical-transport.ts";
  * ærlig «ingen teknisk reversering». Mål-autorisasjon: rotasjons-id-en MÅ stå i `JARVIS_INFISICAL_ROTATION_IDS` (eier-konfigurert, kun på verten; tom = ingen rotasjon).
  * Credential = `INFISICAL_CLIENT_SECRET` (maskin-identiteten som allerede er i api/worker); uten verdi er alt `credential_unavailable`. Verktøy-id `infisical` er et
  * eier-eksklusivt navnerom (aldri på en modellflate) og står i `INFRA_GATED_TOOL_IDS`.
+ *
+ * STEP-UP (gjennomgang av PR #324, M2): `rotate_secrets` har `step_up_required: true` - gatewayen SELV nekter uten enhetssignert økt fra en eier-kanal (web/desktop/api/mobile; aldri tale/Telegram/
+ * meldingsplattform/system). En stjålet eller svak eier-grant skal ikke kunne rotere produksjonshemmeligheter. Standard = strengest; kan lempes av Tobias med en navngitt D-beslutning.
  */
 export const INFISICAL_CREDENTIAL_REF = "INFISICAL_CLIENT_SECRET";
 
@@ -42,6 +45,7 @@ export function infisicalToolDefinitions(transport: ToolTransport, config: { rot
       input_schema: record({ rotation_id: rotationId }), capability_class: "D", scopes: ["infisical:write"], reversible: false,
       rollback_procedure: "ingen teknisk reversering - den forrige verdien ligger i Infisicals egen versjonshistorikk og må gjenopprettes manuelt der; avhengige tjenester må hente ny verdi. Før-tilstand (rotasjonsstatus/tidspunkt) er journalført, aldri verdier.",
       idempotent_external: false, timeout_ms: 90_000, rate_limit_per_minute: 3, credential_ref: INFISICAL_CREDENTIAL_REF, output_trust: "internal", transport,
+      step_up_required: true,
       parameterAuthorizer: (p: Params) => {
         const id = p["rotation_id"];
         if (!isRotationId(id)) return { allowed: false, reason: "missing_or_invalid_rotation_id" };

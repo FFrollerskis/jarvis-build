@@ -23,7 +23,7 @@ import { FakeLangfuse } from "./support/fake-langfuse.ts";
  */
 const TENANT = "tenant-e1-lfi";
 const VALUE = "SUPER-HEMMELIG-VERDI-4711";
-const owner: IdentityContext = { person_id: "person-e1-lfi", tenant_id: TENANT, memory_space_id: "business", session_id: "sess-lfi", device_id: "dev-lfi", channel: "api", auth_strength: "active" };
+const owner: IdentityContext = { person_id: "person-e1-lfi", tenant_id: TENANT, memory_space_id: "business", session_id: "sess-lfi", device_id: "dev-lfi", channel: "api", auth_strength: "signed" };
 const delegate: IdentityContext = { ...owner, person_id: "person-e1-lfi-d", session_id: "sess-lfi-d" };
 
 let stop: (() => Promise<void>) | undefined;

@@ -18,7 +18,7 @@ import { executeCloudMutation } from "../src/cloud-execution.ts";
  * Bevist: før-/etter-revisjon av rotasjonens STATUS (aldri verdier), idempotent retry, ærlig «ingen reversering», og at et avslag journalføres som FAILED.
  */
 const TENANT = "tenant-e1-infx";
-const identity: IdentityContext = { person_id: "person-e1-infx", tenant_id: TENANT, memory_space_id: "business", session_id: "sess-infx", device_id: "dev-infx", channel: "api", auth_strength: "active" };
+const identity: IdentityContext = { person_id: "person-e1-infx", tenant_id: TENANT, memory_space_id: "business", session_id: "sess-infx", device_id: "dev-infx", channel: "api", auth_strength: "signed" };
 
 let stop: (() => Promise<void>) | undefined;
 let admin: pg.Pool;

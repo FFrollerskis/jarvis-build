@@ -31,6 +31,11 @@ import {
  * Credential uten verdi => `credential_unavailable` for ALLE handlinger (connectoren er sovende til eieren har satt `JARVIS_CLOUDFLARE_API_TOKEN`).
  * Verktøy-id `cloudflare` står i `infraToolIds` (PAUSED stanser B/C/D, DEGRADED stanser D, lesing er aldri stanset) og er et eier-eksklusivt navnerom
  * som aldri kan stå på en modellflate (`FORBIDDEN_MODEL_TOOL_IDS`/`OWNER_ONLY_NAMESPACES`).
+ *
+ * STEP-UP (gjennomgang av PR #324, M2): ALLE skrivehandlinger (klasse C OG D, inkl. `purge_cache`) har `step_up_required: true` - gatewayen SELV (`ownerStepUpDenial`, uavhengig av `enforce`)
+ * nekter uten en enhetssignert økt (`auth_strength: "signed"`) fra en eier-kanal (web/desktop/api/mobile), aldri tale/Telegram/meldingsplattform/system. SOVEREIGN-modus alene er ikke nok:
+ * en stjålet eller svak eier-grant (passiv/tale) kunne ellers endre produksjons-DNS, WAF og SSL. Standarden er den strengeste; Tobias kan lempe den per handling med en navngitt D-beslutning
+ * (D-41/D-192). Ren lesing (klasse A) krever aldri step-up.
  */
 export const CLOUDFLARE_CREDENTIAL_REF = "JARVIS_CLOUDFLARE_API_TOKEN";
 
@@ -66,6 +71,7 @@ export function cloudflareToolDefinitions(transport: ToolTransport, config: { mu
     reversible: true, idempotent_external: false, timeout_ms: 45_000, rate_limit_per_minute: 10,
     credential_ref: CLOUDFLARE_CREDENTIAL_REF, output_trust: "internal", transport,
     parameterAuthorizer: authorizer(action),
+    step_up_required: true,
     ...extra
   });
 
@@ -167,7 +173,8 @@ export function cloudflareToolDefinitions(transport: ToolTransport, config: { mu
       capability_class: "C", scopes: ["cloudflare:cache"], reversible: false,
       rollback_procedure: "ingen teknisk reversering - cachen fylles på igjen fra opprinnelsen ved neste forespørsel; ved belastningsproblemer: send mindre purge eller aktiver development_mode",
       idempotent_external: true, timeout_ms: 45_000, rate_limit_per_minute: 5, credential_ref: CLOUDFLARE_CREDENTIAL_REF,
-      output_trust: "internal", transport, parameterAuthorizer: authorizer("purge_cache")
+      output_trust: "internal", transport, parameterAuthorizer: authorizer("purge_cache"),
+      step_up_required: true
     }
   ];
 }

@@ -17,6 +17,9 @@ import { authorizePostgresOpsTarget, type PostgresOpsConfig, type PostgresOpsMut
  * Mål-autorisasjon (database/skjema står i eierens lister) håndheves av `parameterAuthorizer` i selve gateway-pipelinen. Verktøy-id `postgres_ops` står i
  * `INFRA_GATED_TOOL_IDS` (PAUSED stanser skriving, DEGRADED stanser D, lesing stanses aldri) og er et eier-eksklusivt navnerom som aldri kan stå på en modellflate.
  * Credential uten verdi (`JARVIS_POSTGRES_OPS_URL` ikke satt) => `credential_unavailable` for ALLE handlinger: connectoren er sovende til eieren har opprettet rollen.
+ *
+ * STEP-UP (gjennomgang av PR #324, M2): alle tre klasse D-handlingene har `step_up_required: true` - gatewayen SELV nekter uten enhetssignert økt fra en eier-kanal (web/desktop/api/mobile; aldri
+ * tale/Telegram/meldingsplattform/system). Å terminere en produksjonsøkt eller starte VACUUM krever mer enn SOVEREIGN-modus alene. Standard = strengest; kan lempes av Tobias per handling (navngitt D-beslutning).
  */
 export const POSTGRES_OPS_CREDENTIAL_REF = "JARVIS_POSTGRES_OPS_URL";
 
@@ -51,6 +54,7 @@ export function postgresOpsToolDefinitions(transport: ToolTransport, config: { o
     reversible: false, idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 6,
     credential_ref: POSTGRES_OPS_CREDENTIAL_REF, output_trust: "internal", transport,
     parameterAuthorizer: authorizer(action),
+    step_up_required: true,
     ...extra
   });
 

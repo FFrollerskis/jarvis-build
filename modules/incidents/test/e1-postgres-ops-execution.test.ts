@@ -18,7 +18,7 @@ import { executeCloudMutation } from "../src/cloud-execution.ts";
  * (recovery_available=false, aldri en fabrikkert gjenoppretting) og at et avslag/feil journalføres som FAILED med årsak.
  */
 const TENANT = "tenant-e1-pgx";
-const identity: IdentityContext = { person_id: "person-e1-pgx", tenant_id: TENANT, memory_space_id: "business", session_id: "sess-pgx", device_id: "dev-pgx", channel: "api", auth_strength: "active" };
+const identity: IdentityContext = { person_id: "person-e1-pgx", tenant_id: TENANT, memory_space_id: "business", session_id: "sess-pgx", device_id: "dev-pgx", channel: "api", auth_strength: "signed" };
 const TS = (c: string): string => `to_char(${c} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 
 let stop: (() => Promise<void>) | undefined;

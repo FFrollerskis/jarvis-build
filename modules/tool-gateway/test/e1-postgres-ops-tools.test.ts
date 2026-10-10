@@ -21,7 +21,7 @@ import {
  */
 const TENANT = "tenant-e1-pgops";
 const OPS_PW = "opsPw-secret-7788";
-const owner: IdentityContext = { person_id: "person-e1-pgops", tenant_id: TENANT, memory_space_id: "business", session_id: "sess-e1p", device_id: "dev-e1p", channel: "api", auth_strength: "active" };
+const owner: IdentityContext = { person_id: "person-e1-pgops", tenant_id: TENANT, memory_space_id: "business", session_id: "sess-e1p", device_id: "dev-e1p", channel: "api", auth_strength: "signed" };
 const delegate: IdentityContext = { ...owner, person_id: "person-e1-pgops-d", session_id: "sess-e1p-d" };
 const TS = (c: string): string => `to_char(${c} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 

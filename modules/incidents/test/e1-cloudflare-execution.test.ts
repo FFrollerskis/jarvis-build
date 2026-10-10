@@ -26,8 +26,8 @@ let appPool: pg.Pool;
 let cf: FakeCloudflare;
 const TENANT_A = "tenant-e1-exec-a";
 const TENANT_B = "tenant-e1-exec-b";
-const idA: IdentityContext = { person_id: "person-e1a", tenant_id: TENANT_A, memory_space_id: "business", session_id: "sess-a", device_id: "dev-a", channel: "api", auth_strength: "active" };
-const idB: IdentityContext = { person_id: "person-e1b", tenant_id: TENANT_B, memory_space_id: "business", session_id: "sess-b", device_id: "dev-b", channel: "api", auth_strength: "active" };
+const idA: IdentityContext = { person_id: "person-e1a", tenant_id: TENANT_A, memory_space_id: "business", session_id: "sess-a", device_id: "dev-a", channel: "api", auth_strength: "signed" };
+const idB: IdentityContext = { person_id: "person-e1b", tenant_id: TENANT_B, memory_space_id: "business", session_id: "sess-b", device_id: "dev-b", channel: "api", auth_strength: "signed" };
 
 beforeAll(async () => {
   const databaseDir = await mkdtemp(join(tmpdir(), "jarvis-pg-e1-exec-"));
