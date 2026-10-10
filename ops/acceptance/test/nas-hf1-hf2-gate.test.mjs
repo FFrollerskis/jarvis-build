@@ -25,7 +25,7 @@ function fakeEnv(overrides = {}) {
   const dir = mkdtempSync(join(tmpdir(), "fake-hf-"));
   const cfg = {
     migrations: MIGS.join("\n"), select1: "1", norls: EXEMPT,
-    apiEnv: "JARVIS_COUNCIL_PROPOSALS=off\nJARVIS_KNOWLEDGE_CLAIM_MIN_SOURCES=2\nJARVIS_OWNER_EXTRA_TENANTS=tenant-hemmelig-navn\nJARVIS_GITHUB_APP_ID=12345678\nPATH=/usr/bin",
+    webEnv: "JARVIS_COUNCIL_PROPOSALS=off\nJARVIS_KNOWLEDGE_CLAIM_MIN_SOURCES=2\nJARVIS_OWNER_EXTRA_TENANTS=tenant-hemmelig-navn\nJARVIS_GITHUB_APP_ID=12345678\nPATH=/usr/bin",
     workerEnv: "JARVIS_KNOWLEDGE_SOURCES=[{\"id\":\"hemmelig\"}]\nJARVIS_JOB_RUNNER=\nPATH=/usr/bin",
     logs: '{"msg":"knowledge_source_synced","source_id":"notater"}\n{"msg":"heartbeat"}',
     bstat: "ok ok ok age_h=3", sockOk: "0",
@@ -42,7 +42,7 @@ args="$*"
 case "$args" in
   *" ps -q"*) echo cid123; exit 0;;
   *" logs "*) val logs; echo; exit 0;;
-  *"exec -T api env"*) val apiEnv; echo; exit 0;;
+  *"exec -T api env"*) val webEnv; echo; exit 0;;
   *"exec -T worker env"*) val workerEnv; echo; exit 0;;
   *"exec -T api node -e"*) val bstat; echo; exit 0;;
   *"exec -T worker sh -c"*) [ "$(val sockOk)" = "1" ] && exit 0 || exit 1;;
@@ -160,11 +160,11 @@ describe("nas-hf1-hf2-gate.sh", () => {
   });
 
   it("nesten-riktige flaggverdier (ON, 1, yes) gir H05 WARN - flagget er da STILLE AV", () => {
-    const res = run({ overrides: { apiEnv: "JARVIS_KNOWLEDGE_CLAIM_WRITES=ON\nJARVIS_COUNCIL_PROPOSALS=yes\nJARVIS_INCIDENT_PRODUCERS_ENABLED=1\nPATH=/usr/bin" } });
+    const res = run({ overrides: { webEnv: "JARVIS_KNOWLEDGE_CLAIM_WRITES=ON\nJARVIS_COUNCIL_PROPOSALS=yes\nJARVIS_INCIDENT_PRODUCERS_ENABLED=1\nPATH=/usr/bin" } });
     const row = rowOf(res.text, "H05_exact_on_flags");
     expect(row).toContain("WARN");
     for (const name of ["JARVIS_KNOWLEDGE_CLAIM_WRITES", "JARVIS_COUNCIL_PROPOSALS", "JARVIS_INCIDENT_PRODUCERS_ENABLED"]) expect(row).toContain(name);
-    const exact = run({ overrides: { apiEnv: "JARVIS_KNOWLEDGE_CLAIM_WRITES=on\nJARVIS_COUNCIL_PROPOSALS=off\nJARVIS_INCIDENT_PRODUCERS_ENABLED=true\nPATH=/usr/bin" } });
+    const exact = run({ overrides: { webEnv: "JARVIS_KNOWLEDGE_CLAIM_WRITES=on\nJARVIS_COUNCIL_PROPOSALS=off\nJARVIS_INCIDENT_PRODUCERS_ENABLED=true\nPATH=/usr/bin" } });
     expect(rowOf(exact.text, "H05_exact_on_flags")).toContain("PASS");
   });
 
