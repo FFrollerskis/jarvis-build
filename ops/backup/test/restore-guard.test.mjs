@@ -168,7 +168,7 @@ describe("WP-C2 review runde 2 L1: system_identifier (alias-sikkert «samme klyn
   it("manifestet kan bære kildens system_identifier; ugyldig form avvises uten å sitere verdien", () => {
     expect(manifestProblems(withId())).toEqual([]);
     expect(manifestProblems(withId("-7234567890123456789"))).toEqual([]); // bigint kan være negativt
-    for (const bad of ["", "abc", "1; DROP DATABASE postgres", "12 34", "1".repeat(21), 7234567890123456789, null, {}, ["1"], "EVIL-SENTINEL"]) {
+    for (const bad of ["", "abc", "1; DROP DATABASE postgres", "12 34", "1".repeat(21), 72345, null, {}, ["1"], "EVIL-SENTINEL"]) {
       const m = makeSet(tempDir(), WHEN).manifest;
       m.source.system_identifier = bad;
       expect(manifestProblems(m), String(bad)).toEqual(["source.system_identifier er ugyldig"]);
