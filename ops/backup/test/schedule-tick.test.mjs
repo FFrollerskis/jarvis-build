@@ -6,7 +6,7 @@ import { ConfigError } from "../lib/env.mjs";
 import { OffsiteError, prepareSetForOffsite } from "../lib/offsite.mjs";
 import { loadScheduleConfig } from "../lib/config.mjs";
 import {
-  EXIT, ScheduleError, backupDecision, buildDefaultDeps, dropFutureTimestamps, findFutureSets, findHollowSets, findOrphanSets, findStaleTempDirs, listCompleteSets, offsiteDecision, retryDelayMs,
+  EXIT, FETCH_FALLBACK_MAX_BYTES, ScheduleError, backupDecision, buildDefaultDeps, dropFutureTimestamps, findFutureSets, findHollowSets, findOrphanSets, findStaleTempDirs, listCompleteSets, offsiteDecision, retryDelayMs,
   runTick, setFileProblems, setNameMs, setsToPrune, verifyDecision
 } from "../lib/schedule.mjs";
 import { emptyStatus, readStatusFile } from "../lib/state.mjs";
@@ -19,7 +19,7 @@ const D = 24 * H;
 const PASSWORD = "test-admin-pw-12345";
 
 function fakeSink({ remote = [] } = {}) {
-  const state = { remote: new Set(remote), pushes: [], fetches: [], failWith: null, listFails: false };
+  const state = { remote: new Set(remote), pushes: [], fetches: [], fetchOptions: [], failWith: null, listFails: false };
   return {
     state, adapter: "local", label: "local:fake",
     list: async () => { if (state.listFails) throw new OffsiteError("offsite_failed", "list feilet"); return [...state.remote].sort(); },
@@ -30,8 +30,9 @@ function fakeSink({ remote = [] } = {}) {
       return { verification: "sha256", files: prepared.files.length, bytes: prepared.bytes };
     },
     verify: async (prepared) => ({ verification: "sha256", files: prepared.files.length, bytes: prepared.bytes }),
-    fetch: async (name, dest) => {
+    fetch: async (name, dest, options) => {
       state.fetches.push(name);
+      state.fetchOptions.push(options);
       mkdirSync(dest, { recursive: true });
       writeFileSync(join(dest, "jarvis.dump.age"), "x");
       return ["jarvis.dump.age"];
@@ -626,6 +627,23 @@ describe("WP-C2 tick: restore-verifisering (scratch, uten å røre produksjon)",
     expect(h.verifyCalls[0].existedAtCall).toBe(true);
     expect(readdirSync(h.out).filter((n) => n.startsWith(".verify-tmp-"))).toEqual([]);
     expect(h.status().restore_verify).toMatchObject({ state: "ok", source: "offsite", last_set: "jarvis-backup-20261008T020000Z", fetch_duration_s: 0 });
+  });
+
+  it("review runde 2 L2: henting fra off-site får et tak = 80 % av ledig plass der arbeidsmappen ligger; kan ledig plass ikke leses (feil/ugyldig), gjelder et absolutt tak", async () => {
+    const run = async (freeBytes) => {
+      const sink = fakeSink({ remote: ["jarvis-backup-20261008T020000Z"] });
+      const h = harness({ identity: true, sink, env: { JARVIS_BACKUP_OFFSITE_LOCAL_DIR: "/mnt/usb/jarvis" }, flags: { roles: "verify", "verify-source": "offsite" } });
+      await h.tick({ freeBytes });
+      return sink.state.fetchOptions;
+    };
+    expect(await run(async () => 10_000)).toEqual([{ maxBytes: 8000 }]);
+    expect(await run(async () => 0)).toEqual([{ maxBytes: 0 }]); // full disk: ingenting kan hentes (fail-closed)
+    for (const unreadable of [async () => { throw new Error("statfs: ikke støttet"); }, async () => Number.NaN, async () => -5, async () => "mye"]) {
+      expect(await run(unreadable)).toEqual([{ maxBytes: FETCH_FALLBACK_MAX_BYTES }]);
+    }
+    // standard-implementasjonen leser ekte ledig plass (statfs) på filsystemet der stien ligger
+    const real = await harness().deps().freeBytes(tempDir());
+    expect(Number.isFinite(real) && real > 0).toBe(true);
   });
 
   it("en ekstern verifiserers kvittering (PC med privat nøkkel) flettes inn på NAS-en og vises som `external_verifier`", async () => {

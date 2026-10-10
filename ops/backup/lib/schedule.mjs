@@ -1,4 +1,5 @@
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, rmdirSync } from "node:fs";
+import { statfs } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DUE_TOLERANCE_MS, assertRunnable } from "./config.mjs";
@@ -38,6 +39,12 @@ const VERIFY_MIN_RETRY_MS = 6 * 3_600_000;
 /** Tikk-budsjett når konfigen ikke oppgir et (tester som bygger config for hånd): lengre enn noe legitimt tikk, men endelig. */
 const DEFAULT_TICK_BUDGET_MS = 10 * 3_600_000;
 const WATCHDOG = Symbol("tick-watchdog");
+/**
+ * Henting fra off-site (review runde 2, L2): fjernmålet er UBETRODDT, så en gigantisk fil kunne fylle backup-disken i `.verify-tmp-*`. Taket for HELE settet er en andel av ledig plass der
+ * arbeidsmappen ligger (restoren trenger resten); kan ledig plass ikke leses, gjelder et absolutt tak.
+ */
+export const FETCH_FREE_FRACTION = 0.8;
+export const FETCH_FALLBACK_MAX_BYTES = 64 * 1024 ** 3;
 
 export class ScheduleError extends Error {
   constructor(code, message) {
@@ -391,6 +398,8 @@ export function buildDefaultDeps(config, env = process.env, overrides = {}) {
     remove: overrides.remove ?? ((dir) => rmSync(dir, { recursive: true, force: true })),
     // Foreldreløse settkataloger fjernes med `rmdir` (ikke rekursivt): er noe dukket opp i katalogen siden skanningen, feiler fjerningen i stedet for å slette det (review runde 2, M3/L3).
     removeEmptyDir: overrides.removeEmptyDir ?? ((dir) => rmdirSync(dir)),
+    // Ledig plass (byte) på filsystemet der `path` ligger; byttes ut i tester.
+    freeBytes: overrides.freeBytes ?? (async (path) => { const st = await statfs(path); return Number(st.bavail) * Number(st.bsize); }),
     recipient: env.JARVIS_BACKUP_AGE_RECIPIENT
   };
 }
@@ -910,7 +919,9 @@ export async function runTick(config, deps, env = process.env) {
           tmpRoot = mkdtempSync(join(config.out, ".verify-tmp-"));
           setDir = join(tmpRoot, name);
           const f0 = now().getTime();
-          await deps.sink.fetch(name, setDir);
+          const free = await Promise.resolve().then(() => deps.freeBytes(tmpRoot)).catch(() => null);
+          const maxBytes = typeof free === "number" && Number.isFinite(free) && free >= 0 ? Math.floor(free * FETCH_FREE_FRACTION) : FETCH_FALLBACK_MAX_BYTES;
+          await deps.sink.fetch(name, setDir, { maxBytes });
           await deps.materializeManifest(setDir, config.verify.identityFile, { env });
           fetchSeconds = Math.round((now().getTime() - f0) / 1000);
           setName = name;

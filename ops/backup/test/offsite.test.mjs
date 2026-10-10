@@ -748,3 +748,109 @@ describe("WP-C2 off-site: standard-kjøreren gir underprosessene et MINIMALT mil
     }
   });
 });
+
+describe("WP-C2 off-site (review runde 2, L2): henting fra et UBETRODDT fjernmål har tak og age-header", () => {
+  const setup = async () => {
+    const out = tempDir();
+    const target = tempDir("wpc2-usb-");
+    writeFileSync(join(target, LOCAL_MARKER), "");
+    const set = makeSet(out, WHEN);
+    const sink = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs: 30_000 }, { sourceDir: out });
+    const prepared = await prep(set.dir);
+    await sink.push(prepared);
+    return { out, target, set, sink, prepared, dest: join(tempDir(), "hentet") };
+  };
+
+  it("kontroll: en sunn henting lykkes uten tak, med et romslig tak og med et tak NØYAKTIG lik settet (filene er identiske med de som ble sendt)", async () => {
+    const { sink, prepared, set } = await setup();
+    for (const options of [undefined, { maxBytes: prepared.bytes * 10 }, { maxBytes: prepared.bytes }]) {
+      const dest = join(tempDir(), "hentet");
+      const names = await sink.fetch(set.name, dest, options);
+      expect(names.sort()).toEqual(prepared.files.map((f) => f.name).sort());
+      for (const f of prepared.files) expect(createHash("sha256").update(readFileSync(join(dest, f.name))).digest("hex")).toBe(f.sha256);
+    }
+  });
+
+  it("settet over taket nektes FØR noe kopieres (arbeidsmappen opprettes ikke engang) - en gigantisk fil kan ikke fylle backup-disken", async () => {
+    const { sink, prepared, set, dest } = await setup();
+    await expect(sink.fetch(set.name, dest, { maxBytes: prepared.bytes - 1 })).rejects.toMatchObject({ code: "offsite_ineligible", message: expect.stringContaining("større enn grensen") });
+    expect(existsSync(dest)).toBe(false);
+    await expect(sink.fetch(set.name, dest, { maxBytes: 0 })).rejects.toMatchObject({ code: "offsite_ineligible" });
+  });
+
+  it("en gigantisk fil lagt inn i fjernmålet (sparse, 40 GB) stopper henting med tak - uten å lese eller skrive en byte", async () => {
+    const { sink, target, set, dest } = await setup();
+    const huge = join(target, set.name, "plantet-stor.dump.age");
+    const fd = openSync(huge, "w");
+    closeSync(fd);
+    execFileSync("truncate", ["-s", "40G", huge]); // sparse: tar ingen plass i testmiljøet
+    await expect(sink.fetch(set.name, dest, { maxBytes: 1024 ** 3 })).rejects.toMatchObject({ code: "offsite_ineligible" });
+    expect(existsSync(dest)).toBe(false);
+  });
+
+  it("en .age-fil som ikke starter med age-headeren (omdøpt klartekst) kopieres ALDRI - ingenting skrives til arbeidsmappen for den filen", async () => {
+    const { sink, target, set, dest } = await setup();
+    writeFileSync(join(target, set.name, "jarvis.dump.age"), "SELECT * FROM hemmeligheter; -- klartekst, ikke age");
+    await expect(sink.fetch(set.name, dest)).rejects.toMatchObject({ code: "offsite_ineligible", message: expect.stringContaining("ikke age-chiffertekst") });
+    expect(existsSync(join(dest, "jarvis.dump.age"))).toBe(false);
+    for (const n of existsSync(dest) ? readdirSync(dest) : []) expect(readFileSync(join(dest, n), "utf8")).not.toContain("hemmeligheter");
+    // en TOM .age-fil er heller ikke age
+    writeFileSync(join(target, set.name, "jarvis.dump.age"), "");
+    await expect(sink.fetch(set.name, join(tempDir(), "hentet2"))).rejects.toMatchObject({ code: "offsite_ineligible" });
+  });
+
+  it("en fil som endret størrelse mellom oppslaget og kopien (vokste) avvises, og den delvise kopien fjernes", async () => {
+    const { target, set, prepared, out } = await setup();
+    const { lstat } = await import("node:fs/promises");
+    const stale = async (path) => { const st = await lstat(path); return { isFile: () => st.isFile(), isDirectory: () => st.isDirectory(), isSymbolicLink: () => st.isSymbolicLink(), size: Math.max(1, st.size - 7), mtimeMs: st.mtimeMs }; };
+    const sink = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs: 30_000 }, { sourceDir: out, fs: { lstat: stale } });
+    const dest = join(tempDir(), "hentet");
+    await expect(sink.fetch(set.name, dest)).rejects.toMatchObject({ code: "offsite_verify_failed", message: expect.stringContaining("størrelsen avviker fra forhåndssjekken") });
+    expect(prepared.bytes).toBeGreaterThan(0);
+    expect(existsSync(dest) ? readdirSync(dest) : []).toEqual([]);
+  });
+
+  it("hver kopi under hentingen får size (fra oppslaget), ageHeader:true og kallerens maxBytes - uten tak sendes bare de to første", async () => {
+    const { out, target, set, prepared } = await setup();
+    const sinkWith = (seen) => createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs: 30_000 }, {
+      sourceDir: out, fs: { copyFile: async (src, dest, expected) => { seen.push({ file: src.split("/").at(-1), expected }); return copyRegularNoFollow(src, dest, expected); } }
+    });
+    const capped = [];
+    await sinkWith(capped).fetch(set.name, join(tempDir(), "h1"), { maxBytes: 1_000_000 });
+    expect(capped).toHaveLength(prepared.files.length);
+    for (const { file, expected } of capped) expect(expected, file).toEqual({ size: prepared.files.find((f) => f.name === file).size, ageHeader: true, maxBytes: 1_000_000 });
+    const uncapped = [];
+    await sinkWith(uncapped).fetch(set.name, join(tempDir(), "h2"));
+    for (const { file, expected } of uncapped) expect(expected, file).toEqual({ size: prepared.files.find((f) => f.name === file).size, ageHeader: true });
+  });
+
+  it("copyRegularNoFollow: `maxBytes` under filens størrelse avvises før dest opprettes; lik størrelse slipper gjennom", async () => {
+    const src = join(tempDir(), "x.age");
+    writeFileSync(src, Buffer.concat([AGE_MAGIC, Buffer.alloc(100, 1)]));
+    const size = statSync(src).size;
+    const dest = join(tempDir(), "y.age");
+    await expect(copyRegularNoFollow(src, dest, { ageHeader: true, maxBytes: size - 1 })).rejects.toMatchObject({ code: "offsite_ineligible" });
+    expect(existsSync(dest)).toBe(false);
+    await copyRegularNoFollow(src, dest, { ageHeader: true, maxBytes: size, size });
+    expect(statSync(dest).size).toBe(size);
+  });
+
+  it("rclone og rsync får `--max-size` bare når kallerens tak er oppgitt (per fil; ingen endring ellers)", async () => {
+    const rcloneRun = recorder([{}]);
+    const rcloneDest = join(tempDir(), "r");
+    await createOffsiteSink({ adapter: "rclone", remote: "mitt-b2:jarvis/backups", timeoutMs: 600_000 }, { run: rcloneRun.run }).fetch("jarvis-backup-20261009T020000Z", rcloneDest, { maxBytes: 5_000_000 });
+    const rcloneArgs = rcloneRun.calls[0].args;
+    expect(rcloneArgs[rcloneArgs.indexOf("--max-size") + 1]).toBe("4883K"); // ceil(5 000 000 / 1024) KiB: rundes OPP, aldri strengere enn kallerens tak med uforutsett enhet
+    const rcloneNoCap = recorder([{}]);
+    await createOffsiteSink({ adapter: "rclone", remote: "mitt-b2:jarvis/backups", timeoutMs: 600_000 }, { run: rcloneNoCap.run }).fetch("jarvis-backup-20261009T020000Z", join(tempDir(), "r2"));
+    expect(rcloneNoCap.calls[0].args).not.toContain("--max-size");
+
+    const rsyncConfig = { adapter: "rsync_ssh", target: { user: "backup", host: "annen-vert.lan", path: "/srv/jarvis", spec: "backup@annen-vert.lan:/srv/jarvis" }, keyFile: null, knownHosts: null, timeoutMs: 300_000 };
+    const rsyncRun = recorder([{}]);
+    await createOffsiteSink(rsyncConfig, { run: rsyncRun.run }).fetch("jarvis-backup-20261009T020000Z", join(tempDir(), "s"), { maxBytes: 5_000_000 });
+    expect(rsyncRun.calls[0].args).toContain("--max-size=5000000");
+    const rsyncNoCap = recorder([{}]);
+    await createOffsiteSink(rsyncConfig, { run: rsyncNoCap.run }).fetch("jarvis-backup-20261009T020000Z", join(tempDir(), "s2"));
+    expect(rsyncNoCap.calls[0].args.some((a) => a.startsWith("--max-size"))).toBe(false);
+  });
+});
