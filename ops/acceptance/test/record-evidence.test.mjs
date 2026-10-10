@@ -470,6 +470,18 @@ describe("--scan (delt mønsterliste for NAS-porten)", () => {
     expect(r.stdout).not.toContain("Correct-Horse");
   });
 
+  it("leser langt forbi evidensfilens tak på 200 kB (en hemmelighet på slutten av 1 MB loggtekst finnes), og melder «avkortet» først over 16 MB", () => {
+    const filler = '{"level":30,"msg":"heartbeat","tenant_id":"tenant-1"}\n'.repeat(20_000); // ~1 MB
+    const secret = fake.ghp();
+    const found = run(["--scan"], { input: `${filler}${secret}\n` });
+    expect(found.status).toBe(1);
+    expect(found.stdout).toMatch(/^github_token=1$/m);
+    expect(found.stdout).not.toContain("avkortet");
+    const clean = run(["--scan"], { input: filler });
+    expect(clean.status).toBe(0);
+    expect(clean.stdout).toBe("");
+  });
+
   it("gir exit 0 og ingen utdata på ren tekst, og avviser id/kommando sammen med --scan", () => {
     const clean = run(["--scan"], { input: "alt er i orden, 12 tjenester oppe\n" });
     expect(clean.status).toBe(0);

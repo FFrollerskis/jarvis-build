@@ -22,6 +22,8 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..", "..");
 const MAX_OUTPUT_BYTES = 200_000;
+// --scan (NAS-porten skanner loggutdrag) leser langt mer enn en evidensfil kan bære; redigeringen er rask (8 MB på ~0,2 s), så taket er 16 MB.
+const SCAN_MAX_BYTES = 16_000_000;
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{1,60}$/;
 const R = "«REDIGERT»";
 
@@ -215,14 +217,14 @@ function parseArgs(argv) {
   return { opts, cmd };
 }
 
-function capture(stream, sink) {
+function capture(stream, sink, max = MAX_OUTPUT_BYTES) {
   stream.on("data", (chunk) => {
-    if (sink.bytes < MAX_OUTPUT_BYTES) {
-      const room = MAX_OUTPUT_BYTES - sink.bytes;
+    if (sink.bytes < max) {
+      const room = max - sink.bytes;
       sink.chunks.push(chunk.length > room ? chunk.subarray(0, room) : chunk);
     } else sink.truncated = true;
     sink.bytes += chunk.length;
-    if (sink.bytes > MAX_OUTPUT_BYTES) sink.truncated = true;
+    if (sink.bytes > max) sink.truncated = true;
   });
 }
 
@@ -284,9 +286,9 @@ function runCommand(cmd, timeoutS) {
   });
 }
 
-async function readStdin() {
+async function readStdin(max = MAX_OUTPUT_BYTES) {
   const sink = { chunks: [], bytes: 0, truncated: false };
-  capture(process.stdin, sink);
+  capture(process.stdin, sink, max);
   await new Promise((r) => process.stdin.on("end", r));
   return { code: null, fromStdin: true, signal: null, output: Buffer.concat(sink.chunks), truncated: sink.truncated, timedOut: false };
 }
@@ -335,7 +337,7 @@ export function renderEvidence({ id, note, cmd, result, counts: outputCounts, in
 
 /** --scan: les stdin, skriv KUN «regel=antall» (aldri tekst). Brukes av NAS-porten (H12) slik at den deler mønsterlisten med opptakeren. Exit 1 ved treff. */
 async function scanMain() {
-  const input = await readStdin();
+  const input = await readStdin(SCAN_MAX_BYTES);
   const { counts } = redact(sanitize(input.output.toString("utf8")));
   const names = Object.keys(counts).sort();
   for (const name of names) console.log(`${name}=${counts[name]}`);
