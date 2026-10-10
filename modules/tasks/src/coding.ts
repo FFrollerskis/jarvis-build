@@ -285,21 +285,30 @@ export function createCodingHandler(deps: {
     // autentisere git-transport skal ALDRI komme så langt som å klone noe.
     let gitAuth: Awaited<ReturnType<typeof createGitAuthHandle>> | undefined;
     /**
+     * WP-C1 review B-M2: per-credential-tilbakekalling (`owner_controls.revoke_credential` på git-refen, WP-C3 F3) som EN delt sjekk. I host-modus utsteder worker ikke noe token (runnerens egen
+     * credential brukes), så `issueGitToken` kjøres aldri der - uten denne sjekken hadde eierens tilbakekalling ingen virkning på kodejobber i host-modus (både PAT-fil og `source: request`).
+     * Kalles derfor FØR klone og FØR publish i host-modus, og FØR hver utstedelse ellers. Fail-closed: feiler selve sjekken regnes credentialen som «ikke bevist ikke-tilbakekalt».
+     * Uten `gitAuth.isRevoked` finnes det ingenting å sjekke mot (lokale repoer, tester).
+     */
+    const assertNotRevoked = async (): Promise<void> => {
+      const auth = deps.gitAuth;
+      if (!auth?.isRevoked) return;
+      let revoked: boolean;
+      try {
+        revoked = await auth.isRevoked(auth.ref ?? "JARVIS_GITHUB_TOKEN");
+      } catch {
+        throw new Error("git_auth_revocation_check_failed"); // fail-closed: kan ikke bevise at credentialen ikke er tilbakekalt
+      }
+      if (revoked) throw new Error("git_auth_revoked");
+    };
+    /**
      * WP-C3 (review F2/F3/F13): ÉN utstedelse av git-credential. Kalles FØR sandboxen opprettes (tilgjengelighet bevises før noe klones) OG rett før hver git-nettverksoperasjon, så et kortlevd,
      * repo-scopet token aldri er eldre enn selve operasjonen. Hver utstedelse sjekker først per-credential-tilbakekalling (ingen utstedelse for en tilbakekalt credential).
      */
     const issueGitToken = async (): Promise<string> => {
       const auth = deps.gitAuth as NonNullable<typeof deps.gitAuth>;
       const ref = auth.ref ?? "JARVIS_GITHUB_TOKEN";
-      if (auth.isRevoked) {
-        let revoked: boolean;
-        try {
-          revoked = await auth.isRevoked(ref);
-        } catch {
-          throw new Error("git_auth_revocation_check_failed"); // fail-closed: kan ikke bevise at credentialen ikke er tilbakekalt
-        }
-        if (revoked) throw new Error("git_auth_revoked");
-      }
+      await assertNotRevoked();
       let token: string | null = null;
       let code = "";
       try {
@@ -355,6 +364,7 @@ export function createCodingHandler(deps: {
       if (hostGit) {
         // Klone på VERTEN, med runnerens credential, til en katalog runneren selv oppretter (monteres som /work). Ingenting av dette berører worker.
         if (!sandbox.gitCheckout || !sandbox.gitPublish) throw new Error("host_git_not_supported_by_sandbox");
+        await assertNotRevoked(); // B-M2: eierens tilbakekalling stopper også en host-jobb - FØR runneren får beskjed om å klone (og før noe token hentes for `source: request`)
         await sandbox.gitCheckout({ repoUrl: cloneUrl, ...(deps.github?.base ? { baseBranch: deps.github.base } : {}) });
       } else {
         must("clone", await sandbox.exec("git", netArgs(["clone", "--", cloneUrl, "."]), undefined, await networkEnv()));
@@ -393,6 +403,7 @@ export function createCodingHandler(deps: {
       if (hostGit) {
         // Publish via verifisert git-bundle: runneren lager bundlen i containeren (uten credential), verifiserer den i et ferskt bare-repo
         // på verten og pusher KUN den verifiserte committen til denne jobb-branchen. SHA-en runneren faktisk pushet er autoritativ.
+        await assertNotRevoked(); // B-M2: en credential som er tilbakekalt MIDT i jobben stopper publiseringen (samme sjekk som før klonen)
         const published = await (sandbox.gitPublish as NonNullable<typeof sandbox.gitPublish>)({ branch });
         if (published.commitSha !== commitSha) throw new Error("published_commit_mismatch");
         commitSha = published.commitSha;

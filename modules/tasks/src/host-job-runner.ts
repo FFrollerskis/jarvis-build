@@ -54,6 +54,29 @@ export interface HostGitCredentialSource {
   tokenFor(repoSlug: string): Promise<string>;
 }
 
+/**
+ * WP-C1 review B-M2: pakker en kilde til kortlevde git-tokens (`source: request`) med eierens per-credential-tilbakekalling (`owner_controls.revoke_credential`, WP-C3 F3).
+ * `isRevoked` kalles FØR kilden: er credentialen tilbakekalt, eller sjekken selv feiler, utstedes ikke noe token (fail-closed, `git_credential_unavailable:GIT_AUTH_REVOKED` /
+ * `...:GIT_AUTH_REVOCATION_CHECK_FAILED` - kun stabile koder, aldri en melding fra kilden). Kodejobben har allerede en sjekk før klone og publish (`coding.ts`); denne vakten
+ * gjør at kilden aldri kan nås uten sjekken uansett hvem som kaller runneren. Brukes ved kobling i worker-main (kapittel 15 i runbooken):
+ * `resolveJobSandboxRunner(env, { gitCredentialSource: guardGitCredentialSource(githubAuth.gitCredentialSource(...), () => ownerControls.isRevokedDurable("JARVIS_GITHUB_TOKEN")) })`.
+ */
+export function guardGitCredentialSource(source: HostGitCredentialSource, isRevoked: () => Promise<boolean>): HostGitCredentialSource {
+  const coded = (code: string): Error => Object.assign(new Error(code.toLowerCase()), { code });
+  return {
+    async tokenFor(repoSlug: string): Promise<string> {
+      let revoked: boolean;
+      try {
+        revoked = await isRevoked();
+      } catch {
+        throw coded("GIT_AUTH_REVOCATION_CHECK_FAILED");
+      }
+      if (revoked) throw coded("GIT_AUTH_REVOKED");
+      return source.tokenFor(repoSlug);
+    }
+  };
+}
+
 export class HostJobRunnerConfigError extends Error {
   constructor(readonly reason: string) {
     super(`host_job_runner_config_invalid:${reason}`);

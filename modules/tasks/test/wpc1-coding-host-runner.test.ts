@@ -4,8 +4,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { IdentityContext, JobContract } from "@jarvis/contracts";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import {
-  HostJobSandboxRunner, JobCancelledError, ScriptedCodingAgent, createCodingHandler,
-  type ArtifactStore, type ClaimedTask, type JobContext, type PrPublishingGateway, type Sandbox, type SandboxRunner
+  HostJobSandboxRunner, JobCancelledError, ScriptedCodingAgent, createCodingHandler, guardGitCredentialSource,
+  type ArtifactStore, type ClaimedTask, type CodingAgentAdapter, type HostGitCredentialSource, type JobContext, type PrPublishingGateway, type Sandbox, type SandboxRunner
 } from "@jarvis/tasks";
 // @ts-expect-error - .mjs uten typer (ops/job-runner)
 import { createHarness, gitSync } from "../../../ops/job-runner/test/support/harness.mjs";
@@ -46,13 +46,31 @@ interface Wiring {
   artifacts: Array<{ kind: string; name: string; content: string }>;
   gatewayCalls: Array<Record<string, unknown>>;
   handler: ReturnType<typeof createCodingHandler>;
+  /** Hver `isRevoked(ref)`-sjekk, i rekkefølge. */
+  revokedChecks: string[];
 }
 
-async function wire(options: { runner?: (real: HostJobSandboxRunner) => SandboxRunner; allowedRepos?: string[]; harnessOptions?: unknown } = {}): Promise<Wiring> {
+interface WireOptions {
+  runner?: (real: HostJobSandboxRunner) => SandboxRunner;
+  allowedRepos?: string[];
+  harnessOptions?: unknown;
+  /** WP-C3 F3 / B-M2: eierens per-credential-tilbakekalling (`owner_controls.revoke_credential`). */
+  isRevoked?: (ref: string) => Promise<boolean>;
+  gitAuthRef?: string;
+  /** Ingen `gitAuth` i det hele tatt (W4: repo-allowlisten gjelder også da i host-modus). */
+  withoutGitAuth?: boolean;
+  agent?: CodingAgentAdapter;
+  killSwitch?: KillSwitch;
+  /** `source: request` (WP-C3): kilde til kortlevde, repo-scopede tokens som klienten sender i klone-/publish-forespørselen. */
+  gitCredentialSource?: HostGitCredentialSource;
+}
+
+async function wire(options: WireOptions = {}): Promise<Wiring> {
   const h = (await createHarness(options.harnessOptions)) as Harness;
   harnesses.push(h);
-  const real = new HostJobSandboxRunner({ socketPath: h.socketPath, tokenFile: h.tokenFile });
+  const real = new HostJobSandboxRunner({ socketPath: h.socketPath, tokenFile: h.tokenFile, ...(options.gitCredentialSource ? { gitCredentialSource: options.gitCredentialSource } : {}) });
   const runner = options.runner ? options.runner(real) : real;
+  const revokedChecks: string[] = [];
   const secretCalls: string[] = [];
   const artifacts: Wiring["artifacts"] = [];
   const gatewayCalls: Array<Record<string, unknown>> = [];
@@ -64,17 +82,23 @@ async function wire(options: { runner?: (real: HostJobSandboxRunner) => SandboxR
   };
   const handler = createCodingHandler({
     sandbox: runner,
-    agent: new ScriptedCodingAgent(),
+    agent: options.agent ?? new ScriptedCodingAgent(),
     artifacts: { save: async (_t: string, _task: string, kind: string, name: string, content: string) => { artifacts.push({ kind, name, content }); }, list: async () => [] } as unknown as ArtifactStore,
-    policy: new PolicyGateway({ devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch: new KillSwitch(), mandates: new Set(["git:push_branch"]) }),
+    policy: new PolicyGateway({ devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch: options.killSwitch ?? new KillSwitch(), mandates: new Set(["git:push_branch"]) }),
     identityFor: () => identity,
     // Samme secret-provider for begge: i host-modus skal git-referansen ALDRI slås opp, kun Claude-nøkkelen (jobbens egen env).
     claudeCodeCredential: { secretProvider: { get: async (ref: string) => { secretCalls.push(ref); return ref === "ANTHROPIC_API_KEY" ? "sk-ant-api03-test-hemmelig" : workerSideValue; } } },
-    gitAuth: { secretProvider: { get: async (ref: string) => { secretCalls.push(ref); return workerSideValue; } } },
+    ...(options.withoutGitAuth ? {} : {
+      gitAuth: {
+        secretProvider: { get: async (ref: string) => { secretCalls.push(ref); return workerSideValue; } },
+        ...(options.gitAuthRef !== undefined ? { ref: options.gitAuthRef } : {}),
+        ...(options.isRevoked ? { isRevoked: async (ref: string) => { revokedChecks.push(ref); return (options.isRevoked as (r: string) => Promise<boolean>)(ref); } } : {})
+      }
+    }),
     allowedRepos: options.allowedRepos ?? ["owner/repo"],
     github: { gateway }
   });
-  return { h, runner, secretCalls, artifacts, gatewayCalls, handler };
+  return { h, runner, secretCalls, artifacts, gatewayCalls, handler, revokedChecks };
 }
 
 describe("A: ende-til-ende i host-modus", () => {
@@ -224,4 +248,111 @@ describe("C: uendret flyt uten hostGit", () => {
     await expect(handler(claimed(contract()), makeCtx())).rejects.toThrow("sandbox_not_needed_for_this_check");
     expect(secretCalls).toEqual(["JARVIS_GITHUB_TOKEN"]); // uten hostGit hentes tokenet som før
   });
+});
+
+const dockerCreates = (w: Wiring): number => (w.h.fake.calls as Array<{ args: string[] }>).filter((c) => c.args[0] === "create").length;
+const originRefs = (w: Wiring): string => spawnSync("git", ["for-each-ref", "--format=%(refname)"], { cwd: w.h.origins["owner/repo"].dir, encoding: "utf8" }).stdout;
+
+describe("D: eierens revoke_credential gjelder også i host-modus (WP-C1 review B-M2)", () => {
+  it("reviewerens repro: isRevoked() = true stopper jobben FØR runneren får beskjed om å klone - ingen jobb, ingen container, ingenting publisert", async () => {
+    const w = await wire({ isRevoked: async () => true });
+    await expect(w.handler(claimed(contract()), makeCtx())).rejects.toThrow("git_auth_revoked");
+    expect(w.revokedChecks).toEqual(["JARVIS_GITHUB_TOKEN"]); // før: 0 kall - jobben fullførte og publiserte tross tilbakekalling
+    expect(dockerCreates(w)).toBe(0);
+    expect(w.h.service.manager.activeJobs).toBe(0);
+    expect(originRefs(w)).not.toContain("jarvis/");
+    expect(w.gatewayCalls).toEqual([]);
+    expect(w.secretCalls).toEqual(["ANTHROPIC_API_KEY"]); // host-modus: git-referansen slås fortsatt aldri opp
+  }, 60_000);
+
+  it("sjekken kjøres FØR klone og FØR publish (to ganger) med riktig ref; en ikke-tilbakekalt credential gir normal flyt", async () => {
+    const w = await wire({ isRevoked: async () => false, gitAuthRef: "MIN_GITHUB_REF" });
+    const c = contract();
+    const result = await w.handler(claimed(c), makeCtx());
+    expect(result).toMatchObject({ branch: `jarvis/${c.task_id}`, tests: "passed" });
+    expect(w.revokedChecks).toEqual(["MIN_GITHUB_REF", "MIN_GITHUB_REF"]);
+  }, 60_000);
+
+  it("tilbakekalt MIDT i jobben (etter klone, før publish): ingenting publiseres, containeren og katalogen ryddes", async () => {
+    let calls = 0;
+    const w = await wire({ isRevoked: async () => { calls += 1; return calls >= 2; } });
+    const c = contract();
+    await expect(w.handler(claimed(c), makeCtx())).rejects.toThrow("git_auth_revoked");
+    expect(calls).toBe(2);
+    expect(dockerCreates(w)).toBe(1); // klonen ble gjort (første sjekk besto) ...
+    expect(originRefs(w)).not.toContain("jarvis/"); // ... men publish ble stoppet av den andre
+    expect(w.h.fake.containers.size).toBe(0);
+    expect(w.h.service.manager.activeJobs).toBe(0);
+    expect(w.gatewayCalls).toEqual([]);
+  }, 60_000);
+
+  it("fail-closed: en sjekk som selv feiler (ved start eller før publish) gir git_auth_revocation_check_failed og stopper jobben", async () => {
+    const atStart = await wire({ isRevoked: async () => { throw new Error("db nede"); } });
+    await expect(atStart.handler(claimed(contract()), makeCtx())).rejects.toThrow("git_auth_revocation_check_failed");
+    expect(dockerCreates(atStart)).toBe(0);
+    let calls = 0;
+    const atPublish = await wire({ isRevoked: async () => { calls += 1; if (calls >= 2) throw new Error("db nede"); return false; } });
+    await expect(atPublish.handler(claimed(contract()), makeCtx())).rejects.toThrow("git_auth_revocation_check_failed");
+    expect(originRefs(atPublish)).not.toContain("jarvis/");
+    expect(atPublish.h.fake.containers.size).toBe(0);
+  }, 60_000);
+
+  it("source: request - tilbakekalt: kilden (tokenFor) kalles ALDRI og runneren får aldri en jobb; vakten rundt kilden gjør det samme uavhengig av hvem som kaller", async () => {
+    const tokenCalls: string[] = [];
+    const source = { tokenFor: async (slug: string): Promise<string> => { tokenCalls.push(slug); return `ghs_${"A".repeat(40)}`; } };
+    const w = await wire({ harnessOptions: { requestTokenSlugs: ["owner/repo"] }, isRevoked: async () => true, gitCredentialSource: source });
+    await expect(w.handler(claimed(contract()), makeCtx())).rejects.toThrow("git_auth_revoked");
+    expect(tokenCalls).toEqual([]);
+    expect(dockerCreates(w)).toBe(0);
+
+    // vakten alene (uten coding.ts): revoked -> ingen utstedelse; sjekken feiler -> ingen utstedelse; ellers videre til kilden
+    const direct = async (isRevoked: () => Promise<boolean>) => guardGitCredentialSource(source, isRevoked).tokenFor("owner/repo");
+    await expect(direct(async () => true)).rejects.toMatchObject({ code: "GIT_AUTH_REVOKED" });
+    await expect(direct(async () => { throw new Error("db nede med hemmelig tekst"); })).rejects.toMatchObject({ code: "GIT_AUTH_REVOCATION_CHECK_FAILED" });
+    expect(tokenCalls).toEqual([]);
+    await expect(direct(async () => false)).resolves.toMatch(/^ghs_/);
+    expect(tokenCalls).toEqual(["owner/repo"]);
+  }, 60_000);
+
+  it("HostJobSandboxRunner med vakt: en tilbakekalt credential gir host_job_runner_error:git_credential_unavailable:GIT_AUTH_REVOKED (kun stabil kode) og ingen jobb hos runneren", async () => {
+    const h = (await createHarness({ requestTokenSlugs: ["owner/repo"] })) as Harness;
+    harnesses.push(h);
+    const guarded = guardGitCredentialSource({ tokenFor: async () => `ghs_${"B".repeat(40)}` }, async () => true);
+    const runner = new HostJobSandboxRunner({ socketPath: h.socketPath, tokenFile: h.tokenFile, gitCredentialSource: guarded });
+    const sandbox = await runner.create({});
+    await expect((sandbox.gitCheckout as NonNullable<Sandbox["gitCheckout"]>)({ repoUrl: "https://github.com/owner/repo" })).rejects.toThrow("host_job_runner_error:git_credential_unavailable:GIT_AUTH_REVOKED");
+    expect(h.service.manager.activeJobs).toBe(0);
+    expect((h.fake.calls as Array<{ args: string[] }>).some((c) => c.args[0] === "create")).toBe(false);
+  });
+});
+
+describe("E: policy og allowlist håndheves i host-modus (WP-C1 review W2, W4)", () => {
+  it("W2: kill switch aktivert MIDT i jobben (etter agenten): policy vurderes på nytt rett før publish - ingen branch publiseres", async () => {
+    const killSwitch = new KillSwitch();
+    class MidRunAgent extends ScriptedCodingAgent {
+      override async modify(run: Parameters<ScriptedCodingAgent["modify"]>[0], goal: string): Promise<string> {
+        const description = await super.modify(run, goal);
+        killSwitch.activate("review: kill switch midt i jobben");
+        return description;
+      }
+    }
+    const w = await wire({ agent: new MidRunAgent(), killSwitch });
+    const c = contract();
+    await expect(w.handler(claimed(c), makeCtx())).rejects.toThrow("policy_denied:kill_switch_active");
+    expect(gitSync(w.h.origins["owner/repo"].dir as string, ["branch", "--list", `jarvis/${c.task_id}`])).toBe("");
+    expect(w.h.fake.containers.size).toBe(0);
+    expect(w.gatewayCalls).toEqual([]);
+  }, 60_000);
+
+  it("W4: repo-allowlisten gjelder også i host-modus UTEN gitAuth - fremmed repo og tom liste avvises før noe opprettes; allowlistet repo går", async () => {
+    const w = await wire({ withoutGitAuth: true, allowedRepos: ["owner/annet"] });
+    await expect(w.handler(claimed(contract()), makeCtx())).rejects.toThrow("coding_input_rejected:git_repo_not_allowlisted");
+    expect(dockerCreates(w)).toBe(0);
+    const empty = await wire({ withoutGitAuth: true, allowedRepos: [] });
+    await expect(empty.handler(claimed(contract()), makeCtx())).rejects.toThrow("coding_input_rejected:git_repo_allowlist_empty");
+    expect(dockerCreates(empty)).toBe(0);
+    const ok = await wire({ withoutGitAuth: true });
+    const c = contract();
+    await expect(ok.handler(claimed(c), makeCtx())).resolves.toMatchObject({ branch: `jarvis/${c.task_id}` });
+  }, 60_000);
 });
