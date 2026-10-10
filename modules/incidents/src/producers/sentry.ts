@@ -9,7 +9,9 @@ import { subjectOf, type IncidentProducer, type ProducerClearing } from "./types
  * består kun av validerte felt (numerisk id, nivå fra et lukket sett, antall som heltall, tidsstempel som dato) og er `UNVERIFIED` - det er Sentrys påstand, ikke en Jarvis-måling.
  *
  * Tak mot oversvømmelse: maks `maxIssues` (standard 10) per kjøring, og `IncidentService` har i tillegg tak på aktive hendelser per produsent. Dormant uten token (`skipped`).
- * Løsning kun når `get_issue` for akkurat dette issuet melder `resolved`/`ignored`; en feilet oppslag løser aldri noe.
+ * Løsning kun når `get_issue` for akkurat dette issuet melder `resolved`; en feilet oppslag løser aldri noe. Gjennomgang av PR #324 (L3): `ignored` (og alt annet) lukker ALDRI - «ignorert» er en menneskelig handling i Sentry («jeg
+ * bryr meg ikke»), ikke et bevis for at feilen er borte. Og selv `resolved` er kildens EGEN påstand (også en menneskelig/leverandør-handling): hendelsen lukkes, men beviset merkes PROVISIONAL (observert, ikke bekreftet),
+ * aldri VERIFIED. Kommer feilen tilbake, åpner `openFromFact` hendelsen på nytt (regresjon) som før.
  */
 const SENTRY_TOKEN_REF = "JARVIS_SENTRY_API_TOKEN";
 const LEVELS: ReadonlySet<string> = new Set(["error", "fatal"]);
@@ -82,12 +84,12 @@ export function sentryProducer(deps: SentryProducerDeps): IncidentProducer {
         const fetched = await deps.gateway.execute({ identity: deps.identity, tool_id: "sentry", action: "get_issue", parameters: { issue_id: id } });
         if (!fetched.ok || typeof fetched.data !== "object" || fetched.data === null) continue; // oppslag feilet: ukjent, aldri «borte»
         const status = (fetched.data as Record<string, unknown>)["status"];
-        if (status !== "resolved" && status !== "ignored") continue;
+        if (status !== "resolved") continue;
         cleared.push({
           subject,
           check: {
-            source_type: "application_error", source_ref: `sentry:${id}`, summary: `Sentry-issue ${id} har status ${status}`, observed_at: ctx.now.toISOString(),
-            verified_by: "source_recheck", basis: `sentry get_issue ${id}: status ${status}`
+            source_type: "application_error", source_ref: `sentry:${id}`, summary: `Sentry rapporterer issue ${id} som resolved (kildens egen påstand, ikke verifisert av Jarvis)`, observed_at: ctx.now.toISOString(),
+            confirmation: "PROVISIONAL"
           }
         });
       }

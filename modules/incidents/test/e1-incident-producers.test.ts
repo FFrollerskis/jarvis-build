@@ -295,17 +295,47 @@ describe("Sentry-produsenten (ubetrodd kilde)", () => {
     expect(sentry.some((i) => /issue-(5001|5002|5003|5004)$/.test(i.dedupe_key) || i.dedupe_key.endsWith("issue-abc"))).toBe(false);
   });
 
-  it("løses kun når get_issue for akkurat dette issuet sier resolved/ignored; mislykket oppslag løser ikke", async () => {
-    const g1 = fakeGateway({ list: () => [issue("7001")] });
+  it("løses kun når get_issue for akkurat dette issuet sier `resolved`; mislykket oppslag løser ikke, og `ignored` er en menneskelig handling som aldri lukker (review PR #324, L3)", async () => {
+    const g1 = fakeGateway({ list: () => [issue("7001"), issue("7002")] });
     await run([sentryProducer({ gateway: g1.gateway as never, identity })]);
     const failing = fakeGateway({ list: () => [], get: () => new Error("sentry_error_500") });
     expect((await run([sentryProducer({ gateway: failing.gateway as never, identity })]))[0]).toMatchObject({ resolved: 0 });
     const stillOpen = fakeGateway({ list: () => [], get: () => ({ status: "unresolved" }) });
     expect((await run([sentryProducer({ gateway: stillOpen.gateway as never, identity })]))[0]).toMatchObject({ resolved: 0 });
+    // L3: «ignorert» er en menneskelig «jeg bryr meg ikke», ikke et bevis for at feilen er borte - hendelsene forblir åpne.
+    const ignored = fakeGateway({ list: () => [], get: () => ({ status: "ignored" }) });
+    expect((await run([sentryProducer({ gateway: ignored.gateway as never, identity, maxRechecks: 50 })]))[0]).toMatchObject({ status: "ok", resolved: 0 });
+    for (const id of ["7001", "7002"]) expect((await allOf("sentry")).find((i) => i.dedupe_key === `sentry:issue-${id}`)?.status, id).not.toBe("resolved");
     const resolved = fakeGateway({ list: () => [], get: () => ({ status: "resolved" }) });
     const done = (await run([sentryProducer({ gateway: resolved.gateway as never, identity, maxRechecks: 50 })]))[0]!;
     expect(done.resolved).toBeGreaterThanOrEqual(1);
-    expect((await allOf("sentry")).find((i) => i.dedupe_key === "sentry:issue-7001")?.status).toBe("resolved");
+    const closed = (await allOf("sentry")).find((i) => i.dedupe_key === "sentry:issue-7001")!;
+    expect(closed.status).toBe("resolved");
+    // L3: selv `resolved` er kildens egen påstand: lukkingsbeviset er PROVISIONAL (observert, ikke bekreftet) - aldri VERIFIED, og uten verifiseringsfelt.
+    const evidence = await incidents.listEvidence(T, SPACE, closed.incident_id);
+    const closing = evidence.find((e) => e.asserted_by === "check")!;
+    expect(closing).toMatchObject({ status: "PROVISIONAL", verified_by: null, verification_basis: null, verified_at: null, source_ref: "sentry:7001" });
+    expect(closing.summary).toContain("kildens egen påstand");
+    expect(evidence.some((e) => e.status === "VERIFIED")).toBe(false);
+    const transitions = await incidents.listTransitions(T, SPACE, closed.incident_id);
+    expect(transitions.at(-1)).toMatchObject({ to_status: "resolved", actor_kind: "producer", evidence_ref: closing.evidence_id });
+  });
+
+  it("resolveByCheck: VERIFIED krever verified_by + basis; PROVISIONAL tillater dem ikke (ingen halvt fylt verifisering)", async () => {
+    const created = await incidents.openFromFact(T, SPACE, { source_kind: "sentry", subject: "issue-9001", title: "Sentry: error-feil i api (API-9001)", severity: "normal", observed_at: nowIso(), evidence: { source_type: "application_error", summary: "x" } });
+    const id = (created as { incident: { incident_id: string } }).incident.incident_id;
+    const base = { source_type: "application_error" as const, summary: "re-målt", observed_at: nowIso(), reason: "test" };
+    await expect(incidents.resolveByCheck(T, SPACE, id, base)).rejects.toThrow("incident_resolve_check_requires_basis");
+    await expect(incidents.resolveByCheck(T, SPACE, id, { ...base, confirmation: "VERIFIED", verified_by: "source_recheck" })).rejects.toThrow("incident_resolve_check_requires_basis");
+    await expect(incidents.resolveByCheck(T, SPACE, id, { ...base, confirmation: "PROVISIONAL", verified_by: "source_recheck", basis: "b" })).rejects.toThrow("incident_resolve_provisional_has_no_verification");
+    expect((await incidents.getIncident(T, SPACE, id))?.status).toBe("open");
+    // Unntaket er SMALT: den generelle transition() krever fortsatt et VERIFIED bevis for en produsent - også med kontrollens eget PROVISIONAL bevis.
+    const provisionalCheck = await incidents.addEvidence(T, SPACE, id, { source_type: "application_error", summary: "kilden sier resolved", observed_at: nowIso(), asserted_by: "check", status: "PROVISIONAL" });
+    await expect(incidents.transition(T, SPACE, id, "resolved", { kind: "producer" }, { reason: "x", evidence_ref: provisionalCheck.evidence_id })).rejects.toThrow("incident_producer_resolve_requires_verified_evidence");
+    expect((await incidents.getIncident(T, SPACE, id))?.status).toBe("open");
+    const verified = await incidents.resolveByCheck(T, SPACE, id, { ...base, verified_by: "source_recheck", basis: "deterministisk re-måling" });
+    expect(verified?.status).toBe("resolved");
+    expect((await incidents.listEvidence(T, SPACE, id)).find((e) => e.asserted_by === "check")).toMatchObject({ status: "VERIFIED", verified_by: "source_recheck" });
   });
 });
 

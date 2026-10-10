@@ -83,10 +83,16 @@ export interface ResolveByCheckInput {
   /** Hva den deterministiske re-målingen så (kort, redigert). */
   summary: string;
   observed_at: string;
-  /** Hvorfor re-målingen teller som bekreftelse: `source_recheck` (samme primærkilde målt på nytt) eller `independent_probe` (uavhengig kilde). */
-  verified_by: Extract<EvidenceVerifiedBy, "source_recheck" | "independent_probe">;
-  /** Grunnlaget som lagres med VERIFIED-statusen (≤ 300 tegn). */
-  basis: string;
+  /**
+   * Gjennomgang av PR #324 (L3): `VERIFIED` (standard) = en deterministisk re-måling bekrefter at betingelsen er borte, og `verified_by` + `basis` er PÅKREVD. `PROVISIONAL` = KILDEN SELV sier at betingelsen er borte
+   * (en ekstern påstand, f.eks. Sentry-status «resolved», som er en menneskelig/leverandør-handling og ikke en Jarvis-måling): hendelsen lukkes, men beviset forblir PROVISIONAL («observert, ikke bekreftet») -
+   * `verified_by`/`basis` skal da IKKE oppgis (ingen halvt fylt verifisering).
+   */
+  confirmation?: "VERIFIED" | "PROVISIONAL";
+  /** Hvorfor re-målingen teller som bekreftelse: `source_recheck` (samme primærkilde målt på nytt) eller `independent_probe` (uavhengig kilde). Påkrevd for `VERIFIED`. */
+  verified_by?: Extract<EvidenceVerifiedBy, "source_recheck" | "independent_probe">;
+  /** Grunnlaget som lagres med VERIFIED-statusen (≤ 300 tegn). Påkrevd for `VERIFIED`. */
+  basis?: string;
   /** Årsaken i overgangshistorikken. */
   reason: string;
 }
@@ -312,6 +318,9 @@ export class IncidentService {
    */
   async resolveByCheck(tenantId: string, memorySpace: MemorySpace, incidentId: string, check: ResolveByCheckInput): Promise<IncidentRecord | null> {
     const reason = cleanReason(check.reason);
+    const confirmation = check.confirmation ?? "VERIFIED";
+    if (confirmation === "VERIFIED" && (check.verified_by === undefined || check.basis === undefined)) throw new Error("incident_resolve_check_requires_basis");
+    if (confirmation === "PROVISIONAL" && (check.verified_by !== undefined || check.basis !== undefined)) throw new Error("incident_resolve_provisional_has_no_verification");
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const current = await this.lockIncident(client, tenantId, incidentId);
       if (!current) return null;
@@ -323,8 +332,9 @@ export class IncidentService {
         summary: check.summary,
         observed_at: isoOrNow(check.observed_at)
       });
-      await this.verifyEvidenceTx(client, tenantId, evidence.evidence_id, { verified_by: check.verified_by, basis: check.basis });
-      return this.transitionTx(client, current, "resolved", { kind: "producer" }, reason, evidence.evidence_id);
+      if (confirmation === "VERIFIED") await this.verifyEvidenceTx(client, tenantId, evidence.evidence_id, { verified_by: check.verified_by!, basis: check.basis! });
+      // L3: kun DENNE stien (kildens egen påstand, merket PROVISIONAL) får lukke en hendelse på et ikke-verifisert bevis - den generelle `transition()` krever fortsatt VERIFIED for en produsent.
+      return this.transitionTx(client, current, "resolved", { kind: "producer" }, reason, evidence.evidence_id, { provisionalCheckProofOk: confirmation === "PROVISIONAL" });
     });
   }
 
@@ -341,7 +351,8 @@ export class IncidentService {
     to: IncidentStatus,
     actor: IncidentActor,
     reason: string,
-    evidenceRef: string | undefined
+    evidenceRef: string | undefined,
+    opts: { provisionalCheckProofOk?: boolean } = {}
   ): Promise<IncidentRecord> {
     if (actor.kind === "owner" && (typeof actor.person_id !== "string" || actor.person_id.length === 0)) throw new Error("incident_owner_actor_requires_person");
     if (actor.kind === "system") throw new Error("incident_system_actor_not_allowed");
@@ -350,8 +361,10 @@ export class IncidentService {
     if (actor.kind === "producer") {
       if (current.source_kind === "manual") throw new Error("incident_producer_cannot_touch_manual");
       if (to === "resolved") {
+        // Standard: en produsent kan kun løse med et VERIFIED bevis for SAMME hendelse. Unntak (L3, kun fra `resolveByCheck` med `confirmation: "PROVISIONAL"`): kontrollens eget PROVISIONAL bevis.
+        const accepted = opts.provisionalCheckProofOk === true ? "(status = 'VERIFIED' OR (status = 'PROVISIONAL' AND asserted_by = 'check'))" : "status = 'VERIFIED'";
         const proof = evidenceRef
-          ? await client.query(`SELECT 1 FROM incident_evidence WHERE tenant_id = $1 AND incident_id = $2 AND evidence_id = $3 AND status = 'VERIFIED'`, [current.tenant_id, current.incident_id, evidenceRef])
+          ? await client.query(`SELECT 1 FROM incident_evidence WHERE tenant_id = $1 AND incident_id = $2 AND evidence_id = $3 AND ${accepted}`, [current.tenant_id, current.incident_id, evidenceRef])
           : { rowCount: 0 };
         if (!proof.rowCount) throw new Error("incident_producer_resolve_requires_verified_evidence");
       } else if (to === "open") {
