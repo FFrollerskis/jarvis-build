@@ -107,13 +107,13 @@ Per audit 2026-10-05: DONE_IN_CODE 2 (Situation Engine, Executive Mode), PARTIAL
 | Q-52 | **A** (ja): utvid mønstre; tvetydige ord kun målt → `CODE_FIXED` i WP-A (D-451); nattlig resensitize-sveip (`report`) rydder gamle minnerader |
 | Q-51 | **D** (ja): hold sensitive meldinger (+ par + hale) utenfor skybundet tur → `CODE_FIXED` i WP-A (D-451) |
 | Q-50 B | **ja**: repo-lås med eier-opt-out → `CODE_FIXED` i WP-A (D-451) |
-| Q-48 | **C nå**; A/B avgjøres med tenant-topologien (JARVIS-044) |
+| Q-48 | **C nå**; A/B avgjøres med tenant-topologien (JARVIS-044); eieren avtaler det selv med Jarvis når temaet blir aktuelt (D-468) |
 | Q-47 (a) | akseptert: D-klasse utilgjengelig for modellen til kjeden er komplett (WP-F bygger kjeden bak step-up) |
 | Q-47 (c)(e), Q-45 (b), Q-43, Q-23 | **eier-handling** (env, nøkkelrotasjon, GitHub App, HF6-fil, testkonto) |
 | Q-28 B, Q-42, Q-13, Q-22 | **eier-valg** (leverandør/stack) – et generelt ja velger ikke leverandør (CLAUDE.md regel 12) |
-| Q-54 | **eier-valg (F1, PR #326):** skal `JARVIS_OWNER_EXTRA_TENANTS` gi suverenitet også til eierens egne planlagte jobber (dagens, dokumentert) eller bare signerte økter |
-| Q-55 | **eier-valg (E1 M2, PR #324):** er strengeste step-up-standard for skymål-mutasjoner riktig, eller skal enkelte handlinger lempes (navngitt D-beslutning per handling) |
-| Q-56 | **eier-valg (D2 F5):** egen sletterolle/trigger for `business_change_log` eller akseptere app-rollens DELETE |
+| Q-54 | **eieren avtaler selv med Jarvis når temaet blir aktuelt (D-468, 2026-10-10; dagens oppførsel gjelder) - gjelder (F1, PR #326):** skal `JARVIS_OWNER_EXTRA_TENANTS` gi suverenitet også til eierens egne planlagte jobber (dagens, dokumentert) eller bare signerte økter |
+| Q-55 | **besluttet A (D-468, 2026-10-10):** strengeste step-up-standard for skymål-mutasjoner beholdes; å lempe enkelte handlinger krever en navngitt D-beslutning per handling |
+| Q-56 | **besluttet A (D-468, 2026-10-10):** app-rollens DELETE på `business_change_log` beholdes (dokumentert) |
 | Q-03/04/06/09/10/11/12/19 | **måling** (verifiseringsøkten) |
 
 ## 8. Samlet liste: dette må Tobias gjøre (fysisk/valg) for å lukke
