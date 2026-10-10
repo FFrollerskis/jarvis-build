@@ -1462,8 +1462,11 @@ describe("WP-C2 review runde 2 M4: ubrukelig/nullstilt statusfil pauser retensjo
       }
       expect(listNames(h)).toHaveLength(47);
       expect(h.logs.filter((l) => l.level !== "debug")).toEqual([]);
-      // uten verifisering/off-site finnes det ingenting å vente på: etter et døgn (samme hold som ved et tikk-gap) slippes pausen og sletting går gradvis, 3 per tikk
-      h.advance(25 * H);
+      // uten verifisering/off-site finnes det ingenting å vente på: etter et døgn (samme hold som ved et tikk-gap) slippes pausen og sletting går gradvis, 3 per tikk - men ikke før
+      h.advance(5 * H);
+      expect((await h.tick()).retention).toMatchObject({ paused: "status_unusable", pruned: 0 }); // 5 t inne i døgnet: klokken kan fortsatt rettes
+      expect(listNames(h)).toHaveLength(47);
+      h.advance(20 * H);
       const later = await h.tick();
       expect(later.retention).toMatchObject({ paused: null, pruned: 3 });
       expect(h.status().retention).toMatchObject({ last_skipped_reason: null, status_reset_at: null });
