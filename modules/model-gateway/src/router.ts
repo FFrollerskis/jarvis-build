@@ -176,6 +176,12 @@ function isPaidModelsEligible(profile: ModelProfile, paidModelsAllowed: boolean 
 interface ProviderRuntime {
   configured: boolean;
   model: string;
+  /**
+   * WP-H0 (JARVIS-087): eieren har pauset/tilbakekalt leverandøren. En pauset leverandør er alltid `configured: false` (ingen kandidat i noen modus, heller ikke som eksplisitt eier-override
+   * eller i en preferanseliste); flagget gjør kun at avslaget SIER hvorfor («pauset av eier», ikke «ikke konfigurert»). Sensitivitetsreglene er uendret: SECRET_RESTRICTED slipper fortsatt kun lokale
+   * leverandører, så en pauset lokal leverandør gir fail-closed for slike turer - aldri en sky-fallback.
+   */
+  paused?: boolean;
 }
 
 export class AiRouter {
@@ -193,7 +199,7 @@ export class AiRouter {
       const name = input.provider as string;
       const rt = providers.get(name);
       if (!rt?.configured) {
-        throw new NoEligibleProviderError(`override-provider '${name}' er ikke konfigurert`);
+        throw new NoEligibleProviderError(rt?.paused ? `override-provider '${name}' er pauset av eier` : `override-provider '${name}' er ikke konfigurert`);
       }
       const requiredForOverride = new Set<ModelCapability>(input.required_capabilities ?? []);
       if (input.needs_structured) requiredForOverride.add("structured_output");
@@ -237,7 +243,7 @@ export class AiRouter {
       for (const name of input.providerPreference) {
         const rt = providers.get(name);
         attempted.push(name);
-        if (!rt?.configured) { rejected.push(`${name}:not_configured`); continue; }
+        if (!rt?.configured) { rejected.push(`${name}:${rt?.paused ? "paused_by_owner" : "not_configured"}`); continue; }
         const profile = this.registry.profileOrGeneric(name, rt.model);
         const missing = [...requiredForPref].filter((c) => !profile.capabilities.includes(c));
         if (missing.length > 0) { rejected.push(`${name}:missing_capabilities=${missing.join("+")}`); continue; }
@@ -263,7 +269,9 @@ export class AiRouter {
     const eligible: Array<{ profile: ModelProfile; model: string; state: string }> = [];
     let sensitivityExcludedCount = 0;
     let paidExcludedCount = 0;
+    const pausedByOwner: string[] = [];
     for (const [name, rt] of providers) {
+      if (rt.paused) pausedByOwner.push(name);
       if (!rt.configured) continue;
       const profile = this.registry.profileOrGeneric(name, rt.model);
       if (mode === "LOCAL" && profile.locality !== "local") continue;
@@ -287,7 +295,8 @@ export class AiRouter {
       }
       throw new NoEligibleProviderError(
         `ingen konfigurert provider dekker [${[...required].join(",")}]` +
-          (input.sensitivity ? ` (sensitivity=${input.sensitivity})` : "")
+          (input.sensitivity ? ` (sensitivity=${input.sensitivity})` : "") +
+          (pausedByOwner.length > 0 ? ` (pauset av eier: ${pausedByOwner.join(",")})` : "")
       );
     }
 

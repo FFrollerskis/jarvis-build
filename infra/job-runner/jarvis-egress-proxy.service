@@ -1,0 +1,61 @@
+# WP-C1 (D-32 port 9): egress-proxy for jobb-containere (CONNECT-only, eksakt vert:port-allowlist, SSRF-/DNS-rebinding-vern).
+# Installeres til /etc/systemd/system/ av infra/job-runner/install-host.sh.
+#
+# Proxyen lytter KUN på jobbnettverkets gateway-adresse (egress_proxy.listen_host) - aldri på 0.0.0.0. Før start oppretter/verifiserer
+# setup-network.sh (som root) det interne Docker-nettverket og INPUT-reglene som hindrer jobb-containere i å nå andre tjenester på verten.
+[Unit]
+Description=Jarvis egress-proxy for jobb-containere (WP-C1)
+Documentation=https://github.com/tsworkflow/jarvisbuild/blob/main/docs/runbooks/JOB_RUNNER.md
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+ConditionPathExists=/etc/jarvis/job-runner.json
+
+[Service]
+Type=simple
+User=jarvis-egress
+Group=jarvis-egress
+Environment=JARVIS_JOB_RUNNER_CONFIG=/etc/jarvis/job-runner.json
+WorkingDirectory=/opt/jarvis-job-runner
+# «+» = kjør som root uten tjenestens sandbox (docker network create + iptables). Idempotent; feiler lukket (proxyen starter ikke uten nettverk/regler).
+ExecStartPre=+/opt/jarvis-job-runner/infra/job-runner/setup-network.sh
+ExecStart=/usr/bin/env node /opt/jarvis-job-runner/ops/job-runner/egress-proxy.mjs
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+
+# --- herding ---
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+MemoryDenyWriteExecute=no
+LimitNOFILE=4096
+# Ingen minnedump (som job-runner-enheten; proxyen holder ingen hemmeligheter, men ingenting skal skrive prosessminne til disk).
+LimitCORE=0
+TasksMax=256
+# Valgfri ekstra SSRF-forsvar på kjernenivå (kommentert ut: krever at du kjenner verts-DNS-adressen). Proxyen nekter allerede private adresser i kode.
+# IPAddressDeny=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 127.0.0.0/8
+# IPAddressAllow=172.30.77.0/24 <DNS-resolver-adressen>
+
+[Install]
+WantedBy=multi-user.target

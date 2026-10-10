@@ -58,7 +58,9 @@ export function psqlOnce(runner, database, sql, { input } = {}) {
     let err = "";
     child.stdout.on("data", (d) => { out += d; });
     child.stderr.on("data", (d) => { err += d; });
+    child.on("error", (e) => reject(new Error(`psql could not be started: ${e?.code ?? "spawn_failed"}`))); // uten lytter ville et manglende `docker`/`psql` krasjet prosessen i stedet for å feile lukket
     child.on("close", (code) => (code === 0 ? resolve(out.trim()) : reject(new Error(`psql failed (${code}): ${err.trim().slice(0, 300)}`))));
+    child.stdin.on("error", () => undefined); // EPIPE hvis psql avslutter før all inndata er lest
     if (input !== undefined) child.stdin.end(input);
     else child.stdin.end();
   });

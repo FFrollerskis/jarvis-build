@@ -25,6 +25,7 @@ import {
   type FikenCredentials, type FikenCredentialsProvider, type FikenGeneralJournalEntryWriter
 } from "../src/index.ts";
 import { OpenLoopService } from "../../business/src/index.ts";
+import { deleteMoneyRows } from "./lib/money-cleanup.ts";
 
 type Verdict = "PASS" | "FAIL" | "NOT_RUN";
 
@@ -113,7 +114,7 @@ async function cleanupTenant(tenantId: string): Promise<void> {
   await adminPool.query("DELETE FROM marketing_campaigns WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM cost_events WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM payment_intent_events WHERE tenant_id = $1", [tenantId]);
-  await adminPool.query("DELETE FROM payment_intents WHERE tenant_id = $1", [tenantId]);
+  await deleteMoneyRows(adminPool, "payment_intents", tenantId);
   // D-116 (migrasjon 045): barn-FK FØR forelder - `payment_intents.vendor_id`
   // er allerede slettet over; `finance_vendor_provider_bindings` har SIN
   // EGEN FK -> `finance_vendors` og MÅ derfor også vekk før selve vendoren.

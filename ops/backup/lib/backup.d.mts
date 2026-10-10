@@ -2,6 +2,8 @@ import type { PgRunner } from "./runner.mjs";
 
 export declare const MANIFEST_VERSION: number;
 export declare const DEFAULT_DATABASES: string[];
+/** `system_identifier` fra pg_control som tekst (64-bit heltall, evt. negativt). */
+export declare const SYSTEM_IDENTIFIER_RE: RegExp;
 export interface BackupTableEntry {
   table: string;
   rows: number;
@@ -18,7 +20,8 @@ export interface BackupManifest {
   manifest_version: number;
   created_at_utc: string;
   set: string;
-  source: { endpoint: string; mode: string };
+  /** `system_identifier`: kildeklyngens pg_control-identifikator (valgfri: eldre sett har den ikke). Brukes til å nekte en scratch-server som er SAMME klynge. */
+  source: { endpoint: string; mode: string; system_identifier?: string };
   recipient_fingerprint: string;
   globals: { file: string; sha256: string };
   databases: BackupDatabaseEntry[];

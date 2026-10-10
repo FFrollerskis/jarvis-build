@@ -3,24 +3,33 @@
  * EV-20 uavhengig nødtilbakekalling/off-site, og EV-22/EV-23 (bygger på Admin Control Center). Dette er REN logikk: den utfører ingenting og aktiverer ingenting. Den svarer kun på «hva mangler før eieren kan ta en
  * navngitt D-beslutning om aktivering?» ut fra fakta som måles i kjøretiden eller som eieren selv har erklært verifisert (`JARVIS_EV_VERIFIED_GATES`). `activation_decision` er ALLTID false her: ingen kodevei kan
  * gi `ready`-svaret kraft - det er et sjekklistesvar til verifiseringsøkten, ikke en bryter.
+ *
+ * KJENT-IKKE-LIK-OK (M2, gjennomgang av PR #313): et innsignal som ikke kunne måles er `null` (aldri en fabrikkert `false`/`0` og aldri `true`). Et krav som hviler på et ukjent innsignal er ALDRI oppfylt, og står i `missing`
+ * med `unknown: true` - så en del kan aldri bli «klar for en navngitt D-beslutning» på grunn av en måling som sviktet.
  */
 export type DormantEv = "EV-6" | "EV-11" | "EV-13" | "EV-14" | "EV-15" | "EV-18" | "EV-20" | "EV-22" | "EV-23";
 
 /** Porter som kan erklæres verifisert av eieren (aldri utledet av kode): `JARVIS_EV_VERIFIED_GATES=D-32,OFFSITE_RESTORE,...` */
-export const EXTERNAL_GATES = ["D-32", "OFFSITE_RESTORE", "ADMIN_CONTROL_CENTER", "UA-10_LIVE", "OUTCOME_TRACKING", "PERSONALITY_SLIDERS_WIRED", "EXPRESSION_STATE_WIRED", "CONNECTOR_FACTORY"] as const;
+export const EXTERNAL_GATES = ["D-32", "OFFSITE_RESTORE", "ADMIN_CONTROL_CENTER", "UA-10_LIVE", "OUTCOME_TRACKING", "PERSONALITY_SLIDERS_WIRED", "EXPRESSION_STATE_WIRED", "CONNECTOR_FACTORY", "JOB_RUNNER_CONFIGURED"] as const;
 export type ExternalGate = (typeof EXTERNAL_GATES)[number];
 
+/** Innsignalene som måles i kjøretiden og derfor kan være UKJENT (`null`). Resten (`job_runner_configured`, `declared_gates`) kommer fra eierens egen konfigurasjon og er alltid kjent. */
+export type MeasuredFact = "constitution_verified" | "ledger_ok" | "change_freeze_off" | "proven_connectors" | "job_runner_configured";
+
 export interface ReadinessFacts {
-  /** Safety Constitution verifisert (signatur + festet nøkkel) - fra oppstartssjekken. */
-  constitution_verified: boolean;
-  /** Endringsregisterets hash-kjede intakt. */
-  ledger_ok: boolean;
-  /** Change freeze er av akkurat nå. */
-  change_freeze_off: boolean;
-  /** Antall tilkoblinger som er konfigurert, har live-test og siste helse «healthy» (beviste connectorer). */
-  proven_connectors: number;
-  /** Er jobb-container-runneren konfigurert i denne kjøringen (`JARVIS_JOB_RUNNER=container` + gyldig image/nettverk/proxy)? Konfigurert er ikke det samme som verifisert (D-32). */
-  job_runner_configured: boolean;
+  /** Safety Constitution verifisert (signatur + festet nøkkel) - fra oppstartssjekken. `null` = ukjent. */
+  constitution_verified: boolean | null;
+  /** Endringsregisterets hash-kjede intakt. `null` = ukjent. */
+  ledger_ok: boolean | null;
+  /** Change freeze er av akkurat nå. `null` = ukjent (freeze kan ikke utelukkes). */
+  change_freeze_off: boolean | null;
+  /** Antall tilkoblinger som er konfigurert, har live-test og siste helse «healthy» (beviste connectorer). `null` = ukjent (registeret kunne ikke leses). */
+  proven_connectors: number | null;
+  /**
+   * Er jobb-container-runneren konfigurert (`JARVIS_JOB_RUNNER=container` + image/nettverk/proxy)? Konfigurert er ikke det samme som verifisert (D-32). Variablene går kun til worker-containeren (L6, gjennomgang av PR #313),
+   * så API-et ser dem normalt ikke: da er faktumet `null` (UKJENT) og kravet oppfylles i stedet av eierens erklæring `JOB_RUNNER_CONFIGURED`.
+   */
+  job_runner_configured: boolean | null;
   /** Porter eieren har erklært verifisert. */
   declared_gates: ReadonlySet<string>;
 }
@@ -28,14 +37,17 @@ export interface ReadinessFacts {
 export interface ReadinessRequirement {
   id: string;
   label_no: string;
+  /** Strengt: kun `true` når innsignalet er KJENT og oppfyller kravet. */
   met: (facts: ReadinessFacts) => boolean;
+  /** De målte innsignalene kravet hviler på (for å skille «ikke oppfylt» fra «kunne ikke måles»). */
+  needs?: readonly MeasuredFact[];
 }
 
 const gate = (g: ExternalGate, label_no: string): ReadinessRequirement => ({ id: `gate:${g}`, label_no, met: (f) => f.declared_gates.has(g) });
 const BASE: readonly ReadinessRequirement[] = [
-  { id: "constitution_verified", label_no: "Safety Constitution er signert og verifisert (EV-0)", met: (f) => f.constitution_verified },
-  { id: "ledger_ok", label_no: "Endringsregisterets hash-kjede er intakt", met: (f) => f.ledger_ok },
-  { id: "change_freeze_off", label_no: "Change freeze er av", met: (f) => f.change_freeze_off }
+  { id: "constitution_verified", label_no: "Safety Constitution er signert og verifisert (EV-0)", met: (f) => f.constitution_verified === true, needs: ["constitution_verified"] },
+  { id: "ledger_ok", label_no: "Endringsregisterets hash-kjede er intakt", met: (f) => f.ledger_ok === true, needs: ["ledger_ok"] },
+  { id: "change_freeze_off", label_no: "Change freeze er av", met: (f) => f.change_freeze_off === true, needs: ["change_freeze_off"] }
 ];
 
 /** Per sovende del: hva som MÅ være på plass før en aktiveringsbeslutning kan vurderes. Alle har i tillegg `owner_decision` (navngitt D-beslutning) - aldri oppfylt av kode. */
@@ -46,7 +58,10 @@ export const READINESS: Readonly<Record<DormantEv, { title_no: string; why_dorma
     requirements: [
       ...BASE,
       gate("D-32", "Worker-isolasjon er verifisert på ekte vert (D-32: ressurs-/nettverksisolasjon, ekte branch/PR)"),
-      { id: "job_runner_configured", label_no: "Jobb-container-runneren er konfigurert (JARVIS_JOB_RUNNER=container)", met: (f) => f.job_runner_configured }
+      {
+        id: "job_runner_configured", label_no: "Jobb-container-runneren er konfigurert (JARVIS_JOB_RUNNER=container; API-et ser ikke worker-oppsettet - erklær JOB_RUNNER_CONFIGURED når du har verifisert det på verten)",
+        met: (f) => f.job_runner_configured === true || f.declared_gates.has("JOB_RUNNER_CONFIGURED"), needs: ["job_runner_configured"]
+      }
     ]
   },
   "EV-11": {
@@ -74,7 +89,7 @@ export const READINESS: Readonly<Record<DormantEv, { title_no: string; why_dorma
     why_dormant_no: "venter 3–5 beviste connectorer (mønsteret må være bevist før det genereres)",
     requirements: [
       ...BASE,
-      { id: "proven_connectors>=3", label_no: "Minst 3 connectorer er konfigurert, live-testet og friske", met: (f) => f.proven_connectors >= 3 },
+      { id: "proven_connectors>=3", label_no: "Minst 3 connectorer er konfigurert, live-testet og friske", met: (f) => typeof f.proven_connectors === "number" && f.proven_connectors >= 3, needs: ["proven_connectors"] },
       gate("CONNECTOR_FACTORY", "Connector SDK/fabrikk er bygget og gjennomgått")
     ]
   },
@@ -104,7 +119,10 @@ export interface ReadinessVerdict {
   /** Alle tekniske krav er oppfylt - da kan eieren vurdere en D-beslutning (ikke det samme som at noe er aktivert). */
   ready_for_owner_decision: boolean;
   met: string[];
-  missing: Array<{ id: string; label_no: string }>;
+  /** Det som ikke er oppfylt. `unknown: true` = kravet hviler på et innsignal som IKKE kunne måles (da er det verken oppfylt eller bevist brutt). */
+  missing: Array<{ id: string; label_no: string; unknown: boolean }>;
+  /** De målte innsignalene som er ukjente og som minst ett krav i denne delen hviler på. Alltid tom når delen er klar. */
+  unknown_signals: MeasuredFact[];
 }
 
 export function parseDeclaredGates(raw: string | undefined): Set<string> {
@@ -112,11 +130,20 @@ export function parseDeclaredGates(raw: string | undefined): Set<string> {
   return new Set((raw ?? "").split(",").map((g) => g.trim()).filter((g) => known.has(g)));
 }
 
+/** Et målt innsignal er ukjent hvis det ikke er et ekte svar (`null`/`undefined`/feil type/ikke-endelig tall). */
+const isUnknownFact = (facts: ReadinessFacts, key: MeasuredFact): boolean => {
+  const value: unknown = facts[key];
+  return key === "proven_connectors" ? typeof value !== "number" || !Number.isFinite(value) : typeof value !== "boolean";
+};
+
 export function evaluateReadiness(ev: DormantEv, facts: ReadinessFacts): ReadinessVerdict {
   const spec = READINESS[ev];
+  const unknownOf = (r: ReadinessRequirement): MeasuredFact[] => (r.needs ?? []).filter((k) => isUnknownFact(facts, k));
   const met = spec.requirements.filter((r) => r.met(facts)).map((r) => r.id);
-  const missing = spec.requirements.filter((r) => !r.met(facts)).map((r) => ({ id: r.id, label_no: r.label_no }));
-  return { ev, title_no: spec.title_no, why_dormant_no: spec.why_dormant_no, activation_decision: false, ready_for_owner_decision: missing.length === 0, met, missing };
+  const missingReqs = spec.requirements.filter((r) => !r.met(facts));
+  const missing = missingReqs.map((r) => ({ id: r.id, label_no: r.label_no, unknown: unknownOf(r).length > 0 }));
+  const unknown_signals = [...new Set(missingReqs.flatMap(unknownOf))];
+  return { ev, title_no: spec.title_no, why_dormant_no: spec.why_dormant_no, activation_decision: false, ready_for_owner_decision: missing.length === 0, met, missing, unknown_signals };
 }
 
 export function evaluateAllReadiness(facts: ReadinessFacts): ReadinessVerdict[] {

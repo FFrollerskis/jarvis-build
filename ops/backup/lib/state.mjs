@@ -49,13 +49,15 @@ export function emptyStatus() {
       last_attempt_at: null, last_success_at: null, last_set: null, duration_s: null, size_bytes: null,
       consecutive_failures: 0, retry_after: null, last_error_code: null, last_error: null
     },
-    retention: { last_pruned_at: null, last_pruned_count: 0, last_skipped_reason: null },
+    // `status_reset_at`: tidspunktet statusfilen var borte/ubrukelig og historikken (siste verifiserte / off-site-bekreftede sett, forrige tikk) dermed er nullstilt. Retensjonen er pauset
+    // (`status_unusable`) til en vellykket verifisering eller off-site-bekreftelse har skrevet gyldig status på nytt (review runde 2, M4).
+    retention: { last_pruned_at: null, last_pruned_count: 0, last_skipped_reason: null, hold_until: null, status_reset_at: null },
     offsite: {
       state: "not_configured", adapter: null, last_attempt_at: null, last_success_at: null, last_verified_at: null, last_set: null,
       verification: null, consecutive_failures: 0, retry_after: null, last_error_code: null, last_error: null
     },
     restore_verify: {
-      state: "not_configured", last_attempt_at: null, last_success_at: null, last_set: null, duration_s: null, fetch_duration_s: null,
+      state: "not_configured", last_attempt_at: null, last_success_at: null, last_set: null, last_success_set: null, duration_s: null, fetch_duration_s: null,
       tables: null, rows: null, source: null, reported_by: null, consecutive_failures: 0, retry_after: null, last_error_code: null, last_error: null
     },
     heartbeat: { configured: false, last_ping_at: null, last_ping_kind: null, last_ping_ok: null, last_error_code: null }
@@ -81,7 +83,10 @@ export function normalizeStatus(raw) {
       duration_s: count(b.duration_s), size_bytes: count(b.size_bytes), consecutive_failures: count(b.consecutive_failures, 1e6) ?? 0,
       retry_after: iso(b.retry_after), last_error_code: code(b.last_error_code), last_error: text(b.last_error)
     },
-    retention: { last_pruned_at: iso(r.last_pruned_at), last_pruned_count: count(r.last_pruned_count, 1e6) ?? 0, last_skipped_reason: text(r.last_skipped_reason, 60) },
+    retention: {
+      last_pruned_at: iso(r.last_pruned_at), last_pruned_count: count(r.last_pruned_count, 1e6) ?? 0, last_skipped_reason: text(r.last_skipped_reason, 60), hold_until: iso(r.hold_until),
+      status_reset_at: iso(r.status_reset_at)
+    },
     offsite: {
       state: oneOf(o.state, ["not_configured", "pending", "ok", "failed"], d.offsite.state), adapter: oneOf(o.adapter, OFFSITE_ADAPTERS, null),
       last_attempt_at: iso(o.last_attempt_at), last_success_at: iso(o.last_success_at), last_verified_at: iso(o.last_verified_at), last_set: setName(o.last_set),
@@ -90,7 +95,7 @@ export function normalizeStatus(raw) {
     },
     restore_verify: {
       state: oneOf(v.state, ["not_configured", "never_run", "ok", "failed"], d.restore_verify.state),
-      last_attempt_at: iso(v.last_attempt_at), last_success_at: iso(v.last_success_at), last_set: setName(v.last_set),
+      last_attempt_at: iso(v.last_attempt_at), last_success_at: iso(v.last_success_at), last_set: setName(v.last_set), last_success_set: setName(v.last_success_set),
       duration_s: count(v.duration_s), fetch_duration_s: count(v.fetch_duration_s), tables: count(v.tables), rows: count(v.rows),
       source: oneOf(v.source, ["local", "offsite"], null), reported_by: oneOf(v.reported_by, ["local", "external_verifier"], null),
       consecutive_failures: count(v.consecutive_failures, 1e6) ?? 0, retry_after: iso(v.retry_after), last_error_code: code(v.last_error_code), last_error: text(v.last_error)
@@ -248,6 +253,7 @@ export function mergePeerVerifyReport(status, report, now) {
   if (report.ok) {
     rv.state = "ok";
     rv.last_success_at = report.finished_at;
+    rv.last_success_set = report.set;
     rv.consecutive_failures = 0;
     rv.last_error_code = null;
     rv.last_error = null;

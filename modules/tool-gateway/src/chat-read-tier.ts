@@ -64,6 +64,8 @@ export const CHAT_READ_TIER: ReadonlyArray<{ readonly tool_id: string; readonly 
   { tool_id: "executive", action: "get_attention_item" },
   { tool_id: "executive", action: "get_attention_queue" },
   { tool_id: "executive", action: "get_connector_status" },
+  // WP-H0 (UA-11 Admin Control Center): eierens kontrollsentre (kun lesing; eier-kun port i verktøydefinisjonen, rapportene er merket private). Handlingene eieren kan ta peker på eksisterende ruter og står ikke på modellflaten.
+  { tool_id: "executive", action: "get_control_center" },
   { tool_id: "executive", action: "get_control_surface_status" },
   { tool_id: "executive", action: "get_delegation_board" },
   { tool_id: "executive", action: "get_self_diagnosis" },

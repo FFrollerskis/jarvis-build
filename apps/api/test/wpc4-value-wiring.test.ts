@@ -182,7 +182,8 @@ describe("C: main.ts kobler Value Center og V2-push - kun bak flagget, kun i API
     expect(warn).toBeGreaterThan(call);
     // ingenting mellom vakten og kallet kan hoppe over den (ingen `else if`/tidlig return som gjør kallet betinget av annet enn flagget)
     expect(mainSource.slice(guard, call)).toBe("if (v2PushPolicy.enabled) {\n      ");
-    expect(mainSource).toContain("startFollowUpPush({ pool, graph: conversationGraphService, gateway: toolGateway, ownerIdentity, policy: v2PushPolicy });");
+    // M1: stopp-sjekken (kill switch/frys/tilbakekalt credential/infra-pause) er en PÅKREVD dependency og bygges av de ekte, delte objektene - ikke en kopi
+    expect(mainSource).toContain("startFollowUpPush({ pool, graph: conversationGraphService, gateway: toolGateway, ownerIdentity, policy: v2PushPolicy, guard: createPushSendGuard({ killSwitch, controls: ownerControls, infraGate, infraToolIds }) });");
     expect(mainSource).toContain("telegramDeliveryConfigured = Boolean(telegramToken && telegramChatId);");
   });
 
@@ -241,7 +242,10 @@ describe("D: /value/query og dashbordet", () => {
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 describe("E: kjøretidsfakta er flagg og tilstand - fail-closed og aldri innhold", () => {
-  const policy: FollowUpPushPolicy = { enabled: false, max_messages_per_day: 3, max_items_per_message: 5, min_gap_minutes: 60, quiet_start_hour: 22, quiet_end_hour: 7, time_zone: "Europe/Oslo", stale_overdue_days: 14 };
+  const policy: FollowUpPushPolicy = {
+    enabled: false, max_messages_per_day: 3, max_items_per_message: 5, min_gap_minutes: 60, quiet_start_hour: 22, quiet_end_hour: 7, time_zone: "Europe/Oslo", stale_overdue_days: 14,
+    max_attempts_per_message: 3, retry_backoff_minutes: [15, 60, 240], include_titles: true
+  };
   const base = { env: {}, push: policy, deliveryConfigured: () => true, ev0Status: () => null, killSwitchActive: async () => false };
 
   it("kun den eksakte verdien «true» slår V5-forslag på", () => {

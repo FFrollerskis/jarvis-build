@@ -292,6 +292,10 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   );
   // `payment_intent_events` har en FK -> payment_intents - MÅ slettes FØR.
   add(result, "payment_intent_events", await run(client, mode, "payment_intent_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // WP-F1 (D-462, 100_finance_reconciliation.sql): avstemmingsfunn har en FK -> payment_intents OG -> finance_reconciliation_runs -
+  // funnene MÅ slettes FØR både kjøringene og `payment_intents` ("barn-FK FØR forelder").
+  add(result, "finance_reconciliation_findings", await run(client, mode, "finance_reconciliation_findings", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "finance_reconciliation_runs", await run(client, mode, "finance_reconciliation_runs", "tenant_id = $1 AND memory_space_id = $2", tv));
   // D-109 (UA-6 Slice 3, 040_stripe.sql): `stripe_webhook_events` og
   // `stripe_refunds` har BEGGE en FK -> `payment_intents` (payment_intent_id)
   // - SAMME "barn-FK FØR forelder"-regel som `payment_intent_events` over,

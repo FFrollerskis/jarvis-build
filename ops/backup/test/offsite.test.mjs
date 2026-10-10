@@ -1,9 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, closeSync, constants, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { rm as realRm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
-  AGE_MAGIC, LOCAL_MARKER, MANIFEST_AGE, OffsiteError, compareRemoteListing, createOffsiteSink, materializeManifest, parseLsjson, parseOffsiteConfig, prepareSetForOffsite,
+  AGE_MAGIC, INCOMING_RE, LOCAL_MARKER, MANIFEST_AGE, OffsiteError, compareRemoteListing, copyRegularNoFollow, createOffsiteSink, materializeManifest, parseLsjson, parseOffsiteConfig, prepareSetForOffsite,
   rcloneCopyArgs, rsyncDifferences, rsyncPushArgs, rsyncVerifyArgs, sshCommand, validateLocalDir, validateRcloneRemote, validateSshTarget
 } from "../lib/offsite.mjs";
 import { findBinary } from "../lib/tools.mjs";
@@ -32,6 +34,7 @@ describe("WP-C2 off-site: konfig - av som standard, ÉN adapter, lukket tegnsett
     for (const bad of [":sftp,host=evil,user=x:/path", "-oProxyCommand=evil:x", "--config=/x:y", "navn", "navn:sti;rm -rf /", "navn:$(id)", "navn:`id`", "navn:a\nb", "navn:../../x", "navn:a\\b", "n a:b", `n:${"a".repeat(400)}`, "navn:'x'", "navn:a*b", "navn:{x}", "navn:a:b", "navn:a|b", "navn:a&b"]) {
       expect(() => validateRcloneRemote(bad), bad).toThrow(OffsiteError);
     }
+    for (const bad of ["-x:sti", "-:sti", "--config:sti", "-b2:sti", ".x:sti"]) expect(() => validateRcloneRemote(bad), bad).toThrow(/forventet «navn:sti»/);
     expect(validateRcloneRemote("b2:")).toBe("b2:");
     expect(validateRcloneRemote("gdrive:Backups/Jarvis")).toBe("gdrive:Backups/Jarvis");
     expect(validateRcloneRemote("gdrive:Mine sikkerhetskopier/Æøå-2026")).toBe("gdrive:Mine sikkerhetskopier/Æøå-2026");
@@ -41,6 +44,11 @@ describe("WP-C2 off-site: konfig - av som standard, ÉN adapter, lukket tegnsett
     for (const bad of ["-oProxyCommand=x@host:/p", "user@-oProxyCommand=x:/p", "user@host:relativ", "user@host:/a/../b", "user@host:/a b", "user@host:/a;b", "user@host:/$(id)", "user@host:/", "host:/p", "user@host", "user@host:/p\n", "@host:/p"]) {
       expect(() => validateSshTarget(bad), bad).toThrow(OffsiteError);
     }
+    // E7 (review): disse inneholder KUN tegn som ellers er lovlige - det er den ledende «-» alene som avvises (en bruker/vert som begynner med «-» blir et ssh-/rsync-flagg)
+    for (const bad of ["-user@host:/p", "-o@host:/p", "-@host:/p", "--@host:/p", "user@-host:/p", "user@-o:/p", "user@--:/p", "u-ser@-h.example:/p", "-F@h:/p"]) {
+      expect(() => validateSshTarget(bad), bad).toThrow(/forventet «bruker@vert:\/absolutt\/sti»/);
+    }
+    for (const ok of ["u-ser@h-ost.example:/p", "_u@h1:/p", "u.s@h:/a-b/c"]) expect(() => validateSshTarget(ok), ok).not.toThrow();
     expect(validateSshTarget("u@[::1]:/srv/x/")).toMatchObject({ host: "[::1]", path: "/srv/x" });
     expect(() => parseOffsiteConfig({ JARVIS_BACKUP_OFFSITE_SSH: "u@h:/p", JARVIS_BACKUP_OFFSITE_SSH_KEY: "/home/x/my key" })).toThrow(/ingen mellomrom/);
     expect(() => parseOffsiteConfig({ JARVIS_BACKUP_OFFSITE_SSH: "u@h:/p", JARVIS_BACKUP_OFFSITE_SSH_KNOWN_HOSTS: "relativ/known_hosts" })).toThrow(OffsiteError);
@@ -147,6 +155,29 @@ describe("WP-C2 off-site: KUN age-chiffertekst forlater maskinen (forhåndssjekk
     await expect(prepareSetForOffsite(dir, { encryptManifest: fakeEncryptManifest })).rejects.toMatchObject({ code: "offsite_config_invalid" });
   });
 
+  it("review E13: en ALLEREDE EKSISTERENDE manifest.json.age som ikke er age-chiffertekst nektes - ellers ville manifestet (tabellnavn + radtall) gått ut i klartekst under et .age-navn", async () => {
+    const bad = {
+      "klartekst-manifest": (dir) => writeFileSync(join(dir, MANIFEST_AGE), readFileSync(join(dir, "manifest.json"))),
+      "tom fil": (dir) => writeFileSync(join(dir, MANIFEST_AGE), ""),
+      "kortere enn age-headeren": (dir) => writeFileSync(join(dir, MANIFEST_AGE), AGE_MAGIC.subarray(0, 8)),
+      "header med feil versjon": (dir) => writeFileSync(join(dir, MANIFEST_AGE), "age-encryption.org/v2\n-> X25519 AAAA\n"),
+      "symlenke til en ekte age-fil": (dir) => { const real = join(tempDir(), "ekte.age"); writeFileSync(real, Buffer.concat([AGE_MAGIC, Buffer.from("\nxx")])); symlinkSync(real, join(dir, MANIFEST_AGE)); },
+      "katalog": (dir) => mkdirSync(join(dir, MANIFEST_AGE))
+    };
+    for (const [what, make] of Object.entries(bad)) {
+      const { dir } = makeSet(tempDir(), WHEN);
+      make(dir);
+      await expect(prep(dir), what).rejects.toMatchObject({ code: "offsite_ineligible" });
+      await expect(prep(dir), what).rejects.toThrow(/manifest\.json\.age er ikke age-chiffertekst/);
+    }
+    // motstykket: en ekte (gyldig) forhåndseksisterende manifest.json.age brukes som den er og krypteres ikke på nytt
+    const { dir } = makeSet(tempDir(), WHEN);
+    const ciphertext = Buffer.concat([Buffer.from(AGE_MAGIC), Buffer.from("\n-> X25519 QQ\nzz\n--- yy\n"), Buffer.alloc(24, 7)]);
+    writeFileSync(join(dir, MANIFEST_AGE), ciphertext);
+    const prepared = await prepareSetForOffsite(dir, { encryptManifest: async () => { throw new Error("skal ikke kryptere på nytt"); } });
+    expect(prepared.files.at(-1)).toMatchObject({ name: MANIFEST_AGE, size: ciphertext.length });
+  });
+
   it("rester etter en avbrutt manifest-kryptering ryddes (vår egen tmp-fil blir ikke en «ukjent fil»)", async () => {
     const { dir } = makeSet(tempDir(), WHEN);
     writeFileSync(join(dir, "manifest.json.age.tmp-0123456789ab"), "halv");
@@ -192,7 +223,7 @@ describe("WP-C2 off-site: lokal sti (USB/annen disk) - atomisk, aldri overskrivi
     const target = tempDir("wpc2-usb-");
     if (marker) writeFileSync(join(target, LOCAL_MARKER), "");
     const set = makeSet(out, WHEN);
-    const sink = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice, timeoutMs: 1000 }, { sourceDir: out });
+    const sink = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice, timeoutMs: 30_000 }, { sourceDir: out });
     return { out, target, set, sink, prepared: await prep(set.dir) };
   };
 
@@ -209,7 +240,7 @@ describe("WP-C2 off-site: lokal sti (USB/annen disk) - atomisk, aldri overskrivi
     const inside = join(out, "off");
     mkdirSync(inside);
     writeFileSync(join(inside, LOCAL_MARKER), "");
-    const nested = createOffsiteSink({ adapter: "local", dir: inside, allowSameDevice: true, timeoutMs: 1 }, { sourceDir: out });
+    const nested = createOffsiteSink({ adapter: "local", dir: inside, allowSameDevice: true, timeoutMs: 30_000 }, { sourceDir: out });
     await expect(nested.list()).rejects.toThrow(/inne i backup-mappen/);
   });
 
@@ -249,6 +280,291 @@ describe("WP-C2 off-site: lokal sti (USB/annen disk) - atomisk, aldri overskrivi
     rmSync(join(target, set.name, "globals.sql.age"));
     await expect(sink.verify(prepared)).rejects.toThrow(/mangler: globals\.sql\.age/);
     await expect(sink.fetch("../../etc", join(tempDir(), "x"))).rejects.toThrow(/ugyldig settnavn/);
+  });
+});
+
+describe("WP-C2 off-site (review F4): en hengt disk/NFS-montering blokkerer aldri tikket - hver operasjon har en frist", () => {
+  const never = () => new Promise(() => undefined);
+  const setup = async (fs, { timeoutMs = 150, cleanupMs = 100 } = {}) => {
+    const out = tempDir();
+    const target = tempDir("wpc2-usb-");
+    writeFileSync(join(target, LOCAL_MARKER), "");
+    const set = makeSet(out, WHEN);
+    const sink = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs }, { sourceDir: out, fs, cleanupMs });
+    return { target, set, sink, prepared: await prep(set.dir) };
+  };
+
+  it("en kopi som aldri ferdigstilles gir `offsite_timeout` innen fristen (ikke en evig ventetid), og resten av tikket kan gå videre", async () => {
+    const { sink, prepared, target } = await setup({ copyFile: never });
+    const t0 = Date.now();
+    await expect(sink.push(prepared)).rejects.toMatchObject({ code: "offsite_timeout" });
+    expect(Date.now() - t0).toBeLessThan(3000);
+    expect(readdirSync(target).filter((n) => n.startsWith("jarvis-backup-"))).toEqual([]); // ingenting ble publisert
+    expect(readdirSync(target).filter((n) => n.startsWith(".incoming"))).toEqual([]); // og den halve kopien ble ryddet (best effort)
+  });
+
+  it("hengt oppryddingen også, gir den opp etter sin egen korte frist: feilen rapporteres likevel, resten (.incoming-*) ryddes senere", async () => {
+    const { sink, prepared, target } = await setup({ copyFile: never, rm: never }, { cleanupMs: 100 });
+    const t0 = Date.now();
+    await expect(sink.push(prepared)).rejects.toMatchObject({ code: "offsite_timeout" });
+    expect(Date.now() - t0).toBeLessThan(3000);
+    expect(readdirSync(target).filter((n) => n.startsWith(".incoming"))).toHaveLength(1); // resten ligger igjen; F12 fjerner den når den er foreldet
+  });
+
+  it("selve målet som henger (stat av montering): list, push, verify og fetch gir alle `offsite_timeout`", async () => {
+    const { sink, prepared } = await setup({ stat: never });
+    for (const op of [() => sink.list(), () => sink.push(prepared), () => sink.verify(prepared), () => sink.fetch(prepared.name, join(tempDir(), "x"))]) {
+      await expect(op()).rejects.toMatchObject({ code: "offsite_timeout" });
+    }
+  });
+
+  it("sjekksum-lesing som henger er tidsavbrudd, ikke «mangler» (en hengt disk skal ikke se ut som en tom disk)", async () => {
+    const { sink, prepared } = await setup({}, { timeoutMs: 20_000 }); // den friske pushen skal ikke selv kunne tidsavbrytes (fsync på en tregere disk)
+    await sink.push(prepared);
+    const hung = createOffsiteSink({ adapter: "local", dir: sink.config.dir, allowSameDevice: true, timeoutMs: 150 }, { sourceDir: sink.deps.sourceDir, fs: { lstat: never } });
+    await expect(hung.verify(prepared)).rejects.toMatchObject({ code: "offsite_timeout" });
+  });
+
+  it("en operasjon som svikter ETTER at fristen er gått gir ingen uhåndtert avvisning (race-vinneren er allerede avgjort)", async () => {
+    const late = () => new Promise((_, reject) => setTimeout(() => reject(new Error("sent")), 300));
+    const { sink, prepared } = await setup({ copyFile: late }, { timeoutMs: 100 });
+    await expect(sink.push(prepared)).rejects.toMatchObject({ code: "offsite_timeout" });
+    await new Promise((resolve) => setTimeout(resolve, 500)); // vitest feiler kjøringen hvis en uhåndtert avvisning dukker opp i mellomtiden
+  });
+
+  it("fristen er TOTAL for ett kall: mange små, trege steg summeres (ikke 120 min per fil)", async () => {
+    const slow = (real) => async (...args) => { await new Promise((resolve) => setTimeout(resolve, 60)); return real(...args); };
+    const { chmod } = await import("node:fs/promises");
+    const { sink, prepared } = await setup({ copyFile: slow(copyRegularNoFollow), chmod: slow(chmod) }, { timeoutMs: 250 });
+    await expect(sink.push(prepared)).rejects.toMatchObject({ code: "offsite_timeout" }); // 5 filer × (kopi + chmod) × 60 ms > 250 ms
+  });
+
+  it("uten hengt disk er oppførselen uendret (full rundtur), og feil FØR fristen beholder sin egen kode", async () => {
+    const { sink, prepared, target, set } = await setup({}, { timeoutMs: 20_000 });
+    expect(await sink.push(prepared)).toMatchObject({ verification: "sha256", files: 5 });
+    expect(await sink.list()).toEqual([set.name]);
+    rmSync(join(target, set.name, "globals.sql.age"));
+    await expect(sink.verify(prepared)).rejects.toMatchObject({ code: "offsite_verify_failed" });
+  });
+});
+
+describe("WP-C2 off-site (review F13): kopiering fra et ÅPNET håndtak uten å følge symlenker - en fil som byttes ut etter forhåndssjekken kommer ikke ut", () => {
+  const onLinux = process.platform === "linux";
+  const ageBytes = (n = 300) => Buffer.concat([AGE_MAGIC, Buffer.from("\n-> X25519 AA\nBB\n--- CC\n"), Buffer.alloc(n, 9)]);
+  const unblock = (fifo) => { try { chmodSync(fifo, 0o600); const fd = openSync(fifo, constants.O_WRONLY | constants.O_NONBLOCK); closeSync(fd); } catch { /* ingen blokkert leser */ } };
+  const guarded = (p, ms = 3000) => Promise.race([p, new Promise((resolve) => setTimeout(() => resolve("HUNG"), ms))]);
+  const sha = (buf) => createHash("sha256").update(buf).digest("hex");
+
+  it("copyRegularNoFollow: vanlig fil kopieres (0600), eksisterende mål overskrives ALDRI (wx), og hash/størrelse/header sjekkes mot det som faktisk ble lest", async () => {
+    const dir = tempDir();
+    const body = ageBytes();
+    writeFileSync(join(dir, "a.age"), body);
+    await copyRegularNoFollow(join(dir, "a.age"), join(dir, "b.age"), { size: body.length, sha256: sha(body), ageHeader: true });
+    expect(readFileSync(join(dir, "b.age")).equals(body)).toBe(true);
+    expect(statSync(join(dir, "b.age")).mode & 0o777).toBe(0o600);
+    await expect(copyRegularNoFollow(join(dir, "a.age"), join(dir, "b.age"))).rejects.toMatchObject({ code: "EEXIST" });
+    expect(readFileSync(join(dir, "b.age")).equals(body)).toBe(true); // urørt
+    // avvik fra forhåndssjekken: kopien fjernes, og feilen er offsite_verify_failed
+    await expect(copyRegularNoFollow(join(dir, "a.age"), join(dir, "c.age"), { size: body.length + 1 })).rejects.toMatchObject({ code: "offsite_verify_failed" });
+    await expect(copyRegularNoFollow(join(dir, "a.age"), join(dir, "d.age"), { sha256: "0".repeat(64) })).rejects.toMatchObject({ code: "offsite_verify_failed" });
+    expect(existsSync(join(dir, "c.age")) || existsSync(join(dir, "d.age"))).toBe(false);
+    // uten forventninger kopieres også en tom fil
+    writeFileSync(join(dir, "tom.age"), "");
+    await copyRegularNoFollow(join(dir, "tom.age"), join(dir, "tom-kopi.age"));
+    expect(statSync(join(dir, "tom-kopi.age")).size).toBe(0);
+    // store filer går i flere blokker
+    const big = Buffer.concat([AGE_MAGIC, Buffer.alloc(9 * 1024 * 1024, 5)]);
+    writeFileSync(join(dir, "stor.age"), big);
+    await copyRegularNoFollow(join(dir, "stor.age"), join(dir, "stor-kopi.age"), { size: big.length, sha256: sha(big), ageHeader: true });
+    expect(readFileSync(join(dir, "stor-kopi.age")).equals(big)).toBe(true);
+  });
+
+  it("symlenke (også til en identisk fil), mappe og FIFO som kilde avvises - uten å skrive noe og uten å henge", async () => {
+    const dir = tempDir();
+    const body = ageBytes();
+    writeFileSync(join(dir, "ekte.age"), body);
+    symlinkSync(join(dir, "ekte.age"), join(dir, "lenke.age"));
+    await expect(copyRegularNoFollow(join(dir, "lenke.age"), join(dir, "u1.age"), { size: body.length, sha256: sha(body) })).rejects.toMatchObject({ code: "offsite_ineligible" });
+    await expect(copyRegularNoFollow(join(dir, "lenke.age"), join(dir, "u1.age"))).rejects.toThrow(/symlenke/);
+    mkdirSync(join(dir, "mappe.age"));
+    await expect(copyRegularNoFollow(join(dir, "mappe.age"), join(dir, "u2.age"))).rejects.toThrow();
+    if (onLinux) {
+      const fifo = join(dir, "fifo.age");
+      execFileSync("mkfifo", [fifo]);
+      try {
+        const r = await guarded(copyRegularNoFollow(fifo, join(dir, "u3.age")).then(() => "KOPIERT", (err) => err));
+        expect(r).not.toBe("HUNG");
+        expect(r).not.toBe("KOPIERT");
+        expect(r).toMatchObject({ code: "offsite_ineligible" });
+      } finally {
+        unblock(fifo);
+      }
+    }
+    expect(readdirSync(dir).filter((n) => n.startsWith("u"))).toEqual([]);
+  });
+
+  it("klartekst bak et .age-navn: INGENTING opprettes i målet (første blokk må ha age-headeren), og en tom fil er heller ikke chiffertekst", async () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "klartekst.age"), "-- PostgreSQL database dump\nINSERT INTO secrets VALUES ('x');\n".repeat(20));
+    writeFileSync(join(dir, "kort.age"), AGE_MAGIC.subarray(0, 10));
+    writeFileSync(join(dir, "tom.age"), "");
+    for (const n of ["klartekst.age", "kort.age", "tom.age"]) {
+      await expect(copyRegularNoFollow(join(dir, n), join(dir, `ut-${n}`), { ageHeader: true }), n).rejects.toMatchObject({ code: "offsite_ineligible" });
+      expect(existsSync(join(dir, `ut-${n}`)), n).toBe(false);
+    }
+    // rekkefølgen er selve poenget: i en skrivebeskyttet mappe ville et forsøk på å OPPRETTE målfilen gitt EACCES - avvisningen skal komme FØR (ikke-rot; rot ignorerer rettigheter)
+    if (process.getuid?.() !== 0) {
+      const ro = tempDir();
+      chmodSync(ro, 0o500);
+      try {
+        await expect(copyRegularNoFollow(join(dir, "klartekst.age"), join(ro, "ut.age"), { ageHeader: true })).rejects.toMatchObject({ code: "offsite_ineligible" });
+      } finally {
+        chmodSync(ro, 0o700);
+      }
+    }
+  });
+
+  it("push: kilden byttes ut med en symlenke ETTER forhåndssjekken (til en fil med nøyaktig samme innhold) - settet publiseres ikke, og resten ryddes", async () => {
+    const out = tempDir();
+    const target = tempDir("wpc2-usb-");
+    writeFileSync(join(target, LOCAL_MARKER), "");
+    const set = makeSet(out, WHEN);
+    const prepared = await prep(set.dir);
+    const sink = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs: 20_000 }, { sourceDir: out });
+    const victim = join(set.dir, "jarvis.dump.age");
+    const copyOfIt = join(tempDir(), "identisk.age");
+    writeFileSync(copyOfIt, readFileSync(victim));
+    rmSync(victim);
+    symlinkSync(copyOfIt, victim);
+    // gammel copyFile ville fulgt lenken: størrelse og sjekksum stemmer, og settet ville blitt publisert
+    await expect(sink.push(prepared)).rejects.toMatchObject({ code: "offsite_ineligible" });
+    expect(readdirSync(target).filter((n) => n.startsWith("jarvis-backup-") || n.startsWith(".incoming"))).toEqual([]);
+  });
+
+  it("push: kilden byttes ut med KLARTEKST ETTER forhåndssjekken - ingenting klartekst skrives til målet, ikke et øyeblikk (katalogen er tom når den ryddes)", async () => {
+    const out = tempDir();
+    const target = tempDir("wpc2-usb-");
+    writeFileSync(join(target, LOCAL_MARKER), "");
+    const set = makeSet(out, WHEN);
+    const prepared = await prep(set.dir);
+    const seen = [];
+    const spyRm = async (path, options) => { if (path.includes(".incoming-")) seen.push(readdirSync(path)); return realRm(path, options); };
+    const sink = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs: 20_000 }, { sourceDir: out, fs: { rm: spyRm } });
+    const first = prepared.files[0];
+    writeFileSync(join(set.dir, first.name), Buffer.alloc(first.size, "S")); // samme størrelse, klartekst
+    await expect(sink.push(prepared)).rejects.toMatchObject({ code: "offsite_ineligible" });
+    expect(seen).toEqual([[]]); // .incoming-* var TOM da den ble fjernet: klartekstfilen ble aldri opprettet
+    expect(readdirSync(target).filter((n) => n.startsWith("jarvis-backup-") || n.startsWith(".incoming"))).toEqual([]);
+
+    // age-header men annet innhold (samme størrelse): fanges av sjekksummen før kopien beholdes, og kopien fjernes
+    const sink2 = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs: 20_000 }, { sourceDir: out });
+    writeFileSync(join(set.dir, first.name), Buffer.concat([AGE_MAGIC, Buffer.alloc(first.size - AGE_MAGIC.length, "S")]));
+    await expect(sink2.push(prepared)).rejects.toMatchObject({ code: "offsite_verify_failed" });
+    expect(readdirSync(target).filter((n) => n.startsWith("jarvis-backup-") || n.startsWith(".incoming"))).toEqual([]);
+  });
+
+  it("fetch: en symlenke i off-site-målet (byttet inn etter oppslaget) følges ikke", async () => {
+    const out = tempDir();
+    const target = tempDir("wpc2-usb-");
+    writeFileSync(join(target, LOCAL_MARKER), "");
+    const set = makeSet(out, WHEN);
+    const prepared = await prep(set.dir);
+    const plain = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs: 20_000 }, { sourceDir: out });
+    await plain.push(prepared);
+    const outside = join(tempDir(), "hemmelig.txt");
+    writeFileSync(outside, "KLARTEKST-HEMMELIGHET");
+    rmSync(join(target, set.name, "infisical.dump.age"));
+    symlinkSync(outside, join(target, set.name, "infisical.dump.age"));
+    // oppslaget (lstat) lyver: «alt er vanlige filer» - slik en fil som byttes ut ETTER oppslaget ville sett ut
+    const { lstat } = await import("node:fs/promises");
+    const lying = async (path) => { const st = await lstat(path); return { isFile: () => true, isDirectory: () => st.isDirectory(), isSymbolicLink: () => false, size: st.size, mtimeMs: st.mtimeMs }; };
+    const sink = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs: 20_000 }, { sourceDir: out, fs: { lstat: lying } });
+    const dest = join(tempDir(), "hentet");
+    await expect(sink.fetch(set.name, dest)).rejects.toMatchObject({ code: "offsite_ineligible" });
+    for (const n of existsSync(dest) ? readdirSync(dest) : []) expect(readFileSync(join(dest, n), "utf8")).not.toContain("KLARTEKST-HEMMELIGHET");
+  });
+});
+
+describe("WP-C2 off-site (review F12): foreldede .incoming-* i målet ryddes - bare våre egne, bare kataloger, bare når de er gamle", () => {
+  const DAY = 86_400_000;
+  const old = (path, ageMs) => { const t = new Date(Date.now() - ageMs); utimesSync(path, t, t); };
+  const setup = ({ timeoutMs = 30_000 } = {}) => {
+    const out = tempDir();
+    const target = tempDir("wpc2-usb-");
+    writeFileSync(join(target, LOCAL_MARKER), "");
+    return { out, target, sink: createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs }, { sourceDir: out }) };
+  };
+  const stale = (target, name, ageMs) => { mkdirSync(join(target, name)); writeFileSync(join(target, name, "jarvis.dump.age"), "halv kopi"); old(join(target, name), ageMs); };
+
+  it("fjerner foreldede egne rester; lar ferske rester, publiserte sett, filer, symlenker, ukjente navn og markørfilen være", async () => {
+    const { target, sink } = setup();
+    const staleName = "\u002eincoming-jarvis-backup-20260101T000000Z-0123abcd";
+    const freshName = "\u002eincoming-jarvis-backup-20260102T000000Z-aaaaaaaa";
+    stale(target, staleName, 3 * DAY);
+    stale(target, freshName, 1000);
+    stale(target, ".incoming-jarvis-backup-20260101T000000Z-ZZZZZZZZ", 3 * DAY); // ikke hex
+    stale(target, ".incoming-notes", 3 * DAY);
+    stale(target, "jarvis-backup-20260101T000000Z", 30 * DAY); // et PUBLISERT sett er aldri en rest
+    writeFileSync(join(target, ".incoming-jarvis-backup-20260103T000000Z-bbbbbbbb"), "en fil, ikke en katalog");
+    old(join(target, ".incoming-jarvis-backup-20260103T000000Z-bbbbbbbb"), 3 * DAY);
+    const outside = tempDir();
+    writeFileSync(join(outside, "canary.txt"), "må overleve");
+    old(outside, 3 * DAY); // målet ER gammelt: følges lenken, ser den ut som en foreldet rest
+    symlinkSync(outside, join(target, ".incoming-jarvis-backup-20260104T000000Z-cccccccc"));
+    expect(await sink.cleanupStale()).toEqual([staleName]);
+    expect(readdirSync(target).sort()).toEqual([
+      ".incoming-jarvis-backup-20260101T000000Z-ZZZZZZZZ", ".incoming-jarvis-backup-20260102T000000Z-aaaaaaaa", ".incoming-jarvis-backup-20260103T000000Z-bbbbbbbb",
+      ".incoming-jarvis-backup-20260104T000000Z-cccccccc", ".incoming-notes", LOCAL_MARKER, "jarvis-backup-20260101T000000Z"
+    ].sort());
+    expect(readFileSync(join(outside, "canary.txt"), "utf8")).toBe("må overleve"); // symlenken ble ikke fulgt
+    expect(await sink.cleanupStale()).toEqual([]); // idempotent
+  });
+
+  it("terskelen er max(12 t, 2 × off-site-fristen): 11 t er fersk, 13 t er foreldet; med en frist på 10 t er 15 t fortsatt fersk og 25 t foreldet", async () => {
+    const a = setup();
+    stale(a.target, ".incoming-jarvis-backup-20260101T000000Z-00000001", 11 * 3_600_000);
+    stale(a.target, ".incoming-jarvis-backup-20260101T000000Z-00000002", 13 * 3_600_000);
+    expect(await a.sink.cleanupStale()).toEqual([".incoming-jarvis-backup-20260101T000000Z-00000002"]);
+    const b = setup({ timeoutMs: 10 * 3_600_000 });
+    stale(b.target, ".incoming-jarvis-backup-20260101T000000Z-00000003", 15 * 3_600_000);
+    stale(b.target, ".incoming-jarvis-backup-20260101T000000Z-00000004", 25 * 3_600_000);
+    expect(await b.sink.cleanupStale()).toEqual([".incoming-jarvis-backup-20260101T000000Z-00000004"]);
+  });
+
+  it("mønsteret er nøyaktig det push() lager (en rest etter en hengt kopi matcher), og en avmontert disk ryddes ikke (markørfilen kreves)", async () => {
+    const out = tempDir();
+    const target = tempDir("wpc2-usb-");
+    writeFileSync(join(target, LOCAL_MARKER), "");
+    const set = makeSet(out, WHEN);
+    const never = () => new Promise(() => undefined);
+    const hung = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs: 150 }, { sourceDir: out, fs: { copyFile: never, rm: never }, cleanupMs: 50 });
+    await expect(hung.push(await prep(set.dir))).rejects.toMatchObject({ code: "offsite_timeout" });
+    const leftovers = readdirSync(target).filter((n) => n.startsWith(".incoming"));
+    expect(leftovers).toHaveLength(1);
+    expect(INCOMING_RE.test(leftovers[0])).toBe(true);
+    old(join(target, leftovers[0]), 3 * DAY);
+    const healthy = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs: 30_000 }, { sourceDir: out });
+    expect(await healthy.cleanupStale()).toEqual(leftovers);
+    expect(readdirSync(target).filter((n) => n.startsWith(".incoming"))).toEqual([]);
+
+    const bare = tempDir("wpc2-unmounted-");
+    mkdirSync(join(bare, ".incoming-jarvis-backup-20260101T000000Z-0123abcd"));
+    old(join(bare, ".incoming-jarvis-backup-20260101T000000Z-0123abcd"), 3 * DAY);
+    const unmounted = createOffsiteSink({ adapter: "local", dir: bare, allowSameDevice: true, timeoutMs: 30_000 }, { sourceDir: out });
+    await expect(unmounted.cleanupStale()).rejects.toThrow(/mangler markørfilen/);
+    expect(readdirSync(bare)).toEqual([".incoming-jarvis-backup-20260101T000000Z-0123abcd"]);
+  });
+
+  it("oppryddingen har samme frist som alt annet mot disken: en hengt rm gir offsite_timeout, ikke en evig ventetid", async () => {
+    const out = tempDir();
+    const target = tempDir("wpc2-usb-");
+    writeFileSync(join(target, LOCAL_MARKER), "");
+    stale(target, ".incoming-jarvis-backup-20260101T000000Z-0123abcd", 3 * DAY);
+    const never = () => new Promise(() => undefined);
+    const sink = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs: 150 }, { sourceDir: out, fs: { rm: never } });
+    const t0 = Date.now();
+    await expect(sink.cleanupStale()).rejects.toMatchObject({ code: "offsite_timeout" });
+    expect(Date.now() - t0).toBeLessThan(3000);
   });
 });
 
@@ -430,5 +746,111 @@ describe("WP-C2 off-site: standard-kjøreren gir underprosessene et MINIMALT mil
     } finally {
       process.env.PATH = saved;
     }
+  });
+});
+
+describe("WP-C2 off-site (review runde 2, L2): henting fra et UBETRODDT fjernmål har tak og age-header", () => {
+  const setup = async () => {
+    const out = tempDir();
+    const target = tempDir("wpc2-usb-");
+    writeFileSync(join(target, LOCAL_MARKER), "");
+    const set = makeSet(out, WHEN);
+    const sink = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs: 30_000 }, { sourceDir: out });
+    const prepared = await prep(set.dir);
+    await sink.push(prepared);
+    return { out, target, set, sink, prepared, dest: join(tempDir(), "hentet") };
+  };
+
+  it("kontroll: en sunn henting lykkes uten tak, med et romslig tak og med et tak NØYAKTIG lik settet (filene er identiske med de som ble sendt)", async () => {
+    const { sink, prepared, set } = await setup();
+    for (const options of [undefined, { maxBytes: prepared.bytes * 10 }, { maxBytes: prepared.bytes }]) {
+      const dest = join(tempDir(), "hentet");
+      const names = await sink.fetch(set.name, dest, options);
+      expect(names.sort()).toEqual(prepared.files.map((f) => f.name).sort());
+      for (const f of prepared.files) expect(createHash("sha256").update(readFileSync(join(dest, f.name))).digest("hex")).toBe(f.sha256);
+    }
+  });
+
+  it("settet over taket nektes FØR noe kopieres (arbeidsmappen opprettes ikke engang) - en gigantisk fil kan ikke fylle backup-disken", async () => {
+    const { sink, prepared, set, dest } = await setup();
+    await expect(sink.fetch(set.name, dest, { maxBytes: prepared.bytes - 1 })).rejects.toMatchObject({ code: "offsite_ineligible", message: expect.stringContaining("større enn grensen") });
+    expect(existsSync(dest)).toBe(false);
+    await expect(sink.fetch(set.name, dest, { maxBytes: 0 })).rejects.toMatchObject({ code: "offsite_ineligible" });
+  });
+
+  it("en gigantisk fil lagt inn i fjernmålet (sparse, 40 GB) stopper henting med tak - uten å lese eller skrive en byte", async () => {
+    const { sink, target, set, dest } = await setup();
+    const huge = join(target, set.name, "plantet-stor.dump.age");
+    const fd = openSync(huge, "w");
+    closeSync(fd);
+    execFileSync("truncate", ["-s", "40G", huge]); // sparse: tar ingen plass i testmiljøet
+    await expect(sink.fetch(set.name, dest, { maxBytes: 1024 ** 3 })).rejects.toMatchObject({ code: "offsite_ineligible" });
+    expect(existsSync(dest)).toBe(false);
+  });
+
+  it("en .age-fil som ikke starter med age-headeren (omdøpt klartekst) kopieres ALDRI - ingenting skrives til arbeidsmappen for den filen", async () => {
+    const { sink, target, set, dest } = await setup();
+    writeFileSync(join(target, set.name, "jarvis.dump.age"), "SELECT * FROM hemmeligheter; -- klartekst, ikke age");
+    await expect(sink.fetch(set.name, dest)).rejects.toMatchObject({ code: "offsite_ineligible", message: expect.stringContaining("ikke age-chiffertekst") });
+    expect(existsSync(join(dest, "jarvis.dump.age"))).toBe(false);
+    for (const n of existsSync(dest) ? readdirSync(dest) : []) expect(readFileSync(join(dest, n), "utf8")).not.toContain("hemmeligheter");
+    // en TOM .age-fil er heller ikke age
+    writeFileSync(join(target, set.name, "jarvis.dump.age"), "");
+    await expect(sink.fetch(set.name, join(tempDir(), "hentet2"))).rejects.toMatchObject({ code: "offsite_ineligible" });
+  });
+
+  it("en fil som endret størrelse mellom oppslaget og kopien (vokste) avvises, og den delvise kopien fjernes", async () => {
+    const { target, set, prepared, out } = await setup();
+    const { lstat } = await import("node:fs/promises");
+    const stale = async (path) => { const st = await lstat(path); return { isFile: () => st.isFile(), isDirectory: () => st.isDirectory(), isSymbolicLink: () => st.isSymbolicLink(), size: Math.max(1, st.size - 7), mtimeMs: st.mtimeMs }; };
+    const sink = createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs: 30_000 }, { sourceDir: out, fs: { lstat: stale } });
+    const dest = join(tempDir(), "hentet");
+    await expect(sink.fetch(set.name, dest)).rejects.toMatchObject({ code: "offsite_verify_failed", message: expect.stringContaining("størrelsen avviker fra forhåndssjekken") });
+    expect(prepared.bytes).toBeGreaterThan(0);
+    expect(existsSync(dest) ? readdirSync(dest) : []).toEqual([]);
+  });
+
+  it("hver kopi under hentingen får size (fra oppslaget), ageHeader:true og kallerens maxBytes - uten tak sendes bare de to første", async () => {
+    const { out, target, set, prepared } = await setup();
+    const sinkWith = (seen) => createOffsiteSink({ adapter: "local", dir: target, allowSameDevice: true, timeoutMs: 30_000 }, {
+      sourceDir: out, fs: { copyFile: async (src, dest, expected) => { seen.push({ file: src.split("/").at(-1), expected }); return copyRegularNoFollow(src, dest, expected); } }
+    });
+    const capped = [];
+    await sinkWith(capped).fetch(set.name, join(tempDir(), "h1"), { maxBytes: 1_000_000 });
+    expect(capped).toHaveLength(prepared.files.length);
+    for (const { file, expected } of capped) expect(expected, file).toEqual({ size: prepared.files.find((f) => f.name === file).size, ageHeader: true, maxBytes: 1_000_000 });
+    const uncapped = [];
+    await sinkWith(uncapped).fetch(set.name, join(tempDir(), "h2"));
+    for (const { file, expected } of uncapped) expect(expected, file).toEqual({ size: prepared.files.find((f) => f.name === file).size, ageHeader: true });
+  });
+
+  it("copyRegularNoFollow: `maxBytes` under filens størrelse avvises før dest opprettes; lik størrelse slipper gjennom", async () => {
+    const src = join(tempDir(), "x.age");
+    writeFileSync(src, Buffer.concat([AGE_MAGIC, Buffer.alloc(100, 1)]));
+    const size = statSync(src).size;
+    const dest = join(tempDir(), "y.age");
+    await expect(copyRegularNoFollow(src, dest, { ageHeader: true, maxBytes: size - 1 })).rejects.toMatchObject({ code: "offsite_ineligible" });
+    expect(existsSync(dest)).toBe(false);
+    await copyRegularNoFollow(src, dest, { ageHeader: true, maxBytes: size, size });
+    expect(statSync(dest).size).toBe(size);
+  });
+
+  it("rclone og rsync får `--max-size` bare når kallerens tak er oppgitt (per fil; ingen endring ellers)", async () => {
+    const rcloneRun = recorder([{}]);
+    const rcloneDest = join(tempDir(), "r");
+    await createOffsiteSink({ adapter: "rclone", remote: "mitt-b2:jarvis/backups", timeoutMs: 600_000 }, { run: rcloneRun.run }).fetch("jarvis-backup-20261009T020000Z", rcloneDest, { maxBytes: 5_000_000 });
+    const rcloneArgs = rcloneRun.calls[0].args;
+    expect(rcloneArgs[rcloneArgs.indexOf("--max-size") + 1]).toBe("4883K"); // ceil(5 000 000 / 1024) KiB: rundes OPP, aldri strengere enn kallerens tak med uforutsett enhet
+    const rcloneNoCap = recorder([{}]);
+    await createOffsiteSink({ adapter: "rclone", remote: "mitt-b2:jarvis/backups", timeoutMs: 600_000 }, { run: rcloneNoCap.run }).fetch("jarvis-backup-20261009T020000Z", join(tempDir(), "r2"));
+    expect(rcloneNoCap.calls[0].args).not.toContain("--max-size");
+
+    const rsyncConfig = { adapter: "rsync_ssh", target: { user: "backup", host: "annen-vert.lan", path: "/srv/jarvis", spec: "backup@annen-vert.lan:/srv/jarvis" }, keyFile: null, knownHosts: null, timeoutMs: 300_000 };
+    const rsyncRun = recorder([{}]);
+    await createOffsiteSink(rsyncConfig, { run: rsyncRun.run }).fetch("jarvis-backup-20261009T020000Z", join(tempDir(), "s"), { maxBytes: 5_000_000 });
+    expect(rsyncRun.calls[0].args).toContain("--max-size=5000000");
+    const rsyncNoCap = recorder([{}]);
+    await createOffsiteSink(rsyncConfig, { run: rsyncNoCap.run }).fetch("jarvis-backup-20261009T020000Z", join(tempDir(), "s2"));
+    expect(rsyncNoCap.calls[0].args.some((a) => a.startsWith("--max-size"))).toBe(false);
   });
 });

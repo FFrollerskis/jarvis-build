@@ -34,6 +34,9 @@ const INJECTION_PATTERNS: ReadonlyArray<[string, RegExp]> = [
   ["merge_or_deploy", /\b(merge|deploy|publish|push)\b.{0,30}\b(now|immediately|without (review|approval))\b/i]
 ];
 
+/** Id-ene til injeksjonsmønstrene (L4, gjennomgang av PR #313): gull-suiten krever én oppgave per mønster, så et nytt mønster uten oppgave gjør en test rød. */
+export const INJECTION_PATTERN_IDS: readonly string[] = INJECTION_PATTERNS.map(([id]) => id);
+
 /** Kodepunkt-områder som fjernes fra ubetrodd tekst: kontrolltegn (unntatt tab/linjeskift), DEL, zero-width, retningstegn, linje-/avsnittsskille. */
 const STRIPPED_RANGES: ReadonlyArray<readonly [number, number]> = [
   [0x00, 0x08], [0x0b, 0x0c], [0x0e, 0x1f], [0x7f, 0x7f], [0x200b, 0x200f], [0x2028, 0x202e], [0x2060, 0x2064], [0xfeff, 0xfeff]

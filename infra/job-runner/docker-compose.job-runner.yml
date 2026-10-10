@@ -1,0 +1,34 @@
+# WP-C1 (D-32 / Q-45a): VALGFRI override som kobler worker til den vertsside job-runneren. Aktiveres ved å legge den til compose-kallet:
+#
+#   docker compose --env-file .env -f infra/local/docker-compose.yml -f infra/job-runner/docker-compose.job-runner.yml up -d worker
+#
+# Uten denne filen (og med tomme JARVIS_JOB_RUNNER*-variabler) feiler hver kodejobb lukket, som før. Filen gir worker KUN to ting:
+#   1. runnerens socket-KATALOG /var/lib/jarvis-job-runner/sock (read-only mount). Katalogen er PERSISTENT og slettes aldri av runneren eller systemd, så
+#      omstart av runneren, krasj og reboot ugyldiggjør ikke mounten (en bind-mount peker på selve katalog-inoden; en katalog under /run som systemd fjerner
+#      ved hver stopp ville pekt på en slettet katalog til worker ble startet på nytt). Worker kan også starte FØR runneren: socketen mangler da bare en stund,
+#      og kodejobber feiler lukket (host_job_runner_error:unreachable) til runneren er oppe. install-host.sh oppretter katalogen.
+#   2. tokenfilen (read-only) - selve token-verdien står aldri i env eller compose.
+# Den monterer IKKE Docker-socketen, gir ingen capabilities og endrer ikke nettverk. Worker får tilgang til socketen via gruppen
+# jarvis-job-clients (group_add med NUMERISK gid; sett JARVIS_JOB_RUNNER_GID i .env: `getent group jarvis-job-clients | cut -d: -f3`).
+# Eksisterer ikke katalogen/filen på verten, nekter compose å starte worker (create_host_path: false) - aldri en stille tom mount.
+services:
+  worker:
+    environment:
+      JARVIS_JOB_RUNNER: "host"
+      JARVIS_JOB_RUNNER_SOCKET: "/run/jarvis-job-runner/runner.sock"
+      JARVIS_JOB_RUNNER_TOKEN_FILE: "/run/secrets/jarvis-job-runner-token"
+    group_add:
+      - "${JARVIS_JOB_RUNNER_GID:?sett JARVIS_JOB_RUNNER_GID i .env til gid for gruppen jarvis-job-clients}"
+    volumes:
+      - type: bind
+        source: /var/lib/jarvis-job-runner/sock
+        target: /run/jarvis-job-runner
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /etc/jarvis/job-runner.token
+        target: /run/secrets/jarvis-job-runner-token
+        read_only: true
+        bind:
+          create_host_path: false
