@@ -124,4 +124,6 @@ Per audit 2026-10-05: DONE_IN_CODE 2 (Situation Engine, Executive Mode), PARTIAL
 4. Levere/bekrefte: GitHub-token og evt. GitHub App (Q-45b), Google Ads developer token, Meta-verifisering, Cloudflare-token, Apple Developer/Mac (D-36), HA-instans + token, bil-provider (Q-13), e-sign-leverandør (Q-28 B).
 5. Fysiske kjøringer: ≥100 norske lydprøver (D-30), off-site backup + restore-drill, uptime-overvåking, Xcode/iPhone/Watch.
 6. HF6-filen (Q-43) og HF2-PDF-en i `docs/input/` hvis planens egne akseptansekriterier skal måles.
-7. Kjøre akseptansegaten (`ops/acceptance/nas-ua0-gate.sh`) og verifiseringspakken (WP-J) sammen med meg.
+7. Kjøre akseptanseportene (`ops/acceptance/nas-ua0-gate.sh` og `ops/acceptance/nas-hf1-hf2-gate.sh`) og verifiseringspakken (WP-J) sammen med meg.
+
+**Verifiseringspakken (WP-J3):** oppdatering av NAS-en: [runbooks/NAS_UPDATE_HF1_HF2.md](runbooks/NAS_UPDATE_HF1_HF2.md) · manus for den felles økten (blokker, bestått-kriterier, evidens-id-er): [runbooks/VERIFICATION_SESSION_HF1_HF2.md](runbooks/VERIFICATION_SESSION_HF1_HF2.md) · alt som bare du kan gjøre, som sjekkliste: [OWNER_ACTIONS_HF1_HF2.md](OWNER_ACTIONS_HF1_HF2.md). Porten og pakken endrer ingen rad: en rad blir `VERIFIED` først når en evidensfil er lenket.
