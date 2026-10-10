@@ -1,5 +1,5 @@
 import type { JsonValue } from "@jarvis/contracts";
-import type { ToolTransport } from "./gateway.ts";
+import { OUTCOME_UNKNOWN_PREFIX, type ToolTransport } from "./gateway.ts";
 import { guardedFetch, isRetrySafeStatus } from "./url-safety.ts";
 import { redactVendorText, vendorText, vendorTimestamp } from "./vendor-text.ts";
 import {
@@ -130,6 +130,24 @@ export function maskEmail(email: string | null): string | null {
 /** Felt vi kjenner på en ruleset-regel; alt annet (action_parameters, logging …) bevares i `extra` slik at endring/gjenoppretting aldri mister dem. */
 const RULE_KNOWN = new Set(["id", "ref", "version", "last_updated", "action", "expression", "description", "enabled", "ratelimit", "categories"]);
 const RULE_READ_ONLY = new Set(["id", "version", "last_updated", "categories"]);
+/**
+ * Gjennomgang av PR #324 (M4): størrelsestaket per ukjent regelfelt i `extra` (tegn som JSON). Et felt OVER taket ble tidligere STILLE sluppet fra `extra` - og siden en PATCH sender hele regelen (verste tilfelle: serveren
+ * erstatter), mistet regelen feltet (`action_parameters.response.content` på 6000 tegn), mens etterbetingelsen (som kun sjekker action/uttrykk/beskrivelse/aktiv) meldte SUKSESS. Nå registreres feltnavnet i
+ * `extra_omitted`, og regelen kan verken endres eller slettes (stabil feilkode `cloudflare_rule_unroundtrippable_fields`) - ingenting sendes som ikke kan gjenopprettes.
+ */
+export const CLOUDFLARE_RULE_EXTRA_FIELD_MAX_CHARS = 4000;
+/** Stabil feilkode når en regel har felt som ikke kan round-trippes (endring/sletting avvises). */
+export const CLOUDFLARE_RULE_UNROUNDTRIPPABLE = "cloudflare_rule_unroundtrippable_fields";
+
+/** Kanonisk JSON (sorterte nøkler, rekursivt) - dyp likhet uavhengig av nøkkelrekkefølge. */
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (isObj(value)) return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${stableJson(value[k])}`).join(",")}}`;
+  return JSON.stringify(value) ?? "null";
+}
+
+/** Feltnavn til en feilmelding/preflight: kun trygge tegn, kort liste. */
+const safeNames = (names: readonly string[]): string => names.slice(0, 5).map((n) => n.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 40)).join(",");
 
 export interface NormalizedRule {
   id: string;
@@ -142,13 +160,21 @@ export interface NormalizedRule {
   last_updated: string | null;
   ratelimit: JsonValue | null;
   extra: Record<string, JsonValue>;
+  /**
+   * M4: NAVN (aldri verdier) på ukjente regelfelt som er for store til å bevares i `extra` (over `CLOUDFLARE_RULE_EXTRA_FIELD_MAX_CHARS`). Ikke tom = regelen KAN IKKE round-trippes: den kan hverken endres eller slettes
+   * (feltet ville gått tapt i PATCH, og snapshotet kan ikke gjenopprette det). Vises i preflight (`get_ruleset`) og i før-/etter-tilstanden.
+   */
+  extra_omitted: string[];
 }
 
 function normalizeRule(raw: unknown): NormalizedRule | null {
   if (!isObj(raw) || typeof raw["id"] !== "string") return null;
   const extra: Record<string, JsonValue> = {};
+  const omitted: string[] = [];
   for (const [key, value] of Object.entries(raw)) {
-    if (!RULE_KNOWN.has(key) && JSON.stringify(value).length <= 4000) extra[key] = json(value);
+    if (RULE_KNOWN.has(key)) continue;
+    if ((JSON.stringify(value) ?? "").length <= CLOUDFLARE_RULE_EXTRA_FIELD_MAX_CHARS) extra[key] = json(value);
+    else omitted.push(key);
   }
   return {
     id: raw["id"],
@@ -160,7 +186,7 @@ function normalizeRule(raw: unknown): NormalizedRule | null {
     version: str(raw["version"]),
     last_updated: str(raw["last_updated"]),
     ratelimit: isObj(raw["ratelimit"]) ? json(raw["ratelimit"]) : null,
-    extra
+    extra, extra_omitted: omitted.sort()
   };
 }
 
@@ -650,6 +676,8 @@ export class CloudflareTransport implements ToolTransport {
     const current = before.rules.find((r) => r.id === ruleId);
     if (!before.id || !current) throw new CloudflareApiError("cloudflare_error_404:rule_not_found", 404, false);
     if (current.action === null || current.expression === null) throw new Error("cloudflare_rule_not_modelled");
+    // M4: en regel med felt som ikke kan bevares i sin helhet endres ALDRI (PATCH sender hele regelen - feltet ville gått tapt uten at etterbetingelsen merket det).
+    if (current.extra_omitted.length > 0) throw new Error(`${CLOUDFLARE_RULE_UNROUNDTRIPPABLE}:${safeNames(current.extra_omitted)}`);
     const merged = {
       ref: current.ref, action: input.action ?? current.action, expression: input.expression ?? current.expression,
       description: input.description ?? current.description, enabled: input.enabled ?? current.enabled,
@@ -663,6 +691,10 @@ export class CloudflareTransport implements ToolTransport {
     const after = normalizeRuleset(env.result, input.phase);
     const updated = after.rules.find((r) => r.id === ruleId);
     if (!updated) throw new CloudflareApiError("cloudflare_invalid_response:rule_missing", 200, false);
+    // M4: det vi SENDTE må finnes igjen i svaret (dyp likhet per ukjent felt; felt leverandøren selv legger til er greit). Mistet regelen et felt, SKJEDDE endringen - utfallet er da ukjent for gatewayen
+    // (uverifisert + umiddelbar varsling), aldri en suksess.
+    const lost = Object.keys(merged.extra).filter((key) => stableJson(merged.extra[key]) !== stableJson(updated.extra[key]));
+    if (lost.length > 0 || updated.extra_omitted.length > 0) throw new Error(`${OUTCOME_UNKNOWN_PREFIX}:cloudflare_rule_fields_changed:${safeNames([...lost, ...updated.extra_omitted])}`);
     return { external_id: updated.id, data: json({ ruleset_id: after.id, rule: updated }) };
   }
 
@@ -671,7 +703,10 @@ export class CloudflareTransport implements ToolTransport {
     const ruleId = this.requireId(parameters, "rule_id");
     const phase = assertWafPhase(parameters["phase"]);
     const before = await this.entrypoint(zoneId, phase, credential);
-    if (!before.id || !before.rules.some((r) => r.id === ruleId)) throw new CloudflareApiError("cloudflare_error_404:rule_not_found", 404, false);
+    const existing = before.rules.find((r) => r.id === ruleId);
+    if (!before.id || !existing) throw new CloudflareApiError("cloudflare_error_404:rule_not_found", 404, false);
+    // M4: snapshotet (before_state) ville mangle de utelatte feltene, så sletting ville vært uopprettelig - avvises som endring.
+    if (existing.extra_omitted.length > 0) throw new Error(`${CLOUDFLARE_RULE_UNROUNDTRIPPABLE}:${safeNames(existing.extra_omitted)}`);
     await this.call("DELETE", `/zones/${zoneId}/rulesets/${before.id}/rules/${ruleId}`, credential);
     return { external_id: ruleId, data: json({ deleted: true, ruleset_id: before.id, rule_id: ruleId }) };
   }

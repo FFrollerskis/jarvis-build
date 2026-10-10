@@ -193,7 +193,8 @@ const undoDeleteRule: Strategy = async (ctx) => {
   const beforeRule = ruleId ? rulesOf(j.exec.before_state).find((r) => r.id === ruleId) : undefined;
   if (!phase || !beforeRule || beforeRule.action === null || beforeRule.expression === null) return unknown("no_before_state_captured");
   // Regler med skip/execute-parametere (action_parameters m.m.) kan ikke gjenskapes via den smale create-handlingen - ærlig PARTIAL med snapshotet, ikke en lavere versjon av regelen.
-  if (Object.keys(beforeRule.extra ?? {}).length > 0) return { status: "PARTIAL", result: { reason: "rule_has_unmodelled_fields_manual_restore_required", snapshot: beforeRule } };
+  // M4: felt som var for store til å bevares i snapshotet (`extra_omitted`) kan heller ikke gjenskapes.
+  if (Object.keys(beforeRule.extra ?? {}).length > 0 || (beforeRule.extra_omitted?.length ?? 0) > 0) return { status: "PARTIAL", result: { reason: "rule_has_unmodelled_fields_manual_restore_required", snapshot: beforeRule } };
   const current = await read(ctx, "get_ruleset", { zone_id: j.zone, phase });
   if (!current.ok) return failed(current.reason);
   const match = rulesOf(current.data).find((r) => sameRule(beforeRule, r));

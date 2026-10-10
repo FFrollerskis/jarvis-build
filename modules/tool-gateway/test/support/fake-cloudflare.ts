@@ -44,6 +44,10 @@ export class FakeCloudflare {
   ignoreFilters = false;
   silentlyIgnoreWrites = false;
   ruleUpdateSemantics: "replace" | "merge" = "replace";
+  /** M4: feltnavn en PATCH SILENT dropper fra regelen uansett hva som sendes (simulerer en leverandør som ikke bevarer ukjente felt). */
+  patchDropsFields: string[] = [];
+  /** M4: felt leverandøren SELV legger til en regel ved hver PATCH (f.eks. standardverdier) - skal ikke gi falsk «felt mistet». */
+  patchAddsFields: Record<string, unknown> = {};
   quoteTxt = true;
   /** Visningsnavn i sone-svaret (M1: testene setter dem til fiendtlig tekst, se `hostile.ts`). */
   accountName = "Test account";
@@ -300,6 +304,8 @@ export class FakeCloudflare {
         if (!this.silentlyIgnoreWrites) {
           const base = this.ruleUpdateSemantics === "merge" ? { ...old } : {};
           rs.rules[idx] = { ...base, ...b, id: old.id, version: String(Number(old.version) + 1), last_updated: new Date().toISOString() } as FakeRule;
+          for (const field of this.patchDropsFields) delete rs.rules[idx]![field];
+          Object.assign(rs.rules[idx]!, this.patchAddsFields);
           this.versionBump(rs);
         }
         return this.send(res, 200, this.ok(this.rulesetView(rs)));

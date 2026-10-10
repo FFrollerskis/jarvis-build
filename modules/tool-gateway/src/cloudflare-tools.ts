@@ -47,10 +47,16 @@ const settingId = z.enum(CLOUDFLARE_ZONE_SETTING_IDS as [string, ...string[]]);
 
 type Params = Record<string, JsonValue>;
 interface DnsRecordView { id?: string; type: string | null; name: string | null; content: string | null; ttl: number | null; proxied: boolean | null; comment: string | null; priority: number | null }
-interface RuleView { id: string; action: string | null; expression: string | null; description: string; enabled: boolean }
+interface RuleView { id: string; action: string | null; expression: string | null; description: string; enabled: boolean; extra_omitted?: string[] }
 
 const asRecords = (after: JsonValue): DnsRecordView[] => ((after as { records?: DnsRecordView[] } | null)?.records ?? []);
 const asRules = (state: JsonValue): RuleView[] => ((state as { rules?: RuleView[] } | null)?.rules ?? []);
+/**
+ * Gjennomgang av PR #324 (M4): en regel med ukjente felt som er for store til å bevares (`extra_omitted`) kan ikke round-trippes - endring ville mistet feltet, sletting kan ikke gjenopprettes. Avvises i preflight
+ * (FØR noe reserveres/utføres) med den stabile årsaken `rule_has_unroundtrippable_fields`; transporten avviser det samme som forsvar i dybden.
+ */
+const ruleRoundTrip = (state: JsonValue, p: Params): string | null =>
+  (asRules(state).find((r) => r.id === p["rule_id"])?.extra_omitted?.length ?? 0) > 0 ? "rule_has_unroundtrippable_fields" : null;
 
 export function cloudflareToolDefinitions(transport: ToolTransport, config: { mutationZones?: ReadonlySet<string> } = {}): ToolDefinition[] {
   const zones = config.mutationZones ?? new Set<string>();
@@ -134,7 +140,7 @@ export function cloudflareToolDefinitions(transport: ToolTransport, config: { mu
         postcondition_predicate: (after, p) => asRules(after).some((r) =>
           r.action === p["action"] && r.expression === p["expression"] && r.description === String(p["description"] ?? "") && r.enabled === (p["enabled"] ?? true))
       }),
-    write("update_waf_rule", "Endre en eksisterende WAF-/rate-limit-regel (handling/uttrykk/beskrivelse/aktiv) - hele regelen (inkl. ukjente felt) sendes slik at ingenting mistes",
+    write("update_waf_rule", "Endre en eksisterende WAF-/rate-limit-regel (handling/uttrykk/beskrivelse/aktiv) - hele regelen (inkl. ukjente felt) sendes slik at ingenting mistes; en regel med felt for store til å bevares (extra_omitted) endres ikke",
       { zone_id: cfId, phase: wafPhase, rule_id: cfId, action: z.enum(CLOUDFLARE_WAF_ACTIONS).optional(), expression: z.string().min(1).max(4096).optional(), description: z.string().max(500).optional(), enabled: z.boolean().optional(),
         ratelimit: z.object({ characteristics: z.array(z.string().max(120)).min(1).max(10), period: z.number().int(), requests_per_period: z.number().int(), mitigation_timeout: z.number().int().optional() }).strict().optional() },
       {
@@ -142,20 +148,24 @@ export function cloudflareToolDefinitions(transport: ToolTransport, config: { mu
         idempotent_external: true,
         preflight_action: "get_ruleset", preflight_requires_target: true,
         preflight_target_check: (state, p) => asRules(state).some((r) => r.id === p["rule_id"]),
+        preflight_validator: ruleRoundTrip,
         postcondition_predicate: (after, p) => {
           const r = asRules(after).find((x) => x.id === p["rule_id"]);
           if (!r) return false;
+          // M4: etter en endring skal regelen fortsatt kunne round-trippes (ingen felt falt ut av det vi kan lese tilbake).
+          if ((r.extra_omitted?.length ?? 0) > 0) return false;
           return (p["action"] === undefined || r.action === p["action"]) && (p["expression"] === undefined || r.expression === p["expression"])
             && (p["description"] === undefined || r.description === p["description"]) && (p["enabled"] === undefined || r.enabled === p["enabled"]);
         }
       }),
-    write("delete_waf_rule", "Slett en WAF-/rate-limit-regel PERMANENT - snapshot av regelen tas først og brukes til gjenoppretting (ny regel-id)",
+    write("delete_waf_rule", "Slett en WAF-/rate-limit-regel PERMANENT - snapshot av regelen tas først og brukes til gjenoppretting (ny regel-id); en regel med felt for store til å bevares (extra_omitted) slettes ikke",
       { zone_id: cfId, phase: wafPhase, rule_id: cfId },
       {
         rollback_procedure: "cloudflare.create_waf_rule med regelens felt fra before_state (regelen får ny id); recovery verifiserer ved ny lesing",
         idempotent_external: true,
         preflight_action: "get_ruleset", preflight_requires_target: true,
         preflight_target_check: (state, p) => asRules(state).some((r) => r.id === p["rule_id"]),
+        preflight_validator: ruleRoundTrip,
         postcondition_predicate: (after, p) => !asRules(after).some((r) => r.id === p["rule_id"])
       }),
     write("update_zone_setting", "Endre én sone-innstilling (ssl, min_tls_version, always_use_https, development_mode, security_level, tls_1_3) til en verdi fra den lukkede mengden",
