@@ -23,6 +23,7 @@ import {
   WallesterCredentialsUnavailableError, WallesterTenantNotConfiguredError,
   type CardService, type FinanceService
 } from "@jarvis/finance";
+import { isControlCenterId } from "@jarvis/executive";
 import type { ConversationEngine } from "./conversation.ts";
 import { submittedContractHasReservedKey, type ChatJobs } from "./chat-jobs.ts";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
@@ -271,6 +272,15 @@ const EXECUTIVE_QUERY_ACTIONS = [
 const EXECUTIVE_QUERY_BODY_KEYS = ["grant_token", "action", "parameters"] as const;
 
 /**
+ * WP-H0 (UA-11 Admin Control Center): kontrollsentrene leses via to EGNE, LESE-KUN ruter (`POST /control/centers` = oversikt, `POST /control/center` = ett senter) som begge går via ToolGateway
+ * (`executive.get_control_center`, klasse A, eier-kun port i verktøydefinisjonen) - SAMME grant-autoritet, avslagsrekkefølge og kroppsdisiplin som `/executive/query`. Kroppen har ingen identitetsfelt
+ * og ingen handlings-/parameterfelt: kun `center` (en av de ti kjente id-ene). Rutene muterer ALDRI noe; handlingene i rapporten peker på de EKSISTERENDE mutasjonsrutene (`/executive/mutate` m.fl.),
+ * som håndhever step-up, policy og revisjon som før.
+ */
+const CONTROL_CENTERS_BODY_KEYS = ["grant_token"] as const;
+const CONTROL_CENTER_BODY_KEYS = ["grant_token", "center"] as const;
+
+/**
  * D-421 (UA0-RUNRATE): run-rate og connector maintenance ledger. EGNE ruter med EGNE hardkodede allowlister (lese-kun og skrive-kun holdt adskilt,
  * samme disiplin som `/executive/query` vs `/owner-controls/...`). Skriving krever grant fra en innrullert enhet; modellen har kun lese-handlingene.
  */
@@ -322,7 +332,7 @@ const GOVERNANCE_MUTATE_ACTIONS = [
  * ruten, samme "hardkodet allowlist, ALDRI hele verktøyet"-disiplin som
  * `EXECUTIVE_QUERY_ACTIONS` selv.
  */
-const OWNER_CONTROLS_CONNECTOR_ACTIONS = ["set_connector_credential", "test_connector"] as const;
+export const OWNER_CONTROLS_CONNECTOR_ACTIONS = ["set_connector_credential", "test_connector"] as const;
 
 /**
  * D-367: eierens godkjenning av modellens minneforslag (`memory.propose` -> karantene). EGEN rute og EGET hardkodet
@@ -351,13 +361,17 @@ const MEMORY_PROPOSAL_ACTIONS = ["list_proposals", "approve_proposal", "reject_p
  * `ToolGateway.execute()` sin EGEN, allerede eksisterende klasse D-preflight/
  * autoritetssjekk (samme dobbelt-gatede modell som §2/§6 i design-notatet
  * beskriver - denne ruten legger ALDRI til en tredje, egen autoritetsrunde).
+ *
+ * WP-H0 (JARVIS-087): den 13. handlingen, `cancel_task`, er kontrollsenterets avbryt-handling for en bakgrunnsjobb/agent. Den er et gjennomslag til den EKSISTERENDE kanselleringsveien (`TaskService.cancel`, samme som
+ * chatens «avbryt jobb <id>»), eier-kun (verktøydefinisjonens parameterAuthorizer), klasse B og en stopp-handling uten step-up (se `STEP_UP_EXEMPT_ACTIONS`). Allowlisten er ellers uendret.
  */
-const EXECUTIVE_MUTATE_ACTIONS = [
+export const EXECUTIVE_MUTATE_ACTIONS = [
   "pause_domain", "resume_domain", "resolve_situation",
   "activate_kill_switch", "deactivate_kill_switch",
   "freeze_connector", "unfreeze_connector",
   "revoke_credential", "restore_credential", "revoke_device",
-  "enable_finance_kill_switch", "disable_finance_kill_switch"
+  "enable_finance_kill_switch", "disable_finance_kill_switch",
+  "cancel_task"
 ] as const;
 
 /**
@@ -452,6 +466,8 @@ async function resolveFromGrant(
 const WEB_INDEX = fileURLToPath(new URL("../../web/index.html", import.meta.url));
 /** D-199: samme statiske servering som WEB_INDEX over, egen side for dashboard.html. */
 const WEB_DASHBOARD = fileURLToPath(new URL("../../web/dashboard.html", import.meta.url));
+/** WP-H0: kontrollsentrene (UA-11 Admin Control Center) - egen, selvstendig side (ingen endring i dashbord/skall), samme statiske servering og nonce-CSP som de øvrige. */
+const WEB_CONTROL = fileURLToPath(new URL("../../web/control.html", import.meta.url));
 /**
  * D-361 (Tobias direkte i chat: "sinnsyk interface ... slipper og skrive 3
  * forskjellige url"): en samlet HUD-skall-side som viser WEB_INDEX/WEB_VOICE/
@@ -787,6 +803,11 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/control") {
+    await sendStaticPage(res, WEB_CONTROL, deps, true);
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/voice") {
     await sendStaticPage(res, WEB_VOICE, deps, true);
     return;
@@ -985,6 +1006,40 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       return json(res, 403, { error: "tool_denied", reason: result.reason });
     }
     return json(res, 200, { ok: true, data: result.data, session_id: resolved.identity.session_id });
+  }
+
+  if (deps.executive && req.method === "POST" && (url.pathname === "/control/centers" || url.pathname === "/control/center")) {
+    // WP-H0: SAMME rekkefølge/avslagsform som /executive/query - ugyldig kropp/senter avvises FØR grantet løses, et ugyldig/utløpt grant FØR gateway.execute() nås. Lese-kun: ingen mutasjon.
+    const single = url.pathname === "/control/center";
+    const raw: unknown = await readBodyOrUndefined(req);
+    const parsedBody = grantBodyOrReject(res, raw, single ? CONTROL_CENTER_BODY_KEYS : CONTROL_CENTERS_BODY_KEYS);
+    if (!parsedBody) return;
+    let parameters: Record<string, JsonValue> = {};
+    if (single) {
+      const center = parsedBody["center"];
+      if (typeof center !== "string") {
+        return json(res, 400, { error: "malformed_request", reason: "center_required", request_id: requestIdOf(res) });
+      }
+      if (!isControlCenterId(center)) {
+        return json(res, 400, { error: "malformed_request", reason: "unknown_center", request_id: requestIdOf(res) });
+      }
+      parameters = { center };
+    }
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
+    if (!resolved.ok) {
+      if (resolved.responded) return;
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+    }
+    const result = await deps.executive.gateway.execute({
+      identity: resolved.identity, tool_id: "executive", action: "get_control_center", parameters
+    });
+    if (!result.ok) {
+      return json(res, 403, { error: "tool_denied", reason: result.reason });
+    }
+    if (single && (result.data as { found?: unknown } | undefined)?.found === false) {
+      return json(res, 404, { error: "center_not_registered", request_id: requestIdOf(res) });
+    }
+    return json(res, 200, { ok: true, data: result.data, session_id: resolved.identity.session_id }, { "cache-control": "no-store" });
   }
 
   if (deps.executive && req.method === "POST" && (url.pathname === "/runrate/query" || url.pathname === "/runrate/maintenance")) {

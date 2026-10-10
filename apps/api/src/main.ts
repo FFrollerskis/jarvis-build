@@ -32,10 +32,11 @@ import {
   withTenantTransaction,
   writeAudit
 } from "@jarvis/core";
-import { InfraExecutionGate, KillSwitch, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
+import { InfraExecutionGate, KillSwitch, PolicyGateway, createPgInfraModeStore, type AuthorityConfig } from "@jarvis/policy";
 import { DeploymentService, DiagnosisService, IncidentService } from "@jarvis/incidents";
 import {
   AiCouncil,
+  CouncilAutoTriggerLimiter,
   DEFAULT_PROFILES,
   assertProvidersHaveExplicitPricing,
   pricingFromEnv,
@@ -95,7 +96,7 @@ import {
 } from "@jarvis/situations";
 import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions, parseFollowUpPushPolicy, renderSelfDiagnosisNo, type SelfDiagnosis } from "@jarvis/executive";
 import { GovernanceService, GovernanceTransport, governanceToolDefinitions } from "@jarvis/governance";
-import { OwnerControlsService, OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
+import { OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
 import {
   FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
   BankingService, NeonomicsFinanceTransport, runNeonomicsSweepForAllTenants,
@@ -124,8 +125,11 @@ import { createEvolutionReportProvider } from "./evolution-source.ts";
 import { createPushSendGuard, startFollowUpPush } from "./follow-up-push.ts";
 import { buildValueRuntimeFacts } from "./value-facts.ts";
 import { createValueMeasurementSource } from "./value-source.ts";
-import { ChatJobs, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
+import { ChatJobs, MAX_ACTIVE_JOBS, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
+import { createControlCenterRegistry, registerControlCenters } from "./control-center/register.ts";
+import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
+import { createOwnerControlsService } from "./provider-pause.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
 
 const port = envPort("JARVIS_API_PORT", 3010);
@@ -168,7 +172,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   await killSwitch.restore();
   const ownerControls = new OwnerControls(killSwitch, pool, ownerControlAuthority);
   // EV-1 (D-412): leserne selvdiagnosen (`executive.get_self_diagnosis`) komponeres av. `toolGateway` refereres først når en leser kalles (lat).
-  const selfModelControls = new OwnerControlsService(killSwitch, ownerControls);
+  const selfModelControls = createOwnerControlsService(killSwitch, ownerControls);
   // WP-C2: backup-status fra en skrivebeskyttet statusfil (JARVIS_BACKUP_STATUS_FILE); uten den er `backup` UKJENT i selvdiagnosen.
   const backupStatusSource = backupStatusSourceFromEnv();
   const selfModelReaders = buildSelfModelReaders({
@@ -243,6 +247,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       error: err instanceof Error ? err.message : String(err)
     }));
   }), 30_000).unref();
+  // Gjennomgang av PR #316 (M-2): ÉN eier-autoritetskonfigurasjon, delt av Policy Gateway og kontrollsentrene (eier-porten og Authority Center), så de aldri kan være uenige om hvem eieren er.
+  const ownerAuthority: AuthorityConfig = { owner_person_id: owner.owner_person_id, owner_tenants: [owner.tenant_id] };
   const policy = new PolicyGateway({
     devices: deviceRegistry,
     nonces: new PgApprovalStore(pool),
@@ -258,10 +264,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // SCOPED-modus og krevde approval for owners D-kall. A-D er risikoklasser -
     // for owner gir SOVEREIGN autonom utførelse; sikkerheten ligger i D-pipelinen
     // (preflight/readback/evidens/recovery) + owner-kontrollene, ikke approval.
-    authority: {
-      owner_person_id: owner.owner_person_id,
-      owner_tenants: [owner.tenant_id]
-    }
+    authority: ownerAuthority
   });
   const queue = new PgTaskQueue(pool);
   const worker = new InProcessWorker(queue);
@@ -319,7 +322,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // (router.ts) - en strukturert, auditerbar feil, ALDRI et falskt svar.
     ],
     // D-395 (JARVIS-039): samme budsjettkilde som workeren (`budgetConfigFromEnv`) - tidligere hardkodet her og med `DEFAULT_BUDGET` i workeren.
-    budget: budgetConfigFromEnv()
+    budget: budgetConfigFromEnv(),
+    // WP-H0 (JARVIS-087): eierens pause/tilbakekall av en modellleverandør, lest LIVE fra `owner_control_state` ved hvert kall (samme kilde i worker-main.ts) - se provider-pause.ts.
+    providerPause: createProviderPauseSourceFromPool(pool)
   });
   // JARVIS-006: hver konstruert adapter MÅ ha eksplisitt pris - ingen stille `default_rate`.
   assertProvidersHaveExplicitPricing(pricingFromEnv(), gateway.listProviderNames());
@@ -676,6 +681,17 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     tenant: () => readSecretProvider.get("JARVIS_MICROSOFT_TENANT_ID"),
     persist: (value) => toolGateway.setSecret("JARVIS_MICROSOFT_REFRESH_TOKEN", value)
   });
+  // WP-H0 (UA-11 Admin Control Center): registeret over de ti kontrollsentrene. EIER-KUN og fail-closed: kun den suverene eieren (eier-person i eier-tenant, ingen delegasjon) får rapporter, samme
+  // `resolveAuthorityMode` og SAMME `ownerAuthority` som Policy Gateway. Fabrikken (control-center/register.ts) eier både eier-predikatet og redigeringen av hemmeligheter - ingen av dem er en parameter her
+  // (gjennomgang av PR #316, M-2; låst av wph0-control-wiring.test.ts). Sentrene leser kun eksisterende kilder; de skriver ingenting.
+  const controlCenters = createControlCenterRegistry({ authority: ownerAuthority });
+  // WP-H0 (AI Center): ÉN delt begrenser for AI-rådets automatiske trigger - samme instans i chatten (`ConversationEngine`) og i kontrollsenteret, så tellerne som vises er de som faktisk håndheves.
+  const councilAutoLimiter = new CouncilAutoTriggerLimiter(envInt("JARVIS_COUNCIL_AUTO_MAX_PER_HOUR", 3, { min: 1, max: 100 }));
+  registerControlCenters(controlCenters, {
+    pool, env: process.env, toolGateway, ownerControls, meshStatus: () => gateway.meshStatus(),
+    authority: ownerAuthority, killSwitch, infraGate,
+    modelGateway: gateway, runRate: new RunRateService(pool), councilLimiter: councilAutoLimiter, evolutionReport: evolutionReports, maxActiveJobs: MAX_ACTIVE_JOBS
+  });
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(githubRateLimitController),
@@ -978,6 +994,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         // WP-C3 (Q-45 b): autentiseringsmetode (pat/app, installasjons-id, utløp, repo-scope, rettigheter) i get_connector_status - aldri tokenverdier.
         connectorAuth: (connectorId) => (connectorId === "github" ? githubAuth.connectorAuthInfo() : undefined),
         evolution: { report: evolutionReports },
+        controlCenters,
+        // WP-H0 (JARVIS-087): kontrollsenterets avbryt-handling bruker den EKSISTERENDE kanselleringsveien (samme `taskService` som chatens «avbryt jobb <id>»).
+        tasks: { cancel: (identity, taskId) => taskService.cancel(identity, taskId) },
         // WP-C4: Value Center - kilde (aggregater under RLS) + kjøretidsfakta (flagg, EV-0, kill switch, erklærte porter). Ingen innhold, ingen skriving; V3/V5 er sovende og kan aldri aktiveres herfra.
         value: {
           source: valueSource,
@@ -994,7 +1013,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // Task #122 (D-213): andre konstruktør-argument - DEN SAMME `toolGateway`-
       // instansen (allerede konstruert over) - kobler `set_connector_credential`/
       // `test_connector` til `ToolGateway.setSecret()`/nøstet `execute()`.
-      ...ownerControlsToolDefinitions(new OwnerControlsTransport(new OwnerControlsService(killSwitch, ownerControls, {
+      // Gjennomgang av PR #316 (L-5): `createOwnerControlsService` kobler alltid frys-validatoren (`model:<leverandør>` valideres mot modellregisteret ved frysing, ellers «Utført» uten pause).
+      ...ownerControlsToolDefinitions(new OwnerControlsTransport(createOwnerControlsService(killSwitch, ownerControls, {
         pool,
         grants: grantService,
         devices: new DeviceService(pool),
@@ -1118,6 +1138,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // D-431/D-432: ruten og dagstaket er parset tidlig (rett før executive-handleren, D-449) og brukes her uendret.
   console.log(JSON.stringify({ msg: "tool_turn_route", route: toolTurnRoute ? `${toolTurnRoute.provider}:${toolTurnRoute.model}` : "off", daily_cap_ore: toolTurnDailyCapOre }));
   const conversationEngine = new ConversationEngine({
+    councilAutoLimiter,
     messages: new MessageStore(pool),
     context: new ContextBuilder(pool),
     gateway,

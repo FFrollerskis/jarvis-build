@@ -6,11 +6,30 @@ import { UnsafeVendorUrlError, guardedFetch } from "./url-safety.ts";
 import { assessClassDPipeline, isClassDExempt, isNotFoundError, type ClassDNotifier, type ClassDPipelineOptions } from "./class-d-pipeline.ts";
 import { isSelfRecoveryAction, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
 
+/**
+ * Gjennomgang av PR #316 (M-1): helsen til en credential-kilde etter siste oppslag. `unavailable` = kilden svarte ikke / feilet (nettverk, 5xx, auth), `unconfigured` = kilden er ikke i bruk (mangler URL/klient),
+ * `healthy` = siste oppslag gikk bra. En kilde som ikke kan feile (miljøvariabler) har ingen helse.
+ */
+export type SecretSourceHealth = "healthy" | "unavailable" | "unconfigured";
+
+/**
+ * Gjennomgang av PR #316 (M-1): presence er TRI-STATE. `absent` er en MÅLING (kilden svarte og har ingen verdi); `unknown` betyr at kilden ikke kunne spørres. `get()` kan ikke skille de to (begge gir null, fail-closed ved
+ * kall), og derfor ble «Infisical nede» vist som «ikke konfigurert» med status OK i kontrollsenteret.
+ */
+export type SecretPresence = "present" | "absent" | "unknown";
+
 /** Secrets bak adapter (D-16): env/SOPS nå; Infisical/OpenBao (Q-05, krever Docker) senere. */
 export interface SecretProvider {
   readonly name: string;
   /** Returnerer credential eller null. Verdien går ALDRI i logg/trace/modellkontekst. */
   get(ref: string): Promise<string | null>;
+  /** Helsen til kilden etter siste oppslag (se `SecretSourceHealth`). Utelatt/`undefined` = kilden kan ikke feile (eller kjeden har ingen del med helse). */
+  readonly health?: SecretSourceHealth | undefined;
+  /**
+   * Tri-state presence for visning (kontrollsentre, dashbord). Implementeres av kilder der «null» kan bety både «finnes ikke» og «kunne ikke måles» (Infisical). Utelatt: `secretPresenceOf` utleder den fra `get()`
+   * og `health` (null + `health === "unavailable"` er `unknown`, ikke `absent`). Skal aldri kaste og aldri returnere verdien.
+   */
+  presence?(ref: string): Promise<SecretPresence>;
   /**
    * VALGFRI (WP-C3 review F3): tilstedeværelse UTEN å materialisere verdien. `ToolGateway.hasSecret()` bruker den hvis den finnes, ellers `get(ref) !== null`. Trengs av leverandører der
    * `get` har en SIDEEFFEKT eller kostnad - i dag GitHub App-dekoratøren, hvor `get` utsteder et installasjonstoken (et kall mot GitHub): uten `has` ville hver statuspoll, helse-sveip
@@ -18,6 +37,28 @@ export interface SecretProvider {
    * selve tjenesten credentialen gjelder. En wrapper som ikke videresender `has` faller trygt tilbake til `get`.
    */
   has?(ref: string): Promise<boolean>;
+}
+
+/**
+ * Presence for én kilde som tri-state. Bruker kildens egen `presence()` når den finnes (deterministisk, ingen delt tilstand); ellers utledes den av `get()` og `health`: en verdi er `present`, null fra en kilde som
+ * rapporterer `unavailable` er `unknown`, og null ellers er `absent`. En tom streng er aldri en gyldig credential (D-236) og regnes som fraværende, som `ToolGateway.execute()` gjør.
+ */
+export async function secretPresenceOf(provider: SecretProvider, ref: string): Promise<SecretPresence> {
+  if (typeof provider.presence === "function") return provider.presence(ref);
+  // WP-C3 (review F3): en kilde med `has` (GitHub App-dekoratøren: `get` utsteder et installasjonstoken) svarer på presence uten å materialisere noe.
+  if (typeof provider.has === "function") {
+    let has = false;
+    try {
+      has = await provider.has(ref);
+    } catch {
+      has = false;
+    }
+    if (has) return "present";
+    return provider.health === "unavailable" ? "unknown" : "absent";
+  }
+  const value = await provider.get(ref);
+  if (value) return "present";
+  return provider.health === "unavailable" ? "unknown" : "absent";
 }
 export class EnvSecretProvider implements SecretProvider {
   readonly name = "env-sops";
@@ -72,7 +113,9 @@ const INFISICAL_WRITE_TIMEOUT_MS = 15_000;
 export class InfisicalSecretProvider implements SecretProvider {
   readonly name = "infisical";
   private token: string | null = null;
-  health: "healthy" | "unavailable" | "unconfigured" = "unconfigured";
+  /** Gjennomgang av PR #316 (L-3): ÉN pågående innlogging deles av alle samtidige oppslag (en Integration-bygging leser ~87 refs; uten dette ga `this.token ??= await this.login()` opptil 87 parallelle innlogginger). */
+  private loginInflight: Promise<string> | null = null;
+  health: SecretSourceHealth = "unconfigured";
 
   constructor(
     private readonly baseUrl = process.env["INFISICAL_URL"],
@@ -101,25 +144,65 @@ export class InfisicalSecretProvider implements SecretProvider {
     return ((await response.json()) as { accessToken: string }).accessToken;
   }
 
+  /** Innlogging med single-flight (L-3): samtidige oppslag uten token deler ÉN innlogging; en mislykket innlogging nullstilles slik at neste oppslag prøver på nytt. */
+  private ensureToken(): Promise<string> {
+    if (this.token !== null) return Promise.resolve(this.token);
+    if (this.loginInflight === null) {
+      const attempt: Promise<string> = this.login().then((token) => { this.token = token; return token; });
+      this.loginInflight = attempt;
+      const clear = (): void => { if (this.loginInflight === attempt) this.loginInflight = null; };
+      attempt.then(clear, clear);
+    }
+    return this.loginInflight;
+  }
+
+  /** Leser ÉN secret. 404 = «finnes ikke» (null, kilden svarte); enhver annen feil (nettverk, 5xx, auth, ugyldig svar) KASTES. Oppdaterer `health` ved vellykket svar. */
+  private async read(ref: string): Promise<string | null> {
+    const token = await this.ensureToken();
+    const url = `${this.baseUrl}/api/v3/secrets/raw/${encodeURIComponent(ref)}?workspaceId=${this.projectId}&environment=${this.env}`;
+    const response = await guardedFetch(url, { signal: AbortSignal.timeout(INFISICAL_READ_TIMEOUT_MS), headers: { authorization: `Bearer ${token}` } });
+    if (response.status === 401) { this.token = null; throw new Error("infisical_auth_expired"); }
+    if (response.status === 404) { this.health = "healthy"; return null; }
+    if (!response.ok) throw new Error(`infisical_${response.status}`);
+    const value = ((await response.json()) as { secret: { secretValue: string } }).secret.secretValue;
+    this.health = "healthy";
+    return value;
+  }
+
+  private noteFailure(err: unknown): void {
+    // En utrygg INFISICAL_URL er en KONFIG-feil, ikke et avbrudd: si det tydelig (uten verdi) i stedet for å se ut som en Infisical-nedetid.
+    if (err instanceof UnsafeVendorUrlError) console.error(JSON.stringify({ msg: "infisical_url_unsafe", reason: err.reason }));
+    this.health = "unavailable";
+  }
+
   async get(ref: string): Promise<string | null> {
     if (!this.available()) {
       this.health = "unconfigured";
       return null;
     }
     try {
-      this.token ??= await this.login();
-      const url = `${this.baseUrl}/api/v3/secrets/raw/${encodeURIComponent(ref)}?workspaceId=${this.projectId}&environment=${this.env}`;
-      const response = await guardedFetch(url, { signal: AbortSignal.timeout(INFISICAL_READ_TIMEOUT_MS), headers: { authorization: `Bearer ${this.token}` } });
-      if (response.status === 401) { this.token = null; throw new Error("infisical_auth_expired"); }
-      if (response.status === 404) { this.health = "healthy"; return null; }
-      if (!response.ok) throw new Error(`infisical_${response.status}`);
-      this.health = "healthy";
-      return ((await response.json()) as { secret: { secretValue: string } }).secret.secretValue;
+      return await this.read(ref);
     } catch (err) {
-      // En utrygg INFISICAL_URL er en KONFIG-feil, ikke et avbrudd: si det tydelig (uten verdi) i stedet for å se ut som en Infisical-nedetid.
-      if (err instanceof UnsafeVendorUrlError) console.error(JSON.stringify({ msg: "infisical_url_unsafe", reason: err.reason }));
-      this.health = "unavailable";
+      this.noteFailure(err);
       return null; // fail-closed her; FallbackSecretProvider håndterer rollback
+    }
+  }
+
+  /**
+   * Gjennomgang av PR #316 (M-1): TRI-STATE presence uten delt tilstand. `absent` = kilden svarte og har ikke secreten (404) eller er ikke konfigurert (ikke i bruk); `unknown` = kilden kunne ikke spørres
+   * (nettverk, 5xx, auth, ugyldig svar). `get()` gir null i begge tilfeller, og derfor kunne «Infisical nede» ikke skilles fra «ikke konfigurert».
+   */
+  async presence(ref: string): Promise<SecretPresence> {
+    if (!this.available()) {
+      this.health = "unconfigured";
+      return "absent";
+    }
+    try {
+      const value = await this.read(ref);
+      return value ? "present" : "absent";
+    } catch (err) {
+      this.noteFailure(err);
+      return "unknown";
     }
   }
 
@@ -138,10 +221,10 @@ export class InfisicalSecretProvider implements SecretProvider {
     if (!this.available()) {
       throw new Error("infisical_unconfigured");
     }
-    this.token ??= await this.login();
+    const token = await this.ensureToken();
     const url = `${this.baseUrl}/api/v3/secrets/raw/${encodeURIComponent(ref)}`;
     const body = JSON.stringify({ workspaceId: this.projectId, environment: this.env, secretValue: value });
-    const headers = { authorization: `Bearer ${this.token}`, "content-type": "application/json" };
+    const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
     let response = await guardedFetch(url, { method: "PATCH", signal: AbortSignal.timeout(INFISICAL_WRITE_TIMEOUT_MS), headers, body });
     if (response.status === 401) {
       this.token = null;
@@ -170,6 +253,35 @@ export class FallbackSecretProvider implements SecretProvider {
   ) {}
   async get(ref: string): Promise<string | null> {
     return (await this.primary.get(ref)) ?? this.fallback.get(ref);
+  }
+
+  /** Gjennomgang av PR #316 (M-1): kjedens helse = den verste av delene (`unavailable` hvis en del ikke svarer). Kilder uten helse (miljøvariabler) teller ikke. */
+  get health(): SecretSourceHealth | undefined {
+    const parts = [this.primary.health, this.fallback.health];
+    if (parts.includes("unavailable")) return "unavailable";
+    if (parts.includes("healthy")) return "healthy";
+    if (parts.includes("unconfigured")) return "unconfigured";
+    return undefined;
+  }
+
+  /**
+   * Tri-state presence for kjeden: `present` så snart en del har verdien (samme regel som `get()`); `absent` KUN når ALLE deler har svart «finnes ikke»; ellers `unknown` - en del som ikke kunne spørres kan ha secreten
+   * (Infisical nede og verdien kun der er akkurat tilfellet som ellers ble vist som «ikke konfigurert»).
+   */
+  async presence(ref: string): Promise<SecretPresence> {
+    const first = await this.partPresence(this.primary, ref);
+    if (first === "present") return "present";
+    const second = await this.partPresence(this.fallback, ref);
+    if (second === "present") return "present";
+    return first === "absent" && second === "absent" ? "absent" : "unknown";
+  }
+
+  private async partPresence(part: SecretProvider, ref: string): Promise<SecretPresence> {
+    try {
+      return await secretPresenceOf(part, ref);
+    } catch {
+      return "unknown";
+    }
   }
 }
 
@@ -404,6 +516,17 @@ export class ToolGateway {
   }
 
   /**
+   * WP-H0: LESING for kontrollsenteret - hvilke harde porter som er slått på i DENNE prosessen (kun sannhetsverdier, ingen konfigurasjonsinnhold, ingen hemmeligheter).
+   * Å vise at klasse D-pipelinen og credential-bindingen faktisk er på er en måling, ikke en antakelse om oppstartskoden.
+   */
+  policyFlags(): { class_d_pipeline_enforced: boolean; credential_binding_active: boolean } {
+    return {
+      class_d_pipeline_enforced: this.options?.classDPipeline?.enforce === true,
+      credential_binding_active: this.options?.credentialBinding !== undefined
+    };
+  }
+
+  /**
    * Task #119 (integrasjons-dashboard, D-211): presence-sjekk for eierens
    * "er X konfigurert"-visning - kaller SAMME `SecretProvider` gatewayen
    * allerede injiseres med (aldri en egen, parallell secret-lesevei), men
@@ -421,6 +544,24 @@ export class ToolGateway {
       }
     }
     return (await this.secrets.get(ref)) !== null;
+  }
+
+  /**
+   * Gjennomgang av PR #316 (M-1): TRI-STATE presence for kontrollsentre. `true` = secreten finnes, `false` = kilden SVARTE og har den ikke (en måling), `null` = kilden kunne ikke spørres (ukjent - aldri «mangler»).
+   * Kaster aldri. `hasSecret()` er uendret (to-state, brukt av dashbord og sveip): den kunne ikke skille «Infisical nede» fra «ikke konfigurert», og kontrollsentrene må kunne det. Verdien forlater aldri metoden.
+   */
+  async secretPresence(ref: string): Promise<boolean | null> {
+    try {
+      const presence = await secretPresenceOf(this.secrets, ref);
+      return presence === "present" ? true : presence === "absent" ? false : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Gjennomgang av PR #316 (M-1): helsen til credential-kilden etter siste oppslag (for visning: «Infisical er utilgjengelig»). Kilder som ikke kan feile er `healthy`. */
+  secretsHealth(): SecretSourceHealth {
+    return this.secrets.health ?? "healthy";
   }
 
   /**
