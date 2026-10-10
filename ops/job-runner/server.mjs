@@ -91,7 +91,7 @@ async function prepareSocketPath(path) {
  *   testOverrides?: {
  *     remote?: { protocol: "https" | "http", host: string, urlFor?: (slug: string) => string },
  *     allowFile?: boolean, skipUidCheck?: boolean, allowAnyOwner?: boolean,
- *     now?: () => number, randomId?: () => string, authFailureDelayMs?: number, tokenTimeoutMs?: number
+ *     now?: () => number, randomId?: () => string, authFailureDelayMs?: number, tokenTimeoutMs?: number, diffEntryBytes?: number
  *   }
  * }} options
  */
@@ -123,7 +123,8 @@ export async function createRunnerService(options) {
     homeDir, templateDir,
     remote: t.remote ?? { protocol: "https", host: "github.com" },
     allowFile: t.allowFile === true,
-    registry, scrub
+    registry, scrub,
+    ...(t.diffEntryBytes !== undefined ? { diffEntryBytes: t.diffEntryBytes } : {})
   });
   const manager = new JobManager({
     config, docker, git, credentials, logger,

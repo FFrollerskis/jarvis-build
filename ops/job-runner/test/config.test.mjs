@@ -35,7 +35,7 @@ describe("A: gyldig konfig og standardverdier", () => {
     expect(r.maxJobLifetimeS).toBe(3600);
     expect(r.branchPrefix).toBe("jarvis/");
     expect(r.policy).toMatchObject({ user: "10001:10001", memory: "1g", cpus: "1.0", pidsLimit: 256, pull: "never" });
-    expect(r.publish.denyPaths).toContain(".github/");
+    expect([...r.publish.denyPaths]).toEqual([".github/", ".gitmodules", ".gitattributes", ".lfsconfig"]); // A-F1: .lfsconfig er med (LFS-url mot en fremmed server)
     expect(r.publish.maxCommits).toBe(20);
     expect(r.envAllow).toEqual(["ANTHROPIC_API_KEY"]); // standard: KUN Anthropic-nøkkelen worker leverer til Claude Code
     expect(Object.isFrozen(r)).toBe(true);
@@ -183,7 +183,7 @@ describe("C: runner-policy valideres fail-closed", () => {
   });
 
   it("publiseringsgrenser og nektelisten valideres", () => {
-    for (const publish of [{ max_commits: 0 }, { max_commits: 501 }, { max_bundle_bytes: 10 }, { max_files: 0 }, { deny_paths: ["/abs"] }, { deny_paths: ["a/../b"] }, { deny_paths: "x" }]) {
+    for (const publish of [{ max_commits: 0 }, { max_commits: 501 }, { max_bundle_bytes: 10 }, { max_files: 0 }, { deny_paths: ["/abs"] }, { deny_paths: ["a/../b"] }, { deny_paths: "x" }, { deny_paths: ["."] }, { deny_paths: ["./x"] }, { deny_paths: ["a/./b"] }]) {
       expect(code(() => parse({ ...runner(), publish })), JSON.stringify(publish)).toContain("config_invalid");
     }
     expect(parse({ ...runner(), publish: { deny_paths: [".github/", "secrets/"] } }).runner.publish.denyPaths).toEqual([".github/", "secrets/"]);

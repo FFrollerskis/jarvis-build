@@ -23,7 +23,8 @@ const DENY_PATH = /^[A-Za-z0-9._/-]{1,200}$/;
 const ALLOW_ENTRY = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+:[0-9]{1,5}$/;
 const IDENT = /^[A-Za-z0-9 ._@+-]{1,100}$/;
 const DEFAULT_ALLOW = ["github.com:443", "api.github.com:443", "api.anthropic.com:443"];
-const DEFAULT_DENY_PATHS = [".github/", ".gitmodules", ".gitattributes"];
+/** Standard nekteliste for publish. Oppføringer med ÉN komponent gjelder på ALLE nivåer (som i `.gitignore`), oppføringer med sti er forankret i roten - se `compileDenyPaths` i git.mjs (A-F1). `.lfsconfig` kan peke Git LFS mot en fremmed server. */
+const DEFAULT_DENY_PATHS = [".github/", ".gitmodules", ".gitattributes", ".lfsconfig"];
 /** Eneste env-navn en jobb får som standard: Anthropic-nøkkelen worker leverer til Claude Code. Alt annet må vertsadmin åpne eksplisitt (`runner.env_allow`). */
 const DEFAULT_ENV_ALLOW = ["ANTHROPIC_API_KEY"];
 
@@ -149,7 +150,8 @@ function parseRunner(raw) {
   onlyKeys(publishRaw, ["max_bundle_bytes", "max_commits", "max_files", "deny_paths", "timeout_ms"], "runner.publish");
   const denyPaths = stringList(publishRaw, "deny_paths", "runner.publish", DEFAULT_DENY_PATHS, DENY_PATH, 100);
   for (const entry of denyPaths) {
-    if (entry.startsWith("/") || entry.includes("..") || entry.includes("//")) throw new ConfigError("config_invalid", "runner.publish.deny_paths:entry_unsafe");
+    // «.» som komponent normaliseres bort og ville blitt en oppføring som ikke treffer noe (en stille no-op som ser ut som en regel): avvises høyt.
+    if (entry.startsWith("/") || entry.includes("..") || entry.includes("//") || entry.split("/").includes(".")) throw new ConfigError("config_invalid", "runner.publish.deny_paths:entry_unsafe");
   }
 
   const identityRaw = r["git_identity"] === undefined ? {} : plainObject(r["git_identity"], "runner.git_identity");

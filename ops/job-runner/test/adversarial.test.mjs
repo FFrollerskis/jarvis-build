@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { EgressProxy, parseConnectTarget } from "../egress-proxy.mjs";
 import { DockerClient } from "../lib/docker.mjs";
 import { RunnerError } from "../lib/errors.mjs";
-import { assertPathAllowed } from "../lib/git.mjs";
+import { assertPathAllowed, assertPathAllowedCompiled, compileDenyPaths } from "../lib/git.mjs";
 import { scrubPaths, SecretRegistry } from "../lib/log.mjs";
 import { createGitSpy } from "./support/git-spy.mjs";
 import { createHarness, gitSync, RUNNER_TOKEN, syntheticInstallationToken } from "./support/harness.mjs";
@@ -421,7 +421,7 @@ describe("I: policyen er vertsadmins - ingen konfignøkkel kan overstyres via AP
 });
 
 describe("C: stiregler ved publish (assertPathAllowed) - .git i alle skrivemåter, NTFS-varianter, nekteliste og aliaser", () => {
-  const DENY = [".github/", ".gitmodules", ".gitattributes"];
+  const DENY = [".github/", ".gitmodules", ".gitattributes", ".lfsconfig"];
   /** @returns {string | null} `kode:detalj` hvis nektet, ellers null */
   const denied = (path, deny = DENY) => {
     try { assertPathAllowed(path, deny); return null; } catch (e) { return e instanceof RunnerError ? `${e.code}:${e.detail}` : `other:${e}`; }
@@ -441,27 +441,67 @@ describe("C: stiregler ved publish (assertPathAllowed) - .git i alle skrivemåte
     }
   });
 
-  it("standard nekteliste (.github/, .gitmodules, .gitattributes): skrivemåter, undermapper, usynlige tegn, etterfølgende punktum/mellomrom OG NTFS-kortnavn (github~1, gitmod~1, gitatt~1)", () => {
+  it("standard nekteliste (.github/, .gitmodules, .gitattributes, .lfsconfig): skrivemåter, usynlige tegn, etterfølgende punktum/mellomrom OG NTFS-kortnavn (github~1, gitmod~1, gitatt~1, lfscon~1)", () => {
     for (const path of [
       ".github/workflows/ci.yml", ".github/CODEOWNERS", ".github", ".GitHub/x", ".GITHUB/Workflows/x.yml", `.gith${zw}ub/x`, ".github./workflows/x.yml", ".github /x", ".github../x", "github~1/workflows/x.yml", "GITHUB~1", "GitHub~1/x",
-      ".gitmodules", ".GITMODULES", ".gitmodules.", ".gitmodules ", `.gitmod${zw}ules`, "gitmod~1", "GITMOD~1", ".gitattributes", ".GitAttributes", "gitatt~1", "GITATT~1"
+      ".gitmodules", ".GITMODULES", ".gitmodules.", ".gitmodules ", `.gitmod${zw}ules`, "gitmod~1", "GITMOD~1", ".gitattributes", ".GitAttributes", "gitatt~1", "GITATT~1",
+      ".lfsconfig", ".LfsConfig", ".lfsconfig.", `.lfs${zw}config`, "lfscon~1", "LFSCON~1"
     ]) {
       expect(denied(path)?.startsWith("path_denied:matches_deny_list:"), JSON.stringify(path)).toBe(true);
     }
-    // mapper som bare LIGNER: ikke nektet
-    for (const ok of [".github-actions/x", ".githubx/y", "github/x", "x/.github/y", "a.github/x", ".gitmodulesx", ".gitattributes2", "gitmodules", "docs/.gitattributes"]) {
-      const result = denied(ok);
-      // «x/.github/y» og «docs/.gitattributes» ligger UNDER en annen mappe: nekte-oppføringene gjelder repo-roten
-      expect(result, ok).toBeNull();
+    // mapper og filer som bare LIGNER: ikke nektet
+    for (const ok of [".github-actions/x", ".githubx/y", "github/x", "a.github/x", ".gitmodulesx", ".gitattributes2", "gitmodules", ".lfsconfigx", "lfsconfig", "README.md"]) expect(denied(ok), ok).toBeNull();
+  });
+
+  it("A-F1: oppføringer med ÉN komponent gjelder på ALLE nivåer (som .gitignore) - nestede .gitattributes/.gitmodules/.lfsconfig/.github omgår ikke lenger nektelisten", () => {
+    for (const path of [
+      "src/.gitattributes", "a/b/c/.gitattributes", "src/.GitAttributes", `src/.gitattr${zw}ibutes`, "src/.gitattributes.", "src/gitatt~1", "a/b/GITATT~1", "src/gitatt~2", "src/gi7d29~1", "src/GI7D29~3",
+      "sub/.gitmodules", "a/b/.gitmodules", "a/gitmod~1", "a/gitmod~4", "a/gitmod~5", "a/gi7eba~1", "a/GI7EBA~9",
+      "src/.lfsconfig", "a/b/.lfsconfig", "x/lfscon~1", "x/LFSCON~2",
+      "pakke/.github/workflows/ci.yml", "a/b/.github", "a/.GitHub/x", "a/github~1/x", "a/.github./x",
+      // en MAPPE med nekteliste-navnet nederst i treet
+      "x/.gitattributes/y.txt", "x/.lfsconfig/z"
+    ]) {
+      expect(denied(path)?.startsWith("path_denied:matches_deny_list:"), JSON.stringify(path)).toBe(true);
+    }
+    // ... men lignende navn på hvilket som helst nivå slipper gjennom (ingen falske positive)
+    for (const ok of [
+      "foo.gitattributes.md", "docs/gitmodules.txt", "docs/gitattributes", "src/lfsconfig", "src/x.lfsconfig", "src/.lfsconfig.bak", "docs/.gitattributes.md", "a/.github-actions/x", "a/.githubx/y", "a/github/x",
+      "src/gitatt~", "src/gitatt~x", "src/gitattr~1", "src/gitmod~", "src/gi7eb~1", "src/gitatt1", "a/b/c/d.txt"
+    ]) {
+      expect(denied(ok), ok).toBeNull();
     }
   });
 
-  it("konfigurerbar nekteliste: egne oppføringer (mappe/ og eksakt sti) og deres punkt-aliaser, men ingen falske treff på søsken med felles prefiks", () => {
-    const deny = ["secrets/", "terraform", ".env", "infra/prod/"];
-    for (const path of ["secrets/k.txt", "secrets", "SECRETS/x", "terraform", "terraform/main.tf", "TERRAFORM/x", ".env", ".ENV", ".env.", "env~1", "infra/prod/db.tf", "Infra/Prod/x"]) {
+  it("A-F1: NTFS-kortnavn gjelder hver komponent (ikke bare den første), også for oppføringer med sti", () => {
+    const deny = ["config/.env", "ci/.github/"];
+    for (const path of ["config/.env", "config/env~1", "config/ENV~2", "ci/.github/x", "ci/github~1/x", "CI/GITHUB~3/x"]) {
       expect(denied(path, deny)?.startsWith("path_denied:matches_deny_list:"), path).toBe(true);
     }
-    for (const ok of ["secretsx/a", "my-secrets/a", "terraform2/main.tf", "terraformer", ".envrc", ".env-example", "infra/prod2/x", "infra/production/x", "app/secrets/x"]) expect(denied(ok, deny), ok).toBeNull();
+    for (const ok of ["config/env", "config/.envrc", "x/config/.env", "ci/x/.github/y", "ci/github/x"]) expect(denied(ok, deny), ok).toBeNull(); // forankret: bare fra roten
+  });
+
+  it("konfigurerbar nekteliste: oppføring med én komponent = alle nivåer, oppføring med sti = fra roten; ingen falske treff på søsken med felles prefiks", () => {
+    const deny = ["secrets/", "terraform", ".env", "infra/prod/"];
+    for (const path of [
+      "secrets/k.txt", "secrets", "SECRETS/x", "terraform", "terraform/main.tf", "TERRAFORM/x", ".env", ".ENV", ".env.", "env~1", "infra/prod/db.tf", "Infra/Prod/x",
+      "app/secrets/x", "a/b/terraform/main.tf", "svc/.env", "svc/env~1" // én komponent: alle nivåer (A-F1)
+    ]) {
+      expect(denied(path, deny)?.startsWith("path_denied:matches_deny_list:"), path).toBe(true);
+    }
+    for (const ok of [
+      "secretsx/a", "my-secrets/a", "terraform2/main.tf", "terraformer", ".envrc", ".env-example", "infra/prod2/x", "infra/production/x",
+      "app/infra/prod/x" /* sti-oppføring: forankret i roten */, "infra/x/prod/y", "a/terraform2/b"
+    ]) {
+      expect(denied(ok, deny), ok).toBeNull();
+    }
+  });
+
+  it("A-F1: compileDenyPaths klassifiserer oppføringene (forankret = har sti) og en tom/degenerert oppføring treffer aldri noe", () => {
+    const compiled = compileDenyPaths([".github/", "a/b", "x", ""]);
+    expect(compiled.map((c) => [c.entry, c.anchored, c.components])).toEqual([[".github/", false, [".github"]], ["a/b", true, ["a", "b"]], ["x", false, ["x"]], ["", false, []]]);
+    expect(() => assertPathAllowedCompiled("any/thing", compiled)).not.toThrow();
+    expect(denied("a/b/c", ["a/b"])).toMatch(/^path_denied:matches_deny_list:a\/b$/);
   });
 });
 

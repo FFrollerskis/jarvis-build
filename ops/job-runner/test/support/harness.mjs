@@ -108,6 +108,7 @@ export function apiRequest(socketPath, req = {}) {
  *   credentials?: import("../../lib/credentials.mjs").GitCredentialSource,
  *   dockerExec?: import("../../lib/docker.mjs").DockerExec,
  *   tokenTimeoutMs?: number,
+ *   testOverrides?: Record<string, unknown>,
  *   beforeStart?: (ctx: { root: string, baseDir: string, fake: ReturnType<typeof createFakeDocker> }) => Promise<void> | void,
  *   autoStart?: boolean
  * }} [options]
@@ -164,7 +165,8 @@ export async function createHarness(options = {}) {
       remote,
       allowFile: options.remote === undefined, skipUidCheck: true, allowAnyOwner: true, authFailureDelayMs: 0,
       ...(options.now ? { now: options.now } : {}),
-      ...(options.tokenTimeoutMs ? { tokenTimeoutMs: options.tokenTimeoutMs } : {})
+      ...(options.tokenTimeoutMs ? { tokenTimeoutMs: options.tokenTimeoutMs } : {}),
+      ...(options.testOverrides ?? {})
     }
   });
   if (options.beforeStart) await options.beforeStart({ root, baseDir, fake });

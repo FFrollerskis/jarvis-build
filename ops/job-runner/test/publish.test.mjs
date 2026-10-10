@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { HostGit } from "../lib/git.mjs";
+import { SecretRegistry } from "../lib/log.mjs";
 import { GIT_TOKEN, createHarness, gitSync } from "./support/harness.mjs";
 
 /**
@@ -142,7 +144,13 @@ describe("B: grenser og nektede stier (verifisert på verten, ikke stolt på fra
       ["echo x >> .github/workflows/base.yml", ".github/"],
       ["git rm -q -r .github", ".github/"],
       ["printf '[submodule \"s\"]\\n\\tpath = s\\n\\turl = https://evil.example/x\\n' > .gitmodules", ".gitmodules"],
-      ["echo '* filter=evil' > .gitattributes", ".gitattributes"]
+      ["echo '* filter=evil' > .gitattributes", ".gitattributes"],
+      // A-F1 (review): nestede filer og .lfsconfig omgikk nektelisten (rot-`.gitattributes` ga 422, `src/.gitattributes` 200)
+      ["mkdir -p src && echo '* linguist-generated=true -diff' > src/.gitattributes", ".gitattributes"],
+      ["printf '[lfs]\\n\\turl = https://evil.example/lfs\\n' > .lfsconfig", ".lfsconfig"],
+      ["mkdir -p a/b && echo x > a/b/.lfsconfig", ".lfsconfig"],
+      ["mkdir -p pkg/.github/workflows && echo x > pkg/.github/workflows/ci.yml", ".github/"],
+      ["mkdir -p sub && printf '[submodule \"s\"]\\n' > sub/.gitmodules", ".gitmodules"]
     ];
     for (const [script, rule] of cases) {
       const job = await h.createJob();
@@ -154,6 +162,15 @@ describe("B: grenser og nektede stier (verifisert på verten, ikke stolt på fra
       await h.api({ method: "DELETE", path: `/v1/jobs/${job.job_id}` });
     }
     expect(refs(origin).filter((r) => r.includes("jarvis/"))).toEqual([]); // ingenting pushet
+  });
+
+  it("A-F1: filer med LIGNENDE navn (foo.gitattributes.md, docs/gitmodules.txt, src/lfsconfig) publiseres - nektelisten treffer komponenter, ikke delstrenger", async () => {
+    const h = await harness();
+    const job = await h.createJob();
+    await commitAs(h, job.job_id, "mkdir -p docs src && echo a > foo.gitattributes.md && echo b > docs/gitmodules.txt && echo c > src/lfsconfig && echo d > docs/gitattributes");
+    const pub = await publish(h, job.job_id, "jarvis/lookalike");
+    expect(pub.status).toBe(200);
+    expect(pub.json.files_changed).toBe(4);
   });
 
   it("nektelisten er konfigurerbar (vertsadmin): en tillatt sti går gjennom, en ny nektet blokkeres", async () => {
@@ -310,6 +327,73 @@ describe("C: bundler fra en ondsinnet agent (laget direkte, utenom runnerens ege
     expect(pub.status).toBe(422);
     expect(pub.json.error).toBe("bundle_create_failed");
   });
+});
+
+describe("F: avkortet git-utdata er aldri «komplett» (A-F2)", () => {
+  const ok = { status: 0, signal: null, stdout: Buffer.from("ok"), stderr: Buffer.alloc(0), timedOut: false, truncated: false, cancelled: false };
+  const gitWith = (extra) => new HostGit({
+    gitBin: "/usr/bin/git", nodePath: process.execPath, helperScript: "/x/helper.mjs", homeDir: tmpdir(), templateDir: tmpdir(),
+    remote: { protocol: "https", host: "github.com" }, registry: new SecretRegistry(), run: async () => ({ ...ok, ...extra })
+  });
+
+  it("mustGit kaster git_output_truncated for ethvert trinn med kuttet utdata (også stderr), men ikke ved vanlig utdata; en feilet kommando beholder sin egen kode", async () => {
+    await expect(gitWith({}).mustGit(["x"], {}, "steg_feilet", 422)).resolves.toMatchObject({ status: 0 });
+    await expect(gitWith({ truncated: true }).mustGit(["x"], {}, "steg_feilet", 422)).rejects.toMatchObject({ code: "git_output_truncated", status: 422, detail: "steg_feilet" });
+    await expect(gitWith({ truncated: true, stdout: Buffer.alloc(0), stderr: Buffer.from("støy") }).mustGit(["x"], {}, "steg_feilet", 502)).rejects.toMatchObject({ code: "git_output_truncated", status: 502 });
+    await expect(gitWith({ truncated: true, status: 1 }).mustGit(["x"], {}, "steg_feilet", 422)).rejects.toMatchObject({ code: "steg_feilet", status: 422 });
+    await expect(gitWith({ truncated: true, timedOut: true }).mustGit(["x"], {}, "steg_feilet", 422)).rejects.toMatchObject({ code: "steg_feilet_timeout" });
+  });
+
+  it("reviewerens angrep i liten skala (diff-taket senket): kuttpunktet faller FØR .github/workflows/evil.yml, og publish avvises i stedet for å tolke den avkortede listen som komplett", async () => {
+    const h = await harness({ runner: { publish: { max_files: 20 } }, testOverrides: { diffEntryBytes: 120 } });
+    const origin = h.origins["owner/repo"].dir;
+    const job = await h.createJob();
+    // 30 filer med 101 tegns navn sorterer FØR «.github» (`!` < `.`); taket er (20+1)*120+1 = 2521 byte, 201 byte per oppføring => ca. 12 oppføringer slipper inn, resten (og evil.yml) kuttes
+    await commitAs(h, job.job_id, 'for i in $(seq 1 30); do echo $i > "!$(printf \'%0100d\' $i)"; done && mkdir -p .github/workflows && echo evil > .github/workflows/evil.yml');
+    const pub = await publish(h, job.job_id, "jarvis/trunc");
+    expect(pub.status).toBe(422);
+    expect(pub.json).toMatchObject({ error: "bundle_too_many_files" });
+    expect(pub.json.detail).toContain("diff_output_truncated");
+    expect(refs(origin).some((r) => r.includes("jarvis/"))).toBe(false); // ingenting pushet
+  });
+
+  it("reviewerens ORIGINALE bundle (2150 filer med 4000 tegns navn + .github/workflows/evil.yml, max_files 20000): avvist med path_denied - før ga publish 200 og evil.yml lå på branchen", async () => {
+    const h = await harness({ runner: { publish: { max_files: 20_000 } } });
+    const origin = h.origins["owner/repo"].dir;
+    const job = await h.createJob();
+    const { bundle } = await craft(h, job.head_sha, async (s) => {
+      const env = { PATH: process.env["PATH"], HOME: s, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "evil", GIT_AUTHOR_EMAIL: "evil@test", GIT_COMMITTER_NAME: "evil", GIT_COMMITTER_EMAIL: "evil@test" };
+      const run = (args, input) => { const r = spawnSync("git", args, { cwd: s, input, encoding: "utf8", env, maxBuffer: 64 * 1024 * 1024 }); if (r.status !== 0) throw new Error(`${args.join(" ")}: ${r.stderr}`); return r.stdout.trim(); };
+      const blob = run(["hash-object", "-w", "--stdin"], "x\n");
+      const workflows = run(["mktree"], `100644 blob ${blob}\tevil.yml\n`);
+      const dotGithub = run(["mktree"], `040000 tree ${workflows}\tworkflows\n`);
+      const lines = [];
+      for (let i = 0; i < 2150; i += 1) lines.push(`100644 blob ${blob}\t!${String(i).padStart(4000, "0")}`);
+      lines.push(`040000 tree ${dotGithub}\t.github`);
+      const tree = run(["mktree"], `${lines.join("\n")}\n`);
+      const commit = run(["commit-tree", tree, "-p", job.head_sha, "-m", "evil"]);
+      run(["update-ref", "refs/heads/evil", commit]);
+      run(["symbolic-ref", "HEAD", "refs/heads/evil"]);
+      return [`${job.head_sha}..HEAD`];
+    });
+    intercept(h, bundle);
+    const pub = await publish(h, job.job_id, "jarvis/big");
+    expect(pub.status).toBe(422);
+    expect(pub.json).toMatchObject({ error: "path_denied", detail: "matches_deny_list:.github/" });
+    expect(refs(origin).some((r) => r.includes("jarvis/"))).toBe(false);
+  }, 120_000);
+
+  it("diff-taket utledes av max_files: en diff innenfor grensen avkortes aldri (500 filer med lange stier publiseres), og for mange filer gir bundle_too_many_files", async () => {
+    const h = await harness({ runner: { publish: { max_files: 500 } } });
+    const job = await h.createJob();
+    await commitAs(h, job.job_id, 'mkdir -p d && for i in $(seq 1 500); do echo $i > "d/$(printf \'%0200d\' $i)"; done');
+    const pub = await publish(h, job.job_id, "jarvis/five-hundred");
+    expect(pub.status).toBe(200);
+    expect(pub.json.files_changed).toBe(500);
+    const job2 = await h.createJob();
+    await commitAs(h, job2.job_id, 'mkdir -p d && for i in $(seq 1 501); do echo $i > "d/$(printf \'%0200d\' $i)"; done');
+    expect((await publish(h, job2.job_id, "jarvis/five-hundred-one")).json).toMatchObject({ error: "bundle_too_many_files", detail: "max=500" });
+  }, 60_000);
 });
 
 describe("D: agenten planter hooks/config i /work - ingenting kjøres på VERTEN under publish", () => {

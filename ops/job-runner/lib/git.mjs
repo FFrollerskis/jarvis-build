@@ -23,6 +23,12 @@ const SHA1 = /^[0-9a-f]{40}$/;
 export const BASE_BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/;
 const MIN_GIT = [2, 39, 0];
 
+/**
+ * Øvre grense (byte) for ÉN oppføring i `git diff-tree -r --raw -z --no-abbrev`-utdata: `:<6> <6> <40> <40> <S>\0` (99 byte) + sti (maks 4096 - lengre nektes uansett) + `\0`.
+ * Utdatataket til diff-tree utledes av `max_files` (se `diffOutputCap`), så en diff innenfor grensen ALDRI kan avkortes.
+ */
+export const DIFF_ENTRY_MAX_BYTES = 99 + 4096 + 1;
+
 /** Forbudte sti-komponenter uavhengig av konfig: `.git` (også NTFS-/HFS-varianter), `.`/`..`. */
 function normalizeComponent(component) {
   return component.normalize("NFKC").toLowerCase().replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, "").replace(/[. ]+$/u, "");
@@ -34,20 +40,49 @@ function normalizePath(p) {
 }
 
 /**
- * NTFS-kortnavn (8.3) for et punktnavn: `.github` -> `github~1`, `.gitmodules` -> `gitmod~1`, `.gitattributes` -> `gitatt~1` (de seks første bokstavene/sifrene + `~1`).
- * På en Windows-sjekkut kan kortnavnet adressere samme oppføring som det lange (derfor har git egne regler for `git~1`). Brukes på den første komponenten i nektelisten.
- * @param {string} component allerede normalisert (små bokstaver)
- * @returns {string | null}
+ * NTFS-kortnavn (8.3) for et punktnavn: `.github` -> `github~1`, `.gitmodules` -> `gitmod~1`, `.gitattributes` -> `gitatt~1`, `.lfsconfig` -> `lfscon~1` (de seks første bokstavene/sifrene + `~N`).
+ * På en Windows-sjekkut kan kortnavnet adressere samme oppføring som det lange (derfor har git egne regler for `git~1`). `N` er et hvilket som helst tall (en kollisjon gir `~2`, `~3` ...), og for
+ * de navnene git selv beskytter finnes i tillegg et hash-basert kortnavn når fire kortnavn er tatt: `gi7eba~N` = `.gitmodules` (målt mot git 2.43: `update-index` nekter både `gitmod~1..4` og `gi7eba~1..9`
+ * som `.gitmodules`), `gi7d29~N` = `.gitattributes` og `gi250a~N` = `.gitignore` (git `path.c`, `is_ntfs_dot_generic`).
  */
-function ntfsShortName(component) {
+const NTFS_HASH_PREFIX = new Map([[".gitmodules", "gi7eba"], [".gitattributes", "gi7d29"], [".gitignore", "gi250a"]]);
+
+/**
+ * Mønster for NTFS-kortnavnene til en nektelistekomponent (allerede normalisert), eller `null` hvis komponenten ikke er et punktnavn.
+ * @param {string} component
+ * @returns {RegExp | null}
+ */
+function ntfsAliasPattern(component) {
   if (!component.startsWith(".")) return null;
   const stem = component.slice(1).replace(/[^a-z0-9]/g, "").slice(0, 6);
-  return stem.length > 0 ? `${stem}~1` : null;
+  if (stem.length === 0) return null;
+  const hash = NTFS_HASH_PREFIX.get(component);
+  return new RegExp(`^(?:${stem}${hash !== undefined ? `|${hash}` : ""})~[0-9]+$`); // `stem`/`hash` har kun [a-z0-9]
 }
 
-/** Treffer sti `p` (normalisert) nektelisteoppføringen `e` (normalisert)? Oppføring på formen `mappe/` dekker mappen og alt under; ellers eksakt sti eller alt under den. */
-function matchesDenyEntry(p, e) {
-  return e.endsWith("/") ? p.startsWith(e) || p === e.slice(0, -1) : p === e || p.startsWith(`${e}/`);
+/**
+ * Kompilerer nektelisten ÉN gang (normalisering + kortnavnmønstre). WP-C1 review A-F1: reglene er de samme som i `.gitignore`.
+ *  - Oppføring med ÉN komponent (`.gitattributes`, `.gitmodules`, `.lfsconfig`, `.github/`) gjelder på ALLE nivåer: `src/.gitattributes` og `pakke/.github/x` treffes som rotfilene.
+ *    (En `.gitattributes` i en undermappe kan skjule en endring for en reviewer, `* -diff`; en `.lfsconfig` kan peke LFS mot en fremmed server.) En avsluttende `/` er kosmetisk.
+ *  - Oppføring med en STI (`ci/secrets/`, `infra/prod`) er forankret i repo-roten og dekker alt under.
+ * @param {readonly string[]} denyPaths
+ */
+export function compileDenyPaths(denyPaths) {
+  return denyPaths.map((entry) => {
+    const components = normalizePath(entry).split("/").filter((c) => c !== "");
+    return { entry, anchored: components.length > 1, components, aliases: components.map(ntfsAliasPattern) };
+  });
+}
+
+/**
+ * Treffer stien (normaliserte komponenter) den kompilerte oppføringen? Hver komponent sammenlignes både som skrevet og som NTFS-kortnavn.
+ * @param {string[]} pathComponents @param {ReturnType<typeof compileDenyPaths>[number]} compiled
+ */
+function matchesDenyEntry(pathComponents, compiled) {
+  const hit = (/** @type {string | undefined} */ component, /** @type {number} */ index) =>
+    component !== undefined && (component === compiled.components[index] || (compiled.aliases[index]?.test(component) ?? false));
+  if (compiled.anchored) return pathComponents.length >= compiled.components.length && compiled.components.every((_, index) => hit(pathComponents[index], index));
+  return compiled.components.length === 1 && pathComponents.some((component) => hit(component, 0));
 }
 
 /**
@@ -55,9 +90,9 @@ function matchesDenyEntry(p, e) {
  * Harde regler (uavhengig av konfig): ingen kontrolltegn/backslash/absolutt sti, ingen tomme/`.`/`..`-komponenter, ingen `.git` (store/små bokstaver, usynlige tegn,
  * etterfølgende punktum/mellomrom, Unicode-kompatibilitetsformer) og ingen NTFS-varianter av den: kortnavnet `git~1` og alternative datastrømmer (enhver komponent med `:`).
  * @param {string} path
- * @param {readonly string[]} denyPaths
+ * @param {ReturnType<typeof compileDenyPaths>} denyPaths nekteliste fra `compileDenyPaths` (kompiler én gang per publish, ikke per sti)
  */
-export function assertPathAllowed(path, denyPaths) {
+export function assertPathAllowedCompiled(path, denyPaths) {
   // eslint-disable-next-line no-control-regex
   if (path.length === 0 || path.length > 4096 || /[\u0000-\u001f\u007f\\]/.test(path) || path.startsWith("/")) {
     throw new RunnerError("path_denied", 422, "path_invalid");
@@ -69,15 +104,15 @@ export function assertPathAllowed(path, denyPaths) {
     }
     if (/^git~[0-9]+$/.test(c) || component.includes(":")) throw new RunnerError("path_denied", 422, "path_component_forbidden");
   }
-  const p = normalizePath(path);
+  const components = normalizePath(path).split("/");
   for (const entry of denyPaths) {
-    const e = normalizePath(entry);
-    const first = e.split("/")[0] ?? "";
-    const alias = ntfsShortName(first);
-    if (matchesDenyEntry(p, e) || (alias !== null && matchesDenyEntry(p, `${alias}${e.slice(first.length)}`))) {
-      throw new RunnerError("path_denied", 422, `matches_deny_list:${entry.slice(0, 40)}`);
-    }
+    if (matchesDenyEntry(components, entry)) throw new RunnerError("path_denied", 422, `matches_deny_list:${entry.entry.slice(0, 40)}`);
   }
+}
+
+/** @param {string} path @param {readonly string[]} denyPaths rå nekteliste (kompileres her; `verifyAndPush` bruker `assertPathAllowedCompiled`) */
+export function assertPathAllowed(path, denyPaths) {
+  assertPathAllowedCompiled(path, compileDenyPaths(denyPaths));
 }
 
 /**
@@ -144,7 +179,8 @@ export class HostGit {
    *   allowFile?: boolean,
    *   run?: typeof runProcess,
    *   registry: import("./log.mjs").SecretRegistry,
-   *   scrub?: ReadonlyArray<readonly [string, string]>
+   *   scrub?: ReadonlyArray<readonly [string, string]>,
+   *   diffEntryBytes?: number
    * }} options
    */
   constructor(options) {
@@ -159,6 +195,8 @@ export class HostGit {
     this.registry = options.registry;
     /** Interne stier som aldri skal stå i en feildetalj til klienten (jobbkatalogen m.m.). */
     this.scrub = options.scrub ?? [];
+    /** Byte per diff-tree-oppføring som utdatataket regnes med (KUN tester senker den, for å kunne avkorte uten 8 MiB; produksjon bruker alltid DIFF_ENTRY_MAX_BYTES). */
+    this.diffEntryBytes = options.diffEntryBytes ?? DIFF_ENTRY_MAX_BYTES;
   }
 
   /** Renset basis-env: tom HOME, ingen system/global-config, ingen prompt, kun den ene tillatte protokollen. */
@@ -226,7 +264,9 @@ export class HostGit {
   }
 
   /**
-   * Som `git()`, men kaster `RunnerError(code)` ved feil/tidsavbrudd/avbrudd.
+   * Som `git()`, men kaster `RunnerError(code)` ved feil/tidsavbrudd/avbrudd. WP-C1 review A-F2: AVKORTET utdata (taket `maxOutputBytes` nådd) er aldri «komplett»: alt som leses
+   * av `mustGit` er enten parset (diff-tree, rev-list, ls-remote ...) eller bevis på at noe gikk bra, og en avkortet liste hadde latt stier etter kuttpunktet slippe unna
+   * nekteliste og tellere. Kaster derfor `git_output_truncated` (stabil kode; detaljen er trinnets kode) uavhengig av hvilket trinn det er.
    * @param {string[]} args
    * @param {Parameters<HostGit["git"]>[1]} options
    * @param {string} code
@@ -238,6 +278,7 @@ export class HostGit {
     if (result.timedOut) throw new RunnerError(`${code}_timeout`, 504);
     if (result.spawnError !== undefined) throw new RunnerError(`${code}`, 500, "git_could_not_start");
     if (result.status !== 0) throw new RunnerError(code, status, this.sanitize(result));
+    if (result.truncated) throw new RunnerError("git_output_truncated", status, code);
     return result;
   }
 
@@ -389,17 +430,26 @@ export class HostGit {
     const merges = await this.mustGit(hardened(["rev-list", "--merges", "--count", `${p.baseSha}..${sha}`]), { ...inRepo, timeoutMs: 30_000 }, "bundle_invalid", 422);
     if (Number(merges.stdout.toString("utf8").trim()) !== 0) throw new RunnerError("bundle_invalid", 422, "merge_commits_not_allowed");
 
-    const diff = await this.mustGit(
-      hardened(["diff-tree", "-r", "--raw", "-z", "--no-renames", "--no-abbrev", "--no-textconv", "--no-ext-diff", p.baseSha, sha]),
-      { ...inRepo, timeoutMs: 60_000, maxOutputBytes: 8 * 1024 * 1024 },
-      "bundle_invalid", 422
-    );
+    // Utdatataket utledes av `max_files` (maks `max_files + 1` oppføringer à maks DIFF_ENTRY_MAX_BYTES): en diff innenfor grensen kan aldri avkortes, og en avkortet diff (flere filer enn
+    // grensen, eller absurd lange stier) feiler lukket - uten dette kunne stier etter kuttpunktet (f.eks. `.github/workflows/x.yml`) aldri blitt sjekket mot nektelisten (A-F2).
+    let diff;
+    try {
+      diff = await this.mustGit(
+        hardened(["diff-tree", "-r", "--raw", "-z", "--no-renames", "--no-abbrev", "--no-textconv", "--no-ext-diff", p.baseSha, sha]),
+        { ...inRepo, timeoutMs: 60_000, maxOutputBytes: (p.limits.maxFiles + 1) * this.diffEntryBytes + 1 },
+        "bundle_invalid", 422
+      );
+    } catch (error) {
+      if (error instanceof RunnerError && error.code === "git_output_truncated") throw new RunnerError("bundle_too_many_files", 422, `max=${p.limits.maxFiles};diff_output_truncated`);
+      throw error;
+    }
     const entries = parseRawDiff(diff.stdout);
     if (entries.length === 0) throw new RunnerError("no_changes", 422, "tree_identical_to_the_base");
     if (entries.length > p.limits.maxFiles) throw new RunnerError("bundle_too_many_files", 422, `max=${p.limits.maxFiles}`);
+    const denyPaths = compileDenyPaths(p.limits.denyPaths);
     for (const entry of entries) {
       if (entry.oldMode === "160000" || entry.newMode === "160000") throw new RunnerError("path_denied", 422, "submodule_changes_not_allowed");
-      assertPathAllowed(entry.path, p.limits.denyPaths);
+      assertPathAllowedCompiled(entry.path, denyPaths);
     }
 
     // Push: kun den verifiserte SHA-en, kun mot refs/heads/<prefiks>..., aldri force/sletting (refspec har ingen `+` og ingen tom kilde).

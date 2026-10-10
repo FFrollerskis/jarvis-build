@@ -32,7 +32,7 @@
       "max_bundle_bytes": 67108864,
       "max_commits": 20,
       "max_files": 500,
-      "deny_paths": [".github/", ".gitmodules", ".gitattributes"],
+      "deny_paths": [".github/", ".gitmodules", ".gitattributes", ".lfsconfig"],
       "timeout_ms": 180000
     },
     "git_identity": { "name": "jarvis-worker", "email": "worker@jarvis.local" },

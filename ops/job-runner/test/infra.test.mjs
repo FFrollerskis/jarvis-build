@@ -307,7 +307,7 @@ describe("D: eksempelkonfigen", () => {
     const parsed = validateConfig(replaced, { require: ["runner", "egress_proxy"] });
     expect(parsed.runner.policy).toMatchObject({ user: "10001:10001", memory: "1g", pull: "never" });
     expect(parsed.runner.maxConcurrentJobs).toBe(2);
-    expect(parsed.runner.publish.denyPaths).toEqual([".github/", ".gitmodules", ".gitattributes"]);
+    expect(parsed.runner.publish.denyPaths).toEqual([".github/", ".gitmodules", ".gitattributes", ".lfsconfig"]);
     expect(example.runner.env_allow).toEqual(["ANTHROPIC_API_KEY"]); // eksempelet viser standarden eksplisitt: kun Anthropic-nøkkelen worker leverer
     expect(parsed.runner.envAllow).toEqual(["ANTHROPIC_API_KEY"]);
     expect([...parsed.egressProxy.allow].sort()).toEqual(["api.anthropic.com:443", "api.github.com:443", "github.com:443"]);
