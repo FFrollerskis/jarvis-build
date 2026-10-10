@@ -267,6 +267,158 @@ describe("E: klient-CIDR og grenser", () => {
   });
 });
 
+describe("H: klient som forsvinner midt i oppslag/oppkobling lekker ingen upstream-sockets (B-M1)", () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  /** Hver upstream-socket proxyen noen gang åpner, så testen kan telle hvilke som fortsatt lever. */
+  let upstreams;
+  beforeEach(() => { upstreams = []; });
+  const openUpstreams = () => upstreams.filter((u) => !u.destroyed).length;
+  const tracked = () => { const u = net.connect(echoPort, "127.0.0.1"); upstreams.push(u); return u; };
+
+  /** Rå forbindelse som sender CONNECT og deretter RST etter `rstAfterMs` (en jobb som dør/avbryter midt i oppslaget). */
+  const connectThenReset = (rstAfterMs) => new Promise((resolve) => {
+    const socket = net.connect(proxyPort, "127.0.0.1");
+    cleanup.push(socket);
+    socket.on("error", () => undefined);
+    socket.on("close", resolve);
+    socket.on("connect", () => { socket.write(connectReq("github.com:443")); setTimeout(() => socket.resetAndDestroy(), rstAfterMs); });
+  });
+
+  it("RST mens proxyen slår opp DNS (reviewerens repro: 40 forsøk) -> ingen åpne upstream-sockets, og slot-regnskapet er tomt", async () => {
+    await startProxy({ resolve: async () => { await sleep(150); return ["140.82.112.3"]; }, connect: tracked, maxConnections: 8, maxConnectionsPerClient: 4, idleTimeoutMs: 60_000 });
+    for (let i = 0; i < 40; i += 1) await connectThenReset(30);
+    await sleep(600);
+    expect(openUpstreams()).toBe(0); // før: 40 åpne sockets (idle-timeout 120 s) mens active=0 - maxConnections omgått
+    expect(proxy.active).toBe(0);
+    expect(proxy.perClient.size).toBe(0);
+    expect(events.some((e) => e.event === "connect_allowed")).toBe(false);
+  }, 30_000);
+
+  it("RST mens proxyen kobler til upstream (oppkoblingen tar 150 ms) -> den halvåpne oppkoblingen rives med en gang; ingenting henger igjen", async () => {
+    // Oppkoblingen starter først etter 150 ms (som en treg handshake); er klienten borte da, skal den aldri bli en tunnel.
+    const slow = () => {
+      const u = new net.Socket();
+      upstreams.push(u);
+      setTimeout(() => { if (!u.destroyed) u.connect(echoPort, "127.0.0.1"); }, 150);
+      return u;
+    };
+    await startProxy({ connect: slow, maxConnections: 8, maxConnectionsPerClient: 4, idleTimeoutMs: 60_000 });
+    await connectThenReset(40); // klienten er borte etter ca. 40 ms; oppkoblingen ville først startet etter 150 ms
+    await sleep(30);
+    expect(upstreams.at(-1)?.destroyed).toBe(true); // revet MED EN GANG (avbrutt), ikke først når oppkoblingen er ferdig og vi oppdager at klienten er borte
+    for (let i = 0; i < 20; i += 1) await connectThenReset(40);
+    await sleep(600);
+    expect(upstreams.length).toBeGreaterThan(0);
+    expect(openUpstreams()).toBe(0);
+    expect(proxy.active).toBe(0);
+    expect(proxy.perClient.size).toBe(0);
+  }, 30_000);
+
+  it("klienten forsvinner i SAMME øyeblikk som oppkoblingen lykkes (close er ikke levert ennå): upstream rives og plassen frigis", async () => {
+    let dial;
+    await startProxy({ connect: () => { dial = new net.Socket(); upstreams.push(dial); return dial; }, connectTimeoutMs: 5_000, idleTimeoutMs: 60_000 });
+    const client = net.connect(proxyPort, "127.0.0.1");
+    cleanup.push(client);
+    client.on("error", () => undefined);
+    client.on("connect", () => client.write(connectReq("github.com:443")));
+    for (let i = 0; i < 100 && dial === undefined; i += 1) await sleep(10);
+    expect(dial).toBeDefined();
+    // synkront i ett tikk: serversiden av klienten ødelegges (destroyed=true; close kommer først i neste tikk) og oppkoblingen «lykkes»
+    for (const server of proxy.sockets) server.destroy();
+    dial.emit("connect");
+    await sleep(300);
+    expect(dial.destroyed).toBe(true);
+    expect(proxy.active).toBe(0);
+    expect(events.some((e) => e.event === "connect_aborted" && e.reason === "client_gone")).toBe(true);
+    expect(events.some((e) => e.event === "connect_allowed")).toBe(false); // aldri en tunnel, aldri et 200-svar til en klient som er borte
+  });
+
+  it("klienten forsvinner ETTER at tunnelen er etablert: upstream rives umiddelbart (ikke ved idle-tidsavbruddet)", async () => {
+    await startProxy({ connect: tracked, idleTimeoutMs: 60_000 });
+    const r = await rawRequest(connectReq("github.com:443"), { keepOpen: true });
+    expect(r.status).toBe(200);
+    expect(openUpstreams()).toBe(1);
+    r.socket.resetAndDestroy();
+    await sleep(300);
+    expect(openUpstreams()).toBe(0);
+    expect(proxy.active).toBe(0);
+  });
+
+  it("klientsiden har egen idle-timer, uavhengig av upstream: en tunnel hvis upstream aldri tidsavbryter rives likevel", async () => {
+    await startProxy({ connect: () => { const u = tracked(); u.setTimeout = () => u; return u; }, idleTimeoutMs: 250 });
+    const idle = await rawRequest(connectReq("github.com:443"), { keepOpen: true });
+    const closed = await new Promise((resolve) => { idle.socket.on("close", () => resolve(true)); setTimeout(() => resolve(false), 3_000); });
+    expect(closed).toBe(true);
+  });
+});
+
+describe("I: rå tilkoblinger før CONNECT er lest - per-IP-tak, global grense og kort header-timeout (B-L1)", () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  /** Rå forbindelse fra en bestemt kilde-IP (127.0.0.0/8: hver adresse er en egen «jobb-container»). */
+  const from = (localAddress, onConnect) => {
+    const socket = net.connect({ host: "127.0.0.1", port: proxyPort, localAddress });
+    cleanup.push(socket);
+    socket.on("error", () => undefined);
+    socket.on("connect", () => onConnect?.(socket));
+    return socket;
+  };
+  const halfSent = (socket) => socket.write("CONNECT github.com:443 HTTP/1.1\r\nHost: x\r\n"); // aldri ferdig header-blokk
+  const answerTo = (localAddress) => new Promise((resolve) => {
+    let out = "";
+    const s = from(localAddress, (sock) => sock.write(connectReq("github.com:443")));
+    s.on("data", (d) => { out += d; if (out.includes("\r\n\r\n")) resolve(out.split("\r\n")[0]); });
+    s.on("close", () => resolve(out ? out.split("\r\n")[0] : "closed-without-answer"));
+    setTimeout(() => resolve("timeout"), 3_000);
+  });
+
+  it("én klient-IP kan ikke fylle alle rå plasser med halvsendte header-blokker: taket per IP holdes, og en annen jobb får svar (før: closed-without-answer)", async () => {
+    await startProxy({ maxConnections: 4, maxConnectionsPerClient: 2 }); // server.maxConnections = 8, rå tilkoblinger per IP = 2 x 2 = 4
+    const held = Array.from({ length: 12 }, () => from("127.0.0.2", halfSent));
+    await sleep(400);
+    expect(held.filter((s) => !s.destroyed).length).toBe(4);
+    expect(events.some((e) => e.event === "connect_denied" && e.reason === "too_many_raw_connections" && e.client === "127.0.0.2")).toBe(true);
+    expect(await answerTo("127.0.0.3")).toBe("HTTP/1.1 200 Connection Established");
+    // plassen frigjøres når en av de holdte lukkes
+    held.find((s) => !s.destroyed).destroy();
+    await sleep(200);
+    expect(proxy.rawPerClient.get("127.0.0.2")).toBe(3);
+  });
+
+  it("tallet på rå tilkoblinger går tilbake til null når alle er lukket (ingen lekkasje i telleren)", async () => {
+    await startProxy({ maxConnections: 4, maxConnectionsPerClient: 2 });
+    const sockets = Array.from({ length: 6 }, () => from("127.0.0.2", halfSent));
+    await sleep(300);
+    for (const s of sockets) s.destroy();
+    await sleep(300);
+    expect(proxy.rawPerClient.size).toBe(0);
+  });
+
+  it("den globale grensen (server.maxConnections = 2 x maxConnections) holder også når hver klient er under sitt eget tak", async () => {
+    await startProxy({ maxConnections: 2, maxConnectionsPerClient: 10, maxRawConnectionsPerClient: 50 }); // server.maxConnections = 4
+    const first = ["127.0.0.2", "127.0.0.3", "127.0.0.4", "127.0.0.5"].map((ip) => from(ip, halfSent));
+    await sleep(300);
+    expect(first.every((s) => !s.destroyed)).toBe(true);
+    const fifth = from("127.0.0.6", halfSent);
+    const closed = await new Promise((resolve) => { fifth.on("close", () => resolve(true)); setTimeout(() => resolve(false), 1_500); });
+    expect(closed).toBe(true); // avvist av serveren uten svar
+  });
+
+  it("header-blokken må være ferdig på sekunder: en halvsendt forespørsel rives etter headersTimeout (ikke etter Nodes standard 60 s)", async () => {
+    await startProxy({ headersTimeoutMs: 300, requestTimeoutMs: 600, timeoutCheckIntervalMs: 50 });
+    const slow = from("127.0.0.2", halfSent);
+    const closed = await new Promise((resolve) => { slow.on("close", () => resolve(true)); setTimeout(() => resolve(false), 2_500); });
+    expect(closed).toBe(true);
+    await sleep(100);
+    expect(proxy.rawPerClient.size).toBe(0);
+  });
+
+  it("standardverdiene: header-timeout 5 s, request-timeout 10 s, sjekkintervall 1 s, rå tak per IP = 2 x tunneltaket per klient", () => {
+    const p = new EgressProxy({ allow: ALLOW, allowedClientCidrs: LOOPBACK_CLIENTS });
+    expect([p.headersTimeoutMs, p.requestTimeoutMs, p.timeoutCheckIntervalMs, p.maxRawPerClient, p.maxPerClient]).toEqual([5_000, 10_000, 1_000, 32, 16]);
+    expect(new EgressProxy({ allow: ALLOW, allowedClientCidrs: LOOPBACK_CLIENTS, headersTimeoutMs: 20_000, requestTimeoutMs: 1_000 }).requestTimeoutMs).toBe(20_000); // Node krever header <= request
+  });
+});
+
 describe("F: logging - kun vert:port og årsak, aldri innhold", () => {
   it("hendelser inneholder ikke tunnel-data, stier eller header-innhold", async () => {
     await startProxy();

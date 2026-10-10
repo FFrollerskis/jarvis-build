@@ -16,7 +16,9 @@ import { createLogger } from "./lib/log.mjs";
  *   - SSRF/DNS-rebinding: proxyen slår opp DNS SELV, krever at ALLE svar er offentlige adresser (loopback/privat/link-local/ULA/CGNAT/
  *     metadata nektes) og kobler til den VALIDERTE IP-en - aldri et nytt oppslag mellom sjekk og tilkobling.
  *   - Kun klienter fra jobbnettverkets CIDR (forsvar i dybden hvis gateway-adressen skulle nås utenfra).
- *   - Grenser: samtidige tilkoblinger (global + per klient), tilkoblings-/idle-tidsavbrudd, maks tunnel-levetid.
+ *   - Grenser: samtidige tilkoblinger (global + per klient), tilkoblings-/idle-tidsavbrudd, maks tunnel-levetid. RÅ tilkoblinger (før CONNECT er lest) har egne grenser: per klient-IP
+ *     (`maxRawConnectionsPerClient`, standard 2 x per-klient-tunnelgrensen) og kort header-timeout (5 s), så én klient ikke kan fylle alle plasser med halvsendte forespørsler (B-L1).
+ *   - Når en klient forsvinner (RST/lukking) midt i DNS-oppslag eller oppkobling, rives alt vi har åpnet UMIDDELBART - aldri en upstream-socket som henger til idle-tidsavbruddet (B-M1).
  *   - Logger kun vert:port + årsak - aldri innhold (en CONNECT-tunnel er uansett kryptert) og aldri URL-er.
  */
 
@@ -104,6 +106,14 @@ export function isPublicAddress(ip) {
   return !blocked.check(ip, "ipv4");
 }
 
+/** Klienten forsvant (RST/lukking) mens vi slo opp eller koblet til - ikke en feil å svare på, bare noe å rydde. */
+class ClientGoneError extends Error {
+  constructor() {
+    super("client_gone");
+    this.name = "ClientGoneError";
+  }
+}
+
 export class EgressDeniedError extends Error {
   /** @param {string} reason */
   constructor(reason) {
@@ -141,8 +151,9 @@ export class EgressProxy {
    *   allowedClientCidrs: ReadonlyArray<{ network: string, prefix: number }>,
    *   resolve?: (host: string) => Promise<string[]>,
    *   connect?: (ip: string, port: number) => net.Socket,
-   *   maxConnections?: number, maxConnectionsPerClient?: number,
+   *   maxConnections?: number, maxConnectionsPerClient?: number, maxRawConnectionsPerClient?: number,
    *   idleTimeoutMs?: number, connectTimeoutMs?: number, maxTunnelMs?: number,
+   *   headersTimeoutMs?: number, requestTimeoutMs?: number, timeoutCheckIntervalMs?: number,
    *   onEvent?: (event: { event: string, host?: string, port?: number, reason?: string, client?: string }) => void
    * }} options
    */
@@ -154,13 +165,22 @@ export class EgressProxy {
     this.dial = options.connect ?? ((ip, port) => net.connect({ host: ip, port }));
     this.maxConnections = options.maxConnections ?? 64;
     this.maxPerClient = options.maxConnectionsPerClient ?? 16;
+    /** B-L1: rå TCP-tilkoblinger per klient-IP (inkluderer tunneler og halvsendte forespørsler). Én klient kan aldri fylle `server.maxConnections` alene. */
+    this.maxRawPerClient = options.maxRawConnectionsPerClient ?? this.maxPerClient * 2;
     this.idleTimeoutMs = options.idleTimeoutMs ?? 120_000;
     this.connectTimeoutMs = options.connectTimeoutMs ?? 10_000;
     this.maxTunnelMs = options.maxTunnelMs ?? 3_600_000;
+    // B-L1: en CONNECT-forespørsel fra jobbnettet kommer i ett pust. Header-blokken skal være ferdig på sekunder, ikke 15 s; Node sjekker tidsavbruddene bare ved `connectionsCheckingInterval`.
+    this.headersTimeoutMs = options.headersTimeoutMs ?? 5_000;
+    this.requestTimeoutMs = Math.max(options.requestTimeoutMs ?? 10_000, this.headersTimeoutMs);
+    this.timeoutCheckIntervalMs = options.timeoutCheckIntervalMs ?? 1_000;
     this.onEvent = options.onEvent ?? (() => undefined);
     this.active = 0;
     /** @type {Map<string, number>} */
     this.perClient = new Map();
+    /** @type {Map<string, number>} rå tilkoblinger per klient-IP (B-L1) */
+    this.rawPerClient = new Map();
+    this.lastRawDeniedEventAt = 0;
     /** @type {http.Server | undefined} */
     this.server = undefined;
     /** Alle åpne sockets (klientsiden av tunneler): `server.close()` venter ellers på dem for alltid ved avslutning. */
@@ -187,21 +207,31 @@ export class EgressProxy {
     return addresses;
   }
 
-  /** @param {string[]} addresses @param {number} port @returns {Promise<net.Socket>} */
-  async connectValidated(addresses, port) {
+  /**
+   * @param {string[]} addresses @param {number} port
+   * @param {AbortSignal} [signal] avbrytes når klienten forsvinner: en oppkobling som pågår rives umiddelbart, og ingen flere adresser prøves (B-M1)
+   * @returns {Promise<net.Socket>}
+   */
+  async connectValidated(addresses, port, signal) {
     let lastError;
     for (const ip of addresses) {
+      if (signal?.aborted) throw new ClientGoneError();
       try {
         return await new Promise((resolveConn, rejectConn) => {
           const socket = this.dial(ip, port);
+          const onAbort = () => socket.destroy(new ClientGoneError());
+          const settle = () => { clearTimeout(timer); signal?.removeEventListener("abort", onAbort); };
           const timer = setTimeout(() => socket.destroy(new Error("connect_timeout")), this.connectTimeoutMs);
-          socket.once("connect", () => { clearTimeout(timer); resolveConn(socket); });
-          socket.once("error", (error) => { clearTimeout(timer); rejectConn(error); });
+          signal?.addEventListener("abort", onAbort, { once: true });
+          socket.once("connect", () => { settle(); resolveConn(socket); });
+          socket.once("error", (error) => { settle(); rejectConn(error); });
         });
       } catch (error) {
         lastError = error;
+        if (signal?.aborted) break;
       }
     }
+    if (signal?.aborted) throw new ClientGoneError();
     throw lastError instanceof Error ? lastError : new Error("connect_failed");
   }
 
@@ -237,26 +267,48 @@ export class EgressProxy {
     };
     clientSocket.once("close", release);
 
+    // B-M1: lytteren settes FØR første await. Klienten kan forsvinne (RST/lukking) mens vi slår opp DNS eller kobler til; da må alt vi har åpnet rives umiddelbart. Registrert først ETTER
+    // oppkoblingen (som før) ville den aldri fyrt: `close` har da allerede gått, og upstream-socketen hang til idle-tidsavbruddet mens slot-regnskapet (`active`, `perClient`) var frigitt -
+    // en jobb kunne dermed omgå `maxConnections` og fylle fd-grensen.
+    const gone = new AbortController();
+    /** @type {net.Socket | undefined} */
+    let upstream;
+    clientSocket.once("close", () => {
+      gone.abort();
+      upstream?.destroy();
+    });
+
     let target;
     try {
       target = parseConnectTarget(req.url ?? "");
       const addresses = await this.validate(target.host, target.port);
-      const upstream = await this.connectValidated(addresses, target.port);
-      upstream.on("error", () => upstream.destroy());
-      upstream.once("close", () => clientSocket.destroy());
-      clientSocket.once("close", () => upstream.destroy());
-      upstream.setTimeout(this.idleTimeoutMs, () => upstream.destroy());
+      if (clientSocket.destroyed) throw new ClientGoneError();
+      upstream = await this.connectValidated(addresses, target.port, gone.signal);
+      // Oppkoblingen kan ha lyktes i samme øyeblikk klienten forsvant (`close` er ikke nødvendigvis levert ennå): riv og frigi.
+      if (clientSocket.destroyed) {
+        upstream.destroy();
+        throw new ClientGoneError();
+      }
+      const tunnel = upstream;
+      tunnel.on("error", () => tunnel.destroy());
+      tunnel.once("close", () => clientSocket.destroy());
+      tunnel.setTimeout(this.idleTimeoutMs, () => tunnel.destroy());
       clientSocket.setTimeout(this.idleTimeoutMs, () => clientSocket.destroy());
-      const lifetime = setTimeout(() => { clientSocket.destroy(); upstream.destroy(); }, this.maxTunnelMs);
+      const lifetime = setTimeout(() => { clientSocket.destroy(); tunnel.destroy(); }, this.maxTunnelMs);
       lifetime.unref();
       clientSocket.once("close", () => clearTimeout(lifetime));
       this.onEvent({ event: "connect_allowed", host: target.host, port: target.port, client });
       clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-      if (head.length > 0) upstream.write(head);
-      upstream.pipe(clientSocket);
-      clientSocket.pipe(upstream);
+      if (head.length > 0) tunnel.write(head);
+      tunnel.pipe(clientSocket);
+      clientSocket.pipe(tunnel);
     } catch (error) {
       release();
+      if (error instanceof ClientGoneError || clientSocket.destroyed) {
+        upstream?.destroy();
+        this.onEvent({ event: "connect_aborted", reason: "client_gone", ...(target ? { host: target.host, port: target.port } : {}), client });
+        return; // ingen å svare
+      }
       if (error instanceof EgressDeniedError) {
         this.onEvent({ event: "connect_denied", reason: error.reason, ...(target ? { host: target.host, port: target.port } : {}), client });
         return reply(error.reason === "target_invalid" ? 400 : 403, error.reason === "target_invalid" ? "Bad Request" : "Forbidden");
@@ -273,7 +325,10 @@ export class EgressProxy {
   async start(port, host) {
     if (isIP(host) !== 4 || host === "0.0.0.0") throw new Error("egress_proxy_requires_specific_ipv4_listen_address");
     const server = http.createServer(
-      { maxHeaderSize: 8 * 1024, requestTimeout: 30_000, headersTimeout: 15_000, keepAliveTimeout: 1_000 },
+      {
+        maxHeaderSize: 8 * 1024, requestTimeout: this.requestTimeoutMs, headersTimeout: this.headersTimeoutMs, keepAliveTimeout: 1_000,
+        connectionsCheckingInterval: this.timeoutCheckIntervalMs
+      },
       (req, res) => {
         // Ingen vanlig HTTP-videresending: alt som ikke er CONNECT avvises, uten å logge URL/innhold.
         this.onEvent({ event: "connect_denied", reason: "method_not_allowed" });
@@ -284,6 +339,27 @@ export class EgressProxy {
     );
     server.on("connect", (req, clientSocket, head) => void this.handleConnect(req, /** @type {net.Socket} */ (clientSocket), head));
     server.on("clientError", (_error, socket) => socket.destroy());
+    // B-L1: tak på RÅ tilkoblinger per klient-IP, FØR noe er lest. Uten det kunne én jobb holde alle `server.maxConnections` åpne med halvsendte header-blokker (målt: 128 stk ga «closed-without-answer»
+    // til en legitim CONNECT fra en annen jobb), mens slot-regnskapet for tunneler (`maxConnections`/`maxConnectionsPerClient`) aldri så dem.
+    server.on("connection", (socket) => {
+      const client = clientAddress(socket);
+      const count = (this.rawPerClient.get(client) ?? 0) + 1;
+      if (count > this.maxRawPerClient) {
+        const now = Date.now();
+        if (now - this.lastRawDeniedEventAt >= 1_000) { // ett varsel i sekundet: en flom skal ikke bli en loggflom
+          this.lastRawDeniedEventAt = now;
+          this.onEvent({ event: "connect_denied", reason: "too_many_raw_connections", client });
+        }
+        socket.destroy();
+        return;
+      }
+      this.rawPerClient.set(client, count);
+      socket.once("close", () => {
+        const left = (this.rawPerClient.get(client) ?? 1) - 1;
+        if (left <= 0) this.rawPerClient.delete(client);
+        else this.rawPerClient.set(client, left);
+      });
+    });
     server.maxConnections = this.maxConnections * 2;
     this.server = server;
     await new Promise((resolveListen, rejectListen) => {
