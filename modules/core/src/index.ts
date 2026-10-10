@@ -23,3 +23,4 @@ export * from "./services/runtime-role.ts";
 export * from "./services/erasure-ledger.ts";
 export * from "./services/operational-retention.ts";
 export * from "./services/tenant-catalog.ts";
+export * from "./services/business-tenant-provisioning.ts";

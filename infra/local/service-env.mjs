@@ -49,6 +49,7 @@ export const CORE_ENV = [
   "JARVIS_GIT_ALLOWED_REPOS",
   // WP-E1 (JARVIS-068): incident-produsentene (observasjon + registrering). AV som standard; api kjører de fleste, worker kjører vakthund-produsenten - begge leser samme bryter.
   "JARVIS_INCIDENT_PRODUCERS_ENABLED",
+  "JARVIS_OWNER_EXTRA_TENANTS",
   "JARVIS_OWNER_NAME",
   "JARVIS_OWNER_PERSON_ID",
   "JARVIS_TENANT_ID",
@@ -193,6 +194,7 @@ export const CONNECTOR_ENV = [
   "JARVIS_STRIPE_SYNC_HOUR",
   "JARVIS_STRIPE_TENANT_ID",
   "JARVIS_SUPPORT_INBOX_EMAILS",
+  "JARVIS_SUPPORT_SLA_HOURS",
   "JARVIS_TAVILY_API_KEY",
   "JARVIS_TELEGRAM_CHAT_ID",
   "JARVIS_TELEGRAM_TOKEN",
@@ -243,6 +245,7 @@ export const WORKER_CONNECTOR_ENV = [
   "JARVIS_NEONOMICS_ENVIRONMENT",
   "JARVIS_NEONOMICS_REALM",
   "JARVIS_SUPPORT_INBOX_EMAILS",
+  "JARVIS_SUPPORT_SLA_HOURS",
   "JARVIS_TELEGRAM_CHAT_ID",
   "JARVIS_TELEGRAM_TOKEN",
   "JARVIS_VIPPS_ENVIRONMENT",
@@ -251,6 +254,8 @@ export const WORKER_CONNECTOR_ENV = [
 /** Webhook-hemmeligheter - KUN api (mottar webhooks). */
 export const WEBHOOK_ENV = [
   "JARVIS_NEONOMICS_WEBHOOK_API_KEY",
+  // WP-D2 (UA-3 «churn/product usage»): HMAC-hemmelighet for POST /webhooks/product-usage (eierens egne produkter). Tom = ruten svarer 503 selv om tenanten er satt.
+  "JARVIS_PRODUCT_USAGE_WEBHOOK_SECRET",
   "JARVIS_STRIPE_WEBHOOK_SECRET",
   "JARVIS_VIPPS_WEBHOOK_SECRET",
   "JARVIS_WALLESTER_WEBHOOK_BASIC_PASSWORD",
@@ -346,6 +351,10 @@ export const SERVICE_ENV = {
     "JARVIS_BUSINESS_EVENTS_SYNC_HOUR", "JARVIS_BUSINESS_SCORING_HOUR", "JARVIS_BUSINESS_SWEEP_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_WEEKDAY", "JARVIS_CONNECTOR_HEALTH_SWEEP_HOUR", "JARVIS_CONVERSATION_GRAPH_SYNC_HOUR", "JARVIS_FINANCE_RECONCILE_HOUR", "JARVIS_FINANCE_SPEND_SWEEP_HOUR", "JARVIS_GROWTH_RECOMMENDATION_SWEEP_HOUR", "JARVIS_HEALTH_RETENTION_SWEEP_HOUR", "JARVIS_LOCATION_RETENTION_SWEEP_HOUR", "JARVIS_SITUATION_SWEEP_HOUR", "JARVIS_SUPPORT_INBOX_SYNC_HOUR", "JARVIS_VISION_RETENTION_SWEEP_HOUR", "JARVIS_STREAM_DEBUG",
     // WP-E1 (JARVIS-068): incident-produsentene i api-prosessen - intervall (ms), grener hvis utrullinger teller, og repoer som leses aktivt for nye Actions-kjøringer (tom = ingen polling). Ingen hemmeligheter.
     "JARVIS_INCIDENT_PRODUCERS_INTERVAL_MS", "JARVIS_INCIDENT_DEPLOY_REFS", "JARVIS_INCIDENT_DEPLOY_REPOS",
+    // WP-D2 (JARVIS-044/Q-48): dashbord-ruten for å opprette en bedrifts-tenant er AV som standard (api-only; CLI-en trenger ikke flagget).
+    "JARVIS_BUSINESS_TENANT_PROVISIONING",
+    // WP-D2 (UA-3 «churn/product usage»): bedrifts-tenanten produktbruk-webhooken skriver til (api-only; tom = ruten finnes ikke, 404).
+    "JARVIS_PRODUCT_USAGE_TENANT_ID",
     // WP-C2 (OPS-RUNTIME): ekstern oppetids-heartbeat (AV som standard; pinger kun mens en lokal selvsjekk består) og stien til den SKRIVEBESKYTTEDE backup-statusfilen
     // (monteres `:ro` med infra/backup/docker-compose.backup-status.yml - aldri selve backup-mappen).
     "JARVIS_UPTIME_HEARTBEAT_URL", "JARVIS_UPTIME_HEARTBEAT_INTERVAL_SEC", "JARVIS_BACKUP_STATUS_FILE",

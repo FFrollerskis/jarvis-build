@@ -275,7 +275,7 @@ export class BusinessService {
       if (!company) return null;
       const contacts = (await client.query(`SELECT * FROM business_contacts WHERE tenant_id = $1 AND company_id = $2 ORDER BY name LIMIT 50`, [tenantId, companyId])).rows as BusinessContact[];
       const opportunities = (await client.query(
-        `SELECT opportunity_id, title, stage, value_ore FROM business_opportunities WHERE tenant_id = $1 AND company_id = $2 AND stage NOT IN ('won','lost') ORDER BY updated_at DESC LIMIT 20`,
+        `SELECT opportunity_id, title, stage, value_ore, next_action, next_action_due_at FROM business_opportunities WHERE tenant_id = $1 AND company_id = $2 AND stage NOT IN ('won','lost') ORDER BY updated_at DESC LIMIT 20`,
         [tenantId, companyId]
       )).rows;
       const followups = (await client.query(
@@ -292,7 +292,14 @@ export class BusinessService {
          ORDER BY occurred_at DESC LIMIT $3`,
         [tenantId, companyId, clampLimit(activityLimit)]
       )).rows as CustomerTimelineEntry[];
-      return { company, contacts, open_opportunities: opportunities, open_followups: followups, open_loops: openLoops, recent_activities: recent };
+      // WP-D2 (UA-3 «churn/product usage»): siste churn-vurdering(er) for kunden, i klartekst (signalene), uten konto-pseudonymer. Tom liste = ingen koblet produktkonto / ingen vurdering ennå.
+      const churn = (await client.query(
+        `SELECT risk_score::float8 AS risk_score, risk_level, signals, calculated_at FROM business_churn_assessments WHERE tenant_id = $1 AND company_id = $2
+          ORDER BY risk_score DESC, account_ref ASC LIMIT 5`,
+        [tenantId, companyId]
+      )).rows as Array<{ risk_score: number; risk_level: string; signals: Array<{ label: string }>; calculated_at: Date }>;
+      const churnRisk = churn.map((c) => ({ risk_score: c.risk_score, risk_level: c.risk_level, signals: c.signals.map((x) => x.label), calculated_at: new Date(c.calculated_at).toISOString() }));
+      return { company, contacts, open_opportunities: opportunities, open_followups: followups, open_loops: openLoops, recent_activities: recent, churn_risk: churnRisk };
     });
   }
 
@@ -462,4 +469,6 @@ export interface CustomerOverview {
   open_followups: Array<Record<string, unknown>>;
   open_loops: Array<Record<string, unknown>>;
   recent_activities: CustomerTimelineEntry[];
+  /** WP-D2: churn-vurdering(er) fra koblede produktkontoer (signalene i klartekst). Tom = ingen koblet konto/vurdering. */
+  churn_risk: Array<{ risk_score: number; risk_level: string; signals: string[]; calculated_at: string }>;
 }

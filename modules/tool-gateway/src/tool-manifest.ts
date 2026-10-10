@@ -114,6 +114,8 @@ const EFFECT_OVERRIDES: Record<string, Effect> = {
   [k("executive", "get_value_report")]: "read",
   // WP-E1 (UA-5): driftsstatus (åpne hendelser, skymål, produsenthelse) - ren lesing.
   [k("executive", "get_infra_status")]: "read",
+  // WP-D2: «resolve» står i READ_VERB (DNS-/oppslagsbetydning), men å lukke en open loop er en SKRIVING (klasse C).
+  [k("business", "resolve_open_loop")]: "write",
   // D-416: delegeringsnivået - oppretter en intern, lesende bakgrunnsjobb (write, klasse B) / leser jobbstatus.
   [k("tasks", "delegate_background_task")]: "write",
   [k("tasks", "get_task_status")]: "read"
