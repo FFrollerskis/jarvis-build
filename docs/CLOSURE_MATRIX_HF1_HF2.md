@@ -46,7 +46,7 @@ HF2-PDF-en ligger ikke i repoet; radene bygger på beslutningsloggen D-406…D-4
 | 3 Core/tekst-MVP | ja | – | Langfuse-trace mot `cost_events` (D-27); Gemma-først-ruting målt |
 | 4 Hybridminne | delvis | `ErasureService`/`ContextEngine`/`MemoryExporter` kobles (JARVIS-060), `contextFor` flere rom (077), memory_items-unikhet (Q-45d) | pgvector/HNSW på NAS (D-28) |
 | 5 Voice | delvis | AEC/NS er hooks; rå-lyd-dump av som standard | D-30: ≥100 norske prøver, WER, P50/P95 |
-| 6 Workers | delvis | Vertsside job-runner + jobbimage (D-32/Q-45a) → WP-C | Ekte branch/PR fra NAS |
+| 6 Workers | delvis: vertsside job-runner, jobb-image og egress-proxy er bygget og `DORMANT` (WP-C1, D-455) | Diskkvote (restrisiko); rootless/userns er en forutsetning | Smal uavhengig re-review av rettelsene, installasjon og `ops/job-runner/acceptance.sh` på NAS (`NOT VERIFIED`), så ekte branch/PR fra NAS |
 | 7 Første integrasjoner | ja | – | Google OAuth/Gmail/Drive/GitHub live fra NAS (D-35) |
 | 8 Mobil/Watch | delvis | APNs-kontrakt, Swift-konfig i stedet for hardkodet identitet (Q-46) → WP-G | Xcode, signering, fysisk iPhone/Watch, TestFlight (D-36) |
 | 9 Home Assistant | ja | Romkart, state-readback-øvelse | Ekte HA-instans + token |
@@ -59,12 +59,12 @@ HF2-PDF-en ligger ikke i repoet; radene bygger på beslutningsloggen D-406…D-4
 | D-27 Langfuse | `LangfuseTraceSink`, akseptansescript (D-422) | – | Trace-round-trip på NAS mot `cost_events` |
 | D-28 pgvector/HNSW | migr. 014/068, eval-skript | – | Kjør `ops/memory/embedding-eval-live.ts` på NAS |
 | D-30 Voice-benchmark | `benchmark.ts` | – | ≥100 norske lydprøver |
-| D-32 Worker Docker/GitHub | policy, `DockerJobSandboxRunner`, `pr-publisher` | Vertsside runner + jobbimage + egress → WP-C | Ekte branch/PR, ressurs-/nettverksisolasjon |
+| D-32 Worker Docker/GitHub | policy, `DockerJobSandboxRunner`, `pr-publisher`; **vertsside runner + jobbimage + egress-proxy (WP-C1, D-455): `DORMANT`** (`JARVIS_JOB_RUNNER=host`; `ops/job-runner/acceptance.sh` J01–J13 + M01; `jarvis-runner` i `docker`-gruppen er effektivt root på verten – restrisiko dokumentert i `JOB_RUNNER.md`) | Diskkvote; selvkoding (EV-6/V3) forblir frosset | `acceptance.sh` på NAS mot sandbox-repo, ekte branch/PR, ressurs-/nettverksisolasjon; uavhengig re-review først |
 | D-35 Vault + live | Infisical i compose, `oauth-refresh`, host-skript; **GitHub-App-autentisering (Q-45b, D-454): `WIRED/DORMANT`** - uten `JARVIS_GITHUB_APP_ID`/`_INSTALLATION_ID` er alt PAT uendret (`modules/tool-gateway/src/github-app-auth.ts`, `github-token-provider.ts`; kodejobbens git-credential er repo-scopet via `GitCredentialSource.tokenFor`) | – (GHES, releases, branch protection, rulesets, webhooks, secrets: `DEFERRED`) | Machine identity, rotasjon, Google OAuth live; **GitHub App (ikke verifisert mot ekte GitHub):** eier følger `docs/runbooks/GITHUB_APP.md` og kjører `node --env-file=.env --experimental-transform-types modules/tool-gateway/scripts/github-app-live.ts --key-file ./nokkel.pem [--sandbox-repo owner/test]` til `GITHUB_APP_LIVE_STATUS=VERIFIED` |
 | D-36 Apple | skjelett | Swift-konfig, APNs-kontrakt → WP-G | Mac/Xcode/enhet |
 | HA-RUNTIME | HA-transport | – | Fysisk HA |
 | OPS-RUNTIME | backup/restore-skript, watchdog. **WP-C2 (D-453):** planlagt tikk/lås/retensjon/status `DORMANT` til cron installeres; off-site-sinks (rclone, rsync+ssh, lokal sti) `DORMANT` + `BLOCKED_EXTERNAL` (eier velger mål); backup-heartbeat `DORMANT` + `BLOCKED_EXTERNAL`; API-oppetids-heartbeat `DORMANT` (kablet i `main.ts`, av uten URL); selvdiagnose-område «Backup» `WIRED` (`UNKNOWN` til statusmappen er montert); restore-drill med RTO/RPO `DORMANT`. Uavhengig gjennomgang: 15 funn + 8 testgap rettet i oppfølgings-PR (F15 = erklært begrensning) | Off-site-retensjon `DEFERRED`; EV-19-kobling `BUILT_UNWIRED` (`backupMaintenanceLastRun` finnes, ikke koblet til `maintenanceSection`); `C13` i UA-0-gaten ikke lagt inn; `nas-restore-verify.sh --network none` `NOT VERIFIED` (ingen Docker-daemon i byggemiljøet) | `ops/backup/acceptance-ops.sh nas /volume1/jarvisbuild-data/backups/encrypted` på NAS (exit 0 = alt bestått, 3 = ikke lukket); på maskinen med privatnøkkelen: `ops/backup/acceptance-ops.sh drill ~/jarvis-drill --identity <nøkkelfil> --from-offsite` |
-| UA0-AUTHORITY | `authority.ts`, klasse D-pipeline | Fullfør D-kjede for finans/Zapier/Outlook bak step-up → WP-F | Pause/revoke/preflight/recovery i NAS-runtime |
+| UA0-AUTHORITY | `authority.ts`, klasse D-pipeline; **finans D-kjeden (WP-F1, D-462): de fire pengehandlingene kun via hele kjeden + step-up, `DORMANT` uten leverandør-credentials** | `mcp_zapier.call_tool` og `microsoft_outlook.send_mail` forblir `DEFERRED` (ingen deterministisk fersk lesing/readback); eldre klasse D-mutasjoner i Docker/GCE/Vercel/GitHub mangler `step_up_required` | Pause/revoke/preflight/recovery i NAS-runtime; Stripe testmodus-akseptanse (eier) |
 | UA0-PRIVACY | `PROCESSING_INVENTORY.md` + CI-vakt (D-420) | – | DPIA godkjent av eier |
 | UA0-RUNRATE | run-rate-rapport + maintenance ledger (D-421) + Value Center-bruksmetrikk per verdiløkke (`executive.get_value_report`, hurtigbane, `POST /value/query`, dashbord «Verdi og bruk», D-456): `WIRED`, testet mot ekte Postgres, IKKE kjørt på NAS | – | Åpne «Verdi og bruk» (eller si «hva har du hjulpet meg med») på NAS og sammenlign tallene (briefer, jobber, godkjenninger) med virkeligheten |
 
@@ -73,17 +73,17 @@ HF2-PDF-en ligger ikke i repoet; radene bygger på beslutningsloggen D-406…D-4
 | UA | Gjenstår å bygge (kode) | Gjenstår å verifisere |
 |---|---|---|
 | UA-0 | Job-runner, backup-drift/uptime, Value Center-metrikk, V2/V3/V4/V5-løkker | D-gatene over |
-| UA-1 AI Mesh | Standard med flere kandidater (033), kimi/hermes-verktøy (036), råd-bekreftelse (078) | ≥3 live providers med fallback og kost-synlighet |
-| UA-2 Knowledge | Flere kilder i produksjon, `KnowledgeRetriever` i chat, Docs/Sheets/Slides, møtetranskripter, entitetsgraf, Q-26 (truth promotion), Pieces (ingen kjent API) | Fem kilder i samme retrieval, cross-tenant=0 |
-| UA-3 Business OS | Business-tenant-provisjonering (044, topologi: Q-48), lead/opportunity-oppdatering, churn/product usage | Kjøring mot ekte kundedata |
+| UA-1 AI Mesh | **Bygget** (WP-D4, D-460): kandidatkjede i standardstien med synlig reservemerknad (033, `DORMANT` opt-in via `JARVIS_CHAT_CANDIDATES`), kimi/hermes-verktøy (036, bevist mot fake server + ekte `ModelGateway`-løkke), rådets forslagsvei (078, `DORMANT`), `executive.get_ai_mesh_status` + `mesh-live-smoke.ts` (`WIRED`/eierkjørt). Gjenstår: Hermes-streaming (bevisst ikke bygget) | ≥3 live providers med fallback og kost-synlighet: eier kjører `mesh-live-smoke.ts --db --tools --parallel` med ≥3 nøkler (`BLOCKED_EXTERNAL` til nøkler er levert) |
+| UA-2 Knowledge | **Bygget, DVALE** (WP-D1, D-457): Drive Docs/Slides/Sheets, Obsidian, filmapper, GitHub (beskrivelse/saker), e-postvedlegg, møtetranskripter, `KnowledgeRetriever` i chat (`knowledge.search` med skyskjerm), entitetsgraf, Q-26-påstandsverifisering (skriving av til `JARVIS_KNOWLEDGE_CLAIM_WRITES=on`). Gjenstår: GitHub-repo-filinnhold (`DEFERRED`), Pieces (ingen kjent API, Q-22), eier-rute/dashbord for Q-26-skriveverktøyene | Fem kilder i samme retrieval, cross-tenant=0, helse/`special` holdt tilbake fra sky (`NOT VERIFIED`); smal re-review av filleser + skyskjerm før kilder settes |
+| UA-3 Business OS | **Bygget, DORMANT/bak bekreftelse** (WP-D2, D-458): bedrifts-tenant-provisjonering (044), lead-/mulighetsoppdatering (049, klasse B/C), produktbruk + churn (090), kalibrering + SLA (045/082). Gjenstår: Q-48 A/B for `system`-jobber (C valgt), F1 (eierens egne jobber i utvidede tenants – `NEEDS_TOBIAS`), sletterolle for `business_change_log` (F5, dokumentert) | Kjøring mot ekte kundedata (`NOT VERIFIED`); smal re-review |
 | UA-4 Growth | Skriveaksjoner (idempotent, før/etter) mot Ads, GA4/Search Console/GBP/LinkedIn/YouTube/TikTok, eksperiment/kreativ-intelligens | Google Ads developer token, Meta-verifisering |
-| UA-5 Dev/Cloud | Cloudflare, Langfuse/Infisical/Postgres som mål, incident-produsenter. *GitHub App er bygget (`DORMANT`, D-454); EV-17-faktaene `GitHubAuth.credentialFacts()` er `BUILT_UNWIRED` til de kobles til `assessCredential`* | Live GitHub (App-akseptansescriptet over)/Vercel/GCP/Cloudflare |
-| UA-6 Finance | D-kjede for betaling/refund/capture bak step-up, Wallester-/banking-webhooks, avstemming | Live Vipps/Neonomics/Wallester, BankID/KYC |
+| UA-5 Dev/Cloud | **Bygget, SOVENDE** (WP-E1, D-461): Cloudflare-connector (lesing + klasse D-skriving), Postgres-drift, Langfuse/Infisical som kontrollerte mål, incident-livssyklus (096–098) med produsenter (AV), `executive.get_infra_status`. *GitHub App er bygget (`DORMANT`, D-454); EV-17-faktaene `GitHubAuth.credentialFacts()` er `BUILT_UNWIRED` til de kobles til `assessCredential`.* Gjenstår: eldre klasse D-mutasjoner (Docker/GCE/Vercel/GitHub) mangler `step_up_required` | Live GitHub (App-akseptansescriptet over)/Vercel/GCP; Cloudflare mot SANDBOX-sone; smal re-review (step-up, eier-port, WAF-roundtrip); lemping av M2 er `NEEDS_TOBIAS` |
+| UA-6 Finance | **Bygget, DORMANT** (WP-F1, D-462): D-kjede for de fire pengehandlingene bak step-up, webhook-herding (Stripe/Vipps/Neonomics/Wallester), avstemming (migrasjon 099–101). Gjenstår: manuell disposisjon av ukjent utfall (ikke bygget), Zapier/Outlook (`DEFERRED`) | Stripe testmodus (eier), live Vipps/Neonomics/Wallester/Fiken (`BLOCKED_EXTERNAL`), BankID/KYC; smal re-review før aktivering |
 | UA-7 Comms | Contacts, Teams, Messenger/Instagram, møtetranskripsjon-pipeline, utgående AI-ringing (regler), push-oppfølging | Identitet mot ekte data |
 | UA-8 Personal | Lokalagenter (Mac/Windows), Apple Calendar/Reminders/Contacts/Health-inntak, bil (provider-nøytral), familie/delte rom, personlig økonomi-lesing | Fysisk iPhone/Watch/bil |
 | UA-9 Vision | Kamera-produsenter (HA/iPhone), objekt-/hendelses-embeddings, inventar | Fysiske kameraer |
 | UA-10 Situation | Sanntids-abonnement, helse/hjem/vision-bro, modellassistert klassifisering, simulering/feedback | ACT/ACT+NOTIFY observert på NAS |
-| UA-11 Executive | Ti kontrollsentre (kap. 21), provider-/agent-dekning i ett panel (087) | «Ett panel»-bevis på NAS |
+| UA-11 Executive | **Delvis** (WP-H0, D-467): delt kontrakt + Integration/Authority/AI Center, modellpause/-tilbakekall (087), avbryt jobb, `/control` (`WIRED`). Gjenstår: 7 sentre (H1/H2), 087 del 2, golden-suite-knapp, tilbakekall av autonomi-binding | «Ett panel»-bevis på NAS (`NOT VERIFIED`, runbook WPH0 trinn 1–6) |
 
 ## 5. Value Track (kap. 9)
 
@@ -92,7 +92,7 @@ HF2-PDF-en ligger ikke i repoet; radene bygger på beslutningsloggen D-406…D-4
 | V1 Daily Executive Brief | `WIRED` (Daily Brief, `DailyScheduler`) + bruksmetrikk i Value Center (genererte/leverte briefer, daglig løper; «åpnet/besvart» kan ikke måles) | Observere daglig bruk på NAS |
 | V2 Unified Follow-up | pull `WIRED` (conversation-graph); push `DORMANT` (`JARVIS_V2_PUSH_ENABLED=true`: høyst én gang, forsøkstak/backoff, stopp før reservasjon, vasket tittel, D-456) | Verifiser på NAS: sett flagget, se én melding som ikke gjentas (`SELECT … FROM audit_events WHERE type LIKE 'followup.push_%'`) |
 | V3 Builder Loop | `DORMANT` (kun ren beredskapsvurdering; `activation_decision` er alltid false; selvmodifikasjon frosset, D-397) | D-32, EV-0, worker-isolasjon og eierens navngitte D-beslutning |
-| V4 Business Operating Loop | `PARTIAL` (Business OS-verktøyene finnes; selve løkken ikke) | Business-tenant (Q-48) → WP-D2 |
+| V4 Business Operating Loop | `PARTIAL` (Business OS-verktøy, tenant-provisjonering, lead-/mulighetsoppdatering og churn-løkke finnes, `DORMANT` – WP-D2/D-458; selve daglige løkken er ikke egen) | Q-48, tenant-topologi og kjøring mot ekte data |
 | V5 Autonomous Operations | `BUILT_UNWIRED` (ren forslagslogikk, `executes: false`, AV som standard) | Levering via bekreftelsesvei (TTL 5 min) og signert D-løp for omstart → WP-C/F |
 
 ## 6. Definition of Done, kap. 28 (15 punkter)
@@ -111,6 +111,9 @@ Per audit 2026-10-05: DONE_IN_CODE 2 (Situation Engine, Executive Mode), PARTIAL
 | Q-47 (a) | akseptert: D-klasse utilgjengelig for modellen til kjeden er komplett (WP-F bygger kjeden bak step-up) |
 | Q-47 (c)(e), Q-45 (b), Q-43, Q-23 | **eier-handling** (env, nøkkelrotasjon, GitHub App, HF6-fil, testkonto) |
 | Q-28 B, Q-42, Q-13, Q-22 | **eier-valg** (leverandør/stack) – et generelt ja velger ikke leverandør (CLAUDE.md regel 12) |
+| Q-54 | **eier-valg (F1, PR #326):** skal `JARVIS_OWNER_EXTRA_TENANTS` gi suverenitet også til eierens egne planlagte jobber (dagens, dokumentert) eller bare signerte økter |
+| Q-55 | **eier-valg (E1 M2, PR #324):** er strengeste step-up-standard for skymål-mutasjoner riktig, eller skal enkelte handlinger lempes (navngitt D-beslutning per handling) |
+| Q-56 | **eier-valg (D2 F5):** egen sletterolle/trigger for `business_change_log` eller akseptere app-rollens DELETE |
 | Q-03/04/06/09/10/11/12/19 | **måling** (verifiseringsøkten) |
 
 ## 8. Samlet liste: dette må Tobias gjøre (fysisk/valg) for å lukke
