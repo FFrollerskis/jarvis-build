@@ -27,8 +27,11 @@ export interface CloudMutationProvider {
   actions: ReadonlySet<string>;
   /** Stabil, lesbar mål-streng for journalen (id-er, aldri hemmeligheter). */
   target(action: string, parameters: Params): string;
-  /** Kompensasjonsplan som tekst + om den kan utføres automatisk med den fangede før-tilstanden. */
-  recovery(action: string, before: JsonValue | null, parameters: Params, externalId: string | undefined): { plan: string; available: boolean };
+  /**
+   * Kompensasjonsplan som tekst + om den kan utføres automatisk med den fangede før-tilstanden. `receipt.already_existed` (gjennomgang av PR #324, L7): mutasjonen opprettet ingenting fordi en identisk ressurs
+   * fantes allerede - da finnes det ikke noe Jarvis kan eller skal reversere.
+   */
+  recovery(action: string, before: JsonValue | null, parameters: Params, externalId: string | undefined, receipt?: { already_existed?: boolean }): { plan: string; available: boolean };
 }
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "?");
@@ -51,9 +54,13 @@ export const CLOUDFLARE_PROVIDER: CloudMutationProvider = {
       default: return `cloudflare:${zone}:cache`;
     }
   },
-  recovery(action, before, p, externalId) {
+  recovery(action, before, p, externalId, receipt) {
     const zone = str(p["zone_id"]);
     const b = obj(before);
+    // L7: en identisk post/regel som fantes fra før er ikke opprettet av Jarvis - aldri en kompensasjon som sletter den.
+    if ((action === "create_dns_record" || action === "create_waf_rule") && receipt?.already_existed === true) {
+      return { plan: "ingenting å reversere - en identisk ressurs fantes allerede, og Jarvis opprettet den ikke (kompensasjonen sletter aldri noe Jarvis ikke har opprettet)", available: false };
+    }
     switch (action) {
       case "create_dns_record":
         return externalId
@@ -163,8 +170,9 @@ export async function executeCloudMutation(
   identity: IdentityContext,
   input: ExecuteCloudMutationInput
 ): Promise<InfraExecution> {
-  const adapter = CLOUD_MUTATION_PROVIDERS[input.provider];
-  if (!adapter) throw new Error(`cloud_mutation_unknown_provider:${input.provider.slice(0, 40)}`);
+  // Gjennomgang av PR #324 (L8): eget-egenskap-oppslag - `provider: "constructor"`/`"__proto__"` ga tidligere en `TypeError` (en funksjon/prototype som «adapter») og et generisk 400.
+  const adapter = Object.hasOwn(CLOUD_MUTATION_PROVIDERS, input.provider) ? CLOUD_MUTATION_PROVIDERS[input.provider] : undefined;
+  if (!adapter) throw new Error(`cloud_mutation_unknown_provider:${String(input.provider).slice(0, 40)}`);
   if (!adapter.actions.has(input.action)) throw new Error(`cloud_mutation_unknown_action:${input.action.slice(0, 60)}`);
   const definition = deps.gateway.get(adapter.tool_id, input.action);
   if (!definition) throw new Error("cloud_mutation_tool_not_registered");
@@ -184,10 +192,12 @@ export async function executeCloudMutation(
   const { before, after, key_collision, external_id: ledgerExternalId } = await readToolExecutionState(deps.pool, input.tenant_id, input.idempotency_key, { tool_id: adapter.tool_id, action: input.action });
   // Ved PARTIAL/UNKNOWN (mutasjonen skjedde, verifiseringen feilet) er den eksterne id-en bare i ledgeren - den trengs for kompensasjon av opprettelser.
   const externalId = (result.ok ? result.external_id : undefined) ?? ledgerExternalId ?? undefined;
+  // L7: transporten sier fra når den ikke opprettet noe (en identisk post/regel fantes allerede). Flagget følger journalen (`provider_receipt.already_existed`) så recovery aldri sletter noe Jarvis ikke opprettet.
+  const alreadyExisted = result.ok && typeof result.data === "object" && result.data !== null && !Array.isArray(result.data) && (result.data as Record<string, JsonValue>)["already_existed"] === true;
   const state_diff = computeStateDiff(before, after);
-  const recovery = adapter.recovery(input.action, before, input.parameters, externalId);
+  const recovery = adapter.recovery(input.action, before, input.parameters, externalId, { already_existed: alreadyExisted });
   const provider_receipt: JsonValue = result.ok
-    ? ({ external_id: externalId ?? null, ...(key_collision ? { key_collision: true } : {}) } as unknown as JsonValue)
+    ? ({ external_id: externalId ?? null, ...(alreadyExisted ? { already_existed: true } : {}), ...(key_collision ? { key_collision: true } : {}) } as unknown as JsonValue)
     : ({ reason: result.reason.slice(0, 200), ...(externalId ? { external_id: externalId } : {}) } as unknown as JsonValue);
   const risk_class: InfraRiskClass = definition.capability_class;
 

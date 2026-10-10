@@ -43,7 +43,7 @@ async function write(ctx: CloudflareRecoveryContext, action: string, parameters:
   return r.ok ? { ok: true, ...(r.external_id !== undefined ? { external_id: r.external_id } : {}) } : { ok: false, reason: r.reason };
 }
 
-function journal(ctx: CloudflareRecoveryContext): { exec: InfraExecution; zone: string; requested: Record<string, unknown>; externalId: string | null } | null {
+function journal(ctx: CloudflareRecoveryContext): { exec: InfraExecution; zone: string; requested: Record<string, unknown>; externalId: string | null; alreadyExisted: boolean } | null {
   const exec = ctx.execution;
   if (!exec) return null;
   const requested = asObj(exec.requested_state) ?? {};
@@ -51,7 +51,8 @@ function journal(ctx: CloudflareRecoveryContext): { exec: InfraExecution; zone: 
   if (!zone) return null;
   const receipt = asObj(exec.provider_receipt);
   const externalId = typeof receipt?.["external_id"] === "string" ? (receipt["external_id"] as string) : null;
-  return { exec, zone, requested, externalId };
+  // L7: `already_existed` i kvitteringen = mutasjonen opprettet ingenting (en identisk ressurs fantes allerede) - kompensasjonen skal aldri slette den.
+  return { exec, zone, requested, externalId, alreadyExisted: receipt?.["already_existed"] === true };
 }
 
 /** Sammenligner to DNS-poster på feltene en mutasjon kan endre (innhold uavhengig av leverandørens normalisering; ttl ignoreres for proxiede poster). */
@@ -72,6 +73,8 @@ const rulesOf = (state: unknown): NormalizedRule[] => ((asObj(state)?.["rules"] 
 const undoCreateDns: Strategy = async (ctx) => {
   const j = journal(ctx);
   if (!j) return unknown("execution_journal_missing");
+  // L7 (gjennomgang av PR #324): aldri slett en post Jarvis ikke opprettet - også ikke når den dukket opp mellom preflight og kallet (da står den ikke i før-tilstanden).
+  if (j.alreadyExisted) return { status: "SUCCESS", result: { noop: "record_existed_before_execution", reason: "record_not_created_by_jarvis" } };
   if (!j.externalId) return unknown("no_created_record_id_captured");
   const before = (asObj(j.exec.before_state)?.["records"] as Array<{ id?: string }> | undefined) ?? [];
   if (before.some((r) => r.id === j.externalId)) return { status: "SUCCESS", result: { noop: "record_existed_before_execution", record_id: j.externalId } };
@@ -144,6 +147,8 @@ const undoDeleteDns: Strategy = async (ctx) => {
 const undoCreateRule: Strategy = async (ctx) => {
   const j = journal(ctx);
   if (!j) return unknown("execution_journal_missing");
+  // L7: samme prinsipp som for DNS - en identisk regel som fantes fra før (også en som dukket opp i et løp) slettes aldri.
+  if (j.alreadyExisted) return { status: "SUCCESS", result: { noop: "rule_existed_before_execution", reason: "rule_not_created_by_jarvis" } };
   const phase = typeof j.requested["phase"] === "string" ? j.requested["phase"] : null;
   if (!phase) return unknown("no_phase_captured");
   if (!j.externalId) return unknown("no_created_rule_id_captured");

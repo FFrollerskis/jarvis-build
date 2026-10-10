@@ -575,9 +575,11 @@ export class CloudflareTransport implements ToolTransport {
     else if (parameters["priority"] !== undefined) throw new Error("cloudflare_invalid_priority:kun_for_mx");
     if (parameters["comment"] !== undefined) body["comment"] = assertDnsComment(parameters["comment"]);
     // Idempotent opprettelse: finnes en IDENTISK post allerede (type+navn+innhold), returneres den uten nytt POST (Cloudflare ville avvist duplikatet).
+    // Gjennomgang av PR #324 (L7): INGEN `external_id` - Jarvis opprettet ingenting, så det finnes ingen «opprettet ressurs» kompensasjonen kan slette. (Tidligere ble den eksisterende postens id journalført som `external_id`;
+    // oppsto den mellom preflight og dette kallet (en tredjepart), sto den ikke i før-tilstanden, og recovery slettet en post Jarvis aldri opprettet.) `already_existed: true` følger i stedet med i journalens kvittering.
     const existing = ((await this.findDns({ zone_id: zoneId, type, name }, credential, "find")).data as unknown as { records: NormalizedDnsRecord[] }).records
       .find((r) => r.content !== null && dnsContentMatches(type, content, r.content));
-    if (existing) return { external_id: existing.id, data: json({ ...existing, already_existed: true }) };
+    if (existing) return { data: json({ ...existing, already_existed: true }) };
     const env = (await this.call("POST", `/zones/${zoneId}/dns_records`, credential, { body }))!;
     const record = normalizeDnsRecord(env.result);
     if (record === null) throw new CloudflareApiError("cloudflare_invalid_response:record_missing", 200, false);
@@ -656,7 +658,8 @@ export class CloudflareTransport implements ToolTransport {
     const before = await this.entrypoint(zoneId, input.phase, credential);
     const description = input.description ?? "";
     const duplicate = before.rules.find((r) => r.action === input.action && r.expression === input.expression && r.description === description);
-    if (duplicate) return { external_id: duplicate.id, data: json({ ruleset_id: before.id, rule: duplicate, already_existed: true }) };
+    // L7: samme prinsipp som for DNS - en identisk regel som fantes fra før er ikke noe Jarvis opprettet, så ingen `external_id` (recovery kan aldri slette den).
+    if (duplicate) return { data: json({ ruleset_id: before.id, rule: duplicate, already_existed: true }) };
     const rule = { action: input.action, expression: input.expression, description, enabled: input.enabled ?? true, ...(input.ratelimit ? { ratelimit: input.ratelimit } : {}) };
     // Mangler entrypoint-rulesettet, opprettes det med regelen i `rules` (dokumentert flyt); ellers legges regelen til i det eksisterende.
     const env = before.exists && before.id

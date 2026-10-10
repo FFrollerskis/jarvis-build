@@ -54,6 +54,8 @@ export class FakeCloudflare {
   planName = "Free";
   /** L2: de neste forespørslene hvis «METHOD /sti» matcher `pattern` svarer med en redirect (`status` + `location`). */
   private readonly redirects: Array<{ pattern: RegExp; status: number; location: string; remaining: number }> = [];
+  /** L7: kroker som kjøres rett FØR en bestemt forespørsel behandles (simulerer et løp: en tredjepart endrer tilstanden mellom to av transportens egne kall). */
+  private readonly hooks: Array<{ pattern: RegExp; fn: () => void; skip: number; fired: boolean }> = [];
   private rateLimited = 0;
   private rateLimitRetryAfter: string | null = null;
   private readonly failures: Array<{ pattern: RegExp; status: number; body?: unknown; remaining: number }> = [];
@@ -103,6 +105,14 @@ export class FakeCloudflare {
     const id = hex32();
     rs.rules.push({ id, version: "1", last_updated: new Date().toISOString(), description: "", enabled: true, ...rule });
     return { rulesetId: rs.id, ruleId: id };
+  }
+
+  /**
+   * L7: kjør `fn` (f.eks. `seedDns`/`seedRule` for en tredjepart) EN gang, rett FØR forespørselen som matcher «METHOD /sti» etter at `skip` treff er sluppet forbi. Eksempel: `skip = 1` på dns_records-GET
+   * slipper preflight-lesingen (treff 1) forbi og kjører kroken rett før transportens egen duplikat-sjekk (treff 2) - altså et løp mellom preflight og kallet.
+   */
+  beforeNext(pattern: RegExp, fn: () => void, skip = 0): void {
+    this.hooks.push({ pattern, fn, skip, fired: false });
   }
 
   redirectNext(pattern: RegExp, status: number, location: string, times = 1): void {
@@ -185,6 +195,12 @@ export class FakeCloudflare {
     const path = url.pathname.replace(/^\/client\/v4/, "");
     this.requests.push({ method, path, query, body, auth });
 
+    for (const hook of this.hooks) {
+      if (hook.fired || !hook.pattern.test(`${method} ${path}`)) continue;
+      if (hook.skip > 0) { hook.skip -= 1; continue; }
+      hook.fired = true;
+      hook.fn();
+    }
     for (const r of this.redirects) {
       if (r.remaining > 0 && r.pattern.test(`${method} ${path}`)) {
         r.remaining -= 1;
