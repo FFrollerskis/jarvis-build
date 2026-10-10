@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   classifyFetchError,
   classifyHttpStatus,
@@ -10,8 +11,11 @@ import {
   textOnly,
   type ModelProviderAdapter,
   type ModelRequest,
-  type ModelResult
+  type ModelResult,
+  type ToolCallRequest
 } from "./types.ts";
+import { HermesToolParseError, hermesToolReplayMessages, parseHermesOutput, renderHermesToolsSystemBlock } from "./hermes-tools.ts";
+import { normalizeToolCalls, normalizeUsage } from "./openai-compat-tools.ts";
 
 /**
  * Hermes (NousResearch)-adapter. Tobias direkte i chat (D-360): "Hermes
@@ -40,6 +44,12 @@ import {
  * PENDING_CREDENTIALS` - FIXED_SUITE_VERIFIED, ALDRI LIVE_VERIFIED før
  * Tobias limmer inn en ekte Nous Portal-nøkkel og en host-kjøring bekrefter
  * et faktisk svar.
+ *
+ * JARVIS-036 (WP-D4): VERKTØYKALL via Hermes' eget prompt-protokoll (`<tools>`/`<tool_call>`/`<tool_response>`), se `hermes-tools.ts` for format, streng parser og injeksjonsvern. `tools`-feltet
+ * sendes ALDRI (hosted støtte er udokumentert/motstridende), så adapteren virker likt mot Nous' API og en selvhostet vLLM/SGLang. Ugyldig/ukjent verktøykall → `invalid_tool_call`, aldri utføring.
+ * Hvis serveren likevel selv leverer `message.tool_calls` (den kan oversette taggene), brukes de på samme strenge måte (kun tilbudte verktøy), så et kall aldri forsvinner stille - men
+ * tagger OG `tool_calls` i samme svar er tvetydig og avvises. STREAMING er BEVISST ikke bygget for Hermes (taggene måtte filtreres ut av en løpende strøm; registeret påstår derfor ikke `streaming`):
+ * `ModelGateway.stream()` velger ikke Hermes, mens bakgrunnsløkker (`complete()`) kan.
  */
 export class HermesAdapter implements ModelProviderAdapter {
   readonly name: string = "hermes";
@@ -59,9 +69,15 @@ export class HermesAdapter implements ModelProviderAdapter {
     if (!this.apiKey) {
       throw new ProviderError(this.name, "not_configured", `${this.name}_not_configured`);
     }
+    const tools = request.tools ?? [];
+    // Protokollblokken legges ETTER Jarvis' egen systemprompt, og kun når verktøy er tilbudt i denne forespørselen.
+    const system = [request.system, tools.length > 0 ? renderHermesToolsSystemBlock(tools) : undefined]
+      .filter((part): part is string => typeof part === "string" && part.length > 0)
+      .join("\n\n");
     const messages = [
-      ...(request.system ? [{ role: "system", content: request.system }] : []),
-      ...request.messages.map((m) => ({ role: m.role, content: textOnly(m.content) }))
+      ...(system ? [{ role: "system", content: system }] : []),
+      ...request.messages.map((m) => ({ role: m.role, content: textOnly(m.content) })),
+      ...hermesToolReplayMessages(request.tool_exchanges)
     ];
     const started = Date.now();
     const url = `${this.baseUrl}/v1/chat/completions`;
@@ -98,7 +114,7 @@ export class HermesAdapter implements ModelProviderAdapter {
       });
     }
     let body: {
-      choices: Array<{ message: { content: string | null }; finish_reason?: string }>;
+      choices: Array<{ message: { content: string | null; tool_calls?: unknown }; finish_reason?: string }>;
       usage: { prompt_tokens: number; completion_tokens: number };
     };
     try {
@@ -109,15 +125,62 @@ export class HermesAdapter implements ModelProviderAdapter {
     } catch {
       throw new ProviderError(this.name, "invalid_response", `${this.name}_invalid_response`);
     }
-    const text = body.choices[0]?.message.content ?? "";
-    onToken?.(text);
+    const message = body.choices[0]?.message;
+    const parsed = this.parseOutput(message?.content ?? "", message?.tool_calls, tools);
+    if (parsed.text) onToken?.(parsed.text);
+    const finish = body.choices[0]?.finish_reason;
+    // L10: tokentall valideres (endelige heltall >= 0) før de når kostberegningen; ugyldige felt blir 0 og svaret merkes, aldri en streng/NaN.
+    const normalized = normalizeUsage(body.usage);
+    const metadata = {
+      ...(parsed.ignored_blocks > 0 ? { tool_blocks_ignored: parsed.ignored_blocks } : {}),
+      ...(normalized.problems.length > 0 ? { usage_missing: true, usage_invalid: true, usage_problems: normalized.problems } : {})
+    };
     return {
-      text,
-      usage: { input_tokens: body.usage.prompt_tokens, output_tokens: body.usage.completion_tokens },
+      text: parsed.text,
+      usage: normalized.usage,
       provider: this.name,
       model: this.model,
       latency_ms: Date.now() - started,
-      ...(body.choices[0]?.finish_reason ? { finish_reason: body.choices[0].finish_reason } : {})
+      ...(parsed.calls.length > 0 ? { finish_reason: "tool_calls" } : finish ? { finish_reason: finish } : {}),
+      ...(parsed.calls.length > 0 ? { tool_calls: parsed.calls } : {}),
+      ...(Object.keys(metadata).length > 0 ? { metadata } : {})
+    };
+  }
+
+  /** Svartekst (+ eventuelle serveroversatte `tool_calls`) → synlig tekst og normaliserte kall, eller `invalid_tool_call` (aldri et delvis resultat). */
+  private parseOutput(
+    content: string,
+    nativeToolCalls: unknown,
+    tools: NonNullable<ModelRequest["tools"]>
+  ): { text: string; calls: ToolCallRequest[]; ignored_blocks: number } {
+    let tagged: ReturnType<typeof parseHermesOutput>;
+    try {
+      tagged = parseHermesOutput(content, tools);
+    } catch (err) {
+      if (err instanceof HermesToolParseError) throw new ProviderError(this.name, "invalid_tool_call", `${this.name}_invalid_tool_call:${err.code}`);
+      throw err;
+    }
+    const native = Array.isArray(nativeToolCalls) && nativeToolCalls.length > 0 ? normalizeToolCalls(this.name, this.model, nativeToolCalls) : [];
+    if (native.length > 0 && (tagged.calls.length > 0 || tagged.ignored_blocks > 0)) {
+      throw new ProviderError(this.name, "invalid_tool_call", `${this.name}_invalid_tool_call:ambiguous_call_formats`);
+    }
+    if (native.length > 0) {
+      const known = new Set(tools.map((t) => t.name));
+      if (tools.length === 0 || native.some((c) => !known.has(c.tool_name))) {
+        throw new ProviderError(this.name, "invalid_tool_call", `${this.name}_invalid_tool_call:unknown_tool`);
+      }
+      return { text: tagged.text, calls: native, ignored_blocks: 0 };
+    }
+    return {
+      text: tagged.text,
+      calls: tagged.calls.map((c) => ({
+        tool_call_id: `call-${randomUUID().slice(0, 8)}`,
+        tool_name: c.name,
+        arguments: c.arguments,
+        provider: this.name,
+        model: this.model
+      })),
+      ignored_blocks: tagged.ignored_blocks
     };
   }
 }

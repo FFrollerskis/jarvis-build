@@ -115,11 +115,24 @@ describe("JARVIS-034: bokføringsfeil etter et vellykket kall er ikke en leveran
 });
 
 describe("JARVIS-036: ærlig capability-registry", () => {
-  it("kimi og hermes påstår ikke verktøykall/strukturert utdata som adapterne ikke støtter", () => {
+  it("kimi og hermes påstår ikke strukturert utdata som adapterne ikke støtter (verktøykall: se under og wpd4-kimi-hermes-tools.test.ts)", () => {
     const kimi = DEFAULT_PROFILES.find((p) => p.provider === "kimi")!;
     const hermes = DEFAULT_PROFILES.find((p) => p.provider === "hermes")!;
-    expect(kimi.capabilities).not.toContain("tool_calling");
-    expect(hermes.capabilities).not.toContain("tool_calling");
+    expect(kimi.capabilities).not.toContain("structured_output");
     expect(hermes.capabilities).not.toContain("structured_output");
+    expect(hermes.capabilities).not.toContain("streaming");
+  });
+
+  it("WP-D4: tool_calling for kimi/hermes er først påstått etter at adapterne beviselig støtter det - testene som beviser det må finnes", async () => {
+    // Låser koblingen: påstanden i registeret og beviset (adaptertestene + gateway-løkken) hører sammen. Fjernes beviset, må påstanden fjernes med det.
+    const { existsSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const root = fileURLToPath(new URL("../../../", import.meta.url));
+    for (const proof of ["packages/provider-adapters/test/kimi-tools.test.ts", "packages/provider-adapters/test/hermes-tools.test.ts", "modules/model-gateway/test/wpd4-kimi-hermes-tools.test.ts"]) {
+      expect(existsSync(`${root}${proof}`), proof).toBe(true);
+    }
+    for (const provider of ["kimi", "hermes"]) {
+      expect(DEFAULT_PROFILES.find((p) => p.provider === provider)!.capabilities).toContain("tool_calling");
+    }
   });
 });

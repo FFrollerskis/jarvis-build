@@ -270,7 +270,9 @@ describe("D-106 ConversationEngine: routing overrides folder inn i CompleteInput
     expect(callCount).toBe(2);
     expect(capturedInputs[0]?.providerPreference).toEqual(["gemma_local", "gemma_hosted"]);
     expect(capturedInputs[1]?.providerPreference).toBeUndefined();
-    expect(result.reply).toBe("fallback-svar");
+    // WP-D4 (JARVIS-033): en reserve svarte - svaret sier det (merknad bak svaret), selve svaret er uendret.
+    expect(result.reply.split("\n\n(Reservemodell brukt:")[0]).toBe("fallback-svar");
+    expect(result.reply).toContain("(Reservemodell brukt:");
     expect(result.routed).toBe("model");
   });
 
@@ -293,7 +295,9 @@ describe("D-106 ConversationEngine: routing overrides folder inn i CompleteInput
     expect(captured[1]?.providerPreference).toBeUndefined();
     // Sensitivitet følger med uendret inn i fallbacken (routeren stopper SECRET_RESTRICTED fra sky).
     expect(captured[1]?.sensitivity).toBe(captured[0]?.sensitivity);
-    expect(result.reply).toBe("reserve-svar");
+    // WP-D4 (JARVIS-033): en reserve svarte - svaret sier det (merknad bak svaret), selve svaret er uendret.
+    expect(result.reply.split("\n\n(Reservemodell brukt:")[0]).toBe("reserve-svar");
+    expect(result.reply).toContain("(Reservemodell brukt:");
   });
 
   it("G9 (D-404): andre feil fra Gemma (f.eks. bad_request/auth) og feil fra ANDRE leverandører faller IKKE stille tilbake", async () => {
@@ -341,7 +345,9 @@ describe("D-106 ConversationEngine: routing overrides folder inn i CompleteInput
     expect(captured).toHaveLength(2);
     expect(captured[1]?.providerPreference).toBeUndefined();
     expect(captured[1]?.sensitivity).toBe(captured[0]?.sensitivity); // sensitivitetsreglene følger med uendret
-    expect(result.reply).toBe("reserve-svar");
+    // WP-D4 (JARVIS-033): en reserve svarte - svaret sier det (merknad bak svaret), selve svaret er uendret.
+    expect(result.reply.split("\n\n(Reservemodell brukt:")[0]).toBe("reserve-svar");
+    expect(result.reply).toContain("(Reservemodell brukt:");
   });
 
   it("G8c (D-444): streaming - kun blanke tegn er levert før det ubrukelige svaret, så fallbacken gjelder fortsatt (blanke tegn er ikke synlig output)", async () => {
@@ -364,8 +370,10 @@ describe("D-106 ConversationEngine: routing overrides folder inn i CompleteInput
     const tokens: string[] = [];
     const result = await engine.handle(identity, "hva er klokken?", (t) => tokens.push(t));
     expect(captured).toHaveLength(2);
-    expect(result.reply).toBe("reserve-svar");
-    expect(tokens.join("").trim()).toBe("reserve-svar");
+    // WP-D4 (JARVIS-033): en reserve svarte - svaret sier det (merknad bak svaret), selve svaret er uendret.
+    expect(result.reply.split("\n\n(Reservemodell brukt:")[0]).toBe("reserve-svar");
+    expect(result.reply).toContain("(Reservemodell brukt:");
+    expect(tokens.join("").split("\n\n(Reservemodell brukt:")[0]?.trim()).toBe("reserve-svar"); // merknaden strømmes etter svaret (WP-D4)
   });
 
   it("G8d (D-444): derimot faller motoren IKKE tilbake når synlig tekst allerede er sendt til eieren (feiler ærlig, aldri to svar etter hverandre)", async () => {

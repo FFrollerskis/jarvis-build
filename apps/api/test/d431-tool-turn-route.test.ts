@@ -119,7 +119,9 @@ describe("D-431: verktøyturer til skymodell, ren prat lokalt", () => {
       }
     });
     const result = await engine.handle(identity, ASK);
-    expect(result.reply).toBe("lokalt svar");
+    // WP-D4 (JARVIS-033): en reserve svarte - svaret sier det (merknad bak svaret), selve svaret er uendret.
+    expect(result.reply.split("\n\n(Reservemodell brukt:")[0]).toBe("lokalt svar");
+    expect(result.reply).toContain("(Reservemodell brukt:");
     expect(captured).toHaveLength(2);
     expect(captured[1]?.providerPreference).toEqual(["gemma_local", "gemma_hosted"]);
     expect(captured[1]?.request.model).toBeUndefined();
@@ -135,7 +137,9 @@ describe("D-431: verktøyturer til skymodell, ren prat lokalt", () => {
       }
     });
     const result = await engine.handle(identity, ASK);
-    expect(result.reply).toBe("reserve");
+    // WP-D4 (JARVIS-033): en reserve svarte - svaret sier det (merknad bak svaret), selve svaret er uendret.
+    expect(result.reply.split("\n\n(Reservemodell brukt:")[0]).toBe("reserve");
+    expect(result.reply).toContain("(Reservemodell brukt:");
     expect(captured[1]?.providerPreference).toBeUndefined();
     expect(captured[1]?.request.model).toBeUndefined();
   });

@@ -60,6 +60,20 @@ export interface RouteInput {
    * satt - `provider` er alltid mer spesifikk og vinner.
    */
   providerPreference?: string[];
+  /**
+   * WP-D4 (JARVIS-033): kun sammen med `providerPreference`. Av (standard/udefinert) = UENDRET: første kvalifiserte medlem vinner og planen har ÉN kandidat (standardstien hadde derfor
+   * aldri en reserve inne i gatewayen). På = ALLE kvalifiserte medlemmer returneres som kandidater i listerekkefølge, så `ModelGateway.executePlan` kan gå til neste medlem ved en klassifisert
+   * feil FØR noe er sendt. Listen er fortsatt HARD (ingen leverandør utenfor den, ingen scoring), og HVER port gjelder per medlem akkurat som for enkeltvalget: capabilities, sensitivitet
+   * (SECRET_RESTRICTED = kun lokal), `paid_models_allowed`, helse og `mode: "LOCAL"`. Et medlem som feiler en port blir aldri kandidat - failover kan ikke åpne noe et enkeltvalg ville stengt.
+   */
+  preferenceFailover?: boolean;
+  /**
+   * WP-D4 (gjennomgang av PR #315, L6): leverandører som allerede er FORSØKT i denne turen og ikke skal prøves igjen. Gjelder kun den scorede (AUTO/FAST/…) grenen - ikke eksakt `provider` og ikke `providerPreference`, som er
+   * eierens eksplisitte valg. Brukes av samtalemotorens siste reserve (D-354/D-404): omkjøringen gjennom vanlig ruting gjentok tidligere leverandørene i kjeden (opptil 4 kall til samme leverandør og 11 totalt per tur).
+   * Alle øvrige porter (sensitivitet, betaling, `mode: LOCAL`, helse) gjelder uendret - utelukking kan bare gjøre utvalget mindre. Er alt som ellers kvalifiserte allerede forsøkt, kastes
+   * `NoEligibleProviderError` med `already_attempted` (kalleren kaster da den opprinnelige feilen, som er den ærligste).
+   */
+  excludeProviders?: readonly string[];
 }
 
 export interface RouteCandidate {
@@ -72,6 +86,12 @@ export interface RoutePlan {
   reason: RoutingReason;
   /** Primær først; resten er deterministisk fallback-rekkefølge. */
   candidates: RouteCandidate[];
+  /**
+   * WP-D4 (gjennomgang av PR #315, M2): medlemmer av en preferanseliste som bestod ALLE porter (konfigurert, capabilities, sensitivitet, betaling, `mode: LOCAL`), men ble hoppet over FØR noe kall fordi helsen er UNAVAILABLE
+   * (halv-åpen krets etter gjentatte feil). Å bytte til neste medlem er reservebruk like mye som etter en kastet feil, så gatewayen melder dem til `CompleteInput.onAttemptFailed` (ellers ble reserven stille de
+   * neste 30 s-5 min etter et utfall). Kun satt for preferanselister.
+   */
+  unavailable?: string[];
 }
 
 /** LOCAL krevd men ingen egnet lokal modell live → tydelig feil, aldri sky bak ryggen (§26). */
@@ -185,9 +205,14 @@ interface ProviderRuntime {
 }
 
 export class AiRouter {
+  /**
+   * `autoVerified` (M3, gjennomgang av PR #315): leverandører eieren har erklært LIVE-verifisert for capabilities registeret bare PÅSTÅR (`ModelProfile.live_unverified`; `JARVIS_MESH_TOOLS_VERIFIED`). Tom (standard) = AUTO-ruting
+   * bruker ikke slike leverandører til kall som krever en uverifisert capability (verktøykall, Kimi-streaming). Gjelder kun den scorede grenen - eierens eksplisitte valg (`provider`, `providerPreference`) er uendret.
+   */
   constructor(
     private readonly registry: CapabilityRegistry,
-    private readonly health: ProviderHealthTracker
+    private readonly health: ProviderHealthTracker,
+    private readonly autoVerified: ReadonlySet<string> = new Set()
   ) {}
 
   plan(input: RouteInput, providers: Map<string, ProviderRuntime>): RoutePlan {
@@ -240,22 +265,33 @@ export class AiRouter {
       const attempted: string[] = [];
       // D-404: HVILKEN port som avviste hver leverandør (tidligere bare «ingen er konfigurert/kvalifisert» - kostet en hel feilsøkingsrunde).
       const rejected: string[] = [];
+      // WP-D4 (JARVIS-033): med `preferenceFailover` samles ALLE kvalifiserte medlemmer (i listerekkefølge) i stedet for å returnere ved det første.
+      const chain: RouteCandidate[] = [];
+      const unavailable: string[] = [];
       for (const name of input.providerPreference) {
+        if (attempted.includes(name)) continue; // samme leverandør to ganger i listen = ett forsøk (ellers dobbelt betalt kall i failover)
         const rt = providers.get(name);
         attempted.push(name);
         if (!rt?.configured) { rejected.push(`${name}:${rt?.paused ? "paused_by_owner" : "not_configured"}`); continue; }
         const profile = this.registry.profileOrGeneric(name, rt.model);
         const missing = [...requiredForPref].filter((c) => !profile.capabilities.includes(c));
         if (missing.length > 0) { rejected.push(`${name}:missing_capabilities=${missing.join("+")}`); continue; }
+        // WP-D4: `mode: "LOCAL"` gjaldt tidligere bare AUTO-grenen; en preferanseliste med en skyleverandør kunne dermed ignorere «kun lokale modeller». Nå gjelder den også her (strengere, aldri løsere).
+        if (mode === "LOCAL" && profile.locality !== "local") { rejected.push(`${name}:not_local`); continue; }
         if (!isSensitivityEligible(profile, input.sensitivity)) { rejected.push(`${name}:sensitivity=${input.sensitivity ?? "undefined"}`); continue; }
         if (!isPaidModelsEligible(profile, input.paid_models_allowed)) { rejected.push(`${name}:paid_models_disabled`); continue; }
-        if (this.health.state(name, true) === "UNAVAILABLE") { rejected.push(`${name}:health_unavailable`); continue; }
-        return {
-          mode: "SPECIFIC_PROVIDER",
-          reason: "PROVIDER_PREFERENCE",
-          candidates: [{ provider: name, model: rt.model }]
-        };
+        if (this.health.state(name, true) === "UNAVAILABLE") { rejected.push(`${name}:health_unavailable`); unavailable.push(name); continue; }
+        if (!input.preferenceFailover) {
+          return {
+            mode: "SPECIFIC_PROVIDER",
+            reason: "PROVIDER_PREFERENCE",
+            candidates: [{ provider: name, model: rt.model }],
+            ...(unavailable.length > 0 ? { unavailable } : {})
+          };
+        }
+        chain.push({ provider: name, model: rt.model });
       }
+      if (chain.length > 0) return { mode: "SPECIFIC_PROVIDER", reason: "PROVIDER_PREFERENCE", candidates: chain, ...(unavailable.length > 0 ? { unavailable } : {}) };
       throw new NoEligibleProviderError(
         `provider_preference_exhausted: ingen av [${attempted.join(",")}] er konfigurert/kvalifisert (${rejected.join("; ")})`
       );
@@ -269,10 +305,16 @@ export class AiRouter {
     const eligible: Array<{ profile: ModelProfile; model: string; state: string }> = [];
     let sensitivityExcludedCount = 0;
     let paidExcludedCount = 0;
+    const alreadyAttempted = new Set(input.excludeProviders ?? []);
+    const skippedAttempted: string[] = [];
+    // M3: leverandører som er hoppet over fordi en capability kallet krever er påstått, men ikke live-verifisert av eieren (navn → capabilities).
+    const skippedUnverified = new Map<string, ModelCapability[]>();
+    // WP-H0: leverandører eieren har pauset/tilbakekalt (er alltid `configured: false`; navnene brukes kun til å SI hvorfor avslaget kom).
     const pausedByOwner: string[] = [];
     for (const [name, rt] of providers) {
       if (rt.paused) pausedByOwner.push(name);
       if (!rt.configured) continue;
+      if (alreadyAttempted.has(name)) { skippedAttempted.push(name); continue; }
       const profile = this.registry.profileOrGeneric(name, rt.model);
       if (mode === "LOCAL" && profile.locality !== "local") continue;
       if (![...required].every((c) => profile.capabilities.includes(c))) continue;
@@ -284,9 +326,15 @@ export class AiRouter {
         paidExcludedCount++;
         continue;
       }
+      // M3: siste port - påstått, men ikke live-verifisert capability som dette kallet krever (kun hvis leverandøren ellers ville vært kvalifisert).
+      const unverified = (profile.live_unverified ?? []).filter((c) => required.has(c));
+      if (unverified.length > 0 && !this.autoVerified.has(name)) { skippedUnverified.set(name, unverified); continue; }
       eligible.push({ profile, model: rt.model, state: this.health.state(name, true) });
     }
     if (eligible.length === 0) {
+      if (skippedAttempted.length > 0) {
+        throw new NoEligibleProviderError(`all_remaining_providers_already_attempted: [${skippedAttempted.join(",")}] er allerede forsøkt i denne turen`);
+      }
       if (mode === "LOCAL") throw new LocalModelUnavailableError();
       if (input.paid_models_allowed === false && paidExcludedCount > 0) {
         throw new PaidModelsDisabledError(
@@ -296,6 +344,9 @@ export class AiRouter {
       throw new NoEligibleProviderError(
         `ingen konfigurert provider dekker [${[...required].join(",")}]` +
           (input.sensitivity ? ` (sensitivity=${input.sensitivity})` : "") +
+          (skippedUnverified.size > 0
+            ? ` (ikke live-verifisert, utelatt fra AUTO-ruting: ${[...skippedUnverified].map(([name, caps]) => `${name}:${caps.join("+")}`).join(", ")} - kjør mesh-live-smoke.ts --tools og sett JARVIS_MESH_TOOLS_VERIFIED)`
+            : "") +
           (pausedByOwner.length > 0 ? ` (pauset av eier: ${pausedByOwner.join(",")})` : "")
       );
     }
