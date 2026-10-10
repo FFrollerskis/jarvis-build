@@ -45,6 +45,9 @@ export class FakeCloudflare {
   silentlyIgnoreWrites = false;
   ruleUpdateSemantics: "replace" | "merge" = "replace";
   quoteTxt = true;
+  /** Visningsnavn i sone-svaret (M1: testene setter dem til fiendtlig tekst, se `hostile.ts`). */
+  accountName = "Test account";
+  planName = "Free";
   private rateLimited = 0;
   private rateLimitRetryAfter: string | null = null;
   private readonly failures: Array<{ pattern: RegExp; status: number; body?: unknown; remaining: number }> = [];
@@ -199,12 +202,12 @@ export class FakeCloudflare {
       let list = [...this.zones.values()];
       if (query["account.id"] !== undefined && !this.ignoreFilters) list = list.filter((z) => z.account_id === query["account.id"]);
       const { page, info } = this.paginate(list, { ...query, per_page: String(Math.min(Number(query["per_page"] ?? 20), 50)) });
-      return this.send(res, 200, this.ok(page.map((z) => ({ id: z.id, name: z.name, status: z.status, paused: false, type: "full", account: { id: z.account_id, name: "Test account" }, name_servers: ["a.ns.cloudflare.com", "b.ns.cloudflare.com"], plan: { name: "Free" } })), info));
+      return this.send(res, 200, this.ok(page.map((z) => ({ id: z.id, name: z.name, status: z.status, paused: false, type: "full", account: { id: z.account_id, name: this.accountName }, name_servers: ["a.ns.cloudflare.com", "b.ns.cloudflare.com"], plan: { name: this.planName } })), info));
     }
     if (method === "GET" && (m = path.match(/^\/zones\/([0-9a-f]{32})$/))) {
       const z = this.zones.get(m[1]!);
       if (!z) return this.send(res, 404, this.error(7003, "Could not route to /zones/x, perhaps your object identifier is invalid?"));
-      return this.send(res, 200, this.ok({ id: z.id, name: z.name, status: z.status, paused: false, type: "full", account: { id: z.account_id, name: "Test account" }, name_servers: ["a.ns.cloudflare.com"], plan: { name: "Free" } }));
+      return this.send(res, 200, this.ok({ id: z.id, name: z.name, status: z.status, paused: false, type: "full", account: { id: z.account_id, name: this.accountName }, name_servers: ["a.ns.cloudflare.com"], plan: { name: this.planName } }));
     }
     // --- DNS
     if ((m = path.match(/^\/zones\/([0-9a-f]{32})\/dns_records$/))) {

@@ -12,6 +12,7 @@ import {
   quoteIdent,
   type PostgresOpsConfig
 } from "./postgres-ops-target-policy.ts";
+import { redactVendorText, vendorText } from "./vendor-text.ts";
 
 /**
  * WP-E1 (UA-5): Postgres-DRIFT som kontrollert mål - diagnostikk (klasse A) og tre smale klasse D-handlinger (terminate / cancel / VACUUM-ANALYZE) mot Jarvis'
@@ -27,6 +28,8 @@ import {
  *  - Mål-AUTORISASJON (database/skjema i eierens lister) håndheves av `ToolGateway` via `parameterAuthorizer` (se postgres-ops-target-policy.ts), ikke her; transporten
  *    kontrollerer likevel databasen mot listen som forsvar i dybden.
  *  - Økt-guardrails per tilkobling: `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`, `application_name = jarvis-ops`.
+ *  - LEVERANDØRTEKST (gjennomgang av PR #324, M1): Postgres-feilmeldinger og klient-satt fritekst (`application_name`) går gjennom den sentrale hemmelighetsskanneren (`vendorText`) før de forlater
+ *    transporten - en feil kan sitere en tilkoblingsstreng, et passord eller en literal.
  */
 
 /** Bevisste, forklarbare feil (nektelser/ugyldig mål) - sendes videre uendret; alt annet fra `pg` passerer `mapError` og vaskes. */
@@ -89,7 +92,8 @@ function mapError(err: unknown, dsn: string): Error {
   if (err instanceof PostgresOpsError || (err instanceof Error && /^postgres_ops_invalid_/.test(err.message))) return err;
   const e = err as { code?: unknown; message?: unknown };
   const code = typeof e.code === "string" ? e.code : "";
-  const message = scrub(typeof e.message === "string" ? e.message : String(err), dsn).replace(/\s+/g, " ").slice(0, 120);
+  // M1: DSN/passord vaskes først, deretter den sentrale skanneren (URL med passord, Bearer, token-formater, PEM …) - Postgres-feilteksten er fritekst og kan sitere klientdata.
+  const message = redactVendorText(scrub(typeof e.message === "string" ? e.message : String(err), dsn), 120);
   if (/^(ECONNREFUSED|ENOTFOUND|ETIMEDOUT|EHOSTUNREACH|ECONNRESET|EAI_AGAIN)$/.test(code) || /timeout exceeded when trying to connect|Connection terminated/i.test(message)) {
     return new Error(`postgres_ops_unreachable:${code || "connect"}`);
   }
@@ -187,7 +191,9 @@ export class PostgresOpsTransport implements ToolTransport {
       )).rows;
       const by = (key: "datname" | "usename" | "application_name" | "state"): Array<{ name: string; count: number }> => {
         const m = new Map<string, number>();
-        for (const r of rows) m.set(r[key] ?? "(ingen)", (m.get(r[key] ?? "(ingen)") ?? 0) + r.n);
+        // `application_name` er klient-satt fritekst (M1) - redigert som annen leverandørtekst; de øvrige nøklene er katalogidentifikatorer.
+        const label = (r: (typeof rows)[number]): string => (key === "application_name" ? vendorText(r[key], 64) : r[key]) ?? "(ingen)";
+        for (const r of rows) m.set(label(r), (m.get(label(r)) ?? 0) + r.n);
         return [...m.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)).slice(0, 20);
       };
       const total = rows.reduce((s, r) => s + r.n, 0);
@@ -219,7 +225,7 @@ export class PostgresOpsTransport implements ToolTransport {
     const eligible = row.datname !== null && this.config.databases.has(row.datname) && row.backend_type === "client backend" && row.is_superuser !== true
       && !(row.usename !== null && this.config.protectedRoles.has(row.usename));
     return {
-      pid: row.pid, database: row.datname, role: row.usename, application_name: row.application_name, backend_type: row.backend_type, state: row.state,
+      pid: row.pid, database: row.datname, role: row.usename, application_name: vendorText(row.application_name, 64), backend_type: row.backend_type, state: row.state,
       wait_event_type: row.wait_event_type, wait_event: row.wait_event, backend_start: row.backend_start, query_start: row.query_start, xact_start: row.xact_start,
       duration_s: round1(row.duration_s), xact_age_s: round1(row.xact_age_s), is_superuser: row.is_superuser === true,
       // Tekst KUN for økter i databaser eieren eier/leser - og aldri uten normalisering.
@@ -350,7 +356,7 @@ export class PostgresOpsTransport implements ToolTransport {
       return {
         data: json({
           visibility: session.visibility, role: inRecovery ? "standby" : "primary", replicas: senders.length,
-          senders: senders.map((s) => ({ application_name: s.application_name, state: s.state, sync_state: s.sync_state, replay_lag_s: round1(s.replay_lag_s), replay_gap_bytes: num(s.replay_gap_bytes) })),
+          senders: senders.map((s) => ({ application_name: vendorText(s.application_name, 64), state: s.state, sync_state: s.sync_state, replay_lag_s: round1(s.replay_lag_s), replay_gap_bytes: num(s.replay_gap_bytes) })),
           slots: slots.map((s) => ({ slot_name: s.slot_name, slot_type: s.slot_type, active: s.active, retained_bytes: num(s.retained_bytes) })),
           wal_receiver: receiver,
           note: inRecovery || senders.length > 0 ? null : "ingen replikaer tilkoblet (enkelt-node er et gyldig oppsett)"

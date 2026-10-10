@@ -18,6 +18,7 @@ export * from "./postgres-ops-target-policy.ts";
 export * from "./postgres-ops-transport.ts";
 export * from "./postgres-ops-tools.ts";
 export * from "./control-target-http.ts";
+export * from "./vendor-text.ts";
 export * from "./langfuse-transport.ts";
 export * from "./langfuse-tools.ts";
 export * from "./infisical-transport.ts";

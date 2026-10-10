@@ -7,6 +7,7 @@ import type { AddressInfo } from "node:net";
  * `/api/v3/secrets/raw` (liste + enkelt, med `viewSecretValue`) og Secret Rotation V2 (`/api/v2/secret-rotations`, type-spesifikk `rotate-secrets`). Secrets har
  * BEVISST verdier ("SUPER-HEMMELIG-…") - testene beviser at de aldri kommer ut av transporten, heller ikke når serveren IGNORERER `viewSecretValue=false` (`leakValues`).
  * Brytere: `leakValues`, `rotationsStatus` (feature utilgjengelig), `rotationFails`, `silentlyIgnoreRotate`, `revokeTokens()`, `failNext`.
+ * Gjennomgang av PR #324 (M1): `rotationErrorText` (teksten en feilet rotasjon skriver i `lastRotationJobError`) og meldingen i `failNext` kan settes til FIENDTLIG tekst (se `hostile.ts`).
  */
 export interface FakeSecret { key: string; value: string; version: number; createdAt: string; updatedAt: string; tags?: string[]; rotationId?: string; comment?: string }
 export interface FakeRotation { id: string; name: string; type: string; environment: string; folder: string; isAutoRotationEnabled: boolean; rotationStatus: string; lastRotatedAt: string | null; lastRotationAttemptedAt: string | null; nextRotationAt: string | null; lastRotationJobError?: string }
@@ -23,11 +24,13 @@ export class FakeInfisical {
   leakValues = false;
   rotationsStatus = 200;
   rotationFails = false;
+  /** Teksten en feilet rotasjon skriver i `lastRotationJobError` (M1: testene setter den til en fiendtlig streng som siterer en tilkoblingsstreng/et token). */
+  rotationErrorText = "upstream rejected credentials for supabase";
   silentlyIgnoreRotate = false;
   statusBody: unknown = { date: "2026-10-09T12:00:00.000Z", message: "Ok", emailConfigured: false, inviteOnlySignup: true, redisConfigured: true, secretScanningConfigured: false };
   loginCount = 0;
   private tokens = new Set<string>();
-  private readonly failures: Array<{ pattern: RegExp; status: number; remaining: number }> = [];
+  private readonly failures: Array<{ pattern: RegExp; status: number; remaining: number; message: string }> = [];
   private server: Server | undefined;
   baseUrl = "";
 
@@ -62,8 +65,8 @@ export class FakeInfisical {
     this.tokens = new Set();
   }
 
-  failNext(pattern: RegExp, status: number, times = 1): void {
-    this.failures.push({ pattern, status, remaining: times });
+  failNext(pattern: RegExp, status: number, times = 1, message = "forced failure"): void {
+    this.failures.push({ pattern, status, remaining: times, message });
   }
 
   requestsMatching(method: string, pattern: RegExp): InfisicalLoggedRequest[] {
@@ -104,7 +107,7 @@ export class FakeInfisical {
     const failure = this.failures.find((f) => f.remaining > 0 && f.pattern.test(line));
     if (failure) {
       failure.remaining -= 1;
-      return this.send(res, failure.status, { message: "forced failure" });
+      return this.send(res, failure.status, { message: failure.message });
     }
     if (req.method === "GET" && url.pathname === "/api/status") return this.send(res, 200, this.statusBody);
     if (req.method === "POST" && url.pathname === "/api/v1/auth/universal-auth/login") {
@@ -137,7 +140,7 @@ export class FakeInfisical {
       if (this.silentlyIgnoreRotate) return this.send(res, 200, { secretRotation: r });
       if (this.rotationFails) {
         r.rotationStatus = "failed";
-        r.lastRotationJobError = "upstream rejected credentials for supabase";
+        r.lastRotationJobError = this.rotationErrorText;
         r.lastRotationAttemptedAt = new Date().toISOString();
         return this.send(res, 200, { secretRotation: r });
       }

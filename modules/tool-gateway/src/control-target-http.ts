@@ -1,4 +1,5 @@
 import { guardedFetch, isRetrySafeStatus } from "./url-safety.ts";
+import { redactVendorText } from "./vendor-text.ts";
 
 /**
  * WP-E1 (UA-5): felles, smal HTTP-klient for de SELVHOSTEDE kontrollerte skymålene (Langfuse, Infisical) - samme garantier som `cloudflare-transport.ts`, men uten
@@ -74,7 +75,8 @@ function errorText(raw: string, secrets: readonly string[]): string {
   try {
     const parsed = JSON.parse(raw) as { message?: unknown; error?: unknown; errors?: Array<{ message?: unknown }> };
     const candidate = typeof parsed.message === "string" ? parsed.message : typeof parsed.error === "string" ? parsed.error : typeof parsed.errors?.[0]?.message === "string" ? parsed.errors[0].message : "";
-    return scrubSecrets(candidate, secrets).replace(/\s+/g, " ").slice(0, 160) || "UNCLASSIFIED";
+    // Gjennomgang av PR #324 (M1): leverandørens feiltekst er ubetrodd fritekst - kjente hemmeligheter vaskes først, deretter den sentrale skanneren (token-formater, URL med passord, PEM, JWT, Bearer …).
+    return redactVendorText(scrubSecrets(candidate, secrets), 160) || "UNCLASSIFIED";
   } catch {
     return "UNCLASSIFIED_ERROR_BODY";
   }

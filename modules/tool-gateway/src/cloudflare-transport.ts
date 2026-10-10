@@ -1,6 +1,7 @@
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolTransport } from "./gateway.ts";
 import { guardedFetch, isRetrySafeStatus } from "./url-safety.ts";
+import { redactVendorText, vendorText, vendorTimestamp } from "./vendor-text.ts";
 import {
   CLOUDFLARE_ZONE_SETTING_IDS,
   assertDnsComment,
@@ -48,6 +49,9 @@ import {
  *   - Sone -> konto-binding: sonen MÅ tilhøre `JARVIS_CLOUDFLARE_ACCOUNT_ID` (leses fra Cloudflare, cachet 5 min). Skriving uten konfigurert konto feiler lukket.
  *   - Mutasjoner gjentas ALDRI automatisk på 5xx (bivirkningen kan ha skjedd - JARVIS-018); bare 429 (avslag før behandling) og lesing gjentas.
  *   - Utdata er hvitlistet per ressurs (ingen ukjente felt videre). E-post i medlemslisten maskeres; audit-logg uten aktørens e-post/IP.
+ *   - LEVERANDØRTEKST (gjennomgang av PR #324, M1): feilmeldinger og visningstekster (kontonavn, rollenavn, token-navn, audit-felt, statuser) går gjennom den sentrale hemmelighetsskanneren
+ *     (`vendorText`) FØR de forlater transporten, og tidsstempelfelt godtas kun som rene tidsstempler. BEVISST IKKE redigert: konfigurasjonsdata eieren selv skriver og som er gjenopprettings-
+ *     grunnlaget (DNS-innhold/-kommentar, regeluttrykk/-beskrivelse, `extra`) - å erstatte dem ville ødelagt etterbetingelsene og kompensasjonen (se `vendor-text.ts`).
  *   - Mål-AUTORISASJON (sone står i eierens liste) håndheves av `ToolGateway` via `parameterAuthorizer`, ikke her (se `cloudflare-target-policy.ts`).
  */
 export const CLOUDFLARE_API_BASE_URL = "https://api.cloudflare.com/client/v4";
@@ -108,7 +112,8 @@ function classifyBody(raw: string, credential: string): { text: string; code?: n
     const first = parsed.errors?.[0];
     if (!first) return { text: "UNCLASSIFIED" };
     const code = typeof first.code === "number" ? first.code : undefined;
-    const message = scrub(typeof first.message === "string" ? first.message : "", credential).replace(/\s+/g, " ").slice(0, 160);
+    // M1: kjent credential vaskes først, deretter den sentrale skanneren (token-formater, URL med passord, PEM, JWT, Bearer …) - Cloudflares feiltekst er ubetrodd fritekst.
+    const message = redactVendorText(scrub(typeof first.message === "string" ? first.message : "", credential), 160);
     return { text: `${code ?? "NA"}:${message}`, ...(code !== undefined ? { code } : {}) };
   } catch {
     return { text: "UNCLASSIFIED_ERROR_BODY" };
@@ -183,7 +188,7 @@ function normalizeRuleset(raw: unknown, phase: string): NormalizedRuleset {
   if (!isObj(raw)) return { exists: false, id: null, name: null, phase, version: null, last_updated: null, rules: [], truncated: false };
   const rules = (Array.isArray(raw["rules"]) ? raw["rules"] : []).map(normalizeRule).filter((r): r is NormalizedRule => r !== null);
   return {
-    exists: true, id: str(raw["id"]), name: str(raw["name"]), phase: str(raw["phase"]) ?? phase, version: str(raw["version"]),
+    exists: true, id: str(raw["id"]), name: vendorText(raw["name"], 120), phase: str(raw["phase"]) ?? phase, version: str(raw["version"]),
     last_updated: str(raw["last_updated"]), rules: rules.slice(0, MAX_RULES_RETURNED), truncated: rules.length > MAX_RULES_RETURNED
   };
 }
@@ -193,9 +198,9 @@ function normalizeZone(raw: unknown): JsonValue | null {
   const account = isObj(raw["account"]) ? raw["account"] : {};
   const plan = isObj(raw["plan"]) ? raw["plan"] : {};
   return json({
-    id: raw["id"], name: str(raw["name"]), status: str(raw["status"]), paused: bool(raw["paused"]), type: str(raw["type"]),
-    account_id: str(account["id"]), account_name: str(account["name"]), plan: str(plan["name"]),
-    name_servers: Array.isArray(raw["name_servers"]) ? raw["name_servers"].filter((n): n is string => typeof n === "string").slice(0, 8) : []
+    id: raw["id"], name: str(raw["name"]), status: vendorText(raw["status"], 40), paused: bool(raw["paused"]), type: vendorText(raw["type"], 20),
+    account_id: str(account["id"]), account_name: vendorText(account["name"], 120), plan: vendorText(plan["name"], 60),
+    name_servers: Array.isArray(raw["name_servers"]) ? raw["name_servers"].filter((n): n is string => typeof n === "string" && /^[A-Za-z0-9.-]{1,253}$/.test(n)).slice(0, 8) : []
   });
 }
 
@@ -220,14 +225,14 @@ function normalizeDnsRecord(raw: unknown): NormalizedDnsRecord | null {
     id: raw["id"], type: str(raw["type"]), name: str(raw["name"])?.toLowerCase() ?? null, content: str(raw["content"]), ttl: num(raw["ttl"]),
     proxied: bool(raw["proxied"]), comment: str(raw["comment"]), priority: num(raw["priority"]),
     data: isObj(data) && JSON.stringify(data).length <= 1000 ? json(data) : null,
-    created_on: str(raw["created_on"]), modified_on: str(raw["modified_on"])
+    created_on: vendorTimestamp(raw["created_on"]), modified_on: vendorTimestamp(raw["modified_on"])
   };
 }
 
 function normalizeSetting(raw: unknown): JsonValue | null {
   if (!isObj(raw) || typeof raw["id"] !== "string") return null;
   const value = raw["value"];
-  return json({ id: raw["id"], value: typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? value : null, editable: bool(raw["editable"]), modified_on: str(raw["modified_on"]) });
+  return json({ id: raw["id"], value: typeof value === "string" ? vendorText(value, 64) : typeof value === "number" || typeof value === "boolean" ? value : null, editable: bool(raw["editable"]), modified_on: vendorTimestamp(raw["modified_on"]) });
 }
 
 export class CloudflareTransport implements ToolTransport {
@@ -389,7 +394,7 @@ export class CloudflareTransport implements ToolTransport {
     }
     env ??= (await this.call("GET", "/user/tokens/verify", credential))!;
     const r = isObj(env.result) ? env.result : {};
-    return { data: json({ kind, id: str(r["id"]), status: str(r["status"]), expires_on: str(r["expires_on"]), not_before: str(r["not_before"]) }) };
+    return { data: json({ kind, id: vendorText(r["id"], 64), status: vendorText(r["status"], 40), expires_on: vendorTimestamp(r["expires_on"]), not_before: vendorTimestamp(r["not_before"]) }) };
   }
 
   private async listZones(credential: string): Promise<{ data: JsonValue }> {
@@ -471,8 +476,8 @@ export class CloudflareTransport implements ToolTransport {
     const { items, truncated } = await this.paged(`/accounts/${accountId}/members`, credential, {}, ACCOUNT_PAGE_SIZE, MAX_ACCOUNT_PAGES);
     const members = items.filter(isObj).map((m) => {
       const user = isObj(m["user"]) ? m["user"] : {};
-      const roles = Array.isArray(m["roles"]) ? m["roles"].filter(isObj).map((r) => str(r["name"])).filter((n): n is string => n !== null) : [];
-      return { id: str(m["id"]), status: str(m["status"]), email: maskEmail(str(user["email"])), two_factor_enabled: bool(user["two_factor_authentication_enabled"]), roles };
+      const roles = Array.isArray(m["roles"]) ? m["roles"].filter(isObj).map((r) => vendorText(r["name"], 80)).filter((n): n is string => n !== null) : [];
+      return { id: vendorText(m["id"], 64), status: vendorText(m["status"], 40), email: maskEmail(str(user["email"])), two_factor_enabled: bool(user["two_factor_authentication_enabled"]), roles };
     });
     return { data: json({ members, truncated }) };
   }
@@ -480,7 +485,7 @@ export class CloudflareTransport implements ToolTransport {
   private async listAccountRoles(credential: string): Promise<{ data: JsonValue }> {
     const accountId = await this.requireAccountId();
     const { items, truncated } = await this.paged(`/accounts/${accountId}/roles`, credential, {}, ACCOUNT_PAGE_SIZE, MAX_ACCOUNT_PAGES);
-    const roles = items.filter(isObj).map((r) => ({ id: str(r["id"]), name: str(r["name"]), description: str(r["description"]) }));
+    const roles = items.filter(isObj).map((r) => ({ id: vendorText(r["id"], 64), name: vendorText(r["name"], 80), description: vendorText(r["description"], 200) }));
     return { data: json({ roles, truncated }) };
   }
 
@@ -489,8 +494,8 @@ export class CloudflareTransport implements ToolTransport {
     const { items, truncated } = await this.paged(`/accounts/${accountId}/tokens`, credential, {}, ACCOUNT_PAGE_SIZE, MAX_ACCOUNT_PAGES);
     // Kun metadata: Cloudflare returnerer aldri token-verdier i lister, og policy-detaljer utelates bevisst.
     const tokens = items.filter(isObj).map((t) => ({
-      id: str(t["id"]), name: str(t["name"]), status: str(t["status"]), issued_on: str(t["issued_on"]), modified_on: str(t["modified_on"]),
-      expires_on: str(t["expires_on"]), not_before: str(t["not_before"]), last_used_on: str(t["last_used_on"])
+      id: vendorText(t["id"], 64), name: vendorText(t["name"], 120), status: vendorText(t["status"], 40), issued_on: vendorTimestamp(t["issued_on"]), modified_on: vendorTimestamp(t["modified_on"]),
+      expires_on: vendorTimestamp(t["expires_on"]), not_before: vendorTimestamp(t["not_before"]), last_used_on: vendorTimestamp(t["last_used_on"])
     }));
     return { data: json({ tokens, truncated }) };
   }
@@ -520,8 +525,8 @@ export class CloudflareTransport implements ToolTransport {
       const actor = isObj(e["actor"]) ? e["actor"] : {};
       const zone = isObj(e["zone"]) ? e["zone"] : {};
       // Aktørens e-post og IP utelates bevisst (personopplysninger) - kun aktørtype.
-      return { id: str(e["id"]), when: str(action["time"]) ?? str(e["when"]), action_type: str(action["type"]), action_result: str(action["result"]),
-        resource_type: str(resource["type"]), resource_id: str(resource["id"]), resource_product: str(resource["product"]), actor_type: str(actor["type"]), zone_name: str(zone["name"]) };
+      return { id: vendorText(e["id"], 64), when: vendorTimestamp(action["time"]) ?? vendorTimestamp(e["when"]), action_type: vendorText(action["type"], 80), action_result: vendorText(action["result"], 40),
+        resource_type: vendorText(resource["type"], 80), resource_id: vendorText(resource["id"], 64), resource_product: vendorText(resource["product"], 80), actor_type: vendorText(actor["type"], 40), zone_name: vendorText(zone["name"], 253) };
     });
     return { data: json({ events }) };
   }

@@ -1,6 +1,7 @@
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolTransport } from "./gateway.ts";
-import { ControlTargetHttpError, boolOrNull, isObj, jsonRequest, normalizeBaseUrl, numOrNull, strOrNull } from "./control-target-http.ts";
+import { ControlTargetHttpError, boolOrNull, isObj, jsonRequest, normalizeBaseUrl, numOrNull } from "./control-target-http.ts";
+import { vendorText, vendorTimestamp } from "./vendor-text.ts";
 
 /**
  * WP-E1 (UA-5, D-41/D-64): Infisical (selvhostet hvelv, D-35) som KONTROLLERT MÅL - helse, secret-METADATA (nøkkelnavn, versjon, alder, tagger, rotasjonsflagg),
@@ -22,6 +23,10 @@ import { ControlTargetHttpError, boolOrNull, isObj, jsonRequest, normalizeBaseUr
  *
  * SIKKERHET: maskin-identiteten (`INFISICAL_CLIENT_ID`/`INFISICAL_CLIENT_SECRET`, allerede i api/worker) brukes - ingen ny credential. Prosjekt og miljø kommer fra miljøet,
  * aldri fra kaller. Access-token caches kun i minnet og kastes ved 401. Hemmeligheter vaskes ut av alle feil. Alle kall via `guardedFetch`.
+ *
+ * LEVERANDØRTEKST (gjennomgang av PR #324, M1): ALL fritekst fra Infisical (`lastRotationJobError`, rotasjonsnavn/-status, statusmelding, tagger …) går gjennom den sentrale hemmelighetsskanneren (`vendorText`)
+ * FØR den forlater transporten - en rotasjonsfeil kan sitere en tilkoblingsstreng med passord eller et Bearer-token, og svaret havner i `tool_executions` og `audit_events`. Tidsstempelfelt godtas kun som rene
+ * tidsstempler (`vendorTimestamp`).
  */
 export interface InfisicalTransportOptions {
   baseUrl: () => Promise<string | null>;
@@ -54,6 +59,8 @@ const SECRET_NAME = /^[A-Za-z0-9_.-]{1,200}$/;
 const SECRET_PATH = /^\/(?:[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*)?$/;
 const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const ROTATION_TYPE = /^[a-z0-9]+(?:-[a-z0-9]+){0,5}$/;
+/** Rotasjons-id slik Infisical gir den (UUID); formen låses så feltet aldri kan bære fritekst. */
+const ROTATION_ID_SHAPE = /^[A-Za-z0-9_-]{1,64}$/;
 
 export function isRotationId(value: unknown): value is string {
   return typeof value === "string" && UUID.test(value);
@@ -197,7 +204,7 @@ export class InfisicalTransport implements ToolTransport {
       throw err;
     });
     const body = isObj(res.json) ? res.json : {};
-    const message = strOrNull(body["message"], 40);
+    const message = vendorText(body["message"], 40);
     return {
       data: {
         reachable: true, healthy: res.ok && message !== null, http_status: res.status, message,
@@ -209,12 +216,12 @@ export class InfisicalTransport implements ToolTransport {
   /** Hvitliste: ALDRI `secretValue`, `secretComment`, `secretMetadata` eller noe annet enn disse feltene. */
   private metadata(raw: unknown, now: number): SecretMetadata | null {
     if (!isObj(raw) || typeof raw["secretKey"] !== "string" || !SECRET_NAME.test(raw["secretKey"])) return null;
-    const created = strOrNull(raw["createdAt"], 40);
-    const updated = strOrNull(raw["updatedAt"], 40);
+    const created = vendorTimestamp(raw["createdAt"]);
+    const updated = vendorTimestamp(raw["updatedAt"]);
     const reference = Date.parse(updated ?? created ?? "");
-    const tags = Array.isArray(raw["tags"]) ? raw["tags"].filter(isObj).map((t) => strOrNull(t["slug"], 60) ?? strOrNull(t["name"], 60)).filter((t): t is string => t !== null).slice(0, 5) : [];
+    const tags = Array.isArray(raw["tags"]) ? raw["tags"].filter(isObj).map((t) => vendorText(t["slug"], 60) ?? vendorText(t["name"], 60)).filter((t): t is string => t !== null).slice(0, 5) : [];
     return {
-      key: raw["secretKey"], version: numOrNull(raw["version"]), type: strOrNull(raw["type"], 20), created_at: created, updated_at: updated,
+      key: raw["secretKey"], version: numOrNull(raw["version"]), type: vendorText(raw["type"], 20), created_at: created, updated_at: updated,
       age_days: Number.isNaN(reference) ? null : Math.max(0, Math.floor((now - reference) / DAY_MS)), tags,
       is_rotated: raw["isRotatedSecret"] === true || (typeof raw["rotationId"] === "string" && raw["rotationId"].length > 0)
     };
@@ -259,14 +266,15 @@ export class InfisicalTransport implements ToolTransport {
 
   private rotation(raw: unknown): RotationView | null {
     if (!isObj(raw)) return null;
-    const env = isObj(raw["environment"]) ? strOrNull(raw["environment"]["slug"], 40) : strOrNull(raw["environment"], 40);
-    const error = strOrNull(raw["lastRotationJobError"], 200) ?? strOrNull(raw["lastRotationError"], 200) ?? strOrNull(raw["rotationError"], 200);
+    const env = isObj(raw["environment"]) ? vendorText(raw["environment"]["slug"], 40) : vendorText(raw["environment"], 40);
+    // M1: feilteksten SITERER ofte en tilkobling/et token (`postgresql://bruker:passord@…`, `Bearer …`) - redigert av den sentrale skanneren, kort og uten linjeskift.
+    const error = vendorText(raw["lastRotationJobError"], 200) ?? vendorText(raw["lastRotationError"], 200) ?? vendorText(raw["rotationError"], 200);
     return {
-      id: strOrNull(raw["id"], 64), name: strOrNull(raw["name"], 120), type: strOrNull(raw["type"], 64), environment: env, secret_path: strOrNull(raw["folder"] ?? raw["secretPath"], 200),
-      auto_rotation_enabled: boolOrNull(raw["isAutoRotationEnabled"]), rotation_status: strOrNull(raw["rotationStatus"], 40),
-      last_rotated_at: strOrNull(raw["lastRotatedAt"], 40), last_rotation_attempted_at: strOrNull(raw["lastRotationAttemptedAt"], 40), next_rotation_at: strOrNull(raw["nextRotationAt"], 40),
-      // Feilteksten kan i prinsippet inneholde fragmenter av en tilkobling - kort og uten linjeskift.
-      last_error: error === null ? null : error.replace(/\s+/g, " ").slice(0, 160)
+      id: typeof raw["id"] === "string" && ROTATION_ID_SHAPE.test(raw["id"]) ? raw["id"] : null, name: vendorText(raw["name"], 120), type: vendorText(raw["type"], 64), environment: env,
+      secret_path: vendorText(raw["folder"] ?? raw["secretPath"], 200),
+      auto_rotation_enabled: boolOrNull(raw["isAutoRotationEnabled"]), rotation_status: vendorText(raw["rotationStatus"], 40),
+      last_rotated_at: vendorTimestamp(raw["lastRotatedAt"]), last_rotation_attempted_at: vendorTimestamp(raw["lastRotationAttemptedAt"]), next_rotation_at: vendorTimestamp(raw["nextRotationAt"]),
+      last_error: error === null ? null : error.slice(0, 160)
     };
   }
 

@@ -1,6 +1,7 @@
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolTransport } from "./gateway.ts";
-import { ControlTargetHttpError, isObj, jsonRequest, normalizeBaseUrl, numOrNull, strOrNull } from "./control-target-http.ts";
+import { ControlTargetHttpError, isObj, jsonRequest, normalizeBaseUrl, numOrNull } from "./control-target-http.ts";
+import { vendorText } from "./vendor-text.ts";
 
 /**
  * WP-E1 (UA-5, D-41/D-64): Langfuse som KONTROLLERT MÅL - helse, prosjekt-/nøkkel-metadata og trace-TELLING. ALDRI innhold: ingen funksjon her returnerer en traces
@@ -20,6 +21,9 @@ import { ControlTargetHttpError, isObj, jsonRequest, normalizeBaseUrl, numOrNull
  *
  * SIKKERHET: secret key kun som parameter fra `ToolGateway` (aldri logget, vaskes ut av feil, aldri til modellen); basis-URL fra miljø (aldri modellstyrt) og
  * valideres som ren opprinnelse; utdata er hvitlistet (ingen ukjente felt videre); alle kall via `guardedFetch`.
+ *
+ * LEVERANDØRTEKST (gjennomgang av PR #324, M1): fritekst fra Langfuse (status, prosjekt-/organisasjonsnavn, feilmeldinger) går gjennom den sentrale hemmelighetsskanneren (`vendorText`) før den forlater transporten,
+ * og datofelt godtas kun som `ÅÅÅÅ-MM-DD`.
  */
 export interface LangfuseTransportOptions {
   /** `LANGFUSE_BASE_URL` (f.eks. `http://langfuse:3000` eller Langfuse Cloud), slått opp ved hvert kall. */
@@ -46,6 +50,9 @@ export const LANGFUSE_CAPABILITIES: readonly LangfuseCapability[] = [
 
 const DAY_MS = 86_400_000;
 const MAX_DAYS = 31;
+/** Identifikatorer (prosjekt, organisasjon) og datoer låses til sin form - de kan aldri bære fritekst fra leverandøren. */
+const idOrNull = (v: unknown): string | null => (typeof v === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(v) ? v : null);
+const dayOrNull = (v: unknown): string | null => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
 
 /** `pk-lf-1234…abcd`: nok til å kjenne igjen NØKKELEN i dashbordet, aldri nok til å bruke den. */
 export function maskPublicKey(key: string): string {
@@ -88,11 +95,12 @@ export class LangfuseTransport implements ToolTransport {
       throw err;
     });
     const body = isObj(res.json) ? res.json : {};
-    const version = strOrNull(body["version"], 40);
+    // Redigert FØR formsjekken: et token-formet «version»-felt (`ghp_…`) består tegnsett-regexen, men blir `[REDACTED:…]` her og forkastes av den.
+    const version = vendorText(body["version"], 40);
     return {
       data: {
         reachable: true, healthy: res.ok, http_status: res.status, database_checked: true,
-        status: strOrNull(body["status"], 20), version: version !== null && /^[0-9A-Za-z.+_-]+$/.test(version) ? version : null
+        status: vendorText(body["status"], 20), version: version !== null && /^[0-9A-Za-z.+_-]+$/.test(version) ? version : null
       }
     };
   }
@@ -107,7 +115,7 @@ export class LangfuseTransport implements ToolTransport {
     const rows = isObj(res.json) && Array.isArray(res.json["data"]) ? res.json["data"] : [];
     const projects = rows.filter(isObj).slice(0, 20).map((p) => {
       const org = isObj(p["organization"]) ? p["organization"] : {};
-      return { id: strOrNull(p["id"], 64), name: strOrNull(p["name"], 120), organization_id: strOrNull(org["id"], 64), organization_name: strOrNull(org["name"], 120) };
+      return { id: idOrNull(p["id"]), name: vendorText(p["name"], 120), organization_id: idOrNull(org["id"]), organization_name: vendorText(org["name"], 120) };
     });
     return { data: { credentials_valid: true, key: { public_key_hint: maskPublicKey(publicKey), scope: "project" }, projects, project_count: projects.length } };
   }
@@ -126,7 +134,7 @@ export class LangfuseTransport implements ToolTransport {
     if (daily.status !== 404) {
       const rows = isObj(daily.json) && Array.isArray(daily.json["data"]) ? daily.json["data"] : [];
       const days = rows.filter(isObj).slice(0, MAX_DAYS + 1).map((d) => ({
-        date: strOrNull(d["date"], 10), traces: numOrNull(d["countTraces"]) ?? 0, observations: numOrNull(d["countObservations"]) ?? 0,
+        date: dayOrNull(d["date"]), traces: numOrNull(d["countTraces"]) ?? 0, observations: numOrNull(d["countObservations"]) ?? 0,
         cost_usd: Math.round((numOrNull(d["totalCost"]) ?? 0) * 10_000) / 10_000
       }));
       const meta = isObj(daily.json) && isObj(daily.json["meta"]) ? daily.json["meta"] : {};

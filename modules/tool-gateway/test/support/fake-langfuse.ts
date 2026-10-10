@@ -6,7 +6,7 @@ import type { AddressInfo } from "node:net";
  * WP-E1: lokal FAKE Langfuse-server (ekte `node:http`, ingen nettverk ut av maskinen). Etterligner KUN det delsettet transporten bruker: `/api/public/health`,
  * `/api/public/projects` (Basic-auth), `/api/public/metrics/daily` og `/api/public/traces` (med `meta.totalItems`). Trace-listen inneholder BEVISST sensitivt
  * innhold (prompt/svar/bruker) - testene beviser at det aldri kommer ut av transporten.
- * Brytere: `dailyMetricsAvailable` (404 på metrics/daily -> fallback), `healthStatus`, `healthBody`, `failNext`.
+ * Brytere: `dailyMetricsAvailable` (404 på metrics/daily -> fallback), `healthStatus`, `healthBody`, `failNext` (valgfri melding - M1: fiendtlig tekst, se `hostile.ts`).
  * Nøkkelverdier lagres ALDRI i forespørselsloggen - kun om autentiseringen var riktig/feil/mangler.
  */
 const hex = (n: number): string => randomBytes(n).toString("hex");
@@ -27,7 +27,7 @@ export class FakeLangfuse {
   ];
   /** Skal ALDRI sees i noe transporten returnerer. */
   readonly traces = [{ id: "t1", name: "chat", input: "HEMMELIG-PROMPT-INNHOLD", output: "HEMMELIG-SVAR", userId: "bruker-42", sessionId: "sesjon-7", metadata: { tenant_id: "tenant-x" } }];
-  private readonly failures: Array<{ pattern: RegExp; status: number; remaining: number }> = [];
+  private readonly failures: Array<{ pattern: RegExp; status: number; remaining: number; message: string }> = [];
   private server: Server | undefined;
   baseUrl = "";
 
@@ -41,8 +41,8 @@ export class FakeLangfuse {
     await new Promise<void>((resolve) => (this.server ? this.server.close(() => resolve()) : resolve()));
   }
 
-  failNext(pattern: RegExp, status: number, times = 1): void {
-    this.failures.push({ pattern, status, remaining: times });
+  failNext(pattern: RegExp, status: number, times = 1, message = "forced failure"): void {
+    this.failures.push({ pattern, status, remaining: times, message });
   }
 
   private send(res: ServerResponse, status: number, body: unknown): void {
@@ -66,7 +66,7 @@ export class FakeLangfuse {
     const failure = this.failures.find((f) => f.remaining > 0 && f.pattern.test(line));
     if (failure) {
       failure.remaining -= 1;
-      return this.send(res, failure.status, { message: "forced failure" });
+      return this.send(res, failure.status, { message: failure.message });
     }
     if (req.method === "GET" && url.pathname === "/api/public/health") {
       return this.send(res, this.healthStatus, this.healthBody);
