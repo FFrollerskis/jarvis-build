@@ -49,10 +49,16 @@ export interface KnowledgeSyncRunnerDeps {
   staggerMs?: number | undefined;
   /** Høyst så mange kilder samtidig. Standard 2. */
   maxConcurrent?: number | undefined;
+  /**
+   * Gjennomgang av PR #325 (funn 2): maks tid én kilde kan bruke på én synk før plassen frigis (standard 20 min). En kilde som henger (en NAS-monteringen som står, en fil som blokkerer) skal aldri holde en av de få
+   * samtidige plassene til workeren restartes. Den hengende kjøringen kan ikke avbrytes, men regnes som feilet (`source_sync_timeout`) og prøves igjen om høyst 30 min.
+   */
+  sourceTimeoutMs?: number | undefined;
 }
 
 const FAILURE_RETRY_MS = 30 * 60_000;
 const MINUTE_MS = 60_000;
+export const DEFAULT_SOURCE_TIMEOUT_MS = 20 * MINUTE_MS;
 
 export interface SyncRunnerStatusEntry {
   id: string;
@@ -78,6 +84,7 @@ export class KnowledgeSyncRunner {
   private readonly firstRunDelayMs: number;
   private readonly staggerMs: number;
   private readonly maxConcurrent: number;
+  private readonly sourceTimeoutMs: number;
 
   constructor(private readonly deps: KnowledgeSyncRunnerDeps) {
     this.sync = new KnowledgeSyncService(deps.pool, deps.embeddings);
@@ -88,6 +95,7 @@ export class KnowledgeSyncRunner {
     this.firstRunDelayMs = Math.max(0, Math.floor(deps.firstRunDelayMs ?? 20_000));
     this.staggerMs = Math.max(0, Math.floor(deps.staggerMs ?? 10_000));
     this.maxConcurrent = Math.min(Math.max(Math.floor(deps.maxConcurrent ?? 2), 1), 8);
+    this.sourceTimeoutMs = Math.max(10, Math.floor(deps.sourceTimeoutMs ?? DEFAULT_SOURCE_TIMEOUT_MS));
   }
 
   get sourceCount(): number {
@@ -184,7 +192,7 @@ export class KnowledgeSyncRunner {
     const key = this.keyOf(source);
     const running = this.inFlight.get(key);
     if (running !== undefined) return running;
-    const promise = this.runSource(source)
+    const promise = this.withWatchdog(source, this.runSource(source))
       .then((outcome) => {
         const now = this.clock().getTime();
         this.lastOutcome.set(key, { status: outcome.status, at: now });
@@ -196,6 +204,21 @@ export class KnowledgeSyncRunner {
       .finally(() => this.inFlight.delete(key));
     this.inFlight.set(key, promise);
     return promise;
+  }
+
+  /** Frigir plassen når en synk tar for lang tid (se `sourceTimeoutMs`). Den hengende kjøringen får fortsette i bakgrunnen, men utfallet er «feilet» og neste forsøk planlegges som ved enhver feil. */
+  private withWatchdog(source: ConfiguredKnowledgeSource, run: Promise<SyncRunOutcome>): Promise<SyncRunOutcome> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<SyncRunOutcome>((resolve) => {
+      timer = setTimeout(() => {
+        this.log({ msg: "knowledge_source_timeout", source_id: source.id, kind: source.kind, memory_space: source.memory_space, after_ms: this.sourceTimeoutMs });
+        resolve({ status: "failed", error: "source_sync_timeout" });
+      }, this.sourceTimeoutMs);
+      timer.unref?.();
+    });
+    return Promise.race([run, timeout]).finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+    });
   }
 
   private async runSource(source: ConfiguredKnowledgeSource): Promise<SyncRunOutcome> {

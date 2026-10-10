@@ -222,6 +222,10 @@ const CLAIM_COLUMNS = `claim_id, memory_space_id, claim_text, status, time_sensi
   sensitivity, researching_since, verified_at, reverify_by, promotion_status, promotion_memory_item_id, promotion_proposed_at, created_at, updated_at`;
 
 interface EvidenceRow {
+  /** Gjennomgang av PR #325 (funn 5): kildeinstansen og innholdshashen til det koblede kunnskapsdokumentet (via LEFT JOIN; null uten dokumentpeker). Brukes KUN til å slå sammen evidens fra samme kilde/innhold. */
+  doc_source_type?: string | null;
+  doc_source_instance_id?: string | null;
+  doc_content_hash?: string | null;
   evidence_id: string;
   stance: EvidenceStance;
   source_ref: string;
@@ -237,6 +241,10 @@ interface EvidenceRow {
   created_at: Date;
 }
 const EVIDENCE_COLUMNS = `evidence_id, stance, source_ref, knowledge_document_id, independence_key, upstream_origin, is_primary, published_at, retrieved_at, excerpt, retracted, retraction_reason, created_at`;
+/** Samme kolonner med dokument-lenkene (LEFT JOIN mot kunnskapsdokumentet, under samme tenant og rom - RLS gjelder). Brukes av alle lesinger som regner ut status. */
+const EVIDENCE_SELECT_WITH_DOC = `${EVIDENCE_COLUMNS.split(",").map((c) => `e.${c.trim()}`).join(", ")},
+  d.source_type AS doc_source_type, d.source_instance_id AS doc_source_instance_id, d.content_hash AS doc_content_hash
+  FROM claim_evidence e LEFT JOIN knowledge_documents d ON d.tenant_id = e.tenant_id AND d.memory_space_id = e.memory_space_id AND d.knowledge_document_id = e.knowledge_document_id`;
 
 const iso = (d: Date | null): string | null => (d === null ? null : d.toISOString());
 
@@ -327,8 +335,19 @@ const toEvidenceView = (row: EvidenceRow): ClaimEvidenceView => ({
   published_at: iso(row.published_at), retrieved_at: row.retrieved_at.toISOString(), excerpt: row.excerpt, retracted: row.retracted, knowledge_document_id: row.knowledge_document_id
 });
 
+/**
+ * Lenkene som slår sammen evidens UAVHENGIG av hva innleggeren deklarerte (funn 5): to dokumenter fra samme kildeinstans (samme mappe/Drive/vault) er ikke uavhengige - den som kontrollerer kilden kontrollerer begge -
+ * og to dokumenter med samme innhold er samme opphav (speil/kopi). Uten dokumentpeker finnes ingen lenker (da gjelder kun den deklarerte nøkkelen, som før).
+ */
+function evidenceLinks(row: EvidenceRow): string[] {
+  const links: string[] = [];
+  if (row.doc_source_type && row.doc_source_instance_id) links.push(`src:${row.doc_source_type}:${row.doc_source_instance_id}`);
+  if (row.doc_content_hash) links.push(`hash:${row.doc_content_hash}`);
+  return links;
+}
+
 const toEngineEvidence = (row: EvidenceRow): ClaimEvidence => ({
-  stance: row.stance, independence_key: row.independence_key, is_primary: row.is_primary, published_at: row.published_at, retrieved_at: row.retrieved_at, retracted: row.retracted
+  stance: row.stance, independence_key: row.independence_key, links: evidenceLinks(row), is_primary: row.is_primary, published_at: row.published_at, retrieved_at: row.retrieved_at, retracted: row.retracted
 });
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -568,7 +587,7 @@ export class ClaimVerificationService {
       const row = found.rows[0] as ClaimRow | undefined;
       if (row === undefined) return null;
       const evidence = await client.query(
-        `SELECT ${EVIDENCE_COLUMNS} FROM claim_evidence WHERE tenant_id = $1 AND memory_space_id = $2 AND claim_id = $3 ORDER BY retrieved_at DESC, evidence_id LIMIT ${MAX_EVIDENCE_PER_CLAIM * 5}`,
+        `SELECT ${EVIDENCE_SELECT_WITH_DOC} WHERE e.tenant_id = $1 AND e.memory_space_id = $2 AND e.claim_id = $3 ORDER BY e.retrieved_at DESC, e.evidence_id LIMIT ${MAX_EVIDENCE_PER_CLAIM * 5}`,
         [identity.tenant_id, space, row.claim_id]
       );
       const rows = evidence.rows as EvidenceRow[];
@@ -628,7 +647,7 @@ export class ClaimVerificationService {
     const effective = effectiveClaimStatus({ status: snapshot.status, reverify_by: snapshot.reverify_by }, now);
     if (effective.status !== "VERIFIED" || effective.reverification_due) throw new ClaimError("only_verified_claims_can_be_proposed");
     const evidence = await withMemoryTransaction(this.pool, identity.tenant_id, [space], async (client) => {
-      const rows = await client.query(`SELECT ${EVIDENCE_COLUMNS} FROM claim_evidence WHERE tenant_id = $1 AND memory_space_id = $2 AND claim_id = $3`, [identity.tenant_id, space, claimId]);
+      const rows = await client.query(`SELECT ${EVIDENCE_SELECT_WITH_DOC} WHERE e.tenant_id = $1 AND e.memory_space_id = $2 AND e.claim_id = $3`, [identity.tenant_id, space, claimId]);
       return rows.rows as EvidenceRow[];
     });
     const policy = this.policyFor(snapshot);
@@ -675,7 +694,7 @@ export class ClaimVerificationService {
 
   /** Leser ALL evidens, kjører den rene tilstandsmaskinen og lagrer resultatet. Kaller har låst påstanden. */
   private async recompute(client: pg.PoolClient, identity: IdentityContext, space: MemorySpace, row: ClaimRow, now: Date): Promise<{ claim: ClaimView; evaluation: EvidenceEvaluation; transition: ClaimStatus[] }> {
-    const rows = await client.query(`SELECT ${EVIDENCE_COLUMNS} FROM claim_evidence WHERE tenant_id = $1 AND memory_space_id = $2 AND claim_id = $3`, [identity.tenant_id, space, row.claim_id]);
+    const rows = await client.query(`SELECT ${EVIDENCE_SELECT_WITH_DOC} WHERE e.tenant_id = $1 AND e.memory_space_id = $2 AND e.claim_id = $3`, [identity.tenant_id, space, row.claim_id]);
     const result = reduceClaim({ status: row.status, verified_at: row.verified_at, reverify_by: row.reverify_by }, (rows.rows as EvidenceRow[]).map(toEngineEvidence), this.policyFor(row), now);
     const updated = await client.query(
       `UPDATE claim_verifications

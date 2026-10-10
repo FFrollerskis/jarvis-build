@@ -183,3 +183,10 @@ kilder, og modellkall går som før kun via `ModelGateway`.
 4. Pieces er IKKE bygget (ingen kjent offentlig API, Q-22).
 5. Hele WP-D1-flaten er testet mot fakes; ingen ekte Drive-/NAS-/transkriptkjøring er gjort (`NOT VERIFIED`).
 
+## Tillegg etter uavhengig sikkerhetsgjennomgang (PR #325)
+
+Tiltak som er lagt til etter gjennomgangen og som berører personvern (detaljer i [runbooken](runbooks/KNOWLEDGE_SOURCES.md), §3 og §9):
+- Skjulte kataloger/filer indekseres aldri (hindrer at `.ssh`/`.aws`/`.docker`-lignende hemmelighetsfiler inne i en tillatt rot blir søkbare og kan nå en skymodell).
+- OCR av vedlegg rutes minst `PRIVATE` og `SECRET_RESTRICTED` for helse-rommet/`special`-kilder (tidligere kunne et vedleggsbilde gå til en delt/gratis sky før kildens policy ble anvendt på teksten).
+- Skyskjermen klassifiserer en normalisert utgave av teksten (usynlige tegn, bredformat, spredte bokstaver); mønsterbasert, ikke en garanti - homoglyfer og andre språk enn norsk/engelsk dekkes ikke.
+- Tomme eller utilgjengelige kilderøtter fører ikke til tombstoning av eksisterende dokumenter.

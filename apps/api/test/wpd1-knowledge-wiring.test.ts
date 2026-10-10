@@ -33,7 +33,7 @@ describe("A2: Q-26 påstandsverifisering - lesing alltid på, SKRIVING av som st
     expect(main).toMatch(/import\s*\{[^}]*ClaimVerificationService[^}]*createKnowledgeClaimsPort[^}]*\}\s*from\s*"@jarvis\/knowledge"/s);
     expect(main.match(/new ClaimVerificationService\(/g) ?? []).toHaveLength(1);
     expect(main.match(/createKnowledgeClaimsPort\(/g) ?? []).toHaveLength(1);
-    expect(main).toContain('const knowledgeClaimWrites = (process.env["JARVIS_KNOWLEDGE_CLAIM_WRITES"] ?? "").trim().toLowerCase() === "on";');
+    expect(main).toContain('const knowledgeClaimWrites = parseKnowledgeClaimWrites(process.env["JARVIS_KNOWLEDGE_CLAIM_WRITES"]);');
     expect(main).toContain("{ writes: knowledgeClaimWrites, promotion: memoryWriter }");
     // Promotering bruker det vanlige minnet (karantene-veien), aldri en direkte skriving: ingen annen vei til memory_items fra claims-koden.
     expect(main).not.toMatch(/claim[^\n]*INSERT INTO memory_items/i);

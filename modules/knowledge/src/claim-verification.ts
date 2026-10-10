@@ -130,6 +130,11 @@ export function deriveIndependenceKey(input: { source_ref: string; upstream_orig
 export interface ClaimEvidence {
   stance: EvidenceStance;
   independence_key: string;
+  /**
+   * Gjennomgang av PR #325 (funn 5): ekstra identiteter evidensen deler med andre rader UAVHENGIG av hva innleggeren deklarerte - kildeinstansen et kunnskapsdokument kommer fra (`src:<type>:<instans>`: den som kontrollerer en
+   * mappe/et Drive kontrollerer alle dokumentene i den) og dokumentets innholdshash (`hash:<sha256>`: samme tekst = samme opphav). Rader som deler NØKKEL eller en LENKE teller som ÉN uavhengig kilde (sammenhengende komponenter).
+   */
+  links?: readonly string[] | undefined;
   is_primary: boolean;
   /** Når kilden selv publiserte/oppdaterte (mangler ofte). */
   published_at: Date | null;
@@ -172,6 +177,41 @@ function bestWeightPerKey(entries: Array<{ key: string; primary: boolean }>): nu
 const complementProduct = (weights: number[]): number => 1 - weights.reduce((acc, w) => acc * (1 - w), 1);
 
 /**
+ * Union-find over uavhengighetsnøkler og lenker: hver evidensrad forener sin nøkkel med alle sine lenker. `keys` = én representant (den alfabetisk minste nøkkelen) per komponent, sortert; `rootOf(e)` = komponentens representant.
+ * Deterministisk og uavhengig av radrekkefølge.
+ */
+function independentComponents(rows: readonly ClaimEvidence[]): { keys: string[]; rootOf: (e: ClaimEvidence) => string } {
+  const parent = new Map<string, string>();
+  const find = (x: string): string => {
+    let root = x;
+    while ((parent.get(root) ?? root) !== root) root = parent.get(root) as string;
+    parent.set(x, root);
+    return root;
+  };
+  const union = (a: string, b: string): void => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra === rb) return;
+    // Representant = alfabetisk minste (stabil uansett rekkefølge).
+    if (ra < rb) parent.set(rb, ra);
+    else parent.set(ra, rb);
+  };
+  for (const row of rows) {
+    find(row.independence_key);
+    for (const link of row.links ?? []) union(row.independence_key, link);
+  }
+  const rootOf = (e: ClaimEvidence): string => find(e.independence_key);
+  // Representant for visning: den minste uavhengighetsnøkkelen (ikke lenken) i komponenten.
+  const smallestKey = new Map<string, string>();
+  for (const row of rows) {
+    const root = rootOf(row);
+    const current = smallestKey.get(root);
+    if (current === undefined || row.independence_key < current) smallestKey.set(root, row.independence_key);
+  }
+  return { keys: [...smallestKey.values()].sort(), rootOf };
+}
+
+/**
  * Ren evaluering. Regler (alle deterministiske):
  *  - tilbaketrukket evidens ignoreres helt;
  *  - støtte telles per UAVHENGIGHETSNØKKEL (maks én per nøkkel, uansett antall kopier);
@@ -205,13 +245,14 @@ export function evaluateEvidence(evidence: readonly ClaimEvidence[], policy: Ver
     }
     counted.push(e);
   }
-  const keys = [...new Set(counted.map((e) => e.independence_key))].sort();
-  const primaryKeys = new Set(counted.filter((e) => e.is_primary).map((e) => e.independence_key));
-  const hasPrimary = primaryKeys.size > 0;
+  // Uavhengige kilder = sammenhengende komponenter: rader som deler uavhengighetsnøkkel ELLER en lenke (kildeinstans, innholdshash) er ÉN kilde.
+  const components = independentComponents(counted);
+  const keys = components.keys;
+  const hasPrimary = counted.some((e) => e.is_primary);
   const independent = keys.length;
   const ruleMet = independent >= policy.min_independent_sources && (hasPrimary || independent >= INDEPENDENT_SOURCES_WITHOUT_PRIMARY);
 
-  const support = complementProduct(bestWeightPerKey(counted.map((e) => ({ key: e.independence_key, primary: e.is_primary }))));
+  const support = complementProduct(bestWeightPerKey(counted.map((e) => ({ key: components.rootOf(e), primary: e.is_primary }))));
   const contraWeights = bestWeightPerKey(live.filter((e) => e.stance === "contradicts").map((e) => ({ key: e.independence_key, primary: e.is_primary })));
   const contra = complementProduct(contraWeights);
   const confidence = Math.round(Math.min(1, Math.max(0, support * (1 - contra))) * 1000) / 1000;
@@ -227,6 +268,7 @@ export function evaluateEvidence(evidence: readonly ClaimEvidence[], policy: Ver
   if (excluded.self_contradicting > 0) reasons.push("self_contradicting_source_excluded");
   const duplicateCopies = counted.length - independent;
   if (duplicateCopies > 0) reasons.push("duplicate_copies_counted_once");
+  if (new Set(counted.map((e) => e.independence_key)).size > independent) reasons.push("same_source_or_content_collapsed");
 
   const supportExpiresAt =
     policy.time_sensitive && counted.length > 0

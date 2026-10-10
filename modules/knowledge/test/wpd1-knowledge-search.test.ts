@@ -186,6 +186,17 @@ describe("B: searchHits mot ekte Postgres (RLS som app-rolle)", () => {
     expect(withHealth).toMatchObject({ sensitivity: "special", trust_level: "internal" });
   });
 
+  it("re-klassifiseringen ved levering: en rad LAGRET som normal med helsetekst leveres som special (ordforrådet vokser; gammel rad slipper ikke forbi) - gjennomgang av PR #325 (M08)", async () => {
+    const root = await seedDir({ "gammel-helse.md": "Kaffe og en ny diagnose hos legen i morgen tidlig." });
+    await sync.sync(identity(A), "personal", new FilesystemKnowledgeSource(root, "fs:wpd1-stored-normal"), { policy: { default_sensitivity: "normal" } });
+    // Simuler en rad lagret før ordforrådet ble utvidet: lagret merke «normal» selv om teksten i dag er helse.
+    await adminPool.query("UPDATE knowledge_documents SET sensitivity = 'normal' WHERE tenant_id = $1 AND source_instance_id = $2", [A, "fs:wpd1-stored-normal"]);
+    const { rows } = await adminPool.query("SELECT sensitivity FROM knowledge_documents WHERE tenant_id = $1 AND source_instance_id = $2", [A, "fs:wpd1-stored-normal"]);
+    expect(rows[0]).toMatchObject({ sensitivity: "normal" });
+    const hit = (await retriever.searchHits(identity(A), { query: "diagnose legen kaffe", spaces: ["personal"] })).find((h) => h.title === "gammel-helse.md");
+    expect(hit).toMatchObject({ sensitivity: "special" });
+  });
+
   it("uten kildepolicy er standarden sensitive/untrusted - aldri normal/internal", async () => {
     const root = await seedDir({ "gammel-rad.md": "Et vanlig notat om hagearbeid og gjødsel i mai." });
     await sync.sync(identity(A), "personal", new FilesystemKnowledgeSource(root, "fs:wpd1-legacy-row"));
@@ -218,7 +229,8 @@ describe("B: searchHits mot ekte Postgres (RLS som app-rolle)", () => {
   });
 
   it("slettede (tombstonede) dokumenter finnes aldri i treff", async () => {
-    const root = await seedDir({ "midlertidig.md": "Dette dokumentet om kenguruer forsvinner snart." });
+    // (en anker-fil holder roten ikke-tom: en helt tom rot tombstoner aldri, PR #325 funn 6)
+    const root = await seedDir({ "midlertidig.md": "Dette dokumentet om kenguruer forsvinner snart.", "anker.md": "Et annet dokument som blir stående." });
     const source = () => new FilesystemKnowledgeSource(root, "fs:wpd1-tomb");
     await sync.sync(identity(A), "personal", source());
     expect((await retriever.searchHits(identity(A), { query: "kenguruer", spaces: ["personal"] })).length).toBe(1);

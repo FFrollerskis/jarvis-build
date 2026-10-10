@@ -63,6 +63,20 @@ Sikkerhetsgrenser som håndheves i kode: stier må være absolutte og normaliser
 den SANNE (symlink-oppløste) roten sjekkes på nytt før hver synk, og en rot som er blitt en symlink ut av allowlisten synkes ikke (ingenting tombstones). GitHub er låst til `JARVIS_GITHUB_REPO`
 (åpne andre repo bevisst med `JARVIS_GITHUB_ALLOW_OTHER_REPOS=true`). Endring av gulv/tak/tillit gjelder fra neste synk (kildens `sync_interval_minutes`); et dokument som da er strengere enn taket tombstones. **Endre aldri en kildes `id` etter første synk** - de gamle dokumentene blir da foreldreløse; fjern kilden (se 7) og opprett den på nytt.
 
+**Skjerping etter uavhengig sikkerhetsgjennomgang (PR #325):**
+- **Skjulte filer og kataloger hoppes alltid over** (alt som heter `.noe`: `.ssh`, `.aws`, `.docker`, `.config`, `.git`, `.obsidian`, `.env`-lignende, skjulte notater) - også inne i en tillatt rot. `FORBIDDEN_SEGMENTS` gjelder bare selve rot-stien.
+- **Filleseren tåler at en fil byttes ut etter listingen:** filen åpnes med `O_NOFOLLOW` (en symlink som er satt inn i mellomtiden følges ikke) og `O_NONBLOCK`, må være en vanlig fil (en FIFO/enhet hoppes over uten å henge), og den åpne filens sanne sti
+  (`/proc/self/fd`) må være NØYAKTIG den listede (en mellomliggende katalog byttet mot en symlink ut av roten gir en annen sti). Aldri mer enn størrelsesgrensen + 1 byte leses.
+- **Tak og vakthund:** høyst 100 000 katalogoppføringer per vandring (deretter avkortet listing, ingenting tombstones; vanlige filer med en endelse vi ikke leser koster verken `realpath` eller `stat`), og høyst 20 min per kilde per synk (`knowledge_source_timeout`,
+  utfall `source_sync_timeout`; kilden prøves på nytt om høyst 30 min) - en hengende kilde holder aldri en av de to samtidige plassene til workeren restartes.
+- **En tom rot tombstoner aldri noe:** en eksisterende men tom rot (eller en som bare har skjulte/ikke-støttede filer) kan ikke skilles fra en NAS-mappe som ikke er montert, så listingen regnes som ufullstendig. Skal du tømme en kilde bevisst, fjern kilden (se 7).
+- **`trust: "internal"` er bare tillatt for `obsidian`, `filesystem` og `meeting_transcript`** (det du selv kontrollerer lokalt). `github`, `drive` og `email_attachment` (andre kan skrive i dem) er alltid `untrusted`; konfigurasjonen avvises ellers.
+- **OCR av bilder (e-postvedlegg) rutes aldri som lavt sensitivt:** minst `PRIVATE` (ingen gratis/delt sky), og `SECRET_RESTRICTED` (kun lokal modell) for helse-rommet og kilder med `special` som gulv/tak.
+- **Skyskjermen normaliserer før klassifisering:** NFKC (bredformat → vanlige bokstaver), usynlige formattegn (myk bindestrek, nullbredde, toveistegn, tagg-tegn, variasjonsvelgere) fjernes, og bokstaver spredt med mellomrom/punktum/bindestrek («d i a b e t e s»)
+  slås sammen. Usynlige tegn fjernes også fra utdraget som vises. Fortsatt mønsterbasert: **homoglyfer (kyrilliske bokstaver som ligner latinske) og andre språk enn norsk/engelsk dekkes ikke** (unntak: «cancer»). Docker-konfig og lignende hemmelighetsfiler fanges
+  av skjult-katalog-regelen, ikke av klassifisereren.
+- Hardlenker til filer utenfor roten sjekkes ikke (krever skrivetilgang begge steder på samme filsystem, og `fs.protected_hardlinks` hindrer lenking til filer man ikke eier) - akseptert LAV risiko.
+
 ## 4. Google Drive (Docs, Slides, Sheets)
 
 - Krever Drive-OAuth-credentialen i hvelvet (samme som Drive-verktøyet). Uten den hoppes kilden over med `knowledge_source_skipped ... drive_credentials_missing` og prøves igjen automatisk.
@@ -80,9 +94,9 @@ Sett `retention_days` for transkriptkilder (de inneholder tredjeparts persondata
 - Entitetsgrafen (kjente navn fra minnet, domener, repo-navn, prosjektnøkler, e-postadresser KUN som hash) er alltid på for konfigurerte kilder. `knowledge.search` med `mentions` svarer på «hvilke dokumenter nevner X»,
   og hvert treff lister hva det nevner. Modellassistert uttrekk er AV (`JARVIS_KNOWLEDGE_ENTITY_LLM=off`); `local` bruker kun lokal modell, `on` følger dokumentets sensitivitet (aldri sky for `special`).
 - `knowledge.get_claim_status` (alltid på) viser kildeverifiseringsstatusen til en påstand: UNKNOWN, RESEARCHING, PROVISIONAL, VERIFIED, DISPUTED. **VERIFIED krever minst N uavhengige kilder** (standard 2,
-  `JARVIS_KNOWLEDGE_CLAIM_MIN_SOURCES` 2-10; minst én primærkilde ELLER minst 3) og ingen motstridende evidens. Tre kopier av samme oppstrøms-påstand er én kilde. Motstrid gir DISPUTED. Dette er Jarvis' egen
+  `JARVIS_KNOWLEDGE_CLAIM_MIN_SOURCES` 2-10; minst én primærkilde ELLER minst 3) og ingen motstridende evidens. Tre kopier av samme oppstrøms-påstand er én kilde, og **kunnskapsdokumenter fra samme kildeinstans (samme mappe/vault/Drive) eller med samme innholdshash teller som ÉN kilde** uansett hva innleggeren deklarerte (sammenhengende komponenter over nøkkel, kildeinstans og hash). Motstrid gir DISPUTED. Dette er Jarvis' egen
   kildeverifisering, ikke en fasit.
-- Skriving (registrere påstand, legge til/trekke tilbake evidens, foreslå promotering) er AV: `JARVIS_KNOWLEDGE_CLAIM_WRITES=on` i api. Handlingene står på ingen modellflate og har i dag **ingen eier-rute/UI** -
+- Skriving (registrere påstand, legge til/trekke tilbake evidens, foreslå promotering) er AV: KUN den eksakte verdien `JARVIS_KNOWLEDGE_CLAIM_WRITES=on` i api slår den på (`ON`, `true`, `1`, `yes` = AV og en logglinje). Handlingene står på ingen modellflate og har i dag **ingen eier-rute/UI** -
   de finnes som verktøy for eier-/system-veier (se «Begrensninger»). Promotering er alltid bare et forslag til minnets karantene.
 
 ## 7. Fjerne en kilde
@@ -105,4 +119,7 @@ embeddings, entitetslenker, foreldreløse entiteter og evidensutdrag. Kilder med
 - Skrive-handlingene i kildeverifiseringen (`register_claim`, `add_claim_evidence`, `retract_claim_evidence`, `propose_claim_promotion`) har ingen eier-rute eller dashbord: de kan foreløpig kun nås av kode med
   eier-/systemidentitet via ToolGateway. Selve lesingen og tilstandsmaskinen er ferdig og testet.
 - Sensitivitetsklassifiseringen er stikkordsbasert (Q-52); sett gulv/tak per kilde og evaluer mot ekte materiale.
+- Opphav utenfor kunnskapsdokumentene (to ulike domener som egentlig er samme eier, eller samme kilde via flere URL-er) kan systemet ikke oppdage: Q-26-uavhengighet for rene URL-kilder hviler fortsatt på at den som legger inn evidensen deklarerer opphavet.
+- Tombstonede dokumenter er MYKE slettinger: innholdet ligger i databasen til oppbevaringsfristen (`retention_days`) eller erasure fjerner det. Senker du `max_sensitivity`, blir allerede lagrede strengere dokumenter ikke synlige i søk, men ligger der.
+- En hengende kildesynk (NAS-montering som står) avbrytes ikke, bare regnes som feilet etter 20 min; den underliggende kjøringen kan fortsette i bakgrunnen til den selv gir opp.
 - Pieces er IKKE bygget (ingen kjent offentlig API, Q-22).

@@ -36,7 +36,9 @@ const HEALTH_TERMS: readonly string[] = [
   "kreft(?:en)?", "kreft(?:syk|svulst|behandl|celle|diagnos)[a-zæøå]*", "helseopplysning[a-zæøå]*", "diabetes(?:en)?", "blodtrykk[a-zæøå]*",
   "helse(?:n|problem[a-zæøå]*|tilstand[a-zæøå]*)?", "helse(?:plag|hjelp|status|journal|forsikring)[a-zæøå]*", "astma[a-zæøå]*", "metformin[a-zæøå]*", "adhd", "psykiater[a-zæøå]*", "tannlege[a-zæøå]*", "terapi(?:en|er|ene)?", "terapeut[a-zæøå]*", "migrene[a-zæøå]*", "kolesterol[a-zæøå]*",
   "insulin[a-zæøå]*", "kjemoterapi[a-zæøå]*", "antidepressiv[a-zæøå]*", "covid(?:-?19)?", "gravid[a-zæøå]*", "svangerskap[a-zæøå]*", "kolonoskopi[a-zæøå]*",
-  "medication", "diagnosis", "prescription", "therapy", "therapist", "medical"
+  "medication", "diagnosis", "prescription", "therapy", "therapist", "medical",
+  // Gjennomgang av PR #325: «cancer» er samme ord på engelsk, svensk og fransk (og slapp gjennom uten dette).
+  "cancer"
 ];
 const HEALTH = new RegExp(`\\b(?:${HEALTH_TERMS.join("|")})\\b`, "i");
 /**
@@ -108,6 +110,23 @@ export interface SensitivityDecision {
   ambiguous_terms?: string[];
 }
 
+/**
+ * Gjennomgang av PR #325 (funn 1): stikkordsklassifiseringen så bare på tegnene slik de står. Usynlige tegn midt i et ord («diabe<myk bindestrek>tes»), bredformatbokstaver («ｄｉａｂｅｔｅｓ») og bokstaver spredt med mellomrom («d i a b e t e s»)
+ * ga PUBLIC for tekst en leser (og en modell) likevel forstår. Derfor klassifiseres også en NORMALISERT utgave: NFKC (bredformat/ligaturer -> vanlige bokstaver), alle formattegn (Unicode-kategori Cf: myk bindestrek, nullbredde-tegn,
+ * toveistegn, tagg-tegn) og variasjonsvelgere/fyllertegn fjernet, og en utgave der løpende enkeltbokstaver (4 eller flere, skilt av ett mellomrom/punktum/bindestrek/understrek/stjerne) er slått sammen til ett ord.
+ * Det strengeste signalet fra noen av utgavene vinner (som ellers). Dette lukker KJENTE omgåelser; det er fortsatt mønsterbasert (ikke en garanti): homoglyfer (kyrilliske bokstaver som ligner latinske) og andre språk enn norsk/engelsk dekkes ikke.
+ */
+const INVISIBLE_IN_TEXT = /[\p{Cf}\u034f\u115f\u1160\u3164\uffa0\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/gu;
+const SPACED_LETTERS = /(?<![\p{L}\p{N}])(?:\p{L}[\s.\-_*]){3,}\p{L}(?![\p{L}\p{N}])/gu;
+export function classificationVariants(text: string): string[] {
+  const variants = new Set<string>([text]);
+  const normalized = text.normalize("NFKC").replace(INVISIBLE_IN_TEXT, "");
+  variants.add(normalized);
+  const collapsed = normalized.replace(SPACED_LETTERS, (run) => run.replace(/[\s.\-_*]/g, ""));
+  variants.add(collapsed);
+  return [...variants];
+}
+
 export function classifyContentSensitivity(input: SensitivityInput): SensitivityDecision {
   const reasons: string[] = [];
   let level: DataSensitivity = "PUBLIC_OR_LOW_SENSITIVITY";
@@ -127,14 +146,16 @@ export function classifyContentSensitivity(input: SensitivityInput): Sensitivity
   }
   if (input.private_tool_output) raise("PRIVATE", "private_tool_output");
   const ambiguous = new Set<string>();
-  for (const text of input.texts ?? []) {
-    for (const [key, pattern] of AMBIGUOUS_TERMS) if (pattern.test(text)) ambiguous.add(key);
-    if (containsSecret(text) || SECRET_HINT.test(text)) raise("SECRET_RESTRICTED", "text:secret");
-    if (healthHit(text)) raise("SECRET_RESTRICTED", "text:health");
-    if (FINANCE_STRONG.test(text)) raise("SECRET_RESTRICTED", "text:finance");
-    else if (FINANCE_WEAK.test(text)) raise("PRIVATE", "text:finance_weak");
-    if (BUSINESS.test(text)) raise("BUSINESS_CONFIDENTIAL", "text:business");
-    if (PRIVATE_HINT.test(text)) raise("PRIVATE", "text:private");
+  for (const original of input.texts ?? []) {
+    for (const text of classificationVariants(original)) {
+      for (const [key, pattern] of AMBIGUOUS_TERMS) if (pattern.test(text)) ambiguous.add(key);
+      if (containsSecret(text) || SECRET_HINT.test(text)) raise("SECRET_RESTRICTED", "text:secret");
+      if (healthHit(text)) raise("SECRET_RESTRICTED", "text:health");
+      if (FINANCE_STRONG.test(text)) raise("SECRET_RESTRICTED", "text:finance");
+      else if (FINANCE_WEAK.test(text)) raise("PRIVATE", "text:finance_weak");
+      if (BUSINESS.test(text)) raise("BUSINESS_CONFIDENTIAL", "text:business");
+      if (PRIVATE_HINT.test(text)) raise("PRIVATE", "text:private");
+    }
   }
   return { sensitivity: level, reasons: [...new Set(reasons)], ...(ambiguous.size > 0 ? { ambiguous_terms: [...ambiguous] } : {}) };
 }

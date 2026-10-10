@@ -53,7 +53,7 @@ import {
   withSecretRedaction
 } from "@jarvis/tasks";
 import {
-  KnowledgeEntityIndexer, KnowledgeLlmEntityPass, KnowledgeSourceRegistry, KnowledgeSourcesConfigError, KnowledgeSyncRunner, LlmEntityExtractor, ModelGatewayVisionExtractor, emailIngestHandler,
+  KnowledgeEntityIndexer, KnowledgeLlmEntityPass, KnowledgeSourceRegistry, KnowledgeSourcesConfigError, KnowledgeSyncRunner, LlmEntityExtractor, ModelGatewayVisionExtractor, emailIngestHandler, ocrSensitivityForSource,
   parseEntityLlmMode, parseFilesystemRoots, parseKnowledgeSources, verifyFilesystemRoot, type ConfiguredKnowledgeSource
 } from "@jarvis/knowledge";
 import { LlmExtractionAdapter, MemoryRetriever, MemoryWriter, createEmbeddingProviderFromEnv } from "@jarvis/memory";
@@ -757,7 +757,7 @@ const knowledgeSyncRunner = new KnowledgeSyncRunner({
   pool, embeddings: memoryEmbedding, sources: configuredKnowledgeSources,
   identityFor: (source) => ({ ...knowledgeSyncIdentity, memory_space_id: source.memory_space }),
   buildSource: (source, identity) => configuredKnowledgeRegistry.build(source.config.tenant_id, source.memory_space, source.id, {
-    toolGateway, identity, ocr: new ModelGatewayVisionExtractor(gateway, source.config.tenant_id, `knowledge-sync-${source.id}`)
+    toolGateway, identity, ocr: new ModelGatewayVisionExtractor(gateway, source.config.tenant_id, `knowledge-sync-${source.id}`, ocrSensitivityForSource(source))
   }),
   preflight: async (source) => {
     // Filsystem-baserte kilder: den SANNE roten må fortsatt ligge innenfor en SANN allowlistet basemappe (en rot kan ha blitt en symlink ut av den).

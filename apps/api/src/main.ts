@@ -128,6 +128,7 @@ import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
 import { createRadarState, radarSweepFailures } from "./evolution-radar.ts";
 import { createEvolutionReportProvider } from "./evolution-source.ts";
 import { createAiMeshReportProvider } from "./ai-mesh-source.ts";
+import { parseKnowledgeClaimWrites } from "./knowledge-flags.ts";
 import { createPushSendGuard, startFollowUpPush } from "./follow-up-push.ts";
 import { buildValueRuntimeFacts } from "./value-facts.ts";
 import { createValueMeasurementSource } from "./value-source.ts";
@@ -662,7 +663,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const memoryWriter = new MemoryWriter(pool, memoryEmbedding, new LlmExtractionAdapter(gateway, { maxConcurrent: envInt("JARVIS_MEMORY_EXTRACTION_CONCURRENCY", 1, { min: 1, max: 8 }) }), policy);
   // WP-D1 (UA-2, Q-26): påstandsverifisering (kildeuavhengighet, ingen autonom nettsøk). Lesingen (`knowledge.get_claim_status`) er alltid på; SKRIVING er AV som standard og slås på med
   // JARVIS_KNOWLEDGE_CLAIM_WRITES=on (kun den eksakte verdien «on» - alt annet er av). Promotering til etablert kunnskap er KUN et forslag til minnets karantene (`MemoryWriter.propose`, D-367).
-  const knowledgeClaimWrites = (process.env["JARVIS_KNOWLEDGE_CLAIM_WRITES"] ?? "").trim().toLowerCase() === "on";
+  const knowledgeClaimWrites = parseKnowledgeClaimWrites(process.env["JARVIS_KNOWLEDGE_CLAIM_WRITES"]);
   const knowledgeClaims = createKnowledgeClaimsPort(
     new ClaimVerificationService(pool, { default_min_independent_sources: envInt("JARVIS_KNOWLEDGE_CLAIM_MIN_SOURCES", 2, { min: 2, max: 10 }) }),
     { writes: knowledgeClaimWrites, promotion: memoryWriter }

@@ -622,3 +622,61 @@ describe("G: createKnowledgeClaimsPort - bindingen mot verktøylaget (skriving A
     expect(done.claim.status).toBe("RESEARCHING");
   });
 });
+
+describe("uavhengighet er bundet til kildeinstans og innhold, ikke bare til det innleggeren deklarerer (gjennomgang av PR #325, funn 5)", () => {
+  let docCounter = 0;
+  async function insertDoc(opts: { instance: string; hash: string; type?: string; tenant?: string; space?: MemorySpace }): Promise<string> {
+    docCounter += 1;
+    const id = `kd-wpd1-indep-${docCounter}-${randomSuffix()}`;
+    await adminPool.query(
+      `INSERT INTO knowledge_documents (knowledge_document_id, tenant_id, memory_space_id, source_type, source_instance_id, external_id, canonical_uri, title, content, content_type, content_hash)
+       VALUES ($1, $2, $3, $4, $5, $6, 'file:///x', 'Notat', 'tekst om påstanden', 'text/plain', $7)`,
+      [id, opts.tenant ?? TENANT_A, opts.space ?? "personal", opts.type ?? "filesystem", opts.instance, `ext-${id}`, opts.hash]
+    );
+    return id;
+  }
+  const randomSuffix = (): string => Math.random().toString(36).slice(2, 10);
+
+  it("tre dokumenter fra SAMME kildeinstans (ulike deklarerte kilder, ulikt innhold) er ÉN uavhengig kilde - aldri VERIFIED", async () => {
+    const { id, claim } = await newClaim("samme-kilde", { min: 2 });
+    const docs = [await insertDoc({ instance: "fs:samme-mappe", hash: "h-a" }), await insertDoc({ instance: "fs:samme-mappe", hash: "h-b" }), await insertDoc({ instance: "fs:samme-mappe", hash: "h-c" })];
+    let last;
+    for (const [i, doc] of docs.entries()) {
+      last = await service.addEvidence(id, "personal", claim.claim_id, {
+        stance: "supports", source_ref: url(`kilde-${i}.example`, "/artikkel"), upstream_origin: `domain:uavhengig-${i}.example`, is_primary: i === 0, knowledge_document_id: doc, published_at: NOW.toISOString()
+      });
+    }
+    expect(last?.evaluation.independent_support).toBe(1);
+    expect(last?.evaluation.reasons).toContain("same_source_or_content_collapsed");
+    expect(last?.claim.status).not.toBe("VERIFIED");
+    const view = await service.getClaim(id, "personal", { claim_id: claim.claim_id });
+    expect(view?.claim.independent_support).toBe(1);
+  });
+
+  it("samme innhold i to ulike kildeinstanser (speil/kopi) er ÉN kilde", async () => {
+    const { id, claim } = await newClaim("speil", { min: 2 });
+    const a = await insertDoc({ instance: "fs:mappe-a", hash: "h-identisk" });
+    const b = await insertDoc({ instance: "drive:mappe-b", hash: "h-identisk", type: "google_drive" });
+    await service.addEvidence(id, "personal", claim.claim_id, { stance: "supports", source_ref: url("a.example"), is_primary: true, knowledge_document_id: a, published_at: NOW.toISOString() });
+    const result = await service.addEvidence(id, "personal", claim.claim_id, { stance: "supports", source_ref: url("b.example"), is_primary: true, knowledge_document_id: b, published_at: NOW.toISOString() });
+    expect(result.evaluation.independent_support).toBe(1);
+    expect(result.claim.status).not.toBe("VERIFIED");
+  });
+
+  it("to dokumenter fra ulike kildeinstanser med ulikt innhold er to uavhengige kilder (med en primærkilde: VERIFIED)", async () => {
+    const { id, claim } = await newClaim("ulike", { min: 2 });
+    const a = await insertDoc({ instance: "fs:mappe-1", hash: "h-1" });
+    const b = await insertDoc({ instance: "drive:mappe-2", hash: "h-2", type: "google_drive" });
+    await service.addEvidence(id, "personal", claim.claim_id, { stance: "supports", source_ref: url("x.example"), is_primary: true, knowledge_document_id: a, published_at: NOW.toISOString() });
+    const result = await service.addEvidence(id, "personal", claim.claim_id, { stance: "supports", source_ref: url("y.example"), knowledge_document_id: b, published_at: NOW.toISOString() });
+    expect(result.evaluation.independent_support).toBe(2);
+    expect(result.claim.status).toBe("VERIFIED");
+  });
+
+  it("uten dokumentpeker er oppførselen uendret: to ulike domener = to uavhengige kilder", async () => {
+    const { id, claim } = await newClaim("uten-peker", { min: 2 });
+    await service.addEvidence(id, "personal", claim.claim_id, { stance: "supports", source_ref: url("p.example"), is_primary: true, published_at: NOW.toISOString() });
+    const result = await service.addEvidence(id, "personal", claim.claim_id, { stance: "supports", source_ref: url("q.example"), published_at: NOW.toISOString() });
+    expect(result.evaluation.independent_support).toBe(2);
+  });
+});

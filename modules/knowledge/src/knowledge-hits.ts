@@ -70,8 +70,12 @@ export const URI_MAX_CHARS = 300;
 
 /** Kontrolltegn (C0/C1 unntatt vanlig blank) og usynlige/toveis-formateringstegn, avgjort på kodepunkt (ingen usynlige tegn i selve kildekoden). */
 const isControlCode = (code: number): boolean => code <= 0x08 || code === 0x0b || code === 0x0c || (code >= 0x0e && code <= 0x1f) || (code >= 0x7f && code <= 0x9f);
+// Gjennomgang av PR #325 (funn 1): + myk bindestrek (U+00AD), kombinerende grafem-skjøter (U+034F), arabisk bokstavmerke (U+061C), Hangul-fyllere (U+115F/U+1160/U+3164/U+FFA0), mongolsk vokalskille (U+180E), ALLE formattegn 2060-206F,
+// variasjonsvelgere (FE00-FE0F, E0100-E01EF), tolkningstegn (FFF9-FFFB) og tagg-tegn (E0000-E007F - en usynlig kanal for skjult tekst i et utdrag).
 const isInvisibleCode = (code: number): boolean =>
-  (code >= 0x200b && code <= 0x200f) || (code >= 0x202a && code <= 0x202e) || (code >= 0x2060 && code <= 0x2064) || (code >= 0x2066 && code <= 0x2069) || code === 0xfeff;
+  (code >= 0x200b && code <= 0x200f) || (code >= 0x202a && code <= 0x202e) || (code >= 0x2060 && code <= 0x206f) || code === 0xfeff ||
+  code === 0x00ad || code === 0x034f || code === 0x061c || code === 0x115f || code === 0x1160 || code === 0x180e || code === 0x3164 || code === 0xffa0 ||
+  (code >= 0xfe00 && code <= 0xfe0f) || (code >= 0xfff9 && code <= 0xfffb) || (code >= 0xe0000 && code <= 0xe007f) || (code >= 0xe0100 && code <= 0xe01ef);
 
 /**
  * Nøytraliserer ubetrodd tekst før den krysser modellgrensen: kontrolltegn og usynlige/toveis-tegn fjernes (kan skjule tekst eller snu leseretning), `<` og `>` byttes

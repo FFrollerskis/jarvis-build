@@ -110,6 +110,7 @@ describe("A: filsystemvandringen er begrenset og løkkesikker", () => {
     await writeFile(join(root, ".obsidian", "app.md"), "intern");
     await writeFile(join(root, "a.md"), "a");
     await writeFile(join(root, "b.md"), "b");
+    await writeFile(join(root, "c.md"), "c");
     const result = await new ObsidianVaultKnowledgeSource(root, "obs:test", { maxFiles: 2 }).list();
     expect(result.listing).toBe("partial");
     expect(result.records.every((r) => !r.external_id.startsWith(".obsidian/"))).toBe(true);

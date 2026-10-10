@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFile, readdir, realpath, stat } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { open, opendir, realpath, stat } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { KnowledgeSourceError, type KnowledgeListResult, type KnowledgeRecord, type KnowledgeSource, type SkippedRecord } from "./source.ts";
 
@@ -27,8 +28,13 @@ export interface WalkLimits {
   maxFiles: number;
   /** Maks katalogdybde under roten. */
   maxDepth: number;
+  /**
+   * Gjennomgang av PR #325 (funn 7): maks antall katalogoppføringer vandringen ser på (uavhengig av endelse), slik at en kilde med millioner av filer/kataloger ikke kan holde en synk-plass i timer. Overskrides den, er listingen avkortet
+   * (`truncated`, ingenting tombstones).
+   */
+  maxEntries: number;
 }
-export const DEFAULT_WALK_LIMITS: WalkLimits = { maxFileBytes: 5 * 1024 * 1024, maxFiles: 20_000, maxDepth: 32 };
+export const DEFAULT_WALK_LIMITS: WalkLimits = { maxFileBytes: 5 * 1024 * 1024, maxFiles: 20_000, maxDepth: 32, maxEntries: 100_000 };
 
 export interface WalkedFile {
   /** Sti relativt til roten, med `/` som skilletegn. */
@@ -44,8 +50,10 @@ export interface WalkResult {
   files: WalkedFile[];
   /** Filer over `maxFileBytes` - ikke lest. */
   oversized: WalkedFile[];
-  /** `true` når antallsgrensen stoppet vandringen: listingen er ufullstendig og må ikke brukes til å tombstone. */
+  /** `true` når listingen er ufullstendig eller ikke kan stoles på som «alt som finnes»: antallsgrensen stoppet vandringen, eller roten var TOM (se `truncated_reason`). Må ikke brukes til å tombstone. */
   truncated: boolean;
+  /** Hvorfor `truncated` er satt: `max_files`/`max_entries` (grensene), `empty_listing` (en eksisterende men tom rot - f.eks. en NAS-mappe som ikke er montert - kan ikke skilles fra «alt er slettet»). Kun en kort kode. */
+  truncated_reason?: "max_files" | "max_entries" | "empty_listing";
   /** Kataloger som ikke kunne leses eller lå under dybdegrensen (relativ sti + `/`): allerede lagrede dokumenter under dem skal ikke tombstones, resten av treet påvirkes ikke. */
   protected_prefixes: string[];
 }
@@ -62,7 +70,7 @@ export async function walkAllowlistedFiles(
   allowedExtensions: ReadonlySet<string>,
   limits: Partial<WalkLimits> = {}
 ): Promise<WalkResult> {
-  const { maxFileBytes, maxFiles, maxDepth } = { ...DEFAULT_WALK_LIMITS, ...limits };
+  const { maxFileBytes, maxFiles, maxDepth, maxEntries } = { ...DEFAULT_WALK_LIMITS, ...limits };
   // Selve roten må kunne oppløses og leses: en rot som mangler (f.eks. en NAS-montering som ikke er oppe) er TOTAL svikt, aldri en tom liste som ville tombstonet alt (§5: ingen tombstoning på en feilet listing).
   let rootResolved: string;
   try {
@@ -75,6 +83,7 @@ export async function walkAllowlistedFiles(
   const visitedDirs = new Set<string>();
   const prefixOf = (dir: string): string => `${relative(rootResolved, dir).split(sep).join("/")}/`;
   const seenFiles = new Set<string>();
+  let entriesSeen = 0;
   const queue: Array<{ dir: string; depth: number }> = [{ dir: rootResolved, depth: 0 }];
   while (queue.length > 0) {
     const next = queue.shift() as { dir: string; depth: number };
@@ -84,15 +93,29 @@ export async function walkAllowlistedFiles(
       result.protected_prefixes.push(prefixOf(next.dir));
       continue;
     }
-    let entries;
+    // opendir strømmer oppføringene (minnet vokser ikke med katalogstørrelsen) og lar oss stoppe ved `maxEntries` uten å ha lest hele katalogen.
+    let dir;
     try {
-      entries = await readdir(next.dir, { withFileTypes: true });
+      dir = await opendir(next.dir);
     } catch {
       if (next.depth === 0) throw new KnowledgeSourceError("SOURCE_UNAVAILABLE", "filesystem_root_unreadable");
       result.protected_prefixes.push(prefixOf(next.dir)); // en uleselig undermappe (f.eks. lost+found): ikke bekreftet borte
       continue;
     }
-    for (const entry of entries) {
+    try {
+    for await (const entry of dir) {
+      // Skjulte filer og kataloger (.ssh, .aws, .docker, .git, .obsidian, .env-lignende ...) indekseres ALDRI (gjennomgang av PR #325, funn 3): `FORBIDDEN_SEGMENTS` sjekker bare selve rot-stien, og en hemmelighetsmappe
+      // INNE i en tillatt rot ble ellers vandret og indeksert.
+      // (Navn som starter med «..» er ikke skjulte filer i noen verktøykonvensjon og må fortsatt behandles som vanlige navn - et filnavn som «..notat.md» er ikke et utbrudd; se `realpathWithinRoot`.)
+      if (entry.name.startsWith(".") && !entry.name.startsWith("..")) continue;
+      entriesSeen += 1;
+      if (entriesSeen > maxEntries) {
+        result.truncated = true;
+        result.truncated_reason = "max_entries";
+        return result;
+      }
+      // En vanlig fil med en endelse vi ikke leser trenger verken realpath eller stat (kostbart ved millioner av oppføringer). Symlinker og kataloger går videre til full sjekk.
+      if (entry.isFile() && !allowedExtensions.has(extname(entry.name).toLowerCase())) continue;
       const real = await realpathWithinRoot(rootResolved, join(next.dir, entry.name));
       if (real === null) continue; // finnes ikke, uleselig eller peker ut av roten - ALDRI stopp hele scanningen på én ondsinnet symlink
       let info;
@@ -112,6 +135,7 @@ export async function walkAllowlistedFiles(
       if (seenFiles.has(relPath)) continue;
       if (result.files.length + result.oversized.length >= maxFiles) {
         result.truncated = true;
+        result.truncated_reason = "max_files";
         return result;
       }
       seenFiles.add(relPath);
@@ -119,6 +143,18 @@ export async function walkAllowlistedFiles(
       if (info.size > maxFileBytes) result.oversized.push(file);
       else result.files.push(file);
     }
+    } catch {
+      // En lesefeil midt i katalogen (I/O-feil, NAS som detter ut): det vi har sett så langt beholdes, men katalogen er IKKE bekreftet fullstendig -> ingen tombstoning under den.
+      if (next.depth === 0) throw new KnowledgeSourceError("SOURCE_UNAVAILABLE", "filesystem_root_unreadable");
+      result.protected_prefixes.push(prefixOf(next.dir));
+    } finally {
+      await dir.close().catch(() => undefined);
+    }
+  }
+  // En eksisterende men TOM rot (ingen filer overhodet) kan ikke skilles fra en NAS-mappe som ikke er montert: listingen regnes som ufullstendig, så ingenting tombstones (gjennomgang av PR #325, funn 6).
+  if (!result.truncated && result.files.length === 0 && result.oversized.length === 0) {
+    result.truncated = true;
+    result.truncated_reason = "empty_listing";
   }
   return result;
 }
@@ -144,17 +180,53 @@ export interface FilesystemSourceOptions {
 
 /**
  * Leser en fil som er funnet av vandringen. `null` = filen skal hoppes over (vokste forbi grensen siden `stat`, eller har NUL-byte = binærinnhold som Postgres ikke kan lagre som tekst).
+ *
+ * Gjennomgang av PR #325 (funn 2): vandringen lister først og leser etterpå, så filen kan være byttet ut i mellomtiden (TOCTOU). Derfor åpnes den med `O_NOFOLLOW` (siste ledd kan ikke være en symlink) og `O_NONBLOCK` (en FIFO
+ * blokkerer ikke `open`), `fstat` på den ÅPNE filen må vise en vanlig fil (aldri FIFO/enhet/katalog), størrelsen sjekkes på det åpne håndtaket, og den åpne filens sanne sti (`/proc/self/fd/<fd>`, ellers en ny `realpath`) må være
+ * NØYAKTIG den vandringen listet - en mellomliggende katalog som er byttet mot en symlink ut av roten gir en annen sti og filen leses ikke. Leses aldri mer enn `maxFileBytes + 1` byte.
  */
 export async function readWalkedFile(file: WalkedFile, maxFileBytes: number): Promise<{ text: string } | { skip: "too_large" | "binary_content" | "unreadable" }> {
-  let buf: Buffer;
+  let handle;
   try {
-    buf = await readFile(file.real);
+    handle = await open(file.real, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
   } catch {
     return { skip: "unreadable" };
   }
-  if (buf.length > maxFileBytes) return { skip: "too_large" };
-  if (buf.includes(0)) return { skip: "binary_content" };
-  return { text: buf.toString("utf8") };
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) return { skip: "unreadable" };
+    if (info.size > maxFileBytes) return { skip: "too_large" };
+    if (!(await openedPathIs(handle.fd, file.real))) return { skip: "unreadable" };
+    const buf = Buffer.allocUnsafe(Math.min(info.size, maxFileBytes) + 1);
+    let filled = 0;
+    while (filled < buf.length) {
+      const { bytesRead } = await handle.read(buf, filled, buf.length - filled, filled);
+      if (bytesRead === 0) break;
+      filled += bytesRead;
+    }
+    if (filled > maxFileBytes) return { skip: "too_large" };
+    const content = buf.subarray(0, filled);
+    if (content.includes(0)) return { skip: "binary_content" };
+    return { text: content.toString("utf8") };
+  } catch {
+    return { skip: "unreadable" };
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
+/** Er den ÅPNE filen (fd) fortsatt filen på den listede, symlink-oppløste stien? Linux: `/proc/self/fd`; ellers (ingen /proc) en ny `realpath` etter åpning. */
+async function openedPathIs(fd: number, expected: string): Promise<boolean> {
+  try {
+    return (await realpath(`/proc/self/fd/${fd}`)) === expected;
+  } catch {
+    // ingen /proc (ikke-Linux): fall tilbake til en ny sanne-sti-sjekk etter at filen er åpnet
+  }
+  try {
+    return (await realpath(expected)) === expected;
+  } catch {
+    return false;
+  }
 }
 
 /**

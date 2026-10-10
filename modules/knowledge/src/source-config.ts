@@ -68,6 +68,8 @@ export const SOURCES_CONFIG_LIMITS = {
   maxRetentionDays: 3650
 } as const;
 
+/** Kilder eieren selv kontrollerer lokalt - de eneste som kan merkes `trust: "internal"`. */
+const INTERNAL_TRUST_KINDS: ReadonlySet<string> = new Set(["obsidian", "filesystem", "meeting_transcript"]);
 const SOURCE_ID = /^[a-z0-9][a-z0-9._:-]{0,62}$/;
 const DRIVE_FOLDER_ID = /^[A-Za-z0-9_-]{10,100}$/;
 const GITHUB_SLUG = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
@@ -236,6 +238,11 @@ function parseOne(raw: unknown, index: number, context: KnowledgeSourcesParseCon
   const defaultSensitivity = enumField(raw, "default_sensitivity", KNOWLEDGE_SENSITIVITIES, problems, at);
   const maxSensitivity = enumField(raw, "max_sensitivity", KNOWLEDGE_SENSITIVITIES, problems, at);
   const trust = enumField(raw, "trust", KNOWLEDGE_TRUST_LEVELS, problems, at);
+  // Gjennomgang av PR #325 (funn 9): `internal` er en påstand om at kun eieren skriver i kilden. Det kan bare gjelde lokale kilder eieren selv kontrollerer; innhold andre kan skrive (GitHub-saker, delte Drive-filer, e-postvedlegg)
+  // forblir `untrusted` uansett hva konfigurasjonen sier.
+  if (trust === "internal" && kind !== undefined && !INTERNAL_TRUST_KINDS.has(kind)) {
+    problems.push(`${at}.trust: 'internal' is only allowed for obsidian, filesystem and meeting_transcript sources (content that others can write - GitHub issues, shared Drive files, email attachments - stays untrusted)`);
+  }
   const retentionDays = intField(raw, "retention_days", 1, SOURCES_CONFIG_LIMITS.maxRetentionDays, problems, at);
   const interval = intField(raw, "sync_interval_minutes", SOURCES_CONFIG_LIMITS.minIntervalMinutes, SOURCES_CONFIG_LIMITS.maxIntervalMinutes, problems, at);
   const policy: KnowledgeSourcePolicy = {

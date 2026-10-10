@@ -199,3 +199,28 @@ describe("D: merknaden bak svaret", () => {
     expect(stripSystemNotes(`Her er svaret.${note}${chatWithheldNote()}`)).toBe("Her er svaret.");
   });
 });
+
+describe("A2: omgåelser av helseord i treffets tekst holdes tilbake (gjennomgang av PR #325, funn 1)", () => {
+  const tag = (code: number): string => String.fromCodePoint(code);
+  const variants: Array<[string, string]> = [
+    ["myk bindestrek", "diabe­tes"],
+    ["nullbredde-mellomrom", "dia​betes"],
+    ["variasjonsvelger", "dia️betes"],
+    ["tagg-tegn", `dia${tag(0xe0061)}betes`],
+    ["bredformat", "ｄｉａｂｅｔｅｓ"],
+    ["spredt med mellomrom", "d i a b e t e s"],
+    ["spredt med punktum", "d.i.a.b.e.t.e.s"],
+    ["cancer (samme ord på flere språk)", "cancer"]
+  ];
+  it.each(variants)("%s: treffet holdes tilbake fra skymodellen selv om merket sier normal", (_name, word) => {
+    const out = screenKnowledgeSearchResult(result([hit("ok"), hit("skjult", { sensitivity: "normal", snippet: `Notatet sier at pasienten har ${word} og følges opp`, title: "Notat" })]));
+    expect(idsOf(out.result.output)).toEqual(["ok"]);
+    expect(out.withheld).toBe(1);
+  });
+
+  it("kontroll: samme setning uten helseord beholdes", () => {
+    const out = screenKnowledgeSearchResult(result([hit("ok", { sensitivity: "normal", snippet: "Notatet sier at kaffemaskinen skal rengjøres og følges opp", title: "Notat" })]));
+    expect(idsOf(out.result.output)).toEqual(["ok"]);
+    expect(out.withheld).toBe(0);
+  });
+});
