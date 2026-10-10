@@ -1,12 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import http from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validateConfig } from "../../lib/config.mjs";
 import { createLogger, SecretRegistry } from "../../lib/log.mjs";
 import { createRunnerService } from "../../server.mjs";
 import { createFakeDocker } from "./fake-docker.mjs";
+import { makeTempDir, removeTemp } from "./tmp.mjs";
 
 /**
  * Felles testrigg for vertstjenesten: ekte HTTP over Unix-socket, ekte `git` mot lokale bare-repoer (file://-remote, KUN via
@@ -53,7 +53,7 @@ export function gitSync(cwd, args, extraEnv = {}) {
 export async function createBareOrigin(dir, options = {}) {
   await mkdir(dir, { recursive: true });
   gitSync(dir, ["init", "--bare", "--quiet", "--initial-branch=main", "."]);
-  const seed = await mkdtemp(join(tmpdir(), "jr-seed-"));
+  const seed = await makeTempDir("jr-seed-");
   gitSync(seed, ["init", "--quiet", "--initial-branch=main", "."]);
   const commits = options.commits ?? 3;
   for (let i = 1; i <= commits; i += 1) {
@@ -66,6 +66,7 @@ export async function createBareOrigin(dir, options = {}) {
     gitSync(seed, ["commit", "--quiet", "-m", `c${i}`]);
   }
   gitSync(seed, ["push", "--quiet", dir, "main"]);
+  await removeTemp(seed); // A-F9: seed-klonen trengs ikke etter pushen
   return { dir, head: gitSync(dir, ["rev-parse", "main"]) };
 }
 
@@ -114,7 +115,7 @@ export function apiRequest(socketPath, req = {}) {
  * }} [options]
  */
 export async function createHarness(options = {}) {
-  const root = await mkdtemp(join(tmpdir(), "jr-"));
+  const root = await makeTempDir("jr-");
   const baseDir = join(root, "jobs");
   const socketPath = join(root, "runner.sock");
   const tokenFile = join(root, "token");
@@ -182,8 +183,11 @@ export async function createHarness(options = {}) {
   return {
     root, baseDir, socketPath, tokenFile, config: validated.runner, fake, service, origins, logLines, registry, api, createJob, exec,
     token: RUNNER_TOKEN, gitToken: GIT_TOKEN,
+    /** Stopper tjenesten og rydder ALT testen laget (A-F9): jobbkataloger (også uryddelige trær), remote-repoer og fake-docker-hjemmet. */
     async close() {
       await service.stop().catch(() => undefined);
+      fake.dispose();
+      await removeTemp(root);
     }
   };
 }

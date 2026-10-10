@@ -1,11 +1,9 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { DockerClient } from "../lib/docker.mjs";
 import { SecretRegistry } from "../lib/log.mjs";
 import { buildJobContainerCreateArgs } from "../lib/spec.mjs";
+import { makeTempDir } from "./support/tmp.mjs";
 
 /**
  * WP-C1: argv-et runneren sender til `docker create` blir PARSET av den ekte Docker-CLI-en (uten daemon). Fake-docker-testene beviser hva
@@ -24,7 +22,7 @@ const job = { containerName: "jarvis-job-123e4567-e89b-42d3-a456-426614174000", 
 
 /** Kjører `docker <args>` mot en daemon som ikke finnes; returnerer {parsed, stderr}. */
 async function dockerParses(args) {
-  const config = await mkdtemp(join(tmpdir(), "wpc1-dockercfg-"));
+  const config = await makeTempDir("wpc1-dockercfg-");
   const r = spawnSync("docker", args, {
     encoding: "utf8", timeout: 30_000,
     env: { PATH: process.env["PATH"], HOME: config, DOCKER_CONFIG: config, DOCKER_HOST: "unix:///nonexistent-jarvis-wpc1.sock", ANTHROPIC_API_KEY: "ikke-en-ekte-nokkel" }

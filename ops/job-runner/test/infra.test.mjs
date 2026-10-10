@@ -1,12 +1,12 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, mkdir, readdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import { checkDockerfile } from "../../security/check-containment.mjs";
 import { validateConfig } from "../lib/config.mjs";
+import { makeTempDir } from "./support/tmp.mjs";
 
 /**
  * WP-C1: infrastrukturfilene (infra/job-runner/*) holder det de lover SÅ LANGT det kan bevises uten root/Docker/systemd/brannmur:
@@ -263,7 +263,7 @@ const HAS_COMPOSE = !COMPOSE_PROBE.error && COMPOSE_PROBE.status === 0;
 describe.skipIf(!HAS_COMPOSE)("C2: den ekte Compose-CLI-en (uten daemon) fletter basen og overriden riktig", () => {
   /** `docker compose config --format json` mot basen (+ overriden). Krever ikke daemon; leser ikke .env fra repoet. */
   async function render(withOverride, extra = {}) {
-    const dir = await mkdtemp(join(tmpdir(), "wpc1-compose-"));
+    const dir = await makeTempDir("wpc1-compose-");
     const envFile = join(dir, "check.env");
     const lines = ["INFISICAL_DB_PASSWORD", "JARVIS_BROWSER_GATEWAY_TOKEN_SECRET", "JARVIS_DB_ADMIN_PASSWORD", "LANGFUSE_DB_PASSWORD"].map((n) => `${n}=dummy-verdi-kun-for-config-0123456789abcdef`);
     for (const [k, v] of Object.entries(extra)) lines.push(`${k}=${v}`);
@@ -356,7 +356,7 @@ const NEEDED = ["sh", "bash", "dirname", "cat", "grep", "sed", "awk", "cut", "he
 let toolbox = "";
 beforeAll(async () => {
   // En PATH som bare har systemverktøyene scriptene trenger + node (symlinket) - UTEN docker/iptables/git, slik at «mangler verktøy» kan testes.
-  toolbox = await mkdtemp(join(tmpdir(), "wpc1-toolbox-"));
+  toolbox = await makeTempDir("wpc1-toolbox-");
   for (const name of NEEDED) {
     const real = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"].map((d) => join(d, name)).find((p) => existsSync(p));
     if (real) await symlink(real, join(toolbox, name));
@@ -366,7 +366,7 @@ beforeAll(async () => {
 
 /** Lager en isolert testverden: falsk bin med valgt sett verktøy + tilstandskatalog. */
 async function makeWorld({ tools = ["docker", "iptables", "iptables-restore"], uid = 0 } = {}) {
-  const root = await mkdtemp(join(tmpdir(), "wpc1-infra-"));
+  const root = await makeTempDir("wpc1-infra-");
   const bin = join(root, "bin");
   const state = join(root, "state");
   await mkdir(bin);

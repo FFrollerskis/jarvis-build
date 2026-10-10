@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import http from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DockerClient } from "../lib/docker.mjs";
@@ -10,6 +9,7 @@ import { MAX_JOB_SECRET_BYTES, MAX_JOB_SECRET_VALUES } from "../lib/jobs.mjs";
 import { SecretRegistry } from "../lib/log.mjs";
 import { createRunnerService } from "../server.mjs";
 import { GIT_TOKEN, RUNNER_TOKEN, apiRequest, createHarness } from "./support/harness.mjs";
+import { makeTempDir } from "./support/tmp.mjs";
 
 /**
  * WP-C1: livssyklus og robusthet (D-32 porter 1-8, 11, 12): container per jobb, grenser faktisk satt, kansellering dreper umiddelbart,
@@ -635,7 +635,7 @@ describe("J: socket-katalogen er persistent og trygg (bind-mount i worker peker 
   const health = (socketPath) => apiRequest(socketPath, { token: RUNNER_TOKEN, path: "/v1/health" });
 
   it("en manglende socket-katalog opprettes med modus 0750 (selv om prosessen har umask 0077), og socketen er 0660", async () => {
-    const base = await mkdtemp(join(tmpdir(), "jr-sock-"));
+    const base = await makeTempDir("jr-sock-");
     const socketPath = join(base, "state", "sock", "runner.sock");
     const previous = process.umask(0o077); // som UMask=0077 i systemd-enheten
     let h;
@@ -651,7 +651,7 @@ describe("J: socket-katalogen er persistent og trygg (bind-mount i worker peker 
   });
 
   it("stop og ny start beholder SAMME katalog-inode (en gammel bind-mount forblir gyldig), og den nye socketen virker i samme katalog", async () => {
-    const base = await mkdtemp(join(tmpdir(), "jr-sock-"));
+    const base = await makeTempDir("jr-sock-");
     const socketPath = join(base, "sock", "runner.sock");
     const first = await harness({ runner: { socket_path: socketPath } });
     const before = await stat(join(base, "sock"));
@@ -667,7 +667,7 @@ describe("J: socket-katalogen er persistent og trygg (bind-mount i worker peker 
 
   it("en eksisterende katalog som er skrivbar for gruppe/andre nektes (en annen bruker kunne byttet ut socketen)", async () => {
     for (const mode of [0o770, 0o775, 0o777, 0o722]) {
-      const base = await mkdtemp(join(tmpdir(), "jr-sock-"));
+      const base = await makeTempDir("jr-sock-");
       await mkdir(join(base, "sock"));
       await chmod(join(base, "sock"), mode);
       const h = await harness({ autoStart: false, runner: { socket_path: join(base, "sock", "runner.sock") } });
@@ -677,7 +677,7 @@ describe("J: socket-katalogen er persistent og trygg (bind-mount i worker peker 
   });
 
   it("socket-katalogen kan ikke være en symlenke (til en katalog agenten/andre kontrollerer)", async () => {
-    const base = await mkdtemp(join(tmpdir(), "jr-sock-"));
+    const base = await makeTempDir("jr-sock-");
     await mkdir(join(base, "annen"));
     await symlink(join(base, "annen"), join(base, "sock"));
     const h = await harness({ autoStart: false, runner: { socket_path: join(base, "sock", "runner.sock") } });
@@ -686,7 +686,7 @@ describe("J: socket-katalogen er persistent og trygg (bind-mount i worker peker 
   });
 
   it("en eksisterende 0750-katalog (laget av install-host.sh) beholdes uendret", async () => {
-    const base = await mkdtemp(join(tmpdir(), "jr-sock-"));
+    const base = await makeTempDir("jr-sock-");
     await mkdir(join(base, "sock"));
     await chmod(join(base, "sock"), 0o750);
     const before = await stat(join(base, "sock"));

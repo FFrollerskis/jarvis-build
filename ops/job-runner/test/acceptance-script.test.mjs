@@ -1,11 +1,12 @@
 import { spawn, spawnSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, gitSync, syntheticInstallationToken } from "./support/harness.mjs";
 import { apiRequest, RUNNER_TOKEN } from "./support/harness.mjs";
+import { makeTempDir } from "./support/tmp.mjs";
 
 /**
  * WP-C1: akseptansescriptet (ops/job-runner/acceptance.sh) kjøres av EIER på NAS-en mot ekte Docker. Her testes det som KAN testes uten:
@@ -48,7 +49,7 @@ describe("A: syntaks og tørrkjøring", () => {
 
   it("--dry-run lister ALLE sjekkene og kjører ingenting (exit 0; docker/curl/node/systemctl blir aldri kalt)", async () => {
     // Skim-kommandoer FORAN på PATH: hvis tørrkjøringen noen gang kaller dem, skriver de en markørfil og feiler (exit 99).
-    const shims = await mkdtemp(join(tmpdir(), "wpc1-shims-"));
+    const shims = await makeTempDir("wpc1-shims-");
     const marker = join(shims, "ble-kalt");
     for (const name of ["docker", "curl", "node", "systemctl", "sudo", "iptables", "git"]) {
       const p = join(shims, name);
@@ -364,7 +365,7 @@ describe("D: repo med `source: request` (kortlevd token fra worker): scriptet se
   it("create_job og J11-stegene fungerer mot en `request`-runner med token fra filen; argv til curl OG node inneholder verken git-tokenet eller API-nøkkelen", async () => {
     const { info: h, config, health } = await setupServed({ requestTokenSlugs: ["owner/repo"] });
     const file = await tokenFile(h);
-    const shims = await mkdtemp(join(tmpdir(), "wpc1-argvspy-"));
+    const shims = await makeTempDir("wpc1-argvspy-");
     const log = join(shims, "argv.log");
     for (const name of ["curl", "node"]) {
       const real = spawnSync("sh", ["-c", `command -v ${name}`], { encoding: "utf8", env: { PATH: process.env["PATH"] } }).stdout.trim();

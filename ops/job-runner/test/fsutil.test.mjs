@@ -1,12 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { chmod, link as fs_link, lstat, mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, link as fs_link, lstat, mkdir, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigError } from "../lib/errors.mjs";
 import { assertPrivateDir, ensurePrivateDir, forceRemoveTree, isPathInside, readSecretFile } from "../lib/fsutil.mjs";
+import { makeTempDir } from "./support/tmp.mjs";
 
-const tmp = () => mkdtemp(join(tmpdir(), "jr-fs-"));
+const tmp = () => makeTempDir("jr-fs-");
 const err = async (promise) => {
   try { await promise; } catch (e) { return e instanceof ConfigError ? e.code : `other:${e instanceof Error ? e.message : e}`; }
   return "no_error";

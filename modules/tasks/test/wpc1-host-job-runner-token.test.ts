@@ -1,8 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import http from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { IdentityContext, JobContract } from "@jarvis/contracts";
@@ -15,6 +14,7 @@ import {
 import { RUNNER_TOKEN, createHarness, gitSync, syntheticInstallationToken } from "../../../ops/job-runner/test/support/harness.mjs";
 // @ts-expect-error - .mjs uten typer (git smart-HTTP-server som egen barneprosess; logger token-fingeravtrykk per operasjon)
 import { fingerprint, startTokenGitServer } from "../../../ops/job-runner/test/support/token-git-server.mjs";
+import { makeTempDir } from "../../../ops/job-runner/test/support/tmp.mjs";
 
 /**
  * WP-C1 + WP-C3: worker-klienten sender et KORTLEVD, REPO-SCOPET git-token i jobbforespørselen (`git_token`) når den er gitt en `gitCredentialSource`
@@ -270,7 +270,7 @@ describe("C: resolveJobSandboxRunner viderefører kilden kun i host-modus", () =
 describe("D: tokenet gjengis aldri - heller ikke om runneren (mot formodning) ekkoer det, og heller ikke når git skriver det på stderr", () => {
   /** En falsk runner på et Unix-socket som svarer med en gitt feil. */
   async function fakeRunner(respond: (body: Record<string, unknown>) => { status: number; json: unknown }) {
-    const dir = await mkdtemp(join(tmpdir(), "jr-fakerunner-"));
+    const dir = await makeTempDir("jr-fakerunner-");
     const socketPath = join(dir, "r.sock");
     const bodies: Array<Record<string, unknown>> = [];
     const server = http.createServer((req, res) => {

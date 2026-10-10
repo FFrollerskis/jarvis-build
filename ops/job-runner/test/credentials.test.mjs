@@ -1,6 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { startGitSmartHttpServer } from "../../../modules/tasks/test/support/git-smart-http-server.ts";
@@ -8,6 +7,7 @@ import { assertWellFormedToken, credentialHelperArgs, FileGitCredentialSource, G
 import { RunnerError } from "../lib/errors.mjs";
 import { GIT_TOKEN, createHarness, gitSync, syntheticInstallationToken } from "./support/harness.mjs";
 import { startProbeServer } from "./support/probe-server.mjs";
+import { makeTempDir } from "./support/tmp.mjs";
 
 /**
  * WP-C1: git-credentialen går ALDRI inn i jobb-containeren og leveres KUN til nøyaktig protokoll + vert + repo-sti
@@ -100,7 +100,7 @@ describe("B: credentialHelperArgs - ingen shell-metategn når git sin shell-snip
 
 describe("C: FileGitCredentialSource (PAT per repo, fil med strenge rettigheter)", () => {
   const make = async (mode, content = `${GIT_TOKEN}\n`) => {
-    const dir = await mkdtemp(join(tmpdir(), "jr-cred-"));
+    const dir = await makeTempDir("jr-cred-");
     const file = join(dir, "pat");
     await writeFile(file, content);
     await chmod(file, mode);
@@ -182,7 +182,7 @@ describe("D: ende-til-ende mot ekte git ↔ lokal HTTP (produksjonens protokollr
   beforeAll(async () => {
     server = await startGitSmartHttpServer([{ user: "x-access-token", pass: GIT_TOKEN }]);
     server.createBareRepo("owner/repo.git");
-    const seed = await mkdtemp(join(tmpdir(), "jr-seed3-"));
+    const seed = await makeTempDir("jr-seed3-");
     gitSync(seed, ["init", "--quiet", "--initial-branch=main", "."]);
     gitSync(seed, ["commit", "--allow-empty", "-q", "-m", "c1"]);
     gitSync(seed, ["push", "--quiet", join(server.reposRoot, "owner/repo.git"), "main"]);
@@ -220,7 +220,7 @@ describe("D: ende-til-ende mot ekte git ↔ lokal HTTP (produksjonens protokollr
     const srv = await startGitSmartHttpServer([{ user: "x-access-token", pass: long }]);
     try {
       srv.createBareRepo("owner/repo.git");
-      const seed = await mkdtemp(join(tmpdir(), "jr-seed-long-"));
+      const seed = await makeTempDir("jr-seed-long-");
       gitSync(seed, ["init", "--quiet", "--initial-branch=main", "."]);
       gitSync(seed, ["commit", "--allow-empty", "-q", "-m", "c1"]);
       gitSync(seed, ["push", "--quiet", join(srv.reposRoot, "owner/repo.git"), "main"]);

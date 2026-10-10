@@ -1,8 +1,6 @@
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { CancelToken } from "../../lib/errors.mjs";
 import { runProcess } from "../../lib/process.mjs";
+import { makeTempDirSync, removeTemp } from "./tmp.mjs";
 
 /**
  * Testdobler for `docker` (injisert som `DockerExec`). Etterligner NØYAKTIG de kallene runneren gjør
@@ -41,7 +39,7 @@ export function parseCreateArgs(args) {
  */
 export function createFakeDocker(options = {}) {
   const networkName = options.networkName ?? "jarvis-jobs";
-  const home = mkdtempSync(join(tmpdir(), "jr-fakehome-"));
+  const home = makeTempDirSync("jr-fakehome-");
   /** @type {Array<{ args: string[], env: Record<string, string> }>} */
   const calls = [];
   /** @type {Map<string, any>} */
@@ -170,5 +168,7 @@ export function createFakeDocker(options = {}) {
     }
   }
 
-  return { exec, calls, containers, state, networkName, home, running };
+  /** Rydder «hjemmet» containeren bruker (A-F9). Idempotent; kalles av harness.close(). */
+  const dispose = () => void removeTemp(home);
+  return { exec, calls, containers, state, networkName, home, running, dispose };
 }

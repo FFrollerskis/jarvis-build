@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import net from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { EgressProxy, parseConnectTarget } from "../egress-proxy.mjs";
@@ -11,6 +10,7 @@ import { assertPathAllowed, assertPathAllowedCompiled, compileDenyPaths } from "
 import { scrubPaths, SecretRegistry } from "../lib/log.mjs";
 import { createGitSpy } from "./support/git-spy.mjs";
 import { createHarness, gitSync, RUNNER_TOKEN, syntheticInstallationToken } from "./support/harness.mjs";
+import { makeTempDir } from "./support/tmp.mjs";
 
 /**
  * WP-C1: DEN STORE ADVERSARIELLE TESTEN. Alt her er en angriper som prøver å komme seg ut av, eller forbi, runnerens grenser - mot den EKTE tjenesten (HTTP over Unix-socket, ekte
@@ -549,7 +549,7 @@ describe("D: fail-closed - ugyldig token-fil, ødelagt PAT og utilgjengelig dock
   }, 60_000);
 
   it("selve prosessene (server.mjs og egress-proxy.mjs): manglende, relativ, ikke-vanlig, symlenke, for stor, verdensskrivbar eller ikke-root-eid policy-fil gir exit 1 med en stabil kode som JSON på stderr - ingen socket, ingen lytting", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jr-main-"));
+    const dir = await makeTempDir("jr-main-");
     const write = async (name, content, mode) => { const f = join(dir, name); await writeFile(f, content); await chmod(f, mode); return f; };
     const valid = JSON.stringify({ version: 1, runner: { token_file: join(dir, "t"), image: `sha256:${"a".repeat(64)}`, network: "jarvis-jobs", egress_proxy_url: "http://172.30.77.1:3128", allowed_repos: ["o/r"], git_credentials: { "o/r": { token_file: join(dir, "p") } }, socket_path: join(dir, "x.sock") }, egress_proxy: { listen_host: "127.0.0.1", listen_port: 39999, allowed_client_cidrs: ["127.0.0.0/8"] } });
     const real = await write("real.json", valid, 0o644);

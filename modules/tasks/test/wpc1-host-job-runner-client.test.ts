@@ -1,10 +1,10 @@
-import { chmod, mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { GitPolicyError, HostJobRunnerConfigError, HostJobRunnerError, HostJobSandboxRunner, FailClosedSandboxRunner, resolveJobSandboxRunner } from "@jarvis/tasks";
 // @ts-expect-error - .mjs uten typer (ops/job-runner; samme mønster som ops/security i andre tester)
 import { RUNNER_TOKEN, createHarness, gitSync } from "../../../ops/job-runner/test/support/harness.mjs";
+import { makeTempDir } from "../../../ops/job-runner/test/support/tmp.mjs";
 
 /**
  * WP-C1: worker-klienten (`HostJobSandboxRunner`) mot den EKTE vertstjenesten over et temp-Unix-socket (fake docker + ekte git mot
@@ -118,7 +118,7 @@ describe("B: klienten feiler lukket", () => {
 
   it("feil token: HostJobRunnerError(unauthorized); meldingen inneholder aldri tokenet", async () => {
     const h = await harness();
-    const dir = await mkdtemp(join(tmpdir(), "jr-badtok-"));
+    const dir = await makeTempDir("jr-badtok-");
     const badFile = join(dir, "token");
     await writeFile(badFile, "feil-token-feil-token-feil-token-feil-token\n", { mode: 0o600 });
     const sandbox = await runnerFor(h, { tokenFile: badFile }).create();
@@ -130,7 +130,7 @@ describe("B: klienten feiler lukket", () => {
 
   it("manglende/ugyldig tokenfil: token_unavailable / token_invalid", async () => {
     const h = await harness();
-    const dir = await mkdtemp(join(tmpdir(), "jr-notok-"));
+    const dir = await makeTempDir("jr-notok-");
     const missing = await runnerFor(h, { tokenFile: join(dir, "finnes-ikke") }).create();
     await expect(missing.gitCheckout!({ repoUrl: REPO })).rejects.toMatchObject({ code: "token_unavailable" });
     const shortFile = join(dir, "kort");
@@ -144,7 +144,7 @@ describe("B: klienten feiler lukket", () => {
   });
 
   it("runner nede (socket finnes ikke / ingen lytter): unreachable med feilkode, ingen hengende forespørsel", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jr-down-"));
+    const dir = await makeTempDir("jr-down-");
     const tokenFile = join(dir, "token");
     await writeFile(tokenFile, `${RUNNER_TOKEN}\n`, { mode: 0o600 });
     const runner = new HostJobSandboxRunner({ socketPath: join(dir, "ingen.sock"), tokenFile });

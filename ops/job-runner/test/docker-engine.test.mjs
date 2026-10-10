@@ -1,12 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createDockerExec } from "../lib/docker.mjs";
 import { buildJobContainerCreateArgs } from "../lib/spec.mjs";
 import { startFakeEngine } from "./support/fake-engine.mjs";
 import { createHarness, IMAGE_ID } from "./support/harness.mjs";
+import { makeTempDir } from "./support/tmp.mjs";
 
 /**
  * WP-C1 (D-32 port 2-8): runnerens HELE docker-kjede kjørt gjennom den EKTE Docker-CLI-en mot en FALSK Engine API (Unix-socket). Fake-docker-testene viser hva runneren SENDER til
@@ -31,7 +30,7 @@ afterEach(async () => {
 });
 
 async function realDocker(engine) {
-  const home = await mkdtemp(join(tmpdir(), "jr-dockerhome-"));
+  const home = await makeTempDir("jr-dockerhome-");
   const real = createDockerExec({
     dockerBin: DOCKER_BIN,
     baseEnv: { PATH: "/usr/bin:/bin:/usr/local/bin", HOME: home, DOCKER_CONFIG: home, DOCKER_HOST: `unix://${engine.socketPath}` }

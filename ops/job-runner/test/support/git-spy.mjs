@@ -1,6 +1,6 @@
-import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { makeTempDir } from "./tmp.mjs";
 
 /**
  * WP-C1 (test): en `git`-innpakning som runneren kjører i stedet for `/usr/bin/git` (via `runner.git_bin`, som er en vanlig konfignøkkel - ingen
@@ -16,7 +16,7 @@ const quote = (dir) => `'${dir.replace(/'/g, "'\\''")}'`;
 
 /** @returns {Promise<{ dir: string, gitBin: string, calls: () => Promise<Array<{ tokenHash: string | null, addressSpace: string, cwd: string, argv: string[], subcommand: string }>> }>} */
 export async function createGitSpy() {
-  const dir = await mkdtemp(join(tmpdir(), "jr-gitspy-"));
+  const dir = await makeTempDir("jr-gitspy-");
   const log = join(dir, "calls.log");
   const gitBin = join(dir, "git");
   await writeFile(log, "");

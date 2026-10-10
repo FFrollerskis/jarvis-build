@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,6 +7,7 @@ import { HostGit } from "../lib/git.mjs";
 import { SecretRegistry } from "../lib/log.mjs";
 import { createGitSpy } from "./support/git-spy.mjs";
 import { GIT_TOKEN, createHarness, gitSync } from "./support/harness.mjs";
+import { makeTempDir } from "./support/tmp.mjs";
 
 /**
  * WP-C1: publish = bundle laget INNE I containeren -> verifisert på verten i et ferskt bare-repo -> push med runnerens credential.
@@ -25,7 +26,7 @@ const refs = (dir) => gitSync(dir, ["for-each-ref", "--format=%(refname) %(objec
 
 /** Lager en bundle fra en scratch-klone av origin (agentens «ondsinnede» side), og får runneren til å motta den som svar på `git bundle create`. */
 async function craft(h, base, build) {
-  const scratch = await mkdtemp(join(tmpdir(), "jr-craft-"));
+  const scratch = await makeTempDir("jr-craft-");
   gitSync(scratch, ["clone", "--quiet", h.origins["owner/repo"].dir, "."]);
   const revArgs = await build(scratch);
   const r = spawnSync("git", ["bundle", "create", "-", ...revArgs], { cwd: scratch, env: { PATH: process.env["PATH"], HOME: scratch, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
@@ -86,7 +87,7 @@ describe("A: happy path og push-semantikk", () => {
     const h = await harness();
     const origin = h.origins["owner/repo"].dir;
     // en «annen» historie ligger allerede på jarvis/taken
-    const other = await mkdtemp(join(tmpdir(), "jr-other-"));
+    const other = await makeTempDir("jr-other-");
     gitSync(other, ["init", "--quiet", "--initial-branch=main", "."]);
     gitSync(other, ["commit", "--allow-empty", "-q", "-m", "annen"]);
     gitSync(other, ["push", "--quiet", origin, "HEAD:refs/heads/jarvis/taken"]);
@@ -570,7 +571,7 @@ describe("D: agenten planter hooks/config i /work - ingenting kjøres på VERTEN
     const env = { PATH: process.env["PATH"], HOME: h.root, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
     spawnSync("git", ["status"], { cwd: work, env });                    // core.fsmonitor
     spawnSync("git", ["checkout", "-q", "-b", "kontroll"], { cwd: work, env }); // hooks (post-checkout / reference-transaction)
-    const scratch = await mkdtemp(join(tmpdir(), "jr-ctl-"));
+    const scratch = await makeTempDir("jr-ctl-");
     gitSync(scratch, ["init", "--quiet", "."]);
     spawnSync("git", ["fetch", "--quiet", work, "HEAD"], { cwd: scratch, env });    // uploadpack.packObjectsHook ved henting FRA agent-katalogen
     const fired = (await readFile(marker, "utf8").catch(() => "")).split("\n").filter(Boolean);

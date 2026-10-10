@@ -1,11 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { startGitSmartHttpServer } from "../../../modules/tasks/test/support/git-smart-http-server.ts";
 import { RunnerError } from "../lib/errors.mjs";
 import { createHarness, gitSync, syntheticInstallationToken } from "./support/harness.mjs";
+import { makeTempDir } from "./support/tmp.mjs";
 
 /**
  * WP-C1: grensen mot git-credential-KILDEN. Runneren eier `GitCredentialSource { tokenFor(repoSlug) -> Promise<string> }` (strukturelt lik
@@ -139,7 +138,7 @@ describe("B: ende-til-ende med ekte git: det SISTE tokenet kilden gir brukes til
   beforeAll(async () => {
     server = await startGitSmartHttpServer([{ user: "x-access-token", pass: GOOD }]);
     server.createBareRepo("owner/repo.git");
-    const seed = await mkdtemp(join(tmpdir(), "jr-seed-src-"));
+    const seed = await makeTempDir("jr-seed-src-");
     gitSync(seed, ["init", "--quiet", "--initial-branch=main", "."]);
     gitSync(seed, ["commit", "--allow-empty", "-q", "-m", "c1"]);
     gitSync(seed, ["push", "--quiet", join(server.reposRoot, "owner/repo.git"), "main"]);

@@ -1,10 +1,10 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import http from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { makeTempDirSync, removeTemp } from "./tmp.mjs";
 
 /**
  * WP-C1: en ekte git smart-HTTP-server (over `git http-backend`) for tester av kortlevde tokens i forespørselen (`source: request`). Kjøres som EGEN
@@ -99,7 +99,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv[2] === "s
  * }>}
  */
 export function startTokenGitServer(options) {
-  const reposRoot = mkdtempSync(join(tmpdir(), "jr-tokgit-"));
+  const reposRoot = makeTempDirSync("jr-tokgit-");
   const accepted = options.accepted.map((a) => ({ user: "x-access-token", ...a }));
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "serve", JSON.stringify({ reposRoot, accepted, reflect: options.reflect ?? null })], {
@@ -127,15 +127,16 @@ export function startTokenGitServer(options) {
               };
               git(dir, ["init", "--bare", "--quiet", "--initial-branch=main", "."]);
               git(dir, ["config", "http.receivepack", "true"]);
-              const seed = mkdtempSync(join(tmpdir(), "jr-tokgit-seed-"));
+              const seed = makeTempDirSync("jr-tokgit-seed-");
               git(seed, ["init", "--quiet", "--initial-branch=main", "."]);
               writeFileSync(join(seed, "README.md"), "# seed\n");
               git(seed, ["add", "-A"]);
               git(seed, ["commit", "--quiet", "-m", "c1"]);
               git(seed, ["push", "--quiet", dir, "main"]);
+              void removeTemp(seed);
               return git(dir, ["rev-parse", "main"]);
             },
-            stop: () => child.kill()
+            stop: () => { child.kill(); void removeTemp(reposRoot); }
           });
         } else {
           events.push(msg);

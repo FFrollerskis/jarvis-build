@@ -1,9 +1,9 @@
-import { chmod, mkdtemp, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadConfigFile, validateConfig } from "../lib/config.mjs";
 import { ConfigError } from "../lib/errors.mjs";
+import { makeTempDir } from "./support/tmp.mjs";
 
 /**
  * WP-C1: konfigfilen EIES AV VERTSADMIN og kan ALDRI overstyres via API-et. Alt som ikke er eksplisitt tillatt avvises -
@@ -253,7 +253,7 @@ describe("D: egress-proxy-policy valideres fail-closed", () => {
 
 describe("E: loadConfigFile - filen må eies av root og ikke være skrivbar for andre", () => {
   const writeConfig = async (mode, body = { version: 1, runner: runner() }) => {
-    const dir = await mkdtemp(join(tmpdir(), "jr-cfg-"));
+    const dir = await makeTempDir("jr-cfg-");
     const file = join(dir, "job-runner.json");
     await writeFile(file, typeof body === "string" ? body : JSON.stringify(body), { mode });
     await chmod(file, mode);
