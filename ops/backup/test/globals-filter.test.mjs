@@ -1,5 +1,6 @@
+import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
-import { GLOBALS_MAX_BYTES, GlobalsRejectedError, sanitizeGlobals } from "../lib/globals-filter.mjs";
+import { GLOBALS_MAX_BYTES, GLOBALS_MAX_STATEMENT_CHARS, GlobalsRejectedError, ROLE_SET_ALLOWLIST, sanitizeGlobals } from "../lib/globals-filter.mjs";
 import { GLOBALS_DUMP_KEY, REAL_GLOBALS_DUMP } from "./helpers.mjs";
 
 /**
@@ -26,7 +27,9 @@ describe("WP-C2 review F2: globals-filteret slipper gjennom det pg_dumpall fakti
   it("et ekte uttrekk (PG 16): alle roller, medlemskap, innstillinger og kommentarer kommer gjennom; \\restrict fjernes; passord-hasher fjernes", () => {
     const r = sanitizeGlobals(REAL_DUMP);
     expect(r.passwordsStripped).toBe(1);
-    expect(r.statements).toBe(16);
+    expect(r.statements).toBe(14); // 16 setninger i uttrekket minus CREATE ROLE postgres og ALTER ROLE postgres (innloggingsrollen, runde 2 M1)
+    expect(r.skippedLoginRole).toBe(2);
+    expect(r.sql).not.toMatch(/ROLE postgres/);
     expect(r.sql).toContain('CREATE ROLE "Weird Role;x";');
     expect(r.sql).toContain('ALTER ROLE "Weird Role;x" WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB NOLOGIN NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 5 VALID UNTIL \'2030-01-01 00:00:00+00\';');
     expect(r.sql).toContain("ALTER ROLE jarvis_app WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB LOGIN NOREPLICATION NOBYPASSRLS;");
@@ -70,8 +73,8 @@ describe("WP-C2 review F2: globals-filteret slipper gjennom det pg_dumpall fakti
   });
 
   it("tomt innhold, bare kommentarer og bare \\restrict er gyldig og gir ingenting å kjøre", () => {
-    expect(sanitizeGlobals("")).toEqual({ sql: "", statements: 0, passwordsStripped: 0 });
-    expect(sanitizeGlobals("-- bare en kommentar\n\n")).toEqual({ sql: "", statements: 0, passwordsStripped: 0 });
+    expect(sanitizeGlobals("")).toEqual({ sql: "", statements: 0, passwordsStripped: 0, skippedLoginRole: 0 });
+    expect(sanitizeGlobals("-- bare en kommentar\n\n")).toEqual({ sql: "", statements: 0, passwordsStripped: 0, skippedLoginRole: 0 });
     expect(sanitizeGlobals(`\\restrict abc\n\\unrestrict abc\n`).sql).toBe("");
     expect(sanitizeGlobals("-- \\! touch /tmp/x\nCREATE ROLE a;").sql).toBe("CREATE ROLE a;\n"); // en backslash i en kommentar er død tekst og slippes ikke videre
   });
@@ -205,8 +208,38 @@ function stripQuoted(sql) {
   return out;
 }
 
-/** Uavhengig kontroll av utdata (bruker ikke filterets egen kode): intet utenfor sitat annet enn kjente setninger, aldri backslash. */
-function assertSafeOutput(sql) {
+/** Deler utdata i setninger ved `;` UTENFOR sitat (en streng kan inneholde både `;` og linjeskift). Uavhengig av filterets kode. */
+function splitOutsideQuotes(sql) {
+  const out = [];
+  let current = "";
+  let quote = null;
+  for (const ch of sql) {
+    if (quote !== null) {
+      current += ch;
+      if (ch === quote) quote = null; // doblede sitat (`''`) åpner og lukker rett etter hverandre
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+      current += ch;
+    } else if (ch === ";") {
+      if (current.trim() !== "") out.push(current.trim());
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  if (current.trim() !== "") out.push(current.trim());
+  return out;
+}
+
+/** Rollenavnet (bart ord → små bokstaver, sitert → innholdet) rett etter `prefix` i en setning, ellers null. Uavhengig av filterets kode. */
+function roleAfter(stmt, prefix) {
+  const m = new RegExp(`^${prefix} ("(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_]*)`, "i").exec(stmt);
+  if (m === null) return null;
+  return m[1].startsWith('"') ? m[1].slice(1, -1).replace(/""/g, '"') : m[1].toLowerCase();
+}
+
+/** Uavhengig kontroll av utdata (bruker ikke filterets egen kode): intet utenfor sitat annet enn kjente setninger, aldri backslash, aldri nøkkelord som rollenavn, aldri innloggingsrollen. */
+function assertSafeOutput(sql, loginRole = "postgres") {
   expect(sql).not.toContain("\\");
   // eslint-disable-next-line no-control-regex
   expect(sql).not.toMatch(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/);
@@ -214,6 +247,17 @@ function assertSafeOutput(sql) {
   expect(bare).not.toMatch(/[$:\\]|\/\*|--|[^\x20-\x7e\n]/);
   for (const stmt of bare.split(";").map((s) => s.trim()).filter(Boolean)) {
     expect(stmt, stmt).toMatch(/^(?:SET|CREATE ROLE|ALTER ROLE|GRANT|COMMENT ON ROLE|SELECT pg_catalog\.set_config)\b/i);
+  }
+  // Rolle-setninger i den ORIGINALE utdata (med sitater): hverken nøkkelord eller innloggingsrollen som subjekt, og ALTER ROLE … SET kun med allowlistede parametere
+  for (const stmt of splitOutsideQuotes(sql)) {
+    for (const prefix of ["CREATE ROLE", "ALTER ROLE", "COMMENT ON ROLE"]) {
+      const role = roleAfter(stmt, prefix);
+      if (role === null) continue;
+      expect(["current_user", "session_user", "current_role", "all", "public", "none"], stmt).not.toContain(role);
+      expect(role, stmt).not.toBe(loginRole.toLowerCase());
+    }
+    const set = /^ALTER ROLE ("(?:[^"]|"")*"|\S+)(?: IN DATABASE ("(?:[^"]|"")*"|\S+))? SET (\S+)/i.exec(stmt);
+    if (set !== null) expect(ROLE_SET_ALLOWLIST.has(set[3].toLowerCase()), stmt).toBe(true);
   }
 }
 
@@ -226,7 +270,10 @@ describe("WP-C2 review F2: mutasjons-fuzzing - uansett hva vi gjør med et ekte 
   };
   const PAYLOADS = [
     "\\! touch /tmp/pwned", "\\i /etc/passwd", "COPY (SELECT 1) TO PROGRAM 'x'", "DO $$ BEGIN END $$", ":foo", "/* x */", "E'\\x41'", "\\restrict a b", "SELECT 1", "DROP ROLE postgres",
-    "'; \\! touch /tmp/pwned; --", "\"; \\! touch /tmp/pwned; --", "$$", "\u0001", "\u0000", "--", "\\", ";", "'", '"'
+    "'; \\! touch /tmp/pwned; --", "\"; \\! touch /tmp/pwned; --", "$$", "\u0001", "\u0000", "--", "\\", ";", "'", '"',
+    // runde 2 (M1): reviewerens eksempler og beslektede former - skal nektes eller hoppes over, aldri nå psql
+    "ALTER ROLE postgres WITH NOLOGIN", "ALTER ROLE CURRENT_USER WITH NOSUPERUSER NOLOGIN", "ALTER ROLE ALL SET statement_timeout TO 1", "ALTER ROLE postgres SET session_preload_libraries TO '/tmp/x.so'",
+    "ALTER ROLE x IN DATABASE postgres SET dynamic_library_path TO '/tmp'", "GRANT a TO PUBLIC", "CREATE ROLE SESSION_USER", "COMMENT ON ROLE postgres IS 'x'", "ALTER ROLE \"postgres\" WITH SUPERUSER"
   ];
   const ALPHABET = ["\\", ";", "'", '"', "$", ":", "-", "/", "*", "\n", "\r", " ", "E", "e", "U", "&", "(", ")", "=", ",", ".", "x", "\u00e6", "\t"];
 
@@ -279,5 +326,209 @@ describe("WP-C2 review F2: mutasjons-fuzzing - uansett hva vi gjør med et ekte 
         if (!(err instanceof GlobalsRejectedError)) throw err;
       }
     }
+  });
+});
+
+/**
+ * WP-C2 re-review (runde 2), M1: filteret slapp `ALTER ROLE postgres WITH NOLOGIN` (låste ut verifisereren), `ALTER ROLE ALL/CURRENT_USER …` og
+ * `ALTER ROLE … SET session_preload_libraries` (lagres klyngeglobalt, kodelasting ved neste tilkobling) gjennom. Reviewerens eksempler er regresjonstester under.
+ */
+const RESERVED = ["CURRENT_USER", "SESSION_USER", "CURRENT_ROLE", "ALL", "PUBLIC", "NONE"];
+const ROLE_POSITIONS = [
+  "CREATE ROLE {K};", "ALTER ROLE {K} WITH NOLOGIN;", "ALTER ROLE {K} SET search_path TO x;", "ALTER ROLE {K} IN DATABASE d SET search_path TO x;",
+  "GRANT {K} TO b;", "GRANT a TO {K};", "GRANT a TO b GRANTED BY {K};", "GRANT a TO b WITH ADMIN OPTION GRANTED BY {K};", "COMMENT ON ROLE {K} IS 'x';"
+];
+
+describe("WP-C2 review runde 2 M1 (a): nøkkelord i rollenavn-posisjon nektes", () => {
+  it("CURRENT_USER/SESSION_USER/CURRENT_ROLE/ALL/PUBLIC/NONE nektes i HVER posisjon og i alle skrivemåter - med stabil `kind`", () => {
+    for (const keyword of RESERVED) {
+      for (const spelling of [keyword, keyword.toLowerCase(), keyword[0] + keyword.slice(1).toLowerCase()]) {
+        for (const template of ROLE_POSITIONS) {
+          const err = rejects(template.replace("{K}", spelling), "nøkkelord");
+          expect(err.kind, template).toBe("reserved_role_name");
+        }
+      }
+    }
+  });
+
+  it("reviewerens eksempler: `ALTER ROLE ALL SET …` og `ALTER ROLE CURRENT_USER WITH NOSUPERUSER NOLOGIN` nektes (hele filen), også innimellom gyldige setninger", () => {
+    rejects("ALTER ROLE ALL SET statement_timeout TO '1ms';", "nøkkelord");
+    rejects("ALTER ROLE ALL IN DATABASE postgres SET statement_timeout TO '1ms';", "nøkkelord");
+    rejects("ALTER ROLE CURRENT_USER WITH NOSUPERUSER NOLOGIN;", "nøkkelord");
+    rejects("CREATE ROLE a;\nALTER ROLE current_user WITH NOLOGIN;\nCREATE ROLE b;\n", "nøkkelord");
+  });
+
+  it("et SITERT navn er et ordinært rollenavn (pg_dumpall siterer et rolle som heter `all`), og bokstavene i et lengre ord som starter likt er greit", () => {
+    expect(sanitizeGlobals('CREATE ROLE "current_user";\nALTER ROLE "ALL" WITH LOGIN;\nGRANT "public" TO "none";\nCREATE ROLE all_roles;\nCREATE ROLE publicity;').statements).toBe(5);
+    expect(sanitizeGlobals('ALTER ROLE "all" SET search_path TO x;').sql).toBe('ALTER ROLE "all" SET search_path TO x;\n');
+  });
+});
+
+describe("WP-C2 review runde 2 M1 (b): setninger om innloggingsrollen sendes aldri til psql", () => {
+  const ABOUT = (role) => [
+    `CREATE ROLE ${role};`, `ALTER ROLE ${role} WITH SUPERUSER INHERIT LOGIN PASSWORD 'hash';`, `ALTER ROLE ${role} SET search_path TO a;`,
+    `ALTER ROLE ${role} IN DATABASE d SET statement_timeout TO 5;`, `COMMENT ON ROLE ${role} IS 'x';`
+  ].join("\n");
+
+  it("reviewerens eksempel: `ALTER ROLE postgres WITH NOLOGIN` slippes ikke videre (verifisereren ville vært låst ute), men filen nektes heller ikke", () => {
+    expect(sanitizeGlobals("ALTER ROLE postgres WITH NOLOGIN;")).toEqual({ sql: "", statements: 0, passwordsStripped: 0, skippedLoginRole: 1 });
+    // en ANNEN innloggingsrolle på scratch betyr at `postgres` ikke er verifisereren, og da er setningen en vanlig rolle-setning
+    expect(sanitizeGlobals("ALTER ROLE postgres WITH NOLOGIN;", { loginRole: "scratch_admin" }).sql).toBe("ALTER ROLE postgres WITH NOLOGIN;\n");
+    expect(sanitizeGlobals("ALTER ROLE scratch_admin WITH NOLOGIN;", { loginRole: "scratch_admin" })).toMatchObject({ sql: "", skippedLoginRole: 1 });
+  });
+
+  it("alle setningsformer og skrivemåter (bart ord i alle case, sitert, avkortet til 63 byte) hoppes over; andre roller kommer gjennom; passord telles som fjernet", () => {
+    for (const spelling of ["postgres", "POSTGRES", "Postgres", '"postgres"', '"POSTGRES"']) {
+      const r = sanitizeGlobals(`${ABOUT(spelling)}\nCREATE ROLE other;`);
+      expect(r.sql, spelling).toBe("CREATE ROLE other;\n");
+      expect(r.skippedLoginRole, spelling).toBe(5);
+      expect(r.passwordsStripped, spelling).toBe(1); // hashen i en hoppet over setning sendes heller aldri videre
+    }
+    const long = "a".repeat(63);
+    expect(sanitizeGlobals(`ALTER ROLE ${long}zzz WITH NOLOGIN;`, { loginRole: long })).toMatchObject({ sql: "", skippedLoginRole: 1 }); // Postgres avkorter 66 tegn til 63
+    // 31 × «é» = 62 byte; 32 × «é» = 64 byte avkortes av Postgres ved tegngrensen til 62 byte (ikke midt i et tegn) = innloggingsrollen
+    expect(sanitizeGlobals(`ALTER ROLE "${"é".repeat(32)}" WITH NOLOGIN;`, { loginRole: "é".repeat(31) }).skippedLoginRole).toBe(1);
+    expect(sanitizeGlobals(`ALTER ROLE "${"é".repeat(31)}x" WITH NOLOGIN;`, { loginRole: "é".repeat(31) }).skippedLoginRole).toBe(0); // 63 byte: ikke avkortet, et annet navn
+  });
+
+  it("setninger om andre roller rører ikke telleren; GRANT som nevner innloggingsrollen (GRANTED BY postgres) sendes videre - det endrer ikke innloggingen", () => {
+    const r = sanitizeGlobals("CREATE ROLE reader;\nGRANT reader TO postgres;\nGRANT pg_read_all_data TO reader WITH INHERIT TRUE GRANTED BY postgres;\nALTER ROLE postgres_backup WITH NOLOGIN;");
+    expect(r.skippedLoginRole).toBe(0);
+    expect(r.statements).toBe(4);
+  });
+
+  it("en ugyldig innloggingsrolle feiler lukket (ingenting slippes gjennom på gjetning)", () => {
+    for (const loginRole of ["", "a".repeat(64), "bad\nrole", "bad\u0000role", 5, null, ["postgres"], {}]) {
+      let error;
+      try {
+        sanitizeGlobals("CREATE ROLE a;", { loginRole });
+      } catch (err) {
+        error = err;
+      }
+      expect(error, JSON.stringify(loginRole)).toBeInstanceOf(GlobalsRejectedError);
+      expect(error.kind).toBe("login_role_invalid");
+    }
+    expect(sanitizeGlobals("CREATE ROLE a;", { loginRole: undefined }).statements).toBe(1); // utelatt = standard `postgres`
+  });
+});
+
+describe("WP-C2 review runde 2 M1 (c): `ALTER ROLE … SET` kun for ufarlige parametere", () => {
+  const DANGEROUS = [
+    "session_preload_libraries", "shared_preload_libraries", "local_preload_libraries", "dynamic_library_path", "session_replication_role", "role", "session_authorization",
+    "log_line_prefix", "archive_command", "allow_system_table_mods", "row_security", "default_tablespace", "temp_tablespaces", "plperl.on_plperl_init", "plpython3.x", "app.setting",
+    "search_path.x", "work_mem.y", "ikke_en_parameter", "SESSION_PRELOAD_LIBRARIES"
+  ];
+
+  it("reviewerens eksempel `ALTER ROLE postgres SET session_preload_libraries TO '/tmp/x.so'` nektes - også for ANDRE roller og med IN DATABASE", () => {
+    rejects("ALTER ROLE postgres SET session_preload_libraries TO '/tmp/x.so';", "allowlisten");
+    for (const guc of DANGEROUS) {
+      for (const text of [`ALTER ROLE someone SET ${guc} TO '/tmp/x.so';`, `ALTER ROLE someone IN DATABASE d SET ${guc} = 1;`, `ALTER ROLE postgres SET ${guc} TO x;`]) {
+        const err = rejects(text);
+        expect(err.kind, text).toBe("role_setting_not_allowed");
+      }
+    }
+  });
+
+  it("hver parameter på allowlisten slippes gjennom (case-insensitivt, med og uten IN DATABASE); selve allowlisten er kort og inneholder ingen farlige parametere", () => {
+    expect(ROLE_SET_ALLOWLIST.size).toBeLessThanOrEqual(20);
+    for (const dangerous of DANGEROUS) expect(ROLE_SET_ALLOWLIST.has(dangerous.toLowerCase())).toBe(false);
+    for (const guc of ROLE_SET_ALLOWLIST) {
+      expect(guc).toMatch(/^[a-z_]+$/); // ingen punktum-parametere
+      expect(sanitizeGlobals(`ALTER ROLE r SET ${guc} TO '1';`).sql).toBe(`ALTER ROLE r SET ${guc} TO '1';\n`);
+      expect(sanitizeGlobals(`ALTER ROLE r IN DATABASE d SET ${guc.toUpperCase()} = 1;`).statements).toBe(1);
+    }
+    for (const want of ["search_path", "statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout", "application_name", "log_statement", "timezone", "datestyle", "client_encoding", "default_transaction_read_only"]) {
+      expect(ROLE_SET_ALLOWLIST.has(want), want).toBe(true);
+    }
+  });
+
+  it("parameteren sjekkes FØR innloggingsrollen hoppes over: en farlig SET for innloggingsrollen nektes (ikke stille droppes)", () => {
+    expect(rejects("ALTER ROLE postgres SET dynamic_library_path TO '/tmp';").kind).toBe("role_setting_not_allowed");
+    expect(sanitizeGlobals("ALTER ROLE postgres SET search_path TO x;")).toMatchObject({ sql: "", skippedLoginRole: 1 });
+  });
+});
+
+/**
+ * WP-C2 re-review (runde 2), M2: `SET x = a,a,…` på 300 kB tok 31,7 s (kvadratisk: `trim()` per tegn og `endsWith` på en voksende streng); taket er 4 MiB. Fiendtlige 4 MiB-innganger
+ * skal nå avvises eller filtreres på under ett sekund (generøs grense: målt er titalls ms).
+ */
+describe("WP-C2 review runde 2 M2: fiendtlige innganger på opptil 4 MiB gir ingen DoS", () => {
+  const FAST_MS = 1000;
+  const MAX = GLOBALS_MAX_BYTES;
+  const fill = (unit, bytes = MAX - 64) => unit.repeat(Math.floor(bytes / unit.length));
+  const timed = (text) => {
+    const t0 = performance.now();
+    let outcome;
+    try {
+      outcome = sanitizeGlobals(text);
+    } catch (err) {
+      outcome = err;
+    }
+    return { ms: performance.now() - t0, outcome };
+  };
+
+  it("én setning som er nær 4 MiB (verdiliste, streng, sitert identifikator, doblede anførselstegn, mange literaler, ingen semikolon) avvises raskt med `statement_too_long`", () => {
+    const hostile = {
+      "SET x = a,a,…": `SET x = ${fill("a,")}a;`,
+      "SET x = a,a,… uten semikolon": `SET x = ${fill("a,")}a`,
+      "enorm streng": `COMMENT ON ROLE a IS '${fill("x")}';`,
+      "enorm sitert identifikator": `CREATE ROLE "${fill("x")}";`,
+      "doblede anførselstegn": `COMMENT ON ROLE a IS '${fill("''")}';`,
+      "mange literaler": `SET x = ${fill("'a' ")}'a';`,
+      "ett langt ord": `SET ${fill("a")} = 1;`,
+      "ALTER ROLE med mange valg": `ALTER ROLE a WITH ${fill("LOGIN ")}LOGIN;`,
+      "GRANT-valg": `GRANT a TO b WITH ${fill("ADMIN OPTION, ")}ADMIN OPTION;`
+    };
+    for (const [what, text] of Object.entries(hostile)) {
+      expect(Buffer.byteLength(text), what).toBeLessThanOrEqual(MAX);
+      const { ms, outcome } = timed(text);
+      expect(outcome, what).toBeInstanceOf(GlobalsRejectedError);
+      expect(outcome.kind, what).toBe("statement_too_long");
+      expect(ms, `${what}: ${Math.round(ms)} ms`).toBeLessThan(FAST_MS);
+    }
+  });
+
+  it("mange små setninger avvises underveis (`too_many_statements`), og lange kommentarer/mellomrom/linjeskift/tomme setninger tas lineært", () => {
+    const many = timed(fill("CREATE ROLE a;\n"));
+    expect(many.outcome.kind).toBe("too_many_statements");
+    expect(many.ms).toBeLessThan(FAST_MS);
+    const manySet = timed(fill("SET x=1;"));
+    expect(manySet.outcome.kind).toBe("too_many_statements");
+    expect(manySet.ms).toBeLessThan(FAST_MS);
+    const benign = {
+      "4 MiB kommentar": `-- ${fill("x")}\nCREATE ROLE a;\n`,
+      "4 MiB mellomrom": `${fill(" ")}CREATE ROLE a;`,
+      "4 MiB linjeskift": `${fill("\n")}CREATE ROLE a;`,
+      "4 MiB semikolon": fill(";"),
+      "4 MiB kommentarlinjer": fill("-- kommentar\n"),
+      "4 MiB CRLF": `${fill("\r\n")}CREATE ROLE a;`
+    };
+    for (const [what, text] of Object.entries(benign)) {
+      const { ms, outcome } = timed(text);
+      expect(outcome, what).not.toBeInstanceOf(Error);
+      expect(ms, `${what}: ${Math.round(ms)} ms`).toBeLessThan(FAST_MS);
+    }
+  });
+
+  it("taket per setning er nøyaktig `GLOBALS_MAX_STATEMENT_CHARS`: en setning på akkurat taket tas, én tegn over nektes - og en ekte setning er langt under", () => {
+    const stmt = (contentLength) => `SET x = '${"a".repeat(contentLength)}';`; // setningen er 10 tegn pluss innholdet (SET x = ' … ')
+    expect(GLOBALS_MAX_STATEMENT_CHARS).toBe(8192);
+    expect(sanitizeGlobals(stmt(GLOBALS_MAX_STATEMENT_CHARS - 10)).statements).toBe(1);
+    const over = rejects(stmt(GLOBALS_MAX_STATEMENT_CHARS - 9));
+    expect(over.kind).toBe("statement_too_long");
+    expect(over.line).toBe(1);
+    expect(sanitizeGlobals(`COMMENT ON ROLE a IS '${"x".repeat(4000)}';`).statements).toBe(1); // en lang, men ekte kommentar
+    // taket gjelder PER setning: mange setninger som til sammen er langt over taket er greit
+    expect(sanitizeGlobals(`${"CREATE ROLE some_role_name;\n".repeat(2000)}`).statements).toBe(2000);
+    // linjenummeret peker på setningens start
+    expect(rejects(`CREATE ROLE a;\n\nSET x = ${"a,".repeat(GLOBALS_MAX_STATEMENT_CHARS)}a;`).line).toBe(3);
+  });
+
+  it("ytelse er lineær også for en ekte, stor fil (20 000 roller med kommentarer) - ca. 2 MB tas på godt under ett sekund", () => {
+    const lines = [];
+    for (let i = 0; i < 6000; i++) lines.push(`CREATE ROLE role_${i};`, `ALTER ROLE role_${i} WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB LOGIN NOREPLICATION NOBYPASSRLS PASSWORD 'SCRAM-SHA-256$4096:salt$key:key';`, `COMMENT ON ROLE role_${i} IS 'rolle nummer ${i}';`);
+    const { ms, outcome } = timed(`${lines.join("\n")}\n`);
+    expect(outcome.statements).toBe(18_000);
+    expect(ms).toBeLessThan(FAST_MS);
   });
 });

@@ -109,6 +109,7 @@ const EFFECT_OVERRIDES: Record<string, Effect> = {
   [k("executive", "get_self_diagnosis")]: "read",
   [k("executive", "get_slo_report")]: "read",
   [k("executive", "get_evolution_report")]: "read",
+  [k("executive", "get_ai_mesh_status")]: "read",
   [k("executive", "get_control_center")]: "read",
   [k("executive", "get_value_report")]: "read",
   // WP-E1 (UA-5): driftsstatus (åpne hendelser, skymål, produsenthelse) - ren lesing.

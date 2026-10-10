@@ -5,6 +5,7 @@ export * from "./transport.ts";
 export * from "./self-model/index.ts";
 export * from "./slo/index.ts";
 export * from "./evolution/index.ts";
+export * from "./ai-mesh/index.ts";
 export * from "./control-center/index.ts";
 export * from "./value/index.ts";
 export * from "./infra/index.ts";

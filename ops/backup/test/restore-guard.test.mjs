@@ -98,12 +98,12 @@ describe("WP-C2 review F1: scratch-serveren må BEVISE at den er tom og kastbar 
 
   it("en fersk klynge (postgres + template0/1) og rester etter våre egne avbrutte kjøringer er greit; kun lesing, ingenting skrives", async () => {
     const fresh = fakeScratchRunner();
-    expect(await checkScratchServer(fresh.runner, manifest())).toEqual({ ok: true });
+    expect(await checkScratchServer(fresh.runner, manifest())).toEqual({ ok: true, systemIdentifier: "absent" });
     expect(fresh.writes()).toEqual([]);
     expect(fresh.calls().map((c) => c.database)).toEqual(["postgres", "postgres"]);
 
     const leftovers = fakeScratchRunner({ databases: [...PRODUCTION_DBS.slice(0, 3), "restore_verify_jarvis_20261008t020000z", "restore_verify_infisical_20261008t020000z"] });
-    expect(await checkScratchServer(leftovers.runner, manifest())).toEqual({ ok: true });
+    expect(await checkScratchServer(leftovers.runner, manifest())).toMatchObject({ ok: true });
   });
 
   it("en server med produksjonsdatabasene nektes - uansett hvordan endepunktet staves (poenget med F1)", async () => {
@@ -134,7 +134,7 @@ describe("WP-C2 review F1: scratch-serveren må BEVISE at den er tom og kastbar 
     expect((await checkScratchServer(clash.runner, m)).ok).toBe(false);
     const sys = manifest();
     sys.databases[0].database = "postgres";
-    expect(await checkScratchServer(fakeScratchRunner().runner, sys)).toEqual({ ok: true });
+    expect(await checkScratchServer(fakeScratchRunner().runner, sys)).toMatchObject({ ok: true });
   });
 
   it("tabeller i postgres-databasen (noen bruker den til data) gjør serveren ikke-kastbar", async () => {
@@ -156,6 +156,91 @@ describe("WP-C2 review F1: scratch-serveren må BEVISE at den er tom og kastbar 
   it("tillatelsesmønsteret er smalt: kun systemdatabasene og små bokstaver/tall/understrek etter restore_verify_", () => {
     for (const ok of ["postgres", "template0", "template1", "restore_verify_jarvis_20261009t020000z", "restore_verify_a1_b2"]) expect(SCRATCH_ALLOWED_DB.test(ok), ok).toBe(true);
     for (const bad of ["jarvis", "template2", "Postgres", "restore_verify_", "restore_verify_A", "xrestore_verify_a", "restore_verify_a b", "postgres2", "postgres\n", ""]) expect(SCRATCH_ALLOWED_DB.test(bad), bad).toBe(false);
+  });
+});
+
+const manifest0 = () => makeSet(tempDir(), WHEN).manifest;
+
+describe("WP-C2 review runde 2 L1: system_identifier (alias-sikkert «samme klynge»-bevis) og strengere tom-sjekk", () => {
+  const SOURCE_ID = "7234567890123456789";
+  const withId = (id = SOURCE_ID) => makeSet(tempDir(), WHEN, { systemIdentifier: id }).manifest;
+
+  it("manifestet kan bære kildens system_identifier; ugyldig form avvises uten å sitere verdien", () => {
+    expect(manifestProblems(withId())).toEqual([]);
+    expect(manifestProblems(withId("-7234567890123456789"))).toEqual([]); // bigint kan være negativt
+    for (const bad of ["", "abc", "1; DROP DATABASE postgres", "12 34", "1".repeat(21), 72345, null, {}, ["1"], "EVIL-SENTINEL"]) {
+      const m = makeSet(tempDir(), WHEN).manifest;
+      m.source.system_identifier = bad;
+      expect(manifestProblems(m), String(bad)).toEqual(["source.system_identifier er ugyldig"]);
+    }
+    const m = makeSet(tempDir(), WHEN).manifest;
+    m.source.system_identifier = "EVIL-SENTINEL";
+    expect(manifestProblems(m).join("\n")).not.toContain("SENTINEL");
+  });
+
+  it("SAMME system_identifier nektes - selv når scratch-serveren ser helt tom ut (de eneste kallene er identifikator-spørringen; ingenting skrives)", async () => {
+    const same = fakeScratchRunner({ systemIdentifier: SOURCE_ID }); // fersk, tom klynge med kildens identifikator = kilden under et annet navn
+    const res = await checkScratchServer(same.runner, withId());
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain("SAMME Postgres-klynge");
+    expect(res.error).toContain("ikke en tom, kastbar instans");
+    expect(same.calls().map((c) => c.sql)).toEqual(["SELECT system_identifier FROM pg_control_system()"]);
+    expect(same.writes()).toEqual([]);
+  });
+
+  it("en ANNEN identifikator slipper gjennom til de øvrige kontrollene (som fortsatt gjelder); `checked` rapporteres", async () => {
+    const other = fakeScratchRunner({ systemIdentifier: "5000000000000000001" });
+    expect(await checkScratchServer(other.runner, withId())).toEqual({ ok: true, systemIdentifier: "checked" });
+    expect(other.calls()).toHaveLength(3); // identifikator, databaseliste, objekt-oversikt
+    const prod = fakeScratchRunner({ systemIdentifier: "5000000000000000001", databases: PRODUCTION_DBS });
+    expect(await checkScratchServer(prod.runner, withId())).toMatchObject({ ok: false, error: expect.stringContaining("3 database(r)") }); // tom-sjekken er andre lag
+  });
+
+  it("FAIL-CLOSED: kan identifikatoren ikke leses (feil, tom eller ugyldig utdata), er svaret nei når manifestet har en", async () => {
+    const down = fakeScratchRunner({ systemIdentifier: null });
+    expect(await checkScratchServer(down.runner, withId())).toMatchObject({ ok: false, error: expect.stringContaining("kunne ikke lese system_identifier") });
+    for (const garbage of ["", "ikke-et-tall", "1; select 1"]) {
+      const odd = fakeScratchRunner({ systemIdentifier: garbage });
+      expect(await checkScratchServer(odd.runner, withId()), garbage).toMatchObject({ ok: false, error: expect.stringContaining("ingen gyldig system_identifier") });
+    }
+    // uten felt i manifestet (eldre sett) spørres identifikatoren aldri - tom-sjekken er alene
+    const old = fakeScratchRunner({ systemIdentifier: null });
+    expect(await checkScratchServer(old.runner, makeSet(tempDir(), WHEN).manifest)).toEqual({ ok: true, systemIdentifier: "absent" });
+    expect(old.calls().some((c) => /pg_control_system/.test(c.sql ?? ""))).toBe(false);
+  });
+
+  it("runRestoreVerify logger at eldre sett uten system_identifier kun har tom-sjekken, og nekter et sett med SAMME identifikator på trinn scratch_guard uten ett skrivekall", async () => {
+    const logs = [];
+    const oldSet = makeSet(tempDir(), WHEN);
+    const scratch = fakeScratchRunner();
+    await runRestoreVerify({ setDir: oldSet.dir, identityFile: NO_IDENTITY, scratchRunner: scratch.runner, now: WHEN, log: (m) => logs.push(m) });
+    expect(logs.some((m) => m.includes("ingen system_identifier i manifestet"))).toBe(true);
+
+    const set = makeSet(tempDir(), WHEN, { systemIdentifier: SOURCE_ID });
+    const same = fakeScratchRunner({ systemIdentifier: SOURCE_ID });
+    const report = await runRestoreVerify({ setDir: set.dir, identityFile: NO_IDENTITY, scratchRunner: same.runner, now: WHEN });
+    expect(report).toMatchObject({ ok: false, stage: "scratch_guard", set: set.name });
+    expect(report.error).toContain("samme system_identifier");
+    expect(same.writes()).toEqual([]);
+  });
+
+  it("databasenavn sammenlignes UTEN normalisering: « postgres» (med mellomrom) er en fremmed database, ikke systemdatabasen (tidligere trimmet til `postgres` og passerte)", async () => {
+    // midt i listen, så den ikke trimmes bort av psqlOnce sin trimming av hele utdata
+    const sneaky = fakeScratchRunner({ databases: ["postgres", " postgres", "template0", "template1"] });
+    const res = await checkScratchServer(sneaky.runner, withId("1"));
+    expect(res).toMatchObject({ ok: false, error: expect.stringContaining("1 database(r)") });
+    const trailing = fakeScratchRunner({ databases: ["postgres", "postgres ", "template0", "template1"] });
+    expect((await checkScratchServer(trailing.runner, manifest0())).ok).toBe(false);
+    // og spørringen ber serveren sitere navnene (quote_ident), så en ekte server aldri leverer et navn med mellomrom uten sitat
+    expect(sneaky.calls().find((c) => /FROM pg_database/.test(c.sql ?? "")).sql).toContain("quote_ident(datname)");
+  });
+
+  it("tom-sjekken teller også VISNINGER, materialiserte visninger, fremmede tabeller og sekvenser i postgres-databasen (ikke bare tabeller)", async () => {
+    const used = fakeScratchRunner({ tables: { postgres: ["public.v"] } });
+    expect(await checkScratchServer(used.runner, manifest0())).toMatchObject({ ok: false, error: expect.stringContaining("1 tabell(er)/visning(er)/sekvens(er)") });
+    const sql = used.calls().find((c) => /FROM pg_class/.test(c.sql ?? "")).sql;
+    for (const kind of ["'r'", "'p'", "'v'", "'m'", "'f'", "'S'"]) expect(sql, kind).toContain(kind);
+    expect(sql).toContain("NOT IN ('pg_catalog','information_schema')");
   });
 });
 
@@ -219,7 +304,7 @@ describe("WP-C2 review F1: runRestoreVerify skriver ALDRI til en server som ikke
     const report = await verify(set, scratch);
     expect(report).toMatchObject({ ok: false, stage: "restore" });
     const calls = scratch.calls();
-    expect(calls.slice(0, 2).map((c) => c.sql?.slice(0, 20))).toEqual(["SELECT datname FROM ", "SELECT quote_ident(n"]);
+    expect(calls.slice(0, 2).map((c) => c.sql?.slice(0, 20))).toEqual(["SELECT quote_ident(d", "SELECT quote_ident(n"]);
     expect(calls.slice(0, 2).every((c) => c.stdin === "")).toBe(true);
   });
 });

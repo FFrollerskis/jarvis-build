@@ -118,7 +118,9 @@ describe("Q-51 D: skyturen sendes uten de enkelte følsomme meldingene (og paren
     expect(local.sensitivity).toBe("SECRET_RESTRICTED");
     expect(local.request.model).toBeUndefined();
     expect(messagesOf(local)).toEqual([CLEAN_Q.content, CLEAN_A.content, FIN_Q.content, FIN_A.content, PR_ASK]);
-    expect(result.reply).toBe("svar");
+    // WP-D4 (JARVIS-033): en reserve svarte - svaret sier det (merknad bak svaret), selve svaret er uendret.
+    expect(result.reply.split("\n\n(Reservemodell brukt:")[0]).toBe("svar");
+    expect(result.reply).toContain("(Reservemodell brukt:");
   });
 
   it("dagstaket nådd → lokalt med hele historikken og kun dagstak-merknaden (skyvarianten brukes ikke)", async () => {
@@ -534,7 +536,9 @@ describe("WP-A-gjennomgangen: lokale reserver etter skyvarianten (mutasjonsfunn 
     expect(fallback.providerPreference).toBeUndefined();
     expect(fallback.request.model).toBeUndefined();
     expect(messagesOf(fallback)).toEqual([CLEAN_Q.content, CLEAN_A.content, FIN_Q.content, FIN_A.content, PR_ASK]);
-    expect(result.reply).toBe("svar");
+    // WP-D4 (JARVIS-033): en reserve svarte - svaret sier det (merknad bak svaret), selve svaret er uendret.
+    expect(result.reply.split("\n\n(Reservemodell brukt:")[0]).toBe("svar");
+    expect(result.reply).toContain("(Reservemodell brukt:");
   });
 
   it("lokal reserve etter at skyen feilet bruker heller aldri varianten som kilde til merknaden", async () => {

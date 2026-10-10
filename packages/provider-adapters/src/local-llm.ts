@@ -71,10 +71,26 @@ export function normalizeLocalLlmBaseUrl(baseUrl: string): string {
  * eieren (chat/tale) eller bli lagret som svar. Fjerner lukkede blokker og en åpen blokk uten avslutning (avkuttet på `max_tokens`).
  */
 export function stripThinking(text: string): string {
-  return text
-    .replace(/<think>[\s\S]*?<\/think>/gi, "")
-    .replace(/<think>[\s\S]*$/i, "")
-    .trim();
+  // WP-D4: LINEÆR skanning, ikke `/<think>[\s\S]*?<\/think>/gi` + `/<think>[\s\S]*$/i`: mange uavsluttede `<think>` i en lang respons ga kvadratisk tid (140 000 tegn ≈ 1,4 s, synkront i hendelsesløkken), og Hermes-parseren
+  // leser ubetrodd modelltekst gjennom denne. NØYAKTIG samme to trinn som før (låst mot den gamle implementasjonen av en differensialtest, `wpd4-linear-parsers.test.ts`):
+  //  1. lukkede blokker fjernes (en ny `<think>` inni en åpen blokk er en del av den; en løs `</think>` utenfor en blokk står som tekst; en åpning uten avslutning røres ikke);
+  //  2. fra første gjenværende `<think>` forkastes alt til slutten (åpen blokk avkuttet på `max_tokens`). Trinn 2 ser også en `<think>` som først DANNES når trinn 1 fjerner en blokk midt i en tagg - bevisst like konservativt som før.
+  let visible = "";
+  let from = 0;
+  let openAt = -1;
+  for (const tag of text.matchAll(/<(\/?)think>/gi)) {
+    const index = tag.index ?? 0;
+    if (openAt === -1) {
+      if (tag[1] === "") openAt = index;
+    } else if (tag[1] === "/") {
+      visible += text.slice(from, openAt);
+      from = index + tag[0].length;
+      openAt = -1;
+    }
+  }
+  visible += text.slice(from);
+  const cut = visible.search(/<think>/i);
+  return (cut === -1 ? visible : visible.slice(0, cut)).trim();
 }
 
 /**

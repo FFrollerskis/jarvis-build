@@ -71,6 +71,7 @@ export const CHAT_READ_TIER: ReadonlyArray<{ readonly tool_id: string; readonly 
   { tool_id: "executive", action: "get_self_diagnosis" },
   { tool_id: "executive", action: "get_slo_report" },
   { tool_id: "executive", action: "get_evolution_report" },
+  { tool_id: "executive", action: "get_ai_mesh_status" },
   // WP-C4: Value Center - bruk per verdiløkke (kun tall, aldri innhold), og status for de sovende løkkene V3/V5 (kun beredskap/forslag, aldri utførelse).
   { tool_id: "executive", action: "get_value_report" },
   // WP-E1 (UA-5, JARVIS-068): driftsstatus - åpne hendelser (fase/alvorlighet/sannhetsmerking), skymål (helse + siste journalførte endring) og produsenthelse. Kun lesing, ingen hemmeligheter eller hendelsestekst.

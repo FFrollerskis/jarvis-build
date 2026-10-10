@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -6,7 +6,7 @@ import { ConfigError } from "../lib/env.mjs";
 import { OffsiteError, prepareSetForOffsite } from "../lib/offsite.mjs";
 import { loadScheduleConfig } from "../lib/config.mjs";
 import {
-  EXIT, ScheduleError, backupDecision, buildDefaultDeps, dropFutureTimestamps, findFutureSets, findHollowSets, findOrphanSets, findStaleTempDirs, listCompleteSets, offsiteDecision, retryDelayMs,
+  EXIT, FETCH_FALLBACK_MAX_BYTES, ScheduleError, backupDecision, buildDefaultDeps, dropFutureTimestamps, findFutureSets, findHollowSets, findOrphanSets, findStaleTempDirs, listCompleteSets, offsiteDecision, retryDelayMs,
   runTick, setFileProblems, setNameMs, setsToPrune, verifyDecision
 } from "../lib/schedule.mjs";
 import { emptyStatus, readStatusFile } from "../lib/state.mjs";
@@ -19,7 +19,7 @@ const D = 24 * H;
 const PASSWORD = "test-admin-pw-12345";
 
 function fakeSink({ remote = [] } = {}) {
-  const state = { remote: new Set(remote), pushes: [], fetches: [], failWith: null, listFails: false };
+  const state = { remote: new Set(remote), pushes: [], fetches: [], fetchOptions: [], failWith: null, listFails: false };
   return {
     state, adapter: "local", label: "local:fake",
     list: async () => { if (state.listFails) throw new OffsiteError("offsite_failed", "list feilet"); return [...state.remote].sort(); },
@@ -30,8 +30,9 @@ function fakeSink({ remote = [] } = {}) {
       return { verification: "sha256", files: prepared.files.length, bytes: prepared.bytes };
     },
     verify: async (prepared) => ({ verification: "sha256", files: prepared.files.length, bytes: prepared.bytes }),
-    fetch: async (name, dest) => {
+    fetch: async (name, dest, options) => {
       state.fetches.push(name);
+      state.fetchOptions.push(options);
       mkdirSync(dest, { recursive: true });
       writeFileSync(join(dest, "jarvis.dump.age"), "x");
       return ["jarvis.dump.age"];
@@ -84,6 +85,19 @@ function harness({ flags = {}, env = {}, sink = null, identity = false, noHeartb
     tick: (extra = {}) => runTick(config, h.deps(extra), baseEnv)
   };
   return h;
+}
+
+/**
+ * Et system som HAR kjørt før: en gyldig statusfil fra forrige tikk. Uten den er det en første kjøring (eller en nullstilt status), og retensjonen pauses bevisst til et bevis er registrert
+ * (review runde 2, M4) - tester av ordinær sletting må derfor starte fra en kjørt tilstand.
+ */
+function ranBefore(h, mutate = () => undefined) {
+  const st = emptyStatus();
+  st.created_at = new Date(T0.getTime() - 30 * D).toISOString();
+  st.last_tick_at = new Date(T0.getTime() - 15 * 60_000).toISOString();
+  mutate(st);
+  mkdirSync(dirname(h.config.statusFile), { recursive: true });
+  writeFileSync(h.config.statusFile, JSON.stringify(st));
 }
 
 describe("WP-C2 forfalt-beslutninger (rene funksjoner)", () => {
@@ -333,6 +347,7 @@ describe("WP-C2 tick: planlagt backup (falsk backup/klokke, ekte filsystem)", ()
 
   it("retensjon: gamle sett fjernes, de 7 nyeste beholdes uansett alder; hoppes over når kjeden er stille (gamle sett er alt vi har)", async () => {
     const h = harness();
+    ranBefore(h);
     for (const d of [40, 35, 10]) makeSet(h.out, new Date(T0.getTime() - d * D));
     for (const d of [8, 7, 6, 5, 4, 3, 2]) makeSet(h.out, new Date(T0.getTime() - d * D));
     makeSet(h.out, hoursAgo(T0, 1));
@@ -342,6 +357,7 @@ describe("WP-C2 tick: planlagt backup (falsk backup/klokke, ekte filsystem)", ()
     expect(h.status().retention).toMatchObject({ last_pruned_count: 2, last_skipped_reason: null });
 
     const stale = harness();
+    ranBefore(stale);
     for (const d of [60, 45]) makeSet(stale.out, new Date(T0.getTime() - d * D));
     stale.backupError = new ScheduleError("backup_failed", "nede");
     await stale.tick();
@@ -349,10 +365,11 @@ describe("WP-C2 tick: planlagt backup (falsk backup/klokke, ekte filsystem)", ()
     expect(stale.status().retention.last_skipped_reason).toBe("pipeline_stale");
   });
 
-  it("foreldreløse settkataloger (uten manifest, > 12 t) ryddes; ferske, ferdige og korrupte-manifest-sett røres ikke", async () => {
+  it("foreldreløse settkataloger: BARE helt tomme kataloger eldre enn 12 t ryddes; ferske, ferdige, korrupte-manifest-sett og kataloger med innhold røres ikke (innholdet rapporteres hver gang)", async () => {
     const h = harness();
+    ranBefore(h);
     makeSet(h.out, hoursAgo(T0, 1));
-    const mk = (name, ageH, files = { "x.age": "x" }) => {
+    const mk = (name, ageH, files = {}) => {
       const dir = join(h.out, name);
       mkdirSync(dir);
       for (const [f, c] of Object.entries(files)) writeFileSync(join(dir, f), c);
@@ -360,15 +377,21 @@ describe("WP-C2 tick: planlagt backup (falsk backup/klokke, ekte filsystem)", ()
       utimesSync(dir, t, t);
       return dir;
     };
-    const old = mk("jarvis-backup-20261001T000000Z", 30);
+    const old = mk("jarvis-backup-20261001T000000Z", 30); // tom og gammel: eneste som ryddes
+    const withData = mk("jarvis-backup-20260930T000000Z", 30, { "x.age": "x" }); // avkortet dump uten manifest: kan være det eneste som er igjen
     const fresh = mk("jarvis-backup-20261009T013000Z", 0.5);
     const corrupt = mk("jarvis-backup-20260901T000000Z", 90, { "manifest.json": "{ikke json" });
     expect(findOrphanSets(h.out, T0.getTime())).toEqual([old]);
     await h.tick();
     expect(existsSync(old)).toBe(false);
-    expect(existsSync(fresh)).toBe(true);
-    expect(existsSync(corrupt)).toBe(true);
+    for (const kept of [withData, fresh, corrupt]) expect(existsSync(kept), kept).toBe(true);
     expect(h.logs).toContainEqual(expect.objectContaining({ level: "warn", event: "orphan_set_removed", set: "jarvis-backup-20261001T000000Z" }));
+    expect(h.logs).toContainEqual(expect.objectContaining({ level: "warn", event: "orphan_set_has_data", set: "jarvis-backup-20260930T000000Z", entries: 1 }));
+    h.logs.length = 0;
+    h.advance(15 * 60_000);
+    await h.tick();
+    expect(existsSync(withData)).toBe(true); // og rapporteres på nytt neste tikk
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "orphan_set_has_data", set: "jarvis-backup-20260930T000000Z" }));
   });
 
   it("en heartbeat som feiler påvirker aldri backupen: exit 0, men statusen sier ærlig at pinget feilet", async () => {
@@ -604,6 +627,23 @@ describe("WP-C2 tick: restore-verifisering (scratch, uten å røre produksjon)",
     expect(h.verifyCalls[0].existedAtCall).toBe(true);
     expect(readdirSync(h.out).filter((n) => n.startsWith(".verify-tmp-"))).toEqual([]);
     expect(h.status().restore_verify).toMatchObject({ state: "ok", source: "offsite", last_set: "jarvis-backup-20261008T020000Z", fetch_duration_s: 0 });
+  });
+
+  it("review runde 2 L2: henting fra off-site får et tak = 80 % av ledig plass der arbeidsmappen ligger; kan ledig plass ikke leses (feil/ugyldig), gjelder et absolutt tak", async () => {
+    const run = async (freeBytes) => {
+      const sink = fakeSink({ remote: ["jarvis-backup-20261008T020000Z"] });
+      const h = harness({ identity: true, sink, env: { JARVIS_BACKUP_OFFSITE_LOCAL_DIR: "/mnt/usb/jarvis" }, flags: { roles: "verify", "verify-source": "offsite" } });
+      await h.tick({ freeBytes });
+      return sink.state.fetchOptions;
+    };
+    expect(await run(async () => 10_000)).toEqual([{ maxBytes: 8000 }]);
+    expect(await run(async () => 0)).toEqual([{ maxBytes: 0 }]); // full disk: ingenting kan hentes (fail-closed)
+    for (const unreadable of [async () => { throw new Error("statfs: ikke støttet"); }, async () => Number.NaN, async () => -5, async () => "mye"]) {
+      expect(await run(unreadable)).toEqual([{ maxBytes: FETCH_FALLBACK_MAX_BYTES }]);
+    }
+    // standard-implementasjonen leser ekte ledig plass (statfs) på filsystemet der stien ligger
+    const real = await harness().deps().freeBytes(tempDir());
+    expect(Number.isFinite(real) && real > 0).toBe(true);
   });
 
   it("en ekstern verifiserers kvittering (PC med privat nøkkel) flettes inn på NAS-en og vises som `external_verifier`", async () => {
@@ -955,6 +995,7 @@ describe("WP-C2 tick (review F7): retensjon beskytter siste verifiserte og off-s
 
   it("retensjonsdøgn satt til 1 beholder likevel de 7 nyeste (en feilkonfigurasjon eller klokkefeil tømmer ikke mappen)", async () => {
     const h = harness({ env: { JARVIS_BACKUP_RETAIN_DAYS: "1" } });
+    ranBefore(h);
     const sets = manySets(h, 20);
     for (let i = 0; i < 8; i++) {
       await h.tick();
@@ -1013,6 +1054,7 @@ describe("WP-C2 tick (review F7): retensjon beskytter siste verifiserte og off-s
     }
     // motstykket: med backup-rollen slettes de gamle
     const h = harness();
+    ranBefore(h);
     for (const d of [90, 60]) makeSet(h.out, new Date(T0.getTime() - d * D));
     manySets(h, 10);
     await h.tick();
@@ -1237,5 +1279,315 @@ describe("WP-C2 findOrphanSets / listCompleteSets", () => {
     writeFileSync(join(out, "jarvis-backup-20250101T000000Z", "manifest.json"), "{kaputt");
     expect(listCompleteSets(out)).toHaveLength(1);
     expect(listCompleteSets(join(out, "finnes-ikke"))).toEqual([]);
+  });
+});
+
+/**
+ * Review runde 2 (M3/M4). Felles hjelpere: `n` daglige sett (det nyeste 2 t gammelt), en gammel TOM foreldreløs settkatalog og skriving av en (u)gyldig statusfil.
+ */
+const dailySets = (h, n) => {
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(makeSet(h.out, new Date(T0.getTime() - (2 / 24 + i) * D)));
+  return out; // [0] = nyeste
+};
+const emptyOrphan = (h, name = "jarvis-backup-20260101T000000Z", ageH = 30) => {
+  const dir = join(h.out, name);
+  mkdirSync(dir);
+  const t = new Date(T0.getTime() - ageH * H);
+  utimesSync(dir, t, t);
+  return dir;
+};
+const listNames = (h) => listCompleteSets(h.out).map((x) => x.name);
+
+describe("WP-C2 review runde 2 M3: foreldreløs-rydding kjører ETTER alle pausene, med felles tak, og tar aldri beskyttede eller uverifiserbare kataloger", () => {
+  it("kontroll: en gammel, TOM foreldreløs katalog ryddes når ingenting er pauset - og tikkresultatet sier det", async () => {
+    const h = harness();
+    ranBefore(h);
+    dailySets(h, 10);
+    const orphan = emptyOrphan(h);
+    const r = await h.tick();
+    expect(existsSync(orphan)).toBe(false);
+    expect(r.retention).toEqual({ paused: null, pruned: 0, orphans_removed: 1 });
+  });
+
+  const pausedScenarios = [
+    ["pipeline_stale (backup feiler, nyeste sett er gammelt)", async () => {
+      const h = harness();
+      ranBefore(h, (st) => { st.backup.retry_after = new Date(T0.getTime() + 3 * H).toISOString(); });
+      for (const d of [6, 5, 4, 3]) makeSet(h.out, new Date(T0.getTime() - d * D));
+      return { h, reason: "pipeline_stale" };
+    }],
+    ["status_unusable (første kjøring uten status)", async () => {
+      const h = harness();
+      dailySets(h, 10);
+      return { h, reason: "status_unusable" };
+    }],
+    ["time_gap_hold", async () => {
+      const h = harness();
+      ranBefore(h, (st) => { st.retention.hold_until = new Date(T0.getTime() + 5 * H).toISOString(); });
+      dailySets(h, 10);
+      return { h, reason: "time_gap_hold" };
+    }],
+    ["offsite_failing", async () => {
+      const h = harness({ sink: fakeSink(), flags: { roles: "backup,offsite" } });
+      ranBefore(h, (st) => { Object.assign(st.offsite, { state: "failed", adapter: "local", consecutive_failures: 3, retry_after: new Date(T0.getTime() + 3 * H).toISOString(), last_error_code: "offsite_failed" }); });
+      dailySets(h, 10);
+      return { h, reason: "offsite_failing" };
+    }],
+    ["verify_failing", async () => {
+      const h = harness({ identity: true });
+      ranBefore(h, (st) => { Object.assign(st.restore_verify, { state: "failed", last_attempt_at: new Date(T0.getTime() - H).toISOString(), retry_after: new Date(T0.getTime() + 5 * H).toISOString(), last_error_code: "verify_mismatch", consecutive_failures: 2 }); });
+      dailySets(h, 10);
+      return { h, reason: "verify_failing" };
+    }]
+  ];
+
+  for (const [name, build] of pausedScenarios) {
+    it(`pause «${name}»: den gamle TOMME foreldreløse katalogen står (tidligere ble den rm -rf-et FØR pausene)`, async () => {
+      const { h, reason } = await build();
+      if (name.startsWith("pipeline_stale")) h.backupError = new ScheduleError("backup_failed", "nede");
+      const orphan = emptyOrphan(h);
+      const r = await h.tick();
+      expect(r.retention).toMatchObject({ paused: reason, orphans_removed: 0, pruned: 0 });
+      expect(existsSync(orphan), `${name}: foreldreløs katalog skulle stått`).toBe(true);
+      expect(h.status().retention.last_skipped_reason).toBe(reason);
+    });
+  }
+
+  it("beskyttede navn (siste verifiserte / siste off-site-bekreftede sett) fjernes aldri, selv om katalogen har mistet manifestet og er tom", async () => {
+    const h = harness();
+    dailySets(h, 10);
+    const verified = emptyOrphan(h, "jarvis-backup-20260101T000000Z");
+    const confirmed = emptyOrphan(h, "jarvis-backup-20260102T000000Z");
+    const other = emptyOrphan(h, "jarvis-backup-20260103T000000Z");
+    ranBefore(h, (st) => {
+      st.restore_verify.last_success_set = "jarvis-backup-20260101T000000Z";
+      st.offsite.last_set = "jarvis-backup-20260102T000000Z";
+    });
+    await h.tick();
+    expect(existsSync(verified) && existsSync(confirmed)).toBe(true);
+    expect(existsSync(other)).toBe(false);
+    // direkte: `protect` som parameter (uten den er de to gjenværende tomme katalogene ryddbare)
+    expect(findOrphanSets(h.out, T0.getTime(), 12 * H)).toHaveLength(2);
+    expect(findOrphanSets(h.out, T0.getTime(), 12 * H, ["jarvis-backup-20260101T000000Z", "jarvis-backup-20260102T000000Z", null])).toEqual([]);
+  });
+
+  it("felles tak: høyst 3 slettinger per tikk TOTALT (sett først, så foreldreløse) - 5 tomme kataloger tar to tikk, og 2 sett + 5 kataloger gir 2 + 1", async () => {
+    const only = harness();
+    ranBefore(only);
+    dailySets(only, 10);
+    const dirs = [1, 2, 3, 4, 5].map((i) => emptyOrphan(only, `jarvis-backup-2026010${i}T000000Z`));
+    expect((await only.tick()).retention).toMatchObject({ pruned: 0, orphans_removed: 3 });
+    expect(dirs.filter((d) => existsSync(d))).toHaveLength(2);
+    only.advance(15 * 60_000);
+    expect((await only.tick()).retention).toMatchObject({ orphans_removed: 2 });
+    expect(dirs.filter((d) => existsSync(d))).toHaveLength(0);
+
+    const mixed = harness();
+    ranBefore(mixed);
+    for (const d of [0, 1, 2, 3, 4, 5, 6, 7]) makeSet(mixed.out, new Date(T0.getTime() - (2 / 24 + d) * D));
+    for (const d of [40, 35]) makeSet(mixed.out, new Date(T0.getTime() - d * D));
+    const mixedDirs = [1, 2, 3, 4, 5].map((i) => emptyOrphan(mixed, `jarvis-backup-2026010${i}T000000Z`));
+    const r = await mixed.tick();
+    expect(r.retention).toEqual({ paused: null, pruned: 2, orphans_removed: 1 });
+    expect(mixedDirs.filter((d) => existsSync(d))).toHaveLength(4);
+  });
+
+  it("en katalog med innhold uten manifest slettes ALDRI (rapporteres), og det samme gjelder en uverifiserbar - også etter mange tikk", async () => {
+    const h = harness();
+    ranBefore(h);
+    dailySets(h, 10);
+    const truncated = emptyOrphan(h, "jarvis-backup-20260101T000000Z");
+    writeFileSync(join(truncated, "jarvis.dump.age"), "halvferdig");
+    const t = new Date(T0.getTime() - 30 * H);
+    utimesSync(truncated, t, t);
+    for (let i = 0; i < 4; i++) {
+      await h.tick();
+      h.advance(15 * 60_000);
+    }
+    expect(readdirSync(truncated)).toEqual(["jarvis.dump.age"]);
+    expect(h.logs.filter((l) => l.event === "orphan_set_has_data")).toHaveLength(4);
+  });
+
+  // Som ikke-rot kan en katalog uten søketilgang gi en EKTE EACCES på manifestsjekken (rot omgår rettigheter). De øvrige feilkodene (EIO/ESTALE/…) injiseres i orphan-fs-errors.test.mjs.
+  it.skipIf(process.getuid?.() === 0)("ekte EACCES på manifestsjekken under et tikk: den tomme katalogen røres ikke (uverifiserbar), og tikket er upåvirket", async () => {
+    const h = harness();
+    ranBefore(h);
+    dailySets(h, 10);
+    const orphan = emptyOrphan(h);
+    chmodSync(orphan, 0o000);
+    try {
+      const r = await h.tick();
+      expect(r.exitCode).toBe(EXIT.OK);
+      expect(r.retention).toMatchObject({ orphans_removed: 0 });
+      expect(existsSync(orphan)).toBe(true);
+      expect(h.logs).toContainEqual(expect.objectContaining({ level: "warn", event: "orphan_check_unverified", set: "jarvis-backup-20260101T000000Z", code: "EACCES" }));
+    } finally {
+      chmodSync(orphan, 0o700);
+    }
+    h.advance(15 * 60_000);
+    await h.tick(); // tilgangen er tilbake: nå kan fraværet bevises, og den tomme katalogen ryddes
+    expect(existsSync(orphan)).toBe(false);
+  });
+
+  it("fjerningen bruker rmdir: noe som dukket opp i katalogen siden skanningen slettes aldri, og feilen er ikke fatal", async () => {
+    const h = harness();
+    ranBefore(h);
+    dailySets(h, 10);
+    const orphan = emptyOrphan(h);
+    // standard-avhengigheten er rmdir (ikke rekursiv): en katalog med innhold nektes av filsystemet
+    const withFile = emptyOrphan(h, "jarvis-backup-20260102T000000Z");
+    writeFileSync(join(withFile, "dukket-opp.age"), "x");
+    expect(() => h.deps().removeEmptyDir(withFile)).toThrow(/ENOTEMPTY|not empty/i);
+    expect(existsSync(join(withFile, "dukket-opp.age"))).toBe(true);
+    // en feilende fjerning logges og stopper ikke tikket
+    const r = await h.tick({ removeEmptyDir: () => { throw Object.assign(new Error("noe"), { code: "EBUSY" }); } });
+    expect(r.exitCode).toBe(EXIT.OK);
+    expect(existsSync(orphan)).toBe(true);
+    expect(h.logs).toContainEqual(expect.objectContaining({ level: "warn", event: "orphan_set_remove_failed", code: "EBUSY" }));
+  });
+});
+
+describe("WP-C2 review runde 2 M4: ubrukelig/nullstilt statusfil pauser retensjonen (`status_unusable`) til et bevis er registrert på nytt", () => {
+  const statusVariants = {
+    manglende: (h) => rmSync(h.config.statusFile, { force: true }),
+    korrupt: (h) => writeFileSync(h.config.statusFile, "{ikke json"),
+    tom: (h) => writeFileSync(h.config.statusFile, ""),
+    "feil schema": (h) => writeFileSync(h.config.statusFile, JSON.stringify({ schema: 2, backup: {} })),
+    "JSON null": (h) => writeFileSync(h.config.statusFile, "null"),
+    "for stor": (h) => writeFileSync(h.config.statusFile, " ".repeat(300 * 1024))
+  };
+
+  for (const [variant, damage] of Object.entries(statusVariants)) {
+    it(`${variant} statusfil + klokkehopp 40 døgn frem: INGENTING slettes (tidligere gikk 3 sett per tikk, også det siste verifiserte), pausen er synlig i tikkresultat, status og logg - og slippes etter et døgn uten bevis-kilde`, async () => {
+      const h = harness();
+      const sets = dailySets(h, 46);
+      ranBefore(h);
+      damage(h);
+      h.set(new Date(T0.getTime() + 40 * D)); // reviewerens scenario: klokken hopper frem, alle sett ser gamle ut
+      const first = await h.tick();
+      expect(first.actions).toEqual(["backup"]); // nyeste sett er nå 40 d gammelt: en ny backup tas
+      expect(listNames(h)).toHaveLength(47);
+      expect(first.retention).toMatchObject({ paused: "status_unusable", pruned: 0 });
+      expect(h.status().retention).toMatchObject({ last_skipped_reason: "status_unusable", status_reset_at: new Date(T0.getTime() + 40 * D).toISOString() });
+      if (variant !== "manglende") expect(h.logs).toContainEqual(expect.objectContaining({ level: "warn", event: "status_file_unusable" }));
+      expect(h.logs).toContainEqual(expect.objectContaining({ event: "retention_paused_status_unusable" }));
+      // senere tikk: fortsatt pauset (statusfilen er nå gyldig igjen, men nullstilt - pausen hviler ikke på filens gyldighet), og tikket er stille
+      h.logs.length = 0;
+      for (let i = 0; i < 3; i++) {
+        h.advance(15 * 60_000);
+        expect((await h.tick()).retention.paused).toBe("status_unusable");
+      }
+      expect(listNames(h)).toHaveLength(47);
+      expect(h.logs.filter((l) => l.level !== "debug")).toEqual([]);
+      // uten verifisering/off-site finnes det ingenting å vente på: etter et døgn (samme hold som ved et tikk-gap) slippes pausen og sletting går gradvis, 3 per tikk - men ikke før
+      h.advance(5 * H);
+      expect((await h.tick()).retention).toMatchObject({ paused: "status_unusable", pruned: 0 }); // 5 t inne i døgnet: klokken kan fortsatt rettes
+      expect(listNames(h)).toHaveLength(47);
+      h.advance(20 * H);
+      const later = await h.tick();
+      expect(later.retention).toMatchObject({ paused: null, pruned: 3 });
+      expect(h.status().retention).toMatchObject({ last_skipped_reason: null, status_reset_at: null });
+      expect(listNames(h).length).toBeGreaterThan(40); // gradvis, ikke alt på én gang
+      expect(sets.length).toBe(46);
+    });
+  }
+
+  it("første kjøring uten status på et system med gamle sett (sameksistens med nas-backup.sh): ingenting slettes, men det blokkerer ikke for alltid", async () => {
+    const h = harness();
+    for (const d of [90, 60, 45, 40]) makeSet(h.out, new Date(T0.getTime() - d * D));
+    dailySets(h, 10);
+    const first = await h.tick();
+    expect(first.retention).toMatchObject({ paused: "status_unusable", pruned: 0 });
+    expect(listNames(h)).toHaveLength(14);
+    expect(h.logs).toContainEqual(expect.objectContaining({ level: "warn", event: "status_file_missing", sets_on_disk: 14 }));
+    h.advance(24 * H + 30 * 60_000);
+    await h.tick(); // backup tas (24 t), og holdet er over
+    h.advance(15 * 60_000);
+    expect((await h.tick()).retention.pruned).toBeGreaterThan(0);
+  });
+
+  it("første kjøring på en tom maskin er stille (info, ikke advarsel), og en vanlig, gyldig statusfil gir aldri pause", async () => {
+    const fresh = harness();
+    await fresh.tick();
+    expect(fresh.logs.filter((l) => l.level === "warn")).toEqual([]);
+    expect(fresh.logs).toContainEqual(expect.objectContaining({ level: "info", event: "status_file_missing", sets_on_disk: 0 }));
+    const ok = harness();
+    ranBefore(ok);
+    dailySets(ok, 10);
+    expect((await ok.tick()).retention).toEqual({ paused: null, pruned: 0, orphans_removed: 0 });
+    expect(ok.status().retention.status_reset_at).toBeNull();
+  });
+
+  it("med restore-verifisering påslått varer pausen til en verifisering FAKTISK har lyktes: feiler den, slettes ingenting - uansett hvor lenge", async () => {
+    const h = harness({ identity: true });
+    h.verifyResult = { exitCode: 2, report: { ok: false, stage: "restore", databases: [] } };
+    dailySets(h, 46);
+    ranBefore(h);
+    writeFileSync(h.config.statusFile, "{ikke json");
+    h.set(new Date(T0.getTime() + 40 * D));
+    for (let i = 0; i < 10; i++) {
+      await h.tick();
+      h.advance(7 * H);
+    }
+    expect(listNames(h).length).toBeGreaterThanOrEqual(47);
+    expect(h.status().retention).toMatchObject({ last_skipped_reason: "status_unusable" });
+    // verifiseringen lykkes: beviset er registrert, det siste verifiserte settet beskyttes, og slettingen går gradvis
+    h.verifyResult = null;
+    h.advance(7 * H);
+    await h.tick(); // verifiseringen lykkes i dette tikket (etter at retensjonen allerede er pauset)
+    expect(h.status().restore_verify.last_success_set).not.toBeNull();
+    const verified = h.status().restore_verify.last_success_set;
+    h.advance(15 * 60_000);
+    const after = await h.tick();
+    expect(after.retention.paused).toBeNull();
+    expect(h.status().retention.status_reset_at).toBeNull();
+    expect(listNames(h)).toContain(verified);
+    expect(after.retention.pruned).toBeLessThanOrEqual(3);
+  });
+
+  it("med off-site påslått slippes pausen når en off-site-kopi er bekreftet; det off-site-bekreftede settet beskyttes", async () => {
+    const sink = fakeSink();
+    const h = harness({ sink, flags: { roles: "backup,offsite" } });
+    const sets = dailySets(h, 46);
+    ranBefore(h);
+    writeFileSync(h.config.statusFile, JSON.stringify({ schema: 99 }));
+    h.set(new Date(T0.getTime() + 40 * D));
+    const first = await h.tick();
+    expect(first.retention.paused).toBe("status_unusable");
+    expect(first.actions).toEqual(["backup", "offsite"]);
+    expect(h.status().offsite.last_set).not.toBeNull();
+    h.advance(15 * 60_000);
+    const second = await h.tick();
+    expect(second.retention).toMatchObject({ paused: null, pruned: 3 });
+    expect(listNames(h)).toContain(h.status().offsite.last_set);
+    expect(sets.length).toBe(46);
+  });
+
+  it("en kvittering fra en ekstern verifiserer (restore-verify-report.json) flettes inn og gjenoppretter beviset i SAMME tikk: det rapporterte settet beskyttes, resten slettes gradvis", async () => {
+    const h = harness();
+    const sets = dailySets(h, 46);
+    const verified = sets[40]; // langt utenfor retensjonen: kun beviset holder det i live
+    ranBefore(h);
+    writeFileSync(h.config.statusFile, "{ikke json");
+    h.set(new Date(T0.getTime() + 40 * D));
+    writeFileSync(join(h.config.stateDir, "restore-verify-report.json"), JSON.stringify({
+      schema: 1, finished_at: new Date(T0.getTime() + 39 * D).toISOString(), ok: true, set: verified.name, duration_s: 9, fetch_duration_s: null, tables: 12, rows: 340, source: "offsite", error_code: null
+    }));
+    const r = await h.tick();
+    expect(r.retention).toMatchObject({ paused: null, pruned: 3 });
+    expect(h.status().restore_verify).toMatchObject({ state: "ok", last_success_set: verified.name, reported_by: "external_verifier" });
+    expect(listNames(h)).toContain(verified.name);
+    expect(listNames(h)).not.toContain(sets[45].name); // de eldste går først
+  });
+
+  it("selve statusfeltet normaliseres og kan ikke smugles inn som tekst eller framtid", async () => {
+    const h = harness();
+    ranBefore(h, (st) => { st.retention.status_reset_at = "ikke en dato"; });
+    expect(h.status().retention.status_reset_at).toBeNull();
+    ranBefore(h, (st) => { st.retention.status_reset_at = "2099-01-01T00:00:00.000Z"; });
+    dailySets(h, 10);
+    await h.tick();
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "status_timestamps_in_future_dropped", fields: expect.arrayContaining(["retention.status_reset_at"]) }));
   });
 });

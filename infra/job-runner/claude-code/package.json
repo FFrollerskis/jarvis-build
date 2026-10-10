@@ -1,0 +1,9 @@
+{
+  "name": "jarvis-job-claude-code",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinnet Claude Code CLI for jobb-imaget (WP-C1). Eksakt versjon + package-lock.json med integritet for ALLE pakker (inkl. plattformbinæren).",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.286"
+  }
+}

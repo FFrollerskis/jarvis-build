@@ -345,10 +345,12 @@ class RcloneSink {
     return compareRemoteListing(prepared, parseLsjson(res.stdout));
   }
 
-  async fetch(name, destDir) {
+  /** `maxBytes`: tak PER FIL (`--max-size`, i KiB med `K`-suffiks). En fil over taket hoppes over av rclone, og settet blir da ufullstendig (feiler integritetssjekken) i stedet for å fylle disken. NOT VERIFIED mot en ekte rclone. */
+  async fetch(name, destDir, { maxBytes } = {}) {
     if (!SET_NAME_RE.test(name)) throw ineligible("ugyldig settnavn");
     mkdirSync(destDir, { recursive: true, mode: 0o700 });
-    await this.#run(["copy", "--checksum", "--include", "*.age", "--contimeout", "30s", "--timeout", "10m", "--stats", "0", joinRemote(this.config.remote, name), destDir], "rclone copy");
+    const cap = maxBytes === undefined ? [] : ["--max-size", `${Math.max(1, Math.ceil(maxBytes / 1024))}K`];
+    await this.#run(["copy", "--checksum", "--include", "*.age", ...cap, "--contimeout", "30s", "--timeout", "10m", "--stats", "0", joinRemote(this.config.remote, name), destDir], "rclone copy");
     pruneNonAge(destDir);
     return listAgeFiles(destDir);
   }
@@ -425,12 +427,14 @@ class RsyncSshSink {
     });
   }
 
-  async fetch(name, destDir) {
+  /** `maxBytes`: tak PER FIL (`--max-size=<byte>`): en større fil overføres ikke, og settet blir ufullstendig (feiler integritetssjekken) i stedet for å fylle disken. NOT VERIFIED mot en ekte rsync/ssh. */
+  async fetch(name, destDir, { maxBytes } = {}) {
     if (!SET_NAME_RE.test(name)) throw ineligible("ugyldig settnavn");
     mkdirSync(destDir, { recursive: true, mode: 0o700 });
+    const cap = maxBytes === undefined ? [] : [`--max-size=${Math.max(1, Math.floor(maxBytes))}`];
     const res = await this.deps.run(
       "rsync",
-      ["-a", "--partial-dir=.rsync-partial", "--include=*.age", "--exclude=*", "-e", this.ssh, "--timeout=300", "--", `${this.config.target.spec}/${name}/`, `${destDir}/`],
+      ["-a", "--partial-dir=.rsync-partial", "--include=*.age", "--exclude=*", ...cap, "-e", this.ssh, "--timeout=300", "--", `${this.config.target.spec}/${name}/`, `${destDir}/`],
       { timeoutMs: this.config.timeoutMs }
     );
     this.deps.check(res, "rsync");
@@ -455,7 +459,9 @@ export const STALE_INCOMING_MIN_MS = 12 * 3_600_000;
  * (TOCTOU) kopieres det symlenken peker på - f.eks. en klartekstfil - til off-site-målet. Her åpnes kilden med O_NOFOLLOW (symlenke -> ELOOP -> `offsite_ineligible`) og O_NONBLOCK,
  * `fstat` på det ÅPNE håndtaket må si «vanlig fil», og det er DET håndtaket som leses: bytene vi hasher og skriver er nøyaktig de vi åpnet, ikke det stien peker på et øyeblikk senere.
  * Med `expect` avvises avvik FØR noe skrives (størrelse, age-header i første blokk) eller før kopien beholdes (lengde og SHA-256 av det som faktisk ble skrevet); en avvist kopi fjernes.
- * @param {{ size?: number, sha256?: string, ageHeader?: boolean }} [expect] fra forhåndssjekken (`prepareSetForOffsite`)
+ * Review runde 2 (L2): `maxBytes` er en HARD øvre grense (avvises før noe skrives hvis filen allerede er større, og avbryter underveis hvis den vokser mens den leses) - en gigantisk fil i et
+ * ubetrodd fjernmål skal ikke kunne fylle backup-disken.
+ * @param {{ size?: number, sha256?: string, ageHeader?: boolean, maxBytes?: number }} [expect] fra forhåndssjekken (`prepareSetForOffsite`) eller, ved henting, fra oppslaget i målet
  */
 export async function copyRegularNoFollow(src, dest, expect = {}) {
   const label = safeEntry(basename(src));
@@ -470,6 +476,7 @@ export async function copyRegularNoFollow(src, dest, expect = {}) {
   try {
     const st = await source.stat();
     if (!st.isFile()) throw ineligible(`kilden er ikke en vanlig fil: ${label}`);
+    if (expect.maxBytes !== undefined && st.size > expect.maxBytes) throw ineligible(`filen er større enn grensen på ${expect.maxBytes} byte: ${label}`);
     if (expect.size !== undefined && st.size !== expect.size) throw new OffsiteError("offsite_verify_failed", `størrelsen avviker fra forhåndssjekken: ${label}`);
     const hash = createHash("sha256");
     const buf = Buffer.allocUnsafe(Math.min(COPY_CHUNK, Math.max(st.size, 1)));
@@ -482,6 +489,7 @@ export async function copyRegularNoFollow(src, dest, expect = {}) {
         if (expect.ageHeader === true && (bytesRead < AGE_MAGIC.length || !buf.subarray(0, AGE_MAGIC.length).equals(AGE_MAGIC))) throw ineligible(`ikke age-chiffertekst: ${label}`);
         target = await openFile(dest, "wx", 0o600);
       }
+      if (expect.maxBytes !== undefined && total + bytesRead > expect.maxBytes) throw ineligible(`filen vokste forbi grensen på ${expect.maxBytes} byte mens den ble lest: ${label}`);
       hash.update(buf.subarray(0, bytesRead));
       for (let written = 0; written < bytesRead;) written += (await target.write(buf, written, bytesRead - written)).bytesWritten;
       total += bytesRead;
@@ -626,12 +634,15 @@ class LocalSink {
     return sets;
   }
 
+  /** `.age`-filene i et sett i målet, med størrelsen slik oppslaget (lstat) så den. */
   async #listAgeFiles(budget, dir) {
-    const names = [];
+    const files = [];
     for (const n of await budget.run("lese settet", () => this.fs.readdir(dir))) {
-      if (AGE_FILE.test(n) && (await budget.run(`lstat ${n}`, () => this.fs.lstat(join(dir, n)))).isFile()) names.push(n);
+      if (!AGE_FILE.test(n)) continue;
+      const st = await budget.run(`lstat ${n}`, () => this.fs.lstat(join(dir, n)));
+      if (st.isFile()) files.push({ name: n, size: st.size });
     }
-    return names;
+    return files;
   }
 
   async #hashAll(budget, dir, prepared) {
@@ -690,16 +701,27 @@ class LocalSink {
     return { verification: "sha256", files: prepared.files.length, bytes: prepared.bytes };
   }
 
-  async fetch(name, destDir) {
+  /**
+   * Henter `.age`-filene i et sett fra målet. Fjernmålet er UBETRODDT (hvem som helst med skrivetilgang kan legge noe der), så (review runde 2, L2): hver fil må starte med age-headeren (en
+   * omdøpt klartekstfil skrives aldri), kopieres mot størrelsen oppslaget så (vokser den, avbrytes kopien), og HELE settet må rime med `maxBytes` (kallerens tak, typisk en andel av ledig
+   * diskplass) FØR noe kopieres - en gigantisk fil kan ikke fylle backup-disken i arbeidsmappen.
+   * @param {string} name settnavn
+   * @param {string} destDir
+   * @param {{ maxBytes?: number }} [options]
+   */
+  async fetch(name, destDir, { maxBytes } = {}) {
     if (!SET_NAME_RE.test(name)) throw ineligible("ugyldig settnavn");
     const budget = this.#budget();
     const root = await this.#assertTarget(budget);
     const dir = join(root, name);
     if (!(await this.#exists(budget, dir))) throw new OffsiteError("offsite_failed", "settet finnes ikke i off-site-målet");
+    const files = await this.#listAgeFiles(budget, dir);
+    const total = files.reduce((sum, f) => sum + f.size, 0);
+    if (maxBytes !== undefined && total > maxBytes) throw ineligible(`settet i off-site-målet er større enn grensen (${total} byte mot høyst ${maxBytes}) - hentes ikke`);
     mkdirSync(destDir, { recursive: true, mode: 0o700 });
-    for (const n of await this.#listAgeFiles(budget, dir)) {
-      await budget.run(`kopiere ${n}`, () => this.fs.copyFile(join(dir, n), join(destDir, n)));
-      await budget.run(`chmod ${n}`, () => this.fs.chmod(join(destDir, n), 0o600));
+    for (const f of files) {
+      await budget.run(`kopiere ${f.name}`, () => this.fs.copyFile(join(dir, f.name), join(destDir, f.name), { size: f.size, ageHeader: true, ...(maxBytes === undefined ? {} : { maxBytes }) }));
+      await budget.run(`chmod ${f.name}`, () => this.fs.chmod(join(destDir, f.name), 0o600));
     }
     return listAgeFiles(destDir);
   }

@@ -1,6 +1,7 @@
 import type { SloReport } from "./slo/index.ts";
 import { composeSloReport, SLO_CATALOG } from "./slo/index.ts";
 import { composeEvolutionReport, type EvolutionReport } from "./evolution/index.ts";
+import { composeAiMeshReport, type AiMeshReport } from "./ai-mesh/index.ts";
 import { composeControlCenterOverview, explainControlCenterNo, type ControlCenterOverview, type ControlCenterRegistry, type ControlCenterReport } from "./control-center/index.ts";
 import {
   composeValueReport, deriveChangeFreeze, describeValueLoops, evaluateBuilderLoopReadiness, proposeOpsActions,
@@ -103,6 +104,8 @@ export interface ExecutiveServiceOptions {
   connectorAuth?: (connectorId: string) => ConnectorAuthInfo | undefined;
   /** WP-B (D-452): evolusjonsporter i observasjonsmodus (injisert fra `apps/api`; kun lesing - utfører aldri en endring). */
   evolution?: { report(): Promise<EvolutionReport> };
+  /** WP-D4 (JARVIS-033/036/078): AI Mesh-status (injisert fra `apps/api`; kun lesing - gjør aldri et modellkall). */
+  aiMesh?: { report(): Promise<AiMeshReport> };
   /**
    * WP-H0 (UA-11 Admin Control Center): registeret over de ti kontrollsentrene (injisert fra `apps/api`; kun lesing - sentrene skriver ingenting, handlingene deres peker på eksisterende ruter).
    * Uten registeret: oversikten sier ærlig at ingen sentre er koblet inn (aldri en gjetning om at alt er i orden).
@@ -422,6 +425,22 @@ export class ExecutiveService {
     return composeEvolutionReport({
       as_of: now,
       sections: [{ ev: "EV-0…EV-23", title_no: "Evolusjonsporter", mode: "observe", status: "UNKNOWN", summary_no: "Ingen kilde er koblet inn, så ingenting kan vurderes.", findings: [], source: "ingen kilde koblet inn", observed_at: null }]
+    });
+  }
+
+  /**
+   * WP-D4: status for AI Mesh (leverandører, kjede, fallback-bevis) - kun observasjon, `acts: false`. Uten kilde: ærlig «ikke koblet inn» (ingen leverandør regnes som frisk uten måling).
+   */
+  async getAiMeshStatus(): Promise<AiMeshReport> {
+    const provider = this.options.aiMesh;
+    if (provider) return provider.report();
+    return composeAiMeshReport({
+      as_of: new Date().toISOString(),
+      router: "UNAVAILABLE",
+      providers: [],
+      fallback_verified_in_process: false,
+      extra_not_measured: ["Ingen kilde er koblet inn, så ingen leverandør kan vurderes."],
+      unknown_reason: "Ingen kilde er koblet inn, så akseptansen kan ikke vurderes."
     });
   }
 
