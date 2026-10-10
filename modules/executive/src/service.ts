@@ -435,6 +435,17 @@ export class ExecutiveService {
   }
 
   /**
+   * Gjennomgang av PR #324 (M3/L4): lese-porten for `executive.get_infra_status` (hendelsestitler med repo/gren, jobbnavn, skymål-tilstand - eierens driftsbilde). Samme port som kontrollsentrene (`authorizeRead`:
+   * eier OG enhetssignert økt, aldri tale/Telegram), men FAIL-CLOSED også uten register: driftsstatusen har egne kilder og skal aldri bli åpen for alle fordi eier-registeret mangler. Brukes av
+   * verktøydefinisjonens `parameterAuthorizer`, slik at et avslag blir en vanlig `tool.denied`-revisjonsrad FØR noe leses - uansett om kallet kommer fra `/infra/overview`, chat eller en annen vei.
+   */
+  authorizeInfraStatus(identity: IdentityContext): { allowed: boolean; reason: string } {
+    const registry = this.options.controlCenters;
+    if (!registry) return { allowed: false, reason: "control_center_owner_check_not_configured" };
+    return registry.authorizeRead(identity);
+  }
+
+  /**
    * WP-H0 (JARVIS-087): eier-kun-porten for kontrollsenterets MUTASJONER (`cancel_task`). I motsetning til lesingen over er den FAIL-CLOSED også uten register: en skrivehandling slippes aldri gjennom fordi
    * «det ikke er noe å lekke». Samme eier-predikat (`isOwner`, i drift `resolveAuthorityMode(...) === "SOVEREIGN"`) som kontrollsentrene bruker.
    */

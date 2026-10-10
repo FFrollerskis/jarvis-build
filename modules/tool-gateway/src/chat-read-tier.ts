@@ -74,6 +74,7 @@ export const CHAT_READ_TIER: ReadonlyArray<{ readonly tool_id: string; readonly 
   // WP-C4: Value Center - bruk per verdiløkke (kun tall, aldri innhold), og status for de sovende løkkene V3/V5 (kun beredskap/forslag, aldri utførelse).
   { tool_id: "executive", action: "get_value_report" },
   // WP-E1 (UA-5, JARVIS-068): driftsstatus - åpne hendelser (fase/alvorlighet/sannhetsmerking), skymål (helse + siste journalførte endring) og produsenthelse. Kun lesing, ingen hemmeligheter eller hendelsestekst.
+  // Gjennomgang av PR #324 (L4): kun for eieren fra en signert enhetsøkt (verktøyets `parameterAuthorizer`, som kontrollsentrene) og IKKE på tale (`VOICE_EXCLUDED_KEYS` i tool-manifest.ts); sensitivitet `private`.
   { tool_id: "executive", action: "get_infra_status" },
   // D-421 (UA0-RUNRATE): hva Jarvis koster og hva connectorene koster i vedlikeholdstid (kun lesing; skriving er dashbord-ruten).
   { tool_id: "run_rate", action: "get_cost_overview" },

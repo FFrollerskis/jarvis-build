@@ -48,11 +48,11 @@ describe("A: executive.get_infra_status er ren lesing på chat-flaten - og ingen
     expect(buildToolManifest(defs).get(KEY)).toMatchObject({ tool_id: "executive", effect: "read", risk: "A" });
   });
 
-  it("har nøyaktig samme flater som søsterverktøyet get_slo_report, og ikke bakgrunn/koding", () => {
+  it("står på web-chatten (eier + signert økt, som kontrollsentrene) og ikke på tale (gjennomgang av PR #324, L4), Telegram, bakgrunn eller koding", () => {
     const manifest = buildToolManifest(defs);
-    expect(manifest.get(KEY)?.surfaces).toEqual(manifest.get("executive.get_slo_report")?.surfaces);
-    expect(manifest.get(KEY)?.surfaces.length).toBeGreaterThan(0);
-    for (const s of ["background", "coding"] as const) expect(SURFACE_TOOL_GRANTS[s].some((g) => `${g.tool_id}.${g.action}` === KEY), s).toBe(false);
+    expect(manifest.get(KEY)?.surfaces).toEqual(["web_chat"]);
+    expect(manifest.get("executive.get_slo_report")?.surfaces).toContain("voice");
+    for (const s of ["voice", "telegram", "background", "coding"] as const) expect(SURFACE_TOOL_GRANTS[s].some((g) => `${g.tool_id}.${g.action}` === KEY), s).toBe(false);
   });
 
   it("endres definisjonen til skriving (klasse B), stopper oppstarten lukket", () => {

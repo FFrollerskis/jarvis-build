@@ -141,7 +141,9 @@ function inferDataZone(tool_id: string): DataZone {
  * kostnad, autoritet, leverandørhelse) - aldri «public», selv om resten av executive-lesingene er det.
  */
 const SENSITIVITY_OVERRIDES: Record<string, Sensitivity> = {
-  [k("executive", "get_control_center")]: "private"
+  [k("executive", "get_control_center")]: "private",
+  // Gjennomgang av PR #324 (L4): driftsstatus har hendelsestitler med repo/gren, jobbnavn og skymål-tilstand - eierens driftsbilde, aldri «public» (og strømmer til modellen som betjener turen).
+  [k("executive", "get_infra_status")]: "private"
 };
 
 function inferSensitivity(tool_id: string): Sensitivity {
@@ -183,8 +185,9 @@ export const BACKGROUND_GITHUB_READ = CHAT_READ_TIER.filter((g) => g.tool_id ===
 /**
  * Gjennomgang av PR #316 (L-4): handlinger tale ALDRI får, utover finans. Kontrollsentrene er en EIER-flate med enhetssignatur (rapportene er eierens konfigurasjonsmetadata, handlingene peker på eier-ruter):
  * tale er ubetrodd inndata (STT) og gir aldri forhøyet autentiseringsstyrke, så hele rapporten skal ikke kunne leses opp over en stemmeflate.
+ * Gjennomgang av PR #324 (L4): det samme gjelder driftsstatusen (`get_infra_status`: hendelsestitler med repo/gren, jobbnavn, skymål-tilstand) - den står på web-chatten (eier + signert økt, se verktøyets `parameterAuthorizer`), ikke på tale.
  */
-const VOICE_EXCLUDED_KEYS: ReadonlySet<string> = new Set([k("executive", "get_control_center")]);
+const VOICE_EXCLUDED_KEYS: ReadonlySet<string> = new Set([k("executive", "get_control_center"), k("executive", "get_infra_status")]);
 /** D-382: tale er ubetrodd inndata (STT) - lese-nivået uten finans (og uten kontrollsentrene, L-4); aldri handlingsnivået. */
 const VOICE_READ_TIER = CHAT_READ_TIER.filter((g) => !/^finance/.test(g.tool_id) && !VOICE_EXCLUDED_KEYS.has(k(g.tool_id, g.action)));
 
