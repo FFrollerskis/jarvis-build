@@ -35,10 +35,15 @@ export class BearerToken {
     this.expected = createHash("sha256").update(token).digest();
   }
 
+  /** A-F5: ugyldiggjør tokenet - ALT gir 401 til et nytt, gyldig token er satt. Brukes når en rotasjon (SIGHUP) feiler: det GAMLE tokenet skal ikke fortsette å virke «som om ingenting skjedde». */
+  invalidate() {
+    this.expected = undefined;
+  }
+
   /** @param {string} presented */
   verify(presented) {
     const actual = createHash("sha256").update(presented).digest();
-    return timingSafeEqual(actual, this.expected);
+    return this.expected !== undefined && timingSafeEqual(actual, this.expected);
   }
 }
 

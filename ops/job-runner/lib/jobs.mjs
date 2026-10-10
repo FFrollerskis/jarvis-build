@@ -25,6 +25,13 @@ import { buildJobContainerCreateArgs, isHostRunnerEnvNameAllowed } from "./spec.
 
 /** @typedef {"creating" | "ready" | "terminated" | "closing" | "cleanup_pending"} JobState */
 
+/**
+ * A-F8: tak per jobb på hemmelige env-verdier som registreres for redigering (create + ALLE exec-kall). Uten tak vokste listen (og `redact`, som er O(antall verdier)) med hvert exec-kall til jobben
+ * døde. Verdier dedupes per jobb, og går grensen over avvises forespørselen (400 `env_values_limit_exceeded`) FØR noe registreres. Standard `env_allow` er kun én nøkkel, så grensene merkes ikke i bruk.
+ */
+export const MAX_JOB_SECRET_VALUES = 64;
+export const MAX_JOB_SECRET_BYTES = 256 * 1024;
+
 export class JobManager {
   /**
    * @param {{
@@ -194,10 +201,10 @@ export class JobManager {
       containerCreated: false,
       cancel: new CancelToken(),
       /** @type {Promise<unknown> | null} */ inflight: null,
-      secretValues: Object.values(req.env)
+      secretValues: /** @type {string[]} */ ([])
     };
+    this.registerSecrets(job, Object.values(req.env)); // kaster FØR jobben er i oversikten og før noe er registrert (en avvist forespørsel etterlater ingenting)
     this.jobs.set(id, job);
-    for (const value of job.secretValues) this.logger.registry.add(value);
     const unsubscribe = clientGone ? clientGone.onCancel(() => job.cancel.cancel()) : () => undefined;
     // Tokenet holdes i hemmelighetsregisteret så lenge forespørselen behandles (logg/feildetaljer redigeres uansett hvem som skriver) og frigjøres i `finally`.
     const releaseToken = req.gitToken !== undefined ? this.logger.registry.hold(req.gitToken) : () => undefined;
@@ -252,6 +259,23 @@ export class JobManager {
     }
   }
 
+  /**
+   * Registrerer env-verdier som hemmeligheter for jobben (dedupet, med tak - se MAX_JOB_SECRET_*). Kaster FØR noe endres hvis taket ville blitt overskredet.
+   * @param {any} job @param {string[]} values
+   */
+  registerSecrets(job, values) {
+    const fresh = [...new Set(values)].filter((value) => !job.secretValues.includes(value));
+    if (fresh.length === 0) return;
+    const bytes = [...job.secretValues, ...fresh].reduce((total, value) => total + Buffer.byteLength(value), 0);
+    if (job.secretValues.length + fresh.length > MAX_JOB_SECRET_VALUES || bytes > MAX_JOB_SECRET_BYTES) {
+      throw new RunnerError("env_values_limit_exceeded", 400, `max_values=${MAX_JOB_SECRET_VALUES};max_bytes=${MAX_JOB_SECRET_BYTES}`);
+    }
+    for (const value of fresh) {
+      this.logger.registry.add(value);
+      job.secretValues.push(value);
+    }
+  }
+
   /** @param {string} id */
   require(id) {
     const job = this.jobs.get(id);
@@ -268,10 +292,7 @@ export class JobManager {
     const job = this.require(id);
     this.assertUsable(job);
     this.assertEnvAllowed(req.env);
-    for (const value of Object.values(req.env)) {
-      this.logger.registry.add(value);
-      job.secretValues.push(value);
-    }
+    this.registerSecrets(job, Object.values(req.env));
     return this.runExclusive(job, "exec", clientGone, async () => {
       const result = await this.docker.execIn(job.containerName, {
         argv: req.argv, env: req.env, timeoutMs: req.timeoutMs, maxOutputBytes: this.config.maxOutputBytes, cancel: job.cancel
@@ -338,7 +359,7 @@ export class JobManager {
     try {
       const out = await this.git.verifyAndPush({
         bundle: created.stdout, baseSha: job.baseSha, baseGitDir: job.baseGitDir, verifyDir: job.verifyDir, privateDir: job.privateDir,
-        slug: job.slug, branch: req.branch,
+        slug: job.slug, branch: req.branch, identity: this.config.gitIdentity,
         limits: { maxCommits: limits.maxCommits, maxFiles: limits.maxFiles, denyPaths: limits.denyPaths },
         timeoutMs: limits.timeoutMs, token, cancel: job.cancel
       });

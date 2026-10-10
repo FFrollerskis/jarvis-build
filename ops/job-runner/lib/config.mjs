@@ -1,6 +1,6 @@
 import { constants as fsConstants } from "node:fs";
 import { open } from "node:fs/promises";
-import { BlockList, isIP } from "node:net";
+import { isIP } from "node:net";
 import { isAbsolute } from "node:path";
 import { ConfigError } from "./errors.mjs";
 import { ENV_NAME, JobContainerConfigError, isHostRunnerEnvNameAllowed, validateJobContainerPolicy } from "./spec.mjs";
@@ -240,13 +240,36 @@ function parseRunner(raw) {
   });
 }
 
-/** @param {string} entry */
+/** IPv4 som uten fortegn 32-bits heltall. @param {string} ip */
+function ipv4ToInt(ip) {
+  return ip.split(".").reduce((n, octet) => n * 256 + Number(octet), 0);
+}
+
+/** Private IPv4-blokker (RFC 1918): jobbnettverket er et privat Docker-nett, aldri et offentlig eller «alle». [nettverk, prefiks] */
+const PRIVATE_BLOCKS = /** @type {const} */ ([["10.0.0.0", 8], ["172.16.0.0", 12], ["192.168.0.0", 16]]);
+
+/**
+ * Klient-CIDR for proxyen = jobbnettverkets subnett. Strengt (B-L7): prefiks 16-32, nettverksadressen (ingen vertbiter satt, ellers nekter Docker subnettet senere) og HELE området innenfor et
+ * privat nett (RFC 1918). Tidligere ble `0.0.0.0/8`, `8.0.0.0/8` og `10.0.0.0/8` godtatt selv om kommentaren sa «hele nettet er forbudt»: klientene er jobbnettverket, ikke «noen».
+ * @param {string} entry
+ */
 function parseCidr(entry) {
   const m = /^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/.exec(entry);
   if (!m || isIP(m[1]) !== 4) throw new ConfigError("config_invalid", "egress_proxy.allowed_client_cidrs:entry_invalid");
+  const network = /** @type {string} */ (m[1]);
   const prefix = Number(m[2]);
-  if (prefix < 8 || prefix > 32) throw new ConfigError("config_invalid", "egress_proxy.allowed_client_cidrs:prefix_8_32");
-  return { network: /** @type {string} */ (m[1]), prefix };
+  if (prefix < 16 || prefix > 32) throw new ConfigError("config_invalid", "egress_proxy.allowed_client_cidrs:prefix_16_32");
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  const first = ipv4ToInt(network);
+  if (((first & mask) >>> 0) !== first) throw new ConfigError("config_invalid", "egress_proxy.allowed_client_cidrs:host_bits_set");
+  const last = (first | (~mask >>> 0)) >>> 0;
+  const insidePrivate = PRIVATE_BLOCKS.some(([block, blockPrefix]) => {
+    const blockMask = (0xffffffff << (32 - blockPrefix)) >>> 0;
+    const base = ipv4ToInt(block);
+    return ((first & blockMask) >>> 0) === base && ((last & blockMask) >>> 0) === base;
+  });
+  if (!insidePrivate) throw new ConfigError("config_invalid", "egress_proxy.allowed_client_cidrs:must_be_private_network");
+  return { network, prefix };
 }
 
 /** Validerer og normaliserer egress-proxy-seksjonen. */
@@ -273,9 +296,6 @@ function parseEgressProxy(raw) {
   const cidrs = stringList(p, "allowed_client_cidrs", "egress_proxy", [], /^[0-9./]{7,18}$/, 16);
   if (cidrs.length === 0) throw new ConfigError("config_invalid", "egress_proxy.allowed_client_cidrs:required");
   const clientCidrs = cidrs.map(parseCidr);
-  // Hele nettet (0.0.0.0/8) og «alle» (/8 minimum) er forbudt: klientene er jobbnettverket, ikke «noen».
-  const probe = new BlockList();
-  for (const c of clientCidrs) probe.addSubnet(c.network, c.prefix, "ipv4");
 
   return Object.freeze({
     listenHost,

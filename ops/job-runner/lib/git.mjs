@@ -1,5 +1,5 @@
 import { copyFile, lstat, mkdir, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { credentialHelperArgs, GIT_CREDENTIAL_TOKEN_ENV } from "./credentials.mjs";
 import { RunnerError } from "./errors.mjs";
 import { forceRemoveTree } from "./fsutil.mjs";
@@ -346,10 +346,12 @@ export class HostGit {
    */
   async fetchBase(p) {
     const url = this.remoteUrl(p.slug);
-    await this.mustGit(["init", "--bare", "--quiet", p.baseGitDir], { timeoutMs: 30_000, ...(p.cancel ? { cancel: p.cancel } : {}) }, "git_init_failed", 500);
+    // A-F7: aldri i prosessens arbeidskatalog (der kunne en `.git` bli oppdaget og dens config lest): `cwd` er jobbens egen, runner-eide private katalog.
+    await this.mustGit(["init", "--bare", "--quiet", p.baseGitDir], { cwd: dirname(p.baseGitDir), timeoutMs: 30_000, ...(p.cancel ? { cancel: p.cancel } : {}) }, "git_init_failed", 500);
     let branch = p.baseBranch;
     if (branch === undefined) {
-      const ls = await this.netGit(["ls-remote", "--symref", url, "HEAD"], { slug: p.slug, token: p.token, timeoutMs: 60_000, ...(p.cancel ? { cancel: p.cancel } : {}) });
+      // A-F7: kjøres i det ferske, runner-eide bare-repoet - aldri i prosessens arbeidskatalog (en `.git` der ville blitt oppdaget og lest av git).
+      const ls = await this.netGit(["ls-remote", "--symref", url, "HEAD"], { slug: p.slug, token: p.token, cwd: p.baseGitDir, timeoutMs: 60_000, ...(p.cancel ? { cancel: p.cancel } : {}) });
       const m = /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(ls.stdout.toString("utf8"));
       branch = m?.[1];
       if (branch === undefined || !BASE_BRANCH.test(branch) || branch.includes("..") || branch.includes("//") || branch.endsWith("/") || branch.endsWith(".lock")) {
@@ -406,6 +408,7 @@ export class HostGit {
    *
    * @param {{
    *   bundle: Buffer, baseSha: string, baseGitDir: string, verifyDir: string, privateDir: string, slug: string, branch: string,
+   *   identity: { name: string, email: string },
    *   limits: { maxCommits: number, maxFiles: number, denyPaths: readonly string[] },
    *   timeoutMs: number, token: string, cancel?: import("./errors.mjs").CancelToken
    * }} p
@@ -421,7 +424,7 @@ export class HostGit {
     await forceRemoveTree(bundlePath).catch(() => undefined);
     await writeFile(bundlePath, p.bundle, { mode: 0o600, flag: "wx" });
     await forceRemoveTree(p.verifyDir).catch(() => undefined);
-    await this.mustGit(["init", "--bare", "--quiet", p.verifyDir], { timeoutMs: 30_000, ...(p.cancel ? { cancel: p.cancel } : {}) }, "git_init_failed", 500);
+    await this.mustGit(["init", "--bare", "--quiet", p.verifyDir], { cwd: p.privateDir, timeoutMs: 30_000, ...(p.cancel ? { cancel: p.cancel } : {}) }, "git_init_failed", 500);
     await writeFile(join(p.verifyDir, "objects", "info", "alternates"), `${join(p.baseGitDir, "objects")}\n`, { mode: 0o600 });
     const shallow = join(p.baseGitDir, "shallow");
     if (await stat(shallow).then(() => true, () => false)) await copyFile(shallow, join(p.verifyDir, "shallow"));
@@ -456,6 +459,17 @@ export class HostGit {
     if (commits > p.limits.maxCommits) throw new RunnerError("bundle_too_many_commits", 422, `max=${p.limits.maxCommits}`);
     const merges = await this.mustGit(hardened(["rev-list", "--merges", "--count", `${p.baseSha}..${sha}`]), { ...inRepo, timeoutMs: 30_000 }, "bundle_invalid", 422);
     if (Number(merges.stdout.toString("utf8").trim()) !== 0) throw new RunnerError("bundle_invalid", 422, "merge_commits_not_allowed");
+
+    // A-F4: ALLE commits skal ha den faste identiteten (`runner.git_identity`) som forfatter OG committer. Containeren setter den som env, men agenten kan sette hva som helst (`git commit --author`,
+    // `GIT_AUTHOR_NAME`, `commit-tree`): en forfalsket forfatter på en publisert branch ville sett ut som en annen persons arbeid. Avvises (stabil kode), ikke skrevet om: en commit som ikke er
+    // slik agenten laget den er ikke noe runneren skal stille seg bak. Feltene skilles med US (0x1f) og commits med NUL (-z); et felt som inneholder skilletegnet gir feil antall felt og avvises.
+    const log = await this.mustGit(hardened(["log", "-z", "--format=%an%x1f%ae%x1f%cn%x1f%ce", `${p.baseSha}..${sha}`]), { ...inRepo, timeoutMs: 30_000 }, "bundle_invalid", 422);
+    for (const record of log.stdout.toString("utf8").split("\0").filter((r) => r !== "")) {
+      const fields = record.split("\x1f");
+      if (fields.length !== 4 || fields[0] !== p.identity.name || fields[1] !== p.identity.email || fields[2] !== p.identity.name || fields[3] !== p.identity.email) {
+        throw new RunnerError("bundle_invalid", 422, "commit_identity_not_allowed");
+      }
+    }
 
     // Utdatataket utledes av `max_files` (maks `max_files + 1` oppføringer à maks DIFF_ENTRY_MAX_BYTES): en diff innenfor grensen kan aldri avkortes, og en avkortet diff (flere filer enn
     // grensen, eller absurd lange stier) feiler lukket - uten dette kunne stier etter kuttpunktet (f.eks. `.github/workflows/x.yml`) aldri blitt sjekket mot nektelisten (A-F2).

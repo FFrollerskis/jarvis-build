@@ -4,7 +4,11 @@ import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { DockerClient } from "../lib/docker.mjs";
 import { CancelToken, RunnerError } from "../lib/errors.mjs";
+import { MAX_JOB_SECRET_BYTES, MAX_JOB_SECRET_VALUES } from "../lib/jobs.mjs";
+import { SecretRegistry } from "../lib/log.mjs";
+import { createRunnerService } from "../server.mjs";
 import { GIT_TOKEN, RUNNER_TOKEN, apiRequest, createHarness } from "./support/harness.mjs";
 
 /**
@@ -376,6 +380,143 @@ describe("F: oppstartsavstemming (D-32 port 12: crash/reclaim)", () => {
     });
     expect(await exists(join(h.baseDir, stale))).toBe(false);
     expect(await readFile(outside, "utf8")).toBe("skal-overleve");
+  });
+});
+
+describe("K: hemmelige env-verdier per jobb har tak og dedupes (A-F8)", () => {
+  it("samme verdi sendt i hvert exec-kall vokser ikke: registeret og jobbens liste forblir på én verdi, og redigeringen virker hele tiden", async () => {
+    const h = await harness();
+    const job = await h.createJob();
+    const before = h.registry.size;
+    for (let i = 0; i < 200; i += 1) {
+      const r = await h.exec(job.job_id, ["sh", "-c", "echo $CALL_VAR"], { env: { CALL_VAR: "samme-verdi-hver-gang-123" } });
+      expect(r.json.stdout).toBe("[REDACTED]\n");
+    }
+    expect(h.registry.size).toBe(before + 1);
+    expect(h.service.manager.jobs.get(job.job_id).secretValues).toHaveLength(1);
+  }, 60_000);
+
+  it(`over ${MAX_JOB_SECRET_VALUES} ULIKE verdier avvises (400 env_values_limit_exceeded) FØR noe registreres; jobben lever videre og tidligere verdier redigeres fortsatt`, async () => {
+    const h = await harness();
+    const job = await h.createJob();
+    const before = h.registry.size;
+    for (let i = 0; i < MAX_JOB_SECRET_VALUES; i += 1) {
+      expect((await h.exec(job.job_id, ["true"], { env: { CALL_VAR: `verdi-${String(i).padStart(4, "0")}-xxxxxxxx` } })).status, String(i)).toBe(200);
+    }
+    expect(h.registry.size).toBe(before + MAX_JOB_SECRET_VALUES);
+    const over = await h.exec(job.job_id, ["true"], { env: { CALL_VAR: "en-verdi-for-mye-xxxxxxxx" } });
+    expect(over.status).toBe(400);
+    expect(over.json.error).toBe("env_values_limit_exceeded");
+    expect(h.registry.size).toBe(before + MAX_JOB_SECRET_VALUES); // den avviste verdien ble ikke registrert
+    const ok = await h.exec(job.job_id, ["sh", "-c", "echo verdi-0007-xxxxxxxx"]);
+    expect(ok.json.stdout).toBe("[REDACTED]\n"); // en tidligere verdi redigeres fortsatt
+    await h.api({ method: "DELETE", path: `/v1/jobs/${job.job_id}` });
+    expect(h.registry.size).toBe(before); // alt ryddes når jobben fjernes
+  }, 60_000);
+
+  it(`total størrelse over ${MAX_JOB_SECRET_BYTES / 1024} KiB avvises også (store verdier); jobben lever videre`, async () => {
+    const h = await harness();
+    const job = await h.createJob();
+    const big = (n) => `${String(n).padStart(4, "0")}${"x".repeat(8188)}`; // 8192 tegn, unike
+    const perValue = Buffer.byteLength(big(0));
+    const allowed = Math.floor(MAX_JOB_SECRET_BYTES / perValue);
+    for (let i = 0; i < allowed; i += 1) expect((await h.exec(job.job_id, ["true"], { env: { CALL_VAR: big(i) } })).status, String(i)).toBe(200);
+    const over = await h.exec(job.job_id, ["true"], { env: { CALL_VAR: big(allowed) } });
+    expect(over.json).toMatchObject({ error: "env_values_limit_exceeded" });
+  }, 60_000);
+
+  it("create med for store verdier (16 navn x 8192 tegn à 3 byte = 384 KiB) avvises 400 FØR noe opprettes eller registreres", async () => {
+    const names = Array.from({ length: 16 }, (_, i) => `ENVNAME_${i}`);
+    const h = await harness({ runner: { env_allow: names, max_body_bytes: 1024 * 1024 } }); // kroppstaket (256 KiB) ville ellers gitt 413 først
+    const before = { jobs: h.service.manager.activeJobs, size: h.registry.size, dirs: (await readdir(h.baseDir)).length, calls: h.fake.calls.length };
+    const env = Object.fromEntries(names.map((name, i) => [name, `${i}`.padStart(2, "0") + "€".repeat(8190)]));
+    const created = await h.api({ method: "POST", path: "/v1/jobs", body: { repo: "owner/repo", env } });
+    expect(created.status).toBe(400);
+    expect(created.json.error).toBe("env_values_limit_exceeded");
+    expect(h.service.manager.activeJobs).toBe(before.jobs);
+    expect(h.registry.size).toBe(before.size);
+    expect((await readdir(h.baseDir)).length).toBe(before.dirs);
+    expect(h.fake.calls.slice(before.calls).some((c) => ["create", "start", "exec"].includes(c.args[0]))).toBe(false);
+  });
+});
+
+describe("L: tokenrotasjon feiler lukket, og en nektet andre instans river ikke den første (A-F5, A-F6)", () => {
+  const newToken = "B".repeat(48);
+  const status = (h, token) => apiRequest(h.socketPath, { token, path: "/v1/health" }).then((r) => r.status);
+
+  it("A-F5: en feilet rotasjon (ugyldig/for kort token, manglende fil, feil modus) ugyldiggjør det GAMLE tokenet også - alt gir 401 til en vellykket reload", async () => {
+    const h = await harness();
+    expect(await status(h, RUNNER_TOKEN)).toBe(200);
+    const broken = [
+      ["for kort", () => writeFile(h.tokenFile, "for-kort\n")],
+      ["ugyldige tegn", () => writeFile(h.tokenFile, `${"æ".repeat(40)}\n`)],
+      ["åpen modus", async () => { await writeFile(h.tokenFile, `${newToken}\n`); await chmod(h.tokenFile, 0o666); }]
+    ];
+    for (const [label, breakIt] of broken) {
+      await writeFile(h.tokenFile, `${RUNNER_TOKEN}\n`, { mode: 0o600 });
+      await chmod(h.tokenFile, 0o600);
+      await h.service.reloadToken();                 // gyldig utgangspunkt
+      expect(await status(h, RUNNER_TOKEN), label).toBe(200);
+      await breakIt();
+      await expect(h.service.reloadToken(), label).rejects.toThrow();
+      expect(await status(h, RUNNER_TOKEN), `${label}: gammelt token`).toBe(401); // før: 200 - rotasjonen «feilet stille»
+      expect(await status(h, newToken), `${label}: nytt token`).toBe(401);
+    }
+    // en manglende fil likeså
+    await writeFile(h.tokenFile, `${RUNNER_TOKEN}\n`, { mode: 0o600 });
+    await chmod(h.tokenFile, 0o600);
+    await h.service.reloadToken();
+    const { rm } = await import("node:fs/promises");
+    await rm(h.tokenFile);
+    await expect(h.service.reloadToken()).rejects.toThrow();
+    expect(await status(h, RUNNER_TOKEN)).toBe(401);
+    // gjenoppretting: en gyldig fil + ny reload -> det NYE tokenet virker, det gamle gjør det ikke
+    await writeFile(h.tokenFile, `${newToken}\n`, { mode: 0o600 });
+    await chmod(h.tokenFile, 0o600);
+    await h.service.reloadToken();
+    expect(await status(h, newToken)).toBe(200);
+    expect(await status(h, RUNNER_TOKEN)).toBe(401);
+    const log = h.logLines.join("\n");
+    expect(log).toContain("token_reload_failed_all_requests_denied");
+    expect(log).toContain("token_reloaded");
+    expect(log).not.toContain(newToken);
+  });
+
+  it("A-F6: en andre instans mot samme socket nektes (another_instance_is_listening) UTEN å rive første instans' jobber - avstemmingen kjører etter socket-sjekken", async () => {
+    const h = await harness();
+    const job = await h.createJob();
+    expect(h.fake.containers.size).toBe(1);
+    const second = await createRunnerService({
+      config: h.config, dockerExec: h.fake.exec,
+      testOverrides: { remote: { protocol: "https", host: "github.com" }, skipUidCheck: true, allowAnyOwner: true, authFailureDelayMs: 0 }
+    });
+    await expect(second.start()).rejects.toMatchObject({ code: "another_instance_is_listening" });
+    // første instans' jobb lever: containeren, katalogen og API-et (før: reconcile() fjernet containeren og katalogen FØR socket-sjekken)
+    expect(h.fake.containers.size).toBe(1);
+    expect((await readdir(h.baseDir)).includes(job.job_id)).toBe(true);
+    expect((await h.exec(job.job_id, ["echo", "lever"])).json.stdout).toBe("lever\n");
+  });
+});
+
+describe("M: DockerClient.assertName (D1) - bare navn vi selv har laget kan nå docker", () => {
+  it("start/exec/rm med et navn som ikke er jarvis-job-<uuid> kaster container_name_invalid UTEN at docker kalles (flagg-/argv-injeksjon via navn er umulig)", async () => {
+    const calls = [];
+    const docker = new DockerClient({ exec: async (args) => { calls.push(args); return { status: 0, signal: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), timedOut: false, truncated: false, cancelled: false }; }, registry: new SecretRegistry() });
+    const good = `jarvis-job-${"a".repeat(8)}-aaaa-4aaa-8aaa-${"b".repeat(12)}`;
+    for (const bad of ["--privileged", "-v", "jarvis-job-x", "jarvis-job-", "jarvis-job-../../etc", `${good}; reboot`, ` ${good}`, `${good}\n`, "", "JARVIS-JOB-AAAAAAAA-AAAA-4AAA-8AAA-BBBBBBBBBBBB", "container:abc", "$(id)"]) {
+      await expect(docker.start(bad), JSON.stringify(bad)).rejects.toMatchObject({ code: "container_name_invalid", status: 500 });
+      await expect(docker.execIn(bad, { argv: ["true"], env: {}, timeoutMs: 1000, maxOutputBytes: 10 }), JSON.stringify(bad)).rejects.toMatchObject({ code: "container_name_invalid" });
+      await expect(docker.remove(bad), JSON.stringify(bad)).rejects.toMatchObject({ code: "container_name_invalid" });
+    }
+    expect(calls).toEqual([]);
+    await docker.start(good);
+    await docker.remove(good);
+    expect(calls.map((c) => c[0])).toEqual(["start", "rm"]);
+  });
+
+  it("A-F2 (docker): en avkortet `docker ps` regnes ikke som en komplett liste - oppstartsavstemmingen feiler lukket i stedet for å overse containere", async () => {
+    const docker = new DockerClient({ exec: async () => ({ status: 0, signal: null, stdout: Buffer.from("jarvis-job-a\n"), stderr: Buffer.alloc(0), timedOut: false, truncated: true, cancelled: false }), registry: new SecretRegistry() });
+    await expect(docker.listJobContainers()).rejects.toMatchObject({ code: "docker_output_truncated", status: 503 });
   });
 });
 

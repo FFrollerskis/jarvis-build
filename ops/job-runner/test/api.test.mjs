@@ -237,6 +237,27 @@ describe("F: POST /publish - kun jobb-branch (policy-prefiks), aldri beskyttede 
   });
 });
 
+describe("N: ALLE svar har Connection: close (én forespørsel per forbindelse) - A-F10 M28", () => {
+  it("200, 201, 202/200 (DELETE), 400, 401, 403, 404, 405, 409, 413 og 422 har alle connection: close (en rørlinjet forespørsel kan aldri besvares eller utføres)", async () => {
+    const job = await (async () => { const r = await create({ repo: "owner/repo" }); expect(r.status).toBe(201); expect(r.headers["connection"]).toBe("close"); return r.json; })();
+    const responses = [
+      await h.api({ path: "/v1/health" }),
+      await h.api({ method: "POST", path: `/v1/jobs/${job.job_id}/exec`, body: { argv: ["true"] } }),
+      await h.api({ method: "POST", path: "/v1/jobs", body: { repo: "owner/repo", unknown: 1 } }),
+      await h.api({ method: "POST", path: "/v1/jobs", body: { repo: "ukjent/repo" } }),
+      await h.api({ path: "/v1/ukjent" }),
+      await h.api({ method: "PUT", path: "/v1/health" }),
+      await h.api({ path: "/v1/health", token: "feil-token-feil-token-feil-token-feil-token" }),
+      await h.api({ method: "POST", path: `/v1/jobs/${job.job_id}/publish`, body: { branch: "jarvis/x" } }), // 422 no_changes
+      await h.api({ method: "POST", path: "/v1/jobs", rawBody: "x".repeat(300_000) }), // 413
+      await h.api({ method: "DELETE", path: `/v1/jobs/${job.job_id}` }),
+      await h.api({ method: "DELETE", path: `/v1/jobs/${job.job_id}` })
+    ];
+    expect(responses.map((r) => r.status)).toEqual([200, 200, 400, 403, 404, 405, 401, 422, 413, 200, 200]);
+    for (const r of responses) expect(r.headers["connection"], `${r.status}`).toBe("close");
+  });
+});
+
 describe("G: feilsvar lekker ikke interne detaljer", () => {
   it("feilsvar er kun {error, detail?} med korte stabile koder", async () => {
     const r = await create({ repo: "owner/other" });

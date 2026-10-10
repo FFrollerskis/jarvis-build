@@ -111,6 +111,8 @@ export class DockerClient {
   async listJobContainers() {
     const r = await this.exec(["ps", "-a", "--no-trunc", "--filter", "label=jarvis.role=job", "--format", "{{.Names}}"], { timeoutMs: 30_000 });
     if (r.status !== 0) throw new RunnerError("docker_unavailable", 503, this.detail(r));
+    // En avkortet liste er ikke «alle containere»: avstemmingen ville oversett jobb-containere. Feil lukket (samme prinsipp som `mustGit` i git.mjs, A-F2).
+    if (r.truncated) throw new RunnerError("docker_output_truncated", 503);
     return r.stdout.toString("utf8").split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
   }
 

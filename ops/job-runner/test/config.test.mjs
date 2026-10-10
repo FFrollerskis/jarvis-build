@@ -239,6 +239,15 @@ describe("D: egress-proxy-policy valideres fail-closed", () => {
     for (const cidr of ["0.0.0.0/0", "0.0.0.0/4", "172.30.77.0/33", "172.30.77.0", "garbage", "::/0"]) {
       expect(code(() => parse(undefined, { ...proxy(), allowed_client_cidrs: [cidr] })), cidr).toContain("config_invalid");
     }
+    // B-L7: klientene er jobbnettverket - prefiks 16-32, nettverksadresse, og hele området innenfor et privat nett (RFC 1918). Før ble 0.0.0.0/8, 8.0.0.0/8 og 10.0.0.0/8 godtatt.
+    const cidrError = (cidr) => code(() => parse(undefined, { ...proxy(), allowed_client_cidrs: [cidr] }));
+    for (const cidr of ["0.0.0.0/8", "8.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/15", "172.30.0.0/15"]) expect(cidrError(cidr), cidr).toContain("prefix_16_32");
+    for (const cidr of ["8.8.8.0/24", "1.1.1.0/24", "172.15.0.0/16", "172.32.0.0/16", "100.64.0.0/16", "127.0.0.0/24", "169.254.0.0/16", "192.169.0.0/16", "11.0.0.0/16", "0.0.0.0/16", "224.0.0.0/16", "255.255.255.0/24"]) {
+      expect(cidrError(cidr), cidr).toContain("must_be_private_network");
+    }
+    for (const cidr of ["172.30.77.5/24", "10.0.0.1/16", "192.168.1.128/24"]) expect(cidrError(cidr), cidr).toContain("host_bits_set");
+    for (const cidr of ["172.30.77.0/24", "10.1.2.0/24", "10.0.0.0/16", "192.168.1.0/24", "192.168.0.0/16", "172.16.0.0/16", "172.31.255.0/24", "172.30.77.1/32", "10.255.0.0/16"]) expect(cidrError(cidr), cidr).toBe("no_error");
+    expect(parse(undefined, { ...proxy(), allowed_client_cidrs: ["172.30.77.0/24", "10.9.0.0/16"] }).egressProxy.allowedClientCidrs).toEqual([{ network: "172.30.77.0", prefix: 24 }, { network: "10.9.0.0", prefix: 16 }]);
   });
 });
 

@@ -166,10 +166,12 @@ export async function createRunnerService(options) {
       await manager.prepare();
       await docker.assertNetworkInternal(config.policy.network);
       await loadToken();
-      await manager.reconcile();
 
+      // A-F6: socket-sjekken (`another_instance_is_listening`) FØR avstemmingen. Avstemmingen fjerner ALLE containere merket jarvis.role=job og alle jobbkataloger: kjørt av en NEKTET andre instans
+      // ville den revet de levende jobbene til den første.
       await ensureSocketDir(dirname(config.socketPath), config.socketGroup);
       await prepareSocketPath(config.socketPath);
+      await manager.reconcile();
       server = createApiServer({
         manager, bearer: /** @type {BearerToken} */ (bearer), logger,
         limits: {
@@ -194,9 +196,18 @@ export async function createRunnerService(options) {
       logger.info("runner_started", { version: VERSION, docker: dockerVersion, git: gitVersion, max_jobs: config.maxConcurrentJobs, repos: config.allowedRepos.length });
     },
 
-    /** Roter token uten omstart (SIGHUP). */
+    /**
+     * Roter token uten omstart (SIGHUP). FEIL LUKKET (A-F5): feiler lesingen eller formatet (manglende fil, feil modus, ugyldig token), ugyldiggjøres det GAMLE tokenet også - alt gir 401 til et gyldig
+     * token er lest med en ny `reload`. Før ble det gamle stående og ga 200 selv om eieren trodde han hadde byttet. Bekreft alltid `token_reloaded` i journalen etter en rotasjon.
+     */
     async reloadToken() {
-      await loadToken();
+      try {
+        await loadToken();
+      } catch (error) {
+        bearer?.invalidate();
+        logger.error("token_reload_failed_all_requests_denied", { reason: error instanceof Error ? error.message : "unknown" });
+        throw error;
+      }
       logger.info("token_reloaded", {});
     },
 

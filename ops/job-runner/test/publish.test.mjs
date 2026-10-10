@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { HostGit } from "../lib/git.mjs";
 import { SecretRegistry } from "../lib/log.mjs";
+import { createGitSpy } from "./support/git-spy.mjs";
 import { GIT_TOKEN, createHarness, gitSync } from "./support/harness.mjs";
 
 /**
@@ -312,7 +313,7 @@ describe("C: bundler fra en ondsinnet agent (laget direkte, utenom runnerens ege
     const verifyDir = join(privateDir, "verify.git");
     await expect(h.service.manager.git.verifyAndPush({
       bundle, baseSha: job.head_sha, baseGitDir: join(privateDir, "base.git"), verifyDir, privateDir, slug: "owner/repo", branch: "jarvis/mange",
-      limits: { maxCommits: 20, maxFiles: 5, denyPaths: [] }, timeoutMs: 60_000, token: GIT_TOKEN
+      identity: { name: "seed", email: "seed@test" }, limits: { maxCommits: 20, maxFiles: 5, denyPaths: [] }, timeoutMs: 60_000, token: GIT_TOKEN
     })).rejects.toMatchObject({ code: "bundle_too_many_files" }); // stopper ETTER fetch + fsck, og verify.git blir stående for inspeksjon
     const objects = join(verifyDir, "objects");
     expect((await readdir(objects)).filter((d) => /^[0-9a-f]{2}$/.test(d))).toEqual([]);
@@ -362,7 +363,7 @@ describe("F: avkortet git-utdata er aldri «komplett» (A-F2)", () => {
     const origin = h.origins["owner/repo"].dir;
     const job = await h.createJob();
     const { bundle } = await craft(h, job.head_sha, async (s) => {
-      const env = { PATH: process.env["PATH"], HOME: s, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "evil", GIT_AUTHOR_EMAIL: "evil@test", GIT_COMMITTER_NAME: "evil", GIT_COMMITTER_EMAIL: "evil@test" };
+      const env = { PATH: process.env["PATH"], HOME: s, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", /* runnerens faste identitet: bundlen skal nå helt til nekteliste-trinnet (identitetssjekken A-F4 kommer før) */ GIT_AUTHOR_NAME: "jarvis-worker", GIT_AUTHOR_EMAIL: "worker@jarvis.local", GIT_COMMITTER_NAME: "jarvis-worker", GIT_COMMITTER_EMAIL: "worker@jarvis.local" };
       const run = (args, input) => { const r = spawnSync("git", args, { cwd: s, input, encoding: "utf8", env, maxBuffer: 64 * 1024 * 1024 }); if (r.status !== 0) throw new Error(`${args.join(" ")}: ${r.stderr}`); return r.stdout.trim(); };
       const blob = run(["hash-object", "-w", "--stdin"], "x\n");
       const workflows = run(["mktree"], `100644 blob ${blob}\tevil.yml\n`);
@@ -394,6 +395,117 @@ describe("F: avkortet git-utdata er aldri «komplett» (A-F2)", () => {
     await commitAs(h, job2.job_id, 'mkdir -p d && for i in $(seq 1 501); do echo $i > "d/$(printf \'%0200d\' $i)"; done');
     expect((await publish(h, job2.job_id, "jarvis/five-hundred-one")).json).toMatchObject({ error: "bundle_too_many_files", detail: "max=500" });
   }, 60_000);
+});
+
+describe("G: commit-identiteten er runnerens faste identitet (A-F4)", () => {
+  const forged = [
+    ["forfatternavn", "GIT_AUTHOR_NAME=Eva git commit -q -m x"],
+    ["forfatter-e-post", "GIT_AUTHOR_EMAIL=eva@firma.no git commit -q -m x"],
+    ["committer-navn", "GIT_COMMITTER_NAME=Eva git commit -q -m x"],
+    ["committer-e-post", "GIT_COMMITTER_EMAIL=eva@firma.no git commit -q -m x"],
+    ["--author", "git commit -q -m x --author='Eva <eva@firma.no>'"],
+    ["identitet satt i git-config", "git -c user.name=Eva -c user.email=eva@firma.no commit -q -m x --author='Eva <eva@firma.no>'"]
+  ];
+
+  it("forfalsket forfatter eller committer (navn og e-post, alle veier) avvises med bundle_invalid / commit_identity_not_allowed - ingenting pushes", async () => {
+    const h = await harness({ runner: { max_concurrent_jobs: 8 } });
+    for (const [label, commit] of forged) {
+      const job = await h.createJob();
+      expect((await sh(h, job.job_id, `echo ${label.length} > f.txt && git add -A && ${commit}`)).json.code, label).toBe(0);
+      const pub = await publish(h, job.job_id, `jarvis/forged-${label.length}`);
+      expect(pub.status, label).toBe(422);
+      expect(pub.json, label).toMatchObject({ error: "bundle_invalid", detail: "commit_identity_not_allowed" });
+      await h.api({ method: "DELETE", path: `/v1/jobs/${job.job_id}` });
+    }
+    expect(refs(h.origins["owner/repo"].dir).filter((r) => r.includes("jarvis/"))).toEqual([]);
+  });
+
+  it("EN forfalsket commit blant flere gode avvises (hele serien sjekkes); en serie med riktig identitet går gjennom", async () => {
+    const h = await harness();
+    const job = await h.createJob();
+    await commitAs(h, job.job_id, "echo 1 > a.txt");
+    await sh(h, job.job_id, "echo 2 > b.txt && git add -A && GIT_AUTHOR_NAME=Eva git commit -q -m forged");
+    await commitAs(h, job.job_id, "echo 3 > c.txt");
+    expect((await publish(h, job.job_id)).json).toMatchObject({ error: "bundle_invalid", detail: "commit_identity_not_allowed" });
+    const ok = await h.createJob();
+    await commitAs(h, ok.job_id, "echo 1 > a.txt");
+    await commitAs(h, ok.job_id, "echo 2 > b.txt");
+    const pub = await publish(h, ok.job_id, "jarvis/ok");
+    expect(pub.status).toBe(200);
+    expect(pub.json.commits).toBe(2);
+  });
+
+  it("identiteten er policy (runner.git_identity), ikke en konstant: med en annen konfigurert identitet går dens commits gjennom, og standardidentiteten er nå den forfalskede", async () => {
+    const h = await harness({ runner: { git_identity: { name: "Annen Bot", email: "bot@firma.no" } } });
+    const job = await h.createJob();
+    await commitAs(h, job.job_id, "echo 1 > a.txt");
+    expect((await publish(h, job.job_id, "jarvis/annen")).status).toBe(200);
+    expect(gitSync(h.origins["owner/repo"].dir, ["log", "-1", "--format=%an <%ae> / %cn <%ce>", "jarvis/annen"])).toBe("Annen Bot <bot@firma.no> / Annen Bot <bot@firma.no>");
+    const forgedJob = await h.createJob();
+    await sh(h, forgedJob.job_id, "echo 2 > b.txt && git add -A && GIT_AUTHOR_NAME=jarvis-worker GIT_AUTHOR_EMAIL=worker@jarvis.local GIT_COMMITTER_NAME=jarvis-worker GIT_COMMITTER_EMAIL=worker@jarvis.local git commit -q -m x");
+    expect((await publish(h, forgedJob.job_id, "jarvis/forfalsket")).json).toMatchObject({ detail: "commit_identity_not_allowed" });
+  });
+
+  it("en forfatter med skilletegnet (US, 0x1f) i navnet gir feil antall felt og avvises (fail-closed, ikke parset feil)", async () => {
+    const h = await harness();
+    const job = await h.createJob();
+    await sh(h, job.job_id, "echo 1 > a.txt && git add -A && GIT_AUTHOR_NAME=\"$(printf 'jarvis-worker\\037x')\" git commit -q -m x");
+    expect((await publish(h, job.job_id)).json).toMatchObject({ error: "bundle_invalid", detail: "commit_identity_not_allowed" });
+  });
+});
+
+describe("H: bundle-trinnene (A-F10: mutanter M10, M46)", () => {
+  it("M46: `git bundle create` i containeren kjøres med herdingsflaggene (ingen replace-objekter, hooks av, ingen protokoller, fsmonitor av) og nøyaktig dette argv-et", async () => {
+    const h = await harness();
+    const job = await h.createJob();
+    await commitAs(h, job.job_id, "echo 1 > a.txt");
+    let seen;
+    h.fake.state.onExec = ({ argv }) => { if (argv.includes("bundle")) seen = argv; return undefined; };
+    expect((await publish(h, job.job_id)).status).toBe(200);
+    expect(seen).toEqual([
+      "git", "--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", "-c", "core.fsmonitor=false",
+      "bundle", "create", "-", `${job.head_sha}..HEAD`
+    ]);
+  });
+
+  it("M10: SHA-en som faktisk ble hentet MÅ være den headeren lovet - avviker den, avvises bundlen (head_does_not_match_header) selv om fetch og fsck gikk bra", async () => {
+    const h = await harness();
+    const job = await h.createJob();
+    const { bundle } = await craft(h, job.head_sha, async (s) => { gitSync(s, ["commit", "--allow-empty", "-q", "-m", "ok"]); return [`${job.head_sha}..HEAD`]; });
+    const real = h.service.manager.git;
+    const spoofed = Object.create(real);
+    const realRun = real.run;
+    spoofed.run = async (bin, args, options) => {
+      if (args.includes("rev-parse") && args.includes("refs/jarvis/candidate^{commit}")) {
+        return { status: 0, signal: null, stdout: Buffer.from(`${"0".repeat(40)}\n`), stderr: Buffer.alloc(0), timedOut: false, truncated: false, cancelled: false };
+      }
+      return realRun.call(real, bin, args, options);
+    };
+    const privateDir = join(h.baseDir, job.job_id, "private");
+    const call = (git) => git.verifyAndPush({
+      bundle, baseSha: job.head_sha, baseGitDir: join(privateDir, "base.git"), verifyDir: join(privateDir, "verify.git"), privateDir, slug: "owner/repo", branch: "jarvis/m10",
+      identity: { name: "seed", email: "seed@test" }, limits: { maxCommits: 20, maxFiles: 5, denyPaths: [] }, timeoutMs: 60_000, token: GIT_TOKEN
+    });
+    await expect(call(spoofed)).rejects.toMatchObject({ code: "bundle_invalid", detail: "head_does_not_match_header" });
+    expect(refs(h.origins["owner/repo"].dir).some((r) => r.includes("jarvis/"))).toBe(false);
+  });
+});
+
+describe("I: git kjøres aldri i prosessens arbeidskatalog (A-F7)", () => {
+  it("ls-remote (base-branch-oppslaget) kjører i det ferske, runner-eide base.git - ikke i arbeidskatalogen til runner-prosessen, der en .git ville blitt oppdaget og lest", async () => {
+    const spy = await createGitSpy();
+    const h = await harness({ runner: { git_bin: spy.gitBin } });
+    const job = await h.createJob(); // uten base_branch -> ls-remote --symref
+    const calls = await spy.calls();
+    const lsRemote = calls.filter((c) => c.subcommand === "ls-remote");
+    expect(lsRemote).toHaveLength(1);
+    expect(lsRemote[0].cwd).toBe(join(h.baseDir, job.job_id, "private", "base.git"));
+    // og INGEN git-kall (utenom --version-sjekkene ved oppstart) kjører i en katalog som ikke er jobbens eller runnerens egen
+    for (const c of calls) {
+      if (c.argv.includes("--version")) continue;
+      expect(c.cwd.startsWith(h.baseDir), `${c.subcommand} i ${c.cwd}`).toBe(true);
+    }
+  });
 });
 
 describe("D: agenten planter hooks/config i /work - ingenting kjøres på VERTEN under publish", () => {

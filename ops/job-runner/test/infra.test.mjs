@@ -185,6 +185,15 @@ describe("B: jobb-imaget og Claude Code-pinningen", () => {
     expect(code.indexOf("chmod a-s")).toBeLessThan(code.indexOf("USER 10001:10001"));
   });
 
+  it("B-L8: apt/dpkg fjernes etter bygging (FØR siste USER), mens git, node og npm beholdes", () => {
+    const code = dockerfile.split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
+    expect(code).toMatch(/^RUN rm -f \/usr\/bin\/apt \/usr\/bin\/apt-\* \/usr\/bin\/dpkg \/usr\/bin\/dpkg-\* \/usr\/bin\/add-apt-repository$/m);
+    expect(code.indexOf("RUN rm -f /usr/bin/apt")).toBeGreaterThan(code.indexOf("apt-get install"));
+    expect(code.indexOf("RUN rm -f /usr/bin/apt")).toBeLessThan(code.indexOf("USER 10001:10001"));
+    expect(code).not.toMatch(/rm [^\n]*\/usr\/(local\/)?bin\/(git|node|npm|npx|claude)\b/);
+    expect(code.slice(code.indexOf("USER 10001:10001"))).not.toMatch(/apt-get|dpkg/); // ingen pakkebehandler-bruk etter siste USER
+  });
+
   it("telemetri og auto-oppdatering er slått av i imaget (containeren når kun proxyens allowlist)", () => {
     for (const flag of ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", "DISABLE_TELEMETRY=1", "DISABLE_ERROR_REPORTING=1", "GIT_TERMINAL_PROMPT=0"]) {
       expect(dockerfile).toContain(flag);
