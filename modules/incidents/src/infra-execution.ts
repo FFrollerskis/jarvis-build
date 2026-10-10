@@ -19,29 +19,29 @@ export interface ExecuteInfraMutationInput {
   idempotency_key: string;
 }
 
-async function readToolExecutionState(
+export async function readToolExecutionState(
   pool: pg.Pool,
   tenantId: string,
   idempotencyKey: string,
   expected: { tool_id: string; action: string }
-): Promise<{ before: JsonValue | null; after: JsonValue | null; key_collision: boolean }> {
+): Promise<{ before: JsonValue | null; after: JsonValue | null; key_collision: boolean; external_id: string | null }> {
   return withTenantTransaction(pool, tenantId, async (client) => {
     const { rows } = await client.query(
-      `SELECT tool_id, action, before_state, after_state FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2`,
+      `SELECT tool_id, action, before_state, after_state, external_id FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2`,
       [tenantId, idempotencyKey]
     );
-    const row = rows[0] as { tool_id: string; action: string; before_state: JsonValue | null; after_state: JsonValue | null } | undefined;
+    const row = rows[0] as { tool_id: string; action: string; before_state: JsonValue | null; after_state: JsonValue | null; external_id: string | null } | undefined;
     // D-398 (JARVIS-094): nøkkelen kan ha vært brukt av et ANNET verktøy/en annen handling - da tilhører før-/etter-tilstanden ikke denne mutasjonen og
     // kan aldri journalføres som dens bevis (tidligere ble en fremmed rad lest som egen og kunne gi SUCCESS).
     if (row && (row.tool_id !== expected.tool_id || row.action !== expected.action)) {
-      return { before: null, after: null, key_collision: true };
+      return { before: null, after: null, key_collision: true, external_id: null };
     }
-    return { before: row?.before_state ?? null, after: row?.after_state ?? null, key_collision: false };
+    return { before: row?.before_state ?? null, after: row?.after_state ?? null, key_collision: false, external_id: row?.external_id ?? null };
   });
 }
 
 /** D-398 (JARVIS-094): eksisterende journalrad for nøkkelen (idempotent retry). */
-async function findExecutionByKey(pool: pg.Pool, tenantId: string, idempotencyKey: string): Promise<InfraExecution | null> {
+export async function findExecutionByKey(pool: pg.Pool, tenantId: string, idempotencyKey: string): Promise<InfraExecution | null> {
   return withTenantTransaction(pool, tenantId, async (client) => {
     const { rows } = await client.query(`SELECT * FROM infra_executions WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, idempotencyKey]);
     return (rows[0] as InfraExecution) ?? null;

@@ -36,7 +36,9 @@ export type OpenLoopType =
   | "product_item_high_priority_stalled"
   // UA-3 Native Jarvis Operations Core (D-129) - speiler 048_operations.sql sin utvidede CHECK.
   | "operations_task_overdue"
-  | "operations_task_escalation_needed";
+  | "operations_task_escalation_needed"
+  // WP-D2 (UA-3 «churn/product usage», migrasjon 090) - speiler 090_business_product_usage_churn.sql sin utvidede CHECK.
+  | "customer_churn_risk";
 export type OpenLoopDetectionMethod = "deterministic" | "ai_assisted";
 
 /**
@@ -45,13 +47,21 @@ export type OpenLoopDetectionMethod = "deterministic" | "ai_assisted";
  * (dager uten aktivitet, utgiftsavvik mot glidende snitt) = 0.7. Verdiene er KALIBRERINGSFORSLAG - eier kan justere (NEEDS_TOBIAS: kalibrering mot faktiske data).
  */
 export const HEURISTIC_LOOP_TYPES: ReadonlySet<OpenLoopType> = new Set<OpenLoopType>([
-  "stalled_opportunity", "contract_review_required", "marketing_spend_anomaly", "product_item_needs_triage", "product_item_high_priority_stalled"
+  "stalled_opportunity", "contract_review_required", "marketing_spend_anomaly", "product_item_needs_triage", "product_item_high_priority_stalled",
+  // WP-D2: churn-risiko er en regelbasert PROGNOSE (signaler om atferd), ikke et hardt faktum.
+  "customer_churn_risk"
 ]);
 export function deterministicLoopConfidence(loopType: string): number {
   return HEURISTIC_LOOP_TYPES.has(loopType as OpenLoopType) ? 0.7 : 0.9;
 }
 export type OpenLoopPriority = "low" | "normal" | "high";
 export type OpenLoopStatus = "open" | "resolved";
+/**
+ * WP-D2 (091, JARVIS-045): hva som skjedde da loopen ble lukket. `acted` = eieren/operatøren handlet, `dismissed` = avvist som irrelevant, `condition_cleared` = vilkåret forsvant av
+ * seg selv (satt av sveipet). `null` på en lukket loop = lukket uten utfall (umerket).
+ */
+export type LoopResolutionOutcome = "acted" | "dismissed" | "condition_cleared";
+export const MANUAL_RESOLUTION_OUTCOMES = ["acted", "dismissed"] as const;
 
 export interface BusinessOpenLoop {
   open_loop_id: string;
@@ -85,6 +95,8 @@ export interface BusinessOpenLoop {
   detection_key: string;
   detection_method: OpenLoopDetectionMethod;
   confidence: number | null;
+  /** WP-D2 (091, JARVIS-045): hvorfor `confidence` ble som den ble (se confidence.ts `ConfidenceBasis`); null til første sveip etter 091. */
+  confidence_basis: Record<string, unknown> | null;
   reason: string;
   next_action: string | null;
   canonical_uri: string | null;
@@ -95,6 +107,10 @@ export interface BusinessOpenLoop {
   due_at: string | null;
   resolved_at: string | null;
   resolution_reason: string | null;
+  /** WP-D2 (091): se `LoopResolutionOutcome`. */
+  resolution_outcome: LoopResolutionOutcome | null;
+  /** WP-D2 (091): tidligere MERKEDE lukkinger av denne loopen (utfall + confidence ved lukking) etter at vilkåret gjenåpnet den - kalibreringsgrunnlag som ikke skal forsvinne ved gjenåpning. */
+  closure_history?: Array<{ outcome: "acted" | "dismissed"; confidence: number; closed_at: string }>;
   created_at: string;
   updated_at: string;
 }

@@ -1,6 +1,7 @@
 export * from "./types.ts";
 export * from "./state-machine.ts";
 export * from "./service.ts";
+export * from "./truth.ts";
 export * from "./deployments.ts";
 export * from "./correlation.ts";
 export * from "./repair.ts";
@@ -11,4 +12,7 @@ export * from "./diagnosis.ts";
 export * from "./db-correlation.ts";
 export * from "./observability.ts";
 export * from "./infra-execution.ts";
+export * from "./cloud-execution.ts";
+export * from "./cloudflare-recovery.ts";
 export * from "./deployment-ingestion.ts";
+export * from "./producers/index.ts";

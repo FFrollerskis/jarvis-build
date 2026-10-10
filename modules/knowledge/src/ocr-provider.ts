@@ -1,3 +1,4 @@
+import type { DataSensitivity } from "@jarvis/contracts";
 import type { CompleteInput } from "@jarvis/model-gateway";
 
 /** Rå bilde-bytes - standard base64 (ALDRI en `data:`-URI-prefiks), samme kontrakt som `ContentPart` i `@jarvis/provider-adapters`. */
@@ -50,10 +51,15 @@ const NO_TEXT_FOUND_MARKER = "(ingen tekst funnet)";
  * `BudgetGuard`/`cost_events` som ethvert annet modellkall) - se D-43 §6.
  */
 export class ModelGatewayVisionExtractor implements OcrProvider, VisionDescriptionProvider {
+  /**
+   * `sensitivity` (gjennomgang av PR #325, funn 4): bildene kommer fra eierens egne kilder (e-postvedlegg, dokumenter) og er ALDRI «offentlige». Uten merke behandlet ruteren kallet som lavt sensitivt (gratis/delt sky tillatt). Standard
+   * er derfor `PRIVATE` (ingen `hosted_free_tier`); kilder i helse-rommet eller med `special`-gulv skal gi `SECRET_RESTRICTED` (kun lokal modell) - se `ocrSensitivityForSource`.
+   */
   constructor(
     private readonly gateway: VisionCompleter,
     private readonly tenantId: string,
-    private readonly taskId?: string
+    private readonly taskId?: string,
+    private readonly sensitivity: DataSensitivity = "PRIVATE"
   ) {}
 
   async transcribeText(image: ImageInput): Promise<string> {
@@ -70,6 +76,7 @@ export class ModelGatewayVisionExtractor implements OcrProvider, VisionDescripti
       tenant_id: this.tenantId,
       ...(this.taskId !== undefined ? { task_id: this.taskId } : {}),
       purpose: "VISION",
+      sensitivity: this.sensitivity,
       request: {
         messages: [
           {
@@ -85,4 +92,13 @@ export class ModelGatewayVisionExtractor implements OcrProvider, VisionDescripti
     });
     return result.text.trim();
   }
+}
+
+/**
+ * Sensitiviteten bildene fra en konfigurert kilde skal rutes med (gjennomgang av PR #325, funn 4): helse-rommet og et `special`-gulv (eller -tak) krever `SECRET_RESTRICTED` (kun lokal modell - aldri sky, uansett leverandør);
+ * alt annet er minst `PRIVATE`. Kildens policy brukes ellers først ETTER OCR-en (på teksten), så bildet selv må rutes konservativt.
+ */
+export function ocrSensitivityForSource(source: { memory_space: string; policy: { default_sensitivity?: string | undefined; max_sensitivity?: string | undefined } }): DataSensitivity {
+  if (source.memory_space === "health" || source.policy.default_sensitivity === "special" || source.policy.max_sensitivity === "special") return "SECRET_RESTRICTED";
+  return "PRIVATE";
 }

@@ -19,7 +19,7 @@ import type { SituationCandidateInput } from "./types.ts";
  * Domenenavnene er de SAMME fri-tekst-navnene `DomainPauseRegistry` og
  * `situation_autonomy_policies` bruker ('spend','pipeline','deadlines',...).
  */
-export type BridgedSituationDomain = "pipeline" | "support" | "deadlines" | "spend" | "product" | "operations";
+export type BridgedSituationDomain = "pipeline" | "support" | "deadlines" | "spend" | "product" | "operations" | "retention";
 
 /** Prefiks på `detection_key` slik at en bro-produsert situasjon ALDRI kolliderer med en kandidat en fremtidig annen kilde (vision/helse/lokasjon) sender med samme rå nøkkel. */
 export const OPEN_LOOP_DETECTION_KEY_PREFIX = "open_loop:";
@@ -58,6 +58,10 @@ export function domainForLoopType(loopType: OpenLoopType): BridgedSituationDomai
     case "operations_task_overdue":
     case "operations_task_escalation_needed":
       return "operations";
+    // WP-D2: kundefrafall (churn) er et EGET domene, ikke «pipeline»: en autonomi-policy eieren har bundet til pipeline-loops (f.eks. oppfølging av stagnerte muligheter)
+    // skal aldri stille gjelde for churn-risiko. Uten en eksplisitt policy for «retention» finnes ingen auto-ACT (fail closed) - loopen er INFORM/SUGGEST.
+    case "customer_churn_risk":
+      return "retention";
     default: {
       // Uttømmende: en ny OpenLoopType MÅ få en eksplisitt domene-avgjørelse her.
       const exhaustive: never = loopType;

@@ -1,5 +1,5 @@
 import type { JsonValue } from "@jarvis/contracts";
-import { FilesystemKnowledgeSource } from "./filesystem-source.ts";
+import { FilesystemKnowledgeSource, type WalkLimits } from "./filesystem-source.ts";
 import type { KnowledgeListResult, KnowledgeRecord, KnowledgeSource } from "./source.ts";
 
 const OBSIDIAN_INTERNAL_PREFIX = ".obsidian/";
@@ -83,14 +83,14 @@ export class ObsidianVaultKnowledgeSource implements KnowledgeSource {
   readonly source_instance_id: string;
   private readonly inner: FilesystemKnowledgeSource;
 
-  constructor(vaultRoot: string, sourceInstanceId?: string) {
+  constructor(vaultRoot: string, sourceInstanceId?: string, limits?: Partial<WalkLimits>) {
     const instanceId = sourceInstanceId ?? `obsidian:${vaultRoot}`;
     this.source_instance_id = instanceId;
-    this.inner = new FilesystemKnowledgeSource(vaultRoot, instanceId, MARKDOWN_EXTENSIONS);
+    this.inner = new FilesystemKnowledgeSource(vaultRoot, instanceId, { allowedExtensions: MARKDOWN_EXTENSIONS, ...(limits ? { limits } : {}) });
   }
 
   async list(): Promise<KnowledgeListResult> {
-    const { records, skipped } = await this.inner.list();
+    const { records, skipped, listing, protected_prefixes } = await this.inner.list();
     const filtered: KnowledgeRecord[] = [];
     for (const record of records) {
       if (record.external_id === ".obsidian" || record.external_id.startsWith(OBSIDIAN_INTERNAL_PREFIX)) {
@@ -110,6 +110,6 @@ export class ObsidianVaultKnowledgeSource implements KnowledgeSource {
         }
       });
     }
-    return { records: filtered, skipped };
+    return { records: filtered, skipped, ...(listing ? { listing } : {}), ...(protected_prefixes ? { protected_prefixes } : {}) };
   }
 }

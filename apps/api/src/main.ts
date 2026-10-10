@@ -7,7 +7,7 @@ import { parseCouncilProposals } from "./council-proposals.ts";
 import { fileURLToPath } from "node:url";
 import { checkEv0Boot, getLastEv0BootStatus, logEv0Boot } from "./ev0-boot.ts";
 import { assertNoSweepFailures, envHour, envInt, envPort, failOnSweepFailures, systemIdentity } from "@jarvis/contracts";
-import { ownerConfigOrExit } from "./owner.ts";
+import { ownerConfigOrExit, ownerTenantsOrExit } from "./owner.ts";
 import { buildSelfModelReaders } from "./self-model-readers.ts";
 import { backupStatusSourceFromEnv } from "./backup-status.ts";
 import { startUptimeHeartbeat } from "./heartbeat-sender.ts";
@@ -35,7 +35,8 @@ import {
   writeAudit
 } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, PolicyGateway, createPgInfraModeStore, type AuthorityConfig } from "@jarvis/policy";
-import { DeploymentService, DiagnosisService, IncidentService } from "@jarvis/incidents";
+import { DeploymentService, DiagnosisService, INCIDENT_PRODUCER_NAMES, IncidentService } from "@jarvis/incidents";
+import { ClaimVerificationService, KnowledgeRetriever, createKnowledgeClaimsPort } from "@jarvis/knowledge";
 import {
   AiCouncil,
   CouncilAutoTriggerLimiter,
@@ -75,14 +76,17 @@ import {
 import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubTransport, createGitHubAuth,
   CHAT_ACT_TIER, CHAT_READ_TIER, GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, CouncilProposalGate, MeshToolExecutor, assertManifestInvariants, buildToolManifest, describeSurfaceCatalog, memoryToolDefinitions, selectSurfaceTools,
+  KnowledgeSearchTransport, knowledgeToolDefinitions,
   MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, resolveModelToolSurface, PgGithubRateLimitStore,
   PgTelegramOffsetStore, TelegramCommandPoller, createTurnContext, jobIdentityFor, telegramClassDNotifier, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, schedulerSource, DailyScheduler, runConnectorHealthSweep,
-  CONNECTOR_REGISTRY, FORBIDDEN_MODEL_TOOL_IDS, listConnectorStatus
+  CONNECTOR_REGISTRY, FORBIDDEN_MODEL_TOOL_IDS, listConnectorStatus,
+  CloudflareTransport, INFRA_GATED_TOOL_IDS, cloudControlToolDefinitions, parseCloudflareMutationZones,
+  InfisicalTransport, LangfuseTransport, PostgresOpsTransport, parseInfisicalRotationIds, parsePostgresOpsConfig
 } from "@jarvis/tool-gateway";
 import {
-  BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessEventSyncService, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService,
-  ScoringService, isWeeklyBriefDay, runBusinessEventSyncForAllTenants, runBusinessWeeklyBriefForAllTenants,
+  BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessEventSyncService, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ProductUsageService,
+  ScoringService, isWeeklyBriefDay, parseSupportSlaHours, runBusinessEventSyncForAllTenants, runBusinessWeeklyBriefForAllTenants,
   runOpenLoopSweepForAllTenants, runScoringSweepForAllTenants
 } from "@jarvis/business";
 import { SupportEmailService, SupportService, SupportTransport, runSupportInboxSyncForAllTenants } from "@jarvis/support";
@@ -123,15 +127,18 @@ import { ConversationEngine } from "./conversation.ts";
 import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
 import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
+import { parseIncidentProducerConfig, startApiIncidentProducers } from "./incident-producers.ts";
+import { createInfraStatusSource } from "./infra-status-source.ts";
 import { createRadarState, radarSweepFailures } from "./evolution-radar.ts";
 import { createEvolutionReportProvider } from "./evolution-source.ts";
 import { createAiMeshReportProvider } from "./ai-mesh-source.ts";
+import { parseKnowledgeClaimWrites } from "./knowledge-flags.ts";
 import { createPushSendGuard, startFollowUpPush } from "./follow-up-push.ts";
 import { buildValueRuntimeFacts } from "./value-facts.ts";
 import { createValueMeasurementSource } from "./value-source.ts";
 import { ChatJobs, MAX_ACTIVE_JOBS, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
-import { createControlCenterRegistry, registerControlCenters } from "./control-center/register.ts";
+import { createControlCenterRegistry, ownerPredicate, registerControlCenters } from "./control-center/register.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { createOwnerControlsService } from "./provider-pause.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
@@ -149,6 +156,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   assertRuntimeCredentialsConfigured();
   // Remediering del 2 (JARVIS-065): ÉN validert eier-identitet for hele prosessen (fail closed uten).
   const owner = ownerConfigOrExit();
+  // WP-D2 (Q-44/Q-48 C): standard `[JARVIS_TENANT_ID]`; `JARVIS_OWNER_EXTRA_TENANTS` er en dormant, eier-satt utvidelse (kun eierens person-id; aldri `system`/delegat/andre personer - men planlagte jobber som kjører som eieren, f.eks. brief og situasjonssveip, er suverene der som i primær-tenanten, PR #326 F1).
+  const ownerTenants = ownerTenantsOrExit(owner);
+  // WP-E1 (UA-5, JARVIS-068): incident-produsentene (AV som standard) - parses tidlig, fordi driftsstatus-verktøyet (`executive.get_infra_status`) og produsent-løkka begge leser den.
+  const incidentProducerConfig = parseIncidentProducerConfig(process.env);
   process.env["JARVIS_PROCESS"] ??= "api"; // D-394 (JARVIS-054): audit-rader merkes med hvilken prosess som skrev dem
   const pool = createPool(configFromEnv());
   // Migrasjoner kjøres av admin-bruker i drift (compose: `migrate`-tjenesten); her antas app-bruker å ha skjema fra før.
@@ -240,7 +251,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // strengest/uendret). Gjelder KUN registrerte infra-tool_id-er (`infraToolIds` under). D-438 (JARVIS-025): modusen er DELT med worker-prosessen via
   // `owner_control_state` og leses LIVE av `PolicyGateway` (ingen cache/timer); varige overganger krever eier-autoritet (`ownerControlAuthority`).
   const infraGate = new InfraExecutionGate(undefined, createPgInfraModeStore(pool), ownerControlAuthority);
-  const infraToolIds = new Set(["github", "docker"]);
+  // WP-E1: SAMME ene sannhet som worker-main.ts (`INFRA_GATED_TOOL_IDS`): github/docker/gce/vercel + de kontrollerte skymålene (cloudflare/langfuse/infisical/postgres_ops).
+  const infraToolIds = new Set(INFRA_GATED_TOOL_IDS);
+  // WP-E1: Postgres-drift (diagnostikk + terminate/cancel/VACUUM) mot Jarvis' EGEN database. Listene er eier-konfigurert vertskonfig (kun `.env` + restart): tom `databases` = ingen
+  // klasse D-skriving; selve tilkoblingen (`JARVIS_POSTGRES_OPS_URL`, en dedikert minste-privilegium-rolle) er en credential og gjør hele connectoren sovende når den mangler.
+  const postgresOpsConfig = parsePostgresOpsConfig({
+    databases: process.env["JARVIS_POSTGRES_OPS_DATABASES"], schemas: process.env["JARVIS_POSTGRES_OPS_SCHEMAS"], protectedRoles: process.env["JARVIS_POSTGRES_OPS_PROTECTED_ROLES"]
+  });
   // Enhetsregister fra databasen (fase 8): godkjenninger verifiseres mot registrerte enhetsnøkler.
   const deviceRegistry = new PgDeviceRegistry(pool, owner.tenant_id);
   // D-222: tidligere `.catch(() => undefined)` på begge steder - en vedvarende
@@ -260,7 +277,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     }));
   }), 30_000).unref();
   // Gjennomgang av PR #316 (M-2): ÉN eier-autoritetskonfigurasjon, delt av Policy Gateway og kontrollsentrene (eier-porten og Authority Center), så de aldri kan være uenige om hvem eieren er.
-  const ownerAuthority: AuthorityConfig = { owner_person_id: owner.owner_person_id, owner_tenants: [owner.tenant_id] };
+  const ownerAuthority: AuthorityConfig = { owner_person_id: owner.owner_person_id, owner_tenants: ownerTenants };
   const policy = new PolicyGateway({
     devices: deviceRegistry,
     nonces: new PgApprovalStore(pool),
@@ -380,7 +397,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const toolGateway = new ToolGateway(pool, policy, readSecretProvider, ownerControls, infisicalSecretProvider, {
     classDPipeline: { enforce: true },
     // Del 3 (JARVIS-003/005): eier-tilkoblede leverandør-credentials bindes til den autentiserte eieren i eierens tenant.
-    credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: [owner.tenant_id], internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) }
+    credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: ownerTenants, internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) }
   });
   // D-104: egen tjeneste over SAMME runtime-pool, ingen ny motor - gjenbruker
   // DEN SAMME `toolGateway`-instansen (registrert med github under) for
@@ -393,7 +410,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const businessService = new BusinessService(pool);
   // UA-3 next slice (D-53): open-loop-deteksjon - egen tjeneste over samme runtime-pool,
   // ingen ny kø/motor (§4/§19/§20 i byggeordren).
-  const openLoopService = new OpenLoopService(pool);
+  // WP-D2 (JARVIS-082): svarfrist («SLA») for support_ticket_overdue. Ugyldig JARVIS_SUPPORT_SLA_HOURS KASTER her (fail closed ved oppstart) - aldri en stille standard.
+  const openLoopService = new OpenLoopService(pool, { supportSla: parseSupportSlaHours(process.env["JARVIS_SUPPORT_SLA_HOURS"]) });
   // UA-3 profiling/scoring-slice (D-61): egen tjeneste over samme runtime-pool,
   // ingen ny kø/motor (§14/§23 i byggeordren) - gjenbruker Business Graph uendret.
   const scoringService = new ScoringService(pool);
@@ -634,6 +652,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     model: memoryEmbedding.model, dim: memoryEmbedding.dim, locality: memoryEmbedding.locality
   }));
   const memoryRetriever = new MemoryRetriever(pool, memoryEmbedding);
+  // WP-D1 (UA-2, JARVIS-060): kunnskapslaget (`KnowledgeRetriever`) er nå koblet til chatten som `knowledge.search` (chattens lese-nivå, klasse A, ubetrodd output). SAMME lokale
+  // embedding-leverandør som minnet og kunnskaps-synken (en sky-provider er avvist ved oppstart av `MemoryWriter`/`MemoryRetriever`; vektorer fra en annen modell filtreres bort i søket).
+  const knowledgeRetriever = new KnowledgeRetriever(pool, memoryEmbedding);
   // D-283 (Tobias direkte i chat, "ja bygg minne-skrivingen", ETTER at D-282
   // sin live-samtale avdekket at minnet var en HELT PASSIV lesestruktur -
   // `MemoryWriter`/ekstraksjon var bygget og enhetstestet, men ALDRI kalt fra
@@ -655,6 +676,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // web/verktøyoutput - som er en helt annen tillitsklasse enn eierens egne
   // ord i en samtale, se `ingest`-kommentaren ved `conversationEngine` under).
   const memoryWriter = new MemoryWriter(pool, memoryEmbedding, new LlmExtractionAdapter(gateway, { maxConcurrent: envInt("JARVIS_MEMORY_EXTRACTION_CONCURRENCY", 1, { min: 1, max: 8 }) }), policy);
+  // WP-D1 (UA-2, Q-26): påstandsverifisering (kildeuavhengighet, ingen autonom nettsøk). Lesingen (`knowledge.get_claim_status`) er alltid på; SKRIVING er AV som standard og slås på med
+  // JARVIS_KNOWLEDGE_CLAIM_WRITES=on (kun den eksakte verdien «on» - alt annet er av). Promotering til etablert kunnskap er KUN et forslag til minnets karantene (`MemoryWriter.propose`, D-367).
+  const knowledgeClaimWrites = parseKnowledgeClaimWrites(process.env["JARVIS_KNOWLEDGE_CLAIM_WRITES"]);
+  const knowledgeClaims = createKnowledgeClaimsPort(
+    new ClaimVerificationService(pool, { default_min_independent_sources: envInt("JARVIS_KNOWLEDGE_CLAIM_MIN_SOURCES", 2, { min: 2, max: 10 }) }),
+    { writes: knowledgeClaimWrites, promotion: memoryWriter }
+  );
   // D-286 (Tobias "alle" - se retention-sweep.ts sitt filhode for full
   // begrunnelse): `SummaryService` FANTES fra før, men ble ALDRI konstruert
   // eller kalt fra noe produksjonssted (D-286 sitt eget funn) - kun
@@ -1020,6 +1048,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         connectorAuth: (connectorId) => (connectorId === "github" ? githubAuth.connectorAuthInfo() : undefined),
         evolution: { report: evolutionReports },
         aiMesh: { report: aiMeshReports },
+        // WP-E1 (UA-5, JARVIS-068): driftsstatus - åpne hendelser (fase/alvorlighet/sannhetsmerking), skymål (helse + siste journalførte endring) og produsentenes helse. Kun lesing under RLS, ingen hemmeligheter.
+        infra: {
+          source: createInfraStatusSource(pool), producers_enabled: incidentProducerConfig.enabled, producers_interval_ms: incidentProducerConfig.intervalMs,
+          producer_names: INCIDENT_PRODUCER_NAMES, mode: async () => (await infraGate.statusDurable()).state.mode
+        },
         controlCenters,
         // WP-H0 (JARVIS-087): kontrollsenterets avbryt-handling bruker den EKSISTERENDE kanselleringsveien (samme `taskService` som chatens «avbryt jobb <id>»).
         tasks: { cancel: (identity, taskId) => taskService.cancel(identity, taskId) },
@@ -1057,10 +1090,30 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // for bakgrunnskontekst - se `memoryRetriever` sin egen filhode-kommentar
       // lenger opp for hvorfor den ble hevet ut hit.
       ...memoryToolDefinitions(new MemorySearchTransport(memoryRetriever, memoryWriter)),
+      // WP-D1 (UA-2): `knowledge.search` over `knowledgeRetriever` (tenant-/space-skopet via RLS som app-rolle; treffene bærer strukturerte sensitivitetsmerker for skyskjermen) og
+      // `knowledge.get_claim_status` (Q-26: kildeverifiseringsstatus, ren lesing). Skrive-handlingene i kildeverifiseringen (registrer/evidens/tilbaketrekking/promotering som FORSLAG til karantenen)
+      // finnes KUN med JARVIS_KNOWLEDGE_CLAIM_WRITES=on, og står uansett på ingen modellflate.
+      ...knowledgeToolDefinitions(new KnowledgeSearchTransport(knowledgeRetriever, knowledgeClaims), { claimWrites: knowledgeClaimWrites }),
       // D-416: delegeringsnivået (opprett lesende bakgrunnsjobb / les jobbstatus) over SAMME `taskService` (policy + kontraktsregler).
       ...tasksDelegateToolDefinitions(new TasksDelegateTransport(taskService, chatJobs)),
       // D-421 (UA0-RUNRATE): run-rate og connector maintenance ledger (kun lesing for modellen; skriving via dashbord-ruten).
-      ...runRateToolDefinitions(new RunRateTransport(new RunRateService(pool)))
+      ...runRateToolDefinitions(new RunRateTransport(new RunRateService(pool))),
+      // WP-E1 (UA-5): de kontrollerte skymålene (Cloudflare nå; Langfuse/Infisical/Postgres-drift legges til i samme fabrikk). SOVENDE uten credential;
+      // skriving krever sone i JARVIS_CLOUDFLARE_MUTATION_ZONES (kun på verten) og går alltid gjennom klasse D-kjeden + InfraExecutionGate.
+      ...cloudControlToolDefinitions(
+        {
+          cloudflare: new CloudflareTransport({ accountId: () => readSecretProvider.get("JARVIS_CLOUDFLARE_ACCOUNT_ID") }),
+          // Langfuse/Infisical/Postgres-drift: basis-URL, klient-id, prosjekt og miljø er ikke-hemmelig VERTSKONFIG (aldri modellstyrt, aldri dashbord-redigerbar);
+          // selve hemmelighetene (secret key / klient-hemmelighet / ops-tilkoblingsstreng) hentes av ToolGateway via credential_ref og når bare transporten.
+          langfuse: new LangfuseTransport({ baseUrl: async () => process.env["LANGFUSE_BASE_URL"] ?? null, publicKey: async () => process.env["LANGFUSE_PUBLIC_KEY"] ?? null }),
+          infisical: new InfisicalTransport({
+            baseUrl: async () => process.env["INFISICAL_URL"] ?? null, clientId: async () => process.env["INFISICAL_CLIENT_ID"] ?? null,
+            projectId: async () => process.env["INFISICAL_PROJECT_ID"] ?? null, environment: async () => process.env["INFISICAL_ENV"] || "dev"
+          }),
+          postgres_ops: new PostgresOpsTransport({ config: postgresOpsConfig })
+        },
+        { cloudflareMutationZones: parseCloudflareMutationZones(process.env["JARVIS_CLOUDFLARE_MUTATION_ZONES"]), postgresOps: postgresOpsConfig, infisicalRotationIds: parseInfisicalRotationIds(process.env["JARVIS_INFISICAL_ROTATION_IDS"]) }
+      )
     ]
   })) toolGateway.register(tool);
   // REMEDIERING DEL 1 (JARVIS-002): `allMeshTools()` (hele registeret) er IKKE
@@ -1316,6 +1369,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // Del 2 (JARVIS-065): den validerte eier-identiteten fyller visningsfeltene i /chat, /dashboard og /voice
     // (aldri autoritet - den kommer fra et verifisert grant). Uten denne svarer sidene 503 `owner_not_configured`.
     owner: { tenant_id: owner.tenant_id, person_id: owner.owner_person_id },
+    // WP-E1 review (M3): eier-porten for incident-livssyklus, reparasjon, driftsoversikt og skymutasjoner = DET SAMME predikatet som kontrollsentrene (`ownerPredicate`), bygget fra DEN SAMME `ownerAuthority`
+    // som Policy Gateway. Ingen egen sammenligning her - uten verdien nektes alle (`owner_required`).
+    ownerGate: ownerPredicate(ownerAuthority),
     identity: identityService,
     devices: deviceService,
     grants: grantService,
@@ -1350,7 +1406,22 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // allowlist, ingen ny autorisasjonsmekanisme her.
     executive: { gateway: toolGateway },
     confirmations: confirmationStore,
-    chatJobs
+    chatJobs,
+    // WP-D2 (JARVIS-044/Q-48): eier-ruten for å opprette en bedrifts-tenant er AV som standard - kun eksakt `true` åpner den (ellers 404). Ingenting provisjoneres automatisk.
+    ...(process.env["JARVIS_BUSINESS_TENANT_PROVISIONING"] === "true" ? { businessTenants: { pool } } : {}),
+    // WP-D2 (UA-3 «churn/product usage»): produktbruk-webhooken er AV som standard - ruten finnes først når eieren har satt JARVIS_PRODUCT_USAGE_TENANT_ID (en bedrifts-tenant;
+    // tjenesten avviser alt annet). Hemmeligheten leses ved HVERT kall via den delte kjeden (Infisical-primær, .env-fallback), slik at rotasjon gjelder umiddelbart; er den
+    // borte eller kortere enn 32 tegn svarer ruten 503 (fail closed).
+    ...(process.env["JARVIS_PRODUCT_USAGE_TENANT_ID"]
+      ? {
+          productUsage: {
+            service: new ProductUsageService(pool, {
+              webhookSecretProvider: async () => (await readSecretProvider.get("JARVIS_PRODUCT_USAGE_WEBHOOK_SECRET")) ?? null,
+              tenantResolver: () => process.env["JARVIS_PRODUCT_USAGE_TENANT_ID"] ?? null
+            })
+          }
+        }
+      : {})
   };
   // D-416: lever ferdige bakgrunnsjobber tilbake til samtalen (nøyaktig én gang). Feil logges, stopper aldri prosessen.
   setInterval(
@@ -1777,6 +1848,16 @@ porter: se docs/RUNTIME_GATES.md`;
       console.error(JSON.stringify({ msg: "connector_health_sweep_completed_with_failures", failed: result.failed }));
     }
   });
+  // WP-E1 (UA-5, JARVIS-068): deterministiske incident-produsenter - bakgrunnsjobber som gir opp, feilede utrullinger, brutte tjenestemål, sviktende tilkoblinger, mislykkede infra-handlinger og
+  // Sentry-feil blir hendelser. KUN observasjon + registrering i Jarvis' egen database (ingen reparasjon, intet eksternt skriv). AV som standard (`JARVIS_INCIDENT_PRODUCERS_ENABLED=true`).
+  if (incidentProducerConfig.enabled) {
+    startApiIncidentProducers({
+      pool, gateway: toolGateway, identity: ownerIdentity, deployments: deploymentService, sloReport: sloReports,
+      config: incidentProducerConfig, incidents: incidentService, tenantId: owner.tenant_id
+    });
+  } else {
+    console.log(JSON.stringify({ msg: "incident_producers_disabled" }));
+  }
   // D-411 (EV-0): KUN observasjon - logger om Safety Constitution er verifisert og om endringsregisterets hash-kjede er hel. Kaster aldri,
   // blokkerer ikke oppstart, og endrer ingenting (selvendring er fortsatt frosset, D-397).
   void checkEv0Boot({

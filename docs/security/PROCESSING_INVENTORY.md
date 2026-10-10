@@ -32,14 +32,14 @@ uten at det er gjort, eller (4) en DPIA-henvisning peker på en fil som ikke fin
 - **Eksterne mottakere:** LLM-leverandører ser utdrag per tur etter sensitivitetsregelen (se behandlere); embeddings lokalt (bge-m3 via Ollama) når konfigurert
 - **Tabeller:** `artifacts`, `brief_seen`, `commitments`, `deadlines`, `decisions`, `embeddings`, `entities`, `events`, `memory_episodes`, `memory_item_entities`, `memory_items`, `memory_links`, `memory_profiles`, `memory_sources`, `memory_spaces`, `memory_vectors`, `memory_versions`, `messages`, `relations`, `summaries`
 
-### Kunnskapslag (dokumenter)
+### Kunnskapslag (dokumenter, entitetsgraf, påstandsverifisering)
 
-- **Formål:** Indekserte dokumenter fra tilkoblede kilder
-- **Memory space/tenant:** per kilde/space (alle tabeller tenant-skopet med FORCE RLS unntatt dokumenterte globale: `scheduler_state`, `capabilities`, `evolution_change_ledger`, `self_modification_requests`, `github_rate_limit_state`, `telegram_poll_state`)
-- **Datakategori:** Dokumentinnhold og chunk-embeddings fra eierens egne kilder
-- **Retensjon:** Tombstones ved sletting i kilden; ellers så lenge kilden er koblet (UA2-DPIA).
-- **Eksterne mottakere:** Kilden (f.eks. Drive) + embedding lokalt
-- **Tabeller:** `knowledge_documents`, `knowledge_embeddings`
+- **Formål:** Indekserte dokumenter fra tilkoblede kilder (Drive inkl. Docs/Sheets/Slides, Obsidian, filsystem, GitHub, e-postvedlegg, møtetranskripter), en deterministisk entitetsgraf («hvilke dokumenter nevner X», «hva henger sammen med Y») og påstandsverifisering (Q-26: hvilke uavhengige kilder støtter en påstand)
+- **Memory space/tenant:** per kilde/space (nøkkelen er (tenant, space, kilde, instans, ekstern id) - samme dokument kan finnes i flere rom, aldri på tvers av dem) (alle tabeller tenant-skopet med FORCE RLS unntatt dokumenterte globale: `scheduler_state`, `capabilities`, `evolution_change_ledger`, `self_modification_requests`, `github_rate_limit_state`, `telegram_poll_state`)
+- **Datakategori:** Dokumentinnhold og chunk-embeddings fra eierens egne kilder, med strukturert sensitivitetsmerke (`normal`/`sensitive`/`special`, standard `sensitive`) og tillitsnivå (standard `untrusted`). Møtetranskripter lagres med deltakernavn/referanse, aldri e-postadresser (maskeres ved lesing). Entitetsgrafen lagrer navn på kjente entiteter, domener, repo-navn og prosjektnøkler; e-postadresser lagres KUN som sha256-nøkkel + maskert visning. Påstandsverifisering lagrer påstandsteksten (≤ 1000 tegn), kildehenvisninger og korte utdrag (≤ 500 tegn).
+- **Retensjon:** Tombstones ved sletting i kilden; kilder med `retention_days` (transkripter m.fl.) fjernes fysisk etter fristen; ellers så lenge kilden er koblet (UA2-DPIA). Entitets- og lenkeradene følger dokumentet (slettes sammen med det, også ved erasure); påstander og evidens beholdes til eieren sletter dem eller tenant/rom slettes (erasure).
+- **Eksterne mottakere:** Kilden (f.eks. Drive) + embedding lokalt. Treff i `knowledge.search` og påstandsstatus i `knowledge.get_claim_status` går til en skymodell KUN når treffet er merket `normal`/`sensitive` og passerer skyskjermen (D-449/D-451); `special` forlater aldri lokal modell. Valgfritt modellassistert entitetsuttrekk er AV som standard og kjører aldri i sky for `special`-dokumenter.
+- **Tabeller:** `claim_evidence`, `claim_verifications`, `knowledge_documents`, `knowledge_embeddings`, `knowledge_entities`, `knowledge_links`
 
 ### Jobber, verktøy og revisjon
 
@@ -66,7 +66,25 @@ uten at det er gjort, eller (4) en DPIA-henvisning peker på en fil som ikke fin
 - **Datakategori:** Personopplysninger om kunder/kontakter (UA3-DPIA)
 - **Retensjon:** Følger kundeforholdet; sletting via erasure-flyten (ikke koblet i produksjon).
 - **Eksterne mottakere:** Gmail/Calendar m.fl. som kilder; ingen sending uten bekreftelse
-- **Tabeller:** `business_activities`, `business_companies`, `business_contacts`, `business_followups`, `business_leads`, `business_open_loops`, `business_opportunities`, `business_scores`, `contract_events`, `contract_obligations`, `contract_versions`, `contracts`, `conversation_channel_links`, `conversation_identities`, `conversation_identity_merges`, `decision_log`, `goal_key_results`, `goals`, `operations_runbooks`, `operations_task_events`, `operations_tasks`, `operations_vendors`, `product_item_events`, `product_items`, `projects`, `risks`, `scenarios`, `support_ticket_events`, `support_tickets`
+- **Tabeller:** `business_activities`, `business_change_log`, `business_companies`, `business_contacts`, `business_followups`, `business_leads`, `business_open_loops`, `business_opportunities`, `business_scores`, `contract_events`, `contract_obligations`, `contract_versions`, `contracts`, `conversation_channel_links`, `conversation_identities`, `conversation_identity_merges`, `decision_log`, `goal_key_results`, `goals`, `operations_runbooks`, `operations_task_events`, `operations_tasks`, `operations_vendors`, `product_item_events`, `product_items`, `projects`, `risks`, `scenarios`, `support_ticket_events`, `support_tickets`
+
+### Produktbruk og churn (kundekonti, WP-D2)
+
+- **Formål:** Deterministisk churn-risiko på KUNDEKONTO-nivå (inaktivitet, fall i bruk, åpne supportsaker, forfalte fakturaer) som forslag/opplysning til eieren - aldri person-profilering og aldri en automatisk handling
+- **Memory space/tenant:** business (kun bedrifts-tenant; alle tabeller tenant-skopet med FORCE RLS)
+- **Datakategori:** Pseudonyme konto-/bruker-referanser (avsenderen hasher selv), funksjonsnøkkel, tidspunkt og antall. Ingen navn, e-post, telefon, IP eller fritekst - kolonner og CHECK-er (090) forbyr det; `user_ref` leses av ingen regel. Se «Produktbruk og churn» i `docs/UA3_BUSINESS_DPIA.md`
+- **Retensjon:** Rå hendelser slettes automatisk etter 400 dager (churn-sveipet; eldre avvises ved innhenting). Vurderinger overskrives ved hver kjøring. «Glem bruker» nuller `user_ref`. Sletting av memory space `business` via erasure-flyten (ikke koblet i produksjon, JARVIS-060)
+- **Eksterne mottakere:** Ingen. Hendelsene kommer inn fra eierens egne produkter (signert webhook, CSV/JSONL); ingenting sendes ut
+- **Tabeller:** `business_churn_assessments`, `product_usage_accounts`, `product_usage_events`
+
+### Open-loop-kalibrering og svarfrist (WP-D2, 091)
+
+- **Formål:** Confidence på åpne loops fra flere signaler, og en kalibreringsrapport (forutsagt mot utfall) som lar eieren justere terskler; svarfrist for supportsaker utledet fra faktiske kundemeldinger
+- **Memory space/tenant:** business (nye kolonner `resolution_outcome`, `confidence_basis`, `closure_history` på `business_open_loops` - ingen ny tabell; samme FORCE RLS)
+- **Datakategori:** Ingen persondata i de nye kolonnene - utfallskategori (`acted`/`dismissed`/`condition_cleared`), tall (confidence, justeringer) og tidspunkt. Svarfristen leser eksisterende `support_ticket_events` (hendelsestype og tidspunkt) og lagrer kun en frist på loopen. Se «Confidence-kalibrering og svarfrist» i `docs/UA3_BUSINESS_DPIA.md`
+- **Retensjon:** Følger loopen (som dens øvrige felt); `closure_history` er begrenset til de 100 nyeste merkede lukkingene per loop. Sletting via memory space-sletting (erasure-flyten, ikke koblet i produksjon, JARVIS-060)
+- **Eksterne mottakere:** Ingen
+- **Tabeller:** (ingen nye - `business_open_loops`, `support_ticket_events` er oppført under «Forretning»)
 
 ### Vekst og markedsføring
 
@@ -92,9 +110,9 @@ uten at det er gjort, eller (4) en DPIA-henvisning peker på en fil som ikke fin
 - **Formål:** Hendelser, diagnoser og infrastrukturkjøringer
 - **Memory space/tenant:** system (alle tabeller tenant-skopet med FORCE RLS unntatt dokumenterte globale: `scheduler_state`, `capabilities`, `evolution_change_ledger`, `self_modification_requests`, `github_rate_limit_state`, `telegram_poll_state`)
 - **Datakategori:** Tekniske data (logger, diagnoser); kan inneholde stedsnavn/IP
-- **Retensjon:** Følger hendelsen; ingen automatisk sletting ennå.
+- **Retensjon:** Følger hendelsen; ingen automatisk sletting ennå. Overgangshistorikken (`incident_transitions`, WP-E1: hvem/når/hvorfor per statusendring, kun sanert kort årsak og pekere) er append-only og forsvinner kun sammen med hendelsen (erasure-kaskade). Produsent-helsen (`incident_producer_runs`) er driftsstatus per tenant uten innhold.
 - **Eksterne mottakere:** Sentry/Grafana m.fl. kun hvis koblet
-- **Tabeller:** `incident_diagnoses`, `incident_diagnosis_evidence`, `incident_evidence`, `incident_repair_tasks`, `incidents`, `infra_executions`, `infra_recovery_actions`
+- **Tabeller:** `incident_diagnoses`, `incident_diagnosis_evidence`, `incident_evidence`, `incident_producer_runs`, `incident_repair_tasks`, `incident_transitions`, `incidents`, `infra_executions`, `infra_recovery_actions`
 
 ### Situasjonsmotor og kontroll
 
@@ -166,6 +184,7 @@ trening, retensjon) er **IKKE VERIFISERT** for alle skyleverandører under, med 
 | `google_drive` | Google Drive/Docs | tool_gateway | ekstern leverandør (eierens konto); IKKE VERIFISERT |
 | `telegram` | Telegram | tool_gateway | ekstern leverandør (eierens konto); IKKE VERIFISERT |
 | `vercel` | Vercel | tool_gateway | ekstern leverandør (eierens konto); IKKE VERIFISERT |
+| `cloudflare` | Cloudflare | tool_gateway | ekstern leverandør (eierens konto; DNS/WAF/sone-innstillinger/cache - Jarvis sender kun infrastrukturkonfigurasjon og API-token, aldri samtale-/minneinnhold; egen rad i `PROCESSOR_REGION_MATRIX.md`); IKKE VERIFISERT |
 | `anthropic` | Anthropic API | model_provider | se 2a; IKKE VERIFISERT |
 | `openai` | OpenAI API | model_provider | se 2a; IKKE VERIFISERT |
 | `gemini` | Gemini API | model_provider | se 2a; IKKE VERIFISERT |

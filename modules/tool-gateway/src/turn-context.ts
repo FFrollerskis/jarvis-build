@@ -45,8 +45,15 @@ export function createTurnContext(surface: Surface, userMessage: string): TurnCo
   return { user_message: userMessage, surface, taint, limits: SURFACE_LIMITS[surface], calls: { total: 0 } };
 }
 
+/**
+ * WP-E1 (UA-5, JARVIS-068): driftsstatus, åpne hendelser og skyen -> KUN `executive.get_infra_status` (per verktøy, ikke hele executive-familien). Etter sammenslåingen med D4/H0/C4 har familien så mange lesinger at de
+ * utkonkurrerte driftsstatusen innenfor `max_tools_per_round` når alle traff på samme familie-regex; et eget treff på nøyaktig dette verktøyet gjør utvalget både smalere og stabilt.
+ */
+const INFRA_STATUS_INTENT = /(åpne hendelser|hendelsesstatus|incident|driftsstatus|status på driften|infra-?status|skystatus|cloud-?status|er noe nede|hva er nede|produksjonsfeil|feilet utrulling|hvordan går det med skyen)/i;
+
 /** Intensjons-nøkkelord per handling. Kun handlinger som er tildelt flaten kan velges - dette er IKKE en autorisasjon, bare utvalg. */
 const INTENT_KEYWORDS: Readonly<Record<string, RegExp>> = {
+  "executive.get_infra_status": INFRA_STATUS_INTENT,
   "email.read_inbox": /(e-?post|\bmail\b|innboks|inbox|melding|brev)/i,
   "calendar.read_events": /(kalender|møte|avtale|timeplan|calendar|schedule|\bi dag\b|dagens|\bi morgen\b)/i,
   "github.read_issues": /(github|issue|repo\b|pull request|\bpr\b|\bbug\b|kodebase)/i,
@@ -98,6 +105,9 @@ const TOOL_INTENTS: Readonly<Record<string, RegExp>> = {
   tasks: /(bakgrunn|deleger|sub-?agent|\bagent|\bjobb(en|er)?\b|undersøk|utred|research|analyser|lag en rapport|gjør (det|dette) mens|mens jeg )/i,
   // D-421: kostnad/run-rate («hva koster du», «hvor mye har du brukt»).
   run_rate: /(hva koster (du|det)|run-?rate|hvor mye (har (du|jeg) )?(brukt|koster)|api-?regning|regningen|modellkostnad|vedlikeholdstid|connector-?vedlikehold)/i,
+  // WP-D1 (UA-2): kunnskapslaget («hva står det i dokumentene/notatene/referatene om …»). BEVISST smalt: kun eksplisitte kunnskaps-/dokumentfraser, ikke enkeltordene «dokument»/«fil»/«notat»
+  // som allerede velger Drive/Notion - en tilfeldig ordtreff skal ikke gi turen kunnskapsverktøyet (og dermed skyruten, for det er et ekte verktøy og ikke minne-reserven, Q-53 A).
+  knowledge: /(kunnskapsbas|kunnskapslag|kunnskapsgraf|dokumentbas|obsidian|\bvault|møtereferat|\breferat(?:et|ene|er)?\b|transkrip(?:t|sjon)|(?:i|fra|blant) (?:alle )?(?:dokumentene|notatene|filene|referatene|vedleggene)(?: mine)?\b|søk(?:e)? (?:i|etter) (?:dokument|notat|fil|referat|vedlegg|kunnskap)|finn (?:i|det i|ut i) (?:dokument|notat|fil|referat|vedlegg)|står det noe om|hvilke (?:dokumenter|notater|filer|referater|vedlegg) (?:nevner|omtaler|handler om|inneholder)|hva henger sammen med|faktasjekk|kildeverifisering|verifiseringsstatus|er (?:det|dette|påstanden) (?:bekreftet|verifisert)|påstanden (?:om|at))/i,
   finance_neonomics: /(bank|konto|saldo|neonomics|transaksjon|samtykke|kontoutskrift|innskudd|uttak)/i,
   finance_stripe: /(stripe|kortbetaling|refusjon)/i,
   finance_vipps: /(vipps)/i,
@@ -120,7 +130,8 @@ const TOOL_INTENTS: Readonly<Record<string, RegExp>> = {
   pipedrive: /(pipedrive|\bcrm\b|pipeline|\bdeal(s|en|ene)?\b|salgsmulighet)/i,
   contract: /(kontrakt|avtaler\b|fornyelse|oppsigelse|forpliktelse|bindingstid)/i,
   support: /(support|billett|ticket|kundehenvendelse|kundesak|henvendelse)/i,
-  business: /(forretning|selskap|bedrift|åpne saker|oppfølging|metrikk|\blead(s|en|ene)?\b|mulighet(er|ene)?\b|brief)/i,
+  // WP-D2: «muligheten» (bestemt entall) manglet - «lukk salgsmuligheten» traff ingen verktøy; + churn/produktbruk (kundeforhold-signalene).
+  business: /(forretning|selskap|bedrift|åpne saker|oppfølging|metrikk|\blead(s|en|ene)?\b|mulighet(en|er|ene)?\b|brief|churn|frafall|produktbruk|kalibrer|treffsikker|konfidens|lukk(e|et)? (saken|loopen)|risikerer vi|mister vi|miste (en |våre |noen |flere )?kund|kundeavgang|kunderisiko|produktkonto|kundekonto)/i,
   operations: /(drift|leverandør|runbook|driftsoppgave|vedlikehold)/i,
   product: /(produkt(et|er|ene)?\b|feature|funksjon(er|ene)?\b|roadmap)/i,
   conversation_graph: /(samtalegraf|hvem er .* (på|i) (slack|discord|telegram|e-?post)|identitet|kanalkobling|på tvers av kanal)/i,
@@ -180,15 +191,15 @@ function toolIntent(tool_id: string): RegExp | null {
   return cached;
 }
 /** D-382: handlingsnivået velges kun når meldingen uttrykker en handling (ikke bare nevner tjenesten). */
-const ACTION_VERBS = /(send|sende|opprett|lag\b|lage|legg (til|inn)|oppdater|endre|flytt|slett|fjern|arkiver|lukk|åpne? (igjen|på nytt)|svar\b|svare|synk|synkroniser|book|bestill|sett\b|registrer|fullfør|marker|tildel|eskaler|avbryt|kanseller|pause|gjenoppta|aktiver|deaktiver|kommenter|publiser|kjør|start|stopp|create|update|add|move|delete|remove|reply|sync|close|assign|schedule|post|slå (på|av)|skru (på|av|opp|ned)|tenn|slukk|slokk|dimm|lås (opp|døra|døren)|lås\b|spill (av )?|sett på|legg (i|til) kø|rull tilbake|promoter)/i;
+const ACTION_VERBS = /(send|sende|opprett|lag\b|lage|legg (til|inn)|oppdater|endre|flytt|slett|fjern|arkiver|lukk|koble|kople|knytt|åpne? (igjen|på nytt)|svar\b|svare|synk|synkroniser|book|bestill|sett\b|registrer|fullfør|marker|tildel|eskaler|avbryt|kanseller|pause|gjenoppta|aktiver|deaktiver|kommenter|publiser|kjør|start|stopp|create|update|add|move|delete|remove|reply|sync|close|assign|schedule|post|slå (på|av)|skru (på|av|opp|ned)|tenn|slukk|slokk|dimm|lås (opp|døra|døren)|lås\b|spill (av )?|sett på|legg (i|til) kø|rull tilbake|promoter)/i;
 /** D-382: handlingsord → handlingsnavn-prefiks, så den handlingen eieren faktisk ber om rangeres først innenfor budsjettet. */
 const VERB_TO_ACTION: ReadonlyArray<[RegExp, RegExp]> = [
   [/synk|synkroniser|sync|avstem/i, /^(sync|reconcile)/],
   [/opprett|lag\b|lage|legg (til|inn)|registrer|create|add|book|bestill|ny\b/i, /^(create|add|append|record|register|ingest)/],
-  [/oppdater|endre|sett\b|update|set\b|marker|tildel|assign|link/i, /^(update|set|assign|link|transition|rename)/],
+  [/oppdater|endre|sett\b|update|set\b|marker|tildel|assign|link|koble|kople|knytt/i, /^(update|set|assign|link|transition|rename)/],
   [/slett|fjern|arkiver|delete|remove|trash|papirkurv/i, /^(trash|delete|remove|archive)/],
   [/send|svar|kommenter|notify|reply|post|varsle|si fra/i, /^(notify|send|reply|comment|publish|dispatch)/],
-  [/lukk|fullfør|close|complete|ferdig/i, /^(close|complete)/],
+  [/lukk|fullfør|close|complete|ferdig/i, /^(close|complete|resolve)/],
   [/åpne? (igjen|på nytt)|reopen|gjenoppta|resume/i, /^(reopen|resume)/],
   [/flytt|move/i, /^move/],
   [/pause|avbryt|kanseller|cancel|stopp/i, /^(pause|cancel|defer)/],
@@ -227,7 +238,8 @@ export function isMetaComplaint(text: string): boolean {
 
 const OVERVIEW = /(oversikt|hva skjer|brief|morgenbrief|hva har jeg)/i;
 const OVERVIEW_KEYS = new Set(["email.read_inbox", "calendar.read_events", "github.read_issues"]);
-const ALWAYS_PRIORITY = ["memory.search", "email.read_inbox", "calendar.read_events", "github.read_issues", "executive.get_capability_status", "memory.propose"];
+// WP-D1: `knowledge.search` rangeres rett etter minnesøket NÅR den er valgt (smale nøkkelord) - ellers ville tjenester med mange lese-handlinger (kontrakter, forretning) fylt verktøybudsjettet først.
+const ALWAYS_PRIORITY = ["memory.search", "knowledge.search", "email.read_inbox", "calendar.read_events", "github.read_issues", "executive.get_capability_status", "memory.propose"];
 
 export interface SurfaceSelection {
   selected: MeshToolMapping[];

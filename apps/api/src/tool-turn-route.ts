@@ -181,6 +181,7 @@ const SYSTEM_NOTE_PREFIXES: readonly string[] = [
   "Dagstaket for sky på",
   "Svart på skymodellen uten",
   "Deler av minnesøket ble holdt tilbake",
+  "Deler av kunnskapssøket ble holdt tilbake",
   "Reservemodell brukt:"
 ];
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

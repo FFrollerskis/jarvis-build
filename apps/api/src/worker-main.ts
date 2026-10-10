@@ -2,7 +2,8 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import "./normalize-env.ts";
 import { envInt, systemIdentity } from "@jarvis/contracts";
-import { ownerConfigOrExit } from "./owner.ts";
+import { ownerConfigOrExit, ownerTenantsOrExit } from "./owner.ts";
+import { createWatchdogIncidentBridge, parseIncidentProducerConfig } from "./incident-producers.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, ConfirmationStore, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway, createPgInfraModeStore } from "@jarvis/policy";
@@ -11,9 +12,11 @@ import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubTransport, createGitHubAuth, GmailTransport,
   GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, MeshToolExecutor, resolveModelToolSurface, chatReadTierMeshTools, BACKGROUND_GITHUB_READ, PgGithubRateLimitStore,
   CHAT_ACT_TIER, CHAT_READ_TIER, MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, memoryToolDefinitions,
-  ToolGateway, assertManifestInvariants, buildToolManifest, createTurnContext, driveTransportsIfConfigured, firstWaveTools, jobIdentityFor, telegramClassDNotifier, parseDockerMutationTargets, parseGceMutationTargets
+  ToolGateway, assertManifestInvariants, buildToolManifest, createTurnContext, driveTransportsIfConfigured, firstWaveTools, jobIdentityFor, telegramClassDNotifier, parseDockerMutationTargets, parseGceMutationTargets,
+  INFRA_GATED_TOOL_IDS,
+  configuredGithubRepo, githubReposUnlocked
 } from "@jarvis/tool-gateway";
-import { BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
+import { BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService, parseSupportSlaHours } from "@jarvis/business";
 import { SupportService, SupportTransport } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
 import { ProductService, ProductTransport } from "@jarvis/product";
@@ -51,7 +54,10 @@ import {
   resolveJobSandboxRunner,
   withSecretRedaction
 } from "@jarvis/tasks";
-import { KnowledgeSourceRegistry, emailIngestHandler } from "@jarvis/knowledge";
+import {
+  KnowledgeEntityIndexer, KnowledgeLlmEntityPass, KnowledgeSourceRegistry, KnowledgeSourcesConfigError, KnowledgeSyncRunner, LlmEntityExtractor, ModelGatewayVisionExtractor, emailIngestHandler, ocrSensitivityForSource,
+  parseEntityLlmMode, parseFilesystemRoots, parseKnowledgeSources, verifyFilesystemRoot, type ConfiguredKnowledgeSource
+} from "@jarvis/knowledge";
 import { LlmExtractionAdapter, MemoryRetriever, MemoryWriter, createEmbeddingProviderFromEnv } from "@jarvis/memory";
 import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "@jarvis/executive";
 import {
@@ -72,6 +78,8 @@ try {
 }
 // Remediering del 2 (JARVIS-065): ÉN validert eier-identitet (fail closed uten) - ingen env-defaults for eier/tenant.
 const owner = ownerConfigOrExit();
+// WP-D2 (Q-44/Q-48 C): samme dormante eier-tenant-liste som api (standard `[JARVIS_TENANT_ID]`).
+const ownerTenants = ownerTenantsOrExit(owner);
 process.env["JARVIS_PROCESS"] ??= "worker"; // D-394 (JARVIS-054): audit-rader merkes med hvilken prosess som skrev dem
 const pool = createPool(configFromEnv());
 try {
@@ -138,8 +146,9 @@ await ownerControls.restore();
 // api-prosessen via `owner_control_state` og leses LIVE av `PolicyGateway` (en pause via api-ets `/infra/pause` stanser derfor også workeren umiddelbart).
 // Workeren har ingen eier-vendt rute som endrer modusen; autoriteten settes likevel likt, så en varig overgang aldri kan skje uten eier.
 const infraGate = new InfraExecutionGate(undefined, createPgInfraModeStore(pool), ownerControlAuthority);
-// D-105: "docker" lagt til (samme rasjonale som apps/api/src/main.ts).
-const infraToolIds = new Set(["github", "docker"]);
+// D-105: "docker" lagt til (samme rasjonale som apps/api/src/main.ts). WP-E1: SAMME ene sannhet som api (`INFRA_GATED_TOOL_IDS`) - ellers kunne en pause
+// stanse et verktøy i api-prosessen men ikke i workeren (JARVIS-025).
+const infraToolIds = new Set(INFRA_GATED_TOOL_IDS);
 const deviceRegistry = new PgDeviceRegistry(pool, owner.tenant_id);
 // D-222: samme fiks som apps/api/src/main.ts - se den for full begrunnelse.
 await deviceRegistry.refresh().catch((err) => {
@@ -160,7 +169,7 @@ const policy = new PolicyGateway({
   infraToolIds,
   authority: {
     owner_person_id: owner.owner_person_id,
-    owner_tenants: [owner.tenant_id]
+    owner_tenants: ownerTenants
   }
 });
 // D-181 (BLOCKER B1, D184): hoistet til en NAVNGITT konstant (var tidligere
@@ -188,12 +197,19 @@ const toolSecretProvider = githubAuth.secretProvider(baseToolSecretProvider);
 // Del 3 (JARVIS-013/043): samme HÅRDE klasse D-pipeline som API-prosessen (API/worker-parity); varsleren bindes rett under.
 const toolGateway = new ToolGateway(pool, policy, toolSecretProvider, ownerControls, infisicalSecretProvider, {
   classDPipeline: { enforce: true },
-  credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: [owner.tenant_id], internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) }
+  credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: ownerTenants, internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) }
 });
 const businessService = new BusinessService(pool);
 // UA-3 next slice (D-53): samme OpenLoopService-wiring som api - workeren sin
 // mesh-tool-executor maa kunne kalle de nye business-handlingene identisk.
-const openLoopService = new OpenLoopService(pool);
+// WP-D2 (JARVIS-082): samme SLA-policy som api (API/worker-parity) - ugyldig JARVIS_SUPPORT_SLA_HOURS stopper oppstarten (fail closed), aldri en stille standard.
+let supportSla: ReturnType<typeof parseSupportSlaHours>;
+try {
+  supportSla = parseSupportSlaHours(process.env["JARVIS_SUPPORT_SLA_HOURS"]);
+} catch (err) {
+  failStartup(err);
+}
+const openLoopService = new OpenLoopService(pool, { supportSla });
 // UA-3 profiling/scoring-slice (D-61): samme ScoringService-wiring som api -
 // workeren sin mesh-tool-executor maa kunne kalle score-handlingene identisk.
 const scoringService = new ScoringService(pool);
@@ -582,6 +598,12 @@ watchdog.register(
 );
 // D-395 (JARVIS-039): varsel ved varselgrensen (tidligere kun et internt nivå som aldri nådde eieren).
 watchdog.register(costWarningCheck(pool, owner.tenant_id, budgetConfigFromEnv().warn_ore));
+// WP-E1 (UA-5, JARVIS-068): vakthundens fullførte tikk mates til incident-produsenten (en feilende sjekk -> hendelse, en senere vellykket kjøring av SAMME sjekk -> re-målt som borte).
+// AV som standard (`JARVIS_INCIDENT_PRODUCERS_ENABLED=true`); observatøren er fire-and-forget og kan aldri påvirke vakthunden eller varslingen.
+if (parseIncidentProducerConfig(process.env).enabled) {
+  const watchdogIncidents = createWatchdogIncidentBridge({ pool, tenantId: owner.tenant_id });
+  watchdog.setObserver((report) => watchdogIncidents.observe(report));
+}
 const WATCHDOG_INTERVAL_MS = parseWatchdogIntervalMs(process.env["JARVIS_WATCHDOG_INTERVAL_MS"]);
 setInterval(
   () =>
@@ -718,6 +740,60 @@ worker.register(
     embeddings: createEmbeddingProviderFromEnv(), visionGateway: gateway, registry: knowledgeRegistry
   })
 );
+
+// WP-D1 (UA-2, JARVIS-032): DEKLARATIVE kunnskapskilder (`JARVIS_KNOWLEDGE_SOURCES`, en JSON-liste) - DVALE til eieren har satt dem. Konfigurasjonen er alt-eller-ingenting: ugyldig/ufullstendig
+// konfig (eller en ugyldig `JARVIS_KNOWLEDGE_FS_ROOTS`) forkastes HØYLYTT og LUKKET - ingen kilde registreres, aldri en delvis liste - uten å velte resten av workeren (kodejobber, executive og watchdog
+// skal ikke stoppe pga. en skrivefeil i en valgfri konfig). Tenant kommer fra eier-identiteten, aldri fra konfigurasjonen. Filsystemkilder må ligge innenfor `JARVIS_KNOWLEDGE_FS_ROOTS`, GitHub er låst
+// til `JARVIS_GITHUB_REPO`, og Drive kjører først når Drive-transporten faktisk er registrert (OAuth-credential i hvelvet). Se docs/runbooks/KNOWLEDGE_SOURCES.md.
+let configuredKnowledgeSources: ConfiguredKnowledgeSource[] = [];
+let knowledgeFsRoots: string[] = [];
+try {
+  knowledgeFsRoots = parseFilesystemRoots(process.env["JARVIS_KNOWLEDGE_FS_ROOTS"]);
+  configuredKnowledgeSources = parseKnowledgeSources(process.env["JARVIS_KNOWLEDGE_SOURCES"], {
+    tenant_id: owner.tenant_id,
+    fs_roots: knowledgeFsRoots,
+    // D-340: samme tom-streng-.env-bug - JARVIS_GOOGLE_ACCOUNT="" i .env skal falle til defaulten.
+    google_account: process.env["JARVIS_GOOGLE_ACCOUNT"] || "post@tsworkflow.com",
+    github_repo: configuredGithubRepo(),
+    github_unlocked: githubReposUnlocked(),
+    // `email:inbox` (personal) eies av koden over (`knowledge-ingest-email`) og kan ikke gjenbrukes av konfigurasjonen.
+    reserved: [{ memory_space: "personal", id: "email:inbox" }]
+  });
+} catch (err) {
+  configuredKnowledgeSources = [];
+  console.error(JSON.stringify({
+    msg: "knowledge_sources_config_rejected", registered: 0,
+    problems: err instanceof KnowledgeSourcesConfigError ? err.problems : [(err as Error).message.slice(0, 200)],
+    action: "ingen kunnskapskilder er registrert; rett JARVIS_KNOWLEDGE_SOURCES/JARVIS_KNOWLEDGE_FS_ROOTS og start workeren på nytt"
+  }));
+}
+const knowledgeEntityLlmMode = parseEntityLlmMode(process.env["JARVIS_KNOWLEDGE_ENTITY_LLM"]);
+const configuredKnowledgeRegistry = new KnowledgeSourceRegistry(configuredKnowledgeSources.map((source) => source.config));
+// Én systemidentitet per oppstart (unik sesjons-id i revisjonsloggen); rommet settes per kilde.
+const knowledgeSyncIdentity = systemIdentity(owner, "knowledge-sync", { channel: "api" });
+const knowledgeSyncRunner = new KnowledgeSyncRunner({
+  pool, embeddings: memoryEmbedding, sources: configuredKnowledgeSources,
+  identityFor: (source) => ({ ...knowledgeSyncIdentity, memory_space_id: source.memory_space }),
+  buildSource: (source, identity) => configuredKnowledgeRegistry.build(source.config.tenant_id, source.memory_space, source.id, {
+    toolGateway, identity, ocr: new ModelGatewayVisionExtractor(gateway, source.config.tenant_id, `knowledge-sync-${source.id}`, ocrSensitivityForSource(source))
+  }),
+  preflight: async (source) => {
+    // Filsystem-baserte kilder: den SANNE roten må fortsatt ligge innenfor en SANN allowlistet basemappe (en rot kan ha blitt en symlink ut av den).
+    if (source.config.source_type === "filesystem" || source.config.source_type === "meeting_transcript") return verifyFilesystemRoot(source.config.root_path, knowledgeFsRoots);
+    if (source.config.source_type === "obsidian") return verifyFilesystemRoot(source.config.vault_root, knowledgeFsRoots);
+    // Drive: først når Drive-transporten er registrert (OAuth-credentialen finnes). Uten den hoppes kilden over og prøves igjen - aldri en synk som feiler på auth og ser ut som «ingenting finnes».
+    if (source.config.source_type === "google_drive" && !toolGateway.list().some((tool) => tool.tool_id === "drive")) return "drive_credentials_missing";
+    return null;
+  },
+  // Den DETERMINISTISKE entitetsindekseringen er alltid på for konfigurerte kilder (lokal, ingen modellkall). Det modellassisterte passet er AV som standard (JARVIS_KNOWLEDGE_ENTITY_LLM=off|local|on).
+  entityIndexer: new KnowledgeEntityIndexer(),
+  llmPass: knowledgeEntityLlmMode === "off" ? undefined : new KnowledgeLlmEntityPass(pool, new LlmEntityExtractor(gateway, { mode: knowledgeEntityLlmMode }))
+});
+knowledgeSyncRunner.start();
+console.log(JSON.stringify({
+  msg: "knowledge_sources", configured: configuredKnowledgeSources.length, fs_roots: knowledgeFsRoots.length, entity_llm: knowledgeEntityLlmMode,
+  kinds: configuredKnowledgeSources.map((source) => source.kind)
+}));
 
 console.log(JSON.stringify({ msg: "jarvis-worker started", worker_id: worker.workerId, sandbox: runner.name }));
 setInterval(

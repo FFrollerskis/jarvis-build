@@ -28,7 +28,7 @@ import { DEFAULT_PERSONALITY_CONFIG, type PersonalityConfig } from "@jarvis/self
 import type { TaskService, InProcessWorker } from "@jarvis/tasks";
 import { createTurnContext, surfaceForChannel, type CouncilSubmitResult, type Surface, type SurfaceLimits, type TurnContext } from "@jarvis/tool-gateway";
 import { randomUUID } from "node:crypto";
-import { chatWithheldNote, cloudScreenedExecutor, servedByCloudModel } from "./cloud-tool-screen.ts";
+import { chatKnowledgeWithheldNote, chatWithheldNote, cloudScreenedExecutor, servedByCloudModel } from "./cloud-tool-screen.ts";
 import { LOCAL_FALLBACK_ERROR_KINDS, cloudHistoryNote, isMemoryReserveOnly, jobLocalOnlyNote, localOnlyNote, reserveModelNote, stripSourceMarkerIds, stripSystemNotes } from "./tool-turn-route.ts";
 import { DEFAULT_CHAT_CANDIDATES, type ChatCandidates } from "./chat-candidates.ts";
 
@@ -674,11 +674,13 @@ export class ConversationEngine {
       // #228 (D-450): verktøyresultatene går videre til modellen som betjener neste runde. Betjenes den av en SKYMODELL (avgjort per kall av leverandøren adapteren stempler, ikke av ruten vi valgte - det dekker også
       // en fallback til en annen skyleverandør og eierens egne modellvalg), holdes minnetreff merket særlig sensitive tilbake (samme port som delegerte jobber, D-449). Lokale modeller får se alt.
       let withheldFromCloud = 0;
+      let withheldKnowledgeFromCloud = 0; // WP-D1: kunnskapstreff har egen merknad (egen prefiks i SYSTEM_NOTE_PREFIXES)
       const screenedExecutor = (): ToolExecutor =>
         cloudScreenedExecutor(
           this.deps.tools!.executorFor(identity, turn),
           ({ tool, withheld }) => {
-            withheldFromCloud += withheld;
+            if (tool.startsWith("knowledge.")) withheldKnowledgeFromCloud += withheld;
+            else withheldFromCloud += withheld;
             console.log(JSON.stringify({ msg: "d450_chat_cloud_tool_output_withheld", tool, withheld }));
           },
           servedByCloudModel
@@ -799,7 +801,7 @@ export class ConversationEngine {
       // D-432 / D-447: er sky-ruten stoppet av dagstaket eller av sensitivitetsregelen, sier svaret det (aldri en stille nedgradering). Q-51 D / #228: det samme når skyturen ble sendt uten noen meldinger, eller
       // når minnetreff ble holdt tilbake fra skymodellen. Ikke på tale (samme som D-447); loggen har alltid kategoriene.
       const variantNote = cloudVariant !== undefined && servedByVariant && cloudVariant.withheld > 0 && surface !== "voice" ? cloudHistoryNote(cloudVariant.withheld) : "";
-      const withheldNote = withheldFromCloud > 0 && surface !== "voice" ? chatWithheldNote() : "";
+      const withheldNote = surface !== "voice" ? `${withheldFromCloud > 0 ? chatWithheldNote() : ""}${withheldKnowledgeFromCloud > 0 ? chatKnowledgeWithheldNote() : ""}` : "";
       // WP-D4 (JARVIS-033): en reserve svarte (kjedefailover eller siste reserve) - aldri usynlig. Ikke på tale (samme som de øvrige rutemerknadene); loggen har alltid navnene (aldri innhold).
       // L11 (gjennomgang av PR #315): en verktøytur har flere runder, og ruten kan skifte mellom dem. Skyleverandører som betjente en TIDLIGERE runde enn den som ga svaret (gatewayen setter `served_providers` når flere betjente turen)
       // nevnes også, og en leverandør som feilet i én runde men ga det siste svaret utløser fortsatt merknaden når en skyreserve tok en annen runde.

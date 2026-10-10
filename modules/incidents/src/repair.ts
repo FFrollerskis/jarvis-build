@@ -1,22 +1,33 @@
 import type pg from "pg";
 import type { IdentityContext, JobContract, MemorySpace } from "@jarvis/contracts";
 import { withTenantTransaction } from "@jarvis/core";
-import type { TaskService } from "@jarvis/tasks";
+import { GitPolicyError, assertTestCommand, type TaskService } from "@jarvis/tasks";
 import type { IncidentService } from "./service.ts";
 import type { Incident } from "./types.ts";
 
 export interface ProposeRepairTaskInput {
   repo_url: string;
   goal: string;
-  test_command?: string[];
+  /** WP-E1 (JARVIS-068): PÅKREVD og validert mot den kjente testløper-allowlisten FØR noe sendes inn. Tidligere ble `?? []` til Jarvis' interne standard (`node -e process.exit(0)`) - en vakuøs
+   * «test» som alltid består, så en reparasjon kunne meldes `tests: passed` uten at noen test var kjørt. Den uavhengige testporten er hele poenget med reparasjonsflyten. */
+  test_command: string[];
   /** Krever `allowed_tools: ["github"]` for at D-95 PR-publisering skal skje - uten den fullføres jobben likevel (skipped_not_allowed, D-95-presedens uendret). */
   publishPr?: boolean;
   model_budget_ore?: number;
 }
 
+/**
+ * Gjennomgang av PR #324 (M3): SERVERENS tak for modellbudsjettet til en reparasjonsjobb (øre) - og standarden. Kalleren kan senke budsjettet, aldri øke det: `model_budget_ore` kom tidligere
+ * urørt fra HTTP-kroppen inn i jobbkontrakten, så en eier-grant kunne bestille en vilkårlig dyr agentkjøring. Over taket avvises forespørselen (`repair_budget_exceeds_cap`), den klippes ikke stille.
+ */
+export const REPAIR_MODEL_BUDGET_CAP_ORE = 20_000;
+
 export type ProposeRepairTaskResult =
   | { ok: true; task_id: string }
   | { ok: false; reason: string };
+
+/** Statuser der det gir mening å foreslå (et nytt forsøk på) en reparasjon. `repair_proposed` tillates for nytt forsøk etter en feilet jobb; en løst/lukket hendelse eller et pågående tiltak avvises. */
+const REPAIRABLE: ReadonlySet<Incident["status"]> = new Set(["open", "diagnosing", "repair_proposed"]);
 
 /**
  * D-104 Part C: hendelse -> DEN EKSISTERENDE, allerede live-verifiserte
@@ -35,6 +46,11 @@ export type ProposeRepairTaskResult =
  * merget). Hendelsen flyttes til `repair_proposed` KUN ved en vellykket
  * innsending - en avvist jobb (policy/kontrakt-feil) endrer ALDRI
  * hendelsens status.
+ *
+ * WP-E1 (JARVIS-068) - gjort sikker FØR noe betales for:
+ *  - `test_command` er påkrevd og valideres (kjent testløper) FØR innsending - aldri en vakuøs standardtest.
+ *  - Hendelsen må være i en reparerbar status (ikke løst/lukket/avbøting pågår), og det kan ikke finnes en uferdig reparasjonsjobb fra før (dobbeltklikk/retry ga to betalte agentkjøringer).
+ *  - Statusovergangen går gjennom `transition()` (aktør `repair`, årsak + peker på jobben) i stedet for en anonym statusskriving.
  */
 export async function proposeRepairTask(
   deps: { taskService: TaskService; pool: pg.Pool; incidents: IncidentService },
@@ -43,6 +59,26 @@ export async function proposeRepairTask(
   incident: Incident,
   input: ProposeRepairTaskInput
 ): Promise<ProposeRepairTaskResult> {
+  let testCommand: string[];
+  try {
+    testCommand = assertTestCommand(input.test_command);
+  } catch (err) {
+    return { ok: false, reason: err instanceof GitPolicyError ? `repair_${err.reason}` : "repair_test_command_invalid" };
+  }
+  const budget = input.model_budget_ore ?? REPAIR_MODEL_BUDGET_CAP_ORE;
+  if (typeof budget !== "number" || !Number.isInteger(budget) || budget < 0) return { ok: false, reason: "repair_budget_invalid" };
+  if (budget > REPAIR_MODEL_BUDGET_CAP_ORE) return { ok: false, reason: "repair_budget_exceeds_cap" };
+  if (!REPAIRABLE.has(incident.status)) return { ok: false, reason: "repair_incident_not_repairable" };
+
+  const unfinished = await withTenantTransaction(deps.pool, incident.tenant_id, (client) =>
+    client.query(
+      `SELECT 1 FROM incident_repair_tasks r JOIN tasks t ON t.tenant_id = r.tenant_id AND t.task_id = r.task_id
+        WHERE r.tenant_id = $1 AND r.incident_id = $2 AND t.status IN ('created', 'running', 'paused') LIMIT 1`,
+      [incident.tenant_id, incident.incident_id]
+    )
+  );
+  if (unfinished.rowCount) return { ok: false, reason: "repair_already_in_progress" };
+
   const task_id = `inc-repair-${incident.incident_id}-${Date.now().toString(36)}`;
   const contract: JobContract = {
     task_id,
@@ -52,7 +88,7 @@ export async function proposeRepairTask(
     goal: input.goal,
     acceptance_criteria: ["tester bestaar", "endring committet og pushet"],
     input: {
-      data: { repo_url: input.repo_url, test_command: input.test_command ?? [], incident_id: incident.incident_id },
+      data: { repo_url: input.repo_url, test_command: testCommand, incident_id: incident.incident_id },
       trust_level: "internal",
       provenance: "incident-repair-orchestration"
     },
@@ -60,7 +96,7 @@ export async function proposeRepairTask(
     allowed_memory_spaces: [memorySpace],
     allowed_network_targets: [],
     agent_profile: "coding",
-    model_budget_ore: input.model_budget_ore ?? 20_000,
+    model_budget_ore: budget,
     retry_policy: { max_attempts: 1, backoff_seconds: 0 },
     max_steps: 5
   };
@@ -77,7 +113,10 @@ export async function proposeRepairTask(
     )
   );
   if (incident.status === "open" || incident.status === "diagnosing") {
-    await deps.incidents.setStatus(incident.tenant_id, memorySpace, incident.incident_id, "repair_proposed");
+    await deps.incidents.transition(
+      incident.tenant_id, memorySpace, incident.incident_id, "repair_proposed", { kind: "repair" },
+      { reason: "reparasjonsjobb (testet-fiks-pipelinen) sendt inn", evidence_ref: task_id }
+    );
   }
 
   return { ok: true, task_id };

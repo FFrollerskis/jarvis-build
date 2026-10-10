@@ -53,13 +53,15 @@ const k = (tool_id: string, action: string) => `${tool_id}.${action}`;
 /** DB-baserte domenenavnerom (Jarvis eier tilstanden, ingen ekstern leverandør). */
 const JARVIS_CORE_NAMESPACES = new Set([
   "business", "support", "contract", "agreements", "growth", "consent", "finance", "finance_spend", "product", "operations",
-  "governance", "situations", "executive", "owner_controls", "memory", "tasks", "incidents", "conversation_graph", "self_modification", "run_rate"
+  "governance", "situations", "executive", "owner_controls", "memory", "knowledge", "tasks", "incidents", "conversation_graph", "self_modification", "run_rate",
+  // WP-E1: Jarvis' EGEN Postgres (drift/diagnostikk mot kjernedatabasen på NAS-en) - ingen ekstern leverandør og ingen utgående nettverkstrafikk.
+  "postgres_ops"
 ]);
 const FINANCIAL_NAMESPACES = /^(finance|finance_[a-z]+)$/;
 
 /** Namerom som ALDRI kan stå på en modellflate, uansett handling (eier-kontroll, penger, infra, selvmodifikasjon, samtykke, styring). */
 export const OWNER_ONLY_NAMESPACES: ReadonlySet<string> = new Set([
-  "owner_controls", "self_modification", "docker", "gce", "mcp_zapier", "browser", "incidents", "governance", "situations", "consent",
+  "owner_controls", "self_modification", "docker", "gce", "cloudflare", "langfuse", "infisical", "postgres_ops", "mcp_zapier", "browser", "incidents", "governance", "situations", "consent",
   "finance", "finance_spend", "finance_stripe", "finance_vipps", "finance_neonomics", "finance_wallester", "data-erasure", "scheduler"
 ]);
 
@@ -67,7 +69,7 @@ const PAID_MEDIA = new Set(["openai_images", "runway", "kling", "google_veo", "h
 const SMS_LIKE = new Set(["twilio", "telnyx", "whatsapp"]);
 const METERED = new Set(["brave_search", "tavily", "exa", "google_maps", "google_places", "google_routes"]);
 const OWNER_CONFIGURED_URL = new Set(["jira", "pipedrive", "grafana", "prometheus", "n8n", "make", "finance_wallester", "home-assistant"]);
-const PRIVATE_NAMESPACES = new Set(["email", "calendar", "drive", "gmail", "microsoft_outlook", "memory", "dropbox", "onedrive", "notion", "slack", "discord", "telegram", "whatsapp", "twilio", "telnyx", "google_sheets", "spotify", "home-assistant"]);
+const PRIVATE_NAMESPACES = new Set(["email", "calendar", "drive", "gmail", "microsoft_outlook", "memory", "knowledge", "dropbox", "onedrive", "notion", "slack", "discord", "telegram", "whatsapp", "twilio", "telnyx", "google_sheets", "spotify", "home-assistant"]);
 
 const READ_VERB = /^(read|get|list|search|query|find|fetch|lookup|describe|inspect|check|status|test|health|count|summar|show|view|browse|explain|rank|evaluate|resolve|upcoming|due|overdue|cancellable|campaign_performance|geocode|reverse_geocode|web_search|news_search|extract|screenshot|navigate)/;
 const SEND_VERB = /(^|_)(send|notify|reply|forward|publish|broadcast|invite|call_tool|run_scenario|activate_workflow|dispatch_workflow|comment_on_issue|rerun_workflow_run|cancel_workflow_run)(_|$)/;
@@ -110,6 +112,10 @@ const EFFECT_OVERRIDES: Record<string, Effect> = {
   [k("executive", "get_ai_mesh_status")]: "read",
   [k("executive", "get_control_center")]: "read",
   [k("executive", "get_value_report")]: "read",
+  // WP-E1 (UA-5): driftsstatus (åpne hendelser, skymål, produsenthelse) - ren lesing.
+  [k("executive", "get_infra_status")]: "read",
+  // WP-D2: «resolve» står i READ_VERB (DNS-/oppslagsbetydning), men å lukke en open loop er en SKRIVING (klasse C).
+  [k("business", "resolve_open_loop")]: "write",
   // D-416: delegeringsnivået - oppretter en intern, lesende bakgrunnsjobb (write, klasse B) / leser jobbstatus.
   [k("tasks", "delegate_background_task")]: "write",
   [k("tasks", "get_task_status")]: "read"
@@ -138,7 +144,9 @@ function inferDataZone(tool_id: string): DataZone {
  * kostnad, autoritet, leverandørhelse) - aldri «public», selv om resten av executive-lesingene er det.
  */
 const SENSITIVITY_OVERRIDES: Record<string, Sensitivity> = {
-  [k("executive", "get_control_center")]: "private"
+  [k("executive", "get_control_center")]: "private",
+  // Gjennomgang av PR #324 (L4): driftsstatus har hendelsestitler med repo/gren, jobbnavn og skymål-tilstand - eierens driftsbilde, aldri «public» (og strømmer til modellen som betjener turen).
+  [k("executive", "get_infra_status")]: "private"
 };
 
 function inferSensitivity(tool_id: string): Sensitivity {
@@ -180,8 +188,9 @@ export const BACKGROUND_GITHUB_READ = CHAT_READ_TIER.filter((g) => g.tool_id ===
 /**
  * Gjennomgang av PR #316 (L-4): handlinger tale ALDRI får, utover finans. Kontrollsentrene er en EIER-flate med enhetssignatur (rapportene er eierens konfigurasjonsmetadata, handlingene peker på eier-ruter):
  * tale er ubetrodd inndata (STT) og gir aldri forhøyet autentiseringsstyrke, så hele rapporten skal ikke kunne leses opp over en stemmeflate.
+ * Gjennomgang av PR #324 (L4): det samme gjelder driftsstatusen (`get_infra_status`: hendelsestitler med repo/gren, jobbnavn, skymål-tilstand) - den står på web-chatten (eier + signert økt, se verktøyets `parameterAuthorizer`), ikke på tale.
  */
-const VOICE_EXCLUDED_KEYS: ReadonlySet<string> = new Set([k("executive", "get_control_center")]);
+const VOICE_EXCLUDED_KEYS: ReadonlySet<string> = new Set([k("executive", "get_control_center"), k("executive", "get_infra_status")]);
 /** D-382: tale er ubetrodd inndata (STT) - lese-nivået uten finans (og uten kontrollsentrene, L-4); aldri handlingsnivået. */
 const VOICE_READ_TIER = CHAT_READ_TIER.filter((g) => !/^finance/.test(g.tool_id) && !VOICE_EXCLUDED_KEYS.has(k(g.tool_id, g.action)));
 

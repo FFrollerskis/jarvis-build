@@ -38,6 +38,50 @@ async function gatherKnowledgeIdentities(client: pg.PoolClient, where: string, v
   return r.rows as KnowledgeIdentity[];
 }
 
+/**
+ * WP-D1 (UA-2, migrasjon 087/088): alt som er AVLEDET av et sett kunnskapsdokumenter skal følge dem ut av systemet - ikke bare selve dokumentene:
+ *  - `knowledge_links` (dokument <-> entitet),
+ *  - `knowledge_entities` som ikke lenger har NOEN lenke igjen (navnene er hentet fra det slettede innholdet - en foreldreløs entitet ville latt et navn overleve sletting),
+ *  - `claim_evidence` som peker på dokumentene (utdraget er kopiert fra dokumentet; påstanden selv beholdes, men leses alltid på nytt mot gjenværende evidens).
+ * `docsWhere` er et WHERE-uttrykk mot `knowledge_documents` (uten alias). Kalles FØR embeddings/dokumenter slettes, i samme RLS-kontekst som dokumentslettingen.
+ */
+async function planDocumentDerivedRows(
+  client: pg.PoolClient,
+  mode: Mode,
+  result: ScopePlanResult,
+  docsWhere: string,
+  values: unknown[]
+): Promise<void> {
+  const docIds = `SELECT knowledge_document_id FROM knowledge_documents WHERE ${docsWhere}`;
+  const tenantAnd = `tenant_id = $1 AND knowledge_document_id IN (${docIds})`;
+  if (mode === "count") {
+    add(result, "knowledge_links", await run(client, mode, "knowledge_links", tenantAnd, values));
+    // Foreldreløse etter slettingen = entiteter som har lenke til settet og ingen lenke utenfor det.
+    const orphans = await client.query(
+      `SELECT count(DISTINCT l.entity_id)::int AS n FROM knowledge_links l
+        WHERE l.tenant_id = $1 AND l.knowledge_document_id IN (${docIds})
+          AND NOT EXISTS (SELECT 1 FROM knowledge_links o WHERE o.tenant_id = l.tenant_id AND o.entity_id = l.entity_id
+                            AND o.knowledge_document_id NOT IN (${docIds}))`,
+      values
+    );
+    add(result, "knowledge_entities", (orphans.rows[0] as { n: number }).n);
+    add(result, "claim_evidence", await run(client, mode, "claim_evidence", tenantAnd, values));
+    return;
+  }
+  const candidates = await client.query(`SELECT DISTINCT entity_id FROM knowledge_links WHERE ${tenantAnd}`, values);
+  const entityIds = (candidates.rows as Array<{ entity_id: string }>).map((r) => r.entity_id);
+  add(result, "knowledge_links", await run(client, mode, "knowledge_links", tenantAnd, values));
+  if (entityIds.length > 0) {
+    const gone = await client.query(
+      `DELETE FROM knowledge_entities e WHERE e.tenant_id = $1 AND e.entity_id = ANY($2::text[])
+         AND NOT EXISTS (SELECT 1 FROM knowledge_links l WHERE l.tenant_id = e.tenant_id AND l.entity_id = e.entity_id)`,
+      [values[0], entityIds]
+    );
+    add(result, "knowledge_entities", gone.rowCount ?? 0);
+  }
+  add(result, "claim_evidence", await run(client, mode, "claim_evidence", tenantAnd, values));
+}
+
 /** Ét memory_space (allerede satt som RLS-kontekst av kalleren) - alle tabeller filtrert direkte på (tenant_id, space). */
 async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenantId: string, space: string): Promise<ScopePlanResult> {
   const result = empty();
@@ -56,6 +100,11 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
       ...(await gatherKnowledgeIdentities(client, "tenant_id = $1 AND memory_space_id = $2", tv))
     );
   }
+  // WP-D1 (087/088): påstandsverifisering (evidens FØR påstand) og entitetsgrafen (lenker FØR entiteter og dokumenter) - alt (tenant_id, memory_space_id)-skopet.
+  add(result, "claim_evidence", await run(client, mode, "claim_evidence", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "claim_verifications", await run(client, mode, "claim_verifications", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "knowledge_links", await run(client, mode, "knowledge_links", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "knowledge_entities", await run(client, mode, "knowledge_entities", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "knowledge_embeddings", await run(client, mode, "knowledge_embeddings", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "knowledge_documents", await run(client, mode, "knowledge_documents", "tenant_id = $1 AND memory_space_id = $2", tv));
   // UA-3 Native Jarvis Support Core (D-66) §21 i byggeordren: registrer
@@ -123,6 +172,10 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // `product_item_events` FØR `product_items` (FK -> product_items).
   add(result, "product_item_events", await run(client, mode, "product_item_events", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "product_items", await run(client, mode, "product_items", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // WP-D2 (089_business_pipeline_writes.sql): før/etter-loggen for lead-/opportunity-endringer holder KOPIER av pipeline-radene (tittel, neste handling, lukkegrunn)
+  // og er derfor KUNDEDATA som følger memory-space-slettingen (ikke append-only systemrevisjon som `audit_events`, som aldri får fritekst - se pipeline-service.ts
+  // `inspect()`). Ingen FK inn eller ut (løs entity_id-peker) - rekkefølgen er likegyldig. `jarvis_app` har DELETE kun for dette (089).
+  add(result, "business_change_log", await run(client, mode, "business_change_log", "tenant_id = $1 AND memory_space_id = $2", tv));
   // UA-4 Native Jarvis Growth Core (D-74, 027_growth.sql): registrer
   // vekst-tabellene i erasure-planen (SAMME mønster/begrunnelse som
   // support_*/contract_* over).
@@ -437,6 +490,18 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   add(result, "scenarios", await run(client, mode, "scenarios", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "decision_log", await run(client, mode, "decision_log", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "situations", await run(client, mode, "situations", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // WP-D2 (UA-3 «churn/product usage», 090): produktbruk + churn-vurderinger. Churn-loopen er REN DERIVERT state av bruksdataene (detection_key bærer konto-pseudonymet,
+  // reason bærer tall utledet av dem) og slettes sammen med dem - snevert avgrenset til loop_type = 'customer_churn_risk' (rører aldri andre loops). Plassert ETTER
+  // `situations`: `situations.source_open_loop_id` peker (sammensatt FK, 056) til loopen og ville ellers blokkert slettingen. Vurderinger og hendelser har FK -> kontoer
+  // (ON DELETE CASCADE) men registreres eksplisitt FØR kontoene; kontoene (pseudonym -> selskap-koblingen) slettes sist.
+  add(
+    result,
+    "business_open_loops",
+    await run(client, mode, "business_open_loops", "tenant_id = $1 AND memory_space_id = $2 AND loop_type = 'customer_churn_risk'", tv)
+  );
+  add(result, "business_churn_assessments", await run(client, mode, "business_churn_assessments", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "product_usage_events", await run(client, mode, "product_usage_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "product_usage_accounts", await run(client, mode, "product_usage_accounts", "tenant_id = $1 AND memory_space_id = $2", tv));
   return result;
 }
 
@@ -485,6 +550,7 @@ export async function planKnowledgeDocument(client: pg.PoolClient, mode: Mode, t
     if (mode === "delete") {
       result.knowledgeIdentities.push(...(await gatherKnowledgeIdentities(client, "tenant_id = $1 AND knowledge_document_id = $2", tv)));
     }
+    await planDocumentDerivedRows(client, mode, result, "tenant_id = $1 AND knowledge_document_id = $2", tv);
     add(result, "knowledge_embeddings", await run(client, mode, "knowledge_embeddings", "tenant_id = $1 AND knowledge_document_id = $2", tv));
     add(result, "knowledge_documents", await run(client, mode, "knowledge_documents", "tenant_id = $1 AND knowledge_document_id = $2", tv));
     return result;
@@ -505,6 +571,7 @@ export async function planKnowledgeSource(
     if (mode === "delete") {
       result.knowledgeIdentities.push(...(await gatherKnowledgeIdentities(client, docsWhere, tv)));
     }
+    await planDocumentDerivedRows(client, mode, result, docsWhere, tv);
     add(
       result,
       "knowledge_embeddings",
@@ -530,6 +597,14 @@ export async function planPerson(client: pg.PoolClient, mode: Mode, tenantId: st
       add(result, table, await run(client, mode, table, `memory_item_id IN (${ownedSubquery})`, ownedValues));
     }
     add(result, "memory_items", await run(client, mode, "memory_items", "tenant_id = $1 AND owner_person_id = $2", ownedValues));
+    // WP-D1 (088): påstander personen selv har registrert (påstandsteksten kan inneholde personopplysninger). Evidensen FØR påstanden. Kunnskapsdokumenter har fortsatt ingen person-kolonne
+    // (kjent gap, jf. docs/DATA_ERASURE.md) - men det de gir opphav til i grafen følger dokumentene (se `planDocumentDerivedRows`).
+    add(
+      result,
+      "claim_evidence",
+      await run(client, mode, "claim_evidence", "tenant_id = $1 AND claim_id IN (SELECT claim_id FROM claim_verifications WHERE tenant_id = $1 AND created_by_person_id = $2)", ownedValues)
+    );
+    add(result, "claim_verifications", await run(client, mode, "claim_verifications", "tenant_id = $1 AND created_by_person_id = $2", ownedValues));
     // UA-8 Personal Digital Twin (D-130, 049_context_engine.sql):
     // `context_observations` HAR en RESTRICTIVE `jarvis.memory_spaces`-RLS-
     // policy (samme mønster som `consent_decisions`) - i MOTSETNING til

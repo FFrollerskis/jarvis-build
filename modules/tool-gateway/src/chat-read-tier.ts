@@ -15,6 +15,8 @@ export const CHAT_READ_TIER: ReadonlyArray<{ readonly tool_id: string; readonly 
   { tool_id: "business", action: "find_companies" },
   { tool_id: "business", action: "find_contacts" },
   { tool_id: "business", action: "get_attention_queue" },
+  { tool_id: "business", action: "get_calibration_report" },
+  { tool_id: "business", action: "get_churn_overview" },
   { tool_id: "business", action: "get_customer_overview" },
   { tool_id: "business", action: "get_business_brief" },
   { tool_id: "business", action: "get_lead_score" },
@@ -74,6 +76,9 @@ export const CHAT_READ_TIER: ReadonlyArray<{ readonly tool_id: string; readonly 
   { tool_id: "executive", action: "get_ai_mesh_status" },
   // WP-C4: Value Center - bruk per verdiløkke (kun tall, aldri innhold), og status for de sovende løkkene V3/V5 (kun beredskap/forslag, aldri utførelse).
   { tool_id: "executive", action: "get_value_report" },
+  // WP-E1 (UA-5, JARVIS-068): driftsstatus - åpne hendelser (fase/alvorlighet/sannhetsmerking), skymål (helse + siste journalførte endring) og produsenthelse. Kun lesing, ingen hemmeligheter eller hendelsestekst.
+  // Gjennomgang av PR #324 (L4): kun for eieren fra en signert enhetsøkt (verktøyets `parameterAuthorizer`, som kontrollsentrene) og IKKE på tale (`VOICE_EXCLUDED_KEYS` i tool-manifest.ts); sensitivitet `private`.
+  { tool_id: "executive", action: "get_infra_status" },
   // D-421 (UA0-RUNRATE): hva Jarvis koster og hva connectorene koster i vedlikeholdstid (kun lesing; skriving er dashbord-ruten).
   { tool_id: "run_rate", action: "get_cost_overview" },
   { tool_id: "run_rate", action: "list_connector_maintenance" },
@@ -144,6 +149,10 @@ export const CHAT_READ_TIER: ReadonlyArray<{ readonly tool_id: string; readonly 
   { tool_id: "jira", action: "get_issue" },
   { tool_id: "jira", action: "list_transitions" },
   { tool_id: "jira", action: "search_issues" },
+  // WP-D1 (UA-2): kunnskapslaget (indekserte dokumenter, notater, vedlegg, referater) - klasse A, ubetrodd output (tainter turen), strukturerte sensitivitetsmerker per treff (skyskjermen).
+  { tool_id: "knowledge", action: "search" },
+  // WP-D1 (Q-26): kildeverifiseringsstatus for en påstand - ren lesing (klasse A), ubetrodd output, strukturert sensitivitetsmerke (skyskjermen). Skriving (registrer/evidens/promotering) står på INGEN modellflate.
+  { tool_id: "knowledge", action: "get_claim_status" },
   { tool_id: "linear", action: "get_issue" },
   { tool_id: "linear", action: "list_issues" },
   { tool_id: "linear", action: "list_teams" },

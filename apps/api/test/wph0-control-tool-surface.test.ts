@@ -6,7 +6,7 @@ import { OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/ow
 import { SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";
 import {
   CHAT_ACT_TIER, CHAT_DELEGATE_TIER, CHAT_READ_TIER, MODEL_SURFACE_ALLOWLIST, MemorySearchTransport, SURFACE_TOOL_GRANTS, assertChatReadTier, assertManifestInvariants,
-  buildToolManifest, chatReadTierMeshTools, firstWaveTools, homeAssistantTools, inferEffect, memoryToolDefinitions, resolveModelToolSurface, scopeFieldsOf, selectSurfaceTools,
+  KnowledgeSearchTransport, buildToolManifest, chatReadTierMeshTools, firstWaveTools, homeAssistantTools, inferEffect, knowledgeToolDefinitions, memoryToolDefinitions, resolveModelToolSurface, scopeFieldsOf, selectSurfaceTools,
   type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
 import { TasksDelegateTransport, tasksDelegateToolDefinitions } from "../src/chat-jobs.ts";
@@ -30,6 +30,7 @@ function productionDefinitions(registry?: ControlCenterRegistry): ToolDefinition
       ...governanceToolDefinitions(new GovernanceTransport({} as never)),
       ...situationsToolDefinitions(new SituationsTransport({} as never, {} as never)),
       ...memoryToolDefinitions(new MemorySearchTransport({} as never, {} as never)),
+      ...knowledgeToolDefinitions(new KnowledgeSearchTransport({} as never)),
       ...tasksDelegateToolDefinitions(new TasksDelegateTransport({} as never, {} as never)),
       ...runRateToolDefinitions(new RunRateTransport({} as never))
     ]
@@ -142,7 +143,7 @@ describe("eier-kun port i verktøydefinisjonen", () => {
     expect(d.parameterAuthorizer?.({}, owner)).toEqual({ allowed: false, reason: "control_center_owner_check_not_configured" });
   });
 
-  it("ingen andre executive-handlinger har fått en slik port ved et uhell (unntak: `cancel_task`, kontrollsenterets avbryt-handling, som er eier-kun - se wph0-cancel-task.test.ts)", () => {
-    for (const d of defs.filter((x) => x.tool_id === "executive" && x.action !== "get_control_center" && x.action !== "cancel_task")) expect(d.parameterAuthorizer, d.action).toBeUndefined();
+  it("ingen andre executive-handlinger har fått en slik port ved et uhell (unntak: `cancel_task`, kontrollsenterets avbryt-handling, som er eier-kun - se wph0-cancel-task.test.ts, og `get_infra_status`, driftsstatusen, som fikk samme eier + signert-økt-port i gjennomgangen av PR #324 (M3/L4) - se e1-review-l4-infra-status-gate.test.ts)", () => {
+    for (const d of defs.filter((x) => x.tool_id === "executive" && x.action !== "get_control_center" && x.action !== "cancel_task" && x.action !== "get_infra_status")) expect(d.parameterAuthorizer, d.action).toBeUndefined();
   });
 });

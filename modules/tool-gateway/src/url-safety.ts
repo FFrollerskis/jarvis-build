@@ -59,13 +59,37 @@ export function assertSafeVendorUrl(raw: string): string {
   return raw;
 }
 
-/** `fetch` med sentral URL-sikring. Kalles alltid med en streng-URL bygget av vendor-base + (kodede) segmenter. */
-export async function guardedFetch(input: string | URL, init?: RequestInit): Promise<Response> {
+/**
+ * Gjennomgang av PR #324 (L2): `redirect` kan i tillegg være `"reject"` = ingen redirect FØLGES, og et 3xx-svar (301/302/303/307/308) kaster `UnsafeVendorUrlError("unexpected_redirect_http_<status>")` i stedet for å bli gitt videre.
+ * `"error"` (fetch sin egen) gir en generisk `TypeError` som ikke kan skilles fra et nettverksavbrudd; `"reject"` gir en stabil, presis feilkode.
+ */
+export type GuardedFetchInit = Omit<RequestInit, "redirect"> & { redirect?: NonNullable<RequestInit["redirect"]> | "reject" };
+
+const REDIRECT_STATUSES: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * `fetch` med sentral URL-sikring. Kalles alltid med en streng-URL bygget av vendor-base + (kodede) segmenter.
+ *
+ * REDIRECTS (gjennomgang av PR #324, L2): «ingen redirects» var påstått men ikke håndhevet - en 307/308 på en POST/PATCH/DELETE ble fulgt med kropp OG `Authorization` (selv til en annen sti på samme opprinnelse).
+ * Nå følger en MUTASJON (alt annet enn GET/HEAD) aldri en redirect som standard (`"reject"`); GET/HEAD beholder plattformens standard (`follow`) for kallere som trenger det. En kaller kan alltid velge selv
+ * (`redirect: "reject" | "error" | "manual" | "follow"`) - skymål-transportene (Cloudflare, Langfuse, Infisical) velger `"reject"` eksplisitt for ALLE metoder.
+ */
+export async function guardedFetch(input: string | URL, init?: GuardedFetchInit): Promise<Response> {
   const raw = typeof input === "string" ? input : input.toString();
   assertSafeVendorUrl(raw);
+  const method = (init?.method ?? "GET").toUpperCase();
+  const policy = init?.redirect ?? (method === "GET" || method === "HEAD" ? undefined : "reject");
+  const { redirect: _redirect, ...rest } = init ?? {};
+  void _redirect;
+  const options: RequestInit = { ...rest, ...(policy === undefined ? {} : { redirect: policy === "reject" ? "manual" : policy }) };
   // D-392 (JARVIS-018): ingen leverandørkall uten avbrudd - gatewayens `withTimeout` avviser bare løftet, så uten dette ville selve
   // forespørselen (og dens evt. bivirkning) fortsette å leve etter at kalleren har fått «tool_timeout».
-  return fetch(raw, init?.signal ? init : { ...init, signal: AbortSignal.timeout(VENDOR_FETCH_TIMEOUT_MS) });
+  const response = await fetch(raw, options.signal ? options : { ...options, signal: AbortSignal.timeout(VENDOR_FETCH_TIMEOUT_MS) });
+  if (policy === "reject" && (response.type === "opaqueredirect" || REDIRECT_STATUSES.has(response.status))) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new UnsafeVendorUrlError(`unexpected_redirect_http_${response.status}`);
+  }
+  return response;
 }
 
 export const VENDOR_FETCH_TIMEOUT_MS = 45_000;

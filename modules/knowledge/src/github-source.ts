@@ -20,9 +20,11 @@ export class GithubKnowledgeSource implements KnowledgeSource {
   constructor(
     private readonly toolGateway: ToolGateway,
     private readonly identity: IdentityContext,
-    private readonly repo: string
+    private readonly repo: string,
+    sourceInstanceId?: string
   ) {
-    this.source_instance_id = `github:${repo}`;
+    // WP-D1: en konfigurert kilde (`JARVIS_KNOWLEDGE_SOURCES`) oppgir sin egen instans-id; uten den er den som før (`github:<repo>`).
+    this.source_instance_id = sourceInstanceId ?? `github:${repo}`;
   }
 
   /**

@@ -3,7 +3,9 @@ import type pg from "pg";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import { withTenantTransaction } from "@jarvis/core";
 import type { ToolGateway } from "@jarvis/tool-gateway";
-import type { InfraRecoveryAction, RecoveryStatus } from "./types.ts";
+import { CLOUDFLARE_RECOVERY_STRATEGIES } from "./cloudflare-recovery.ts";
+import { findExecutionByKey, getInfraExecution } from "./infra-execution.ts";
+import type { InfraExecution, InfraRecoveryAction, RecoveryStatus } from "./types.ts";
 
 export interface AttemptRecoveryInput {
   tenant_id: string;
@@ -24,6 +26,12 @@ interface RecoveryStrategyContext {
   beforeState: JsonValue | null;
   parameters: Record<string, JsonValue>;
   idempotencyKey: string;
+  /**
+   * WP-E1 (JARVIS-068/TSK-033): den journalførte eksekusjonen (`infra_executions`) for nøkkelen, hvis den finnes. Strategier som bærer mål-identitet
+   * (Docker-navn, Cloudflare-sone/post/regel) skal hente målet HERFRA, ikke fra kallerens parametre - og `attemptRecovery()` avviser en recovery der
+   * kallerens verktøy/handling/mål ikke samsvarer med den journalførte eksekusjonen (`recovery_target_mismatch`).
+   */
+  execution: InfraExecution | null;
 }
 
 interface RecoveryOutcome {
@@ -149,7 +157,9 @@ const RECOVERY_STRATEGIES: Readonly<Record<string, (ctx: RecoveryStrategyContext
     return { status: "PARTIAL", result: { external_id: restore.external_id ?? null, verified_state: reinspected.data, expected_image: before.image } };
   },
   "docker:stop_container": dockerRunningStateRecovery,
-  "docker:start_container": dockerRunningStateRecovery
+  "docker:start_container": dockerRunningStateRecovery,
+  // WP-E1: Cloudflare (DNS/WAF/sone-innstillinger) - se cloudflare-recovery.ts. Kompensasjonen leser målet fra den journalførte eksekusjonen og sjekker drift.
+  ...CLOUDFLARE_RECOVERY_STRATEGIES
 };
 
 export function supportedRecoveryStrategies(): readonly string[] {
@@ -189,17 +199,32 @@ export async function attemptRecovery(
   const beforeState = await readBeforeState(deps.pool, input.tenant_id, input.idempotency_key);
   const strategyKey = `${input.tool_id}:${input.action}`;
   const strategy = RECOVERY_STRATEGIES[strategyKey];
+  // WP-E1 (JARVIS-068/TSK-033): recovery bindes til den JOURNALFØRTE eksekusjonen. Kallerens verktøy/handling/mål/eksekusjons-id MÅ samsvare med den, ellers
+  // utføres INGENTING (en kaller kunne ellers gjenopprette container X med container Y sin før-tilstand). Finnes det ingen journalrad for nøkkelen,
+  // fungerer de eldre strategiene (github.delete_branch) som før, men Docker og Cloudflare krever journalen.
+  const execution = await findExecutionByKey(deps.pool, input.tenant_id, input.idempotency_key);
+  const mismatch = execution !== null && (
+    execution.tool_id !== input.tool_id || execution.action !== input.action ||
+    (input.execution_id !== undefined && input.execution_id !== execution.execution_id) ||
+    (input.tool_id === "docker" && input.parameters["name"] !== execution.target)
+  );
 
   let outcome: RecoveryOutcome;
-  if (!strategy) {
+  if (mismatch) {
+    outcome = { status: "FAILED", result: { reason: "recovery_target_mismatch", strategy_key: strategyKey } };
+  } else if (!strategy) {
     outcome = { status: "UNKNOWN", result: { reason: "no_recovery_strategy_registered", strategy_key: strategyKey } };
+  } else if (execution === null && (input.tool_id === "docker" || input.tool_id === "cloudflare")) {
+    outcome = { status: "UNKNOWN", result: { reason: "execution_journal_missing", strategy_key: strategyKey } };
   } else {
     outcome = await strategy({
-      gateway: deps.gateway, identity, beforeState,
+      gateway: deps.gateway, identity, beforeState, execution,
       parameters: input.parameters, idempotencyKey: input.idempotency_key
     });
   }
 
+  // Lenken peker på den JOURNALFØRTE eksekusjonen (aldri en kaller-oppgitt id som ikke finnes - FK-brudd ville gjort et avslått forsøk til en 500).
+  const linkedExecutionId = execution?.execution_id ?? (input.execution_id ? (await getInfraExecution(deps.pool, input.tenant_id, input.execution_id))?.execution_id ?? null : null);
   return withTenantTransaction(deps.pool, input.tenant_id, async (client) => {
     const recovery_id = `inf-rec-${randomUUID()}`;
     const { rows } = await client.query(
@@ -208,7 +233,7 @@ export async function attemptRecovery(
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
       [
         recovery_id, input.tenant_id, input.tool_id, input.action, input.idempotency_key,
-        input.incident_id ?? null, strategyKey, outcome.status, JSON.stringify(outcome.result), input.execution_id ?? null
+        input.incident_id ?? null, strategyKey, outcome.status, JSON.stringify(outcome.result), linkedExecutionId
       ]
     );
     return rows[0] as InfraRecoveryAction;
