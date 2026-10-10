@@ -32,14 +32,14 @@ uten at det er gjort, eller (4) en DPIA-henvisning peker på en fil som ikke fin
 - **Eksterne mottakere:** LLM-leverandører ser utdrag per tur etter sensitivitetsregelen (se behandlere); embeddings lokalt (bge-m3 via Ollama) når konfigurert
 - **Tabeller:** `artifacts`, `brief_seen`, `commitments`, `deadlines`, `decisions`, `embeddings`, `entities`, `events`, `memory_episodes`, `memory_item_entities`, `memory_items`, `memory_links`, `memory_profiles`, `memory_sources`, `memory_spaces`, `memory_vectors`, `memory_versions`, `messages`, `relations`, `summaries`
 
-### Kunnskapslag (dokumenter)
+### Kunnskapslag (dokumenter, entitetsgraf, påstandsverifisering)
 
-- **Formål:** Indekserte dokumenter fra tilkoblede kilder
-- **Memory space/tenant:** per kilde/space (alle tabeller tenant-skopet med FORCE RLS unntatt dokumenterte globale: `scheduler_state`, `capabilities`, `evolution_change_ledger`, `self_modification_requests`, `github_rate_limit_state`, `telegram_poll_state`)
-- **Datakategori:** Dokumentinnhold og chunk-embeddings fra eierens egne kilder
-- **Retensjon:** Tombstones ved sletting i kilden; ellers så lenge kilden er koblet (UA2-DPIA).
-- **Eksterne mottakere:** Kilden (f.eks. Drive) + embedding lokalt
-- **Tabeller:** `knowledge_documents`, `knowledge_embeddings`
+- **Formål:** Indekserte dokumenter fra tilkoblede kilder (Drive inkl. Docs/Sheets/Slides, Obsidian, filsystem, GitHub, e-postvedlegg, møtetranskripter), en deterministisk entitetsgraf («hvilke dokumenter nevner X», «hva henger sammen med Y») og påstandsverifisering (Q-26: hvilke uavhengige kilder støtter en påstand)
+- **Memory space/tenant:** per kilde/space (nøkkelen er (tenant, space, kilde, instans, ekstern id) - samme dokument kan finnes i flere rom, aldri på tvers av dem) (alle tabeller tenant-skopet med FORCE RLS unntatt dokumenterte globale: `scheduler_state`, `capabilities`, `evolution_change_ledger`, `self_modification_requests`, `github_rate_limit_state`, `telegram_poll_state`)
+- **Datakategori:** Dokumentinnhold og chunk-embeddings fra eierens egne kilder, med strukturert sensitivitetsmerke (`normal`/`sensitive`/`special`, standard `sensitive`) og tillitsnivå (standard `untrusted`). Møtetranskripter lagres med deltakernavn/referanse, aldri e-postadresser (maskeres ved lesing). Entitetsgrafen lagrer navn på kjente entiteter, domener, repo-navn og prosjektnøkler; e-postadresser lagres KUN som sha256-nøkkel + maskert visning. Påstandsverifisering lagrer påstandsteksten (≤ 1000 tegn), kildehenvisninger og korte utdrag (≤ 500 tegn).
+- **Retensjon:** Tombstones ved sletting i kilden; kilder med `retention_days` (transkripter m.fl.) fjernes fysisk etter fristen; ellers så lenge kilden er koblet (UA2-DPIA). Entitets- og lenkeradene følger dokumentet (slettes sammen med det, også ved erasure); påstander og evidens beholdes til eieren sletter dem eller tenant/rom slettes (erasure).
+- **Eksterne mottakere:** Kilden (f.eks. Drive) + embedding lokalt. Treff i `knowledge.search` og påstandsstatus i `knowledge.get_claim_status` går til en skymodell KUN når treffet er merket `normal`/`sensitive` og passerer skyskjermen (D-449/D-451); `special` forlater aldri lokal modell. Valgfritt modellassistert entitetsuttrekk er AV som standard og kjører aldri i sky for `special`-dokumenter.
+- **Tabeller:** `claim_evidence`, `claim_verifications`, `knowledge_documents`, `knowledge_embeddings`, `knowledge_entities`, `knowledge_links`
 
 ### Jobber, verktøy og revisjon
 

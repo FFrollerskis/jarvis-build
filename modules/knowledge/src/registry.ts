@@ -1,9 +1,11 @@
 import type { MemorySpace } from "@jarvis/contracts";
 import type { KnowledgeSource } from "./source.ts";
-import { FilesystemKnowledgeSource, DEFAULT_TEXT_EXTENSIONS } from "./filesystem-source.ts";
+import { FilesystemKnowledgeSource, DEFAULT_TEXT_EXTENSIONS, type WalkLimits } from "./filesystem-source.ts";
 import { GithubKnowledgeSource } from "./github-source.ts";
-import { GoogleDriveKnowledgeSource } from "./drive-source.ts";
+import { GoogleDriveKnowledgeSource, type GoogleDriveSourceOptions } from "./drive-source.ts";
 import { ObsidianVaultKnowledgeSource } from "./obsidian-source.ts";
+import { MeetingTranscriptKnowledgeSource } from "./meeting-transcript-source.ts";
+import type { TranscriptFormat } from "./transcript-parse.ts";
 import { EmailAttachmentKnowledgeSource } from "./email-attachment-source.ts";
 import type { OcrProvider, VisionDescriptionProvider } from "./ocr-provider.ts";
 import type { ToolGateway } from "@jarvis/tool-gateway";
@@ -28,6 +30,8 @@ export type KnowledgeSourceConfig =
       source_instance_id: string;
       root_path: string;
       allowed_extensions?: ReadonlySet<string>;
+      /** WP-D1: harde grenser for vandringen (filstørrelse, antall, dybde). Utelatt = standardene. */
+      limits?: Partial<WalkLimits>;
     }
   | {
       source_type: "github";
@@ -45,6 +49,8 @@ export type KnowledgeSourceConfig =
       scope: { kind: "folder"; folder_id: string } | { kind: "whole_drive" };
       /** Google-kontoen denne instansen autentiserer som (samme mønster som GmailTransport). */
       account: string;
+      /** WP-D1: ark-modus, rad-/kolonnetak og API-pause (se `GoogleDriveSourceOptions`). */
+      options?: GoogleDriveSourceOptions;
     }
   | {
       source_type: "obsidian";
@@ -52,6 +58,17 @@ export type KnowledgeSourceConfig =
       memory_space_id: MemorySpace;
       source_instance_id: string;
       vault_root: string;
+      limits?: Partial<WalkLimits>;
+    }
+  | {
+      /** WP-D1: ferdige møtetranskripter (txt/vtt/srt/json) fra en allowlistet rotmappe. Tale -> tekst er UA-7 og ikke bygget. */
+      source_type: "meeting_transcript";
+      tenant_id: string;
+      memory_space_id: MemorySpace;
+      source_instance_id: string;
+      root_path: string;
+      formats?: readonly TranscriptFormat[];
+      limits?: Partial<WalkLimits>;
     }
   | {
       source_type: "email_attachment";
@@ -132,12 +149,14 @@ export class KnowledgeSourceRegistry {
   buildFromConfig(config: KnowledgeSourceConfig, deps: KnowledgeSourceBuildDeps = {}): KnowledgeSource {
     switch (config.source_type) {
       case "filesystem":
-        return new FilesystemKnowledgeSource(config.root_path, config.source_instance_id, config.allowed_extensions ?? DEFAULT_TEXT_EXTENSIONS);
+        return new FilesystemKnowledgeSource(config.root_path, config.source_instance_id, {
+          allowedExtensions: config.allowed_extensions ?? DEFAULT_TEXT_EXTENSIONS, ...(config.limits ? { limits: config.limits } : {})
+        });
       case "github": {
         if (!deps.toolGateway || !deps.identity) {
           throw new Error("github_source_requires_tool_gateway_and_identity");
         }
-        return new GithubKnowledgeSource(deps.toolGateway, deps.identity, config.repo);
+        return new GithubKnowledgeSource(deps.toolGateway, deps.identity, config.repo, config.source_instance_id);
       }
       case "google_drive": {
         if (!deps.toolGateway || !deps.identity) {
@@ -146,11 +165,16 @@ export class KnowledgeSourceRegistry {
         return new GoogleDriveKnowledgeSource(
           deps.toolGateway, deps.identity,
           config.scope.kind === "folder" ? { kind: "folder", folder_id: config.scope.folder_id } : { kind: "whole_drive" },
-          config.source_instance_id
+          config.source_instance_id,
+          config.options
         );
       }
       case "obsidian":
-        return new ObsidianVaultKnowledgeSource(config.vault_root, config.source_instance_id);
+        return new ObsidianVaultKnowledgeSource(config.vault_root, config.source_instance_id, config.limits);
+      case "meeting_transcript":
+        return new MeetingTranscriptKnowledgeSource(config.root_path, config.source_instance_id, {
+          ...(config.formats ? { formats: config.formats } : {}), ...(config.limits ? { limits: config.limits } : {})
+        });
       case "email_attachment": {
         if (!deps.toolGateway || !deps.identity || !deps.ocr) {
           throw new Error("email_attachment_source_requires_tool_gateway_identity_and_ocr");

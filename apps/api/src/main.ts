@@ -36,6 +36,7 @@ import {
 } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, PolicyGateway, createPgInfraModeStore, type AuthorityConfig } from "@jarvis/policy";
 import { DeploymentService, DiagnosisService, INCIDENT_PRODUCER_NAMES, IncidentService } from "@jarvis/incidents";
+import { ClaimVerificationService, KnowledgeRetriever, createKnowledgeClaimsPort } from "@jarvis/knowledge";
 import {
   AiCouncil,
   CouncilAutoTriggerLimiter,
@@ -75,6 +76,7 @@ import {
 import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GceTransport, McpZapierTransport, BrowserGatewayTransport, GithubTransport, createGitHubAuth,
   CHAT_ACT_TIER, CHAT_READ_TIER, GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, CouncilProposalGate, MeshToolExecutor, assertManifestInvariants, buildToolManifest, describeSurfaceCatalog, memoryToolDefinitions, selectSurfaceTools,
+  KnowledgeSearchTransport, knowledgeToolDefinitions,
   MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, resolveModelToolSurface, PgGithubRateLimitStore,
   PgTelegramOffsetStore, TelegramCommandPoller, createTurnContext, jobIdentityFor, telegramClassDNotifier, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, GoogleVeoTransport, HiggsfieldTransport, TodoistTransport, TrelloTransport, JiraTransport, LinearTransport, HubSpotTransport, PipedriveTransport, ToolGateway, VercelTransport, HomeAssistantTransport, MicrosoftGraphAuth, homeAssistantTools, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, parseGceMutationTargets, tasksSource, schedulerSource, DailyScheduler, runConnectorHealthSweep,
@@ -130,6 +132,7 @@ import { createInfraStatusSource } from "./infra-status-source.ts";
 import { createRadarState, radarSweepFailures } from "./evolution-radar.ts";
 import { createEvolutionReportProvider } from "./evolution-source.ts";
 import { createAiMeshReportProvider } from "./ai-mesh-source.ts";
+import { parseKnowledgeClaimWrites } from "./knowledge-flags.ts";
 import { createPushSendGuard, startFollowUpPush } from "./follow-up-push.ts";
 import { buildValueRuntimeFacts } from "./value-facts.ts";
 import { createValueMeasurementSource } from "./value-source.ts";
@@ -646,6 +649,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     model: memoryEmbedding.model, dim: memoryEmbedding.dim, locality: memoryEmbedding.locality
   }));
   const memoryRetriever = new MemoryRetriever(pool, memoryEmbedding);
+  // WP-D1 (UA-2, JARVIS-060): kunnskapslaget (`KnowledgeRetriever`) er nå koblet til chatten som `knowledge.search` (chattens lese-nivå, klasse A, ubetrodd output). SAMME lokale
+  // embedding-leverandør som minnet og kunnskaps-synken (en sky-provider er avvist ved oppstart av `MemoryWriter`/`MemoryRetriever`; vektorer fra en annen modell filtreres bort i søket).
+  const knowledgeRetriever = new KnowledgeRetriever(pool, memoryEmbedding);
   // D-283 (Tobias direkte i chat, "ja bygg minne-skrivingen", ETTER at D-282
   // sin live-samtale avdekket at minnet var en HELT PASSIV lesestruktur -
   // `MemoryWriter`/ekstraksjon var bygget og enhetstestet, men ALDRI kalt fra
@@ -667,6 +673,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // web/verktøyoutput - som er en helt annen tillitsklasse enn eierens egne
   // ord i en samtale, se `ingest`-kommentaren ved `conversationEngine` under).
   const memoryWriter = new MemoryWriter(pool, memoryEmbedding, new LlmExtractionAdapter(gateway, { maxConcurrent: envInt("JARVIS_MEMORY_EXTRACTION_CONCURRENCY", 1, { min: 1, max: 8 }) }), policy);
+  // WP-D1 (UA-2, Q-26): påstandsverifisering (kildeuavhengighet, ingen autonom nettsøk). Lesingen (`knowledge.get_claim_status`) er alltid på; SKRIVING er AV som standard og slås på med
+  // JARVIS_KNOWLEDGE_CLAIM_WRITES=on (kun den eksakte verdien «on» - alt annet er av). Promotering til etablert kunnskap er KUN et forslag til minnets karantene (`MemoryWriter.propose`, D-367).
+  const knowledgeClaimWrites = parseKnowledgeClaimWrites(process.env["JARVIS_KNOWLEDGE_CLAIM_WRITES"]);
+  const knowledgeClaims = createKnowledgeClaimsPort(
+    new ClaimVerificationService(pool, { default_min_independent_sources: envInt("JARVIS_KNOWLEDGE_CLAIM_MIN_SOURCES", 2, { min: 2, max: 10 }) }),
+    { writes: knowledgeClaimWrites, promotion: memoryWriter }
+  );
   // D-286 (Tobias "alle" - se retention-sweep.ts sitt filhode for full
   // begrunnelse): `SummaryService` FANTES fra før, men ble ALDRI konstruert
   // eller kalt fra noe produksjonssted (D-286 sitt eget funn) - kun
@@ -1074,6 +1087,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // for bakgrunnskontekst - se `memoryRetriever` sin egen filhode-kommentar
       // lenger opp for hvorfor den ble hevet ut hit.
       ...memoryToolDefinitions(new MemorySearchTransport(memoryRetriever, memoryWriter)),
+      // WP-D1 (UA-2): `knowledge.search` over `knowledgeRetriever` (tenant-/space-skopet via RLS som app-rolle; treffene bærer strukturerte sensitivitetsmerker for skyskjermen) og
+      // `knowledge.get_claim_status` (Q-26: kildeverifiseringsstatus, ren lesing). Skrive-handlingene i kildeverifiseringen (registrer/evidens/tilbaketrekking/promotering som FORSLAG til karantenen)
+      // finnes KUN med JARVIS_KNOWLEDGE_CLAIM_WRITES=on, og står uansett på ingen modellflate.
+      ...knowledgeToolDefinitions(new KnowledgeSearchTransport(knowledgeRetriever, knowledgeClaims), { claimWrites: knowledgeClaimWrites }),
       // D-416: delegeringsnivået (opprett lesende bakgrunnsjobb / les jobbstatus) over SAMME `taskService` (policy + kontraktsregler).
       ...tasksDelegateToolDefinitions(new TasksDelegateTransport(taskService, chatJobs)),
       // D-421 (UA0-RUNRATE): run-rate og connector maintenance ledger (kun lesing for modellen; skriving via dashbord-ruten).

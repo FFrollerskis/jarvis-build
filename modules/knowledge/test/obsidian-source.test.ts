@@ -160,6 +160,8 @@ describe("ObsidianVaultKnowledgeSource - full livssyklus via KnowledgeSyncServic
     const updated = await sync.sync(identity, "personal", source());
     expect(updated).toMatchObject({ created: 0, updated: 1 });
 
+    // En anker-fil holder vaulten ikke-tom: en helt tom rot tombstoner aldri (kan være en umontert NAS-mappe, PR #325 funn 6).
+    await writeFile(join(vault, "anker.md"), "anker");
     await rm(path);
     const tombstoned = await sync.sync(identity, "personal", source());
     expect(tombstoned).toMatchObject({ tombstoned: 1 });
