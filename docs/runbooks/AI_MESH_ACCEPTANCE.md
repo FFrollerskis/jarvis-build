@@ -58,6 +58,8 @@ Mangler: Bare 0 av 3 nødvendige leverandører er bevist live (konfigurert, men 
 
 «Konfigurert» betyr kun at nøkkel/URL er satt (presence, aldri verdien) - det er **ikke** det samme som bevist.
 
+**Merk (observert på NAS 2026-10-10):** eksempelet over (0 av 3) gjelder bare uten trafikk siste 7 døgn. «Bevist live» betyr at leverandøren er `LIVE` nå eller har minst ett vellykket kall siste 7 døgn (`modules/executive/src/ai-mesh/types.ts`), så på en NAS der chatten allerede har brukt Anthropic, lokal Gemma og Gemini viste statusen «oppfylt» (3 av 3, fallback observert 2 ganger) før røyktesten var kjørt ([evidens](../evidence/2026-10-10-hf-1-chat-observasjon.md)). Det er trafikkbasert observasjon. Evidens for UA-1 gir først røyktesten (steg 2-4): den krever synlig tekst fra minst tre leverandører, bevist fallback og at sensitivitetsporten holder.
+
 ## 3. Steg 2: kjør røyktesten
 
 **På NAS-en (anbefalt)** - kjøres inne i den kjørende api-containeren, som allerede har nøklene, databasetilgangen og eierens tenant (`JARVIS_TENANT_ID`):

@@ -57,10 +57,11 @@ Hver blokk: **Mål** · **Krever** (fra OWNER_ACTIONS) · **Slik** · **Bestått
 ### Blokk 1 – Chat-observasjon av det som er `WIRED`
 
 - **Mål:** se at observatoriet svarer i vanlig chat, og at tallene stemmer med virkeligheten.
-- **Slik (i chat på NAS-dashbordet, signert enhet):** «hva er galt med deg» (EV-1 selvdiagnose) · «hvor bra yter du» (EV-2 SLO) · «hva har du hjulpet meg med» (Value Center, se blokk 4) · «hvordan står AI-mesh-en?» (D4, forventet «0 av 3 bevist» før blokk 6) · «hva er status på driften» (E1, forventet tom/rolig før hendelser). Kopier svarene inn i chat til meg.
+- **Slik (i chat på NAS-dashbordet, signert enhet):** «hva er galt med deg» (EV-1 selvdiagnose) · «hvor bra yter du» (EV-2 SLO; chat-, bakgrunns- og verktøymålene trenger minst 10 målinger siste 24 t, så «ikke nok data» er riktig uten normal bruk) · «hva har du hjulpet meg med» (Value Center, se blokk 4) · «hvordan står AI-mesh-en?» (D4; en leverandør regnes som «bevist live» når den er `LIVE` nå eller har minst ett vellykket kall siste 7 døgn, så har chatten brukt tre leverandører siste uke står det «oppfylt» som observasjon, og røyktesten i blokk 6 er det som gir evidens) · «hva er status på driften» (E1, forventet tom/rolig før hendelser; skriv **driften**, ikke «bedriften», som går til forretningsverktøyene). De tre første går på hurtigbanen (uten AI-modell, så svaret kommer på brøkdeler av et sekund og er likevel målt, ikke ferdigtekst); AI-mesh- og driftsspørsmålene besvares av en modell som velger et verktøy, og tar noen sekunder. Kopier svarene inn i chat til meg. Ikke be om en bakgrunnsjobb rett etter svar med kostnader i: økonomi i de siste meldingene tvinger lokal modell.
 - **Bestått når:** hvert svar kommer uten feil, viser ukjent som ukjent (aldri påstått friskt uten måling), og nevner `constitution_unsigned`/åpne WARN akkurat slik porten gjorde.
 - **Evidens:** svarene limes inn i chat; jeg lager `hf-1-chat-observasjon` fra utdraget (`--stdin`), merket «håndlimt av eier» – det er svakere enn en kjørt kommando og skrives slik.
-- **Rader:** EV-1, EV-2 (SLO-mål godkjennes separat av deg), EV-12 (kun skygge), EV-16, EV-17, EV-19.
+- **Rader:** EV-1, EV-2 (SLO-mål godkjennes separat av deg), EV-12 (kun skygge), EV-16, EV-17, EV-19. EV-12, EV-16, EV-17 og EV-19 leses i evolusjonsrapporten («hvordan utvikler du deg»), som ikke er en av de fem spørsmålene over; spør om den i tillegg.
+- **Utført 2026-10-10 (delvis, WARN):** fire av fem spørsmål observert ([docs/evidence/2026-10-10-hf-1-chat-observasjon.md](../evidence/2026-10-10-hf-1-chat-observasjon.md)); E1 «driften», evolusjonsrapporten og kryssjekk av verdirapportens tall (Telegram, Anthropic) gjenstår.
 
 ### Blokk 2 – Backup, restore og off-site (WP-C2)
 
