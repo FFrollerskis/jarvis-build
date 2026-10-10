@@ -420,7 +420,8 @@ describe("I: rå tilkoblinger før CONNECT er lest - per-IP-tak, global grense o
   });
 
   it("header-blokken må være ferdig på sekunder: en halvsendt forespørsel rives etter headersTimeout (ikke etter Nodes standard 60 s)", async () => {
-    await startProxy({ headersTimeoutMs: 300, requestTimeoutMs: 600, timeoutCheckIntervalMs: 50 });
+    // request-timeout settes høyt med vilje: det er header-timeouten alene som skal rive en halvsendt header-blokk (ellers maskerer request-timeouten den)
+    await startProxy({ headersTimeoutMs: 300, requestTimeoutMs: 30_000, timeoutCheckIntervalMs: 50 });
     const slow = from("127.0.0.2", halfSent);
     const closed = await new Promise((resolve) => { slow.on("close", () => resolve(true)); setTimeout(() => resolve(false), 2_500); });
     expect(closed).toBe(true);
