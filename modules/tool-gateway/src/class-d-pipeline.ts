@@ -24,11 +24,14 @@ export interface ClassDNotification {
   person_id: string;
   tool_id: string;
   action: string;
-  outcome: "executed" | "unverified";
+  /** `unknown` (WP-F1) = tidsavbrudd/nettverk: handlingen KAN ha gått gjennom hos leverandøren - sjekk der FØR noe forsøkes på nytt. */
+  outcome: "executed" | "unverified" | "unknown";
   external_id: string | null;
   idempotency_key: string;
   recovery: string;
   at: string;
+  /** WP-F1: kort, redigert sammendrag av hva handlingen gjaldt (beløp/valuta/leverandørtype) - aldri kontonummer/KID/kortdata. */
+  summary?: string;
 }
 
 export interface ClassDNotifier {
@@ -40,6 +43,22 @@ export interface ClassDNotifier {
 export interface ClassDPipelineOptions {
   enforce: boolean;
   notifier?: ClassDNotifier;
+}
+
+/**
+ * WP-F1 (D-462): kanaler der eieren selv sitter foran en innrullert enhet. ALDRI tale, Telegram, meldingsplattformer, klokke eller system.
+ * Felles kilde for API-rutenes step-up (`apps/api/src/step-up.ts` delegerer hit) og for gatewayens egen håndhevelse (`ToolDefinition.step_up_required`).
+ */
+export const OWNER_STEP_UP_CHANNELS: ReadonlySet<string> = new Set(["web", "desktop", "api", "mobile"]);
+
+/**
+ * Step-up for eierens kontroll- og pengehandlinger: kun en enhetssignert økt (`auth_strength === "signed"`) fra en eier-kanal. `undefined` = oppfylt, ellers årsakskode.
+ * Ren og deterministisk - ingen modell, prompt eller konfigurasjon kan lempe på den.
+ */
+export function ownerStepUpDenial(identity: Pick<IdentityContext, "auth_strength" | "channel">): string | undefined {
+  if (identity.auth_strength !== "signed") return "step_up_required:signed_device_session";
+  if (!OWNER_STEP_UP_CHANNELS.has(identity.channel)) return `step_up_required:channel_${identity.channel}_not_allowed`;
+  return undefined;
 }
 
 /** Sikkerhetsbrytere: aldri blokkert av pipeline-kravene (de MÅ virke også når alt annet er nede). */
@@ -72,7 +91,9 @@ export function assessClassDPipeline(def: ToolDefinition): ClassDAssessment {
     return { complete: missing.length === 0, missing };
   }
   if (!def.preflight_action) missing.push("fresh_state_read");
-  else if (def.preflight_requires_target !== true && !def.preflight_target_check && def.allows_missing_preflight_target !== true) {
+  else if (
+    def.preflight_requires_target !== true && !def.preflight_target_check && !def.preflight_validator && def.allows_missing_preflight_target !== true
+  ) {
     missing.push("target_validation");
   }
   if (!def.postcondition_predicate && !def.postcondition_target_absent) missing.push("postcondition");
@@ -99,9 +120,14 @@ export function telegramClassDNotifier(deps: {
       return Boolean(token) && Boolean(chat);
     },
     async notify(n) {
+      const headline =
+        n.outcome === "executed" ? "Klasse D-handling utført"
+          : n.outcome === "unknown" ? "Klasse D-handling: UTFALL UKJENT (tidsavbrudd/nettverk) - sjekk hos leverandøren FØR du prøver igjen"
+            : "Klasse D-handling UTFØRT MEN IKKE VERIFISERT - sjekk manuelt";
       const lines = [
-        n.outcome === "executed" ? "Klasse D-handling utført" : "Klasse D-handling UTFØRT MEN IKKE VERIFISERT - sjekk manuelt",
+        headline,
         `Verktøy: ${n.tool_id}.${n.action}`,
+        ...(n.summary ? [`Gjelder: ${n.summary}`] : []),
         n.external_id ? `Ekstern ID: ${n.external_id}` : "Ekstern ID: (ingen)",
         `Referanse: ${n.idempotency_key}`,
         `Gjenoppretting: ${n.recovery}`

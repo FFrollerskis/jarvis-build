@@ -25,6 +25,7 @@ import {
 } from "@jarvis/finance";
 import { isControlCenterId } from "@jarvis/executive";
 import type { ConversationEngine } from "./conversation.ts";
+import { FINANCE_ACTION_ROUTE_ACTIONS, moneyActionParameters, parseFinanceActionRequest, previewFinanceAction, readReconciliationStatus } from "./finance-actions.ts";
 import { submittedContractHasReservedKey, type ChatJobs } from "./chat-jobs.ts";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import {
@@ -1151,6 +1152,13 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       return json(res, 400, { error: "malformed_request", reason: "decision_malformed" });
     }
     if (decision === "approve" && deps.executive) {
+      // WP-F1 (D-462): godkjenning av en handling som flytter penger (`ToolDefinition.step_up_required`) krever eierens step-up - en enhetssignert økt fra en
+      // eier-kanal - FØR bekreftelsen forbrukes. (Avvisning er unntatt: den reduserer risiko.) ToolGateway håndhever det samme på nytt ved utførelsen.
+      const pending = await deps.confirmations.peekPending(resolved.identity, id);
+      if (pending && deps.executive.gateway.get(pending.tool_id, pending.action)?.step_up_required === true) {
+        const stepUp = stepUpDenial(resolved.identity, "approve_finance_action");
+        if (stepUp) return json(res, 403, { error: "step_up_required", reason: stepUp });
+      }
       // D-382: godkjenning UTFØRER kallet i deterministisk kode - samme ToolGateway (policy, kill switch, klasse D-pipeline, audit) som
       // alt annet, med eierens grant-identitet og bekreftelses-id som idempotensnøkkel (aldri dobbel utførelse).
       const taken = await deps.confirmations.approveAndTake(resolved.identity, id);
@@ -1173,6 +1181,74 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     const ok = await deps.confirmations.decide(resolved.identity, id, decision);
     if (!ok) return json(res, 404, { error: "not_pending", reason: "confirmation_not_pending_or_expired" });
     return json(res, 200, { ok: true, data: { confirmation_id: id, decision } });
+  }
+
+  if (deps.executive && deps.confirmations && deps.owner && req.method === "POST" && url.pathname === "/finance/actions") {
+    // WP-F1 (D-462, Q-47 a): eierens vei til pengehandlingene (se finance-actions.ts). EGEN rute med hardkodet allowlist (`preview`/`request`/`reconciliation_status`) - aldri en utvidelse av
+    // /confirmations eller /executive/*. SAMME grant-rekkefølge som de øvrige muterende rutene: avvis ugyldig action/parametre FØR grantet løses, avvis et ugyldig
+    // grant FØR step-up, og step-up FØR noe leses eller opprettes. `request` UTFØRER ALDRI - den oppretter kun en bundet, engangs bekreftelse som eieren godkjenner
+    // via `/confirmations` (som igjen krever step-up og kjører gjennom klasse D-pipelinen).
+    const raw: unknown = await readBodyOrUndefined(req);
+    const parsedBody = grantBodyOrReject(res, raw, EXECUTIVE_QUERY_BODY_KEYS);
+    if (!parsedBody) return;
+    const action = parsedBody["action"];
+    if (typeof action !== "string" || !(FINANCE_ACTION_ROUTE_ACTIONS as readonly string[]).includes(action)) {
+      return json(res, 400, { error: "malformed_request", reason: "action_not_allowed" });
+    }
+    const rawParameters = parsedBody["parameters"];
+    const parameterObject = typeof rawParameters === "object" && rawParameters !== null && !Array.isArray(rawParameters) ? (rawParameters as Record<string, unknown>) : {};
+    // `reconciliation_status` er en ren LESING av avstemmingsrapporten (klasse A, `finance.get_reconciliation_status`) og tar INGEN parametre (tenant kommer fra grantet).
+    let parsedRequest: ReturnType<typeof parseFinanceActionRequest> = { ok: false, reason: "not_applicable" };
+    if (action === "reconciliation_status") {
+      const extra = Object.keys(parameterObject)[0];
+      if (extra !== undefined) return json(res, 400, { error: "malformed_request", reason: `unknown_parameter:${extra.slice(0, 40).replace(/[^A-Za-z0-9_.:-]/g, "_")}` });
+    } else {
+      parsedRequest = parseFinanceActionRequest(parameterObject);
+      if (!parsedRequest.ok) return json(res, 400, { error: "malformed_request", reason: parsedRequest.reason });
+    }
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string, res);
+    if (!resolved.ok) {
+      if (resolved.responded) return;
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+    }
+    // Kun den validerte eieren (ikke en gjest eller delegat i samme tenant) kan se eller be om pengehandlinger - `deps.owner` er prosessens ENE eier-identitet.
+    if (resolved.identity.person_id !== deps.owner.person_id || resolved.identity.tenant_id !== deps.owner.tenant_id || resolved.identity.delegation_id !== undefined) {
+      return json(res, 403, { error: "owner_only", reason: "finance_actions_require_owner" });
+    }
+    const stepUp = stepUpDenial(resolved.identity, `finance_${action}`);
+    if (stepUp) {
+      return json(res, 403, { error: "step_up_required", reason: stepUp });
+    }
+    if (action === "reconciliation_status") {
+      const status = await readReconciliationStatus(deps.executive.gateway, resolved.identity);
+      return status.ok ? json(res, 200, { ok: true, data: status.data }) : json(res, 403, { error: "tool_denied", reason: status.reason });
+    }
+    if (!parsedRequest.ok) return json(res, 400, { error: "malformed_request", reason: parsedRequest.reason });
+    const request = parsedRequest.request;
+    const preview = await previewFinanceAction(deps.executive.gateway, resolved.identity, request);
+    if (!preview.ok) {
+      return preview.kind === "not_found"
+        ? json(res, 404, { error: "target_not_found", reason: preview.reason, request_id: requestIdOf(res) })
+        : json(res, 403, { error: "tool_denied", reason: preview.reason });
+    }
+    const tool = `${request.spec.tool_id}.${request.spec.action}`;
+    const view = { tool, target_id: request.targetId, allowed: preview.reason === null && preview.binding !== null, reason: preview.reason, summary: preview.summary, binding: preview.binding, state: preview.state };
+    if (action === "preview") return json(res, 200, { ok: true, data: view });
+    if (preview.reason !== null) {
+      return json(res, 409, { error: "not_submittable", reason: preview.reason, data: view });
+    }
+    // Uten beløp/valuta/mottaker-digest i den ferske tilstanden kan beløp + mottaker ikke bindes - da opprettes ingen bekreftelse (fail-closed).
+    if (preview.binding === null) {
+      return json(res, 409, { error: "not_submittable", reason: "binding_unavailable", data: view });
+    }
+    const identity = resolved.identity;
+    const pending = await deps.confirmations.requestPending(
+      { tool_id: request.spec.tool_id, action: request.spec.action, parameters: moneyActionParameters(identity, request, preview.binding) },
+      { tenant_id: identity.tenant_id, person_id: identity.person_id, device_id: identity.device_id, session_id: identity.session_id },
+      ["owner_finance_action_request"],
+      preview.summary ?? undefined
+    );
+    return json(res, 200, { ok: true, data: { ...pending, tool, target_id: request.targetId, summary: preview.summary, next: "approve_via_confirmations_with_step_up" } });
   }
 
   if (deps.executive && req.method === "POST" && url.pathname === "/memory/proposals") {
