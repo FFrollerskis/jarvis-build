@@ -5,6 +5,8 @@
 # gamle teller som ferskt), men gir ekstra sett.
 #
 # Stiene under er fra NAS-oppsettet i docs/runbooks/NAS_UPDATE_2026-10-07.md - tilpass dem. node og docker MÅ ligge i PATH (sjekk: command -v node docker).
+# NAS (UGOS/Debian 12), observert 2026-10-12: `crontab -e` / `crontab -` som vanlig bruker kan gi «/var/spool/cron/: mkstemp: Permission denied». Skriv da linjene under til en tekstfil og
+# installer den med `sudo crontab -u <bruker> <fil>` (kontroller først at filen inneholder nas-schedule.sh-linjen, så du ikke installerer en tom liste).
 SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin
 */15 * * * * cd /volume1/jarvisbuild-data/jarvisbuild && ops/backup/nas-schedule.sh /volume1/jarvisbuild-data/backups/encrypted >> /volume1/jarvisbuild-data/backups/backup.log 2>&1
