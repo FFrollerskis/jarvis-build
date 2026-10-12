@@ -72,6 +72,7 @@ Hver blokk: **Mål** · **Krever** (fra OWNER_ACTIONS) · **Slik** · **Bestått
 - **Evidens:** `hf-2-backup-nas`, `hf-2-restore-drill` (kjøres der nøkkelen er; filen kommer via chat).
 - **Hvis det feiler:** raden står som den er; full produksjons-restore er ikke skriptet (kjent, `DEFERRED`).
 - **Rader:** UA-0 OPS-RUNTIME (Fase 10), EV-20 (off-site restore bevist → `OFFSITE_RESTORE`).
+- **Utført 2026-10-12 (delvis):** cron installert (`sudo crontab -u`), `acceptance-ops.sh nas` kjørt: PASS=5 / FAIL=0 / ikke satt opp=3 (exit 3), off-site rclone → Google Drive sha256-bekreftet, statuseksport montert, gammel nattjobb fjernet. Evidens (håndlimt av eier): [hf-1-ops-runtime-nas](../evidence/2026-10-12-hf-1-ops-runtime-nas.md). **Gjenstår:** heartbeat (O04/O07), RPO/RTO-mål (Q-62), `drill --from-offsite` med privatnøkkel, Google-opprydding og nøkkel-escrow (Q-61), og chat-test av «Backup»-området.
 
 ### Blokk 3 – Vertsside job-runner (WP-C1, D-32) – sandbox
 

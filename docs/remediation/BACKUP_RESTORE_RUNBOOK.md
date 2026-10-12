@@ -2,6 +2,8 @@
 
 **Status (2026-10-02): `RESTORE_VERIFISERT` for ett sett.** Backup `jarvis-backup-20261002T211007Z` ble tatt på NAS-en og restore-verifisert på Tobias' Windows-PC (Git Bash + Docker Desktop): `ok: true`, tabeller og eksakte radtall lik manifestet for jarvis (130/9019), infisical (188/954) og langfuse (40/373). **Fortsatt åpent:** daglig cron, flere kopier utenfor NAS, nøkkel-escrow, full katastrofe-restore til produksjon, sletting av ukryptert dump i `backups/stray/`.
 
+**Oppdatering 2026-10-12 (blokk 2, observert på NAS, håndlimt av eier, [evidens](../evidence/2026-10-12-hf-1-ops-runtime-nas.md)):** planlagt tikk er installert i cron (hvert 15. minutt som brukeren Jarvis; første cron-tikk 09:00:01Z), off-site rclone → Google Drive er sha256-bekreftet, statuseksporten er montert i api, og `acceptance-ops.sh nas` ga PASS=5 / FAIL=0 / ikke satt opp=3 (exit 3 = IKKE lukket). Den gamle nattjobben er fjernet. **Fortsatt åpent:** ekstern heartbeat (O04/O07), RPO/RTO-mål (Q-62), restore-drill fra off-site med privatnøkkel (D01-D04), nøkkel-escrow og rotering av Google-hemmeligheter (Q-61), og første naturlige backup fra cron (ventet 2026-10-13 ca. 09:23Z).
+
 ## Hva som dekkes
 
 | Database | Innhold | Kommentar |
@@ -119,6 +121,10 @@ Velg **én** planlegger (eksempler i `infra/backup/`, alle `NOT VERIFIED` på NA
 * **cron:** `infra/backup/crontab.example` - `*/15 * * * * cd <repo> && ops/backup/nas-schedule.sh <backup-mappe> >> <backup-mappe>/../backup.log 2>&1` (sett `PATH` slik at `node` og `docker` finnes). **Fjern den gamle linjen** `17 2 * * * … nas-backup.sh …`.
 * **systemd:** `infra/backup/jarvis-backup.service` + `jarvis-backup.timer` (se kommentarene i filene for installasjon; `systemctl list-timers jarvis-backup.timer`).
 * NAS-ens egen oppgaveplanlegger (UGOS/DSM) kan kjøre samme kommando hvert 15. minutt som den brukeren som eier backup-mappen.
+* **NAS (UGOS/Debian 12), observert 2026-10-12:** `crontab -e` og `crontab -` som vanlig bruker kan feile med `/var/spool/cron/: mkstemp: Permission denied` (da endres ingenting). Skriv ønsket crontab til en fil og installer den med sudo for brukeren; `grep -q` først, så du ikke installerer en tom liste hvis `crontab -l` feiler:
+```bash
+(crontab -l | grep -v 'nas-schedule.sh'; echo '<ny cron-linje>') > ~/crontab-ny.txt && grep -q 'nas-schedule.sh' ~/crontab-ny.txt && sudo crontab -u <bruker> ~/crontab-ny.txt && crontab -l
+```
 
 `nas-schedule.sh` leser `JARVIS_DB_ADMIN_*` og `JARVIS_BACKUP_*` fra `.env` (CRLF, anførselstegn og `# kommentar` tåles; **miljøet vinner** over `.env`), den OFFENTLIGE nøkkelen fra `~/.jarvis-backup-recipient`, velger `age-docker.sh` når `age` mangler (D-370), og kjører fra repoets rot så `docker compose` finner `.env`. Ingenting annet fra `.env` sendes videre, og ingen verdi skrives til skjerm.
 
@@ -210,6 +216,8 @@ echo 'JARVIS_BACKUP_STATUS_EXPORT_DIR=/volume1/jarvisbuild-data/backups/status' 
 ops/backup/nas-schedule.sh <backup-mappe> tick --json                    # skriver eksporten (0644, mappen 0755)
 docker compose -f infra/local/docker-compose.yml -f infra/backup/docker-compose.backup-status.yml up -d api
 ```
+**Husk (observert 2026-10-12):** når eksporten er slått på må alle senere `up`/`--build`-kommandoer for api ha begge compose-filene og `--env-file .env` (`sudo docker compose --env-file .env -f infra/local/docker-compose.yml -f infra/backup/docker-compose.backup-status.yml up -d api`). Ellers fjernes monteringen når api opprettes på nytt, og «Backup» i selvdiagnosen blir `UNKNOWN`.
+
 Overstyringen monterer MAPPEN skrivebeskyttet og setter `JARVIS_BACKUP_STATUS_FILE=/var/lib/jarvis-backup-status/backup-status.json` (en fil-montering ville pekt på den gamle, slettede inoden etter atomisk skriving). API-et leser filen defensivt: `lstat` først og kun en vanlig fil (en FIFO, enhet, mappe eller **symlenke** i stedet for `backup-status.json` er uleselig - symlenker følges ikke), `O_NONBLOCK | O_NOFOLLOW`, og en frist på 5 s (`timeout` → området er `UNKNOWN`, aldri «frisk»). Et tidspunkt i filen som ligger mer enn 5 min FREM i tid (klokkeavvik mellom NAS og API, eller en endret fil) kan aldri bevise ferskhet: området blir `DEGRADED` med årsaken, aldri «0 t siden». Spør Jarvis «hva er galt med deg?»: området **Backup** viser nå alder på siste backup, restore-verifisering, off-site og heartbeat. Terskler: siste backup > 1,5 × intervall = `DEGRADED`, > 3 × = `DOWN` (3 mislykkede forsøk på rad også); selve statusfilen eldre enn 1,5 × intervall (tikket kjører ikke) = `DEGRADED`; off-site eldre enn 2,5 × intervall eller feilet = `DEGRADED`; restore-verifisering feilet eller eldre enn 2 × intervallet (eller aldri bevist etter 2 intervaller) = `DEGRADED`; filen mangler/er ulesbar = `UNKNOWN` (aldri «frisk»). Ikke satt opp (off-site, heartbeat) vises som en **merknad**, ikke skjult. Filen er ubetrodd data: fritekst fra verktøyutdata når aldri selvdiagnosen (kun feilkoder oversatt i API-et).
 
 ## 6.6 Restore-verifisering og restore-drill (RTO/RPO)

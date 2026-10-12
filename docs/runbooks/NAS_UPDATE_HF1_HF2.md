@@ -32,6 +32,8 @@ nohup sudo docker compose --env-file .env -f infra/local/docker-compose.yml up -
 tail -f /tmp/jarvis-update.log
 ```
 
+> **Er backup-statuseksporten slått på** (`JARVIS_BACKUP_STATUS_EXPORT_DIR` står i `.env`)? Da må **alle** `up`-kommandoer for api ha begge compose-filene, ellers fjernes monteringen og «Backup» i selvdiagnosen blir `UNKNOWN`: `sudo docker compose --env-file .env -f infra/local/docker-compose.yml -f infra/backup/docker-compose.backup-status.yml up -d --build` (se [BACKUP_RESTORE_RUNBOOK §6.5](../remediation/BACKUP_RESTORE_RUNBOOK.md)).
+
 `migrate`-tjenesten kjører migrasjonene (navnebasert – hull i nummerrekken og rekkefølge på tvers av PR-er er ikke et problem). Ny kode krever ingen nye `.env`-verdier for å starte: alle nye variabler er valgfrie og AV som standard.
 
 ## 2. Tjenester oppe
