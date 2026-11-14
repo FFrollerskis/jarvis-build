@@ -14,7 +14,7 @@ import type pg from "pg";
 import { AccessTokenCache, bearerFor, type RefreshedToken, dropboxRefreshExchange, microsoftRefreshExchange, spotifyRefreshExchange } from "./oauth-refresh.ts";
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolInvocationContext, ToolTransport } from "./gateway.ts";
-import { createVaultFirstConfigReader, readEnvConfig, type ConfigReader } from "./oauth-client-config.ts";
+import { createVaultFirstConfigReader, readEnvConfig, type ConfigReader, type VaultFirstConfigReader } from "./oauth-client-config.ts";
 import { GithubRateLimitedError, GithubRateLimitController } from "./github-rate-limit-controller.ts";
 import { abortableSleep, throwIfAborted } from "./call-signal.ts";
 
@@ -193,8 +193,8 @@ async function readGoogleClientRef(ref: "JARVIS_GOOGLE_CLIENT_ID" | "JARVIS_GOOG
 }
 
 async function googleTokenExchange(refreshToken: string): Promise<RefreshedToken> {
-  const clientId = await readGoogleClientRef("JARVIS_GOOGLE_CLIENT_ID");
-  const clientSecret = await readGoogleClientRef("JARVIS_GOOGLE_CLIENT_SECRET");
+  // Review M3b: id og secret leses PARALLELT (hver med kort hvelvfrist i leseren) - to sekvensielle oppslag mot et hengt hvelv ga 10 s ventetid FØR selve token-forespørselen.
+  const [clientId, clientSecret] = await Promise.all([readGoogleClientRef("JARVIS_GOOGLE_CLIENT_ID"), readGoogleClientRef("JARVIS_GOOGLE_CLIENT_SECRET")]);
   if (!clientId || !clientSecret) throw new Error("google_oauth_client_not_configured");
   // HOST FIX #2: KUN LEST (aldri skrevet/eksponert) for å avgjøre om DENNE
   // klienten allerede er host-bevist Desktop-type - samme markør
@@ -988,21 +988,55 @@ export function googleDriveCredentialsConfigured(): boolean {
 /** WP-K (JARVIS-056): sist målte Drive-konfig (hvelv-bevisst); `undefined` = ikke primet (da gjelder miljøsjekken over). */
 let googleDriveSnapshot: boolean | undefined;
 
+export interface PrimeDriveCheckOptions {
+  /** Antall målinger når hvelvet IKKE svarte (standard 7). Svarer hvelvet (selv «finnes ikke») er første måling endelig. */
+  attempts?: number;
+  /** Pause mellom målingene (ms, standard 5000: ca. 30 s totalt - Infisical er ofte tregere enn api ved en NAS-omstart). */
+  delayMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  log?: (line: Record<string, string>) => void;
+}
+
 /**
  * WP-K (D-471, JARVIS-056): Drive-verktøyene registreres kun når client id + secret + refresh-token finnes - og til nå ble det målt i miljøet alene, så dashbord-/Infisical-lagret Google-konfig ga
  * et «delvis konfigurert»-system der token-utvekslingen kunne lese hvelvet men Drive-verktøyene aldri ble registrert. api/worker kaller denne ÉN gang ved oppstart FØR `firstWaveTools()` (den
  * synkrone `driveTransportsIfConfigured()` er uendret og leser målingen). `readRefreshToken` er den vanlige secret-kjeden (`readSecretProvider.get`). Kaster aldri: en feil gir `false`.
+ *
+ * Review M3c: målingen er et engangsøyeblikksbilde. Etter en NAS-omstart kan Infisical være tregere enn api; med `.env`-verdiene fjernet (runbookens sluttilstand) ble Drive da stille utelatt til neste omstart.
+ * Derfor: når målingen gir «ikke konfigurert» OG hvelvet IKKE svarte (leserens `vaultState() === "error"`), måles det på nytt (`attempts` x `delayMs`) før svaret blir endelig, og en endelig «hoppet over fordi hvelvet
+ * var nede» logges tydelig (`drive_registration_skipped_vault_unavailable`). Når hvelvet svarer (selv «finnes ikke») eller verdiene finnes i miljøet er første måling endelig - ingen ekstra ventetid i dagens oppsett.
+ * (`depends_on` Infisical i compose ville stoppet api helt ved en Infisical-feil - bevisst ikke gjort.)
  */
-export async function primeGoogleDriveCredentialCheck(readRefreshToken: ConfigReader): Promise<boolean> {
-  try {
-    const [clientId, clientSecret, token] = await Promise.all([
-      readGoogleClientRef("JARVIS_GOOGLE_CLIENT_ID"), readGoogleClientRef("JARVIS_GOOGLE_CLIENT_SECRET"), readRefreshToken("JARVIS_GOOGLE_TOKEN")
-    ]);
-    googleDriveSnapshot = Boolean(clientId && clientSecret && token);
-  } catch {
-    googleDriveSnapshot = false;
+export async function primeGoogleDriveCredentialCheck(readRefreshToken: ConfigReader, options: PrimeDriveCheckOptions = {}): Promise<boolean> {
+  const attempts = Math.max(1, Math.trunc(options.attempts ?? 7));
+  const delayMs = Math.max(0, Math.trunc(options.delayMs ?? 5_000));
+  const sleep = options.sleep ?? ((ms: number) => abortableSleep(ms)); // oppstartsvei: ingen ambient kallsignal, så dette er en vanlig sleep
+  const log = options.log ?? ((line: Record<string, string>) => console.warn(JSON.stringify(line)));
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let configured: boolean;
+    try {
+      const [clientId, clientSecret, token] = await Promise.all([
+        readGoogleClientRef("JARVIS_GOOGLE_CLIENT_ID"), readGoogleClientRef("JARVIS_GOOGLE_CLIENT_SECRET"), readRefreshToken("JARVIS_GOOGLE_TOKEN")
+      ]);
+      configured = Boolean(clientId && clientSecret && token);
+    } catch {
+      configured = false;
+    }
+    googleDriveSnapshot = configured;
+    if (configured) return true;
+    const vaultDown = (googleClientSource as Partial<VaultFirstConfigReader> | undefined)?.vaultState?.() === "error";
+    if (!vaultDown) return false; // hvelvet svarte (eller finnes ikke): «ikke konfigurert» er endelig
+    if (attempt === attempts) {
+      log({
+        msg: "drive_registration_skipped_vault_unavailable", attempts: String(attempts),
+        action: "Drive-verktøyene er IKKE registrert: hvelvet var utilgjengelig ved oppstart og verdiene finnes ikke i miljøet. Start api og worker på nytt når Infisical er oppe."
+      });
+      return false;
+    }
+    log({ msg: "drive_registration_waiting_for_vault", attempt: String(attempt), of: String(attempts) });
+    await sleep(delayMs);
   }
-  return googleDriveSnapshot;
+  return false;
 }
 
 /**

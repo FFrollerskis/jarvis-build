@@ -34,6 +34,26 @@ export interface RefreshTokenExchange {
 const EXPIRY_MARGIN_MS = 60_000;
 const DEFAULT_EXPIRES_IN_S = 3600;
 
+/** Alle levende cacher i denne prosessen (svake referanser - en cache som ikke lenger brukes skal kunne frigjøres). Brukes kun av `invalidateAllAccessTokenCaches`. */
+const liveCaches = new Set<WeakRef<AccessTokenCache>>();
+
+/**
+ * WP-K review M3d: nullstiller ALLE access-token-cacher i prosessen. Eieren som bytter en connector-credential (`owner_controls.set_connector_credential`: klient-id/-secret, refresh-token) skal ikke
+ * måtte vente opptil en time (`expires_in`) på at et access-token som ble utstedt med den GAMLE konfigurasjonen slutter å bli brukt - det er hele poenget ved en rotasjon etter en lekkasje. Kalles
+ * KUN fra eierens egen skrivevei, aldri fra `ToolGateway.setSecret()` (den kalles også av `persist` etter hver refresh-token-rotasjon, og en nullstilling der ville utløst en ny utveksling per rotasjon).
+ * Returnerer antall levende cacher som ble nullstilt (for logg/test).
+ */
+export function invalidateAllAccessTokenCaches(): number {
+  let cleared = 0;
+  for (const ref of [...liveCaches]) {
+    const cache = ref.deref();
+    if (cache === undefined) { liveCaches.delete(ref); continue; }
+    cache.clear();
+    cleared += 1;
+  }
+  return cleared;
+}
+
 /**
  * Cache per refresh-token (i minnet, per prosess). `get()` returnerer et gyldig access-token, utveksler ved behov og
  * kaller `persist` når leverandøren roterte refresh-tokenet. Parallelle kall deler samme pågående utveksling.
@@ -41,11 +61,15 @@ const DEFAULT_EXPIRES_IN_S = 3600;
 export class AccessTokenCache {
   private readonly entries = new Map<string, { access_token: string; expires_at_ms: number }>();
   private readonly inflight = new Map<string, Promise<string>>();
+  /** Økes av `clear()`: en utveksling som startet FØR nullstillingen ble gjort med gammel konfigurasjon og skal verken caches eller persisteres. */
+  private generation = 0;
 
   constructor(
     private readonly exchanger: RefreshTokenExchange,
     private readonly options: { persist?: (newRefreshToken: string) => Promise<void>; now?: () => number; label?: string } = {}
-  ) {}
+  ) {
+    liveCaches.add(new WeakRef(this));
+  }
 
   async get(refreshToken: string): Promise<string> {
     const now = this.options.now?.() ?? Date.now();
@@ -55,9 +79,13 @@ export class AccessTokenCache {
     // WP-K (D-471, JARVIS-018): den pågående utvekslingen er DELT mellom samtidige kall - den starter uten første kallers frist (egen 45 s-grense i `guardedFetch`), og hver kaller venter med SITT eget
     // kallsignal, så et tidsavbrudd slipper kalleren fri uten å drepe utvekslingen for de andre.
     if (pending) return raceCallSignal(pending);
+    const generation = this.generation;
+    const own: { run?: Promise<string> } = {};
     const run = detachFromCallSignal(() => (async () => {
       try {
         const token = await this.exchanger.exchange(refreshToken);
+        // `clear()` mens utvekslingen pågikk: svaret er gyldig for DENNE kalleren, men ble utstedt med konfigurasjonen eieren nettopp byttet ut - hverken cache eller persister det (eierens nye verdi vinner).
+        if (generation !== this.generation) return token.access_token;
         const expiresIn = Number.isFinite(token.expires_in) && token.expires_in > 0 ? token.expires_in : DEFAULT_EXPIRES_IN_S;
         const entry = { access_token: token.access_token, expires_at_ms: (this.options.now?.() ?? Date.now()) + expiresIn * 1000 };
         this.entries.set(refreshToken, entry);
@@ -74,9 +102,11 @@ export class AccessTokenCache {
         }
         return entry.access_token;
       } finally {
-        this.inflight.delete(refreshToken);
+        // Kun den EGNE oppføringen fjernes: etter en `clear()` kan en NYERE utveksling ligge under samme nøkkel.
+        if (this.inflight.get(refreshToken) === own.run) this.inflight.delete(refreshToken);
       }
     })());
+    own.run = run;
     this.inflight.set(refreshToken, run);
     return raceCallSignal(run);
   }
@@ -84,6 +114,13 @@ export class AccessTokenCache {
   /** Kastes når leverandøren avviser tokenet (401/invalid_grant) slik at neste kall gjør en fersk utveksling. */
   invalidate(refreshToken: string): void {
     this.entries.delete(refreshToken);
+  }
+
+  /** Glemmer ALLE cachede access-tokens og pågående utvekslinger (review M3d - se `invalidateAllAccessTokenCaches`). Neste `get()` gjør en fersk utveksling med gjeldende konfigurasjon. */
+  clear(): void {
+    this.generation += 1;
+    this.entries.clear();
+    this.inflight.clear();
   }
 }
 

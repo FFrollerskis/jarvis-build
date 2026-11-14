@@ -3,14 +3,17 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  CONNECTOR_REGISTRY, SpotifyTransport, configureGoogleOAuthClientSource, createVaultFirstConfigReader, driveTransportsIfConfigured, googleAccessToken,
-  googleDriveCredentialsConfigured, listConnectorStatus, primeGoogleDriveCredentialCheck, resetGoogleAccessTokenCache
+  AccessTokenCache, CONNECTOR_REGISTRY, SpotifyTransport, configureGoogleOAuthClientSource, createVaultFirstConfigReader, driveTransportsIfConfigured, googleAccessToken,
+  googleDriveCredentialsConfigured, invalidateAllAccessTokenCaches, listConnectorStatus, primeGoogleDriveCredentialCheck, resetGoogleAccessTokenCache
 } from "../src/index.ts";
 
 /**
  * WP-K (D-471, JARVIS-056): Google-/Spotify-klientens id/secret leses via hvelvet FØRST (dashbord-lagret/Infisical) med miljøet som en LOGGET-DEPRECATED fallback. Beviser (1) rekkefølgen og at
  * fallbacken logges uten å lekke verdier, (2) at token-utvekslingen faktisk bruker hvelvets klient, (3) at Drive-registreringssjekken ser hvelvet, (4) at standardoppførselen (ingen kilde koblet inn)
  * er den gamle, stille miljølesingen, og (5) at klient-referansene kan lagres fra dashbordet uten at `configured` endres. Alle verdier er åpenbart falske.
+ *
+ * Review M3 (a-d): (a) en hvelvFEIL skilles fra «finnes ikke» (egen strupet logglinje, sist kjente hvelvverdi foretrekkes fremfor en utdatert .env-verdi), (b) klient-id og -secret leses parallelt med kort
+ * frist, (c) Drive-registreringen venter på et hvelv som kommer opp etter api, (d) access-token-cachen nullstilles når eieren bytter en credential.
  */
 const originalFetch = global.fetch;
 const json = (status: number, body: unknown): Response => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -49,14 +52,18 @@ afterEach(() => {
 
 const vaultOf = (values: Record<string, string>) => ({ get: async (ref: string) => values[ref] ?? null });
 const deprecationLines = (log: Array<Record<string, string>>) => log.filter((l) => l["msg"] === "credential_env_fallback_deprecated");
+const errorLines = (log: Array<Record<string, string>>) => log.filter((l) => l["msg"] === "credential_vault_error");
+const sourceLines = (log: Array<Record<string, string>>) => log.filter((l) => l["msg"] === "credential_source");
 
 describe("createVaultFirstConfigReader: hvelv først, miljø som logget-deprecated fallback", () => {
-  it("hvelvet vinner over miljøet, og da logges ingenting (ikke en fallback)", async () => {
+  it("hvelvet vinner over miljøet: ingen fallback-/feillogg, kun ÉN `credential_source`-linje (source=vault, kun referansen) første gang - så et deploy som snur forrangen er synlig", async () => {
     const log: Array<Record<string, string>> = [];
     const read = createVaultFirstConfigReader({ vault: vaultOf({ REF_A: "fra-hvelvet" }), env: { REF_A: "fra-miljoet" }, log: (l) => log.push(l) });
     expect(await read("REF_A")).toBe("fra-hvelvet");
+    expect(await read("REF_A")).toBe("fra-hvelvet");
     expect(read.lastSource("REF_A")).toBe("vault");
-    expect(log).toEqual([]);
+    expect(log).toEqual([{ msg: "credential_source", ref: "REF_A", source: "vault" }]);
+    expect(JSON.stringify(log)).not.toContain("fra-hvelvet");
   });
 
   it("miljøfallbacken virker uendret (verdien returneres) og logges ÉN gang per referanse - kun referansenavnet, aldri verdien", async () => {
@@ -72,13 +79,25 @@ describe("createVaultFirstConfigReader: hvelv først, miljø som logget-deprecat
     expect(JSON.stringify(log)).not.toContain("annen-verdi");
   });
 
-  it("hvelv som kaster eller returnerer tom streng behandles som «ikke tilgjengelig» - miljøet tar over, kallet feiler aldri på grunn av hvelvet", async () => {
+  it("hvelv som kaster = «kunne ikke leses» (IKKE «finnes ikke»): miljøet tar over og kallet feiler aldri på grunn av hvelvet - men det logges som credential_vault_error, ikke som deprecated-fallback", async () => {
     const log: Array<Record<string, string>> = [];
     const down = { get: async (): Promise<string | null> => { throw new Error("infisical nede"); } };
-    expect(await createVaultFirstConfigReader({ vault: down, env: { REF_A: "env-a" }, log: (l) => log.push(l) })("REF_A")).toBe("env-a");
+    const read = createVaultFirstConfigReader({ vault: down, env: { REF_A: "env-a" }, log: (l) => log.push(l) });
+    expect(await read("REF_A")).toBe("env-a");
+    expect(read.vaultState()).toBe("error");
+    expect(read.lastSource("REF_A")).toBe("env");
+    expect(deprecationLines(log)).toEqual([]);
+    expect(errorLines(log)).toEqual([{ msg: "credential_vault_error", ref: "REF_A", reason: "exception", using: "env", action: expect.any(String) }]);
+  });
+
+  it("hvelv som returnerer tom streng = «finnes ikke» (D-236): miljøet tar over og fallbacken logges som deprecated (ikke som hvelvfeil)", async () => {
+    const log: Array<Record<string, string>> = [];
     const empty = { get: async (): Promise<string | null> => "" };
-    expect(await createVaultFirstConfigReader({ vault: empty, env: { REF_A: "env-a" }, log: (l) => log.push(l) })("REF_A")).toBe("env-a");
-    expect(deprecationLines(log)).toHaveLength(2); // hver leser har sin egen «én gang»-sperre
+    const read = createVaultFirstConfigReader({ vault: empty, env: { REF_A: "env-a" }, log: (l) => log.push(l) });
+    expect(await read("REF_A")).toBe("env-a");
+    expect(read.vaultState()).toBe("ok");
+    expect(deprecationLines(log)).toHaveLength(1);
+    expect(errorLines(log)).toEqual([]);
   });
 
   it("verken hvelv eller miljø: null (og tom miljøvariabel = ikke satt, D-236), uten logg", async () => {
@@ -95,6 +114,129 @@ describe("createVaultFirstConfigReader: hvelv først, miljø som logget-deprecat
     const read = createVaultFirstConfigReader({ env: { REF_A: "x" }, log: (l) => log.push(l) });
     expect(await read("REF_A")).toBe("x");
     expect(deprecationLines(log)).toHaveLength(1);
+  });
+});
+
+describe("review M3a: «hvelvet kunne ikke leses» er ikke det samme som «verdien finnes ikke i hvelvet»", () => {
+  const down = { get: async (): Promise<string | null> => { throw new Error("infisical nede"); } };
+
+  it("en Infisical-lignende kilde som svarer null med health=unavailable behandles som FEIL (reason=unavailable), og teksten sier IKKE at verdien skal flyttes til dashbordet", async () => {
+    const log: Array<Record<string, string>> = [];
+    const vault = { health: "unavailable" as const, get: async (): Promise<string | null> => null };
+    const read = createVaultFirstConfigReader({ vault, env: { REF_A: "env-a" }, log: (l) => log.push(l) });
+    expect(await read("REF_A")).toBe("env-a");
+    const [line] = errorLines(log);
+    expect(line).toMatchObject({ ref: "REF_A", reason: "unavailable", using: "env" });
+    expect(line!["action"]).toContain("ikke flytt");
+    expect(line!["action"]).not.toContain("dashbordet (Tilkoblinger)");
+    expect(deprecationLines(log)).toEqual([]);
+  });
+
+  it("health=healthy med null = «finnes ikke» (deprecated, vault=absent); health=unconfigured = hvelvet er ikke i bruk (deprecated, vault=unconfigured, med tekst om at Infisical ikke er konfigurert)", async () => {
+    const absentLog: Array<Record<string, string>> = [];
+    const absent = createVaultFirstConfigReader({ vault: { health: "healthy", get: async () => null }, env: { REF_A: "x" }, log: (l) => absentLog.push(l) });
+    expect(await absent("REF_A")).toBe("x");
+    expect(absent.vaultState()).toBe("ok");
+    expect(deprecationLines(absentLog)).toMatchObject([{ ref: "REF_A", source: "env", vault: "absent" }]);
+    expect(errorLines(absentLog)).toEqual([]);
+
+    const offLog: Array<Record<string, string>> = [];
+    const off = createVaultFirstConfigReader({ vault: { health: "unconfigured", get: async () => null }, env: { REF_A: "x" }, log: (l) => offLog.push(l) });
+    expect(await off("REF_A")).toBe("x");
+    expect(off.vaultState()).toBe("ok");
+    expect(deprecationLines(offLog)).toMatchObject([{ ref: "REF_A", vault: "unconfigured" }]);
+    expect(deprecationLines(offLog)[0]!["action"]).toContain("Infisical) er ikke konfigurert");
+    expect(errorLines(offLog)).toEqual([]);
+  });
+
+  it("feillinjen er strupet per referanse: et vedvarende avbrudd synes uten å fylle loggen, og logges på nytt når intervallet er over", async () => {
+    const log: Array<Record<string, string>> = [];
+    let clock = 1_000_000;
+    const read = createVaultFirstConfigReader({ vault: down, env: { REF_A: "a", REF_B: "b" }, log: (l) => log.push(l), errorLogIntervalMs: 60_000, now: () => clock });
+    await read("REF_A"); await read("REF_A"); await read("REF_B");
+    expect(errorLines(log).map((l) => l["ref"])).toEqual(["REF_A", "REF_B"]);
+    clock += 59_999;
+    await read("REF_A");
+    expect(errorLines(log)).toHaveLength(2);
+    clock += 1;
+    await read("REF_A");
+    expect(errorLines(log).map((l) => l["ref"])).toEqual(["REF_A", "REF_B", "REF_A"]);
+  });
+
+  it("den SIST KJENTE hvelvverdien brukes når hvelvet svikter (en rotert hemmelighet byttes ikke ut med en utdatert .env-verdi); kilden logges ved hvert skifte, aldri verdien", async () => {
+    const log: Array<Record<string, string>> = [];
+    const mode: { value: "ok" | "down" | "absent" } = { value: "ok" };
+    const vault = { get: async (): Promise<string | null> => { if (mode.value === "down") throw new Error("nede"); return mode.value === "absent" ? null : "vault-verdi-v1"; } };
+    const read = createVaultFirstConfigReader({ vault, env: { REF_A: "gammel-env-verdi" }, log: (l) => log.push(l) });
+    expect(await read("REF_A")).toBe("vault-verdi-v1");
+    mode.value = "down";
+    expect(await read("REF_A")).toBe("vault-verdi-v1"); // IKKE gammel-env-verdi
+    expect(read.lastSource("REF_A")).toBe("vault_last_known");
+    expect(errorLines(log)[0]).toMatchObject({ ref: "REF_A", using: "last_known_vault_value" });
+    mode.value = "ok";
+    expect(await read("REF_A")).toBe("vault-verdi-v1");
+    expect(read.lastSource("REF_A")).toBe("vault");
+    expect(read.vaultState()).toBe("ok");
+    expect(sourceLines(log).map((l) => l["source"])).toEqual(["vault", "vault_last_known", "vault"]);
+    expect(deprecationLines(log)).toEqual([]);
+    // hvelvet SVARER «finnes ikke» (ikke en feil): den sist kjente verdien gjelder ikke lenger, miljøet brukes og fallbacken logges
+    mode.value = "absent";
+    expect(await read("REF_A")).toBe("gammel-env-verdi");
+    expect(deprecationLines(log)).toMatchObject([{ ref: "REF_A", vault: "absent" }]);
+    const everything = JSON.stringify(log);
+    expect(everything).not.toContain("vault-verdi-v1");
+    expect(everything).not.toContain("gammel-env-verdi");
+  });
+
+  it("vaultState() er «error» når NOEN referanse feilet sist, og «ok» når alle siste oppslag svarte", async () => {
+    const mode: { value: "ok" | "down" } = { value: "down" };
+    const vault = { get: async (ref: string): Promise<string | null> => { if (mode.value === "down" && ref === "REF_A") throw new Error("nede"); return null; } };
+    const read = createVaultFirstConfigReader({ vault, env: {}, log: () => undefined });
+    await read("REF_B");
+    expect(read.vaultState()).toBe("ok");
+    await read("REF_A");
+    expect(read.vaultState()).toBe("error");
+    mode.value = "ok";
+    await read("REF_A");
+    expect(read.vaultState()).toBe("ok");
+  });
+});
+
+describe("review M3b: klient-id og -secret leses PARALLELT, og et hengt hvelv har en kort frist", () => {
+  it("et HENGT hvelv gir feil etter fristen (reason=timeout, ikke evig ventetid): miljøet brukes og kallet fullføres", async () => {
+    const log: Array<Record<string, string>> = [];
+    const hung = { get: (): Promise<string | null> => new Promise(() => undefined) };
+    const started = Date.now();
+    const read = createVaultFirstConfigReader({ vault: hung, env: { REF_A: "env-a" }, log: (l) => log.push(l), timeoutMs: 60 });
+    expect(await read("REF_A")).toBe("env-a");
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(errorLines(log)[0]).toMatchObject({ reason: "timeout", using: "env" });
+  });
+
+  it("token-utvekslingen starter BEGGE hvelvoppslagene før noen av dem er besvart (ikke to sekvensielle ventetider)", async () => {
+    const started: string[] = [];
+    const resolvers = new Map<string, (value: string | null) => void>();
+    const vault = { get: (ref: string): Promise<string | null> => new Promise((resolve) => { started.push(ref); resolvers.set(ref, resolve); }) };
+    configureGoogleOAuthClientSource(createVaultFirstConfigReader({ vault, log: () => undefined }));
+    const pending = googleAccessToken("fake-refresh-token");
+    await new Promise((resolve) => setTimeout(resolve, 0)); // tøm mikrokøen: ingen av oppslagene er besvart ennå
+    expect([...started].sort()).toEqual(["JARVIS_GOOGLE_CLIENT_ID", "JARVIS_GOOGLE_CLIENT_SECRET"]);
+    resolvers.get("JARVIS_GOOGLE_CLIENT_ID")!("vault-id");
+    resolvers.get("JARVIS_GOOGLE_CLIENT_SECRET")!("vault-secret");
+    await expect(pending).resolves.toBe("fake-access-token");
+    const body = new URLSearchParams(tokenBodies[0]);
+    expect([body.get("client_id"), body.get("client_secret")]).toEqual(["vault-id", "vault-secret"]);
+  });
+
+  it("token-utveksling mot et hengt hvelv med miljøverdier: fullfører med miljøverdiene innen fristen (ikke 5-10 s)", async () => {
+    process.env["JARVIS_GOOGLE_CLIENT_ID"] = "env-client-id";
+    process.env["JARVIS_GOOGLE_CLIENT_SECRET"] = "env-client-secret";
+    const hung = { get: (): Promise<string | null> => new Promise(() => undefined) };
+    configureGoogleOAuthClientSource(createVaultFirstConfigReader({ vault: hung, log: () => undefined, timeoutMs: 80 }));
+    const started = Date.now();
+    await expect(googleAccessToken("fake-refresh-token")).resolves.toBe("fake-access-token");
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(new URLSearchParams(tokenBodies[0]).get("client_id")).toBe("env-client-id");
   });
 });
 
@@ -191,6 +333,178 @@ describe("Drive-registreringssjekken ser hvelvet (ikke bare miljøet)", () => {
     expect(await primeGoogleDriveCredentialCheck(async () => { throw new Error("boom"); })).toBe(false);
     configureGoogleOAuthClientSource(undefined);
     expect(googleDriveCredentialsConfigured()).toBe(false); // miljøet er tomt - snapshot er forkastet
+  });
+});
+
+describe("review M3c: Drive-registreringen tåler et hvelv som kommer opp etter api", () => {
+  const readToken = (values: Record<string, string>) => async (ref: string) => values[ref] ?? null;
+  const VALUES: Record<string, string> = { JARVIS_GOOGLE_CLIENT_ID: "vault-id", JARVIS_GOOGLE_CLIENT_SECRET: "vault-secret" };
+
+  it("hvelvet er nede ved oppstart men kommer opp innen vinduet: målingen gjentas og Drive registreres (tidligere stille utelatt til neste omstart)", async () => {
+    const state = { up: false };
+    const vault = { get: async (ref: string): Promise<string | null> => { if (!state.up) throw new Error("infisical starter ennå"); return VALUES[ref] ?? null; } };
+    configureGoogleOAuthClientSource(createVaultFirstConfigReader({ vault, log: () => undefined }));
+    const log: Array<Record<string, string>> = [];
+    let sleeps = 0;
+    const ok = await primeGoogleDriveCredentialCheck(readToken({ JARVIS_GOOGLE_TOKEN: "fake-refresh-token" }), {
+      attempts: 5, delayMs: 1, log: (l) => log.push(l), sleep: async () => { sleeps += 1; if (sleeps >= 2) state.up = true; }
+    });
+    expect(ok).toBe(true);
+    expect(sleeps).toBe(2);
+    expect(log.map((l) => l["msg"])).toEqual(["drive_registration_waiting_for_vault", "drive_registration_waiting_for_vault"]);
+    expect(Object.keys(driveTransportsIfConfigured())).toEqual(["drive"]);
+  });
+
+  it("hvelvet kommer aldri opp: etter `attempts` målinger er svaret endelig false, og én tydelig linje sier at Drive IKKE er registrert fordi hvelvet var nede", async () => {
+    const vault = { get: async (): Promise<string | null> => { throw new Error("nede"); } };
+    configureGoogleOAuthClientSource(createVaultFirstConfigReader({ vault, log: () => undefined }));
+    const log: Array<Record<string, string>> = [];
+    let sleeps = 0;
+    const ok = await primeGoogleDriveCredentialCheck(readToken({ JARVIS_GOOGLE_TOKEN: "fake-refresh-token" }), {
+      attempts: 3, delayMs: 1, log: (l) => log.push(l), sleep: async () => { sleeps += 1; }
+    });
+    expect(ok).toBe(false);
+    expect(sleeps).toBe(2);
+    expect(log.map((l) => l["msg"])).toEqual(["drive_registration_waiting_for_vault", "drive_registration_waiting_for_vault", "drive_registration_skipped_vault_unavailable"]);
+    expect(log.at(-1)).toMatchObject({ attempts: "3" });
+    expect(log.at(-1)!["action"]).toContain("Start api og worker på nytt");
+    expect(driveTransportsIfConfigured()).toEqual({});
+  });
+
+  it("hvelvet SVARER «finnes ikke»: første måling er endelig - ingen ventetid, ingen retry, ingen logg", async () => {
+    configureGoogleOAuthClientSource(createVaultFirstConfigReader({ vault: { health: "healthy", get: async () => null }, log: () => undefined }));
+    const log: Array<Record<string, string>> = [];
+    let sleeps = 0;
+    const ok = await primeGoogleDriveCredentialCheck(readToken({ JARVIS_GOOGLE_TOKEN: "fake-refresh-token" }), { attempts: 5, log: (l) => log.push(l), sleep: async () => { sleeps += 1; } });
+    expect(ok).toBe(false);
+    expect(sleeps).toBe(0);
+    expect(log).toEqual([]);
+  });
+
+  it("en Infisical-lignende kilde med health=unavailable (null, ikke kast) regnes også som «hvelvet svarte ikke» og gir nye målinger", async () => {
+    const state = { up: false };
+    const vault = {
+      get health(): "healthy" | "unavailable" { return state.up ? "healthy" : "unavailable"; },
+      get: async (ref: string): Promise<string | null> => (state.up ? VALUES[ref] ?? null : null)
+    };
+    configureGoogleOAuthClientSource(createVaultFirstConfigReader({ vault, log: () => undefined }));
+    let sleeps = 0;
+    const ok = await primeGoogleDriveCredentialCheck(readToken({ JARVIS_GOOGLE_TOKEN: "fake-refresh-token" }), {
+      attempts: 4, delayMs: 1, log: () => undefined, sleep: async () => { sleeps += 1; state.up = true; }
+    });
+    expect(ok).toBe(true);
+    expect(sleeps).toBe(1);
+  });
+
+  it("verdiene finnes i miljøet mens hvelvet er nede: konfigurert på første måling (ingen ventetid)", async () => {
+    process.env["JARVIS_GOOGLE_CLIENT_ID"] = "env-id";
+    process.env["JARVIS_GOOGLE_CLIENT_SECRET"] = "env-secret";
+    configureGoogleOAuthClientSource(createVaultFirstConfigReader({ vault: { get: async () => { throw new Error("nede"); } }, log: () => undefined }));
+    let sleeps = 0;
+    const ok = await primeGoogleDriveCredentialCheck(readToken({ JARVIS_GOOGLE_TOKEN: "fake-refresh-token" }), { attempts: 5, log: () => undefined, sleep: async () => { sleeps += 1; } });
+    expect(ok).toBe(true);
+    expect(sleeps).toBe(0);
+  });
+
+  it("en kilde uten vaultState() (en rå ConfigReader) og ingen kilde i det hele tatt: én måling, aldri retry", async () => {
+    let sleeps = 0;
+    const options = { attempts: 5, log: () => undefined, sleep: async () => { sleeps += 1; } };
+    configureGoogleOAuthClientSource(async () => null);
+    expect(await primeGoogleDriveCredentialCheck(readToken({}), options)).toBe(false);
+    configureGoogleOAuthClientSource(undefined);
+    expect(await primeGoogleDriveCredentialCheck(readToken({}), options)).toBe(false);
+    expect(sleeps).toBe(0);
+  });
+
+  it("standard: 7 målinger med 5 s mellomrom (ca. 30 s totalt), mellomrommet bruker ekte (her falske) timere", async () => {
+    vi.useFakeTimers();
+    try {
+      configureGoogleOAuthClientSource(createVaultFirstConfigReader({ vault: { get: async () => { throw new Error("nede"); } }, log: () => undefined }));
+      const log: Array<Record<string, string>> = [];
+      let settled = false;
+      const done = primeGoogleDriveCredentialCheck(readToken({ JARVIS_GOOGLE_TOKEN: "fake-refresh-token" }), { log: (l) => log.push(l) }).then((v) => { settled = true; return v; });
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(settled).toBe(false);
+      expect(log.filter((l) => l["msg"] === "drive_registration_waiting_for_vault")).toHaveLength(6);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await done).toBe(false);
+      expect(log.at(-1)!["msg"]).toBe("drive_registration_skipped_vault_unavailable");
+      expect(log.at(-1)!["attempts"]).toBe("7");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("review M3d: access-token-cachen nullstilles når eieren bytter en credential", () => {
+  const counting = (): { exchanges: () => number; cache: AccessTokenCache; persisted: string[] } => {
+    let n = 0;
+    const persisted: string[] = [];
+    const cache = new AccessTokenCache({ exchange: async () => { n += 1; return { access_token: `fake-access-${n}`, expires_in: 3600 }; } }, { persist: async (t) => { persisted.push(t); } });
+    return { exchanges: () => n, cache, persisted };
+  };
+
+  it("clear() glemmer cachede tokens: neste get() gjør en fersk utveksling", async () => {
+    const { cache, exchanges } = counting();
+    expect(await cache.get("fake-refresh")).toBe("fake-access-1");
+    expect(await cache.get("fake-refresh")).toBe("fake-access-1");
+    expect(exchanges()).toBe(1);
+    cache.clear();
+    expect(await cache.get("fake-refresh")).toBe("fake-access-2");
+    expect(exchanges()).toBe(2);
+  });
+
+  it("invalidateAllAccessTokenCaches() nullstiller ALLE levende cacher i prosessen (også den delte Google-cachen)", async () => {
+    const a = counting();
+    const b = counting();
+    await a.cache.get("rt");
+    await b.cache.get("rt");
+    process.env["JARVIS_GOOGLE_CLIENT_ID"] = "env-client-id";
+    process.env["JARVIS_GOOGLE_CLIENT_SECRET"] = "env-client-secret";
+    await googleAccessToken("fake-refresh-token");
+    await googleAccessToken("fake-refresh-token");
+    expect(tokenBodies).toHaveLength(1);
+    expect(invalidateAllAccessTokenCaches()).toBeGreaterThanOrEqual(3);
+    expect(await a.cache.get("rt")).toBe("fake-access-2");
+    expect(await b.cache.get("rt")).toBe("fake-access-2");
+    await googleAccessToken("fake-refresh-token");
+    expect(tokenBodies).toHaveLength(2);
+  });
+
+  it("en utveksling som PÅGÅR når cachen nullstilles caches ikke og persisteres ikke (utstedt med gammel konfig), en ny get() starter en fersk utveksling, og den gamle fullføringen river ikke den nye pågående", async () => {
+    const calls: Array<{ resolve: (token: { access_token: string; expires_in: number; refresh_token?: string }) => void }> = [];
+    const persisted: string[] = [];
+    const cache = new AccessTokenCache({
+      exchange: () => new Promise((resolve) => { calls.push({ resolve }); })
+    }, { persist: async (t) => { persisted.push(t); } });
+    const first = cache.get("rt");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls).toHaveLength(1);
+    cache.clear();
+    const second = cache.get("rt");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls).toHaveLength(2); // ikke delt med den gamle utvekslingen
+    calls[0]!.resolve({ access_token: "fake-old-access", expires_in: 3600, refresh_token: "fake-rotated-old" });
+    expect(await first).toBe("fake-old-access"); // gyldig for den gamle kalleren
+    expect(persisted).toEqual([]);
+    const third = cache.get("rt"); // den nye utvekslingen er fortsatt pågående og deles - IKKE revet av den gamle finally
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls).toHaveLength(2);
+    calls[1]!.resolve({ access_token: "fake-new-access", expires_in: 3600 });
+    expect(await second).toBe("fake-new-access");
+    expect(await third).toBe("fake-new-access");
+    expect(await cache.get("rt")).toBe("fake-new-access"); // cachet: ingen tredje utveksling
+    expect(calls).toHaveLength(2);
+  });
+
+  it("uten nullstilling er rotasjon uendret: nytt refresh-token persisteres og caches under den nye nøkkelen", async () => {
+    const persisted: string[] = [];
+    let n = 0;
+    const cache = new AccessTokenCache({ exchange: async () => { n += 1; return { access_token: "fake-access", expires_in: 3600, refresh_token: "fake-rotated" }; } }, { persist: async (t) => { persisted.push(t); } });
+    expect(await cache.get("rt")).toBe("fake-access");
+    expect(persisted).toEqual(["fake-rotated"]);
+    expect(await cache.get("fake-rotated")).toBe("fake-access");
+    expect(n).toBe(1);
   });
 });
 
