@@ -84,6 +84,9 @@ const BASELINE_REASON: Record<string, string> = {
   erasure_requests: "APPEND_ONLY_EVIDENCE",
   events: "APPEND_ONLY_EVIDENCE",
   // WP-K (D-471, JARVIS-053, migrasjon 108): policy-journalen er append-only (ingen DELETE-grant for runtime; kun `prune_policy_decisions()` sletter, etter 90 dager) og inneholder kun metadata - samme kategori som `audit_events`/`tool_executions`.
+  // PRESIS (review L3): tabellen er IKKE dekket av noen erasure-plan og slettes IKKE av en kaskade - dette er en oppføring i GJELDSREGISTERET, ikke en løsning. `tenant_id` har FK mot `tenants` UTEN `ON DELETE CASCADE`, så en hard
+  // `DELETE FROM tenants` (admin-opprydding) må først slette tenantens `policy_decisions` som admin, og `person_id` står i klartekst til retensjonen (standard 90 dager, gulv 30) har ryddet raden. Om erasure skal pseudonymisere
+  // `person_id` her er en eierbeslutning sammen med `audit_events` (JARVIS-030/074) - ikke tatt i WP-K, og tabellen er tom så lenge `JARVIS_POLICY_AUDIT_SINK` er AV.
   policy_decisions: "APPEND_ONLY_EVIDENCE",
   revoked_device_keys: "APPEND_ONLY_EVIDENCE",
   tool_executions: "APPEND_ONLY_EVIDENCE",

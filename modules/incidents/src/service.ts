@@ -420,6 +420,8 @@ export class IncidentService {
   ): Promise<IncidentEvidence> {
     // WP-K (D-471, JARVIS-068): en motsigelse peker på bevis i SAMME hendelse (og tenant). Tenant-FK-en (migrasjon 080) hindrer allerede en annen tenants rad, men ikke en annen HENDELSES
     // bevis (heller ikke et annet minne-rom - FK-oppslag omgår RLS): «dette beviset motsier den andre hendelsens» ville ellers vært en stille, uforklart kobling i sannhetsregimet.
+    // OMFANG (review L6): sjekken er KUN i tjenestelaget - `addEvidence()`/produsentene er eneste skrivevei i koden. Den er IKKE en databasebegrensning: en rå `INSERT INTO incident_evidence` fra app-rollen kan fortsatt peke på
+    // en annen hendelses bevis (en DB-håndheving krever en trigger/migrasjon - ikke bygget; se WPK_LEDGER_REMNANTS.md §7). Ikke les «avvist» som «umulig».
     if (input.contradicts_evidence_id !== undefined) {
       const target = await client.query(
         `SELECT 1 FROM incident_evidence WHERE tenant_id = $1 AND incident_id = $2 AND evidence_id = $3`,
