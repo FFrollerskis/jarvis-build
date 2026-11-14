@@ -68,6 +68,10 @@ export const CHAT_READ_TIER: ReadonlyArray<{ readonly tool_id: string; readonly 
   { tool_id: "executive", action: "get_connector_status" },
   // WP-H0 (UA-11 Admin Control Center): eierens kontrollsentre (kun lesing; eier-kun port i verktøydefinisjonen, rapportene er merket private). Handlingene eieren kan ta peker på eksisterende ruter og står ikke på modellflaten.
   { tool_id: "executive", action: "get_control_center" },
+  // WP-H1 (UA-11): per-senter lese-verktøy for Finans, Minne og Agenter - SAMME register og samme eier + signert-økt-port (fail-closed), ikke på tale (VOICE_EXCLUDED_KEYS). Beløp fjernes fra svaret til modellen.
+  { tool_id: "executive", action: "get_finance_center" },
+  { tool_id: "executive", action: "get_memory_center" },
+  { tool_id: "executive", action: "get_agent_center" },
   { tool_id: "executive", action: "get_control_surface_status" },
   { tool_id: "executive", action: "get_delegation_board" },
   { tool_id: "executive", action: "get_self_diagnosis" },

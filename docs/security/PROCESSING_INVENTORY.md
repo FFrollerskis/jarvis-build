@@ -67,6 +67,7 @@ uten at det er gjort, eller (4) en DPIA-henvisning peker på en fil som ikke fin
 - **Retensjon:** Følger kundeforholdet; sletting via erasure-flyten (ikke koblet i produksjon).
 - **Eksterne mottakere:** Gmail/Calendar m.fl. som kilder; ingen sending uten bekreftelse
 - **Tabeller:** `business_activities`, `business_change_log`, `business_companies`, `business_contacts`, `business_followups`, `business_leads`, `business_open_loops`, `business_opportunities`, `business_scores`, `contract_events`, `contract_obligations`, `contract_versions`, `contracts`, `conversation_channel_links`, `conversation_identities`, `conversation_identity_merges`, `decision_log`, `goal_key_results`, `goals`, `operations_runbooks`, `operations_task_events`, `operations_tasks`, `operations_vendors`, `product_item_events`, `product_items`, `projects`, `risks`, `scenarios`, `support_ticket_events`, `support_tickets`
+- **Merknad (WP-H1, migrasjon 102, JARVIS-087 del 2):** styringsjournalen (`decision_log`, `scenarios`, `risks`, `goals`, `goal_key_results`) får nullbare `prov_*`-kolonner (kanal, sesjons-/jobb-id, opphav `owner_direct`/`model`/`unspecified`, tidspunkt) - kun metadata, aldri innhold, og skrevet kun med `JARVIS_GOVERNANCE_PROVENANCE=on` (AV som standard; eldre rader bakdateres aldri). Kontrollsentrene (Finans, Minne, Agenter) leser disse og øvrige tabeller kun som antall/kategorier/tidsstempler - de lagrer ingenting selv.
 
 ### Produktbruk og churn (kundekonti, WP-D2)
 

@@ -465,6 +465,17 @@ export class ExecutiveService {
   }
 
   /**
+   * WP-H1/H2: lese-porten for de per-senter verktøyene (`executive.get_<senter>_center`). SAMME port som `authorizeInfraStatus` (eier OG enhetssignert økt, `authorizeRead`) og FAIL-CLOSED også uten register:
+   * i motsetning til `get_control_center` (H0, slipper gjennom uten register fordi det da ikke er noe å lekke) har disse verktøyene ingen grunn til å være åpne for noen når eier-registeret mangler.
+   * Avslaget er en vanlig `tool.denied`-revisjonsrad FØR noe bygges.
+   */
+  authorizeControlCenterRead(identity: IdentityContext): { allowed: boolean; reason: string } {
+    const registry = this.options.controlCenters;
+    if (!registry) return { allowed: false, reason: "control_center_owner_check_not_configured" };
+    return registry.authorizeRead(identity);
+  }
+
+  /**
    * WP-H0 (JARVIS-087): eier-kun-porten for kontrollsenterets MUTASJONER (`cancel_task`). I motsetning til lesingen over er den FAIL-CLOSED også uten register: en skrivehandling slippes aldri gjennom fordi
    * «det ikke er noe å lekke». Samme eier-predikat (`isOwner`, i drift `resolveAuthorityMode(...) === "SOVEREIGN"`) som kontrollsentrene bruker.
    */

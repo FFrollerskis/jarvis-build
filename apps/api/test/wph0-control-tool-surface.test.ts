@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { CONTROL_CENTER_IDS, ControlCenterRegistry, ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "@jarvis/executive";
+import { CONTROL_CENTER_IDS, CONTROL_CENTER_READ_ACTIONS, ControlCenterRegistry, ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "@jarvis/executive";
 import { GovernanceTransport, governanceToolDefinitions } from "@jarvis/governance";
 import { OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
 import { SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";
@@ -144,6 +144,7 @@ describe("eier-kun port i verktøydefinisjonen", () => {
   });
 
   it("ingen andre executive-handlinger har fått en slik port ved et uhell (unntak: `cancel_task`, kontrollsenterets avbryt-handling, som er eier-kun - se wph0-cancel-task.test.ts, og `get_infra_status`, driftsstatusen, som fikk samme eier + signert-økt-port i gjennomgangen av PR #324 (M3/L4) - se e1-review-l4-infra-status-gate.test.ts)", () => {
-    for (const d of defs.filter((x) => x.tool_id === "executive" && x.action !== "get_control_center" && x.action !== "cancel_task" && x.action !== "get_infra_status")) expect(d.parameterAuthorizer, d.action).toBeUndefined();
+    // WP-H1/H2: de per-senter lese-verktøyene (`get_<senter>_center`) har samme fail-closed lese-port - se wph1-control-tools.test.ts; listen kommer fra CONTROL_CENTER_READ_TOOLS.
+    for (const d of defs.filter((x) => x.tool_id === "executive" && x.action !== "get_control_center" && x.action !== "cancel_task" && x.action !== "get_infra_status" && !CONTROL_CENTER_READ_ACTIONS.has(x.action))) expect(d.parameterAuthorizer, d.action).toBeUndefined();
   });
 });

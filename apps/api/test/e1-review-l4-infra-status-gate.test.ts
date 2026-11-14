@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "@jarvis/executive";
+import { CONTROL_CENTER_READ_ACTIONS, ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "@jarvis/executive";
 import { GovernanceTransport, governanceToolDefinitions } from "@jarvis/governance";
 import { OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
 import { SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";
@@ -104,7 +104,8 @@ describe("lese-porten i verktøydefinisjonen: eier OG signert enhetsøkt, fail-c
   });
 
   it("de øvrige executive-lesingene (f.eks. get_slo_report) har ingen slik port - kun driftsstatusen (og kontrollsenteret/avbryt fra H0) er låst", () => {
-    for (const x of withRegistry.filter((y) => y.tool_id === "executive" && !["get_control_center", "cancel_task", "get_infra_status"].includes(y.action))) {
+    // WP-H1/H2: de per-senter lese-verktøyene har samme lese-port (se wph1-control-tools.test.ts) - listen kommer fra CONTROL_CENTER_READ_TOOLS.
+    for (const x of withRegistry.filter((y) => y.tool_id === "executive" && !["get_control_center", "cancel_task", "get_infra_status"].includes(y.action) && !CONTROL_CENTER_READ_ACTIONS.has(y.action))) {
       expect(x.parameterAuthorizer, x.action).toBeUndefined();
     }
   });

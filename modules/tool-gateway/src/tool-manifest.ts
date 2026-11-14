@@ -111,6 +111,10 @@ const EFFECT_OVERRIDES: Record<string, Effect> = {
   [k("executive", "get_evolution_report")]: "read",
   [k("executive", "get_ai_mesh_status")]: "read",
   [k("executive", "get_control_center")]: "read",
+  // WP-H1/H2: per-senter lese-verktøy (kontrollsentrene) - ren lesing. Listen speiler `CONTROL_CENTER_READ_TOOLS` i @jarvis/executive (låst av apps/api/test/wph1-control-tools.test.ts).
+  [k("executive", "get_finance_center")]: "read",
+  [k("executive", "get_memory_center")]: "read",
+  [k("executive", "get_agent_center")]: "read",
   [k("executive", "get_value_report")]: "read",
   // WP-E1 (UA-5): driftsstatus (åpne hendelser, skymål, produsenthelse) - ren lesing.
   [k("executive", "get_infra_status")]: "read",
@@ -145,6 +149,10 @@ function inferDataZone(tool_id: string): DataZone {
  */
 const SENSITIVITY_OVERRIDES: Record<string, Sensitivity> = {
   [k("executive", "get_control_center")]: "private",
+  // WP-H1: Finans-senteret er finansdomenet (antall/tilstander for betalinger, avstemming, banksamtykker) - `restricted`, samme klasse som finance_*-verktøyene (turen låses lokalt, se RESTRICTED_TOOL_KEYS).
+  [k("executive", "get_finance_center")]: "restricted",
+  [k("executive", "get_memory_center")]: "private",
+  [k("executive", "get_agent_center")]: "private",
   // Gjennomgang av PR #324 (L4): driftsstatus har hendelsestitler med repo/gren, jobbnavn og skymål-tilstand - eierens driftsbilde, aldri «public» (og strømmer til modellen som betjener turen).
   [k("executive", "get_infra_status")]: "private"
 };
@@ -190,7 +198,11 @@ export const BACKGROUND_GITHUB_READ = CHAT_READ_TIER.filter((g) => g.tool_id ===
  * tale er ubetrodd inndata (STT) og gir aldri forhøyet autentiseringsstyrke, så hele rapporten skal ikke kunne leses opp over en stemmeflate.
  * Gjennomgang av PR #324 (L4): det samme gjelder driftsstatusen (`get_infra_status`: hendelsestitler med repo/gren, jobbnavn, skymål-tilstand) - den står på web-chatten (eier + signert økt, se verktøyets `parameterAuthorizer`), ikke på tale.
  */
-const VOICE_EXCLUDED_KEYS: ReadonlySet<string> = new Set([k("executive", "get_control_center"), k("executive", "get_infra_status")]);
+const VOICE_EXCLUDED_KEYS: ReadonlySet<string> = new Set([
+  k("executive", "get_control_center"), k("executive", "get_infra_status"),
+  // WP-H1/H2: per-senter lese-verktøy for kontrollsentrene - samme eier-flate med enhetssignatur som get_control_center (L-4).
+  k("executive", "get_finance_center"), k("executive", "get_memory_center"), k("executive", "get_agent_center")
+]);
 /** D-382: tale er ubetrodd inndata (STT) - lese-nivået uten finans (og uten kontrollsentrene, L-4); aldri handlingsnivået. */
 const VOICE_READ_TIER = CHAT_READ_TIER.filter((g) => !/^finance/.test(g.tool_id) && !VOICE_EXCLUDED_KEYS.has(k(g.tool_id, g.action)));
 

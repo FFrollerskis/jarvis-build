@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { ControlCenterRegistry, ExecutiveAccessDeniedError, ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "@jarvis/executive";
+import { CONTROL_CENTER_READ_ACTIONS, ControlCenterRegistry, ExecutiveAccessDeniedError, ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "@jarvis/executive";
 import {
   CHAT_ACT_TIER, CHAT_DELEGATE_TIER, CHAT_READ_TIER, MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, SURFACE_TOOL_GRANTS, assertManifestInvariants, buildToolManifest, inferEffect,
   type ToolDefinition, type ToolGateway
@@ -92,7 +92,8 @@ describe("eier-kun port (fail-closed)", () => {
   it("ingen annen executive-handling enn kontrollsenter-lesingen, driftsstatusen og avbryt har fått en slik port ved et uhell", () => {
     const withPort = defsWith(new ExecutiveService(fakeGw, { controlCenters: ownerOnly })).filter((d) => d.parameterAuthorizer !== undefined).map((d) => d.action).sort();
     // `get_infra_status` fikk BEVISST samme lese-port som kontrollsentrene i gjennomgangen av PR #324 (L4/M3): eier + signert enhetsøkt, fail-closed (se `e1-review-l4-infra-status-gate.test.ts`).
-    expect(withPort).toEqual(["cancel_task", "get_control_center", "get_infra_status"]);
+    // WP-H1/H2: de per-senter lese-verktøyene (`get_<senter>_center`) har BEVISST samme lese-port som `get_infra_status` (fail-closed) - listen kommer fra `CONTROL_CENTER_READ_TOOLS`, ikke en håndvedlikeholdt kopi.
+    expect(withPort).toEqual(["cancel_task", "get_control_center", "get_infra_status", ...CONTROL_CENTER_READ_ACTIONS].sort());
   });
 });
 

@@ -51,9 +51,21 @@ export function createTurnContext(surface: Surface, userMessage: string): TurnCo
  */
 const INFRA_STATUS_INTENT = /(åpne hendelser|hendelsesstatus|incident|driftsstatus|status på driften|infra-?status|skystatus|cloud-?status|er noe nede|hva er nede|produksjonsfeil|feilet utrulling|hvordan går det med skyen)/i;
 
+/**
+ * WP-H1/H2: per-senter lese-verktøy for kontrollsentrene - hvert med sitt EGET, smale uttrykk (kun eksplisitte senter-/statusfraser), aldri `executive`-familie-uttrykket: etter H0/C4/D4/E1 har familien så
+ * mange lesinger at flere treff på samme regex utkonkurrerer hverandre innenfor `max_tools_per_round` (samme lærdom som for driftsstatusen over). «kontrollsentrene» alene gir fortsatt `get_control_center`
+ * (H0, via familie-uttrykket); disse velges når eieren spør om ETT senter.
+ */
+const FINANCE_CENTER_INTENT = /(finans-?sent(er|re)(t|et)?|finans-?kontroll|finansstatus|status (på|for) finans(en)?|finans-?nødbryter|nødbryter(en)? (for )?finans|ukjent utfall|avstemming(en|s)?\b|betalingsintensjon(er|ene)?)/i;
+const MEMORY_CENTER_INTENT = /(minne-?sent(er|re)(t|et)?|minnestatus|status (på|for) minne(t)?|karantene(n)?\b|minneforslag|proveniens|styringsjournal(en)?|beslutningslogg(en)?|slettebevis)/i;
+const AGENT_CENTER_INTENT = /(agent-?sent(er|re)(t|et)?|agentstatus|status (på|for) agent(ene|er)?|kjørende (agenter|jobber)|hvilke (agenter|jobber) kjører|aktive (agenter|jobber)|nettverksomfang|worker(e|ne)? (status|kjører)|\blease(r|ne)?\b)/i;
+
 /** Intensjons-nøkkelord per handling. Kun handlinger som er tildelt flaten kan velges - dette er IKKE en autorisasjon, bare utvalg. */
 const INTENT_KEYWORDS: Readonly<Record<string, RegExp>> = {
   "executive.get_infra_status": INFRA_STATUS_INTENT,
+  "executive.get_finance_center": FINANCE_CENTER_INTENT,
+  "executive.get_memory_center": MEMORY_CENTER_INTENT,
+  "executive.get_agent_center": AGENT_CENTER_INTENT,
   "email.read_inbox": /(e-?post|\bmail\b|innboks|inbox|melding|brev)/i,
   "calendar.read_events": /(kalender|møte|avtale|timeplan|calendar|schedule|\bi dag\b|dagens|\bi morgen\b)/i,
   "github.read_issues": /(github|issue|repo\b|pull request|\bpr\b|\bbug\b|kodebase)/i,
@@ -218,6 +230,11 @@ function verbMatches(action: string, text: string): boolean {
 }
 /** Finans-verktøy (`finance_*`) gjør turen SECRET_RESTRICTED (D-378: kun lokal modell) - uavhengig av hvordan meldingen er formulert. */
 const RESTRICTED_TOOL_ID = /^finance(_|$)/;
+/**
+ * WP-H1: finansdata kan også ligge bak et `executive`-verktøy (Finans-senteret). En tur som velger det er låst lokalt (SECRET_RESTRICTED) på samme måte som `finance_*` - uansett hva meldingen sier.
+ * (`get_control_center` er ikke på listen: finans-senterets beløp fjernes fra svaret til en modell i transporten, og oversikten har kun antall.)
+ */
+const RESTRICTED_TOOL_KEYS: ReadonlySet<string> = new Set(["executive.get_finance_center"]);
 
 /**
  * D-415: småprat uten saksinnhold (hilsen, takk, språk, klokkeslett) får INGEN verktøy. En liten lokal modell kalte statusverktøy på «hei»
@@ -341,7 +358,7 @@ export function selectSurfaceTools(
   for (const m of selected) {
     if (!granted.has(mappingKey(m))) throw new Error(`surface_selection_violation:${surface}:${mappingKey(m)}`);
   }
-  const restricted = selected.some((m) => RESTRICTED_TOOL_ID.test(m.tool_id));
+  const restricted = selected.some((m) => RESTRICTED_TOOL_ID.test(m.tool_id) || RESTRICTED_TOOL_KEYS.has(mappingKey(m)));
   return { selected, schema_tokens: tokens, limits, dropped, ...(restricted ? { min_sensitivity: "SECRET_RESTRICTED" as const } : {}) };
 }
 

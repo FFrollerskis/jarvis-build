@@ -4,7 +4,7 @@ import type { JsonValue } from "@jarvis/contracts";
 import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import type { ExecutiveService } from "./service.ts";
 import { summarizeCapabilityStatusNo, summarizeConnectorStatusNo, summarizeSelfDiagnosisNo } from "./status-summary.ts";
-import { CONTROL_CENTER_IDS } from "./control-center/index.ts";
+import { CONTROL_CENTER_IDS, CONTROL_CENTER_READ_TOOLS, controlCenterForReadAction, stripMoneyFacts, type ControlCenterId } from "./control-center/index.ts";
 
 /**
  * UA-11 Executive Mode (P0, D-162): eierens SAMLEDE kontrollflate, eksponert
@@ -26,6 +26,26 @@ export class ExecutiveTransport implements ToolTransport {
   /** WP-H0: eier-kun-porten for `get_control_center` (kobles på verktøydefinisjonen som `parameterAuthorizer`). */
   authorizeControlCenter(identity: Parameters<ExecutiveService["authorizeControlCenter"]>[0]): { allowed: boolean; reason: string } {
     return this.service.authorizeControlCenter(identity);
+  }
+
+  /** WP-H1/H2: eier + signert økt-porten for de per-senter verktøyene (`get_<senter>_center`) - fail-closed også uten register. */
+  authorizeControlCenterRead(identity: Parameters<ExecutiveService["authorizeControlCenterRead"]>[0]): { allowed: boolean; reason: string } {
+    return this.service.authorizeControlCenterRead(identity);
+  }
+
+  /**
+   * WP-H0/H1: ÉN rapport-respons for `get_control_center` (med `center`) og de per-senter verktøyene. Et ikke-koblet senter (registeret har det ikke, f.eks. flagget er av) er et ærlig, strukturert svar
+   * (`found: false`) - IKKE et kastet unntak, som ToolGateway ellers ville tolket som at hele executive-verktøyet er utilgjengelig (helse). Når en modell betjener kallet (`servingModel`) fjernes pengebeløp
+   * (`*_ore`-fakta) fra finans-senteret (`stripMoneyFacts`); siden uten modell i løkka får hele rapporten.
+   */
+  private async centerResponse(identity: Parameters<ExecutiveService["getControlCenterReport"]>[0], center: string, servingModel: ToolInvocationContext["servingModel"]): Promise<{ data: JsonValue }> {
+    const result = await this.service.getControlCenterReport(identity, center);
+    if (result === null) {
+      return { data: { found: false, center, summary_no: "Dette kontrollsenteret er ikke koblet inn ennå (eller er slått av), så ingenting kan vurderes." } as unknown as JsonValue };
+    }
+    const report = servingModel !== undefined ? stripMoneyFacts(result.report) : result.report;
+    // `summary_no` og `explanation_no` først: chat-executoren kutter lange svar bakfra, og det er disse modellen skal relayere.
+    return { data: { found: true, summary_no: report.summary_no, explanation_no: result.explanation_no, report } as unknown as JsonValue };
   }
 
   /** Gjennomgang av PR #324 (M3/L4): eier + signert økt-porten for `get_infra_status` - fail-closed også uten register. */
@@ -112,12 +132,14 @@ export class ExecutiveTransport implements ToolTransport {
           const { summary_no, ...rest } = overview;
           return { data: { summary_no, ...rest } as unknown as JsonValue }; // `summary_no` først (se under)
         }
-        const result = await this.service.getControlCenterReport(identity, String(center));
-        if (result === null) {
-          return { data: { found: false, center: String(center), summary_no: "Dette kontrollsenteret er ikke koblet inn ennå, så ingenting kan vurderes." } as unknown as JsonValue };
-        }
-        // `summary_no` og `explanation_no` først: chat-executoren kutter lange svar bakfra, og det er disse modellen skal relayere.
-        return { data: { found: true, summary_no: result.report.summary_no, explanation_no: result.explanation_no, report: result.report } as unknown as JsonValue };
+        return this.centerResponse(identity, String(center), context?.servingModel);
+      }
+      case "get_finance_center":
+      case "get_memory_center":
+      case "get_agent_center": {
+        // WP-H1/H2: samme respons og samme register som `get_control_center {center}` - kun et smalere verktøynavn for chatten (egen port: eier + signert økt, fail-closed).
+        const center = controlCenterForReadAction(action) as ControlCenterId;
+        return this.centerResponse(identity, center, context?.servingModel);
       }
       case "get_value_report": {
         // WP-C4: tenanten kommer UTELUKKENDE fra den betrodde kontekst-identiteten (D-68), aldri fra parametre.
@@ -291,9 +313,17 @@ export function executiveToolDefinitions(transport: ExecutiveTransport): ToolDef
         "Les eierens kontrollsentre (UA-11 Admin Control Center): uten `center` en oversikt over alle ti sentre med status per seksjon (integrasjoner, autoritet, AI, finans, minne, agenter, drift, verdi, personvern, sikkerhet); med `center` full rapport for ett senter med hvert tall kildeforankret (tabell/kilde og når det ble målt), en norsk forklaring av hvorfor noe er advarsel/feil, og hvilke eksisterende kontrollhandlinger eieren kan ta (pause/tilbakekall). KUN lesing - jeg utfører ingenting herfra. Ukjent vises som ukjent, aldri som i orden. Kun eieren får svar, og kun fra en signert enhetsøkt (nettleser/app) - aldri over tale eller Telegram.",
         { center: z.enum(CONTROL_CENTER_IDS).optional() }
       ),
+      // WP-H1: siden gjør 1 + (antall sentre) kall per oppdatering (oversikt + ett per senter); med ti sentre er 30/min for lavt (to oppdateringer på rad ga 429). 120/min er fortsatt lavt: kun eieren
+      // fra en signert enhetsøkt når verktøyet, og bygginger av samme senter for samme identitet deles (single-flight i registeret).
+      rate_limit_per_minute: 120,
       // WP-H0: eier-kun FØR noe bygges (avslaget er en vanlig `tool.denied`-revisjonsrad). Rapportene er konfigurasjonsmetadata og handlingene peker på eier-ruter.
       parameterAuthorizer: (_parameters, identity) => transport.authorizeControlCenter(identity)
     },
+    // WP-H1/H2: per-senter lese-verktøy (`get_finance_center` m.fl.) - ingen parametre, samme register, EGEN fail-closed port (eier + signert enhetsøkt). Tabellen er `CONTROL_CENTER_READ_TOOLS`.
+    ...CONTROL_CENTER_READ_TOOLS.map((tool): ToolDefinition => ({
+      ...read(tool.action, tool.description),
+      parameterAuthorizer: (_parameters, identity) => transport.authorizeControlCenterRead(identity)
+    })),
     read(
       "get_ai_mesh_status",
       "Svar på «hvilke modeller har du?»/«fungerer Kimi/Hermes/Gemma?»/«hva koster modellene?»/«er fallback i orden?»: AI Mesh slik det står NÅ - per leverandør konfigurert (kun presence), frisk, siste feil, kostnad og p50-latens siste 7 døgn, parallell-delegerings-overhead - og om akseptansen «≥3 live providers med fallback» er oppfylt. KUN lesing: jeg gjør ikke et testkall (eierens røyktest er mesh-live-smoke.ts). Ukjent vises som ukjent, konfigurert er aldri det samme som bevist."

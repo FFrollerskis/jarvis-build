@@ -3,10 +3,13 @@ import type { IdentityContext } from "@jarvis/contracts";
 import { scanForSecrets } from "@jarvis/core";
 import { ControlCenterRegistry } from "@jarvis/executive";
 import { resolveAuthorityMode, type AuthorityConfig } from "@jarvis/policy";
+import { createAgentCenter } from "./agent.ts";
 import { createAiCenter, type AiCenterDeps } from "./ai.ts";
 import { createAuthorityCenter, type AuthorityCenterDeps } from "./authority.ts";
+import { createFinanceCenter } from "./finance.ts";
 import { createIntegrationCenter, type IntegrationCenterDeps } from "./integration.ts";
-import type { ControlCenterPool } from "./shared.ts";
+import { createMemoryCenter } from "./memory.ts";
+import { flagOn, type ControlCenterPool } from "./shared.ts";
 
 export type { ControlCenterPool } from "./shared.ts";
 
@@ -24,6 +27,16 @@ export type { ControlCenterPool } from "./shared.ts";
 export function ownerPredicate(authority: AuthorityConfig): (identity: IdentityContext) => boolean {
   return (identity) => resolveAuthorityMode(authority, identity) === "SOVEREIGN";
 }
+
+/**
+ * WP-H1/H2: flaggene som slår på kontrollsentrene som ble bygget etter H0. ALLE er AV som standard og krever den EKSAKTE verdien «on» (`flagOn`): uten flagg registreres senteret ikke, og står i oversiktens
+ * `unregistered`-liste («ikke koblet inn») akkurat som før H1 - H0-oppførselen er uendret. Integrasjoner, Autoritet og AI (H0) har ingen flagg og er alltid på når deres avhengigheter finnes.
+ */
+export const CONTROL_CENTER_FLAGS = {
+  finance: "JARVIS_CONTROL_CENTER_FINANCE",
+  memory: "JARVIS_CONTROL_CENTER_MEMORY",
+  agent: "JARVIS_CONTROL_CENTER_AGENT"
+} as const;
 
 /** Redigerer hemmeligheter i alle menneskelesbare strenger i en rapport (siste forsvarslinje). FAST: ikke en parameter noe sted. */
 const redactSecrets = (text: string): string => scanForSecrets(text).text;
@@ -54,8 +67,9 @@ export function createControlCenterRegistry(wiring: ControlCenterRegistryWiring)
  * WP-H0 (UA-11 Admin Control Center): ÉN plass der kontrollsentrene kobles til registeret. Hvert senter er en `ControlCenterDefinition` (se `@jarvis/executive` sin `control-center/types.ts`) i sin
  * EGEN fil i denne mappen (`integration.ts`, `authority.ts`, `ai.ts`, ...), slik at flere byggeagenter kan legge til sentre uten å røre hverandres filer.
  *
- * KROKPUNKT FOR NYE SENTRE (Finance, Memory, Agent, Operations, Value, Privacy, Security): legg til én linje i `registerControlCenters()` under, og utvid `ControlCenterWiring` med det senteret trenger
- * (additivt). Agent Center: bruk `agents.ts` (`readActiveTasks`, `activeTaskRows` med avbryt-handlingen) i stedet for en egen jobbleser, så to sentre aldri viser samme jobb med to ulike knapper.
+ * KROKPUNKT FOR NYE SENTRE (Operations, Value, Privacy, Security - H2): legg til én linje i `registerControlCenters()` under, og utvid `ControlCenterWiring` med det senteret trenger
+ * (additivt). WP-H1 koblet inn Finance (`finance.ts`), Memory (`memory.ts`) og Agent (`agent.ts`, som bruker `agents.ts`: `readActiveTasks`/`activeTaskRows` med avbryt-handlingen, så to sentre aldri viser
+ * samme jobb med to ulike knapper) - hver bak sitt flagg i `CONTROL_CENTER_FLAGS`.
  *
  * VALUE-KROKPUNKT (WP-C4 ER på main, merget 2026-10-09; koblingen hit er bevisst utsatt til H1/H2): verdirapporten kommer fra `ExecutiveService.getValueReport(tenantId)` → `ValueReport` med verdiløkker V1-V5,
  * Builder Loop-beredskap og V5-forslag (`modules/executive/src/value/*`; `main.ts` gir tjenesten `value: { source, facts }`). Når den kobles: (1) legg til `valueReport?: (tenantId: string) => Promise<ValueReport>` i
@@ -112,4 +126,8 @@ export function registerControlCenters(registry: ControlCenterRegistry, wiring: 
       ...(wiring.infraGate ? { infraGate: wiring.infraGate } : {})
     }));
   }
+  // WP-H1: Finans, Minne og Agenter - hver bak sitt flagg (AV som standard), kun lesing av eksisterende tabeller. Uten verktøyregisteret (risikoklasse for knappene) registreres ikke Finans/Agenter.
+  if (flagOn(wiring.env, CONTROL_CENTER_FLAGS.finance) && wiring.toolGateway) registry.register(createFinanceCenter({ pool: wiring.pool, toolGateway: wiring.toolGateway }));
+  if (flagOn(wiring.env, CONTROL_CENTER_FLAGS.memory)) registry.register(createMemoryCenter({ pool: wiring.pool, env: wiring.env }));
+  if (flagOn(wiring.env, CONTROL_CENTER_FLAGS.agent) && wiring.toolGateway) registry.register(createAgentCenter({ pool: wiring.pool, toolGateway: wiring.toolGateway }));
 }
