@@ -1084,7 +1084,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // resten av denne filen (`withMemoryTransaction`, se `GovernanceService`
       // sitt filhode) - IKKE en parallell tilkobling. Registrert i SAMME
       // liste/løkke som `situations`/`executive`/`owner_controls`.
-      ...governanceToolDefinitions(new GovernanceTransport(new GovernanceService(pool))),
+      // WP-H1 (JARVIS-087 del 2): proveniens (kanal/sesjon/jobb/opphav) på nye journalrader - AV som standard, kun den eksakte verdien «on» slår det på.
+      ...governanceToolDefinitions(new GovernanceTransport(new GovernanceService(pool), { recordProvenance: process.env["JARVIS_GOVERNANCE_PROVENANCE"] === "on" })),
       // Task #118 ("Charlie"-minne-verifisering): `memory.search` over DEN
       // SAMME `memoryRetriever`-instansen `conversationEngine` under gjenbruker
       // for bakgrunnskontekst - se `memoryRetriever` sin egen filhode-kommentar

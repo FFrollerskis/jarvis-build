@@ -1,7 +1,7 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import type pg from "pg";
 import type { MemorySpace } from "@jarvis/contracts";
-import { withTenantTransaction } from "@jarvis/core";
+import { scanForSecrets, withTenantTransaction } from "@jarvis/core";
 import { failureCategory, type ControlItem, type ControlRiskClass, type ControlStatus } from "@jarvis/executive";
 import type { ToolGateway } from "@jarvis/tool-gateway";
 import { withMemoryTransaction } from "@jarvis/memory";
@@ -124,4 +124,58 @@ export function countsNo(items: readonly ControlItem[]): string {
 /** Risikoklassen til en registrert handling, lest fra verktøydefinisjonen (aldri en kopi). Ukjent handling regnes som D (strengest). */
 export function riskOf(gateway: Pick<ToolGateway, "get">, toolId: string, action: string): ControlRiskClass {
   return gateway.get(toolId, action)?.capability_class ?? "D";
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// WP-H1/H2: felles hjelpere for sentrene som ble lagt til etter H0 (Finans, Minne, Agenter, Drift, Verdi, Personvern, Sikkerhet). Kun tillegg - H0-hjelperne over er uendret.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** Alle minnerom UTEN health: health er isolert (aldri sammen med andre rom) og leses kun som antall i en egen lesing. */
+export const NON_HEALTH_SPACES: readonly MemorySpace[] = ["personal", "business", "project", "home", "guest", "shared"];
+
+/** pg gir `bigint` og `numeric` som strenger; alt som ikke er et endelig tall blir 0 (en teller er aldri NaN). */
+export function toInt(value: unknown): number {
+  const n = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : 0;
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** `null` beholdes som `null` (ukjent er ikke 0); ellers som `toInt`. */
+export function toIntOrNull(value: unknown): number | null {
+  return value === null || value === undefined ? null : toInt(value);
+}
+
+export function optStr(value: unknown): string | null {
+  return value === null || value === undefined ? null : String(value);
+}
+
+/**
+ * Et kort, trygt kategorinavn fra en tekstkolonne (bokstaver, tall, understrek, kolon, punktum og bindestrek; maks 60 tegn). Alt annet blir `annet` - aldri fri tekst inn i en rapport.
+ * Kategorinavn havner også i id-er (`flag:<kilde>:<flagg>`), og registerets redigering rører bevisst ikke id-er (de er strukturelle) - derfor avvises alt som ligner en hemmelighet HER: noe
+ * `scanForSecrets` ville endret, og enhver sammenhengende løpe på 24 eller flere bokstaver/tall uten skilletegn (nøkler og tokens har dem, kategorinavn i snake_case har dem ikke).
+ */
+export function safeCategory(value: unknown): string {
+  const text = typeof value === "string" ? value : "";
+  if (!/^[A-Za-z0-9_:.-]{1,60}$/.test(text)) return "annet";
+  if (/[A-Za-z0-9]{24,}/.test(text)) return "annet";
+  if (scanForSecrets(text).text !== text) return "annet";
+  return text;
+}
+
+/**
+ * Slår sammen rader som får SAMME nøkkel etter `safeCategory` (to ulike «uvanlige» verdier blir begge «annet»). Id-ene i en seksjon må være unike - en kollisjon ville ellers felt hele senteret
+ * (`duplicate_control_item_id`) på grunn av én rar rad. Rekkefølgen beholdes (første forekomst).
+ */
+export function mergeBy<T>(rows: readonly T[], key: (row: T) => string, merge: (a: T, b: T) => T): T[] {
+  const out = new Map<string, T>();
+  for (const row of rows) {
+    const k = key(row);
+    const prev = out.get(k);
+    out.set(k, prev === undefined ? row : merge(prev, row));
+  }
+  return [...out.values()];
+}
+
+/** Strengt flagg: kun den eksakte verdien «on» slår en funksjon på (alt annet, også «true»/«1»/«ON», er AV - samme regel som JARVIS_KNOWLEDGE_CLAIM_WRITES). */
+export function flagOn(env: Readonly<Record<string, string | undefined>>, name: string): boolean {
+  return env[name] === "on";
 }

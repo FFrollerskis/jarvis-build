@@ -1540,8 +1540,10 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       if (resolved.responded) return;
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
     }
+    // WP-H1 (JARVIS-087 del 2): dashbord-ruten attesterer at parameterne er eierens EGNE ord (skjemaet i dashbordet, signert enhetsøkt - ingen modell har formulert dem). Det er det eneste trusted
+    // opphavet denne ruten kan bevise; uten attesten ville proveniensen på journalraden stå som `unspecified`. Kun journal-transporten leser verdien (og kun når JARVIS_GOVERNANCE_PROVENANCE=on).
     const result = await deps.executive.gateway.execute({
-      identity: resolved.identity, tool_id: "governance", action, parameters
+      identity: resolved.identity, tool_id: "governance", action, parameters, contentOrigin: "owner_direct"
     });
     if (!result.ok) {
       return json(res, 403, { error: "tool_denied", reason: result.reason });
