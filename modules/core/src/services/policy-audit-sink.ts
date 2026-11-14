@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { envInt } from "@jarvis/contracts";
 import type { PolicyAuditEvent } from "@jarvis/policy";
@@ -15,8 +15,11 @@ import { scanForSecrets } from "./secret-scan.ts";
  *  - FEIL: en transient feil (database nede, tidsavbrudd, manglende tabell) beholder batchen i køen og prøver igjen med eksponentiell backoff; en PERMANENT feil på én rad (22xxx/23xxx: ugyldige data, ukjent tenant)
  *    isoleres rad for rad slik at én giftig rad aldri blokkerer resten (den kastes og telles som `rejected_invalid`). Innsettingen er idempotent (`ON CONFLICT DO NOTHING`), så en retry etter et uklart utfall dupliserer aldri.
  *  - AVGJØRELSEN ER ALDRI AVHENGIG AV SINKEN: se `PolicyGateway.emit()` - en kastet/avvist/falsk sink endrer aldri ALLOW/DENY. Feil her er TELT (`stats()`) og synlige (strupet logg + Autoritet-senteret), aldri stille.
- *  - REDAKSJON: hendelsen har aldri parametre/prompts/godkjenningsinnhold (se `PolicyAuditEvent`). I tillegg går hvert tekstfelt gjennom den sentrale hemmelighetsskanneren, kontrolltegn fjernes og lengden kuttes
- *    (grunnkoder 160, id-er 200) før lagring. Feil-etiketter i statistikken er koder/feilnavn, aldri fri feiltekst.
+ *  - REDAKSJON: hendelsen har aldri parametre/prompts/godkjenningsinnhold (se `PolicyAuditEvent`). FRITEKST (grunnkoden `reason`) går gjennom den sentrale hemmelighetsskanneren, kontrolltegn fjernes og lengden kuttes (160).
+ *    ID-ER (tenant/person/sesjon/verktøy/handling/oppgave/spor/avgjørelse) skannes ALDRI: de kuttes til maks lengde FØRST og valideres så på tegnsett (bokstaver, sifre og `._:@/#+=~-`; alt annet blir `_`). Hemmelighets-
+ *    heuristikken (kortnummer/Luhn, `NAVN=verdi`) gir falske treff på vanlige id-er (en tilfeldig UUID, `sched:oauth-token-refresh:<dato>`) og ville gjort at journalraden og `audit_events` (som har rå-id-en) ikke lenger kan joines
+ *    (review M4). En id fra Jarvis' egen kode er ikke fritekst, og samme id står uredigert i `audit_events`. TENANT er det eneste feltet som må være eksakt: en tenant som ikke består tegnsett-/lengdekontrollen skrives ALDRI
+ *    (den telles som `skipped_unattributable`) - en «renset» tenant-id kunne havnet under en ANNEN tenant. Feil-etiketter i statistikken er koder/feilnavn, aldri fri feiltekst.
  *  - TENANT: en avgjørelse uten gyldig tenant (ugyldig identitet: `unknown`/tom) har ingen tenant å skrives under (RLS) og telles som `skipped_unattributable` - aldri en oppdiktet tenant/person.
  *  - OPPBEVARING: `prune_policy_decisions()` (migrasjon 108; standard 90 dager, gulv 30) kjøres daglig i api-prosessen sammen med oppbevaringssveipet fra D-395 (`runPolicyDecisionRetentionSweep`).
  */
@@ -86,23 +89,34 @@ const CLASSES: ReadonlySet<string> = new Set(["A", "B", "C", "D"]);
 const DEGRADED_WINDOW_MS = 5 * 60_000;
 const LOG_THROTTLE_MS = 60_000;
 
-/** Fritekst (grunnkode): kontrolltegn bort, hemmeligheter redigert (`[REDACTED:<type>]`), kuttet til `max`. `null` for ikke-tekst/tom. */
+/** Øvre grense for hvor mye fritekst som skannes (arbeidet er begrenset uansett hva en feilende kaller sender). */
+const MAX_SCANNED_TEXT = 4_096;
+
+/** Fritekst (grunnkode): kontrolltegn bort, hemmeligheter redigert (`[REDACTED:<type>]`), kuttet til `max`. `null` for ikke-tekst/tom. KUN fritekst skannes - id-er gjør det aldri (se `cleanId`). */
 function cleanText(value: unknown, max: number): string | null {
   if (typeof value !== "string") return null;
-  const text = scanForSecrets(value.replace(CONTROL_CHARS, " ")).text.trim();
+  const text = scanForSecrets(value.slice(0, MAX_SCANNED_TEXT).replace(CONTROL_CHARS, " ")).text.trim();
   return text.length === 0 ? null : text.slice(0, max);
 }
 
+/** Tillatte tegn i en identifikator: bokstaver og sifre (også utenfor ASCII) og `._:@/#+=~-`. Alt annet (mellomrom, kontrolltegn, anførselstegn, parenteser, bakstrek ...) er ikke en del av en id. */
+const ID_UNSAFE = /[^\p{L}\p{N}._:@/#+=~-]/gu;
+const ID_SAFE_EXACT = /^[\p{L}\p{N}._:@/#+=~-]+$/u;
+const ID_HAS_ALNUM = /[\p{L}\p{N}]/u;
+
 /**
- * Identifikator (tenant/person/sesjon/verktøy/handling/oppgave/spor/avgjørelse): kontrolltegn bort og kuttet. Skanneren får aldri OMSKRIVE en id (en endret id ville ødelagt korrelasjonen) -
- * hvis den likevel finner noe hemmelig-aktig lagres en deterministisk markør (`redacted-<sha256-prefiks>`): samme inndata gir samme markør (kan fortsatt joines), men ingen hemmelighet lagres.
+ * Identifikator (person/sesjon/verktøy/handling/oppgave/spor/avgjørelse): kuttet til `max` FØRST (begrenset arbeid, ingen skanning av en lang streng), trimmet og så validert på tegnsett - utrygge tegn blir `_`.
+ * Id-er skannes ALDRI for «hemmeligheter» (review M4): heuristikken gir falske treff på helt vanlige id-er og ville ødelagt joinen mot `audit_events`, som har rå-id-en. `null` når ingenting brukbart er igjen.
  */
 function cleanId(value: unknown, max: number): string | null {
   if (typeof value !== "string") return null;
-  const text = value.replace(CONTROL_CHARS, " ").trim();
-  if (text.length === 0) return null;
-  if (scanForSecrets(text).findings.length > 0) return `redacted-${createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16)}`;
-  return text.slice(0, max);
+  const text = value.slice(0, max).trim().replace(ID_UNSAFE, "_");
+  return ID_HAS_ALNUM.test(text) ? text : null;
+}
+
+/** Tenant-id: EKSAKT eller ingenting. En kuttet/«renset» tenant-id kunne vært en annen tenants id, så en id som ikke består kontrollen skrives aldri (`null` -> `skipped_unattributable`). */
+function exactId(value: unknown, max: number): string | null {
+  return typeof value === "string" && value.length > 0 && value.length <= max && ID_SAFE_EXACT.test(value) ? value : null;
 }
 
 function processLabel(explicit: string | null | undefined): string | null {
@@ -112,7 +126,7 @@ function processLabel(explicit: string | null | undefined): string | null {
 
 /** Hendelse -> rad. `"unattributable"` = ingen gyldig tenant; `"invalid"` = ikke journalførbar form. Aldri en oppdiktet tenant/person. */
 export function toPolicyDecisionRow(event: PolicyAuditEvent, processName: string | null, now: Date): PolicyDecisionRow | "unattributable" | "invalid" {
-  const tenant = cleanId(event.tenant_id, 200);
+  const tenant = exactId(event.tenant_id, 200);
   if (tenant === null || tenant === "unknown") return "unattributable";
   if (event.decision !== "ALLOW" && event.decision !== "DENY") return "invalid";
   const id = cleanId(event.decision_id, 80);

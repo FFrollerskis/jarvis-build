@@ -54,8 +54,10 @@ afterEach(() => {
 });
 
 let seq = 0;
+/** Deterministisk id (review M4): løpenummer + et hash-aktig, men reproduserbart, hex-ledd - aldri `Math.random` (en tilfeldig id som tilfeldigvis ligner et kortnummer gjorde testen flaky). */
+const decisionIdFor = (n: number): string => `d-wpk53-${String(n).padStart(6, "0")}-${((n * 2654435761) >>> 0).toString(16).padStart(8, "0")}`;
 const event = (over: Partial<PolicyAuditEvent> = {}): PolicyAuditEvent => ({
-  at: new Date().toISOString(), decision_id: `d-wpk53-${String(++seq).padStart(6, "0")}-${Math.random().toString(16).slice(2, 10)}`, decision: "ALLOW", reason: "class_a_read",
+  at: new Date().toISOString(), decision_id: decisionIdFor(++seq), decision: "ALLOW", reason: "class_a_read",
   person_id: "person-tobias", tenant_id: "t-a", session_id: "sess-wpk53", tool_id: "calendar", action: "read_events", capability_class: "A", ...over
 });
 const sinkOn = (pool: pg.Pool, over: Record<string, unknown> = {}): PgPolicyAuditSink => new PgPolicyAuditSink({ pool, autoFlush: false, processName: "api", ...over });
@@ -158,24 +160,83 @@ describe("B: sinken skriver en avgjørelse fra den ekte PolicyGateway - korreler
     expect(Object.keys(row).sort()).toEqual(["action", "actor_kind", "capability_class", "decided_at", "decision", "decision_id", "person_id", "process", "reason", "recorded_at", "session_id", "task_id", "tenant_id", "tool_id", "trace_id"]);
   });
 
-  it("redaksjon: hemmelighetsformer i grunnkoden redigeres, en id som ser ut som en hemmelighet får en deterministisk markør (kan fortsatt joines), kontrolltegn og lengde kuttes", async () => {
+  it("redaksjon: hemmelighetsformer i FRITEKST (grunnkoden) redigeres og kontrolltegn/lengde kuttes - men id-er redigeres ALDRI (de kuttes og tegnsett-valideres)", async () => {
     const tokenLike = `gh${"p_"}${"a1B2c3D4e5".repeat(4)}`; // bygges ved kjøring - ingen leverandørformet tekst i kildefilen
     const sink = sinkOn(app);
-    const a = event({ reason: `denied: token ${tokenLike} used\nsecond line\u0007`, task_id: tokenLike, trace_id: "x".repeat(500) });
-    const b = event({ task_id: tokenLike });
+    const a = event({ reason: `denied: token ${tokenLike} used\nsecond line\u0007`, task_id: "task-plain-1", trace_id: "x".repeat(500) });
     sink.write(a);
-    sink.write(b);
     await sink.flush();
-    const rows = await rowsAs("t-a");
-    const ra = rows.find((r) => r["decision_id"] === a.decision_id)!;
-    const rb = rows.find((r) => r["decision_id"] === b.decision_id)!;
-    expect(JSON.stringify(ra)).not.toContain(tokenLike);
+    const ra = (await rowsAs("t-a")).find((r) => r["decision_id"] === a.decision_id)!;
+    expect(JSON.stringify(ra)).not.toContain(tokenLike); // hemmeligheten i fritekst er borte
     expect(ra["reason"]).toMatch(/\[REDACTED:/);
     expect(String(ra["reason"]).includes("\n")).toBe(false);
     expect(String(ra["reason"]).includes(String.fromCharCode(7))).toBe(false);
-    expect(String(ra["task_id"])).toMatch(/^redacted-[0-9a-f]{16}$/);
-    expect(rb["task_id"]).toBe(ra["task_id"]); // samme inndata -> samme markør
-    expect(String(ra["trace_id"]).length).toBe(200);
+    expect(ra["task_id"]).toBe("task-plain-1");
+    expect(String(ra["trace_id"]).length).toBe(200); // kuttet FØRST, så validert
+  });
+
+  it("M4: id-er redigeres ALDRI - Luhn-gyldige sifferrekker, `NAVN=verdi`-lignende job-id-er og token-lignende id-er lagres eksakt, så joinen mot audit_events (rå-id) alltid treffer", async () => {
+    const luhn = (body: string): string => { // gyldig Luhn-sifferrekke bygget ved kjøring (ingen kortnummer i kildefilen)
+      let sum = 0;
+      for (let i = 0; i < body.length; i += 1) {
+        let n = Number(body[body.length - 1 - i]);
+        if (i % 2 === 0) { n *= 2; if (n > 9) n -= 9; }
+        sum += n;
+      }
+      return `${body}${(10 - (sum % 10)) % 10}`;
+    };
+    const card = luhn("411111111111111"); // 16 sifre, Luhn-gyldig
+    const tokenLike = `gh${"p_"}${"a1B2c3D4e5".repeat(4)}`;
+    const ids = {
+      decision_id: `d-${card}-wpk`, task_id: `task-${card}`, trace_id: `${card.slice(0, 8)}-${card.slice(8)}`, session_id: `sess ${card}`.replace(" ", "-"),
+      job: "sched:oauth-token-refresh:2026-11-14", token: tokenLike
+    };
+    const sink = sinkOn(app);
+    const e = event({ decision_id: ids.decision_id, task_id: ids.task_id, trace_id: ids.trace_id, session_id: ids.session_id, person_id: `person-${card}` });
+    const jobEvent = event({ task_id: ids.job, trace_id: ids.token });
+    sink.write(e);
+    sink.write(jobEvent);
+    await sink.flush();
+    const rows = await rowsAs("t-a");
+    const re = rows.find((r) => r["decision_id"] === ids.decision_id)!;
+    expect(re).toMatchObject({ decision_id: ids.decision_id, task_id: ids.task_id, trace_id: ids.trace_id, session_id: ids.session_id, person_id: `person-${card}` });
+    const rj = rows.find((r) => r["decision_id"] === jobEvent.decision_id)!;
+    expect(rj).toMatchObject({ task_id: ids.job, trace_id: ids.token });
+    for (const row of [re, rj]) for (const column of ["decision_id", "task_id", "trace_id", "session_id", "person_id"]) expect(String(row[column]), column).not.toMatch(/REDACTED|redacted-/);
+  });
+
+  it("M4 (deterministisk regresjon): 5 000 id-er av byggerens tidligere testform går urørt gjennom radbyggingen - ingen id blir omskrevet", () => {
+    let altered = 0;
+    for (let n = 1; n <= 5_000; n += 1) {
+      const id = decisionIdFor(n);
+      const row = toPolicyDecisionRow(event({ decision_id: id, task_id: `inc-repair-${n}-${n * 7919}`, trace_id: `corr-${(n * 40503).toString(16).padStart(16, "0")}` }), null, new Date());
+      if (row === "unattributable" || row === "invalid" || row.decision_id !== id || row.task_id !== `inc-repair-${n}-${n * 7919}`) altered += 1;
+    }
+    expect(altered).toBe(0);
+    const uuidLike = (n: number): string => `${(n * 2654435761 >>> 0).toString(16).padStart(8, "0")}-${(n * 40503 % 65536).toString(16).padStart(4, "0")}-4${(n % 4096).toString(16).padStart(3, "0")}-8${((n * 31) % 4096).toString(16).padStart(3, "0")}-${(n * 7919).toString(16).padStart(12, "0")}`;
+    for (let n = 1; n <= 5_000; n += 1) {
+      const row = toPolicyDecisionRow(event({ decision_id: uuidLike(n) }), null, new Date());
+      expect(row !== "unattributable" && row !== "invalid" && row.decision_id === uuidLike(n)).toBe(true);
+    }
+  });
+
+  it("M4: id-er kuttes FØRST og valideres på tegnsett (mellomrom/kontrolltegn/anførselstegn blir `_`), en kjempestor id er billig, og tom/ren-symbol id blir `unknown`/null", () => {
+    const row = toPolicyDecisionRow(event({ session_id: "ses sion\n\"x\"", tool_id: "t\u0000ool", action: ";;;", task_id: "a".repeat(1_000_000) }), null, new Date());
+    if (row === "unattributable" || row === "invalid") throw new Error("uventet");
+    expect(row.session_id).toBe("ses_sion__x_");
+    expect(row.tool_id).toBe("t_ool");
+    expect(row.action).toBe("unknown"); // ingen bokstaver/sifre igjen
+    expect(row.task_id).toBe("a".repeat(200));
+    const started = Date.now();
+    toPolicyDecisionRow(event({ trace_id: `${"-".repeat(5_000_000)}x` }), null, new Date());
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  it("M4: TENANT er eksakt eller ingenting - en tenant-id med utrygge tegn eller over 200 tegn skrives ALDRI (heller ikke «renset», det kunne blitt en annen tenant)", () => {
+    for (const tenant of ["t a", "t-a\n", "t'a", "t".repeat(201), "t;a", ""]) {
+      expect(toPolicyDecisionRow(event({ tenant_id: tenant }), null, new Date()), JSON.stringify(tenant)).toBe("unattributable");
+    }
+    expect(toPolicyDecisionRow(event({ tenant_id: "tenant-owner.example@host:1/x#y+z=1~2" }), null, new Date())).not.toBe("unattributable");
   });
 
   it("uten gyldig tenant (ugyldig identitet) finnes ingen tenant å skrive under: telles, ingen rad, aldri en oppdiktet tenant/person", async () => {
