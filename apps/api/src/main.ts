@@ -27,10 +27,14 @@ import {
   assertRuntimeCredentialsConfigured,
   assertRuntimeRoleSafe,
   configFromEnv,
+  createPolicyAuditSinkFromEnv,
   createPool,
   ConfirmationStore,
+  installPolicyAuditDrain,
+  policyAuditSinkConfigFromEnv,
   runMigrationsAsAdmin,
   runOperationalRetentionSweep,
+  runPolicyDecisionRetentionSweep,
   withTenantTransaction,
   writeAudit
 } from "@jarvis/core";
@@ -278,6 +282,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   }), 30_000).unref();
   // Gjennomgang av PR #316 (M-2): ÉN eier-autoritetskonfigurasjon, delt av Policy Gateway og kontrollsentrene (eier-porten og Authority Center), så de aldri kan være uenige om hvem eieren er.
   const ownerAuthority: AuthorityConfig = { owner_person_id: owner.owner_person_id, owner_tenants: ownerTenants };
+  // WP-K (D-471, JARVIS-053): varig policy-journal (AV som standard; `JARVIS_POLICY_AUDIT_SINK=db` skriver hver avgjørelse til `policy_decisions`). En sink-feil kan aldri endre en avgjørelse (telt og vist i
+  // Autoritet-senteret); uten flagget er `policyAuditSink` null og PolicyGateway bruker ringbufferen som før (byte-identisk oppførsel).
+  const policyAuditSink = createPolicyAuditSinkFromEnv(pool);
+  if (policyAuditSink) installPolicyAuditDrain(policyAuditSink);
   const policy = new PolicyGateway({
     devices: deviceRegistry,
     nonces: new PgApprovalStore(pool),
@@ -293,7 +301,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // SCOPED-modus og krevde approval for owners D-kall. A-D er risikoklasser -
     // for owner gir SOVEREIGN autonom utførelse; sikkerheten ligger i D-pipelinen
     // (preflight/readback/evidens/recovery) + owner-kontrollene, ikke approval.
-    authority: ownerAuthority
+    authority: ownerAuthority,
+    ...(policyAuditSink ? { auditSink: policyAuditSink.write } : {})
   });
   const queue = new PgTaskQueue(pool);
   const worker = new InProcessWorker(queue);
@@ -743,6 +752,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   registerControlCenters(controlCenters, {
     pool, env: process.env, toolGateway, ownerControls, meshStatus: () => gateway.meshStatus(),
     authority: ownerAuthority, killSwitch, infraGate,
+    ...(policyAuditSink ? { policyAudit: () => ({ gateway: policy.auditStats(), sink: policyAuditSink.stats() }) } : {}),
     modelGateway: gateway, runRate: new RunRateService(pool), councilLimiter: councilAutoLimiter, evolutionReport: evolutionReports, maxActiveJobs: MAX_ACTIVE_JOBS
   });
   for (const tool of firstWaveTools({
@@ -1819,6 +1829,16 @@ porter: se docs/RUNTIME_GATES.md`;
     const result = await runOperationalRetentionSweep(pool);
     console.log(JSON.stringify({ msg: "operational_retention_sweep_completed", ...result }));
   });
+  // WP-K (D-471, JARVIS-053): oppbevaring for den varige policy-journalen (`policy_decisions`, migrasjon 108) - SAMME mønster og klokkeslett som sveipet over, men egen jobb (egen claim/retry/helse i
+  // `scheduler_state`, så en feil her aldri skjuler resultatet av det eksisterende sveipet). Kun registrert når journalen er PÅ (AV = ingenting nytt kjører); `prune_policy_decisions()` har et fast gulv på 30 dager.
+  if (policyAuditSink) {
+    new DailyScheduler(
+      pool, "policy-decision-retention-sweep", envHour("JARVIS_OPERATIONAL_RETENTION_SWEEP_HOUR", 3)
+    ).start(async () => {
+      const result = await runPolicyDecisionRetentionSweep(pool, { days: policyAuditSinkConfigFromEnv().retentionDays });
+      console.log(JSON.stringify({ msg: "policy_decision_retention_sweep_completed", ...result }));
+    });
+  }
   if (memoryEmbedding.model !== "local-hash-v1") {
     setTimeout(() => {
       runMemoryReembedSweepForAllTenants(pool, memoryEmbedding, { maxRows: 500 }).catch((err: unknown) => {

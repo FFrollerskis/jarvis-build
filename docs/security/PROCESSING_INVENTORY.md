@@ -46,9 +46,9 @@ uten at det er gjort, eller (4) en DPIA-henvisning peker på en fil som ikke fin
 - **Formål:** Bevis på hva Jarvis har gjort, og durable jobbkø
 - **Memory space/tenant:** system (alle tabeller tenant-skopet med FORCE RLS unntatt dokumenterte globale: `scheduler_state`, `capabilities`, `evolution_change_ledger`, `self_modification_requests`, `github_rate_limit_state`, `telegram_poll_state`)
 - **Datakategori:** Parametere/utfall for verktøykall (hemmeligheter fjernes før lagring), jobbkontrakter og resultater
-- **Retensjon:** tool_executions: ferdige rader slettes etter ≥ 30 dager (standard 180; `unverified`/`reserved` slettes aldri automatisk). audit_events/events/memory_versions er append-only og beholdes (oppbevaringspolicy er eierbeslutning). tasks: ingen automatisk sletting.
+- **Retensjon:** tool_executions: ferdige rader slettes etter ≥ 30 dager (standard 180; `unverified`/`reserved` slettes aldri automatisk). audit_events/events/memory_versions er append-only og beholdes (oppbevaringspolicy er eierbeslutning). tasks: ingen automatisk sletting. `policy_decisions` (WP-K, migrasjon 108; PÅ kun med `JARVIS_POLICY_AUDIT_SINK=db`, ellers tom): append-only journal over policy-avgjørelser (person/sesjon/verktøy/handling/risikoklasse/avgjørelse/grunnkode + oppgave-/spor-ID - aldri parametre, prompts eller godkjenningsinnhold; id-er og grunnkode redigeres for hemmeligheter før lagring); slettes av `prune_policy_decisions()` etter 90 dager (`JARVIS_POLICY_AUDIT_RETENTION_DAYS`, gulv 30 dager i databasen) - `audit_events` er fortsatt den varige revisjonen.
 - **Eksterne mottakere:** Ingen
-- **Tabeller:** `audit_events`, `capabilities`, `deployments`, `evolution_change_ledger`, `github_rate_limit_state`, `scheduler_state`, `self_modification_requests`, `tasks`, `telegram_poll_state`, `tool_executions`
+- **Tabeller:** `audit_events`, `capabilities`, `deployments`, `evolution_change_ledger`, `github_rate_limit_state`, `policy_decisions`, `scheduler_state`, `self_modification_requests`, `tasks`, `telegram_poll_state`, `tool_executions`
 
 ### Kostnad og modellbruk
 

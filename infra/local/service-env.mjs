@@ -52,6 +52,9 @@ export const CORE_ENV = [
   "JARVIS_OWNER_EXTRA_TENANTS",
   "JARVIS_OWNER_NAME",
   "JARVIS_OWNER_PERSON_ID",
+  // WP-K (D-471, JARVIS-053): varig policy-journal (`policy_decisions`). AV som standard (kun `db` slår på); api OG worker bruker samme sink-kode og leser samme bryter. Ingen hemmeligheter.
+  "JARVIS_POLICY_AUDIT_QUEUE_MAX",
+  "JARVIS_POLICY_AUDIT_SINK",
   "JARVIS_TENANT_ID",
   "JARVIS_WATCHDOG_INTERVAL_MS",
   "LANGFUSE_PUBLIC_KEY",
@@ -351,6 +354,8 @@ export const SERVICE_ENV = {
     "JARVIS_BUSINESS_EVENTS_SYNC_HOUR", "JARVIS_BUSINESS_SCORING_HOUR", "JARVIS_BUSINESS_SWEEP_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_HOUR", "JARVIS_BUSINESS_WEEKLY_BRIEF_WEEKDAY", "JARVIS_CONNECTOR_HEALTH_SWEEP_HOUR", "JARVIS_CONVERSATION_GRAPH_SYNC_HOUR", "JARVIS_FINANCE_RECONCILE_HOUR", "JARVIS_FINANCE_SPEND_SWEEP_HOUR", "JARVIS_GROWTH_RECOMMENDATION_SWEEP_HOUR", "JARVIS_HEALTH_RETENTION_SWEEP_HOUR", "JARVIS_LOCATION_RETENTION_SWEEP_HOUR", "JARVIS_SITUATION_SWEEP_HOUR", "JARVIS_SUPPORT_INBOX_SYNC_HOUR", "JARVIS_VISION_RETENTION_SWEEP_HOUR", "JARVIS_STREAM_DEBUG",
     // WP-E1 (JARVIS-068): incident-produsentene i api-prosessen - intervall (ms), grener hvis utrullinger teller, og repoer som leses aktivt for nye Actions-kjøringer (tom = ingen polling). Ingen hemmeligheter.
     "JARVIS_INCIDENT_PRODUCERS_INTERVAL_MS", "JARVIS_INCIDENT_DEPLOY_REFS", "JARVIS_INCIDENT_DEPLOY_REPOS",
+    // WP-K (D-471, JARVIS-053): oppbevaring (dager, 30..3650, standard 90) for den varige policy-journalen - retensjonssveipet kjører i api-prosessen.
+    "JARVIS_POLICY_AUDIT_RETENTION_DAYS",
     // WP-D2 (JARVIS-044/Q-48): dashbord-ruten for å opprette en bedrifts-tenant er AV som standard (api-only; CLI-en trenger ikke flagget).
     "JARVIS_BUSINESS_TENANT_PROVISIONING",
     // WP-D2 (UA-3 «churn/product usage»): bedrifts-tenanten produktbruk-webhooken skriver til (api-only; tom = ruten finnes ikke, 404).

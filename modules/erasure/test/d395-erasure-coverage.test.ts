@@ -83,6 +83,8 @@ const BASELINE_REASON: Record<string, string> = {
   erasure_fingerprints: "APPEND_ONLY_EVIDENCE",
   erasure_requests: "APPEND_ONLY_EVIDENCE",
   events: "APPEND_ONLY_EVIDENCE",
+  // WP-K (D-471, JARVIS-053, migrasjon 108): policy-journalen er append-only (ingen DELETE-grant for runtime; kun `prune_policy_decisions()` sletter, etter 90 dager) og inneholder kun metadata - samme kategori som `audit_events`/`tool_executions`.
+  policy_decisions: "APPEND_ONLY_EVIDENCE",
   revoked_device_keys: "APPEND_ONLY_EVIDENCE",
   tool_executions: "APPEND_ONLY_EVIDENCE",
   // IDENTITY_SCAFFOLD: identitets-/strukturrader som følger tenant-/person-slettingen på høyere nivå (tenants/people), ikke en datainnholds-sletting per scope

@@ -93,9 +93,10 @@ export interface PolicyGatewayOptions {
   infraToolIds?: ReadonlySet<string>;
   /**
    * Varig revisjons-sink for hver avgjørelse. WP-K (D-471, JARVIS-053): en sink kan IKKE endre en avgjørelse - kaster den (eller et returnert løfte avvises), telles feilen (`auditStats().sink_failures`) og
-   * avgjørelsen returneres uendret; returnerer den `false` (full kø = mottrykk) telles det som `sink_rejected`. Se `PgPolicyAuditSink` (`@jarvis/core`) for den DB-baserte implementasjonen.
+   * avgjørelsen returneres uendret; returnerer den `false` (full kø = mottrykk) telles det som `sink_rejected`. Returtypen er bevisst `unknown` (som før: `void`-kompatible sinker som `events.push` er
+   * fortsatt gyldige); kun `false` og et løfte tolkes. Se `PgPolicyAuditSink` (`@jarvis/core`) for den DB-baserte implementasjonen.
    */
-  auditSink?: (event: PolicyAuditEvent) => void | boolean | PromiseLike<unknown>;
+  auditSink?: (event: PolicyAuditEvent) => unknown;
   /** WP-K: ID-fabrikk for avgjørelser (standard `crypto.randomUUID`). Kun for deterministiske tester. */
   newDecisionId?: () => string;
   /**
@@ -117,7 +118,7 @@ export class PolicyGateway {
   private readonly nonces: NonceStore;
   private readonly killSwitch: KillSwitch;
   private readonly mandates: ReadonlySet<string>;
-  private readonly auditSink: (event: PolicyAuditEvent) => void | boolean | PromiseLike<unknown>;
+  private readonly auditSink: (event: PolicyAuditEvent) => unknown;
   private readonly clock: () => Date;
   private readonly newDecisionId: () => string;
   readonly auditLog: PolicyAuditEvent[] = [];
