@@ -360,16 +360,25 @@ export class PolicyGateway {
     }
   }
 
+  /**
+   * Feilhåndteringen selv kan ALDRI feile (review L1): den kalles fra `emit()`s `catch` (da ville et kast her fortsette ut av `authorize()` og gjøre en avgjørelse til en feil) og fra avvisningsbehandleren
+   * til et sink-løfte (da ble et kast en ubehandlet avvisning som kan felle prosessen). Telleren økes først, utenfor `try`; alt annet (feiltekst fra et fiendtlig feilobjekt med kastende getter, en
+   * injisert klokke, loggingen) er best-effort, og en feil der gir en fast, ufarlig etikett i stedet for et kast.
+   */
   private noteSinkFailure(err: unknown): void {
     this.auditSinkFailures += 1;
-    const message = describeSinkError(err);
-    const at = this.clock().toISOString();
-    this.lastSinkFailure = { at, message };
-    // Strupet: høyst én loggline per minutt (en død sink skal ikke fylle loggen), uten hendelsesinnhold og uten fri feiltekst.
-    const nowMs = Date.now();
-    if (nowMs - this.lastSinkFailureLogAt >= 60_000) {
-      this.lastSinkFailureLogAt = nowMs;
-      console.error(JSON.stringify({ msg: "policy_audit_sink_failed", failures: this.auditSinkFailures, rejected: this.auditSinkRejected, error: message }));
+    try {
+      const message = describeSinkError(err);
+      const at = this.clock().toISOString();
+      this.lastSinkFailure = { at, message };
+      // Strupet: høyst én loggline per minutt (en død sink skal ikke fylle loggen), uten hendelsesinnhold og uten fri feiltekst.
+      const nowMs = Date.now();
+      if (nowMs - this.lastSinkFailureLogAt >= 60_000) {
+        this.lastSinkFailureLogAt = nowMs;
+        console.error(JSON.stringify({ msg: "policy_audit_sink_failed", failures: this.auditSinkFailures, rejected: this.auditSinkRejected, error: message }));
+      }
+    } catch {
+      this.lastSinkFailure = { at: new Date().toISOString(), message: "sink_failure_unreportable" };
     }
   }
 

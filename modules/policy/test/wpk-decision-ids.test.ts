@@ -139,6 +139,45 @@ describe("B: en revisjons-sink kan aldri endre en avgjørelse (JARVIS-053)", () 
   });
 });
 
+describe("B2: sink-feilhåndteringen kan selv ikke feile (review L1)", () => {
+  /** Et feilobjekt der HVER lesing kaster: `describeSinkError` leser code/name/message. */
+  const hostileError = (): unknown => new Proxy({}, { get() { throw new Error("fiendtlig getter"); } });
+
+  it("en sink som kaster et fiendtlig feilobjekt: avgjørelsen er uendret (ALLOW og DENY), feilen telles, og last_failure er en fast etikett", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { policy, killSwitch } = gateway({ auditSink: () => { throw hostileError(); } });
+    expect(await policy.authorize(read())).toMatchObject({ decision: "ALLOW", reason: "class_a_read" });
+    killSwitch.activate("test");
+    expect(await policy.authorize(read())).toMatchObject({ decision: "DENY", reason: "kill_switch_active" });
+    expect(policy.auditStats()).toMatchObject({ sink_failures: 2, last_failure: "sink_failure_unreportable" });
+    expect(errors).not.toHaveBeenCalled(); // loggingen ble aldri nådd: ingen halv logglinje med innhold
+  });
+
+  it("et AVVIST løfte med et fiendtlig feilobjekt gir ingen ubehandlet avvisning (ville ellers felt prosessen) og endrer ikke avgjørelsen", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const unhandled: unknown[] = [];
+    const listener = (reason: unknown): void => { unhandled.push(reason); };
+    process.on("unhandledRejection", listener);
+    try {
+      const { policy } = gateway({ auditSink: () => Promise.reject(hostileError()) });
+      expect(await policy.authorize(read())).toMatchObject({ decision: "ALLOW" });
+      await vi.waitFor(() => expect(policy.auditStats().sink_failures).toBe(1));
+      await new Promise((resolve) => setTimeout(resolve, 20)); // gi Node tid til å melde en ubehandlet avvisning
+      expect(unhandled).toEqual([]);
+      expect(policy.auditStats().last_failure).toBe("sink_failure_unreportable");
+    } finally {
+      process.off("unhandledRejection", listener);
+    }
+  });
+
+  it("en vanlig feil beholder den strukturerte etiketten (regresjon: try/catch endrer ikke normalveien)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { policy } = gateway({ auditSink: () => { throw new Error("policy_audit_queue_full"); } });
+    await policy.authorize(read());
+    expect(policy.auditStats().last_failure).toBe("policy_audit_queue_full");
+  });
+});
+
 describe("C: utsatt nonce-forbruk gir en NY avgjørelse (DENY) når commit() feiler", () => {
   it("commit() beholder returformatet, og den nye avgjørelsens ID gjøres tilgjengelig som commit_decision_id", async () => {
     const { signApproval } = await import("@jarvis/contracts");
