@@ -409,9 +409,15 @@ describe("G: connector-status, EV-17-fakta og redaksjon", () => {
     expect(github?.credentials).toEqual([{ ref: GITHUB_TOKEN_REF, configured: true }]);
     expect(github?.optional_credentials).toEqual([{ ref: "JARVIS_GITHUB_APP_PRIVATE_KEY", configured: false }]);
     expect(github?.auth?.method).toBe("app");
+    // WP-K (D-471, JARVIS-056): de fire Google-connectorene har Google OAuth-klientens id/secret som VALGFRIE refs (hvelv-lagret konfig; teller ikke med i `configured`). Ingen annen connector har valgfrie refs.
+    const googleClientConnectors = new Set(["google_calendar", "gmail", "google_drive", "google_sheets"]);
     for (const c of statuses.filter((x) => x.id !== "github")) {
       expect(c.auth, c.id).toBeUndefined();
-      expect(c.optional_credentials, c.id).toBeUndefined();
+      if (googleClientConnectors.has(c.id)) {
+        expect(c.optional_credentials, c.id).toEqual([{ ref: "JARVIS_GOOGLE_CLIENT_ID", configured: false }, { ref: "JARVIS_GOOGLE_CLIENT_SECRET", configured: false }]);
+      } else {
+        expect(c.optional_credentials, c.id).toBeUndefined();
+      }
     }
     expect(CONNECTOR_REGISTRY.find((c) => c.id === "github")?.credential_refs).toEqual([GITHUB_TOKEN_REF]);
     const plain = await listConnectorStatus(gateway);

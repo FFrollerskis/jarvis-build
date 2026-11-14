@@ -14,7 +14,8 @@ import {
   CHAT_ACT_TIER, CHAT_READ_TIER, MODEL_SURFACE_ALLOWLIST, MODEL_SURFACE_QUARANTINE_WRITES, memoryToolDefinitions,
   ToolGateway, assertManifestInvariants, buildToolManifest, createTurnContext, driveTransportsIfConfigured, firstWaveTools, jobIdentityFor, telegramClassDNotifier, parseDockerMutationTargets, parseGceMutationTargets,
   INFRA_GATED_TOOL_IDS,
-  configuredGithubRepo, githubReposUnlocked
+  configuredGithubRepo, githubReposUnlocked,
+  configureGoogleOAuthClientSource, createVaultFirstConfigReader, primeGoogleDriveCredentialCheck
 } from "@jarvis/tool-gateway";
 import { BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService, parseSupportSlaHours } from "@jarvis/business";
 import { SupportService, SupportTransport } from "@jarvis/support";
@@ -204,6 +205,10 @@ const toolGateway = new ToolGateway(pool, policy, toolSecretProvider, ownerContr
   classDPipeline: { enforce: true },
   credentialBinding: { owner_person_id: owner.owner_person_id, owner_tenants: ownerTenants, internalRefs: new Set([BUSINESS_INTERNAL_CREDENTIAL_REF]) }
 });
+// WP-K (D-471, JARVIS-056): samme hvelv-først-lesing av Google-klientens id/secret som apps/api/src/main.ts (API/worker-parity) - miljøet er en LOGGET-DEPRECATED fallback, og Drive-sjekken
+// (`driveTransportsIfConfigured()` under) måles hvelv-bevisst ÉN gang her, FØR `firstWaveTools()`.
+configureGoogleOAuthClientSource(createVaultFirstConfigReader({ vault: infisicalSecretProvider }));
+await primeGoogleDriveCredentialCheck((ref) => toolSecretProvider.get(ref));
 const businessService = new BusinessService(pool);
 // UA-3 next slice (D-53): samme OpenLoopService-wiring som api - workeren sin
 // mesh-tool-executor maa kunne kalle de nye business-handlingene identisk.

@@ -14,6 +14,7 @@ import type pg from "pg";
 import { AccessTokenCache, bearerFor, type RefreshedToken, dropboxRefreshExchange, microsoftRefreshExchange, spotifyRefreshExchange } from "./oauth-refresh.ts";
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolInvocationContext, ToolTransport } from "./gateway.ts";
+import { createVaultFirstConfigReader, readEnvConfig, type ConfigReader } from "./oauth-client-config.ts";
 import { GithubRateLimitedError, GithubRateLimitController } from "./github-rate-limit-controller.ts";
 import { abortableSleep, throwIfAborted } from "./call-signal.ts";
 
@@ -176,9 +177,24 @@ export function parseGoogleAuthFailureReason(reason: string): GoogleAuthErrorCla
  * aldri). Konto-/tenant-oppløsning: hver transport-instans er bundet til én
  * eksplisitt konto (accountEmail) - ingen implisitt cross-account fallback.
  */
+/**
+ * WP-K (D-471, JARVIS-056): hvor Google-klientens id/secret leses fra. Uten en konfigurert kilde (skript, tester) leses miljøet stille som før. api/worker kobler inn hvelv-først-leseren ved
+ * oppstart (`configureGoogleOAuthClientSource(createVaultFirstConfigReader({ vault }))`): dashbord-lagret/Infisical FØRST, miljøet som LOGGET-DEPRECATED fallback. En endret kilde nullstiller
+ * access-token-cachen (et token utvekslet med en annen klient skal aldri gjenbrukes) og Drive-sjekken under.
+ */
+let googleClientSource: ConfigReader | undefined;
+export function configureGoogleOAuthClientSource(reader: ConfigReader | undefined): void {
+  googleClientSource = reader;
+  googleDriveSnapshot = undefined;
+  resetGoogleAccessTokenCache();
+}
+async function readGoogleClientRef(ref: "JARVIS_GOOGLE_CLIENT_ID" | "JARVIS_GOOGLE_CLIENT_SECRET"): Promise<string | null> {
+  return googleClientSource ? googleClientSource(ref) : readEnvConfig(ref);
+}
+
 async function googleTokenExchange(refreshToken: string): Promise<RefreshedToken> {
-  const clientId = process.env["JARVIS_GOOGLE_CLIENT_ID"];
-  const clientSecret = process.env["JARVIS_GOOGLE_CLIENT_SECRET"];
+  const clientId = await readGoogleClientRef("JARVIS_GOOGLE_CLIENT_ID");
+  const clientSecret = await readGoogleClientRef("JARVIS_GOOGLE_CLIENT_SECRET");
   if (!clientId || !clientSecret) throw new Error("google_oauth_client_not_configured");
   // HOST FIX #2: KUN LEST (aldri skrevet/eksponert) for å avgjøre om DENNE
   // klienten allerede er host-bevist Desktop-type - samme markør
@@ -962,9 +978,31 @@ export class GoogleDriveTransport implements ToolTransport {
  * logges/returneres/eksponeres her.
  */
 export function googleDriveCredentialsConfigured(): boolean {
+  // WP-K (JARVIS-056): etter `primeGoogleDriveCredentialCheck()` (api/worker, ved oppstart) gjelder hvelv-bevisst-målingen; uten den er dette den uendrede miljøsjekken.
+  if (googleDriveSnapshot !== undefined) return googleDriveSnapshot;
   return Boolean(
-    process.env["JARVIS_GOOGLE_CLIENT_ID"] && process.env["JARVIS_GOOGLE_CLIENT_SECRET"] && process.env["JARVIS_GOOGLE_TOKEN"]
+    readEnvConfig("JARVIS_GOOGLE_CLIENT_ID") && readEnvConfig("JARVIS_GOOGLE_CLIENT_SECRET") && readEnvConfig("JARVIS_GOOGLE_TOKEN")
   );
+}
+
+/** WP-K (JARVIS-056): sist målte Drive-konfig (hvelv-bevisst); `undefined` = ikke primet (da gjelder miljøsjekken over). */
+let googleDriveSnapshot: boolean | undefined;
+
+/**
+ * WP-K (D-471, JARVIS-056): Drive-verktøyene registreres kun når client id + secret + refresh-token finnes - og til nå ble det målt i miljøet alene, så dashbord-/Infisical-lagret Google-konfig ga
+ * et «delvis konfigurert»-system der token-utvekslingen kunne lese hvelvet men Drive-verktøyene aldri ble registrert. api/worker kaller denne ÉN gang ved oppstart FØR `firstWaveTools()` (den
+ * synkrone `driveTransportsIfConfigured()` er uendret og leser målingen). `readRefreshToken` er den vanlige secret-kjeden (`readSecretProvider.get`). Kaster aldri: en feil gir `false`.
+ */
+export async function primeGoogleDriveCredentialCheck(readRefreshToken: ConfigReader): Promise<boolean> {
+  try {
+    const [clientId, clientSecret, token] = await Promise.all([
+      readGoogleClientRef("JARVIS_GOOGLE_CLIENT_ID"), readGoogleClientRef("JARVIS_GOOGLE_CLIENT_SECRET"), readRefreshToken("JARVIS_GOOGLE_TOKEN")
+    ]);
+    googleDriveSnapshot = Boolean(clientId && clientSecret && token);
+  } catch {
+    googleDriveSnapshot = false;
+  }
+  return googleDriveSnapshot;
 }
 
 /**
@@ -2855,8 +2893,10 @@ export class SpotifyTransport implements ToolTransport {
   private readonly cache: AccessTokenCache;
 
   constructor(options: SpotifyTransportOptions = {}) {
-    const clientId = options.clientId ?? (async () => process.env["JARVIS_SPOTIFY_CLIENT_ID"] || null);
-    const clientSecret = options.clientSecret ?? (async () => process.env["JARVIS_SPOTIFY_CLIENT_SECRET"] || null);
+    // WP-K (JARVIS-056): uten resolvere (api/worker gir dem alltid) faller klienten tilbake til miljøet - nå LOGGET som deprecated (én linje per ref, aldri verdien).
+    const envFallback = createVaultFirstConfigReader();
+    const clientId = options.clientId ?? (() => envFallback("JARVIS_SPOTIFY_CLIENT_ID"));
+    const clientSecret = options.clientSecret ?? (() => envFallback("JARVIS_SPOTIFY_CLIENT_SECRET"));
     this.cache = new AccessTokenCache(spotifyRefreshExchange(clientId, clientSecret), { label: "spotify", ...(options.persist ? { persist: options.persist } : {}) });
   }
 
