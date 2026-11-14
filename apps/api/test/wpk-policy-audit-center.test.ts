@@ -23,7 +23,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..", "..", "..");
 
 const sinkStats = (over: Partial<PolicyAuditSinkStats> = {}): PolicyAuditSinkStats => ({
-  mode: "db", queued: 0, max_queue: 2_000, pressure: "ok", written: 120, rejected_full: 0, rejected_invalid: 0, skipped_unattributable: 0, flush_failures: 0, consecutive_failures: 0,
+  mode: "db", queued: 0, max_queue: 2_000, max_per_tenant: 1_600, pressure: "ok", written: 120, rejected_full: 0, rejected_tenant_cap: 0, rejected_invalid: 0, skipped_unattributable: 0, flush_failures: 0, consecutive_failures: 0,
   last_failure_at: null, last_failure: null, last_written_at: NOW.toISOString(), degraded: false, ...over
 });
 const gatewayStats = (over: Partial<PolicyAuditStats> = {}): PolicyAuditStats => ({
@@ -75,11 +75,39 @@ describe("Authority Center: den varige policy-journalen", () => {
     for (const value of Object.values(item.facts ?? {})) expect(["string", "number", "boolean"].includes(typeof value) || value === null).toBe(true);
   });
 
-  it("tapte avgjørelser uten aktiv feil (rejected_invalid/gateway-feil) er også WARN; en leser som kaster er UNKNOWN, aldri OK", async () => {
-    const lost = (await policies(() => ({ gateway: gatewayStats({ sink_failures: 1 }), sink: sinkStats() }))).find((i) => i.id === "policy_audit")!;
+  it("en sink-feil i gatewayen for under 5 minutter siden er WARN; en leser som kaster er UNKNOWN, aldri OK", async () => {
+    const recent = new Date(NOW.getTime() - 60_000).toISOString();
+    const lost = (await policies(() => ({ gateway: gatewayStats({ sink_failures: 1, last_failure_at: recent, last_failure: "Error" }), sink: sinkStats() }))).find((i) => i.id === "policy_audit")!;
     expect(lost.status).toBe("WARN");
     const broken = (await policies(() => { throw new Error("boom"); })).find((i) => i.id === "policy_audit")!;
     expect(broken.status).toBe("UNKNOWN");
+  });
+
+  it("review L4: WARN nullstiller seg - livstidstellerne alene (gamle avvisninger) holder ikke statusen på WARN; de står i teksten som tidligere avvik, og aktuelle avvik gir WARN igjen", async () => {
+    const old = new Date(NOW.getTime() - 10 * 60_000).toISOString();
+    const healedSink = sinkStats({ rejected_full: 7, rejected_tenant_cap: 3, rejected_invalid: 1, flush_failures: 4, degraded: false, last_failure_at: old, last_failure: "Error:ECONNREFUSED" });
+    const healed = (await policies(() => ({ gateway: gatewayStats({ sink_failures: 2, sink_rejected: 10, last_failure_at: old, last_failure: "Error" }), sink: healedSink }))).find((i) => i.id === "policy_audit")!;
+    expect(healed.status).toBe("OK");
+    expect(healed.detail_no).toContain("Tidligere avvik");
+    expect(healed.detail_no).toContain("23 avgjørelser"); // 7 + 3 + 1 + 2 + 10
+    expect(healed.facts).toMatchObject({ rejected_full: 7, rejected_tenant_cap: 3, max_per_tenant: 1_600, gateway_sink_failures: 2 });
+    // rent friskt system: ingen «tidligere avvik»-setning
+    const clean = (await policies(() => ({ gateway: gatewayStats(), sink: sinkStats() }))).find((i) => i.id === "policy_audit")!;
+    expect(clean.status).toBe("OK");
+    expect(clean.detail_no).not.toContain("Tidligere avvik");
+    // aktuelle avvik: degraded (nylig avvisning/feil) og full kø gir WARN, og tenant-taket vises
+    const degraded = (await policies(() => ({ gateway: gatewayStats({ sink_rejected: 1 }), sink: sinkStats({ rejected_tenant_cap: 1, degraded: true }) }))).find((i) => i.id === "policy_audit")!;
+    expect(degraded.status).toBe("WARN");
+    expect(degraded.detail_no).toContain("1 avvist av tenant-taket");
+    const full = (await policies(() => ({ gateway: gatewayStats(), sink: sinkStats({ pressure: "full", queued: 2_000 }) }))).find((i) => i.id === "policy_audit")!;
+    expect(full.status).toBe("WARN");
+    // gatewayfeilen er gammel nok (utenfor vinduet) -> OK; akkurat innenfor vinduet -> WARN
+    const edgeOut = new Date(NOW.getTime() - 5 * 60_000).toISOString();
+    const edgeIn = new Date(NOW.getTime() - (5 * 60_000 - 1)).toISOString();
+    expect((await policies(() => ({ gateway: gatewayStats({ sink_failures: 1, last_failure_at: edgeOut }), sink: sinkStats() }))).find((i) => i.id === "policy_audit")!.status).toBe("OK");
+    expect((await policies(() => ({ gateway: gatewayStats({ sink_failures: 1, last_failure_at: edgeIn }), sink: sinkStats() }))).find((i) => i.id === "policy_audit")!.status).toBe("WARN");
+    // en ulesbar tidsstempel gir ikke et falskt WARN (tellerne vises uansett)
+    expect((await policies(() => ({ gateway: gatewayStats({ sink_failures: 1, last_failure_at: "ikke-en-dato" }), sink: sinkStats() }))).find((i) => i.id === "policy_audit")!.status).toBe("OK");
   });
 
   it("registerControlCenters videresender policyAudit kun når den finnes", async () => {

@@ -165,6 +165,9 @@ export interface AuthorityCenterDeps {
 
 const kr = (ore: number): string => `${Math.round(ore / 100)} kr`;
 
+/** Vinduet (5 min, samme som sinkens `degraded`) en journal-feil regnes som AKTUELL for Autoritet-senteret. */
+const POLICY_AUDIT_RECENT_MS = 5 * 60_000;
+
 export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterDefinition {
   return {
     id: "authority",
@@ -514,16 +517,20 @@ export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterD
           policyItems.push(controlItem({ id: "policy_audit", label: "Varig policy-journal", status: "UNKNOWN", detail_no: "Statusen kan ikke leses.", facts: {} }));
         } else {
           const { gateway: g, sink: k } = audit;
-          const lost = k.rejected_full + k.rejected_invalid + g.sink_failures + g.sink_rejected;
-          const status = k.degraded || k.pressure === "full" ? "WARN" : lost > 0 ? "WARN" : "OK";
+          // Review L4: statusen følger det AKTUELLE bildet, ikke livstidstellerne. Tidligere ga ENHVER avvisning siden oppstart `WARN` helt til neste omstart - en forbigående kø-overflyt for en uke siden skjulte om journalen
+          // fungerer NÅ. `k.degraded` = siste skriving feilet eller noe ble avvist de siste 5 minuttene; en sink-feil i gatewayen vurderes på samme vindu. Historikken beholdes i teksten og tellerne, ikke i statusen.
+          const lost = k.rejected_full + k.rejected_tenant_cap + k.rejected_invalid + g.sink_failures + g.sink_rejected;
+          const gatewayFailedAt = g.last_failure_at === null ? Number.NaN : Date.parse(g.last_failure_at);
+          const recentGatewayFailure = Number.isFinite(gatewayFailedAt) && nowMs - gatewayFailedAt < POLICY_AUDIT_RECENT_MS;
+          const status = k.degraded || k.pressure === "full" || recentGatewayFailure ? "WARN" : "OK";
           policyItems.push(controlItem({
             id: "policy_audit", label: "Varig policy-journal", status,
             detail_no: status === "OK"
-              ? `PÅ: hver policy-avgjørelse skrives til databasen (${k.written} skrevet siden oppstart, ${k.queued} i kø).`
-              : `PÅ, men svekket: ${k.queued} i kø (${k.pressure}), ${k.rejected_full} avvist fordi køen var full, ${k.flush_failures} mislykkede skrivinger${k.last_failure ? ` (${k.last_failure})` : ""}. Avgjørelsene er uendret - men noen er ikke journalført.`,
+              ? `PÅ: hver policy-avgjørelse skrives til databasen (${k.written} skrevet siden oppstart, ${k.queued} i kø).${lost > 0 ? ` Tidligere avvik siden oppstart (nå friskmeldt): ${lost} avgjørelser ble ikke journalført.` : ""}`
+              : `PÅ, men svekket: ${k.queued} i kø (${k.pressure}), ${k.rejected_full} avvist fordi køen var full, ${k.rejected_tenant_cap} avvist av tenant-taket, ${k.flush_failures} mislykkede skrivinger${k.last_failure ? ` (${k.last_failure})` : ""}. Avgjørelsene er uendret - men noen er ikke journalført.`,
             facts: {
-              queued: k.queued, max_queue: k.max_queue, pressure: k.pressure, written: k.written, rejected_full: k.rejected_full, rejected_invalid: k.rejected_invalid,
-              skipped_unattributable: k.skipped_unattributable, flush_failures: k.flush_failures, consecutive_failures: k.consecutive_failures, last_failure: k.last_failure,
+              queued: k.queued, max_queue: k.max_queue, max_per_tenant: k.max_per_tenant, pressure: k.pressure, written: k.written, rejected_full: k.rejected_full, rejected_tenant_cap: k.rejected_tenant_cap,
+              rejected_invalid: k.rejected_invalid, skipped_unattributable: k.skipped_unattributable, flush_failures: k.flush_failures, consecutive_failures: k.consecutive_failures, last_failure: k.last_failure,
               gateway_sink_failures: g.sink_failures, gateway_sink_rejected: g.sink_rejected
             },
             ...(k.last_written_at ? { observed_at: k.last_written_at } : {})

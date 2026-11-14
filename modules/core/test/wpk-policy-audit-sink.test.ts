@@ -276,7 +276,7 @@ describe("B: sinken skriver en avgjørelse fra den ekte PolicyGateway - korreler
 
 describe("C: begrenset kø med mottrykk - minnet vokser aldri, feil er telt", () => {
   it("full kø avviser nye hendelser (write -> false), PolicyGateway teller det som sink_rejected, og avgjørelsen er uendret", async () => {
-    const sink = sinkOn(app, { maxQueue: 5 });
+    const sink = sinkOn(app, { maxQueue: 5, maxPerTenant: 5 }); // tenant-taket er egen test (C2) - her er det den TOTALE køen som er full
     const policy = new PolicyGateway({ devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch: new KillSwitch(), auditSink: sink.write });
     const results = [];
     for (let i = 0; i < 8; i += 1) results.push(await policy.authorize({ identity: IDENT, toolCall: { tool_id: "calendar", action: "read_events", capability_class: "A", parameters: { i } } }));
@@ -291,7 +291,7 @@ describe("C: begrenset kø med mottrykk - minnet vokser aldri, feil er telt", ()
   it("køen er begrenset også under en lang databasenedetid: 5000 hendelser mot en død database gir aldri mer enn maxQueue i minnet", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const dead = { connect: async () => { throw Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432"), { code: "ECONNREFUSED" }); } } as unknown as pg.Pool;
-    const sink = sinkOn(dead, { maxQueue: 100 });
+    const sink = sinkOn(dead, { maxQueue: 100, maxPerTenant: 100 });
     let peak = 0;
     for (let i = 0; i < 5_000; i += 1) {
       sink.write(event());
@@ -301,6 +301,111 @@ describe("C: begrenset kø med mottrykk - minnet vokser aldri, feil er telt", ()
     expect(sink.stats()).toMatchObject({ queued: 100, rejected_full: 4_900 });
     await sink.flush();
     expect(sink.stats()).toMatchObject({ queued: 100, consecutive_failures: 1, last_failure: "Error:ECONNREFUSED", degraded: true });
+  });
+});
+
+describe("C2: tak per tenant i køen (review L4) - én tenant fortrenger aldri de andre", () => {
+  it("standard er 80 % av køen: en tenant som fyller sitt tak avvises (rejected_tenant_cap) mens de siste plassene er reservert andre tenanter", () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const sink = sinkOn(app, { maxQueue: 10 });
+    expect(sink.stats().max_per_tenant).toBe(8);
+    const noisy = Array.from({ length: 12 }, () => sink.write(event({ tenant_id: "t-b" })));
+    expect(noisy.filter(Boolean)).toHaveLength(8);
+    expect(sink.stats()).toMatchObject({ queued: 8, rejected_tenant_cap: 4, rejected_full: 0, degraded: true, pressure: "high" });
+    // eierens tenant er ikke fortrengt: de to reserverte plassene er ledige
+    expect(sink.write(event({ tenant_id: "t-a" }))).toBe(true);
+    expect(sink.write(event({ tenant_id: "t-a" }))).toBe(true);
+    expect(sink.stats()).toMatchObject({ queued: 10, pressure: "full" });
+    // nå er hele køen full: neste hendelse fra en tenant UNDER taket avvises som `rejected_full`, ikke som tenant-tak
+    expect(sink.write(event({ tenant_id: "t-a" }))).toBe(false);
+    expect(sink.stats()).toMatchObject({ rejected_full: 1, rejected_tenant_cap: 4 });
+  });
+
+  it("eierens rader havner i journalen selv om en annen tenant har fylt køen til taket (ekte Postgres)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const sink = sinkOn(app, { maxQueue: 10 });
+    for (let i = 0; i < 30; i += 1) sink.write(event({ tenant_id: "t-b", reason: "flood_b" }));
+    const owner = [event({ tenant_id: "t-a", reason: "owner_decision_1" }), event({ tenant_id: "t-a", reason: "owner_decision_2" })];
+    for (const e of owner) expect(sink.write(e)).toBe(true);
+    await sink.flush();
+    const ids = (await rowsAs("t-a")).map((r) => r["decision_id"]);
+    for (const e of owner) expect(ids).toContain(e.decision_id);
+    expect(sink.stats()).toMatchObject({ queued: 0, written: 10, rejected_tenant_cap: 22 });
+  });
+
+  it("taket frigjøres når køen skrives ut (tellerne følger køen), også etter en giftig rad som kastes", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const sink = sinkOn(app, { maxQueue: 100, maxPerTenant: 3 });
+    for (let i = 0; i < 3; i += 1) expect(sink.write(event({ tenant_id: "t-b" }))).toBe(true);
+    expect(sink.write(event({ tenant_id: "t-b" }))).toBe(false);
+    await sink.flush();
+    for (let i = 0; i < 3; i += 1) expect(sink.write(event({ tenant_id: "t-b" }))).toBe(true); // tellerne er nullstilt av utskrivingen
+    expect(sink.write(event({ tenant_id: "t-b" }))).toBe(false);
+    await sink.flush();
+
+    // giftig rad (permanent avvist av databasen) forlater køen uten å bli skrevet - taket skal likevel frigjøres
+    const client = {
+      async query(sql: string, params?: unknown[]) {
+        if (!/INSERT INTO policy_decisions/.test(sql)) return { rows: [], rowCount: 0 };
+        const ids = (params?.[1] as string[]) ?? [];
+        if (ids.includes("d-poison-cap-01")) throw Object.assign(new Error("check violation"), { code: "23514" });
+        return { rows: [], rowCount: ids.length };
+      },
+      release() { /* noop */ }
+    };
+    const poisoned = sinkOn({ connect: async () => client } as unknown as pg.Pool, { maxQueue: 100, maxPerTenant: 2 });
+    poisoned.write(event({ decision_id: "d-poison-cap-01" }));
+    poisoned.write(event({ decision_id: "d-good-cap-0001" }));
+    expect(poisoned.write(event())).toBe(false);
+    await poisoned.flush();
+    expect(poisoned.stats()).toMatchObject({ queued: 0, written: 1, rejected_invalid: 1 });
+    expect(poisoned.write(event())).toBe(true);
+    expect(poisoned.write(event())).toBe(true);
+    expect(poisoned.write(event())).toBe(false);
+  });
+
+  it("mot en død database holdes tenant-tellerne uendret (hendelsene ligger i køen): taket gjelder fortsatt, og minnet er avgrenset", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const dead = { connect: async () => { throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }); } } as unknown as pg.Pool;
+    const sink = sinkOn(dead, { maxQueue: 20, maxPerTenant: 5 });
+    for (let i = 0; i < 5; i += 1) sink.write(event({ tenant_id: "t-b" }));
+    await sink.flush();
+    expect(sink.stats()).toMatchObject({ queued: 5, consecutive_failures: 1 });
+    expect(sink.write(event({ tenant_id: "t-b" }))).toBe(false);
+    expect(sink.write(event({ tenant_id: "t-a" }))).toBe(true);
+  });
+
+  it("taket klemmes til 1..maxQueue, og logglinjen er strupet og har kun tellere + tenant-id (aldri hendelsesinnhold)", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    expect(sinkOn(app, { maxQueue: 10, maxPerTenant: 0 }).stats().max_per_tenant).toBe(1);
+    expect(sinkOn(app, { maxQueue: 10, maxPerTenant: 999 }).stats().max_per_tenant).toBe(10);
+    expect(sinkOn(app, { maxQueue: 1 }).stats().max_per_tenant).toBe(1);
+    const sink = sinkOn(app, { maxQueue: 10, maxPerTenant: 1 });
+    for (let i = 0; i < 6; i += 1) sink.write(event({ tenant_id: "t-b", reason: "fake-private-reason-text-for-test" }));
+    const lines = errors.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("policy_audit_sink_tenant_cap"));
+    expect(lines).toHaveLength(1); // strupet
+    expect(JSON.parse(lines[0]!)).toMatchObject({ msg: "policy_audit_sink_tenant_cap", tenant_id: "t-b", max_per_tenant: 1, rejected_tenant_cap: 1 });
+    expect(lines[0]).not.toContain("fake-private-reason-text-for-test");
+  });
+
+  it("avvisning telles som AKTUELT problem i 5 minutter (degraded) og nullstilles så - livstidstellerne består (review L4)", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-14T12:00:00.000Z"));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const sink = sinkOn(app, { maxQueue: 100, maxPerTenant: 1 });
+    expect(sink.stats().degraded).toBe(false);
+    sink.write(event({ tenant_id: "t-b" }));
+    sink.write(event({ tenant_id: "t-b" })); // avvist av taket
+    expect(sink.stats()).toMatchObject({ degraded: true, rejected_tenant_cap: 1 });
+    vi.setSystemTime(new Date("2026-11-14T12:04:59.000Z"));
+    expect(sink.stats().degraded).toBe(true);
+    vi.setSystemTime(new Date("2026-11-14T12:05:01.000Z"));
+    expect(sink.stats()).toMatchObject({ degraded: false, rejected_tenant_cap: 1 });
+    // ugyldige hendelser (dårlig `decision`) er også et aktuelt, men tidsavgrenset, avvik
+    expect(sink.write(event({ decision: "MAYBE" as never }))).toBe(false);
+    expect(sink.stats()).toMatchObject({ degraded: true, rejected_invalid: 1 });
+    vi.setSystemTime(new Date("2026-11-14T12:10:02.000Z"));
+    expect(sink.stats()).toMatchObject({ degraded: false, rejected_invalid: 1 });
   });
 });
 
@@ -454,9 +559,23 @@ describe("F: konfigurasjon og oppstart (AV som standard)", () => {
     expect(policyAuditSinkConfigFromEnv({ JARVIS_POLICY_AUDIT_SINK: "off" }).mode).toBe("off");
     expect(policyAuditSinkConfigFromEnv({ JARVIS_POLICY_AUDIT_SINK: " DB " }).mode).toBe("db");
     expect(policyAuditSinkConfigFromEnv({ JARVIS_POLICY_AUDIT_SINK: "true" })).toMatchObject({ mode: "off", unknownValue: "true" });
-    expect(policyAuditSinkConfigFromEnv({ JARVIS_POLICY_AUDIT_QUEUE_MAX: "500", JARVIS_POLICY_AUDIT_RETENTION_DAYS: "45" })).toMatchObject({ maxQueue: 500, retentionDays: 45 });
-    expect(() => policyAuditSinkConfigFromEnv({ JARVIS_POLICY_AUDIT_RETENTION_DAYS: "7" })).toThrow(/JARVIS_POLICY_AUDIT_RETENTION_DAYS/);
-    expect(() => policyAuditSinkConfigFromEnv({ JARVIS_POLICY_AUDIT_QUEUE_MAX: "5" })).toThrow(/JARVIS_POLICY_AUDIT_QUEUE_MAX/);
+    expect(policyAuditSinkConfigFromEnv({ JARVIS_POLICY_AUDIT_SINK: "db", JARVIS_POLICY_AUDIT_QUEUE_MAX: "500", JARVIS_POLICY_AUDIT_RETENTION_DAYS: "45" })).toMatchObject({ mode: "db", maxQueue: 500, retentionDays: 45 });
+  });
+
+  it("review L2: størrelsene VALIDERES kun når journalen er PÅ - med flagget AV (eller ukjent verdi) stopper en feilskrevet verdi aldri oppstarten", () => {
+    const bad = { JARVIS_POLICY_AUDIT_QUEUE_MAX: "abc", JARVIS_POLICY_AUDIT_RETENTION_DAYS: "7" };
+    for (const sink of [undefined, "", "off", "false", "yes"]) {
+      const env = { ...bad, ...(sink === undefined ? {} : { JARVIS_POLICY_AUDIT_SINK: sink }) };
+      expect(() => policyAuditSinkConfigFromEnv(env), String(sink)).not.toThrow();
+      expect(policyAuditSinkConfigFromEnv(env), String(sink)).toMatchObject({ mode: "off", maxQueue: 2_000, retentionDays: 90 });
+    }
+    expect(() => policyAuditSinkConfigFromEnv({ JARVIS_POLICY_AUDIT_SINK: "db", JARVIS_POLICY_AUDIT_RETENTION_DAYS: "7" })).toThrow(/JARVIS_POLICY_AUDIT_RETENTION_DAYS/);
+    expect(() => policyAuditSinkConfigFromEnv({ JARVIS_POLICY_AUDIT_SINK: "db", JARVIS_POLICY_AUDIT_QUEUE_MAX: "5" })).toThrow(/JARVIS_POLICY_AUDIT_QUEUE_MAX/);
+    expect(() => policyAuditSinkConfigFromEnv({ JARVIS_POLICY_AUDIT_SINK: "db", JARVIS_POLICY_AUDIT_QUEUE_MAX: "abc" })).toThrow(/JARVIS_POLICY_AUDIT_QUEUE_MAX/);
+    // oppstartsveien: AV + ugyldig verdi gir `null` (ingen sink) uten å kaste; PÅ + ugyldig verdi feiler høyt
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    expect(createPolicyAuditSinkFromEnv(app, bad)).toBeNull();
+    expect(() => createPolicyAuditSinkFromEnv(app, { ...bad, JARVIS_POLICY_AUDIT_SINK: "db" })).toThrow(/JARVIS_POLICY_AUDIT/);
   });
 
   it("createPolicyAuditSinkFromEnv: AV gir null (ingen sink, ingen timer, ingen skriving); PÅ gir en sink; ukjent verdi logges", () => {
@@ -487,5 +606,45 @@ describe("F: konfigurasjon og oppstart (AV som standard)", () => {
     again();
     expect(proc.listenerCount("SIGTERM")).toBe(0);
     remove();
+  });
+
+  it("review L5: kill() som kaster gir ingen ubehandlet avvisning, og prosessen avsluttes direkte med standard signal-exitkode i stedet for å ignorere signalet for alltid", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const unhandled: unknown[] = [];
+    const listener = (reason: unknown): void => { unhandled.push(reason); };
+    process.on("unhandledRejection", listener);
+    try {
+      for (const [signal, code] of [["SIGTERM", 143], ["SIGINT", 130]] as const) {
+        const exits: number[] = [];
+        const sink = { drain: async () => ({ remaining: 0 }), close: () => undefined };
+        const proc = Object.assign(new EventEmitter(), {
+          pid: 4243, kill: (() => { throw Object.assign(new Error("kill EPERM"), { code: "EPERM" }); }) as never, exit: ((c?: number) => { exits.push(c ?? 0); }) as never
+        });
+        installPolicyAuditDrain(sink, { proc: proc as never, timeoutMs: 50 });
+        proc.emit(signal);
+        await vi.waitFor(() => expect(exits).toEqual([code]));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toEqual([]);
+      const line = errors.mock.calls.map((c) => String(c[0])).find((l) => l.includes("policy_audit_drain_kill_failed"))!;
+      expect(JSON.parse(line)).toMatchObject({ msg: "policy_audit_drain_kill_failed", signal: "SIGTERM", error: "Error:EPERM" });
+    } finally {
+      process.off("unhandledRejection", listener);
+    }
+  });
+
+  it("review L5: close() som kaster hindrer ikke at signalet sendes på nytt; manglende exit() på prosessobjektet er ikke en feil", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const calls: string[] = [];
+    const sink = { drain: async () => ({ remaining: 0 }), close: () => { calls.push("close"); throw new Error("close feilet"); } };
+    const proc = Object.assign(new EventEmitter(), { pid: 4244, kill: ((pid: number, signal: string) => { calls.push(`kill:${pid}:${signal}`); return true; }) as never });
+    installPolicyAuditDrain(sink, { proc: proc as never, timeoutMs: 50 });
+    proc.emit("SIGTERM");
+    await vi.waitFor(() => expect(calls).toEqual(["close", "kill:4244:SIGTERM"]));
+    // kill kaster og det finnes ingen exit(): ingen krasj
+    const bare = Object.assign(new EventEmitter(), { pid: 4245, kill: (() => { throw new Error("nei"); }) as never });
+    installPolicyAuditDrain({ drain: async () => ({ remaining: 0 }), close: () => undefined }, { proc: bare as never, timeoutMs: 50 });
+    bare.emit("SIGINT");
+    await new Promise((resolve) => setTimeout(resolve, 30));
   });
 });

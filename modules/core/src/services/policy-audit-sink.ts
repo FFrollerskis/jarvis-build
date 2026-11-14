@@ -12,6 +12,8 @@ import { scanForSecrets } from "./secret-scan.ts";
  * KONTRAKT (testet i `wpk-policy-audit-sink.test.ts` mot ekte Postgres):
  *  - `write()` er SYNKRON, kaster ALDRI og blokkerer aldri en avgjørelse: hendelsen legges i en BEGRENSET kø og skrives av en bakgrunns-flusher i batcher (én transaksjon per tenant).
  *  - MOTTRYKK: en full kø AVVISER nye hendelser (`write()` svarer `false`, `rejected_full` telles og logges strupet). Køen vokser aldri utover `maxQueue` - minnet er avgrenset uansett hvor lenge databasen er nede.
+ *    TAK PER TENANT (review L4): én tenant kan aldri ha mer enn `maxPerTenant` (standard 80 % av `maxQueue`) hendelser i køen samtidig - de siste 20 % er reservert for ALLE ANDRE tenanter, så en støyende/løpsk
+ *    tenant ikke kan fortrenge eierens avgjørelser fra journalen. En hendelse som avvises av taket telles som `rejected_tenant_cap` (og gjør journalen `degraded`, som all annen avvisning).
  *  - FEIL: en transient feil (database nede, tidsavbrudd, manglende tabell) beholder batchen i køen og prøver igjen med eksponentiell backoff; en PERMANENT feil på én rad (22xxx/23xxx: ugyldige data, ukjent tenant)
  *    isoleres rad for rad slik at én giftig rad aldri blokkerer resten (den kastes og telles som `rejected_invalid`). Innsettingen er idempotent (`ON CONFLICT DO NOTHING`), så en retry etter et uklart utfall dupliserer aldri.
  *  - AVGJØRELSEN ER ALDRI AVHENGIG AV SINKEN: se `PolicyGateway.emit()` - en kastet/avvist/falsk sink endrer aldri ALLOW/DENY. Feil her er TELT (`stats()`) og synlige (strupet logg + Autoritet-senteret), aldri stille.
@@ -32,6 +34,10 @@ export interface PolicyAuditSinkStats {
   written: number;
   /** Mottrykk: køen var full - hendelsen ble IKKE journalført (avgjørelsen er uendret). */
   rejected_full: number;
+  /** Tenant-taket (`max_per_tenant`) var nådd - hendelsen ble IKKE journalført, så andre tenanter ikke fortrenges (avgjørelsen er uendret). */
+  rejected_tenant_cap: number;
+  /** Tak for hvor mange hendelser ÉN tenant kan ha i køen samtidig. */
+  max_per_tenant: number;
   /** Kunne ikke journalføres: ugyldig form eller permanent avvist av databasen (22xxx/23xxx). */
   rejected_invalid: number;
   /** Ingen gyldig tenant (ugyldig identitet) - ikke journalført, ingen tenant å skrive under. */
@@ -43,7 +49,7 @@ export interface PolicyAuditSinkStats {
   /** Sikker etikett: SQLSTATE/feilkode eller maskinkode, aldri fri feiltekst. */
   last_failure: string | null;
   last_written_at: string | null;
-  /** `true` når siste flush feilet eller køen har avvist hendelser de siste 5 minuttene. */
+  /** `true` når siste flush feilet eller køen har avvist/kastet hendelser de siste 5 minuttene (AKTUELT problem - livstidstellerne over er historikk). */
   degraded: boolean;
 }
 
@@ -51,6 +57,8 @@ export interface PgPolicyAuditSinkOptions {
   pool: pg.Pool;
   /** Største antall hendelser i køen. Full kø = mottrykk (nye hendelser avvises og telles). Standard 2000. */
   maxQueue?: number;
+  /** Største antall hendelser ÉN tenant kan ha i køen samtidig (review L4). Standard 80 % av `maxQueue` (minst 1): resten er reservert andre tenanter. Sett lik `maxQueue` for å slå taket av. */
+  maxPerTenant?: number;
   /** Største antall hendelser per flush-runde (grupperes per tenant). Standard 200. */
   batchSize?: number;
   /** Ventetid før en ny hendelse skrives (samler en batch). Standard 500 ms. */
@@ -178,6 +186,7 @@ const INSERT_SQL = `
 export class PgPolicyAuditSink {
   private readonly pool: pg.Pool;
   private readonly maxQueue: number;
+  private readonly maxPerTenant: number;
   private readonly batchSize: number;
   private readonly flushIntervalMs: number;
   private readonly maxBackoffMs: number;
@@ -187,12 +196,15 @@ export class PgPolicyAuditSink {
   private readonly clock: () => Date;
 
   private queue: PolicyDecisionRow[] = [];
+  /** Antall hendelser per tenant som ligger i køen nå (for tenant-taket). Holdes i takt med `queue`. */
+  private readonly queuedByTenant = new Map<string, number>();
   private timer: NodeJS.Timeout | undefined;
   private flushing: Promise<void> | null = null;
   private closed = false;
 
   private written = 0;
   private rejectedFull = 0;
+  private rejectedTenantCap = 0;
   private rejectedInvalid = 0;
   private skippedUnattributable = 0;
   private flushFailures = 0;
@@ -207,6 +219,7 @@ export class PgPolicyAuditSink {
   constructor(options: PgPolicyAuditSinkOptions) {
     this.pool = options.pool;
     this.maxQueue = Math.max(1, Math.trunc(options.maxQueue ?? 2_000));
+    this.maxPerTenant = Math.min(this.maxQueue, Math.max(1, Math.trunc(options.maxPerTenant ?? Math.ceil(this.maxQueue * 0.8))));
     this.batchSize = Math.max(1, Math.trunc(options.batchSize ?? 200));
     this.flushIntervalMs = Math.max(0, Math.trunc(options.flushIntervalMs ?? 500));
     this.maxBackoffMs = Math.max(this.flushIntervalMs, Math.trunc(options.maxBackoffMs ?? 30_000));
@@ -233,6 +246,7 @@ export class PgPolicyAuditSink {
       }
       if (row === "invalid") {
         this.rejectedInvalid += 1;
+        this.lastRejectedAtMs = Date.now();
         return false;
       }
       if (this.queue.length >= this.maxQueue) {
@@ -241,12 +255,22 @@ export class PgPolicyAuditSink {
         this.logThrottled("policy_audit_sink_overflow", { rejected_full: this.rejectedFull, queued: this.queue.length });
         return false;
       }
+      const tenantQueued = this.queuedByTenant.get(row.tenant_id) ?? 0;
+      if (tenantQueued >= this.maxPerTenant) {
+        // Review L4: én tenant fyller aldri hele køen - de siste plassene er reservert andre tenanter (eierens avgjørelser fortrenges ikke av en støyende tenant).
+        this.rejectedTenantCap += 1;
+        this.lastRejectedAtMs = Date.now();
+        this.logThrottled("policy_audit_sink_tenant_cap", { tenant_id: row.tenant_id, tenant_queued: tenantQueued, max_per_tenant: this.maxPerTenant, rejected_tenant_cap: this.rejectedTenantCap, queued: this.queue.length });
+        return false;
+      }
       this.queue.push(row);
+      this.queuedByTenant.set(row.tenant_id, tenantQueued + 1);
       this.schedule(this.queue.length >= this.batchSize ? 0 : this.flushIntervalMs);
       return true;
     } catch {
       // `write()` kaster ALDRI (en sink-feil skal aldri kunne endre en policy-avgjørelse).
       this.rejectedInvalid += 1;
+      this.lastRejectedAtMs = Date.now();
       return false;
     }
   };
@@ -260,6 +284,8 @@ export class PgPolicyAuditSink {
       pressure: this.queue.length >= this.maxQueue ? "full" : ratio >= 0.8 ? "high" : ratio >= 0.5 ? "elevated" : "ok",
       written: this.written,
       rejected_full: this.rejectedFull,
+      rejected_tenant_cap: this.rejectedTenantCap,
+      max_per_tenant: this.maxPerTenant,
       rejected_invalid: this.rejectedInvalid,
       skipped_unattributable: this.skippedUnattributable,
       flush_failures: this.flushFailures,
@@ -325,7 +351,7 @@ export class PgPolicyAuditSink {
         }
         for (const [tenant, rows] of byTenant) {
           const done = await this.writeGroup(tenant, rows);
-          this.queue = this.queue.filter((r) => !done.has(r));
+          this.removeFromQueue(done);
           if (done.size < rows.length) {
             // transient feil: resten ligger igjen i køen og forsøkes på nytt etter backoff
             this.afterFailure();
@@ -341,6 +367,17 @@ export class PgPolicyAuditSink {
     }
   }
 
+  /** Fjerner ferdige rader fra køen og holder per-tenant-tellerne i takt. */
+  private removeFromQueue(done: Set<PolicyDecisionRow>): void {
+    if (done.size === 0) return;
+    this.queue = this.queue.filter((r) => !done.has(r));
+    for (const row of done) {
+      const left = (this.queuedByTenant.get(row.tenant_id) ?? 0) - 1;
+      if (left > 0) this.queuedByTenant.set(row.tenant_id, left);
+      else this.queuedByTenant.delete(row.tenant_id);
+    }
+  }
+
   /** Skriver én tenant-gruppe. Returnerer radene som er ferdige (skrevet ELLER kastet som ugyldige); resten må forsøkes igjen. */
   private async writeGroup(tenant: string, rows: PolicyDecisionRow[]): Promise<Set<PolicyDecisionRow>> {
     try {
@@ -352,6 +389,7 @@ export class PgPolicyAuditSink {
       if (!isPerRowError(err) || rows.length === 1) {
         if (isPerRowError(err)) {
           this.rejectedInvalid += 1;
+          this.lastRejectedAtMs = Date.now();
           this.logThrottled("policy_audit_sink_row_rejected", { reason: safeLabel(err) });
           return new Set(rows);
         }
@@ -369,6 +407,7 @@ export class PgPolicyAuditSink {
         } catch (single) {
           if (isPerRowError(single)) {
             this.rejectedInvalid += 1;
+            this.lastRejectedAtMs = Date.now();
             this.logThrottled("policy_audit_sink_row_rejected", { reason: safeLabel(single) });
             done.add(row);
           } else {
@@ -446,14 +485,25 @@ export interface PolicyAuditSinkConfig {
   unknownValue: string | null;
 }
 
-/** Leser flagget. Kun eksakt `db` (uavhengig av store/små bokstaver) slår på; alt annet er AV (en ukjent verdi meldes, aldri stille). Blank = usatt. */
+const DEFAULT_QUEUE_MAX = 2_000;
+const DEFAULT_RETENTION_DAYS = 90;
+
+/**
+ * Leser flagget. Kun eksakt `db` (uavhengig av store/små bokstaver) slår på; alt annet er AV (en ukjent verdi meldes, aldri stille). Blank = usatt.
+ *
+ * Review L2: `JARVIS_POLICY_AUDIT_QUEUE_MAX`/`_RETENTION_DAYS` VALIDERES (og kaster ved ugyldig verdi) KUN når journalen er PÅ. Med flagget AV er funksjonen dormant og må være byte-identisk med før WP-K:
+ * en feilskrevet verdi for en funksjon som ikke brukes skal aldri stoppe oppstarten av api/worker. AV gir standardverdiene (som ingen leser).
+ */
 export function policyAuditSinkConfigFromEnv(env: Record<string, string | undefined> = process.env): PolicyAuditSinkConfig {
   const raw = (env["JARVIS_POLICY_AUDIT_SINK"] ?? "").trim().toLowerCase();
+  const mode = raw === "db" ? "db" : "off";
+  const unknownValue = raw === "" || raw === "db" || raw === "off" ? null : raw.slice(0, 20);
+  if (mode !== "db") return { mode, maxQueue: DEFAULT_QUEUE_MAX, retentionDays: DEFAULT_RETENTION_DAYS, unknownValue };
   return {
-    mode: raw === "db" ? "db" : "off",
-    maxQueue: envInt("JARVIS_POLICY_AUDIT_QUEUE_MAX", 2_000, { min: 100, max: 50_000 }, env),
-    retentionDays: envInt("JARVIS_POLICY_AUDIT_RETENTION_DAYS", 90, { min: 30, max: 3_650 }, env),
-    unknownValue: raw === "" || raw === "db" || raw === "off" ? null : raw.slice(0, 20)
+    mode,
+    maxQueue: envInt("JARVIS_POLICY_AUDIT_QUEUE_MAX", DEFAULT_QUEUE_MAX, { min: 100, max: 50_000 }, env),
+    retentionDays: envInt("JARVIS_POLICY_AUDIT_RETENTION_DAYS", DEFAULT_RETENTION_DAYS, { min: 30, max: 3_650 }, env),
+    unknownValue
   };
 }
 
@@ -478,7 +528,7 @@ export function createPolicyAuditSinkFromEnv(
  */
 export function installPolicyAuditDrain(
   sink: Pick<PgPolicyAuditSink, "drain" | "close">,
-  options: { timeoutMs?: number; proc?: Pick<NodeJS.Process, "once" | "off" | "kill" | "pid"> } = {}
+  options: { timeoutMs?: number; proc?: Pick<NodeJS.Process, "once" | "off" | "kill" | "pid"> & { exit?: (code?: number) => unknown } } = {}
 ): () => void {
   const proc = options.proc ?? process;
   const timeoutMs = options.timeoutMs ?? 3_000;
@@ -489,8 +539,17 @@ export function installPolicyAuditDrain(
     const handler = (): void => {
       remove();
       void sink.drain(timeoutMs).catch(() => ({ remaining: -1 })).finally(() => {
-        sink.close();
-        proc.kill(proc.pid, signal); // standard avslutning (uendret exit-status) nå som køen er forsøkt skrevet
+        // Review L5: INGENTING her kan kaste ut av løftekjeden (en ubehandlet avvisning ved nedstenging), og et mislykket `kill` skal ikke gjøre at prosessen ignorerer SIGTERM for alltid - lytteren er allerede fjernet,
+        // så standardhandlingen er borte. Da logges det og prosessen avsluttes direkte med standard signal-exitkode (128 + signalnummer).
+        try {
+          sink.close();
+        } catch { /* close() er best-effort */ }
+        try {
+          proc.kill(proc.pid, signal); // standard avslutning (uendret exit-status) nå som køen er forsøkt skrevet
+        } catch (err) {
+          console.error(JSON.stringify({ msg: "policy_audit_drain_kill_failed", signal, error: safeLabel(err) }));
+          try { proc.exit?.(signal === "SIGINT" ? 130 : 143); } catch { /* ingenting mer å gjøre */ }
+        }
       });
     };
     handlers.set(signal, handler);
