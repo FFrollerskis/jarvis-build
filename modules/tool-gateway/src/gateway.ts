@@ -5,6 +5,7 @@ import { withTenantTransaction, writeAudit } from "@jarvis/core";
 import { UnsafeVendorUrlError, guardedFetch } from "./url-safety.ts";
 import { currentCallSignal, detachFromCallSignal, invokeWithCallSignal } from "./call-signal.ts";
 import { assessClassDPipeline, isClassDExempt, isNotFoundError, ownerStepUpDenial, type ClassDNotifier, type ClassDPipelineOptions } from "./class-d-pipeline.ts";
+import { isIndeterminateTransportError, transportErrorKind } from "./transport-errors.ts";
 import { isSelfRecoveryAction, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
 
 /**
@@ -510,6 +511,15 @@ export const OUTCOME_UNKNOWN_PREFIX = "outcome_unknown";
 
 export function isOutcomeUnknownMessage(message: string): boolean {
   return message === "tool_timeout" || message.startsWith(OUTCOME_UNKNOWN_PREFIX);
+}
+
+/**
+ * WP-K (review M1): klasse C/D-mutasjoner som IKKE er idempotente hos leverandøren (`idempotent_external: false`). En uavklart transportfeil (`TimeoutError`/`AbortError`, nullstilt socket etter sending, `fetch failed`)
+ * betyr at leverandøren KAN ha utført mutasjonen - da er utfallet ukjent (`unverified`), aldri `failed`, ellers re-armer et samme-nøkkel-replay raden og sender POST-en en gang til. Klasse A (lesing) har ingen ledger,
+ * idempotente mutasjoner tåler en retry, og klasse B (intern/reversibel bokføring og varsler) er bevisst utenfor (se runbook).
+ */
+function mayDuplicateOnRetry(definition: Pick<ToolDefinition, "capability_class" | "idempotent_external">): boolean {
+  return (definition.capability_class === "C" || definition.capability_class === "D") && definition.idempotent_external === false;
 }
 
 /** Årsakskoder fra en validator havner i avslagsårsaken og audit - kun et trygt tegnsett og en kort lengde. */
@@ -1093,12 +1103,15 @@ export class ToolGateway {
         definition.timeout_ms
       );
     } catch (err) {
-      const message = (err as Error).message;
+      const raw = (err as Error).message;
       // WP-F1: «utfall ukjent» = gateway-tidsavbrudd ELLER en transport som selv vet at leverandørkallet kan ha gått gjennom (`outcome_unknown:...`).
+      // Review M1: OG en uavklart transportfeil på en ikke-idempotent klasse C/D-mutasjon (feilformen avgjøres av `isIndeterminateTransportError`; DNS/tilkobling nektet/TLS beviser at ingenting ble sendt og forblir `failed`).
+      const transportUnknown = !isOutcomeUnknownMessage(raw) && mayDuplicateOnRetry(definition) && isIndeterminateTransportError(err);
+      const message = transportUnknown ? `${OUTCOME_UNKNOWN_PREFIX}:transport_${transportErrorKind(err)}` : raw;
       failure = { message, timedOut: isOutcomeUnknownMessage(message) };
       this.setHealth(request.tool_id,
-        /401|403|auth/.test(message) ? "auth_failed" : /429|rate/.test(message) ? "rate_limited" : "unavailable",
-        message.slice(0, 60));
+        /401|403|auth/.test(raw) ? "auth_failed" : /429|rate/.test(raw) ? "rate_limited" : "unavailable",
+        raw.slice(0, 60));
     }
 
     let afterState: JsonValue | null = null;
