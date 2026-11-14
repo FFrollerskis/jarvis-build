@@ -418,6 +418,15 @@ export class IncidentService {
     status: EvidenceStatus,
     input: AddEvidenceInput
   ): Promise<IncidentEvidence> {
+    // WP-K (D-471, JARVIS-068): en motsigelse peker på bevis i SAMME hendelse (og tenant). Tenant-FK-en (migrasjon 080) hindrer allerede en annen tenants rad, men ikke en annen HENDELSES
+    // bevis (heller ikke et annet minne-rom - FK-oppslag omgår RLS): «dette beviset motsier den andre hendelsens» ville ellers vært en stille, uforklart kobling i sannhetsregimet.
+    if (input.contradicts_evidence_id !== undefined) {
+      const target = await client.query(
+        `SELECT 1 FROM incident_evidence WHERE tenant_id = $1 AND incident_id = $2 AND evidence_id = $3`,
+        [incident.tenant_id, incident.incident_id, input.contradicts_evidence_id]
+      );
+      if (!target.rowCount) throw new Error("incident_evidence_contradiction_target_invalid");
+    }
     const evidence_id = `inc-ev-${randomUUID()}`;
     const { rows } = await client.query(
       `INSERT INTO incident_evidence
