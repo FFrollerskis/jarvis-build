@@ -1,6 +1,7 @@
 import { guardedFetch, isRetrySafeStatus } from "./url-safety.ts";
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolTransport } from "./gateway.ts";
+import { abortableSleep, throwIfAborted } from "./call-signal.ts";
 import { googleAccessToken } from "./live-transports.ts";
 
 /**
@@ -70,8 +71,9 @@ export class GceApiError extends Error {
   }
 }
 
+/** WP-K (D-471, JARVIS-018): avbrytes av gatewayens tidsavbrudd (kallsignalet) - ingen sovende retry-/poll-løkke etter at utfallet er meldt ukjent. */
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return abortableSleep(ms);
 }
 
 /** Tolerant JSON-parsing av Google sin generiske API-feilkonvolutt (`{error:{code,message,status}}`, SAMME form som `classifyGoogleAdsErrorBody`/Drive-feil andre steder i denne kodebasen). Avkortet (200 tegn), ALDRI rå kropp/headere videre. */
@@ -103,6 +105,8 @@ async function gceRequest(options: GceRequestOptions): Promise<JsonValue> {
   const url = `https://compute.googleapis.com/compute/${API_VERSION}/${options.path}`;
   let lastError: GceApiError | undefined;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    // WP-K: aldri et nytt forsøk (heller ikke ny `reset`/`stop`-POST etter 429) når kallet er avbrutt.
+    throwIfAborted();
     const response = await guardedFetch(url, {
       method: options.method,
       headers: { authorization: `Bearer ${options.accessToken}` }
@@ -135,6 +139,7 @@ interface GceOperation {
  */
 async function waitForOperation(projectId: string, zone: string, operationName: string, accessToken: string, pollIntervalMs: number): Promise<void> {
   for (let poll = 0; poll < MAX_OPERATION_POLLS; poll++) {
+    throwIfAborted();
     const operation = (await gceRequest({
       method: "GET",
       path: `projects/${projectId}/zones/${zone}/operations/${operationName}`,

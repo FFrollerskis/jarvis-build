@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   IdentityContextSchema,
   ToolCallSchema,
@@ -26,6 +27,16 @@ export interface AuthorizationResult {
    * som feiler en ortogonal port brenner dermed ikke engangs-noncen.
    */
   commit?: () => Promise<{ ok: true } | { ok: false; reason: string }>;
+  /**
+   * WP-K (D-471, JARVIS-054): ID-en til DENNE avgjørelsen (stemmer med `PolicyAuditEvent.decision_id`). Kalleren (Tool Gateway) skriver den inn i revisjonsraden handlingen førte til,
+   * slik at «hvilken policy-avgjørelse tillot/stoppet dette» kan slås opp i begge retninger. Utelatt av eldre/falske policy-implementasjoner (valgfri).
+   */
+  decision_id?: string;
+  /**
+   * WP-K: settes (på dette objektet) når `commit()` AVVISER - nonce-forbruket som feiler er en NY avgjørelse (DENY) i journalen, og revisjonsraden refererer til den, ikke til den foreløpige ALLOW-en.
+   * `commit()` sitt returformat er bevisst uendret.
+   */
+  commit_decision_id?: string;
 }
 
 export interface AuthorizationRequest {
@@ -35,11 +46,21 @@ export interface AuthorizationRequest {
   approval?: unknown;
   /** Utsett forbruk av godkjenningens nonce til kalleren kaller `commit()` (se `AuthorizationResult.commit`). */
   deferNonceConsumption?: boolean;
+  /**
+   * WP-K (D-471, JARVIS-054): oppgave-/spor-ID fra kalleren (jobb, planlagt kjøring, samtaletur). Følger avgjørelsen inn i `PolicyAuditEvent`, så et kall kan rekonstrueres på tvers av policy-
+   * journal og revisjonsrader. Aldri en identitet: dette er korrelasjon, ikke autoritet - ingen avgjørelse leser feltene.
+   */
+  correlation?: { task_id?: string; trace_id?: string };
 }
 
 /** Audit-hendelse fra Policy Gateway. Append-only sink; ekstern lagring fra fase 2. */
 export interface PolicyAuditEvent {
   at: string;
+  /** WP-K (D-471, JARVIS-054): unik ID per avgjørelse (UUID) - nøkkelen revisjonsraden og policy-journalen deler. */
+  decision_id: string;
+  /** WP-K: korrelasjon fra kalleren (valgfri; se `AuthorizationRequest.correlation`). */
+  task_id?: string;
+  trace_id?: string;
   decision: Decision;
   reason: string;
   person_id: string;
@@ -70,7 +91,13 @@ export interface PolicyGatewayOptions {
    */
   infraGate?: InfraExecutionGate;
   infraToolIds?: ReadonlySet<string>;
-  auditSink?: (event: PolicyAuditEvent) => void;
+  /**
+   * Varig revisjons-sink for hver avgjørelse. WP-K (D-471, JARVIS-053): en sink kan IKKE endre en avgjørelse - kaster den (eller et returnert løfte avvises), telles feilen (`auditStats().sink_failures`) og
+   * avgjørelsen returneres uendret; returnerer den `false` (full kø = mottrykk) telles det som `sink_rejected`. Se `PgPolicyAuditSink` (`@jarvis/core`) for den DB-baserte implementasjonen.
+   */
+  auditSink?: (event: PolicyAuditEvent) => void | boolean | PromiseLike<unknown>;
+  /** WP-K: ID-fabrikk for avgjørelser (standard `crypto.randomUUID`). Kun for deterministiske tester. */
+  newDecisionId?: () => string;
   /**
    * D-393 (JARVIS-053): øvre grense for den innebygde minne-journalen (`auditLog`) når INGEN `auditSink` er koblet til. Journalen var en
    * ubegrenset array i begge prosessene og vokste for hver eneste avgjørelse. Eldste hendelser forkastes først (ringbuffer); `auditDropped` teller dem.
@@ -90,12 +117,20 @@ export class PolicyGateway {
   private readonly nonces: NonceStore;
   private readonly killSwitch: KillSwitch;
   private readonly mandates: ReadonlySet<string>;
-  private readonly auditSink: (event: PolicyAuditEvent) => void;
+  private readonly auditSink: (event: PolicyAuditEvent) => void | boolean | PromiseLike<unknown>;
   private readonly clock: () => Date;
+  private readonly newDecisionId: () => string;
   readonly auditLog: PolicyAuditEvent[] = [];
   /** D-393: antall hendelser som er forkastet fra `auditLog` fordi grensen var nådd. */
   auditDropped = 0;
+  /** WP-K (JARVIS-053): hendelser en tilkoblet sink avviste (mottrykk: `false`) - avgjørelsen ble likevel levert uendret. */
+  private auditSinkRejected = 0;
+  /** WP-K (JARVIS-053): ganger en tilkoblet sink kastet/avviste - avgjørelsen ble likevel levert uendret. */
+  private auditSinkFailures = 0;
+  private lastSinkFailure: { at: string; message: string } | null = null;
+  private lastSinkFailureLogAt = 0;
   private readonly opts: PolicyGatewayOptions;
+  private readonly hasExternalSink: boolean;
 
   constructor(options: PolicyGatewayOptions) {
     this.opts = options;
@@ -104,6 +139,8 @@ export class PolicyGateway {
     this.killSwitch = options.killSwitch;
     this.mandates = options.mandates ?? new Set();
     this.clock = options.clock ?? (() => new Date());
+    this.newDecisionId = options.newDecisionId ?? randomUUID;
+    this.hasExternalSink = options.auditSink !== undefined;
     const maxInMemory = Math.max(1, options.maxInMemoryAudit ?? 5_000);
     this.auditSink = options.auditSink ?? ((event) => {
       this.auditLog.push(event);
@@ -260,16 +297,19 @@ export class PolicyGateway {
     };
     if (request.deferNonceConsumption === true) {
       const decided = this.finish(request, "ALLOW", "class_d_valid_signed_approval_pending_commit");
-      return {
+      const pending: AuthorizationResult = {
         ...decided,
         commit: async () => {
           const result = await consume();
           if (!result.ok) {
-            this.finish(request, "DENY", result.reason);
+            // En feilet nonce-forbruk er en NY avgjørelse (DENY) i journalen - ID-en gjøres tilgjengelig så revisjonsraden refererer til den.
+            const denied = this.finish(request, "DENY", result.reason);
+            if (denied.decision_id !== undefined) pending.commit_decision_id = denied.decision_id;
           }
           return result;
         }
       };
+      return pending;
     }
     const consumed = await consume();
     if (!consumed.ok) {
@@ -279,8 +319,14 @@ export class PolicyGateway {
   }
 
   private finish(request: AuthorizationRequest, decision: Decision, reason: string): AuthorizationResult {
-    this.auditSink({
+    const decisionId = this.newDecisionId();
+    const taskId = request.correlation?.task_id;
+    const traceId = request.correlation?.trace_id;
+    this.emit({
       at: this.clock().toISOString(),
+      decision_id: decisionId,
+      ...(typeof taskId === "string" && taskId.length > 0 ? { task_id: taskId } : {}),
+      ...(typeof traceId === "string" && traceId.length > 0 ? { trace_id: traceId } : {}),
       decision,
       reason,
       person_id: request.identity?.person_id ?? "unknown",
@@ -290,6 +336,79 @@ export class PolicyGateway {
       action: request.toolCall?.action ?? "unknown",
       capability_class: request.toolCall?.capability_class ?? "unknown"
     });
-    return { decision, reason };
+    return { decision, reason, decision_id: decisionId };
   }
+
+  /**
+   * WP-K (D-471, JARVIS-053): levering til sinken er ALDRI en del av avgjørelsen. Alt som går galt (kastet feil, avvist løfte, `false` = full kø) telles og logges (strupet), men
+   * endrer aldri `decision`/`reason` som kalleren får - en revisjonssvikt skal aldri gjøre et avslag til en feil eller en tillatelse til et avslag (og aldri omvendt).
+   */
+  private emit(event: PolicyAuditEvent): void {
+    try {
+      const outcome = this.auditSink(event);
+      if (outcome === false) {
+        this.auditSinkRejected += 1;
+      } else if (typeof outcome === "object" && outcome !== null && typeof (outcome as PromiseLike<unknown>).then === "function") {
+        (outcome as PromiseLike<unknown>).then(
+          (value) => { if (value === false) this.auditSinkRejected += 1; },
+          (err: unknown) => this.noteSinkFailure(err)
+        );
+      }
+    } catch (err) {
+      this.noteSinkFailure(err);
+    }
+  }
+
+  private noteSinkFailure(err: unknown): void {
+    this.auditSinkFailures += 1;
+    const message = describeSinkError(err);
+    const at = this.clock().toISOString();
+    this.lastSinkFailure = { at, message };
+    // Strupet: høyst én loggline per minutt (en død sink skal ikke fylle loggen), uten hendelsesinnhold og uten fri feiltekst.
+    const nowMs = Date.now();
+    if (nowMs - this.lastSinkFailureLogAt >= 60_000) {
+      this.lastSinkFailureLogAt = nowMs;
+      console.error(JSON.stringify({ msg: "policy_audit_sink_failed", failures: this.auditSinkFailures, rejected: this.auditSinkRejected, error: message }));
+    }
+  }
+
+  /**
+   * WP-K (JARVIS-053): tellere for revisjonsleveransen (kun lesing, ingen hendelsesinnhold). `sink` er `external` når en `auditSink` er tilkoblet, ellers `memory` (ringbufferen - ikke varig).
+   * `sink_failures`/`sink_rejected` > 0 betyr at avgjørelser er levert uten å være journalført (eieren ser det i Autoritet-senteret når DB-sinken er på).
+   */
+  auditStats(): PolicyAuditStats {
+    return {
+      sink: this.hasExternalSink ? "external" : "memory",
+      in_memory: this.auditLog.length,
+      dropped_in_memory: this.auditDropped,
+      sink_failures: this.auditSinkFailures,
+      sink_rejected: this.auditSinkRejected,
+      last_failure_at: this.lastSinkFailure?.at ?? null,
+      last_failure: this.lastSinkFailure?.message ?? null
+    };
+  }
+}
+
+/**
+ * Kort, SIKKER etikett for en sink-feil (vises i loggen og i Autoritet-senteret): feilkoden (pg SQLSTATE/errno) hvis den finnes, ellers selve meldingen KUN hvis den er en maskinkode
+ * (`[a-z0-9_:.-]`, f.eks. `policy_audit_queue_full`), ellers feilnavnet. Fri feiltekst (kan sitere data/tilkoblingsdetaljer) vises aldri.
+ */
+function describeSinkError(err: unknown): string {
+  if (err === null || typeof err !== "object") return "non_error_rejection";
+  const e = err as { code?: unknown; name?: unknown; message?: unknown };
+  const code = typeof e.code === "string" && /^[A-Za-z0-9_.-]{1,40}$/.test(e.code) ? e.code : undefined;
+  const name = typeof e.name === "string" && /^[A-Za-z0-9_.-]{1,40}$/.test(e.name) ? e.name : "Error";
+  if (code !== undefined) return `${name}:${code}`;
+  if (typeof e.message === "string" && /^[a-z0-9_:.-]{1,80}$/.test(e.message)) return e.message;
+  return name;
+}
+
+export interface PolicyAuditStats {
+  sink: "memory" | "external";
+  in_memory: number;
+  dropped_in_memory: number;
+  sink_failures: number;
+  sink_rejected: number;
+  last_failure_at: string | null;
+  last_failure: string | null;
 }

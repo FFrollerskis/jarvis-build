@@ -1,5 +1,6 @@
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
-import type { ToolTransport } from "@jarvis/tool-gateway";
+import type { ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
+import { abortableSleep, adoptCallSignal, currentCallSignal, throwIfAborted } from "@jarvis/tool-gateway";
 import type { GrowthService } from "./service.ts";
 import type { CampaignStatus } from "./types.ts";
 
@@ -96,8 +97,9 @@ export class MetaAdsApiError extends Error {
   }
 }
 
+/** WP-K (D-471, JARVIS-018): venting mellom forsøk avbrytes av gatewayens kallsignal. */
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return abortableSleep(ms);
 }
 
 /**
@@ -150,7 +152,10 @@ async function metaGraphGetAllPages(initialUrl: string): Promise<MetaGraphRow[]>
     let lastError: MetaAdsApiError | undefined;
     let page: MetaGraphPage | undefined;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const response = await fetch(url);
+      // WP-K (D-471, JARVIS-018): gatewayens kallsignal avbryter forespørselen (rå `fetch` hadde INGEN frist før), og et avbrutt kall sender aldri et nytt forsøk.
+      throwIfAborted();
+      const callSignal = currentCallSignal();
+      const response = await fetch(url, callSignal ? { signal: callSignal } : undefined);
       if (response.ok) {
         page = (await response.json()) as MetaGraphPage;
         lastError = undefined;
@@ -242,7 +247,13 @@ export class MetaAdsTransport implements ToolTransport {
     private readonly apiVersion: string = (process.env["JARVIS_META_ADS_API_VERSION"] ?? "").trim() || DEFAULT_API_VERSION
   ) {}
 
-  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string): Promise<{ external_id?: string; data?: JsonValue }> {
+  async invoke(
+    action: string, parameters: Record<string, JsonValue>, credential: string, _context?: ToolInvocationContext, signal?: AbortSignal
+  ): Promise<{ external_id?: string; data?: JsonValue }> {
+    return adoptCallSignal(signal, () => this.dispatch(action, parameters, credential));
+  }
+
+  private async dispatch(action: string, parameters: Record<string, JsonValue>, credential: string): Promise<{ external_id?: string; data?: JsonValue }> {
     const tenantId = requireString(parameters, "tenant_id");
     const memorySpace = (parameters["memory_space"] !== undefined ? String(parameters["memory_space"]) : "business") as MemorySpace;
     const adAccountId = parameters["ad_account_id"] !== undefined ? String(parameters["ad_account_id"]) : this.defaultAdAccountId;

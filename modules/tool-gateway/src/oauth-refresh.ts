@@ -1,3 +1,4 @@
+import { detachFromCallSignal, raceCallSignal } from "./call-signal.ts";
 import { guardedFetch } from "./url-safety.ts";
 
 /**
@@ -51,8 +52,10 @@ export class AccessTokenCache {
     const cached = this.entries.get(refreshToken);
     if (cached && cached.expires_at_ms - EXPIRY_MARGIN_MS > now) return cached.access_token;
     const pending = this.inflight.get(refreshToken);
-    if (pending) return pending;
-    const run = (async () => {
+    // WP-K (D-471, JARVIS-018): den pågående utvekslingen er DELT mellom samtidige kall - den starter uten første kallers frist (egen 45 s-grense i `guardedFetch`), og hver kaller venter med SITT eget
+    // kallsignal, så et tidsavbrudd slipper kalleren fri uten å drepe utvekslingen for de andre.
+    if (pending) return raceCallSignal(pending);
+    const run = detachFromCallSignal(() => (async () => {
       try {
         const token = await this.exchanger.exchange(refreshToken);
         const expiresIn = Number.isFinite(token.expires_in) && token.expires_in > 0 ? token.expires_in : DEFAULT_EXPIRES_IN_S;
@@ -73,9 +76,9 @@ export class AccessTokenCache {
       } finally {
         this.inflight.delete(refreshToken);
       }
-    })();
+    })());
     this.inflight.set(refreshToken, run);
-    return run;
+    return raceCallSignal(run);
   }
 
   /** Kastes når leverandøren avviser tokenet (401/invalid_grant) slik at neste kall gjør en fersk utveksling. */

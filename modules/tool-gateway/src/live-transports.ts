@@ -15,6 +15,7 @@ import { AccessTokenCache, bearerFor, type RefreshedToken, dropboxRefreshExchang
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolInvocationContext, ToolTransport } from "./gateway.ts";
 import { GithubRateLimitedError, GithubRateLimitController } from "./github-rate-limit-controller.ts";
+import { abortableSleep, throwIfAborted } from "./call-signal.ts";
 
 /**
  * UA-2 P1B-A HOST FIX #1 (2026-08-16, host-funn run_id `3af67dab`): den
@@ -1475,8 +1476,9 @@ export class GithubApiError extends Error {
   }
 }
 
+/** WP-K (D-471, JARVIS-018): venting mellom forsøk slutter når kallet avbrytes (gatewayens tidsavbrudd) - ingen sovende retry som våkner ETTER at utfallet er meldt ukjent. */
 function githubSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return abortableSleep(ms);
 }
 
 /** GitHub sin feilkonvolutt (`{message, documentation_url,...}`) - avkortet (200 tegn), aldri rå kropp/headere videre. */
@@ -1519,6 +1521,8 @@ async function githubFetchRaw(url: string, init: RequestInit, controller?: Githu
   const attemptAll = async (): Promise<Response> => {
     let lastError: GithubApiError | undefined;
     for (let attempt = 1; attempt <= GITHUB_MAX_ATTEMPTS; attempt++) {
+      // WP-K: aldri et nytt forsøk (heller ikke etter 429) når kallet er avbrutt - en POST som er satt i gang har et UKJENT utfall, og gatewayen har merket raden `unverified`.
+      throwIfAborted();
       const response = await guardedFetch(url, init);
       if (response.ok) {
         if (controller) await controller.recordOutcome(mutation, response.status, response.headers, "");
