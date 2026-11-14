@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { CapabilityClass, IdentityContext, JobContract, JsonValue, TrustLevel } from "@jarvis/contracts";
 import { withTenantTransaction, writeAudit } from "@jarvis/core";
 import { UnsafeVendorUrlError, guardedFetch } from "./url-safety.ts";
-import { currentCallSignal, invokeWithCallSignal } from "./call-signal.ts";
+import { currentCallSignal, detachFromCallSignal, invokeWithCallSignal } from "./call-signal.ts";
 import { assessClassDPipeline, isClassDExempt, isNotFoundError, ownerStepUpDenial, type ClassDNotifier, type ClassDPipelineOptions } from "./class-d-pipeline.ts";
 import { isSelfRecoveryAction, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
 
@@ -713,7 +713,10 @@ export class ToolGateway {
       this.deny(request, reason, { ...corr, ...(policyDecisionId !== undefined ? { policy_decision_id: policyDecisionId } : {}) });
     // WP-K (D-471, JARVIS-018): et NØSTET kall (en transport som selv kaller `execute()`, f.eks. `support.reply` -> `email.send`) startes aldri på vegne av et ytre kall som allerede er avbrutt/tidsavbrutt -
     // ellers kunne en forlatt transport utføre en mutasjon ETTER at det ytre kallet er meldt «utfall ukjent».
-    if (currentCallSignal()?.aborted === true) {
+    // UNNTAK (review H1): sikkerhetsbryterne (kill switch, `CLASS_D_EXEMPT_ACTIONS`) og selvgjenopprettings-handlingene (`isSelfRecoveryAction`) MÅ virke også fra en avbrutt kontekst - de er
+    // nettopp det eieren trenger når noe har gått galt, og de kan aldri være «en forlatt mutasjon». Klasse D-varslingen (`notifyClassD`/`ready()`) kjører i tillegg frakoblet fra kallsignalet.
+    const exemptFromAbortGuard = definition !== undefined && (isClassDExempt(definition) || isSelfRecoveryAction(request.tool_id, request.action));
+    if (!exemptFromAbortGuard && currentCallSignal()?.aborted === true) {
       return deny("caller_call_aborted");
     }
     if (!definition) {
@@ -904,7 +907,8 @@ export class ToolGateway {
       }
       let notifierReady = false;
       try {
-        notifierReady = this.classDNotifier ? await this.classDNotifier.ready() : false;
+        // Review H1: frakoblet fra det ytre kallets signal (varslerens egen nøstede `telegram.notify` skal aldri nektes fordi et YTRE kall har fått tidsavbrudd).
+        notifierReady = this.classDNotifier ? await detachFromCallSignal(() => this.classDNotifier!.ready()) : false;
       } catch {
         notifierReady = false;
       }
@@ -1329,13 +1333,15 @@ export class ToolGateway {
       summary = null; // et sammendrag er pynt - aldri en grunn til å miste selve varselet
     }
     try {
-      await this.classDNotifier!.notify({
+      // Review H1: out-of-band-varslingen er hele poenget med klasse D-kjeden («aldri stille»), og den er ALLTID mest nødvendig når utfallet er ukjent - nettopp da kan det YTRE kallet ha fått tidsavbrudd.
+      // Varsleren er selv en nøstet `execute(telegram.notify)`, så den kjører frakoblet fra kallsignalet (egen frist per leverandørkall gjelder fortsatt).
+      await detachFromCallSignal(() => this.classDNotifier!.notify({
         tenant_id: request.identity.tenant_id, person_id: request.identity.person_id,
         tool_id: request.tool_id, action: request.action, outcome: outcome.outcome,
         external_id: outcome.external_id, idempotency_key: request.idempotency_key ?? "",
         recovery: definition.rollback_procedure, at: new Date().toISOString(),
         ...(summary !== null && summary.length > 0 ? { summary: summary.slice(0, 300) } : {})
-      });
+      }));
       notified = true;
     } catch (err) {
       await withTenantTransaction(this.pool, request.identity.tenant_id, (client) =>
