@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { CapabilityClass, IdentityContext, JobContract, JsonValue, TrustLevel } from "@jarvis/contracts";
 import { withTenantTransaction, writeAudit } from "@jarvis/core";
 import { UnsafeVendorUrlError, guardedFetch } from "./url-safety.ts";
-import { currentCallSignal, detachFromCallSignal, invokeWithCallSignal } from "./call-signal.ts";
+import { currentCallSignal, detachFromCallSignal, invokeWithCallSignal, toolCallAbortEnabled } from "./call-signal.ts";
 import { assessClassDPipeline, isClassDExempt, isNotFoundError, ownerStepUpDenial, type ClassDNotifier, type ClassDPipelineOptions } from "./class-d-pipeline.ts";
 import { isIndeterminateTransportError, transportErrorKind } from "./transport-errors.ts";
 import { isSelfRecoveryAction, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
@@ -726,7 +726,7 @@ export class ToolGateway {
     // UNNTAK (review H1): sikkerhetsbryterne (kill switch, `CLASS_D_EXEMPT_ACTIONS`) og selvgjenopprettings-handlingene (`isSelfRecoveryAction`) MÅ virke også fra en avbrutt kontekst - de er
     // nettopp det eieren trenger når noe har gått galt, og de kan aldri være «en forlatt mutasjon». Klasse D-varslingen (`notifyClassD`/`ready()`) kjører i tillegg frakoblet fra kallsignalet.
     const exemptFromAbortGuard = definition !== undefined && (isClassDExempt(definition) || isSelfRecoveryAction(request.tool_id, request.action));
-    if (!exemptFromAbortGuard && currentCallSignal()?.aborted === true) {
+    if (!exemptFromAbortGuard && toolCallAbortEnabled() && currentCallSignal()?.aborted === true) {
       return deny("caller_call_aborted");
     }
     if (!definition) {
@@ -1457,7 +1457,8 @@ async function withTimeout<T>(run: (signal: AbortSignal) => Promise<T>, ms: numb
     timer = setTimeout(() => {
       const err = new Error("tool_timeout");
       reject(err);
-      controller.abort(err);
+      // Review M2: med `JARVIS_TOOL_CALL_ABORT=off` avvises løftet som før WP-K, men forespørselen avbrytes ikke.
+      if (toolCallAbortEnabled()) controller.abort(err);
     }, ms);
   });
   try {

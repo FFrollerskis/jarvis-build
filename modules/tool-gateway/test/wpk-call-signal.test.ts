@@ -370,22 +370,39 @@ describe("E: vakt - ingen transport i tool-gateway/src setter eget signal uten �
     .replace(/"(?:\\.|[^"\\\n])*"/g, '""')
     .replace(/'(?:\\.|[^'\\\n])*'/g, "''");
 
-  /** Filer som BEVISST setter et eget `signal:`, med grunn. Alt annet går via guardedFetch uten eget signal (= ambient kallsignal). */
-  const OWN_SIGNAL: Record<string, string> = {
-    "call-signal.ts": "selve primitivet: AsyncLocalStorage-formen `{ signal }` (ingen forespørsel)",
-    "gateway.ts": "Infisical-oppslag/-skriving har egne korte frister (delt innlogging må ikke dø med et annet kalls frist)",
-    "github-app-auth.ts": "GitHub App-tokenutstedelse: egen, delt frist per forespørsel (token-cache, ikke del av et verktøykall)",
-    "live-transports.ts": "Telegram-pollerens getUpdates (bakgrunnsløkke, ikke et verktøykall)",
-    "mcp-zapier-transport.ts": "egen 45 s-frist SAMMENSATT med kallsignalet (composeSignals)",
-    "browser-transport.ts": "eget tak SAMMENSATT med kallsignalet (composeSignals)"
+  /**
+   * Filer som BEVISST setter et eget `signal:` i kode, med grunn OG et EKSAKT antall forekomster (review M2: oppføringen for `live-transports.ts` unntok tidligere HELE filen - ca. 70 `guardedFetch`-kallesteder - fra vakten,
+   * så et nytt `signal: AbortSignal.timeout(...)` hvor som helst der ville passert). `"mekanisme"` = filene som SELV er mekanismen (type-/parameterformer og Infisical-oppslag med egne korte frister).
+   * Alt annet går via guardedFetch uten eget signal (= ambient kallsignal). Dekningsgrenser som IKKE fanges av denne vakten (finans-transportene, preflight/re-arm uten frist) står i runbook §3.
+   */
+  const OWN_SIGNAL: Record<string, { why: string; count: number | "mekanisme" }> = {
+    "call-signal.ts": { why: "selve primitivet: AsyncLocalStorage-formen `{ signal }` og parameter-/typeformer (ingen forespørsel)", count: "mekanisme" },
+    "gateway.ts": { why: "Infisical-oppslag/-skriving har egne korte frister (delt innlogging må ikke dø med et annet kalls frist), og `withTimeout`", count: "mekanisme" },
+    "github-app-auth.ts": { why: "GitHub App-tokenutstedelse: egen, delt frist per forespørsel (token-cache, ikke del av et verktøykall)", count: 2 },
+    "live-transports.ts": { why: "Telegram-pollerens getUpdates (bakgrunnsløkke, ikke et verktøykall)", count: 1 },
+    "mcp-zapier-transport.ts": { why: "egen 45 s-frist SAMMENSATT med kallsignalet (composeSignals)", count: 1 },
+    "browser-transport.ts": { why: "eget tak SAMMENSATT med kallsignalet (composeSignals)", count: 1 }
   };
+  const ownSignalCount = (file: string): number => (stripNonCode(readFileSync(file, "utf8")).match(/(?<![A-Za-z0-9_$])signal\s*:/g) ?? []).length;
 
   it("hver fil med `signal:` i kode står på den begrunnede listen - en NY transport med eget signal må enten bruke composeSignals eller forklares her", () => {
     const withOwnSignal = files(SRC)
-      .filter((f) => /(?<![A-Za-z0-9_$])signal\s*:/.test(stripNonCode(readFileSync(f, "utf8"))))
+      .filter((f) => ownSignalCount(f) > 0)
       .map((f) => f.slice(SRC.length + 1))
       .sort();
     expect(withOwnSignal).toEqual(Object.keys(OWN_SIGNAL).sort());
+  });
+
+  it("M2: antall `signal:`-forekomster per transportfil er EKSAKT det begrunnede (et nytt eget signal i live-transports.ts feiler til det er begrunnet eller sammensatt med kallsignalet)", () => {
+    for (const [name, entry] of Object.entries(OWN_SIGNAL)) {
+      if (entry.count === "mekanisme") continue;
+      expect(ownSignalCount(join(SRC, name)), `${name}: ${entry.why}`).toBe(entry.count);
+    }
+  });
+
+  it("M2: den ENE egne `signal:` i live-transports.ts er Telegram-pollerens getUpdates (bakgrunnsløkke utenfor et verktøykall) - ikke et vilkårlig kallested", () => {
+    const raw = readFileSync(join(SRC, "live-transports.ts"), "utf8");
+    expect(raw).toMatch(/getUpdates[^\n]*`,\s*\{\s*signal:\s*AbortSignal\.timeout\(this\.options\.fetchTimeoutMs \?\? TELEGRAM_FETCH_TIMEOUT_MS\)/);
   });
 
   it("de to transportene med eget tak setter det sammen med kallsignalet (aldri bare eget signal)", () => {

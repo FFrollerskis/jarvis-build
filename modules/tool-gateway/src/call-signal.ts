@@ -23,6 +23,19 @@ import type { ToolInvocationContext, ToolTransport } from "./gateway.ts";
  */
 const store = new AsyncLocalStorage<{ signal: AbortSignal | undefined }>();
 
+/**
+ * AV-BRYTER (review M2): `JARVIS_TOOL_CALL_ABORT=off` (kun eksakt «off», uavhengig av store/små bokstaver) slår av HELE mekanismen i gatewayen - ingen `AbortController` per kall, ingen avbrudd ved tidsavbrudd, ingen ambient kontekst,
+ * ingen eksplisitt `signal`-parameter til transporten og ingen inngangsvakt (`caller_call_aborted`). Gatewayens eget tidsavbrudd (avvisning med `tool_timeout`, utfall ukjent) er UENDRET - det er oppførselen FØR WP-K.
+ * Standard er PÅ (alt annet enn «off»). Leses ved HVERT kall (ingen modulkonstant): en omstart er ikke nødvendig i tester, og en feilskrevet verdi slår aldri av beskyttelsen stille (kun «off» gjør det).
+ * Mekanismen er på ca. 70 `guardedFetch`-kallesteder «ved konstruksjon» og H1 viste at en slik bred endring trenger en nødutgang som ikke krever tilbakerulling av kode.
+ *
+ * DEKNINGSGRENSER (bevisst, ikke et hull i bryteren): finans-transportene (`modules/finance`) har egne 20 s-signaler og rå fetch; gatewayens preflight- og re-arm-kall (`transport.invoke(preflight_action)`) har verken frist
+ * eller signal (lesing FØR mutasjon); Postgres-drift avbryter klienten, ikke setningen på serveren. Se `docs/runbooks/WPK_LEDGER_REMNANTS.md` §3.
+ */
+export function toolCallAbortEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return (env["JARVIS_TOOL_CALL_ABORT"] ?? "").trim().toLowerCase() !== "off";
+}
+
 /** Signalet for kallet som kjører akkurat nå (satt av `invokeWithCallSignal`/`runWithCallSignal`), ellers `undefined`. */
 export function currentCallSignal(): AbortSignal | undefined {
   return store.getStore()?.signal;
@@ -107,7 +120,7 @@ export function adoptCallSignal<T>(signal: AbortSignal | undefined, fn: () => T)
 
 /**
  * Det ENE stedet som definerer hvordan en transport kalles med en frist: eksplisitt 5. parameter OG ambient kontekst. Gatewayen bruker denne for hovedkallet og readback;
- * tester kan bruke den for å kjøre en transport under et signal uten å gå via gatewayen.
+ * tester kan bruke den for å kjøre en transport under et signal uten å gå via gatewayen. Med `JARVIS_TOOL_CALL_ABORT=off` kalles transporten UTEN signal og uten ambient kontekst (gammel oppførsel).
  */
 export function invokeWithCallSignal(
   transport: ToolTransport,
@@ -117,5 +130,6 @@ export function invokeWithCallSignal(
   context: ToolInvocationContext,
   signal: AbortSignal
 ): Promise<{ external_id?: string; data?: JsonValue }> {
+  if (!toolCallAbortEnabled()) return transport.invoke(action, parameters, credential, context);
   return runWithCallSignal(signal, () => transport.invoke(action, parameters, credential, context, signal));
 }
