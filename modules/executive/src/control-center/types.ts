@@ -97,7 +97,9 @@ export const CONTROL_ACTION_ALLOWED: Readonly<Record<ControlActionEndpoint, read
     "freeze_connector", "unfreeze_connector",
     "revoke_credential", "restore_credential", "revoke_device",
     "enable_finance_kill_switch", "disable_finance_kill_switch",
-    "cancel_task"
+    "cancel_task",
+    // WP-H2 (additivt): `revoke_autonomy_binding` (klasse C, eier-kun + step-up; kun med JARVIS_CONTROL_AUTONOMY_REVOKE=on) og `run_golden_suite` (klasse A, lesende selvtest; kun med JARVIS_CONTROL_GOLDEN_SUITE=on).
+    "revoke_autonomy_binding", "run_golden_suite"
   ],
   "/owner-controls/connector-credentials": ["test_connector"]
 };

@@ -137,7 +137,7 @@ describe("controlAction: peker kun på eksisterende ruter, aldri en ny skrivevei
     const test = controlAction({ ...base, endpoint: "/owner-controls/connector-credentials", body: { action: "test_connector", parameters: { connector_id: "github" } }, risk_class: "A" });
     expect(test.body["action"]).toBe("test_connector");
     expect(CONTROL_ACTION_ALLOWED["/owner-controls/connector-credentials"]).toEqual(["test_connector"]);
-    expect(CONTROL_ACTION_ALLOWED["/executive/mutate"]).toHaveLength(13); // 12 + cancel_task (WP-H0, JARVIS-087)
+    expect(CONTROL_ACTION_ALLOWED["/executive/mutate"]).toHaveLength(15); // 12 + cancel_task (WP-H0, JARVIS-087) + revoke_autonomy_binding og run_golden_suite (WP-H2)
   });
 
   it("parametre må være et objekt (ikke liste/streng/null)", () => {

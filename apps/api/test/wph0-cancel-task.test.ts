@@ -44,14 +44,16 @@ describe("registrering", () => {
     }
   });
 
-  it("står i den lukkede mutasjonslisten (13 handlinger), og er en stopp-handling uten step-up (resten av listen uendret)", () => {
-    expect(EXECUTIVE_MUTATE_ACTIONS).toHaveLength(13);
+  it("står i den lukkede mutasjonslisten (15 handlinger: 13 + WP-H2 revoke_autonomy_binding og run_golden_suite), og er en stopp-handling uten step-up (resten av listen uendret)", () => {
+    expect(EXECUTIVE_MUTATE_ACTIONS).toHaveLength(15);
     expect(EXECUTIVE_MUTATE_ACTIONS).toContain("cancel_task");
     expect(STEP_UP_EXEMPT_ACTIONS.has("cancel_task")).toBe(true);
     expect(actionRequiresStepUp("cancel_task")).toBe(false);
     expect(stepUpDenial({ auth_strength: "passive", channel: "telegram" }, "cancel_task")).toBeUndefined();
     // å GJENOPPTA/gjenopprette krever fortsatt step-up (uendret)
     for (const a of ["unfreeze_connector", "resume_domain", "restore_credential", "revoke_device", "deactivate_kill_switch"]) expect(actionRequiresStepUp(a), a).toBe(true);
+    // WP-H2: de to nye handlingene krever BEGGE step-up (signert enhet) - ingen av dem er en stopp-handling i unntaksmengden
+    for (const a of ["revoke_autonomy_binding", "run_golden_suite"]) { expect(actionRequiresStepUp(a), a).toBe(true); expect(STEP_UP_EXEMPT_ACTIONS.has(a), a).toBe(false); }
   });
 });
 

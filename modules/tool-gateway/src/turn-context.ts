@@ -59,6 +59,11 @@ const INFRA_STATUS_INTENT = /(åpne hendelser|hendelsesstatus|incident|driftssta
 const FINANCE_CENTER_INTENT = /(finans-?sent(er|re)(t|et)?|finans-?kontroll|finansstatus|status (på|for) finans(en)?|finans-?nødbryter|nødbryter(en)? (for )?finans|ukjent utfall|avstemming(en|s)?\b|betalingsintensjon(er|ene)?)/i;
 const MEMORY_CENTER_INTENT = /(minne-?sent(er|re)(t|et)?|minnestatus|status (på|for) minne(t)?|karantene(n)?\b|minneforslag|proveniens|styringsjournal(en)?|beslutningslogg(en)?|slettebevis)/i;
 const AGENT_CENTER_INTENT = /(agent-?sent(er|re)(t|et)?|agentstatus|status (på|for) agent(ene|er)?|kjørende (agenter|jobber)|hvilke (agenter|jobber) kjører|aktive (agenter|jobber)|nettverksomfang|worker(e|ne)? (status|kjører)|\blease(r|ne)?\b)/i;
+// WP-H2: samme mønster for de fire siste sentrene. «driftsstatus» og «status på driften» står bevisst IKKE i Drift-uttrykket (de velger `get_infra_status`, INFRA_STATUS_INTENT over).
+const OPERATIONS_CENTER_INTENT = /(drifts?-?sent(er|re)(t|et)?|driftskontroll|driftskapasitet|kapasitetsstatus|backup-?status|status (på|for) backup(en|ene)?|restore-?(test|øvelse|verifisering)|gjenopprettingstest|oppetid|runbook(s|er|ene)?\b|vakthund(en)?)/i;
+const VALUE_CENTER_INTENT = /(verdi-?sent(er|re)(t|et)?|verdi-?kontroll|verdiløkke(r|ne)?|spart tid|bruksfrekvens)/i;
+const PRIVACY_CENTER_INTENT = /(personvern-?sent(er|re)(t|et)?|personvernstatus|status (på|for) personvern(et)?|behandlingsoversikt(en)?|\bdpia(-?(er|ene))?\b|databehandler(e|ne)?)/i;
+const SECURITY_CENTER_INTENT = /(sikkerhets-?sent(er|re)(t|et)?|sikkerhetsstatus|status (på|for) sikkerhet(en)?|revisjonslogg(en)?|credential-?hendelser|mistenkelig(e)? (innhold|aktivitet)|eksfiltrer(ing|t)?|injeksjonsforsøk|selvtest(en)?|golden-?suite|gull-?suite)/i;
 
 /** Intensjons-nøkkelord per handling. Kun handlinger som er tildelt flaten kan velges - dette er IKKE en autorisasjon, bare utvalg. */
 const INTENT_KEYWORDS: Readonly<Record<string, RegExp>> = {
@@ -66,6 +71,10 @@ const INTENT_KEYWORDS: Readonly<Record<string, RegExp>> = {
   "executive.get_finance_center": FINANCE_CENTER_INTENT,
   "executive.get_memory_center": MEMORY_CENTER_INTENT,
   "executive.get_agent_center": AGENT_CENTER_INTENT,
+  "executive.get_operations_center": OPERATIONS_CENTER_INTENT,
+  "executive.get_value_center": VALUE_CENTER_INTENT,
+  "executive.get_privacy_center": PRIVACY_CENTER_INTENT,
+  "executive.get_security_center": SECURITY_CENTER_INTENT,
   "email.read_inbox": /(e-?post|\bmail\b|innboks|inbox|melding|brev)/i,
   "calendar.read_events": /(kalender|møte|avtale|timeplan|calendar|schedule|\bi dag\b|dagens|\bi morgen\b)/i,
   "github.read_issues": /(github|issue|repo\b|pull request|\bpr\b|\bbug\b|kodebase)/i,
@@ -256,7 +265,12 @@ export function isMetaComplaint(text: string): boolean {
 const OVERVIEW = /(oversikt|hva skjer|brief|morgenbrief|hva har jeg)/i;
 const OVERVIEW_KEYS = new Set(["email.read_inbox", "calendar.read_events", "github.read_issues"]);
 // WP-D1: `knowledge.search` rangeres rett etter minnesøket NÅR den er valgt (smale nøkkelord) - ellers ville tjenester med mange lese-handlinger (kontrakter, forretning) fylt verktøybudsjettet først.
-const ALWAYS_PRIORITY = ["memory.search", "knowledge.search", "email.read_inbox", "calendar.read_events", "github.read_issues", "executive.get_capability_status", "memory.propose"];
+// WP-H2: de syv per-senter-verktøyene (kontrollsentrene) står sist: de velges KUN når deres egen, smale intensjon treffer, men da må de rangeres foran familietreff (`operations.*` treffer «drift» og fylte ellers hele
+// budsjettet før `executive.get_operations_center` kom med).
+const ALWAYS_PRIORITY = [
+  "memory.search", "knowledge.search", "email.read_inbox", "calendar.read_events", "github.read_issues", "executive.get_capability_status", "memory.propose",
+  "executive.get_finance_center", "executive.get_memory_center", "executive.get_agent_center", "executive.get_operations_center", "executive.get_value_center", "executive.get_privacy_center", "executive.get_security_center"
+];
 
 export interface SurfaceSelection {
   selected: MeshToolMapping[];

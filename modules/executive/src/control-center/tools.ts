@@ -30,6 +30,22 @@ export const CONTROL_CENTER_READ_TOOLS: ReadonlyArray<ControlCenterReadTool> = [
   {
     center: "agent", action: "get_agent_center",
     description: `Les Agent-kontrollsenteret (UA-11): alle kjørende og ventende agenter/jobber, workere og kø, leaser, forsøk på nytt, avbrytelser, artefakter og nettverksomfang. Aldri jobbtitler eller resultater. ${COMMON_TAIL}`
+  },
+  {
+    center: "operations", action: "get_operations_center",
+    description: `Les Drift-kontrollsenteret (UA-11): åpne hendelser (antall, alvorlighet, bevisgrad - aldri titler), skymål og produsenter, runbooks (antall), backup og restore-øvelser, planlagte jobber, oppetid og kapasitet. Ikke målt (diskplass, oppetid-prosent, vakthundens egne sjekker) sies rett ut. ${COMMON_TAIL}`
+  },
+  {
+    center: "value", action: "get_value_center",
+    description: `Les Verdi-kontrollsenteret (UA-11): verdiløkkene V1-V5 med tilstandsord, bruksfrekvens, lukkede jobber, spart tid og dine korrigeringer (de to siste er IKKE målt og står som ikke målt, aldri som 0). Kun tall fra eksisterende målinger. ${COMMON_TAIL}`
+  },
+  {
+    center: "privacy", action: "get_privacy_center",
+    description: `Les Personvern-kontrollsenteret (UA-11): behandlingsoversikten mot de levende tabellene, DPIA-status (slik dokumentet erklærer; ikke en juridisk vurdering), oppbevaring og slettebevis. Aldri personinnhold. ${COMMON_TAIL}`
+  },
+  {
+    center: "security", action: "get_security_center",
+    description: `Les Sikkerhet-kontrollsenteret (UA-11): revisjon (inkl. om append-only-triggeren er intakt), credential- og tilgangshendelser, mistenkelig innhold/eksfiltrering (det som ikke kan telles sies rett ut), det som venter på gjenoppretting og siste golden-suite-kjøring. Aldri innhold eller hemmeligheter. ${COMMON_TAIL}`
   }
 ];
 

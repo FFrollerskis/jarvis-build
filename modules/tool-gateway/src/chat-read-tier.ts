@@ -72,6 +72,11 @@ export const CHAT_READ_TIER: ReadonlyArray<{ readonly tool_id: string; readonly 
   { tool_id: "executive", action: "get_finance_center" },
   { tool_id: "executive", action: "get_memory_center" },
   { tool_id: "executive", action: "get_agent_center" },
+  // WP-H2 (UA-11): Drift, Verdi, Personvern og Sikkerhet - samme mønster (samme register, eier + signert-økt-port, ikke på tale). `run_golden_suite` og `revoke_autonomy_binding` står bevisst IKKE her (kontrollsenter-knapper).
+  { tool_id: "executive", action: "get_operations_center" },
+  { tool_id: "executive", action: "get_value_center" },
+  { tool_id: "executive", action: "get_privacy_center" },
+  { tool_id: "executive", action: "get_security_center" },
   { tool_id: "executive", action: "get_control_surface_status" },
   { tool_id: "executive", action: "get_delegation_board" },
   { tool_id: "executive", action: "get_self_diagnosis" },

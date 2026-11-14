@@ -74,7 +74,8 @@ describe("flagg: AV som standard, kun «on» slår et senter på", () => {
   });
 
   it("flaggnavnene er stabile og dokumentert i `.env.example`", () => {
-    expect(CONTROL_CENTER_FLAGS).toEqual({ finance: "JARVIS_CONTROL_CENTER_FINANCE", memory: "JARVIS_CONTROL_CENTER_MEMORY", agent: "JARVIS_CONTROL_CENTER_AGENT" });
+    // H1-flaggene er uendret (WP-H2 la til fire til - se wph2-control-centers.test.ts for hele settet).
+    expect(CONTROL_CENTER_FLAGS).toMatchObject({ finance: "JARVIS_CONTROL_CENTER_FINANCE", memory: "JARVIS_CONTROL_CENTER_MEMORY", agent: "JARVIS_CONTROL_CENTER_AGENT" });
     const envExample = readFileSync(fileURLToPath(new URL("../../../.env.example", import.meta.url)), "utf8");
     for (const name of [...Object.values(CONTROL_CENTER_FLAGS), "JARVIS_GOVERNANCE_PROVENANCE"]) expect(envExample, name).toContain(name);
   });

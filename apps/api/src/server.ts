@@ -403,6 +403,11 @@ const MEMORY_PROPOSAL_ACTIONS = ["list_proposals", "approve_proposal", "reject_p
  *
  * WP-H0 (JARVIS-087): den 13. handlingen, `cancel_task`, er kontrollsenterets avbryt-handling for en bakgrunnsjobb/agent. Den er et gjennomslag til den EKSISTERENDE kanselleringsveien (`TaskService.cancel`, samme som
  * chatens «avbryt jobb <id>»), eier-kun (verktøydefinisjonens parameterAuthorizer), klasse B og en stopp-handling uten step-up (se `STEP_UP_EXEMPT_ACTIONS`). Allowlisten er ellers uendret.
+ *
+ * WP-H2: to tilføyelser (begge BARE tilgjengelige når verktøyet er registrert, bak sitt eget flagg - uten flagg avviser gatewayen dem som ukjent verktøy):
+ *  - `revoke_autonomy_binding` (14.): tilbakekall av eierens autonomi-binding for ett domene (klasse C, gjennomslag til `situations.clear_autonomy_policy`, eier-kun, KREVER step-up: ikke unntatt i `STEP_UP_EXEMPT_ACTIONS`).
+ *  - `run_golden_suite` (15.): golden-suite-knappen. BEVISST den ENESTE lesende handlingen i denne listen: den er en deterministisk selvtest uten sideeffekter (klasse A), men plassert her fordi knappen skal gå
+ *    gjennom SAMME grant-, step-up- (signert enhet) og revisjonsvei som alle andre kontrollsenter-knapper - ikke en ny rute, og ikke `/executive/query` (som ikke har step-up). Tool-porten krever i tillegg eier + signert økt.
  */
 export const EXECUTIVE_MUTATE_ACTIONS = [
   "pause_domain", "resume_domain", "resolve_situation",
@@ -410,7 +415,8 @@ export const EXECUTIVE_MUTATE_ACTIONS = [
   "freeze_connector", "unfreeze_connector",
   "revoke_credential", "restore_credential", "revoke_device",
   "enable_finance_kill_switch", "disable_finance_kill_switch",
-  "cancel_task"
+  "cancel_task",
+  "revoke_autonomy_binding", "run_golden_suite"
 ] as const;
 
 /**

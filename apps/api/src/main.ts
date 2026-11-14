@@ -138,7 +138,9 @@ import { buildValueRuntimeFacts } from "./value-facts.ts";
 import { createValueMeasurementSource } from "./value-source.ts";
 import { ChatJobs, MAX_ACTIVE_JOBS, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
-import { createControlCenterRegistry, ownerPredicate, registerControlCenters } from "./control-center/register.ts";
+import { CONTROL_FEATURE_FLAGS, createControlCenterRegistry, ownerPredicate, registerControlCenters } from "./control-center/register.ts";
+import { flagOn } from "./control-center/shared.ts";
+import { createGoldenSuiteRunner } from "./golden-suite-runner.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { createOwnerControlsService } from "./provider-pause.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
@@ -740,10 +742,22 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const controlCenters = createControlCenterRegistry({ authority: ownerAuthority });
   // WP-H0 (AI Center): ÉN delt begrenser for AI-rådets automatiske trigger - samme instans i chatten (`ConversationEngine`) og i kontrollsenteret, så tellerne som vises er de som faktisk håndheves.
   const councilAutoLimiter = new CouncilAutoTriggerLimiter(envInt("JARVIS_COUNCIL_AUTO_MAX_PER_HOUR", 3, { min: 1, max: 100 }));
+  // WP-H2: Drift- og Verdi-sentrene leser rapportene til ExecutiveService (bygges lenger ned) gjennom late funksjoner. Golden-suite-kjøreren deles av Sikkerhet-senteret og `executive.run_golden_suite` -
+  // den finnes KUN med JARVIS_CONTROL_GOLDEN_SUITE=on (deterministisk, lesende, ingen modell). Prosessens starttidspunkt gir oppetid i Drift-senteret.
+  const executiveRef: { service?: ExecutiveService } = {};
+  const lateExecutive = (): ExecutiveService => {
+    if (executiveRef.service === undefined) throw new Error("executive_service_not_ready");
+    return executiveRef.service;
+  };
+  const goldenSuiteRunner = flagOn(process.env, CONTROL_FEATURE_FLAGS.goldenSuite) ? createGoldenSuiteRunner({ surface: () => modelToolSurface }) : undefined;
+  const processStartedAt = new Date(Date.now() - Math.round(process.uptime() * 1000));
   registerControlCenters(controlCenters, {
     pool, env: process.env, toolGateway, ownerControls, meshStatus: () => gateway.meshStatus(),
     authority: ownerAuthority, killSwitch, infraGate,
-    modelGateway: gateway, runRate: new RunRateService(pool), councilLimiter: councilAutoLimiter, evolutionReport: evolutionReports, maxActiveJobs: MAX_ACTIVE_JOBS
+    modelGateway: gateway, runRate: new RunRateService(pool), councilLimiter: councilAutoLimiter, evolutionReport: evolutionReports, maxActiveJobs: MAX_ACTIVE_JOBS,
+    valueReport: (tenantId) => lateExecutive().getValueReport(tenantId), infraStatus: (tenantId) => lateExecutive().getInfraStatus(tenantId),
+    ...(backupStatusSource ? { backupStatus: backupStatusSource } : {}), processStartedAt: () => processStartedAt,
+    ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {})
   });
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
@@ -1032,6 +1046,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // ekte transporten fra `transports`-recorden over - samme ene register-løkke som resten.
       ...homeAssistantTools(new HomeAssistantTransport(() => readSecretProvider.get("JARVIS_HA_BASE_URL"), () => readSecretProvider.get("JARVIS_HA_ROOMS"))),
       ...situationsToolDefinitions(new SituationsTransport(situationEngine, situationDomainPauses)),
+      // WP-H2: tjenesten legger seg i `executiveRef` (`holder`) så Drift-/Verdi-sentrene kan lese rapportene dens (late funksjoner over); `run_golden_suite` og `revoke_autonomy_binding` registreres KUN med sine flagg.
       ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, { modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES, ...CHAT_READ_TIER, ...CHAT_ACT_TIER],
         selfModel: {
           readers: selfModelReaders,
@@ -1063,8 +1078,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
             env: process.env, push: v2PushPolicy, deliveryConfigured: () => telegramDeliveryConfigured, ev0Status: () => getLastEv0BootStatus(),
             killSwitchActive: async () => (await selfModelControls.getControlState()).kill_switch.active
           })
-        }
-      }))),
+        },
+        ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {}),
+        holder: executiveRef
+      })), { goldenSuite: goldenSuiteRunner !== undefined, autonomyRevoke: flagOn(process.env, CONTROL_FEATURE_FLAGS.autonomyRevoke) }),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten
       // av eier-autoritets-/session-grant-mønstrene i denne filen - IKKE en ny,

@@ -2,7 +2,10 @@ import type { SloReport } from "./slo/index.ts";
 import { composeSloReport, SLO_CATALOG } from "./slo/index.ts";
 import { composeEvolutionReport, type EvolutionReport } from "./evolution/index.ts";
 import { composeAiMeshReport, type AiMeshReport } from "./ai-mesh/index.ts";
-import { composeControlCenterOverview, explainControlCenterNo, type ControlCenterOverview, type ControlCenterRegistry, type ControlCenterReport } from "./control-center/index.ts";
+import {
+  composeControlCenterOverview, explainControlCenterNo,
+  type ControlCenterOverview, type ControlCenterRegistry, type ControlCenterReport, type GoldenSuiteControl, type GoldenSuiteRunResult
+} from "./control-center/index.ts";
 import {
   composeValueReport, deriveChangeFreeze, describeValueLoops, evaluateBuilderLoopReadiness, proposeOpsActions,
   type ValueMeasurementSource, type ValueMeasurement, type ValueReport, type ValueRuntimeFacts, type ValueWindows
@@ -128,13 +131,25 @@ export interface ExecutiveServiceOptions {
    * `producers_interval_ms` kommer fra kjøretidskonfig; `mode` er den delte infra-modusen (NORMAL/DEGRADED/PAUSED). Uten `infra` er hendelser og endringer `not_measured` (aldri 0).
    */
   infra?: { source: InfraStatusSource; producers_enabled: boolean; producer_names: readonly string[]; producers_interval_ms: number; mode?: () => Promise<string | null> };
+  /**
+   * WP-H2: golden-suite-kjøreren (injisert fra `apps/api`; kun med `JARVIS_CONTROL_GOLDEN_SUITE=on`). Deterministisk og lesende: ingen modell, ingen database, ingen skriving. Uten kjører avvises `run_golden_suite`.
+   */
+  goldenSuite?: GoldenSuiteControl;
+  /**
+   * WP-H2: lat binding. Konstruktøren legger seg selv i holderen, slik at kontrollsentrene (som bygges FØR tjenesten i `main.ts`) kan lese `getValueReport`/`getInfraStatus` når en forespørsel kommer -
+   * uten at tjenesten må konstrueres tidligere eller flyttes ut av `additionalTools`-listen (komposisjonsroten er låst av `executive-wiring.test.ts`).
+   */
+  holder?: { service?: ExecutiveService };
 }
 
 export class ExecutiveService {
   constructor(
     private readonly gateway: ToolGateway,
     private readonly options: ExecutiveServiceOptions = {}
-  ) {}
+  ) {
+    // WP-H2: lat binding - se `ExecutiveServiceOptions.holder`.
+    if (options.holder !== undefined) options.holder.service = this;
+  }
 
   /**
    * Henter (via `situations.get_queue`, ALDRI en egen spørring) + pause-/
@@ -194,6 +209,24 @@ export class ExecutiveService {
   /** Rent gjennomslag til `situations.unpause_domain`. */
   async resumeDomain(identity: IdentityContext, domain: string): Promise<ToolResult> {
     return this.gateway.execute({ identity, tool_id: "situations", action: "unpause_domain", parameters: { domain } });
+  }
+
+  /**
+   * WP-H2: tilbakekall av eierens autonomi-binding (D-160, `situation_autonomy_policies`) for ÉTT domene. Rent gjennomslag til `situations.clear_autonomy_policy` med den UENDREDE identiteten (D-68): motoren
+   * velger rommet fra identiteten (kun kallerens eget minnerom), og dens EGEN sovereign-eier-port (`assertAutonomyAuthority`) gjelder i tillegg til policyen. Ingen egen slettelogikk her.
+   */
+  async revokeAutonomyBinding(identity: IdentityContext, domain: string): Promise<ToolResult> {
+    return this.gateway.execute({ identity, tool_id: "situations", action: "clear_autonomy_policy", parameters: { domain } });
+  }
+
+  /**
+   * WP-H2: golden-suite-knappen - kjører den deterministiske suiten via den injiserte kjøreren (ingen modell, ingen database, ingen skriving). Uten kjører (flagget AV) finnes ikke handlingen; dette er en ekstra
+   * lukket dør hvis verktøyet likevel skulle bli registrert uten kjører.
+   */
+  async runGoldenSuite(): Promise<GoldenSuiteRunResult> {
+    const suite = this.options.goldenSuite;
+    if (suite === undefined) throw new Error("golden_suite_not_configured");
+    return suite.run();
   }
 
   /** Rent gjennomslag til `situations.get_pause_state`. */

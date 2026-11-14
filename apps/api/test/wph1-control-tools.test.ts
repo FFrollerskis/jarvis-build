@@ -48,7 +48,8 @@ const defOf = (action: string, list: ToolDefinition[] = defs): ToolDefinition =>
 
 describe("tabellen er den eneste kilden", () => {
   it("hvert senter i tabellen er et kjent senter (H0-sentrene har ikke et eget verktøy), og handlingsnavnene er stabile og unike", () => {
-    expect(TOOLS.map((t) => t.action)).toEqual(["get_finance_center", "get_memory_center", "get_agent_center"]);
+    // H1-verktøyene står først og er uendret (WP-H2 la til fire til bakerst - se wph2-control-tools.test.ts for hele tabellen).
+    expect(TOOLS.map((t) => t.action).slice(0, 3)).toEqual(["get_finance_center", "get_memory_center", "get_agent_center"]);
     expect(new Set(TOOLS.map((t) => t.action)).size).toBe(TOOLS.length);
     for (const t of TOOLS) {
       expect(CONTROL_CENTER_IDS as readonly string[]).toContain(t.center);

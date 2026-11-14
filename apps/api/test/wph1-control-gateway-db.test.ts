@@ -79,7 +79,8 @@ beforeAll(async () => {
 afterAll(async () => { await db?.stop(); }, 120_000);
 
 describe("eieren får rapportene (flaggene PÅ)", () => {
-  for (const tool of CONTROL_CENTER_READ_TOOLS) {
+  // H1-sentrene (ALL_ON slår kun dem på); de fire H2-sentrene er dekket av wph2-control-gateway-db.test.ts med alle flagg.
+  for (const tool of CONTROL_CENTER_READ_TOOLS.filter((t) => ["finance", "memory", "agent"].includes(t.center))) {
     it(`${tool.action}: ok, funnet, målt - og identisk innhold som get_control_center {center: "${tool.center}"}`, async () => {
       const viaTool = await get(gateway, owner, tool.action);
       expect(viaTool.ok).toBe(true);
