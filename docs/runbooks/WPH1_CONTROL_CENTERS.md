@@ -22,7 +22,7 @@ Hver seksjon viser **kilde** (tabell) og **når den ble målt**; «Hvorfor …?�
 | `JARVIS_CONTROL_CENTER_AGENT=on` | Agent-sentret (side + `executive.get_agent_center`) | api-prosessen |
 | `JARVIS_GOVERNANCE_PROVENANCE=on` | skriv proveniens på NYE styringsjournal-poster (`decision_log`, `scenarios`, `risks`, `goals`, `goal_key_results`) | api-prosessen |
 
-Flaggene settes i `.env` (se `.env.example`) og krever **restart av api** (`docker compose up -d api`). AV = H0-oppførselen er uendret: senteret registreres ikke, står under «Ikke koblet inn», og verktøyet svarer `found: false` («senteret er ikke koblet inn»).
+Flaggene settes i `.env` (se `.env.example`) og krever **restart av api** (`docker compose up -d api`). De når containeren fordi de står i `SERVICE_ENV.api` (`infra/local/service-env.mjs`) og dermed i den genererte compose-blokken (`wph1-control-env.test.ts` låser det) - en variabel som ikke står i manifestet når aldri containeren. AV = H0-oppførselen er uendret: senteret registreres ikke, står under «Ikke koblet inn», og verktøyet svarer `found: false` («senteret er ikke koblet inn»).
 Migrasjon 102 kjøres av vanlig migrering; den er additiv (nullbare kolonner) og endrer ingenting når flagget er AV.
 
 ## Sentre
@@ -49,9 +49,9 @@ Migrasjon 102 kjøres av vanlig migrering; den er additiv (nullbare kolonner) og
 
 ## Minne: proveniens (JARVIS-087 del 2)
 - Migrasjon 102 legger til `prov_channel`, `prov_session_id`, `prov_task_id`, `prov_origin`, `prov_recorded_at` på de fem styringstabellene (alt-eller-ingenting-CHECK; `prov_origin` er `owner_direct`, `model` eller `unspecified`).
-- Opphavet utledes KUN fra den betrodde kontekstens egne felter (modellkjøring > eier-direkte > uspesifisert); aldri fra parametere en modell kan sende. Dashbord-ruten (`/governance/mutate`) attesterer `owner_direct` (se «Dekker ikke»).
+- Opphavet utledes KUN fra den betrodde kontekstens egne felter (modellkjøring > eier-direkte > uspesifisert); aldri fra parametere en modell kan sende. Dashbord-ruten (`/governance/mutate`) attesterer `owner_direct` KUN når kalleren er den suverene eieren (eier-porten `ownerGate`, etter løst grant); en annen innrullert person, eller en server uten eier-port, får ingen attest og posten står som `unspecified` (se «Dekker ikke»).
 - **Eldre rader bakdateres aldri:** de står som «ikke registrert». Senteret gir **advarsel** så lenge ingen rad har proveniens (flagget er AV eller ingenting er skrevet ennå) - aldri «i orden» på manglende data.
-- **Dekker ikke (PARTIAL):** hvem som ENDRET en post etter opprettelsen får ikke egne kolonner; det ligger kun i `audit_events`. `contentOrigin: "owner_direct"` settes av `/governance/mutate`-ruten selv (eier-autentisert dashbord), ikke av den raske chat-banen - det avviker fra D-449-kommentaren om at kun `main.ts` setter den (flagges for uavhengig review).
+- **Dekker ikke (PARTIAL):** hvem som ENDRET en post etter opprettelsen får ikke egne kolonner; det ligger kun i `audit_events`. `contentOrigin: "owner_direct"` settes nå på to steder i produksjonskoden: hurtigbanen i `main.ts` (D-449, uendret) og `/governance/mutate` i `server.ts` (denne WP-en). D-449-vakten (`d449-delegated-tool-jobs-cloud.test.ts`) er derfor bevisst endret fra «nøyaktig ett sted» til «nøyaktig to, hvert med låst plassering og betingelse» - **SIKKERHETSFLATE FOR UAVHENGIG REVIEW** (verdien leses kun av journal-transporten og åpner ingen rute; `wph1-governance-origin-route.test.ts` beviser attesten for eier, ingen attest for andre, og at klienten ikke kan sende den inn).
 
 ## Kjente begrensninger (DEFERRED/PARTIAL - ikke stille utelatt)
 - **Finans:** manuell disposisjon av en intensjon med ukjent utfall er ikke bygget (WP-F1) - du avstemmer i leverandørens portal; avstemmingskjøring på forespørsel herfra er **DEFERRED** (kjøres av den planlagte `finance-reconcile-sweep`).
@@ -64,6 +64,7 @@ Migrasjon 102 kjøres av vanlig migrering; den er additiv (nullbare kolonner) og
 ## Verifiser på NAS (NOT VERIFIED - ikke kjørt mot ekte data/NAS ennå)
 1. I `.env`: `JARVIS_CONTROL_CENTER_FINANCE=on`, `JARVIS_CONTROL_CENTER_MEMORY=on`, `JARVIS_CONTROL_CENTER_AGENT=on`, `JARVIS_GOVERNANCE_PROVENANCE=on`. `docker compose up -d api`. Kontroller at migrasjon 102 er kjørt:
    `SELECT column_name FROM information_schema.columns WHERE table_name = 'decision_log' AND column_name LIKE 'prov_%' ORDER BY 1;` (forvent 5 rader).
+   Kontroller at flaggene faktisk når containeren: `docker compose exec api printenv | grep -E 'JARVIS_CONTROL_CENTER|JARVIS_GOVERNANCE_PROVENANCE'` (forvent fire linjer med `=on`).
 2. Åpne `/control` fra en innrullert enhet: Finans, Minne og Agenter er flis i oversikten og står IKKE lenger under «Ikke koblet inn». Hver seksjon har kilde og tidspunkt; det som ikke er målbart står som «ikke målt».
 3. Chat: «vis finanssenteret» → forvent summary/explanation uten kronebeløp. Åpne samme senter på siden → beløp i måledata (`amount_ore`). Gjenta fra Telegram eller tale → forvent nekt (`control_center_requires_signed_device_session`/verktøyet ikke tilgjengelig).
 4. Opprett en beslutning i dashbordet (styringsjournalen). Forvent i Minne → Styringsjournal at posten har proveniens, og i databasen:
@@ -74,6 +75,6 @@ Migrasjon 102 kjøres av vanlig migrering; den er additiv (nullbare kolonner) og
 
 ## Utvikler: legg til et senter
 1. `apps/api/src/control-center/<id>.ts`: `ControlCenterDefinition` (kun lesing; `controlSection`/`controlItem`/`controlAction` fra `@jarvis/executive`; data via `tenantRead`/`tenantSpaceRead`/`settle` fra `shared.ts`).
-2. `register.ts`: ett flagg i `CONTROL_CENTER_FLAGS` og én linje i `registerControlCenters()` (`flagOn` krever eksakt `on`).
+2. `register.ts`: ett flagg i `CONTROL_CENTER_FLAGS` og én linje i `registerControlCenters()` (`flagOn` krever eksakt `on`). Legg flagget i `SERVICE_ENV.api` (`infra/local/service-env.mjs`) og regenerer compose (`node ops/security/generate-compose-env.mjs --write`) - ellers når `.env`-verdien aldri containeren; `wph1-control-env.test.ts` feiler hvis du glemmer det.
 3. Verktøy: en rad i `CONTROL_CENTER_READ_TOOLS` (`modules/executive/src/control-center/tools.ts`) - transporten og enumerasjonstestene leser tabellen. Speil i `modules/tool-gateway`: `chat-read-tier.ts`, `tool-manifest.ts` (effekt `read`, sensitivitet), `VOICE_EXCLUDED_KEYS`, og et smalt intent i `turn-context.ts` (executive-familien overstyres ellers av `max_tools_per_round`). Er dataen finansiell: legg verktøyet i `RESTRICTED_TOOL_KEYS` og sentret i `MONEY_REDACTED_CENTERS`.
 4. Tester: flagg AV, ikke-eier nektet, tenant-isolasjon, redigering, «ikke målt», DB-støttet som app-rolle (`apps/api/test/support/h0-db.ts`), og at siden viser sentret uten endring (`wph1-control-page.test.ts`).

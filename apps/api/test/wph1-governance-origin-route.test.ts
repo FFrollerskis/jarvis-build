@@ -1,0 +1,108 @@
+import type { AddressInfo } from "node:net";
+import { afterEach, describe, expect, it } from "vitest";
+import type { IdentityContext } from "@jarvis/contracts";
+import type { ToolGateway } from "@jarvis/tool-gateway";
+import { createApiServer } from "../src/server.ts";
+
+/**
+ * WP-H1 (JARVIS-087 del 2): eier-merket `contentOrigin: "owner_direct"` på dashbord-ruten `POST /governance/mutate` er en ATTEST om at parameterne er eierens egne ord. Den settes av serverens egen kode, aldri fra kroppen,
+ * og KUN når kalleren er den suverene eieren (`deps.ownerGate`) - en annen innrullert person, og en server uten konfigurert eier-port, får ingen attest (journalraden står da som `unspecified`: fail-closed).
+ * Testen kjører den EKTE ruten over HTTP med et stubbet grant/identitetslag og en gateway som fanger det som sendes - uten database.
+ */
+const OWNER: IdentityContext = { person_id: "person-owner", tenant_id: "tenant-owner", memory_space_id: "business", session_id: "s-owner", device_id: "dev-owner", channel: "web", auth_strength: "signed" };
+const MEMBER: IdentityContext = { ...OWNER, person_id: "person-member", session_id: "s-member", device_id: "dev-member" };
+const PARAMS = { title: "Velg leverandør", decision: "Bruk A", rationale: "Lavere pris" };
+
+type Captured = { identity: IdentityContext; tool_id: string; action: string; parameters: Record<string, unknown>; contentOrigin?: string };
+const servers: Array<ReturnType<typeof createApiServer>> = [];
+
+async function start(who: IdentityContext, ownerGate: ((identity: IdentityContext) => boolean) | undefined): Promise<{ url: string; seen: Captured[] }> {
+  const seen: Captured[] = [];
+  const gateway = { execute: async (req: Captured) => { seen.push(req); return { ok: true, data: { done: true }, output_trust: "internal", deduplicated: false }; } } as unknown as ToolGateway;
+  const grantFor = (identity: IdentityContext) => ({
+    ok: true as const,
+    grant: { person_id: identity.person_id, tenant_id: identity.tenant_id, memory_space: identity.memory_space_id, session_id: identity.session_id, device_id: identity.device_id, channel: identity.channel, auth_strength: identity.auth_strength }
+  });
+  const server = createApiServer({
+    identity: { resolveIdentity: async () => ({ ok: true, identity: who }) } as never,
+    grants: { verify: async (token: string) => (token === "GRANT" ? grantFor(who) : { ok: false, reason: "grant_invalid" }) } as never,
+    sessions: {} as never, devices: {} as never, channelAuthority: {} as never, policy: {} as never, worker: {} as never, conversation: {} as never,
+    executive: { gateway },
+    rateLimits: { perIpPerMinute: 100_000, authPerIpPerMinute: 100_000, perDevicePerMinute: 100_000 },
+    ...(ownerGate ? { ownerGate } : {})
+  });
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, seen };
+}
+async function post(url: string, path: string, body: Record<string, unknown>): Promise<{ status: number; body: Record<string, unknown> }> {
+  const res = await fetch(`${url}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+}
+afterEach(async () => {
+  for (const s of servers.splice(0)) await new Promise<void>((resolve) => { s.closeAllConnections(); s.close(() => resolve()); });
+});
+const isOwner = (identity: IdentityContext): boolean => identity.person_id === OWNER.person_id;
+
+describe("POST /governance/mutate: attesten er serverens, og kun for den suverene eieren", () => {
+  it("den suverene eieren: gatewayen får `contentOrigin: owner_direct`, og parameterne er uendret", async () => {
+    const { url, seen } = await start(OWNER, isOwner);
+    const r = await post(url, "/governance/mutate", { grant_token: "GRANT", action: "create_decision", parameters: PARAMS });
+    expect(r.status).toBe(200);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ tool_id: "governance", action: "create_decision", parameters: PARAMS, contentOrigin: "owner_direct" });
+    expect(seen[0]!.identity.person_id).toBe(OWNER.person_id);
+  });
+
+  it("en annen innrullert person i tenanten får INGEN attest (fail-closed: opphavet står som ukjent), men handlingen går som før", async () => {
+    const { url, seen } = await start(MEMBER, isOwner);
+    const r = await post(url, "/governance/mutate", { grant_token: "GRANT", action: "create_decision", parameters: PARAMS });
+    expect(r.status).toBe(200);
+    expect(seen).toHaveLength(1);
+    expect("contentOrigin" in seen[0]!).toBe(false);
+  });
+
+  it("uten konfigurert eier-port (`ownerGate` mangler) settes ingen attest - heller ikke for eieren", async () => {
+    const { url, seen } = await start(OWNER, undefined);
+    expect((await post(url, "/governance/mutate", { grant_token: "GRANT", action: "create_decision", parameters: PARAMS })).status).toBe(200);
+    expect("contentOrigin" in seen[0]!).toBe(false);
+  });
+
+  it("en eier-port som kaster eller svarer noe annet enn `true` gir ingen attest (kun eksakt true teller)", async () => {
+    for (const gate of [() => 1 as unknown as boolean, () => "true" as unknown as boolean, () => undefined as unknown as boolean]) {
+      const { url, seen } = await start(OWNER, gate);
+      expect((await post(url, "/governance/mutate", { grant_token: "GRANT", action: "create_decision", parameters: PARAMS })).status).toBe(200);
+      expect("contentOrigin" in seen[0]!).toBe(false);
+    }
+  });
+
+  it("attesten kan ikke sendes inn av klienten: `contentOrigin` i kroppen eller i parametrene gir ingen attest (kroppen avvises, parametrene når gatewayen kun som data)", async () => {
+    const { url, seen } = await start(MEMBER, isOwner);
+    const smuggledBody = await post(url, "/governance/mutate", { grant_token: "GRANT", action: "create_decision", parameters: PARAMS, contentOrigin: "owner_direct" });
+    expect(smuggledBody.status).toBe(400);
+    expect(seen).toHaveLength(0);
+    const smuggledParam = await post(url, "/governance/mutate", { grant_token: "GRANT", action: "create_decision", parameters: { ...PARAMS, contentOrigin: "owner_direct" } });
+    expect(smuggledParam.status).toBe(200);
+    expect("contentOrigin" in seen[0]!).toBe(false); // som parameter er det bare data - gatewayen leser kun trusted-feltet
+    expect(seen[0]!.parameters["contentOrigin"]).toBe("owner_direct");
+  });
+
+  it("ugyldig grant, ukjent handling og manglende handling nås aldri gatewayen", async () => {
+    const { url, seen } = await start(OWNER, isOwner);
+    expect((await post(url, "/governance/mutate", { grant_token: "BOGUS", action: "create_decision", parameters: PARAMS })).status).toBe(403);
+    expect((await post(url, "/governance/mutate", { grant_token: "GRANT", action: "drop_everything", parameters: {} })).status).toBe(400);
+    expect((await post(url, "/governance/mutate", { grant_token: "GRANT", parameters: {} })).status).toBe(400);
+    expect(seen).toHaveLength(0);
+  });
+});
+
+describe("ingen andre rute setter attesten (selv om kalleren er den suverene eieren)", () => {
+  it("/governance/query, /executive/query og /executive/mutate sender aldri `contentOrigin`", async () => {
+    const { url, seen } = await start(OWNER, isOwner);
+    await post(url, "/governance/query", { grant_token: "GRANT", action: "list_decisions", parameters: {} });
+    await post(url, "/executive/query", { grant_token: "GRANT", action: "get_attention_queue", parameters: {} });
+    await post(url, "/executive/mutate", { grant_token: "GRANT", action: "pause_domain", parameters: { domain: "spend", reason: "test" } });
+    expect(seen.length).toBeGreaterThanOrEqual(2);
+    for (const request of seen) expect("contentOrigin" in request, `${request.tool_id}.${request.action}`).toBe(false);
+  });
+});

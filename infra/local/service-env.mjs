@@ -359,7 +359,10 @@ export const SERVICE_ENV = {
     // (monteres `:ro` med infra/backup/docker-compose.backup-status.yml - aldri selve backup-mappen).
     "JARVIS_UPTIME_HEARTBEAT_URL", "JARVIS_UPTIME_HEARTBEAT_INTERVAL_SEC", "JARVIS_BACKUP_STATUS_FILE",
     // WP-D1 (Q-26): kildeverifisering - skriving er AV som standard (kun «on» slår den på), og standard antall uavhengige kilder for VERIFIED (2..10).
-    "JARVIS_KNOWLEDGE_CLAIM_WRITES", "JARVIS_KNOWLEDGE_CLAIM_MIN_SOURCES"],
+    "JARVIS_KNOWLEDGE_CLAIM_WRITES", "JARVIS_KNOWLEDGE_CLAIM_MIN_SOURCES",
+    // WP-H1 (UA-11, JARVIS-087 del 2): kontrollsentrene Finans/Minne/Agenter (AV som standard; kun den eksakte verdien «on» slår dem på) og proveniens på nye styringsjournal-poster (AV som standard). Api-only; ingen hemmeligheter.
+    // Uten disse linjene når en verdi i `.env` aldri containeren (compose sender kun det manifestet lister) - flaggene ville vært stille virkningsløse.
+    "JARVIS_CONTROL_CENTER_FINANCE", "JARVIS_CONTROL_CENTER_MEMORY", "JARVIS_CONTROL_CENTER_AGENT", "JARVIS_GOVERNANCE_PROVENANCE"],
   worker: [...CORE_ENV.filter((n) => !WORKER_EXCLUDES.has(n)), ...MODEL_ENV, ...WORKER_CONNECTOR_ENV, "LANGFUSE_BASE_URL", "JARVIS_TRACE_FILE", "JARVIS_CLAUDE_BIN", "JARVIS_JOB_RUNNER", "JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY",
     // WP-C1 (D-32 / Q-45a): vertsside job-runner (JARVIS_JOB_RUNNER=host). Socket-katalogen og tokenfilen monteres inn via infra/job-runner/docker-compose.job-runner.yml
     // (valgfri override) - uten den, og med tomme verdier her, feiler hver kodejobb lukket som før.

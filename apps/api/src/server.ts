@@ -1540,10 +1540,12 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       if (resolved.responded) return;
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
     }
-    // WP-H1 (JARVIS-087 del 2): dashbord-ruten attesterer at parameterne er eierens EGNE ord (skjemaet i dashbordet, signert enhetsøkt - ingen modell har formulert dem). Det er det eneste trusted
-    // opphavet denne ruten kan bevise; uten attesten ville proveniensen på journalraden stå som `unspecified`. Kun journal-transporten leser verdien (og kun når JARVIS_GOVERNANCE_PROVENANCE=on).
+    // WP-H1 (JARVIS-087 del 2): dashbord-ruten attesterer at parameterne er eierens EGNE ord (skjemaet i dashbordet, grant fra en innrullert enhet - ingen modell har formulert dem) - men KUN når kalleren er
+    // den suverene eieren (`deps.ownerGate`, samme predikat som kontrollsentrene): en annen innrullert person i tenanten (eller en rute uten konfigurert eier-port) får ingen attest, og journalraden står da
+    // som `unspecified` (fail-closed - aldri «eierens ord» på noe annet enn eierens egen inntasting). Kun journal-transporten leser verdien (og kun når JARVIS_GOVERNANCE_PROVENANCE=on); den åpner ingen rute.
     const result = await deps.executive.gateway.execute({
-      identity: resolved.identity, tool_id: "governance", action, parameters, contentOrigin: "owner_direct"
+      identity: resolved.identity, tool_id: "governance", action, parameters,
+      ...(deps.ownerGate?.(resolved.identity) === true ? { contentOrigin: "owner_direct" as const } : {})
     });
     if (!result.ok) {
       return json(res, 403, { error: "tool_denied", reason: result.reason });
