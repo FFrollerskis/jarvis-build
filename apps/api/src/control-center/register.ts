@@ -13,7 +13,7 @@ import { createMemoryCenter } from "./memory.ts";
 import { createOperationsCenter } from "./operations.ts";
 import { createPrivacyCenter } from "./privacy.ts";
 import { createSecurityCenter } from "./security.ts";
-import { flagOn, type ControlCenterPool } from "./shared.ts";
+import { CONTROL_CENTER_FLAGS, CONTROL_FEATURE_FLAGS, flagOn, type ControlCenterPool } from "./shared.ts";
 import { createValueCenter } from "./value.ts";
 
 export type { ControlCenterPool } from "./shared.ts";
@@ -33,29 +33,8 @@ export function ownerPredicate(authority: AuthorityConfig): (identity: IdentityC
   return (identity) => resolveAuthorityMode(authority, identity) === "SOVEREIGN";
 }
 
-/**
- * WP-H1/H2: flaggene som slår på kontrollsentrene som ble bygget etter H0. ALLE er AV som standard og krever den EKSAKTE verdien «on» (`flagOn`): uten flagg registreres senteret ikke, og står i oversiktens
- * `unregistered`-liste («ikke koblet inn») akkurat som før H1 - H0-oppførselen er uendret. Integrasjoner, Autoritet og AI (H0) har ingen flagg og er alltid på når deres avhengigheter finnes.
- */
-export const CONTROL_CENTER_FLAGS = {
-  finance: "JARVIS_CONTROL_CENTER_FINANCE",
-  memory: "JARVIS_CONTROL_CENTER_MEMORY",
-  agent: "JARVIS_CONTROL_CENTER_AGENT",
-  operations: "JARVIS_CONTROL_CENTER_OPERATIONS",
-  value: "JARVIS_CONTROL_CENTER_VALUE",
-  privacy: "JARVIS_CONTROL_CENTER_PRIVACY",
-  security: "JARVIS_CONTROL_CENTER_SECURITY"
-} as const;
-
-/**
- * WP-H2: to enkelt-funksjoner kontrollsentrene får bak EGNE flagg (AV som standard, kun eksakt «on»; uten flagg finnes verken knappen eller verktøyet):
- *  - `goldenSuite`: golden-suite-knappen (Sikkerhet-senteret + `executive.run_golden_suite`). Lesende, deterministisk, ingen modell.
- *  - `autonomyRevoke`: tilbakekall av eierens autonomi-binding per domene (Autoritet-senteret + `executive.revoke_autonomy_binding`). Eier-kun, step-up, klasse C.
- */
-export const CONTROL_FEATURE_FLAGS = {
-  goldenSuite: "JARVIS_CONTROL_GOLDEN_SUITE",
-  autonomyRevoke: "JARVIS_CONTROL_AUTONOMY_REVOKE"
-} as const;
+// Flaggobjektene (`CONTROL_CENTER_FLAGS`, `CONTROL_FEATURE_FLAGS`) bor i `shared.ts` og re-eksporteres her (se kommentaren der): `main.ts` leser dem derfra, så importlinjen fra denne fabrikken forblir uendret.
+export { CONTROL_CENTER_FLAGS, CONTROL_FEATURE_FLAGS };
 
 /** Redigerer hemmeligheter i alle menneskelesbare strenger i en rapport (siste forsvarslinje). FAST: ikke en parameter noe sted. */
 const redactSecrets = (text: string): string => scanForSecrets(text).text;

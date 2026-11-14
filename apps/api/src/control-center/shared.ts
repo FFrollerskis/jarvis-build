@@ -179,3 +179,29 @@ export function mergeBy<T>(rows: readonly T[], key: (row: T) => string, merge: (
 export function flagOn(env: Readonly<Record<string, string | undefined>>, name: string): boolean {
   return env[name] === "on";
 }
+
+/**
+ * WP-H1/H2: flaggene som slår på kontrollsentrene som ble bygget etter H0. ALLE er AV som standard og krever den EKSAKTE verdien «on» (`flagOn`): uten flagg registreres senteret ikke, og står i oversiktens
+ * `unregistered`-liste («ikke koblet inn») akkurat som før H1 - H0-oppførselen er uendret. Integrasjoner, Autoritet og AI (H0) har ingen flagg og er alltid på når deres avhengigheter finnes.
+ * Objektene bor her (ikke i `register.ts`) slik at `main.ts` kan lese dem uten å røre importlinjen fra fabrikken `register.ts` - den er låst av kildevakten i `e1-review-m3-owner-gate.test.ts`. `register.ts` re-eksporterer dem.
+ * Hvert navn MÅ stå i `SERVICE_ENV.api` (`infra/local/service-env.mjs`), ellers når en verdi i `.env` aldri containeren - låst av `wph1-control-env.test.ts`.
+ */
+export const CONTROL_CENTER_FLAGS = {
+  finance: "JARVIS_CONTROL_CENTER_FINANCE",
+  memory: "JARVIS_CONTROL_CENTER_MEMORY",
+  agent: "JARVIS_CONTROL_CENTER_AGENT",
+  operations: "JARVIS_CONTROL_CENTER_OPERATIONS",
+  value: "JARVIS_CONTROL_CENTER_VALUE",
+  privacy: "JARVIS_CONTROL_CENTER_PRIVACY",
+  security: "JARVIS_CONTROL_CENTER_SECURITY"
+} as const;
+
+/**
+ * WP-H2: to enkelt-funksjoner kontrollsentrene får bak EGNE flagg (AV som standard, kun eksakt «on»; uten flagg finnes verken knappen eller verktøyet):
+ *  - `goldenSuite`: golden-suite-knappen (Sikkerhet-senteret + `executive.run_golden_suite`). Lesende, deterministisk, ingen modell.
+ *  - `autonomyRevoke`: tilbakekall av eierens autonomi-binding per domene (Autoritet-senteret + `executive.revoke_autonomy_binding`). Eier-kun, step-up, klasse C.
+ */
+export const CONTROL_FEATURE_FLAGS = {
+  goldenSuite: "JARVIS_CONTROL_GOLDEN_SUITE",
+  autonomyRevoke: "JARVIS_CONTROL_AUTONOMY_REVOKE"
+} as const;
