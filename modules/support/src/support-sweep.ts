@@ -1,5 +1,5 @@
 import type pg from "pg";
-import type { IdentityContext, SweepFailureCollector } from "@jarvis/contracts";
+import type { IdentityContext, RunCorrelation, SweepFailureCollector } from "@jarvis/contracts";
 import { listBusinessTenantIds } from "@jarvis/core";
 import type { GmailIngressStats, SupportEmailService } from "./email-ingress.ts";
 
@@ -21,7 +21,9 @@ import type { GmailIngressStats, SupportEmailService } from "./email-ingress.ts"
 export async function runSupportInboxSyncForAllTenants(
   pool: pg.Pool,
   emailService: SupportEmailService,
-  failures?: SweepFailureCollector
+  failures?: SweepFailureCollector,
+  /** WP-K (JARVIS-054): kjøringens oppgave-/spor-ID (`ScheduledRun`) - ender i revisjonsradene og policy-journalen til `person_id: "system"`-kallet. */
+  correlation?: Partial<RunCorrelation>
 ): Promise<Record<string, GmailIngressStats>> {
   const tenantIds = await listBusinessTenantIds(pool, 200);
   const results: Record<string, GmailIngressStats> = {};
@@ -32,7 +34,7 @@ export async function runSupportInboxSyncForAllTenants(
       channel: "api", auth_strength: "active"
     };
     try {
-      results[tenantId] = await emailService.ingestFromGmail(tenantId, "business", identity);
+      results[tenantId] = await emailService.ingestFromGmail(tenantId, "business", identity, correlation === undefined ? {} : { correlation });
     } catch (err) {
       console.error(JSON.stringify({
         msg: "support_inbox_sync_tenant_failed", tenant_id: tenantId,

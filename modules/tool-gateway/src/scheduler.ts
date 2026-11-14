@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
-import { envHour } from "@jarvis/contracts";
+import { envHour, scheduledRunCorrelation, type RunCorrelation } from "@jarvis/contracts";
 
 /**
  * BO-05: reboot-durabel daglig scheduler. Tilstand i Postgres (scheduler_state):
@@ -17,6 +17,19 @@ export const DAILY_SCHEDULER_CLAIM_LEASE_MINUTES = 15;
 
 /** WP-C4: jobbnavnet for den daglige morgenbriefen (standard for `DailyScheduler`) - delt med Value Center-kilden som leser løperens helse i `scheduler_state`. */
 export const DAILY_BRIEF_JOB_NAME = "daily-brief";
+
+/**
+ * WP-K (D-471, JARVIS-054): det en planlagt kjøring bærer inn i jobben. `task_id`/`trace_id` (se `RunCorrelation`) sendes videre til `ToolGateway.execute()` av jobber som kaller verktøy som
+ * `person_id: "system"`, slik at revisjonsrader og policy-avgjørelser fra samme kjøring kan knyttes til jobben og forsøket som skrev dem. `deliver()` kan fortsatt deklareres uten parameter.
+ */
+export interface ScheduledRun extends RunCorrelation {
+  job_name: string;
+  /** Dagen (Europe/Oslo) claimet gjelder, `YYYY-MM-DD`. */
+  run_date: string;
+  /** Forsøksnummer for dagen (1 = første kjøring; øker når en feilet/hengt claim overtas). */
+  attempt: number;
+  instance_id: string;
+}
 
 export class DailyScheduler {
   readonly instanceId = `sched-${randomUUID().slice(0, 8)}`;
@@ -40,9 +53,14 @@ export class DailyScheduler {
    * opp til `MAX_ATTEMPTS` forsoek per dag - tidligere var ETT forbigaaende nettverks-/DB-feil nok til at dagens jobb gikk tapt.
    */
   async claimToday(): Promise<boolean> {
+    return (await this.claimTodayRun()) !== null;
+  }
+
+  /** Som `claimToday()`, men returnerer kjøringens identitet og korrelasjon (`null` = ikke vår kjøring nå). `claimToday()` er uendret for eksisterende kallere. */
+  async claimTodayRun(): Promise<ScheduledRun | null> {
     const { date, hour } = this.localNow();
-    if (hour < this.hour) return false; // foer planlagt tid
-    const result = await this.pool.query(
+    if (hour < this.hour) return null; // foer planlagt tid
+    const result = await this.pool.query<{ attempts: number | string }>(
       `INSERT INTO scheduler_state (job_name, run_date, claimed_by) VALUES ($1, $2, $3)
        ON CONFLICT (job_name, run_date) DO UPDATE
          SET claimed_by = EXCLUDED.claimed_by, claimed_at = now(), attempts = scheduler_state.attempts + 1, retry_after = NULL
@@ -51,10 +69,14 @@ export class DailyScheduler {
          AND (
            (scheduler_state.retry_after IS NOT NULL AND scheduler_state.retry_after <= now())
            OR (scheduler_state.retry_after IS NULL AND scheduler_state.claimed_at < now() - make_interval(mins => $5::int))
-         )`,
+         )
+       RETURNING attempts`,
       [this.jobName, date, this.instanceId, MAX_ATTEMPTS, DAILY_SCHEDULER_CLAIM_LEASE_MINUTES]
     );
-    return (result.rowCount ?? 0) > 0;
+    if ((result.rowCount ?? 0) === 0) return null;
+    const attempt = Number(result.rows?.[0]?.attempts);
+    const run = Number.isFinite(attempt) && attempt >= 1 ? Math.trunc(attempt) : 1;
+    return { job_name: this.jobName, run_date: date, attempt: run, instance_id: this.instanceId, ...scheduledRunCorrelation(this.jobName, date, run) };
   }
 
   async markCompleted(): Promise<void> {
@@ -92,14 +114,18 @@ export class DailyScheduler {
     }
   }
 
-  /** Kjoer i intervall: leverer maks en gang per dag, reboot-/multi-instans-trygt. `heartbeatMs` (D-442) styrer hvor ofte claimet fornyes mens `deliver()` kjorer. */
-  start(deliver: () => Promise<void>, intervalMs = 60_000, heartbeatMs = 60_000): NodeJS.Timeout {
+  /**
+   * Kjoer i intervall: leverer maks en gang per dag, reboot-/multi-instans-trygt. `heartbeatMs` (D-442) styrer hvor ofte claimet fornyes mens `deliver()` kjorer.
+   * WP-K (JARVIS-054): `deliver` får kjøringens `ScheduledRun` (oppgave-/spor-ID) - en jobb som ikke trenger den kan fortsatt deklareres uten parameter.
+   */
+  start(deliver: (run: ScheduledRun) => Promise<void>, intervalMs = 60_000, heartbeatMs = 60_000): NodeJS.Timeout {
     const timer = setInterval(() => void (async () => {
-      if (await this.claimToday()) {
+      const run = await this.claimTodayRun();
+      if (run !== null) {
         const heartbeat = setInterval(() => void this.heartbeat().catch(() => undefined), heartbeatMs);
         heartbeat.unref();
         try {
-          await deliver();
+          await deliver(run);
           await this.markCompleted();
         } catch (err) {
           // D-393 (JARVIS-027): planlegg retry foer feilen logges av sikkerhetsnettet under (feil i selve markFailed maa ikke skjule originalfeilen).

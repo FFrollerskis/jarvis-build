@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts";
+import { correlationFields, type IdentityContext, type JsonValue, type MemorySpace, type RunCorrelation } from "@jarvis/contracts";
 import type { ToolGateway } from "@jarvis/tool-gateway";
 import { extractCounterpartEmails, extractEmailAddress, type BusinessService } from "@jarvis/business";
 import type { SupportService } from "./service.ts";
@@ -98,12 +98,14 @@ export class SupportEmailService {
     tenantId: string,
     memorySpace: MemorySpace,
     identity: IdentityContext,
-    opts: { max?: number; query?: string } = {}
+    opts: { max?: number; query?: string; correlation?: Partial<RunCorrelation> } = {}
   ): Promise<GmailIngressStats> {
     const stats: GmailIngressStats = { scanned: 0, ingested: 0, ignored_not_support: 0, unmatched: 0, ambiguous: 0 };
     const result = await this.gateway.execute({
       identity, tool_id: "email", action: "list_messages",
-      parameters: { max: opts.max ?? 25, ...(opts.query ? { query: opts.query } : {}) }
+      parameters: { max: opts.max ?? 25, ...(opts.query ? { query: opts.query } : {}) },
+      // WP-K (JARVIS-054): `person_id: "system"`-kallet bærer jobb-/spor-ID videre til revisjon og policy-journal (tom når kallet ikke kommer fra en planlagt kjøring).
+      ...correlationFields(opts.correlation)
     });
     if (!result.ok) throw new Error(result.reason);
     const messages = ((result.data as { messages?: JsonValue[] } | undefined)?.messages ?? []) as GmailMessage[];

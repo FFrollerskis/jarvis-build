@@ -1718,14 +1718,14 @@ porter: se docs/RUNTIME_GATES.md`;
   // morgenbriefen kjører.
   new DailyScheduler(
     pool, "business-events-sync", envHour("JARVIS_BUSINESS_EVENTS_SYNC_HOUR", 5)
-  ).start(() => failOnSweepFailures("business-events-sync", (failures) => runBusinessEventSyncForAllTenants(pool, businessEventSyncService, failures)));
+  ).start((run) => failOnSweepFailures("business-events-sync", (failures) => runBusinessEventSyncForAllTenants(pool, businessEventSyncService, failures, run)));
   // UA-7 Communications Hub - foerste slice (D-119): periodisk Gmail->
   // Conversation Graph-identitetskobling - SAMME reboot-durable
   // DailyScheduler-mekanisme (eget job_name, egen klokkeslett-env),
   // uavhengig av business-events-sync over.
   new DailyScheduler(
     pool, "conversation-graph-sync", envHour("JARVIS_CONVERSATION_GRAPH_SYNC_HOUR", 5)
-  ).start(() => failOnSweepFailures("conversation-graph-sync", (failures) => runConversationGraphSyncForAllTenants(pool, conversationGraphSyncService, failures)));
+  ).start((run) => failOnSweepFailures("conversation-graph-sync", (failures) => runConversationGraphSyncForAllTenants(pool, conversationGraphSyncService, failures, run)));
   // UA-3 profiling/scoring-slice (D-61) §23: periodisk, idempotent
   // score-rekalkulering - SAMME reboot-durable DailyScheduler-mekanisme (eget
   // job_name, egen klokkeslett-env). Kjøres ETTER events-sync (05) og
@@ -1746,7 +1746,7 @@ porter: se docs/RUNTIME_GATES.md`;
   // klassifiseres som support, se `email-ingress.ts`).
   new DailyScheduler(
     pool, "support-inbox-sync", envHour("JARVIS_SUPPORT_INBOX_SYNC_HOUR", 8)
-  ).start(() => failOnSweepFailures("support-inbox-sync", (failures) => runSupportInboxSyncForAllTenants(pool, supportEmailService, failures)));
+  ).start((run) => failOnSweepFailures("support-inbox-sync", (failures) => runSupportInboxSyncForAllTenants(pool, supportEmailService, failures, run)));
   // D-85: periodisk anomaly->anbefaling-sveip (growth-eid BESLUTNINGS-lag,
   // ALDRI utførelse) - SAMME reboot-durable DailyScheduler-mekanisme, eget
   // job_name/klokkeslett-env. Kjøres ETTER business-open-loop-sweep (default

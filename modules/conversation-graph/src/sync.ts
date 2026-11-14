@@ -22,7 +22,7 @@
  */
 
 import type pg from "pg";
-import type { IdentityContext, JsonValue, MemorySpace, SweepFailureCollector } from "@jarvis/contracts";
+import { correlationFields, type IdentityContext, type JsonValue, type MemorySpace, type RunCorrelation, type SweepFailureCollector } from "@jarvis/contracts";
 import { extractCounterpartEmails, type BusinessService } from "@jarvis/business";
 import { listBusinessTenantIds } from "@jarvis/core";
 import type { ToolGateway } from "@jarvis/tool-gateway";
@@ -60,12 +60,14 @@ export class ConversationGraphSyncService {
     tenantId: string,
     memorySpace: MemorySpace,
     identity: IdentityContext,
-    opts: { max?: number; query?: string } = {}
+    opts: { max?: number; query?: string; correlation?: Partial<RunCorrelation> } = {}
   ): Promise<ConversationGraphSyncStats> {
     const stats: ConversationGraphSyncStats = { scanned: 0, linked: 0 };
     const result = await this.gateway.execute({
       identity, tool_id: "email", action: "list_messages",
-      parameters: { max: opts.max ?? 25, ...(opts.query ? { query: opts.query } : {}) }
+      parameters: { max: opts.max ?? 25, ...(opts.query ? { query: opts.query } : {}) },
+      // WP-K (JARVIS-054): `person_id: "system"`-kallet bærer jobb-/spor-ID videre til revisjon og policy-journal (tom når kallet ikke kommer fra en planlagt kjøring).
+      ...correlationFields(opts.correlation)
     });
     if (!result.ok) throw new Error(result.reason);
     const messages = ((result.data as { messages?: JsonValue[] } | undefined)?.messages ?? []) as GmailMessage[];
@@ -133,7 +135,9 @@ export function createConversationGraphSyncService(
 export async function runConversationGraphSyncForAllTenants(
   pool: pg.Pool,
   syncService: ConversationGraphSyncService,
-  failures?: SweepFailureCollector
+  failures?: SweepFailureCollector,
+  /** WP-K (JARVIS-054): kjøringens oppgave-/spor-ID (`ScheduledRun`) - ender i revisjonsradene og policy-journalen til `person_id: "system"`-kallet. */
+  correlation?: Partial<RunCorrelation>
 ): Promise<Record<string, ConversationGraphSyncStats>> {
   const tenantIds = await listBusinessTenantIds(pool, 200);
   const results: Record<string, ConversationGraphSyncStats> = {};
@@ -144,7 +148,7 @@ export async function runConversationGraphSyncForAllTenants(
       channel: "api", auth_strength: "active"
     };
     try {
-      results[tenantId] = await syncService.syncGmailIdentities(tenantId, "business", identity);
+      results[tenantId] = await syncService.syncGmailIdentities(tenantId, "business", identity, correlation === undefined ? {} : { correlation });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(JSON.stringify({ msg: "conversation_graph_sync_tenant_failed", tenant_id: tenantId, error: message.slice(0, 200) }));
