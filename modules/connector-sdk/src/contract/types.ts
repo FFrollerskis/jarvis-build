@@ -15,6 +15,13 @@ export type { HealthState, JsonValue, TrustLevel };
 /** Speiler `FailureCategory` (Integrasjonssenteret) + de avvisningsårsakene gatewayen selv gir. */
 export type ErrorCategory = "auth" | "rate_limit" | "timeout" | "network" | "not_found" | "invalid_input" | "authority" | "paused" | "conflict" | "policy" | "other";
 
+/**
+ * Hva slags adapter kittet kjørte mot (review M4). `fake_from_manifest` = en fake bygget av manifestet selv (`createFakeConnector`): den beviser at manifestets garantier er konsistente og at kittet
+ * fanger brudd, men sier INGENTING om en ekte transport (kontrakten er modellert ut fra samme manifest den testes mot). `real_transport` er reservert for en bro som kjører en EKTE transport bak en
+ * fake leverandørserver (DEFERRED). Kun `real_transport` kan gi akseptansestatus `proven`; en fake gir høyst `modelled`.
+ */
+export type AdapterKind = "fake_from_manifest" | "real_transport";
+
 export interface AdapterIdentity {
   tenant_id: string;
   person_id: string;
@@ -84,6 +91,8 @@ export interface ProviderState {
 
 /** Testkroker kittet trenger for å bevise egenskapene (en fake implementerer dem; en ekte transport ville fått dem fra en fake leverandørserver). */
 export interface ContractControls {
+  /** Proveniens for beviset (review M4): en fake bygget fra manifestet, eller en ekte transport. Ukjent/manglende regnes som `fake_from_manifest`. */
+  readonly adapter_kind: AdapterKind;
   readonly clock: VirtualClock;
   injectFault(fault: Fault | null): void;
   /** Antall leverandør-side effekter (kjøringer av en skrivehandling) - per handling eller totalt. */

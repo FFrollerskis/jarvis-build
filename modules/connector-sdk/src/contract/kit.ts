@@ -4,7 +4,7 @@ import { validateConnectorManifest } from "../validate.ts";
 import { settle } from "./clock.ts";
 import { redactText } from "./redact.ts";
 import { scoreAcceptance, type AcceptanceReport } from "./scoring.ts";
-import type { AdapterIdentity, AdapterRequest, AdapterResult, CheckStatus, ContractAdapter, ContractCheckResult, ErrorCategory, HealthState, JsonValue } from "./types.ts";
+import type { AdapterIdentity, AdapterKind, AdapterRequest, AdapterResult, CheckStatus, ContractAdapter, ContractCheckResult, ErrorCategory, Fault, HealthState, JsonValue } from "./types.ts";
 
 /**
  * WP-I (D-472): KONTRAKTSTEST-KITTET `runConnectorContract(manifest, adapter)`. Én standard prosedyre som beviser at en connector holder det manifestet lover (kap. 10) og Appendiks B (nivå R/A):
@@ -12,13 +12,19 @@ import type { AdapterIdentity, AdapterRequest, AdapterResult, CheckStatus, Contr
  * ubetrodd-merking, autoritet (tenant/delegert), rollback, klasse D-kjeden, pause/tilbakekall. Kittet kjører mot en `ContractAdapter` (en fake fra `createFakeConnector`, ingen nettverk, virtuell klokke).
  *
  * Hver sjekk har en stabil `id`, et nivå (`R` = alle connectorer, `A` = skrive-/utførende) og et utfall `pass`/`fail`/`skip` (med årsak). `skip` er ALDRI `pass`. Resultatet mates inn i
- * `scoreAcceptance` (Appendiks B) som skiller ærlig mellom BEVIST (kittet kjørte det), DEKLARERT (manifestet påstår det), GAP og IKKE BEVIST (krever live-/ekstern evidens). Ingenting blir «VERIFIED».
+ * `scoreAcceptance` (Appendiks B) som skiller ærlig mellom BEVIST (kittet kjørte det mot en EKTE transport - ingen connector har det i dag), MODELLERT (kittet kjørte det mot en fake bygget fra manifestet),
+ * DEKLARERT (manifestet påstår det), GAP og IKKE BEVIST (krever live-/ekstern evidens). Rapporten bærer `adapter_kind` (`fake_from_manifest` | `real_transport`). Ingenting blir «VERIFIED».
+ *
+ * Skjerpet etter review M4 (hver skjerping har en mutant og en test): nøkkelgjenbruk med annen nyttelast må AVVISES (ikke bare «ingen ny effekt»), hemmelighetsskanning dekker ALLE feilklasser, evidensen må vise en endring
+ * når tilstanden endret seg, HVER påkrevd parameter fjernes i tur, tenant-/pause-/tilbakekall-sjekk må komme før dedupe-oppslaget (kryss-tenant-replay), og 5xx på en skriving er ukjent utfall.
  *
  * Leverandør-/hemmelighetsformede testverdier bygges ved KJØRING (aldri som bokstaver i kilden, så gitleaks aldri ser dem).
  */
 
 export interface ContractReport {
   connector_id: string;
+  /** Proveniens for beviset (review M4): en fake bygget av manifestet (`fake_from_manifest`, gir høyst `modelled`) eller en ekte transport (`real_transport`, DEFERRED). */
+  adapter_kind: AdapterKind;
   checks: ContractCheckResult[];
   passed: number;
   failed: number;
@@ -200,9 +206,10 @@ const CHECKS: CheckDef[] = [
     run: async (k) => {
       const probe = k.reads[0] ?? k.executableWrites[0];
       if (probe === undefined) return skip("ingen handling å prøve");
+      // En 5xx på en LESING er en vanlig, retry-bar nettverksfeil; på en SKRIVING er utfallet ukjent (retryable false - se `errors.write_5xx_is_outcome_unknown`).
       const cases: Array<[{ kind: "auth" | "rate_limit" | "network" | "server" | "not_found" | "invalid" }, ErrorCategory, boolean]> = [
         [{ kind: "auth" }, "auth", false], [{ kind: "rate_limit" }, "rate_limit", true], [{ kind: "network" }, "network", true],
-        [{ kind: "server" }, "network", true], [{ kind: "not_found" }, "not_found", false], [{ kind: "invalid" }, "invalid_input", false]
+        [{ kind: "server" }, "network", probe.effect === "read"], [{ kind: "not_found" }, "not_found", false], [{ kind: "invalid" }, "invalid_input", false]
       ];
       const f: string[] = [];
       for (const [fault, category, retryable] of cases) {
@@ -264,23 +271,28 @@ const CHECKS: CheckDef[] = [
     }
   },
   {
-    id: "redaction.no_secret_shapes", level: "R", title: "utdata og feil inneholder aldri credential eller hemmelighetsformer (leverandørtekst og feil siterer dem)",
+    id: "redaction.no_secret_shapes", level: "R", title: "utdata og feil inneholder aldri credential eller hemmelighetsformer - for HVER feilklasse (auth, 429, nettverk, 5xx, ikke funnet, ugyldig, tidsavbrudd) og både lesing og skriving",
     run: async (k) => {
-      const probe = k.reads[0] ?? k.executableWrites[0];
-      if (probe === undefined) return skip("ingen handling å prøve");
+      const probes = [k.reads[0], k.executableWrites[0]].filter((a): a is ActionSpec => a !== undefined);
+      if (probes.length === 0) return skip("ingen handling å prøve");
       const canary = k.adapter.credentialCanary();
       const f: string[] = [];
-      k.adapter.seedProviderText(`${secretShapes().join(" ")} ${canary}`);
-      for (const a of k.reads) {
-        const c = await k.call(a);
-        if (c.result !== null && hasSecretShape(JSON.stringify(c.result), canary)) f.push(`${a.key}: hemmelighetsform i svaret`);
-      }
-      for (const fault of [{ kind: "auth" }, { kind: "network" }, { kind: "invalid" }] as const) {
-        k.adapter.injectFault(fault);
-        const c = await k.call(probe);
-        if (c.result !== null && hasSecretShape(JSON.stringify(c.result), canary)) f.push(`${probe.key}: hemmelighetsform i feilen (${fault.kind})`);
-        k.reset();
-        k.adapter.seedProviderText(`${secretShapes().join(" ")} ${canary}`);
+      const seed = (): void => k.adapter.seedProviderText(`${secretShapes().join(" ")} ${canary}`);
+      const scan = (a: ActionSpec, c: CallOutcome, where: string): void => {
+        if (c.result !== null && hasSecretShape(JSON.stringify(c.result), canary)) f.push(`${a.key}: hemmelighetsform ${where}`);
+      };
+      seed();
+      for (const a of [...k.reads, ...k.executableWrites]) scan(a, await k.call(a), "i svaret");
+      // Review M4: ALLE feilklasser (ikke bare auth/nettverk/ugyldig) - leverandøren siterer tekst og credential også i 429, 5xx og tidsavbrudd.
+      for (const a of probes) {
+        const faults: Fault[] = [{ kind: "auth" }, { kind: "rate_limit" }, { kind: "network" }, { kind: "server" }, { kind: "not_found" }, { kind: "invalid" }, { kind: "slow", ms: a.operations.timeout_ms * 10, effect: "before" }];
+        if (a.effect !== "read") faults.push({ kind: "slow", ms: a.operations.timeout_ms * 10, effect: "after" });
+        for (const fault of faults) {
+          k.adapter.injectFault(fault);
+          scan(a, await k.call(a), `i feilen (${fault.kind === "slow" ? `tidsavbrudd ${fault.effect}` : fault.kind})`);
+          k.reset();
+          seed();
+        }
       }
       k.reset();
       return verdict(f);
@@ -306,6 +318,9 @@ const CHECKS: CheckDef[] = [
       const probes = [k.reads[0], k.executableWrites[0]].filter((a): a is ActionSpec => a !== undefined);
       if (probes.length === 0) return skip("ingen handling å prøve");
       const f: string[] = [];
+      const replayKey = k.key("revokereplay");
+      const replayTarget = k.executableWrites[0];
+      if (replayTarget !== undefined && okOf(await k.call(replayTarget, { key: replayKey })) === null) f.push(`${replayTarget.key}: kall før tilbakekall feilet`);
       k.adapter.setCredentialRevoked(true);
       const calls0 = k.adapter.providerCalls();
       const eff0 = k.adapter.effects();
@@ -313,6 +328,12 @@ const CHECKS: CheckDef[] = [
         const e = errOf(await k.call(a));
         if (e === null) f.push(`${a.key}: utført med tilbakekalt credential`);
         else if (e.category !== "authority") f.push(`${a.key}: kategori ${e.category}, forventet authority`);
+      }
+      // Tilbakekalt credential gjelder også en gjentakelse av et allerede utført kall (ingen lagret resultat uten gyldig credential).
+      if (replayTarget !== undefined) {
+        const again = await k.call(replayTarget, { key: replayKey });
+        if (okOf(again) !== null) f.push(`${replayTarget.key}: gjentakelse av et utført kall ble besvart med tilbakekalt credential (dedupe før credential-sjekk)`);
+        else if (errOf(again)?.category !== "authority") f.push(`${replayTarget.key}: gjentakelse med tilbakekalt credential: kategori ${errOf(again)?.category ?? "?"}, forventet authority`);
       }
       if (k.adapter.providerCalls() !== calls0 || k.adapter.effects() !== eff0) f.push("tilbakekalt credential nådde leverandøren");
       k.adapter.setCredentialRevoked(false);
@@ -331,26 +352,28 @@ const CHECKS: CheckDef[] = [
 
   // ----- Nivå A (skrive-/utførende) ------------------------------------------------------------------------------------
   {
-    id: "params.validated_before_provider", level: "A", title: "ugyldige parametre avvises deterministisk FØR leverandøren (ingen kall, ingen effekt)", needsWrites: true,
+    id: "params.validated_before_provider", level: "A", title: "ugyldige parametre avvises deterministisk FØR leverandøren (ingen kall, ingen effekt) - hver påkrevd parameter fjernes i tur, for lesing og skriving", needsWrites: true,
     run: async (k) => {
       const f: string[] = [];
       let tried = 0;
-      for (const a of k.executableWrites) {
+      // Review M4: ikke bare den første påkrevde parameteren - en adapter som stille setter en standardverdi for den andre/tredje må felles.
+      for (const a of [...k.reads, ...k.executableWrites]) {
         const required = isUnknown(a.data.input_required) ? [] : a.data.input_required;
-        if (required.length === 0) continue;
-        tried += 1;
-        const params = { ...k.adapter.sampleParameters(a.key) };
-        delete params[required[0] as string];
-        const calls0 = k.adapter.providerCalls();
-        const eff0 = k.adapter.effects();
-        const c = await k.call(a, { params });
-        const e = errOf(c);
-        if (e === null) f.push(`${a.key}: ugyldig kall ble godtatt`);
-        else if (e.category !== "invalid_input") f.push(`${a.key}: kategori ${e.category}, forventet invalid_input`);
-        if (k.adapter.providerCalls() !== calls0) f.push(`${a.key}: ugyldig kall nådde leverandøren`);
-        if (k.adapter.effects() !== eff0) f.push(`${a.key}: ugyldig kall ga en effekt`);
+        for (const missing of required) {
+          tried += 1;
+          const params = { ...k.adapter.sampleParameters(a.key) };
+          delete params[missing];
+          const calls0 = k.adapter.providerCalls();
+          const eff0 = k.adapter.effects();
+          const c = await k.call(a, { params });
+          const e = errOf(c);
+          if (e === null) f.push(`${a.key}: kall uten «${missing}» ble godtatt`);
+          else if (e.category !== "invalid_input") f.push(`${a.key}: uten «${missing}»: kategori ${e.category}, forventet invalid_input`);
+          if (k.adapter.providerCalls() !== calls0) f.push(`${a.key}: kall uten «${missing}» nådde leverandøren`);
+          if (k.adapter.effects() !== eff0) f.push(`${a.key}: kall uten «${missing}» ga en effekt`);
+        }
       }
-      return tried === 0 ? skip("ingen skrivehandling har påkrevde parametre i manifestet") : verdict(f);
+      return tried === 0 ? skip("ingen handling har påkrevde parametre i manifestet") : verdict(f, `${tried} fjernede parametre`);
     }
   },
   {
@@ -400,7 +423,7 @@ const CHECKS: CheckDef[] = [
     }
   },
   {
-    id: "idempotency.key_reuse_other_payload", level: "A", title: "samme nøkkel med annen nyttelast gir aldri en ny effekt", needsWrites: true,
+    id: "idempotency.key_reuse_other_payload", level: "A", title: "samme nøkkel med annen nyttelast AVVISES (conflict/invalid_input): aldri en ny effekt og aldri det gamle resultatet gjentatt som deduplisert; det opprinnelige kallet kan fortsatt gjentas", needsWrites: true,
     run: async (k) => {
       const f: string[] = [];
       let tried = 0;
@@ -410,16 +433,27 @@ const CHECKS: CheckDef[] = [
         tried += 1;
         const key = k.key("reuse");
         const eff0 = k.adapter.effects(a.key);
-        await k.call(a, { key });
+        const first = okOf(await k.call(a, { key }));
+        if (first === null) { f.push(`${a.key}: første kall feilet`); continue; }
         const other = { ...k.adapter.sampleParameters(a.key), [required[0] as string]: "another-target" };
-        await k.call(a, { key, params: other });
-        if (k.adapter.effects(a.key) - eff0 !== 1) f.push(`${a.key}: nøkkelgjenbruk med annen nyttelast ga ${k.adapter.effects(a.key) - eff0} effekter`);
+        const second = await k.call(a, { key, params: other });
+        const ok2 = okOf(second);
+        const e2 = errOf(second);
+        // Review M4: «ingen ny effekt» er ikke nok - et gammelt `ok:true, deduplicated:true` for en ANNEN nyttelast er en stille feilanvendelse (kalleren tror det nye kallet lyktes).
+        if (ok2 !== null) f.push(`${a.key}: nøkkelgjenbruk med annen nyttelast ga ok${ok2.deduplicated ? " (gammelt resultat gjentatt som deduplisert)" : " (ny effekt)"} - skal avvises`);
+        else if (e2 === null) f.push(`${a.key}: nøkkelgjenbruk med annen nyttelast ${second.hung ? "hang" : "kastet"}`);
+        else if (e2.category !== "conflict" && e2.category !== "invalid_input") f.push(`${a.key}: nøkkelgjenbruk avvist med kategori ${e2.category}, forventet conflict eller invalid_input`);
+        if (k.adapter.effects(a.key) - eff0 !== 1) f.push(`${a.key}: nøkkelgjenbruk med annen nyttelast ga ${k.adapter.effects(a.key) - eff0} effekter (forventet 1)`);
+        // Avvisningen skal ikke ha ødelagt ledgeren: det opprinnelige kallet gjentas fortsatt som deduplisert, med samme ekstern id.
+        const replay = okOf(await k.call(a, { key }));
+        if (replay === null || !replay.deduplicated || replay.external_id !== first.external_id) f.push(`${a.key}: det opprinnelige kallet kan ikke gjentas som deduplisert etter nøkkelgjenbruk`);
+        if (k.adapter.effects(a.key) - eff0 !== 1) f.push(`${a.key}: ${k.adapter.effects(a.key) - eff0} effekter etter gjentakelse av det opprinnelige kallet (forventet 1)`);
       }
       return tried === 0 ? skip("ingen skrivehandling har påkrevde parametre") : verdict(f);
     }
   },
   {
-    id: "evidence.before_after", level: "A", title: "skrivehandlinger gir før-/etter-evidens (readback) eller leverandørens bekreftede id", needsWrites: true,
+    id: "evidence.before_after", level: "A", title: "skrivehandlinger gir før-/etter-evidens (readback) eller leverandørens bekreftede id - og når tilstanden hos leverandøren endret seg, viser evidensen en endring (før er ikke lik etter)", needsWrites: true,
     run: async (k) => {
       const f: string[] = [];
       let tried = 0;
@@ -427,13 +461,17 @@ const CHECKS: CheckDef[] = [
         const ev = a.reversibility.evidence;
         if (!ev.before_state && ev.postcondition === "none") continue;
         tried += 1;
+        const stateBefore = JSON.stringify(k.adapter.snapshot());
         const r = okOf(await k.call(a));
+        const stateChanged = JSON.stringify(k.adapter.snapshot()) !== stateBefore;
         if (r === null) { f.push(`${a.key}: feilet`); continue; }
         if (ev.postcondition === "provider_id" && (r.external_id === undefined || r.external_id.length === 0)) f.push(`${a.key}: ingen bekreftet leverandør-id`);
         if (ev.before_state || ev.postcondition === "readback") {
           if (r.evidence === undefined) { f.push(`${a.key}: mangler evidens`); continue; }
           if (ev.before_state && r.evidence.before === undefined) f.push(`${a.key}: mangler før-tilstand`);
           if (ev.postcondition === "readback" && a.effect !== "delete" && (r.evidence.after === null || r.evidence.after === undefined)) f.push(`${a.key}: mangler etter-tilstand (readback)`);
+          // Review M4: tilstedeværelse er ikke nok. Endret leverandør-tilstanden seg, må før-evidensen (lest FØR effekten) skille seg fra etter-evidensen - ellers er før-tilstanden lest for sent og recovery har ikke noe å gjenopprette fra.
+          if (ev.before_state && ev.postcondition === "readback" && stateChanged && JSON.stringify(r.evidence.before) === JSON.stringify(r.evidence.after)) f.push(`${a.key}: før- og etter-evidensen er like selv om tilstanden hos leverandøren endret seg`);
         }
       }
       return tried === 0 ? skip("ingen skrivehandling lover evidens") : verdict(f);
@@ -486,6 +524,30 @@ const CHECKS: CheckDef[] = [
     }
   },
   {
+    id: "errors.write_5xx_is_outcome_unknown", level: "A", title: "5xx på en SKRIVING er «ukjent utfall» (outcome_unknown, ikke retry-bar), og samme nøkkel gir aldri en ny effekt (avstem først)", needsWrites: true,
+    run: async (k) => {
+      const f: string[] = [];
+      for (const a of k.executableWrites) {
+        const key = k.key("srv");
+        k.adapter.injectFault({ kind: "server" });
+        const c = await k.call(a, { key });
+        k.reset();
+        const e = errOf(c);
+        // Review M4 (byggerens eget funn for GitHub): en 5xx kan komme ETTER at leverandøren har behandlet kallet. En retry-bar nettverksfeil her gir dobbeltutføring hos en kaller som prøver på nytt.
+        if (e === null) f.push(`${a.key}: 5xx på skriving ga ikke en feil (${c.hung ? "hang" : c.threw ? "kastet" : "ok"})`);
+        else {
+          if (e.code !== "outcome_unknown") f.push(`${a.key}: 5xx på skriving gir kode ${e.code}, forventet outcome_unknown (utfallet er ukjent)`);
+          if (e.retryable) f.push(`${a.key}: 5xx på skriving er markert retry-bar (kan gi dobbeltutføring)`);
+        }
+        const effAfterFirst = k.adapter.effects(a.key);
+        const replay = await k.call(a, { key });
+        if (k.adapter.effects(a.key) !== effAfterFirst) f.push(`${a.key}: samme nøkkel etter 5xx ga en NY effekt (ukjent utfall må avstemmes, aldri gjentas)`);
+        if (okOf(replay) !== null) f.push(`${a.key}: samme nøkkel etter 5xx ble utført/deduplisert som ok i stedet for å kreve avstemming`);
+      }
+      return verdict(f);
+    }
+  },
+  {
     id: "authority.tenant_isolation", level: "A", title: "en identitet utenfor credentialens tenant nektes uten leverandørkall (også lesing)", needsWrites: true,
     run: async (k) => {
       const f: string[] = [];
@@ -496,6 +558,17 @@ const CHECKS: CheckDef[] = [
         if (e === null) f.push(`${a.key}: utført for fremmed tenant`);
         else if (e.category !== "authority") f.push(`${a.key}: kategori ${e.category}, forventet authority`);
         if (k.adapter.providerCalls() !== calls0 || k.adapter.effects() !== eff0) f.push(`${a.key}: fremmed tenant nådde leverandøren`);
+        if (a.effect === "read") continue;
+        // Review M4: tenant-sjekken må komme FØR dedupe-oppslaget. Eieren utfører et kall; en fremmed tenant som gjentar eierens nøkkel må nektes - ikke få eierens lagrede resultat tilbake (kryss-tenant-replay).
+        const key = k.key("xtenant");
+        const own = okOf(await k.call(a, { key }));
+        if (own === null) { f.push(`${a.key}: eierens kall feilet (kan ikke prøve kryss-tenant-replay)`); continue; }
+        const calls1 = k.adapter.providerCalls();
+        const eff1 = k.adapter.effects();
+        const replay = await k.call(a, { key, identity: k.adapter.identities.foreign_tenant });
+        if (okOf(replay) !== null) f.push(`${a.key}: fremmed tenant fikk eierens resultat ved å gjenta nøkkelen (dedupe før tenant-sjekk)`);
+        else if (errOf(replay)?.category !== "authority") f.push(`${a.key}: kryss-tenant-replay: kategori ${errOf(replay)?.category ?? "?"}, forventet authority`);
+        if (k.adapter.providerCalls() !== calls1 || k.adapter.effects() !== eff1) f.push(`${a.key}: kryss-tenant-replay nådde leverandøren`);
       }
       return verdict(f);
     }
@@ -570,6 +643,10 @@ const CHECKS: CheckDef[] = [
     run: async (k) => {
       const probes = [k.reads[0], ...k.executableWrites].filter((a): a is ActionSpec => a !== undefined);
       const f: string[] = [];
+      // Pausen stanser ALLE kall - også en gjentakelse av et allerede utført kall (ledgeren slås ikke opp før pause-sjekken).
+      const replayKey = k.key("pausereplay");
+      const replayTarget = k.executableWrites[0];
+      if (replayTarget !== undefined && okOf(await k.call(replayTarget, { key: replayKey })) === null) f.push(`${replayTarget.key}: kall før pause feilet`);
       k.adapter.setPaused(true);
       const calls0 = k.adapter.providerCalls();
       const eff0 = k.adapter.effects();
@@ -577,6 +654,11 @@ const CHECKS: CheckDef[] = [
         const e = errOf(await k.call(a));
         if (e === null) f.push(`${a.key}: utført mens connectoren er pauset`);
         else if (e.category !== "paused") f.push(`${a.key}: kategori ${e.category}, forventet paused`);
+      }
+      if (replayTarget !== undefined) {
+        const again = await k.call(replayTarget, { key: replayKey });
+        if (okOf(again) !== null) f.push(`${replayTarget.key}: gjentakelse av et utført kall ble besvart mens connectoren er pauset (dedupe før pause-sjekk)`);
+        else if (errOf(again)?.category !== "paused") f.push(`${replayTarget.key}: gjentakelse under pause: kategori ${errOf(again)?.category ?? "?"}, forventet paused`);
       }
       if (k.adapter.providerCalls() !== calls0 || k.adapter.effects() !== eff0) f.push("pauset connector nådde leverandøren");
       k.adapter.setPaused(false);
@@ -616,10 +698,12 @@ export async function runConnectorContract(manifest: ConnectorManifest, adapter:
     });
   }
   const failed = checks.filter((c) => c.status === "fail").length;
+  // Ukjent/manglende proveniens regnes som den svakere påstanden: kun en adapter som EKSPLISITT sier `real_transport` kan gi `proven`.
+  const adapter_kind: AdapterKind = adapter.adapter_kind === "real_transport" ? "real_transport" : "fake_from_manifest";
   return {
-    connector_id: safeIdentifier(manifest.identity.id), checks,
+    connector_id: safeIdentifier(manifest.identity.id), adapter_kind, checks,
     passed: checks.filter((c) => c.status === "pass").length, failed, skipped: checks.filter((c) => c.status === "skip").length,
     ok: failed === 0,
-    acceptance: scoreAcceptance(manifest, checks)
+    acceptance: scoreAcceptance(manifest, checks, adapter_kind)
   };
 }

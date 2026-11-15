@@ -16,6 +16,7 @@ import type {
  * ekte transport holder dem (det krever en bro mot en ekte transport bak en fake leverandørserver, DEFERRED, eller live smoke, BLOCKED_EXTERNAL).
  *
  * `defects` er KUN for kittets egne mutasjonstester: hver defekt gjør fakeen brutal mot nøyaktig én kontraktsegenskap, og kittet må da feile den egenskapen.
+ * En fake bygget av manifestet har `adapter_kind: "fake_from_manifest"` (review M4): den kan aldri gi akseptansestatus `proven`, kun `modelled`.
  */
 
 export const FAKE_TENANT = "tenant-a";
@@ -26,7 +27,10 @@ export const FAKE_DEFECTS = [
   "no_dedupe", "required_key_not_enforced", "params_not_validated", "wrong_trust_label", "leaks_credential", "no_redaction",
   "health_never_degrades", "ignores_abort", "timeout_masks_as_ok", "no_evidence", "cross_tenant_allowed", "delegated_allowed",
   "pause_ignored", "revoke_ignored", "no_notification", "auth_reported_as_other", "unknown_outcome_replay_executes",
-  "compensate_noop", "deferred_chain_executes", "key_reuse_executes", "provider_text_in_control_field"
+  "compensate_noop", "deferred_chain_executes", "key_reuse_executes", "provider_text_in_control_field",
+  // Review M4: subtilt gale adaptere kittet først slapp gjennom, pluss de to sjekkene uten innebygd mutant.
+  "key_reuse_returns_stale", "leaks_credential_in_rate_limit", "leaks_credential_in_server_error", "leaks_credential_in_timeout", "evidence_before_is_after",
+  "validates_only_first_required", "dedupe_before_authority", "server_error_not_unknown", "read_has_effect", "dedupe_ignores_key"
 ] as const;
 export type FakeDefect = (typeof FAKE_DEFECTS)[number];
 
@@ -112,6 +116,8 @@ export function createFakeConnector(spec: FakeConnectorSpec): ContractAdapter {
     log(`invoke ${a?.key ?? "?"} failed ${code}`);
     return { ok: false, error };
   };
+  // Defekter (review M4): credentialen ekkoes i feilteksten for en bestemt feilklasse (429, 5xx, tidsavbrudd) - kittet må skanne ALLE feilklasser, ikke bare auth/nettverk/ugyldig.
+  const leakIn = (defect: FakeDefect, result: AdapterResult): AdapterResult => (defects.has(defect) && !result.ok ? { ok: false, error: { ...result.error, message: `${result.error.message} Authorization=${FAKE_CREDENTIAL_CANARY}` } } : result);
   const trustOf = (a: ActionSpec): TrustLevel => (defects.has("wrong_trust_label") && a.trust.output === "untrusted" ? "trusted" : a.trust.output);
   const countEffect = (key: string): number => { const n = (effects.get(key) ?? 0) + 1; effects.set(key, n); return n; };
 
@@ -133,6 +139,7 @@ export function createFakeConnector(spec: FakeConnectorSpec): ContractAdapter {
   };
 
   const adapter: ContractAdapter = {
+    adapter_kind: "fake_from_manifest",
     connector_id: manifest.identity.id,
     actions: manifest.actions.map((a) => a.key),
     clock,
@@ -172,6 +179,11 @@ export function createFakeConnector(spec: FakeConnectorSpec): ContractAdapter {
     invoke: async (req: AdapterRequest): Promise<AdapterResult> => {
       const a = byKey.get(req.action);
       if (a === undefined) return fail(null, "not_found", "unknown_action", `unknown action ${req.action}`, { health: false });
+      // Defekt (review M4): ledgeren slås opp FØR pause/tilbakekall/tenant-bindingen, så en annen tenant (eller en pauset/tilbakekalt connector) får eierens lagrede resultat.
+      if (defects.has("dedupe_before_authority") && req.idempotency_key !== undefined) {
+        const early = ledger.get(req.idempotency_key);
+        if (early !== undefined && early.status === "done" && early.result !== undefined && early.action === a.key) { audit(a, "tool.executed", { deduplicated: true }); log(`invoke ${a.key} deduplicated`); return { ...early.result, deduplicated: true }; }
+      }
       if (paused && !defects.has("pause_ignored")) return fail(a, "paused", "connector_paused", "connector is paused by the owner", { health: false });
       if (revoked && !defects.has("revoke_ignored")) return fail(a, "authority", "credential_revoked", "credential is revoked", { health: false });
 
@@ -190,10 +202,16 @@ export function createFakeConnector(spec: FakeConnectorSpec): ContractAdapter {
         return fail(a, "policy", "class_d_pipeline_incomplete", `class D pipeline incomplete: ${chain.missing.join(",")}`, { health: false });
       }
 
-      // Deterministisk parametervalidering FØR leverandøren.
+      // Deterministisk parametervalidering FØR leverandøren. Defekten `validates_only_first_required` (review M4) håndhever bare den første påkrevde parameteren og setter resten stille til en standardverdi.
+      let params = req.parameters;
       if (!defects.has("params_not_validated")) {
-        const missing = requiredOf(a).filter((r) => req.parameters[r] === undefined);
+        const enforced = defects.has("validates_only_first_required") ? requiredOf(a).slice(0, 1) : requiredOf(a);
+        const missing = enforced.filter((r) => params[r] === undefined);
         if (missing.length > 0) return fail(a, "invalid_input", "missing_parameters", `missing required parameters: ${missing.join(",")}`, { health: false });
+        if (defects.has("validates_only_first_required")) {
+          params = { ...params };
+          for (const r of requiredOf(a).slice(1)) if (params[r] === undefined) params[r] = "silent-default";
+        }
       }
 
       const isWrite = a.effect !== "read";
@@ -202,13 +220,14 @@ export function createFakeConnector(spec: FakeConnectorSpec): ContractAdapter {
         return fail(a, "invalid_input", "idempotency_key_required", "an idempotency key is required for this action", { health: false });
       }
 
-      // Idempotens-ledger (gatewayen dedupe-r klasse B/C/D med nøkkel; klasse A har ingen bivirkning å beskytte).
-      const ledgerKey = isWrite && key !== undefined && a.authority.risk_class !== "A" && !defects.has("no_dedupe") ? key : undefined;
-      const digest = canonical(req.parameters);
+      // Idempotens-ledger (gatewayen dedupe-r klasse B/C/D med nøkkel; klasse A har ingen bivirkning å beskytte). Defekten `dedupe_ignores_key` dedupe-r på handling + nyttelast i stedet for nøkkelen (overivrig).
+      const digest = canonical(params);
+      const ledgerKey = isWrite && key !== undefined && a.authority.risk_class !== "A" && !defects.has("no_dedupe") ? (defects.has("dedupe_ignores_key") ? `${a.key}|${digest}` : key) : undefined;
       if (ledgerKey !== undefined) {
         const row = ledger.get(ledgerKey);
         if (row !== undefined) {
-          const same = row.action === a.key && row.digest === digest;
+          // Defekten `key_reuse_returns_stale` behandler en annen nyttelast under samme nøkkel som en gjentakelse og svarer med det GAMLE resultatet (ok:true, deduplicated:true).
+          const same = row.action === a.key && (row.digest === digest || defects.has("key_reuse_returns_stale"));
           if (!same && !defects.has("key_reuse_executes")) return fail(a, "conflict", "idempotency_key_reuse_mismatch", "the idempotency key was used for a different request", { health: false });
           if (same && row.status === "done" && row.result) { audit(a, "tool.executed", { deduplicated: true }); log(`invoke ${a.key} deduplicated`); return { ...row.result, deduplicated: true }; }
           if (same && (row.status === "unknown" || row.status === "reserved") && !defects.has("unknown_outcome_replay_executes")) {
@@ -219,7 +238,7 @@ export function createFakeConnector(spec: FakeConnectorSpec): ContractAdapter {
 
       const timedOut = (): AdapterResult => {
         if (defects.has("timeout_masks_as_ok")) return { ok: true, data: null, deduplicated: false, output_trust: trustOf(a) };
-        return fail(a, "timeout", "timeout", "the call was aborted at its deadline");
+        return leakIn("leaks_credential_in_timeout", fail(a, "timeout", "timeout", "the call was aborted at its deadline"));
       };
       const sleep = (ms: number): Promise<void> => clock.sleep(ms, defects.has("ignores_abort") ? undefined : req.signal);
 
@@ -234,9 +253,16 @@ export function createFakeConnector(spec: FakeConnectorSpec): ContractAdapter {
         const raw = `upstream ${f.kind} error${providerText !== null ? ` saying ${providerText}` : ""}${f.kind === "auth" ? ` for credential ${FAKE_CREDENTIAL_CANARY}` : ""}`;
         switch (f.kind) {
           case "auth": return fail(a, "auth", "provider_auth_rejected", raw);
-          case "rate_limit": return fail(a, "rate_limit", "provider_rate_limited", raw);
+          case "rate_limit": return leakIn("leaks_credential_in_rate_limit", fail(a, "rate_limit", "provider_rate_limited", raw));
           case "network": return fail(a, "network", "provider_unreachable", raw);
-          case "server": return fail(a, "network", "provider_server_error", raw);
+          case "server":
+            // Review M4: en 5xx på en SKRIVING betyr at leverandøren kan ha behandlet kallet - utfallet er UKJENT (kontrakten fra WP-F1: `outcome_unknown`, aldri retry-bar, aldri en ny effekt med samme nøkkel).
+            // Lesing har ingenting å miste: vanlig, retry-bar nettverksfeil. Defekten `server_error_not_unknown` gir den gamle (feilaktige) oppførselen også for skriving.
+            if (isWrite && !defects.has("server_error_not_unknown")) {
+              if (ledgerKey !== undefined) ledger.set(ledgerKey, { action: a.key, digest, status: "unknown", target: targetOf(a, params) });
+              return leakIn("leaks_credential_in_server_error", fail(a, "network", "outcome_unknown", raw, { retryable: false }));
+            }
+            return leakIn("leaks_credential_in_server_error", fail(a, "network", "provider_server_error", raw));
           case "not_found": return fail(a, "not_found", "provider_not_found", raw, { health: false });
           case "invalid": return fail(a, "invalid_input", "provider_rejected_input", raw, { health: false });
         }
@@ -246,12 +272,14 @@ export function createFakeConnector(spec: FakeConnectorSpec): ContractAdapter {
       let external_id: string | undefined;
       let evidence: AdapterEvidence | undefined;
       if (!isWrite) {
-        data = defaultRead(a, req.parameters);
+        // Defekten `read_has_effect`: en lesing som gir en leverandør-side effekt (kittet skal felle den).
+        if (defects.has("read_has_effect")) countEffect(a.key);
+        data = defaultRead(a, params);
       } else {
-        const target = targetOf(a, req.parameters);
-        const before = readbackOf(a, req.parameters);
+        const target = targetOf(a, params);
+        const before = readbackOf(a, params);
         if (ledgerKey !== undefined) ledger.set(ledgerKey, { action: a.key, digest, status: "reserved", target, before });
-        const ran = defaultRun(a, req.parameters);
+        const ran = defaultRun(a, params);
         data = ran.data;
         if (ran.external_id !== undefined) external_id = ran.external_id;
         if (ledgerKey !== undefined) ledger.set(ledgerKey, { action: a.key, digest, status: "reserved", target, before });
@@ -261,14 +289,16 @@ export function createFakeConnector(spec: FakeConnectorSpec): ContractAdapter {
             if (e instanceof AbortedError) {
               if (ledgerKey !== undefined) ledger.set(ledgerKey, { action: a.key, digest, status: "unknown", target, before });
               if (defects.has("timeout_masks_as_ok")) return timedOut();
-              return fail(a, "timeout", "outcome_unknown", "the call timed out after the provider may have applied it; the outcome is unknown", { retryable: false });
+              return leakIn("leaks_credential_in_timeout", fail(a, "timeout", "outcome_unknown", "the call timed out after the provider may have applied it; the outcome is unknown", { retryable: false }));
             }
             throw e;
           }
         }
         const ev = a.reversibility.evidence;
         if ((ev.before_state || ev.postcondition === "readback") && !defects.has("no_evidence")) {
-          evidence = { before: ev.before_state ? before : null, after: ev.postcondition === "readback" ? readbackOf(a, req.parameters) : null };
+          const afterState = ev.postcondition === "readback" ? readbackOf(a, params) : null;
+          // Defekten `evidence_before_is_after`: før-tilstanden leses ETTER effekten (før-evidensen er lik etter-evidensen selv om tilstanden endret seg).
+          evidence = { before: ev.before_state ? (defects.has("evidence_before_is_after") && afterState !== null ? afterState : before) : null, after: afterState };
         }
         if (ledgerKey !== undefined) ledger.set(ledgerKey, { action: a.key, digest, status: "done", target, before });
       }

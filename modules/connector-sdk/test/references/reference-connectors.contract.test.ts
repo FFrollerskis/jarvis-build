@@ -63,12 +63,17 @@ describe.each(REFERENCES)("referanse: %s", (id, manifest, make) => {
     expect(["gaps", "live_evidence_pending", "complete_on_paper"]).toContain(r.acceptance.verdict);
   });
 
-  it("kittets bevis: idempotens, evidens, klasse D-kjede, autoritet, pause/tilbakekall, redigering og ubetrodd-merking er PROVEN", async () => {
+  it("kittets bevis (idempotens, evidens, klasse D-kjede, autoritet, pause/tilbakekall, redigering, ubetrodd-merking) er MODELLERT mot en fake fra manifestet - aldri «proven» (review M4)", async () => {
     const r = await reportOf(id, manifest, make);
-    const proven = new Set(r.acceptance.items.filter((i) => i.status === "proven").map((i) => i.id));
+    expect(r.adapter_kind).toBe("fake_from_manifest");
+    expect(r.acceptance.adapter_kind).toBe("fake_from_manifest");
+    const modelled = new Set(r.acceptance.items.filter((i) => i.status === "modelled").map((i) => i.id));
     for (const item of ["R.fake_adapter_contract_tests", "R.injection_classification", "R.audit_without_secret_values", "A.authority_target_resolution", "A.param_validation_state_readback", "A.idempotency_replay", "A.before_after_evidence", "A.classd_snapshot_notification", "A.pause_revoke_kill_switch"]) {
-      expect(proven.has(item), item).toBe(true);
+      expect(modelled.has(item), item).toBe(true);
     }
+    // Referansene er fakes bygget fra SINE EGNE manifester: ingenting er bevist mot en ekte transport, så «proven» finnes ikke (GitHub har f.eks. et dokumentert ekte replay-gap som en fake aldri kan vise).
+    expect(r.acceptance.items.filter((i) => i.status === "proven").map((i) => i.id)).toEqual([]);
+    expect(r.acceptance.summary.proven).toBe(0);
   });
 });
 
@@ -77,7 +82,7 @@ describe("referansespesifikt", () => {
     const [, manifest, make] = REFERENCES[2]!;
     const r = await reportOf("stripe", manifest, make);
     expect(r.acceptance.items.find((i) => i.id === "A.finance_reconciliation")?.status).toBe("declared");
-    expect(r.acceptance.items.find((i) => i.id === "A.classd_snapshot_notification")?.status).toBe("proven");
+    expect(r.acceptance.items.find((i) => i.id === "A.classd_snapshot_notification")?.status).toBe("modelled");
   });
 
   it("GitHub: merge_pr (klasse D, irreversibel) har dokumentert manuell reversering, ikke automatisk rollback; øvrige reversible handlinger rulles tilbake", async () => {

@@ -66,33 +66,48 @@ describe("kittet mot en korrekt fake: hver sjekk består (ingen feil) og ingenti
   });
 });
 
-describe("MUTASJONSTESTER: hver defekt i fakeen feller nøyaktig den kontraktsegenskapen den bryter", () => {
+describe("MUTASJONSTESTER: hver defekt i fakeen feller NØYAKTIG de kontraktsegenskapene den bryter (ikke mer, ikke mindre)", () => {
+  /**
+   * Hver rad: defekten og den EKSAKTE mengden sjekker den feller (sortert sammenligning, `toEqual` - ikke `toContain`). Første id er egenskapen defekten bryter; resten er følgefeil som er legitime fordi sjekkene
+   * bygger på samme egenskap (f.eks. avhenger rollback, gjentakelse etter ukjent utfall og nøkkelgjenbruk alle av idempotens-ledgeren, så `no_dedupe` feller dem også). Endres kittet, må tabellen endres bevisst.
+   */
   const cases: Array<[FakeDefect, string[]]> = [
-    ["no_dedupe", ["idempotency.same_key_one_effect"]],
+    ["no_dedupe", ["idempotency.same_key_one_effect", "idempotency.key_reuse_other_payload", "timeout.after_effect_unknown_not_replayed", "errors.write_5xx_is_outcome_unknown", "recovery.rollback_restores_state"]],
     ["required_key_not_enforced", ["idempotency.required_key_enforced"]],
     ["params_not_validated", ["params.validated_before_provider"]],
-    ["wrong_trust_label", ["trust.labelling"]],
+    ["wrong_trust_label", ["trust.labelling", "trust.injection_is_data"]],
     ["leaks_credential", ["audit.no_secret_values", "redaction.no_secret_shapes"]],
     ["no_redaction", ["redaction.no_secret_shapes"]],
     ["health_never_degrades", ["health.degrades_and_recovers"]],
-    ["ignores_abort", ["timeout.abort"]],
-    ["timeout_masks_as_ok", ["timeout.abort"]],
-    ["no_evidence", ["evidence.before_after"]],
+    ["ignores_abort", ["timeout.abort", "timeout.after_effect_unknown_not_replayed", "timeout.before_effect_applies_nothing"]],
+    ["timeout_masks_as_ok", ["timeout.abort", "timeout.after_effect_unknown_not_replayed", "timeout.before_effect_applies_nothing"]],
+    ["no_evidence", ["evidence.before_after", "classd.chain_and_notification"]],
     ["cross_tenant_allowed", ["authority.tenant_isolation"]],
     ["delegated_allowed", ["authority.delegated"]],
     ["pause_ignored", ["control.pause_blocks_all"]],
     ["revoke_ignored", ["revoke.and_reauth"]],
     ["no_notification", ["classd.chain_and_notification"]],
     ["auth_reported_as_other", ["errors.taxonomy", "health.degrades_and_recovers"]],
-    ["unknown_outcome_replay_executes", ["timeout.after_effect_unknown_not_replayed"]],
+    ["unknown_outcome_replay_executes", ["timeout.after_effect_unknown_not_replayed", "errors.write_5xx_is_outcome_unknown"]],
     ["compensate_noop", ["recovery.rollback_restores_state"]],
     ["key_reuse_executes", ["idempotency.key_reuse_other_payload"]],
-    ["provider_text_in_control_field", ["trust.injection_is_data"]]
+    ["provider_text_in_control_field", ["trust.injection_is_data", "redaction.no_secret_shapes"]],
+    // Review M4 - de fem subtilt gale adapterne (+ 5xx) og de to sjekkene uten innebygd mutant:
+    ["key_reuse_returns_stale", ["idempotency.key_reuse_other_payload"]],
+    ["leaks_credential_in_rate_limit", ["redaction.no_secret_shapes"]],
+    ["leaks_credential_in_server_error", ["redaction.no_secret_shapes"]],
+    ["leaks_credential_in_timeout", ["redaction.no_secret_shapes"]],
+    ["evidence_before_is_after", ["evidence.before_after"]],
+    ["validates_only_first_required", ["params.validated_before_provider"]],
+    ["dedupe_before_authority", ["authority.tenant_isolation", "control.pause_blocks_all", "revoke.and_reauth", "idempotency.key_reuse_other_payload"]],
+    ["server_error_not_unknown", ["errors.write_5xx_is_outcome_unknown"]],
+    ["read_has_effect", ["read.returns_data"]],
+    ["dedupe_ignores_key", ["idempotency.distinct_keys_distinct_effects", "idempotency.same_key_one_effect", "idempotency.key_reuse_other_payload", "timeout.after_effect_unknown_not_replayed", "timeout.before_effect_applies_nothing", "errors.write_5xx_is_outcome_unknown", "authority.delegated", "recovery.rollback_restores_state", "classd.chain_and_notification"]]
   ];
   it.each(cases)("%s", async (defect, expected) => {
     const r = await run(validFullManifest(), [defect]);
-    const failed = failedIds(r);
-    for (const id of expected) expect(failed, `${defect} burde felle ${id}; feilet: ${failed.join(", ")}`).toContain(id);
+    expect([...failedIds(r)].sort(), `${defect} burde felle nøyaktig ${expected.join(", ")}; feilet: ${failedIds(r).join(", ")}`).toEqual([...expected].sort());
+    expect(failedIds(r)).toContain(expected[0]);
     expect(r.ok).toBe(false);
   });
 
@@ -130,6 +145,199 @@ describe("MUTASJONSTESTER: hver defekt i fakeen feller nøyaktig den kontraktseg
     const r = await run(bad);
     expect(failedIds(r)).toEqual(expect.arrayContaining(["manifest.valid", "manifest.secret_scan"]));
     expect(JSON.stringify(r).includes(secretShapes()[0]!)).toBe(false);
+  });
+});
+
+describe("review M4: subtilt gale adaptere bygget UTENFRA (wrappere rundt en korrekt adapter, som i reviewens eksperimenter) feller nøyaktig de sjekkene som skal", () => {
+  const manifest = validFullManifest();
+  const base = () => createFakeConnector({ manifest });
+  type Adapter = ReturnType<typeof base>;
+  type Req = Parameters<Adapter["invoke"]>[0];
+  const wrap = (b: Adapter, invoke: (req: Req) => ReturnType<Adapter["invoke"]>): Adapter => ({ ...b, invoke });
+  const failedWith = async (adapter: Adapter): Promise<string[]> => [...failedIds(await runConnectorContract(manifest, adapter))].sort();
+
+  it("kontroll: den korrekte adapteren feller ingenting (og wrapper-mekanikken endrer ingenting)", async () => {
+    const b = base();
+    expect(await failedWith(wrap(b, (req) => b.invoke(req)))).toEqual([]);
+  });
+
+  it("(1)+(5) ledgeren slår opp på nøkkelen alene, FØR nyttelast- og tenant-sjekk: annen nyttelast gir gammelt ok:true+deduplicated:true, og en fremmed tenant får eierens resultat", async () => {
+    const staleByKey = (): { b: Adapter; a: Adapter } => {
+      const b = base();
+      const cache = new Map<string, Awaited<ReturnType<Adapter["invoke"]>>>();
+      const a = wrap(b, async (req) => {
+        const k = req.idempotency_key;
+        if (k !== undefined && cache.has(k)) return { ...cache.get(k)!, deduplicated: true } as never;
+        const r = await b.invoke(req);
+        if (k !== undefined && r.ok) cache.set(k, r);
+        return r;
+      });
+      return { b, a };
+    };
+    // Manuelt bevis på feilen (som i reviewen): annen nyttelast under samme nøkkel gir det gamle resultatet, og en fremmed tenant får eierens resultat.
+    const { b, a } = staleByKey();
+    const own = await a.invoke({ action: ACME_KEYS.create, parameters: b.sampleParameters(ACME_KEYS.create), idempotency_key: "shared", identity: b.identities.owner });
+    const stale = await a.invoke({ action: ACME_KEYS.create, parameters: { title: "HELT ANNEN NYTTELAST" }, idempotency_key: "shared", identity: b.identities.owner });
+    const foreign = await a.invoke({ action: ACME_KEYS.create, parameters: b.sampleParameters(ACME_KEYS.create), idempotency_key: "shared", identity: b.identities.foreign_tenant });
+    expect(own.ok && stale.ok && stale.deduplicated).toBe(true);
+    expect(foreign.ok && foreign.external_id).toBe(own.ok && own.external_id);
+    // Kittet feller nøyaktig egenskapene som brytes (nøkkelgjenbruk, tenant, og gjentakelse under pause/tilbakekall):
+    expect(await failedWith(staleByKey().a)).toEqual(["authority.tenant_isolation", "control.pause_blocks_all", "idempotency.key_reuse_other_payload", "revoke.and_reauth"]);
+  });
+
+  it("(2) credential ekkoet i 429-feilen (kittet skannet før bare auth/nettverk/ugyldig)", async () => {
+    const b = base();
+    const a = wrap(b, async (req) => {
+      const r = await b.invoke(req);
+      return !r.ok && r.error.category === "rate_limit" ? { ok: false, error: { ...r.error, message: `${r.error.message} Authorization=${b.credentialCanary()}` } } : r;
+    });
+    expect(await failedWith(a)).toEqual(["redaction.no_secret_shapes"]);
+  });
+
+  it("(3) før-evidensen er lik etter-evidensen (lest etter effekten) selv om tilstanden endret seg", async () => {
+    const b = base();
+    const a = wrap(b, async (req) => {
+      const r = await b.invoke(req);
+      return r.ok && r.evidence !== undefined && r.evidence.after !== null ? { ...r, evidence: { before: r.evidence.after, after: r.evidence.after } } : r;
+    });
+    expect(await failedWith(a)).toEqual(["evidence.before_after"]);
+  });
+
+  it("(4) adapteren setter stille en standardverdi for andre og senere påkrevde parametre (kittet fjernet bare den første)", async () => {
+    const b = base();
+    const a = wrap(b, async (req) => {
+      const act = manifest.actions.find((x) => x.key === req.action);
+      const required = act !== undefined && Array.isArray(act.data.input_required) ? act.data.input_required : [];
+      const params = { ...req.parameters };
+      for (const r of required.slice(1)) if (params[r] === undefined) params[r] = "silent-default";
+      return b.invoke({ ...req, parameters: params });
+    });
+    expect(await failedWith(a)).toEqual(["params.validated_before_provider"]);
+  });
+
+  it("(6) 5xx på en skriving rapporteres som retry-bar leverandørfeil i stedet for ukjent utfall", async () => {
+    const b = base();
+    const a = wrap(b, async (req) => {
+      const r = await b.invoke(req);
+      return !r.ok && r.error.code === "outcome_unknown" && r.error.category === "network" ? { ok: false, error: { ...r.error, code: "provider_server_error", retryable: true } } : r;
+    });
+    expect(await failedWith(a)).toEqual(["errors.write_5xx_is_outcome_unknown"]);
+  });
+
+  it("effekt utført selv om kallet gikk ut på tid FØR leverandøren handlet (avbrudd skal ikke gi en effekt)", async () => {
+    const b = base();
+    let slowBefore = false;
+    const a = { ...wrap(b, async (req) => {
+      const act = manifest.actions.find((x) => x.key === req.action);
+      if (slowBefore && act !== undefined && act.effect !== "read") {
+        b.injectFault(null);
+        await b.invoke(req);
+        b.injectFault({ kind: "slow", ms: 99_999, effect: "before" });
+        return { ok: false, error: { category: "timeout", code: "timeout", message: "aborted", retryable: true } };
+      }
+      return b.invoke(req);
+    }), injectFault: (f: Parameters<Adapter["injectFault"]>[0]) => { slowBefore = f !== null && f.kind === "slow" && f.effect === "before"; b.injectFault(f); } };
+    expect(await failedWith(a)).toEqual(["timeout.before_effect_applies_nothing"]);
+  });
+
+  it("SLUTT: hver sjekk i kittet kan feile (ingen vakuøse sjekker): hver er felt av minst én defekt eller manifest-/adaptermutasjon", async () => {
+    const failedByDefects = new Set<string>();
+    for (const d of FAKE_DEFECTS) for (const id of failedIds(await run(withDeferredD(), [d]))) failedByDefects.add(id);
+    for (const d of FAKE_DEFECTS) for (const id of failedIds(await run(validFullManifest(), [d]))) failedByDefects.add(id);
+    // Manifest-nivå-sjekkene har ingen fake-defekt; de felles av mutasjoner av manifestet/adapteren (testet over og her).
+    const emptyDelete = validFullManifest();
+    (emptyDelete.data.delete_semantics as { jarvis_side: string }).jarvis_side = "";
+    for (const id of failedIds(await run(emptyDelete))) failedByDefects.add(id);
+    const secretRef = validFullManifest();
+    secretRef.secrets.refs[0]!.ref = secretShapes()[0]!;
+    for (const id of failedIds(await run(secretRef))) failedByDefects.add(id);
+    const g = base();
+    for (const id of failedIds(await runConnectorContract(validFullManifest(), { ...g, actions: g.actions.slice(1) } as unknown as typeof g))) failedByDefects.add(id);
+    expect(CONTRACT_CHECK_IDS.filter((id) => !failedByDefects.has(id))).toEqual([]);
+  });
+});
+
+describe("review M4: fakeen modellerer en 5xx på en SKRIVING som ukjent utfall (aldri en retry-bar nettverksfeil), og en 5xx på en lesing som vanlig nettverksfeil", () => {
+  it("skriving: outcome_unknown, ikke retry-bar, helse unavailable; samme nøkkel etter fjernet feil gir aldri en ny effekt og krever avstemming", async () => {
+    const f = createFakeConnector({ manifest: validFullManifest() });
+    const params = f.sampleParameters(ACME_KEYS.create);
+    f.injectFault({ kind: "server" });
+    const first = await f.invoke({ action: ACME_KEYS.create, parameters: params, idempotency_key: "s1", identity: f.identities.owner });
+    f.injectFault(null);
+    expect(!first.ok && [first.error.category, first.error.code, first.error.retryable]).toEqual(["network", "outcome_unknown", false]);
+    expect(f.health()?.state).toBe("unavailable");
+    const again = await f.invoke({ action: ACME_KEYS.create, parameters: params, idempotency_key: "s1", identity: f.identities.owner });
+    expect(!again.ok && again.error.code).toBe("outcome_unknown");
+    expect(f.effects(ACME_KEYS.create)).toBe(0);
+    // Uten nøkkel finnes ingen ledger å avstemme mot, men utfallet meldes fortsatt som ukjent.
+    f.injectFault({ kind: "server" });
+    const noKey = await f.invoke({ action: ACME_KEYS.create, parameters: params, identity: f.identities.owner });
+    expect(!noKey.ok && noKey.error.code).toBe("outcome_unknown");
+  });
+
+  it("lesing: vanlig, retry-bar nettverksfeil (ingenting å miste ved å prøve igjen)", async () => {
+    const f = createFakeConnector({ manifest: validFullManifest() });
+    f.injectFault({ kind: "server" });
+    const r = await f.invoke({ action: ACME_KEYS.list, parameters: f.sampleParameters(ACME_KEYS.list), identity: f.identities.owner });
+    expect(!r.ok && [r.error.category, r.error.code, r.error.retryable]).toEqual(["network", "provider_server_error", true]);
+  });
+
+  it("kittet har sjekken, og et manifest med bare lese-handlinger hopper den over med årsak (aldri bestått)", async () => {
+    expect(CONTRACT_CHECK_IDS).toContain("errors.write_5xx_is_outcome_unknown");
+    const readOnly = validFullManifest();
+    readOnly.actions = readOnly.actions.filter((a) => a.effect === "read");
+    const r = await runConnectorContract(readOnly, createFakeConnector({ manifest: readOnly }));
+    expect(statusOf(r, "errors.write_5xx_is_outcome_unknown")).toBe("skip");
+  });
+});
+
+describe("review M4: adapter_kind - en fake bygget fra manifestet kan aldri gi «proven»; kun en ekte transport kan", () => {
+  it("harnessen er fake_from_manifest, rapporten bærer det (kit og akseptanse), og alle kit-bevis er «modelled» - ingen «proven» uansett hvor mange sjekker som består", async () => {
+    const m = validFullManifest();
+    const f = createFakeConnector({ manifest: m });
+    expect(f.adapter_kind).toBe("fake_from_manifest");
+    const r = await run(m);
+    expect(r.adapter_kind).toBe("fake_from_manifest");
+    expect(r.acceptance.adapter_kind).toBe("fake_from_manifest");
+    expect(r.acceptance.summary.proven).toBe(0);
+    expect(r.acceptance.summary.modelled).toBeGreaterThan(5);
+    expect(r.acceptance.items.filter((i) => i.status === "modelled").every((i) => i.evidence.includes("modellert"))).toBe(true);
+  });
+
+  it("scoreAcceptance: samme sjekkresultater gir «proven» KUN når adapteren oppgir real_transport; manglende eller ukjent proveniens er fake (fail-safe)", async () => {
+    const m = validFullManifest();
+    const r = await run(m);
+    const statuses = (kind?: Parameters<typeof scoreAcceptance>[2]) => scoreAcceptance(m, r.checks, kind).items.map((i) => `${i.id}:${i.status}`);
+    const real = scoreAcceptance(m, r.checks, "real_transport");
+    expect(real.adapter_kind).toBe("real_transport");
+    expect(real.summary.proven).toBeGreaterThan(5);
+    expect(real.summary.modelled).toBe(0);
+    expect(statuses("real_transport").map((x) => x.replace(":proven", ":modelled"))).toEqual(statuses("fake_from_manifest"));
+    expect(statuses()).toEqual(statuses("fake_from_manifest"));
+    expect(statuses("bogus" as never)).toEqual(statuses("fake_from_manifest"));
+  });
+
+  it("runConnectorContract: en adapter som EKSPLISITT oppgir real_transport gir «proven»; en som mangler feltet eller har en ukjent verdi regnes som fake", async () => {
+    const m = validFullManifest();
+    const f = createFakeConnector({ manifest: m });
+    const asReal = { ...f, adapter_kind: "real_transport" } as unknown as typeof f;
+    const real = await runConnectorContract(m, asReal);
+    expect(real.adapter_kind).toBe("real_transport");
+    expect(real.acceptance.summary.proven).toBeGreaterThan(5);
+    const missing = { ...f } as Record<string, unknown>;
+    delete missing["adapter_kind"];
+    expect((await runConnectorContract(m, missing as unknown as typeof f)).adapter_kind).toBe("fake_from_manifest");
+    expect((await runConnectorContract(m, { ...f, adapter_kind: "whatever" } as unknown as typeof f)).adapter_kind).toBe("fake_from_manifest");
+  });
+
+  it("verdiktet er uendret (gaps / live_evidence_pending / complete_on_paper) - modelled er ikke «live», og ingenting heter VERIFIED", async () => {
+    const m = validFullManifest();
+    m.operations.circuit_breaker = { status: "implemented", mechanism: "automatisk bryter (fiktiv)" };
+    m.tests.live_smoke = { status: "present", paths: ["modules/connector-sdk/test/fixtures.ts"] };
+    const r = await run(m);
+    expect(r.acceptance.verdict).toBe("complete_on_paper");
+    expect(JSON.stringify(r.acceptance)).not.toContain("VERIFIED");
+    expect(JSON.stringify(r.acceptance)).not.toContain('"status":"proven"');
   });
 });
 
@@ -171,10 +379,10 @@ describe("akseptanse-scoring (Appendiks B): ærlig skille mellom bevist, deklare
     expect(JSON.stringify(a)).not.toContain("VERIFIED");
   });
 
-  it("kit-bevisene gir proven; manifest-deklarasjonene gir declared", async () => {
+  it("kit-bevisene mot en fake gir modelled (aldri proven - det krever en ekte transport); manifest-deklarasjonene gir declared", async () => {
     const a = await score(validFullManifest());
     for (const id of ["R.fake_adapter_contract_tests", "R.injection_classification", "R.audit_without_secret_values", "A.authority_target_resolution", "A.param_validation_state_readback", "A.idempotency_replay", "A.before_after_evidence", "A.rollback_or_documented_recovery", "A.classd_snapshot_notification", "A.pause_revoke_kill_switch"]) {
-      expect(item(a, id).status, id).toBe("proven");
+      expect(item(a, id).status, id).toBe("modelled");
     }
     for (const id of ["R.docs_checked", "R.minimal_scopes_vault_refs", "R.data_schema_provenance_freshness_retention", "R.cost_maintenance_measurement", "A.risk_class_a_d"]) expect(item(a, id).status, id).toBe("declared");
   });
