@@ -41,7 +41,9 @@ const U = {
   vendor: "leverandørnavn er ikke et felt i registeret",
   apiVersion: "koden oppgir ikke API-versjon for denne connectoren (ukjent, ikke «ingen»)",
   vendorFact: "leverandørfakta (krever offisiell dokumentasjon)",
-  runtimeFact: "kjøretidsfakta som ikke ligger i registeret"
+  runtimeFact: "kjøretidsfakta som ikke ligger i registeret",
+  boundary: "D-64-porten er ikke kjørt i manifestet: system_of_record er en beslutning (sjekk beslutningsloggen), ikke avledbar fra registeret",
+  coreDependency: "CORE_DEPENDENCY_DECISION_REQUIRED er svaret på D-64-porten og forhåndssvares aldri av en standard - ukjent til porten er kjørt"
 } as const;
 
 const u = (reason: string): Unknown => unknownField(reason);
@@ -205,11 +207,13 @@ export function deriveSkeletonManifest(
     },
     tests: { fake_adapter: u(U.generic), contract: u(U.generic), live_smoke: u(U.generic), authority: u(U.generic), recovery: u(U.generic), security: u(U.generic) },
     d41_audit: u("D-41-revisjonen er en leverandørvurdering mot offisiell dokumentasjon og kan ikke avledes"),
+    // D-64 (review M3): svarene på Core-vs-Adapter-porten kan IKKE avledes fra registeret - en registeroppføring er ikke et svar. Skeletonet påstår derfor verken EXTERNAL_CANONICAL eller
+    // «ingen kjerneavhengighet» (beslutningsloggen har HYBRID_WITH_CLEAR_AUTHORITY for fiken/stripe/vipps/neonomics/wallester); begge står som ukjent til porten er kjørt og loggført.
     core_boundary: {
-      system_of_record: "EXTERNAL_CANONICAL",
-      basis: "derived_default",
-      external_role: u("D-64-rollen er ikke revidert for denne connectoren (en registeroppføring er en leverandørtilkobling, standard EXTERNAL_CANONICAL)"),
-      core_dependency_decision_required: false
+      system_of_record: u(U.boundary),
+      basis: "unassessed",
+      external_role: u("D-64-rollen (kilde/sluk/utførelsesleverandør) er ikke revidert for denne connectoren i manifestet"),
+      core_dependency_decision_required: u(U.coreDependency)
     },
     actions
   };

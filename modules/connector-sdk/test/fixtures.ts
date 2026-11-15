@@ -130,7 +130,7 @@ export function validFullManifest(): ConnectorManifest {
       docs_reference: ["Acme API-referanse (fiktiv): tasks, settings"],
       gaps: [{ capability: "tilgangsstyring (medlemmer/deling)", status: "DEFERRED", reason: "krever egen eierbeslutning" }]
     },
-    core_boundary: { system_of_record: "EXTERNAL_CANONICAL", basis: "audited", external_role: "kilde og utførelsesleverandør for oppgaver", core_dependency_decision_required: false },
+    core_boundary: { system_of_record: "EXTERNAL_CANONICAL", basis: "audited", decision_refs: ["D-64"], external_role: "kilde og utførelsesleverandør for oppgaver", core_dependency_decision_required: false },
     actions
   };
 }
@@ -155,7 +155,7 @@ export function validSkeletonManifest(): ConnectorManifest {
     operations: { health_check: full.operations.health_check, timeout: full.operations.timeout, circuit_breaker: u("ikke avledbart"), metrics: u("ikke avledbart"), runbook: u("ikke avledbart"), maintenance_owner: u("ikke avledbart") },
     tests: { fake_adapter: u("ikke avledbart"), contract: u("ikke avledbart"), live_smoke: u("ikke avledbart"), authority: u("ikke avledbart"), recovery: u("ikke avledbart"), security: u("ikke avledbart") },
     d41_audit: u("D-41-revisjonen er en leverandørvurdering"),
-    core_boundary: { system_of_record: "EXTERNAL_CANONICAL", basis: "derived_default", external_role: u("ikke avledbart"), core_dependency_decision_required: false },
+    core_boundary: { system_of_record: u("D-64-porten er ikke kjørt"), basis: "unassessed", external_role: u("ikke avledbart"), core_dependency_decision_required: u("D-64-porten er ikke kjørt") },
     actions: full.actions.map((a) => ({ ...a, reversibility: { ...a.reversibility, rollback_method: u("ikke avledbart"), compensating_action: u("ikke avledbart") } }))
   };
 }

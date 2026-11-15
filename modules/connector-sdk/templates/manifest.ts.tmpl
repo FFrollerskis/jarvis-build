@@ -75,11 +75,13 @@ export const {{CONST}}_MANIFEST: ConnectorManifest = {
     authority: unknownField("TODO"), recovery: unknownField("TODO"), security: unknownField("TODO")
   },
   d41_audit: unknownField("TODO: D-41-revisjonen (se punkt 2 over)"),
+  // D-64: svarene på Core-vs-Adapter-porten (system_of_record, core_dependency_decision_required) skal IKKE forhåndssvares av malen. De står som ukjent til porten er kjørt og beslutningen er loggført; da settes
+  // `basis: "audited"`, begge svar og `decision_refs: ["D-<id>"]` (beslutningen i DECISIONS_AND_ASSUMPTIONS.md som loggførte porten).
   core_boundary: {
-    system_of_record: "EXTERNAL_CANONICAL",
-    basis: "derived_default",
+    system_of_record: unknownField("TODO: JARVIS_CANONICAL | EXTERNAL_CANONICAL | HYBRID_WITH_CLEAR_AUTHORITY - svaret fra D-64-porten, ikke en standard"),
+    basis: "unassessed",
     external_role: unknownField("TODO: D-64-rollen (kilde/sluk/utførelsesleverandør)"),
-    core_dependency_decision_required: false
+    core_dependency_decision_required: unknownField("TODO: CORE_DEPENDENCY_DECISION_REQUIRED (true = STOPP og meld til eieren) - svaret fra D-64-porten")
   },
   actions
 };

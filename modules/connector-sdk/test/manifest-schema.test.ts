@@ -36,7 +36,8 @@ describe("kap. 10-feltene: skjemaet har nøyaktig det masterplanen krever (ordre
   });
 
   it("D-64: system_of_record har nøyaktig de tre lovlige verdiene; D-41: kapabilitetsrevisjonen har lese/skrive/slette/tilgangsstyring og gap merket DEFERRED/PARTIAL", () => {
-    const sor = (MANIFEST_SECTION_SCHEMAS.core_boundary.shape.system_of_record as unknown as { options: string[] }).options;
+    // system_of_record er «maybe(enum)»: en union av de tre lovlige verdiene og Unknown-markøren (svaret på D-64-porten kan være ukjent til porten er kjørt).
+    const sor = (MANIFEST_SECTION_SCHEMAS.core_boundary.shape.system_of_record as unknown as { options: Array<{ options?: string[] }> }).options[0]!.options;
     expect(sor).toEqual(["JARVIS_CANONICAL", "EXTERNAL_CANONICAL", "HYBRID_WITH_CLEAR_AUTHORITY"]);
     const d41 = Object.keys(MANIFEST_SECTION_SCHEMAS.d41_audit.shape);
     for (const f of ["read", "write", "delete", "access_control", "scopes_verified_against_docs", "gaps", "classification"]) expect(d41).toContain(f);
@@ -199,9 +200,18 @@ describe("semantiske regler (speiler verktøymanifestet, klasse D-kjeden, idempo
     ["duplisert hvelvreferanse", (m) => { m.secrets.refs.push({ ref: "ACME_API_TOKEN", required: false, purpose: "x" }); }, "duplicate_secret_ref"],
     ["ingen hvelvreferanser", (m) => { m.secrets.refs = []; }, "no_secret_refs"],
     ["HYBRID uten authority_split", (m) => { m.core_boundary = { system_of_record: "HYBRID_WITH_CLEAR_AUTHORITY", basis: "audited", external_role: "utførelsesleverandør", core_dependency_decision_required: false }; }, "hybrid_requires_authority_split"],
-    ["HYBRID med authority_split er gyldig", (m) => { m.core_boundary = { system_of_record: "HYBRID_WITH_CLEAR_AUTHORITY", basis: "audited", external_role: "utførelsesleverandør", authority_split: "Jarvis eier intensjonene; leverandøren eier betalingstilstanden", core_dependency_decision_required: false }; }, "__ok__"],
+    ["HYBRID med authority_split er gyldig", (m) => { m.core_boundary = { system_of_record: "HYBRID_WITH_CLEAR_AUTHORITY", basis: "audited", decision_refs: ["D-109"], external_role: "utførelsesleverandør", authority_split: "Jarvis eier intensjonene; leverandøren eier betalingstilstanden", core_dependency_decision_required: false }; }, "__ok__"],
     ["kjerneavhengighet må avklares før et fullt manifest godtas", (m) => { m.core_boundary.core_dependency_decision_required = true; }, "core_dependency_decision_required"],
-    ["fullt manifest med bare «derived_default»-grense", (m) => { m.core_boundary.basis = "derived_default"; }, "full_requires_audited_boundary"],
+    ["fullt manifest med bare «unassessed»-grense", (m) => { m.core_boundary.basis = "unassessed"; }, "full_requires_audited_boundary"],
+    ["unassessed grense som likevel påstår system_of_record (porten er ikke kjørt)", (m) => { m.core_boundary.basis = "unassessed"; delete m.core_boundary.decision_refs; }, "unassessed_boundary_asserts", "core_boundary.system_of_record"],
+    ["unassessed grense som likevel svarer på CORE_DEPENDENCY_DECISION_REQUIRED", (m) => { m.core_boundary.basis = "unassessed"; delete m.core_boundary.decision_refs; }, "unassessed_boundary_asserts", "core_boundary.core_dependency_decision_required"],
+    ["decision_refs uten revisjon (basis unassessed)", (m) => { m.core_boundary = { system_of_record: { unknown: true, reason: "ikke kjørt" }, basis: "unassessed", decision_refs: ["D-109"], external_role: { unknown: true, reason: "ikke kjørt" }, core_dependency_decision_required: { unknown: true, reason: "ikke kjørt" } }; }, "decision_refs_without_audit"],
+    ["revidert grense uten beslutnings-id (basis audited krever decision_refs)", (m) => { delete m.core_boundary.decision_refs; }, "audited_boundary_without_decision", "core_boundary.decision_refs"],
+    ["revidert grense med tom decision_refs", (m) => { m.core_boundary.decision_refs = []; }, "audited_boundary_without_decision"],
+    ["revidert grense med ukjent system_of_record", (m) => { m.core_boundary.system_of_record = { unknown: true, reason: "ikke besluttet" }; }, "audited_boundary_has_unknown", "core_boundary.system_of_record"],
+    ["revidert grense uten svar på CORE_DEPENDENCY_DECISION_REQUIRED", (m) => { m.core_boundary.core_dependency_decision_required = { unknown: true, reason: "ikke besluttet" }; }, "audited_boundary_has_unknown", "core_boundary.core_dependency_decision_required"],
+    ["beslutnings-id med feil form", (m) => { m.core_boundary.decision_refs = ["109"]; }, "invalid_format", "core_boundary.decision_refs[0]"],
+    ["fullt manifest med ukjent system_of_record", (m) => { m.core_boundary.system_of_record = { unknown: true, reason: "ikke besluttet" }; }, "full_manifest_has_unknown", "core_boundary.system_of_record"],
     ["fullt manifest må være håndskrevet", (m) => { m.source = "derived_from_registry"; }, "full_must_be_authored"],
     ["fullt manifest med ukjent-markør", (m) => { m.identity.vendor = { unknown: true, reason: "mangler" }; }, "full_manifest_has_unknown", "identity.vendor"]
   ];

@@ -53,6 +53,12 @@ describe("generering inn i en midlertidig mappe", () => {
     expect(manifest).toContain('"modules/connector-sdk/test/connectors/acme_tasks.contract.test.ts"');
     expect(manifest).toContain("D-64");
     expect(manifest).toContain("D-41");
+    // Review M3: malen forhåndssvarer ALDRI D-64-porten - svarene står som ukjent til porten er kjørt og loggført.
+    expect(manifest).toContain('basis: "unassessed"');
+    expect(manifest).not.toMatch(/system_of_record:\s*"(JARVIS_CANONICAL|EXTERNAL_CANONICAL|HYBRID_WITH_CLEAR_AUTHORITY)"/);
+    expect(manifest).not.toMatch(/core_dependency_decision_required:\s*(true|false)\b/);
+    expect(manifest).toMatch(/system_of_record: unknownField\(/);
+    expect(manifest).toMatch(/core_dependency_decision_required: unknownField\(/);
     expect(manifest).toContain('"acme_tasks.list_items"');
     expect(manifest).toContain('ref: "JARVIS_ACME_TASKS_TOKEN"');
     expect(fake).toContain("export function createAcmeTasksFake");

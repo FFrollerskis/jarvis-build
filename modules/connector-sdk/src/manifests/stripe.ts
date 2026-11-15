@@ -3,7 +3,7 @@ import type { ConnectorManifest } from "../manifest.ts";
 
 /**
  * WP-I (D-472): FULLT, håndskrevet referansemanifest for finansleverandøren Stripe (`CONNECTOR_REGISTRY` id `stripe`, UA-6/WP-F1, D-462). Kilder (alle i repoet): `docs/runbooks/FINANCE_D_CHAIN.md` (klasse D-kjeden for penger,
- * step-up, dobbeltbetalingsvern, avstemming, webhooks, kjente begrensninger), D-228 (Stripe testmodus), `docs/ARCHITECTURE.md` §11.9 (finans/betalinger: «sannsynlig HYBRID»). Alt som kan avledes av registeret SJEKKES mot det.
+ * step-up, dobbeltbetalingsvern, avstemming, webhooks, kjente begrensninger), D-228 (Stripe testmodus), D-109 (D-64-porten for Stripe: HYBRID_WITH_CLEAR_AUTHORITY, CORE_DEPENDENCY_DECISION_REQUIRED=false; `docs/ARCHITECTURE.md` §11.9 sier bare «sannsynlig HYBRID» og er ikke selve porten) og D-462 (klasse D-kjeden). Alt som kan avledes av registeret SJEKKES mot det.
  *
  * REGISTERETS HANDLINGSMENGDE for `stripe` er de tre handlingene bundet til Stripe-credentialen. Selve betalingskjeden (intensjoner, refusjonsforespørsel, avstemming) er Jarvis-kjernen (`finance*`-handlingene med intern credential,
  * JARVIS_CANONICAL) og står derfor IKKE i handlingslisten under - se `core_boundary.authority_split`.
@@ -130,9 +130,9 @@ export const STRIPE_MANIFEST: ConnectorManifest = {
     ]
   },
   core_boundary: {
-    system_of_record: "HYBRID_WITH_CLEAR_AUTHORITY", basis: "audited",
+    system_of_record: "HYBRID_WITH_CLEAR_AUTHORITY", basis: "audited", decision_refs: ["D-109"],
     external_role: "betalingsrail og utførelsesleverandør for refusjoner; betalings- og refusjonstilstand hentes via webhooks, synk og refresh",
-    authority_split: "Jarvis eier betalingsintensjoner, bekreftelse, journal, avstemming, policy og revisjon (finance*-kjernen, JARVIS_CANONICAL); Stripe eier betalings- og refusjonstilstanden og selve pengebevegelsen (EXTERNAL_CANONICAL, betalingsrails er intrinsic regulert ekstern, ARCHITECTURE.md §11.9).",
+    authority_split: "D-109 (D-64-porten kjørt FØRST; ARCHITECTURE.md §11.9 sier bare «sannsynlig HYBRID» og er ikke porten): Jarvis eier betalings-/refusjonsintensjon, idempotensgarantien (egen DB-tilstand og avledet Stripe Idempotency-Key), avviksdeteksjon, avstemmingstilstand, eier-nødbryter og audit (finance*-kjernen, JARVIS_CANONICAL); Stripe eier PaymentIntent-/Charge-/Refund-tilstanden og webhook-hendelsesidentiteten (EXTERNAL_CANONICAL).",
     core_dependency_decision_required: false
   },
   actions

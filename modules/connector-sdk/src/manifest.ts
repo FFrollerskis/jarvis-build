@@ -295,15 +295,26 @@ const D41AuditSchema = z.object({
   gaps: z.array(z.object({ capability: text(240), status: z.enum(GAP_STATUSES), reason: text(500) }).strict()).max(40)
 }).strict();
 
-/** D-64 (CLAUDE.md regel 12): Core-vs-Adapter-grensen. `basis: derived_default` = ikke revidert (en registeroppføring er en leverandørtilkobling som standard EXTERNAL_CANONICAL); `audited` = Core-vs-Adapter-porten er kjørt. */
+/** Beslutnings-id i beslutningsloggen (`docs/DECISIONS_AND_ASSUMPTIONS.md`): `D-109`. */
+const DECISION_ID = /^D-\d{1,4}$/;
+export const BOUNDARY_BASES = ["unassessed", "audited"] as const;
+
+/**
+ * D-64 (CLAUDE.md regel 12): Core-vs-Adapter-grensen. `system_of_record` og `core_dependency_decision_required` er SVARENE på porten - de skal aldri forhåndssvares av en standard (review M3: alle 58 skeletons
+ * hevdet EXTERNAL_CANONICAL/false, mot beslutningsloggen som har HYBRID_WITH_CLEAR_AUTHORITY for fiken/vipps/neonomics/wallester/stripe). Derfor kan begge være `Unknown`-markører.
+ *  - `basis: unassessed` = porten er ikke kjørt/revidert i manifestet: begge felt SKAL være `Unknown` (en uavhengig påstand uten revisjon er forbudt).
+ *  - `basis: audited` = porten er kjørt: begge felt er kjent og `decision_refs` peker på beslutningen som loggførte den (D-id i beslutningsloggen; CI-vakten sjekker at den finnes).
+ */
 const CoreBoundarySchema = z.object({
-  system_of_record: z.enum(SYSTEMS_OF_RECORD),
-  basis: z.enum(["derived_default", "audited"]),
+  system_of_record: maybe(z.enum(SYSTEMS_OF_RECORD)),
+  basis: z.enum(BOUNDARY_BASES),
+  /** Beslutningen/beslutningene som loggførte D-64-porten for denne connectoren (påkrevd for `audited`). */
+  decision_refs: z.array(z.string().regex(DECISION_ID)).max(8).optional(),
   external_role: maybe(text(300)),
   /** Påkrevd for HYBRID_WITH_CLEAR_AUTHORITY: hvem som har autoriteten over hva (ingen tvetydig dobbel-eierskap). */
   authority_split: text(500).optional(),
-  /** `true` = leverandøren ville blitt en CORE DEPENDENCY: STOPP og meld `CORE_DEPENDENCY_DECISION_REQUIRED=true` til Tobias. Blokkerer et fullt manifest. */
-  core_dependency_decision_required: z.boolean()
+  /** `true` = leverandøren ville blitt en CORE DEPENDENCY: STOPP og meld `CORE_DEPENDENCY_DECISION_REQUIRED=true` til Tobias. Blokkerer et fullt manifest. `Unknown` til porten er kjørt. */
+  core_dependency_decision_required: maybe(z.boolean())
 }).strict();
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -436,3 +447,4 @@ export function safeScalar(value: unknown): string {
 export const VAULT_REF_PATTERN = VAULT_REF;
 export const ACTION_KEY_PATTERN = ACTION_KEY;
 export const CONNECTOR_ID_PATTERN = CONNECTOR_ID;
+export const DECISION_ID_PATTERN = DECISION_ID;

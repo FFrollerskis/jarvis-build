@@ -190,8 +190,8 @@ export const CLOUDFLARE_MANIFEST: ConnectorManifest = {
     ]
   },
   core_boundary: {
-    system_of_record: "EXTERNAL_CANONICAL", basis: "audited",
-    external_role: "adapter og utførelsesleverandør for DNS, WAF og sone-innstillinger; Jarvis eier hendelsesmodellen, infra_executions-journalen, policyen og revisjonen",
+    system_of_record: "EXTERNAL_CANONICAL", basis: "audited", decision_refs: ["D-461"],
+    external_role: "adapter og utførelsesleverandør for DNS, WAF og sone-innstillinger; Jarvis eier hendelsesmodellen, infra_executions-journalen, policyen og revisjonen (D-64-porten loggført i D-461: leverandørene er adaptere, EXTERNAL_CANONICAL)",
     core_dependency_decision_required: false
   },
   actions

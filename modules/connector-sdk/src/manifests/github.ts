@@ -3,7 +3,7 @@ import type { ConnectorManifest } from "../manifest.ts";
 
 /**
  * WP-I (D-472): FULLT, håndskrevet referansemanifest for GitHub (`CONNECTOR_REGISTRY` id `github`). Kilder (alle i repoet): `docs/runbooks/GITHUB_APP.md` (rettighetsmatrisen, verifisert mot
- * GitHubs åpne docs-repo 2026-10-09), `modules/tool-gateway/src/github-rate-limit-controller.ts` (D-97), D-94 (23-handlings D-41-matrisen), D-450/Q-50 B (repo-lås), `docs/ARCHITECTURE.md` §11.9
+ * GitHubs åpne docs-repo 2026-10-09), `modules/tool-gateway/src/github-rate-limit-controller.ts` (D-97), D-94 (23-handlings D-41-matrisen og D-64-porten: EXTERNAL_CANONICAL), D-450/Q-50 B (repo-lås), `docs/ARCHITECTURE.md` §11.9
  * (D-64-revisjonen: GitHub = adapter, EXTERNAL_CANONICAL). Alt som kan avledes av registeret SJEKKES mot det (`checkManifestAgainstDerived`); resten er narrativ som gjennomgås av et menneske.
  *
  * STATUS: BUILT_UNWIRED. Manifestet beskriver connectoren; det styrer ingenting i kjøretiden. Ingenting er kjørt mot ekte GitHub (live smoke `BLOCKED_EXTERNAL`: krever eierens credential).
@@ -214,8 +214,8 @@ export const GITHUB_MANIFEST: ConnectorManifest = {
     ]
   },
   core_boundary: {
-    system_of_record: "EXTERNAL_CANONICAL", basis: "audited",
-    external_role: "kilde og utførelsesleverandør for kode, PR-er, issues og CI (Git-hosting er intrinsic ekstern, ARCHITECTURE.md §11.9)",
+    system_of_record: "EXTERNAL_CANONICAL", basis: "audited", decision_refs: ["D-94", "D-64"],
+    external_role: "kilde og utførelsesleverandør for kode, PR-er, issues og CI (Git-hosting er intrinsic ekstern). D-64-porten er loggført i D-94 (EXTERNAL_CANONICAL, CORE_DEPENDENCY_DECISION_REQUIRED=false; GitHub gjøres aldri til domenekjerne) og i den opprinnelige audit'en (D-64, ARCHITECTURE.md §11.9)",
     core_dependency_decision_required: false
   },
   actions

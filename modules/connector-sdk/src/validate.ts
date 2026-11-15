@@ -318,8 +318,28 @@ function semanticIssues(m: ConnectorManifest): ManifestIssue[] {
     refs.add(r.ref);
   });
   if (m.secrets.refs.length === 0) out.push({ path: "secrets.refs", code: "no_secret_refs", message: "en connector må oppgi minst én hvelvreferanse (credential)" });
-  if (m.core_boundary.system_of_record === "HYBRID_WITH_CLEAR_AUTHORITY" && m.core_boundary.authority_split === undefined) out.push({ path: "core_boundary.authority_split", code: "hybrid_requires_authority_split", message: "HYBRID_WITH_CLEAR_AUTHORITY krever authority_split (hvem har autoriteten over hva)" });
+  boundaryIssues(m, out);
   return out;
+}
+
+/**
+ * D-64-grensen (review M3). `unassessed`: porten er ikke kjørt, så svarene (system_of_record, core_dependency_decision_required) skal være `Unknown` - en standard skal aldri forhåndssvare porten.
+ * `audited`: svarene er kjent og beslutningen som loggførte dem er oppgitt. HYBRID krever authority_split.
+ */
+function boundaryIssues(m: ConnectorManifest, out: ManifestIssue[]): void {
+  const b = m.core_boundary;
+  const sorKnown = !isUnknown(b.system_of_record);
+  const flagKnown = !isUnknown(b.core_dependency_decision_required);
+  if (b.basis === "unassessed") {
+    if (sorKnown) out.push({ path: "core_boundary.system_of_record", code: "unassessed_boundary_asserts", message: "system_of_record kan ikke påstås uten at D-64-porten er kjørt (basis: audited + decision_refs); la den stå som ukjent" });
+    if (flagKnown) out.push({ path: "core_boundary.core_dependency_decision_required", code: "unassessed_boundary_asserts", message: "CORE_DEPENDENCY_DECISION_REQUIRED kan ikke svares uten at D-64-porten er kjørt (basis: audited + decision_refs); la den stå som ukjent" });
+    if (b.decision_refs !== undefined && b.decision_refs.length > 0) out.push({ path: "core_boundary.decision_refs", code: "decision_refs_without_audit", message: "decision_refs hører bare til en revidert grense (basis: audited)" });
+  } else {
+    if (!sorKnown) out.push({ path: "core_boundary.system_of_record", code: "audited_boundary_has_unknown", message: "en revidert grense (basis: audited) kan ikke ha ukjent system_of_record" });
+    if (!flagKnown) out.push({ path: "core_boundary.core_dependency_decision_required", code: "audited_boundary_has_unknown", message: "en revidert grense (basis: audited) må svare på CORE_DEPENDENCY_DECISION_REQUIRED" });
+    if (b.decision_refs === undefined || b.decision_refs.length === 0) out.push({ path: "core_boundary.decision_refs", code: "audited_boundary_without_decision", message: "en revidert grense må peke på beslutningen som loggførte D-64-porten (decision_refs, f.eks. D-109)" });
+  }
+  if (b.system_of_record === "HYBRID_WITH_CLEAR_AUTHORITY" && b.authority_split === undefined) out.push({ path: "core_boundary.authority_split", code: "hybrid_requires_authority_split", message: "HYBRID_WITH_CLEAR_AUTHORITY krever authority_split (hvem har autoriteten over hva)" });
 }
 
 function fullOnlyIssues(m: ConnectorManifest, unknownPaths: readonly string[]): ManifestIssue[] {
@@ -327,7 +347,7 @@ function fullOnlyIssues(m: ConnectorManifest, unknownPaths: readonly string[]): 
   if (m.source !== "authored") out.push({ path: "source", code: "full_must_be_authored", message: "et fullt manifest er håndskrevet og gjennomgått (source: authored), aldri generert" });
   for (const p of unknownPaths) out.push({ path: p, code: "full_manifest_has_unknown", message: "et fullt manifest kan ikke inneholde «ukjent»-markører" });
   if (m.core_boundary.basis !== "audited") out.push({ path: "core_boundary.basis", code: "full_requires_audited_boundary", message: "et fullt manifest krever at Core-vs-Adapter-porten (D-64) er kjørt (basis: audited)" });
-  if (m.core_boundary.core_dependency_decision_required) out.push({ path: "core_boundary.core_dependency_decision_required", code: "core_dependency_decision_required", message: "CORE_DEPENDENCY_DECISION_REQUIRED=true: leverandøren ville blitt en kjerneavhengighet - STOPP og avklar med eieren før manifestet kan godtas" });
+  if (m.core_boundary.core_dependency_decision_required === true) out.push({ path: "core_boundary.core_dependency_decision_required", code: "core_dependency_decision_required", message: "CORE_DEPENDENCY_DECISION_REQUIRED=true: leverandøren ville blitt en kjerneavhengighet - STOPP og avklar med eieren før manifestet kan godtas" });
   return out;
 }
 

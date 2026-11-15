@@ -159,7 +159,22 @@ describe("avledning: ærlighet - alt som ikke kan avledes er en Unknown-markør"
       expect(isUnknown(m.operations.maintenance_owner), m.identity.id).toBe(true);
       for (const t of Object.values(m.tests)) expect(isUnknown(t), m.identity.id).toBe(true);
       expect(m.identity.version.manifest).toBe(DERIVED_MANIFEST_VERSION);
-      expect(m.core_boundary.basis).toBe("derived_default");
+      expect(m.core_boundary.basis).toBe("unassessed");
+    }
+  });
+
+  it("review M3 (D-64): INGEN skeleton forhåndssvarer Core-vs-Adapter-porten - system_of_record og CORE_DEPENDENCY_DECISION_REQUIRED er ukjent for alle, også D-64-port-backlogen og finansleverandørene beslutningsloggen har svart for", () => {
+    for (const m of skeletons) {
+      expect(isUnknown(m.core_boundary.system_of_record), `${m.identity.id}: system_of_record`).toBe(true);
+      expect(isUnknown(m.core_boundary.core_dependency_decision_required), `${m.identity.id}: core_dependency_decision_required`).toBe(true);
+      expect(m.core_boundary.decision_refs, m.identity.id).toBeUndefined();
+    }
+    // Beslutningsloggen (D-107, D-109, D-110, D-111, D-112) har HYBRID_WITH_CLEAR_AUTHORITY for disse - et skeleton skal verken motsi eller gjenta det; svaret hører hjemme i et revidert, fullt manifest.
+    for (const id of ["fiken", "stripe", "vipps", "neonomics", "wallester"]) expect(isUnknown(byId.get(id)!.core_boundary.system_of_record), id).toBe(true);
+    // De seks CRM-/prosjektstyrings-leverandørene som var «D-64-port-krevende backlog» (D-232) og senere ble bygget (D-329..D-334): ingen forhåndssvart port heller for dem.
+    for (const id of ["hubspot", "pipedrive", "linear", "jira", "trello", "todoist"]) {
+      expect(byId.has(id), id).toBe(true);
+      expect(isUnknown(byId.get(id)!.core_boundary.core_dependency_decision_required), id).toBe(true);
     }
   });
 
