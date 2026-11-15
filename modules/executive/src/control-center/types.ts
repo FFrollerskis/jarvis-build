@@ -193,5 +193,7 @@ export interface ControlCenterOverview {
   centers: ControlCenterSummary[];
   /** Sentre fra masterplanen som ikke er koblet inn ennå. */
   unregistered: ControlCenterId[];
+  /** Gjennomgang M2: registrerte sentre som er HOLDT TILBAKE fra mottakeren (en skymodell får ikke finans, D-378) - ikke bygget, ikke i `centers`, ikke i samlet status. Utelatt når ingenting er holdt tilbake. */
+  withheld?: ControlCenterId[];
   summary_no: string;
 }

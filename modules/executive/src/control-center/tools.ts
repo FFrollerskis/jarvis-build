@@ -1,4 +1,4 @@
-import type { ControlCenterId, ControlCenterReport } from "./types.ts";
+import type { ControlCenterId } from "./types.ts";
 
 /**
  * WP-H1/H2: per-senter LESE-verktøy (`executive.get_<senter>_center`, klasse A) for sentrene som ble bygget etter H0. Hvert verktøy er et tynt, lesende gjennomslag til SAMME register som `get_control_center`
@@ -21,7 +21,7 @@ const COMMON_TAIL =
 export const CONTROL_CENTER_READ_TOOLS: ReadonlyArray<ControlCenterReadTool> = [
   {
     center: "finance", action: "get_finance_center",
-    description: `Les Finans-kontrollsenteret (UA-11): betalingsintensjoner (inkl. de med ukjent utfall), forbruk og faste trekk, avvik, leverandører/kontoer/banksamtykker, avstemming (siste kjøring og åpne funn) og finans-nødbryterens tilstand. Beløp er utelatt i svaret til modellen (kun antall og tilstander). ${COMMON_TAIL}`
+    description: `Les Finans-kontrollsenteret (UA-11): betalingsintensjoner (inkl. de med ukjent utfall), forbruk og faste trekk, avvik, leverandører/kontoer/banksamtykker, avstemming (siste kjøring og åpne funn) og finans-nødbryterens tilstand. Finansdata er SECRET_RESTRICTED (D-378): en skymodell får IKKE rapporten (den holdes tilbake ved utførelse); kun en lokal modell og kontrollsiden får den. ${COMMON_TAIL}`
   },
   {
     center: "memory", action: "get_memory_center",
@@ -40,22 +40,25 @@ export function controlCenterForReadAction(action: string): ControlCenterId | un
 }
 
 /**
- * Sentre der pengebeløp (`*_ore`-fakta) ALDRI skal nå en modell. Finansdata er `SECRET_RESTRICTED` (D-378: aldri til sky), og kontrollsenterets verktøy kan velges av en tur som ikke er låst lokalt
- * (`get_control_center` gjør det ikke). Beløpene ligger derfor kun i numeriske fakta med nøkkel som ender på `_ore` (aldri i tekstene), og fjernes her når en modell betjener kallet. Siden
- * (`/control/center`, ingen modell i løkka) får hele rapporten. H0-sentrene er uendret.
+ * Sentre som ALDRI leveres til en skymodell (gjennomgang M2). Finansdata er `SECRET_RESTRICTED` (D-378: aldri til sky; en LOKAL modell får lov til å se alt, D-378 punkt 2). Låsen i turn-konteksten
+ * (`RESTRICTED_TOOL_KEYS`) gjelder bare når `get_finance_center` blir VALGT av utvalget, og `MeshToolExecutor` sjekker bare flate-tildelingen - en skymodell som likevel kaller verktøyet (tom-utvalg-tur,
+ * `get_control_center {center: "finance"}`, oversikten) ville derfor fått rapporten. Håndhevingen skjer derfor VED UTFØRELSE, i transporten: ber en skymodell om dette senteret, bygges det ikke engang -
+ * svaret er en kort merknad. Lokale modeller og siden (`/control`, ingen modell i løkka) får hele rapporten, inkl. beløp i øre.
  */
-export const MONEY_REDACTED_CENTERS: readonly ControlCenterId[] = ["finance"];
-const MONEY_FACT_KEY = /_ore$/;
+export const CLOUD_WITHHELD_CENTERS: readonly ControlCenterId[] = ["finance"];
 
-export function stripMoneyFacts(report: ControlCenterReport): ControlCenterReport {
-  if (!MONEY_REDACTED_CENTERS.includes(report.center)) return report;
-  return {
-    ...report,
-    sections: report.sections.map((section) => ({
-      ...section,
-      items: section.items.map((item) =>
-        item.facts === undefined ? item : { ...item, facts: Object.fromEntries(Object.entries(item.facts).filter(([key]) => !MONEY_FACT_KEY.test(key))) }
-      )
-    }))
-  };
+/**
+ * Verktøynøklene (`tool_id.action`) som er håndhevet VED UTFØRELSE mot skymodeller (ikke bare ved utvalg). Låst mot manifestets `restricted`-merking av `wph1-restricted-tools-invariant.test.ts`:
+ * et verktøy merket `restricted` på en modellflate må enten være låst i utvalget (turen blir lokal) eller stå her.
+ */
+export const EXECUTION_GUARDED_RESTRICTED_KEYS: ReadonlySet<string> = new Set(["executive.get_finance_center"]);
+
+export function isCloudWithheldCenter(center: string): boolean {
+  return (CLOUD_WITHHELD_CENTERS as readonly string[]).includes(center);
+}
+
+/** Svaret en skymodell får i stedet for et holdt-tilbake senter: ingen tall, ingen seksjoner, ingen tilstand - kun hvorfor og hva eieren kan gjøre. */
+export function withheldCenterData(center: ControlCenterId, title_no: string): Record<string, unknown> {
+  const summary_no = `${title_no}-kontrollsenteret holdes tilbake fra denne modellen: ${title_no.toLowerCase()}data er SECRET_RESTRICTED (D-378) og går aldri til en skymodell. Åpne kontrollsiden (/control) fra en innrullert enhet, eller still spørsmålet til en lokal modell.`;
+  return { found: true, withheld: true, center, summary_no, explanation_no: summary_no };
 }

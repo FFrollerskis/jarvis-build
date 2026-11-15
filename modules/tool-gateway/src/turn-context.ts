@@ -232,9 +232,18 @@ function verbMatches(action: string, text: string): boolean {
 const RESTRICTED_TOOL_ID = /^finance(_|$)/;
 /**
  * WP-H1: finansdata kan også ligge bak et `executive`-verktøy (Finans-senteret). En tur som velger det er låst lokalt (SECRET_RESTRICTED) på samme måte som `finance_*` - uansett hva meldingen sier.
- * (`get_control_center` er ikke på listen: finans-senterets beløp fjernes fra svaret til en modell i transporten, og oversikten har kun antall.)
+ * (`get_control_center` er ikke på listen: en SKYmodell får ikke finans-senteret via den heller - transporten holder det tilbake ved utførelse og bygger oversikten uten det; en lokal modell får det.)
  */
 const RESTRICTED_TOOL_KEYS: ReadonlySet<string> = new Set(["executive.get_finance_center"]);
+
+/**
+ * Gjennomgang M2: er verktøyet LÅST i utvalget (en tur som velger det blir `SECRET_RESTRICTED`, kun lokal modell)? Brukes av invariant-testen «manifest `restricted` + modellflate => låst eller håndhevet ved utførelse».
+ * NB: låsen gjelder bare når verktøyet VELGES - en modell som kaller et ikke-valgt verktøy omgår den (`MeshToolExecutor` sjekker bare flate-tildelingen), derfor er finans-senteret i tillegg håndhevet ved
+ * utførelse (se `EXECUTION_GUARDED_RESTRICTED_KEYS` i `@jarvis/executive`).
+ */
+export function isSelectionLockedTool(toolId: string, action: string): boolean {
+  return RESTRICTED_TOOL_ID.test(toolId) || RESTRICTED_TOOL_KEYS.has(`${toolId}.${action}`);
+}
 
 /**
  * D-415: småprat uten saksinnhold (hilsen, takk, språk, klokkeslett) får INGEN verktøy. En liten lokal modell kalte statusverktøy på «hei»

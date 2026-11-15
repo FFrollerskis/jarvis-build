@@ -247,12 +247,21 @@ export class ControlCenterRegistry {
     return this.buildOne(center, identity);
   }
 
-  /** Oversikt over alle ti sentre: de registrerte bygges parallelt (hver fail-soft), de øvrige listes som `unregistered`. */
-  async overview(identity: IdentityContext): Promise<ControlCenterOverview> {
+  /**
+   * Oversikt over alle ti sentre: de registrerte bygges parallelt (hver fail-soft), de øvrige listes som `unregistered`. `options.withhold` (gjennomgang M2) = sentre som IKKE skal bygges for denne mottakeren
+   * (en skymodell får ikke finans): de leses ikke engang, og oversikten sier rett ut at de er holdt tilbake.
+   */
+  async overview(identity: IdentityContext, options: { withhold?: readonly ControlCenterId[] } = {}): Promise<ControlCenterOverview> {
     this.assertAuthorized(identity);
+    const withhold = new Set<string>(options.withhold ?? []);
     const registered = this.list();
-    const reports = await Promise.all(registered.map((c) => this.buildOne(this.centers.get(c.id) as ControlCenterDefinition, identity)));
-    return composeControlCenterOverview(reports.map((r, i) => summarizeControlCenter(r, (registered[i] as RegisteredControlCenter).description_no)), this.now());
+    const visible = registered.filter((c) => !withhold.has(c.id));
+    const reports = await Promise.all(visible.map((c) => this.buildOne(this.centers.get(c.id) as ControlCenterDefinition, identity)));
+    return composeControlCenterOverview(
+      reports.map((r, i) => summarizeControlCenter(r, (visible[i] as RegisteredControlCenter).description_no)),
+      this.now(),
+      registered.filter((c) => withhold.has(c.id)).map((c) => c.id)
+    );
   }
 
   /** `explain(center)`: deterministisk norsk forklaring av hvorfor senteret har sin status (UA-11: «Jarvis forklarer hvorfor»). `null` for ukjent/ikke-koblet senter. */

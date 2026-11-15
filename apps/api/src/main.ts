@@ -140,6 +140,7 @@ import { ChatJobs, MAX_ACTIVE_JOBS, TasksDelegateTransport, tasksDelegateToolDef
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
 import { createControlCenterRegistry, ownerPredicate, registerControlCenters } from "./control-center/register.ts";
 import { enabledControlCenters } from "./control-center/shared.ts";
+import { servedByCloudModel } from "./cloud-tool-screen.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { createOwnerControlsService } from "./provider-pause.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
@@ -1055,6 +1056,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
           producer_names: INCIDENT_PRODUCER_NAMES, mode: async () => (await infraGate.statusDurable()).state.mode
         },
         controlCenters,
+        // Gjennomgang M2: finansdata er SECRET_RESTRICTED (D-378) - en SKYmodell får aldri finans-senteret (holdes tilbake ved utførelse i executive-transporten, uansett hvilke verktøy turens utvalg valgte); en lokal modell
+        // og siden får det. Lokalitet kommer fra leverandørregisteret (SAMME `servedByCloudModel` som chattens verktøyskjerm); ukjent leverandør regnes som sky (fail-closed).
+        servedLocally: (model) => !servedByCloudModel({ provider: model.provider }),
         // WP-H0 (JARVIS-087): kontrollsenterets avbryt-handling bruker den EKSISTERENDE kanselleringsveien (samme `taskService` som chatens «avbryt jobb <id>»).
         tasks: { cancel: (identity, taskId) => taskService.cancel(identity, taskId) },
         // WP-C4: Value Center - kilde (aggregater under RLS) + kjøretidsfakta (flagg, EV-0, kill switch, erklærte porter). Ingen innhold, ingen skriving; V3/V5 er sovende og kan aldri aktiveres herfra.

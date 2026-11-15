@@ -248,19 +248,24 @@ export function summarizeControlCenter(report: ControlCenterReport, description_
   };
 }
 
-/** Oversikten over alle ti sentre. Sentre uten registrering listes som `unregistered` (ikke som «OK»). */
-export function composeControlCenterOverview(summaries: ControlCenterSummary[], now: Date): ControlCenterOverview {
+/**
+ * Oversikten over alle ti sentre. Sentre uten registrering listes som `unregistered` (ikke som «OK»). `withheld` (gjennomgang M2) er registrerte sentre som er holdt tilbake fra mottakeren (en skymodell får ikke finans):
+ * de er IKKE bygget, står ikke i `centers`, teller ikke i samlet status (ellers ville status røpet noe om dem) og listes aldri som «ikke koblet inn» - de sies rett ut å være holdt tilbake.
+ */
+export function composeControlCenterOverview(summaries: ControlCenterSummary[], now: Date, withheld: readonly ControlCenterId[] = []): ControlCenterOverview {
   const registered = new Set(summaries.map((s) => s.center));
-  const unregistered = CONTROL_CENTER_IDS.filter((id) => !registered.has(id));
+  const heldBack = CONTROL_CENTER_IDS.filter((id) => withheld.includes(id) && !registered.has(id));
+  const unregistered = CONTROL_CENTER_IDS.filter((id) => !registered.has(id) && !heldBack.includes(id));
   const status = summaries.length === 0 ? "UNKNOWN" : worstStatus(summaries.map((s) => s.status));
   const lines = [
-    summaries.length === 0
+    summaries.length + heldBack.length === 0
       ? "Ingen kontrollsentre er koblet inn, så ingenting kan vurderes."
-      : `Kontrollsentre: ${summaries.length} av ${CONTROL_CENTER_IDS.length} er koblet inn. Samlet: ${statusLabelNo(status)}.`,
+      : `Kontrollsentre: ${summaries.length + heldBack.length} av ${CONTROL_CENTER_IDS.length} er koblet inn. Samlet${heldBack.length > 0 ? " (uten de tilbakeholdte)" : ""}: ${statusLabelNo(status)}.`,
     ...summaries.map((s) => `- ${s.summary_no}`),
-    ...(unregistered.length > 0 && summaries.length > 0 ? [`Ikke koblet inn ennå: ${unregistered.map((id) => CONTROL_CENTER_TITLES_NO[id]).join(", ")}.`] : [])
+    ...(heldBack.length > 0 ? [`Holdt tilbake fra denne modellen (SECRET_RESTRICTED, D-378): ${heldBack.map((id) => CONTROL_CENTER_TITLES_NO[id]).join(", ")}. Åpne kontrollsiden (/control) eller bruk en lokal modell.`] : []),
+    ...(unregistered.length > 0 && summaries.length + heldBack.length > 0 ? [`Ikke koblet inn ennå: ${unregistered.map((id) => CONTROL_CENTER_TITLES_NO[id]).join(", ")}.`] : [])
   ];
-  return { generated_at: now.toISOString(), status, sensitivity: "PRIVATE", centers: summaries, unregistered, summary_no: lines.join("\n") };
+  return { generated_at: now.toISOString(), status, sensitivity: "PRIVATE", centers: summaries, unregistered, ...(heldBack.length > 0 ? { withheld: heldBack } : {}), summary_no: lines.join("\n") };
 }
 
 const EXPLAIN_MAX_ITEMS_PER_SECTION = 5;

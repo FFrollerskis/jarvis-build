@@ -4,7 +4,7 @@ import type { JsonValue } from "@jarvis/contracts";
 import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import type { ExecutiveService } from "./service.ts";
 import { summarizeCapabilityStatusNo, summarizeConnectorStatusNo, summarizeSelfDiagnosisNo } from "./status-summary.ts";
-import { CONTROL_CENTER_IDS, CONTROL_CENTER_READ_TOOLS, controlCenterForReadAction, stripMoneyFacts, type ControlCenterId } from "./control-center/index.ts";
+import { CLOUD_WITHHELD_CENTERS, CONTROL_CENTER_IDS, CONTROL_CENTER_READ_TOOLS, CONTROL_CENTER_TITLES_NO, controlCenterForReadAction, isCloudWithheldCenter, withheldCenterData, type ControlCenterId } from "./control-center/index.ts";
 
 /**
  * UA-11 Executive Mode (P0, D-162): eierens SAMLEDE kontrollflate, eksponert
@@ -34,18 +34,21 @@ export class ExecutiveTransport implements ToolTransport {
   }
 
   /**
-   * WP-H0/H1: ÉN rapport-respons for `get_control_center` (med `center`) og de per-senter verktøyene. Et ikke-koblet senter (registeret har det ikke, f.eks. flagget er av) er et ærlig, strukturert svar
-   * (`found: false`) - IKKE et kastet unntak, som ToolGateway ellers ville tolket som at hele executive-verktøyet er utilgjengelig (helse). Når en modell betjener kallet (`servingModel`) fjernes pengebeløp
-   * (`*_ore`-fakta) fra finans-senteret (`stripMoneyFacts`); siden uten modell i løkka får hele rapporten.
+   * WP-H0/H1: ÉN rapport-respons for `get_control_center` (med `center`) og de per-senter verktøyene. Et ikke-koblet senter (registeret har det ikke, f.eks. avhengighetene mangler) er et ærlig, strukturert svar
+   * (`found: false`) - IKKE et kastet unntak, som ToolGateway ellers ville tolket som at hele executive-verktøyet er utilgjengelig (helse).
+   * Gjennomgang M2: ber en SKYmodell om et senter som ikke skal til sky (`CLOUD_WITHHELD_CENTERS`, finans: D-378), bygges det ikke engang - svaret er en kort «holdt tilbake»-merknad. Lokale modeller og siden (ingen modell
+   * i løkka) får hele rapporten. Håndhevingen skjer HER, ved utførelse, uavhengig av hvilke verktøy utvalget valgte for turen.
    */
   private async centerResponse(identity: Parameters<ExecutiveService["getControlCenterReport"]>[0], center: string, servingModel: ToolInvocationContext["servingModel"]): Promise<{ data: JsonValue }> {
+    if (isCloudWithheldCenter(center) && this.service.isCloudServed(servingModel) && this.service.hasControlCenter(center)) {
+      return { data: withheldCenterData(center as ControlCenterId, CONTROL_CENTER_TITLES_NO[center as ControlCenterId]) as unknown as JsonValue };
+    }
     const result = await this.service.getControlCenterReport(identity, center);
     if (result === null) {
       return { data: { found: false, center, summary_no: "Dette kontrollsenteret er ikke koblet inn ennå, så ingenting kan vurderes." } as unknown as JsonValue };
     }
-    const report = servingModel !== undefined ? stripMoneyFacts(result.report) : result.report;
     // `summary_no` og `explanation_no` først: chat-executoren kutter lange svar bakfra, og det er disse modellen skal relayere.
-    return { data: { found: true, summary_no: report.summary_no, explanation_no: result.explanation_no, report } as unknown as JsonValue };
+    return { data: { found: true, summary_no: result.report.summary_no, explanation_no: result.explanation_no, report: result.report } as unknown as JsonValue };
   }
 
   /** Gjennomgang av PR #324 (M3/L4): eier + signert økt-porten for `get_infra_status` - fail-closed også uten register. */
@@ -128,7 +131,7 @@ export class ExecutiveTransport implements ToolTransport {
         // IKKE et kastet unntak, som ToolGateway ellers ville tolket som at hele executive-verktøyet er utilgjengelig (helse).
         const center = parameters["center"];
         if (center === undefined) {
-          const overview = await this.service.getControlCenterOverview(identity);
+          const overview = await this.service.getControlCenterOverview(identity, this.service.isCloudServed(context?.servingModel) ? { withhold: CLOUD_WITHHELD_CENTERS } : {});
           const { summary_no, ...rest } = overview;
           return { data: { summary_no, ...rest } as unknown as JsonValue }; // `summary_no` først (se under)
         }
