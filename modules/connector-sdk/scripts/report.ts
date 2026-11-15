@@ -7,7 +7,7 @@
 //        fake: test/references/<id>.fake.ts eller test/connectors/<id>.fake.ts (export create<Id>Fake).
 //
 // Avslutter 0 = ok, 1 = vakten/kittet har brudd, 2 = ugyldig bruk. Gap og «ikke bevist» er arbeidslisten, ikke feil: de gir kode 0. Alt kittet skriver er redigert (ingen hemmelighetsformer).
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { FULL_MANIFESTS, SKELETON_BASELINE, productionConnectorDefinitions, runManifestGuard, validateConnectorManifest, type ConnectorManifest } from "../src/index.ts";
@@ -19,6 +19,18 @@ const ROOT = resolve(PKG, "..", "..");
 const ID = /^[a-z][a-z0-9_]{1,40}$/;
 
 const pascal = (id: string): string => id.split("_").map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join("");
+/**
+ * Bevisstrengheten (en eneste implementasjon, brukt av både denne rapporten og CI-porten i `guard.test.ts`): en repo-relativ sti teller som runbook-/testbevis kun hvis den er en VANLIG FIL som ikke er tom.
+ * Vakten selv leser aldri innholdet; uten dette var en tom plassholderfil (eller en katalog) nok. Stiene er allerede låst av skjemaet (`REPO_PATH`: ingen `..`, ingen absolutt sti), så `root` kan ikke forlates.
+ */
+export const evidenceFileExists = (root: string) => (repoRelativePath: string): boolean => {
+  try {
+    const st = statSync(join(root, repoRelativePath));
+    return st.isFile() && st.size > 0;
+  } catch {
+    return false;
+  }
+};
 const decisionLog = (): string => readFileSync(join(ROOT, "docs", "DECISIONS_AND_ASSUMPTIONS.md"), "utf8");
 
 export interface Io {
@@ -30,7 +42,7 @@ function guardReport(json: boolean, io: Io): number {
   const log = decisionLog();
   const report = runManifestGuard({
     definitions: productionConnectorDefinitions(), authored: FULL_MANIFESTS,
-    fileExists: (p) => existsSync(join(ROOT, p)), decisionExists: (id) => new RegExp(`^\\| ${id} \\|`, "m").test(log)
+    fileExists: evidenceFileExists(ROOT), decisionExists: (id) => new RegExp(`^\\| ${id} \\|`, "m").test(log)
   });
   const work = Object.entries(report.coverage.unknown_fields_by_connector).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   if (json) {

@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -7,6 +8,7 @@ import {
   FULL_MANIFESTS, GUARD_RULES, SKELETON_BASELINE, auditManifestCatalogue, buildManifestCatalogue, productionConnectorDefinitions, runManifestGuard, unregisteredManifestFiles,
   type ConnectorManifest, type GuardRule, type GuardViolation
 } from "../src/index.ts";
+import { evidenceFileExists } from "../scripts/report.ts";
 import { fakeSecretShapes, secretShapedActionKeys, secretShapedConnectorId } from "./fixtures.ts";
 
 /**
@@ -14,7 +16,8 @@ import { fakeSecretShapes, secretShapedActionKeys, secretShapedConnectorId } fro
  * et manifest refererer en hemmelighets VERDI, en skrivekapabel connector mangler idempotensinfo, eller et håndskrevet manifest driver fra registeret. Resten er mutasjonstester som beviser at hver regel biter.
  */
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const fileExists = (p: string) => existsSync(join(ROOT, p));
+/** CI-portens `fileExists` (samme implementasjon som `scripts/report.ts`): stien er en vanlig, ikke-tom fil (review LOW: vakten selv leser aldri innholdet, så en tom plassholderfil var nok som runbook-/testbevis). */
+const fileExists = evidenceFileExists(ROOT);
 /** Beslutningsloggen er en markdown-tabell: `| D-109 | ...`. Vakten får den injisert, som filsystemet. */
 const decisionLog = readFileSync(join(ROOT, "docs/DECISIONS_AND_ASSUMPTIONS.md"), "utf8");
 const decisionExists = (id: string) => new RegExp(`^\\| ${id} \\|`, "m").test(decisionLog);
@@ -71,6 +74,37 @@ describe("PORTEN: hvert connector-manifest i repoet holder reglene (feiler CI ve
     const files = readdirSync(join(ROOT, "modules/connector-sdk/src/manifests"));
     expect(unregisteredManifestFiles(files, FULL_MANIFESTS.map((m) => m.identity.id))).toEqual([]);
     expect(unregisteredManifestFiles(["github.ts", "index.ts", "forgotten_connector.ts", "notes.md"], ["github"])).toEqual(["forgotten_connector"]);
+  });
+
+  it("CI-portens fileExists er streng: kun en vanlig, ikke-tom fil er bevis - en tom plassholderfil, en katalog og en sti som ikke finnes er det ikke", () => {
+    expect(fileExists("docs/runbooks/WPI_CONNECTOR_SDK.md")).toBe(true);
+    expect(fileExists("modules/connector-sdk/test/no-such.test.ts")).toBe(false);
+    expect(fileExists("modules/connector-sdk")).toBe(false); // en katalog er ikke et runbook-/testbevis
+    // Tom fil: lages i en egen midlertidig katalog (ikke i repoet) og ryddes etterpå.
+    const dir = mkdtempSync(join(tmpdir(), "wpi-evidence-"));
+    const sub = join(dir, "docs");
+    mkdirSync(sub);
+    const empty = join(sub, "RUNBOOK_EMPTY.md");
+    const filled = join(sub, "RUNBOOK_FILLED.md");
+    try {
+      writeFileSync(empty, "");
+      writeFileSync(filled, "# Runbook\n");
+      const check = evidenceFileExists(dir);
+      expect(check("docs/RUNBOOK_EMPTY.md")).toBe(false);
+      expect(check("docs/RUNBOOK_FILLED.md")).toBe(true);
+      expect(check("docs")).toBe(false);
+      expect(check("docs/finnes_ikke.md")).toBe(false);
+      // Og vakten feller et fullt manifest hvis runbooken er en tom plassholder:
+      const m = clone(FULL_MANIFESTS.find((x) => x.identity.id === "stripe")!);
+      m.operations.runbook = { path: "docs/RUNBOOK_EMPTY.md" };
+      const withEmpty = guard(FULL_MANIFESTS.map((x) => (x.identity.id === "stripe" ? m : x)), { exists: (p) => (p === "docs/RUNBOOK_EMPTY.md" ? check(p) : fileExists(p)) });
+      expect(withEmpty.violations.some((v) => v.rule === "runbook_file_missing" && v.connector_id === "stripe")).toBe(true);
+    } finally {
+      unlinkSync(empty);
+      unlinkSync(filled);
+      rmdirSync(sub);
+      rmdirSync(dir);
+    }
   });
 
   it("vaktens regelliste er låst (en ny regel krever en bevisst endring her)", () => {
