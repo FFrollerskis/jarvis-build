@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
+import pg from "pg";
 import { ControlCenterRegistry, type ControlCenterReport } from "@jarvis/executive";
-import { AGENT_CENTER_MAX_ACTIVE_ROWS, createAgentCenter, readAgentAggregates } from "../src/control-center/agent.ts";
+import { AGENT_CENTER_MAX_ACTIVE_ROWS, ARTIFACT_KINDS_SQL, ARTIFACT_TOTALS_SQL, createAgentCenter, readAgentAggregates } from "../src/control-center/agent.ts";
 import { productionToolDefinitions } from "./support/production-tools.ts";
 import { seedTenants, startH0Db, type H0Db } from "./support/h0-db.ts";
 
@@ -215,6 +216,91 @@ describe("senteret som helhet (registeret → rapport)", () => {
     } finally {
       await db.adminPool.query("GRANT SELECT ON artifacts TO jarvis_app");
     }
+  });
+});
+
+describe("gjennomgang M3: artefaktmengden er byte (octet_length) og leser aldri TOAST-innholdet", () => {
+  const TENANT_M3 = "tenant-ag-m3";
+  const idM3: IdentityContext = { ...idA, person_id: "person-ag-m3", tenant_id: TENANT_M3 };
+  const BIG_ROWS = 24;
+  const BIG_CHARS = 32_768 * 32; // 1 MiB per rad (md5 i hex: 32 tegn x 32768) - nesten usammentrykkbart, så det lagres utenfor raden (TOAST)
+  const SMALL = "mål æøå ".repeat(50);
+  const SMALL_BYTES = Buffer.byteLength(SMALL, "utf8");
+  const BIG_BYTES = BIG_ROWS * BIG_CHARS;
+
+  beforeAll(async () => {
+    await seedTenants(db.adminPool, [{ tenant_id: TENANT_M3, person_id: idM3.person_id }]);
+    await task({ id: "t-m3", tenant: TENANT_M3, person: idM3.person_id, status: "completed", finished: ago(H), created: ago(2 * H) });
+    await db.adminPool.query(
+      `INSERT INTO artifacts (artifact_id, task_id, tenant_id, kind, name, content, created_at)
+       SELECT 'a-m3-big-' || g, 't-m3', $1, 'stor', 'navn', (SELECT string_agg(md5(g::text || ':' || i::text), '') FROM generate_series(1, 32768) i), now() - interval '1 hour'
+         FROM generate_series(1, ${BIG_ROWS}) g`,
+      [TENANT_M3]
+    );
+    await db.adminPool.query(`INSERT INTO artifacts (artifact_id, task_id, tenant_id, kind, name, content, created_at) VALUES ('a-m3-small', 't-m3', $1, 'liten', 'navn', $2, now() - interval '1 hour')`, [TENANT_M3, SMALL]);
+    await db.adminPool.query("ANALYZE artifacts");
+  }, 180_000);
+
+  /** Antall buffere (treff + lesinger, hele plantreet) en spørring rører. `EXPLAIN (ANALYZE, BUFFERS)` som superbruker: RLS-policyen legger kun til ett likt tenant-filter, og spørringen filtrerer på tenant uansett. */
+  async function buffers(sql: string, params: unknown[], client: { query: (text: string, values?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> } = db.adminPool): Promise<number> {
+    const res = await client.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${sql}`, params);
+    const plan = (res.rows[0]!["QUERY PLAN"] as Array<{ Plan: Record<string, number> }>)[0]!.Plan;
+    return Number(plan["Shared Hit Blocks"] ?? 0) + Number(plan["Shared Read Blocks"] ?? 0);
+  }
+
+  it("tallet er BYTE, helt riktig: sum av octet_length - ikke tegn - både totalt og per art; og kolonnen heter `bytes`", async () => {
+    const v = await readAgentAggregates(db.appPool, TENANT_M3, NOW.getTime());
+    expect(v.artifacts.total).toBe(BIG_ROWS + 1);
+    expect(v.artifacts.bytes).toBe(BIG_BYTES + SMALL_BYTES);
+    expect(v.artifacts).not.toHaveProperty("chars");
+    expect(v.artifacts.recent_by_kind).toEqual([
+      expect.objectContaining({ kind: "liten", n: 1, bytes: SMALL_BYTES }),
+      expect.objectContaining({ kind: "stor", n: BIG_ROWS, bytes: BIG_BYTES })
+    ]);
+    const r = await (async () => {
+      const registry = new ControlCenterRegistry({ isOwner: () => true, now: () => NOW });
+      registry.register(center());
+      return (await registry.report("agent", idM3)) as ControlCenterReport;
+    })();
+    const total = item(r, "artifacts", "artifacts_total");
+    expect(total.facts).toMatchObject({ total: BIG_ROWS + 1, bytes: BIG_BYTES + SMALL_BYTES });
+    expect(total.detail_no).toContain("24,0 MiB");
+    expect(item(r, "artifacts", "kind:stor").detail_no).toContain("24,0 MiB");
+    expect(item(r, "artifacts", "kind:liten").detail_no).toContain("byte");
+    expect(JSON.stringify(r)).not.toContain("tegn totalt");
+  });
+
+  it("PLAN-/BUFFERVEGG (reviewerens EXP4): med ~24 MiB TOAST-lagret innhold rører begge produksjonsspørringene bare noen få buffere (heap) - uavhengig av datamengden i `content`", async () => {
+    const totals = await buffers(ARTIFACT_TOTALS_SQL, [TENANT_M3]);
+    const kinds = await buffers(ARTIFACT_KINDS_SQL, [TENANT_M3, ago(7 * D)]);
+    expect(totals).toBeLessThan(100);
+    expect(kinds).toBeLessThan(100);
+  });
+
+  it("KONTROLL i en UTF-8-database (som drift): den gamle `length(content)` må hente og dekomprimere hele TOAST-innholdet (tusenvis av buffere), `octet_length(content)` gjør det ikke - veggen over er altså ikke en tom påstand", async () => {
+    // Testklyngen kan være SQL_ASCII (initdb med C-lokale), der `length` har en hurtigsti uten TOAST-lesing; drift er UTF-8 (flerbyte-koding krever at tegn telles i det dekomprimerte innholdet) - derfor en egen UTF-8-database.
+    await db.adminPool.query("CREATE DATABASE m3_utf8 TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'");
+    const opts = (db.adminPool as unknown as { options: { port: number } }).options;
+    const client = new pg.Client({ host: "127.0.0.1", port: opts.port, database: "m3_utf8", user: "postgres", password: "pw" });
+    await client.connect();
+    try {
+      expect((await client.query("SHOW server_encoding")).rows[0]!["server_encoding"]).toBe("UTF8");
+      await client.query("CREATE TABLE artifacts (tenant_id text NOT NULL, content text NOT NULL)");
+      await client.query(`INSERT INTO artifacts SELECT 't', (SELECT string_agg(md5(g::text || ':' || i::text), '') FROM generate_series(1, 32768) i) FROM generate_series(1, ${BIG_ROWS}) g`);
+      await client.query("ANALYZE artifacts");
+      const slow = await buffers(ARTIFACT_TOTALS_SQL.replace("octet_length(content)", "length(content)"), ["t"], client);
+      const fast = await buffers(ARTIFACT_TOTALS_SQL, ["t"], client);
+      expect(slow).toBeGreaterThan(1000);
+      expect(fast).toBeLessThan(100);
+      expect(slow).toBeGreaterThan(fast * 20);
+    } finally {
+      await client.end();
+    }
+  }, 120_000);
+
+  it("spørringene er fortsatt tenant-avgrenset: en annen tenant ser ingenting av dette (RLS som app-rolle), og et tenant uten artefakter får 0 byte", async () => {
+    expect((await readAgentAggregates(db.appPool, TENANT_B, NOW.getTime())).artifacts.bytes).toBe(Buffer.byteLength(HIDDEN_ARTIFACT_CONTENT, "utf8"));
+    expect((await readAgentAggregates(db.appPool, "tenant-ag-empty-m3", NOW.getTime())).artifacts).toEqual({ total: 0, bytes: 0, recent_by_kind: [] });
   });
 });
 
