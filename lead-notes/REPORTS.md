@@ -62,3 +62,5 @@ Lead-handling: runbook-korreksjoner committet lokalt: H1 529e7838 (WPH1), H2 59b
 BUILDER-NOTAT (legg i neste BUILDER_COMMON): wph1-flag-off-selection-baseline.test.ts og wph2-flag-off-main-parity.test.ts sammenligner flagg-AV-utvalg mot et snapshot av main@ec3e684e. Legger din WP legitimt til verktøy/intents/mutate-navn blir de røde: regenerer fixturene fra din egen branch-tupp (flagg AV) etter overskriften i testen, rapporter det under «security surfaces», og aldri løs opp assertions.
 
 ## WP-I uavhengig review (agent a2ae0e072d578b901) FERDIG 2026-11-15 ~08:40Z: MERGE ETTER FIKSER (ingen BLOCKER/HIGH; M1-M5 + LOW). Full tekst: lead-notes/I-review.md. Fikser startes (agent se TaskList #3).
+
+## WP-K re-review (agent a768e8bb971775add) FERDIG 2026-11-15 ~08:50Z: MERGE (LOW 1-6 gjenstår). Full tekst: lead-notes/K-rereview.md. K-fikser for LOW 1/2/3/6 (+doc 4/5) startes.
