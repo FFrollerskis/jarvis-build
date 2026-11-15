@@ -188,6 +188,54 @@ describe("review M3a: «hvelvet kunne ikke leses» er ikke det samme som «verdi
     expect(everything).not.toContain("gammel-env-verdi");
   });
 
+  it("re-review LOW 3: en verdi som ble SLETTET fra hvelvet (rollback, runbook §10) kommer ikke tilbake som «sist kjent» når hvelvet senere får et avbrudd i samme prosess - miljøet gjelder", async () => {
+    const log: Array<Record<string, string>> = [];
+    const mode: { value: "ok" | "down" | "absent" } = { value: "ok" };
+    const vault = { get: async (): Promise<string | null> => { if (mode.value === "down") throw new Error("nede"); return mode.value === "absent" ? null : "vault-verdi-v1"; } };
+    const read = createVaultFirstConfigReader({ vault, env: { REF_A: "env-verdi" }, log: (l) => log.push(l) });
+    expect(await read("REF_A")).toBe("vault-verdi-v1");
+    mode.value = "absent"; // eieren sletter hvelvoppføringen
+    expect(await read("REF_A")).toBe("env-verdi");
+    mode.value = "down"; // hvelvet får et avbrudd i samme prosess
+    expect(await read("REF_A")).toBe("env-verdi"); // IKKE den slettede vault-verdien-v1
+    expect(read.lastSource("REF_A")).toBe("env");
+    expect(read.vaultState()).toBe("error");
+    expect(errorLines(log)).toHaveLength(1);
+    expect(errorLines(log)[0]).toMatchObject({ ref: "REF_A", reason: "exception", using: "env" });
+    // Hvelvet er tilbake med en NY verdi: den gjelder, og blir den nye sist kjente.
+    mode.value = "ok";
+    expect(await read("REF_A")).toBe("vault-verdi-v1");
+    mode.value = "down";
+    expect(await read("REF_A")).toBe("vault-verdi-v1");
+    expect(read.lastSource("REF_A")).toBe("vault_last_known");
+    expect(JSON.stringify(log)).not.toContain("vault-verdi-v1");
+    expect(JSON.stringify(log)).not.toContain("env-verdi");
+  });
+
+  it("re-review LOW 3: samme når hvelvet slutter å være konfigurert (health=unconfigured) - den sist kjente verdien nullstilles, og er per referanse (en annen referanse beholder sin)", async () => {
+    const state: { health: "healthy" | "unconfigured" | "unavailable"; down: boolean } = { health: "healthy", down: false };
+    const values: Record<string, string> = { REF_A: "vault-a", REF_B: "vault-b" };
+    const vault = {
+      get health() { return state.health; },
+      get: async (ref: string): Promise<string | null> => {
+        if (state.down) { state.health = "unavailable"; return null; }
+        if (state.health === "unconfigured") return null;
+        return values[ref] ?? null;
+      }
+    };
+    const read = createVaultFirstConfigReader({ vault, env: { REF_A: "env-a", REF_B: "env-b" }, log: () => undefined });
+    expect(await read("REF_A")).toBe("vault-a");
+    expect(await read("REF_B")).toBe("vault-b");
+    state.health = "unconfigured"; // Infisical er ikke lenger konfigurert (get() gir null og health=unconfigured)
+    expect(await read("REF_A")).toBe("env-a");
+    state.health = "healthy";
+    state.down = true; // avbrudd: REF_A har ikke lenger en sist kjent verdi, REF_B har
+    expect(await read("REF_A")).toBe("env-a");
+    expect(await read("REF_B")).toBe("vault-b");
+    expect(read.lastSource("REF_A")).toBe("env");
+    expect(read.lastSource("REF_B")).toBe("vault_last_known");
+  });
+
   it("vaultState() er «error» når NOEN referanse feilet sist, og «ok» når alle siste oppslag svarte", async () => {
     const mode: { value: "ok" | "down" } = { value: "down" };
     const vault = { get: async (ref: string): Promise<string | null> => { if (mode.value === "down" && ref === "REF_A") throw new Error("nede"); return null; } };

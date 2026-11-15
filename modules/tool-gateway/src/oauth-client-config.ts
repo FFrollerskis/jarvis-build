@@ -8,6 +8,8 @@ import type { SecretProvider, SecretSourceHealth } from "./gateway.ts";
  *  1. hvelvet (`vault.get(ref)`, med kort frist) - en tom streng er aldri en gyldig verdi (D-236). Treffet logges som `credential_source` (source=vault) første gang og når kilden skifter.
  *  2. HVELVET FEILET (frist/unntak/`health === "unavailable"`; review M3a - ikke det samme som «finnes ikke»): den SIST KJENTE hvelvverdien i denne prosessen brukes (en flyttet/rotert hemmelighet skal ikke
  *     byttes ut med en utdatert `.env`-verdi), ellers miljøet. Feilen logges som `credential_vault_error` (strupet; kun referanse, årsakskode og hva som ble brukt) - med en tekst som IKKE sier «flytt til dashbordet».
+ *     Den sist kjente verdien ligger KUN i prosessens minne og nullstilles så snart hvelvet SVARER «finnes ikke»/«ikke konfigurert» (re-review LOW 3: en slettet hvelvverdi kommer ikke tilbake ved et senere avbrudd).
+ *     Sletter eieren hvelvoppføringen mens hvelvet allerede er nede (eller før noe oppslag har sett fraværet), huskes verdien til neste omstart av api/worker - se runbook §10.
  *  3. hvelvet svarte «finnes ikke»/er ikke konfigurert, og miljøet har verdien: miljøet brukes og logges ÉN gang per referanse og prosess som `credential_env_fallback_deprecated` (kun referansenavnet, aldri verdien).
  *  4. `null` - ikke konfigurert (kalleren avgjør feilen).
  *
@@ -88,6 +90,9 @@ export function createVaultFirstConfigReader(options: VaultFirstConfigReaderOpti
   const read = async (ref: string): Promise<string | null> => {
     const outcome = await readVault(ref);
     states.set(ref, outcome.state);
+    // Re-review LOW 3: svarte hvelvet «finnes ikke»/«ikke konfigurert», er det en BEKREFTET fravær - den sist kjente hvelvverdien er da foreldet og må ikke kunne komme tilbake. Uten dette ville en verdi eieren
+    // slettet fra hvelvet (rollback, runbook §10) vinne over `.env` igjen så snart hvelvet fikk et avbrudd i samme prosess. En FEIL (frist/unntak/utilgjengelig) rører den ikke - da er det nettopp den som brukes.
+    if (outcome.state === "absent" || outcome.state === "unconfigured") lastKnown.delete(ref);
     if (outcome.state === "ok" && outcome.value !== undefined) {
       lastKnown.set(ref, outcome.value);
       noteSource(ref, "vault");
