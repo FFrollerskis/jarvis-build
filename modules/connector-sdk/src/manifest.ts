@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { CapabilityClassSchema, TrustLevelSchema } from "@jarvis/contracts";
+import { containsSecret } from "@jarvis/core";
 
 /**
  * WP-I (D-472) - CONNECTOR SDK: `ConnectorManifest` (masterplan Sovereign Autonomy v4.0 kap. 10 «Connector Factory og maintenance model», tabellen «Manifest-felt Krav»).
@@ -114,7 +115,14 @@ const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const ROLE = /^[a-z][a-z0-9_.-]{1,60}$/;
 
-const ActionKeySchema = z.string().max(120).regex(ACTION_KEY);
+/**
+ * Review M2: regexen over godtar hemmelighetsformede navn (`ghp_<24 tegn>.read`, `sk_live_...`, `xoxb-...`, `sk-ant-...`), og handlingsnøkler gjentas i meldinger (duplikat, kind/effekt, gap, drift, kittets
+ * subjects). Derfor er en identifikator som ser ut som en hemmelighet (den sentrale skanneren, `containsSecret`) ugyldig allerede i skjemaet: da kan ingen gyldig manifest bære en hemmelighet inn i en melding.
+ */
+const notSecretShaped = (value: string): boolean => !containsSecret(value);
+const SECRET_SHAPED_ID = { message: "identifier looks like a secret", params: { manifest_code: "secret_shaped_identifier" } } as const;
+
+const ActionKeySchema = z.string().max(120).regex(ACTION_KEY).refine(notSecretShaped, SECRET_SHAPED_ID);
 const ActionKeyListSchema = z.array(ActionKeySchema).max(150);
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -123,7 +131,7 @@ const ActionKeyListSchema = z.array(ActionKeySchema).max(150);
 
 const IdentitySchema = z.object({
   /** Registerets stabile id (`CONNECTOR_REGISTRY[].id`) - nøkkelen manifestet sjekkes mot. */
-  id: z.string().regex(CONNECTOR_ID),
+  id: z.string().regex(CONNECTOR_ID).refine(notSecretShaped, SECRET_SHAPED_ID),
   name: text(80),
   vendor: maybe(text(80)),
   /** `manifest` = manifestdokumentets egen semver; `provider_api` = leverandørens API-versjon koden faktisk kaller (ikke leverandørens nyeste). */
@@ -409,6 +417,21 @@ export const MANIFEST_SECTION_SCHEMAS = {
   idempotency: IdempotencySchema, limits: LimitsSchema, trust: TrustSchema, data: DataSchema, operations: OperationsSchema, secrets: SecretsSchema, tests: TestsSchema,
   core_boundary: CoreBoundarySchema, d41_audit: D41AuditSchema, action: ActionSpecSchema
 } as const;
+
+/**
+ * Vis en identifikator (handlingsnøkkel, connector-id) i en melding: en hemmelighetsformet verdi vises aldri, kun `<redacted>`. Brukes av ALLE meldingsveier (validator, drift, vakt, kittets subjects) slik at
+ * heller ikke et uvalidert, typet manifest kan få en hemmelighet gjentatt i utdata.
+ */
+export function safeIdentifier(value: unknown): string {
+  if (typeof value !== "string") return "<invalid>";
+  return value.length <= 120 && !containsSecret(value) ? value : "<redacted>";
+}
+
+/** Vis en skalarverdi fra et (muligens uvalidert) manifest i en melding: tall/boolske som de er, korte rene ord (enum-verdier) som de er, alt annet `<redacted>`. */
+export function safeScalar(value: unknown): string {
+  if (typeof value === "boolean" || typeof value === "number" || value === undefined) return String(value);
+  return typeof value === "string" && /^[A-Za-z0-9_.-]{1,40}$/.test(value) && !containsSecret(value) ? value : "<redacted>";
+}
 
 export const VAULT_REF_PATTERN = VAULT_REF;
 export const ACTION_KEY_PATTERN = ACTION_KEY;

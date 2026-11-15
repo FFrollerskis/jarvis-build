@@ -4,7 +4,7 @@ import {
   CONTRACT_CHECK_IDS, FAKE_CREDENTIAL_CANARY, FAKE_DEFECTS, INJECTION_PAYLOAD, VirtualClock, createFakeConnector, runConnectorContract, secretShapes, scoreAcceptance,
   type ContractReport, type FakeDefect
 } from "../src/testing.ts";
-import { ACME_KEYS, validFullManifest, validSkeletonManifest } from "./fixtures.ts";
+import { ACME_KEYS, secretShapedActionKeys, validFullManifest, validSkeletonManifest } from "./fixtures.ts";
 
 const failedIds = (r: ContractReport) => r.checks.filter((c) => c.status === "fail").map((c) => c.id);
 const statusOf = (r: ContractReport, id: string) => r.checks.find((c) => c.id === id)?.status;
@@ -310,5 +310,50 @@ describe("fake-harnessen: modellen holder kontrakten den påstår", () => {
     expect(!r.ok && r.error.code).toBe("unknown_action");
     expect(f.health()).toBeNull();
     expect(isUnknown(validFullManifest().d41_audit)).toBe(false);
+  });
+});
+
+describe("review M2: kittets utdata (detail, subjects, evidens) ekkoer aldri en hemmelighetsform - heller ikke fra adapteren eller et uvalidert manifest", () => {
+  it("et UVALIDERT, typet manifest med hemmelighetsformet handlingsnøkkel (duplikat) og uverifiserte scopes: hele rapporten er ren, og manifest.valid feller det", async () => {
+    for (const key of secretShapedActionKeys()) {
+      const m = validFullManifest();
+      m.actions[0]!.key = key;
+      m.actions.push(structuredClone(m.actions[0]!));
+      const d41 = m.d41_audit as { scopes_verified_against_docs: boolean; unverified_scopes: string[] };
+      d41.scopes_verified_against_docs = false;
+      d41.unverified_scopes = [key];
+      const r = await run(m);
+      expect(failedIds(r)).toContain("manifest.valid");
+      expect(JSON.stringify(r).includes(key), key.slice(0, 6)).toBe(false);
+      expect(JSON.stringify(scoreAcceptance(m, r.checks)).includes(key), `scoreAcceptance ${key.slice(0, 6)}`).toBe(false);
+    }
+  });
+
+  it("verdier FRA ADAPTEREN (connector-id, handlingsliste, feilkode, feilkategori, helsetilstand, unntakstekst) med hemmelighetsform redigeres bort", async () => {
+    const shape = secretShapes()[0]!;
+    const m = validFullManifest();
+    const good = createFakeConnector({ manifest: m });
+    const evil = {
+      ...good, connector_id: shape, actions: [...good.actions, `${shape}.read`],
+      invoke: async (req: Parameters<typeof good.invoke>[0]) => { const r = await good.invoke(req); return r.ok ? r : { ok: false as const, error: { ...r.error, code: shape, category: shape as never } }; },
+      health: () => ({ state: shape as never, at: "ikke-en-dato" })
+    } as unknown as typeof good;
+    const r = await runConnectorContract(m, evil);
+    expect(r.ok).toBe(false);
+    expect(JSON.stringify(r).includes(shape)).toBe(false);
+    const thrower = { ...good, invoke: async () => { throw new Error(`boom ${shape} ${good.credentialCanary()}`); } } as unknown as typeof good;
+    const t = await runConnectorContract(m, thrower);
+    expect(t.checks.some((c) => c.status === "fail" && /kastet/.test(`${c.detail ?? ""} ${(c.subjects ?? []).join(" ")}`))).toBe(true);
+    expect(JSON.stringify(t).includes(shape)).toBe(false);
+    expect(JSON.stringify(t).includes(good.credentialCanary())).toBe(false);
+  });
+
+  it("en kjent credential (kanarifuglen) i adapterens egen feiltekst redigeres også når den ikke har noen kjent hemmelighetsform", async () => {
+    const m = validFullManifest();
+    const good = createFakeConnector({ manifest: m });
+    const canary = good.credentialCanary();
+    const leaky = { ...good, invoke: async (req: Parameters<typeof good.invoke>[0]) => { const r = await good.invoke(req); return r.ok ? r : { ok: false as const, error: { ...r.error, code: `bad_${canary}` } }; } } as unknown as typeof good;
+    const r = await runConnectorContract(m, leaky);
+    expect(JSON.stringify(r).includes(canary)).toBe(false);
   });
 });

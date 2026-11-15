@@ -1,7 +1,7 @@
 import { CONNECTOR_REGISTRY, type ConnectorDefinition } from "@jarvis/tool-gateway";
 import { buildManifestCatalogue, type Catalogue, type CatalogueInput } from "./catalogue.ts";
 import { deriveSkeletonManifests } from "./derive.ts";
-import { isUnknown, type ConnectorManifest } from "./manifest.ts";
+import { isUnknown, safeIdentifier, type ConnectorManifest } from "./manifest.ts";
 import { validateConnectorManifest, type ManifestIssue } from "./validate.ts";
 
 /**
@@ -64,9 +64,10 @@ function at(obj: unknown, ...path: string[]): unknown {
   return cur;
 }
 
+/** Connector-id fra et RÅTT (uvalidert) manifest. Aldri en hemmelighetsformet verdi i vaktens utdata (review M2): `null` når id mangler, `<redacted>` når den ligner en hemmelighet. */
 function idOf(raw: unknown): string | null {
   const id = at(raw, "identity", "id");
-  return typeof id === "string" ? id : null;
+  return typeof id === "string" ? safeIdentifier(id) : null;
 }
 
 /** Eier, tillitsklasse og risikoklasse per handling - sjekket på det RÅ manifestet, så et manglende felt får et eget, navngitt brudd. */

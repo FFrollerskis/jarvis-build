@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  ACTION_EFFECTS, EXTRA_SECTIONS, MANIFEST_SECTION_SCHEMAS, MIN_RISK_FOR_EFFECT, SECTION_10_FIELDS, ConnectorManifestSchema, ConnectorManifestError,
-  assertConnectorManifest, collectUnknownPaths, isUnknown, kindOfEffect, validateConnectorManifest, type ConnectorManifest, type ManifestIssue
+  ACTION_EFFECTS, ACTION_KEY_PATTERN, CONNECTOR_ID_PATTERN, EXTRA_SECTIONS, MANIFEST_SECTION_SCHEMAS, MIN_RISK_FOR_EFFECT, SECTION_10_FIELDS, ConnectorManifestSchema, ConnectorManifestError,
+  assertConnectorManifest, collectUnknownPaths, isUnknown, kindOfEffect, safeIdentifier, safeScalar, validateConnectorManifest, type ConnectorManifest, type ManifestIssue
 } from "../src/index.ts";
-import { ACME_KEYS, fakeSecretShapes, validFullManifest, validSkeletonManifest } from "./fixtures.ts";
+import { ACME_KEYS, fakeSecretShapes, secretShapedActionKeys, secretShapedConnectorId, validFullManifest, validSkeletonManifest } from "./fixtures.ts";
 
 const codes = (issues: readonly ManifestIssue[]) => issues.map((i) => i.code);
 const has = (issues: readonly ManifestIssue[], code: string, path?: string) => issues.some((i) => i.code === code && (path === undefined || i.path === path));
@@ -360,5 +360,106 @@ describe("hemmeligheter: kun hvelvreferanser, og feilene gjentar aldri verdien (
     m.auth.rotation = { credential_kind: "api_key", method: "manual", note: "eieren fornyer API-nøkkelen i dashbordet; token utløper aldri automatisk" };
     m.limits.quotas = "ingen kjente kvoter; ved auth-feil: be eieren legge inn nøkkelen på nytt";
     expect(validateConnectorManifest(m).issues).toEqual([]);
+  });
+});
+
+describe("review M2: hemmelighetsformede IDENTIFIKATORER (handlingsnøkler, connector-id) ekkoes aldri av noen meldingsvei", () => {
+  const keys = secretShapedActionKeys();
+  const leaks = (value: string, ...things: unknown[]): boolean => things.some((t) => JSON.stringify(t).includes(value) || String(t).includes(value));
+
+  it("regexen alene godtar nøklene (derfor trengs skjema-vernet), men skjemaet avviser dem som secret_shaped_identifier", () => {
+    expect(keys.length).toBe(4);
+    for (const key of keys) {
+      expect(ACTION_KEY_PATTERN.test(key), "regexen godtar nøkkelen").toBe(true);
+      const m = validFullManifest();
+      m.actions[0]!.key = key;
+      const r = validateConnectorManifest(m);
+      expect(has(r.issues, "secret_shaped_identifier", "actions[0].key"), key.slice(0, 6)).toBe(true);
+      expect(has(r.issues, "secret_shape_detected", "actions[0].key"), key.slice(0, 6)).toBe(true);
+      expect(r.ok).toBe(false);
+      expect(leaks(key, r), "hele resultatet").toBe(false);
+    }
+  });
+
+  it("duplikat og kind/effekt-mismatch med hemmelighetsformet nøkkel: verken melding, sti, kode eller resultat inneholder verdien (repro fra review M2)", () => {
+    for (const key of keys) {
+      const dup = validFullManifest();
+      dup.actions[0]!.key = key;
+      dup.actions.push(structuredClone(dup.actions[0]!));
+      const kind = validFullManifest();
+      kind.actions[0]!.key = key;
+      kind.actions[0]!.kind = "write";
+      for (const m of [dup, kind]) {
+        const r = validateConnectorManifest(m);
+        expect(r.ok).toBe(false);
+        expect(leaks(key, r, r.issues, r.issues.map((i) => i.message), r.issues.map((i) => i.path)), key.slice(0, 6)).toBe(false);
+      }
+    }
+  });
+
+  it("samme i ALLE lister som bærer handlingsnøkler: d41-revisjonen, step-up-listen, leverandør-scopes og helsesjekken", () => {
+    const key = keys[0]!;
+    const places: Array<[string, string, Mutate]> = [
+      ["d41_audit.read.action_keys[0]", "secret_shaped_identifier", (m) => { (m.d41_audit as { read: { action_keys: string[] } }).read.action_keys[0] = key; }],
+      ["authority.approval_policy.step_up_actions[0]", "secret_shaped_identifier", (m) => { m.authority.approval_policy!.step_up_actions[0] = key; }],
+      ["auth.scopes.provider[0].needed_for[0]", "secret_shaped_identifier", (m) => { (m.auth.scopes.provider as Array<{ needed_for: string[] }>)[0]!.needed_for[0] = key; }],
+      ["operations.health_check.action_key", "secret_shaped_identifier", (m) => { (m.operations.health_check as { action_key: string | null }).action_key = key; }]
+    ];
+    for (const [path, code, mutate] of places) {
+      const m = validFullManifest();
+      mutate(m);
+      const r = validateConnectorManifest(m);
+      expect(has(r.issues, code, path), `${path}: ${JSON.stringify(codes(r.issues))}`).toBe(true);
+      expect(leaks(key, r), path).toBe(false);
+    }
+  });
+
+  it("assertConnectorManifest: ConnectorManifestError (message, issues, stack, enumererbare felt) inneholder aldri verdien", () => {
+    for (const key of keys) {
+      const m = validFullManifest();
+      m.actions[0]!.key = key;
+      m.actions.push(structuredClone(m.actions[0]!));
+      let caught: unknown;
+      try { assertConnectorManifest(m); } catch (e) { caught = e; }
+      expect(caught).toBeInstanceOf(ConnectorManifestError);
+      const err = caught as ConnectorManifestError;
+      expect(err.issues.length).toBeGreaterThan(0);
+      expect(leaks(key, err.message, err.issues, err.stack ?? "", Object.keys(err), { ...err }), key.slice(0, 6)).toBe(false);
+    }
+  });
+
+  it("de semantiske reglene (den eneste fasen som gjentar identifikatorer) kjøres IKKE når skanneren fant en hemmelighetsform - og kommer tilbake når den er rettet", () => {
+    const m = validFullManifest();
+    m.actions.find((a) => a.key === ACME_KEYS.create)!.kind = "read";
+    m.limits.quotas = `bruk ${fakeSecretShapes.githubToken()} her`;
+    const blocked = validateConnectorManifest(m);
+    expect(has(blocked.issues, "secret_shape_detected", "limits.quotas")).toBe(true);
+    expect(has(blocked.issues, "kind_effect_mismatch")).toBe(false);
+    m.limits.quotas = "ingen kjente kvoter";
+    expect(has(validateConnectorManifest(m).issues, "kind_effect_mismatch")).toBe(true);
+  });
+
+  it("en connector-id med hemmelighetsform avvises og ekkoes ikke", () => {
+    const id = secretShapedConnectorId();
+    expect(CONNECTOR_ID_PATTERN.test(id)).toBe(true);
+    const m = validFullManifest();
+    m.identity.id = id;
+    const r = validateConnectorManifest(m);
+    expect(has(r.issues, "secret_shaped_identifier", "identity.id")).toBe(true);
+    expect(leaks(id, r)).toBe(false);
+  });
+
+  it("safeIdentifier/safeScalar: rene navn og enkle verdier vises, hemmelighetsformer og ukjente former vises aldri", () => {
+    expect(safeIdentifier("github.merge_pr")).toBe("github.merge_pr");
+    expect(safeIdentifier(keys[0]!)).toBe("<redacted>");
+    expect(safeIdentifier("x".repeat(121))).toBe("<redacted>");
+    expect(safeIdentifier(42)).toBe("<invalid>");
+    expect(safeScalar("D")).toBe("D");
+    expect(safeScalar(true)).toBe("true");
+    expect(safeScalar(12)).toBe("12");
+    expect(safeScalar(undefined)).toBe("undefined");
+    expect(safeScalar(keys[1]!)).toBe("<redacted>");
+    expect(safeScalar({ a: 1 })).toBe("<redacted>");
+    expect(safeScalar("med mellomrom")).toBe("<redacted>");
   });
 });

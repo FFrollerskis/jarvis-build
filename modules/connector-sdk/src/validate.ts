@@ -1,15 +1,19 @@
 import { z } from "zod";
 import { containsSecret } from "@jarvis/core";
 import {
-  ConnectorManifestSchema, MIN_RISK_FOR_EFFECT, RISK_ORDER, isUnknown, kindOfEffect,
+  ConnectorManifestSchema, MIN_RISK_FOR_EFFECT, RISK_ORDER, isUnknown, kindOfEffect, safeIdentifier,
   type ActionSpec, type Completeness, type ConnectorManifest
 } from "./manifest.ts";
 
 /**
  * WP-I (D-472): validator for `ConnectorManifest`. Returnerer PRESISE og REDAKSJONSSIKRE feil: hver feil har `path` (felt-sti, kun skjema-definerte nøkler og array-indekser),
- * en stabil `code` og en `message` som BARE bruker skjemaets egne ord (forventet type/tillatte verdier/grenser) og handlingsnøkler (regex-begrenset, kan ikke bære en hemmelighet).
+ * en stabil `code` og en `message` som BARE bruker skjemaets egne ord (forventet type/tillatte verdier/grenser) og identifikatorer (handlingsnøkler) som har passert hemmelighetsvernet under.
  * ALDRI den innsendte verdien: zod sin standardtekst («received 'xyz'») siteres ikke, og ukjente nøkkelnavn som ser ut som hemmeligheter vises som `<redacted>`.
  * En hemmelighetsskanning (`scanForSecrets` fra @jarvis/core - ÉN sentral skanner, ingen egne mønstre) går over HVER tekstverdi og HVERT nøkkelnavn i inndata FØR skjemaet kjøres.
+ *
+ * Hemmelighetsvern for identifikatorer (review M2): handlingsnøkkel- og connector-id-regexene alene utelukker IKKE hemmelighetsformede navn (`ghp_<24 tegn>.read` er en gyldig nøkkel etter regexen), så (1) skjemaet
+ * avviser en identifikator som skanneren kjenner igjen (`secret_shaped_identifier`), (2) den semantiske fasen - den eneste som gjentar identifikatorer i meldinger - kjøres IKKE når skanneren fant en
+ * hemmelighetsform eller ikke rakk å skanne alt, og (3) alle meldinger viser identifikatorer via `safeIdentifier` (`<redacted>` for det som ligner en hemmelighet).
  *
  * Etter skjemaet kjører semantiske regler som speiler eksisterende kjøretidsregler (verktøymanifestets invarianter, klasse D-kjeden, idempotens, D-41, D-64) - se `semanticIssues`.
  */
@@ -125,6 +129,13 @@ function formatZodIssue(issue: z.ZodIssue, out: ManifestIssue[]): void {
     case "invalid_string":
       out.push({ path, code: "invalid_format", message: "string does not match the required format" });
       return;
+    case "custom": {
+      // Skjemaets egne `refine`-regler bærer en stabil kode i `params` (aldri en verdi). Uten kode: generisk.
+      const tag: unknown = issue.params?.["manifest_code"];
+      if (typeof tag === "string") out.push({ path, code: tag, message: "identifier looks like a secret (identifiers must be plain names)" });
+      else out.push({ path, code: "invalid_value", message: "value is not valid" });
+      return;
+    }
     case "too_small":
       out.push({ path, code: "too_small", message: `too small (minimum ${String(issue.minimum)})` });
       return;
@@ -165,7 +176,7 @@ export function isWriteCapable(action: Pick<ActionSpec, "effect">): boolean {
 
 function actionIssues(a: ActionSpec, i: number, out: ManifestIssue[]): void {
   const at = (field: string) => `actions[${i}].${field}`;
-  const add = (field: string, code: string, message: string) => out.push({ path: at(field), code, message: `${a.key}: ${message}` });
+  const add = (field: string, code: string, message: string) => out.push({ path: at(field), code, message: `${safeIdentifier(a.key)}: ${message}` });
   if (a.kind !== kindOfEffect(a.effect)) add("kind", "kind_effect_mismatch", `effekten «${a.effect}» hører til kap. 10-bøtten «${kindOfEffect(a.effect)}», ikke «${a.kind}»`);
   const min = MIN_RISK_FOR_EFFECT[a.effect];
   if (RISK_ORDER[a.authority.risk_class] < RISK_ORDER[min] && a.authority.risk_exception === undefined) {
@@ -274,7 +285,7 @@ function semanticIssues(m: ConnectorManifest): ManifestIssue[] {
   const out: ManifestIssue[] = [];
   const seen = new Set<string>();
   m.actions.forEach((a, i) => {
-    if (seen.has(a.key)) out.push({ path: `actions[${i}].key`, code: "duplicate_action_key", message: `${a.key}: duplisert handlingsnøkkel` });
+    if (seen.has(a.key)) out.push({ path: `actions[${i}].key`, code: "duplicate_action_key", message: `${safeIdentifier(a.key)}: duplisert handlingsnøkkel` });
     seen.add(a.key);
     actionIssues(a, i, out);
   });
@@ -340,8 +351,12 @@ export function validateConnectorManifest(input: unknown, options: ValidateOptio
   }
   const manifest = parsed.data;
   const unknown_paths = collectUnknownPaths(manifest);
-  issues.push(...semanticIssues(manifest));
-  if (manifest.completeness === "full") issues.push(...fullOnlyIssues(manifest, unknown_paths));
+  // Review M2: de semantiske reglene er den eneste fasen som gjentar identifikatorer i meldinger. Fant skanneren en hemmelighetsform (eller rakk den ikke å skanne alt), kjøres de ikke: manifestet er allerede
+  // avvist, og ingen melding skal få en sjanse til å sitere noe fra det. Rett hemmeligheten, kjør på nytt, så kommer de semantiske feilene.
+  if (scan.paths.length === 0 && !scan.budgetExceeded) {
+    issues.push(...semanticIssues(manifest));
+    if (manifest.completeness === "full") issues.push(...fullOnlyIssues(manifest, unknown_paths));
+  }
   if (options.require_full === true && manifest.completeness !== "full") issues.push({ path: "completeness", code: "completeness_not_full", message: "fullt manifest kreves, men dette er et skeleton" });
   return { ok: issues.length === 0, issues, manifest: issues.length === 0 ? manifest : null, completeness: manifest.completeness, unknown_paths };
 }

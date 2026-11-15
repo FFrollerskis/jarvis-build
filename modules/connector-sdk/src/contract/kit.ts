@@ -1,7 +1,8 @@
 import { containsSecret } from "@jarvis/core";
-import { isUnknown, type ActionSpec, type ConnectorManifest } from "../manifest.ts";
+import { isUnknown, safeIdentifier, type ActionSpec, type ConnectorManifest } from "../manifest.ts";
 import { validateConnectorManifest } from "../validate.ts";
 import { settle } from "./clock.ts";
+import { redactText } from "./redact.ts";
 import { scoreAcceptance, type AcceptanceReport } from "./scoring.ts";
 import type { AdapterIdentity, AdapterRequest, AdapterResult, CheckStatus, ContractAdapter, ContractCheckResult, ErrorCategory, HealthState, JsonValue } from "./types.ts";
 
@@ -588,10 +589,19 @@ const CHECKS: CheckDef[] = [
 /** Id-ene på alle sjekker (stabil API for scoring og tester). */
 export const CONTRACT_CHECK_IDS: readonly string[] = CHECKS.map((c) => c.id);
 
+/** Credential-kanarifuglen adapteren oppgir (kaster aldri: en adapter som feiler her har ingen kanarifugl). */
+function canaryOf(adapter: ContractAdapter): string {
+  try { const c = adapter.credentialCanary(); return typeof c === "string" ? c : ""; } catch { return ""; }
+}
+
 /** Kjør hele kontraktstest-kittet mot en connector. Kaster aldri: en feilende sjekk blir `fail` med årsak. */
 export async function runConnectorContract(manifest: ConnectorManifest, adapter: ContractAdapter): Promise<ContractReport> {
   const kit = makeKit(manifest, adapter);
   const checks: ContractCheckResult[] = [];
+  // Review M2: INGEN tekst forlater kittet uredigert. Verdier fra adapteren (feilkoder, handlingsnøkler, helsetilstand, unntakstekst) og fra et uvalidert manifest (handlingsnøkler, notater) kan bære en
+  // hemmelighetsform; den redigeres her, helt til slutt, uansett hvilken sjekk som skrev teksten.
+  const literals = [canaryOf(adapter), ...secretShapes()];
+  const clean = (text: string): string => redactText(text, literals);
   for (const def of CHECKS) {
     let outcome: Outcome;
     if (def.needsWrites === true && kit.writes.length === 0) outcome = skip(NO_WRITES);
@@ -599,11 +609,15 @@ export async function runConnectorContract(manifest: ConnectorManifest, adapter:
       try { outcome = await def.run(kit); } catch (e) { outcome = { status: "fail", detail: `sjekken kastet: ${(e as Error).message.slice(0, 120)}` }; }
     }
     kit.reset();
-    checks.push({ id: def.id, level: def.level, title: def.title, status: outcome.status, ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}), ...(outcome.subjects !== undefined ? { subjects: outcome.subjects } : {}) });
+    checks.push({
+      id: def.id, level: def.level, title: def.title, status: outcome.status,
+      ...(outcome.detail !== undefined ? { detail: clean(outcome.detail) } : {}),
+      ...(outcome.subjects !== undefined ? { subjects: outcome.subjects.map(clean) } : {})
+    });
   }
   const failed = checks.filter((c) => c.status === "fail").length;
   return {
-    connector_id: manifest.identity.id, checks,
+    connector_id: safeIdentifier(manifest.identity.id), checks,
     passed: checks.filter((c) => c.status === "pass").length, failed, skipped: checks.filter((c) => c.status === "skip").length,
     ok: failed === 0,
     acceptance: scoreAcceptance(manifest, checks)

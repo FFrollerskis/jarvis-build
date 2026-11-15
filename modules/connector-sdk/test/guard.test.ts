@@ -7,7 +7,7 @@ import {
   FULL_MANIFESTS, GUARD_RULES, auditManifestCatalogue, buildManifestCatalogue, productionConnectorDefinitions, runManifestGuard, unregisteredManifestFiles,
   type ConnectorManifest, type GuardRule, type GuardViolation
 } from "../src/index.ts";
-import { fakeSecretShapes } from "./fixtures.ts";
+import { fakeSecretShapes, secretShapedActionKeys, secretShapedConnectorId } from "./fixtures.ts";
 
 /**
  * WP-I (D-472): CI-VAKTEN for connector-manifester. Den første describe-blokken ER porten: den feiler i CI når en connector i registeret mangler manifest, et fullt manifest mangler runbook/teststi,
@@ -159,6 +159,29 @@ describe("mutasjonstester: hver regel biter", () => {
     const extra = { ...definitions.find((d) => d.tool_id === "cloudflare" && d.action === "check_token")!, action: "list_pagerules" };
     const v = guard(FULL_MANIFESTS, { definitions: [...definitions, extra] }).violations;
     expect(v.some((x) => x.rule === "manifest_drift" && x.connector_id === "cloudflare" && x.message.startsWith("drift_action_missing_in_manifest"))).toBe(true);
+  });
+
+  it("review M2: en hemmelighetsformet handlingsnøkkel (duplikat, kind/effekt-mismatch) eller connector-id ekkoes aldri i vaktens utdata", () => {
+    for (const key of secretShapedActionKeys()) {
+      const dup = clone(FULL_MANIFESTS[0]!);
+      dup.actions[0]!.key = key;
+      dup.actions.push(structuredClone(dup.actions[0]!));
+      const kind = clone(FULL_MANIFESTS[0]!);
+      kind.actions[0]!.key = key;
+      kind.actions[0]!.kind = "write";
+      for (const m of [dup, kind]) {
+        const r = guard([m]);
+        expect(r.ok).toBe(false);
+        expect(rulesOf(r.violations)).toEqual(expect.arrayContaining(["secret_value_in_manifest"]));
+        expect(JSON.stringify(r).includes(key), key.slice(0, 6)).toBe(false);
+      }
+    }
+    const id = secretShapedConnectorId();
+    const bad = clone(FULL_MANIFESTS[0]!);
+    bad.identity.id = id;
+    const r = guard([bad]);
+    expect(JSON.stringify(r).includes(id)).toBe(false);
+    expect(r.violations.some((v) => v.connector_id === "<redacted>")).toBe(true);
   });
 
   it("vakten er rent funksjonell: samme inndata gir samme rapport", () => {

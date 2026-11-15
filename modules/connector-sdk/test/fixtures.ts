@@ -171,3 +171,17 @@ export const fakeSecretShapes = {
   stripeKey: () => `sk_live_${"c3".repeat(12)}`,
   url: () => `postgres://admin:${"pw0".repeat(4)}@db.example.test/app`
 };
+
+/**
+ * Review M2: handlingsnøkler som er GYLDIGE etter ACTION_KEY-regexen, men har formen til en leverandør-hemmelighet (GitHub-token, Stripe live-nøkkel, Slack-bot-token, Anthropic-nøkkel). Bygges ved KJØRING
+ * av fyllstoff-tegn (aldri som bokstaver i kilden, aldri en ekte konto), så gitleaks aldri ser en nøkkelform i repoet.
+ */
+export const secretShapedActionKeys = (): string[] => [
+  `ghp_${"a1".repeat(12)}.read`,
+  `sk_live_${"c3".repeat(12)}.read`,
+  `${["xoxb", "1".repeat(10), "2".repeat(10), "abcdef"].join("-")}.read`,
+  `${["sk", "ant", "a1b2c3d4e5f6"].join("-")}.read`
+];
+
+/** En connector-id som passer CONNECTOR_ID-regexen (små bokstaver, tall, understrek, maks 41 tegn) men har GitHub-token-formen. */
+export const secretShapedConnectorId = (): string => `ghp_${"a1".repeat(18)}`;

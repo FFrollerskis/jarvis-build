@@ -1,6 +1,6 @@
 import { CONNECTOR_REGISTRY, type ConnectorDefinition } from "@jarvis/tool-gateway";
 import { deriveSkeletonManifests, type DeriveInput } from "./derive.ts";
-import { isUnknown, type ActionSpec, type Completeness, type ConnectorManifest } from "./manifest.ts";
+import { isUnknown, safeIdentifier, safeScalar, type ActionSpec, type Completeness, type ConnectorManifest } from "./manifest.ts";
 
 /**
  * WP-I (D-472): manifest-KATALOGEN og DRIFT-kontrollen. Registeret (`CONNECTOR_REGISTRY` + de registrerte verktøydefinisjonene) forblir kjøretidens sannhetskilde; et håndskrevet (`full`)
@@ -20,8 +20,10 @@ const sameSet = (a: readonly string[], b: readonly string[]): boolean => a.lengt
 
 function actionDrift(id: string, i: number, m: ActionSpec, d: ActionSpec, out: DriftIssue[]): void {
   const at = (f: string) => `actions[${i}].${f}`;
+  // Review M2: manifest-verdier vises aldri rått (et uvalidert, typet manifest kan bære en hemmelighet): handlingsnøkkel og verdier går via safeIdentifier/safeScalar.
+  const key = safeIdentifier(m.key);
   const diff = (field: string, code: string, a: unknown, b: unknown) => {
-    if (a !== b) out.push({ connector_id: id, path: at(field), code, message: `${m.key}: manifestet sier ${String(a)}, registeret sier ${String(b)}` });
+    if (a !== b) out.push({ connector_id: id, path: at(field), code, message: `${key}: manifestet sier ${safeScalar(a)}, registeret sier ${safeScalar(b)}` });
   };
   diff("kind", "drift_kind", m.kind, d.kind);
   diff("effect", "drift_effect", m.effect, d.effect);
@@ -32,22 +34,22 @@ function actionDrift(id: string, i: number, m: ActionSpec, d: ActionSpec, out: D
   diff("reversibility.evidence.before_state", "drift_before_state", m.reversibility.evidence.before_state, d.reversibility.evidence.before_state);
   diff("reversibility.evidence.postcondition", "drift_postcondition", m.reversibility.evidence.postcondition, d.reversibility.evidence.postcondition);
   diff("reversibility.class_d_chain.status", "drift_class_d_chain", m.reversibility.class_d_chain?.status, d.reversibility.class_d_chain?.status);
-  if (d.reversibility.destructive && !m.reversibility.destructive) out.push({ connector_id: id, path: at("reversibility.destructive"), code: "drift_destructive_understated", message: `${m.key}: registeret gjør handlingen destruktiv (sletting eller ikke-reversibel skriving), manifestet sier det ikke` });
+  if (d.reversibility.destructive && !m.reversibility.destructive) out.push({ connector_id: id, path: at("reversibility.destructive"), code: "drift_destructive_understated", message: `${key}: registeret gjør handlingen destruktiv (sletting eller ikke-reversibel skriving), manifestet sier det ikke` });
   diff("idempotency.requirement", "drift_idempotency_requirement", m.idempotency.requirement, d.idempotency.requirement);
   diff("idempotency.provider_idempotent", "drift_provider_idempotent", m.idempotency.provider_idempotent, d.idempotency.provider_idempotent);
   diff("trust.output", "drift_trust", m.trust.output, d.trust.output);
   diff("limits.rate_limit_per_minute", "drift_rate_limit", m.limits.rate_limit_per_minute, d.limits.rate_limit_per_minute);
   diff("operations.timeout_ms", "drift_timeout", m.operations.timeout_ms, d.operations.timeout_ms);
-  if (!sameSet(m.data.identity_fields, d.data.identity_fields)) out.push({ connector_id: id, path: at("data.identity_fields"), code: "drift_identity_fields", message: `${m.key}: identitetsfeltene i skjemaet er ${JSON.stringify(d.data.identity_fields)}` });
+  if (!sameSet(m.data.identity_fields, d.data.identity_fields)) out.push({ connector_id: id, path: at("data.identity_fields"), code: "drift_identity_fields", message: `${key}: identitetsfeltene i skjemaet er ${JSON.stringify(d.data.identity_fields)}` });
   if (!isUnknown(m.data.input_required) && !isUnknown(d.data.input_required) && !sameSet(m.data.input_required, d.data.input_required)) {
-    out.push({ connector_id: id, path: at("data.input_required"), code: "drift_input_required", message: `${m.key}: påkrevde parametre i skjemaet er ${JSON.stringify(d.data.input_required)}` });
+    out.push({ connector_id: id, path: at("data.input_required"), code: "drift_input_required", message: `${key}: påkrevde parametre i skjemaet er ${JSON.stringify(d.data.input_required)}` });
   }
 }
 
 /** Sammenligner et håndskrevet manifest med skeletonet avledet fra registeret. Tom liste = ingen drift. */
 export function checkManifestAgainstDerived(authored: ConnectorManifest, derived: ConnectorManifest): DriftIssue[] {
   const out: DriftIssue[] = [];
-  const id = authored.identity.id;
+  const id = safeIdentifier(authored.identity.id);
   if (authored.identity.id !== derived.identity.id) out.push({ connector_id: id, path: "identity.id", code: "drift_id", message: "id stemmer ikke med registeret" });
   if (authored.identity.name !== derived.identity.name) out.push({ connector_id: id, path: "identity.name", code: "drift_name", message: `navnet i registeret er «${derived.identity.name}»` });
   if (authored.identity.owner.kind !== derived.identity.owner.kind) out.push({ connector_id: id, path: "identity.owner.kind", code: "drift_owner_kind", message: `eier-art i verktøymanifestet er ${derived.identity.owner.kind}` });
@@ -56,7 +58,7 @@ export function checkManifestAgainstDerived(authored: ConnectorManifest, derived
   authored.actions.forEach((m, i) => {
     seen.add(m.key);
     const d = byKey.get(m.key);
-    if (d === undefined) out.push({ connector_id: id, path: `actions[${i}].key`, code: "drift_action_not_in_registry", message: `${m.key}: finnes ikke blant connectorens registrerte handlinger` });
+    if (d === undefined) out.push({ connector_id: id, path: `actions[${i}].key`, code: "drift_action_not_in_registry", message: `${safeIdentifier(m.key)}: finnes ikke blant connectorens registrerte handlinger` });
     else actionDrift(id, i, m, d, out);
   });
   for (const d of derived.actions) if (!seen.has(d.key)) out.push({ connector_id: id, path: "actions", code: "drift_action_missing_in_manifest", message: `${d.key}: er registrert (klasse ${d.authority.risk_class}) men står ikke i manifestet` });

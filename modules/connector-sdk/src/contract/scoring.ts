@@ -1,4 +1,5 @@
-import { isUnknown, type ConnectorManifest } from "../manifest.ts";
+import { isUnknown, safeIdentifier, type ConnectorManifest } from "../manifest.ts";
+import { redactText } from "./redact.ts";
 import type { ContractCheckResult } from "./types.ts";
 
 /**
@@ -50,7 +51,8 @@ export function scoreAcceptance(manifest: ConnectorManifest, checks: readonly Co
   const st: Statuses = new Map(checks.map((c) => [c.id, c.status]));
   const writeCapable = manifest.actions.some((a) => a.effect !== "read");
   const items: AcceptanceItem[] = [];
-  const add = (id: string, level: "R" | "A", requirement: string, basis: AcceptanceItem["basis"], status: AcceptanceStatus, evidence: string): void => { items.push({ id, level, requirement, basis, status, evidence }); };
+  // Review M2: evidensteksten siterer manifestfelt (handlingsnøkler, notater, uverifiserte scopes) - alt går gjennom redigeringen, så en hemmelighetsform i et uvalidert manifest aldri havner i rapporten.
+  const add = (id: string, level: "R" | "A", requirement: string, basis: AcceptanceItem["basis"], status: AcceptanceStatus, evidence: string): void => { items.push({ id, level, requirement, basis, status, evidence: redactText(evidence) }); };
   const m = manifest;
 
   // ----- Nivå R ---------------------------------------------------------------------------------------------------------
@@ -145,13 +147,13 @@ export function scoreAcceptance(manifest: ConnectorManifest, checks: readonly Co
     const cd = fromKit(st, ["classd.chain_and_notification"]);
     if (dActions.length === 0) add("A.classd_snapshot_notification", "A", "D-class snapshot/checkpoint where possible + immediate notification", "kit", "not_applicable", "ingen klasse D-handlinger");
     else if (cd.status === "gap") add("A.classd_snapshot_notification", "A", "D-class snapshot/checkpoint where possible + immediate notification", "kit", "gap", "klasse D-kjeden feilet i kittet");
-    else if (deferred.length > 0) add("A.classd_snapshot_notification", "A", "D-class snapshot/checkpoint where possible + immediate notification", "composite", "gap", `ufullstendig klasse D-kjede (utilgjengelig under håndhevelse, DEFERRED): ${list(deferred.map((a) => a.key))}`);
+    else if (deferred.length > 0) add("A.classd_snapshot_notification", "A", "D-class snapshot/checkpoint where possible + immediate notification", "composite", "gap", `ufullstendig klasse D-kjede (utilgjengelig under håndhevelse, DEFERRED): ${list(deferred.map((a) => safeIdentifier(a.key)))}`);
     else add("A.classd_snapshot_notification", "A", "D-class snapshot/checkpoint where possible + immediate notification", "kit", cd.status, cd.status === "proven" ? "komplett kjede, evidens og umiddelbar varsling bevist (kittet)" : "ikke kjørt");
 
     const money = m.actions.filter((a) => a.effect === "pay");
     if (money.length === 0) add("A.finance_reconciliation", "A", "Finance reconciliation for money-affecting actions", "manifest", "not_applicable", "ingen penge-berørende handlinger");
     else add("A.finance_reconciliation", "A", "Finance reconciliation for money-affecting actions", "manifest", m.operations.reconciliation?.required === true ? "declared" : "gap",
-      m.operations.reconciliation?.required === true ? `avstemming er påkrevd og beskrevet for ${list(money.map((a) => a.key))}` : `penge-berørende handlinger (${list(money.map((a) => a.key))}) uten deklarert avstemming`);
+      m.operations.reconciliation?.required === true ? `avstemming er påkrevd og beskrevet for ${list(money.map((a) => safeIdentifier(a.key)))}` : `penge-berørende handlinger (${list(money.map((a) => safeIdentifier(a.key)))}) uten deklarert avstemming`);
 
     const pr = fromKit(st, ["control.pause_blocks_all", "revoke.and_reauth"]);
     add("A.pause_revoke_kill_switch", "A", "Pause/revoke/kill-switch tested", "kit", pr.status, pr.status === "proven" ? "pause og tilbakekall stanser alle kall uten leverandørkall (kittet)" : pr.status === "gap" ? `feilet: ${list(pr.failed)}` : `hoppet over: ${list(pr.skipped)}`);

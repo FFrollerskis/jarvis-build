@@ -4,6 +4,7 @@ import {
   isUnknown, productionConnectorDefinitions, validateConnectorManifest, type ConnectorManifest
 } from "../src/index.ts";
 import { CONNECTOR_REGISTRY } from "@jarvis/tool-gateway";
+import { secretShapedActionKeys, secretShapedConnectorId } from "./fixtures.ts";
 
 const definitions = productionConnectorDefinitions();
 const derivedById = new Map(deriveSkeletonManifests({ definitions }).map((m) => [m.identity.id, m]));
@@ -170,6 +171,28 @@ describe("DRIFT: manifestet og registeret må være identiske i det som kan avle
     expect(gh.drift.map((d) => d.code)).toContain("drift_rate_limit");
     expect(cf.drift.map((d) => d.code)).toContain("drift_risk_class");
     expect(cat.entries.find((e) => e.connector_id === "stripe")!.drift).toEqual([]);
+  });
+
+  it("review M2: driftmeldinger om et UVALIDERT, typet manifest med hemmelighetsformet handlingsnøkkel/connector-id viser aldri verdien", () => {
+    for (const key of secretShapedActionKeys()) {
+      const m = clone(GITHUB_MANIFEST);
+      m.actions[0]!.key = key;
+      m.actions[1]!.key = key.replace(".read", ".other");
+      const catalogueMsgs = drift(m);
+      expect(catalogueMsgs.some((d) => d.code === "drift_action_not_in_registry")).toBe(true);
+      expect(JSON.stringify(catalogueMsgs).includes(key), key.slice(0, 6)).toBe(false);
+      // Samme handlingsnøkkel som registeret, men en verdi manifestet «sier» som er en hemmelighetsform: skalarvisningen redigerer også den.
+      const g = clone(GITHUB_MANIFEST);
+      (g.actions[0]!.authority as unknown as Record<string, unknown>)["risk_class"] = key;
+      const out = drift(g);
+      expect(out.some((d) => d.code === "drift_risk_class" && d.message.includes("<redacted>"))).toBe(true);
+      expect(JSON.stringify(out).includes(key)).toBe(false);
+    }
+    const ghost = clone(GITHUB_MANIFEST);
+    ghost.identity.id = secretShapedConnectorId();
+    const idDrift = checkManifestAgainstDerived(ghost, derivedById.get("github")!);
+    expect(idDrift.some((d) => d.connector_id === "<redacted>" && d.code === "drift_id")).toBe(true);
+    expect(JSON.stringify(idDrift).includes(secretShapedConnectorId())).toBe(false);
   });
 
   it("en ny handling i registeret uten manifest-rad fanges for en fullt dokumentert connector", () => {
