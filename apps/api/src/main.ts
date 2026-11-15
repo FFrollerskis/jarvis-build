@@ -140,6 +140,7 @@ import { ChatJobs, MAX_ACTIVE_JOBS, TasksDelegateTransport, tasksDelegateToolDef
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
 import { createControlCenterRegistry, ownerPredicate, registerControlCenters } from "./control-center/register.ts";
 import { CONTROL_FEATURE_FLAGS, controlCentersWithTools, flagOn } from "./control-center/shared.ts";
+import { createAutonomyAudit } from "./autonomy-audit.ts";
 import { createGoldenSuiteRunner } from "./golden-suite-runner.ts";
 import { servedByCloudModel } from "./cloud-tool-screen.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
@@ -1084,6 +1085,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
           })
         },
         ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {}),
+        // WP-H2 (gjennomgang L1): før-bildet av en autonomi-binding skrives og committes i revisjonssporet FØR `revoke_autonomy_binding` sletter den (kun brukt når verktøyet er registrert, JARVIS_CONTROL_AUTONOMY_REVOKE=on).
+        autonomyAudit: createAutonomyAudit(pool),
         holder: executiveRef
       })), {
         // WP-H1/H2 (gjennomgang M1): per-senter lese-verktøyene (`get_<senter>_center`) registreres KUN for sentrene hvis flagg er på - flagg AV er identisk med main (ingen verktøy, ingen utvalgstreff, ingen rate-endring).

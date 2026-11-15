@@ -7,6 +7,8 @@ import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, OwnerControls, 
 import { DomainPauseRegistry, SituationEngine, SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";
 import { ToolGateway, type SecretProvider } from "@jarvis/tool-gateway";
 import { CONTROL_CENTER_FLAGS, CONTROL_FEATURE_FLAGS, createControlCenterRegistry, registerControlCenters } from "../src/control-center/register.ts";
+import { createAutonomyAudit } from "../src/autonomy-audit.ts";
+import { controlCentersWithTools } from "../src/control-center/shared.ts";
 import { createGoldenSuiteRunner } from "../src/golden-suite-runner.ts";
 import { createApiServer } from "../src/server.ts";
 import { PRODUCTION_SURFACE } from "./support/fast-path-harness.ts";
@@ -72,8 +74,9 @@ async function startStack(env: Record<string, string>, goldenOn: boolean, revoke
     infraStatus: async () => infra(), backupStatus: async () => ({ kind: "missing" }), processStartedAt: () => new Date(Date.now() - 3_600_000),
     ...(runner ? { goldenSuite: runner } : {})
   });
-  const service = new ExecutiveService(gateway, { controlCenters: registry, ...(runner ? { goldenSuite: runner } : {}) });
-  for (const tool of executiveToolDefinitions(new ExecutiveTransport(service), { goldenSuite: runner !== undefined, autonomyRevoke: revokeOn })) gateway.register(tool);
+  // SAMME kobling som main.ts: før-bilde-skriveren (L1) og verktøy kun for sentre med flagg på OG et registrert senter (M1/L5).
+  const service = new ExecutiveService(gateway, { controlCenters: registry, autonomyAudit: createAutonomyAudit(db.appPool), ...(runner ? { goldenSuite: runner } : {}) });
+  for (const tool of executiveToolDefinitions(new ExecutiveTransport(service), { controlCenters: controlCentersWithTools(env, registry), goldenSuite: runner !== undefined, autonomyRevoke: revokeOn })) gateway.register(tool);
   for (const tool of situationsToolDefinitions(new SituationsTransport(engine, new DomainPauseRegistry(db.appPool, { owner_person_id: OWNER })))) gateway.register(tool);
 
   const identityService = new IdentityService(db.appPool);
@@ -114,6 +117,9 @@ const policyRows = async (): Promise<Array<{ tenant_id: string; memory_space_id:
   (await db.adminPool.query("SELECT tenant_id, memory_space_id, domain FROM situation_autonomy_policies ORDER BY tenant_id, memory_space_id, domain")).rows as Array<{ tenant_id: string; memory_space_id: string; domain: string }>;
 const auditRows = async (type: string, toolId: string, action: string): Promise<Array<{ reason: string | null; person_id: string }>> =>
   (await db.adminPool.query("SELECT reason, person_id FROM audit_events WHERE type = $1 AND tool_id = $2 AND action = $3 ORDER BY audit_id", [type, toolId, action])).rows as Array<{ reason: string | null; person_id: string }>;
+/** L1: revisjonsradene med før-bildet (`autonomy_binding.revoke_requested`), skrevet FØR slettingen. */
+const beforeImageRows = async (): Promise<Array<{ person_id: string; payload: { domain?: string; existed?: boolean; before?: unknown } }>> =>
+  (await db.adminPool.query("SELECT person_id, payload FROM audit_events WHERE type = 'autonomy_binding.revoke_requested' AND tool_id = 'executive' AND action = 'revoke_autonomy_binding' ORDER BY audit_id")).rows as Array<{ person_id: string; payload: { domain?: string; existed?: boolean; before?: unknown } }>;
 async function counts(): Promise<Record<string, number>> {
   const out: Record<string, number> = {};
   for (const t of ["tasks", "owner_control_state", "memory_items", "payment_intents"]) out[t] = Number((await db.adminPool.query(`SELECT count(*) AS n FROM ${t}`)).rows[0].n);
@@ -223,6 +229,11 @@ describe("B: revoke_autonomy_binding - nøyaktig én rad, i identitetens eget ro
     expect(inner.length).toBeGreaterThanOrEqual(1);
     expect(outer.every((row) => row.person_id === OWNER)).toBe(true);
     expect(inner.every((row) => row.person_id === OWNER)).toBe(true);
+    // L1: før-bildet av bindingen står i en egen revisjonsrad (skrevet før slettingen), med eierens person
+    const images = await beforeImageRows();
+    expect(images.length).toBeGreaterThanOrEqual(1);
+    expect(images.every((row) => row.person_id === OWNER)).toBe(true);
+    expect(images[0]?.payload).toMatchObject({ domain: "pipeline", existed: true, before: { domain: "pipeline", tool_id: "test_actuator", action: "assign", enabled: true } });
   });
 
   it("idempotent: å tilbakekalle samme domene igjen er trygt (removed: false) og endrer ingenting", async () => {
@@ -426,14 +437,22 @@ describe("E: de tre nye sentrene over HTTP - eier-kun, kildeforankret, og Verdi 
 });
 
 describe("F: FLAGGENE AV - verktøyene og knappene finnes ikke, og H0-oppførselen er uendret", () => {
-  it("revoke_autonomy_binding og run_golden_suite er ukjente verktøy (unknown_tool) - og ingenting slettes", async () => {
+  it("revoke_autonomy_binding og run_golden_suite er ukjente navn for ruten (gjennomgang M1: SAMME svar som main gir et ukjent navn - 400 action_not_allowed FØR grantet løses) - ingenting slettes, ingenting revideres", async () => {
     const before = await policyRows();
+    const deniedBefore = (await auditRows("tool.denied", "executive", "revoke_autonomy_binding")).length + (await auditRows("tool.denied", "executive", "run_golden_suite")).length;
+    const imagesBefore = (await beforeImageRows()).length;
     for (const [action, parameters] of [["revoke_autonomy_binding", { domain: "pipeline" }], ["run_golden_suite", {}]] as const) {
-      const r = await mutate(off, grants.owner, action, parameters);
-      expect(r.status, action).toBe(403);
-      expect(r.body, action).toMatchObject({ error: "tool_denied", reason: "unknown_tool" });
+      for (const grant of [grants.owner, "bogus"]) {
+        const r = await mutate(off, grant, action, parameters);
+        expect(r.status, action).toBe(400);
+        expect(r.body, action).toEqual({ error: "malformed_request", reason: "action_not_allowed" });
+      }
+      // gatewayen kjenner dem heller ikke
+      expect(off.gateway.get("executive", action), action).toBeUndefined();
     }
     expect(await policyRows()).toEqual(before);
+    expect((await auditRows("tool.denied", "executive", "revoke_autonomy_binding")).length + (await auditRows("tool.denied", "executive", "run_golden_suite")).length).toBe(deniedBefore);
+    expect((await beforeImageRows()).length).toBe(imagesBefore);
   });
 
   it("de fire H2-sentrene er ikke koblet inn (404 center_not_registered) og står under unregistered i oversikten", async () => {

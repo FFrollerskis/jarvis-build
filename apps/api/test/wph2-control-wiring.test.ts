@@ -68,7 +68,11 @@ describe("kildevakt: de to flaggstyrte funksjonene finnes kun med sine flagg", (
   });
 
   it("executiveToolDefinitions får flaggene som valg: `run_golden_suite` bare med en kjører, `revoke_autonomy_binding` bare med JARVIS_CONTROL_AUTONOMY_REVOKE=on", () => {
-    expect(MAIN_CODE).toMatch(/\{ goldenSuite: goldenSuiteRunner !== undefined, autonomyRevoke: flagOn\(process\.env, CONTROL_FEATURE_FLAGS\.autonomyRevoke\) \}/);
+    expect(MAIN_CODE).toMatch(/goldenSuite: goldenSuiteRunner !== undefined,\s*autonomyRevoke: flagOn\(process\.env, CONTROL_FEATURE_FLAGS\.autonomyRevoke\)\s*\}\)/);
+    // M1: per-senter-verktøyene registreres kun for sentre med flagg på OG et registrert senter
+    expect(MAIN_CODE).toMatch(/controlCenters: controlCentersWithTools\(process\.env, controlCenters\)/);
+    // L1: før-bildet skrives via den injiserte revisjonsskriveren (ikke en ny ExecutiveService)
+    expect(MAIN_CODE).toMatch(/autonomyAudit: createAutonomyAudit\(pool\)/);
   });
 
   it("flaggnavnene står ikke som strenger i main.ts (de kommer fra CONTROL_FEATURE_FLAGS), og workeren registrerer ingen av de to handlingene", () => {

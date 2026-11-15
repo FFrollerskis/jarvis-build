@@ -407,11 +407,13 @@ export function executiveToolDefinitions(transport: ExecutiveTransport, options:
       : []),
     // WP-H2: tilbakekall av eierens autonomi-binding (`situation_autonomy_policies`, D-160) for ÉTT domene i kallerens eget minnerom: gjennomslag til `situations.clear_autonomy_policy` (samme verktøy, samme sovereign-eier-port,
     // samme revisjon). Fravær av binding = ingen auto-ACT (fail-closed), så domenet går tilbake til det strengeste nivået. Klasse C; eier-kun FØR noe kalles; ruten krever step-up (signert enhet). Kan ikke angres automatisk:
-    // parametrene til den slettede bindingen lagres ikke. Registreres kun med JARVIS_CONTROL_AUTONOMY_REVOKE=on.
+    // parametrene til den slettede bindingen lagres i revisjonsraden `autonomy_binding.revoke_requested` (før-bildet, skrevet og committet FØR slettingen; se `ExecutiveService.revokeAutonomyBinding`). Registreres kun med JARVIS_CONTROL_AUTONOMY_REVOKE=on.
     ...(options.autonomyRevoke === true
       ? [{
-        ...control("revoke_autonomy_binding", "Tilbakekall eierens autonomi-binding (auto-ACT) for ÉTT situasjonsdomene i kallerens eget minnerom (gjennomslag til situations.clear_autonomy_policy); domenet går tilbake til ingen auto-ACT", { domain: z.string().min(1).max(100) }, "set_autonomy_policy med de forrige verdiene (parametrene til den slettede bindingen lagres ikke - de må gis på nytt)"),
+        ...control("revoke_autonomy_binding", "Tilbakekall eierens autonomi-binding (auto-ACT) for ÉTT situasjonsdomene i kallerens eget minnerom (gjennomslag til situations.clear_autonomy_policy); domenet går tilbake til ingen auto-ACT", { domain: z.string().min(1).max(100) }, "set_autonomy_policy med verdiene i før-bildet i revisjonsraden `autonomy_binding.revoke_requested` (domene, tool_id, action, enabled, parameters)"),
         reversible: false,
+        // Gjennomgang L1: uopprettelig sletting = step-up på GATEWAY-nivå (signert enhetsøkt fra en eier-kanal, WP-F1-mekanismen), ikke bare i ruten - hver vei til verktøyet krever den (avslag: `step_up_required:<årsak>`).
+        step_up_required: true,
         parameterAuthorizer: (_parameters: Record<string, JsonValue>, identity: Parameters<ExecutiveTransport["authorizeOwnerControl"]>[0]) => transport.authorizeOwnerControl(identity)
       } satisfies ToolDefinition]
       : []),

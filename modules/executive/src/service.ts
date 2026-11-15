@@ -141,6 +141,11 @@ export interface ExecutiveServiceOptions {
    */
   goldenSuite?: GoldenSuiteControl;
   /**
+   * WP-H2 (gjennomgang L1): skriver en revisjonsrad (append-only `audit_events`) som er COMMITTET før en autonomi-binding slettes (`revokeAutonomyBinding`). Injisert fra `apps/api` (`withTenantTransaction` + `writeAudit`);
+   * executive-pakken har ingen databasetilgang selv. Utelatt eller kastende = tilbakekallet avvises (fail-closed).
+   */
+  autonomyAudit?: (identity: IdentityContext, entry: { type: string; tool_id: string; action: string; payload: Record<string, unknown> }) => Promise<void>;
+  /**
    * WP-H2: lat binding. Konstruktøren legger seg selv i holderen, slik at kontrollsentrene (som bygges FØR tjenesten i `main.ts`) kan lese `getValueReport`/`getInfraStatus` når en forespørsel kommer -
    * uten at tjenesten må konstrueres tidligere eller flyttes ut av `additionalTools`-listen (komposisjonsroten er låst av `executive-wiring.test.ts`).
    */
@@ -217,10 +222,39 @@ export class ExecutiveService {
   }
 
   /**
-   * WP-H2: tilbakekall av eierens autonomi-binding (D-160, `situation_autonomy_policies`) for ÉTT domene. Rent gjennomslag til `situations.clear_autonomy_policy` med den UENDREDE identiteten (D-68): motoren
+   * WP-H2: tilbakekall av eierens autonomi-binding (D-160, `situation_autonomy_policies`) for ÉTT domene. Slettingen er et gjennomslag til `situations.clear_autonomy_policy` med den UENDREDE identiteten (D-68): motoren
    * velger rommet fra identiteten (kun kallerens eget minnerom), og dens EGEN sovereign-eier-port (`assertAutonomyAuthority`) gjelder i tillegg til policyen. Ingen egen slettelogikk her.
+   *
+   * Gjennomgang L1: SLETTINGEN KAN IKKE ANGRES (parametrene til bindingen lagres ellers ingen steder), så FØR DELETE leses bindingen (`situations.list_autonomy_policies`, kallerens eget rom) og en
+   * revisjonsrad med FØR-BILDET (domene, verktøy, handling, aktiv/av, parametre, hvem som satte den) skrives og COMMITTES (`autonomyAudit`, injisert fra apps/api: `writeAudit` i egen transaksjon). FAIL-CLOSED i alle
+   * tre ledd: kan bindingen ikke leses, kan revisjonsraden ikke skrives, eller mangler `autonomyAudit`, utføres INGEN sletting. Mangler bindingen (`existed: false`) skrives raden likevel (forsøket er revisjonsverdig) og
+   * slettingen er idempotent (`removed: false`).
    */
   async revokeAutonomyBinding(identity: IdentityContext, domain: string): Promise<ToolResult> {
+    const audit = this.options.autonomyAudit;
+    if (audit === undefined) return { ok: false, reason: "autonomy_audit_not_configured" };
+    const listed = await this.gateway.execute({ identity, tool_id: "situations", action: "list_autonomy_policies", parameters: {} });
+    if (!listed.ok) return { ok: false, reason: `before_image_unreadable:${listed.reason.slice(0, 60)}` };
+    if (!Array.isArray(listed.data)) return { ok: false, reason: "before_image_unreadable:unexpected_shape" };
+    const row = (listed.data as unknown[]).find((r) => typeof r === "object" && r !== null && (r as { domain?: unknown }).domain === domain) as Record<string, unknown> | undefined;
+    const before = row === undefined
+      ? null
+      : {
+        domain, tool_id: String(row["tool_id"] ?? ""), action: String(row["action"] ?? ""), enabled: row["enabled"] === true,
+        parameters: (row["parameters"] ?? null) as JsonValue, actor_person_id: row["actor_person_id"] === undefined || row["actor_person_id"] === null ? null : String(row["actor_person_id"]),
+        updated_at: row["updated_at"] === undefined || row["updated_at"] === null ? null : String(row["updated_at"])
+      };
+    try {
+      await audit(identity, {
+        type: "autonomy_binding.revoke_requested", tool_id: "executive", action: "revoke_autonomy_binding",
+        payload: {
+          domain, memory_space: identity.memory_space_id, existed: before !== null, before,
+          recovery: before === null ? "ingen binding å gjenopprette" : "set_autonomy_policy med verdiene i `before` (domene, tool_id, action, enabled, parameters)"
+        }
+      });
+    } catch {
+      return { ok: false, reason: "autonomy_audit_write_failed" };
+    }
     return this.gateway.execute({ identity, tool_id: "situations", action: "clear_autonomy_policy", parameters: { domain } });
   }
 
