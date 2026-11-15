@@ -350,7 +350,7 @@ async function startVendor(respond: (req: IncomingMessage, res: ServerResponse) 
 
 let realSeq = 0;
 /** Kjører den samme ikke-idempotente mutasjonen to ganger med SAMME nøkkel mot en transport som gjør ekte HTTP. `invokes` teller kall inn i transporten (også de som aldri sendte noe). */
-async function runTwiceReal(opts: { cls: "C" | "D"; mutate: () => Promise<void>; notifier?: ClassDNotifier }): Promise<{
+async function runTwiceReal(opts: { cls: "B" | "C" | "D"; idem?: boolean; mutate: () => Promise<void>; notifier?: ClassDNotifier }): Promise<{
   first: unknown; replay: unknown; invokes: number; row: { status: string; postcondition_reason: string | null }
 }> {
   const toolId = `m1-low1-${(realSeq += 1)}`;
@@ -358,7 +358,7 @@ async function runTwiceReal(opts: { cls: "C" | "D"; mutate: () => Promise<void>;
   let invokes = 0;
   const transport: ToolTransport = { invoke: async () => { invokes += 1; await opts.mutate(); return {}; } };
   const g = new ToolGateway(appPool, policy, secrets, undefined, undefined, opts.notifier ? { classDPipeline: { enforce: true, notifier: opts.notifier } } : undefined);
-  g.register(def({ tool_id: toolId, capability_class: opts.cls, ...(opts.cls === "D" && opts.notifier ? { class_d_profile: "outbound_message" as const } : {}) }, transport));
+  g.register(def({ tool_id: toolId, capability_class: opts.cls, idempotent_external: opts.idem ?? false, ...(opts.cls === "D" && opts.notifier ? { class_d_profile: "outbound_message" as const } : {}) }, transport));
   const request = { identity, tool_id: toolId, action: "send", parameters: {}, idempotency_key: key };
   const first = await g.execute(request);
   const replay = await g.execute(request);
@@ -411,6 +411,22 @@ describe("LOW 1: EKTE HTTP mot en lokal leverandørserver - leverandøren svarte
     expect(r.row.status).toBe("unverified");
     expect(r.replay).toEqual(UNKNOWN_REPLAY);
     expect(vendor.requests).toHaveLength(1);
+  }, 30_000);
+
+  it("kontrast: klasse B (varsler) og IDEMPOTENTE mutasjoner er uendret også for de nye formene - POST + 303 og 200 + uparserbar kropp er `failed` og kan prøves på nytt (2 POST)", async () => {
+    const redirecting = await startVendor((_req, res) => { res.writeHead(303, { location: "/done" }); res.end(); });
+    const garbled = await startVendor((_req, res) => { res.writeHead(200, { "content-type": "text/html" }); res.end("<html>ok</html>"); });
+    for (const variant of [{ cls: "B" as const, idem: false }, { cls: "C" as const, idem: true }]) {
+      const viaRedirect = await runTwiceReal({ ...variant, mutate: async () => { await guardedFetch(`${redirecting.base}/mutate`, { method: "POST", body: "x" }); } });
+      expect(viaRedirect.row.status, `${variant.cls}/${String(variant.idem)} 303`).toBe("failed");
+      expect(String((viaRedirect.first as { reason: string }).reason)).toBe("tool_failed:unsafe_vendor_url:unexpected_redirect_http_303");
+      expect(viaRedirect.invokes).toBe(2);
+      const viaGarbage = await runTwiceReal({ ...variant, mutate: async () => { const res = await guardedFetch(`${garbled.base}/mutate`, { method: "POST", body: "x" }); await res.json(); } });
+      expect(viaGarbage.row.status, `${variant.cls}/${String(variant.idem)} garbage`).toBe("failed");
+      expect(viaGarbage.invokes).toBe(2);
+    }
+    expect(redirecting.requests).toHaveLength(4); // 2 varianter x 2 forsøk
+    expect(garbled.requests).toHaveLength(4);
   }, 30_000);
 
   it("kontrast: en eksplisitt AVVISNING (422 fra leverandøren) er IKKE ukjent utfall - raden er `failed`, og samme nøkkel kan prøves på nytt (2 POST)", async () => {
