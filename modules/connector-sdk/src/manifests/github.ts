@@ -144,7 +144,7 @@ export const GITHUB_MANIFEST: ConnectorManifest = {
     dedupe_key: "jarvis_idempotency_key",
     retry_semantics: {
       on_timeout: "reconcile_before_retry", on_rate_limit: "retry_after", on_server_error: "reconcile_before_retry",
-      note: "KJENT GAP (PARTIAL): GithubTransport melder ikke outcome_unknown ved 5xx (kun gateway-tidsavbrudd gir ukjent utfall), så for handlinger uten leverandør-idempotens (create_issue, comment_on_issue, rerun/cancel/dispatch) kan et retry etter kastet leverandørfeil i teorien dobbeltutføre"
+      note: "KJENT GAP (PARTIAL): transporten gjentar aldri en mutasjon ved 5xx (D-392), men melder heller ikke outcome_unknown (kun gateway-tidsavbrudd gir ukjent utfall); for handlinger uten leverandør-idempotens (create_issue, comment_on_issue, rerun/cancel/dispatch) kan en kaller som prøver på nytt etter kastet leverandørfeil i teorien dobbeltutføre"
     },
     exactly_once_target: "at_most_once"
   },

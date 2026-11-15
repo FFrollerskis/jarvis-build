@@ -1,0 +1,27 @@
+import { describe, expect, it } from "vitest";
+import { runConnectorContract, validateConnectorManifest } from "../../src/index.ts";
+import { {{CONST}}_MANIFEST } from "../../src/manifests/{{ID}}.ts";
+import { create{{PASCAL}}Fake } from "./{{ID}}.fake.ts";
+
+/**
+ * Kontraktstest for {{NAME_COMMENT}} (`{{ID}}`) - GENERERT av `ops/connector/new-connector.mjs` (WP-I, D-472). Kjører Connector SDK-ets kontraktstest-kit mot fake-adapteren (ingen nettverk).
+ * Testen er grønn mot et gyldig utkast; AKSEPTANSE-GAPENE (Appendiks B nivå R/A) er arbeidslisten: hvert `gap` og `not_proven` skal lukkes eller dokumenteres ærlig før connectoren kalles ferdig.
+ */
+describe("{{ID}}: kontraktstest-kit (fake, ingen nettverk)", () => {
+  it("manifestet er gyldig (skeleton er lov under utvikling; sett completeness til full når alt er fylt ut)", () => {
+    const v = validateConnectorManifest({{CONST}}_MANIFEST);
+    expect(v.issues).toEqual([]);
+  });
+
+  it("kontraktstest-kittet består uten feil mot fake-adapteren", async () => {
+    const report = await runConnectorContract({{CONST}}_MANIFEST, create{{PASCAL}}Fake());
+    expect(report.checks.filter((c) => c.status === "fail").map((c) => `${c.id}: ${c.detail ?? ""} ${(c.subjects ?? []).join("; ")}`)).toEqual([]);
+    expect(report.ok).toBe(true);
+  });
+
+  it("akseptansenivå følger manifestet (R for ren lesing, A for skriving), og ingenting regnes som verifisert uten live-evidens", async () => {
+    const report = await runConnectorContract({{CONST}}_MANIFEST, create{{PASCAL}}Fake());
+    expect(report.acceptance.required_level).toBe("{{LEVEL}}");
+    expect(report.acceptance.items.find((i) => i.id === "R.live_read_smoke")?.status).not.toBe("proven");
+  });
+});

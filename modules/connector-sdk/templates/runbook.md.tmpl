@@ -1,0 +1,54 @@
+# Connector {{NAME_MD}} (`{{ID}}`) - runbook (UTKAST generert av ops/connector/new-connector.mjs, WP-I, D-472)
+
+**Status: NOT_BUILT / UTKAST.** Dette er en mal. Ingenting under er verifisert. Fyll ut hver `TODO`, og slett denne linjen først når connectoren er bygget OG kjørt mot en sandbox.
+Hold den ærlig: `NOT VERIFIED` står til en ekte kjøring er observert (fellesbrief regel 11).
+
+**Eier:** owner · **Vedlikeholdseier:** owner · **Manifest:** `modules/connector-sdk/src/manifests/{{ID}}.ts` · **Sist testet:** aldri (TODO)
+
+## 1. Core-vs-Adapter-port (D-64, CLAUDE.md regel 12) - FØR noe annet
+
+| Spørsmål | Svar |
+|---|---|
+| Kapabilitet (hva skal connectoren gjøre for en aktiv verdi-løkke?) | TODO |
+| Kanonisk Jarvis-tilstand (hva eier Jarvis uavhengig av leverandøren?) | TODO |
+| Hva krever faktisk et eksternt system? | TODO |
+| Portabilitet/utfall/dataeierskap (kan Jarvis kjøre uten leverandøren? erstatningsvei?) | TODO |
+| `system_of_record` | `JARVIS_CANONICAL` / `EXTERNAL_CANONICAL` / `HYBRID_WITH_CLEAR_AUTHORITY` (TODO) |
+| `CORE_DEPENDENCY_DECISION_REQUIRED` | TODO (hvis `true`: STOPP og avklar med eieren før leverandøren velges) |
+
+Ingen connector «fordi den kan være nyttig»: den må støtte en aktiv verdi-løkke, et kontrollsenter eller en konkret veikartavhengighet (kap. 10).
+
+## 2. D-41 kapabilitetsrevisjon (CLAUDE.md regel 11) - mot OFFISIELL dokumentasjon
+
+| Kapabilitet | Leverandøren tilbyr | Bygget | Handlinger (risikoklasse A-D) | Merknad |
+|---|---|---|---|---|
+| Lese/søke | TODO | TODO | TODO | |
+| Skrive | TODO | TODO | TODO | |
+| Slette | TODO | TODO | TODO | |
+| Tilgangsstyring | TODO | TODO | TODO | |
+
+- **Scopes for FULL nyttig tilgang** (lest mot offisiell dokumentasjon, ikke gjettet): TODO. Kilde og dato: TODO.
+- **Eier vs delegert:** TODO. **Idempotens:** TODO. **Trygg test-sandbox:** TODO (test- og akseptanseløp begrenses til sandbox; sier ingenting om produksjonens tilgangsnivå).
+- **`DEFERRED`/`PARTIAL`** (alt leverandøren tilbyr som ikke er bygget - aldri stille utelatt): TODO.
+
+## 3. Symptomer og tiltak
+
+- Auth feiler (`auth_failed` i Integrasjoner): TODO (hvor fornyes credentialen, hvilke scopes mangler).
+- Rate limit / utilgjengelig: TODO.
+- Ukjent utfall etter tidsavbrudd på en skrivehandling: sjekk leverandøren FØR du prøver igjen (samme idempotensnøkkel gir aldri en ny effekt).
+
+## 4. Rollback og av-bryter
+
+- Stopp connectoren umiddelbart: pause (frys) i Integrasjoner, eller tilbakekall credentialen. TODO (connectorspesifikt).
+- Per handling: se `reversibility` i manifestet. TODO.
+
+## 5. Verifisering på NAS (`NOT VERIFIED`)
+
+1. TODO: sett credentialen (dashbordet/Infisical; aldri i chat).
+2. TODO: «Test tilkobling» (live-testen) mot sandbox.
+3. TODO: reversibel skrivehandling med før-/etter-evidens mot sandbox.
+4. Lim inn utfallet (uten secrets); først da kan live smoke merkes `present`.
+
+## 6. Kontraktstester
+
+`pnpm exec vitest run modules/connector-sdk/test/connectors/{{ID}}.contract.test.ts`. Akseptansegapene kittet viser er arbeidslisten (Appendiks B nivå {{LEVEL}}).
