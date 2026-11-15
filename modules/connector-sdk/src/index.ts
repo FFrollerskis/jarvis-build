@@ -6,3 +6,5 @@ export * from "./catalogue.ts";
 export * from "./builders.ts";
 export * from "./manifests/index.ts";
 export * from "./contract/index.ts";
+export * from "./guard.ts";
+export * from "./debt.ts";
