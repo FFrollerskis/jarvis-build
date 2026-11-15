@@ -69,7 +69,8 @@ backticks, emoji og retningstegn fjernes uansett posisjon. Systemdetekterte løk
 | Utfall fra gatewayen | Frigis? | Hvorfor |
 |---|---|---|
 | `kill_switch_active`, `connector_frozen`, `credential_revoked`, `credential_unavailable`, `credential_not_bound_to_identity`, `class_b_requires_active_auth`, `invalid_identity_context`, `invalid_tool_call`, `unknown_tool`, `invalid_parameters`, `rate_limited`, `infra_paused`, `infra_degraded_blocks_class_d`, `infra_mode_unavailable`, `scope_mismatch:*` | **ja** | avslag FØR leverandørkallet - ingenting gikk ut |
-| `tool_failed:telegram_chat_id_not_configured`, `tool_failed:unsafe_vendor_url:*` | **ja** | transporten avviste før noen forespørsel ble sendt |
+| `tool_failed:telegram_chat_id_not_configured`, `tool_failed:unsafe_vendor_url:*` (unntatt `unexpected_redirect_http_<status>`) | **ja** | transporten avviste før noen forespørsel ble sendt |
+| `tool_failed:unsafe_vendor_url:unexpected_redirect_http_<status>` | nei | `guardedFetch` kaster etter at POST-en er sendt og besvart 3xx (WP-K re-review LOW 1) - kan bety «levert» |
 | `tool_failed:telegram_error_400/401/403/404/429` | **ja** | Telegram avviste selve kallet; ingen melding opprettet |
 | `tool_failed:tool_timeout` | nei | gatewayens 10 s-frist: Telegram kan levere etterpå |
 | `tool_failed:telegram_error_5xx` (500, 502, 503, 504 ...) | nei | Telegram/mellomledd kan ha lagret meldingen og svart feil |
