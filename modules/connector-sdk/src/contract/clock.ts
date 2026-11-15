@@ -1,6 +1,8 @@
 /**
  * WP-I (D-472): virtuell klokke for kontraktstestene (fellesbriefen: «inject clocks», ingen ekte ventetid). `sleep` venter på virtuell tid og avbrytes av en `AbortSignal`;
  * `advance` flytter tiden og fyrer forfalte timere i rekkefølge, mens løftekjeder får fullføre mellom hver. Rent og deterministisk.
+ * Navnet er `VirtualClock` (ikke `Fake*`) fordi den er kittets egen deterministiske tidskilde, ikke en stand-in for en produksjonsklokke; D-396-vakten
+ * (`modules/core/test/d396-fake-export-guard.test.ts`) teller eksporterte klasser med prefiksene Fake, Scripted, InMemory og Mock i src/, og denne pakken legger ingen slik klasse til.
  */
 export class AbortedError extends Error {
   constructor() {
@@ -21,7 +23,7 @@ export async function settle(): Promise<void> {
   for (let i = 0; i < 4; i++) await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
-export class FakeClock {
+export class VirtualClock {
   private t: number;
   private seq = 0;
   private timers: Timer[] = [];

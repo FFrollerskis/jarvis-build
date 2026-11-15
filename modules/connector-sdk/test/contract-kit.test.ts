@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  CONTRACT_CHECK_IDS, FAKE_CREDENTIAL_CANARY, FAKE_DEFECTS, FakeClock, INJECTION_PAYLOAD, createFakeConnector, isUnknown, runConnectorContract, secretShapes, scoreAcceptance,
+  CONTRACT_CHECK_IDS, FAKE_CREDENTIAL_CANARY, FAKE_DEFECTS, INJECTION_PAYLOAD, VirtualClock, createFakeConnector, isUnknown, runConnectorContract, secretShapes, scoreAcceptance,
   type ConnectorManifest, type ContractReport, type FakeDefect
 } from "../src/index.ts";
 import { ACME_KEYS, validFullManifest, validSkeletonManifest } from "./fixtures.ts";
@@ -219,7 +219,7 @@ describe("akseptanse-scoring (Appendiks B): ærlig skille mellom bevist, deklare
 
 describe("fake-harnessen: modellen holder kontrakten den påstår", () => {
   it("virtuell klokke: sleep venter på advance, avbrytes av signal, og fyrer i rekkefølge", async () => {
-    const clock = new FakeClock(0);
+    const clock = new VirtualClock(0);
     const order: number[] = [];
     void clock.sleep(30).then(() => order.push(30));
     void clock.sleep(10).then(() => order.push(10));

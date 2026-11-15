@@ -1,5 +1,5 @@
 import type { JsonValue, TrustLevel } from "@jarvis/contracts";
-import type { FakeClock } from "./clock.ts";
+import type { VirtualClock } from "./clock.ts";
 
 /**
  * WP-I (D-472): PORTEN en connector eksponerer for kontraktstest-kittet (`runConnectorContract`). Den modellerer connectoren SLIK JARVIS KJØRER DEN (ToolGateway + transport): idempotens-ledger,
@@ -86,7 +86,7 @@ export interface ProviderState {
 
 /** Testkroker kittet trenger for å bevise egenskapene (en fake implementerer dem; en ekte transport ville fått dem fra en fake leverandørserver). */
 export interface ContractControls {
-  readonly clock: FakeClock;
+  readonly clock: VirtualClock;
   injectFault(fault: Fault | null): void;
   /** Antall leverandør-side effekter (kjøringer av en skrivehandling) - per handling eller totalt. */
   effects(actionKey?: string): number;

@@ -1,7 +1,7 @@
 import { scanForSecrets } from "@jarvis/core";
 import type { TrustLevel } from "@jarvis/contracts";
 import { isUnknown, type ActionSpec, type ConnectorManifest } from "../manifest.ts";
-import { AbortedError, FakeClock } from "./clock.ts";
+import { AbortedError, VirtualClock } from "./clock.ts";
 import type {
   AdapterError, AdapterEvidence, AdapterHealth, AdapterRequest, AdapterResult, ContractAdapter, ErrorCategory, Fault, HealthState, JsonValue
 } from "./types.ts";
@@ -55,7 +55,7 @@ export interface FakeConnectorSpec {
   manifest: ConnectorManifest;
   handlers?: Readonly<Record<string, FakeActionHandler>>;
   defects?: readonly FakeDefect[];
-  clock?: FakeClock;
+  clock?: VirtualClock;
   /** Tenanten credentialen er bundet til (standard `tenant-a`). */
   bound_tenant?: string;
 }
@@ -77,7 +77,7 @@ const RETRYABLE: Readonly<Record<ErrorCategory, boolean>> = { auth: false, rate_
 export function createFakeConnector(spec: FakeConnectorSpec): ContractAdapter {
   const { manifest } = spec;
   const defects = new Set(spec.defects ?? []);
-  const clock = spec.clock ?? new FakeClock();
+  const clock = spec.clock ?? new VirtualClock();
   const bound = spec.bound_tenant ?? FAKE_TENANT;
   const handlers = spec.handlers ?? {};
   const byKey = new Map(manifest.actions.map((a) => [a.key, a]));
