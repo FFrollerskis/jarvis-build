@@ -1,26 +1,32 @@
 import { CONNECTOR_REGISTRY, type ConnectorDefinition } from "@jarvis/tool-gateway";
 import { buildManifestCatalogue, type Catalogue, type CatalogueInput } from "./catalogue.ts";
-import { deriveSkeletonManifests } from "./derive.ts";
+import { SKELETON_BASELINE } from "./manifests/index.ts";
 import { isUnknown, safeIdentifier, type ConnectorManifest } from "./manifest.ts";
 import { validateConnectorManifest, type ManifestIssue } from "./validate.ts";
 
 /**
- * WP-I (D-472): CI-VAKT for connector-manifester. Ren funksjon (filsystemet injiseres), brukt av `guard.test.ts` som en CI-port: en connector kan ikke legges til, endres eller beskrives uten at manifestet følger med.
+ * WP-I (D-472): CI-VAKT for connector-manifester. Ren funksjon (filsystemet og beslutningsloggen injiseres), brukt av `guard.test.ts` som en CI-port.
+ *
+ * ÆRLIG OM HVA DEN GARANTERER (review M5): et skeleton avledes AUTOMATISK for hver registeroppføring (`derive.ts`), så en registeroppføring uten manifest kan ikke oppstå - vakten kan derfor ikke kreve at et manifest
+ * «følger med» i den forstand. Det den kan kreve er at en NY BYGD connector ikke slipper stille inn med bare et skeleton: den må ha et FULLT manifest eller en bevisst oppføring i `SKELETON_BASELINE`
+ * (`built_connector_unreviewed`), og baselinen kan bare krympe (`skeleton_baseline_stale`).
  *
  * Reglene (kap. 10 + CLAUDE.md regel 11/12 + Appendiks B):
- *  - hver registeroppføring har et manifest (et avledet skeleton er nok) med eier, tillitsklasse og risikoklasse per handling;
- *  - alle manifester er gyldige (skjema + semantiske regler), og et håndskrevet manifest er `full`;
- *  - hvert fullt manifest har en runbook-sti som FINNES, og hver teststi det oppgir finnes;
+ *  - hver bygd registeroppføring har et fullt manifest eller står i den committede skeleton-baselinen; alle manifester (også avledede skeletons) er gyldige med eier, tillitsklasse og risikoklasse per handling;
+ *  - et håndskrevet manifest er `full`, og hvert fullt manifest har en runbook som er deklarert og FINNES, teststier som finnes, og beslutningene (`decision_refs`) som loggførte D-64-porten finnes i beslutningsloggen;
  *  - ingen manifest refererer en hemmelighets VERDI (kun hvelvreferanser);
  *  - en skrivekapabel connector uten idempotensinfo feiler;
- *  - et håndskrevet manifest har ingen drift mot registeret, er ikke foreldreløst og ikke dobbelt.
+ *  - et håndskrevet manifest har ingen drift mot registeret (handlingsmengde og alle avledbare fakta), er ikke foreldreløst og ikke dobbelt.
+ * Grense: «finnes» betyr at filen/beslutningen eksisterer - vakten leser ikke innholdet i runbook eller tester (en tom fil teller; se runbook §11, DEFERRED).
  * Vakten svekker aldri en regel stille: en regel som ikke kan evalueres (ugyldig inndata) er et brudd, ikke en hopp-over.
  */
 
 export const GUARD_RULES = [
   "registry_connector_without_manifest", "manifest_invalid", "missing_owner", "missing_trust_class", "action_without_risk_class", "authored_manifest_not_full",
   "runbook_not_declared", "runbook_file_missing", "test_evidence_without_path", "test_file_missing", "secret_value_in_manifest", "write_capable_without_idempotency",
-  "manifest_drift", "orphan_manifest", "duplicate_manifest"
+  "manifest_drift", "orphan_manifest", "duplicate_manifest",
+  // Review M5/M3: den meningsfulle registerregelen (skeleton-baselinen) og beslutningsreferansen.
+  "built_connector_unreviewed", "skeleton_baseline_stale", "decision_ref_missing"
 ] as const;
 export type GuardRule = (typeof GUARD_RULES)[number];
 
@@ -36,6 +42,10 @@ export interface GuardInput extends Omit<CatalogueInput, "authored"> {
   authored: readonly unknown[];
   /** Finnes denne repo-relative stien? (Injisert: vakten selv rører ikke filsystemet.) */
   fileExists: (repoRelativePath: string) => boolean;
+  /** Finnes beslutningen (`D-109`) i beslutningsloggen? (Injisert, som `fileExists`; påkrevd fordi en regel som ikke kan evalueres ikke skal hoppes over.) */
+  decisionExists: (decisionId: string) => boolean;
+  /** Den committede skeleton-baselinen (standard: `SKELETON_BASELINE`). Kun testene overstyrer den. */
+  skeleton_baseline?: readonly string[];
 }
 
 export interface GuardReport {
@@ -48,7 +58,7 @@ export interface GuardReport {
     model_provider: number;
     full: string[];
     skeleton: number;
-    /** Ukjent-markører per skeleton: arbeidslisten for å oppgradere en connector til `full`. */
+    /** Ukjent-markører per SKELETON (kun connectorer uten fullt manifest): arbeidslisten for å oppgradere en connector til `full`. */
     unknown_fields_by_connector: Record<string, number>;
   };
 }
@@ -93,13 +103,18 @@ function issueViolations(id: string | null, issues: readonly ManifestIssue[], ou
     const secret = i.code === "secret_shape_detected" || (i.code === "invalid_format" && /^secrets\.refs\[\d+\]\.ref$/.test(i.path));
     if (secret) out.push({ rule: "secret_value_in_manifest", connector_id: id, path: i.path, message: "manifestet inneholder noe som ikke er en hvelvreferanse (en verdi?) - kun referanser er lov" });
     else if (WRITE_IDEMPOTENCY_CODES.has(i.code)) out.push({ rule: "write_capable_without_idempotency", connector_id: id, path: i.path, message: i.message });
+    // Review M5: et FULLT manifest med ukjent runbook gir validatorens `full_manifest_has_unknown` ved operations.runbook - vakten navngir det som sitt eget brudd (ellers var regelen uoppnåelig: evidensfasen kjører bare på gyldige manifester).
+    else if (i.code === "full_manifest_has_unknown" && i.path === "operations.runbook") out.push({ rule: "runbook_not_declared", connector_id: id, path: i.path, message: "et fullt manifest må oppgi en runbook" });
     else out.push({ rule: "manifest_invalid", connector_id: id, path: i.path, message: `${i.code}: ${i.message}` });
   }
 }
 
-/** Runbook- og testbevis-stier i et FULLT manifest må finnes (vakten leser aldri filene, bare eksistens). */
-function evidenceViolations(m: ConnectorManifest, fileExists: (p: string) => boolean, out: GuardViolation[]): void {
+/** Runbook- og testbevis-stier i et FULLT manifest må finnes, og beslutningene som loggførte D-64-porten likeså (vakten leser aldri innholdet, bare eksistens). */
+function evidenceViolations(m: ConnectorManifest, fileExists: (p: string) => boolean, decisionExists: (id: string) => boolean, out: GuardViolation[]): void {
   const id = m.identity.id;
+  for (const ref of m.core_boundary.decision_refs ?? []) {
+    if (!decisionExists(ref)) out.push({ rule: "decision_ref_missing", connector_id: id, path: "core_boundary.decision_refs", message: `beslutningen ${ref} finnes ikke i beslutningsloggen (DECISIONS_AND_ASSUMPTIONS.md)` });
+  }
   const rb = m.operations.runbook;
   if (isUnknown(rb)) out.push({ rule: "runbook_not_declared", connector_id: id, path: "operations.runbook", message: "et fullt manifest må oppgi en runbook" });
   else if (!fileExists(rb.path)) out.push({ rule: "runbook_file_missing", connector_id: id, path: "operations.runbook.path", message: `runbooken finnes ikke: ${rb.path}` });
@@ -111,10 +126,31 @@ function evidenceViolations(m: ConnectorManifest, fileExists: (p: string) => boo
 }
 
 /** Revisjonen over en ferdig bygd katalog. Ren; brukes av `runManifestGuard` og direkte av mutasjonstestene. */
-export function auditManifestCatalogue(args: { catalogue: Catalogue; registry: readonly ConnectorDefinition[]; authored: readonly unknown[]; fileExists: (p: string) => boolean }): GuardViolation[] {
+const isBuilt = (c: ConnectorDefinition): boolean => c.category !== "backlog" && c.category !== "backlog_d64_gate";
+
+export function auditManifestCatalogue(args: {
+  catalogue: Catalogue; registry: readonly ConnectorDefinition[]; authored: readonly unknown[]; fileExists: (p: string) => boolean; decisionExists: (id: string) => boolean; skeleton_baseline?: readonly string[];
+}): GuardViolation[] {
   const out: GuardViolation[] = [];
   const have = new Set(args.catalogue.entries.map((e) => e.connector_id));
+  // Defensivt: katalogen skal ha en oppføring for hver registeroppføring (den bygges av `buildManifestCatalogue`, som alltid avleder et skeleton). Feiler katalogen, er det en feil i vakten selv.
   for (const c of args.registry) if (!have.has(c.id)) out.push({ rule: "registry_connector_without_manifest", connector_id: c.id, path: "", message: "registeroppføringen har ikke noe manifest (heller ikke et avledet skeleton)" });
+
+  // Skeleton-baselinen (review M5): en NY bygd connector må ha et fullt manifest eller en bevisst baseline-oppføring; baselinen kan bare krympe.
+  const baseline = new Set(args.skeleton_baseline ?? SKELETON_BASELINE);
+  const levelOf = new Map(args.catalogue.entries.map((e) => [e.connector_id, e.level] as const));
+  const registryById = new Map(args.registry.map((c) => [c.id, c] as const));
+  // En connector med et håndskrevet manifest (også et ugyldig, som da meldes under `manifest_invalid` osv.) er ikke «uten manifest»: da har den et gjennomgått utkast som bare må rettes.
+  const authoredIds = new Set(args.authored.map((raw) => at(raw, "identity", "id")).filter((id): id is string => typeof id === "string"));
+  for (const c of args.registry) {
+    if (isBuilt(c) && levelOf.get(c.id) !== "full" && !authoredIds.has(c.id) && !baseline.has(c.id)) out.push({ rule: "built_connector_unreviewed", connector_id: c.id, path: "", message: "bygd connector uten fullt manifest og uten oppføring i SKELETON_BASELINE: lag et fullt manifest (anbefalt; legg det i FULL_MANIFESTS), eller legg id-en bevisst til i SKELETON_BASELINE (src/manifests/index.ts) med begrunnelse i PR-en" });
+  }
+  for (const id of [...baseline].sort()) {
+    const c = registryById.get(id);
+    if (c === undefined) out.push({ rule: "skeleton_baseline_stale", connector_id: safeIdentifier(id), path: "", message: "SKELETON_BASELINE har en id som ikke finnes i registeret: fjern den" });
+    else if (!isBuilt(c)) out.push({ rule: "skeleton_baseline_stale", connector_id: id, path: "", message: "SKELETON_BASELINE har en backlog-oppføring (ikke bygget trenger ingen baseline-oppføring): fjern den" });
+    else if (levelOf.get(id) === "full") out.push({ rule: "skeleton_baseline_stale", connector_id: id, path: "", message: "connectoren har nå et fullt manifest: fjern den fra SKELETON_BASELINE (baselinen kan bare krympe)" });
+  }
 
   // Håndskrevne manifester: rå sjekk først (eier/tillit/risiko), så skjema + semantikk.
   for (const raw of args.authored) {
@@ -124,7 +160,7 @@ export function auditManifestCatalogue(args: { catalogue: Catalogue; registry: r
     issueViolations(id, v.issues, out);
     if (v.manifest !== null) {
       if (v.manifest.completeness !== "full") out.push({ rule: "authored_manifest_not_full", connector_id: id, path: "completeness", message: "et håndskrevet manifest må være «full» (et håndskrevet skeleton ville skjult drift mot det avledede)" });
-      else evidenceViolations(v.manifest, args.fileExists, out);
+      else evidenceViolations(v.manifest, args.fileExists, args.decisionExists, out);
     }
   }
   // Alle manifestene i katalogen (inkl. avledede skeletons): gyldige, med eier/tillit/risiko, og uten drift.
@@ -145,10 +181,10 @@ export function runManifestGuard(input: GuardInput): GuardReport {
   const registry = input.registry ?? CONNECTOR_REGISTRY;
   const validAuthored = input.authored.map((raw) => validateConnectorManifest(raw).manifest).filter((m): m is ConnectorManifest => m !== null);
   const catalogue = buildManifestCatalogue({ ...input, registry, authored: validAuthored });
-  const violations = auditManifestCatalogue({ catalogue, registry, authored: input.authored, fileExists: input.fileExists });
-  const skeletons = deriveSkeletonManifests({ ...input, registry });
+  const violations = auditManifestCatalogue({ catalogue, registry, authored: input.authored, fileExists: input.fileExists, decisionExists: input.decisionExists, ...(input.skeleton_baseline !== undefined ? { skeleton_baseline: input.skeleton_baseline } : {}) });
+  // Arbeidslisten gjelder KUN connectorer som fortsatt er skeletons: en connector med fullt manifest har ingen ukjent-markører å lukke (review: den ble før telt fra det avledede skeletonet også).
   const unknown_fields_by_connector: Record<string, number> = {};
-  for (const s of skeletons) unknown_fields_by_connector[s.identity.id] = validateConnectorManifest(s).unknown_paths.length;
+  for (const e of catalogue.entries) if (e.level === "skeleton") unknown_fields_by_connector[e.connector_id] = validateConnectorManifest(e.manifest).unknown_paths.length;
   return {
     ok: violations.length === 0,
     violations,

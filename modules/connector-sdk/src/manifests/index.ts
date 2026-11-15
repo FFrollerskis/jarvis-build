@@ -10,3 +10,17 @@ export { CLOUDFLARE_MANIFEST, GITHUB_MANIFEST, STRIPE_MANIFEST };
  * (`deriveSkeletonManifests`). En ny connector legger sitt fulle manifest til HER (CI-vakten feiler om en manifestfil i denne mappen mangler i listen) og i `modules/tool-gateway/src/connector-registry.ts`.
  */
 export const FULL_MANIFESTS: readonly ConnectorManifest[] = [GITHUB_MANIFEST, CLOUDFLARE_MANIFEST, STRIPE_MANIFEST];
+
+/**
+ * SKELETON-BASELINEN (review M5): de BYGDE registeroppføringene (kategori ikke backlog) som i dag bare har et avledet `skeleton` og ikke et fullt manifest. Et skeleton avledes automatisk for hver registeroppføring,
+ * så «ingen manifest» kan aldri oppstå - derfor kunne vakten ikke fange at en NY connector ble lagt til uten et gjennomgått manifest. Baselinen gjør det til en bevisst handling (samme idé som baselinen i D-396-vakten):
+ *  - en NY bygd registeroppføring må enten få et FULLT manifest (anbefalt; legg det til i `FULL_MANIFESTS`), eller legges til HER med begrunnelse i PR-en;
+ *  - baselinen kan bare krympe: når en connector får et fullt manifest, SKAL den fjernes herfra (ellers feiler vakten), og en oppføring som ikke lenger finnes i registeret eller er backlog feiler også.
+ * Backlog-oppføringer (ikke bygget) trenger ingen oppføring; i det øyeblikket de bygges (kategori endres) må de få manifest eller en bevisst baseline-oppføring.
+ * Arbeidslisten for å tømme baselinen er `unknown_fields_by_connector` i vaktens rapport.
+ */
+export const SKELETON_BASELINE: readonly string[] = [
+  "anthropic", "brave_search", "discord", "dropbox", "exa", "fiken", "gemini", "gmail", "google_calendar", "google_drive", "google_maps", "google_places", "google_routes", "google_sheets", "google_veo", "grafana",
+  "higgsfield", "home_assistant", "hubspot", "jira", "kling", "linear", "make", "microsoft_outlook", "n8n", "neonomics", "notion", "onedrive", "openai", "openai_images", "pipedrive", "playwright", "prometheus",
+  "runway", "sentry", "slack", "spotify", "tavily", "telegram", "telnyx", "todoist", "trello", "twilio", "vercel", "vipps", "wallester", "whatsapp", "zapier"
+];

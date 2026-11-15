@@ -9,10 +9,21 @@ import { isUnknown, safeIdentifier, safeScalar, type ActionSpec, type Completene
  * si noe om og sammenlignes derfor ikke.
  */
 
+/**
+ * ALLE driftkodene (review M5: `drift_kind`, `drift_effect` og `drift_reversible` hadde ingen mutasjonstest). Listen er uttømmende og låst: `catalogue.test.ts` har en mutasjon per kode og feiler når en kode legges til uten en.
+ */
+export const DRIFT_CODES = [
+  "drift_id", "drift_name", "drift_owner_kind", "drift_action_not_in_registry", "drift_action_missing_in_manifest",
+  "drift_kind", "drift_effect", "drift_risk_class", "drift_step_up", "drift_owner_only", "drift_reversible", "drift_before_state", "drift_postcondition", "drift_class_d_chain", "drift_destructive_understated",
+  "drift_idempotency_requirement", "drift_provider_idempotent", "drift_trust", "drift_rate_limit", "drift_timeout", "drift_identity_fields", "drift_input_required",
+  "drift_declared_scopes", "drift_secret_refs", "drift_provider_api", "drift_sync_jobs", "drift_health_check", "drift_timeout_max", "drift_trust_class"
+] as const;
+export type DriftCode = (typeof DRIFT_CODES)[number];
+
 export interface DriftIssue {
   connector_id: string;
   path: string;
-  code: string;
+  code: DriftCode;
   message: string;
 }
 
@@ -22,7 +33,7 @@ function actionDrift(id: string, i: number, m: ActionSpec, d: ActionSpec, out: D
   const at = (f: string) => `actions[${i}].${f}`;
   // Review M2: manifest-verdier vises aldri rått (et uvalidert, typet manifest kan bære en hemmelighet): handlingsnøkkel og verdier går via safeIdentifier/safeScalar.
   const key = safeIdentifier(m.key);
-  const diff = (field: string, code: string, a: unknown, b: unknown) => {
+  const diff = (field: string, code: DriftCode, a: unknown, b: unknown) => {
     if (a !== b) out.push({ connector_id: id, path: at(field), code, message: `${key}: manifestet sier ${safeScalar(a)}, registeret sier ${safeScalar(b)}` });
   };
   diff("kind", "drift_kind", m.kind, d.kind);

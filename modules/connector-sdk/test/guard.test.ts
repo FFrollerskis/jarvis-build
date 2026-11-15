@@ -1,10 +1,10 @@
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { CONNECTOR_REGISTRY } from "@jarvis/tool-gateway";
+import { CONNECTOR_REGISTRY, type ConnectorDefinition } from "@jarvis/tool-gateway";
 import {
-  FULL_MANIFESTS, GUARD_RULES, auditManifestCatalogue, buildManifestCatalogue, productionConnectorDefinitions, runManifestGuard, unregisteredManifestFiles,
+  FULL_MANIFESTS, GUARD_RULES, SKELETON_BASELINE, auditManifestCatalogue, buildManifestCatalogue, productionConnectorDefinitions, runManifestGuard, unregisteredManifestFiles,
   type ConnectorManifest, type GuardRule, type GuardViolation
 } from "../src/index.ts";
 import { fakeSecretShapes, secretShapedActionKeys, secretShapedConnectorId } from "./fixtures.ts";
@@ -15,10 +15,24 @@ import { fakeSecretShapes, secretShapedActionKeys, secretShapedConnectorId } fro
  */
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const fileExists = (p: string) => existsSync(join(ROOT, p));
+/** Beslutningsloggen er en markdown-tabell: `| D-109 | ...`. Vakten får den injisert, som filsystemet. */
+const decisionLog = readFileSync(join(ROOT, "docs/DECISIONS_AND_ASSUMPTIONS.md"), "utf8");
+const decisionExists = (id: string) => new RegExp(`^\\| ${id} \\|`, "m").test(decisionLog);
 const definitions = productionConnectorDefinitions();
 const clone = (m: ConnectorManifest): ConnectorManifest => structuredClone(m);
-const guard = (authored: readonly unknown[], over: { definitions?: typeof definitions; exists?: (p: string) => boolean } = {}) =>
-  runManifestGuard({ definitions: over.definitions ?? definitions, authored, fileExists: over.exists ?? fileExists });
+/**
+ * Mutasjonstestene kjører ofte vakten med BARE ÉN av de tre fulle manifestene. Standardbaselinen er da den committede pluss de fulle manifestene som ikke er med (tilstanden «de er ikke skrevet ennå»), så
+ * skeleton-baselinen ikke feller dem for noe annet enn det testen undersøker. Med ALLE de tre (PORTEN) er baselinen nøyaktig den committede. En test overstyrer den med `baseline`.
+ */
+const guard = (authored: readonly unknown[], over: { definitions?: typeof definitions; exists?: (p: string) => boolean; registry?: readonly ConnectorDefinition[]; baseline?: readonly string[]; decisions?: (id: string) => boolean } = {}) => {
+  const authoredIds = new Set(authored.map((m) => (m as { identity?: { id?: string } }).identity?.id));
+  const baseline = over.baseline ?? [...SKELETON_BASELINE, ...FULL_MANIFESTS.map((m) => m.identity.id).filter((id) => !authoredIds.has(id))];
+  return runManifestGuard({
+    definitions: over.definitions ?? definitions, authored, fileExists: over.exists ?? fileExists, decisionExists: over.decisions ?? decisionExists, skeleton_baseline: baseline,
+    ...(over.registry !== undefined ? { registry: over.registry } : {})
+  });
+};
+const newBuiltEntry = (id = "brand_new_vendor"): ConnectorDefinition => ({ id, display_name: "Brand New Vendor", category: "tool_gateway", credential_refs: ["JARVIS_BRAND_NEW_TOKEN"] });
 const rulesOf = (vs: readonly GuardViolation[]): GuardRule[] => [...new Set(vs.map((v) => v.rule))].sort();
 
 describe("PORTEN: hvert connector-manifest i repoet holder reglene (feiler CI ved brudd)", () => {
@@ -34,10 +48,14 @@ describe("PORTEN: hvert connector-manifest i repoet holder reglene (feiler CI ve
     expect(report.coverage.full).toEqual(["github", "cloudflare", "stripe"]);
     expect(report.coverage.skeleton).toBe(CONNECTOR_REGISTRY.length - 3);
     expect(report.coverage.built + report.coverage.backlog + report.coverage.model_provider).toBe(CONNECTOR_REGISTRY.length);
+    // Arbeidslisten gjelder bare skeletons: en connector med fullt manifest har ingen ukjent-markører å lukke og står ikke i den.
+    const fullIds = new Set(FULL_MANIFESTS.map((m) => m.identity.id));
     for (const c of CONNECTOR_REGISTRY) {
       const n = report.coverage.unknown_fields_by_connector[c.id];
-      expect(n, c.id).toBeGreaterThan(0);
+      if (fullIds.has(c.id)) expect(n, c.id).toBeUndefined();
+      else expect(n, c.id).toBeGreaterThan(0);
     }
+    expect(Object.keys(report.coverage.unknown_fields_by_connector).length).toBe(CONNECTOR_REGISTRY.length - FULL_MANIFESTS.length);
   });
 
   it("hvert fullt manifest har en runbook som finnes, og hver teststi det oppgir finnes", () => {
@@ -59,8 +77,16 @@ describe("PORTEN: hvert connector-manifest i repoet holder reglene (feiler CI ve
     expect([...GUARD_RULES]).toEqual([
       "registry_connector_without_manifest", "manifest_invalid", "missing_owner", "missing_trust_class", "action_without_risk_class", "authored_manifest_not_full",
       "runbook_not_declared", "runbook_file_missing", "test_evidence_without_path", "test_file_missing", "secret_value_in_manifest", "write_capable_without_idempotency",
-      "manifest_drift", "orphan_manifest", "duplicate_manifest"
+      "manifest_drift", "orphan_manifest", "duplicate_manifest", "built_connector_unreviewed", "skeleton_baseline_stale", "decision_ref_missing"
     ]);
+  });
+
+  it("skeleton-baselinen er nøyaktig de BYGDE registeroppføringene som ikke har fullt manifest (ingen duplikater, ingen døde oppføringer)", () => {
+    const full = new Set(FULL_MANIFESTS.map((m) => m.identity.id));
+    const expected = CONNECTOR_REGISTRY.filter((c) => c.category !== "backlog" && c.category !== "backlog_d64_gate" && !full.has(c.id)).map((c) => c.id).sort();
+    expect([...SKELETON_BASELINE].sort()).toEqual(expected);
+    expect(new Set(SKELETON_BASELINE).size).toBe(SKELETON_BASELINE.length);
+    expect(SKELETON_BASELINE.length).toBeGreaterThan(40);
   });
 });
 
@@ -68,8 +94,42 @@ describe("mutasjonstester: hver regel biter", () => {
   it("registeroppføring uten manifest", () => {
     const catalogue = buildManifestCatalogue({ definitions, authored: FULL_MANIFESTS });
     catalogue.entries = catalogue.entries.filter((e) => e.connector_id !== "slack");
-    const v = auditManifestCatalogue({ catalogue, registry: CONNECTOR_REGISTRY, authored: FULL_MANIFESTS, fileExists });
+    const v = auditManifestCatalogue({ catalogue, registry: CONNECTOR_REGISTRY, authored: FULL_MANIFESTS, fileExists, decisionExists });
     expect(v.find((x) => x.rule === "registry_connector_without_manifest")?.connector_id).toBe("slack");
+  });
+
+  it("review M5: en NY bygd registeroppføring uten fullt manifest og uten baseline-oppføring feller vakten (reviewens repro ga før ok=true fordi skeletonet avledes automatisk)", () => {
+    const registry = [...CONNECTOR_REGISTRY, newBuiltEntry()];
+    const r = guard(FULL_MANIFESTS, { registry });
+    expect(r.ok).toBe(false);
+    expect(r.violations.map((v) => `${v.rule}:${v.connector_id}`)).toEqual(["built_connector_unreviewed:brand_new_vendor"]);
+    expect(r.violations[0]!.message).toContain("SKELETON_BASELINE");
+    // Bevisst oppføring i baselinen gjør den grønn igjen (en synlig handling i PR-en), og skeletonet er fortsatt validert.
+    expect(guard(FULL_MANIFESTS, { registry, baseline: [...SKELETON_BASELINE, "brand_new_vendor"] }).violations).toEqual([]);
+    // Backlog (ikke bygget) trenger ingen oppføring; i det øyeblikket kategorien endres til bygd, kreves en.
+    expect(guard(FULL_MANIFESTS, { registry: [...CONNECTOR_REGISTRY, { ...newBuiltEntry("future_vendor"), category: "backlog" }] }).violations).toEqual([]);
+    const flipped = guard(FULL_MANIFESTS, { registry: [...CONNECTOR_REGISTRY.filter((c) => c.id !== "apple_music"), ...CONNECTOR_REGISTRY.filter((c) => c.id === "apple_music").map((c) => ({ ...c, category: "tool_gateway" as const }))] });
+    expect(flipped.violations.map((v) => `${v.rule}:${v.connector_id}`)).toEqual(["built_connector_unreviewed:apple_music"]);
+  });
+
+  it("review M5: baselinen kan bare krympe - en id som ikke finnes, en backlog-oppføring eller en connector som nå har fullt manifest feller vakten", () => {
+    const ghost = guard(FULL_MANIFESTS, { baseline: [...SKELETON_BASELINE, "no_such_connector"] });
+    expect(ghost.violations.map((v) => `${v.rule}:${v.connector_id}`)).toEqual(["skeleton_baseline_stale:no_such_connector"]);
+    const backlog = CONNECTOR_REGISTRY.find((c) => c.category === "backlog")!;
+    expect(guard(FULL_MANIFESTS, { baseline: [...SKELETON_BASELINE, backlog.id] }).violations.map((v) => `${v.rule}:${v.connector_id}`)).toEqual([`skeleton_baseline_stale:${backlog.id}`]);
+    const full = guard(FULL_MANIFESTS, { baseline: [...SKELETON_BASELINE, "github"] });
+    expect(full.violations.map((v) => `${v.rule}:${v.connector_id}`)).toEqual(["skeleton_baseline_stale:github"]);
+    expect(full.violations[0]!.message).toContain("kan bare krympe");
+  });
+
+  it("review M3: en decision_ref som ikke finnes i beslutningsloggen feller vakten (og de ekte referansene finnes)", () => {
+    for (const m of FULL_MANIFESTS) for (const ref of m.core_boundary.decision_refs ?? []) expect(decisionExists(ref), `${m.identity.id}: ${ref}`).toBe(true);
+    const m = clone(FULL_MANIFESTS[2]!);
+    m.core_boundary.decision_refs = ["D-109", "D-9999"];
+    const v = guard([FULL_MANIFESTS[0]!, FULL_MANIFESTS[1]!, m]).violations;
+    expect(v.map((x) => `${x.rule}:${x.connector_id}`)).toEqual(["decision_ref_missing:stripe"]);
+    expect(v[0]!.message).toContain("D-9999");
+    expect(guard(FULL_MANIFESTS, { decisions: () => false }).violations.map((x) => x.rule)).toEqual(["decision_ref_missing", "decision_ref_missing", "decision_ref_missing", "decision_ref_missing"]);
   });
 
   it("manglende eier, tillitsklasse og risikoklasse gir egne, navngitte brudd (og ugyldig manifest)", () => {
@@ -107,11 +167,12 @@ describe("mutasjonstester: hver regel biter", () => {
     expect(rulesOf(guard([FULL_MANIFESTS[0]!], { exists: () => false }).violations)).toEqual(expect.arrayContaining(["runbook_file_missing", "test_file_missing"]));
   });
 
-  it("runbook ikke deklarert i et fullt manifest", () => {
+  it("review M5: runbook ikke deklarert i et fullt manifest gir NØYAKTIG runbook_not_declared (regelen var uoppnåelig - kun manifest_invalid fyrte)", () => {
     const m = clone(FULL_MANIFESTS[0]!);
     m.operations.runbook = { unknown: true, reason: "mangler" };
-    const rules = rulesOf(guard([m]).violations);
-    expect(rules).toEqual(expect.arrayContaining(["manifest_invalid"]));
+    const v = guard([m]).violations;
+    expect(v.map((x) => `${x.rule} ${x.path}`)).toEqual(["runbook_not_declared operations.runbook"]);
+    expect(v[0]!.connector_id).toBe("github");
   });
 
   it("hemmelighetsVERDI i manifestet (som referanse og i fritekst) fanges, uten at verdien gjentas i bruddet", () => {

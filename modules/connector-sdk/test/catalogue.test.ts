@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  CLOUDFLARE_MANIFEST, FULL_MANIFESTS, GITHUB_MANIFEST, STRIPE_MANIFEST, buildManifestCatalogue, checkManifestAgainstDerived, deriveSkeletonManifests,
-  isUnknown, productionConnectorDefinitions, validateConnectorManifest, type ConnectorManifest
+  CLOUDFLARE_MANIFEST, DRIFT_CODES, FULL_MANIFESTS, GITHUB_MANIFEST, STRIPE_MANIFEST, buildManifestCatalogue, checkManifestAgainstDerived, deriveSkeletonManifests,
+  isUnknown, productionConnectorDefinitions, validateConnectorManifest, type ConnectorManifest, type DriftCode, type DriftIssue
 } from "../src/index.ts";
 import { CONNECTOR_REGISTRY } from "@jarvis/tool-gateway";
 import { secretShapedActionKeys, secretShapedConnectorId } from "./fixtures.ts";
@@ -90,6 +90,10 @@ describe("DRIFT: manifestet og registeret må være identiske i det som kan avle
   it("endret risikoklasse, effekt, step-up, owner-only, idempotenskrav og provider-idempotens", () => {
     const a = clone(CLOUDFLARE_MANIFEST); act(a, "cloudflare.update_dns_record").authority.risk_class = "C";
     expect(codes(a)).toContain("drift_risk_class");
+    // Review M5: testen het «endret ... effekt» men muterte aldri effekten (drift_effect hadde ingen mutasjonstest).
+    const eff = clone(GITHUB_MANIFEST); act(eff, "github.create_issue").effect = "send";
+    expect(drift(eff).filter((d) => d.code === "drift_effect").map((d) => d.path)).toEqual([`actions[${eff.actions.findIndex((x) => x.key === "github.create_issue")}].effect`]);
+    expect(drift(eff).find((d) => d.code === "drift_effect")?.message).toContain("manifestet sier send, registeret sier write");
     const b = clone(CLOUDFLARE_MANIFEST); act(b, "cloudflare.purge_cache").authority.step_up_required = false;
     expect(codes(b)).toContain("drift_step_up");
     const c = clone(GITHUB_MANIFEST); act(c, "github.create_issue").idempotency.requirement = "required";
@@ -98,6 +102,19 @@ describe("DRIFT: manifestet og registeret må være identiske i det som kan avle
     expect(codes(d)).toContain("drift_provider_idempotent");
     const e = clone(GITHUB_MANIFEST); act(e, "github.read_issues").authority.owner_only = true;
     expect(codes(e)).toContain("drift_owner_only");
+  });
+
+  it("review M5: endret kind (kap. 10-bøtte) og reversibel-flagg fanges (drift_kind, drift_reversible hadde ingen mutasjonstest)", () => {
+    const k = clone(GITHUB_MANIFEST); act(k, "github.create_issue").kind = "action";
+    const kd = drift(k).filter((d) => d.code === "drift_kind");
+    expect(kd.length).toBe(1);
+    expect(kd[0]!.message).toContain("manifestet sier action, registeret sier write");
+    const r = clone(GITHUB_MANIFEST); act(r, "github.create_issue").reversibility.reversible = false;
+    const rd = drift(r).filter((d) => d.code === "drift_reversible");
+    expect(rd.length).toBe(1);
+    expect(rd[0]!.message).toContain("manifestet sier false, registeret sier true");
+    const r2 = clone(GITHUB_MANIFEST); act(r2, "github.merge_pr").reversibility.reversible = true;
+    expect(codes(r2)).toContain("drift_reversible");
   });
 
   it("endret rate limit, tidsavbrudd, tillit, før-tilstand, etterbetingelse og klasse D-kjede", () => {
@@ -201,3 +218,56 @@ describe("DRIFT: manifestet og registeret må være identiske i det som kan avle
     expect(cat.entries.find((e) => e.connector_id === "github")!.drift.map((d) => d.code)).toContain("drift_action_missing_in_manifest");
   });
 });
+
+describe("review M5: HVER driftkode har en mutasjon (uttømmende tabell mot DRIFT_CODES)", () => {
+  const act = (m: ConnectorManifest, key: string) => m.actions.find((a) => a.key === key)!;
+  const facts = { apiFacts: { github: { api_version: "X-GitHub-Api-Version 2022-11-28" } }, syncJobs: { github: [] as string[] } };
+  const derivedWithFacts = new Map(deriveSkeletonManifests({ definitions, ...facts }).map((m) => [m.identity.id, m]));
+  const gh = () => clone(GITHUB_MANIFEST);
+  const viaFacts = (m: ConnectorManifest): DriftIssue[] => checkManifestAgainstDerived(m, derivedWithFacts.get("github")!);
+
+  /** Hver rad muterer nøyaktig ett felt i et gyldig referansemanifest og må gi sin kode. */
+  const MUTATIONS: Array<[DriftCode, () => DriftIssue[]]> = [
+    ["drift_id", () => { const m = gh(); m.identity.id = "ghost"; return checkManifestAgainstDerived(m, derivedById.get("github")!); }],
+    ["drift_name", () => { const m = gh(); m.identity.name = "Git Hub"; return drift(m); }],
+    ["drift_owner_kind", () => { const m = gh(); m.identity.owner.kind = "jarvis_core"; return drift(m); }],
+    ["drift_action_not_in_registry", () => { const m = gh(); const c = clone(GITHUB_MANIFEST).actions[0]!; c.key = "github.force_push"; m.actions.push(c); return drift(m); }],
+    ["drift_action_missing_in_manifest", () => { const m = gh(); m.actions = m.actions.filter((a) => a.key !== "github.merge_pr"); return drift(m); }],
+    ["drift_kind", () => { const m = gh(); act(m, "github.create_issue").kind = "action"; return drift(m); }],
+    ["drift_effect", () => { const m = gh(); act(m, "github.create_issue").effect = "send"; return drift(m); }],
+    ["drift_risk_class", () => { const m = gh(); act(m, "github.create_issue").authority.risk_class = "C"; return drift(m); }],
+    ["drift_step_up", () => { const m = gh(); act(m, "github.merge_pr").authority.step_up_required = true; return drift(m); }],
+    ["drift_owner_only", () => { const m = gh(); act(m, "github.read_issues").authority.owner_only = true; return drift(m); }],
+    ["drift_reversible", () => { const m = gh(); act(m, "github.create_issue").reversibility.reversible = false; return drift(m); }],
+    ["drift_before_state", () => { const m = gh(); act(m, "github.merge_pr").reversibility.evidence.before_state = false; return drift(m); }],
+    ["drift_postcondition", () => { const m = gh(); act(m, "github.merge_pr").reversibility.evidence.postcondition = "none"; return drift(m); }],
+    ["drift_class_d_chain", () => { const m = gh(); act(m, "github.merge_pr").reversibility.class_d_chain = { status: "deferred", missing: ["postcondition"] }; return drift(m); }],
+    ["drift_destructive_understated", () => { const m = gh(); act(m, "github.merge_pr").reversibility.destructive = false; return drift(m); }],
+    ["drift_idempotency_requirement", () => { const m = gh(); act(m, "github.create_issue").idempotency.requirement = "required"; return drift(m); }],
+    ["drift_provider_idempotent", () => { const m = gh(); act(m, "github.create_issue").idempotency.provider_idempotent = true; return drift(m); }],
+    ["drift_trust", () => { const m = gh(); act(m, "github.read_issues").trust.output = "trusted"; return drift(m); }],
+    ["drift_rate_limit", () => { const m = gh(); act(m, "github.get_branch").limits.rate_limit_per_minute = 1; return drift(m); }],
+    ["drift_timeout", () => { const m = gh(); act(m, "github.merge_pr").operations.timeout_ms = 1; return drift(m); }],
+    ["drift_identity_fields", () => { const m = clone(STRIPE_MANIFEST); act(m, "finance_stripe.get_balance").data.identity_fields = []; return checkManifestAgainstDerived(m, derivedById.get("stripe")!); }],
+    ["drift_input_required", () => { const m = gh(); act(m, "github.create_issue").data.input_required = ["repo"]; return drift(m); }],
+    ["drift_declared_scopes", () => { const m = gh(); m.auth.scopes.declared_by_actions = ["repo:read"]; return drift(m); }],
+    ["drift_secret_refs", () => { const m = gh(); m.secrets.refs[1]!.required = true; return drift(m); }],
+    ["drift_provider_api", () => { const m = gh(); m.identity.version.provider_api = "GitHub REST API, X-GitHub-Api-Version 2026-01-01"; return viaFacts(m); }],
+    ["drift_sync_jobs", () => { const m = gh(); m.capabilities.sync = { status: "implemented", items: ["github-sync"] }; return viaFacts(m); }],
+    ["drift_health_check", () => { const m = gh(); m.operations.health_check = { method: "presence_only", action_key: null }; return drift(m); }],
+    ["drift_timeout_max", () => { const m = gh(); m.operations.timeout = { max_ms: 1 }; return drift(m); }],
+    ["drift_trust_class", () => { const m = gh(); m.trust.output.class = "internal"; return drift(m); }]
+  ];
+
+  it.each(MUTATIONS)("%s", (code, mutate) => {
+    expect(mutate().map((d) => d.code), code).toContain(code);
+  });
+
+  it("tabellen dekker nøyaktig DRIFT_CODES (en ny driftkode uten mutasjon feiler her), og uten mutasjon er det ingen drift", () => {
+    expect([...MUTATIONS.map(([c]) => c)].sort()).toEqual([...DRIFT_CODES].sort());
+    expect(new Set(DRIFT_CODES).size).toBe(DRIFT_CODES.length);
+    expect(drift(gh())).toEqual([]);
+    expect(viaFacts(gh())).toEqual([]);
+  });
+});
+
