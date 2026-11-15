@@ -514,6 +514,21 @@ export function isOutcomeUnknownMessage(message: string): boolean {
 }
 
 /**
+ * WP-K (uavhengig delta-review L-1): ÉN felles definisjon av hvilke `ToolResult.reason`-strenger som betyr at utfallet av leverandørkallet er UKJENT (kallet KAN ha blitt utført) - for forbrukere av resultatet
+ * (infra-journalen i `modules/incidents`, feilforklaringen til modellen). Ledgeren lagrer ukjent utfall som `unverified`, men det første kallets SVAR bærer `tool_failed:tool_timeout` /
+ * `tool_failed:outcome_unknown:...` (kun replay-svaret er `postcondition_unverified:tool_timeout_outcome_unknown`), og en retry mot en reservert rad gir `execution_in_flight_or_outcome_unknown`.
+ * Forbrukere som la disse i «feilet»-bøtta (FAILED / retry «later») fortalte ledgeren og journalen to forskjellige historier om samme kall. Endrer ingen `postcondition_reason`-streng (11 testfiler og
+ * produksjonskode er festet til dem); dette er kun en klassifisering av strengene som finnes.
+ */
+export function isUnknownOutcomeReason(reason: string): boolean {
+  return reason === "execution_in_flight_or_outcome_unknown"
+    || reason === "tool_failed:tool_timeout"
+    || reason.startsWith(`tool_failed:${OUTCOME_UNKNOWN_PREFIX}`)
+    || reason.startsWith("postcondition_unverified:tool_timeout")
+    || reason.startsWith("postcondition_unverified:ledger_finalize_failed");
+}
+
+/**
  * WP-K (review M1): klasse C/D-mutasjoner som IKKE er idempotente hos leverandøren (`idempotent_external: false`). En uavklart transportfeil (`TimeoutError`/`AbortError`, nullstilt socket etter sending, `fetch failed`)
  * betyr at leverandøren KAN ha utført mutasjonen - da er utfallet ukjent (`unverified`), aldri `failed`, ellers re-armer et samme-nøkkel-replay raden og sender POST-en en gang til. Klasse A (lesing) har ingen ledger,
  * idempotente mutasjoner tåler en retry, og klasse B (intern/reversibel bokføring og varsler) er bevisst utenfor (se runbook).
