@@ -9,7 +9,7 @@ import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import {
-  DockerTransport, GceTransport, GithubRateLimitController, GithubTransport, InMemoryGithubRateLimitStore, InfisicalTransport, ToolGateway,
+  ControlTargetHttpError, DockerTransport, GceTransport, GithubRateLimitController, GithubTransport, InMemoryGithubRateLimitStore, InfisicalTransport, SlackTransport, ToolGateway,
   afterAcceptedMutation, firstWaveTools, infisicalToolDefinitions, isOutcomeUnknownMessage, resetGoogleAccessTokenCache,
   INFRA_GATED_TOOL_IDS, type ClassDNotification, type SecretProvider, type ToolDefinition, type ToolTransport
 } from "../src/index.ts";
@@ -477,4 +477,56 @@ describe("E: GitHub - rate-limit-bokføringen ETTER en akseptert 2xx kan aldri g
     await expect(t.invoke("dispatch_workflow", { repo: "acme/app", workflow_id: "ci.yml", ref: "main" }, "fake-token-for-test")).rejects.toThrow(/github_api_error_429/);
     expect((await store.get("JARVIS_GITHUB_TOKEN"))?.consecutiveViolations).toBeGreaterThanOrEqual(1);
   }, 30_000);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+describe("F: DOKUMENTERTE GRENSER (KJENT GRENSE - festet så en endring må være bevisst; runbook §3 punkt 7-8)", () => {
+  it("L-2: Slack notify (klasse C) som får HTTP 200 + ok:false `internal_error` kaster slack_error_<kode> -> `failed`, og et samme-nøkkel-replay sender en ANDRE melding (Slack kan ha utført den delvis)", async () => {
+    let posts = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => { posts += 1; return new Response(JSON.stringify({ ok: false, error: "internal_error" }), { status: 200 }); }));
+    const [slack] = firstWaveTools({ slack: new SlackTransport() }).filter((d) => d.tool_id === "slack" && d.action === "notify");
+    const { gateway, key } = gatewayFor(slack!, "fake-token-for-test");
+    const k = key("slack");
+    const request = { identity: owner, tool_id: "slack", action: "notify", parameters: { channel: "C123", message: "hei" } as never, idempotency_key: k };
+    expect(await gateway.execute(request)).toEqual({ ok: false, reason: "tool_failed:slack_error_internal_error" });
+    expect((await ledger(k))?.status).toBe("failed");
+    expect(await gateway.execute(request)).toEqual({ ok: false, reason: "tool_failed:slack_error_internal_error" });
+    expect(posts).toBe(2); // KJENT GRENSE: begge forsøkene nådde Slack
+  }, 60_000);
+
+  it("L-2: en 2xx med `null`-kropp gir en vanlig TypeError ved nøstet property-lesing (github.comment_on_issue) -> `failed`, og replayet sender kommentaren en ANDRE gang", async () => {
+    let posts = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => { posts += 1; return new Response("null", { status: 200, headers: { "content-type": "application/json" } }); }));
+    const [comment] = firstWaveTools({ github: new GithubTransport() }).filter((d) => d.tool_id === "github" && d.action === "comment_on_issue");
+    const { gateway, key } = gatewayFor(comment!, "fake-token-for-test");
+    const k = key("gh-null");
+    const request = { identity: owner, tool_id: "github", action: "comment_on_issue", parameters: { repo: "acme/app", issue_number: "7", body: "hei" } as never, idempotency_key: k };
+    const first = await gateway.execute(request);
+    expect(first.ok).toBe(false);
+    expect((first as { reason: string }).reason).toMatch(/^tool_failed:Cannot read propert/);
+    expect((await ledger(k))?.status).toBe("failed");
+    await gateway.execute(request);
+    expect(posts).toBe(2); // KJENT GRENSE
+  }, 60_000);
+
+  it("L-3 (konservativ retning): en uforståelig 2xx-kropp fra et FØR-mutasjons-oppslag (ingen mutasjon sendt) gir likevel `unverified`, og replayet blokkeres", async () => {
+    let lookups = 0;
+    let mutations = 0;
+    const transport: ToolTransport = {
+      invoke: async () => {
+        lookups += 1; // trinn 1: oppslaget FØR mutasjonen ...
+        const found = await Promise.reject<string>(new ControlTargetHttpError("svc_invalid_response:non_json", 200, false)); // ... svarer 2xx med en kropp som ikke kan tolkes
+        mutations += 1; // trinn 2 (selve mutasjonen) nås aldri
+        return { external_id: found };
+      }
+    };
+    const { gateway, key } = gatewayFor(plainDef("m1b-l3", "create", transport), "fake-token-for-test");
+    const k = key("l3");
+    const request = { identity: owner, tool_id: "m1b-l3", action: "create", parameters: {} as never, idempotency_key: k };
+    expect(await gateway.execute(request)).toEqual({ ok: false, reason: "tool_failed:outcome_unknown:transport_response" });
+    expect((await ledger(k))?.status).toBe("unverified");
+    expect(await gateway.execute(request)).toEqual({ ok: false, reason: "postcondition_unverified:tool_timeout_outcome_unknown" });
+    expect(lookups).toBe(1); // replayet nådde aldri transporten
+    expect(mutations).toBe(0); // KJENT GRENSE: ingenting ble utført, men en ny nøkkel må brukes
+  }, 60_000);
 });
