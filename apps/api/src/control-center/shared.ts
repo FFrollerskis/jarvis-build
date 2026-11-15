@@ -2,7 +2,7 @@
 import type pg from "pg";
 import type { MemorySpace } from "@jarvis/contracts";
 import { scanForSecrets, withTenantTransaction } from "@jarvis/core";
-import { failureCategory, type ControlItem, type ControlRiskClass, type ControlStatus } from "@jarvis/executive";
+import { failureCategory, type ControlCenterId, type ControlItem, type ControlRiskClass, type ControlStatus } from "@jarvis/executive";
 import type { ToolGateway } from "@jarvis/tool-gateway";
 import { withMemoryTransaction } from "@jarvis/memory";
 
@@ -178,4 +178,24 @@ export function mergeBy<T>(rows: readonly T[], key: (row: T) => string, merge: (
 /** Strengt flagg: kun den eksakte verdien «on» slår en funksjon på (alt annet, også «true»/«1»/«ON», er AV - samme regel som JARVIS_KNOWLEDGE_CLAIM_WRITES). */
 export function flagOn(env: Readonly<Record<string, string | undefined>>, name: string): boolean {
   return env[name] === "on";
+}
+
+/**
+ * WP-H1/H2: flaggene som slår på kontrollsentrene som ble bygget etter H0. ALLE er AV som standard og krever den EKSAKTE verdien «on» (`flagOn`): uten flagg registreres senteret ikke, og står i oversiktens
+ * `unregistered`-liste («ikke koblet inn») akkurat som før H1 - H0-oppførselen er uendret. Integrasjoner, Autoritet og AI (H0) har ingen flagg og er alltid på når deres avhengigheter finnes.
+ * Objektet bor her (ikke i `register.ts`) slik at `main.ts` kan lese det uten å røre importlinjen fra fabrikken `register.ts` - den er låst av kildevakten i `e1-review-m3-owner-gate.test.ts`. `register.ts` re-eksporterer det.
+ * Hvert navn MÅ stå i `SERVICE_ENV.api` (`infra/local/service-env.mjs`), ellers når en verdi i `.env` aldri containeren - låst av `wph1-control-env.test.ts`.
+ */
+export const CONTROL_CENTER_FLAGS = {
+  finance: "JARVIS_CONTROL_CENTER_FINANCE",
+  memory: "JARVIS_CONTROL_CENTER_MEMORY",
+  agent: "JARVIS_CONTROL_CENTER_AGENT"
+} as const;
+
+/**
+ * Gjennomgang M1: sentrene hvis flagg er PÅ (eksakt «on»), i masterplanens rekkefølge. `main.ts` registrerer per-senter lese-verktøyene (`executive.get_<senter>_center`) KUN for disse - med alle flagg AV er
+ * verktøysettet, flatene og utvalget identisk med main.
+ */
+export function enabledControlCenters(env: Readonly<Record<string, string | undefined>>): ControlCenterId[] {
+  return (Object.keys(CONTROL_CENTER_FLAGS) as Array<keyof typeof CONTROL_CENTER_FLAGS>).filter((id) => flagOn(env, CONTROL_CENTER_FLAGS[id]));
 }

@@ -1,6 +1,6 @@
 import type { CapabilityClass } from "@jarvis/contracts";
 import type { ToolDefinition } from "./gateway.ts";
-import { CHAT_READ_TIER, CHAT_READ_TIER_KEYS } from "./chat-read-tier.ts";
+import { CHAT_READ_TIER, CHAT_READ_TIER_KEYS, OPTIONAL_TIER_KEYS } from "./chat-read-tier.ts";
 import { CHAT_DELEGATE_TIER, CHAT_DELEGATE_TIER_KEYS, DELEGATE_WRITE_KEYS } from "./chat-delegate-tier.ts";
 import { CHAT_ACT_TIER, CHAT_ACT_TIER_KEYS } from "./chat-act-tier.ts";
 
@@ -357,7 +357,8 @@ export function assertManifestInvariants(manifest: ToolManifest, options: { igno
   if (!options.ignoreUnregisteredGrants) {
     for (const surface of SURFACES) {
       for (const g of SURFACE_TOOL_GRANTS[surface]) {
-        if (!manifest.has(k(g.tool_id, g.action))) violations.push(`${k(g.tool_id, g.action)}: tildelt flate «${surface}» men ikke registrert`);
+        // Gjennomgang M1: kontrollsenter-lesetoolene registreres kun med flagget på (`OPTIONAL_TIER_KEYS`) - uregistrert er riktig når flagget er av.
+        if (!manifest.has(k(g.tool_id, g.action)) && !OPTIONAL_TIER_KEYS.has(k(g.tool_id, g.action))) violations.push(`${k(g.tool_id, g.action)}: tildelt flate «${surface}» men ikke registrert`);
       }
     }
   }

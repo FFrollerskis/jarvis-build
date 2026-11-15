@@ -9,7 +9,7 @@ import { createAuthorityCenter, type AuthorityCenterDeps } from "./authority.ts"
 import { createFinanceCenter } from "./finance.ts";
 import { createIntegrationCenter, type IntegrationCenterDeps } from "./integration.ts";
 import { createMemoryCenter } from "./memory.ts";
-import { flagOn, type ControlCenterPool } from "./shared.ts";
+import { CONTROL_CENTER_FLAGS, flagOn, type ControlCenterPool } from "./shared.ts";
 
 export type { ControlCenterPool } from "./shared.ts";
 
@@ -28,15 +28,8 @@ export function ownerPredicate(authority: AuthorityConfig): (identity: IdentityC
   return (identity) => resolveAuthorityMode(authority, identity) === "SOVEREIGN";
 }
 
-/**
- * WP-H1/H2: flaggene som slår på kontrollsentrene som ble bygget etter H0. ALLE er AV som standard og krever den EKSAKTE verdien «on» (`flagOn`): uten flagg registreres senteret ikke, og står i oversiktens
- * `unregistered`-liste («ikke koblet inn») akkurat som før H1 - H0-oppførselen er uendret. Integrasjoner, Autoritet og AI (H0) har ingen flagg og er alltid på når deres avhengigheter finnes.
- */
-export const CONTROL_CENTER_FLAGS = {
-  finance: "JARVIS_CONTROL_CENTER_FINANCE",
-  memory: "JARVIS_CONTROL_CENTER_MEMORY",
-  agent: "JARVIS_CONTROL_CENTER_AGENT"
-} as const;
+// Flaggobjektet (`CONTROL_CENTER_FLAGS`) bor i `shared.ts` og re-eksporteres her (se kommentaren der): `main.ts` leser det derfra, så importlinjen fra denne fabrikken forblir uendret.
+export { CONTROL_CENTER_FLAGS };
 
 /** Redigerer hemmeligheter i alle menneskelesbare strenger i en rapport (siste forsvarslinje). FAST: ikke en parameter noe sted. */
 const redactSecrets = (text: string): string => scanForSecrets(text).text;

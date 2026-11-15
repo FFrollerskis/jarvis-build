@@ -5,6 +5,7 @@ import { CONTROL_CENTER_READ_TOOLS, ExecutiveService, ExecutiveTransport, execut
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, type SecretProvider } from "@jarvis/tool-gateway";
 import { CONTROL_CENTER_FLAGS, createControlCenterRegistry, registerControlCenters } from "../src/control-center/register.ts";
+import { enabledControlCenters } from "../src/control-center/shared.ts";
 import { seedTenants, startH0Db, type H0Db } from "./support/h0-db.ts";
 
 /**
@@ -13,7 +14,7 @@ import { seedTenants, startH0Db, type H0Db } from "./support/h0-db.ts";
  *  - alle andre nektes av verktøyets port FØR noe bygges, med `tool.denied` i revisjonssporet; svak autentisering nektes med en tydelig årsak; kill switch stopper også lesingen;
  *  - FAIL-CLOSED uten register: per-senter-verktøyene er ikke åpne, i motsetning til get_control_center (H0);
  *  - en modell i løkka (servingModel) får aldri pengebeløp fra Finans; siden (ingen modell) får hele rapporten;
- *  - flaggene AV: sentrene er ikke koblet inn (`found: false`, `unregistered`), og H0-oppførselen er uendret; ingenting skrives (radtall uendret).
+ *  - gjennomgang M1: flaggene AV er identisk med main: per-senter-verktøyene er IKKE registrert (`unknown_tool`), `get_control_center` har main sin rate-grense, og H0-oppførselen er uendret; ingenting skrives (radtall uendret).
  */
 let db: H0Db;
 const TENANT_A = "tenant-cg-a";
@@ -33,15 +34,17 @@ let policy: PolicyGateway;
 let gateway: ToolGateway;
 let gatewayFlagsOff: ToolGateway;
 
+/** Samme kobling som `main.ts`: per-senter-verktøyene registreres KUN for sentrene med flagget på (`enabledControlCenters`). */
 function wire(env: Record<string, string | undefined>, withRegistry = true): ToolGateway {
   const g = new ToolGateway(db.appPool, policy, secrets);
   if (!withRegistry) {
-    for (const tool of executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(g)))) g.register(tool);
+    // Verktøyene er registrert (flaggene på) men registeret mangler: porten må feile lukket.
+    for (const tool of executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(g)), { controlCenters: enabledControlCenters(ALL_ON) })) g.register(tool);
     return g;
   }
   const registry = createControlCenterRegistry({ authority });
   registerControlCenters(registry, { pool: db.appPool, env, toolGateway: g });
-  for (const tool of executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(g, { controlCenters: registry })))) g.register(tool);
+  for (const tool of executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(g, { controlCenters: registry })), { controlCenters: enabledControlCenters(env) })) g.register(tool);
   return g;
 }
 const ALL_ON = { [CONTROL_CENTER_FLAGS.finance]: "on", [CONTROL_CENTER_FLAGS.memory]: "on", [CONTROL_CENTER_FLAGS.agent]: "on" };
@@ -164,7 +167,7 @@ describe("portene: kun den suverene eieren fra en signert enhetsøkt - og alt av
 });
 
 describe("hastighetsgrense", () => {
-  it("get_control_center tåler en full sideoppdatering to ganger (2 × (1 + 10) kall) - den gamle grensen på 30/min tålte det ikke; per-senter-verktøyene har fortsatt 30/min", async () => {
+  it("get_control_center tåler en full sideoppdatering to ganger (2 × (1 + 10) kall) når sentrene er på - den gamle grensen på 30/min tålte det ikke; per-senter-verktøyene har fortsatt 30/min", async () => {
     const g = wire(ALL_ON);
     let okCount = 0;
     for (let i = 0; i < 60; i += 1) if ((await get(g, owner, "get_control_center")).ok) okCount += 1;
@@ -180,18 +183,43 @@ describe("hastighetsgrense", () => {
   });
 });
 
-describe("flaggene AV: H0-oppførselen er uendret", () => {
-  it("sentrene er ikke koblet inn: `found: false` med en ærlig forklaring (aldri en tom «i orden»), og oversikten viser dem under «ikke koblet inn»", async () => {
+describe("gjennomgang M1: flaggene AV er identisk med main", () => {
+  it("per-senter-verktøyene er IKKE registrert: ingen `get_<senter>_center` finnes i gatewayens liste, og et kall gir `unknown_tool` (som før H1) - for eieren og alle andre", async () => {
+    const registered = gatewayFlagsOff.list().filter((d) => d.tool_id === "executive").map((d) => d.action);
     for (const tool of CONTROL_CENTER_READ_TOOLS) {
-      const r = await get(gatewayFlagsOff, owner, tool.action);
-      expect(r.ok).toBe(true);
-      expect(data(r)).toMatchObject({ found: false, center: tool.center });
-      expect(data(r).summary_no).toContain("ikke koblet inn");
+      expect(registered, tool.action).not.toContain(tool.action);
+      expect(await get(gatewayFlagsOff, owner, tool.action), tool.action).toEqual({ ok: false, reason: "unknown_tool" });
+      expect(await get(gatewayFlagsOff, idFor(MEMBER, TENANT_A), tool.action), `${tool.action} (medlem)`).toEqual({ ok: false, reason: "unknown_tool" });
     }
+    expect(registered).toContain("get_control_center"); // H0-verktøyet er der som før
+  });
+
+  it("kun flaggene som er på gir verktøy: Minne på alene registrerer `get_memory_center` og ingen av de to andre", async () => {
+    const g = wire({ [CONTROL_CENTER_FLAGS.memory]: "on" });
+    const registered = g.list().filter((d) => d.tool_id === "executive").map((d) => d.action);
+    expect(registered).toContain("get_memory_center");
+    expect(registered).not.toContain("get_finance_center");
+    expect(registered).not.toContain("get_agent_center");
+  });
+
+  it("`get_control_center` uten sentre på: ærlig `ikke koblet inn` med main sin ordlyd, oversikten viser alle som «ikke koblet inn», og hele svaret har main sin form", async () => {
+    const one = data(await get(gatewayFlagsOff, owner, "get_control_center", { center: "finance" }));
+    expect(one).toEqual({ found: false, center: "finance", summary_no: "Dette kontrollsenteret er ikke koblet inn ennå, så ingenting kan vurderes." });
     const overview = data(await get(gatewayFlagsOff, owner, "get_control_center")) as unknown as { centers: unknown[]; unregistered: string[]; status: string };
     expect(overview.centers).toEqual([]);
     expect(overview.unregistered).toEqual(expect.arrayContaining(["finance", "memory", "agent"]));
     expect(overview.status).toBe("UNKNOWN");
+    expect(Object.keys(overview)).toEqual(["summary_no", "generated_at", "status", "sensitivity", "centers", "unregistered"]);
+  });
+
+  it("rate-grensen på `get_control_center` er main sin (30/min) når ingen sentre er på - hevingen til 120/min er flaggstyrt", async () => {
+    const g = wire({});
+    let ok = 0;
+    for (let i = 0; i < 35; i += 1) if ((await get(g, owner, "get_control_center")).ok) ok += 1;
+    expect(ok).toBe(30);
+    expect(await get(g, owner, "get_control_center")).toEqual({ ok: false, reason: "rate_limited" });
+    expect(g.list().find((d) => d.tool_id === "executive" && d.action === "get_control_center")?.rate_limit_per_minute).toBe(30);
+    expect(gateway.list().find((d) => d.tool_id === "executive" && d.action === "get_control_center")?.rate_limit_per_minute).toBe(120);
   });
 });
 

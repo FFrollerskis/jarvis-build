@@ -8,7 +8,7 @@ import { GovernanceTransport, governanceToolDefinitions } from "@jarvis/governan
 import { OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
 import { SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";
 import {
-  CHAT_ACT_TIER, CHAT_DELEGATE_TIER, CHAT_READ_TIER, MODEL_SURFACE_ALLOWLIST, MemorySearchTransport, SURFACE_TOOL_GRANTS, assertChatReadTier, assertManifestInvariants, buildToolManifest,
+  CHAT_ACT_TIER, CHAT_DELEGATE_TIER, CHAT_READ_TIER, MODEL_SURFACE_ALLOWLIST, MemorySearchTransport, OPTIONAL_TIER_KEYS, SURFACE_TOOL_GRANTS, assertChatReadTier, assertManifestInvariants, buildToolManifest,
   KnowledgeSearchTransport, chatReadTierMeshTools, firstWaveTools, homeAssistantTools, inferEffect, knowledgeToolDefinitions, memoryToolDefinitions, resolveModelToolSurface, scopeFieldsOf, selectSurfaceTools,
   type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
@@ -25,12 +25,15 @@ const owner: IdentityContext = { person_id: "person-owner", tenant_id: "tenant-o
 const keyOf = (action: string): string => `executive.${action}`;
 const TOOLS = CONTROL_CENTER_READ_TOOLS;
 
-function productionDefinitions(registry?: ControlCenterRegistry): ToolDefinition[] {
+/** Alle sentrene med et eget lese-verktøy - i produksjon registreres verktøyene KUN for sentrene hvis flagg er på (`enabledControlCenters`, gjennomgang M1); testene under har dem alle på med mindre noe annet er sagt. */
+const ALL_CENTERS = TOOLS.map((t) => t.center);
+
+function productionDefinitions(registry?: ControlCenterRegistry, centers: ReadonlyArray<(typeof TOOLS)[number]["center"]> = ALL_CENTERS): ToolDefinition[] {
   const fakeGw = { list: () => [], health: new Map(), hasSecret: async () => true } as unknown as ToolGateway;
   return firstWaveTools({}, {
     additionalTools: [
       ...homeAssistantTools({ invoke: async () => ({}) } as never),
-      ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(fakeGw, registry ? { controlCenters: registry } : {}))),
+      ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(fakeGw, registry ? { controlCenters: registry } : {})), { controlCenters: centers }),
       ...ownerControlsToolDefinitions(new OwnerControlsTransport({} as never, fakeGw)),
       ...governanceToolDefinitions(new GovernanceTransport({} as never)),
       ...situationsToolDefinitions(new SituationsTransport({} as never, {} as never)),
@@ -66,6 +69,63 @@ describe("tabellen er den eneste kilden", () => {
   });
 });
 
+describe("gjennomgang M1: verktøyene registreres KUN for sentre med flagget på (flagg AV er identisk med main)", () => {
+  const actionsOf = (list: ToolDefinition[]): string[] => list.filter((d) => d.tool_id === "executive" && /_center$/.test(d.action)).map((d) => d.action).sort();
+  const rateOf = (list: ToolDefinition[], action: string): number | undefined => list.find((d) => d.tool_id === "executive" && d.action === action)?.rate_limit_per_minute;
+
+  it("ingen flagg på: INGEN `get_<senter>_center` finnes (kun H0-verktøyet `get_control_center`), og `get_control_center` har main sin rate-grense (30/min, arvet fra read())", () => {
+    const none = productionDefinitions(ownerOnly, []);
+    expect(actionsOf(none)).toEqual(["get_control_center"]);
+    expect(rateOf(none, "get_control_center")).toBe(30);
+    // utelatt valg = ingen sentre på (standard for alle eksisterende kallere)
+    const fakeGw = { list: () => [], health: new Map(), hasSecret: async () => true } as unknown as ToolGateway;
+    const defaults = executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(fakeGw)));
+    expect(actionsOf(defaults)).toEqual(["get_control_center"]);
+    expect(rateOf(defaults, "get_control_center")).toBe(30);
+  });
+
+  it("kun de slåtte-på sentrene får verktøy; rate-grensen på `get_control_center` heves (120/min) først når minst ett senter er på", () => {
+    const one = productionDefinitions(ownerOnly, ["memory"]);
+    expect(actionsOf(one)).toEqual(["get_control_center", "get_memory_center"]);
+    expect(rateOf(one, "get_control_center")).toBe(120);
+    expect(rateOf(one, "get_memory_center")).toBe(30);
+    expect(actionsOf(productionDefinitions(ownerOnly, ["finance", "agent"]))).toEqual(["get_agent_center", "get_control_center", "get_finance_center"]);
+  });
+
+  it("OPTIONAL_TIER_KEYS er nøyaktig nøklene til tabellen (ingen mer, ingen mindre) - og alle står i web-chattens lese-nivå", () => {
+    expect([...OPTIONAL_TIER_KEYS].sort()).toEqual(TOOLS.map((t) => keyOf(t.action)).sort());
+    for (const key of OPTIONAL_TIER_KEYS) expect(CHAT_READ_TIER.some((g) => `${g.tool_id}.${g.action}` === key), key).toBe(true);
+  });
+
+  it("oppstartsvaktene godtar at disse (og KUN disse) mangler: ingen flagg på → manifest, lese-nivå og modellflate er gyldige uten dem", () => {
+    const none = productionDefinitions(ownerOnly, []);
+    const noneGw = { list: () => none } as unknown as ToolGateway;
+    expect(() => assertManifestInvariants(buildToolManifest(none))).not.toThrow();
+    expect(() => assertChatReadTier(noneGw)).not.toThrow();
+    expect(() => resolveModelToolSurface(noneGw, { includeChatReadTier: true })).not.toThrow();
+    // ... men en ANNEN manglende lese-nøkkel feiler fortsatt (unntaket er smalt, ikke «alt som mangler er greit»)
+    const withoutSlo = none.filter((d) => !(d.tool_id === "executive" && d.action === "get_slo_report"));
+    expect(() => assertChatReadTier({ list: () => withoutSlo } as unknown as ToolGateway)).toThrow(/executive:get_slo_report: ikke registrert/);
+    expect(() => assertManifestInvariants(buildToolManifest(withoutSlo))).toThrow(/executive\.get_slo_report/);
+  });
+
+  it("er et av verktøyene registrert, kontrolleres det som alle andre: klasse B eller et skrive-lignende handlingsnavn stopper oppstarten", () => {
+    const base = productionDefinitions(ownerOnly, ["memory"]);
+    const tampered = base.map((d) => (d.tool_id === "executive" && d.action === "get_memory_center" ? { ...d, capability_class: "B" as const } : d));
+    expect(() => assertChatReadTier({ list: () => tampered } as unknown as ToolGateway)).toThrow(/executive:get_memory_center: klasse B/);
+  });
+
+  it("utvalg og lese-nivå ser aldri et uregistrert verktøy: flaten uten flagg har ingen av dem, og flaten med flagg har dem", () => {
+    const none = productionDefinitions(ownerOnly, []);
+    const on = productionDefinitions(ownerOnly, ALL_CENTERS);
+    const surfaceKeys = (list: ToolDefinition[]): string[] => resolveModelToolSurface({ list: () => list } as unknown as ToolGateway, { includeChatReadTier: true }).map((m) => `${m.tool_id}.${m.action}`);
+    for (const t of TOOLS) {
+      expect(surfaceKeys(none), t.action).not.toContain(keyOf(t.action));
+      expect(surfaceKeys(on), t.action).toContain(keyOf(t.action));
+    }
+  });
+});
+
 describe("registrering og risiko", () => {
   for (const t of TOOLS) {
     it(`${t.action}: klasse A, reversibel lesing, uten identitetsfelt, strengt og parameterløst skjema`, () => {
@@ -88,8 +148,7 @@ describe("registrering og risiko", () => {
     });
   }
 
-  it("Finans-beskrivelsen sier at beløp er utelatt til modellen; ingen verktøy har høyere rate-grense enn 30/min bortsett fra get_control_center (120/min - siden gjør 1 + antall sentre kall)", () => {
-    expect(defOf("get_finance_center").description).toContain("Beløp er utelatt");
+  it("ingen verktøy har høyere rate-grense enn 30/min bortsett fra get_control_center (120/min med sentre på - siden gjør 1 + antall sentre kall)", () => {
     for (const t of TOOLS) expect(defOf(t.action).rate_limit_per_minute, t.action).toBe(30);
     expect(defOf("get_control_center").rate_limit_per_minute).toBe(120);
   });

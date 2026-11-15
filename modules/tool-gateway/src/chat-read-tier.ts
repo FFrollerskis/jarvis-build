@@ -68,7 +68,8 @@ export const CHAT_READ_TIER: ReadonlyArray<{ readonly tool_id: string; readonly 
   { tool_id: "executive", action: "get_connector_status" },
   // WP-H0 (UA-11 Admin Control Center): eierens kontrollsentre (kun lesing; eier-kun port i verktøydefinisjonen, rapportene er merket private). Handlingene eieren kan ta peker på eksisterende ruter og står ikke på modellflaten.
   { tool_id: "executive", action: "get_control_center" },
-  // WP-H1 (UA-11): per-senter lese-verktøy for Finans, Minne og Agenter - SAMME register og samme eier + signert-økt-port (fail-closed), ikke på tale (VOICE_EXCLUDED_KEYS). Beløp fjernes fra svaret til modellen.
+  // WP-H1 (UA-11): per-senter lese-verktøy for Finans, Minne og Agenter - SAMME register og samme eier + signert-økt-port (fail-closed), ikke på tale (VOICE_EXCLUDED_KEYS). Registreres KUN med senterets flagg på
+  // (`OPTIONAL_TIER_KEYS`, gjennomgang M1): står flagget av, finnes verktøyet ikke - og da er flaten, utvalget og kapabilitetslisten identisk med main.
   { tool_id: "executive", action: "get_finance_center" },
   { tool_id: "executive", action: "get_memory_center" },
   { tool_id: "executive", action: "get_agent_center" },
@@ -213,6 +214,15 @@ export const CHAT_READ_TIER: ReadonlyArray<{ readonly tool_id: string; readonly 
   { tool_id: "vercel", action: "read_deployments" },
   { tool_id: "whatsapp", action: "get_phone_number_info" }
 ];
+
+/**
+ * WP-H1/H2 (gjennomgang M1): nøklene i lese-nivået som MÅ KUNNE mangle som registrert verktøy. Kontrollsenter-lesetoolene (`executive.get_<senter>_center`) registreres kun når eierens flagg for senteret er på;
+ * står flagget av, finnes verktøyet ikke - og da er oppførselen identisk med main (verktøyet kan ikke velges, kalles eller listes som tilgjengelig; intensjons-, prioritets- og lås-oppføringene i
+ * `turn-context.ts` slås bare opp for registrerte kandidater og er derfor uvirksomme - bevist mot main i `apps/api/test/wph1-flag-off-selection-baseline.test.ts`). Oppstartsvaktene (`assertChatReadTier`,
+ * `assertManifestInvariants`) godtar derfor at AKKURAT disse er uregistrert; er et av dem registrert, kontrolleres det som alle andre (klasse A, effekt read, flater, forbudte navn). Utvidelsen er en eksplisitt,
+ * endelig liste - aldri et unntak per kall.
+ */
+export const OPTIONAL_TIER_KEYS: ReadonlySet<string> = new Set(["executive.get_finance_center", "executive.get_memory_center", "executive.get_agent_center"]);
 
 /** `tool_id.action`-nøkler for rask oppslag. */
 export const CHAT_READ_TIER_KEYS: ReadonlySet<string> = new Set(CHAT_READ_TIER.map((g) => `${g.tool_id}.${g.action}`));

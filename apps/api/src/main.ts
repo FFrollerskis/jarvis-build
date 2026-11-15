@@ -139,6 +139,7 @@ import { createValueMeasurementSource } from "./value-source.ts";
 import { ChatJobs, MAX_ACTIVE_JOBS, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
 import { createControlCenterRegistry, ownerPredicate, registerControlCenters } from "./control-center/register.ts";
+import { enabledControlCenters } from "./control-center/shared.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { createOwnerControlsService } from "./provider-pause.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
@@ -1064,7 +1065,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
             killSwitchActive: async () => (await selfModelControls.getControlState()).kill_switch.active
           })
         }
-      }))),
+      })), {
+        // WP-H1/H2 (gjennomgang M1): per-senter lese-verktøyene (`get_<senter>_center`) registreres KUN for sentrene hvis flagg er på - flagg AV er identisk med main (ingen verktøy, ingen utvalgstreff, ingen rate-endring).
+        controlCenters: enabledControlCenters(process.env)
+      }),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten
       // av eier-autoritets-/session-grant-mønstrene i denne filen - IKKE en ny,
