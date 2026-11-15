@@ -19,8 +19,8 @@ function readSource(relativePath: string): string {
 
 const serverSource = readSource("../src/server.ts");
 
-describe("A: EXECUTIVE_MUTATE_ACTIONS inneholder NØYAKTIG de 15 executive.*-handlingene (12 + WP-H0 cancel_task + WP-H2 revoke_autonomy_binding og run_golden_suite)", () => {
-  it("inneholder alle 15 forventede handlinger, ingen flere, ingen færre", () => {
+describe("A: EXECUTIVE_MUTATE_ACTIONS inneholder NØYAKTIG de 13 executive.*-handlingene (12 + WP-H0 cancel_task) - main sin liste; de to WP-H2-handlingene står i EXECUTIVE_MUTATE_FLAGGED_ACTIONS (gjennomgang M1)", () => {
+  it("inneholder alle 13 forventede handlinger, ingen flere, ingen færre", () => {
     const match = serverSource.match(/const EXECUTIVE_MUTATE_ACTIONS = \[([\s\S]*?)\] as const;/);
     expect(match).not.toBeNull();
     const actions = (match?.[1] ?? "")
@@ -34,11 +34,24 @@ describe("A: EXECUTIVE_MUTATE_ACTIONS inneholder NØYAKTIG de 15 executive.*-han
         "freeze_connector", "unfreeze_connector",
         "revoke_credential", "restore_credential", "revoke_device",
         "enable_finance_kill_switch", "disable_finance_kill_switch",
-        "cancel_task",
-        // WP-H2: begge BARE tilgjengelige når verktøyet er registrert (egne flagg). `run_golden_suite` er den ENESTE lesende (klasse A) handlingen her - bevisst: den skal gjennom samme grant/step-up/revisjon som kontrollsenterets øvrige knapper.
-        "revoke_autonomy_binding", "run_golden_suite"
+        "cancel_task"
       ].sort()
     );
+  });
+
+  it("WP-H2 (gjennomgang M1): de to flaggstyrte handlingene står i EXECUTIVE_MUTATE_FLAGGED_ACTIONS, og ruten kjenner dem KUN når verktøyet er registrert (`gateway.get(\"executive\", navn)`) - ellers er de et ukjent navn som hos main", () => {
+    const match = serverSource.match(/export const EXECUTIVE_MUTATE_FLAGGED_ACTIONS = \[([\s\S]*?)\] as const;/);
+    expect(match).not.toBeNull();
+    const actions = (match?.[1] ?? "").split(",").map((s) => s.trim().replace(/"/g, "")).filter(Boolean);
+    expect(actions.sort()).toEqual(["revoke_autonomy_binding", "run_golden_suite"]);
+    const fn = serverSource.match(/function executiveMutateActionKnown\([\s\S]*?\n\}\n/);
+    expect(fn).not.toBeNull();
+    expect(fn?.[0]).toContain('gateway.get("executive", action) !== undefined');
+    const routeIdx = serverSource.indexOf('url.pathname === "/executive/mutate"');
+    const known = serverSource.indexOf("executiveMutateActionKnown(action, deps.executive.gateway)", routeIdx);
+    expect(known).toBeGreaterThan(routeIdx);
+    // allowlist-sjekken skjer FØR grantet løses og FØR noe utføres (samme rekkefølge som main)
+    expect(known).toBeLessThan(serverSource.indexOf("deps.executive.gateway.execute(", routeIdx));
   });
 
   it("ingen lese-handling (get_attention_queue/get_control_surface_status/get_connector_status/get_attention_item/get_pause_state/get_delegation_board/get_capability_status/get_finance_kill_switch) forekommer i EXECUTIVE_MUTATE_ACTIONS-blokken", () => {
