@@ -106,6 +106,17 @@ export function isNotFoundError(message: string): boolean {
 }
 
 /**
+ * Delta-review L-5: tekst fra et kall (en modellvalgt `idempotency_key`, en leverandørs `external_id`, `summary`) settes inn i EIER-meldingen. Et linjeskift i en slik verdi kunne forfalske linjer i meldingen («Klasse D-handling utført»,
+ * «Verktøy: …»), så kontrolltegn/linjeskift/Unicode-linjeseparatorer erstattes med mellomrom og lengden kuttes (`…` når den ble kuttet). KUN i meldingen: nøkkelen som brukes i ledgeren er aldri rørt.
+ */
+const MESSAGE_MAX_VALUE = 160;
+function oneLine(value: string, max = MESSAGE_MAX_VALUE): string {
+  // eslint-disable-next-line no-control-regex
+  const flat = value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").replace(/ {2,}/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/**
  * Standardvarsler: out-of-band via Telegram (`telegram.notify`, samme ToolGateway-styrte sendevei som resten av systemet).
  * `ready()` krever at bot-token OG eierens chat-id faktisk finnes - ellers er klasse D utilgjengelig (fail-closed).
  */
@@ -127,9 +138,9 @@ export function telegramClassDNotifier(deps: {
       const lines = [
         headline,
         `Verktøy: ${n.tool_id}.${n.action}`,
-        ...(n.summary ? [`Gjelder: ${n.summary}`] : []),
-        n.external_id ? `Ekstern ID: ${n.external_id}` : "Ekstern ID: (ingen)",
-        `Referanse: ${n.idempotency_key}`,
+        ...(n.summary ? [`Gjelder: ${oneLine(n.summary)}`] : []),
+        n.external_id ? `Ekstern ID: ${oneLine(n.external_id)}` : "Ekstern ID: (ingen)",
+        `Referanse: ${oneLine(n.idempotency_key)}`,
         `Gjenoppretting: ${n.recovery}`
       ];
       const result = await deps.execute({
