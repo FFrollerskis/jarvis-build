@@ -15,7 +15,7 @@ import {
 import { TasksDelegateTransport, tasksDelegateToolDefinitions } from "../src/chat-jobs.ts";
 import { createControlCenterRegistry } from "../src/control-center/register.ts";
 import { RunRateTransport, runRateToolDefinitions } from "../src/run-rate.ts";
-import { EXECUTIVE_MUTATE_ACTIONS } from "../src/server.ts";
+import { EXECUTIVE_MUTATE_ACTIONS, EXECUTIVE_MUTATE_FLAGGED_ACTIONS } from "../src/server.ts";
 import { STEP_UP_EXEMPT_ACTIONS, actionRequiresStepUp, stepUpDenial } from "../src/step-up.ts";
 
 /**
@@ -27,6 +27,8 @@ const owner: IdentityContext = { person_id: "person-owner", tenant_id: "tenant-o
 const keyOf = (action: string): string => `executive.${action}`;
 const H2_ACTIONS = ["get_operations_center", "get_value_center", "get_privacy_center", "get_security_center"] as const;
 const ownerOnly = createControlCenterRegistry({ authority: { owner_person_id: "person-owner", owner_tenants: ["tenant-owner"] } });
+/** Gjennomgang M1: per-senter-verktøyene registreres kun for sentre med flagg på (`controlCentersWithTools` i main.ts) - disse testene har alle sju sentrene på; de to funksjonsflaggene styres av `options`. */
+const ALL_CENTERS: ControlCenterId[] = CONTROL_CENTER_READ_TOOLS.map((t) => t.center);
 
 /** De reelle definisjonene produksjonen registrerer (samme sammensetning som wph1-control-tools.test.ts), med de to flaggstyrte executive-handlingene av/på. */
 function productionDefinitions(options: Parameters<typeof executiveToolDefinitions>[1] = {}): ToolDefinition[] {
@@ -34,7 +36,7 @@ function productionDefinitions(options: Parameters<typeof executiveToolDefinitio
   return firstWaveTools({}, {
     additionalTools: [
       ...homeAssistantTools({ invoke: async () => ({}) } as never),
-      ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(fakeGw, { controlCenters: ownerOnly })), options),
+      ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(fakeGw, { controlCenters: ownerOnly })), { controlCenters: ALL_CENTERS, ...options }),
       ...ownerControlsToolDefinitions(new OwnerControlsTransport({} as never, fakeGw)),
       ...governanceToolDefinitions(new GovernanceTransport({} as never)),
       ...situationsToolDefinitions(new SituationsTransport({} as never, {} as never)),
@@ -52,7 +54,7 @@ const find = (list: ToolDefinition[], action: string): ToolDefinition | undefine
 /** `registry: null` = ingen register i tjenesten (fail-closed-sjekken); utelatt = eier-registeret. (`undefined` ville falt tilbake til standardverdien.) */
 function withRegistry(options: Parameters<typeof executiveToolDefinitions>[1] = {}, registry: ControlCenterRegistry | null = ownerOnly): ToolDefinition[] {
   const fakeGw = { list: () => [], health: new Map(), hasSecret: async () => true } as unknown as ToolGateway;
-  return executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(fakeGw, registry ? { controlCenters: registry } : {})), options);
+  return executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(fakeGw, registry ? { controlCenters: registry } : {})), { controlCenters: ALL_CENTERS, ...options });
 }
 
 describe("tabellen: syv verktøy, de fire nye bakerst", () => {
@@ -82,10 +84,10 @@ describe("tabellen: syv verktøy, de fire nye bakerst", () => {
 });
 
 describe("manifest og modellflate for de fire nye", () => {
-  it("sensitivitet: alle fire er `private` (eierens konfigurasjonsmetadata), og kun Finans er `restricted`", () => {
+  it("sensitivitet: Drift, Personvern og Sikkerhet er `private` (eierens konfigurasjonsmetadata); Finans og Verdi er `restricted` (gjennomgang M2: Verdi viser AI-kostnad i øre - strengeste regel inntil eieren har avgjort noe annet)", () => {
     const manifest = buildToolManifest(defsOff);
-    for (const a of H2_ACTIONS) expect(manifest.get(keyOf(a))?.sensitivity, a).toBe("private");
-    expect(manifest.get(keyOf("get_finance_center"))?.sensitivity).toBe("restricted");
+    for (const a of ["get_operations_center", "get_privacy_center", "get_security_center"]) expect(manifest.get(keyOf(a))?.sensitivity, a).toBe("private");
+    for (const a of ["get_finance_center", "get_value_center"]) expect(manifest.get(keyOf(a))?.sensitivity, a).toBe("restricted");
   });
 
   it("står kun på web_chat (lese-nivået), aldri på tale/Telegram/bakgrunn/koding og ikke i det minimale, handlings- eller delegeringsnivået", () => {
@@ -146,9 +148,10 @@ describe("utvalg per melding", () => {
     }
   });
 
-  it("småprat og urelaterte meldinger får ingen av de fire; ingen av dem låser turen lokalt (kun Finans gjør det)", () => {
+  it("småprat og urelaterte meldinger får ingen av de fire; kun Verdi (som Finans) låser turen lokalt (SECRET_RESTRICTED) - Drift, Personvern og Sikkerhet gjør det ikke", () => {
     for (const msg of ["hei", "hva er klokka", "snakk om været", "hvem er kunden min", "hva husker du om meg"]) for (const a of H2_ACTIONS) expect(keys(msg), `${msg} → ${a}`).not.toContain(keyOf(a));
-    for (const msg of ["vis driftssenteret", "vis verdisenteret", "vis personvernsenteret", "vis sikkerhetssenteret"]) expect(picked(msg).min_sensitivity, msg).toBeUndefined();
+    for (const msg of ["vis driftssenteret", "vis personvernsenteret", "vis sikkerhetssenteret"]) expect(picked(msg).min_sensitivity, msg).toBeUndefined();
+    for (const msg of ["vis verdisenteret", "hvor mye spart tid har jeg", "hva er bruksfrekvens"]) expect(picked(msg).min_sensitivity, msg).toBe("SECRET_RESTRICTED");
   });
 
   it("en stemmeflate får aldri noen av dem, uansett hva som sies", () => {
@@ -186,9 +189,9 @@ describe("de to flaggstyrte executive-handlingene: finnes kun med flagg", () => 
     expect(def.description).toMatch(/Ingen modell kalles, ingenting skrives/);
   });
 
-  it("revoke_autonomy_binding: klasse C, effekt control, KAN IKKE ANGRES, kun `domain` (1-100 tegn) uten identitetsfelt, 30 kall/min", () => {
+  it("revoke_autonomy_binding: klasse C, effekt control, KAN IKKE ANGRES, step-up i gatewayen, kun `domain` (1-100 tegn) uten identitetsfelt, 30 kall/min", () => {
     const def = find(defsOn, "revoke_autonomy_binding")!;
-    expect(def).toMatchObject({ capability_class: "C", reversible: false, rate_limit_per_minute: 30 });
+    expect(def).toMatchObject({ capability_class: "C", reversible: false, rate_limit_per_minute: 30, step_up_required: true }); // L1: step-up også på gateway-nivå
     expect(inferEffect("executive", "revoke_autonomy_binding")).toBe("control");
     expect(scopeFieldsOf(def)).toEqual([]);
     const parse = (p: Record<string, unknown>) => def.input_schema.safeParse(p).success;
@@ -196,7 +199,7 @@ describe("de to flaggstyrte executive-handlingene: finnes kun med flagg", () => 
     for (const bad of [{}, { domain: "" }, { domain: "x".repeat(101) }, { domain: 5 }, { domain: "p", tenant_id: "andre" }, { domain: "p", actor_person_id: "x" }, { domain: "p", memory_space: "business" }, { domain: "p", tool_id: "t" }, { domains: ["a"] }]) {
       expect(parse(bad), JSON.stringify(bad)).toBe(false);
     }
-    expect(def.rollback_procedure).toMatch(/lagres ikke/);
+    expect(def.rollback_procedure).toMatch(/autonomy_binding\.revoke_requested/); // før-bildet i revisjonsraden (L1)
   });
 
   it("portene: golden-suite = eier + signert økt (som kontrollsentrene), tilbakekall = eier - og begge er FAIL-CLOSED uten register", () => {
@@ -224,10 +227,11 @@ describe("de to flaggstyrte executive-handlingene: finnes kun med flagg", () => 
 });
 
 describe("kontrakten: ruten, allowlisten og step-up", () => {
-  it("de to nye handlingene står i den lukkede mutasjonslisten, og kontraktens allowlist speiler ruten NØYAKTIG (15 handlinger)", () => {
-    expect([...EXECUTIVE_MUTATE_ACTIONS].sort()).toEqual([...(CONTROL_ACTION_ALLOWED["/executive/mutate"] ?? [])].sort());
-    expect(EXECUTIVE_MUTATE_ACTIONS).toHaveLength(15);
-    for (const a of ["revoke_autonomy_binding", "run_golden_suite"]) expect(EXECUTIVE_MUTATE_ACTIONS).toContain(a);
+  it("de to nye handlingene står i den FLAGGSTYRTE listen (ikke i main sin allowliste på 13), og kontraktens allowlist speiler rutens kjente navn NØYAKTIG (13 + 2 = 15)", () => {
+    expect(EXECUTIVE_MUTATE_ACTIONS).toHaveLength(13);
+    expect([...EXECUTIVE_MUTATE_FLAGGED_ACTIONS].sort()).toEqual(["revoke_autonomy_binding", "run_golden_suite"]);
+    expect([...EXECUTIVE_MUTATE_ACTIONS, ...EXECUTIVE_MUTATE_FLAGGED_ACTIONS].sort()).toEqual([...(CONTROL_ACTION_ALLOWED["/executive/mutate"] ?? [])].sort());
+    for (const a of EXECUTIVE_MUTATE_FLAGGED_ACTIONS) expect(EXECUTIVE_MUTATE_ACTIONS as readonly string[]).not.toContain(a);
   });
 
   it("begge KREVER step-up (signert enhet fra en eier-kanal): ikke unntatt, og passiv/Telegram/tale nektes av ruten", () => {
@@ -242,7 +246,7 @@ describe("kontrakten: ruten, allowlisten og step-up", () => {
 
   it("run_golden_suite er den ENESTE lesende (klasse A) handlingen i mutasjonslisten; alle andre er B, C eller D", () => {
     const classOf = (action: string): string => find(defsOn, action)!.capability_class;
-    const readOnes = EXECUTIVE_MUTATE_ACTIONS.filter((a) => classOf(a) === "A");
+    const readOnes = [...EXECUTIVE_MUTATE_ACTIONS, ...EXECUTIVE_MUTATE_FLAGGED_ACTIONS].filter((a) => classOf(a) === "A");
     expect(readOnes).toEqual(["run_golden_suite"]);
     expect(classOf("revoke_autonomy_binding")).toBe("C");
   });
@@ -256,15 +260,28 @@ const result = (over: Partial<GoldenSuiteRunResult> = {}): GoldenSuiteRunResult 
   skipped: [], red_team: [], hard_stop: false, uncovered: [], surface_available: true, model_calls: 0, ...over
 });
 
-function transportWith(opts: { golden?: GoldenSuiteControl; centers?: ControlCenterDefinition[]; execute?: (req: { tool_id: string; action: string; parameters: Record<string, unknown>; identity: IdentityContext }) => Promise<ToolResult> } = {}) {
+function transportWith(opts: {
+  golden?: GoldenSuiteControl; centers?: ControlCenterDefinition[]; servedLocally?: (model: { provider: string; model: string }) => boolean; noAudit?: boolean;
+  execute?: (req: { tool_id: string; action: string; parameters: Record<string, unknown>; identity: IdentityContext }) => Promise<ToolResult>;
+} = {}) {
   const registry = createControlCenterRegistry({ authority: { owner_person_id: "person-owner", owner_tenants: ["tenant-owner"] } });
   for (const c of opts.centers ?? []) registry.register(c);
   const calls: Array<{ tool_id: string; action: string; parameters: Record<string, unknown>; identity: IdentityContext }> = [];
+  const audits: Array<{ type: string; tool_id: string; action: string; payload: Record<string, unknown> }> = [];
   const gw = {
     list: () => [], health: new Map(), hasSecret: async () => true,
-    execute: async (req: { tool_id: string; action: string; parameters: Record<string, unknown>; identity: IdentityContext }) => { calls.push(req); return opts.execute ? opts.execute(req) : ({ ok: true, data: { removed: true } } as unknown as ToolResult); }
+    execute: async (req: { tool_id: string; action: string; parameters: Record<string, unknown>; identity: IdentityContext }) => {
+      calls.push(req);
+      if (opts.execute) return opts.execute(req);
+      // L1: tilbakekallet leser FØRST før-bildet (`list_autonomy_policies`), skriver revisjonsraden og sletter så (`clear_autonomy_policy`)
+      return (req.action === "list_autonomy_policies" ? { ok: true, data: [] } : { ok: true, data: { removed: true } }) as unknown as ToolResult;
+    }
   } as unknown as ToolGateway;
-  return { transport: new ExecutiveTransport(new ExecutiveService(gw, { controlCenters: registry, ...(opts.golden ? { goldenSuite: opts.golden } : {}) })), calls };
+  const autonomyAudit = async (_identity: IdentityContext, entry: { type: string; tool_id: string; action: string; payload: Record<string, unknown> }): Promise<void> => { audits.push(entry); };
+  const service = new ExecutiveService(gw, {
+    controlCenters: registry, ...(opts.golden ? { goldenSuite: opts.golden } : {}), ...(opts.servedLocally ? { servedLocally: opts.servedLocally } : {}), ...(opts.noAudit === true ? {} : { autonomyAudit })
+  });
+  return { transport: new ExecutiveTransport(service), calls, audits };
 }
 const run = (t: ExecutiveTransport, action: string, params: Record<string, string> = {}) => t.invoke(action, params, "cred", { identity: owner } as never);
 
@@ -291,22 +308,33 @@ describe("transporten: run_golden_suite", () => {
 });
 
 describe("transporten: revoke_autonomy_binding", () => {
-  it("er et rent gjennomslag til situations.clear_autonomy_policy med UENDRET identitet og kun domenet som parameter (aldri tenant/rom/aktør)", async () => {
-    const { transport, calls } = transportWith();
+  it("sletter via situations.clear_autonomy_policy med UENDRET identitet og kun domenet som parameter (aldri tenant/rom/aktør) - etter at før-bildet er lest (L1)", async () => {
+    const { transport, calls, audits } = transportWith();
     const out = await run(transport, "revoke_autonomy_binding", { domain: "pipeline" });
-    expect(calls).toEqual([{ identity: owner, tool_id: "situations", action: "clear_autonomy_policy", parameters: { domain: "pipeline" } }]);
+    expect(calls).toEqual([
+      { identity: owner, tool_id: "situations", action: "list_autonomy_policies", parameters: {} },
+      { identity: owner, tool_id: "situations", action: "clear_autonomy_policy", parameters: { domain: "pipeline" } }
+    ]);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({ type: "autonomy_binding.revoke_requested", tool_id: "executive", action: "revoke_autonomy_binding" });
     expect(out.external_id).toBe("tenant-owner:personal:pipeline");
     expect(out.data).toEqual({ removed: true, domain: "pipeline", memory_space: "personal" });
   });
 
   it("ingen binding å fjerne er ikke en feil, men svaret sier removed:false (idempotent: domenet er allerede på strengeste nivå)", async () => {
-    const { transport } = transportWith({ execute: async () => ({ ok: true, data: { removed: false } }) as unknown as ToolResult });
+    const { transport } = transportWith({ execute: async (req) => (req.action === "list_autonomy_policies" ? { ok: true, data: [] } : { ok: true, data: { removed: false } }) as unknown as ToolResult });
     expect((await run(transport, "revoke_autonomy_binding", { domain: "pipeline" })).data).toMatchObject({ removed: false });
   });
 
   it("et avslag fra det nøstede kallet (policy/sovereign-port/kill switch) forplanter seg som en feil med SAMME årsak - aldri en stille ok", async () => {
-    const { transport } = transportWith({ execute: async () => ({ ok: false, reason: "situation_autonomy_unauthorized" }) });
+    const { transport } = transportWith({ execute: async (req) => (req.action === "list_autonomy_policies" ? { ok: true, data: [] } : { ok: false, reason: "situation_autonomy_unauthorized" }) as unknown as ToolResult });
     await expect(run(transport, "revoke_autonomy_binding", { domain: "pipeline" })).rejects.toThrow("situation_autonomy_unauthorized");
+  });
+
+  it("uten revisjonsskriver (ikke koblet inn) feiler tilbakekallet lukket: ingenting leses eller slettes", async () => {
+    const { transport, calls } = transportWith({ noAudit: true });
+    await expect(run(transport, "revoke_autonomy_binding", { domain: "pipeline" })).rejects.toThrow("autonomy_audit_not_configured");
+    expect(calls).toEqual([]);
   });
 
   it("manglende domene avvises før noe kalles", async () => {
@@ -332,16 +360,25 @@ describe("transporten: de fire nye senterverktøyene", () => {
     }
   });
 
-  it("koblet inn: samme rapport som get_control_center {center}; pengebeløp (`*_ore`) fjernes KUN for Finans - de fire nye er uendret også med en modell i løkka", async () => {
-    const t = transportWith({ centers: [center("operations"), center("value"), center("privacy"), center("security")] }).transport;
+  it("koblet inn: samme rapport som get_control_center {center}; med en SKYmodell i løkka holdes Verdi tilbake HELT (gjennomgang M2: AI-kostnad i øre) mens Drift, Personvern og Sikkerhet er uendret; en LOKAL modell og siden får alt", async () => {
+    const t = transportWith({ centers: [center("operations"), center("value"), center("privacy"), center("security")], servedLocally: (m) => m.provider === "gemma_local" }).transport;
     for (const a of H2_ACTIONS) {
       const id = controlCenterForReadAction(a) as ControlCenterId;
       const viaTool = (await run(t, a)).data as unknown as Data;
       const viaCenter = (await run(t, "get_control_center", { center: id })).data as unknown as Data;
       expect(viaTool.found).toBe(true);
       expect(viaTool.report?.sections).toEqual(viaCenter.report?.sections);
-      const withModel = (await t.invoke(a, {}, "cred", { identity: owner, servingModel: { provider: "anthropic", model: "x" } } as never)).data as unknown as Data;
-      expect(withModel.report?.sections[0]?.items[0]?.facts, a).toMatchObject({ amount_ore: 5 });
+      const cloud = (await t.invoke(a, {}, "cred", { identity: owner, servingModel: { provider: "anthropic", model: "x" } } as never)).data as unknown as Data & { withheld?: boolean };
+      const local = (await t.invoke(a, {}, "cred", { identity: owner, servingModel: { provider: "gemma_local", model: "x" } } as never)).data as unknown as Data;
+      expect(local.report?.sections[0]?.items[0]?.facts, `${a} lokal`).toMatchObject({ amount_ore: 5 });
+      if (id === "value") {
+        expect(cloud, `${a} sky`).toMatchObject({ found: true, withheld: true, center: "value" });
+        expect(cloud.report, a).toBeUndefined();
+        expect(JSON.stringify(cloud)).not.toContain("amount_ore");
+        expect(cloud.summary_no).toContain("AI-kostnad i øre");
+      } else {
+        expect(cloud.report?.sections[0]?.items[0]?.facts, `${a} sky`).toMatchObject({ amount_ore: 5 });
+      }
     }
   });
 });

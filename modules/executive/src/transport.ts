@@ -40,10 +40,12 @@ export class ExecutiveTransport implements ToolTransport {
    * i løkka) får hele rapporten. Håndhevingen skjer HER, ved utførelse, uavhengig av hvilke verktøy utvalget valgte for turen.
    */
   private async centerResponse(identity: Parameters<ExecutiveService["getControlCenterReport"]>[0], center: string, servingModel: ToolInvocationContext["servingModel"]): Promise<{ data: JsonValue }> {
-    if (isCloudWithheldCenter(center) && this.service.isCloudServed(servingModel) && this.service.hasControlCenter(center)) {
+    const cloud = this.service.isCloudServed(servingModel);
+    if (isCloudWithheldCenter(center) && cloud && this.service.hasControlCenter(center)) {
       return { data: withheldCenterData(center as ControlCenterId, CONTROL_CENTER_TITLES_NO[center as ControlCenterId]) as unknown as JsonValue };
     }
-    const result = await this.service.getControlCenterReport(identity, center);
+    // M2 (H2): for en SKYmodell bygges de øvrige sentrene uten finansavledet tilstand (`restrictFinance`, f.eks. finans-nødbryteren i Sikkerhet og finansjobbene i Drift); lokal modell og siden får alt.
+    const result = await this.service.getControlCenterReport(identity, center, cloud ? { restrictFinance: true } : {});
     if (result === null) {
       return { data: { found: false, center, summary_no: "Dette kontrollsenteret er ikke koblet inn ennå, så ingenting kan vurderes." } as unknown as JsonValue };
     }
@@ -131,7 +133,7 @@ export class ExecutiveTransport implements ToolTransport {
         // IKKE et kastet unntak, som ToolGateway ellers ville tolket som at hele executive-verktøyet er utilgjengelig (helse).
         const center = parameters["center"];
         if (center === undefined) {
-          const overview = await this.service.getControlCenterOverview(identity, this.service.isCloudServed(context?.servingModel) ? { withhold: CLOUD_WITHHELD_CENTERS } : {});
+          const overview = await this.service.getControlCenterOverview(identity, this.service.isCloudServed(context?.servingModel) ? { withhold: CLOUD_WITHHELD_CENTERS, restrictFinance: true } : {});
           const { summary_no, ...rest } = overview;
           return { data: { summary_no, ...rest } as unknown as JsonValue }; // `summary_no` først (se under)
         }

@@ -52,6 +52,8 @@ function wire(env: Record<string, string | undefined>, withRegistry = true): Too
   return g;
 }
 const ALL_ON = { [CONTROL_CENTER_FLAGS.finance]: "on", [CONTROL_CENTER_FLAGS.memory]: "on", [CONTROL_CENTER_FLAGS.agent]: "on" };
+/** H1-sentrene (ALL_ON slår kun dem på); de fire H2-sentrene (Drift/Verdi/Personvern/Sikkerhet) er dekket av wph2-control-gateway-db.test.ts - der alle flagg er på. */
+const H1_TOOLS = CONTROL_CENTER_READ_TOOLS.filter((t) => ["finance", "memory", "agent"].includes(t.center));
 const CLOUD = { provider: "anthropic", model: "claude-test" };
 const LOCAL = { provider: "gemma_local", model: "gemma-local" };
 
@@ -89,7 +91,7 @@ afterAll(async () => { await db?.stop(); }, 120_000);
 
 describe("eieren får rapportene (flaggene PÅ)", () => {
   // H1-sentrene (ALL_ON slår kun dem på); de fire H2-sentrene er dekket av wph2-control-gateway-db.test.ts med alle flagg.
-  for (const tool of CONTROL_CENTER_READ_TOOLS.filter((t) => ["finance", "memory", "agent"].includes(t.center))) {
+  for (const tool of H1_TOOLS) {
     it(`${tool.action}: ok, funnet, målt - og identisk innhold som get_control_center {center: "${tool.center}"}`, async () => {
       const viaTool = await get(gateway, owner, tool.action);
       expect(viaTool.ok).toBe(true);
@@ -151,7 +153,7 @@ describe("gjennomgang M2: finansdata (SECRET_RESTRICTED, D-378) når aldri en sk
     expect(overview.summary_no).toContain("Holdt tilbake fra denne modellen");
     assertNoFinanceData(overview, "oversikt");
     // Minne og Agenter er IKKE holdt tilbake for skyen (de er `private`, ikke `SECRET_RESTRICTED`)
-    for (const tool of CONTROL_CENTER_READ_TOOLS.filter((t) => t.center !== "finance")) {
+    for (const tool of H1_TOOLS.filter((t) => t.center !== "finance")) {
       expect(data(await get(gateway, owner, tool.action, {}, CLOUD)).report?.center, tool.action).toBe(tool.center);
     }
   });
@@ -214,7 +216,7 @@ describe("portene: kun den suverene eieren fra en signert enhetsøkt - og alt av
     ["eieren, aktiv økt uten enhetssignatur", idFor(OWNER, TENANT_A, { auth_strength: "active" }), "control_center_requires_signed_device_session"]
   ];
 
-  for (const tool of CONTROL_CENTER_READ_TOOLS) {
+  for (const tool of H1_TOOLS) {
     it(`${tool.action}: nektes for ${CASES.length} identitetskategorier med riktig årsak, og hver nekting står som tool.denied i revisjonssporet`, async () => {
       const before = (await deniedRows(tool.action)).length;
       for (const [label, identity, reason] of CASES) expect(await get(gateway, identity, tool.action), label).toEqual({ ok: false, reason });
@@ -226,7 +228,7 @@ describe("portene: kun den suverene eieren fra en signert enhetsøkt - og alt av
 
   it("FAIL-CLOSED uten register: per-senter-verktøyene er ikke åpne for noen (selv ikke eieren), mens get_control_center slipper gjennom med en tom oversikt (H0)", async () => {
     const bare = wire({}, false);
-    for (const tool of CONTROL_CENTER_READ_TOOLS) expect(await get(bare, owner, tool.action), tool.action).toEqual({ ok: false, reason: "control_center_owner_check_not_configured" });
+    for (const tool of H1_TOOLS) expect(await get(bare, owner, tool.action), tool.action).toEqual({ ok: false, reason: "control_center_owner_check_not_configured" });
     const overview = await get(bare, owner, "get_control_center");
     expect(overview.ok).toBe(true);
   });
@@ -234,7 +236,7 @@ describe("portene: kun den suverene eieren fra en signert enhetsøkt - og alt av
   it("kill switch stopper også disse lesingene (de står ikke på selvgjenopprettingslisten)", async () => {
     killSwitch.activate("wph1-test");
     try {
-      for (const tool of CONTROL_CENTER_READ_TOOLS) expect(await get(gateway, owner, tool.action), tool.action).toMatchObject({ ok: false, reason: expect.stringContaining("kill_switch") });
+      for (const tool of H1_TOOLS) expect(await get(gateway, owner, tool.action), tool.action).toMatchObject({ ok: false, reason: expect.stringContaining("kill_switch") });
     } finally {
       killSwitch.deactivate();
     }
@@ -302,7 +304,7 @@ describe("gjennomgang M1: flaggene AV er identisk med main", () => {
 describe("kun lesing", () => {
   it("radtall i tasks, payment_intents, memory_items og owner_control_state er uendret etter alle kallene over", async () => {
     const before = await counts();
-    for (const tool of CONTROL_CENTER_READ_TOOLS) await get(gateway, owner, tool.action);
+    for (const tool of H1_TOOLS) await get(gateway, owner, tool.action);
     await get(gateway, owner, "get_control_center");
     expect(await counts()).toEqual(before);
   });

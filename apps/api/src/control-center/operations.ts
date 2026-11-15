@@ -6,7 +6,7 @@ import {
 import { observeBackupStatus, type BackupStatusRead, type BackupStatusSnapshot } from "../backup-status.ts";
 import { JOB_WINDOW_DAYS, jobState, type JobRow } from "./integration.ts";
 import {
-  DAY_MS, NON_HEALTH_SPACES, bySeverityThenLabel, countsNo, globalRows, relativeNo, safeCategory, settle, tenantRead, tenantSpaceRead, toInt, toIso,
+  DAY_MS, NON_HEALTH_SPACES, bySeverityThenLabel, countsNo, globalRows, isFinanceJobName, relativeNo, safeCategory, settle, tenantRead, tenantSpaceRead, toInt, toIso,
   type ControlCenterPool, type Settled
 } from "./shared.ts";
 
@@ -379,7 +379,8 @@ export function createOperationsCenter(deps: OperationsCenterDeps): ControlCente
       // 7. Planlagte jobber
       // -------------------------------------------------------------------------------------------------------------------------------------------
       if (jobsR.ok) {
-        const rows = jobsR.value;
+        // Gjennomgang M2 (H2): går rapporten til en SKYmodell (`restrictFinance`), utelates finansdomenets daglige jobber (navn og tilstand er finansavledet) - FØR seksjonen bygges, så tellinger og sammendrag ikke bærer dem.
+        const rows = ctx.restrictFinance === true ? jobsR.value.filter((row) => !isFinanceJobName(row.job_name)) : jobsR.value;
         const items: ControlItem[] = rows.map((row) => {
           const st = jobState(row, nowMs);
           return controlItem({

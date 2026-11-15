@@ -7,8 +7,11 @@ import {
 } from "@jarvis/executive";
 import { InMemoryDeviceRegistry, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, type SecretProvider } from "@jarvis/tool-gateway";
+import { servedByCloudModel } from "../src/cloud-tool-screen.ts";
+import { createAutonomyAudit } from "../src/autonomy-audit.ts";
 import { createGoldenSuiteRunner } from "../src/golden-suite-runner.ts";
 import { CONTROL_CENTER_FLAGS, CONTROL_FEATURE_FLAGS, createControlCenterRegistry, registerControlCenters } from "../src/control-center/register.ts";
+import { controlCentersWithTools, flagOn } from "../src/control-center/shared.ts";
 import { PRODUCTION_SURFACE } from "./support/fast-path-harness.ts";
 import { seedTenants, startH0Db, type H0Db } from "./support/h0-db.ts";
 
@@ -18,7 +21,9 @@ import { seedTenants, startH0Db, type H0Db } from "./support/h0-db.ts";
  *  - alle andre nektes av verktøyets port FØR noe bygges, med `tool.denied` i revisjonssporet;
  *  - tenant-isolasjon i sluttrapportene måles mot databasens egne tall (A sine avslag, ikke B sine);
  *  - hvert flagg slår på kun sitt senter, og et senter uten sine avhengigheter er ærlig «ikke koblet inn»; flaggene AV: alt som i H0;
- *  - en modell i løkka (servingModel) får de samme rapportene (ingen penger her å fjerne - Verdi bruker de samme tallene som get_value_report), og ingenting skrives.
+ *  - gjennomgang M1: per-senter-verktøyene registreres KUN for sentre med flagg på (og registrert i registeret) - et flagg AV gir `unknown_tool`, aldri et verktøy som sier «ikke koblet inn»;
+ *  - gjennomgang M2: en SKYmodell (servingModel) får Verdi-senteret IKKE (AI-kostnad i øre, strengeste regel inntil eieren har svart) og får Drift/Personvern/Sikkerhet uten finansutledede elementer; en LOKAL modell og siden får alt;
+ *    ingenting skrives.
  */
 let db: H0Db;
 const TENANT_A = "tenant-g2-a";
@@ -63,7 +68,8 @@ function wire(env: Record<string, string | undefined>, options: WireOptions = {}
   const { valueSource = true, withControls = true, withRegistry = true } = options;
   const g = new ToolGateway(db.appPool, policy, secrets);
   if (!withRegistry) {
-    for (const tool of executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(g)))) g.register(tool);
+    // Verktøyene er registrert (flaggene på) men registeret mangler: porten må feile lukket.
+    for (const tool of executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(g)), { controlCenters: H2_TOOLS.map((t) => t.center) })) g.register(tool);
     return g;
   }
   const holder: { service?: ExecutiveService } = {};
@@ -78,9 +84,14 @@ function wire(env: Record<string, string | undefined>, options: WireOptions = {}
   });
   const service = new ExecutiveService(g, {
     controlCenters: registry, holder,
+    // SAMME kobling som main.ts: lokalitet fra leverandørregisteret (ukjent leverandør = sky) og før-bilde-skriveren for tilbakekall (L1)
+    servedLocally: (model) => !servedByCloudModel({ provider: model.provider }),
+    autonomyAudit: createAutonomyAudit(db.appPool),
     ...(valueSource ? { value: { source: { measure: async () => ({ windows: WINDOWS, measurements: MEASURED }) }, facts: () => VALUE_FACTS } } : {})
   });
-  for (const tool of executiveToolDefinitions(new ExecutiveTransport(service))) g.register(tool);
+  // Gjennomgang M1/L5: som main.ts - verktøy kun for sentre med flagg på OG et registrert senter; de to funksjonsflaggene bestemmer `run_golden_suite`/`revoke_autonomy_binding`.
+  const toolOptions = { controlCenters: controlCentersWithTools(env, registry), goldenSuite: flagOn(env, CONTROL_FEATURE_FLAGS.goldenSuite), autonomyRevoke: flagOn(env, CONTROL_FEATURE_FLAGS.autonomyRevoke) };
+  for (const tool of executiveToolDefinitions(new ExecutiveTransport(service), toolOptions)) g.register(tool);
   return g;
 }
 const ALL_ON: Record<string, string> = {
@@ -171,17 +182,38 @@ describe("eieren får rapportene (alle flagg PÅ, alle avhengigheter koblet)", (
   });
 });
 
-describe("modell i løkka: samme rapporter (ingen penger å fjerne her), og aldri skriving", () => {
-  it("get_<senter>_center med servingModel gir identiske seksjoner som uten - og radtall er uendret", async () => {
+describe("modell i løkka (gjennomgang M2): en SKYmodell får ikke Verdi-senteret (AI-kostnad i øre) - og Drift/Personvern/Sikkerhet uten finansutledede elementer; en LOKAL modell og siden får alt; aldri skriving", () => {
+  const CLOUD = { provider: "anthropic", model: "claude-test" };
+  const LOCAL = { provider: "gemma_local", model: "gemma-local" };
+
+  it("Verdi: en skymodell får «holdt tilbake» (uten rapport, uten tall) via BEGGE verktøyene og i oversikten; en lokal modell og siden får rapporten - og radtall er uendret", async () => {
     const before = await counts();
-    const model = { provider: "anthropic", model: "claude-test" };
-    for (const tool of H2_TOOLS) {
-      const without = data(await get(gateway, owner, tool.action)).report;
-      const withModel = data(await get(gateway, owner, tool.action, {}, model)).report;
-      expect(withModel?.sections.map((s) => s.id), tool.action).toEqual(without?.sections.map((s) => s.id));
-      expect(withModel?.status, tool.action).toBe(without?.status);
+    for (const [action, params] of [["get_value_center", {}], ["get_control_center", { center: "value" }]] as const) {
+      const cloud = data(await get(gateway, owner, action, params, CLOUD)) as unknown as { withheld?: boolean; report?: unknown; center?: string; summary_no: string };
+      expect(cloud.withheld, action).toBe(true);
+      expect(cloud.report, action).toBeUndefined();
+      expect(cloud.summary_no).toContain("AI-kostnad i øre");
+      expect(JSON.stringify(cloud)).not.toMatch(/_ore|amount_ore/);
+      expect(data(await get(gateway, owner, action, params, LOCAL)).report?.center, `${action} lokal`).toBe("value");
+      expect(data(await get(gateway, owner, action, params)).report?.center, `${action} siden`).toBe("value");
     }
+    const overview = data(await get(gateway, owner, "get_control_center", {}, CLOUD)) as unknown as { withheld?: string[]; centers: Array<{ center: string }> };
+    expect(overview.withheld).toEqual(["finance", "value"]); // alle flagg på: begge sentrene finnes og holdes tilbake fra skyen
+    expect(overview.centers.map((c) => c.center)).not.toContain("value");
     expect(await counts()).toEqual(before);
+  });
+
+  it("Drift, Personvern og Sikkerhet: en skymodell får de samme seksjonene som uten modell (finansutledede elementer fjernes i bygget - se wph2-restrict-finance-db.test.ts), og en lokal modell får samme rapport som siden", async () => {
+    // tidsstempler og databasestørrelse varierer mellom kallene - sammenlign form (seksjon/element/status), ikke bytes
+    const shape = (r: ControlCenterReport | undefined): unknown => r?.sections.map((s) => [s.id, s.status, s.measured, s.items.map((i) => [i.id, i.status])]);
+    for (const tool of H2_TOOLS.filter((t) => t.center !== "value")) {
+      const without = data(await get(gateway, owner, tool.action)).report;
+      const local = data(await get(gateway, owner, tool.action, {}, LOCAL)).report;
+      const cloud = data(await get(gateway, owner, tool.action, {}, CLOUD)).report;
+      expect(shape(local), `${tool.action} lokal`).toEqual(shape(without));
+      expect(cloud?.status, `${tool.action} sky`).toBe(without?.status);
+      expect(cloud?.sections.map((s) => s.id), `${tool.action} sky`).toEqual(without?.sections.map((s) => s.id));
+    }
   });
 });
 
@@ -208,36 +240,47 @@ describe("portene: kun den suverene eieren fra en signert enhetsøkt - og alt av
 });
 
 describe("flagg og avhengigheter", () => {
-  it("hvert flagg slår på KUN sitt senter - de andre tre er ikke koblet inn (found: false), og H1-sentrene er også av", async () => {
+  it("hvert flagg slår på KUN sitt senter og KUN dets verktøy - de andre tre verktøyene finnes ikke (`unknown_tool`, gjennomgang M1), og H1-sentrene er også av", async () => {
     for (const [flag, id] of [[CONTROL_CENTER_FLAGS.operations, "operations"], [CONTROL_CENTER_FLAGS.value, "value"], [CONTROL_CENTER_FLAGS.privacy, "privacy"], [CONTROL_CENTER_FLAGS.security, "security"]] as const) {
       const g = wire({ [flag]: "on" });
       const found: string[] = [];
-      for (const tool of H2_TOOLS) if (data(await get(g, owner, tool.action)).found) found.push(tool.center);
+      for (const tool of H2_TOOLS) {
+        const r = await get(g, owner, tool.action);
+        if (tool.center === id) { expect(r.ok, `${flag}: ${tool.action}`).toBe(true); if (data(r).found) found.push(tool.center); }
+        else expect(r, `${flag}: ${tool.action}`).toEqual({ ok: false, reason: "unknown_tool" });
+      }
       expect(found, flag).toEqual([id]);
-      expect(data(await get(g, owner, "get_finance_center")).found).toBe(false);
+      expect(await get(g, owner, "get_finance_center")).toEqual({ ok: false, reason: "unknown_tool" });
+      // H0-verktøyet er der som før og viser de andre sentrene som «ikke koblet inn»
+      expect(data(await get(g, owner, "get_control_center", { center: H2_TOOLS.find((t) => t.center !== id)?.center ?? "" })).found).toBe(false);
     }
   });
 
   it("kun den eksakte verdien «on» slår på (aldri true/1/ON)", async () => {
     for (const value of ["true", "1", "ON", "yes", " on", "on "]) {
       const g = wire({ [CONTROL_CENTER_FLAGS.privacy]: value });
-      expect(data(await get(g, owner, "get_privacy_center")).found, JSON.stringify(value)).toBe(false);
+      expect(await get(g, owner, "get_privacy_center"), JSON.stringify(value)).toEqual({ ok: false, reason: "unknown_tool" });
+      expect(data(await get(g, owner, "get_control_center", { center: "privacy" })).found, JSON.stringify(value)).toBe(false);
     }
   });
 
-  it("Sikkerhet uten eier-kontrollene/kill switch er ærlig «ikke koblet inn» selv med flagget på (aldri en halv rapport)", async () => {
+  it("Sikkerhet uten eier-kontrollene/kill switch er ærlig «ikke koblet inn» selv med flagget på (aldri en halv rapport) - og verktøyet listes ikke som tilgjengelig for et senter som ikke finnes (gjennomgang L5)", async () => {
     const g = wire({ [CONTROL_CENTER_FLAGS.security]: "on" }, { withControls: false });
-    const r = data(await get(g, owner, "get_security_center"));
+    expect(await get(g, owner, "get_security_center")).toEqual({ ok: false, reason: "unknown_tool" });
+    expect(g.list().some((d) => d.tool_id === "executive" && d.action === "get_security_center")).toBe(false);
+    const r = data(await get(g, owner, "get_control_center", { center: "security" }));
     expect(r.found).toBe(false);
     expect(r.summary_no).toContain("ikke koblet inn");
   });
 
-  it("alle fire AV: `found: false` med en ærlig forklaring, og oversikten viser dem under «ikke koblet inn»", async () => {
+  it("alle fire AV (gjennomgang M1): verktøyene finnes ikke (`unknown_tool`, ingen verktøyoppføring) - `get_control_center` svarer `found: false` med en ærlig forklaring, og oversikten viser dem under «ikke koblet inn»", async () => {
+    const registered = gatewayFlagsOff.list().filter((d) => d.tool_id === "executive").map((d) => d.action);
     for (const tool of H2_TOOLS) {
-      const r = await get(gatewayFlagsOff, owner, tool.action);
-      expect(r.ok).toBe(true);
-      expect(data(r)).toMatchObject({ found: false, center: tool.center });
+      expect(registered, tool.action).not.toContain(tool.action);
+      expect(await get(gatewayFlagsOff, owner, tool.action), tool.action).toEqual({ ok: false, reason: "unknown_tool" });
+      expect(data(await get(gatewayFlagsOff, owner, "get_control_center", { center: tool.center }))).toMatchObject({ found: false, center: tool.center });
     }
+    for (const action of ["run_golden_suite", "revoke_autonomy_binding"]) expect(registered, action).not.toContain(action);
     const overview = data(await get(gatewayFlagsOff, owner, "get_control_center")) as unknown as { unregistered: string[]; centers: Array<{ center: string }> };
     for (const tool of H2_TOOLS) expect(overview.unregistered).toContain(tool.center);
     expect(overview.centers.some((c) => H2_TOOLS.some((t) => t.center === c.center))).toBe(false);

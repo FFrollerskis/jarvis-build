@@ -246,3 +246,23 @@ export function activeRestrictedControlTools(env: Readonly<Record<string, string
 export function financeIntentOptions(env: Readonly<Record<string, string | undefined>> = process.env): FinanceIntentOptions {
   return { restrictedTools: activeRestrictedControlTools(env) };
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// WP-H2 (gjennomgang M2): finansavledet tilstand utenfor Finans-senteret holdes tilbake fra skymodeller (`ControlCenterBuildContext.restrictFinance`)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** Finans-verktøyene (`finance`, `finance_spend`, `finance_stripe` ...): samme regel som `RESTRICTED_TOOL_ID` i turn-context.ts. */
+const FINANCE_TOOL_ID = /^finance(_|$)/;
+
+/** Er revisjonsraden (verktøy-id + handling) en del av finansdomenet? `executive.enable_finance_kill_switch`, `executive.get_finance_center` og alle `finance*`-verktøy. Rader uten verktøy (innlogging osv.) er det ikke. */
+export function isFinanceAuditRow(toolId: string | null | undefined, action: string | null | undefined): boolean {
+  return (typeof toolId === "string" && FINANCE_TOOL_ID.test(toolId)) || (typeof action === "string" && action.includes("finance"));
+}
+
+/** SQL-form av `isFinanceAuditRow` for `audit_events` (og `action_confirmations`): kun rader som IKKE gjelder finansdomenet. NULL-trygt (rader uten `tool_id`/`action` beholdes). Fast tekst - aldri bygget fra data. */
+export const NOT_FINANCE_AUDIT_SQL = `(tool_id IS NULL OR tool_id !~ '^finance(_|$)') AND (action IS NULL OR action NOT LIKE '%finance%')`;
+
+/** Daglige jobber i finansdomenet (`finance-spend-integrity-sweep`, `finance-reconcile-sweep`, `stripe-payment-sync`, `vipps-payment-sync`, `neonomics-sweep`, `wallester-sweep`): navnet og tilstanden er finansavledet. */
+export function isFinanceJobName(name: string): boolean {
+  return /^(finance|stripe|vipps|neonomics|wallester)-/.test(name);
+}

@@ -716,7 +716,7 @@ describe("Sikkerhet: statusene følger det som er målt", () => {
 
   it("nektede kontrollhandlinger og avviste innlogginger er advarsler; tilbakekalte credentials og frosne connectorer teller med navn (aldri verdier)", async () => {
     const r = await report(securityRules([
-      { match: /tool_id IN \('owner_controls', 'executive'\) AND action = ANY\(\$3::text\[\]\) GROUP BY action ORDER BY action$/, rows: [{ action: "revoke_credential", executed: 2, denied: 1, failed: 0, last_at: iso(D) }] },
+      { match: /tool_id IN \('owner_controls', 'executive'\) AND action = ANY\(\$3::text\[\]\) AND NOT \(tool_id = 'owner_controls' AND action = ANY\(\$4::text\[\]\)\) GROUP BY action ORDER BY action$/, rows: [{ action: "revoke_credential", executed: 2, denied: 1, failed: 0, last_at: iso(D) }] },
       { match: /type = ANY\(\$3::text\[\]\) GROUP BY type/, rows: (p) => ((p[2] as string[]).includes("device.enrollment_denied") ? [{ type: "device.enrollment_denied", n: 2, last_at: iso(H) }] : []) }
     ]), { ownerControls: { listFrozenConnectorsDurable: async () => [{ connector_id: "github", reason: "x", actor_person_id: null, changed_at: iso(H) }], listRevokedCredentialsDurable: async () => [{ credential_ref: "ANTHROPIC_API_KEY", reason: "x", actor_person_id: null, changed_at: iso(H) }] } });
     expect(item(r, "credentials", "action:revoke_credential")).toMatchObject({ status: "WARN", facts: { executed: 2, denied: 1 } });

@@ -161,7 +161,8 @@ const SENSITIVITY_OVERRIDES: Record<string, Sensitivity> = {
   [k("executive", "get_agent_center")]: "private",
   // WP-H2: eierens driftsbilde, verdimålinger, personvern- og sikkerhetstilstand er konfigurasjonsmetadata - aldri «public».
   [k("executive", "get_operations_center")]: "private",
-  [k("executive", "get_value_center")]: "private",
+  // Gjennomgang M2: Verdi-senteret viser AI-kostnad i øre (strengeste regel inntil eieren har avgjort om den kan til sky): `restricted`, utvalgslåst lokalt og holdt tilbake fra skymodeller ved utførelse (som Finans-senteret).
+  [k("executive", "get_value_center")]: "restricted",
   [k("executive", "get_privacy_center")]: "private",
   [k("executive", "get_security_center")]: "private",
   // Gjennomgang av PR #324 (L4): driftsstatus har hendelsestitler med repo/gren, jobbnavn og skymål-tilstand - eierens driftsbilde, aldri «public» (og strømmer til modellen som betjener turen).

@@ -4,7 +4,7 @@ import { composeEvolutionReport, type EvolutionReport } from "./evolution/index.
 import { composeAiMeshReport, type AiMeshReport } from "./ai-mesh/index.ts";
 import {
   composeControlCenterOverview, explainControlCenterNo,
-  type ControlCenterId, type ControlCenterOverview, type ControlCenterRegistry, type ControlCenterReport, type GoldenSuiteControl, type GoldenSuiteRunResult
+  type ControlCenterBuildOptions, type ControlCenterId, type ControlCenterOverview, type ControlCenterRegistry, type ControlCenterReport, type GoldenSuiteControl, type GoldenSuiteRunResult
 } from "./control-center/index.ts";
 import {
   composeValueReport, deriveChangeFreeze, describeValueLoops, evaluateBuilderLoopReadiness, proposeOpsActions,
@@ -558,7 +558,7 @@ export class ExecutiveService {
   }
 
   /** WP-H0: oversikt over de ti kontrollsentrene (registrerte bygges, øvrige listes som ikke koblet inn). RENT lesende. */
-  async getControlCenterOverview(identity: IdentityContext, options: { withhold?: readonly ControlCenterId[] } = {}): Promise<ControlCenterOverview> {
+  async getControlCenterOverview(identity: IdentityContext, options: { withhold?: readonly ControlCenterId[]; restrictFinance?: boolean } = {}): Promise<ControlCenterOverview> {
     const registry = this.options.controlCenters;
     if (registry) return registry.overview(identity, options);
     return composeControlCenterOverview([], new Date());
@@ -582,10 +582,10 @@ export class ExecutiveService {
   }
 
   /** WP-H0: full rapport for ETT senter + deterministisk forklaring, eller `null` når senteret ikke er koblet inn. RENT lesende. */
-  async getControlCenterReport(identity: IdentityContext, center: string): Promise<{ report: ControlCenterReport; explanation_no: string } | null> {
+  async getControlCenterReport(identity: IdentityContext, center: string, options: ControlCenterBuildOptions = {}): Promise<{ report: ControlCenterReport; explanation_no: string } | null> {
     const registry = this.options.controlCenters;
     if (!registry) return null;
-    const report = await registry.report(center, identity);
+    const report = await registry.report(center, identity, options);
     return report === null ? null : { report, explanation_no: explainControlCenterNo(report) };
   }
 

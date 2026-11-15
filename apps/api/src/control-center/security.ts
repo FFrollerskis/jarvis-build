@@ -9,7 +9,7 @@ import type { ToolGateway } from "@jarvis/tool-gateway";
 import { actionRequiresStepUp } from "../step-up.ts";
 import { readDomainPauses, readFinanceKillSwitch } from "./authority.ts";
 import {
-  DAY_MS, bySeverityThenLabel, countsNo, globalRows, mergeBy, relativeNo, riskOf, safeCategory, settle, tenantRead, toInt, toIso,
+  DAY_MS, NOT_FINANCE_AUDIT_SQL, bySeverityThenLabel, countsNo, globalRows, mergeBy, relativeNo, riskOf, safeCategory, settle, tenantRead, toInt, toIso,
   type ControlCenterPool, type Settled
 } from "./shared.ts";
 
@@ -36,6 +36,15 @@ const MAX_LISTED_REFS = 10;
 /** Kontrollhandlingene (executive.* og owner_controls.*) som er credential-/tilgangsendringer. */
 export const CREDENTIAL_ACTIONS: readonly string[] = [
   "set_connector_credential", "revoke_credential", "restore_credential", "freeze_connector", "unfreeze_connector", "revoke_device", "test_connector", "activate_kill_switch", "deactivate_kill_switch"
+];
+/**
+ * Gjennomgang L2: `executive.<handling>` er et rent gjennomslag som kaller `owner_controls.<handling>` NØSTET (samme identitet) - begge lag skriver `tool.executed`, så én kontrollhandling ga to revisjonsrader og
+ * teller ble doblet. Kun det YTTERSTE laget teller: for disse handlingene telles `executive`-raden, og `owner_controls`-raden (det indre laget) teller ikke. `set_connector_credential` og `test_connector` har INGEN
+ * executive-omslag (de går rett til `owner_controls` via `/owner-controls/connector-credentials`) og telles som før. Ingen produksjonsvei kaller de omsluttede `owner_controls`-handlingene direkte; listen er låst mot
+ * verktøyregisteret av `wph2-security-center-db.test.ts` (både `executive.<h>` og `owner_controls.<h>` finnes for hver, og ingen annen handling i CREDENTIAL_ACTIONS har et executive-omslag).
+ */
+export const EXECUTIVE_WRAPPED_OWNER_ACTIONS: readonly string[] = [
+  "activate_kill_switch", "deactivate_kill_switch", "freeze_connector", "unfreeze_connector", "revoke_credential", "restore_credential", "revoke_device"
 ];
 /** Handlingene som GJENOPPRETTER noe en eier har stanset. */
 export const RECOVERY_ACTIONS: readonly string[] = ["deactivate_kill_switch", "restore_credential", "unfreeze_connector", "resume_domain", "disable_finance_kill_switch"];
@@ -66,10 +75,24 @@ export interface SecurityAggregates {
   recovery_events: Array<{ action: string; n: number; last_at: string | null }>;
 }
 
-export async function readSecurityAggregates(pool: ControlCenterPool, tenantId: string, nowMs: number): Promise<SecurityAggregates> {
+/** Kun det ytterste laget teller (se `EXECUTIVE_WRAPPED_OWNER_ACTIONS`): en `owner_controls`-rad for en handling som executive pakker inn er et indre lag. `$4` = de omsluttede handlingene. Fast tekst. */
+const OUTERMOST_LAYER_SQL = `NOT (tool_id = 'owner_controls' AND action = ANY($4::text[]))`;
+
+export interface SecurityReadOptions {
+  /**
+   * Gjennomgang M2 (H2): rapporten skal til en SKYmodell - revisjonsrader og bekreftelser i FINANSDOMENET (`finance*`-verktøy og handlinger med «finance» i navnet) telles ikke med, og gjenopprettingslisten har ikke
+   * finans-nødbryteren. Kun fast SQL-tekst (`NOT_FINANCE_AUDIT_SQL`), aldri bygget fra data.
+   */
+  restrictFinance?: boolean;
+}
+
+export async function readSecurityAggregates(pool: ControlCenterPool, tenantId: string, nowMs: number, options: SecurityReadOptions = {}): Promise<SecurityAggregates> {
   const d1 = new Date(nowMs - DAY_MS);
   const d7 = new Date(nowMs - AUDIT_WINDOW_MS);
   const d30 = new Date(nowMs - EVENT_WINDOW_MS);
+  const restrict = options.restrictFinance === true;
+  const notFinance = restrict ? ` AND ${NOT_FINANCE_AUDIT_SQL}` : "";
+  const recoveryActions = restrict ? RECOVERY_ACTIONS.filter((a) => !a.includes("finance")) : [...RECOVERY_ACTIONS];
   return tenantRead(pool, tenantId, async (query) => {
     const a = (await query(
       `SELECT (count(*))::int AS events_7d,
@@ -79,29 +102,29 @@ export async function readSecurityAggregates(pool: ControlCenterPool, tenantId: 
               (count(*) FILTER (WHERE type = 'tool.failed'))::int AS failed_7d,
               (count(*) FILTER (WHERE type IN ('tool.postcondition_unverified', 'tool.execution_in_flight')))::int AS outcome_unknown_7d,
               max(at) AS last_event_at, max(at) FILTER (WHERE type = 'tool.denied') AS last_denied_at
-         FROM audit_events WHERE tenant_id = $1 AND at >= $2`, [tenantId, d7, d1]
+         FROM audit_events WHERE tenant_id = $1 AND at >= $2${notFinance}`, [tenantId, d7, d1]
     ))[0] ?? {};
     const reasons = await query(
-      `SELECT reason, (count(*))::int AS n FROM audit_events WHERE tenant_id = $1 AND at >= $2 AND type = 'tool.denied' GROUP BY reason ORDER BY n DESC, reason LIMIT ${MAX_REASON_ROWS}`, [tenantId, d7]
+      `SELECT reason, (count(*))::int AS n FROM audit_events WHERE tenant_id = $1 AND at >= $2 AND type = 'tool.denied'${notFinance} GROUP BY reason ORDER BY n DESC, reason LIMIT ${MAX_REASON_ROWS}`, [tenantId, d7]
     );
     const creds = await query(
       `SELECT action, (count(*) FILTER (WHERE type = 'tool.executed'))::int AS executed, (count(*) FILTER (WHERE type = 'tool.denied'))::int AS denied,
               (count(*) FILTER (WHERE type = 'tool.failed'))::int AS failed, max(at) AS last_at
-         FROM audit_events WHERE tenant_id = $1 AND at >= $2 AND tool_id IN ('owner_controls', 'executive') AND action = ANY($3::text[]) GROUP BY action ORDER BY action`,
-      [tenantId, d30, [...CREDENTIAL_ACTIONS]]
+         FROM audit_events WHERE tenant_id = $1 AND at >= $2 AND tool_id IN ('owner_controls', 'executive') AND action = ANY($3::text[]) AND ${OUTERMOST_LAYER_SQL}${notFinance} GROUP BY action ORDER BY action`,
+      [tenantId, d30, [...CREDENTIAL_ACTIONS], [...EXECUTIVE_WRAPPED_OWNER_ACTIONS]]
     );
     const access = await query(
       `SELECT type, (count(*))::int AS n, max(at) AS last_at FROM audit_events WHERE tenant_id = $1 AND at >= $2 AND type = ANY($3::text[]) GROUP BY type ORDER BY type`, [tenantId, d30, [...ACCESS_DENIAL_TYPES]]
     );
     const tainted = await query(
-      `SELECT status, (count(*))::int AS n, max(created_at) AS last_at FROM action_confirmations WHERE tenant_id = $1 AND created_at >= $2 AND cardinality(taint_reasons) > 0 GROUP BY status ORDER BY status`, [tenantId, d30]
+      `SELECT status, (count(*))::int AS n, max(created_at) AS last_at FROM action_confirmations WHERE tenant_id = $1 AND created_at >= $2 AND cardinality(taint_reasons) > 0${notFinance} GROUP BY status ORDER BY status`, [tenantId, d30]
     );
     const memory = await query(
       `SELECT type, (count(*))::int AS n, max(at) AS last_at FROM audit_events WHERE tenant_id = $1 AND at >= $2 AND type = ANY($3::text[]) GROUP BY type ORDER BY type`, [tenantId, d30, [...MEMORY_GUARD_TYPES]]
     );
     const recovery = await query(
-      `SELECT action, (count(*))::int AS n, max(at) AS last_at FROM audit_events WHERE tenant_id = $1 AND at >= $2 AND type = 'tool.executed' AND tool_id IN ('owner_controls', 'executive') AND action = ANY($3::text[]) GROUP BY action ORDER BY action`,
-      [tenantId, d30, [...RECOVERY_ACTIONS]]
+      `SELECT action, (count(*))::int AS n, max(at) AS last_at FROM audit_events WHERE tenant_id = $1 AND at >= $2 AND type = 'tool.executed' AND tool_id IN ('owner_controls', 'executive') AND action = ANY($3::text[]) AND ${OUTERMOST_LAYER_SQL}${notFinance} GROUP BY action ORDER BY action`,
+      [tenantId, d30, recoveryActions, [...EXECUTIVE_WRAPPED_OWNER_ACTIONS]]
     );
     return {
       audit: {
@@ -157,12 +180,14 @@ export function createSecurityCenter(deps: SecurityCenterDeps): ControlCenterDef
       const rel = (iso: string | null | undefined): string => relativeNo(iso, nowMs);
       const failed = (r: Settled<unknown>): string => (r.ok ? "" : ` (${r.category})`);
 
+      // Gjennomgang M2 (H2): går rapporten til en SKYmodell (`restrictFinance`), leses og vises ingenting fra finansdomenet - hverken finans-nødbryteren, revisjonsrader om finansverktøy eller finans-gjenopprettinger.
+      const restrict = ctx.restrictFinance === true;
       const [aggR, triggerR, killR, controlsR, financeR, pausesR] = await Promise.all([
-        settle(() => readSecurityAggregates(deps.pool, tenantId, nowMs)),
+        settle(() => readSecurityAggregates(deps.pool, tenantId, nowMs, { restrictFinance: restrict })),
         settle(() => readAuditTrigger(deps.pool)),
         settle(() => deps.killSwitch.currentStateDurable()),
         settle(async () => ({ frozen: await deps.ownerControls.listFrozenConnectorsDurable(), revoked: await deps.ownerControls.listRevokedCredentialsDurable() })),
-        settle(() => readFinanceKillSwitch(deps.pool, tenantId)),
+        restrict ? Promise.resolve(null) : settle(() => readFinanceKillSwitch(deps.pool, tenantId)),
         settle(() => readDomainPauses(deps.pool))
       ]);
 
@@ -310,7 +335,9 @@ export function createSecurityCenter(deps: SecurityCenterDeps): ControlCenterDef
         } else {
           items.push(controlItem({ id: "kill_switch", label: "Kill switch", status: "UNKNOWN", detail_no: `Tilstanden kunne ikke leses${failed(killR)} - behandles ikke som «av».`, facts: { active: null } }));
         }
-        if (financeR.ok) {
+        if (financeR === null) {
+          // `restrictFinance`: finans-nødbryteren hører til finansdomenet og utelates helt (ikke som «ukjent» - da ville selve utelatelsen røpet at noe er holdt tilbake per element).
+        } else if (financeR.ok) {
           items.push(controlItem({
             id: "finance_kill_switch", label: "Finans-nødbryter", status: financeR.value.enabled ? "WARN" : "OK", observed_at: financeR.value.enabled_at,
             detail_no: financeR.value.enabled ? `AKTIV siden ${rel(financeR.value.enabled_at)} - spend-muliggjørende finanshandlinger er stanset.` : "Av.", facts: { enabled: financeR.value.enabled }
@@ -347,7 +374,9 @@ export function createSecurityCenter(deps: SecurityCenterDeps): ControlCenterDef
         items.sort(bySeverityThenLabel);
         sections.push(controlSection({
           id: "recovery", title_no: "Gjenoppretting", observed_at: nowIso, items,
-          source: "owner_control_state (kill switch, frys, tilbakekall) + finance_kill_switch + situation_domain_pauses + audit_events (utførte gjenopprettingshandlinger). Handlingene bor i Autoritet-senteret",
+          source: restrict
+            ? "owner_control_state (kill switch, frys, tilbakekall) + situation_domain_pauses + audit_events (utførte gjenopprettingshandlinger). Handlingene bor i Autoritet-senteret"
+            : "owner_control_state (kill switch, frys, tilbakekall) + finance_kill_switch + situation_domain_pauses + audit_events (utførte gjenopprettingshandlinger). Handlingene bor i Autoritet-senteret",
           summary_no: `${killR.ok && killR.value ? "KILL SWITCH ER AKTIV. " : ""}${items.filter((i) => i.status === "WARN" || i.status === "FAIL").length} ting venter på gjenoppretting. ${countsNo(items)}.`
         }));
       }

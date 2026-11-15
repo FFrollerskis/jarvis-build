@@ -153,6 +153,17 @@ export interface ControlCenterBuildContext {
   /** Den betrodde identiteten fra `ToolInvocationContext` (D-68) - aldri fra parametre. All databaselesing skjer under denne identitetens tenant (RLS). */
   identity: IdentityContext;
   now: Date;
+  /**
+   * WP-H2 (gjennomgang M2): rapporten skal til en SKYmodell (`ExecutiveService.isCloudServed`, håndhevet ved utførelse i transporten). Et senter som har FINANSAVLEDET tilstand utenfor Finans-senteret
+   * (Sikkerhet: finans-nødbryteren; Drift: finansjobbene) utelater den da - HELT, ikke bare i teksten - så seksjonsstatus, tellinger og sammendrag ikke bærer den. Utelatt/`false` = hele rapporten
+   * (siden uten modell i løkka og en lokal modell, D-378 punkt 2). Senteret setter ALDRI dette selv; kun registeret fra transportens trusted kontekst.
+   */
+  restrictFinance?: boolean;
+}
+
+/** Valg ved bygging av en rapport (trusted lag, aldri fra modell-parametre). */
+export interface ControlCenterBuildOptions {
+  restrictFinance?: boolean;
 }
 
 /**

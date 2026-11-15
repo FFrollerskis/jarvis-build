@@ -50,9 +50,13 @@ beforeAll(async () => {
   await audit(TENANT_A, idA.person_id, "tool.denied", { tool: "executive", action: "get_security_center", reason: "control_center_owner_only", at: ago(3 * D) });
   await audit(TENANT_A, idA.person_id, "tool.denied", { tool: "executive", action: "revoke_credential", reason: "step_up_required:signed_device_session", at: ago(4 * D) });
   await audit(TENANT_A, idA.person_id, "tool.denied", { tool: "email", action: "send", reason: "fri tekst med mellomrom og kontonummer 12345678901", at: ago(20 * D) });
+  // Gjennomgang L2: `executive.<handling>` nøster `owner_controls.<handling>` og begge lag skriver `tool.executed` - fiksturen har derfor det EKTE paret (ytre + indre) for hver utførelse; senteret skal telle EN utførelse, ikke to.
+  await audit(TENANT_A, idA.person_id, "tool.executed", { tool: "executive", action: "revoke_credential", at: ago(5 * D) });
   await audit(TENANT_A, idA.person_id, "tool.executed", { tool: "owner_controls", action: "revoke_credential", at: ago(5 * D) });
   await audit(TENANT_A, idA.person_id, "tool.executed", { tool: "executive", action: "restore_credential", at: ago(4 * D) });
+  await audit(TENANT_A, idA.person_id, "tool.executed", { tool: "owner_controls", action: "restore_credential", at: ago(4 * D) });
   await audit(TENANT_A, idA.person_id, "tool.executed", { tool: "executive", action: "restore_credential", at: ago(3 * D) });
+  await audit(TENANT_A, idA.person_id, "tool.executed", { tool: "owner_controls", action: "restore_credential", at: ago(3 * D) });
   await audit(TENANT_A, idA.person_id, "tool.executed", { tool: "executive", action: "resume_domain", at: ago(2 * D) });
   await audit(TENANT_A, idA.person_id, "tool.failed", { tool: "github", action: "list_pull_requests", reason: "tool_failed:timeout", at: ago(D) });
   await audit(TENANT_A, idA.person_id, "tool.postcondition_unverified", { tool: "twilio", action: "notify", at: ago(D) });

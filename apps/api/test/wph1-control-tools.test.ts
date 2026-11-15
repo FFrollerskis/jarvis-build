@@ -399,20 +399,21 @@ describe("responsen", () => {
     expect(((await call(t, "get_control_center", {}, CLOUD)) as unknown as { withheld?: string[] }).withheld).toBeUndefined();
   });
 
-  it("H0-sentrene er uendret: AI-senterets `*_ore`-fakta (grenser og kost) når fortsatt en skymodell - kun senteret i CLOUD_WITHHELD_CENTERS holdes tilbake", async () => {
+  it("H0-sentrene er uendret: AI-senterets `*_ore`-fakta (grenser og kost) når fortsatt en skymodell - kun sentrene i CLOUD_WITHHELD_CENTERS (Finans, og fra WP-H2 Verdi) holdes tilbake", async () => {
     const t = transportWith([money("ai")]);
     const keys = factKeys((await call(t, "get_control_center", { center: "ai" }, CLOUD)).report);
     expect(keys).toEqual(expect.arrayContaining(["amount_ore", "daily_cap_ore"]));
-    expect(CLOUD_WITHHELD_CENTERS).toEqual(["finance"]);
+    expect(CLOUD_WITHHELD_CENTERS).toEqual(["finance", "value"]);
     expect(isCloudWithheldCenter("finance")).toBe(true);
-    for (const id of CONTROL_CENTER_IDS.filter((c) => c !== "finance")) expect(isCloudWithheldCenter(id), id).toBe(false);
+    expect(isCloudWithheldCenter("value")).toBe(true);
+    for (const id of CONTROL_CENTER_IDS.filter((c) => c !== "finance" && c !== "value")) expect(isCloudWithheldCenter(id), id).toBe(false);
   });
 
   it("`withheldCenterData` har ingen tall og ingen innhold - kun hvorfor og hva eieren kan gjøre; verktøynøkkelen står i EXECUTION_GUARDED_RESTRICTED_KEYS", () => {
     const d = withheldCenterData("finance", "Finans");
     expect(Object.keys(d).sort()).toEqual(["center", "explanation_no", "found", "summary_no", "withheld"]);
     expect(String(d["summary_no"])).toContain("finansdata er SECRET_RESTRICTED (D-378)");
-    expect([...EXECUTION_GUARDED_RESTRICTED_KEYS]).toEqual(["executive.get_finance_center"]);
+    expect([...EXECUTION_GUARDED_RESTRICTED_KEYS].sort()).toEqual(["executive.get_finance_center", "executive.get_value_center"]);
     // hvert senter som holdes tilbake har sitt lese-verktøy i den guardede mengden
     for (const center of CLOUD_WITHHELD_CENTERS) {
       const tool = TOOLS.find((x) => x.center === center);

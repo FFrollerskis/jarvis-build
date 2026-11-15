@@ -37,7 +37,7 @@ export const CONTROL_CENTER_READ_TOOLS: ReadonlyArray<ControlCenterReadTool> = [
   },
   {
     center: "value", action: "get_value_center",
-    description: `Les Verdi-kontrollsenteret (UA-11): verdiløkkene V1-V5 med tilstandsord, bruksfrekvens, lukkede jobber, spart tid og dine korrigeringer (de to siste er IKKE målt og står som ikke målt, aldri som 0). Kun tall fra eksisterende målinger. ${COMMON_TAIL}`
+    description: `Les Verdi-kontrollsenteret (UA-11): verdiløkkene V1-V5 med tilstandsord, bruksfrekvens, lukkede jobber, spart tid og dine korrigeringer (de to siste er IKKE målt og står som ikke målt, aldri som 0). Kun tall fra eksisterende målinger, inkl. AI-kostnad i øre: en skymodell får IKKE rapporten (den holdes tilbake ved utførelse, SECRET_RESTRICTED inntil eieren har avgjort noe annet); kun en lokal modell og kontrollsiden får den. ${COMMON_TAIL}`
   },
   {
     center: "privacy", action: "get_privacy_center",
@@ -61,13 +61,23 @@ export function controlCenterForReadAction(action: string): ControlCenterId | un
  * `get_control_center {center: "finance"}`, oversikten) ville derfor fått rapporten. Håndhevingen skjer derfor VED UTFØRELSE, i transporten: ber en skymodell om dette senteret, bygges det ikke engang -
  * svaret er en kort merknad. Lokale modeller og siden (`/control`, ingen modell i løkka) får hele rapporten, inkl. beløp i øre.
  */
-export const CLOUD_WITHHELD_CENTERS: readonly ControlCenterId[] = ["finance"];
+export const CLOUD_WITHHELD_CENTERS: readonly ControlCenterId[] = ["finance", "value"];
+
+/**
+ * Hvorfor et senter holdes tilbake (vises til modellen i «holdt tilbake»-merknaden, uten tall). Verdi-senteret (H2) holdes tilbake HELT fordi verdimålingene inkluderer AI-kostnad i øre (`unit: "ore"`) - strengeste regel
+ * inntil eieren har avgjort om AI-kostnaden kan vises til en skymodell (åpent spørsmål; `get_value_report` fra WP-C4 og AI-senteret fra H0 på main er uendret og viser den fortsatt). Å åpne for skyen igjen er å fjerne
+ * `value` fra `CLOUD_WITHHELD_CENTERS`/`EXECUTION_GUARDED_RESTRICTED_KEYS` (og `RESTRICTED_TOOL_KEYS` i turn-context.ts, `restricted` i manifestet) - invarianttesten sier fra hvis noe av det glemmes.
+ */
+const WITHHELD_REASON_NO: Readonly<Partial<Record<ControlCenterId, string>>> = {
+  finance: "finansdata er SECRET_RESTRICTED (D-378) og går aldri til en skymodell",
+  value: "verdimålingene inkluderer AI-kostnad i øre, som holdes som finansdata (SECRET_RESTRICTED, D-378) og ikke går til en skymodell inntil eieren har avgjort noe annet"
+};
 
 /**
  * Verktøynøklene (`tool_id.action`) som er håndhevet VED UTFØRELSE mot skymodeller (ikke bare ved utvalg). Låst mot manifestets `restricted`-merking av `wph1-restricted-tools-invariant.test.ts`:
  * et verktøy merket `restricted` på en modellflate må enten være låst i utvalget (turen blir lokal) eller stå her.
  */
-export const EXECUTION_GUARDED_RESTRICTED_KEYS: ReadonlySet<string> = new Set(["executive.get_finance_center"]);
+export const EXECUTION_GUARDED_RESTRICTED_KEYS: ReadonlySet<string> = new Set(["executive.get_finance_center", "executive.get_value_center"]);
 
 export function isCloudWithheldCenter(center: string): boolean {
   return (CLOUD_WITHHELD_CENTERS as readonly string[]).includes(center);
@@ -75,6 +85,6 @@ export function isCloudWithheldCenter(center: string): boolean {
 
 /** Svaret en skymodell får i stedet for et holdt-tilbake senter: ingen tall, ingen seksjoner, ingen tilstand - kun hvorfor og hva eieren kan gjøre. */
 export function withheldCenterData(center: ControlCenterId, title_no: string): Record<string, unknown> {
-  const summary_no = `${title_no}-kontrollsenteret holdes tilbake fra denne modellen: ${title_no.toLowerCase()}data er SECRET_RESTRICTED (D-378) og går aldri til en skymodell. Åpne kontrollsiden (/control) fra en innrullert enhet, eller still spørsmålet til en lokal modell.`;
+  const summary_no = `${title_no}-kontrollsenteret holdes tilbake fra denne modellen: ${WITHHELD_REASON_NO[center] ?? `${title_no.toLowerCase()}data er SECRET_RESTRICTED (D-378) og går aldri til en skymodell`}. Åpne kontrollsiden (/control) fra en innrullert enhet, eller still spørsmålet til en lokal modell.`;
   return { found: true, withheld: true, center, summary_no, explanation_no: summary_no };
 }

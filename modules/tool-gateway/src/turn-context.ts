@@ -243,9 +243,10 @@ function verbMatches(action: string, text: string): boolean {
 const RESTRICTED_TOOL_ID = /^finance(_|$)/;
 /**
  * WP-H1: finansdata kan også ligge bak et `executive`-verktøy (Finans-senteret). En tur som velger det er låst lokalt (SECRET_RESTRICTED) på samme måte som `finance_*` - uansett hva meldingen sier.
+ * WP-H2 (gjennomgang M2): det samme gjelder Verdi-senteret (AI-kostnad i øre; strengeste regel inntil eieren har avgjort om den kan til sky).
  * (`get_control_center` er ikke på listen: en SKYmodell får ikke finans-senteret via den heller - transporten holder det tilbake ved utførelse og bygger oversikten uten det; en lokal modell får det.)
  */
-const RESTRICTED_TOOL_KEYS: ReadonlySet<string> = new Set(["executive.get_finance_center"]);
+const RESTRICTED_TOOL_KEYS: ReadonlySet<string> = new Set(["executive.get_finance_center", "executive.get_value_center"]);
 
 /**
  * Gjennomgang M2: er verktøyet LÅST i utvalget (en tur som velger det blir `SECRET_RESTRICTED`, kun lokal modell)? Brukes av invariant-testen «manifest `restricted` + modellflate => låst eller håndhevet ved utførelse».
