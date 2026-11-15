@@ -1,10 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { DEFAULT_TEMPLATES_DIR, GeneratorError, ID_PATTERN, main, normalize, parseArgs, planFiles, render, writePlan } from "../new-connector.mjs";
+import { DEFAULT_TEMPLATES_DIR, GeneratorError, ID_PATTERN, errorLabel, main, normalize, parseArgs, planFiles, render, secretKinds, writePlan } from "../new-connector.mjs";
 
 /**
  * WP-I (D-472): tester for scaffold-generatoren `ops/connector/new-connector.mjs`. ALT genereres inn i en midlertidig mappe (aldri inn i repoet); ingen nettverk.
@@ -284,6 +284,126 @@ describe("FORHERDING (review LOW): symlenker, mapper, id-form, usynlige tegn og 
     expect(listFiles(root)).toEqual([]);
     // Vanlig tekst (norske bokstaver, mellomrom, bindestrek, punktum, parentes, &) er fortsatt lovlig.
     expect(normalize({ id: "acme_x", name: "Åse & Øvre (v2) - AS.", vendor: "Blåbær Ægir", write: false }).name).toBe("Åse & Øvre (v2) - AS.");
+  });
+});
+
+describe("review N4/N7: ingen ekko av argumenter eller unntakstekst, ingen token-formede navn, ingen tom fil etter en feilet skriving, klar melding for dinglende --root", () => {
+  /** Token-formede verdier bygges ved KJØRING (aldri som bokstaver i kilden, så gitleaks aldri ser dem). `ghp_...` med små bokstaver er en gyldig snake_case-id. */
+  const githubShaped = () => `ghp_${"a1".repeat(18)}`;
+  const stripeShaped = () => `sk_live_${"c3".repeat(12)}`;
+  const tree = (root) => (existsSync(root) ? readdirSync(root, { recursive: true }).map((p) => String(p).split("\\").join("/")).sort() : []);
+
+  it("N4: et ukjent argument ekkoes ALDRI (kun plassering og lengde) - også når det er et helt token", () => {
+    const token = githubShaped();
+    for (const argv of [[token], ["--id", "acme_x", "--name", "Acme", token], ["--id", "acme_x", "--name", "Acme", `--${token}`]]) {
+      const out = [];
+      const code = main(argv, { log: () => {}, err: (s) => out.push(s) });
+      const text = out.join("\n");
+      expect(code, argv.join(" ")).toBe(1);
+      expect(text).toMatch(/ukjent argument nr\. \d+ \(\d+ tegn\)/);
+      for (const leak of [token, token.slice(0, 8), token.slice(0, 4)]) expect(text.includes(leak), leak).toBe(false);
+    }
+    expect(() => parseArgs([githubShaped()])).toThrow(/ukjent argument nr\. 1 \(40 tegn\)/);
+  });
+
+  it("N4: et uventet unntak viser kun navn/kode - aldri meldingen (token i meldingen, in-process og som kommando)", () => {
+    const token = githubShaped();
+    const out = [];
+    const throwing = { log: () => { throw new Error(`log feilet for ${token}`); }, err: (s) => out.push(s) };
+    expect(main(["--id", "acme_x", "--name", "Acme", "--dry-run"], throwing)).toBe(1);
+    expect(out).toEqual(["UVENTET FEIL: Error"]);
+    // Som kommando: en mal som er en MAPPE gir EISDIR (en rå feilmelding ville vist en systemtekst); utdata er bare navn og kode.
+    const root = fresh();
+    const templates = fresh();
+    for (const name of ["manifest.ts.tmpl", "fake-adapter.ts.tmpl", "contract.test.ts.tmpl", "runbook.md.tmpl"]) mkdirSync(join(templates, name));
+    const r = run(["--id", "acme_x", "--name", "Acme", "--templates", templates, "--root", root]);
+    expect(r.status).toBe(1);
+    expect(r.stderr.trim()).toBe("UVENTET FEIL: Error (EISDIR)");
+    expect(listFiles(root)).toEqual([]);
+  });
+
+  it("N4: errorLabel slipper bare allowlistede former (navn: bokstaver/tall, kode: STORE bokstaver/tall/_) og redigerer en token-formet del", () => {
+    expect(errorLabel(new Error("m"))).toBe("Error");
+    expect(errorLabel(Object.assign(new TypeError("m"), { code: "ERR_X" }))).toBe("TypeError (ERR_X)");
+    expect(errorLabel(Object.assign(new Error("m"), { code: githubShaped() }))).toBe("Error");
+    expect(errorLabel(Object.assign(new Error("m"), { name: githubShaped() }))).toBe("Error");
+    const awsShaped = `AKIA${"B7".repeat(8)}`;
+    expect(errorLabel(Object.assign(new Error("m"), { name: awsShaped }))).toBe("[REDACTED:aws_access_key]");
+    for (const odd of ["streng", 3, undefined, null, {}]) expect(errorLabel(odd), String(odd)).toBe("Error");
+  });
+
+  it("N7: en token-formet --id, --name, --vendor og --tool-id (også med små bokstaver) avvises (kode 1) uten å skrive noe og uten å ekkoe verdien - kun funn-typen", () => {
+    for (const [flag, make] of [["--id", githubShaped], ["--id", stripeShaped], ["--name", githubShaped], ["--vendor", githubShaped], ["--tool-id", stripeShaped]]) {
+      const value = make();
+      const base = ["--id", "acme_x", "--name", "Acme"].filter((x, i, a) => !(a[i - 1] === flag || x === flag));
+      const root = fresh();
+      const r = run([...base, flag, value, "--root", root]);
+      expect(r.status, `${flag} ${value.slice(0, 6)}`).toBe(1);
+      expect(r.stderr).toContain(`${flag} ligner en hemmelighet`);
+      expect(r.stderr).toMatch(/\((github_token|stripe_key)\)/);
+      for (const leak of [value, value.slice(0, 8)]) expect(r.stderr.includes(leak), `${flag}: ${leak}`).toBe(false);
+      expect(listFiles(root)).toEqual([]);
+    }
+    // Også ved tørrkjøring (valideringen skjer før noe planlegges), og via normalize() direkte:
+    expect(main(["--id", githubShaped(), "--name", "X", "--dry-run"], quiet)).toBe(1);
+    expect(() => normalize({ id: githubShaped(), name: "X", write: false })).toThrow(GeneratorError);
+    expect(() => normalize({ id: "acme_x", name: `API_KEY=${"x7".repeat(8)}`, write: false })).toThrow(/named_secret/);
+  });
+
+  it("N7: vanlige navn og id-er (inkl. alle eksemplene i dokumentasjonen) har ingen funn - ingen falske positive for normal bruk", () => {
+    for (const v of ["acme_tasks", "google_sheets", "a_b", "ab", "x9", "zz_demo", "tasks-api", "Acme Tasks", "Åse & Øvre (v2) - AS.", "Acme Corp"]) expect(secretKinds(v), v).toEqual([]);
+  });
+
+  it("N7: en feilet skriving ETTER at filen er opprettet (disk full) etterlater ingen tom fil og ingen mapper - alt denne kjøringen laget fjernes", () => {
+    const plan = planFiles(normalize({ id: "acme_x", name: "Acme", write: false }));
+    for (const failOn of [1, 2, 4]) {
+      const root = fresh();
+      let n = 0;
+      const io = { openSync, closeSync, writeFileSync: (...a) => { n += 1; if (n === failOn) throw Object.assign(new Error("simulert disk full"), { code: "ENOSPC" }); return writeFileSync(...a); } };
+      let caught;
+      try { writePlan(root, plan, { io }); } catch (e) { caught = e; }
+      expect(caught?.code, `feiler på fil ${failOn}`).toBe("ENOSPC");
+      expect(tree(root), `feiler på fil ${failOn}`).toEqual([]);
+    }
+    // Kontroll: uten feil skrives alle fire.
+    const ok = fresh();
+    expect(writePlan(ok, plan).length).toBe(4);
+    expect(listFiles(ok).length).toBe(4);
+  });
+
+  it("N7: en fil som dukker opp underveis (EEXIST ved åpning) er IKKE vår: den røres ikke, det kjøringen selv laget før den fjernes (kode 2)", () => {
+    const plan = planFiles(normalize({ id: "acme_x", name: "Acme", write: false }));
+    const root = fresh();
+    const intruder = join(root, plan[1].path);
+    const io = {
+      openSync: (path, flag) => {
+        if (path === intruder) { mkdirSync(dirname(intruder), { recursive: true }); writeFileSync(intruder, "annens fil\n"); }
+        return openSync(path, flag);
+      },
+      closeSync, writeFileSync
+    };
+    let caught;
+    try { writePlan(root, plan, { io }); } catch (e) { caught = e; }
+    expect(caught).toBeInstanceOf(GeneratorError);
+    expect(caught.exitCode).toBe(2);
+    expect(readFileSync(intruder, "utf8")).toBe("annens fil\n");
+    expect(listFiles(root)).toEqual([plan[1].path]);
+  });
+
+  it("N7: en dinglende symlenke som --root gir en KLAR melding (kode 1, uten rå ENOENT/UVENTET og uten å ekkoe stien), også ved tørrkjøring, og ingenting dukker opp i målet", () => {
+    const holder = fresh();
+    const target = join(holder, "finnes-ikke");
+    const link = join(holder, "rot");
+    symlinkSync(target, link);
+    for (const extra of [[], ["--dry-run"]]) {
+      const r = run(["--id", "acme_x", "--name", "Acme", "--root", link, ...extra]);
+      expect(r.status, r.stderr).toBe(1);
+      expect(r.stderr).toContain("dinglende symlenke");
+      expect(r.stderr).not.toMatch(/ENOENT|EEXIST|UVENTET/);
+      expect(r.stderr.includes(link)).toBe(false);
+    }
+    expect(existsSync(target)).toBe(false);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
   });
 });
 

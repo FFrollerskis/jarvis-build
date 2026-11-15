@@ -10,8 +10,8 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { FULL_MANIFESTS, SKELETON_BASELINE, productionConnectorDefinitions, runManifestGuard, validateConnectorManifest, type ConnectorManifest } from "../src/index.ts";
-import { runConnectorContract, type ContractAdapter } from "../src/testing.ts";
+import { FULL_MANIFESTS, SKELETON_BASELINE, productionConnectorDefinitions, runManifestGuard, safeIdentifier, validateConnectorManifest, type ConnectorManifest } from "../src/index.ts";
+import { errorLabel, runConnectorContract, type ContractAdapter } from "../src/testing.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG = resolve(HERE, "..");
@@ -82,10 +82,12 @@ async function loadFake(id: string): Promise<ContractAdapter | null> {
 
 async function contractReport(id: string, json: boolean, io: Io): Promise<number> {
   if (!ID.test(id)) { io.err("FEIL: connector-id må være snake_case (a-z, 0-9, _)"); return 2; }
+  // Review N4: et argument som har id-formen kan likevel være et helt token (`ghp_...` er snake_case) - det vises aldri uredigert (`safeIdentifier`: `<redacted>` for det som ligner en hemmelighet).
+  const shown = safeIdentifier(id);
   const manifest = await loadManifest(id);
-  if (manifest === null) { io.err(`FEIL: fant ikke et gyldig manifest for «${id}» (FULL_MANIFESTS eller src/manifests/${id}.ts med export ${id.toUpperCase()}_MANIFEST)`); return 2; }
+  if (manifest === null) { io.err(`FEIL: fant ikke et gyldig manifest for «${shown}» (FULL_MANIFESTS eller src/manifests/${shown}.ts med export ${shown.toUpperCase()}_MANIFEST)`); return 2; }
   const adapter = await loadFake(id);
-  if (adapter === null) { io.err(`FEIL: fant ikke en fake-adapter for «${id}» (test/references/${id}.fake.ts eller test/connectors/${id}.fake.ts med export create${pascal(id)}Fake)`); return 2; }
+  if (adapter === null) { io.err(`FEIL: fant ikke en fake-adapter for «${shown}» (test/references/${shown}.fake.ts eller test/connectors/${shown}.fake.ts med export create${pascal(shown)}Fake)`); return 2; }
   const r = await runConnectorContract(manifest, adapter);
   if (json) { io.log(JSON.stringify(r, null, 2)); return r.ok ? 0 : 1; }
   io.log(`Kontraktstest-kit for ${r.connector_id}: ${r.ok ? "OK" : "BRUDD"} - ${r.passed} bestått, ${r.failed} feilet, ${r.skipped} hoppet over (adapter_kind: ${r.adapter_kind})`);
@@ -106,7 +108,8 @@ export async function main(argv: readonly string[], io: Io = { log: (s) => conso
     if (args[0] === "guard" && args.length === 1) return guardReport(json, io);
     if (args[0] === "contract" && args.length === 2) return await contractReport(args[1]!, json, io);
   } catch (e) {
-    io.err(`UVENTET FEIL: ${(e as Error).message.slice(0, 200)}`);
+    // Review N4: aldri råtekst fra unntaket (en fake-fabrikk, en manifestfil eller en sti kan sitere en verdi) - kun navn/kode, gjennom den sentrale redigeringen.
+    io.err(`UVENTET FEIL: ${errorLabel(e)}`);
     return 1;
   }
   io.err(USAGE);

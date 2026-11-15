@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { CONNECTOR_ID_PATTERN, VAULT_REF_PATTERN, validateConnectorManifest } from "../src/index.ts";
+import { secretShapedConnectorId, validFullManifest } from "./fixtures.ts";
 import { runConnectorContract } from "../src/testing.ts";
 
 /**
@@ -90,6 +91,21 @@ describe("generatoren og skjemaet er enige om hva en connector-id er (review LOW
   it("alle registerets connector-id-er oppfyller den strammere formen (ingen eksisterende id brytes)", async () => {
     const { CONNECTOR_REGISTRY } = await import("@jarvis/tool-gateway");
     for (const c of CONNECTOR_REGISTRY) expect(CONNECTOR_ID_PATTERN.test(c.id), c.id).toBe(true);
+  });
+
+  it("review N7: generatoren avviser det manifestskjemaet avviser (token-formede id-er) og godtar det skjemaet godtar - samme skanner, så ingen registerid og ingen id fra fixturene gir falske positive", async () => {
+    const gen = (await import(/* @vite-ignore */ pathToFileURL(SCRIPT).href)) as { secretKinds: (v: string) => string[]; normalize: (o: unknown) => unknown };
+    const { CONNECTOR_REGISTRY } = await import("@jarvis/tool-gateway");
+    for (const c of CONNECTOR_REGISTRY) expect(gen.secretKinds(c.id), c.id).toEqual([]);
+    // Det skjemaet kaller `secret_shaped_identifier`, avviser generatoren før noe skrives (id-en bygges ved kjøring, aldri som bokstav i kilden):
+    for (const id of [secretShapedConnectorId(), `sk_live_${"c3".repeat(12)}`]) {
+      expect(CONNECTOR_ID_PATTERN.test(id), id.slice(0, 6)).toBe(true); // formmessig en gyldig id...
+      const m = validFullManifest();
+      m.identity.id = id;
+      expect(validateConnectorManifest(m).issues.some((i) => i.path === "identity.id" && (i.code === "secret_shaped_identifier" || i.code === "secret_shape_detected"))).toBe(true);
+      expect(gen.secretKinds(id).length, id.slice(0, 6)).toBeGreaterThan(0); // ...men begge avviser den som hemmelighetsform
+      expect(() => gen.normalize({ id, name: "X", write: false })).toThrow(/ligner en hemmelighet/);
+    }
   });
 });
 

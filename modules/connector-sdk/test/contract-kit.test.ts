@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { deriveSkeletonManifests, isUnknown, productionConnectorDefinitions, validateConnectorManifest, type ConnectorManifest } from "../src/index.ts";
 import {
-  CONTRACT_CHECK_IDS, FAKE_CREDENTIAL_CANARY, FAKE_DEFECTS, INJECTION_PAYLOAD, VirtualClock, createFakeConnector, runConnectorContract, secretShapes, scoreAcceptance,
+  CONTRACT_CHECK_IDS, FAKE_CREDENTIAL_CANARY, FAKE_DEFECTS, INJECTION_PAYLOAD, VirtualClock, createFakeConnector, errorLabel, messageOf, runConnectorContract, secretShapes, scoreAcceptance,
   type ContractReport, type FakeDefect
 } from "../src/testing.ts";
 import { adapterKindOf, brandRealTransportAdapter } from "../src/contract/provenance.ts";
@@ -477,6 +477,84 @@ describe("review N1: ingen vakuøse pass når connectoren bare har utsatte klass
     expect(withSkipped(["idempotency.required_key_enforced", "idempotency.key_reuse_other_payload"])).toBe("modelled");
     for (const id of OVER_EXECUTABLE_WRITES.filter((x) => x.startsWith("idempotency.") || x.startsWith("timeout.") || x.startsWith("errors."))) expect(withSkipped([id]), id).toBe("not_proven");
     expect(withSkipped(["idempotency.same_key_one_effect", "idempotency.required_key_enforced"])).toBe("not_proven");
+  });
+});
+
+describe("review N4/N7: kittet kaster aldri, og unntakstekst redigeres FØR den kuttes", () => {
+  const good = () => createFakeConnector({ manifest: validFullManifest() });
+  const withThrowingSampleParameters = (thrown: unknown) => ({ ...good(), sampleParameters: () => { throw thrown; } }) as unknown as ReturnType<typeof good>;
+
+  it("N4: et token som krysser 120-tegnskuttet (≥ 9 tegn av det før kuttet) lekker ikke et prefiks - redigering skjer før kutt", async () => {
+    // Token starter ved tegn 108 i meldingen, så et kutt ved 120 uten forutgående redigering ville latt «ghp_a1a1a1a1» stå (12 tegn, under skannerens 20-tegns minimum).
+    const token = secretShapes()[0]!;
+    const message = `${"x".repeat(107)} ${token} ${"y".repeat(40)}`;
+    expect(message.indexOf(token)).toBe(108);
+    expect(message.slice(0, 120).includes(token.slice(0, 12))).toBe(true); // forutsetningen: et rå kutt etterlater prefikset
+    for (const prefixLen of [9, 12, 19]) {
+      const m = validFullManifest();
+      const r = await runConnectorContract(m, withThrowingSampleParameters(new Error(message)));
+      const json = JSON.stringify(r);
+      expect(json.includes(token.slice(0, prefixLen)), `prefiks på ${prefixLen} tegn`).toBe(false);
+      expect(json).toContain("[REDACTED:");
+    }
+    const r = await runConnectorContract(validFullManifest(), withThrowingSampleParameters(new Error(message)));
+    const thrown = r.checks.filter((c) => c.status === "fail" && /sjekken kastet/.test(c.detail ?? ""));
+    expect(thrown.length).toBeGreaterThan(0);
+    for (const c of thrown) expect((c.detail ?? "").length).toBeLessThanOrEqual("sjekken kastet: ".length + 120);
+  });
+
+  it("N4/N7: også ting som IKKE er Error (streng, objekt med message, tall, undefined) kastes uten at kittet selv kaster - og strengen redigeres", async () => {
+    const token = secretShapes()[0]!;
+    for (const thrown of [`rå streng ${token}`, { message: `objekt ${token}` }, 42, undefined, null]) {
+      const r = await runConnectorContract(validFullManifest(), withThrowingSampleParameters(thrown));
+      expect(r.ok).toBe(false);
+      expect(JSON.stringify(r).includes(token.slice(0, 12)), String(thrown)).toBe(false);
+    }
+    expect(messageOf("a")).toBe("a");
+    expect(messageOf({ message: "b" })).toBe("b");
+    expect([messageOf(1), messageOf(undefined), messageOf(null), messageOf({}), messageOf({ message: 5 })]).toEqual(["", "", "", "", ""]);
+  });
+
+  it("N7: en adapter som ikke oppfyller ContractAdapter (ikke et objekt, uten actions, uten invoke) gir en fail-closed rapport i stedet for at runConnectorContract kaster", async () => {
+    const m = validFullManifest();
+    const base = good();
+    const bad: unknown[] = [undefined, null, "adapter", 7, {}, { actions: "ikke en liste", invoke: async () => ({}) }, { ...base, actions: undefined }, { ...base, invoke: undefined }];
+    for (const adapter of bad) {
+      const r = await runConnectorContract(m, adapter as never);
+      expect(r.ok, String(adapter)).toBe(false);
+      expect(r.failed).toBe(1);
+      expect(failedIds(r)).toEqual(["manifest.adapter_matches"]);
+      expect(r.checks.every((c) => c.id === "manifest.adapter_matches" || c.status === "skip")).toBe(true);
+      expect(r.passed).toBe(0);
+      expect(r.checks.length).toBe(CONTRACT_CHECK_IDS.length);
+      expect(r.adapter_kind).toBe("fake_from_manifest");
+      expect(r.acceptance.verdict).toBe("gaps");
+      expect(r.acceptance.summary.proven + r.acceptance.summary.modelled).toBe(0);
+    }
+  });
+
+  it("N7: en adapter uten kontrollkrokene (injectFault/setPaused/... mangler) feiler per sjekk uten at kittet kaster (kit.reset er trygg)", async () => {
+    const m = validFullManifest();
+    const base = good();
+    const crippled = { ...base, injectFault: undefined, setPaused: undefined, setCredentialRevoked: undefined, seedProviderText: undefined } as unknown as typeof base;
+    const r = await runConnectorContract(m, crippled);
+    expect(r.ok).toBe(false);
+    expect(r.checks.some((c) => c.status === "fail" && /sjekken kastet/.test(c.detail ?? ""))).toBe(true);
+  });
+
+  it("N4: errorLabel viser kun navn og kode (aldri melding), slipper bare allowlistede former, og redigerer en token-formet del", () => {
+    const token = secretShapes()[0]!;
+    expect(errorLabel(new Error(`boom ${token}`))).toBe("Error");
+    expect(errorLabel(Object.assign(new TypeError(`x ${token}`), { code: "ERR_INVALID_ARG_TYPE" }))).toBe("TypeError (ERR_INVALID_ARG_TYPE)");
+    expect(errorLabel(Object.assign(new Error("m"), { code: "ENOENT" }))).toBe("Error (ENOENT)");
+    // En kode eller et navn med liten bokstav/tegnsetting (token-formet) slippes aldri gjennom allowlisten:
+    expect(errorLabel(Object.assign(new Error("m"), { code: token }))).toBe("Error");
+    expect(errorLabel(Object.assign(new Error("m"), { name: token }))).toBe("Error");
+    // Et token som tilfeldigvis passer allowlisten (AKIA + 16 tegn) redigeres av den sentrale skanneren:
+    const awsShaped = secretShapes()[2]!;
+    expect(awsShaped).toMatch(/^[A-Za-z][A-Za-z0-9]{0,39}$/);
+    expect(errorLabel(Object.assign(new Error("m"), { name: awsShaped }))).toBe("[REDACTED:aws_access_key]");
+    for (const odd of ["streng", 3, undefined, null, {}, { name: 5, code: 6 }]) expect(errorLabel(odd), String(odd)).toBe("Error");
   });
 });
 

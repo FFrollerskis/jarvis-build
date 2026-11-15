@@ -3,7 +3,7 @@ import { isUnknown, safeIdentifier, type ActionSpec, type ConnectorManifest } fr
 import { validateConnectorManifest } from "../validate.ts";
 import { settle } from "./clock.ts";
 import { adapterKindOf } from "./provenance.ts";
-import { redactText } from "./redact.ts";
+import { messageOf, redactText } from "./redact.ts";
 import { scoreAcceptance, type AcceptanceReport } from "./scoring.ts";
 import type { AdapterIdentity, AdapterKind, AdapterRequest, AdapterResult, CheckStatus, ContractAdapter, ContractCheckResult, ErrorCategory, Fault, HealthState, JsonValue } from "./types.ts";
 
@@ -92,7 +92,8 @@ function makeKit(manifest: ConnectorManifest, adapter: ContractAdapter): Kit {
     manifest, adapter, reads, writes, executableWrites,
     callCount: () => calls,
     key: (label) => `kit-${label}-${++seq}`,
-    reset: () => { adapter.injectFault(null); adapter.setPaused(false); adapter.setCredentialRevoked(false); adapter.seedProviderText(null); },
+    // Review N7: en adapter uten kontrollkrokene (som ikke oppfyller ContractAdapter) skal ikke få kittet til å kaste mellom sjekkene - sjekkene som trenger dem feiler for seg selv (`sjekken kastet`).
+    reset: () => { for (const undo of [() => adapter.injectFault(null), () => adapter.setPaused(false), () => adapter.setCredentialRevoked(false), () => adapter.seedProviderText(null)]) { try { undo(); } catch { /* se over */ } } },
     call: async (a, o = {}) => {
       calls += 1;
       const controller = new AbortController();
@@ -696,8 +697,36 @@ function canaryOf(adapter: ContractAdapter): string {
   try { const c = adapter.credentialCanary(); return typeof c === "string" ? c : ""; } catch { return ""; }
 }
 
-/** Kjør hele kontraktstest-kittet mot en connector. Kaster aldri: en feilende sjekk blir `fail` med årsak. */
+/**
+ * Strukturelle feil som ville fått kittet SELV til å kaste før noen sjekk rakk å kjøre (review N7). Fast ordforråd: aldri en verdi fra adapteren, så meldingen kan ikke ekko noe.
+ * Resten av en ufullstendig adapter (manglende kontrollkroker, en `invoke` som kaster) fanges per sjekk (`sjekken kastet`) og i `kit.reset`.
+ */
+function adapterProblem(adapter: unknown): string | null {
+  if (typeof adapter !== "object" || adapter === null) return "adapteren er ikke et objekt (ContractAdapter kreves)";
+  const a = adapter as { actions?: unknown; invoke?: unknown };
+  if (!Array.isArray(a.actions)) return "adapteren mangler `actions` (liste over handlingsnøkler)";
+  if (typeof a.invoke !== "function") return "adapteren mangler `invoke()`";
+  return null;
+}
+
+/** Rapport for en adapter som ikke oppfyller grensesnittet: `manifest.adapter_matches` feiler (fail-closed, `ok: false`), resten hoppes over med årsak - aldri bestått. */
+function rejectedReport(manifest: ConnectorManifest, problem: string): ContractReport {
+  const checks: ContractCheckResult[] = CHECKS.map((def) => (def.id === "manifest.adapter_matches"
+    ? { id: def.id, level: def.level, title: def.title, status: "fail" as const, detail: problem }
+    : { id: def.id, level: def.level, title: def.title, status: "skip" as const, detail: "adapteren oppfyller ikke ContractAdapter-grensesnittet (se manifest.adapter_matches): sjekken er ikke kjørt" }));
+  return {
+    connector_id: safeIdentifier(manifest.identity.id), adapter_kind: "fake_from_manifest", checks,
+    passed: 0, failed: 1, skipped: checks.length - 1, ok: false, acceptance: scoreAcceptance(manifest, checks, "fake_from_manifest")
+  };
+}
+
+/**
+ * Kjør hele kontraktstest-kittet mot en connector. Kaster aldri: en feilende sjekk blir `fail` med årsak, og en adapter som ikke oppfyller `ContractAdapter` (ikke et objekt, mangler `actions` eller `invoke`)
+ * gir en rapport der `manifest.adapter_matches` feiler (review N7; før kastet `makeKit` en TypeError). Manifestet må være et (muligens ugyldig) typet `ConnectorManifest` - `manifest.valid` feller et ugyldig.
+ */
 export async function runConnectorContract(manifest: ConnectorManifest, adapter: ContractAdapter): Promise<ContractReport> {
+  const problem = adapterProblem(adapter);
+  if (problem !== null) return rejectedReport(manifest, problem);
   const kit = makeKit(manifest, adapter);
   const checks: ContractCheckResult[] = [];
   // Review M2: INGEN tekst forlater kittet uredigert. Verdier fra adapteren (feilkoder, handlingsnøkler, helsetilstand, unntakstekst) og fra et uvalidert manifest (handlingsnøkler, notater) kan bære en
@@ -709,7 +738,8 @@ export async function runConnectorContract(manifest: ConnectorManifest, adapter:
     if (def.needsWrites === true && kit.writes.length === 0) outcome = skip(NO_WRITES);
     else if (def.needsExecutableWrites === true && kit.executableWrites.length === 0) outcome = skip(NO_EXECUTABLE_WRITES);
     else {
-      try { outcome = await def.run(kit); } catch (e) { outcome = { status: "fail", detail: `sjekken kastet: ${(e as Error).message.slice(0, 120)}` }; }
+      // Review N4: REDIGER FØRST, kutt så. Kuttes teksten før redigeringen, kan et token som krysser kuttet bli igjen som et prefiks (9-19 tegn) som ingen skannermønster kjenner igjen.
+      try { outcome = await def.run(kit); } catch (e) { outcome = { status: "fail", detail: `sjekken kastet: ${clean(messageOf(e)).slice(0, 120)}` }; }
     }
     kit.reset();
     checks.push({

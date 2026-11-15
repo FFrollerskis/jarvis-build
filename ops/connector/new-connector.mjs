@@ -12,11 +12,21 @@
  *   docs/runbooks/CONNECTOR_<ID>.md                          runbook-stub (norsk, D-64/D-41-maler)
  *
  * NEKTER Å OVERSKRIVE: finnes en av målfilene fra før, skrives INGENTING (avslutter med kode 2). Ugyldige argumenter gir kode 1. `--dry-run` skriver ingenting.
+ * INGEN EKKO (review N4): ukjente argumenter vises kun som plassering/lengde, uventede unntak kun som `Navn (KODE)`, og en `--id`/`--name`/`--vendor`/`--tool-id` som ligner en hemmelighet avvises med funn-typen (aldri verdien).
  * Generatoren velger ingen leverandør og kjører ingen D-64-/D-41-vurdering - malene PEKER på dem (CLAUDE.md regel 11 og 12); å gjøre dem er arbeidet etterpå.
  */
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+/**
+ * ÉN hemmelighetsskanner (review N7): generatoren gjenbruker den SENTRALE skanneren (`modules/core/src/services/secret-scan.ts`, den samme `notSecretShaped` i manifestskjemaet bruker via `@jarvis/core`) i stedet for egne
+ * mønstre: en token-formet `--id`/`--name`/`--vendor`/`--tool-id` (også med små bokstaver, som `ghp_...` som snake_case) ble før skrevet til fire filer. Skannerfilen er selvstendig (ingen importer, kun slettbar TypeScript-syntaks),
+ * så generatoren trenger fortsatt ingen pakkeavhengigheter - men Node må kunne laste `.ts` (Node >= 22.18 har type-stripping som standard; eldre: `node --experimental-strip-types ...`). Lastes den ikke, FEILER generatoren
+ * lukket (kode 1 med klar melding) i stedet for å hoppe over sjekken. Kun skannerens funn-TYPER (fast ordforråd) vises i meldinger - aldri teksten som traff.
+ */
+let scanner = null;
+try { scanner = await import("../../modules/core/src/services/secret-scan.ts"); } catch { scanner = null; }
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(SCRIPT_DIR, "..", "..");
@@ -64,13 +74,26 @@ export function parseArgs(argv) {
       case "--write": o.write = true; break;
       case "--dry-run": o.dryRun = true; break;
       case "--help": case "-h": o.help = true; break;
-      default: throw new GeneratorError(`ukjent argument: ${String(a).slice(0, 40)}`, 1);
+      // Review N4: ALDRI selve argumentet (et ukjent argument kan være et helt token) - kun plassering og lengde.
+      default: throw new GeneratorError(`ukjent argument nr. ${i + 1} (${String(a).length} tegn) - se --help`, 1);
     }
   }
   return o;
 }
 
 const pascal = (id) => id.split("_").map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join("");
+
+/** Skannerens funn-typer i en verdi (fast ordforråd, aldri den matchede teksten). Kaster `GeneratorError` (kode 1) hvis skanneren ikke kunne lastes - ingen hemmelighetssjekk å hoppe over. */
+export function secretKinds(value) {
+  if (scanner === null) throw new GeneratorError("hemmelighetsskanneren (modules/core/src/services/secret-scan.ts) kunne ikke lastes: bruk Node >= 22.18 (type-stripping), eller kjør med `node --experimental-strip-types ops/connector/new-connector.mjs ...` - generatoren nekter å fortsette uten den", 1);
+  return scanner.scanForSecrets(String(value)).findings.map((f) => f.kind).filter((k) => /^[a-z_]{1,40}$/.test(k));
+}
+
+/** Review N7: en verdi som ligner en hemmelighet (kjent token-form, `NAVN=verdi` ...) avvises - verdien selv ekkoes aldri, kun funn-typen. */
+function rejectSecretShaped(flag, value) {
+  const kinds = secretKinds(value);
+  if (kinds.length > 0) throw new GeneratorError(`${flag} ligner en hemmelighet (${kinds.join(", ")}): en connector-id/et navn er aldri en verdi - velg et nøytralt navn`, 1);
+}
 
 /** Validerer og normaliserer inndata. Kaster `GeneratorError` (kode 1) ved brudd. */
 export function normalize(o) {
@@ -79,6 +102,11 @@ export function normalize(o) {
   if (o.vendor !== undefined && !TEXT_PATTERN.test(o.vendor)) throw new GeneratorError("--vendor har ugyldige tegn (samme regler som --name)", 1);
   const toolId = o.toolId ?? o.id;
   if (!TOOL_ID_PATTERN.test(toolId)) throw new GeneratorError("--tool-id må være a-z, 0-9, _ eller -, starte med en bokstav (verktøy-id i verktøydefinisjonene)", 1);
+  // Samme regel som manifestskjemaet (`notSecretShaped`): den sentrale skanneren, ikke egne mønstre. Gjelder alle felt som havner i filene.
+  rejectSecretShaped("--id", o.id);
+  rejectSecretShaped("--name", o.name);
+  if (o.vendor !== undefined) rejectSecretShaped("--vendor", o.vendor);
+  if (o.toolId !== undefined) rejectSecretShaped("--tool-id", o.toolId);
   return { id: o.id, name: o.name, vendor: o.vendor, toolId, write: o.write };
 }
 
@@ -206,14 +234,21 @@ function missingDirs(dir) {
   return out.reverse();
 }
 
+/** Filsystemoperasjonene som SKRIVER (kan byttes i test for å simulere en skrivefeil - disk full - ETTER at filen er opprettet). */
+const DEFAULT_IO = { openSync, writeFileSync, closeSync };
+
 /**
  * Skriver planen under `root`. NEKTER å overskrive: alle mål sjekkes FØR noe skrives (kode 2), og filene åpnes med `wx` (feiler om en fil dukker opp underveis - da fjernes det denne kjøringen allerede har laget,
  * både filer og mapper den selv opprettet; en mappe som ikke er tom fjernes aldri). ALDRI utenfor `--root`: stien sjekkes både leksikalt og via `realpath` (en symlenke inne i roten som peker ut, f.eks.
  * `manifests/ -> /annet`, gir kode 1 før noe skrives). Selve `--root` kan være en symlenke - den er eierens eksplisitte valg.
  * @returns {string[]} absolutte stier som ble skrevet (tom ved dry-run)
  */
-export function writePlan(root, plan, { dryRun = false } = {}) {
+export function writePlan(root, plan, { dryRun = false, io = DEFAULT_IO } = {}) {
   const base = resolve(root);
+  // Review N7: en --root som er en DINGLENDE symlenke (peker til noe som ikke finnes) ga en rå ENOENT/EEXIST fra mkdir langt nede. Stans tidlig med en klar melding (uten å ekkoe stien).
+  let rootIsDangling = false;
+  try { rootIsDangling = lstatSync(base).isSymbolicLink() && !existsSync(base); } catch { /* finnes ikke i det hele tatt: opprettes under */ }
+  if (rootIsDangling) throw new GeneratorError("--root er en dinglende symlenke (den peker til noe som ikke finnes) - rett eller fjern symlenken, eller velg en annen --root", 1);
   const rootExists = existsSync(base);
   const baseReal = rootExists ? realpathSync(base) : base;
   const targets = plan.map((f) => {
@@ -234,8 +269,11 @@ export function writePlan(root, plan, { dryRun = false } = {}) {
       const dir = dirname(t.abs);
       createdDirs.push(...missingDirs(dir));
       mkdirSync(dir, { recursive: true });
-      writeFileSync(t.abs, t.content, { encoding: "utf8", flag: "wx" });
+      // Review N7: åpne EKSKLUSIVT (`wx`, feiler med EEXIST hvis filen dukket opp underveis - da er den ikke vår og røres ikke), og registrer filen som VÅR med en gang den finnes - ikke først etter vellykket skriving.
+      // Før lå `created.push` etter `writeFileSync`: feilet skrivingen (disk full) etter at filen var opprettet, ble en TOM fil stående igjen som neste kjøring nektet å overskrive.
+      const fd = io.openSync(t.abs, "wx");
       created.push(t.abs);
+      try { io.writeFileSync(fd, t.content, "utf8"); } finally { io.closeSync(fd); }
     }
   } catch (err) {
     for (const f of created) rmSync(f, { force: true });
@@ -258,6 +296,20 @@ const USAGE = `Bruk: node ops/connector/new-connector.mjs --id <connector_id> --
   --root      mappen filene skrives under (standard: repo-roten)
   --dry-run   vis hva som ville blitt skrevet, uten å skrive
 Avslutter 0 = ok, 1 = ugyldig bruk, 2 = ville overskrive (ingenting skrives).`;
+
+/**
+ * Review N4: `Navn (KODE)` for et uventet unntak - aldri meldingsteksten. Hver del slippes gjennom en streng allowlist (feilnavn: bokstaver/tall, kode: STORE bokstaver/tall/understrek), og det hele redigeres av den sentrale
+ * skanneren når den er lastet (forsvar i dybden: et token som tilfeldigvis passer allowlisten, f.eks. AKIA + 16 tegn).
+ * @param {unknown} err @returns {string}
+ */
+export function errorLabel(err) {
+  const rawName = typeof err === "object" && err !== null ? err.name : undefined;
+  const name = typeof rawName === "string" && /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(rawName) ? rawName : "Error";
+  const rawCode = typeof err === "object" && err !== null ? err.code : undefined;
+  const code = typeof rawCode === "string" && /^[A-Z][A-Z0-9_]{1,39}$/.test(rawCode) ? rawCode : null;
+  const label = code === null ? name : `${name} (${code})`;
+  return scanner === null ? label : scanner.scanForSecrets(label).text;
+}
 
 /** @param {string[]} argv @returns {number} exit code */
 export function main(argv, io = { log: (s) => console.log(s), err: (s) => console.error(s) }) {
@@ -284,7 +336,8 @@ NESTE STEG (CLAUDE.md regel 11 og 12 - ingen snarvei):
       io.err(`FEIL: ${err.message}`);
       return err.exitCode;
     }
-    io.err(`UVENTET FEIL: ${err && err.message ? String(err.message).slice(0, 200) : "ukjent"}`);
+    // Review N4: aldri meldingsteksten (en feil kan sitere en sti eller et argument, og et token er ikke alltid en kjent form) - kun navn/kode fra en streng allowlist.
+    io.err(`UVENTET FEIL: ${errorLabel(err)}`);
     return 1;
   }
 }
