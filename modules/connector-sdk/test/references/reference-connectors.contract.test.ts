@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { runConnectorContract, FULL_MANIFESTS, type ConnectorManifest, type ContractAdapter, type ContractReport } from "../../src/index.ts";
+import { FULL_MANIFESTS, type ConnectorManifest } from "../../src/index.ts";
+import { runConnectorContract, type ContractAdapter, type ContractReport } from "../../src/testing.ts";
 import { createCloudflareFake } from "./cloudflare.fake.ts";
 import { createGithubFake } from "./github.fake.ts";
 import { createStripeFake } from "./stripe.fake.ts";

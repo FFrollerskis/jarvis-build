@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { isUnknown, type ConnectorManifest } from "../src/index.ts";
 import {
-  CONTRACT_CHECK_IDS, FAKE_CREDENTIAL_CANARY, FAKE_DEFECTS, INJECTION_PAYLOAD, VirtualClock, createFakeConnector, isUnknown, runConnectorContract, secretShapes, scoreAcceptance,
-  type ConnectorManifest, type ContractReport, type FakeDefect
-} from "../src/index.ts";
+  CONTRACT_CHECK_IDS, FAKE_CREDENTIAL_CANARY, FAKE_DEFECTS, INJECTION_PAYLOAD, VirtualClock, createFakeConnector, runConnectorContract, secretShapes, scoreAcceptance,
+  type ContractReport, type FakeDefect
+} from "../src/testing.ts";
 import { ACME_KEYS, validFullManifest, validSkeletonManifest } from "./fixtures.ts";
 
 const failedIds = (r: ContractReport) => r.checks.filter((c) => c.status === "fail").map((c) => c.id);

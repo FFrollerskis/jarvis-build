@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { runConnectorContract, validateConnectorManifest } from "../../src/index.ts";
+import { validateConnectorManifest } from "../../src/index.ts";
+import { runConnectorContract } from "../../src/testing.ts";
 import { {{CONST}}_MANIFEST } from "../../src/manifests/{{ID}}.ts";
 import { create{{PASCAL}}Fake } from "./{{ID}}.fake.ts";
 

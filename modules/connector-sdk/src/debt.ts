@@ -1,4 +1,4 @@
-import type { HealthState } from "./contract/types.ts";
+import type { HealthState } from "./health-state.ts";
 
 /**
  * WP-I (D-472): CONNECTOR-GJELD som ren LESEMODELL (masterplan kap. 10: «Connector debt is measured: auth failures, API changes, maintenance hours, incident count, sync lag and deprecation risk»,

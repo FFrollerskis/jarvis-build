@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { runConnectorContract, validateConnectorManifest } from "../src/index.ts";
+import { validateConnectorManifest } from "../src/index.ts";
+import { runConnectorContract } from "../src/testing.ts";
 
 /**
  * WP-I (D-472): ende-til-ende-bevis for scaffold-generatoren. Genererer et utkast inn i en MIDLERTIDIG mappe (aldri inn i repoet), kobler SDK-kildene inn via symlinker så de genererte relative

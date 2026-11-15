@@ -1,4 +1,4 @@
-import { createFakeConnector, type ContractAdapter, type FakeConnectorSpec } from "../../src/index.ts";
+import { createFakeConnector, type ContractAdapter, type FakeConnectorSpec } from "../../src/testing.ts";
 import { CLOUDFLARE_MANIFEST } from "../../src/manifests/cloudflare.ts";
 
 /**

@@ -1,4 +1,5 @@
 import type { JsonValue, TrustLevel } from "@jarvis/contracts";
+import type { HealthState } from "../health-state.ts";
 import type { VirtualClock } from "./clock.ts";
 
 /**
@@ -9,13 +10,10 @@ import type { VirtualClock } from "./clock.ts";
  * Kittet kan kjøres mot (1) en FAKE bygget av `createFakeConnector` (ingen nettverk), og i prinsippet (2) en ekte transport bak en fake leverandørserver - den broen er DEFERRED (se runbook).
  */
 
-export type { JsonValue, TrustLevel };
+export type { HealthState, JsonValue, TrustLevel };
 
 /** Speiler `FailureCategory` (Integrasjonssenteret) + de avvisningsårsakene gatewayen selv gir. */
 export type ErrorCategory = "auth" | "rate_limit" | "timeout" | "network" | "not_found" | "invalid_input" | "authority" | "paused" | "conflict" | "policy" | "other";
-
-/** Speiler `HealthState` (ToolGateway.health / Integrasjonssenteret). */
-export type HealthState = "healthy" | "degraded" | "rate_limited" | "auth_failed" | "unavailable";
 
 export interface AdapterIdentity {
   tenant_id: string;
