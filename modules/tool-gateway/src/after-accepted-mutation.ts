@@ -32,11 +32,19 @@ function messageOf(err: unknown): string {
   }
 }
 
+function keeps(options: AfterAcceptedOptions, err: unknown): boolean {
+  try {
+    return options.keep?.(err) === true;
+  } catch {
+    return false; // et kastende `keep` skal aldri la en feil slippe forbi som en vanlig (retry-bar) feil: da er den ukjent, ikke «mislyktes»
+  }
+}
+
 export async function afterAcceptedMutation<T>(code: string, step: () => Promise<T> | T, options: AfterAcceptedOptions = {}): Promise<T> {
   try {
     return await step();
   } catch (err) {
-    if (options.keep?.(err) === true) throw err;
+    if (keeps(options, err)) throw err;
     if (isOutcomeUnknownMessage(messageOf(err))) throw err;
     throw new Error(`${OUTCOME_UNKNOWN_PREFIX}:${code.replace(CODE_CHARS, "_").slice(0, 60)}`);
   }

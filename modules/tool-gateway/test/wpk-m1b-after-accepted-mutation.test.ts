@@ -106,6 +106,11 @@ describe("A: afterAcceptedMutation - den delte hjelperen for steg ETTER en aksep
     await expect(afterAcceptedMutation("c", () => { throw new Error("gce_operation_poll_timeout"); }, { keep })).rejects.toThrow("outcome_unknown:c");
   });
 
+  it("et `keep` som selv kaster regnes som «ikke holdt igjen»: feilen blir `outcome_unknown` (aldri en vanlig feil, aldri keep-feilen)", async () => {
+    const boom = (): boolean => { throw new Error("keep_boom"); };
+    await expect(afterAcceptedMutation("k", () => { throw new Error("whatever"); }, { keep: boom })).rejects.toThrow(/^outcome_unknown:k$/);
+  });
+
   it("ikke-Error-verdier og en feil med kastende getter gir fortsatt `outcome_unknown` (hjelperen kaster aldri noe annet)", async () => {
     for (const value of ["en streng", null, undefined, 7, { message: 12 }]) {
       await expect(afterAcceptedMutation("odd", () => { throw value; })).rejects.toThrow("outcome_unknown:odd");
