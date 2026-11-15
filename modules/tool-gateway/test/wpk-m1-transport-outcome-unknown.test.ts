@@ -1,4 +1,4 @@
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createServer as createTcpServer, type Server as TcpServer } from "node:net";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,7 +12,7 @@ import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { KillSwitch, PolicyGateway } from "@jarvis/policy";
 import {
-  ToolGateway, UnsafeVendorUrlError, isIndeterminateTransportError, transportErrorKind,
+  CloudflareApiError, ControlTargetHttpError, ToolGateway, UnsafeVendorUrlError, guardedFetch, isIndeterminateTransportError, jsonRequest, transportErrorKind,
   type ClassDNotification, type ClassDNotifier, type ToolDefinition, type ToolTransport
 } from "../src/index.ts";
 
@@ -271,5 +271,190 @@ describe("EKTE socket-feil (undici mot lokale servere) gir samme klassifisering 
     const row = (await adminPool.query("SELECT status FROM tool_executions WHERE idempotency_key = 'k-m1-real-refused'")).rows[0] as { status: string };
     expect(row.status).toBe("failed");
     expect(hits.count).toBe(2);
+  }, 30_000);
+});
+
+/**
+ * Re-review (LOW 1): TRE former der leverandøren faktisk SVARTE, men transporten likevel kastet, ble regnet som «ikke sendt»/«ordinær feil» (`failed`), så et samme-nøkkel-replay sendte en ikke-idempotent POST en gang til
+ * (reviewerens POST+303: 2 POST). Nå er utfallet UKJENT (`unverified`). Beviset er ekte HTTP: en lokal leverandørserver telles, `guardedFetch`/`jsonRequest`/`Response.json()` er de EKTE funksjonene, og gatewayen er ekte
+ * (embedded Postgres, klasse D under håndhevet pipeline der det er relevant).
+ */
+describe("LOW 1: leverandøren SVARTE, men transporten kastet - klassifisering (ren funksjon)", () => {
+  it("`unexpected_redirect_http_<status>` (301/302/303/307/308) er ukjent utfall med kind `redirect` - forespørselen ble SENDT og besvart; ANDRE `UnsafeVendorUrlError` (kastet FØR sending) er det ikke", () => {
+    for (const status of [301, 302, 303, 307, 308]) {
+      const err = new UnsafeVendorUrlError(`unexpected_redirect_http_${status}`);
+      expect(isIndeterminateTransportError(err), String(status)).toBe(true);
+      expect(transportErrorKind(err), String(status)).toBe("redirect");
+    }
+    for (const reason of ["dot_segment", "url_malformed", "url_not_plain_http_url", "normalization_changed_url", "file_id_unsafe", "id_invalid", "repo_invalid"]) {
+      expect(isIndeterminateTransportError(new UnsafeVendorUrlError(reason)), reason).toBe(false);
+    }
+  });
+
+  it("redirect-feilen gjenkjennes også når en transport pakker den inn (cause-kjeden), men ikke når en utrygg URL er pakket inn", () => {
+    expect(isIndeterminateTransportError(new Error("vendor_failed", { cause: new UnsafeVendorUrlError("unexpected_redirect_http_303") }))).toBe(true);
+    expect(transportErrorKind(new Error("vendor_failed", { cause: new UnsafeVendorUrlError("unexpected_redirect_http_303") }))).toBe("redirect");
+    expect(isIndeterminateTransportError(new Error("vendor_failed", { cause: new UnsafeVendorUrlError("dot_segment") }))).toBe(false);
+  });
+
+  it("en feil som BÆRER en 2xx-`httpStatus` (leverandøren sa ja, transporten godtok ikke svaret) er ukjent utfall med kind `response`; 4xx (avvist) og 5xx (dokumentert grense) er det ikke", () => {
+    const accepted: Array<[string, unknown]> = [
+      ["ControlTargetHttpError non_json 200", new ControlTargetHttpError("infisical_invalid_response:non_json", 200, false)],
+      ["ControlTargetHttpError response_too_large 200", new ControlTargetHttpError("response_too_large", 200, false)],
+      ["CloudflareApiError non_json 200", new CloudflareApiError("cloudflare_invalid_response:non_json", 200, false)],
+      ["CloudflareApiError success_flag_missing 201", new CloudflareApiError("cloudflare_error_201:success_flag_missing", 201, false)]
+    ];
+    for (const [label, error] of accepted) {
+      expect(isIndeterminateTransportError(error), label).toBe(true);
+      expect(transportErrorKind(error), label).toBe("response");
+    }
+    for (const status of [400, 401, 403, 404, 409, 422, 429, 500, 502, 503, 504]) {
+      expect(isIndeterminateTransportError(new ControlTargetHttpError(`vendor_error_${status}:x`, status, false)), String(status)).toBe(false);
+      expect(isIndeterminateTransportError(new CloudflareApiError(`cloudflare_error_${status}:x`, status, false)), `cf ${status}`).toBe(false);
+    }
+  });
+
+  it("en `SyntaxError` fra JSON-parsing (`Response.json()`/`JSON.parse` på et 2xx-svar) er ukjent utfall med kind `response`; en `SyntaxError` som ikke gjelder JSON er det ikke", async () => {
+    const parse = (text: string): unknown => { try { JSON.parse(text); } catch (error) { return error; } return undefined; };
+    for (const text of ["<html>ok</html>", "", "{not json", "undefined", "OK", "{\"a\":1} trailing"]) {
+      const error = parse(text);
+      expect(error, text).toBeInstanceOf(SyntaxError);
+      expect(isIndeterminateTransportError(error), text).toBe(true);
+      expect(transportErrorKind(error), text).toBe("response");
+    }
+    const viaResponse = await new Response("<html>ok</html>", { status: 200 }).json().then(() => undefined, (error: unknown) => error);
+    expect(isIndeterminateTransportError(viaResponse)).toBe(true);
+    expect(isIndeterminateTransportError(new SyntaxError("Invalid regular expression: /(/: Unterminated group"))).toBe(false);
+  });
+});
+
+interface VendorRequest { method: string; path: string; body: string }
+const vendorClosers: Array<() => Promise<void>> = [];
+afterAll(async () => { for (const close of vendorClosers) await close(); });
+
+/** Ekte lokal leverandørserver som teller hver forespørsel (metode, sti, kropp) og svarer med `respond`. */
+async function startVendor(respond: (req: IncomingMessage, res: ServerResponse) => void): Promise<{ base: string; requests: VendorRequest[] }> {
+  const requests: VendorRequest[] = [];
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      requests.push({ method: req.method ?? "", path: req.url ?? "", body: Buffer.concat(chunks).toString("utf8") });
+      respond(req, res);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  vendorClosers.push(() => new Promise<void>((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()); }));
+  return { base: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, requests };
+}
+
+let realSeq = 0;
+/** Kjører den samme ikke-idempotente mutasjonen to ganger med SAMME nøkkel mot en transport som gjør ekte HTTP. `invokes` teller kall inn i transporten (også de som aldri sendte noe). */
+async function runTwiceReal(opts: { cls: "C" | "D"; mutate: () => Promise<void>; notifier?: ClassDNotifier }): Promise<{
+  first: unknown; replay: unknown; invokes: number; row: { status: string; postcondition_reason: string | null }
+}> {
+  const toolId = `m1-low1-${(realSeq += 1)}`;
+  const key = `k-${toolId}`;
+  let invokes = 0;
+  const transport: ToolTransport = { invoke: async () => { invokes += 1; await opts.mutate(); return {}; } };
+  const g = new ToolGateway(appPool, policy, secrets, undefined, undefined, opts.notifier ? { classDPipeline: { enforce: true, notifier: opts.notifier } } : undefined);
+  g.register(def({ tool_id: toolId, capability_class: opts.cls, ...(opts.cls === "D" && opts.notifier ? { class_d_profile: "outbound_message" as const } : {}) }, transport));
+  const request = { identity, tool_id: toolId, action: "send", parameters: {}, idempotency_key: key };
+  const first = await g.execute(request);
+  const replay = await g.execute(request);
+  const row = (await adminPool.query("SELECT status, postcondition_reason FROM tool_executions WHERE idempotency_key = $1", [key])).rows[0] as { status: string; postcondition_reason: string | null };
+  return { first, replay, invokes, row };
+}
+const UNKNOWN_REPLAY = { ok: false, reason: "postcondition_unverified:tool_timeout_outcome_unknown" };
+
+describe("LOW 1: EKTE HTTP mot en lokal leverandørserver - leverandøren svarte, men transporten kastet: ÉN POST, `unverified`, replay blokkert", () => {
+  for (const status of [301, 302, 303, 307, 308]) {
+    it(`klasse C, POST + ${status}: nøyaktig ÉN POST nådde leverandøren (redirect-målet får ingenting), raden er unverified og replayet sender ikke på nytt`, async () => {
+      const vendor = await startVendor((_req, res) => { res.writeHead(status, { location: "/done" }); res.end(); });
+      const r = await runTwiceReal({ cls: "C", mutate: async () => { await guardedFetch(`${vendor.base}/mutate`, { method: "POST", body: "x" }); } });
+      expect(String((r.first as { reason: string }).reason)).toBe("tool_failed:outcome_unknown:transport_redirect");
+      expect(r.row).toEqual({ status: "unverified", postcondition_reason: "postcondition_unverified:tool_timeout_outcome_unknown" });
+      expect(r.replay).toEqual(UNKNOWN_REPLAY);
+      expect(vendor.requests.map((q) => `${q.method} ${q.path}`)).toEqual(["POST /mutate"]); // aldri en andre POST, aldri en forespørsel til /done
+      expect(r.invokes).toBe(1);
+    }, 30_000);
+  }
+
+  it("klasse D under håndhevet pipeline, POST + 303 (reviewerens exp): én POST, `unverified`, replay blokkert og eieren varsles NØYAKTIG ÉN gang om UKJENT utfall", async () => {
+    const vendor = await startVendor((_req, res) => { res.writeHead(303, { location: "/done" }); res.end(); });
+    const sent: ClassDNotification[] = [];
+    const notifier: ClassDNotifier = { ready: () => true, notify: async (n) => { sent.push(n); } };
+    const r = await runTwiceReal({ cls: "D", notifier, mutate: async () => { await guardedFetch(`${vendor.base}/mutate`, { method: "POST", body: "x" }); } });
+    expect(String((r.first as { reason: string }).reason)).toBe("tool_failed:outcome_unknown:transport_redirect");
+    expect(r.row.status).toBe("unverified");
+    expect(r.replay).toEqual(UNKNOWN_REPLAY);
+    expect(vendor.requests).toHaveLength(1);
+    expect(r.invokes).toBe(1);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ action: "send", outcome: "unknown" });
+  }, 30_000);
+
+  it("200-svar med uparserbar kropp (`await response.json()` -> SyntaxError): én POST, `unverified` (kind `response`), replay blokkert", async () => {
+    const vendor = await startVendor((_req, res) => { res.writeHead(200, { "content-type": "text/html" }); res.end("<html>ok</html>"); });
+    const r = await runTwiceReal({ cls: "C", mutate: async () => { const res = await guardedFetch(`${vendor.base}/mutate`, { method: "POST", body: "x" }); await res.json(); } });
+    expect(String((r.first as { reason: string }).reason)).toBe("tool_failed:outcome_unknown:transport_response");
+    expect(r.row.status).toBe("unverified");
+    expect(r.replay).toEqual(UNKNOWN_REPLAY);
+    expect(vendor.requests).toHaveLength(1);
+    expect(r.invokes).toBe(1);
+  }, 30_000);
+
+  it("`jsonRequest` (Infisical/Langfuse-klienten) mot 200 + ikke-JSON kaster `ControlTargetHttpError` med 2xx-status: én POST, `unverified`, replay blokkert", async () => {
+    const vendor = await startVendor((_req, res) => { res.writeHead(200, { "content-type": "text/plain" }); res.end("created, thanks"); });
+    const r = await runTwiceReal({ cls: "C", mutate: async () => { await jsonRequest({ service: "vendor", method: "POST", url: `${vendor.base}/mutate`, body: { a: 1 }, secrets: [] }); } });
+    expect(String((r.first as { reason: string }).reason)).toBe("tool_failed:outcome_unknown:transport_response");
+    expect(r.row.status).toBe("unverified");
+    expect(r.replay).toEqual(UNKNOWN_REPLAY);
+    expect(vendor.requests).toHaveLength(1);
+  }, 30_000);
+
+  it("kontrast: en eksplisitt AVVISNING (422 fra leverandøren) er IKKE ukjent utfall - raden er `failed`, og samme nøkkel kan prøves på nytt (2 POST)", async () => {
+    const vendor = await startVendor((_req, res) => { res.writeHead(422, { "content-type": "application/json" }); res.end(JSON.stringify({ message: "Validation Failed" })); });
+    const r = await runTwiceReal({ cls: "C", mutate: async () => { await jsonRequest({ service: "vendor", method: "POST", url: `${vendor.base}/mutate`, body: { a: 1 }, secrets: [] }); } });
+    expect(r.row.status).toBe("failed");
+    expect(String((r.first as { reason: string }).reason)).toContain("tool_failed:vendor_error_422");
+    expect(vendor.requests).toHaveLength(2);
+    expect(r.invokes).toBe(2);
+  }, 30_000);
+
+  it("kontrast: en utrygg URL avvist FØR sending (`dot_segment`) sendte ingenting - raden er `failed` og ingen forespørsel nådde serveren", async () => {
+    const vendor = await startVendor((_req, res) => { res.writeHead(200); res.end("{}"); });
+    const r = await runTwiceReal({ cls: "C", mutate: async () => { await guardedFetch(`${vendor.base}/files/../admin`, { method: "POST", body: "x" }); } });
+    expect(r.row.status).toBe("failed");
+    expect(String((r.first as { reason: string }).reason)).toBe("tool_failed:unsafe_vendor_url:dot_segment");
+    expect(vendor.requests).toHaveLength(0);
+    expect(r.invokes).toBe(2);
+  }, 30_000);
+});
+
+describe("LOW 1: KJENT GRENSE (runbook §3 «ikke dekket») - festet så en senere endring må oppdatere dokumentasjonen", () => {
+  it("en transport som selv omskriver en nettverksfeil til en NY Error uten `cause`/`code` er usynlig for klassifiseringen: `failed`, og replayet sender POST-en en gang til (2 POST)", async () => {
+    const vendor = await startVendor((req, res) => { req.socket.destroy(); void res; }); // forespørselen mottas, så rives socketen
+    const r = await runTwiceReal({
+      cls: "C",
+      mutate: async () => {
+        try { await fetch(`${vendor.base}/mutate`, { method: "POST", body: "x" }); } catch { throw new Error("vendor_unreachable"); } // omskriving UTEN cause
+      }
+    });
+    expect(r.row.status).toBe("failed");
+    expect(vendor.requests).toHaveLength(2);
+  }, 30_000);
+
+  it("HTTP 5xx-svar på en mutasjon forblir `failed` (leverandøren svarte; en 5xx kan bety både «utført» og «ikke behandlet»): replayet sender på nytt (2 POST)", async () => {
+    const vendor = await startVendor((_req, res) => { res.writeHead(502); res.end(); });
+    const r = await runTwiceReal({
+      cls: "C",
+      mutate: async () => {
+        const res = await guardedFetch(`${vendor.base}/mutate`, { method: "POST", body: "x" });
+        if (!res.ok) throw new Error(`vendor_error_${res.status}`);
+      }
+    });
+    expect(r.row.status).toBe("failed");
+    expect(vendor.requests).toHaveLength(2);
   }, 30_000);
 });
