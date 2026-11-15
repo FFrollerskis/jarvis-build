@@ -9,11 +9,12 @@ import { OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/ow
 import { SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";
 import {
   CHAT_ACT_TIER, CHAT_DELEGATE_TIER, CHAT_READ_TIER, MODEL_SURFACE_ALLOWLIST, MemorySearchTransport, SURFACE_TOOL_GRANTS, assertChatReadTier, assertManifestInvariants, buildToolManifest, inferEffect,
-  KnowledgeSearchTransport, firstWaveTools, homeAssistantTools, knowledgeToolDefinitions, memoryToolDefinitions, resolveModelToolSurface, scopeFieldsOf, selectSurfaceTools,
+  KnowledgeSearchTransport, financeToolIntent, firstWaveTools, homeAssistantTools, knowledgeToolDefinitions, memoryToolDefinitions, resolveModelToolSurface, scopeFieldsOf, selectSurfaceTools,
   type ToolDefinition, type ToolGateway, type ToolResult
 } from "@jarvis/tool-gateway";
 import { TasksDelegateTransport, tasksDelegateToolDefinitions } from "../src/chat-jobs.ts";
 import { createControlCenterRegistry } from "../src/control-center/register.ts";
+import { CONTROL_CENTER_FLAGS, activeRestrictedControlTools, financeIntentOptions } from "../src/control-center/shared.ts";
 import { RunRateTransport, runRateToolDefinitions } from "../src/run-rate.ts";
 import { EXECUTIVE_MUTATE_ACTIONS, EXECUTIVE_MUTATE_FLAGGED_ACTIONS } from "../src/server.ts";
 import { STEP_UP_EXEMPT_ACTIONS, actionRequiresStepUp, stepUpDenial } from "../src/step-up.ts";
@@ -379,6 +380,29 @@ describe("transporten: de fire nye senterverktøyene", () => {
       } else {
         expect(cloud.report?.sections[0]?.items[0]?.facts, `${a} sky`).toMatchObject({ amount_ore: 5 });
       }
+    }
+  });
+});
+
+describe("gjennomgang L5 (H2): Verdi-senterets ord holder også en DELEGERT jobb lokal (paritet med chatten) - kun når Verdi-flagget er på", () => {
+  const ALL_H2_FLAGS = { [CONTROL_CENTER_FLAGS.operations]: "on", [CONTROL_CENTER_FLAGS.privacy]: "on", [CONTROL_CENTER_FLAGS.security]: "on" };
+
+  it("activeRestrictedControlTools: Verdi (restricted) kommer med når flagget er på; Drift, Personvern og Sikkerhet aldri; ingen flagg = tom liste (main)", () => {
+    expect(activeRestrictedControlTools({})).toEqual([]);
+    expect(activeRestrictedControlTools({ [CONTROL_CENTER_FLAGS.value]: "on" })).toEqual(["executive.get_value_center"]);
+    expect(activeRestrictedControlTools(ALL_H2_FLAGS)).toEqual([]);
+    expect(activeRestrictedControlTools({ ...ALL_H2_FLAGS, [CONTROL_CENTER_FLAGS.finance]: "on", [CONTROL_CENTER_FLAGS.value]: "on" }).sort()).toEqual(["executive.get_finance_center", "executive.get_value_center"]);
+    for (const value of ["true", "1", "ON", "yes", " on", "on "]) expect(activeRestrictedControlTools({ [CONTROL_CENTER_FLAGS.value]: value }), JSON.stringify(value)).toEqual([]);
+  });
+
+  it("financeToolIntent: «vis verdisenteret», «spart tid» og «bruksfrekvens» låser en delegert jobb lokalt med Verdi PÅ - og er identisk med main (false) med flagget AV; de tre andre sentrenes ord gjør det aldri", () => {
+    for (const text of ["vis verdisenteret", "hvor mye spart tid har jeg", "hva er bruksfrekvens"]) {
+      expect(financeToolIntent(text, financeIntentOptions({ [CONTROL_CENTER_FLAGS.value]: "on" })), text).toBe(true);
+      expect(financeToolIntent(text, financeIntentOptions({})), `${text} (flagg AV = main)`).toBe(false);
+      expect(financeToolIntent(text), `${text} (uten valg = main)`).toBe(false);
+    }
+    for (const text of ["vis driftssenteret", "vis personvernsenteret", "vis sikkerhetssenteret", "hva er golden-suite"]) {
+      expect(financeToolIntent(text, financeIntentOptions({ ...ALL_H2_FLAGS, [CONTROL_CENTER_FLAGS.value]: "on" })), text).toBe(false);
     }
   });
 });
