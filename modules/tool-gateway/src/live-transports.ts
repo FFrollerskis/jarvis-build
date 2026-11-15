@@ -1597,7 +1597,25 @@ async function githubFetchRaw(url: string, init: RequestInit, controller?: Githu
       throwIfAborted();
       const response = await guardedFetch(url, init);
       if (response.ok) {
-        if (controller) await controller.recordOutcome(mutation, response.status, response.headers, "");
+        if (controller) {
+          if (mutation) {
+            // WP-K (D-471, uavhengig review M-1, revisjon av transportene): leverandøren har svart 2xx - en mutasjon er AKSEPTERT. Rate-limit-bokføringen er en Postgres-skriving (`PgGithubRateLimitStore.recordSuccess`),
+            // altså hjelpetilstand som kan feile uavhengig av GitHub (tilkobling, tidsavbrudd, manglende tabell). Den må ALDRI gjøre en akseptert merge/sletting/dispatch/kommentar om til en kastet feil: raden ville endt
+            // `failed`, og et samme-nøkkel-replay ville sendt mutasjonen en gang til. Feilen logges (kun navn/kode, aldri meldingstekst) og svelges; neste vellykkede svar retter tilstanden.
+            try {
+              await controller.recordOutcome(mutation, response.status, response.headers, "");
+            } catch (err) {
+              let label = "unknown";
+              try {
+                const name = (err as { name?: unknown } | null | undefined)?.name;
+                if (typeof name === "string") label = name.slice(0, 40);
+              } catch { /* en kastende getter: bruk «unknown» - loggingen skal aldri selv kaste */ }
+              console.error(JSON.stringify({ msg: "github_rate_limit_record_failed", status: response.status, error: label }));
+            }
+          } else {
+            await controller.recordOutcome(mutation, response.status, response.headers, "");
+          }
+        }
         return response;
       }
       const rawBody = await response.text().catch(() => "");

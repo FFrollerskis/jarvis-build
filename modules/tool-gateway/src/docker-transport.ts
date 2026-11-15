@@ -3,6 +3,7 @@ import { scanForSecrets } from "@jarvis/core";
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolInvocationContext, ToolTransport } from "./gateway.ts";
 import { abortReason, currentCallSignal } from "./call-signal.ts";
+import { afterAcceptedMutation } from "./after-accepted-mutation.ts";
 
 /**
  * D-105 (UA-5 kriterium 1+3): Docker Engine-transport - SAMME `docker`-CLI-
@@ -191,9 +192,14 @@ export class DockerTransport implements ToolTransport {
       const started = await run(dockerBin, ["run", "-d", "--name", name, "--label", "jarvis.sentinel=true", "--label", "jarvis.managed=true", "--", image, "sleep", "999999999"], this.timeoutMs, callSignal);
       if (started.code !== 0) throw new Error(`docker_run_failed:${started.stderr.slice(0, 160)}`);
       const containerId = started.stdout.trim().slice(0, 12);
-      const inspected = await run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs, callSignal);
-      if (inspected.code !== 0) throw new Error(`docker_post_deploy_inspect_failed:${inspected.stderr.slice(0, 160)}`);
-      return { external_id: containerId, data: parseInspect(inspected.stdout) as unknown as JsonValue };
+      // WP-K (D-471, uavhengig review M-1): `docker run -d` har lykkes - containeren er startet. `redeploy_container` er IKKE idempotent (`rm -f` + `run`): feiler lesingen av den nye containeren herfra
+      // (inspect gir feil, prosessen avbrytes/tidsavbrytes, uleselig utdata) er utfallet UKJENT (`outcome_unknown:docker_post_deploy_inspect_failed`), ikke en retry-bar feil - et samme-nøkkel-replay ville
+      // ellers fjernet og startet containeren en gang til. Feil FØR/UNDER `run` (`docker_run_failed`) er fortsatt vanlige feil.
+      return afterAcceptedMutation("docker_post_deploy_inspect_failed", async () => {
+        const inspected = await run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs, callSignal);
+        if (inspected.code !== 0) throw new Error(`docker_post_deploy_inspect_failed:${inspected.stderr.slice(0, 160)}`);
+        return { external_id: containerId, data: parseInspect(inspected.stdout) as unknown as JsonValue };
+      });
     }
 
     if (action === "stop_container") {

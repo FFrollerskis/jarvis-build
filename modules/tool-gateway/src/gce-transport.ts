@@ -2,6 +2,7 @@ import { guardedFetch, isRetrySafeStatus } from "./url-safety.ts";
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolTransport } from "./gateway.ts";
 import { abortableSleep, throwIfAborted } from "./call-signal.ts";
+import { afterAcceptedMutation } from "./after-accepted-mutation.ts";
 import { googleAccessToken } from "./live-transports.ts";
 
 /**
@@ -205,6 +206,11 @@ export class GceTransport implements ToolTransport {
    * og leser DERETTER den faktiske instans-tilstanden på nytt - `invoke()`
    * returnerer ALDRI før den ekte, konvergerte sluttilstanden er bekreftet
    * (ALDRI kun operasjonens egen "akseptert"-signal).
+   *
+   * WP-K (D-471, uavhengig review M-1): POST-en er AKSEPTERT når `gceRequest` returnerer. For `reset` (en HARD reboot, `idempotent_external: false`) er enhver feil i bekreftelsen etter det
+   * (`gce_operation_poll_timeout`, en feil under polling, manglende operasjonsnavn, feil ved sluttlesingen) et UKJENT utfall (`outcome_unknown:gce_reset_not_confirmed`): kastet som vanlig feil ville raden
+   * endt `failed`, og et samme-nøkkel-replay ville sendt `reset` en gang til. Unntak: en operasjon som er FERDIG med feil (`gce_operation_failed:*`) er et entydig «mislyktes» fra leverandøren og forblir en
+   * vanlig feil. `start`/`stop` er idempotente (retry er trygt) og er uendret.
    */
   private async mutate(
     parameters: Record<string, JsonValue>,
@@ -217,10 +223,18 @@ export class GceTransport implements ToolTransport {
       path: `projects/${this.projectId}/zones/${zone}/instances/${instanceName}/${verb}`,
       accessToken
     })) as unknown as GceOperation;
-    const operationName = operation.name;
-    if (!operationName) throw new Error("gce_operation_response_missing_name");
-    await waitForOperation(this.projectId!, zone, operationName, accessToken, this.operationPollIntervalMs);
-    const finalState = await gceRequest({ method: "GET", path: `projects/${this.projectId}/zones/${zone}/instances/${instanceName}`, accessToken });
-    return { external_id: operationName, data: finalState };
+    const confirm = async (): Promise<{ external_id?: string; data?: JsonValue }> => {
+      const operationName = operation.name;
+      if (!operationName) throw new Error("gce_operation_response_missing_name");
+      await waitForOperation(this.projectId!, zone, operationName, accessToken, this.operationPollIntervalMs);
+      const finalState = await gceRequest({ method: "GET", path: `projects/${this.projectId}/zones/${zone}/instances/${instanceName}`, accessToken });
+      return { external_id: operationName, data: finalState };
+    };
+    return verb === "reset" ? afterAcceptedMutation("gce_reset_not_confirmed", confirm, { keep: isOperationFailedError }) : confirm();
   }
+}
+
+/** En GCE-operasjon som er ferdig (`DONE`) MED feil: leverandøren har sagt entydig «mislyktes» - ikke et ukjent utfall. */
+function isOperationFailedError(err: unknown): boolean {
+  return err instanceof Error && err.message.startsWith("gce_operation_failed:");
 }
