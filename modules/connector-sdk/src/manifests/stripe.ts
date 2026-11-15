@@ -117,7 +117,7 @@ export const STRIPE_MANIFEST: ConnectorManifest = {
   d41_audit: {
     classification: "PARTIAL",
     read: { provider_offers: "yes", implemented: "partial", action_keys: ["finance_stripe.get_balance", "finance_stripe.refresh_payment_state"], note: "saldo og betalingstilstand; øvrige lese-flater (kunder, abonnementer, payouts, disputes) er ikke bygget" },
-    write: { provider_offers: "yes", implemented: "none", action_keys: [], note: "betalingsopprettelse er Jarvis-kjernens finance.submit_payment_intent (JARVIS_CANONICAL), ikke en handling i dette registerinnslaget" },
+    write: { provider_offers: "yes", implemented: "partial", action_keys: ["finance_stripe.submit_refund"], note: "kun refusjon (klasse D, penger); betalingsopprettelse er Jarvis-kjernens finance.submit_payment_intent (intern kjede, JARVIS_CANONICAL), ikke en handling i dette registerinnslaget; kunder, abonnementer og payouts er ikke bygget" },
     delete: { provider_offers: "unknown", implemented: "none", action_keys: [], note: "ikke vurdert: betalingsobjekter slettes ikke hos Stripe (refunderes/avbrytes); andre ressurser er utenfor scope" },
     access_control: { provider_offers: "unknown", implemented: "none", action_keys: [], note: "ikke vurdert: API-nøkler og teammedlemmer er root-nivå og skal aldri nås av modellen" },
     scopes_verified_against_docs: false,

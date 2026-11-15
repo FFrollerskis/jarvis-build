@@ -241,6 +241,12 @@ function d41Issues(m: ConnectorManifest, out: ManifestIssue[]): void {
   d.delete.action_keys.forEach((k, idx) => { if (byKey.get(k) && byKey.get(k)!.effect !== "delete") out.push({ path: `d41_audit.delete.action_keys[${idx}]`, code: "d41_delete_key_not_delete", message: "slette-kapabiliteten kan bare peke på slette-handlinger" }); });
   d.write.action_keys.forEach((k, idx) => { const e = byKey.get(k)?.effect; if (e === "read" || e === "delete") out.push({ path: `d41_audit.write.action_keys[${idx}]`, code: "d41_write_key_not_write", message: "skrive-kapabiliteten kan ikke peke på lese- eller slette-handlinger (slette har egen kapabilitet)" }); });
 
+  // En skrive-/utførende handling som ikke står under noen revidert kapabilitet (skriv, slett eller tilgangsstyring) er «stille utelatt» fra D-41-revisjonen (CLAUDE.md regel 11).
+  const audited = new Set([...d.write.action_keys, ...d.delete.action_keys, ...d.access_control.action_keys]);
+  m.actions.forEach((a, idx) => {
+    if (isWriteCapable(a) && !audited.has(a.key)) out.push({ path: `actions[${idx}].key`, code: "d41_action_not_audited", message: "skrive-/utførende handling står ikke under skriv, slett eller tilgangsstyring i d41_audit (D-41: aldri stille utelatt)" });
+  });
+
   const anyWrite = m.actions.some(isWriteCapable);
   if (d.classification === "FULL") {
     if (d.gaps.length > 0) out.push({ path: "d41_audit.gaps", code: "d41_full_with_gaps", message: "FULL kan ikke ha åpne DEFERRED/PARTIAL-gap (bruk PARTIAL)" });

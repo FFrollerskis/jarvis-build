@@ -234,12 +234,22 @@ describe("D-41-revisjonen (CLAUDE.md regel 11)", () => {
     ["skrive-kapabilitet som peker på en slettehandling", (m) => { audit(m).write.action_keys = [ACME_KEYS.remove]; }, "d41_write_key_not_write"],
     ["kapabilitet «none» med handlingsnøkler", (m) => { audit(m).access_control = { provider_offers: "yes", implemented: "none", action_keys: [ACME_KEYS.create] }; }, "d41_cap_none_with_actions"],
     ["implementert kapabilitet uten handlingsnøkler", (m) => { audit(m).read = { provider_offers: "yes", implemented: "full", action_keys: [] }; }, "d41_cap_without_actions"],
-    ["revisjon peker på ukjent handling", (m) => { audit(m).read.action_keys = ["acme.nope"]; }, "unknown_action_key"]
+    ["revisjon peker på ukjent handling", (m) => { audit(m).read.action_keys = ["acme.nope"]; }, "unknown_action_key"],
+    ["skrivehandling som ikke står under noen revidert kapabilitet (stille utelatt)", (m) => { audit(m).write.action_keys = [ACME_KEYS.create, ACME_KEYS.setting]; }, "d41_action_not_audited"],
+    ["slettehandling som ikke står under noen revidert kapabilitet (stille utelatt)", (m) => { audit(m).delete = { provider_offers: "yes", implemented: "none", action_keys: [] }; }, "d41_action_not_audited"]
   ];
   it.each(cases)("%s", (_name, mutate, code) => {
     const m = validFullManifest();
     mutate(m);
     expect(has(validateConnectorManifest(m).issues, code), codes(validateConnectorManifest(m).issues).join(",")).toBe(true);
+  });
+
+  it("en handling revidert under tilgangsstyring regnes som revidert (ikke stille utelatt), og den umutterte fixturen har full revisjonsdekning", () => {
+    const m = validFullManifest();
+    expect(has(validateConnectorManifest(m).issues, "d41_action_not_audited")).toBe(false);
+    audit(m).write.action_keys = [ACME_KEYS.create, ACME_KEYS.setting];
+    audit(m).access_control = { provider_offers: "yes", implemented: "partial", action_keys: [ACME_KEYS.notify] };
+    expect(has(validateConnectorManifest(m).issues, "d41_action_not_audited")).toBe(false);
   });
 
   it("READ_ONLY er lovlig for en ren lese-connector med en av de fem grunnene (leverandøren tilbyr ingenting mer)", () => {

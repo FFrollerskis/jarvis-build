@@ -1,6 +1,6 @@
 # Connector SDK / Connector Factory (WP-I, D-472) - runbook
 
-**Status: BYGGET OG ENHETSTESTET - INGENTING ER KJØRT MOT EKTE LEVERANDØR OG INGENTING ER KOBLET TIL KJØRETIDEN. `NOT VERIFIED` på NAS.** Dette er en beskrivelses-, validerings- og testmodul
+**Status: `BUILT_UNWIRED` (utvikler- og CI-verktøy; CI-vakten er `WIRED` som test-port). Enhetstestet - men INGENTING er kjørt mot en ekte leverandør (`NOT VERIFIED` på NAS/sandbox) og INGENTING er koblet til kjøretiden.** Dette er en beskrivelses-, validerings- og testmodul
 (masterplan Sovereign Autonomy v4.0 kap. 10 «Connector Factory og maintenance model», UA-0 «standardisert Connector SDK», Appendiks B «Connector acceptance nivå R / A»). Den endrer ingen eksisterende
 connector: `CONNECTOR_REGISTRY` og verktøydefinisjonene er uendret og forblir kjøretidens sannhetskilde; manifestene BESKRIVER dem og sjekkes MOT dem.
 
@@ -59,9 +59,9 @@ påkrevde parametre) ligger i `actions[]` under fasetter oppkalt etter seksjonen
 ingen `Unknown`, `source: "authored"`, `core_boundary.basis: "audited"`.
 
 **Validatoren** (`validateConnectorManifest`) gir presise og REDAKSJONSSIKRE feil: `path` + `code` + skjema-ord, aldri den innsendte verdien (zod sin «received ...» siteres ikke; hemmelighetsformede nøkkelnavn vises som
-`<redacted>`). Den sentrale hemmelighetsskanneren (`scanForSecrets`) går over alle tekstverdier og nøkkelnavn. Semantiske regler speiler kjøretiden: effekt -> minimum risikoklasse (`MIN_RISK_BY_EFFECT`),
-klasse D-kjeden (`assessClassDPipeline`: gjenopprettingsplan, fersk lesing + etterbetingelse), idempotens (D/send/pay = required), delete = destruktiv, D-41-konsistens (FULL/PARTIAL/READ_ONLY/PROVIDER_LIMITED),
-D-64 (HYBRID krever `authority_split`). Minimumsklassen per effekt er `MIN_RISK_FOR_EFFECT` i `src/manifest.ts` (speiler `MIN_RISK_BY_EFFECT` i `modules/tool-gateway/src/tool-manifest.ts`).
+`<redacted>`). Den sentrale hemmelighetsskanneren (`scanForSecrets`) går over alle tekstverdier og nøkkelnavn. Semantiske regler speiler kjøretiden: effekt -> minimum risikoklasse (`MIN_RISK_FOR_EFFECT` i `src/manifest.ts`, speiler `MIN_RISK_BY_EFFECT` i `modules/tool-gateway/src/tool-manifest.ts`),
+klasse D-kjeden (`assessClassDPipeline`: gjenopprettingsplan, fersk lesing + etterbetingelse), idempotens (D/send/pay = required), delete = destruktiv, D-41-konsistens (FULL/PARTIAL/READ_ONLY/PROVIDER_LIMITED; hver skrive-/utførende handling må stå under skriv, slett eller tilgangsstyring i revisjonen - aldri stille utelatt),
+D-64 (HYBRID krever `authority_split`).
 
 ## 3. Avledning og drift (registeret er sannheten)
 
@@ -92,7 +92,7 @@ Endres registeret uten at manifestet følger med, feiler `guard.test.ts`/`catalo
    Handlinger uten leverandør-idempotens (`create_issue`, `comment_on_issue`, rerun/cancel/dispatch) kan derfor i teorien dobbeltutføres hvis en KALLER prøver på nytt uten å avstemme mot GitHub. Manifestet erklærer kontrakten (`reconcile_before_retry`) og navngir gapet i
    `idempotency.retry_semantics.note`; kontraktstest-kittet kan ikke vise det (fakeen modellerer kontrakten, ikke den ekte transportens 5xx-oppførsel).
 3. GitHub: de eldre klasse D-handlingene `merge_pr` og `delete_branch` mangler `step_up_required` (allerede kjent i lukkingsmatrisen, UA-5).
-4. De to klasse D-handlingene uten komplett kjede (`mcp_zapier.call_tool`, `microsoft_outlook.send_mail`) er `deferred` i skeletonene og regnes som `gap` i akseptansen (utilgjengelige under håndhevelse, jf. `EXPECTED_DEFERRED`).
+4. De to klasse D-handlingene uten komplett kjede (`mcp_zapier.call_tool`, `microsoft_outlook.send_mail`) er `deferred` i skeletonene og regnes som `gap` i akseptansen (utilgjengelige under håndhevelse, jf. `EXPECTED_DEFERRED` i `modules/tool-gateway/test/part3-class-d-pipeline.test.ts`; `derive.test.ts` speiler listen, så en ny klasse D-handling uten kjede gjør testen rød).
 
 ## 5. Kontraktstest-kittet
 
@@ -126,7 +126,7 @@ egenskap, og testen låser at kittet feller den (`FAKE_DEFECTS` er uttømmende d
 
 ## 6. Akseptansenivå R / A (Appendiks B)
 
-`scoreAcceptance(manifest, checks)`: nivå R (10 krav) for lese-/synk-connectorer; nivå A (11 krav, inkluderer alle R-krav) så snart connectoren har en skrive-/utførende handling. Hvert krav får en ÆRLIG status:
+`scoreAcceptance(manifest, checks)`: nivå R (10 krav) for lese-/synk-connectorer; nivå A (11 krav, det første er «alle nivå R-krav oppfylt») så snart connectoren har en skrive-/utførende handling. Hvert krav får en ÆRLIG status:
 `proven` (kittet kjørte det mot adapteren) · `declared` (manifestet påstår det; ingenting har utført det) · `gap` (kittet feilet, eller manifestet deklarerer selv at det mangler: circuit breaker `partial`, D-41-gap, ufullstendig klasse D-kjede)
 · `not_proven` (krever live-/ekstern evidens: live read-smoke, reversibel live-handling) · `not_applicable`. Dom: `gaps` / `live_evidence_pending` / `complete_on_paper`. **Ingenting er `VERIFIED`** - det krever en kjøring mot ekte leverandør.
 
