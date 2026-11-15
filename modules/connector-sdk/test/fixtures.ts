@@ -45,7 +45,7 @@ export function acmeActions(): ActionSpec[] {
     action({
       key: ACME_KEYS.setting, kind: "write", effect: "write",
       authority: { risk_class: "D", step_up_required: true, owner_only: true },
-      reversibility: { reversible: true, rollback_method: "provider_revert", rollback_procedure: "sett tilbake innstillingen fra før-tilstanden", compensating_action: null, destructive: false, evidence: { before_state: true, postcondition: "readback" } },
+      reversibility: { reversible: true, rollback_method: "provider_revert", rollback_procedure: "sett tilbake innstillingen fra før-tilstanden", compensating_action: null, destructive: false, evidence: { before_state: true, postcondition: "readback" }, class_d_chain: { status: "complete", missing: [] } },
       idempotency: { requirement: "required", provider_idempotent: true }, trust: { output: "internal" }
     })
   ];

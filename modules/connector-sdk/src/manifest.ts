@@ -62,6 +62,8 @@ export const D41_CLASSIFICATIONS = ["FULL", "PARTIAL", "READ_ONLY", "PROVIDER_LI
 export const READ_ONLY_REASONS = ["provider_offers_nothing", "scope_missing", "law_or_platform", "owner_configured_restricted", "isolation_breach"] as const;
 export const GAP_STATUSES = ["DEFERRED", "PARTIAL"] as const;
 
+export const CLASS_D_CHAIN_STATUSES = ["complete", "deferred", "exempt"] as const;
+
 export const TEST_STATUSES = ["present", "partial", "missing", "deferred", "blocked_external", "not_run"] as const;
 
 /**
@@ -196,7 +198,8 @@ const IdempotencySchema = z.object({
   retry_semantics: maybe(z.object({
     on_timeout: z.enum(["safe_retry", "reconcile_before_retry", "never_retry"]),
     on_rate_limit: z.enum(["retry_after", "never_retry"]),
-    on_server_error: z.enum(["safe_retry", "reconcile_before_retry", "never_retry"])
+    on_server_error: z.enum(["safe_retry", "reconcile_before_retry", "never_retry"]),
+    note: text(400).optional()
   }).strict()),
   exactly_once_target: maybe(z.enum(["exactly_once", "at_most_once", "at_least_once_idempotent", "not_applicable"]))
 }).strict();
@@ -317,7 +320,7 @@ const ActionSpecSchema = z.object({
     reversible: z.boolean(),
     rollback_method: maybe(z.enum(ROLLBACK_METHODS)),
     /** Fritekst fra definisjonen (`ToolDefinition.rollback_procedure`) - klasse D krever en gjenopprettingsplan (også «ingen reversering»). */
-    rollback_procedure: text(600),
+    rollback_procedure: text(1000),
     compensating_action: z.union([text(300), z.null(), UnknownSchema]),
     destructive: z.boolean(),
     evidence: z.object({
@@ -325,7 +328,12 @@ const ActionSpecSchema = z.object({
       before_state: z.boolean(),
       /** `readback` = tilstanden leses på nytt og sammenlignes; `provider_id` = leverandørens bekreftede id (utgående melding); `none` = ingen etterbetingelse. */
       postcondition: z.enum(POSTCONDITIONS)
-    }).strict()
+    }).strict(),
+    /**
+     * KUN klasse D: hvor langt klasse D-kjeden (`assessClassDPipeline`) er bygget. `complete` = hele kjeden; `deferred` = kjeden mangler deler (`missing`) og handlingen er UTILGJENGELIG under håndhevelse
+     * (fail-closed, eksplisitt DEFERRED-liste i `part3-class-d-pipeline.test.ts`); `exempt` = bevisst unntatt (nødbrytere). En ufullstendig D-handling er ærlig merket, aldri stille utelatt.
+     */
+    class_d_chain: z.object({ status: z.enum(CLASS_D_CHAIN_STATUSES), missing: z.array(text(60)).max(10) }).strict().optional()
   }).strict(),
   idempotency: z.object({
     requirement: z.enum(IDEMPOTENCY_REQUIREMENTS),

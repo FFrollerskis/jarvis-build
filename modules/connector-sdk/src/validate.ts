@@ -193,7 +193,16 @@ function actionIssues(a: ActionSpec, i: number, out: ManifestIssue[]): void {
     }
   }
   // Klasse D-kjeden (speiler `assessClassDPipeline` i class-d-pipeline.ts): gjenopprettingsplan (rollback_procedure er alltid utfylt), fersk tilstandslesing + etterbetingelse, idempotensnøkkel.
-  if (a.authority.risk_class === "D") {
+  // En ufullstendig kjede er LOVLIG å beskrive (`class_d_chain.status: deferred` - handlingen er utilgjengelig under håndhevelse), men må være merket; en «complete» kjede må ha beviset.
+  const chain = a.reversibility.class_d_chain;
+  if (a.authority.risk_class !== "D") {
+    if (chain !== undefined) add("reversibility.class_d_chain", "class_d_chain_on_non_d", "class_d_chain hører bare til klasse D");
+    return;
+  }
+  if (chain === undefined) { add("reversibility.class_d_chain", "class_d_chain_missing", "klasse D må oppgi hvor langt kjeden er bygget (complete/deferred/exempt)"); return; }
+  if (chain.status === "deferred" && chain.missing.length === 0) add("reversibility.class_d_chain.missing", "class_d_chain_deferred_without_reason", "deferred krever at manglende ledd er navngitt");
+  if (chain.status === "complete") {
+    if (chain.missing.length > 0) add("reversibility.class_d_chain.missing", "class_d_chain_complete_with_missing", "en komplett kjede kan ikke ha manglende ledd");
     if (a.reversibility.evidence.postcondition === "none") add("reversibility.evidence.postcondition", "class_d_missing_postcondition", "klasse D krever etterbetingelse (readback eller leverandørens bekreftede id)");
     if (a.reversibility.evidence.postcondition !== "provider_id" && !a.reversibility.evidence.before_state) add("reversibility.evidence.before_state", "class_d_missing_before_state", "klasse D krever fersk tilstandslesing før handlingen (før-tilstand = recovery-grunnlag)");
   }
