@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { validateConnectorManifest } from "../src/index.ts";
+import { CONNECTOR_ID_PATTERN, VAULT_REF_PATTERN, validateConnectorManifest } from "../src/index.ts";
 import { runConnectorContract } from "../src/testing.ts";
 
 /**
@@ -75,3 +75,21 @@ describe("det genererte utkastet er IKKE en ferdig connector (CI-vakten stopper 
     expect((mod["ZZ_DEMO_MANIFEST"] as { completeness: string }).completeness).toBe("skeleton");
   });
 });
+
+describe("generatoren og skjemaet er enige om hva en connector-id er (review LOW)", () => {
+  it("ID_PATTERN i generatoren og CONNECTOR_ID i manifestskjemaet godtar og avviser nøyaktig de samme id-ene, og hver godtatt id gir en gyldig hvelvreferanse JARVIS_<ID>_TOKEN", async () => {
+    const gen = (await import(/* @vite-ignore */ pathToFileURL(SCRIPT).href)) as { ID_PATTERN: RegExp };
+    const candidates = ["ab", "a_b", "a1_b2", "google_sheets", "a".repeat(41), "a", "ab_", "a__b", "_ab", "a_", "A_b", "a-b", "a b", "1ab", "a".repeat(42), "", "a_b_c_d", "x9", "ab\n", "aå"];
+    for (const id of candidates) {
+      expect(gen.ID_PATTERN.test(id), JSON.stringify(id)).toBe(CONNECTOR_ID_PATTERN.test(id));
+      if (CONNECTOR_ID_PATTERN.test(id)) expect(VAULT_REF_PATTERN.test(`JARVIS_${id.toUpperCase()}_TOKEN`), id).toBe(true);
+    }
+    expect(candidates.filter((id) => CONNECTOR_ID_PATTERN.test(id))).toEqual(["ab", "a_b", "a1_b2", "google_sheets", "a".repeat(41), "a_b_c_d", "x9"]);
+  });
+
+  it("alle registerets connector-id-er oppfyller den strammere formen (ingen eksisterende id brytes)", async () => {
+    const { CONNECTOR_REGISTRY } = await import("@jarvis/tool-gateway");
+    for (const c of CONNECTOR_REGISTRY) expect(CONNECTOR_ID_PATTERN.test(c.id), c.id).toBe(true);
+  });
+});
+

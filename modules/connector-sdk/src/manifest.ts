@@ -105,7 +105,8 @@ const maybe = <T extends z.ZodTypeAny>(schema: T) => z.union([schema, UnknownSch
 // ---------------------------------------------------------------------------------------------------------------------
 
 const text = (max: number) => z.string().min(1).max(max);
-const CONNECTOR_ID = /^[a-z][a-z0-9_]{1,40}$/;
+/** Connector-id: snake_case (2-41 tegn) uten ledende, avsluttende eller doble understreker - slik at `JARVIS_<ID>_TOKEN` alltid er en gyldig hvelvreferanse. Samme form som scaffold-generatorens `ID_PATTERN` (låst av en test). */
+const CONNECTOR_ID = /^(?=.{2,41}$)[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 const ACTION_KEY = /^[a-z][a-z0-9_-]{0,40}\.[a-z][a-z0-9_]{0,60}$/;
 /** Hvelvreferanse: STORE BOKSTAVER med minst ett understrek (JARVIS_GITHUB_TOKEN). En verdi (ghp_..., AKIA...) har aldri denne formen. */
 const VAULT_REF = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/;
@@ -352,7 +353,12 @@ const ActionSpecSchema = z.object({
      * KUN klasse D: hvor langt klasse D-kjeden (`assessClassDPipeline`) er bygget. `complete` = hele kjeden; `deferred` = kjeden mangler deler (`missing`) og handlingen er UTILGJENGELIG under håndhevelse
      * (fail-closed, eksplisitt DEFERRED-liste i `part3-class-d-pipeline.test.ts`); `exempt` = bevisst unntatt (nødbrytere). En ufullstendig D-handling er ærlig merket, aldri stille utelatt.
      */
-    class_d_chain: z.object({ status: z.enum(CLASS_D_CHAIN_STATUSES), missing: z.array(text(60)).max(10) }).strict().optional()
+    class_d_chain: z.object({
+      status: z.enum(CLASS_D_CHAIN_STATUSES),
+      missing: z.array(text(60)).max(10),
+      /** Påkrevd for `exempt` (review LOW): HVORFOR handlingen er unntatt kjedekravene - uten begrunnelse er et unntak bare en stille omgåelse. */
+      justification: text(300).optional()
+    }).strict().optional()
   }).strict(),
   idempotency: z.object({
     requirement: z.enum(IDEMPOTENCY_REQUIREMENTS),

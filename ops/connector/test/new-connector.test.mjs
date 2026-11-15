@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -151,6 +151,139 @@ describe("NEKTER Å OVERSKRIVE", () => {
     const root = fresh();
     expect(() => writePlan(root, [{ path: "../utenfor.txt", content: "x" }])).toThrow(GeneratorError);
     expect(existsSync(join(root, "..", "utenfor.txt"))).toBe(false);
+  });
+});
+
+describe("FORHERDING (review LOW): symlenker, mapper, id-form, usynlige tegn og --root /", () => {
+  /** Alle oppføringer (filer OG mapper, også symlenker) under en mappe, relativt, sortert. */
+  const tree = (root) => (existsSync(root) ? readdirSync(root, { recursive: true }).map((p) => String(p).split("\\").join("/")).sort() : []);
+
+  it("en symlenke INNE i --root som peker ut (manifests/ -> annen mappe) gir kode 1, og ingenting skrives - verken inni roten eller i målmappen (runbook §9: aldri utenfor --root)", () => {
+    const root = fresh();
+    const outside = fresh();
+    mkdirSync(join(root, "modules/connector-sdk/src"), { recursive: true });
+    symlinkSync(outside, join(root, "modules/connector-sdk/src/manifests"));
+    const r = run(["--id", "acme_x", "--name", "Acme", "--root", root]);
+    expect(r.status, r.stdout).toBe(1);
+    expect(r.stderr).toContain("symlenke");
+    expect(listFiles(outside)).toEqual([]);
+    expect(tree(root)).toEqual(["modules", "modules/connector-sdk", "modules/connector-sdk/src", "modules/connector-sdk/src/manifests"]);
+    expect(lstatSync(join(root, "modules/connector-sdk/src/manifests")).isSymbolicLink()).toBe(true);
+  });
+
+  it("en symlenke høyere opp (modules/ -> annen mappe) og en symlenke til en FIL som mappe stoppes også; writePlan kaster GeneratorError med kode 1", () => {
+    const root = fresh();
+    const outside = fresh();
+    symlinkSync(outside, join(root, "modules"));
+    expect(run(["--id", "acme_x", "--name", "Acme", "--root", root]).status).toBe(1);
+    expect(tree(outside)).toEqual([]);
+    const root2 = fresh();
+    const outside2 = fresh();
+    mkdirSync(join(root2, "docs"), { recursive: true });
+    symlinkSync(outside2, join(root2, "docs/runbooks"));
+    const plan = planFiles(normalize({ id: "acme_x", name: "Acme", write: false }));
+    let caught;
+    try { writePlan(root2, plan); } catch (e) { caught = e; }
+    expect(caught).toBeInstanceOf(GeneratorError);
+    expect(caught.exitCode).toBe(1);
+    expect(tree(outside2)).toEqual([]);
+    // Ingenting ble skrevet inni roten heller (sjekken skjer FØR noe skrives).
+    expect(listFiles(root2)).toEqual([]);
+  });
+
+  it("en dinglende symlenke som mappe stoppes eksplisitt (kode 1, ikke en uventet feil), og ingenting dukker opp i målet", () => {
+    const root = fresh();
+    const outsideParent = fresh();
+    const dangling = join(outsideParent, "finnes-ikke");
+    mkdirSync(join(root, "modules/connector-sdk/src"), { recursive: true });
+    symlinkSync(dangling, join(root, "modules/connector-sdk/src/manifests"));
+    const r = run(["--id", "acme_x", "--name", "Acme", "--root", root]);
+    expect(r.status, r.stderr).toBe(1);
+    expect(r.stderr).toContain("dinglende symlenke");
+    expect(r.stderr).not.toContain("UVENTET");
+    expect(existsSync(dangling)).toBe(false);
+    expect(tree(outsideParent)).toEqual([]);
+  });
+
+  it("en symlenke som peker til et annet sted INNE i roten er lov (den slipper ikke noe ut)", () => {
+    const root = fresh();
+    mkdirSync(join(root, "modules/connector-sdk/src/ekte"), { recursive: true });
+    symlinkSync(join(root, "modules/connector-sdk/src/ekte"), join(root, "modules/connector-sdk/src/manifests"));
+    const r = run(["--id", "acme_x", "--name", "Acme", "--root", root]);
+    expect(r.status, r.stderr).toBe(0);
+    expect(existsSync(join(root, "modules/connector-sdk/src/ekte/acme_x.ts"))).toBe(true);
+  });
+
+  it("--root som selv er en symlenke til en mappe er eierens eksplisitte valg: filene havner i målmappen", () => {
+    const real = fresh();
+    const holder = fresh();
+    const link = join(holder, "link");
+    symlinkSync(real, link);
+    const r = run(["--id", "acme_x", "--name", "Acme", "--root", link]);
+    expect(r.status, r.stderr).toBe(0);
+    expect(listFiles(real).length).toBe(4);
+  });
+
+  it("rollback fjerner mappene kjøringen selv opprettet (ikke bare filene), men aldri forhåndsfinnes mapper eller filer den ikke eier", () => {
+    const root = fresh();
+    mkdirSync(join(root, "modules/connector-sdk/test"), { recursive: true });
+    writeFileSync(join(root, "modules/connector-sdk/test/connectors"), "i veien\n");
+    const before = tree(root);
+    const r = run(["--id", "acme_x", "--name", "Acme", "--root", root]);
+    expect(r.status).toBe(2);
+    // manifests/ og src/ ble opprettet for den første filen og skal være borte igjen; docs/ ble aldri nådd.
+    expect(tree(root)).toEqual(before);
+    expect(tree(root)).toEqual(["modules", "modules/connector-sdk", "modules/connector-sdk/test", "modules/connector-sdk/test/connectors"]);
+    expect(readFileSync(join(root, "modules/connector-sdk/test/connectors"), "utf8")).toBe("i veien\n");
+  });
+
+  it("rollback rører ikke en mappe som ikke er tom (noe en annen la der) - rmdir, aldri rekursiv sletting", () => {
+    const root = fresh();
+    mkdirSync(join(root, "modules/connector-sdk/test"), { recursive: true });
+    writeFileSync(join(root, "modules/connector-sdk/test/connectors"), "i veien\n");
+    // Et eget (ikke-generert) filnavn legges i en mappe kjøringen skal opprette: den eksisterer da, og rollback lar den være.
+    mkdirSync(join(root, "modules/connector-sdk/src/manifests"), { recursive: true });
+    writeFileSync(join(root, "modules/connector-sdk/src/manifests/annet.ts"), "eierens fil\n");
+    const r = run(["--id", "acme_x", "--name", "Acme", "--root", root]);
+    expect(r.status).toBe(2);
+    expect(readFileSync(join(root, "modules/connector-sdk/src/manifests/annet.ts"), "utf8")).toBe("eierens fil\n");
+    expect(existsSync(join(root, "modules/connector-sdk/src/manifests/acme_x.ts"))).toBe(false);
+  });
+
+  it("--root / avvises ikke lenger feilaktig (tørrkjøring: ingenting skrives), mens ../ ut av en vanlig rot fortsatt stoppes", () => {
+    const plan = planFiles(normalize({ id: "acme_x", name: "Acme", write: false }));
+    expect(writePlan("/", plan, { dryRun: true })).toEqual([]);
+    expect(main(["--id", "acme_x", "--name", "Acme", "--root", "/", "--dry-run"], quiet)).toBe(0);
+    const root = fresh();
+    expect(() => writePlan(root, [{ path: "../utenfor.txt", content: "x" }], { dryRun: true })).toThrow(GeneratorError);
+    expect(() => writePlan(root, [{ path: ".", content: "x" }], { dryRun: true })).toThrow(GeneratorError);
+  });
+
+  it("id-formen: ab_, a__b, _ab og a_ avvises (de ga en ugyldig hvelvreferanse JARVIS_AB__TOKEN); a_b, ab, a1_b2 og lengdegrensene 2 og 41 er lovlige", () => {
+    for (const bad of ["ab_", "a__b", "_ab", "a_", "a", "a".repeat(42), "a-b", "A_b"]) expect(ID_PATTERN.test(bad), bad).toBe(false);
+    for (const good of ["a_b", "ab", "a1_b2", "ab", "a".repeat(41), "google_sheets"]) expect(ID_PATTERN.test(good), good).toBe(true);
+    for (const bad of ["ab_", "a__b"]) {
+      const root = fresh();
+      const r = run(["--id", bad, "--name", "X", "--root", root]);
+      expect(r.status, bad).toBe(1);
+      expect(listFiles(root)).toEqual([]);
+    }
+    // Hvelvreferansen som genereres for en lovlig id følger hvelvreferanse-formen (STORE bokstaver, enkle understreker): JARVIS_<ID>_TOKEN.
+    const VAULT_REF = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/;
+    for (const good of ["a_b", "ab", "a1_b2", "google_sheets"]) expect(VAULT_REF.test(`JARVIS_${good.toUpperCase()}_TOKEN`), good).toBe(true);
+  });
+
+  it("usynlige og retningsstyrende tegn i --name/--vendor avvises (nullbredde, bidi, U+2028/U+2029/U+0085, BOM, formattegn) - ingen injeksjon, men heller ingen skjulte tegn i genererte filer", () => {
+    const hidden = [0x200b, 0x200c, 0x200d, 0x200e, 0x200f, 0x202a, 0x202e, 0x2066, 0x2069, 0x2028, 0x2029, 0x0085, 0xfeff, 0x00ad, 0x061c, 0xe000].map((cp) => String.fromCodePoint(cp));
+    for (const ch of hidden) {
+      expect(() => normalize({ id: "acme_x", name: `Acme${ch}Tasks`, write: false }), `U+${ch.codePointAt(0).toString(16)}`).toThrow(GeneratorError);
+      expect(() => normalize({ id: "acme_x", name: "Acme", vendor: `Ven${ch}dor`, write: false })).toThrow(GeneratorError);
+    }
+    const root = fresh();
+    expect(run(["--id", "acme_x", "--name", `A${String.fromCodePoint(0x202e)}B`, "--root", root]).status).toBe(1);
+    expect(listFiles(root)).toEqual([]);
+    // Vanlig tekst (norske bokstaver, mellomrom, bindestrek, punktum, parentes, &) er fortsatt lovlig.
+    expect(normalize({ id: "acme_x", name: "Åse & Øvre (v2) - AS.", vendor: "Blåbær Ægir", write: false }).name).toBe("Åse & Øvre (v2) - AS.");
   });
 });
 

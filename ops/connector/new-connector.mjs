@@ -14,19 +14,25 @@
  * NEKTER Å OVERSKRIVE: finnes en av målfilene fra før, skrives INGENTING (avslutter med kode 2). Ugyldige argumenter gir kode 1. `--dry-run` skriver ingenting.
  * Generatoren velger ingen leverandør og kjører ingen D-64-/D-41-vurdering - malene PEKER på dem (CLAUDE.md regel 11 og 12); å gjøre dem er arbeidet etterpå.
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(SCRIPT_DIR, "..", "..");
 export const DEFAULT_TEMPLATES_DIR = join(REPO_ROOT, "modules", "connector-sdk", "templates");
 
-export const ID_PATTERN = /^[a-z][a-z0-9_]{1,40}$/;
+/**
+ * Connector-id: snake_case uten ledende/avsluttende/doble understreker (2-41 tegn) - SAMME form som `CONNECTOR_ID` i manifestskjemaet (en test låser at de er like). Den gamle formen tillot `ab_` og `a__b`, som
+ * ga en generert hvelvreferanse `JARVIS_AB__TOKEN` som ikke er en gyldig hvelvreferanse (utkastet validerte ikke).
+ */
+export const ID_PATTERN = /^(?=.{2,41}$)[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 const TOOL_ID_PATTERN = /^[a-z][a-z0-9_-]{0,40}$/;
-/** Visningstekst havner i TS-kommentarer, TS-strenger og markdown: ingen kontrolltegn, anførselstegn, backslash, backtick, $, `*` eller `|`. */
-// eslint-disable-next-line no-control-regex -- kontrolltegn (inkl. NUL og linjeskift) er bevisst med i den forbudte klassen
-const TEXT_PATTERN = /^[^\u0000-\u001f\u007f"'\\`$*|{}<>]{1,80}$/;
+/**
+ * Visningstekst havner i TS-kommentarer, TS-strenger og markdown: ingen kontrolltegn og ingen usynlige/retningsstyrende tegn (Unicode-kategori C: kontroll inkl. NUL og U+0085, formattegn som nullbredde-mellomrom/
+ * U+200B-200F, bidi U+202A-202E og U+2066-2069, U+FEFF; ubrukte/private), ingen linje-/avsnittsseparatorer (U+2028/U+2029), og ingen anførselstegn, backslash, backtick, $, `*`, `|`, klammer eller `<` `>`.
+ */
+const TEXT_PATTERN = /^[^\p{C}\p{Zl}\p{Zp}"'\\`$*|{}<>]{1,80}$/u;
 
 export class GeneratorError extends Error {
   /** @param {string} message @param {number} exitCode 1 = ugyldig bruk, 2 = ville overskrive */
@@ -68,8 +74,8 @@ const pascal = (id) => id.split("_").map((p) => p.charAt(0).toUpperCase() + p.sl
 
 /** Validerer og normaliserer inndata. Kaster `GeneratorError` (kode 1) ved brudd. */
 export function normalize(o) {
-  if (o.id === undefined || !ID_PATTERN.test(o.id)) throw new GeneratorError("--id må være snake_case (a-z, 0-9, _), 2-41 tegn, starte med en bokstav (samme form som connector-id i registeret)", 1);
-  if (o.name === undefined || !TEXT_PATTERN.test(o.name)) throw new GeneratorError("--name er påkrevd (1-80 tegn uten kontrolltegn, anførselstegn, backslash, backtick, $, *, |, { } < >)", 1);
+  if (o.id === undefined || !ID_PATTERN.test(o.id)) throw new GeneratorError("--id må være snake_case (a-z, 0-9, _), 2-41 tegn, starte med en bokstav, uten ledende, avsluttende eller doble understreker (samme form som connector-id i registeret)", 1);
+  if (o.name === undefined || !TEXT_PATTERN.test(o.name)) throw new GeneratorError("--name er påkrevd (1-80 tegn uten kontroll-, usynlige og retningsstyrende tegn, linjeskift, anførselstegn, backslash, backtick, $, *, |, { } < >)", 1);
   if (o.vendor !== undefined && !TEXT_PATTERN.test(o.vendor)) throw new GeneratorError("--vendor har ugyldige tegn (samme regler som --name)", 1);
   const toolId = o.toolId ?? o.id;
   if (!TOOL_ID_PATTERN.test(toolId)) throw new GeneratorError("--tool-id må være a-z, 0-9, _ eller -, starte med en bokstav (verktøy-id i verktøydefinisjonene)", 1);
@@ -162,30 +168,82 @@ export function planFiles(n, templatesDir = DEFAULT_TEMPLATES_DIR) {
   ];
 }
 
+/** Er `child` lik `parent` eller en etterkommer av den? Håndterer en rot som allerede ender på skilletegn (`--root /`). */
+function within(child, parent) {
+  return child === parent || child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
+}
+
 /**
- * Skriver planen under `root`. NEKTER å overskrive: alle mål sjekkes FØR noe skrives (kode 2), og filene åpnes med `wx` (feiler om en fil dukker opp underveis - da fjernes det denne kjøringen allerede har laget).
+ * Går fra roten ned til `dir` og stopper ved den første symlenken som peker UT av roten (`baseReal` = rotens realpath) eller er dinglende. En symlenke som peker til et annet sted INNE i roten er lov.
+ * Returnerer en kort beskrivelse (relativ sti, aldri innholdet), eller `null` når stien er trygg. Det som ikke finnes ennå (`lstat` feiler) kan heller ikke være en symlenke.
+ */
+function symlinkEscape(dir, base, baseReal) {
+  const rel = relative(base, dir);
+  if (rel === "") return null;
+  let cur = base;
+  for (const part of rel.split(sep)) {
+    cur = join(cur, part);
+    let st;
+    try { st = lstatSync(cur); } catch { return null; }
+    if (!st.isSymbolicLink()) continue;
+    let real;
+    try { real = realpathSync(cur); } catch { return `${relative(base, cur)} er en dinglende symlenke`; }
+    if (!within(real, baseReal)) return `${relative(base, cur)} er en symlenke ut av roten`;
+  }
+  return null;
+}
+
+/** Mapper som mangler mellom `dir` og det som finnes, grunnest først (det en `mkdir -p` av `dir` ville opprettet). */
+function missingDirs(dir) {
+  const out = [];
+  let cur = dir;
+  while (!existsSync(cur)) {
+    out.push(cur);
+    const up = dirname(cur);
+    if (up === cur) break;
+    cur = up;
+  }
+  return out.reverse();
+}
+
+/**
+ * Skriver planen under `root`. NEKTER å overskrive: alle mål sjekkes FØR noe skrives (kode 2), og filene åpnes med `wx` (feiler om en fil dukker opp underveis - da fjernes det denne kjøringen allerede har laget,
+ * både filer og mapper den selv opprettet; en mappe som ikke er tom fjernes aldri). ALDRI utenfor `--root`: stien sjekkes både leksikalt og via `realpath` (en symlenke inne i roten som peker ut, f.eks.
+ * `manifests/ -> /annet`, gir kode 1 før noe skrives). Selve `--root` kan være en symlenke - den er eierens eksplisitte valg.
  * @returns {string[]} absolutte stier som ble skrevet (tom ved dry-run)
  */
 export function writePlan(root, plan, { dryRun = false } = {}) {
   const base = resolve(root);
+  const rootExists = existsSync(base);
+  const baseReal = rootExists ? realpathSync(base) : base;
   const targets = plan.map((f) => {
     const abs = resolve(join(base, f.path));
-    if (!abs.startsWith(base + sep)) throw new GeneratorError(`målstien havner utenfor --root: ${f.path}`, 1);
+    if (abs === base || !within(abs, base)) throw new GeneratorError(`målstien havner utenfor --root: ${f.path}`, 1);
+    // Symlenker: ingen mappe på veien ned fra roten kan være en symlenke som peker ut av den (eller en dinglende). Finnes ikke roten ennå, finnes det heller ingen symlenke inni den.
+    const escape = rootExists ? symlinkEscape(dirname(abs), base, baseReal) : null;
+    if (escape !== null) throw new GeneratorError(`målstien går via en symlenke ut av --root (${escape}): ${f.path}`, 1);
     return { abs, content: f.content, rel: f.path };
   });
   const existing = targets.filter((t) => existsSync(t.abs)).map((t) => t.rel);
   if (existing.length > 0) throw new GeneratorError(`nekter å overskrive eksisterende filer: ${existing.join(", ")} - ingenting er skrevet`, 2);
   if (dryRun) return [];
   const created = [];
+  const createdDirs = [];
   try {
     for (const t of targets) {
-      mkdirSync(dirname(t.abs), { recursive: true });
+      const dir = dirname(t.abs);
+      createdDirs.push(...missingDirs(dir));
+      mkdirSync(dir, { recursive: true });
       writeFileSync(t.abs, t.content, { encoding: "utf8", flag: "wx" });
       created.push(t.abs);
     }
   } catch (err) {
     for (const f of created) rmSync(f, { force: true });
-    if (err && (err.code === "EEXIST" || err.code === "ENOTDIR")) throw new GeneratorError("en sti er i veien eller en målfil dukket opp underveis - nekter å overskrive; filene denne kjøringen laget er fjernet", 2);
+    // Mapper denne kjøringen opprettet fjernes dypest først, og BARE hvis de er tomme (`rmdir`, aldri rekursivt): noe en annen har lagt i dem røres ikke.
+    for (const d of [...createdDirs].reverse()) {
+      try { rmdirSync(d); } catch { /* ikke tom, finnes ikke, eller ikke vår - la den være */ }
+    }
+    if (err && (err.code === "EEXIST" || err.code === "ENOTDIR")) throw new GeneratorError("en sti er i veien eller en målfil dukket opp underveis - nekter å overskrive; filene og mappene denne kjøringen laget er fjernet", 2);
     throw err;
   }
   return created;
