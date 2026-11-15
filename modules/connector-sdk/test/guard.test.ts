@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { CONNECTOR_REGISTRY, type ConnectorDefinition } from "@jarvis/tool-gateway";
 import {
-  FULL_MANIFESTS, GUARD_RULES, SKELETON_BASELINE, auditManifestCatalogue, buildManifestCatalogue, productionConnectorDefinitions, runManifestGuard, unregisteredManifestFiles,
+  FULL_MANIFESTS, GUARD_RULES, SKELETON_BASELINE, auditManifestCatalogue, buildManifestCatalogue, decisionLogHasRow, productionConnectorDefinitions, runManifestGuard, unregisteredManifestFiles,
   type ConnectorManifest, type GuardRule, type GuardViolation
 } from "../src/index.ts";
 import { evidenceFileExists } from "../scripts/report.ts";
@@ -20,16 +20,20 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const fileExists = evidenceFileExists(ROOT);
 /** Beslutningsloggen er en markdown-tabell: `| D-109 | ...`. Vakten får den injisert, som filsystemet. */
 const decisionLog = readFileSync(join(ROOT, "docs/DECISIONS_AND_ASSUMPTIONS.md"), "utf8");
-const decisionExists = (id: string) => new RegExp(`^\\| ${id} \\|`, "m").test(decisionLog);
+const decisionExists = (id: string) => decisionLogHasRow(decisionLog, id);
 const definitions = productionConnectorDefinitions();
 const clone = (m: ConnectorManifest): ConnectorManifest => structuredClone(m);
 /**
- * Mutasjonstestene kjører ofte vakten med BARE ÉN av de tre fulle manifestene. Standardbaselinen er da den committede pluss de fulle manifestene som ikke er med (tilstanden «de er ikke skrevet ennå»), så
- * skeleton-baselinen ikke feller dem for noe annet enn det testen undersøker. Med ALLE de tre (PORTEN) er baselinen nøyaktig den committede. En test overstyrer den med `baseline`.
+ * Mutasjonstestene kjører ofte vakten med BARE ÉN av de tre fulle manifestene. Standardbaselinen (`pendingBaseline`) er da ALLE de bygde registeroppføringene som ikke har et håndskrevet manifest i `authored` (de to fulle som
+ * ikke er med regnes som «ikke skrevet ennå»), så skeleton-baselinen ikke feller dem for noe annet enn det testen undersøker - og så en urelatert WP som legger til en bygd registeroppføring ikke gjør hver mutasjonstest rød
+ * (review N6: det var 11 røde tester; nå er det bare de to PORTEN-testene, som er selve porten). PORTEN bruker den COMMITTEDE baselinen eksplisitt (`baseline: SKELETON_BASELINE`). En test overstyrer med `baseline`.
  */
-const guard = (authored: readonly unknown[], over: { definitions?: typeof definitions; exists?: (p: string) => boolean; registry?: readonly ConnectorDefinition[]; baseline?: readonly string[]; decisions?: (id: string) => boolean } = {}) => {
+const pendingBaseline = (authored: readonly unknown[]): string[] => {
   const authoredIds = new Set(authored.map((m) => (m as { identity?: { id?: string } }).identity?.id));
-  const baseline = over.baseline ?? [...SKELETON_BASELINE, ...FULL_MANIFESTS.map((m) => m.identity.id).filter((id) => !authoredIds.has(id))];
+  return CONNECTOR_REGISTRY.filter((c) => c.category !== "backlog" && c.category !== "backlog_d64_gate" && !authoredIds.has(c.id)).map((c) => c.id);
+};
+const guard = (authored: readonly unknown[], over: { definitions?: typeof definitions; exists?: (p: string) => boolean; registry?: readonly ConnectorDefinition[]; baseline?: readonly string[]; decisions?: (id: string) => boolean } = {}) => {
+  const baseline = over.baseline ?? pendingBaseline(authored);
   return runManifestGuard({
     definitions: over.definitions ?? definitions, authored, fileExists: over.exists ?? fileExists, decisionExists: over.decisions ?? decisionExists, skeleton_baseline: baseline,
     ...(over.registry !== undefined ? { registry: over.registry } : {})
@@ -39,7 +43,7 @@ const newBuiltEntry = (id = "brand_new_vendor"): ConnectorDefinition => ({ id, d
 const rulesOf = (vs: readonly GuardViolation[]): GuardRule[] => [...new Set(vs.map((v) => v.rule))].sort();
 
 describe("PORTEN: hvert connector-manifest i repoet holder reglene (feiler CI ved brudd)", () => {
-  const report = guard(FULL_MANIFESTS);
+  const report = guard(FULL_MANIFESTS, { baseline: SKELETON_BASELINE });
 
   it("ingen brudd: hver registeroppføring har et manifest med eier, tillitsklasse og risikoklasse per handling; fulle manifester har runbook og testbevis som finnes; ingen hemmelighetsverdi; ingen drift", () => {
     expect(report.violations.map((v) => `${v.rule} ${v.connector_id ?? "-"} ${v.path}: ${v.message}`)).toEqual([]);
@@ -117,10 +121,25 @@ describe("PORTEN: hvert connector-manifest i repoet holder reglene (feiler CI ve
 
   it("skeleton-baselinen er nøyaktig de BYGDE registeroppføringene som ikke har fullt manifest (ingen duplikater, ingen døde oppføringer)", () => {
     const full = new Set(FULL_MANIFESTS.map((m) => m.identity.id));
-    const expected = CONNECTOR_REGISTRY.filter((c) => c.category !== "backlog" && c.category !== "backlog_d64_gate" && !full.has(c.id)).map((c) => c.id).sort();
+    const built = CONNECTOR_REGISTRY.filter((c) => c.category !== "backlog" && c.category !== "backlog_d64_gate");
+    const expected = built.filter((c) => !full.has(c.id)).map((c) => c.id).sort();
     expect([...SKELETON_BASELINE].sort()).toEqual(expected);
     expect(new Set(SKELETON_BASELINE).size).toBe(SKELETON_BASELINE.length);
-    expect(SKELETON_BASELINE.length).toBeGreaterThan(40);
+    // Review N6: ikke-vakuøsitet måles mot REGISTERET (som bare vokser), ikke mot baselinen - den kan og skal legitimt krympe (helt til 0) når connectorer får fullt manifest.
+    expect(built.length).toBeGreaterThan(40);
+    expect(SKELETON_BASELINE.length).toBe(built.length - [...full].filter((id) => built.some((c) => c.id === id)).length);
+  });
+
+  it("review N6: decisionLogHasRow er den ene beslutningsraden-sjekken (CI-porten og rapporten bruker den): en RAD som starter med `| D-n |`, eksakt id, og aldri en id med mønsterstegn", () => {
+    const log = "| D-5 | x |\n| D-50 | y |\ntekst | D-77 | midt i en linje\n  | D-12 | innrykket\n";
+    expect(decisionLogHasRow(log, "D-5")).toBe(true);
+    expect(decisionLogHasRow(log, "D-50")).toBe(true);
+    expect(decisionLogHasRow(log, "D-500")).toBe(false); // D-5-raden dekker ikke D-500, og D-50 ikke D-5000
+    expect(decisionLogHasRow(log, "D-77")).toBe(false); // ikke først på linjen
+    expect(decisionLogHasRow(log, "D-12")).toBe(false); // innrykket er ikke en tabellrad
+    for (const bad of ["D-.*", ".*", "D-5|D-50", "D-5\n", "d-5", "D-", "", "D-12345", "^\\| D-5 \\|"]) expect(decisionLogHasRow(log, bad), JSON.stringify(bad)).toBe(false);
+    expect(decisionLogHasRow(decisionLog, "D-109")).toBe(true);
+    expect(decisionLogHasRow(decisionLog, "D-9999")).toBe(false);
   });
 });
 
@@ -138,8 +157,8 @@ describe("mutasjonstester: hver regel biter", () => {
     expect(r.ok).toBe(false);
     expect(r.violations.map((v) => `${v.rule}:${v.connector_id}`)).toEqual(["built_connector_unreviewed:brand_new_vendor"]);
     expect(r.violations[0]!.message).toContain("SKELETON_BASELINE");
-    // Bevisst oppføring i baselinen gjør den grønn igjen (en synlig handling i PR-en), og skeletonet er fortsatt validert.
-    expect(guard(FULL_MANIFESTS, { registry, baseline: [...SKELETON_BASELINE, "brand_new_vendor"] }).violations).toEqual([]);
+    // Bevisst oppføring i baselinen gjør den grønn igjen (en synlig handling i PR-en - en KONVENSJON, vakten hindrer ikke at listen vokser, jf. guard.ts), og skeletonet er fortsatt validert.
+    expect(guard(FULL_MANIFESTS, { registry, baseline: [...pendingBaseline(FULL_MANIFESTS), "brand_new_vendor"] }).violations).toEqual([]);
     // Backlog (ikke bygget) trenger ingen oppføring; i det øyeblikket kategorien endres til bygd, kreves en.
     expect(guard(FULL_MANIFESTS, { registry: [...CONNECTOR_REGISTRY, { ...newBuiltEntry("future_vendor"), category: "backlog" }] }).violations).toEqual([]);
     const flipped = guard(FULL_MANIFESTS, { registry: [...CONNECTOR_REGISTRY.filter((c) => c.id !== "apple_music"), ...CONNECTOR_REGISTRY.filter((c) => c.id === "apple_music").map((c) => ({ ...c, category: "tool_gateway" as const }))] });
@@ -147,13 +166,13 @@ describe("mutasjonstester: hver regel biter", () => {
   });
 
   it("review M5: baselinen kan bare krympe - en id som ikke finnes, en backlog-oppføring eller en connector som nå har fullt manifest feller vakten", () => {
-    const ghost = guard(FULL_MANIFESTS, { baseline: [...SKELETON_BASELINE, "no_such_connector"] });
+    const ghost = guard(FULL_MANIFESTS, { baseline: [...pendingBaseline(FULL_MANIFESTS), "no_such_connector"] });
     expect(ghost.violations.map((v) => `${v.rule}:${v.connector_id}`)).toEqual(["skeleton_baseline_stale:no_such_connector"]);
     const backlog = CONNECTOR_REGISTRY.find((c) => c.category === "backlog")!;
-    expect(guard(FULL_MANIFESTS, { baseline: [...SKELETON_BASELINE, backlog.id] }).violations.map((v) => `${v.rule}:${v.connector_id}`)).toEqual([`skeleton_baseline_stale:${backlog.id}`]);
-    const full = guard(FULL_MANIFESTS, { baseline: [...SKELETON_BASELINE, "github"] });
+    expect(guard(FULL_MANIFESTS, { baseline: [...pendingBaseline(FULL_MANIFESTS), backlog.id] }).violations.map((v) => `${v.rule}:${v.connector_id}`)).toEqual([`skeleton_baseline_stale:${backlog.id}`]);
+    const full = guard(FULL_MANIFESTS, { baseline: [...pendingBaseline(FULL_MANIFESTS), "github"] });
     expect(full.violations.map((v) => `${v.rule}:${v.connector_id}`)).toEqual(["skeleton_baseline_stale:github"]);
-    expect(full.violations[0]!.message).toContain("kan bare krympe");
+    expect(full.violations[0]!.message).toContain("skal bare krympe");
   });
 
   it("review M3: en decision_ref som ikke finnes i beslutningsloggen feller vakten (og de ekte referansene finnes)", () => {

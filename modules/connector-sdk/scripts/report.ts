@@ -10,7 +10,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { FULL_MANIFESTS, SKELETON_BASELINE, productionConnectorDefinitions, runManifestGuard, safeIdentifier, validateConnectorManifest, type ConnectorManifest } from "../src/index.ts";
+import { FULL_MANIFESTS, SKELETON_BASELINE, decisionLogHasRow, productionConnectorDefinitions, runManifestGuard, safeIdentifier, validateConnectorManifest, type ConnectorManifest } from "../src/index.ts";
 import { errorLabel, runConnectorContract, type ContractAdapter } from "../src/testing.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -42,7 +42,7 @@ function guardReport(json: boolean, io: Io): number {
   const log = decisionLog();
   const report = runManifestGuard({
     definitions: productionConnectorDefinitions(), authored: FULL_MANIFESTS,
-    fileExists: evidenceFileExists(ROOT), decisionExists: (id) => new RegExp(`^\\| ${id} \\|`, "m").test(log)
+    fileExists: evidenceFileExists(ROOT), decisionExists: (id) => decisionLogHasRow(log, id)
   });
   const work = Object.entries(report.coverage.unknown_fields_by_connector).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   if (json) {

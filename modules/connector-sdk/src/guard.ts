@@ -1,7 +1,7 @@
 import { CONNECTOR_REGISTRY, type ConnectorDefinition } from "@jarvis/tool-gateway";
 import { buildManifestCatalogue, type Catalogue, type CatalogueInput } from "./catalogue.ts";
 import { SKELETON_BASELINE } from "./manifests/index.ts";
-import { isUnknown, safeIdentifier, type ConnectorManifest } from "./manifest.ts";
+import { DECISION_ID_PATTERN, isUnknown, safeIdentifier, type ConnectorManifest } from "./manifest.ts";
 import { validateConnectorManifest, type ManifestIssue } from "./validate.ts";
 
 /**
@@ -9,7 +9,9 @@ import { validateConnectorManifest, type ManifestIssue } from "./validate.ts";
  *
  * ÆRLIG OM HVA DEN GARANTERER (review M5): et skeleton avledes AUTOMATISK for hver registeroppføring (`derive.ts`), så en registeroppføring uten manifest kan ikke oppstå - vakten kan derfor ikke kreve at et manifest
  * «følger med» i den forstand. Det den kan kreve er at en NY BYGD connector ikke slipper stille inn med bare et skeleton: den må ha et FULLT manifest eller en bevisst oppføring i `SKELETON_BASELINE`
- * (`built_connector_unreviewed`), og baselinen kan bare krympe (`skeleton_baseline_stale`).
+ * (`built_connector_unreviewed`). Baselinen er ment å krympe, men det er en KONVENSJON, ikke noe vakten håndhever: `skeleton_baseline_stale` sjekker at hver oppføring fortsatt er en bygd registeroppføring uten fullt
+ * manifest (en id som ikke finnes, en backlog-oppføring eller en connector som nå har fullt manifest), men IKKE at listen aldri VOKSER. Å legge en id til er den dokumenterte, synlige utveien (én linje i PR-diffen,
+ * med begrunnelse i PR-en), og en ny connector kan også registreres som `backlog` for å slippe unna. En frosset legacy-liste (en committet kopi av de nåværende id-ene som bare kan fjernes fra) er DEFERRED (runbook §11).
  *
  * Reglene (kap. 10 + CLAUDE.md regel 11/12 + Appendiks B):
  *  - hver bygd registeroppføring har et fullt manifest eller står i den committede skeleton-baselinen; alle manifester (også avledede skeletons) er gyldige med eier, tillitsklasse og risikoklasse per handling;
@@ -126,7 +128,10 @@ function evidenceViolations(m: ConnectorManifest, fileExists: (p: string) => boo
   }
 }
 
-/** Bygd = registerkategori som ikke er backlog (samme skille som `coverage.built`). */
+/**
+ * Bygd = registerkategori som ikke er backlog. Merk: dette er IKKE det samme som `coverage.built` (rapporten), som i tillegg utelater `model_provider`: modellleverandørene (anthropic, openai, gemini) regnes som bygde her og
+ * står i baselinen. At de to tallene i dag begge er 48 er tilfeldig (51 bygde inkl. modellleverandører minus 3 fulle manifester = baselinen; 58 minus 7 backlog minus 3 modellleverandører = `coverage.built`).
+ */
 const isBuilt = (c: ConnectorDefinition): boolean => c.category !== "backlog" && c.category !== "backlog_d64_gate";
 
 /** Revisjonen over en ferdig bygd katalog. Ren; brukes av `runManifestGuard` og direkte av mutasjonstestene. */
@@ -151,7 +156,7 @@ export function auditManifestCatalogue(args: {
     const c = registryById.get(id);
     if (c === undefined) out.push({ rule: "skeleton_baseline_stale", connector_id: safeIdentifier(id), path: "", message: "SKELETON_BASELINE har en id som ikke finnes i registeret: fjern den" });
     else if (!isBuilt(c)) out.push({ rule: "skeleton_baseline_stale", connector_id: id, path: "", message: "SKELETON_BASELINE har en backlog-oppføring (ikke bygget trenger ingen baseline-oppføring): fjern den" });
-    else if (levelOf.get(id) === "full") out.push({ rule: "skeleton_baseline_stale", connector_id: id, path: "", message: "connectoren har nå et fullt manifest: fjern den fra SKELETON_BASELINE (baselinen kan bare krympe)" });
+    else if (levelOf.get(id) === "full") out.push({ rule: "skeleton_baseline_stale", connector_id: id, path: "", message: "connectoren har nå et fullt manifest: fjern den fra SKELETON_BASELINE (baselinen skal bare krympe - konvensjon, jf. kommentaren øverst)" });
   }
 
   // Håndskrevne manifester: rå sjekk først (eier/tillit/risiko), så skjema + semantikk.
@@ -200,6 +205,14 @@ export function runManifestGuard(input: GuardInput): GuardReport {
       unknown_fields_by_connector
     }
   };
+}
+
+/**
+ * Finnes beslutningen `id` (`D-109`) som en RAD i beslutningsloggen (`| D-109 | ...` først på en linje)? ÉN implementasjon: brukt av både CI-porten (`guard.test.ts`) og rapporten (`scripts/report.ts`), som begge injiserer
+ * `decisionExists` i vakten (den rører aldri filsystemet selv). Id-en valideres mot `DECISION_ID_PATTERN` FØR den settes inn i et regulært uttrykk: en ugyldig id (også en med mønsterstegn) finnes aldri.
+ */
+export function decisionLogHasRow(log: string, id: string): boolean {
+  return DECISION_ID_PATTERN.test(id) && new RegExp(`^\\| ${id} \\|`, "m").test(log);
 }
 
 /** Manifestfiler (basenavn uten `.ts`, uten `index`) som ikke svarer til noe registrert håndskrevet manifest: en glemt registrering i `FULL_MANIFESTS`. */
