@@ -94,8 +94,9 @@ describe("PORTEN: hvert connector-manifest i repoet holder reglene (feiler CI ve
       put("RUNBOOK_FILLED.md", "# Runbook\n");
       put("RUNBOOK_NEWLINE.md", "\n");
       put("RUNBOOK_WHITESPACE.md", "  \t\r\n \n\n   ");
-      put("RUNBOOK_BOM_NEWLINE.md", "\ufeff\n");
-      put("RUNBOOK_ZEROWIDTH.md", "\u200b\u200b\n\u2060");
+      const cp = (...points: number[]): string => String.fromCodePoint(...points); // usynlige tegn bygges av kodepunkt (aldri som rå tegn eller \u-escapes i kilden)
+      put("RUNBOOK_BOM_NEWLINE.md", `${cp(0xfeff)}\n`);
+      put("RUNBOOK_ZEROWIDTH.md", `${cp(0x200b, 0x200b)}\n${cp(0x2060)}`);
       put("RUNBOOK_ONE_CHAR.md", "x");
       symlinkSync(join(sub, "RUNBOOK_FILLED.md"), join(sub, "RUNBOOK_LINK.md")); // peker til en gyldig, fylt fil - er likevel ikke bevis
       symlinkSync(sub, join(sub, "LINK_TO_DIR"));
