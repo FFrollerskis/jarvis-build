@@ -70,3 +70,7 @@ The lead (main Claude session) integrates, opens the PR, runs CI and the indepen
 9. For connectors: the D-41 capability audit table.
 
 Be economical: do not spawn your own agents, do not re-read huge files repeatedly, do not paste large outputs back.
+
+## 5. Kjente guards som kan bli røde av legitime tillegg (lagt til 2026-11-15)
+- `apps/api/test/wph1-flag-off-selection-baseline.test.ts` og `wph2-flag-off-main-parity.test.ts` sammenligner flagg-AV-utvalg/mutate-svar mot et snapshot av main@ec3e684e. Legger din WP legitimt til verktøy, intents eller mutate-navn, blir de røde. Regenerer fixturene fra din egen branch-tupp (kontrollsenter-flaggene AV) etter overskriften i testen, rapporter det under «security surfaces», og løs ALDRI opp assertions.
+- Restricted-verktøy (SECRET_RESTRICTED): utvalgslås alene er IKKE nok - håndhev ved utførelse (se `wph1-restricted-tools-invariant.test.ts`). Kjent åpent hull N1: tidligere lokale svar i samtalehistorikken er ikke merket begrenset og kan nå en senere skytur; ikke bygg noe nytt som er avhengig av at historikken er ren.
