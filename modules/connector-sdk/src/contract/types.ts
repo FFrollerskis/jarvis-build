@@ -8,6 +8,14 @@ import type { VirtualClock } from "./clock.ts";
  * det kjøretiden allerede bruker (`HealthState` i Integrasjonssenteret, `FailureCategory`/`classifyFailureReason`, `ToolGateway.health`), så en connector ikke trenger en ny ordbok.
  *
  * Kittet kan kjøres mot (1) en FAKE bygget av `createFakeConnector` (ingen nettverk), og i prinsippet (2) en ekte transport bak en fake leverandørserver - den broen er DEFERRED (se runbook).
+ *
+ * ÆRLIG OM HVA «MODELLERT» BESKRIVER (review N2): kontrakten her er STRENGERE enn dagens kjøretid på idempotens. ToolGateway-ledgeren (`tool_executions`, migrasjon 010) er nøklet på idempotensnøkkelen ALENE:
+ * PRIMARY KEY (tenant_id, idempotency_key), og `gateway.ts` (ledger-blokken rundt `INSERT ... ON CONFLICT DO NOTHING`, ca. 958-983) svarer med det LAGREDE resultatet som `deduplicated: true` også når samme nøkkel gjenbrukes
+ * med en ANNEN nyttelast eller handling - aldri en konflikt. Nøkkelkravet håndheves bare for styrt klasse D (`class_d_idempotency_key_required`, ca. 859-862); for andre handlinger som manifestet kaller `required` (send/pay)
+ * betyr manglende nøkkel at ingen ledger brukes. Finans håndhever nyttelast-konflikt på DOMENEsiden (`IdempotencyKeyConflictError`, `finance/service.ts` ca. 415-426), ikke i gatewayen. Kittet og fakeen krever derimot
+ * `conflict` ved nøkkelgjenbruk med annen nyttelast (`idempotency.key_reuse_other_payload`) og `idempotency_key_required` for hver påkrevd skriving (`idempotency.required_key_enforced`). `modelled` betyr derfor «den ØNSKEDE
+ * kontrakten er konsistent og kittet kan felle brudd», IKKE «kjøretiden gjør dette i dag». Den utsatte transport-broen (`adapter_kind: real_transport`) vil feile de to sjekkene på selve gatewayen til en kjøretids-oppfølging
+ * finnes (runbook §5/§11) - det er et funn i gatewayen, ikke en connector-defekt. WP-I endrer ingen kjøretidskode.
  */
 
 export type { HealthState, JsonValue, TrustLevel };

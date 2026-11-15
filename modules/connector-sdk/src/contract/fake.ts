@@ -17,6 +17,11 @@ import type {
  *
  * `defects` er KUN for kittets egne mutasjonstester: hver defekt gjør fakeen brutal mot nøyaktig én kontraktsegenskap, og kittet må da feile den egenskapen.
  * En fake bygget av manifestet har `adapter_kind: "fake_from_manifest"` (review M4): den kan aldri gi akseptansestatus `proven`, kun `modelled`.
+ *
+ * IDEMPOTENS-LEDGEREN HER ER STRENGERE ENN KJØRETIDENS (review N2): fakeen nøkler ledgeren på nøkkel + handling + nyttelast-digest og svarer `conflict` (`idempotency_key_reuse_mismatch`) når samme nøkkel brukes med en annen
+ * nyttelast, og den krever nøkkel (`idempotency_key_required`) for hver skriving manifestet kaller `required`. Den ekte ToolGateway-ledgeren er nøklet på (tenant_id, idempotency_key) ALENE (migrasjon 010): samme nøkkel med annen
+ * nyttelast gir der det lagrede resultatet som `deduplicated: true`, og nøkkelkravet håndheves bare for styrt klasse D (`gateway.ts`; finans håndhever konflikten på domenesiden, `finance/service.ts`). Fakeen modellerer altså
+ * den ØNSKEDE kontrakten, ikke kjøretidens nåværende oppførsel - `modelled` i akseptansen skal leses slik (runbook §5/§6/§11). WP-I endrer ingen kjøretidskode; oppfølgingen i gatewayen er ikke gjort.
  */
 
 export const FAKE_TENANT = "tenant-a";

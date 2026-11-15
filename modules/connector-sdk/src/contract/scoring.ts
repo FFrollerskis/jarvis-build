@@ -8,6 +8,7 @@ import type { AdapterKind, ContractCheckResult } from "./types.ts";
  *  - `proven`: kontraktstest-kittet KJØRTE og beviste det mot en EKTE transport (`adapter_kind: real_transport`, bak en fake leverandørserver - broen er DEFERRED, så ingen connector har dette i dag).
  *  - `modelled` (review M4): kittet KJØRTE og beviste det mot en FAKE bygget av manifestet selv (`adapter_kind: fake_from_manifest`). Det beviser at manifestets garantier er konsistente og at kittet kan felle brudd -
  *    IKKE at en ekte transport holder dem (referansefakene er laget fra manifestene de testes mot; f.eks. har GitHub et dokumentert ekte gap i replay-beskyttelsen som en fake aldri kan vise).
+ *    Review N2: `modelled` beskriver den ØNSKEDE kontrakten, som for idempotens er strengere enn dagens ToolGateway-ledger (se `types.ts`) - det er ikke et utsagn om hva kjøretiden gjør i dag.
  *  - `declared`: manifestet PÅSTÅR det og er gyldig (CI-vakten drift-sjekker det som kan avledes), men ingenting har utført det.
  *  - `gap`: kittet feilet, eller manifestet deklarerer selv at det mangler/er delvis (circuit breaker `partial`, D-41-gap, ufullstendig klasse D-kjede ...).
  *  - `not_proven`: krever evidens kittet aldri kan gi (live smoke mot ekte konto/sandbox, reversibel live-handling) og som manifestet ikke oppgir som tilstede.
@@ -153,7 +154,7 @@ export function scoreAcceptance(manifest: ConnectorManifest, checks: readonly Co
     add("A.idempotency_replay", "A", "Idempotency/replay protection", "kit", kitStatus(idemStatus),
       idemStatus === "gap" ? `feilet: ${list(idem.failed)}`
         : idemStatus === "not_proven" ? `hoppet over (ingenting å kjøre mot, f.eks. ingen utførbare skrivehandlinger): ${list(idem.skipped)}`
-          : "samme nøkkel = én effekt, annen nyttelast under samme nøkkel avvises, ukjent utfall (tidsavbrudd etter effekt, 5xx på skriving) gjentas aldri, avbrudd før effekt er trygt å prøve igjen (kittet)");
+          : "samme nøkkel = én effekt, annen nyttelast under samme nøkkel avvises, ukjent utfall (tidsavbrudd etter effekt, 5xx på skriving) gjentas aldri, avbrudd før effekt er trygt å prøve igjen (kittet). NB (review N2): den modellerte kontrakten er STRENGERE enn dagens ToolGateway-ledger (nøklet på idempotensnøkkelen alene: samme nøkkel med annen nyttelast gir det lagrede resultatet som deduplisert, ikke en konflikt; nøkkelkrav kun for styrt klasse D) - se runbook §5");
 
     const ev = fromKit(st, ["evidence.before_after"]);
     add("A.before_after_evidence", "A", "Before/after evidence", "kit", kitStatus(ev.status), ev.status === "proven" ? "før-/etter-evidens bevist: finnes, og skiller seg når tilstanden endret seg (kittet)" : ev.status === "gap" ? "evidens mangler" : "ikke kjørt (ingen handling lover evidens)");

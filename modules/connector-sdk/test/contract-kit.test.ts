@@ -604,6 +604,15 @@ describe("akseptanse-scoring (Appendiks B): ærlig skille mellom bevist, deklare
     for (const id of ["R.docs_checked", "R.minimal_scopes_vault_refs", "R.data_schema_provenance_freshness_retention", "R.cost_maintenance_measurement", "A.risk_class_a_d"]) expect(item(a, id).status, id).toBe("declared");
   });
 
+  it("review N2: A.idempotency_replay er modelled MED forbeholdet at kontrakten er strengere enn dagens ToolGateway-ledger (nøklet på nøkkelen alene) - forbeholdet står i selve evidensen", async () => {
+    const a = await score(validFullManifest());
+    expect(item(a, "A.idempotency_replay").status).toBe("modelled");
+    expect(item(a, "A.idempotency_replay").evidence).toContain("STRENGERE enn dagens ToolGateway-ledger");
+    expect(item(a, "A.idempotency_replay").evidence).toContain("runbook §5");
+    // Forbeholdet gjelder bare idempotens - de andre modellerte kravene bærer det ikke:
+    expect(item(a, "A.authority_target_resolution").evidence).not.toContain("ToolGateway-ledger");
+  });
+
   it("en brutt kontrakt blir et gap i riktig Appendiks B-krav", async () => {
     expect(item(await score(validFullManifest(), ["no_dedupe"]), "A.idempotency_replay").status).toBe("gap");
     expect(item(await score(validFullManifest(), ["leaks_credential"]), "R.audit_without_secret_values").status).toBe("gap");
