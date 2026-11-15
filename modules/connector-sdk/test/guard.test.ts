@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -80,34 +80,40 @@ describe("PORTEN: hvert connector-manifest i repoet holder reglene (feiler CI ve
     expect(unregisteredManifestFiles(["github.ts", "index.ts", "forgotten_connector.ts", "notes.md"], ["github"])).toEqual(["forgotten_connector"]);
   });
 
-  it("CI-portens fileExists er streng: kun en vanlig, ikke-tom fil er bevis - en tom plassholderfil, en katalog og en sti som ikke finnes er det ikke", () => {
+  it("CI-portens fileExists er streng: kun en vanlig fil med synlig innhold er bevis - ikke en tom fil, en fil med ett linjeskift/bare blanke tegn, en katalog, en symlenke eller en sti som ikke finnes (review N7)", () => {
     expect(fileExists("docs/runbooks/WPI_CONNECTOR_SDK.md")).toBe(true);
     expect(fileExists("modules/connector-sdk/test/no-such.test.ts")).toBe(false);
     expect(fileExists("modules/connector-sdk")).toBe(false); // en katalog er ikke et runbook-/testbevis
-    // Tom fil: lages i en egen midlertidig katalog (ikke i repoet) og ryddes etterpå.
+    // Alt under lages i en egen midlertidig katalog (ikke i repoet) og ryddes etterpå.
     const dir = mkdtempSync(join(tmpdir(), "wpi-evidence-"));
     const sub = join(dir, "docs");
     mkdirSync(sub);
-    const empty = join(sub, "RUNBOOK_EMPTY.md");
-    const filled = join(sub, "RUNBOOK_FILLED.md");
     try {
-      writeFileSync(empty, "");
-      writeFileSync(filled, "# Runbook\n");
+      const put = (name: string, content: string): void => writeFileSync(join(sub, name), content);
+      put("RUNBOOK_EMPTY.md", "");
+      put("RUNBOOK_FILLED.md", "# Runbook\n");
+      put("RUNBOOK_NEWLINE.md", "\n");
+      put("RUNBOOK_WHITESPACE.md", "  \t\r\n \n\n   ");
+      put("RUNBOOK_BOM_NEWLINE.md", "\ufeff\n");
+      put("RUNBOOK_ZEROWIDTH.md", "\u200b\u200b\n\u2060");
+      put("RUNBOOK_ONE_CHAR.md", "x");
+      symlinkSync(join(sub, "RUNBOOK_FILLED.md"), join(sub, "RUNBOOK_LINK.md")); // peker til en gyldig, fylt fil - er likevel ikke bevis
+      symlinkSync(sub, join(sub, "LINK_TO_DIR"));
+      symlinkSync(join(dir, "finnes-ikke.md"), join(sub, "RUNBOOK_DANGLING.md"));
       const check = evidenceFileExists(dir);
-      expect(check("docs/RUNBOOK_EMPTY.md")).toBe(false);
       expect(check("docs/RUNBOOK_FILLED.md")).toBe(true);
+      expect(check("docs/RUNBOOK_ONE_CHAR.md")).toBe(true);
+      for (const bad of ["RUNBOOK_EMPTY.md", "RUNBOOK_NEWLINE.md", "RUNBOOK_WHITESPACE.md", "RUNBOOK_BOM_NEWLINE.md", "RUNBOOK_ZEROWIDTH.md", "RUNBOOK_LINK.md", "LINK_TO_DIR", "RUNBOOK_DANGLING.md", "finnes_ikke.md"]) expect(check(`docs/${bad}`), bad).toBe(false);
       expect(check("docs")).toBe(false);
-      expect(check("docs/finnes_ikke.md")).toBe(false);
-      // Og vakten feller et fullt manifest hvis runbooken er en tom plassholder:
-      const m = clone(FULL_MANIFESTS.find((x) => x.identity.id === "stripe")!);
-      m.operations.runbook = { path: "docs/RUNBOOK_EMPTY.md" };
-      const withEmpty = guard(FULL_MANIFESTS.map((x) => (x.identity.id === "stripe" ? m : x)), { exists: (p) => (p === "docs/RUNBOOK_EMPTY.md" ? check(p) : fileExists(p)) });
-      expect(withEmpty.violations.some((v) => v.rule === "runbook_file_missing" && v.connector_id === "stripe")).toBe(true);
+      // Og vakten feller et fullt manifest hvis runbooken er en tom plassholder, en fil med bare et linjeskift eller en symlenke:
+      for (const placeholder of ["RUNBOOK_EMPTY.md", "RUNBOOK_NEWLINE.md", "RUNBOOK_LINK.md"]) {
+        const m = clone(FULL_MANIFESTS.find((x) => x.identity.id === "stripe")!);
+        m.operations.runbook = { path: `docs/${placeholder}` };
+        const withBad = guard(FULL_MANIFESTS.map((x) => (x.identity.id === "stripe" ? m : x)), { exists: (p) => (p === `docs/${placeholder}` ? check(p) : fileExists(p)) });
+        expect(withBad.violations.some((v) => v.rule === "runbook_file_missing" && v.connector_id === "stripe"), placeholder).toBe(true);
+      }
     } finally {
-      unlinkSync(empty);
-      unlinkSync(filled);
-      rmdirSync(sub);
-      rmdirSync(dir);
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

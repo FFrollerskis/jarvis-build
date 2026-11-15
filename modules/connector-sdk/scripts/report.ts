@@ -7,7 +7,7 @@
 //        fake: test/references/<id>.fake.ts eller test/connectors/<id>.fake.ts (export create<Id>Fake).
 //
 // Avslutter 0 = ok, 1 = vakten/kittet har brudd, 2 = ugyldig bruk. Gap og «ikke bevist» er arbeidslisten, ikke feil: de gir kode 0. Alt kittet skriver er redigert (ingen hemmelighetsformer).
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { FULL_MANIFESTS, SKELETON_BASELINE, decisionLogHasRow, productionConnectorDefinitions, runManifestGuard, safeIdentifier, validateConnectorManifest, type ConnectorManifest } from "../src/index.ts";
@@ -20,13 +20,18 @@ const ID = /^[a-z][a-z0-9_]{1,40}$/;
 
 const pascal = (id: string): string => id.split("_").map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join("");
 /**
- * Bevisstrengheten (en eneste implementasjon, brukt av både denne rapporten og CI-porten i `guard.test.ts`): en repo-relativ sti teller som runbook-/testbevis kun hvis den er en VANLIG FIL som ikke er tom.
- * Vakten selv leser aldri innholdet; uten dette var en tom plassholderfil (eller en katalog) nok. Stiene er allerede låst av skjemaet (`REPO_PATH`: ingen `..`, ingen absolutt sti), så `root` kan ikke forlates.
+ * Bevisstrengheten (en eneste implementasjon, brukt av både denne rapporten og CI-porten i `guard.test.ts`): en repo-relativ sti teller som runbook-/testbevis kun hvis den er en VANLIG FIL (ikke en symlenke, ikke en katalog)
+ * med innhold som ikke bare er blanke/usynlige tegn. Vakten selv leser aldri innholdet utover dette; uten det var en tom plassholderfil, en fil med ett linjeskift (`touch`/`echo > fil`), en katalog eller en symlenke (som kan peke
+ * hvor som helst, også ut av repoet) nok. `lstat`, ikke `stat`: `stat` følger en symlenke og ga `isFile()` for målet. Stiene er allerede låst av skjemaet (`REPO_PATH`: ingen `..`, ingen absolutt sti), så `root` kan ikke forlates.
+ * Innholdskrav utover «noe synlig står der» (en `.md`/`.test.ts`-form, at runbooken nevner connector-id, at teststien inneholder en test) er `DEFERRED` (runbook §11).
  */
 export const evidenceFileExists = (root: string) => (repoRelativePath: string): boolean => {
   try {
-    const st = statSync(join(root, repoRelativePath));
-    return st.isFile() && st.size > 0;
+    const abs = join(root, repoRelativePath);
+    const st = lstatSync(abs);
+    if (!st.isFile() || st.size === 0) return false;
+    // En fil på over 1 MiB er ingen plassholder; mindre filer må ha minst ett tegn som verken er blankt eller et kontroll-/formattegn (nullbredde, BOM ...).
+    return st.size > 1_048_576 || /[^\s\p{C}]/u.test(readFileSync(abs, "utf8"));
   } catch {
     return false;
   }
