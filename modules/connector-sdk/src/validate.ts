@@ -212,6 +212,8 @@ function actionIssues(a: ActionSpec, i: number, out: ManifestIssue[]): void {
   }
   if (chain === undefined) { add("reversibility.class_d_chain", "class_d_chain_missing", "klasse D må oppgi hvor langt kjeden er bygget (complete/deferred/exempt)"); return; }
   if (chain.status === "deferred" && chain.missing.length === 0) add("reversibility.class_d_chain.missing", "class_d_chain_deferred_without_reason", "deferred krever at manglende ledd er navngitt");
+  if (chain.status === "exempt" && (chain.justification === undefined || chain.justification.trim().length === 0)) add("reversibility.class_d_chain.justification", "class_d_chain_exempt_without_justification", "exempt (unntatt klasse D-kjeden) krever en begrunnelse (justification)");
+  if (chain.status !== "exempt" && chain.justification !== undefined) add("reversibility.class_d_chain.justification", "class_d_chain_justification_without_exempt", "justification hører bare til exempt");
   if (chain.status === "complete") {
     if (chain.missing.length > 0) add("reversibility.class_d_chain.missing", "class_d_chain_complete_with_missing", "en komplett kjede kan ikke ha manglende ledd");
     if (a.reversibility.evidence.postcondition === "none") add("reversibility.evidence.postcondition", "class_d_missing_postcondition", "klasse D krever etterbetingelse (readback eller leverandørens bekreftede id)");
@@ -262,6 +264,8 @@ function d41Issues(m: ConnectorManifest, out: ManifestIssue[]): void {
   if (d.classification === "FULL") {
     if (d.gaps.length > 0) out.push({ path: "d41_audit.gaps", code: "d41_full_with_gaps", message: "FULL kan ikke ha åpne DEFERRED/PARTIAL-gap (bruk PARTIAL)" });
     for (const [name, cap] of Object.entries(caps)) if (cap.implemented === "partial" || (cap.provider_offers === "yes" && cap.implemented === "none")) out.push({ path: `d41_audit.${name}`, code: "d41_full_with_incomplete_capability", message: `FULL, men «${name}» er ikke fullt implementert selv om leverandøren tilbyr den` });
+    // En kapabilitet som ikke er vurdert (provider_offers «unknown») kan ikke ligge under en FULL-klassifisering: ukjent er ikke «tilbys ikke».
+    for (const [name, cap] of Object.entries(caps)) if (cap.provider_offers === "unknown") out.push({ path: `d41_audit.${name}.provider_offers`, code: "d41_full_with_unassessed_capability", message: `FULL, men «${name}» er ikke vurdert mot leverandøren (provider_offers: unknown)` });
     if (!d.scopes_verified_against_docs) out.push({ path: "d41_audit.scopes_verified_against_docs", code: "d41_full_unverified_scopes", message: "FULL krever scopes verifisert mot offisiell dokumentasjon" });
   }
   if (d.classification === "PARTIAL" && d.gaps.length === 0) out.push({ path: "d41_audit.gaps", code: "d41_partial_without_gaps", message: "PARTIAL krever minst ett navngitt gap (DEFERRED/PARTIAL)" });
@@ -274,6 +278,12 @@ function d41Issues(m: ConnectorManifest, out: ManifestIssue[]): void {
   }
   if (d.classification !== "READ_ONLY" && d.read_only_reason !== undefined) out.push({ path: "d41_audit.read_only_reason", code: "d41_reason_without_read_only", message: "read_only_reason hører bare til READ_ONLY" });
   if (d.classification === "PROVIDER_LIMITED" && !Object.values(caps).some((c) => c.provider_offers === "no")) out.push({ path: "d41_audit.classification", code: "d41_provider_limited_without_limit", message: "PROVIDER_LIMITED krever at leverandøren faktisk ikke tilbyr minst én kapabilitet" });
+  // Slettesemantikken (data.delete_semantics) skal ikke motsi D-41-revisjonen av slettekapabiliteten: «supported» krever at leverandøren tilbyr sletting, «not_offered» at den eksplisitt ikke gjør det.
+  const ds = m.data.delete_semantics;
+  if (!isUnknown(ds)) {
+    if (ds.provider_side === "supported" && d.delete.provider_offers === "no") out.push({ path: "data.delete_semantics.provider_side", code: "delete_semantics_conflict", message: "slettesemantikken sier «supported», men D-41-revisjonen sier at leverandøren ikke tilbyr sletting" });
+    if (ds.provider_side === "not_offered" && d.delete.provider_offers !== "no") out.push({ path: "data.delete_semantics.provider_side", code: "delete_semantics_conflict", message: `slettesemantikken sier «not_offered», men D-41-revisjonen sier ${d.delete.provider_offers === "yes" ? "at leverandøren tilbyr sletting" : "at sletting ikke er vurdert (unknown)"}` });
+  }
   if (d.scopes_verified_against_docs) {
     if (d.unverified_scopes.length > 0) out.push({ path: "d41_audit.unverified_scopes", code: "d41_verified_with_unverified_scopes", message: "scopes er markert verifisert, men unverified_scopes er ikke tom" });
     if (d.verified_on === undefined) out.push({ path: "d41_audit.verified_on", code: "d41_verified_without_date", message: "verifisering mot dokumentasjon krever dato (verified_on)" });
@@ -295,6 +305,17 @@ function semanticIssues(m: ConnectorManifest): ManifestIssue[] {
   const writeCapable = m.actions.some(isWriteCapable);
   const dedupe = m.idempotency.dedupe_key;
   if (writeCapable && (isUnknown(dedupe) || dedupe === "none")) out.push({ path: "idempotency.dedupe_key", code: "write_capable_without_idempotency", message: "connectoren har skrive-/utførende handlinger men oppgir ingen dedupe-nøkkel (idempotensinfo mangler)" });
+  // En blind retry er bare trygg når leverandøren selv er idempotent. Skrive-/utførende handlinger uten leverandør-idempotens kan dobbeltutføres av `safe_retry` etter tidsavbrudd eller 5xx (utfallet er ukjent):
+  // da må kontrakten være reconcile_before_retry eller never_retry (429 er et avslag FØR behandling og kan alltid prøves på nytt).
+  const retry = m.idempotency.retry_semantics;
+  if (!isUnknown(retry)) {
+    const nonIdempotent = m.actions.filter((a) => isWriteCapable(a) && !a.idempotency.provider_idempotent);
+    if (nonIdempotent.length > 0) {
+      for (const field of ["on_timeout", "on_server_error"] as const) {
+        if (retry[field] === "safe_retry") out.push({ path: `idempotency.retry_semantics.${field}`, code: "unsafe_retry_with_non_idempotent_writes", message: `${field} er safe_retry, men ${nonIdempotent.length} skrive-/utførende handling(er) er ikke leverandør-idempotente: en blind retry kan dobbeltutføre (bruk reconcile_before_retry eller never_retry)` });
+      }
+    }
+  }
   const stepUp = m.actions.filter((a) => a.authority.step_up_required).map((a) => a.key).sort();
   if (m.authority.approval_policy) {
     const declared = [...m.authority.approval_policy.step_up_actions].sort();

@@ -42,7 +42,7 @@ export const STRIPE_MANIFEST: ConnectorManifest = {
       provider: [
         { scope: "balance (lesing)", needed_for: ["finance_stripe.get_balance"] },
         { scope: "payment_intents (lesing)", needed_for: ["finance_stripe.refresh_payment_state"] },
-        { scope: "refunds (skriving)", needed_for: ["finance_stripe.submit_refund"] }
+        { scope: "UVERIFISERT: tillatelse til å opprette refusjoner (navnet er ikke lest mot Stripe-dokumentasjonen)", needed_for: ["finance_stripe.submit_refund"] }
       ]
     },
     rotation: { credential_kind: "api_key", method: "manual", note: "eieren roterer nøkkelen i Stripe Dashboard; utløp og rotasjon overvåkes ikke automatisk (EV-17)" }
@@ -72,7 +72,7 @@ export const STRIPE_MANIFEST: ConnectorManifest = {
     dedupe_key: "jarvis_idempotency_key",
     retry_semantics: {
       on_timeout: "reconcile_before_retry", on_rate_limit: "retry_after", on_server_error: "reconcile_before_retry",
-      note: "samme refusjon sendes alltid med samme Idempotency-Key hos Stripe (23 t-vindu); ukjent utfall går til avstemming og prøves aldri på nytt blindt"
+      note: "samme refusjon sendes alltid med samme Idempotency-Key hos Stripe; ukjent utfall går til avstemming og prøves aldri på nytt blindt. 23 t-vinduet for gjenbruk av nøkkelen er Jarvis' EGEN avgjørelse (D-462), ikke et Stripe-tall; Stripe godtar nøkler opptil 255 tegn og rydder dem etter minst 24 t"
     },
     exactly_once_target: "exactly_once"
   },
@@ -91,7 +91,7 @@ export const STRIPE_MANIFEST: ConnectorManifest = {
     provenance: { origin: "mixed", tagging: "payment_intents og refusjoner med tenant-RLS, leverandørens ekstern id og revisjon merket person/tenant/task_id" },
     freshness: { model: "synced", note: "webhooks (hendelsesdrevet) + daglig stripe-payment-sync + live refresh_payment_state" },
     retention: { stored_by_jarvis: ["audit_metadata", "before_after_ledger", "synced_copy"], note: "pengekolonnene er uforanderlige og sendte rader kan ikke slettes (migrasjon 101)" },
-    delete_semantics: { provider_side: "not_offered", jarvis_side: "en sendt refusjon kan ikke angres hos Stripe; utkast kan slettes og erasure virker (transaksjonslokal, ErasureService); sendte rader kan ikke slettes" }
+    delete_semantics: { provider_side: "deferred", jarvis_side: "betalingsobjekter slettes ikke hos Stripe (avbrytes/refunderes; uverifisert), sletting av øvrige ressurser er ikke vurdert (DEFERRED). Jarvis-utkast kan slettes og erasure virker (ErasureService); sendte rader kan ikke slettes, en sendt refusjon kan ikke angres" }
   },
   operations: {
     health_check: { method: "live_probe", action_key: "finance_stripe.get_balance", cadence: "daglig helsesveip (ConnectorHealthSweep)" },
@@ -118,14 +118,16 @@ export const STRIPE_MANIFEST: ConnectorManifest = {
     classification: "PARTIAL",
     read: { provider_offers: "yes", implemented: "partial", action_keys: ["finance_stripe.get_balance", "finance_stripe.refresh_payment_state"], note: "saldo og betalingstilstand; øvrige lese-flater (kunder, abonnementer, payouts, disputes) er ikke bygget" },
     write: { provider_offers: "yes", implemented: "partial", action_keys: ["finance_stripe.submit_refund"], note: "kun refusjon (klasse D, penger); betalingsopprettelse er Jarvis-kjernens finance.submit_payment_intent (intern kjede, JARVIS_CANONICAL), ikke en handling i dette registerinnslaget; kunder, abonnementer og payouts er ikke bygget" },
-    delete: { provider_offers: "unknown", implemented: "none", action_keys: [], note: "ikke vurdert: betalingsobjekter slettes ikke hos Stripe (refunderes/avbrytes); andre ressurser er utenfor scope" },
-    access_control: { provider_offers: "unknown", implemented: "none", action_keys: [], note: "ikke vurdert: API-nøkler og teammedlemmer er root-nivå og skal aldri nås av modellen" },
+    delete: { provider_offers: "unknown", implemented: "none", action_keys: [], note: "ikke vurdert mot dokumentasjon i WP-I: betalingsobjekter slettes ikke hos Stripe (avbrytes/refunderes - uverifisert), øvrige ressurser (kunder m.fl.) er ikke undersøkt. Se gap «sletting»" },
+    access_control: { provider_offers: "unknown", implemented: "none", action_keys: [], note: "ikke vurdert: API-nøkler, restricted keys og teammedlemmer er root-nivå og skal aldri nås av modellen uten egen eierbeslutning. Se gap «tilgangsstyring»" },
     scopes_verified_against_docs: false,
-    unverified_scopes: ["Stripe restricted key-tillatelsesnavn for balance, payment_intents og refunds (ikke lest mot Stripes dokumentasjon i WP-I)"],
+    unverified_scopes: ["Stripe restricted key-tillatelsesnavn for balance og payment_intents (ikke lest mot Stripes dokumentasjon i WP-I)", "tillatelsen til å opprette refusjoner (navnet er UVERIFISERT; sammendrag grupperer refusjoner under charge_write)"],
     docs_reference: ["Stripe API-referanse (balance, payment_intents, refunds) slik D-228 og transporten bruker den; tillatelsesnavn ikke verifisert i WP-I - se docs/runbooks/FINANCE_D_CHAIN.md §8"],
     gaps: [
       { capability: "Stripe restricted key-tillatelser verifisert mot dokumentasjon", status: "PARTIAL", reason: "tillatelsesnavnene er ikke lest mot offisiell dokumentasjon i WP-I" },
       { capability: "kunder, abonnementer, payouts, disputes (lese- og skriveflater)", status: "DEFERRED", reason: "ikke bygget; ikke vurdert mot dokumentasjon" },
+      { capability: "sletting av Stripe-ressurser (delete)", status: "DEFERRED", reason: "ikke vurdert mot offisiell dokumentasjon i WP-I (provider_offers: unknown): betalingsobjekter avbrytes/refunderes i stedet for å slettes (uverifisert), øvrige ressurser (kunder m.fl.) er ikke undersøkt; ingen sletthandling er bygget" },
+      { capability: "tilgangsstyring (restricted keys, API-nøkler, teammedlemmer)", status: "DEFERRED", reason: "ikke vurdert; root-nivå (privilegie-eskalering) og skal aldri nås av modellen - krever en egen eierbeslutning og et eget isolert credential før noe bygges" },
       { capability: "manuell disposisjon av ukjent utfall", status: "DEFERRED", reason: "bevisst ikke bygget (FINANCE_D_CHAIN §9); forslaget resolve_submit_outcome ligger som åpent spørsmål" }
     ]
   },

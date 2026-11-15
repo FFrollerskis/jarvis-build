@@ -99,11 +99,11 @@ export const CLOUDFLARE_MANIFEST: ConnectorManifest = {
     },
     rotation: {
       credential_kind: "api_key", method: "manual", interval_days: 90,
-      note: "token med utløpsdato (anbefalt 90 dager) og IP-filter; eieren roterer. check_token leser status og utløp, men utløp overvåkes ikke automatisk (EV-17)."
+      note: "token med utløpsdato og IP-filter; eieren roterer. 90 dager er Jarvis' egen anbefaling - UVERIFISERT som leverandørkrav (ikke bekreftet mot Cloudflares dokumentasjon). check_token leser status og utløp, men utløp overvåkes ikke automatisk (EV-17)."
     }
   },
   capabilities: {
-    read: { status: "implemented", note: "list_account_roles er PARTIAL (tillatelsen for listeendepunktet er ikke bekreftet)" },
+    read: { status: "implemented", note: "list_account_roles og list_account_members er PARTIAL (tillatelsene for listeendepunktene er ikke bekreftet)" },
     write: { status: "implemented", note: "DNS-poster (A/AAAA/CNAME/TXT/MX/NS), WAF-/rate limit-regler og seks verifiserte sone-innstillinger" },
     actions: { status: "not_implemented", note: "ingen send/betal/styr-handlinger; cache-purge regnes som sletting (effekt delete)" },
     webhooks: { status: "not_implemented", items: [] },
@@ -133,7 +133,7 @@ export const CLOUDFLARE_MANIFEST: ConnectorManifest = {
   },
   limits: {
     rate_limits: "Cloudflare: 1200 forespørsler per 5 minutter per bruker (429 med Retry-After respekteres); Jarvis: 5-30 kall/min per handling",
-    quotas: "purge-listen er begrenset til 30 elementer per kall (konservativt valgt, maks er ikke bekreftet)"
+    quotas: "purge-listen er begrenset til 30 elementer per kall (konservativt valgt; leverandørens maksimum er UVERIFISERT - ikke bekreftet mot dokumentasjonen)"
   },
   trust: {
     output: { class: strictestTrust(actions) },
@@ -174,10 +174,14 @@ export const CLOUDFLARE_MANIFEST: ConnectorManifest = {
     classification: "PARTIAL",
     read: { provider_offers: "yes", implemented: "partial", action_keys: actions.filter((a) => a.kind === "read").map((a) => a.key), note: "list_account_roles: tillatelsen for listeendepunktet er ikke bekreftet; audit-logg leses kun første side; list_dns_records er begrenset til 10 sider à 100 poster" },
     write: { provider_offers: "yes", implemented: "partial", action_keys: ["cloudflare.create_dns_record", "cloudflare.update_dns_record", "cloudflare.create_waf_rule", "cloudflare.update_waf_rule", "cloudflare.update_zone_setting"], note: "kun de verifiserte DNS-typene, WAF-fasene http_request_firewall_custom og http_ratelimit, og seks sone-innstillinger" },
-    delete: { provider_offers: "yes", implemented: "full", action_keys: ["cloudflare.delete_dns_record", "cloudflare.delete_waf_rule", "cloudflare.purge_cache"] },
+    delete: { provider_offers: "yes", implemented: "partial", action_keys: ["cloudflare.delete_dns_record", "cloudflare.delete_waf_rule", "cloudflare.purge_cache"], note: "kun DNS-poster, WAF-regler og cache-purge; sletting av øvrige slettbare ressurser (Workers, Pages, R2, tunneler, strukturerte DNS-typer m.fl.) er DEFERRED - se gap" },
     access_control: { provider_offers: "yes", implemented: "partial", action_keys: ["cloudflare.list_account_members", "cloudflare.list_account_roles", "cloudflare.list_api_tokens", "cloudflare.list_audit_logs"], note: "kun lesing av metadata; skriving (medlemmer, roller, opprette/tilbakekalle tokens) er DEFERRED fordi et token som kan opprette tokens er privilegie-eskalering" },
     scopes_verified_against_docs: false,
-    unverified_scopes: ["Account Settings Read for rolle-listen (kun enkelt-rolle-oppslaget er verifisert)", "dashbord-navnet Account API Tokens Read for kontoeide tokens"],
+    unverified_scopes: [
+      "Account Settings Read for rolle-listen (list roles; kun enkelt-rolle-oppslaget er verifisert)",
+      "tillatelsen for konto-medlemslisten (List Members) er ikke bekreftet",
+      "dashbord-navnet Account API Tokens Read for kontoeide tokens"
+    ],
     verified_on: "2026-10-09",
     docs_reference: ["Cloudflare API-dokumentasjon (developers.cloudflare.com): token-verifisering, DNS-poster, Rulesets, sone-innstillinger, cache purge, konto-medlemmer, audit-logg v2 - lest via søk 2026-10-09; se docs/runbooks/CLOUDFLARE_CONNECTOR.md §9"],
     gaps: [
@@ -186,7 +190,9 @@ export const CLOUDFLARE_MANIFEST: ConnectorManifest = {
       { capability: "sone-innstillinger utover de seks verifiserte", status: "PARTIAL", reason: "kun ssl, min_tls_version, always_use_https, development_mode, security_level og tls_1_3; batch-endepunktet er deprecated" },
       { capability: "tilgangsstyring skriv: medlemmer, roller, opprette/tilbakekalle API-tokens", status: "DEFERRED", reason: "privilegie-eskalering; krever egen eierbeslutning og et eget isolert token" },
       { capability: "Workers, Pages, R2, Tunnel, Zero Trust, Load Balancing, Page/Cache/Transform Rules, Logpush, GraphQL-analyse", status: "DEFERRED", reason: "utenfor masterplanens Cloudflare (DNS/WAF)-avgrensning; hver krever egen D-41-verifisering" },
-      { capability: "paginering av audit-logg (kun første side)", status: "PARTIAL", reason: "cursor-paginering er ikke bygget" }
+      { capability: "paginering av audit-logg (kun første side)", status: "PARTIAL", reason: "cursor-paginering er ikke bygget" },
+      { capability: "cache purge: leverandørens maksimum per kall", status: "PARTIAL", reason: "30 elementer per kall er konservativt valgt; maksimum er UVERIFISERT (ikke bekreftet mot dokumentasjonen)" },
+      { capability: "sletting av øvrige slettbare ressurser (Workers, Pages, R2, tunneler, strukturerte DNS-typer m.fl.)", status: "DEFERRED", reason: "utenfor masterplanens Cloudflare (DNS/WAF)-avgrensning; hver krever egen D-41-verifisering" }
     ]
   },
   core_boundary: {

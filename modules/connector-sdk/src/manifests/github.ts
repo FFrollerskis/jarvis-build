@@ -115,7 +115,8 @@ export const GITHUB_MANIFEST: ConnectorManifest = {
         { scope: "Contents (read and write)", needed_for: ["github.list_branches", "github.get_branch", "github.get_commit", "github.create_branch", "github.delete_branch", "github.merge_pr"] },
         { scope: "Pull requests (read and write)", needed_for: ["github.list_pull_requests", "github.get_pull_request", "github.create_pr", "github.update_pr", "github.request_reviewers"] },
         { scope: "Issues (read and write)", needed_for: ["github.read_issues", "github.create_issue", "github.update_issue", "github.set_labels", "github.comment_on_issue"] },
-        { scope: "Actions (read and write)", needed_for: ["github.list_workflow_runs", "github.get_workflow_run", "github.list_workflow_jobs", "github.rerun_workflow_run", "github.cancel_workflow_run", "github.dispatch_workflow"] }
+        { scope: "Actions (read and write)", needed_for: ["github.list_workflow_runs", "github.get_workflow_run", "github.list_workflow_jobs", "github.rerun_workflow_run", "github.cancel_workflow_run", "github.dispatch_workflow"] },
+        { scope: "Workflows (read and write) - VALGFRI, AV som standard; UVERIFISERT kartlegging", needed_for: [] }
       ]
     },
     rotation: {
@@ -197,8 +198,10 @@ export const GITHUB_MANIFEST: ConnectorManifest = {
     },
     delete: { provider_offers: "yes", implemented: "partial", action_keys: ["github.delete_branch"], note: "kun branches; sletting av releases, kommentarer m.fl. er ikke bygget" },
     access_control: { provider_offers: "yes", implemented: "none", action_keys: [], note: "branch protection/rulesets/collaborators/deploy keys (Administration) er ikke bygget" },
-    scopes_verified_against_docs: true,
-    unverified_scopes: [],
+    // Den valgfrie Workflows-tillatelsen (runbook GITHUB_APP.md) er dokumentert som «additional permission» for endringer under .github/workflows, men hvilke github.*-handlinger som trenger den (git/refs, contents,
+    // releases) er IKKE kartlagt mot dokumentasjonen - derfor er scopene ikke fullt verifisert (review LOW). De øvrige fem tillatelsene er verifisert 2026-10-09.
+    scopes_verified_against_docs: false,
+    unverified_scopes: ["Workflows (read and write) - valgfri: hvilke handlinger som krever den når .github/workflows berøres er ikke kartlagt mot dokumentasjonen"],
     verified_on: "2026-10-09",
     docs_reference: ["GitHub-dokumentasjon (github/docs, åpent repo): server-to-server-permissions for REST API 2022-11-28, Choosing permissions for a GitHub App, Rate limits for the REST API - se docs/runbooks/GITHUB_APP.md, avsnittet Kilder"],
     gaps: [

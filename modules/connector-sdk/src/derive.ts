@@ -81,8 +81,8 @@ export function requiredInputOf(def: ToolDefinition): string[] | null {
 }
 
 /** Klasse D-kjedens tilstand fra den EKSISTERENDE statiske vurderingen (`assessClassDPipeline`/`isClassDExempt`) - ingen egen tolkning. */
-function classDChain(def: ToolDefinition): { status: "complete" | "deferred" | "exempt"; missing: string[] } {
-  if (isClassDExempt(def)) return { status: "exempt", missing: [] };
+function classDChain(def: ToolDefinition): { status: "complete" | "deferred" | "exempt"; missing: string[]; justification?: string } {
+  if (isClassDExempt(def)) return { status: "exempt", missing: [], justification: "sikkerhetsbryter: unntatt kjedekravene (CLASS_D_EXEMPT_ACTIONS i class-d-pipeline.ts) slik at den virker også når alt annet er nede" };
   const assessment = assessClassDPipeline(def);
   return { status: assessment.complete ? "complete" : "deferred", missing: [...assessment.missing] };
 }

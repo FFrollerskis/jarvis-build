@@ -50,6 +50,7 @@ describe("kittet mot en korrekt fake: hver sjekk består (ingen feil) og ingenti
     m.idempotency = { dedupe_key: "none", retry_semantics: { on_timeout: "safe_retry", on_rate_limit: "retry_after", on_server_error: "safe_retry" }, exactly_once_target: "not_applicable" };
     delete (m.authority as Record<string, unknown>)["approval_policy"];
     m.auth.scopes.provider = [{ scope: "tasks:read", needed_for: [ACME_KEYS.list] }];
+    m.data.delete_semantics = { provider_side: "not_offered", jarvis_side: "revisjon beholdes; leverandøren tilbyr ikke sletting" };
     m.d41_audit = {
       classification: "READ_ONLY", read_only_reason: "provider_offers_nothing",
       read: { provider_offers: "yes", implemented: "full", action_keys: [ACME_KEYS.list] }, write: { provider_offers: "no", implemented: "none", action_keys: [] },

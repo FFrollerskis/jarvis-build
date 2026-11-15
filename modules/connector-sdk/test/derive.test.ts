@@ -4,7 +4,7 @@ import {
   CONNECTOR_REGISTRY, MIN_RISK_BY_EFFECT, buildToolManifest, inferEffect, type ConnectorDefinition, type ToolDefinition
 } from "@jarvis/tool-gateway";
 import {
-  ACTION_EFFECTS, MIN_RISK_FOR_EFFECT, claimedDefinitions, deriveSkeletonManifests, isUnknown, productionConnectorDefinitions, requiredInputOf, validateConnectorManifest,
+  ACTION_EFFECTS, MIN_RISK_FOR_EFFECT, claimedDefinitions, deriveAction, deriveSkeletonManifests, isUnknown, productionConnectorDefinitions, requiredInputOf, validateConnectorManifest,
   DEFAULT_INTERNAL_CREDENTIAL_REFS, DERIVED_MANIFEST_VERSION, type ConnectorManifest
 } from "../src/index.ts";
 
@@ -123,6 +123,22 @@ describe("avledning: fakta er identiske med verktøymanifestet og definisjonene 
     }
     // Speiler EXPECTED_DEFERRED i modules/tool-gateway/test/part3-class-d-pipeline.test.ts (en ny D-handling uten kjede gjør denne testen rød - ingen stille utelatelse).
     expect(deferred.sort()).toEqual(["mcp_zapier.call_tool", "microsoft_outlook.send_mail"]);
+  });
+
+  it("review LOW: en «exempt» klasse D-kjede (nødbrytere) bærer alltid en begrunnelse; andre kjeder har ingen", () => {
+    // Nødbryterne (finance.enable/disable_kill_switch m.fl.) er Jarvis-interne og ligger ikke i noen connectors skeleton - de avledes direkte.
+    const def = definitions.find((d) => d.tool_id === "finance" && d.action === "enable_kill_switch")!;
+    const action = deriveAction(def, buildToolManifest(definitions).get("finance.enable_kill_switch")!);
+    expect(action.reversibility.class_d_chain?.status).toBe("exempt");
+    expect(action.reversibility.class_d_chain?.justification).toContain("sikkerhetsbryter");
+    // Og begrunnelsen holder skjemaet: et skeleton med akkurat denne handlingen validerer.
+    const base = skeletons.find((m) => m.identity.id === "stripe")!;
+    const withExempt = { ...structuredClone(base), actions: [...structuredClone(base.actions), action] } as ConnectorManifest;
+    expect(validateConnectorManifest(withExempt).issues.filter((i) => i.code.startsWith("class_d_chain"))).toEqual([]);
+    for (const m of skeletons) for (const a of m.actions) {
+      const chain = a.reversibility.class_d_chain;
+      if (chain !== undefined && chain.status !== "exempt") expect(chain.justification, a.key).toBeUndefined();
+    }
   });
 
   it("risiko under minimum for effekten forekommer bare med den begrunnelsen verktøymanifestet selv har (MIN_RISK_EXCEPTIONS)", () => {

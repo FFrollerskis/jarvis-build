@@ -50,7 +50,7 @@ export interface MutationOptions {
   before_state: boolean;
   postcondition: Postcondition;
   /** Kun klasse D: kjedens tilstand (standard `complete`). */
-  class_d_chain?: { status: "complete" | "deferred" | "exempt"; missing?: readonly string[] };
+  class_d_chain?: { status: "complete" | "deferred" | "exempt"; missing?: readonly string[]; justification?: string };
   required?: readonly string[];
   identity_fields?: readonly string[];
   trust?: TrustLevel;
@@ -61,7 +61,9 @@ export interface MutationOptions {
 
 export function mutationAction(key: string, o: MutationOptions): ActionSpec {
   const destructive = o.destructive ?? (o.effect === "delete" || !o.reversible);
-  const chain = o.risk === "D" ? { class_d_chain: { status: o.class_d_chain?.status ?? "complete", missing: [...(o.class_d_chain?.missing ?? [])] } } : {};
+  const chain = o.risk === "D"
+    ? { class_d_chain: { status: o.class_d_chain?.status ?? "complete", missing: [...(o.class_d_chain?.missing ?? [])], ...(o.class_d_chain?.justification !== undefined ? { justification: o.class_d_chain.justification } : {}) } }
+    : {};
   return {
     key, kind: kindOfEffect(o.effect), effect: o.effect,
     authority: { risk_class: o.risk, step_up_required: o.step_up === true, owner_only: o.owner_only === true, ...(o.risk_exception !== undefined ? { risk_exception: o.risk_exception } : {}) },

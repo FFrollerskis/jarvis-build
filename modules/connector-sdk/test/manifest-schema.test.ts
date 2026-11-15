@@ -183,6 +183,10 @@ describe("semantiske regler (speiler verktøymanifestet, klasse D-kjeden, idempo
     ["komplett klasse D-kjede med manglende ledd", (m) => { act(m, ACME_KEYS.setting).reversibility.class_d_chain = { status: "complete", missing: ["postcondition"] }; }, "class_d_chain_complete_with_missing"],
     ["klasse D-kjede på en handling som ikke er klasse D", (m) => { act(m, ACME_KEYS.create).reversibility.class_d_chain = { status: "complete", missing: [] }; }, "class_d_chain_on_non_d"],
     ["en ufullstendig klasse D-handling er lovlig når den er ærlig merket deferred (utilgjengelig under håndhevelse)", (m) => { const a = act(m, ACME_KEYS.setting); a.reversibility.evidence = { before_state: false, postcondition: "none" }; a.reversibility.class_d_chain = { status: "deferred", missing: ["fresh_state_read", "postcondition"] }; }, "__ok__"],
+    ["klasse D «exempt» uten begrunnelse er en stille omgåelse", (m) => { act(m, ACME_KEYS.setting).reversibility.class_d_chain = { status: "exempt", missing: [] }; }, "class_d_chain_exempt_without_justification"],
+    ["klasse D «exempt» med tom begrunnelse", (m) => { act(m, ACME_KEYS.setting).reversibility.class_d_chain = { status: "exempt", missing: [], justification: "   " }; }, "class_d_chain_exempt_without_justification"],
+    ["klasse D «exempt» MED begrunnelse er lovlig (nødbryter)", (m) => { act(m, ACME_KEYS.setting).reversibility.class_d_chain = { status: "exempt", missing: [], justification: "nødbryter: må virke også når alt annet er nede" }; }, "__ok__"],
+    ["begrunnelse på en kjede som ikke er «exempt»", (m) => { act(m, ACME_KEYS.setting).reversibility.class_d_chain = { status: "complete", missing: [], justification: "unødvendig" }; }, "class_d_chain_justification_without_exempt"],
     ["klasse D med leverandør-id som etterbetingelse trenger ikke før-tilstand (utgående melding)", (m) => { const a = act(m, ACME_KEYS.setting); a.reversibility.evidence = { before_state: false, postcondition: "provider_id" }; }, "__ok__"],
     ["lese-kapabilitet erklært implementert uten lese-handlinger", (m) => { m.actions = m.actions.filter((a) => a.kind !== "read"); }, "capability_without_actions", "capabilities.read.status"],
     ["skrive-kapabilitet «ikke implementert» men handlinger finnes", (m) => { m.capabilities.write = { status: "not_implemented" }; }, "capability_declared_missing_but_has_actions", "capabilities.write.status"],
@@ -190,6 +194,9 @@ describe("semantiske regler (speiler verktøymanifestet, klasse D-kjeden, idempo
     ["webhooks implementert uten elementer", (m) => { m.capabilities.webhooks = { status: "implemented", items: [] }; }, "capability_without_items"],
     ["skrivekapabel connector uten dedupe-nøkkel", (m) => { m.idempotency.dedupe_key = "none"; }, "write_capable_without_idempotency", "idempotency.dedupe_key"],
     ["skrivekapabel connector med ukjent dedupe-nøkkel", (m) => { m.idempotency.dedupe_key = { unknown: true, reason: "x" }; }, "write_capable_without_idempotency"],
+    ["safe_retry etter tidsavbrudd med skrivehandlinger som ikke er leverandør-idempotente (dobbeltutføring)", (m) => { m.idempotency.retry_semantics = { on_timeout: "safe_retry", on_rate_limit: "retry_after", on_server_error: "reconcile_before_retry" }; m.idempotency.exactly_once_target = "exactly_once"; }, "unsafe_retry_with_non_idempotent_writes", "idempotency.retry_semantics.on_timeout"],
+    ["safe_retry ved 5xx med skrivehandlinger som ikke er leverandør-idempotente", (m) => { m.idempotency.retry_semantics = { on_timeout: "reconcile_before_retry", on_rate_limit: "retry_after", on_server_error: "safe_retry" }; }, "unsafe_retry_with_non_idempotent_writes", "idempotency.retry_semantics.on_server_error"],
+    ["safe_retry er lovlig når ALLE skrivehandlinger er leverandør-idempotente", (m) => { for (const a of m.actions) a.idempotency.provider_idempotent = true; m.idempotency.retry_semantics = { on_timeout: "safe_retry", on_rate_limit: "retry_after", on_server_error: "safe_retry" }; }, "__ok__"],
     ["step-up-liste som ikke stemmer med handlingene", (m) => { m.authority.approval_policy = { step_up_actions: [ACME_KEYS.create], delegated_class_cd: "denied" }; }, "step_up_actions_mismatch"],
     ["leverandør-scope peker på ukjent handling", (m) => { m.auth.scopes.provider = [{ scope: "x:read", needed_for: ["acme.nope"] }]; }, "unknown_action_key"],
     ["timeout.max_ms stemmer ikke", (m) => { m.operations.timeout = { max_ms: 5 }; }, "timeout_max_mismatch"],
@@ -239,6 +246,7 @@ describe("D-41-revisjonen (CLAUDE.md regel 11)", () => {
     ["verifiserte scopes med uverifiserte igjen", (m) => { audit(m).unverified_scopes = ["x"]; }, "d41_verified_with_unverified_scopes"],
     ["verifisering uten dato", (m) => { delete audit(m).verified_on; }, "d41_verified_without_date"],
     ["verifisering uten dokumentasjonsreferanse", (m) => { audit(m).docs_reference = []; }, "d41_verified_without_reference"],
+    ["FULL med en ikke-vurdert kapabilitet (provider_offers unknown)", (m) => { const a = audit(m); a.classification = "FULL"; a.gaps = []; a.access_control = { provider_offers: "unknown", implemented: "none", action_keys: [] }; }, "d41_full_with_unassessed_capability"],
     ["lese-kapabilitet som peker på en skrivehandling", (m) => { audit(m).read.action_keys = [ACME_KEYS.create]; }, "d41_read_key_not_read"],
     ["slette-kapabilitet som peker på en ikke-slette-handling", (m) => { audit(m).delete.action_keys = [ACME_KEYS.create]; }, "d41_delete_key_not_delete"],
     ["skrive-kapabilitet som peker på en slettehandling", (m) => { audit(m).write.action_keys = [ACME_KEYS.remove]; }, "d41_write_key_not_write"],
@@ -252,6 +260,29 @@ describe("D-41-revisjonen (CLAUDE.md regel 11)", () => {
     const m = validFullManifest();
     mutate(m);
     expect(has(validateConnectorManifest(m).issues, code), codes(validateConnectorManifest(m).issues).join(",")).toBe(true);
+  });
+
+  describe("slettesemantikken (data.delete_semantics) motsier ikke D-41-revisjonen av sletting (review LOW: Stripe sa «not_offered» mens revisjonen sa «unknown»)", () => {
+    /** Et manifest uten slettehandling, så ingen annen regel forstyrrer: bare `provider_side` og `provider_offers` varierer. */
+    const make = (providerSide: "supported" | "not_offered" | "deferred" | "not_applicable", offers: "yes" | "no" | "unknown"): ConnectorManifest => {
+      const m = validFullManifest();
+      m.actions = m.actions.filter((a) => a.key !== ACME_KEYS.remove);
+      (m.auth.scopes.provider as Array<{ needed_for: string[] }>).forEach((p) => { p.needed_for = p.needed_for.filter((k) => k !== ACME_KEYS.remove); });
+      audit(m).delete = { provider_offers: offers, implemented: "none", action_keys: [] };
+      m.data.delete_semantics = { provider_side: providerSide, jarvis_side: "revisjon beholdes etter retensjonsregelen" };
+      return m;
+    };
+    const rows: Array<["supported" | "not_offered" | "deferred" | "not_applicable", "yes" | "no" | "unknown", boolean]> = [
+      ["supported", "yes", false], ["supported", "no", true], ["supported", "unknown", false],
+      ["not_offered", "no", false], ["not_offered", "yes", true], ["not_offered", "unknown", true],
+      ["deferred", "yes", false], ["deferred", "unknown", false], ["deferred", "no", false],
+      ["not_applicable", "no", false], ["not_applicable", "unknown", false]
+    ];
+    it.each(rows)("provider_side %s + provider_offers %s => konflikt: %s", (side, offers, conflict) => {
+      const r = validateConnectorManifest(make(side, offers));
+      expect(has(r.issues, "delete_semantics_conflict"), JSON.stringify(codes(r.issues))).toBe(conflict);
+      if (!conflict) expect(r.issues, JSON.stringify(codes(r.issues))).toEqual([]);
+    });
   });
 
   it("en handling revidert under tilgangsstyring regnes som revidert (ikke stille utelatt), og den umutterte fixturen har full revisjonsdekning", () => {
@@ -271,6 +302,7 @@ describe("D-41-revisjonen (CLAUDE.md regel 11)", () => {
     m.idempotency = { dedupe_key: "none", retry_semantics: { on_timeout: "safe_retry", on_rate_limit: "retry_after", on_server_error: "safe_retry" }, exactly_once_target: "not_applicable" };
     delete (m.authority as Record<string, unknown>)["approval_policy"];
     m.auth.scopes.provider = [{ scope: "tasks:read", needed_for: [ACME_KEYS.list] }];
+    m.data.delete_semantics = { provider_side: "not_offered", jarvis_side: "revisjon beholdes; leverandøren tilbyr ikke sletting" };
     m.d41_audit = {
       classification: "READ_ONLY", read_only_reason: "provider_offers_nothing",
       read: { provider_offers: "yes", implemented: "full", action_keys: [ACME_KEYS.list] },

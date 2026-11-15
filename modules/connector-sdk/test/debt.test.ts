@@ -56,6 +56,40 @@ describe("connector-gjeld: ren lesemodell over vedlikeholdsjournal, auth-helse, 
     expect(factor(computeConnectorDebt(base({ sync: { lag_hours: null, expected_interval_hours: 24 } })), "sync_lag").level).toBe("unknown");
   });
 
+  it("review LOW: ugyldige målinger (NaN, 0 eller negativt intervall, NaN/negativ/uendelig forsinkelse) er UKJENT - aldri stille «ok» (fail-open)", () => {
+    const bad: Array<[string, { lag_hours: number | null; expected_interval_hours: number }]> = [
+      ["NaN-intervall", { lag_hours: 80, expected_interval_hours: Number.NaN }],
+      ["0-intervall (lag/0 = Infinity)", { lag_hours: 80, expected_interval_hours: 0 }],
+      ["0 forsinkelse og 0 intervall (0/0 = NaN)", { lag_hours: 0, expected_interval_hours: 0 }],
+      ["negativt intervall", { lag_hours: 80, expected_interval_hours: -24 }],
+      ["NaN-forsinkelse", { lag_hours: Number.NaN, expected_interval_hours: 24 }],
+      ["negativ forsinkelse", { lag_hours: -5, expected_interval_hours: 24 }],
+      ["uendelig forsinkelse", { lag_hours: Number.POSITIVE_INFINITY, expected_interval_hours: 24 }],
+      ["uendelig intervall", { lag_hours: 5, expected_interval_hours: Number.POSITIVE_INFINITY }]
+    ];
+    for (const [label, sync] of bad) {
+      const d = computeConnectorDebt(base({ sync }));
+      expect(factor(d, "sync_lag"), label).toMatchObject({ level: "unknown", value: null });
+      expect(factor(d, "sync_lag").detail_no, label).toContain("ugyldig synk-måling");
+      expect(d.unmeasured_factors, label).toContain("sync_lag");
+      expect(d.measured_factors, label).toBe(4);
+    }
+    // Gyldige grenseverdier er fortsatt målinger: forsinkelse 0 mot et positivt intervall er «ok».
+    expect(factor(computeConnectorDebt(base({ sync: { lag_hours: 0, expected_interval_hours: 24 } })), "sync_lag").level).toBe("ok");
+    // Ugyldig auth-måling og ugyldig journal er også ukjent, aldri null gjeld.
+    expect(factor(computeConnectorDebt(base({ auth: { failures_in_window: Number.NaN, current_health: "healthy" } })), "auth_failures")).toMatchObject({ level: "unknown", value: null });
+    expect(factor(computeConnectorDebt(base({ auth: { failures_in_window: -1, current_health: "healthy" } })), "auth_failures").level).toBe("unknown");
+    const badLedger = computeConnectorDebt(base({ ledger: [{ event_kind: "incident", events: Number.NaN, minutes: 10 }] }));
+    for (const id of ["maintenance_hours", "incident_count", "api_changes"]) expect(factor(badLedger, id), id).toMatchObject({ level: "unknown", value: null });
+    expect(factor(badLedger, "maintenance_hours").detail_no).toContain("ugyldige tall");
+    const negLedger = computeConnectorDebt(base({ ledger: [{ event_kind: "manual_fix", events: 1, minutes: -600 }] }));
+    expect(factor(negLedger, "maintenance_hours").level).toBe("unknown");
+    // Alt ugyldig gir ukjent nivå, ikke «lav».
+    const allBad = computeConnectorDebt(base({ ledger: [{ event_kind: "incident", events: Number.NaN, minutes: Number.NaN }], auth: { failures_in_window: Number.NaN, current_health: "healthy" }, sync: { lag_hours: Number.NaN, expected_interval_hours: 0 }, api: null }));
+    expect(allBad.level).toBe("unknown");
+    expect(allBad.score).toBeNull();
+  });
+
   it("kjent utfasing er høy risiko; uten API-fakta er utfasing ukjent", () => {
     const d = computeConnectorDebt(base({ api: { version_known: true, deprecation_documented: true } }));
     expect(factor(d, "deprecation_risk")).toMatchObject({ level: "high", value: 1 });

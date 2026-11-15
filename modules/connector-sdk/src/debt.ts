@@ -102,6 +102,9 @@ function bump(value: number, watch: number, high: number): DebtLevel {
   return value >= high ? "high" : value >= watch ? "watch" : "ok";
 }
 
+/** En gyldig MÅLING: et endelig, ikke-negativt tall. NaN, Infinity og negative tall er ikke målinger - de er ukjent, aldri «ok» (en sammenligning med NaN er alltid usann og ga før stille nivå `ok`). */
+const isMeasure = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0;
+
 export function computeConnectorDebt(input: DebtInput, overrides: Partial<DebtThresholds> = {}): ConnectorDebt {
   const t: DebtThresholds = { ...DEFAULT_DEBT_THRESHOLDS, ...overrides };
   const window = input.window_days ?? 30;
@@ -119,8 +122,9 @@ export function computeConnectorDebt(input: DebtInput, overrides: Partial<DebtTh
   // Vedlikeholdsjournalen -> vedlikeholdstimer, hendelser og API-endringer.
   const ledger = input.ledger;
   const sum = (kinds: readonly DebtEventKind[], pick: "events" | "minutes"): number => (ledger ?? []).filter((g) => kinds.includes(g.event_kind)).reduce((a, g) => a + g[pick], 0);
-  if (ledger === null) {
-    factors.push(unknown("maintenance_hours", "timer", "vedlikeholdsjournalen kunne ikke leses"), unknown("incident_count", "hendelser", "vedlikeholdsjournalen kunne ikke leses"), unknown("api_changes", "endringer", "vedlikeholdsjournalen kunne ikke leses"));
+  const ledgerWhy = ledger === null ? "vedlikeholdsjournalen kunne ikke leses" : ledger.every((g) => isMeasure(g.events) && isMeasure(g.minutes)) ? null : "vedlikeholdsjournalen har ugyldige tall (ikke endelige eller negative)";
+  if (ledgerWhy !== null) {
+    factors.push(unknown("maintenance_hours", "timer", ledgerWhy), unknown("incident_count", "hendelser", ledgerWhy), unknown("api_changes", "endringer", ledgerWhy));
   } else {
     const h = hours(sum(DEBT_EVENT_KINDS, "minutes"));
     factors.push({ id: "maintenance_hours", value: h, unit: "timer", level: bump(h, t.maintenance_hours_watch, t.maintenance_hours_high), detail_no: `${h} timer vedlikehold siste ${window} døgn` });
@@ -132,6 +136,7 @@ export function computeConnectorDebt(input: DebtInput, overrides: Partial<DebtTh
 
   // Auth: feil i vinduet, og en pågående auth-feil er alltid høy.
   if (input.auth === null) factors.push(unknown("auth_failures", "feil", "ingen auth-helse målt (ingen kall eller helsesveip)"));
+  else if (!isMeasure(input.auth.failures_in_window)) factors.push(unknown("auth_failures", "feil", "ugyldig måling av auth-feil (ikke et endelig, ikke-negativt tall)"));
   else {
     const f = input.auth.failures_in_window;
     const now = input.auth.current_health === "auth_failed";
@@ -141,6 +146,8 @@ export function computeConnectorDebt(input: DebtInput, overrides: Partial<DebtTh
   // Synk-forsinkelse.
   if (input.sync === null) factors.push(unknown("sync_lag", "timer", "connectoren har ingen daglig synk-jobb"));
   else if (input.sync.lag_hours === null) factors.push(unknown("sync_lag", "timer", "synk-forsinkelsen er ikke målt (jobben har ikke kjørt)"));
+  // Review LOW: NaN/negativ forsinkelse og et intervall som er NaN, 0 eller negativt ga `x` = NaN/Infinity/negativ, og sammenligningene under ga stille «ok» (fail-open). Ugyldig måling er ukjent.
+  else if (!isMeasure(input.sync.lag_hours) || !isMeasure(input.sync.expected_interval_hours) || input.sync.expected_interval_hours === 0) factors.push(unknown("sync_lag", "timer", "ugyldig synk-måling (forsinkelse ikke endelig/negativ, eller forventet intervall ikke et positivt tall)"));
   else {
     const x = input.sync.lag_hours / input.sync.expected_interval_hours;
     factors.push({ id: "sync_lag", value: input.sync.lag_hours, unit: "timer", level: x >= t.sync_lag_high_x ? "high" : x >= t.sync_lag_watch_x ? "watch" : "ok", detail_no: `synk ${input.sync.lag_hours} t bak (forventet intervall ${input.sync.expected_interval_hours} t)` });

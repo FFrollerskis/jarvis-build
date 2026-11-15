@@ -35,7 +35,11 @@ describe("de tre fulle referansemanifestene (GitHub, Cloudflare, Stripe)", () =>
     if (isUnknown(GITHUB_MANIFEST.d41_audit)) throw new Error("d41_audit mangler");
     expect(GITHUB_MANIFEST.d41_audit.gaps.length).toBeGreaterThanOrEqual(8);
     expect(GITHUB_MANIFEST.d41_audit.gaps.every((g) => g.status === "DEFERRED" || g.status === "PARTIAL")).toBe(true);
-    expect(GITHUB_MANIFEST.d41_audit.scopes_verified_against_docs).toBe(true);
+    // Review LOW: den valgfrie Workflows-tillatelsen er dokumentert i runbooken, men kartleggingen mot handlingene er uverifisert - derfor er scopene ikke «fullt verifisert».
+    expect(GITHUB_MANIFEST.d41_audit.scopes_verified_against_docs).toBe(false);
+    expect(GITHUB_MANIFEST.d41_audit.unverified_scopes.some((s) => s.includes("Workflows"))).toBe(true);
+    const gh = isUnknown(GITHUB_MANIFEST.auth.scopes.provider) ? [] : GITHUB_MANIFEST.auth.scopes.provider;
+    expect(gh.some((s) => s.scope.includes("Workflows") && s.scope.includes("VALGFRI") && s.needed_for.length === 0)).toBe(true);
     expect(isUnknown(GITHUB_MANIFEST.capabilities.webhooks) ? "" : GITHUB_MANIFEST.capabilities.webhooks.status).toBe("deferred");
   });
 
@@ -60,6 +64,47 @@ describe("de tre fulle referansemanifestene (GitHub, Cloudflare, Stripe)", () =>
     expect(STRIPE_MANIFEST.core_boundary.authority_split).toContain("Jarvis eier");
     expect(STRIPE_MANIFEST.operations.reconciliation?.required).toBe(true);
     expect(STRIPE_MANIFEST.core_boundary.core_dependency_decision_required).toBe(false);
+  });
+
+  it("review M3: D-64-grensen siterer beslutningene som loggførte porten (GitHub D-94, Cloudflare D-461, Stripe D-109) - ikke ARCHITECTURE.md §11.9 som grunnlag", () => {
+    expect(GITHUB_MANIFEST.core_boundary.decision_refs).toEqual(["D-94", "D-64"]);
+    expect(CLOUDFLARE_MANIFEST.core_boundary.decision_refs).toEqual(["D-461"]);
+    expect(STRIPE_MANIFEST.core_boundary.decision_refs).toEqual(["D-109"]);
+    expect(STRIPE_MANIFEST.core_boundary.authority_split).toContain("D-109");
+    expect(STRIPE_MANIFEST.core_boundary.authority_split).not.toMatch(/ARCHITECTURE\.md §11\.9,?\)/);
+    for (const m of FULL_MANIFESTS) expect(m.core_boundary.basis, m.identity.id).toBe("audited");
+  });
+
+  it("review LOW (Stripe): sletting og tilgangsstyring har gap-oppføringer (ikke stille utelatt), slettesemantikken motsier ikke revisjonen, refusjons-tillatelsen er merket UVERIFISERT, og 23 t-vinduet er en intern avgjørelse", () => {
+    if (isUnknown(STRIPE_MANIFEST.d41_audit)) throw new Error("d41_audit mangler");
+    const gaps = STRIPE_MANIFEST.d41_audit.gaps.map((g) => `${g.status}: ${g.capability}`).join(" | ");
+    expect(gaps).toMatch(/DEFERRED: sletting av Stripe-ressurser/);
+    expect(gaps).toMatch(/DEFERRED: tilgangsstyring/);
+    expect(STRIPE_MANIFEST.d41_audit.delete.provider_offers).toBe("unknown");
+    expect(isUnknown(STRIPE_MANIFEST.data.delete_semantics) ? "" : STRIPE_MANIFEST.data.delete_semantics.provider_side).toBe("deferred");
+    const scopes = isUnknown(STRIPE_MANIFEST.auth.scopes.provider) ? [] : STRIPE_MANIFEST.auth.scopes.provider.map((s) => s.scope);
+    expect(scopes.some((s) => s.includes("refunds (skriving)"))).toBe(false);
+    expect(scopes.filter((s) => s.startsWith("UVERIFISERT") && s.includes("refusjoner")).length).toBe(1);
+    expect(STRIPE_MANIFEST.d41_audit.unverified_scopes.some((s) => s.includes("refusjoner"))).toBe(true);
+    const note = isUnknown(STRIPE_MANIFEST.idempotency.retry_semantics) ? "" : (STRIPE_MANIFEST.idempotency.retry_semantics.note ?? "");
+    expect(note).toContain("EGEN avgjørelse");
+    expect(note).toContain("255 tegn");
+    expect(note).toContain("minst 24 t");
+    expect(note).not.toMatch(/Stripe \(23 t-vindu\)/);
+  });
+
+  it("review LOW (Cloudflare): delete er PARTIAL (ikke full) ved siden av utsatte slettbare ressurser, og listetillatelser, purge-maksimum og 90-dagers rotasjon er merket uverifisert", () => {
+    if (isUnknown(CLOUDFLARE_MANIFEST.d41_audit)) throw new Error("d41_audit mangler");
+    const d = CLOUDFLARE_MANIFEST.d41_audit;
+    expect(d.delete.implemented).toBe("partial");
+    expect(d.gaps.some((g) => g.status === "DEFERRED" && /sletting av øvrige slettbare ressurser/.test(g.capability))).toBe(true);
+    expect(d.unverified_scopes.some((s) => s.includes("List Members"))).toBe(true);
+    expect(d.unverified_scopes.some((s) => s.includes("rolle-listen"))).toBe(true);
+    expect(d.gaps.some((g) => /purge/.test(g.capability) && /UVERIFISERT/.test(g.reason))).toBe(true);
+    expect(isUnknown(CLOUDFLARE_MANIFEST.limits.quotas) ? "" : CLOUDFLARE_MANIFEST.limits.quotas).toContain("UVERIFISERT");
+    const rot = isUnknown(CLOUDFLARE_MANIFEST.auth.rotation) ? "" : (CLOUDFLARE_MANIFEST.auth.rotation.note ?? "");
+    expect(rot).toContain("UVERIFISERT");
+    expect(rot).toContain("Jarvis' egen anbefaling");
   });
 });
 

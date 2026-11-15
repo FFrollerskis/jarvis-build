@@ -22,10 +22,11 @@ const REFERENCES: Array<[string, ConnectorManifest, () => ContractAdapter]> = [
 
 /**
  * De NAVNGITTE gapene hver referanse har i dag (pinnet: en endring i manifestet som lukker eller åpner et gap må gjøres bevisst). Alle tre deklarerer circuit breaker `partial` (ingen automatisk bryter på
- * feilrate; manuell pause/frys og porter finnes), og Cloudflare/Stripe har scopes som ikke er fullt verifisert mot dokumentasjon.
+ * feilrate; manuell pause/frys og porter finnes), og ingen har scopes som er fullt verifisert mot dokumentasjon: GitHub har den valgfrie Workflows-tillatelsen uten kartlegging mot handlingene (review LOW),
+ * Cloudflare to uverifiserte listetillatelser, Stripe tillatelsesnavnene.
  */
 const EXPECTED_GAPS: Record<string, string[]> = {
-  github: ["R.health_retry_breaker_runbook", "A.all_level_r"],
+  github: ["R.docs_checked", "R.health_retry_breaker_runbook", "A.all_level_r"],
   cloudflare: ["R.docs_checked", "R.health_retry_breaker_runbook", "A.all_level_r"],
   stripe: ["R.docs_checked", "R.health_retry_breaker_runbook", "A.all_level_r"]
 };
