@@ -441,6 +441,11 @@ const NOT_SENT_REASONS: ReadonlySet<string> = new Set([
 /** Avslag med variabel hale: `scope_mismatch:<felt>` (gateway, før policy) og `unsafe_vendor_url:<grunn>` (`guardedFetch` avviser URL-en FØR `fetch` kalles - f.eks. et token med ugyldige tegn). */
 const NOT_SENT_PREFIXES: readonly string[] = ["scope_mismatch:", "tool_failed:unsafe_vendor_url:"];
 /**
+ * UNNTAK fra `unsafe_vendor_url:`-prefikset (WP-K re-review LOW 1): `unexpected_redirect_http_<status>` kastes av `guardedFetch` ETTER at POST-en er sendt og besvart 3xx (`303` = «utført, se her») - det er IKKE
+ * «ikke sendt». Reservasjonen beholdes (ukjent), som for alle andre svar etter sending.
+ */
+const SENT_THEN_REDIRECTED_PREFIX = "tool_failed:unsafe_vendor_url:unexpected_redirect_";
+/**
  * Telegram Bot API avviste selve kallet: dokumenterte 4xx for `sendMessage` (400 ugyldig forespørsel, 401 ugyldig token, 403 boten er blokkert, 404 ukjent bot, 429 for mange forespørsler) - ingen melding ble opprettet.
  * Andre 4xx (408, 499 ...) kan komme fra mellomledd og regnes IKKE som bevis. ALLE 5xx er «ukjent»: Telegram kan ha levert meldingen og likevel svart 502.
  */
@@ -454,6 +459,7 @@ const TELEGRAM_REJECTED = /^tool_failed:telegram_error_(?:400|401|403|404|429)$/
 export function classifyNotifyFailure(reason: unknown): NotifyFailureClass {
   if (typeof reason !== "string") return "unknown";
   if (NOT_SENT_REASONS.has(reason)) return "not_sent";
+  if (reason.startsWith(SENT_THEN_REDIRECTED_PREFIX)) return "unknown";
   if (NOT_SENT_PREFIXES.some((prefix) => reason.startsWith(prefix) && reason.length > prefix.length)) return "not_sent";
   return TELEGRAM_REJECTED.test(reason) ? "not_sent" : "unknown";
 }

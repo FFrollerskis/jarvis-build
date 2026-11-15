@@ -1,7 +1,8 @@
 import pg from "pg";
 import type { JsonValue } from "@jarvis/contracts";
 import { planMigrations } from "@jarvis/core";
-import type { ToolTransport } from "./gateway.ts";
+import type { ToolInvocationContext, ToolTransport } from "./gateway.ts";
+import { adoptCallSignal, currentCallSignal, throwIfAborted } from "./call-signal.ts";
 import {
   assertDatabaseName,
   assertIdentifier,
@@ -138,7 +139,13 @@ export class PostgresOpsTransport implements ToolTransport {
 
   private async withClient<T>(dsn: string, statementTimeoutMs: number, fn: (client: PgOpsClient, session: Session, dsnDatabase: string) => Promise<T>): Promise<T> {
     const { database: dsnDatabase } = parsePostgresOpsDsn(dsn);
+    // WP-K (D-471, JARVIS-018): gatewayens kallsignal. Avbrudd lukker tilkoblingen (pågående spørring avvises, ingen flere startes) - en allerede kjørende SERVER-setning avbrytes ikke herfra
+    // (det krever pg_cancel_backend fra en annen tilkobling); den er fortsatt avgrenset av `statement_timeout` (20 s lesing, 280 s VACUUM) som før. Utfallet er UKJENT for gatewayen (`unverified`).
+    const callSignal = currentCallSignal();
+    throwIfAborted(callSignal);
     const client = (this.options.createClient ?? defaultClient)(dsn);
+    const onAbort = (): void => { void client.end().catch(() => undefined); };
+    callSignal?.addEventListener("abort", onAbort, { once: true });
     try {
       await client.connect();
       await client.query(`SET statement_timeout = ${Math.trunc(statementTimeoutMs)}`);
@@ -153,6 +160,7 @@ export class PostgresOpsTransport implements ToolTransport {
     } catch (err) {
       throw mapError(err, dsn);
     } finally {
+      callSignal?.removeEventListener("abort", onAbort);
       await client.end().catch(() => undefined);
     }
   }
@@ -162,7 +170,13 @@ export class PostgresOpsTransport implements ToolTransport {
     return new Set([...this.config.databases, dsnDatabase]);
   }
 
-  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string): Promise<{ external_id?: string; data?: JsonValue }> {
+  async invoke(
+    action: string, parameters: Record<string, JsonValue>, credential: string, _context?: ToolInvocationContext, signal?: AbortSignal
+  ): Promise<{ external_id?: string; data?: JsonValue }> {
+    return adoptCallSignal(signal, () => this.dispatch(action, parameters, credential));
+  }
+
+  private async dispatch(action: string, parameters: Record<string, JsonValue>, credential: string): Promise<{ external_id?: string; data?: JsonValue }> {
     switch (action) {
       case "get_connections": return this.getConnections(credential);
       case "get_long_running_queries": return this.getLongRunning(parameters, credential);

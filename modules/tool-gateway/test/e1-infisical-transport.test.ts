@@ -159,11 +159,11 @@ describe("C: rotasjon (V2)", () => {
     expect(JSON.stringify(out)).not.toContain("secretValue");
   });
 
-  it("rotasjon som feiler hos leverandøren gir infisical_rotation_failed (ikke ok), og siste feil står ikke i feilmeldingen", async () => {
+  it("rotasjon som feiler hos leverandøren ETTER akseptert POST gir `outcome_unknown:infisical_rotation_failed` (ikke ok, og IKKE en retry-bar feil - WP-K M-1), og siste feil står ikke i feilmeldingen", async () => {
     const r = fx.seedRotation();
     fx.rotationFails = true;
     const err = await rejection(transport().invoke("rotate_secrets", { rotation_id: r.id }, fx.clientSecret));
-    expect(err.message).toMatch(/^infisical_rotation_failed:failed/);
+    expect(err.message).toMatch(/^outcome_unknown:infisical_rotation_failed:failed/);
     expect(err.message).not.toContain("supabase");
   });
 

@@ -324,7 +324,7 @@ describe("D-442: main.ts forkaster aldri et sveipresultat (kildenivå-vakt, main
     expect(calls.length).toBeGreaterThanOrEqual(19);
     const unescalated = calls.filter(({ fn, stmt }) => {
       if (fn === "runBusinessWeeklyBriefForAllTenants") return false; // egen logikk, testet under
-      if (/\bfailures\)/.test(stmt)) return false; // samleren sendes faktisk inn i sveipet
+      if (/\bfailures(?:, run)?\)/.test(stmt)) return false; // samleren sendes faktisk inn i sveipet (WP-K: evt. fulgt av kjøringens korrelasjon `run`)
       if (/assertNoSweepFailures\("[a-z-]+", summary\.failed\)/.test(stmt)) return false;
       if (/assertSituationSweepHealthy/.test(stmt)) return false;
       if (fn === "runMemoryReembedSweepForAllTenants" && /\{ maxRows: 500 \}\)\.catch\(/.test(stmt)) return false; // oppstartskick, ikke en DailyScheduler-jobb
@@ -341,7 +341,8 @@ describe("D-442: main.ts forkaster aldri et sveipresultat (kildenivå-vakt, main
       "support-inbox-sync", "vipps-payment-sync", "wallester-sweep"
     ]);
     for (const [, job, , args] of viaCollector) {
-      expect(args, `${job}: samleren må være siste argument`).toMatch(/, failures$/);
+      // WP-K (JARVIS-054): `person_id: "system"`-sveipene tar kjøringens korrelasjon (`run`) som ETTERFØLGENDE valgfritt argument; samleren er fortsatt det siste av de obligatoriske.
+      expect(args, `${job}: samleren må være siste argument (evt. fulgt av korrelasjonen \`run\`)`).toMatch(/, failures(?:, run)?$/);
       expect(mainSource, `DailyScheduler for ${job}`).toMatch(new RegExp(`new DailyScheduler\\(\\s*pool, "${job}"`));
     }
   });

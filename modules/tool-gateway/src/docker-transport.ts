@@ -1,7 +1,9 @@
 import { execFile } from "node:child_process";
 import { scanForSecrets } from "@jarvis/core";
 import type { JsonValue } from "@jarvis/contracts";
-import type { ToolTransport } from "./gateway.ts";
+import type { ToolInvocationContext, ToolTransport } from "./gateway.ts";
+import { abortReason, currentCallSignal } from "./call-signal.ts";
+import { afterAcceptedMutation } from "./after-accepted-mutation.ts";
 
 /**
  * D-105 (UA-5 kriterium 1+3): Docker Engine-transport - SAMME `docker`-CLI-
@@ -56,9 +58,14 @@ interface ContainerState {
  * `timeoutMs` per docker-kall; `execFile` lar resten av prosessen leve mens docker svarer. Samme semantikk som før: ikke-null exit-kode returneres,
  * spawn-feil/tidsavbrudd kaster `docker_spawn_failed`, utdata er begrenset (8 MB).
  */
-function run(bin: string, args: string[], timeoutMs: number): Promise<{ code: number; stdout: string; stderr: string }> {
+function run(bin: string, args: string[], timeoutMs: number, signal?: AbortSignal): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    execFile(bin, args, { timeout: timeoutMs, encoding: "utf8", killSignal: "SIGKILL", maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => {
+    // WP-K (D-471, JARVIS-018): gatewayens kallsignal avbryter prosessen (SIGKILL) og hindrer at neste steg i en flertrinns-handling (rm -> run -> inspect) startes etter et tidsavbrudd.
+    if (signal?.aborted) {
+      reject(abortReason(signal));
+      return;
+    }
+    execFile(bin, args, { timeout: timeoutMs, encoding: "utf8", killSignal: "SIGKILL", maxBuffer: 8 * 1024 * 1024, ...(signal ? { signal } : {}) }, (error, stdout, stderr) => {
       if (error) {
         const code = (error as NodeJS.ErrnoException & { code?: unknown }).code;
         if (typeof code === "number" && !(error as { killed?: boolean }).killed) {
@@ -114,12 +121,15 @@ export class DockerTransport implements ToolTransport {
    * strukturelt `credential_unavailable`, ALDRI et stille fall til en
    * ambient/uverifisert binærsti).
    */
-  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string): Promise<{ external_id?: string; data?: JsonValue }> {
+  async invoke(
+    action: string, parameters: Record<string, JsonValue>, credential: string, _context?: ToolInvocationContext, signal?: AbortSignal
+  ): Promise<{ external_id?: string; data?: JsonValue }> {
     const dockerBin = credential;
+    const callSignal = signal ?? currentCallSignal();
     if (action === "list_containers") {
       const labelFilter = typeof parameters["label_filter"] === "string" ? (parameters["label_filter"] as string) : undefined;
       const args = ["ps", "--format", "{{json .}}", ...(labelFilter ? ["--filter", `label=${labelFilter}`] : [])];
-      const { code, stdout, stderr } = await run(dockerBin, args, this.timeoutMs);
+      const { code, stdout, stderr } = await run(dockerBin, args, this.timeoutMs, callSignal);
       if (code !== 0) throw new Error(`docker_ps_failed:${stderr.slice(0, 160)}`);
       const containers = stdout
         .split("\n")
@@ -131,7 +141,7 @@ export class DockerTransport implements ToolTransport {
     if (action === "inspect_container") {
       const name = parameters["name"];
       assertValidContainerName(name);
-      const { code, stdout, stderr } = await run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs);
+      const { code, stdout, stderr } = await run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs, callSignal);
       if (code !== 0) {
         if (/No such (container|object)/i.test(stderr)) {
           // D-105: "finnes ikke ennå" er en GYLDIG tilstand (f.eks. FØRSTE
@@ -159,7 +169,7 @@ export class DockerTransport implements ToolTransport {
         ...(since ? ["--since", since] : []), ...(until ? ["--until", until] : []),
         name
       ];
-      const { code, stdout, stderr } = await run(dockerBin, args, this.timeoutMs);
+      const { code, stdout, stderr } = await run(dockerBin, args, this.timeoutMs, callSignal);
       if (code !== 0) throw new Error(`docker_logs_failed:${stderr.slice(0, 160)}`);
       const lines = (stdout + stderr)
         .split("\n")
@@ -178,21 +188,26 @@ export class DockerTransport implements ToolTransport {
       const image = parameters["image"];
       assertValidContainerName(name);
       assertValidImageRef(image);
-      await run(dockerBin, ["rm", "-f", "--", name], this.timeoutMs); // best-effort - "finnes ikke" er OK (første deploy)
-      const started = await run(dockerBin, ["run", "-d", "--name", name, "--label", "jarvis.sentinel=true", "--label", "jarvis.managed=true", "--", image, "sleep", "999999999"], this.timeoutMs);
+      await run(dockerBin, ["rm", "-f", "--", name], this.timeoutMs, callSignal); // best-effort - "finnes ikke" er OK (første deploy)
+      const started = await run(dockerBin, ["run", "-d", "--name", name, "--label", "jarvis.sentinel=true", "--label", "jarvis.managed=true", "--", image, "sleep", "999999999"], this.timeoutMs, callSignal);
       if (started.code !== 0) throw new Error(`docker_run_failed:${started.stderr.slice(0, 160)}`);
       const containerId = started.stdout.trim().slice(0, 12);
-      const inspected = await run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs);
-      if (inspected.code !== 0) throw new Error(`docker_post_deploy_inspect_failed:${inspected.stderr.slice(0, 160)}`);
-      return { external_id: containerId, data: parseInspect(inspected.stdout) as unknown as JsonValue };
+      // WP-K (D-471, uavhengig review M-1): `docker run -d` har lykkes - containeren er startet. `redeploy_container` er IKKE idempotent (`rm -f` + `run`): feiler lesingen av den nye containeren herfra
+      // (inspect gir feil, prosessen avbrytes/tidsavbrytes, uleselig utdata) er utfallet UKJENT (`outcome_unknown:docker_post_deploy_inspect_failed`), ikke en retry-bar feil - et samme-nøkkel-replay ville
+      // ellers fjernet og startet containeren en gang til. Feil FØR/UNDER `run` (`docker_run_failed`) er fortsatt vanlige feil.
+      return afterAcceptedMutation("docker_post_deploy_inspect_failed", async () => {
+        const inspected = await run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs, callSignal);
+        if (inspected.code !== 0) throw new Error(`docker_post_deploy_inspect_failed:${inspected.stderr.slice(0, 160)}`);
+        return { external_id: containerId, data: parseInspect(inspected.stdout) as unknown as JsonValue };
+      });
     }
 
     if (action === "stop_container") {
       const name = parameters["name"];
       assertValidContainerName(name);
-      const stopped = await run(dockerBin, ["stop", "--", name], this.timeoutMs);
+      const stopped = await run(dockerBin, ["stop", "--", name], this.timeoutMs, callSignal);
       if (stopped.code !== 0) throw new Error(`docker_stop_failed:${stopped.stderr.slice(0, 160)}`);
-      const inspected = await run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs);
+      const inspected = await run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs, callSignal);
       if (inspected.code !== 0) throw new Error(`docker_post_stop_inspect_failed:${inspected.stderr.slice(0, 160)}`);
       return { data: parseInspect(inspected.stdout) as unknown as JsonValue };
     }
@@ -200,9 +215,9 @@ export class DockerTransport implements ToolTransport {
     if (action === "start_container") {
       const name = parameters["name"];
       assertValidContainerName(name);
-      const started = await run(dockerBin, ["start", "--", name], this.timeoutMs);
+      const started = await run(dockerBin, ["start", "--", name], this.timeoutMs, callSignal);
       if (started.code !== 0) throw new Error(`docker_start_failed:${started.stderr.slice(0, 160)}`);
-      const inspected = await run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs);
+      const inspected = await run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs, callSignal);
       if (inspected.code !== 0) throw new Error(`docker_post_start_inspect_failed:${inspected.stderr.slice(0, 160)}`);
       return { data: parseInspect(inspected.stdout) as unknown as JsonValue };
     }

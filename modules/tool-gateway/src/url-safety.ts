@@ -1,3 +1,5 @@
+import { currentCallSignal, throwIfAborted } from "./call-signal.ts";
+
 /**
  * Remediering del 2 (JARVIS-091): modellstyrte id-er interpoleres i leverandørenes URL-stier.
  * `encodeURIComponent("..")` er FORTSATT `..`, og WHATWG-URL-parseren normaliserer `/files/../admin` til `/admin` FØR
@@ -81,10 +83,15 @@ export async function guardedFetch(input: string | URL, init?: GuardedFetchInit)
   const policy = init?.redirect ?? (method === "GET" || method === "HEAD" ? undefined : "reject");
   const { redirect: _redirect, ...rest } = init ?? {};
   void _redirect;
-  const options: RequestInit = { ...rest, ...(policy === undefined ? {} : { redirect: policy === "reject" ? "manual" : policy }) };
-  // D-392 (JARVIS-018): ingen leverandørkall uten avbrudd - gatewayens `withTimeout` avviser bare løftet, så uten dette ville selve
-  // forespørselen (og dens evt. bivirkning) fortsette å leve etter at kalleren har fått «tool_timeout».
-  const response = await fetch(raw, options.signal ? options : { ...options, signal: AbortSignal.timeout(VENDOR_FETCH_TIMEOUT_MS) });
+  // D-392 (JARVIS-018): ingen leverandørkall uten avbrudd - uten dette ville selve forespørselen (og dens evt. bivirkning) fortsette å leve etter at kalleren har fått «tool_timeout».
+  // WP-K (D-471): rekkefølgen er (1) kallerens EGET `signal` (uendret: eget tidsavbrudd vinner, ambient ignoreres - delt tilstand med eget signal, som Infisical-innlogging, skal ikke dø med et annet kalls frist),
+  // (2) ellers gatewayens ambient kallsignal (`call-signal.ts`) KOMBINERT med standardgrensen, (3) ellers bare standardgrensen på 45 s.
+  const callSignal = rest.signal ? undefined : currentCallSignal();
+  // Et kall som allerede er avbrutt sender ALDRI en forespørsel (heller ikke når en test-/proxy-`fetch` ikke selv ser på signalet).
+  throwIfAborted(rest.signal ?? callSignal);
+  const signal = rest.signal ?? (callSignal ? AbortSignal.any([callSignal, AbortSignal.timeout(VENDOR_FETCH_TIMEOUT_MS)]) : AbortSignal.timeout(VENDOR_FETCH_TIMEOUT_MS));
+  const options: RequestInit = { ...rest, signal, ...(policy === undefined ? {} : { redirect: policy === "reject" ? "manual" : policy }) };
+  const response = await fetch(raw, options);
   if (policy === "reject" && (response.type === "opaqueredirect" || REDIRECT_STATUSES.has(response.status))) {
     await response.body?.cancel().catch(() => undefined);
     throw new UnsafeVendorUrlError(`unexpected_redirect_http_${response.status}`);

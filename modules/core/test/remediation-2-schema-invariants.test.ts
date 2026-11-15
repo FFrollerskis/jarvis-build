@@ -70,7 +70,9 @@ describe("A: SECURITY DEFINER med minste privilegium (JARVIS-073)", () => {
       "jarvis_list_business_tenant_ids(integer)",
       "jarvis_session_grant_tenant(text)",
       // D-395 (JARVIS-074): oppbevaringsfunksjonen (073) - samme invarianter (eid av jarvis_definer, låst search_path, ingen PUBLIC-EXECUTE).
-      "prune_operational_data(integer,integer,integer,integer,integer,integer)"
+      "prune_operational_data(integer,integer,integer,integer,integer,integer)",
+      // WP-K (D-471, JARVIS-053): policy-journalens oppbevaring (108) - samme invarianter (eid av jarvis_definer, låst search_path, ingen PUBLIC-EXECUTE).
+      "prune_policy_decisions(integer,integer)"
     ]);
     for (const row of r.rows as Array<{ fn: string; owner: string; rolsuper: boolean; rolbypassrls: boolean; proconfig: string[]; public_exec: boolean; app_exec: boolean }>) {
       expect(row.owner, row.fn).toBe("jarvis_definer");

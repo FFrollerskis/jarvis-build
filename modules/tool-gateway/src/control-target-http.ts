@@ -1,3 +1,4 @@
+import { abortableSleep, throwIfAborted } from "./call-signal.ts";
 import { guardedFetch, isRetrySafeStatus } from "./url-safety.ts";
 import { redactVendorText } from "./vendor-text.ts";
 
@@ -83,9 +84,11 @@ function errorText(raw: string, secrets: readonly string[]): string {
 }
 
 export async function jsonRequest(req: JsonRequest): Promise<JsonResponse> {
-  const sleep = req.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  // WP-K (D-471, JARVIS-018): standardventingen avbrytes av gatewayens tidsavbrudd, og et avbrutt kall sender aldri et nytt forsøk (en mutasjon kan allerede ha nådd målet).
+  const sleep = req.sleep ?? ((ms: number) => abortableSleep(ms));
   let last: ControlTargetHttpError | undefined;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    throwIfAborted();
     const response = await guardedFetch(req.url, {
       method: req.method,
       // L2 (review PR #324): «ingen redirects» er nå håndhevet - en 3xx fra et kontrollert skymål (Langfuse/Infisical) kaster `unsafe_vendor_url:unexpected_redirect_http_<status>` i stedet for å følges med Authorization/kropp.

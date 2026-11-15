@@ -12,7 +12,8 @@ import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/polic
 import { canonicalJson, toolCallIdempotencyKey } from "@jarvis/model-gateway";
 import { McpZapierTransport } from "../src/mcp-zapier-transport.ts";
 import { isRetrySafeStatus } from "../src/url-safety.ts";
-import { ToolGateway, firstWaveTools, type SecretProvider, type ToolTransport } from "../src/index.ts";
+import { z } from "zod";
+import { ToolGateway, firstWaveTools, type SecretProvider, type ToolDefinition, type ToolTransport } from "../src/index.ts";
 
 /**
  * D-392 (JARVIS-004/017/018/022): reserve-then-execute-ledger, kanonisk idempotency-nøkkel og trygg retry-regel.
@@ -249,5 +250,43 @@ describe("D-392 JARVIS-018: retry på mutasjoner", () => {
     vi.stubGlobal("fetch", async (_u: string, init?: RequestInit) => { seen.push(init); return { ok: true } as Response; });
     await guardedFetch("https://api.github.com/user");
     expect(seen[0]?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  // WP-K (D-471, JARVIS-018): `ToolTransport.invoke` har nå et 5. `signal`-argument; gateway-tidsavbruddet AVBRYTER signalet (ikke bare løftet). Per transportfamilie: wpk-018-gateway-abort.test.ts.
+  it("WP-K: gateway-timeout avbryter signalet transporten fikk, og en replay etter timeout kaller aldri leverandøren på nytt", async () => {
+    const key = `k-${randomUUID()}`;
+    let calls = 0;
+    let seen: AbortSignal | undefined;
+    const transport: ToolTransport = { async invoke(_a, _p, _c, _ctx, signal) { calls += 1; seen = signal; return new Promise(() => undefined); } };
+    const gateway = gatewayWith(appPool, transport, 60);
+    const parameters = params();
+    const first = await createEvent(gateway, parameters, key);
+    expect(first.ok).toBe(false);
+    expect(seen).toBeInstanceOf(AbortSignal);
+    expect(seen?.aborted).toBe(true);
+    expect((seen?.reason as Error).message).toBe("tool_timeout");
+    expect((await rowOf(key))?.status).toBe("unverified");
+    const replay = await createEvent(gateway, parameters, key);
+    expect(replay.ok).toBe(false);
+    expect(calls).toBe(1);
+  });
+
+  it("WP-K: Zapier tools/call som får 429 og så tidsavbrudd under backoff sendes ikke en gang til (ikke-idempotent POST gjentas aldri etter timeout)", async () => {
+    const seenUrls: string[] = [];
+    vi.stubGlobal("fetch", async (u: string) => { seenUrls.push(u); return { ok: false, status: 429, headers: new Headers(), text: async () => "" } as unknown as Response; });
+    const url = "https://mcp.zapier.com/api/mcp/s/fake-token-for-test/mcp";
+    const gateway = new ToolGateway(appPool, new PolicyGateway({
+      devices: new InMemoryDeviceRegistry(), nonces: new PgApprovalStore(appPool), killSwitch: new KillSwitch(),
+      authority: { owner_person_id: identity.person_id, owner_tenants: [identity.tenant_id] }
+    }), { name: "test", async get() { return url; } });
+    gateway.register({
+      tool_id: "zapier", action: "call_tool", description: "wpk", input_schema: z.record(z.string(), z.any()) as unknown as ToolDefinition["input_schema"],
+      capability_class: "C", scopes: ["x"], reversible: false, rollback_procedure: "manuell", idempotent_external: false, timeout_ms: 150, rate_limit_per_minute: 100,
+      credential_ref: "WPK_ZAPIER", output_trust: "untrusted", transport: new McpZapierTransport()
+    });
+    const result = await gateway.execute({ identity, tool_id: "zapier", action: "call_tool", parameters: { tool_name: "send", arguments: "{}" }, idempotency_key: `k-${randomUUID()}` });
+    expect(result.ok).toBe(false);
+    await new Promise((r) => setTimeout(r, 800)); // forbi første backoff (500 ms)
+    expect(seenUrls).toHaveLength(1);
   });
 });

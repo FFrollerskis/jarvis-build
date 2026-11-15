@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import { withTenantTransaction } from "@jarvis/core";
-import type { ToolGateway, ToolResult } from "@jarvis/tool-gateway";
+import { isUnknownOutcomeReason, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
 import { computeStateDiff } from "./diff.ts";
 import { findExecutionByKey, readToolExecutionState } from "./infra-execution.ts";
 import type { InfraExecution, InfraOperationalOutcome, InfraRiskClass } from "./types.ts";
@@ -155,12 +155,14 @@ export interface ExecuteCloudMutationInput {
 }
 
 /**
- * Utfallet av en gateway-utførelse: `ok` = verifisert; `postcondition_*` = mutasjonen LYKTES men etterbetingelsen holdt ikke (PARTIAL); et tidsavbrudd
- * kan ha endret noe uten at vi vet det (UNKNOWN); alt annet (nektelse, ugyldig inndata, leverandørfeil) = FAILED (ingenting er verifisert endret).
+ * Utfallet av en gateway-utførelse: `ok` = verifisert; `postcondition_*` = mutasjonen LYKTES men etterbetingelsen holdt ikke (PARTIAL); et UKJENT utfall kan ha endret noe uten at vi vet det (UNKNOWN);
+ * alt annet (nektelse, ugyldig inndata, leverandørfeil) = FAILED (ingenting er verifisert endret).
+ * WP-K (uavhengig delta-review L-1): «ukjent» gjelder ALLE de ukjent-utfall-svarene gatewayen gir (`isUnknownOutcomeReason`), ikke bare replay-strengen: det FØRSTE kallets svar er `tool_failed:tool_timeout`
+ * eller `tool_failed:outcome_unknown:...` mens ledgeren allerede står `unverified` - journalen sa FAILED (og `recovery_available = false`) for et kall som kan ha utført mutasjonen.
  */
 export function classifyGatewayOutcome(result: ToolResult): InfraOperationalOutcome {
   if (result.ok) return "SUCCESS";
-  if (result.reason.startsWith("postcondition_unverified:tool_timeout") || result.reason.startsWith("postcondition_unverified:ledger_finalize_failed")) return "UNKNOWN";
+  if (isUnknownOutcomeReason(result.reason)) return "UNKNOWN";
   if (result.reason.startsWith("postcondition_")) return "PARTIAL";
   return "FAILED";
 }

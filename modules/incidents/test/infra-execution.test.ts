@@ -54,6 +54,8 @@ interface FakeContainer {
 class FakeDockerTransport implements ToolTransport {
   readonly containers = new Map<string, FakeContainer>();
   failRedeploy = false;
+  /** WP-K (delta-review L-1): containeren ER startet (tilstanden endres), men transporten kaster `outcome_unknown:` bagen (inspect feilet ETTER `docker run -d`) - utfallet er UKJENT. */
+  unknownAfterRedeploy = false;
   failStop = false;
   failStart = false;
   /** Simulerer et kall som TEKNISK lykkes (HTTP-nivå) men lander på FEIL image - byggeordrens §K: "Do not define rollback as successful merely because the provider call returned HTTP 200". */
@@ -91,6 +93,7 @@ class FakeDockerTransport implements ToolTransport {
       const actualImage = this.landOnWrongImage ?? image;
       const state: FakeContainer = { id, image: actualImage, status: "running", health: null, started_at: new Date().toISOString(), created_at: new Date().toISOString(), restart_count: 0 };
       this.containers.set(name, state);
+      if (this.unknownAfterRedeploy) throw new Error("outcome_unknown:docker_post_deploy_inspect_failed");
       return { external_id: id, data: { ...state } as unknown as JsonValue };
     }
     if (action === "stop_container") {
@@ -236,6 +239,24 @@ describe("D-105: kritisk infra-eksekusjonsjournal v2 (EKTE ToolGateway, in-memor
       tenant_id: TENANT_A, target: "jarvis-sentinel-c", action: "redeploy_container", target_image: "alpine:3.20", idempotency_key: "infra-key-c"
     });
     expect(execution.verification_outcome).toBe("FAILED");
+  });
+
+  it("C2 (WP-K delta-review L-1): UKJENT utfall etter akseptert redeploy (`outcome_unknown:...`, ledger `unverified`) journalføres som UNKNOWN - ikke FAILED - og før-tilstanden/recovery bevares; en gjentatt nøkkel gir samme rad uten ny utførelse", async () => {
+    const transport = new FakeDockerTransport();
+    transport.seed("jarvis-sentinel-c2", "alpine:3.19");
+    transport.unknownAfterRedeploy = true;
+    const gateway = buildGateway(transport);
+    const input = { tenant_id: TENANT_A, target: "jarvis-sentinel-c2", action: "redeploy_container" as const, target_image: "alpine:3.20", idempotency_key: "infra-key-c2" };
+    const execution = await executeInfraMutation({ pool: appPool, gateway }, identityA, input);
+    expect(execution.verification_outcome).toBe("UNKNOWN");
+    expect((execution.provider_receipt as { reason: string }).reason).toBe("tool_failed:outcome_unknown:docker_post_deploy_inspect_failed");
+    expect(execution.before_state).toMatchObject({ image: "alpine:3.19" }); // ledgerens før-tilstand (preflight kjørte)
+    expect(execution.recovery_available).toBe(true);
+    expect(execution.recovery_plan).toContain("alpine:3.19");
+    const ledger = (await adminPool.query("SELECT status FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2", [TENANT_A, "infra-key-c2"])).rows[0] as { status: string };
+    expect(ledger.status).toBe("unverified");
+    const again = await executeInfraMutation({ pool: appPool, gateway }, identityA, input);
+    expect(again.execution_id).toBe(execution.execution_id);
   });
 
   it("D: kallet lykkes teknisk men lander på FEIL image - EKSPLISITT PARTIAL, ikke SUCCESS (§K: HTTP 200 er ikke nok)", async () => {

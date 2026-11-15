@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import type { JsonValue } from "@jarvis/contracts";
-import type { ToolTransport } from "./gateway.ts";
+import type { ToolInvocationContext, ToolTransport } from "./gateway.ts";
+import { composeSignals, currentCallSignal } from "./call-signal.ts";
 import { guardedFetch } from "./url-safety.ts";
 
 /** Q-46 (D-436): browser-gateway-kall går via guardedFetch. Taket er lik LENGSTE verktøy-timeout (`navigate`, 30 s i integrations.ts) - ikke lenger, ellers lever forespørselen (og en Chromium-kontekst) videre etter at gatewayen har gitt `tool_timeout`. */
@@ -50,7 +51,9 @@ export function signBrowserGatewayToken(
 export class BrowserGatewayTransport implements ToolTransport {
   constructor(private readonly tokenSecret: string = "") {}
 
-  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string): Promise<{ external_id?: string; data?: JsonValue }> {
+  async invoke(
+    action: string, parameters: Record<string, JsonValue>, credential: string, _context?: ToolInvocationContext, signal?: AbortSignal
+  ): Promise<{ external_id?: string; data?: JsonValue }> {
     if (!credential) {
       throw new Error("browser_gateway_base_url_not_configured");
     }
@@ -63,7 +66,8 @@ export class BrowserGatewayTransport implements ToolTransport {
     const body = JSON.stringify({ action, parameters });
     const response = await guardedFetch(`${credential}/invoke`, {
       method: "POST",
-      signal: AbortSignal.timeout(BROWSER_INVOKE_TIMEOUT_MS),
+      // WP-K (D-471, JARVIS-018): eget tak (eksplisitt signal velger bort det ambiente) SAMMENSATT med gatewayens kallsignal - tidsavbruddet avbryter også forespørselen mot nettleser-gatewayen (og dens Chromium-kontekst).
+      signal: composeSignals(signal ?? currentCallSignal(), AbortSignal.timeout(BROWSER_INVOKE_TIMEOUT_MS))!,
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${signBrowserGatewayToken(this.tokenSecret, action, body)}`

@@ -1,6 +1,6 @@
 import type { ToolCallRequest, ToolDefinition as MeshToolDefinition, ToolResultMessage } from "@jarvis/provider-adapters";
 import { zodToJsonSchema } from "zod-to-json-schema";
-import { jobContractAllows, type ToolGateway } from "./gateway.ts";
+import { isUnknownOutcomeReason, jobContractAllows, type ToolDefinition, type ToolGateway } from "./gateway.ts";
 import { ownerStatesMemory } from "./owner-stated-memory.ts";
 import type { JobContract, JsonValue } from "@jarvis/contracts";
 import { SURFACE_TOOL_GRANTS, requiresConfirmationWhenTainted, scopeFieldsOf, type ToolManifest } from "./tool-manifest.ts";
@@ -445,6 +445,12 @@ export class MeshToolExecutor {
     };
   }
 
+  /** Klasse A (ren lesing) ifølge gatewayens registrerte definisjon. Enkle test-fakes uten `get`, og ukjente verktøy, regnes IKKE som lesing (konservativt). */
+  private isReadOnly(mapped: { tool_id: string; action: string }): boolean {
+    const definition = (this.toolGateway as { get?: (toolId: string, action: string) => ToolDefinition | undefined }).get?.(mapped.tool_id, mapped.action);
+    return definition?.capability_class === "A";
+  }
+
   /** Tjenestene som faktisk finnes på turens flate (til «verktøyet finnes ikke»-forklaringen). */
   private availableServices(): string[] {
     const surface = this.turn?.surface;
@@ -543,7 +549,9 @@ export class MeshToolExecutor {
       servingModel: { provider: call.provider, model: call.model }
     });
     if (!result.ok) {
-      return this.failure(call, result.reason, at, failCtx, ctx.idempotency_key);
+      // WP-K (delta-review L-1): ukjent utfall på en HANDLING gir «ikke kjør på nytt» (retry never); en ren lesing (klasse A) har ingenting å ha utført og beholder «prøv igjen senere».
+      const readOnly = isUnknownOutcomeReason(result.reason) && this.isReadOnly(mapped);
+      return this.failure(call, result.reason, at, readOnly ? { ...failCtx, read_only: true } : failCtx, ctx.idempotency_key);
     }
     let output: unknown = result.data ?? null;
     const serialized = JSON.stringify(output);

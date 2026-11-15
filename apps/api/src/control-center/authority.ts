@@ -3,8 +3,9 @@ import {
   controlAction, controlItem, controlSection, unknownControlSection,
   type ControlAction, type ControlCenterBuildContext, type ControlCenterDefinition, type ControlCenterParts, type ControlItem, type ControlSection, type ControlStatus
 } from "@jarvis/executive";
+import type { PolicyAuditSinkStats } from "@jarvis/core";
 import { budgetConfigFromEnv } from "@jarvis/model-gateway";
-import { resolveAuthorityMode, type AuthorityConfig, type InfraExecutionGate, type KillSwitch, type OwnerControls } from "@jarvis/policy";
+import { resolveAuthorityMode, type AuthorityConfig, type InfraExecutionGate, type KillSwitch, type OwnerControls, type PolicyAuditStats } from "@jarvis/policy";
 import { allowedReposFromEnv } from "@jarvis/tasks";
 import {
   assertManifestInvariants, buildToolManifest, configuredGithubRepo, githubReposUnlocked, parseDockerMutationTargets, parseGceMutationTargets,
@@ -155,9 +156,17 @@ export interface AuthorityCenterDeps {
   ownerControls: Pick<OwnerControls, "listFrozenConnectorsDurable" | "listRevokedCredentialsDurable">;
   killSwitch: Pick<KillSwitch, "currentStateDurable">;
   infraGate?: Pick<InfraExecutionGate, "statusDurable">;
+  /**
+   * WP-K (D-471, JARVIS-053): status for den varige policy-journalen (`JARVIS_POLICY_AUDIT_SINK=db`). Utelatt (journalen er AV) = ingen rad vises og seksjonen er byte-identisk med før.
+   * Kun tellere og sikre etiketter - aldri avgjørelsesinnhold.
+   */
+  policyAudit?: () => { gateway: PolicyAuditStats; sink: PolicyAuditSinkStats };
 }
 
 const kr = (ore: number): string => `${Math.round(ore / 100)} kr`;
+
+/** Vinduet (5 min, samme som sinkens `degraded`) en journal-feil regnes som AKTUELL for Autoritet-senteret. */
+const POLICY_AUDIT_RECENT_MS = 5 * 60_000;
 
 export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterDefinition {
   return {
@@ -496,6 +505,38 @@ export function createAuthorityCenter(deps: AuthorityCenterDeps): ControlCenterD
         detail_no: `Alle kontrollhandlinger unntatt de som STOPPER ting krever signert enhetsøkt fra kanalene ${[...STEP_UP_CHANNELS].join(", ")}. Unntatt: ${[...STEP_UP_EXEMPT_ACTIONS].join(", ")}.`,
         facts: { channels: [...STEP_UP_CHANNELS].join(", "), exempt_actions: [...STEP_UP_EXEMPT_ACTIONS].join(", ") }
       }));
+      if (deps.policyAudit !== undefined) {
+        // WP-K (JARVIS-053): journalen er PÅ - vis om den faktisk virker. Mottrykk (full kø) og sink-feil betyr at avgjørelser er levert UTEN å være journalført; selve avgjørelsene er aldri berørt.
+        let audit: ReturnType<NonNullable<AuthorityCenterDeps["policyAudit"]>> | undefined;
+        try {
+          audit = deps.policyAudit();
+        } catch {
+          audit = undefined;
+        }
+        if (audit === undefined) {
+          policyItems.push(controlItem({ id: "policy_audit", label: "Varig policy-journal", status: "UNKNOWN", detail_no: "Statusen kan ikke leses.", facts: {} }));
+        } else {
+          const { gateway: g, sink: k } = audit;
+          // Review L4: statusen følger det AKTUELLE bildet, ikke livstidstellerne. Tidligere ga ENHVER avvisning siden oppstart `WARN` helt til neste omstart - en forbigående kø-overflyt for en uke siden skjulte om journalen
+          // fungerer NÅ. `k.degraded` = siste skriving feilet eller noe ble avvist de siste 5 minuttene; en sink-feil i gatewayen vurderes på samme vindu. Historikken beholdes i teksten og tellerne, ikke i statusen.
+          const lost = k.rejected_full + k.rejected_tenant_cap + k.rejected_invalid + g.sink_failures + g.sink_rejected;
+          const gatewayFailedAt = g.last_failure_at === null ? Number.NaN : Date.parse(g.last_failure_at);
+          const recentGatewayFailure = Number.isFinite(gatewayFailedAt) && nowMs - gatewayFailedAt < POLICY_AUDIT_RECENT_MS;
+          const status = k.degraded || k.pressure === "full" || recentGatewayFailure ? "WARN" : "OK";
+          policyItems.push(controlItem({
+            id: "policy_audit", label: "Varig policy-journal", status,
+            detail_no: status === "OK"
+              ? `PÅ: hver policy-avgjørelse skrives til databasen (${k.written} skrevet siden oppstart, ${k.queued} i kø).${lost > 0 ? ` Tidligere avvik siden oppstart (nå friskmeldt): ${lost} avgjørelser ble ikke journalført.` : ""}`
+              : `PÅ, men svekket: ${k.queued} i kø (${k.pressure}), ${k.rejected_full} avvist fordi køen var full, ${k.rejected_tenant_cap} avvist av tenant-taket, ${k.flush_failures} mislykkede skrivinger${k.last_failure ? ` (${k.last_failure})` : ""}. Avgjørelsene er uendret - men noen er ikke journalført.`,
+            facts: {
+              queued: k.queued, max_queue: k.max_queue, max_per_tenant: k.max_per_tenant, pressure: k.pressure, written: k.written, rejected_full: k.rejected_full, rejected_tenant_cap: k.rejected_tenant_cap,
+              rejected_invalid: k.rejected_invalid, skipped_unattributable: k.skipped_unattributable, flush_failures: k.flush_failures, consecutive_failures: k.consecutive_failures, last_failure: k.last_failure,
+              gateway_sink_failures: g.sink_failures, gateway_sink_rejected: g.sink_rejected
+            },
+            ...(k.last_written_at ? { observed_at: k.last_written_at } : {})
+          }));
+        }
+      }
       const autoApproveOff = deps.env["JARVIS_MEMORY_AUTO_APPROVE"] === "false";
       policyItems.push(controlItem({
         id: "memory_auto_approve", label: "Auto-godkjenning av dine uttrykte minner", status: "OK",

@@ -268,6 +268,11 @@ describe("C: ærlige utfall - FAILED, PARTIAL, ingen strategi", () => {
     expect(classifyGatewayOutcome({ ok: false, reason: "postcondition_mismatch" })).toBe("PARTIAL");
     expect(classifyGatewayOutcome({ ok: false, reason: "postcondition_unverified:readback_failed" })).toBe("PARTIAL");
     expect(classifyGatewayOutcome({ ok: false, reason: "postcondition_unverified:tool_timeout_outcome_unknown" })).toBe("UNKNOWN");
+    // WP-K (delta-review L-1): det FØRSTE kallets ukjent-utfall-svar (ledgeren står `unverified`) er også UNKNOWN - ikke bare replay-strengen.
+    for (const reason of [
+      "tool_failed:tool_timeout", "tool_failed:outcome_unknown:transport_reset", "tool_failed:outcome_unknown:transport_redirect", "tool_failed:outcome_unknown:infisical_rotation_readback_failed",
+      "tool_failed:outcome_unknown:cloudflare_rule_fields_changed:action_parameters", "execution_in_flight_or_outcome_unknown", "postcondition_unverified:ledger_finalize_failed"
+    ]) expect(classifyGatewayOutcome({ ok: false, reason }), reason).toBe("UNKNOWN");
     for (const reason of ["tool_failed:x", "infra_paused", "invalid_parameters", "preflight_target_not_found", "cloudflare_zone_not_authorized"]) expect(classifyGatewayOutcome({ ok: false, reason }), reason).toBe("FAILED");
   });
 });
