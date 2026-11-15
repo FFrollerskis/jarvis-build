@@ -101,7 +101,8 @@ function requiredFieldViolations(raw: unknown, out: GuardViolation[]): void {
 function issueViolations(id: string | null, issues: readonly ManifestIssue[], out: GuardViolation[]): void {
   for (const i of issues) {
     const secret = i.code === "secret_shape_detected" || (i.code === "invalid_format" && /^secrets\.refs\[\d+\]\.ref$/.test(i.path));
-    if (secret) out.push({ rule: "secret_value_in_manifest", connector_id: id, path: i.path, message: "manifestet inneholder noe som ikke er en hvelvreferanse (en verdi?) - kun referanser er lov" });
+    // Review N5: funn-typen (fast ordforråd fra den sentrale skanneren, aldri teksten som traff) står i bruddet, så en falsk positiv på vanlig prosa kan rettes uten å gjette hvilket mønster som slo til.
+    if (secret) out.push({ rule: "secret_value_in_manifest", connector_id: id, path: i.path, message: `manifestet inneholder noe som ikke er en hvelvreferanse (en verdi?) - kun referanser er lov${i.finding_kinds !== undefined && i.finding_kinds.length > 0 ? ` (skannerfunn: ${i.finding_kinds.join(", ")})` : ""}` });
     else if (WRITE_IDEMPOTENCY_CODES.has(i.code)) out.push({ rule: "write_capable_without_idempotency", connector_id: id, path: i.path, message: i.message });
     // Review M5: et FULLT manifest med ukjent runbook gir validatorens `full_manifest_has_unknown` ved operations.runbook - vakten navngir det som sitt eget brudd (ellers var regelen uoppnåelig: evidensfasen kjører bare på gyldige manifester).
     else if (i.code === "full_manifest_has_unknown" && i.path === "operations.runbook") out.push({ rule: "runbook_not_declared", connector_id: id, path: i.path, message: "et fullt manifest må oppgi en runbook" });

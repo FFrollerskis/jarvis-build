@@ -505,3 +505,56 @@ describe("review M2: hemmelighetsformede IDENTIFIKATORER (handlingsnøkler, conn
     expect(safeScalar("med mellomrom")).toBe("<redacted>");
   });
 });
+
+describe("review N5: hemmelighetsmeldingen sier HVILKEN funn-type den sentrale skanneren fant (aldri teksten som traff)", () => {
+  const secretIssues = (set: (m: ConnectorManifest) => void): ManifestIssue[] => {
+    const m = validFullManifest();
+    set(m);
+    return validateConnectorManifest(m).issues.filter((i) => i.code === "secret_shape_detected");
+  };
+  /** NAVN=verdi bygges ved kjøring av fragmenter (aldri som bokstav i kilden). */
+  const namedSecret = (): string => `${["API", "KEY"].join("_")}=${"x7".repeat(8)}`;
+
+  it("hver kjent hemmelighetsform gir sin funn-type i både `finding_kinds` og meldingen, og verdien (eller et prefiks av den) ekkoes aldri", () => {
+    const expected: Array<[string, string, string]> = [
+      ["github-token", fakeSecretShapes.githubToken(), "github_token"], ["bearer", fakeSecretShapes.bearer(), "bearer_token"], ["aws", fakeSecretShapes.awsKey(), "aws_access_key"],
+      ["stripe", fakeSecretShapes.stripeKey(), "stripe_key"], ["url med passord", fakeSecretShapes.url(), "url_credentials"], ["NAVN=verdi", namedSecret(), "named_secret"]
+    ];
+    for (const [label, value, kind] of expected) {
+      const issues = secretIssues((m) => { m.limits.quotas = `bruk ${value} her`; });
+      expect(issues.length, label).toBe(1);
+      expect(issues[0]!.path, label).toBe("limits.quotas");
+      expect(issues[0]!.finding_kinds, label).toEqual([kind]);
+      expect(issues[0]!.message, label).toContain(`skannerfunn: ${kind}`);
+      const blob = JSON.stringify(issues);
+      for (const leak of [value, value.slice(0, 8), value.slice(-8)]) expect(blob.includes(leak), `${label}: ${leak}`).toBe(false);
+    }
+  });
+
+  it("et hemmelighetsformet NØKKELNAVN får også funn-type (på stien <redacted-key>) uten å sitere nøkkelen", () => {
+    const key = fakeSecretShapes.githubToken();
+    const issues = secretIssues((m) => { (m.limits as unknown as Record<string, unknown>)[key] = "x"; });
+    const hit = issues.find((i) => i.path === "limits.<redacted-key>");
+    expect(hit?.finding_kinds).toEqual(["github_token"]);
+    expect(JSON.stringify(issues).includes(key.slice(0, 8))).toBe(false);
+  });
+
+  it("flere funn i samme tekst gir alle typene (unike, i funnrekkefølge) - og meldingen peker til runbook §2 for falske positive", () => {
+    const issues = secretIssues((m) => { m.limits.quotas = `${fakeSecretShapes.githubToken()} og ${namedSecret()}`; });
+    expect(issues[0]!.finding_kinds).toEqual(["github_token", "named_secret"]);
+    expect(issues[0]!.message).toContain("runbook §2");
+  });
+
+  it("DOKUMENTERT falsk positiv (runbook §2): vanlig prosa av formen «ord: verdi» treffer `named_secret`; den anbefalte omskrivingen gjør det ikke", () => {
+    // Skannerens `named_secret` (modules/core/src/services/secret-scan.ts) treffer et nøkkelord (TOKEN/SECRET/PASSWORD/API_KEY/CREDENTIAL/AUTH - også inni et ord, som «authority») rett før `:`/`=` og en verdi på minst 6 tegn.
+    // Skannerens egen presisjon er IKKE endret av WP-I. Endres skanneren slik at disse ikke lenger treffer, rettes runbook §2 (og denne testen) - det er hele poenget med å låse dokumentasjonen her.
+    const flagged = ["credential: bundet til eieren", "authority: sovereign", "secret: ligger kun i vaulten", "credential_binding: owner_bound"];
+    const reworded = ["Credentialen er bundet til eieren", "sovereign authority (eieren)", "Hemmeligheten ligger kun i vaulten", "credential binding: owner_bound"];
+    for (const phrase of flagged) {
+      const issues = secretIssues((m) => { m.limits.quotas = phrase; });
+      expect(issues.map((i) => i.finding_kinds), phrase).toEqual([["named_secret"]]);
+      expect(JSON.stringify(issues).includes(phrase), `${phrase}: meldingen skal ikke sitere teksten`).toBe(false);
+    }
+    for (const phrase of reworded) expect(secretIssues((m) => { m.limits.quotas = phrase; }), phrase).toEqual([]);
+  });
+});

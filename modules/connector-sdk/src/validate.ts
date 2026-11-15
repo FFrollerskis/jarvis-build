@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { containsSecret } from "@jarvis/core";
+import { containsSecret, scanForSecrets } from "@jarvis/core";
 import {
   ConnectorManifestSchema, MIN_RISK_FOR_EFFECT, RISK_ORDER, isUnknown, kindOfEffect, safeIdentifier,
   type ActionSpec, type Completeness, type ConnectorManifest
@@ -22,6 +22,8 @@ export interface ManifestIssue {
   path: string;
   code: string;
   message: string;
+  /** Kun for `secret_shape_detected` (review N5): hvilke FUNN-TYPER den sentrale skanneren fant (fast ordforråd: `github_token`, `named_secret` ...) - aldri teksten som traff. */
+  finding_kinds?: readonly string[];
 }
 
 export interface ManifestValidation {
@@ -68,29 +70,44 @@ function safeKey(key: string): string {
 const SCAN_MAX_NODES = 20_000;
 const SCAN_MAX_DEPTH = 24;
 
-/** Stier (med redigerte nøkkelnavn) til tekstverdier/nøkler som ligner hemmeligheter. Overskrides skannebudsjettet, feiler vi LUKKET (`scan_budget_exceeded`). */
-function findSecretShapes(input: unknown): { paths: string[]; budgetExceeded: boolean } {
-  const paths: string[] = [];
+interface SecretFindingAt {
+  path: string;
+  /** Skannerens funn-typer (fast ordforråd, aldri teksten som traff). */
+  kinds: string[];
+}
+
+/** Funn-typene for en tekst: skannerens egne type-navn (`github_token`, `named_secret` ...), filtrert til rene identifikatorer så ingenting annet enn ordforrådet noensinne kan vises. */
+function findingKinds(text: string): string[] {
+  return [...new Set(scanForSecrets(text).findings.map((f) => f.kind).filter((k) => /^[a-z_]{1,40}$/.test(k)))];
+}
+
+/** Stier (med redigerte nøkkelnavn) til tekstverdier/nøkler som ligner hemmeligheter, med skannerens funn-TYPER. Overskrides skannebudsjettet, feiler vi LUKKET (`scan_budget_exceeded`). */
+function findSecretShapes(input: unknown): { found: SecretFindingAt[]; budgetExceeded: boolean } {
+  const found: SecretFindingAt[] = [];
   let nodes = 0;
   let budgetExceeded = false;
   const walk = (value: unknown, path: PathPart[], depth: number): void => {
     if (budgetExceeded) return;
     if (++nodes > SCAN_MAX_NODES || depth > SCAN_MAX_DEPTH) { budgetExceeded = true; return; }
     if (typeof value === "string") {
-      if (containsSecret(value)) paths.push(pathToString(path));
+      const kinds = findingKinds(value);
+      if (kinds.length > 0) found.push({ path: pathToString(path), kinds });
       return;
     }
     if (Array.isArray(value)) { value.forEach((v, i) => walk(v, [...path, i], depth + 1)); return; }
     if (typeof value === "object" && value !== null) {
       for (const [k, v] of Object.entries(value)) {
         const shown = safeKey(k);
-        if (shown === "<redacted>" && containsSecret(k)) paths.push(pathToString([...path, "<redacted-key>"]));
+        if (shown === "<redacted>") {
+          const kinds = findingKinds(k);
+          if (kinds.length > 0) found.push({ path: pathToString([...path, "<redacted-key>"]), kinds });
+        }
         walk(v, [...path, shown], depth + 1);
       }
     }
   };
   walk(input, [], 0);
-  return { paths, budgetExceeded };
+  return { found, budgetExceeded };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -379,7 +396,13 @@ function fullOnlyIssues(m: ConnectorManifest, unknownPaths: readonly string[]): 
 export function validateConnectorManifest(input: unknown, options: ValidateOptions = {}): ManifestValidation {
   const issues: ManifestIssue[] = [];
   const scan = findSecretShapes(input);
-  for (const p of scan.paths) issues.push({ path: p, code: "secret_shape_detected", message: "verdien ligner en hemmelighet (manifestet skal kun inneholde hvelvreferanser, aldri verdier)" });
+  // Review N5: meldingen sier HVILKEN funn-type som slo til (aldri teksten) - den sentrale skanneren er høy-presisjon, men «navn: verdi» i vanlig prosa (`credential: bundet til eieren`) kan treffe `named_secret`.
+  for (const f of scan.found) {
+    issues.push({
+      path: f.path, code: "secret_shape_detected", finding_kinds: f.kinds,
+      message: `verdien ligner en hemmelighet (skannerfunn: ${f.kinds.join(", ")}); manifestet skal kun inneholde hvelvreferanser, aldri verdier. Vanlig prosa som «ord: verdi» kan gi falsk positiv - skriv det om (runbook §2)`
+    });
+  }
   if (scan.budgetExceeded) issues.push({ path: "", code: "scan_budget_exceeded", message: "manifestet er for stort/dypt til å hemmelighetsskannes (feiler lukket)" });
 
   const declared = (typeof input === "object" && input !== null ? (input as { completeness?: unknown }).completeness : undefined);
@@ -394,7 +417,7 @@ export function validateConnectorManifest(input: unknown, options: ValidateOptio
   const unknown_paths = collectUnknownPaths(manifest);
   // Review M2: de semantiske reglene er den eneste fasen som gjentar identifikatorer i meldinger. Fant skanneren en hemmelighetsform (eller rakk den ikke å skanne alt), kjøres de ikke: manifestet er allerede
   // avvist, og ingen melding skal få en sjanse til å sitere noe fra det. Rett hemmeligheten, kjør på nytt, så kommer de semantiske feilene.
-  if (scan.paths.length === 0 && !scan.budgetExceeded) {
+  if (scan.found.length === 0 && !scan.budgetExceeded) {
     issues.push(...semanticIssues(manifest));
     if (manifest.completeness === "full") issues.push(...fullOnlyIssues(manifest, unknown_paths));
   }

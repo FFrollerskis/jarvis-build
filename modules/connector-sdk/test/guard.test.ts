@@ -224,6 +224,19 @@ describe("mutasjonstester: hver regel biter", () => {
     }
   });
 
+  it("review N5: bruddet sier HVILKEN funn-type som slo til (skannerfunn), aldri teksten - også for en falsk positiv på vanlig prosa", () => {
+    const asText = clone(FULL_MANIFESTS[0]!);
+    asText.limits.quotas = `bruk ${fakeSecretShapes.githubToken()} her`;
+    const v = guard([asText]).violations.filter((x) => x.rule === "secret_value_in_manifest");
+    expect(v.map((x) => x.message)).toEqual(["manifestet inneholder noe som ikke er en hvelvreferanse (en verdi?) - kun referanser er lov (skannerfunn: github_token)"]);
+    const prose = clone(FULL_MANIFESTS[0]!);
+    prose.limits.quotas = "credential: bundet til eieren";
+    const p = guard([prose]).violations.filter((x) => x.rule === "secret_value_in_manifest");
+    expect(p.length).toBe(1);
+    expect(p[0]!.message).toContain("skannerfunn: named_secret");
+    expect(JSON.stringify(p).includes("bundet til eieren")).toBe(false);
+  });
+
   it("skrivekapabel connector uten idempotensinfo feiler (dedupe-nøkkel og per-handling-krav)", () => {
     const noKey = clone(FULL_MANIFESTS[0]!);
     noKey.idempotency.dedupe_key = "none";
