@@ -139,7 +139,7 @@ import { createValueMeasurementSource } from "./value-source.ts";
 import { ChatJobs, MAX_ACTIVE_JOBS, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
 import { createControlCenterRegistry, ownerPredicate, registerControlCenters } from "./control-center/register.ts";
-import { enabledControlCenters } from "./control-center/shared.ts";
+import { controlCentersWithTools } from "./control-center/shared.ts";
 import { servedByCloudModel } from "./cloud-tool-screen.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { createOwnerControlsService } from "./provider-pause.ts";
@@ -1071,7 +1071,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         }
       })), {
         // WP-H1/H2 (gjennomgang M1): per-senter lese-verktøyene (`get_<senter>_center`) registreres KUN for sentrene hvis flagg er på - flagg AV er identisk med main (ingen verktøy, ingen utvalgstreff, ingen rate-endring).
-        controlCenters: enabledControlCenters(process.env)
+        // Gjennomgang L5: OG som faktisk er registrert i registeret (en slått-på flagg uten sine avhengigheter gir et uregistrert senter) - et verktøy for et senter som ikke finnes skal aldri listes som tilgjengelig (`get_capability_status`).
+        controlCenters: controlCentersWithTools(process.env, controlCenters)
       }),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten

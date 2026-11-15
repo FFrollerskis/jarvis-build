@@ -56,7 +56,9 @@ const INFRA_STATUS_INTENT = /(åpne hendelser|hendelsesstatus|incident|driftssta
  * mange lesinger at flere treff på samme regex utkonkurrerer hverandre innenfor `max_tools_per_round` (samme lærdom som for driftsstatusen over). «kontrollsentrene» alene gir fortsatt `get_control_center`
  * (H0, via familie-uttrykket); disse velges når eieren spør om ETT senter.
  */
-const FINANCE_CENTER_INTENT = /(finans-?sent(er|re)(t|et)?|finans-?kontroll|finansstatus|status (på|for) finans(en)?|finans-?nødbryter|nødbryter(en)? (for )?finans|ukjent utfall|avstemming(en|s)?\b|betalingsintensjon(er|ene)?)/i;
+// Gjennomgang L5: «avstemming» alene er flertydig (økonomisk avstemming, men også «avstemming av styret»/votering og «avstemming av forventninger») og ga en lokal tur og et verktøy uten finansgrunn. Kun finanskontekstene treffer:
+// bank-/regnskaps-/konto-/betalings-/bilags-/transaksjonsavstemming («bankavstemming», «avstemming av bank»), «avstemmingsfunn» og «avstemmingskjøring». Å velge for få er trygt (eieren kan si «finanssenteret»), å velge for mange låser turen lokalt.
+const FINANCE_CENTER_INTENT = /(finans-?sent(er|re)(t|et)?|finans-?kontroll|finansstatus|status (på|for) finans(en)?|finans-?nødbryter|nødbryter(en)? (for )?finans|ukjent utfall|(bank|regnskaps?|konto|betalings?|bilags?|transaksjons?)-?avstemming(en|er|ene|s)?\b|avstemming(en)? (av|mot|for) (bank|konto|regnskap|betaling|bilag|transaksjon)\w*|avstemmingsfunn|avstemmingskjøring(en|er|ene)?|betalingsintensjon(er|ene)?)/i;
 const MEMORY_CENTER_INTENT = /(minne-?sent(er|re)(t|et)?|minnestatus|status (på|for) minne(t)?|karantene(n)?\b|minneforslag|proveniens|styringsjournal(en)?|beslutningslogg(en)?|slettebevis)/i;
 const AGENT_CENTER_INTENT = /(agent-?sent(er|re)(t|et)?|agentstatus|status (på|for) agent(ene|er)?|kjørende (agenter|jobber)|hvilke (agenter|jobber) kjører|aktive (agenter|jobber)|nettverksomfang|worker(e|ne)? (status|kjører)|\blease(r|ne)?\b)/i;
 
@@ -376,8 +378,16 @@ export function selectSurfaceTools(
  * sin egen tekst, ellers kunne en modellskrevet prompt («finn e-poster fra banken») gå til sky selv om de samme ordene fra eieren hadde holdt turen lokal. Dette er en overmengde (superset) av utvalget
  * (ikke begrenset av verktøybudsjettet, ikke av småprat-regelen) - strengere, aldri løsere - og kjenner bare ordene i `TOOL_INTENTS` (jf. Q-52).
  */
-export function financeToolIntent(text: string): boolean {
-  return Object.entries(TOOL_INTENTS).some(([toolId, intent]) => RESTRICTED_TOOL_ID.test(toolId) && intent.test(text));
+export function financeToolIntent(text: string, options: FinanceIntentOptions = {}): boolean {
+  if (Object.entries(TOOL_INTENTS).some(([toolId, intent]) => RESTRICTED_TOOL_ID.test(toolId) && intent.test(text))) return true;
+  // Gjennomgang L5: er et begrenset kontrollsenter-verktøy REGISTRERT (flagget på), låser chatten en tur som velger det (`RESTRICTED_TOOL_KEYS`) - da holder senterets egne ord også en delegert jobb lokal (paritet).
+  // Uten `restrictedTools` (flaggene AV, standard) er svaret nøyaktig det samme som før H1.
+  return (options.restrictedTools ?? []).some((key) => RESTRICTED_TOOL_KEYS.has(key) && (INTENT_KEYWORDS[key]?.test(text) ?? false));
+}
+
+export interface FinanceIntentOptions {
+  /** Verktøynøkler (`tool_id.action`) for begrensede kontrollsenter-verktøy som faktisk er registrert (senterets flagg er på). Nøkler som ikke er utvalgslåst (`isSelectionLockedTool`) ignoreres. */
+  restrictedTools?: ReadonlyArray<string>;
 }
 
 const JOB_MEMORY_SPACES = ["personal", "business", "project", "health", "home", "guest", "shared"] as const;

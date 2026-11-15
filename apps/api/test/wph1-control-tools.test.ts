@@ -10,10 +10,11 @@ import { SituationsTransport, situationsToolDefinitions } from "@jarvis/situatio
 import {
   CHAT_ACT_TIER, CHAT_DELEGATE_TIER, CHAT_READ_TIER, MODEL_SURFACE_ALLOWLIST, MemorySearchTransport, OPTIONAL_TIER_KEYS, SURFACE_TOOL_GRANTS, assertChatReadTier, assertManifestInvariants, buildToolManifest,
   KnowledgeSearchTransport, chatReadTierMeshTools, firstWaveTools, homeAssistantTools, inferEffect, knowledgeToolDefinitions, memoryToolDefinitions, resolveModelToolSurface, scopeFieldsOf, selectSurfaceTools,
-  type ToolDefinition, type ToolGateway
+  financeToolIntent, type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
 import { TasksDelegateTransport, tasksDelegateToolDefinitions } from "../src/chat-jobs.ts";
-import { createControlCenterRegistry } from "../src/control-center/register.ts";
+import { CONTROL_CENTER_FLAGS, createControlCenterRegistry, registerControlCenters } from "../src/control-center/register.ts";
+import { activeRestrictedControlTools, controlCentersWithTools, financeIntentOptions, safeRef } from "../src/control-center/shared.ts";
 import { RunRateTransport, runRateToolDefinitions } from "../src/run-rate.ts";
 
 /**
@@ -421,5 +422,104 @@ describe("responsen", () => {
   it("transporten uten invocation-context feiler lukket (som alle executive-handlinger)", async () => {
     const t = transportWith([money("finance")]);
     await expect(t.invoke("get_finance_center", {}, "cred")).rejects.toThrow("executive_missing_invocation_context");
+  });
+});
+
+describe("gjennomgang L5: `avstemming` er flertydig - kun finanskontekstene velger Finans-senteret (og låser turen lokalt)", () => {
+  // Kun senter-verktøyene + minnesøket som kandidater: intensjonen testes isolert (andre finansord som «bank»/«konto» treffer Neonomics-familien og kunne fortrengt senteret innenfor verktøybudsjettet).
+  const surface = resolveModelToolSurface(gw, { includeChatReadTier: true }).filter((m) => (m.tool_id === "executive" && TOOLS.some((t) => t.action === m.action)) || (m.tool_id === "memory" && m.action === "search"));
+  const picked = (text: string) => selectSurfaceTools("web_chat", text, surface);
+  const keys = (text: string) => picked(text).selected.map((m) => `${m.tool_id}.${m.action}`);
+
+  it("kandidatflaten er nøyaktig de tre senter-verktøyene + minnesøket (testen er ikke tom)", () => {
+    expect(surface.map((m) => `${m.tool_id}.${m.action}`).sort()).toEqual([...TOOLS.map((t) => keyOf(t.action)), "memory.search"].sort());
+  });
+
+  it("finansavstemming velger Finans-senteret: bankavstemming, avstemming av bank/konto/regnskap/betalinger, avstemmingsfunn og avstemmingskjøring", () => {
+    for (const msg of ["hvordan går bankavstemmingen", "vis kontoavstemming", "er regnskapsavstemmingen ferdig", "avstemming av bank", "avstemmingen mot regnskapet", "avstemming av betalinger", "hva er avstemmingsfunn", "når var siste avstemmingskjøring", "hva er status på finans"]) {
+      expect(keys(msg), msg).toContain(keyOf("get_finance_center"));
+      expect(picked(msg).min_sensitivity, msg).toBe("SECRET_RESTRICTED");
+    }
+  });
+
+  it("«avstemming» i andre betydninger (votering, forventninger, tidsplan) velger IKKE senteret og låser ikke turen - modellen beholder minnesøket", () => {
+    for (const msg of ["jeg trenger en avstemming av styret", "avstemmingen blant medlemmene", "vi må ha en avstemming av forventninger", "avstemming mellom teamene", "hvordan går avstemmingen", "vis meg avstemningen fra styremøtet"]) {
+      expect(keys(msg), msg).toEqual(["memory.search"]);
+      expect(picked(msg).min_sensitivity, msg).toBeUndefined();
+    }
+  });
+});
+
+describe("gjennomgang L5: `financeToolIntent` (den delegerte jobb-veien) følger Finans-senterets intensjon når senteret er på", () => {
+  it("uten valg (flaggene AV) er svaret main sitt: senterets ord alene gjør ingenting - jobb-veien er uendret", () => {
+    for (const msg of ["vis finanssenteret", "hva er avstemmingsfunn", "er det betalinger med ukjent utfall", "hva sier minnesenteret"]) expect(financeToolIntent(msg), msg).toBe(false);
+    expect(financeToolIntent("hva er saldoen på kontoen")).toBe(true); // de eksisterende finansordene (D-381) er uendret
+  });
+
+  it("med Finans-verktøyet registrert holder senterets egne ord også en delegert jobb lokal (paritet med chatten, som låser turen lokalt)", () => {
+    const options = { restrictedTools: ["executive.get_finance_center"] };
+    for (const msg of ["vis finanssenteret", "hva er status på finans", "når var siste avstemmingskjøring", "er det betalinger med ukjent utfall", "lag en rapport om betalingsintensjonene"]) expect(financeToolIntent(msg, options), msg).toBe(true);
+    for (const msg of ["jeg trenger en avstemming av styret", "hva sier minnesenteret", "lag en rapport om GitHub-sakene"]) expect(financeToolIntent(msg, options), msg).toBe(false);
+  });
+
+  it("kun UTVALGSLÅSTE verktøy teller: et ikke-låst senter-verktøy (Minne) eller et ukjent nøkkelnavn i `restrictedTools` gjør ingenting", () => {
+    expect(financeToolIntent("hva sier minnesenteret", { restrictedTools: ["executive.get_memory_center"] })).toBe(false);
+    expect(financeToolIntent("vis finanssenteret", { restrictedTools: ["executive.get_does_not_exist"] })).toBe(false);
+    expect(financeToolIntent("vis finanssenteret", { restrictedTools: [] })).toBe(false);
+  });
+
+  it("apps/api leser valget fra miljøet: Finans-flagget PÅ gir verktøynøkkelen (og kun den), AV gir ingenting - kun den eksakte verdien «on» teller", () => {
+    expect(activeRestrictedControlTools({})).toEqual([]);
+    expect(activeRestrictedControlTools({ [CONTROL_CENTER_FLAGS.finance]: "on" })).toEqual(["executive.get_finance_center"]);
+    expect(activeRestrictedControlTools({ [CONTROL_CENTER_FLAGS.memory]: "on", [CONTROL_CENTER_FLAGS.agent]: "on" })).toEqual([]);
+    for (const value of ["true", "1", "ON", "yes", ""]) expect(activeRestrictedControlTools({ [CONTROL_CENTER_FLAGS.finance]: value }), value).toEqual([]);
+    expect(financeIntentOptions({})).toEqual({ restrictedTools: [] });
+    expect(financeToolIntent("vis finanssenteret", financeIntentOptions({ [CONTROL_CENTER_FLAGS.finance]: "on" }))).toBe(true);
+    expect(financeToolIntent("vis finanssenteret", financeIntentOptions({}))).toBe(false);
+  });
+});
+
+describe("gjennomgang L5: et verktøy for et senter som ikke er registrert finnes ikke (og listes ikke som tilgjengelig i get_capability_status)", () => {
+  const owner2 = { owner_person_id: "person-owner", owner_tenants: ["tenant-owner"] };
+  const capabilityActions = async (centers: ReturnType<typeof controlCentersWithTools>): Promise<string[]> => {
+    const list = productionDefinitions(createControlCenterRegistry({ authority: owner2 }), centers);
+    const gateway = { list: () => list, health: new Map(), hasSecret: async () => true } as unknown as ToolGateway;
+    const service = new ExecutiveService(gateway, { modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...CHAT_READ_TIER, ...CHAT_ACT_TIER] });
+    const status = await service.getCapabilityStatus();
+    return status.chat_accessible_tools.find((t) => t.tool_id === "executive")?.actions ?? [];
+  };
+
+  it("`controlCentersWithTools`: flagg PÅ og registrert senter = verktøy; flagg PÅ uten registrering (manglende avhengighet) = ingen verktøy; flagg AV = ingen verktøy", () => {
+    const registry = createControlCenterRegistry({ authority: owner2 });
+    // Finans krever verktøyregisteret (`toolGateway`) og registreres ikke uten; Minne krever ingenting ekstra.
+    registerControlCenters(registry, { pool: {} as never, env: { [CONTROL_CENTER_FLAGS.finance]: "on", [CONTROL_CENTER_FLAGS.memory]: "on", [CONTROL_CENTER_FLAGS.agent]: "off" } });
+    expect(registry.has("finance")).toBe(false);
+    expect(registry.has("memory")).toBe(true);
+    expect(controlCentersWithTools({ [CONTROL_CENTER_FLAGS.finance]: "on", [CONTROL_CENTER_FLAGS.memory]: "on", [CONTROL_CENTER_FLAGS.agent]: "off" }, registry)).toEqual(["memory"]);
+    expect(controlCentersWithTools({}, registry)).toEqual([]);
+  });
+
+  it("get_capability_status lister kun verktøy for registrerte sentre: Finans (flagg på, ikke registrert) står IKKE som tilgjengelig, Minne (registrert) gjør det", async () => {
+    const registry = createControlCenterRegistry({ authority: owner2 });
+    const env = { [CONTROL_CENTER_FLAGS.finance]: "on", [CONTROL_CENTER_FLAGS.memory]: "on" };
+    registerControlCenters(registry, { pool: {} as never, env });
+    const actions = await capabilityActions(controlCentersWithTools(env, registry));
+    expect(actions).toContain("get_memory_center");
+    expect(actions).not.toContain("get_finance_center");
+    expect(actions).not.toContain("get_agent_center");
+    expect(await capabilityActions([])).toEqual(expect.not.arrayContaining(["get_memory_center", "get_finance_center", "get_agent_center"]));
+  });
+});
+
+describe("gjennomgang L5: `safeRef` - id-er fra databasen går gjennom samme filter som kategorinavn, med unik reserve", () => {
+  it("egne id-er (bank-co-<uuid>, fin-rec-<uuid>) passerer uendret", () => {
+    for (const id of ["bank-co-3f2b8a52-6b4e-4c5a-9d21-0a1b2c3d4e5f", "fin-rec-3f2b8a52-6b4e-4c5a-9d21-0a1b2c3d4e5f", "bc-a-active", "run_1.2:3"]) expect(safeRef(id, "ukjent-1"), id).toBe(id);
+  });
+
+  it("tegn utenfor tillatt sett, lengde over 60, tokenlignende løper (24+ bokstaver/tall), tomt og ikke-tekst gir reserveverdien - aldri «annet», aldri verdien selv", () => {
+    for (const bad of ["med mellomrom", "<script>x</script>", "x".repeat(61), "q".repeat(24), `bank-co-${"a".repeat(30)}`, "", null, undefined, 42, { a: 1 }]) {
+      expect(safeRef(bad, "ukjent-7"), String(bad)).toBe("ukjent-7");
+    }
+    expect(safeRef("annet", "ukjent-2")).toBe("ukjent-2");
   });
 });

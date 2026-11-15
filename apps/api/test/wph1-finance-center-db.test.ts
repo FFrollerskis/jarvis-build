@@ -15,6 +15,7 @@ import { seedTenants, startH0Db, type H0Db } from "./support/h0-db.ts";
 let db: H0Db;
 const TENANT_A = "tenant-fin-a";
 const TENANT_B = "tenant-fin-b";
+const TENANT_C = "tenant-fin-c"; // gjennomgang L5: uvanlige id-er (samtykke, avstemmingskjøring) skal aldri nå rapporten som de er
 const NOW = new Date();
 const MIN = 60_000;
 const H = 3_600_000;
@@ -23,6 +24,10 @@ const ago = (ms: number): Date => new Date(NOW.getTime() - ms);
 const ahead = (ms: number): Date => new Date(NOW.getTime() + ms);
 const idA: IdentityContext = { person_id: "person-fin-a", tenant_id: TENANT_A, memory_space_id: "personal", session_id: "s", device_id: "d", channel: "web", auth_strength: "signed" };
 const idB: IdentityContext = { ...idA, person_id: "person-fin-b", tenant_id: TENANT_B };
+const idC: IdentityContext = { ...idA, person_id: "person-fin-c", tenant_id: TENANT_C };
+const ODD_CONSENT_SPACES = "uvanlig id med mellomrom <b>";
+const ODD_CONSENT_LONG = "q".repeat(40); // en sammenhengende løpe på 24+ bokstaver/tall ligner et token
+const ODD_RUN_ID = "kjøring med <b>mellomrom</b>";
 const defs = productionToolDefinitions();
 const HIDDEN_VENDOR = "Hemmelig Leverandør AS";
 const HIDDEN_PURPOSE = "privat formål som aldri skal vises";
@@ -57,7 +62,7 @@ async function counts(): Promise<Record<string, number>> {
 beforeAll(async () => {
   db = await startH0Db("fin");
   const admin = db.adminPool;
-  await seedTenants(admin, [{ tenant_id: TENANT_A, person_id: idA.person_id }, { tenant_id: TENANT_B, person_id: idB.person_id }]);
+  await seedTenants(admin, [{ tenant_id: TENANT_A, person_id: idA.person_id }, { tenant_id: TENANT_B, person_id: idB.person_id }, { tenant_id: TENANT_C, person_id: idC.person_id }]);
 
   // Intensjoner (A): oppgjort+avstemt, oppgjort+uavstemt, ukjent utfall (sendt for 10 min siden uten referanse), pågående (sendt for 30 s siden), feilet for 2 døgn siden, utkast med avviksflagg
   await intent("pi-a-settled", TENANT_A, { state: "settled", amount_ore: 150_000, reconciliation_state: "matched", provider_ref: "ref-1" });
@@ -111,6 +116,11 @@ beforeAll(async () => {
     [TENANT_A, TENANT_B, HIDDEN_VENDOR, ahead(60 * D), ago(H), ahead(3 * D), ago(5 * D)]
   );
   await admin.query(
+    `INSERT INTO bank_consents (consent_id, tenant_id, bank_id, bank_name, state, expires_at, last_verified_at) VALUES
+       ('bc-c-ok', $1, 'bank-c', $2, 'active', $3, $4), ($5, $1, 'bank-c', $2, 'active', $3, $4), ($6, $1, 'bank-c', $2, 'active', $3, $4)`,
+    [TENANT_C, HIDDEN_VENDOR, ahead(60 * D), ago(H), ODD_CONSENT_SPACES, ODD_CONSENT_LONG]
+  );
+  await admin.query(
     `INSERT INTO bank_accounts (bank_account_id, tenant_id, provider_account_id, consent_id, bank_id, account_name, account_identifier_masked, active, last_synced_at) VALUES
        ('ba-a-1', $1, 'pa-1', 'bc-a-active', 'bank-x', $3, $4, true, $5), ('ba-a-2', $1, 'pa-2', 'bc-a-soon', 'bank-y', $3, $4, false, NULL), ('ba-b-1', $2, 'pa-b', 'bc-b-1', 'bank-b', $3, $4, true, $5)`,
     [TENANT_A, TENANT_B, HIDDEN_VENDOR, HIDDEN_ACCOUNT, ago(2 * H)]
@@ -138,6 +148,10 @@ beforeAll(async () => {
        ('rr-a-new', $1, 'completed', 'sweep', $3, $3, '{"local":"ok","fiken":"skipped_no_credentials","stripe":"failed:timeout"}'::jsonb, '{}'::jsonb),
        ('rr-b-1', $4, 'failed', 'manual', $3, $3, '{}'::jsonb, '{}'::jsonb)`,
     [TENANT_A, ago(3 * D), ago(2 * H), TENANT_B]
+  );
+  await admin.query(
+    `INSERT INTO finance_reconciliation_runs (run_id, tenant_id, status, trigger, started_at, finished_at, checks, summary) VALUES ($1, $2, 'completed', 'sweep', $3, $3, '{"local":"ok"}'::jsonb, '{}'::jsonb)`,
+    [ODD_RUN_ID, TENANT_C, ago(2 * H)]
   );
   await admin.query(
     `INSERT INTO finance_reconciliation_findings (finding_id, tenant_id, finding_key, kind, severity, subject_type, subject_id, payment_intent_id, summary, status, first_seen_at, last_seen_at, resolved_at, reopen_count) VALUES
@@ -297,6 +311,32 @@ describe("senteret som helhet (registeret → rapport)", () => {
     } finally {
       await db.adminPool.query("GRANT SELECT ON finance_reconciliation_runs TO jarvis_app");
     }
+  });
+});
+
+describe("gjennomgang L5: id-er fra databasen går gjennom samme filter som kategorinavn (safeRef)", () => {
+  it("samtykke-id: en gyldig id er uendret; en id med mellomrom/HTML og en tokenlignende løpe erstattes av en UNIK reserve - aldri som de er, og senteret feller ikke (ingen duplikat-id)", async () => {
+    const v = await readVendorsAccounts(db.appPool, TENANT_C);
+    const ids = v.consents.map((c) => c.consent_id);
+    expect(ids).toHaveLength(3);
+    expect(new Set(ids).size).toBe(3);
+    expect(ids).toContain("bc-c-ok");
+    expect(ids.filter((id) => /^ukjent-[1-3]$/.test(id))).toHaveLength(2);
+    expect(ids).not.toContain(ODD_CONSENT_SPACES);
+    expect(ids).not.toContain(ODD_CONSENT_LONG);
+    const r = await report(idC);
+    expect(sec(r, "vendors_accounts").measured).toBe(true);
+    const itemIds = sec(r, "vendors_accounts").items.map((i) => i.id).filter((id) => id.startsWith("consent:"));
+    expect(new Set(itemIds).size).toBe(3);
+    const text = JSON.stringify(r);
+    for (const odd of [ODD_CONSENT_SPACES, ODD_CONSENT_LONG, ODD_RUN_ID]) expect(text, odd).not.toContain(odd);
+  });
+
+  it("avstemmingskjøring: en uvanlig run-id erstattes av «ukjent» (ikke som den er), resten av kjøringen leses som før", async () => {
+    const v = await readReconciliation(db.appPool, TENANT_C, NOW.getTime());
+    expect(v.last_run).toMatchObject({ run_id: "ukjent", status: "completed", trigger: "sweep" });
+    const r = await report(idC);
+    expect(item(r, "reconciliation", "last_run").facts).toMatchObject({ run_id: "ukjent", status: "completed" });
   });
 });
 

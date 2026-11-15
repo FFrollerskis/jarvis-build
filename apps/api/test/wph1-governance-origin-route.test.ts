@@ -2,6 +2,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
 import type { ToolGateway } from "@jarvis/tool-gateway";
+import { ownerPredicate } from "../src/control-center/register.ts";
 import { createApiServer } from "../src/server.ts";
 
 /**
@@ -136,6 +137,42 @@ describe("POST /governance/mutate: attesten er serverens, og kun for den suveren
     expect((await post(url, "/governance/mutate", { grant_token: "GRANT", action: "drop_everything", parameters: {} })).status).toBe(400);
     expect((await post(url, "/governance/mutate", { grant_token: "GRANT", parameters: {} })).status).toBe(400);
     expect(seen).toHaveLength(0);
+  });
+});
+
+describe("L3 med den EKTE eier-porten (`ownerPredicate` over AuthorityConfig - ikke stubben over): eier-porten alene er IKKE nok, den signerte eier-kanal-økten må også holde", () => {
+  // `resolveAuthorityMode` ser kun person + tenant + delegasjon: eieren er SOVEREIGN også med en passiv økt eller på tale. Attesten krever derfor i tillegg `ownerStepUpDenial(identity) === undefined`.
+  const real = ownerPredicate({ owner_person_id: OWNER.person_id, owner_tenants: [OWNER.tenant_id] });
+  const CASES: ReadonlyArray<readonly [string, IdentityContext, boolean]> = [
+    ["eier, signert enhetsøkt, web (HOLDER BEGGE VILKÅR)", OWNER, true],
+    ["eier, signert enhetsøkt, desktop", { ...OWNER, channel: "desktop" }, true],
+    ["eier, aktiv økt uten enhetssignatur", { ...OWNER, auth_strength: "active" }, false],
+    ["eier, passiv økt", { ...OWNER, auth_strength: "passive" }, false],
+    ["eier, signert økt, men på tale", { ...OWNER, channel: "voice" }, false],
+    ["eier, signert økt, men på Telegram", { ...OWNER, channel: "telegram" }, false],
+    ["delegat av eieren (delegation_id) arver aldri eier-attest", { ...OWNER, delegation_id: "deleg-1" }, false],
+    ["eierens person i en annen tenant", { ...OWNER, tenant_id: "tenant-annen" }, false],
+    ["annen person i eierens tenant, signert enhetsøkt", MEMBER, false]
+  ];
+
+  it("den ekte eier-porten: sanity - den slipper eieren inn uavhengig av autentiseringsstyrke og kanal (det er derfor step-up-vilkåret trengs)", () => {
+    expect(real(OWNER)).toBe(true);
+    expect(real({ ...OWNER, auth_strength: "passive" })).toBe(true);
+    expect(real({ ...OWNER, channel: "voice" })).toBe(true);
+    expect(real({ ...OWNER, delegation_id: "deleg-1" })).toBe(false);
+    expect(real(MEMBER)).toBe(false);
+  });
+
+  it("over HTTP: kun (suveren eier ∧ enhetssignert eier-kanal-økt) gir `contentOrigin: owner_direct` - alle andre kombinasjoner går som før, uten attest", async () => {
+    for (const [label, identity, attested] of CASES) {
+      const { url, seen } = await start(identity, real);
+      const r = await post(url, "/governance/mutate", { grant_token: "GRANT", action: "create_decision", parameters: PARAMS });
+      expect(r.status, label).toBe(200);
+      expect(seen, label).toHaveLength(1);
+      expect("contentOrigin" in seen[0]!, label).toBe(attested);
+      if (attested) expect(seen[0], label).toMatchObject({ contentOrigin: "owner_direct" });
+      expect(seen[0]!.parameters, label).toEqual(PARAMS);
+    }
   });
 });
 
