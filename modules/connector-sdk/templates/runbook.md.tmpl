@@ -51,4 +51,5 @@ Ingen connector «fordi den kan være nyttig»: den må støtte en aktiv verdi-l
 
 ## 6. Kontraktstester
 
-`pnpm exec vitest run modules/connector-sdk/test/connectors/{{ID}}.contract.test.ts`. Akseptansegapene kittet viser er arbeidslisten (Appendiks B nivå {{LEVEL}}).
+`pnpm exec vitest run modules/connector-sdk/test/connectors/{{ID}}.contract.test.ts`. Akseptansegapene kittet viser er arbeidslisten (Appendiks B nivå {{LEVEL}}):
+`node --experimental-transform-types modules/connector-sdk/scripts/report.ts contract {{ID}}`. Beviset er MODELLERT mot en fake bygget fra manifestet - ikke mot en ekte transport og ikke mot leverandøren (live smoke `BLOCKED_EXTERNAL`).

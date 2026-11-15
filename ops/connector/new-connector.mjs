@@ -275,7 +275,8 @@ NESTE STEG (CLAUDE.md regel 11 og 12 - ingen snarvei):
   1. D-64 Core-vs-Adapter-porten (runbook-stubbens punkt 1), så D-41 kapabilitetsrevisjonen mot offisiell dokumentasjon (punkt 2). Blir leverandøren en kjerneavhengighet: STOPP og meld CORE_DEPENDENCY_DECISION_REQUIRED=true.
   2. Registrer connectoren i modules/tool-gateway/src/connector-registry.ts og verktøydefinisjonene i modules/tool-gateway/src/integrations.ts (registeret er sannheten).
   3. Fyll ut hver unknownField/TODO i manifestet, sett completeness til "full" og source til "authored", og legg manifestet til i FULL_MANIFESTS (modules/connector-sdk/src/manifests/index.ts).
-  4. Kjør: pnpm exec vitest run modules/connector-sdk  (kontraktstest-kit + CI-vakt). Akseptansegapene er arbeidslisten.
+  4. Kjør: pnpm exec vitest run modules/connector-sdk  (kontraktstest-kit + CI-vakt). Akseptansegapene er arbeidslisten:
+     node --experimental-transform-types modules/connector-sdk/scripts/report.ts contract <id>   (og ...report.ts guard for vaktens arbeidsliste)
   5. Skriv runbooken ferdig; live smoke mot sandbox er BLOCKED_EXTERNAL til eieren har gitt credential.`);
     return 0;
   } catch (err) {

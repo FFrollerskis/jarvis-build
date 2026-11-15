@@ -125,9 +125,10 @@ function evidenceViolations(m: ConnectorManifest, fileExists: (p: string) => boo
   }
 }
 
-/** Revisjonen over en ferdig bygd katalog. Ren; brukes av `runManifestGuard` og direkte av mutasjonstestene. */
+/** Bygd = registerkategori som ikke er backlog (samme skille som `coverage.built`). */
 const isBuilt = (c: ConnectorDefinition): boolean => c.category !== "backlog" && c.category !== "backlog_d64_gate";
 
+/** Revisjonen over en ferdig bygd katalog. Ren; brukes av `runManifestGuard` og direkte av mutasjonstestene. */
 export function auditManifestCatalogue(args: {
   catalogue: Catalogue; registry: readonly ConnectorDefinition[]; authored: readonly unknown[]; fileExists: (p: string) => boolean; decisionExists: (id: string) => boolean; skeleton_baseline?: readonly string[];
 }): GuardViolation[] {
