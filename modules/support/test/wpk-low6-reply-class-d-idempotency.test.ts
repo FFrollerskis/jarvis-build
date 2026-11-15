@@ -1,10 +1,12 @@
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { IdentityContext, JsonValue } from "@jarvis/contracts";
+import type { IdentityContext, JsonValue, SignedApproval } from "@jarvis/contracts";
+import { signApproval } from "@jarvis/contracts";
 import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
@@ -43,8 +45,8 @@ beforeAll(async () => {
   await adminPool.query("GRANT jarvis_app TO jarvis_support_low6_test");
   await adminPool.query(`
     INSERT INTO tenants (tenant_id, name, kind) VALUES ('${TENANT}','Support LOW 6','business');
-    INSERT INTO people (person_id, display_name) VALUES ('person-tobias','Tobias');
-    INSERT INTO person_tenants (person_id, tenant_id) VALUES ('person-tobias','${TENANT}');
+    INSERT INTO people (person_id, display_name) VALUES ('person-tobias','Tobias'), ('person-low6-delegate','Delegat');
+    INSERT INTO person_tenants (person_id, tenant_id) VALUES ('person-tobias','${TENANT}'), ('person-low6-delegate','${TENANT}');
     INSERT INTO memory_spaces (memory_space_id, tenant_id, space) VALUES ('ms-support-low6-business','${TENANT}','business');
   `);
   appPool = createPool({ host: "127.0.0.1", port: leased.port, database: "jarvis_test", user: "jarvis_support_low6_test", password: "pw2" });
@@ -65,18 +67,21 @@ class FlakySupport extends SupportService {
   }
 }
 
-function build(email: ToolTransport = new FakeTransport()): {
+function build(email: ToolTransport = new FakeTransport(), opts: { enforce?: boolean; devices?: InMemoryDeviceRegistry; mandates?: ReadonlySet<string> } = {}): {
   gateway: ToolGateway; support: FlakySupport; email: ToolTransport; notices: ClassDNotification[]
 } {
   const notices: ClassDNotification[] = [];
   const notifier: ClassDNotifier = { ready: () => true, notify: async (n) => { notices.push(n); } };
   const support = new FlakySupport(appPool);
   const policy = new PolicyGateway({
-    devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch: new KillSwitch(),
+    devices: opts.devices ?? new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch: new KillSwitch(),
+    ...(opts.mandates ? { mandates: opts.mandates } : {}),
     authority: { owner_person_id: "person-tobias", owner_tenants: [TENANT] }
   });
-  // HÅNDHEVET klasse D-pipeline, slik produksjon kjører den (main.ts/worker-main.ts).
-  const gateway = new ToolGateway(appPool, policy, secrets, undefined, undefined, { classDPipeline: { enforce: true, notifier } });
+  // HÅNDHEVET klasse D-pipeline, slik produksjon kjører den (main.ts/worker-main.ts). `enforce: false` = den uhåndhevede varianten (utvikling/eldre tester).
+  const gateway = opts.enforce === false
+    ? new ToolGateway(appPool, policy, secrets)
+    : new ToolGateway(appPool, policy, secrets, undefined, undefined, { classDPipeline: { enforce: true, notifier } });
   const supportTransport = new SupportTransport(support, new BusinessService(appPool), gateway);
   for (const tool of firstWaveTools({ support: supportTransport, email })) gateway.register(tool);
   return { gateway, support, email, notices };
@@ -88,11 +93,12 @@ function countingEmail(behaviour: (call: number) => { external_id?: string; data
   return { transport: { invoke: async (action: string) => { if (action !== "send") return {}; sends += 1; return behaviour(sends); } }, sends: () => sends };
 }
 
-async function reply(gateway: ToolGateway, ticketId: string, key: string, outerKey?: string): Promise<ToolResult> {
+async function reply(gateway: ToolGateway, ticketId: string, key: string, outerKey?: string, as: { identity?: IdentityContext; approval?: SignedApproval } = {}): Promise<ToolResult> {
   return gateway.execute({
-    identity, tool_id: "support", action: "reply",
+    identity: as.identity ?? identity, tool_id: "support", action: "reply",
     parameters: { tenant_id: TENANT, memory_space: "business", ticket_id: ticketId, to: "kunde@example.no", subject: "Re: LOW 6", body: "Svar", idempotency_key: key },
-    ...(outerKey !== undefined ? { idempotency_key: outerKey } : {})
+    ...(outerKey !== undefined ? { idempotency_key: outerKey } : {}),
+    ...(as.approval !== undefined ? { approval: as.approval } : {})
   });
 }
 
@@ -236,4 +242,90 @@ describe("delta-review L-4: hendelsesnøkkelen for et sendt svar er scopet på t
     expect(await agentReplies(t.support, ticketA)).toBe(1);
     expect(await agentReplies(t.support, ticketB)).toBe(1);
   }, 90_000);
+});
+
+describe("re-review LOW 6 (tester som manglet i deltaen): delegat + godkjenning under HÅNDHEVET klasse D", () => {
+  const OWNER = "person-tobias";
+  const DELEGATE = "person-low6-delegate";
+  const DEVICE = "watch-low6";
+  const keys = generateKeyPairSync("ed25519");
+  const delegate: IdentityContext = { ...identity, person_id: DELEGATE, session_id: "sess-low6-delegate", device_id: "dev-low6-delegate" };
+  /** Godkjenning for NETTOPP det nøstede `email.send`-kallet `reply()` sender (kun to/subject/body er bundet - ikke idempotensnøkkelen). */
+  const approval = (): SignedApproval => signApproval(keys.privateKey, {
+    tool_id: "email", action: "send", tenant_id: TENANT, person_id: DELEGATE, approver_person_id: OWNER,
+    parameters: { to: "kunde@example.no", subject: "Re: LOW 6", body: "Svar" }, nonce: `nonce-${randomUUID()}`, approving_device_id: DEVICE
+  });
+  const delegateBuild = (email: ToolTransport) => {
+    const devices = new InMemoryDeviceRegistry();
+    devices.register(DEVICE, keys.publicKey, { tenant_id: TENANT, person_id: OWNER });
+    return build(email, { devices, mandates: new Set(["support:reply"]) });
+  };
+
+  it("delegat UTEN godkjenning: ingen e-post, ingen ledger-rad og intet varsel; en retry med SAMME nøkkel og en gyldig godkjenning sender nøyaktig ÉN e-post (avledet nøkkel, `succeeded`)", async () => {
+    const email = countingEmail(() => ({ external_id: "gmail-msg-delegate" }));
+    const t = delegateBuild(email.transport);
+    const ticketId = await newTicket(t.support);
+    const denied = await reply(t.gateway, ticketId, "reply-low6-delegate", undefined, { identity: delegate });
+    expect(denied.ok).toBe(false);
+    if (!denied.ok) expect(denied.reason).toContain("class_d_missing_approval");
+    expect(email.sends()).toBe(0);
+    expect(await sendLedger(ticketId, "reply-low6-delegate")).toEqual([]); // nektet FØR reservasjon: ingen ledger-rad
+    expect(t.notices).toHaveLength(0);
+    expect(await agentReplies(t.support, ticketId)).toBe(0); // bare et internt notat om at sendingen feilet
+    const retried = await reply(t.gateway, ticketId, "reply-low6-delegate", undefined, { identity: delegate, approval: approval() });
+    expect(retried).toMatchObject({ ok: true });
+    expect(email.sends()).toBe(1);
+    expect(await sendLedger(ticketId, "reply-low6-delegate")).toEqual([{ status: "succeeded", postcondition_reason: null }]);
+    expect(await agentReplies(t.support, ticketId)).toBe(1);
+    expect(t.notices.map((n) => n.outcome)).toEqual(["executed"]);
+  }, 90_000);
+
+  it("delegat MED godkjenning: én e-post under den avledede nøkkelen; et identisk gjentatt svar sender ikke på nytt og trenger ingen ny godkjenning (nonce er brukt)", async () => {
+    const email = countingEmail(() => ({ external_id: "gmail-msg-delegate-2" }));
+    const t = delegateBuild(email.transport);
+    const ticketId = await newTicket(t.support);
+    const usedApproval = approval();
+    expect(await reply(t.gateway, ticketId, "reply-low6-delegate-2", undefined, { identity: delegate, approval: usedApproval })).toMatchObject({ ok: true });
+    expect(await reply(t.gateway, ticketId, "reply-low6-delegate-2", undefined, { identity: delegate, approval: usedApproval })).toMatchObject({ ok: true });
+    expect(email.sends()).toBe(1);
+    expect(await agentReplies(t.support, ticketId)).toBe(1);
+    expect(await sendLedger(ticketId, "reply-low6-delegate-2")).toHaveLength(1);
+  }, 90_000);
+});
+
+describe("re-review LOW 6 (tester som manglet i deltaen): UHÅNDHEVET klasse D (`enforce: false`) - det nøstede sendekallet får nå også ledger-rad, dedupe og blokkering av ukjent utfall", () => {
+  it("én e-post med ledger-rad `succeeded` under den avledede nøkkelen; ingen varsler (ingen varsler i uhåndhevet modus); identisk retry sender ikke på nytt", async () => {
+    const email = countingEmail(() => ({ external_id: "gmail-msg-nofce-1" }));
+    const t = build(email.transport, { enforce: false });
+    const ticketId = await newTicket(t.support);
+    expect(await reply(t.gateway, ticketId, "reply-low6-nf-a")).toMatchObject({ ok: true });
+    expect(await reply(t.gateway, ticketId, "reply-low6-nf-a")).toMatchObject({ ok: true });
+    expect(email.sends()).toBe(1);
+    expect(await sendLedger(ticketId, "reply-low6-nf-a")).toEqual([{ status: "succeeded", postcondition_reason: null }]);
+    expect(await agentReplies(t.support, ticketId)).toBe(1);
+    expect(t.notices).toHaveLength(0);
+  }, 60_000);
+
+  it("krasj ETTER sending men FØR registrering: retry sender IKKE på nytt (ledger `succeeded` -> deduplisert)", async () => {
+    const email = countingEmail(() => ({ external_id: "gmail-msg-nofce-2" }));
+    const t = build(email.transport, { enforce: false });
+    const ticketId = await newTicket(t.support);
+    t.support.failNextIngest = true;
+    expect(await reply(t.gateway, ticketId, "reply-low6-nf-crash")).toMatchObject({ ok: false });
+    expect(email.sends()).toBe(1);
+    expect(await reply(t.gateway, ticketId, "reply-low6-nf-crash")).toMatchObject({ ok: true });
+    expect(email.sends()).toBe(1);
+    expect(await agentReplies(t.support, ticketId)).toBe(1);
+  }, 60_000);
+
+  it("UKJENT utfall: ledger `unverified`, en retry med samme nøkkel sender ALDRI på nytt (før LOW 6 hadde det nøstede kallet ingen nøkkel og dermed ingen blokkering)", async () => {
+    const email = countingEmail(() => { throw new Error("outcome_unknown:test_transport_lost_response"); });
+    const t = build(email.transport, { enforce: false });
+    const ticketId = await newTicket(t.support);
+    expect(await reply(t.gateway, ticketId, "reply-low6-nf-unknown")).toMatchObject({ ok: false });
+    expect(await reply(t.gateway, ticketId, "reply-low6-nf-unknown")).toMatchObject({ ok: false });
+    expect(email.sends()).toBe(1);
+    expect((await sendLedger(ticketId, "reply-low6-nf-unknown"))[0]?.status).toBe("unverified");
+    expect(await agentReplies(t.support, ticketId)).toBe(0);
+  }, 60_000);
 });
