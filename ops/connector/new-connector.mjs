@@ -83,10 +83,16 @@ export function parseArgs(argv) {
 
 const pascal = (id) => id.split("_").map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join("");
 
-/** Skannerens funn-typer i en verdi (fast ordforråd, aldri den matchede teksten). Kaster `GeneratorError` (kode 1) hvis skanneren ikke kunne lastes - ingen hemmelighetssjekk å hoppe over. */
+/**
+ * Skannerens funn-typer i en verdi (fast ordforråd, aldri den matchede teksten); tom liste = ingen funn. Funn ER avgjørelsen (`findings.length > 0`) - filteret styrer bare VISNINGEN, så en type utenfor ordforrådet gir `ukjent_type`
+ * og aldri et skjult funn. Kaster `GeneratorError` (kode 1) hvis skanneren ikke kunne lastes - ingen hemmelighetssjekk å hoppe over.
+ */
 export function secretKinds(value) {
   if (scanner === null) throw new GeneratorError("hemmelighetsskanneren (modules/core/src/services/secret-scan.ts) kunne ikke lastes: bruk Node >= 22.18 (type-stripping), eller kjør med `node --experimental-strip-types ops/connector/new-connector.mjs ...` - generatoren nekter å fortsette uten den", 1);
-  return scanner.scanForSecrets(String(value)).findings.map((f) => f.kind).filter((k) => /^[a-z_]{1,40}$/.test(k));
+  const findings = scanner.scanForSecrets(String(value)).findings;
+  if (findings.length === 0) return [];
+  const kinds = [...new Set(findings.map((f) => f.kind).filter((k) => /^[a-z][a-z0-9_]{0,39}$/.test(k)))];
+  return kinds.length > 0 ? kinds : ["ukjent_type"];
 }
 
 /** Review N7: en verdi som ligner en hemmelighet (kjent token-form, `NAVN=verdi` ...) avvises - verdien selv ekkoes aldri, kun funn-typen. */

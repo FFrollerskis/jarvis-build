@@ -76,9 +76,15 @@ interface SecretFindingAt {
   kinds: string[];
 }
 
-/** Funn-typene for en tekst: skannerens egne type-navn (`github_token`, `named_secret` ...), filtrert til rene identifikatorer så ingenting annet enn ordforrådet noensinne kan vises. */
-function findingKinds(text: string): string[] {
-  return [...new Set(scanForSecrets(text).findings.map((f) => f.kind).filter((k) => /^[a-z_]{1,40}$/.test(k)))];
+/**
+ * Funn-typene for en tekst (`null` = ingen funn): skannerens egne type-navn (`github_token`, `named_secret` ...), filtrert til rene identifikatorer så ingenting annet enn ordforrådet noensinne kan vises.
+ * Funn ER avgjørelsen (`findings.length > 0`, som `containsSecret`) - filteret styrer bare VISNINGEN: en type utenfor ordforrådet gir `ukjent_type`, aldri et skjult funn (fail-closed).
+ */
+function findingKinds(text: string): string[] | null {
+  const findings = scanForSecrets(text).findings;
+  if (findings.length === 0) return null;
+  const kinds = [...new Set(findings.map((f) => f.kind).filter((k) => /^[a-z][a-z0-9_]{0,39}$/.test(k)))];
+  return kinds.length > 0 ? kinds : ["ukjent_type"];
 }
 
 /** Stier (med redigerte nøkkelnavn) til tekstverdier/nøkler som ligner hemmeligheter, med skannerens funn-TYPER. Overskrides skannebudsjettet, feiler vi LUKKET (`scan_budget_exceeded`). */
@@ -91,7 +97,7 @@ function findSecretShapes(input: unknown): { found: SecretFindingAt[]; budgetExc
     if (++nodes > SCAN_MAX_NODES || depth > SCAN_MAX_DEPTH) { budgetExceeded = true; return; }
     if (typeof value === "string") {
       const kinds = findingKinds(value);
-      if (kinds.length > 0) found.push({ path: pathToString(path), kinds });
+      if (kinds !== null) found.push({ path: pathToString(path), kinds });
       return;
     }
     if (Array.isArray(value)) { value.forEach((v, i) => walk(v, [...path, i], depth + 1)); return; }
@@ -100,7 +106,7 @@ function findSecretShapes(input: unknown): { found: SecretFindingAt[]; budgetExc
         const shown = safeKey(k);
         if (shown === "<redacted>") {
           const kinds = findingKinds(k);
-          if (kinds.length > 0) found.push({ path: pathToString([...path, "<redacted-key>"]), kinds });
+          if (kinds !== null) found.push({ path: pathToString([...path, "<redacted-key>"]), kinds });
         }
         walk(v, [...path, shown], depth + 1);
       }

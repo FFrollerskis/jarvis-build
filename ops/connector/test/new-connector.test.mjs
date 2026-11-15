@@ -390,6 +390,17 @@ describe("review N4/N7: ingen ekko av argumenter eller unntakstekst, ingen token
     expect(listFiles(root)).toEqual([plan[1].path]);
   });
 
+  // Uten type-stripping (Node < 22.18 uten flagg) kan ikke skannerfilen lastes. Da skal generatoren FEILE LUKKET - ikke hoppe over hemmelighetssjekken - men --help og ugyldig bruk virker fortsatt.
+  it.skipIf(!process.allowedNodeEnvironmentFlags.has("--experimental-strip-types"))("N7: uten type-stripping (skanneren kan ikke lastes) nekter generatoren å fortsette med en klar melding (kode 1) og skriver ingenting; --help virker", () => {
+    const root = fresh();
+    const r = spawnSync(process.execPath, ["--no-experimental-strip-types", SCRIPT, "--id", "acme_x", "--name", "Acme", "--root", root], { encoding: "utf8" });
+    expect(r.status, r.stderr).toBe(1);
+    expect(r.stderr).toContain("hemmelighetsskanneren");
+    expect(r.stderr).toContain("--experimental-strip-types");
+    expect(listFiles(root)).toEqual([]);
+    expect(spawnSync(process.execPath, ["--no-experimental-strip-types", SCRIPT, "--help"], { encoding: "utf8" }).status).toBe(0);
+  });
+
   it("N7: en dinglende symlenke som --root gir en KLAR melding (kode 1, uten rå ENOENT/UVENTET og uten å ekkoe stien), også ved tørrkjøring, og ingenting dukker opp i målet", () => {
     const holder = fresh();
     const target = join(holder, "finnes-ikke");
