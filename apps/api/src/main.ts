@@ -144,6 +144,10 @@ import { createValueMeasurementSource } from "./value-source.ts";
 import { ChatJobs, MAX_ACTIVE_JOBS, TasksDelegateTransport, tasksDelegateToolDefinitions } from "./chat-jobs.ts";
 import { RunRateService, RunRateTransport, runRateToolDefinitions } from "./run-rate.ts";
 import { createControlCenterRegistry, ownerPredicate, registerControlCenters } from "./control-center/register.ts";
+import { CONTROL_FEATURE_FLAGS, controlCentersWithTools, flagOn } from "./control-center/shared.ts";
+import { createAutonomyAudit } from "./autonomy-audit.ts";
+import { createGoldenSuiteRunner } from "./golden-suite-runner.ts";
+import { servedByCloudModel } from "./cloud-tool-screen.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
 import { createOwnerControlsService } from "./provider-pause.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
@@ -754,11 +758,23 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const controlCenters = createControlCenterRegistry({ authority: ownerAuthority });
   // WP-H0 (AI Center): ÉN delt begrenser for AI-rådets automatiske trigger - samme instans i chatten (`ConversationEngine`) og i kontrollsenteret, så tellerne som vises er de som faktisk håndheves.
   const councilAutoLimiter = new CouncilAutoTriggerLimiter(envInt("JARVIS_COUNCIL_AUTO_MAX_PER_HOUR", 3, { min: 1, max: 100 }));
+  // WP-H2: Drift- og Verdi-sentrene leser rapportene til ExecutiveService (bygges lenger ned) gjennom late funksjoner. Golden-suite-kjøreren deles av Sikkerhet-senteret og `executive.run_golden_suite` -
+  // den finnes KUN med JARVIS_CONTROL_GOLDEN_SUITE=on (deterministisk, lesende, ingen modell). Prosessens starttidspunkt gir oppetid i Drift-senteret.
+  const executiveRef: { service?: ExecutiveService } = {};
+  const lateExecutive = (): ExecutiveService => {
+    if (executiveRef.service === undefined) throw new Error("executive_service_not_ready");
+    return executiveRef.service;
+  };
+  const goldenSuiteRunner = flagOn(process.env, CONTROL_FEATURE_FLAGS.goldenSuite) ? createGoldenSuiteRunner({ surface: () => modelToolSurface }) : undefined;
+  const processStartedAt = new Date(Date.now() - Math.round(process.uptime() * 1000));
   registerControlCenters(controlCenters, {
     pool, env: process.env, toolGateway, ownerControls, meshStatus: () => gateway.meshStatus(),
     authority: ownerAuthority, killSwitch, infraGate,
     ...(policyAuditSink ? { policyAudit: () => ({ gateway: policy.auditStats(), sink: policyAuditSink.stats() }) } : {}),
-    modelGateway: gateway, runRate: new RunRateService(pool), councilLimiter: councilAutoLimiter, evolutionReport: evolutionReports, maxActiveJobs: MAX_ACTIVE_JOBS
+    modelGateway: gateway, runRate: new RunRateService(pool), councilLimiter: councilAutoLimiter, evolutionReport: evolutionReports, maxActiveJobs: MAX_ACTIVE_JOBS,
+    valueReport: (tenantId) => lateExecutive().getValueReport(tenantId), infraStatus: (tenantId) => lateExecutive().getInfraStatus(tenantId),
+    ...(backupStatusSource ? { backupStatus: backupStatusSource } : {}), processStartedAt: () => processStartedAt,
+    ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {})
   });
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
@@ -1047,6 +1063,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // ekte transporten fra `transports`-recorden over - samme ene register-løkke som resten.
       ...homeAssistantTools(new HomeAssistantTransport(() => readSecretProvider.get("JARVIS_HA_BASE_URL"), () => readSecretProvider.get("JARVIS_HA_ROOMS"))),
       ...situationsToolDefinitions(new SituationsTransport(situationEngine, situationDomainPauses)),
+      // WP-H2: tjenesten legger seg i `executiveRef` (`holder`) så Drift-/Verdi-sentrene kan lese rapportene dens (late funksjoner over); `run_golden_suite` og `revoke_autonomy_binding` registreres KUN med sine flagg.
       ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway, { modelSurface: [...MODEL_SURFACE_ALLOWLIST, ...MODEL_SURFACE_QUARANTINE_WRITES, ...CHAT_READ_TIER, ...CHAT_ACT_TIER],
         selfModel: {
           readers: selfModelReaders,
@@ -1069,6 +1086,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
           producer_names: INCIDENT_PRODUCER_NAMES, mode: async () => (await infraGate.statusDurable()).state.mode
         },
         controlCenters,
+        // Gjennomgang M2: finansdata er SECRET_RESTRICTED (D-378) - en SKYmodell får aldri finans-senteret (holdes tilbake ved utførelse i executive-transporten, uansett hvilke verktøy turens utvalg valgte); en lokal modell
+        // og siden får det. Lokalitet kommer fra leverandørregisteret (SAMME `servedByCloudModel` som chattens verktøyskjerm); ukjent leverandør regnes som sky (fail-closed).
+        servedLocally: (model) => !servedByCloudModel({ provider: model.provider }),
         // WP-H0 (JARVIS-087): kontrollsenterets avbryt-handling bruker den EKSISTERENDE kanselleringsveien (samme `taskService` som chatens «avbryt jobb <id>»).
         tasks: { cancel: (identity, taskId) => taskService.cancel(identity, taskId) },
         // WP-C4: Value Center - kilde (aggregater under RLS) + kjøretidsfakta (flagg, EV-0, kill switch, erklærte porter). Ingen innhold, ingen skriving; V3/V5 er sovende og kan aldri aktiveres herfra.
@@ -1078,8 +1098,19 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
             env: process.env, push: v2PushPolicy, deliveryConfigured: () => telegramDeliveryConfigured, ev0Status: () => getLastEv0BootStatus(),
             killSwitchActive: async () => (await selfModelControls.getControlState()).kill_switch.active
           })
-        }
-      }))),
+        },
+        ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {}),
+        // WP-H2 (gjennomgang L1): før-bildet av en autonomi-binding skrives og committes i revisjonssporet FØR `revoke_autonomy_binding` sletter den (kun brukt når verktøyet er registrert, JARVIS_CONTROL_AUTONOMY_REVOKE=on).
+        autonomyAudit: createAutonomyAudit(pool),
+        holder: executiveRef
+      })), {
+        // WP-H1/H2 (gjennomgang M1): per-senter lese-verktøyene (`get_<senter>_center`) registreres KUN for sentrene hvis flagg er på - flagg AV er identisk med main (ingen verktøy, ingen utvalgstreff, ingen rate-endring).
+        // Gjennomgang L5: OG som faktisk er registrert i registeret (en slått-på flagg uten sine avhengigheter gir et uregistrert senter) - et verktøy for et senter som ikke finnes skal aldri listes som tilgjengelig (`get_capability_status`).
+        controlCenters: controlCentersWithTools(process.env, controlCenters),
+        // WP-H2 (M1): `run_golden_suite` og `revoke_autonomy_binding` registreres KUN med sine egne flagg (uten flagg finnes verktøyene ikke - og `/executive/mutate` godtar ikke navnene, se `server.ts`).
+        goldenSuite: goldenSuiteRunner !== undefined,
+        autonomyRevoke: flagOn(process.env, CONTROL_FEATURE_FLAGS.autonomyRevoke)
+      }),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten
       // av eier-autoritets-/session-grant-mønstrene i denne filen - IKKE en ny,
@@ -1099,7 +1130,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // resten av denne filen (`withMemoryTransaction`, se `GovernanceService`
       // sitt filhode) - IKKE en parallell tilkobling. Registrert i SAMME
       // liste/løkke som `situations`/`executive`/`owner_controls`.
-      ...governanceToolDefinitions(new GovernanceTransport(new GovernanceService(pool))),
+      // WP-H1 (JARVIS-087 del 2): proveniens (kanal/sesjon/jobb/opphav) på nye journalrader - AV som standard, kun den eksakte verdien «on» slår det på.
+      ...governanceToolDefinitions(new GovernanceTransport(new GovernanceService(pool), { recordProvenance: process.env["JARVIS_GOVERNANCE_PROVENANCE"] === "on" })),
       // Task #118 ("Charlie"-minne-verifisering): `memory.search` over DEN
       // SAMME `memoryRetriever`-instansen `conversationEngine` under gjenbruker
       // for bakgrunnskontekst - se `memoryRetriever` sin egen filhode-kommentar

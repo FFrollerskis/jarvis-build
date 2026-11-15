@@ -3,6 +3,7 @@ import { BUSINESS_INTERNAL_CREDENTIAL_REF } from "@jarvis/business";
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import type { GovernanceService } from "./service.ts";
+import type { GovernanceProvenance } from "./types.ts";
 
 /**
  * UA-11 Executive Mode "K2": eierens kontrollflate for decision log/
@@ -17,8 +18,33 @@ import type { GovernanceService } from "./service.ts";
  * det hele tatt nås. Manglende context feiler lukket
  * (`governance_missing_invocation_context`).
  */
+export interface GovernanceTransportOptions {
+  /**
+   * WP-H1 (JARVIS-087 del 2): skriv PROVENIENS (kanal, sesjon, jobb, opphav) sammen med hver NY journalrad (migrasjon 102). AV som standard (`JARVIS_GOVERNANCE_PROVENANCE=on` i `main.ts`):
+   * uten flagget er oppførselen identisk med før (proveniens-kolonnene forblir NULL).
+   */
+  recordProvenance?: boolean;
+}
+
+/**
+ * Proveniensen for ETT kall, utledet UTELUKKENDE fra den betrodde `ToolInvocationContext` (aldri fra parametre):
+ *  - kanal og sesjon fra identiteten; jobb-id fra `job:`-sesjonen (`jobIdentityFor`);
+ *  - opphav: `model` når en modell formulerte kallet (`servingModel` satt - en modell i løkka vinner ALLTID, også om noe annet påstår `owner_direct`), `owner_direct` kun når trusted kode har
+ *    attestert det (`contentOrigin`), ellers `unspecified` - aldri gjettet fra kanal/signatur (en eier-godkjent bekreftelse som utfører et modellskrevet kall senere har signert identitet men ukjent opphav).
+ */
+export function deriveGovernanceProvenance(context: ToolInvocationContext): GovernanceProvenance {
+  const identity = context.identity;
+  const sessionId = identity.session_id;
+  return {
+    channel: identity.channel,
+    session_id: sessionId,
+    task_id: sessionId.startsWith("job:") && sessionId.length > 4 ? sessionId.slice(4) : null,
+    origin: context.servingModel !== undefined ? "model" : context.contentOrigin === "owner_direct" ? "owner_direct" : "unspecified"
+  };
+}
+
 export class GovernanceTransport implements ToolTransport {
-  constructor(private readonly service: GovernanceService) {}
+  constructor(private readonly service: GovernanceService, private readonly options: GovernanceTransportOptions = {}) {}
 
   async invoke(
     action: string,
@@ -33,6 +59,7 @@ export class GovernanceTransport implements ToolTransport {
     const tenantId = identity.tenant_id;
     const memorySpace = identity.memory_space_id as MemorySpace;
     const actor = identity.person_id;
+    const provenance = this.options.recordProvenance === true && context ? deriveGovernanceProvenance(context) : undefined;
 
     switch (action) {
       case "create_decision": {
@@ -47,7 +74,8 @@ export class GovernanceTransport implements ToolTransport {
             ...(parameters["related_situation_id"] !== undefined ? { related_situation_id: String(parameters["related_situation_id"]) } : {}),
             ...(parameters["owner_person_id"] !== undefined ? { owner_person_id: String(parameters["owner_person_id"]) } : {})
           },
-          actor
+          actor,
+          provenance
         );
         return { external_id: row.decision_id, data: row as unknown as JsonValue };
       }
@@ -71,7 +99,8 @@ export class GovernanceTransport implements ToolTransport {
             projected_outcome: requireString(parameters, "projected_outcome"),
             ...(parameters["owner_person_id"] !== undefined ? { owner_person_id: String(parameters["owner_person_id"]) } : {})
           },
-          actor
+          actor,
+          provenance
         );
         return { external_id: row.scenario_id, data: row as unknown as JsonValue };
       }
@@ -102,7 +131,8 @@ export class GovernanceTransport implements ToolTransport {
             ...(parameters["mitigation_plan"] !== undefined ? { mitigation_plan: String(parameters["mitigation_plan"]) } : {}),
             ...(parameters["owner_person_id"] !== undefined ? { owner_person_id: String(parameters["owner_person_id"]) } : {})
           },
-          actor
+          actor,
+          provenance
         );
         return { external_id: row.risk_id, data: row as unknown as JsonValue };
       }
@@ -136,7 +166,8 @@ export class GovernanceTransport implements ToolTransport {
             ...(parameters["target_date"] !== undefined ? { target_date: String(parameters["target_date"]) } : {}),
             ...(parameters["owner_person_id"] !== undefined ? { owner_person_id: String(parameters["owner_person_id"]) } : {})
           },
-          actor
+          actor,
+          provenance
         );
         return { external_id: row.goal_id, data: row as unknown as JsonValue };
       }
@@ -161,7 +192,7 @@ export class GovernanceTransport implements ToolTransport {
         const row = await this.service.addKeyResult(tenantId, memorySpace, {
           goal_id: requireString(parameters, "goal_id"),
           title: requireString(parameters, "title")
-        });
+        }, provenance);
         return { external_id: row.key_result_id, data: row as unknown as JsonValue };
       }
       case "update_key_result_progress": {

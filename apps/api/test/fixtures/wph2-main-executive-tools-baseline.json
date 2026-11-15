@@ -1,0 +1,287 @@
+{
+ "baseline": "origin/main",
+ "baseline_sha": "ec3e684e1333261e5f4d5456d35e941457019d42",
+ "note": "Opptak av `executiveToolDefinitions(transport)` fra en REN kopi av origin/main (git archive): handling, klasse, rate-grense, step_up_required, reversibel, tidsavbrudd, om en parameterAuthorizer finnes, og SHA-256 av beskrivelsen. Endres kun ved bevisst regenerering mot en ny main.",
+ "tools": [
+  {
+   "action": "get_attention_queue",
+   "capability_class": "A",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "42b0d7ac1f43c8e0d237fde83b02e9fc4845c23e776135ff270fbf321ad8bb4b"
+  },
+  {
+   "action": "get_attention_item",
+   "capability_class": "A",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "49c3723c042d464694faa0517544649f431d47cba2cc56188ddde4696d242f37"
+  },
+  {
+   "action": "get_pause_state",
+   "capability_class": "A",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "d5ce7cb485a2967853bee823e911938dc8fd4cad5b5c8d3b2bce303b8420a955"
+  },
+  {
+   "action": "get_control_surface_status",
+   "capability_class": "A",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "6da925ffd89888f9d6e3d5adc9fdfb227d60dbdc19f9248c533d97dc8c7604c4"
+  },
+  {
+   "action": "get_delegation_board",
+   "capability_class": "A",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "464a604d29ca38a2c5294ca1342c3b57ff9631632410b601c2b561e470a681d0"
+  },
+  {
+   "action": "get_capability_status",
+   "capability_class": "A",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "a6610e03bd53694911deda185d7d31cbf9321d99ea760879a2ec040775d75178"
+  },
+  {
+   "action": "get_self_diagnosis",
+   "capability_class": "A",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "4c42b95efd6ca2d2d38b0ae894ce7e6aaef56384067c4e73368478bd54a8a1a3"
+  },
+  {
+   "action": "get_slo_report",
+   "capability_class": "A",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "296ea4f720508cfe15c4fecd2d33b50e981141260de588afdfaec69366c96f77"
+  },
+  {
+   "action": "get_evolution_report",
+   "capability_class": "A",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "0a92d5f1c5f2f523e1836e14af9213c74f276b2748ea4766f385d6650e850836"
+  },
+  {
+   "action": "get_control_center",
+   "capability_class": "A",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": true,
+   "description_sha": "ae8b91f3d3c3ba2f0c6fc8df53f9ec0819fe5a3c48acc75af166c48ce69aa532"
+  },
+  {
+   "action": "get_ai_mesh_status",
+   "capability_class": "A",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "9e34e7912231ace5da7008f8b3a93124868e1efdedb67db113b86f47c2b12736"
+  },
+  {
+   "action": "get_value_report",
+   "capability_class": "A",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "f92cfc21cda5c43fa228f4e4b607d613ab6dca329a988ed288367e32d7df141d"
+  },
+  {
+   "action": "get_infra_status",
+   "capability_class": "A",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": true,
+   "description_sha": "92b03cc22c4f31e3eb5ed0b18ad1fcd8da75fa0f6af6e21e401e8638b310f271"
+  },
+  {
+   "action": "get_connector_status",
+   "capability_class": "A",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "7d6e7e84004ec1c9532ecac01fdfabb0432ab55f41eacd441e0ce31ed2abedf6"
+  },
+  {
+   "action": "pause_domain",
+   "capability_class": "C",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "167ecaa4e3fb3ba4a19089b6afd8f35f80705065f697fde08c6eeaca94d1bf57"
+  },
+  {
+   "action": "resume_domain",
+   "capability_class": "C",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "a9aedbadbbb33db30b6dfe8b478fa85cca4aad44c7b1fd2ff9130960a3b03c31"
+  },
+  {
+   "action": "resolve_situation",
+   "capability_class": "B",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "ac0b97867a34cca0075f02263ddae73e9167fc3defd92f703b8f874ba10831ef"
+  },
+  {
+   "action": "cancel_task",
+   "capability_class": "B",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": false,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": true,
+   "description_sha": "f933c1ebda772d659c757604a30c52d1647cfd6550bc0cf62dc0028f5ec97c7a"
+  },
+  {
+   "action": "activate_kill_switch",
+   "capability_class": "D",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "280309630cad13ebf426b84fddaa4135269747bfaf7038b19f91874fa820a1f6"
+  },
+  {
+   "action": "deactivate_kill_switch",
+   "capability_class": "D",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "c4b2b3633f2769640e8e25d012e7ccd849b92ead0d8b97c504711cd39ec2b9d3"
+  },
+  {
+   "action": "freeze_connector",
+   "capability_class": "C",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "c97bd3a68e93da2f0d1b0691ae123f9f6b11b2dafc546695665b98d0d12dc049"
+  },
+  {
+   "action": "unfreeze_connector",
+   "capability_class": "C",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "cef53dd7b484127a0bd6292afa421ae8476d459d634cddb405ea775987e1deb9"
+  },
+  {
+   "action": "revoke_credential",
+   "capability_class": "C",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "1086df23de5f1d9610ddd2d402ea5e3b12378ce686117b9bf56fb6b95ddd07b0"
+  },
+  {
+   "action": "restore_credential",
+   "capability_class": "C",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "ca75dec9e5a7d004ebbae567718f2789e041c816756516158a4d371505c2a9fe"
+  },
+  {
+   "action": "revoke_device",
+   "capability_class": "C",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "c649a5a09381786f1ec1159e0f36b97c1b54bf626c4b95e42d9241ca90c5d7a4"
+  },
+  {
+   "action": "enable_finance_kill_switch",
+   "capability_class": "D",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "2759a03c8c55aa473f25eff3b61e5d77d5ea7220eb88490dc5b15036c4cc8279"
+  },
+  {
+   "action": "disable_finance_kill_switch",
+   "capability_class": "D",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "d31fd2fc82a7d14382090f56d1f61463241967e5748fadd17b59c3dd19e944a7"
+  },
+  {
+   "action": "get_finance_kill_switch",
+   "capability_class": "A",
+   "rate_limit_per_minute": 30,
+   "step_up_required": null,
+   "reversible": true,
+   "timeout_ms": 10000,
+   "has_parameter_authorizer": false,
+   "description_sha": "2983a71eac4628bb7e8eaa637312ba10a572f6c77a2e254241b271296c487812"
+  }
+ ]
+}

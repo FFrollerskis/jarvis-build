@@ -319,9 +319,11 @@ export interface ToolInvocationContext {
    */
   servingModel?: { provider: string; model: string };
   /**
-   * D-449 (Q-50): hvem som skrev innholdet i `parameters`. `owner_direct` = den deterministiske hurtigbanen der parameterne er eierens EGNE ord, ordrett (ingen modell har
-   * formulert eller omskrevet dem; `main.ts` sin `delegateBackground`). Settes KUN av trusted kode i kallerens `ToolGateway.execute()`-kall, ALDRI fra `parameters` -
-   * SAMME disiplin som `servingModel`. Mangler både denne og `servingModel` (f.eks. en eier-godkjent bekreftelse som utfører et modellskrevet kall senere), er innholdets opphav
+   * D-449 (Q-50): hvem som skrev innholdet i `parameters`. `owner_direct` = parameterne er eierens EGNE ord, ordrett (ingen modell har formulert eller omskrevet dem). Settes KUN av trusted kode i
+   * kallerens `ToolGateway.execute()`-kall, ALDRI fra `parameters` - SAMME disiplin som `servingModel`. Nøyaktig TO godkjente setter-steder i produksjonskoden (låst av `d449-delegated-tool-jobs-cloud.test.ts`):
+   * (1) hurtigbanen i `main.ts` (`delegateBackground`, kun når samtalemotoren sa cloudAllowed), og (2) dashbord-ruten `POST /governance/mutate` i `server.ts` (WP-H1, proveniens på styringsjournalen) - KUN etter løst
+   * grant, KUN for den suverene eieren (`ownerGate`) OG kun når grantet er en enhetssignert økt fra en eier-kanal (`ownerStepUpDenial(identity) === undefined`, gjennomgang L3): en svak/passiv/aktiv økt eller en
+   * tale-/Telegram-kanal får aldri attesten. Mangler både denne og `servingModel` (f.eks. en eier-godkjent bekreftelse som utfører et modellskrevet kall senere), er innholdets opphav
    * UKJENT, og en transport som bruker opphavet til å åpne en dyrere/mer eksponert rute må da regne det som ikke betrodd (fail-closed).
    */
   contentOrigin?: "owner_direct";

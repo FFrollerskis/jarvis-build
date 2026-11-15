@@ -7,6 +7,7 @@ import { scanForSecrets, withTenantTransaction } from "@jarvis/core";
 import { DEFAULT_PROFILES, classifyContentSensitivity } from "@jarvis/model-gateway";
 import type { TaskService } from "@jarvis/tasks";
 import { financeToolIntent, type ToolDefinition, type ToolInvocationContext, type ToolTransport } from "@jarvis/tool-gateway";
+import { financeIntentOptions } from "./control-center/shared.ts";
 
 /**
  * D-416: chat og agenter er to løp. Chatten legger en oppgave i den durable jobbkøen (`TaskService.submit`, klasse B) og svarer med en gang;
@@ -69,7 +70,7 @@ export function cloudToolTurnsAllowed(input: CloudToolTurnInput): boolean {
   const content = classifyContentSensitivity({ texts: [input.title, input.prompt], memory_spaces: input.memorySpaces });
   if (content.sensitivity === "SECRET_RESTRICTED") return false;
   // D-381-paritet (gjennomgang nr. 3): ord som ville fått chatten til å velge et finansverktøy (og dermed låse turen lokalt) holder også jobben lokal - uansett hvem som skrev teksten.
-  if (financeToolIntent(`${input.title}\n${input.prompt}`)) return false;
+  if (financeToolIntent(`${input.title}\n${input.prompt}`, financeIntentOptions())) return false;
   const serving = input.servingModel;
   if (serving !== undefined) return DEFAULT_PROFILES.some((profile) => profile.provider === serving.provider && profile.locality === "cloud");
   return input.contentOrigin === "owner_direct";
