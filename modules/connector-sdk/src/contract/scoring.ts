@@ -53,6 +53,8 @@ const list = (xs: readonly string[]): string => xs.join(", ");
 
 /**
  * `adapter_kind` har en fail-safe standard: uten opplysning regnes beviset som en fake (`modelled`). Kun `real_transport` gir `proven`.
+ * Review N3: dette er en REN funksjon - det tredje argumentet er KALLERENS påstand om proveniens. Den eneste kilden som er sikret er `runConnectorContract`, som utleder det av den modul-private branden
+ * (`provenance.ts`) og dermed aldri kan gi `proven` for en kopi av en fake. Kall aldri `scoreAcceptance(..., "real_transport")` utenom en bro som faktisk kjørte en ekte transport.
  */
 export function scoreAcceptance(manifest: ConnectorManifest, checks: readonly ContractCheckResult[], adapterKind: AdapterKind = "fake_from_manifest"): AcceptanceReport {
   const kind: AdapterKind = adapterKind === "real_transport" ? "real_transport" : "fake_from_manifest";

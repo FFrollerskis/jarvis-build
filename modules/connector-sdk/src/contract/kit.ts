@@ -2,6 +2,7 @@ import { containsSecret } from "@jarvis/core";
 import { isUnknown, safeIdentifier, type ActionSpec, type ConnectorManifest } from "../manifest.ts";
 import { validateConnectorManifest } from "../validate.ts";
 import { settle } from "./clock.ts";
+import { adapterKindOf } from "./provenance.ts";
 import { redactText } from "./redact.ts";
 import { scoreAcceptance, type AcceptanceReport } from "./scoring.ts";
 import type { AdapterIdentity, AdapterKind, AdapterRequest, AdapterResult, CheckStatus, ContractAdapter, ContractCheckResult, ErrorCategory, Fault, HealthState, JsonValue } from "./types.ts";
@@ -23,7 +24,7 @@ import type { AdapterIdentity, AdapterKind, AdapterRequest, AdapterResult, Check
 
 export interface ContractReport {
   connector_id: string;
-  /** Proveniens for beviset (review M4): en fake bygget av manifestet (`fake_from_manifest`, gir høyst `modelled`) eller en ekte transport (`real_transport`, DEFERRED). */
+  /** Proveniens for beviset (review M4/N3): en fake bygget av manifestet (`fake_from_manifest`, gir høyst `modelled`) eller en ekte transport (`real_transport`, DEFERRED: kun en adapter merket av den utsatte broen, aldri bare et felt). */
   adapter_kind: AdapterKind;
   checks: ContractCheckResult[];
   passed: number;
@@ -718,8 +719,8 @@ export async function runConnectorContract(manifest: ConnectorManifest, adapter:
     });
   }
   const failed = checks.filter((c) => c.status === "fail").length;
-  // Ukjent/manglende proveniens regnes som den svakere påstanden: kun en adapter som EKSPLISITT sier `real_transport` kan gi `proven`.
-  const adapter_kind: AdapterKind = adapter.adapter_kind === "real_transport" ? "real_transport" : "fake_from_manifest";
+  // Ukjent/manglende/ikke-merket proveniens regnes som den svakere påstanden. Review N3: `real_transport` krever feltet OG den modul-private branden (`provenance.ts`) - en kopi av en fake (`{ ...fake, adapter_kind }`) kan aldri gi `proven`.
+  const adapter_kind: AdapterKind = adapterKindOf(adapter);
   return {
     connector_id: safeIdentifier(manifest.identity.id), adapter_kind, checks,
     passed: checks.filter((c) => c.status === "pass").length, failed, skipped: checks.filter((c) => c.status === "skip").length,

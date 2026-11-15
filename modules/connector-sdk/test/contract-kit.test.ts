@@ -4,6 +4,7 @@ import {
   CONTRACT_CHECK_IDS, FAKE_CREDENTIAL_CANARY, FAKE_DEFECTS, INJECTION_PAYLOAD, VirtualClock, createFakeConnector, runConnectorContract, secretShapes, scoreAcceptance,
   type ContractReport, type FakeDefect
 } from "../src/testing.ts";
+import { adapterKindOf, brandRealTransportAdapter } from "../src/contract/provenance.ts";
 import { ACME_KEYS, secretShapedActionKeys, validFullManifest, validSkeletonManifest } from "./fixtures.ts";
 
 const failedIds = (r: ContractReport) => r.checks.filter((c) => c.status === "fail").map((c) => c.id);
@@ -305,7 +306,7 @@ describe("review M4: adapter_kind - en fake bygget fra manifestet kan aldri gi �
     expect(r.acceptance.items.filter((i) => i.status === "modelled").every((i) => i.evidence.includes("modellert"))).toBe(true);
   });
 
-  it("scoreAcceptance: samme sjekkresultater gir «proven» KUN når adapteren oppgir real_transport; manglende eller ukjent proveniens er fake (fail-safe)", async () => {
+  it("scoreAcceptance (ren funksjon, kallerens påstand): samme sjekkresultater gir «proven» KUN når kalleren oppgir real_transport; manglende eller ukjent proveniens er fake (fail-safe) - runConnectorContract utleder den av branden (N3)", async () => {
     const m = validFullManifest();
     const r = await run(m);
     const statuses = (kind?: Parameters<typeof scoreAcceptance>[2]) => scoreAcceptance(m, r.checks, kind).items.map((i) => `${i.id}:${i.status}`);
@@ -318,13 +319,42 @@ describe("review M4: adapter_kind - en fake bygget fra manifestet kan aldri gi �
     expect(statuses("bogus" as never)).toEqual(statuses("fake_from_manifest"));
   });
 
-  it("runConnectorContract: en adapter som EKSPLISITT oppgir real_transport gir «proven»; en som mangler feltet eller har en ukjent verdi regnes som fake", async () => {
+  it("review N3: en KOPI av en fake med adapter_kind: real_transport gir ALDRI proven (spread, Object.create, Proxy, Object.assign, endret felt) - feltet er en påstand, ikke et bevis", async () => {
     const m = validFullManifest();
     const f = createFakeConnector({ manifest: m });
-    const asReal = { ...f, adapter_kind: "real_transport" } as unknown as typeof f;
-    const real = await runConnectorContract(m, asReal);
+    const spoofs: Array<[string, () => typeof f]> = [
+      ["spread (reviewens reprodusjon)", () => ({ ...f, adapter_kind: "real_transport" }) as unknown as typeof f],
+      ["Object.create", () => Object.create(f, { adapter_kind: { value: "real_transport", enumerable: true } }) as typeof f],
+      ["Proxy", () => new Proxy(f, { get: (t, k, r) => (k === "adapter_kind" ? "real_transport" : Reflect.get(t, k, r)) })],
+      ["Object.assign", () => Object.assign(Object.create(null) as object, f, { adapter_kind: "real_transport" }) as typeof f],
+      ["feltet endret på fakeen selv", () => { const g = createFakeConnector({ manifest: m }); (g as { adapter_kind: string }).adapter_kind = "real_transport"; return g; }]
+    ];
+    for (const [label, make] of spoofs) {
+      const spoofed = make();
+      expect(spoofed.adapter_kind, label).toBe("real_transport"); // påstanden er faktisk satt - og likevel:
+      const r = await runConnectorContract(m, spoofed);
+      expect(r.adapter_kind, label).toBe("fake_from_manifest");
+      expect(r.acceptance.adapter_kind, label).toBe("fake_from_manifest");
+      expect(r.acceptance.summary.proven, label).toBe(0);
+      expect(r.acceptance.summary.modelled, label).toBeGreaterThan(5);
+    }
+  });
+
+  it("review N3: kun en adapter MERKET av den modul-private branden (og med feltet) gir proven; merket uten feltet, eller feltet uten merke, er fake - og en manglende/ukjent verdi er fake", async () => {
+    const m = validFullManifest();
+    const f = createFakeConnector({ manifest: m });
+    const branded = brandRealTransportAdapter({ ...f, adapter_kind: "real_transport" } as unknown as typeof f);
+    const real = await runConnectorContract(m, branded);
     expect(real.adapter_kind).toBe("real_transport");
+    expect(real.acceptance.adapter_kind).toBe("real_transport");
     expect(real.acceptance.summary.proven).toBeGreaterThan(5);
+    expect(real.acceptance.summary.modelled).toBe(0);
+    // Begge kravene må være oppfylt: merket alene (feltet sier fake) er ikke nok.
+    const brandedButFake = brandRealTransportAdapter({ ...f } as typeof f);
+    expect((await runConnectorContract(m, brandedButFake)).adapter_kind).toBe("fake_from_manifest");
+    expect(adapterKindOf(branded)).toBe("real_transport");
+    expect(adapterKindOf({ ...branded })).toBe("fake_from_manifest"); // en kopi av den merkede er ikke merket
+    for (const odd of [null, undefined, "real_transport", 42, {}]) expect(adapterKindOf(odd), String(odd)).toBe("fake_from_manifest");
     const missing = { ...f } as Record<string, unknown>;
     delete missing["adapter_kind"];
     expect((await runConnectorContract(m, missing as unknown as typeof f)).adapter_kind).toBe("fake_from_manifest");

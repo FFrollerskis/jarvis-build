@@ -19,6 +19,9 @@ export type ErrorCategory = "auth" | "rate_limit" | "timeout" | "network" | "not
  * Hva slags adapter kittet kjørte mot (review M4). `fake_from_manifest` = en fake bygget av manifestet selv (`createFakeConnector`): den beviser at manifestets garantier er konsistente og at kittet
  * fanger brudd, men sier INGENTING om en ekte transport (kontrakten er modellert ut fra samme manifest den testes mot). `real_transport` er reservert for en bro som kjører en EKTE transport bak en
  * fake leverandørserver (DEFERRED). Kun `real_transport` kan gi akseptansestatus `proven`; en fake gir høyst `modelled`.
+ *
+ * Review N3: feltet alene er en PÅSTAND og kan kopieres (`{ ...fake, adapter_kind: "real_transport" }`). `runConnectorContract` honorerer derfor `real_transport` kun for et objekt som er merket med den modul-private
+ * branden i `provenance.ts` (ikke eksportert fra noen inngang) - til broen finnes er ingen adapter merket, og ingenting kan gi `proven`.
  */
 export type AdapterKind = "fake_from_manifest" | "real_transport";
 
@@ -91,7 +94,7 @@ export interface ProviderState {
 
 /** Testkroker kittet trenger for å bevise egenskapene (en fake implementerer dem; en ekte transport ville fått dem fra en fake leverandørserver). */
 export interface ContractControls {
-  /** Proveniens for beviset (review M4): en fake bygget fra manifestet, eller en ekte transport. Ukjent/manglende regnes som `fake_from_manifest`. */
+  /** Proveniens for beviset (review M4/N3): en fake bygget fra manifestet, eller en ekte transport. Feltet er en påstand: `real_transport` teller kun for en merket adapter (`provenance.ts`); ukjent/manglende/ikke-merket regnes som `fake_from_manifest`. */
   readonly adapter_kind: AdapterKind;
   readonly clock: VirtualClock;
   injectFault(fault: Fault | null): void;

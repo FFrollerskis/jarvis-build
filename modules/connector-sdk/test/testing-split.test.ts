@@ -60,6 +60,15 @@ describe("hovedinngangen har ingen fake-/harness-symboler (D-396)", () => {
     expect(overlap).toEqual([]);
   });
 
+  it("review N3: proveniens-branden (brandRealTransportAdapter/adapterKindOf) er modul-privat - ikke eksportert fra noen inngang, og ikke nådd via barrel-eksporter", () => {
+    for (const name of ["brandRealTransportAdapter", "adapterKindOf"]) {
+      expect(mainNames, name).not.toContain(name);
+      expect(testingNames, name).not.toContain(name);
+    }
+    const barrels = [join(SRC, "index.ts"), join(SRC, "testing.ts"), join(SRC, "contract", "index.ts")].map((f) => readFileSync(f, "utf8"));
+    for (const text of barrels) expect(/provenance/.test(text)).toBe(false);
+  });
+
   it("hovedinngangen er uendret i det den skal gi: validator, avledning, katalog, vakt, gjeld og referansemanifestene", () => {
     for (const name of ["validateConnectorManifest", "deriveSkeletonManifests", "buildManifestCatalogue", "runManifestGuard", "computeConnectorDebt", "FULL_MANIFESTS", "productionConnectorDefinitions", "ConnectorManifestSchema"]) {
       expect(mainNames, name).toContain(name);
