@@ -1,0 +1,11 @@
+# Utkast: lukkingsmatrise + PROJECT_STATUS - bruk ETTER at K, H1, H2 og I er merget (matrisevakten wpj-closure-matrix krever at kodestier finnes)
+## docs/CLOSURE_MATRIX_HF1_HF2.md
+- EV-18: tilføy «WP-I (D-472) er bygget (`BUILT_UNWIRED`), men er ikke bevis for «beviste connectors»: beredskapen forblir `DORMANT`.»
+- EV-22 / EV-23: «kontrollsentrene er bygget bak flagg (WP-H0/H1/H2, D-467/D-473/D-474; `NOT VERIFIED`); beredskapen forblir `DORMANT` til sentrene er verifisert og B3 (D-475) er bygget.»
+- UA-0: tilføy «Connector SDK (WP-I, D-472): `BUILT_UNWIRED` (CI-vakt `WIRED` som testport); gjeldskobling til Integrasjonssenteret og transport-bro `DEFERRED`; live smoke GitHub/Cloudflare/Stripe `BLOCKED_EXTERNAL`; runbook `docs/runbooks/WPI_CONNECTOR_SDK.md`.»
+- UA-11 Executive: «**Bygget bak flagg, DORMANT** (WP-H0 D-467 `WIRED`; WP-H1 D-473 + WP-H2 D-474: Finans-, Minne-, Agent-, Drift-, Verdi-, Personvern- og Sikkerhet-senteret, golden-suite-knapp, tilbakekall av autonomi-binding (`PARTIAL`: sletter, kun økta sitt rom), JARVIS-087 del 2 (proveniens på styringsjournalen, `PARTIAL` for endringer etter opprettelse); alle nye flagg AV; `NOT VERIFIED`; Finans-/Verdi-flaggene betinges av N1 (JARVIS-101). Gjenstår: manuell disposisjon av ukjent utfall, minne-sletting/eksport (JARVIS-060), worker-hjerteslag, permanent ikke-målte størrelser | «Ett panel»-bevis på NAS (`NOT VERIFIED`, runbooks `docs/runbooks/WPH0_*`, `WPH1_CONTROL_CENTERS.md`, `WPH2_CONTROL_CENTERS.md`)»
+## docs/PROJECT_STATUS.md (blokken «AKTIV STATUS – HF1/HF2-byggeprogrammet»)
+- «Åpne PR-er»: oppdater med de faktiske PR-numrene (K, H1, H2, I, docs) og status.
+- «Merget til main»: legg til WP-K (D-471), WP-I (D-472), WP-H1/H2 (D-473/D-474) med PR-nummer når merget.
+- Ny bullet: «Bygging etter D-470 (2026-11-15): K, H1/H2 og I ferdig bygget og uavhengig reviewet (3-5 gjennomganger hver; ingen åpne BLOCKER/HIGH); alt DORMANT/AV, `NOT VERIFIED`. GitHub-push var nede (403 «verify your email», så 503/502) i ca. 8 timer; arbeidet lå lokalt og i bundle. Neste: B3, D3, G1, G2+G3, G4.»
+- «Anbefalte smale re-reviewer før aktivering»: legg til K (aktivering av policy-journal), H (Finans/Verdi etter N1), I (real_transport-bro).
