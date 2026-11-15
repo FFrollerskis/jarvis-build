@@ -113,7 +113,12 @@ const MESSAGE_MAX_VALUE = 160;
 function oneLine(value: string, max = MESSAGE_MAX_VALUE): string {
   // eslint-disable-next-line no-control-regex
   const flat = value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").replace(/ {2,}/g, " ").trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+  // Delta-2 review L-C: usynlige formateringstegn (kategori Cf: bidi-kontroller, nullbredde, tag-tegn) fjernes - de kan skjule eller omorganisere tekst i eier-meldingen - og ensomme surrogater (kategori Cs,
+  // ugyldig UTF-16 som kan få en JSON-/Telegram-sending til å feile) erstattes med «?». Kuttet skjer på KODEPUNKT-grenser (aldri midt i et surrogatpar). Kosmetisk bivirkning: nullbredde-sammenføyeren
+  // i sammensatte emoji fjernes også.
+  const clean = flat.replace(/\p{Cf}/gu, "").replace(/\p{Cs}/gu, "?");
+  const points = Array.from(clean);
+  return points.length > max ? `${points.slice(0, max - 1).join("")}…` : clean;
 }
 
 /**

@@ -73,4 +73,31 @@ describe("L-5: eier-meldingen kan ikke forfalskes av tekst i nøkkelen/ekstern-I
     expect(lines.filter((l) => l.startsWith("Gjenoppretting:"))).toHaveLength(1);
     expect(lines.filter((l) => l.startsWith("Verktøy:"))).toHaveLength(1);
   });
+
+  it("delta-2 L-C: usynlige formateringstegn fjernes, kuttet skjer på kodepunkt-grenser, og et ensomt surrogat blir «?» (meldingen er alltid gyldig UTF-16)", async () => {
+    const { notifier, sent } = capture();
+    const bidi = String.fromCodePoint(0x202e); // høyre-til-venstre-overstyring
+    const zeroWidth = String.fromCodePoint(0x200b);
+    const tag = String.fromCodePoint(0xe0041);
+    const hiddenKey = `k${bidi}1${zeroWidth}2${tag}3`;
+    await notifier.notify(notification({ idempotency_key: hiddenKey }));
+    expect(sent[0]!.message.split("\n")[3]).toBe("Referanse: k123");
+    expect(sent[0]!.key).toBe(`class-d-notify:${hiddenKey}`); // ledger-nøkkelen er fortsatt den rå nøkkelen
+
+    // 158 tegn + et emoji (to kodeenheter) + 20 tegn: kuttet midt i surrogatparet ville gitt et ensomt surrogat.
+    const emoji = String.fromCodePoint(0x1f600);
+    await notifier.notify(notification({ idempotency_key: `${"x".repeat(158)}${emoji}${"y".repeat(20)}` }));
+    const message = sent[1]!.message;
+    expect(() => encodeURIComponent(message)).not.toThrow(); // kaster URIError ved et ensomt surrogat
+    const reference = message.split("\n").find((l) => l.startsWith("Referanse:"))!.slice("Referanse: ".length);
+    expect([...reference]).toHaveLength(160); // 159 kodepunkter (emojiet helt med) + «…»
+    expect(reference.endsWith("…")).toBe(true);
+    expect(reference).toContain(emoji);
+
+    // Et ensomt surrogat i inndata (ugyldig UTF-16 fra en leverandør) blir «?» i stedet for å følge med til Telegram.
+    const lone = String.fromCharCode(0xd83d);
+    await notifier.notify(notification({ external_id: `id${lone}x` }));
+    expect(() => encodeURIComponent(sent[2]!.message)).not.toThrow();
+    expect(sent[2]!.message).toContain("Ekstern ID: id?x");
+  });
 });

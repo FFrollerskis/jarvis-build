@@ -1610,7 +1610,14 @@ async function githubFetchRaw(url: string, init: RequestInit, controller?: Githu
                 const name = (err as { name?: unknown } | null | undefined)?.name;
                 if (typeof name === "string") label = name.slice(0, 40);
               } catch { /* en kastende getter: bruk «unknown» - loggingen skal aldri selv kaste */ }
-              console.error(JSON.stringify({ msg: "github_rate_limit_record_failed", status: response.status, error: label }));
+              // Delta-2 review L-A: navnet alene sier lite (en pg-serverfeil heter «error», en nettverksfeil «Error»); en hvitelistet SQLSTATE-/errno-kode (store bokstaver, sifre, understrek) tas også med,
+              // aldri meldingstekst. Formen er uendret når feilen ikke har en slik kode.
+              let code: string | undefined;
+              try {
+                const raw = (err as { code?: unknown } | null | undefined)?.code;
+                if (typeof raw === "string" && /^[A-Z0-9_]{3,20}$/.test(raw)) code = raw;
+              } catch { /* en kastende getter: ingen kode */ }
+              console.error(JSON.stringify({ msg: "github_rate_limit_record_failed", status: response.status, error: label, ...(code ? { code } : {}) }));
             }
           } else {
             await controller.recordOutcome(mutation, response.status, response.headers, "");

@@ -442,7 +442,7 @@ describe("E: GitHub - rate-limit-bokføringen ETTER en akseptert 2xx kan aldri g
   }
   const transport = (store: BrokenStore): GithubTransport => new GithubTransport(new GithubRateLimitController(store, "JARVIS_GITHUB_TOKEN"));
 
-  it("dispatch_workflow, merge_pr og delete_branch lykkes selv om bokføringen feiler: ingen kastet feil, loggen bærer kun navn (aldri meldingstekst), mutasjonen sendes én gang", async () => {
+  it("dispatch_workflow, merge_pr og delete_branch lykkes selv om bokføringen feiler: ingen kastet feil, loggen bærer kun navn og en hvitelistet kode (aldri meldingstekst), mutasjonen sendes én gang", async () => {
     const store = new BrokenStore();
     const gh = stubGithub();
     const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -455,10 +455,34 @@ describe("E: GitHub - rate-limit-bokføringen ETTER en akseptert 2xx kan aldri g
     const lines = errors.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("github_rate_limit_record_failed"));
     expect(lines).toHaveLength(3);
     for (const line of lines) {
-      expect(JSON.parse(line)).toEqual({ msg: "github_rate_limit_record_failed", status: expect.any(Number), error: "Error" });
+      // Delta-2 L-A: navn + en hvitelistet kode (her ECONNRESET fra feilen), aldri meldingsteksten.
+      expect(JSON.parse(line)).toEqual({ msg: "github_rate_limit_record_failed", status: expect.any(Number), error: "Error", code: "ECONNRESET" });
       expect(line).not.toContain("fake-password-for-test");
       expect(line).not.toContain("postgresql://");
     }
+  }, 60_000);
+
+  it("delta-2 L-A: en kode som ikke har SQLSTATE-/errno-form (tekst, små bokstaver, for lang, ikke en streng) logges ALDRI; en kastende getter kan ikke velte loggingen", async () => {
+    stubGithub();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const codes: unknown[] = ["connection terminated for user app", "econnreset", "X".repeat(21), 42, { toString: () => "ECONNRESET" }];
+    for (const code of codes) {
+      class OddStore extends InMemoryGithubRateLimitStore {
+        override async recordSuccess(): Promise<void> { throw Object.assign(new Error("fake failure"), { code }); }
+      }
+      await new GithubTransport(new GithubRateLimitController(new OddStore(), "JARVIS_GITHUB_TOKEN")).invoke("dispatch_workflow", { repo: "acme/app", workflow_id: "ci.yml", ref: "main" }, "fake-token-for-test");
+    }
+    class GetterStore extends InMemoryGithubRateLimitStore {
+      override async recordSuccess(): Promise<void> {
+        const err = new Error("fake failure");
+        Object.defineProperty(err, "code", { get() { throw new Error("hostile getter"); } });
+        throw err;
+      }
+    }
+    await new GithubTransport(new GithubRateLimitController(new GetterStore(), "JARVIS_GITHUB_TOKEN")).invoke("dispatch_workflow", { repo: "acme/app", workflow_id: "ci.yml", ref: "main" }, "fake-token-for-test");
+    const lines = errors.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("github_rate_limit_record_failed"));
+    expect(lines).toHaveLength(codes.length + 1);
+    for (const line of lines) expect(JSON.parse(line)).toEqual({ msg: "github_rate_limit_record_failed", status: expect.any(Number), error: "Error" });
   }, 60_000);
 
   it("GENNEM gatewayen: dispatch_workflow med feilende bokføring -> `succeeded`, ok:true, og et replay deduplisereres - ÉN dispatch (før fiksen: `failed` og en ANDRE dispatch)", async () => {
