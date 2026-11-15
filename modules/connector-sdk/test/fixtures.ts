@@ -12,8 +12,8 @@ export const ACME_KEYS = {
   setting: "acme.update_setting"
 } as const;
 
-function action(partial: Pick<ActionSpec, "key" | "kind" | "effect"> & { authority: ActionSpec["authority"]; reversibility: ActionSpec["reversibility"]; idempotency: ActionSpec["idempotency"]; trust: ActionSpec["trust"] }): ActionSpec {
-  return { ...partial, limits: { rate_limit_per_minute: 30 }, operations: { timeout_ms: 10_000 }, data: { input_required: [], identity_fields: [] } };
+function action(partial: Pick<ActionSpec, "key" | "kind" | "effect"> & { authority: ActionSpec["authority"]; reversibility: ActionSpec["reversibility"]; idempotency: ActionSpec["idempotency"]; trust: ActionSpec["trust"] }, required: string[] = []): ActionSpec {
+  return { ...partial, limits: { rate_limit_per_minute: 30 }, operations: { timeout_ms: 10_000 }, data: { input_required: required, identity_fields: [] } };
 }
 
 export function acmeActions(): ActionSpec[] {
@@ -23,31 +23,31 @@ export function acmeActions(): ActionSpec[] {
       authority: { risk_class: "A", step_up_required: false, owner_only: false },
       reversibility: { reversible: true, rollback_method: "none", rollback_procedure: "ingen (lesing)", compensating_action: null, destructive: false, evidence: { before_state: false, postcondition: "none" } },
       idempotency: { requirement: "none", provider_idempotent: true }, trust: { output: "untrusted" }
-    }),
+    }, ["project"]),
     action({
       key: ACME_KEYS.create, kind: "write", effect: "write",
       authority: { risk_class: "B", step_up_required: false, owner_only: false },
       reversibility: { reversible: true, rollback_method: "compensating_action", rollback_procedure: "slett oppgaven (acme.delete_task)", compensating_action: "acme.delete_task på external_id fra svaret", destructive: false, evidence: { before_state: false, postcondition: "readback" } },
       idempotency: { requirement: "recommended", provider_idempotent: false }, trust: { output: "internal" }
-    }),
+    }, ["title"]),
     action({
       key: ACME_KEYS.notify, kind: "action", effect: "send",
       authority: { risk_class: "C", step_up_required: false, owner_only: true },
       reversibility: { reversible: false, rollback_method: "none", rollback_procedure: "ingen: en sendt melding kan ikke trekkes tilbake", compensating_action: null, destructive: true, evidence: { before_state: false, postcondition: "provider_id" } },
       idempotency: { requirement: "required", provider_idempotent: false }, trust: { output: "internal" }
-    }),
+    }, ["message"]),
     action({
       key: ACME_KEYS.remove, kind: "write", effect: "delete",
       authority: { risk_class: "C", step_up_required: false, owner_only: false },
       reversibility: { reversible: true, rollback_method: "restore_from_snapshot", rollback_procedure: "gjenskap oppgaven fra before_state i journalen", compensating_action: null, destructive: true, evidence: { before_state: true, postcondition: "readback" } },
       idempotency: { requirement: "recommended", provider_idempotent: true }, trust: { output: "internal" }
-    }),
+    }, ["task_id"]),
     action({
       key: ACME_KEYS.setting, kind: "write", effect: "write",
       authority: { risk_class: "D", step_up_required: true, owner_only: true },
       reversibility: { reversible: true, rollback_method: "provider_revert", rollback_procedure: "sett tilbake innstillingen fra før-tilstanden", compensating_action: null, destructive: false, evidence: { before_state: true, postcondition: "readback" }, class_d_chain: { status: "complete", missing: [] } },
       idempotency: { requirement: "required", provider_idempotent: true }, trust: { output: "internal" }
-    })
+    }, ["name", "value"])
   ];
 }
 

@@ -1,0 +1,123 @@
+import type { JsonValue, TrustLevel } from "@jarvis/contracts";
+import type { FakeClock } from "./clock.ts";
+
+/**
+ * WP-I (D-472): PORTEN en connector eksponerer for kontraktstest-kittet (`runConnectorContract`). Den modellerer connectoren SLIK JARVIS KJØRER DEN (ToolGateway + transport): idempotens-ledger,
+ * parametervalidering, autoritet, pause/tilbakekall, tidsavbrudd, helsetilstand, revisjon og klasse D-varsling - uten database og uten nettverk. Feilkategoriene og helsetilstandene speiler
+ * det kjøretiden allerede bruker (`HealthState` i Integrasjonssenteret, `FailureCategory`/`classifyFailureReason`, `ToolGateway.health`), så en connector ikke trenger en ny ordbok.
+ *
+ * Kittet kan kjøres mot (1) en FAKE bygget av `createFakeConnector` (ingen nettverk), og i prinsippet (2) en ekte transport bak en fake leverandørserver - den broen er DEFERRED (se runbook).
+ */
+
+export type { JsonValue, TrustLevel };
+
+/** Speiler `FailureCategory` (Integrasjonssenteret) + de avvisningsårsakene gatewayen selv gir. */
+export type ErrorCategory = "auth" | "rate_limit" | "timeout" | "network" | "not_found" | "invalid_input" | "authority" | "paused" | "conflict" | "policy" | "other";
+
+/** Speiler `HealthState` (ToolGateway.health / Integrasjonssenteret). */
+export type HealthState = "healthy" | "degraded" | "rate_limited" | "auth_failed" | "unavailable";
+
+export interface AdapterIdentity {
+  tenant_id: string;
+  person_id: string;
+  /** En delegert identitet (agent/jobb på vegne av eieren) i stedet for den autentiserte eieren. */
+  delegated?: boolean;
+  /** Delegaten har en signert godkjenning for akkurat dette kallet (kun relevant når manifestet krever godkjenning). */
+  approved?: boolean;
+}
+
+export interface AdapterRequest {
+  /** `tool_id.action` */
+  action: string;
+  parameters: Record<string, JsonValue>;
+  idempotency_key?: string;
+  identity: AdapterIdentity;
+  /** Avbrytes ved tidsavbrudd; connectoren SKAL slutte å arbeide og svare `timeout`. */
+  signal?: AbortSignal;
+}
+
+export interface AdapterError {
+  category: ErrorCategory;
+  /** Stabil, maskinlesbar kode (`idempotency_key_required`, `outcome_unknown`, `credential_revoked` ...). */
+  code: string;
+  /** Redaksjonssikker tekst (aldri credential, aldri hemmelighetsformede verdier). */
+  message: string;
+  retryable: boolean;
+}
+
+export interface AdapterEvidence {
+  before: JsonValue | null;
+  after: JsonValue | null;
+}
+
+export type AdapterResult =
+  | { ok: true; data: JsonValue; external_id?: string; deduplicated: boolean; output_trust: TrustLevel; evidence?: AdapterEvidence; notified?: boolean }
+  | { ok: false; error: AdapterError };
+
+export interface AdapterHealth {
+  state: HealthState;
+  /** ISO-tidspunkt fra den injiserte klokken. */
+  at: string;
+  detail?: string;
+}
+
+export interface ConnectorAdapter {
+  readonly connector_id: string;
+  /** Handlingsnøklene (`tool_id.action`) adapteren faktisk kan utføre. */
+  readonly actions: readonly string[];
+  invoke(request: AdapterRequest): Promise<AdapterResult>;
+  health(): AdapterHealth | null;
+}
+
+/** Feil leverandøren (eller nettverket) kan påføre - settes av kittet via `injectFault`. */
+export type Fault =
+  | { kind: "auth" }
+  | { kind: "rate_limit" }
+  | { kind: "network" }
+  | { kind: "server" }
+  | { kind: "not_found" }
+  | { kind: "invalid" }
+  /** Leverandøren er treg: `before` = forsinkelsen kommer FØR effekten (ingenting skjer hvis kallet avbrytes), `after` = effekten er utført men svaret kommer sent (utfallet er UKJENT for kalleren). */
+  | { kind: "slow"; ms: number; effect: "before" | "after" };
+
+export interface ProviderState {
+  [key: string]: JsonValue;
+}
+
+/** Testkroker kittet trenger for å bevise egenskapene (en fake implementerer dem; en ekte transport ville fått dem fra en fake leverandørserver). */
+export interface ContractControls {
+  readonly clock: FakeClock;
+  injectFault(fault: Fault | null): void;
+  /** Antall leverandør-side effekter (kjøringer av en skrivehandling) - per handling eller totalt. */
+  effects(actionKey?: string): number;
+  /** Antall kall som faktisk nådde leverandøren (for å bevise at ugyldige kall aldri gjorde det). */
+  providerCalls(): number;
+  setPaused(paused: boolean): void;
+  setCredentialRevoked(revoked: boolean): void;
+  /** Tekst skrevet av en tredjepart som leverandøren returnerer (og siterer i feilmeldinger). `null` fjerner den. */
+  seedProviderText(text: string | null): void;
+  /** Utfører den deklarerte kompensasjonen for et tidligere utført kall (identifisert ved idempotensnøkkelen). */
+  compensate(actionKey: string, idempotencyKey: string): Promise<{ restored: boolean; reason?: string }>;
+  /** Leverandør-side tilstand (for å sammenligne før handling og etter kompensasjon). */
+  snapshot(): JsonValue;
+  readonly observed: { logs: string[]; audit: string[]; notifications: string[] };
+  /** Den (falske) credential-verdien adapteren har fått; skal ALDRI dukke opp i noe utdata, logg eller revisjon. */
+  credentialCanary(): string;
+  sampleParameters(actionKey: string): Record<string, JsonValue>;
+  readonly identities: { owner: AdapterIdentity; foreign_tenant: AdapterIdentity; delegated: AdapterIdentity; delegated_approved: AdapterIdentity };
+}
+
+export type ContractAdapter = ConnectorAdapter & ContractControls;
+
+export type CheckStatus = "pass" | "fail" | "skip";
+
+export interface ContractCheckResult {
+  id: string;
+  level: "R" | "A";
+  title: string;
+  status: CheckStatus;
+  /** Redaksjonssikker forklaring (aldri verdier/credentials). */
+  detail?: string;
+  /** Handlinger (eller delsjekker) som feilet/ble hoppet over. */
+  subjects?: string[];
+}
