@@ -3,6 +3,7 @@ import { constants as fsConstants } from "node:fs";
 import { lstat, open, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { scanForSecrets } from "@jarvis/core";
 import {
   controlItem, controlSection, unknownControlSection,
   type ControlCenterBuildContext, type ControlCenterDefinition, type ControlCenterParts, type ControlItem, type ControlSection, type ControlStatus
@@ -67,6 +68,25 @@ const TABLE_NAME = /^[a-z][a-z0-9_]{0,62}$/;
 const DOC_PATH = /^docs\/[A-Za-z0-9_./-]{1,120}\.md$/;
 const cleanLabel = (text: string): string => text.replace(/[`*_]/g, "").replace(/\s+/g, " ").trim().slice(0, 80);
 
+/**
+ * Gjennomgang L4: DPIA-etiketten (`trigger`, kolonnen «Trigger» i §3) er FRI TEKST (opptil 80 tegn) fra et dokument og gikk ufiltrert til modellen som elementets etikett. Et dokument kan endres av andre enn eieren
+ * (en PR, en kodejobb), så etiketten er ubetrodd data. Den slippes bare gjennom hvis ALT dette holder - ellers vises `DPIA-trigger N` (og `label_filtered: true` i måledata):
+ *  - tillatt tegnsett (bokstaver inkl. æøå, tall, mellomrom og `, . : - / ( ) & +` - ingen markup, anførselstegn, klammer, linjeskift eller `<>[]{}|\\` ), maks 80 tegn og maks 12 ord;
+ *  - ingen instruksjonslignende innhold (ordene «ignorer»/«ignore», «instruks»/«instruction», «prompt», «system», «assistent», «du må/skal», «kall»/«kjør»/«slett»/«send», «verktøy»/«tool», nøkkel/passord/token, URL, @);
+ *  - ingen hemmelighet (`scanForSecrets` endrer den ikke).
+ * Låst mot det ekte dokumentet (alle dets etiketter passerer) og mot fiendtlige etiketter av tester.
+ */
+const DPIA_LABEL_MAX_CHARS = 80;
+const DPIA_LABEL_MAX_WORDS = 12;
+const DPIA_LABEL_CHARS = /^[A-Za-zÆØÅæøå0-9][A-Za-zÆØÅæøå0-9 ,.:\-/()&+]*$/;
+const INSTRUCTION_LIKE = /(ignor|disregard|forget|overrid|prompt|instruks|instruction|\bsystem\b|assistent|assistant|developer|jailbreak|\bdu\s+(?:må|skal|kan|bør)(?![A-Za-zÆØÅæøå])|\byou\s+(?:must|should|can|are|will)\b|\bkall\b|\bcall\b|\bexecute\b|\bkjør(?![A-Za-zÆØÅæøå])|\bslett(?![A-Za-zÆØÅæøå])|\bdelete\b|\bsend(?![A-Za-zÆØÅæøå])|\bverktøy(?![A-Za-zÆØÅæøå])|\btool\b|\bnøkkel(?![A-Za-zÆØÅæøå])|\bpassord(?![A-Za-zÆØÅæøå])|\bpassword\b|\btoken\b|https?|www\.|@)/i;
+
+export function safeDpiaLabel(label: string, index: number): { label: string; filtered: boolean } {
+  const text = label.trim();
+  const ok = text !== "" && text.length <= DPIA_LABEL_MAX_CHARS && DPIA_LABEL_CHARS.test(text) && text.split(/\s+/).length <= DPIA_LABEL_MAX_WORDS && !INSTRUCTION_LIKE.test(text) && scanForSecrets(text).text === text;
+  return ok ? { label: text, filtered: false } : { label: `DPIA-trigger ${index + 1}`, filtered: text !== "" };
+}
+
 /** Radene i en markdown-tabell (uten overskrift og skillelinje), som celler. */
 function tableRows(lines: readonly string[]): string[][] {
   const rows: string[][] = [];
@@ -123,20 +143,55 @@ export function parseProcessingInventory(markdown: string): InventoryParse {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Dokumentlesing (ubetrodd fil i en montert mappe: lstat før open, størrelsesgrense, frist - som backup-status.ts)
+// Dokumentlesing (ubetrodd fil i en montert mappe: ren sti uten symlenker, lstat før open, størrelsesgrense, frist - som backup-status.ts)
 // ---------------------------------------------------------------------------------------------------------------------
 
 export type DocRead = { kind: "ok"; text: string } | { kind: "missing" } | { kind: "invalid"; reason: "unreadable" | "too_large" | "timeout" };
 
-async function readDocOnce(path: string, maxBytes: number): Promise<DocRead> {
-  try {
-    if (!(await lstat(path)).isFile()) return { kind: "invalid", reason: "unreadable" };
-  } catch (err) {
-    return (err as NodeJS.ErrnoException | null)?.code === "ENOENT" ? { kind: "missing" } : { kind: "invalid", reason: "unreadable" };
+/** Gjennomgang L4: første forsinkelse etter en tidsavbrutt lesing (en hengt mount), og taket forsinkelsen dobles opp til. */
+export const DOC_BACKOFF_BASE_MS = 30_000;
+export const DOC_BACKOFF_MAX_MS = 10 * 60_000;
+
+type PlainPath = { kind: "ok"; size: number; mtimeMs: number; ino: number } | { kind: "missing" } | { kind: "unsafe" };
+
+/**
+ * Gjennomgang L4: stien under `root` må bestå av VANLIGE kataloger og en vanlig fil - ingen komponent kan være en symlenke. `lstat` av selve filen og `O_NOFOLLOW` på open() beskytter kun SISTE komponent; en
+ * mellomliggende `docs`- eller `docs/security`-symlenke ble tidligere fulgt (en symlenke i en montert mappe kunne peke ut av mappen). Hver prefiks-komponent sjekkes derfor med `lstat` (følger aldri).
+ * `root` selv er konfigurasjon (rotkatalogen kan ligge bak en symlenke i deployen) og sjekkes ikke. En komponent som ikke finnes er «missing»; alt annet uvanlig er «unsafe» (behandles som uleselig).
+ */
+async function plainPath(root: string, rel: string): Promise<PlainPath> {
+  const parts = rel.split("/");
+  let current = root;
+  for (let i = 0; i < parts.length; i += 1) {
+    current = join(current, parts[i] as string);
+    let st: Awaited<ReturnType<typeof lstat>>;
+    try {
+      st = await lstat(current);
+    } catch (err) {
+      return (err as NodeJS.ErrnoException | null)?.code === "ENOENT" ? { kind: "missing" } : { kind: "unsafe" };
+    }
+    if (st.isSymbolicLink()) return { kind: "unsafe" };
+    const last = i === parts.length - 1;
+    if (last ? !st.isFile() : !st.isDirectory()) return { kind: "unsafe" };
+    if (last) return { kind: "ok", size: st.size, mtimeMs: st.mtimeMs, ino: st.ino };
   }
+  return { kind: "unsafe" };
+}
+
+interface DocCacheEntry { size: number; mtimeMs: number; ino: number; text: string }
+
+async function readPlainFileOnce(root: string, rel: string, maxBytes: number, cache: Map<string, DocCacheEntry>): Promise<DocRead> {
+  const key = join(root, rel);
+  const found = await plainPath(root, rel);
+  if (found.kind === "missing") return { kind: "missing" };
+  if (found.kind === "unsafe") return { kind: "invalid", reason: "unreadable" };
+  if (found.size > maxBytes) return { kind: "invalid", reason: "too_large" };
+  const hit = cache.get(key);
+  // Gjennomgang L4: uendret fil (samme mtime, størrelse og inode) leses ikke på nytt - dokumentet parses fra minnet.
+  if (hit !== undefined && hit.size === found.size && hit.mtimeMs === found.mtimeMs && hit.ino === found.ino) return { kind: "ok", text: hit.text };
   let handle: FileHandle;
   try {
-    handle = await open(path, OPEN_FLAGS);
+    handle = await open(key, OPEN_FLAGS);
   } catch (err) {
     return (err as NodeJS.ErrnoException | null)?.code === "ENOENT" ? { kind: "missing" } : { kind: "invalid", reason: "unreadable" };
   }
@@ -146,7 +201,9 @@ async function readDocOnce(path: string, maxBytes: number): Promise<DocRead> {
     if (st.size > maxBytes) return { kind: "invalid", reason: "too_large" };
     const buf = Buffer.alloc(st.size);
     const { bytesRead } = await handle.read(buf, 0, st.size, 0);
-    return { kind: "ok", text: buf.subarray(0, bytesRead).toString("utf8") };
+    const text = buf.subarray(0, bytesRead).toString("utf8");
+    cache.set(key, { size: st.size, mtimeMs: st.mtimeMs, ino: st.ino, text });
+    return { kind: "ok", text };
   } catch {
     return { kind: "invalid", reason: "unreadable" };
   } finally {
@@ -154,26 +211,101 @@ async function readDocOnce(path: string, maxBytes: number): Promise<DocRead> {
   }
 }
 
-export async function readDocFile(path: string, maxBytes = INVENTORY_MAX_BYTES, timeoutMs = INVENTORY_READ_TIMEOUT_MS): Promise<DocRead> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    const work = readDocOnce(path, maxBytes).catch((): DocRead => ({ kind: "invalid", reason: "unreadable" }));
-    const expired = new Promise<"expired">((resolve) => { timer = setTimeout(() => resolve("expired"), timeoutMs); });
-    const first = await Promise.race([work, expired]);
-    return first === "expired" ? { kind: "invalid", reason: "timeout" } : first;
-  } finally {
-    clearTimeout(timer);
+export interface DocReaderOptions {
+  maxBytes?: number;
+  timeoutMs?: number;
+  backoffBaseMs?: number;
+  backoffMaxMs?: number;
+  /** Injiserbar klokke (ms). */
+  now?: () => number;
+  /** Injiserbar filoperasjon (tester simulerer en hengt mount med en lesing som aldri avsluttes). Standard: `readPlainFileOnce` med en cache på mtime/størrelse/inode. */
+  readOnce?: (root: string, rel: string, maxBytes: number) => Promise<DocRead>;
+  existsOnce?: (root: string, rel: string) => Promise<boolean | null>;
+}
+
+interface GuardState { inflight: boolean; blockedUntil: number; failures: number }
+
+/**
+ * Gjennomgang L4: lesing av dokumenter fra en (eventuelt hengt) montert mappe uten å la libuv-tråder hope seg opp. Et filsystemkall som henger KAN ikke avbrytes - `Promise.race` mot en frist (som før) gir en
+ * feilmelding etter 5 s, men tråden i libuv sitter fast, og siden oppfriskes hvert minutt: hver bygging la en ny fastsittende tråd i den lille tråd-poolen (standard 4) som API-et også bruker til annen fil-/DNS-aktivitet.
+ * Nå gjelder, per fil:
+ *  - SINGLE-FLIGHT: mens en lesing ikke har avsluttet (også etter fristen), startes IKKE en ny - kallet får `timeout` uten å røre filsystemet. Maks ÉN hengt operasjon per fil, aldri én per bygging.
+ *  - BACKOFF: etter en tidsavbrutt lesing svares `timeout` umiddelbart (ingen filsystemkall) til forsinkelsen (30 s, dobles opp til 10 min) er over; en vellykket lesing nullstiller den.
+ *  - CACHE: en uendret fil (mtime, størrelse, inode) leses ikke på nytt (se `readPlainFileOnce`).
+ */
+export class DocReader {
+  private readonly states = new Map<string, GuardState>();
+  private readonly cache = new Map<string, DocCacheEntry>();
+  private readonly maxBytes: number;
+  private readonly timeoutMs: number;
+  private readonly backoffBaseMs: number;
+  private readonly backoffMaxMs: number;
+  private readonly now: () => number;
+  private readonly readOnce: (root: string, rel: string, maxBytes: number) => Promise<DocRead>;
+  private readonly existsOnce: (root: string, rel: string) => Promise<boolean | null>;
+
+  constructor(options: DocReaderOptions = {}) {
+    this.maxBytes = options.maxBytes ?? INVENTORY_MAX_BYTES;
+    this.timeoutMs = options.timeoutMs ?? INVENTORY_READ_TIMEOUT_MS;
+    this.backoffBaseMs = options.backoffBaseMs ?? DOC_BACKOFF_BASE_MS;
+    this.backoffMaxMs = options.backoffMaxMs ?? DOC_BACKOFF_MAX_MS;
+    this.now = options.now ?? Date.now;
+    this.readOnce = options.readOnce ?? ((root, rel, maxBytes) => readPlainFileOnce(root, rel, maxBytes, this.cache));
+    this.existsOnce = options.existsOnce ?? (async (root, rel) => {
+      const found = await plainPath(root, rel);
+      return found.kind === "ok" ? true : found.kind === "missing" ? false : null;
+    });
+  }
+
+  /** Kjører `op` under frist, single-flight og backoff for `key`. `blocked` = ingen filsystemkall ble gjort (hengt operasjon i flukt eller backoff). */
+  private async guarded<T>(key: string, op: () => Promise<T>): Promise<{ kind: "done"; value: T } | { kind: "timeout" }> {
+    const state = this.states.get(key) ?? { inflight: false, blockedUntil: 0, failures: 0 };
+    this.states.set(key, state);
+    if (state.inflight || this.now() < state.blockedUntil) return { kind: "timeout" };
+    state.inflight = true;
+    // `inflight` slippes først når operasjonen FAKTISK har avsluttet (også en som avsluttes lenge etter fristen) - det er det som hindrer en ny fastsittende tråd.
+    const work = op().finally(() => { state.inflight = false; });
+    work.catch(() => undefined);
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<"expired">((resolve) => { timer = setTimeout(() => resolve("expired"), this.timeoutMs); });
+    try {
+      const first = await Promise.race([work.then((value) => ({ value })), expired]);
+      if (first === "expired") {
+        state.failures += 1;
+        state.blockedUntil = this.now() + Math.min(this.backoffMaxMs, this.backoffBaseMs * 2 ** (state.failures - 1));
+        return { kind: "timeout" };
+      }
+      state.failures = 0;
+      state.blockedUntil = 0;
+      return { kind: "done", value: first.value };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async read(root: string, rel: string): Promise<DocRead> {
+    try {
+      const out = await this.guarded(join(root, rel), () => this.readOnce(root, rel, this.maxBytes));
+      return out.kind === "timeout" ? { kind: "invalid", reason: "timeout" } : out.value;
+    } catch {
+      return { kind: "invalid", reason: "unreadable" };
+    }
+  }
+
+  /** Finnes dokumentet som en vanlig fil (uten symlenker i stien)? `null` = ukjent (hengt mount, uvanlig sti, feil). */
+  async exists(root: string, rel: string): Promise<boolean | null> {
+    if (!DOC_PATH.test(rel) || rel.includes("..")) return null;
+    try {
+      const out = await this.guarded(`exists:${join(root, rel)}`, () => this.existsOnce(root, rel));
+      return out.kind === "timeout" ? null : out.value;
+    } catch {
+      return null;
+    }
   }
 }
 
-async function docExists(repoRoot: string, rel: string): Promise<boolean | null> {
-  if (!DOC_PATH.test(rel) || rel.includes("..")) return null;
-  try {
-    return (await lstat(join(repoRoot, rel))).isFile();
-  } catch (err) {
-    return (err as NodeJS.ErrnoException | null)?.code === "ENOENT" ? false : null;
-  }
-}
+/** Standardleseren for api-prosessen: delt tilstand (cache, backoff) på tvers av bygginger - det er poenget. Tester lager egne instanser. */
+const defaultDocReader = new DocReader();
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Lesere (ekte SQL - bevist som app-rolle i wph2-privacy-center-db.test.ts)
@@ -219,12 +351,15 @@ export interface PrivacyCenterDeps {
   env: Readonly<Record<string, string | undefined>>;
   /** Rotkatalogen som `docs/…` ligger under. Standard: repo-roten utledet fra denne filens plassering (`/app` i api-imaget, der `docs/` ikke finnes). Injiserbar for tester. */
   repoRoot?: string;
+  /** Gjennomgang L4: dokumentleseren (cache, single-flight og backoff mot en hengt mount). Standard: den delte leseren for prosessen; injiserbar for tester. */
+  docReader?: DocReader;
 }
 
 const DEFAULT_REPO_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 
 export function createPrivacyCenter(deps: PrivacyCenterDeps): ControlCenterDefinition {
   const repoRoot = deps.repoRoot ?? DEFAULT_REPO_ROOT;
+  const docReader = deps.docReader ?? defaultDocReader;
   return {
     id: "privacy",
     title_no: "Personvern",
@@ -237,7 +372,7 @@ export function createPrivacyCenter(deps: PrivacyCenterDeps): ControlCenterDefin
       const failed = (r: Settled<unknown>): string => (r.ok ? "" : ` (${r.category})`);
 
       const [docR, liveR, jobsR, backlogR, erasureR] = await Promise.all([
-        settle(() => readDocFile(join(repoRoot, INVENTORY_REL))),
+        settle(() => docReader.read(repoRoot, INVENTORY_REL)),
         settle(() => readLiveTables(deps.pool)),
         settle(() => readJobs(deps.pool, RETENTION_JOBS.map((j) => j.job))),
         settle(() => readRetentionBacklog(deps.pool, tenantId, nowMs)),
@@ -327,16 +462,17 @@ export function createPrivacyCenter(deps: PrivacyCenterDeps): ControlCenterDefin
       } else if (parsed.dpia.length === 0) {
         sections.push(unknownControlSection("dpia", "DPIA-status", DOC_SOURCE, "ingen DPIA-trigger-rader funnet i dokumentet (§3) - ikke målt"));
       } else {
-        const existence = await Promise.all(parsed.dpia.map(async (d) => Promise.all(d.docs.map((docPath) => docExists(repoRoot, docPath)))));
+        const existence = await Promise.all(parsed.dpia.map(async (d) => Promise.all(d.docs.map((docPath) => docReader.exists(repoRoot, docPath)))));
         const items: ControlItem[] = parsed.dpia.map((d, index) => {
           const files = existence[index] ?? [];
           const missingFiles = files.filter((e) => e === false).length;
           const unknownFiles = files.filter((e) => e === null).length;
           const status: ControlStatus = missingFiles > 0 ? "WARN" : !d.approved ? "WARN" : unknownFiles > 0 ? "UNKNOWN" : "OK";
+          const safe = safeDpiaLabel(d.trigger, index);
           return controlItem({
-            id: `dpia:${index + 1}`, label: d.trigger === "" ? `DPIA-trigger ${index + 1}` : d.trigger, status,
+            id: `dpia:${index + 1}`, label: safe.label, status,
             detail_no: `${d.approved ? "godkjent" : "UTKAST/ikke godkjent"}; ${d.docs.length === 0 ? "ingen DPIA-dokument oppgitt" : `${d.docs.length} DPIA-dokument(er) oppgitt${missingFiles > 0 ? `, ${missingFiles} finnes IKKE` : ""}`}.`,
-            facts: { approved: d.approved, documents: d.docs.length, missing_documents: missingFiles, unknown_documents: unknownFiles }
+            facts: { approved: d.approved, documents: d.docs.length, missing_documents: missingFiles, unknown_documents: unknownFiles, label_filtered: safe.filtered }
           });
         });
         items.sort(bySeverityThenLabel);
