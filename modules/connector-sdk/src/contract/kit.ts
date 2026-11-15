@@ -75,20 +75,25 @@ interface Kit {
   writes: ActionSpec[];
   executableWrites: ActionSpec[];
   call(a: ActionSpec, o?: { params?: Record<string, JsonValue>; key?: string | null; identity?: AdapterIdentity; deadlineMs?: number }): Promise<CallOutcome>;
+  /** Antall kall kittet så langt har gjort mot adapteren (review N7: uten kall finnes det ingen revisjon å granske). */
+  callCount(): number;
   key(label: string): string;
   reset(): void;
 }
 
 function makeKit(manifest: ConnectorManifest, adapter: ContractAdapter): Kit {
   let seq = 0;
+  let calls = 0;
   const reads = manifest.actions.filter((a) => a.effect === "read" && adapter.actions.includes(a.key));
   const writes = manifest.actions.filter((a) => a.effect !== "read" && adapter.actions.includes(a.key));
   const executableWrites = writes.filter((a) => !(a.authority.risk_class === "D" && a.reversibility.class_d_chain?.status === "deferred"));
   const kit: Kit = {
     manifest, adapter, reads, writes, executableWrites,
+    callCount: () => calls,
     key: (label) => `kit-${label}-${++seq}`,
     reset: () => { adapter.injectFault(null); adapter.setPaused(false); adapter.setCredentialRevoked(false); adapter.seedProviderText(null); },
     call: async (a, o = {}) => {
+      calls += 1;
       const controller = new AbortController();
       const key = o.key === null ? undefined : (o.key ?? (a.effect === "read" ? undefined : kit.key(a.key)));
       const request: AdapterRequest = {
@@ -127,9 +132,16 @@ const hasSecretShape = (text: string, canary: string): boolean => text.includes(
 // Sjekkene
 // ---------------------------------------------------------------------------------------------------------------------
 
-type CheckDef = { id: string; level: "R" | "A"; title: string; needsWrites?: boolean; run: (k: Kit) => Promise<Outcome> };
+/**
+ * `needsWrites` = sjekken krever minst én skrive-/utførende handling (også en utsatt klasse D, som `classd.chain_and_notification` nettopp skal bevise er utilgjengelig).
+ * `needsExecutableWrites` (review N1) = sjekken kjører KUN mot skrivehandlinger som faktisk kan utføres (`executableWrites`: utsatt klasse D utelatt). Uten dem har den ingenting å kjøre, og en løkke over
+ * en tom liste ga før en vakuøs `pass` (microsoft_outlook og zapier: bare en utsatt klasse D-skriving) - nå `skip` med årsak, og scoringen kan aldri gi `modelled` for det.
+ */
+type CheckDef = { id: string; level: "R" | "A"; title: string; needsWrites?: boolean; needsExecutableWrites?: boolean; run: (k: Kit) => Promise<Outcome> };
 
 const NO_WRITES = "ren lese-connector (nivå R): ingen skrive-/utførende handlinger å prøve";
+const NO_EXECUTABLE_WRITES = "ingen utførbare skrivehandlinger: alle skrive-/utførende handlinger er klasse D uten komplett kjede (utilgjengelige under håndhevelse, DEFERRED) - sjekken har ingenting å kjøre, og et hopp er aldri bestått";
+const NOTHING_TO_PROBE = "ingen lese- eller utførbare skrivehandlinger å prøve: sjekken har ingenting å kjøre, og et hopp er aldri bestått";
 
 const CHECKS: CheckDef[] = [
   {
@@ -174,8 +186,10 @@ const CHECKS: CheckDef[] = [
   {
     id: "trust.labelling", level: "R", title: "utdata merkes med manifestets tillitsnivå (ubetrodd er aldri «trusted»)",
     run: async (k) => {
+      const subjects = [...k.reads, ...k.executableWrites];
+      if (subjects.length === 0) return skip(NOTHING_TO_PROBE);
       const f: string[] = [];
-      for (const a of [...k.reads, ...k.executableWrites]) {
+      for (const a of subjects) {
         const r = okOf(await k.call(a));
         if (r !== null && r.output_trust !== a.trust.output) f.push(`${a.key}: merket ${r.output_trust}, manifestet sier ${a.trust.output}`);
       }
@@ -301,6 +315,8 @@ const CHECKS: CheckDef[] = [
   {
     id: "audit.no_secret_values", level: "R", title: "revisjon og logg har én linje per kall og inneholder aldri credential eller hemmelighetsformer",
     run: async (k) => {
+      // Review N7: en connector uten handlinger (10 av skeletonene) - eller uten noe kittet kan kalle - gir ingen kall og dermed ingen revisjonslinjer å granske. Det er `skip`, ikke en feil: kallene mangler, revisjonen gjør det ikke.
+      if (k.callCount() === 0) return skip("kittet har ikke utført noe kall (ingen lese- eller utførbare skrivehandlinger): ingen revisjon å granske");
       const canary = k.adapter.credentialCanary();
       const f: string[] = [];
       if (k.adapter.observed.audit.length === 0) f.push("ingen revisjonslinjer (hver handling skal revideres)");
@@ -377,7 +393,7 @@ const CHECKS: CheckDef[] = [
     }
   },
   {
-    id: "idempotency.same_key_one_effect", level: "A", title: "samme idempotensnøkkel to ganger = nøyaktig én effekt (andre svar er deduplisert med samme id)", needsWrites: true,
+    id: "idempotency.same_key_one_effect", level: "A", title: "samme idempotensnøkkel to ganger = nøyaktig én effekt (andre svar er deduplisert med samme id)", needsWrites: true, needsExecutableWrites: true,
     run: async (k) => {
       const f: string[] = [];
       for (const a of k.executableWrites) {
@@ -394,7 +410,7 @@ const CHECKS: CheckDef[] = [
     }
   },
   {
-    id: "idempotency.distinct_keys_distinct_effects", level: "A", title: "ulike nøkler gir ulike effekter (dedupe er ikke overivrig)", needsWrites: true,
+    id: "idempotency.distinct_keys_distinct_effects", level: "A", title: "ulike nøkler gir ulike effekter (dedupe er ikke overivrig)", needsWrites: true, needsExecutableWrites: true,
     run: async (k) => {
       const f: string[] = [];
       for (const a of k.executableWrites) {
@@ -478,7 +494,7 @@ const CHECKS: CheckDef[] = [
     }
   },
   {
-    id: "timeout.after_effect_unknown_not_replayed", level: "A", title: "tidsavbrudd ETTER effekten er «ukjent utfall»: svar `outcome_unknown`, og samme nøkkel gir aldri en ny effekt", needsWrites: true,
+    id: "timeout.after_effect_unknown_not_replayed", level: "A", title: "tidsavbrudd ETTER effekten er «ukjent utfall»: svar `outcome_unknown`, og samme nøkkel gir aldri en ny effekt", needsWrites: true, needsExecutableWrites: true,
     run: async (k) => {
       const f: string[] = [];
       for (const a of k.executableWrites) {
@@ -503,7 +519,7 @@ const CHECKS: CheckDef[] = [
     }
   },
   {
-    id: "timeout.before_effect_applies_nothing", level: "A", title: "tidsavbrudd FØR effekten gir ingen effekt, og retry med samme nøkkel virker", needsWrites: true,
+    id: "timeout.before_effect_applies_nothing", level: "A", title: "tidsavbrudd FØR effekten gir ingen effekt, og retry med samme nøkkel virker", needsWrites: true, needsExecutableWrites: true,
     run: async (k) => {
       const f: string[] = [];
       for (const a of k.executableWrites) {
@@ -524,7 +540,7 @@ const CHECKS: CheckDef[] = [
     }
   },
   {
-    id: "errors.write_5xx_is_outcome_unknown", level: "A", title: "5xx på en SKRIVING er «ukjent utfall» (outcome_unknown, ikke retry-bar), og samme nøkkel gir aldri en ny effekt (avstem først)", needsWrites: true,
+    id: "errors.write_5xx_is_outcome_unknown", level: "A", title: "5xx på en SKRIVING er «ukjent utfall» (outcome_unknown, ikke retry-bar), og samme nøkkel gir aldri en ny effekt (avstem først)", needsWrites: true, needsExecutableWrites: true,
     run: async (k) => {
       const f: string[] = [];
       for (const a of k.executableWrites) {
@@ -551,7 +567,9 @@ const CHECKS: CheckDef[] = [
     id: "authority.tenant_isolation", level: "A", title: "en identitet utenfor credentialens tenant nektes uten leverandørkall (også lesing)", needsWrites: true,
     run: async (k) => {
       const f: string[] = [];
-      for (const a of [k.reads[0], ...k.executableWrites].filter((x): x is ActionSpec => x !== undefined)) {
+      const subjects = [k.reads[0], ...k.executableWrites].filter((x): x is ActionSpec => x !== undefined);
+      if (subjects.length === 0) return skip(NOTHING_TO_PROBE);
+      for (const a of subjects) {
         const calls0 = k.adapter.providerCalls();
         const eff0 = k.adapter.effects();
         const e = errOf(await k.call(a, { identity: k.adapter.identities.foreign_tenant }));
@@ -574,7 +592,7 @@ const CHECKS: CheckDef[] = [
     }
   },
   {
-    id: "authority.delegated", level: "A", title: "delegert identitet følger manifestets modus (nektet / krever godkjenning / lik eier) - ingen effekt uten tillatelse", needsWrites: true,
+    id: "authority.delegated", level: "A", title: "delegert identitet følger manifestets modus (nektet / krever godkjenning / lik eier) - ingen effekt uten tillatelse", needsWrites: true, needsExecutableWrites: true,
     run: async (k) => {
       const mode = isUnknown(k.manifest.authority.delegated) ? null : k.manifest.authority.delegated.mode;
       if (mode === null) return skip("skeleton: delegert autoritet er ukjent");
@@ -642,6 +660,7 @@ const CHECKS: CheckDef[] = [
     id: "control.pause_blocks_all", level: "A", title: "pause (kill switch/frys) stanser ALLE kall uten leverandørkall; gjenopptak virker", needsWrites: true,
     run: async (k) => {
       const probes = [k.reads[0], ...k.executableWrites].filter((a): a is ActionSpec => a !== undefined);
+      if (probes.length === 0) return skip(NOTHING_TO_PROBE);
       const f: string[] = [];
       // Pausen stanser ALLE kall - også en gjentakelse av et allerede utført kall (ledgeren slås ikke opp før pause-sjekken).
       const replayKey = k.key("pausereplay");
@@ -687,6 +706,7 @@ export async function runConnectorContract(manifest: ConnectorManifest, adapter:
   for (const def of CHECKS) {
     let outcome: Outcome;
     if (def.needsWrites === true && kit.writes.length === 0) outcome = skip(NO_WRITES);
+    else if (def.needsExecutableWrites === true && kit.executableWrites.length === 0) outcome = skip(NO_EXECUTABLE_WRITES);
     else {
       try { outcome = await def.run(kit); } catch (e) { outcome = { status: "fail", detail: `sjekken kastet: ${(e as Error).message.slice(0, 120)}` }; }
     }

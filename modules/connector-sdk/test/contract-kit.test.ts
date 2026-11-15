@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isUnknown, type ConnectorManifest } from "../src/index.ts";
+import { deriveSkeletonManifests, isUnknown, productionConnectorDefinitions, validateConnectorManifest, type ConnectorManifest } from "../src/index.ts";
 import {
   CONTRACT_CHECK_IDS, FAKE_CREDENTIAL_CANARY, FAKE_DEFECTS, INJECTION_PAYLOAD, VirtualClock, createFakeConnector, runConnectorContract, secretShapes, scoreAcceptance,
   type ContractReport, type FakeDefect
@@ -339,6 +339,114 @@ describe("review M4: adapter_kind - en fake bygget fra manifestet kan aldri gi �
     expect(r.acceptance.verdict).toBe("complete_on_paper");
     expect(JSON.stringify(r.acceptance)).not.toContain("VERIFIED");
     expect(JSON.stringify(r.acceptance)).not.toContain('"status":"proven"');
+  });
+});
+
+describe("review N1: ingen vakuøse pass når connectoren bare har utsatte klasse D-skrivehandlinger (executableWrites er tom)", () => {
+  /** De seks sjekkene som løper over `executableWrites` og før ga `pass` med null kall (reviewens :383, :400, :484, :509, :530, :582). */
+  const OVER_EXECUTABLE_WRITES = [
+    "idempotency.same_key_one_effect", "idempotency.distinct_keys_distinct_effects", "timeout.after_effect_unknown_not_replayed",
+    "timeout.before_effect_applies_nothing", "errors.write_5xx_is_outcome_unknown", "authority.delegated"
+  ] as const;
+  /** Et GYLDIG manifest der den eneste skrivehandlingen er en utsatt klasse D (lesing + `acme.update_setting` uten komplett kjede) - slik microsoft_outlook og zapier ligger i registeret. */
+  const onlyDeferredWrite = (): ConnectorManifest => {
+    const m = withDeferredD();
+    m.actions = m.actions.filter((a) => a.key === ACME_KEYS.list || a.key === ACME_KEYS.setting);
+    m.capabilities.actions = { status: "not_implemented" };
+    m.auth.scopes.provider = [{ scope: "tasks:read", needed_for: [ACME_KEYS.list] }, { scope: "tasks:write", needed_for: [ACME_KEYS.setting] }];
+    m.d41_audit = {
+      classification: "PARTIAL",
+      read: { provider_offers: "yes", implemented: "full", action_keys: [ACME_KEYS.list] }, write: { provider_offers: "yes", implemented: "partial", action_keys: [ACME_KEYS.setting] },
+      delete: { provider_offers: "yes", implemented: "none", action_keys: [] }, access_control: { provider_offers: "yes", implemented: "none", action_keys: [] },
+      scopes_verified_against_docs: true, unverified_scopes: [], verified_on: "2026-11-14", docs_reference: ["Acme API-referanse (fiktiv)"],
+      gaps: [{ capability: "klasse D-kjeden", status: "DEFERRED", reason: "kjeden er ikke komplett" }]
+    };
+    return m;
+  };
+  const executableWritesOf = (m: ConnectorManifest) => m.actions.filter((a) => a.effect !== "read" && !(a.authority.risk_class === "D" && a.reversibility.class_d_chain?.status === "deferred"));
+  const itemStatus = (r: ContractReport, id: string) => r.acceptance.items.find((i) => i.id === id)?.status;
+
+  it("kontroll: fixturen er et gyldig manifest, og den eneste skrivehandlingen er en utsatt klasse D", () => {
+    const m = onlyDeferredWrite();
+    expect(validateConnectorManifest(m).issues).toEqual([]);
+    expect(m.actions.filter((a) => a.effect !== "read").map((a) => a.key)).toEqual([ACME_KEYS.setting]);
+    expect(executableWritesOf(m)).toEqual([]);
+  });
+
+  it("de seks sjekkene hopper over med årsak (aldri pass), og A.idempotency_replay er not_proven - ALDRI modelled", async () => {
+    const r = await run(onlyDeferredWrite());
+    expect(r.failed).toBe(0);
+    for (const id of OVER_EXECUTABLE_WRITES) {
+      expect(statusOf(r, id), id).toBe("skip");
+      expect(r.checks.find((c) => c.id === id)?.detail, id).toContain("utførbare skrivehandlinger");
+    }
+    expect(itemStatus(r, "A.idempotency_replay")).toBe("not_proven");
+    expect(r.acceptance.items.find((i) => i.id === "A.idempotency_replay")?.evidence).toContain("hoppet over");
+    // Kravene som hviler på en hoppet over sjekk er heller ikke modellert:
+    expect(itemStatus(r, "A.authority_target_resolution")).toBe("not_proven");
+    expect(itemStatus(r, "A.param_validation_state_readback")).toBe("not_proven");
+    expect(itemStatus(r, "A.before_after_evidence")).toBe("not_proven");
+    expect(r.acceptance.summary.proven).toBe(0);
+  });
+
+  it("sjekkene som FORTSATT har noe å kjøre, kjører og består (lesing, og den utsatte klasse D-kjeden bevises utilgjengelig) - de hoppes ikke over", async () => {
+    const r = await run(onlyDeferredWrite());
+    for (const id of ["classd.chain_and_notification", "authority.tenant_isolation", "control.pause_blocks_all", "trust.labelling", "read.returns_data", "revoke.and_reauth"]) expect(statusOf(r, id), id).toBe("pass");
+    expect(itemStatus(r, "A.classd_snapshot_notification")).toBe("gap");
+  });
+
+  it("kontroll: de samme sjekkene kjører og består (ingen hopp) så snart connectoren har en utførbar skrivehandling", async () => {
+    const r = await run(withDeferredD());
+    for (const id of OVER_EXECUTABLE_WRITES) expect(statusOf(r, id), id).toBe("pass");
+    expect(itemStatus(r, "A.idempotency_replay")).toBe("modelled");
+  });
+
+  it("uten noe å prøve (verken lesing eller utførbar skriving) hopper også de generelle sjekkene over i stedet for å bestå tomt", async () => {
+    const m = onlyDeferredWrite();
+    m.actions = m.actions.filter((a) => a.key === ACME_KEYS.setting);
+    m.capabilities.read = { status: "not_implemented" };
+    m.trust.output = { class: "internal" };
+    m.trust.injection_exposure = { level: "possible", note: "ingen lesehandlinger; innstillingen skrives bare" };
+    m.operations.health_check = { method: "none", action_key: null };
+    m.auth.scopes.provider = [{ scope: "tasks:write", needed_for: [ACME_KEYS.setting] }];
+    if (!isUnknown(m.d41_audit)) { m.d41_audit.read = { provider_offers: "yes", implemented: "none", action_keys: [] }; }
+    expect(validateConnectorManifest(m).issues).toEqual([]);
+    const r = await run(m);
+    expect(r.failed).toBe(0);
+    for (const id of ["trust.labelling", "authority.tenant_isolation", "control.pause_blocks_all", ...OVER_EXECUTABLE_WRITES]) expect(statusOf(r, id), id).toBe("skip");
+    expect(statusOf(r, "classd.chain_and_notification")).toBe("pass");
+  });
+
+  it("reviewens reprodusjon: skeletonene for microsoft_outlook og zapier (bare en utsatt klasse D-skriving) gir not_proven for idempotens - ikke modelled", async () => {
+    const skeletons = new Map(deriveSkeletonManifests({ definitions: productionConnectorDefinitions() }).map((m) => [m.identity.id, m]));
+    for (const id of ["microsoft_outlook", "zapier"]) {
+      const m = skeletons.get(id)!;
+      // Forutsetningen for reproduksjonen (endres den når en klasse D-kjede fullføres, er det bra - da gjelder den syntetiske fixturen over):
+      if (m.actions.some((a) => a.effect !== "read") && executableWritesOf(m).length === 0) {
+        const r = await run(m);
+        expect(r.failed, id).toBe(0);
+        for (const check of OVER_EXECUTABLE_WRITES) expect(statusOf(r, check), `${id} ${check}`).toBe("skip");
+        expect(itemStatus(r, "A.idempotency_replay"), id).toBe("not_proven");
+      }
+    }
+  });
+
+  it("invariant over ALLE avledede skeletons: kittet feller ingen (ukjent er skip, aldri fail), og idempotens er aldri modelled uten en utførbar skrivehandling", async () => {
+    for (const m of deriveSkeletonManifests({ definitions: productionConnectorDefinitions() })) {
+      const r = await run(m);
+      expect(failedIds(r), m.identity.id).toEqual([]);
+      if (itemStatus(r, "A.idempotency_replay") === "modelled") expect(executableWritesOf(m).length, m.identity.id).toBeGreaterThan(0);
+    }
+  });
+
+  it("scoring alene: en hoppet over idempotenssjekk (bortsett fra de to med legitim hopp-over) kan aldri gi modelled", async () => {
+    const m = validFullManifest();
+    const r = await run(m);
+    const withSkipped = (ids: readonly string[]) => scoreAcceptance(m, r.checks.map((c) => (ids.includes(c.id) ? { ...c, status: "skip" as const } : c))).items.find((i) => i.id === "A.idempotency_replay")?.status;
+    expect(withSkipped([])).toBe("modelled");
+    expect(withSkipped(["idempotency.required_key_enforced", "idempotency.key_reuse_other_payload"])).toBe("modelled");
+    for (const id of OVER_EXECUTABLE_WRITES.filter((x) => x.startsWith("idempotency.") || x.startsWith("timeout.") || x.startsWith("errors."))) expect(withSkipped([id]), id).toBe("not_proven");
+    expect(withSkipped(["idempotency.same_key_one_effect", "idempotency.required_key_enforced"])).toBe("not_proven");
   });
 });
 

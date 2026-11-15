@@ -144,8 +144,14 @@ export function scoreAcceptance(manifest: ConnectorManifest, checks: readonly Co
     add("A.param_validation_state_readback", "A", "Deterministic parameter validation and state readback", "kit", kitStatus(pv.status), pv.status === "proven" ? "ugyldige kall (hver påkrevd parameter fjernet i tur) avvises før leverandøren; før-/etter-readback bevist (kittet)" : pv.status === "gap" ? `feilet: ${list(pv.failed)}` : `hoppet over: ${list(pv.skipped)}`);
 
     const idem = fromKit(st, ["idempotency.same_key_one_effect", "idempotency.distinct_keys_distinct_effects", "idempotency.required_key_enforced", "idempotency.key_reuse_other_payload", "timeout.after_effect_unknown_not_replayed", "timeout.before_effect_applies_nothing", "errors.write_5xx_is_outcome_unknown"]);
-    add("A.idempotency_replay", "A", "Idempotency/replay protection", "kit", kitStatus(idem.status === "not_proven" && idem.skipped.every((id) => id === "idempotency.required_key_enforced" || id === "idempotency.key_reuse_other_payload") ? "proven" : idem.status),
-      idem.status === "gap" ? `feilet: ${list(idem.failed)}` : "samme nøkkel = én effekt, annen nyttelast under samme nøkkel avvises, ukjent utfall (tidsavbrudd etter effekt, 5xx på skriving) gjentas aldri, avbrudd før effekt er trygt å prøve igjen (kittet)");
+    // Kun de to sjekkene som har en LEGITIM hopp-over (ingen handling krever nøkkel / ingen påkrevde parametre) kan hoppes over uten å svekke beviset. Hoppes noe annet over - f.eks. fordi connectorens
+    // eneste skrivehandling er en utsatt klasse D (ingen utførbare skrivehandlinger, review N1) - er idempotens IKKE bevist, og kravet kan aldri bli `modelled`.
+    const idemOptionalSkipsOnly = idem.status === "not_proven" && idem.skipped.every((id) => id === "idempotency.required_key_enforced" || id === "idempotency.key_reuse_other_payload");
+    const idemStatus = idemOptionalSkipsOnly ? "proven" : idem.status;
+    add("A.idempotency_replay", "A", "Idempotency/replay protection", "kit", kitStatus(idemStatus),
+      idemStatus === "gap" ? `feilet: ${list(idem.failed)}`
+        : idemStatus === "not_proven" ? `hoppet over (ingenting å kjøre mot, f.eks. ingen utførbare skrivehandlinger): ${list(idem.skipped)}`
+          : "samme nøkkel = én effekt, annen nyttelast under samme nøkkel avvises, ukjent utfall (tidsavbrudd etter effekt, 5xx på skriving) gjentas aldri, avbrudd før effekt er trygt å prøve igjen (kittet)");
 
     const ev = fromKit(st, ["evidence.before_after"]);
     add("A.before_after_evidence", "A", "Before/after evidence", "kit", kitStatus(ev.status), ev.status === "proven" ? "før-/etter-evidens bevist: finnes, og skiller seg når tilstanden endret seg (kittet)" : ev.status === "gap" ? "evidens mangler" : "ikke kjørt (ingen handling lover evidens)");
