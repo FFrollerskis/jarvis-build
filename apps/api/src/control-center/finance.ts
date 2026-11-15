@@ -8,7 +8,7 @@ import type { ToolGateway } from "@jarvis/tool-gateway";
 import { actionRequiresStepUp } from "../step-up.ts";
 import { readFinanceKillSwitch } from "./authority.ts";
 import {
-  DAY_MS, HOUR_MS, NON_HEALTH_SPACES, bySeverityThenLabel, countsNo, mergeBy, relativeNo, riskOf, safeCategory, settle, tenantRead, tenantSpaceRead, toInt, toIso,
+  DAY_MS, HOUR_MS, NON_HEALTH_SPACES, bySeverityThenLabel, countsNo, mergeBy, relativeNo, riskOf, safeCategory, safeRef, settle, tenantRead, tenantSpaceRead, toInt, toIso,
   type ControlCenterPool, type Settled
 } from "./shared.ts";
 
@@ -19,7 +19,7 @@ import {
  * `UNKNOWN` (aldri «i orden»).
  *
  * INNHOLDSVERN: leverandørnavn, formål, beskrivelser, motpartsnavn, referansetekster, kontonavn/-identifikatorer, funn-sammendrag og råe leverandørnyttelaster leses ALDRI. Kun antall, beløp i øre, tilstander,
- * avviksflagg (kategorinavn fra egen kode, filtrert gjennom `safeCategory`), tidsstempler og interne id-er. Kontonummer/KID/kortdata finnes ikke i noen av spørringene.
+ * avviksflagg (kategorinavn fra egen kode, filtrert gjennom `safeCategory`), tidsstempler og interne id-er (samtykke-id og avstemmingskjøring-id filtrert gjennom `safeRef`, gjennomgang L5: en id som ikke ligner en egen, ufarlig id erstattes). Kontonummer/KID/kortdata finnes ikke i noen av spørringene.
  *
  * HANDLINGER: kun finans-nødbryteren (`enable_finance_kill_switch` / `disable_finance_kill_switch` på `/executive/mutate`, samme bryter som Autoritet-senteret viser: samme risikoklasse, samme step-up-regel).
  * DEFERRED (ikke stille utelatt): manuell disposisjon av en intensjon med ukjent utfall (ikke bygget i WP-F1 - eieren avstemmer i leverandørens portal), og avstemmingskjøring på forespørsel herfra
@@ -208,7 +208,7 @@ export async function readVendorsAccounts(pool: ControlCenterPool, tenantId: str
     return {
       vendors: toInt(counts[0]?.["vendors"]), vendors_unbound: toInt(counts[0]?.["vendors_unbound"]),
       bindings: bindings.map((r) => ({ provider: safeCategory(r["provider"]), status: safeCategory(r["status"]), n: toInt(r["n"]) })),
-      consents: consents.map((r) => ({ consent_id: String(r["consent_id"]), state: safeCategory(r["state"]), expires_at: toIso(r["expires_at"]), last_verified_at: toIso(r["last_verified_at"]) })),
+      consents: consents.map((r, i) => ({ consent_id: safeRef(r["consent_id"], `ukjent-${i + 1}`), state: safeCategory(r["state"]), expires_at: toIso(r["expires_at"]), last_verified_at: toIso(r["last_verified_at"]) })),
       accounts: { total: toInt(a["total"]), active: toInt(a["active"]), last_synced_at: toIso(a["last_synced_at"]) },
       cards: cards.map((r) => ({ state: safeCategory(r["state"]), n: toInt(r["n"]) }))
     };
@@ -254,7 +254,7 @@ export async function readReconciliation(pool: ControlCenterPool, tenantId: stri
       : [];
     return {
       last_run: r
-        ? { run_id: String(r["run_id"]), status: safeCategory(r["status"]), trigger: safeCategory(r["trigger"]), started_at: toIso(r["started_at"]), finished_at: toIso(r["finished_at"]), checks, has_error: r["has_error"] === true }
+        ? { run_id: safeRef(r["run_id"], "ukjent"), status: safeCategory(r["status"]), trigger: safeCategory(r["trigger"]), started_at: toIso(r["started_at"]), finished_at: toIso(r["finished_at"]), checks, has_error: r["has_error"] === true }
         : null,
       open_findings: findings.map((x) => ({ severity: safeCategory(x["severity"]), kind: safeCategory(x["kind"]), n: toInt(x["n"]), oldest_at: toIso(x["oldest_at"]), max_reopen: toInt(x["max_reopen"]) })),
       resolved_7d: toInt(resolved[0]?.["n"]),

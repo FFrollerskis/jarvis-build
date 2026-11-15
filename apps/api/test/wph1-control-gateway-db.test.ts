@@ -4,7 +4,9 @@ import { PgApprovalStore } from "@jarvis/core";
 import { CONTROL_CENTER_READ_TOOLS, ExecutiveService, ExecutiveTransport, executiveToolDefinitions, type ControlCenterReport } from "@jarvis/executive";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, type SecretProvider } from "@jarvis/tool-gateway";
+import { servedByCloudModel } from "../src/cloud-tool-screen.ts";
 import { CONTROL_CENTER_FLAGS, createControlCenterRegistry, registerControlCenters } from "../src/control-center/register.ts";
+import { enabledControlCenters } from "../src/control-center/shared.ts";
 import { seedTenants, startH0Db, type H0Db } from "./support/h0-db.ts";
 
 /**
@@ -12,8 +14,9 @@ import { seedTenants, startH0Db, type H0Db } from "./support/h0-db.ts";
  *  - eieren (suveren, signert enhetsøkt) får rapporten via `executive.get_<senter>_center` OG via `get_control_center {center}` - samme innhold;
  *  - alle andre nektes av verktøyets port FØR noe bygges, med `tool.denied` i revisjonssporet; svak autentisering nektes med en tydelig årsak; kill switch stopper også lesingen;
  *  - FAIL-CLOSED uten register: per-senter-verktøyene er ikke åpne, i motsetning til get_control_center (H0);
- *  - en modell i løkka (servingModel) får aldri pengebeløp fra Finans; siden (ingen modell) får hele rapporten;
- *  - flaggene AV: sentrene er ikke koblet inn (`found: false`, `unregistered`), og H0-oppførselen er uendret; ingenting skrives (radtall uendret).
+ *  - gjennomgang M2: en SKYmodell (servingModel) får aldri finansrapporten - verken via `get_finance_center`, `get_control_center {center: "finance"}` eller oversikten - uavhengig av hvilke verktøy utvalget valgte;
+ *    en LOKAL modell og siden (ingen modell) får hele rapporten, inkl. beløp i øre (D-378 punkt 2);
+ *  - gjennomgang M1: flaggene AV er identisk med main: per-senter-verktøyene er IKKE registrert (`unknown_tool`), `get_control_center` har main sin rate-grense, og H0-oppførselen er uendret; ingenting skrives (radtall uendret).
  */
 let db: H0Db;
 const TENANT_A = "tenant-cg-a";
@@ -33,18 +36,24 @@ let policy: PolicyGateway;
 let gateway: ToolGateway;
 let gatewayFlagsOff: ToolGateway;
 
+/** Samme kobling som `main.ts`: per-senter-verktøyene registreres KUN for sentrene med flagget på (`enabledControlCenters`). */
 function wire(env: Record<string, string | undefined>, withRegistry = true): ToolGateway {
   const g = new ToolGateway(db.appPool, policy, secrets);
   if (!withRegistry) {
-    for (const tool of executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(g)))) g.register(tool);
+    // Verktøyene er registrert (flaggene på) men registeret mangler: porten må feile lukket.
+    for (const tool of executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(g)), { controlCenters: enabledControlCenters(ALL_ON) })) g.register(tool);
     return g;
   }
   const registry = createControlCenterRegistry({ authority });
   registerControlCenters(registry, { pool: db.appPool, env, toolGateway: g });
-  for (const tool of executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(g, { controlCenters: registry })))) g.register(tool);
+  // `servedLocally` fra leverandørregisterets `locality` - SAMME kobling som main.ts (gjennomgang M2).
+  const service = new ExecutiveService(g, { controlCenters: registry, servedLocally: (model) => !servedByCloudModel({ provider: model.provider }) });
+  for (const tool of executiveToolDefinitions(new ExecutiveTransport(service), { controlCenters: enabledControlCenters(env) })) g.register(tool);
   return g;
 }
 const ALL_ON = { [CONTROL_CENTER_FLAGS.finance]: "on", [CONTROL_CENTER_FLAGS.memory]: "on", [CONTROL_CENTER_FLAGS.agent]: "on" };
+const CLOUD = { provider: "anthropic", model: "claude-test" };
+const LOCAL = { provider: "gemma_local", model: "gemma-local" };
 
 const get = (g: ToolGateway, identity: IdentityContext, action: string, parameters: Record<string, string> = {}, servingModel?: { provider: string; model: string }) =>
   g.execute({ identity, tool_id: "executive", action, parameters, ...(servingModel ? { servingModel } : {}) });
@@ -113,16 +122,85 @@ describe("eieren får rapportene (flaggene PÅ)", () => {
   });
 });
 
-describe("pengebeløp når aldri en modell", () => {
-  it("med en modell i løkka (servingModel) er alle *_ore-fakta fjernet fra Finans - via begge verktøyene; uten modell ligger de i rapporten", async () => {
-    const model = { provider: "anthropic", model: "claude-test" };
-    expect(factKeys(data(await get(gateway, owner, "get_finance_center")).report)).toContain("amount_ore");
+describe("gjennomgang M2: finansdata (SECRET_RESTRICTED, D-378) når aldri en skymodell - håndhevet VED UTFØRELSE", () => {
+  // Alt i finansdomenet en skymodell aldri skal se: beløp, leverandørnavn, tellinger av ukjent utfall, samtykke-id-er. Verdiene er seedet over (pi-cg-a).
+  const FINANCE_MARKERS = ["150000", "Leverandør", "amount_ore", "daily_cap_ore", "state:settled", "unreconciled"];
+  const assertNoFinanceData = (value: unknown, label: string): void => {
+    const text = JSON.stringify(value);
+    for (const marker of FINANCE_MARKERS) expect(text, `${label}: ${marker}`).not.toContain(marker);
+  };
+
+  it("EXP1 (reviewerens eksperiment): en SKYmodell får «holdt tilbake» via begge verktøyene - ingen rapport, ingen seksjoner, ingen tall - selv på en tur der utvalget ikke valgte verktøyet", async () => {
     for (const [action, params] of [["get_finance_center", {}], ["get_control_center", { center: "finance" }]] as const) {
-      const report = data(await get(gateway, owner, action, params, model)).report;
-      expect(report?.center).toBe("finance");
-      expect(factKeys(report).filter((k) => /_ore$/.test(k)), action).toEqual([]);
-      expect(JSON.stringify(report)).not.toContain("150000");
+      const r = await get(gateway, owner, action, params, CLOUD);
+      expect(r.ok, action).toBe(true);
+      const d = data(r) as unknown as { found: boolean; withheld?: boolean; center?: string; report?: unknown; summary_no: string; explanation_no: string };
+      expect(d, action).toMatchObject({ found: true, withheld: true, center: "finance" });
+      expect(d.report, action).toBeUndefined();
+      expect(d.summary_no).toContain("SECRET_RESTRICTED");
+      expect(d.summary_no).toContain("/control");
+      assertNoFinanceData(d, action);
     }
+  });
+
+  it("oversikten til en skymodell: Finans er IKKE bygget og ikke med i `centers`, står i `withheld` - uten tall, og teller ikke i samlet status; de øvrige sentrene er som før", async () => {
+    const overview = data(await get(gateway, owner, "get_control_center", {}, CLOUD)) as unknown as { centers: Array<{ center: string }>; unregistered: string[]; withheld?: string[]; summary_no: string };
+    expect(overview.withheld).toEqual(["finance"]);
+    expect(overview.centers.map((c) => c.center).sort()).toEqual(["agent", "memory"]);
+    expect(overview.unregistered).not.toContain("finance");
+    expect(overview.summary_no).toContain("Holdt tilbake fra denne modellen");
+    assertNoFinanceData(overview, "oversikt");
+    // Minne og Agenter er IKKE holdt tilbake for skyen (de er `private`, ikke `SECRET_RESTRICTED`)
+    for (const tool of CONTROL_CENTER_READ_TOOLS.filter((t) => t.center !== "finance")) {
+      expect(data(await get(gateway, owner, tool.action, {}, CLOUD)).report?.center, tool.action).toBe(tool.center);
+    }
+  });
+
+  it("en LOKAL modell får hele rapporten, inkl. beløp i øre (D-378 punkt 2: kun skyen er utestengt) - via begge verktøyene og i oversikten", async () => {
+    for (const [action, params] of [["get_finance_center", {}], ["get_control_center", { center: "finance" }]] as const) {
+      const d = data(await get(gateway, owner, action, params, LOCAL));
+      expect(d.found, action).toBe(true);
+      expect(d.report?.center, action).toBe("finance");
+      expect(factKeys(d.report), action).toEqual(expect.arrayContaining(["amount_ore", "count"]));
+    }
+    const overview = data(await get(gateway, owner, "get_control_center", {}, LOCAL)) as unknown as { centers: Array<{ center: string }>; withheld?: string[] };
+    expect(overview.withheld).toBeUndefined();
+    expect(overview.centers.map((c) => c.center).sort()).toEqual(["agent", "finance", "memory"]);
+  });
+
+  it("siden (ingen modell i løkka) får hele rapporten, inkl. beløp i øre, og kun egen tenant", async () => {
+    for (const [action, params] of [["get_finance_center", {}], ["get_control_center", { center: "finance" }]] as const) {
+      const d = data(await get(gateway, owner, action, params));
+      expect(factKeys(d.report), action).toContain("amount_ore");
+      expect(JSON.stringify(d.report)).not.toContain("777000");
+    }
+  });
+
+  it("en ukjent leverandør regnes som sky (FAIL-CLOSED): finans holdes tilbake", async () => {
+    for (const provider of ["ukjent_leverandor", "openai", ""]) {
+      const d = data(await get(gateway, owner, "get_finance_center", {}, { provider, model: "x" })) as unknown as { withheld?: boolean; report?: unknown };
+      expect(d.withheld, provider).toBe(true);
+      expect(d.report, provider).toBeUndefined();
+    }
+  });
+
+  it("uten `servedLocally` (en kobling som ikke vet noe om lokalitet) regnes ALLE modeller som sky - også en lokal", async () => {
+    const g = new ToolGateway(db.appPool, policy, secrets);
+    const registry = createControlCenterRegistry({ authority });
+    registerControlCenters(registry, { pool: db.appPool, env: ALL_ON, toolGateway: g });
+    for (const tool of executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(g, { controlCenters: registry })), { controlCenters: enabledControlCenters(ALL_ON) })) g.register(tool);
+    expect((data(await get(g, owner, "get_finance_center", {}, LOCAL)) as unknown as { withheld?: boolean }).withheld).toBe(true);
+    expect(factKeys(data(await get(g, owner, "get_finance_center")).report)).toContain("amount_ore"); // siden er upåvirket
+  });
+
+  it("flagget AV for Finans: en skymodell får det samme ærlige «ikke koblet inn» som før (aldri en «holdt tilbake»-merknad for et senter som ikke finnes)", async () => {
+    const g = wire({ [CONTROL_CENTER_FLAGS.memory]: "on" });
+    const viaCenter = data(await get(g, owner, "get_control_center", { center: "finance" }, CLOUD)) as unknown as { found: boolean; withheld?: boolean; summary_no: string };
+    expect(viaCenter).toMatchObject({ found: false });
+    expect(viaCenter.withheld).toBeUndefined();
+    const overview = data(await get(g, owner, "get_control_center", {}, CLOUD)) as unknown as { withheld?: string[]; unregistered: string[] };
+    expect(overview.withheld).toBeUndefined();
+    expect(overview.unregistered).toContain("finance");
   });
 });
 
@@ -165,7 +243,7 @@ describe("portene: kun den suverene eieren fra en signert enhetsøkt - og alt av
 });
 
 describe("hastighetsgrense", () => {
-  it("get_control_center tåler en full sideoppdatering to ganger (2 × (1 + 10) kall) - den gamle grensen på 30/min tålte det ikke; per-senter-verktøyene har fortsatt 30/min", async () => {
+  it("get_control_center tåler en full sideoppdatering to ganger (2 × (1 + 10) kall) når sentrene er på - den gamle grensen på 30/min tålte det ikke; per-senter-verktøyene har fortsatt 30/min", async () => {
     const g = wire(ALL_ON);
     let okCount = 0;
     for (let i = 0; i < 60; i += 1) if ((await get(g, owner, "get_control_center")).ok) okCount += 1;
@@ -181,18 +259,43 @@ describe("hastighetsgrense", () => {
   });
 });
 
-describe("flaggene AV: H0-oppførselen er uendret", () => {
-  it("sentrene er ikke koblet inn: `found: false` med en ærlig forklaring (aldri en tom «i orden»), og oversikten viser dem under «ikke koblet inn»", async () => {
+describe("gjennomgang M1: flaggene AV er identisk med main", () => {
+  it("per-senter-verktøyene er IKKE registrert: ingen `get_<senter>_center` finnes i gatewayens liste, og et kall gir `unknown_tool` (som før H1) - for eieren og alle andre", async () => {
+    const registered = gatewayFlagsOff.list().filter((d) => d.tool_id === "executive").map((d) => d.action);
     for (const tool of CONTROL_CENTER_READ_TOOLS) {
-      const r = await get(gatewayFlagsOff, owner, tool.action);
-      expect(r.ok).toBe(true);
-      expect(data(r)).toMatchObject({ found: false, center: tool.center });
-      expect(data(r).summary_no).toContain("ikke koblet inn");
+      expect(registered, tool.action).not.toContain(tool.action);
+      expect(await get(gatewayFlagsOff, owner, tool.action), tool.action).toEqual({ ok: false, reason: "unknown_tool" });
+      expect(await get(gatewayFlagsOff, idFor(MEMBER, TENANT_A), tool.action), `${tool.action} (medlem)`).toEqual({ ok: false, reason: "unknown_tool" });
     }
+    expect(registered).toContain("get_control_center"); // H0-verktøyet er der som før
+  });
+
+  it("kun flaggene som er på gir verktøy: Minne på alene registrerer `get_memory_center` og ingen av de to andre", async () => {
+    const g = wire({ [CONTROL_CENTER_FLAGS.memory]: "on" });
+    const registered = g.list().filter((d) => d.tool_id === "executive").map((d) => d.action);
+    expect(registered).toContain("get_memory_center");
+    expect(registered).not.toContain("get_finance_center");
+    expect(registered).not.toContain("get_agent_center");
+  });
+
+  it("`get_control_center` uten sentre på: ærlig `ikke koblet inn` med main sin ordlyd, oversikten viser alle som «ikke koblet inn», og hele svaret har main sin form", async () => {
+    const one = data(await get(gatewayFlagsOff, owner, "get_control_center", { center: "finance" }));
+    expect(one).toEqual({ found: false, center: "finance", summary_no: "Dette kontrollsenteret er ikke koblet inn ennå, så ingenting kan vurderes." });
     const overview = data(await get(gatewayFlagsOff, owner, "get_control_center")) as unknown as { centers: unknown[]; unregistered: string[]; status: string };
     expect(overview.centers).toEqual([]);
     expect(overview.unregistered).toEqual(expect.arrayContaining(["finance", "memory", "agent"]));
     expect(overview.status).toBe("UNKNOWN");
+    expect(Object.keys(overview)).toEqual(["summary_no", "generated_at", "status", "sensitivity", "centers", "unregistered"]);
+  });
+
+  it("rate-grensen på `get_control_center` er main sin (30/min) når ingen sentre er på - hevingen til 120/min er flaggstyrt", async () => {
+    const g = wire({});
+    let ok = 0;
+    for (let i = 0; i < 35; i += 1) if ((await get(g, owner, "get_control_center")).ok) ok += 1;
+    expect(ok).toBe(30);
+    expect(await get(g, owner, "get_control_center")).toEqual({ ok: false, reason: "rate_limited" });
+    expect(g.list().find((d) => d.tool_id === "executive" && d.action === "get_control_center")?.rate_limit_per_minute).toBe(30);
+    expect(gateway.list().find((d) => d.tool_id === "executive" && d.action === "get_control_center")?.rate_limit_per_minute).toBe(120);
   });
 });
 

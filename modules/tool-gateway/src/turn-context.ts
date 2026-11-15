@@ -56,7 +56,9 @@ const INFRA_STATUS_INTENT = /(åpne hendelser|hendelsesstatus|incident|driftssta
  * mange lesinger at flere treff på samme regex utkonkurrerer hverandre innenfor `max_tools_per_round` (samme lærdom som for driftsstatusen over). «kontrollsentrene» alene gir fortsatt `get_control_center`
  * (H0, via familie-uttrykket); disse velges når eieren spør om ETT senter.
  */
-const FINANCE_CENTER_INTENT = /(finans-?sent(er|re)(t|et)?|finans-?kontroll|finansstatus|status (på|for) finans(en)?|finans-?nødbryter|nødbryter(en)? (for )?finans|ukjent utfall|avstemming(en|s)?\b|betalingsintensjon(er|ene)?)/i;
+// Gjennomgang L5: «avstemming» alene er flertydig (økonomisk avstemming, men også «avstemming av styret»/votering og «avstemming av forventninger») og ga en lokal tur og et verktøy uten finansgrunn. Kun finanskontekstene treffer:
+// bank-/regnskaps-/konto-/betalings-/bilags-/transaksjonsavstemming («bankavstemming», «avstemming av bank»), «avstemmingsfunn» og «avstemmingskjøring». Å velge for få er trygt (eieren kan si «finanssenteret»), å velge for mange låser turen lokalt.
+const FINANCE_CENTER_INTENT = /(finans-?sent(er|re)(t|et)?|finans-?kontroll|finansstatus|status (på|for) finans(en)?|finans-?nødbryter|nødbryter(en)? (for )?finans|ukjent utfall|(bank|regnskaps?|konto|betalings?|bilags?|transaksjons?)-?avstemming(en|er|ene|s)?\b|avstemming(en)? (av|mot|for) (bank|konto|regnskap|betaling|bilag|transaksjon)\w*|avstemmingsfunn|avstemmingskjøring(en|er|ene)?|betalingsintensjon(er|ene)?)/i;
 const MEMORY_CENTER_INTENT = /(minne-?sent(er|re)(t|et)?|minnestatus|status (på|for) minne(t)?|karantene(n)?\b|minneforslag|proveniens|styringsjournal(en)?|beslutningslogg(en)?|slettebevis)/i;
 const AGENT_CENTER_INTENT = /(agent-?sent(er|re)(t|et)?|agentstatus|status (på|for) agent(ene|er)?|kjørende (agenter|jobber)|hvilke (agenter|jobber) kjører|aktive (agenter|jobber)|nettverksomfang|worker(e|ne)? (status|kjører)|\blease(r|ne)?\b)/i;
 // WP-H2: samme mønster for de fire siste sentrene. «driftsstatus» og «status på driften» står bevisst IKKE i Drift-uttrykket (de velger `get_infra_status`, INFRA_STATUS_INTENT over).
@@ -241,9 +243,18 @@ function verbMatches(action: string, text: string): boolean {
 const RESTRICTED_TOOL_ID = /^finance(_|$)/;
 /**
  * WP-H1: finansdata kan også ligge bak et `executive`-verktøy (Finans-senteret). En tur som velger det er låst lokalt (SECRET_RESTRICTED) på samme måte som `finance_*` - uansett hva meldingen sier.
- * (`get_control_center` er ikke på listen: finans-senterets beløp fjernes fra svaret til en modell i transporten, og oversikten har kun antall.)
+ * (`get_control_center` er ikke på listen: en SKYmodell får ikke finans-senteret via den heller - transporten holder det tilbake ved utførelse og bygger oversikten uten det; en lokal modell får det.)
  */
 const RESTRICTED_TOOL_KEYS: ReadonlySet<string> = new Set(["executive.get_finance_center"]);
+
+/**
+ * Gjennomgang M2: er verktøyet LÅST i utvalget (en tur som velger det blir `SECRET_RESTRICTED`, kun lokal modell)? Brukes av invariant-testen «manifest `restricted` + modellflate => låst eller håndhevet ved utførelse».
+ * NB: låsen gjelder bare når verktøyet VELGES - en modell som kaller et ikke-valgt verktøy omgår den (`MeshToolExecutor` sjekker bare flate-tildelingen), derfor er finans-senteret i tillegg håndhevet ved
+ * utførelse (se `EXECUTION_GUARDED_RESTRICTED_KEYS` i `@jarvis/executive`).
+ */
+export function isSelectionLockedTool(toolId: string, action: string): boolean {
+  return RESTRICTED_TOOL_ID.test(toolId) || RESTRICTED_TOOL_KEYS.has(`${toolId}.${action}`);
+}
 
 /**
  * D-415: småprat uten saksinnhold (hilsen, takk, språk, klokkeslett) får INGEN verktøy. En liten lokal modell kalte statusverktøy på «hei»
@@ -381,8 +392,16 @@ export function selectSurfaceTools(
  * sin egen tekst, ellers kunne en modellskrevet prompt («finn e-poster fra banken») gå til sky selv om de samme ordene fra eieren hadde holdt turen lokal. Dette er en overmengde (superset) av utvalget
  * (ikke begrenset av verktøybudsjettet, ikke av småprat-regelen) - strengere, aldri løsere - og kjenner bare ordene i `TOOL_INTENTS` (jf. Q-52).
  */
-export function financeToolIntent(text: string): boolean {
-  return Object.entries(TOOL_INTENTS).some(([toolId, intent]) => RESTRICTED_TOOL_ID.test(toolId) && intent.test(text));
+export function financeToolIntent(text: string, options: FinanceIntentOptions = {}): boolean {
+  if (Object.entries(TOOL_INTENTS).some(([toolId, intent]) => RESTRICTED_TOOL_ID.test(toolId) && intent.test(text))) return true;
+  // Gjennomgang L5: er et begrenset kontrollsenter-verktøy REGISTRERT (flagget på), låser chatten en tur som velger det (`RESTRICTED_TOOL_KEYS`) - da holder senterets egne ord også en delegert jobb lokal (paritet).
+  // Uten `restrictedTools` (flaggene AV, standard) er svaret nøyaktig det samme som før H1.
+  return (options.restrictedTools ?? []).some((key) => RESTRICTED_TOOL_KEYS.has(key) && (INTENT_KEYWORDS[key]?.test(text) ?? false));
+}
+
+export interface FinanceIntentOptions {
+  /** Verktøynøkler (`tool_id.action`) for begrensede kontrollsenter-verktøy som faktisk er registrert (senterets flagg er på). Nøkler som ikke er utvalgslåst (`isSelectionLockedTool`) ignoreres. */
+  restrictedTools?: ReadonlyArray<string>;
 }
 
 const JOB_MEMORY_SPACES = ["personal", "business", "project", "health", "home", "guest", "shared"] as const;

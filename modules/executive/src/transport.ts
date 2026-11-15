@@ -4,7 +4,7 @@ import type { JsonValue } from "@jarvis/contracts";
 import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import type { ExecutiveService } from "./service.ts";
 import { summarizeCapabilityStatusNo, summarizeConnectorStatusNo, summarizeSelfDiagnosisNo } from "./status-summary.ts";
-import { CONTROL_CENTER_IDS, CONTROL_CENTER_READ_TOOLS, controlCenterForReadAction, stripMoneyFacts, type ControlCenterId } from "./control-center/index.ts";
+import { CLOUD_WITHHELD_CENTERS, CONTROL_CENTER_IDS, CONTROL_CENTER_READ_TOOLS, CONTROL_CENTER_TITLES_NO, controlCenterForReadAction, isCloudWithheldCenter, withheldCenterData, type ControlCenterId } from "./control-center/index.ts";
 
 /**
  * UA-11 Executive Mode (P0, D-162): eierens SAMLEDE kontrollflate, eksponert
@@ -34,18 +34,21 @@ export class ExecutiveTransport implements ToolTransport {
   }
 
   /**
-   * WP-H0/H1: ÉN rapport-respons for `get_control_center` (med `center`) og de per-senter verktøyene. Et ikke-koblet senter (registeret har det ikke, f.eks. flagget er av) er et ærlig, strukturert svar
-   * (`found: false`) - IKKE et kastet unntak, som ToolGateway ellers ville tolket som at hele executive-verktøyet er utilgjengelig (helse). Når en modell betjener kallet (`servingModel`) fjernes pengebeløp
-   * (`*_ore`-fakta) fra finans-senteret (`stripMoneyFacts`); siden uten modell i løkka får hele rapporten.
+   * WP-H0/H1: ÉN rapport-respons for `get_control_center` (med `center`) og de per-senter verktøyene. Et ikke-koblet senter (registeret har det ikke, f.eks. avhengighetene mangler) er et ærlig, strukturert svar
+   * (`found: false`) - IKKE et kastet unntak, som ToolGateway ellers ville tolket som at hele executive-verktøyet er utilgjengelig (helse).
+   * Gjennomgang M2: ber en SKYmodell om et senter som ikke skal til sky (`CLOUD_WITHHELD_CENTERS`, finans: D-378), bygges det ikke engang - svaret er en kort «holdt tilbake»-merknad. Lokale modeller og siden (ingen modell
+   * i løkka) får hele rapporten. Håndhevingen skjer HER, ved utførelse, uavhengig av hvilke verktøy utvalget valgte for turen.
    */
   private async centerResponse(identity: Parameters<ExecutiveService["getControlCenterReport"]>[0], center: string, servingModel: ToolInvocationContext["servingModel"]): Promise<{ data: JsonValue }> {
+    if (isCloudWithheldCenter(center) && this.service.isCloudServed(servingModel) && this.service.hasControlCenter(center)) {
+      return { data: withheldCenterData(center as ControlCenterId, CONTROL_CENTER_TITLES_NO[center as ControlCenterId]) as unknown as JsonValue };
+    }
     const result = await this.service.getControlCenterReport(identity, center);
     if (result === null) {
-      return { data: { found: false, center, summary_no: "Dette kontrollsenteret er ikke koblet inn ennå (eller er slått av), så ingenting kan vurderes." } as unknown as JsonValue };
+      return { data: { found: false, center, summary_no: "Dette kontrollsenteret er ikke koblet inn ennå, så ingenting kan vurderes." } as unknown as JsonValue };
     }
-    const report = servingModel !== undefined ? stripMoneyFacts(result.report) : result.report;
     // `summary_no` og `explanation_no` først: chat-executoren kutter lange svar bakfra, og det er disse modellen skal relayere.
-    return { data: { found: true, summary_no: report.summary_no, explanation_no: result.explanation_no, report } as unknown as JsonValue };
+    return { data: { found: true, summary_no: result.report.summary_no, explanation_no: result.explanation_no, report: result.report } as unknown as JsonValue };
   }
 
   /** Gjennomgang av PR #324 (M3/L4): eier + signert økt-porten for `get_infra_status` - fail-closed også uten register. */
@@ -128,7 +131,7 @@ export class ExecutiveTransport implements ToolTransport {
         // IKKE et kastet unntak, som ToolGateway ellers ville tolket som at hele executive-verktøyet er utilgjengelig (helse).
         const center = parameters["center"];
         if (center === undefined) {
-          const overview = await this.service.getControlCenterOverview(identity);
+          const overview = await this.service.getControlCenterOverview(identity, this.service.isCloudServed(context?.servingModel) ? { withhold: CLOUD_WITHHELD_CENTERS } : {});
           const { summary_no, ...rest } = overview;
           return { data: { summary_no, ...rest } as unknown as JsonValue }; // `summary_no` først (se under)
         }
@@ -252,6 +255,18 @@ function requireString(parameters: Record<string, JsonValue>, key: string): stri
 
 const record = (shape: z.ZodRawShape) => z.object(shape).strict() as unknown as z.ZodType<Record<string, JsonValue>>;
 
+export interface ExecutiveToolOptions {
+  /**
+   * WP-H1/H2 (gjennomgang M1): sentrene hvis per-senter lese-verktøy (`get_<senter>_center`) registreres - KUN de hvis flagg er PÅ og som er registrert (`controlCentersWithTools(env, registry)` i apps/api). Utelatt/tom = ingen av dem finnes
+   * (identisk med main): verktøyet kan da hverken velges av utvalget, kalles av en modell eller listes som tilgjengelig. Rate-grensen på `get_control_center` heves først når minst ett senter er på.
+   */
+  controlCenters?: ReadonlyArray<ControlCenterId>;
+  /** WP-H2: registrer `run_golden_suite` (golden-suite-knappen). AV som standard - uten flagget finnes verktøyet ikke. */
+  goldenSuite?: boolean;
+  /** WP-H2: registrer `revoke_autonomy_binding` (tilbakekall av eierens autonomi-binding fra kontrollsenteret). AV som standard - uten flagget finnes verktøyet ikke. */
+  autonomyRevoke?: boolean;
+}
+
 /**
  * ToolGateway-definisjonene for den samlede kontrollflaten. Lese-handlinger
  * er klasse A (samme som `situations.get_queue`/`get_pause_state` selv);
@@ -272,14 +287,8 @@ const record = (shape: z.ZodRawShape) => z.object(shape).strict() as unknown as 
  * `restore_credential`/`revoke_device` er klasse C, SAMME som
  * `owner_controls` sine egne - `control()` gjenbrukes uendret).
  */
-export interface ExecutiveToolOptions {
-  /** WP-H2: registrer `run_golden_suite` (golden-suite-knappen). AV som standard - uten flagget finnes verktøyet ikke. */
-  goldenSuite?: boolean;
-  /** WP-H2: registrer `revoke_autonomy_binding` (tilbakekall av eierens autonomi-binding fra kontrollsenteret). AV som standard - uten flagget finnes verktøyet ikke. */
-  autonomyRevoke?: boolean;
-}
-
 export function executiveToolDefinitions(transport: ExecutiveTransport, options: ExecutiveToolOptions = {}): ToolDefinition[] {
+  const enabledCenters = new Set<ControlCenterId>(options.controlCenters ?? []);
   const common = {
     credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF,
     output_trust: "internal" as const,
@@ -337,14 +346,15 @@ export function executiveToolDefinitions(transport: ExecutiveTransport, options:
         "Les eierens kontrollsentre (UA-11 Admin Control Center): uten `center` en oversikt over alle ti sentre med status per seksjon (integrasjoner, autoritet, AI, finans, minne, agenter, drift, verdi, personvern, sikkerhet); med `center` full rapport for ett senter med hvert tall kildeforankret (tabell/kilde og når det ble målt), en norsk forklaring av hvorfor noe er advarsel/feil, og hvilke eksisterende kontrollhandlinger eieren kan ta (pause/tilbakekall). KUN lesing - jeg utfører ingenting herfra. Ukjent vises som ukjent, aldri som i orden. Kun eieren får svar, og kun fra en signert enhetsøkt (nettleser/app) - aldri over tale eller Telegram.",
         { center: z.enum(CONTROL_CENTER_IDS).optional() }
       ),
-      // WP-H1: siden gjør 1 + (antall sentre) kall per oppdatering (oversikt + ett per senter); med ti sentre er 30/min for lavt (to oppdateringer på rad ga 429). 120/min er fortsatt lavt: kun eieren
-      // fra en signert enhetsøkt når verktøyet, og bygginger av samme senter for samme identitet deles (single-flight i registeret).
-      rate_limit_per_minute: 120,
+      // WP-H1: siden gjør 1 + (antall sentre) kall per oppdatering (oversikt + ett per senter); med flere sentre på er 30/min for lavt (to oppdateringer på rad ga 429). 120/min er fortsatt lavt: kun eieren
+      // fra en signert enhetsøkt når verktøyet, og bygginger av samme senter for samme identitet deles (single-flight i registeret). Gjennomgang M1: heves KUN når minst ett senter er slått på - ellers er grensen som på main (30).
+      ...(enabledCenters.size > 0 ? { rate_limit_per_minute: 120 } : {}),
       // WP-H0: eier-kun FØR noe bygges (avslaget er en vanlig `tool.denied`-revisjonsrad). Rapportene er konfigurasjonsmetadata og handlingene peker på eier-ruter.
       parameterAuthorizer: (_parameters, identity) => transport.authorizeControlCenter(identity)
     },
     // WP-H1/H2: per-senter lese-verktøy (`get_finance_center` m.fl.) - ingen parametre, samme register, EGEN fail-closed port (eier + signert enhetsøkt). Tabellen er `CONTROL_CENTER_READ_TOOLS`.
-    ...CONTROL_CENTER_READ_TOOLS.map((tool): ToolDefinition => ({
+    // Gjennomgang M1: registreres KUN for sentre med flagget på - ellers finnes verktøyet ikke (flagg AV er identisk med main).
+    ...CONTROL_CENTER_READ_TOOLS.filter((tool) => enabledCenters.has(tool.center)).map((tool): ToolDefinition => ({
       ...read(tool.action, tool.description),
       parameterAuthorizer: (_parameters, identity) => transport.authorizeControlCenterRead(identity)
     })),

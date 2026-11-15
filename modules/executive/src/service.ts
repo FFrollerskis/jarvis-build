@@ -4,7 +4,7 @@ import { composeEvolutionReport, type EvolutionReport } from "./evolution/index.
 import { composeAiMeshReport, type AiMeshReport } from "./ai-mesh/index.ts";
 import {
   composeControlCenterOverview, explainControlCenterNo,
-  type ControlCenterOverview, type ControlCenterRegistry, type ControlCenterReport, type GoldenSuiteControl, type GoldenSuiteRunResult
+  type ControlCenterId, type ControlCenterOverview, type ControlCenterRegistry, type ControlCenterReport, type GoldenSuiteControl, type GoldenSuiteRunResult
 } from "./control-center/index.ts";
 import {
   composeValueReport, deriveChangeFreeze, describeValueLoops, evaluateBuilderLoopReadiness, proposeOpsActions,
@@ -114,6 +114,11 @@ export interface ExecutiveServiceOptions {
    * Uten registeret: oversikten sier ærlig at ingen sentre er koblet inn (aldri en gjetning om at alt er i orden).
    */
   controlCenters?: ControlCenterRegistry;
+  /**
+   * Gjennomgang M2: er modellen som betjener kallet en LOKAL modell? Lokale modeller får se finansdata (D-378 punkt 2: kun skyen er utestengt); alt annet - sky, ukjent leverandør - regnes som sky (fail-closed).
+   * Utelatt = ingen modell regnes som lokal, så ethvert kall fra en modell holder finans tilbake. I drift: leverandørregisterets `locality` (`servedByCloudModel`, `apps/api/src/cloud-tool-screen.ts`).
+   */
+  servedLocally?: (model: { provider: string; model: string }) => boolean;
   /**
    * WP-H0 (JARVIS-087): avbryt en bakgrunnsjobb/agent fra kontrollsenteret. Den EKSISTERENDE kanselleringsveien (`TaskService.cancel`: klasse B-policy, `requestCancel`, revisjon `task.cancelled`) injiseres fra
    * `apps/api`; executive-laget har ingen egen kanselleringslogikk. Uten denne avvises handlingen (`executive_tasks_not_configured`).
@@ -519,10 +524,27 @@ export class ExecutiveService {
   }
 
   /** WP-H0: oversikt over de ti kontrollsentrene (registrerte bygges, øvrige listes som ikke koblet inn). RENT lesende. */
-  async getControlCenterOverview(identity: IdentityContext): Promise<ControlCenterOverview> {
+  async getControlCenterOverview(identity: IdentityContext, options: { withhold?: readonly ControlCenterId[] } = {}): Promise<ControlCenterOverview> {
     const registry = this.options.controlCenters;
-    if (registry) return registry.overview(identity);
+    if (registry) return registry.overview(identity, options);
     return composeControlCenterOverview([], new Date());
+  }
+
+  /** Gjennomgang M2: betjenes kallet av en SKYmodell? `false` uten modell (siden/ruten) og for en lokal modell; `true` for sky og alt ukjent (fail-closed). */
+  isCloudServed(model: { provider: string; model: string } | undefined): boolean {
+    if (model === undefined) return false;
+    const local = this.options.servedLocally;
+    if (local === undefined) return true;
+    try {
+      return local(model) !== true;
+    } catch {
+      return true;
+    }
+  }
+
+  /** Er senteret registrert (flagg på og avhengigheter koblet)? Brukes for at en holdt-tilbake-melding aldri skal gis for et senter som ikke finnes. */
+  hasControlCenter(id: string): boolean {
+    return this.options.controlCenters?.has(id) === true;
   }
 
   /** WP-H0: full rapport for ETT senter + deterministisk forklaring, eller `null` når senteret ikke er koblet inn. RENT lesende. */

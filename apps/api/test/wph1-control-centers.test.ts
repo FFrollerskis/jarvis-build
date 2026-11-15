@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
 import { ControlCenterAccessError, ControlCenterRegistry, type ControlCenterDefinition, type ControlCenterId, type ControlCenterReport } from "@jarvis/executive";
-import { createAgentCenter } from "../src/control-center/agent.ts";
+import { ARTIFACT_KINDS_SQL, ARTIFACT_TOTALS_SQL, bytesNo, createAgentCenter } from "../src/control-center/agent.ts";
 import { createFinanceCenter } from "../src/control-center/finance.ts";
 import { createMemoryCenter } from "../src/control-center/memory.ts";
 import { CONTROL_CENTER_FLAGS, createControlCenterRegistry, registerControlCenters } from "../src/control-center/register.ts";
@@ -194,6 +194,48 @@ describe("ærlig ukjent", () => {
   });
 });
 
+describe("gjennomgang M3: artefaktmengden er byte (octet_length), og leser aldri innholdet", () => {
+  it("begge SQL-spørringene bruker `octet_length(content)` - aldri `length(content)` (som må hente og dekomprimere hele TOAST-innholdet per rad) - og kolonnen heter `bytes`", () => {
+    for (const sql of [ARTIFACT_TOTALS_SQL, ARTIFACT_KINDS_SQL]) {
+      expect(sql).toContain("sum(octet_length(content))");
+      expect(sql).not.toMatch(/[^_]length\(content\)/);
+      expect(sql).toContain("AS bytes");
+      expect(sql).not.toContain("chars");
+      expect(sql).toContain("WHERE tenant_id = $1");
+    }
+    expect(ARTIFACT_KINDS_SQL).toMatch(/LIMIT 30$/);
+  });
+
+  it("`bytesNo` viser byte, KiB, MiB og GiB med norsk desimalkomma", () => {
+    expect(bytesNo(0)).toBe("0 byte");
+    expect(bytesNo(1023)).toBe("1023 byte");
+    expect(bytesNo(1024)).toBe("1,0 KiB");
+    expect(bytesNo(1536)).toBe("1,5 KiB");
+    expect(bytesNo(1024 ** 2)).toBe("1,0 MiB");
+    expect(bytesNo(25 * 1024 ** 2)).toBe("25,0 MiB");
+    expect(bytesNo(5 * 1024 ** 3)).toBe("5,0 GiB");
+  });
+
+  it("senteret merker tallet som byte (ikke «tegn»): fakta heter `bytes`, teksten bruker enheten, og kilden sier byte", async () => {
+    const rules: ScriptedRule[] = [
+      { match: /FROM artifacts WHERE tenant_id = \$1 AND created_at/, rows: [{ kind: "report", n: 2, bytes: "3145728", last_at: NOW.toISOString() }] },
+      { match: /FROM artifacts WHERE tenant_id = \$1$/, rows: [{ total: 7, bytes: "5368709120" }] }
+    ];
+    const r = await build("agent", new ScriptedPool(rules));
+    const artifacts = r.sections.find((s) => s.id === "artifacts")!;
+    const kind = artifacts.items.find((i) => i.id === "kind:report")!;
+    expect(kind.facts).toMatchObject({ count: 2, bytes: 3_145_728 });
+    expect(kind.facts).not.toHaveProperty("chars");
+    expect(kind.detail_no).toContain("3,0 MiB");
+    expect(kind.detail_no).not.toContain("tegn");
+    const total = artifacts.items.find((i) => i.id === "artifacts_total")!;
+    expect(total.facts).toMatchObject({ total: 7, bytes: 5_368_709_120 });
+    expect(total.detail_no).toContain("5,0 GiB");
+    expect(artifacts.source).toContain("byte");
+    expect(artifacts.source).not.toContain("tegn");
+  });
+});
+
 describe("redaksjon og kategorier", () => {
   // Bygges i to deler uten nøkkelord rett foran den lange delen (skanneren leser kildeteksten; verdien settes sammen først ved kjøring).
   const FAKE_KEY = `${["sk", "ant", "api03"].join("-")}-${"FALSKNOKKELFORTEST".concat("0123456789ABCDEF")}`;
@@ -202,7 +244,7 @@ describe("redaksjon og kategorier", () => {
     const rules: ScriptedRule[] = [
       { match: /jsonb_array_elements_text/, rows: [{ source: "intents", flag: FAKE_KEY, n: 1 }] },
       { match: /FROM knowledge_documents/, rows: [{ source_type: FAKE_KEY, documents: 1, tombstoned: 0, instances: 1, last_synced_at: NOW.toISOString() }] },
-      { match: /FROM artifacts WHERE tenant_id = \$1 AND created_at/, rows: [{ kind: FAKE_KEY, n: 1, chars: 10, last_at: NOW.toISOString() }] }
+      { match: /FROM artifacts WHERE tenant_id = \$1 AND created_at/, rows: [{ kind: FAKE_KEY, n: 1, bytes: 10, last_at: NOW.toISOString() }] }
     ];
     for (const id of H1_CENTERS as ReadonlyArray<keyof typeof FACTORIES>) {
       const registry = createControlCenterRegistry({ authority, now: () => NOW });

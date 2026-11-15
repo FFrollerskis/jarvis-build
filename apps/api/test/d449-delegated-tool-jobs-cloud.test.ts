@@ -530,7 +530,7 @@ describe("D-449: oppkobling (kildevakt)", () => {
     for (const name of ["ANTHROPIC_API_KEY", "JARVIS_BUDGET_APPROVED"]) expect(workerEnv, name).toContain(name);
   });
 
-  it("eier-merket `contentOrigin: \"owner_direct\"` settes på nøyaktig TO steder i HELE produksjonskoden: hurtigbanen i main.ts (kun når samtalemotoren sa cloudAllowed) og dashbord-ruten POST /governance/mutate i server.ts (WP-H1: kun for den suverene eieren, etter løst grant); `/confirmations`, `/executive/*` og modellflaten setter det aldri", () => {
+  it("eier-merket `contentOrigin: \"owner_direct\"` settes på nøyaktig TO steder i HELE produksjonskoden: hurtigbanen i main.ts (kun når samtalemotoren sa cloudAllowed) og dashbord-ruten POST /governance/mutate i server.ts (WP-H1: kun for den suverene eieren fra en enhetssignert eier-kanal-økt (L3), etter løst grant); `/confirmations`, `/executive/*` og modellflaten setter det aldri", () => {
     // Kun kode: kommentarer og typedeklarasjoner (`contentOrigin: "owner_direct" | undefined`) er ikke et sted merket SETTES.
     const code = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
     const setters = (text: string) => code(text).match(/contentOrigin:\s*"owner_direct"(?!\s*\|)/g);
@@ -571,7 +571,8 @@ describe("D-449: oppkobling (kildevakt)", () => {
     expect(setterAt).toBeGreaterThan(govRoute);
     expect(setterAt).toBeLessThan(nextRoute);
     expect(serverSource.indexOf("resolveFromGrant(deps", govRoute)).toBeLessThan(setterAt);
-    expect(serverSource).toMatch(/\.\.\.\(deps\.ownerGate\?\.\(resolved\.identity\) === true \? \{ contentOrigin: "owner_direct" as const \} : \{\}\)/);
+    // Gjennomgang L3: attesten krever BÅDE eier-porten OG en enhetssignert økt fra en eier-kanal (`ownerStepUpDenial`) - en svak/passiv/tale-sesjon får aldri `owner_direct`.
+    expect(serverSource).toMatch(/\.\.\.\(deps\.ownerGate\?\.\(resolved\.identity\) === true && ownerStepUpDenial\(resolved\.identity\) === undefined \? \{ contentOrigin: "owner_direct" as const \} : \{\}\)/);
     // Leseren: journal-transporten bruker attesten kun til å skrive `prov_origin` - en modell i løkka (`servingModel`) vinner alltid, og uten attest er opphavet `unspecified`. Ingen rute eller kostnadsvei åpnes av den.
     const governanceTransport = readFileSync(fileURLToPath(new URL("../../../modules/governance/src/transport.ts", import.meta.url)), "utf8");
     expect(governanceTransport).toContain('origin: context.servingModel !== undefined ? "model" : context.contentOrigin === "owner_direct" ? "owner_direct" : "unspecified"');

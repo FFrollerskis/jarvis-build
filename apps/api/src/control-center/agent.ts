@@ -16,7 +16,7 @@ import { DAY_MS, HOUR_MS, bySeverityThenLabel, countsNo, mergeBy, relativeNo, sa
  * (`executive.cancel_task` på `/executive/mutate`, eier-kun, klasse B, ingen step-up - en stopp-handling).
  *
  * INNHOLDSVERN: `tasks.goal` (jobbtittelen), `result`, `checkpoint`, `last_error`-TEKSTEN, artefaktnavn/-innhold og nettverksmålene (vertsnavn) leses ALDRI - kun status, antall, tidsstempler, forsøk,
- * lease, agentprofil, antall nettverksmål, artefaktart og tegnmengde. En jobb kan være skrevet av en modell som har lest ubetrodd innhold; tittelen står i chatten (`/chat/jobs`).
+ * lease, agentprofil, antall nettverksmål, artefaktart og bytemengde. En jobb kan være skrevet av en modell som har lest ubetrodd innhold; tittelen står i chatten (`/chat/jobs`).
  *
  * ÆRLIGHET OM WORKERE: det finnes INGEN worker-hjerteslag. En worker er «bevist i live» kun av en nylig claim (siste 24 t) eller en kjørende jobb med fornyet lease; uten aktivitet er worker-helse
  * `ikke målt` (en ledig worker kan ikke skilles fra en stoppet). Jobb-runneren på verten (WP-C1) kalles ikke herfra: dens tilstand utledes kun av kodejobbenes utfall (`host_job_runner_error:`-feil).
@@ -31,6 +31,23 @@ export const WORKER_EVIDENCE_WINDOW_MS = 24 * HOUR_MS;
 export const RUNNER_ERROR_PREFIX_SQL = "^(host_job_runner_error|job_container_runner_not_configured)";
 const WORKER_LIST_LIMIT = 20;
 
+/**
+ * Gjennomgang M3: artefaktmengden måles i BYTE med `octet_length(content)`, ikke tegn med `length(content)`. `length` på en stor, TOAST-lagret tekst må hente og dekomprimere HELE innholdet for hver rad (målt av
+ * reviewer: 60 x 4 MB = 0,82-0,89 s og 31 500 buffere per kall, lineært i datamengden, gjentatt ved hver sideoppfriskning mens registerets tidsavbrudd ikke avbryter spørringen); `octet_length` leser lengden fra
+ * TOAST-pekeren uten å røre innholdet (0,07 ms, noen få buffere). Navnene er eksportert så plan-/bufferveggen i `wph1-agent-center-db.test.ts` kjører NØYAKTIG disse spørringene.
+ */
+export const ARTIFACT_TOTALS_SQL = `SELECT (count(*))::int AS total, (coalesce(sum(octet_length(content)), 0))::text AS bytes FROM artifacts WHERE tenant_id = $1`;
+export const ARTIFACT_KINDS_SQL = `SELECT kind, (count(*))::int AS n, (coalesce(sum(octet_length(content)), 0))::text AS bytes, max(created_at) AS last_at FROM artifacts WHERE tenant_id = $1 AND created_at >= $2 GROUP BY kind ORDER BY kind LIMIT 30`;
+
+/** «1,5 MiB»-aktig visning av en bytemengde (norsk desimalkomma). */
+export function bytesNo(n: number): string {
+  const fmt = (v: number, unit: string): string => `${v.toFixed(1).replace(".", ",")} ${unit}`;
+  if (n < 1024) return `${n} byte`;
+  if (n < 1024 ** 2) return fmt(n / 1024, "KiB");
+  if (n < 1024 ** 3) return fmt(n / 1024 ** 2, "MiB");
+  return fmt(n / 1024 ** 3, "GiB");
+}
+
 export interface AgentAggregates {
   queue: { queued: number; ready: number; in_backoff: number; oldest_ready_at: string | null; paused: number };
   running: number;
@@ -42,7 +59,7 @@ export interface AgentAggregates {
   runner: { coding_7d: number; coding_completed_7d: number; errors_7d: number; last_error_at: string | null };
   by_profile: Array<{ profile: string; status: string; n: number }>;
   workers: Array<{ worker_id: string; running: number; expired: number; last_claim_at: string | null; soonest_lease_at: string | null }>;
-  artifacts: { total: number; chars: number; recent_by_kind: Array<{ kind: string; n: number; chars: number; last_at: string | null }> };
+  artifacts: { total: number; bytes: number; recent_by_kind: Array<{ kind: string; n: number; bytes: number; last_at: string | null }> };
 }
 
 const laterIso = (a: string | null, b: string | null): string | null => (a === null ? b : b === null ? a : Date.parse(a) >= Date.parse(b) ? a : b);
@@ -91,11 +108,8 @@ export async function readAgentAggregates(pool: ControlCenterPool, tenantId: str
               max(claimed_at) AS last_claim_at, min(lease_expires_at) AS soonest_lease_at
          FROM tasks WHERE tenant_id = $1 AND status = 'running' GROUP BY worker_id ORDER BY worker_id LIMIT ${WORKER_LIST_LIMIT}`, [tenantId, now]
     );
-    const artifactTotals = (await query(`SELECT (count(*))::int AS total, (coalesce(sum(length(content)), 0))::text AS chars FROM artifacts WHERE tenant_id = $1`, [tenantId]))[0] ?? {};
-    const artifactKinds = await query(
-      `SELECT kind, (count(*))::int AS n, (coalesce(sum(length(content)), 0))::text AS chars, max(created_at) AS last_at FROM artifacts WHERE tenant_id = $1 AND created_at >= $2 GROUP BY kind ORDER BY kind LIMIT 30`,
-      [tenantId, d7]
-    );
+    const artifactTotals = (await query(ARTIFACT_TOTALS_SQL, [tenantId]))[0] ?? {};
+    const artifactKinds = await query(ARTIFACT_KINDS_SQL, [tenantId, d7]);
     const audit = (await query(`SELECT (count(*))::int AS n, max(at) AS last_at FROM audit_events WHERE tenant_id = $1 AND type = 'task.cancelled' AND at >= $2`, [tenantId, d7]))[0] ?? {};
     return {
       queue: { queued: toInt(t["queued"]), ready: toInt(t["ready"]), in_backoff: toInt(t["in_backoff"]), oldest_ready_at: toIso(t["oldest_ready_at"]), paused: toInt(t["paused"]) },
@@ -116,10 +130,10 @@ export async function readAgentAggregates(pool: ControlCenterPool, tenantId: str
         (a, b) => ({ worker_id: a.worker_id, running: a.running + b.running, expired: a.expired + b.expired, last_claim_at: laterIso(a.last_claim_at, b.last_claim_at), soonest_lease_at: earlierIso(a.soonest_lease_at, b.soonest_lease_at) })
       ),
       artifacts: {
-        total: toInt(artifactTotals["total"]), chars: toInt(artifactTotals["chars"]),
+        total: toInt(artifactTotals["total"]), bytes: toInt(artifactTotals["bytes"]),
         recent_by_kind: mergeBy(
-          artifactKinds.map((r) => ({ kind: safeCategory(r["kind"]), n: toInt(r["n"]), chars: toInt(r["chars"]), last_at: toIso(r["last_at"]) })),
-          (k) => k.kind, (a, b) => ({ kind: a.kind, n: a.n + b.n, chars: a.chars + b.chars, last_at: laterIso(a.last_at, b.last_at) })
+          artifactKinds.map((r) => ({ kind: safeCategory(r["kind"]), n: toInt(r["n"]), bytes: toInt(r["bytes"]), last_at: toIso(r["last_at"]) })),
+          (k) => k.kind, (a, b) => ({ kind: a.kind, n: a.n + b.n, bytes: a.bytes + b.bytes, last_at: laterIso(a.last_at, b.last_at) })
         )
       }
     };
@@ -289,13 +303,13 @@ export function createAgentCenter(deps: AgentCenterDeps): ControlCenterDefinitio
         // -----------------------------------------------------------------------------------------------------------------------------------------
         const artifactItems: ControlItem[] = v.artifacts.recent_by_kind.map((k) => controlItem({
           id: `kind:${k.kind}`, label: `Artefakter siste 7 døgn: ${k.kind}`, status: "OK", observed_at: k.last_at,
-          detail_no: `${k.n} artefakter, ${k.chars} tegn totalt; sist ${rel(k.last_at)}. Navn og innhold vises aldri.`, facts: { kind: k.kind, count: k.n, chars: k.chars, last_at: k.last_at }
+          detail_no: `${k.n} artefakter, ${bytesNo(k.bytes)} totalt; sist ${rel(k.last_at)}. Navn og innhold vises aldri.`, facts: { kind: k.kind, count: k.n, bytes: k.bytes, last_at: k.last_at }
         }));
         artifactItems.push(controlItem({
-          id: "artifacts_total", label: "Alle artefakter", status: "OK", detail_no: `${v.artifacts.total} artefakter lagret (${v.artifacts.chars} tegn).`, facts: { total: v.artifacts.total, chars: v.artifacts.chars }
+          id: "artifacts_total", label: "Alle artefakter", status: "OK", detail_no: `${v.artifacts.total} artefakter lagret (${bytesNo(v.artifacts.bytes)}).`, facts: { total: v.artifacts.total, bytes: v.artifacts.bytes }
         }));
         sections.push(controlSection({
-          id: "artifacts", title_no: "Artefakter", observed_at: nowIso, items: artifactItems, source: "artifacts (art, antall, tegnmengde; navn og innhold leses aldri; tenant-RLS)",
+          id: "artifacts", title_no: "Artefakter", observed_at: nowIso, items: artifactItems, source: "artifacts (art, antall, byte; navn og innhold leses aldri; tenant-RLS)",
           summary_no: `${v.artifacts.total} artefakter totalt; ${v.artifacts.recent_by_kind.reduce((a, k) => a + k.n, 0)} siste 7 døgn.`
         }));
 

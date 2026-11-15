@@ -2,8 +2,8 @@
 import type pg from "pg";
 import type { MemorySpace } from "@jarvis/contracts";
 import { scanForSecrets, withTenantTransaction } from "@jarvis/core";
-import { failureCategory, type ControlItem, type ControlRiskClass, type ControlStatus } from "@jarvis/executive";
-import type { ToolGateway } from "@jarvis/tool-gateway";
+import { CONTROL_CENTER_READ_TOOLS, failureCategory, isCloudWithheldCenter, type ControlCenterId, type ControlItem, type ControlRiskClass, type ControlStatus } from "@jarvis/executive";
+import type { FinanceIntentOptions, ToolGateway } from "@jarvis/tool-gateway";
 import { withMemoryTransaction } from "@jarvis/memory";
 
 /**
@@ -162,6 +162,16 @@ export function safeCategory(value: unknown): string {
 }
 
 /**
+ * Gjennomgang L5: id-felt fra databasen (samtykke-id, avstemmingskjøring) skal gjennom SAMME filter som `safeCategory`, men et avvist felt får en UNIK reserveverdi (`fallback`, f.eks. `ukjent-2`) i stedet for «annet»:
+ * id-er må være unike i en seksjon (en kollisjon ville felt hele senteret, `duplicate_control_item_id`), og en id som ligner en hemmelighet skal aldri ut i en rapport, et element-id eller en etikett (registerets redigering
+ * rører bevisst ikke id-er). Gyldige, Jarvis-genererte id-er (`bank-co-<uuid>`, `fin-rec-<uuid>`) passerer uendret.
+ */
+export function safeRef(value: unknown, fallback: string): string {
+  const safe = safeCategory(value);
+  return safe === "annet" ? fallback : safe;
+}
+
+/**
  * Slår sammen rader som får SAMME nøkkel etter `safeCategory` (to ulike «uvanlige» verdier blir begge «annet»). Id-ene i en seksjon må være unike - en kollisjon ville ellers felt hele senteret
  * (`duplicate_control_item_id`) på grunn av én rar rad. Rekkefølgen beholdes (første forekomst).
  */
@@ -205,3 +215,34 @@ export const CONTROL_FEATURE_FLAGS = {
   goldenSuite: "JARVIS_CONTROL_GOLDEN_SUITE",
   autonomyRevoke: "JARVIS_CONTROL_AUTONOMY_REVOKE"
 } as const;
+
+/**
+ * Gjennomgang M1: sentrene hvis flagg er PÅ (eksakt «on»), i masterplanens rekkefølge. `main.ts` registrerer per-senter lese-verktøyene (`executive.get_<senter>_center`) KUN for disse - med alle flagg AV er
+ * verktøysettet, flatene og utvalget identisk med main.
+ */
+export function enabledControlCenters(env: Readonly<Record<string, string | undefined>>): ControlCenterId[] {
+  return (Object.keys(CONTROL_CENTER_FLAGS) as Array<keyof typeof CONTROL_CENTER_FLAGS>).filter((id) => flagOn(env, CONTROL_CENTER_FLAGS[id]));
+}
+
+/**
+ * Gjennomgang M1 + L5: sentrene som får et lese-verktøy = flagget er PÅ **og** senteret er faktisk registrert i registeret (`registerControlCenters` registrerer ikke et senter uten sine avhengigheter). Et verktøy for et senter som
+ * ikke finnes ville svart «ikke koblet inn» og stått som tilgjengelig i `get_capability_status` - det registreres derfor ikke. `main.ts` kaller denne etter `registerControlCenters`.
+ */
+export function controlCentersWithTools(env: Readonly<Record<string, string | undefined>>, registry: { has(id: string): boolean }): ControlCenterId[] {
+  return enabledControlCenters(env).filter((id) => registry.has(id));
+}
+
+/**
+ * Gjennomgang L5: verktøynøklene (`executive.get_<senter>_center`) for sentrene som er slått PÅ og som holdes tilbake fra skymodeller (`CLOUD_WITHHELD_CENTERS`: Finans, og i H2 Verdi) - samme sentre som låser en chat-tur
+ * lokalt når verktøyet velges. `financeToolIntent` bruker dem så en delegert jobb med senterets ord også holdes lokal (paritet med chatten). Tom liste (alle flagg AV) = nøyaktig oppførselen på main.
+ */
+export function activeRestrictedControlTools(env: Readonly<Record<string, string | undefined>>): string[] {
+  return enabledControlCenters(env)
+    .filter((center) => isCloudWithheldCenter(center))
+    .flatMap((center) => CONTROL_CENTER_READ_TOOLS.filter((t) => t.center === center).map((t) => `executive.${t.action}`));
+}
+
+/** Valgene `financeToolIntent` får fra kallere i apps/api (delegerte jobber): leses fra miljøet ved hvert kall, så en endring av flaggene (krever restart av api) aldri kan gi en foreldet liste. */
+export function financeIntentOptions(env: Readonly<Record<string, string | undefined>> = process.env): FinanceIntentOptions {
+  return { restrictedTools: activeRestrictedControlTools(env) };
+}
