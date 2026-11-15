@@ -46,6 +46,17 @@ export function replySendIdempotencyKey(ticketId: string, replyKey: string): str
   return `support-reply:${ticketId}:${replyKey}`;
 }
 
+/**
+ * Delta-review L-4 (eksisterende feil, ikke fra WP-K-deltaen): `source_message_id` for den REGISTRERTE svar-hendelsen. Den var `reply:<kallernøkkel>` UTEN ticket, men hendelsesoppslaget (`findEventBySourceMessage`) og
+ * ingest-dedupen er nøklet på (tenant, kildetype, kildeinstans, `source_message_id`) - og alle Gmail-tickets i samme konto deler kildetype og instans. Samme kallernøkkel på en ANDRE ticket traff derfor hendelsen til den første:
+ * `reply()` ga `sent: true` (`ok: true`) uten at noe ble sendt - en stille drop. Nå scopet på ticket (`reply:<ticket_id>:<nøkkel>`; ticket-id-er er `sup-tk-<uuid>` uten kolon, så formen er entydig), akkurat som nøkkelen
+ * for det nøstede sendekallet (`replySendIdempotencyKey`). Et identisk gjentatt svar på SAMME ticket slås fortsatt opp og sendes ikke på nytt. Hendelser registrert før denne endringen bruker den gamle uscopede formen og gjenkjennes
+ * ikke (ingen finnes i produksjon: `support.reply` sendte aldri noe under håndhevet klasse D før LOW 6-fiksen).
+ */
+export function replyEventSourceMessageId(ticketId: string, replyKey: string): string {
+  return `reply:${ticketId}:${replyKey}`;
+}
+
 function sanitizeError(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
   return message.slice(0, 120);
@@ -174,12 +185,12 @@ export class SupportEmailService {
   ): Promise<{ sent: boolean; error?: string; ticket: SupportTicket | null; event: SupportTicketEvent }> {
     const ticket = await this.support.getTicket(tenantId, memorySpace, ticketId);
     if (!ticket) throw new Error("support_ticket_not_found");
-    // D-396 (JARVIS-046): idempotent svar - er et VELLYKKET `reply:<idempotency_key>` allerede registrert, sendes INTET på nytt (gateway kalles
+    // D-396 (JARVIS-046): idempotent svar - er et VELLYKKET `reply:<ticket_id>:<idempotency_key>` allerede registrert, sendes INTET på nytt (gateway kalles
     // ikke). Mislykkede forsøk lagres under en unik nøkkel (`reply-failed:...`) slik at samme idempotency_key kan prøves på nytt etter en feil.
+    // Delta-review L-4: nøkkelen er scopet på TICKET - samme kallernøkkel på en annen ticket er et annet logisk svar og skal sendes (ikke stille droppes).
     const replySourceInstance = ticket.source_instance_id ?? this.accountEmail;
-    const prior = await this.support.findEventBySourceMessage(
-      tenantId, memorySpace, ticket.source_type, replySourceInstance, `reply:${input.idempotency_key}`
-    );
+    const sentMessageId = replyEventSourceMessageId(ticket.ticket_id, input.idempotency_key);
+    const prior = await this.support.findEventBySourceMessage(tenantId, memorySpace, ticket.source_type, replySourceInstance, sentMessageId);
     if (prior) return { sent: true, ticket: await this.support.getTicket(tenantId, memorySpace, ticketId), event: prior };
     let sent = false;
     let error: string | undefined;
@@ -207,7 +218,7 @@ export class SupportEmailService {
       channel: ticket.channel, source_type: ticket.source_type,
       source_instance_id: ticket.source_instance_id ?? this.accountEmail,
       source_thread_id: ticket.source_thread_id ?? ticket.ticket_id,
-      source_message_id: sent ? `reply:${input.idempotency_key}` : `reply-failed:${input.idempotency_key}:${randomUUID()}`,
+      source_message_id: sent ? sentMessageId : `reply-failed:${input.idempotency_key}:${randomUUID()}`,
       subject: ticket.subject, summary: sent ? `Svar sendt til ${input.to}` : `Svar-forsoek feilet: ${error ?? "ukjent feil"}`,
       is_from_customer: false, entity_resolution: ticket.entity_resolution,
       ...(sent ? {} : { outbound_outcome: "failed_send" as const }),

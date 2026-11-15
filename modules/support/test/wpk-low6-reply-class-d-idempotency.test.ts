@@ -12,7 +12,7 @@ import { FakeTransport, ToolGateway, firstWaveTools, type ClassDNotification, ty
 import { BusinessService } from "@jarvis/business";
 import { SupportService } from "../src/service.ts";
 import { SupportTransport } from "../src/transport.ts";
-import { replySendIdempotencyKey } from "../src/email-ingress.ts";
+import { replyEventSourceMessageId, replySendIdempotencyKey } from "../src/email-ingress.ts";
 
 /**
  * Re-review LOW 6 (FINNES PÅ main, ikke WP-K): `SupportEmailService.reply()` kalte det nøstede `email.send` (klasse D) UTEN `idempotency_key`. Med produksjonsinnstillingen `classDPipeline.enforce: true`
@@ -205,4 +205,35 @@ describe("support.reply med HÅNDHEVET klasse D-pipeline (produksjonsinnstilling
     expect(t.notices.filter((n) => n.outcome === "unknown")).toHaveLength(1);
     expect(await agentReplies(t.support, ticketId)).toBe(0); // aldri registrert som sendt
   }, 60_000);
+});
+
+describe("delta-review L-4: hendelsesnøkkelen for et sendt svar er scopet på ticket (samme kallernøkkel på to tickets = to svar, ikke en stille drop)", () => {
+  it("nøkkelen er deterministisk, har ticket-id i seg og skiller to tickets med samme kallernøkkel", () => {
+    expect(replyEventSourceMessageId("sup-tk-1", "k")).toBe("reply:sup-tk-1:k");
+    expect(replyEventSourceMessageId("sup-tk-1", "k")).toBe(replyEventSourceMessageId("sup-tk-1", "k"));
+    expect(replyEventSourceMessageId("sup-tk-2", "k")).not.toBe(replyEventSourceMessageId("sup-tk-1", "k"));
+  });
+
+  it("SAMME kallernøkkel på TO ulike tickets (samme kildetype/instans) sender to e-poster og gir ETT agent_reply per ticket; et identisk gjentatt svar på hver ticket sender IKKE på nytt", async () => {
+    const email = countingEmail(() => ({ external_id: "gmail-msg-l4" }));
+    const t = build(email.transport);
+    const ticketA = await newTicket(t.support);
+    const ticketB = await newTicket(t.support);
+    expect(ticketB).not.toBe(ticketA);
+    const first = await reply(t.gateway, ticketA, "reply-l4-shared");
+    const second = await reply(t.gateway, ticketB, "reply-l4-shared"); // samme kallernøkkel, annen ticket: FØR fiksen `ok: true` med 0 sendinger
+    expect(first).toMatchObject({ ok: true });
+    expect(second).toMatchObject({ ok: true });
+    expect(email.sends()).toBe(2);
+    expect(await agentReplies(t.support, ticketA)).toBe(1);
+    expect(await agentReplies(t.support, ticketB)).toBe(1);
+    expect(await sendLedger(ticketA, "reply-l4-shared")).toEqual([{ status: "succeeded", postcondition_reason: null }]);
+    expect(await sendLedger(ticketB, "reply-l4-shared")).toEqual([{ status: "succeeded", postcondition_reason: null }]);
+    // Identiske retries på HVER ticket: fortsatt ingen ny sending og ingen nye hendelser.
+    expect(await reply(t.gateway, ticketA, "reply-l4-shared")).toMatchObject({ ok: true });
+    expect(await reply(t.gateway, ticketB, "reply-l4-shared")).toMatchObject({ ok: true });
+    expect(email.sends()).toBe(2);
+    expect(await agentReplies(t.support, ticketA)).toBe(1);
+    expect(await agentReplies(t.support, ticketB)).toBe(1);
+  }, 90_000);
 });
