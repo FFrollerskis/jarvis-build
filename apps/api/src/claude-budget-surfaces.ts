@@ -60,7 +60,7 @@ export async function readClaudeUsage(pool: pg.Pool, tenantId: string, config: C
     const purpose = typeof r["purpose"] === "string" && r["purpose"] !== "" ? r["purpose"] : "UNSPECIFIED";
     const origin = deriveBudgetOrigin({ ...(r["has_task"] === true ? { task_id: "x" } : {}), ...(r["has_session"] === true ? { session_id: "x" } : {}) });
     const tier = tierFor(config.tiers, origin, purpose);
-    const key = `${purpose}\u0000${tier}`;
+    const key = `${tier}|${purpose}`; // tier er fra en fast mengde uten «|», så nøkkelen er entydig
     const prev = merged.get(key) ?? { purpose, tier, calls_7d: 0, ore_7d: 0, calls_30d: 0, ore_30d: 0 };
     merged.set(key, {
       purpose, tier, calls_7d: prev.calls_7d + num(r["calls_7d"]), ore_7d: prev.ore_7d + num(r["ore_7d"]), calls_30d: prev.calls_30d + num(r["calls_30d"]), ore_30d: prev.ore_30d + num(r["ore_30d"])
@@ -201,10 +201,14 @@ export interface ClaudeBudgetAlerterOptions {
 /**
  * Varsler eieren ÉN gang per terskel per kredittperiode (50/75/90/100 % og når tempoet er over `tight_ratio` × kurven). Idempotensen er en revisjonsrad `claude_budget.alert` per (periode, terskel) i den varige
  * `audit_events`: den overlever omstart og rydding (revisjon slettes aldri), og skrives ETTER at varselet er levert - leveringsfeil gir et nytt forsøk i neste runde (aldri et tapt varsel), og en feil i selve markøren
- * kan i verste fall gi ett duplikat. Flere terskler som passeres mellom to runder gir ÉN melding (den høyeste) og markeres alle. Ukjent forbruk (lesefeil) varsler ikke - kontrollsenteret og briefen sier «ukjent».
+ * kan i verste fall gi ett duplikat per omstart (instansen husker hva den har levert, så en vedvarende markørfeil gir aldri en melding hvert 5. minutt). Flere terskler som passeres mellom to runder gir ÉN melding
+ * (den høyeste) og markeres alle. Ukjent forbruk (lesefeil) varsler ikke - kontrollsenteret og briefen sier «ukjent». Runder går aldri samtidig (en hengende kilde kan ikke gi to meldinger for samme terskel).
  */
 export class ClaudeBudgetAlerter {
   private readonly now: () => number;
+  /** `<periodestart>|<terskel>` for det DENNE instansen har levert (uavhengig av om markøren ble skrevet). */
+  private readonly deliveredInProcess = new Set<string>();
+  private running = false;
 
   constructor(private readonly opts: ClaudeBudgetAlerterOptions) {
     this.now = opts.now ?? Date.now;
@@ -217,8 +221,18 @@ export class ClaudeBudgetAlerter {
     return new Set((result.rows as Array<{ key: unknown }>).map((r) => String(r.key)));
   }
 
-  /** Én runde. Kaster aldri (logger kategori), og returnerer hva som ble sendt. */
+  /** Én runde. Kaster aldri (logger kategori), og returnerer hva som ble sendt. Er forrige runde ikke ferdig (hengende database/Telegram), hoppes denne over. */
   async tick(): Promise<{ sent: string[] }> {
+    if (this.running) return { sent: [] };
+    this.running = true;
+    try {
+      return await this.round();
+    } finally {
+      this.running = false;
+    }
+  }
+
+  private async round(): Promise<{ sent: string[] }> {
     const { pool, config, tenantId, ownerPersonId, sink } = this.opts;
     let status: ClaudeBudgetStatus;
     try {
@@ -236,7 +250,8 @@ export class ClaudeBudgetAlerter {
       console.error(JSON.stringify({ msg: "claude_budget_alert_markers_unreadable", error: err instanceof Error ? err.name : "unknown" }));
       return { sent: [] }; // uten markørene vet vi ikke hva som er varslet - heller ingen melding enn en gjentatt
     }
-    const fresh = due.filter((key) => !already.has(key));
+    const memoryKey = (key: string): string => `${status.window.start_date}|${key}`;
+    const fresh = due.filter((key) => !already.has(key) && !this.deliveredInProcess.has(memoryKey(key)));
     if (fresh.length === 0) return { sent: [] };
     const { severity, message } = claudeBudgetAlertMessage(status.state, config, fresh);
     const alert: Alert = { check: "claude_budget", severity, message, runbook: ALERT_RUNBOOK, at: new Date(this.now()).toISOString() };
@@ -246,6 +261,7 @@ export class ClaudeBudgetAlerter {
       console.error(JSON.stringify({ msg: "claude_budget_alert_delivery_failed", error: err instanceof Error ? err.name : "unknown" }));
       return { sent: [] }; // ingen markør: neste runde prøver igjen
     }
+    for (const key of fresh) this.deliveredInProcess.add(memoryKey(key)); // levert: aldri på nytt fra denne instansen, selv om markøren under feiler
     try {
       await withTenantTransaction(pool, tenantId, async (client) => {
         for (const key of fresh) {

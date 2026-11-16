@@ -172,21 +172,45 @@ describe("varsler: én gang per terskel per kredittperiode", () => {
     expect(logged).not.toContain("levering_feilet_fake_verdi_123");
   });
 
-  it("feil i selve markøren: meldingen er levert, og feilen kveler aldri runden. DOKUMENTERT GRENSE: uten markør kan neste runde gi ETT duplikat (heller dobbelt enn tapt)", async () => {
+  it("feil i selve markøren: meldingen er levert, og feilen kveler aldri runden. Instansen husker hva den har levert, så en VEDVARENDE markørfeil aldri gir en melding hvert 5. minutt; DOKUMENTERT GRENSE: etter en omstart (ny instans) uten markør kommer ETT duplikat (heller dobbelt enn tapt)", async () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const pool = new BudgetPool();
     const sink = new MemoryAlertSink();
-    const a = alerter(pool, sink, { now: MID });
+    const clock = { now: MID };
+    const a = alerter(pool, sink, clock);
     pool.spend.set(OWNER_TENANT, SPENT.over_50);
     pool.failMarkerWrite = new Error("audit_ned");
     await expect(a.tick()).resolves.toEqual({ sent: ["pct:50"] });
     expect(sink.alerts).toHaveLength(1);
     expect(spy.mock.calls.map((c) => String(c[0])).join("\n")).toContain("claude_budget_alert_marker_failed");
+    // markøren feiler fortsatt, men samme instans sender IKKE på nytt - verken neste runde eller ti runder senere
+    for (let n = 1; n <= 10; n += 1) { clock.now += 5 * 60_000; expect((await a.tick()).sent, `runde ${n}`).toEqual([]); }
+    expect(sink.alerts).toHaveLength(1);
+    // omstart (ny instans) mens markøren fortsatt ikke finnes: ETT duplikat, og nå er markøren på plass
     pool.failMarkerWrite = null;
-    await a.tick(); // duplikatet (ingen markør ble lagret)
+    const restarted = alerter(pool, sink, clock);
+    expect((await restarted.tick()).sent).toEqual(["pct:50"]);
     expect(sink.alerts).toHaveLength(2);
-    await a.tick();
-    expect(sink.alerts).toHaveLength(2); // og så er markøren på plass
+    expect((await restarted.tick()).sent).toEqual([]);
+    expect((await alerter(pool, sink, clock).tick()).sent).toEqual([]); // enda en omstart: markøren stopper det
+    expect(sink.alerts).toHaveLength(2);
+  });
+
+  it("runder går aldri samtidig: en hengende levering (Telegram) gir ikke en andre melding for samme terskel fra en overlappende runde", async () => {
+    const pool = new BudgetPool();
+    let release: () => void = () => undefined;
+    const delivered: Alert[] = [];
+    const slow: AlertSink = { send: (alert) => new Promise<void>((resolve) => { release = () => { delivered.push(alert); resolve(); }; }) };
+    const a = alerter(pool, slow, { now: MID });
+    pool.spend.set(OWNER_TENANT, SPENT.over_50);
+    const first = a.tick(); // henger i leveringen
+    await vi.waitFor(() => expect(pool.queries.length).toBeGreaterThan(1)); // første runde har lest forbruk og markører
+    expect((await a.tick()).sent).toEqual([]); // overlappende runde hoppes over
+    release();
+    await expect(first).resolves.toEqual({ sent: ["pct:50"] });
+    expect(delivered).toHaveLength(1);
+    expect(markerKeys(pool)).toEqual(["pct:50"]);
+    expect((await a.tick()).sent).toEqual([]); // og rundene fungerer igjen etterpå
   });
 
   it("kan forbruket ikke leses sendes INGEN melding og ingen markør (ukjent er ikke «i orden», og ikke et falskt alarmnivå); kan markørene ikke leses sendes heller ingenting (aldri en gjentatt melding)", async () => {
