@@ -128,6 +128,11 @@ function dormantNote(ev: string): string {
   return "";
 }
 
+/** Kravets id (fast kodeverdi, f.eks. `gate:D-32` eller `proven_connectors>=3`) som en trygg kategori: `>=` blir `_ge_` og øvrige tegn utenfor kategorialfabetet `_` - aldri «annet» for et ekte krav. */
+function requirementId(id: unknown): string {
+  return safeCategory(typeof id === "string" ? id.replace(/>=/g, "_ge_").replace(/[^A-Za-z0-9_:.-]/g, "_") : "ukjent_krav");
+}
+
 function dormantSection(verdicts: Settled<readonly ReadinessVerdict[]> | "other_tenant", nowIso: string): ControlSection {
   const title = "Sovende deler (beredskap, ingenting aktiveres)";
   const source = "readiness.ts (EV-6/11/13/14/15/18/20/22/23) mot kjøretidsfakta (konstitusjon, endringsregister, frys, beviste connectorer) og dine erklærte porter (JARVIS_EV_VERIFIED_GATES)";
@@ -152,7 +157,7 @@ function dormantSection(verdicts: Settled<readonly ReadinessVerdict[]> | "other_
       facts: {
         ev, dormant: true, activation_decision: false, ready_for_owner_decision: v.ready_for_owner_decision === true,
         met: v.met.length, missing: missing.length, missing_unknown: unknownCount, unknown_signals: unknownSignals,
-        missing_ids: missing.map((m) => safeCategory(m?.id)).join(",")
+        missing_ids: missing.map((m) => requirementId(m?.id)).join(",")
       },
       observed_at: nowIso
     }));

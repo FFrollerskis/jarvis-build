@@ -84,7 +84,9 @@ function rules(f: LedgerFixture = {}): ScriptedRule[] {
 }
 
 interface Built { deps: EvolutionCenterDeps; pool: ScriptedPool; calls: { report: number; readiness: number; runRate: number } }
-function build(over: Partial<EvolutionCenterDeps> = {}, f: LedgerFixture = {}): Built {
+/** Overstyringer: en egenskap satt til `undefined` FJERNES (kilden er da ikke koblet inn) - `exactOptionalPropertyTypes` tillater ikke `undefined` i selve avhengighetene. */
+type DepsOverride = { [K in keyof EvolutionCenterDeps]?: EvolutionCenterDeps[K] | undefined };
+function build(over: DepsOverride = {}, f: LedgerFixture = {}): Built {
   const pool = new ScriptedPool(rules(f));
   const calls = { report: 0, readiness: 0, runRate: 0 };
   const deps: EvolutionCenterDeps = {
@@ -93,12 +95,15 @@ function build(over: Partial<EvolutionCenterDeps> = {}, f: LedgerFixture = {}): 
     readiness: async () => { calls.readiness += 1; return evaluateAllReadiness(FACTS_NONE); },
     ev0Status: () => BOOT_OK,
     runRate: { report: async () => { calls.runRate += 1; return runRateReport(); } },
-    reportTenantId: "tenant-owner",
-    ...over
+    reportTenantId: "tenant-owner"
   };
+  for (const [key, value] of Object.entries(over)) {
+    if (value === undefined) delete (deps as unknown as Record<string, unknown>)[key];
+    else (deps as unknown as Record<string, unknown>)[key] = value;
+  }
   return { deps, pool, calls };
 }
-async function reportOf(over: Partial<EvolutionCenterDeps> = {}, f: LedgerFixture = {}, options: { restrictFinance?: boolean; identity?: IdentityContext } = {}): Promise<{ report: ControlCenterReport; built: Built }> {
+async function reportOf(over: DepsOverride = {}, f: LedgerFixture = {}, options: { restrictFinance?: boolean; identity?: IdentityContext } = {}): Promise<{ report: ControlCenterReport; built: Built }> {
   const built = build(over, f);
   const registry = createControlCenterRegistry({ authority, now: () => NOW });
   registry.register(createEvolutionCenter(built.deps));
@@ -302,6 +307,9 @@ describe("5. sovende deler: `activation_decision` er alltid false, ukjent innsig
     }
     // EV-6 mangler D-32 og jobb-runneren, og det står i id-listen som data
     expect(itemOf(dormant, "dormant:EV-6").facts?.["missing_ids"]).toContain("gate:D-32");
+    // kravets id er en fast kodeverdi og vises uforandret i trygg form - aldri «annet» (EV-18: `proven_connectors>=3`)
+    expect(itemOf(dormant, "dormant:EV-18").facts?.["missing_ids"]).toContain("proven_connectors_ge_3");
+    for (const item of dormant.items) expect(String(item.facts?.["missing_ids"]), item.id).not.toContain("annet");
     expect(dormant.summary_no).toContain("0 har alle tekniske krav oppfylt");
     expect(dormant.summary_no).toContain("IKKE aktivert");
   });
@@ -614,7 +622,7 @@ describe("8. helhet: status er den verste av seksjonene, forklaringen er determi
   });
 
   it("samlet UKJENT-matrise: når hver av de seks kildene svikter for seg, blir senteret aldri OK og de andre seksjonene bygges likevel", async () => {
-    const down = (what: string): Partial<EvolutionCenterDeps> => {
+    const down = (what: string): DepsOverride => {
       switch (what) {
         case "report": return { evolutionReport: async () => { throw new Error("x"); } };
         case "readiness": return { readiness: async () => { throw new Error("x"); } };
