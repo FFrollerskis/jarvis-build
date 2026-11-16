@@ -134,3 +134,6 @@ export class GrowthWriteJournal {
     });
   }
 }
+
+/** Gyldige statusfiltre for journal-listen. */
+export type GrowthWriteStatusFilter = WriteStatus;

@@ -121,7 +121,9 @@ import {
 } from "@jarvis/finance";
 import { ConsentEnforcementService, ConsentService, ConsentTransport } from "@jarvis/consent";
 import {
-  GoogleAdsTransport, GrowthService, GrowthTransport, MetaAdsTransport, marketingMemoryBriefSource, runActionRecommendationSweepForAllTenants
+  ExperimentRegistryService, GoogleAdsTransport, GrowthExperimentTransport, GrowthService, GrowthTransport, GrowthWriteJournal, MetaAdsTransport,
+  createGrowthWriteTransports, growthExperimentToolDefinitions, growthOpIndex, growthWriteConfigFromEnv, growthWriteSpecs, growthWriteToolDefinitions,
+  marketingMemoryBriefSource, runActionRecommendationSweepForAllTenants
 } from "@jarvis/growth";
 import { OwnerControls } from "@jarvis/policy";
 import {
@@ -776,6 +778,21 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     ...(backupStatusSource ? { backupStatus: backupStatusSource } : {}), processStartedAt: () => processStartedAt,
     ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {})
   });
+  // WP-D3 (UA-4 Growth, D-459): skrivehandlinger mot annonse-/analyseplattformene + eksperimentregisteret. ALT er AV som standard: uten `JARVIS_GROWTH_WRITE_PLATFORMS` registreres INGEN skriveverktøy, og uten
+  // `JARVIS_GROWTH_EXPERIMENTS=on` ingen eksperimentverktøy - verktøylister, utvalg og rate-grenser er da identiske med main, og `deps.growthWrites` (rutene) finnes ikke (404). Skriving krever dessuten
+  // eierens EGNE konto-/eiendoms-id-er i `JARVIS_GROWTH_WRITE_TARGETS` (mål-autorisasjon i gatewayen, fail-closed). Kun API-prosessen registrerer dem (worker/bakgrunn er read-only).
+  const growthWriteConfig = growthWriteConfigFromEnv(process.env);
+  const growthWriteEnabled = growthWriteConfig.platforms.size > 0;
+  const growthExperimentsEnabled = process.env["JARVIS_GROWTH_EXPERIMENTS"] === "on";
+  const growthWriteTransports = growthWriteEnabled
+    ? createGrowthWriteTransports(growthWriteConfig, {
+        readSecret: (ref) => readSecretProvider.get(ref), env: process.env,
+        // UA-6: pengeøkende handlinger nektes mens eierens finans-nødbryter er på OG når tilstanden er ukjent (fail-closed i fabrikken); det er ikke et beløpstak.
+        financeKillSwitch: async (tenantId) => (await financeService.getKillSwitch(tenantId))?.enabled === true
+      })
+    : {};
+  const growthExperimentRegistry = growthExperimentsEnabled ? new ExperimentRegistryService(pool) : undefined;
+  console.log(JSON.stringify({ msg: "growth_writes", platforms: [...growthWriteConfig.platforms], targets: [...growthWriteConfig.targets.entries()].map(([p, ids]) => ({ platform: p, count: ids.size })), experiments: growthExperimentsEnabled }));
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(githubRateLimitController),
@@ -1160,7 +1177,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
           postgres_ops: new PostgresOpsTransport({ config: postgresOpsConfig })
         },
         { cloudflareMutationZones: parseCloudflareMutationZones(process.env["JARVIS_CLOUDFLARE_MUTATION_ZONES"]), postgresOps: postgresOpsConfig, infisicalRotationIds: parseInfisicalRotationIds(process.env["JARVIS_INFISICAL_ROTATION_IDS"]) }
-      )
+      ),
+      // WP-D3 (UA-4 Growth): kun med flaggene på (se over). Eier-eksklusive navnerom (`growth_*`) som aldri står på en modellflate; skriving går alltid gjennom step-up + klasse D-kjeden.
+      ...(growthWriteEnabled ? growthWriteToolDefinitions(growthWriteConfig, growthWriteTransports) : []),
+      ...(growthExperimentRegistry ? growthExperimentToolDefinitions(new GrowthExperimentTransport(growthExperimentRegistry)) : [])
     ]
   })) toolGateway.register(tool);
   // REMEDIERING DEL 1 (JARVIS-002): `allMeshTools()` (hele registeret) er IKKE
@@ -1459,6 +1479,18 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // WP-D2 (UA-3 «churn/product usage»): produktbruk-webhooken er AV som standard - ruten finnes først når eieren har satt JARVIS_PRODUCT_USAGE_TENANT_ID (en bedrifts-tenant;
     // tjenesten avviser alt annet). Hemmeligheten leses ved HVERT kall via den delte kjeden (Infisical-primær, .env-fallback), slik at rotasjon gjelder umiddelbart; er den
     // borte eller kortere enn 32 tegn svarer ruten 503 (fail closed).
+    // WP-D3 (UA-4 Growth): eier-rutene `/growth/*` finnes KUN når skriving (plattformliste) eller eksperimenter er slått på; ellers 404 (identisk med main).
+    ...(growthWriteEnabled || growthExperimentsEnabled
+      ? {
+          growthWrites: {
+            executor: {
+              pool, gateway: toolGateway, journal: new GrowthWriteJournal(pool), index: growthOpIndex(growthWriteSpecs(growthWriteConfig)),
+              findCampaign: (tenantId, space, channel, externalId) => growthService.findCampaignByExternalId(tenantId, space, channel, externalId)
+            },
+            experiments: growthExperimentsEnabled
+          }
+        }
+      : {}),
     ...(process.env["JARVIS_PRODUCT_USAGE_TENANT_ID"]
       ? {
           productUsage: {
