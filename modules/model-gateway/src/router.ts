@@ -202,6 +202,11 @@ interface ProviderRuntime {
    * leverandører, så en pauset lokal leverandør gir fail-closed for slike turer - aldri en sky-fallback.
    */
   paused?: boolean;
+  /**
+   * WP-B4 (D-476): Claude-kreditten har stengt leverandøren for DETTE kallet (hard stopp, utsettelse eller reserve for essensielle behov). Som en pause er den alltid `configured: false`; flagget gjør kun at avslaget
+   * SIER hvorfor («stengt av Claude-kreditten», ikke «ikke konfigurert»). Settes aldri uten `JARVIS_CLAUDE_BUDGET_USD`, så meldingene er uendret uten flagget. Sensitivitetsreglene er uendret.
+   */
+  budget_blocked?: boolean;
 }
 
 export class AiRouter {
@@ -224,7 +229,7 @@ export class AiRouter {
       const name = input.provider as string;
       const rt = providers.get(name);
       if (!rt?.configured) {
-        throw new NoEligibleProviderError(rt?.paused ? `override-provider '${name}' er pauset av eier` : `override-provider '${name}' er ikke konfigurert`);
+        throw new NoEligibleProviderError(rt?.paused ? `override-provider '${name}' er pauset av eier` : rt?.budget_blocked ? `override-provider '${name}' er stengt av Claude-kreditten` : `override-provider '${name}' er ikke konfigurert`);
       }
       const requiredForOverride = new Set<ModelCapability>(input.required_capabilities ?? []);
       if (input.needs_structured) requiredForOverride.add("structured_output");
@@ -272,7 +277,7 @@ export class AiRouter {
         if (attempted.includes(name)) continue; // samme leverandør to ganger i listen = ett forsøk (ellers dobbelt betalt kall i failover)
         const rt = providers.get(name);
         attempted.push(name);
-        if (!rt?.configured) { rejected.push(`${name}:${rt?.paused ? "paused_by_owner" : "not_configured"}`); continue; }
+        if (!rt?.configured) { rejected.push(`${name}:${rt?.paused ? "paused_by_owner" : rt?.budget_blocked ? "budget_blocked" : "not_configured"}`); continue; }
         const profile = this.registry.profileOrGeneric(name, rt.model);
         const missing = [...requiredForPref].filter((c) => !profile.capabilities.includes(c));
         if (missing.length > 0) { rejected.push(`${name}:missing_capabilities=${missing.join("+")}`); continue; }
@@ -311,8 +316,11 @@ export class AiRouter {
     const skippedUnverified = new Map<string, ModelCapability[]>();
     // WP-H0: leverandører eieren har pauset/tilbakekalt (er alltid `configured: false`; navnene brukes kun til å SI hvorfor avslaget kom).
     const pausedByOwner: string[] = [];
+    // WP-B4: leverandører Claude-kreditten har stengt for dette kallet (som over: kun for å SI hvorfor).
+    const budgetBlocked: string[] = [];
     for (const [name, rt] of providers) {
       if (rt.paused) pausedByOwner.push(name);
+      if (rt.budget_blocked) budgetBlocked.push(name);
       if (!rt.configured) continue;
       if (alreadyAttempted.has(name)) { skippedAttempted.push(name); continue; }
       const profile = this.registry.profileOrGeneric(name, rt.model);
@@ -347,7 +355,8 @@ export class AiRouter {
           (skippedUnverified.size > 0
             ? ` (ikke live-verifisert, utelatt fra AUTO-ruting: ${[...skippedUnverified].map(([name, caps]) => `${name}:${caps.join("+")}`).join(", ")} - kjør mesh-live-smoke.ts --tools og sett JARVIS_MESH_TOOLS_VERIFIED)`
             : "") +
-          (pausedByOwner.length > 0 ? ` (pauset av eier: ${pausedByOwner.join(",")})` : "")
+          (pausedByOwner.length > 0 ? ` (pauset av eier: ${pausedByOwner.join(",")})` : "") +
+          (budgetBlocked.length > 0 ? ` (stengt av Claude-kreditten: ${budgetBlocked.join(",")})` : "")
       );
     }
 

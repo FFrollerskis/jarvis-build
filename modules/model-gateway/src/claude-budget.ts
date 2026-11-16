@@ -85,6 +85,17 @@ export interface PacingParams {
 export const DEFAULT_PACING_PARAMS: PacingParams = { reserve_pct: 15, margin_pct: 5, tight_ratio: 1.3, hard_stop: true, reset_day: 15 };
 export const DEFAULT_ALERT_PCTS: readonly number[] = [50, 75, 90, 100];
 
+/** Kun tempoparametrene (uten budsjett, terskler og tabell) - det `decide`/`pacingState` tar inn. */
+export function pacingParamsOf(config: PacingParams): PacingParams {
+  return { reserve_pct: config.reserve_pct, margin_pct: config.margin_pct, tight_ratio: config.tight_ratio, hard_stop: config.hard_stop, reset_day: config.reset_day };
+}
+
+/**
+ * Når forbruket ikke kan leses (databasefeil, ugyldig svar) tas beslutningen UTEN tall (fail-safe): ESSENSIELL tillates (eierens egne turer skal ikke stoppe av en målefeil), VIKTIG nedgraderes
+ * (billigere modell, ingen stopp), BAKGRUNN utsettes. Samme tre årsaker brukes av håndhevelsen (`claude-budget-enforcer.ts`).
+ */
+export type FailsafeReason = "spend_unreadable_essential_allowed" | "spend_unreadable_important_downgraded" | "spend_unreadable_background_deferred";
+
 export type TierTable = Readonly<Record<BudgetOrigin, Readonly<Record<string, BudgetTier>>>>;
 
 export interface ClaudeBudgetConfig extends PacingParams {
@@ -514,6 +525,9 @@ export function blockedMessageNo(kind: BlockedKind, reason: string, resumeMs: nu
   if (reason === "reserve_kept_for_essential") {
     return `Resten av Claude-kreditten er forbeholdt det aller viktigste ut perioden, så dette kallet er utsatt, og ingen lokal modell kunne svare i stedet. ${resetText}`;
   }
+  if (reason === "spend_unreadable_background_deferred") {
+    return "Forbruket av Claude-kreditten kunne ikke leses akkurat nå, så dette kallet er utsatt, og ingen lokal modell kunne svare i stedet. Prøv igjen om litt.";
+  }
   const until = resumeMs !== null && resumeMs < windowEndMs ? ` Det blir rom igjen omtrent ${formatDateTimeNo(resumeMs)}.` : ` ${resetText}`;
   return `Claude-bruken ligger foran periodens tempo, så dette kallet er utsatt, og ingen lokal modell kunne svare i stedet.${until}`;
 }
@@ -529,5 +543,6 @@ export function claudeBudgetNoteNo(action: PacingAction, reason: string, windowE
   const subject = what === "svaret" ? "dette svaret" : "jobben";
   if (action === "deny") return `${CLAUDE_BUDGET_NOTE_PREFIX} perioden er brukt opp, så ${subject} kom fra den lokale modellen. Kreditten fornyes ${formatDateNo(windowEndMs)}.`;
   if (reason === "reserve_kept_for_essential") return `${CLAUDE_BUDGET_NOTE_PREFIX} resten er forbeholdt det aller viktigste, så ${subject} kom fra den lokale modellen. Kreditten fornyes ${formatDateNo(windowEndMs)}.`;
+  if (reason === "spend_unreadable_background_deferred") return `${CLAUDE_BUDGET_NOTE_PREFIX} forbruket kunne ikke leses, så ${subject} kom fra den lokale modellen.`;
   return `${CLAUDE_BUDGET_NOTE_PREFIX} bruken ligger foran periodens tempo, så ${subject} kom fra den lokale modellen.`;
 }

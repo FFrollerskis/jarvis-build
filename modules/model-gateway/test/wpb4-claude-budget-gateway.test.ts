@@ -1,0 +1,711 @@
+import { describe, expect, it, vi } from "vitest";
+import type pg from "pg";
+import { ProviderError, type ModelProviderAdapter, type ModelRequest, type ModelResult, type StreamHandler, type ToolExchange } from "@jarvis/provider-adapters";
+import {
+  BudgetExceededError, ClaudeBudgetBlockedError, ClaudeBudgetEnforcer, DEFAULT_PRICING, MemoryTraceSink, ModelGateway, NoEligibleProviderError, cheaperClaudeModel, claudeBudgetConfigFromEnv,
+  DEFAULT_MODEL_CATALOG, estimateCallOre,
+  type CompleteInput
+} from "../src/index.ts";
+
+/**
+ * WP-B4 (D-476): Claude-kreditten INNE I ModelGateway (complete + stream) - med en fake pool som modellerer tenant (RLS via set_config), forbruksbokføring og revisjonsrader.
+ * Perioden er 15. nov → 15. des 2026 (30 døgn). Klokka står midt i perioden (dag 15): kurven er 47 250 øre, 1,3 × kurven 61 425, tempobudsjettet 89 250, budsjettet 105 000.
+ */
+const DAY = 86_400_000;
+const START = Date.UTC(2026, 10, 14, 23, 0, 0);
+const MID = START + 15 * DAY;
+const SPENT = { on_pace: 40_000, ahead: 55_000, tight: 70_000, reserve: 95_000, exhausted: 105_000 } as const;
+const HAIKU = "claude-haiku-4-5-20251001";
+
+interface AuditRow {
+  tenant_id: string; person_id: string; session_id: string | null; type: string; decision: string | null; reason: string | null; tool_id: string | null; action: string | null;
+  task_id: string | null; trace_id: string | null; payload: Record<string, unknown>;
+}
+
+class FakeDb {
+  readonly spend = new Map<string, number>();
+  readonly audit: AuditRow[] = [];
+  readonly statements: string[] = [];
+  readonly costRows: Array<{ tenant_id: string; provider: string; model: string; amount_ore: number; purpose: string | null }> = [];
+  spendReadError: Error | null = null;
+  spendReadRow: Record<string, unknown> | null = null;
+  spendReads = 0;
+  guardSpentOre = 0;
+  failAuditWrites = false;
+
+  pool(): pg.Pool {
+    const self = this;
+    return {
+      connect: async () => {
+        let tenant = "";
+        return {
+          query: async (sql: string, params: unknown[] = []) => {
+            const text = sql.trim();
+            if (/^(BEGIN|COMMIT|ROLLBACK)/i.test(text)) { self.statements.push(text.split(/\s/)[0]!.toUpperCase()); return { rows: [] }; }
+            if (text.includes("set_config")) { tenant = String(params[0]); self.statements.push("SET_TENANT"); return { rows: [] }; }
+            if (text.includes("FROM cost_events") && text.includes("provider = $4")) {
+              self.spendReads += 1;
+              self.statements.push("READ_CLAUDE_SPEND");
+              if (self.spendReadError !== null) throw self.spendReadError;
+              if (self.spendReadRow !== null) return { rows: [self.spendReadRow] };
+              const v = self.spend.get(tenant) ?? 0;
+              return { rows: [{ window_ore: v, trailing_ore: v }] };
+            }
+            if (text.includes("FROM cost_events")) { self.statements.push("READ_BUDGET_GUARD"); return { rows: [{ spent: self.guardSpentOre }] }; }
+            if (text.includes("INSERT INTO cost_events")) {
+              if (/\$4, 0,/.test(text)) { self.statements.push("INSERT_COST_FAILED"); return { rows: [] }; }
+              self.statements.push("INSERT_COST");
+              const row = { tenant_id: String(params[0]), provider: String(params[5]), model: String(params[6]), amount_ore: Number(params[4]), purpose: params[9] === null ? null : String(params[9]) };
+              self.costRows.push(row);
+              if (row.provider === "anthropic") self.spend.set(row.tenant_id, (self.spend.get(row.tenant_id) ?? 0) + row.amount_ore); // bokføringen mater neste beslutning
+              return { rows: [] };
+            }
+            if (text.includes("INSERT INTO audit_events")) {
+              self.statements.push("INSERT_AUDIT");
+              if (self.failAuditWrites) throw new Error("audit_down");
+              self.audit.push({
+                tenant_id: String(params[0]), person_id: String(params[1]), session_id: params[2] === null ? null : String(params[2]), type: String(params[4]), decision: params[5] === null ? null : String(params[5]),
+                reason: params[6] === null ? null : String(params[6]), tool_id: params[7] === null ? null : String(params[7]), action: params[8] === null ? null : String(params[8]),
+                task_id: params[11] === null ? null : String(params[11]), trace_id: params[12] === null ? null : String(params[12]), payload: JSON.parse(String(params[10])) as Record<string, unknown>
+              });
+              return { rows: [] };
+            }
+            self.statements.push("OTHER");
+            return { rows: [] };
+          },
+          release: () => undefined
+        };
+      }
+    } as unknown as pg.Pool;
+  }
+}
+
+interface AdapterOptions {
+  usage?: { input_tokens: number; output_tokens: number };
+  fail?: Error;
+  hold?: () => Promise<void>;
+  withStream?: boolean;
+  script?: (request: ModelRequest, call: number) => Partial<ModelResult>;
+}
+type FakeAdapter = ModelProviderAdapter & { calls: ModelRequest[]; streamCalls: ModelRequest[] };
+
+function adapter(name: string, model: string, options: AdapterOptions = {}): FakeAdapter {
+  const calls: ModelRequest[] = [];
+  const streamCalls: ModelRequest[] = [];
+  const result = (request: ModelRequest, call: number): ModelResult => ({
+    text: `svar fra ${name}`, usage: options.usage ?? { input_tokens: 100, output_tokens: 50 }, provider: name, model: request.model ?? model, finish_reason: "stop", ...(options.script?.(request, call) ?? {})
+  });
+  const base: ModelProviderAdapter & { calls: ModelRequest[]; streamCalls: ModelRequest[] } = {
+    name, model, calls, streamCalls, available: () => true,
+    complete: async (request) => {
+      calls.push(request);
+      await options.hold?.();
+      if (options.fail !== undefined) throw options.fail;
+      return result(request, calls.length);
+    }
+  };
+  if (options.withStream === true) {
+    base.stream = async (request: ModelRequest, onEvent: StreamHandler) => {
+      streamCalls.push(request);
+      await options.hold?.();
+      if (options.fail !== undefined) throw options.fail;
+      const r = result(request, streamCalls.length);
+      onEvent({ type: "text_delta", text: r.text });
+      onEvent({ type: "usage", usage: r.usage });
+      onEvent({ type: "finish", finish_reason: "stop" });
+      return r;
+    };
+  }
+  return base;
+}
+
+interface BuildOptions {
+  flag?: boolean;
+  env?: Record<string, string>;
+  providers?: Array<"anthropic" | "gemma_local">;
+  anthropic?: AdapterOptions;
+  local?: AdapterOptions;
+  now?: number;
+}
+
+function build(opts: BuildOptions = {}) {
+  const db = new FakeDb();
+  const trace = new MemoryTraceSink();
+  const clock = { now: opts.now ?? MID };
+  const config = claudeBudgetConfigFromEnv({ JARVIS_CLAUDE_BUDGET_USD: "100", ...opts.env });
+  if (config === null) throw new Error("test-oppsett: budsjettet må være på");
+  const enforcer = opts.flag === false ? undefined : new ClaudeBudgetEnforcer({ config, pool: db.pool(), trace, actor_person_id: "owner-1", now: () => clock.now });
+  const anthropic = adapter("anthropic", "claude-sonnet-5-5", { withStream: true, ...opts.anthropic });
+  const local = adapter("gemma_local", "gemma-local", { ...opts.local });
+  const names = opts.providers ?? ["anthropic", "gemma_local"];
+  const providers = [...(names.includes("anthropic") ? [anthropic] : []), ...(names.includes("gemma_local") ? [local] : [])];
+  const gateway = new ModelGateway({ pool: db.pool(), trace, providers, ...(enforcer !== undefined ? { claudeBudget: enforcer } : {}) });
+  const budgetSpans = (): MemoryTraceSink["spans"] => trace.spans.filter((s) => s.kind === "budget");
+  return { gateway, db, trace, clock, enforcer, anthropic, local, config, budgetSpans };
+}
+
+const REQ: ModelRequest = { messages: [{ role: "user", content: "hei" }], max_tokens: 200 };
+/** Eierens egen chat-tur (økt, ingen jobb) = ESSENSIELL. `mode: QUALITY` rangerer Anthropic først, lokal som reserve. */
+const ownerTurn = (extra: Partial<CompleteInput> = {}): CompleteInput => ({ tenant_id: "t1", session_id: "s1", purpose: "CHAT", mode: "QUALITY", request: REQ, ...extra });
+/** Bakgrunnsarbeid (jobb-id, minneuttrekk) = BAKGRUNN. */
+const background = (extra: Partial<CompleteInput> = {}): CompleteInput => ({ tenant_id: "t1", task_id: "job-1", purpose: "EXTRACT", mode: "QUALITY", request: REQ, ...extra });
+/** En jobb eieren bestilte (delegert fra chat, kontrakten merker den BACKGROUND) = VIKTIG via opphavs-hint. */
+const ownerTask = (extra: Partial<CompleteInput> = {}): CompleteInput => ({ tenant_id: "t1", task_id: "job-2", purpose: "BACKGROUND", budget_origin: "owner_task", mode: "QUALITY", request: REQ, ...extra });
+
+/** SQL for ett vanlig kall slik main kjører det: vakt-lesing (BudgetGuard), så kostrad. */
+const ONE_PLAIN_CALL = ["BEGIN", "SET_TENANT", "READ_BUDGET_GUARD", "COMMIT", "BEGIN", "SET_TENANT", "INSERT_COST", "COMMIT"];
+
+describe("flagg AV: identisk med main", () => {
+  it("uten Claude-kreditten leses ikke forbruket, ingen budsjett-trace, ingen revisjon, ingen ekstra metadata - og SQL-sekvensen er nøyaktig main sin (vakt + kostrad)", async () => {
+    const { gateway, db, anthropic, budgetSpans } = build({ flag: false });
+    db.spend.set("t1", SPENT.exhausted); // selv med oppbrukt kreditt gjør gatewayen uten flagg ingenting annerledes
+    expect(gateway.claudeBudgetActive).toBe(false);
+    const r = await gateway.complete(ownerTurn({ provider: "anthropic" }));
+    expect(r.provider).toBe("anthropic");
+    expect(anthropic.calls).toHaveLength(1);
+    expect(db.statements).toEqual(ONE_PLAIN_CALL);
+    expect(db.spendReads).toBe(0);
+    expect(budgetSpans()).toHaveLength(0);
+    expect(db.audit).toHaveLength(0);
+    expect(r.metadata?.["claude_budget"]).toBeUndefined();
+    expect(r.metadata?.["router"]).toMatchObject({ mode: "SPECIFIC_PROVIDER", reason: "OWNER_OVERRIDE" });
+  });
+
+  it("opphavs-hintet `budget_origin` og alle formål er uten virkning uten flagget", async () => {
+    const off = build({ flag: false });
+    for (const input of [ownerTurn(), background(), ownerTask(), ownerTurn({ provider: "anthropic" }), background({ provider: "anthropic", budget_origin: "background" })]) {
+      await off.gateway.complete(input);
+    }
+    expect(off.db.spendReads).toBe(0);
+    expect(off.budgetSpans()).toHaveLength(0);
+    expect(off.anthropic.calls.every((c) => c.model === undefined)).toBe(true);
+  });
+
+  it("med flagget PÅ: kall som KLART ikke kan nå Anthropic gir samme SQL-sekvens som uten flagget (ingen lesing av forbruk, ingen spor) - sensitivitet, betalte modeller av, annen leverandør, preferanseliste uten Anthropic, lokal modus", async () => {
+    const cannotReach: Array<[string, CompleteInput]> = [
+      ["SECRET_RESTRICTED", ownerTurn({ sensitivity: "SECRET_RESTRICTED", mode: "AUTO" })],
+      ["paid_models_allowed=false", ownerTurn({ paid_models_allowed: false })],
+      ["annen leverandør eksplisitt", ownerTurn({ provider: "gemma_local" })],
+      ["preferanseliste uten Anthropic", ownerTurn({ providerPreference: ["gemma_local"], preferenceFailover: true })],
+      ["lokal modus", ownerTurn({ mode: "LOCAL" })]
+    ];
+    for (const [label, input] of cannotReach) {
+      const on = build();
+      on.db.spend.set("t1", SPENT.exhausted);
+      const r = await on.gateway.complete(input);
+      expect(r.provider, label).toBe("gemma_local");
+      expect(on.db.statements, label).toEqual(ONE_PLAIN_CALL);
+      expect(on.db.spendReads, label).toBe(0);
+      expect(on.budgetSpans(), label).toHaveLength(0);
+      expect(r.metadata?.["claude_budget"], label).toBeUndefined();
+    }
+  });
+
+  it("uten Anthropic konfigurert (ingen nøkkel) eller pauset av eier hoppes styringen over - ingenting å styre", async () => {
+    const noAnthropic = build({ providers: ["gemma_local"] });
+    noAnthropic.db.spend.set("t1", SPENT.exhausted);
+    await noAnthropic.gateway.complete(ownerTurn({ mode: "AUTO" }));
+    expect(noAnthropic.db.spendReads).toBe(0);
+    const trace = new MemoryTraceSink();
+    const db = new FakeDb();
+    const config = claudeBudgetConfigFromEnv({ JARVIS_CLAUDE_BUDGET_USD: "100" })!;
+    const enforcer = new ClaudeBudgetEnforcer({ config, pool: db.pool(), trace, actor_person_id: "owner-1", now: () => MID });
+    const paused = new ModelGateway({
+      pool: db.pool(), trace, providers: [adapter("anthropic", "claude-sonnet-5-5"), adapter("gemma_local", "gemma-local")], claudeBudget: enforcer,
+      providerPause: { pausedProviders: async () => new Set(["anthropic"]) }
+    });
+    const r = await paused.complete(ownerTurn({ mode: "AUTO" }));
+    expect(r.provider).toBe("gemma_local");
+    expect(db.spendReads).toBe(0);
+  });
+
+  it("BudgetGuard (alle leverandører, 1000/2000/3000 kr) er fortsatt det ytre vernet og tas FØR Claude-kreditten: hardgrensen stopper uten at kreditten leses", async () => {
+    const { gateway, db } = build();
+    db.guardSpentOre = 400_000;
+    await expect(gateway.complete(ownerTurn({ provider: "anthropic" }))).rejects.toBeInstanceOf(BudgetExceededError);
+    expect(db.spendReads).toBe(0);
+  });
+});
+
+describe("nivå × tier: hva ruteren får lov til (100 USD, dag 15 av 30)", () => {
+  it("PÅ TEMPO (40 USD): alt tillatt - Anthropic svarer for alle tier, ingen revisjonsrad (kun trace), ingen modellendring", async () => {
+    const { gateway, db, anthropic, budgetSpans } = build();
+    db.spend.set("t1", SPENT.on_pace);
+    for (const input of [ownerTurn(), ownerTask(), background()]) {
+      const r = await gateway.complete(input);
+      expect(r.provider).toBe("anthropic");
+      expect(r.metadata?.["claude_budget"]).toMatchObject({ action: "allow", level: "on_pace" });
+    }
+    expect(anthropic.calls.every((c) => c.model === undefined)).toBe(true);
+    expect(db.audit).toHaveLength(0);
+    expect(budgetSpans().map((s) => s.name)).toEqual(["claude_budget_allow", "claude_budget_allow", "claude_budget_allow"]);
+  });
+
+  it("FORAN TEMPO (55 USD): BAKGRUNN nedgraderes til billigere Claude-modell (Haiku), ESSENSIELL og VIKTIG er uendret", async () => {
+    const { gateway, db, anthropic } = build();
+    db.spend.set("t1", SPENT.ahead);
+    expect((await gateway.complete(ownerTurn())).model).toBe("claude-sonnet-5-5");
+    expect((await gateway.complete(ownerTask())).model).toBe("claude-sonnet-5-5");
+    const cheap = await gateway.complete(background());
+    expect(cheap.provider).toBe("anthropic");
+    expect(cheap.model).toBe(HAIKU);
+    expect(anthropic.calls.map((c) => c.model)).toEqual([undefined, undefined, HAIKU]);
+    expect(cheap.metadata?.["claude_budget"]).toMatchObject({ action: "downgrade", level: "ahead", tier: "background", constraint: "cheaper_model", downgrade_model: HAIKU });
+    // kostnaden bokføres til Haiku-satsen (modellen adapteren faktisk brukte), ikke Sonnet-satsen
+    const haikuRow = db.costRows.find((c) => c.model === HAIKU)!;
+    expect(haikuRow.amount_ore).toBe(Math.ceil((100 / 1000) * 1.05 + (50 / 1000) * 5.25));
+    expect(db.audit).toHaveLength(1);
+    expect(db.audit[0]).toMatchObject({ type: "claude_budget.decision", decision: "downgrade", reason: "ahead_background_downgrade" });
+  });
+
+  it("nedgraderingen overstyrer en eksplisitt modell i kallet (siste ord) men aldri til en dyrere: ber kallet allerede om Haiku, forblir det Haiku", async () => {
+    const { gateway, db, anthropic } = build();
+    db.spend.set("t1", SPENT.ahead);
+    await gateway.complete(background({ provider: "anthropic", request: { ...REQ, model: "claude-sonnet-5-5" } }));
+    await gateway.complete(background({ provider: "anthropic", request: { ...REQ, model: HAIKU } }));
+    expect(anthropic.calls.map((c) => c.model)).toEqual([HAIKU, HAIKU]);
+    // Beslutningen er «nedgrader» begge ganger, men bare første gang fantes det en billigere modell å bytte til (Haiku er allerede billigst): sporet sier det ærlig
+    expect(db.audit.map((a) => a.decision)).toEqual(["downgrade", "downgrade"]);
+    expect(db.audit.map((a) => a.payload["constraint"])).toEqual(["cheaper_model", "open"]);
+  });
+
+  it("STRAMT (70 USD): ESSENSIELL og VIKTIG går til Anthropic; BAKGRUNN utsettes til lokal modell uten at Anthropic berøres", async () => {
+    const { gateway, db, anthropic, local } = build();
+    db.spend.set("t1", SPENT.tight);
+    expect((await gateway.complete(ownerTurn())).provider).toBe("anthropic");
+    expect((await gateway.complete(ownerTask())).provider).toBe("anthropic");
+    const callsBefore = anthropic.calls.length;
+    const bg = await gateway.complete(background());
+    expect(bg.provider).toBe("gemma_local");
+    expect(anthropic.calls).toHaveLength(callsBefore);
+    expect(local.calls).toHaveLength(1);
+    expect(bg.metadata?.["claude_budget"]).toMatchObject({ action: "defer", level: "tight", tier: "background", constraint: "closed" });
+    expect(db.audit.map((a) => a.reason)).toEqual(["tight_background_deferred"]);
+  });
+
+  it("RESERVEN (95 USD, over tempobudsjettet): kun ESSENSIELL når Anthropic; VIKTIG og BAKGRUNN går lokalt", async () => {
+    const { gateway, db } = build();
+    db.spend.set("t1", SPENT.reserve);
+    expect((await gateway.complete(ownerTurn())).provider).toBe("anthropic");
+    const task = await gateway.complete(ownerTask());
+    expect(task.provider).toBe("gemma_local");
+    expect(task.metadata?.["claude_budget"]).toMatchObject({ action: "defer", reason: "reserve_kept_for_essential" });
+    expect((await gateway.complete(background())).provider).toBe("gemma_local");
+  });
+
+  it("OPPBRUKT (≥ 100 %): HARD STOPP - alt faller til lokal modell, også eierens egen tur; Anthropic får ikke ett eneste kall", async () => {
+    const { gateway, db, anthropic } = build();
+    db.spend.set("t1", SPENT.exhausted);
+    for (const input of [ownerTurn(), ownerTask(), background()]) {
+      const r = await gateway.complete(input);
+      expect(r.provider).toBe("gemma_local");
+      expect(r.metadata?.["claude_budget"]).toMatchObject({ action: "deny", level: "exhausted", constraint: "closed" });
+    }
+    expect(anthropic.calls).toHaveLength(0);
+    expect(db.audit.map((a) => a.decision)).toEqual(["deny", "deny", "deny"]);
+  });
+
+  it("OPPBRUKT med eierens overstyring `JARVIS_CLAUDE_BUDGET_HARD_STOP=off`: ESSENSIELL og VIKTIG fortsetter på Anthropic (kun varsling), BAKGRUNN går fortsatt lokalt", async () => {
+    const { gateway, db, anthropic } = build({ env: { JARVIS_CLAUDE_BUDGET_HARD_STOP: "off" } });
+    db.spend.set("t1", SPENT.exhausted);
+    expect((await gateway.complete(ownerTurn())).provider).toBe("anthropic");
+    expect((await gateway.complete(ownerTask())).provider).toBe("anthropic");
+    expect((await gateway.complete(background())).provider).toBe("gemma_local");
+    expect(anthropic.calls).toHaveLength(2);
+  });
+
+  it("tier fra miljøet: `background.EXTRACT=important` gjør uttrekk VIKTIG (går fortsatt på Anthropic når det er stramt)", async () => {
+    const { gateway, db } = build({ env: { JARVIS_CLAUDE_BUDGET_TIERS: "background.EXTRACT=important" } });
+    db.spend.set("t1", SPENT.tight);
+    expect((await gateway.complete(background())).provider).toBe("anthropic");
+    expect((await gateway.complete(background({ purpose: "SUMMARIZE" }))).provider).toBe("gemma_local");
+  });
+
+  it("opphavs-hintet virker: en bestilt jobb (owner_task) er VIKTIG selv med formålet BACKGROUND; uten hint er samme kall BAKGRUNN", async () => {
+    const { gateway, db } = build();
+    db.spend.set("t1", SPENT.tight);
+    expect((await gateway.complete(ownerTask())).provider).toBe("anthropic");
+    const { budget_origin: dropped, ...withoutHint } = ownerTask();
+    void dropped;
+    expect((await gateway.complete(withoutHint)).provider).toBe("gemma_local");
+    expect((await gateway.complete(ownerTask({ budget_origin: "gjest" as never }))).provider).toBe("gemma_local"); // ugyldig hint ignoreres til utledning
+  });
+
+  it("kall i en økt som bærer et bakgrunnsformål (minneuttrekk med økt-id) regnes som BAKGRUNN, ikke som eierens egen tur", async () => {
+    const { gateway, db } = build();
+    db.spend.set("t1", SPENT.tight);
+    const r = await gateway.complete({ tenant_id: "t1", session_id: "s1", purpose: "EXTRACT", mode: "QUALITY", request: REQ });
+    expect(r.provider).toBe("gemma_local");
+  });
+});
+
+describe("Anthropic stengt: eksplisitte valg, preferanselister og tydelig norsk svar når det ikke finnes noe lokalt alternativ", () => {
+  it("INGEN lokal modell: oppbrukt gir ClaudeBudgetBlockedError (exhausted) med en tydelig norsk melding - ingen leverandørkall og ingen kostrad", async () => {
+    const { gateway, db, anthropic } = build({ providers: ["anthropic"] });
+    db.spend.set("t1", SPENT.exhausted);
+    const err = await gateway.complete(ownerTurn()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ClaudeBudgetBlockedError);
+    const blocked = err as ClaudeBudgetBlockedError;
+    expect(blocked).toMatchObject({ kind: "exhausted", level: "exhausted", tier: "essential", reason: "exhausted_closed", resume_at_ms: START + 30 * DAY });
+    expect(blocked.message).toContain("Claude-kreditten for perioden er brukt opp");
+    expect(blocked.message).toContain("ingen lokal modell");
+    expect(blocked.message).toContain("fornyes 15. desember");
+    expect(blocked.message).toContain("JARVIS_CLAUDE_BUDGET_HARD_STOP=off");
+    expect(anthropic.calls).toHaveLength(0);
+    expect(db.costRows).toHaveLength(0);
+  });
+
+  it("INGEN lokal modell: stramt gir utsatt (deferred) for BAKGRUNN med tidspunkt for nytt rom; reserve gir egen tekst", async () => {
+    const { gateway, db } = build({ providers: ["anthropic"] });
+    db.spend.set("t1", SPENT.tight);
+    const deferred = await gateway.complete(background()).catch((e: unknown) => e);
+    expect(deferred).toBeInstanceOf(ClaudeBudgetBlockedError);
+    expect(deferred).toMatchObject({ kind: "deferred", tier: "background", reason: "tight_background_deferred" });
+    expect((deferred as ClaudeBudgetBlockedError).resume_at_ms).toBeGreaterThan(MID);
+    expect((deferred as ClaudeBudgetBlockedError).message).toContain("Det blir rom igjen omtrent");
+    db.spend.set("t1", SPENT.reserve);
+    const reserve = (await gateway.complete(ownerTask()).catch((e: unknown) => e)) as ClaudeBudgetBlockedError;
+    expect(reserve.message).toContain("forbeholdt det aller viktigste");
+  });
+
+  it("et EKSPLISITT valg av Anthropic (eier-override, AI-råd-medlem) rutes aldri stille om: avvises med den tydelige feilen selv om en lokal modell finnes", async () => {
+    const { gateway, db, local } = build();
+    db.spend.set("t1", SPENT.exhausted);
+    const err = await gateway.complete(ownerTurn({ provider: "anthropic" })).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ClaudeBudgetBlockedError);
+    expect(local.calls).toHaveLength(0);
+  });
+
+  it("en hard preferanseliste med kun Anthropic beholder rutefeilen `provider_preference_exhausted` (så kallernes lokale fallback trigges) og begrunnelsen står i feilen", async () => {
+    const { gateway, db } = build();
+    db.spend.set("t1", SPENT.exhausted);
+    const err = await gateway.complete(ownerTurn({ mode: "AUTO", providerPreference: ["anthropic"], preferenceFailover: true })).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NoEligibleProviderError);
+    expect((err as Error).message).toContain("provider_preference_exhausted");
+    expect((err as Error).message).toContain("anthropic:budget_blocked");
+  });
+
+  it("en preferansekjede med lokal reserve går videre til den lokale når Anthropic er stengt (failover uten å kalle Anthropic)", async () => {
+    const { gateway, db, anthropic, local } = build();
+    db.spend.set("t1", SPENT.exhausted);
+    const r = await gateway.complete(ownerTurn({ mode: "AUTO", providerPreference: ["anthropic", "gemma_local"], preferenceFailover: true }));
+    expect(r.provider).toBe("gemma_local");
+    expect(anthropic.calls).toHaveLength(0);
+    expect(local.calls).toHaveLength(1);
+  });
+
+  it("når planen ville feilet UANSETT (kallet krever noe Anthropic ikke har), beholdes den ærlige rutefeilen - kreditten får ikke skylden", async () => {
+    const { gateway, db } = build({ providers: ["anthropic"] });
+    db.spend.set("t1", SPENT.exhausted);
+    const err = await gateway.complete(ownerTurn({ request: { ...REQ, structured_schema: { type: "object" } } })).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NoEligibleProviderError);
+    expect(err).not.toBeInstanceOf(ClaudeBudgetBlockedError);
+    expect((err as Error).message).toContain("structured_output");
+  });
+
+  it("en tur som KREVER noe bare Anthropic har (bilde) og der kreditten er oppbrukt, får den tydelige norske feilen - ikke en teknisk rutefeil", async () => {
+    const { gateway, db, local } = build();
+    db.spend.set("t1", SPENT.exhausted);
+    const err = await gateway.complete(ownerTurn({ purpose: "VISION", required_capabilities: ["vision"] })).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ClaudeBudgetBlockedError);
+    expect(local.calls).toHaveLength(0);
+  });
+
+  it("når planen feiler uansett, sier rutefeilen likevel at Anthropic var stengt av Claude-kreditten (ikke «ikke konfigurert»), ved siden av den virkelige årsaken", async () => {
+    const { gateway, db } = build({ providers: ["anthropic"] });
+    db.spend.set("t1", SPENT.exhausted);
+    const err = (await gateway.complete(ownerTurn({ request: { ...REQ, structured_schema: { type: "object" } } })).catch((e: unknown) => e)) as Error;
+    expect(err.message).toContain("structured_output");
+    expect(err.message).toContain("stengt av Claude-kreditten: anthropic");
+  });
+});
+
+describe("fail-safe: forbruket kan ikke leses", () => {
+  it("lesefeil: ESSENSIELL tillates, VIKTIG nedgraderes, BAKGRUNN utsettes - og hver beslutning revideres med årsak (aldri en tilfeldig stopp av eierens tur)", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { gateway, db, anthropic } = build();
+    db.spendReadError = new Error("FATAL: kobling med hemmelig-verdi-123 brutt");
+    const essential = await gateway.complete(ownerTurn());
+    expect(essential.provider).toBe("anthropic");
+    const important = await gateway.complete(ownerTask());
+    expect(important.provider).toBe("anthropic");
+    expect(important.model).toBe(HAIKU);
+    const bg = await gateway.complete(background());
+    expect(bg.provider).toBe("gemma_local");
+    expect(anthropic.calls.map((c) => c.model)).toEqual([undefined, HAIKU]);
+    expect(db.audit.map((a) => [a.decision, a.reason])).toEqual([
+      ["allow", "spend_unreadable_essential_allowed"], ["downgrade", "spend_unreadable_important_downgraded"], ["defer", "spend_unreadable_background_deferred"]
+    ]);
+    expect(db.audit.every((a) => a.payload["level"] === "unknown")).toBe(true);
+    // loggen har kun feilklassen, aldri meldingen (den kan inneholde tilkoblingsdetaljer)
+    const logged = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toContain("claude_budget_spend_unreadable");
+    expect(logged).not.toContain("hemmelig-verdi-123");
+    spy.mockRestore();
+  });
+
+  it("lesefeil og INGEN lokal modell: BAKGRUNN får den tydelige utsatt-feilen, ESSENSIELL går fortsatt", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { gateway, db } = build({ providers: ["anthropic"] });
+    db.spendReadError = new Error("nede");
+    expect((await gateway.complete(ownerTurn())).provider).toBe("anthropic");
+    const err = (await gateway.complete(background()).catch((e: unknown) => e)) as ClaudeBudgetBlockedError;
+    expect(err).toBeInstanceOf(ClaudeBudgetBlockedError);
+    expect(err.message).toContain("kunne ikke leses");
+    vi.restoreAllMocks();
+  });
+
+  it("ugyldige svar fra databasen (tekst, negativt, NaN, manglende rad) behandles som en lesefeil - aldri som 0 forbruk", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    for (const row of [{ window_ore: "abc", trailing_ore: 0 }, { window_ore: -5, trailing_ore: 0 }, { window_ore: Number.NaN, trailing_ore: 0 }, { window_ore: 10, trailing_ore: "x" }, {}]) {
+      const { gateway, db } = build();
+      db.spendReadRow = row;
+      const r = await gateway.complete(background());
+      expect(r.provider, JSON.stringify(row)).toBe("gemma_local");
+      expect(db.audit[0]?.reason, JSON.stringify(row)).toBe("spend_unreadable_background_deferred");
+    }
+    vi.restoreAllMocks();
+  });
+
+  it("svikt i revisjon/trace stopper aldri modellkallet (telles i logFailures)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { gateway, db, enforcer } = build();
+    db.spend.set("t1", SPENT.tight);
+    db.failAuditWrites = true;
+    const r = await gateway.complete(background());
+    expect(r.provider).toBe("gemma_local");
+    expect(enforcer!.logFailures).toBe(1);
+    vi.restoreAllMocks();
+  });
+});
+
+describe("fortsettelsesrunder i en påbegynt verktøytur fullføres", () => {
+  const exchange: ToolExchange = {
+    calls: [{ tool_call_id: "c1", tool_name: "email__read_inbox", arguments: {}, provider: "anthropic", model: "claude-sonnet-5-5" }],
+    results: [{ tool_call_id: "c1", tool_name: "email__read_inbox", execution_id: "e1", success: true, output: { n: 1 }, at: "2026-11-30T12:00:00.000Z" }]
+  };
+
+  it("oppbrukt midt i turen: runde 2 (med tool_exchanges) går til Anthropic og revideres som overstyrt; en NY tur (uten) går lokalt", async () => {
+    const { gateway, db, anthropic } = build();
+    db.spend.set("t1", SPENT.exhausted);
+    const next = await gateway.complete(ownerTurn({ provider: "anthropic", request: { ...REQ, tool_exchanges: [exchange] } }));
+    expect(next.provider).toBe("anthropic");
+    expect(next.metadata?.["claude_budget"]).toMatchObject({ action: "allow", reason: "continuation_round_allowed" });
+    expect(db.audit[0]).toMatchObject({ decision: "allow", reason: "continuation_round_allowed" });
+    expect(db.audit[0]?.payload["overridden_action"]).toBe("deny");
+    const fresh = await gateway.complete(ownerTurn());
+    expect(fresh.provider).toBe("gemma_local");
+    expect(anthropic.calls).toHaveLength(1);
+  });
+
+  it("hele verktøyløkka: runde 1 tillatt, kreditten går tom etter runde 1, runde 2 fullfører turen på Anthropic", async () => {
+    const { gateway, db, anthropic } = build({
+      anthropic: {
+        script: (_request, call) => (call === 1
+          ? { text: "", tool_calls: [{ tool_call_id: "c1", tool_name: "echo", arguments: {}, provider: "anthropic", model: "claude-sonnet-5-5" }], finish_reason: "tool_use" }
+          : {})
+      }
+    });
+    db.spend.set("t1", SPENT.tight);
+    const executor = { execute: vi.fn(async (call: { tool_call_id: string; tool_name: string }) => {
+      db.spend.set("t1", SPENT.exhausted); // verktøyet (og runde 1) brukte opp kreditten
+      return { tool_call_id: call.tool_call_id, tool_name: call.tool_name, execution_id: "e1", success: true, output: { ok: true }, at: "2026-11-30T12:00:00.000Z" };
+    }) };
+    const result = await gateway.completeWithTools(
+      ownerTurn({ provider: "anthropic" }),
+      { tools: [{ name: "echo", description: "ekko", input_schema: { type: "object", additionalProperties: false, properties: {} } }], executor }
+    );
+    expect(result.provider).toBe("anthropic");
+    expect(anthropic.calls).toHaveLength(2);
+    expect(result.metadata?.["tool_rounds"]).toBe(1);
+    expect(db.audit.map((a) => a.reason)).toEqual(["continuation_round_allowed"]);
+  });
+});
+
+describe("parallelle kall: konservativ reservasjon, ingen race forbi taket", () => {
+  it("seks samtidige kall ved kanten: kun så mange som anslaget tillater slipper gjennom (resten får utsatt/oppbrukt-feil), og reservasjonene frigjøres etterpå", async () => {
+    const gate = { open: () => undefined as void, promise: Promise.resolve() };
+    gate.promise = new Promise<void>((resolve) => { gate.open = resolve; });
+    const { gateway, db, anthropic, enforcer, config } = build({ anthropic: { hold: () => gate.promise } });
+    const request: ModelRequest = { messages: [{ role: "user", content: "x" }], max_tokens: 1000 };
+    const estimate = estimateCallOre(DEFAULT_PRICING, "anthropic", "claude-sonnet-5-5", request, config.budget_ore);
+    expect(estimate).toBeGreaterThan(5);
+    const remaining = 3 * estimate - 2; // plass til nøyaktig tre anslag (det tredje passerer fordi forbruk+reservert er under taket når det sjekkes)
+    db.spend.set("t1", config.budget_ore - remaining);
+    const calls = Array.from({ length: 6 }, () => gateway.complete(ownerTurn({ provider: "anthropic", request })).then((r) => r, (e: unknown) => e));
+    await vi.waitFor(() => expect(anthropic.calls.length + db.statements.filter((s) => s === "INSERT_AUDIT").length).toBe(6));
+    expect(enforcer!.inFlightOre("t1")).toBe(3 * estimate);
+    gate.open();
+    const outcomes = await Promise.all(calls);
+    const passed = outcomes.filter((o): o is ModelResult => !(o instanceof Error));
+    const blocked = outcomes.filter((o): o is ClaudeBudgetBlockedError => o instanceof ClaudeBudgetBlockedError);
+    expect(passed).toHaveLength(3);
+    expect(blocked).toHaveLength(3);
+    expect(blocked.every((b) => b.kind === "exhausted")).toBe(true);
+    expect(anthropic.calls).toHaveLength(3);
+    expect(enforcer!.inFlightOre("t1")).toBe(0);
+  });
+
+  it("reservasjon er per tenant: et kall som er på vei hos tenant A påvirker aldri tenant B", async () => {
+    const gate = { open: () => undefined as void, promise: Promise.resolve() };
+    gate.promise = new Promise<void>((resolve) => { gate.open = resolve; });
+    const { gateway, db, enforcer, config } = build({ anthropic: { hold: () => gate.promise } });
+    const request: ModelRequest = { messages: [{ role: "user", content: "x" }], max_tokens: 1000 };
+    const estimate = estimateCallOre(DEFAULT_PRICING, "anthropic", "claude-sonnet-5-5", request, config.budget_ore);
+    db.spend.set("A", config.budget_ore - 2); // A: ett anslag får plass, ikke to
+    db.spend.set("B", config.budget_ore - 2);
+    const a1 = gateway.complete(ownerTurn({ tenant_id: "A", provider: "anthropic", request })).then((r) => r, (e: unknown) => e);
+    await vi.waitFor(() => expect(enforcer!.inFlightOre("A")).toBe(estimate));
+    const a2 = gateway.complete(ownerTurn({ tenant_id: "A", provider: "anthropic", request })).then((r) => r, (e: unknown) => e);
+    const b1 = gateway.complete(ownerTurn({ tenant_id: "B", provider: "anthropic", request })).then((r) => r, (e: unknown) => e);
+    await vi.waitFor(() => expect(enforcer!.inFlightOre("B")).toBe(estimate));
+    gate.open();
+    const [r1, r2, r3] = await Promise.all([a1, a2, b1]);
+    expect(r1).not.toBeInstanceOf(Error);
+    expect(r2).toBeInstanceOf(ClaudeBudgetBlockedError);
+    expect(r3).not.toBeInstanceOf(Error);
+  });
+
+  it("billetten frigjøres også når leverandøren feiler, når strømmen feiler og når kallet avvises - en lekkasje kan aldri stenge for alltid", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const failing = build({ anthropic: { fail: new ProviderError("anthropic", "server", "boom") }, providers: ["anthropic"] });
+    failing.db.spend.set("t1", SPENT.on_pace);
+    await expect(failing.gateway.complete(ownerTurn({ provider: "anthropic" }))).rejects.toBeInstanceOf(ProviderError);
+    expect(failing.enforcer!.inFlightOre("t1")).toBe(0);
+    await expect(failing.gateway.stream(ownerTurn({ provider: "anthropic" }), () => undefined)).rejects.toBeInstanceOf(ProviderError);
+    expect(failing.enforcer!.inFlightOre("t1")).toBe(0);
+    const closed = build({ providers: ["anthropic"] });
+    closed.db.spend.set("t1", SPENT.exhausted);
+    await expect(closed.gateway.complete(ownerTurn())).rejects.toBeInstanceOf(ClaudeBudgetBlockedError);
+    expect(closed.enforcer!.inFlightOre("t1")).toBe(0);
+    vi.restoreAllMocks();
+  });
+
+  it("en reservasjon som aldri frigjøres (krasj) utløper etter 5 minutter", async () => {
+    const { enforcer, clock, db } = build();
+    db.spend.set("t1", SPENT.on_pace);
+    const ticket = await enforcer!.begin({
+      tenant_id: "t1", session_id: "s1", purpose: "CHAT", request: { messages: [{ role: "user", content: "hei" }], max_tokens: 1000 }, pricing: DEFAULT_PRICING, catalog: DEFAULT_MODEL_CATALOG,
+      provider_default_model: "claude-sonnet-5-5", trace_id: "trace-x", started: Date.now()
+    });
+    expect(enforcer!.inFlightOre("t1")).toBeGreaterThan(0);
+    clock.now += 5 * 60_000 - 1;
+    expect(enforcer!.inFlightOre("t1")).toBeGreaterThan(0);
+    clock.now += 2;
+    expect(enforcer!.inFlightOre("t1")).toBe(0);
+    ticket.release();
+    ticket.release(); // idempotent
+    expect(enforcer!.inFlightOre("t1")).toBe(0);
+  });
+});
+
+describe("tenant-isolasjon: kostnad per tenant", () => {
+  it("tenant A er oppbrukt, tenant B er på tempo: A går lokalt, B på Anthropic - revisjon og spor bærer riktig tenant", async () => {
+    const { gateway, db, budgetSpans } = build();
+    db.spend.set("A", SPENT.exhausted);
+    db.spend.set("B", SPENT.on_pace);
+    expect((await gateway.complete(ownerTurn({ tenant_id: "A" }))).provider).toBe("gemma_local");
+    expect((await gateway.complete(ownerTurn({ tenant_id: "B" }))).provider).toBe("anthropic");
+    expect(db.audit.map((a) => a.tenant_id)).toEqual(["A"]);
+    expect(budgetSpans().map((s) => s.tenant_id)).toEqual(["A", "B"]);
+  });
+
+  it("forbruket leses under tenantens egen RLS-kontekst (set_config rett før lesingen)", async () => {
+    const { gateway, db } = build();
+    await gateway.complete(ownerTurn({ tenant_id: "tenant-xyz", provider: "anthropic" }));
+    const i = db.statements.indexOf("READ_CLAUDE_SPEND");
+    expect(i).toBeGreaterThan(1);
+    expect(db.statements.slice(i - 2, i)).toEqual(["BEGIN", "SET_TENANT"]);
+  });
+});
+
+describe("ingen innhold i logg eller revisjon", () => {
+  it("prompt, systemtekst, verktøyargumenter og svar når aldri trace eller revisjonsrader - kun kategorier og tall", async () => {
+    const { gateway, db, trace, budgetSpans } = build();
+    db.spend.set("t1", SPENT.tight);
+    const secret = "innhold som aldri skal logges";
+    await gateway.complete(background({ request: { system: `system ${secret}`, messages: [{ role: "user", content: `bruker ${secret}` }], max_tokens: 100 } }));
+    await gateway.complete(ownerTurn({ provider: "anthropic", request: { messages: [{ role: "user", content: `tur ${secret}` }], tool_exchanges: [{ calls: [{ tool_call_id: "c", tool_name: "t", arguments: { x: secret }, provider: "anthropic", model: "claude-sonnet-5-5" }], results: [] }] } }));
+    expect(JSON.stringify(db.audit)).not.toContain(secret);
+    expect(JSON.stringify(trace.spans.filter((s) => s.kind === "budget"))).not.toContain(secret);
+    const allowedKeys = new Set(["level", "tier", "origin", "purpose", "action", "reason", "constraint", "downgrade_model", "overridden_action", "window_start", "window_end", "budget_ore", "spent_ore", "curve_ore", "spent_pct", "pace_ratio"]);
+    for (const row of db.audit) for (const key of Object.keys(row.payload)) expect(allowedKeys.has(key), key).toBe(true);
+    for (const span of budgetSpans()) for (const key of Object.keys(span.metadata ?? {})) expect(allowedKeys.has(key), key).toBe(true);
+  });
+
+  it("revisjonsraden bærer tenant, eier-person, økt, jobb og spor-id, og type/beslutning/årsak", async () => {
+    const { gateway, db, budgetSpans } = build();
+    db.spend.set("t1", SPENT.tight);
+    await gateway.complete(background({ session_id: "sess-9", task_id: "task-9" }));
+    const row = db.audit[0]!;
+    expect(row).toMatchObject({ tenant_id: "t1", person_id: "owner-1", session_id: "sess-9", task_id: "task-9", type: "claude_budget.decision", decision: "defer", reason: "tight_background_deferred", tool_id: "claude_budget", action: "pacing" });
+    expect(row.trace_id).toBe(budgetSpans()[0]!.trace_id);
+    expect(row.payload).toMatchObject({ level: "tight", tier: "background", origin: "background", purpose: "EXTRACT", window_start: "2026-11-15", window_end: "2026-12-15", budget_ore: 105_000, spent_ore: 70_000 });
+  });
+});
+
+describe("strøm (stream) og criticen følger samme beslutning", () => {
+  it("stream: nedgradert BAKGRUNN strømmer fra Haiku; oppbrukt strømmer fra lokal modell uten at Anthropic berøres", async () => {
+    const { gateway, db, anthropic, local } = build();
+    db.spend.set("t1", SPENT.ahead);
+    const events: string[] = [];
+    const first = await gateway.stream(background(), (e) => events.push(e.type));
+    expect(first.model).toBe(HAIKU);
+    expect(anthropic.streamCalls[0]?.model).toBe(HAIKU);
+    db.spend.set("t1", SPENT.exhausted);
+    const second = await gateway.stream(ownerTurn(), () => undefined);
+    expect(second.provider).toBe("gemma_local");
+    expect(anthropic.streamCalls).toHaveLength(1);
+    expect(local.calls.length + local.streamCalls.length).toBe(1);
+    expect(events).toContain("text_delta");
+  });
+
+  it("stream uten lokal modell og oppbrukt: feilen kommer FØR noe strømmes (ingen delvis tekst)", async () => {
+    const { gateway, db } = build({ providers: ["anthropic"] });
+    db.spend.set("t1", SPENT.exhausted);
+    const seen: string[] = [];
+    await expect(gateway.stream(ownerTurn(), (e) => seen.push(e.type))).rejects.toBeInstanceOf(ClaudeBudgetBlockedError);
+    expect(seen).toEqual([]);
+  });
+
+  it("critic: er Anthropic stengt/innsnevret for kallet, brukes aldri Anthropic som critic (kun lokal); åpen: critic kan velge Anthropic", async () => {
+    const closed = build();
+    closed.db.spend.set("t1", SPENT.exhausted);
+    const r = await closed.gateway.complete(ownerTurn({ provider: "gemma_local", critic: true }));
+    expect(r.provider).toBe("gemma_local");
+    expect(closed.anthropic.calls).toHaveLength(0);
+    expect((r.metadata?.["critic"] as { provider?: string } | undefined)?.provider).toBe("gemma_local");
+    const open = build();
+    open.db.spend.set("t1", SPENT.on_pace);
+    const r2 = await open.gateway.complete(ownerTurn({ provider: "gemma_local", critic: true }));
+    expect((r2.metadata?.["critic"] as { provider?: string } | undefined)?.provider).toBe("anthropic");
+    expect(open.anthropic.calls).toHaveLength(1);
+  });
+});
+
+describe("hjelpere: anslag og modellvalg", () => {
+  const catalog = DEFAULT_MODEL_CATALOG;
+  it("billigste valgbare Claude-modell: Haiku er billigere enn Sonnet og enn en modell uten pris; allerede billigst gir null; ukjent standardmodell uten pris er aldri valgbar", () => {
+    const base = { pricing: DEFAULT_PRICING, catalog, provider_default_model: "claude-sonnet-5-5" };
+    expect(cheaperClaudeModel({ ...base, effective_model: "claude-sonnet-5-5" })).toBe(HAIKU);
+    expect(cheaperClaudeModel({ ...base, effective_model: "claude-opus-5-5" })).toBe(HAIKU);
+    expect(cheaperClaudeModel({ ...base, effective_model: HAIKU })).toBeNull();
+    expect(cheaperClaudeModel({ ...base, effective_model: "" })).toBe(HAIKU);
+    expect(cheaperClaudeModel({ pricing: DEFAULT_PRICING, catalog: [], effective_model: "claude-sonnet-5-5" })).toBeNull();
+    // en katalogmodell uten eksplisitt pris er ikke valgbar (ellers ville forbruket bokføres til feil sats)
+    const unpriced = [{ provider: "anthropic", model: "claude-ukjent-9", tier: "fast" as const, cost_class: 1 as const }];
+    expect(cheaperClaudeModel({ pricing: DEFAULT_PRICING, catalog: unpriced, provider_default_model: "claude-sonnet-5-5", effective_model: "claude-sonnet-5-5" })).toBeNull();
+  });
+
+  it("anslaget er konservativt (tegn/3 inn, max_tokens ut), tak 5 % av budsjettet, og tåler verktøy/utvekslinger som ikke kan serialiseres", () => {
+    const small = estimateCallOre(DEFAULT_PRICING, "anthropic", "claude-sonnet-5-5", { messages: [{ role: "user", content: "hei" }], max_tokens: 1000 }, 105_000);
+    expect(small).toBe(Math.ceil((1 / 1000) * 2.1 + (1000 / 1000) * 10.5));
+    // 3 millioner tegn ≈ 1 million tokens ≈ 2 144 øre - under taket for et 105 000-øres budsjett, men over taket (5 % = 500) for et lite budsjett: et enkelt gigantisk prompt kan aldri alene stenge alt
+    const bigRequest: ModelRequest = { messages: [{ role: "user", content: "x".repeat(3_000_000) }], max_tokens: 4096 };
+    expect(estimateCallOre(DEFAULT_PRICING, "anthropic", "claude-sonnet-5-5", bigRequest, 105_000)).toBe(2144);
+    expect(estimateCallOre(DEFAULT_PRICING, "anthropic", "claude-sonnet-5-5", bigRequest, 10_000)).toBe(500);
+    const circular: Record<string, unknown> = {};
+    circular["self"] = circular;
+    expect(() => estimateCallOre(DEFAULT_PRICING, "anthropic", "claude-sonnet-5-5", { messages: [{ role: "user", content: "hei" }], tools: circular as never }, 105_000)).not.toThrow();
+  });
+});

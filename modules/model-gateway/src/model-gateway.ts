@@ -22,12 +22,14 @@ import { BudgetGuard, type BudgetConfig, DEFAULT_BUDGET } from "./budget-guard.t
 import { classifyCompletionOutcome, computeAdaptiveRetryMaxTokens, type CompletionOutcome } from "./completion-outcome.ts";
 import { CapabilityRegistry, type ModelCapability } from "./capability-registry.ts";
 import { ProviderHealthTracker, type ProviderHealthDetail, type ProviderHealthDetails, type ProviderHealthState } from "./provider-health.ts";
-import { AiRouter, type RoutePlan } from "./router.ts";
+import { AiRouter, LocalModelUnavailableError, NoEligibleProviderError, PaidModelsDisabledError, type RouteInput, type RoutePlan } from "./router.ts";
 import { meshToolsVerifiedFromEnv } from "./mesh-verification.ts";
 import { assertExplicitPricing, costOre as computeCostOre, DEFAULT_PRICING, type PricingTable } from "./pricing.ts";
 import { modelCatalogFromEnv, type CatalogModel, type ModelTier } from "./model-catalog.ts";
 import { describeTask, HeuristicRoutingAdvisor, selectModelForTier, type RoutingAdvisor } from "./routing-advisor.ts";
 import type { TraceSink } from "./trace.ts";
+import { CLAUDE_BUDGET_PROVIDER, type BudgetOrigin } from "./claude-budget.ts";
+import type { ClaudeBudgetEnforcer, PacingTicket } from "./claude-budget-enforcer.ts";
 
 /**
  * D-106 Council reliability (§ARCHITECTURE DECISION, evidensbasert 2026-08-24):
@@ -147,6 +149,11 @@ export interface CompleteInput {
    * spesifikk (§DESIGN REQUIREMENTS: ingen `if provider === "kimi"` noe sted).
    */
   timeoutMs?: number;
+  /**
+   * WP-B4 (D-476): hvem kallet er for (eierens egen tur, en jobb eieren bestilte, bakgrunnsarbeid) - brukes KUN av Claude-kreditten (`GatewayOptions.claudeBudget`) til behovsprioriteringen. Udefinert = utledes av
+   * `task_id`/`session_id`. Betrodde kallere (delegerte jobber, AI-råd) setter den KUN når `gateway.claudeBudgetActive` er sant, så innputtet er uendret uten flagget. Ignoreres helt uten Claude-kreditten.
+   */
+  budget_origin?: BudgetOrigin;
 }
 
 export interface GatewayOptions {
@@ -187,6 +194,11 @@ export interface GatewayOptions {
    * Klokke i millisekunder (standard `Date.now`). Finnes kun slik at tester kan styre alderen på siste kjente pausetilstand; selve aldersgrensen (`PAUSE_STATE_MAX_AGE_MS`) kan IKKE konfigureres.
    */
   now?: () => number;
+  /**
+   * WP-B4 (D-476): Claude-kreditten (100 USD/mnd) med tempostyring og behovsprioritering. Utelatt (standard, `JARVIS_CLAUDE_BUDGET_USD` ikke satt) = ingen av kodeveiene under er i bruk og gatewayen er identisk med main.
+   * Satt: beslutningen tas FØR leverandørvalg for kall som kan ende hos Anthropic, og kan bare SNEVRE INN Anthropic (billigere modell, stengt) - aldri åpne noe sensitivitetsreglene har stengt. Se `claude-budget-enforcer.ts`.
+   */
+  claudeBudget?: ClaudeBudgetEnforcer;
 }
 
 /**
@@ -357,6 +369,9 @@ function pauseReadFailure(err: unknown): { error: string; code?: string } {
   return { error: err instanceof Error ? err.name : "unknown", ...(typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? { code } : {}) };
 }
 
+/** Gatewayens syn på én leverandør i denne prosessen (ruteren ser kun `configured`/`paused`/`budget_blocked`/`model`). */
+type RuntimeRow = { configured: boolean; available: boolean; paused: boolean; model: string; budget_blocked?: boolean };
+
 export class ModelGateway {
   private readonly guard: BudgetGuard;
   private readonly callTimestamps = new Map<string, number[]>();
@@ -410,6 +425,13 @@ export class ModelGateway {
     return this.registry;
   }
 
+  /**
+   * WP-B4 (D-476): `true` når gatewayen er konstruert med Claude-kreditten på. Kallere som vil merke kall med opphav (`CompleteInput.budget_origin`) gjør det KUN når dette er sant - uten flagget er innputtet byte-identisk med main.
+   */
+  get claudeBudgetActive(): boolean {
+    return this.opts.claudeBudget !== undefined;
+  }
+
   /** Remediering del 1: ALLE konstruerte adapternavn (uansett `available()`), brukt av oppstartens eksplisitt-pris-sjekk. */
   listProviderNames(): string[] {
     return this.opts.providers.map((p) => p.name);
@@ -424,8 +446,8 @@ export class ModelGateway {
    * `configured` = kan brukes NÅ (nøkkel/URL satt OG ikke pauset av eieren); `available` = adapteren har nøkkel/URL uavhengig av pausen (helse og visning); `paused` = eierens pause.
    * Ruteren ser kun `configured`/`paused`/`model`.
    */
-  private providerRuntimes(paused: ReadonlySet<string> = this.pausedSnapshot): Map<string, { configured: boolean; available: boolean; paused: boolean; model: string }> {
-    const map = new Map<string, { configured: boolean; available: boolean; paused: boolean; model: string }>();
+  private providerRuntimes(paused: ReadonlySet<string> = this.pausedSnapshot): Map<string, RuntimeRow> {
+    const map = new Map<string, RuntimeRow>();
     for (const p of this.opts.providers) {
       const available = p.available();
       const isPaused = paused.has(p.name);
@@ -538,6 +560,85 @@ export class ModelGateway {
     return candidateModel !== "ukjent" && adapterModel !== undefined && candidateModel !== adapterModel ? { ...request, model: candidateModel } : request;
   }
 
+  // -------------------------------------------------------------------------------------------------------------------
+  // WP-B4 (D-476): Claude-kreditten. ALT under er død kode uten `GatewayOptions.claudeBudget` (`pacing` er da alltid `undefined`).
+  // -------------------------------------------------------------------------------------------------------------------
+
+  /**
+   * Kan dette kallet ende hos Anthropic? Konservativt: tempostyringen (og lesingen av forbruket) hoppes KUN over når det er KLART at kallet ikke kan nå Anthropic - leverandøren er ikke konfigurert/pauset, betalte modeller er av,
+   * innholdet er SECRET_RESTRICTED, en annen leverandør er valgt eksplisitt, en preferanseliste ikke har Anthropic, eller modusen er lokal. Tvil = evaluer. Sensitivitetsreglene i ruteren er uendret og gjelder uansett.
+   */
+  private mayReachClaude(input: CompleteInput, paused: ReadonlySet<string>): boolean {
+    const adapter = this.byName.get(CLAUDE_BUDGET_PROVIDER);
+    if (adapter === undefined || !adapter.available() || paused.has(CLAUDE_BUDGET_PROVIDER)) return false;
+    if (input.paid_models_allowed === false || input.sensitivity === "SECRET_RESTRICTED") return false;
+    if (input.critic === true) return true; // criticen velger sin egen leverandør
+    if (input.provider !== undefined) return input.provider === CLAUDE_BUDGET_PROVIDER;
+    if (input.mode === "LOCAL") return false;
+    if (input.providerPreference !== undefined && input.providerPreference.length > 0) return input.providerPreference.includes(CLAUDE_BUDGET_PROVIDER);
+    return true;
+  }
+
+  /** Beslutningen for dette kallet, tatt FØR leverandørvalg. `undefined` = Claude-kreditten er av, eller kallet kan ikke nå Anthropic. Kaster aldri (se `ClaudeBudgetEnforcer.begin`). */
+  private async beginPacing(input: CompleteInput, paused: ReadonlySet<string>, traceId: string, started: number): Promise<PacingTicket | undefined> {
+    const enforcer = this.opts.claudeBudget;
+    if (enforcer === undefined || !this.mayReachClaude(input, paused)) return undefined;
+    const defaultModel = this.byName.get(CLAUDE_BUDGET_PROVIDER)?.model;
+    return enforcer.begin({
+      tenant_id: input.tenant_id,
+      ...(input.session_id !== undefined ? { session_id: input.session_id } : {}),
+      ...(input.task_id !== undefined ? { task_id: input.task_id } : {}),
+      ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+      ...(input.budget_origin !== undefined ? { budget_origin: input.budget_origin } : {}),
+      request: input.request, pricing: this.pricing, catalog: this.catalog,
+      ...(defaultModel !== undefined ? { provider_default_model: defaultModel } : {}),
+      trace_id: traceId, started
+    });
+  }
+
+  /** Stenger Anthropic for ruteren (som en pause, men med egen begrunnelse). Aldri en måte å åpne noe på. */
+  private closeClaudeRuntime(runtimes: Map<string, RuntimeRow>): void {
+    const rt = runtimes.get(CLAUDE_BUDGET_PROVIDER);
+    if (rt !== undefined) runtimes.set(CLAUDE_BUDGET_PROVIDER, { ...rt, configured: false, budget_blocked: true });
+  }
+
+  /**
+   * `router.plan` med Claude-kreditten som innsnevring. Uten billett, eller når Anthropic ikke er stengt: nøyaktig `router.plan(routeInput, providerRuntimes(paused))` som før.
+   * Stengt: et EKSPLISITT valg av Anthropic (eier-override, AI-råd-medlem) får aldri en stille omruting (§10) - kallet avvises med en tydelig feil; ellers planlegges det uten Anthropic (lokal modell/annen leverandør).
+   */
+  private planRoute(routeInput: RouteInput, paused: ReadonlySet<string>, input: CompleteInput, pacing: PacingTicket | undefined): RoutePlan {
+    if (pacing === undefined || pacing.constraint !== "closed") return this.router.plan(routeInput, this.providerRuntimes(paused));
+    if (input.provider === CLAUDE_BUDGET_PROVIDER) throw pacing.blockedError();
+    const closed = this.providerRuntimes(paused);
+    this.closeClaudeRuntime(closed);
+    try {
+      return this.router.plan(routeInput, closed);
+    } catch (err) {
+      throw this.explainClosedRoute(err, routeInput, paused, input, pacing);
+    }
+  }
+
+  /**
+   * Ruteren fant ingen kandidat uten Anthropic. Hadde kallet gått MED Anthropic åpen, er det kreditten som stoppet det: da får eieren en tydelig norsk feil (`ClaudeBudgetBlockedError`) i stedet for en teknisk rutefeil.
+   * Unntak: en hard preferanseliste beholder rutefeilen (`provider_preference_exhausted`) - kallerne (chatten, jobbene) har allerede en lokal fallback som trigges av nettopp den, og som igjen ender i den tydelige
+   * feilen hvis ingen lokal modell finnes. Feiler planen uansett (sensitivitet, ingen lokal modell for SECRET_RESTRICTED), er den ærlige årsaken en annen og den opprinnelige feilen beholdes.
+   */
+  private explainClosedRoute(err: unknown, routeInput: RouteInput, paused: ReadonlySet<string>, input: CompleteInput, pacing: PacingTicket): unknown {
+    if (!(err instanceof NoEligibleProviderError || err instanceof LocalModelUnavailableError || err instanceof PaidModelsDisabledError)) return err;
+    try {
+      this.router.plan(routeInput, this.providerRuntimes(paused));
+    } catch {
+      return err;
+    }
+    const preferenceList = input.provider === undefined && (input.providerPreference?.length ?? 0) > 0;
+    return preferenceList ? err : pacing.blockedError();
+  }
+
+  /** Nedgradering: Anthropic-kandidater bruker den billigere modellen (siste ord - også over modellrådgiverens valg og over en eksplisitt `request.model`). */
+  private requestWithPacingModel(request: ModelRequest, provider: string, pacing: PacingTicket | undefined): ModelRequest {
+    return pacing?.downgrade_model !== undefined && provider === CLAUDE_BUDGET_PROVIDER ? { ...request, model: pacing.downgrade_model } : request;
+  }
+
   async complete(rawInput: CompleteInput): Promise<ModelResult> {
     return this.withPriority(rawInput.purpose, () => this.completeInner(rawInput));
   }
@@ -567,8 +668,10 @@ export class ModelGateway {
 
     const paused = await this.livePauses();
     this.assertNotPaused(input.provider, paused);
-    const routerPlan = this.router.plan(
-      {
+    // WP-B4 (D-476): Claude-kreditten tar sin beslutning FØR leverandørvalg. `undefined` (av, eller kallet kan ikke nå Anthropic) = alt under er som før.
+    const pacing = await this.beginPacing(input, paused, traceId, started);
+    try {
+      const routeInput: RouteInput = {
         ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
         ...(input.mode !== undefined ? { mode: input.mode } : {}),
         ...(input.provider !== undefined ? { provider: input.provider } : {}),
@@ -585,17 +688,19 @@ export class ModelGateway {
         ...(input.preferenceFailover !== undefined ? { preferenceFailover: input.preferenceFailover } : {}),
         ...(input.excludeProviders !== undefined ? { excludeProviders: input.excludeProviders } : {}),
         needs_structured: Boolean(input.request.structured_schema)
-      },
-      this.providerRuntimes(paused)
-    );
-    const plan = await this.applyModelAdvice(input, routerPlan, budget.level, traceId);
+      };
+      const routerPlan = this.planRoute(routeInput, paused, input, pacing);
+      const plan = await this.applyModelAdvice(input, routerPlan, budget.level, traceId);
 
-    const result = await this.executePlan(input, plan, traceId, started, budget.level, false);
+      const result = await this.executePlan(input, plan, traceId, started, budget.level, false, undefined, undefined, pacing);
 
-    if (input.critic || plan.mode === "CRITIC") {
-      await this.runCritic(input, result, traceId);
+      if (input.critic || plan.mode === "CRITIC") {
+        await this.runCritic(input, result, traceId, pacing);
+      }
+      return result;
+    } finally {
+      pacing?.release();
     }
-    return result;
   }
 
   /**
@@ -612,7 +717,9 @@ export class ModelGateway {
     budgetLevel: string,
     isCritic: boolean,
     requestOverride?: ModelRequest,
-    streamOpts?: { onEvent: StreamHandler; signal?: AbortSignal }
+    streamOpts?: { onEvent: StreamHandler; signal?: AbortSignal },
+    /** WP-B4: Claude-kreditten sin billett for dette kallet (nedgradering av modellen; metadata). `undefined` = uendret. */
+    pacing?: PacingTicket
   ): Promise<ModelResult> {
     const baseRequest = requestOverride ?? input.request;
     const failedProviders: string[] = [];
@@ -631,7 +738,7 @@ export class ModelGateway {
         continue;
       }
       // D-399: per-kall modell for DENNE kandidaten (kun når rådgiveren valgte en annen enn adapterens standard).
-      const request = this.requestForCandidate(baseRequest, candidate.model, adapter.model);
+      const request = this.requestWithPacingModel(this.requestForCandidate(baseRequest, candidate.model, adapter.model), candidate.provider, pacing);
       if (failedProviders.length > 0 && streamOpts) {
         throwIfCancelled(adapter.name); // ingen `fallback`-event og ingen ny kandidat etter at brukeren har avbrutt
         streamOpts.onEvent({
@@ -704,6 +811,8 @@ export class ModelGateway {
               ...(failedProviders.length > 0 ? { fallback_from: failedProviders } : {})
             }
           };
+          // WP-B4: kun kategorier (aldri innhold) - brukes av flatene til merknaden «Claude-kreditten: ...» når svaret kom fra en annen modell enn planlagt.
+          if (pacing !== undefined) result.metadata = { ...result.metadata, claude_budget: pacing.resultMetadata() };
           // L10 (gjennomgang av PR #315): adapteren har nullet ugyldige tokentall (aldri en streng/NaN inn i kostformelen) og merket svaret - kostnaden er UKJENT, ikke gratis. Kun kategorier logges, aldri verdiene.
           const usageProblems = result.metadata["usage_problems"];
           if (Array.isArray(usageProblems) && usageProblems.length > 0) {
@@ -772,6 +881,7 @@ export class ModelGateway {
                     retry_max_tokens: retryRequest.max_tokens
                   }
                 };
+                if (pacing !== undefined) retryResult.metadata = { ...retryResult.metadata, claude_budget: pacing.resultMetadata() };
                 const retryOutcome = classifyCompletionOutcome(retryResult);
                 await this.recordAttemptResult(input, retryResult, retryOutcome, {
                   traceId,
@@ -908,8 +1018,10 @@ export class ModelGateway {
     }
     const paused = await this.livePauses();
     this.assertNotPaused(input.provider, paused);
-    const routerPlan = this.router.plan(
-      {
+    // WP-B4 (D-476): se `completeInner`.
+    const pacing = await this.beginPacing(input, paused, traceId, started);
+    try {
+      const routeInput: RouteInput = {
         ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
         ...(input.mode !== undefined ? { mode: input.mode } : {}),
         ...(input.provider !== undefined ? { provider: input.provider } : {}),
@@ -931,11 +1043,13 @@ export class ModelGateway {
         ...(input.preferenceFailover !== undefined ? { preferenceFailover: input.preferenceFailover } : {}),
         ...(input.excludeProviders !== undefined ? { excludeProviders: input.excludeProviders } : {}),
         needs_structured: Boolean(input.request.structured_schema)
-      },
-      this.providerRuntimes(paused)
-    );
-    const plan = await this.applyModelAdvice(input, routerPlan, budget.level, traceId);
-    return this.executePlan(input, plan, traceId, started, budget.level, false, undefined, { onEvent, ...(signal ? { signal } : {}) });
+      };
+      const routerPlan = this.planRoute(routeInput, paused, input, pacing);
+      const plan = await this.applyModelAdvice(input, routerPlan, budget.level, traceId);
+      return await this.executePlan(input, plan, traceId, started, budget.level, false, undefined, { onEvent, ...(signal ? { signal } : {}) }, pacing);
+    } finally {
+      pacing?.release();
+    }
   }
 
   /**
@@ -1082,9 +1196,11 @@ export class ModelGateway {
   }
 
   /** Critic (§18-§19): separat modellkjøring, egen kostrad, aldri koblet til D-godkjenning. */
-  private async runCritic(input: CompleteInput, primary: ModelResult, traceId: string): Promise<void> {
+  private async runCritic(input: CompleteInput, primary: ModelResult, traceId: string, pacing?: PacingTicket): Promise<void> {
     try {
       const runtimes = this.providerRuntimes(this.pausedSnapshot);
+      // WP-B4: criticen er en ekstra, valgfri kvalitetskjøring - aldri på Anthropic når kreditten har snevret inn dette kallet (nedgradert, utsatt eller stengt).
+      if (pacing !== undefined && pacing.constraint !== "open") this.closeClaudeRuntime(runtimes);
       // Foretrekk annen provider enn primær for uavhengig blikk; ellers samme.
       const others = new Map([...runtimes].filter(([name, rt]) => rt.configured && name !== primary.provider));
       const pool = others.size > 0 ? others : runtimes;
