@@ -342,9 +342,10 @@ export class ClaudeBudgetEnforcer {
       this.logFailures += 1;
       console.error(JSON.stringify({ msg: "claude_budget_trace_failed", error: err instanceof Error ? err.name : "unknown" }));
     }
-    // Revisjon kun når beslutningen gjorde noe (ikke-tillat), var fail-safe eller overstyrt av en fortsettelsesrunde - en vanlig «tillat på tempo» er sporet i trace, ikke revisjon (ellers én rad per modellkall).
+    // Revisjon kun når beslutningen gjorde noe (ikke-tillat), var fail-safe, overstyrt av en fortsettelsesrunde ELLER tillot forbruk over en oppbrukt kreditt (eierens override `HARD_STOP=off`: beviset på hvilke kall som gikk forbi kreditten).
+    // En vanlig «tillat på tempo» er sporet i trace, ikke revisjon (ellers én rad per modellkall).
     const v = ticket.verdict;
-    if (v.action === "allow" && v.overridden_action === undefined && v.level !== "unknown") return;
+    if (v.action === "allow" && v.overridden_action === undefined && v.level !== "unknown" && v.level !== "exhausted") return;
     try {
       await withTenantTransaction(this.opts.pool, info.tenant_id, (client) =>
         writeAudit(

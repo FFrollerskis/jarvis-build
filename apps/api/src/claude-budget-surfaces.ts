@@ -123,6 +123,11 @@ const BRIEF_BY_LEVEL: Readonly<Record<PacingLevel, { score: number; why: string;
   exhausted: { score: 88, why: "kreditten er brukt opp - Anthropic er stengt til fornyelsen og alt går til lokal modell", action: "se AI-senteret (Kost)" }
 };
 
+/** Oppbrukt med hardstoppen AV (eierens override): Anthropic er IKKE stengt - briefen skal ikke påstå det. */
+const BRIEF_EXHAUSTED_HARD_STOP_OFF = {
+  score: 88, why: "kreditten er brukt opp og hardstoppen er av - egne turer og bestilte jobber fortsetter på Claude (det kan koste penger), bakgrunn går lokalt", action: "se AI-senteret (Kost)"
+} as const;
+
 /**
  * Daglig brief: ÉN linje om Claude-kreditten (kilde `claude-budget`). `ref` er dagens dato, så linjen er ny hver dag (briefens «ikke gjenta det som er presentert før» gjelder `source:ref`). Kan kreditten ikke leses,
  * kaster kilden - briefen degraderer da pent (samme som alle kilder) og viser «Connector utilgjengelig: claude-budget», aldri «i orden». Briefen leveres til eieren (Telegram), ikke til en modell.
@@ -134,7 +139,7 @@ export function claudeBudgetBriefSource(opts: { pool: pg.Pool; config: ClaudeBud
     async collect(identity: IdentityContext): Promise<BriefItem[]> {
       const nowMs = now();
       const { state } = await readClaudeBudgetState(opts.pool, identity.tenant_id, opts.config, nowMs);
-      const level = BRIEF_BY_LEVEL[state.level];
+      const level = state.level === "exhausted" && !opts.config.hard_stop ? BRIEF_EXHAUSTED_HARD_STOP_OFF : BRIEF_BY_LEVEL[state.level];
       const today = new Date(nowMs).toLocaleDateString("sv-SE", { timeZone: "Europe/Oslo" });
       return [{
         source: "claude-budget", ref: today, title: describeStateNo(state, opts.config), at: new Date(nowMs).toISOString(), score: level.score,

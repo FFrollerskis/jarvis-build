@@ -529,9 +529,10 @@ describe("tekster: kun kategorier og tall, norsk, og ufarlige for samtalen", () 
   it("feilmeldinger og merknader som havner i samtalen har ingen beløp, ingen parenteser, og utløser aldri sensitivitetsklassifiseringen", () => {
     const texts = [
       blockedMessageNo("exhausted", "exhausted_closed", null, END), blockedMessageNo("deferred", "tight_background_deferred", at(9.7), END), blockedMessageNo("deferred", "tight_background_deferred", null, END),
-      blockedMessageNo("deferred", "reserve_kept_for_essential", END, END),
+      blockedMessageNo("deferred", "reserve_kept_for_essential", END, END), blockedMessageNo("deferred", "exhausted_hard_stop_off_background_deferred", END, END),
       claudeBudgetNoteNo("deny", "exhausted_closed", END), claudeBudgetNoteNo("defer", "reserve_kept_for_essential", END), claudeBudgetNoteNo("defer", "tight_background_deferred", END),
-      claudeBudgetNoteNo("deny", "exhausted_closed", END, "jobben"), claudeBudgetNoteNo("defer", "tight_background_deferred", END, "jobben")
+      claudeBudgetNoteNo("deny", "exhausted_closed", END, "jobben"), claudeBudgetNoteNo("defer", "tight_background_deferred", END, "jobben"),
+      claudeBudgetNoteNo("defer", "exhausted_hard_stop_off_background_deferred", END, "jobben")
     ];
     for (const text of texts) {
       expect(classifyContentSensitivity({ texts: [text] }).sensitivity, text).toBe("PUBLIC_OR_LOW_SENSITIVITY");
@@ -539,7 +540,19 @@ describe("tekster: kun kategorier og tall, norsk, og ufarlige for samtalen", () 
       expect(text, text).not.toMatch(/\d+\s*(?:USD|kr|øre)/i);
       expect(text, text).not.toMatch(/budsjett/i);
     }
-    for (const note of texts.slice(4)) expect(note.startsWith(CLAUDE_BUDGET_NOTE_PREFIX), note).toBe(true);
+    for (const note of texts.slice(5)) expect(note.startsWith(CLAUDE_BUDGET_NOTE_PREFIX), note).toBe(true);
+  });
+
+  it("hard stopp AV: bakgrunn som utsettes fordi kreditten er brukt opp sier det (ikke «foran tempo»), og sier at hardstoppen er av - og notatet sier at perioden er brukt opp", () => {
+    const blocked = blockedMessageNo("deferred", "exhausted_hard_stop_off_background_deferred", END, END);
+    expect(blocked).toContain("brukt opp");
+    expect(blocked).toContain("hardstoppen er av");
+    expect(blocked).toContain("fornyes 15. desember");
+    expect(blocked).not.toContain("foran periodens tempo");
+    const note = claudeBudgetNoteNo("defer", "exhausted_hard_stop_off_background_deferred", END, "jobben");
+    expect(note).toContain("perioden er brukt opp");
+    expect(note).toContain("15. desember");
+    expect(note).not.toContain("foran periodens tempo");
   });
 
   it("hard stopp uten lokalt alternativ gir et tydelig norsk svar som sier hva som skjedde, når det åpner igjen og hvordan eieren kan endre det", () => {

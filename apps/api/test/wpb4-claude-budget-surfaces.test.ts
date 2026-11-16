@@ -316,6 +316,15 @@ describe("daglig brief: én linje", () => {
     expect(exhausted.text).toContain("Anthropic er stengt til fornyelsen");
   });
 
+  it("oppbrukt med hardstoppen AV: briefen påstår IKKE at Anthropic er stengt, men at egne turer og bestilte jobber fortsetter (det kan koste penger)", async () => {
+    const { artifact, text } = await briefFor(SPENT.exhausted, { JARVIS_CLAUDE_BUDGET_HARD_STOP: "off" });
+    const line = artifact.needs_attention.find((i) => i.source === "claude-budget");
+    expect(line?.score).toBe(88);
+    expect(line?.why).toContain("hardstoppen er av");
+    expect(line?.why).toContain("kan koste penger");
+    expect(text).not.toContain("Anthropic er stengt");
+  });
+
   it("foran tempo er fortsatt bare FYI (score 35), og referansen er dagens dato slik at linjen er ny hver dag", async () => {
     const { artifact } = await briefFor(SPENT.over_50);
     expect(artifact.fyi.find((i) => i.source === "claude-budget")).toMatchObject({ score: 35, ref: "2026-11-30" });

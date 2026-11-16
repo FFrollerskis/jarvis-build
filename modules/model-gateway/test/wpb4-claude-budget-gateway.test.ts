@@ -171,6 +171,10 @@ describe("nivå × tier: hva ruteren får lov til (100 USD, 15 av 30 døgn gått
     expect((await gateway.complete(ownerTask())).provider).toBe("anthropic");
     expect((await gateway.complete(background())).provider).toBe("gemma_local");
     expect(anthropic.calls).toHaveLength(2);
+    // overstyringen er revidert: hvert kall som gikk FORBI kreditten står som bevis (ikke bare i sporet), og bakgrunnen som ble utsatt sier hvorfor
+    expect(db.audit.map((a) => `${a.decision}/${a.reason}`)).toEqual([
+      "allow/exhausted_hard_stop_off", "allow/exhausted_hard_stop_off", "defer/exhausted_hard_stop_off_background_deferred"
+    ]);
   });
 
   it("tier fra miljøet: `background.EXTRACT=important` gjør uttrekk VIKTIG (går fortsatt på Anthropic når det er stramt)", async () => {

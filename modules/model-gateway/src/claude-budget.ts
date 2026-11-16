@@ -528,6 +528,10 @@ export function blockedMessageNo(kind: BlockedKind, reason: string, resumeMs: nu
   if (reason === "spend_unreadable_background_deferred") {
     return "Forbruket av Claude-kreditten kunne ikke leses akkurat nå, så dette kallet er utsatt, og ingen lokal modell kunne svare i stedet. Prøv igjen om litt.";
   }
+  if (reason === "exhausted_hard_stop_off_background_deferred") {
+    // hardstoppen er AV: egne turer og bestilte jobber går fortsatt på Claude, men bakgrunnsarbeid venter til fornyelsen
+    return `Claude-kreditten for perioden er brukt opp, og hardstoppen er av, så bakgrunnsarbeid på Claude er utsatt til fornyelsen, og ingen lokal modell kunne svare i stedet. ${resetText}`;
+  }
   const until = resumeMs !== null && resumeMs < windowEndMs ? ` Det blir rom igjen omtrent ${formatDateTimeNo(resumeMs)}.` : ` ${resetText}`;
   return `Claude-bruken ligger foran periodens tempo, så dette kallet er utsatt, og ingen lokal modell kunne svare i stedet.${until}`;
 }
@@ -541,7 +545,7 @@ export const CLAUDE_BUDGET_NOTE_PREFIX = "Claude-kreditten:";
  */
 export function claudeBudgetNoteNo(action: PacingAction, reason: string, windowEndMs: number, what: "svaret" | "jobben" = "svaret"): string {
   const subject = what === "svaret" ? "dette svaret" : "jobben";
-  if (action === "deny") return `${CLAUDE_BUDGET_NOTE_PREFIX} perioden er brukt opp, så ${subject} kom fra den lokale modellen. Kreditten fornyes ${formatDateNo(windowEndMs)}.`;
+  if (action === "deny" || reason === "exhausted_hard_stop_off_background_deferred") return `${CLAUDE_BUDGET_NOTE_PREFIX} perioden er brukt opp, så ${subject} kom fra den lokale modellen. Kreditten fornyes ${formatDateNo(windowEndMs)}.`;
   if (reason === "reserve_kept_for_essential") return `${CLAUDE_BUDGET_NOTE_PREFIX} resten er forbeholdt det aller viktigste, så ${subject} kom fra den lokale modellen. Kreditten fornyes ${formatDateNo(windowEndMs)}.`;
   if (reason === "spend_unreadable_background_deferred") return `${CLAUDE_BUDGET_NOTE_PREFIX} forbruket kunne ikke leses, så ${subject} kom fra den lokale modellen.`;
   return `${CLAUDE_BUDGET_NOTE_PREFIX} bruken ligger foran periodens tempo, så ${subject} kom fra den lokale modellen.`;
