@@ -64,6 +64,13 @@ export interface ProviderToolSpec {
   toolId: string;
   credentialRef: string;
   ops: readonly OpSpec[];
+  /**
+   * Review M5: eierens frys er nøklet på `tool_id` (`growth_googleads`) og connector-id (`ToolDefinition.connector_ids_for`). De EKSISTERENDE lese-/synk-connectorene bor i egne tool-id-er (`googleads`, `metaads`):
+   * en eier som fryser dem forventer at ALL tilgang til plattformen stanser, også skriving. Her står lese-connectorens id, slik at gatewayen også avviser (`connector_frozen`) alle skrive- og lesehandlinger i det
+   * eier-eksklusive navnerommet. De seks nye plattformene har ingen lese-connector og står ikke i CONNECTOR_REGISTRY (DEFERRED, krever fullt manifest): de fryses på `tool_id` (`growth_ga4` ...) via
+   * `owner_controls.freeze_connector`/`executive.freeze_connector` (aksepterer alle id-er) eller ved å tilbakekalle credential-refen. Tom/utelatt = kun `tool_id`-frysen.
+   */
+  freezeConnectorIds?: readonly string[];
 }
 
 /** Er finans-nødbryteren BEKREFTET av (`false`)? Alt annet (på eller ukjent) er «ikke åpen» - fail-closed. */
@@ -84,6 +91,8 @@ export function buildGrowthToolDefinitions(spec: ProviderToolSpec, transport: To
     const base = {
       tool_id: spec.toolId, action: op.action, description: op.description, input_schema: zRecord(op.shape), scopes: op.scopes, credential_ref: spec.credentialRef, transport, owner_only: true,
       parameterAuthorizer: (p: Params) => authorizeGrowthTarget(spec.provider, op.targetParam, p, config),
+      // Review M5: frys av lese-connectoren (`googleads`/`metaads`) stanser også skriving og lesing i det eier-eksklusive navnerommet (gatewayen sjekker det både ved start og rett før leverandørkallet).
+      connector_ids_for: (ref: string): readonly string[] => (ref === spec.credentialRef ? spec.freezeConnectorIds ?? [] : []),
       timeout_ms: op.timeoutMs ?? (op.risk === "A" ? 25_000 : 45_000), rate_limit_per_minute: op.rate ?? (op.risk === "A" ? 30 : 10)
     };
     if (op.risk === "A") return { ...base, capability_class: "A", reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true, output_trust: "untrusted" };

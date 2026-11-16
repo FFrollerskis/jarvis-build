@@ -133,7 +133,7 @@ export function metaAdsWriteSpec(config: Pick<GrowthWriteConfig, "creativeHosts"
       summary: (_s, p) => `Meta Ads: opprett PAUSET lenkeannonse i ${refAdSet(p)}`
     }
   ];
-  return { provider: "meta_ads", toolId: "growth_metaads", credentialRef: "JARVIS_META_ADS_ACCESS_TOKEN", ops };
+  return { provider: "meta_ads", toolId: "growth_metaads", credentialRef: "JARVIS_META_ADS_ACCESS_TOKEN", freezeConnectorIds: ["metaads"], ops };
 }
 
 export interface MetaAdsWriteOptions extends WriteTransportDeps {

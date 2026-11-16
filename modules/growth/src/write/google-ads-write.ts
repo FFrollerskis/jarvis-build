@@ -179,7 +179,7 @@ export function googleAdsWriteSpec(config: Pick<GrowthWriteConfig, "creativeHost
       terminal: ["REMOVED"], paused: "PAUSED", active: "ENABLED", ref: (p) => `${refAdGroup(p)}:ad:${safeId(p, "ad_id")}`
     })
   ];
-  return { provider: "google_ads", toolId: "growth_googleads", credentialRef: "JARVIS_GOOGLE_ADS_REFRESH_TOKEN", ops };
+  return { provider: "google_ads", toolId: "growth_googleads", credentialRef: "JARVIS_GOOGLE_ADS_REFRESH_TOKEN", freezeConnectorIds: ["googleads"], ops };
 }
 
 export interface GoogleAdsWriteOptions extends WriteTransportDeps {

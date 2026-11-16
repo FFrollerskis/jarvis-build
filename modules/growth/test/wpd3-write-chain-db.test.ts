@@ -41,6 +41,7 @@ const GBP_REVIEWS: Record<string, { stars: string; comment: string; name: string
 };
 const YT_CHANNEL = "UCabcdefghijklmnopqrstuv";
 let gateway: ToolGateway;
+let controls: OwnerControls;
 let journal: GrowthWriteJournal;
 let growth: GrowthService;
 let exec: Parameters<typeof executeGrowthWrite>[0];
@@ -101,7 +102,7 @@ beforeAll(async () => {
   linkedCampaignId = campaign.campaign_id;
 
   const killSwitch = new KillSwitch();
-  const controls = new OwnerControls(killSwitch);
+  controls = new OwnerControls(killSwitch);
   const policy = new PolicyGateway({ devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch, controls, authority: { owner_person_id: owner.person_id, owner_tenants: [A] } });
   const secrets: SecretProvider = {
     name: "fake",
@@ -762,5 +763,50 @@ describe("M: review M4 - ingen omtaletekst eller anmelder-navn i journal, tool_e
     expect(unknown.outcome).toBe("FAILED");
     expect(unknown.reason).toMatch(/target_not_found/);
     expect(gbp.requests.filter((r) => r.method !== "GET")).toHaveLength(0);
+  });
+});
+
+describe("N: review M5 - eierens frys av lese-connectoren (og av growth_*-id-en) stanser også skrivingen", () => {
+  const FROZEN = ["googleads", "metaads", "growth_googleads", "growth_metaads", "growth_youtube", "growth_gbp"];
+  const thaw = () => { for (const id of FROZEN) controls.unfreezeConnector(id); };
+  beforeEach(thaw);
+  afterAll(thaw);
+
+  it("frys av `googleads` (den eksisterende lese-/synk-connectoren) avviser pause, budsjett (D) og lesing i growth_googleads FØR noe sendes; opphevet frys virker igjen", async () => {
+    controls.freezeConnector("googleads");
+    for (const [action, parameters] of [["pause_campaign", { campaign_id: "101" }], ["set_campaign_budget", { campaign_id: "101", amount_ore: 40_000 }], ["enable_campaign", { campaign_id: "102" }]] as const) {
+      const res = await g(action, parameters);
+      expect(res.outcome, action).toBe("FAILED");
+      expect(res.reason, action).toBe("connector_frozen");
+    }
+    expect(await gateway.execute({ identity: owner, tool_id: "growth_googleads", action: "get_campaign_state", parameters: { customer_id: CID, campaign_id: "101" } })).toEqual({ ok: false, reason: "connector_frozen" });
+    expect(gads.requests).toHaveLength(0);
+    // en frys av Google Ads rører verken Meta eller YouTube
+    expect((await m("pause_ad_set", { ad_set_id: "60010" })).outcome).toBe("SUCCESS");
+    controls.unfreezeConnector("googleads");
+    expect((await g("pause_campaign", { campaign_id: "101" })).outcome).toBe("SUCCESS");
+    expect(gads.campaigns.get("101")?.status).toBe("PAUSED");
+  });
+
+  it("frys av `metaads` stanser Meta-skriving og -lesing, ikke Google Ads", async () => {
+    controls.freezeConnector("metaads");
+    expect((await m("pause_campaign", { campaign_id: "50010" })).reason).toBe("connector_frozen");
+    expect((await m("set_ad_set_budget", { ad_set_id: "60010", daily_budget_ore: 40_000 })).reason).toBe("connector_frozen");
+    expect(meta.requests).toHaveLength(0);
+    expect((await g("pause_campaign", { campaign_id: "101" })).outcome).toBe("SUCCESS");
+  });
+
+  it("plattformer uten lese-connector (YouTube, Business Profile) fryses på sin egen growth_*-id; tool_id-frysen virker som før for Google Ads/Meta", async () => {
+    yt.reset(); gbp.reset();
+    controls.freezeConnector("growth_youtube");
+    const yt1 = await run({ provider: "youtube", action: "delete_video", parameters: { channel_id: YT_CHANNEL, video_id: "abcdefghijk" } });
+    expect(yt1.reason).toBe("connector_frozen");
+    controls.freezeConnector("growth_gbp");
+    const gbp1 = await run({ provider: "google_business_profile", action: "reply_to_review", parameters: { account_id: "1111", location_id: "123456789", review_id: "rev-1", comment: "x" } });
+    expect(gbp1.reason).toBe("connector_frozen");
+    controls.freezeConnector("growth_googleads");
+    expect((await g("pause_campaign", { campaign_id: "101" })).reason).toBe("connector_frozen");
+    expect(yt.requests).toHaveLength(0);
+    expect(gbp.requests).toHaveLength(0);
   });
 });

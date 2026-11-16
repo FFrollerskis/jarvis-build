@@ -311,6 +311,19 @@ describe("D: verktøydefinisjonenes invarianter for alle åtte plattformer", () 
     }
   });
 
+  it("review M5: ALLE definisjoner (lesing og skriving) bærer `connector_ids_for` - lese-connectorens id for Google Ads/Meta, ingen for de seks nye plattformene, og aldri for en annen credential-ref", () => {
+    const expected: Record<GrowthProvider, readonly string[]> = {
+      google_ads: ["googleads"], meta_ads: ["metaads"], ga4: [], search_console: [], google_business_profile: [], linkedin: [], youtube: [], tiktok: []
+    };
+    for (const provider of GROWTH_WRITE_PROVIDERS) {
+      for (const d of defsByProvider[provider]) {
+        expect(d.connector_ids_for, `${d.tool_id}.${d.action}`).toBeTypeOf("function");
+        expect(d.connector_ids_for!(d.credential_ref), `${d.tool_id}.${d.action}`).toEqual(expected[provider]);
+        expect(d.connector_ids_for!("JARVIS_NOT_THIS_CREDENTIAL"), `${d.tool_id}.${d.action}`).toEqual([]);
+      }
+    }
+  });
+
   it("fabrikken registrerer aldri en ufullstendig skrivehandling (fail-closed ved bygging)", () => {
     const bad = { provider: "ga4" as const, toolId: "growth_ga4", credentialRef: "JARVIS_X", ops: [{ action: "create_thing", description: "", shape: {}, risk: "C" as const, targetParam: "property_id", scopes: [] }] };
     expect(() => buildGrowthToolDefinitions(bad, stub, allConfig)).toThrow("growth_write_op_incomplete:growth_ga4.create_thing");
