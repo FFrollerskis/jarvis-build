@@ -422,9 +422,13 @@ export const EXECUTIVE_MUTATE_ACTIONS = [
  *  - `run_golden_suite` (15.): golden-suite-knappen. BEVISST den ENESTE lesende handlingen i disse listene: den er en deterministisk selvtest uten sideeffekter (klasse A), men plassert her fordi knappen skal gå
  *    gjennom SAMME grant-, step-up- (signert enhet) og revisjonsvei som alle andre kontrollsenter-knapper - ikke en ny rute, og ikke `/executive/query` (som ikke har step-up). Tool-porten krever i tillegg eier + signert økt.
  * Gjennomgang M1: med flaggene AV er navnene IKKE kjent for ruten og svarer NØYAKTIG som main svarer på et ukjent navn (400 `action_not_allowed` FØR grantet løses, ingen `tool.denied`-revisjonsrad) - bevist mot en opptaket
- * baseline fra ren main i `wph2-flag-off-main-parity.test.ts`. Kun CONTROL_ACTION_ALLOWED (knappenes tillatelsestabell) kjenner alle 15 navnene.
+ * baseline fra ren main i `wph2-flag-off-main-parity.test.ts`. Kun CONTROL_ACTION_ALLOWED (knappenes tillatelsestabell) kjenner alle 16 navnene.
+ *
+ * WP-B3 (D-475, EV-23): en TREDJE flaggstyrt handling, `record_evolution_decision` (16.): eierens avgjørelse (godkjenn/avvis/utsett) om ett endringsforslag fra Evolusjon-senteret (klasse C, eier + signert enhet, KREVER step-up:
+ * ikke unntatt i `STEP_UP_EXEMPT_ACTIONS`, og gatewayen krever den også selv). KUN en registrering i revisjonssporet (`evolution.owner_decision`) - ingenting utføres, godkjennes i endringsregisteret eller aktiveres (selvendring er frosset, D-397).
+ * Samme regler som de to andre: kjent for ruten KUN når verktøyet faktisk er registrert (`JARVIS_CONTROL_EVOLUTION_APPROVAL=on` + Evolusjon-senteret koblet inn); ellers 400 `action_not_allowed` som for ethvert ukjent navn.
  */
-export const EXECUTIVE_MUTATE_FLAGGED_ACTIONS = ["revoke_autonomy_binding", "run_golden_suite"] as const;
+export const EXECUTIVE_MUTATE_FLAGGED_ACTIONS = ["revoke_autonomy_binding", "run_golden_suite", "record_evolution_decision"] as const;
 
 /**
  * D-475: er `center` et kjent valg for `/control/center`? Masterplanens ti alltid; et TILLEGGSSENTER (Evolusjon) kun når lese-verktøyet er registrert i gatewayen (flagget på og senteret koblet). Med flagget AV er «evolution» et ukjent senter og

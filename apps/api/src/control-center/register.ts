@@ -1,11 +1,12 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import type { IdentityContext } from "@jarvis/contracts";
 import { scanForSecrets } from "@jarvis/core";
-import { ControlCenterRegistry, type GoldenSuiteControl, type InfraStatusReport, type ValueReport } from "@jarvis/executive";
+import { ControlCenterRegistry, type ControlRiskClass, type GoldenSuiteControl, type InfraStatusReport, type ValueReport } from "@jarvis/executive";
 import { resolveAuthorityMode, type AuthorityConfig } from "@jarvis/policy";
 import type { ReadinessVerdict } from "@jarvis/self-modification";
 import type { BackupStatusRead } from "../backup-status.ts";
 import type { Ev0BootStatus } from "../ev0-boot.ts";
+import { actionRequiresStepUp } from "../step-up.ts";
 import { createAgentCenter } from "./agent.ts";
 import { createAiCenter, type AiCenterDeps } from "./ai.ts";
 import { createAuthorityCenter, type AuthorityCenterDeps } from "./authority.ts";
@@ -119,6 +120,17 @@ export interface ControlCenterWiring {
   goldenSuite?: GoldenSuiteControl;
 }
 
+/** Lat oppslag av klassen til en registrert executive-handling: `undefined` når verktøyet ikke (ennå/lenger) er registrert i gatewayen - aldri en gjettet klasse. Kaster aldri. */
+function riskClassOf(gateway: { get(toolId: string, action: string): { capability_class: ControlRiskClass } | undefined }, action: string): () => ControlRiskClass | undefined {
+  return () => {
+    try {
+      return gateway.get("executive", action)?.capability_class;
+    } catch {
+      return undefined;
+    }
+  };
+}
+
 export function registerControlCenters(registry: ControlCenterRegistry, wiring: ControlCenterWiring): void {
   // Sentrene registreres her, ett per linje, etterhvert som de bygges. Et senter uten sine avhengigheter registreres IKKE (ærlig «ikke koblet inn», aldri en tom OK).
   if (wiring.toolGateway && wiring.ownerControls) {
@@ -174,7 +186,12 @@ export function registerControlCenters(registry: ControlCenterRegistry, wiring: 
       ...(wiring.evolutionReadiness ? { readiness: wiring.evolutionReadiness } : {}),
       ...(wiring.ev0Status ? { ev0Status: wiring.ev0Status } : {}),
       ...(wiring.runRate ? { runRate: wiring.runRate } : {}),
-      ...(wiring.evolutionTenantId !== undefined ? { reportTenantId: wiring.evolutionTenantId } : {})
+      ...(wiring.evolutionTenantId !== undefined ? { reportTenantId: wiring.evolutionTenantId } : {}),
+      // WP-B3 (EV-23): «Registrer avgjørelse»-knappene per forslag - kun med JARVIS_CONTROL_EVOLUTION_APPROVAL=on (og kun når verktøyet faktisk er registrert i gatewayen, sjekkes ved bygging). Uten flagg er senteret uendret fra EV-22.
+      // Risikoklassen slås opp LATT (verktøyene registreres i gatewayen etter sentrene i `main.ts`); step-up-kravet utledes av den ene `STEP_UP_EXEMPT_ACTIONS`-mengden, aldri av en kopi.
+      ...(flagOn(wiring.env, CONTROL_FEATURE_FLAGS.evolutionApproval) && wiring.toolGateway
+        ? { approval: { risk_class: riskClassOf(wiring.toolGateway, "record_evolution_decision"), requires_step_up: actionRequiresStepUp("record_evolution_decision") } }
+        : {})
     }));
   }
 }

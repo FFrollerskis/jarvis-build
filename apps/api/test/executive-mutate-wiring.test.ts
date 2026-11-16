@@ -43,7 +43,8 @@ describe("A: EXECUTIVE_MUTATE_ACTIONS inneholder NØYAKTIG de 13 executive.*-han
     const match = serverSource.match(/export const EXECUTIVE_MUTATE_FLAGGED_ACTIONS = \[([\s\S]*?)\] as const;/);
     expect(match).not.toBeNull();
     const actions = (match?.[1] ?? "").split(",").map((s) => s.trim().replace(/"/g, "")).filter(Boolean);
-    expect(actions.sort()).toEqual(["revoke_autonomy_binding", "run_golden_suite"]);
+    // WP-B3 (D-475, EV-23) la til `record_evolution_decision` (samme regler: kjent for ruten KUN når verktøyet er registrert).
+    expect(actions.sort()).toEqual(["record_evolution_decision", "revoke_autonomy_binding", "run_golden_suite"]);
     const fn = serverSource.match(/function executiveMutateActionKnown\([\s\S]*?\n\}\n/);
     expect(fn).not.toBeNull();
     expect(fn?.[0]).toContain('gateway.get("executive", action) !== undefined');

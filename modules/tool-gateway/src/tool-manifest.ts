@@ -123,6 +123,9 @@ const EFFECT_OVERRIDES: Record<string, Effect> = {
   [k("executive", "get_evolution_center")]: "read",
   // WP-H2: golden-suite-knappen er en deterministisk selvtest (ingen modell, database eller skriving) - effekt «read», klasse A. Står på ingen modellflate (kun kontrollsenterets knapp via /executive/mutate).
   [k("executive", "run_golden_suite")]: "read",
+  // WP-B3 (D-475, EV-23): eierens avgjørelse om et endringsforslag (godkjenn/avvis/utsett) - kun en REGISTRERING i revisjonssporet, men bevisst merket «control» (navneinferensen ville gitt «write»): da forbyr manifestinvariantene
+  // (`pay/control kan aldri stå på en modellflate`) strukturelt at verktøyet noen gang havner på en modellflate. Klasse C; kun kontrollsenterets knapp via /executive/mutate (eier + signert enhet + step-up).
+  [k("executive", "record_evolution_decision")]: "control",
   [k("executive", "get_value_report")]: "read",
   // WP-E1 (UA-5): driftsstatus (åpne hendelser, skymål, produsenthelse) - ren lesing.
   [k("executive", "get_infra_status")]: "read",

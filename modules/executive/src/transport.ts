@@ -5,6 +5,7 @@ import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarv
 import type { ExecutiveService } from "./service.ts";
 import { summarizeCapabilityStatusNo, summarizeConnectorStatusNo, summarizeSelfDiagnosisNo } from "./status-summary.ts";
 import { CLOUD_WITHHELD_CENTERS, CONTROL_CENTER_IDS, CONTROL_CENTER_READ_TOOLS, CONTROL_CENTER_TITLES_NO, EXTENSION_CONTROL_CENTER_IDS, controlCenterForReadAction, isCloudWithheldCenter, withheldCenterData, type ControlCenterId } from "./control-center/index.ts";
+import { EVOLUTION_DECISIONS, isEvolutionDecision, summarizeEvolutionDecisionNo } from "./evolution/index.ts";
 
 /**
  * UA-11 Executive Mode (P0, D-162): eierens SAMLEDE kontrollflate, eksponert
@@ -164,6 +165,14 @@ export class ExecutiveTransport implements ToolTransport {
         const removed = (result.data as { removed?: unknown } | undefined)?.removed === true;
         return { external_id: `${identity.tenant_id}:${identity.memory_space_id}:${domain}`, data: { removed, domain, memory_space: identity.memory_space_id } as unknown as JsonValue };
       }
+      case "record_evolution_decision": {
+        // WP-B3 (D-475, EV-23): REGISTRER eierens avgjørelse om ett endringsforslag i revisjonssporet - uten virkning (selvendring er frosset, D-397). Eier + signert enhetsøkt + step-up håndheves FØR dette kalles
+        // (`parameterAuthorizer` + `step_up_required`). Identiteten kommer UTELUKKENDE fra konteksten (D-68). Svarets `summary_no` er en fast norsk tekst som alltid sier at ingenting utføres.
+        const decision = parameters["decision"];
+        if (!isEvolutionDecision(decision)) throw new Error("invalid_evolution_decision_input");
+        const result = await this.service.recordEvolutionDecision(identity, { change_id: requireString(parameters, "change_id"), proposal_digest: requireString(parameters, "proposal_digest"), decision });
+        return { external_id: `${result.change_id}:${result.proposal_digest.slice(0, 12)}`, data: { summary_no: summarizeEvolutionDecisionNo(result), ...result } as unknown as JsonValue };
+      }
       case "get_value_report": {
         // WP-C4: tenanten kommer UTELUKKENDE fra den betrodde kontekst-identiteten (D-68), aldri fra parametre.
         const report = await this.service.getValueReport(identity.tenant_id);
@@ -268,6 +277,8 @@ export interface ExecutiveToolOptions {
   goldenSuite?: boolean;
   /** WP-H2: registrer `revoke_autonomy_binding` (tilbakekall av eierens autonomi-binding fra kontrollsenteret). AV som standard - uten flagget finnes verktøyet ikke. */
   autonomyRevoke?: boolean;
+  /** WP-B3 (D-475, EV-23): registrer `record_evolution_decision` (eierens avgjørelse om et endringsforslag, KUN registrert i revisjonssporet - ingen virkning). AV som standard - uten flagget finnes verktøyet ikke. */
+  evolutionApproval?: boolean;
 }
 
 /**
@@ -422,6 +433,24 @@ export function executiveToolDefinitions(transport: ExecutiveTransport, options:
         // Gjennomgang L1: uopprettelig sletting = step-up på GATEWAY-nivå (signert enhetsøkt fra en eier-kanal, WP-F1-mekanismen), ikke bare i ruten - hver vei til verktøyet krever den (avslag: `step_up_required:<årsak>`).
         step_up_required: true,
         parameterAuthorizer: (_parameters: Record<string, JsonValue>, identity: Parameters<ExecutiveTransport["authorizeOwnerControl"]>[0]) => transport.authorizeOwnerControl(identity)
+      } satisfies ToolDefinition]
+      : []),
+    // WP-B3 (D-475, EV-23): eierens AVGJØRELSE om ett endringsforslag (godkjenn/avvis/utsett), registrert i revisjonssporet - og KUN det: ingenting utføres, godkjennes i endringsregisteret eller aktiveres (selvendring er
+    // frosset, D-397; `activation_decision` er alltid false). Klasse C; eier OG signert enhetsøkt FØR noe kalles (`authorizeControlCenterRead`), og step-up (signert enhet fra en eier-kanal) også på GATEWAY-nivå, så hver
+    // vei til verktøyet krever den. Bundet til forslagets versjon (`proposal_digest` = entry_hash til forslagets siste rad i endringsregisteret) og idempotent (samme avgjørelse for samme versjon skrives ikke på nytt).
+    // «Angre» = registrer en ny avgjørelse (den nyeste gjelder; alle står i revisjonssporet). Står på INGEN modellflate (effekt «control»: manifestet forbyr det) - kun kontrollsenterets knapp via /executive/mutate.
+    // Registreres kun med JARVIS_CONTROL_EVOLUTION_APPROVAL=on (og Evolusjon-senteret koblet inn).
+    ...(options.evolutionApproval === true
+      ? [{
+        ...control(
+          "record_evolution_decision",
+          "Registrer EIERENS avgjørelse (godkjenn, avvis eller utsett) om ÉTT endringsforslag fra Evolusjon-senteret, bundet til forslagets versjon (proposal_digest). KUN en registrering i revisjonssporet: ingenting utføres, godkjennes i endringsregisteret eller aktiveres (selvendring er frosset, D-397). Kun eieren fra en signert enhetsøkt - kun kontrollsenterets knapp.",
+          { change_id: z.string().min(1).max(60), proposal_digest: z.string().regex(/^[0-9a-f]{64}$/), decision: z.enum(EVOLUTION_DECISIONS) },
+          "registrer en ny avgjørelse for samme forslag (den nyeste gjelder); alle avgjørelser står i revisjonssporet `evolution.owner_decision` - registreringen har ingen virkning å angre"
+        ),
+        rate_limit_per_minute: 10,
+        step_up_required: true,
+        parameterAuthorizer: (_parameters: Record<string, JsonValue>, identity: Parameters<ExecutiveTransport["authorizeControlCenterRead"]>[0]) => transport.authorizeControlCenterRead(identity)
       } satisfies ToolDefinition]
       : []),
     critical("activate_kill_switch", "Stans HELE systemet umiddelbart (gjennomslag til owner_controls.activate_kill_switch)", { reason: z.string() }, "deactivate_kill_switch"),

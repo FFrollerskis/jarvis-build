@@ -1,14 +1,15 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import type pg from "pg";
 import {
-  controlItem, controlSection, unknownControlSection,
-  type ControlCenterBuildContext, type ControlCenterDefinition, type ControlCenterParts, type ControlItem, type ControlSection, type ControlStatus, type EvolutionReport, type EvolutionSection
+  EVOLUTION_DECISION_AUDIT_TYPE, EVOLUTION_DECISION_LABEL_NO, EVOLUTION_DECISIONS, controlAction, controlItem, controlSection, isEvolutionDecision, unknownControlSection,
+  type ControlAction, type ControlCenterBuildContext, type ControlCenterDefinition, type ControlCenterParts, type ControlItem, type ControlRiskClass, type ControlSection, type ControlStatus, type EvolutionDecision,
+  type EvolutionReport, type EvolutionSection
 } from "@jarvis/executive";
 import { BudgetGuard, budgetConfigFromEnv, type BudgetConfig } from "@jarvis/model-gateway";
 import { creditRunway, forecastBreach, type ReadinessVerdict } from "@jarvis/self-modification";
 import type { Ev0BootStatus } from "../ev0-boot.ts";
 import type { RunRateReport } from "../run-rate.ts";
-import { DAY_MS, countsNo, safeCategory, safeRef, settle, toInt, toIso, type ControlCenterPool, type Settled } from "./shared.ts";
+import { DAY_MS, countsNo, safeCategory, safeRef, settle, tenantRows, toInt, toIso, type ControlCenterPool, type Settled } from "./shared.ts";
 
 /**
  * WP-B3 (D-475, EV-22; UA-11 Admin Control Center, HF2 Evolution v1.2) - EVOLUSJON-SENTERET: ett tilleggssenter (utenfor masterplanens ti) som viser Evolution-motoren slik den står NÅ.
@@ -81,6 +82,12 @@ export interface EvolutionCenterDeps {
   runRate?: { report(tenantId: string): Promise<RunRateReport> };
   /** Tenanten rapportleverandøren og beredskapen er bundet til (eierens). En annen identitet-tenant leser dem ikke. Utelatt = ingen kontroll (kun enhetstester). */
   reportTenantId?: string;
+  /**
+   * EV-23 (JARVIS_CONTROL_EVOLUTION_APPROVAL=on): «Registrer avgjørelse»-knappene per forslag og visningen av eierens registrerte avgjørelse. Utelatt = senteret er uendret fra EV-22 (ingen knapper, ingen lesing av avgjørelser).
+   * `risk_class()` svarer med klassen til `executive.record_evolution_decision` slik gatewayen har den registrert, eller `undefined` når verktøyet IKKE er registrert (da vises ingen knapper: en knapp skal aldri peke på noe ruten avviser).
+   * Utledes av `register.ts` (aldri her): senteret importerer hverken verktøyregisteret eller step-up-reglene, og skriver ingenting selv - knappene er rene data som peker på den eksisterende ruten.
+   */
+  approval?: { risk_class: () => ControlRiskClass | undefined; requires_step_up: boolean };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -122,9 +129,13 @@ function portsSection(report: Settled<Awaited<ReturnType<EvolutionReportRead>>> 
 // 2. Sovende deler (beredskap)
 // ---------------------------------------------------------------------------------------------------------------------
 /** Hva senteret selv sier om EV-22 og EV-23 (denne WP-en): fast tekst, aldri data. */
-function dormantNote(ev: string): string {
+function dormantNote(ev: string, approvalOn: boolean): string {
   if (ev === "EV-22") return " Denne flaten (Evolusjon-senteret) er koblet inn og slått på, men det er IKKE en aktivering: kravet «Kontrollsentrene (UA-11) finnes» erklærer du selv (JARVIS_EV_VERIFIED_GATES).";
-  if (ev === "EV-23") return " Godkjenning i kontrollsenteret er DEFERRED: ingen knapp godkjenner, avviser eller utfører noe.";
+  if (ev === "EV-23") {
+    return approvalOn
+      ? " Du kan REGISTRERE din avgjørelse om et forslag her (kun revisjonssporet, ingen virkning); en godkjenning som utfører noe er DEFERRED (selvendring er frosset)."
+      : " Godkjenning i kontrollsenteret er DEFERRED: ingen knapp godkjenner, avviser eller utfører noe.";
+  }
   return "";
 }
 
@@ -133,7 +144,7 @@ function requirementId(id: unknown): string {
   return safeCategory(typeof id === "string" ? id.replace(/>=/g, "_ge_").replace(/[^A-Za-z0-9_:.-]/g, "_") : "ukjent_krav");
 }
 
-function dormantSection(verdicts: Settled<readonly ReadinessVerdict[]> | "other_tenant", nowIso: string): ControlSection {
+function dormantSection(verdicts: Settled<readonly ReadinessVerdict[]> | "other_tenant", nowIso: string, approvalOn: boolean): ControlSection {
   const title = "Sovende deler (beredskap, ingenting aktiveres)";
   const source = "readiness.ts (EV-6/11/13/14/15/18/20/22/23) mot kjøretidsfakta (konstitusjon, endringsregister, frys, beviste connectorer) og dine erklærte porter (JARVIS_EV_VERIFIED_GATES)";
   if (verdicts === "other_tenant") return unknownControlSection("dormant", title, source, "beredskapen gjelder en annen tenant enn din (den leses ikke)");
@@ -153,7 +164,7 @@ function dormantSection(verdicts: Settled<readonly ReadinessVerdict[]> | "other_
     items.push(controlItem({
       id: `dormant:${ev}`, label: `${ev} ${typeof v.title_no === "string" ? v.title_no : ""}`.trim(), status,
       // Rekkefølgen er bevisst: det som MÅ stå (ikke aktivert, hva senteret selv er, antall og klarhet) kommer først; kravenes etiketter er lengst og står sist (detaljen kuttes ved 400 tegn; id-ene står i `missing_ids`).
-      detail_no: `Sover (${typeof v.why_dormant_no === "string" ? v.why_dormant_no : "ukjent årsak"}). Ikke aktivert - ingen kodevei aktiverer dette.${dormantNote(v.ev)} ${v.met.length} krav oppfylt, ${missing.length} mangler${unknownCount > 0 ? ` (${unknownCount} kunne ikke måles og regnes som IKKE oppfylt)` : ""}. ${v.ready_for_owner_decision === true ? "Alle tekniske krav er oppfylt: klar for en navngitt D-beslutning fra deg - IKKE aktivert." : "Ikke klar for en D-beslutning."}${missing.length > 0 ? ` Mangler: ${missingLabels}${missing.length > 2 ? "; …" : ""}` : ""}`,
+      detail_no: `Sover (${typeof v.why_dormant_no === "string" ? v.why_dormant_no : "ukjent årsak"}). Ikke aktivert - ingen kodevei aktiverer dette.${dormantNote(v.ev, approvalOn)} ${v.met.length} krav oppfylt, ${missing.length} mangler${unknownCount > 0 ? ` (${unknownCount} kunne ikke måles og regnes som IKKE oppfylt)` : ""}. ${v.ready_for_owner_decision === true ? "Alle tekniske krav er oppfylt: klar for en navngitt D-beslutning fra deg - IKKE aktivert." : "Ikke klar for en D-beslutning."}${missing.length > 0 ? ` Mangler: ${missingLabels}${missing.length > 2 ? "; …" : ""}` : ""}`,
       facts: {
         ev, dormant: true, activation_decision: false, ready_for_owner_decision: v.ready_for_owner_decision === true,
         met: v.met.length, missing: missing.length, missing_unknown: unknownCount, unknown_signals: unknownSignals,
@@ -205,10 +216,73 @@ async function readLedger(pool: ControlCenterPool, sinceIso: string): Promise<Le
   };
 }
 
-function ledgerSection(ev0: Settled<Ev0BootStatus | null> | null, ledger: Settled<LedgerRead>, nowMs: number, nowIso: string): ControlSection {
+/** Eierens registrerte avgjørelse om ÉN versjon av et forslag (EV-23): siste rad i revisjonssporet for (id, digest). */
+interface OwnerDecision { decision: EvolutionDecision; decided_at: string | null }
+/** Avgjørelsene slått PÅ (`approval` i deps og verktøyet registrert): kilden (lesbar eller ikke) og det knappene trenger. `null` i `ledgerSection` = flagget AV (ingen avgjørelser, ingen knapper). */
+interface DecisionsState { read: Settled<Map<string, OwnerDecision>>; risk_class: ControlRiskClass; requires_step_up: boolean }
+const decisionKey = (changeId: string, digest: string): string => `${changeId}|${digest}`;
+
+/**
+ * Eierens registrerte avgjørelser (EV-23) for de viste forslagene: siste rad per (forslag, versjon) i revisjonssporet (`audit_events`, tenant-RLS). Avgrenset av det eldste viste forslagets tidspunkt (minus en times margin mot
+ * klokkeskjevhet) - en avgjørelse kan aldri være eldre enn forslaget den gjelder - så en lang revisjonshistorikk ikke skannes. Leses kun når det finnes forslag. Ukjente verdier i raden tas ikke med (fail-closed: ingen avgjørelse).
+ */
+async function readOwnerDecisions(pool: ControlCenterPool, tenantId: string, pending: readonly PendingProposal[], nowMs: number): Promise<Map<string, OwnerDecision>> {
+  const ids = pending.map((p) => p.change_id).filter((id) => safeCategory(id) === id);
+  const out = new Map<string, OwnerDecision>();
+  if (ids.length === 0) return out;
+  const oldest = pending.map((p) => p.recorded_at).filter((at): at is string => at !== null).sort()[0] ?? new Date(nowMs - 365 * DAY_MS).toISOString();
+  const rows = await tenantRows<{ change_id: unknown; digest: unknown; decision: unknown; decided_at: unknown }>(
+    pool, tenantId,
+    `SELECT DISTINCT ON (payload->>'change_id', payload->>'proposal_digest')
+            payload->>'change_id' AS change_id, payload->>'proposal_digest' AS digest, payload->>'decision' AS decision, at::text AS decided_at
+       FROM audit_events
+      WHERE tenant_id = $1 AND type = $2 AND at >= $3::timestamptz - interval '1 hour' AND payload->>'change_id' = ANY($4::text[])
+      ORDER BY payload->>'change_id', payload->>'proposal_digest', at DESC, audit_id DESC
+      LIMIT 200`,
+    [tenantId, EVOLUTION_DECISION_AUDIT_TYPE, oldest, ids]
+  );
+  for (const r of rows) {
+    if (typeof r.change_id !== "string" || typeof r.digest !== "string" || !isEvolutionDecision(r.decision)) continue;
+    out.set(decisionKey(r.change_id, r.digest), { decision: r.decision, decided_at: toIso(r.decided_at) });
+  }
+  return out;
+}
+
+const DIGEST_HEX = /^[0-9a-f]{64}$/;
+const DECISION_BUTTON: Readonly<Record<EvolutionDecision, { label: string; verb: string }>> = {
+  approve: { label: "Registrer godkjenning", verb: "godkjenner" },
+  reject: { label: "Registrer avvisning", verb: "avviser" },
+  defer: { label: "Registrer utsettelse", verb: "utsetter avgjørelsen om" }
+};
+
+/**
+ * «Registrer avgjørelse»-knappene for ÉT forslag (EV-23): rene data som peker på den eksisterende `/executive/mutate` (eier + signert enhet + step-up håndheves der og i verktøyet). Knappen for den GJELDENDE avgjørelsen vises ikke
+ * (samme avgjørelse igjen ville vært et no-op). E3 kan aldri godkjennes (registeret forbyr det), så den knappen finnes ikke. Ingen knapper for forslag uten trygg, unik id eller uten gyldig versjons-digest.
+ */
+function decisionActions(p: PendingProposal, itemId: string, current: EvolutionDecision | null, state: DecisionsState): ControlAction[] {
+  if (!DIGEST_HEX.test(p.digest)) return [];
+  const out: ControlAction[] = [];
+  for (const decision of EVOLUTION_DECISIONS) {
+    if (decision === current) continue;
+    if (decision === "approve" && p.change_class === "E3") continue;
+    const b = DECISION_BUTTON[decision];
+    out.push(controlAction({
+      id: `evolution.decision:${decision}:${p.change_id}`, label: `${b.label}: ${p.change_id}`, endpoint: "/executive/mutate",
+      body: { action: "record_evolution_decision", parameters: { change_id: p.change_id, proposal_digest: p.digest, decision } },
+      risk_class: state.risk_class, requires_step_up: state.requires_step_up, reversible: true,
+      description_no: `Registrerer at DU ${b.verb} forslaget «${p.change_id}» (${p.change_class}, versjon ${p.digest.slice(0, 12)}). KUN en registrering i revisjonssporet: ingenting utføres, godkjennes i endringsregisteret eller aktiveres - selvendring er frosset (D-397). Forslagets innhold vises ikke her.`,
+      rollback_no: "Registrer en ny avgjørelse for samme forslag; den nyeste gjelder, og alle står i revisjonssporet.",
+      section_id: "ledger", item_id: itemId
+    }));
+  }
+  return out;
+}
+
+function ledgerSection(ev0: Settled<Ev0BootStatus | null> | null, ledger: Settled<LedgerRead>, decisions: DecisionsState | null, nowMs: number, nowIso: string): { section: ControlSection; actions: ControlAction[] } {
   const title = "Endringsregister og forslag";
-  const source = "evolution_change_ledger (EV-0/EV-5, globalt, kun antall/klasser/id-er) · EV-0-oppstartssjekken (konstitusjon + hash-kjede)";
+  const source = `evolution_change_ledger (EV-0/EV-5, globalt, kun antall/klasser/id-er) · EV-0-oppstartssjekken (konstitusjon + hash-kjede)${decisions !== null ? " · audit_events (type evolution.owner_decision, tenant-RLS: din registrerte avgjørelse)" : ""}`;
   const items: ControlItem[] = [];
+  const actions: ControlAction[] = [];
 
   // Hash-kjeden og konstitusjonen (oppstartssjekken). Ikke kjørt/ulesbar er UKJENT; en ødelagt kjede er FEIL.
   const boot = ev0 !== null && ev0.ok ? ev0.value : null;
@@ -237,7 +311,7 @@ function ledgerSection(ev0: Settled<Ev0BootStatus | null> | null, ledger: Settle
     }));
     items.push(controlItem({
       id: "proposals", label: "Forslag som venter på din avgjørelse", status: r.pending_total > 0 ? "WARN" : "OK",
-      detail_no: r.pending_total === 0 ? "Ingen forslag venter på deg." : `${r.pending_total} forslag venter på deg (${r.pending_by_class.map((c) => `${c.n} ${c.change_class}`).join(", ")}). Å se innholdet og avgjøre skjer utenfor kontrollsenteret - ingenting utføres av et forslag.`,
+      detail_no: r.pending_total === 0 ? "Ingen forslag venter på deg." : `${r.pending_total} forslag venter på deg (${r.pending_by_class.map((c) => `${c.n} ${c.change_class}`).join(", ")}). ${decisions !== null ? "Å se innholdet skjer utenfor kontrollsenteret; her kan du kun REGISTRERE din avgjørelse (ingen virkning)" : "Å se innholdet og avgjøre skjer utenfor kontrollsenteret"} - ingenting utføres av et forslag.`,
       facts: { waiting: r.pending_total, ...Object.fromEntries(r.pending_by_class.map((c) => [`class_${c.change_class}`, c.n])) }
     }));
     const usedIds = new Set<string>();
@@ -247,22 +321,44 @@ function ledgerSection(ev0: Settled<Ev0BootStatus | null> | null, ledger: Settle
       if (usedIds.has(id)) id = `${id}-${i + 1}`;
       usedIds.add(id);
       const ageMs = p.recorded_at === null ? null : Math.max(0, nowMs - Date.parse(p.recorded_at));
+      // EV-23: eierens registrerte avgjørelse om DENNE versjonen (id + digest). Kunne den ikke leses, er den ukjent (aldri «ingen»). Radens status er uendret (WARN): forslaget står fortsatt som åpent i endringsregisteret - en registrert avgjørelse har ingen virkning.
+      let decisionText = "";
+      let decisionFacts: Record<string, string | null> = {};
+      let current: EvolutionDecision | null = null;
+      if (decisions !== null) {
+        if (!decisions.read.ok) {
+          decisionText = " Din avgjørelse kunne ikke leses (ikke målt).";
+          decisionFacts = { owner_decision: null, owner_decided_at: null };
+        } else {
+          const d = decisions.read.value.get(decisionKey(p.change_id, p.digest));
+          current = d?.decision ?? null;
+          decisionText = d === undefined
+            ? " Ingen avgjørelse registrert fra deg."
+            : ` Din registrerte avgjørelse: ${EVOLUTION_DECISION_LABEL_NO[d.decision]}${d.decided_at !== null ? ` (${d.decided_at.slice(0, 10)})` : ""} - uten virkning: forslaget står fortsatt som åpent i endringsregisteret.`;
+          decisionFacts = { owner_decision: d?.decision ?? "none", owner_decided_at: d?.decided_at ?? null };
+        }
+      }
       items.push(controlItem({
         id: `proposal:${id}`, label: `Forslag ${id}`, status: "WARN",
-        detail_no: `${p.change_class}-forslag, ${p.path_count} sti${p.path_count === 1 ? "" : "er"}, registrert ${ageMs === null ? "ukjent tid siden" : `for ${Math.floor(ageMs / DAY_MS)} d siden`}. Forslagets innhold vises ikke her (kun id, klasse og alder).`,
-        facts: { change_class: p.change_class, path_count: p.path_count, digest: p.digest.slice(0, 12), age_days: ageMs === null ? null : Math.floor(ageMs / DAY_MS) },
+        detail_no: `${p.change_class}-forslag, ${p.path_count} sti${p.path_count === 1 ? "" : "er"}, registrert ${ageMs === null ? "ukjent tid siden" : `for ${Math.floor(ageMs / DAY_MS)} d siden`}. Forslagets innhold vises ikke her (kun id, klasse og alder).${decisionText}`,
+        facts: { change_class: p.change_class, path_count: p.path_count, digest: p.digest.slice(0, 12), age_days: ageMs === null ? null : Math.floor(ageMs / DAY_MS), ...decisionFacts },
         observed_at: p.recorded_at
       }));
+      // Knapper kun for forslag med trygg, UNIK id (id === change_id: ingen reserveverdi/løpenummer) - ellers kan raden ikke kobles entydig til en avgjørelse.
+      if (decisions !== null && id === p.change_id) actions.push(...decisionActions(p, `proposal:${id}`, current, decisions));
     });
     if (r.pending_total > r.pending.length) {
       items.push(controlItem({ id: "proposals_more", label: "Flere forslag venter", status: "WARN", detail_no: `${r.pending_total - r.pending.length} forslag til venter (de eldste ${r.pending.length} vises).`, facts: { not_listed: r.pending_total - r.pending.length } }));
     }
   }
   items.sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status]);
-  return controlSection({
-    id: "ledger", title_no: title, source, observed_at: nowIso, items,
-    summary_no: `${items.length} opplysninger om endringsregisteret og forslag: ${countsNo(items)}. Selvendring er frosset (D-397): et forslag utføres aldri av seg selv.`
-  });
+  return {
+    section: controlSection({
+      id: "ledger", title_no: title, source, observed_at: nowIso, items,
+      summary_no: `${items.length} opplysninger om endringsregisteret og forslag: ${countsNo(items)}. Selvendring er frosset (D-397): et forslag utføres aldri av seg selv${decisions !== null ? ", og en avgjørelse du registrerer her har ingen virkning" : ""}.`
+    }),
+    actions
+  };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -397,13 +493,25 @@ export function createEvolutionCenter(deps: EvolutionCenterDeps): ControlCenterD
       ]);
       const ev0R: Settled<Ev0BootStatus | null> | null = deps.ev0Status ? await settle(async () => deps.ev0Status!()) : null;
 
+      // EV-23: eierens avgjørelser vises (og knappene finnes) KUN når flagget er på OG verktøyet er registrert (`risk_class()` kjenner det). Uten det er senteret uendret fra EV-22 - ingen ekstra lesing, ingen knapper.
+      let riskClass: ControlRiskClass | undefined;
+      try { riskClass = deps.approval?.risk_class(); } catch { riskClass = undefined; }
+      let decisions: DecisionsState | null = null;
+      if (deps.approval !== undefined && riskClass !== undefined) {
+        const read: Settled<Map<string, OwnerDecision>> = ledgerR.ok && ledgerR.value.pending.length > 0
+          ? await settle(() => readOwnerDecisions(deps.pool, tenantId, ledgerR.value.pending, nowMs))
+          : { ok: true, value: new Map<string, OwnerDecision>() };
+        decisions = { read, risk_class: riskClass, requires_step_up: deps.approval.requires_step_up };
+      }
+
+      const ledger = ledgerSection(ev0R, ledgerR, decisions, nowMs, nowIso);
       const sections: ControlSection[] = [
         portsSection(reportR, restrictFinance, nowIso),
-        dormantSection(readinessR, nowIso),
-        ledgerSection(ev0R, ledgerR, nowMs, nowIso)
+        dormantSection(readinessR, nowIso, decisions !== null),
+        ledger.section
       ];
       if (!restrictFinance && budgetR !== null) sections.push(costModelSection(limitsR, budgetR, runRateR, nowIso));
-      return { sections, actions: [] };
+      return { sections, actions: ledger.actions };
     }
   };
 }

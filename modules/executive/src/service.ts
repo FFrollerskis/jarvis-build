@@ -1,6 +1,6 @@
 import type { SloReport } from "./slo/index.ts";
 import { composeSloReport, SLO_CATALOG } from "./slo/index.ts";
-import { composeEvolutionReport, type EvolutionReport } from "./evolution/index.ts";
+import { composeEvolutionReport, type EvolutionDecisionInput, type EvolutionDecisionRecorder, type EvolutionDecisionResult, type EvolutionReport } from "./evolution/index.ts";
 import { composeAiMeshReport, type AiMeshReport } from "./ai-mesh/index.ts";
 import {
   composeControlCenterOverview, explainControlCenterNo,
@@ -146,6 +146,11 @@ export interface ExecutiveServiceOptions {
    */
   autonomyAudit?: (identity: IdentityContext, entry: { type: string; tool_id: string; action: string; payload: Record<string, unknown> }) => Promise<void>;
   /**
+   * WP-B3 (D-475, EV-23): skriveren som REGISTRERER eierens avgjørelse om et endringsforslag (godkjenn/avvis/utsett) i revisjonssporet - uten virkning (selvendring er frosset, D-397). Injisert fra `apps/api` KUN med
+   * `JARVIS_CONTROL_EVOLUTION_APPROVAL=on` (executive-pakken har ingen databasetilgang). Utelatt = `recordEvolutionDecision` avvises lukket (`evolution_decisions_not_configured`).
+   */
+  evolutionDecisions?: EvolutionDecisionRecorder;
+  /**
    * WP-H2: lat binding. Konstruktøren legger seg selv i holderen, slik at kontrollsentrene (som bygges FØR tjenesten i `main.ts`) kan lese `getValueReport`/`getInfraStatus` når en forespørsel kommer -
    * uten at tjenesten må konstrueres tidligere eller flyttes ut av `additionalTools`-listen (komposisjonsroten er låst av `executive-wiring.test.ts`).
    */
@@ -256,6 +261,17 @@ export class ExecutiveService {
       return { ok: false, reason: "autonomy_audit_write_failed" };
     }
     return this.gateway.execute({ identity, tool_id: "situations", action: "clear_autonomy_policy", parameters: { domain } });
+  }
+
+  /**
+   * WP-B3 (D-475, EV-23): REGISTRER eierens avgjørelse om ett endringsforslag. Ren videresending til den injiserte skriveren - ingen egen logikk her, og INGEN virkning: ingenting utføres, godkjennes i endringsregisteret eller
+   * aktiveres (selvendring er frosset, D-397; `activation_decision` er alltid false). Fail-closed: uten skriver (flagget AV) skjer ingenting, og et avslag fra skriveren (ukjent/ikke åpent forslag, utdatert versjon, E3-godkjenning,
+   * ugyldig input, skrivefeil) forplanter seg som en feil med en FAST kode - aldri tekst fra data. Eier + signert enhetsøkt + step-up håndheves FØR dette kalles (`parameterAuthorizer`/`step_up_required`).
+   */
+  async recordEvolutionDecision(identity: IdentityContext, input: EvolutionDecisionInput): Promise<EvolutionDecisionResult> {
+    const recorder = this.options.evolutionDecisions;
+    if (recorder === undefined) throw new Error("evolution_decisions_not_configured");
+    return recorder.record(identity, input);
   }
 
   /**

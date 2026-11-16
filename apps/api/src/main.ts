@@ -136,6 +136,7 @@ import { parseIncidentProducerConfig, startApiIncidentProducers } from "./incide
 import { createInfraStatusSource } from "./infra-status-source.ts";
 import { createRadarState, radarSweepFailures } from "./evolution-radar.ts";
 import { createEvolutionReadinessProvider, createEvolutionReportProvider, type EvolutionSourceDeps } from "./evolution-source.ts";
+import { createEvolutionDecisionRecorder } from "./evolution-decisions.ts";
 import { createAiMeshReportProvider } from "./ai-mesh-source.ts";
 import { parseKnowledgeClaimWrites } from "./knowledge-flags.ts";
 import { createPushSendGuard, startFollowUpPush } from "./follow-up-push.ts";
@@ -781,6 +782,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     ...(backupStatusSource ? { backupStatus: backupStatusSource } : {}), processStartedAt: () => processStartedAt,
     ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {})
   });
+  // WP-B3 (D-475, EV-23): eierens avgjørelse om et endringsforslag (`executive.record_evolution_decision`, kun en registrering i revisjonssporet - ingen virkning) finnes KUN med JARVIS_CONTROL_EVOLUTION_APPROVAL=on OG når
+  // Evolusjon-senteret faktisk er koblet inn (knappene bor der). Uten flagget finnes hverken verktøyet, skriveren eller ruten-navnet (flagg AV er identisk med main).
+  const evolutionApprovalOn = flagOn(process.env, CONTROL_FEATURE_FLAGS.evolutionApproval) && controlCenters.has("evolution");
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(githubRateLimitController),
@@ -1107,6 +1111,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {}),
         // WP-H2 (gjennomgang L1): før-bildet av en autonomi-binding skrives og committes i revisjonssporet FØR `revoke_autonomy_binding` sletter den (kun brukt når verktøyet er registrert, JARVIS_CONTROL_AUTONOMY_REVOKE=on).
         autonomyAudit: createAutonomyAudit(pool),
+        // WP-B3 (D-475, EV-23): skriveren (kun revisjonssporet; aldri endringsregisteret) finnes KUN når avgjørelsesverktøyet er registrert.
+        ...(evolutionApprovalOn ? { evolutionDecisions: createEvolutionDecisionRecorder(pool) } : {}),
         holder: executiveRef
       })), {
         // WP-H1/H2 (gjennomgang M1): per-senter lese-verktøyene (`get_<senter>_center`) registreres KUN for sentrene hvis flagg er på - flagg AV er identisk med main (ingen verktøy, ingen utvalgstreff, ingen rate-endring).
@@ -1114,7 +1120,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         controlCenters: controlCentersWithTools(process.env, controlCenters),
         // WP-H2 (M1): `run_golden_suite` og `revoke_autonomy_binding` registreres KUN med sine egne flagg (uten flagg finnes verktøyene ikke - og `/executive/mutate` godtar ikke navnene, se `server.ts`).
         goldenSuite: goldenSuiteRunner !== undefined,
-        autonomyRevoke: flagOn(process.env, CONTROL_FEATURE_FLAGS.autonomyRevoke)
+        autonomyRevoke: flagOn(process.env, CONTROL_FEATURE_FLAGS.autonomyRevoke),
+        // WP-B3 (D-475, EV-23): `record_evolution_decision` registreres kun med eget flagg + Evolusjon-senteret (se `evolutionApprovalOn`).
+        evolutionApproval: evolutionApprovalOn
       }),
       // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten

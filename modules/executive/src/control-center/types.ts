@@ -113,7 +113,9 @@ export const CONTROL_ACTION_ALLOWED: Readonly<Record<ControlActionEndpoint, read
     "enable_finance_kill_switch", "disable_finance_kill_switch",
     "cancel_task",
     // WP-H2 (additivt): `revoke_autonomy_binding` (klasse C, eier-kun + step-up; kun med JARVIS_CONTROL_AUTONOMY_REVOKE=on) og `run_golden_suite` (klasse A, lesende selvtest; kun med JARVIS_CONTROL_GOLDEN_SUITE=on).
-    "revoke_autonomy_binding", "run_golden_suite"
+    "revoke_autonomy_binding", "run_golden_suite",
+    // WP-B3 (D-475, EV-23; additivt): `record_evolution_decision` (klasse C, eier + signert enhet + step-up; KUN registrering i revisjonssporet, ingen virkning; kun med JARVIS_CONTROL_EVOLUTION_APPROVAL=on).
+    "record_evolution_decision"
   ],
   "/owner-controls/connector-credentials": ["test_connector"]
 };

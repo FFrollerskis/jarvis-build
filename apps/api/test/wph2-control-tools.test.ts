@@ -49,7 +49,8 @@ function productionDefinitions(options: Parameters<typeof executiveToolDefinitio
   });
 }
 const defsOff = productionDefinitions();
-const defsOn = productionDefinitions({ goldenSuite: true, autonomyRevoke: true });
+// WP-B3 (D-475, EV-23): `evolutionApproval` er den tredje flaggstyrte executive-handlingen (egen testfil: wpb3-evolution-approval-tools.test.ts); her slås den på så mutasjonslisten (13 + 3) kan låses i sin helhet.
+const defsOn = productionDefinitions({ goldenSuite: true, autonomyRevoke: true, evolutionApproval: true });
 const find = (list: ToolDefinition[], action: string): ToolDefinition | undefined => list.find((d) => d.tool_id === "executive" && d.action === action);
 
 /** `registry: null` = ingen register i tjenesten (fail-closed-sjekken); utelatt = eier-registeret. (`undefined` ville falt tilbake til standardverdien.) */
@@ -231,9 +232,9 @@ describe("de to flaggstyrte executive-handlingene: finnes kun med flagg", () => 
 });
 
 describe("kontrakten: ruten, allowlisten og step-up", () => {
-  it("de to nye handlingene står i den FLAGGSTYRTE listen (ikke i main sin allowliste på 13), og kontraktens allowlist speiler rutens kjente navn NØYAKTIG (13 + 2 = 15)", () => {
+  it("de flaggstyrte handlingene står i den FLAGGSTYRTE listen (ikke i main sin allowliste på 13), og kontraktens allowlist speiler rutens kjente navn NØYAKTIG (13 + 3 = 16; WP-B3 la til `record_evolution_decision`)", () => {
     expect(EXECUTIVE_MUTATE_ACTIONS).toHaveLength(13);
-    expect([...EXECUTIVE_MUTATE_FLAGGED_ACTIONS].sort()).toEqual(["revoke_autonomy_binding", "run_golden_suite"]);
+    expect([...EXECUTIVE_MUTATE_FLAGGED_ACTIONS].sort()).toEqual(["record_evolution_decision", "revoke_autonomy_binding", "run_golden_suite"]);
     expect([...EXECUTIVE_MUTATE_ACTIONS, ...EXECUTIVE_MUTATE_FLAGGED_ACTIONS].sort()).toEqual([...(CONTROL_ACTION_ALLOWED["/executive/mutate"] ?? [])].sort());
     for (const a of EXECUTIVE_MUTATE_FLAGGED_ACTIONS) expect(EXECUTIVE_MUTATE_ACTIONS as readonly string[]).not.toContain(a);
   });
