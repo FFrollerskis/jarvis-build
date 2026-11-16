@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- testfalske leverandører og assertions leser dypt i ikke-typet JSON (forespørselskropper/leverandørsvar); typing av hver form ville bare duplisere leverandørenes skjema. */
 import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import {
   FORBIDDEN_MODEL_TOOL_IDS, OWNER_ONLY_NAMESPACES, SURFACE_TOOL_GRANTS, adoptCallSignal, assertManifestInvariants, assessClassDPipeline, buildToolManifest, isOutcomeUnknownMessage, type ToolDefinition, type ToolTransport
@@ -13,6 +14,7 @@ import {
 } from "../src/write/index.ts";
 import { GROWTH_EXPERIMENT_TOOL_ACTIONS } from "../src/experiments/index.ts";
 import { timelineProjection } from "../src/write/executor.ts";
+import { youtubeSnippetBody, youtubeStatusBody } from "../src/write/youtube-write.ts";
 import { GrowthVendorError, VendorHttp, classifyVendorError } from "../src/write/http.ts";
 import { assertOre, oreToMicros, MAX_ORE } from "../src/write/validators.ts";
 import { FakeVendor } from "./support/fake-vendors.ts";
@@ -478,7 +480,7 @@ describe("E: forespørselsformer for de seks kompakte plattformene (falske lever
     const t = new YoutubeWriteTransport({ ...killOpen, ...token, spec: specs.youtube, baseUrl: v.baseUrl });
     await call(t, "update_video_metadata", { channel_id: CH, video_id: "abcdefghijk", title: "Ny tittel" });
     const put = v.requests.find((r) => r.method === "PUT")!;
-    expect(put.body).toEqual({ id: "abcdefghijk", snippet: { title: "Ny tittel", categoryId: "22", description: "D", tags: ["a", "b"] } });
+    expect(put.body).toEqual({ id: "abcdefghijk", snippet: { channelId: CH, title: "Ny tittel", categoryId: "22", description: "D", tags: ["a", "b"] } });
     await call(t, "set_video_privacy", { channel_id: CH, video_id: "abcdefghijk", privacy_status: "unlisted" });
     expect(v.requests.filter((r) => r.method === "PUT").at(-1)!.body["status"]).toMatchObject({ privacyStatus: "unlisted", embeddable: true, license: "youtube", publicStatsViewable: true, selfDeclaredMadeForKids: false });
     expect(await call(t, "get_video", { channel_id: "UCzzzzzzzzzzzzzzzzzzzzzz", video_id: "abcdefghijk" })).toEqual({ data: null });
@@ -560,6 +562,108 @@ describe("E: forespørselsformer for de seks kompakte plattformene (falske lever
     const rejected = (await t.invoke("pause_campaign", p, "fake-tiktok-token-for-test", ctx).catch((e: Error) => e)) as Error;
     expect(isOutcomeUnknownMessage(rejected.message)).toBe(false);
     expect(rejected.message).toContain("tiktok_error_40002");
+    await v.stop();
+  });
+});
+
+describe("E2: review M3 - YouTube-skriving ødelegger aldri data (originalverdier sendes, alle muterbare felt beholdes)", () => {
+  const CH = "UCabcdefghijklmnopqrstuv";
+  const ORIGINAL_DESCRIPTION = "00:00 Intro\n01:30 Del 1\n\nTakk for at du så på!\n";
+  const ORIGINAL_TAGS = ["a\tb", "kort tag", "æøå"];
+  const token = { accessToken: async () => "fake-access-token" };
+  const call = (t: ToolTransport, action: string, params: Record<string, JsonValue>) => t.invoke(action, params, "fake-refresh-token-for-test", { identity: owner });
+
+  /** Falsk YouTube med leverandørens OVERSKRIVINGSSEMANTIKK: en `PUT` med `part=snippet|status` ERSTATTER hele delen - muterbare felt som mangler i kroppen er SLETTET (kun skrivebeskyttede felt overlever). */
+  function replaceSemanticsVideo(v: FakeVendor, video: { snippet: Record<string, any>; status: Record<string, any> }): void {
+    const readOnlySnippet = { channelId: video.snippet["channelId"], publishedAt: video.snippet["publishedAt"] };
+    const readOnlyStatus = { uploadStatus: video.status["uploadStatus"] };
+    v.handler = (r) => {
+      if (r.method === "GET" && r.path === "/videos") return { json: { items: r.query.get("id") === "abcdefghijk" ? [{ id: "abcdefghijk", snippet: video.snippet, status: video.status }] : [] } };
+      if (r.method === "PUT" && r.path === "/videos") {
+        if (r.query.get("part") === "snippet") video.snippet = { ...readOnlySnippet, ...r.body["snippet"] };
+        if (r.query.get("part") === "status") video.status = { ...readOnlyStatus, ...r.body["status"] };
+        return { json: { id: "abcdefghijk" } };
+      }
+      return { status: 404, json: {} };
+    };
+  }
+  const seed = () => ({
+    snippet: { channelId: CH, publishedAt: "2026-01-01T00:00:00Z", title: "Gammel tittel", description: ORIGINAL_DESCRIPTION, tags: [...ORIGINAL_TAGS], categoryId: "22", defaultLanguage: "nb", defaultAudioLanguage: "nb" } as Record<string, any>,
+    status: { uploadStatus: "processed", privacyStatus: "private", publishAt: "2026-12-24T10:00:00Z", embeddable: true, license: "youtube", publicStatsViewable: true, selfDeclaredMadeForKids: false, containsSyntheticMedia: false } as Record<string, any>
+  });
+
+  it("en tittel-oppdatering bevarer flerlinjers beskrivelse med kapitler, tags med tab, språk og kategori EKSAKT (aldri flatet/omskrevet)", async () => {
+    const v = new FakeVendor(); await v.start();
+    const video = seed(); replaceSemanticsVideo(v, video);
+    const t = new YoutubeWriteTransport({ financeKillSwitch: async () => false, ...token, spec: specs.youtube, baseUrl: v.baseUrl });
+    await call(t, "update_video_metadata", { channel_id: CH, video_id: "abcdefghijk", title: "Ny tittel" });
+    expect(video.snippet["title"]).toBe("Ny tittel");
+    expect(video.snippet["description"]).toBe(ORIGINAL_DESCRIPTION);
+    expect(video.snippet["tags"]).toEqual(ORIGINAL_TAGS);
+    expect(video.snippet["defaultLanguage"]).toBe("nb");
+    expect(video.snippet["defaultAudioLanguage"]).toBe("nb");
+    expect(video.snippet["categoryId"]).toBe("22");
+    expect(v.requests.find((r) => r.method === "PUT")?.body["snippet"]).toMatchObject({ description: ORIGINAL_DESCRIPTION, tags: ORIGINAL_TAGS, defaultLanguage: "nb" });
+    await v.stop();
+  });
+
+  it("nye verdier sendes ORIGINALT: beskrivelse med linjeskift (maks 5000 BYTES), tags uten kontrolltegn; ugyldige tegn nektes FØR sending", async () => {
+    const v = new FakeVendor(); await v.start();
+    const video = seed(); replaceSemanticsVideo(v, video);
+    const t = new YoutubeWriteTransport({ financeKillSwitch: async () => false, ...token, spec: specs.youtube, baseUrl: v.baseUrl });
+    const base = { channel_id: CH, video_id: "abcdefghijk" };
+    const description = "Ny linje 1\nNy linje 2\r\n\n00:00 Kapittel æøå";
+    await call(t, "update_video_metadata", { ...base, description, tags: ["ny tag", "ø"] });
+    expect(video.snippet["description"]).toBe(description);
+    expect(video.snippet["tags"]).toEqual(["ny tag", "ø"]);
+    expect(video.snippet["title"]).toBe("Gammel tittel");
+    expect(video.snippet["defaultLanguage"]).toBe("nb");
+    const putCount = v.requests.filter((r) => r.method === "PUT").length;
+    for (const bad of [{ description: "farlig <script>" }, { description: `styretegn${String.fromCodePoint(7)}` }, { title: "tittel\nmed linjeskift" }, { tags: ["tab\ttag"] }, { tags: ["<b>"] }]) {
+      await expect(call(t, "update_video_metadata", { ...base, ...bad }), JSON.stringify(bad)).rejects.toThrow("growth_precondition_failed:invalid_characters");
+    }
+    expect(v.requests.filter((r) => r.method === "PUT")).toHaveLength(putCount);
+    // 5000 flerbyte-tegn overskrider 5000 BYTES og avvises av skjemaet (leverandøren måler i bytes)
+    const spec = specs.youtube.ops.find((o) => o.action === "update_video_metadata")!;
+    expect(z.object(spec.shape).safeParse({ ...base, description: "æ".repeat(2501) }).success).toBe(false);
+    expect(z.object(spec.shape).safeParse({ ...base, description: "æ".repeat(2500) }).success).toBe(true);
+    await v.stop();
+  });
+
+  it("synlighet: skrivbare statusfelt som FINNES beholdes uendret (ingenting forfalskes til `false`), skrivebeskyttede sendes aldri, planlagt publisering følger leverandørens regel", async () => {
+    const v = new FakeVendor(); await v.start();
+    const video = seed(); replaceSemanticsVideo(v, video);
+    const t = new YoutubeWriteTransport({ financeKillSwitch: async () => false, ...token, spec: specs.youtube, baseUrl: v.baseUrl });
+    const base = { channel_id: CH, video_id: "abcdefghijk" };
+    // privat + planlagt -> uoppført: publiseres nå, planen (publishAt kan kun settes for `private`) droppes; alt annet beholdes
+    await call(t, "set_video_privacy", { ...base, privacy_status: "unlisted" });
+    const body = v.requests.filter((r) => r.method === "PUT").at(-1)!.body["status"];
+    expect(body).toEqual({ embeddable: true, license: "youtube", publicStatsViewable: true, selfDeclaredMadeForKids: false, containsSyntheticMedia: false, privacyStatus: "unlisted" });
+    expect(video.status["privacyStatus"]).toBe("unlisted");
+    expect(video.status["embeddable"]).toBe(true);
+    expect(video.status["containsSyntheticMedia"]).toBe(false);
+    expect(video.status["publishAt"]).toBeUndefined();
+    // et felt som mangler hos leverandøren forblir fraværende (sendes ikke som `false`)
+    delete video.status["selfDeclaredMadeForKids"];
+    await call(t, "set_video_privacy", { ...base, privacy_status: "private" });
+    expect(v.requests.filter((r) => r.method === "PUT").at(-1)!.body["status"]).not.toHaveProperty("selfDeclaredMadeForKids");
+    await v.stop();
+  });
+
+  it("ren kroppsbygging: hele snippet round-trippes med kun oppgitte felt byttet; publishAt kun for `private`; skrivebeskyttede statusfelt utelates; tilstanden viser språk og planlagt publisering", async () => {
+    const raw = { channelId: CH, title: "T", description: "a\nb", tags: ["x\ty"], categoryId: "10", defaultLanguage: "nb", localized: { title: "T" } };
+    expect(youtubeSnippetBody(raw, { title: "N" })).toEqual({ ...raw, title: "N" });
+    expect(youtubeSnippetBody(raw, {})).toEqual(raw);
+    expect(youtubeSnippetBody(raw, { tags: ["z"] })["tags"]).toEqual(["z"]);
+    const status = { uploadStatus: "processed", failureReason: "x", madeForKids: true, privacyStatus: "private", publishAt: "2026-12-24T10:00:00Z", embeddable: false, license: "creativeCommon" };
+    expect(youtubeStatusBody(status, "private")).toEqual({ embeddable: false, license: "creativeCommon", publishAt: "2026-12-24T10:00:00Z", privacyStatus: "private" });
+    expect(youtubeStatusBody(status, "public")).toEqual({ embeddable: false, license: "creativeCommon", privacyStatus: "public" });
+    const v = new FakeVendor(); await v.start();
+    const video = seed(); replaceSemanticsVideo(v, video);
+    const t = new YoutubeWriteTransport({ financeKillSwitch: async () => false, ...token, spec: specs.youtube, baseUrl: v.baseUrl });
+    const state = (await call(t, "get_video", { channel_id: CH, video_id: "abcdefghijk" })).data as Record<string, any>;
+    expect(state).toMatchObject({ default_language: "nb", publish_at: "2026-12-24T10:00:00Z", privacy_status: "private", category_id: "22" });
+    expect(state["description"]).not.toMatch(/\p{Cc}/u);
     await v.stop();
   });
 });
