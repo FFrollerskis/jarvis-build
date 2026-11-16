@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { EVOLUTION_DECISION_AUDIT_TYPE, type ControlCenterReport, type ControlItem, type ControlRiskClass, type ControlSection, type EvolutionReport, type EvolutionSection } from "@jarvis/executive";
+import { EVOLUTION_DECISION_AUDIT_TYPE, type ControlAction, type ControlCenterReport, type ControlItem, type ControlRiskClass, type ControlSection, type EvolutionReport, type EvolutionSection } from "@jarvis/executive";
 import { evaluateAllReadiness, type ReadinessFacts } from "@jarvis/self-modification";
 import type { Ev0BootStatus } from "../src/ev0-boot.ts";
 import { createEvolutionCenter, type EvolutionCenterDeps } from "../src/control-center/evolution.ts";
@@ -27,9 +27,9 @@ const HEX = (c: string): string => c.repeat(64);
 const sections: EvolutionSection[] = ["EV-0/EV-8", "EV-5"].map((ev) => ({ ev, title_no: ev, mode: "observe", status: "OK", summary_no: `Sammendrag ${ev}.`, findings: [], source: "k", observed_at: NOW.toISOString() }));
 const evolutionReport = async (): Promise<EvolutionReport> => ({ as_of: NOW.toISOString(), acts: false, sections, summary_no: "x" });
 
-interface Pending { change_id: string; change_class: string; digest: string; recorded_at: string; path_count: number }
+type Pending = { change_id: string; change_class: string; digest: string; recorded_at: string; path_count: number };
 const proposal = (change_id: string, change_class: string, digest: string, recorded_at = "2026-11-10T08:00:00.000Z"): Pending => ({ change_id, change_class, digest, recorded_at, path_count: 2 });
-interface DecisionRow { change_id: string; digest: string; decision: string; decided_at: string }
+type DecisionRow = { change_id: string; digest: string; decision: string; decided_at: string };
 
 function rulesFor(pending: Pending[], decisions: DecisionRow[] | Error): ScriptedRule[] {
   return [
@@ -64,6 +64,7 @@ const itemOf = (s: ControlSection, id: string): ControlItem => {
   if (!i) throw new Error(`rad mangler: ${id}`);
   return i;
 };
+const decisionOf = (a: ControlAction): string | undefined => (a.body["parameters"] as { decision?: string } | undefined)?.decision;
 const auditQueries = (pool: ScriptedPool) => pool.queries.filter((q) => /FROM audit_events/.test(q.sql));
 
 describe("1. uten `approval` (flagget AV) er senteret som EV-22: ingen knapper, ingen lesing av revisjonssporet, EV-23 DEFERRED", () => {
@@ -91,7 +92,7 @@ describe("2. med `approval` og registrert verktøy: knapper per åpent forslag",
 
   it("E1/E2: godkjenn, avvis, utsett; E3: kun avvis og utsett (registeret forbyr godkjent E3) - alle peker på den EKSISTERENDE ruten med det strenge skjemaet", async () => {
     const { report } = await reportOf(pending, [], approvalOf());
-    const byItem = (id: string) => report.actions.filter((a) => a.item_id === `proposal:${id}`).map((a) => a.body.parameters?.["decision"]);
+    const byItem = (id: string) => report.actions.filter((a) => a.item_id === `proposal:${id}`).map((a) => decisionOf(a));
     expect(byItem("p1")).toEqual(["approve", "reject", "defer"]);
     expect(byItem("p3")).toEqual(["approve", "reject", "defer"]);
     expect(byItem("p2")).toEqual(["reject", "defer"]);
@@ -139,7 +140,7 @@ describe("2. med `approval` og registrert verktøy: knapper per åpent forslag",
     expect(ev23?.detail_no).toContain("Ikke aktivert - ingen kodevei aktiverer dette.");
     expect(ev23?.detail_no).toContain("REGISTRERE din avgjørelse");
     expect(ev23?.detail_no).toContain("DEFERRED");
-    expect(ev23?.detail_no.length).toBeLessThanOrEqual(400);
+    expect(ev23?.detail_no?.length ?? 0).toBeLessThanOrEqual(400);
     expect(ev23?.facts?.["activation_decision"]).toBe(false);
   });
 
@@ -191,7 +192,7 @@ describe("4. eierens registrerte avgjørelse vises for NØYAKTIG denne versjonen
     expect(row.detail_no).toContain("uten virkning");
     expect(row.detail_no).toContain("fortsatt som åpent i endringsregisteret");
     expect(row.status).toBe("WARN");
-    expect(report.actions.filter((a) => a.item_id === "proposal:p1").map((a) => a.body.parameters?.["decision"])).toEqual(["reject", "defer"]);
+    expect(report.actions.filter((a) => a.item_id === "proposal:p1").map((a) => decisionOf(a))).toEqual(["reject", "defer"]);
     // det andre forslaget har ingen avgjørelse: alle tre knapper, og teksten sier det
     const other = itemOf(sectionOf(report, "ledger"), "proposal:p2");
     expect(other.facts).toMatchObject({ owner_decision: "none", owner_decided_at: null });
@@ -202,10 +203,10 @@ describe("4. eierens registrerte avgjørelse vises for NØYAKTIG denne versjonen
   it("«avvist» og «utsatt» vises med sine ord og skjuler hver sin knapp", async () => {
     const rejected = (await reportOf(pending, [decided("p1", HEX("a"), "reject")], approvalOf())).report;
     expect(itemOf(sectionOf(rejected, "ledger"), "proposal:p1").detail_no).toContain("avvist");
-    expect(rejected.actions.filter((a) => a.item_id === "proposal:p1").map((a) => a.body.parameters?.["decision"])).toEqual(["approve", "defer"]);
+    expect(rejected.actions.filter((a) => a.item_id === "proposal:p1").map((a) => decisionOf(a))).toEqual(["approve", "defer"]);
     const deferred = (await reportOf(pending, [decided("p1", HEX("a"), "defer")], approvalOf())).report;
     expect(itemOf(sectionOf(deferred, "ledger"), "proposal:p1").detail_no).toContain("utsatt");
-    expect(deferred.actions.filter((a) => a.item_id === "proposal:p1").map((a) => a.body.parameters?.["decision"])).toEqual(["approve", "reject"]);
+    expect(deferred.actions.filter((a) => a.item_id === "proposal:p1").map((a) => decisionOf(a))).toEqual(["approve", "reject"]);
   });
 
   it("en avgjørelse om en ANNEN versjon (annen digest) av samme forslag teller ikke: forslaget er endret siden du så det", async () => {
