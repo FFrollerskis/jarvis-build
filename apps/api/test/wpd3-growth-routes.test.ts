@@ -35,7 +35,7 @@ describe("A: flagg AV - rutene finnes ikke", () => {
 
   it("alle fire ruter svarer 404 uten growthWrites (ikke 401/403)", async () => {
     for (const path of ["/growth/mutate", "/growth/read", "/growth/writes/list", "/growth/experiments"]) {
-      const res = await fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "google_ads", action: "pause_campaign", parameters: {}, idempotency_key: "key-12345678" }) });
+      const res = await fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "google_ads", action: "pause_campaign", parameters: {}, idempotency_key: "route-probe-0001" }) });
       expect(res.status, path).toBe(404);
     }
   });
