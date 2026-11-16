@@ -71,7 +71,7 @@ export function searchConsoleWriteSpec(): ProviderToolSpec {
       summary: (_s, p) => `Search Console: send inn nettstedskart for ${safeSite(p)}`
     },
     removeOp({
-      action: "remove_sitemap", label: "Search Console-nettstedskart", stateAction: "list_sitemaps", targetParam: "site_url", risk: "C", scopes,
+      action: "remove_sitemap", label: "Search Console-nettstedskart", spend: "none", stateAction: "list_sitemaps", targetParam: "site_url", risk: "C", scopes,
       shape: { ...siteShape, feedpath: z.string().url().max(2048) },
       statusOf: (s, p) => (sitemapsOf(s).some((m) => m["path"] === p["feedpath"]) ? "PRESENT" : "REMOVED"), targetCheck: () => true, removed: ["REMOVED"],
       ref: (p) => `searchconsole:${safeSite(p)}:sitemap:${typeof p["feedpath"] === "string" ? (p["feedpath"] as string).slice(0, 200) : "?"}`,

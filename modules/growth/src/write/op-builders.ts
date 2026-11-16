@@ -75,12 +75,14 @@ export interface RemoveConfig {
   rollback: string;
   /** `true` når objektet forsvinner helt hos leverandøren etter fjerning (readback svarer «finnes ikke» = suksess). */
   absentIsDone?: boolean;
+  /** Pengeeffekt (standard `reduces`: annonse-/kampanjefjerning stopper utgift). `none` for ting uten utgift (nettstedskart, nøkkelhendelse, video, svar på omtale). */
+  spend?: "reduces" | "none";
   targetCheck?: (state: JsonValue, p: Params) => boolean;
 }
 
 export function removeOp(c: RemoveConfig): OpSpec {
   return {
-    action: c.action, risk: c.risk ?? "D", spend: "reduces", irreversible: true, idempotentExternal: true,
+    action: c.action, risk: c.risk ?? "D", spend: c.spend ?? "reduces", irreversible: true, idempotentExternal: true,
     description: `Fjern ${c.label} PERMANENT (leverandørens fjernet-status er terminal og kan ikke angres)`,
     shape: c.shape, targetParam: c.targetParam, stateAction: c.stateAction, scopes: c.scopes, target: c.ref, rollback: c.rollback,
     ...(c.targetCheck ? { targetCheck: c.targetCheck } : {}), ...(c.absentIsDone === true ? { absentIsDone: true } : {}),

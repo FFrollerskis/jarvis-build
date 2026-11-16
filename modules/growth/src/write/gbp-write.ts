@@ -99,7 +99,7 @@ export function gbpWriteSpec(config: Pick<GrowthWriteConfig, "creativeHosts">): 
       summary: (_s, p) => `Business Profile: svar på omtale i ${safeLocation(p)}`
     },
     removeOp({
-      action: "delete_review_reply", label: "Business Profile-svar på omtale", stateAction: "list_reviews", targetParam: "location_id", risk: "C", scopes,
+      action: "delete_review_reply", label: "Business Profile-svar på omtale", spend: "none", stateAction: "list_reviews", targetParam: "location_id", risk: "C", scopes,
       shape: { ...accountLocationShape, review_id: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/) },
       statusOf: (s, p) => { const r = reviewsOf(s).find((x) => x["review_id"] === p["review_id"]); return r === undefined ? null : r["has_reply"] === true ? "PRESENT" : "REMOVED"; },
       targetCheck: (s, p) => reviewsOf(s).some((r) => r["review_id"] === p["review_id"]), removed: ["REMOVED"],

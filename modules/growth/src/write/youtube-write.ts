@@ -55,7 +55,7 @@ export function youtubeWriteSpec(): ProviderToolSpec {
       target: (p) => refVideo(p, "privacy"), summary: (_s, p) => `YouTube: sett synlighet ${String(p["privacy_status"])} på ${refVideo(p, "privacy")}`
     },
     removeOp({
-      action: "delete_video", label: "YouTube-video", stateAction: "get_video", targetParam: "channel_id", shape: videoShape, scopes, absentIsDone: true,
+      action: "delete_video", label: "YouTube-video", spend: "none", stateAction: "get_video", targetParam: "channel_id", shape: videoShape, scopes, absentIsDone: true,
       statusOf: () => "PRESENT", removed: ["REMOVED"], ref: (p) => refVideo(p, "delete"),
       rollback: "ingen teknisk reversering - en slettet video kan ikke gjenopprettes via API-et (må lastes opp på nytt; før-tilstand med metadata er journalført)"
     })

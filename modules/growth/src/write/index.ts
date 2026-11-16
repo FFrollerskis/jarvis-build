@@ -18,7 +18,7 @@ export { GoogleAdsWriteTransport, googleAdsWriteSpec } from "./google-ads-write.
 export { MetaAdsWriteTransport, metaAdsWriteSpec, TWO_DECIMAL_CURRENCIES } from "./meta-ads-write.ts";
 export { Ga4WriteTransport, ga4WriteSpec } from "./ga4-write.ts";
 export { SearchConsoleWriteTransport, searchConsoleWriteSpec, urlBelongsToSite } from "./search-console-write.ts";
-export { GbpWriteTransport, gbpWriteSpec } from "./gbp-write.ts";
+export { GbpWriteTransport, gbpWriteSpec, periodsSignature } from "./gbp-write.ts";
 export { YoutubeWriteTransport, youtubeWriteSpec } from "./youtube-write.ts";
 export { LinkedinWriteTransport, linkedinWriteSpec, decimalToOre, oreToDecimal } from "./linkedin-write.ts";
 export { TiktokWriteTransport, tiktokWriteSpec } from "./tiktok-write.ts";
