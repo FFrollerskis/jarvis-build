@@ -6,7 +6,7 @@ import type { ClaimedTask, JobContext } from "@jarvis/tasks";
 import { filterMeshToolsForJob, financeToolIntent, type MeshToolMapping } from "@jarvis/tool-gateway";
 import { cloudScreenedExecutor, jobWithheldNote } from "./cloud-tool-screen.ts";
 import { financeIntentOptions } from "./control-center/shared.ts";
-import { LOCAL_FALLBACK_ERROR_KINDS, jobDayCapNote } from "./tool-turn-route.ts";
+import { LOCAL_FALLBACK_ERROR_KINDS, claudeBudgetRouteNote, jobDayCapNote } from "./tool-turn-route.ts";
 
 export interface ExecutiveHandlerOptions {
   gateway: ModelGateway;
@@ -102,6 +102,8 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
         tenant_id: task.tenant_id,
         task_id: task.task_id,
         purpose: purpose.success ? purpose.data : ("BACKGROUND" as const),
+        // WP-B4 (D-476): en jobb delegert fra chat er en jobb EIEREN bestilte (VIKTIG for Claude-kreditten, selv om kontrakten merker den BACKGROUND som køetikett). Kun med Claude-kreditten på - ellers uendret innputt.
+        ...(opts.gateway.claudeBudgetActive === true && input.delegated_from_chat === true ? { budget_origin: "owner_task" as const } : {}),
         request: { messages: [{ role: "user" as const, content: input.prompt }], max_tokens: 1024 }
       };
       // BO-11 (§29) + Del 3: tools=true gir modellen KUN verktøyene kontrakten eksplisitt tillater, med kontraktens egen identitet.
@@ -193,6 +195,9 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
       } else {
         result = await opts.gateway.complete(meshInput);
       }
+      // WP-B4 (D-476): jobben kjørte lokalt fordi Claude-kreditten stengte Anthropic - sagt rett ut i svaret (tom uten Claude-kreditten).
+      const budgetNote = claudeBudgetRouteNote(result.metadata, "jobben");
+      if (budgetNote !== "") notes.push(budgetNote);
       const header = notes.length > 0 ? `${notes.join(" ")}\n\n` : "";
       return {
         text: `${header}${result.text.slice(0, Math.max(0, 4000 - header.length))}`,

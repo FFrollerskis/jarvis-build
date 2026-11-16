@@ -2,6 +2,7 @@
 import type { IdentityContext } from "@jarvis/contracts";
 import { scanForSecrets } from "@jarvis/core";
 import { ControlCenterRegistry, type GoldenSuiteControl, type InfraStatusReport, type ValueReport } from "@jarvis/executive";
+import { claudeBudgetConfigFromEnv, type ClaudeBudgetConfig } from "@jarvis/model-gateway";
 import { resolveAuthorityMode, type AuthorityConfig } from "@jarvis/policy";
 import type { BackupStatusRead } from "../backup-status.ts";
 import { createAgentCenter } from "./agent.ts";
@@ -111,8 +112,21 @@ export interface ControlCenterWiring {
   goldenSuite?: GoldenSuiteControl;
 }
 
+/**
+ * WP-B4 (D-476): Claude-kreditten fra miljøet, eller `undefined` når flagget (`JARVIS_CLAUDE_BUDGET_USD`) er AV. En UGYLDIG verdi stopper oppstarten i `main.ts` (samme parser, før gatewayen bygges) - kommer vi hit med en,
+ * viser senteret heller ingenting enn å kaste (kontrollsentrene er kun lesing og skal aldri kunne velte byggingen av en side).
+ */
+export function claudeBudgetFromEnv(env: Readonly<Record<string, string | undefined>>): ClaudeBudgetConfig | undefined {
+  try {
+    return claudeBudgetConfigFromEnv(env) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function registerControlCenters(registry: ControlCenterRegistry, wiring: ControlCenterWiring): void {
   // Sentrene registreres her, ett per linje, etterhvert som de bygges. Et senter uten sine avhengigheter registreres IKKE (ærlig «ikke koblet inn», aldri en tom OK).
+  const claudeBudget = claudeBudgetFromEnv(wiring.env);
   if (wiring.toolGateway && wiring.ownerControls) {
     registry.register(createIntegrationCenter({
       pool: wiring.pool, toolGateway: wiring.toolGateway, ownerControls: wiring.ownerControls,
@@ -125,7 +139,8 @@ export function registerControlCenters(registry: ControlCenterRegistry, wiring: 
       ...(wiring.runRate ? { runRate: wiring.runRate } : {}),
       ...(wiring.councilLimiter ? { councilLimiter: wiring.councilLimiter } : {}),
       ...(wiring.evolutionReport ? { evolutionReport: wiring.evolutionReport } : {}),
-      ...(wiring.maxActiveJobs !== undefined ? { maxActiveJobs: wiring.maxActiveJobs } : {})
+      ...(wiring.maxActiveJobs !== undefined ? { maxActiveJobs: wiring.maxActiveJobs } : {}),
+      ...(claudeBudget !== undefined ? { claudeBudget } : {})
     }));
   }
   if (wiring.toolGateway && wiring.ownerControls && wiring.killSwitch) {

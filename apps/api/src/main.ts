@@ -43,9 +43,11 @@ import { DeploymentService, DiagnosisService, INCIDENT_PRODUCER_NAMES, IncidentS
 import { ClaimVerificationService, KnowledgeRetriever, createKnowledgeClaimsPort } from "@jarvis/knowledge";
 import {
   AiCouncil,
+  ClaudeBudgetEnforcer,
   CouncilAutoTriggerLimiter,
   DEFAULT_PROFILES,
   assertProvidersHaveExplicitPricing,
+  claudeBudgetConfigFromEnv,
   pricingFromEnv,
   ModelGateway,
   InteractivePriorityGate,
@@ -149,6 +151,7 @@ import { createAutonomyAudit } from "./autonomy-audit.ts";
 import { createGoldenSuiteRunner } from "./golden-suite-runner.ts";
 import { servedByCloudModel } from "./cloud-tool-screen.ts";
 import { createProviderPauseSourceFromPool } from "./provider-pause.ts";
+import { claudeBudgetBriefSource } from "./claude-budget-surfaces.ts";
 import { createOwnerControlsService } from "./provider-pause.ts";
 import { createApiServer, makeReadiness, type ApiDeps } from "./server.ts";
 
@@ -311,6 +314,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   });
   const queue = new PgTaskQueue(pool);
   const worker = new InProcessWorker(queue);
+  // WP-B4 (D-476): Claude-kreditten (100 USD/mnd, tempostyring og behovsprioritering). AV som standard (`JARVIS_CLAUDE_BUDGET_USD` tom/usatt = ingen enforcer, gatewayen er identisk med main). En ugyldig
+  // JARVIS_CLAUDE_BUDGET_* KASTER her og stopper oppstarten (buildDeps().catch → exit 1) - aldri en stille standard. Samme parsing og samme enforcer-type i worker-main.ts.
+  const claudeBudgetConfig = claudeBudgetConfigFromEnv(process.env);
+  const claudeBudget = claudeBudgetConfig === null ? undefined : new ClaudeBudgetEnforcer({ config: claudeBudgetConfig, pool, trace, actor_person_id: owner.owner_person_id });
   const gateway = new ModelGateway({
     pool,
     trace,
@@ -367,7 +374,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // D-395 (JARVIS-039): samme budsjettkilde som workeren (`budgetConfigFromEnv`) - tidligere hardkodet her og med `DEFAULT_BUDGET` i workeren.
     budget: budgetConfigFromEnv(),
     // WP-H0 (JARVIS-087): eierens pause/tilbakekall av en modellleverandør, lest LIVE fra `owner_control_state` ved hvert kall (samme kilde i worker-main.ts) - se provider-pause.ts.
-    providerPause: createProviderPauseSourceFromPool(pool)
+    providerPause: createProviderPauseSourceFromPool(pool),
+    // WP-B4: Claude-kreditten (kun når JARVIS_CLAUDE_BUDGET_USD er satt) - beslutningen tas inne i gatewayen FØR leverandørvalg, for api OG worker (samme miljøvariabler).
+    ...(claudeBudget !== undefined ? { claudeBudget } : {})
   });
   // JARVIS-006: hver konstruert adapter MÅ ha eksplisitt pris - ingen stille `default_rate`.
   assertProvidersHaveExplicitPricing(pricingFromEnv(), gateway.listProviderNames());
@@ -1492,7 +1501,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     tasksSource(pool),
     schedulerSource(pool, (id) => id.person_id === owner.owner_person_id && id.tenant_id === owner.tenant_id),
     buildStatusSource(toolGateway),
-    emailSource(toolGateway), calendarSource(toolGateway)
+    emailSource(toolGateway), calendarSource(toolGateway),
+    // WP-B4 (D-476): ÉN linje om Claude-kreditten i den daglige briefen - kun med JARVIS_CLAUDE_BUDGET_USD (uten flagget er kildelisten uendret).
+    ...(claudeBudgetConfig !== null ? [claudeBudgetBriefSource({ pool, config: claudeBudgetConfig })] : [])
   ], pool);
   const aiMeshText = async () => {
     const mesh = gateway.meshStatus();

@@ -1,3 +1,5 @@
+import { CLAUDE_BUDGET_NOTE_PREFIX, claudeBudgetNoteNo } from "@jarvis/model-gateway";
+
 /**
  * D-431: hvor verktøyturer i chatten sendes. Ren prat går til den lokale modellen (gratis); når et ekte verktøy er valgt for turen går den til en
  * skymodell, fordi en liten lokal modell bruker verktøy upålitelig. Styres av `JARVIS_TOOL_TURN_MODEL` = `provider:model`
@@ -172,6 +174,21 @@ export function reserveModelNote(failed: readonly string[], served: string, clou
 }
 
 /**
+ * WP-B4 (D-476): merknaden bak et svar (eller i en jobbs svar) som kom fra en lokal modell fordi Claude-kreditten styrte bort fra Anthropic (hard stopp, utsettelse eller reserve for essensielle behov) - samme prinsipp
+ * som D-447: aldri en usynlig nedgradering. Leser KUN kategoriene gatewayen la i `result.metadata.claude_budget` (finnes bare med Claude-kreditten på, og bare når kallet var stengt for Anthropic), aldri beløp.
+ * Tom streng ellers (flagg AV, nedgradert til billigere modell, tillatt, eller ukjent form) - så svar uten kreditten er byte-identiske. Teksten har ingen parenteser inni (se `stripSystemNotes`) og starter med
+ * `CLAUDE_BUDGET_NOTE_PREFIX`, som står i `SYSTEM_NOTE_PREFIXES` så den fjernes fra historikken før klassifisering.
+ */
+export function claudeBudgetRouteNote(metadata: Readonly<Record<string, unknown>> | undefined, what: "svaret" | "jobben" = "svaret"): string {
+  const meta = metadata?.["claude_budget"];
+  if (typeof meta !== "object" || meta === null) return "";
+  const { action, reason, constraint, window_end_ms } = meta as Record<string, unknown>;
+  if (constraint !== "closed" || (action !== "deny" && action !== "defer") || typeof reason !== "string" || typeof window_end_ms !== "number" || !Number.isFinite(window_end_ms)) return "";
+  const text = claudeBudgetNoteNo(action, reason, window_end_ms, what);
+  return what === "svaret" ? `\n\n(${text})` : `(${text})`;
+}
+
+/**
  * Starten på hver rutemerknad Jarvis selv legger bak et svar (chatten: `localOnlyNote`, dagstaket, `cloudHistoryNote`, skjermet minnesøk; hurtigbanen: `jobLocalOnlyNote`). Listen og `stripSystemNotes` hører sammen og er låst av en test
  * mot hver funksjon som lager en merknad.
  */
@@ -182,7 +199,9 @@ const SYSTEM_NOTE_PREFIXES: readonly string[] = [
   "Svart på skymodellen uten",
   "Deler av minnesøket ble holdt tilbake",
   "Deler av kunnskapssøket ble holdt tilbake",
-  "Reservemodell brukt:"
+  "Reservemodell brukt:",
+  // WP-B4 (D-476): Claude-kreditten styrte svaret bort fra Anthropic (se `claudeBudgetRouteNote`).
+  CLAUDE_BUDGET_NOTE_PREFIX
 ];
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const TRAILING_SYSTEM_NOTE = new RegExp(`(?:\\n\\n|^)\\((?:${SYSTEM_NOTE_PREFIXES.map(escapeRegExp).join("|")})[^()]*\\)\\s*$`);
