@@ -3,10 +3,13 @@ import type { IdentityContext } from "@jarvis/contracts";
 import { scanForSecrets } from "@jarvis/core";
 import { ControlCenterRegistry, type GoldenSuiteControl, type InfraStatusReport, type ValueReport } from "@jarvis/executive";
 import { resolveAuthorityMode, type AuthorityConfig } from "@jarvis/policy";
+import type { ReadinessVerdict } from "@jarvis/self-modification";
 import type { BackupStatusRead } from "../backup-status.ts";
+import type { Ev0BootStatus } from "../ev0-boot.ts";
 import { createAgentCenter } from "./agent.ts";
 import { createAiCenter, type AiCenterDeps } from "./ai.ts";
 import { createAuthorityCenter, type AuthorityCenterDeps } from "./authority.ts";
+import { createEvolutionCenter, type EvolutionReportRead } from "./evolution.ts";
 import { createFinanceCenter } from "./finance.ts";
 import { createIntegrationCenter, type IntegrationCenterDeps } from "./integration.ts";
 import { createMemoryCenter } from "./memory.ts";
@@ -97,8 +100,13 @@ export interface ControlCenterWiring {
   /** AI Center: run-rate (D-421), AI-rådets begrenser, evolusjonsrapporten (EV-12) og taket for samtidige bakgrunnsjobber. Utelatt = den delen står som ukjent. */
   runRate?: AiCenterDeps["runRate"];
   councilLimiter?: AiCenterDeps["councilLimiter"];
-  evolutionReport?: AiCenterDeps["evolutionReport"];
+  /** Evolusjonsrapporten (D-452). Brukes av AI-senteret (EV-12) og, fra WP-B3 (D-475), av Evolusjon-senteret (portstatus). */
+  evolutionReport?: EvolutionReportRead;
   maxActiveJobs?: AiCenterDeps["maxActiveJobs"];
+  /** WP-B3 (D-475) Evolusjon-senteret: strukturerte beredskapsvurderinger for de sovende delene (`createEvolutionReadinessProvider`), EV-0-oppstartsresultatet og tenanten rapportleverandøren er bundet til (eierens). Utelatt = den delen er UKJENT. */
+  evolutionReadiness?: () => Promise<readonly ReadinessVerdict[]>;
+  ev0Status?: () => Ev0BootStatus | null;
+  evolutionTenantId?: string;
   /** WP-H2 Value Center: `ExecutiveService.getValueReport` (lat - tjenesten bygges etter sentrene). Uten den registreres ikke Verdi-senteret. */
   valueReport?: (tenantId: string) => Promise<ValueReport>;
   /** WP-H2 Operations Center: `ExecutiveService.getInfraStatus` (lat). Uten den registreres ikke Drift-senteret. */
@@ -157,6 +165,16 @@ export function registerControlCenters(registry: ControlCenterRegistry, wiring: 
     registry.register(createSecurityCenter({
       pool: wiring.pool, toolGateway: wiring.toolGateway, ownerControls: wiring.ownerControls, killSwitch: wiring.killSwitch,
       ...(flagOn(wiring.env, CONTROL_FEATURE_FLAGS.goldenSuite) && wiring.goldenSuite ? { goldenSuite: wiring.goldenSuite } : {})
+    }));
+  }
+  // WP-B3 (D-475, EV-22): Evolusjon (tilleggssenter utenfor de ti) bak eget flagg (AV som standard). Uten evolusjonsrapporten (portstatus) registreres det IKKE (ærlig «ikke koblet inn»); kun lesing av eksisterende kilder.
+  if (flagOn(wiring.env, CONTROL_CENTER_FLAGS.evolution) && wiring.evolutionReport) {
+    registry.register(createEvolutionCenter({
+      pool: wiring.pool, env: wiring.env, evolutionReport: wiring.evolutionReport,
+      ...(wiring.evolutionReadiness ? { readiness: wiring.evolutionReadiness } : {}),
+      ...(wiring.ev0Status ? { ev0Status: wiring.ev0Status } : {}),
+      ...(wiring.runRate ? { runRate: wiring.runRate } : {}),
+      ...(wiring.evolutionTenantId !== undefined ? { reportTenantId: wiring.evolutionTenantId } : {})
     }));
   }
 }

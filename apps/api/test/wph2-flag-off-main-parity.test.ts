@@ -169,7 +169,9 @@ function productionSurface(env: Record<string, string | undefined>) {
   const pool = {} as never;
   registerControlCenters(registry, {
     pool, env, toolGateway: { get: () => undefined } as never, ownerControls: {} as never, killSwitch: {} as never,
-    valueReport: async () => ({}) as never, infraStatus: async () => ({}) as never
+    valueReport: async () => ({}) as never, infraStatus: async () => ({}) as never,
+    // WP-B3 (D-475): Evolusjon-senteret registreres kun med evolusjonsrapporten koblet inn (som main.ts gjør)
+    evolutionReport: async () => ({ sections: [] })
   });
   const controlCenters: ControlCenterId[] = controlCentersWithTools(env, registry);
   const defs = firstWaveTools({}, {
@@ -208,7 +210,7 @@ describe("3. verktøyutvalget (hele produksjonsflaten, 95 fraser, begge flater) 
     expect(diffs).toEqual([]);
   });
 
-  it("KONTROLL: med ALLE flagg PÅ endres utvalget for minst 11 av hverdagsfrasene på web-chatten og flaten får de sju verktøyene - sammenligningen over er ikke tom", () => {
+  it("KONTROLL: med ALLE flagg PÅ endres utvalget for minst 11 av hverdagsfrasene på web-chatten og flaten får de åtte verktøyene (syv + Evolusjon, D-475) - sammenligningen over er ikke tom", () => {
     const onKeys = allOn.map(keyOf);
     for (const t of CONTROL_CENTER_READ_TOOLS) expect(onKeys, t.action).toContain(`executive.${t.action}`);
     const changed = selectionBaseline.cases.filter((c) => JSON.stringify(selectionOf(allOn, "web_chat", c)) !== JSON.stringify(c.web_chat));

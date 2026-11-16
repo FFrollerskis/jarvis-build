@@ -12,12 +12,13 @@ import { CONTROL_CENTER_FLAGS, CONTROL_FEATURE_FLAGS } from "../src/control-cent
  */
 const COMPOSE = readFileSync(fileURLToPath(new URL("../../../infra/local/docker-compose.yml", import.meta.url)), "utf8");
 // WP-H2 la til fire senterflagg (i CONTROL_CENTER_FLAGS) og to enkeltfunksjoner (CONTROL_FEATURE_FLAGS: golden-suite og tilbakekall av autonomi-binding) - alle må nå containeren.
+// WP-B3 (D-475) la til tilleggssenterflagget JARVIS_CONTROL_CENTER_EVOLUTION (i CONTROL_CENTER_FLAGS) - også det må nå containeren.
 const FLAGS: string[] = [...Object.values(CONTROL_CENTER_FLAGS), ...Object.values(CONTROL_FEATURE_FLAGS), "JARVIS_GOVERNANCE_PROVENANCE"];
 
 describe("kontrollsenter-flaggene og proveniens-flagget når api-containeren", () => {
-  it("alle ti flagg (syv senterflagg + to enkeltfunksjoner + proveniens) er med - ingen er glemt", () => {
-    expect(FLAGS).toHaveLength(10);
-    expect(new Set(FLAGS).size).toBe(10);
+  it("alle elleve flagg (åtte senterflagg inkl. tilleggssenteret Evolusjon + to enkeltfunksjoner + proveniens) er med - ingen er glemt", () => {
+    expect(FLAGS).toHaveLength(11);
+    expect(new Set(FLAGS).size).toBe(11);
   });
 
   it("hvert flagg står i SERVICE_ENV.api - og ikke i worker, voice, browser eller migrate (kun api leser dem)", () => {

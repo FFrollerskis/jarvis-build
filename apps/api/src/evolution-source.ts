@@ -7,7 +7,7 @@ import type { MeshStatus } from "@jarvis/model-gateway";
 import {
   FREEZE_UNKNOWN_REASONS, MAINTENANCE_CATALOG, assessCredential, auditFallbackChains, changeFreeze, creditRunway, decideHeal, detectCostAnomalies, detectPoisoning, dueMaintenance, evaluateAllReadiness, forecastBreach, needsReverification,
   parseDeclaredGates, proposeDedupe, RED_TEAM_CATEGORIES,
-  type CostPoint, type CredentialState, type FreezeVerdict, type MaintenanceTask, type MeasuredFact, type MemoryFact, type MemorySourceKind, type ReadinessFacts
+  type CostPoint, type CredentialState, type FreezeVerdict, type MaintenanceTask, type MeasuredFact, type MemoryFact, type MemorySourceKind, type ReadinessFacts, type ReadinessVerdict
 } from "@jarvis/self-modification";
 import { readSchedulerHealth, type ConnectorStatus, type MeshToolMapping } from "@jarvis/tool-gateway";
 import type { Ev0BootStatus } from "./ev0-boot.ts";
@@ -675,5 +675,34 @@ export function createEvolutionReportProvider(deps: EvolutionSourceDeps, options
     cached = { at: t, report };
     report.catch(() => { if (cached?.report === report) cached = undefined; });
     return report;
+  };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------
+// WP-B3 (D-475, EV-22): strukturerte beredskapsvurderinger til Evolusjon-senteret
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------
+/**
+ * De STRUKTURERTE beredskapsvurderingene (ett `ReadinessVerdict` per sovende del) fra de samme fakta og de samme rene reglene som seksjonen «Sovende deler» i rapporten - men som data, ikke tekst, så Evolusjon-senteret kan vise
+ * antall oppfylte/manglende/ukjente krav per del uten å parse prosa. Ren LESING (ingenting skrives, ingenting aktiveres): `activation_decision` er ALLTID false (`readiness.ts`). Ukjent innsignal = kravet er IKKE oppfylt og står som `unknown`.
+ * Rapporten (`createEvolutionReportProvider`) og dens tekst er uendret av dette.
+ */
+export async function evaluateEvolutionReadiness(deps: EvolutionSourceDeps): Promise<ReadinessVerdict[]> {
+  const now = (deps.now ?? (() => new Date()))();
+  const ctx: EvolutionContext = { pool: deps.pool, tenantId: deps.tenantId, now, env: deps.env ?? process.env, deps, shared: {} };
+  return evaluateAllReadiness(await readinessFacts(ctx));
+}
+
+/** Beredskapsleverandør med kort cache (samme 30 s som rapporten): hver kontrollside-oppdatering bygger Evolusjon-senteret, og beredskapen leser SLO-rapport, hendelser og tilkoblinger. En feilet vurdering caches ikke. */
+export function createEvolutionReadinessProvider(deps: EvolutionSourceDeps, options: { ttlMs?: number } = {}): () => Promise<ReadinessVerdict[]> {
+  const ttl = options.ttlMs ?? 30_000;
+  const clock = deps.now ?? (() => new Date());
+  let cached: { at: number; verdicts: Promise<ReadinessVerdict[]> } | undefined;
+  return () => {
+    const t = clock().getTime();
+    if (cached && t - cached.at < ttl) return cached.verdicts;
+    const verdicts = evaluateEvolutionReadiness(deps);
+    cached = { at: t, verdicts };
+    verdicts.catch(() => { if (cached?.verdicts === verdicts) cached = undefined; });
+    return verdicts;
   };
 }

@@ -135,7 +135,7 @@ import { buildSloReaders, createSloReportProvider } from "./slo-source.ts";
 import { parseIncidentProducerConfig, startApiIncidentProducers } from "./incident-producers.ts";
 import { createInfraStatusSource } from "./infra-status-source.ts";
 import { createRadarState, radarSweepFailures } from "./evolution-radar.ts";
-import { createEvolutionReportProvider } from "./evolution-source.ts";
+import { createEvolutionReadinessProvider, createEvolutionReportProvider, type EvolutionSourceDeps } from "./evolution-source.ts";
 import { createAiMeshReportProvider } from "./ai-mesh-source.ts";
 import { parseKnowledgeClaimWrites } from "./knowledge-flags.ts";
 import { createPushSendGuard, startFollowUpPush } from "./follow-up-push.ts";
@@ -223,7 +223,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     lastResensitize = summary;
     return summary;
   };
-  const evolutionReports = createEvolutionReportProvider({
+  // WP-B3 (D-475): kildene er trukket ut til ÉN verdi (uendret innhold) så Evolusjon-senteret kan lese den samme rapporten og de samme beredskapsfaktaene (`createEvolutionReadinessProvider`) uten en parallell kobling.
+  const evolutionSourceDeps: EvolutionSourceDeps = {
     radar: evolutionRadar,
     resensitize: () => lastResensitize,
     pool,
@@ -234,7 +235,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     killSwitchActive: async () => (await selfModelControls.getControlState()).kill_switch.active,
     mesh: () => gateway.meshStatus(),
     toolSurface: () => modelToolSurface
-  });
+  };
+  const evolutionReports = createEvolutionReportProvider(evolutionSourceDeps);
+  const evolutionReadiness = createEvolutionReadinessProvider(evolutionSourceDeps);
   // WP-D4 (JARVIS-033/036/078): AI Mesh-status (`executive.get_ai_mesh_status`) - leverandørhelse i prosessen + cost_events siste 7 døgn. Kun lesing; gjør aldri et modellkall.
   const aiMeshReports = createAiMeshReportProvider({
     pool,
@@ -772,6 +775,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     authority: ownerAuthority, killSwitch, infraGate,
     ...(policyAuditSink ? { policyAudit: () => ({ gateway: policy.auditStats(), sink: policyAuditSink.stats() }) } : {}),
     modelGateway: gateway, runRate: new RunRateService(pool), councilLimiter: councilAutoLimiter, evolutionReport: evolutionReports, maxActiveJobs: MAX_ACTIVE_JOBS,
+    // WP-B3 (D-475, EV-22): Evolusjon-senteret (kun med JARVIS_CONTROL_CENTER_EVOLUTION=on) leser samme rapport + beredskap + oppstartssjekk, bundet til eierens tenant.
+    evolutionReadiness, ev0Status: () => getLastEv0BootStatus(), evolutionTenantId: owner.tenant_id,
     valueReport: (tenantId) => lateExecutive().getValueReport(tenantId), infraStatus: (tenantId) => lateExecutive().getInfraStatus(tenantId),
     ...(backupStatusSource ? { backupStatus: backupStatusSource } : {}), processStartedAt: () => processStartedAt,
     ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {})

@@ -203,7 +203,9 @@ export const CONTROL_CENTER_FLAGS = {
   operations: "JARVIS_CONTROL_CENTER_OPERATIONS",
   value: "JARVIS_CONTROL_CENTER_VALUE",
   privacy: "JARVIS_CONTROL_CENTER_PRIVACY",
-  security: "JARVIS_CONTROL_CENTER_SECURITY"
+  security: "JARVIS_CONTROL_CENTER_SECURITY",
+  // WP-B3 (D-475, EV-22): tilleggssenteret Evolusjon (utenfor masterplanens ti) - samme regler som de andre: AV som standard, kun eksakt «on», og må stå i `SERVICE_ENV.api`.
+  evolution: "JARVIS_CONTROL_CENTER_EVOLUTION"
 } as const;
 
 /**

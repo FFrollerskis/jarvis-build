@@ -60,15 +60,18 @@ function withRegistry(options: Parameters<typeof executiveToolDefinitions>[1] = 
 
 describe("tabellen: syv verktøy, de fire nye bakerst", () => {
   it("rekkefølge og navn er stabile (legg til, aldri omdøp), og hvert verktøy er knyttet til sitt eget senter", () => {
-    expect(CONTROL_CENTER_READ_TOOLS.map((t) => t.action)).toEqual(["get_finance_center", "get_memory_center", "get_agent_center", ...H2_ACTIONS]);
-    expect(CONTROL_CENTER_READ_TOOLS.slice(3).map((t) => t.center)).toEqual(["operations", "value", "privacy", "security"]);
+    // WP-B3 (D-475) la til `get_evolution_center` (tilleggssenter) sist; de syv første er uendret.
+    expect(CONTROL_CENTER_READ_TOOLS.map((t) => t.action)).toEqual(["get_finance_center", "get_memory_center", "get_agent_center", ...H2_ACTIONS, "get_evolution_center"]);
+    expect(CONTROL_CENTER_READ_TOOLS.slice(3, 7).map((t) => t.center)).toEqual(["operations", "value", "privacy", "security"]);
     for (const a of H2_ACTIONS) expect(controlCenterForReadAction(a)).toBe(a.replace(/^get_/, "").replace(/_center$/, ""));
-    expect(CONTROL_CENTER_READ_ACTIONS.size).toBe(7);
+    expect(controlCenterForReadAction("get_evolution_center")).toBe("evolution");
+    expect(CONTROL_CENTER_READ_ACTIONS.size).toBe(8);
   });
 
   it("alle ti sentre er nå dekket: H0-sentrene (integration, authority, ai) har ikke et eget verktøy, de syv andre har", () => {
     const covered = new Set<ControlCenterId>(CONTROL_CENTER_READ_TOOLS.map((t) => t.center));
-    expect([...covered].sort()).toEqual(["agent", "finance", "memory", "operations", "privacy", "security", "value"]);
+    // + tilleggssenteret Evolusjon (D-475), som ikke teller blant masterplanens ti
+    expect([...covered].sort()).toEqual(["agent", "evolution", "finance", "memory", "operations", "privacy", "security", "value"]);
   });
 
   it("beskrivelsene for de nye sier kun lesing, eier + signert enhet, ukjent er ukjent - og nevner det de ikke måler", () => {

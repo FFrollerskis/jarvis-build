@@ -230,7 +230,9 @@ describe("flagg: AV som standard, kun «on» slår et senter på", () => {
   it("flaggnavnene er stabile og dokumentert i `.env.example`", () => {
     expect(CONTROL_CENTER_FLAGS).toEqual({
       finance: "JARVIS_CONTROL_CENTER_FINANCE", memory: "JARVIS_CONTROL_CENTER_MEMORY", agent: "JARVIS_CONTROL_CENTER_AGENT",
-      operations: "JARVIS_CONTROL_CENTER_OPERATIONS", value: "JARVIS_CONTROL_CENTER_VALUE", privacy: "JARVIS_CONTROL_CENTER_PRIVACY", security: "JARVIS_CONTROL_CENTER_SECURITY"
+      operations: "JARVIS_CONTROL_CENTER_OPERATIONS", value: "JARVIS_CONTROL_CENTER_VALUE", privacy: "JARVIS_CONTROL_CENTER_PRIVACY", security: "JARVIS_CONTROL_CENTER_SECURITY",
+      // WP-B3 (D-475): tilleggssenteret Evolusjon
+      evolution: "JARVIS_CONTROL_CENTER_EVOLUTION"
     });
     expect(CONTROL_FEATURE_FLAGS).toEqual({ goldenSuite: "JARVIS_CONTROL_GOLDEN_SUITE", autonomyRevoke: "JARVIS_CONTROL_AUTONOMY_REVOKE" });
     const envExample = readFileSync(fileURLToPath(new URL("../../../.env.example", import.meta.url)), "utf8");

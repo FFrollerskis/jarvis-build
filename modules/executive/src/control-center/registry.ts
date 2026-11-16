@@ -3,7 +3,7 @@ import {
   composeControlCenterOverview, composeControlCenterReport, explainControlCenterNo, failureCategory, summarizeControlCenter, unknownCenterReport
 } from "./report.ts";
 import {
-  CONTROL_CENTER_IDS, isControlCenterId,
+  ALL_CONTROL_CENTER_IDS, isControlCenterId,
   type ControlAction, type ControlCenterBuildOptions, type ControlCenterDefinition, type ControlCenterId, type ControlCenterOverview, type ControlCenterParts, type ControlCenterReport, type ControlSection
 } from "./types.ts";
 
@@ -170,9 +170,9 @@ export class ControlCenterRegistry {
     this.centers.set(center.id, center);
   }
 
-  /** De registrerte sentrene i masterplanens rekkefølge. */
+  /** De registrerte sentrene i masterplanens rekkefølge (tilleggssentre, D-475, sist). */
   list(): RegisteredControlCenter[] {
-    return CONTROL_CENTER_IDS.filter((id) => this.centers.has(id)).map((id) => {
+    return ALL_CONTROL_CENTER_IDS.filter((id) => this.centers.has(id)).map((id) => {
       const c = this.centers.get(id) as ControlCenterDefinition;
       return { id, title_no: c.title_no, description_no: c.description_no };
     });

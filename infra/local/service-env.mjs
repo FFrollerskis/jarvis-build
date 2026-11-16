@@ -371,7 +371,9 @@ export const SERVICE_ENV = {
     // Uten disse linjene når en verdi i `.env` aldri containeren (compose sender kun det manifestet lister) - flaggene ville vært stille virkningsløse.
     "JARVIS_CONTROL_CENTER_FINANCE", "JARVIS_CONTROL_CENTER_MEMORY", "JARVIS_CONTROL_CENTER_AGENT", "JARVIS_GOVERNANCE_PROVENANCE",
     // WP-H2 (UA-11): kontrollsentrene Drift/Verdi/Personvern/Sikkerhet og de to enkeltfunksjonene golden-suite-knappen og tilbakekall av autonomi-binding. Alle AV som standard (kun eksakt «on»), api-only, ingen hemmeligheter.
-    "JARVIS_CONTROL_CENTER_OPERATIONS", "JARVIS_CONTROL_CENTER_VALUE", "JARVIS_CONTROL_CENTER_PRIVACY", "JARVIS_CONTROL_CENTER_SECURITY", "JARVIS_CONTROL_GOLDEN_SUITE", "JARVIS_CONTROL_AUTONOMY_REVOKE"],
+    "JARVIS_CONTROL_CENTER_OPERATIONS", "JARVIS_CONTROL_CENTER_VALUE", "JARVIS_CONTROL_CENTER_PRIVACY", "JARVIS_CONTROL_CENTER_SECURITY", "JARVIS_CONTROL_GOLDEN_SUITE", "JARVIS_CONTROL_AUTONOMY_REVOKE",
+    // WP-B3 (D-475, EV-22/EV-23): tilleggssenteret Evolusjon (AV som standard; kun eksakt «on», api-only, ingen hemmeligheter).
+    "JARVIS_CONTROL_CENTER_EVOLUTION"],
   worker: [...CORE_ENV.filter((n) => !WORKER_EXCLUDES.has(n)), ...MODEL_ENV, ...WORKER_CONNECTOR_ENV, "LANGFUSE_BASE_URL", "JARVIS_TRACE_FILE", "JARVIS_CLAUDE_BIN", "JARVIS_JOB_RUNNER", "JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY",
     // WP-C1 (D-32 / Q-45a): vertsside job-runner (JARVIS_JOB_RUNNER=host). Socket-katalogen og tokenfilen monteres inn via infra/job-runner/docker-compose.job-runner.yml
     // (valgfri override) - uten den, og med tomme verdier her, feiler hver kodejobb lukket som før.

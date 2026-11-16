@@ -119,6 +119,8 @@ const EFFECT_OVERRIDES: Record<string, Effect> = {
   [k("executive", "get_value_center")]: "read",
   [k("executive", "get_privacy_center")]: "read",
   [k("executive", "get_security_center")]: "read",
+  // WP-B3 (D-475, EV-22): Evolusjon-senteret er et tilleggssenter (utenfor masterplanens ti) - ren lesing.
+  [k("executive", "get_evolution_center")]: "read",
   // WP-H2: golden-suite-knappen er en deterministisk selvtest (ingen modell, database eller skriving) - effekt «read», klasse A. Står på ingen modellflate (kun kontrollsenterets knapp via /executive/mutate).
   [k("executive", "run_golden_suite")]: "read",
   [k("executive", "get_value_report")]: "read",
@@ -165,6 +167,9 @@ const SENSITIVITY_OVERRIDES: Record<string, Sensitivity> = {
   [k("executive", "get_value_center")]: "restricted",
   [k("executive", "get_privacy_center")]: "private",
   [k("executive", "get_security_center")]: "private",
+  // WP-B3 (D-475): Evolusjon-senteret inneholder kostmodellen (EV-16: månedsforbruk, grenser og prognose i øre) - strengeste regel inntil eieren har svart (Q-64): `restricted`, utvalgslåst lokalt og holdt tilbake fra skymodeller
+  // ved utførelse (som Verdi-senteret).
+  [k("executive", "get_evolution_center")]: "restricted",
   // Gjennomgang av PR #324 (L4): driftsstatus har hendelsestitler med repo/gren, jobbnavn og skymål-tilstand - eierens driftsbilde, aldri «public» (og strømmer til modellen som betjener turen).
   [k("executive", "get_infra_status")]: "private"
 };
@@ -214,7 +219,9 @@ const VOICE_EXCLUDED_KEYS: ReadonlySet<string> = new Set([
   k("executive", "get_control_center"), k("executive", "get_infra_status"),
   // WP-H1/H2: per-senter lese-verktøy for kontrollsentrene - samme eier-flate med enhetssignatur som get_control_center (L-4).
   k("executive", "get_finance_center"), k("executive", "get_memory_center"), k("executive", "get_agent_center"),
-  k("executive", "get_operations_center"), k("executive", "get_value_center"), k("executive", "get_privacy_center"), k("executive", "get_security_center")
+  k("executive", "get_operations_center"), k("executive", "get_value_center"), k("executive", "get_privacy_center"), k("executive", "get_security_center"),
+  // WP-B3 (D-475): tilleggssenteret Evolusjon - samme eier-flate med enhetssignatur.
+  k("executive", "get_evolution_center")
 ]);
 /** D-382: tale er ubetrodd inndata (STT) - lese-nivået uten finans (og uten kontrollsentrene, L-4); aldri handlingsnivået. */
 const VOICE_READ_TIER = CHAT_READ_TIER.filter((g) => !/^finance/.test(g.tool_id) && !VOICE_EXCLUDED_KEYS.has(k(g.tool_id, g.action)));

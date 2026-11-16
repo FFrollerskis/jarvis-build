@@ -25,7 +25,7 @@ import {
   type CardService, type FinanceService
 } from "@jarvis/finance";
 import { ProductUsageError, UsageImportError, USAGE_LIMITS, USAGE_WEBHOOK_SIGNATURE_HEADER, type ProductUsageService } from "@jarvis/business";
-import { isControlCenterId } from "@jarvis/executive";
+import { CONTROL_CENTER_READ_TOOLS, isControlCenterId, isExtensionControlCenterId } from "@jarvis/executive";
 import type { ConversationEngine } from "./conversation.ts";
 import { FINANCE_ACTION_ROUTE_ACTIONS, moneyActionParameters, parseFinanceActionRequest, previewFinanceAction, readReconciliationStatus } from "./finance-actions.ts";
 import { submittedContractHasReservedKey, type ChatJobs } from "./chat-jobs.ts";
@@ -425,6 +425,17 @@ export const EXECUTIVE_MUTATE_ACTIONS = [
  * baseline fra ren main i `wph2-flag-off-main-parity.test.ts`. Kun CONTROL_ACTION_ALLOWED (knappenes tillatelsestabell) kjenner alle 15 navnene.
  */
 export const EXECUTIVE_MUTATE_FLAGGED_ACTIONS = ["revoke_autonomy_binding", "run_golden_suite"] as const;
+
+/**
+ * D-475: er `center` et kjent valg for `/control/center`? Masterplanens ti alltid; et TILLEGGSSENTER (Evolusjon) kun når lese-verktøyet er registrert i gatewayen (flagget på og senteret koblet). Med flagget AV er «evolution» et ukjent senter og
+ * ruten svarer NØYAKTIG som main svarer på ethvert ukjent navn (400 `unknown_center`, FØR grantet løses). En gateway uten `get` (testdobler) registrerer ingen tilleggssentre (fail-closed).
+ */
+function controlCenterKnown(center: string, gateway: Pick<ToolGateway, "get">): boolean {
+  if (!isControlCenterId(center)) return false;
+  if (!isExtensionControlCenterId(center)) return true;
+  const tool = CONTROL_CENTER_READ_TOOLS.find((t) => t.center === center);
+  return tool !== undefined && typeof gateway.get === "function" && gateway.get("executive", tool.action) !== undefined;
+}
 
 /** Er handlingen kjent for `/executive/mutate`? Main sin 13, pluss de flaggstyrte kun når verktøyet er registrert. En gateway uten `get` (testdobler) registrerer ingen av de flaggstyrte (fail-closed). */
 function executiveMutateActionKnown(action: string, gateway: Pick<ToolGateway, "get">): boolean {
@@ -1127,7 +1138,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       if (typeof center !== "string") {
         return json(res, 400, { error: "malformed_request", reason: "center_required", request_id: requestIdOf(res) });
       }
-      if (!isControlCenterId(center)) {
+      if (!controlCenterKnown(center, deps.executive.gateway)) {
         return json(res, 400, { error: "malformed_request", reason: "unknown_center", request_id: requestIdOf(res) });
       }
       parameters = { center };

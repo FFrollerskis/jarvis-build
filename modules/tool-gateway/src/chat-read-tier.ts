@@ -78,6 +78,8 @@ export const CHAT_READ_TIER: ReadonlyArray<{ readonly tool_id: string; readonly 
   { tool_id: "executive", action: "get_value_center" },
   { tool_id: "executive", action: "get_privacy_center" },
   { tool_id: "executive", action: "get_security_center" },
+  // WP-B3 (D-475, EV-22): tilleggssenteret Evolusjon - samme mønster (valgfritt: registreres kun med JARVIS_CONTROL_CENTER_EVOLUTION=on, `OPTIONAL_TIER_KEYS`), `restricted` og holdt tilbake fra skymodeller ved utførelse.
+  { tool_id: "executive", action: "get_evolution_center" },
   { tool_id: "executive", action: "get_control_surface_status" },
   { tool_id: "executive", action: "get_delegation_board" },
   { tool_id: "executive", action: "get_self_diagnosis" },
@@ -229,7 +231,8 @@ export const CHAT_READ_TIER: ReadonlyArray<{ readonly tool_id: string; readonly 
  */
 export const OPTIONAL_TIER_KEYS: ReadonlySet<string> = new Set([
   "executive.get_finance_center", "executive.get_memory_center", "executive.get_agent_center",
-  "executive.get_operations_center", "executive.get_value_center", "executive.get_privacy_center", "executive.get_security_center"
+  "executive.get_operations_center", "executive.get_value_center", "executive.get_privacy_center", "executive.get_security_center",
+  "executive.get_evolution_center"
 ]);
 
 /** `tool_id.action`-nøkler for rask oppslag. */
