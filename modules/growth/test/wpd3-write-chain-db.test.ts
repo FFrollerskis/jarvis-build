@@ -619,6 +619,15 @@ describe("J: review H1 - en transportfeil ETTER at en mutasjon er sendt er UKJEN
   });
 });
 
+
+const commandStatus = async (id: string) => ((await adminPool.query(`SELECT status, execution_write_id FROM marketing_campaign_execution_commands WHERE command_id = $1`, [id])).rows[0]) as { status: string; execution_write_id: string | null };
+/** En eier-godkjent `reduce_budget`-anbefaling og kommandoen den ga (budsjett `current` -> `proposed` øre) på den koblede kampanjen. */
+async function seedCommand(id: string, current: number, proposed: number): Promise<void> {
+  await adminPool.query(`INSERT INTO marketing_campaign_action_recommendations (recommendation_id, tenant_id, memory_space_id, campaign_id, recommendation_type, status, rationale, evidence, detection_key)
+    VALUES ('rec-${id}','${A}','business','${linkedCampaignId}','reduce_budget','accepted','test','{}'::jsonb,'det-${id}')`);
+  await adminPool.query(`INSERT INTO marketing_campaign_execution_commands (command_id, tenant_id, memory_space_id, campaign_id, recommendation_id, command_type, current_budget_ore, proposed_budget_ore, reduction_fraction, currency)
+    VALUES ('${id}','${A}','business','${linkedCampaignId}','rec-${id}','reduce_budget',${current},${proposed},0.2,'NOK')`);
+}
 describe("K: review M1 - idempotensnøkkelen kan ikke gjenbrukes på tvers av verktøy (aldri en falsk `applied`)", () => {
   const anySchema = { safeParse: (v: unknown) => ({ success: true, data: v as Record<string, never> }) } as unknown as ToolDefinition["input_schema"];
   const foreignTool: ToolDefinition = {
@@ -626,13 +635,6 @@ describe("K: review M1 - idempotensnøkkelen kan ikke gjenbrukes på tvers av ve
     idempotent_external: true, timeout_ms: 5_000, rate_limit_per_minute: 10_000, credential_ref: "JARVIS_GOOGLE_ADS_REFRESH_TOKEN", output_trust: "internal",
     transport: { invoke: async () => ({ external_id: "foreign-ext-1" }) }
   };
-  const commandStatus = async (id: string) => ((await adminPool.query(`SELECT status, execution_write_id FROM marketing_campaign_execution_commands WHERE command_id = $1`, [id])).rows[0]) as { status: string; execution_write_id: string | null };
-  async function seedCommand(id: string, current: number, proposed: number): Promise<void> {
-    await adminPool.query(`INSERT INTO marketing_campaign_action_recommendations (recommendation_id, tenant_id, memory_space_id, campaign_id, recommendation_type, status, rationale, evidence, detection_key)
-      VALUES ('rec-${id}','${A}','business','${linkedCampaignId}','reduce_budget','accepted','test','{}'::jsonb,'det-${id}')`);
-    await adminPool.query(`INSERT INTO marketing_campaign_execution_commands (command_id, tenant_id, memory_space_id, campaign_id, recommendation_id, command_type, current_budget_ore, proposed_budget_ore, reduction_fraction, currency)
-      VALUES ('${id}','${A}','business','${linkedCampaignId}','rec-${id}','reduce_budget',${current},${proposed},0.2,'NOK')`);
-  }
 
   it("en nøkkel en ANNEN tool har brukt: vekstskrivingen nektes FØR noe sendes - ingen mutasjon, ingen fremmed external_id, kommandoen urørt", async () => {
     gateway.register(foreignTool);
@@ -808,5 +810,41 @@ describe("N: review M5 - eierens frys av lese-connectoren (og av growth_*-id-en)
     expect((await g("pause_campaign", { campaign_id: "101" })).reason).toBe("connector_frozen");
     expect(yt.requests).toHaveLength(0);
     expect(gbp.requests).toHaveLength(0);
+  });
+});
+
+describe("O: review M6 - en kommando kan aldri HEVE det levende budsjettet", () => {
+  it("levende budsjett senket ETTER at kommandoen (50000 -> 40000) ble laget: utførelse avvises `precondition_changed` UTEN mutasjon; kommandoen forblir ventende, journalen er `failed`", async () => {
+    await seedCommand("cmd-d3-m6a", 50_000, 40_000);
+    gads.budgets.get("11")!.micros = 300_000_000; // senket til 30000 øre av eieren etter at kommandoen ble generert
+    const res = await g("set_campaign_budget", { campaign_id: "101", amount_ore: 40_000 }, { command_id: "cmd-d3-m6a" });
+    expect(res.outcome).toBe("FAILED");
+    expect(res.reason).toBe("preflight_invalid:precondition_changed");
+    expect(res.write.status).toBe("failed");
+    expect(res.command_status).toBeNull();
+    expect(gMut()).toHaveLength(0);
+    expect(gads.budgets.get("11")?.micros).toBe(300_000_000); // ikke HEVET til 40000 øre
+    expect(await commandStatus("cmd-d3-m6a")).toEqual({ status: "pending_execution", execution_write_id: null });
+  });
+
+  it("også et levende budsjett som er HEVET siden kommandoen ble laget avvises (enhver drift, ikke bare nedover) - ingen mutasjon", async () => {
+    await seedCommand("cmd-d3-m6b", 50_000, 40_000);
+    gads.budgets.get("11")!.micros = 600_000_000;
+    const res = await g("set_campaign_budget", { campaign_id: "101", amount_ore: 40_000 }, { command_id: "cmd-d3-m6b" });
+    expect(res.reason).toBe("preflight_invalid:precondition_changed");
+    expect(gMut()).toHaveLength(0);
+    expect(gads.budgets.get("11")?.micros).toBe(600_000_000);
+  });
+
+  it("en kaller-oppgitt forventet nåverdi som ikke er kommandoens avvises FØR noe sendes; den riktige (eller ingen) gir utførelse mot kommandoens nåverdi", async () => {
+    await seedCommand("cmd-d3-m6c", 50_000, 40_000);
+    await expect(g("set_campaign_budget", { campaign_id: "101", amount_ore: 40_000, expected_amount_ore: 12_345 }, { command_id: "cmd-d3-m6c" })).rejects.toThrow("growth_command_expected_mismatch");
+    expect(gads.requests).toHaveLength(0);
+    const ok = await g("set_campaign_budget", { campaign_id: "101", amount_ore: 40_000, expected_amount_ore: 50_000 }, { command_id: "cmd-d3-m6c" });
+    expect(ok.outcome).toBe("SUCCESS");
+    expect(ok.command_status).toBe("executed");
+    expect(gads.budgets.get("11")?.micros).toBe(400_000_000);
+    // forespørselens parametere er de EFFEKTIVE (forventet nåverdi er tvunget): samme nøkkel med de samme kallerparameterne er en ekte replay
+    expect((await commandStatus("cmd-d3-m6c")).status).toBe("executed");
   });
 });

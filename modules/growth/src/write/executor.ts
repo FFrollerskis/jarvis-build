@@ -50,11 +50,16 @@ export interface ExecuteGrowthWriteResult {
   command_status: "executed" | "execution_unknown" | null;
 }
 
-/** Budsjett-parameteren i handlinger som kan binde en `reduce_budget`-kommando (kampanjenivå). Andre handlinger kan ikke binde en kommando. */
-export const COMMAND_BUDGET_PARAM: Readonly<Record<string, string>> = {
-  "google_ads.set_campaign_budget": "amount_ore",
-  "linkedin.set_campaign_daily_budget": "daily_budget_ore",
-  "tiktok.set_campaign_budget": "budget_ore"
+/**
+ * Budsjett-parameteren (`amount`) og den tilhørende forventet-nåverdi-parameteren (`expected`) i handlinger som kan binde en `reduce_budget`-kommando (kampanjenivå). Andre handlinger kan ikke binde en kommando.
+ * Review M6: en kommando er en REDUKSJON beregnet mot budsjettet Jarvis kjente da den ble laget (`current_budget_ore`). Utførelsen tvinger derfor `expected` = kommandoens `current_budget_ore`: har det levende
+ * budsjettet flyttet seg siden (manuelt senket, hevet eller endret), avviser gatewayens preflight OG transporten med `precondition_changed` - uten mutasjon. Sammen med databasens `proposed < current` betyr det
+ * at en kommando aldri kan HEVE det levende budsjettet.
+ */
+export const COMMAND_BUDGET_PARAM: Readonly<Record<string, { amount: string; expected: string }>> = {
+  "google_ads.set_campaign_budget": { amount: "amount_ore", expected: "expected_amount_ore" },
+  "linkedin.set_campaign_daily_budget": { amount: "daily_budget_ore", expected: "expected_daily_budget_ore" },
+  "tiktok.set_campaign_budget": { amount: "budget_ore", expected: "expected_budget_ore" }
 };
 const CAMPAIGN_CHANNELS: ReadonlySet<string> = new Set(["google_ads", "meta_ads", "linkedin", "tiktok"]);
 const KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$/;
@@ -85,13 +90,14 @@ export async function executeGrowthWrite(deps: GrowthWriteExecutorDeps, identity
   const space = identity.memory_space_id as MemorySpace;
   const provider = entry.spec.provider as GrowthProvider;
   const target = entry.op.target?.(input.parameters) ?? `${provider}:${input.action}`;
-  const digest = writeRequestDigest(provider, input.action, input.parameters);
 
-  // Kampanje-kobling (kun når kampanjen finnes i Growth-registeret) og kommando-binding FØR noe sendes.
+  // Kampanje-kobling (kun når kampanjen finnes i Growth-registeret) og kommando-binding FØR noe sendes. Review M6: bindingen gir de EFFEKTIVE parameterne (med forventet nåverdi tvunget til kommandoens
+  // `current_budget_ore`) - det er DEM gatewayen får og som journalens digest dekker.
   const externalCampaignId = typeof input.parameters["campaign_id"] === "string" ? (input.parameters["campaign_id"] as string) : null;
   const campaign = externalCampaignId !== null && CAMPAIGN_CHANNELS.has(provider) && deps.findCampaign ? await deps.findCampaign(tenantId, space, provider as CampaignChannel, externalCampaignId) : null;
-  if (input.command_id !== undefined) await assertCommandBinding(deps.pool, tenantId, space, input, provider, campaign?.campaign_id ?? null);
+  const parameters: Params = input.command_id !== undefined ? await bindCommand(deps.pool, tenantId, space, input, provider, campaign?.campaign_id ?? null) : input.parameters;
 
+  const digest = writeRequestDigest(provider, input.action, parameters);
   const begun = await deps.journal.begin(tenantId, space, {
     provider, action: input.action, risk_class: entry.op.risk as "C" | "D", spend_effect: spendEffect(entry.op), target_ref: target, idempotency_key: input.idempotency_key, request_digest: digest,
     actor_person_id: identity.person_id, source: input.source ?? "owner_route", campaign_id: campaign?.campaign_id ?? null, experiment_id: input.experiment_id ?? null, variant_id: input.variant_id ?? null,
@@ -115,7 +121,7 @@ export async function executeGrowthWrite(deps: GrowthWriteExecutorDeps, identity
   if (prior !== null && (begun.created || !belongsToUs(prior))) return collide();
 
   const result = await deps.gateway.execute({
-    identity, tool_id: toolId, action: input.action, parameters: input.parameters, idempotency_key: input.idempotency_key,
+    identity, tool_id: toolId, action: input.action, parameters, idempotency_key: input.idempotency_key,
     ...(input.task_id !== undefined ? { task_id: input.task_id } : {}), ...(input.trace_id !== undefined ? { trace_id: input.trace_id } : {})
   });
   const seen = await readLedger(deps.pool, tenantId, input.idempotency_key);
@@ -150,17 +156,26 @@ export async function executeGrowthWrite(deps: GrowthWriteExecutorDeps, identity
   return { write, outcome, reason, replayed: !begun.created, command_status: commandStatus };
 }
 
-async function assertCommandBinding(pool: pg.Pool, tenantId: string, space: MemorySpace, input: ExecuteGrowthWriteInput, provider: string, campaignId: string | null): Promise<void> {
-  const param = COMMAND_BUDGET_PARAM[`${provider}.${input.action}`];
-  if (param === undefined) throw new Error("growth_command_binding_unsupported_action");
+/**
+ * Binder en `reduce_budget`-kommando til denne skrivingen FØR noe sendes. Avviser alt som ikke er akkurat kommandoens: ukjent kommando, annen kampanje, ikke lenger ventende, beløp som ikke er kommandoens
+ * `proposed_budget_ore`, en kommando som ikke er en reduksjon (databasen krever det også), og en kaller-oppgitt forventet nåverdi som ikke er kommandoens `current_budget_ore`. Returnerer de EFFEKTIVE
+ * parameterne: kallerens parametere med forventet nåverdi tvunget til `current_budget_ore` (review M6) - utførelsen kan da aldri HEVE et budsjett som er flyttet siden kommandoen ble laget.
+ */
+async function bindCommand(pool: pg.Pool, tenantId: string, space: MemorySpace, input: ExecuteGrowthWriteInput, provider: string, campaignId: string | null): Promise<Params> {
+  const binding = COMMAND_BUDGET_PARAM[`${provider}.${input.action}`];
+  if (binding === undefined) throw new Error("growth_command_binding_unsupported_action");
   if (campaignId === null) throw new Error("growth_command_binding_campaign_not_linked");
-  await withMemoryTransaction(pool, tenantId, [space], async (client) => {
-    const { rows } = await client.query(`SELECT status, campaign_id, proposed_budget_ore FROM marketing_campaign_execution_commands WHERE tenant_id = $1 AND command_id = $2`, [tenantId, input.command_id]);
-    const command = rows[0] as { status: string; campaign_id: string; proposed_budget_ore: string } | undefined;
+  return withMemoryTransaction(pool, tenantId, [space], async (client) => {
+    const { rows } = await client.query(`SELECT status, campaign_id, current_budget_ore, proposed_budget_ore FROM marketing_campaign_execution_commands WHERE tenant_id = $1 AND command_id = $2`, [tenantId, input.command_id]);
+    const command = rows[0] as { status: string; campaign_id: string; current_budget_ore: string; proposed_budget_ore: string } | undefined;
     if (!command) throw new Error("growth_command_not_found");
     if (command.campaign_id !== campaignId) throw new Error("growth_command_campaign_mismatch");
     if (command.status !== "pending_execution") throw new Error(`growth_command_not_pending:${command.status}`);
-    if (String(input.parameters[param]) !== String(command.proposed_budget_ore)) throw new Error("growth_command_amount_mismatch");
+    if (!(BigInt(command.proposed_budget_ore) < BigInt(command.current_budget_ore))) throw new Error("growth_command_not_a_reduction");
+    if (String(input.parameters[binding.amount]) !== String(command.proposed_budget_ore)) throw new Error("growth_command_amount_mismatch");
+    const given = input.parameters[binding.expected];
+    if (given !== undefined && String(given) !== String(command.current_budget_ore)) throw new Error("growth_command_expected_mismatch");
+    return { ...input.parameters, [binding.expected]: Number(command.current_budget_ore) };
   });
 }
 

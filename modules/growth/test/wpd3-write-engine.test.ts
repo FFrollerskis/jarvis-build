@@ -13,7 +13,7 @@ import {
   type GrowthProvider
 } from "../src/write/index.ts";
 import { GROWTH_EXPERIMENT_TOOL_ACTIONS } from "../src/experiments/index.ts";
-import { timelineProjection } from "../src/write/executor.ts";
+import { COMMAND_BUDGET_PARAM, timelineProjection } from "../src/write/executor.ts";
 import { youtubeSnippetBody, youtubeStatusBody } from "../src/write/youtube-write.ts";
 import { replyDigest } from "../src/write/gbp-write.ts";
 import { GrowthVendorError, VendorHttp, classifyVendorError } from "../src/write/http.ts";
@@ -140,6 +140,20 @@ describe("B2: tidslinjeprojeksjonen (review M2) - kun id-er, statuser og tall", 
     expect(timelineProjection([1, 2] as never)).toEqual({});
     expect(timelineProjection("tekst" as never)).toEqual({});
     expect(timelineProjection({ currency: "nok" } as never)).toEqual({});
+  });
+});
+
+describe("B3: kommando-binding (review M6) - hver bindbare handling har både beløps- og forventet-nåverdi-parameter i skjemaet", () => {
+  it("COMMAND_BUDGET_PARAM peker på handlinger som finnes (skrivehandling, klasse D, pengeretning `directional`) og på begge parametrene i det strenge skjemaet", () => {
+    const index = growthOpIndex(specs);
+    expect(Object.keys(COMMAND_BUDGET_PARAM).sort()).toEqual(["google_ads.set_campaign_budget", "linkedin.set_campaign_daily_budget", "tiktok.set_campaign_budget"]);
+    for (const [key, binding] of Object.entries(COMMAND_BUDGET_PARAM)) {
+      const entry = index.get(key);
+      expect(entry, key).toBeDefined();
+      expect(entry!.op.risk, key).toBe("D");
+      expect(entry!.op.spend, key).toBe("directional");
+      expect(Object.keys(entry!.op.shape), key).toEqual(expect.arrayContaining([binding.amount, binding.expected]));
+    }
   });
 });
 
