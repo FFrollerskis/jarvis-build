@@ -7,7 +7,13 @@ import type { AddressInfo } from "node:net";
  * hva som faktisk ble sendt (metode, sti, spørring, topptekster, kropp) - og at INGENTING ble sendt når en port stoppet kallet FØR transporten.
  */
 export interface Recorded { method: string; path: string; query: URLSearchParams; headers: IncomingMessage["headers"]; body: Record<string, any>; raw: string }
-export interface Reply { status?: number; json?: unknown; text?: string }
+export interface Reply {
+  status?: number; json?: unknown; text?: string; headers?: Record<string, string>;
+  /** Etter at handleren har kjørt (tilstanden er endret): riv socketen UTEN å svare - leverandøren behandlet forespørselen, klienten ser en nullstilt forbindelse (WP-D3 review H1). */
+  destroySocket?: boolean;
+  /** Send statuslinje og topptekster + en DEL av kroppen, og riv så socketen (svaret ble avbrutt midt i kroppen). */
+  truncateBody?: string;
+}
 
 export class FakeVendor {
   readonly requests: Recorded[] = [];
@@ -29,8 +35,16 @@ export class FakeVendor {
           const rec: Recorded = { method: req.method ?? "GET", path: url.pathname, query: url.searchParams, headers: req.headers, body, raw };
           this.requests.push(rec);
           const reply = await this.handler(rec);
+          if (reply.destroySocket === true) { req.socket.destroy(); return; }
           res.statusCode = reply.status ?? 200;
           res.setHeader("content-type", "application/json");
+          for (const [name, value] of Object.entries(reply.headers ?? {})) res.setHeader(name, value);
+          if (reply.truncateBody !== undefined) {
+            // Lover mer enn vi sender (content-length), skriv en del og riv socketen: klienten får en avbrutt kropp.
+            res.setHeader("content-length", String(reply.truncateBody.length + 100));
+            res.write(reply.truncateBody, () => { setTimeout(() => req.socket.destroy(), 20); });
+            return;
+          }
           res.end(reply.text !== undefined ? reply.text : reply.json === undefined ? "" : JSON.stringify(reply.json));
         })();
       });
@@ -62,6 +76,10 @@ export class FakeGoogleAds extends FakeVendor {
   mutateStatus: number | undefined;
   /** Svar 200 med uleselig kropp på `:mutate`. */
   mutateGarbage = false;
+  /** WP-D3 review H1: leverandøren BEHANDLER mutasjonen (tilstanden endres) og river så socketen uten å svare. */
+  mutateDestroyAfterApply = false;
+  /** WP-D3 review H1/L4: leverandøren behandler mutasjonen og svarer en redirect (303/307) - «POST utført, resultatet ligger her». */
+  mutateRedirectAfterApply: number | undefined;
   private nextId = 9000;
 
   constructor() {
@@ -93,7 +111,10 @@ export class FakeGoogleAds extends FakeVendor {
     if (m[3] === "googleAds:search") return { json: { results: this.search(String(r.body["query"] ?? "")) } };
     if (this.mutateStatus !== undefined) return { status: this.mutateStatus, json: { error: { status: "UNAVAILABLE", message: "backend error" } } };
     if (this.mutateGarbage) return { status: 200, text: "<html>proxy ok</html>" };
-    return { json: this.mutate((m[3] ?? "").replace(":mutate", ""), (r.body["operations"] as Array<Record<string, any>>) ?? []) };
+    const applied = this.mutate((m[3] ?? "").replace(":mutate", ""), (r.body["operations"] as Array<Record<string, any>>) ?? []);
+    if (this.mutateDestroyAfterApply) return { destroySocket: true };
+    if (this.mutateRedirectAfterApply !== undefined) return { status: this.mutateRedirectAfterApply, headers: { location: "/elsewhere" }, json: {} };
+    return { json: applied };
   }
 
   private search(q: string): unknown[] {

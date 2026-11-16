@@ -111,7 +111,8 @@ afterAll(async () => {
 
 beforeEach(() => {
   gads.reset(); meta.reset(); gads.seed(); meta.seed();
-  gads.ignoreWrites = false; gads.mutateStatus = undefined; gads.mutateGarbage = false; meta.ignoreWrites = false; meta.mutateStatus = undefined; meta.currency = "NOK";
+  gads.ignoreWrites = false; gads.mutateStatus = undefined; gads.mutateGarbage = false; gads.mutateDestroyAfterApply = false; gads.mutateRedirectAfterApply = undefined;
+  meta.ignoreWrites = false; meta.mutateStatus = undefined; meta.currency = "NOK";
   state.killSwitch = false; state.notifierReady = true; notifications.length = 0;
 });
 
@@ -508,5 +509,88 @@ describe("I: slettehandling der objektet forsvinner (postcondition_target_absent
     expect(ytVideo).toBeNull();
     expect(yt.requests.filter((r) => r.method === "DELETE")).toHaveLength(1);
     expect(notifications.at(-1)).toMatchObject({ tool_id: "growth_youtube", action: "delete_video", outcome: "executed" });
+  });
+});
+
+describe("J: review H1 - en transportfeil ETTER at en mutasjon er sendt er UKJENT utfall (aldri terminal FAILED)", () => {
+  const ledgerRow = async (key: string) => (await adminPool.query(`SELECT status, postcondition_reason FROM tool_executions WHERE tenant_id = '${A}' AND idempotency_key = $1`, [key])).rows[0] as { status: string; postcondition_reason: string | null };
+
+  it("budsjett (klasse D): socketen rives ETTER at leverandøren endret budsjettet -> UKJENT, journalen er IKKE terminal, eieren varsles, replay sender aldri på nytt", async () => {
+    gads.mutateDestroyAfterApply = true;
+    const key = uniq("h1-budget");
+    const first = await g("set_campaign_budget", { campaign_id: "101", amount_ore: 40_000 }, { idempotency_key: key });
+    expect(gads.budgets.get("11")?.micros).toBe(400_000_000); // leverandøren BEHANDLET forespørselen
+    expect(first.outcome).toBe("UNKNOWN");
+    expect(first.reason).toBe("tool_failed:outcome_unknown:google_ads_transport_reset");
+    expect(first.write.status).toBe("outcome_unknown");
+    expect(await ledgerRow(key)).toMatchObject({ status: "unverified" });
+    expect(notifications.map((n) => n.outcome)).toEqual(["unknown"]);
+    expect(gMut()).toHaveLength(1);
+    gads.mutateDestroyAfterApply = false;
+    const replay = await g("set_campaign_budget", { campaign_id: "101", amount_ore: 40_000 }, { idempotency_key: key });
+    expect(replay.outcome).toBe("UNKNOWN");
+    expect(replay.write.write_id).toBe(first.write.write_id);
+    expect(gMut()).toHaveLength(1);
+    // IKKE terminal: en avstemming kan senere avklare raden (outcome_unknown -> applied); en `failed` rad kan aldri endres igjen
+    const reconciled = await journal.complete(A, "business", first.write.write_id, { status: "applied" });
+    expect(reconciled.status).toBe("applied");
+    const rejected = await g("set_campaign_budget", { campaign_id: "101", amount_ore: 40_000, expected_amount_ore: 12_345 });
+    expect(rejected.write.status).toBe("failed");
+    await expect(journal.complete(A, "business", rejected.write.write_id, { status: "applied" })).rejects.toThrow(/growth_write_journal_terminal_status/);
+  });
+
+  it("pause (klasse C): samme feil gir UKJENT utfall (ikke FAILED), og en NY nøkkel etter at eieren har sett leverandørens tilstand er en trygg NOOP", async () => {
+    gads.mutateDestroyAfterApply = true;
+    const key = uniq("h1-pause");
+    const first = await g("pause_campaign", { campaign_id: "101" }, { idempotency_key: key });
+    expect(gads.campaigns.get("101")?.status).toBe("PAUSED");
+    expect(first.outcome).toBe("UNKNOWN");
+    expect(first.write.status).toBe("outcome_unknown");
+    expect(first.reason).toMatch(/^tool_failed:outcome_unknown:google_ads_transport_/);
+    gads.mutateDestroyAfterApply = false;
+    expect((await g("pause_campaign", { campaign_id: "101" }, { idempotency_key: key })).outcome).toBe("UNKNOWN");
+    expect(gMut()).toHaveLength(1);
+    expect((await g("pause_campaign", { campaign_id: "101" })).outcome).toBe("NOOP");
+    expect(gMut()).toHaveLength(1);
+  });
+
+  it("opprett responsiv søkeannonse (klasse C): UKJENT utfall; leverandøren HAR annonsen, og et nytt forsøk (ny nøkkel) oppretter aldri en dobbel", async () => {
+    gads.mutateDestroyAfterApply = true;
+    const params = { ad_group_id: "201", final_url: "https://example.test/h1", headlines: ["H1 en", "H1 to", "H1 tre"], descriptions: ["H1 beskrivelse en", "H1 beskrivelse to"] };
+    const key = uniq("h1-rsa");
+    const first = await g("create_responsive_search_ad", params, { idempotency_key: key });
+    expect(first.outcome).toBe("UNKNOWN");
+    expect(first.write.status).toBe("outcome_unknown");
+    expect([...gads.ads.values()].filter((a) => a.headlines.includes("H1 en"))).toHaveLength(1);
+    gads.mutateDestroyAfterApply = false;
+    expect((await g("create_responsive_search_ad", params, { idempotency_key: key })).outcome).toBe("UNKNOWN");
+    expect(gMut()).toHaveLength(1);
+    expect((await g("create_responsive_search_ad", params)).outcome).toBe("NOOP");
+    expect([...gads.ads.values()].filter((a) => a.headlines.includes("H1 en"))).toHaveLength(1);
+  });
+
+  it("redirect (303/307) på en mutasjon: leverandøren svarte etter behandling -> UKJENT utfall, aldri terminal FAILED, aldri ny sending", async () => {
+    for (const status of [303, 307]) {
+      gads.reset(); gads.seed(); gads.mutateRedirectAfterApply = status;
+      const key = uniq(`h1-redirect-${status}`);
+      const first = await g("pause_campaign", { campaign_id: "101" }, { idempotency_key: key });
+      expect(first.outcome, String(status)).toBe("UNKNOWN");
+      expect(first.write.status, String(status)).toBe("outcome_unknown");
+      expect(first.reason, String(status)).toBe("tool_failed:outcome_unknown:google_ads_transport_redirect");
+      expect(gads.campaigns.get("101")?.status).toBe("PAUSED");
+      gads.mutateRedirectAfterApply = undefined;
+      expect((await g("pause_campaign", { campaign_id: "101" }, { idempotency_key: key })).outcome).toBe("UNKNOWN");
+      expect(gMut(), String(status)).toHaveLength(1);
+    }
+  });
+
+  it("en lesing som feiler midt i en skriving er ikke «ukjent»: bevist avslag (400) er FAILED og terminal, mens et avslag aldri berører leverandørens tilstand", async () => {
+    const original = gads.handler;
+    gads.handler = (r) => (gads.isMutation(r) ? { status: 400, json: { error: { status: "INVALID_ARGUMENT", message: "avvist" } } } : original(r));
+    const res = await g("pause_campaign", { campaign_id: "101" });
+    gads.handler = original;
+    expect(res.outcome).toBe("FAILED");
+    expect(res.write.status).toBe("failed");
+    expect(gads.campaigns.get("101")?.status).toBe("ENABLED");
   });
 });

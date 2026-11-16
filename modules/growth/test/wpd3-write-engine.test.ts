@@ -1,8 +1,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- testfalske leverandører og assertions leser dypt i ikke-typet JSON (forespørselskropper/leverandørsvar); typing av hver form ville bare duplisere leverandørenes skjema. */
+import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import {
-  FORBIDDEN_MODEL_TOOL_IDS, OWNER_ONLY_NAMESPACES, SURFACE_TOOL_GRANTS, assertManifestInvariants, assessClassDPipeline, buildToolManifest, isOutcomeUnknownMessage, type ToolDefinition, type ToolTransport
+  FORBIDDEN_MODEL_TOOL_IDS, OWNER_ONLY_NAMESPACES, SURFACE_TOOL_GRANTS, adoptCallSignal, assertManifestInvariants, assessClassDPipeline, buildToolManifest, isOutcomeUnknownMessage, type ToolDefinition, type ToolTransport
 } from "@jarvis/tool-gateway";
 import {
   GROWTH_WRITE_PROVIDERS, GROWTH_WRITE_TOOL_IDS, Ga4WriteTransport, GbpWriteTransport, LinkedinWriteTransport, SearchConsoleWriteTransport, TiktokWriteTransport, YoutubeWriteTransport,
@@ -159,6 +160,74 @@ describe("C: HTTP-reglene (retry, ukjent utfall, redirects, hemmeligheter)", () 
     seq({ status: 404, json: {} });
     expect(await http().request({ method: "GET", path: "/x", allowNotFound: true })).toBeNull();
     await expect(http().request({ method: "GET", path: "/x" })).rejects.toBeInstanceOf(GrowthVendorError);
+  });
+
+  it("review H1: en transportfeil ETTER sending på en MUTASJON er UKJENT utfall (nullstilt socket, avbrutt kropp, 3xx) og sendes aldri på nytt; samme feil på en lesing er en vanlig feil", async () => {
+    // leverandøren behandlet forespørselen og rev socketen uten å svare
+    vendor.handler = () => ({ destroySocket: true });
+    const reset = (await http().request({ method: "POST", path: "/x", body: {}, mutation: true }).catch((e: Error) => e)) as Error;
+    expect(reset.message).toBe("outcome_unknown:t_transport_reset");
+    expect(vendor.requests).toHaveLength(1);
+    vendor.reset();
+    const readReset = (await http().request({ method: "GET", path: "/x" }).catch((e: Error) => e)) as Error;
+    expect(isOutcomeUnknownMessage(readReset.message)).toBe(false);
+    // 2xx-svar som ble avbrutt midt i kroppen: mutasjonen KAN være utført (ukjent); for lesing en vanlig feil
+    vendor.reset(); vendor.handler = () => ({ truncateBody: "{\"results\":[" });
+    const cut = (await http().request({ method: "POST", path: "/x", body: {}, mutation: true }).catch((e: Error) => e)) as Error;
+    expect(cut.message).toMatch(/^outcome_unknown:t_transport_/);
+    const cutRead = (await http().request({ method: "GET", path: "/x" }).catch((e: Error) => e)) as Error;
+    expect(cutRead).toBeInstanceOf(GrowthVendorError);
+    expect(cutRead.message).toBe("t_invalid_response:body_unreadable");
+    // 3xx: leverandøren SVARTE (redirect-statusene kastes av guardedFetch etter sending; øvrige 3xx er ikke-2xx uten å være et avslag)
+    for (const status of [300, 303, 307, 308]) {
+      vendor.reset(); vendor.handler = () => ({ status, headers: { location: "/elsewhere" }, json: {} });
+      const err = (await http().request({ method: "POST", path: "/x", body: {}, mutation: true }).catch((e: Error) => e)) as Error;
+      expect(err.message, String(status)).toMatch(/^outcome_unknown:t_(transport_redirect|http_300)$/);
+      expect(vendor.requests, String(status)).toHaveLength(1);
+    }
+    // et entydig avslag (4xx) beviser at mutasjonen IKKE ble behandlet: vanlig feil
+    vendor.reset(); vendor.handler = () => ({ status: 400, json: { error: { status: "INVALID_ARGUMENT", message: "nei" } } });
+    const rejected = (await http().request({ method: "POST", path: "/x", body: {}, mutation: true }).catch((e: Error) => e)) as Error;
+    expect(rejected).toBeInstanceOf(GrowthVendorError);
+    expect(isOutcomeUnknownMessage(rejected.message)).toBe(false);
+  });
+
+  it("review H1: feil som BEVISER at ingenting ble sendt (tilkobling nektet, ugyldig URL, forespørselen kunne ikke bygges) forblir vanlige feil - retry tillatt", async () => {
+    // en lukket, midlertidig port: ingen lytter => ECONNREFUSED før noen byte er sendt (port 1 er «bad port» i fetch og gir en feil uten kode)
+    const closed = createNetServer();
+    await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
+    const closedPort = (closed.address() as AddressInfo).port;
+    await new Promise<void>((resolve) => closed.close(() => resolve()));
+    const dead = new VendorHttp({ label: "t", baseUrl: `http://127.0.0.1:${closedPort}` });
+    const refused = (await dead.request({ method: "POST", path: "/x", body: {}, mutation: true }).catch((e: Error) => e)) as Error;
+    expect(isOutcomeUnknownMessage(refused.message)).toBe(false);
+    const badScheme = new VendorHttp({ label: "t", baseUrl: "ftp://example.test" });
+    const unsafe = (await badScheme.request({ method: "POST", path: "/x", body: {}, mutation: true }).catch((e: Error) => e)) as Error;
+    expect(unsafe.message).toMatch(/^unsafe_vendor_url:/);
+    vendor.reset();
+    const build = (await http().request({ method: "POST", path: "/x", body: { n: BigInt(1) }, mutation: true }).catch((e: Error) => e)) as Error;
+    expect(isOutcomeUnknownMessage(build.message)).toBe(false);
+    expect(vendor.requests).toHaveLength(0);
+  });
+
+  it("review L7: et avbrutt kall (gatewayens tidsavbrudd) sender ingen ny forespørsel og beholder `tool_timeout`-årsaken (ukjent utfall) - verken i sending eller i ventetiden mellom forsøk", async () => {
+    vendor.handler = () => new Promise(() => undefined); // leverandøren svarer aldri
+    const controller = new AbortController();
+    const pending = adoptCallSignal(controller.signal, () => http().request({ method: "POST", path: "/x", body: {}, mutation: true })).catch((e: Error) => e);
+    for (let i = 0; i < 100 && vendor.requests.length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(vendor.requests).toHaveLength(1);
+    controller.abort(new Error("tool_timeout"));
+    const err = (await pending) as Error;
+    expect(err.message).toBe("tool_timeout");
+    expect(isOutcomeUnknownMessage(err.message)).toBe(true);
+    expect(vendor.requests).toHaveLength(1);
+    // allerede avbrutt FØR sending: ingenting sendes i det hele tatt
+    vendor.reset();
+    const early = new AbortController();
+    early.abort(new Error("tool_timeout"));
+    const none = (await adoptCallSignal(early.signal, () => http().request({ method: "POST", path: "/x", body: {}, mutation: true })).catch((e: Error) => e)) as Error;
+    expect(none.message).toBe("tool_timeout");
+    expect(vendor.requests).toHaveLength(0);
   });
 
   it("følger ALDRI en redirect (verken GET eller mutasjon) - Authorization sendes aldri videre", async () => {
@@ -450,6 +519,32 @@ describe("E: forespørselsformer for de seks kompakte plattformene (falske lever
     const failed = await t.invoke("set_campaign_budget", { ...p, budget_ore: 40_000 }, "fake-tiktok-token-for-test", ctx).catch((e: Error) => e);
     expect((failed as Error).message).toContain("tiktok_error_40002");
     expect(isOutcomeUnknownMessage((failed as Error).message)).toBe(false);
+    await v.stop();
+  });
+
+  it("review H1/L4: TikTok - et 2xx-svar på en MUTASJON uten `code`-konvolutt er UKJENT utfall (ikke en vanlig feil); en LESING uten konvolutt er en vanlig feil", async () => {
+    const v = new FakeVendor(); await v.start();
+    const campaign = { campaign_id: "7001234567890", campaign_name: "TT", operation_status: "ENABLE", budget: 500, budget_mode: "BUDGET_MODE_DAY" };
+    let reply: { status?: number; json?: unknown; text?: string } | undefined;
+    v.handler = (r) => {
+      if (r.path === "/campaign/get/") return { json: { code: 0, message: "OK", data: { list: [campaign] } } };
+      if (r.path === "/advertiser/info/") return { json: { code: 0, message: "OK", data: { list: [{ currency: "NOK" }] } } };
+      if (r.path === "/campaign/status/update/") { campaign.operation_status = r.body["operation_status"]; return reply ?? { json: { code: 0, message: "OK", data: {} } }; }
+      return { json: { code: 40002, message: "param error" } };
+    };
+    const t = new TiktokWriteTransport({ ...killOpen, spec: specs.tiktok, baseUrl: v.baseUrl });
+    const p = { advertiser_id: "1234567890123", campaign_id: "7001234567890" };
+    for (const noEnvelope of [{ json: {} }, { json: { ok: true } }, { json: { message: "OK" } }, { text: "" }, { json: { code: "abc" } }]) {
+      reply = noEnvelope; campaign.operation_status = "ENABLE";
+      const err = (await t.invoke("pause_campaign", p, "fake-tiktok-token-for-test", ctx).catch((e: Error) => e)) as Error;
+      expect(isOutcomeUnknownMessage(err.message), JSON.stringify(noEnvelope)).toBe(true);
+      expect(err.message, JSON.stringify(noEnvelope)).toBe("outcome_unknown:tiktok_response_no_envelope");
+    }
+    // et entydig avslag (code != 0, ikke systemfeil) er fortsatt en vanlig feil
+    reply = { json: { code: 40002, message: "param error" } }; campaign.operation_status = "ENABLE";
+    const rejected = (await t.invoke("pause_campaign", p, "fake-tiktok-token-for-test", ctx).catch((e: Error) => e)) as Error;
+    expect(isOutcomeUnknownMessage(rejected.message)).toBe(false);
+    expect(rejected.message).toContain("tiktok_error_40002");
     await v.stop();
   });
 });

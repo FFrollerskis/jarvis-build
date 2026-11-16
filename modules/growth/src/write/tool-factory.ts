@@ -172,11 +172,15 @@ export abstract class GrowthWriteTransportBase implements ToolTransport {
     return result;
   }
 
-  /** Readback + etterbetingelse. Ett (1) ekstra forsøk etter en kort pause tåler at leverandørens lesing henger litt etter skrivingen; deretter er utfallet UKJENT (aldri «ok»). */
+  /**
+   * Readback + etterbetingelse. Ett (1) ekstra forsøk etter en kort pause tåler at leverandørens lesing henger litt etter skrivingen; deretter er utfallet UKJENT (aldri «ok»). Review H1: HELE verifiseringen kjører
+   * ETTER en akseptert mutasjon, så også en feil i etterbetingelsen eller nødbryter-proben (ikke bare selve lesingen) er «utfall ukjent» - aldri en vanlig feil som sier «mislyktes» om noe som ble utført.
+   */
   private async verifyAfter(op: OpSpec, stateAction: string, p: Params, auth: Auth, tenantId: string | undefined): Promise<boolean> {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const after = await afterAcceptedMutation(`${this.label}_readback_failed`, () => this.readState(stateAction, p, auth));
-      const ok = after === null ? op.absentIsDone === true : (op.post as (a: JsonValue, q: Params) => boolean)((await this.withKillSwitch(after, tenantId)) as JsonValue, p);
+      const ok = await afterAcceptedMutation(`${this.label}_verify_failed`, async () =>
+        after === null ? op.absentIsDone === true : (op.post as (a: JsonValue, q: Params) => boolean)((await this.withKillSwitch(after, tenantId)) as JsonValue, p));
       if (ok) return true;
       if (attempt === 0) await (this.deps.sleep ? this.deps.sleep(800) : abortableSleep(800));
     }

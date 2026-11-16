@@ -85,12 +85,16 @@ export class TiktokWriteTransport extends GrowthWriteTransportBase {
     return { headers: { "access-token": credential }, secrets: [credential] };
   }
 
-  /** Åpner `{code,message,data}`-konvolutten: `code != 0` er en feil selv med HTTP 200; systemfeil etter en mutasjon er UKJENT utfall. */
+  /**
+   * Åpner `{code,message,data}`-konvolutten: `code != 0` er en feil selv med HTTP 200; systemfeil etter en mutasjon er UKJENT utfall. Review H1/L4: et 2xx-svar på en MUTASJON uten tallet `code`
+   * (ingen konvolutt: en mellomtjeneste/feilside/uventet form) kan ikke tolkes og er UKJENT utfall - ikke en vanlig feil som inviterer til en ny skriving.
+   */
   private async call(req: { method: "GET" | "POST"; path: string; query?: Record<string, string>; body?: unknown; mutation?: boolean }, auth: Auth): Promise<Record<string, unknown>> {
     const res = await this.http.request({ ...req, headers: auth.headers, secrets: auth.secrets });
     const env = asObj(res?.json);
     const code = num(env["code"]);
     if (code === 0) return asObj(env["data"]);
+    if (req.mutation === true && code === null) throw new Error(`${OUTCOME_UNKNOWN_PREFIX}:tiktok_response_no_envelope`);
     if (req.mutation === true && code !== null && code >= 50000 && code <= 59999) throw new Error(`${OUTCOME_UNKNOWN_PREFIX}:tiktok_system_error_${code}`);
     throw new GrowthVendorError(`tiktok_error_${String(code ?? "unknown")}:${cleanText(env["message"], 120) ?? ""}`.slice(0, 200), 200, false, String(code ?? ""));
   }
