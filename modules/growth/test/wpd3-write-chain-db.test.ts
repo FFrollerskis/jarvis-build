@@ -9,7 +9,7 @@ import type { IdentityContext } from "@jarvis/contracts";
 import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
-import { ToolGateway, type ClassDNotification, type SecretProvider } from "@jarvis/tool-gateway";
+import { ToolGateway, type ClassDNotification, type SecretProvider, type ToolDefinition } from "@jarvis/tool-gateway";
 import {
   GrowthWriteJournal, createGrowthWriteTransports, executeGrowthWrite, growthOpIndex, growthWriteConfigFromEnv, growthWriteSpecs, growthWriteToolDefinitions,
   type ExecuteGrowthWriteInput
@@ -592,5 +592,79 @@ describe("J: review H1 - en transportfeil ETTER at en mutasjon er sendt er UKJEN
     expect(res.outcome).toBe("FAILED");
     expect(res.write.status).toBe("failed");
     expect(gads.campaigns.get("101")?.status).toBe("ENABLED");
+  });
+});
+
+describe("K: review M1 - idempotensnøkkelen kan ikke gjenbrukes på tvers av verktøy (aldri en falsk `applied`)", () => {
+  const anySchema = { safeParse: (v: unknown) => ({ success: true, data: v as Record<string, never> }) } as unknown as ToolDefinition["input_schema"];
+  const foreignTool: ToolDefinition = {
+    tool_id: "zz_other", action: "do_thing", description: "fremmed verktøy (test)", input_schema: anySchema, capability_class: "B", scopes: [], reversible: true, rollback_procedure: "ingen (test)",
+    idempotent_external: true, timeout_ms: 5_000, rate_limit_per_minute: 10_000, credential_ref: "JARVIS_GOOGLE_ADS_REFRESH_TOKEN", output_trust: "internal",
+    transport: { invoke: async () => ({ external_id: "foreign-ext-1" }) }
+  };
+  const commandStatus = async (id: string) => ((await adminPool.query(`SELECT status, execution_write_id FROM marketing_campaign_execution_commands WHERE command_id = $1`, [id])).rows[0]) as { status: string; execution_write_id: string | null };
+  async function seedCommand(id: string, current: number, proposed: number): Promise<void> {
+    await adminPool.query(`INSERT INTO marketing_campaign_action_recommendations (recommendation_id, tenant_id, memory_space_id, campaign_id, recommendation_type, status, rationale, evidence, detection_key)
+      VALUES ('rec-${id}','${A}','business','${linkedCampaignId}','reduce_budget','accepted','test','{}'::jsonb,'det-${id}')`);
+    await adminPool.query(`INSERT INTO marketing_campaign_execution_commands (command_id, tenant_id, memory_space_id, campaign_id, recommendation_id, command_type, current_budget_ore, proposed_budget_ore, reduction_fraction, currency)
+      VALUES ('${id}','${A}','business','${linkedCampaignId}','rec-${id}','reduce_budget',${current},${proposed},0.2,'NOK')`);
+  }
+
+  it("en nøkkel en ANNEN tool har brukt: vekstskrivingen nektes FØR noe sendes - ingen mutasjon, ingen fremmed external_id, kommandoen urørt", async () => {
+    gateway.register(foreignTool);
+    const key = uniq("zz-other");
+    expect(await gateway.execute({ identity: owner, tool_id: "zz_other", action: "do_thing", parameters: {}, idempotency_key: key })).toMatchObject({ ok: true, external_id: "foreign-ext-1" });
+    await seedCommand("cmd-d3-m1", 50_000, 40_000);
+    const res = await g("set_campaign_budget", { campaign_id: "101", amount_ore: 40_000 }, { idempotency_key: key, command_id: "cmd-d3-m1" });
+    expect(res.outcome).toBe("FAILED");
+    expect(res.reason).toBe("growth_write_idempotency_key_collision");
+    expect(res.write.status).toBe("failed");
+    expect(res.write.external_id).toBeNull();
+    expect(res.command_status).toBeNull();
+    expect(await commandStatus("cmd-d3-m1")).toEqual({ status: "pending_execution", execution_write_id: null });
+    expect(gads.requests).toHaveLength(0); // ikke engang en tilstandslesing
+    expect(gads.budgets.get("11")?.micros).toBe(500_000_000);
+    // den fremmede raden er uberørt
+    expect((await adminPool.query(`SELECT tool_id, action, external_id FROM tool_executions WHERE tenant_id = '${A}' AND idempotency_key = $1`, [key])).rows[0]).toEqual({ tool_id: "zz_other", action: "do_thing", external_id: "foreign-ext-1" });
+    // ingen `provider_write_*`-tidslinjehendelse for noe som aldri ble forsøkt
+    expect((await adminPool.query(`SELECT 1 FROM marketing_campaign_events WHERE campaign_id = '${linkedCampaignId}' AND metadata->>'write_id' = $1`, [res.write.write_id])).rows).toHaveLength(0);
+  });
+
+  it("samme tool og handling, men ledger-raden finnes UTEN journalrad (et gatewaykall utenfor journalen): kan ikke bevises å være denne forespørselen - nektes, ingen ny mutasjon", async () => {
+    const key = uniq("direct");
+    const direct = await gateway.execute({ identity: owner, tool_id: "growth_googleads", action: "pause_campaign", parameters: { customer_id: CID, campaign_id: "101" }, idempotency_key: key });
+    expect(direct.ok).toBe(true);
+    expect(gMut()).toHaveLength(1);
+    const res = await g("pause_campaign", { campaign_id: "101" }, { idempotency_key: key });
+    expect(res.outcome).toBe("FAILED");
+    expect(res.reason).toBe("growth_write_idempotency_key_collision");
+    expect(gMut()).toHaveLength(1);
+  });
+
+  it("løpet etter sjekken: gatewayen svarer `deduplicated` mot en fremmed rad som dukket opp mellom sjekken og reservasjonen -> FAILED, aldri `applied`", async () => {
+    const key = uniq("race");
+    const racing = {
+      get: gateway.get.bind(gateway),
+      execute: async (req: Parameters<ToolGateway["execute"]>[0]) => {
+        await adminPool.query(`INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, status, external_id) VALUES ($1, $2, 'zz_other', 'do_thing', 'succeeded', 'foreign-ext-2')`, [A, req.idempotency_key]);
+        return { ok: true as const, external_id: "foreign-ext-2", output_trust: "internal" as const, deduplicated: true };
+      }
+    };
+    const res = await executeGrowthWrite({ ...exec, gateway: racing as never }, owner, { idempotency_key: key, provider: "google_ads", action: "pause_campaign", parameters: { customer_id: CID, campaign_id: "101" } });
+    expect(res.outcome).toBe("FAILED");
+    expect(res.reason).toBe("growth_write_idempotency_key_collision");
+    expect(res.write).toMatchObject({ status: "failed", external_id: null });
+  });
+
+  it("kontrollen over-avviser ikke: en krasj ETTER gatewayen (journalraden står som `requested`, ledgeren er vår) gjenopprettes av replay som ekte dedupe uten ny mutasjon", async () => {
+    const key = uniq("crash");
+    const crashing = { get: gateway.get.bind(gateway), execute: async (req: Parameters<ToolGateway["execute"]>[0]) => { await gateway.execute(req); throw new Error("simulated_crash_after_gateway"); } };
+    const input = { idempotency_key: key, provider: "google_ads", action: "pause_campaign", parameters: { customer_id: CID, campaign_id: "101" } };
+    await expect(executeGrowthWrite({ ...exec, gateway: crashing as never }, owner, input)).rejects.toThrow("simulated_crash_after_gateway");
+    expect(gMut()).toHaveLength(1);
+    const recovered = await executeGrowthWrite(exec, owner, input);
+    expect(recovered.outcome).toBe("SUCCESS");
+    expect(recovered.write.status).toBe("applied");
+    expect(gMut()).toHaveLength(1);
   });
 });

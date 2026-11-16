@@ -58,16 +58,20 @@ export const COMMAND_BUDGET_PARAM: Readonly<Record<string, string>> = {
 };
 const CAMPAIGN_CHANNELS: ReadonlySet<string> = new Set(["google_ads", "meta_ads", "linkedin", "tiktok"]);
 const KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$/;
+/** Review M1: nøkkelen er allerede brukt av noe annet enn denne vekstskrivingen (annen tool/handling i ToolGateway-ledgeren, eller et gatewaykall utenfor journalen). */
+const KEY_COLLISION = "growth_write_idempotency_key_collision";
 
 function spendEffect(op: OpSpec): JournalSpendEffect {
   return op.spend === undefined ? "none" : op.spend === "directional" ? "unknown" : op.spend;
 }
 
-async function readLedger(pool: pg.Pool, tenantId: string, key: string): Promise<{ status: string; before: JsonValue | null; after: JsonValue | null; external_id: string | null } | null> {
+interface LedgerRow { tool_id: string; action: string; status: string; before: JsonValue | null; after: JsonValue | null; external_id: string | null }
+
+async function readLedger(pool: pg.Pool, tenantId: string, key: string): Promise<LedgerRow | null> {
   return withTenantTransaction(pool, tenantId, async (client) => {
-    const { rows } = await client.query(`SELECT status, before_state, after_state, external_id FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, key]);
-    const row = rows[0] as { status: string; before_state: JsonValue | null; after_state: JsonValue | null; external_id: string | null } | undefined;
-    return row ? { status: row.status, before: row.before_state, after: row.after_state, external_id: row.external_id } : null;
+    const { rows } = await client.query(`SELECT tool_id, action, status, before_state, after_state, external_id FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, key]);
+    const row = rows[0] as { tool_id: string; action: string; status: string; before_state: JsonValue | null; after_state: JsonValue | null; external_id: string | null } | undefined;
+    return row ? { tool_id: row.tool_id, action: row.action, status: row.status, before: row.before_state, after: row.after_state, external_id: row.external_id } : null;
   });
 }
 
@@ -98,11 +102,27 @@ export async function executeGrowthWrite(deps: GrowthWriteExecutorDeps, identity
     return { write: begun.row, outcome: begun.row.status === "applied" ? "SUCCESS" : "FAILED", reason: begun.row.failure_code, replayed: true, command_status: null };
   }
 
+  // Review M1: ToolGateway-ledgeren er nøklet på (tenant, nøkkel) ALENE - en ANNEN tool (eller et direkte gateway-kall utenfor journalen) kan ha brukt nøkkelen, og gatewayen ville da svart `deduplicated: true` med
+  // en FREMMED rad som om det var vår skriving (falsk `applied`, ingen mutasjon, kommando `executed`). Her nektes alt vi ikke kan bevise er vårt: en ledger-rad for nøkkelen som tilhører en annen tool/handling, og
+  // enhver ledger-rad når journalraden er NY (ingen tidligere vekstskriving har brukt nøkkelen). Ingenting sendes; nøkkelen er brent og eieren bruker en ny.
+  const toolId = entry.spec.toolId;
+  const belongsToUs = (row: LedgerRow | null): row is LedgerRow => row !== null && row.tool_id === toolId && row.action === input.action;
+  const collide = async (): Promise<ExecuteGrowthWriteResult> => {
+    const write = await deps.journal.complete(tenantId, space, begun.row.write_id, { status: "failed", failure_code: KEY_COLLISION });
+    return { write, outcome: "FAILED", reason: KEY_COLLISION, replayed: !begun.created, command_status: null };
+  };
+  const prior = await readLedger(deps.pool, tenantId, input.idempotency_key);
+  if (prior !== null && (begun.created || !belongsToUs(prior))) return collide();
+
   const result = await deps.gateway.execute({
-    identity, tool_id: entry.spec.toolId, action: input.action, parameters: input.parameters, idempotency_key: input.idempotency_key,
+    identity, tool_id: toolId, action: input.action, parameters: input.parameters, idempotency_key: input.idempotency_key,
     ...(input.task_id !== undefined ? { task_id: input.task_id } : {}), ...(input.trace_id !== undefined ? { trace_id: input.trace_id } : {})
   });
-  const ledger = await readLedger(deps.pool, tenantId, input.idempotency_key);
+  const seen = await readLedger(deps.pool, tenantId, input.idempotency_key);
+  const ledger = belongsToUs(seen) ? seen : null;
+  // Samme sjekk ETTER kallet (en annen tool kan ha tatt nøkkelen mellom sjekken og gatewayens reservasjon): et dedupe-svar på en ny journalrad eller en fremmed rad er aldri «applied». Har VI utført (`ok` uten
+  // `deduplicated`), er etikett-/rad-forskjellen kosmetisk og utfallet gjelder.
+  if ((seen !== null && ledger === null && !(result.ok && !result.deduplicated)) || (result.ok && result.deduplicated && begun.created)) return collide();
   const externalId = (result.ok ? result.external_id : undefined) ?? ledger?.external_id ?? null;
 
   let outcome: GrowthWriteOutcome;
