@@ -6,7 +6,7 @@ import { withMemoryTransaction } from "@jarvis/memory";
 import { isUnknownOutcomeReason, type ToolGateway } from "@jarvis/tool-gateway";
 import type { CampaignChannel } from "../types.ts";
 import type { GrowthProvider } from "./config.ts";
-import { GrowthWriteJournal, sanitizeJournalState, writeRequestDigest, type GrowthWriteRow, type JournalSpendEffect, type WriteSource } from "./journal.ts";
+import { GrowthWriteJournal, writeRequestDigest, type GrowthWriteRow, type JournalSpendEffect, type WriteSource } from "./journal.ts";
 import type { OpSpec, ProviderToolSpec } from "./tool-factory.ts";
 
 /**
@@ -176,6 +176,30 @@ async function markCommand(pool: pg.Pool, tenantId: string, space: MemorySpace, 
   });
 }
 
+/**
+ * Review M2 (CLAUDE.md regel 7): tidslinjen (`marketing_campaign_events`) leses av modellen via `growth.list_events` (chat-lesenivået, `output_trust: internal`). Leverandørtekst (kampanjenavn, annonsetekst)
+ * er UBETRODD og skal aldri nå noe en modell kan lese - sanitering (kontrolltegn/lengde/hemmeligheter) fjerner ikke en instruksjon i klartekst. Derfor bærer tidslinjehendelsen KUN id-er, statuser og tall: en
+ * fast hvitliste av nøkler, der verdien må være et endelig tall, en boolsk verdi eller en enum-formet statuskode (`ENABLED`, `PAUSED` ...; aldri en setning), og valutakoder på tre store bokstaver. Alt annet
+ * (navn, tekster, URL-er) hoppes over - den fulle (redigerte) før-/ettertilstanden ligger i skrivejournalen, som kun eieren når (`/growth/writes/list`), og aldri på en modellflate.
+ */
+const TIMELINE_NUMBER_KEYS: ReadonlySet<string> = new Set(["budget_amount_micros", "cpc_bid_micros", "daily_budget_minor", "lifetime_budget_minor", "bid_amount_minor", "daily_budget_ore", "budget_ore"]);
+const TIMELINE_BOOLEAN_KEYS: ReadonlySet<string> = new Set(["budget_shared"]);
+const TIMELINE_STATUS_KEYS: ReadonlySet<string> = new Set(["status", "effective_status", "campaign_status", "ad_set_status", "ad_group_status", "serving_status", "bid_strategy", "bidding_strategy_type", "budget_mode", "channel_type"]);
+const STATUS_CODE = /^[A-Za-z][A-Za-z0-9_]{0,39}$/;
+const CURRENCY_CODE = /^[A-Z]{3}$/;
+
+export function timelineProjection(state: JsonValue | null): Record<string, number | boolean | string> {
+  const out: Record<string, number | boolean | string> = {};
+  if (typeof state !== "object" || state === null || Array.isArray(state)) return out;
+  for (const [key, value] of Object.entries(state as Record<string, JsonValue>)) {
+    if (TIMELINE_NUMBER_KEYS.has(key) && typeof value === "number" && Number.isFinite(value)) out[key] = value;
+    else if (TIMELINE_BOOLEAN_KEYS.has(key) && typeof value === "boolean") out[key] = value;
+    else if (TIMELINE_STATUS_KEYS.has(key) && typeof value === "string" && STATUS_CODE.test(value)) out[key] = value;
+    else if (key === "currency" && typeof value === "string" && CURRENCY_CODE.test(value)) out[key] = value;
+  }
+  return out;
+}
+
 async function insertTimelineEvent(pool: pg.Pool, tenantId: string, space: MemorySpace, campaignId: string, write: GrowthWriteRow, outcome: GrowthWriteOutcome): Promise<void> {
   const type = outcome === "SUCCESS" || outcome === "NOOP" ? "provider_write_applied" : outcome === "FAILED" ? "provider_write_failed" : "provider_write_unknown";
   await withMemoryTransaction(pool, tenantId, [space], async (client) => {
@@ -183,7 +207,7 @@ async function insertTimelineEvent(pool: pg.Pool, tenantId: string, space: Memor
       `INSERT INTO marketing_campaign_events (event_id, tenant_id, memory_space_id, campaign_id, event_type, summary, actor_person_id, metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
       [
         `grw-ev-${randomUUID()}`, tenantId, space, campaignId, type, `${write.provider}.${write.action}: ${outcome} (${write.target_ref})`.slice(0, 500), write.actor_person_id,
-        JSON.stringify({ write_id: write.write_id, provider: write.provider, action: write.action, outcome, risk_class: write.risk_class, before: sanitizeJournalState(write.before_state), after: sanitizeJournalState(write.after_state) })
+        JSON.stringify({ write_id: write.write_id, provider: write.provider, action: write.action, outcome, risk_class: write.risk_class, before: timelineProjection(write.before_state), after: timelineProjection(write.after_state) })
       ]
     );
   });
