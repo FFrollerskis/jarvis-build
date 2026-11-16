@@ -921,3 +921,20 @@ describe("P: review L1 - sletting og publisering/eksponering er klasse D med ful
     expect(notifications.map((n) => n.outcome)).toContain("unknown");
   });
 });
+
+describe("Q: review L2 - kreativ-URL gjennom hele kjeden (Google Ads RSA)", () => {
+  it("backslash-/port-URL nektes FØR sending; en lovlig URL sendes som normalisert href og annonsen opprettes PAUSET og verifiseres", async () => {
+    const params = { ad_group_id: "201", headlines: ["L2 en", "L2 to", "L2 tre"], descriptions: ["L2 beskrivelse en", "L2 beskrivelse to"] };
+    for (const bad of ["https://example.test" + String.fromCharCode(92) + "@evil.test/x", "https://example.test:8443/x", "http://example.test/x"]) {
+      const res = await g("create_responsive_search_ad", { ...params, final_url: bad });
+      expect(res.reason, bad).toMatch(/creative_url_host_not_allowed$/);
+    }
+    expect(gMut()).toHaveLength(0);
+    const ok = await g("create_responsive_search_ad", { ...params, final_url: "https://EXAMPLE.test:443/Ny" });
+    expect(ok.outcome).toBe("SUCCESS");
+    expect(gMut()[0]!.body["operations"][0].create.ad.finalUrls).toEqual(["https://example.test/Ny"]);
+    expect([...gads.ads.values()].find((a) => a.headlines.includes("L2 en"))?.finalUrls).toEqual(["https://example.test/Ny"]);
+    // identisk forespørsel (annen skrivemåte av samme URL) er en NOOP - sammenligningen skjer på den normaliserte formen
+    expect((await g("create_responsive_search_ad", { ...params, final_url: "https://example.test/Ny" })).outcome).toBe("NOOP");
+  });
+});

@@ -8,7 +8,7 @@ import {
 } from "@jarvis/tool-gateway";
 import {
   GROWTH_WRITE_PROVIDERS, GROWTH_WRITE_TOOL_IDS, Ga4WriteTransport, GbpWriteTransport, LinkedinWriteTransport, SearchConsoleWriteTransport, TiktokWriteTransport, YoutubeWriteTransport,
-  authorizeGrowthTarget, buildGrowthToolDefinitions, composeValidator, creativeUrlHost, decimalToOre, growthOpIndex, growthWriteConfigFromEnv, growthWriteSpecs, killSwitchOpen, normalizeGrowthTarget,
+  authorizeGrowthTarget, buildGrowthToolDefinitions, composeValidator, creativeHref, creativeUrlHost, creativeUrlHref, decimalToOre, growthOpIndex, growthWriteConfigFromEnv, growthWriteSpecs, killSwitchOpen, normalizeGrowthTarget,
   oreToDecimal, parseCreativeUrlHosts, parseGrowthWritePlatforms, parseGrowthWriteTargets, periodsSignature, urlBelongsToSite, writeRequestDigest, sanitizeJournalState, stableStringify,
   type GrowthProvider
 } from "../src/write/index.ts";
@@ -16,6 +16,7 @@ import { GROWTH_EXPERIMENT_TOOL_ACTIONS } from "../src/experiments/index.ts";
 import { COMMAND_BUDGET_PARAM, timelineProjection } from "../src/write/executor.ts";
 import { youtubeSnippetBody, youtubeStatusBody } from "../src/write/youtube-write.ts";
 import { replyDigest } from "../src/write/gbp-write.ts";
+import { MetaAdsWriteTransport } from "../src/write/meta-ads-write.ts";
 import { GrowthVendorError, VendorHttp, classifyVendorError } from "../src/write/http.ts";
 import { assertOre, oreToMicros, MAX_ORE } from "../src/write/validators.ts";
 import { FakeVendor } from "./support/fake-vendors.ts";
@@ -73,6 +74,33 @@ describe("A: konfigurasjon og mål-autorisasjon (fail-closed)", () => {
     for (const bad of ["http://example.test/", "https://user:pw@example.test/", "https://sub.example.test/", "https://example.test.evil.test/", "javascript:alert(1)", "https://example.test:8443@evil.test/", 5, "x".repeat(3000)]) {
       expect(creativeUrlHost(bad, hosts), String(bad).slice(0, 40)).toBeNull();
     }
+  });
+});
+
+describe("A2: kreativ-URL (review L2) - parser-forskjeller avvises og det som sendes er den normaliserte href", () => {
+  it("backslash (WHATWG-vert != RFC 3986-vert), kontrolltegn og ikke-standard port avvises; standardport og store bokstaver normaliseres til href", () => {
+    const backslash = "https://example.test" + String.fromCharCode(92) + "@evil.test/x";
+    const rejected = [
+      backslash, "https://example.test" + String.fromCharCode(92) + "evil.test/x", "https://example.test:8443/x", "https://example.test:80/x", "https://example.test/x" + String.fromCharCode(9), "https://exam" + String.fromCharCode(10) + "ple.test/",
+      "https://example.test/" + String.fromCharCode(0), "", "https://user@example.test/", "http://example.test/", "https://evil.test/", "https://example.test.evil.test/"
+    ];
+    for (const bad of rejected) {
+      expect(creativeUrlHost(bad, hosts), JSON.stringify(bad)).toBeNull();
+      expect(creativeUrlHref(bad, hosts), JSON.stringify(bad)).toBeNull();
+    }
+    // standardport er lov og normaliseres bort; vertsnavnet gjøres små bokstaver; stien/spørringen beholdes; bare verten er listet
+    expect(creativeUrlHref("https://EXAMPLE.test:443/Ny%20side?a=1&b=2#del", hosts)).toBe("https://example.test/Ny%20side?a=1&b=2#del");
+    expect(creativeUrlHref("https://example.test", hosts)).toBe("https://example.test/");
+    expect(creativeUrlHost("https://Example.TEST/x", hosts)).toBe("example.test");
+    // transportens sendevei: kun den normaliserte href, og aldri en URL som ikke tåler reglene
+    expect(creativeHref("https://EXAMPLE.test:443/a b")).toBe("https://example.test/a%20b");
+    for (const bad of [backslash, "https://example.test:8443/", "http://example.test/", 5, "", "ikke en url"]) expect(() => creativeHref(bad), JSON.stringify(bad)).toThrow("growth_invalid_creative_url");
+  });
+
+  it("Search Console: nettstedskart-/inspeksjons-URL med backslash eller kontrolltegn hører aldri til eiendommen", () => {
+    expect(urlBelongsToSite("https://example.test/", "https://example.test" + String.fromCharCode(92) + "@evil.test/sitemap.xml")).toBe(false);
+    expect(urlBelongsToSite("sc-domain:example.test", "https://example.test/" + String.fromCharCode(10) + "x")).toBe(false);
+    expect(urlBelongsToSite("https://example.test/", "https://example.test/sitemap.xml")).toBe(true);
   });
 });
 
@@ -787,5 +815,59 @@ describe("E3: review M4 - Business Profile-omtaler: tilstanden er ÉN omtale og 
     expect(z.object(spec.shape).safeParse({ ...base, comment: "æ".repeat(2049) }).success).toBe(false);
     expect(z.object(spec.shape).safeParse({ ...base, comment: "😀".repeat(1025) }).success).toBe(false);
     expect(z.object(spec.shape).safeParse({ ...base, comment: "" }).success).toBe(false);
+  });
+});
+
+describe("E4: review L2 - transportene sender den normaliserte href, aldri råstrengen", () => {
+  const killOpen = { financeKillSwitch: async () => false };
+  const token = { accessToken: async () => "fake-access-token" };
+  const ctx2 = { identity: owner };
+
+  it("Meta create_ad: lenken som sendes er normalisert (standardport/store bokstaver), og en backslash-lenke nektes FØR sending", async () => {
+    const v = new FakeVendor(); await v.start();
+    const ads: Array<{ id: string; name: string; status: string }> = [];
+    v.handler = (r) => {
+      if (r.method === "GET" && r.path === "/v26.0/act_1234567890123") return { json: { id: "act_1234567890123", currency: "NOK" } };
+      if (r.method === "GET" && r.path === "/v26.0/60010") return { json: { id: "60010", status: "ACTIVE", account_id: "1234567890123" } };
+      if (r.method === "GET" && r.path === "/v26.0/60010/ads") return { json: { data: ads } };
+      if (r.method === "POST" && r.path === "/v26.0/act_1234567890123/ads") { ads.push({ id: "700001", name: r.body["name"], status: "PAUSED" }); return { json: { id: "700001" } }; }
+      return { status: 404, json: {} };
+    };
+    const t = new MetaAdsWriteTransport({ ...killOpen, spec: specs.meta_ads, baseUrl: v.baseUrl });
+    const base = { ad_account_id: "act_1234567890123", ad_set_id: "60010", name: "Ny", page_id: "1234567890", message: "Hei", headline: "Tittel" };
+    await t.invoke("create_ad", { ...base, link: "https://EXAMPLE.test:443/Kampanje" }, "fake-meta-token-for-test", ctx2);
+    expect(v.requests.find((r) => r.method === "POST")?.body["creative"].object_story_spec.link_data.link).toBe("https://example.test/Kampanje");
+    const posts = v.requests.filter((r) => r.method === "POST").length;
+    await expect(t.invoke("create_ad", { ...base, name: "Annen", link: "https://example.test" + String.fromCharCode(92) + "@evil.test/x" }, "fake-meta-token-for-test", ctx2)).rejects.toThrow("growth_precondition_failed:creative_url_host_not_allowed");
+    await expect(t.invoke("create_ad", { ...base, name: "Annen", link: "https://example.test:8443/x" }, "fake-meta-token-for-test", ctx2)).rejects.toThrow("growth_precondition_failed:creative_url_host_not_allowed");
+    expect(v.requests.filter((r) => r.method === "POST")).toHaveLength(posts);
+    await v.stop();
+  });
+
+  it("Business Profile: nettsted og lenke i innlegg sendes normalisert; etterbetingelsen sammenligner normalisert; backslash-/port-URL nektes", async () => {
+    const v = new FakeVendor(); await v.start();
+    let websiteUri = "https://example.test/";
+    let posted: Record<string, any> | undefined;
+    const posts: Array<{ name: string; summary: string; state: string; topicType: string }> = [];
+    v.handler = (r) => {
+      if (r.method === "GET" && r.path === "/locations/123456789") return { json: { title: "Butikk", websiteUri, profile: { description: "x" } } };
+      if (r.method === "PATCH" && r.path === "/locations/123456789") { websiteUri = r.body["websiteUri"] ?? websiteUri; return { json: {} }; }
+      if (r.method === "GET" && r.path.endsWith("/localPosts")) return { json: { localPosts: posts } };
+      if (r.method === "POST" && r.path.endsWith("/localPosts")) { posted = r.body; posts.push({ name: "accounts/1111/locations/123456789/localPosts/9", summary: r.body["summary"], state: "LIVE", topicType: "STANDARD" }); return { json: { name: "accounts/1111/locations/123456789/localPosts/9" } }; }
+      return { status: 404, json: {} };
+    };
+    const t = new GbpWriteTransport({ ...killOpen, ...token, spec: specs.google_business_profile, baseUrl: v.baseUrl, v4BaseUrl: v.baseUrl });
+    const base = { account_id: "1111", location_id: "123456789" };
+    await t.invoke("update_location_profile", { location_id: "123456789", website_uri: "https://EXAMPLE.test:443/Butikk" }, "fake-refresh-token-for-test", ctx2);
+    expect(websiteUri).toBe("https://example.test/Butikk");
+    expect(v.requests.find((r) => r.method === "PATCH")?.body).toEqual({ websiteUri: "https://example.test/Butikk" });
+    await t.invoke("create_local_post", { ...base, summary: "Nyhet", action_url: "https://Example.test:443/Tilbud" }, "fake-refresh-token-for-test", ctx2);
+    expect(posted?.["callToAction"]).toEqual({ actionType: "LEARN_MORE", url: "https://example.test/Tilbud" });
+    for (const bad of ["https://example.test" + String.fromCharCode(92) + "@evil.test/x", "https://example.test:8443/x"]) {
+      await expect(t.invoke("update_location_profile", { location_id: "123456789", website_uri: bad }, "fake-refresh-token-for-test", ctx2)).rejects.toThrow("growth_precondition_failed:website_host_not_allowed");
+      await expect(t.invoke("create_local_post", { ...base, summary: "Ny nyhet", action_url: bad }, "fake-refresh-token-for-test", ctx2)).rejects.toThrow("growth_precondition_failed:action_url_host_not_allowed");
+    }
+    expect(v.requests.filter((r) => r.method !== "GET")).toHaveLength(2);
+    await v.stop();
   });
 });

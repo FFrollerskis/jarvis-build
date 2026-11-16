@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { JsonValue } from "@jarvis/contracts";
-import { creativeUrlHost, normalizeGrowthTarget, type GrowthWriteConfig } from "./config.ts";
+import { creativeHref, creativeHrefOrRaw, creativeUrlHost, normalizeGrowthTarget, type GrowthWriteConfig } from "./config.ts";
 import { VendorHttp } from "./http.ts";
 import { cleanText, removeOp } from "./op-builders.ts";
 import { GoogleOAuthTransport, type GoogleRestOptions } from "./google-rest.ts";
@@ -93,8 +93,8 @@ export function gbpWriteSpec(config: Pick<GrowthWriteConfig, "creativeHosts">): 
         if (p["description"] === undefined && p["website_uri"] === undefined) return "nothing_to_update";
         return p["website_uri"] !== undefined && creativeUrlHost(p["website_uri"], config.creativeHosts) === null ? "website_host_not_allowed" : null;
       },
-      noop: (s, p) => (p["description"] === undefined || asObj(s)["description"] === cleanText(p["description"], 750)) && (p["website_uri"] === undefined || asObj(s)["website_uri"] === p["website_uri"]),
-      post: (a, p) => (p["description"] === undefined || asObj(a)["description"] === cleanText(p["description"], 750)) && (p["website_uri"] === undefined || asObj(a)["website_uri"] === p["website_uri"]),
+      noop: (s, p) => (p["description"] === undefined || asObj(s)["description"] === cleanText(p["description"], 750)) && (p["website_uri"] === undefined || asObj(s)["website_uri"] === creativeHrefOrRaw(p["website_uri"])),
+      post: (a, p) => (p["description"] === undefined || asObj(a)["description"] === cleanText(p["description"], 750)) && (p["website_uri"] === undefined || asObj(a)["website_uri"] === creativeHrefOrRaw(p["website_uri"])),
       target: (p) => ref(p, "profile"), summary: (_s, p) => `Business Profile: oppdater profil for ${safeLocation(p)}`
     },
     {
@@ -217,14 +217,14 @@ export class GbpWriteTransport extends GoogleOAuthTransport {
         const mask = [...(p["description"] !== undefined ? ["profile.description"] : []), ...(p["website_uri"] !== undefined ? ["websiteUri"] : [])];
         await this.info.request({
           method: "PATCH", path: `/locations/${location}`, query: { updateMask: mask.join(",") }, headers: auth.headers, secrets: auth.secrets, mutation: true,
-          body: { ...(p["description"] !== undefined ? { profile: { description: String(p["description"]) } } : {}), ...(p["website_uri"] !== undefined ? { websiteUri: String(p["website_uri"]) } : {}) }
+          body: { ...(p["description"] !== undefined ? { profile: { description: String(p["description"]) } } : {}), ...(p["website_uri"] !== undefined ? { websiteUri: creativeHref(p["website_uri"]) } : {}) }
         });
         return { external_id: `locations/${location}` };
       }
       case "create_local_post": {
         const res = await this.v4.request({
           method: "POST", path: this.v4Path(p, "/localPosts"), headers: auth.headers, secrets: auth.secrets, mutation: true,
-          body: { languageCode: "nb", summary: String(p["summary"]), topicType: "STANDARD", ...(typeof p["action_url"] === "string" ? { callToAction: { actionType: "LEARN_MORE", url: p["action_url"] } } : {}) }
+          body: { languageCode: "nb", summary: String(p["summary"]), topicType: "STANDARD", ...(typeof p["action_url"] === "string" ? { callToAction: { actionType: "LEARN_MORE", url: creativeHref(p["action_url"]) } } : {}) }
         });
         const name = str(asObj(res?.json)["name"]);
         return { ...(name ? { external_id: name.split("/").pop() ?? name } : {}), data: { created: 1 } };

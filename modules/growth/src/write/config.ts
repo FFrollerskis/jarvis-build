@@ -123,12 +123,45 @@ export function authorizeGrowthTarget(provider: GrowthProvider, targetParam: str
   return { allowed: true, reason: "owner_configured_target" };
 }
 
-/** Vert for en kreativ-URL (https, ingen brukerinfo, vert eksakt i listen). `null` = avvist. */
-export function creativeUrlHost(url: unknown, hosts: ReadonlySet<string>): string | null {
-  if (typeof url !== "string" || url.length > 2048) return null;
+/**
+ * Review L2: en WHATWG-parser og en RFC 3986-parser leser IKKE alltid samme vert i samme streng: «https://allowed.test<backslash>@evil.test/x» har vert `allowed.test` for WHATWG (backslash = skråstrek), men
+ * brukerinfo og vert `evil.test` for en RFC 3986-parser (leverandørens), og tab/linjeskift fjernes stille av WHATWG. Forsvaret er tredelt: (1) tegn som gir parser-forskjeller (backslash, kontrolltegn) avvises,
+ * (2) kun standardport (en ikke-tom port avvises), og (3) det som SENDES er alltid den normaliserte `href` fra WHATWG (aldri råstrengen), slik at vertssjekken og leverandøren ser nøyaktig samme URL.
+ */
+const PARSER_DIFFERENTIAL_CHARS = /[\\\p{Cc}]/u;
+
+/** `true` når strengen har tegn som gir ulik lesing i ulike URL-parsere (backslash, kontrolltegn). Brukes også av Search Console-URL-ene (nettstedskart/inspeksjon). */
+export const hasParserDifferentialChars = (value: string): boolean => PARSER_DIFFERENTIAL_CHARS.test(value);
+
+function parseCreativeUrl(url: unknown): URL | null {
+  if (typeof url !== "string" || url.length === 0 || url.length > 2048 || PARSER_DIFFERENTIAL_CHARS.test(url)) return null;
   let parsed: URL;
   try { parsed = new URL(url); } catch { return null; }
-  if (parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== "") return null;
-  const host = parsed.hostname.toLowerCase();
-  return hosts.has(host) ? host : null;
+  if (parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== "" || parsed.port !== "") return null;
+  return parsed;
 }
+
+/** Normalisert `href` for en kreativ-URL (https, ingen brukerinfo, standardport, ingen backslash/kontrolltegn) hvis verten står EKSAKT i listen, ellers `null` = avvist. Dette er strengen som skal SENDES. */
+export function creativeUrlHref(url: unknown, hosts: ReadonlySet<string>): string | null {
+  const parsed = parseCreativeUrl(url);
+  return parsed !== null && hosts.has(parsed.hostname.toLowerCase()) ? parsed.href : null;
+}
+
+/** Vert for en kreativ-URL (samme regler som `creativeUrlHref`). `null` = avvist. */
+export function creativeUrlHost(url: unknown, hosts: ReadonlySet<string>): string | null {
+  const href = creativeUrlHref(url, hosts);
+  return href === null ? null : new URL(href).hostname.toLowerCase();
+}
+
+/**
+ * Transportens vei til strengen som SENDES: den normaliserte `href` (strukturreglene som over; vertslisten er allerede sjekket av validatoren som kjører rett før skrivingen). Kaster ved en URL som ikke tåler
+ * strukturreglene, i stedet for å sende råstrengen.
+ */
+export function creativeHref(url: unknown): string {
+  const parsed = parseCreativeUrl(url);
+  if (parsed === null) throw new Error("growth_invalid_creative_url");
+  return parsed.href;
+}
+
+/** Som `creativeHref`, men gir råstrengen tilbake når URL-en ikke kan normaliseres (kun for sammenligning i noop/etterbetingelse, aldri for sending). */
+export const creativeHrefOrRaw = (url: unknown): string => parseCreativeUrl(url)?.href ?? String(url);

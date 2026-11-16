@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { JsonValue } from "@jarvis/contracts";
-import { normalizeGrowthTarget } from "./config.ts";
+import { hasParserDifferentialChars, normalizeGrowthTarget } from "./config.ts";
 import { VendorHttp } from "./http.ts";
 import { cleanText, removeOp } from "./op-builders.ts";
 import { GoogleOAuthTransport, type GoogleRestOptions } from "./google-rest.ts";
@@ -31,7 +31,8 @@ const enc = (v: string): string => encodeURIComponent(v);
 
 /** Hører URL-en til eiendommen? URL-prefiks: samme opprinnelse og sti-prefiks. Domeneeiendom: verten er domenet eller et underdomene. */
 export function urlBelongsToSite(site: string, url: unknown): boolean {
-  if (typeof url !== "string" || url.length > 2048) return false;
+  // Review L2 (samme klasse): backslash/kontrolltegn gir ulik lesing i WHATWG og leverandørens parser - avvises (strengen sendes uendret til Search Console).
+  if (typeof url !== "string" || url.length > 2048 || hasParserDifferentialChars(url)) return false;
   let parsed: URL;
   try { parsed = new URL(url); } catch { return false; }
   if (parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== "") return false;

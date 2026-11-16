@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { JsonValue } from "@jarvis/contracts";
 import { googleAccessToken } from "@jarvis/tool-gateway";
-import { creativeUrlHost, normalizeGrowthTarget, type GrowthWriteConfig } from "./config.ts";
+import { creativeHref, creativeHrefOrRaw, creativeUrlHost, normalizeGrowthTarget, type GrowthWriteConfig } from "./config.ts";
 import { VendorHttp } from "./http.ts";
 import { cleanText, directionalAmountCheck, pauseEnableOps, removeOp } from "./op-builders.ts";
 import { GrowthWriteTransportBase, killSwitchOpen, type Auth, type OpSpec, type ProviderToolSpec, type WriteTransportDeps } from "./tool-factory.ts";
@@ -50,7 +50,7 @@ const adGroupStatus = (s: JsonValue): string | null => str(asObj(s)["ad_group_st
 function sameRsa(ad: Record<string, unknown>, p: Params): boolean {
   const wantHeadlines = asArr(p["headlines"]).map(String);
   const wantDescriptions = asArr(p["descriptions"]).map(String);
-  return sameStringSet(asArr(ad["headlines"]), wantHeadlines) && sameStringSet(asArr(ad["descriptions"]), wantDescriptions) && sameStringSet(asArr(ad["final_urls"]), [String(p["final_url"] ?? "")]);
+  return sameStringSet(asArr(ad["headlines"]), wantHeadlines) && sameStringSet(asArr(ad["descriptions"]), wantDescriptions) && sameStringSet(asArr(ad["final_urls"]), [creativeHrefOrRaw(p["final_url"] ?? "")]);
 }
 
 export function googleAdsWriteSpec(config: Pick<GrowthWriteConfig, "creativeHosts">): ProviderToolSpec {
@@ -386,7 +386,7 @@ export class GoogleAdsWriteTransport extends GrowthWriteTransportBase {
           create: {
             adGroup: `customers/${cid}/adGroups/${agId}`, status: "PAUSED",
             ad: {
-              finalUrls: [String(p["final_url"])],
+              finalUrls: [creativeHref(p["final_url"])],
               responsiveSearchAd: {
                 headlines: asArr(p["headlines"]).map((text) => ({ text: String(text) })), descriptions: asArr(p["descriptions"]).map((text) => ({ text: String(text) })),
                 ...(typeof p["path1"] === "string" ? { path1: p["path1"] } : {}), ...(typeof p["path2"] === "string" ? { path2: p["path2"] } : {})

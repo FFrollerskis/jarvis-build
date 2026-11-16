@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { JsonValue } from "@jarvis/contracts";
-import { creativeUrlHost, normalizeGrowthTarget, type GrowthWriteConfig } from "./config.ts";
+import { creativeHref, creativeUrlHost, normalizeGrowthTarget, type GrowthWriteConfig } from "./config.ts";
 import { GrowthVendorError, VendorHttp } from "./http.ts";
 import { cleanText, pauseEnableOps, removeOp } from "./op-builders.ts";
 import { GrowthWriteTransportBase, killSwitchOpen, type Auth, type OpSpec, type ProviderToolSpec, type WriteTransportDeps } from "./tool-factory.ts";
@@ -263,7 +263,7 @@ export class MetaAdsWriteTransport extends GrowthWriteTransportBase {
         if (adsOf(before).some((ad) => ad["name"] === name)) return { data: { unchanged: true } };
         const json = await this.post(`act_${acct}/ads`, {
           name, adset_id: setId, status: "PAUSED",
-          creative: { object_story_spec: { page_id: assertDigits(p["page_id"], "page_id", 5, 25), link_data: { link: String(p["link"]), message: String(p["message"]), name: String(p["headline"]) } } }
+          creative: { object_story_spec: { page_id: assertDigits(p["page_id"], "page_id", 5, 25), link_data: { link: creativeHref(p["link"]), message: String(p["message"]), name: String(p["headline"]) } } }
         }, auth);
         const id = str(json["id"]);
         // Uten ad-id etter en akseptert opprettelse kan vi ikke vite hva som skjedde (readback finner den på navn) - ikke et «ok»-svar uten id.
