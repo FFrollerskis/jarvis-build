@@ -80,6 +80,8 @@ export class FakeGoogleAds extends FakeVendor {
   mutateDestroyAfterApply = false;
   /** WP-D3 review H1/L4: leverandøren behandler mutasjonen og svarer en redirect (303/307) - «POST utført, resultatet ligger her». */
   mutateRedirectAfterApply: number | undefined;
+  /** Før 2026-09-09 krevde leverandøren `developer-token`; etter avviklingen er headeren valgfri (review L3). Standard `true` så eksisterende tester er uendret. */
+  requireDeveloperToken = true;
   private nextId = 9000;
 
   constructor() {
@@ -104,7 +106,7 @@ export class FakeGoogleAds extends FakeVendor {
 
   private route(r: Recorded): Reply {
     if (typeof r.headers["authorization"] !== "string" || !String(r.headers["authorization"]).startsWith("Bearer ")) return { status: 401, json: { error: { status: "UNAUTHENTICATED", message: "missing bearer" } } };
-    if (typeof r.headers["developer-token"] !== "string") return { status: 401, json: { error: { status: "UNAUTHENTICATED", message: "missing developer token" } } };
+    if (this.requireDeveloperToken && typeof r.headers["developer-token"] !== "string") return { status: 401, json: { error: { status: "UNAUTHENTICATED", message: "missing developer token" } } };
     const m = /^\/(v\d+)\/customers\/(\d+)\/(googleAds:search|[A-Za-z]+:mutate)$/.exec(r.path);
     if (!m) return { status: 404, json: { error: { status: "NOT_FOUND", message: "no route" } } };
     if (m[2] !== CID) return { status: 403, json: { error: { status: "PERMISSION_DENIED", message: "customer not accessible" } } };

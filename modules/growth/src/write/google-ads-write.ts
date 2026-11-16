@@ -15,7 +15,8 @@ import { asArr, asObj, assertDigits, assertOre, num, oreToMicros, sameStringSet,
  * D-41-STATUS (alt under er `VERIFIED_OFFICIAL_SEARCH_SNIPPET`, IKKE primærkilde - WebFetch mot developers.google.com er blokkert; se runbook §D-41-revisjon):
  *  - REST `POST /v{N}/customers/{id}/{ressurs}:mutate` med `operations[]` (`create`/`update`+`updateMask`/`remove`), atomisk uten `partialFailure`; beløp i mikroenheter som STRENG (int64).
  *  - INGEN idempotensnøkkel finnes hos leverandøren: idempotens = tilstandslesing før skriving + absolutt-tilstand-oppdateringer + readback + opprettelser dedupet mot eksisterende (nøkkelord/RSA).
- *  - `REMOVED` er terminal (kan ikke aktiveres igjen). Developer token: testkonto-tilgang -> Basic (15 000 operasjoner/dag) -> Standard; ny GCP-prosjektbasert tilgang med merkevareverifisering fra 9. sept. 2026 = BLOCKED_EXTERNAL.
+ *  - `REMOVED` er terminal (kan ikke aktiveres igjen). Tilgangsnivå: testkonto-tilgang -> Basic (15 000 operasjoner/dag) -> Standard. Developer token er AVVIKLET 9. sept. 2026 (review L3, VERIFIED_OFFICIAL_SEARCH_SNIPPET):
+ *    tilgangsnivået følger nå Google Cloud-prosjektet (Googles nye onboarding; detaljene UVERIFISERT), og `JARVIS_GOOGLE_ADS_DEVELOPER_TOKEN` er VALGFRITT (sendes kun hvis satt) - ikke lenger BLOCKED_EXTERNAL som token.
  *  - UVERIFISERT (merket i runbook): `updateMask` på camelCase-form (`amountMicros`), tegngrenser for RSA (overskrift 30, beskrivelse 90, sti 15), RSA-tekstendring (immutable via adGroupAds; `ads:mutate` ikke verifisert = DEFERRED).
  * DEFERRED: kampanjeopprettelse, budsjett-/budstrategi-bytte, delte budsjetter (nektes eksplisitt), RSA-tekstendring, kampanjenivå-negative-nøkkelord, offline-konverteringsopplasting, bruker-/kontotilgang (tilgangsstyring).
  */
@@ -208,14 +209,21 @@ export class GoogleAdsWriteTransport extends GrowthWriteTransportBase {
     this.http = new VendorHttp({ label: "google_ads", baseUrl: options.baseUrl ?? BASE_URL, ...(options.sleep ? { sleep: options.sleep } : {}) });
   }
 
+  /**
+   * Review L3: developer tokens er AVVIKLET (Google, sunset 2026-09-09: tilgangsnivået følger nå Google Cloud-prosjektet; `developer-token`-headeren er valgfri og ignoreres av API-serverne, og avvises i en
+   * fremtidig hovedversjon uten fastsatt dato - `VERIFIED_OFFICIAL_SEARCH_SNIPPET`). Tokenet er derfor VALGFRITT her: sendes (og vaskes fra feiltekst) kun når eieren har satt det, og mangler det er det ikke en feil.
+   * Fjern det fra hvelvet før en API-versjon som avviser det tas i bruk. (Den eksisterende LESE-transporten `GoogleAdsTransport` krever fortsatt tokenet - utenfor denne WP-ens skrivegrense.)
+   */
   protected async authenticate(credential: string): Promise<Auth> {
-    const developerToken = await this.options.developerToken();
-    if (!developerToken) throw new Error("google_ads_developer_token_not_configured");
+    const developerToken = (await this.options.developerToken())?.trim() || null;
     const accessToken = await (this.options.accessToken ?? googleAccessToken)(credential);
     const login = this.options.loginCustomerId ? await this.options.loginCustomerId() : null;
     return {
-      headers: { authorization: `Bearer ${accessToken}`, "developer-token": developerToken, ...(login && /^\d{10}$/.test(login.replace(/-/g, "")) ? { "login-customer-id": login.replace(/-/g, "") } : {}) },
-      secrets: [accessToken, developerToken, credential]
+      headers: {
+        authorization: `Bearer ${accessToken}`, ...(developerToken ? { "developer-token": developerToken } : {}),
+        ...(login && /^\d{10}$/.test(login.replace(/-/g, "")) ? { "login-customer-id": login.replace(/-/g, "") } : {})
+      },
+      secrets: [accessToken, credential, ...(developerToken ? [developerToken] : [])]
     };
   }
 

@@ -7,7 +7,7 @@ import {
   FORBIDDEN_MODEL_TOOL_IDS, OWNER_ONLY_NAMESPACES, SURFACE_TOOL_GRANTS, adoptCallSignal, assertManifestInvariants, assessClassDPipeline, buildToolManifest, isOutcomeUnknownMessage, type ToolDefinition, type ToolTransport
 } from "@jarvis/tool-gateway";
 import {
-  GROWTH_WRITE_PROVIDERS, GROWTH_WRITE_TOOL_IDS, Ga4WriteTransport, GbpWriteTransport, LinkedinWriteTransport, SearchConsoleWriteTransport, TiktokWriteTransport, YoutubeWriteTransport,
+  GROWTH_WRITE_PROVIDERS, GROWTH_WRITE_TOOL_IDS, Ga4WriteTransport, GbpWriteTransport, GoogleAdsWriteTransport, LinkedinWriteTransport, SearchConsoleWriteTransport, TiktokWriteTransport, YoutubeWriteTransport,
   authorizeGrowthTarget, buildGrowthToolDefinitions, composeValidator, creativeHref, creativeUrlHost, creativeUrlHref, decimalToOre, growthOpIndex, growthWriteConfigFromEnv, growthWriteSpecs, killSwitchOpen, normalizeGrowthTarget,
   oreToDecimal, parseCreativeUrlHosts, parseGrowthWritePlatforms, parseGrowthWriteTargets, periodsSignature, urlBelongsToSite, writeRequestDigest, sanitizeJournalState, stableStringify,
   type GrowthProvider
@@ -19,7 +19,7 @@ import { replyDigest } from "../src/write/gbp-write.ts";
 import { MetaAdsWriteTransport } from "../src/write/meta-ads-write.ts";
 import { GrowthVendorError, VendorHttp, classifyVendorError } from "../src/write/http.ts";
 import { assertOre, oreToMicros, MAX_ORE } from "../src/write/validators.ts";
-import { FakeVendor } from "./support/fake-vendors.ts";
+import { CID, FakeGoogleAds, FakeVendor } from "./support/fake-vendors.ts";
 
 /**
  * WP-D3 (UA-4 Growth, D-459): skrivemotoren uten database - konfigurasjon/mål-autorisasjon, validatorer, HTTP-reglene (retry, 5xx = ukjent utfall, ingen redirects, hemmelighetsvask),
@@ -868,6 +868,39 @@ describe("E4: review L2 - transportene sender den normaliserte href, aldri råst
       await expect(t.invoke("create_local_post", { ...base, summary: "Ny nyhet", action_url: bad }, "fake-refresh-token-for-test", ctx2)).rejects.toThrow("growth_precondition_failed:action_url_host_not_allowed");
     }
     expect(v.requests.filter((r) => r.method !== "GET")).toHaveLength(2);
+    await v.stop();
+  });
+});
+
+describe("E5: review L3 - Google Ads developer token er VALGFRITT (avviklet 2026-09-09)", () => {
+  const ctx3 = { identity: owner };
+  const killOpen = { financeKillSwitch: async () => false };
+
+  it("uten developer token: forespørslene sendes UTEN `developer-token`-header og lykkes (ingen `google_ads_developer_token_not_configured`); med token sendes den og vaskes fra feiltekst", async () => {
+    const v = new FakeGoogleAds(); await v.start();
+    v.requireDeveloperToken = false;
+    const without = new GoogleAdsWriteTransport({ ...killOpen, spec: specs.google_ads, baseUrl: v.baseUrl, developerToken: async () => null, accessToken: async () => "fake-access-token" });
+    const res = await without.invoke("pause_campaign", { customer_id: CID, campaign_id: "101" }, "fake-refresh-token-for-test", ctx3);
+    expect(res).toEqual({ external_id: "campaigns/101" });
+    expect(v.campaigns.get("101")?.status).toBe("PAUSED");
+    expect(v.requests.length).toBeGreaterThan(0);
+    expect(v.requests.every((r) => r.headers["developer-token"] === undefined && r.headers["authorization"] === "Bearer fake-access-token")).toBe(true);
+    // et tomt/blankt token er det samme som «ikke satt»
+    v.reset(); v.seed();
+    const blank = new GoogleAdsWriteTransport({ ...killOpen, spec: specs.google_ads, baseUrl: v.baseUrl, developerToken: async () => "   ", accessToken: async () => "fake-access-token" });
+    await blank.invoke("pause_campaign", { customer_id: CID, campaign_id: "101" }, "fake-refresh-token-for-test", ctx3);
+    expect(v.requests.every((r) => r.headers["developer-token"] === undefined)).toBe(true);
+    // satt token: sendes uendret (bakoverkompatibelt), og et avslag som siterer det vaskes
+    v.reset(); v.seed();
+    const withToken = new GoogleAdsWriteTransport({ ...killOpen, spec: specs.google_ads, baseUrl: v.baseUrl, developerToken: async () => "fake-developer-token", accessToken: async () => "fake-access-token" });
+    await withToken.invoke("pause_campaign", { customer_id: CID, campaign_id: "101" }, "fake-refresh-token-for-test", ctx3);
+    expect(v.requests.every((r) => r.headers["developer-token"] === "fake-developer-token")).toBe(true);
+    v.requireDeveloperToken = true;
+    const original = v.handler;
+    v.handler = (r) => (v.isMutation(r) ? { status: 400, json: { error: { status: "INVALID_ARGUMENT", message: "avvist for fake-developer-token" } } } : original(r));
+    v.seed();
+    const err = (await withToken.invoke("enable_campaign", { customer_id: CID, campaign_id: "102" }, "fake-refresh-token-for-test", ctx3).catch((e: Error) => e)) as Error;
+    expect(err.message).not.toContain("fake-developer-token");
     await v.stop();
   });
 });
