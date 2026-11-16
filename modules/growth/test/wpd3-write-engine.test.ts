@@ -15,6 +15,7 @@ import {
 import { GROWTH_EXPERIMENT_TOOL_ACTIONS } from "../src/experiments/index.ts";
 import { timelineProjection } from "../src/write/executor.ts";
 import { youtubeSnippetBody, youtubeStatusBody } from "../src/write/youtube-write.ts";
+import { replyDigest } from "../src/write/gbp-write.ts";
 import { GrowthVendorError, VendorHttp, classifyVendorError } from "../src/write/http.ts";
 import { assertOre, oreToMicros, MAX_ORE } from "../src/write/validators.ts";
 import { FakeVendor } from "./support/fake-vendors.ts";
@@ -275,11 +276,11 @@ describe("D: verktøydefinisjonenes invarianter for alle åtte plattformer", () 
     expect(count("meta_ads")).toEqual({ reads: 4, C: 4, D: 6 });
     expect(count("ga4")).toEqual({ reads: 2, C: 2, D: 0 });
     expect(count("search_console")).toEqual({ reads: 3, C: 2, D: 0 });
-    expect(count("google_business_profile")).toEqual({ reads: 3, C: 5, D: 0 });
+    expect(count("google_business_profile")).toEqual({ reads: 4, C: 5, D: 0 });
     expect(count("youtube")).toEqual({ reads: 1, C: 2, D: 1 });
     expect(count("linkedin")).toEqual({ reads: 1, C: 1, D: 2 });
     expect(count("tiktok")).toEqual({ reads: 1, C: 1, D: 3 });
-    expect(reads).toHaveLength(19);
+    expect(reads).toHaveLength(20);
     expect(writes).toHaveLength(43);
     expect(new Set(allDefs.map((d) => `${d.tool_id}.${d.action}`)).size).toBe(allDefs.length);
   });
@@ -442,6 +443,7 @@ describe("E: forespørselsformer for de seks kompakte plattformene (falske lever
       if (r.method === "GET" && r.path === "/locations/123456789") return { json: { title: "Butikk", websiteUri: "https://example.test", regularHours: { periods }, profile: { description: "Gammel" } } };
       if (r.method === "PATCH" && r.path === "/locations/123456789") { if (r.body["regularHours"]) periods = r.body["regularHours"].periods; return { json: {} }; }
       if (r.method === "GET" && r.path.endsWith("/reviews")) return { json: { reviews: [{ reviewId: "rev-1", starRating: "FIVE", comment: "Bra!", reviewer: { displayName: "Navn Navnesen" }, ...(reply ? { reviewReply: { comment: reply } } : {}) }] } };
+      if (r.method === "GET" && r.path.endsWith("/reviews/rev-1")) return { json: { reviewId: "rev-1", starRating: "FIVE", comment: "Bra!", reviewer: { displayName: "Navn Navnesen" }, createTime: "2026-10-01T10:00:00Z", ...(reply ? { reviewReply: { comment: reply } } : {}) } };
       if (r.method === "PUT" && r.path.endsWith("/reviews/rev-1/reply")) { reply = r.body["comment"]; return { json: { comment: reply } }; }
       if (r.method === "DELETE" && r.path.endsWith("/reply")) { reply = null; return { json: {} }; }
       return { status: 404, json: {} };
@@ -665,5 +667,78 @@ describe("E2: review M3 - YouTube-skriving ødelegger aldri data (originalverdie
     expect(state).toMatchObject({ default_language: "nb", publish_at: "2026-12-24T10:00:00Z", privacy_status: "private", category_id: "22" });
     expect(state["description"]).not.toMatch(/\p{Cc}/u);
     await v.stop();
+  });
+});
+
+describe("E3: review M4 - Business Profile-omtaler: tilstanden er ÉN omtale og bærer aldri omtaletekst, anmelders navn eller svartekst", () => {
+  const killOpen = { financeKillSwitch: async () => false };
+  const token = { accessToken: async () => "fake-access-token" };
+  const call = (t: ToolTransport, action: string, params: Record<string, JsonValue>) => t.invoke(action, params, "fake-refresh-token-for-test", { identity: owner });
+  const REVIEWS: Record<string, { stars: string; comment: string; name: string; reply?: string }> = {
+    "rev-1": { stars: "FIVE", comment: "Ola Nordmann her: jeg har kreft og fikk god hjelp", name: "Ola Nordmann" },
+    "rev-2": { stars: "ONE", comment: "Kari Hansen klager på ryggoperasjonen", name: "Kari Hansen", reply: "Beklager, Kari" },
+    "rev-3": { stars: "FOUR", comment: "Per Persen anbefaler", name: "Per Persen" }
+  };
+
+  it("get_review leser ÉN omtale og returnerer kun id, stjerner, tidspunkt, om svar finnes og en digest - ingen tekst, ingen navn, ikke svarteksten", async () => {
+    const v = new FakeVendor(); await v.start();
+    v.handler = (r) => {
+      const m = /\/reviews\/([^/]+)$/.exec(r.path);
+      if (r.method === "GET" && m) {
+        const rev = REVIEWS[m[1]!];
+        return rev ? { json: { reviewId: m[1], starRating: rev.stars, comment: rev.comment, reviewer: { displayName: rev.name }, createTime: "2026-10-01T10:00:00Z", ...(rev.reply ? { reviewReply: { comment: rev.reply } } : {}) } } : { status: 404, json: {} };
+      }
+      return { status: 404, json: {} };
+    };
+    const t = new GbpWriteTransport({ ...killOpen, ...token, spec: specs.google_business_profile, baseUrl: v.baseUrl, v4BaseUrl: v.baseUrl });
+    const base = { account_id: "1111", location_id: "123456789" };
+    const state = (await call(t, "get_review", { ...base, review_id: "rev-2" })).data as Record<string, any>;
+    expect(state).toMatchObject({ review_id: "rev-2", star_rating: "ONE", create_time: "2026-10-01T10:00:00Z", has_reply: true, reply_digest: replyDigest("Beklager, Kari"), finance_kill_switch_active: false });
+    const text = JSON.stringify(state);
+    for (const secret of ["Kari", "Hansen", "ryggoperasjonen", "Beklager", "Ola Nordmann", "kreft"]) expect(text, secret).not.toContain(secret);
+    expect(v.requests).toHaveLength(1); // ÉN omtale, aldri hele listen
+    expect(v.requests[0]!.path).toBe("/accounts/1111/locations/123456789/reviews/rev-2");
+    expect(((await call(t, "get_review", { ...base, review_id: "rev-1" })).data as Record<string, any>)["has_reply"]).toBe(false);
+    expect((await call(t, "get_review", { ...base, review_id: "rev-ukjent" })).data).toBeNull();
+    await expect(call(t, "get_review", { ...base, review_id: "../etc" })).rejects.toThrow("growth_invalid_review_id");
+    await v.stop();
+  });
+
+  it("svar på omtale: tilstanden som valideres og verifiseres er den ENE omtalen; samme svar er en NOOP (digest), erstatning/sletting virker, ukjent omtale er «ikke funnet»", async () => {
+    const v = new FakeVendor(); await v.start();
+    const reviews: typeof REVIEWS = JSON.parse(JSON.stringify(REVIEWS));
+    v.handler = (r) => {
+      const m = /\/reviews\/([^/]+)(\/reply)?$/.exec(r.path);
+      const rev = m ? reviews[m[1]!] : undefined;
+      if (r.method === "GET" && m && !m[2]) return rev ? { json: { reviewId: m[1], starRating: rev.stars, comment: rev.comment, reviewer: { displayName: rev.name }, ...(rev.reply ? { reviewReply: { comment: rev.reply } } : {}) } } : { status: 404, json: {} };
+      if (r.method === "PUT" && m?.[2] && rev) { rev.reply = r.body["comment"]; return { json: { comment: rev.reply } }; }
+      if (r.method === "DELETE" && m?.[2] && rev) { delete rev.reply; return { json: {} }; }
+      return { status: 404, json: {} };
+    };
+    const t = new GbpWriteTransport({ ...killOpen, ...token, spec: specs.google_business_profile, baseUrl: v.baseUrl, v4BaseUrl: v.baseUrl });
+    const base = { account_id: "1111", location_id: "123456789" };
+    await call(t, "reply_to_review", { ...base, review_id: "rev-3", comment: "Takk for omtalen!" });
+    expect(reviews["rev-3"]!.reply).toBe("Takk for omtalen!");
+    expect(await call(t, "reply_to_review", { ...base, review_id: "rev-3", comment: "Takk   for\nomtalen!" })).toEqual({ data: { unchanged: true } }); // renset likt = NOOP
+    await call(t, "reply_to_review", { ...base, review_id: "rev-3", comment: "Nytt svar" });
+    expect(reviews["rev-3"]!.reply).toBe("Nytt svar");
+    expect(await call(t, "delete_review_reply", { ...base, review_id: "rev-3" })).toEqual({ external_id: "rev-3" });
+    expect(reviews["rev-3"]!.reply).toBeUndefined();
+    expect(await call(t, "delete_review_reply", { ...base, review_id: "rev-3" })).toEqual({ data: { unchanged: true } });
+    await expect(call(t, "reply_to_review", { ...base, review_id: "finnes-ikke", comment: "x" })).rejects.toThrow("gbp_target_not_found");
+    // aldri hele listen: ingen forespørsel mot `/reviews` uten id
+    expect(v.requests.filter((r) => r.method === "GET").every((r) => /\/reviews\/[^/]+$/.test(r.path))).toBe(true);
+    await v.stop();
+  });
+
+  it("svargrensen er 4096 BYTES: flerbyte-tegn som overskrider den nektes av skjemaet FØR sending, ren ASCII opp til 4096 er lov", () => {
+    const spec = specs.google_business_profile.ops.find((o) => o.action === "reply_to_review")!;
+    const base = { account_id: "1111", location_id: "123456789", review_id: "rev-1" };
+    expect(z.object(spec.shape).safeParse({ ...base, comment: "a".repeat(4096) }).success).toBe(true);
+    expect(z.object(spec.shape).safeParse({ ...base, comment: "a".repeat(4097) }).success).toBe(false);
+    expect(z.object(spec.shape).safeParse({ ...base, comment: "æ".repeat(2048) }).success).toBe(true);
+    expect(z.object(spec.shape).safeParse({ ...base, comment: "æ".repeat(2049) }).success).toBe(false);
+    expect(z.object(spec.shape).safeParse({ ...base, comment: "😀".repeat(1025) }).success).toBe(false);
+    expect(z.object(spec.shape).safeParse({ ...base, comment: "" }).success).toBe(false);
   });
 });

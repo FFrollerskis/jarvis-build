@@ -29,7 +29,16 @@ let appPool: pg.Pool;
 let gads: FakeGoogleAds;
 let meta: FakeMeta;
 let yt: FakeVendor;
+let gbp: FakeVendor;
 let ytVideo: Record<string, unknown> | null = null;
+/** Omtaler med personopplysninger (navn og helsetekst) - skal ALDRI havne i journal, ledger eller audit (review M4). */
+const GBP_REVIEWS: Record<string, { stars: string; comment: string; name: string; reply?: string }> = {
+  "rev-1": { stars: "FIVE", comment: "Ola Nordmann her. Jeg har kreft og fikk veldig god hjelp", name: "Ola Nordmann" },
+  "rev-2": { stars: "ONE", comment: "Kari Hansen klager på ryggoperasjonen sin", name: "Kari Hansen", reply: "Beklager at du følte det slik, Kari" },
+  "rev-3": { stars: "FOUR", comment: "Per Persen anbefaler klinikken for depresjon", name: "Per Persen" },
+  "rev-4": { stars: "TWO", comment: "Lise Lie: ventetiden var lang", name: "Lise Lie" },
+  "rev-5": { stars: "FIVE", comment: "Nils Nilsen: alt var topp", name: "Nils Nilsen" }
+};
 const YT_CHANNEL = "UCabcdefghijklmnopqrstuv";
 let gateway: ToolGateway;
 let journal: GrowthWriteJournal;
@@ -42,7 +51,7 @@ const B = "tenant-d3-wr-b";
 const owner: IdentityContext = { person_id: "person-d3-wr-owner", tenant_id: A, memory_space_id: "business", session_id: "sess-d3-wr", device_id: "dev-d3-wr", channel: "api", auth_strength: "signed" };
 const delegate: IdentityContext = { ...owner, person_id: "person-d3-wr-delegate", session_id: "sess-d3-wr-d" };
 const ENV = {
-  JARVIS_GROWTH_WRITE_PLATFORMS: "google_ads,meta_ads,youtube", JARVIS_GROWTH_WRITE_TARGETS: `google_ads:123-456-7890,meta_ads:act_${ACCT},youtube:${"UCabcdefghijklmnopqrstuv"}`, JARVIS_GROWTH_CREATIVE_URL_HOSTS: "example.test"
+  JARVIS_GROWTH_WRITE_PLATFORMS: "google_ads,meta_ads,youtube,google_business_profile", JARVIS_GROWTH_WRITE_TARGETS: `google_ads:123-456-7890,meta_ads:act_${ACCT},youtube:${"UCabcdefghijklmnopqrstuv"},google_business_profile:locations/123456789`, JARVIS_GROWTH_CREATIVE_URL_HOSTS: "example.test"
 };
 const config = growthWriteConfigFromEnv(ENV);
 let linkedCampaignId = "";
@@ -65,6 +74,19 @@ beforeAll(async () => {
   appPool = createPool({ host: "127.0.0.1", port: leased.port, database: "jarvis_test", user: "jarvis_d3_wr", password: "pw2" });
   gads = new FakeGoogleAds();
   meta = new FakeMeta();
+  gbp = new FakeVendor();
+  gbp.handler = (r) => {
+    const m = /^\/accounts\/1111\/locations\/123456789\/reviews(?:\/([^/]+)(\/reply)?)?$/.exec(r.path);
+    if (!m) return { status: 404, json: {} };
+    const review = (id: string) => { const rev = GBP_REVIEWS[id]; return rev ? { reviewId: id, starRating: rev.stars, comment: rev.comment, reviewer: { displayName: rev.name }, createTime: "2026-10-01T10:00:00Z", ...(rev.reply ? { reviewReply: { comment: rev.reply } } : {}) } : null; };
+    if (r.method === "GET" && m[1] === undefined) return { json: { reviews: Object.keys(GBP_REVIEWS).map(review) } };
+    const rev = m[1] ? GBP_REVIEWS[m[1]] : undefined;
+    if (r.method === "GET" && m[1] && !m[2]) return rev ? { json: review(m[1]) } : { status: 404, json: {} };
+    if (r.method === "PUT" && m[2] && rev) { rev.reply = r.body["comment"]; return { json: { comment: rev.reply } }; }
+    if (r.method === "DELETE" && m[2] && rev) { delete rev.reply; return { json: {} }; }
+    return { status: 404, json: {} };
+  };
+  await gbp.start();
   yt = new FakeVendor();
   yt.handler = (r) => {
     if (r.method === "GET" && r.path === "/videos") return { json: { items: ytVideo && ytVideo["id"] === r.query.get("id") ? [ytVideo] : [] } };
@@ -83,7 +105,7 @@ beforeAll(async () => {
   const policy = new PolicyGateway({ devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch, controls, authority: { owner_person_id: owner.person_id, owner_tenants: [A] } });
   const secrets: SecretProvider = {
     name: "fake",
-    get: async (ref) => (ref === "JARVIS_GOOGLE_ADS_REFRESH_TOKEN" || ref === "JARVIS_YOUTUBE_REFRESH_TOKEN" ? "fake-refresh-token-for-test" : ref === "JARVIS_META_ADS_ACCESS_TOKEN" ? "fake-meta-token-for-test" : null)
+    get: async (ref) => (ref === "JARVIS_GOOGLE_ADS_REFRESH_TOKEN" || ref === "JARVIS_YOUTUBE_REFRESH_TOKEN" || ref === "JARVIS_GOOGLE_BUSINESS_PROFILE_REFRESH_TOKEN" ? "fake-refresh-token-for-test" : ref === "JARVIS_META_ADS_ACCESS_TOKEN" ? "fake-meta-token-for-test" : null)
   };
   gateway = new ToolGateway(appPool, policy, secrets, controls, undefined, {
     classDPipeline: { enforce: true, notifier: { ready: () => state.notifierReady, notify: async (n) => { notifications.push(n); } } },
@@ -91,7 +113,7 @@ beforeAll(async () => {
   });
   const transports = createGrowthWriteTransports(config, {
     readSecret: async (ref) => (ref === "JARVIS_GOOGLE_ADS_DEVELOPER_TOKEN" ? "fake-developer-token" : null), env: {}, googleAccessToken: async () => "fake-access-token", sleep: async () => undefined,
-    baseUrls: { google_ads: gads.baseUrl, meta_ads: meta.baseUrl, youtube: yt.baseUrl },
+    baseUrls: { google_ads: gads.baseUrl, meta_ads: meta.baseUrl, youtube: yt.baseUrl, google_business_profile: gbp.baseUrl, gbp_v4: gbp.baseUrl },
     financeKillSwitch: async () => { if (state.killSwitch === "error") throw new Error("db down"); return state.killSwitch; }
   });
   // Produksjonsgrensene (10 skriv/min, 30 les/min per handling) bevises i test A; her heves de så de mange testkallene ikke treffer takene.
@@ -104,6 +126,7 @@ afterAll(async () => {
   await gads?.stop();
   await meta?.stop();
   await yt?.stop();
+  await gbp?.stop();
   await appPool?.end();
   await adminPool?.end();
   await stopPg?.();
@@ -129,7 +152,7 @@ const mMut = () => meta.requests.filter(meta.isMutation);
 describe("A: registrering er plattformstyrt og kjeden er komplett", () => {
   it("kun de aktiverte plattformene får verktøy (alle i eier-eksklusive growth_*-navnerom); ingen konfig = ingen verktøy", () => {
     const defs = growthWriteToolDefinitions(config, createGrowthWriteTransports(config, { readSecret: async () => null, env: {} }));
-    expect(new Set(defs.map((d) => d.tool_id))).toEqual(new Set(["growth_googleads", "growth_metaads", "growth_youtube"]));
+    expect(new Set(defs.map((d) => d.tool_id))).toEqual(new Set(["growth_googleads", "growth_metaads", "growth_youtube", "growth_gbp"]));
     expect(defs.every((d) => d.owner_only === true && d.parameterAuthorizer !== undefined)).toBe(true);
     // produksjons-rate-grenser: skriving maks 10/min, lesing maks 30/min per handling (aldri uten tak)
     for (const d of defs) expect(d.rate_limit_per_minute, d.action).toBe(d.capability_class === "A" ? 30 : 10);
@@ -680,7 +703,7 @@ describe("L: review M2 - tidslinjen (modell-lesbar via growth.list_events) bære
     const events = await growth.listEvents(A, "business", linkedCampaignId);
     const written = events.filter((e) => e.event_type.startsWith("provider_write") && e.metadata["write_id"] === res.write.write_id);
     expect(written).toHaveLength(1);
-    expect(JSON.stringify(events)).not.toMatch(/SYSTEM|ignore all|remove_campaign|wire money|attacker/i);
+    expect(JSON.stringify(events)).not.toMatch(/SYSTEM: ignore all previous|call growth_googleads|wire money|attacker/i); // (handlingsnavnet `remove_campaign` fra andre tester står legitimt i en oppsummering)
     const meta = written[0]!.metadata as Record<string, any>;
     expect(meta).toMatchObject({ write_id: res.write.write_id, provider: "google_ads", action: "set_campaign_budget", outcome: "SUCCESS", risk_class: "D" });
     expect(meta["before"]).toMatchObject({ budget_amount_micros: 500_000_000, budget_shared: false, currency: "NOK", serving_status: "SERVING" });
@@ -703,5 +726,41 @@ describe("L: review M2 - tidslinjen (modell-lesbar via growth.list_events) bære
     const events = await growth.listEvents(A, "business", linkedCampaignId);
     expect(events.filter((e) => [failed.write.write_id, unknown.write.write_id].includes(String(e.metadata["write_id"])))).toHaveLength(2);
     expect(JSON.stringify(events)).not.toMatch(/Ignore previous instructions|delete everything/);
+  });
+});
+
+describe("M: review M4 - ingen omtaletekst eller anmelder-navn i journal, tool_executions eller audit_events", () => {
+  it("svar på og sletting av svar: kun ÉN omtale leses, og hele sporingen (journal, ledger, audit) er fri for omtaletekst, navn og svartekst", async () => {
+    gbp.reset();
+    const reply = "Takk for tilbakemeldingen, vi følger opp";
+    const first = await run({ provider: "google_business_profile", action: "reply_to_review", parameters: { account_id: "1111", location_id: "123456789", review_id: "rev-3", comment: reply } });
+    expect(first.outcome).toBe("SUCCESS");
+    expect(GBP_REVIEWS["rev-3"]!.reply).toBe(reply);
+    expect(first.write.before_state).toMatchObject({ review_id: "rev-3", star_rating: "FOUR", has_reply: false, reply_digest: null });
+    expect(first.write.after_state).toMatchObject({ review_id: "rev-3", has_reply: true });
+    const del = await run({ provider: "google_business_profile", action: "delete_review_reply", parameters: { account_id: "1111", location_id: "123456789", review_id: "rev-3" } });
+    expect(del.outcome).toBe("SUCCESS");
+    expect(GBP_REVIEWS["rev-3"]!.reply).toBeUndefined();
+    // ÉN omtale: aldri listen over alle
+    expect(gbp.requests.filter((r) => r.method === "GET").every((r) => /\/reviews\/rev-3$/.test(r.path))).toBe(true);
+    const ids = [first.write.write_id, del.write.write_id];
+    const journal = (await adminPool.query(`SELECT to_jsonb(j) AS row FROM growth_write_journal j WHERE write_id = ANY($1)`, [ids])).rows;
+    const ledger = (await adminPool.query(`SELECT to_jsonb(t) AS row FROM tool_executions t WHERE tenant_id = '${A}' AND tool_id = 'growth_gbp' AND action IN ('reply_to_review', 'delete_review_reply')`)).rows;
+    const audit = (await adminPool.query(`SELECT to_jsonb(a) AS row FROM audit_events a WHERE tenant_id = '${A}' AND tool_id = 'growth_gbp' AND action IN ('reply_to_review', 'delete_review_reply')`)).rows;
+    expect(journal).toHaveLength(2);
+    expect(ledger.length).toBeGreaterThanOrEqual(2);
+    expect(audit.length).toBeGreaterThanOrEqual(2);
+    const blob = JSON.stringify([journal, ledger, audit]);
+    const personal = Object.values(GBP_REVIEWS).flatMap((r) => [r.name, r.comment, ...r.name.split(" ")]);
+    for (const text of [...personal, reply, "Beklager at du følte det slik"]) expect(blob, text).not.toContain(text);
+    expect(blob).toContain("rev-3");
+  });
+
+  it("omtaler utenfor de 50 nyeste er nåbare via id (get_review), og en ukjent omtale er «ikke funnet» uten at noe sendes", async () => {
+    gbp.reset();
+    const unknown = await run({ provider: "google_business_profile", action: "reply_to_review", parameters: { account_id: "1111", location_id: "123456789", review_id: "rev-finnes-ikke", comment: "x" } });
+    expect(unknown.outcome).toBe("FAILED");
+    expect(unknown.reason).toMatch(/target_not_found/);
+    expect(gbp.requests.filter((r) => r.method !== "GET")).toHaveLength(0);
   });
 });

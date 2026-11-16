@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { JsonValue } from "@jarvis/contracts";
 import { creativeUrlHost, normalizeGrowthTarget, type GrowthWriteConfig } from "./config.ts";
@@ -13,13 +14,29 @@ import { asArr, asObj, assertDigits, str, zDigits, zText, type Params } from "./
  * D-41 (`VERIFIED_OFFICIAL_SEARCH_SNIPPET`, delvis): Business Information API v1 `PATCH /v1/locations/{id}?updateMask=...`; v4 `localPosts` (create/get/list/patch/delete) og `reviews.updateReply`/`deleteReply`
  * (`PUT/DELETE .../reviews/{id}/reply`, kun verifiserte lokasjoner). API-TILGANG KREVER GODKJENNING FRA GOOGLE (standardkvote er 0 forespørsler/min til tilgang er innvilget) = BLOCKED_EXTERNAL.
  * UVERIFISERT: feltnavn for regularHours/profile.description mot primærkilde, `readMask`-verdier, `TimeOfDay` for sen stengetid. Anmelders navn leses ALDRI (personopplysning uten formål).
+ * PERSONVERN (review M4): omtaletekst er brukerskrevet og kan inneholde personopplysninger (også helse). Skrivehandlingene (`reply_to_review`, `delete_review_reply`) bruker `get_review` (ÉN omtale, `reviews.get`) som tilstand:
+ * kun id, stjerner, tidspunkt, om eieren har svart og en DIGEST av eierens svar - aldri omtalens tekst, aldri anmelders navn, aldri svarteksten. Dermed havner ingen omtaletekst i journalen, `tool_executions` eller
+ * `audit_events` (der erasure ikke rekker). `list_reviews` (klasse A, kun for eieren å lese) viser teksten, men resultatet lagres ingen steder. Nåbarhet: `list_reviews` viser de 50 NYESTE omtalene (ingen paginering bygget =
+ * DEFERRED); `get_review`/`reply_to_review`/`delete_review_reply` virker på ENHVER omtale-id eieren kjenner. Leverandørens grense for svar er 4096 BYTES (ikke tegn).
  * DEFERRED: lokasjonsopprettelse/-sletting, kategorier, attributter, medier, spørsmål og svar, bekreftelse (verification), tilgangsstyring (Account Management API `admins` create/delete: roller IKKE bekreftet).
  */
 const INFO_BASE_URL = "https://mybusinessbusinessinformation.googleapis.com/v1";
 const V4_BASE_URL = "https://mybusiness.googleapis.com/v4";
 const DAYS = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"] as const;
 const TIME = /^(?:[01]\d|2[0-3]):[0-5]\d$|^24:00$/;
+const REVIEW_ID = /^[A-Za-z0-9_-]{1,200}$/;
+const STAR_RATINGS: ReadonlySet<string> = new Set(["STAR_RATING_UNSPECIFIED", "ONE", "TWO", "THREE", "FOUR", "FIVE"]);
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
+/** Leverandørens grense for et svar på en omtale er 4096 BYTES (ikke tegn): 4000 flerbyte-tegn kunne overskredet den. */
+const REPLY_MAX_BYTES = 4096;
+const replyText = z.string().min(1).max(REPLY_MAX_BYTES).refine((value) => Buffer.byteLength(value, "utf8") <= REPLY_MAX_BYTES, "reply_too_long_bytes");
+/** Digest av eierens svartekst (renset på samme måte på begge sider): sammenligning av «samme svar» uten at teksten lagres i journal/ledger/audit. */
+export const replyDigest = (text: unknown): string => createHash("sha256").update(cleanText(text, REPLY_MAX_BYTES) ?? "").digest("hex");
 
+const assertReviewId = (value: unknown): string => {
+  if (typeof value !== "string" || !REVIEW_ID.test(value)) throw new Error("growth_invalid_review_id");
+  return value;
+};
 const locationOf = (p: Params): string => {
   const v = normalizeGrowthTarget("google_business_profile", p["location_id"]);
   if (v === null) throw new Error("growth_invalid_location_id");
@@ -29,7 +46,6 @@ const safeLocation = (p: Params): string => normalizeGrowthTarget("google_busine
 const locationShape = { location_id: z.string().min(4).max(34) };
 const accountLocationShape = { account_id: zDigits(4, 25), ...locationShape };
 const periodShape = z.object({ open_day: z.enum(DAYS), open_time: z.string().regex(TIME), close_day: z.enum(DAYS), close_time: z.string().regex(TIME) }).strict();
-const reviewsOf = (s: JsonValue): Array<Record<string, unknown>> => asArr(asObj(s)["reviews"]).map(asObj);
 const postsOf = (s: JsonValue): Array<Record<string, unknown>> => asArr(asObj(s)["posts"]).map(asObj);
 
 const toTimeOfDay = (hhmm: string) => ({ hours: Number(hhmm.slice(0, 2)), minutes: Number(hhmm.slice(3, 5)) });
@@ -53,7 +69,11 @@ export function gbpWriteSpec(config: Pick<GrowthWriteConfig, "creativeHosts">): 
   const ref = (p: Params, what: string) => `gbp:locations/${safeLocation(p)}:${what}`;
   const ops: OpSpec[] = [
     { action: "get_location", description: "Les lokasjonens profil (tittel, nettsted, telefon, beskrivelse, åpningstider) - ubetrodd leverandørdata", shape: locationShape, risk: "A", targetParam: "location_id", scopes: readScopes },
-    { action: "list_reviews", description: "List omtalene for en lokasjon (stjerner, tekst, om det finnes svar) - UBETRODD brukertekst; anmelders navn leses aldri", shape: accountLocationShape, risk: "A", targetParam: "location_id", scopes: readScopes },
+    { action: "list_reviews", description: "List de 50 NYESTE omtalene for en lokasjon (stjerner, tekst, om det finnes svar) - UBETRODD brukertekst som kun vises til eieren (lagres aldri); anmelders navn leses aldri", shape: accountLocationShape, risk: "A", targetParam: "location_id", scopes: readScopes },
+    {
+      action: "get_review", risk: "A", targetParam: "location_id", scopes: readScopes, shape: { ...accountLocationShape, review_id: z.string().regex(REVIEW_ID) },
+      description: "Les ÉN omtale: id, stjerner, tidspunkt, om eieren har svart og en digest av svaret - ALDRI omtalens tekst, anmelders navn eller svarteksten (personvern). Tilstanden som svar-/slett-handlingene bygger på."
+    },
     { action: "list_local_posts", description: "List de lokale innleggene for en lokasjon (sammendrag, tilstand) - ubetrodd leverandørdata", shape: accountLocationShape, risk: "A", targetParam: "location_id", scopes: readScopes },
     {
       action: "update_location_hours", risk: "C", spend: "none", targetParam: "location_id", stateAction: "get_location", scopes,
@@ -88,23 +108,23 @@ export function gbpWriteSpec(config: Pick<GrowthWriteConfig, "creativeHosts">): 
       target: (p) => ref(p, "local_post"), summary: (_s, p) => `Business Profile: publiser lokalt innlegg på ${safeLocation(p)}`
     },
     {
-      action: "reply_to_review", risk: "C", spend: "none", targetParam: "location_id", stateAction: "list_reviews", scopes,
-      description: "Svar på en omtale (eller erstatt eierens eksisterende svar). Kun verifiserte lokasjoner. Identisk svar fra før gir ingen endring.",
-      shape: { ...accountLocationShape, review_id: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/), comment: zText(1, 4000) },
-      rollback: "delete_review_reply fjerner svaret; forrige svartekst (hvis noen) ligger i før-tilstanden",
-      targetCheck: (s, p) => reviewsOf(s).some((r) => r["review_id"] === p["review_id"]),
-      noop: (s, p) => reviewsOf(s).some((r) => r["review_id"] === p["review_id"] && r["reply_comment"] === cleanText(p["comment"], 4000)),
-      post: (a, p) => reviewsOf(a).some((r) => r["review_id"] === p["review_id"] && r["reply_comment"] === cleanText(p["comment"], 4000)),
+      action: "reply_to_review", risk: "C", spend: "none", targetParam: "location_id", stateAction: "get_review", scopes,
+      description: "Svar på en omtale (eller erstatt eierens eksisterende svar). Kun verifiserte lokasjoner. Identisk svar fra før gir ingen endring. Svaret er maks 4096 BYTES. Journal/audit bærer aldri omtalens tekst eller svarteksten (kun en digest).",
+      shape: { ...accountLocationShape, review_id: z.string().regex(REVIEW_ID), comment: replyText },
+      rollback: "delete_review_reply fjerner svaret. Forrige svartekst er IKKE journalført (personvern: den kan nevne omtaleren) - kun en digest; ta vare på teksten fra Google-profilen FØR et eksisterende svar erstattes",
+      targetCheck: (s, p) => asObj(s)["review_id"] === p["review_id"],
+      noop: (s, p) => asObj(s)["has_reply"] === true && asObj(s)["reply_digest"] === replyDigest(p["comment"]),
+      post: (a, p) => asObj(a)["has_reply"] === true && asObj(a)["reply_digest"] === replyDigest(p["comment"]),
       target: (p) => ref(p, `review:${typeof p["review_id"] === "string" ? (p["review_id"] as string).slice(0, 60) : "?"}:reply`),
       summary: (_s, p) => `Business Profile: svar på omtale i ${safeLocation(p)}`
     },
     removeOp({
-      action: "delete_review_reply", label: "Business Profile-svar på omtale", spend: "none", stateAction: "list_reviews", targetParam: "location_id", risk: "C", scopes,
-      shape: { ...accountLocationShape, review_id: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/) },
-      statusOf: (s, p) => { const r = reviewsOf(s).find((x) => x["review_id"] === p["review_id"]); return r === undefined ? null : r["has_reply"] === true ? "PRESENT" : "REMOVED"; },
-      targetCheck: (s, p) => reviewsOf(s).some((r) => r["review_id"] === p["review_id"]), removed: ["REMOVED"],
+      action: "delete_review_reply", label: "Business Profile-svar på omtale", spend: "none", stateAction: "get_review", targetParam: "location_id", risk: "C", scopes,
+      shape: { ...accountLocationShape, review_id: z.string().regex(REVIEW_ID) },
+      statusOf: (s) => (asObj(s)["has_reply"] === true ? "PRESENT" : "REMOVED"),
+      targetCheck: (s, p) => asObj(s)["review_id"] === p["review_id"], removed: ["REMOVED"],
       ref: (p) => ref(p, `review:${typeof p["review_id"] === "string" ? (p["review_id"] as string).slice(0, 60) : "?"}:reply`),
-      rollback: "reply_to_review med forrige svartekst (fra før-tilstanden) gjenoppretter svaret"
+      rollback: "reply_to_review med forrige svartekst gjenoppretter svaret - teksten er IKKE journalført (personvern; kun en digest), så den må hentes fra Google-profilen/eierens egen kopi FØR svaret slettes"
     })
   ];
   return { provider: "google_business_profile", toolId: "growth_gbp", credentialRef: "JARVIS_GOOGLE_BUSINESS_PROFILE_REFRESH_TOKEN", ops };
@@ -142,13 +162,29 @@ export class GbpWriteTransport extends GoogleOAuthTransport {
           description: cleanText(asObj(o["profile"])["description"], 750), regular_hours: periods
         };
       }
+      case "get_review": {
+        // Review M4: ÉN omtale, KUN metadata. Omtalens tekst, anmelders navn og svarteksten leses ut av responsen og forkastes - kun en digest av svaret beholdes (for «samme svar»-sammenligning).
+        const review = assertReviewId(p["review_id"]);
+        const res = await this.v4.request({ method: "GET", path: this.v4Path(p, `/reviews/${encodeURIComponent(review)}`), headers: auth.headers, secrets: auth.secrets, allowNotFound: true });
+        if (res === null) return null;
+        const r = asObj(res.json);
+        if (str(r["reviewId"]) !== review) return null; // en annen omtale enn den vi ba om er «ikke funnet»
+        const reply = asObj(r["reviewReply"]);
+        const rating = str(r["starRating"]);
+        const created = str(r["createTime"]);
+        const replyComment = str(reply["comment"]);
+        return {
+          location_id: location, review_id: review, star_rating: rating !== null && STAR_RATINGS.has(rating) ? rating : null, create_time: created !== null && ISO_TIME.test(created) ? created : null,
+          has_reply: replyComment !== null && replyComment.trim().length > 0, reply_digest: replyComment !== null && replyComment.trim().length > 0 ? replyDigest(replyComment) : null
+        };
+      }
       case "list_reviews": {
         const res = await this.v4.request({ method: "GET", path: this.v4Path(p, "/reviews"), query: { pageSize: "50" }, headers: auth.headers, secrets: auth.secrets, allowNotFound: true });
         if (res === null) return null;
         const reviews = asArr(asObj(res.json)["reviews"]).slice(0, 50).map((raw) => {
           const r = asObj(raw);
           const reply = asObj(r["reviewReply"]);
-          return { review_id: str(r["reviewId"]), star_rating: str(r["starRating"]), comment: cleanText(r["comment"], 500), create_time: str(r["createTime"]), has_reply: str(reply["comment"]) !== null, reply_comment: cleanText(reply["comment"], 4000) };
+          return { review_id: str(r["reviewId"]), star_rating: str(r["starRating"]), comment: cleanText(r["comment"], 500), create_time: str(r["createTime"]), has_reply: str(reply["comment"]) !== null, reply_comment: cleanText(reply["comment"], REPLY_MAX_BYTES) };
         });
         return { location_id: location, reviews };
       }
