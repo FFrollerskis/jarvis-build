@@ -30,43 +30,42 @@ export class FakeDb {
   failAuditWrites = false;
 
   pool(): pg.Pool {
-    const self = this;
     return {
       connect: async () => {
         let tenant = "";
         return {
           query: async (sql: string, params: unknown[] = []) => {
             const text = sql.trim();
-            if (/^(BEGIN|COMMIT|ROLLBACK)/i.test(text)) { self.statements.push(text.split(/\s/)[0]!.toUpperCase()); return { rows: [] }; }
-            if (text.includes("set_config")) { tenant = String(params[0]); self.statements.push("SET_TENANT"); return { rows: [] }; }
+            if (/^(BEGIN|COMMIT|ROLLBACK)/i.test(text)) { this.statements.push(text.split(/\s/)[0]!.toUpperCase()); return { rows: [] }; }
+            if (text.includes("set_config")) { tenant = String(params[0]); this.statements.push("SET_TENANT"); return { rows: [] }; }
             if (text.includes("FROM cost_events") && text.includes("provider = $4")) {
-              self.spendReads += 1;
-              self.statements.push("READ_CLAUDE_SPEND");
-              if (self.spendReadError !== null) throw self.spendReadError;
-              if (self.spendReadRow !== null) return { rows: [self.spendReadRow] };
-              const v = self.spend.get(tenant) ?? 0;
+              this.spendReads += 1;
+              this.statements.push("READ_CLAUDE_SPEND");
+              if (this.spendReadError !== null) throw this.spendReadError;
+              if (this.spendReadRow !== null) return { rows: [this.spendReadRow] };
+              const v = this.spend.get(tenant) ?? 0;
               return { rows: [{ window_ore: v, trailing_ore: v }] };
             }
-            if (text.includes("FROM cost_events")) { self.statements.push("READ_BUDGET_GUARD"); return { rows: [{ spent: self.guardSpentOre }] }; }
+            if (text.includes("FROM cost_events")) { this.statements.push("READ_BUDGET_GUARD"); return { rows: [{ spent: this.guardSpentOre }] }; }
             if (text.includes("INSERT INTO cost_events")) {
-              if (/\$4, 0,/.test(text)) { self.statements.push("INSERT_COST_FAILED"); return { rows: [] }; }
-              self.statements.push("INSERT_COST");
+              if (/\$4, 0,/.test(text)) { this.statements.push("INSERT_COST_FAILED"); return { rows: [] }; }
+              this.statements.push("INSERT_COST");
               const row = { tenant_id: String(params[0]), provider: String(params[5]), model: String(params[6]), amount_ore: Number(params[4]), purpose: params[9] === null ? null : String(params[9]) };
-              self.costRows.push(row);
-              if (row.provider === "anthropic") self.spend.set(row.tenant_id, (self.spend.get(row.tenant_id) ?? 0) + row.amount_ore); // bokføringen mater neste beslutning
+              this.costRows.push(row);
+              if (row.provider === "anthropic") this.spend.set(row.tenant_id, (this.spend.get(row.tenant_id) ?? 0) + row.amount_ore); // bokføringen mater neste beslutning
               return { rows: [] };
             }
             if (text.includes("INSERT INTO audit_events")) {
-              self.statements.push("INSERT_AUDIT");
-              if (self.failAuditWrites) throw new Error("audit_down");
-              self.audit.push({
+              this.statements.push("INSERT_AUDIT");
+              if (this.failAuditWrites) throw new Error("audit_down");
+              this.audit.push({
                 tenant_id: String(params[0]), person_id: String(params[1]), session_id: params[2] === null ? null : String(params[2]), type: String(params[4]), decision: params[5] === null ? null : String(params[5]),
                 reason: params[6] === null ? null : String(params[6]), tool_id: params[7] === null ? null : String(params[7]), action: params[8] === null ? null : String(params[8]),
                 task_id: params[11] === null ? null : String(params[11]), trace_id: params[12] === null ? null : String(params[12]), payload: JSON.parse(String(params[10])) as Record<string, unknown>
               });
               return { rows: [] };
             }
-            self.statements.push("OTHER");
+            this.statements.push("OTHER");
             return { rows: [] };
           },
           release: () => undefined

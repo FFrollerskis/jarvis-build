@@ -55,7 +55,6 @@ export class BudgetPool {
   failMarkerWrite: Error | null = null;
 
   pg(): pg.Pool {
-    const self = this;
     return {
       // kontrollsentrene leser noen globale tabeller direkte på poolen; ingen av dem hører til kreditten
       query: async () => ({ rows: [] }),
@@ -66,30 +65,30 @@ export class BudgetPool {
             const text = sql.trim();
             if (/^(BEGIN|COMMIT|ROLLBACK)/i.test(text)) return { rows: [] };
             if (text.includes("set_config")) { tenant = String(params[0]); return { rows: [] }; }
-            self.queries.push({ sql: text, params, tenant });
+            this.queries.push({ sql: text, params, tenant });
             if (text.includes("date_trunc")) return { rows: [{ spent: 0 }] }; // BudgetGuard/dailySpentOre (den eksisterende månedsgrensen), urørt av kreditten
             if (text.includes("FROM cost_events") && text.includes("provider = $4")) {
-              if (self.failSpend !== null) throw self.failSpend;
-              const v = self.spend.get(tenant ?? "") ?? 0;
+              if (this.failSpend !== null) throw this.failSpend;
+              const v = this.spend.get(tenant ?? "") ?? 0;
               return { rows: [{ window_ore: v, trailing_ore: v }] };
             }
             if (text.includes("FROM cost_events") && text.includes("GROUP BY purpose")) {
-              if (self.failUsage !== null) throw self.failUsage;
-              return { rows: self.usageRows };
+              if (this.failUsage !== null) throw this.failUsage;
+              return { rows: this.usageRows };
             }
             if (text.includes("FROM audit_events") && text.includes("'claude_budget.decision'")) {
-              if (self.failDecisions !== null) throw self.failDecisions;
-              return { rows: self.decisionRows };
+              if (this.failDecisions !== null) throw this.failDecisions;
+              return { rows: this.decisionRows };
             }
             if (text.includes("FROM audit_events") && text.includes("'claude_budget.alert'")) {
-              if (self.failMarkerRead !== null) throw self.failMarkerRead;
+              if (this.failMarkerRead !== null) throw this.failMarkerRead;
               const windowStart = String(params[0]);
               // RLS: kun denne tenantens rader
-              return { rows: self.audit.filter((a) => a.tenant_id === tenant && a.type === "claude_budget.alert" && a.payload["window_start"] === windowStart).map((a) => ({ key: a.payload["key"] })) };
+              return { rows: this.audit.filter((a) => a.tenant_id === tenant && a.type === "claude_budget.alert" && a.payload["window_start"] === windowStart).map((a) => ({ key: a.payload["key"] })) };
             }
             if (text.includes("INSERT INTO audit_events")) {
-              if (self.failMarkerWrite !== null) throw self.failMarkerWrite;
-              self.audit.push({
+              if (this.failMarkerWrite !== null) throw this.failMarkerWrite;
+              this.audit.push({
                 tenant_id: String(params[0]), person_id: String(params[1]), type: String(params[4]), decision: params[5] === null ? null : String(params[5]), reason: params[6] === null ? null : String(params[6]),
                 tool_id: params[7] === null ? null : String(params[7]), action: params[8] === null ? null : String(params[8]), payload: JSON.parse(String(params[10])) as Record<string, unknown>
               });
