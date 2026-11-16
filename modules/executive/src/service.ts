@@ -20,7 +20,7 @@ import type {
   SituationAutonomyPolicy,
   SituationNotificationPolicy
 } from "@jarvis/situations";
-import { listConnectorStatus, type ConnectorAuthInfo, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
+import { listConnectorStatus, ownerStepUpDenial, type ConnectorAuthInfo, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
 import { rankAttentionQueue } from "./ranking.ts";
 import type {
   AttentionItem, AttentionItemDetail, CapabilityStatus, ConnectorStatusReport, ControlSurfaceStatus, DelegationBoard
@@ -269,6 +269,12 @@ export class ExecutiveService {
    * ugyldig input, skrivefeil) forplanter seg som en feil med en FAST kode - aldri tekst fra data. Eier + signert enhetsøkt + step-up håndheves FØR dette kalles (`parameterAuthorizer`/`step_up_required`).
    */
   async recordEvolutionDecision(identity: IdentityContext, input: EvolutionDecisionInput): Promise<EvolutionDecisionResult> {
+    // DYBDEFORSVAR (samme regler som verktøyets `parameterAuthorizer` + `step_up_required`, håndhevet også HER så metoden aldri er svakere enn flaten rundt den): eier OG signert enhetsøkt (fail-closed uten register),
+    // og step-up (signert enhet fra en eier-kanal). Avslaget er en fast kode - aldri tekst fra data.
+    const gate = this.authorizeControlCenterRead(identity);
+    if (!gate.allowed) throw new Error(gate.reason);
+    const stepUp = ownerStepUpDenial(identity);
+    if (stepUp !== undefined) throw new Error(stepUp);
     const recorder = this.options.evolutionDecisions;
     if (recorder === undefined) throw new Error("evolution_decisions_not_configured");
     return recorder.record(identity, input);

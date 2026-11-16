@@ -101,8 +101,9 @@ describe("kildevakt: skriveren er smal", () => {
     expect(CONTRACT).toMatch(/activation_decision: false;/);
   });
 
-  it("serialisert per forslag med advisory-lås i transaksjonen, og «siste» = høyeste audit_id (aldri `at`)", () => {
+  it("serialisert per forslag med advisory-lås i transaksjonen (med lock-/statement-timeout, kun lokalt i transaksjonen), og «siste» = høyeste audit_id (aldri `at`)", () => {
     expect(RECORDER).toMatch(/pg_advisory_xact_lock\(hashtext\(\$1\)\)/);
+    expect(RECORDER).toMatch(/set_config\('lock_timeout', \$1, true\), set_config\('statement_timeout', \$2, true\)/);
     expect(RECORDER).toMatch(/ORDER BY audit_id DESC LIMIT 1/);
     expect(RECORDER).not.toMatch(/ORDER BY at DESC/);
     expect(CENTER).toMatch(/ORDER BY payload->>'change_id', payload->>'proposal_digest', audit_id DESC/);

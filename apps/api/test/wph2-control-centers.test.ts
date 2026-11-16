@@ -234,7 +234,8 @@ describe("flagg: AV som standard, kun «on» slår et senter på", () => {
       // WP-B3 (D-475): tilleggssenteret Evolusjon
       evolution: "JARVIS_CONTROL_CENTER_EVOLUTION"
     });
-    expect(CONTROL_FEATURE_FLAGS).toEqual({ goldenSuite: "JARVIS_CONTROL_GOLDEN_SUITE", autonomyRevoke: "JARVIS_CONTROL_AUTONOMY_REVOKE" });
+    // WP-B3 (D-475, EV-23): eierens avgjørelse om endringsforslag er det tredje enkeltfunksjonsflagget
+    expect(CONTROL_FEATURE_FLAGS).toEqual({ goldenSuite: "JARVIS_CONTROL_GOLDEN_SUITE", autonomyRevoke: "JARVIS_CONTROL_AUTONOMY_REVOKE", evolutionApproval: "JARVIS_CONTROL_EVOLUTION_APPROVAL" });
     const envExample = readFileSync(fileURLToPath(new URL("../../../.env.example", import.meta.url)), "utf8");
     for (const name of [...Object.values(CONTROL_CENTER_FLAGS), ...Object.values(CONTROL_FEATURE_FLAGS)]) expect(envExample, name).toContain(name);
   });

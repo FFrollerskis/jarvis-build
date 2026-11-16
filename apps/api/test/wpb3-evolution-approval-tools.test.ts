@@ -281,6 +281,27 @@ describe("6. transporten: identitet kun fra konteksten, fast svar, FASTE avslags
     ]);
   });
 
+  it("DYBDEFORSVAR: tjenesten håndhever SELV eier + signert enhetsøkt + step-up (uavhengig av verktøydefinisjonens port) - skriveren kalles aldri for andre, med faste koder", async () => {
+    let called = 0;
+    const t = transportWith({ record: async () => { called += 1; return result(); } });
+    const call = (identity: IdentityContext) => t.invoke("record_evolution_decision", ok as never, "cred", { identity } as never);
+    for (const identity of [{ ...owner, person_id: "person-member" }, { ...owner, delegation_id: "deleg-1" }, { ...owner, tenant_id: "tenant-annen" }, { ...owner, person_id: "person-guest", memory_space_id: "guest" as const }]) {
+      await expect(call(identity), JSON.stringify(identity)).rejects.toThrow("control_center_owner_only");
+    }
+    for (const auth_strength of ["passive", "active"] as const) await expect(call({ ...owner, auth_strength }), auth_strength).rejects.toThrow("control_center_requires_signed_device_session");
+    for (const channel of ["telegram", "voice", "system"] as const) await expect(call({ ...owner, channel }), channel).rejects.toThrow(`step_up_required:channel_${channel}_not_allowed`);
+    expect(called).toBe(0);
+    // uten register er også eieren avvist (fail-closed)
+    const gw = { list: () => [], health: new Map(), hasSecret: async () => true } as unknown as ToolGateway;
+    const bare = new ExecutiveTransport(new ExecutiveService(gw, { evolutionDecisions: { record: async () => { called += 1; return result(); } } }));
+    await expect(bare.invoke("record_evolution_decision", ok as never, "cred", { identity: owner } as never)).rejects.toThrow("control_center_owner_check_not_configured");
+    expect(called).toBe(0);
+    // eieren fra en signert enhet på en eier-kanal slipper gjennom
+    await call(owner);
+    await call({ ...owner, channel: "desktop" });
+    expect(called).toBe(2);
+  });
+
   it("uten invocation-context feiler transporten lukket (som alle executive-handlinger)", async () => {
     await expect(transportWith({ record: async () => result() }).invoke("record_evolution_decision", ok as never, "cred")).rejects.toThrow("executive_missing_invocation_context");
   });

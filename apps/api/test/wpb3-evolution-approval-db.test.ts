@@ -225,6 +225,26 @@ describe("4. avslag med FASTE koder: ukjent, lukket, E3, og ugyldig input - uten
     expect((EVOLUTION_DECISION_REFUSALS as readonly string[]).includes(msg)).toBe(true);
   });
 
+  it("en fastlåst forsøk gir opp: holdes forslagets lås av en annen økt, avvises kallet med den FASTE koden etter lock-timeout (ingen rad, ingen hengende forbindelse) - og virker igjen når låsen er frigitt", async () => {
+    const ledger = new ChangeLedger(db.adminPool);
+    await ledger.append({ change_id: "a12", change_class: "E1", decision: "proposed", constitution_digest: DIGEST, subject: SECRET_SUBJECT, paths: [], branch: "", head_sha: null, evidence: {}, recorded_by: "test" });
+    const digest = await lastHash("a12");
+    const holder = await db.adminPool.connect();
+    try {
+      await holder.query("SELECT pg_advisory_lock(hashtext($1))", [`jarvis_evolution_decision:${TENANT_A}:a12`]);
+      const impatient = createEvolutionDecisionRecorder(db.appPool, { lockTimeoutMs: 200 });
+      const started = Date.now();
+      expect(await refusal(impatient.record(A, { change_id: "a12", proposal_digest: digest, decision: "approve" }))).toBe("decision_record_failed");
+      expect(Date.now() - started).toBeLessThan(5_000);
+      expect(await decisionRows("a12")).toHaveLength(0);
+    } finally {
+      await holder.query("SELECT pg_advisory_unlock_all()");
+      holder.release();
+    }
+    expect(await record(A, "a12", "approve", digest)).toMatchObject({ outcome: "recorded" });
+    expect(await decisionRows("a12")).toHaveLength(1);
+  });
+
   it("alle faste avslagskoder skriveren kan kaste står i den lukkede listen", () => {
     for (const code of ["invalid_evolution_decision_input", "proposal_not_found", "proposal_not_open", "proposal_digest_mismatch", "proposal_class_forbidden", "decision_record_failed"]) {
       expect((EVOLUTION_DECISION_REFUSALS as readonly string[]).includes(code), code).toBe(true);

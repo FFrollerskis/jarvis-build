@@ -54,7 +54,18 @@ interface PreviousRow { decision: unknown; decided_at: unknown }
 
 const NOTE_NO = "Registrering av eierens avgjørelse. INGEN virkning: ingenting utføres, godkjennes i endringsregisteret eller aktiveres (selvendring er frosset, D-397).";
 
-export function createEvolutionDecisionRecorder(pool: pg.Pool): EvolutionDecisionRecorder {
+export interface EvolutionDecisionRecorderOptions {
+  /** Hvor lenge skriveren venter på låsen for ett forslag før den gir opp (fast kode `decision_record_failed`, ingenting skrevet). Standard 5 s - under gatewayens 10 s verktøy-tidsavbrudd, så et fastlåst forsøk ikke holder en forbindelse. */
+  lockTimeoutMs?: number;
+  /** Øvre grense for hver setning i transaksjonen. Standard 8 s. */
+  statementTimeoutMs?: number;
+}
+const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
+const DEFAULT_STATEMENT_TIMEOUT_MS = 8_000;
+
+export function createEvolutionDecisionRecorder(pool: pg.Pool, options: EvolutionDecisionRecorderOptions = {}): EvolutionDecisionRecorder {
+  const lockTimeoutMs = Math.max(50, Math.min(10_000, Math.trunc(options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS)));
+  const statementTimeoutMs = Math.max(100, Math.min(20_000, Math.trunc(options.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS)));
   return {
     async record(identity, input): Promise<EvolutionDecisionResult> {
       if (typeof input !== "object" || input === null || !isDecidableChangeId(input.change_id) || typeof input.proposal_digest !== "string" || !DIGEST.test(input.proposal_digest) || !isEvolutionDecision(input.decision)) {
@@ -65,6 +76,8 @@ export function createEvolutionDecisionRecorder(pool: pg.Pool): EvolutionDecisio
       const decision: EvolutionDecision = input.decision;
       try {
         return await withTenantTransaction<EvolutionDecisionResult>(pool, identity.tenant_id, async (client) => {
+          // Tidsgrenser (kun denne transaksjonen): en låst eller treg setning gir en fast feilkode i stedet for å holde en forbindelse.
+          await client.query("SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)", [`${lockTimeoutMs}ms`, `${statementTimeoutMs}ms`]);
           // Serialiser per (tenant, forslag): to samtidige klikk gir nøyaktig én rad (den andre ser den første og svarer `already_recorded`).
           await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`jarvis_evolution_decision:${identity.tenant_id}:${changeId}`]);
           const latest = (await client.query(LATEST_LEDGER_ROW, [changeId])).rows[0] as LedgerRow | undefined;
