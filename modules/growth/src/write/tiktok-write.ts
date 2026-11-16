@@ -104,7 +104,8 @@ export class TiktokWriteTransport extends GrowthWriteTransportBase {
       query: { advertiser_id: advertiser, filtering: JSON.stringify({ campaign_ids: [id] }), fields: JSON.stringify(["campaign_id", "campaign_name", "operation_status", "budget", "budget_mode"]) }
     }, auth);
     const c = asObj(asArr(data["list"])[0]);
-    if (str(c["campaign_id"]) !== id) return null;
+    // En slettet kampanje (DELETE) regnes som «finnes ikke» uansett om API-et fortsatt lister den - da stemmer readback-modellen (`absentIsDone`) i gatewayen i begge tilfeller.
+    if (str(c["campaign_id"]) !== id || str(c["operation_status"]) === "DELETE") return null;
     const info = await this.call({ method: "GET", path: "/advertiser/info/", query: { advertiser_ids: JSON.stringify([advertiser]), fields: JSON.stringify(["currency"]) } }, auth);
     const currency = str(asObj(asArr(info["list"])[0])["currency"]);
     return {

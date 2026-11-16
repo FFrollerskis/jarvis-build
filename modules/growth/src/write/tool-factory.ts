@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { JsonValue } from "@jarvis/contracts";
 import {
-  OUTCOME_UNKNOWN_PREFIX, adoptCallSignal, afterAcceptedMutation, type ToolDefinition, type ToolInvocationContext, type ToolTransport
+  OUTCOME_UNKNOWN_PREFIX, abortableSleep, adoptCallSignal, afterAcceptedMutation, type ToolDefinition, type ToolInvocationContext, type ToolTransport
 } from "@jarvis/tool-gateway";
 import { authorizeGrowthTarget, type GrowthProvider, type GrowthWriteConfig } from "./config.ts";
 import { zRecord, type Params } from "./validators.ts";
@@ -114,6 +114,8 @@ export interface Auth {
 export interface WriteTransportDeps {
   /** Er eierens finans-nødbryter på for tenanten? Mangler proben (eller kaster den), er tilstanden «ukjent» (`null`) og pengeøkende handlinger nektes. */
   financeKillSwitch?: (tenantId: string) => Promise<boolean> | boolean;
+  /** Venting før den ene verifiserings-gjentakelsen (standard: avbrytbar, 800 ms). Injiseres i tester. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /**
@@ -166,9 +168,18 @@ export abstract class GrowthWriteTransportBase implements ToolTransport {
     const result = await this.applyWrite(action, p, auth, before);
     if ((result.data as { unchanged?: unknown } | undefined)?.unchanged === true) return result; // ingen mutasjon skjedde - ingenting å verifisere
     // ETTER en akseptert mutasjon: enhver feil herfra er «utfall ukjent» (aldri en vanlig, retry-bar feil).
-    const after = await afterAcceptedMutation(`${this.label}_readback_failed`, () => this.readState(stateAction, p, auth));
-    const verified = after === null ? op.absentIsDone === true : (op.post as (a: JsonValue, q: Params) => boolean)(await this.withKillSwitch(after, tenantId) as JsonValue, p);
-    if (!verified) throw new Error(`${OUTCOME_UNKNOWN_PREFIX}:${this.label}_postcondition_mismatch`);
+    if (!(await this.verifyAfter(op, stateAction, p, auth, tenantId))) throw new Error(`${OUTCOME_UNKNOWN_PREFIX}:${this.label}_postcondition_mismatch`);
     return result;
+  }
+
+  /** Readback + etterbetingelse. Ett (1) ekstra forsøk etter en kort pause tåler at leverandørens lesing henger litt etter skrivingen; deretter er utfallet UKJENT (aldri «ok»). */
+  private async verifyAfter(op: OpSpec, stateAction: string, p: Params, auth: Auth, tenantId: string | undefined): Promise<boolean> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const after = await afterAcceptedMutation(`${this.label}_readback_failed`, () => this.readState(stateAction, p, auth));
+      const ok = after === null ? op.absentIsDone === true : (op.post as (a: JsonValue, q: Params) => boolean)((await this.withKillSwitch(after, tenantId)) as JsonValue, p);
+      if (ok) return true;
+      if (attempt === 0) await (this.deps.sleep ? this.deps.sleep(800) : abortableSleep(800));
+    }
+    return false;
   }
 }

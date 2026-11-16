@@ -363,7 +363,7 @@ export class GoogleAdsWriteTransport extends GrowthWriteTransportBase {
         const res = await this.mutate(cid, "adGroupCriteria", toCreate.map((k) => ({
           create: { adGroup: `customers/${cid}/adGroups/${agId}`, status, ...(negative ? { negative: true } : {}), keyword: { text: k.text, matchType: k.match_type } }
         })), auth);
-        const created = asArr(res["results"]).map((r) => str(asObj(r)["resourceName"])).filter((r): r is string => r !== null);
+        const created = asArr(res["results"]).map((r) => str(asObj(r)["resourceName"])).filter((r): r is string => r !== null && /^customers\/\d{10}\/[A-Za-z]+\/[0-9~]{1,50}$/.test(r));
         return { ...(created[0] ? { external_id: created[0].split("/").pop() ?? created[0] } : {}), data: { created: toCreate.length, resource_names: created.slice(0, 50) } };
       }
       case "pause_keyword":

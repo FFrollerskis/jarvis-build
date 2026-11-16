@@ -99,7 +99,7 @@ Kilder: kun `WebSearch` (WebFetch mot leverandørenes dokumentasjon var blokkert
 
 ## 7. «Utfall ukjent» (`outcome_unknown`) og avstemming
 
-En 5xx/uleselig 2xx-respons ETTER en akseptert mutasjon, en readback som ikke bekrefter, eller et tidsavbrudd kastes som `outcome_unknown:...` (felles hjelper `afterAcceptedMutation`). Gatewayen merker ledger-raden `unverified` (aldri retry-bar med samme nøkkel), eieren varsles umiddelbart ("UTFALL UKJENT - sjekk hos leverandøren"), journalen står som `outcome_unknown`. En retry med samme nøkkel sender ALDRI en ny mutasjon. Eieren sjekker hos leverandøren og bruker en NY nøkkel for et nytt forsøk. Automatisk avstemming av `outcome_unknown`/`execution_unknown` er DEFERRED (journalen tillater overgang til `applied`/`failed`).
+En 5xx/uleselig 2xx-respons ETTER en akseptert mutasjon, en readback som ikke bekrefter, eller et tidsavbrudd kastes som `outcome_unknown:...` (felles hjelper `afterAcceptedMutation`). Gatewayen merker ledger-raden `unverified` (aldri retry-bar med samme nøkkel), eieren varsles umiddelbart ("UTFALL UKJENT - sjekk hos leverandøren"), journalen står som `outcome_unknown`. En retry med samme nøkkel sender ALDRI en ny mutasjon. Eieren sjekker hos leverandøren og bruker en NY nøkkel for et nytt forsøk. Det gjelder også en forespørsel som ble `failed` (avvist av en port, f.eks. step-up eller nødbryter): journalraden er terminal, så et nytt forsøk krever en ny nøkkel (samme nøkkel gir bare det lagrede utfallet). Automatisk avstemming av `outcome_unknown`/`execution_unknown` er DEFERRED (journalen tillater overgang til `applied`/`failed`).
 
 ## 8. Attribusjon: koblingspunkter
 

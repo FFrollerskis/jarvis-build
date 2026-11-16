@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- testfalske leverandører og assertions leser dypt i ikke-typet JSON (forespørselskropper/leverandørsvar); typing av hver form ville bare duplisere leverandørenes skjema. */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import {
@@ -295,6 +296,27 @@ describe("E: forespørselsformer for de seks kompakte plattformene (falske lever
     expect(await call(t, "delete_key_event", { property_id: "123456789", key_event_id: "88" })).toEqual({ external_id: "88" });
     expect(events.map((e) => e.eventName)).toEqual(["purchase"]);
     expect(await call(t, "get_property", { property_id: "999999999" })).toEqual({ data: null });
+    await v.stop();
+  });
+
+  it("readback som henger etter skrivingen får ÉN ny sjekk før utfallet kalles ukjent; vedvarende avvik er alltid ukjent (aldri «ok»)", async () => {
+    const v = new FakeVendor(); await v.start();
+    let lists = 0; let posted = false; const waits: number[] = [];
+    v.handler = (r) => {
+      if (r.method === "GET" && r.path === "/properties/123456789") return { json: { displayName: "P", currencyCode: "NOK", timeZone: "Europe/Oslo" } };
+      if (r.method === "GET" && r.path.endsWith("/keyEvents")) { lists += 1; return { json: { keyEvents: posted && lists >= 3 ? [{ name: "properties/123456789/keyEvents/9", eventName: "lead_form" }] : [] } }; }
+      if (r.method === "POST") { posted = true; return { json: { name: "properties/123456789/keyEvents/9" } }; }
+      return { status: 404, json: {} };
+    };
+    const t = new Ga4WriteTransport({ ...killOpen, ...token, spec: specs.ga4, baseUrl: v.baseUrl, sleep: async (ms) => { waits.push(ms); } });
+    expect(await call(t, "create_key_event", { property_id: "123456789", event_name: "lead_form" })).toMatchObject({ external_id: "9" });
+    expect(waits).toEqual([800]);
+    // leverandøren «lyver» for alltid: ukjent utfall etter nøyaktig to lesinger
+    lists = 0; posted = false; waits.length = 0;
+    v.handler = (r) => (r.method === "POST" ? { json: { name: "properties/123456789/keyEvents/10" } } : r.path.endsWith("/keyEvents") ? { json: { keyEvents: [] } } : { json: { displayName: "P" } });
+    const err = (await call(t, "create_key_event", { property_id: "123456789", event_name: "other_event" }).catch((e: Error) => e)) as Error;
+    expect(isOutcomeUnknownMessage(err.message)).toBe(true);
+    expect(waits).toEqual([800]);
     await v.stop();
   });
 

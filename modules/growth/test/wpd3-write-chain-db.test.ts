@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- testfalske leverandører og assertions leser dypt i ikke-typet JSON (forespørselskropper/leverandørsvar); typing av hver form ville bare duplisere leverandørenes skjema. */
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,7 +15,7 @@ import {
   type ExecuteGrowthWriteInput
 } from "../src/write/index.ts";
 import { GrowthService } from "../src/service.ts";
-import { ACCT, CID, FakeGoogleAds, FakeMeta } from "./support/fake-vendors.ts";
+import { ACCT, CID, FakeGoogleAds, FakeMeta, FakeVendor } from "./support/fake-vendors.ts";
 
 /**
  * WP-D3 (UA-4 Growth, D-459): skrivehandlingene gjennom den EKTE `ToolGateway`-pipelinen (embedded Postgres, ekte policy, ekte klasse D-kjede) mot lokale, tilstandsfulle FALSKE leverandører
@@ -27,6 +28,9 @@ let adminPool: pg.Pool;
 let appPool: pg.Pool;
 let gads: FakeGoogleAds;
 let meta: FakeMeta;
+let yt: FakeVendor;
+let ytVideo: Record<string, unknown> | null = null;
+const YT_CHANNEL = "UCabcdefghijklmnopqrstuv";
 let gateway: ToolGateway;
 let journal: GrowthWriteJournal;
 let growth: GrowthService;
@@ -38,7 +42,7 @@ const B = "tenant-d3-wr-b";
 const owner: IdentityContext = { person_id: "person-d3-wr-owner", tenant_id: A, memory_space_id: "business", session_id: "sess-d3-wr", device_id: "dev-d3-wr", channel: "api", auth_strength: "signed" };
 const delegate: IdentityContext = { ...owner, person_id: "person-d3-wr-delegate", session_id: "sess-d3-wr-d" };
 const ENV = {
-  JARVIS_GROWTH_WRITE_PLATFORMS: "google_ads,meta_ads", JARVIS_GROWTH_WRITE_TARGETS: `google_ads:123-456-7890,meta_ads:act_${ACCT}`, JARVIS_GROWTH_CREATIVE_URL_HOSTS: "example.test"
+  JARVIS_GROWTH_WRITE_PLATFORMS: "google_ads,meta_ads,youtube", JARVIS_GROWTH_WRITE_TARGETS: `google_ads:123-456-7890,meta_ads:act_${ACCT},youtube:${"UCabcdefghijklmnopqrstuv"}`, JARVIS_GROWTH_CREATIVE_URL_HOSTS: "example.test"
 };
 const config = growthWriteConfigFromEnv(ENV);
 let linkedCampaignId = "";
@@ -61,8 +65,15 @@ beforeAll(async () => {
   appPool = createPool({ host: "127.0.0.1", port: leased.port, database: "jarvis_test", user: "jarvis_d3_wr", password: "pw2" });
   gads = new FakeGoogleAds();
   meta = new FakeMeta();
+  yt = new FakeVendor();
+  yt.handler = (r) => {
+    if (r.method === "GET" && r.path === "/videos") return { json: { items: ytVideo && ytVideo["id"] === r.query.get("id") ? [ytVideo] : [] } };
+    if (r.method === "DELETE" && r.path === "/videos") { ytVideo = null; return { status: 204 }; }
+    return { status: 404, json: {} };
+  };
   await gads.start();
   await meta.start();
+  await yt.start();
   growth = new GrowthService(appPool);
   const campaign = await growth.upsertCampaignFromProvider(A, "business", { channel: "google_ads", external_campaign_id: "101", name: "Sommerkampanje", status: "active", currency: "NOK" });
   linkedCampaignId = campaign.campaign_id;
@@ -72,7 +83,7 @@ beforeAll(async () => {
   const policy = new PolicyGateway({ devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch, controls, authority: { owner_person_id: owner.person_id, owner_tenants: [A] } });
   const secrets: SecretProvider = {
     name: "fake",
-    get: async (ref) => (ref === "JARVIS_GOOGLE_ADS_REFRESH_TOKEN" ? "fake-refresh-token-for-test" : ref === "JARVIS_META_ADS_ACCESS_TOKEN" ? "fake-meta-token-for-test" : null)
+    get: async (ref) => (ref === "JARVIS_GOOGLE_ADS_REFRESH_TOKEN" || ref === "JARVIS_YOUTUBE_REFRESH_TOKEN" ? "fake-refresh-token-for-test" : ref === "JARVIS_META_ADS_ACCESS_TOKEN" ? "fake-meta-token-for-test" : null)
   };
   gateway = new ToolGateway(appPool, policy, secrets, controls, undefined, {
     classDPipeline: { enforce: true, notifier: { ready: () => state.notifierReady, notify: async (n) => { notifications.push(n); } } },
@@ -80,7 +91,7 @@ beforeAll(async () => {
   });
   const transports = createGrowthWriteTransports(config, {
     readSecret: async (ref) => (ref === "JARVIS_GOOGLE_ADS_DEVELOPER_TOKEN" ? "fake-developer-token" : null), env: {}, googleAccessToken: async () => "fake-access-token", sleep: async () => undefined,
-    baseUrls: { google_ads: gads.baseUrl, meta_ads: meta.baseUrl },
+    baseUrls: { google_ads: gads.baseUrl, meta_ads: meta.baseUrl, youtube: yt.baseUrl },
     financeKillSwitch: async () => { if (state.killSwitch === "error") throw new Error("db down"); return state.killSwitch; }
   });
   // Produksjonsgrensene (10 skriv/min, 30 les/min per handling) bevises i test A; her heves de så de mange testkallene ikke treffer takene.
@@ -92,6 +103,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await gads?.stop();
   await meta?.stop();
+  await yt?.stop();
   await appPool?.end();
   await adminPool?.end();
   await stopPg?.();
@@ -116,7 +128,7 @@ const mMut = () => meta.requests.filter(meta.isMutation);
 describe("A: registrering er plattformstyrt og kjeden er komplett", () => {
   it("kun de aktiverte plattformene får verktøy (alle i eier-eksklusive growth_*-navnerom); ingen konfig = ingen verktøy", () => {
     const defs = growthWriteToolDefinitions(config, createGrowthWriteTransports(config, { readSecret: async () => null, env: {} }));
-    expect(new Set(defs.map((d) => d.tool_id))).toEqual(new Set(["growth_googleads", "growth_metaads"]));
+    expect(new Set(defs.map((d) => d.tool_id))).toEqual(new Set(["growth_googleads", "growth_metaads", "growth_youtube"]));
     expect(defs.every((d) => d.owner_only === true && d.parameterAuthorizer !== undefined)).toBe(true);
     // produksjons-rate-grenser: skriving maks 10/min, lesing maks 30/min per handling (aldri uten tak)
     for (const d of defs) expect(d.rate_limit_per_minute, d.action).toBe(d.capability_class === "A" ? 30 : 10);
@@ -479,5 +491,22 @@ describe("H: Meta Ads", () => {
     const replay = await m("pause_ad_set", { ad_set_id: "60010" }, { idempotency_key: key });
     expect(replay.outcome).toBe("UNKNOWN");
     expect(mMut()).toHaveLength(1);
+  });
+});
+
+describe("I: slettehandling der objektet forsvinner (postcondition_target_absent) gjennom gateway-kjeden", () => {
+  it("YouTube delete_video: klasse D, readback «finnes ikke» er suksess, journal før/etter; video på annen kanal er «ikke funnet» og røres aldri", async () => {
+    ytVideo = { id: "abcdefghijk", snippet: { channelId: YT_CHANNEL, title: "T", categoryId: "22", tags: [] }, status: { privacyStatus: "private" } };
+    yt.reset();
+    const other = await run({ provider: "youtube", action: "delete_video", parameters: { channel_id: YT_CHANNEL, video_id: "zzzzzzzzzzz" } });
+    expect(other.reason).toBe("preflight_target_not_found");
+    const res = await run({ provider: "youtube", action: "delete_video", parameters: { channel_id: YT_CHANNEL, video_id: "abcdefghijk" } });
+    expect(res.outcome).toBe("SUCCESS");
+    expect(res.write).toMatchObject({ status: "applied", risk_class: "D", provider: "youtube" });
+    expect(res.write.before_state).toMatchObject({ title: "T", privacy_status: "private" });
+    expect(res.write.after_state).toBeNull();
+    expect(ytVideo).toBeNull();
+    expect(yt.requests.filter((r) => r.method === "DELETE")).toHaveLength(1);
+    expect(notifications.at(-1)).toMatchObject({ tool_id: "growth_youtube", action: "delete_video", outcome: "executed" });
   });
 });
