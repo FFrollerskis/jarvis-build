@@ -80,7 +80,7 @@ export function youtubeWriteSpec(): ProviderToolSpec {
   const ops: OpSpec[] = [
     { action: "get_video", description: "Les en egen video (tittel, beskrivelse, tags, synlighet, planlagt publisering, språk, opplastingsstatus) - ubetrodd leverandørdata (1 kvoteenhet)", shape: videoShape, risk: "A", targetParam: "channel_id", scopes: ["youtube.read"] },
     {
-      action: "update_video_metadata", risk: "C", spend: "none", targetParam: "channel_id", stateAction: "get_video", scopes,
+      action: "update_video_metadata", risk: "D", spend: "none", targetParam: "channel_id", stateAction: "get_video", scopes,
       description: "Oppdater tittel, beskrivelse og/eller tags på en egen video (read-modify-write mot den RÅ ressursen; ikke oppgitte felt beholdes eksakt, inkl. linjeskift, språk m.fl.). Beskrivelsen kan ha linjeskift (maks 5000 bytes). 50 kvoteenheter.",
       shape: {
         ...videoShape, title: zText(1, 100).optional(), description: zText(1, DESCRIPTION_MAX_BYTES).refine(byteLimited(DESCRIPTION_MAX_BYTES), "description_too_long_bytes").optional(), tags: z.array(zText(1, 100)).max(40).optional()
@@ -96,7 +96,7 @@ export function youtubeWriteSpec(): ProviderToolSpec {
       target: (p) => refVideo(p, "metadata"), summary: (_s, p) => `YouTube: oppdater metadata på ${refVideo(p, "metadata")}`
     },
     {
-      action: "set_video_privacy", risk: "C", spend: "none", targetParam: "channel_id", stateAction: "get_video", scopes,
+      action: "set_video_privacy", risk: "D", spend: "none", targetParam: "channel_id", stateAction: "get_video", scopes,
       description: "Sett synligheten (private/unlisted/public) på en egen video. NB: «public» eksponerer videoen for alle; uverifiserte API-prosjekter kan være låst til private. En planlagt publisering (`publishAt`) beholdes kun når målet er `private`.",
       shape: { ...videoShape, privacy_status: z.enum(["private", "unlisted", "public"]) },
       rollback: "set_video_privacy med forrige synlighet (privacy_status og evt. publish_at i før-tilstanden er journalført); publisert innhold kan ha blitt sett/kopiert og kan ikke «u-vises»",

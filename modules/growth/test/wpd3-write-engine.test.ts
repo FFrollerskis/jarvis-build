@@ -286,17 +286,37 @@ describe("D: verktøydefinisjonenes invarianter for alle åtte plattformer", () 
 
   it("antall handlinger per plattform er låst (D-41-revisjonstabellen i runbooken må stemme)", () => {
     const count = (p: GrowthProvider) => ({ reads: defsByProvider[p].filter((d) => d.capability_class === "A").length, C: defsByProvider[p].filter((d) => d.capability_class === "C").length, D: defsByProvider[p].filter((d) => d.capability_class === "D").length });
-    expect(count("google_ads")).toEqual({ reads: 4, C: 8, D: 6 });
+    // Review L1: sletting og publisering/eksponering er klasse D (SECURITY_MODEL §3) - 16 C / 27 D (var 25 C / 18 D).
+    expect(count("google_ads")).toEqual({ reads: 4, C: 7, D: 7 });
     expect(count("meta_ads")).toEqual({ reads: 4, C: 4, D: 6 });
-    expect(count("ga4")).toEqual({ reads: 2, C: 2, D: 0 });
-    expect(count("search_console")).toEqual({ reads: 3, C: 2, D: 0 });
-    expect(count("google_business_profile")).toEqual({ reads: 4, C: 5, D: 0 });
-    expect(count("youtube")).toEqual({ reads: 1, C: 2, D: 1 });
+    expect(count("ga4")).toEqual({ reads: 2, C: 1, D: 1 });
+    expect(count("search_console")).toEqual({ reads: 3, C: 1, D: 1 });
+    expect(count("google_business_profile")).toEqual({ reads: 4, C: 1, D: 4 });
+    expect(count("youtube")).toEqual({ reads: 1, C: 0, D: 3 });
     expect(count("linkedin")).toEqual({ reads: 1, C: 1, D: 2 });
     expect(count("tiktok")).toEqual({ reads: 1, C: 1, D: 3 });
+    expect(writes.filter((d) => d.capability_class === "C")).toHaveLength(16);
+    expect(writes.filter((d) => d.capability_class === "D")).toHaveLength(27);
     expect(reads).toHaveLength(20);
     expect(writes).toHaveLength(43);
     expect(new Set(allDefs.map((d) => `${d.tool_id}.${d.action}`)).size).toBe(allDefs.length);
+  });
+
+  it("review L1: ALLE slettinger og publiserings-/eksponeringshandlinger er klasse D med full pipeline (ingen kan stå som C) - låst per handling", () => {
+    const mustBeD = [
+      "google_ads.remove_campaign", "google_ads.remove_keyword", "meta_ads.delete_campaign", "ga4.delete_key_event", "search_console.remove_sitemap", "google_business_profile.delete_review_reply",
+      "youtube.delete_video", "tiktok.delete_campaign", "youtube.set_video_privacy", "youtube.update_video_metadata", "google_business_profile.create_local_post", "google_business_profile.reply_to_review",
+      "google_business_profile.update_location_profile"
+    ];
+    const index = growthOpIndex(specs);
+    for (const key of mustBeD) expect(index.get(key)?.op.risk, key).toBe("D");
+    // generisk: ethvert `remove_*`/`delete_*` er D, og ingen D-handling mangler pipeline
+    for (const [key, entry] of index) if (/^[a-z_]+\.(remove|delete)_/.test(key)) expect(entry.op.risk, key).toBe("D");
+    for (const d of allDefs.filter((x) => x.capability_class === "D")) expect(assessClassDPipeline(d), `${d.tool_id}.${d.action}`).toEqual({ complete: true, missing: [] });
+    // eksplisitt avgrensning (lead-liste): disse forblir C (reduserer/oppretter pauset/konfigurerer uten sletting eller publisering av tekst)
+    for (const key of ["google_ads.create_responsive_search_ad", "google_ads.add_keywords", "meta_ads.create_ad", "ga4.create_key_event", "search_console.register_sitemap", "google_business_profile.update_location_hours"]) {
+      expect(index.get(key)?.op.risk, key).toBe("C");
+    }
   });
 
   it("hver skrivehandling har HELE kjeden: step-up, eier-eksklusiv, mål-autorisasjon, fersk tilstandslesing (en lesehandling i samme plattform), etterbetingelse og rollback; klasse D oppfyller pipelinen", () => {

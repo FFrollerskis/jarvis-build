@@ -41,7 +41,7 @@ export function ga4WriteSpec(): ProviderToolSpec {
       summary: (_s, p) => `GA4: opprett nøkkelhendelse «${typeof p["event_name"] === "string" ? p["event_name"] : "?"}» i eiendom ${safeProperty(p)}`
     },
     removeOp({
-      action: "delete_key_event", label: "GA4-nøkkelhendelse", spend: "none", stateAction: "list_key_events", targetParam: "property_id", risk: "C", scopes,
+      action: "delete_key_event", label: "GA4-nøkkelhendelse", spend: "none", stateAction: "list_key_events", targetParam: "property_id", scopes,
       shape: { ...propertyShape, key_event_id: z.string().regex(/^\d{1,20}$/) },
       statusOf: (s, p) => (eventsOf(s).some((e) => e["key_event_id"] === p["key_event_id"]) ? "PRESENT" : "REMOVED"),
       targetCheck: () => true, removed: ["REMOVED"], ref: (p) => `ga4:properties/${safeProperty(p)}:key_event:${typeof p["key_event_id"] === "string" ? p["key_event_id"] : "?"}`,

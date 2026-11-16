@@ -85,7 +85,7 @@ export function gbpWriteSpec(config: Pick<GrowthWriteConfig, "creativeHosts">): 
       target: (p) => ref(p, "hours"), summary: (_s, p) => `Business Profile: oppdater åpningstider for ${safeLocation(p)} (${asArr(p["periods"]).length} perioder)`
     },
     {
-      action: "update_location_profile", risk: "C", spend: "none", targetParam: "location_id", stateAction: "get_location", scopes,
+      action: "update_location_profile", risk: "D", spend: "none", targetParam: "location_id", stateAction: "get_location", scopes,
       description: "Oppdater lokasjonens beskrivelse og/eller nettsted. Nettstedets vert må stå i JARVIS_GROWTH_CREATIVE_URL_HOSTS.",
       shape: { ...locationShape, description: zText(1, 750).optional(), website_uri: z.string().url().max(2048).optional() },
       rollback: "update_location_profile med description/website_uri fra før-tilstanden (journalført) gjenoppretter profilen",
@@ -98,7 +98,7 @@ export function gbpWriteSpec(config: Pick<GrowthWriteConfig, "creativeHosts">): 
       target: (p) => ref(p, "profile"), summary: (_s, p) => `Business Profile: oppdater profil for ${safeLocation(p)}`
     },
     {
-      action: "create_local_post", risk: "C", spend: "none", targetParam: "location_id", stateAction: "list_local_posts", scopes, idempotentExternal: false,
+      action: "create_local_post", risk: "D", spend: "none", targetParam: "location_id", stateAction: "list_local_posts", scopes, idempotentExternal: false,
       description: "Publiser et lokalt innlegg (STANDARD) på lokasjonen. Finnes et innlegg med identisk tekst fra før, gjøres ingenting. Lenkens vert må stå i JARVIS_GROWTH_CREATIVE_URL_HOSTS.",
       shape: { ...accountLocationShape, summary: zText(1, 1500), action_url: z.string().url().max(2048).optional() },
       rollback: "slett innlegget (delete_local_post er DEFERRED - gjøres i leverandørens grensesnitt); post_id fra svaret",
@@ -108,7 +108,7 @@ export function gbpWriteSpec(config: Pick<GrowthWriteConfig, "creativeHosts">): 
       target: (p) => ref(p, "local_post"), summary: (_s, p) => `Business Profile: publiser lokalt innlegg på ${safeLocation(p)}`
     },
     {
-      action: "reply_to_review", risk: "C", spend: "none", targetParam: "location_id", stateAction: "get_review", scopes,
+      action: "reply_to_review", risk: "D", spend: "none", targetParam: "location_id", stateAction: "get_review", scopes,
       description: "Svar på en omtale (eller erstatt eierens eksisterende svar). Kun verifiserte lokasjoner. Identisk svar fra før gir ingen endring. Svaret er maks 4096 BYTES. Journal/audit bærer aldri omtalens tekst eller svarteksten (kun en digest).",
       shape: { ...accountLocationShape, review_id: z.string().regex(REVIEW_ID), comment: replyText },
       rollback: "delete_review_reply fjerner svaret. Forrige svartekst er IKKE journalført (personvern: den kan nevne omtaleren) - kun en digest; ta vare på teksten fra Google-profilen FØR et eksisterende svar erstattes",
@@ -119,7 +119,7 @@ export function gbpWriteSpec(config: Pick<GrowthWriteConfig, "creativeHosts">): 
       summary: (_s, p) => `Business Profile: svar på omtale i ${safeLocation(p)}`
     },
     removeOp({
-      action: "delete_review_reply", label: "Business Profile-svar på omtale", spend: "none", stateAction: "get_review", targetParam: "location_id", risk: "C", scopes,
+      action: "delete_review_reply", label: "Business Profile-svar på omtale", spend: "none", stateAction: "get_review", targetParam: "location_id", scopes,
       shape: { ...accountLocationShape, review_id: z.string().regex(REVIEW_ID) },
       statusOf: (s) => (asObj(s)["has_reply"] === true ? "PRESENT" : "REMOVED"),
       targetCheck: (s, p) => asObj(s)["review_id"] === p["review_id"], removed: ["REMOVED"],

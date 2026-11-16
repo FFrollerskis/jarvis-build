@@ -92,6 +92,12 @@ beforeAll(async () => {
   yt.handler = (r) => {
     if (r.method === "GET" && r.path === "/videos") return { json: { items: ytVideo && ytVideo["id"] === r.query.get("id") ? [ytVideo] : [] } };
     if (r.method === "DELETE" && r.path === "/videos") { ytVideo = null; return { status: 204 }; }
+    if (r.method === "PUT" && r.path === "/videos" && ytVideo) {
+      // leverandørens overskrivingssemantikk: delen ERSTATTES (kun skrivebeskyttede felt overlever)
+      if (r.query.get("part") === "snippet") ytVideo = { ...ytVideo, snippet: { channelId: (ytVideo["snippet"] as Record<string, unknown>)["channelId"], ...r.body["snippet"] } };
+      if (r.query.get("part") === "status") ytVideo = { ...ytVideo, status: { uploadStatus: (ytVideo["status"] as Record<string, unknown>)["uploadStatus"], ...r.body["status"] } };
+      return { json: ytVideo };
+    }
     return { status: 404, json: {} };
   };
   await gads.start();
@@ -846,5 +852,72 @@ describe("O: review M6 - en kommando kan aldri HEVE det levende budsjettet", () 
     expect(gads.budgets.get("11")?.micros).toBe(400_000_000);
     // forespørselens parametere er de EFFEKTIVE (forventet nåverdi er tvunget): samme nøkkel med de samme kallerparameterne er en ekte replay
     expect((await commandStatus("cmd-d3-m6c")).status).toBe("executed");
+  });
+});
+
+describe("P: review L1 - sletting og publisering/eksponering er klasse D med full kjede (varsler, validator, readback, journal)", () => {
+  const seedVideo = () => {
+    ytVideo = {
+      id: "abcdefghijk", snippet: { channelId: YT_CHANNEL, title: "Gammel tittel", description: "Kapittel 1\nKapittel 2\n", tags: ["a\tb"], categoryId: "22", defaultLanguage: "nb" },
+      status: { uploadStatus: "processed", privacyStatus: "private", publishAt: "2026-12-24T10:00:00Z", embeddable: true, license: "youtube", publicStatsViewable: true, selfDeclaredMadeForKids: false }
+    };
+    yt.reset(); gbp.reset();
+  };
+  const ytMutations = () => yt.requests.filter((r) => r.method !== "GET");
+
+  it("uten klar varsler (Telegram nede) er HVER av dem utilgjengelige - fail-closed, ingenting sendes (var klasse C: ingen port)", async () => {
+    seedVideo();
+    state.notifierReady = false;
+    const attempts = [
+      g("remove_keyword", { ad_group_id: "201", criterion_id: "301" }),
+      run({ provider: "google_business_profile", action: "reply_to_review", parameters: { account_id: "1111", location_id: "123456789", review_id: "rev-5", comment: "Takk!" } }),
+      run({ provider: "youtube", action: "set_video_privacy", parameters: { channel_id: YT_CHANNEL, video_id: "abcdefghijk", privacy_status: "public" } }),
+      run({ provider: "youtube", action: "update_video_metadata", parameters: { channel_id: YT_CHANNEL, video_id: "abcdefghijk", title: "Ny tittel" } })
+    ];
+    for (const res of await Promise.all(attempts)) {
+      expect(res.outcome).toBe("FAILED");
+      expect(res.reason).toBe("class_d_notifier_not_ready");
+    }
+    expect(gads.requests).toHaveLength(0);
+    expect(gbp.requests).toHaveLength(0);
+    expect(yt.requests).toHaveLength(0);
+  });
+
+  it("med klar varsler: utført med out-of-band-varsel («executed»), klasse D i journalen, og YouTube-skriving bevarer språk/planlagt publisering/linjeskift hos leverandøren", async () => {
+    seedVideo();
+    const removed = await g("remove_keyword", { ad_group_id: "201", criterion_id: "301" });
+    expect(removed.outcome).toBe("SUCCESS");
+    expect(removed.write.risk_class).toBe("D");
+    expect(gads.criteria.get("201~301")?.status).toBe("REMOVED");
+    const reply = await run({ provider: "google_business_profile", action: "reply_to_review", parameters: { account_id: "1111", location_id: "123456789", review_id: "rev-5", comment: "Takk!" } });
+    expect(reply.outcome).toBe("SUCCESS");
+    expect(reply.write.risk_class).toBe("D");
+    const meta1 = await run({ provider: "youtube", action: "update_video_metadata", parameters: { channel_id: YT_CHANNEL, video_id: "abcdefghijk", title: "Ny tittel" } });
+    expect(meta1.outcome).toBe("SUCCESS");
+    expect(meta1.write.risk_class).toBe("D");
+    expect(meta1.write.before_state).toMatchObject({ default_language: "nb", publish_at: "2026-12-24T10:00:00Z", privacy_status: "private" });
+    expect(ytVideo?.["snippet"]).toMatchObject({ title: "Ny tittel", description: "Kapittel 1\nKapittel 2\n", tags: ["a\tb"], defaultLanguage: "nb", categoryId: "22" });
+    const pub = await run({ provider: "youtube", action: "set_video_privacy", parameters: { channel_id: YT_CHANNEL, video_id: "abcdefghijk", privacy_status: "unlisted" } });
+    expect(pub.outcome).toBe("SUCCESS");
+    expect(pub.write.risk_class).toBe("D");
+    expect(ytVideo?.["status"]).toMatchObject({ privacyStatus: "unlisted", embeddable: true, license: "youtube", publicStatsViewable: true, selfDeclaredMadeForKids: false });
+    expect((ytVideo?.["status"] as Record<string, unknown>)["publishAt"]).toBeUndefined();
+    expect(ytMutations()).toHaveLength(2);
+    const executed = notifications.filter((n) => n.outcome === "executed").map((n) => `${n.tool_id}.${n.action}`);
+    expect(executed).toEqual(["growth_googleads.remove_keyword", "growth_gbp.reply_to_review", "growth_youtube.update_video_metadata", "growth_youtube.set_video_privacy"]);
+    for (const n of notifications) expect((n.summary ?? "").length).toBeGreaterThan(10);
+    // ingen omtaletekst eller beskrivelsestekst i varselet
+    expect(JSON.stringify(notifications)).not.toMatch(/Kapittel|Ola Nordmann|Kari Hansen|Per Persen/);
+  });
+
+  it("YouTube-synlighet: et UKJENT utfall (socketen rives) gir `unknown`-varsel og avstemmbar journal - også for klasse D-eksponering", async () => {
+    seedVideo();
+    const original = yt.handler;
+    yt.handler = (r) => (r.method === "PUT" ? (original(r), { destroySocket: true }) : original(r));
+    const res = await run({ provider: "youtube", action: "set_video_privacy", parameters: { channel_id: YT_CHANNEL, video_id: "abcdefghijk", privacy_status: "public" } }).finally(() => { yt.handler = original; });
+    expect(res.outcome).toBe("UNKNOWN");
+    expect(res.write.status).toBe("outcome_unknown");
+    expect((ytVideo?.["status"] as Record<string, unknown>)["privacyStatus"]).toBe("public"); // leverandøren BEHANDLET forespørselen
+    expect(notifications.map((n) => n.outcome)).toContain("unknown");
   });
 });

@@ -147,7 +147,7 @@ export function googleAdsWriteSpec(config: Pick<GrowthWriteConfig, "creativeHost
       terminal: ["REMOVED"], paused: "PAUSED", active: "ENABLED", ref: (p) => `${refAdGroup(p)}:keyword:${safeId(p, "criterion_id")}`
     }),
     removeOp({
-      action: "remove_keyword", label: "Google Ads-nøkkelord", stateAction: "get_keyword_state", targetParam: "customer_id", risk: "C", scopes,
+      action: "remove_keyword", label: "Google Ads-nøkkelord", stateAction: "get_keyword_state", targetParam: "customer_id", scopes,
       shape: { ...adGroupShape, criterion_id: zDigits(1, 20) },
       statusOf: (s, p) => (keywordsOf(s).some((k) => k["criterion_id"] === p["criterion_id"]) ? "PRESENT" : "REMOVED"),
       targetCheck: () => true, removed: ["REMOVED"], ref: (p) => `${refAdGroup(p)}:keyword:${safeId(p, "criterion_id")}`,
