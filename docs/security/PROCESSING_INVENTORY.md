@@ -96,6 +96,15 @@ uten at det er gjort, eller (4) en DPIA-henvisning peker på en fil som ikke fin
 - **Eksterne mottakere:** Annonseplattformer (Google Ads/Meta) kun når credentials er satt
 - **Tabeller:** `consent_decisions`, `consent_enforcement_events`, `consent_enforcement_policies`, `marketing_attributions`, `marketing_campaign_action_recommendations`, `marketing_campaign_events`, `marketing_campaign_execution_commands`, `marketing_campaign_observations`, `marketing_campaign_tracking_tags`, `marketing_campaigns`, `marketing_experiments`, `marketing_spend_events`
 
+### Vekst: eksperimentregister og plattform-skrivejournal (WP-D3, D-459)
+
+- **Formål:** Eksperimentregisteret (plan: metrikk/tidsvindu/terskler; varianter; daglige observasjoner; utfall) og Jarvis' egen journal over skrivinger mot annonse-/analyseplattformene (hva ble endret, hvorfor, med hvilket utfall - før/etter-tilstand). Se `docs/UA4_GROWTH_DPIA.md` og `docs/runbooks/WPD3_GROWTH_WRITES.md`.
+- **Memory space/tenant:** business (alle tabeller tenant-skopet med FORCE RLS og memory-space-policy; komposittnøkler (tenant_id, id) mot kampanjer/eksperimenter/varianter)
+- **Datakategori:** Forretningsdata: aggregerte tall per variant og dag (visninger, klikk, konverteringer, utgift og omsetning i øre) og annonsetekster eieren selv skriver. Ingen sluttbrukeridentifikatorer (ingen klikk-ID-er, cookies, IP-adresser eller enhets-ID-er lagres i disse tabellene). Journalens før-/etter-tilstand er redigerte plattformtilstander (budsjett, status, bud, navn) uten hemmeligheter. Proveniens på hver rad: person, kilde, `task_id`, `session_id`.
+- **Retensjon:** Følger kampanjens/eksperimentets levetid; sletting via memory space-sletting (`modules/erasure/src/plan.ts`, registrert og testet). Utfall er append-only (ingen UPDATE for runtime); journalraden kan ikke omskrives (databasetrigger). Ingen automatisk opprydding ennå (`DEFERRED`: retensjonstid for journalen er en eierbeslutning).
+- **Eksterne mottakere:** Ingen fra disse tabellene. Skrivehandlingene som journalen beskriver går til leverandørene (Google Ads, Meta, Google Analytics/Search Console/Business Profile, YouTube, LinkedIn, TikTok) KUN når eieren har satt credentials, mål-liste og flagg (`JARVIS_GROWTH_WRITE_PLATFORMS`); se DPIA-en for behandlerstatus (IKKE VERIFISERT).
+- **Tabeller:** `growth_write_journal`, `marketing_experiment_observations`, `marketing_experiment_outcomes`, `marketing_experiment_plans`, `marketing_experiment_variants`
+
 ### Økonomi og betaling
 
 - **Formål:** Leverandører, forpliktelser, bank- og kortdata, samt deterministisk avstemming av pengebevegelser (WP-F1, D-462)
@@ -257,6 +266,7 @@ En ny funksjon/kilde som treffer minst én trigger MÅ ha (eller oppdatere) tilh
 | Kamera/bilder/syn | HA-kamera, dørklokke | DPIA + rom-scope + retensjon | `docs/UA9_VISION_DPIA.md` | UTKAST; ingen produsenter |
 | Stemme/lydopptak | STT/TTS, rå lyd | DPIA + ingen rå-lyd-lagring som standard | `docs/security/DPIA_VOICE.md` | UTKAST; rå-lyd-dump av som standard (JARVIS-080 åpen) |
 | Kundedata/CRM | kontakter, leads, saker | DPIA + sletteflyt | `docs/UA3_BUSINESS_DPIA.md` | UTKAST; ingen business-tenant på NAS |
+| Annonse-/analysesporing og attribusjon (produksjonssporing) | klikk-ID-er (gclid/fbclid), UTM, GA4, Search Console, annonseskriving | DPIA + samtykke-/cookie-dokumentasjon + databehandleravtaler + dataminimering FØR produksjonssporing | `docs/UA4_GROWTH_DPIA.md` | UTKAST; skriving og sporing er AV (`JARVIS_GROWTH_WRITE_PLATFORMS` tom); samtykkekontroller (JARVIS-084) er ikke bygget |
 | Kommunikasjon på tvers av kanaler | e-post, Telegram, identitetsoppløsning | DPIA + reversibel identitetsoppløsning | `docs/UA7_COMMUNICATIONS_DPIA.md` | UTKAST |
 | Kunnskapskilder (dokumenter, e-postvedlegg) | Drive, Obsidian, GitHub | DPIA + tombstones/sletting | `docs/UA2_KNOWLEDGE_DPIA.md` | UTKAST; én kilde i produksjon |
 | Ny ekstern behandler uten verifiserte vilkår | ny LLM/STT/connector | rad i denne filen + `PROCESSOR_REGION_MATRIX.md`; ingen sensitive spaces før VERIFISERT | `docs/security/PROCESSOR_REGION_MATRIX.md` | løpende |

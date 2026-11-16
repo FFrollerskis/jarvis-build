@@ -101,6 +101,9 @@ describe("A: schema-drevet FK-audit - business_open_loops er DET ENESTE eksterne
       "business_open_loops", "marketing_spend_events", "marketing_attributions", "marketing_experiments",
       "marketing_campaign_events", "marketing_campaign_tracking_tags", "marketing_campaign_action_recommendations",
       "marketing_campaign_execution_commands", "marketing_campaign_observations",
+      // WP-D3 (D-459, migrasjon 112/113): eksperimentvariantene har en NULLABLE komposittnøkkel til kampanjen, og plattform-skrivejournalen har en nullable
+      // komposittnøkkel til kampanjen den endret. Begge er REGISTRERT i erasure-planen (plan.ts) FØR `marketing_campaigns` slettes (journalen etter kommandoene som peker på den).
+      "marketing_experiment_variants", "growth_write_journal",
       // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2,
       // 039_finance_spend_integrity.sql): `finance_spend_records.campaign_id`
       // er en BEVISST, valgfri kampanje-kobling for kildefamilien 'marketing'
