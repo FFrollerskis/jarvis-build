@@ -26,6 +26,15 @@ import {
 
 const MS_PER_DAY = 86_400_000;
 const RESERVATION_TTL_MS = 5 * 60_000;
+/** Frist for lesingen av forbruket per kall: en database som ikke svarer skal gi fail-safe (se `begin`), ikke la eierens tur vente for alltid. */
+export const DEFAULT_SPEND_READ_TIMEOUT_MS = 3_000;
+
+/** Venter på `promise`, men gir opp etter `ms` (feiler med `claude_spend_timeout`). Fristen ryddes alltid; en forsinket avvisning av det oppgitte løftet er håndtert (race abonnerer på begge). */
+function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("claude_spend_timeout")), ms); });
+  return Promise.race([promise, deadline]).finally(() => { if (timer !== undefined) clearTimeout(timer); });
+}
 /** Ett kalls reservasjon kan aldri overstige dette av budsjettet (et gigantisk prompt skal ikke alene stenge alt). */
 const RESERVATION_CAP_SHARE = 0.05;
 
@@ -208,6 +217,8 @@ export interface ClaudeBudgetEnforcerOptions {
   /** Revisjonsraden skrives under eierens sovereign-autoritet (samme presedens som vakthunden, D-181): beslutningen er en deterministisk systemhandling på vegne av eieren. */
   actor_person_id: string;
   now?: () => number;
+  /** Frist (ms) for lesingen av forbruket per kall; standard 3 s. Utløpt = uleselig forbruk = fail-safe. */
+  spend_timeout_ms?: number;
 }
 
 export class ClaudeBudgetEnforcer {
@@ -270,9 +281,9 @@ export class ClaudeBudgetEnforcer {
     const window = budgetWindow(nowMs, cfg.reset_day);
     let spend: ClaudeSpend | null = null;
     try {
-      spend = await readClaudeSpend(this.opts.pool, info.tenant_id, window, nowMs);
+      spend = await withDeadline(readClaudeSpend(this.opts.pool, info.tenant_id, window, nowMs), this.opts.spend_timeout_ms ?? DEFAULT_SPEND_READ_TIMEOUT_MS);
     } catch (err) {
-      console.error(JSON.stringify({ msg: "claude_budget_spend_unreadable", error: err instanceof Error ? err.name : "unknown" }));
+      console.error(JSON.stringify({ msg: "claude_budget_spend_unreadable", error: err instanceof Error ? err.name : "unknown", ...(err instanceof Error && err.message === "claude_spend_timeout" ? { timeout: true } : {}) }));
     }
     // Herfra til reservasjonen er alt SYNKRONT: samtidige kall i denne prosessen ser hverandres reservasjoner (atomisk sjekk-og-reserver).
     let verdict: PacingVerdict;

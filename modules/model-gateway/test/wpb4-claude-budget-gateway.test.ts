@@ -307,6 +307,22 @@ describe("fail-safe: forbruket kan ikke leses", () => {
     spy.mockRestore();
   });
 
+  it("databasen henger (lesingen av forbruket besvares aldri): etter fristen gir hver beslutning fail-safe i stedet for at eierens tur venter for alltid, og fristen logges som kategori", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { gateway, db, anthropic } = build({ spendTimeoutMs: 25 });
+    db.spendReadHangs = true;
+    const started = Date.now();
+    expect((await gateway.complete(ownerTurn())).provider).toBe("anthropic");
+    expect((await gateway.complete(background())).provider).toBe("gemma_local");
+    expect(Date.now() - started).toBeLessThan(2_000); // to frister på 25 ms, ikke en evighet
+    expect(anthropic.calls).toHaveLength(1);
+    expect(db.audit.map((a) => a.reason)).toEqual(["spend_unreadable_essential_allowed", "spend_unreadable_background_deferred"]);
+    const logged = spy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toContain("claude_budget_spend_unreadable");
+    expect(logged).toContain("\"timeout\":true");
+    spy.mockRestore();
+  });
+
   it("lesefeil og INGEN lokal modell: BAKGRUNN får den tydelige utsatt-feilen, ESSENSIELL går fortsatt", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const { gateway, db } = build({ providers: ["anthropic"] });

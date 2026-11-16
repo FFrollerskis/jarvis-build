@@ -24,6 +24,8 @@ export class FakeDb {
   readonly statements: string[] = [];
   readonly costRows: Array<{ tenant_id: string; provider: string; model: string; amount_ore: number; purpose: string | null }> = [];
   spendReadError: Error | null = null;
+  /** Lesingen av forbruket blir aldri besvart (databasen henger). */
+  spendReadHangs = false;
   spendReadRow: Record<string, unknown> | null = null;
   spendReads = 0;
   guardSpentOre = 0;
@@ -41,6 +43,7 @@ export class FakeDb {
             if (text.includes("FROM cost_events") && text.includes("provider = $4")) {
               this.spendReads += 1;
               this.statements.push("READ_CLAUDE_SPEND");
+              if (this.spendReadHangs) await new Promise<never>(() => undefined);
               if (this.spendReadError !== null) throw this.spendReadError;
               if (this.spendReadRow !== null) return { rows: [this.spendReadRow] };
               const v = this.spend.get(tenant) ?? 0;
@@ -121,6 +124,8 @@ export interface BuildOptions {
   anthropic?: AdapterOptions;
   local?: AdapterOptions;
   now?: number;
+  /** Frist for lesingen av forbruket (ms); standard i enforceren er 3 s. */
+  spendTimeoutMs?: number;
 }
 
 export function build(opts: BuildOptions = {}) {
@@ -129,7 +134,9 @@ export function build(opts: BuildOptions = {}) {
   const clock = { now: opts.now ?? MID };
   const config = claudeBudgetConfigFromEnv({ JARVIS_CLAUDE_BUDGET_USD: "100", ...opts.env });
   if (config === null) throw new Error("test-oppsett: budsjettet må være på");
-  const enforcer = opts.flag === false ? undefined : new ClaudeBudgetEnforcer({ config, pool: db.pool(), trace, actor_person_id: "owner-1", now: () => clock.now });
+  const enforcer = opts.flag === false ? undefined : new ClaudeBudgetEnforcer({
+    config, pool: db.pool(), trace, actor_person_id: "owner-1", now: () => clock.now, ...(opts.spendTimeoutMs !== undefined ? { spend_timeout_ms: opts.spendTimeoutMs } : {})
+  });
   const anthropic = adapter("anthropic", "claude-sonnet-5-5", { withStream: true, ...opts.anthropic });
   const local = adapter("gemma_local", "gemma-local", { ...opts.local });
   const names = opts.providers ?? ["anthropic", "gemma_local"];
