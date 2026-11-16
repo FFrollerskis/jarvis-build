@@ -225,6 +225,7 @@ const decisionKey = (changeId: string, digest: string): string => `${changeId}|$
 /**
  * Eierens registrerte avgjørelser (EV-23) for de viste forslagene: siste rad per (forslag, versjon) i revisjonssporet (`audit_events`, tenant-RLS). Avgrenset av det eldste viste forslagets tidspunkt (minus en times margin mot
  * klokkeskjevhet) - en avgjørelse kan aldri være eldre enn forslaget den gjelder - så en lang revisjonshistorikk ikke skannes. Leses kun når det finnes forslag. Ukjente verdier i raden tas ikke med (fail-closed: ingen avgjørelse).
+ * «Siste» = høyeste `audit_id` (tildelt ved innsettingen, som skriveren serialiserer per forslag), ALDRI `at` (transaksjonens starttidspunkt: samtidige klikk kan få låsen i en annen rekkefølge enn de startet).
  */
 async function readOwnerDecisions(pool: ControlCenterPool, tenantId: string, pending: readonly PendingProposal[], nowMs: number): Promise<Map<string, OwnerDecision>> {
   const ids = pending.map((p) => p.change_id).filter((id) => safeCategory(id) === id);
@@ -237,7 +238,7 @@ async function readOwnerDecisions(pool: ControlCenterPool, tenantId: string, pen
             payload->>'change_id' AS change_id, payload->>'proposal_digest' AS digest, payload->>'decision' AS decision, at::text AS decided_at
        FROM audit_events
       WHERE tenant_id = $1 AND type = $2 AND at >= $3::timestamptz - interval '1 hour' AND payload->>'change_id' = ANY($4::text[])
-      ORDER BY payload->>'change_id', payload->>'proposal_digest', at DESC, audit_id DESC
+      ORDER BY payload->>'change_id', payload->>'proposal_digest', audit_id DESC
       LIMIT 200`,
     [tenantId, EVOLUTION_DECISION_AUDIT_TYPE, oldest, ids]
   );

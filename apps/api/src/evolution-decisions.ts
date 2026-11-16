@@ -39,12 +39,15 @@ export function isDecidableChangeId(value: unknown): value is string {
 const LATEST_LEDGER_ROW = `SELECT seq::text AS seq, change_class, decision, entry_hash, at::text AS recorded_at
    FROM evolution_change_ledger WHERE change_id = $1 ORDER BY seq DESC LIMIT 1`;
 
-/** Forrige registrerte avgjørelse for NØYAKTIG denne versjonen (id + digest), tenant-skopet. Margin på en time mot klokkeskjevhet mellom forslagsraden og avgjørelsen. */
+/**
+ * Forrige registrerte avgjørelse for NØYAKTIG denne versjonen (id + digest), tenant-skopet. Margin på en time mot klokkeskjevhet mellom forslagsraden og avgjørelsen (`at` er kun en nedre grense for å avgrense lesingen).
+ * «Siste» = høyeste `audit_id`, ALDRI `at`: `at` er transaksjonens starttidspunkt (`now()`), og to samtidige klikk kan starte i én rekkefølge og få låsen i en annen - `audit_id` tildeles ved innsettingen, som er serialisert av låsen.
+ */
 const PREVIOUS_DECISION = `SELECT payload->>'decision' AS decision, at::text AS decided_at
    FROM audit_events
   WHERE tenant_id = $1 AND type = $2 AND at >= $3::timestamptz - interval '1 hour'
     AND payload->>'change_id' = $4 AND payload->>'proposal_digest' = $5
-  ORDER BY at DESC, audit_id DESC LIMIT 1`;
+  ORDER BY audit_id DESC LIMIT 1`;
 
 interface LedgerRow { seq: string; change_class: string; decision: string; entry_hash: string; recorded_at: string }
 interface PreviousRow { decision: unknown; decided_at: unknown }
