@@ -1,5 +1,5 @@
 import type { ToolDefinition, ToolTransport } from "@jarvis/tool-gateway";
-import { GROWTH_WRITE_PROVIDERS, growthWriteConfigFromEnv, type GrowthProvider, type GrowthWriteConfig } from "./config.ts";
+import { GROWTH_WRITE_PROVIDERS, type GrowthProvider, type GrowthWriteConfig } from "./config.ts";
 import { Ga4WriteTransport, ga4WriteSpec } from "./ga4-write.ts";
 import { GbpWriteTransport, gbpWriteSpec } from "./gbp-write.ts";
 import { GoogleAdsWriteTransport, googleAdsWriteSpec } from "./google-ads-write.ts";
@@ -99,5 +99,3 @@ export function growthWriteToolDefinitions(config: GrowthWriteConfig, transports
   return out;
 }
 
-/** Praktisk: les konfigurasjonen fra miljøet (kun navnene dokumentert i `.env.example`). */
-export { growthWriteConfigFromEnv };
