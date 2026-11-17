@@ -360,7 +360,8 @@ describe("WP-D3 (D-459): erasure med eksperimentregister, skrivejournal og EXECU
     );
     const begun = await journal.begin(TENANT_A, "business", {
       provider: "google_ads", action: "set_campaign_budget", risk_class: "D", spend_effect: "unknown", target_ref: "googleads:1234567890:campaign:101:budget", campaign_id: campaign.campaign_id,
-      idempotency_key: `erase-key-${randomUUID()}`, request_digest: "b".repeat(64), actor_person_id: "person-tobias", source: "owner_route", session_id: "sess-d3-erase"
+      idempotency_key: `erase-key-${randomUUID()}`, request_digest: "b".repeat(64), actor_person_id: "person-tobias", source: "owner_route", session_id: "sess-d3-erase",
+      command_id: "cmd-d3-erase" // review L5: journalraden må være utstedt FOR kommandoen den beviser (migrasjon 114)
     });
     await journal.complete(TENANT_A, "business", begun.row.write_id, { status: "applied", before_state: { budget_amount_micros: 500_000_000 }, after_state: { budget_amount_micros: 400_000_000 } });
     await adminPool.query(
