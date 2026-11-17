@@ -100,7 +100,9 @@ Beslutningstabellen er **monoton**: mer forbruk gjør aldri en beslutning milder
 
 ## Tier-tabellen (formål × opphav)
 **Opphav** utledes slik: eksplisitt hint fra en betrodd kaller (rådet; en delegert jobb fra chat = `owner_task` kun når jobben er ATTESTERT, se under) > har jobb-id = `background` > har økt-id = `owner_turn` > ellers `background`. Hintet settes aldri av en modell eller av innhold; kun av Jarvis' egen kode.
+
 **Attestert «bestilt av eier» (review M2):** en delegert jobb er VIKTIG bare når kontrakten bærer BÅDE markøren `delegated_from_chat` og det interne flagget `cloud_tool_turns_allowed`. Begge er **reserverte nøkler**: `POST /tasks/submit` avviser en innsendt kontrakt som bærer dem (`reserved_input_key`), og bare `TasksDelegateTransport` setter dem - flagget først når turen som delegerte er betrodd (betjent av en skymodell, eller eierens egne ord, og ikke SECRET_RESTRICTED). En jobb uten attesteringen (forfalsket markør, lokalt betjent tur, planlagt jobb) er bakgrunnsarbeid. Å skrive `budget_origin` i kontraktdata har ingen virkning (leses aldri).
+
 | Formål | `owner_turn` (egen tur) | `owner_task` (bestilt jobb) | `background` |
 |---|---|---|---|
 | CHAT, CODE, REASON, PLAN, RESEARCH, VISION, UNSPECIFIED | ESSENSIELL | VIKTIG | BAKGRUNN |
