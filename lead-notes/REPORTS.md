@@ -124,3 +124,7 @@ Avvik: ingen ny executive-lesehandling (gjenbruker get_control_center); varsler 
 
 ## D3 fikser-rapport (2026-11-17 ~06:00Z)
 Se /tmp/lead/D3-fix-report.md (oppdatert D-459-tekst, 7 nye eierspørsmål, steder for blikk). Gren f9b269e4. Smal re-review startet (agent a3b4664ca3a4103c8, range a0aab5ae..f9b269e4, utfall -> /tmp/lead/D3-rereview.md).
+
+
+## B3 fikser-rapport (2026-11-17 ~06:20Z)
+Se /tmp/lead/B3-fix-report.md (oppdatert D-475-tekst, 2 nye eierspørsmål, steder for blikk). Gren 7aa421e5. Smal re-review startet (agent aec976d86ff44a97e, range bdeeb0b2..7aa421e5, utfall -> /tmp/lead/B3-rereview.md).
