@@ -109,6 +109,45 @@ describe("kildevakt: skriveren er smal", () => {
     expect(CENTER).toMatch(/ORDER BY payload->>'change_id', payload->>'proposal_digest', audit_id DESC/);
     expect(CENTER).not.toMatch(/ORDER BY[^`]*\bat DESC/);
   });
+
+  it("GJENNOMGANG H1: «siste» ledger-rad sorteres på den KVALIFISERTE kolonnen (`evolution_change_ledger.seq`, bigint) - aldri på tekst-aliaset `seq`", () => {
+    expect(RECORDER).toMatch(/ORDER BY evolution_change_ledger\.seq DESC LIMIT 1/);
+    expect(RECORDER).not.toMatch(/ORDER BY seq\b/);
+  });
+});
+
+describe("kildevakt (H1): ingen tekst-alias skygger for en sorteringskolonne i B3-spørringene", () => {
+  // Postgres løser et BART ORDER BY-navn til en utdatakolonne med samme navn - også et `::text`-alias («9» foran «10»). Kvalifiser kolonnen (`tabell.kolonne`) eller bruk et annet aliasnavn.
+  const FILES = ["apps/api/src/evolution-decisions.ts", "apps/api/src/control-center/evolution.ts", "apps/api/src/evolution-source.ts"];
+  const sqlStrings = (src: string): string[] => [...src.matchAll(/`([^`]*\bSELECT\b[^`]*)`/g)].map((m) => m[1] as string);
+
+  it("hver spørring (SELECT i en malstreng) har ingen ukvalifisert ORDER BY-referanse til et `::text`-alias - og sjekken er ikke tom", () => {
+    let queries = 0;
+    let aliases = 0;
+    for (const rel of FILES) {
+      for (const sql of sqlStrings(strip(read(rel)))) {
+        queries += 1;
+        // teksten etter FØRSTE ORDER BY (også en indre spørrings sortering og den ytre): en ukvalifisert alias-referanse hvor som helst der er farlig
+        const orderBy = /ORDER BY([^`]*)$/i.exec(sql)?.[1] ?? "";
+        for (const m of sql.matchAll(/::text\s+AS\s+(\w+)/gi)) {
+          aliases += 1;
+          const alias = m[1] as string;
+          // ukvalifisert = ikke direkte etter et punktum eller et ord-tegn
+          expect(new RegExp(`(^|[^.\\w])${alias}\\b`).test(orderBy), `${rel}: ORDER BY refererer det ukvalifiserte tekst-aliaset «${alias}» i: ${sql.replace(/\s+/g, " ").slice(0, 120)}`).toBe(false);
+        }
+      }
+    }
+    expect(queries).toBeGreaterThanOrEqual(8);
+    expect(aliases).toBeGreaterThanOrEqual(3);
+  });
+
+  it("vakten biter: den GAMLE feilen (`seq::text AS seq ... ORDER BY seq DESC`) ville blitt fanget", () => {
+    const bad = "SELECT seq::text AS seq, decision FROM evolution_change_ledger WHERE change_id = $1 ORDER BY seq DESC LIMIT 1";
+    const orderBy = /ORDER BY([^`]*)$/i.exec(bad)?.[1] ?? "";
+    expect(new RegExp("(^|[^.\\w])seq\\b").test(orderBy)).toBe(true);
+    const good = "SELECT seq::text AS seq FROM evolution_change_ledger ORDER BY evolution_change_ledger.seq DESC LIMIT 1";
+    expect(new RegExp("(^|[^.\\w])seq\\b").test(/ORDER BY([^`]*)$/i.exec(good)?.[1] ?? "")).toBe(false);
+  });
 });
 
 describe("kildevakt: INGEN kode leser en registrert avgjørelse som tillatelse", () => {

@@ -10,7 +10,7 @@ import { safeCategory } from "./control-center/shared.ts";
 
 /**
  * WP-B3 (D-475, EV-23): SKRIVEREN som registrerer eierens avgjørelse (godkjenn / avvis / utsett) om ett endringsforslag. Den er den ENESTE skrivevegen, og den skriver ÉN ting: en rad i det append-only revisjonssporet
- * (`audit_events`, type `evolution.owner_decision`, tenant-skopet). Den skriver ALDRI til endringsregisteret (`evolution_change_ledger`: jarvis_app har kun SELECT her), aktiverer ingenting og utfører ingenting - selvendring
+ * (`audit_events`, type `evolution.owner_decision`, tenant-skopet). Den skriver ALDRI til endringsregisteret (`evolution_change_ledger`: jarvis_app HAR INSERT på tabellen (migrasjon 075, ChangeLedger bruker den), men denne skriveren bruker den aldri - en kildevakt og en databasetest låser det), aktiverer ingenting og utfører ingenting - selvendring
  * er frosset (D-397). En registrert avgjørelse er data som kun Evolusjon-senteret leser (for å vise hva eieren har avgjort); ingen kodevei leser den som en tillatelse.
  *
  * VALGT LAGRING (innsnevret tolkning, ingen migrasjon): revisjonssporet i stedet for endringsregisteret. Endringsregisteret er EV-0-autoritetskjeden (D-408), globalt og hash-lenket; en `approved`-rad der er en uttalelse om at
@@ -36,8 +36,11 @@ export function isDecidableChangeId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && safeCategory(value) === value;
 }
 
+// GJENNOMGANG H1: `seq` MÅ sorteres på tabellkolonnen (bigint), ALDRI på utdatakolonnen med samme navn. Når SELECT-listen har tekst-aliaset seq (`seq::text AS seq`), løses et BART ORDER BY-navn til utdatakolonnen
+// (tekst), og «9» sorterer da foran «10» og «99» foran «100» - «siste» rad blir feil og versjonsbindingen/E3-regelen kan omgås. Derfor det KVALIFISERTE navnet (som ChangeLedger.history/all gjør); kildevakten og
+// databasetesten wpb3-evolution-ledger-order-db krysser siffergrensene.
 const LATEST_LEDGER_ROW = `SELECT seq::text AS seq, change_class, decision, entry_hash, at::text AS recorded_at
-   FROM evolution_change_ledger WHERE change_id = $1 ORDER BY seq DESC LIMIT 1`;
+   FROM evolution_change_ledger WHERE change_id = $1 ORDER BY evolution_change_ledger.seq DESC LIMIT 1`;
 
 /**
  * Forrige registrerte avgjørelse for NØYAKTIG denne versjonen (id + digest), tenant-skopet. Margin på en time mot klokkeskjevhet mellom forslagsraden og avgjørelsen (`at` er kun en nedre grense for å avgrense lesingen).
