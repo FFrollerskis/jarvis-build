@@ -474,6 +474,45 @@ describe("4. endringsregister og forslag: kun antall, klasser, id-er og alder - 
     expect(itemOf(sectionOf(unsigned.report, "ledger"), "constitution")).toMatchObject({ status: "WARN", facts: { constitution: "not_verified", code: "constitution_unsigned" } });
   });
 
+  it("NYTT 2 (re-review): kjede- og konstitusjonsradene er OPPSTARTSRESULTATER og sier det - EKSAKT tekst og `basis`-faktum i hver tilstand (aldri «målt nå»), og seksjonskilden sier det samme", async () => {
+    const ledgerFor = async (status: Ev0BootStatus | null | undefined): Promise<ControlSection> => sectionOf((await reportOf({ ev0Status: status === undefined ? undefined : () => status })).report, "ledger");
+    const BASIS = "oppstartssjekk";
+    // ok + verifisert
+    const ok = await ledgerFor(BOOT_OK);
+    expect(ok.source).toContain("EV-0-oppstartssjekken (konstitusjon + hash-kjede: resultatet fra siste OPPSTART, ikke målt nå)");
+    expect(itemOf(ok, "chain").detail_no).toBe("Intakt (12 rader) - resultatet av oppstartssjekken, ikke målt nå.");
+    expect(itemOf(ok, "chain").facts).toEqual({ chain: "ok", rows: 12, basis: BASIS });
+    expect(itemOf(ok, "constitution").detail_no).toBe("Signert og verifisert (versjon 1) - resultatet av oppstartssjekken, ikke målt nå.");
+    expect(itemOf(ok, "constitution").facts).toEqual({ constitution: "verified", version: 1, basis: BASIS });
+    // ingen egen tidsstempel: radene hevder aldri å være målt nå (seksjonens tidspunkt gjelder de andre radene)
+    expect(itemOf(ok, "chain").observed_at ?? null).toBeNull();
+    expect(itemOf(ok, "constitution").observed_at ?? null).toBeNull();
+    // ødelagt kjede
+    const broken = await ledgerFor({ ...BOOT_OK, ledger: { status: "broken", broken_seq: "7", count: 9 } });
+    expect(itemOf(broken, "chain")).toMatchObject({ status: "FAIL", detail_no: "Hash-kjeden var ØDELAGT ved oppstartssjekken (fra rad 7) - resultatet er fra oppstart, ikke målt nå. Evolution kan ikke aktiveres, og endringsregisteret kan ikke stoles på." });
+    expect(itemOf(broken, "chain").facts).toEqual({ chain: "broken", broken_seq: "7", basis: BASIS });
+    // utilgjengelig register ved oppstart
+    const unavailable = await ledgerFor({ ...BOOT_OK, ledger: { status: "unavailable", error: "intern feil" } });
+    expect(itemOf(unavailable, "chain")).toMatchObject({ status: "UNKNOWN", detail_no: "Endringsregisteret var utilgjengelig ved oppstart (ikke målt)." });
+    expect(itemOf(unavailable, "chain").facts).toEqual({ chain: "unavailable", basis: BASIS });
+    // konstitusjon som ikke er verifisert
+    const unsigned = await ledgerFor({ ...BOOT_OK, constitution: { status: "not_verified", code: "constitution_unsigned" } });
+    expect(itemOf(unsigned, "constitution")).toMatchObject({ status: "WARN", detail_no: "Ikke verifisert ved oppstartssjekken (constitution_unsigned) - resultatet er fra oppstart, ikke målt nå. Evolution kan ikke aktiveres før du har signert den." });
+    expect(itemOf(unsigned, "constitution").facts).toEqual({ constitution: "not_verified", code: "constitution_unsigned", basis: BASIS });
+    // INGEN oppstartsresultat (ikke kjørt / ikke koblet inn): UKJENT og ærlig - og uten `basis` (det finnes intet resultat å stemple)
+    const neverRan = await ledgerFor(null);
+    expect(itemOf(neverRan, "chain")).toMatchObject({ status: "UNKNOWN", detail_no: "Oppstartssjekken har ikke kjørt siden oppstart (ikke målt)." });
+    expect(itemOf(neverRan, "chain").facts).toEqual({ chain: null });
+    expect(itemOf(neverRan, "constitution")).toMatchObject({ status: "UNKNOWN", detail_no: "Oppstartssjekken har ikke et resultat (ikke målt)." });
+    expect(itemOf(neverRan, "constitution").facts).toEqual({ constitution: null });
+    const notWired = await ledgerFor(undefined);
+    expect(itemOf(notWired, "chain").detail_no).toBe("Oppstartssjekken er ikke koblet inn (ikke målt).");
+    // presisjon: radene som FAKTISK er målt nå (forslag, siste 30 døgn) er IKKE stemplet som oppstartsresultat
+    expect(itemOf(ok, "decisions_30d").facts).not.toHaveProperty("basis");
+    expect(itemOf(ok, "proposals").facts).not.toHaveProperty("basis");
+    expect(itemOf(ok, "proposals").detail_no).not.toMatch(/oppstart/i);
+  });
+
   it("endringsregisteret kan ikke leses (databasefeil med passord i meldingen) → forslags-raden er UKJENT (aldri «ingen forslag venter»), kjeden vises likevel, og meldingen lekker ikke", async () => {
     const { report } = await reportOf({}, { fail: Object.assign(new Error("password authentication failed for user jarvis_app (db=jarvis)"), { code: "28P01" }) });
     const ledger = sectionOf(report, "ledger");
