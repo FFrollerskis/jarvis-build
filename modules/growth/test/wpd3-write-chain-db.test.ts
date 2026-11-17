@@ -1127,3 +1127,131 @@ describe("U: review L7 - gatewayens tidsavbrudd (avbrudd) gjennom en growth-tran
     }
   });
 });
+
+describe("V: re-review N1 - en replay av en rad som KAN være utført låses aldri som terminal `failed` av en port FØR leverandøren", () => {
+  const journalOf = async (id: string) => (await adminPool.query(`SELECT status, failure_code FROM growth_write_journal WHERE write_id = $1`, [id])).rows[0] as { status: string; failure_code: string | null };
+  const thaw = () => controls.unfreezeConnector("googleads");
+  beforeEach(thaw);
+  afterAll(thaw);
+
+  /** Budsjett 500M -> 400M mikro ANVENDT hos leverandøren, men svaret gikk tapt (socketen revet etter behandling): første kall er UKJENT. */
+  async function appliedButUnknown(extra: Partial<In> = {}) {
+    gads.mutateDestroyAfterApply = true;
+    const key = uniq("n1");
+    const params = { campaign_id: "101", amount_ore: 40_000 };
+    const first = await g("set_campaign_budget", params, { idempotency_key: key, ...extra });
+    gads.mutateDestroyAfterApply = false;
+    expect(first.outcome).toBe("UNKNOWN");
+    expect(first.write.status).toBe("outcome_unknown");
+    expect(gads.budgets.get("11")?.micros).toBe(400_000_000);
+    return { key, params, first, replay: (more: Partial<In> = {}) => g("set_campaign_budget", params, { idempotency_key: key, ...extra, ...more }) };
+  }
+  /** Replayen er UKJENT med den LAGREDE raden, raden står åpen (kan senere avklares til `applied`), og ingenting er sendt på nytt. */
+  async function expectStillOpen(replay: Awaited<ReturnType<typeof g>>, first: Awaited<ReturnType<typeof g>>, reason: RegExp | string) {
+    expect(replay.outcome).toBe("UNKNOWN");
+    expect(replay.replayed).toBe(true);
+    expect(replay.write.write_id).toBe(first.write.write_id);
+    if (typeof reason === "string") expect(replay.reason).toBe(reason); else expect(replay.reason).toMatch(reason);
+    expect(await journalOf(first.write.write_id)).toMatchObject({ status: "outcome_unknown" });
+    expect(gMut()).toHaveLength(1);
+  }
+  const settle = async (id: string) => expect((await journal.complete(A, "business", id, { status: "applied" })).status).toBe("applied");
+
+  it("(a) varsleren er ikke klar: replayen gir UKJENT (ikke FAILED), raden står `outcome_unknown` og kan senere avklares til `applied`", async () => {
+    const { first, replay } = await appliedButUnknown();
+    state.notifierReady = false;
+    await expectStillOpen(await replay(), first, "class_d_notifier_not_ready");
+    state.notifierReady = true;
+    await settle(first.write.write_id);
+  });
+
+  it("(b) eieren har fryst `googleads`: replayen gir UKJENT (ikke FAILED) og raden står åpen", async () => {
+    const { first, replay } = await appliedButUnknown();
+    controls.freezeConnector("googleads");
+    await expectStillOpen(await replay(), first, "connector_frozen");
+    thaw();
+    await settle(first.write.write_id);
+  });
+
+  it("(c) leverandørens GAQL-lesing svarer 503 i preflight: replayen gir UKJENT (ikke FAILED) og raden står åpen", async () => {
+    const { first, replay } = await appliedButUnknown();
+    const original = gads.handler;
+    gads.handler = (r) => (gads.isMutation(r) ? original(r) : { status: 503, json: { error: { status: "UNAVAILABLE", message: "backend error" } } });
+    try {
+      await expectStillOpen(await replay(), first, /^preflight_failed:/);
+    } finally {
+      gads.handler = original;
+    }
+    await settle(first.write.write_id);
+  });
+
+  it("(d) kommando-bundet skriving anvendt men ukjent: replayen sender ikke på nytt (gatewayen svarer fra ledgeren FØR validatoren, så `precondition_changed` oppstår ikke) - raden og kommandoen står `outcome_unknown`/`execution_unknown`", async () => {
+    await seedCommand("cmd-d3-n1d", 50_000, 40_000);
+    const { first, replay } = await appliedButUnknown({ command_id: "cmd-d3-n1d" });
+    expect(first.command_status).toBe("execution_unknown");
+    const again = await replay();
+    await expectStillOpen(again, first, /^postcondition_unverified:/);
+    expect(again.command_status).toBe("execution_unknown"); // markeringen er idempotent (leges etter en krasj mellom journalen og kommandoen)
+    expect(await commandStatus("cmd-d3-n1d")).toEqual({ status: "execution_unknown", execution_write_id: first.write.write_id });
+  });
+
+  it("(e) journalraden står `requested` mens ledgeren er ferdig (krasj mellom gatewayen og journalen): en port-avvisning låser den ikke som `failed`; replayen uten port-avvisning fullfører som `applied` uten ny mutasjon", async () => {
+    const key = uniq("n1e");
+    const input = { idempotency_key: key, provider: "google_ads", action: "set_campaign_budget", parameters: { customer_id: CID, campaign_id: "101", amount_ore: 40_000 } };
+    const crashing = Object.create(journal) as GrowthWriteJournal;
+    crashing.complete = async () => { throw new Error("simulated_crash_before_journal_complete"); };
+    await expect(executeGrowthWrite({ ...exec, journal: crashing }, owner, input)).rejects.toThrow("simulated_crash_before_journal_complete");
+    expect(gMut()).toHaveLength(1);
+    expect((await journal.findByKey(A, "business", key))?.status).toBe("requested");
+    state.notifierReady = false;
+    const blocked = await executeGrowthWrite(exec, owner, input);
+    expect(blocked.outcome).toBe("UNKNOWN");
+    expect(blocked.reason).toBe("class_d_notifier_not_ready");
+    expect((await journal.findByKey(A, "business", key))?.status).toBe("requested"); // ikke `failed`: ledgeren sier at leverandøren HAR utført
+    state.notifierReady = true;
+    const done = await executeGrowthWrite(exec, owner, input);
+    expect(done).toMatchObject({ outcome: "SUCCESS", replayed: true });
+    expect(done.write.status).toBe("applied");
+    expect(gMut()).toHaveLength(1);
+  });
+
+  it("en NY forespørsel som stoppes av en port er fortsatt terminal `failed` (ingenting er sendt - nøkkelen er brent), og replay av den gir bare det lagrede utfallet", async () => {
+    state.notifierReady = false;
+    const key = uniq("n1-fresh");
+    const first = await g("set_campaign_budget", { campaign_id: "101", amount_ore: 40_000 }, { idempotency_key: key });
+    expect(first.outcome).toBe("FAILED");
+    expect(first.write.status).toBe("failed");
+    state.notifierReady = true;
+    const replay = await g("set_campaign_budget", { campaign_id: "101", amount_ore: 40_000 }, { idempotency_key: key });
+    expect(replay).toMatchObject({ outcome: "FAILED", replayed: true });
+    expect(gMut()).toHaveLength(0);
+  });
+});
+
+describe("V2: re-review N2 - en `requested` journalrad er IKKE en fullført replay (kommando som er avbrutt i mellomtiden utfører ingenting)", () => {
+  it("krasj FØR gatewayen (journalraden `requested`, ingen ledger-rad) + kommandoen avbrutt: samme nøkkel nektes `growth_command_not_pending:cancelled` og ingenting sendes", async () => {
+    await seedCommand("cmd-d3-n2", 50_000, 40_000);
+    const key = uniq("n2");
+    const input = { idempotency_key: key, provider: "google_ads", action: "set_campaign_budget", command_id: "cmd-d3-n2", parameters: { customer_id: CID, campaign_id: "101", amount_ore: 40_000 } };
+    const crashing = { get: gateway.get.bind(gateway), execute: async () => { throw new Error("simulated_crash_before_gateway"); } };
+    await expect(executeGrowthWrite({ ...exec, gateway: crashing as never }, owner, input)).rejects.toThrow("simulated_crash_before_gateway");
+    expect((await journal.findByKey(A, "business", key))?.status).toBe("requested");
+    expect(gads.requests).toHaveLength(0);
+    await adminPool.query(`UPDATE marketing_campaign_execution_commands SET status = 'cancelled' WHERE command_id = 'cmd-d3-n2'`);
+    await expect(executeGrowthWrite(exec, owner, input)).rejects.toThrow("growth_command_not_pending:cancelled");
+    expect(gads.requests).toHaveLength(0);
+    expect(gads.budgets.get("11")?.micros).toBe(500_000_000);
+    expect(await commandStatus("cmd-d3-n2")).toEqual({ status: "cancelled", execution_write_id: null });
+  });
+
+  it("samme krasj, men kommandoen er fortsatt ventende: replayen utfører (en `requested` rad uten ledger kan fortsatt mutere, så den følger kravene til en ny forespørsel) og markerer kommandoen", async () => {
+    await seedCommand("cmd-d3-n2b", 50_000, 40_000);
+    const key = uniq("n2b");
+    const input = { idempotency_key: key, provider: "google_ads", action: "set_campaign_budget", command_id: "cmd-d3-n2b", parameters: { customer_id: CID, campaign_id: "101", amount_ore: 40_000 } };
+    const crashing = { get: gateway.get.bind(gateway), execute: async () => { throw new Error("simulated_crash_before_gateway"); } };
+    await expect(executeGrowthWrite({ ...exec, gateway: crashing as never }, owner, input)).rejects.toThrow("simulated_crash_before_gateway");
+    const done = await executeGrowthWrite(exec, owner, input);
+    expect(done).toMatchObject({ outcome: "SUCCESS", command_status: "executed" });
+    expect(gMut()).toHaveLength(1);
+  });
+});

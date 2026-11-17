@@ -14,7 +14,8 @@ import type { OpSpec, ProviderToolSpec } from "./tool-factory.ts";
  * klasse D-kjeden med idempotens/preflight/readback/varsling, frys, kill switch) - denne funksjonen dupliserer INGEN sjekk og har INGEN direkte transport-vei (samme modell som `executeCloudMutation`, WP-E1).
  * Den legger til Jarvis' EGEN kanoniske journal (`growth_write_journal`): forespørselens digest, FØR-/ETTER-tilstand fra gatewayens ledger, utfall, tidslinjehendelse på kampanjen og - kun med bevis -
  * `executed` på en utførelses-kommando (D-87/migrasjon 114). Utfall: `applied` bare når gatewayen verifiserte etterbetingelsen; «utfall ukjent» og «mutasjonen skjedde men verifiseringen feilet» blir
- * `outcome_unknown` (aldri en fabrikkert suksess); alt annet er `failed`. Én nøkkel = ÉN forespørsel: samme nøkkel + annen forespørsel = `growth_write_idempotency_conflict`.
+ * `outcome_unknown` (aldri en fabrikkert suksess); alt annet er `failed` - bortsett fra en REPLAY der leverandøren KAN ha utført mutasjonen (raden er `outcome_unknown`, eller ledgeren har en ikke-feilet rad): en avvisning fra en port
+ * FØR leverandøren (varsler, frys, leverandørlesing, `precondition_changed`) gir UKJENT og lar raden stå åpen (review N1). Én nøkkel = ÉN forespørsel: samme nøkkel + annen forespørsel = `growth_write_idempotency_conflict`.
  */
 type Params = Record<string, JsonValue>;
 export type GrowthWriteOutcome = "SUCCESS" | "NOOP" | "UNKNOWN" | "PARTIAL" | "FAILED";
@@ -95,8 +96,11 @@ export async function executeGrowthWrite(deps: GrowthWriteExecutorDeps, identity
   // `current_budget_ore`) - det er DEM gatewayen får og som journalens digest dekker.
   const externalCampaignId = typeof input.parameters["campaign_id"] === "string" ? (input.parameters["campaign_id"] as string) : null;
   const campaign = externalCampaignId !== null && CAMPAIGN_CHANNELS.has(provider) && deps.findCampaign ? await deps.findCampaign(tenantId, space, provider as CampaignChannel, externalCampaignId) : null;
-  // Review L5: en REPLAY (journalraden finnes fra før) skal gi det lagrede utfallet og fullføre kommando-markeringen - også når kommandoen allerede er `executed`/`execution_unknown`; kun en NY forespørsel krever `pending_execution`.
-  const replaying = input.command_id !== undefined && (await deps.journal.findByKey(tenantId, space, input.idempotency_key)) !== null;
+  // Review L5: en REPLAY skal gi det lagrede utfallet og fullføre kommando-markeringen - også når kommandoen allerede er `executed`/`execution_unknown`; kun en NY forespørsel krever `pending_execution`.
+  // Review N2: «replay» er KUN en journalrad som allerede er FULLFØRT (`applied`/`failed`/`outcome_unknown` - leverandørforsøket er gjort, eller kan være gjort). En rad som fortsatt står `requested` (en krasj FØR
+  // leverandøren, eller et kall som pågår) kan fortsatt føre til en NY mutasjon, og må derfor oppfylle samme krav som en ny forespørsel: en kommando som er avbrutt/erstattet i mellomtiden utfører ingenting.
+  const existing = input.command_id !== undefined ? await deps.journal.findByKey(tenantId, space, input.idempotency_key) : null;
+  const replaying = existing !== null && existing.status !== "requested";
   const parameters: Params = input.command_id !== undefined ? await bindCommand(deps.pool, tenantId, space, input, provider, campaign?.campaign_id ?? null, replaying) : input.parameters;
 
   // Review L5: kommandoen er en del av forespørselen - samme nøkkel for en ANNEN kommando er en konflikt, ikke en replay (en journalrad kan bevise nøyaktig ÉN kommando).
@@ -124,6 +128,10 @@ export async function executeGrowthWrite(deps: GrowthWriteExecutorDeps, identity
   };
   const prior = await readLedger(deps.pool, tenantId, input.idempotency_key);
   if (prior !== null && (begun.created || !belongsToUs(prior))) return collide();
+  // Review N1: en REPLAY der leverandøren KAN ha utført mutasjonen - journalraden er `outcome_unknown`, eller ledgeren har en rad for nøkkelen som ikke er `failed` (reservert/ukjent/utført: forrige forsøk nådde
+  // gatewayens reservasjon). Da bærer en avvisning fra en port FØR leverandøren (varsler ikke klar, frys, leverandørlesing feiler, `precondition_changed` fordi endringen allerede er gjort) ingen NY opplysning om
+  // utfallet - den skal aldri låse raden som terminal `failed` (en `failed` rad kan aldri avklares mer, og ville sagt «mislyktes» om noe som kan være utført).
+  const mayHaveMutated = !begun.created && (begun.row.status === "outcome_unknown" || (prior !== null && prior.status !== "failed"));
 
   const result = await deps.gateway.execute({
     identity, tool_id: toolId, action: input.action, parameters, idempotency_key: input.idempotency_key,
@@ -148,6 +156,11 @@ export async function executeGrowthWrite(deps: GrowthWriteExecutorDeps, identity
   } else if (result.reason.startsWith("postcondition_")) {
     // Mutasjonen LYKTES hos leverandøren, men etterbetingelsen kunne ikke bekreftes: aldri «applied».
     outcome = "PARTIAL"; status = "outcome_unknown"; reason = result.reason;
+  } else if (mayHaveMutated) {
+    // Review N1: raden står åpen (uendret) så en senere avstemming/replay kan sette `applied`; svaret er UKJENT med den lagrede raden og avvisningsårsaken. Ingen ny tidslinjehendelse (ingen ny opplysning), men en
+    // krasj mellom journalen og kommandoen leges som ved en `applied` replay (idempotent markering `execution_unknown`).
+    const healed = input.command_id !== undefined && begun.row.status === "outcome_unknown" ? await markCommand(deps.pool, tenantId, space, input.command_id, begun.row, false) : null;
+    return { write: begun.row, outcome: "UNKNOWN", reason: result.reason, replayed: true, command_status: healed };
   } else {
     outcome = "FAILED"; status = "failed"; reason = result.reason;
   }
