@@ -75,7 +75,8 @@ import type { MemorySpace } from "@jarvis/contracts";
 // D-121: DEN delte prioriteringsregelen fra `@jarvis/business` - aldri en
 // nesten-lik kopi (se `classifyAttentionBucket` i open-loop-types.ts).
 import { classifyAttentionBucket } from "@jarvis/business";
-import { normalizeChannelIdentifier } from "./normalize.ts";
+import { normalizeChannelIdentifier, normalizeE164 } from "./normalize.ts";
+import { PHONE_CHANNELS } from "./types.ts";
 import type {
   AttentionIdentityReach,
   ChannelReach,
@@ -114,6 +115,25 @@ export class ConversationGraphService {
          JOIN conversation_channel_links l ON l.identity_id = ci.identity_id
          WHERE l.tenant_id = $1 AND l.channel = $2 AND l.channel_identifier = $3 AND l.status = 'active'`,
         [tenantId, channel, normalized]
+      );
+      return rows.length === 1 ? (rows[0] as ConversationIdentity) : null;
+    });
+  }
+
+  /**
+   * WP-G1 (D-463, P1a): EKSAKT E.164-treff på tvers av telefonkanalene (`phone`/`sms`/`whatsapp`). Samme nummer = samme person KUN når alle aktive treff peker på NØYAKTIG én identitet.
+   * To forskjellige identiteter med samme nummer er et reelt identitetskonflikt-signal og gir `null` (ukjent forblir ukjent, Q-26) - aldri et valg av «den første». Nummeret normaliseres
+   * av den delte `normalizeE164` (et nasjonalt nummer uten landnummer avvises: et landnummer gjettes aldri).
+   */
+  async resolveIdentityByPhone(tenantId: string, memorySpace: MemorySpace, rawNumber: string): Promise<ConversationIdentity | null> {
+    const e164 = normalizeE164(rawNumber, { allowBareInternationalDigits: false });
+    if (e164 === null) throw new Error("conversation_invalid_phone_channel_identifier");
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT DISTINCT ci.* FROM conversation_identities ci
+         JOIN conversation_channel_links l ON l.identity_id = ci.identity_id AND l.tenant_id = ci.tenant_id
+         WHERE l.tenant_id = $1 AND l.channel = ANY($2::text[]) AND l.channel_identifier = $3 AND l.status = 'active' AND ci.status = 'active'`,
+        [tenantId, [...PHONE_CHANNELS], e164]
       );
       return rows.length === 1 ? (rows[0] as ConversationIdentity) : null;
     });
