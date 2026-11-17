@@ -132,3 +132,7 @@ Se /tmp/lead/B3-fix-report.md (oppdatert D-475-tekst, 2 nye eierspørsmål, sted
 
 ## D3 re-review (2026-11-17 ~06:25Z)
 Se /tmp/lead/D3-rereview.md: VERDICT MERGE ETTER FIKSER (N1 MEDIUM: replay av outcome_unknown stoppet av port blir terminal failed; N2-N9 LOW/INFO; N4 testhull). Andre fiks-runde sendt til fikser ab83bf1579fe69000 (N8: lead bekrefter ingen DB har anvendt a0aab5ae; 114 endret på stedet, ingen 115). Ny re-review (delta) etter fikserens svar.
+
+
+## B4 fikser-rapport (2026-11-17 ~07:00Z)
+Se /tmp/lead/B4-fix-report.md (oppdatert D-476-tekst, 6 nye eierspørsmål, steder for blikk, avvik: reservert `delegated_from_chat` endrer /tasks/submit også med flagg AV; migrasjon 115 uavhengig av flagg). Gren 87e930f3. Smal re-review startet (agent a0009a380306d80df, range 774a7b3a..87e930f3, utfall -> /tmp/lead/B4-rereview.md).
