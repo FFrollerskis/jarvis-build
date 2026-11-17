@@ -176,7 +176,8 @@ describe("merknaden bak svar og jobber når kreditten stengte Anthropic", () => 
     expect(claudeBudgetRouteNote({ claude_budget: null })).toBe("");
   });
 
-  it("merknaden fjernes fra historikken før klassifisering (står i SYSTEM_NOTE_PREFIXES), og kan aldri selv låse samtalen til lokal modell", () => {
+  it("merknaden fjernes fra historikken før klassifisering (står i SYSTEM_NOTE_PREFIXES når kreditten er på), og kan aldri selv låse samtalen til lokal modell", () => {
+    vi.stubEnv("JARVIS_CLAUDE_BUDGET_USD", "100"); // prefikset gjelder kun med kreditten på (INFO i review: flagg AV er identisk med main) - se wpb4-review-fixes.test.ts
     for (const meta of [closed(), closed({ action: "defer", reason: "reserve_kept_for_essential" }), closed({ action: "defer", reason: "tight_background_deferred" })]) {
       const note = claudeBudgetRouteNote(meta);
       expect(stripSystemNotes(`svar${note}`)).toBe("svar");
@@ -221,7 +222,7 @@ const cloudClosedThenLocal = (metadata?: Record<string, unknown>) => ({
 });
 
 let errSpy: ReturnType<typeof vi.spyOn> | undefined;
-afterEach(() => { errSpy?.mockRestore(); errSpy = undefined; });
+afterEach(() => { errSpy?.mockRestore(); errSpy = undefined; vi.unstubAllEnvs(); });
 
 describe("chatten (ConversationEngine) - kreditten stengte skyruten for verktøyturen", () => {
   it("lokal omkjøring etter at Anthropic er stengt: svaret får ÉN merknad om kreditten (i svaret og i strømmen), og den misvisende «Reservemodell brukt: anthropic var ikke tilgjengelig» droppes", async () => {

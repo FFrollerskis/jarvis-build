@@ -154,3 +154,28 @@ describe("M2: VIKTIG kan ikke forfalskes - `delegated_from_chat` er en reservert
     expect(server.indexOf('submittedContractHasReservedKey(authed.body["contract"])')).toBeLessThan(server.indexOf('deps.tasks.submit(authed.identity, authed.body["contract"])'));
   });
 });
+
+describe("INFO: `stripSystemNotes` fjerner «(Claude-kreditten: ...)» KUN når Claude-kreditten er på - flagg AV er identisk med main", () => {
+  const creditNote = claudeBudgetRouteNote(closed(), "svaret", { provider: "gemma_local" });
+  const OTHER_NOTE = "\n\n(Reservemodell brukt: anthropic var ikke tilgjengelig, så dette svaret kom fra gemma_local.)";
+
+  it("uten flagget (tom/usatt/off): en avsluttende kredittmerknad i et lagret svar står urørt i historikken (som på main); de øvrige rutemerknadene fjernes som før", async () => {
+    const { stripSystemNotes } = await import("../src/tool-turn-route.ts");
+    for (const value of [undefined, "", "   ", "off", "OFF"]) {
+      if (value === undefined) vi.stubEnv("JARVIS_CLAUDE_BUDGET_USD", ""); else vi.stubEnv("JARVIS_CLAUDE_BUDGET_USD", value);
+      expect(stripSystemNotes(`Svar.${creditNote}`), String(value)).toBe(`Svar.${creditNote}`);
+      expect(stripSystemNotes(`Svar.${OTHER_NOTE}`), String(value)).toBe("Svar.");
+      expect(stripSystemNotes(`Svar.${OTHER_NOTE}${creditNote}`), String(value)).toBe(`Svar.${OTHER_NOTE}${creditNote}`);
+    }
+  });
+
+  it("med flagget på: kredittmerknaden fjernes (alene, flere på rad og blandet med andre rutemerknader), og en ugyldig verdi regnes som på (oppstarten stopper den uansett)", async () => {
+    const { stripSystemNotes } = await import("../src/tool-turn-route.ts");
+    for (const value of ["100", "42.50", "abc"]) {
+      vi.stubEnv("JARVIS_CLAUDE_BUDGET_USD", value);
+      expect(stripSystemNotes(`Svar.${creditNote}`), value).toBe("Svar.");
+      expect(stripSystemNotes(`Svar.${creditNote}${creditNote}`), value).toBe("Svar.");
+      expect(stripSystemNotes(`Svar.${OTHER_NOTE}${creditNote}`), value).toBe("Svar.");
+    }
+  });
+});

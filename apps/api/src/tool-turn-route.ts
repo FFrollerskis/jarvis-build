@@ -201,12 +201,20 @@ const SYSTEM_NOTE_PREFIXES: readonly string[] = [
   "Svart på skymodellen uten",
   "Deler av minnesøket ble holdt tilbake",
   "Deler av kunnskapssøket ble holdt tilbake",
-  "Reservemodell brukt:",
-  // WP-B4 (D-476): Claude-kreditten styrte svaret bort fra Anthropic (se `claudeBudgetRouteNote`).
-  CLAUDE_BUDGET_NOTE_PREFIX
+  "Reservemodell brukt:"
 ];
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const TRAILING_SYSTEM_NOTE = new RegExp(`(?:\\n\\n|^)\\((?:${SYSTEM_NOTE_PREFIXES.map(escapeRegExp).join("|")})[^()]*\\)\\s*$`);
+const trailingNote = (prefixes: readonly string[]): RegExp => new RegExp(`(?:\\n\\n|^)\\((?:${prefixes.map(escapeRegExp).join("|")})[^()]*\\)\\s*$`);
+const TRAILING_SYSTEM_NOTE = trailingNote(SYSTEM_NOTE_PREFIXES);
+/**
+ * WP-B4 (D-476): Claude-kreditten styrte svaret bort fra Anthropic (se `claudeBudgetRouteNote`). Prefikset står KUN i listen når kreditten er på: uten `JARVIS_CLAUDE_BUDGET_USD` er historikken byte-identisk med main
+ * (en avsluttende «(Claude-kreditten: ...)» som assistenten selv skrev, fjernes da ikke). Regelen samsvarer med `claudeBudgetConfigFromEnv`: tom/usatt/`off` = av, alt annet = på (en ugyldig verdi stopper oppstarten uansett).
+ */
+const TRAILING_SYSTEM_NOTE_WITH_CLAUDE_BUDGET = trailingNote([...SYSTEM_NOTE_PREFIXES, CLAUDE_BUDGET_NOTE_PREFIX]);
+function claudeBudgetNotesActive(): boolean {
+  const raw = (process.env["JARVIS_CLAUDE_BUDGET_USD"] ?? "").trim();
+  return raw !== "" && !/^off$/i.test(raw);
+}
 
 /**
  * Fjerner avsluttende rutemerknader fra et assistent-svar slik det ligger i samtalehistorikken. Merknadene er til EIEREN (hvorfor svaret kom fra en bestemt modell); de er ikke en del av samtalen modellen skal se, og de skal
@@ -227,8 +235,9 @@ export function stripSourceMarkerIds(memoryText: string): string {
 
 export function stripSystemNotes(content: string): string {
   let out = content;
+  const pattern = claudeBudgetNotesActive() ? TRAILING_SYSTEM_NOTE_WITH_CLAUDE_BUDGET : TRAILING_SYSTEM_NOTE;
   for (let round = 0; round < 4; round += 1) {
-    const next = out.replace(TRAILING_SYSTEM_NOTE, "");
+    const next = out.replace(pattern, "");
     if (next === out) break;
     out = next;
   }
