@@ -16,7 +16,7 @@ import { GROWTH_EXPERIMENT_TOOL_ACTIONS } from "../src/experiments/index.ts";
 import { COMMAND_BUDGET_PARAM, timelineProjection } from "../src/write/executor.ts";
 import { youtubeSnippetBody, youtubeStatusBody } from "../src/write/youtube-write.ts";
 import { replyDigest } from "../src/write/gbp-write.ts";
-import { MetaAdsWriteTransport } from "../src/write/meta-ads-write.ts";
+import { MetaAdsWriteTransport, TWO_DECIMAL_CURRENCIES } from "../src/write/meta-ads-write.ts";
 import { GrowthVendorError, MAX_BODY_BYTES, VendorHttp, classifyVendorError, readBodyCapped } from "../src/write/http.ts";
 import { assertOre, oreToMicros, MAX_ORE } from "../src/write/validators.ts";
 import { GrowthWriteTransportBase, type Auth, type OpSpec } from "../src/write/tool-factory.ts";
@@ -183,6 +183,24 @@ describe("B2: tidslinjeprojeksjonen (review M2) - kun id-er, statuser og tall", 
     expect(timelineProjection([1, 2] as never)).toEqual({});
     expect(timelineProjection("tekst" as never)).toEqual({});
     expect(timelineProjection({ currency: "nok" } as never)).toEqual({});
+  });
+});
+
+describe("B4: valutaer (review N7) - kun verifiserte 2-desimal-valutaer; PLN/CZK/SGD er fjernet (Meta-offset uverifisert) for Meta, LinkedIn og TikTok", () => {
+  it("den delte listen er nøyaktig de ti verifiserte, og LinkedIn/TikTok-validatorene nekter en fjernet valuta (`currency_not_supported`) men godtar NOK", () => {
+    expect([...TWO_DECIMAL_CURRENCIES].sort()).toEqual(["AUD", "CAD", "CHF", "DKK", "EUR", "GBP", "NOK", "NZD", "SEK", "USD"]);
+    for (const code of ["PLN", "CZK", "SGD", "JPY"]) expect(TWO_DECIMAL_CURRENCIES.has(code), code).toBe(false);
+    const cases: Array<[GrowthProvider, string, Record<string, JsonValue>, Record<string, JsonValue>]> = [
+      ["linkedin", "set_campaign_daily_budget", { account_id: "123456789", campaign_id: "5001", daily_budget_ore: 40_000 }, { status: "ACTIVE", daily_budget_ore: 50_000 }],
+      ["tiktok", "set_campaign_budget", { advertiser_id: "7000000001", campaign_id: "9001", budget_ore: 40_000 }, { status: "ENABLE", budget_ore: 50_000 }],
+      ["meta_ads", "set_ad_set_budget", { ad_account_id: "act_1234567890123", ad_set_id: "60010", daily_budget_ore: 40_000 }, { status: "ACTIVE", daily_budget_minor: 50_000 }]
+    ];
+    for (const [provider, action, params, state] of cases) {
+      const op = specs[provider].ops.find((o) => o.action === action)!;
+      const validate = composeValidator(op);
+      for (const currency of ["PLN", "CZK", "SGD"]) expect(validate({ ...state, currency, finance_kill_switch_active: false }, params), `${provider} ${currency}`).toBe("currency_not_supported");
+      expect(validate({ ...state, currency: "NOK", finance_kill_switch_active: false }, params), `${provider} NOK`).toBeNull();
+    }
   });
 });
 

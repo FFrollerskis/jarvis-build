@@ -493,8 +493,12 @@ describe("H: Meta Ads", () => {
   });
 
   it("valuta som ikke er støttet (null-desimal), budstrategi uten budbeløp og objekter på en ANNEN konto nektes uten mutasjon", async () => {
-    meta.currency = "JPY";
-    expect((await m("set_ad_set_budget", { ad_set_id: "60010", daily_budget_ore: 40_000 })).reason).toBe("preflight_invalid:currency_not_supported");
+    // null-desimal (JPY) og valutaer der Metas offset ikke er verifisert (review N7: PLN/CZK/SGD) nektes uten mutasjon
+    for (const currency of ["JPY", "PLN", "CZK", "SGD"]) {
+      meta.currency = currency;
+      expect((await m("set_ad_set_budget", { ad_set_id: "60010", daily_budget_ore: 40_000 })).reason, currency).toBe("preflight_invalid:currency_not_supported");
+    }
+    expect(mMut()).toHaveLength(0);
     meta.currency = "NOK";
     expect((await m("set_ad_set_bid", { ad_set_id: "60020", bid_amount_ore: 100 })).reason).toBe("preflight_invalid:bid_strategy_has_no_bid_amount");
     expect((await m("pause_campaign", { campaign_id: "50020" })).reason).toContain("meta_ads_target_not_found");

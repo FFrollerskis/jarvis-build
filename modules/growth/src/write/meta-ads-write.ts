@@ -23,8 +23,12 @@ import { asArr, asObj, assertDigits, assertOre, num, str, truncatedOf, zDigits, 
  */
 export const META_ADS_DEFAULT_API_VERSION = "v26.0";
 const BASE_URL = "https://graph.facebook.com";
-/** Valutaer der minste enhet = 1/100 av hovedenheten (Jarvis' øre-konvensjon er identitet). Alt annet nektes (fail-closed) til en eier-beslutning utvider listen. */
-export const TWO_DECIMAL_CURRENCIES: ReadonlySet<string> = new Set(["NOK", "SEK", "DKK", "EUR", "USD", "GBP", "CHF", "CAD", "AUD", "NZD", "PLN", "CZK", "SGD"]);
+/**
+ * Valutaer der minste enhet = 1/100 av hovedenheten (Jarvis' øre-konvensjon er identitet). Alt annet nektes (fail-closed: `currency_not_supported`) til en eier-beslutning utvider listen.
+ * Review N7: PLN, CZK og SGD er FJERNET - Metas valutaoffset for dem er ikke verifisert mot offisiell dokumentasjon (developers.facebook.com var utilgjengelig), og en feil offset ville satt et budsjett
+ * 100 ganger for høyt/lavt. LinkedIn og TikTok deler listen (konservativt); legg en valuta tilbake KUN etter at offset/format er verifisert mot plattformens egen valutatabell.
+ */
+export const TWO_DECIMAL_CURRENCIES: ReadonlySet<string> = new Set(["NOK", "SEK", "DKK", "EUR", "USD", "GBP", "CHF", "CAD", "AUD", "NZD"]);
 const BID_STRATEGIES_WITH_AMOUNT: ReadonlySet<string> = new Set(["LOWEST_COST_WITH_BID_CAP", "COST_CAP"]);
 
 const acctOf = (p: Params): string => {
