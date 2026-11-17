@@ -918,3 +918,59 @@ describe("E5: review L3 - Google Ads developer token er VALGFRITT (avviklet 2026
     await v.stop();
   });
 });
+
+describe("E6: review L6 - avkortede leverandørlister feiler LUKKET (fravær etter et kutt beviser ingenting)", () => {
+  const ctx6 = { identity: owner };
+  const killOpen = { financeKillSwitch: async () => false };
+  const transport = (v: FakeGoogleAds) => new GoogleAdsWriteTransport({ ...killOpen, spec: specs.google_ads, baseUrl: v.baseUrl, developerToken: async () => "fake-developer-token", accessToken: async () => "fake-access-token" });
+  const call6 = (t: ToolTransport, action: string, params: Record<string, JsonValue>) => t.invoke(action, params, "fake-refresh-token-for-test", ctx6);
+  const seedKeywords = (v: FakeGoogleAds, n: number) => { for (let i = 0; i < n; i += 1) v.criteria.set(`201~${5000 + i}`, { adGroupId: "201", id: String(5000 + i), text: `ord ${i}`, matchType: "EXACT", status: "ENABLED", negative: false }); };
+
+  it("over 1000 nøkkelord: tilstanden sier `truncated`, remove_keyword av et nøkkelord etter kuttet gir IKKE «uendret»-suksess men nektes; add_keywords nektes; funnet nøkkelord i de første 1000 fjernes fortsatt", async () => {
+    const v = new FakeGoogleAds(); await v.start();
+    seedKeywords(v, 1100);
+    const t = transport(v);
+    const state = (await call6(t, "get_keyword_state", { customer_id: CID, ad_group_id: "201" })).data as Record<string, any>;
+    expect(state["truncated"]).toBe(true);
+    expect(state["keywords"]).toHaveLength(1000);
+    const listed = new Set((state["keywords"] as Array<{ criterion_id: string }>).map((k) => k.criterion_id));
+    const beyond = [...v.criteria.values()].map((c) => c.id).find((id) => !listed.has(id))!;
+    expect(beyond).toBeDefined();
+    await expect(call6(t, "remove_keyword", { customer_id: CID, ad_group_id: "201", criterion_id: beyond })).rejects.toThrow("growth_precondition_failed:keyword_list_truncated");
+    await expect(call6(t, "add_keywords", { customer_id: CID, ad_group_id: "201", keywords: [{ text: "ny", match_type: "EXACT" }] })).rejects.toThrow("growth_precondition_failed:keyword_list_truncated");
+    expect(v.requests.filter(v.isMutation)).toHaveLength(0);
+    expect(v.criteria.get(`201~${beyond}`)?.status).toBe("ENABLED"); // aldri meldt «fjernet» uten at noe skjedde
+    // et nøkkelord som FINNES i de første 1000 kan fortsatt fjernes
+    const first = (state["keywords"] as Array<{ criterion_id: string }>)[0]!.criterion_id;
+    expect(await call6(t, "remove_keyword", { customer_id: CID, ad_group_id: "201", criterion_id: first })).toEqual({ external_id: `201~${first}` });
+    expect(v.criteria.get(`201~${first}`)?.status).toBe("REMOVED");
+    await v.stop();
+  });
+
+  it("under taket er `truncated` false og remove_keyword av et allerede fjernet nøkkelord er en ekte NOOP", async () => {
+    const v = new FakeGoogleAds(); await v.start();
+    const t = transport(v);
+    expect(((await call6(t, "get_keyword_state", { customer_id: CID, ad_group_id: "201" })).data as Record<string, any>)["truncated"]).toBe(false);
+    expect(await call6(t, "remove_keyword", { customer_id: CID, ad_group_id: "201", criterion_id: "999999" })).toEqual({ data: { unchanged: true } });
+    await v.stop();
+  });
+
+  it("over 200 annonser: create_responsive_search_ad nektes (kan ikke bevise at en identisk annonse ikke finnes)", async () => {
+    const v = new FakeGoogleAds(); await v.start();
+    for (let i = 0; i < 210; i += 1) v.ads.set(`201~${7000 + i}`, { adGroupId: "201", id: String(7000 + i), status: "PAUSED", finalUrls: ["https://example.test/a"], headlines: [`H${i} a`, `H${i} b`, `H${i} c`], descriptions: [`D${i} a`, `D${i} b`] });
+    const t = transport(v);
+    expect(((await call6(t, "get_ad_state", { customer_id: CID, ad_group_id: "201" })).data as Record<string, any>)["truncated"]).toBe(true);
+    await expect(call6(t, "create_responsive_search_ad", { customer_id: CID, ad_group_id: "201", final_url: "https://example.test/ny", headlines: ["Ny en", "Ny to", "Ny tre"], descriptions: ["Ny beskrivelse en", "Ny beskrivelse to"] })).rejects.toThrow("growth_precondition_failed:ad_list_truncated");
+    expect(v.requests.filter(v.isMutation)).toHaveLength(0);
+    await v.stop();
+  });
+
+  it("et søk med flere sider enn taket (5) gir en feil - aldri en stille avkorting", async () => {
+    const v = new FakeGoogleAds(); await v.start();
+    v.searchAlwaysHasNextPage = true;
+    const t = transport(v);
+    await expect(call6(t, "get_keyword_state", { customer_id: CID, ad_group_id: "201" })).rejects.toThrow("google_ads_result_too_large");
+    expect(v.requests.filter((r) => /googleAds:search$/.test(r.path)).length).toBeGreaterThanOrEqual(5);
+    await v.stop();
+  });
+});

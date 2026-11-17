@@ -41,6 +41,13 @@ const KEYWORD_TEXT = /^[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+$/u;
 const refCampaign = (p: Params) => `googleads:${safeCid(p)}:campaign:${safeId(p, "campaign_id")}`;
 const refAdGroup = (p: Params) => `googleads:${safeCid(p)}:ad_group:${safeId(p, "ad_group_id")}`;
 
+/**
+ * Review L6: en leverandørliste som er KUTTET (over taket) kan ikke bevise at noe er fraværende. Tilstanden bærer derfor `truncated`, og alle handlinger som ville tolket fravær som «allerede fjernet» (remove_keyword)
+ * eller «finnes ikke, så opprett» (add_keywords, create_responsive_search_ad) nektes fail-closed i stedet for å melde en falsk «uendret»-suksess eller opprette duplikater.
+ */
+const MAX_KEYWORDS = 1000;
+const MAX_ADS = 200;
+const truncatedOf = (s: JsonValue): boolean => asObj(s)["truncated"] === true;
 const keywordKey = (text: string, match: string, negative: boolean) => `${text.trim().replace(/\s+/g, " ").toLowerCase()}|${match}|${negative ? "neg" : "pos"}`;
 const requestedKeywords = (p: Params): Array<{ text: string; match_type: string }> =>
   asArr(p["keywords"]).map(asObj).map((k) => ({ text: String(k["text"] ?? ""), match_type: String(k["match_type"] ?? "") }));
@@ -125,6 +132,7 @@ export function googleAdsWriteSpec(config: Pick<GrowthWriteConfig, "creativeHost
       rollback: "remove_keyword per opprettet kriterium (criterion_id fra svaret) fjerner nøkkelordene igjen; negative nøkkelord fjernes på samme måte",
       validate: (s, p) => {
         if (adGroupStatus(s) === "REMOVED") return "ad_group_removed";
+        if (truncatedOf(s)) return "keyword_list_truncated";
         for (const k of requestedKeywords(p)) if (!KEYWORD_TEXT.test(k.text)) return "invalid_keyword_text";
         const starts = p["negative"] !== true && p["status"] === "ENABLED";
         return starts && !killSwitchOpen(s) ? "finance_kill_switch_active_or_unknown" : null;
@@ -152,6 +160,7 @@ export function googleAdsWriteSpec(config: Pick<GrowthWriteConfig, "creativeHost
       shape: { ...adGroupShape, criterion_id: zDigits(1, 20) },
       statusOf: (s, p) => (keywordsOf(s).some((k) => k["criterion_id"] === p["criterion_id"]) ? "PRESENT" : "REMOVED"),
       targetCheck: () => true, removed: ["REMOVED"], ref: (p) => `${refAdGroup(p)}:keyword:${safeId(p, "criterion_id")}`,
+      validate: (s, p) => (truncatedOf(s) && !keywordsOf(s).some((k) => k["criterion_id"] === p["criterion_id"]) ? "keyword_list_truncated" : null),
       rollback: "add_keywords med nøkkelordets tekst og match-type (fra før-tilstanden) oppretter det på nytt - kriteriet får ny id"
     }),
     {
@@ -164,6 +173,7 @@ export function googleAdsWriteSpec(config: Pick<GrowthWriteConfig, "creativeHost
       rollback: "pause_ad/remove via leverandørens grensesnitt; annonsen er opprettet PAUSET og har ikke vist noe (ad_id fra svaret). remove_ad er DEFERRED",
       validate: (s, p) => {
         if (adGroupStatus(s) === "REMOVED") return "ad_group_removed";
+        if (truncatedOf(s)) return "ad_list_truncated";
         if (creativeUrlHost(p["final_url"], config.creativeHosts) === null) return "creative_url_host_not_allowed";
         for (const t of [...asArr(p["headlines"]), ...asArr(p["descriptions"])]) if (typeof t !== "string" || !KEYWORD_TEXT.test(t)) return "invalid_creative_text";
         return null;
@@ -238,9 +248,10 @@ export class GoogleAdsWriteTransport extends GrowthWriteTransportBase {
       const json = asObj(res?.json);
       rows.push(...asArr(json["results"]).map(asObj));
       pageToken = str(json["nextPageToken"]) ?? undefined;
-      if (!pageToken) break;
+      if (!pageToken) return rows;
     }
-    return rows;
+    // Review L6: flere sider enn taket (5) betyr at resultatet er UFULLSTENDIG - aldri en stille avkorting som kan lese fravær som «finnes ikke».
+    throw new Error("google_ads_result_too_large");
   }
 
   private async mutate(cid: string, service: string, operations: unknown[], auth: Auth): Promise<Record<string, unknown>> {
@@ -289,12 +300,13 @@ export class GoogleAdsWriteTransport extends GrowthWriteTransportBase {
         if (group === null) return null;
         const rows = await this.gaql(cid,
           `SELECT ad_group_criterion.criterion_id, ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type, ad_group_criterion.status, ad_group_criterion.negative FROM ad_group_criterion WHERE ad_group.id = ${adGroupId} AND ad_group_criterion.type = KEYWORD AND ad_group_criterion.status != REMOVED`, auth);
-        const keywords = rows.slice(0, 1000).map((r) => {
+        const truncated = rows.length > MAX_KEYWORDS;
+        const keywords = rows.slice(0, MAX_KEYWORDS).map((r) => {
           const k = asObj(r["adGroupCriterion"]);
           const kw = asObj(k["keyword"]);
           return { criterion_id: str(k["criterionId"]), text: cleanText(kw["text"], 80), match_type: str(kw["matchType"]), status: str(k["status"]), negative: k["negative"] === true };
         });
-        return { customer_id: cid, ad_group_id: adGroupId, ad_group_status: str(group["status"]), keywords };
+        return { customer_id: cid, ad_group_id: adGroupId, ad_group_status: str(group["status"]), keywords, truncated };
       }
       case "get_ad_state": {
         const adGroupId = assertDigits(p["ad_group_id"], "ad_group_id", 1, 20);
@@ -302,7 +314,8 @@ export class GoogleAdsWriteTransport extends GrowthWriteTransportBase {
         if (group === null) return null;
         const rows = await this.gaql(cid,
           `SELECT ad_group_ad.ad.id, ad_group_ad.status, ad_group_ad.ad.type, ad_group_ad.ad.final_urls, ad_group_ad.ad.responsive_search_ad.headlines, ad_group_ad.ad.responsive_search_ad.descriptions, ad_group_ad.policy_summary.approval_status FROM ad_group_ad WHERE ad_group.id = ${adGroupId} AND ad_group_ad.status != REMOVED`, auth);
-        const ads = rows.slice(0, 200).map((r) => {
+        const truncated = rows.length > MAX_ADS;
+        const ads = rows.slice(0, MAX_ADS).map((r) => {
           const aga = asObj(r["adGroupAd"]);
           const ad = asObj(aga["ad"]);
           const rsa = asObj(ad["responsiveSearchAd"]);
@@ -313,7 +326,7 @@ export class GoogleAdsWriteTransport extends GrowthWriteTransportBase {
             approval_status: str(asObj(aga["policySummary"])["approvalStatus"])
           };
         });
-        return { customer_id: cid, ad_group_id: adGroupId, ad_group_status: str(group["status"]), ads } as unknown as JsonValue;
+        return { customer_id: cid, ad_group_id: adGroupId, ad_group_status: str(group["status"]), ads, truncated } as unknown as JsonValue;
       }
       default:
         throw new Error(`google_ads_action_not_implemented:${action}`);

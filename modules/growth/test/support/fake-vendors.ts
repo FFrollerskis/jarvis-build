@@ -82,6 +82,8 @@ export class FakeGoogleAds extends FakeVendor {
   mutateRedirectAfterApply: number | undefined;
   /** Før 2026-09-09 krevde leverandøren `developer-token`; etter avviklingen er headeren valgfri (review L3). Standard `true` så eksisterende tester er uendret. */
   requireDeveloperToken = true;
+  /** WP-D3 review L6: søket oppgir ALLTID en neste side (resultatet er større enn transportens tak). */
+  searchAlwaysHasNextPage = false;
   private nextId = 9000;
 
   constructor() {
@@ -110,7 +112,7 @@ export class FakeGoogleAds extends FakeVendor {
     const m = /^\/(v\d+)\/customers\/(\d+)\/(googleAds:search|[A-Za-z]+:mutate)$/.exec(r.path);
     if (!m) return { status: 404, json: { error: { status: "NOT_FOUND", message: "no route" } } };
     if (m[2] !== CID) return { status: 403, json: { error: { status: "PERMISSION_DENIED", message: "customer not accessible" } } };
-    if (m[3] === "googleAds:search") return { json: { results: this.search(String(r.body["query"] ?? "")) } };
+    if (m[3] === "googleAds:search") return { json: { results: this.search(String(r.body["query"] ?? "")), ...(this.searchAlwaysHasNextPage ? { nextPageToken: "mer" } : {}) } };
     if (this.mutateStatus !== undefined) return { status: this.mutateStatus, json: { error: { status: "UNAVAILABLE", message: "backend error" } } };
     if (this.mutateGarbage) return { status: 200, text: "<html>proxy ok</html>" };
     const applied = this.mutate((m[3] ?? "").replace(":mutate", ""), (r.body["operations"] as Array<Record<string, any>>) ?? []);

@@ -78,6 +78,8 @@ export interface RemoveConfig {
   /** Pengeeffekt (standard `reduces`: annonse-/kampanjefjerning stopper utgift). `none` for ting uten utgift (nettstedskart, nøkkelhendelse, video, svar på omtale). */
   spend?: "reduces" | "none";
   targetCheck?: (state: JsonValue, p: Params) => boolean;
+  /** Ekstra deterministisk validering av den ferske tilstanden (`null` = gyldig), f.eks. «listen er avkortet, så fravær beviser ingenting» (review L6). */
+  validate?: (state: JsonValue, p: Params) => string | null;
 }
 
 export function removeOp(c: RemoveConfig): OpSpec {
@@ -85,7 +87,7 @@ export function removeOp(c: RemoveConfig): OpSpec {
     action: c.action, risk: c.risk ?? "D", spend: c.spend ?? "reduces", irreversible: true, idempotentExternal: true,
     description: `Fjern ${c.label} PERMANENT (leverandørens fjernet-status er terminal og kan ikke angres)`,
     shape: c.shape, targetParam: c.targetParam, stateAction: c.stateAction, scopes: c.scopes, target: c.ref, rollback: c.rollback,
-    ...(c.targetCheck ? { targetCheck: c.targetCheck } : {}), ...(c.absentIsDone === true ? { absentIsDone: true } : {}),
+    ...(c.targetCheck ? { targetCheck: c.targetCheck } : {}), ...(c.absentIsDone === true ? { absentIsDone: true } : {}), ...(c.validate ? { validate: c.validate } : {}),
     noop: (s, p) => { const st = c.statusOf(s, p); return st !== null && c.removed.includes(st); },
     post: (a, p) => { const st = c.statusOf(a, p); return st !== null && c.removed.includes(st); },
     summary: (_s, p) => `${c.label}: FJERN ${c.ref(p)} (kan ikke angres)`
