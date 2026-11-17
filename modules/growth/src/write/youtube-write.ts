@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { JsonValue } from "@jarvis/contracts";
 import { normalizeGrowthTarget } from "./config.ts";
@@ -15,7 +16,7 @@ import { asArr, asObj, str, zText, type Params } from "./validators.ts";
  * som har en verdi SLETTES. Derfor er skriving en read-modify-write mot den RÅ ressursen (aldri mot den saniterte tilstanden som vises til eieren): `snippet` sendes tilbake i sin helhet slik leverandøren leverte den
  * (så vel beskrivelse med linjeskift/kapitler, tags med tab, `defaultLanguage` m.fl. beholdes eksakt) - samme mønster som leverandørens eget eksempel (`youtube/api-samples` `update_video.py`: hele `snippet` fra
  * `videos.list` sendes tilbake med `id`, kun feltene brukeren oppgir endres; `VERIFIED` mot primærkilden) - og `status` bygges av de dokumenterte skrivbare feltene (embeddable, license, publicStatsViewable,
- * selfDeclaredMadeForKids, containsSyntheticMedia, privacyStatus og - kun når målet er `private` - publishAt). Validering bruker `cleanText`; det som SENDES er alltid originalverdien.
+ * selfDeclaredMadeForKids, containsSyntheticMedia, privacyStatus og - kun når målet er `private` - publishAt). Visning bruker `cleanText` (flatet); noop/etterbetingelse sammenligner den EKSAKTE formen (digest, linjeskift/mellomrom bevart; review N3); det som SENDES er alltid originalverdien.
  * Uverifiserte API-prosjekter får videoer LÅST SOM PRIVATE ved opplasting (revisjon kreves) = BLOCKED_EXTERNAL for opplasting.
  * DEFERRED: opplasting (`videos.insert`, resumable media + revisjon), miniatyrbilder, spillelister, kommentar-moderering, kanalinnstillinger, tilgangsstyring (kanal-roller håndteres kun i YouTube Studio).
  */
@@ -30,7 +31,7 @@ const videoShape = { channel_id: z.string().min(24).max(24), video_id: z.string(
 const refVideo = (p: Params, what: string) => `youtube:${safeChannel(p)}:video:${typeof p["video_id"] === "string" ? (p["video_id"] as string).slice(0, 11) : "?"}:${what}`;
 const NO_ANGLE = /^[^<>\p{Cc}]*$/u;
 const tagsOf = (v: unknown): string[] => asArr(v).filter((t): t is string => typeof t === "string");
-/** Tags slik de VISES/sammenlignes (kontrolltegn fjernet): validering og noop/etterbetingelse bruker `cleanText`, men det som SENDES er alltid originalverdien. */
+/** Tags slik de VISES (kontrolltegn fjernet, kuttet til 40): noop/etterbetingelse bruker den eksakte formen (`tagsDigest`, review N3), og det som SENDES er alltid originalverdien. */
 const cleanTags = (v: unknown): string[] => tagsOf(v).slice(0, 40).map((t) => cleanText(t, 100) ?? "");
 const BCP47 = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,3}$/;
 const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
@@ -39,6 +40,22 @@ const DESCRIPTION_MAX_BYTES = 5000;
 const byteLimited = (max: number) => (value: string): boolean => Buffer.byteLength(value, "utf8") <= max;
 /** Linjeskift/tab er LOVLIGE i en beskrivelse (kapitler, avsnitt); andre kontrolltegn og < > er det ikke (leverandøren avviser < >). */
 const descriptionOk = (value: string): boolean => NO_ANGLE.test(value.replace(/[\r\n\t]/g, " "));
+
+/**
+ * Review N3: noop og etterbetingelse for metadata må skille det leverandøren FAKTISK har lagret fra det eieren ber om - uten å flate ut linjeskift og mellomrom (`cleanText` gjør begge deler for VISNINGEN, så en
+ * beskrivelse som KUN får linjeskift ellers ble «uendret» uten at PUT noensinne gikk). Sammenligningsformen er den ORIGINALE teksten med kun to normaliseringer som ikke kan skjule en synlig endring: linjeskift-STIL
+ * (CRLF/CR -> LF) og USYNLIG mellomrom (blanke/tab FØRST i teksten og sist på hver linje og sist i teksten). Alt annet (antall/plassering av linjeskift, mellomrom midt i teksten) er eksakt. Tilstanden bærer kun en DIGEST av
+ * formen (aldri en ekstra kopi av teksten): visningsfeltene (`title`/`description`/`tags`) er fortsatt flatet og kuttet.
+ */
+const exactForm = (value: unknown): string | null =>
+  typeof value === "string" ? value.replace(/\r\n?/g, "\n").split("\n").map((line) => line.replace(/[ \t]+$/u, "")).join("\n").trim() : null;
+const textDigest = (form: string): string => createHash("sha256").update(form).digest("hex");
+const exactDigest = (value: unknown): string | null => {
+  const form = exactForm(value);
+  return form === null ? null : textDigest(form);
+};
+/** Digest av ALLE tags (ikke bare de 40 første som vises): en liste som er lengre enn den ønskede er ikke «samme». */
+const tagsDigest = (tags: readonly string[]): string => textDigest(JSON.stringify(tags.map((t) => exactForm(t) ?? "")));
 
 /**
  * Review M3: SNIPPET-kropp for `videos.update` = den RÅ `snippet` slik leverandøren leverte den (alle felt: beskrivelse med linjeskift, tags med tab, `defaultLanguage`, `defaultAudioLanguage` ...), med KUN de oppgitte
@@ -70,12 +87,11 @@ export function youtubeStatusBody(rawStatus: Record<string, unknown>, privacy: s
 
 export function youtubeWriteSpec(): ProviderToolSpec {
   const scopes = ["youtube.write"];
-  const titleOf = (v: unknown) => cleanText(v, 100);
-  const descriptionOf = (v: unknown) => cleanText(v, DESCRIPTION_MAX_BYTES);
+  // Review N3: sammenligning på den EKSAKTE formen (digest) - ikke på den flatede visningsteksten.
   const metadataMatches = (s: JsonValue, p: Params): boolean => {
     const o = asObj(s);
-    return (p["title"] === undefined || o["title"] === titleOf(p["title"])) && (p["description"] === undefined || o["description"] === descriptionOf(p["description"]))
-      && (p["tags"] === undefined || JSON.stringify(tagsOf(o["tags"])) === JSON.stringify(cleanTags(p["tags"])));
+    return (p["title"] === undefined || o["title_digest"] === exactDigest(p["title"])) && (p["description"] === undefined || o["description_digest"] === exactDigest(p["description"]))
+      && (p["tags"] === undefined || o["tags_digest"] === tagsDigest(tagsOf(p["tags"])));
   };
   const ops: OpSpec[] = [
     { action: "get_video", description: "Les en egen video (tittel, beskrivelse, tags, synlighet, planlagt publisering, språk, opplastingsstatus) - ubetrodd leverandørdata (1 kvoteenhet)", shape: videoShape, risk: "A", targetParam: "channel_id", scopes: ["youtube.read"] },
@@ -148,7 +164,9 @@ export class YoutubeWriteTransport extends GoogleOAuthTransport {
       channel_id: channel, video_id: videoId, title: cleanText(snippet["title"], 100), description: cleanText(snippet["description"], DESCRIPTION_MAX_BYTES), tags: cleanTags(snippet["tags"]),
       category_id: str(snippet["categoryId"]), default_language: language !== null && BCP47.test(language) ? language : null, privacy_status: str(status["privacyStatus"]),
       publish_at: publishAt !== null && ISO_TIME.test(publishAt) ? publishAt : null, upload_status: str(status["uploadStatus"]), embeddable: status["embeddable"] === true, license: str(status["license"]),
-      public_stats_viewable: status["publicStatsViewable"] === true, made_for_kids: status["selfDeclaredMadeForKids"] === true
+      public_stats_viewable: status["publicStatsViewable"] === true, made_for_kids: status["selfDeclaredMadeForKids"] === true,
+      // Review N3: eksakt sammenligningsform (digest) for noop/etterbetingelse - visningsfeltene over er flatet.
+      title_digest: exactDigest(snippet["title"]), description_digest: exactDigest(snippet["description"]), tags_digest: tagsDigest(tagsOf(snippet["tags"]))
     };
   }
 

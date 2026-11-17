@@ -788,6 +788,47 @@ describe("E2: review M3 - YouTube-skriving ødelegger aldri data (originalverdie
     expect(state["description"]).not.toMatch(/\p{Cc}/u);
     await v.stop();
   });
+
+  it("review N3: noop/etterbetingelse flater IKKE ut linjeskift og mellomrom - en beskrivelse som KUN får linjeskift sendes (PUT); samme tekst (også CRLF/sluttmellomrom) er NOOP; tittel-/tag-mellomrom og lange tag-lister er eksakte", async () => {
+    const v = new FakeVendor(); await v.start();
+    const video = seed();
+    video.snippet["description"] = "Kap 1 Kap 2"; video.snippet["title"] = "A  B"; video.snippet["tags"] = ["a b"];
+    replaceSemanticsVideo(v, video);
+    const t = new YoutubeWriteTransport({ financeKillSwitch: async () => false, ...token, spec: specs.youtube, baseUrl: v.baseUrl });
+    const base = { channel_id: CH, video_id: "abcdefghijk" };
+    const puts = () => v.requests.filter((r) => r.method === "PUT").length;
+    const unchanged = { data: { unchanged: true } };
+    // beskrivelsen får KUN linjeskift (visningsteksten er flatet og lik før og etter): må sendes
+    expect(await call(t, "update_video_metadata", { ...base, description: "Kap 1\nKap 2" })).toEqual({ external_id: "abcdefghijk" });
+    expect(puts()).toBe(1);
+    expect(video.snippet["description"]).toBe("Kap 1\nKap 2");
+    // samme tekst igjen er en ekte NOOP; linjeskift-stil (CRLF) og usynlig sluttmellomrom er ikke en endring
+    expect(await call(t, "update_video_metadata", { ...base, description: "Kap 1\nKap 2" })).toEqual(unchanged);
+    expect(await call(t, "update_video_metadata", { ...base, description: "Kap 1  \r\nKap 2  \n" })).toEqual(unchanged);
+    expect(puts()).toBe(1);
+    // et ekstra linjeskift ER en endring
+    await call(t, "update_video_metadata", { ...base, description: "Kap 1\n\nKap 2" });
+    expect(puts()).toBe(2);
+    expect(video.snippet["description"]).toBe("Kap 1\n\nKap 2");
+    // mellomrom midt i tittelen og i en tag er eksakt (var flatet til ett mellomrom)
+    await call(t, "update_video_metadata", { ...base, title: "A B" });
+    expect(video.snippet["title"]).toBe("A B");
+    await call(t, "update_video_metadata", { ...base, tags: ["a  b"] });
+    expect(video.snippet["tags"]).toEqual(["a  b"]);
+    expect(puts()).toBe(4);
+    expect(await call(t, "update_video_metadata", { ...base, title: "A B", tags: ["a  b"] })).toEqual(unchanged);
+    // leverandøren har 60 tags, eieren ber om de første 40: en ENDRING (visningen viser bare 40, sammenligningen gjelder alle)
+    const many = Array.from({ length: 60 }, (_, i) => `t${i}`);
+    video.snippet["tags"] = [...many];
+    await call(t, "update_video_metadata", { ...base, tags: many.slice(0, 40) });
+    expect(video.snippet["tags"]).toEqual(many.slice(0, 40));
+    // tilstanden viser fortsatt kun flatet tekst + digest (aldri en ekstra kopi av teksten)
+    const state = (await call(t, "get_video", base)).data as Record<string, any>;
+    expect(state["description"]).not.toMatch(/\p{Cc}/u);
+    expect(state["description_digest"]).toMatch(/^[0-9a-f]{64}$/);
+    expect(JSON.stringify(state)).not.toContain("Kap 1\n");
+    await v.stop();
+  });
 });
 
 describe("E3: review M4 - Business Profile-omtaler: tilstanden er ÉN omtale og bærer aldri omtaletekst, anmelders navn eller svartekst", () => {
