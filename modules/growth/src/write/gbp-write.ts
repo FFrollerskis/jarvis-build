@@ -13,7 +13,7 @@ import { asArr, asObj, assertDigits, str, zDigits, zText, type Params } from "./
  * refresh-token `JARVIS_GOOGLE_BUSINESS_PROFILE_REFRESH_TOKEN`, scope `https://www.googleapis.com/auth/business.manage`.
  * D-41 (`VERIFIED_OFFICIAL_SEARCH_SNIPPET`, delvis): Business Information API v1 `PATCH /v1/locations/{id}?updateMask=...`; v4 `localPosts` (create/get/list/patch/delete) og `reviews.updateReply`/`deleteReply`
  * (`PUT/DELETE .../reviews/{id}/reply`, kun verifiserte lokasjoner). API-TILGANG KREVER GODKJENNING FRA GOOGLE (standardkvote er 0 forespørsler/min til tilgang er innvilget) = BLOCKED_EXTERNAL.
- * UVERIFISERT: feltnavn for regularHours/profile.description mot primærkilde, `readMask`-verdier, `TimeOfDay` for sen stengetid. Anmelders navn leses ALDRI (personopplysning uten formål).
+ * UVERIFISERT: feltnavn for regularHours/profile.description mot primærkilde, `readMask`-verdier, `TimeOfDay` for sen stengetid. Anmelders navn leses ALDRI (personopplysning uten formål), og lokasjonens telefonnummer heller ikke (review N5: `readMask` uten `phoneNumbers`, ingen `phone_primary` i tilstanden - den ville havnet i journal/ledger/audit uten at noen handling trenger den).
  * PERSONVERN (review M4): omtaletekst er brukerskrevet og kan inneholde personopplysninger (også helse). Skrivehandlingene (`reply_to_review`, `delete_review_reply`) bruker `get_review` (ÉN omtale, `reviews.get`) som tilstand:
  * kun id, stjerner, tidspunkt, om eieren har svart og en DIGEST av eierens svar - aldri omtalens tekst, aldri anmelders navn, aldri svarteksten. Dermed havner ingen omtaletekst i journalen, `tool_executions` eller
  * `audit_events` (der erasure ikke rekker). `list_reviews` (klasse A, kun for eieren å lese) viser teksten, men resultatet lagres ingen steder. Nåbarhet: `list_reviews` viser de 50 NYESTE omtalene (ingen paginering bygget =
@@ -68,7 +68,7 @@ export function gbpWriteSpec(config: Pick<GrowthWriteConfig, "creativeHosts">): 
   const readScopes = ["gbp.read"];
   const ref = (p: Params, what: string) => `gbp:locations/${safeLocation(p)}:${what}`;
   const ops: OpSpec[] = [
-    { action: "get_location", description: "Les lokasjonens profil (tittel, nettsted, telefon, beskrivelse, åpningstider) - ubetrodd leverandørdata", shape: locationShape, risk: "A", targetParam: "location_id", scopes: readScopes },
+    { action: "get_location", description: "Les lokasjonens profil (tittel, nettsted, beskrivelse, åpningstider) - ubetrodd leverandørdata. Telefonnummer leses ikke (dataminimering: ingen handling trenger det)", shape: locationShape, risk: "A", targetParam: "location_id", scopes: readScopes },
     { action: "list_reviews", description: "List de 50 NYESTE omtalene for en lokasjon (stjerner, tekst, om det finnes svar) - UBETRODD brukertekst som kun vises til eieren (lagres aldri); anmelders navn leses aldri", shape: accountLocationShape, risk: "A", targetParam: "location_id", scopes: readScopes },
     {
       action: "get_review", risk: "A", targetParam: "location_id", scopes: readScopes, shape: { ...accountLocationShape, review_id: z.string().regex(REVIEW_ID) },
@@ -150,7 +150,7 @@ export class GbpWriteTransport extends GoogleOAuthTransport {
     const location = locationOf(p);
     switch (action) {
       case "get_location": {
-        const res = await this.info.request({ method: "GET", path: `/locations/${location}`, query: { readMask: "name,title,phoneNumbers,websiteUri,regularHours,profile" }, headers: auth.headers, secrets: auth.secrets, allowNotFound: true });
+        const res = await this.info.request({ method: "GET", path: `/locations/${location}`, query: { readMask: "name,title,websiteUri,regularHours,profile" }, headers: auth.headers, secrets: auth.secrets, allowNotFound: true });
         if (res === null) return null;
         const o = asObj(res.json);
         const periods = asArr(asObj(o["regularHours"])["periods"]).slice(0, 14).map((raw) => {
@@ -158,7 +158,7 @@ export class GbpWriteTransport extends GoogleOAuthTransport {
           return { open_day: str(q["openDay"]), open_time: fromTimeOfDay(q["openTime"]), close_day: str(q["closeDay"]), close_time: fromTimeOfDay(q["closeTime"]) };
         });
         return {
-          location_id: location, title: cleanText(o["title"], 120), website_uri: str(o["websiteUri"]), phone_primary: cleanText(asObj(o["phoneNumbers"])["primaryPhone"], 40),
+          location_id: location, title: cleanText(o["title"], 120), website_uri: str(o["websiteUri"]),
           description: cleanText(asObj(o["profile"])["description"], 750), regular_hours: periods
         };
       }

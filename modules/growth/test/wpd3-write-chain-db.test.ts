@@ -32,6 +32,9 @@ let meta: FakeMeta;
 let yt: FakeVendor;
 let gbp: FakeVendor;
 let ytVideo: Record<string, unknown> | null = null;
+/** Lokasjon med telefonnummer (personopplysning uten formål for en skrivehandling) - skal ALDRI havne i journal, ledger eller audit (review N5a). */
+const GBP_PHONE = "+47 900 11 222";
+let gbpHours: Array<Record<string, unknown>> = [{ openDay: "MONDAY", openTime: { hours: 9, minutes: 0 }, closeDay: "MONDAY", closeTime: { hours: 17, minutes: 0 } }];
 /** Omtaler med personopplysninger (navn og helsetekst) - skal ALDRI havne i journal, ledger eller audit (review M4). */
 const GBP_REVIEWS: Record<string, { stars: string; comment: string; name: string; reply?: string }> = {
   "rev-1": { stars: "FIVE", comment: "Ola Nordmann her. Jeg har kreft og fikk veldig god hjelp", name: "Ola Nordmann" },
@@ -78,6 +81,10 @@ beforeAll(async () => {
   meta = new FakeMeta();
   gbp = new FakeVendor();
   gbp.handler = (r) => {
+    if (r.path === "/locations/123456789") {
+      if (r.method === "GET") return { json: { title: "Butikk", websiteUri: "https://example.test/", phoneNumbers: { primaryPhone: GBP_PHONE }, profile: { description: "Beskrivelse" }, regularHours: { periods: gbpHours } } };
+      if (r.method === "PATCH") { gbpHours = r.body["regularHours"].periods; return { json: {} }; }
+    }
     const m = /^\/accounts\/1111\/locations\/123456789\/reviews(?:\/([^/]+)(\/reply)?)?$/.exec(r.path);
     if (!m) return { status: 404, json: {} };
     const review = (id: string) => { const rev = GBP_REVIEWS[id]; return rev ? { reviewId: id, starRating: rev.stars, comment: rev.comment, reviewer: { displayName: rev.name }, createTime: "2026-10-01T10:00:00Z", ...(rev.reply ? { reviewReply: { comment: rev.reply } } : {}) } : null; };
@@ -764,6 +771,23 @@ describe("M: review M4 - ingen omtaletekst eller anmelder-navn i journal, tool_e
     const personal = Object.values(GBP_REVIEWS).flatMap((r) => [r.name, r.comment, ...r.name.split(" ")]);
     for (const text of [...personal, reply, "Beklager at du følte det slik"]) expect(blob, text).not.toContain(text);
     expect(blob).toContain("rev-3");
+  });
+
+  it("review N5a: åpningstider (klasse C) gjennom hele kjeden - lokasjonens telefonnummer står ikke i journal, ledger eller audit, men før/etter-tilstanden (åpningstider) gjør det", async () => {
+    gbp.reset();
+    const res = await run({ provider: "google_business_profile", action: "update_location_hours", parameters: { location_id: "123456789", periods: [{ open_day: "MONDAY", open_time: "10:00", close_day: "MONDAY", close_time: "16:00" }] } });
+    expect(res.outcome).toBe("SUCCESS");
+    expect(res.write.before_state).toMatchObject({ regular_hours: [{ open_day: "MONDAY", open_time: "09:00", close_time: "17:00" }] });
+    expect(res.write.after_state).toMatchObject({ regular_hours: [{ open_day: "MONDAY", open_time: "10:00", close_time: "16:00" }] });
+    expect(gbp.requests.some((r) => r.method === "GET" && r.path === "/locations/123456789" && !/phone/i.test(r.query.get("readMask") ?? ""))).toBe(true);
+    const journalRows = (await adminPool.query(`SELECT to_jsonb(j) AS row FROM growth_write_journal j WHERE write_id = $1`, [res.write.write_id])).rows;
+    const ledger = (await adminPool.query(`SELECT to_jsonb(t) AS row FROM tool_executions t WHERE tenant_id = '${A}' AND tool_id = 'growth_gbp' AND action = 'update_location_hours'`)).rows;
+    const audit = (await adminPool.query(`SELECT to_jsonb(a) AS row FROM audit_events a WHERE tenant_id = '${A}' AND tool_id = 'growth_gbp' AND action = 'update_location_hours'`)).rows;
+    expect(journalRows).toHaveLength(1);
+    expect(ledger.length).toBeGreaterThanOrEqual(1);
+    expect(audit.length).toBeGreaterThanOrEqual(1);
+    const blob = JSON.stringify([journalRows, ledger, audit]);
+    for (const text of [GBP_PHONE, "900 11 222", "phone_primary", "primaryPhone"]) expect(blob, text).not.toContain(text);
   });
 
   it("omtaler utenfor de 50 nyeste er nåbare via id (get_review), og en ukjent omtale er «ikke funnet» uten at noe sendes", async () => {

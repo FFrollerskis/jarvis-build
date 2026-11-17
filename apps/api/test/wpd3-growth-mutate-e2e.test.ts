@@ -16,8 +16,9 @@ import { createApiServer, type ApiDeps } from "../src/server.ts";
 
 /**
  * WP-D3 review L7 (D-459): ENDE-TIL-ENDE over HTTP for `/growth/mutate`, `/growth/read` og `/growth/writes/list` mot den EKTE API-serveren (`createApiServer`), den EKTE `ToolGateway` (policy, eier-binding, klasse D-kjede,
- * ledger) og EKTE Postgres (RLS som ikke-superbruker) - kun leverandøren (Google Ads) er en lokal, tilstandsfull falsk. Grant-verifiseringen (`grants.verify`) er det eneste som er en testdobbel: signaturbeviset selv er
- * dekket av `d131-authority-hardening-e2e` og `part3-step-up`; alt ETTER grant-et (eier-porten, step-up, målautorisasjon, journal, utfall) kjører ekte. Bevist: rekkefølgen grant -> eier -> step-up -> kjede, at en svak økt/gjest/
+ * ledger) og EKTE Postgres (RLS som ikke-superbruker) - kun leverandøren (Google Ads) er en lokal, tilstandsfull falsk. TRE ting er testdobler (review N5c): `grants.verify` (token -> grant-oppslag; signaturbeviset selv er
+ * dekket av `d131-authority-hardening-e2e` og `part3-step-up`), `identity.resolveIdentity` (grant -> identitet, uten databaseoppslag av person/tenant) og `ownerGate` (en ren funksjon som peker ut eieren). Alt som kjører
+ * etter dem er ekte: ToolGateway (eier-binding, step-up, målautorisasjon, klasse D-kjede, ledger), journal, RLS-Postgres og utfall. Bevist: rekkefølgen grant -> eier -> step-up -> kjede, at en svak økt/gjest/
  * feil kanal aldri når leverandøren, utført endring + journal + varsel, replay uten ny mutasjon, ukjent utfall over HTTP, og at lese-ruten kun når klasse A.
  */
 const TENANT = "tenant-wpd3-e2e";

@@ -951,6 +951,20 @@ describe("E3: review M4 - Business Profile-omtaler: tilstanden er ÉN omtale og 
     await v.stop();
   });
 
+  it("review N5a: lokasjonens telefonnummer leses ALDRI (readMask uten `phoneNumbers`) og står ikke i tilstanden - selv om leverandøren sender det - så det aldri havner i journal/ledger/audit", async () => {
+    const v = new FakeVendor(); await v.start();
+    v.handler = (r) => (r.method === "GET" && r.path === "/locations/123456789"
+      ? { json: { title: "Butikk", websiteUri: "https://example.test/", phoneNumbers: { primaryPhone: "+47 900 11 222", additionalPhones: ["+47 900 33 444"] }, profile: { description: "Beskrivelse" }, regularHours: { periods: [] } } }
+      : { status: 404, json: {} });
+    const t = new GbpWriteTransport({ ...killOpen, ...token, spec: specs.google_business_profile, baseUrl: v.baseUrl, v4BaseUrl: v.baseUrl });
+    const state = (await call(t, "get_location", { location_id: "123456789" })).data as Record<string, any>;
+    expect(state).toMatchObject({ location_id: "123456789", title: "Butikk", website_uri: "https://example.test/", description: "Beskrivelse" });
+    expect(state).not.toHaveProperty("phone_primary");
+    expect(JSON.stringify(state)).not.toMatch(/900|\+47/);
+    expect(v.requests[0]!.query.get("readMask")).not.toMatch(/phone/i);
+    await v.stop();
+  });
+
   it("svargrensen er 4096 BYTES: flerbyte-tegn som overskrider den nektes av skjemaet FØR sending, ren ASCII opp til 4096 er lov", () => {
     const spec = specs.google_business_profile.ops.find((o) => o.action === "reply_to_review")!;
     const base = { account_id: "1111", location_id: "123456789", review_id: "rev-1" };
