@@ -116,6 +116,8 @@ describe("invariant: restricted + modellflate => låst i utvalget OG (håndhevet
     expect(restrictedGaps(noSurface, EXECUTION_GUARDED_RESTRICTED_KEYS)).toEqual([]);
     // fjernes utførelses-vernet for Finans- og Verdi-senteret, feiler invarianten (de er ikke et finance_*-namespace)
     expect(restrictedGaps(manifest, new Set())).toEqual([
+      // WP-B3 (D-475): Evolusjon-senteret (kostmodellen) er det tredje restricted senteret
+      "executive.get_evolution_center: restricted på web_chat - hverken håndhevet ved utførelse eller eksplisitt akseptert valg-kun-lås",
       "executive.get_finance_center: restricted på web_chat - hverken håndhevet ved utførelse eller eksplisitt akseptert valg-kun-lås",
       "executive.get_value_center: restricted på web_chat - hverken håndhevet ved utførelse eller eksplisitt akseptert valg-kun-lås"
     ]);

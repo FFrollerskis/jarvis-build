@@ -1,6 +1,6 @@
 import type { JsonValue } from "@jarvis/contracts";
 import {
-  CONTROL_ACTION_ALLOWED, CONTROL_ACTION_BODY_KEYS, CONTROL_ACTION_ENDPOINTS, CONTROL_CENTER_IDS,
+  ALL_CONTROL_CENTER_IDS, CONTROL_ACTION_ALLOWED, CONTROL_ACTION_BODY_KEYS, CONTROL_ACTION_ENDPOINTS, CONTROL_CENTER_IDS, isExtensionControlCenterId,
   type ControlAction, type ControlCenterDefinition, type ControlCenterId, type ControlCenterOverview, type ControlCenterParts, type ControlCenterReport,
   type ControlCenterSummary, type ControlFactValue, type ControlItem, type ControlRiskClass, type ControlSection, type ControlStatus
 } from "./types.ts";
@@ -10,10 +10,11 @@ import {
  * Alt her er ren funksjon (ingen I/O, ingen LLM). Byggere SKAL bruke `controlSection`/`controlItem`/`controlAction` i stedet for å lage objektene for hånd: det er der invariantene bor.
  */
 
-/** Visningsnavn for de ti sentrene (brukes også for sentre som ikke er koblet inn ennå). */
+/** Visningsnavn for de ti sentrene (brukes også for sentre som ikke er koblet inn ennå) og tilleggssentrene (D-475: Evolusjon). */
 export const CONTROL_CENTER_TITLES_NO: Readonly<Record<ControlCenterId, string>> = {
   integration: "Integrasjoner", authority: "Autoritet", ai: "AI", finance: "Finans", memory: "Minne",
-  agent: "Agenter", operations: "Drift", value: "Verdi", privacy: "Personvern", security: "Sikkerhet"
+  agent: "Agenter", operations: "Drift", value: "Verdi", privacy: "Personvern", security: "Sikkerhet",
+  evolution: "Evolusjon"
 };
 
 const STATUS_RANK: Readonly<Record<ControlStatus, number>> = { OK: 0, UNKNOWN: 1, WARN: 2, FAIL: 3 };
@@ -251,21 +252,27 @@ export function summarizeControlCenter(report: ControlCenterReport, description_
 /**
  * Oversikten over alle ti sentre. Sentre uten registrering listes som `unregistered` (ikke som «OK»). `withheld` (gjennomgang M2) er registrerte sentre som er holdt tilbake fra mottakeren (en skymodell får ikke finans):
  * de er IKKE bygget, står ikke i `centers`, teller ikke i samlet status (ellers ville status røpet noe om dem) og listes aldri som «ikke koblet inn» - de sies rett ut å være holdt tilbake.
+ * D-475: tilleggssentre (`EXTENSION_CONTROL_CENTER_IDS`) er valgfrie. De listes ALDRI som `unregistered`, teller ikke i «N av 10» (nevnes i stedet som «pluss N tilleggssenter») og påvirker ikke teksten når ingen er registrert -
+ * med tilleggsflaggene AV er oversikten tegn for tegn lik main.
  */
 export function composeControlCenterOverview(summaries: ControlCenterSummary[], now: Date, withheld: readonly ControlCenterId[] = []): ControlCenterOverview {
   const registered = new Set(summaries.map((s) => s.center));
-  const heldBack = CONTROL_CENTER_IDS.filter((id) => withheld.includes(id) && !registered.has(id));
+  const heldBackAll = ALL_CONTROL_CENTER_IDS.filter((id) => withheld.includes(id) && !registered.has(id));
+  const heldBack = heldBackAll.filter((id) => !isExtensionControlCenterId(id));
   const unregistered = CONTROL_CENTER_IDS.filter((id) => !registered.has(id) && !heldBack.includes(id));
+  const extensionCount = summaries.filter((s) => isExtensionControlCenterId(s.center)).length + heldBackAll.filter((id) => isExtensionControlCenterId(id)).length;
+  const connected = summaries.length + heldBackAll.length - extensionCount;
+  const extensionNames = ALL_CONTROL_CENTER_IDS.filter((id) => isExtensionControlCenterId(id) && (registered.has(id) || heldBackAll.includes(id))).map((id) => CONTROL_CENTER_TITLES_NO[id]);
   const status = summaries.length === 0 ? "UNKNOWN" : worstStatus(summaries.map((s) => s.status));
   const lines = [
-    summaries.length + heldBack.length === 0
+    connected + extensionCount === 0
       ? "Ingen kontrollsentre er koblet inn, så ingenting kan vurderes."
-      : `Kontrollsentre: ${summaries.length + heldBack.length} av ${CONTROL_CENTER_IDS.length} er koblet inn. Samlet${heldBack.length > 0 ? " (uten de tilbakeholdte)" : ""}: ${statusLabelNo(status)}.`,
+      : `Kontrollsentre: ${connected} av ${CONTROL_CENTER_IDS.length} er koblet inn${extensionCount > 0 ? ` (pluss ${extensionCount} ${extensionCount === 1 ? "tilleggssenter" : "tilleggssentre"}: ${extensionNames.join(", ")})` : ""}. Samlet${heldBackAll.length > 0 ? " (uten de tilbakeholdte)" : ""}: ${statusLabelNo(status)}.`,
     ...summaries.map((s) => `- ${s.summary_no}`),
-    ...(heldBack.length > 0 ? [`Holdt tilbake fra denne modellen (SECRET_RESTRICTED, D-378): ${heldBack.map((id) => CONTROL_CENTER_TITLES_NO[id]).join(", ")}. Åpne kontrollsiden (/control) eller bruk en lokal modell.`] : []),
-    ...(unregistered.length > 0 && summaries.length + heldBack.length > 0 ? [`Ikke koblet inn ennå: ${unregistered.map((id) => CONTROL_CENTER_TITLES_NO[id]).join(", ")}.`] : [])
+    ...(heldBackAll.length > 0 ? [`Holdt tilbake fra denne modellen (SECRET_RESTRICTED, D-378): ${heldBackAll.map((id) => CONTROL_CENTER_TITLES_NO[id]).join(", ")}. Åpne kontrollsiden (/control) eller bruk en lokal modell.`] : []),
+    ...(unregistered.length > 0 && connected + extensionCount > 0 ? [`Ikke koblet inn ennå: ${unregistered.map((id) => CONTROL_CENTER_TITLES_NO[id]).join(", ")}.`] : [])
   ];
-  return { generated_at: now.toISOString(), status, sensitivity: "PRIVATE", centers: summaries, unregistered, ...(heldBack.length > 0 ? { withheld: heldBack } : {}), summary_no: lines.join("\n") };
+  return { generated_at: now.toISOString(), status, sensitivity: "PRIVATE", centers: summaries, unregistered, ...(heldBackAll.length > 0 ? { withheld: heldBackAll } : {}), summary_no: lines.join("\n") };
 }
 
 const EXPLAIN_MAX_ITEMS_PER_SECTION = 5;
