@@ -69,6 +69,16 @@ export const MODEL_ENV = [
   "GEMMA_API_KEY",
   "HERMES_API_KEY",
   "JARVIS_BUDGET_APPROVED",
+  // WP-B4 (D-476): Claude-kreditten (100 USD/mnd) med tempostyring og behovsprioritering. AV som standard (tom/usatt = av; `JARVIS_CLAUDE_BUDGET_USD=100` slår på). Både api og worker kaller modellen, så begge får dem
+  // (MODEL_ENV er felles); worker kjører også varslingen (Telegram). Kun tall, flagg og tabeller - ingen hemmeligheter.
+  "JARVIS_CLAUDE_BUDGET_ALERT_PCTS",
+  "JARVIS_CLAUDE_BUDGET_HARD_STOP",
+  "JARVIS_CLAUDE_BUDGET_MARGIN_PCT",
+  "JARVIS_CLAUDE_BUDGET_RESERVE_PCT",
+  "JARVIS_CLAUDE_BUDGET_RESET_DAY",
+  "JARVIS_CLAUDE_BUDGET_TIERS",
+  "JARVIS_CLAUDE_BUDGET_TIGHT_RATIO",
+  "JARVIS_CLAUDE_BUDGET_USD",
   "JARVIS_COST_APPROVAL_ORE",
   "JARVIS_COST_HARD_LIMIT_ORE",
   "JARVIS_COST_WARN_ORE",

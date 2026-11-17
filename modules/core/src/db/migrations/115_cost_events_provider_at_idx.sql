@@ -1,0 +1,12 @@
+-- WP-B4 (D-476, review L3): dekkende indeks for lesingen av Claude-forbruket i kredittperioden. Additiv og forover-trygg (kun en ny indeks, ingen tabell/kolonne/policy endres).
+--
+-- Spoerringen (modules/model-gateway/src/claude-budget-enforcer.ts `readClaudeSpend`, og flatene i apps/api/src/claude-budget-surfaces.ts):
+--   SELECT sum(amount_ore), sum(amount_ore) FILTER (WHERE at >= $3) FROM cost_events WHERE provider = 'anthropic' AND at >= $1 AND at < $2   -- under tenant-RLS (tenant_id = current_setting(...))
+-- Med 300 000 rader valgte planleggeren Parallel Seq Scan (RLS-predikatet `tenant_id = current_setting(...)` ga `cost_events_tenant_at_idx` ingen nytte), 16-31 ms per lesing. Indeksen under
+-- har tenant, leverandoer og tidspunkt som noekkel og `amount_ore` som innhold, saa lesingen kan besvares uten aa lese tabellen (index-only scan). `cost_events` ryddes ikke (kun operasjonell
+-- oppbevaring, migrasjon 073), og BudgetGuard skanner tabellen allerede per kall - indeksen er en ren lesegevinst.
+--
+-- Skriveprisen er ubetydelig (kostrader kommer i titalls per time). Bygges i samme transaksjon som resten av migrasjonen; paa en stor tabell tar `CREATE INDEX` en kort skrivelaas, men cost_events er liten
+-- i drift (ett sett rader per modellkall), og migratoren kjoerer foer appen starter (etter backup, se docs/remediation/BACKUP_RESTORE_RUNBOOK.md). `IF NOT EXISTS`: trygg ved gjentatt kjoering.
+-- Rollback: `DROP INDEX cost_events_tenant_provider_at_idx` (ingen avhengigheter; lesingen faller tilbake til den eksisterende planen).
+CREATE INDEX IF NOT EXISTS cost_events_tenant_provider_at_idx ON cost_events (tenant_id, provider, at) INCLUDE (amount_ore);
