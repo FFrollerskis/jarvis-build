@@ -17,7 +17,7 @@ import { COMMAND_BUDGET_PARAM, timelineProjection } from "../src/write/executor.
 import { youtubeSnippetBody, youtubeStatusBody } from "../src/write/youtube-write.ts";
 import { replyDigest } from "../src/write/gbp-write.ts";
 import { MetaAdsWriteTransport } from "../src/write/meta-ads-write.ts";
-import { GrowthVendorError, VendorHttp, classifyVendorError } from "../src/write/http.ts";
+import { GrowthVendorError, MAX_BODY_BYTES, VendorHttp, classifyVendorError, readBodyCapped } from "../src/write/http.ts";
 import { assertOre, oreToMicros, MAX_ORE } from "../src/write/validators.ts";
 import { CID, FakeGoogleAds, FakeVendor } from "./support/fake-vendors.ts";
 
@@ -302,6 +302,37 @@ describe("C: HTTP-reglene (retry, ukjent utfall, redirects, hemmeligheter)", () 
     const none = (await adoptCallSignal(early.signal, () => http().request({ method: "POST", path: "/x", body: {}, mutation: true })).catch((e: Error) => e)) as Error;
     expect(none.message).toBe("tool_timeout");
     expect(vendor.requests).toHaveLength(0);
+  });
+
+  it("review L8: svarkroppen STRØMMES med hard bytegrense - en kropp over grensen avbrytes (resten overføres aldri) og feiler LUKKET (lesing: vanlig feil, mutasjon: ukjent utfall); et svar rett under grensen tolkes", async () => {
+    // deterministisk: leseren trekker ikke mer enn grensen (+ én bit) og avbryter strømmen
+    let pulled = 0; let cancelled = false;
+    const endless = new ReadableStream<Uint8Array>({ pull(controller) { pulled += 1_000; controller.enqueue(new Uint8Array(1_000).fill(97)); }, cancel() { cancelled = true; } });
+    const capped = await readBodyCapped(new Response(endless), 10_000);
+    expect(capped.truncated).toBe(true);
+    expect(capped.text).toHaveLength(10_000);
+    expect(cancelled).toBe(true);
+    expect(pulled).toBeLessThanOrEqual(10_000 + 2_000 + 4_000); // grensen + (kjøresystemets forhåndstrekk) - aldri «uendelig»
+    expect((await readBodyCapped(new Response("{\"a\":1}"))).truncated).toBe(false);
+    // ekte HTTP: 30 MB sendes ikke ferdig
+    const total = 30_000_000;
+    vendor.handler = () => ({ streamBytes: total });
+    const read = (await http().request({ method: "GET", path: "/x" }).catch((e: Error) => e)) as Error;
+    expect(read).toBeInstanceOf(GrowthVendorError);
+    expect(read.message).toBe("t_invalid_response:too_large");
+    expect(vendor.bytesSent).toBeLessThan(total / 2);
+    vendor.reset();
+    const mutation = (await http().request({ method: "POST", path: "/x", body: {}, mutation: true }).catch((e: Error) => e)) as Error;
+    expect(mutation.message).toBe("outcome_unknown:t_response_too_large");
+    expect(vendor.bytesSent).toBeLessThan(total / 2);
+    // en stor feilkropp (4xx) avkortes og bruker kun til feilmelding - aldri bufret i sin helhet
+    vendor.reset(); vendor.handler = () => ({ status: 400, streamBytes: total });
+    const rejected = (await http().request({ method: "POST", path: "/x", body: {}, mutation: true }).catch((e: Error) => e)) as Error;
+    expect(rejected).toBeInstanceOf(GrowthVendorError);
+    expect(vendor.bytesSent).toBeLessThan(total / 2);
+    // rett under grensen: tolkes som vanlig
+    vendor.reset(); vendor.handler = () => ({ text: JSON.stringify({ data: "x".repeat(MAX_BODY_BYTES - 100) }) });
+    expect(((await http().request({ method: "GET", path: "/x" }))?.json as { data: string }).data).toHaveLength(MAX_BODY_BYTES - 100);
   });
 
   it("følger ALDRI en redirect (verken GET eller mutasjon) - Authorization sendes aldri videre", async () => {

@@ -11,7 +11,7 @@ import { OUTCOME_UNKNOWN_PREFIX, abortableSleep, afterAcceptedMutation, guardedF
  * skriving og som låser journalraden som terminal `failed`. Konkret: (a) en transportfeil ETTER at forespørselen kan ha nådd leverandøren (nullstilt socket, tidsavbrudd, `fetch failed`, avbrutt lesing av svaret,
  * ukjent feilform) kastes som `outcome_unknown:<etikett>_transport_<art>` via den delte `afterAcceptedMutation` (WP-K) - unntatt feil som BEVISER at ingenting ble sendt (ugyldig URL/konfig, DNS, tilkobling nektet,
  * TLS-oppsett: `isProvenPreSendTransportError`), som forblir vanlige feil; (b) en 5xx eller 3xx (også en uventet redirect: `redirect: "reject"`) er `outcome_unknown:<etikett>_http_<status>`; (c) et 2xx-svar som ikke
- * kan tolkes er `outcome_unknown:<etikett>_response_unreadable`. Feil mens forespørselen BYGGES (JSON-serialisering) kastes før noe sendes og er vanlige feil. Gatewayen merker raden `unverified` (aldri retry-bar med
+ * kan tolkes (ikke JSON, eller over bytegrensen `MAX_BODY_BYTES` = 1 MB - kroppen STRØMMES og kuttes, aldri bufret i sin helhet, review L8) er `outcome_unknown:<etikett>_response_unreadable`/`_response_too_large`. Feil mens forespørselen BYGGES (JSON-serialisering) kastes før noe sendes og er vanlige feil. Gatewayen merker raden `unverified` (aldri retry-bar med
  * samme nøkkel), journalen står som `outcome_unknown` (kan senere avklares), og klasse D-eieren varsles («UTFALL UKJENT»).
  *
  * HEMMELIGHETER: credential og access token havner aldri i URL-en (Meta bruker body/header der det er verifisert), aldri i feilmeldinger (kjente verdier vaskes, deretter den sentrale
@@ -50,7 +50,37 @@ export interface VendorHttpOptions {
 const MAX_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 500;
 const MAX_RETRY_AFTER_MS = 10_000;
-const MAX_BODY_CHARS = 1_000_000;
+/** Review L8: HARD grense for hvor mye av et svar som leses (bytes). Kroppen strømmes og kuttes her - aldri bufret i sin helhet (en 20 MB-kropp ga +127 MB RSS før). */
+export const MAX_BODY_BYTES = 1_000_000;
+
+/**
+ * Review L8: leser svarkroppen som en STRØM med en hard bytegrense. Når grensen nås, avbrytes overføringen (resten bufres aldri) og `truncated` settes - kalleren feiler LUKKET for et 2xx-svar (kan ikke tolkes)
+ * og bruker den avkortede teksten kun til feilmelding for andre statuser. Leserfeil (nullstilt/avbrutt midt i kroppen) kastes videre til kalleren, som klassifiserer dem.
+ */
+export async function readBodyCapped(response: Response, maxBytes: number = MAX_BODY_BYTES): Promise<{ text: string; truncated: boolean }> {
+  if (response.body === null) return { text: "", truncated: false };
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let truncated = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (total + value.byteLength > maxBytes) {
+        chunks.push(value.subarray(0, maxBytes - total));
+        total = maxBytes;
+        truncated = true;
+        break;
+      }
+      chunks.push(value);
+      total += value.byteLength;
+    }
+  } finally {
+    if (truncated) await reader.cancel().catch(() => undefined);
+  }
+  return { text: new TextDecoder().decode(Buffer.concat(chunks)), truncated };
+}
 
 function scrub(text: string, secrets: readonly string[]): string {
   let out = text;
@@ -104,10 +134,14 @@ export class VendorHttp {
       } catch (err) {
         throw mutation ? await afterSendFailure(label, err) : err;
       }
-      if (response.status === 404 && r.allowNotFound === true) return null;
+      if (response.status === 404 && r.allowNotFound === true) {
+        await response.body?.cancel().catch(() => undefined);
+        return null;
+      }
       let text = "";
+      let truncated = false;
       try {
-        text = (await response.text()).slice(0, MAX_BODY_CHARS);
+        ({ text, truncated } = await readBodyCapped(response));
       } catch (err) {
         // Svaret kunne ikke leses ferdig (nullstilt/avbrutt midt i kroppen). Et 2xx-svar vi ikke kan lese betyr at leverandøren KAN ha behandlet mutasjonen (ukjent utfall); for lesing er det en feil. En 4xx/5xx
         // er allerede et svar (statusen avgjør under), så kroppen mangler bare for feilmeldingen.
@@ -117,6 +151,11 @@ export class VendorHttp {
         }
       }
       if (response.ok) {
+        // Review L8: et 2xx-svar over bytegrensen kan ikke tolkes. FAIL LUKKET: for en mutasjon er utfallet ukjent (leverandøren sa ja), for lesing en vanlig feil.
+        if (truncated) {
+          if (mutation) throw new Error(`${OUTCOME_UNKNOWN_PREFIX}:${label}_response_too_large`);
+          throw new GrowthVendorError(`${label}_invalid_response:too_large`, response.status, false);
+        }
         if (text.trim().length === 0) return { status: response.status, json: {} };
         try {
           return { status: response.status, json: JSON.parse(text) as unknown };

@@ -13,10 +13,14 @@ export interface Reply {
   destroySocket?: boolean;
   /** Send statuslinje og topptekster + en DEL av kroppen, og riv så socketen (svaret ble avbrutt midt i kroppen). */
   truncateBody?: string;
+  /** Strøm en kropp på så mange bytes (64 KB-biter, med mottrykk); klientens avbrudd stopper sendingen. Teller i `bytesSent` (review L8). */
+  streamBytes?: number;
 }
 
 export class FakeVendor {
   readonly requests: Recorded[] = [];
+  /** Bytes av `streamBytes`-kropper som faktisk ble skrevet til socketen (en klient som avbryter stopper sendingen). */
+  bytesSent = 0;
   private server: Server | undefined;
   baseUrl = "";
   /** Settes av tester for å styre svar; standard 404. */
@@ -39,6 +43,24 @@ export class FakeVendor {
           res.statusCode = reply.status ?? 200;
           res.setHeader("content-type", "application/json");
           for (const [name, value] of Object.entries(reply.headers ?? {})) res.setHeader(name, value);
+          if (reply.streamBytes !== undefined) {
+            const total = reply.streamBytes;
+            const chunk = Buffer.alloc(65_536, 0x61);
+            let sent = 0;
+            res.setHeader("content-length", String(total));
+            const pump = (): void => {
+              while (sent < total && !res.destroyed) {
+                const n = Math.min(chunk.length, total - sent);
+                const ok = res.write(chunk.subarray(0, n));
+                sent += n;
+                this.bytesSent += n;
+                if (!ok) { res.once("drain", pump); return; }
+              }
+              if (!res.destroyed) res.end();
+            };
+            pump();
+            return;
+          }
           if (reply.truncateBody !== undefined) {
             // Lover mer enn vi sender (content-length), skriv en del og riv socketen: klienten får en avbrutt kropp.
             res.setHeader("content-length", String(reply.truncateBody.length + 100));
@@ -57,7 +79,7 @@ export class FakeVendor {
     await new Promise<void>((resolve) => (this.server ? this.server.close(() => resolve()) : resolve()));
   }
 
-  reset(): void { this.requests.length = 0; }
+  reset(): void { this.requests.length = 0; this.bytesSent = 0; }
   mutations(isMutation: (r: Recorded) => boolean): Recorded[] { return this.requests.filter(isMutation); }
 }
 
