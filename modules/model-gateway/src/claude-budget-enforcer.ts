@@ -113,17 +113,44 @@ function jsonLength(value: unknown): number {
   }
 }
 
+/** Antall tegn i ett meldingsinnhold; fiendtlig/ugyldig innhold (undefined, null, deler uten tekst, kastende objekter) teller 0 - aldri en feil. */
+function contentLength(content: unknown): number {
+  try {
+    if (typeof content === "string") return content.length;
+    if (!Array.isArray(content)) return 0;
+    return textOnly(content.filter((part) => typeof part === "object" && part !== null) as never).length;
+  } catch {
+    return 0;
+  }
+}
+
+const DEFAULT_MAX_TOKENS = 1024;
+
+/** Størst mulig anslag for ett kall (taket); brukes også når anslaget ikke lar seg beregne (aldri 0 og aldri NaN). */
+function reservationCap(budgetOre: number): number {
+  const cap = Math.round(budgetOre * RESERVATION_CAP_SHARE);
+  return Number.isFinite(cap) && cap >= 1 ? cap : 1;
+}
+
 /**
  * Konservativt kostnadsanslag (øre) for ett kall FØR det kjøres: innholdstegn / 3 som inn-tokens (en token er ca. 3-4 tegn), `max_tokens` (standard 1024) som ut-tokens, priset med satsen for modellen. Bilder
  * telles ikke (underestimat for vision). Brukes KUN til reservasjonen mot parallelle kall - den faktiske kostnaden bokføres fra leverandørens tokenregnskap som før.
+ * L5 (review): kaster ALDRI og gir alltid et endelig tall mellom 0 og taket - fiendtlig innhold (`content: undefined`, manglende `messages`, sirkulære verktøy) teller 0 tegn, og en ugyldig `max_tokens`
+ * (NaN, negativ, ikke-endelig, tekst) regnes som standarden; kan anslaget ikke beregnes, brukes taket (det mest konservative). Et NaN-anslag ville ellers gjort alle samtidige beslutninger til `on_pace`.
  */
 export function estimateCallOre(pricing: PricingTable, provider: string, model: string, request: ModelRequest, budgetOre: number): number {
-  let chars = request.system?.length ?? 0;
-  for (const message of request.messages) chars += textOnly(message.content).length;
-  if (request.tools !== undefined) chars += jsonLength(request.tools);
-  if (request.tool_exchanges !== undefined) chars += jsonLength(request.tool_exchanges);
-  const estimate = costOre(pricing, provider, model, { input_tokens: Math.ceil(chars / 3), output_tokens: request.max_tokens ?? 1024 });
-  return Math.min(estimate, Math.max(1, Math.round(budgetOre * RESERVATION_CAP_SHARE)));
+  const cap = reservationCap(budgetOre);
+  try {
+    let chars = typeof request.system === "string" ? request.system.length : 0;
+    if (Array.isArray(request.messages)) for (const message of request.messages) chars += contentLength((message as { content?: unknown } | null | undefined)?.content);
+    if (request.tools !== undefined) chars += jsonLength(request.tools);
+    if (request.tool_exchanges !== undefined) chars += jsonLength(request.tool_exchanges);
+    const maxTokens = typeof request.max_tokens === "number" && Number.isFinite(request.max_tokens) && request.max_tokens > 0 ? request.max_tokens : DEFAULT_MAX_TOKENS;
+    const estimate = costOre(pricing, provider, model, { input_tokens: Math.ceil(chars / 3), output_tokens: maxTokens });
+    return Number.isFinite(estimate) && estimate >= 0 ? Math.min(estimate, cap) : cap;
+  } catch {
+    return cap;
+  }
 }
 
 /**
@@ -261,7 +288,9 @@ export class ClaudeBudgetEnforcer {
     return sum;
   }
 
-  private reserve(tenantId: string, ore: number, nowMs: number): () => void {
+  private reserve(tenantId: string, rawOre: number, nowMs: number): () => void {
+    // L5: en reservasjon er alltid et endelig tall ≥ 0 (et NaN-/negativt anslag ville forgiftet summen alle samtidige beslutninger bygger på)
+    const ore = Number.isFinite(rawOre) && rawOre >= 0 ? rawOre : reservationCap(this.config.budget_ore);
     const key = Symbol("claude-budget-reservation");
     let reservations = this.inflight.get(tenantId);
     if (reservations === undefined) {
@@ -289,6 +318,39 @@ export class ClaudeBudgetEnforcer {
    * kreditten har stengt forblir stengt (se `PacingRoundContext`). Alt annet - også en forespørsel som bare HAR `tool_exchanges` - er en ny beslutning.
    */
   async begin(info: PacingBeginInfo): Promise<PacingTicket> {
+    try {
+      return await this.decideAndReserve(info);
+    } catch (err) {
+      // L5: begin() kaster ALDRI - heller ingen modellkall stoppet av en feil i selve styringen. En uventet feil (fiendtlig innputt, en bug) gir fail-safe etter tier, aldri en tillatelse uten grenser.
+      return this.safetyTicket(info, err);
+    }
+  }
+
+  /** Siste skanse når selve beslutningen feilet: fail-safe etter tier (ukjent tier = BAKGRUNN, den strengeste) uten å røre noe som kan kaste. */
+  private safetyTicket(info: PacingBeginInfo, err: unknown): PacingTicket {
+    console.error(JSON.stringify({ msg: "claude_budget_begin_failed", error: err instanceof Error ? err.name : "unknown" }));
+    let origin: BudgetOrigin = "background";
+    let tier: BudgetTier = "background";
+    let purpose: ModelPurpose | null = null;
+    try {
+      origin = deriveBudgetOrigin(info);
+      tier = tierFor(this.config.tiers, origin, info.purpose);
+      purpose = info.purpose ?? null;
+    } catch {
+      origin = "background";
+      tier = "background";
+    }
+    let window: BudgetWindow;
+    try {
+      window = budgetWindow(Date.now(), this.config.reset_day);
+    } catch {
+      window = { start_ms: 0, end_ms: 0, start_date: "", end_date: "" };
+    }
+    const verdict = this.failsafe(tier, origin, purpose, window);
+    return new PacingTicket(verdict, verdict.action === "defer" || verdict.action === "deny" ? "closed" : "open", undefined, () => undefined);
+  }
+
+  private async decideAndReserve(info: PacingBeginInfo): Promise<PacingTicket> {
     const nowMs = this.now();
     const cfg = this.config;
     const origin = deriveBudgetOrigin(info);

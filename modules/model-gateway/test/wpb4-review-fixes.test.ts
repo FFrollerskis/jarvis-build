@@ -223,3 +223,88 @@ describe("L1: stengt Anthropic gir LOKAL fallback (Q-67) - aldri en betalt skyle
     expect(used(anthropic) + used(openai)).toBe(0);
   });
 });
+
+describe("L5: begin() kaster aldri, og ikke-endelige tall behandles som ULESELIG forbruk (fail-safe) - aldri som «på tempo»", () => {
+  const hostile: Array<[string, ModelRequest]> = [
+    ["content: undefined", { messages: [{ role: "user", content: undefined as never }], max_tokens: 100 }],
+    ["content: null", { messages: [{ role: "user", content: null as never }], max_tokens: 100 }],
+    ["messages: undefined", { messages: undefined as never, max_tokens: 100 }],
+    ["max_tokens: NaN", { messages: [{ role: "user", content: "hei" }], max_tokens: Number.NaN }],
+    ["max_tokens: -5", { messages: [{ role: "user", content: "hei" }], max_tokens: -5 }],
+    ["max_tokens: Infinity", { messages: [{ role: "user", content: "hei" }], max_tokens: Number.POSITIVE_INFINITY }],
+    ["max_tokens: tekst", { messages: [{ role: "user", content: "hei" }], max_tokens: "mange" as never }],
+    ["system: objekt", { system: { toString: () => { throw new Error("hostile"); } } as never, messages: [{ role: "user", content: "hei" }] }],
+    ["sirkulær tools/tool_exchanges", (() => { const a: Record<string, unknown> = {}; a["self"] = a; return { messages: [{ role: "user", content: "hei" }], tools: [a] as never, tool_exchanges: [a] as never }; })()],
+    ["content: delvis ugyldig array", { messages: [{ role: "user", content: [null, { type: "text" }, { type: "text", text: 5 }] as never }] }]
+  ];
+
+  for (const [name, request] of hostile) {
+    it(`${name}: gateway.complete() lykkes, reservasjonen er et endelig tall ≥ 0, og et samtidig kall ser ikke «NaN-forbruk»`, async () => {
+      const gate = { open: () => undefined as void, promise: Promise.resolve() };
+      gate.promise = new Promise<void>((resolve) => { gate.open = resolve; });
+      const { gateway, db, enforcer, anthropic } = build({ anthropic: { hold: () => gate.promise } });
+      db.spend.set("t1", SPENT.tight);
+      const first = gateway.complete(ownerTurn({ request }));
+      await vi.waitFor(() => expect(anthropic.calls).toHaveLength(1));
+      const inFlight = enforcer!.inFlightOre("t1");
+      expect(Number.isFinite(inFlight), String(inFlight)).toBe(true);
+      expect(inFlight).toBeGreaterThanOrEqual(0);
+      // mens det hengende kallet står med sin reservasjon: BAKGRUNN ved stramt er fortsatt utsatt (aldri «på tempo» pga. et NaN-/negativt anslag)
+      const next = await gateway.complete(background());
+      expect(next.provider).toBe("gemma_local");
+      expect(db.audit.at(-1)?.reason).toBe("tight_background_deferred");
+      gate.open();
+      expect((await first).provider).toBe("anthropic"); // ESSENSIELL ved stramt: tillatt
+      expect(enforcer!.inFlightOre("t1")).toBe(0);
+    });
+  }
+
+  it("begin() direkte med fiendtlige objekter (info uten forespørsel, kastende getters) gir en billett - aldri et avvist løfte", async () => {
+    const { enforcer } = build();
+    const evil = new Proxy({}, { get: () => { throw new Error("hostile getter"); } });
+    for (const info of [{ tenant_id: "t1", request: evil, pricing: evil, catalog: evil, trace_id: "x", started: 0 }, { tenant_id: "t1" }, {}, { tenant_id: "t1", request: undefined }]) {
+      const ticket = await enforcer!.begin(info as never);
+      expect(["allow", "downgrade", "defer", "deny"]).toContain(ticket.verdict.action);
+      expect(ticket.constraint === "open" || ticket.constraint === "cheaper_model" || ticket.constraint === "closed").toBe(true);
+      ticket.release();
+    }
+    vi.restoreAllMocks();
+  });
+
+  it("estimateCallOre er alltid et endelig tall ≥ 0 og aldri over taket, uansett fiendtlig innhold", async () => {
+    const { estimateCallOre, DEFAULT_PRICING } = await import("../src/index.ts");
+    for (const [name, request] of hostile) {
+      const ore = estimateCallOre(DEFAULT_PRICING, "anthropic", "claude-sonnet-5-5", request, 105_000);
+      expect(Number.isFinite(ore), name).toBe(true);
+      expect(ore, name).toBeGreaterThanOrEqual(0);
+      expect(ore, name).toBeLessThanOrEqual(5_250);
+    }
+  });
+
+  it("motoren: ikke-endelig forbruk eller budsjett gir en feil (aldri `allow/on_pace`) - `decide`, `pacingState` og dermed alle flater; endelig forbruk er uendret", async () => {
+    const { decide, pacingState, claudeBudgetConfigFromEnv } = await import("../src/index.ts");
+    const cfg = claudeBudgetConfigFromEnv({ JARVIS_CLAUDE_BUDGET_USD: "100" })!;
+    const base = { now: MID_FOR_ENGINE, budget_ore: cfg.budget_ore, tier: "essential" as const };
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(() => decide({ ...base, spent_ore: bad }), String(bad)).toThrow(/ikke endelig|non_finite/i);
+      expect(() => pacingState({ now: MID_FOR_ENGINE, budget_ore: cfg.budget_ore, spent_ore: bad }), String(bad)).toThrow();
+      expect(() => decide({ ...base, spent_ore: 1_000, budget_ore: bad }), `budsjett ${bad}`).toThrow();
+    }
+    expect(decide({ ...base, spent_ore: 40_000 })).toMatchObject({ action: "allow", level: "on_pace" });
+    expect(decide({ ...base, spent_ore: 0 })).toMatchObject({ action: "allow" });
+  });
+
+  it("en forbrukslesing som gir et ikke-endelig tall (database, mellomsum) gir fail-safe per tier, aldri «på tempo»: ESSENSIELL tillates, VIKTIG nedgraderes, BAKGRUNN utsettes", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    for (const row of [{ window_ore: Number.POSITIVE_INFINITY, trailing_ore: 0 }, { window_ore: Number.NaN, trailing_ore: 0 }, { window_ore: "Infinity", trailing_ore: 0 }, { window_ore: 10, trailing_ore: Number.NaN }]) {
+      const { gateway, db } = build();
+      db.spendReadRow = row;
+      expect((await gateway.complete(ownerTurn())).provider).toBe("anthropic");
+      expect((await gateway.complete(background())).provider).toBe("gemma_local");
+      expect(db.audit.map((a) => a.reason), JSON.stringify(row)).toEqual(["spend_unreadable_essential_allowed", "spend_unreadable_background_deferred"]);
+    }
+    vi.restoreAllMocks();
+  });
+});
+
+const MID_FOR_ENGINE = Date.UTC(2026, 10, 30, 11, 0, 0); // 30. nov 2026, midt i perioden

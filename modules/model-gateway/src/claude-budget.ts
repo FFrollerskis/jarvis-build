@@ -319,6 +319,17 @@ export function budgetWindow(nowMs: number, resetDay: number, timeZone: string =
 // Tilstand og beslutning (ren)
 // ---------------------------------------------------------------------------------------------------------------------
 
+/**
+ * WP-B4 (review L5): ikke-endelig forbruk eller budsjett (NaN, ±Infinity) er ULESELIG, aldri «på tempo»: en NaN-sammenligning er alltid usann, så `NaN` ga tidligere nivået `on_pace` og dermed `allow`. Motoren kaster i stedet,
+ * og alle kallere (håndhevelsen, flatene) behandler en kastet feil som uleselig forbruk (fail-safe / «ukjent») - aldri som en tillatelse.
+ */
+export class NonFiniteSpendError extends Error {
+  constructor(readonly field: "spent_ore" | "budget_ore") {
+    super(`pacing_input_non_finite: ${field} er ikke et endelig tall - forbruket behandles som uleselig`);
+    this.name = "NonFiniteSpendError";
+  }
+}
+
 export interface PacingStateInput {
   now: number | Date;
   budget_ore: number;
@@ -360,6 +371,8 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 export function pacingState(input: PacingStateInput): PacingState {
+  if (typeof input.spent_ore !== "number" || !Number.isFinite(input.spent_ore)) throw new NonFiniteSpendError("spent_ore");
+  if (typeof input.budget_ore !== "number" || !Number.isFinite(input.budget_ore)) throw new NonFiniteSpendError("budget_ore");
   const params: PacingParams = { ...DEFAULT_PACING_PARAMS, ...input.params };
   const nowMs = input.now instanceof Date ? input.now.getTime() : input.now;
   const w = budgetWindow(nowMs, params.reset_day);
@@ -382,7 +395,9 @@ export function pacingState(input: PacingStateInput): PacingState {
   const daysLeft = (length - elapsedMs) / MS_PER_DAY;
   const daysLeftWhole = Math.max(1, Math.ceil(daysLeft - 1e-9));
   let dailyRate: number | null = null;
-  if (input.trailing !== undefined && input.trailing.days >= 1) dailyRate = input.trailing.spent_ore / input.trailing.days;
+  // prognosen er kun visning: et ikke-endelig trailing-tall ignoreres (påvirker aldri nivået eller beslutningen)
+  const trailing = input.trailing !== undefined && Number.isFinite(input.trailing.spent_ore) && Number.isFinite(input.trailing.days) ? input.trailing : undefined;
+  if (trailing !== undefined && trailing.days >= 1) dailyRate = trailing.spent_ore / trailing.days;
   else if (elapsedDays >= 1) dailyRate = S / elapsedDays;
   const forecast = dailyRate === null ? null : Math.round(S + dailyRate * Math.max(0, daysLeft));
   return {
