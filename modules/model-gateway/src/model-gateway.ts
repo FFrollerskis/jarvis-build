@@ -853,7 +853,8 @@ export class ModelGateway {
             latency,
             ...(streamOpts !== undefined ? { streamOpts } : {}),
             failedProviders,
-            plan
+            plan,
+            ...(pacing !== undefined ? { pacing } : {})
           });
 
           if (outcome === "USABLE_SUCCESS") {
@@ -916,7 +917,8 @@ export class ModelGateway {
                   latency: retryLatency,
                   failedProviders,
                   plan,
-                  adaptiveRetryOfOutcome: outcome
+                  adaptiveRetryOfOutcome: outcome,
+                  ...(pacing !== undefined ? { pacing } : {})
                 });
                 if (retryOutcome === "USABLE_SUCCESS") {
                   if (streamOpts) {
@@ -1389,10 +1391,14 @@ export class ModelGateway {
       plan: RoutePlan;
       /** Satt kun når DETTE forsøket er det adaptive retry-forsøket. */
       adaptiveRetryOfOutcome?: CompletionOutcome;
+      /** WP-B4: Claude-kreditten sin billett for kallet (kostnaden meldes til overlegget i enforceren). */
+      pacing?: PacingTicket;
     }
   ): Promise<void> {
     const cost =
       this.legacyCostOverride(result) ?? computeCostOre(this.pricing, result.provider, result.model, result.usage);
+    // WP-B4 (M3): meld kostnaden til billetten FØR bokføringen (en feilet INSERT betyr ikke at pengene ikke er brukt - overlegget må likevel se dem).
+    if (result.provider === CLAUDE_BUDGET_PROVIDER) ctx.pacing?.noteBooked(cost);
     // D-393 (JARVIS-034): kostnads- og sporingsskriving ETTER et vellykket leverandørkall er bokføring, ikke en leverandørfeil. Tidligere
     // gikk en feilet `cost_events`-INSERT eller trace-skriving til `catch` i `executePlan`, ble talt som leverandørfeil og utløste et NYTT
     // (fakturert) kall mot neste kandidat selv om svaret allerede forelå. Nå logges feilen høyt (med beløpet slik at det kan etterbokføres)

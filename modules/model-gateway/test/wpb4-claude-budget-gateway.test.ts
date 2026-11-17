@@ -219,7 +219,7 @@ describe("Anthropic stengt: eksplisitte valg, preferanselister og tydelig norsk 
   });
 
   it("INGEN lokal modell: stramt gir utsatt (deferred) for BAKGRUNN med tidspunkt for nytt rom; reserve gir egen tekst", async () => {
-    const { gateway, db } = build({ providers: ["anthropic"] });
+    const { gateway, db, clock } = build({ providers: ["anthropic"] });
     db.spend.set("t1", SPENT.tight);
     const deferred = await gateway.complete(background()).catch((e: unknown) => e);
     expect(deferred).toBeInstanceOf(ClaudeBudgetBlockedError);
@@ -227,6 +227,7 @@ describe("Anthropic stengt: eksplisitte valg, preferanselister og tydelig norsk 
     expect((deferred as ClaudeBudgetBlockedError).resume_at_ms).toBeGreaterThan(MID);
     expect((deferred as ClaudeBudgetBlockedError).message).toContain("Det blir rom igjen omtrent");
     db.spend.set("t1", SPENT.reserve);
+    clock.now += 3_000; // bufferen av forbruket (3 s) har utløpt - neste beslutning leser det nye forbruket (M3)
     const reserve = (await gateway.complete(ownerTask()).catch((e: unknown) => e)) as ClaudeBudgetBlockedError;
     expect(reserve.message).toContain("forbeholdt det aller viktigste");
   });
@@ -539,13 +540,14 @@ describe("ingen innhold i logg eller revisjon", () => {
 
 describe("strøm (stream) og criticen følger samme beslutning", () => {
   it("stream: nedgradert BAKGRUNN strømmer fra Haiku; oppbrukt strømmer fra lokal modell uten at Anthropic berøres", async () => {
-    const { gateway, db, anthropic, local } = build();
+    const { gateway, db, anthropic, local, clock } = build();
     db.spend.set("t1", SPENT.ahead);
     const events: string[] = [];
     const first = await gateway.stream(background(), (e) => events.push(e.type));
     expect(first.model).toBe(HAIKU);
     expect(anthropic.streamCalls[0]?.model).toBe(HAIKU);
     db.spend.set("t1", SPENT.exhausted);
+    clock.now += 3_000; // bufferen av forbruket (3 s) har utløpt (M3)
     const second = await gateway.stream(ownerTurn(), () => undefined);
     expect(second.provider).toBe("gemma_local");
     expect(anthropic.streamCalls).toHaveLength(1);

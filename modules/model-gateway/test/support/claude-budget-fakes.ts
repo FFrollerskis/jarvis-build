@@ -139,7 +139,8 @@ export function build(opts: BuildOptions = {}) {
   const config = claudeBudgetConfigFromEnv({ JARVIS_CLAUDE_BUDGET_USD: "100", ...opts.env });
   if (config === null) throw new Error("test-oppsett: budsjettet må være på");
   const enforcer = opts.flag === false ? undefined : new ClaudeBudgetEnforcer({
-    config, pool: db.pool(), trace, actor_person_id: "owner-1", now: () => clock.now, ...(opts.spendTimeoutMs !== undefined ? { spend_timeout_ms: opts.spendTimeoutMs } : {})
+    config, pool: db.pool(), trace, actor_person_id: "owner-1", now: () => clock.now, ...(opts.spendTimeoutMs !== undefined ? { spend_timeout_ms: opts.spendTimeoutMs } : {}),
+    ...(opts.spendCacheTtlMs !== undefined ? { spend_cache_ttl_ms: opts.spendCacheTtlMs } : {})
   });
   const anthropic = adapter("anthropic", "claude-sonnet-5-5", { withStream: true, ...opts.anthropic });
   const local = adapter("gemma_local", "gemma-local", { ...opts.local });

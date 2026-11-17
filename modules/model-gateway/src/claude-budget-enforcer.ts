@@ -28,6 +28,14 @@ const MS_PER_DAY = 86_400_000;
 const RESERVATION_TTL_MS = 5 * 60_000;
 /** Frist for lesingen av forbruket per kall: en database som ikke svarer skal gi fail-safe (se `begin`), ikke la eierens tur vente for alltid. */
 export const DEFAULT_SPEND_READ_TIMEOUT_MS = 3_000;
+/**
+ * WP-B4 (review M3): levetid for den leste summen per tenant og kredittperiode. Innenfor levetiden deler kall én lesing (en frisk database gjorde ellers opptil fire lesinger per verktøytur); kall fra DENNE prosessen
+ * ses uansett fortsatt av overlegget (pågående reservasjoner + det hvert fullførte kall bokførte siden lesingen startet), så bufferen kan ikke slippe forbruket i denne prosessen forbi taket. Kun forbruk fra en ANNEN
+ * prosess (api mot worker) er usynlig i inntil denne tiden - dokumentert rest-overskridelse. 0 = ingen buffer (hver beslutning leser).
+ */
+export const DEFAULT_SPEND_CACHE_TTL_MS = 3_000;
+/** WP-B4 (review M3): etter en lesefeil eller utløpt frist hoppes lesingen over så lenge (fail-safe per tier gjelder i mellomtiden), så en hengende database koster ÉN frist - ikke én per kall - og holder ikke en pool-klient per kall. */
+export const SPEND_FAILURE_COOLDOWN_MS = 30_000;
 
 /** Venter på `promise`, men gir opp etter `ms` (feiler med `claude_spend_timeout`). Fristen ryddes alltid; en forsinket avvisning av det oppgitte løftet er håndtert (race abonnerer på begge). */
 function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -193,19 +201,25 @@ export interface PacingVerdict {
 /** Det gatewayen får ut av en beslutning. `release()` MÅ kalles når kallet er ferdig (idempotent). */
 export class PacingTicket {
   private released = false;
+  private booked = 0;
 
   constructor(
     readonly verdict: PacingVerdict,
     /** `closed`: Anthropic skal ikke brukes for dette kallet. `cheaper_model`: bruk `downgrade_model`. `open`: uendret. */
     readonly constraint: PacingConstraint,
     readonly downgrade_model: string | undefined,
-    private readonly onRelease: () => void
+    private readonly onRelease: (booked: number) => void
   ) {}
+
+  /** Gatewayen melder hva kallet kostet (øre) idet det bokføres (også anslag for avbrutte kall): overlegget i enforceren bruker det til å se egne bokføringer før bufferen av forbruket er fornyet. */
+  noteBooked(ore: number): void {
+    if (Number.isFinite(ore) && ore > 0) this.booked += ore;
+  }
 
   release(): void {
     if (this.released) return;
     this.released = true;
-    this.onRelease();
+    this.onRelease(this.booked);
   }
 
   /** Feilen når kallet ikke kan betjenes uten Anthropic (ingen lokal modell). */
@@ -261,6 +275,8 @@ export interface ClaudeBudgetEnforcerOptions {
   now?: () => number;
   /** Frist (ms) for lesingen av forbruket per kall; standard 3 s. Utløpt = uleselig forbruk = fail-safe. */
   spend_timeout_ms?: number;
+  /** Levetid (ms) for bufferen av forbruket per tenant og periode (se `DEFAULT_SPEND_CACHE_TTL_MS`); standard 3 s, 0 = av. */
+  spend_cache_ttl_ms?: number;
 }
 
 export class ClaudeBudgetEnforcer {
@@ -268,6 +284,12 @@ export class ClaudeBudgetEnforcer {
   /** Antall logg-/revisjonsskrivinger som feilet (isolert fra modellkallet; synlig for drift/tester). */
   logFailures = 0;
   private readonly inflight = new Map<string, Map<symbol, { ore: number; expires: number }>>();
+  /** M3: sist leste forbruk per tenant (`at` = når lesingen STARTET), og når lesingen sist feilet (negativ buffer), og lesinger som pågår (enkeltflyt per tenant og periode). */
+  private readonly spendCache = new Map<string, { window_start: number; at: number; spend: ClaudeSpend }>();
+  private readonly readFailedUntil = new Map<string, number>();
+  private readonly inflightReads = new Map<string, { promise: Promise<ClaudeSpend>; started: number }>();
+  /** M3: det fullførte kall har bokført (øre, høyeste av reservasjonen og det bokførte) etter at lesingen startet - broen mellom en buffer og databasen. */
+  private readonly settled = new Map<string, Array<{ ore: number; at: number }>>();
   private readonly now: () => number;
 
   constructor(private readonly opts: ClaudeBudgetEnforcerOptions) {
@@ -288,7 +310,7 @@ export class ClaudeBudgetEnforcer {
     return sum;
   }
 
-  private reserve(tenantId: string, rawOre: number, nowMs: number): () => void {
+  private reserve(tenantId: string, rawOre: number, nowMs: number): (booked: number) => void {
     // L5: en reservasjon er alltid et endelig tall ≥ 0 (et NaN-/negativt anslag ville forgiftet summen alle samtidige beslutninger bygger på)
     const ore = Number.isFinite(rawOre) && rawOre >= 0 ? rawOre : reservationCap(this.config.budget_ore);
     const key = Symbol("claude-budget-reservation");
@@ -298,11 +320,68 @@ export class ClaudeBudgetEnforcer {
       this.inflight.set(tenantId, reservations);
     }
     reservations.set(key, { ore, expires: nowMs + RESERVATION_TTL_MS });
-    return () => {
+    return (booked: number) => {
       const current = this.inflight.get(tenantId);
       current?.delete(key);
       if (current !== undefined && current.size === 0) this.inflight.delete(tenantId);
+      this.noteSettled(tenantId, Math.max(ore, Number.isFinite(booked) && booked > 0 ? booked : 0), this.now());
     };
+  }
+
+  private cacheTtl(): number {
+    const ttl = this.opts.spend_cache_ttl_ms ?? DEFAULT_SPEND_CACHE_TTL_MS;
+    return Number.isFinite(ttl) && ttl > 0 ? ttl : 0;
+  }
+
+  /** M3: et fullført kall (reservasjon eller det bokførte, det høyeste) legges til overlegget til bufferen av forbruket er fornyet. Uten buffer trengs det ikke (hver beslutning leser). */
+  private noteSettled(tenantId: string, ore: number, at: number): void {
+    const ttl = this.cacheTtl();
+    if (ttl === 0 || !(ore > 0)) return;
+    const kept = (this.settled.get(tenantId) ?? []).filter((entry) => entry.at > at - ttl);
+    kept.push({ ore, at });
+    this.settled.set(tenantId, kept);
+  }
+
+  private settledSince(tenantId: string, since: number): number {
+    let sum = 0;
+    for (const entry of this.settled.get(tenantId) ?? []) if (entry.at >= since) sum += entry.ore;
+    return sum;
+  }
+
+  /**
+   * M3: forbruket i perioden for tenanten - fra bufferen (levetid `spend_cache_ttl_ms`, samme kredittperiode), fra en lesing som allerede pågår (enkeltflyt), eller fra en ny lesing med frist. `null` = uleselig (feil, frist,
+   * ugyldig svar, eller negativ buffer etter en nylig feil): kalleren tar fail-safe-beslutningen. `since` = når lesingen startet (overlegget teller det som er bokført etter det).
+   */
+  private async spendView(tenantId: string, window: BudgetWindow, nowMs: number): Promise<{ spend: ClaudeSpend; since: number } | null> {
+    const failedUntil = this.readFailedUntil.get(tenantId);
+    if (failedUntil !== undefined) {
+      if (nowMs < failedUntil && failedUntil - nowMs <= SPEND_FAILURE_COOLDOWN_MS) return null; // negativ buffer: ingen ny lesing før den har utløpt
+      this.readFailedUntil.delete(tenantId);
+    }
+    const ttl = this.cacheTtl();
+    const cached = this.spendCache.get(tenantId);
+    if (ttl > 0 && cached !== undefined && cached.window_start === window.start_ms && nowMs >= cached.at && nowMs - cached.at < ttl) return { spend: cached.spend, since: cached.at };
+    const key = `${tenantId}|${window.start_ms}`;
+    let flight = this.inflightReads.get(key);
+    if (flight === undefined) {
+      const created = { promise: readClaudeSpend(this.opts.pool, tenantId, window, nowMs), started: nowMs };
+      flight = created;
+      this.inflightReads.set(key, created);
+      const done = (): void => { if (this.inflightReads.get(key) === created) this.inflightReads.delete(key); };
+      created.promise.then(done, done); // en frist som utløper mens lesingen henger fjerner den ikke (se under), så den ryddes når den (om noen gang) svarer
+    }
+    try {
+      const spend = await withDeadline(flight.promise, this.opts.spend_timeout_ms ?? DEFAULT_SPEND_READ_TIMEOUT_MS);
+      if (ttl > 0) this.spendCache.set(tenantId, { window_start: window.start_ms, at: flight.started, spend });
+      return { spend, since: flight.started };
+    } catch (err) {
+      if (this.inflightReads.get(key) === flight) this.inflightReads.delete(key); // en hengende lesing blokkerer aldri senere forsøk (etter den negative bufferen)
+      this.spendCache.delete(tenantId);
+      const first = !this.readFailedUntil.has(tenantId);
+      this.readFailedUntil.set(tenantId, nowMs + SPEND_FAILURE_COOLDOWN_MS);
+      if (first) console.error(JSON.stringify({ msg: "claude_budget_spend_unreadable", error: err instanceof Error ? err.name : "unknown", ...(err instanceof Error && err.message === "claude_spend_timeout" ? { timeout: true } : {}) }));
+      return null;
+    }
   }
 
   private failsafe(tier: BudgetTier, origin: BudgetOrigin, purpose: ModelPurpose | null, window: BudgetWindow): PacingVerdict {
@@ -377,21 +456,17 @@ export class ClaudeBudgetEnforcer {
       return ticket;
     }
 
-    let spend: ClaudeSpend | null = null;
-    try {
-      spend = await withDeadline(readClaudeSpend(this.opts.pool, info.tenant_id, window, nowMs), this.opts.spend_timeout_ms ?? DEFAULT_SPEND_READ_TIMEOUT_MS);
-    } catch (err) {
-      console.error(JSON.stringify({ msg: "claude_budget_spend_unreadable", error: err instanceof Error ? err.name : "unknown", ...(err instanceof Error && err.message === "claude_spend_timeout" ? { timeout: true } : {}) }));
-    }
+    const view = await this.spendView(info.tenant_id, window, nowMs);
+    const spend: ClaudeSpend | null = view === null ? null : view.spend;
     // Herfra til reservasjonen er alt SYNKRONT: samtidige kall i denne prosessen ser hverandres reservasjoner (atomisk sjekk-og-reserver).
     let verdict: PacingVerdict;
     let decision: PacingDecision | null = null;
-    if (spend === null) {
+    if (view === null || spend === null) {
       verdict = this.failsafe(tier, origin, purpose, window);
     } else {
       try {
         decision = decide({
-          now: nowMs, budget_ore: cfg.budget_ore, spent_ore: spend.window_ore + this.inFlightOre(info.tenant_id, nowMs), tier, ...(info.purpose !== undefined ? { purpose: info.purpose } : {}),
+          now: nowMs, budget_ore: cfg.budget_ore, spent_ore: spend.window_ore + this.inFlightOre(info.tenant_id, nowMs) + this.settledSince(info.tenant_id, view.since), tier, ...(info.purpose !== undefined ? { purpose: info.purpose } : {}),
           params: pacingParamsOf(cfg), trailing: { spent_ore: spend.trailing_ore, days: spend.trailing_days }
         });
         verdict = { action: decision.action, reason: decision.reason, level: decision.level, tier, origin, purpose, resume_at_ms: decision.resume_at_ms, window };
@@ -414,7 +489,7 @@ export class ClaudeBudgetEnforcer {
         downgradeModel = cheaper;
       }
     }
-    let release = (): void => undefined;
+    let release: (booked: number) => void = () => undefined;
     if (constraint !== "closed") {
       const model = downgradeModel ?? info.request.model ?? info.provider_default_model ?? "";
       release = this.reserve(info.tenant_id, estimateCallOre(info.pricing, CLAUDE_BUDGET_PROVIDER, model, info.request, cfg.budget_ore), nowMs);

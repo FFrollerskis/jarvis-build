@@ -116,13 +116,14 @@ describe("M1: en påbegynt tur PÅ Anthropic fullføres fortsatt (fortsettelsesr
   });
 
   it("fortsettelse krever at en tidligere runde FAKTISK ble betjent av Anthropic: runde 1 betjent av lokal reserve (Anthropic feilet) gir en vanlig beslutning i runde 2", async () => {
-    const { gateway, db, anthropic } = build({ anthropic: { fail: new Error("nede") }, local: { script: toolThenAnswer("gemma_local", "gemma-local") } });
+    const { gateway, db, anthropic, clock } = build({ anthropic: { fail: new Error("nede") }, local: { script: toolThenAnswer("gemma_local", "gemma-local") } });
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     db.spend.set("t1", SPENT.on_pace);
     let anthropicCallsAfterRound1 = -1;
     const result = await gateway.completeWithTools(ownerTurn(), {
       tools: [ECHO_TOOL],
-      executor: executor(() => { anthropicCallsAfterRound1 = anthropic.calls.length; db.spend.set("t1", SPENT.exhausted); })
+      // verktøyet tar tid (forbruket leses på nytt etter at bufferen på 3 s har utløpt): kreditten er oppbrukt når runde 2 skal avgjøres
+      executor: executor(() => { anthropicCallsAfterRound1 = anthropic.calls.length; db.spend.set("t1", SPENT.exhausted); clock.now += 3_000; })
     });
     // runde 1: Anthropic tillatt (på tempo) men feilet → lokal reserve; runde 2: ingen Anthropic-runde å fortsette → ny beslutning (oppbrukt) → lokal, uten nytt Anthropic-forsøk
     expect(result.provider).toBe("gemma_local");
@@ -308,3 +309,149 @@ describe("L5: begin() kaster aldri, og ikke-endelige tall behandles som ULESELIG
 });
 
 const MID_FOR_ENGINE = Date.UTC(2026, 10, 30, 11, 0, 0); // 30. nov 2026, midt i perioden
+
+describe("M3: lesingen av forbruket er billig og begrenset (buffer, enkeltflyt, negativ buffer, ingen lesing i fortsettelsesrunder)", () => {
+  const DAYMS = 86_400_000;
+
+  it("en 4-kalls verktøytur på en frisk database gjør ÉN lesing (ikke fire): første runde leser, fortsettelsesrundene bærer billetten", async () => {
+    const { gateway, db } = build({ anthropic: { script: (_r, n) => (n <= 3 ? toolRound("anthropic", "claude-sonnet-5-5") : {}) } });
+    db.spend.set("t1", SPENT.on_pace);
+    const result = await gateway.completeWithTools(ownerTurn({ provider: "anthropic" }), { tools: [ECHO_TOOL], executor: executor(), maxRounds: 6 });
+    expect(result.metadata?.["tool_rounds"]).toBe(3);
+    expect(db.spendReads).toBe(1);
+  });
+
+  it("buffer (3 s): uavhengige kall innenfor levetiden deler ÉN lesing; ved utløp (>= 3 s) leses det på nytt; en annen tenant har sin egen lesing", async () => {
+    const { gateway, db, clock } = build();
+    db.spend.set("t1", SPENT.on_pace);
+    db.spend.set("t2", SPENT.on_pace);
+    for (let i = 0; i < 4; i++) await gateway.complete(ownerTurn());
+    expect(db.spendReads).toBe(1);
+    clock.now += 2_999;
+    await gateway.complete(ownerTurn());
+    expect(db.spendReads).toBe(1);
+    clock.now += 1; // nøyaktig 3 s siden lesingen
+    await gateway.complete(ownerTurn());
+    expect(db.spendReads).toBe(2);
+    await gateway.complete(ownerTurn({ tenant_id: "t2" }));
+    expect(db.spendReads).toBe(3);
+  });
+
+  it("enkeltflyt: seks samtidige kall deler ÉN lesing (og ser fortsatt hverandres reservasjoner)", async () => {
+    const { gateway, db, anthropic } = build();
+    db.spend.set("t1", SPENT.on_pace);
+    await Promise.all(Array.from({ length: 6 }, () => gateway.complete(ownerTurn())));
+    expect(anthropic.calls.length).toBe(6);
+    expect(db.spendReads).toBe(1);
+  });
+
+  it("bufferen + overlegget slipper aldri forbruket over hard stopp med mer enn ÉN kalls kostnad (klokka står stille: bufferen er gyldig hele tiden)", async () => {
+    const usage = { input_tokens: 2_000, output_tokens: 3_000 }; // faktisk kostnad 36 øre per kall (anslaget fra max_tokens er lavere - overlegget må bruke det bokførte)
+    const { gateway, db, config } = build({ anthropic: { usage } });
+    const { costOre, DEFAULT_PRICING } = await import("../src/index.ts");
+    const actual = costOre(DEFAULT_PRICING, "anthropic", "claude-sonnet-5-5", usage);
+    expect(actual).toBe(36);
+    db.spend.set("t1", config.budget_ore - 100);
+    const request: ModelRequest = { messages: [{ role: "user", content: "x" }], max_tokens: 200 };
+    let served = 0;
+    for (let i = 0; i < 12; i++) {
+      const r = await gateway.complete(ownerTurn({ request })).catch((e: unknown) => e);
+      if (!(r instanceof Error) && (r as { provider: string }).provider === "anthropic") served += 1;
+    }
+    expect(db.spendReads).toBe(1); // hele rekka på ÉN lesing
+    expect(served).toBe(3);
+    const total = db.spend.get("t1") ?? 0;
+    expect(total).toBe(config.budget_ore - 100 + 3 * actual);
+    expect(total).toBeLessThanOrEqual(config.budget_ore + actual); // dokumentert overskridelse: høyst ett kalls kostnad
+  });
+
+  it("anslaget er høyere enn det faktiske (vanlig): overlegget bruker anslaget og stopper tidligere (konservativt) - aldri over taket", async () => {
+    const { gateway, db, config } = build({ anthropic: { usage: { input_tokens: 10, output_tokens: 10 } } });
+    db.spend.set("t1", config.budget_ore - 30);
+    const request: ModelRequest = { messages: [{ role: "user", content: "x" }], max_tokens: 1_000 }; // anslag ca. 11 øre, faktisk 1 øre
+    let served = 0;
+    for (let i = 0; i < 12; i++) {
+      const r = await gateway.complete(ownerTurn({ request })).catch((e: unknown) => e);
+      if (!(r instanceof Error) && (r as { provider: string }).provider === "anthropic") served += 1;
+    }
+    expect(served).toBe(3); // overlegget bruker anslaget (11 øre per kall) - tre kall fyller de 30 øre som var igjen
+    expect(db.spend.get("t1") ?? 0).toBeLessThanOrEqual(config.budget_ore);
+  });
+
+  it("når bufferen har utløpt ser neste kall det faktiske forbruket (også fra en annen prosess) - overlegget er bare en bro", async () => {
+    const { gateway, db, clock } = build();
+    db.spend.set("t1", SPENT.on_pace);
+    expect((await gateway.complete(ownerTurn())).provider).toBe("anthropic");
+    db.spend.set("t1", SPENT.exhausted); // en annen prosess (worker) brukte opp kreditten
+    expect((await gateway.complete(ownerTurn())).provider).toBe("anthropic"); // innenfor 3 s: ikke sett ennå (dokumentert)
+    clock.now += 3_000;
+    expect((await gateway.complete(ownerTurn())).provider).toBe("gemma_local");
+  });
+
+  it("periodeskifte: en buffer fra forrige kredittperiode brukes aldri i den nye, selv innenfor levetiden", async () => {
+    const { gateway, db, clock } = build({ now: START_OF_PERIOD + 30 * DAYMS - 1_000 });
+    db.spend.set("t1", SPENT.exhausted);
+    expect((await gateway.complete(ownerTurn())).provider).toBe("gemma_local"); // gammel periode: oppbrukt, lest og bufret
+    db.spend.set("t1", 0); // ny periode: ingenting brukt ennå
+    clock.now += 2_000; // over fornyelsen (15. des 00:00), men bufferen er bare 2 s gammel
+    expect((await gateway.complete(ownerTurn())).provider).toBe("anthropic");
+    expect(db.spendReads).toBe(2);
+  });
+
+  describe("negativ buffer: etter en feil/frist hoppes lesingen over i 30 s (fail-safe per tier gjelder så lenge), deretter prøves den igjen", () => {
+    it("hengende database: fire kall etter hverandre tar ca. ÉN frist (ikke fire), og bare ÉN lesing er forsøkt", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const FRIST = 120;
+      const { gateway, db, anthropic } = build({ spendTimeoutMs: FRIST });
+      db.spendReadHangs = true;
+      const started = Date.now();
+      expect((await gateway.complete(ownerTurn())).provider).toBe("anthropic");
+      expect((await gateway.complete(ownerTask())).model).toBe(HAIKU);
+      expect((await gateway.complete(background())).provider).toBe("gemma_local");
+      expect((await gateway.complete(ownerTurn())).provider).toBe("anthropic");
+      const elapsed = Date.now() - started;
+      expect(db.spendReads).toBe(1);
+      expect(elapsed).toBeGreaterThanOrEqual(FRIST - 10);
+      expect(elapsed).toBeLessThan(2 * FRIST + 150); // ikke 4 × frist
+      expect(anthropic.calls).toHaveLength(3);
+      expect(db.audit.map((a) => a.reason)).toEqual([
+        "spend_unreadable_essential_allowed", "spend_unreadable_important_downgraded", "spend_unreadable_background_deferred", "spend_unreadable_essential_allowed"
+      ]);
+      vi.restoreAllMocks();
+    });
+
+    it("feil (ikke bare frist): samme negative buffer; etter 30 s leses det på nytt og en frisk database gir vanlige beslutninger igjen", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const { gateway, db, clock } = build();
+      db.spendReadError = new Error("nede");
+      for (let i = 0; i < 3; i++) await gateway.complete(background());
+      expect(db.spendReads).toBe(1);
+      clock.now += 29_999;
+      await gateway.complete(background());
+      expect(db.spendReads).toBe(1);
+      db.spendReadError = null;
+      db.spend.set("t1", SPENT.tight);
+      clock.now += 1; // 30 s
+      const r = await gateway.complete(background());
+      expect(db.spendReads).toBe(2);
+      expect(r.provider).toBe("gemma_local");
+      expect(db.audit.at(-1)?.reason).toBe("tight_background_deferred"); // vanlig beslutning fra den leste verdien
+      vi.restoreAllMocks();
+    });
+
+    it("negativ buffer er per tenant: tenant A sin feil hindrer ikke lesingen for B", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const { gateway, db } = build();
+      db.spendReadError = new Error("nede");
+      await gateway.complete(background({ tenant_id: "A" }));
+      db.spendReadError = null;
+      db.spend.set("B", SPENT.tight);
+      const r = await gateway.complete(background({ tenant_id: "B" }));
+      expect(db.spendReads).toBe(2);
+      expect(r.provider).toBe("gemma_local");
+      vi.restoreAllMocks();
+    });
+  });
+});
+
+const START_OF_PERIOD = Date.UTC(2026, 10, 14, 23, 0, 0); // 15. nov 2026 00:00 Europe/Oslo
