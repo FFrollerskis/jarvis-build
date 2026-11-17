@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- testfalske leverandører og assertions leser dypt i ikke-typet JSON (forespørselskropper/leverandørsvar); typing av hver form ville bare duplisere leverandørenes skjema. */
+import { randomUUID } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -936,5 +937,162 @@ describe("Q: review L2 - kreativ-URL gjennom hele kjeden (Google Ads RSA)", () =
     expect([...gads.ads.values()].find((a) => a.headlines.includes("L2 en"))?.finalUrls).toEqual(["https://example.test/Ny"]);
     // identisk forespørsel (annen skrivemåte av samme URL) er en NOOP - sammenligningen skjer på den normaliserte formen
     expect((await g("create_responsive_search_ad", { ...params, final_url: "https://example.test/Ny" })).outcome).toBe("NOOP");
+  });
+});
+
+describe("R: review L5 - kommando-/journalbeviset (replay markerer kommandoen, ett bevis per kommando, ærlig vakt)", () => {
+  /** En pool som lar `UPDATE marketing_campaign_execution_commands` feile ÉN gang (krasj mellom journalen og kommandoen). */
+  function crashingMarkPool(): { pool: pg.Pool; armed: { value: boolean } } {
+    const armed = { value: true };
+    const pool = new Proxy(appPool, {
+      get(target, prop) {
+        if (prop === "connect") {
+          return async () => {
+            const client = await target.connect();
+            return new Proxy(client, {
+              get(c, p) {
+                if (p === "query") {
+                  return (sql: unknown, ...rest: unknown[]) => {
+                    if (armed.value && typeof sql === "string" && sql.includes("UPDATE marketing_campaign_execution_commands")) { armed.value = false; return Promise.reject(new Error("simulated_crash_marking_command")); }
+                    return (c.query as (...a: unknown[]) => unknown)(sql, ...rest);
+                  };
+                }
+                const v = (c as unknown as Record<string | symbol, unknown>)[p];
+                return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(c) : v;
+              }
+            });
+          };
+        }
+        const v = (target as unknown as Record<string | symbol, unknown>)[prop];
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      }
+    }) as pg.Pool;
+    return { pool, armed };
+  }
+
+  it("krasj ETTER at journalen er `applied` men FØR kommandoen er markert: en replay med samme nøkkel + command_id fullfører markeringen (kommandoen ble ellers stående `pending_execution`), uten ny mutasjon", async () => {
+    await seedCommand("cmd-d3-l5a", 50_000, 40_000);
+    const key = uniq("l5-crash");
+    const input = { idempotency_key: key, provider: "google_ads", action: "set_campaign_budget", command_id: "cmd-d3-l5a", parameters: { customer_id: CID, campaign_id: "101", amount_ore: 40_000 } };
+    const { pool } = crashingMarkPool();
+    await expect(executeGrowthWrite({ ...exec, pool }, owner, input)).rejects.toThrow("simulated_crash_marking_command");
+    expect(gMut()).toHaveLength(1);
+    expect((await journal.findByKey(A, "business", key))?.status).toBe("applied");
+    expect((await commandStatus("cmd-d3-l5a")).status).toBe("pending_execution"); // «stuck» etter krasjen
+    const replay = await executeGrowthWrite(exec, owner, input);
+    expect(replay).toMatchObject({ outcome: "SUCCESS", replayed: true, command_status: "executed" });
+    expect(await commandStatus("cmd-d3-l5a")).toEqual({ status: "executed", execution_write_id: replay.write.write_id });
+    expect(gMut()).toHaveLength(1);
+    // en ny replay etter at kommandoen er `executed` kaster ikke og gir samme svar (idempotent), fortsatt ingen ny mutasjon
+    expect(await executeGrowthWrite(exec, owner, input)).toMatchObject({ outcome: "SUCCESS", replayed: true, command_status: "executed" });
+    expect(gMut()).toHaveLength(1);
+  });
+
+  it("samme nøkkel for en ANNEN kommando er en konflikt (journalraden beviser nøyaktig ÉN kommando)", async () => {
+    await seedCommand("cmd-d3-l5b1", 50_000, 40_000);
+    await seedCommand("cmd-d3-l5b2", 50_000, 40_000);
+    const key = uniq("l5-twocmd");
+    const base = { idempotency_key: key, provider: "google_ads", action: "set_campaign_budget", parameters: { customer_id: CID, campaign_id: "101", amount_ore: 40_000 } };
+    expect((await executeGrowthWrite(exec, owner, { ...base, command_id: "cmd-d3-l5b1" })).command_status).toBe("executed");
+    await expect(executeGrowthWrite(exec, owner, { ...base, command_id: "cmd-d3-l5b2" })).rejects.toThrow("growth_write_idempotency_conflict");
+    // og uten command_id er det en annen forespørsel (digest) - heller ingen stille gjenbruk
+    await expect(executeGrowthWrite(exec, owner, base)).rejects.toThrow("growth_write_idempotency_conflict");
+    expect((await commandStatus("cmd-d3-l5b2")).status).toBe("pending_execution");
+    expect(gMut()).toHaveLength(1);
+  });
+
+  it("ukjent utfall med kommando: kommandoen blir `execution_unknown`, og en replay med samme nøkkel kaster ikke (bindingen er lempet for replay) men sender aldri på nytt", async () => {
+    await seedCommand("cmd-d3-l5c", 50_000, 40_000);
+    gads.mutateStatus = 503;
+    const key = uniq("l5-unknown");
+    const input = { idempotency_key: key, provider: "google_ads", action: "set_campaign_budget", command_id: "cmd-d3-l5c", parameters: { customer_id: CID, campaign_id: "101", amount_ore: 40_000 } };
+    const first = await executeGrowthWrite(exec, owner, input);
+    expect(first).toMatchObject({ outcome: "UNKNOWN", command_status: "execution_unknown" });
+    gads.mutateStatus = undefined;
+    const replay = await executeGrowthWrite(exec, owner, input);
+    expect(replay).toMatchObject({ outcome: "UNKNOWN", replayed: true, command_status: "execution_unknown" });
+    expect(gMut()).toHaveLength(1);
+    // en NY nøkkel for samme kommando nektes mens utfallet er ukjent (kun ventende kommandoer kan bindes av en ny forespørsel)
+    await expect(executeGrowthWrite(exec, owner, { ...input, idempotency_key: uniq("l5-unknown-new") })).rejects.toThrow("growth_command_not_pending:execution_unknown");
+  });
+});
+
+describe("S: review L5/L7 - databasevakten på kommandoer (migrasjon 114) - hver betingelse er dekket av en egen test", () => {
+  let otherCampaignId = "";
+  beforeAll(async () => {
+    otherCampaignId = (await growth.upsertCampaignFromProvider(A, "business", { channel: "google_ads", external_campaign_id: "202", name: "Annen kampanje", status: "active", currency: "NOK" })).campaign_id;
+  });
+
+  /** En journalrad rett i databasen (admin) i ønsket status - `requested` først, deretter lovlig overgang. */
+  async function journalRow(status: "requested" | "applied" | "failed" | "outcome_unknown", campaignId: string, commandId: string | null): Promise<string> {
+    const id = `grw-wr-${randomUUID()}`;
+    await adminPool.query(
+      `INSERT INTO growth_write_journal (write_id, tenant_id, memory_space_id, provider, action, risk_class, spend_effect, target_ref, campaign_id, command_id, idempotency_key, request_digest, status, actor_person_id, source)
+       VALUES ($1, '${A}', 'business', 'google_ads', 'set_campaign_budget', 'D', 'unknown', 'googleads:test', $2, $3, $4, $5, 'requested', '${owner.person_id}', 'script')`,
+      [id, campaignId, commandId, `key-${id}`, "a".repeat(64)]
+    );
+    if (status !== "requested") await adminPool.query(`UPDATE growth_write_journal SET status = $2, completed_at = now() WHERE write_id = $1`, [id, status]);
+    return id;
+  }
+  const markExecuted = (commandId: string, writeId: string) =>
+    adminPool.query(`UPDATE marketing_campaign_execution_commands SET status = 'executed', executed_at = now(), execution_write_id = $2 WHERE command_id = $1`, [commandId, writeId]);
+
+  it("`executed` krever en journalrad som er `applied`: requested, outcome_unknown og failed avvises hver for seg", async () => {
+    for (const status of ["requested", "outcome_unknown", "failed"] as const) {
+      const command = `cmd-d3-s-${status}`;
+      await seedCommand(command, 50_000, 40_000);
+      const write = await journalRow(status, linkedCampaignId, command);
+      await expect(markExecuted(command, write), status).rejects.toThrow(/command_executed_requires_applied_write_for_same_campaign/);
+      expect((await commandStatus(command)).status, status).toBe("pending_execution");
+    }
+  });
+
+  it("`executed` krever at journalraden gjelder SAMME kampanje: en `applied` rad for en annen kampanje avvises", async () => {
+    await seedCommand("cmd-d3-s-campaign", 50_000, 40_000);
+    const write = await journalRow("applied", otherCampaignId, "cmd-d3-s-campaign");
+    await expect(markExecuted("cmd-d3-s-campaign", write)).rejects.toThrow(/command_executed_requires_applied_write_for_same_campaign/);
+  });
+
+  it("`executed` krever at journalraden ble utstedt FOR DENNE kommandoen (review L5): en `applied` rad for en annen kommando - eller uten kommando - avvises; riktig rad godtas", async () => {
+    await seedCommand("cmd-d3-s-own", 50_000, 40_000);
+    await seedCommand("cmd-d3-s-foreign", 50_000, 40_000);
+    const foreignWrite = await journalRow("applied", linkedCampaignId, "cmd-d3-s-foreign");
+    const noCommandWrite = await journalRow("applied", linkedCampaignId, null);
+    await expect(markExecuted("cmd-d3-s-own", foreignWrite)).rejects.toThrow(/command_execution_write_must_be_issued_for_this_command/);
+    await expect(markExecuted("cmd-d3-s-own", noCommandWrite)).rejects.toThrow(/command_execution_write_must_be_issued_for_this_command/);
+    const ownWrite = await journalRow("applied", linkedCampaignId, "cmd-d3-s-own");
+    await markExecuted("cmd-d3-s-own", ownWrite);
+    expect(await commandStatus("cmd-d3-s-own")).toEqual({ status: "executed", execution_write_id: ownWrite });
+    // `execution_unknown` bærer samme regel: et fremmed bevis godtas heller ikke der
+    await expect(adminPool.query(`UPDATE marketing_campaign_execution_commands SET status = 'execution_unknown', execution_write_id = $1 WHERE command_id = 'cmd-d3-s-foreign'`, [ownWrite])).rejects.toThrow(/command_execution_write_must_be_issued_for_this_command/);
+  });
+
+  it("ÉN journalrad kan bevise høyst ÉN kommando: den unike indeksen holder selv når triggeren er slått av, og en `executed` kommando er terminal", async () => {
+    await seedCommand("cmd-d3-s-uniq1", 50_000, 40_000);
+    await seedCommand("cmd-d3-s-uniq2", 50_000, 40_000);
+    const write = await journalRow("applied", linkedCampaignId, "cmd-d3-s-uniq1");
+    await markExecuted("cmd-d3-s-uniq1", write);
+    await expect(markExecuted("cmd-d3-s-uniq2", write)).rejects.toThrow(/command_execution_write_must_be_issued_for_this_command/);
+    await adminPool.query(`ALTER TABLE marketing_campaign_execution_commands DISABLE TRIGGER marketing_command_executed_guard`);
+    try {
+      await expect(adminPool.query(`UPDATE marketing_campaign_execution_commands SET status = 'execution_unknown', execution_write_id = $1 WHERE command_id = 'cmd-d3-s-uniq2'`, [write])).rejects.toThrow(/marketing_campaign_execution_commands_write_uniq|duplicate key/);
+    } finally {
+      await adminPool.query(`ALTER TABLE marketing_campaign_execution_commands ENABLE TRIGGER marketing_command_executed_guard`);
+    }
+    await expect(adminPool.query(`UPDATE marketing_campaign_execution_commands SET status = 'pending_execution' WHERE command_id = 'cmd-d3-s-uniq1'`)).rejects.toThrow(/command_executed_is_terminal|executed_has_proof/);
+    await expect(adminPool.query(`UPDATE marketing_campaign_execution_commands SET proposed_budget_ore = 1 WHERE command_id = 'cmd-d3-s-uniq1'`)).rejects.toThrow(/command_executed_is_terminal/);
+  });
+});
+
+describe("T: review L7 - hemmeligheter i leverandørtekst redigeres i journalen", () => {
+  it("en kampanje hvis navn inneholder en hemmelighet: journalraden bærer `[REDACTED:...]`, aldri verdien (kjøres gjennom hele kjeden)", async () => {
+    const value = ["f1e2d3c4", "b5a69788", "796a5b4c"].join("");
+    gads.campaigns.get("101")!.name = `Sommer SESSION_TOKEN=${value} slutt`;
+    const res = await g("pause_campaign", { campaign_id: "101" });
+    expect(res.outcome).toBe("SUCCESS");
+    const row = (await adminPool.query(`SELECT before_state, after_state FROM growth_write_journal WHERE write_id = $1`, [res.write.write_id])).rows[0];
+    const stored = JSON.stringify(row);
+    expect(stored).toContain("[REDACTED:named_secret]");
+    expect(stored).not.toContain(value);
   });
 });

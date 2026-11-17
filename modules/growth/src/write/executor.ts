@@ -95,9 +95,12 @@ export async function executeGrowthWrite(deps: GrowthWriteExecutorDeps, identity
   // `current_budget_ore`) - det er DEM gatewayen får og som journalens digest dekker.
   const externalCampaignId = typeof input.parameters["campaign_id"] === "string" ? (input.parameters["campaign_id"] as string) : null;
   const campaign = externalCampaignId !== null && CAMPAIGN_CHANNELS.has(provider) && deps.findCampaign ? await deps.findCampaign(tenantId, space, provider as CampaignChannel, externalCampaignId) : null;
-  const parameters: Params = input.command_id !== undefined ? await bindCommand(deps.pool, tenantId, space, input, provider, campaign?.campaign_id ?? null) : input.parameters;
+  // Review L5: en REPLAY (journalraden finnes fra før) skal gi det lagrede utfallet og fullføre kommando-markeringen - også når kommandoen allerede er `executed`/`execution_unknown`; kun en NY forespørsel krever `pending_execution`.
+  const replaying = input.command_id !== undefined && (await deps.journal.findByKey(tenantId, space, input.idempotency_key)) !== null;
+  const parameters: Params = input.command_id !== undefined ? await bindCommand(deps.pool, tenantId, space, input, provider, campaign?.campaign_id ?? null, replaying) : input.parameters;
 
-  const digest = writeRequestDigest(provider, input.action, parameters);
+  // Review L5: kommandoen er en del av forespørselen - samme nøkkel for en ANNEN kommando er en konflikt, ikke en replay (en journalrad kan bevise nøyaktig ÉN kommando).
+  const digest = writeRequestDigest(provider, input.action, input.command_id !== undefined ? { ...parameters, _command_id: input.command_id } : parameters);
   const begun = await deps.journal.begin(tenantId, space, {
     provider, action: input.action, risk_class: entry.op.risk as "C" | "D", spend_effect: spendEffect(entry.op), target_ref: target, idempotency_key: input.idempotency_key, request_digest: digest,
     actor_person_id: identity.person_id, source: input.source ?? "owner_route", campaign_id: campaign?.campaign_id ?? null, experiment_id: input.experiment_id ?? null, variant_id: input.variant_id ?? null,
@@ -105,7 +108,9 @@ export async function executeGrowthWrite(deps: GrowthWriteExecutorDeps, identity
     ...(input.trace_id !== undefined ? { trace_id: input.trace_id } : {})
   });
   if (!begun.created && (begun.row.status === "applied" || begun.row.status === "failed")) {
-    return { write: begun.row, outcome: begun.row.status === "applied" ? "SUCCESS" : "FAILED", reason: begun.row.failure_code, replayed: true, command_status: null };
+    // Review L5: en replay med `command_id` av en `applied` skriving fullfører markeringen (idempotent): en krasj mellom journalen og kommandoen lot ellers kommandoen stå `pending_execution` for alltid.
+    const replayedCommand = input.command_id !== undefined && begun.row.status === "applied" ? await markCommand(deps.pool, tenantId, space, input.command_id, begun.row, true) : null;
+    return { write: begun.row, outcome: begun.row.status === "applied" ? "SUCCESS" : "FAILED", reason: begun.row.failure_code, replayed: true, command_status: replayedCommand };
   }
 
   // Review M1: ToolGateway-ledgeren er nøklet på (tenant, nøkkel) ALENE - en ANNEN tool (eller et direkte gateway-kall utenfor journalen) kan ha brukt nøkkelen, og gatewayen ville da svart `deduplicated: true` med
@@ -161,7 +166,7 @@ export async function executeGrowthWrite(deps: GrowthWriteExecutorDeps, identity
  * `proposed_budget_ore`, en kommando som ikke er en reduksjon (databasen krever det også), og en kaller-oppgitt forventet nåverdi som ikke er kommandoens `current_budget_ore`. Returnerer de EFFEKTIVE
  * parameterne: kallerens parametere med forventet nåverdi tvunget til `current_budget_ore` (review M6) - utførelsen kan da aldri HEVE et budsjett som er flyttet siden kommandoen ble laget.
  */
-async function bindCommand(pool: pg.Pool, tenantId: string, space: MemorySpace, input: ExecuteGrowthWriteInput, provider: string, campaignId: string | null): Promise<Params> {
+async function bindCommand(pool: pg.Pool, tenantId: string, space: MemorySpace, input: ExecuteGrowthWriteInput, provider: string, campaignId: string | null, replaying: boolean): Promise<Params> {
   const binding = COMMAND_BUDGET_PARAM[`${provider}.${input.action}`];
   if (binding === undefined) throw new Error("growth_command_binding_unsupported_action");
   if (campaignId === null) throw new Error("growth_command_binding_campaign_not_linked");
@@ -170,7 +175,7 @@ async function bindCommand(pool: pg.Pool, tenantId: string, space: MemorySpace, 
     const command = rows[0] as { status: string; campaign_id: string; current_budget_ore: string; proposed_budget_ore: string } | undefined;
     if (!command) throw new Error("growth_command_not_found");
     if (command.campaign_id !== campaignId) throw new Error("growth_command_campaign_mismatch");
-    if (command.status !== "pending_execution") throw new Error(`growth_command_not_pending:${command.status}`);
+    if (!replaying && command.status !== "pending_execution") throw new Error(`growth_command_not_pending:${command.status}`);
     if (!(BigInt(command.proposed_budget_ore) < BigInt(command.current_budget_ore))) throw new Error("growth_command_not_a_reduction");
     if (String(input.parameters[binding.amount]) !== String(command.proposed_budget_ore)) throw new Error("growth_command_amount_mismatch");
     const given = input.parameters[binding.expected];
@@ -179,6 +184,10 @@ async function bindCommand(pool: pg.Pool, tenantId: string, space: MemorySpace, 
   });
 }
 
+/**
+ * Markerer kommandoen (`executed` ved verifisert `applied`, `execution_unknown` ved ukjent utfall). Idempotent: er kommandoen ALLEREDE markert for NETTOPP denne skrivingen (replay etter en krasj, eller samme
+ * markering to ganger), er det ikke en feil - svaret er den eksisterende statusen. Databasen krever beviset (`applied` journalrad for samme kampanje OG samme kommando, unik per kommando - migrasjon 114).
+ */
 async function markCommand(pool: pg.Pool, tenantId: string, space: MemorySpace, commandId: string, write: GrowthWriteRow, applied: boolean): Promise<"executed" | "execution_unknown" | null> {
   return withMemoryTransaction(pool, tenantId, [space], async (client) => {
     const next = applied ? "executed" : "execution_unknown";
@@ -187,7 +196,9 @@ async function markCommand(pool: pg.Pool, tenantId: string, space: MemorySpace, 
         WHERE tenant_id = $1 AND command_id = $2 AND status IN ('pending_execution', 'execution_unknown') RETURNING status`,
       [tenantId, commandId, next, write.write_id]
     );
-    return rows[0] ? next : null;
+    if (rows[0]) return next;
+    const current = (await client.query(`SELECT status, execution_write_id FROM marketing_campaign_execution_commands WHERE tenant_id = $1 AND command_id = $2`, [tenantId, commandId])).rows[0] as { status: string; execution_write_id: string | null } | undefined;
+    return current !== undefined && current.execution_write_id === write.write_id && (current.status === "executed" || current.status === "execution_unknown") ? current.status : null;
   });
 }
 

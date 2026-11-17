@@ -144,6 +144,20 @@ describe("B: validatorer, beløp og hjelpefunksjoner", () => {
     expect(composeValidator({ ...op, spend: "reduces" })({ finance_kill_switch_active: true }, {})).toBe("own_reason");
   });
 
+  it("review L7: journalen redigerer hemmeligheter i leverandørtekst (verdier OG nøkler) - settes sammen i kjøretid så kildefilen ikke inneholder noe nøkkellignende", () => {
+    const value = ["a1b2c3d4", "e5f6a7b8", "c9d0e1f2"].join("");
+    const secretLike = `SESSION_TOKEN=${value}`;
+    const clean = sanitizeJournalState({ name: `Sommerkampanje ${secretLike} slutt`, nested: { note: `Bearer ${["x1y2z3w4", "v5u6t7s8", "r9q0p1o2"].join("")}` }, [`API_KEY=${value}`]: 1, list: [secretLike] }) as Record<string, any>;
+    const text = JSON.stringify(clean);
+    expect(text).not.toContain(value);
+    expect(text).not.toContain("x1y2z3w4");
+    expect(clean["name"]).toContain("[REDACTED:named_secret]");
+    expect(clean["name"]).toMatch(/^Sommerkampanje SESSION_TOKEN=\[REDACTED:named_secret\] slutt$/);
+    expect(clean["nested"]["note"]).toBe("[REDACTED:bearer_token]");
+    expect(clean["list"][0]).toBe("SESSION_TOKEN=[REDACTED:named_secret]");
+    expect(Object.keys(clean).some((k) => k.includes(value))).toBe(false);
+  });
+
   it("journal: digest er stabil mot nøkkelrekkefølge; tilstand begrenses (dybde/lengde/kontrolltegn) før lagring", () => {
     expect(writeRequestDigest("google_ads", "a", { b: 1, a: { d: [1, 2], c: 3 } })).toBe(writeRequestDigest("google_ads", "a", { a: { c: 3, d: [1, 2] }, b: 1 }));
     expect(writeRequestDigest("google_ads", "a", { b: 1 })).not.toBe(writeRequestDigest("meta_ads", "a", { b: 1 }));

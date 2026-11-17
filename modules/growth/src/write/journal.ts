@@ -114,6 +114,14 @@ export class GrowthWriteJournal {
     });
   }
 
+  /** Journalraden for en idempotensnøkkel (`null` = ingen tidligere vekstskriving har brukt nøkkelen). Ren lesing. */
+  async findByKey(tenantId: string, memorySpace: MemorySpace, idempotencyKey: string): Promise<GrowthWriteRow | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(`SELECT * FROM growth_write_journal WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, idempotencyKey]);
+      return rows[0] ? asRow(rows[0]) : null;
+    });
+  }
+
   async get(tenantId: string, memorySpace: MemorySpace, writeId: string): Promise<GrowthWriteRow | null> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(`SELECT * FROM growth_write_journal WHERE tenant_id = $1 AND write_id = $2`, [tenantId, writeId]);
