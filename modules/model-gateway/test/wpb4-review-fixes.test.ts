@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ModelRequest, ToolCallRequest, ToolExchange } from "@jarvis/provider-adapters";
+import { ProviderError, type ModelRequest, type ToolCallRequest, type ToolExchange } from "@jarvis/provider-adapters";
 import { ClaudeBudgetBlockedError, type CompleteInput } from "../src/index.ts";
 import { HAIKU, REQ, SPENT, background, build, ownerTask, ownerTurn } from "./support/claude-budget-fakes.ts";
 
@@ -538,5 +538,108 @@ describe("L7: oppbruksvarselet kan ikke konfigureres bort - ALERT_PCTS har allti
     const cfg = claudeBudgetConfigFromEnv({ JARVIS_CLAUDE_BUDGET_USD: "100", JARVIS_CLAUDE_BUDGET_ALERT_PCTS: "50,75" })!;
     const state = pacingState({ now: Date.UTC(2026, 10, 30, 11, 0, 0), budget_ore: cfg.budget_ore, spent_ore: cfg.budget_ore });
     expect(dueAlertKeys(state, cfg)).toContain("pct:100");
+  });
+});
+
+describe("L2: avbrutte/feilede/utløpte Anthropic-kall bokføres med et ANSLAG (input + genererte tokens så langt), ikke 0 øre", () => {
+  const SYSTEM = "s".repeat(3_000); // ≈ 1000 inn-tokens (tegn / 3)
+  const request: ModelRequest = { system: SYSTEM, messages: [{ role: "user", content: "hei" }], max_tokens: 2_000 };
+  const partial = (chars: number) => async (_r: ModelRequest, onEvent: (e: { type: "text_delta"; text: string }) => void, signal: AbortSignal | undefined): Promise<never> => {
+    onEvent({ type: "text_delta", text: "x".repeat(chars) });
+    await new Promise<void>((resolve) => { if (signal?.aborted) resolve(); else signal?.addEventListener("abort", () => resolve()); });
+    throw new ProviderError("anthropic", "cancelled", "anthropic_cancelled");
+  };
+  const expected = async (generatedChars: number): Promise<number> => {
+    const { estimateFailedCallOre, DEFAULT_PRICING } = await import("../src/index.ts");
+    return estimateFailedCallOre(DEFAULT_PRICING, "anthropic", "claude-sonnet-5-5", request, generatedChars);
+  };
+
+  it("taleavbrudd (barge-in): delvis strøm så avbrudd gir ÉN rad med anslaget (inn ≈ 1001 + ut ≈ 1000 tokens = 13 øre), og neste beslutning ser det", async () => {
+    const { gateway, db, enforcer } = build({ anthropic: { streamScript: partial(3_000) } });
+    db.spend.set("t1", SPENT.on_pace);
+    const ac = new AbortController();
+    const turn = gateway.stream(ownerTurn({ provider: "anthropic", request }), () => undefined, ac.signal);
+    await vi.waitFor(() => expect(db.spendReads).toBe(1));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    ac.abort();
+    await expect(turn).rejects.toMatchObject({ kind: "cancelled" });
+    expect(db.failedRows).toHaveLength(1);
+    expect(db.failedRows[0]).toMatchObject({ provider: "anthropic", kind: "model:failed:cancelled" });
+    expect(await expected(3_000)).toBe(13);
+    expect(db.failedRows[0]!.amount_ore).toBe(13);
+    expect(db.statements).toContain("INSERT_COST_FAILED_ESTIMATED");
+    expect(db.spend.get("t1")).toBe(SPENT.on_pace + 13); // raden teller i kredittperioden
+    expect(enforcer!.inFlightOre("t1")).toBe(0);
+  });
+
+  it("avbrudd FØR noe er generert (kallet er sendt): kun input-anslaget; en kalt-men-aldri-startet runde (avbrutt før retry) bokføres ikke på nytt", async () => {
+    const { gateway, db } = build({ anthropic: { streamScript: partial(0) } });
+    db.spend.set("t1", SPENT.on_pace);
+    const ac = new AbortController();
+    const turn = gateway.stream(ownerTurn({ provider: "anthropic", request }), () => undefined, ac.signal);
+    await vi.waitFor(() => expect(db.spendReads).toBe(1));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    ac.abort();
+    await expect(turn).rejects.toMatchObject({ kind: "cancelled" });
+    expect(db.failedRows.map((r) => r.amount_ore)).toEqual([await expected(0)]);
+    expect(db.failedRows[0]!.amount_ore).toBeGreaterThan(0);
+  });
+
+  it("utløpt frist (timeout) uten svar: input-anslaget; strøm som brytes midt i (stream_interrupted) etter delvis tekst: input + genererte tokens", async () => {
+    const timeout = build({ anthropic: { fail: new ProviderError("anthropic", "timeout", "anthropic_timeout") } });
+    timeout.db.spend.set("t1", SPENT.on_pace);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await timeout.gateway.complete(ownerTurn({ provider: "anthropic", request })).catch(() => undefined);
+    expect(timeout.db.failedRows.every((r) => r.amount_ore === 3)).toBe(true); // 1001 inn-tokens × 2,1 øre/1k = 2,1 → 3
+    expect(timeout.db.failedRows.length).toBeGreaterThan(0);
+
+    const interrupted = build({ anthropic: { streamScript: async (_r, onEvent) => { onEvent({ type: "text_delta", text: "y".repeat(1_500) }); throw new ProviderError("anthropic", "stream_interrupted", "anthropic_stream_interrupted"); } } });
+    interrupted.db.spend.set("t1", SPENT.on_pace);
+    await interrupted.gateway.stream(ownerTurn({ provider: "anthropic", request }), () => undefined).catch(() => undefined);
+    expect(interrupted.db.failedRows).toHaveLength(1);
+    expect(interrupted.db.failedRows[0]!.amount_ore).toBe(await expected(1_500));
+    expect(interrupted.db.failedRows[0]!.amount_ore).toBeGreaterThan(3);
+    vi.restoreAllMocks();
+  });
+
+  it("feil som ikke faktureres (rate_limit, auth, bad_request, server uten tekst) forblir 0 øre - og andre leverandører er alltid 0 øre", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    for (const kind of ["rate_limit", "auth", "bad_request", "server", "not_configured"] as const) {
+      const { gateway, db } = build({ anthropic: { fail: new ProviderError("anthropic", kind, `anthropic_${kind}`) } });
+      db.spend.set("t1", SPENT.on_pace);
+      await gateway.complete(ownerTurn({ provider: "anthropic", request })).catch(() => undefined);
+      expect(db.failedRows.length, kind).toBeGreaterThan(0);
+      expect(db.failedRows.every((r) => r.amount_ore === 0), kind).toBe(true);
+    }
+    const other = build({ providers: ["anthropic", "gemma_local"], local: { fail: new ProviderError("gemma_local", "timeout", "gemma_timeout") } });
+    other.db.spend.set("t1", SPENT.on_pace);
+    await other.gateway.complete(ownerTurn({ provider: "gemma_local", request })).catch(() => undefined);
+    expect(other.db.failedRows.length).toBeGreaterThan(0);
+    expect(other.db.failedRows.every((r) => r.amount_ore === 0)).toBe(true);
+    vi.restoreAllMocks();
+  });
+
+  it("flagg AV: et avbrutt Anthropic-kall bokføres som før (0 øre, samme SQL) - ingenting av anslaget finnes uten Claude-kreditten", async () => {
+    const { gateway, db } = build({ flag: false, anthropic: { streamScript: partial(3_000) } });
+    const ac = new AbortController();
+    const turn = gateway.stream(ownerTurn({ provider: "anthropic", request }), () => undefined, ac.signal);
+    await vi.waitFor(() => expect(db.statements).toContain("COMMIT"));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    ac.abort();
+    await expect(turn).rejects.toMatchObject({ kind: "cancelled" });
+    expect(db.failedRows.map((r) => r.amount_ore)).toEqual([0]);
+    expect(db.statements).toContain("INSERT_COST_FAILED");
+    expect(db.statements).not.toContain("INSERT_COST_FAILED_ESTIMATED");
+  });
+
+  it("avbrutt før et begrenset retry: første forsøk er bokført normalt, og det aldri-startede retry-kallet får ikke et anslag", async () => {
+    const ac = new AbortController();
+    const { gateway, db } = build({
+      anthropic: { streamScript: async () => { ac.abort(); return { text: "", usage: { input_tokens: 100, output_tokens: 2_000 }, provider: "anthropic", model: "claude-sonnet-5-5", finish_reason: "length" }; } }
+    });
+    db.spend.set("t1", SPENT.on_pace);
+    await expect(gateway.stream(ownerTurn({ provider: "anthropic", request }), () => undefined, ac.signal)).rejects.toMatchObject({ kind: "cancelled" });
+    expect(db.costRows.filter((r) => r.provider === "anthropic")).toHaveLength(1); // første (avkortede) forsøk, bokført etter faktisk bruk
+    expect(db.failedRows.map((r) => r.amount_ore)).toEqual([0]); // avbrutt før retry: ingen kall ble sendt
   });
 });

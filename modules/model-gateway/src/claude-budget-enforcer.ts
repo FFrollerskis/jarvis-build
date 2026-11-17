@@ -149,15 +149,39 @@ function reservationCap(budgetOre: number): number {
 export function estimateCallOre(pricing: PricingTable, provider: string, model: string, request: ModelRequest, budgetOre: number): number {
   const cap = reservationCap(budgetOre);
   try {
-    let chars = typeof request.system === "string" ? request.system.length : 0;
-    if (Array.isArray(request.messages)) for (const message of request.messages) chars += contentLength((message as { content?: unknown } | null | undefined)?.content);
-    if (request.tools !== undefined) chars += jsonLength(request.tools);
-    if (request.tool_exchanges !== undefined) chars += jsonLength(request.tool_exchanges);
-    const maxTokens = typeof request.max_tokens === "number" && Number.isFinite(request.max_tokens) && request.max_tokens > 0 ? request.max_tokens : DEFAULT_MAX_TOKENS;
-    const estimate = costOre(pricing, provider, model, { input_tokens: Math.ceil(chars / 3), output_tokens: maxTokens });
+    const estimate = costOre(pricing, provider, model, { input_tokens: Math.ceil(requestChars(request) / 3), output_tokens: effectiveMaxTokens(request) });
     return Number.isFinite(estimate) && estimate >= 0 ? Math.min(estimate, cap) : cap;
   } catch {
     return cap;
+  }
+}
+
+/** Antall tegn forespørselen sender (system, meldinger, verktøy, tidligere runder) - fiendtlige deler teller 0. Kan kaste for helt ugyldige objekter: kallerne fanger det. */
+function requestChars(request: ModelRequest): number {
+  let chars = typeof request.system === "string" ? request.system.length : 0;
+  if (Array.isArray(request.messages)) for (const message of request.messages) chars += contentLength((message as { content?: unknown } | null | undefined)?.content);
+  if (request.tools !== undefined) chars += jsonLength(request.tools);
+  if (request.tool_exchanges !== undefined) chars += jsonLength(request.tool_exchanges);
+  return chars;
+}
+
+function effectiveMaxTokens(request: ModelRequest): number {
+  return typeof request.max_tokens === "number" && Number.isFinite(request.max_tokens) && request.max_tokens > 0 ? request.max_tokens : DEFAULT_MAX_TOKENS;
+}
+
+/**
+ * WP-B4 (review L2): anslag (øre) for et AVBRUTT, utløpt eller feilet Anthropic-kall som er sendt, men aldri fikk et tokenregnskap fra leverandøren. Anthropic fakturerer input og det som ble generert før avbruddet,
+ * så 0 øre (som før) ville underteller forbruket - taleavbrudd (barge-in) er hovedkilden. Anslaget er det samme som reservasjonen (tegn / 3 per token) men for det FAKTISK genererte: inn-tokens fra forespørselen +
+ * ut-tokens fra tegnene som er strømmet til nå (aldri mer enn `max_tokens`). Et anslag, ikke fakturaen (en lokal modells ukjente tokentelling er uten betydning her: kun Anthropic bokføres slik).
+ */
+export function estimateFailedCallOre(pricing: PricingTable, provider: string, model: string, request: ModelRequest, generatedChars: number): number {
+  try {
+    const generated = typeof generatedChars === "number" && Number.isFinite(generatedChars) && generatedChars > 0 ? generatedChars : 0;
+    const output = Math.min(Math.ceil(generated / 3), effectiveMaxTokens(request));
+    const ore = costOre(pricing, provider, model, { input_tokens: Math.ceil(requestChars(request) / 3), output_tokens: output });
+    return Number.isFinite(ore) && ore >= 0 ? ore : 0;
+  } catch {
+    return 0;
   }
 }
 

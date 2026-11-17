@@ -29,7 +29,7 @@ import { modelCatalogFromEnv, type CatalogModel, type ModelTier } from "./model-
 import { describeTask, HeuristicRoutingAdvisor, selectModelForTier, type RoutingAdvisor } from "./routing-advisor.ts";
 import type { TraceSink } from "./trace.ts";
 import { CLAUDE_BUDGET_PROVIDER, type BudgetOrigin } from "./claude-budget.ts";
-import type { ClaudeBudgetEnforcer, PacingRoundContext, PacingTicket } from "./claude-budget-enforcer.ts";
+import { estimateFailedCallOre, type ClaudeBudgetEnforcer, type PacingRoundContext, type PacingTicket } from "./claude-budget-enforcer.ts";
 
 /**
  * D-106 Council reliability (§ARCHITECTURE DECISION, evidensbasert 2026-08-24):
@@ -368,6 +368,17 @@ function pauseReadFailure(err: unknown): { error: string; code?: string } {
   const code = (err as { code?: unknown } | null)?.code;
   return { error: err instanceof Error ? err.name : "unknown", ...(typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? { code } : {}) };
 }
+
+/** WP-B4 (L2): hva gatewayen vet om et leverandørkall som feilet etter at det var sendt (se `recordFailedAttempt`). */
+interface FailedCallBilling {
+  pacing: PacingTicket | undefined;
+  request: ModelRequest;
+  model: string;
+  generated_chars: number;
+}
+
+/** WP-B4 (L2): feilklassene der Anthropic kan ha fakturert det som var gjort (avbrutt/utløpt/brutt midt i/ugyldig svar etter generering). Andre feil (auth, kvote, dårlig forespørsel, serverfeil uten tekst) faktureres ikke. */
+const BILLABLE_FAILURE_KINDS: ReadonlySet<string> = new Set(["cancelled", "timeout", "stream_interrupted", "invalid_tool_call", "invalid_response"]);
 
 /** Gatewayens syn på én leverandør i denne prosessen (ruteren ser kun `configured`/`paused`/`budget_blocked`/`model`). */
 type RuntimeRow = { configured: boolean; available: boolean; paused: boolean; model: string; budget_blocked?: boolean };
@@ -773,6 +784,12 @@ export class ModelGateway {
         const concurrent = this.inFlightCalls > 0;
         this.inFlightCalls += 1;
         let outputStarted = false;
+        // WP-B4 (L2): hva et avbrutt/feilet Anthropic-kall kan ha kostet. `callActive` = leverandørkallet er sendt og ikke ferdig (en avbrytelse FØR kallet eller etter at det ga svar koster ingenting nytt);
+        // `generatedChars` = tegnene som er strømmet til konsumenten så langt (tekst og verktøyargumenter).
+        let callActive = false;
+        let generatedChars = 0;
+        const billing = (billedRequest: ModelRequest): FailedCallBilling | undefined =>
+          callActive && this.opts.claudeBudget !== undefined ? { pacing, request: billedRequest, model: billedRequest.model ?? adapter.model ?? candidate.model, generated_chars: generatedChars } : undefined;
         // D-441 (JARVIS-038): `usage`/`finish` holdes tilbake til utfallet er klassifisert. Leveres de FØR (som tidligere), er konsumenten allerede «ferdig» når et tomt
         // eller avkortet resultat avsløres, og vi kan verken prøve neste kandidat eller feile ærlig - da ble et tomt svar returnert som suksess.
         const heldTerminalEvents: StreamEvent[] = [];
@@ -786,6 +803,8 @@ export class ModelGateway {
             // secrets/prompt/svar-tekst) - og kun aktiv når eksplisitt slått på.
             const streamDebug = process.env["JARVIS_STREAM_DEBUG"] === "true";
             const guardedOnEvent: StreamHandler = (event) => {
+              if (event.type === "text_delta") generatedChars += event.text.length;
+              else if (event.type === "tool_call_delta") generatedChars += event.arguments_delta.length;
               if (event.type === "text_delta" || event.type === "tool_call_start") {
                 outputStarted = true;
                 if (event.type === "tool_call_start" || event.text.trim().length > 0) visibleOutputStarted = true;
@@ -802,6 +821,7 @@ export class ModelGateway {
               }
               streamOpts.onEvent(event);
             };
+            callActive = true;
             if (adapter.stream) {
               result = await adapter.stream(request, guardedOnEvent, streamOpts.signal);
             } else {
@@ -811,8 +831,11 @@ export class ModelGateway {
               guardedOnEvent({ type: "usage", usage: result.usage });
               guardedOnEvent({ type: "finish", finish_reason: result.finish_reason ?? "stop" });
             }
+            callActive = false;
           } else {
+            callActive = true;
             result = await adapter.complete(request, isCritic ? undefined : input.onToken);
+            callActive = false;
           }
           const latency = result.latency_ms ?? Date.now() - attemptStart;
           // D-106 PR #53: transport lyktes (ingen kastet feil) - health reflekterer
@@ -885,7 +908,10 @@ export class ModelGateway {
                   ...request,
                   max_tokens: computeAdaptiveRetryMaxTokens(result, request)
                 };
+                generatedChars = 0; // retry-kallet er ikke streamet: ingenting er generert som vi vet om før det svarer
+                callActive = true;
                 const retryResult = await adapter.complete(retryRequest, streamOpts || isCritic ? undefined : input.onToken);
+                callActive = false;
                 const retryLatency = retryResult.latency_ms ?? Date.now() - retryStart;
                 this.health.recordSuccess(adapter.name, retryLatency, concurrent);
                 retryResult.metadata = {
@@ -946,7 +972,7 @@ export class ModelGateway {
                 }
                 lastError = pe;
                 if (!isBackgroundTimeout(input.purpose, pe.kind)) this.health.recordFailure(adapter.name, pe.kind, pe.message);
-                await this.recordFailedAttempt(input, adapter.name, pe, isCritic);
+                await this.recordFailedAttempt(input, adapter.name, pe, isCritic, billing(request));
                 break;
               }
             }
@@ -966,11 +992,11 @@ export class ModelGateway {
           lastError = pe;
           // Bruker-cancellation er ikke provider-feil (§35): ingen health-straff, ingen fallback.
           if (pe.kind === "cancelled") {
-            await this.recordFailedAttempt(input, adapter.name, pe, isCritic);
+            await this.recordFailedAttempt(input, adapter.name, pe, isCritic, billing(request));
             throw pe;
           }
           if (!isBackgroundTimeout(input.purpose, pe.kind)) this.health.recordFailure(adapter.name, pe.kind, pe.message);
-          await this.recordFailedAttempt(input, adapter.name, pe, isCritic);
+          await this.recordFailedAttempt(input, adapter.name, pe, isCritic, billing(request));
           // D-106 HOST-FIX Defekt B-oppfølging (host-bevis 2026-09-20): et mislykket
           // forsøk skrev FØR denne linjen KUN `kind` til `cost_events`
           // (`recordFailedAttempt` over) - selve feilmeldingen/diagnostikken
@@ -1573,15 +1599,24 @@ export class ModelGateway {
     input: CompleteInput,
     provider: string,
     err: ProviderError,
-    critic: boolean
+    critic: boolean,
+    billing?: FailedCallBilling
   ): Promise<void> {
     this.notifyAttemptFailed(input, provider, err.kind, critic);
+    // WP-B4 (L2): et sendt, men avbrutt/utløpt/feilet Anthropic-kall bokføres med et ANSLAG (input + det som er generert så langt) i stedet for 0 øre - ellers undertelles kreditten (taleavbrudd er hovedkilden).
+    // Kun med Claude-kreditten på (uten den er raden som før: 0 øre, samme SQL) og kun for Anthropic og feilklasser som kan være fakturert. Anslaget meldes også til overlegget i enforceren.
+    let estimate = 0;
+    if (billing !== undefined && provider === CLAUDE_BUDGET_PROVIDER && (BILLABLE_FAILURE_KINDS.has(err.kind) || billing.generated_chars > 0)) {
+      estimate = estimateFailedCallOre(this.pricing, provider, billing.model, billing.request, billing.generated_chars);
+      if (estimate > 0) billing.pacing?.noteBooked(estimate);
+    }
     try {
       await withTenantTransaction(this.opts.pool, input.tenant_id, (client) =>
         client.query(
+          // `0` er literal når ingenting er anslått (SQL-teksten er da byte-identisk med main); et anslag settes inn som parameter `$9`.
           `INSERT INTO cost_events (tenant_id, task_id, session_id, kind, amount_ore, provider, model,
                                     input_tokens, output_tokens, purpose, success, fallback, critic, latency_ms)
-           VALUES ($1, $2, $3, $4, 0, $5, $6, 0, 0, $7, false, false, $8, NULL)`,
+           VALUES ($1, $2, $3, $4, ${estimate > 0 ? "$9" : "0"}, $5, $6, 0, 0, $7, false, false, $8, NULL)`,
           [
             input.tenant_id,
             input.task_id ?? null,
@@ -1590,7 +1625,8 @@ export class ModelGateway {
             provider,
             "(failed)",
             input.purpose ?? null,
-            critic
+            critic,
+            ...(estimate > 0 ? [estimate] : [])
           ]
         )
       );

@@ -23,6 +23,8 @@ export class FakeDb {
   readonly audit: AuditRow[] = [];
   readonly statements: string[] = [];
   readonly costRows: Array<{ tenant_id: string; provider: string; model: string; amount_ore: number; purpose: string | null }> = [];
+  /** Mislykkede forsøk (`model:failed:<kind>`): 0 øre som før, eller et anslag når Claude-kreditten er på (L2). */
+  readonly failedRows: Array<{ tenant_id: string; provider: string; kind: string; amount_ore: number }> = [];
   spendReadError: Error | null = null;
   /** Lesingen av forbruket blir aldri besvart (databasen henger). */
   spendReadHangs = false;
@@ -51,7 +53,16 @@ export class FakeDb {
             }
             if (text.includes("FROM cost_events")) { this.statements.push("READ_BUDGET_GUARD"); return { rows: [{ spent: this.guardSpentOre }] }; }
             if (text.includes("INSERT INTO cost_events")) {
-              if (/\$4, 0,/.test(text)) { this.statements.push("INSERT_COST_FAILED"); return { rows: [] }; }
+              if (/\$4, 0,/.test(text)) { this.statements.push("INSERT_COST_FAILED"); this.failedRows.push({ tenant_id: String(params[0]), provider: String(params[4]), kind: String(params[3]), amount_ore: 0 }); return { rows: [] }; }
+              if (/\$4, \$9,/.test(text)) {
+                // WP-B4 (L2): avbrutt/feilet kall bokført med et ANSLAG (øre) i stedet for 0
+                this.statements.push("INSERT_COST_FAILED_ESTIMATED");
+                const amount = Number(params[8]);
+                const failed = { tenant_id: String(params[0]), provider: String(params[4]), kind: String(params[3]), amount_ore: amount };
+                this.failedRows.push(failed);
+                if (failed.provider === "anthropic") this.spend.set(failed.tenant_id, (this.spend.get(failed.tenant_id) ?? 0) + amount);
+                return { rows: [] };
+              }
               this.statements.push("INSERT_COST");
               const row = { tenant_id: String(params[0]), provider: String(params[5]), model: String(params[6]), amount_ore: Number(params[4]), purpose: params[9] === null ? null : String(params[9]) };
               this.costRows.push(row);
@@ -84,6 +95,8 @@ export interface AdapterOptions {
   hold?: () => Promise<void>;
   withStream?: boolean;
   script?: (request: ModelRequest, call: number) => Partial<ModelResult>;
+  /** Full kontroll over strømmen (delvis tekst, avbrudd, feil midt i): erstatter standardstrømmen. */
+  streamScript?: (request: ModelRequest, onEvent: StreamHandler, signal: AbortSignal | undefined) => Promise<ModelResult>;
 }
 export type FakeAdapter = ModelProviderAdapter & { calls: ModelRequest[]; streamCalls: ModelRequest[] };
 
@@ -102,7 +115,13 @@ export function adapter(name: string, model: string, options: AdapterOptions = {
       return result(request, calls.length);
     }
   };
-  if (options.withStream === true) {
+  if (options.streamScript !== undefined) {
+    const script = options.streamScript;
+    base.stream = async (request: ModelRequest, onEvent: StreamHandler, signal?: AbortSignal) => {
+      streamCalls.push(request);
+      return script(request, onEvent, signal);
+    };
+  } else if (options.withStream === true) {
     base.stream = async (request: ModelRequest, onEvent: StreamHandler) => {
       streamCalls.push(request);
       await options.hold?.();
