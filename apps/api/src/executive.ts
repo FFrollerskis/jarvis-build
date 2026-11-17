@@ -102,8 +102,10 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
         tenant_id: task.tenant_id,
         task_id: task.task_id,
         purpose: purpose.success ? purpose.data : ("BACKGROUND" as const),
-        // WP-B4 (D-476): en jobb delegert fra chat er en jobb EIEREN bestilte (VIKTIG for Claude-kreditten, selv om kontrakten merker den BACKGROUND som køetikett). Kun med Claude-kreditten på - ellers uendret innputt.
-        ...(opts.gateway.claudeBudgetActive === true && input.delegated_from_chat === true ? { budget_origin: "owner_task" as const } : {}),
+        // WP-B4 (D-476, review M2): en jobb EIEREN bestilte er VIKTIG for Claude-kreditten (selv om kontrakten merker den BACKGROUND som køetikett). Opphavet kommer KUN fra attestert kilde: markøren OG det interne flagget
+        // `cloud_tool_turns_allowed` - begge er reservert (`RESERVED_SUBMIT_DATA_KEYS`: en innsendt kontrakt kan ikke bære dem) og settes bare av `TasksDelegateTransport` når turen som delegerte er betrodd (skybetjent eller eierens
+        // egne ord, ikke SECRET_RESTRICTED). En jobb uten attesteringen er bakgrunnsarbeid (jobb-id → BAKGRUNN). Kun med Claude-kreditten på - ellers uendret innputt.
+        ...(opts.gateway.claudeBudgetActive === true && input.delegated_from_chat === true && input.cloud_tool_turns_allowed === true ? { budget_origin: "owner_task" as const } : {}),
         request: { messages: [{ role: "user" as const, content: input.prompt }], max_tokens: 1024 }
       };
       // BO-11 (§29) + Del 3: tools=true gir modellen KUN verktøyene kontrakten eksplisitt tillater, med kontraktens egen identitet.

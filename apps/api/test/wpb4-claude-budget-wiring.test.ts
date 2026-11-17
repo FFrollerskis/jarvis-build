@@ -301,16 +301,17 @@ describe("delegerte jobber (executive-handler) - opphav og merknad", () => {
     }
   });
 
-  it("MED kreditten: en jobb delegert fra chat er en bestilt oppgave (owner_task) - både på skyruten og lokalt og uten verktøy; en jobb som ikke er delegert fra chat får ikke hintet", async () => {
+  it("MED kreditten: en jobb delegert fra chat OG attestert av trusted kode (`cloud_tool_turns_allowed`) er en bestilt oppgave (owner_task) - på skyruten og uten verktøy; uten attesteringen, uten markør eller planlagt får den ikke hintet (M2, se wpb4-review-fixes.test.ts)", async () => {
     const { run, seen } = handler({ claudeBudgetActive: true });
     await run(task(delegated()), jobCtx); // skyrute
-    await run(task(delegated({ cloud_tool_turns_allowed: false })), jobCtx); // lokal rute med verktøy
     await run(task(delegated({ tools: false })), jobCtx); // uten verktøy
-    expect(seen).toHaveLength(3);
+    expect(seen).toHaveLength(2);
     for (const input of seen) expect(input.budget_origin).toBe("owner_task");
     const other = handler({ claudeBudgetActive: true });
+    await other.run(task(delegated({ cloud_tool_turns_allowed: false })), jobCtx); // markør uten attestering (lokalt betjent tur eller forfalsket)
     await other.run(task(delegated({ delegated_from_chat: false })), jobCtx);
     await other.run(task({ prompt: "planlagt jobb", purpose: "BACKGROUND" }), jobCtx);
+    expect(other.seen).toHaveLength(3);
     for (const input of other.seen) expect("budget_origin" in input).toBe(false);
   });
 
