@@ -349,6 +349,13 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // er FORTSATT IKKE registrert i denne planen) - INGEN ordringskonflikt
   // i dag, men MÅ slettes FØR `business_contacts` dersom den noen gang
   // legges til.
+  // WP-G1 (UA-7 resterende deler, D-463, 118_comms_outbound_policy.sql): kommunikasjonstabellene. `comms_inbound_events.identity_id` er en (tenant-sammensatt) FK -> `conversation_identities` -
+  // `comms_inbound_events` MÅ derfor slettes FØR `conversation_identities` (under). Mottakers avmelding (`comms_recipient_opt_outs`) slettes også her: en full tenant-/rom-sletting fjerner ALT, også undertrykkelseslisten
+  // (en eier som sletter hele rommet har ikke lenger noen avsender som kan sende dit). Øvrige comms_*-tabeller har ingen FK mellom seg.
+  add(result, "comms_inbound_events", await run(client, mode, "comms_inbound_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "comms_outbound_log", await run(client, mode, "comms_outbound_log", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "comms_recipient_opt_outs", await run(client, mode, "comms_recipient_opt_outs", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "comms_authorized_accounts", await run(client, mode, "comms_authorized_accounts", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "conversation_identity_merges", await run(client, mode, "conversation_identity_merges", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "conversation_channel_links", await run(client, mode, "conversation_channel_links", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "conversation_identities", await run(client, mode, "conversation_identities", "tenant_id = $1 AND memory_space_id = $2", tv));

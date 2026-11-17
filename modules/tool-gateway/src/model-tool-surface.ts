@@ -56,7 +56,9 @@ export const FORBIDDEN_MODEL_TOOL_IDS: ReadonlyArray<string> = [
   "browser",
   "incidents",
   "governance",
-  "situations"
+  "situations",
+  // WP-G1 (UA-7, D-463): utgående kommunikasjon (send/rediger/slett/reager, konto-allowlist, avmelding) - aldri på en modellflate. Modellen kan foreslå og utkaste; utsendelse går via eierens rute.
+  "comms"
 ];
 
 /** Handlingsnavn som indikerer skriving/sletting/sending/betaling/merge/kontroll. */
