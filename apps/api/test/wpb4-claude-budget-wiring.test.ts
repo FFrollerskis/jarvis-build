@@ -83,7 +83,7 @@ describe("api og worker lager samme enforcer fra samme miljø - kun når flagget
 
   it("api: konfig parses fra miljøet, enforcer lages kun når den finnes, og gis til gatewayen via betinget spread (uendret options-objekt uten flagget)", () => {
     expect(main).toMatch(/const claudeBudgetConfig = claudeBudgetConfigFromEnv\(process\.env\);/);
-    expect(main).toMatch(/const claudeBudget = claudeBudgetConfig === null \? undefined : new ClaudeBudgetEnforcer\(\{ config: claudeBudgetConfig, pool, trace, actor_person_id: owner\.owner_person_id \}\);/);
+    expect(main).toMatch(/const claudeBudget = claudeBudgetConfig === null \? undefined : new ClaudeBudgetEnforcer\(\{ config: claudeBudgetConfig, pool, trace, actor_person_id: owner\.owner_person_id, owner_tenant_id: owner\.tenant_id \}\);/);
     const gatewayCall = main.slice(main.indexOf("const gateway = new ModelGateway({"), main.indexOf("assertProvidersHaveExplicitPricing(pricingFromEnv(), gateway.listProviderNames());"));
     expect(gatewayCall).toContain("...(claudeBudget !== undefined ? { claudeBudget } : {})");
     expect(main.indexOf("const claudeBudgetConfig")).toBeLessThan(main.indexOf("const gateway = new ModelGateway({"));
@@ -92,7 +92,7 @@ describe("api og worker lager samme enforcer fra samme miljø - kun når flagget
   it("worker: samme parsing (ugyldig verdi stopper oppstarten via failStartup), samme sporsink til enforceren og gatewayen, samme betingede spread", () => {
     expect(worker).toMatch(/claudeBudgetConfig = claudeBudgetConfigFromEnv\(process\.env\);\s*\} catch \(err\) \{\s*failStartup\(err\);\s*\}/);
     expect(worker).toMatch(/const workerTrace = traceSinkFromEnv\("var\/worker-traces\.jsonl"\);/);
-    expect(worker).toMatch(/new ClaudeBudgetEnforcer\(\{ config: claudeBudgetConfig, pool, trace: workerTrace, actor_person_id: owner\.owner_person_id \}\)/);
+    expect(worker).toMatch(/new ClaudeBudgetEnforcer\(\{ config: claudeBudgetConfig, pool, trace: workerTrace, actor_person_id: owner\.owner_person_id, owner_tenant_id: owner\.tenant_id \}\)/);
     const gatewayCall = worker.slice(worker.indexOf("const gateway = new ModelGateway({"), worker.indexOf("assertProvidersHaveExplicitPricing(pricingFromEnv(), gateway.listProviderNames());"));
     expect(gatewayCall).toContain("trace: workerTrace,");
     expect(gatewayCall).toContain("...(claudeBudget !== undefined ? { claudeBudget } : {})");

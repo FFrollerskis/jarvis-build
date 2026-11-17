@@ -317,7 +317,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // WP-B4 (D-476): Claude-kreditten (100 USD/mnd, tempostyring og behovsprioritering). AV som standard (`JARVIS_CLAUDE_BUDGET_USD` tom/usatt = ingen enforcer, gatewayen er identisk med main). En ugyldig
   // JARVIS_CLAUDE_BUDGET_* KASTER her og stopper oppstarten (buildDeps().catch → exit 1) - aldri en stille standard. Samme parsing og samme enforcer-type i worker-main.ts.
   const claudeBudgetConfig = claudeBudgetConfigFromEnv(process.env);
-  const claudeBudget = claudeBudgetConfig === null ? undefined : new ClaudeBudgetEnforcer({ config: claudeBudgetConfig, pool, trace, actor_person_id: owner.owner_person_id });
+  const claudeBudget = claudeBudgetConfig === null ? undefined : new ClaudeBudgetEnforcer({ config: claudeBudgetConfig, pool, trace, actor_person_id: owner.owner_person_id, owner_tenant_id: owner.tenant_id });
   const gateway = new ModelGateway({
     pool,
     trace,

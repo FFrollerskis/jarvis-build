@@ -695,3 +695,51 @@ describe("L7: én eiertur ved hard stopp telles ÉN gang - første forsøk (hard
     expect(other.db.audit).toHaveLength(2);
   });
 });
+
+describe("L6: revisjonsraden tilskrives kallets EGEN person (økt → jobb), og eieren kun for systemkall i eierens tenant", () => {
+  it("økt kjent: personen som eier økta - også for en annen tenant enn eierens (ikke eierens person_id for alle)", async () => {
+    const { gateway, db } = build({ ownerTenantId: "t1" });
+    db.spend.set("t2", SPENT.exhausted);
+    db.sessionPersons.set("s-x", "person-x");
+    await gateway.complete(ownerTurn({ tenant_id: "t2", session_id: "s-x" }));
+    expect(db.audit).toHaveLength(1);
+    expect(db.audit[0]).toMatchObject({ tenant_id: "t2", person_id: "person-x", session_id: "s-x", reason: "exhausted_closed" });
+    expect(db.statements).toContain("LOOKUP_SESSION");
+  });
+
+  it("jobb kjent (ingen økt): jobbens eier", async () => {
+    const { gateway, db } = build({ ownerTenantId: "t1" });
+    db.spend.set("t2", SPENT.tight);
+    db.taskOwners.set("job-9", "person-job-owner");
+    await gateway.complete(background({ tenant_id: "t2", task_id: "job-9" }));
+    expect(db.audit[0]).toMatchObject({ tenant_id: "t2", person_id: "person-job-owner", task_id: "job-9", reason: "tight_background_deferred" });
+    expect(db.statements).not.toContain("LOOKUP_SESSION");
+    expect(db.statements).toContain("LOOKUP_TASK");
+  });
+
+  it("økt og jobb: økta vinner; ukjent økt-id faller til jobben", async () => {
+    const { gateway, db } = build({ ownerTenantId: "t1" });
+    db.spend.set("t2", SPENT.tight);
+    db.sessionPersons.set("s-1", "person-session");
+    db.taskOwners.set("job-1", "person-job");
+    await gateway.complete(background({ tenant_id: "t2", task_id: "job-1", session_id: "s-1" }));
+    await gateway.complete(background({ tenant_id: "t2", task_id: "job-1", session_id: "s-finnes-ikke" }));
+    expect(db.audit.map((a) => a.person_id)).toEqual(["person-session", "person-job"]);
+  });
+
+  it("systemkall (hverken økt eller jobb kjent): eierens person i EIERENS tenant, `system` i alle andre - aldri en fabrikkert person", async () => {
+    const { gateway, db } = build({ ownerTenantId: "t1" });
+    db.spend.set("t1", SPENT.tight);
+    db.spend.set("t2", SPENT.tight);
+    await gateway.complete(background({ tenant_id: "t1", task_id: "job-ukjent" }));
+    await gateway.complete(background({ tenant_id: "t2", task_id: "job-ukjent" }));
+    expect(db.audit.map((a) => [a.tenant_id, a.person_id])).toEqual([["t1", "owner-1"], ["t2", "system"]]);
+  });
+
+  it("uten oppgitt eier-tenant (som før): systemkall tilskrives eieren; en lesefeil i oppslaget stopper aldri modellkallet (telles i logFailures)", async () => {
+    const { gateway, db } = build();
+    db.spend.set("t2", SPENT.tight);
+    await gateway.complete(background({ tenant_id: "t2", task_id: "job-x" }));
+    expect(db.audit[0]?.person_id).toBe("owner-1");
+  });
+});

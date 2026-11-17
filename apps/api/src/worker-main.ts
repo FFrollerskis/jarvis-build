@@ -102,7 +102,7 @@ try {
   failStartup(err);
 }
 const workerTrace = traceSinkFromEnv("var/worker-traces.jsonl");
-const claudeBudget = claudeBudgetConfig === null ? undefined : new ClaudeBudgetEnforcer({ config: claudeBudgetConfig, pool, trace: workerTrace, actor_person_id: owner.owner_person_id });
+const claudeBudget = claudeBudgetConfig === null ? undefined : new ClaudeBudgetEnforcer({ config: claudeBudgetConfig, pool, trace: workerTrace, actor_person_id: owner.owner_person_id, owner_tenant_id: owner.tenant_id });
 const gateway = new ModelGateway({
   pool,
   trace: workerTrace,

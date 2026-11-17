@@ -30,6 +30,9 @@ export class FakeDb {
   spendReadHangs = false;
   spendReadRow: Record<string, unknown> | null = null;
   spendReads = 0;
+  /** Økter og jobber som finnes (for å tilskrive revisjonsraden riktig person, L6): `session_id → person_id` og `task_id → owner_person_id`. */
+  readonly sessionPersons = new Map<string, string>();
+  readonly taskOwners = new Map<string, string>();
   guardSpentOre = 0;
   failAuditWrites = false;
 
@@ -42,6 +45,16 @@ export class FakeDb {
             const text = sql.trim();
             if (/^(BEGIN|COMMIT|ROLLBACK)/i.test(text)) { this.statements.push(text.split(/\s/)[0]!.toUpperCase()); return { rows: [] }; }
             if (text.includes("set_config")) { tenant = String(params[0]); this.statements.push("SET_TENANT"); return { rows: [] }; }
+            if (text.includes("FROM sessions")) {
+              this.statements.push("LOOKUP_SESSION");
+              const person = this.sessionPersons.get(String(params[0]));
+              return { rows: person === undefined ? [] : [{ person_id: person }] };
+            }
+            if (text.includes("FROM tasks")) {
+              this.statements.push("LOOKUP_TASK");
+              const owner = this.taskOwners.get(String(params[0]));
+              return { rows: owner === undefined ? [] : [{ owner_person_id: owner }] };
+            }
             if (text.includes("FROM cost_events") && text.includes("provider = $4")) {
               this.spendReads += 1;
               this.statements.push("READ_CLAUDE_SPEND");
@@ -146,6 +159,8 @@ export interface BuildOptions {
   openai?: AdapterOptions;
   /** Levetid (ms) for bufferen av forbruket i enforceren; utelatt = enforcerens standard. */
   spendCacheTtlMs?: number;
+  /** Eierens tenant (L6): revisjonsrader uten kjent person tilskrives eieren kun her, ellers `system`. Utelatt = som før (alltid eieren). */
+  ownerTenantId?: string;
   now?: number;
   /** Frist for lesingen av forbruket (ms); standard i enforceren er 3 s. */
   spendTimeoutMs?: number;
@@ -159,7 +174,8 @@ export function build(opts: BuildOptions = {}) {
   if (config === null) throw new Error("test-oppsett: budsjettet må være på");
   const enforcer = opts.flag === false ? undefined : new ClaudeBudgetEnforcer({
     config, pool: db.pool(), trace, actor_person_id: "owner-1", now: () => clock.now, ...(opts.spendTimeoutMs !== undefined ? { spend_timeout_ms: opts.spendTimeoutMs } : {}),
-    ...(opts.spendCacheTtlMs !== undefined ? { spend_cache_ttl_ms: opts.spendCacheTtlMs } : {})
+    ...(opts.spendCacheTtlMs !== undefined ? { spend_cache_ttl_ms: opts.spendCacheTtlMs } : {}),
+    ...(opts.ownerTenantId !== undefined ? { owner_tenant_id: opts.ownerTenantId } : {})
   });
   const anthropic = adapter("anthropic", "claude-sonnet-5-5", { withStream: true, ...opts.anthropic });
   const local = adapter("gemma_local", "gemma-local", { ...opts.local });

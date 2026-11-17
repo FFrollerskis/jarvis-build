@@ -306,8 +306,13 @@ export interface ClaudeBudgetEnforcerOptions {
   config: ClaudeBudgetConfig;
   pool: pg.Pool;
   trace: TraceSink;
-  /** Revisjonsraden skrives under eierens sovereign-autoritet (samme presedens som vakthunden, D-181): beslutningen er en deterministisk systemhandling på vegne av eieren. */
+  /**
+   * Eierens person. L6 (review): revisjonsraden tilskrives kallets EGEN person når den er kjent (økta sin person, ellers jobbens eier). Er den ukjent (et systemkall uten økt eller jobb), brukes eieren (samme presedens som
+   * vakthunden, D-181: en deterministisk systemhandling på vegne av eieren) - men kun i eierens tenant (`owner_tenant_id`); i en annen tenant er raden en systemhandling (`system`), aldri en fabrikkert person.
+   */
   actor_person_id: string;
+  /** Eierens tenant. Utelatt = en systemhandling tilskrives alltid eieren (som før). */
+  owner_tenant_id?: string;
   now?: () => number;
   /** Frist (ms) for lesingen av forbruket per kall; standard 3 s. Utløpt = uleselig forbruk = fail-safe. */
   spend_timeout_ms?: number;
@@ -556,6 +561,25 @@ export class ClaudeBudgetEnforcer {
     return ticket;
   }
 
+  /**
+   * L6: personen revisjonsraden tilskrives, slått opp under tenantens egen RLS i samme transaksjon som skrivingen: økta sin person, ellers jobbens eier. Ukjent (systemkall) → eieren i eierens tenant, ellers `system`
+   * (aldri en fabrikkert person). En ukjent økt-id (finnes ikke) faller videre til jobben.
+   */
+  private async auditPerson(client: pg.PoolClient, info: PacingBeginInfo): Promise<string> {
+    if (info.session_id !== undefined) {
+      const found = await client.query("SELECT person_id FROM sessions WHERE session_id = $1", [info.session_id]);
+      const person = (found.rows[0] as { person_id?: unknown } | undefined)?.person_id;
+      if (typeof person === "string" && person !== "") return person;
+    }
+    if (info.task_id !== undefined) {
+      const found = await client.query("SELECT owner_person_id FROM tasks WHERE task_id = $1", [info.task_id]);
+      const owner = (found.rows[0] as { owner_person_id?: unknown } | undefined)?.owner_person_id;
+      if (typeof owner === "string" && owner !== "") return owner;
+    }
+    const ownerTenant = this.opts.owner_tenant_id;
+    return ownerTenant === undefined || ownerTenant === info.tenant_id ? this.opts.actor_person_id : "system";
+  }
+
   /** Kategorier og tall - aldri prompt, svar, verktøyargumenter eller feiltekst. */
   private facts(ticket: PacingTicket, state: PacingState | null, spend: ClaudeSpend | null, roundRule?: RoundRule): Record<string, string | number | boolean | null> {
     const v = ticket.verdict;
@@ -585,16 +609,17 @@ export class ClaudeBudgetEnforcer {
     if (roundRule === "retry_of_closed") return; // samme kall som ble revidert for et øyeblikk siden (L7)
     if (v.action === "allow" && v.level !== "unknown" && v.level !== "exhausted") return;
     try {
-      await withTenantTransaction(this.opts.pool, info.tenant_id, (client) =>
-        writeAudit(
+      await withTenantTransaction(this.opts.pool, info.tenant_id, async (client) => {
+        const person_id = await this.auditPerson(client, info);
+        await writeAudit(
           client,
-          { tenant_id: info.tenant_id, person_id: this.opts.actor_person_id, ...(info.session_id !== undefined ? { session_id: info.session_id } : {}) },
+          { tenant_id: info.tenant_id, person_id, ...(info.session_id !== undefined ? { session_id: info.session_id } : {}) },
           {
             type: "claude_budget.decision", decision: v.action, reason: v.reason, tool_id: "claude_budget", action: "pacing", trace_id: info.trace_id,
             ...(info.task_id !== undefined ? { task_id: info.task_id } : {}), payload: facts
           }
-        )
-      );
+        );
+      });
     } catch (err) {
       this.logFailures += 1;
       console.error(JSON.stringify({ msg: "claude_budget_audit_failed", error: err instanceof Error ? err.name : "unknown" }));

@@ -5,7 +5,7 @@ import { ControlCenterRegistry, type ControlCenterReport } from "@jarvis/executi
 import {
   ClaudeBudgetBlockedError, ClaudeBudgetEnforcer, MemoryTraceSink, ModelGateway, budgetWindow, claudeBudgetConfigFromEnv, readClaudeBudgetState, type ClaudeBudgetConfig, type CompleteInput
 } from "@jarvis/model-gateway";
-import type { ModelProviderAdapter, ModelRequest, ModelResult } from "@jarvis/provider-adapters";
+import { ProviderError, type ModelProviderAdapter, type ModelRequest, type ModelResult, type StreamHandler } from "@jarvis/provider-adapters";
 import { MemoryAlertSink } from "@jarvis/watchdog";
 import { createAiCenter } from "../src/control-center/ai.ts";
 import { ClaudeBudgetAlerter, claudeBudgetBriefSource, readClaudeDecisionCounts, readClaudeUsage } from "../src/claude-budget-surfaces.ts";
@@ -344,5 +344,89 @@ describe("hele sløyfen: gateway + enforcer + ekte database (ekte klokke; nivåe
     expect(status.state.level).toBe("exhausted");
     const counts = await readClaudeDecisionCounts(db.appPool, TENANT_EXHAUSTED, status.window.start_ms, status.window.end_ms, Date.now());
     expect(counts.by_decision.deny.period).toBe(rows.length);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Review-fikser mot ekte database: L2 (anslag for avbrutt kall), L3 (indeks), L6 (tilskriving av revisjonsraden)
+// ---------------------------------------------------------------------------------------------------------------------
+
+describe("review-fikser mot ekte database", () => {
+  it("L3: den dekkende indeksen (tenant, provider, at) INCLUDE (amount_ore) finnes, og forbrukslesingen KAN bruke den under tenant-RLS (som app-rolle)", async () => {
+    const def = await db.adminPool.query("SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'cost_events_tenant_provider_at_idx'");
+    expect(def.rows).toHaveLength(1);
+    expect((def.rows[0] as { indexdef: string }).indexdef).toContain("(tenant_id, provider, at) INCLUDE (amount_ore)");
+    const plan = await withTenantTransaction(db.appPool, A, async (client) => {
+      await client.query("SET LOCAL enable_seqscan = off"); // på en liten testtabell velger planleggeren ellers alltid skann: dette beviser at indeksen er BRUKBAR under RLS-predikatet
+      return client.query(
+        `EXPLAIN (FORMAT JSON) SELECT coalesce(sum(amount_ore), 0)::float8 AS window_ore, coalesce(sum(amount_ore) FILTER (WHERE at >= $3), 0)::float8 AS trailing_ore
+           FROM cost_events WHERE provider = $4 AND at >= $1 AND at < $2`,
+        [new Date(WINDOW.start_ms), new Date(WINDOW.end_ms), new Date(WINDOW.start_ms), "anthropic"]
+      );
+    });
+    const text = JSON.stringify(plan.rows);
+    expect(text).toContain("cost_events_tenant_provider_at_idx");
+    expect(text).toContain("Index Only Scan");
+  });
+
+  it("L2: et avbrutt Anthropic-kall (delvis strøm så cancel) bokføres med anslaget i cost_events (success=false, 0 → > 0 øre), og NESTE lesing av forbruket ser det", async () => {
+    const T = "tenant-b4-abort";
+    const P = "person-b4-abort";
+    await seedTenants(db.adminPool, [{ tenant_id: T, person_id: P }]);
+    const anthropic: ModelProviderAdapter = {
+      name: "anthropic", model: "claude-sonnet-5-5", available: () => true,
+      complete: async () => { throw new Error("ikke brukt"); },
+      stream: async (_request: ModelRequest, onEvent: StreamHandler, signal?: AbortSignal): Promise<ModelResult> => {
+        onEvent({ type: "text_delta", text: "x".repeat(3_000) });
+        await new Promise<void>((resolve) => { if (signal?.aborted) resolve(); else signal?.addEventListener("abort", () => resolve()); });
+        throw new ProviderError("anthropic", "cancelled", "anthropic_cancelled");
+      }
+    };
+    const { gateway } = gatewayFor(P, [anthropic, spyAdapter("gemma_local", "gemma-local")]);
+    const ac = new AbortController();
+    const turn = gateway.stream(ownerTurn(T, { provider: "anthropic", request: { system: "s".repeat(3_000), messages: [{ role: "user", content: "hei" }], max_tokens: 2_000 } }), () => undefined, ac.signal);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    ac.abort();
+    await expect(turn).rejects.toMatchObject({ kind: "cancelled" });
+    const rows = await db.adminPool.query("SELECT kind, provider, success, amount_ore, input_tokens, output_tokens FROM cost_events WHERE tenant_id = $1 ORDER BY cost_id", [T]);
+    expect(rows.rows).toEqual([{ kind: "model:failed:cancelled", provider: "anthropic", success: false, amount_ore: 13, input_tokens: 0, output_tokens: 0 }]);
+    expect((await readClaudeBudgetState(db.appPool, T, config, Date.now())).spend.window_ore).toBe(13);
+  });
+
+  it("L6: revisjonsraden tilskrives kallets egen person (økta, ellers jobbens eier), eierens person kun for systemkall i eierens tenant, `system` i andre tenanter (actor_kind=system)", async () => {
+    const OWNER_T = "tenant-b4-own";
+    const OWNER_P = "person-b4-own";
+    const OTHER_T = "tenant-b4-other";
+    const OTHER_P = "person-b4-other";
+    const SESSION_P = "person-b4-session";
+    await seedTenants(db.adminPool, [{ tenant_id: OWNER_T, person_id: OWNER_P }, { tenant_id: OTHER_T, person_id: OTHER_P }]);
+    await db.adminPool.query("INSERT INTO people (person_id, display_name) VALUES ($1, $1)", [SESSION_P]);
+    await db.adminPool.query("INSERT INTO person_tenants (person_id, tenant_id, role) VALUES ($1, $2, 'member')", [SESSION_P, OTHER_T]);
+    await db.adminPool.query("INSERT INTO sessions (session_id, tenant_id, person_id, status, last_channel, last_device_id) VALUES ('s-attr', $1, $2, 'active', 'web', 'd1')", [OTHER_T, SESSION_P]);
+    await db.adminPool.query("INSERT INTO tasks (task_id, tenant_id, owner_person_id, goal, status, contract) VALUES ('job-attr', $1, $2, 'mål', 'created', '{}'::jsonb)", [OTHER_T, OTHER_P]);
+    await seedSpend(OWNER_T, 105_000); // oppbrukt: hver beslutning stenges og revideres
+    await seedSpend(OTHER_T, 105_000);
+    const trace = new MemoryTraceSink();
+    const enforcer = new ClaudeBudgetEnforcer({ config, pool: db.appPool, trace, actor_person_id: OWNER_P, owner_tenant_id: OWNER_T });
+    const gateway = new ModelGateway({ pool: db.appPool, trace, providers: [spyAdapter("anthropic", "claude-sonnet-5-5"), spyAdapter("gemma_local", "gemma-local")], claudeBudget: enforcer });
+
+    await gateway.complete(ownerTurn(OTHER_T, { session_id: "s-attr" })); // økta eies av en annen person enn eieren
+    await gateway.complete(backgroundJob(OTHER_T, { task_id: "job-attr" })); // jobb uten økt: jobbens eier
+    await gateway.complete(backgroundJob(OTHER_T, { task_id: "job-finnes-ikke" })); // systemkall i en annen tenant
+    await gateway.complete(backgroundJob(OWNER_T, { task_id: "job-finnes-ikke" })); // systemkall i eierens tenant
+
+    const other = await db.adminPool.query("SELECT person_id, actor_kind, task_id, session_id FROM audit_events WHERE tenant_id = $1 AND type = 'claude_budget.decision' ORDER BY audit_id", [OTHER_T]);
+    expect(other.rows).toEqual([
+      { person_id: SESSION_P, actor_kind: "person", task_id: null, session_id: "s-attr" },
+      { person_id: OTHER_P, actor_kind: "person", task_id: "job-attr", session_id: null },
+      { person_id: "system", actor_kind: "system", task_id: "job-finnes-ikke", session_id: null }
+    ]);
+    const own = await db.adminPool.query("SELECT person_id, actor_kind FROM audit_events WHERE tenant_id = $1 AND type = 'claude_budget.decision'", [OWNER_T]);
+    expect(own.rows).toEqual([{ person_id: OWNER_P, actor_kind: "person" }]);
+    // RLS: oppslaget så aldri en annen tenants økt (eierens tenant har ingen økt «s-attr»)
+    const crossTenant = await gateway.complete(ownerTurn(OWNER_T, { session_id: "s-attr" }));
+    expect(crossTenant.provider).toBe("gemma_local");
+    const after = await db.adminPool.query("SELECT person_id FROM audit_events WHERE tenant_id = $1 AND type = 'claude_budget.decision' ORDER BY audit_id", [OWNER_T]);
+    expect(after.rows).toEqual([{ person_id: OWNER_P }, { person_id: OWNER_P }]);
   });
 });
