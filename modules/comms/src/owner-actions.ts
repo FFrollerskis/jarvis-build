@@ -19,6 +19,19 @@ const KEY = /^[A-Za-z0-9._:-]{8,200}$/;
 export interface OwnerActionDeps {
   readonly gateway: Pick<ToolGateway, "execute" | "get">;
   readonly funnel: OutboundFunnel;
+  /**
+   * Eier-porten (SAMME predikat som kontrollsentrene og Policy Gateway: suveren eier-person i eier-tenant, ingen delegasjon). FAIL-CLOSED: uten den (eller når den kaster) nektes ALT her - FØR policyen kjøres, FØR noe journalføres og FØR gatewayen er
+   * nådd. Gatewayen håndhever i tillegg `owner_only` på hvert verktøy (dyp forsvarslinje); denne porten sørger for at en ikke-eier heller aldri kan skrive en avslagsrad i journalen.
+   */
+  readonly ownerGate: ((identity: IdentityContext) => boolean) | undefined;
+}
+
+function isOwner(deps: OwnerActionDeps, identity: IdentityContext): boolean {
+  try {
+    return deps.ownerGate !== undefined && deps.ownerGate(identity) === true;
+  } catch {
+    return false;
+  }
 }
 
 export type OwnerActionResult =
@@ -32,6 +45,7 @@ function funnelContext(identity: IdentityContext): FunnelContext {
 
 /** Tørrkjøring: hva ville policyen sagt? Ingen sending, ingen journal. Svaret bærer regelutfall og mottakerbevis - aldri meldingsteksten. */
 export async function previewCommsSend(deps: OwnerActionDeps, identity: IdentityContext, parameters: Record<string, JsonValue>): Promise<OwnerActionResult> {
+  if (!isOwner(deps, identity)) return { ok: false, status: "rejected", reason: "owner_required" };
   const parsed = parseSendParams({ request_id: "preview-00000000", ...parameters });
   if (!parsed.ok) return { ok: false, status: "rejected", reason: parsed.code };
   const ev = await deps.funnel.evaluate(funnelContext(identity), parsed.value);
@@ -42,6 +56,7 @@ export async function executeCommsOwnerAction(
   deps: OwnerActionDeps, identity: IdentityContext, input: { action: string; parameters: Record<string, JsonValue>; idempotency_key?: string }
 ): Promise<OwnerActionResult> {
   const { action } = input;
+  if (!isOwner(deps, identity)) return { ok: false, status: "rejected", reason: "owner_required" };
   if (!COMMS_OWNER_ACTIONS.includes(action) || deps.gateway.get("comms", action) === undefined) return { ok: false, status: "rejected", reason: "comms_unknown_action" };
   const outbound = COMMS_OUTBOUND_ACTIONS.includes(action);
   const idempotencyKey = input.idempotency_key;
@@ -51,12 +66,15 @@ export async function executeCommsOwnerAction(
     if (parameters["request_id"] !== undefined && parameters["request_id"] !== idempotencyKey) return { ok: false, status: "rejected", reason: "comms_request_id_mismatch" };
     parameters = { ...parameters, request_id: idempotencyKey };
     // Send: tørrkjør FØRST, slik at eieren får ALLE avslagskodene (ikke bare den første) og avslaget journalføres som bevis. ToolGateway kjører policyen på nytt (preflight + rett før kallet).
+    // UNNTAK: en GJENSPILLING (id-en har allerede et ikke-avslått forsøk) går rett til gatewayen - ledgeren gir det første resultatet tilbake. Å vurdere policyen mot en tilstand det første forsøket selv har endret
+    // (f.eks. ratetelleren) ville avslått en ellers idempotent gjenspilling og skrevet en misvisende avslagsrad.
     if (action === "send") {
       const parsed = parseSendParams(parameters);
       if (!parsed.ok) return { ok: false, status: "rejected", reason: parsed.code };
       const ctx = funnelContext(identity);
-      const ev = await deps.funnel.evaluate(ctx, parsed.value);
-      if (!ev.decision.allowed) {
+      const replay = await deps.funnel.hasPriorAttempt(ctx, parsed.value.request_id);
+      const ev = replay ? undefined : await deps.funnel.evaluate(ctx, parsed.value);
+      if (ev !== undefined && !ev.decision.allowed) {
         const journalId = await deps.funnel.recordDenial(ctx, ev);
         return { ok: false, status: "denied", denial_codes: ev.decision.denial_codes, rules: deps.funnel.summarize(ev)["rules"] as JsonValue, journal_id: journalId };
       }

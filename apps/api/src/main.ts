@@ -128,6 +128,7 @@ import {
   ConversationGraphService, ConversationGraphSyncService, ConversationGraphTransport,
   runConversationGraphSyncForAllTenants
 } from "@jarvis/conversation-graph";
+import { buildCommsRuntime } from "./comms-wiring.ts";
 import { ConversationEngine } from "./conversation.ts";
 import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
@@ -776,6 +777,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     ...(backupStatusSource ? { backupStatus: backupStatusSource } : {}), processStartedAt: () => processStartedAt,
     ...(goldenSuiteRunner ? { goldenSuite: goldenSuiteRunner } : {})
   });
+  // WP-G1 (D-463, UA-7): felles utgående kommunikasjon + signerte innkommende webhooks. DORMANT og NOT VERIFIED: alt AV = ingenting konstrueres (identisk med main). Ugyldig konfigurasjon kaster og stopper oppstarten.
+  const commsRuntime = buildCommsRuntime({
+    env: process.env, pool, graph: conversationGraphService, business: businessService, secrets: readSecretProvider,
+    warn: (event) => console.error(JSON.stringify({ msg: "comms_warn", ...event }))
+  });
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(githubRateLimitController),
@@ -1160,7 +1166,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
           postgres_ops: new PostgresOpsTransport({ config: postgresOpsConfig })
         },
         { cloudflareMutationZones: parseCloudflareMutationZones(process.env["JARVIS_CLOUDFLARE_MUTATION_ZONES"]), postgresOps: postgresOpsConfig, infisicalRotationIds: parseInfisicalRotationIds(process.env["JARVIS_INFISICAL_ROTATION_IDS"]) }
-      )
+      ),
+      // WP-G1 (D-463, UA-7): `comms.*` (felles utgående kommunikasjon - klasse D `outbound_message`, eier-kun, aldri en modellflate) registreres KUN med JARVIS_COMMS_OUTBOUND=on. Flagg AV = tom liste = identisk med main
+      // (ingen verktøy, ingen utvalgstreff, ingen rate-endring). Samme ene register-løkke som resten - ingen parallell registreringsvei.
+      ...commsRuntime.tools
     ]
   })) toolGateway.register(tool);
   // REMEDIERING DEL 1 (JARVIS-002): `allMeshTools()` (hele registeret) er IKKE
@@ -1410,6 +1419,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // `buildSystemPrompt()`/`loadPersonality()`.
     personality: loadPersonalityConfig
   });
+  const commsApiDeps = commsRuntime.apiDeps(toolGateway);
   const deps: ApiDeps = {
     // D-393 (JARVIS-026): `/health` svarer 503 når databasen ikke svarer (tidligere konstant «ok»).
     readiness: makeReadiness({ database: () => pool.query("SELECT 1") }),
@@ -1468,7 +1478,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
             })
           }
         }
-      : {})
+      : {}),
+    // WP-G1 (D-463, UA-7): webhook-rutene finnes KUN med JARVIS_COMMS_WEBHOOKS og eier-rutene /comms/* KUN med JARVIS_COMMS_OUTBOUND=on (uten flaggene er `comms` ikke satt = 404, identisk med main).
+    ...(commsApiDeps ? { comms: commsApiDeps } : {})
   };
   // D-416: lever ferdige bakgrunnsjobber tilbake til samtalen (nøyaktig én gang). Feil logges, stopper aldri prosessen.
   setInterval(

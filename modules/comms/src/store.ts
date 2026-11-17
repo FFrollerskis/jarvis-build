@@ -275,6 +275,15 @@ export class CommsStore {
     });
   }
 
+  /** Finnes det allerede et IKKE-avslått forsøk med denne forespørsels-id-en? (`null` = nei.) Eier-ruten bruker det til å la en gjenspilling gå rett til gatewayens ledger i stedet for å vurdere policyen mot en tilstand det første forsøket selv har endret. */
+  async findAttempt(tenantId: string, space: MemorySpace, requestId: string): Promise<{ log_id: string; status: JournalStatus } | null> {
+    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
+      const res = await client.query(`SELECT log_id, status FROM comms_outbound_log WHERE tenant_id = $1 AND request_id = $2 AND status <> 'denied'`, [tenantId, requestId]);
+      const row = res.rows[0] as { log_id: string; status: JournalStatus } | undefined;
+      return row ?? null;
+    });
+  }
+
   /** Bevisføring for et AVSLÅTT forsøk (policy). Brenner IKKE forespørsels-id-en (delvis unik indeks utelater `denied`). */
   async recordDenied(tenantId: string, space: MemorySpace, entry: JournalEntryInput, actor: Actor, retentionDays: number): Promise<string> {
     return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {

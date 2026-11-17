@@ -237,6 +237,15 @@ export class OutboundFunnel {
     };
   }
 
+  /**
+   * Har denne forespørsels-id-en allerede et (ikke-avslått) forsøk? Da er det en GJENSPILLING: eier-ruten sender den rett til gatewayen (ledgeren gir det første resultatet tilbake; journalens unike nøkkel er andre vern) i stedet for å
+   * vurdere policyen på nytt mot en tilstand det første forsøket selv har endret (ratetelleren ville ellers avslå en ellers idempotent gjenspilling). Ingenting kan sendes to ganger av dette: nytt utsendelsesforsøk går alltid gjennom preflight,
+   * policyen i transporten og `beginAttempt` (som gir `replay`).
+   */
+  async hasPriorAttempt(ctx: FunnelContext, requestId: string): Promise<boolean> {
+    return (await this.deps.store.findAttempt(ctx.tenantId, ctx.space, requestId)) !== null;
+  }
+
   /** Journalfører et avslag (bevis) uten å sende. Brukes av eier-ruten når tørrkjøringen avslår. */
   async recordDenial(ctx: FunnelContext, ev: Evaluation): Promise<string> {
     return this.deps.store.recordDenied(ctx.tenantId, ctx.space, this.entry(ctx, ev), ctx.actor, this.deps.config.log_retention_days);
