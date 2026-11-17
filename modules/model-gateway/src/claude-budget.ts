@@ -23,8 +23,12 @@ import { PRICING_NOK_PER_USD } from "./pricing.ts";
  * POLITIKK (nivå × tier):
  *   on_pace   : alt tillatt
  *   ahead     : BAKGRUNN → billigere modell (eller annen leverandør); ESSENSIELL/VIKTIG uendret
- *   tight     : ESSENSIELL tillatt; VIKTIG tillatt så lenge tempobudsjettet ikke er brukt opp (ellers utsatt - reserven er kun for ESSENSIELL); BAKGRUNN utsatt
+ *   tight     : ESSENSIELL tillatt; VIKTIG tillatt så lenge tempobudsjettet ikke er brukt opp (ellers utsatt - reserven er kun for ESSENSIELL, men KUN med hard stopp PÅ, se under); BAKGRUNN utsatt
  *   exhausted : alt avvist (Anthropic stengt) - med `hard_stop=off` fortsetter ESSENSIELL og VIKTIG (kun varsling), BAKGRUNN utsettes fortsatt
+ *
+ * MONOTONI (review L4): mer forbruk gjør aldri en beslutning mildere, og tiden (kurven stiger) gjør den aldri strengere - låst av en test over 121 forbruksnivåer × hele perioden × alle tier × hard stopp på/av.
+ * Med hard stopp AV stenges ingenting ved 100 %, så reserven har ingenting å beskytte mot VIKTIG: VIKTIG tillates også i reserven (`reserve_open_hard_stop_off`). Uten den regelen ble VIKTIG utsatt ved 85-99 % og
+ * tillatt igjen fra 100 % - en tabell der mer forbruk ga mildere beslutning. BAKGRUNN er uendret (lokal/utsatt hele veien).
  *
  * FX: kreditten er i USD, forbruket bokføres i øre med prislistens kurs (`PRICING_NOK_PER_USD`, ca. 10,5 kr/USD, IKKE sanntid). Budsjettet omregnes med SAMME kurs, så de er sammenlignbare.
  */
@@ -52,6 +56,7 @@ export type PacingReason =
   | "tight_important_allowed"
   | "tight_background_deferred"
   | "reserve_kept_for_essential"
+  | "reserve_open_hard_stop_off"
   | "exhausted_closed"
   | "exhausted_hard_stop_off"
   | "exhausted_hard_stop_off_background_deferred";
@@ -172,7 +177,8 @@ function parseAlertPcts(env: Readonly<Record<string, string | undefined>>): read
   const values = parts.map((p) => (/^\d{1,3}$/.test(p) ? Number(p) : Number.NaN));
   const ok = values.length >= 1 && values.length <= 8 && values.every((v, i) => Number.isInteger(v) && v >= 1 && v <= 100 && (i === 0 || v > (values[i - 1] as number)));
   if (!ok) throw new InvalidClaudeBudgetConfigError("JARVIS_CLAUDE_BUDGET_ALERT_PCTS", `«${raw.trim().slice(0, 30)}» må være 1-8 stigende heltall mellom 1 og 100, skilt med komma`);
-  return values;
+  // L7 (review): oppbruksvarselet (100 %) kan ikke konfigureres bort - mangler 100 i listen, legges det alltid til (etter de 1-8 eieren valgte). Når hard stopp slår til, skal eieren alltid få vite det.
+  return values.includes(100) ? values : [...values, 100];
 }
 
 /**
@@ -460,7 +466,11 @@ function policy(level: PacingLevel, tier: BudgetTier, inReserve: boolean, hardSt
       return tier === "background" ? { action: "downgrade", reason: "ahead_background_downgrade" } : { action: "allow", reason: "ahead_allowed" };
     case "tight":
       if (tier === "essential") return { action: "allow", reason: "tight_essential_allowed" };
-      if (tier === "important") return inReserve ? { action: "defer", reason: "reserve_kept_for_essential" } : { action: "allow", reason: "tight_important_allowed" };
+      if (tier === "important") {
+        if (!inReserve) return { action: "allow", reason: "tight_important_allowed" };
+        // L4: reserven er kun for ESSENSIELL når Anthropic faktisk stenges ved 100 %. Uten hard stopp er det ingen knapphet å beskytte, og en utsettelse her ville åpnet igjen ved 100 % (ikke-monotont).
+        return hardStop ? { action: "defer", reason: "reserve_kept_for_essential" } : { action: "allow", reason: "reserve_open_hard_stop_off" };
+      }
       return { action: "defer", reason: "tight_background_deferred" };
     case "exhausted":
       if (hardStop) return { action: "deny", reason: "exhausted_closed" };

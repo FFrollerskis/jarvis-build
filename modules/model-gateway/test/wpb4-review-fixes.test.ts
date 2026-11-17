@@ -455,3 +455,88 @@ describe("M3: lesingen av forbruket er billig og begrenset (buffer, enkeltflyt, 
 });
 
 const START_OF_PERIOD = Date.UTC(2026, 10, 14, 23, 0, 0); // 15. nov 2026 00:00 Europe/Oslo
+
+describe("L4: beslutningstabellen er MONOTON - 121 forbruksnivåer (0-120 %) × hele perioden × alle tier × hard stopp på/av", () => {
+  const STRICT = { allow: 0, downgrade: 1, defer: 2, deny: 3 } as const;
+  const HOUR = 3_600_000;
+  const START_MS = Date.UTC(2026, 10, 14, 23, 0, 0); // 15. nov 2026 00:00 Oslo
+  const END_MS = Date.UTC(2026, 11, 14, 23, 0, 0); // 15. des 2026 00:00 Oslo
+  const times: number[] = [];
+  for (let t = START_MS; t < END_MS; t += 12 * HOUR) times.push(t);
+  times.push(END_MS - 1);
+
+  async function loadEngine() {
+    const { decide, claudeBudgetConfigFromEnv, BUDGET_TIERS } = await import("../src/index.ts");
+    const cfg = claudeBudgetConfigFromEnv({ JARVIS_CLAUDE_BUDGET_USD: "100" })!;
+    return { decide, tiers: BUDGET_TIERS, B: cfg.budget_ore };
+  }
+
+  for (const hardStop of [true, false]) {
+    it(`hard stopp ${hardStop ? "PÅ" : "AV (eierens override)"}: mer forbruk gjør aldri en beslutning mildere (121 steg per tid og tier), og tid gjør den aldri strengere`, async () => {
+      const { decide, tiers, B } = await loadEngine();
+      let decisions = 0;
+      for (const tier of tiers) {
+        // monoton i FORBRUK: for hvert tidspunkt, 0..120 %
+        for (const now of times) {
+          let previous = -1;
+          for (let pct = 0; pct <= 120; pct++) {
+            const d = decide({ now, budget_ore: B, spent_ore: Math.round((B * pct) / 100), tier, params: { hard_stop: hardStop } });
+            const rank = STRICT[d.action];
+            decisions += 1;
+            if (rank < previous) throw new Error(`ikke monoton i forbruk: tier=${tier} hard_stop=${hardStop} t=${new Date(now).toISOString()} ${pct} % ga ${d.action}/${d.reason} etter strengere`);
+            previous = rank;
+          }
+        }
+        // monoton i TID: for hvert forbruksnivå gjør tiden (kurven stiger) aldri en beslutning strengere
+        for (let pct = 0; pct <= 120; pct++) {
+          let previous = Number.POSITIVE_INFINITY;
+          for (const now of times) {
+            const d = decide({ now, budget_ore: B, spent_ore: Math.round((B * pct) / 100), tier, params: { hard_stop: hardStop } });
+            const rank = STRICT[d.action];
+            if (rank > previous) throw new Error(`strengere over tid: tier=${tier} hard_stop=${hardStop} ${pct} % t=${new Date(now).toISOString()} ga ${d.action}/${d.reason}`);
+            previous = rank;
+          }
+        }
+      }
+      expect(decisions).toBe(3 * times.length * 121);
+    });
+  }
+
+  it("L4-regelen er eksplisitt: med hardstoppen AV er reserven ikke lenger forbeholdt ESSENSIELL (ingenting stenges ved 100 %), så VIKTIG tillates i reserven - og er dermed aldri utsatt for så å bli tillatt igjen; med hardstoppen PÅ er VIKTIG utsatt i reserven og avvist ved 100 %", async () => {
+    const { decide, B } = await loadEngine();
+    const now = START_MS + 15 * 24 * HOUR;
+    const spent = (pct: number) => Math.round((B * pct) / 100);
+    const row = (hardStop: boolean) => [86, 90, 99, 100, 110].map((pct) => { const d = decide({ now, budget_ore: B, spent_ore: spent(pct), tier: "important", params: { hard_stop: hardStop } }); return `${pct}:${d.action}`; });
+    expect(row(true)).toEqual(["86:defer", "90:defer", "99:defer", "100:deny", "110:deny"]);
+    expect(row(false)).toEqual(["86:allow", "90:allow", "99:allow", "100:allow", "110:allow"]);
+    expect(decide({ now, budget_ore: B, spent_ore: spent(90), tier: "important", params: { hard_stop: false } }).reason).toBe("reserve_open_hard_stop_off");
+    // BAKGRUNN og ESSENSIELL er uendret: BAKGRUNN forblir lokal/utsatt uten hard stopp, ESSENSIELL fortsetter
+    expect(decide({ now, budget_ore: B, spent_ore: spent(105), tier: "background", params: { hard_stop: false } }).action).toBe("defer");
+    expect(decide({ now, budget_ore: B, spent_ore: spent(105), tier: "essential", params: { hard_stop: false } }).action).toBe("allow");
+  });
+});
+
+describe("L7: oppbruksvarselet kan ikke konfigureres bort - ALERT_PCTS har alltid 100", () => {
+  it("100 legges til når det mangler (og beholdes når det står der); ugyldige lister kaster som før", async () => {
+    const { claudeBudgetConfigFromEnv, DEFAULT_ALERT_PCTS } = await import("../src/index.ts");
+    const pcts = (raw: string | undefined) => claudeBudgetConfigFromEnv({ JARVIS_CLAUDE_BUDGET_USD: "100", ...(raw !== undefined ? { JARVIS_CLAUDE_BUDGET_ALERT_PCTS: raw } : {}) })!.alert_pcts;
+    expect(pcts(undefined)).toEqual([50, 75, 90, 100]);
+    expect(pcts("")).toEqual([...DEFAULT_ALERT_PCTS]);
+    expect(pcts("50,75")).toEqual([50, 75, 100]);
+    expect(pcts("90")).toEqual([90, 100]);
+    expect(pcts("1")).toEqual([1, 100]);
+    expect(pcts("10, 20,100")).toEqual([10, 20, 100]);
+    expect(pcts("100")).toEqual([100]);
+    expect(pcts("1,2,3,4,5,6,7,8")).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 100]);
+    for (const bad of ["0", "101", "50,50", "75,50", "halv", "1,2,3,4,5,6,7,8,9", "50,"]) {
+      expect(() => claudeBudgetConfigFromEnv({ JARVIS_CLAUDE_BUDGET_USD: "100", JARVIS_CLAUDE_BUDGET_ALERT_PCTS: bad }), bad).toThrow(/ALERT_PCTS/);
+    }
+  });
+
+  it("varslingsnøklene: ved 100 % er `pct:100` alltid forfalt, selv om eieren bare satte lavere terskler", async () => {
+    const { claudeBudgetConfigFromEnv, dueAlertKeys, pacingState } = await import("../src/index.ts");
+    const cfg = claudeBudgetConfigFromEnv({ JARVIS_CLAUDE_BUDGET_USD: "100", JARVIS_CLAUDE_BUDGET_ALERT_PCTS: "50,75" })!;
+    const state = pacingState({ now: Date.UTC(2026, 10, 30, 11, 0, 0), budget_ore: cfg.budget_ore, spent_ore: cfg.budget_ore });
+    expect(dueAlertKeys(state, cfg)).toContain("pct:100");
+  });
+});
