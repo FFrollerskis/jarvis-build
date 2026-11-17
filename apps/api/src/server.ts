@@ -183,7 +183,7 @@ export interface ApiDeps {
    * (`/growth/experiments`). DORMANT: uten verdien svarer rutene 404; `main.ts` setter den KUN når `JARVIS_GROWTH_WRITE_PLATFORMS` er ikke-tom (skriving) eller `JARVIS_GROWTH_EXPERIMENTS=on` (eksperimenter).
    * Utførelsen går UTELUKKENDE via `ToolGateway.execute()` (policy, mål-autorisasjon, step-up, klasse D-kjeden) - rutene omgår ingenting.
    */
-  growthWrites?: { executor: GrowthWriteExecutorDeps; experiments: boolean };
+  growthWrites?: { executor: GrowthWriteExecutorDeps; /** Skriving/lesing/journal (`/growth/mutate|read|writes/list`) finnes KUN når minst én plattform er slått på (`JARVIS_GROWTH_WRITE_PLATFORMS`). */ writes: boolean; experiments: boolean };
 }
 
 export interface HealthStatus {
@@ -2141,7 +2141,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       return json(res, 200, { ok: true, output_trust: result.output_trust, data: result.data ?? null });
     }
 
-    if (deps.growthWrites && req.method === "POST" && url.pathname === "/growth/mutate") {
+    if (deps.growthWrites?.writes && req.method === "POST" && url.pathname === "/growth/mutate") {
       // WP-D3 (UA-4 Growth, D-459): eier-initiert skriving mot en annonse-/analyseplattform (budsjett, bud, status, nøkkelord, kreativer ...). Rekkefølge: grant -> KUN eieren (ingen delegat) -> step-up (enhetssignert økt) ->
       // `executeGrowthWrite` (journal + `ToolGateway.execute()`: mål-autorisasjon, klasse D-kjede, idempotens, readback, varsling). Svaret er journalraden med FØR-/ETTER-tilstand og utfall (SUCCESS/NOOP/UNKNOWN/PARTIAL/FAILED).
       const authed = await authedRequest(req, res, deps, ["provider", "action", "parameters", "idempotency_key", "command_id", "experiment_id", "variant_id"]);
@@ -2168,7 +2168,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       }
     }
 
-    if (deps.growthWrites && req.method === "POST" && url.pathname === "/growth/read") {
+    if (deps.growthWrites?.writes && req.method === "POST" && url.pathname === "/growth/read") {
       // WP-D3: klasse A-lesing av leverandørtilstand (kampanje-/annonsegruppe-/nøkkelord-/eiendomstilstand osv.) for eieren. Kun registrerte klasse A-handlinger i skrive-familiens navnerom kan nås; utdata er UBETRODD data
       // (kampanje-/kreativ-/omtaletekst er leverandør- eller brukerskrevet) og merkes som sådan - aldri instruksjoner.
       const authed = await authedRequest(req, res, deps, ["provider", "action", "parameters"]);
@@ -2184,7 +2184,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       return json(res, 200, { ok: true, output_trust: result.output_trust, data: result.data ?? null });
     }
 
-    if (deps.growthWrites && req.method === "POST" && url.pathname === "/growth/writes/list") {
+    if (deps.growthWrites?.writes && req.method === "POST" && url.pathname === "/growth/writes/list") {
       // WP-D3: skrivejournalen (FØR-/ETTER-tilstand, utfall, proveniens) for eieren. Ren lesing under RLS.
       const authed = await authedRequest(req, res, deps, ["campaign_id", "status", "provider", "limit"]);
       if (!authed) return;

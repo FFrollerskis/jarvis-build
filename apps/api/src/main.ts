@@ -792,7 +792,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       })
     : {};
   const growthExperimentRegistry = growthExperimentsEnabled ? new ExperimentRegistryService(pool) : undefined;
-  console.log(JSON.stringify({ msg: "growth_writes", platforms: [...growthWriteConfig.platforms], targets: [...growthWriteConfig.targets.entries()].map(([p, ids]) => ({ platform: p, count: ids.size })), experiments: growthExperimentsEnabled }));
+  // Review INFO: loggen kommer KUN når et av flaggene er satt (med alt AV er oppstarten identisk med main - ingen ekstra loggline).
+  if (growthWriteEnabled || growthExperimentsEnabled) {
+    console.log(JSON.stringify({ msg: "growth_writes", platforms: [...growthWriteConfig.platforms], targets: [...growthWriteConfig.targets.entries()].map(([p, ids]) => ({ platform: p, count: ids.size })), experiments: growthExperimentsEnabled }));
+  }
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(githubRateLimitController),
@@ -1487,7 +1490,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
               pool, gateway: toolGateway, journal: new GrowthWriteJournal(pool), index: growthOpIndex(growthWriteSpecs(growthWriteConfig)),
               findCampaign: (tenantId, space, channel, externalId) => growthService.findCampaignByExternalId(tenantId, space, channel, externalId)
             },
-            experiments: growthExperimentsEnabled
+            // Review INFO: skrive-/lese-/journalrutene finnes KUN med minst én plattform (kun `JARVIS_GROWTH_EXPERIMENTS=on` gir bare eksperimentruten; de øvrige gir 404).
+            writes: growthWriteEnabled, experiments: growthExperimentsEnabled
           }
         }
       : {}),

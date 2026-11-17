@@ -41,13 +41,45 @@ describe("A: flagg AV - rutene finnes ikke", () => {
   });
 });
 
+describe("A2: kun ett av flaggene (review INFO) - bare de rutene flagget åpner finnes", () => {
+  const probe = async (growthWrites: { executor: never; writes: boolean; experiments: boolean }): Promise<Record<string, number>> => {
+    // rutene bor i incidents-blokken (eier-porten skriver revisjon via incidents-poolen): en tom verdi holder for å nå dem uten grant (401)
+    const server = createApiServer({ incidents: {}, growthWrites } as never);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const out: Record<string, number> = {};
+    try {
+      for (const path of ["/growth/mutate", "/growth/read", "/growth/writes/list", "/growth/experiments"]) {
+        out[path] = (await fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "x", parameters: {} }) })).status;
+      }
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    return out;
+  };
+
+  it("kun `JARVIS_GROWTH_EXPERIMENTS=on`: /growth/mutate, /read og /writes/list gir 404 (ikke 401), mens eksperimentruten finnes", async () => {
+    const status = await probe({ executor: {} as never, writes: false, experiments: true });
+    expect(status["/growth/mutate"]).toBe(404);
+    expect(status["/growth/read"]).toBe(404);
+    expect(status["/growth/writes/list"]).toBe(404);
+    expect(status["/growth/experiments"]).not.toBe(404);
+  });
+
+  it("kun skriving (plattformer satt): skrive-/lese-/journalrutene finnes, eksperimentruten gir 404", async () => {
+    const status = await probe({ executor: {} as never, writes: true, experiments: false });
+    expect(status["/growth/experiments"]).toBe(404);
+    for (const path of ["/growth/mutate", "/growth/read", "/growth/writes/list"]) expect(status[path], path).not.toBe(404);
+  });
+});
+
 describe("B: rekkefølgen i rutene er låst (kildevakt)", () => {
   it("/growth/mutate: deps.growthWrites -> grant -> requireOwner -> stepUpDenial -> executeGrowthWrite; kun egne feilkoder vises", () => {
     const block = routeBlock(SERVER, "/growth/mutate");
     const owner = block.indexOf("requireOwner(");
     const stepUp = block.indexOf("stepUpDenial(");
     const exec = block.indexOf("executeGrowthWrite(");
-    expect(SERVER).toMatch(/if \(deps\.growthWrites && req\.method === "POST" && url\.pathname === "\/growth\/mutate"\)/);
+    expect(SERVER).toMatch(/if \(deps\.growthWrites\?\.writes && req\.method === "POST" && url\.pathname === "\/growth\/mutate"\)/);
     expect(block.indexOf("authedRequest(")).toBeGreaterThan(-1);
     expect(owner).toBeGreaterThan(block.indexOf("authedRequest("));
     expect(stepUp).toBeGreaterThan(owner);
@@ -100,6 +132,12 @@ describe("C: main.ts - flagg-AV-identitet (kildevakt)", () => {
     expect(MAIN).toMatch(/\.\.\.\(growthWriteEnabled \? growthWriteToolDefinitions\(growthWriteConfig, growthWriteTransports\) : \[\]\)/);
     expect(MAIN).toMatch(/\.\.\.\(growthExperimentRegistry \? growthExperimentToolDefinitions\(new GrowthExperimentTransport\(growthExperimentRegistry\)\) : \[\]\)/);
     expect(MAIN).toMatch(/\.\.\.\(growthWriteEnabled \|\| growthExperimentsEnabled\s*\?\s*\{\s*growthWrites:/);
+  });
+
+  it("review INFO: oppstartsloggen `growth_writes` er betinget av et flagg, og `writes`-flagget i ruteavhengigheten følger plattformlisten", () => {
+    expect(MAIN).toMatch(/if \(growthWriteEnabled \|\| growthExperimentsEnabled\) \{\s*console\.log\(JSON\.stringify\(\{ msg: "growth_writes"/);
+    expect(MAIN).toMatch(/writes: growthWriteEnabled, experiments: growthExperimentsEnabled/);
+    expect(MAIN.match(/msg: "growth_writes"/g)).toHaveLength(1);
   });
 
   it("nødbryter-proben leser den ekte finanstjenesten (kun `enabled === true` er «på»), og worker-prosessen registrerer aldri skriveverktøyene", () => {
