@@ -190,19 +190,26 @@ function dormantSection(verdicts: Settled<readonly ReadinessVerdict[]> | "other_
 // ---------------------------------------------------------------------------------------------------------------------
 /** Forslag som venter på eieren vises med høyst så mange rader; resten telles. */
 export const MAX_LISTED_PROPOSALS = 20;
+/** Så mange av de NYESTE åpne forslagene hentes og sjekkes mot eierens registrerte avgjørelser (gjennomgang L5); åpne forslag utover dette telles, men er ikke sjekket. */
+export const MAX_CANDIDATE_PROPOSALS = 200;
+/** Øvre grense for avgjørelsesrader som leses; når den nås er lesingen ufullstendig og regnes som ulesbar (aldri «ingen avgjørelse» på et avkortet grunnlag). */
+const MAX_DECISION_ROWS = 1000;
 
 interface PendingProposal { change_id: string; change_class: string; digest: string; recorded_at: string | null; path_count: number }
 interface LedgerRead { by_decision: Array<{ decision: string; n: number }>; pending: PendingProposal[]; pending_total: number; pending_by_class: Array<{ change_class: string; n: number }> }
 
-/** Endringsregisteret er GLOBALT (ingen tenant, ingen RLS): kun antall, klasser, id-er og tidspunkt leses - aldri `subject`, `paths`, `evidence` eller `branch`. */
+/**
+ * Endringsregisteret er GLOBALT (ingen tenant, ingen RLS): kun antall, klasser, id-er og tidspunkt leses - aldri `subject`, `paths`, `evidence` eller `branch`.
+ * `pending` er de NYESTE åpne forslagene (høyest `seq` først, høyst `MAX_CANDIDATE_PROPOSALS`): «nyest» = sist lagt til i hash-kjeden - uavhengig av klokke og tidsstempel, og sortert på den KVALIFISERTE bigint-kolonnen (H1-fella).
+ */
 async function readLedger(pool: ControlCenterPool, sinceIso: string): Promise<LedgerRead> {
   const byDecision = (await pool.query(
     `SELECT decision, count(*)::int AS n FROM evolution_change_ledger WHERE at >= $1::timestamptz GROUP BY decision ORDER BY decision`, [sinceIso]
   )).rows as Array<{ decision: unknown; n: unknown }>;
   const pending = (await pool.query(
     `SELECT t.change_id, t.change_class, t.entry_hash AS digest, t.at::text AS recorded_at, cardinality(t.paths)::int AS path_count
-       FROM (SELECT DISTINCT ON (change_id) change_id, change_class, decision, entry_hash, at, paths FROM evolution_change_ledger ORDER BY change_id, seq DESC) t
-      WHERE t.decision = 'proposed' ORDER BY t.at ASC, t.change_id ASC LIMIT ${MAX_LISTED_PROPOSALS}`
+       FROM (SELECT DISTINCT ON (change_id) change_id, change_class, decision, entry_hash, at, paths, seq FROM evolution_change_ledger ORDER BY change_id, seq DESC) t
+      WHERE t.decision = 'proposed' ORDER BY t.seq DESC LIMIT ${MAX_CANDIDATE_PROPOSALS}`
   )).rows as Array<{ change_id: unknown; change_class: unknown; digest: unknown; recorded_at: unknown; path_count: unknown }>;
   const byClass = (await pool.query(
     `SELECT t.change_class, count(*)::int AS n
@@ -242,9 +249,11 @@ async function readOwnerDecisions(pool: ControlCenterPool, tenantId: string, pen
        FROM audit_events
       WHERE tenant_id = $1 AND type = $2 AND at >= $3::timestamptz - interval '1 hour' AND payload->>'change_id' = ANY($4::text[])
       ORDER BY payload->>'change_id', payload->>'proposal_digest', audit_id DESC
-      LIMIT 200`,
+      LIMIT ${MAX_DECISION_ROWS}`,
     [tenantId, EVOLUTION_DECISION_AUDIT_TYPE, oldest, ids]
   );
+  // Et avkortet resultat kan skjule en registrert avgjørelse (forslaget ville da stå som «uten avgjørelse»): ulesbart, aldri en stille mangel.
+  if (rows.length >= MAX_DECISION_ROWS) throw new Error("decisions_truncated");
   for (const r of rows) {
     if (typeof r.change_id !== "string" || typeof r.digest !== "string" || !isEvolutionDecision(r.decision)) continue;
     out.set(decisionKey(r.change_id, r.digest), { decision: r.decision, decided_at: toIso(r.decided_at) });
@@ -284,7 +293,7 @@ function decisionActions(p: PendingProposal, itemId: string, current: EvolutionD
 
 function ledgerSection(ev0: Settled<Ev0BootStatus | null> | null, ledger: Settled<LedgerRead>, decisions: DecisionsState | null, nowMs: number, nowIso: string): { section: ControlSection; actions: ControlAction[] } {
   const title = "Endringsregister og forslag";
-  const source = `evolution_change_ledger (EV-0/EV-5, globalt, kun antall/klasser/id-er) · EV-0-oppstartssjekken (konstitusjon + hash-kjede)${decisions !== null ? " · audit_events (type evolution.owner_decision, tenant-RLS: din registrerte avgjørelse)" : ""}`;
+  const source = `evolution_change_ledger (EV-0/EV-5, globalt, kun antall/klasser/id-er) · EV-0-oppstartssjekken (konstitusjon + hash-kjede: resultatet fra siste OPPSTART, ikke målt nå)${decisions !== null ? " · audit_events (type evolution.owner_decision, tenant-RLS: din registrerte avgjørelse)" : ""}`;
   const items: ControlItem[] = [];
   const actions: ControlAction[] = [];
 
@@ -295,12 +304,12 @@ function ledgerSection(ev0: Settled<Ev0BootStatus | null> | null, ledger: Settle
     items.push(controlItem({ id: "constitution", label: "Safety Constitution (EV-0)", status: "UNKNOWN", detail_no: "Oppstartssjekken har ikke et resultat (ikke målt).", facts: { constitution: null } }));
   } else {
     const l = boot.ledger;
-    if (l?.status === "ok") items.push(controlItem({ id: "chain", label: "Hash-kjeden i endringsregisteret", status: "OK", detail_no: `Intakt (${toInt(l.count)} rader), verifisert ved oppstart.`, facts: { chain: "ok", rows: toInt(l.count) } }));
-    else if (l?.status === "broken") items.push(controlItem({ id: "chain", label: "Hash-kjeden i endringsregisteret", status: "FAIL", detail_no: `Hash-kjeden er ØDELAGT${typeof l.broken_seq === "string" ? ` fra rad ${safeCategory(l.broken_seq)}` : ""} - Evolution kan ikke aktiveres, og endringsregisteret kan ikke stoles på.`, facts: { chain: "broken", broken_seq: typeof l.broken_seq === "string" ? safeCategory(l.broken_seq) : null } }));
-    else items.push(controlItem({ id: "chain", label: "Hash-kjeden i endringsregisteret", status: "UNKNOWN", detail_no: "Endringsregisteret var utilgjengelig ved oppstart (ikke målt).", facts: { chain: "unavailable" } }));
+    if (l?.status === "ok") items.push(controlItem({ id: "chain", label: "Hash-kjeden i endringsregisteret", status: "OK", detail_no: `Intakt (${toInt(l.count)} rader) - resultatet av oppstartssjekken, ikke målt nå.`, facts: { chain: "ok", rows: toInt(l.count), basis: "oppstartssjekk" } }));
+    else if (l?.status === "broken") items.push(controlItem({ id: "chain", label: "Hash-kjeden i endringsregisteret", status: "FAIL", detail_no: `Hash-kjeden var ØDELAGT ved oppstartssjekken${typeof l.broken_seq === "string" ? ` (fra rad ${safeCategory(l.broken_seq)})` : ""} - resultatet er fra oppstart, ikke målt nå. Evolution kan ikke aktiveres, og endringsregisteret kan ikke stoles på.`, facts: { chain: "broken", broken_seq: typeof l.broken_seq === "string" ? safeCategory(l.broken_seq) : null, basis: "oppstartssjekk" } }));
+    else items.push(controlItem({ id: "chain", label: "Hash-kjeden i endringsregisteret", status: "UNKNOWN", detail_no: "Endringsregisteret var utilgjengelig ved oppstart (ikke målt).", facts: { chain: "unavailable", basis: "oppstartssjekk" } }));
     const c = boot.constitution;
-    if (c?.status === "verified") items.push(controlItem({ id: "constitution", label: "Safety Constitution (EV-0)", status: "OK", detail_no: `Signert og verifisert (versjon ${toInt(c.version)}).`, facts: { constitution: "verified", version: toInt(c.version) } }));
-    else items.push(controlItem({ id: "constitution", label: "Safety Constitution (EV-0)", status: "WARN", detail_no: `Ikke verifisert (${safeCategory(c?.status === "not_verified" ? c.code : "ukjent_kode")}) - Evolution kan ikke aktiveres før du har signert den.`, facts: { constitution: "not_verified", code: safeCategory(c?.status === "not_verified" ? c.code : "ukjent_kode") } }));
+    if (c?.status === "verified") items.push(controlItem({ id: "constitution", label: "Safety Constitution (EV-0)", status: "OK", detail_no: `Signert og verifisert (versjon ${toInt(c.version)}) - resultatet av oppstartssjekken, ikke målt nå.`, facts: { constitution: "verified", version: toInt(c.version), basis: "oppstartssjekk" } }));
+    else items.push(controlItem({ id: "constitution", label: "Safety Constitution (EV-0)", status: "WARN", detail_no: `Ikke verifisert ved oppstartssjekken (${safeCategory(c?.status === "not_verified" ? c.code : "ukjent_kode")}) - resultatet er fra oppstart, ikke målt nå. Evolution kan ikke aktiveres før du har signert den.`, facts: { constitution: "not_verified", code: safeCategory(c?.status === "not_verified" ? c.code : "ukjent_kode"), basis: "oppstartssjekk" } }));
   }
 
   if (!ledger.ok) {
@@ -313,13 +322,29 @@ function ledgerSection(ev0: Settled<Ev0BootStatus | null> | null, ledger: Settle
       detail_no: total === 0 ? "Ingen rader i endringsregisteret siste 30 døgn (ingen forslag er registrert)." : `${total} rader: ${r.by_decision.map((d) => `${d.n} ${d.decision}`).join(", ")}.`,
       facts: { total, ...Object.fromEntries(r.by_decision.map((d) => [d.decision, d.n])) }
     }));
+
+    // L5 (gjennomgang): HVILKE forslag som listes. `r.pending` er de NYESTE åpne forslagene (nyest først). En registrert avgjørelse lar ledgerraden stå `proposed` (ingen virkning), så avgjorte forslag blir åpne i registeret -
+    // de skal ikke fylle listen og skjule nyere forslag. Forslag UTEN din registrerte avgjørelse listes først (nyest først); avgjorte fyller kun plassene som er igjen (så en avgjørelse kan fortsatt omgjøres), og alt som ikke vises telles.
+    // Er avgjørelsene ikke lest (flagget AV, eller ulesbare), kan forslagene ikke skilles: da listes de nyeste, og ingenting påstås om avgjort/uavgjort.
+    const known = decisions !== null && decisions.read.ok ? decisions.read.value : null;
+    const isDecided = (p: PendingProposal): boolean => known !== null && known.has(decisionKey(p.change_id, p.digest));
+    const undecidedAll = r.pending.filter((p) => !isDecided(p));
+    const decidedAll = r.pending.filter(isDecided);
+    const listedUndecided = undecidedAll.slice(0, MAX_LISTED_PROPOSALS);
+    const listedDecided = decidedAll.slice(0, MAX_LISTED_PROPOSALS - listedUndecided.length);
+    const listed = [...listedUndecided, ...listedDecided];
+    const unchecked = Math.max(0, r.pending_total - r.pending.length); // åpne forslag utover taket på kandidater: ikke hentet, ikke sjekket mot avgjørelsene
+    const hiddenUndecided = undecidedAll.length - listedUndecided.length;
+    const hiddenDecided = decidedAll.length - listedDecided.length;
+    const hiddenTotal = hiddenUndecided + hiddenDecided + unchecked;
+
     items.push(controlItem({
       id: "proposals", label: "Forslag som venter på din avgjørelse", status: r.pending_total > 0 ? "WARN" : "OK",
-      detail_no: r.pending_total === 0 ? "Ingen forslag venter på deg." : `${r.pending_total} forslag venter på deg (${r.pending_by_class.map((c) => `${c.n} ${c.change_class}`).join(", ")}). ${decisions !== null ? "Å se innholdet skjer utenfor kontrollsenteret; her kan du kun REGISTRERE din avgjørelse (ingen virkning)" : "Å se innholdet og avgjøre skjer utenfor kontrollsenteret"} - ingenting utføres av et forslag.`,
-      facts: { waiting: r.pending_total, ...Object.fromEntries(r.pending_by_class.map((c) => [`class_${c.change_class}`, c.n])) }
+      detail_no: r.pending_total === 0 ? "Ingen forslag venter på deg." : `${r.pending_total} forslag venter på deg (${r.pending_by_class.map((c) => `${c.n} ${c.change_class}`).join(", ")}).${known !== null ? ` ${undecidedAll.length}${unchecked > 0 ? " eller flere" : ""} uten din registrerte avgjørelse, ${decidedAll.length} med (de står fortsatt åpne i endringsregisteret).` : ""} ${decisions !== null ? "Å se innholdet skjer utenfor kontrollsenteret; her kan du kun REGISTRERE din avgjørelse (ingen virkning)" : "Å se innholdet og avgjøre skjer utenfor kontrollsenteret"} - ingenting utføres av et forslag.`,
+      facts: { waiting: r.pending_total, ...(known !== null ? { undecided: undecidedAll.length, decided: decidedAll.length, unchecked } : {}), ...Object.fromEntries(r.pending_by_class.map((c) => [`class_${c.change_class}`, c.n])) }
     }));
     const usedIds = new Set<string>();
-    r.pending.forEach((p, i) => {
+    listed.forEach((p, i) => {
       // Id-er i en seksjon må være unike (en kollisjon ville felt hele senteret): en id som ikke er trygg å vise får en reserveverdi, og en som likevel kolliderer får en løpenummer-hale.
       let id = safeRef(p.change_id, `forslag-ukjent-${i + 1}`);
       if (usedIds.has(id)) id = `${id}-${i + 1}`;
@@ -351,8 +376,18 @@ function ledgerSection(ev0: Settled<Ev0BootStatus | null> | null, ledger: Settle
       // Knapper kun for forslag med trygg, UNIK id (id === change_id: ingen reserveverdi/løpenummer) - ellers kan raden ikke kobles entydig til en avgjørelse.
       if (decisions !== null && id === p.change_id) actions.push(...decisionActions(p, `proposal:${id}`, current, decisions));
     });
-    if (r.pending_total > r.pending.length) {
-      items.push(controlItem({ id: "proposals_more", label: "Flere forslag venter", status: "WARN", detail_no: `${r.pending_total - r.pending.length} forslag til venter (de eldste ${r.pending.length} vises).`, facts: { not_listed: r.pending_total - r.pending.length } }));
+    if (hiddenTotal > 0) {
+      const detail = decisions === null
+        ? `${hiddenTotal} forslag til venter (de nyeste ${listed.length} vises).`
+        : known === null
+          ? `${hiddenTotal} forslag vises ikke (de nyeste ${listed.length} vises). Din registrerte avgjørelse kunne ikke leses, så forslagene kan ikke skilles fra hverandre (ikke målt).`
+          : `${hiddenTotal} forslag vises ikke: ${hiddenUndecided} uten din registrerte avgjørelse, ${hiddenDecided} med din registrerte avgjørelse${unchecked > 0 ? `, ${unchecked} eldre som ikke er sjekket mot avgjørelsene dine (over taket på ${MAX_CANDIDATE_PROPOSALS} nyeste)` : ""}. Forslag uten din avgjørelse vises først, de nyeste først.`;
+      items.push(controlItem({
+        id: "proposals_more", label: "Flere forslag venter", status: "WARN", detail_no: detail,
+        facts: decisions === null
+          ? { not_listed: hiddenTotal }
+          : { not_listed: hiddenTotal, undecided_not_listed: known === null ? null : hiddenUndecided, decided_not_listed: known === null ? null : hiddenDecided, unchecked }
+      }));
     }
   }
   items.sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status]);

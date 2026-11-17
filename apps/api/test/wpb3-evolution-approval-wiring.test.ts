@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -23,19 +23,28 @@ const CENTER = strip(read("apps/api/src/control-center/evolution.ts"));
 const SERVER = strip(read("apps/api/src/server.ts"));
 const TRANSPORT = strip(read("modules/executive/src/transport.ts"));
 
+/** Mapper kildevaktene skanner (gjennomgang, INFO): ALLE kodemapper, ikke bare apps/ og modules/ - en leser i en driftsscript (ops/), infra/ eller packages/ skal også felle vakten. Mapper som ikke finnes hoppes over. */
+const SCAN_ROOTS = ["apps", "modules", "ops", "packages", "infra"] as const;
+/** Kun «ikke leselig»-feil hoppes over (en mappe eieren ikke har tilgang til, f.eks. root-eid etter en annen kjøring); alt annet kastes - vakten skal aldri bli stille tom. */
 function walk(dir: string, out: string[] = []): string[] {
-  for (const name of readdirSync(dir)) {
+  let names: string[];
+  try { names = readdirSync(dir); } catch (err) {
+    if (["EACCES", "EPERM", "ENOENT"].includes((err as NodeJS.ErrnoException).code ?? "")) return out;
+    throw err;
+  }
+  for (const name of names) {
     if (name === "node_modules" || name === "dist" || name.startsWith(".")) continue;
     const full = join(dir, name);
-    if (statSync(full).isDirectory()) walk(full, out);
-    else if (/\.(ts|mjs|js|html)$/.test(name)) out.push(full);
+    let isDir: boolean;
+    try { isDir = statSync(full).isDirectory(); } catch { continue; }
+    if (isDir) walk(full, out);
+    else if (/\.(ts|mjs|cjs|js|html|sh|yml|yaml|sql)$/.test(name)) out.push(full);
   }
   return out;
 }
-const SOURCE_FILES = [
-  ...walk(resolve(REPO_ROOT, "apps")).filter((f) => !/[\\/](test|tests)[\\/]/.test(f)),
-  ...walk(resolve(REPO_ROOT, "modules")).filter((f) => !/[\\/](test|tests)[\\/]/.test(f))
-];
+const isTestFile = (f: string): boolean => /[\\/](test|tests)[\\/]/.test(f) || /\.(test|spec)\.(ts|mjs|cjs|js)$/.test(f);
+const SOURCE_FILES = SCAN_ROOTS.filter((root) => existsSync(resolve(REPO_ROOT, root))).flatMap((root) => walk(resolve(REPO_ROOT, root)).filter((f) => !isTestFile(f)));
+const rel = (f: string): string => relative(REPO_ROOT, f).replace(/\\/g, "/");
 
 describe("kildevakt: main.ts kobler avgjørelsen kun med eget flagg + koblet senter", () => {
   it("`evolutionApprovalOn` er flagget OG at senteret er koblet inn - definert ÉN gang og brukt til både skriveren og verktøyvalget", () => {
@@ -154,7 +163,7 @@ describe("kildevakt: INGEN kode leser en registrert avgjørelse som tillatelse",
   it("kun kontrakten (definisjon), skriveren og Evolusjon-senteret (visning) refererer revisjonstypen - ingen annen kode kan handle på en avgjørelse", () => {
     const referencing = SOURCE_FILES
       .filter((f) => /EVOLUTION_DECISION_AUDIT_TYPE|evolution\.owner_decision/.test(strip(readFileSync(f, "utf8"))))
-      .map((f) => relative(REPO_ROOT, f).replace(/\\/g, "/"))
+      .map(rel)
       .sort();
     // `transport.ts` nevner typen KUN i rollback-teksten til verktøydefinisjonen (en beskrivelse for mennesker: «alle avgjørelser står i revisjonssporet ...») - aldri som kode som leser den (sjekkes under).
     expect(referencing).toEqual(["apps/api/src/control-center/evolution.ts", "apps/api/src/evolution-decisions.ts", "modules/executive/src/evolution/decision.ts", "modules/executive/src/transport.ts"]);
@@ -167,9 +176,33 @@ describe("kildevakt: INGEN kode leser en registrert avgjørelse som tillatelse",
   it("det finnes ingen kodevei som skriver `approved` til endringsregisteret fra apps/api eller executive (ingen `ChangeLedger.append` utenfor selvmodifikasjonsmodulen og EV-0-oppstart)", () => {
     const appenders = SOURCE_FILES
       .filter((f) => /\.append\(/.test(strip(readFileSync(f, "utf8"))) && /ChangeLedger/.test(readFileSync(f, "utf8")))
-      .map((f) => relative(REPO_ROOT, f).replace(/\\/g, "/"))
+      .map(rel)
       .filter((f) => f.startsWith("apps/api/") || f.startsWith("modules/executive/"));
     expect(appenders).toEqual([]);
+  });
+
+  it("dekningen er BRED (gjennomgang, INFO): alle kodemappene skannes - apps, modules, ops, packages og infra - og skanningen er ikke tom", () => {
+    for (const root of SCAN_ROOTS) expect(SOURCE_FILES.some((f) => rel(f).startsWith(`${root}/`)), root).toBe(true);
+    expect(SOURCE_FILES.length).toBeGreaterThan(500);
+    expect(SOURCE_FILES.some((f) => isTestFile(f))).toBe(false);
+  });
+
+  it("revisjonsradens NØKLER leses kun av skriveren og senteret: `payload->>'change_id'` og `payload->>'proposal_digest'` finnes bare der, og `proposal_digest` ellers kun i kontrakten og verktøyskjemaet - en leser som unngår det bokstavelige typenavnet blir likevel fanget", () => {
+    const filesWith = (re: RegExp): string[] => SOURCE_FILES.filter((f) => re.test(strip(readFileSync(f, "utf8")))).map(rel).sort();
+    const readers = ["apps/api/src/control-center/evolution.ts", "apps/api/src/evolution-decisions.ts"];
+    expect(filesWith(/payload->>'change_id'/)).toEqual(readers);
+    expect(filesWith(/payload->>'proposal_digest'/)).toEqual(readers);
+    expect(filesWith(/\bproposal_digest\b/)).toEqual([...readers, "modules/executive/src/evolution/decision.ts", "modules/executive/src/transport.ts"].sort());
+  });
+
+  it("revisjonstypen bygges aldri ved strengsammensetting (ingen skjult leser som setter navnet sammen først)", () => {
+    const dynamic = /["'`]evolution\.["'`]\s*\+|\+\s*["'`]\.?owner_decision["'`]|\$\{[^}]*\}\.owner_decision|["'`]owner_["'`]\s*\+|["'`]\.owner["'`]\s*\+/;
+    expect(SOURCE_FILES.filter((f) => dynamic.test(strip(readFileSync(f, "utf8")))).map(rel)).toEqual([]);
+    // vakten biter: de vanlige omgåelsene ville blitt fanget
+    const template = "const t = `" + "${prefix}" + ".owner_decision`;"; // bygget slik at testkilden selv ikke inneholder et malbokstav-treff
+    for (const evasion of ['const t = "evolution." + "owner_decision";', template, 'const k = "owner_" + "decision";', 'x + "owner_decision"']) {
+      expect(dynamic.test(evasion), evasion).toBe(true);
+    }
   });
 });
 

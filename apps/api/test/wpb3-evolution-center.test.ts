@@ -8,7 +8,7 @@ import {
 } from "@jarvis/executive";
 import { EXTERNAL_GATES, evaluateAllReadiness, type ReadinessFacts, type ReadinessVerdict } from "@jarvis/self-modification";
 import type { Ev0BootStatus } from "../src/ev0-boot.ts";
-import { createEvolutionCenter, MAX_LISTED_PROPOSALS, type EvolutionCenterDeps } from "../src/control-center/evolution.ts";
+import { createEvolutionCenter, MAX_CANDIDATE_PROPOSALS, MAX_LISTED_PROPOSALS, type EvolutionCenterDeps } from "../src/control-center/evolution.ts";
 import { CONTROL_CENTER_FLAGS, createControlCenterRegistry, registerControlCenters } from "../src/control-center/register.ts";
 import { controlCentersWithTools } from "../src/control-center/shared.ts";
 import type { RunRateReport } from "../src/run-rate.ts";
@@ -432,13 +432,17 @@ describe("4. endringsregister og forslag: kun antall, klasser, id-er og alder - 
     expect(report.sections.every((s) => s.measured)).toBe(true);
   });
 
-  it(`opptil ${MAX_LISTED_PROPOSALS} forslag listes (de eldste), resten telles og sies fra om`, async () => {
+  it(`opptil ${MAX_LISTED_PROPOSALS} forslag listes (de NYESTE først - databasen svarer nyest først), resten telles og sies fra om (L5)`, async () => {
     const pending = Array.from({ length: MAX_LISTED_PROPOSALS }, (_, i) => proposal(i + 1));
     const { report, built } = await reportOf({}, { pending, by_class: [{ change_class: "E2", n: MAX_LISTED_PROPOSALS + 5 }] });
     const ledger = sectionOf(report, "ledger");
     expect(ledger.items.filter((i) => i.id.startsWith("proposal:forslag-"))).toHaveLength(MAX_LISTED_PROPOSALS);
     expect(itemOf(ledger, "proposals_more").facts).toEqual({ not_listed: 5 });
-    expect(built.pool.queries.some((q) => new RegExp(`LIMIT ${MAX_LISTED_PROPOSALS}\\b`).test(q.sql))).toBe(true);
+    // SQL: nyest først på den kvalifiserte bigint-kolonnen, med et tak på kandidater (ikke de 20 eldste)
+    expect(built.pool.queries.some((q) => new RegExp(`ORDER BY t\\.seq DESC LIMIT ${MAX_CANDIDATE_PROPOSALS}\\b`).test(q.sql))).toBe(true);
+    expect(built.pool.queries.some((q) => /ORDER BY t\.at ASC/.test(q.sql))).toBe(false);
+    // rekkefølgen er databasens (nyest først): første forslag i fixturen er første rad
+    expect(ledger.items.filter((i) => i.id.startsWith("proposal:forslag-")).map((i) => i.id)[0]).toBe("proposal:forslag-1");
   });
 
   it("endringsregisteret er GLOBALT og leses uten tenant; kun SELECT (ingen skriving)", async () => {

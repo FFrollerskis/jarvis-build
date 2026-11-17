@@ -3,7 +3,7 @@ import type { IdentityContext } from "@jarvis/contracts";
 import { EVOLUTION_DECISION_AUDIT_TYPE, type ControlAction, type ControlCenterReport, type ControlItem, type ControlRiskClass, type ControlSection, type EvolutionReport, type EvolutionSection } from "@jarvis/executive";
 import { evaluateAllReadiness, type ReadinessFacts } from "@jarvis/self-modification";
 import type { Ev0BootStatus } from "../src/ev0-boot.ts";
-import { createEvolutionCenter, type EvolutionCenterDeps } from "../src/control-center/evolution.ts";
+import { createEvolutionCenter, MAX_CANDIDATE_PROPOSALS, MAX_LISTED_PROPOSALS, type EvolutionCenterDeps } from "../src/control-center/evolution.ts";
 import { CONTROL_CENTER_FLAGS, CONTROL_FEATURE_FLAGS, createControlCenterRegistry, registerControlCenters } from "../src/control-center/register.ts";
 import { ScriptedPool, type ScriptedRule } from "./support/scripted-pool.ts";
 
@@ -313,5 +313,111 @@ describe("7. produksjonsfabrikken (`registerControlCenters`) kobler det kun med 
       const { registry } = wiringFor({ [CONTROL_CENTER_FLAGS.evolution]: "on", [CONTROL_FEATURE_FLAGS.evolutionApproval]: value }, { get: () => ({ capability_class: "C" }) });
       expect((await registry.report("evolution", owner2) as ControlCenterReport).actions, JSON.stringify(value)).toEqual([]);
     }
+  });
+});
+
+describe("8. L5 (gjennomgang): senteret lister de NYESTE forslagene UTEN din avgjørelse - avgjorte (som står åpne i registeret) tar aldri plassen deres, og skjulte telles", () => {
+  /** Åpne forslag NYEST FØRST (slik databasen svarer: `ORDER BY t.seq DESC`): `p01` er det nyeste. */
+  const open = (n: number): Pending[] => Array.from({ length: n }, (_, i) => proposal(`p${String(i + 1).padStart(2, "0")}`, "E1", i.toString(16).padStart(2, "0").repeat(32), new Date(NOW.getTime() - (i + 1) * 3_600_000).toISOString()));
+  const decided = (list: Pending[], decision = "reject"): DecisionRow[] => list.map((p) => ({ change_id: p.change_id, digest: p.digest, decision, decided_at: "2026-11-14T08:00:00.000Z" }));
+  const ledgerOf = (r: ControlCenterReport): ControlSection => sectionOf(r, "ledger");
+  const listedIds = (r: ControlCenterReport): string[] => ledgerOf(r).items.filter((i) => i.id.startsWith("proposal:p")).map((i) => i.id.slice("proposal:".length));
+  const range = (from: number, to: number): string[] => Array.from({ length: to - from + 1 }, (_, i) => `p${String(from + i).padStart(2, "0")}`);
+
+  it("30 åpne, de 12 NYESTE er avgjort: de 18 uten avgjørelse listes først (nyest først), avgjorte fyller kun de 2 plassene som er igjen, og de 10 skjulte telles", async () => {
+    const pending = open(30);
+    const { report } = await reportOf(pending, decided(pending.slice(0, 12)), approvalOf());
+    expect(listedIds(report)).toEqual([...range(13, 30), "p01", "p02"]);
+    expect(listedIds(report)).toHaveLength(MAX_LISTED_PROPOSALS);
+    const more = itemOf(ledgerOf(report), "proposals_more");
+    expect(more.facts).toEqual({ not_listed: 10, undecided_not_listed: 0, decided_not_listed: 10, unchecked: 0 });
+    expect(more.detail_no).toContain("10 forslag vises ikke");
+    expect(more.detail_no).toContain("Forslag uten din avgjørelse vises først, de nyeste først");
+    expect(itemOf(ledgerOf(report), "proposals")).toMatchObject({ status: "WARN", facts: { waiting: 30, undecided: 18, decided: 12, unchecked: 0 } });
+    expect(itemOf(ledgerOf(report), "proposals").detail_no).toContain("18 uten din registrerte avgjørelse, 12 med");
+    expect(itemOf(ledgerOf(report), "proposal:p01").facts).toMatchObject({ owner_decision: "reject" });
+    expect(itemOf(ledgerOf(report), "proposal:p13").facts).toMatchObject({ owner_decision: "none" });
+  });
+
+  it("40 åpne, de 5 nyeste avgjort: alle 20 plassene går til de NYESTE 20 uten avgjørelse (p06-p25), ingen avgjort rad listes, og både skjulte uten (15) og skjulte med (5) telles", async () => {
+    const pending = open(40);
+    const { report } = await reportOf(pending, decided(pending.slice(0, 5)), approvalOf());
+    expect(listedIds(report)).toEqual(range(6, 25));
+    for (const hidden of range(1, 5)) expect(listedIds(report), hidden).not.toContain(hidden);
+    expect(itemOf(ledgerOf(report), "proposals_more").facts).toEqual({ not_listed: 20, undecided_not_listed: 15, decided_not_listed: 5, unchecked: 0 });
+    // knappene følger de LISTEDE radene (aldri en skjult), og det nyeste uavgjorte forslaget har sine tre knapper
+    expect(new Set(report.actions.map((a) => a.item_id))).toEqual(new Set(range(6, 25).map((id) => `proposal:${id}`)));
+    expect(report.actions.filter((a) => a.item_id === "proposal:p06")).toHaveLength(3);
+  });
+
+  it("GAMMEL FEIL: de 20 ELDSTE (p21-p40) ville ha blitt listet og de nyeste skjult - nå er det omvendt (p01 er listet, p40 er ikke)", async () => {
+    const pending = open(40);
+    const { report } = await reportOf(pending, [], approvalOf());
+    expect(listedIds(report)).toEqual(range(1, 20));
+    expect(listedIds(report)).not.toContain("p40");
+    expect(itemOf(ledgerOf(report), "proposals_more").facts).toEqual({ not_listed: 20, undecided_not_listed: 20, decided_not_listed: 0, unchecked: 0 });
+  });
+
+  it("alt avgjort og få forslag: avgjorte listes (så en avgjørelse kan omgjøres), ingen «flere forslag»-rad", async () => {
+    const pending = open(5);
+    const { report } = await reportOf(pending, decided(pending), approvalOf());
+    expect(listedIds(report)).toEqual(range(1, 5));
+    expect(ledgerOf(report).items.find((i) => i.id === "proposals_more")).toBeUndefined();
+    expect(itemOf(ledgerOf(report), "proposals").facts).toMatchObject({ waiting: 5, undecided: 0, decided: 5 });
+  });
+
+  it("en avgjørelse om en GAMMEL versjon (annen digest) teller ikke: forslaget er uavgjort og listes blant de uavgjorte", async () => {
+    const pending = open(3);
+    const oldVersion: DecisionRow[] = [{ change_id: "p01", digest: HEX("f"), decision: "approve", decided_at: "2026-11-01T08:00:00.000Z" }];
+    const { report } = await reportOf(pending, oldVersion, approvalOf());
+    expect(itemOf(ledgerOf(report), "proposal:p01").facts).toMatchObject({ owner_decision: "none" });
+    expect(itemOf(ledgerOf(report), "proposals").facts).toMatchObject({ undecided: 3, decided: 0 });
+  });
+
+  it(`over taket (${MAX_CANDIDATE_PROPOSALS}) på kandidater: åpne forslag utover det telles som «ikke sjekket» - aldri påstått avgjort eller uavgjort`, async () => {
+    const pending = open(MAX_CANDIDATE_PROPOSALS);
+    const pool = new ScriptedPool([
+      { match: /FROM audit_events/, rows: [] }, { match: /date_trunc\('month', now\(\)\)/, rows: [{ spent: 1_000 }] },
+      { match: /GROUP BY t\.change_class/, rows: [{ change_class: "E1", n: MAX_CANDIDATE_PROPOSALS + 50 }] }, { match: /DISTINCT ON \(change_id\)/, rows: pending }, { match: /GROUP BY decision/, rows: [] }
+    ]);
+    const registry = createControlCenterRegistry({ authority, now: () => NOW });
+    registry.register(createEvolutionCenter({ pool: pool.asPool(), env: {}, evolutionReport, readiness: async () => evaluateAllReadiness(FACTS), ev0Status: () => BOOT, reportTenantId: "tenant-owner", approval: approvalOf() }));
+    const report = (await registry.report("evolution", owner)) as ControlCenterReport;
+    const more = itemOf(ledgerOf(report), "proposals_more");
+    expect(more.facts).toEqual({ not_listed: MAX_CANDIDATE_PROPOSALS - MAX_LISTED_PROPOSALS + 50, undecided_not_listed: MAX_CANDIDATE_PROPOSALS - MAX_LISTED_PROPOSALS, decided_not_listed: 0, unchecked: 50 });
+    expect(more.detail_no).toContain("50 eldre som ikke er sjekket mot avgjørelsene dine");
+    expect(itemOf(ledgerOf(report), "proposals").detail_no).toContain(`${MAX_CANDIDATE_PROPOSALS} eller flere uten din registrerte avgjørelse`);
+  });
+
+  it("avgjørelsene kan ikke leses (feil) ELLER lesingen er avkortet (taket nådd): ukjent, de nyeste listes uten å påstå noe om avgjort/uavgjort, og tellingen sier at skillet ikke er målt", async () => {
+    const pending = open(30);
+    const truncated: DecisionRow[] = Array.from({ length: 1000 }, (_, i) => ({ change_id: `andre-${i}`, digest: HEX("e"), decision: "reject", decided_at: "2026-11-14T08:00:00.000Z" }));
+    for (const source of [new Error("passord=hemmelig-passord"), truncated]) {
+      const { report } = await reportOf(pending, source, approvalOf());
+      expect(listedIds(report)).toEqual(range(1, 20));
+      for (const id of listedIds(report)) expect(itemOf(ledgerOf(report), `proposal:${id}`).facts).toMatchObject({ owner_decision: null });
+      expect(itemOf(ledgerOf(report), "proposal:p01").detail_no).toContain("kunne ikke leses (ikke målt)");
+      const more = itemOf(ledgerOf(report), "proposals_more");
+      expect(more.facts).toEqual({ not_listed: 10, undecided_not_listed: null, decided_not_listed: null, unchecked: 0 });
+      expect(more.detail_no).toContain("kunne ikke leses");
+      expect(itemOf(ledgerOf(report), "proposals").facts).not.toHaveProperty("undecided");
+      expect(JSON.stringify(report)).not.toContain("hemmelig-passord");
+    }
+  });
+
+  it("uten `approval` (flagget AV, som EV-22): de NYESTE 20 listes, ingen lesing av revisjonssporet, og «flere forslag»-raden har samme enkle faktaform som før", async () => {
+    const pending = open(25);
+    const { report, pool } = await reportOf(pending, [], undefined);
+    expect(listedIds(report)).toEqual(range(1, 20));
+    expect(itemOf(ledgerOf(report), "proposals_more").facts).toEqual({ not_listed: 5 });
+    expect(auditQueries(pool)).toEqual([]);
+  });
+
+  it("SQL: ledgeren leses nyest først på den KVALIFISERTE bigint-kolonnen (`ORDER BY t.seq DESC`), med et tak på kandidater - og avgjørelsene med et eget tak", async () => {
+    const { pool } = await reportOf(open(3), [], approvalOf());
+    const ledgerSql = pool.queries.map((q) => q.sql).find((sql) => /DISTINCT ON \(change_id\)/.test(sql) && /LIMIT/.test(sql)) ?? "";
+    expect(ledgerSql).toMatch(new RegExp(`ORDER BY t\\.seq DESC LIMIT ${MAX_CANDIDATE_PROPOSALS}\\b`));
+    expect(ledgerSql).not.toMatch(/ORDER BY t\.at/);
+    expect(auditQueries(pool)[0]?.sql).toMatch(/LIMIT 1000\b/);
   });
 });

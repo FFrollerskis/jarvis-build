@@ -14,7 +14,7 @@ import { seedTenants, startH0Db, type H0Db } from "./support/h0-db.ts";
 
 /**
  * WP-B3 (D-475, EV-22): Evolusjon-senteret mot EKTE Postgres som app-rollen (`jarvis_app`, RLS) med de EKTE kildene (evolusjonsrapporten, beredskapen, BudgetGuard, RunRateService, endringsregisteret):
- *  - SQL-en mot det GLOBALE endringsregisteret er riktig (siste beslutning per forslag; omforeslått etter avvisning; klassetall; de eldste først; digest = hash-raden) og leser aldri tekstkolonnene;
+ *  - SQL-en mot det GLOBALE endringsregisteret er riktig (siste beslutning per forslag; omforeslått etter avvisning; klassetall; de nyeste først (L5); digest = hash-raden) og leser aldri tekstkolonnene;
  *  - kostnad er TENANT-skopet (RLS): A sine tall er databasens egne tall for A, aldri B sine - også når senteret bygges direkte for B;
  *  - `restrictFinance`: ingen kostnads-SQL kjøres og ingen øre-tall finnes i rapporten;
  *  - senteret skriver ingenting (radtall i alle relevante tabeller uendret);
@@ -106,6 +106,8 @@ beforeAll(async () => {
   const ledger = new ChangeLedger(admin);
   const row = (change_id: string, change_class: "E0" | "E1" | "E2" | "E3", decision: "proposed" | "approved" | "rejected" | "blocked") =>
     ledger.append({ change_id, change_class, decision, constitution_digest: DIGEST, subject: SECRET_SUBJECT, paths: [SECRET_PATH, "docs/x.md"], branch: "hemmelig-gren", head_sha: null, evidence: { note: SECRET_EVIDENCE }, recorded_by: "hemmelig-forslagsstiller" });
+  // `many-*` legges inn FØRST (de er de ELDSTE åpne forslagene); `c*` kommer etter og er dermed de nyeste (senteret lister nyest først, L5).
+  for (let i = 1; i <= 22; i += 1) await row(`many-${String(i).padStart(2, "0")}`, "E1", "proposed");
   await row("c1", "E1", "proposed");
   await row("c2", "E2", "proposed");
   await row("c2", "E2", "rejected");
@@ -119,12 +121,11 @@ beforeAll(async () => {
   await row("c7", "E2", "rejected");
   await row("c7", "E2", "proposed"); // omforeslått etter avvisning: venter igjen, med den NYE radens digest
   await row("c8 med mellomrom <b>og tegn</b>", "E1", "proposed"); // ubetrodd id
-  for (let i = 1; i <= 22; i += 1) await row(`many-${String(i).padStart(2, "0")}`, "E1", "proposed");
 }, 240_000);
 
 afterAll(async () => { await db?.stop(); }, 120_000);
 
-describe("endringsregisteret: siste beslutning per forslag, klassetall, de eldste først - og aldri tekstkolonnene", () => {
+describe("endringsregisteret: siste beslutning per forslag, klassetall, de nyeste først - og aldri tekstkolonnene", () => {
   const built = async (pool: pg.Pool = db.appPool, identity: IdentityContext = A): Promise<ControlCenterParts> => {
     const center = createEvolutionCenter({
       pool, env: {}, evolutionReport: createEvolutionReportProvider(sourceDeps(pool, TENANT_A)), readiness: createEvolutionReadinessProvider(sourceDeps(pool, TENANT_A)),
@@ -143,13 +144,15 @@ describe("endringsregisteret: siste beslutning per forslag, klassetall, de eldst
     expect(listed).toContain("proposal:c7");
   });
 
-  it(`de ${MAX_LISTED_PROPOSALS} ELDSTE listes (etter siste rad per forslag), resten telles: 6 vises ikke, og \`many-17\`…\`many-22\` mangler`, async () => {
+  it(`de ${MAX_LISTED_PROPOSALS} NYESTE listes nyest først (høyest ledger-seq, etter siste rad per forslag), resten telles: 6 vises ikke, og \`many-01\`…\`many-06\` (de eldste) mangler (L5)`, async () => {
     const ledger = sectionOf(await built(), "ledger");
     const listed = ledger.items.filter((i) => i.id.startsWith("proposal:")).map((i) => i.id);
     expect(listed).toHaveLength(MAX_LISTED_PROPOSALS);
     expect(itemOf(ledger, "proposals_more").facts).toEqual({ not_listed: 6 });
-    expect(listed).toContain("proposal:many-16");
-    for (const late of ["many-17", "many-22"]) expect(listed, late).not.toContain(`proposal:${late}`);
+    // nyest først: c8 (ubetrodd id -> reserve-id), c7 (omforeslått sist), c6, c1, så many-22 ... many-07
+    expect(listed.slice(0, 4)).toEqual(["proposal:forslag-ukjent-1", "proposal:c7", "proposal:c6", "proposal:c1"]);
+    expect(listed.slice(4)).toEqual(Array.from({ length: 16 }, (_, i) => `proposal:many-${String(22 - i).padStart(2, "0")}`));
+    for (const old of ["many-01", "many-06"]) expect(listed, old).not.toContain(`proposal:${old}`);
   });
 
   it("digesten som vises er de 12 første tegnene av SISTE rads hash (omforeslåtte c7 har den nye radens hash, ikke den første)", async () => {
