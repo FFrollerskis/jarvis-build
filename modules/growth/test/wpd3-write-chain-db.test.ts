@@ -1082,6 +1082,15 @@ describe("S: review L5/L7 - databasevakten på kommandoer (migrasjon 114) - hver
     await expect(adminPool.query(`UPDATE marketing_campaign_execution_commands SET status = 'pending_execution' WHERE command_id = 'cmd-d3-s-uniq1'`)).rejects.toThrow(/command_executed_is_terminal|executed_has_proof/);
     await expect(adminPool.query(`UPDATE marketing_campaign_execution_commands SET proposed_budget_ore = 1 WHERE command_id = 'cmd-d3-s-uniq1'`)).rejects.toThrow(/command_executed_is_terminal/);
   });
+
+  it("review N4d: `executed` krever også `executed_at` (CHECK `executed_has_proof`): en `applied` journalrad for riktig kommando og kampanje er ikke nok uten tidsstempel - men med tidsstempel godtas den", async () => {
+    await seedCommand("cmd-d3-s-at", 50_000, 40_000);
+    const write = await journalRow("applied", linkedCampaignId, "cmd-d3-s-at");
+    await expect(adminPool.query(`UPDATE marketing_campaign_execution_commands SET status = 'executed', execution_write_id = $2 WHERE command_id = $1`, ["cmd-d3-s-at", write])).rejects.toThrow(/marketing_campaign_execution_commands_executed_has_proof/);
+    expect((await commandStatus("cmd-d3-s-at")).status).toBe("pending_execution");
+    await markExecuted("cmd-d3-s-at", write);
+    expect(await commandStatus("cmd-d3-s-at")).toEqual({ status: "executed", execution_write_id: write });
+  });
 });
 
 describe("T: review L7 - hemmeligheter i leverandørtekst redigeres i journalen", () => {
@@ -1252,6 +1261,61 @@ describe("V2: re-review N2 - en `requested` journalrad er IKKE en fullført repl
     await expect(executeGrowthWrite({ ...exec, gateway: crashing as never }, owner, input)).rejects.toThrow("simulated_crash_before_gateway");
     const done = await executeGrowthWrite(exec, owner, input);
     expect(done).toMatchObject({ outcome: "SUCCESS", command_status: "executed" });
+    expect(gMut()).toHaveLength(1);
+  });
+});
+
+describe("V3: re-review N4 - mutanter som overlevde (kommando-kampanje og nøkkelens handling)", () => {
+  it("N4c: en kommando for kampanje A kan aldri utføre en skriving mot kampanje B (`growth_command_campaign_mismatch`) - FØR noe sendes, ingen journalrad, kommandoen urørt", async () => {
+    const other = await growth.upsertCampaignFromProvider(A, "business", { channel: "google_ads", external_campaign_id: "104", name: "Fjerde kampanje", status: "active", currency: "NOK" });
+    expect(other.campaign_id).not.toBe(linkedCampaignId);
+    gads.budgets.set("13", { id: "13", micros: 500_000_000, shared: false });
+    gads.campaigns.set("104", { id: "104", name: "Fjerde kampanje", status: "ENABLED", budgetId: "13" });
+    await seedCommand("cmd-d3-n4c", 50_000, 40_000); // kommandoen gjelder kampanje 101 (linkedCampaignId)
+    const key = uniq("n4c");
+    await expect(g("set_campaign_budget", { campaign_id: "104", amount_ore: 40_000 }, { idempotency_key: key, command_id: "cmd-d3-n4c" })).rejects.toThrow("growth_command_campaign_mismatch");
+    expect(gMut()).toHaveLength(0);
+    expect(gads.budgets.get("13")?.micros).toBe(500_000_000);
+    expect(await journal.findByKey(A, "business", key)).toBeNull();
+    expect(await commandStatus("cmd-d3-n4c")).toEqual({ status: "pending_execution", execution_write_id: null });
+    // riktig kampanje virker (kontrollen over-avviser ikke)
+    expect((await g("set_campaign_budget", { campaign_id: "101", amount_ore: 40_000 }, { command_id: "cmd-d3-n4c" })).command_status).toBe("executed");
+  });
+
+  it("N4e: samme tool, ANNEN handling i ledgeren for en replay (journalraden finnes) er en kollisjon - aldri en falsk `applied` på en fremmed rad", async () => {
+    const key = uniq("n4e");
+    const input = { idempotency_key: key, provider: "google_ads", action: "set_campaign_budget", parameters: { customer_id: CID, campaign_id: "101", amount_ore: 40_000 } };
+    const crashing = { get: gateway.get.bind(gateway), execute: async () => { throw new Error("simulated_crash_before_gateway"); } };
+    await expect(executeGrowthWrite({ ...exec, gateway: crashing as never }, owner, input)).rejects.toThrow("simulated_crash_before_gateway");
+    expect((await journal.findByKey(A, "business", key))?.status).toBe("requested");
+    // et DIREKTE gatewaykall (utenfor journalen) bruker samme nøkkel for en ANNEN handling på SAMME tool
+    expect((await gateway.execute({ identity: owner, tool_id: "growth_googleads", action: "pause_campaign", parameters: { customer_id: CID, campaign_id: "101" }, idempotency_key: key })).ok).toBe(true);
+    const replay = await executeGrowthWrite(exec, owner, input);
+    expect(replay.outcome).toBe("FAILED");
+    expect(replay.reason).toBe("growth_write_idempotency_key_collision");
+    expect(replay.write.status).toBe("failed");
+    expect(replay.write.external_id).toBeNull();
+    expect(gads.budgets.get("11")?.micros).toBe(500_000_000); // budsjettet er aldri endret
+    expect(gMut()).toHaveLength(1); // kun den direkte pausen
+  });
+
+  it("N4a: 503 på lesingen ETTER at budsjettet er anvendt (verifiseringen) -> UKJENT utfall med `unknown`-varsel og ledger `unverified` - aldri FAILED/retry-bar", async () => {
+    const original = gads.handler;
+    gads.handler = (r) => (!gads.isMutation(r) && gMut().length > 0 ? { status: 503, json: { error: { status: "UNAVAILABLE", message: "backend error" } } } : original(r));
+    const key = uniq("n4a");
+    try {
+      const res = await g("set_campaign_budget", { campaign_id: "101", amount_ore: 40_000 }, { idempotency_key: key });
+      expect(gads.budgets.get("11")?.micros).toBe(400_000_000); // endringen ER gjort hos leverandøren
+      expect(res.outcome).toBe("UNKNOWN");
+      expect(res.reason).toBe("tool_failed:outcome_unknown:google_ads_readback_failed");
+      expect(res.write.status).toBe("outcome_unknown");
+      expect((await adminPool.query(`SELECT status FROM tool_executions WHERE tenant_id = '${A}' AND idempotency_key = $1`, [key])).rows[0]).toEqual({ status: "unverified" });
+      expect(notifications.map((n) => n.outcome)).toEqual(["unknown"]);
+    } finally {
+      gads.handler = original;
+    }
+    expect(gMut()).toHaveLength(1);
+    expect((await g("set_campaign_budget", { campaign_id: "101", amount_ore: 40_000 }, { idempotency_key: key })).outcome).toBe("UNKNOWN"); // replay sender aldri på nytt
     expect(gMut()).toHaveLength(1);
   });
 });

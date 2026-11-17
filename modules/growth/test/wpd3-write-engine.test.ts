@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- testfalske leverandører og assertions leser dypt i ikke-typet JSON (forespørselskropper/leverandørsvar); typing av hver form ville bare duplisere leverandørenes skjema. */
 import { createServer as createNetServer, type AddressInfo } from "node:net";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import {
@@ -19,6 +19,7 @@ import { replyDigest } from "../src/write/gbp-write.ts";
 import { MetaAdsWriteTransport } from "../src/write/meta-ads-write.ts";
 import { GrowthVendorError, MAX_BODY_BYTES, VendorHttp, classifyVendorError, readBodyCapped } from "../src/write/http.ts";
 import { assertOre, oreToMicros, MAX_ORE } from "../src/write/validators.ts";
+import { GrowthWriteTransportBase, type Auth, type OpSpec } from "../src/write/tool-factory.ts";
 import { CID, FakeGoogleAds, FakeVendor } from "./support/fake-vendors.ts";
 
 /**
@@ -335,6 +336,27 @@ describe("C: HTTP-reglene (retry, ukjent utfall, redirects, hemmeligheter)", () 
     expect(((await http().request({ method: "GET", path: "/x" }))?.json as { data: string }).data).toHaveLength(MAX_BODY_BYTES - 100);
   });
 
+  it("review N4b: en feilform vi IKKE kjenner (verken kjent «ukjent» eller bevist «aldri sendt») på en MUTASJON er UKJENT utfall; på en lesing og for en BEVIST før-sending-feil kastes feilen uendret", async () => {
+    const spy = vi.spyOn(globalThis, "fetch");
+    const attempt = (r: Parameters<VendorHttp["request"]>[0]) => http().request(r).then(() => null, (e: unknown) => ({ thrown: e }));
+    try {
+      for (const thrown of [new Error("boom"), "en vanlig streng", undefined, { code: "E_HELT_NY_FEILKODE" }]) {
+        spy.mockRejectedValueOnce(thrown);
+        const caught = await attempt({ method: "POST", path: "/x", body: {}, mutation: true });
+        expect((caught?.thrown as Error | undefined)?.message, String(thrown)).toBe("outcome_unknown:t_transport_network");
+      }
+      expect(vendor.requests).toHaveLength(0);
+      const boom = new Error("boom");
+      spy.mockRejectedValueOnce(boom);
+      expect((await attempt({ method: "GET", path: "/x" }))?.thrown).toBe(boom); // lesing: ingen mutasjon å være usikker på
+      const refused = Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:9"), { code: "ECONNREFUSED" }) });
+      spy.mockRejectedValueOnce(refused);
+      expect((await attempt({ method: "POST", path: "/x", body: {}, mutation: true }))?.thrown).toBe(refused); // BEVIST før sending: vanlig feil (retry tillatt)
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("følger ALDRI en redirect (verken GET eller mutasjon) - Authorization sendes aldri videre", async () => {
     vendor.handler = () => ({ status: 307, json: {} });
     await expect(http().request({ method: "POST", path: "/x", body: {}, mutation: true, headers: { authorization: "Bearer fake-token-for-test" } })).rejects.toThrow(/redirect/);
@@ -350,6 +372,43 @@ describe("C: HTTP-reglene (retry, ukjent utfall, redirects, hemmeligheter)", () 
     expect(err.message.startsWith("t_error_400:INVALID_ARGUMENT")).toBe(true);
     expect(classifyVendorError('{"errors":[{"message":"m","code":"c"}]}')).toEqual({ code: "c", message: "m" });
     expect(classifyVendorError("not json")).toEqual({ code: "UNCLASSIFIED", message: "" });
+  });
+});
+
+describe("C2: review N4a - verifiseringen etter en akseptert mutasjon (`verifyAfter`): feil i readback ELLER etterbetingelse er UKJENT utfall", () => {
+  /** Minimal skrivetransport: mutasjonen lykkes alltid; lesingen og etterbetingelsen kan settes til å feile. */
+  class Probe extends GrowthWriteTransportBase {
+    protected readonly label = "probe";
+    protected readonly ops: ReadonlyMap<string, OpSpec>;
+    reads = 0;
+    failReadsFrom = Number.POSITIVE_INFINITY;
+    constructor(post: NonNullable<OpSpec["post"]>) {
+      super({ sleep: async () => undefined });
+      this.ops = new Map<string, OpSpec>([["write_it", { action: "write_it", description: "probe", shape: {}, risk: "C", spend: "none", targetParam: "x", stateAction: "read_it", scopes: [], post, target: () => "probe:t", rollback: "ingen (probe for test)" }]]);
+    }
+    protected async authenticate(): Promise<Auth> { return { headers: {}, secrets: [] }; }
+    protected async readState(): Promise<JsonValue | null> {
+      this.reads += 1;
+      if (this.reads >= this.failReadsFrom) throw new Error("backend 503 med klientdata som aldri skal på vei videre");
+      return { value: 1 };
+    }
+    protected async applyWrite(): Promise<{ external_id?: string }> { return { external_id: "probe-1" }; }
+  }
+  const run = (t: Probe) => t.invoke("write_it", {}, "fake-credential-for-test", { identity: owner }).then(() => null, (e: Error) => e);
+
+  it("readback som feiler ETTER at mutasjonen er akseptert gir `outcome_unknown:..._readback_failed` (feilteksten følger aldri med) - aldri en vanlig, retry-bar feil", async () => {
+    const t = new Probe(() => false);
+    t.failReadsFrom = 2; // lesing 1 = før-tilstanden (OK), lesing 2 = readback etter mutasjonen (feiler)
+    const err = await run(t);
+    expect(err?.message).toBe("outcome_unknown:probe_readback_failed");
+    expect(isOutcomeUnknownMessage(err?.message ?? "")).toBe(true);
+  });
+
+  it("en etterbetingelse som KASTER etter en akseptert mutasjon gir `outcome_unknown:..._verify_failed`; en som er usann gir `..._postcondition_mismatch`; en sann lykkes", async () => {
+    const throwing = await run(new Probe(() => { throw new Error("etterbetingelsen kastet med intern tekst"); }));
+    expect(throwing?.message).toBe("outcome_unknown:probe_verify_failed");
+    expect((await run(new Probe(() => false)))?.message).toBe("outcome_unknown:probe_postcondition_mismatch");
+    expect(await run(new Probe(() => true))).toBeNull();
   });
 });
 
