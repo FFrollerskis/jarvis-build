@@ -660,6 +660,8 @@ export class ModelGateway {
       return err;
     }
     const preferenceList = input.provider === undefined && (input.providerPreference?.length ?? 0) > 0;
+    // L7: en hard preferanseliste gir rutefeilen kallerne svarer på med en ny kjøring (samtalemotorens D-354-fallback): den kjøringen er SAMME avviste kall og skal ikke telles en gang til.
+    if (preferenceList) pacing.expectRetry();
     return preferenceList ? err : pacing.blockedError();
   }
 

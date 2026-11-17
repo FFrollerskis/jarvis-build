@@ -208,8 +208,11 @@ export function cheaperClaudeModel(args: { pricing: PricingTable; catalog: reado
 
 export type PacingConstraint = "open" | "cheaper_model" | "closed";
 
-/** Hvorfor en runde av en verktøytur ble avgjort uten ny vurdering (kun kategori i spor og revisjon). */
-export type RoundRule = "continuation" | "earlier_round_closed";
+/** Hvorfor et kall ble avgjort uten ny vurdering (kun kategori i spor og revisjon): en runde i en verktøytur, eller samtalemotorens gjentakelse av et kall som nettopp ble avvist. */
+export type RoundRule = "continuation" | "earlier_round_closed" | "retry_of_closed";
+
+/** L7: hvor lenge en avvisning huskes for gjentakelsen (D-354-fallbacken kjører umiddelbart etter første forsøk). */
+const RETRY_MEMO_MS = 10_000;
 
 export interface PacingVerdict {
   action: PacingAction;
@@ -232,8 +235,17 @@ export class PacingTicket {
     /** `closed`: Anthropic skal ikke brukes for dette kallet. `cheaper_model`: bruk `downgrade_model`. `open`: uendret. */
     readonly constraint: PacingConstraint,
     readonly downgrade_model: string | undefined,
-    private readonly onRelease: (booked: number) => void
+    private readonly onRelease: (booked: number) => void,
+    private readonly onExpectRetry?: () => void
   ) {}
+
+  /**
+   * L7: gatewayen sier at dette avviste kallet feiler med en rutefeil KALLEREN svarer på med en ny kjøring (samtalemotorens D-354-fallback etter `provider_preference_exhausted`). Den neste beslutningen for samme tenant,
+   * økt/jobb og formål innen 10 s er da samme kall på nytt: den bærer denne avvisningen (ingen ny lesing, ingen ny revisjonsrad) - aldri en åpning, kun den samme stengte beslutningen.
+   */
+  expectRetry(): void {
+    this.onExpectRetry?.();
+  }
 
   /** Gatewayen melder hva kallet kostet (øre) idet det bokføres (også anslag for avbrutte kall): overlegget i enforceren bruker det til å se egne bokføringer før bufferen av forbruket er fornyet. */
   noteBooked(ore: number): void {
@@ -314,6 +326,8 @@ export class ClaudeBudgetEnforcer {
   private readonly inflightReads = new Map<string, { promise: Promise<ClaudeSpend>; started: number }>();
   /** M3: det fullførte kall har bokført (øre, høyeste av reservasjonen og det bokførte) etter at lesingen startet - broen mellom en buffer og databasen. */
   private readonly settled = new Map<string, Array<{ ore: number; at: number }>>();
+  /** L7: avvisninger som forventes gjentatt (se `PacingTicket.expectRetry`), nøklet på tenant, økt/jobb og formål. */
+  private readonly retryMemo = new Map<string, { verdict: PacingVerdict; expires: number }>();
   private readonly now: () => number;
 
   constructor(private readonly opts: ClaudeBudgetEnforcerOptions) {
@@ -408,6 +422,15 @@ export class ClaudeBudgetEnforcer {
     }
   }
 
+  private retryKey(info: PacingBeginInfo): string {
+    return [info.tenant_id, info.session_id ?? "", info.task_id ?? "", info.purpose ?? ""].join("|");
+  }
+
+  private rememberClosed(info: PacingBeginInfo, verdict: PacingVerdict, nowMs: number): void {
+    for (const [key, memo] of this.retryMemo) if (memo.expires <= nowMs) this.retryMemo.delete(key);
+    this.retryMemo.set(this.retryKey(info), { verdict, expires: nowMs + RETRY_MEMO_MS });
+  }
+
   private failsafe(tier: BudgetTier, origin: BudgetOrigin, purpose: ModelPurpose | null, window: BudgetWindow): PacingVerdict {
     const base = { level: "unknown" as const, tier, origin, purpose, window };
     if (tier === "essential") return { ...base, action: "allow", reason: "spend_unreadable_essential_allowed", resume_at_ms: null };
@@ -480,6 +503,16 @@ export class ClaudeBudgetEnforcer {
       return ticket;
     }
 
+    const memo = this.retryMemo.get(this.retryKey(info));
+    if (memo !== undefined) {
+      this.retryMemo.delete(this.retryKey(info)); // brukes én gang
+      if (memo.expires > nowMs && memo.verdict.window.end_ms > nowMs) {
+        // L7: samme avviste kall på nytt (D-354-fallbacken): samme stengte beslutning, uten ny lesing og uten en ny revisjonsrad (tellerne teller kallet én gang)
+        const repeat = new PacingTicket({ ...memo.verdict, tier, origin, purpose }, "closed", undefined, () => undefined);
+        await this.log(info, repeat, null, null, "retry_of_closed");
+        return repeat;
+      }
+    }
     const view = await this.spendView(info.tenant_id, window, nowMs);
     const spend: ClaudeSpend | null = view === null ? null : view.spend;
     // Herfra til reservasjonen er alt SYNKRONT: samtidige kall i denne prosessen ser hverandres reservasjoner (atomisk sjekk-og-reserver).
@@ -518,7 +551,7 @@ export class ClaudeBudgetEnforcer {
       const model = downgradeModel ?? info.request.model ?? info.provider_default_model ?? "";
       release = this.reserve(info.tenant_id, estimateCallOre(info.pricing, CLAUDE_BUDGET_PROVIDER, model, info.request, cfg.budget_ore), nowMs);
     }
-    const ticket = new PacingTicket(verdict, constraint, downgradeModel, release);
+    const ticket = new PacingTicket(verdict, constraint, downgradeModel, release, constraint === "closed" ? () => this.rememberClosed(info, verdict, this.now()) : undefined);
     await this.log(info, ticket, decision?.state ?? null, spend);
     return ticket;
   }
@@ -549,6 +582,7 @@ export class ClaudeBudgetEnforcer {
     // Revisjon kun når beslutningen gjorde noe (ikke-tillat), var fail-safe ELLER tillot forbruk over en oppbrukt kreditt (eierens override `HARD_STOP=off`: beviset på hvilke kall som gikk forbi kreditten).
     // En vanlig «tillat på tempo» er sporet i trace, ikke revisjon (ellers én rad per modellkall). Hver runde av en verktøytur er ett kall og revideres likt (også de som bærer en tidligere rundes billett).
     const v = ticket.verdict;
+    if (roundRule === "retry_of_closed") return; // samme kall som ble revidert for et øyeblikk siden (L7)
     if (v.action === "allow" && v.level !== "unknown" && v.level !== "exhausted") return;
     try {
       await withTenantTransaction(this.opts.pool, info.tenant_id, (client) =>

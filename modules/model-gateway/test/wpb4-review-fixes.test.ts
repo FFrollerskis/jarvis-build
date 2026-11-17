@@ -643,3 +643,55 @@ describe("L2: avbrutte/feilede/utløpte Anthropic-kall bokføres med et ANSLAG (
     expect(db.failedRows.map((r) => r.amount_ore)).toEqual([0]); // avbrutt før retry: ingen kall ble sendt
   });
 });
+
+describe("L7: én eiertur ved hard stopp telles ÉN gang - første forsøk (hard preferanse) + D-354-fallbacken er samme avviste kall", () => {
+  const chatAttempt = (extra: Partial<CompleteInput> = {}) => ownerTurn({ mode: "AUTO", providerPreference: ["anthropic"], preferenceFailover: true, ...extra });
+
+  it("første forsøk feiler med provider_preference_exhausted, fallbacken (uten preferanse) går lokalt: ÉN revisjonsrad og ÉN lesing - ikke to", async () => {
+    const { gateway, db, anthropic, local, budgetSpans } = build();
+    db.spend.set("t1", SPENT.exhausted);
+    const err = await gateway.complete(chatAttempt()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain("provider_preference_exhausted");
+    const fallback = await gateway.complete(ownerTurn()); // slik samtalemotoren kjører den (D-354): samme økt og formål, uten preferanse
+    expect(fallback.provider).toBe("gemma_local");
+    expect(fallback.metadata?.["claude_budget"]).toMatchObject({ action: "deny", constraint: "closed", reason: "exhausted_closed" });
+    expect(db.audit).toHaveLength(1);
+    expect(db.audit[0]).toMatchObject({ decision: "deny", reason: "exhausted_closed" });
+    expect(db.spendReads).toBe(1);
+    expect(anthropic.calls).toHaveLength(0);
+    expect(local.calls).toHaveLength(1);
+    expect(budgetSpans().map((s) => s.metadata?.["round_rule"] ?? null)).toEqual([null, "retry_of_closed"]); // sporet viser begge, revisjonen (tellerne) kun den første
+  });
+
+  it("merket gjelder KUN det neste kallet fra samme tenant/økt/formål innen 10 s: et senere, uavhengig kall (eller en annen økt) vurderes og telles på nytt", async () => {
+    const { gateway, db, clock } = build();
+    db.spend.set("t1", SPENT.exhausted);
+    await gateway.complete(chatAttempt()).catch(() => undefined);
+    await gateway.complete(ownerTurn()); // fallbacken: ikke telt på nytt
+    expect(db.audit).toHaveLength(1);
+    await gateway.complete(ownerTurn()); // en NY tur (merket er brukt opp): vurdert og telt
+    expect(db.audit).toHaveLength(2);
+    await gateway.complete(chatAttempt()).catch(() => undefined); // nytt forsøk (telt) - merket står igjen for økta s1
+    expect(db.audit).toHaveLength(3);
+    await gateway.complete(ownerTurn({ session_id: "s-annen" })); // annen økt: egen beslutning (telt), merket til s1 er urørt
+    expect(db.audit).toHaveLength(4);
+    clock.now += 10_001; // merket til s1 er utløpt: neste kall er en vanlig, ny beslutning
+    await gateway.complete(ownerTurn());
+    expect(db.audit).toHaveLength(5);
+  });
+
+  it("merket kan aldri ÅPNE noe: en lukket beslutning gjenbrukes bare (aldri over fornyelsen), og et kall med et annet formål får ikke merket", async () => {
+    const { gateway, db, clock } = build({ now: START_OF_PERIOD + 30 * 86_400_000 - 2_000 });
+    db.spend.set("t1", SPENT.exhausted);
+    await gateway.complete(chatAttempt()).catch(() => undefined);
+    db.spend.set("t1", 0); // ny periode har ingenting brukt
+    clock.now += 3_000; // over fornyelsen: merket gjelder ikke den nye perioden
+    expect((await gateway.complete(ownerTurn())).provider).toBe("anthropic");
+    const other = build();
+    other.db.spend.set("t1", SPENT.exhausted);
+    await other.gateway.complete(chatAttempt()).catch(() => undefined);
+    await other.gateway.complete(ownerTurn({ purpose: "SUMMARIZE" })); // annet formål: egen beslutning
+    expect(other.db.audit).toHaveLength(2);
+  });
+});
