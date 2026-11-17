@@ -42,10 +42,6 @@ async function add(change_id: string, cls: Cls, decision: Dec): Promise<Row> {
 async function fillTo(target: number): Promise<void> {
   while ((rows.at(-1)?.seq ?? 0) + 1 < target) await add(`fyll-${String((rows.at(-1)?.seq ?? 0) + 1).padStart(3, "0")}`, "E1", "blocked");
 }
-async function refusal(promise: Promise<unknown>): Promise<string> {
-  try { await promise; } catch (err) { return (err as Error).message; }
-  return "ingen feil";
-}
 const decide = (change_id: string, decision: string, digest: string) => recorder.record(owner, { change_id, proposal_digest: digest, decision: decision as never });
 const outcome = async (change_id: string, decision: string, digest: string): Promise<string> => {
   try { return (await decide(change_id, decision, digest)).outcome; } catch (err) { return (err as Error).message; }
