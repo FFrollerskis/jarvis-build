@@ -540,13 +540,15 @@ export function blockedMessageNo(kind: BlockedKind, reason: string, resumeMs: nu
 export const CLAUDE_BUDGET_NOTE_PREFIX = "Claude-kreditten:";
 
 /**
- * Merknaden bak et svar (eller en jobb) som kom fra lokal modell fordi Claude-kreditten styrte bort fra Anthropic (D-447: aldri en usynlig nedgradering). Kun kategorier og dato - ingen beløp
+ * Merknaden bak et svar (eller en jobb) som kom fra en annen modell enn Claude fordi Claude-kreditten styrte bort fra Anthropic (D-447: aldri en usynlig nedgradering). Kun kategorier og dato - ingen beløp
  * (AI-kostnad behandles etter strengeste regel inntil Q-64 er besvart, og merknaden lagres i samtalen). Ingen parenteser inni teksten (se `stripSystemNotes`).
+ * L1: «den lokale modellen» står KUN når en lokal modell faktisk svarte (`answeredBy: "local"`, standard); svarte noe annet (eller ukjent) sier teksten bare at svaret ikke kom fra Claude - aldri en påstand om lokal modell.
  */
-export function claudeBudgetNoteNo(action: PacingAction, reason: string, windowEndMs: number, what: "svaret" | "jobben" = "svaret"): string {
+export function claudeBudgetNoteNo(action: PacingAction, reason: string, windowEndMs: number, what: "svaret" | "jobben" = "svaret", answeredBy: "local" | "other" = "local"): string {
   const subject = what === "svaret" ? "dette svaret" : "jobben";
-  if (action === "deny" || reason === "exhausted_hard_stop_off_background_deferred") return `${CLAUDE_BUDGET_NOTE_PREFIX} perioden er brukt opp, så ${subject} kom fra den lokale modellen. Kreditten fornyes ${formatDateNo(windowEndMs)}.`;
-  if (reason === "reserve_kept_for_essential") return `${CLAUDE_BUDGET_NOTE_PREFIX} resten er forbeholdt det aller viktigste, så ${subject} kom fra den lokale modellen. Kreditten fornyes ${formatDateNo(windowEndMs)}.`;
-  if (reason === "spend_unreadable_background_deferred") return `${CLAUDE_BUDGET_NOTE_PREFIX} forbruket kunne ikke leses, så ${subject} kom fra den lokale modellen.`;
-  return `${CLAUDE_BUDGET_NOTE_PREFIX} bruken ligger foran periodens tempo, så ${subject} kom fra den lokale modellen.`;
+  const source = answeredBy === "local" ? "kom fra den lokale modellen" : "kom ikke fra Claude";
+  if (action === "deny" || reason === "exhausted_hard_stop_off_background_deferred") return `${CLAUDE_BUDGET_NOTE_PREFIX} perioden er brukt opp, så ${subject} ${source}. Kreditten fornyes ${formatDateNo(windowEndMs)}.`;
+  if (reason === "reserve_kept_for_essential") return `${CLAUDE_BUDGET_NOTE_PREFIX} resten er forbeholdt det aller viktigste, så ${subject} ${source}. Kreditten fornyes ${formatDateNo(windowEndMs)}.`;
+  if (reason === "spend_unreadable_background_deferred") return `${CLAUDE_BUDGET_NOTE_PREFIX} forbruket kunne ikke leses, så ${subject} ${source}.`;
+  return `${CLAUDE_BUDGET_NOTE_PREFIX} bruken ligger foran periodens tempo, så ${subject} ${source}.`;
 }

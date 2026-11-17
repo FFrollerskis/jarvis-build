@@ -196,7 +196,7 @@ export function executiveHandler(opts: ExecutiveHandlerOptions) {
         result = await opts.gateway.complete(meshInput);
       }
       // WP-B4 (D-476): jobben kjørte lokalt fordi Claude-kreditten stengte Anthropic - sagt rett ut i svaret (tom uten Claude-kreditten).
-      const budgetNote = claudeBudgetRouteNote(result.metadata, "jobben");
+      const budgetNote = claudeBudgetRouteNote(result.metadata, "jobben", result);
       if (budgetNote !== "") notes.push(budgetNote);
       const header = notes.length > 0 ? `${notes.join(" ")}\n\n` : "";
       return {

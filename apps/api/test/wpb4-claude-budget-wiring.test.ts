@@ -153,10 +153,12 @@ describe("merknaden bak svar og jobber når kreditten stengte Anthropic", () => 
   });
 
   it("deny og defer gir en norsk merknad (svar: to linjeskift + parenteser; jobb: kun parenteser) som starter med prefikset og sier når kreditten fornyes", () => {
-    expect(claudeBudgetRouteNote(closed())).toBe("\n\n(Claude-kreditten: perioden er brukt opp, så dette svaret kom fra den lokale modellen. Kreditten fornyes 15. desember.)");
-    expect(claudeBudgetRouteNote(closed(), "jobben")).toBe("(Claude-kreditten: perioden er brukt opp, så jobben kom fra den lokale modellen. Kreditten fornyes 15. desember.)");
-    expect(claudeBudgetRouteNote(closed({ action: "defer", reason: "reserve_kept_for_essential" }))).toContain("resten er forbeholdt det aller viktigste");
-    expect(claudeBudgetRouteNote(closed({ action: "defer", reason: "tight_background_deferred" }))).toContain("bruken ligger foran periodens tempo");
+    // L1: «lokale modellen» står kun når en lokal modell svarte (leverandøren som svarte oppgis) - se wpb4-review-fixes.test.ts for annen/ukjent leverandør
+    const local = { provider: "gemma_local" };
+    expect(claudeBudgetRouteNote(closed(), "svaret", local)).toBe("\n\n(Claude-kreditten: perioden er brukt opp, så dette svaret kom fra den lokale modellen. Kreditten fornyes 15. desember.)");
+    expect(claudeBudgetRouteNote(closed(), "jobben", local)).toBe("(Claude-kreditten: perioden er brukt opp, så jobben kom fra den lokale modellen. Kreditten fornyes 15. desember.)");
+    expect(claudeBudgetRouteNote(closed({ action: "defer", reason: "reserve_kept_for_essential" }), "svaret", local)).toContain("resten er forbeholdt det aller viktigste");
+    expect(claudeBudgetRouteNote(closed({ action: "defer", reason: "tight_background_deferred" }), "svaret", local)).toContain("bruken ligger foran periodens tempo");
   });
 
   it("tom streng for alt annet: ingen metadata (flagg AV), tillatt, nedgradert til billigere modell, åpen, og ugyldige/ukjente former", () => {
@@ -185,7 +187,7 @@ describe("merknaden bak svar og jobber når kreditten stengte Anthropic", () => 
   });
 
   it("merknaden og feilteksten har samme ordlyd som motoren produserer (ingen kopi som kan drive fra hverandre)", () => {
-    expect(claudeBudgetRouteNote(closed())).toContain(claudeBudgetNoteNo("deny", "exhausted_closed", WINDOW_END));
+    expect(claudeBudgetRouteNote(closed(), "svaret", { provider: "gemma_local" })).toContain(claudeBudgetNoteNo("deny", "exhausted_closed", WINDOW_END));
   });
 });
 

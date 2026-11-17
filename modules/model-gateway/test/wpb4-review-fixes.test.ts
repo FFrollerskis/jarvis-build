@@ -132,3 +132,94 @@ describe("M1: en påbegynt tur PÅ Anthropic fullføres fortsatt (fortsettelsesr
     vi.restoreAllMocks();
   });
 });
+
+describe("L1: stengt Anthropic gir LOKAL fallback (Q-67) - aldri en betalt skyleverandør bare fordi Claude-kreditten er brukt opp", () => {
+  const CLOUD_TOO = ["anthropic", "gemma_local", "openai"] as const;
+  const used = (a: { calls: unknown[]; streamCalls: unknown[] }): number => a.calls.length + a.streamCalls.length;
+
+  for (const mode of ["AUTO", "QUALITY"] as const) {
+    for (const purpose of ["REASON", "PLAN", "CODE"] as const) {
+      it(`${purpose} (${mode}) ved oppbrukt kreditt og hard stopp: svaret kommer fra den lokale modellen, aldri fra openai/gpt-5`, async () => {
+        const { gateway, db, anthropic, local, openai } = build({ providers: [...CLOUD_TOO] });
+        db.spend.set("t1", SPENT.exhausted);
+        const result = await gateway.complete(ownerTurn({ purpose, mode }));
+        expect(result.provider).toBe("gemma_local");
+        expect(used(anthropic)).toBe(0);
+        expect(used(openai)).toBe(0);
+        expect(local.calls).toHaveLength(1);
+        expect((result.metadata?.["router"] as { mode?: string } | undefined)?.mode).toBe("LOCAL");
+        expect(result.metadata?.["claude_budget"]).toMatchObject({ action: "deny", constraint: "closed", reason: "exhausted_closed" });
+      });
+    }
+    it(`BAKGRUNN REASON (${mode}) ved stramt: utsatt = lokal modell, ikke openai/gpt-5`, async () => {
+      const { gateway, db, anthropic, local, openai } = build({ providers: [...CLOUD_TOO] });
+      db.spend.set("t1", SPENT.tight);
+      const result = await gateway.complete(background({ purpose: "REASON", mode }));
+      expect(result.provider).toBe("gemma_local");
+      expect(used(anthropic) + used(openai)).toBe(0);
+      expect(local.calls).toHaveLength(1);
+    });
+  }
+
+  it("en vanlig tur UTEN kreditt-innsnevring er uendret: på tempo velger ruteren som før (Anthropic rangerer først i QUALITY), og lokal-only brukes aldri når Anthropic er åpen", async () => {
+    const { gateway, db, anthropic, local } = build({ providers: [...CLOUD_TOO] });
+    db.spend.set("t1", SPENT.on_pace);
+    const result = await gateway.complete(ownerTurn({ purpose: "REASON" }));
+    expect(result.provider).toBe("anthropic");
+    expect(used(anthropic)).toBe(1);
+    expect(local.calls).toHaveLength(0);
+  });
+
+  it("INGEN lokal modell, men openai er konfigurert: stengt kreditt gir den tydelige norske meldingen (ClaudeBudgetBlockedError), ikke et stille betalt kall mot openai", async () => {
+    const { gateway, db, openai } = build({ providers: ["anthropic", "openai"] });
+    db.spend.set("t1", SPENT.exhausted);
+    const err = (await gateway.complete(ownerTurn({ purpose: "REASON" })).catch((e: unknown) => e)) as ClaudeBudgetBlockedError;
+    expect(err).toBeInstanceOf(ClaudeBudgetBlockedError);
+    expect(err.message).toContain("ingen lokal modell");
+    expect(used(openai)).toBe(0);
+    // samme for utsatt BAKGRUNN (stramt): den tydelige «utsatt»-feilen, ikke openai
+    const tight = build({ providers: ["anthropic", "openai"] });
+    tight.db.spend.set("t1", SPENT.tight);
+    const deferred = (await tight.gateway.complete(background({ purpose: "REASON" })).catch((e: unknown) => e)) as ClaudeBudgetBlockedError;
+    expect(deferred).toBeInstanceOf(ClaudeBudgetBlockedError);
+    expect(deferred.kind).toBe("deferred");
+    expect(used(tight.openai)).toBe(0);
+  });
+
+  it("sensitivitetsforrang er uendret: PRIVATE med lokal modell går lokalt; PRIVATE uten lokal modell og stengt kreditt får den tydelige feilen; SECRET_RESTRICTED når aldri budsjettlaget", async () => {
+    const withLocal = build({ providers: [...CLOUD_TOO] });
+    withLocal.db.spend.set("t1", SPENT.exhausted);
+    expect((await withLocal.gateway.complete(ownerTurn({ sensitivity: "PRIVATE" }))).provider).toBe("gemma_local");
+    const noLocal = build({ providers: ["anthropic", "openai"] });
+    noLocal.db.spend.set("t1", SPENT.exhausted);
+    expect(await noLocal.gateway.complete(ownerTurn({ sensitivity: "PRIVATE" })).catch((e: unknown) => e)).toBeInstanceOf(ClaudeBudgetBlockedError);
+    expect(used(noLocal.openai)).toBe(0);
+    const secret = build({ providers: [...CLOUD_TOO] });
+    secret.db.spend.set("t1", SPENT.exhausted);
+    expect((await secret.gateway.complete(ownerTurn({ sensitivity: "SECRET_RESTRICTED" }))).provider).toBe("gemma_local");
+    expect(secret.db.spendReads).toBe(0);
+  });
+
+  it("eksplisitte valg beholder sin egen semantikk: `provider: openai` er eierens valg (ingen kredittbeslutning), en preferanseliste [anthropic, openai] (spesialist-delegering) går videre til openai - men Anthropic får aldri kallet mens den er stengt", async () => {
+    const { gateway, db, anthropic, openai } = build({ providers: [...CLOUD_TOO] });
+    db.spend.set("t1", SPENT.exhausted);
+    const explicitOpenai = await gateway.complete(ownerTurn({ provider: "openai" }));
+    expect(explicitOpenai.provider).toBe("openai");
+    expect(db.spendReads).toBe(0);
+    const specialist = await gateway.complete(ownerTurn({ purpose: "CODE", providerPreference: ["anthropic", "openai", "gemini"], preferenceFailover: true }));
+    expect(specialist.provider).toBe("openai");
+    expect(used(anthropic)).toBe(0);
+    expect(used(openai)).toBe(2);
+  });
+
+  it("criticen følger samme regel: er Anthropic innsnevret for kallet, er criticen lokal (aldri en betalt skyleverandør), også når den lokale modellen er den som svarte", async () => {
+    const { gateway, db, anthropic, openai } = build({ providers: [...CLOUD_TOO] });
+    db.spend.set("t1", SPENT.exhausted);
+    const result = await gateway.complete(ownerTurn({ critic: true }));
+    expect(result.provider).toBe("gemma_local");
+    const critic = result.metadata?.["critic"] as { provider?: string } | undefined;
+    expect(critic?.provider).toBe("gemma_local");
+    expect(result.metadata?.["critic_error"]).toBeUndefined();
+    expect(used(anthropic) + used(openai)).toBe(0);
+  });
+});

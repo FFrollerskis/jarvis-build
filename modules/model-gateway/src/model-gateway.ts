@@ -612,30 +612,40 @@ export class ModelGateway {
 
   /**
    * `router.plan` med Claude-kreditten som innsnevring. Uten billett, eller når Anthropic ikke er stengt: nøyaktig `router.plan(routeInput, providerRuntimes(paused))` som før.
-   * Stengt: et EKSPLISITT valg av Anthropic (eier-override, AI-råd-medlem) får aldri en stille omruting (§10) - kallet avvises med en tydelig feil; ellers planlegges det uten Anthropic (lokal modell/annen leverandør).
+   * Stengt: et EKSPLISITT valg av Anthropic (eier-override, AI-råd-medlem) får aldri en stille omruting (§10) - kallet avvises med en tydelig feil.
+   * ELLERS (L1, Q-67: «hard stopp av Anthropic med lokal fallback»): et kall UTEN eksplisitt leverandør eller preferanseliste planlegges `mode: LOCAL` - kun lokale modeller. Fallbacken er aldri en annen BETALT skyleverandør
+   * (openai/gemini ville brukt eierens penger i stedet for den gratis kreditten, og var ikke det Q-67 ba om). Sensitivitets- og betalt-modell-reglene i ruteren gjelder uendret oppå dette (LOCAL kan bare snevre inn).
+   * Et eksplisitt valg beholder sin egen semantikk: en preferanseliste (spesialist-delegering: anthropic → openai → gemini) går videre til neste medlem i sin egen liste, men Anthropic står stengt.
    */
   private planRoute(routeInput: RouteInput, paused: ReadonlySet<string>, input: CompleteInput, pacing: PacingTicket | undefined): RoutePlan {
     if (pacing === undefined || pacing.constraint !== "closed") return this.router.plan(routeInput, this.providerRuntimes(paused));
     if (input.provider === CLAUDE_BUDGET_PROVIDER) throw pacing.blockedError();
     const closed = this.providerRuntimes(paused);
     this.closeClaudeRuntime(closed);
+    const explicitChoice = input.provider !== undefined || (input.providerPreference?.length ?? 0) > 0;
     try {
-      return this.router.plan(routeInput, closed);
+      return this.router.plan(explicitChoice ? routeInput : { ...routeInput, mode: "LOCAL" }, closed);
     } catch (err) {
-      throw this.explainClosedRoute(err, routeInput, paused, input, pacing);
+      throw this.explainClosedRoute(err, routeInput, closed, paused, input, pacing);
     }
   }
 
   /**
    * Ruteren fant ingen kandidat uten Anthropic. Hadde kallet gått MED Anthropic åpen, er det kreditten som stoppet det: da får eieren en tydelig norsk feil (`ClaudeBudgetBlockedError`) i stedet for en teknisk rutefeil.
    * Unntak: en hard preferanseliste beholder rutefeilen (`provider_preference_exhausted`) - kallerne (chatten, jobbene) har allerede en lokal fallback som trigges av nettopp den, og som igjen ender i den tydelige
-   * feilen hvis ingen lokal modell finnes. Feiler planen uansett (sensitivitet, ingen lokal modell for SECRET_RESTRICTED), er den ærlige årsaken en annen og den opprinnelige feilen beholdes.
+   * feilen hvis ingen lokal modell finnes. Feiler planen uansett (kallet krever noe ingen konfigurert modell har, sensitivitet, ingen lokal modell for SECRET_RESTRICTED), er den ærlige årsaken en annen: da gis feilen
+   * ruteren ville gitt for det OPPRINNELIGE kallet med Anthropic stengt (den nevner både den virkelige årsaken og «stengt av Claude-kreditten») - ikke «lokal modell mangler» fra lokal-planen.
    */
-  private explainClosedRoute(err: unknown, routeInput: RouteInput, paused: ReadonlySet<string>, input: CompleteInput, pacing: PacingTicket): unknown {
+  private explainClosedRoute(err: unknown, routeInput: RouteInput, closedRuntimes: Map<string, RuntimeRow>, paused: ReadonlySet<string>, input: CompleteInput, pacing: PacingTicket): unknown {
     if (!(err instanceof NoEligibleProviderError || err instanceof LocalModelUnavailableError || err instanceof PaidModelsDisabledError)) return err;
     try {
       this.router.plan(routeInput, this.providerRuntimes(paused));
     } catch {
+      try {
+        this.router.plan(routeInput, closedRuntimes);
+      } catch (honest) {
+        return honest;
+      }
       return err;
     }
     const preferenceList = input.provider === undefined && (input.providerPreference?.length ?? 0) > 0;
@@ -1223,15 +1233,20 @@ export class ModelGateway {
   /** Critic (§18-§19): separat modellkjøring, egen kostrad, aldri koblet til D-godkjenning. */
   private async runCritic(input: CompleteInput, primary: ModelResult, traceId: string, pacing?: PacingTicket): Promise<void> {
     try {
-      const runtimes = this.providerRuntimes(this.pausedSnapshot);
-      // WP-B4: criticen er en ekstra, valgfri kvalitetskjøring - aldri på Anthropic når kreditten har snevret inn dette kallet (nedgradert, utsatt eller stengt).
-      if (pacing !== undefined && pacing.constraint !== "open") this.closeClaudeRuntime(runtimes);
+      let runtimes = this.providerRuntimes(this.pausedSnapshot);
+      // WP-B4: criticen er en ekstra, valgfri kvalitetskjøring - aldri på Anthropic når kreditten har snevret inn dette kallet (nedgradert, utsatt eller stengt). L1: og da heller aldri en annen BETALT skyleverandør i
+      // stedet - criticen er lokal (en gratis kvalitetsforsterkning skal ikke koste eierens penger fordi den gratis kreditten er styrt bort fra).
+      const narrowed = pacing !== undefined && pacing.constraint !== "open";
+      if (narrowed) {
+        this.closeClaudeRuntime(runtimes);
+        runtimes = new Map([...runtimes].filter(([name, rt]) => this.registry.profileOrGeneric(name, rt.model).locality === "local"));
+      }
       // Foretrekk annen provider enn primær for uavhengig blikk; ellers samme.
       const others = new Map([...runtimes].filter(([name, rt]) => rt.configured && name !== primary.provider));
       const pool = others.size > 0 ? others : runtimes;
       // Del 3 (JARVIS-016): criticen ser det samme innholdet som primærkallet - SAMME sensitivitets-/betalt-modell-regler gjelder.
       const criticPlan = this.router.plan({
-        mode: "QUALITY",
+        mode: narrowed ? "LOCAL" : "QUALITY",
         purpose: "CRITIQUE",
         ...(input.sensitivity !== undefined ? { sensitivity: input.sensitivity } : {}),
         ...(input.paid_models_allowed !== undefined ? { paid_models_allowed: input.paid_models_allowed } : {})

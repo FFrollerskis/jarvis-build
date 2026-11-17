@@ -120,9 +120,13 @@ export function adapter(name: string, model: string, options: AdapterOptions = {
 export interface BuildOptions {
   flag?: boolean;
   env?: Record<string, string>;
-  providers?: Array<"anthropic" | "gemma_local">;
+  providers?: Array<"anthropic" | "gemma_local" | "openai">;
   anthropic?: AdapterOptions;
   local?: AdapterOptions;
+  /** En betalt skyleverandør som IKKE er Anthropic (`openai`/gpt-5) - kun med når den står i `providers`. */
+  openai?: AdapterOptions;
+  /** Levetid (ms) for bufferen av forbruket i enforceren; utelatt = enforcerens standard. */
+  spendCacheTtlMs?: number;
   now?: number;
   /** Frist for lesingen av forbruket (ms); standard i enforceren er 3 s. */
   spendTimeoutMs?: number;
@@ -139,11 +143,12 @@ export function build(opts: BuildOptions = {}) {
   });
   const anthropic = adapter("anthropic", "claude-sonnet-5-5", { withStream: true, ...opts.anthropic });
   const local = adapter("gemma_local", "gemma-local", { ...opts.local });
+  const openai = adapter("openai", "gpt-5", { withStream: true, ...opts.openai });
   const names = opts.providers ?? ["anthropic", "gemma_local"];
-  const providers = [...(names.includes("anthropic") ? [anthropic] : []), ...(names.includes("gemma_local") ? [local] : [])];
+  const providers = [...(names.includes("anthropic") ? [anthropic] : []), ...(names.includes("gemma_local") ? [local] : []), ...(names.includes("openai") ? [openai] : [])];
   const gateway = new ModelGateway({ pool: db.pool(), trace, providers, ...(enforcer !== undefined ? { claudeBudget: enforcer } : {}) });
   const budgetSpans = (): MemoryTraceSink["spans"] => trace.spans.filter((s) => s.kind === "budget");
-  return { gateway, db, trace, clock, enforcer, anthropic, local, config, budgetSpans };
+  return { gateway, db, trace, clock, enforcer, anthropic, local, openai, config, budgetSpans };
 }
 
 export const REQ: ModelRequest = { messages: [{ role: "user", content: "hei" }], max_tokens: 200 };

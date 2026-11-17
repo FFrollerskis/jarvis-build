@@ -814,7 +814,7 @@ export class ConversationEngine {
       if (reserveUsed) console.log(JSON.stringify({ msg: "wpd4_chat_reserve_used", failed: reserveFailedBeforeAnswer.length > 0 ? reserveFailedBeforeAnswer : [...reserveFailed], served: result.provider, cloud: servedByCloudModel(result), ...(earlierCloud.length > 0 ? { earlier_cloud: earlierCloud } : {}) }));
       // WP-B4 (D-476): svaret kom fra lokal modell fordi Claude-kreditten stengte Anthropic - sagt rett ut (aldri en usynlig nedgradering). Da droppes den generelle «Reservemodell brukt: anthropic var ikke tilgjengelig»-merknaden,
       // som ville vært misvisende (Anthropic var tilgjengelig, men stengt av kreditten). Uten Claude-kreditten er `budgetNote` alltid tom og strengen under er identisk med før.
-      const budgetNote = surface !== "voice" ? claudeBudgetRouteNote(result.metadata) : "";
+      const budgetNote = surface !== "voice" ? claudeBudgetRouteNote(result.metadata, "svaret", result) : "";
       const notes = `${routeNote}${variantNote}${withheldNote}${budgetNote !== "" && [...reserveFailed].every((name) => name === "anthropic") ? "" : reserveNote}${budgetNote}`;
       const replyText = notes ? `${result.text}${notes}` : result.text;
       if (notes) onToken?.(notes);
