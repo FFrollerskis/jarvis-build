@@ -592,7 +592,12 @@ export class ClaudeBudgetEnforcer {
   }
 
   private async log(info: PacingBeginInfo, ticket: PacingTicket, state: PacingState | null, spend: ClaudeSpend | null, roundRule?: RoundRule): Promise<void> {
-    const facts = this.facts(ticket, state, spend, roundRule);
+    let facts: Record<string, string | number | boolean | null> = {};
+    try {
+      facts = this.facts(ticket, state, spend, roundRule);
+    } catch {
+      this.logFailures += 1; // logging skal aldri påvirke beslutningen (billetten er allerede laget)
+    }
     try {
       await this.opts.trace.record({
         trace_id: info.trace_id, kind: "budget", name: `claude_budget_${ticket.verdict.action}`, tenant_id: info.tenant_id,

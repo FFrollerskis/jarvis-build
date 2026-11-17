@@ -805,8 +805,11 @@ export class ModelGateway {
             // secrets/prompt/svar-tekst) - og kun aktiv når eksplisitt slått på.
             const streamDebug = process.env["JARVIS_STREAM_DEBUG"] === "true";
             const guardedOnEvent: StreamHandler = (event) => {
-              if (event.type === "text_delta") generatedChars += event.text.length;
-              else if (event.type === "tool_call_delta") generatedChars += event.arguments_delta.length;
+              // WP-B4 (L2): kun med Claude-kreditten på (uten den er denne funksjonen uendret), og aldri en feil fra en uventet hendelsesform
+              if (this.opts.claudeBudget !== undefined) {
+                if (event.type === "text_delta" && typeof event.text === "string") generatedChars += event.text.length;
+                else if (event.type === "tool_call_delta" && typeof event.arguments_delta === "string") generatedChars += event.arguments_delta.length;
+              }
               if (event.type === "text_delta" || event.type === "tool_call_start") {
                 outputStarted = true;
                 if (event.type === "tool_call_start" || event.text.trim().length > 0) visibleOutputStarted = true;

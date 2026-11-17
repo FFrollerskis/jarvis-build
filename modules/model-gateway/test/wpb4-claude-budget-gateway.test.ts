@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ProviderError, type ModelRequest, type ModelResult, type ToolExchange } from "@jarvis/provider-adapters";
+import { ProviderError, type ModelRequest, type ModelResult } from "@jarvis/provider-adapters";
 import {
   BudgetExceededError, ClaudeBudgetBlockedError, ClaudeBudgetEnforcer, DEFAULT_MODEL_CATALOG, DEFAULT_PRICING, MemoryTraceSink, ModelGateway, NoEligibleProviderError, cheaperClaudeModel,
   claudeBudgetConfigFromEnv, estimateCallOre, type CompleteInput
