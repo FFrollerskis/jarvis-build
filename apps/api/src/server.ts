@@ -26,6 +26,7 @@ import {
 } from "@jarvis/finance";
 import { ProductUsageError, UsageImportError, USAGE_LIMITS, USAGE_WEBHOOK_SIGNATURE_HEADER, type ProductUsageService } from "@jarvis/business";
 import { isControlCenterId } from "@jarvis/executive";
+import { GROWTH_EXPERIMENT_TOOL_ACTIONS, executeGrowthWrite, type GrowthWriteExecutorDeps, type GrowthWriteStatusFilter } from "@jarvis/growth";
 import type { ConversationEngine } from "./conversation.ts";
 import { FINANCE_ACTION_ROUTE_ACTIONS, moneyActionParameters, parseFinanceActionRequest, previewFinanceAction, readReconciliationStatus } from "./finance-actions.ts";
 import { submittedContractHasReservedKey, type ChatJobs } from "./chat-jobs.ts";
@@ -177,6 +178,12 @@ export interface ApiDeps {
    * eier-tenant, ingen delegasjon), aldri en egen sammenligning her. FAIL-CLOSED: uten verdien (eller ved en kastet feil) nektes alle med `owner_required`.
    */
   ownerGate?: (identity: IdentityContext) => boolean;
+  /**
+   * WP-D3 (UA-4 Growth, D-459): eier-rutene for SKRIVING mot annonse-/analyseplattformene (`POST /growth/mutate`), lesing (`/growth/read`), journal (`/growth/writes/list`) og eksperimentregisteret
+   * (`/growth/experiments`). DORMANT: uten verdien svarer rutene 404; `main.ts` setter den KUN når `JARVIS_GROWTH_WRITE_PLATFORMS` er ikke-tom (skriving) eller `JARVIS_GROWTH_EXPERIMENTS=on` (eksperimenter).
+   * Utførelsen går UTELUKKENDE via `ToolGateway.execute()` (policy, mål-autorisasjon, step-up, klasse D-kjeden) - rutene omgår ingenting.
+   */
+  growthWrites?: { executor: GrowthWriteExecutorDeps; /** Skriving/lesing/journal (`/growth/mutate|read|writes/list`) finnes KUN når minst én plattform er slått på (`JARVIS_GROWTH_WRITE_PLATFORMS`). */ writes: boolean; experiments: boolean };
 }
 
 export interface HealthStatus {
@@ -2128,6 +2135,86 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       if (definition.capability_class !== "A") return json(res, 400, { error: "cloud_read_not_a_read_action", request_id: requestIdOf(res) });
       const result = await gateway.execute({
         identity: authed.identity, tool_id: provider, action,
+        parameters: (authed.body["parameters"] === undefined ? {} : fieldRecord(authed.body, "parameters")) as Record<string, JsonValue>
+      });
+      if (!result.ok) return json(res, 200, { ok: false, reason: result.reason.slice(0, 120), request_id: requestIdOf(res) });
+      return json(res, 200, { ok: true, output_trust: result.output_trust, data: result.data ?? null });
+    }
+
+    if (deps.growthWrites?.writes && req.method === "POST" && url.pathname === "/growth/mutate") {
+      // WP-D3 (UA-4 Growth, D-459): eier-initiert skriving mot en annonse-/analyseplattform (budsjett, bud, status, nøkkelord, kreativer ...). Rekkefølge: grant -> KUN eieren (ingen delegat) -> step-up (enhetssignert økt) ->
+      // `executeGrowthWrite` (journal + `ToolGateway.execute()`: mål-autorisasjon, klasse D-kjede, idempotens, readback, varsling). Svaret er journalraden med FØR-/ETTER-tilstand og utfall (SUCCESS/NOOP/UNKNOWN/PARTIAL/FAILED).
+      const authed = await authedRequest(req, res, deps, ["provider", "action", "parameters", "idempotency_key", "command_id", "experiment_id", "variant_id"]);
+      if (!authed) return;
+      if (!(await requireOwner(res, deps, authed.identity, { tool_id: "growth", action: "mutate" }))) return;
+      const growthStepUp = stepUpDenial(authed.identity, "growth_mutate");
+      if (growthStepUp) return json(res, 403, { error: "step_up_required", reason: growthStepUp, request_id: requestIdOf(res) });
+      const commandId = fieldOptionalString(authed.body, "command_id");
+      const experimentId = fieldOptionalString(authed.body, "experiment_id");
+      const variantId = fieldOptionalString(authed.body, "variant_id");
+      try {
+        const execution = await executeGrowthWrite(deps.growthWrites.executor, authed.identity, {
+          provider: fieldString(authed.body, "provider"), action: fieldString(authed.body, "action"), parameters: fieldRecord(authed.body, "parameters") as Record<string, JsonValue>,
+          idempotency_key: fieldString(authed.body, "idempotency_key"), source: "owner_route", session_id: authed.identity.session_id,
+          ...(commandId !== undefined ? { command_id: commandId } : {}), ...(experimentId !== undefined ? { experiment_id: experimentId } : {}), ...(variantId !== undefined ? { variant_id: variantId } : {})
+        });
+        return json(res, 200, { execution });
+      } catch (err) {
+        if (err instanceof HttpError) throw err;
+        // Kun VÅRE egne, bevisste feilkoder (ukjent handling, nøkkel-/kommando-/konfliktfeil) vises til eieren; alt annet logges og blir generisk.
+        const reason = (err as Error).message;
+        if (/^(growth_write_[a-z_]+|growth_command_[a-z_]+)(?::|$)/.test(reason)) return json(res, 400, { error: "growth_write_rejected", reason: reason.slice(0, 80), request_id: requestIdOf(res) });
+        return domainFailure(res, 400, "growth_write_rejected", err);
+      }
+    }
+
+    if (deps.growthWrites?.writes && req.method === "POST" && url.pathname === "/growth/read") {
+      // WP-D3: klasse A-lesing av leverandørtilstand (kampanje-/annonsegruppe-/nøkkelord-/eiendomstilstand osv.) for eieren. Kun registrerte klasse A-handlinger i skrive-familiens navnerom kan nås; utdata er UBETRODD data
+      // (kampanje-/kreativ-/omtaletekst er leverandør- eller brukerskrevet) og merkes som sådan - aldri instruksjoner.
+      const authed = await authedRequest(req, res, deps, ["provider", "action", "parameters"]);
+      if (!authed) return;
+      if (!(await requireOwner(res, deps, authed.identity, { tool_id: "growth", action: "read" }))) return;
+      const entry = deps.growthWrites.executor.index.get(`${fieldString(authed.body, "provider")}.${fieldString(authed.body, "action")}`);
+      if (!entry || entry.op.risk !== "A" || !deps.growthWrites.executor.gateway.get(entry.spec.toolId, entry.op.action)) return json(res, 400, { error: "growth_read_unknown_action", request_id: requestIdOf(res) });
+      const result = await deps.growthWrites.executor.gateway.execute({
+        identity: authed.identity, tool_id: entry.spec.toolId, action: entry.op.action,
+        parameters: (authed.body["parameters"] === undefined ? {} : fieldRecord(authed.body, "parameters")) as Record<string, JsonValue>
+      });
+      if (!result.ok) return json(res, 200, { ok: false, reason: result.reason.slice(0, 120), request_id: requestIdOf(res) });
+      return json(res, 200, { ok: true, output_trust: result.output_trust, data: result.data ?? null });
+    }
+
+    if (deps.growthWrites?.writes && req.method === "POST" && url.pathname === "/growth/writes/list") {
+      // WP-D3: skrivejournalen (FØR-/ETTER-tilstand, utfall, proveniens) for eieren. Ren lesing under RLS.
+      const authed = await authedRequest(req, res, deps, ["campaign_id", "status", "provider", "limit"]);
+      if (!authed) return;
+      if (!(await requireOwner(res, deps, authed.identity, { tool_id: "growth", action: "writes_list" }))) return;
+      const status = fieldOptionalString(authed.body, "status") as GrowthWriteStatusFilter | undefined;
+      if (status !== undefined && !["requested", "applied", "failed", "outcome_unknown"].includes(status)) return json(res, 400, { error: "malformed_request", reason: "status", request_id: requestIdOf(res) });
+      const campaignFilter = fieldOptionalString(authed.body, "campaign_id");
+      const providerFilter = fieldOptionalString(authed.body, "provider");
+      const limit = fieldOptionalNumber(authed.body, "limit");
+      const writes = await deps.growthWrites.executor.journal.list(authed.identity.tenant_id, authed.identity.memory_space_id as never, {
+        ...(campaignFilter !== undefined ? { campaign_id: campaignFilter } : {}), ...(status !== undefined ? { status } : {}), ...(providerFilter !== undefined ? { provider: providerFilter } : {}), ...(limit !== undefined ? { limit } : {})
+      });
+      return json(res, 200, { writes });
+    }
+
+    if (deps.growthWrites?.experiments && req.method === "POST" && url.pathname === "/growth/experiments") {
+      // WP-D3: eksperimentregisteret (plan/variant/observasjon/utfall, evaluering, kreativ-intelligens) for eieren. Går via `ToolGateway.execute()` (verktøyet `growth.*` er eier-eksklusivt). Skriving krever step-up.
+      const authed = await authedRequest(req, res, deps, ["action", "parameters", "idempotency_key"]);
+      if (!authed) return;
+      if (!(await requireOwner(res, deps, authed.identity, { tool_id: "growth", action: "experiments" }))) return;
+      const action = fieldString(authed.body, "action");
+      const definition = (GROWTH_EXPERIMENT_TOOL_ACTIONS as readonly string[]).includes(action) ? deps.growthWrites.executor.gateway.get("growth", action) : undefined;
+      if (!definition) return json(res, 400, { error: "growth_experiment_unknown_action", request_id: requestIdOf(res) });
+      if (definition.capability_class !== "A") {
+        const experimentStepUp = stepUpDenial(authed.identity, "growth_experiments");
+        if (experimentStepUp) return json(res, 403, { error: "step_up_required", reason: experimentStepUp, request_id: requestIdOf(res) });
+      }
+      const idempotencyKey = fieldOptionalString(authed.body, "idempotency_key");
+      const result = await deps.growthWrites.executor.gateway.execute({
+        identity: authed.identity, tool_id: "growth", action, ...(idempotencyKey !== undefined ? { idempotency_key: idempotencyKey } : {}),
         parameters: (authed.body["parameters"] === undefined ? {} : fieldRecord(authed.body, "parameters")) as Record<string, JsonValue>
       });
       if (!result.ok) return json(res, 200, { ok: false, reason: result.reason.slice(0, 120), request_id: requestIdOf(res) });

@@ -62,7 +62,9 @@ const FINANCIAL_NAMESPACES = /^(finance|finance_[a-z]+)$/;
 /** Namerom som ALDRI kan stå på en modellflate, uansett handling (eier-kontroll, penger, infra, selvmodifikasjon, samtykke, styring). */
 export const OWNER_ONLY_NAMESPACES: ReadonlySet<string> = new Set([
   "owner_controls", "self_modification", "docker", "gce", "cloudflare", "langfuse", "infisical", "postgres_ops", "mcp_zapier", "browser", "incidents", "governance", "situations", "consent",
-  "finance", "finance_spend", "finance_stripe", "finance_vipps", "finance_neonomics", "finance_wallester", "data-erasure", "scheduler"
+  "finance", "finance_spend", "finance_stripe", "finance_vipps", "finance_neonomics", "finance_wallester", "data-erasure", "scheduler",
+  // WP-D3 (UA-4 Growth, D-459): skrivehandlingene mot annonse-/analyseplattformene (egne navnerom, adskilt fra de eksisterende `googleads`/`metaads`-lese-/synk-handlingene på chat-nivåene).
+  "growth_googleads", "growth_metaads", "growth_ga4", "growth_searchconsole", "growth_gbp", "growth_linkedin", "growth_youtube", "growth_tiktok"
 ]);
 
 const PAID_MEDIA = new Set(["openai_images", "runway", "kling", "google_veo", "higgsfield"]);
