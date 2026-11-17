@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- den falske leverandøren og HTTP-assertions leser dypt i ikke-typet JSON (forespørselskropper, svar-konvolutter); typing av hver form ville bare duplisere skjemaene. */
 import { mkdtemp } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
