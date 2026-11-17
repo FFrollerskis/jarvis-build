@@ -10,6 +10,7 @@ import {
   type CostPoint, type CredentialState, type FreezeVerdict, type MaintenanceTask, type MeasuredFact, type MemoryFact, type MemorySourceKind, type ReadinessFacts, type ReadinessVerdict
 } from "@jarvis/self-modification";
 import { readSchedulerHealth, type ConnectorStatus, type MeshToolMapping } from "@jarvis/tool-gateway";
+import { monthTrendSamples } from "./cost-trend.ts";
 import type { Ev0BootStatus } from "./ev0-boot.ts";
 import type { RadarState } from "./evolution-radar.ts";
 import { GOLDEN_SUITE_DIGEST, WIRING_LOCKS, runGolden, type GoldenRun } from "./golden-suite.ts";
@@ -257,17 +258,16 @@ export async function costSection(ctx: EvolutionContext): Promise<EvolutionSecti
   const burn = dayOfMonth > 0 ? monthToDate / dayOfMonth : 0;
   const runway = creditRunway({ balance_ore: Math.max(0, hardLimit - monthToDate), burn_ore_per_day: burn, warn_days: 7 });
   // Prognose mot månedens hardgrense fra kumulative dagssummer (kun når det finnes nok dager i måneden).
-  const perDay = new Map<string, number>();
-  for (const p of points) if (p.day >= monthStart.slice(0, 10)) perDay.set(p.day, (perDay.get(p.day) ?? 0) + p.ore);
-  let cumulative = 0;
-  const samples = [...perDay.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([day, v]) => ({ at: `${day}T12:00:00.000Z`, value: (cumulative += v) }));
-  const forecast = forecastBreach(samples, hardLimit, 45, 5);
+  // M1 (WP-B3-gjennomgang): dagssummene er et AVGRENSET vindu (siste 15 døgn), men «hittil i måneden» er hele måneden - serien seedes derfor med forbruket FØR vinduet (månedssummen minus vindusdagene i måneden), ellers
+  // undervurderes trenden fra dag 16 (se `cost-trend.ts`). Usamstemte summer gir en ærlig «ikke målt» i stedet for en trend som ser grei ut.
+  const trendSamples = monthTrendSamples({ month: today.slice(0, 7), month_to_date_ore: monthToDate, daily: points });
+  const forecast = trendSamples.ok ? forecastBreach(trendSamples.samples, hardLimit, 45, 5) : { days_to_breach: null, slope_per_day: 0, samples: 0, confidence: "low" as const };
   const findings: string[] = [
     `Hittil i måneden: ${ore(monthToDate)} (varselgrense ${ore(warnLimit)}, hardgrense ${ore(hardLimit)}).`,
     runway.days_left === null ? "Ingen kostnad hittil i måneden, så ingen utregnet rekkevidde." : `Rekkevidde til hardgrensen med dagens tempo: ${runway.days_left} dager.`
   ];
   if (forecast.confidence === "ok" && forecast.days_to_breach !== null) findings.push(`Prognose: hardgrensen nås om ca. ${forecast.days_to_breach} dager med dagens vekst.`);
-  else if (forecast.confidence === "low") findings.push("For lite data i måneden til en trendprognose.");
+  else if (forecast.confidence === "low") findings.push(trendSamples.ok ? "For lite data i måneden til en trendprognose." : "Trenden er ikke målt: dagssummene og månedssummen stemmer ikke overens.");
   for (const a of anomalies.slice(0, 5)) findings.push(`Uvanlig kostnad i dag hos ${a.key}: ${ore(a.today_ore)} mot snitt ${ore(a.baseline_mean_ore)} (z=${a.z}).`);
   findings.push("Prognosene foreslår kun; ingen utgift, opprydding eller påfyll utløses herfra (alt kapasitetsforslag er eier- og finansport).");
   const attention = anomalies.length > 0 || runway.warn || monthToDate >= warnLimit || (forecast.days_to_breach !== null && forecast.days_to_breach <= 14);

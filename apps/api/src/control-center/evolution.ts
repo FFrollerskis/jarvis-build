@@ -7,6 +7,7 @@ import {
 } from "@jarvis/executive";
 import { BudgetGuard, budgetConfigFromEnv, type BudgetConfig } from "@jarvis/model-gateway";
 import { creditRunway, forecastBreach, type ReadinessVerdict } from "@jarvis/self-modification";
+import { monthTrendSamples } from "../cost-trend.ts";
 import type { Ev0BootStatus } from "../ev0-boot.ts";
 import type { RunRateReport } from "../run-rate.ts";
 import { DAY_MS, countsNo, safeCategory, safeRef, settle, tenantRows, toInt, toIso, type ControlCenterPool, type Settled } from "./shared.ts";
@@ -63,6 +64,8 @@ function evNumber(ev: string): number {
 }
 
 const kr = (ore: number): string => `${(ore / 100).toFixed(2).replace(".", ",")} kr`;
+/** Et gyldig beløp i øre: et endelig, ikke-negativt tall. NaN, negativt og alt som ikke er et tall er UKJENT (gjennomgang L3: ugyldig er aldri «i orden»). */
+const validOre = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0;
 
 /** Rapporten som sentret leser: kun seksjonene (og målt-tidspunktet hvis det finnes). Strukturelt - `createEvolutionReportProvider` oppfyller det. */
 export type EvolutionReportRead = () => Promise<Pick<EvolutionReport, "sections"> & { as_of?: string }>;
@@ -389,7 +392,10 @@ function costModelSection(
     }));
 
   let spent: number | null = null;
-  if (budget.ok) {
+  if (budget.ok && !validOre(budget.value.spent_ore)) {
+    // L3: forbruket var ikke et gyldig tall (NaN, negativt): ukjent - aldri en OK-rad og aldri grunnlag for rekkevidde/trend.
+    items.push(controlItem({ id: "month_to_date", label: "Forbruk hittil denne måneden", status: "UNKNOWN", detail_no: "Forbruket var ikke et gyldig tall (ikke målt).", facts: { level: null, spent_month_ore: null } }));
+  } else if (budget.ok) {
     spent = budget.value.spent_ore;
     const b = budget.value;
     const status: ControlStatus = b.level === "ok" ? "OK" : b.level === "warn" ? "WARN" : "FAIL";
@@ -414,9 +420,16 @@ function costModelSection(
   } else {
     rr = runRate.value;
     const projected = rr.totals.projected_month_ore;
-    const base = { projected_month_ore: projected, basis: "snitt siste 7 døgn x 30", today_ore: rr.totals.today_ore, last_7d_ore: rr.totals.last_7d_ore, last_30d_ore: rr.totals.last_30d_ore, cloud_share_30d: rr.cloud_share_30d };
+    const num = (n: unknown): number | null => (validOre(n) ? n : null); // ugyldige tall står som null i fakta (aldri NaN)
+    const base = {
+      projected_month_ore: num(projected), basis: "snitt siste 7 døgn x 30", today_ore: num(rr.totals.today_ore), last_7d_ore: num(rr.totals.last_7d_ore), last_30d_ore: num(rr.totals.last_30d_ore),
+      cloud_share_30d: typeof rr.cloud_share_30d === "number" && Number.isFinite(rr.cloud_share_30d) ? rr.cloud_share_30d : null
+    };
     if (projected === null) {
       items.push(controlItem({ id: "projection", label: "Månedsprognose", status: "UNKNOWN", detail_no: "For lite data til en prognose (under 3 døgn med målinger siste 7 døgn) - ikke målt.", facts: base }));
+    } else if (!validOre(projected)) {
+      // L3: «Prognose NaN kr ... under varselgrensen» ville lest som OK. Et ugyldig tall (NaN, negativt, ikke et tall) er ukjent.
+      items.push(controlItem({ id: "projection", label: "Månedsprognose", status: "UNKNOWN", detail_no: "Prognosen fra run-rate var ikke et gyldig tall (ikke målt).", facts: base }));
     } else if (lim === null) {
       items.push(controlItem({ id: "projection", label: "Månedsprognose", status: "UNKNOWN", detail_no: `Prognose ${kr(projected)} (snitt siste 7 døgn x 30), men grensene er ukjente - kan ikke vurderes mot dem.`, facts: base }));
     } else {
@@ -434,7 +447,11 @@ function costModelSection(
   if (lim !== null && spent !== null && rr !== null) {
     const asOf = new Date(rr.as_of);
     const dayOfMonth = Number.isNaN(asOf.getTime()) ? 0 : asOf.getUTCDate();
-    if (dayOfMonth > 0) {
+    if (dayOfMonth === 0) {
+      // L3: et ugyldig målt-tidspunkt gir ingen dag i måneden - rekkevidde og trend kan ikke regnes. De står som UKJENT (aldri stille utelatt, aldri OK).
+      items.push(controlItem({ id: "runway", label: "Rekkevidde til hardgrensen", status: "UNKNOWN", detail_no: "Run-rate ga et ugyldig målt-tidspunkt, så rekkevidden kan ikke regnes (ikke målt).", facts: { days_left: null, burn_ore_per_day: null } }));
+      items.push(controlItem({ id: "trend", label: "Trend mot hardgrensen", status: "UNKNOWN", detail_no: "Run-rate ga et ugyldig målt-tidspunkt, så trenden kan ikke regnes (ikke målt).", facts: { days_to_breach: null, samples: null, confidence: null } }));
+    } else {
       const burn = spent / dayOfMonth;
       const runway = creditRunway({ balance_ore: Math.max(0, lim.hard_limit_ore - spent), burn_ore_per_day: burn, warn_days: RUNWAY_WARN_DAYS });
       items.push(controlItem({
@@ -442,19 +459,28 @@ function costModelSection(
         detail_no: runway.days_left === null ? "Ikke noe forbruk hittil i måneden, så ingen utregnet rekkevidde." : `Med månedens snitt (${kr(Math.round(burn))} per døgn) nås hardgrensen om ca. ${runway.days_left} dager.${runway.warn ? " Det er kort." : ""}`,
         facts: { days_left: runway.days_left, burn_ore_per_day: Math.round(burn) }
       }));
-      const month = rr.as_of.slice(0, 7);
-      let cumulative = 0;
-      const samples = rr.daily.filter((d) => typeof d.day === "string" && d.day.startsWith(month)).sort((a, b) => a.day.localeCompare(b.day)).map((d) => ({ at: `${d.day}T12:00:00.000Z`, value: (cumulative += toInt(d.ore)) }));
-      const trend = forecastBreach(samples, lim.hard_limit_ore, 45, 5);
-      if (trend.confidence === "low") {
-        items.push(controlItem({ id: "trend", label: "Trend mot hardgrensen", status: "UNKNOWN", detail_no: "For lite data i måneden til en trendprognose (krever minst 5 dager med kostnad over minst 2 døgn) - ikke målt.", facts: { days_to_breach: null, samples: trend.samples, confidence: trend.confidence } }));
-      } else {
-        const soon = trend.days_to_breach !== null && trend.days_to_breach <= TREND_WARN_DAYS;
+      // M1: dagssummene i run-rate er et AVGRENSET vindu (siste 14 døgn). Den kumulative serien seedes derfor med forbruket FØR vinduet (månedssummen minus vindusdagene i måneden) - ellers undervurderes måned-til-dato fra dag 15.
+      const built = monthTrendSamples({ month: asOf.toISOString().slice(0, 7), month_to_date_ore: spent, daily: rr.daily });
+      if (!built.ok) {
         items.push(controlItem({
-          id: "trend", label: "Trend mot hardgrensen", status: soon ? "WARN" : "OK",
-          detail_no: trend.days_to_breach === null ? "Ingen brudd på hardgrensen innen 45 dager med dagens vekst." : trend.days_to_breach === 0 ? "Trenden ligger allerede på eller over hardgrensen." : `Med dagens vekst nås hardgrensen om ca. ${trend.days_to_breach} dager.`,
-          facts: { days_to_breach: trend.days_to_breach, slope_ore_per_day: trend.slope_per_day, samples: trend.samples, confidence: trend.confidence }
+          id: "trend", label: "Trend mot hardgrensen", status: "UNKNOWN",
+          detail_no: built.reason === "inconsistent_sums"
+            ? "Dagssummene og forbruket hittil i måneden stemmer ikke overens (kildene ble lest litt ulikt), så trenden kan ikke regnes sikkert - ikke målt."
+            : "Dagssummene fra run-rate hadde ugyldige tall, så trenden kan ikke regnes - ikke målt.",
+          facts: { days_to_breach: null, samples: null, confidence: null }
         }));
+      } else {
+        const trend = forecastBreach(built.samples, lim.hard_limit_ore, 45, 5);
+        if (trend.confidence === "low") {
+          items.push(controlItem({ id: "trend", label: "Trend mot hardgrensen", status: "UNKNOWN", detail_no: "For lite data i måneden til en trendprognose (krever minst 5 dager med kostnad over minst 2 døgn) - ikke målt.", facts: { days_to_breach: null, samples: trend.samples, confidence: trend.confidence } }));
+        } else {
+          const soon = trend.days_to_breach !== null && trend.days_to_breach <= TREND_WARN_DAYS;
+          items.push(controlItem({
+            id: "trend", label: "Trend mot hardgrensen", status: soon ? "WARN" : "OK",
+            detail_no: trend.days_to_breach === null ? "Ingen brudd på hardgrensen innen 45 dager med dagens vekst." : trend.days_to_breach === 0 ? "Trenden ligger allerede på eller over hardgrensen." : `Med dagens vekst nås hardgrensen om ca. ${trend.days_to_breach} dager.`,
+            facts: { days_to_breach: trend.days_to_breach, slope_ore_per_day: trend.slope_per_day, samples: trend.samples, confidence: trend.confidence, seed_ore: built.seed_ore }
+          }));
+        }
       }
     }
   }

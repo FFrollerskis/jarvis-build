@@ -51,10 +51,10 @@ const readinessOf = (facts: ReadinessFacts) => async (): Promise<readonly Readin
 
 const BOOT_OK: Ev0BootStatus = { constitution: { status: "verified", version: 1, digest: "a".repeat(64) }, ledger: { status: "ok", count: 12, head_hash: "b".repeat(64) } };
 
-function runRateReport(over: { projected?: number | null; today?: number; d7?: number; d30?: number; daily?: Array<{ day: string; ore: number }> } = {}): RunRateReport {
+function runRateReport(over: { projected?: number | null; today?: number; d7?: number; d30?: number; daily?: Array<{ day: string; ore: number }>; asOf?: string } = {}): RunRateReport {
   const daily = over.daily ?? [];
   return {
-    as_of: NOW.toISOString(),
+    as_of: over.asOf ?? NOW.toISOString(),
     totals: { today_ore: over.today ?? 1_000, last_7d_ore: over.d7 ?? 7_000, last_30d_ore: over.d30 ?? 30_000, projected_month_ore: over.projected === undefined ? 30_000 : over.projected },
     cloud_share_30d: 0.4, by_provider: [], by_purpose: [], daily: daily.map((d) => ({ day: d.day, calls: 1, ore: d.ore })),
     maintenance: { minutes_30d: 0, by_connector: [], recent: [] }, value_loop: { brief_days_30d: 3 },
@@ -64,6 +64,17 @@ function runRateReport(over: { projected?: number | null; today?: number; d7?: n
 }
 /** Daglige summer for denne måneden (15 døgn: 1.-15. november), med fast beløp per døgn. */
 const monthDaily = (perDay: number, days = 15): Array<{ day: string; ore: number }> => Array.from({ length: days }, (_, i) => ({ day: `2026-11-${String(i + 1).padStart(2, "0")}`, ore: perDay }));
+/**
+ * REALISTISK run-rate-vindu (`at >= now() - interval '14 days'`, run-rate.ts) for dag `day` i november kl. 10:00 UTC: 15 kalenderdøgn der det første og det siste er DELVISE (40 %), resten fulle - og månedssummen (BudgetGuard) er HELE månedens forbruk
+ * (fulle døgn før i dag + dagens delvise). Fra dag 15 ligger forbruk fra før vinduet kun i månedssummen (gjennomgang M1). Over dag 15 starter vinduet i forrige måned (oktober), og alt forbruk i måneden ligger i vinduet.
+ */
+function steadyMonth(day: number, perDay = 10_000): { as_of: string; daily: Array<{ day: string; ore: number }>; spent: number } {
+  const daily = Array.from({ length: 15 }, (_, i) => {
+    const d = day - 14 + i;
+    return { day: d >= 1 ? `2026-11-${String(d).padStart(2, "0")}` : `2026-10-${String(31 + d).padStart(2, "0")}`, ore: i === 0 || i === 14 ? Math.round(perDay * 0.4) : perDay };
+  });
+  return { as_of: `2026-11-${String(day).padStart(2, "0")}T10:00:00.000Z`, daily, spent: (day - 1) * perDay + Math.round(perDay * 0.4) };
+}
 
 interface LedgerFixture {
   by_decision?: Array<{ decision: string; n: number }>;
@@ -525,7 +536,9 @@ describe("6. kostmodellen (EV-16): grenser, forbruk, prognose, rekkevidde og tre
   });
 
   it("trenden (EV-16 forecastBreach): for lite data = UKJENT; kraftig vekst mot hardgrensen innen 14 døgn = WARN; flat vekst = OK", async () => {
-    const trend = async (daily: Array<{ day: string; ore: number }>, spent = 50_000) => itemOf(cost((await reportOf({ runRate: { report: async () => runRateReport({ projected: 10_000, daily }) } }, { spent })).report), "trend");
+    // Månedssummen er konsistent med dagssummene (vinduet dekker hele måneden: dag 15), ellers er kildene usamstemte (egen test under).
+    const inMonth = (daily: Array<{ day: string; ore: number }>): number => daily.filter((d) => d.day.startsWith("2026-11")).reduce((a, d) => a + d.ore, 0);
+    const trend = async (daily: Array<{ day: string; ore: number }>, spent = inMonth(daily)) => itemOf(cost((await reportOf({ runRate: { report: async () => runRateReport({ projected: 10_000, daily }) } }, { spent })).report), "trend");
     const few = await trend(monthDaily(500, 3));
     expect(few.status).toBe("UNKNOWN");
     expect(few.facts?.["days_to_breach"]).toBeNull();
@@ -539,6 +552,117 @@ describe("6. kostmodellen (EV-16): grenser, forbruk, prognose, rekkevidde og tre
     // dager fra FORRIGE måned teller ikke med i månedens trend
     const prev = await trend([...Array.from({ length: 10 }, (_, i) => ({ day: `2026-10-${String(i + 20).padStart(2, "0")}`, ore: 9_000 })), ...monthDaily(100, 2)]);
     expect(prev.status).toBe("UNKNOWN");
+  });
+
+  describe("M1 (gjennomgang): trenden regner med HELE månedens forbruk, ikke bare run-rate-vinduet (siste 14 døgn)", () => {
+    const run = async (day: number, over: { spent?: number; perDay?: number } = {}) => {
+      const m = steadyMonth(day, over.perDay);
+      const r = await reportOf({ runRate: { report: async () => runRateReport({ projected: 300_000, daily: m.daily, asOf: m.as_of }) } }, { spent: over.spent ?? m.spent });
+      return { trend: itemOf(cost(r.report), "trend"), runway: itemOf(cost(r.report), "runway"), report: r.report, m };
+    };
+
+    it("jevnt 100 kr/døgn, hardgrense 3000 kr, DAG 20: trenden og rekkevidden er ENIGE (ca. 10-11 døgn, WARN) - ikke «ca. 16 døgn» OK som før fiksen", async () => {
+      const { trend, runway, m } = await run(20);
+      expect(m.daily).toHaveLength(15);
+      expect(m.spent).toBe(194_000);
+      expect(Number(runway.facts?.["days_left"])).toBeGreaterThan(10);
+      expect(Number(runway.facts?.["days_left"])).toBeLessThan(11.5);
+      expect(trend.status).toBe("WARN");
+      const days = Number(trend.facts?.["days_to_breach"]);
+      expect(days).toBeGreaterThan(9);
+      expect(days).toBeLessThan(12);
+      expect(Math.abs(days - Number(runway.facts?.["days_left"]))).toBeLessThan(2);
+      // frøet er forbruket FØR vinduet (dag 1-5 + dag 6 før klokkeslettet): 194 000 - (4 000 + 13 x 10 000 + 4 000)
+      expect(trend.facts?.["seed_ore"]).toBe(56_000);
+    });
+
+    it("DAG 28 (2740 kr brukt): rekkevidden sier ca. 2-3 døgn (WARN), og trenden sier det samme - ikke «16 døgn» OK", async () => {
+      const { trend, runway } = await run(28);
+      expect(runway.status).toBe("WARN");
+      expect(trend.status).toBe("WARN");
+      expect(Number(trend.facts?.["days_to_breach"])).toBeLessThan(4);
+      expect(Math.abs(Number(trend.facts?.["days_to_breach"]) - Number(runway.facts?.["days_left"]))).toBeLessThan(2);
+    });
+
+    it("når vinduet dekker hele måneden (dag 10) er frøet 0 og trenden er den samme som før: ca. 20 døgn, OK, og enig med rekkevidden", async () => {
+      const { trend, runway } = await run(10);
+      expect(trend.facts?.["seed_ore"]).toBe(0);
+      expect(trend.status).toBe("OK");
+      expect(Math.abs(Number(trend.facts?.["days_to_breach"]) - Number(runway.facts?.["days_left"]))).toBeLessThan(3);
+    });
+
+    it("dag 15-31 gir aldri en trend som er mer enn 3 døgn fra rekkevidden ved jevnt forbruk (sveip over alle dager i november)", async () => {
+      for (let day = 12; day <= 30; day += 1) {
+        const { trend, runway } = await run(day);
+        if (trend.status === "UNKNOWN") continue; // for lite data tidlig i måneden er ukjent, aldri OK
+        const t = trend.facts?.["days_to_breach"];
+        const rd = Number(runway.facts?.["days_left"]);
+        if (t === null) expect(rd, `dag ${day}`).toBeGreaterThan(40); // ingen brudd innen 45 døgn <=> rekkevidden er lang
+        else expect(Math.abs(Number(t) - rd), `dag ${day}`).toBeLessThan(3);
+      }
+    });
+
+    it("usamstemte kilder (dagssummene er STØRRE enn månedssummen) gir UKJENT - aldri en trend som ser grei ut - og ugyldige dagstall gir UKJENT", async () => {
+      const inconsistent = await run(20, { spent: 50_000 });
+      expect(inconsistent.trend.status).toBe("UNKNOWN");
+      expect(inconsistent.trend.detail_no).toContain("stemmer ikke overens");
+      expect(inconsistent.trend.facts).toMatchObject({ days_to_breach: null });
+      // en liten overskridelse (en rad som landet mellom de to avlesningene; vinduet dekker hele måneden på dag 10) tåles og gir fortsatt en trend - en stor gjør det ikke
+      const slightly = await run(10, { spent: steadyMonth(10).spent - 300 });
+      expect(slightly.trend.status).not.toBe("UNKNOWN");
+      expect(slightly.trend.facts?.["seed_ore"]).toBe(0);
+      expect((await run(10, { spent: steadyMonth(10).spent - 5_000 })).trend.status).toBe("UNKNOWN");
+      const m = steadyMonth(20);
+      const bad = await reportOf({ runRate: { report: async () => runRateReport({ projected: 300_000, daily: [...steadyMonth(20).daily.slice(0, 3), { day: "2026-11-xx", ore: 5 }, { day: "2026-11-21", ore: Number.NaN }], asOf: m.as_of }) } }, { spent: m.spent });
+      expect(itemOf(cost(bad.report), "trend").status).toBe("UNKNOWN");
+      expect(itemOf(cost(bad.report), "trend").detail_no).toContain("ugyldige tall");
+    });
+  });
+
+  describe("L3 (gjennomgang): ugyldige tall og tidspunkt er UKJENT - aldri OK", () => {
+    const rr = (over: Parameters<typeof runRateReport>[0], spent = 12_345) => reportOf({ runRate: { report: async () => runRateReport(over) } }, { spent });
+
+    it("prognosen er NaN, uendelig, negativ eller ikke et tall → UKJENT (ikke «Prognose NaN kr ... under varselgrensen» OK), og tallet står som null i fakta", async () => {
+      for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -5, "30000" as never]) {
+        const item = itemOf(cost((await rr({ projected: bad })).report), "projection");
+        expect(item.status, String(bad)).toBe("UNKNOWN");
+        expect(item.detail_no, String(bad)).toContain("ikke et gyldig tall");
+        expect(item.facts?.["projected_month_ore"], String(bad)).toBeNull();
+        expect(item.detail_no).not.toMatch(/NaN|Infinity/);
+      }
+      expect(itemOf(cost((await rr({ projected: 30_000 })).report), "projection").status).toBe("OK");
+    });
+
+    it("ugyldige beløp i prognosens øvrige fakta (i dag, 7 d, 30 d) blir null - aldri NaN i rapporten", async () => {
+      const r = await rr({ projected: 30_000, today: Number.NaN, d7: -1, d30: Number.POSITIVE_INFINITY });
+      const facts = itemOf(cost(r.report), "projection").facts;
+      expect(facts).toMatchObject({ projected_month_ore: 30_000, today_ore: null, last_7d_ore: null, last_30d_ore: null });
+      expect(JSON.stringify(r.report)).not.toMatch(/NaN|Infinity/);
+    });
+
+    it("ugyldig `as_of` fra run-rate: rekkevidden OG trenden er UKJENT (de er ikke stille utelatt), og begge sier hvorfor", async () => {
+      for (const asOf of ["ikke en dato", "", "2026-13-45T99:99:99Z"]) {
+        const r = await rr({ projected: 30_000, daily: monthDaily(500), asOf });
+        const runway = itemOf(cost(r.report), "runway");
+        const trend = itemOf(cost(r.report), "trend");
+        expect(runway.status, asOf).toBe("UNKNOWN");
+        expect(trend.status, asOf).toBe("UNKNOWN");
+        expect(runway.detail_no).toContain("ugyldig målt-tidspunkt");
+        expect(trend.detail_no).toContain("ugyldig målt-tidspunkt");
+        expect(r.report.status).not.toBe("OK");
+      }
+    });
+
+    it("ugyldig forbruk hittil i måneden (NaN eller negativt) → UKJENT, og rekkevidde/trend regnes IKKE av det", async () => {
+      for (const spent of [Number.NaN, -1]) {
+        const r = await rr({ projected: 30_000, daily: monthDaily(500) }, spent);
+        const item = itemOf(cost(r.report), "month_to_date");
+        expect(item.status, String(spent)).toBe("UNKNOWN");
+        expect(item.facts).toMatchObject({ level: null, spent_month_ore: null });
+        expect(cost(r.report).items.find((i) => i.id === "runway" || i.id === "trend")).toBeUndefined();
+        expect(JSON.stringify(r.report)).not.toMatch(/NaN|Infinity/);
+      }
+    });
   });
 
   it("kilder som svikter gir UKJENT for SINE rader (aldri OK, aldri 0): forbruk (databasefeil), run-rate (kaster) og run-rate (ikke koblet inn)", async () => {
