@@ -7,7 +7,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
-import { IncidentService } from "@jarvis/incidents";
+import { IncidentService, providerProducer, type ProducerContext } from "@jarvis/incidents";
 import { MemoryAlertSink, Watchdog, type HealthCheck } from "@jarvis/watchdog";
 import {
   NOT_A_CONNECTION_TOOL_IDS, connectorStatusesFromGateway, createIncidentProducerLoop, createWatchdogIncidentBridge, parseIncidentProducerConfig,
@@ -66,15 +66,52 @@ describe("tilkoblingshelse og kjøre-løkken", () => {
     expect(statuses.find((s) => s.id === "postgres_ops")?.display_name).toBe("postgres_ops");
   });
 
-  it("L1 (WP-B3-gjennomgang): Jarvis' EGEN kontrollflate (`executive`) er ikke en tilkobling - et avslag som merker den «utilgjengelig» blir aldri en hendelse, mens ekte tilkoblinger (også de som ikke står i registeret) fortsatt gjør det", () => {
-    const health = new Map([
-      ["executive", { state: "unavailable", at: "2026-10-09T10:00:00Z", detail: "proposal_digest_mismatch" }],
-      ["github", { state: "unavailable", at: "2026-10-09T10:00:00Z", detail: "github_error_503" }],
-      ["growth_googleads", { state: "auth_failed", at: "2026-10-09T10:01:00Z" }]
-    ]);
-    const ids = connectorStatusesFromGateway({ health }).map((s) => s.id);
-    expect(ids).toEqual(["github", "growth_googleads"]);
-    expect([...NOT_A_CONNECTION_TOOL_IDS]).toEqual(["executive"]);
+  describe("L1 (WP-B3-gjennomgang + re-review NYTT 1): Jarvis' EGEN kontrollflate (`executive`) er ikke en tilkobling - et avslag åpner ALDRI en hendelse, men en allerede åpen hendelse kan fortsatt lukkes automatisk", () => {
+    const FAILED_AT = "2026-10-09T10:00:00.000Z";
+    const HEALED_AT = "2026-10-09T10:05:00.000Z";
+    const ctx: ProducerContext = { tenantId: "t1", memorySpace: "business", now: new Date("2026-10-09T10:10:00.000Z") };
+    const gatewayOf = (executive: { state: string; at: string; detail?: string }) => ({
+      health: new Map([
+        ["executive", executive], ["github", { state: "unavailable", at: FAILED_AT, detail: "github_error_503" }], ["growth_googleads", { state: "auth_failed", at: FAILED_AT }]
+      ])
+    });
+    /** Den ekte produsenten over de ekte statusene fra `connectorStatusesFromGateway` - akkurat slik `buildApiIncidentProducers` kobler den. */
+    const observe = (executive: { state: string; at: string; detail?: string }, active: Array<{ incident_id: string; dedupe_key: string | null; last_seen_at: string | null; opened_at: string }> = []) =>
+      providerProducer({ readStatus: async () => connectorStatusesFromGateway(gatewayOf(executive)) }).observe(ctx, active as never);
+
+    it("raden SENDES (aldri droppet), men som `configured: false`; ekte tilkoblinger er konfigurerte - og kun `executive` er unntatt", () => {
+      const rows = connectorStatusesFromGateway(gatewayOf({ state: "unavailable", at: FAILED_AT, detail: "proposal_digest_mismatch" }));
+      expect(rows.map((r) => [r.id, r.configured])).toEqual([["executive", false], ["github", true], ["growth_googleads", true]]);
+      expect(rows[0]?.health).toMatchObject({ state: "unavailable" }); // helsen er uendret - kun «tilkobling» er falsk
+      expect([...NOT_A_CONNECTION_TOOL_IDS]).toEqual(["executive"]);
+    });
+
+    it("(a) en executive som svikter gir INGEN ny hendelse - mens ekte tilkoblinger som svikter fortsatt gjør det (produsenten er ikke tom)", async () => {
+      const o = await observe({ state: "unavailable", at: FAILED_AT, detail: "proposal_digest_mismatch" });
+      expect(o.present.map((f) => f.subject).sort()).toEqual(["github", "growth_googleads"]);
+      expect(o.present.some((f) => /executive/i.test(f.title) || f.subject === "executive")).toBe(false);
+      expect(o.cleared).toEqual([]);
+      // heller ikke auth_failed-formen (verre alvorlighet) åpner noe for executive
+      const auth = await observe({ state: "auth_failed", at: FAILED_AT, detail: "owner_control_unauthorized" });
+      expect(auth.present.some((f) => f.subject === "executive")).toBe(false);
+    });
+
+    it("(b) en allerede ÅPEN executive-hendelse (åpnet av en eldre versjon) auto-lukkes når raden er frisk igjen og nyere enn siste observerte svikt (`cleared: [\"executive\"]`)", async () => {
+      const active = [{ incident_id: "inc-executive", dedupe_key: "provider:executive", last_seen_at: FAILED_AT, opened_at: FAILED_AT }];
+      const o = await observe({ state: "healthy", at: HEALED_AT }, active);
+      expect(o.cleared.map((c) => c.subject)).toEqual(["executive"]);
+      expect(o.cleared[0]?.check).toMatchObject({ verified_by: "source_recheck", observed_at: HEALED_AT });
+      expect(o.present.some((f) => f.subject === "executive")).toBe(false);
+    });
+
+    it("(b2) men aldri på tvil: er raden fortsatt utilgjengelig, eller ikke nyere enn siste observerte svikt, lukkes ingenting - og det åpnes heller ingenting", async () => {
+      const active = [{ incident_id: "inc-executive", dedupe_key: "provider:executive", last_seen_at: FAILED_AT, opened_at: FAILED_AT }];
+      const stillDown = await observe({ state: "unavailable", at: HEALED_AT }, active);
+      expect(stillDown.cleared).toEqual([]);
+      expect(stillDown.present.some((f) => f.subject === "executive")).toBe(false);
+      const notNewer = await observe({ state: "healthy", at: FAILED_AT }, active);
+      expect(notNewer.cleared).toEqual([]);
+    });
   });
 
   it("en ny runde mens forrige pågår hoppes over, og en feil i en runde kastes aldri ut av løkken", async () => {

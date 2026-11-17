@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
 import { ChannelSessionAuthority, DeviceService, IdentityService, SessionGrantService, SessionService } from "@jarvis/core";
 import { EVOLUTION_DECISION_AUDIT_TYPE, ExecutiveService, ExecutiveTransport, executiveToolDefinitions, type ControlCenterReport } from "@jarvis/executive";
-import { providerProducer } from "@jarvis/incidents";
+import { IncidentService, ProducerRunStore, providerProducer, runIncidentProducers } from "@jarvis/incidents";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ChangeLedger, evaluateAllReadiness, type ReadinessFacts } from "@jarvis/self-modification";
 import { ToolGateway, type SecretProvider } from "@jarvis/tool-gateway";
@@ -343,18 +343,43 @@ describe("F: gjennomgang L1/L2 - en modell kan ikke registrere avgjørelsen, og 
     expect((await decisionRows("r6")).length).toBe(before + 1);
   });
 
-  it("L1: et avslag KASTES og merker `executive` «utilgjengelig» i gatewayen (kjent: helse styrer aldri utførelse) - men det blir ALDRI en hendelse: incident-produsentens statuser har ingen executive-rad", async () => {
+  it("L1: et avslag KASTES og merker `executive` «utilgjengelig» i gatewayen (kjent: helse styrer aldri utførelse) - men det blir ALDRI en hendelse: raden sendes til incident-produsenten som `configured: false`", async () => {
     const r = await exec(undefined, "0".repeat(64)); // utdatert versjon: `proposal_digest_mismatch` (kastet av skriveren)
     expect(r.ok).toBe(false);
     expect(String((r as { reason?: string }).reason)).toContain("proposal_digest_mismatch");
     expect(fresh.gateway.health.get("executive")?.state).toBe("unavailable");
-    expect(connectorStatusesFromGateway(fresh.gateway).map((s) => s.id)).not.toContain("executive");
+    // raden er MED (aldri droppet: en allerede åpen hendelse må kunne lukkes, re-review NYTT 1), men er ikke en tilkobling
+    expect(connectorStatusesFromGateway(fresh.gateway).find((s) => s.id === "executive")).toMatchObject({ configured: false, health: { state: "unavailable" } });
     const observation = await observe(async () => connectorStatusesFromGateway(fresh.gateway));
     expect(observation.present.map((f) => f.subject)).not.toContain("executive");
     expect(observation.present.some((f) => /executive/i.test(f.title))).toBe(false);
     // kontroll av selve testen: med den RÅE gateway-helsen (uten filteret) åpner den samme produsenten «Tilkobling svikter: executive»
     const raw = await observe(async () => [...fresh.gateway.health].map(([id, health]) => ({ id, display_name: id, configured: true, health })));
     expect(raw.present.some((f) => f.subject === "executive" && f.title.includes("Tilkobling svikter"))).toBe(true);
+  });
+
+  it("NYTT 1 (re-review), ENDE-TIL-ENDE med ekte runIncidentProducers + IncidentService + Postgres: en ny svikt åpner ingenting, og en hendelse en eldre versjon allerede åpnet auto-lukkes når executive er frisk igjen", async () => {
+    const incidents = new IncidentService(db.appPool);
+    const runs = new ProducerRunStore(db.appPool);
+    const run = async (readStatus: Parameters<typeof observe>[0]) => (await runIncidentProducers({ incidents, runs }, TENANT_A, "business", [providerProducer({ readStatus })]))[0];
+    const active = async (): Promise<Array<string | null>> => (await incidents.listActiveBySource(TENANT_A, "business", "provider")).map((i) => i.dedupe_key);
+    const fixed = async () => connectorStatusesFromGateway(fresh.gateway);
+    const rawRows = async () => [...fresh.gateway.health].map(([id, health]) => ({ id, display_name: id, configured: true, health }));
+    expect(fresh.gateway.health.get("executive")?.state).toBe("unavailable"); // avslaget i testen over
+    // (a) med den rettede koblingen åpnes ingenting for en executive som svikter
+    expect(await run(fixed)).toMatchObject({ producer: "provider", status: "ok", opened: 0, updated: 0, resolved: 0 });
+    expect(await active()).toEqual([]);
+    // tilstanden ved utrulling: en eldre versjon (rå helse) hadde allerede åpnet «Tilkobling svikter: executive»
+    expect(await run(rawRows)).toMatchObject({ status: "ok", opened: 1 });
+    expect(await active()).toEqual(["provider:executive"]);
+    // rettet kobling mens raden fortsatt er utilgjengelig: hendelsen står åpen, uten oppdatering og uten en ny
+    expect(await run(fixed)).toMatchObject({ opened: 0, updated: 0, resolved: 0 });
+    expect(await active()).toEqual(["provider:executive"]);
+    // (b) executive blir frisk igjen (neste vellykkede kall) -> hendelsen lukkes AUTOMATISK
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect((await fresh.gateway.execute({ identity: ownerIdentity, tool_id: "executive", action: "get_evolution_center", parameters: {} })).ok).toBe(true);
+    expect(await run(fixed)).toMatchObject({ status: "ok", opened: 0, resolved: 1 });
+    expect(await active()).toEqual([]);
   });
 
   it("raden leges av neste vellykkede executive-kall (siden oppfrisker hvert minutt), og er da ikke lenger noe produsenten kunne sett", async () => {
