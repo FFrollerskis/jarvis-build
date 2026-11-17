@@ -29,7 +29,7 @@ import { modelCatalogFromEnv, type CatalogModel, type ModelTier } from "./model-
 import { describeTask, HeuristicRoutingAdvisor, selectModelForTier, type RoutingAdvisor } from "./routing-advisor.ts";
 import type { TraceSink } from "./trace.ts";
 import { CLAUDE_BUDGET_PROVIDER, type BudgetOrigin } from "./claude-budget.ts";
-import type { ClaudeBudgetEnforcer, PacingTicket } from "./claude-budget-enforcer.ts";
+import type { ClaudeBudgetEnforcer, PacingRoundContext, PacingTicket } from "./claude-budget-enforcer.ts";
 
 /**
  * D-106 Council reliability (§ARCHITECTURE DECISION, evidensbasert 2026-08-24):
@@ -373,6 +373,13 @@ function pauseReadFailure(err: unknown): { error: string; code?: string } {
 type RuntimeRow = { configured: boolean; available: boolean; paused: boolean; model: string; budget_blocked?: boolean };
 
 export class ModelGateway {
+  /**
+   * WP-B4 (M1): hva gatewayens EGEN verktøyløkke (`completeWithTools`) vet om tidligere runder, nøklet på selve `CompleteInput`-objektet løkka lager for hver runde. En svakt referert, privat tabell: ingen kaller
+   * (og ingen forespørsel) kan legge noe inn i den, så en «fortsettelse» kan aldri påstås utenfra. Tom uten Claude-kreditten.
+   */
+  private readonly pacingRounds = new WeakMap<CompleteInput, PacingRoundContext>();
+  /** WP-B4 (M1): billetten hver leverandørrunde ble avgjort med, nøklet på resultatet (så løkka kan bære den til neste runde). */
+  private readonly resultTickets = new WeakMap<ModelResult, PacingTicket>();
   private readonly guard: BudgetGuard;
   private readonly callTimestamps = new Map<string, number[]>();
   private readonly registry: CapabilityRegistry;
@@ -580,7 +587,7 @@ export class ModelGateway {
   }
 
   /** Beslutningen for dette kallet, tatt FØR leverandørvalg. `undefined` = Claude-kreditten er av, eller kallet kan ikke nå Anthropic. Kaster aldri (se `ClaudeBudgetEnforcer.begin`). */
-  private async beginPacing(input: CompleteInput, paused: ReadonlySet<string>, traceId: string, started: number): Promise<PacingTicket | undefined> {
+  private async beginPacing(input: CompleteInput, paused: ReadonlySet<string>, traceId: string, started: number, round?: PacingRoundContext): Promise<PacingTicket | undefined> {
     const enforcer = this.opts.claudeBudget;
     if (enforcer === undefined || !this.mayReachClaude(input, paused)) return undefined;
     const defaultModel = this.byName.get(CLAUDE_BUDGET_PROVIDER)?.model;
@@ -592,6 +599,7 @@ export class ModelGateway {
       ...(input.budget_origin !== undefined ? { budget_origin: input.budget_origin } : {}),
       request: input.request, pricing: this.pricing, catalog: this.catalog,
       ...(defaultModel !== undefined ? { provider_default_model: defaultModel } : {}),
+      ...(round !== undefined ? { round } : {}),
       trace_id: traceId, started
     });
   }
@@ -669,7 +677,7 @@ export class ModelGateway {
     const paused = await this.livePauses();
     this.assertNotPaused(input.provider, paused);
     // WP-B4 (D-476): Claude-kreditten tar sin beslutning FØR leverandørvalg. `undefined` (av, eller kallet kan ikke nå Anthropic) = alt under er som før.
-    const pacing = await this.beginPacing(input, paused, traceId, started);
+    const pacing = await this.beginPacing(input, paused, traceId, started, this.pacingRounds.get(rawInput));
     try {
       const routeInput: RouteInput = {
         ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
@@ -812,7 +820,10 @@ export class ModelGateway {
             }
           };
           // WP-B4: kun kategorier (aldri innhold) - brukes av flatene til merknaden «Claude-kreditten: ...» når svaret kom fra en annen modell enn planlagt.
-          if (pacing !== undefined) result.metadata = { ...result.metadata, claude_budget: pacing.resultMetadata() };
+          if (pacing !== undefined) {
+            result.metadata = { ...result.metadata, claude_budget: pacing.resultMetadata() };
+            this.resultTickets.set(result, pacing);
+          }
           // L10 (gjennomgang av PR #315): adapteren har nullet ugyldige tokentall (aldri en streng/NaN inn i kostformelen) og merket svaret - kostnaden er UKJENT, ikke gratis. Kun kategorier logges, aldri verdiene.
           const usageProblems = result.metadata["usage_problems"];
           if (Array.isArray(usageProblems) && usageProblems.length > 0) {
@@ -881,7 +892,10 @@ export class ModelGateway {
                     retry_max_tokens: retryRequest.max_tokens
                   }
                 };
-                if (pacing !== undefined) retryResult.metadata = { ...retryResult.metadata, claude_budget: pacing.resultMetadata() };
+                if (pacing !== undefined) {
+                  retryResult.metadata = { ...retryResult.metadata, claude_budget: pacing.resultMetadata() };
+                  this.resultTickets.set(retryResult, pacing);
+                }
                 const retryOutcome = classifyCompletionOutcome(retryResult);
                 await this.recordAttemptResult(input, retryResult, retryOutcome, {
                   traceId,
@@ -1019,7 +1033,7 @@ export class ModelGateway {
     const paused = await this.livePauses();
     this.assertNotPaused(input.provider, paused);
     // WP-B4 (D-476): se `completeInner`.
-    const pacing = await this.beginPacing(input, paused, traceId, started);
+    const pacing = await this.beginPacing(input, paused, traceId, started, this.pacingRounds.get(rawInput));
     try {
       const routeInput: RouteInput = {
         ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
@@ -1071,6 +1085,10 @@ export class ModelGateway {
     // WP-D4 (L11): hver leverandør som betjente en runde (i rekkefølge). Ruten kan skifte mellom runder (runde 1 reserve i skyen, siste runde den lokale som kom tilbake), og flaten skal få vite om en skyleverandør
     // har rørt turen selv om den ikke var den som ga det siste svaret.
     const servedProviders: string[] = [];
+    // WP-B4 (M1): Claude-kreditten på tvers av runder. `anthropicRound` = billetten til den siste runden Anthropic FAKTISK betjente (turen er påbegynt der og fullføres); `closedRound` = en runde kreditten stengte for Anthropic
+    // (resten av turen forblir stengt). Begge kommer fra gatewayens egne resultater (leverandør stemplet av adapteren) - aldri fra innholdet i forespørselen.
+    let anthropicRound: PacingTicket | undefined;
+    let closedRound: PacingTicket | undefined;
 
     for (let round = 1; round <= maxRounds; round++) {
       // Siste runde / loop-vern: uten tools MÅ modellen syntetisere tekstsvar av
@@ -1087,6 +1105,8 @@ export class ModelGateway {
         request,
         ...(lockedToLocal ? this.localOnlyRouting(input) : {})
       };
+      if (closedRound !== undefined) this.pacingRounds.set(roundInput, { closed_by: closedRound });
+      else if (anthropicRound !== undefined) this.pacingRounds.set(roundInput, { continuation_of: anthropicRound });
       // D-430: har ingen verktøykall lyktes så langt, bufres runden (ingen tekst strømmes) - modellen kan ennå rette kallet, men en tekst
       // uten data er gjetting og erstattes under av en fast, ærlig melding.
       const failureGuard = mustReplaceWithFailureText(summarizeToolOutcomes(exchanges));
@@ -1094,6 +1114,11 @@ export class ModelGateway {
         ? await this.stream(roundInput, opts.onEvent, opts.signal)
         : await this.complete(roundInput);
       if (!servedProviders.includes(result.provider)) servedProviders.push(result.provider);
+      const roundTicket = this.resultTickets.get(result);
+      if (roundTicket !== undefined) {
+        if (roundTicket.constraint === "closed") closedRound ??= roundTicket;
+        else if (result.provider === CLAUDE_BUDGET_PROVIDER) anthropicRound = roundTicket;
+      }
       if (opts.localStickiness && !lockedToLocal && this.servedLocally(result)) lockedToLocal = true;
       const calls = (result.tool_calls ?? []).slice(0, opts.maxCallsPerRound ?? Number.POSITIVE_INFINITY);
       if (calls.length === 0) {

@@ -359,45 +359,42 @@ describe("fail-safe: forbruket kan ikke leses", () => {
 });
 
 describe("fortsettelsesrunder i en påbegynt verktøytur fullføres", () => {
-  const exchange: ToolExchange = {
-    calls: [{ tool_call_id: "c1", tool_name: "email__read_inbox", arguments: {}, provider: "anthropic", model: "claude-sonnet-5-5" }],
-    results: [{ tool_call_id: "c1", tool_name: "email__read_inbox", execution_id: "e1", success: true, output: { n: 1 }, at: "2026-11-30T12:00:00.000Z" }]
-  };
+  // M1 (review): «fortsettelse» er noe gatewayens EGEN verktøyløkke vet (en tidligere runde ble faktisk betjent av Anthropic) - en forespørsel som bare HAR `tool_exchanges` er en ny beslutning.
+  // De samme garantiene som før gjelder for en ekte påbegynt tur; se `wpb4-review-fixes.test.ts` for lukkede runder og dummy-utvekslinger.
+  const TOOL = { name: "echo", description: "ekko", input_schema: { type: "object" as const, additionalProperties: false, properties: {} } };
+  const anthropicTool = { tool_call_id: "c1", tool_name: "echo", arguments: {}, provider: "anthropic", model: "claude-sonnet-5-5" };
+  const executor = (afterRound1: () => void) => ({ execute: vi.fn(async (call: { tool_call_id: string; tool_name: string }) => {
+    afterRound1(); // verktøyet (og runde 1) brukte opp kreditten
+    return { tool_call_id: call.tool_call_id, tool_name: call.tool_name, execution_id: "e1", success: true, output: { ok: true }, at: "2026-11-30T12:00:00.000Z" };
+  }) });
 
-  it("oppbrukt midt i turen: runde 2 (med tool_exchanges) går til Anthropic og revideres som overstyrt; en NY tur (uten) går lokalt", async () => {
-    const { gateway, db, anthropic } = build();
-    db.spend.set("t1", SPENT.exhausted);
-    const next = await gateway.complete(ownerTurn({ provider: "anthropic", request: { ...REQ, tool_exchanges: [exchange] } }));
-    expect(next.provider).toBe("anthropic");
-    expect(next.metadata?.["claude_budget"]).toMatchObject({ action: "allow", reason: "continuation_round_allowed" });
-    expect(db.audit[0]).toMatchObject({ decision: "allow", reason: "continuation_round_allowed" });
-    expect(db.audit[0]?.payload["overridden_action"]).toBe("deny");
+  it("oppbrukt midt i turen: runde 2 går til Anthropic (turen er påbegynt der) og sporet viser begrunnelsen; en NY tur etterpå går lokalt", async () => {
+    const { gateway, db, anthropic, budgetSpans, clock } = build({ anthropic: { script: (_request, call) => (call === 1 ? { text: "", tool_calls: [anthropicTool], finish_reason: "tool_use" } : {}) } });
+    db.spend.set("t1", SPENT.tight);
+    const turn = await gateway.completeWithTools(ownerTurn({ provider: "anthropic" }), { tools: [TOOL], executor: executor(() => db.spend.set("t1", SPENT.exhausted)) });
+    expect(turn.provider).toBe("anthropic");
+    expect(anthropic.calls).toHaveLength(2);
+    expect(turn.metadata?.["claude_budget"]).toMatchObject({ action: "allow", reason: "continuation_round_allowed" });
+    expect(budgetSpans().map((s) => s.metadata?.["reason"])).toEqual(["tight_essential_allowed", "continuation_round_allowed"]);
+    expect(budgetSpans()[1]?.metadata?.["round_rule"]).toBe("continuation");
+    // en ny tur (ny beslutning) ser det oppbrukte forbruket - etter at lese-bufferen (3 s) har utløpt
+    clock.now += 4_000;
     const fresh = await gateway.complete(ownerTurn());
     expect(fresh.provider).toBe("gemma_local");
-    expect(anthropic.calls).toHaveLength(1);
+    expect(anthropic.calls).toHaveLength(2);
   });
 
-  it("hele verktøyløkka: runde 1 tillatt, kreditten går tom etter runde 1, runde 2 fullfører turen på Anthropic", async () => {
+  it("hele verktøyløkka: runde 1 tillatt, kreditten går tom etter runde 1, runde 2 fullfører turen på Anthropic - uten ny lesing av forbruket", async () => {
     const { gateway, db, anthropic } = build({
-      anthropic: {
-        script: (_request, call) => (call === 1
-          ? { text: "", tool_calls: [{ tool_call_id: "c1", tool_name: "echo", arguments: {}, provider: "anthropic", model: "claude-sonnet-5-5" }], finish_reason: "tool_use" }
-          : {})
-      }
+      anthropic: { script: (_request, call) => (call === 1 ? { text: "", tool_calls: [anthropicTool], finish_reason: "tool_use" } : {}) }
     });
     db.spend.set("t1", SPENT.tight);
-    const executor = { execute: vi.fn(async (call: { tool_call_id: string; tool_name: string }) => {
-      db.spend.set("t1", SPENT.exhausted); // verktøyet (og runde 1) brukte opp kreditten
-      return { tool_call_id: call.tool_call_id, tool_name: call.tool_name, execution_id: "e1", success: true, output: { ok: true }, at: "2026-11-30T12:00:00.000Z" };
-    }) };
-    const result = await gateway.completeWithTools(
-      ownerTurn({ provider: "anthropic" }),
-      { tools: [{ name: "echo", description: "ekko", input_schema: { type: "object", additionalProperties: false, properties: {} } }], executor }
-    );
+    const result = await gateway.completeWithTools(ownerTurn({ provider: "anthropic" }), { tools: [TOOL], executor: executor(() => db.spend.set("t1", SPENT.exhausted)) });
     expect(result.provider).toBe("anthropic");
     expect(anthropic.calls).toHaveLength(2);
     expect(result.metadata?.["tool_rounds"]).toBe(1);
-    expect(db.audit.map((a) => a.reason)).toEqual(["continuation_round_allowed"]);
+    expect(db.spendReads).toBe(1);
+    expect(db.audit).toHaveLength(0); // ESSENSIELL på tempo (tight): tillatt i begge runder, kun spor
   });
 });
 
