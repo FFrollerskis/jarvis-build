@@ -74,9 +74,22 @@ describe("kildevakt: Evolusjon-senteret er KUN LESING av eksisterende kilder", (
     expect(CENTER).not.toMatch(/\bwriteAudit\b|\.execute\(|ToolGateway|gateway\.execute/);
   });
 
-  it("importerer kun executive-kontrakten, modellgatewayens BudgetGuard/budsjettgrenser, de rene EV-reglene og delte hjelpere - ingen leverandør-SDK", () => {
+  it("importerer kun executive-kontrakten, modellgatewayens BudgetGuard/budsjettgrenser, de rene EV-reglene, den rene kosttrend-funksjonen (cost-trend.ts, gjennomgang M1) og delte hjelpere - ingen leverandør-SDK", () => {
     const imports = [...CENTER_RAW.matchAll(/^import[\s\S]*?from "([^"]+)";/gm)].map((m) => m[1]);
-    expect(imports.sort()).toEqual(["../ev0-boot.ts", "../run-rate.ts", "./shared.ts", "@jarvis/executive", "@jarvis/model-gateway", "@jarvis/self-modification", "pg"].sort());
+    expect(imports.sort()).toEqual(["../cost-trend.ts", "../ev0-boot.ts", "../run-rate.ts", "./shared.ts", "@jarvis/executive", "@jarvis/model-gateway", "@jarvis/self-modification", "pg"].sort());
+  });
+
+  it("cost-trend.ts (M1) er en REN funksjon: kun en typeimport fra EV-reglene, ingen database, nettverk, fil, prosess eller miljø - og begge brukerne (senteret og EV-16-seksjonen) bruker den", () => {
+    const raw = read("apps/api/src/cost-trend.ts");
+    const imports = [...raw.matchAll(/^import[\s\S]*?from "([^"]+)";/gm)].map((m) => m[1]);
+    expect(imports).toEqual(["@jarvis/self-modification"]);
+    expect(raw).toMatch(/^import type \{ Sample \} from "@jarvis\/self-modification";/m);
+    expect(strip(raw)).not.toMatch(/\bfetch\s*\(|node:|\bprocess\.|\bquery\(|\bpool\b|\bawait\b|\bPromise\b|child_process/);
+    expect(CENTER).toMatch(/monthTrendSamples\(\{ month: asOf\.toISOString\(\)\.slice\(0, 7\), month_to_date_ore: spent, daily: rr\.daily \}\)/);
+    expect(SOURCE).toMatch(/monthTrendSamples\(\{ month: today\.slice\(0, 7\), month_to_date_ore: monthToDate, daily: points \}\)/);
+    // den gamle, feil serien (kun vindusdager, ingen frø) finnes ikke lenger noe sted
+    expect(CENTER).not.toMatch(/rr\.daily\.filter/);
+    expect(SOURCE).not.toMatch(/perDay\.set\(p\.day/);
   });
 
   it("endringsregisteret leses bare med SELECT og uten tekstkolonnene (subject, paths-innhold, evidence, branch, recorded_by, head_sha)", () => {
