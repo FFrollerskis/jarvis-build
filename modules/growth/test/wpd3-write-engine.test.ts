@@ -1119,3 +1119,118 @@ describe("E6: review L6 - avkortede leverandørlister feiler LUKKET (fravær ett
     await v.stop();
   });
 });
+
+describe("E7: review N6 - avkortede leverandørlister feiler LUKKET også for GBP-innlegg, Meta-annonser, GA4-nøkkelhendelser og Search Console-nettstedskart", () => {
+  const killOpen = { financeKillSwitch: async () => false };
+  const token = { accessToken: async () => "fake-access-token" };
+  const call7 = (t: ToolTransport, action: string, params: Record<string, JsonValue>) => t.invoke(action, params, "fake-refresh-token-for-test", { identity: owner });
+  const writes = (v: FakeVendor) => v.requests.filter((r) => r.method !== "GET" && !r.path.endsWith("/searchAnalytics/query"));
+
+  it("Business Profile: en full side (20) ELLER en neste-side-token = KUTTET -> create_local_post nektes (kan ikke bevise at et identisk innlegg mangler); under taket er dedupe og opprettelse som før", async () => {
+    const v = new FakeVendor(); await v.start();
+    let posts: Array<Record<string, unknown>> = Array.from({ length: 20 }, (_, i) => ({ name: `accounts/1111/locations/123456789/localPosts/${i}`, summary: `Innlegg ${i}`, state: "LIVE", topicType: "STANDARD" }));
+    let nextToken: string | undefined;
+    v.handler = (r) => {
+      if (r.method === "GET" && r.path.endsWith("/localPosts")) return { json: { localPosts: posts, ...(nextToken ? { nextPageToken: nextToken } : {}) } };
+      if (r.method === "POST" && r.path.endsWith("/localPosts")) { posts = [...posts, { name: "accounts/1111/locations/123456789/localPosts/99", summary: r.body["summary"], state: "LIVE", topicType: "STANDARD" }]; return { json: { name: "accounts/1111/locations/123456789/localPosts/99" } }; }
+      return { status: 404, json: {} };
+    };
+    const t = new GbpWriteTransport({ ...killOpen, ...token, spec: specs.google_business_profile, baseUrl: v.baseUrl, v4BaseUrl: v.baseUrl });
+    const base = { account_id: "1111", location_id: "123456789" };
+    const listed = async () => ((await call7(t, "list_local_posts", base)).data as Record<string, any>);
+    expect((await listed())["truncated"]).toBe(true); // full side uten token
+    await expect(call7(t, "create_local_post", { ...base, summary: "Helt nytt innlegg" })).rejects.toThrow("growth_precondition_failed:local_post_list_truncated");
+    posts = posts.slice(0, 3); nextToken = "mer"; // neste-side-token med få innlegg
+    expect((await listed())["truncated"]).toBe(true);
+    await expect(call7(t, "create_local_post", { ...base, summary: "Innlegg 1" })).rejects.toThrow("growth_precondition_failed:local_post_list_truncated");
+    expect(writes(v)).toHaveLength(0);
+    nextToken = undefined; // komplett liste
+    expect((await listed())["truncated"]).toBe(false);
+    expect(await call7(t, "create_local_post", { ...base, summary: "Innlegg 1" })).toEqual({ data: { unchanged: true } });
+    expect(await call7(t, "create_local_post", { ...base, summary: "Helt nytt innlegg" })).toMatchObject({ external_id: "99" });
+    expect(writes(v)).toHaveLength(1);
+    await v.stop();
+  });
+
+  it("Meta Ads: en full side (100) ELLER `paging.next` = KUTTET -> create_ad nektes (dedupe på navn kan ikke avgjøres); under taket virker dedupe og opprettelse", async () => {
+    const v = new FakeVendor(); await v.start();
+    let ads: Array<Record<string, unknown>> = Array.from({ length: 100 }, (_, i) => ({ id: String(700000 + i), name: `Annonse ${i}`, status: "PAUSED" }));
+    let next: string | undefined;
+    v.handler = (r) => {
+      if (r.method === "GET" && r.path === "/v26.0/act_1234567890123") return { json: { id: "act_1234567890123", currency: "NOK" } };
+      if (r.method === "GET" && r.path === "/v26.0/60010") return { json: { id: "60010", status: "ACTIVE", account_id: "1234567890123" } };
+      if (r.method === "GET" && r.path === "/v26.0/60010/ads") return { json: { data: ads, ...(next ? { paging: { cursors: { after: "c" }, next } } : {}) } };
+      if (r.method === "POST" && r.path === "/v26.0/act_1234567890123/ads") { ads = [...ads, { id: "799999", name: r.body["name"], status: "PAUSED" }]; return { json: { id: "799999" } }; }
+      return { status: 404, json: {} };
+    };
+    const t = new MetaAdsWriteTransport({ ...killOpen, spec: specs.meta_ads, baseUrl: v.baseUrl });
+    const run7 = (name: string) => t.invoke("create_ad", { ad_account_id: "act_1234567890123", ad_set_id: "60010", name, page_id: "1234567890", link: "https://example.test/x", message: "Hei", headline: "Tittel" }, "fake-meta-token-for-test", { identity: owner });
+    const listed = async () => ((await t.invoke("list_ads", { ad_account_id: "act_1234567890123", ad_set_id: "60010" }, "fake-meta-token-for-test", { identity: owner })).data as Record<string, any>);
+    expect((await listed())["truncated"]).toBe(true); // full side uten paging.next
+    await expect(run7("Helt ny annonse")).rejects.toThrow("growth_precondition_failed:ad_list_truncated");
+    ads = ads.slice(0, 3); next = "https://graph.example.test/next"; // paging.next med få annonser
+    expect((await listed())["truncated"]).toBe(true);
+    await expect(run7("Annonse 1")).rejects.toThrow("growth_precondition_failed:ad_list_truncated");
+    expect(writes(v)).toHaveLength(0);
+    next = undefined;
+    expect((await listed())["truncated"]).toBe(false);
+    expect(await run7("Annonse 1")).toEqual({ data: { unchanged: true } });
+    expect(await run7("Helt ny annonse")).toMatchObject({ external_id: "799999" });
+    expect(writes(v)).toHaveLength(1);
+    await v.stop();
+  });
+
+  it("GA4: en full side (200) ELLER `nextPageToken` = KUTTET -> create_key_event nektes, delete_key_event av en id som ikke står i den kuttede listen nektes (aldri falsk «uendret»), en id som FINNES fjernes", async () => {
+    const v = new FakeVendor(); await v.start();
+    let events: Array<Record<string, unknown>> = Array.from({ length: 200 }, (_, i) => ({ name: `properties/123456789/keyEvents/${1000 + i}`, eventName: `hendelse_${i}`, custom: true, deletable: true }));
+    let nextToken: string | undefined;
+    v.handler = (r) => {
+      if (r.method === "GET" && r.path === "/properties/123456789") return { json: { displayName: "P", currencyCode: "NOK", timeZone: "Europe/Oslo" } };
+      if (r.method === "GET" && r.path === "/properties/123456789/keyEvents") return { json: { keyEvents: events, ...(nextToken ? { nextPageToken: nextToken } : {}) } };
+      if (r.method === "POST" && r.path === "/properties/123456789/keyEvents") { events = [...events, { name: "properties/123456789/keyEvents/9999", eventName: r.body["eventName"], custom: true, deletable: true }]; return { json: { name: "properties/123456789/keyEvents/9999" } }; }
+      if (r.method === "DELETE") { events = events.filter((e) => !String(e["name"]).endsWith(r.path.split("/").pop()!)); return { json: {} }; }
+      return { status: 404, json: {} };
+    };
+    const t = new Ga4WriteTransport({ ...killOpen, ...token, spec: specs.ga4, baseUrl: v.baseUrl });
+    const base = { property_id: "123456789" };
+    const listed = async () => ((await call7(t, "list_key_events", base)).data as Record<string, any>);
+    expect((await listed())["truncated"]).toBe(true); // full side uten token
+    await expect(call7(t, "create_key_event", { ...base, event_name: "ny_hendelse" })).rejects.toThrow("growth_precondition_failed:key_event_list_truncated");
+    await expect(call7(t, "delete_key_event", { ...base, key_event_id: "424242" })).rejects.toThrow("growth_precondition_failed:key_event_list_truncated");
+    expect(writes(v)).toHaveLength(0);
+    expect(await call7(t, "delete_key_event", { ...base, key_event_id: "1005" })).toEqual({ external_id: "1005" }); // FINNES i den leste delen: avgjørbart
+    events = events.slice(0, 3); nextToken = "mer"; // token med få hendelser
+    expect((await listed())["truncated"]).toBe(true);
+    await expect(call7(t, "create_key_event", { ...base, event_name: "ny_hendelse" })).rejects.toThrow("growth_precondition_failed:key_event_list_truncated");
+    nextToken = undefined;
+    expect((await listed())["truncated"]).toBe(false);
+    expect(await call7(t, "delete_key_event", { ...base, key_event_id: "424242" })).toEqual({ data: { unchanged: true } }); // komplett liste: en ekte NOOP
+    expect(await call7(t, "create_key_event", { ...base, event_name: "ny_hendelse" })).toMatchObject({ external_id: "9999" });
+    await v.stop();
+  });
+
+  it("Search Console: over 200 nettstedskart = KUTTET av oss -> remove_sitemap av et kart som ikke står i den kuttede listen og register_sitemap nektes; et kart som FINNES fjernes; under taket er NOOP ekte", async () => {
+    const v = new FakeVendor(); await v.start();
+    const site = "https://example.test/";
+    let sitemaps = Array.from({ length: 250 }, (_, i) => `https://example.test/kart-${i}.xml`);
+    v.handler = (r) => {
+      if (r.method === "GET" && r.path.endsWith("/sitemaps")) return { json: { sitemap: sitemaps.map((path) => ({ path, isPending: false, warnings: "0", errors: "0" })) } };
+      if (r.method === "DELETE") { const feed = decodeURIComponent(r.path.split("/sitemaps/")[1]!); sitemaps = sitemaps.filter((x) => x !== feed); return { status: 204 }; }
+      if (r.method === "PUT") { sitemaps = [...sitemaps, decodeURIComponent(r.path.split("/sitemaps/")[1]!)]; return { status: 204 }; }
+      return { status: 404, json: {} };
+    };
+    const t = new SearchConsoleWriteTransport({ ...killOpen, ...token, spec: specs.search_console, baseUrl: v.baseUrl, inspectBaseUrl: v.baseUrl });
+    const listed = async () => ((await call7(t, "list_sitemaps", { site_url: site })).data as Record<string, any>);
+    const state = await listed();
+    expect(state["truncated"]).toBe(true);
+    expect(state["sitemaps"]).toHaveLength(200);
+    await expect(call7(t, "remove_sitemap", { site_url: site, feedpath: "https://example.test/kart-249.xml" })).rejects.toThrow("growth_precondition_failed:sitemap_list_truncated"); // etter kuttet: ikke bevist fraværende
+    await expect(call7(t, "register_sitemap", { site_url: site, feedpath: "https://example.test/nytt.xml" })).rejects.toThrow("growth_precondition_failed:sitemap_list_truncated");
+    expect(writes(v)).toHaveLength(0);
+    expect(await call7(t, "remove_sitemap", { site_url: site, feedpath: "https://example.test/kart-3.xml" })).toEqual({ external_id: "https://example.test/kart-3.xml" }); // i den leste delen: avgjørbart
+    sitemaps = sitemaps.slice(0, 3);
+    expect((await listed())["truncated"]).toBe(false);
+    expect(await call7(t, "remove_sitemap", { site_url: site, feedpath: "https://example.test/finnes-ikke.xml" })).toEqual({ data: { unchanged: true } });
+    await v.stop();
+  });
+});

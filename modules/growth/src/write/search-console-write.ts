@@ -5,7 +5,7 @@ import { VendorHttp } from "./http.ts";
 import { cleanText, removeOp } from "./op-builders.ts";
 import { GoogleOAuthTransport, type GoogleRestOptions } from "./google-rest.ts";
 import type { Auth, OpSpec, ProviderToolSpec } from "./tool-factory.ts";
-import { asArr, asObj, num, str, type Params } from "./validators.ts";
+import { asArr, asObj, num, str, truncatedOf, type Params } from "./validators.ts";
 
 /**
  * WP-D3 (UA-4 Growth, D-459): Google Search Console - nettstedskart (sitemaps), søkeanalyse og URL-inspeksjon. Nytt navnerom `growth_searchconsole` (eier-eksklusivt, forbudt for modellflater); eget
@@ -28,6 +28,9 @@ const safeSite = (p: Params): string => normalizeGrowthTarget("search_console", 
 const siteShape = { site_url: z.string().min(8).max(260) };
 const sitemapsOf = (s: JsonValue): Array<Record<string, unknown>> => asArr(asObj(s)["sitemaps"]).map(asObj);
 const enc = (v: string): string => encodeURIComponent(v);
+/** Review N6: `sitemaps.list` har ingen paginering; vi beholder høyst 200. Flere enn det betyr at listen er KUTTET av oss: fravær beviser ikke at nettstedskartet mangler. */
+const SITEMAPS_LIMIT = 200;
+const sitemapPresent = (s: JsonValue, p: Params): boolean => sitemapsOf(s).some((m) => m["path"] === p["feedpath"]);
 
 /** Hører URL-en til eiendommen? URL-prefiks: samme opprinnelse og sti-prefiks. Domeneeiendom: verten er domenet eller et underdomene. */
 export function urlBelongsToSite(site: string, url: unknown): boolean {
@@ -65,16 +68,17 @@ export function searchConsoleWriteSpec(): ProviderToolSpec {
       description: "Send inn (registrer) et nettstedskart for eiendommen. Idempotent: finnes det allerede, gjøres ingenting.",
       shape: { ...siteShape, feedpath: z.string().url().max(2048) },
       rollback: "remove_sitemap med samme feedpath fjerner innsendingen igjen (selve nettstedskartet på nettstedet røres ikke)",
-      validate: (_s, p) => (urlBelongsToSite(safeSite(p), p["feedpath"]) ? null : "feedpath_not_under_site"),
-      noop: (s, p) => sitemapsOf(s).some((m) => m["path"] === p["feedpath"]),
-      post: (a, p) => sitemapsOf(a).some((m) => m["path"] === p["feedpath"]),
+      validate: (s, p) => (urlBelongsToSite(safeSite(p), p["feedpath"]) ? (truncatedOf(s) ? "sitemap_list_truncated" : null) : "feedpath_not_under_site"),
+      noop: (s, p) => sitemapPresent(s, p),
+      post: (a, p) => sitemapPresent(a, p),
       target: (p) => `searchconsole:${safeSite(p)}:sitemap:${typeof p["feedpath"] === "string" ? (p["feedpath"] as string).slice(0, 200) : "?"}`,
       summary: (_s, p) => `Search Console: send inn nettstedskart for ${safeSite(p)}`
     },
     removeOp({
       action: "remove_sitemap", label: "Search Console-nettstedskart", spend: "none", stateAction: "list_sitemaps", targetParam: "site_url", scopes,
       shape: { ...siteShape, feedpath: z.string().url().max(2048) },
-      statusOf: (s, p) => (sitemapsOf(s).some((m) => m["path"] === p["feedpath"]) ? "PRESENT" : "REMOVED"), targetCheck: () => true, removed: ["REMOVED"],
+      statusOf: (s, p) => (sitemapPresent(s, p) ? "PRESENT" : "REMOVED"), targetCheck: () => true, removed: ["REMOVED"],
+      validate: (s, p) => (truncatedOf(s) && !sitemapPresent(s, p) ? "sitemap_list_truncated" : null),
       ref: (p) => `searchconsole:${safeSite(p)}:sitemap:${typeof p["feedpath"] === "string" ? (p["feedpath"] as string).slice(0, 200) : "?"}`,
       rollback: "register_sitemap med samme feedpath sender inn nettstedskartet på nytt"
     })
@@ -100,11 +104,13 @@ export class SearchConsoleWriteTransport extends GoogleOAuthTransport {
       case "list_sitemaps": {
         const res = await this.http.request({ method: "GET", path: `/sites/${enc(site)}/sitemaps`, headers: auth.headers, secrets: auth.secrets, allowNotFound: true });
         if (res === null) return null;
-        const sitemaps = asArr(asObj(res.json)["sitemap"]).slice(0, 200).map((raw) => {
+        const rawSitemaps = asArr(asObj(res.json)["sitemap"]);
+        const truncated = rawSitemaps.length > SITEMAPS_LIMIT;
+        const sitemaps = rawSitemaps.slice(0, SITEMAPS_LIMIT).map((raw) => {
           const m = asObj(raw);
           return { path: str(m["path"]), last_submitted: str(m["lastSubmitted"]), is_pending: m["isPending"] === true, is_sitemaps_index: m["isSitemapsIndex"] === true, warnings: num(m["warnings"]), errors: num(m["errors"]) };
         });
-        return { site_url: site, sitemaps };
+        return { site_url: site, sitemaps, truncated };
       }
       case "query_search_analytics": {
         const start = String(p["start_date"]);

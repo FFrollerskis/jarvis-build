@@ -6,7 +6,7 @@ import { VendorHttp } from "./http.ts";
 import { cleanText, removeOp } from "./op-builders.ts";
 import { GoogleOAuthTransport, type GoogleRestOptions } from "./google-rest.ts";
 import type { Auth, OpSpec, ProviderToolSpec } from "./tool-factory.ts";
-import { asArr, asObj, assertDigits, str, zDigits, zText, type Params } from "./validators.ts";
+import { asArr, asObj, assertDigits, str, truncatedOf, zDigits, zText, type Params } from "./validators.ts";
 
 /**
  * WP-D3 (UA-4 Growth, D-459): Google Business Profile - åpningstider, profiltekst/nettsted, lokale innlegg og svar på omtaler. Nytt navnerom `growth_gbp` (eier-eksklusivt, forbudt for modellflater); eget
@@ -47,6 +47,8 @@ const locationShape = { location_id: z.string().min(4).max(34) };
 const accountLocationShape = { account_id: zDigits(4, 25), ...locationShape };
 const periodShape = z.object({ open_day: z.enum(DAYS), open_time: z.string().regex(TIME), close_day: z.enum(DAYS), close_time: z.string().regex(TIME) }).strict();
 const postsOf = (s: JsonValue): Array<Record<string, unknown>> => asArr(asObj(s)["posts"]).map(asObj);
+/** Review N6: `list_local_posts` leser ÉN side (20). En full side eller en neste-side-token betyr at listen er KUTTET - fravær beviser da ikke at et identisk innlegg mangler (paginering = DEFERRED). */
+const POSTS_PAGE_SIZE = 20;
 
 const toTimeOfDay = (hhmm: string) => ({ hours: Number(hhmm.slice(0, 2)), minutes: Number(hhmm.slice(3, 5)) });
 const fromTimeOfDay = (t: unknown): string => {
@@ -102,7 +104,10 @@ export function gbpWriteSpec(config: Pick<GrowthWriteConfig, "creativeHosts">): 
       description: "Publiser et lokalt innlegg (STANDARD) på lokasjonen. Finnes et innlegg med identisk tekst fra før, gjøres ingenting. Lenkens vert må stå i JARVIS_GROWTH_CREATIVE_URL_HOSTS.",
       shape: { ...accountLocationShape, summary: zText(1, 1500), action_url: z.string().url().max(2048).optional() },
       rollback: "slett innlegget (delete_local_post er DEFERRED - gjøres i leverandørens grensesnitt); post_id fra svaret",
-      validate: (_s, p) => (p["action_url"] !== undefined && creativeUrlHost(p["action_url"], config.creativeHosts) === null ? "action_url_host_not_allowed" : null),
+      validate: (s, p) => {
+        if (truncatedOf(s)) return "local_post_list_truncated";
+        return p["action_url"] !== undefined && creativeUrlHost(p["action_url"], config.creativeHosts) === null ? "action_url_host_not_allowed" : null;
+      },
       noop: (s, p) => postsOf(s).some((post) => post["summary"] === cleanText(p["summary"], 1500)),
       post: (a, p) => postsOf(a).some((post) => post["summary"] === cleanText(p["summary"], 1500)),
       target: (p) => ref(p, "local_post"), summary: (_s, p) => `Business Profile: publiser lokalt innlegg på ${safeLocation(p)}`
@@ -189,13 +194,15 @@ export class GbpWriteTransport extends GoogleOAuthTransport {
         return { location_id: location, reviews };
       }
       case "list_local_posts": {
-        const res = await this.v4.request({ method: "GET", path: this.v4Path(p, "/localPosts"), query: { pageSize: "20" }, headers: auth.headers, secrets: auth.secrets, allowNotFound: true });
+        const res = await this.v4.request({ method: "GET", path: this.v4Path(p, "/localPosts"), query: { pageSize: String(POSTS_PAGE_SIZE) }, headers: auth.headers, secrets: auth.secrets, allowNotFound: true });
         if (res === null) return null;
-        const posts = asArr(asObj(res.json)["localPosts"]).slice(0, 20).map((raw) => {
+        const rawPosts = asArr(asObj(res.json)["localPosts"]);
+        const truncated = str(asObj(res.json)["nextPageToken"]) !== null || rawPosts.length >= POSTS_PAGE_SIZE;
+        const posts = rawPosts.slice(0, POSTS_PAGE_SIZE).map((raw) => {
           const q = asObj(raw);
           return { post_id: (str(q["name"]) ?? "").split("/").pop() ?? null, summary: cleanText(q["summary"], 1500), state: str(q["state"]), topic_type: str(q["topicType"]) };
         });
-        return { location_id: location, posts };
+        return { location_id: location, posts, truncated };
       }
       default:
         throw new Error(`gbp_action_not_implemented:${action}`);

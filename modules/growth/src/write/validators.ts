@@ -68,3 +68,9 @@ export const num = (v: unknown): number | null => {
   if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v);
   return null;
 };
+
+/**
+ * Review L6/N6: en leverandørliste som er KUTTET (full side, neste-side-token eller over taket) kan ikke bevise at noe er FRAVÆRENDE. Tilstanden bærer da `truncated: true`, og handlinger som ville tolket fravær som
+ * «finnes ikke, så opprett» (dedupe) eller «allerede fjernet» (NOOP) nektes fail-closed i stedet for å lage duplikater eller melde en falsk «uendret»-suksess.
+ */
+export const truncatedOf = (state: JsonValue): boolean => asObj(state)["truncated"] === true;

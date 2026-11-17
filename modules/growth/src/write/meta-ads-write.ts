@@ -4,7 +4,7 @@ import { creativeHref, creativeUrlHost, normalizeGrowthTarget, type GrowthWriteC
 import { GrowthVendorError, VendorHttp } from "./http.ts";
 import { cleanText, pauseEnableOps, removeOp } from "./op-builders.ts";
 import { GrowthWriteTransportBase, killSwitchOpen, type Auth, type OpSpec, type ProviderToolSpec, type WriteTransportDeps } from "./tool-factory.ts";
-import { asArr, asObj, assertDigits, assertOre, num, str, zDigits, zOre, zText, type Params } from "./validators.ts";
+import { asArr, asObj, assertDigits, assertOre, num, str, truncatedOf, zDigits, zOre, zText, type Params } from "./validators.ts";
 
 /**
  * WP-D3 (UA-4 Growth, D-459): Meta Ads (Marketing API / Graph) SKRIVING: kampanje-/annonsesett-/annonsestatus, annonsesett-dagsbudsjett og -bud, opprettelse av PAUSET lenkeannonse. Rå REST via `VendorHttp`
@@ -44,6 +44,8 @@ const refAdSet = (p: Params) => `metaads:act_${safeAcct(p)}:ad_set:${safeId(p, "
 const refAd = (p: Params) => `metaads:act_${safeAcct(p)}:ad:${safeId(p, "ad_id")}`;
 const statusOf = (s: JsonValue): string | null => str(asObj(s)["status"]);
 const adsOf = (s: JsonValue): Array<Record<string, unknown>> => asArr(asObj(s)["ads"]).map(asObj);
+/** Review N6: `list_ads` leser ÉN side (100). Full side eller `paging.next` = listen er KUTTET: fravær beviser ikke at annonsen mangler (dedupe i `create_ad`; paginering = DEFERRED). */
+const ADS_PAGE_SIZE = 100;
 const currencyOk = (s: JsonValue): boolean => TWO_DECIMAL_CURRENCIES.has(str(asObj(s)["currency"]) ?? "");
 
 export function metaAdsWriteSpec(config: Pick<GrowthWriteConfig, "creativeHosts">): ProviderToolSpec {
@@ -125,6 +127,7 @@ export function metaAdsWriteSpec(config: Pick<GrowthWriteConfig, "creativeHosts"
       targetCheck: sameAccount,
       validate: (s, p) => {
         if (str(asObj(s)["ad_set_status"]) === "DELETED") return "ad_set_deleted";
+        if (truncatedOf(s)) return "ad_list_truncated";
         return creativeUrlHost(p["link"], config.creativeHosts) === null ? "creative_url_host_not_allowed" : null;
       },
       noop: (s, p) => adsOf(s).some((ad) => ad["name"] === cleanText(p["name"], 100)),
@@ -220,9 +223,11 @@ export class MetaAdsWriteTransport extends GrowthWriteTransportBase {
         const id = assertDigits(p["ad_set_id"], "ad_set_id", 5, 25);
         const set = await this.get(id, { fields: "id,status,account_id" }, auth);
         if (set === null || str(set["account_id"]) !== acct) return null;
-        const list = await this.get(`${id}/ads`, { fields: "id,name,status", limit: "100" }, auth);
-        const ads = asArr(list?.["data"]).slice(0, 100).map((a) => ({ id: str(asObj(a)["id"]), name: cleanText(asObj(a)["name"], 100), status: str(asObj(a)["status"]) }));
-        return { ad_account_id: acct, ad_set_id: id, account_id: acct, ad_set_status: str(set["status"]), ads };
+        const list = await this.get(`${id}/ads`, { fields: "id,name,status", limit: String(ADS_PAGE_SIZE) }, auth);
+        const rawAds = asArr(list?.["data"]);
+        const truncated = str(asObj(list?.["paging"])["next"]) !== null || rawAds.length >= ADS_PAGE_SIZE;
+        const ads = rawAds.slice(0, ADS_PAGE_SIZE).map((a) => ({ id: str(asObj(a)["id"]), name: cleanText(asObj(a)["name"], 100), status: str(asObj(a)["status"]) }));
+        return { ad_account_id: acct, ad_set_id: id, account_id: acct, ad_set_status: str(set["status"]), ads, truncated };
       }
       default:
         throw new Error(`meta_ads_action_not_implemented:${action}`);

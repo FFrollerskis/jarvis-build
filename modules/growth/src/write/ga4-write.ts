@@ -5,7 +5,7 @@ import { VendorHttp } from "./http.ts";
 import { cleanText, removeOp } from "./op-builders.ts";
 import { GoogleOAuthTransport, type GoogleRestOptions } from "./google-rest.ts";
 import type { Auth, OpSpec, ProviderToolSpec } from "./tool-factory.ts";
-import { asArr, asObj, assertDigits, str, type Params } from "./validators.ts";
+import { asArr, asObj, assertDigits, str, truncatedOf, type Params } from "./validators.ts";
 
 /**
  * WP-D3 (UA-4 Growth, D-459): Google Analytics 4 (Admin API v1beta) - nøkkelhendelser (konverteringer). Nytt navnerom `growth_ga4` (eier-eksklusivt, forbudt for modellflater); eget refresh-token
@@ -24,6 +24,8 @@ const safeProperty = (p: Params): string => normalizeGrowthTarget("ga4", p["prop
 const propertyShape = { property_id: z.string().min(4).max(24) };
 const eventsOf = (s: JsonValue): Array<Record<string, unknown>> => asArr(asObj(s)["key_events"]).map(asObj);
 const EVENT_NAME = /^[A-Za-z][A-Za-z0-9_]{0,39}$/;
+/** Review N6: `list_key_events` leser ÉN side (200). Full side eller `nextPageToken` = listen er KUTTET: fravær beviser ikke at nøkkelhendelsen mangler (paginering = DEFERRED). */
+const KEY_EVENTS_PAGE_SIZE = 200;
 
 export function ga4WriteSpec(): ProviderToolSpec {
   const scopes = ["ga4.write"];
@@ -35,6 +37,7 @@ export function ga4WriteSpec(): ProviderToolSpec {
       description: "Merk en hendelse som nøkkelhendelse (konvertering) i GA4. Finnes den allerede, gjøres ingenting (idempotent).",
       shape: { ...propertyShape, event_name: z.string().regex(EVENT_NAME), counting_method: z.enum(["ONCE_PER_EVENT", "ONCE_PER_SESSION"]).optional() },
       rollback: "delete_key_event med key_event_id fra svaret fjerner nøkkelhendelsen igjen (historiske data påvirkes ikke)",
+      validate: (s) => (truncatedOf(s) ? "key_event_list_truncated" : null),
       noop: (s, p) => eventsOf(s).some((e) => e["event_name"] === p["event_name"]),
       post: (a, p) => eventsOf(a).some((e) => e["event_name"] === p["event_name"]),
       target: (p) => `ga4:properties/${safeProperty(p)}:key_event:${typeof p["event_name"] === "string" ? p["event_name"] : "?"}`,
@@ -45,6 +48,7 @@ export function ga4WriteSpec(): ProviderToolSpec {
       shape: { ...propertyShape, key_event_id: z.string().regex(/^\d{1,20}$/) },
       statusOf: (s, p) => (eventsOf(s).some((e) => e["key_event_id"] === p["key_event_id"]) ? "PRESENT" : "REMOVED"),
       targetCheck: () => true, removed: ["REMOVED"], ref: (p) => `ga4:properties/${safeProperty(p)}:key_event:${typeof p["key_event_id"] === "string" ? p["key_event_id"] : "?"}`,
+      validate: (s, p) => (truncatedOf(s) && !eventsOf(s).some((e) => e["key_event_id"] === p["key_event_id"]) ? "key_event_list_truncated" : null),
       rollback: "create_key_event med samme hendelsesnavn (fra før-tilstanden) oppretter nøkkelhendelsen på nytt (ny id)"
     })
   ];
@@ -68,12 +72,14 @@ export class Ga4WriteTransport extends GoogleOAuthTransport {
     const base = { property_id: property, display_name: cleanText(o["displayName"]), currency: str(o["currencyCode"]), time_zone: str(o["timeZone"]) };
     if (action === "get_property") return base;
     if (action !== "list_key_events") throw new Error(`ga4_action_not_implemented:${action}`);
-    const list = await this.http.request({ method: "GET", path: `/properties/${property}/keyEvents`, query: { pageSize: "200" }, headers: auth.headers, secrets: auth.secrets });
-    const key_events = asArr(asObj(list?.json)["keyEvents"]).slice(0, 200).map((raw) => {
+    const list = await this.http.request({ method: "GET", path: `/properties/${property}/keyEvents`, query: { pageSize: String(KEY_EVENTS_PAGE_SIZE) }, headers: auth.headers, secrets: auth.secrets });
+    const rawEvents = asArr(asObj(list?.json)["keyEvents"]);
+    const truncated = str(asObj(list?.json)["nextPageToken"]) !== null || rawEvents.length >= KEY_EVENTS_PAGE_SIZE;
+    const key_events = rawEvents.slice(0, KEY_EVENTS_PAGE_SIZE).map((raw) => {
       const e = asObj(raw);
       return { key_event_id: (str(e["name"]) ?? "").split("/").pop() ?? null, event_name: cleanText(e["eventName"], 40), counting_method: str(e["countingMethod"]), custom: e["custom"] === true, deletable: e["deletable"] === true };
     });
-    return { ...base, key_events };
+    return { ...base, key_events, truncated };
   }
 
   protected async applyWrite(action: string, p: Params, auth: Auth): Promise<{ external_id?: string; data?: JsonValue }> {
