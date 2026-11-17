@@ -400,6 +400,19 @@ function ledgerSection(ev0: Settled<Ev0BootStatus | null> | null, ledger: Settle
   };
 }
 
+/** Tidssonenavn med null forskyvning hele året (ingen sommertid) - `UTC`-ekvivalenter. */
+const UTC_ZONE_NAMES = /^(utc|etc\/utc|uct|etc\/uct|universal|etc\/universal|zulu|etc\/zulu|z|gmt|etc\/gmt|gmt0|etc\/gmt0|etc\/gmt\+0|etc\/gmt-0|greenwich|etc\/greenwich)$/i;
+const SAFE_ZONE_NAME = /^[A-Za-z0-9_+\-/:]{1,64}$/;
+
+/**
+ * Databasens tidssone slik app-rollens forbindelser ser den (re-review INFO 4). `BudgetGuard` (`date_trunc('month', now())`) og `RunRateService` (`date_trunc('day', at)`) følger DB-sesjonens tidssone, mens senteret regner dag og
+ * måned i UTC (`as_of`): er databasen ikke i UTC, kan rekkevidde og trend avvike rundt månedsskiftet. Rent en OPPLYSNING (en faktarad) - ingenting blokkeres. `null` = uventet form (tomt svar, ikke et trygt tidssonenavn).
+ */
+async function readDbTimeZone(pool: ControlCenterPool): Promise<string | null> {
+  const row = (await pool.query("SELECT current_setting('TimeZone') AS tz")).rows[0] as { tz?: unknown } | undefined;
+  return typeof row?.tz === "string" && SAFE_ZONE_NAME.test(row.tz) ? row.tz : null;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // 4. Kostmodellen (EV-16)
 // ---------------------------------------------------------------------------------------------------------------------
@@ -411,10 +424,10 @@ export const RUNWAY_WARN_DAYS = 7;
 type Budget = { level: "ok" | "warn" | "needs_approval" | "hard_blocked"; spent_ore: number };
 
 function costModelSection(
-  limits: Settled<BudgetConfig>, budget: Settled<Budget>, runRate: Settled<RunRateReport> | null, nowIso: string
+  limits: Settled<BudgetConfig>, budget: Settled<Budget>, runRate: Settled<RunRateReport> | null, timeZone: Settled<string | null> | null, nowIso: string
 ): ControlSection {
   const title = "Kostmodell (EV-16)";
-  const source = "cost_events via BudgetGuard og RunRateService (D-421; tenant-RLS) · miljø (JARVIS_COST_WARN_ORE, JARVIS_COST_APPROVAL_ORE, JARVIS_COST_HARD_LIMIT_ORE, JARVIS_BUDGET_APPROVED) · EV-16-reglene (creditRunway, forecastBreach)";
+  const source = "cost_events via BudgetGuard og RunRateService (D-421; tenant-RLS) · miljø (JARVIS_COST_WARN_ORE, JARVIS_COST_APPROVAL_ORE, JARVIS_COST_HARD_LIMIT_ORE, JARVIS_BUDGET_APPROVED) · EV-16-reglene (creditRunway, forecastBreach) · databasens tidssone (current_setting)";
   const items: ControlItem[] = [];
   const lim = limits.ok ? limits.value : null;
 
@@ -425,6 +438,25 @@ function costModelSection(
       detail_no: `Varsel ${kr(lim.warn_ore)}, godkjenning ${kr(lim.approval_ore)}, hardgrense ${kr(lim.hard_limit_ore)}. Forbruk over godkjenningsgrensen er ${lim.spend_approved ? "godkjent av deg (JARVIS_BUDGET_APPROVED)" : "IKKE godkjent - nye modellkall stoppes ved grensen"}.`,
       facts: { warn_ore: lim.warn_ore, approval_ore: lim.approval_ore, hard_limit_ore: lim.hard_limit_ore, spend_approved: lim.spend_approved }
     }));
+
+  // Databasens tidssone (re-review INFO 4): en synlig faktarad. Ikke UTC = advarsel (tallene kan avvike rundt månedsskiftet), aldri en blokkering; ulesbar/uventet = UKJENT (aldri OK).
+  if (timeZone !== null) {
+    if (!timeZone.ok) {
+      items.push(controlItem({ id: "db_timezone", label: "Databasens tidssone", status: "UNKNOWN", detail_no: `Tidssonen kunne ikke leses (${timeZone.category}) - om månedsgrensen og døgnsummene følger UTC er ikke målt.`, facts: { timezone: null, is_utc: null } }));
+    } else if (timeZone.value === null) {
+      items.push(controlItem({ id: "db_timezone", label: "Databasens tidssone", status: "UNKNOWN", detail_no: "Tidssonen hadde en uventet form (ikke målt) - om månedsgrensen og døgnsummene følger UTC er ikke målt.", facts: { timezone: null, is_utc: null } }));
+    } else {
+      const name = timeZone.value;
+      const isUtc = UTC_ZONE_NAMES.test(name);
+      items.push(controlItem({
+        id: "db_timezone", label: "Databasens tidssone", status: isUtc ? "OK" : "WARN",
+        detail_no: isUtc
+          ? `${name} (UTC): månedsgrensen (BudgetGuard) og døgnsummene (run-rate) følger samme tidssone som senterets dag og måned.`
+          : `${name} - IKKE UTC. Månedsforbruk (BudgetGuard) og døgnsummer (run-rate) følger databasens tidssone, mens rekkevidde og trend regnes i UTC: rundt månedsskiftet kan de avvike i opptil tidssoneforskjellen (trenden blir da ukjent, rekkevidden kan bli feil). Kun en opplysning - ingenting stoppes.`,
+        facts: { timezone: name, is_utc: isUtc }, observed_at: nowIso
+      }));
+    }
+  }
 
   let spent: number | null = null;
   if (budget.ok && !validOre(budget.value.spent_ore)) {
@@ -545,13 +577,15 @@ export function createEvolutionCenter(deps: EvolutionCenterDeps): ControlCenterD
       const sameTenant = deps.reportTenantId === undefined || deps.reportTenantId === tenantId;
 
       const limitsR: Settled<BudgetConfig> = await settle(async () => budgetConfigFromEnv({ ...deps.env }));
-      const [reportR, readinessR, ledgerR, budgetR, runRateR] = await Promise.all([
+      const [reportR, readinessR, ledgerR, budgetR, runRateR, timeZoneR] = await Promise.all([
         sameTenant ? settle(() => deps.evolutionReport()) : Promise.resolve("other_tenant" as const),
         sameTenant ? (deps.readiness ? settle(() => deps.readiness!()) : Promise.resolve({ ok: false, category: "ikke koblet inn" } as Settled<readonly ReadinessVerdict[]>)) : Promise.resolve("other_tenant" as const),
         settle(() => readLedger(deps.pool, new Date(nowMs - 30 * DAY_MS).toISOString())),
         // Kostmodellen leses KUN når mottakeren ikke er begrenset (finansavledet tilstand holdes tilbake fra sky, og senteret bygges normalt aldri for sky).
         restrictFinance ? Promise.resolve(null) : (limitsR.ok ? settle<Budget>(async () => new BudgetGuard(deps.pool as pg.Pool, limitsR.value).evaluate(tenantId)) : Promise.resolve({ ok: false, category: "ugyldige grenser" } as Settled<Budget>)),
-        restrictFinance ? Promise.resolve(null) : (deps.runRate ? settle(() => deps.runRate!.report(tenantId)) : Promise.resolve(null))
+        restrictFinance ? Promise.resolve(null) : (deps.runRate ? settle(() => deps.runRate!.report(tenantId)) : Promise.resolve(null)),
+        // Databasens tidssone hører til kostdelen (månedsgrensen og døgnsummene): leses heller ikke for en begrenset mottaker.
+        restrictFinance ? Promise.resolve(null) : settle(() => readDbTimeZone(deps.pool))
       ]);
       const ev0R: Settled<Ev0BootStatus | null> | null = deps.ev0Status ? await settle(async () => deps.ev0Status!()) : null;
 
@@ -572,7 +606,7 @@ export function createEvolutionCenter(deps: EvolutionCenterDeps): ControlCenterD
         dormantSection(readinessR, nowIso, decisions !== null),
         ledger.section
       ];
-      if (!restrictFinance && budgetR !== null) sections.push(costModelSection(limitsR, budgetR, runRateR, nowIso));
+      if (!restrictFinance && budgetR !== null) sections.push(costModelSection(limitsR, budgetR, runRateR, timeZoneR, nowIso));
       return { sections, actions: ledger.actions };
     }
   };

@@ -82,11 +82,14 @@ interface LedgerFixture {
   by_class?: Array<{ change_class: string; n: number }>;
   fail?: Error;
   spent?: number | Error;
+  /** Svar på `current_setting('TimeZone')` (databasens tidssone). Standard: UTC. */
+  tzRows?: Array<Record<string, unknown>> | Error;
 }
 /** Rekkefølgen er viktig: `first match`. Kostnadsraden (BudgetGuard) leses under identitetens tenant; endringsregisteret er globalt. */
 function rules(f: LedgerFixture = {}): ScriptedRule[] {
   const ledgerRows = (rows: ScriptedRule["rows"]): ScriptedRule["rows"] => (f.fail ? f.fail : rows);
   return [
+    { match: /current_setting\('TimeZone'\)/, rows: f.tzRows ?? [{ tz: "UTC" }] },
     { match: /date_trunc\('month', now\(\)\)/, rows: f.spent instanceof Error ? f.spent : [{ spent: f.spent ?? 12_345 }] },
     { match: /GROUP BY t\.change_class/, rows: ledgerRows(f.by_class ?? [{ change_class: "E2", n: f.pending?.length ?? 0 }].filter((r) => r.n > 0)) },
     { match: /DISTINCT ON \(change_id\)/, rows: ledgerRows(f.pending ?? []) },
@@ -659,6 +662,59 @@ describe("6. kostmodellen (EV-16): grenser, forbruk, prognose, rekkevidde og tre
       const bad = await reportOf({ runRate: { report: async () => runRateReport({ projected: 300_000, daily: [...steadyMonth(20).daily.slice(0, 3), { day: "2026-11-xx", ore: 5 }, { day: "2026-11-21", ore: Number.NaN }], asOf: m.as_of }) } }, { spent: m.spent });
       expect(itemOf(cost(bad.report), "trend").status).toBe("UNKNOWN");
       expect(itemOf(cost(bad.report), "trend").detail_no).toContain("ugyldige tall");
+    });
+  });
+
+  describe("DB-tidssone (re-review INFO 4): en synlig faktarad - aldri en blokkering", () => {
+    const tz = async (tzRows: LedgerFixture["tzRows"] | undefined) => (await reportOf({}, tzRows === undefined ? {} : { tzRows })).report;
+    const row = (r: ControlCenterReport): ControlItem => itemOf(cost(r), "db_timezone");
+
+    it("UTC (og navn med null forskyvning hele året: Etc/UTC, GMT ...): OK, og tidssonen står i fakta", async () => {
+      for (const name of ["UTC", "Etc/UTC", "utc", "GMT", "Etc/GMT", "Zulu", "Etc/Universal"]) {
+        const item = row(await tz([{ tz: name }]));
+        expect(item.status, name).toBe("OK");
+        expect(item.facts, name).toEqual({ timezone: name, is_utc: true });
+        expect(item.detail_no, name).toContain("følger samme tidssone som senterets dag og måned");
+      }
+      expect(cost(await tz(undefined)).source).toContain("databasens tidssone");
+    });
+
+    it("IKKE UTC (Europe/Oslo, America/New_York, Asia/Kolkata, Europe/London): WARN med navnet og forklaringen - men kun en opplysning: seksjonen blir ADVARSEL (aldri FEIL), og de andre kostradene er urørt", async () => {
+      for (const name of ["Europe/Oslo", "America/New_York", "Asia/Kolkata", "Europe/London", "CET", "Etc/GMT+1"]) {
+        const r = await tz([{ tz: name }]);
+        const item = row(r);
+        expect(item.status, name).toBe("WARN");
+        expect(item.facts, name).toEqual({ timezone: name, is_utc: false });
+        expect(item.detail_no, name).toContain(`${name} - IKKE UTC`);
+        expect(item.detail_no, name).toContain("Kun en opplysning - ingenting stoppes");
+        expect(cost(r).status, name).not.toBe("FAIL");
+        for (const other of ["limits", "month_to_date", "projection"]) expect(itemOf(cost(r), other).status, `${name}/${other}`).toBe("OK");
+      }
+    });
+
+    it("ulesbar (databasefeil med vert og passord) eller uventet form (tomt svar, tom/lang/markup-streng, ikke tekst): UKJENT - aldri OK - og feilteksten når aldri rapporten", async () => {
+      const down = await tz(Object.assign(new Error("connect ECONNREFUSED 10.7.7.7:5432 password=hemmelig-passord"), { code: "ECONNREFUSED" }));
+      expect(row(down).status).toBe("UNKNOWN");
+      expect(row(down).facts).toEqual({ timezone: null, is_utc: null });
+      expect(JSON.stringify(down)).not.toMatch(/10\.7\.7\.7|hemmelig-passord|ECONNREFUSED/);
+      for (const bad of [[], [{ tz: "" }], [{ tz: "<b>Oslo</b>" }], [{ tz: "x".repeat(65) }], [{ tz: 5 }], [{ tz: null }], [{}], [{ tz: "Europe/Oslo'; DROP TABLE x" }]]) {
+        const r = await tz(bad as never);
+        expect(row(r).status, JSON.stringify(bad)).toBe("UNKNOWN");
+        expect(row(r).facts, JSON.stringify(bad)).toEqual({ timezone: null, is_utc: null });
+        expect(row(r).detail_no).toContain("ikke målt");
+        expect(r.status, JSON.stringify(bad)).not.toBe("OK");
+      }
+    });
+
+    it("restrictFinance (kostdelen utelates): ingen tidssonerad og SQL-en kjøres ikke; SQL-en er én ren lesing av innstillingen", async () => {
+      const { report, built } = await reportOf({}, {}, { restrictFinance: true });
+      expect(report.sections.some((s) => s.id === "cost_model")).toBe(false);
+      expect(built.pool.queries.some((q) => /current_setting/.test(q.sql))).toBe(false);
+      const normal = await reportOf({}, {});
+      const queries = normal.built.pool.queries.filter((q) => /current_setting/.test(q.sql));
+      expect(queries).toHaveLength(1);
+      expect(queries[0]?.sql).toBe("SELECT current_setting('TimeZone') AS tz");
+      expect(queries[0]?.tenant).toBeNull(); // en innstilling, ikke tenant-data
     });
   });
 

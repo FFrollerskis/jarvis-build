@@ -219,6 +219,18 @@ describe("kostmodellen mot ekte cost_events: tenant-skopet (RLS) - A sine tall e
     expect(JSON.stringify(parts)).not.toContain(String(await truthSpent(TENANT_A)) + ",");
   });
 
+  it("databasens tidssone (re-review INFO 4) leses av app-rollen som en synlig faktarad - lik innstillingen databasen faktisk har (UTC = OK, ellers ADVARSEL), aldri en blokkering", async () => {
+    const truth = String((await db.adminPool.query("SELECT current_setting('TimeZone') AS tz")).rows[0].tz);
+    const utc = /^(utc|etc\/utc|uct|etc\/uct|universal|etc\/universal|zulu|etc\/zulu|z|gmt|etc\/gmt|gmt0|etc\/gmt0|greenwich)$/i.test(truth);
+    const parts = await build(A).run();
+    const item = itemOf(sectionOf(parts, "cost_model"), "db_timezone");
+    expect(item.facts).toEqual({ timezone: truth, is_utc: utc });
+    expect(item.status).toBe(utc ? "OK" : "WARN");
+    expect(item.status).not.toBe("FAIL"); // en opplysning: raden alene gjør aldri seksjonen til FEIL
+    // og den lagrede innstillingen blir ikke endret av å bygge senteret
+    expect(String((await db.adminPool.query("SELECT current_setting('TimeZone') AS tz")).rows[0].tz)).toBe(truth);
+  });
+
   it("månedsprognosen er run-rate fra de ekte radene: databasens egen 7-døgnssum og antall døgn gir prognosen (snitt siste 7 døgn x 30)", async () => {
     const t = (await db.adminPool.query(
       "SELECT coalesce(sum(amount_ore),0)::int AS d7, count(DISTINCT date_trunc('day', at))::int AS days FROM cost_events WHERE tenant_id = $1 AND at >= now() - interval '7 days'", [TENANT_A]

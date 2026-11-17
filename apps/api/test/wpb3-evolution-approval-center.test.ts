@@ -33,6 +33,7 @@ type DecisionRow = { change_id: string; digest: string; decision: string; decide
 
 function rulesFor(pending: Pending[], decisions: DecisionRow[] | Error): ScriptedRule[] {
   return [
+    { match: /current_setting\('TimeZone'\)/, rows: [{ tz: "UTC" }] },
     { match: /FROM audit_events/, rows: decisions },
     { match: /date_trunc\('month', now\(\)\)/, rows: [{ spent: 1_000 }] },
     { match: /GROUP BY t\.change_class/, rows: pending.length > 0 ? [{ change_class: "E2", n: pending.length }] : [] },
