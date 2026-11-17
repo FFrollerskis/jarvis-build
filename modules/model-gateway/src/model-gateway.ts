@@ -1297,6 +1297,8 @@ export class ModelGateway {
         ],
         max_tokens: 512
       };
+      // WP-B4 (M3): billetten følger med så criticens kostnad (og et avbrutt critic-kall) også ses av overlegget i enforceren mens bufferen av forbruket er gyldig. Er kallet snevret inn er criticen lokal (ingen Anthropic-kandidat),
+      // og er det åpent finnes ingen nedgradering å anvende - billetten endrer derfor ingenting ved valget, kun bokføringen. Uten Claude-kreditten er `pacing` udefinert og kallet er uendret.
       const criticResult = await this.executePlan(
         input,
         criticPlan,
@@ -1304,7 +1306,9 @@ export class ModelGateway {
         Date.now(),
         "ok",
         true,
-        criticRequest
+        criticRequest,
+        undefined,
+        pacing
       );
       this.criticRunSeen = true;
       primary.metadata = {

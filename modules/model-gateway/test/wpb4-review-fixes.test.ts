@@ -107,10 +107,22 @@ describe("M1: en påbegynt tur PÅ Anthropic fullføres fortsatt (fortsettelsesr
     expect(db.audit).toHaveLength(0); // ESSENSIELL på tempo: kun spor, ingen revisjonsrad
   });
 
+  it("fortsettelsen er IKKE en ny vurdering selv når bufferen har utløpt og kreditten ser oppbrukt ut: runde 2 går fortsatt til Anthropic med billett fra runde 1 (ingen ny lesing)", async () => {
+    const { gateway, db, anthropic, clock, budgetSpans } = build({ anthropic: { script: toolThenAnswer("anthropic", "claude-sonnet-5-5") } });
+    db.spend.set("t1", SPENT.tight);
+    const result = await gateway.completeWithTools(ownerTurn(), { tools: [ECHO_TOOL], executor: executor(() => { db.spend.set("t1", SPENT.exhausted); clock.now += 5_000; }) });
+    expect(result.provider).toBe("anthropic");
+    expect(anthropic.calls.length + anthropic.streamCalls.length).toBe(2);
+    expect(db.spendReads).toBe(1); // en ny vurdering ville lest på nytt (bufferen er utløpt) og sett «oppbrukt»
+    expect(budgetSpans().map((span) => span.metadata?.["reason"])).toEqual(["tight_essential_allowed", "continuation_round_allowed"]);
+    expect(db.audit).toHaveLength(0);
+  });
+
   it("en nedgradert tur fortsetter på den billigere modellen i neste runde (billetten bæres gjennom løkka, ikke overstyrt til dyr modell)", async () => {
-    const { gateway, db, anthropic } = build({ anthropic: { script: toolThenAnswer("anthropic", HAIKU) } });
+    const { gateway, db, anthropic, clock } = build({ anthropic: { script: toolThenAnswer("anthropic", HAIKU) } });
     db.spend.set("t1", SPENT.ahead);
-    const result = await gateway.completeWithTools(background(), { tools: [ECHO_TOOL], executor: executor() });
+    // forbruket «synker» og bufferen utløper mellom rundene: en NY vurdering ville gitt full modell, men turen er påbegynt på den billige og forblir der
+    const result = await gateway.completeWithTools(background(), { tools: [ECHO_TOOL], executor: executor(() => { db.spend.set("t1", SPENT.on_pace); clock.now += 5_000; }) });
     expect(result.provider).toBe("anthropic");
     expect([...anthropic.calls, ...anthropic.streamCalls].map((c) => c.model)).toEqual([HAIKU, HAIKU]);
   });
@@ -741,5 +753,20 @@ describe("L6: revisjonsraden tilskrives kallets EGEN person (økt → jobb), og 
     db.spend.set("t2", SPENT.tight);
     await gateway.complete(background({ tenant_id: "t2", task_id: "job-x" }));
     expect(db.audit[0]?.person_id).toBe("owner-1");
+  });
+});
+
+describe("M3: criticens kostnad ses av overlegget (billetten følger med criticen)", () => {
+  it("en åpen tur med critic på Anthropic: criticens bokførte kostnad teller i bufferen - neste Anthropic-kall ved kanten stenges i stedet for å slippe gjennom på en gammel buffer", async () => {
+    const usage = { input_tokens: 2_000, output_tokens: 3_000 }; // 36 øre per kall
+    const { gateway, db, config, anthropic } = build({ anthropic: { usage } });
+    db.spend.set("t1", config.budget_ore - 30);
+    // primærkallet går lokalt (eksplisitt valg), criticen velger Anthropic (QUALITY, åpen billett): 36 øre bokføres
+    const first = await gateway.complete(ownerTurn({ provider: "gemma_local", critic: true }));
+    expect((first.metadata?.["critic"] as { provider?: string } | undefined)?.provider).toBe("anthropic");
+    expect(anthropic.calls).toHaveLength(1);
+    const next = await gateway.complete(ownerTurn());
+    expect(next.provider).toBe("gemma_local"); // oppbrukt (30 øre igjen, 36 brukt av criticen) - uten overlegg ville bufferen sagt «på tempo» og sluppet kallet til Anthropic
+    expect(anthropic.calls).toHaveLength(1);
   });
 });
