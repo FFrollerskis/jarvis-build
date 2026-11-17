@@ -128,3 +128,7 @@ Se /tmp/lead/D3-fix-report.md (oppdatert D-459-tekst, 7 nye eierspørsmål, sted
 
 ## B3 fikser-rapport (2026-11-17 ~06:20Z)
 Se /tmp/lead/B3-fix-report.md (oppdatert D-475-tekst, 2 nye eierspørsmål, steder for blikk). Gren 7aa421e5. Smal re-review startet (agent aec976d86ff44a97e, range bdeeb0b2..7aa421e5, utfall -> /tmp/lead/B3-rereview.md).
+
+
+## D3 re-review (2026-11-17 ~06:25Z)
+Se /tmp/lead/D3-rereview.md: VERDICT MERGE ETTER FIKSER (N1 MEDIUM: replay av outcome_unknown stoppet av port blir terminal failed; N2-N9 LOW/INFO; N4 testhull). Andre fiks-runde sendt til fikser ab83bf1579fe69000 (N8: lead bekrefter ingen DB har anvendt a0aab5ae; 114 endret på stedet, ingen 115). Ny re-review (delta) etter fikserens svar.
