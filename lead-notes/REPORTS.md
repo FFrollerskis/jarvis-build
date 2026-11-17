@@ -136,3 +136,7 @@ Se /tmp/lead/D3-rereview.md: VERDICT MERGE ETTER FIKSER (N1 MEDIUM: replay av ou
 
 ## B4 fikser-rapport (2026-11-17 ~07:00Z)
 Se /tmp/lead/B4-fix-report.md (oppdatert D-476-tekst, 6 nye eierspørsmål, steder for blikk, avvik: reservert `delegated_from_chat` endrer /tasks/submit også med flagg AV; migrasjon 115 uavhengig av flagg). Gren 87e930f3. Smal re-review startet (agent a0009a380306d80df, range 774a7b3a..87e930f3, utfall -> /tmp/lead/B4-rereview.md).
+
+
+## B3 re-review (2026-11-17 ~07:00Z)
+Se /tmp/lead/B3-rereview.md: VERDICT MERGE (H1, M1, L1-L5 lukket). NYTT 1 LOW (regresjon: executive droppet fra statusliste => åpen hendelse kan ikke auto-lukkes), NYTT 2 LOW (testhull INFO-stempling), INFO 3-8 (kildevakter tripwires; DB-tidssone ikke festet; L5-grenser; andre interne verktøy kan gi auth_failed/HIGH - eksisterende på main). Liten oppfølger sendt til B3-fikser aaca1673b43060a25 (NYTT 1, NYTT 2, valgfritt timezone-faktarad). Mulig ledger-funn: INFO 8 (owner_control_unauthorized klassifiseres auth_failed/HIGH i gateway.ts:1129; ikke introdusert av B3).
