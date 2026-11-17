@@ -1096,3 +1096,34 @@ describe("T: review L7 - hemmeligheter i leverandørtekst redigeres i journalen"
     expect(stored).not.toContain(value);
   });
 });
+
+describe("U: review L7 - gatewayens tidsavbrudd (avbrudd) gjennom en growth-transport", () => {
+  it("leverandøren behandler mutasjonen men svarer for sent: gatewayens frist avbryter kallet -> UKJENT utfall (`tool_timeout`), `unknown`-varsel, ÉN forespørsel (ingen ny sending), replay sender aldri på nytt", async () => {
+    const original = gateway.get("growth_googleads", "set_campaign_budget")!;
+    gateway.register({ ...original, timeout_ms: 400, rate_limit_per_minute: 10_000 });
+    const fast = gads.handler;
+    gads.handler = async (r) => {
+      const reply = fast(r);
+      if (gads.isMutation(r)) await new Promise((resolve) => setTimeout(resolve, 1_300)); // leverandøren har ENDRET budsjettet, men svarer etter fristen
+      return reply;
+    };
+    try {
+      const key = uniq("l7-timeout");
+      const first = await g("set_campaign_budget", { campaign_id: "101", amount_ore: 40_000 }, { idempotency_key: key });
+      expect(first.outcome).toBe("UNKNOWN");
+      expect(first.reason).toBe("tool_failed:tool_timeout");
+      expect(first.write.status).toBe("outcome_unknown");
+      expect(notifications.map((n) => n.outcome)).toEqual(["unknown"]);
+      expect(gads.budgets.get("11")?.micros).toBe(400_000_000);
+      await new Promise((resolve) => setTimeout(resolve, 1_500)); // la den forsinkede leverandørresponsen komme: ingen retry skal ha skjedd
+      expect(gMut()).toHaveLength(1);
+      const replay = await g("set_campaign_budget", { campaign_id: "101", amount_ore: 40_000 }, { idempotency_key: key });
+      expect(replay.outcome).toBe("UNKNOWN");
+      expect(replay.write.write_id).toBe(first.write.write_id);
+      expect(gMut()).toHaveLength(1);
+    } finally {
+      gads.handler = fast;
+      gateway.register(original);
+    }
+  });
+});
