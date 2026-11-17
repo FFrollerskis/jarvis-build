@@ -168,6 +168,9 @@ export class ExecutiveTransport implements ToolTransport {
       case "record_evolution_decision": {
         // WP-B3 (D-475, EV-23): REGISTRER eierens avgjørelse om ett endringsforslag i revisjonssporet - uten virkning (selvendring er frosset, D-397). Eier + signert enhetsøkt + step-up håndheves FØR dette kalles
         // (`parameterAuthorizer` + `step_up_required`). Identiteten kommer UTELUKKENDE fra konteksten (D-68). Svarets `summary_no` er en fast norsk tekst som alltid sier at ingenting utføres.
+        // GJENNOMGANG L2 (dybdeforsvar): INGEN modell kan registrere eierens avgjørelse. Verktøyet står på ingen modellflate (manifestet: effekt `control`), men er `servingModel` satt - en modellbetjent tur, SKY ELLER LOKAL -
+        // avvises kallet her med en fast kode, FØR noe annet leses. Kun siden (ingen modell i løkka) og eierens egen knapp kommer gjennom.
+        if (context?.servingModel !== undefined) throw new Error("evolution_decision_model_origin_denied");
         const decision = parameters["decision"];
         if (!isEvolutionDecision(decision)) throw new Error("invalid_evolution_decision_input");
         const result = await this.service.recordEvolutionDecision(identity, { change_id: requireString(parameters, "change_id"), proposal_digest: requireString(parameters, "proposal_digest"), decision });

@@ -46,7 +46,7 @@ export interface EvolutionDecisionResult {
 
 /** Feilkodene skriveren avviser med (`Error.message`). Faste koder - aldri tekst fra data. */
 export const EVOLUTION_DECISION_REFUSALS = [
-  "evolution_decisions_not_configured", "invalid_evolution_decision_input", "proposal_not_found", "proposal_not_open", "proposal_digest_mismatch", "proposal_class_forbidden", "decision_record_failed"
+  "evolution_decisions_not_configured", "evolution_decision_model_origin_denied", "invalid_evolution_decision_input", "proposal_not_found", "proposal_not_open", "proposal_digest_mismatch", "proposal_class_forbidden", "decision_record_failed"
 ] as const;
 export type EvolutionDecisionRefusal = (typeof EVOLUTION_DECISION_REFUSALS)[number];
 

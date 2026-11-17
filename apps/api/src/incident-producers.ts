@@ -68,8 +68,16 @@ export function parseIncidentProducerConfig(env: Record<string, string | undefin
  */
 export function connectorStatusesFromGateway(gateway: Pick<ToolGateway, "health">): ProviderStatusLike[] {
   const names = new Map(CONNECTOR_REGISTRY.map((def) => [def.live_test?.tool_id ?? def.id, def.display_name]));
-  return [...gateway.health].map(([id, health]) => ({ id, display_name: names.get(id) ?? id, configured: true, health }));
+  return [...gateway.health].filter(([id]) => !NOT_A_CONNECTION_TOOL_IDS.has(id)).map(([id, health]) => ({ id, display_name: names.get(id) ?? id, configured: true, health }));
 }
+
+/**
+ * GJENNOMGANG L1 (WP-B3): verktøy som er Jarvis' EGEN kontrollflate i prosessen - ikke en tilkobling til et eksternt system. `ToolGateway` merker helsen til HVERT verktøy som kaster, og et avslag (utdatert versjon, lukket forslag,
+ * feil digest, `cancel_task` for en oppgave som ikke finnes ...) kastes som en feil: `executive` ble da «utilgjengelig» til neste vellykkede kall, og `providerProducer` åpnet «Tilkobling svikter: executive» (kun med
+ * JARVIS_INCIDENT_PRODUCERS_ENABLED=true). Et avslag er et riktig svar, ikke en tilkobling som svikter - og det finnes ingen ekstern tilkobling å reparere. Raden er fortsatt i `gateway.health` (statusrapportene viser den
+ * uendret); den blir bare ikke en HENDELSE. Andre interne verktøy med samme mønster (owner_controls, situations ...) er ikke kartlagt her (se runbook, WPB3 «Kjente grenser»); legg dem til kun etter en egen vurdering.
+ */
+export const NOT_A_CONNECTION_TOOL_IDS: ReadonlySet<string> = new Set(["executive"]);
 
 export interface ApiIncidentProducerDeps {
   pool: pg.Pool;

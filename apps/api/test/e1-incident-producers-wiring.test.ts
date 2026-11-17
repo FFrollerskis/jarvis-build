@@ -10,7 +10,7 @@ import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { IncidentService } from "@jarvis/incidents";
 import { MemoryAlertSink, Watchdog, type HealthCheck } from "@jarvis/watchdog";
 import {
-  connectorStatusesFromGateway, createIncidentProducerLoop, createWatchdogIncidentBridge, parseIncidentProducerConfig,
+  NOT_A_CONNECTION_TOOL_IDS, connectorStatusesFromGateway, createIncidentProducerLoop, createWatchdogIncidentBridge, parseIncidentProducerConfig,
   INCIDENT_PRODUCER_INTERVAL_MS_DEFAULT, INCIDENT_PRODUCER_MEMORY_SPACE
 } from "../src/incident-producers.ts";
 
@@ -64,6 +64,17 @@ describe("tilkoblingshelse og kjøre-løkken", () => {
     const statuses = connectorStatusesFromGateway({ health });
     expect(statuses.find((s) => s.id === "cloudflare")).toMatchObject({ display_name: "Cloudflare", configured: true, health: { state: "unavailable" } });
     expect(statuses.find((s) => s.id === "postgres_ops")?.display_name).toBe("postgres_ops");
+  });
+
+  it("L1 (WP-B3-gjennomgang): Jarvis' EGEN kontrollflate (`executive`) er ikke en tilkobling - et avslag som merker den «utilgjengelig» blir aldri en hendelse, mens ekte tilkoblinger (også de som ikke står i registeret) fortsatt gjør det", () => {
+    const health = new Map([
+      ["executive", { state: "unavailable", at: "2026-10-09T10:00:00Z", detail: "proposal_digest_mismatch" }],
+      ["github", { state: "unavailable", at: "2026-10-09T10:00:00Z", detail: "github_error_503" }],
+      ["growth_googleads", { state: "auth_failed", at: "2026-10-09T10:01:00Z" }]
+    ]);
+    const ids = connectorStatusesFromGateway({ health }).map((s) => s.id);
+    expect(ids).toEqual(["github", "growth_googleads"]);
+    expect([...NOT_A_CONNECTION_TOOL_IDS]).toEqual(["executive"]);
   });
 
   it("en ny runde mens forrige pågår hoppes over, og en feil i en runde kastes aldri ut av løkken", async () => {

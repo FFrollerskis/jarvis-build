@@ -277,8 +277,24 @@ describe("6. transporten: identitet kun fra konteksten, fast svar, FASTE avslags
       await expect(run(t, ok), code).rejects.toThrow(code);
     }
     expect([...EVOLUTION_DECISION_REFUSALS].sort()).toEqual([
-      "decision_record_failed", "evolution_decisions_not_configured", "invalid_evolution_decision_input", "proposal_class_forbidden", "proposal_digest_mismatch", "proposal_not_found", "proposal_not_open"
+      "decision_record_failed", "evolution_decision_model_origin_denied", "evolution_decisions_not_configured", "invalid_evolution_decision_input", "proposal_class_forbidden", "proposal_digest_mismatch", "proposal_not_found", "proposal_not_open"
     ]);
+  });
+
+  it("L2 (gjennomgang) DYBDEFORSVAR: en modellbetjent tur (`servingModel` satt - sky ELLER lokal) kan ALDRI registrere eierens avgjørelse; skriveren kalles aldri, med en fast kode - kun siden (ingen modell) slipper gjennom", async () => {
+    let called = 0;
+    const t = transportWith({ record: async () => { called += 1; return result(); } });
+    const withModel = (servingModel: { provider: string; model: string } | undefined) => t.invoke("record_evolution_decision", ok as never, "cred", { identity: owner, ...(servingModel ? { servingModel } : {}) } as never);
+    for (const model of [{ provider: "anthropic", model: "claude-test" }, { provider: "gemma_local", model: "gemma-local" }, { provider: "", model: "" }, { provider: "ukjent-leverandor", model: "x" }]) {
+      await expect(withModel(model), JSON.stringify(model)).rejects.toThrow("evolution_decision_model_origin_denied");
+    }
+    expect(called).toBe(0);
+    // modellopphavet avvises FØR noe annet (selv ved ugyldig input), så ingenting om forslaget eller skriveren når en modell
+    await expect(t.invoke("record_evolution_decision", { change_id: "finnes-ikke", proposal_digest: "x", decision: "execute" } as never, "cred", { identity: owner, servingModel: { provider: "anthropic", model: "m" } } as never)).rejects.toThrow("evolution_decision_model_origin_denied");
+    expect(called).toBe(0);
+    await withModel(undefined); // siden: ingen modell i løkka
+    expect(called).toBe(1);
+    expect((EVOLUTION_DECISION_REFUSALS as readonly string[]).includes("evolution_decision_model_origin_denied")).toBe(true);
   });
 
   it("DYBDEFORSVAR: tjenesten håndhever SELV eier + signert enhetsøkt + step-up (uavhengig av verktøydefinisjonens port) - skriveren kalles aldri for andre, med faste koder", async () => {

@@ -1,12 +1,15 @@
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { IdentityContext } from "@jarvis/contracts";
 import { ChannelSessionAuthority, DeviceService, IdentityService, SessionGrantService, SessionService } from "@jarvis/core";
 import { EVOLUTION_DECISION_AUDIT_TYPE, ExecutiveService, ExecutiveTransport, executiveToolDefinitions, type ControlCenterReport } from "@jarvis/executive";
+import { providerProducer } from "@jarvis/incidents";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ChangeLedger, evaluateAllReadiness, type ReadinessFacts } from "@jarvis/self-modification";
 import { ToolGateway, type SecretProvider } from "@jarvis/tool-gateway";
 import type { Ev0BootStatus } from "../src/ev0-boot.ts";
 import { createEvolutionDecisionRecorder } from "../src/evolution-decisions.ts";
+import { connectorStatusesFromGateway } from "../src/incident-producers.ts";
 import { CONTROL_CENTER_FLAGS, CONTROL_FEATURE_FLAGS, createControlCenterRegistry, registerControlCenters } from "../src/control-center/register.ts";
 import { controlCentersWithTools, flagOn } from "../src/control-center/shared.ts";
 import { createApiServer } from "../src/server.ts";
@@ -126,7 +129,7 @@ beforeAll(async () => {
   const ledger = new ChangeLedger(admin);
   const row = (change_id: string, change_class: "E0" | "E1" | "E2" | "E3", decision: "proposed" | "rejected") =>
     ledger.append({ change_id, change_class, decision, constitution_digest: DIGEST, subject: "HEMMELIG FORSLAGSTEKST", paths: ["config/hemmelig.json"], branch: "", head_sha: null, evidence: {}, recorded_by: "test" });
-  for (const [id, cls] of [["r1", "E1"], ["r2", "E3"], ["r4", "E2"], ["r5", "E2"]] as const) {
+  for (const [id, cls] of [["r1", "E1"], ["r2", "E3"], ["r4", "E2"], ["r5", "E2"], ["r6", "E1"]] as const) {
     await row(id, cls, "proposed");
     hashes.set(id, String((await admin.query("SELECT entry_hash FROM evolution_change_ledger WHERE change_id = $1 ORDER BY seq DESC LIMIT 1", [id])).rows[0].entry_hash));
   }
@@ -315,5 +318,48 @@ describe("E: kill switch stanser avgjørelsen - og ingenting aktiveres uansett",
     expect(Number((await db.adminPool.query("SELECT count(*) AS n FROM evolution_change_ledger WHERE decision IN ('approved', 'merged', 'deployed')")).rows[0].n)).toBe(0);
     expect((await new ChangeLedger(db.adminPool).verify()).ok).toBe(true);
     for (const id of ["r1", "r2", "r4", "r5"]) expect(await latestLedger(id), id).toBe("proposed");
+  });
+});
+
+describe("F: gjennomgang L1/L2 - en modell kan ikke registrere avgjørelsen, og et avslag blir aldri en «Tilkobling svikter: executive»-hendelse", () => {
+  // EGEN stabel: verktøyets grense på 10 kall/min er brukt opp av de andre seksjonene, og gatewayens helsekart skal starte tomt (L1).
+  let fresh: Stack;
+  beforeAll(async () => { fresh = await startStack(ENV_ON); }, 60_000);
+  const ownerIdentity: IdentityContext = { person_id: OWNER, tenant_id: TENANT_A, memory_space_id: "personal", session_id: "s-b3r-f", device_id: "b3r-dev-owner", channel: "web", auth_strength: "signed" };
+  const exec = (servingModel?: { provider: string; model: string }, digest: string = hashes.get("r6") as string, decision = "defer") =>
+    fresh.gateway.execute({ identity: ownerIdentity, tool_id: "executive", action: "record_evolution_decision", parameters: { change_id: "r6", proposal_digest: digest, decision }, ...(servingModel ? { servingModel } : {}) });
+  const observe = (readStatus: () => Promise<Array<{ id: string; display_name: string; configured: boolean; health: { state: string; at: string; detail?: string } | null }>>) =>
+    providerProducer({ readStatus }).observe({ tenantId: TENANT_A, memorySpace: "business", now: new Date() }, []);
+
+  it("L2: samme eier og samme gyldige kall - med en modell i løkka (sky ELLER lokal) avvises det med en fast kode og INGEN rad; uten modell (siden) registreres det", async () => {
+    const before = (await decisionRows("r6")).length;
+    for (const model of [{ provider: "anthropic", model: "claude-test" }, { provider: "gemma_local", model: "gemma-local" }]) {
+      const r = await exec(model);
+      expect(r.ok, model.provider).toBe(false);
+      expect(String((r as { reason?: string }).reason), model.provider).toContain("evolution_decision_model_origin_denied");
+    }
+    expect((await decisionRows("r6")).length).toBe(before);
+    expect((await exec()).ok).toBe(true);
+    expect((await decisionRows("r6")).length).toBe(before + 1);
+  });
+
+  it("L1: et avslag KASTES og merker `executive` «utilgjengelig» i gatewayen (kjent: helse styrer aldri utførelse) - men det blir ALDRI en hendelse: incident-produsentens statuser har ingen executive-rad", async () => {
+    const r = await exec(undefined, "0".repeat(64)); // utdatert versjon: `proposal_digest_mismatch` (kastet av skriveren)
+    expect(r.ok).toBe(false);
+    expect(String((r as { reason?: string }).reason)).toContain("proposal_digest_mismatch");
+    expect(fresh.gateway.health.get("executive")?.state).toBe("unavailable");
+    expect(connectorStatusesFromGateway(fresh.gateway).map((s) => s.id)).not.toContain("executive");
+    const observation = await observe(async () => connectorStatusesFromGateway(fresh.gateway));
+    expect(observation.present.map((f) => f.subject)).not.toContain("executive");
+    expect(observation.present.some((f) => /executive/i.test(f.title))).toBe(false);
+    // kontroll av selve testen: med den RÅE gateway-helsen (uten filteret) åpner den samme produsenten «Tilkobling svikter: executive»
+    const raw = await observe(async () => [...fresh.gateway.health].map(([id, health]) => ({ id, display_name: id, configured: true, health })));
+    expect(raw.present.some((f) => f.subject === "executive" && f.title.includes("Tilkobling svikter"))).toBe(true);
+  });
+
+  it("raden leges av neste vellykkede executive-kall (siden oppfrisker hvert minutt), og er da ikke lenger noe produsenten kunne sett", async () => {
+    expect((await fresh.gateway.execute({ identity: ownerIdentity, tool_id: "executive", action: "get_evolution_center", parameters: {} })).ok).toBe(true);
+    expect(fresh.gateway.health.get("executive")?.state).toBe("healthy");
+    expect((await observe(async () => [...fresh.gateway.health].map(([id, health]) => ({ id, display_name: id, configured: true, health })))).present.some((f) => f.subject === "executive")).toBe(false);
   });
 });
