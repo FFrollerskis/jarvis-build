@@ -227,6 +227,11 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
       h.json(CAPTURE_STATUS[err.code] ?? 400, { error: "vision_capture", code: err.code, request_id: requestId });
       return true;
     }
+    // Samme kilde (type + ref) kan registreres én gang per space (unik indeks): et duplikat er en konflikt, ikke en serverfeil.
+    if (pathname === "/vision/cameras/register" && (err as { code?: unknown } | null)?.code === "23505") {
+      h.json(409, { error: "camera_already_registered", request_id: requestId });
+      return true;
+    }
     throw err;
   }
 }
