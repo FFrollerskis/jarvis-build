@@ -21,7 +21,7 @@ import { detectionsJson, makeJpeg, ScriptedGateway, seedTenant, startVisionDb, t
  * lokal klassifisering -> én transaksjon; en ny poll av samme tilstand koster ingenting (idempotens FØR bilde/modell); kameraets policy bestemmer hva som hentes/lagres; HA nede = `source_error`
  * (ingen kast); tokenet finnes ingensteds i databasen; flagg av = ingen forespørsel til HA.
  */
-const TOKEN = "ha-llat-SECRET-4be07a21";
+const TOKEN = "canary-ha-credential-0001";
 let db: VisionDb;
 let T: Awaited<ReturnType<typeof seedTenant>>;
 let ha: FakeHaServer;

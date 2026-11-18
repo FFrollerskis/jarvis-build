@@ -147,3 +147,10 @@ c98488190cb505052121112a15568171a873a1ef:docs/evidence/2026-10-10-hf-0-gate.md:g
 # WP-D3 (D-459): test fixture idempotency_key in the route-boundary test (a literal probe value for a 404 check, not a credential). Replaced by a neutral value in the
 # following commit; this entry covers the historical commit only.
 3bd13fb82290eb2813aa638deb7e0b8fe074e373:apps/api/test/wpd3-growth-routes.test.ts:generic-api-key:38
+
+# WP-G3 (D-465): tre vision-tester (g3-ha-source, g3-ha-pipeline og apps/api wpg3-vision-runtime) hadde en konstant med et oppdiktet, tilfeldig utseende «kanari»-token som testene bruker til å bevise at
+# et Home Assistant-token aldri havner i feilkoder, logg eller database. Verdiene er rene testkonstanter (ingen ekte HA, ingen ekte credential); regelen generic-api-key slo til på navn + entropi.
+# Verdiene er erstattet av nøytrale tekster i en senere commit; disse oppføringene dekker kun de historiske commit-ene.
+71ec3924d33c259a337982da7817be65921bdfbd:modules/vision/test/g3-ha-source.test.ts:generic-api-key:13
+71ec3924d33c259a337982da7817be65921bdfbd:modules/vision/test/g3-ha-pipeline.test.ts:generic-api-key:24
+2d332d71c132feb8e19a464ecb574c6db80eda62:apps/api/test/wpg3-vision-runtime.test.ts:generic-api-key:168

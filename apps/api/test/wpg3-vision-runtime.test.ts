@@ -165,7 +165,7 @@ describe("createVisionPollerGuard: kill switch, frosset connector, tilbakekalt c
 
 describe("HA-kilden med den ENDELIGE guardedFetch (som i drift)", () => {
   let ha: FakeHaServer;
-  const TOKEN = "ha-llat-SECRET-api-3d9e";
+  const TOKEN = "canary-ha-credential-0003";
   const source = (base: () => Promise<string | null>) => new HomeAssistantVisionSource({ fetch: (url, init) => guardedFetch(url, init), baseUrl: base, token: async () => TOKEN });
   const cam = { camera_id: "vis-cam-1", source_ref: "camera.front", trigger_entities: ["binary_sensor.front_motion"] };
 

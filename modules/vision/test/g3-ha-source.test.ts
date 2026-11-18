@@ -10,7 +10,7 @@ import { makeJpeg } from "./support/harness.ts";
  * grenser (kropp, tidsavbrudd, innholdstype), og at kilden BARE leser (GET mot /api/states og /api/camera_proxy - aldri strøm, aldri skriving).
  */
 const NOW = new Date("2026-11-18T12:00:00.000Z");
-const TOKEN = "ha-llat-SECRET-9f3c1d7b";
+const TOKEN = "canary-ha-credential-0002";
 const ago = (ms: number): string => haTimestamp(new Date(NOW.getTime() - ms));
 const isoAgo = (ms: number): string => new Date(NOW.getTime() - ms).toISOString();
 
