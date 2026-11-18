@@ -41,6 +41,8 @@ export interface CommsConfig {
   readonly call_window_start_hour: number;
   readonly call_window_end_hour: number;
   readonly reply_window_days: number;
+  /** Timer en verifisert innkommende melding kan stå ubesvart før oppfølgingssveipet lager en åpen oppfølging (`JARVIS_COMMS_REPLY_AFTER_HOURS`, standard 24). */
+  readonly reply_after_hours: number;
   readonly conversational_window_minutes: number;
   readonly ai_disclosure_text: string;
   /** WhatsApp-maler eieren HAR attestert inneholder AI-opplysningen (en godkjent mal kan ikke få tekst lagt til). */
@@ -149,6 +151,7 @@ export function parseCommsConfig(env: Readonly<Record<string, string | undefined
     call_window_start_hour: envHour("JARVIS_COMMS_CALL_WINDOW_START", 9, env),
     call_window_end_hour: envHour("JARVIS_COMMS_CALL_WINDOW_END", 20, env),
     reply_window_days: envInt("JARVIS_COMMS_REPLY_WINDOW_DAYS", 7, { min: 1, max: 90 }, env),
+    reply_after_hours: envInt("JARVIS_COMMS_REPLY_AFTER_HOURS", 24, { min: 1, max: 168 }, env),
     conversational_window_minutes: 120,
     ai_disclosure_text: disclosure,
     templates_with_disclosure: templates,

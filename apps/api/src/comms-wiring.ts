@@ -2,7 +2,7 @@
 import type pg from "pg";
 import type { BusinessService } from "@jarvis/business";
 import {
-  CommsStore, CommsTransport, CommsWebhookService, DiscordAdapter, GoogleContacts, MeetingService, MetaMessagingAdapter, OutboundFunnel, SlackAdapter, TeamsGraphAdapter, TelnyxSmsAdapter, TwilioSmsAdapter, VendorReads, WhatsAppAdapter,
+  CommsStore, CommsTransport, CommsWebhookService, DiscordAdapter, GoogleContacts, MeetingService, ReplySweep, MetaMessagingAdapter, OutboundFunnel, SlackAdapter, TeamsGraphAdapter, TelnyxSmsAdapter, TwilioSmsAdapter, VendorReads, WhatsAppAdapter,
   commsAnyEnabled, commsToolDefinitions, parseCommsConfig, type CommsConfig
 } from "@jarvis/comms";
 import type { ConversationGraphService } from "@jarvis/conversation-graph";
@@ -36,13 +36,13 @@ export interface CommsRuntime {
   readonly tools: ToolDefinition[];
   /** `ApiDeps.comms` for den gitte gatewayen, eller `undefined` når verken webhooks eller utgående er slått på. */
   apiDeps(gateway: ToolGateway): ApiDeps["comms"] | undefined;
-  /** Starter retensjonssveipet (kun når noe er slått på). `tenants` = eierens tenants. */
-  startRetentionSweep(tenants: readonly string[]): void;
+  /** Starter de planlagte sveipene (kun når noe er slått på): retensjon (hver 6. time) og - kun med JARVIS_COMMS_REPLY_SWEEP=on - ubesvarte meldinger -> åpne oppfølginger (hver 30. minutt). `tenants` = eierens tenants. */
+  startSweeps(tenants: readonly string[], ownerPersonId: string): void;
 }
 
 export function buildCommsRuntime(input: CommsRuntimeInput): CommsRuntime {
   const config = parseCommsConfig(input.env);
-  if (!commsAnyEnabled(config)) return { config, tools: [], apiDeps: () => undefined, startRetentionSweep: () => undefined };
+  if (!commsAnyEnabled(config)) return { config, tools: [], apiDeps: () => undefined, startSweeps: () => undefined };
 
   const clock = input.clock ?? (() => new Date());
   const store = new CommsStore(input.pool, clock);
@@ -83,7 +83,8 @@ export function buildCommsRuntime(input: CommsRuntimeInput): CommsRuntime {
   }));
 
   // Retensjonssveip (utløpte innkommende hendelser, journalrader og møter): hver 6. time for eierens tenants og de tillatte rommene. Feil logges, stopper aldri prosessen. Intet sveip uten at noe er slått på.
-  const startRetentionSweep = (tenants: readonly string[]): void => {
+  const replySweep = config.reply_sweep ? new ReplySweep({ pool: input.pool, clock, business: input.business, afterHours: config.reply_after_hours, windowDays: config.reply_window_days, ...(input.warn ? { warn: input.warn } : {}) }) : undefined;
+  const startSweeps = (tenants: readonly string[], ownerPersonId: string): void => {
     const run = async (): Promise<void> => {
       for (const tenantId of tenants) {
         for (const space of ["business", "personal", "project", "shared"] as const) {
@@ -97,10 +98,23 @@ export function buildCommsRuntime(input: CommsRuntimeInput): CommsRuntime {
       }
     };
     setInterval(() => void run(), 6 * 3_600_000).unref();
+    // Ubesvarte meldinger -> åpne oppfølginger (V2-pushen leverer dem; dormant uten JARVIS_COMMS_REPLY_SWEEP=on). Idempotent; feil logges.
+    if (replySweep) {
+      const reply = async (): Promise<void> => {
+        for (const tenantId of tenants) {
+          try {
+            await replySweep.run(tenantId, config.webhook_memory_space, ownerPersonId);
+          } catch (err) {
+            input.warn?.({ msg: "comms_reply_sweep_failed", error: err instanceof Error ? err.message.slice(0, 80) : "unknown" });
+          }
+        }
+      };
+      setInterval(() => void reply(), 30 * 60_000).unref();
+    }
   };
 
   return {
-    config, tools, startRetentionSweep,
+    config, tools, startSweeps,
     apiDeps: (gateway) => ({
       ...(webhookService ? { webhooks: { service: webhookService, providers: config.webhooks } } : {}),
       ...(funnel ? { outbound: { gateway, funnel } } : {})
