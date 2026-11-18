@@ -360,9 +360,17 @@ describe("visjonsmodulen har ingen egen nettverksvei og ingen leverandør-SDK (a
   ];
   const importsOf = (source: string): string[] => [...strip(source, true).matchAll(/\b(?:import|export)\b[^;'"`]*?\bfrom\s+["']([^"']+)["']|\bimport\s+["']([^"']+)["']|\bimport\(\s*["']([^"']+)["']\s*\)|\brequire\(\s*["']([^"']+)["']\s*\)/g)].map((m) => (m[1] ?? m[2] ?? m[3] ?? m[4]) as string);
   const ALLOWED_BARE = new Set(["node:crypto", "node:fs", "node:fs/promises", "node:path", "pg", "zod", "@jarvis/contracts", "@jarvis/core", "@jarvis/memory"]);
+  /**
+   * Rene TYPE-importer (`import type ... from "node:http"`, kun typer, ingen kjøretidskode) og rene IP-parsere (`import { isIP } from "node:net"`, ingen sokkel) er ufarlige og ikke et nettverksvei; alt annet fra de
+   * rå modulene er det.
+   */
+  const withoutBenignNodeImports = (imports: string): string =>
+    imports
+      .replace(/\bimport\s+type\b[^;]*?\bfrom\s+["']node:[^"']+["']/g, "")
+      .replace(/\bimport\s*\{\s*(?:isIP|isIPv4|isIPv6)(?:\s*,\s*(?:isIP|isIPv4|isIPv6))*\s*\}\s*from\s+["']node:net["']/g, "");
   const scanNetwork = (source: string): string[] => {
     const code = strip(source, false);
-    const imports = strip(source, true);
+    const imports = withoutBenignNodeImports(strip(source, true));
     return NETWORK_TOKENS.filter(([label, pattern]) => pattern.test(label.startsWith("node:") ? imports : code)).map(([label]) => label);
   };
   const disallowedImports = (source: string): string[] => importsOf(source).filter((spec) => !spec.startsWith(".") && !ALLOWED_BARE.has(spec));
@@ -397,6 +405,15 @@ describe("visjonsmodulen har ingen egen nettverksvei og ingen leverandør-SDK (a
     expect(scanNetwork('import { request } from "node:https";')).toEqual(["node:http/https/net/dgram/tls/dns/child_process"]);
     expect(scanNetwork('import { spawn } from "node:child_process";')).toHaveLength(1);
     expect(scanNetwork("const r = await this.options.fetch(url, init); // fetch( i en kommentar")).toEqual([]);
+    // ufarlige node-importer: ren typeimport og ren IP-parser slipper gjennom; enhver ekte nettverks-/sokkelbruk av samme moduler gjør det ikke
+    expect(scanNetwork('import type { IncomingMessage } from "node:http";')).toEqual([]);
+    expect(scanNetwork('import { isIP } from "node:net";')).toEqual([]);
+    expect(scanNetwork('import { isIP, isIPv6 } from "node:net";')).toEqual([]);
+    expect(scanNetwork('import { createConnection } from "node:net";')).toHaveLength(1);
+    expect(scanNetwork('import { isIP, connect } from "node:net";')).toHaveLength(1);
+    expect(scanNetwork('import http from "node:http";')).toHaveLength(1);
+    expect(scanNetwork('import * as net from "node:net";')).toHaveLength(1);
+    expect(scanNetwork('import type { Socket } from "node:net"; import { request } from "node:http";')).toHaveLength(1);
     expect(disallowedImports('import OpenAI from "openai"; import { x } from "@jarvis/provider-adapters"; import a from "@anthropic-ai/sdk"; import b from "./ok.ts"; import c from "zod"; import d from "node:crypto";').sort()).toEqual(["@anthropic-ai/sdk", "@jarvis/provider-adapters", "openai"]);
     expect(disallowedImports('const m = await import("undici"); const r = require("axios");').sort()).toEqual(["axios", "undici"]);
   });
