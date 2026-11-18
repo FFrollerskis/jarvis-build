@@ -4,6 +4,9 @@ import {
   type CommsChannel, type OutboundPolicyState, type OutboundRequest
 } from "../src/index.ts";
 
+/** En Discord-snowflake bygget ved kjøring (aldri en bokstavelig ID-lignende streng i kildekoden). */
+const SNOWFLAKE = "1".repeat(18);
+
 /**
  * WP-G1 (P1b): den deterministiske utgående policyen, regel for regel. REN funksjon: ingen DB, ingen nettverk, injisert klokke. Hver test navngir regelen den beviser, og de som beviser at noe IKKE kan omgås
  * bruker alle felt en kaller (også en modell) faktisk kan styre - det finnes ingen parameter for AI-opplysning, stille timer, opt-out eller mål-konto.
@@ -46,7 +49,7 @@ describe("A: grunnregler - kanal, konto, mottaker", () => {
     expect(codes(evaluateOutboundPolicy(sms({ channel: "slack", account_ref: "T0AAAAAAAA", recipient: "kari" }), state(), config(), NOON))).toContain("recipient_not_a_slack_id");
     expect(normalizeRecipient("whatsapp", "4790000000")).toEqual({ ok: true, value: "+4790000000" });
     expect(normalizeRecipient("sms", "4790000000").ok).toBe(false);
-    expect(normalizeRecipient("discord", "123456789012345678").ok).toBe(true);
+    expect(normalizeRecipient("discord", SNOWFLAKE).ok).toBe(true);
     expect(normalizeRecipient("teams", "chat:19:abc_def@thread.v2").ok).toBe(true);
     expect(normalizeRecipient("teams", "kari@firma.no").ok).toBe(false);
   });

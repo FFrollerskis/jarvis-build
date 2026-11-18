@@ -3,6 +3,9 @@ import {
   MetaMessagingAdapter, ProviderRejectedError, TeamsGraphAdapter, TwilioSmsAdapter, VendorReads, xmlEscape, type AdapterSend
 } from "../src/index.ts";
 
+/** Et Twilio-lignende meldings-SID bygget ved kjøring (aldri en bokstavelig nøkkel-lignende streng i kildekoden). */
+const SM_SID = `SM${"0123456789abcdef".repeat(2)}`;
+
 /**
  * WP-G1 (P1c/P2f/P3h): de nye adapterne og leverandør-lesingen mot en FALSK transport (`fetch` er stubbet; ingen ekte nettkall). Bevist: nøyaktig forespørselsform, ingen injeksjon (TwiML/sti), kun tekst der kanalen bare har tekst,
  * ukjent utfall klassifiseres som `outcome_unknown:`, og lesing minimerer personlige felt og renser ubetrodd tekst.
@@ -222,15 +225,15 @@ describe("Leverandør-lesing (ubetrodd data, minimerte felt)", () => {
   });
 
   it("Twilio-melding: status/retning/feilkode/tidspunkt + renset tekst; konto-SID mangler = stopp før kall", async () => {
-    stub(() => jsonRes({ sid: "SM0123456789abcdef0123456789abcdef", status: "delivered", direction: "outbound-api", error_code: null, date_sent: "Mon, 16 Aug 2026 03:45:01 +0000", body: `Hei ${fakeKey()}`, to: "+4790001111", from: "+4791000000", price: "-0.05" }));
-    const out = await reads.twilioMessage(FAKE_TOKEN, "SM0123456789abcdef0123456789abcdef");
-    expect(out).toMatchObject({ sid: "SM0123456789abcdef0123456789abcdef", status: "delivered", direction: "outbound-api", error_code: null });
+    stub(() => jsonRes({ sid: SM_SID, status: "delivered", direction: "outbound-api", error_code: null, date_sent: "Mon, 16 Aug 2026 03:45:01 +0000", body: `Hei ${fakeKey()}`, to: "+4790001111", from: "+4791000000", price: "-0.05" }));
+    const out = await reads.twilioMessage(FAKE_TOKEN, SM_SID);
+    expect(out).toMatchObject({ sid: SM_SID, status: "delivered", direction: "outbound-api", error_code: null });
     expect(out.body).toContain("[REDACTED:");
     expect(JSON.stringify(out)).not.toMatch(/\+47|price/);
-    expect(calls[0]?.url).toBe("https://api.twilio.com/2010-04-01/Accounts/ACfaketestsid0000000000/Messages/SM0123456789abcdef0123456789abcdef.json");
+    expect(calls[0]?.url).toBe(`https://api.twilio.com/2010-04-01/Accounts/ACfaketestsid0000000000/Messages/${SM_SID}.json`);
     const noSid = new VendorReads({ graphVersion: "v25.0", accountSid: async () => null });
     calls = [];
-    expect((await errorOf(noSid.twilioMessage(FAKE_TOKEN, "SM0123456789abcdef0123456789abcdef"))).message).toBe("comms_twilio_account_sid_not_configured");
+    expect((await errorOf(noSid.twilioMessage(FAKE_TOKEN, SM_SID))).message).toBe("comms_twilio_account_sid_not_configured");
     expect(calls).toHaveLength(0);
   });
 });

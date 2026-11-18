@@ -143,3 +143,14 @@ b7d403a9ab1b979dfd72cf882f65df28399f60a4:.gitleaksignore:generic-api-key:131
 # etikett + flaggliste. Verifisert manuelt: ingen hemmelighet (kun JARVIS_*-flaggnavn og «ikke-satt»). Etiketten i porten er endret (se neste commit), men evidensfilen er den ekte utskriften og
 # endres ikke, og commit-en er allerede publisert (aldri force push).
 c98488190cb505052121112a15568171a873a1ef:docs/evidence/2026-10-10-hf-0-gate.md:generic-api-key:22
+
+# WP-G1 (D-463): fem VERIFISERTE falske positiver i testfiksturer. Verifisert manuelt: ingen nøkkel, token eller passord noe sted her.
+#  - `discord-client-id`: en 18-sifret Discord-«snowflake» (offentlig ID-format, brukt som falsk mottaker-/kontoid i normaliserings- og policytester) ved siden av ordet «discord».
+#  - `generic-api-key`: et falskt Twilio-meldings-SID (`SM` + 32 heksadesimale tegn, ren testverdi) ved siden av testvariabelen FAKE_TOKEN.
+# Fiksturene er byttet til verdier bygget ved kjøring i en senere commit (ingen bokstavelig ID-lignende streng i kildekoden lenger), men gitleaks skanner hele historikken og de opprinnelige commitene
+# er en del av grenens historikk.
+7bcf7851a0ece620466264207422c733fc38ef47:modules/conversation-graph/test/wpg1-channels.test.ts:discord-client-id:48
+7bcf7851a0ece620466264207422c733fc38ef47:modules/conversation-graph/test/wpg1-channels.test.ts:discord-client-id:140
+e8c23d4aaf5fefed111a0fa7e05145196e608b57:modules/comms/test/policy.test.ts:discord-client-id:49
+37a608f3db1fa52ce36694342152f439b5ffd695:modules/comms/test/adapters-extra.test.ts:generic-api-key:226
+37a608f3db1fa52ce36694342152f439b5ffd695:modules/comms/test/adapters-extra.test.ts:generic-api-key:233

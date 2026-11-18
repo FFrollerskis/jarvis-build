@@ -10,6 +10,9 @@ import { BusinessService } from "@jarvis/business";
 import { ConversationGraphService } from "../src/service.ts";
 import { CONVERSATION_CHANNELS, PHONE_CHANNELS, normalizeChannelIdentifier, normalizeE164 } from "../src/index.ts";
 
+/** En Discord-snowflake bygget ved kjøring (aldri en bokstavelig ID-lignende streng i kildekoden). */
+const SNOWFLAKE = "1".repeat(18);
+
 /**
  * WP-G1 (D-463, P1a): Conversation Graph med alle UA-7-kanalene. Rene normaliseringstester (ingen DB) + ekte embedded Postgres/RLS for lenking, E.164-treff på tvers av telefonkanalene, reversibel
  * merge/split og tverr-kanal-forpliktelser for de nye kanalene (D-121 gjelder også dem).
@@ -45,7 +48,7 @@ describe("B: normalizeChannelIdentifier - hver kanal har SIN lukkede form", () =
   it("Slack krever team:bruker (scopet), Discord snowflake, Teams GUID (lowercase), Messenger/Instagram side:scopet-id", () => {
     expect(normalizeChannelIdentifier("slack", " t012abcdef:u012abcdef ")).toBe("T012ABCDEF:U012ABCDEF");
     expect(() => normalizeChannelIdentifier("slack", "U012ABCDEF")).toThrow("conversation_invalid_slack_channel_identifier");
-    expect(normalizeChannelIdentifier("discord", "123456789012345678")).toBe("123456789012345678");
+    expect(normalizeChannelIdentifier("discord", SNOWFLAKE)).toBe(SNOWFLAKE);
     expect(() => normalizeChannelIdentifier("discord", "kari#1234")).toThrow("conversation_invalid_discord_channel_identifier");
     expect(normalizeChannelIdentifier("teams", "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")).toBe("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
     expect(() => normalizeChannelIdentifier("teams", "kari@firma.no")).toThrow("conversation_invalid_teams_channel_identifier");
@@ -137,7 +140,7 @@ describe("C: migrasjon 117 - databasens CHECK speiler CONVERSATION_CHANNELS nøy
 describe("D: lenking og oppslag for alle nye kanaler (tenant-isolert, eksakt)", () => {
   const cases: Array<[string, string, string]> = [
     ["slack", "T012ABCDEF:U012ABCDEF", "exact_handle"],
-    ["discord", "123456789012345678", "exact_handle"],
+    ["discord", SNOWFLAKE, "exact_handle"],
     ["whatsapp", "4790011111", "exact_phone_e164"],
     ["sms", "+4790022222", "exact_phone_e164"],
     ["teams", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "exact_handle"],

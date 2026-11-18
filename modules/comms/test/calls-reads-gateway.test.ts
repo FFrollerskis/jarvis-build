@@ -9,6 +9,9 @@ import {
 } from "../src/index.ts";
 import { OWNER, TENANT_A, startCommsDb, type CommsDb } from "./support/harness.ts";
 
+/** Et Twilio-lignende meldings-SID bygget ved kjøring (aldri en bokstavelig nøkkel-lignende streng i kildekoden). */
+const SM_SID = `SM${"0123456789abcdef".repeat(2)}`;
+
 /**
  * WP-G1 (P1c/P3h): utgående AI-samtale og leverandør-lesing gjennom den EKSAKTE kjeden (ekte ToolGateway med klasse D-pipeline, ekte policy og journal mot embedded Postgres, RLS som app-rolle; kun `fetch` er stubbet).
  * Samtale: AI-opplysningen er første talte innhold, opptak avslås med kode, eget tidsvindu, ratebegrensning per nummer, avmelding, markedsføringsforbud, Telnyx feiler lukket, gjenspilling ringer aldri to ganger.
@@ -223,12 +226,12 @@ describe("B: leverandør-lesing (klasse A, ubetrodd output, kun autoriserte kont
   });
 
   it("riktig leverandør kreves: `read_message` mot en Telnyx-SMS-konto avvises (aldri en Telnyx-nøkkel mot Twilio-API-et), mot en Twilio-konto virker", async () => {
-    const wrong = await executeCommsOwnerAction(deps(), owner, { action: "read_message", parameters: { channel: "sms", account_ref: TELNYX_SMS, message_sid: "SM0123456789abcdef0123456789abcdef" } });
+    const wrong = await executeCommsOwnerAction(deps(), owner, { action: "read_message", parameters: { channel: "sms", account_ref: TELNYX_SMS, message_sid: SM_SID } });
     expect(wrong.ok).toBe(false);
     expect(wrong.ok ? "" : (wrong as { reason: string }).reason).toContain("comms_read_not_supported_by_provider");
     expect(calls).toEqual([]);
-    respond = () => jsonRes({ sid: "SM0123456789abcdef0123456789abcdef", status: "delivered", direction: "outbound-api", error_code: null, date_sent: "Mon, 16 Aug 2026 03:45:01 +0000", body: "Hei" });
-    const ok = await executeCommsOwnerAction(deps(), owner, { action: "read_message", parameters: { channel: "sms", account_ref: TWILIO_SMS, message_sid: "SM0123456789abcdef0123456789abcdef" } });
+    respond = () => jsonRes({ sid: SM_SID, status: "delivered", direction: "outbound-api", error_code: null, date_sent: "Mon, 16 Aug 2026 03:45:01 +0000", body: "Hei" });
+    const ok = await executeCommsOwnerAction(deps(), owner, { action: "read_message", parameters: { channel: "sms", account_ref: TWILIO_SMS, message_sid: SM_SID } });
     expect(ok.ok).toBe(true);
     expect(ok.ok ? ok.output_trust : "").toBe("untrusted");
   });
