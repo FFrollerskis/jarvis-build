@@ -43,7 +43,7 @@ const reply = async (tenant: string, to: string, status: "sent" | "outcome_unkno
   };
   const actor = { person_id: OWNER, session_id: "sess-g1-rs" };
   if (status === "denied") { await store.recordDenied(tenant, "business", entry, actor, 30); return; }
-  const begin = await store.beginAttempt(tenant, "business", entry, actor, 30);
+  const begin = await store.beginAttempt(tenant, "business", entry, actor, 30, { recipient: null, account: { limit: 1_000_000, code: "rate_limit_account_hour" } });
   if (begin.kind !== "started") throw new Error("forventet started");
   await store.settleAttempt(tenant, "business", begin.log_id, { status });
 };

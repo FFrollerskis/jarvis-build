@@ -163,6 +163,32 @@ function contentCanonical(request: OutboundRequest, finalText: string | null): s
   return finalText;
 }
 
+/** Ett ratetak: grensen (antall aktive forsøk i vinduet) og avslagskoden når den nås. */
+export interface RateCap {
+  readonly limit: number;
+  readonly code: string;
+}
+
+export interface RateCaps {
+  /** Tak per mottaker per døgn for `message`/`call` (telles per handlingstype). `null` = handlingen telles ikke mot mottakeren (redigering/sletting/reaksjon). */
+  readonly recipient: (RateCap & { readonly kind: "message" | "call" }) | null;
+  /** Tak per avsenderkonto per time (alle handlinger). */
+  readonly account: RateCap;
+}
+
+/**
+ * FIKS A-H2: ÉN kilde for ratetakene. Policyen sammenligner dem mot tellerne (tørrkjøring/preflight - en rådgivende lesing), og `CommsStore.beginAttempt` HÅNDHEVER dem atomisk under lås i samme transaksjon som journal-INSERT-en
+ * (sjekk-så-skriv uten lås lot N samtidige sendinger alle se «0 sendt» og alle sende). «Kald» = mottakeren har verken skrevet til oss (siste `reply_window_days`) eller en løst identitet.
+ */
+export function rateCaps(kind: OutboundKind, cold: boolean, config: CommsConfig): RateCaps {
+  const account: RateCap = { limit: config.max_per_account_per_hour, code: "rate_limit_account_hour" };
+  if (kind === "call") return { recipient: { kind: "call", limit: config.max_calls_per_number_per_day, code: "rate_limit_calls_per_number_day" }, account };
+  if (kind === "message") {
+    return { recipient: { kind: "message", limit: cold ? config.max_cold_per_recipient_per_day : config.max_per_recipient_per_day, code: cold ? "rate_limit_cold_recipient_day" : "rate_limit_recipient_day" }, account };
+  }
+  return { recipient: null, account };
+}
+
 /** Kallerens (route/verktøy) bevisste, ikke-modellstyrte tilstand for «nå». Injiseres slik at testene er deterministiske. */
 export function evaluateOutboundPolicy(request: OutboundRequest, state: OutboundPolicyState, config: CommsConfig, now: Date): PolicyDecision {
   const rules: RuleResult[] = [];
@@ -254,18 +280,16 @@ export function evaluateOutboundPolicy(request: OutboundRequest, state: Outbound
     add("quiet_hours", "not_applicable");
   }
 
-  // 7. ratebegrensning (per mottaker per døgn - kald mottaker strengere - og per konto per time)
-  if (request.kind === "call") {
-    if (state.calls_last_24h_to_recipient >= config.max_calls_per_number_per_day) deny("rate_limit_recipient", "rate_limit_calls_per_number_day");
-    else add("rate_limit_recipient", "pass");
-  } else if (request.kind === "message") {
-    const cap = proofMethod === "explicit_param" ? config.max_cold_per_recipient_per_day : config.max_per_recipient_per_day;
-    if (state.sends_last_24h_to_recipient >= cap) deny("rate_limit_recipient", proofMethod === "explicit_param" ? "rate_limit_cold_recipient_day" : "rate_limit_recipient_day");
-    else add("rate_limit_recipient", "pass");
-  } else {
+  // 7. ratebegrensning (per mottaker per døgn - kald mottaker strengere - og per konto per time). Takene kommer fra `rateCaps` (samme kilde som den atomiske håndhevelsen i `beginAttempt`).
+  const caps = rateCaps(request.kind, proofMethod === "explicit_param", config);
+  if (caps.recipient === null) {
     add("rate_limit_recipient", "not_applicable");
+  } else {
+    const used = caps.recipient.kind === "call" ? state.calls_last_24h_to_recipient : state.sends_last_24h_to_recipient;
+    if (used >= caps.recipient.limit) deny("rate_limit_recipient", caps.recipient.code);
+    else add("rate_limit_recipient", "pass");
   }
-  if (state.sends_last_hour_from_account >= config.max_per_account_per_hour) deny("rate_limit_account", "rate_limit_account_hour");
+  if (state.sends_last_hour_from_account >= caps.account.limit) deny("rate_limit_account", caps.account.code);
   else add("rate_limit_account", "pass");
 
   // 8. plattformregler: kundeservicevindu (WhatsApp/Messenger/Instagram) - fritekst kun innenfor 24 t etter mottakerens siste melding; WhatsApp tillater godkjente maler utenfor. Meldingskoder (tagger) brukes ALDRI.

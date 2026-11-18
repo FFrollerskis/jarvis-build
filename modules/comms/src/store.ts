@@ -3,7 +3,7 @@ import type pg from "pg";
 import type { MemorySpace } from "@jarvis/contracts";
 import { withMemoryTransaction } from "@jarvis/memory";
 import { PROVIDERS_FOR_CHANNEL, isValidAccountRef, type CommsChannel, type CommsProvider } from "./channels.ts";
-import type { OutboundKind, OutboundPurpose, RecipientProof, RuleResult } from "./policy.ts";
+import type { OutboundKind, OutboundPurpose, RateCaps, RecipientProof, RuleResult } from "./policy.ts";
 
 /**
  * WP-G1 (D-463): databasetilgang for kommunikasjonstabellene (migrasjon 118). ALL tilgang går via `withMemoryTransaction` (tenant + memory space på transaksjonen, RLS FORCE) - ingen spørring uten tenant-kontekst.
@@ -92,7 +92,9 @@ export interface JournalRow {
 
 export type BeginResult =
   | { readonly kind: "started"; readonly log_id: string }
-  | { readonly kind: "replay"; readonly log_id: string; readonly status: JournalStatus; readonly provider_message_id: string | null };
+  | { readonly kind: "replay"; readonly log_id: string; readonly status: JournalStatus; readonly provider_message_id: string | null }
+  /** A-H2: taket var nådd da forsøket skulle reserveres (tellingen ble gjort UNDER lås, etter at policyen så «0 sendt»). Ingenting er skrevet; kalleren journalfører et avslag. */
+  | { readonly kind: "cap_exceeded"; readonly scope: "recipient" | "account"; readonly code: string };
 
 export interface InboundEventInput {
   readonly provider: "slack" | "meta" | "twilio" | "telnyx";
@@ -248,13 +250,24 @@ export class CommsStore {
 
   // ---------------------------------------------------------------- utgående journal
   /**
-   * Starter et forsøk. Atomisk: `INSERT ... ON CONFLICT DO NOTHING` på (tenant, request_id) - finnes raden fra før (sendt, under utførelse, ukjent utfall eller feilet) gis `replay` og INGENTING skal sendes.
-   * Dette er journal-nivåets egen gjenspillingsvern, i tillegg til ToolGateway-ledgeren (forsvar i dybden: en annen innfallsvei til transporten kan ikke sende samme forespørsel to ganger).
+   * Starter et forsøk - ATOMISK (A-H2). I ÉN transaksjon: (1) to transaksjonsbundne rådgivende låser, alltid i samme rekkefølge (mottaker, så konto - aldri deadlock), serialiserer «tell + reserver» for samme mottaker/konto;
+   * (2) en eksisterende, ikke-avslått rad med samme `request_id` gir `replay` (ingenting sendes to ganger, og en gjenspilling telles ikke mot taket mot seg selv); (3) ratetakene telles PÅ NYTT under låsen (READ COMMITTED: alle
+   * som holdt låsen før oss har committet og er synlige) - nådd tak gir `cap_exceeded` uten skriving; (4) først da skrives `requested`-raden, som neste i køen ser. Før dette (sjekk i policyen, skriv senere uten lås) så N samtidige
+   * sendinger alle «0 sendt» og alle sendte. Låsen holdes kun gjennom denne korte DB-transaksjonen, aldri over leverandørkallet.
+   * Journal-nivåets gjenspillingsvern (`INSERT ... ON CONFLICT DO NOTHING` på (tenant, request_id)) står i tillegg til ToolGateway-ledgeren (forsvar i dybden).
    */
-  async beginAttempt(tenantId: string, space: MemorySpace, entry: JournalEntryInput, actor: Actor, retentionDays: number): Promise<BeginResult> {
+  async beginAttempt(tenantId: string, space: MemorySpace, entry: JournalEntryInput, actor: Actor, retentionDays: number, caps: RateCaps): Promise<BeginResult> {
     return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
-      const id = newId("clog");
+      if (caps.recipient !== null) await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 7340463))", [`comms-cap-recipient|${tenantId}|${entry.channel}|${entry.recipient_hash}`]);
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 7340463))", [`comms-cap-account|${tenantId}|${entry.channel}|${entry.account_ref}`]);
+      const replay = await this.priorAttemptOf(client, tenantId, entry.request_id);
+      if (replay !== null) return replay;
       const now = this.clock();
+      if (caps.recipient !== null && (await this.recipientCount(client, tenantId, entry.channel, entry.recipient_hash, caps.recipient.kind, now)) >= caps.recipient.limit) {
+        return { kind: "cap_exceeded", scope: "recipient", code: caps.recipient.code } as const;
+      }
+      if ((await this.accountCount(client, tenantId, entry.channel, entry.account_ref, now)) >= caps.account.limit) return { kind: "cap_exceeded", scope: "account", code: caps.account.code } as const;
+      const id = newId("clog");
       const retention = new Date(now.getTime() + retentionDays * 86_400_000);
       const res = await client.query(
         `INSERT INTO comms_outbound_log
@@ -267,12 +280,17 @@ export class CommsStore {
           entry.target_log_id ?? null, entry.thread_ref ?? null, entry.before_state === undefined ? null : JSON.stringify(entry.before_state), actor.person_id, actor.session_id, actor.task_id ?? null, entry.source, now, retention]
       );
       if (res.rowCount === 1) return { kind: "started", log_id: id } as const;
-      const prior = await client.query(
-        `SELECT log_id, status, provider_message_id FROM comms_outbound_log WHERE tenant_id = $1 AND request_id = $2 AND status <> 'denied'`, [tenantId, entry.request_id]
-      );
-      const row = prior.rows[0] as { log_id: string; status: JournalStatus; provider_message_id: string | null };
-      return { kind: "replay", log_id: row.log_id, status: row.status, provider_message_id: row.provider_message_id } as const;
+      const raced = await this.priorAttemptOf(client, tenantId, entry.request_id);
+      if (raced === null) throw new Error("comms_journal_insert_conflict_without_row");
+      return raced;
     });
+  }
+
+  private async priorAttemptOf(client: pg.PoolClient, tenantId: string, requestId: string): Promise<Extract<BeginResult, { kind: "replay" }> | null> {
+    const prior = await client.query(`SELECT log_id, status, provider_message_id FROM comms_outbound_log WHERE tenant_id = $1 AND request_id = $2 AND status <> 'denied'`, [tenantId, requestId]);
+    if (prior.rowCount === 0) return null;
+    const row = prior.rows[0] as { log_id: string; status: JournalStatus; provider_message_id: string | null };
+    return { kind: "replay", log_id: row.log_id, status: row.status, provider_message_id: row.provider_message_id };
   }
 
   /** Finnes det allerede et IKKE-avslått forsøk med denne forespørsels-id-en? (`null` = nei.) Eier-ruten bruker det til å la en gjenspilling gå rett til gatewayens ledger i stedet for å vurdere policyen mot en tilstand det første forsøket selv har endret. */
@@ -316,25 +334,31 @@ export class CommsStore {
   }
 
   async countRecipient24h(tenantId: string, space: MemorySpace, channel: CommsChannel, recipientHash: string, kind: "message" | "call"): Promise<number> {
-    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
-      const since = new Date(this.clock().getTime() - 24 * 3_600_000);
-      const res = await client.query(
-        `SELECT count(*)::int AS n FROM comms_outbound_log WHERE tenant_id = $1 AND channel = $2 AND recipient_hash = $3 AND kind = $4 AND status = ANY($5::text[]) AND created_at > $6`,
-        [tenantId, channel, recipientHash, kind, ACTIVE_STATUSES, since]
-      );
-      return (res.rows[0] as { n: number }).n;
-    });
+    return withMemoryTransaction(this.pool, tenantId, [space], (client) => this.recipientCount(client, tenantId, channel, recipientHash, kind, this.clock()));
   }
 
   async countAccountHour(tenantId: string, space: MemorySpace, channel: CommsChannel, accountRef: string): Promise<number> {
-    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
-      const since = new Date(this.clock().getTime() - 3_600_000);
-      const res = await client.query(
-        `SELECT count(*)::int AS n FROM comms_outbound_log WHERE tenant_id = $1 AND channel = $2 AND account_ref = $3 AND status = ANY($4::text[]) AND created_at > $5`,
-        [tenantId, channel, accountRef, ACTIVE_STATUSES, since]
-      );
-      return (res.rows[0] as { n: number }).n;
-    });
+    return withMemoryTransaction(this.pool, tenantId, [space], (client) => this.accountCount(client, tenantId, channel, accountRef, this.clock()));
+  }
+
+  /** Samme SQL for den rådgivende tellingen (policyens tørrkjøring) og den atomiske tellingen under lås i `beginAttempt`: aktive forsøk (requested/sent/outcome_unknown) siste 24 t til mottakeren, per handlingstype. */
+  private async recipientCount(client: pg.PoolClient, tenantId: string, channel: CommsChannel, recipientHash: string, kind: "message" | "call", now: Date): Promise<number> {
+    const since = new Date(now.getTime() - 24 * 3_600_000);
+    const res = await client.query(
+      `SELECT count(*)::int AS n FROM comms_outbound_log WHERE tenant_id = $1 AND channel = $2 AND recipient_hash = $3 AND kind = $4 AND status = ANY($5::text[]) AND created_at > $6`,
+      [tenantId, channel, recipientHash, kind, ACTIVE_STATUSES, since]
+    );
+    return (res.rows[0] as { n: number }).n;
+  }
+
+  /** Aktive forsøk (alle handlinger) fra kontoen siste time. */
+  private async accountCount(client: pg.PoolClient, tenantId: string, channel: CommsChannel, accountRef: string, now: Date): Promise<number> {
+    const since = new Date(now.getTime() - 3_600_000);
+    const res = await client.query(
+      `SELECT count(*)::int AS n FROM comms_outbound_log WHERE tenant_id = $1 AND channel = $2 AND account_ref = $3 AND status = ANY($4::text[]) AND created_at > $5`,
+      [tenantId, channel, accountRef, ACTIVE_STATUSES, since]
+    );
+    return (res.rows[0] as { n: number }).n;
   }
 
   /** Meldingen Jarvis selv har sendt (status `sent`) med dette leverandør-id-et fra denne kontoen - grunnlaget for «egen melding» ved redigering/sletting. */

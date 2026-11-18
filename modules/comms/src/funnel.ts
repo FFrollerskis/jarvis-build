@@ -6,7 +6,7 @@ import { isIndeterminateTransportError, isOutcomeUnknownMessage } from "@jarvis/
 import { ProviderRejectedError, type AdapterMap } from "./adapters.ts";
 import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, normalizeRecipient, recipientHash, recipientHint, type CommsChannel, type CommsProvider } from "./channels.ts";
 import type { CommsConfig } from "./config.ts";
-import { evaluateOutboundPolicy, type OutboundKind, type OutboundPolicyState, type OutboundPurpose, type OutboundRequest, type PolicyDecision, type ReservationRegisterStatus } from "./policy.ts";
+import { evaluateOutboundPolicy, rateCaps, type OutboundKind, type OutboundPolicyState, type OutboundPurpose, type OutboundRequest, type PolicyDecision, type ReservationRegisterStatus } from "./policy.ts";
 import type { Actor, AuthorizedAccount, Clock, CommsStore, JournalEntryInput, JournalSource } from "./store.ts";
 
 /**
@@ -257,6 +257,13 @@ export class OutboundFunnel {
     return (await this.deps.store.findAttempt(ctx.tenantId, ctx.space, requestId)) !== null;
   }
 
+  /** A-H2: taket ble nådd UNDER låsen (policyens tørrkjøring så det ikke): avslaget journalføres med regelen som faktisk slo til, så beviset og utfallet stemmer. */
+  private withCapDenial(ev: Evaluation, scope: "recipient" | "account", code: string): Evaluation {
+    const ruleName = scope === "recipient" ? "rate_limit_recipient" : "rate_limit_account";
+    const rules = ev.decision.rules.map((r) => (r.rule === ruleName ? ({ rule: ruleName, outcome: "deny", code } as const) : r));
+    return { ...ev, decision: { ...ev.decision, allowed: false, denial_codes: [...new Set([...ev.decision.denial_codes, code])], rules } };
+  }
+
   /** Journalfører et avslag (bevis) uten å sende. Brukes av eier-ruten når tørrkjøringen avslår. */
   async recordDenial(ctx: FunnelContext, ev: Evaluation): Promise<string> {
     return this.deps.store.recordDenied(ctx.tenantId, ctx.space, this.entry(ctx, ev), ctx.actor, this.deps.config.log_retention_days);
@@ -279,7 +286,13 @@ export class OutboundFunnel {
     if (adapter === undefined) throw new Error("comms_adapter_unavailable");
     const supported = req.kind === "message" ? true : req.kind === "edit" ? adapter.edit !== undefined : req.kind === "delete" ? adapter.delete !== undefined : req.kind === "call" ? adapter.call !== undefined : adapter.react !== undefined;
     if (!supported) throw new Error("comms_action_not_supported_by_provider");
-    const begin = await store.beginAttempt(ctx.tenantId, ctx.space, this.entry(ctx, ev), ctx.actor, config.log_retention_days);
+    // A-H2: ratetakene håndheves ATOMISK i `beginAttempt` (lås + ny telling + INSERT i samme transaksjon); policyen over er kun den rådgivende tørrkjøringen.
+    const caps = rateCaps(req.kind, ev.decision.recipient_proof.method === "explicit_param", config);
+    const begin = await store.beginAttempt(ctx.tenantId, ctx.space, this.entry(ctx, ev), ctx.actor, config.log_retention_days, caps);
+    if (begin.kind === "cap_exceeded") {
+      await this.recordDenial(ctx, this.withCapDenial(ev, begin.scope, begin.code));
+      throw new Error(`comms_policy_denied:${begin.code}`);
+    }
     if (begin.kind === "replay") {
       if (begin.status === "sent") {
         return { external_id: begin.provider_message_id ?? "replayed", data: { log_id: begin.log_id, status: "sent", deduplicated: true, channel: req.channel, kind: req.kind } };
