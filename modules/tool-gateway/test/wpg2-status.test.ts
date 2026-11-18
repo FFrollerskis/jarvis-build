@@ -31,7 +31,7 @@ describe("PERSONAL_CAPABILITY_STATUS", () => {
       expect(s.status as readonly string[], s.id).not.toContain("VERIFIED");
     }
     const reserved = PERSONAL_CAPABILITY_STATUS.filter((s) => s.flag !== undefined && !(s.status as readonly string[]).includes("DORMANT"));
-    expect(reserved.map((s) => s.flag).sort()).toEqual(["JARVIS_PERSONAL_APPLE_DAV", "JARVIS_PERSONAL_CONTEXT"]);
+    expect(reserved.map((s) => s.flag).sort()).toEqual(["JARVIS_PERSONAL_CONTEXT"]);
     for (const s of reserved) expect(s.status.some((w) => w === "DEFERRED" || w === "BUILT_UNWIRED"), s.id).toBe(true);
   });
 });

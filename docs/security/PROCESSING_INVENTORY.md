@@ -170,6 +170,15 @@ uten at det er gjort, eller (4) en DPIA-henvisning peker på en fil som ikke fin
 - **Eksterne mottakere:** Ingen. Tabellene sendes aldri til en modell; bruken av en deling revideres (`audit_events`, uten innhold).
 - **Tabeller:** `family_delegations`, `family_events`, `family_invitations`, `family_list_items`, `family_lists`, `family_members`, `family_shares`
 
+### Personlig tvilling: Apple Kalender/Påminnelser/Kontakter (WP-G2 P2e, D-464; ingen ny tabell)
+
+- **Formål:** Eierens egne kalender-, påminnelses- og kontaktdata hos iCloud, lest og endret via standardprotokollene CalDAV/CardDAV som eier-kun RUTER (`/personal/dav/*`, `JARVIS_PERSONAL_APPLE_DAV`, AV). Jarvis eier ingen kopi og ingen kanonisk modell her: iCloud er kilde og sluk (D-64). Se `docs/UA8_PERSONAL_TWIN_DPIA.md` og `docs/runbooks/WPG2_PERSONAL.md` §6.
+- **Memory space/tenant:** ingen lagring (ingen tabell); mutasjonene revideres i `audit_events` (tenant-skopet) med samling, UID og utfall.
+- **Datakategori:** Personlige kalender-/kontaktdata (titler, tider, steder, notater, navn, e-post, telefon); fritekst fra mennesker og tredjeparter er ubetrodd data. Innholdet leveres kun til eierens signerte enhet - aldri til en modell, prompt, logg eller verktøy - og revisjonen har aldri innhold.
+- **Retensjon:** Ingen kopi hos Jarvis; retensjonen styres av eierens iCloud-konto.
+- **Eksterne mottakere:** iCloud (Apple) er en ekstern databehandler når flagget er på og eieren har lagt inn et app-spesifikt passord (D-108): innhold sendes til Apple ved opprettelse/endring. Vilkår (region, DPA, trening, retensjon) er IKKE VERIFISERT; `docs/security/PROCESSOR_REGION_MATRIX.md` og DPIA-en utvides FØR live bruk. Connectoren er IKKE i `CONNECTOR_REGISTRY` (ruter, ikke verktøy).
+- **Tabeller:** ingen
+
 ### Sletting og personvern
 
 - **Formål:** Sporing av slettekrav

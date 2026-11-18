@@ -5,6 +5,7 @@ import { HealthIntakeError, HealthRetentionPolicyRequiredError, type HealthIntak
 import type {
   ActionDomain, ActionStatus, ExecutePersonalActionInput, ExecutePersonalActionResult, Params, PersonalActionExecutorDeps
 } from "@jarvis/tool-gateway";
+import { handleDavRoute, type PersonalDavDeps } from "./personal-dav.ts";
 import { handleFinanceRead, type PersonalFinanceDeps } from "./personal-finance-read.ts";
 
 /**
@@ -42,6 +43,7 @@ export interface PersonalApiDeps {
   family?: PersonalFamilyDeps;
   health?: PersonalHealthDeps;
   finance?: PersonalFinanceDeps;
+  dav?: PersonalDavDeps;
 }
 
 export interface PersonalRouteContext {
@@ -84,6 +86,8 @@ export async function handlePersonalRoute(ctx: PersonalRouteContext): Promise<bo
   if (health !== undefined && url.pathname === "/personal/health/ingest") return handleHealthIngest(ctx, health);
   const finance = ctx.deps.finance;
   if (finance !== undefined && url.pathname === "/personal/finance/read") return handleFinanceRead(ctx, finance);
+  const dav = ctx.deps.dav;
+  if (dav !== undefined && url.pathname.startsWith("/personal/dav/")) return handleDavRoute(ctx, dav);
   return false;
 }
 

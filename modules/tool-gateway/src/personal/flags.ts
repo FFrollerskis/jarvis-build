@@ -16,7 +16,7 @@ export const PERSONAL_FLAG_NAMES = {
   family: "JARVIS_PERSONAL_FAMILY",
   /** P1d: enhetssignert helse-inntak (rute `/personal/health/*` registreres KUN med flagget på). */
   healthIngest: "JARVIS_PERSONAL_HEALTH_INGEST",
-  /** RESERVERT, INGEN EFFEKT (`DEFERRED`, se `status.ts`): P2e Apple Kalender/Påminnelser/Kontakter via CalDAV/CardDAV (iCloud). Live er `BLOCKED_EXTERNAL` (eieren lager det app-spesifikke passordet). */
+  /** P2e: Apple Kalender/Påminnelser/Kontakter via CalDAV/CardDAV (iCloud) som eier-kun ruter `/personal/dav/*` (aldri verktøy). Live er `BLOCKED_EXTERNAL` (eieren lager det app-spesifikke passordet). */
   appleDav: "JARVIS_PERSONAL_APPLE_DAV",
   /** P2f: personlig økonomi - KUN lesing (rute `/personal/finance/read`, `personal`-rommet) fra Jarvis' kanoniske banktabeller. Aldri betaling, aldri et verktøy. */
   financeRead: "JARVIS_PERSONAL_FINANCE_READ",
@@ -36,7 +36,7 @@ export const PERSONAL_CONFIG_NAMES = {
   homeSettleMs: "JARVIS_PERSONAL_HOME_SETTLE_MS",
   carTargets: "JARVIS_PERSONAL_CAR_TARGETS",
   carSettleMs: "JARVIS_PERSONAL_CAR_SETTLE_MS",
-  /** Eksakte, eier-valgte iCloud-konto-referanser (ikke passord) som CalDAV/CardDAV-verktøyene kan nå. Tom = ingen. */
+  /** Eierens allowlist av CalDAV/CardDAV-samlinger (`navn=https://vert/sti/`, slag fra navnet; ikke passord). Tom/ugyldig = ingenting kan nås. */
   appleDavAccounts: "JARVIS_PERSONAL_APPLE_DAV_ACCOUNTS"
 } as const;
 

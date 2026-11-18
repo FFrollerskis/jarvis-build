@@ -1,16 +1,19 @@
 import type pg from "pg";
 import { FamilyService } from "@jarvis/context";
 import type { IdentityContext } from "@jarvis/contracts";
+import { withTenantTransaction, writeAudit } from "@jarvis/core";
 import { BankingService } from "@jarvis/finance";
 import { HEALTH_INTAKE_MAX_DELETES, HEALTH_INTAKE_MAX_SAMPLES, HEALTH_INTAKE_SOURCE_TYPE, HealthIntakeService, HealthService, MetricTypeSchema } from "@jarvis/health";
 import { LocationService } from "@jarvis/location";
 import {
+  AppleDavClient, FetchDavTransport, PERSONAL_CONFIG_NAMES, parseDavCollections,
   CAR_CRITICAL_OPS, CAR_READ_ACTION, CAR_TOOL_ID, CarTransport, UnconfiguredCarAdapter, carCriticalConfigFromEnv, carCriticalToolDefinitions,
   HOME_CRITICAL_OPS, HOME_CRITICAL_READ_ACTION, HOME_ASSISTANT_TOOL_ID, HomeAssistantCriticalTransport, PERSONAL_FLAG_NAMES, PERSONAL_SECRET_REFS, PersonalActionJournal,
   executePersonalAction, homeCriticalConfigFromEnv, homeCriticalToolDefinitions, legacyCriticalActionsToDrop, personalActionIndex, personalFlagOn,
   type CarAdapter, type ExecutePersonalActionInput, type PersonalActionIndexEntry, type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
 import { familySharedDataReaders, type HealthReadApi, type LocationReadApi } from "./personal-family-readers.ts";
+import type { PersonalDavDeps } from "./personal-dav.ts";
 import { FINANCE_READ_VIEWS, type PersonalFinanceDeps } from "./personal-finance-read.ts";
 import type { PersonalActionDomainDeps, PersonalApiDeps, PersonalFamilyDeps, PersonalHealthDeps } from "./personal-routes.ts";
 
@@ -110,9 +113,30 @@ export function createPersonalWiring(input: PersonalWiringInput): PersonalWiring
     log["finance_read"] = { registered: true, space: "personal", read_only: true, views: FINANCE_READ_VIEWS };
   }
 
+  // Apple Kalender/Påminnelser/Kontakter (P2e): KUN ruter (`/personal/dav/*`), aldri verktøy. Samlingene er en allowlist fra eieren; passordet (app-spesifikt, D-108) hentes per forespørsel fra vaulten. Live mot iCloud er `BLOCKED_EXTERNAL`.
+  let dav: PersonalDavDeps | undefined;
+  if (personalFlagOn(env, PERSONAL_FLAG_NAMES.appleDav)) {
+    const { collections, rejected } = parseDavCollections(env[PERSONAL_CONFIG_NAMES.appleDavAccounts]);
+    const transport = new FetchDavTransport({
+      collections,
+      credentials: async () => {
+        const [user, password] = [await readSecret(PERSONAL_SECRET_REFS.appleDavUser), await readSecret(PERSONAL_SECRET_REFS.appleDavAppPassword)];
+        return user && password ? { user, password } : null;
+      }
+    });
+    dav = {
+      client: new AppleDavClient({ transport, collections }),
+      audit: (identity, entry) =>
+        withTenantTransaction(pool, identity.tenant_id, (client) =>
+          writeAudit(client, identity, { type: "dav.mutation", decision: "ALLOW", tool_id: "apple_dav", action: entry.action, payload: { collection: entry.collection, ...(entry.uid !== undefined ? { uid: entry.uid } : {}), outcome: entry.outcome, channel: identity.channel } })
+        )
+    };
+    log["apple_dav"] = { registered: true, collections: collections.length, rejected_entries: rejected, live: "BLOCKED_EXTERNAL" };
+  }
+
   const deps: PersonalApiDeps | undefined =
-    actions || family || health || finance
-      ? { ...(actions ? { actions } : {}), ...(family ? { family } : {}), ...(health ? { health } : {}), ...(finance ? { finance } : {}) }
+    actions || family || health || finance || dav
+      ? { ...(actions ? { actions } : {}), ...(family ? { family } : {}), ...(health ? { health } : {}), ...(finance ? { finance } : {}), ...(dav ? { dav } : {}) }
       : undefined;
   return {
     tools,
