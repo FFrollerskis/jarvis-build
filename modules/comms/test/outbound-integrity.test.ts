@@ -167,3 +167,35 @@ describe("A-M5: idempotensnøkkelen er bundet til forespørselen", () => {
     expect(recipientHash(TENANT_A, "sms", "+4790000001")).toMatch(/^[0-9a-f]{64}$/);
   });
 });
+
+describe("A-M6: edit_message har levende preflight/før-tilstand og markedsføringssjekk", () => {
+  const beforeState = async (k: string) => ((await chain.db.admin.query("SELECT before_state FROM tool_executions WHERE idempotency_key = $1", [k])).rows[0] as { before_state: Record<string, unknown> | null } | undefined)?.before_state ?? null;
+  const editP = (target: string, text: string, recipient = "C0EEEEEEEE") => ({ channel: "slack", account_ref: "T0AAAAAAAA", recipient, target_message_id: target, text });
+
+  it("preflighten leser målet ferskt hos leverandøren FØR redigeringen: ledgerens før-tilstand er ikke tom (policy + `exists`), og en vanlig redigering virker", async () => {
+    chain.slack.calls.length = 0;
+    const sent = await chain.act("send", slackP({ recipient: "C0EEEEEEEE" }), chain.key("ee1"));
+    expect(sent.ok).toBe(true);
+    const k = chain.key("ee2");
+    const edited = await chain.act("edit_message", editP(sent.ok ? String(sent.external_id) : "x", "Rettet tekst"), k);
+    expect(edited.ok).toBe(true);
+    expect(await beforeState(k)).toMatchObject({ kind: "edit", allowed: true, exists: true });
+    expect(chain.slack.calls.map((c) => c.op)).toEqual(["send", "exists", "edit", "exists"]); // fersk lesing FØR redigeringen og readback ETTER
+  });
+
+  it("redigering til reklametekst avslås som ved sending (ingenting redigeres, avslaget journalføres og ligger i før-tilstanden); en rolig tekst til samme melding virker fortsatt", async () => {
+    chain.slack.calls.length = 0;
+    const sent = await chain.act("send", slackP({ recipient: "C0FFFFFFFF" }), chain.key("em1")); // eget mål: kald mottaker tillater kun én sending per døgn
+    expect(sent.ok).toBe(true);
+    const target = sent.ok ? String(sent.external_id) : "x";
+    const k = chain.key("em2");
+    const promo = await chain.act("edit_message", editP(target, "Spesialtilbud: 50% rabatt, kjøp nå! Gratis frakt.", "C0FFFFFFFF"), k);
+    expect(promo.ok).toBe(false);
+    expect(chain.slack.calls.some((c) => c.op === "edit")).toBe(false);
+    expect(await beforeState(k)).toMatchObject({ kind: "edit", allowed: false, denial_codes: expect.arrayContaining(["content_looks_like_marketing"]) });
+    const denied = (await chain.db.admin.query("SELECT status, denial_codes FROM comms_outbound_log WHERE request_id = $1", [k])).rows;
+    expect(denied).toEqual([{ status: "denied", denial_codes: expect.arrayContaining(["content_looks_like_marketing"]) }]);
+    const calm = await chain.act("edit_message", editP(target, "Timen din er flyttet til 14:00.", "C0FFFFFFFF"), chain.key("em3"));
+    expect(calm, JSON.stringify(calm)).toMatchObject({ ok: true });
+  });
+});

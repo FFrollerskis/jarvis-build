@@ -155,8 +155,9 @@ export class CommsTransport implements ToolTransport {
         return { external_id: r.external_id, data: r.data };
       }
       // `check_message_target` = fersk lesing for sletting (preflight OG readback). `data: null` = meldingen finnes ikke (etterbetingelsen for sletting).
+      // A-M6: med `text` er det preflighten for en REDIGERING (policyen for redigeringen vurderes mot den nye teksten); uten er det sletting. Begge leser målet ferskt hos leverandøren.
       case "check_message_target":
-        return { data: await funnel.checkTarget(ctx, this.parsed(parseDeleteParams(parameters)), credential) };
+        return { data: await funnel.checkTarget(ctx, this.parsed(parameters["text"] !== undefined ? parseEditParams(parameters) : parseDeleteParams(parameters)), credential) };
       case "delete_message": {
         const r = await funnel.execute(ctx, this.parsed(parseDeleteParams(parameters)), credential);
         return { external_id: r.external_id, data: r.data };

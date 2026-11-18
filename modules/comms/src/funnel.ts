@@ -68,6 +68,11 @@ export const SendParamsSchema = json({
 });
 export const EditParamsSchema = json({ request_id: RequestId, channel: Channel, account_ref: AccountRef, recipient: Recipient, target_message_id: MessageId, text: z.string().min(1).max(8000) });
 export const DeleteParamsSchema = json({ request_id: RequestId, channel: Channel, account_ref: AccountRef, recipient: Recipient, target_message_id: MessageId });
+/**
+ * A-M6: skjemaet for `check_message_target` (fersk lesing av målet). Brukes som preflight for BÅDE sletting (uten tekst) og redigering (med den nye teksten, slik at policyen for redigeringen - også reklameordene - vurderes i før-tilstanden).
+ * Før var det `DeleteParamsSchema` (strengt), som avviste `text` - preflighten for `edit_message` kastet, gatewayen svelger preflight-feil for klasse C, og redigeringens før-tilstand/lesing var DØD (null).
+ */
+export const CheckTargetSchema = DeleteParamsSchema.extend({ text: z.string().min(1).max(8000).optional() });
 export const ReactParamsSchema = json({ request_id: RequestId, channel: Channel, account_ref: AccountRef, recipient: Recipient, target_message_id: MessageId, reaction: z.string().min(1).max(64) });
 /** Utgående samtale (P3h): kun kanalen `phone`; `text` er manuset (AI-opplysningen settes FØRST av policyen). `recording` finnes bare for at en forespørsel om opptak skal AVSLÅS med kode - den ignoreres aldri stille. */
 export const CallParamsSchema = json({

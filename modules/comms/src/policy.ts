@@ -281,8 +281,8 @@ export function evaluateOutboundPolicy(request: OutboundRequest, state: Outbound
     add("purpose_marketing", "not_applicable");
   }
 
-  // 5b. ikke-markedsføring som likevel ser ut som reklame til en mottaker uten fersk samtale
-  if (isMessageLike && request.purpose !== "marketing") {
+  // 5b. ikke-markedsføring som likevel ser ut som reklame til en mottaker uten fersk samtale. A-M6: også en REDIGERING (en melding kan ellers sendes ren og redigeres til reklame etterpå).
+  if ((isMessageLike || request.kind === "edit") && request.purpose !== "marketing") {
     const textLike = text ?? content.media?.caption ?? "";
     if (proofMethod !== "inbound_thread" && textLike.length > 0 && looksLikeMarketing(textLike)) deny("content_not_marketing", "content_looks_like_marketing");
     else add("content_not_marketing", "pass");
