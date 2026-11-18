@@ -18,7 +18,7 @@ CREATE TABLE comms_meetings (
   title                   text CHECK (title IS NULL OR char_length(title) <= 200),
   started_at              timestamptz,
   duration_ms             bigint CHECK (duration_ms IS NULL OR duration_ms >= 0),
-  -- Idempotens: samme innhold i samme tenant gir samme møte (ingen dobbeltbehandling, ingen dobbelte forslag).
+  -- Idempotens: samme innhold i samme tenant OG memory space gir samme møte (ingen dobbeltbehandling, ingen dobbelte forslag). Hvert rom er sitt eget datasett (RLS), så hashen er unik per rom.
   content_sha256          text NOT NULL CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
   segment_count           integer NOT NULL CHECK (segment_count >= 0),
   -- Eierens eksplisitte attest (D-122: Jarvis avgjør aldri selv et rettslig grunnlag). Uten attest kan raden ikke finnes.
@@ -32,7 +32,7 @@ CREATE TABLE comms_meetings (
   created_at              timestamptz NOT NULL DEFAULT now(),
   retention_until         timestamptz NOT NULL,
   PRIMARY KEY (tenant_id, meeting_id),
-  UNIQUE (tenant_id, content_sha256)
+  UNIQUE (tenant_id, memory_space_id, content_sha256)
 );
 CREATE INDEX comms_meetings_retention_idx ON comms_meetings (retention_until);
 

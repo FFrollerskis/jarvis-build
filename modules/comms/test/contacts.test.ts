@@ -79,6 +79,7 @@ describe("A: lesing (ubetrodd data, minimerte felt)", () => {
     });
     expect(v).toEqual({ resource_name: "people/c1", etag: "etag-1", display_name: "Kontakt 1", emails: ["ola@example.com"], phones: ["+4790000001"], organization: "Firma AS" });
     expect(JSON.stringify(v)).not.toMatch(/Oslo|Ignorer|photo|1980/);
+    expect(viewOf(person("3", { etag: "%EgcBAgMEBQYHGgQBAgUHIgxXTUlLT1E4L0JJZz0=" }))?.etag).toBe("%EgcBAgMEBQYHGgQBAgUHIgxXTUlLT1E4L0JJZz0="); // ekte etag-er kan inneholde «%»
     expect(viewOf({ ...person("2"), resourceName: "people/c2; DROP" })).toBeNull();
     expect(viewOf({ ...person("2"), resourceName: "otherContacts/c2" })).toBeNull();
     expect(viewOf("streng")).toBeNull();
@@ -179,6 +180,14 @@ describe("B: skriving - create/update (klasse C) og delete (klasse D)", () => {
     expect(patch?.body).toEqual({ phoneNumbers: [{ value: "+4790000099" }], etag: "etag-41", metadata: person("41").metadata });
     const none = await act("contacts_update", { resource_name: "people/c41", etag: "etag-41" }, key("ct-upd"));
     expect(none.ok).toBe(false);
+  });
+
+  it("update aksepterer en etag med prosenttegn (Googles format) og sender den uendret videre", async () => {
+    const etag = "%EgcBAgMEBQYHGgQBAgUHIgxXTUlLT1E4L0JJZz0=";
+    handler = (c) => (c.method === "GET" ? jsonRes(person("43", { etag })) : jsonRes(person("43", { etag, organizations: [{ name: "Nytt AS" }] })));
+    const r = await act("contacts_update", { resource_name: "people/c43", etag, organization: "Nytt AS" }, key("ct-upd"));
+    expect(r.ok).toBe(true);
+    expect(calls.find((c) => c.method === "PATCH")?.body?.["etag"]).toBe(etag);
   });
 
   it("delete: preflight (finnes målet), DELETE, readback (borte); gjenspilling sletter aldri to ganger; finnes ikke gir `target_not_found` uten DELETE", async () => {

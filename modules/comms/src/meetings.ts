@@ -167,7 +167,7 @@ export class MeetingService {
       return null;
     }));
     return withMemoryTransaction(this.deps.pool, ctx.tenantId, [ctx.space], async (client) => {
-      const existing = await client.query(`SELECT meeting_id, source, title, segment_count FROM comms_meetings WHERE tenant_id = $1 AND content_sha256 = $2`, [ctx.tenantId, hash]);
+      const existing = await client.query(`SELECT meeting_id, source, title, segment_count FROM comms_meetings WHERE tenant_id = $1 AND memory_space_id = $2 AND content_sha256 = $3`, [ctx.tenantId, ctx.space, hash]);
       if (existing.rows.length === 1) {
         const row = existing.rows[0] as { meeting_id: string; source: MeetingSummary["source"]; title: string | null; segment_count: number };
         const counts = await client.query(

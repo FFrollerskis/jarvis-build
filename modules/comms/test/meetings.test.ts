@@ -113,6 +113,17 @@ describe("B: behandling av tekst (idempotens, minimering, attest)", () => {
     expect({ m: await count("comms_meetings"), p: await count("comms_meeting_participants"), c: await count("comms_meeting_commitments") }).toEqual(before);
   });
 
+  it("samme transkript i to memory spaces er to separate møter (hashen er unik per rom) - ingen feil, ingen lekkasje mellom rommene", async () => {
+    const text = transcript();
+    const business = await svc.ingestText(ctx(), { format: "txt", text, attest_legal_basis: true });
+    const project = await svc.ingestText({ ...ctx(), space: "project" }, { format: "txt", text, attest_legal_basis: true });
+    expect(project.deduplicated).toBe(false);
+    expect(project.meeting_id).not.toBe(business.meeting_id);
+    expect((await svc.list({ ...ctx(), space: "project" })).map((m) => m["meeting_id"])).toEqual([project.meeting_id]);
+    expect((await svc.list(ctx())).map((m) => m["meeting_id"])).not.toContain(project.meeting_id);
+    expect(await svc.ingestText({ ...ctx(), space: "project" }, { format: "txt", text, attest_legal_basis: true })).toMatchObject({ deduplicated: true, meeting_id: project.meeting_id });
+  });
+
   it("eierens attest på rettslig grunnlag er PÅKREVD (Jarvis avgjør det aldri selv): uten den - ingenting lagres; ugyldig/for stor/tom tekst gir faste koder", async () => {
     const before = await count("comms_meetings");
     await expect(svc.ingestText(ctx(), { format: "txt", text: transcript(), attest_legal_basis: false })).rejects.toThrow("meeting_legal_basis_not_attested");

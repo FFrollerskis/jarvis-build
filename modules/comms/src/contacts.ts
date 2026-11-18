@@ -20,7 +20,8 @@ const WRITE_FIELDS = ["names", "emailAddresses", "phoneNumbers", "organizations"
 
 export const RESOURCE_NAME = /^people\/c\d{1,25}$/;
 const EMAIL = /^[^\s@<>"'`\\]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,24}$/;
-const ETAG = /^[A-Za-z0-9+/=_-]{1,200}$/;
+// Googles etag-er kan inneholde «%» (URL-kodet base64) og «.» - tegnsettet må tillate dem, ellers ville ekte etag-er blitt avvist av skjemaet.
+const ETAG = /^[A-Za-z0-9+/=_%.-]{1,200}$/;
 
 /** Fritekst-felt: uendret av renseren (ingen kontrolltegn, ingen hemmeligheter, ikke tom/trimmet) - ellers avvises feltet (aldri en stille «rensing» som endrer hva som skrives til eierens kontaktbok). */
 const text = (max: number) => z.string().min(1).max(max).refine((v) => v === v.trim() && sanitizeInboundText(v) === v, "text_invalid");
