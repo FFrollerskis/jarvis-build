@@ -392,7 +392,8 @@ const claudeBudgetClosures = new WeakMap<object, Readonly<Record<string, string 
  * lukkingen åpner aldri noe og endrer ikke feilteksten - den lar en lokal omkjøring legge `claude_budget` på resultatet sitt slik at flatene viser «Claude-kreditten: ...» i stedet for å tie.
  */
 export function claudeBudgetClosureOf(err: unknown): Readonly<Record<string, string | number | boolean>> | undefined {
-  return typeof err === "object" && err !== null ? claudeBudgetClosures.get(err) : undefined;
+  const stored = typeof err === "object" && err !== null ? claudeBudgetClosures.get(err) : undefined;
+  return stored === undefined ? undefined : { ...stored }; // en kopi: det kalleren gjør med den kan aldri endre det en senere lesing av samme feil ser
 }
 
 /** Gatewayens syn på én leverandør i denne prosessen (ruteren ser kun `configured`/`paused`/`budget_blocked`/`model`). */

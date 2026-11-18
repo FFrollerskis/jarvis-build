@@ -865,13 +865,20 @@ describe("N1 (re-review): rutefeilen fra en stengt preferanseliste bærer lukkin
     expect(claudeBudgetClosureOf(viaComplete)).toMatchObject({ action: "deny", constraint: "closed" });
   });
 
-  it("lukkingen er en KOPI av kategoriene (aldri noe som kan åpne noe): å endre det som leses påvirker ikke en senere lesing", async () => {
+  it("lukkingen bærer kun kategoriene (ingen beløp, ingen feiltekst) og leveres som en KOPI: å endre det som leses påvirker ikke en senere lesing av samme feil", async () => {
     const { gateway, db } = build();
     db.spend.set("t1", SPENT.exhausted);
     const err = await gateway.complete(preferExhausted()).catch((e: unknown) => e);
     const first = claudeBudgetClosureOf(err) as Record<string, unknown>;
     expect(first["constraint"]).toBe("closed");
     expect(Object.keys(first).sort()).toEqual(["action", "level", "reason", "constraint", "tier", "window_end_ms"].sort());
+    first["constraint"] = "open"; // en kaller som (feilaktig) endrer det den fikk ...
+    first["action"] = "allow";
+    first["ekstra"] = "x";
+    const second = claudeBudgetClosureOf(err) as Record<string, unknown>;
+    expect(second).not.toBe(first); // ... påvirker ikke neste lesing
+    expect(second).toMatchObject({ constraint: "closed", action: "deny" });
+    expect(second).not.toHaveProperty("ekstra");
   });
 
   it("uskyldige og ukjente feil har ingen lukking: Anthropic er ikke konfigurert (rutefeil uten kreditt-årsak), en egenprodusert feil med samme tekst, og alt som ikke er en feil", async () => {
