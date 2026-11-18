@@ -103,7 +103,7 @@ export interface JournalRow {
 
 export type BeginResult =
   | { readonly kind: "started"; readonly log_id: string }
-  | { readonly kind: "replay"; readonly log_id: string; readonly status: JournalStatus; readonly provider_message_id: string | null }
+  | { readonly kind: "replay"; readonly log_id: string; readonly status: JournalStatus; readonly provider_message_id: string | null; readonly request_fingerprint: string | null }
   /** A-H2: taket var nådd da forsøket skulle reserveres (tellingen ble gjort UNDER lås, etter at policyen så «0 sendt»). Ingenting er skrevet; kalleren journalfører et avslag. */
   | { readonly kind: "cap_exceeded"; readonly scope: "recipient" | "account"; readonly code: string };
 
@@ -310,19 +310,17 @@ export class CommsStore {
   }
 
   private async priorAttemptOf(client: pg.PoolClient, tenantId: string, requestId: string): Promise<Extract<BeginResult, { kind: "replay" }> | null> {
-    const prior = await client.query(`SELECT log_id, status, provider_message_id FROM comms_outbound_log WHERE tenant_id = $1 AND request_id = $2 AND status <> 'denied'`, [tenantId, requestId]);
+    const prior = await client.query(
+      `SELECT log_id, status, provider_message_id, before_state->>'request_fingerprint' AS request_fingerprint FROM comms_outbound_log WHERE tenant_id = $1 AND request_id = $2 AND status <> 'denied'`, [tenantId, requestId]
+    );
     if (prior.rowCount === 0) return null;
-    const row = prior.rows[0] as { log_id: string; status: JournalStatus; provider_message_id: string | null };
-    return { kind: "replay", log_id: row.log_id, status: row.status, provider_message_id: row.provider_message_id };
+    const row = prior.rows[0] as { log_id: string; status: JournalStatus; provider_message_id: string | null; request_fingerprint: string | null };
+    return { kind: "replay", log_id: row.log_id, status: row.status, provider_message_id: row.provider_message_id, request_fingerprint: row.request_fingerprint };
   }
 
   /** Finnes det allerede et IKKE-avslått forsøk med denne forespørsels-id-en? (`null` = nei.) Eier-ruten bruker det til å la en gjenspilling gå rett til gatewayens ledger i stedet for å vurdere policyen mot en tilstand det første forsøket selv har endret. */
-  async findAttempt(tenantId: string, space: MemorySpace, requestId: string): Promise<{ log_id: string; status: JournalStatus } | null> {
-    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
-      const res = await client.query(`SELECT log_id, status FROM comms_outbound_log WHERE tenant_id = $1 AND request_id = $2 AND status <> 'denied'`, [tenantId, requestId]);
-      const row = res.rows[0] as { log_id: string; status: JournalStatus } | undefined;
-      return row ?? null;
-    });
+  async findAttempt(tenantId: string, space: MemorySpace, requestId: string): Promise<Extract<BeginResult, { kind: "replay" }> | null> {
+    return withMemoryTransaction(this.pool, tenantId, [space], (client) => this.priorAttemptOf(client, tenantId, requestId));
   }
 
   /** Bevisføring for et AVSLÅTT forsøk (policy). Brenner IKKE forespørsels-id-en (delvis unik indeks utelater `denied`). */

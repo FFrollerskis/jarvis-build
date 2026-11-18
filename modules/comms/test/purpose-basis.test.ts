@@ -116,7 +116,7 @@ describe("A-M2 (full kjede): eierruten avslår uten grunnlag, journalfører grun
     expect(ledger.before_state).toMatchObject({ allowed: true, purpose_basis: "existing_customer_relationship" });
     expect(JSON.stringify(ledger)).not.toContain("Kunde siden 2023"); // notatet er i journalen, ikke i verktøy-ledgeren
     expect(JSON.stringify(ledger)).not.toContain("nye produkter");
-    const note = chain.notifications.find((x) => x.action === "send" && x.summary.includes("existing_customer_relationship"));
+    const note = chain.notifications.find((x) => x.action === "send" && x.summary?.includes("existing_customer_relationship") === true);
     expect(note?.summary).toMatch(/\(formål: transactional, grunnlag: existing_customer_relationship\)/);
   });
 

@@ -2,12 +2,12 @@ import { z } from "zod";
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { BusinessService } from "@jarvis/business";
 import type { ConversationGraphService } from "@jarvis/conversation-graph";
-import { isIndeterminateTransportError, isOutcomeUnknownMessage } from "@jarvis/tool-gateway";
+import { afterAcceptedMutation, isIndeterminateTransportError, isOutcomeUnknownMessage } from "@jarvis/tool-gateway";
 import { ProviderRejectedError, type AdapterMap } from "./adapters.ts";
-import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, normalizeRecipient, optOutHash, recipientHash, recipientHint, type CommsChannel, type CommsProvider } from "./channels.ts";
+import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, normalizeRecipient, optOutHash, recipientHash, recipientHint, sha256Hex, type CommsChannel, type CommsProvider } from "./channels.ts";
 import type { CommsConfig } from "./config.ts";
 import { PURPOSE_BASES, evaluateOutboundPolicy, rateCaps, type OutboundKind, type OutboundPolicyState, type OutboundPurpose, type OutboundRequest, type PolicyDecision, type ReservationRegisterStatus } from "./policy.ts";
-import type { Actor, AuthorizedAccount, Clock, CommsStore, JournalEntryInput, JournalSource } from "./store.ts";
+import type { Actor, AuthorizedAccount, BeginResult, Clock, CommsStore, JournalEntryInput, JournalSource } from "./store.ts";
 
 /**
  * WP-G1 (D-463, P1b/P1c): TRAKTEN alle nye sendeveier går gjennom. ÉN kodevei fra forespørsel til leverandørkall: parse (streng) -> normaliser mottaker -> last tilstand -> `evaluateOutboundPolicy` -> journal (`requested`) ->
@@ -147,6 +147,21 @@ export function parseCallParams(raw: unknown): ParseResult {
   return build("call", { request_id: d.request_id, channel: d.channel, account_ref: d.account_ref, recipient: d.recipient, purpose: d.purpose, ...basisOf(d) }, { text: d.text, ...(d.recording !== undefined ? { recording: d.recording } : {}) }, {});
 }
 
+/** A-M5: er forespørsels-id-en (idempotensnøkkelen) ubrukt (`none`), en ekte gjenspilling av SAMME forespørsel (`replay`), eller gjenbrukt til en ANNEN forespørsel (`collision`)? */
+export type ReplayState = "none" | "replay" | "collision";
+
+/**
+ * Fingeravtrykk av HELE forespørselen (handling, kanal, konto, mottaker, formål, grunnlag, innhold, mål, tråd) - alt eieren kan sette bortsett fra selve id-en. Lagres i journalens `before_state` ved forsøket og sammenlignes ved
+ * gjenspilling: ledgeren (PK tenant+nøkkel) svarer ellers `ok + deduplicated` på HVA SOM HELST med samme nøkkel, selv om ingenting ble sendt/slettet (A-M5).
+ */
+export function requestFingerprint(request: OutboundRequest): string {
+  const c = request.content;
+  return sha256Hex(JSON.stringify([
+    "comms-request-v1", request.kind, request.channel, request.account_ref, request.recipient, request.purpose, request.purpose_basis ?? null, request.purpose_basis_note ?? null,
+    c.text ?? null, c.template ?? null, c.media ?? null, c.reaction ?? null, c.recording ?? null, request.thread_ref ?? null, request.target_message_id ?? null
+  ]));
+}
+
 export interface Evaluation {
   readonly parsed: ParsedOutbound;
   readonly decision: PolicyDecision;
@@ -259,17 +274,21 @@ export class OutboundFunnel {
       request_id: ev.parsed.request_id, kind: r.kind, channel: r.channel, account_ref: r.account_ref, provider: ev.provider, recipient_hash: ev.recipient_hash, recipient_hint: ev.recipient_hint,
       purpose: r.purpose, rule_evaluation: ev.decision.rules, denial_codes: ev.decision.denial_codes, recipient_proof: ev.decision.recipient_proof, content_sha256: ev.decision.content_sha256,
       content_length: ev.decision.content_length, ai_disclosure_applied: ev.decision.disclosure_applied, ...(ev.target_log_id !== null ? { target_log_id: ev.target_log_id } : {}),
-      ...(r.thread_ref !== undefined ? { thread_ref: r.thread_ref } : {}), source: ctx.source
+      ...(r.thread_ref !== undefined ? { thread_ref: r.thread_ref } : {}), source: ctx.source,
+      // A-M5: fingeravtrykket av forespørselen følger forsøket (journalens `before_state`), så en gjenbrukt nøkkel til en annen forespørsel kan avvises.
+      before_state: { v: 1, request_fingerprint: requestFingerprint(r) }
     };
   }
 
   /**
-   * Har denne forespørsels-id-en allerede et (ikke-avslått) forsøk? Da er det en GJENSPILLING: eier-ruten sender den rett til gatewayen (ledgeren gir det første resultatet tilbake; journalens unike nøkkel er andre vern) i stedet for å
-   * vurdere policyen på nytt mot en tilstand det første forsøket selv har endret (ratetelleren ville ellers avslå en ellers idempotent gjenspilling). Ingenting kan sendes to ganger av dette: nytt utsendelsesforsøk går alltid gjennom preflight,
-   * policyen i transporten og `beginAttempt` (som gir `replay`).
+   * Har denne forespørsels-id-en allerede et (ikke-avslått) forsøk? Da er det en GJENSPILLING (`replay`): eier-ruten sender den rett til gatewayen (ledgeren gir det første resultatet tilbake; journalens unike nøkkel er andre vern) i stedet for
+   * å vurdere policyen på nytt mot en tilstand det første forsøket selv har endret (ratetelleren ville ellers avslå en ellers idempotent gjenspilling). Ingenting kan sendes to ganger av dette: nytt utsendelsesforsøk går alltid gjennom
+   * preflight, policyen i transporten og `beginAttempt` (som gir `replay`). Er id-en brukt til en ANNEN forespørsel (`collision`, A-M5) må kalleren AVVISE den - ledgeren ville ellers svart «ok + deduplicated» uten at noe ble gjort.
    */
-  async hasPriorAttempt(ctx: FunnelContext, requestId: string): Promise<boolean> {
-    return (await this.deps.store.findAttempt(ctx.tenantId, ctx.space, requestId)) !== null;
+  async replayState(ctx: FunnelContext, parsed: ParsedOutbound): Promise<ReplayState> {
+    const prior = await this.deps.store.findAttempt(ctx.tenantId, ctx.space, parsed.request_id);
+    if (prior === null) return "none";
+    return prior.request_fingerprint === null || prior.request_fingerprint === requestFingerprint(parsed.request) ? "replay" : "collision";
   }
 
   /** A-H2: taket ble nådd UNDER låsen (policyens tørrkjøring så det ikke): avslaget journalføres med regelen som faktisk slo til, så beviset og utfallet stemmer. */
@@ -288,9 +307,25 @@ export class OutboundFunnel {
     return this.execute(ctx, parsed, credential);
   }
 
+  /**
+   * Svaret på en GJENSPILLING (samme forespørsels-id som et ikke-avslått forsøk). Ingen leverandørkall skjer på denne veien: sendt = dedup, feilet = brent id, ellers ukjent/under utførelse. Brukt av BÅDE den tidlige sjekken i `execute`
+   * og `beginAttempt`s racevern. Er id-en brukt til en ANNEN forespørsel (A-M5) er det en feil, aldri «dedup».
+   */
+  private replayResult(prior: Extract<BeginResult, { kind: "replay" }>, req: OutboundRequest): ExecResult {
+    if (prior.request_fingerprint !== null && prior.request_fingerprint !== requestFingerprint(req)) throw new Error("idempotency_key_collision");
+    if (prior.status === "sent") {
+      return { external_id: prior.provider_message_id ?? "replayed", data: { log_id: prior.log_id, status: "sent", deduplicated: true, channel: req.channel, kind: req.kind } };
+    }
+    if (prior.status === "failed") throw new Error("comms_request_id_burned_use_a_new_key");
+    throw new Error("outcome_unknown:comms_request_in_flight_or_unknown");
+  }
+
   /** Utfører (send/edit/delete/reaksjon) ETTER en ny policyevaluering og med journalføring før og etter leverandørkallet. Den ENESTE veien til en adapter. */
   async execute(ctx: FunnelContext, parsed: ParsedOutbound, credential: string): Promise<ExecResult> {
     const { store, adapters, config } = this.deps;
+    // En GJENSPILLING avgjøres FØR policyen: policyen ville ellers vurdert den mot en tilstand det første forsøket selv har endret (ratetelleren teller forsøket selv) og skrevet en misvisende avslagsrad for en ellers idempotent gjenspilling.
+    const prior = await store.findAttempt(ctx.tenantId, ctx.space, parsed.request_id);
+    if (prior !== null) return this.replayResult(prior, parsed.request);
     const ev = await this.evaluate(ctx, parsed);
     if (!ev.decision.allowed) {
       await this.recordDenial(ctx, ev);
@@ -308,13 +343,7 @@ export class OutboundFunnel {
       await this.recordDenial(ctx, this.withCapDenial(ev, begin.scope, begin.code));
       throw new Error(`comms_policy_denied:${begin.code}`);
     }
-    if (begin.kind === "replay") {
-      if (begin.status === "sent") {
-        return { external_id: begin.provider_message_id ?? "replayed", data: { log_id: begin.log_id, status: "sent", deduplicated: true, channel: req.channel, kind: req.kind } };
-      }
-      if (begin.status === "failed") throw new Error("comms_request_id_burned_use_a_new_key");
-      throw new Error("outcome_unknown:comms_request_in_flight_or_unknown");
-    }
+    if (begin.kind === "replay") return this.replayResult(begin, req); // racevern: et samtidig forsøk med samme id rakk å skrive raden mellom den tidlige sjekken og her
     const target = { account_ref: req.account_ref, recipient: req.recipient };
     try {
       let providerMessageId: string;
@@ -336,10 +365,12 @@ export class OutboundFunnel {
         await adapter.react!({ ...target, target_message_id: req.target_message_id!, reaction: req.content.reaction! }, credential);
         providerMessageId = req.target_message_id!;
       }
-      await store.settleAttempt(ctx.tenantId, ctx.space, begin.log_id, {
+      // A-M4: leverandøren HAR akseptert. Feiler journalføringen nå (DB-feil), er utfallet UKJENT - aldri en vanlig `failed` (som ville invitert til en ny nøkkel og en ny sending til samme mottaker). `afterAcceptedMutation` gjør feilen om til
+      // `outcome_unknown:comms_journal_settle_failed`: ledger `unverified`, raden blir stående åpen (`requested`/`outcome_unknown` teller i takene) og eieren varsles om ukjent utfall.
+      await afterAcceptedMutation("comms_journal_settle_failed", () => store.settleAttempt(ctx.tenantId, ctx.space, begin.log_id, {
         status: "sent", provider_message_id: providerMessageId, ...(threadRef !== undefined ? { thread_ref: threadRef } : {}),
         after_state: { provider_message_id_present: true }
-      });
+      }));
       if (req.kind === "message") await this.recordTimeline(ctx, ev, begin.log_id);
       return {
         external_id: providerMessageId,

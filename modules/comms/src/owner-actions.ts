@@ -1,6 +1,6 @@
 import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { ToolGateway } from "@jarvis/tool-gateway";
-import { parseCallParams, parseSendParams, type FunnelContext, type OutboundFunnel } from "./funnel.ts";
+import { parseCallParams, parseDeleteParams, parseEditParams, parseReactParams, parseSendParams, type FunnelContext, type OutboundFunnel, type ParseResult } from "./funnel.ts";
 
 /**
  * WP-G1 (D-463): eierens HTTP-flate for kommunikasjon (`POST /comms/action`, `POST /comms/preview`) - logikken bor HER (testbar uten HTTP), ruten i `apps/api` gjør kun autentisering (grant -> KUN eieren) og kaller hit.
@@ -50,6 +50,18 @@ export type OwnerActionResult =
   | { readonly ok: false; readonly status: "denied"; readonly denial_codes: readonly string[]; readonly rules: JsonValue; readonly journal_id: string }
   | { readonly ok: false; readonly status: "rejected" | "failed"; readonly reason: string };
 
+/** Parser en utgående handling med funnelens egne parsere (samme form som transporten). `undefined` = ikke en journalført utgående handling. */
+function parseOutbound(action: string, parameters: Record<string, JsonValue>): ParseResult | undefined {
+  switch (action) {
+    case "send": return parseSendParams(parameters);
+    case "start_call": return parseCallParams(parameters);
+    case "edit_message": return parseEditParams(parameters);
+    case "delete_message": return parseDeleteParams(parameters);
+    case "add_reaction": return parseReactParams(parameters);
+    default: return undefined;
+  }
+}
+
 function funnelContext(identity: IdentityContext): FunnelContext {
   return { tenantId: identity.tenant_id, space: identity.memory_space_id as MemorySpace, actor: { person_id: identity.person_id, session_id: identity.session_id }, source: "owner_route" };
 }
@@ -76,18 +88,23 @@ export async function executeCommsOwnerAction(
   if (outbound && idempotencyKey !== undefined) {
     if (parameters["request_id"] !== undefined && parameters["request_id"] !== idempotencyKey) return { ok: false, status: "rejected", reason: "comms_request_id_mismatch" };
     parameters = { ...parameters, request_id: idempotencyKey };
+    // Idempotensnøkkelen er BUNDET til forespørselen (A-M5): ledgeren (PK tenant+nøkkel) ville ellers svart `ok + deduplicated` på en HELT ANNEN forespørsel med samme nøkkel (annen mottaker/tekst, eller `delete_message` med nøkkelen til en
+    // tidligere sending - der ingenting ble sendt/slettet). Et forsøk som ER journalført sammenlignes derfor med fingeravtrykket; avvik = `idempotency_key_collision` FØR gatewayen er nådd.
     // Send: tørrkjør FØRST, slik at eieren får ALLE avslagskodene (ikke bare den første) og avslaget journalføres som bevis. ToolGateway kjører policyen på nytt (preflight + rett før kallet).
     // UNNTAK: en GJENSPILLING (id-en har allerede et ikke-avslått forsøk) går rett til gatewayen - ledgeren gir det første resultatet tilbake. Å vurdere policyen mot en tilstand det første forsøket selv har endret
     // (f.eks. ratetelleren) ville avslått en ellers idempotent gjenspilling og skrevet en misvisende avslagsrad.
-    if (action === "send" || action === "start_call") {
-      const parsed = action === "send" ? parseSendParams(parameters) : parseCallParams(parameters);
-      if (!parsed.ok) return { ok: false, status: "rejected", reason: parsed.code };
+    const parsed = parseOutbound(action, parameters);
+    if (parsed !== undefined && !parsed.ok && (action === "send" || action === "start_call")) return { ok: false, status: "rejected", reason: parsed.code };
+    if (parsed !== undefined && parsed.ok) {
       const ctx = funnelContext(identity);
-      const replay = await deps.funnel.hasPriorAttempt(ctx, parsed.value.request_id);
-      const ev = replay ? undefined : await deps.funnel.evaluate(ctx, parsed.value);
-      if (ev !== undefined && !ev.decision.allowed) {
-        const journalId = await deps.funnel.recordDenial(ctx, ev);
-        return { ok: false, status: "denied", denial_codes: ev.decision.denial_codes, rules: deps.funnel.summarize(ev)["rules"] as JsonValue, journal_id: journalId };
+      const state = await deps.funnel.replayState(ctx, parsed.value);
+      if (state === "collision") return { ok: false, status: "rejected", reason: "idempotency_key_collision" };
+      if ((action === "send" || action === "start_call") && state === "none") {
+        const ev = await deps.funnel.evaluate(ctx, parsed.value);
+        if (!ev.decision.allowed) {
+          const journalId = await deps.funnel.recordDenial(ctx, ev);
+          return { ok: false, status: "denied", denial_codes: ev.decision.denial_codes, rules: deps.funnel.summarize(ev)["rules"] as JsonValue, journal_id: journalId };
+        }
       }
     }
   }

@@ -71,7 +71,7 @@ function stubOutbound(opts: { allowed?: boolean; gatewayResult?: unknown; replay
   };
   const evaluation = (allowed: boolean) => ({ parsed: { request_id: "x" }, decision: { allowed, denial_codes: allowed ? [] : ["quiet_hours", "recipient_opted_out"], rules: [] } });
   const funnel = {
-    hasPriorAttempt: async () => { funnelCalls.push("hasPriorAttempt"); return opts.replay === true; },
+    replayState: async () => { funnelCalls.push("replayState"); return opts.replay === true ? "replay" : "none"; },
     evaluate: async () => { funnelCalls.push("evaluate"); return evaluation(opts.allowed !== false); },
     recordDenial: async () => { funnelCalls.push("recordDenial"); return "clog_denied_1"; },
     summarize: (ev: { decision: { allowed: boolean; denial_codes: string[] } }) => ({ v: 1, allowed: ev.decision.allowed, denial_codes: ev.decision.denial_codes, rules: [{ rule: "quiet_hours", outcome: "deny", code: "quiet_hours" }], content: { sha256: "0".repeat(64), length: 12 } })
@@ -294,7 +294,7 @@ describe("C: `/comms/action` og `/comms/preview` - grant -> suveren eier -> step
     expect(call).toMatchObject({ tool_id: "comms", action: "send", idempotency_key: "idem-route-0001" });
     expect(call?.parameters["request_id"]).toBe("idem-route-0001");
     expect(call?.identity).toMatchObject({ person_id: OWNER, tenant_id: TENANT, memory_space_id: "business", channel: "web", auth_strength: "signed" });
-    expect(funnelCalls).toEqual(["hasPriorAttempt", "evaluate"]);
+    expect(funnelCalls).toEqual(["replayState", "evaluate"]);
     expect(r.text).not.toContain("timen din");
   });
 
@@ -324,14 +324,14 @@ describe("C: `/comms/action` og `/comms/preview` - grant -> suveren eier -> step
     expect(Array.isArray(r.json?.["rules"])).toBe(true);
     expect(r.text).not.toContain("timen din");
     expect(gatewayCalls).toEqual([]);
-    expect(funnelCalls).toEqual(["hasPriorAttempt", "evaluate", "recordDenial"]);
+    expect(funnelCalls).toEqual(["replayState", "evaluate", "recordDenial"]);
   });
 
   it("gjenspilling (id-en har et tidligere forsøk) går rett til gatewayen uten ny evaluering; gatewayfeil gir 403 `tool_denied` med kort årsak", async () => {
     const replay = stubOutbound({ replay: true });
     const base = await listen({ ...authDeps, comms: { outbound: replay.outbound } });
     expect((await post(base, "/comms/action", sendBody())).status).toBe(200);
-    expect(replay.funnelCalls).toEqual(["hasPriorAttempt"]);
+    expect(replay.funnelCalls).toEqual(["replayState"]);
     expect(replay.gatewayCalls).toHaveLength(1);
     const failing = stubOutbound({ gatewayResult: { ok: false, reason: "class_d_notifier_not_ready" } });
     const base2 = await listen({ ...authDeps, comms: { outbound: failing.outbound } });
