@@ -19,7 +19,7 @@ import type { PersonalActionDomainDeps, PersonalApiDeps, PersonalFamilyDeps, Per
 
 /**
  * WP-G2 (D-464, UA-8 Personal Twin): ÉN komposisjonsfunksjon for hele personlig-domenet (verktøy + rute-avhengigheter + oppstartslogg). ALT er dormant: uten `JARVIS_PERSONAL_*`-flagg returnerer den tom verktøyliste,
- * identitets-filter og `deps: undefined` - verktøylister, utvalg, rate-grenser og ruter er da identiske med main (bevist av `wpg2-personal-flag-off-identity.test.ts`). Kun API-prosessen kaller den (worker/bakgrunn er read-only).
+ * identitets-filter og `deps: undefined` - verktøylister, utvalg, rate-grenser og ruter er da identiske med main (bevist av seksjon A i `wpg2-personal-routes.test.ts`, `wpg2-family-routes.test.ts`, `wpg2-health-intake.test.ts`, `wpg2-apple-dav-routes.test.ts` og de eksisterende `wph1`/`wph2`-baselinene). Kun API-prosessen kaller den (worker/bakgrunn er read-only).
  * `main.ts` trenger tre små kroker: `...personal.tools` blant tilleggsverktøyene, `personal.filterTools(...)` rundt `firstWaveTools(...)` og `...(personal.deps ? { personal: personal.deps } : {})` i `ApiDeps`.
  */
 export interface PersonalWiring {

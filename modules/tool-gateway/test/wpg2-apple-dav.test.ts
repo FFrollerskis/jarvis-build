@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   AppleDavClient, DavError, FetchDavTransport, cleanText, escapeText, findComponent, foldLine, fromIcsDate, itemFromResource, normalizeCollectionUrl, parseDavCollections, parseMultistatus, parseProp,
-  patchComponent, propertyChanges, toIcsDate, uidFromKey, unescapeText, unfold, type DavCollection
+  patchComponent, propertyChanges, toIcsDate, uidFromKey, unescapeText, unfold, type DavCollection, type DavFetch
 } from "../src/personal/apple-dav.ts";
+import { UnsafeVendorUrlError } from "../src/url-safety.ts";
 import { FakeDavServer, ics } from "./support/fake-dav-server.ts";
 
 /**
@@ -243,7 +244,7 @@ describe("C: klienten mot en falsk server - les, opprett, endre, slett med readb
 describe("D: HTTP-transporten (kun med injisert fetch; ingen nettkall)", () => {
   const collections: DavCollection[] = [{ name: "privat", kind: "calendar", url: CAL }];
   const creds = async () => ({ user: "eier@example.com", password: "app-passord-fake-123" });
-  const make = (fetchFn: unknown, extra: Partial<ConstructorParameters<typeof FetchDavTransport>[0]> = {}) => new FetchDavTransport({ collections, credentials: creds, fetchFn: fetchFn as typeof fetch, ...extra });
+  const make = (fetchFn: unknown, extra: Partial<ConstructorParameters<typeof FetchDavTransport>[0]> = {}) => new FetchDavTransport({ collections, credentials: creds, fetchFn: fetchFn as unknown as DavFetch, ...extra });
   const ok = () => vi.fn(async () => new Response("<ok/>", { status: 207, headers: { ETag: '"e1"' } }));
 
   it("sender Basic-autentisering fra vault-verdier, aldri redirect, og gir status/hoder/innhold; kun URL-er under en samling", async () => {
@@ -252,7 +253,8 @@ describe("D: HTTP-transporten (kun med injisert fetch; ingen nettkall)", () => {
     expect(res).toEqual({ status: 207, headers: expect.objectContaining({ etag: '"e1"' }), body: "<ok/>" });
     const [url, init] = fetchFn.mock.calls[0] as unknown as [string, RequestInit & { headers: Record<string, string> }];
     expect(url).toBe(CAL);
-    expect(init.redirect).toBe("manual");
+    expect(init.redirect).toBe("reject"); // guardedFetch gjør «reject» til manual + avvisning av 3xx for ALLE metoder
+    expect(init.signal).toBeInstanceOf(AbortSignal); // eget tak, aldri uten signal
     expect(init.headers["Authorization"]).toBe(`Basic ${Buffer.from("eier@example.com:app-passord-fake-123").toString("base64")}`);
     for (const url of ["https://evil.example.net/u1/cal/", "http://caldav.example.com/u1/cal/", "https://caldav.example.com:8443/u1/cal/", "https://caldav.example.com/u1/other/", "ikke en url"]) {
       const f = ok();
@@ -263,7 +265,7 @@ describe("D: HTTP-transporten (kun med injisert fetch; ingen nettkall)", () => {
 
   it("uten credentials sendes ingenting (fail closed); redirect, for stort svar og nettfeil gir kode uten å lekke passord/feiltekst", async () => {
     const f = ok();
-    expect(await code(new FetchDavTransport({ collections, credentials: async () => null, fetchFn: f as unknown as typeof fetch }).request({ method: "GET", url: `${CAL}a.ics`, headers: {} }))).toBe("dav_credentials_unavailable");
+    expect(await code(new FetchDavTransport({ collections, credentials: async () => null, fetchFn: f as unknown as DavFetch }).request({ method: "GET", url: `${CAL}a.ics`, headers: {} }))).toBe("dav_credentials_unavailable");
     expect(f).not.toHaveBeenCalled();
     expect(await code(make(vi.fn(async () => new Response("", { status: 302, headers: { Location: "https://evil.example.net/" } }))).request({ method: "GET", url: `${CAL}a.ics`, headers: {} }))).toBe("dav_redirect_refused");
     expect(await code(make(ok(), { maxBytes: 3 }).request({ method: "GET", url: `${CAL}a.ics`, headers: {} }))).toBe("dav_response_too_large");
@@ -274,6 +276,39 @@ describe("D: HTTP-transporten (kun med injisert fetch; ingen nettkall)", () => {
     expect((err as Error).message).not.toContain("passord");
     const slow = make(vi.fn((_u: string, init: RequestInit) => new Promise((_res, rej) => init.signal?.addEventListener("abort", () => rej(new Error("avbrutt"))))), { timeoutMs: 20 });
     expect(await code(slow.request({ method: "GET", url: `${CAL}a.ics`, headers: {} }))).toBe("dav_unreachable");
+  });
+
+  it("standard-transporten går via guardedFetch (D-436): redirect følges ALDRI (heller ikke for GET), nettfeil gir kode uten feiltekst, og et allerede avbrutt kall sender ingenting", async () => {
+    const spy = vi.spyOn(globalThis, "fetch");
+    try {
+      spy.mockResolvedValue(new Response("<ok/>", { status: 207, headers: { ETag: '"e1"' } }));
+      const transport = new FetchDavTransport({ collections, credentials: creds }); // ingen fetchFn: standarden er guardedFetch
+      expect((await transport.request({ method: "GET", url: `${CAL}a.ics`, headers: {} })).status).toBe(207);
+      const [url, init] = spy.mock.calls[0] as unknown as [string, RequestInit & { headers: Record<string, string> }];
+      expect(url).toBe(`${CAL}a.ics`);
+      expect(init.redirect).toBe("manual"); // «reject» blir manual + avvisning av 3xx i guardedFetch
+      expect(init.headers["Authorization"]).toMatch(/^Basic /);
+      for (const method of ["GET", "PUT", "DELETE"] as const) {
+        spy.mockResolvedValueOnce(new Response("", { status: 307, headers: { Location: "https://evil.example.net/" } }));
+        expect(await code(transport.request({ method, url: `${CAL}a.ics`, headers: {}, ...(method === "PUT" ? { body: "x" } : {}) })), method).toBe("dav_redirect_refused");
+      }
+      expect(spy).toHaveBeenCalledTimes(4); // ingen oppfølgingsforespørsel til evil.example.net
+      spy.mockRejectedValueOnce(new Error("connect ECONNRESET app-passord-fake-123"));
+      const err = await transport.request({ method: "GET", url: `${CAL}a.ics`, headers: {} }).catch((e: unknown) => e as Error);
+      expect((err as Error).message).toBe("dav_unreachable");
+      spy.mockClear();
+      expect(await code(transport.request({ method: "GET", url: `${CAL}a.ics`, headers: {}, signal: AbortSignal.abort() }))).toBe("dav_unreachable");
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("feil fra guardedFetch oversettes til koder uten å lekke feiltekst: utrygg URL = url_not_allowed, uventet redirect = dav_redirect_refused", async () => {
+    const thrower = (reason: string) => vi.fn(async () => { throw new UnsafeVendorUrlError(reason); });
+    expect(await code(make(thrower("url_malformed")).request({ method: "GET", url: `${CAL}a.ics`, headers: {} }))).toBe("url_not_allowed");
+    expect(await code(make(thrower("dot_segment")).request({ method: "GET", url: `${CAL}a.ics`, headers: {} }))).toBe("url_not_allowed");
+    expect(await code(make(thrower("unexpected_redirect_http_308")).request({ method: "PUT", url: `${CAL}a.ics`, headers: {}, body: "x" }))).toBe("dav_redirect_refused");
   });
 
   it("for stort svar avbrytes strømmet: en for stor Content-Length avvises uten å lese kroppen, og en uendelig kropp avbrytes når taket passeres (ikke lest ferdig)", async () => {

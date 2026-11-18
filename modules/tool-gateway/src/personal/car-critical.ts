@@ -149,7 +149,7 @@ export class CarTransport implements ToolTransport {
     return adoptCallSignal(signal, () => this.dispatch(action, parameters, signal));
   }
 
-  private async read(vehicleId: string, signal: AbortSignal | undefined): Promise<Params | null> {
+  private async read(vehicleId: string, signal?: AbortSignal | undefined): Promise<Params | null> {
     let raw: Awaited<ReturnType<CarAdapter["readState"]>>;
     try {
       raw = await this.deps.adapter.readState(vehicleId, { signal });
@@ -162,7 +162,7 @@ export class CarTransport implements ToolTransport {
     return state === null ? null : { ...state };
   }
 
-  private async dispatch(action: string, p: Params, signal: AbortSignal | undefined): Promise<{ external_id?: string; data?: JsonValue }> {
+  private async dispatch(action: string, p: Params, signal?: AbortSignal | undefined): Promise<{ external_id?: string; data?: JsonValue }> {
     const vehicleId = p["vehicle_id"];
     if (typeof vehicleId !== "string" || !VEHICLE_ID.test(vehicleId)) throw new Error("car_invalid_vehicle_id");
     if (action === CAR_READ_ACTION) return { data: await this.read(vehicleId, signal) };

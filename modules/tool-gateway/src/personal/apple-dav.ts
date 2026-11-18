@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { composeSignals, currentCallSignal } from "../call-signal.ts";
+import { UnsafeVendorUrlError, guardedFetch } from "../url-safety.ts";
 
 /**
  * WP-G2 (D-464, UA-8 Personal Twin) P2e: Apple Kalender / Påminnelser / Kontakter over STANDARDPROTOKOLLENE CalDAV (RFC 4791) og CardDAV (RFC 6352) - en ADAPTER, ikke kjerne (D-64): Jarvis' egen kalender-/kontaktmodell forblir kanonisk, iCloud er kilde og sluk.
@@ -519,13 +521,17 @@ function expectedMatches(item: DavItem, expected: Record<string, string[] | null
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// HTTP-transport (live = BLOCKED_EXTERNAL; testet kun med en injisert fetch)
+// HTTP-transport (live = BLOCKED_EXTERNAL; testet kun med en injisert fake)
 // ---------------------------------------------------------------------------------------------------------------------
+/** All utgående leverandørtrafikk i `tool-gateway/src` går via `guardedFetch` (D-436: rå-URL-sjekk, ingen redirect, tidsgrense); aldri rå `fetch`. */
+export type DavFetch = typeof guardedFetch;
+
 export interface FetchDavTransportOptions {
   collections: readonly DavCollection[];
   /** Hentes per forespørsel fra vaulten; `null` = ikke konfigurert (fail closed). Verdiene logges aldri. */
   credentials: () => Promise<{ user: string; password: string } | null>;
-  fetchFn?: typeof fetch;
+  /** Standard `guardedFetch`; tester injiserer en fake (ingen nettkall). */
+  fetchFn?: DavFetch;
   timeoutMs?: number;
   maxBytes?: number;
 }
@@ -558,9 +564,9 @@ async function readCapped(response: Response, maxBytes: number): Promise<string>
 }
 
 export class FetchDavTransport implements DavTransport {
-  private readonly fetchFn: typeof fetch;
+  private readonly fetchFn: DavFetch;
   constructor(private readonly options: FetchDavTransportOptions) {
-    this.fetchFn = options.fetchFn ?? fetch;
+    this.fetchFn = options.fetchFn ?? guardedFetch;
   }
 
   async request(request: DavRequest): Promise<DavResponse> {
@@ -569,24 +575,25 @@ export class FetchDavTransport implements DavTransport {
     if (!allowed) throw new DavError("url_not_allowed");
     const credentials = await this.options.credentials();
     if (!credentials || credentials.user.length === 0 || credentials.password.length === 0) throw new DavError("dav_credentials_unavailable");
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 20_000);
+    // Eget tak (standard 20 s) SAMMENSATT med et evt. forespørsels-/kallsignal (aldri bare eget signal, D-471); et allerede avbrutt kall sender ingenting.
+    const limit = AbortSignal.timeout(this.options.timeoutMs ?? 20_000);
+    const signal = composeSignals(request.signal, currentCallSignal(), limit) ?? limit;
     try {
+      // `redirect: "reject"` for ALLE metoder: et 3xx-svar følges aldri (Authorization skal aldri videre til en annen vert/sti) og gir `dav_redirect_refused`.
       const response = await this.fetchFn(request.url, {
-        method: request.method, redirect: "manual", signal: request.signal ?? controller.signal,
+        method: request.method, redirect: "reject", signal,
         headers: { ...request.headers, Authorization: `Basic ${Buffer.from(`${credentials.user}:${credentials.password}`).toString("base64")}` },
         ...(request.body !== undefined ? { body: request.body } : {})
       });
-      if (response.status >= 300 && response.status < 400) throw new DavError("dav_redirect_refused");
+      if (response.status >= 300 && response.status < 400) throw new DavError("dav_redirect_refused"); // en injisert fetch uten «reject»-håndhevelse
       const text = await readCapped(response, this.options.maxBytes ?? 1_048_576);
       const headers: Record<string, string> = {};
       response.headers.forEach((v, k) => { headers[k.toLowerCase()] = v; });
       return { status: response.status, headers, body: text };
     } catch (err) {
       if (err instanceof DavError) throw err;
+      if (err instanceof UnsafeVendorUrlError) throw new DavError(err.reason.startsWith("unexpected_redirect_http_") ? "dav_redirect_refused" : "url_not_allowed");
       throw new DavError("dav_unreachable"); // aldri feilteksten: den kan inneholde URL-er/hodeverdier
-    } finally {
-      clearTimeout(timer);
     }
   }
 }
