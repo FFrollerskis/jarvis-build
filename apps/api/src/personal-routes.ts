@@ -5,6 +5,7 @@ import { HealthIntakeError, HealthRetentionPolicyRequiredError, type HealthIntak
 import type {
   ActionDomain, ActionStatus, ExecutePersonalActionInput, ExecutePersonalActionResult, Params, PersonalActionExecutorDeps
 } from "@jarvis/tool-gateway";
+import { handleFinanceRead, type PersonalFinanceDeps } from "./personal-finance-read.ts";
 
 /**
  * WP-G2 (D-464, UA-8 Personal Twin): HTTP-rutene under `/personal/*`. ALT er dormant: `deps.personal` finnes KUN når minst ett `JARVIS_PERSONAL_*`-flagg er på (se `personal-wiring.ts`), og hver rutefamilie finnes kun med sitt eget flagg
@@ -40,6 +41,7 @@ export interface PersonalApiDeps {
   actions?: PersonalActionsDeps;
   family?: PersonalFamilyDeps;
   health?: PersonalHealthDeps;
+  finance?: PersonalFinanceDeps;
 }
 
 export interface PersonalRouteContext {
@@ -80,6 +82,8 @@ export async function handlePersonalRoute(ctx: PersonalRouteContext): Promise<bo
   if (family !== undefined && url.pathname.startsWith("/personal/family/")) return handleFamilyRoute(ctx, family);
   const health = ctx.deps.health;
   if (health !== undefined && url.pathname === "/personal/health/ingest") return handleHealthIngest(ctx, health);
+  const finance = ctx.deps.finance;
+  if (finance !== undefined && url.pathname === "/personal/finance/read") return handleFinanceRead(ctx, finance);
   return false;
 }
 

@@ -18,7 +18,7 @@ export const PERSONAL_FLAG_NAMES = {
   healthIngest: "JARVIS_PERSONAL_HEALTH_INGEST",
   /** RESERVERT, INGEN EFFEKT (`DEFERRED`, se `status.ts`): P2e Apple Kalender/Påminnelser/Kontakter via CalDAV/CardDAV (iCloud). Live er `BLOCKED_EXTERNAL` (eieren lager det app-spesifikke passordet). */
   appleDav: "JARVIS_PERSONAL_APPLE_DAV",
-  /** RESERVERT, INGEN EFFEKT (`DEFERRED`, se `status.ts`): P2f personlig økonomi - KUN lesing via den eksisterende bank-/PSD2-connectoren. Aldri betaling. */
+  /** P2f: personlig økonomi - KUN lesing (rute `/personal/finance/read`, `personal`-rommet) fra Jarvis' kanoniske banktabeller. Aldri betaling, aldri et verktøy. */
   financeRead: "JARVIS_PERSONAL_FINANCE_READ",
   /** RESERVERT, INGEN EFFEKT (`BUILT_UNWIRED`, se `status.ts`): P2g kontekstavledninger (rene funksjoner i `@jarvis/context`); sesjonskontinuitet er eksisterende og uendret. */
   context: "JARVIS_PERSONAL_CONTEXT"

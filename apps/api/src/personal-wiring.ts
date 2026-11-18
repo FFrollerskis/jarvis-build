@@ -1,6 +1,7 @@
 import type pg from "pg";
 import { FamilyService } from "@jarvis/context";
 import type { IdentityContext } from "@jarvis/contracts";
+import { BankingService } from "@jarvis/finance";
 import { HEALTH_INTAKE_MAX_DELETES, HEALTH_INTAKE_MAX_SAMPLES, HEALTH_INTAKE_SOURCE_TYPE, HealthIntakeService, HealthService, MetricTypeSchema } from "@jarvis/health";
 import { LocationService } from "@jarvis/location";
 import {
@@ -10,6 +11,7 @@ import {
   type CarAdapter, type ExecutePersonalActionInput, type PersonalActionIndexEntry, type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
 import { familySharedDataReaders, type HealthReadApi, type LocationReadApi } from "./personal-family-readers.ts";
+import { FINANCE_READ_VIEWS, type PersonalFinanceDeps } from "./personal-finance-read.ts";
 import type { PersonalActionDomainDeps, PersonalApiDeps, PersonalFamilyDeps, PersonalHealthDeps } from "./personal-routes.ts";
 
 /**
@@ -101,8 +103,17 @@ export function createPersonalWiring(input: PersonalWiringInput): PersonalWiring
     log["health_ingest"] = { registered: true, source_type: HEALTH_INTAKE_SOURCE_TYPE, max_samples: HEALTH_INTAKE_MAX_SAMPLES, max_deletes: HEALTH_INTAKE_MAX_DELETES, metrics: MetricTypeSchema.options.length };
   }
 
+  // Personlig økonomi-lesing (P2f): KUN en rute (`POST /personal/finance/read`), aldri et verktøy - finansdata er begrenset og skal ikke kunne nå en modell. `BankingService` konstrueres UTEN credentials: lesingen er ren database, ingen leverandørkall.
+  let finance: PersonalFinanceDeps | undefined;
+  if (personalFlagOn(env, PERSONAL_FLAG_NAMES.financeRead)) {
+    finance = { banking: new BankingService(pool) };
+    log["finance_read"] = { registered: true, space: "personal", read_only: true, views: FINANCE_READ_VIEWS };
+  }
+
   const deps: PersonalApiDeps | undefined =
-    actions || family || health ? { ...(actions ? { actions } : {}), ...(family ? { family } : {}), ...(health ? { health } : {}) } : undefined;
+    actions || family || health || finance
+      ? { ...(actions ? { actions } : {}), ...(family ? { family } : {}), ...(health ? { health } : {}), ...(finance ? { finance } : {}) }
+      : undefined;
   return {
     tools,
     filterTools: (all) => (dropLegacyHome ? legacyCriticalActionsToDrop(all) : all),

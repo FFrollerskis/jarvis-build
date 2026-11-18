@@ -19,7 +19,7 @@ og en test låser at id-ene under henger sammen med denne filen.
 | `p1c_family` | P1c Familie/delte rom (medlemmer, roller, deling, «på vegne av», lister, kalender) | `DORMANT` bak `JARVIS_PERSONAL_FAMILY`; `PARTIAL` (provisjonering og verge-tilgang ikke bygget) | `modules/context/test/family-service.test.ts` (30), `modules/erasure/test/wpg2-family-erasure.test.ts`, `apps/api/test/wpg2-family-{routes,integration}.test.ts` |
 | `p1d_health_ingest` | P1d Enhetssignert helse-inntak | `DORMANT` bak `JARVIS_PERSONAL_HEALTH_INGEST`; appen `BLOCKED_EXTERNAL` | `modules/health/test/intake.test.ts` (15), `apps/api/test/wpg2-health-intake{,-db}.test.ts` |
 | `p2e_apple_dav`, `p2e_eventkit` | P2e Apple Kalender/Påminnelser/Kontakter | `DEFERRED` (ikke bygget), live `BLOCKED_EXTERNAL`; EventKit `DEFERRED` | - (se §6) |
-| `p2f_finance_read` | P2f Personlig økonomi-lesing | `DEFERRED` (ikke bygget; ingen betaling bygges) | - (se §7) |
+| `p2f_finance_read` | P2f Personlig økonomi-lesing (kun rute, kun lesing) | `DORMANT` bak `JARVIS_PERSONAL_FINANCE_READ`; `PARTIAL` (personlig bankkobling `NOT VERIFIED`, ingen samtale-tilgang) | `apps/api/test/wpg2-finance-read{,-db}.test.ts` (8 + 4) |
 | `p2g_context` | P2g Kontekstavledninger (tid på døgnet, reiser) | `BUILT_UNWIRED` | `modules/context/test/derive.test.ts` (5) |
 | `p2g_session_continuity` | P2g Sesjonskontinuitet | `EXISTING_UNCHANGED` (PASS med bevis, ingenting bygget) | `modules/core/test/channel-session-authority.test.ts` D |
 | `local_agent_q60` | Lokalagent med filtilgang (Q-60) | `DEFERRED` - bygges IKKE, ingen kontrakt laget | - |
@@ -36,7 +36,8 @@ og en test låser at id-ene under henger sammen med denne filen.
 | `JARVIS_PERSONAL_CAR_TARGETS` / `_CAR_SETTLE_MS` / `_CAR_CREDENTIAL` | tom / 60000 (5000-300000) / tom | Eierens EGNE kjøretøy-id-er (allowlist) / ventetid på sluttilstand / vault-ref til leverandørtoken (aldri i journal/logg) |
 | `JARVIS_PERSONAL_FAMILY` | AV | Registrerer `/personal/family/*` (26 POST-ruter). Registreres IKKE uten eierens person-id fra eierkonfigurasjonen (fail closed); ingen modellverktøy |
 | `JARVIS_PERSONAL_HEALTH_INGEST` | AV | Registrerer `POST /personal/health/ingest` (ingen verktøy) |
-| `JARVIS_PERSONAL_APPLE_DAV`, `_APPLE_DAV_ACCOUNTS`, `_APPLE_DAV_USER`, `_APPLE_DAV_APP_PASSWORD`, `JARVIS_PERSONAL_FINANCE_READ`, `JARVIS_PERSONAL_CONTEXT` | AV | **RESERVERT, ingen effekt** (delene er `DEFERRED`/`BUILT_UNWIRED`, se §6-§8); navnene står i compose slik at en senere pakke ikke trenger en ny kompose-endring |
+| `JARVIS_PERSONAL_FINANCE_READ` | AV | Registrerer `POST /personal/finance/read` (kun lesing, `personal`-rommet, ingen verktøy) |
+| `JARVIS_PERSONAL_APPLE_DAV`, `_APPLE_DAV_ACCOUNTS`, `_APPLE_DAV_USER`, `_APPLE_DAV_APP_PASSWORD`, `JARVIS_PERSONAL_CONTEXT` | AV | **RESERVERT, ingen effekt** (delene er `DEFERRED`/`BUILT_UNWIRED`, se §6 og §8); navnene står i compose slik at en senere pakke ikke trenger en ny kompose-endring |
 
 Flaggene står i `SERVICE_ENV.api` (`infra/local/service-env.mjs`), er generert inn i compose (`node ops/security/generate-compose-env.mjs --write`) og vaktes av `wpg2-flags-wiring.test.ts`. De når IKKE worker/voice/browser. Oppstartsloggen får linjen `personal_twin` KUN når minst ett flagg er på.
 **Tilbakerulling = flagget AV og restart:** rutene forsvinner (404), verktøyene avregistreres, de gamle `lock_set`/`alarm_set` kommer tilbake. Data (journal, familie, helseprøver) blir stående og er fortsatt tilgjengelig for sletting; migrasjon 125-128 er additive og trenger ikke rulles tilbake.
@@ -162,11 +163,21 @@ Kropp: `{ grant_token, samples: [{ metric_type, value, unit, observed_at, extern
 Ikke bygget i dette omfanget (ærlig utsatt, ikke stille utelatt). Flaggene `JARVIS_PERSONAL_APPLE_DAV*` er reservert uten effekt. **Neste skritt (i denne rekkefølgen):** (1) eieren oppretter et app-spesifikt passord på Apple-ID-en (D-108) og velger hvilke kalendere/adressebøker som er med; (2) D-41-revisjon mot offisiell dokumentasjon (iCloud CalDAV/CardDAV-endepunkter, påminnelser som VTODO over CalDAV, app-spesifikt passord og 2FA - alt `unverified` i dag);
 (3) iCalendar/vCard-kodek med CRLF-/escape-vern, DAV-klient bak et transportgrensesnitt og en falsk transport (aldri ekte nettkall i tester); (4) eier-kun-verktøy: lesing A, opprett/endre/slett med step-up og etag-forutsetning (`If-Match`), sletting med eksplisitt bekreftelse; (5) full connector-manifest (`ops/connector/new-connector.mjs`, aldri stille inn i `SKELETON_BASELINE`) og behandlingsinventar-rad. Apple-DAV er en kilde/sluk (`EXTERNAL_CANONICAL`): Jarvis' kalender-/kontaktmodell forblir kanonisk. **EventKit** (lokal Apple-API) er `DEFERRED` til en iPhone/Mac-app finnes.
 
-## 7. P2f Personlig økonomi-lesing - `DEFERRED`
+## 7. P2f Personlig økonomi-lesing (kun lesing, kun rute)
 
-Ikke bygget; ingen betaling bygges. Eksisterende `finance_neonomics` (D-111) er uendret. Strengeste regel (Q-64) gjelder: finansdata er `restricted`, men de eksisterende `finance_*`-verktøyene har kun **valg-lås** (aksept i `wph1-restricted-tools-invariant.test.ts`), ikke utførelseslås mot skymodeller, og samtalehistorikken bærer ingen begrenset-merking (Q-66/N1).
-Å bygge personlig bankinnsyn oppå det ville utvidet to kjente hull. **Neste skritt:** eierbeslutning om hvilken tenant/hvilket samtykke en personlig bankkobling hører til, og den generelle utførelseslåsen + N1-merkingen (Q-64 pkt 3, Q-66) som egen pakke; deretter en skrivebeskyttet fasade i `finance_neonomics`-namespacet.
-Flagget `JARVIS_PERSONAL_FINANCE_READ` er reservert uten effekt.
+**Bygget (`DORMANT` bak `JARVIS_PERSONAL_FINANCE_READ`):** `POST /personal/finance/read` med `view` = `accounts` | `balances` (krever `bank_account_id`) | `transactions` (valgfri `bank_account_id`, `limit` 1-200). Krav: eier, enhetssignert økt (step-up) og et grant scopet til `personal` (`business`/andre rom nektes FØR noe leses). Den leser Jarvis' EGNE kanoniske banktabeller
+(`bank_*`, UA-6/D-111) i grantets tenant og `personal`-rommet via tre lese-metoder på `BankingService` konstruert UTEN credentials: ingen leverandørkall, ingen skrivevei, ingen synkronisering, ingen avstemming, ingen betaling (UA-6 eier pengehandlinger). «Private-rommet» i oppdraget er tolket som `personal` (det finnes ikke et rom som heter `private`).
+**Minimering:** kun et normalisert utvalg (konto-id, maskert kontoidentifikator, valuta, saldo og transaksjoner i øre, datoer, retning/status); ingen leverandør-id-er, samtykke-id-er, avstemming eller match-data. Bankens fritekst (kontonavn, motpart, referanse) er UBETRODD data: kontrolltegn fjernes, kuttes ved 140 tegn og leveres merket (`untrusted_text_fields`).
+**Utførelsesvern (Q-64 strengeste regel):** finansdata er begrenset (SECRET_RESTRICTED); fasaden er en RUTE, aldri et verktøy, og utvider dermed ikke det kjente hullet at de eksisterende `finance_*`-verktøyene kun har valg-lås og at samtalehistorikken ikke bærer begrenset-merking (Q-64 pkt 3, Q-66). Kildevakt-tester: bare typer importeres fra finanspakken, bare de tre lese-metodene brukes, ingen skrive-/synk-/betalingsnavn, ingen modellflate.
+**BankID/PSD2:** samtykket (opprettelse, SCA/BankID hos banken, utløp, tilbakekall) forblir i de EKSISTERENDE `finance_neonomics`-verktøyene; fasaden leser bare det som allerede er synkronisert under et aktivt samtykke og utløser aldri tilgang hos banken. En personlig bankkobling krever at samtykket opprettes i eierens personlige tenant (`personal`-rommet) - `NOT VERIFIED` mot en ekte bank.
+**`DEFERRED`/`PARTIAL`:** personlig bankkobling mot en ekte bank (eierbeslutning om tenant/samtykke, BankID hos eieren = `BLOCKED_EXTERNAL`); samtale-tilgang til økonomi (krever generell utførelseslås + N1-merking, Q-64 pkt 3/Q-66); kategorisering/budsjett (egen domenemodell, ikke bygget).
+
+| D-41 (Neonomics, personlig lesing) | Svar |
+|---|---|
+| Leverandøren tilbyr | AIS (kontoer, saldoer, transaksjoner) og PIS (betaling) via PSD2; `unverified` her (ikke gjennomgått på nytt; eksisterende D-111-revisjon gjelder) |
+| Bygget | Kun lesing av Jarvis-kanonisk kopi; ingen PIS, ingen provider-kall fra fasaden |
+| Risikoklasse / eier | Lesing = A, men begrenset data: eier + signert økt; ingen delegat |
+| Sandbox | Neonomics sandbox-miljø (`JARVIS_NEONOMICS_ENVIRONMENT=sandbox`) og seedede testrader |
 
 ## 8. P2g Kontekstmotor og sesjonskontinuitet
 
@@ -201,6 +212,6 @@ e-post er kun et SIGNAL knyttet til reisen som id - aldri kilde til dato/sted, o
 | Q-G2-2 | Bil-leverandør (D-64)? Et aggregat-API er `CORE_DEPENDENCY_DECISION_REQUIRED` | Sjekk bilmerkets eget API først; hold adapteren tynn; ikke gjør et aggregat til domenekjerne |
 | Q-G2-3 | Familiesirkel: dedikert tenant, provisjonerings-CLI, verge-tilgang for barn og rettslig grunnlag for mindreårige | Dedikert tenant opprettet av eieren; ingen deling av barns helse før juridisk vurdering |
 | Q-G2-4 | Helse-inntak: transportvei fra telefonen (egen tunnel eller en tredjepartsrelé = databehandler) og oppbevaringstid | Egen tunnel (Tailscale/egen domene), ingen tredjepartsrelé; 365 dager som startpunkt |
-| Q-G2-5 | Personlig økonomi: tenant/samtykke for personlig bankkobling, og utførelseslås for begrensede verktøy (Q-64 pkt 3/Q-66) | Gjør låsen + N1-merkingen først, deretter en lesefasade |
+| Q-G2-5 | Personlig økonomi: tenant/samtykke for personlig bankkobling, og utførelseslås for begrensede verktøy (Q-64 pkt 3/Q-66) | Bruk ruten `/personal/finance/read` nå; gjør låsen + N1-merkingen FØR noen samtale-tilgang til økonomi |
 | Q-G2-6 | Apple-DAV: app-spesifikt passord og hvilke kalendere/adressebøker | CalDAV/CardDAV først; EventKit når appen finnes |
 | Q-G2-7 | Retensjon for handlingsjournalen og familiens samtykke-poster (delinger/delegasjoner) | 12 måneder for journal; samtykke-poster beholdes til sirkelen/personen slettes |
