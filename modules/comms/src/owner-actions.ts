@@ -1,6 +1,6 @@
 import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { ToolGateway } from "@jarvis/tool-gateway";
-import { parseSendParams, type FunnelContext, type OutboundFunnel } from "./funnel.ts";
+import { parseCallParams, parseSendParams, type FunnelContext, type OutboundFunnel } from "./funnel.ts";
 
 /**
  * WP-G1 (D-463): eierens HTTP-flate for kommunikasjon (`POST /comms/action`, `POST /comms/preview`) - logikken bor HER (testbar uten HTTP), ruten i `apps/api` gjør kun autentisering (grant -> KUN eieren) og kaller hit.
@@ -13,6 +13,10 @@ export const COMMS_OUTBOUND_ACTIONS: readonly string[] = ["send", "edit_message"
 export const COMMS_ADMIN_ACTIONS: readonly string[] = ["authorize_account", "revoke_account", "record_opt_out"];
 export const COMMS_READ_ACTIONS: readonly string[] = ["list_inbound", "list_outbound", "list_opt_outs", "list_accounts"];
 export const COMMS_OWNER_ACTIONS: readonly string[] = [...COMMS_OUTBOUND_ACTIONS, ...COMMS_ADMIN_ACTIONS, ...COMMS_READ_ACTIONS];
+/** Handlinger som finnes KUN med sitt eget flagg: `start_call` (JARVIS_COMMS_CALLS, klasse D - idempotensnøkkel + step-up som sending) og leverandør-lesing (JARVIS_COMMS_VENDOR_READS, klasse A). Ruten kjenner navnene, men en handling uten registrert verktøy avvises som ukjent. */
+export const COMMS_CALL_ACTIONS: readonly string[] = ["start_call"];
+export const COMMS_VENDOR_READ_ACTIONS: readonly string[] = ["read_thread", "list_users", "get_message", "list_templates", "read_message"];
+export const COMMS_KNOWN_ACTIONS: readonly string[] = [...COMMS_OWNER_ACTIONS, ...COMMS_CALL_ACTIONS, ...COMMS_VENDOR_READ_ACTIONS];
 
 const KEY = /^[A-Za-z0-9._:-]{8,200}$/;
 
@@ -57,8 +61,8 @@ export async function executeCommsOwnerAction(
 ): Promise<OwnerActionResult> {
   const { action } = input;
   if (!isOwner(deps, identity)) return { ok: false, status: "rejected", reason: "owner_required" };
-  if (!COMMS_OWNER_ACTIONS.includes(action) || deps.gateway.get("comms", action) === undefined) return { ok: false, status: "rejected", reason: "comms_unknown_action" };
-  const outbound = COMMS_OUTBOUND_ACTIONS.includes(action);
+  if (!COMMS_KNOWN_ACTIONS.includes(action) || deps.gateway.get("comms", action) === undefined) return { ok: false, status: "rejected", reason: "comms_unknown_action" };
+  const outbound = COMMS_OUTBOUND_ACTIONS.includes(action) || COMMS_CALL_ACTIONS.includes(action);
   const idempotencyKey = input.idempotency_key;
   let parameters = input.parameters;
   if (outbound) {
@@ -68,8 +72,8 @@ export async function executeCommsOwnerAction(
     // Send: tørrkjør FØRST, slik at eieren får ALLE avslagskodene (ikke bare den første) og avslaget journalføres som bevis. ToolGateway kjører policyen på nytt (preflight + rett før kallet).
     // UNNTAK: en GJENSPILLING (id-en har allerede et ikke-avslått forsøk) går rett til gatewayen - ledgeren gir det første resultatet tilbake. Å vurdere policyen mot en tilstand det første forsøket selv har endret
     // (f.eks. ratetelleren) ville avslått en ellers idempotent gjenspilling og skrevet en misvisende avslagsrad.
-    if (action === "send") {
-      const parsed = parseSendParams(parameters);
+    if (action === "send" || action === "start_call") {
+      const parsed = action === "send" ? parseSendParams(parameters) : parseCallParams(parameters);
       if (!parsed.ok) return { ok: false, status: "rejected", reason: parsed.code };
       const ctx = funnelContext(identity);
       const replay = await deps.funnel.hasPriorAttempt(ctx, parsed.value.request_id);

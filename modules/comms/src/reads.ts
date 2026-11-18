@@ -1,5 +1,5 @@
 import { encodePathSegment } from "@jarvis/tool-gateway";
-import { ProviderRejectedError, providerCall } from "./adapters.ts";
+import { ProviderRejectedError, providerCall, safeVendorCode } from "./adapters.ts";
 import { sanitizeInboundText } from "./webhooks/ingest.ts";
 
 /**
@@ -21,10 +21,11 @@ const SAFE_ID = /^[A-Za-z0-9._:-]{1,100}$/;
 const safeId = (value: unknown): string | null => (typeof value === "string" && SAFE_ID.test(value) ? value : null);
 const asRecord = (value: unknown): Record<string, unknown> | null => (typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null);
 
-function reject(provider: string, res: { status: number; json: Record<string, unknown> | null }, errorKey: string): never {
-  const raw = res.json?.[errorKey];
-  const code = typeof raw === "string" && /^[A-Za-z0-9_.-]{1,60}$/.test(raw) ? raw.toLowerCase() : `http_${res.status}`;
-  throw new ProviderRejectedError(provider, code);
+/** Entydig leverandøravslag med FAST kode (tall/korte ord i et trygt tegnsett) - aldri leverandørens fritekst (kan sitere klientdata/token). */
+function reject(provider: string, res: { status: number; json: Record<string, unknown> | null }, path: readonly string[]): never {
+  let cursor: unknown = res.json;
+  for (const key of path) cursor = asRecord(cursor)?.[key];
+  throw new ProviderRejectedError(provider, cursor === undefined ? `http_${res.status}` : safeVendorCode(cursor));
 }
 
 export class VendorReads {
@@ -35,7 +36,7 @@ export class VendorReads {
     const res = await providerCall("slack", "https://slack.com/api/conversations.replies", {
       method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ channel: channelId, ts: threadTs, limit })
     }, false);
-    if (res.json?.["ok"] !== true) return reject("slack", res, "error");
+    if (res.json?.["ok"] !== true) return reject("slack", res, ["error"]);
     const messages = Array.isArray(res.json["messages"]) ? (res.json["messages"] as unknown[]) : [];
     return messages.slice(0, limit).flatMap((m) => {
       const r = asRecord(m);
@@ -49,7 +50,7 @@ export class VendorReads {
     const res = await providerCall("slack", "https://slack.com/api/users.list", {
       method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ limit, ...(cursor !== undefined ? { cursor } : {}) })
     }, false);
-    if (res.json?.["ok"] !== true) return reject("slack", res, "error");
+    if (res.json?.["ok"] !== true) return reject("slack", res, ["error"]);
     const members = Array.isArray(res.json["members"]) ? (res.json["members"] as unknown[]) : [];
     const users = members.slice(0, limit).flatMap((m) => {
       const r = asRecord(m);
@@ -64,7 +65,7 @@ export class VendorReads {
   async discordMessage(token: string, channelId: string, messageId: string): Promise<ReadMessage | null> {
     const res = await providerCall("discord", `https://discord.com/api/v10/channels/${encodePathSegment(channelId, "channel")}/messages/${encodePathSegment(messageId, "message")}`, { headers: { authorization: `Bot ${token}` } }, false);
     if (res.status === 404) return null;
-    if (res.status >= 400) return reject("discord", res, "code");
+    if (res.status >= 400) return reject("discord", res, ["code"]);
     const id = safeId(res.json?.["id"]);
     if (res.json === null || id === null) throw new Error("comms_discord_unreadable_message");
     return { id, author: safeId(asRecord(res.json["author"])?.["id"]), text: sanitizeInboundText(typeof res.json["content"] === "string" ? res.json["content"] : null), ts: typeof res.json["timestamp"] === "string" ? res.json["timestamp"].slice(0, 40) : null };
@@ -74,7 +75,7 @@ export class VendorReads {
   async whatsappTemplates(token: string, wabaId: string, limit: number): Promise<Array<{ name: string; language: string; status: string; category: string | null }>> {
     const url = `https://graph.facebook.com/${this.deps.graphVersion}/${encodePathSegment(wabaId, "waba_id")}/message_templates?fields=name,language,status,category&limit=${limit}`;
     const res = await providerCall("whatsapp", url, { headers: { authorization: `Bearer ${token}` } }, false);
-    if (res.status >= 400) return reject("whatsapp", res, "error");
+    if (res.status >= 400) return reject("whatsapp", res, ["error", "code"]);
     const data = Array.isArray(res.json?.["data"]) ? (res.json?.["data"] as unknown[]) : [];
     return data.slice(0, limit).flatMap((t) => {
       const r = asRecord(t);
@@ -92,7 +93,7 @@ export class VendorReads {
     const res = await providerCall("twilio", `https://api.twilio.com/2010-04-01/Accounts/${encodePathSegment(accountSid, "account_sid")}/Messages/${encodePathSegment(messageSid, "message_sid")}.json`, {
       headers: { authorization: `Basic ${Buffer.from(`${accountSid}:${authToken}`).toString("base64")}` }
     }, false);
-    if (res.status >= 400) return reject("twilio", res, "code");
+    if (res.status >= 400) return reject("twilio", res, ["code"]);
     const sid = safeId(res.json?.["sid"]);
     if (res.json === null || sid === null) throw new Error("comms_twilio_unreadable_message");
     const code = res.json["error_code"];

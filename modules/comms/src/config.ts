@@ -29,7 +29,6 @@ export interface CommsConfig {
   readonly calls: boolean;
   readonly reply_sweep: boolean;
   readonly vendor_reads: boolean;
-  readonly gate_legacy_notify: boolean;
   readonly quiet_hours_enabled: boolean;
   readonly quiet_start_hour: number;
   readonly quiet_end_hour: number;
@@ -118,6 +117,12 @@ export function parseCommsConfig(env: Readonly<Record<string, string | undefined
   }
   const version = env["JARVIS_META_GRAPH_VERSION"]?.trim();
   if (version !== undefined && version !== "" && !/^v\d{2}\.\d$/.test(version)) throw new InvalidCommsConfigError("JARVIS_META_GRAPH_VERSION", "forventet vNN.N");
+  // Avhengigheter (fail-closed): leverandør-lesing og utgående samtale bruker kontoene, journalen og policyen som hører til `JARVIS_COMMS_OUTBOUND` - uten den ville de stå uten allowlist og regler.
+  if (!onFlag(env, "JARVIS_COMMS_OUTBOUND")) {
+    for (const dependent of ["JARVIS_COMMS_VENDOR_READS", "JARVIS_COMMS_CALLS"] as const) {
+      if (onFlag(env, dependent)) throw new InvalidCommsConfigError(dependent, "krever JARVIS_COMMS_OUTBOUND=on (kontoer, journal og policy)");
+    }
+  }
   const quietOff = env["JARVIS_COMMS_QUIET_HOURS"]?.trim() === "off";
   return Object.freeze({
     outbound: onFlag(env, "JARVIS_COMMS_OUTBOUND"),
@@ -131,7 +136,6 @@ export function parseCommsConfig(env: Readonly<Record<string, string | undefined
     calls: onFlag(env, "JARVIS_COMMS_CALLS"),
     reply_sweep: onFlag(env, "JARVIS_COMMS_REPLY_SWEEP"),
     vendor_reads: onFlag(env, "JARVIS_COMMS_VENDOR_READS"),
-    gate_legacy_notify: onFlag(env, "JARVIS_COMMS_GATE_LEGACY_NOTIFY"),
     quiet_hours_enabled: !quietOff,
     quiet_start_hour: envHour("JARVIS_COMMS_QUIET_START", 22, env),
     quiet_end_hour: envHour("JARVIS_COMMS_QUIET_END", 8, env),
@@ -155,5 +159,5 @@ export function parseCommsConfig(env: Readonly<Record<string, string | undefined
 
 /** Er NOEN del av UA-7-komponentene slått på? Brukes til oppstartsloggen og til å la `main.ts` hoppe over alt når alt er av (flagg-AV = identisk med main). */
 export function commsAnyEnabled(config: CommsConfig): boolean {
-  return config.outbound || config.webhooks.size > 0 || config.contacts || config.meetings || config.reply_sweep || config.vendor_reads || config.gate_legacy_notify;
+  return config.outbound || config.webhooks.size > 0 || config.contacts || config.meetings || config.reply_sweep || config.vendor_reads || config.calls;
 }

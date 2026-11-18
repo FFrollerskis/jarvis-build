@@ -22,7 +22,7 @@ const GUEST = "person-g1-routes-guest";
 const closers: Array<() => Promise<void>> = [];
 afterAll(async () => { for (const c of closers) await c(); });
 
-async function listen(deps: Partial<ApiDeps>): Promise<string> {
+async function listen(deps: Record<string, unknown>): Promise<string> {
   const server = createApiServer(deps as unknown as ApiDeps);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   closers.push(() => new Promise<void>((r) => { server.closeAllConnections(); server.close(() => r()); }));
@@ -80,7 +80,7 @@ function stubOutbound(opts: { allowed?: boolean; gatewayResult?: unknown; replay
 }
 
 const post = async (base: string, path: string, body: unknown, headers: Record<string, string> = {}) => {
-  const res = await fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: typeof body === "string" || Buffer.isBuffer(body) ? (body as BodyInit) : JSON.stringify(body) });
+  const res = await fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: typeof body === "string" || Buffer.isBuffer(body) ? (body as never) : JSON.stringify(body) });
   const text = await res.text();
   let json: Record<string, unknown> | undefined;
   try { json = JSON.parse(text) as Record<string, unknown>; } catch { json = undefined; }

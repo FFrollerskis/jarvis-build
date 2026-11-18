@@ -27,7 +27,7 @@ import {
 import { ProductUsageError, UsageImportError, USAGE_LIMITS, USAGE_WEBHOOK_SIGNATURE_HEADER, type ProductUsageService } from "@jarvis/business";
 import { isControlCenterId } from "@jarvis/executive";
 import {
-  COMMS_OWNER_ACTIONS, COMMS_READ_ACTIONS, WEBHOOK_MAX_BYTES as COMMS_WEBHOOK_MAX_BYTES, executeCommsOwnerAction, previewCommsSend,
+  COMMS_KNOWN_ACTIONS, COMMS_READ_ACTIONS, COMMS_VENDOR_READ_ACTIONS, WEBHOOK_MAX_BYTES as COMMS_WEBHOOK_MAX_BYTES, executeCommsOwnerAction, previewCommsSend,
   type CommsWebhookProvider, type CommsWebhookService, type OutboundFunnel
 } from "@jarvis/comms";
 import type { ConversationEngine } from "./conversation.ts";
@@ -649,7 +649,7 @@ function commsStrictRoutes(deps: ApiDeps | undefined): ReadonlySet<string> {
 /** Eierens `/comms/action`: kroppsnøklene (identitet kan aldri være med - `grantBodyOrReject`), og hvilke handlinger som IKKE krever step-up (leser + registrering av en avmelding, som reduserer risiko). */
 const COMMS_ACTION_BODY_KEYS = ["grant_token", "action", "parameters", "idempotency_key"] as const;
 const COMMS_PREVIEW_BODY_KEYS = ["grant_token", "parameters"] as const;
-const COMMS_STEP_UP_EXEMPT: ReadonlySet<string> = new Set([...COMMS_READ_ACTIONS, "record_opt_out"]);
+const COMMS_STEP_UP_EXEMPT: ReadonlySet<string> = new Set([...COMMS_READ_ACTIONS, ...COMMS_VENDOR_READ_ACTIONS, "record_opt_out"]);
 
 const limiterRegistry = new WeakMap<ServerResponse, RateLimiters>();
 
@@ -1863,7 +1863,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     if (typeof action !== "string") {
       return json(res, 400, { error: "malformed_request", reason: "grant_malformed", request_id: requestIdOf(res) });
     }
-    if (!COMMS_OWNER_ACTIONS.includes(action)) {
+    if (!COMMS_KNOWN_ACTIONS.includes(action)) {
       return json(res, 400, { error: "malformed_request", reason: "action_not_allowed", request_id: requestIdOf(res) });
     }
     if (parsedBody["parameters"] !== undefined && (typeof parsedBody["parameters"] !== "object" || parsedBody["parameters"] === null || Array.isArray(parsedBody["parameters"]))) {

@@ -4,8 +4,9 @@ import { BUSINESS_INTERNAL_CREDENTIAL_REF } from "@jarvis/business";
 import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import { PROVIDER_CREDENTIAL_REFS, connectorIdsForCredentialRef } from "./adapters.ts";
 import { isCommsChannel } from "./channels.ts";
-import { DeleteParamsSchema, EditParamsSchema, ReactParamsSchema, SendParamsSchema } from "./funnel.ts";
+import { CallParamsSchema, DeleteParamsSchema, EditParamsSchema, ReactParamsSchema, SendParamsSchema } from "./funnel.ts";
 import type { CommsStore } from "./store.ts";
+import { GetMessageSchema, ListTemplatesSchema, ListUsersSchema, ReadMessageSchema, ReadThreadSchema } from "./transport.ts";
 
 /**
  * WP-G1 (D-463): verktøydefinisjonene for `comms.*`. Registreres KUN med `JARVIS_COMMS_OUTBOUND=on` (flagg AV = ingen verktøy, identisk med main). Alle står i eier-eksklusive navnerom og på INGEN modellflate
@@ -59,7 +60,13 @@ export interface CommsToolDeps {
   readonly store: CommsStore;
   /** ToolGateways egen grense per verktøy per minutt for utsendelse/redigering/sletting (standard 10). Kun testene løfter den; policyens timesgrense per konto er den reelle begrensningen. */
   readonly rateLimitPerMinute?: number;
+  /** `JARVIS_COMMS_VENDOR_READS=on`: leverandør-lesing (Slack tråd/brukere, Discord melding, WhatsApp-maler, Twilio-melding). Uten flagget finnes verktøyene ikke. */
+  readonly vendorReads?: boolean;
+  /** `JARVIS_COMMS_CALLS=on`: utgående AI-samtale (`start_call`, klasse D) + tørrkjøring. Uten flagget finnes verktøyene ikke. */
+  readonly calls?: boolean;
 }
+
+const CALL_RECOVERY = "Ikke reverserbar: samtalen er satt i gang hos leverandøren. Avbryt eller ring tilbake manuelt. Journalen (comms_outbound_log) har innholds-hash, mottaker-pseudonym og leverandørens samtale-id. Opptak er aldri på.";
 
 export function commsToolDefinitions(deps: CommsToolDeps): ToolDefinition[] {
   const { transport, store } = deps;
@@ -77,7 +84,7 @@ export function commsToolDefinitions(deps: CommsToolDeps): ToolDefinition[] {
     tool_id: "comms", action, description, input_schema: input, capability_class: "A", scopes: ["comms.read"], reversible: true, rollback_procedure: "ingen (lesing)",
     idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, output_trust: untrusted ? "untrusted" : "internal", transport, owner_only: true
   });
-  return [
+  const defs: ToolDefinition[] = [
     read("evaluate_send", "Tørrkjør den utgående policyen for en melding (ingen sending): regelutfall, mottakerbevis, innholds-hash. Brukes også som preflight/readback for comms.send", cast(SendParamsSchema)),
     {
       ...common, tool_id: "comms", action: "send",
@@ -137,4 +144,33 @@ export function commsToolDefinitions(deps: CommsToolDeps): ToolDefinition[] {
       credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, output_trust: "internal"
     }
   ];
+  if (deps.calls === true) {
+    defs.push(
+      read("evaluate_call", "Tørrkjør den utgående policyen for en AI-samtale (ingen samtale): regelutfall (AI-opplysning først, samtaletidsvindu, ratebegrensning per nummer, avmelding, opptak avslås), mottakerbevis og manus-hash. Preflight for comms.start_call", cast(CallParamsSchema)),
+      {
+        ...common, tool_id: "comms", action: "start_call",
+        description: "Start en utgående AI-samtale (kanal `phone`, kun Twilio med inline TwiML) fra en eier-autorisert konto. AI-opplysningen er ALLTID første talte innhold (satt av policyen), opptak er aldri på. Avslag FØR noe ringes (avmelding, tidsvindu, ratebegrensning, markedsføringsforbud)",
+        input_schema: cast(CallParamsSchema), capability_class: "D", scopes: ["comms.call"], rollback_procedure: CALL_RECOVERY, idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: perMinute,
+        credential_ref: "JARVIS_COMMS_OWNER_BINDING", output_trust: "internal",
+        class_d_profile: "outbound_message", preflight_action: "evaluate_call", preflight_validator: policyValidator(false), notification_summary: notificationSummary,
+        credential_ref_resolver: credentialResolver, connector_ids_for: connectorIdsForCredentialRef
+      }
+    );
+  }
+  if (deps.vendorReads === true) {
+    /** Leverandør-lesing: klasse A, eier-kun, innholdet er UBETRODD (`output_trust: "untrusted"`). Credentialen løses per konto (samme allowlist som sending). */
+    const vendorRead = (action: string, description: string, schema: z.ZodTypeAny): ToolDefinition => ({
+      tool_id: "comms", action, description, input_schema: cast(schema), capability_class: "A", scopes: ["comms.read_vendor"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 20_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_COMMS_OWNER_BINDING", output_trust: "untrusted", transport, owner_only: true,
+      credential_ref_resolver: credentialResolver, connector_ids_for: connectorIdsForCredentialRef
+    });
+    defs.push(
+      vendorRead("read_thread", "Les en Slack-tråd (conversations.replies) fra en autorisert Slack-konto. Innholdet er ubetrodd data (renset, hemmeligheter redigert, maks 2000 tegn per melding)", ReadThreadSchema),
+      vendorRead("list_users", "List Slack-brukere (kun id, handle, bot-/slettet-flagg - aldri navn, e-post eller telefon) fra en autorisert Slack-konto", ListUsersSchema),
+      vendorRead("get_message", "Les én Discord-melding (renset, ubetrodd data) fra en autorisert Discord-konto. `null` = finnes ikke", GetMessageSchema),
+      vendorRead("list_templates", "List WhatsApp-maler (navn, språk, status, kategori - aldri malinnholdet) for en WhatsApp Business-konto", ListTemplatesSchema),
+      vendorRead("read_message", "Les en Twilio-melding (leveringsstatus, retning, feilkode og renset tekst) fra en autorisert Twilio-konto", ReadMessageSchema)
+    );
+  }
+  return defs;
 }

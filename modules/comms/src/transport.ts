@@ -2,7 +2,8 @@ import { z } from "zod";
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, normalizeRecipient, recipientHash, recipientHint, type CommsProvider } from "./channels.ts";
-import { parseDeleteParams, parseEditParams, parseReactParams, parseSendParams, type FunnelContext, type OutboundFunnel, type ParseResult } from "./funnel.ts";
+import { parseCallParams, parseDeleteParams, parseEditParams, parseReactParams, parseSendParams, type FunnelContext, type OutboundFunnel, type ParseResult } from "./funnel.ts";
+import type { VendorReads } from "./reads.ts";
 import type { CommsStore } from "./store.ts";
 
 /**
@@ -25,8 +26,28 @@ const RecordOptOut = z.object({
   channel: z.enum(COMMS_CHANNELS), account_ref: z.string().min(1).max(200), recipient: z.string().min(1).max(300), source: z.enum(["owner_recorded", "recipient_request"]).optional()
 }).strict();
 
+/** Leverandør-lesing (P1c): strenge, eksakte former - id-er valideres mot leverandørens format FØR noe kall (ingen sti-/spørringsinjeksjon). */
+const AccountRef = z.string().min(1).max(200);
+export const ReadThreadSchema = z.object({ channel: z.literal("slack"), account_ref: AccountRef, channel_id: z.string().regex(/^[CDG][A-Z0-9]{8,14}$/), thread_ts: z.string().regex(/^\d{10}\.\d{6}$/), limit: z.number().int().min(1).max(50).optional() }).strict();
+export const ListUsersSchema = z.object({ channel: z.literal("slack"), account_ref: AccountRef, limit: z.number().int().min(1).max(200).optional(), cursor: z.string().min(1).max(300).optional() }).strict();
+export const GetMessageSchema = z.object({ channel: z.literal("discord"), account_ref: AccountRef, channel_id: z.string().regex(/^\d{17,20}$/), message_id: z.string().regex(/^\d{17,20}$/) }).strict();
+export const ListTemplatesSchema = z.object({ channel: z.literal("whatsapp"), account_ref: AccountRef, waba_id: z.string().regex(/^\d{5,20}$/), limit: z.number().int().min(1).max(100).optional() }).strict();
+export const ReadMessageSchema = z.object({ channel: z.literal("sms"), account_ref: AccountRef, message_sid: z.string().regex(/^(SM|MM)[0-9a-fA-F]{32}$/) }).strict();
+
 export class CommsTransport implements ToolTransport {
-  constructor(private readonly deps: { funnel: OutboundFunnel; store: CommsStore }) {}
+  constructor(private readonly deps: { funnel: OutboundFunnel; store: CommsStore; reads?: VendorReads }) {}
+
+  /** Leverandør-lesing går KUN mot en konto eieren har autorisert, og kun når kontoens leverandør faktisk er den handlingen gjelder (aldri en Telnyx-nøkkel mot Twilio-API-et). */
+  private async requireAccount(ctx: FunnelContext, channel: "slack" | "discord" | "whatsapp" | "sms", accountRef: string, provider: CommsProvider): Promise<void> {
+    const account = await this.deps.store.findActiveAccount(ctx.tenantId, ctx.space, channel, accountRef);
+    if (account === null) throw new Error("comms_account_not_authorized");
+    if (account.provider !== provider) throw new Error("comms_read_not_supported_by_provider");
+  }
+
+  private reads(): VendorReads {
+    if (this.deps.reads === undefined) throw new Error("comms_vendor_reads_not_enabled");
+    return this.deps.reads;
+  }
 
   private ctxOf(context: ToolInvocationContext): FunnelContext {
     const identity = context?.identity;
@@ -70,6 +91,39 @@ export class CommsTransport implements ToolTransport {
       case "delete_message": {
         const r = await funnel.execute(ctx, this.parsed(parseDeleteParams(parameters)), credential);
         return { external_id: r.external_id, data: r.data };
+      }
+      // Utgående samtale (P3h): tørrkjøring = ToolGateway-preflight, start = klasse D. Samme trakt som sending (`kind: "call"`): policy -> journal -> adapter (Twilio med inline TwiML).
+      case "evaluate_call":
+        return { data: funnel.summarize(await funnel.evaluate(ctx, this.parsed(parseCallParams(parameters)))) };
+      case "start_call": {
+        const r = await funnel.execute(ctx, this.parsed(parseCallParams(parameters)), credential);
+        return { external_id: r.external_id, data: r.data };
+      }
+      // Leverandør-lesing (P1c): rene lesinger, ubetrodd data, ingen journal.
+      case "read_thread": {
+        const p = ReadThreadSchema.parse(parameters);
+        await this.requireAccount(ctx, "slack", p.account_ref, "slack");
+        return { data: { messages: await this.reads().slackThread(credential, p.channel_id, p.thread_ts, p.limit ?? 20) } as unknown as JsonValue };
+      }
+      case "list_users": {
+        const p = ListUsersSchema.parse(parameters);
+        await this.requireAccount(ctx, "slack", p.account_ref, "slack");
+        return { data: (await this.reads().slackUsers(credential, p.limit ?? 50, p.cursor)) as unknown as JsonValue };
+      }
+      case "get_message": {
+        const p = GetMessageSchema.parse(parameters);
+        await this.requireAccount(ctx, "discord", p.account_ref, "discord");
+        return { data: { message: await this.reads().discordMessage(credential, p.channel_id, p.message_id) } as unknown as JsonValue };
+      }
+      case "list_templates": {
+        const p = ListTemplatesSchema.parse(parameters);
+        await this.requireAccount(ctx, "whatsapp", p.account_ref, "meta_whatsapp");
+        return { data: { templates: await this.reads().whatsappTemplates(credential, p.waba_id, p.limit ?? 50) } as unknown as JsonValue };
+      }
+      case "read_message": {
+        const p = ReadMessageSchema.parse(parameters);
+        await this.requireAccount(ctx, "sms", p.account_ref, "twilio");
+        return { data: (await this.reads().twilioMessage(credential, p.message_sid)) as unknown as JsonValue };
       }
       case "list_inbound": {
         const p = ListInbound.parse(parameters);

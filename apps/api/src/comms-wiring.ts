@@ -2,11 +2,14 @@
 import type pg from "pg";
 import type { BusinessService } from "@jarvis/business";
 import {
-  CommsStore, CommsTransport, CommsWebhookService, DiscordAdapter, OutboundFunnel, SlackAdapter, TelnyxSmsAdapter, TwilioSmsAdapter, WhatsAppAdapter,
+  CommsStore, CommsTransport, CommsWebhookService, DiscordAdapter, MetaMessagingAdapter, OutboundFunnel, SlackAdapter, TeamsGraphAdapter, TelnyxSmsAdapter, TwilioSmsAdapter, VendorReads, WhatsAppAdapter,
   commsAnyEnabled, commsToolDefinitions, parseCommsConfig, type CommsConfig
 } from "@jarvis/comms";
 import type { ConversationGraphService } from "@jarvis/conversation-graph";
-import type { ToolDefinition, ToolGateway } from "@jarvis/tool-gateway";
+import { AccessTokenCache, microsoftRefreshExchange, type ToolDefinition, type ToolGateway } from "@jarvis/tool-gateway";
+
+/** Delegerte Graph-scopes for Teams-sending (`ChatMessage.Send`/`ChannelMessage.Send` finnes KUN som delegerte rettigheter - verifisert via søk). Eksakt scope-streng i refresh-forespørselen er UVERIFISERT. */
+const TEAMS_REFRESH_SCOPE = "https://graph.microsoft.com/ChatMessage.Send https://graph.microsoft.com/ChannelMessage.Send offline_access";
 import type { ApiDeps } from "./server.ts";
 
 /**
@@ -42,25 +45,35 @@ export function buildCommsRuntime(input: CommsRuntimeInput): CommsRuntime {
   const clock = input.clock ?? (() => new Date());
   const store = new CommsStore(input.pool, clock);
   const secrets = { get: async (ref: string): Promise<string | null> => (await input.secrets.get(ref)) ?? null };
+  // Teams: delegert refresh-token (eget samtykke, BLOCKED_EXTERNAL live) -> access-token via den eksisterende Microsoft-utvekslingen. Rotert refresh-token lagres IKKE (DEFERRED).
+  const teamsTokens = new AccessTokenCache(
+    microsoftRefreshExchange(() => secrets.get("JARVIS_MICROSOFT_CLIENT_ID"), () => secrets.get("JARVIS_MICROSOFT_CLIENT_SECRET"), () => secrets.get("JARVIS_MICROSOFT_TENANT_ID"), TEAMS_REFRESH_SCOPE),
+    { label: "teams" }
+  );
+  const twilioSid = (): Promise<string | null> => secrets.get("JARVIS_TWILIO_ACCOUNT_SID");
   const funnel = config.outbound
     ? new OutboundFunnel({
         store, graph: input.graph, config, clock, business: input.business,
         adapters: {
           slack: new SlackAdapter(), discord: new DiscordAdapter(), meta_whatsapp: new WhatsAppAdapter(config.graph_api_version),
-          twilio: new TwilioSmsAdapter(() => secrets.get("JARVIS_TWILIO_ACCOUNT_SID")), telnyx: new TelnyxSmsAdapter()
+          // Telnyx har bevisst INGEN `call` (AI-opplysningen kan ikke garanteres som første talte innhold uten call.answered-flyten): samtale via Telnyx feiler lukket (DEFERRED).
+          twilio: new TwilioSmsAdapter(twilioSid), telnyx: new TelnyxSmsAdapter(),
+          meta_messenger: new MetaMessagingAdapter("meta_messenger", config.graph_api_version), meta_instagram: new MetaMessagingAdapter("meta_instagram", config.graph_api_version),
+          ms_graph: new TeamsGraphAdapter((refreshToken) => teamsTokens.get(refreshToken.trim()))
         },
         ...(input.warn ? { warn: input.warn } : {})
       })
     : undefined;
+  const reads = config.vendor_reads ? new VendorReads({ graphVersion: config.graph_api_version, accountSid: twilioSid }) : undefined;
   const webhookService = config.webhooks.size > 0
     ? new CommsWebhookService({ store, graph: input.graph, config, secrets, clock, business: input.business, ...(input.warn ? { warn: input.warn } : {}) })
     : undefined;
-  const tools = funnel ? commsToolDefinitions({ transport: new CommsTransport({ funnel, store }), store }) : [];
+  const tools = funnel ? commsToolDefinitions({ transport: new CommsTransport({ funnel, store, ...(reads ? { reads } : {}) }), store, vendorReads: reads !== undefined, calls: config.calls }) : [];
 
   // Kun kanalnavn/leverandørnavn/flagg - aldri hemmeligheter, tenant-id eller URL-er.
   console.log(JSON.stringify({
     msg: "comms_enabled", status: "NOT_VERIFIED", outbound: config.outbound, channels: [...config.channels].sort(), webhooks: [...config.webhooks].sort(),
-    contacts: config.contacts, meetings: config.meetings, calls: config.calls, reply_sweep: config.reply_sweep, vendor_reads: config.vendor_reads, gate_legacy_notify: config.gate_legacy_notify
+    contacts: config.contacts, meetings: config.meetings, calls: config.calls, reply_sweep: config.reply_sweep, vendor_reads: config.vendor_reads
   }));
 
   return {
