@@ -52,7 +52,7 @@ beforeAll(async () => {
     tokenCalls.push(refreshToken);
     if (tokenFails) throw new Error("invalid_grant: refresh-token abc-hemmelig");
     return "fake-access-token";
-  });
+  }, { warmupDelayMs: 0 });
   for (const d of commsToolDefinitions({ transport: new CommsTransport({ funnel, store, contacts: { api, graph } }), store, rateLimitPerMinute: 1000, contacts: true })) gateway.register(d);
 }, 240_000);
 
@@ -103,7 +103,7 @@ describe("A: lesing (ubetrodd data, minimerte felt)", () => {
     handler = () => jsonRes({ results: [{ person: person("21") }] });
     const s = await act("contacts_search", { query: "Kontakt" });
     expect(s.ok && (s.data as { contacts: unknown[] }).contacts).toHaveLength(1);
-    expect(calls[0]?.url).toContain("people:searchContacts?query=Kontakt");
+    expect(calls.some((c) => c.url.includes("people:searchContacts?query=Kontakt&"))).toBe(true);
     handler = () => jsonRes({ error: { code: 404, status: "NOT_FOUND" } }, 404);
     const g = await act("contacts_get", { resource_name: "people/c999" });
     expect(g.ok && (g.data as { contact: unknown }).contact).toBeNull();
@@ -112,6 +112,27 @@ describe("A: lesing (ubetrodd data, minimerte felt)", () => {
       expect((await act("contacts_get", parameters)).ok, JSON.stringify(parameters)).toBe(false);
     }
     expect(calls).toEqual([]);
+  });
+
+  it("contacts_search: OPPVARMINGSKALL med tom spørring FØR første søk (Googles anbefaling: lat cache), kun én gang per refresh-token; et avslag på oppvarmingen er feilen og regnes ikke som oppvarmet", async () => {
+    const queryOf = (c: Call) => new URL(c.url).searchParams.get("query");
+    handler = (c) => (queryOf(c) === "" ? jsonRes({}) : jsonRes({ results: [{ person: person("77") }] }));
+    const api = new GoogleContacts(async () => "tok", { warmupDelayMs: 0 });
+    expect(await api.search("rt-1", "Ola", 10)).toHaveLength(1);
+    expect(calls.map(queryOf)).toEqual(["", "Ola"]);
+    expect(calls[0]!.url).toContain("people:searchContacts?query=&readMask=names&pageSize=1");
+    await api.search("rt-1", "Kari", 10);
+    expect(calls.map(queryOf)).toEqual(["", "Ola", "Kari"]); // ingen ny oppvarming for samme token
+    await api.search("rt-2", "Ola", 10);
+    expect(calls.map(queryOf).slice(3)).toEqual(["", "Ola"]); // en annen refresh-token varmes opp for seg
+    calls = [];
+    handler = () => jsonRes({ error: { code: 403, status: "PERMISSION_DENIED", message: "fritekst" } }, 403);
+    const denied = new GoogleContacts(async () => "tok", { warmupDelayMs: 0 });
+    await expect(denied.search("rt-3", "Ola", 10)).rejects.toThrow("comms_provider_rejected:google_contacts:permission_denied");
+    expect(calls).toHaveLength(1); // kun oppvarmingen ble forsøkt
+    handler = (c) => (queryOf(c) === "" ? jsonRes({}) : jsonRes({ results: [] }));
+    await denied.search("rt-3", "Ola", 10);
+    expect(calls.map(queryOf)).toEqual(["", "", "Ola"]); // ikke cachet som oppvarmet etter avslaget
   });
 
   it("tokenutveksling som feiler stopper FØR noe kall (fast kode uten lekkasje); leverandøravslag gir fast statuskode", async () => {

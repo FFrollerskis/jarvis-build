@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { normalizeE164 } from "@jarvis/conversation-graph";
 import { ProviderRejectedError, providerCall, safeVendorCode } from "./adapters.ts";
@@ -11,7 +12,8 @@ import { sanitizeInboundText } from "./webhooks/ingest.ts";
  * VERIFISERT via søk mot Googles People API-dokumentasjon (2026-11): `POST /v1/people:createContact`, `PATCH /v1/{resourceName}:updateContact` (krever `updatePersonFields` og kontaktens kilde-etag - ellers 400; en utdatert etag gir
  * `failedPrecondition`), `DELETE /v1/{resourceName}:deleteContact`, scope `https://www.googleapis.com/auth/contacts` (skriving; `contacts.readonly` for lesing), og at mutasjoner for samme bruker bør sendes sekvensielt. UVERIFISERT: `connections.list`/
  * `searchContacts`-parametrene (kjent fra tidligere dokumentasjon), sidestørrelser og «other contacts». Nytt scope krever eierens re-samtykke (egen refresh-token `JARVIS_GOOGLE_CONTACTS_TOKEN`) - BLOCKED_EXTERNAL live.
- * Oppdatering er lese-endre-skriv med etag-sammenligning (aldri en stille overskriving): avviker etag fra den ferske lesingen avbrytes uten skriving.
+ * VERIFISERT (fiks-runde, søk 2026-11): `searchContacts` bruker en lat cache og krever et OPPVARMINGSKALL med tom spørring før første søk - gjort i `warmUp` (én gang per refresh-token per prosess).
+ * Oppdatering er lese-endre-skriv med etag-sammenligning (aldri en stille overskriving): avviker etag fra den ferske lesingen avbrytes uten skriving; kun oppgitte felt endres og resten av den ferske kontakten beholdes (`mergedBody`).
  */
 export const CONTACTS_CREDENTIAL_REF = "JARVIS_GOOGLE_CONTACTS_TOKEN";
 const PEOPLE = "https://people.googleapis.com/v1";
@@ -138,9 +140,15 @@ function reject(res: { status: number; json: Record<string, unknown> | null }): 
   throw new ProviderRejectedError("google_contacts", status === undefined ? `http_${res.status}` : safeVendorCode(status));
 }
 
+/** Ventetid etter oppvarmingskallet før første søk (Googles eksempel venter noen sekunder på at den late cachen oppdateres). UVERIFISERT hvor lenge som trengs i praksis; konfigurerbar og 0 i testene. */
+const SEARCH_WARMUP_DELAY_MS = 2000;
+
 export class GoogleContacts {
+  /** Refresh-tokens (som SHA-256) som allerede har sendt oppvarmingskallet for `searchContacts` i denne prosessen. */
+  private readonly warmed = new Set<string>();
+
   /** `tokenFor`: refresh-token -> access-token (i drift `googleAccessToken` fra tool-gateway, delt Google-klient). */
-  constructor(private readonly tokenFor: (refreshToken: string) => Promise<string>) {}
+  constructor(private readonly tokenFor: (refreshToken: string) => Promise<string>, private readonly options: { warmupDelayMs?: number } = {}) {}
 
   private async call(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, refreshToken: string, body?: Record<string, unknown>, mutation = false): Promise<{ status: number; json: Record<string, unknown> | null }> {
     let token: string;
@@ -161,7 +169,23 @@ export class GoogleContacts {
     return { contacts: arr(res.json?.["connections"]).flatMap((c) => { const v = viewOf(c); return v === null ? [] : [v]; }), next_page_token: typeof next === "string" && next.length <= 500 ? next : null };
   }
 
+  /**
+   * `people:searchContacts` bruker en LAT cache som oppdateres etter et kall. VERIFISERT (Googles People API-veiledning for kontakter og metodesiden for `searchContacts`, søk 2026-11): klienten skal sende et OPPVARMINGSKALL med TOM spørring
+   * før det første reelle søket, ellers kan søket mangle ferske endringer. Oppvarmingen sendes derfor én gang per refresh-token per prosess (deretter en kort ventetid), og et avslag på den (f.eks. manglende scope) er selve feilen.
+   */
+  private async warmUp(refreshToken: string): Promise<void> {
+    const key = createHash("sha256").update(refreshToken, "utf8").digest("hex");
+    if (this.warmed.has(key)) return;
+    const q = new URLSearchParams({ query: "", readMask: "names", pageSize: "1" });
+    const res = await this.call("GET", `/people:searchContacts?${q.toString()}`, refreshToken);
+    if (res.status >= 400) return reject(res);
+    this.warmed.add(key);
+    const delay = this.options.warmupDelayMs ?? SEARCH_WARMUP_DELAY_MS;
+    if (delay > 0) await new Promise<void>((resolve) => setTimeout(resolve, delay));
+  }
+
   async search(refreshToken: string, query: string, pageSize: number): Promise<ContactView[]> {
+    await this.warmUp(refreshToken);
     const q = new URLSearchParams({ query, readMask: READ_FIELDS, pageSize: String(pageSize) });
     const res = await this.call("GET", `/people:searchContacts?${q.toString()}`, refreshToken);
     if (res.status >= 400) return reject(res);
