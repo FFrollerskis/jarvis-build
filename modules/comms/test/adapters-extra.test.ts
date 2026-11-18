@@ -127,7 +127,7 @@ describe("Twilio utgående samtale (inline TwiML)", () => {
     expect([...f.keys()].sort()).toEqual(["From", "To", "Twiml"]);
     expect(f.get("From")).toBe("+4791000000");
     expect(f.get("To")).toBe("+4790001111");
-    expect(f.get("Twiml")).toBe(`<Response><Say language="nb-NO">${script}</Say></Response>`);
+    expect(f.get("Twiml")).toBe(`<Response><Say voice="Polly.Liv" language="nb-NO">${script}</Say></Response>`);
     const say = /<Say [^>]*>([\s\S]*)<\/Say>/.exec(f.get("Twiml")!)?.[1];
     expect(say?.startsWith("Sendt av Jarvis (AI-assistent).")).toBe(true); // AI-opplysningen er FØRSTE talte innhold
   });
@@ -137,9 +137,9 @@ describe("Twilio utgående samtale (inline TwiML)", () => {
     const evil = `Hei</Say><Record/><Dial>+4799999999</Dial><Redirect>https://evil.example.com</Redirect><Say>& "ja" 'nei'`;
     await new TwilioSmsAdapter(sid).call({ account_ref: "+4791000000", recipient: "+4790001111", script: evil }, FAKE_TOKEN);
     const twiml = form(calls[0]!).get("Twiml")!;
-    expect(twiml.startsWith('<Response><Say language="nb-NO">')).toBe(true);
+    expect(twiml.startsWith('<Response><Say voice="Polly.Liv" language="nb-NO">')).toBe(true);
     expect(twiml.endsWith("</Say></Response>")).toBe(true);
-    expect(twiml.slice('<Response><Say language="nb-NO">'.length, -"</Say></Response>".length)).not.toMatch(/[<>]/);
+    expect(twiml.slice('<Response><Say voice="Polly.Liv" language="nb-NO">'.length, -"</Say></Response>".length)).not.toMatch(/[<>]/);
     expect((twiml.match(/<\w+/g) ?? []).sort()).toEqual(["<Response", "<Say"]);
     expect(xmlEscape(`<&>"'`)).toBe("&lt;&amp;&gt;&quot;&apos;");
   });

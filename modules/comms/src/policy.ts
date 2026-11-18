@@ -150,11 +150,16 @@ export function isQuietHour(hour: number, start: number, end: number): boolean {
   return start < end ? hour >= start && hour < end : hour >= start || hour < end;
 }
 
-/** Tekst som kan sendes: ingen kontrollbokstaver (unntatt linjeskift/tabulator), ingen usynlige formateringstegn (bidi/null-bredde), ingen ensomme surrogater, ingen Unicode-linjeseparatorer. */
+/** Unicode «noncharacters» (U+FDD0-FDEF og U+nFFFE/U+nFFFF i hvert plan): aldri gyldige i XML 1.0/TwiML og aldri meningsfylt tekst (L4). */
+function isNonCharacter(cp: number): boolean {
+  return (cp >= 0xfdd0 && cp <= 0xfdef) || (cp & 0xfffe) === 0xfffe;
+}
+
+/** Tekst som kan sendes: ingen kontrollbokstaver (unntatt linjeskift/tabulator), ingen usynlige formateringstegn (bidi/null-bredde), ingen ensomme surrogater, ingen Unicode-linjeseparatorer, ingen noncharacters. */
 export function textIsSendable(text: string): boolean {
   for (const ch of text) {
     if (ch === "\n" || ch === "\t") continue;
-    if (/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u.test(ch)) return false;
+    if (/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u.test(ch) || isNonCharacter(ch.codePointAt(0) as number)) return false;
   }
   return true;
 }
@@ -373,7 +378,9 @@ export function evaluateOutboundPolicy(request: OutboundRequest, state: Outbound
         let host: string | null = null;
         try {
           const url = new URL(media.url);
-          host = url.protocol === "https:" && url.username === "" && url.password === "" && url.port === "" && !media.url.includes("\\") ? url.hostname.toLowerCase() : null;
+          // L3: nøyaktig strengen som er validert er strengen som sendes. `new URL()` fjerner tab/linjeskift/ledende mellomrom og kollapser `../`-segmenter og store bokstaver i verten - en rå streng som ikke er identisk med den kanoniske
+          // formen (`href`) kunne dermed passert vertsallowlisten mens adapteren sendte noe annet. Ikke-kanonisk form avvises.
+          host = url.protocol === "https:" && url.username === "" && url.password === "" && url.port === "" && !media.url.includes("\\") && url.href === media.url ? url.hostname.toLowerCase() : null;
         } catch {
           host = null;
         }
