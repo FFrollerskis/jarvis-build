@@ -2,11 +2,11 @@
 import type pg from "pg";
 import type { BusinessService } from "@jarvis/business";
 import {
-  CommsStore, CommsTransport, CommsWebhookService, DiscordAdapter, MetaMessagingAdapter, OutboundFunnel, SlackAdapter, TeamsGraphAdapter, TelnyxSmsAdapter, TwilioSmsAdapter, VendorReads, WhatsAppAdapter,
+  CommsStore, CommsTransport, CommsWebhookService, DiscordAdapter, GoogleContacts, MetaMessagingAdapter, OutboundFunnel, SlackAdapter, TeamsGraphAdapter, TelnyxSmsAdapter, TwilioSmsAdapter, VendorReads, WhatsAppAdapter,
   commsAnyEnabled, commsToolDefinitions, parseCommsConfig, type CommsConfig
 } from "@jarvis/comms";
 import type { ConversationGraphService } from "@jarvis/conversation-graph";
-import { AccessTokenCache, microsoftRefreshExchange, type ToolDefinition, type ToolGateway } from "@jarvis/tool-gateway";
+import { AccessTokenCache, googleAccessToken, microsoftRefreshExchange, type ToolDefinition, type ToolGateway } from "@jarvis/tool-gateway";
 
 /** Delegerte Graph-scopes for Teams-sending (`ChatMessage.Send`/`ChannelMessage.Send` finnes KUN som delegerte rettigheter - verifisert via søk). Eksakt scope-streng i refresh-forespørselen er UVERIFISERT. */
 const TEAMS_REFRESH_SCOPE = "https://graph.microsoft.com/ChatMessage.Send https://graph.microsoft.com/ChannelMessage.Send offline_access";
@@ -64,11 +64,13 @@ export function buildCommsRuntime(input: CommsRuntimeInput): CommsRuntime {
         ...(input.warn ? { warn: input.warn } : {})
       })
     : undefined;
+  // Google Contacts: egen refresh-token (`JARVIS_GOOGLE_CONTACTS_TOKEN`, scope `contacts`) via den delte Google-klienten.
+  const contacts = config.contacts ? { api: new GoogleContacts((refreshToken) => googleAccessToken(refreshToken.trim())), graph: input.graph } : undefined;
   const reads = config.vendor_reads ? new VendorReads({ graphVersion: config.graph_api_version, accountSid: twilioSid }) : undefined;
   const webhookService = config.webhooks.size > 0
     ? new CommsWebhookService({ store, graph: input.graph, config, secrets, clock, business: input.business, ...(input.warn ? { warn: input.warn } : {}) })
     : undefined;
-  const tools = funnel ? commsToolDefinitions({ transport: new CommsTransport({ funnel, store, ...(reads ? { reads } : {}) }), store, vendorReads: reads !== undefined, calls: config.calls }) : [];
+  const tools = funnel ? commsToolDefinitions({ transport: new CommsTransport({ funnel, store, ...(reads ? { reads } : {}), ...(contacts ? { contacts } : {}) }), store, vendorReads: reads !== undefined, calls: config.calls, contacts: contacts !== undefined }) : [];
 
   // Kun kanalnavn/leverandørnavn/flagg - aldri hemmeligheter, tenant-id eller URL-er.
   console.log(JSON.stringify({

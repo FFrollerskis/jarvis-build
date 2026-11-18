@@ -4,6 +4,7 @@ import { BUSINESS_INTERNAL_CREDENTIAL_REF } from "@jarvis/business";
 import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import { PROVIDER_CREDENTIAL_REFS, connectorIdsForCredentialRef } from "./adapters.ts";
 import { isCommsChannel } from "./channels.ts";
+import { CONTACTS_CREDENTIAL_REF, ContactsCreateSchema, ContactsDeleteSchema, ContactsGetSchema, ContactsListSchema, ContactsSearchSchema, ContactsSyncSchema, ContactsUpdateSchema } from "./contacts.ts";
 import { CallParamsSchema, DeleteParamsSchema, EditParamsSchema, ReactParamsSchema, SendParamsSchema } from "./funnel.ts";
 import type { CommsStore } from "./store.ts";
 import { GetMessageSchema, ListTemplatesSchema, ListUsersSchema, ReadMessageSchema, ReadThreadSchema } from "./transport.ts";
@@ -62,6 +63,8 @@ export interface CommsToolDeps {
   readonly rateLimitPerMinute?: number;
   /** `JARVIS_COMMS_VENDOR_READS=on`: leverandør-lesing (Slack tråd/brukere, Discord melding, WhatsApp-maler, Twilio-melding). Uten flagget finnes verktøyene ikke. */
   readonly vendorReads?: boolean;
+  /** `JARVIS_COMMS_CONTACTS=on`: Google Contacts (lese/søke/opprette/oppdatere/slette + lenke til identiteter). Uten flagget finnes verktøyene ikke. */
+  readonly contacts?: boolean;
   /** `JARVIS_COMMS_CALLS=on`: utgående AI-samtale (`start_call`, klasse D) + tørrkjøring. Uten flagget finnes verktøyene ikke. */
   readonly calls?: boolean;
 }
@@ -155,6 +158,32 @@ export function commsToolDefinitions(deps: CommsToolDeps): ToolDefinition[] {
         class_d_profile: "outbound_message", preflight_action: "evaluate_call", preflight_validator: policyValidator(false), notification_summary: notificationSummary,
         credential_ref_resolver: credentialResolver, connector_ids_for: connectorIdsForCredentialRef
       }
+    );
+  }
+  if (deps.contacts === true) {
+    /** Kontaktbokens innhold er UBETRODD data (notatfelt kan inneholde instruksjoner): lesing er klasse A med `untrusted` output. Credentialen er en EGEN refresh-token med `contacts`-scope (eierens samtykke, BLOCKED_EXTERNAL live). */
+    const contactsRead = (action: string, description: string, schema: z.ZodTypeAny): ToolDefinition => ({
+      tool_id: "comms", action, description, input_schema: cast(schema), capability_class: "A", scopes: ["comms.contacts.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 20_000, rate_limit_per_minute: 30, credential_ref: CONTACTS_CREDENTIAL_REF, output_trust: "untrusted", transport, owner_only: true
+    });
+    const contactsWrite = (action: string, cls: "C" | "D", description: string, schema: z.ZodTypeAny, rollback: string, extra: Partial<ToolDefinition>): ToolDefinition => ({
+      ...common, tool_id: "comms", action, description, input_schema: cast(schema), capability_class: cls, scopes: ["comms.contacts.write"], rollback_procedure: rollback, idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 20,
+      credential_ref: CONTACTS_CREDENTIAL_REF, output_trust: "untrusted", ...extra
+    });
+    const exists = (data: JsonValue): string | null => (stateOf(data)?.["exists"] === true ? null : "target_not_found");
+    defs.push(
+      contactsRead("contacts_list", "List kontakter fra eierens Google Contacts (navn, e-post, telefon, organisasjon - aldri adresser/notater/bilder). Innholdet er ubetrodd data", ContactsListSchema),
+      contactsRead("contacts_search", "Søk i eierens Google Contacts (navn, e-post, telefon). Ubetrodd data", ContactsSearchSchema),
+      contactsRead("contacts_get", "Les én kontakt (ressursnavn people/c…). `contact: null` = finnes ikke. Ubetrodd data", ContactsGetSchema),
+      contactsRead("contacts_check_target", "Fersk lesing av en kontakt (finnes den, hvilken etag). `null` = finnes ikke. Preflight/readback for sletting", ContactsGetSchema),
+      contactsWrite("contacts_create", "C", "Opprett en kontakt i eierens Google Contacts (navn, e-post, telefon E.164, organisasjon)", ContactsCreateSchema, "slett kontakten med comms.contacts_delete (ressursnavnet står i resultatet)", { reversible: true, idempotent_external: false }),
+      contactsWrite("contacts_update", "C", "Oppdater en kontakt med etag-sjekk (lese-endre-skriv: avvikende etag avbryter uten skriving). Kun oppgitte felt endres", ContactsUpdateSchema,
+        "oppdater kontakten tilbake med comms.contacts_update (forrige verdier er IKKE lagret her - ta vare på dem før en endring)", { reversible: false }),
+      contactsWrite("contacts_delete", "D", "Slett en kontakt i eierens Google Contacts: fersk lesing av målet (preflight), sletting, readback at den er borte. Ikke reverserbar via API-et", ContactsDeleteSchema,
+        "Ikke reverserbar via API-et: en slettet kontakt kan bare gjenopprettes manuelt (Google Contacts papirkurv) eller opprettes på nytt med comms.contacts_create.",
+        { reversible: false, preflight_action: "contacts_check_target", preflight_requires_target: true, preflight_validator: exists, postcondition_target_absent: true }),
+      contactsWrite("contacts_sync", "C", "Lenk én side kontakter til identiteter i Conversation Graph (eksakt E.164/e-post, confidence 0.9, aldri automatisk sammenslåing). Idempotent", ContactsSyncSchema,
+        "lenkene kan splittes/slås sammen av eieren i Conversation Graph (reversibel merge/split); ingen data slettes hos Google", { reversible: true, output_trust: "internal" })
     );
   }
   if (deps.vendorReads === true) {

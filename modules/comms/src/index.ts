@@ -9,6 +9,7 @@ export * from "./transport.ts";
 export * from "./tools.ts";
 export * from "./owner-actions.ts";
 export * from "./reads.ts";
+export * from "./contacts.ts";
 export * from "./webhooks/verify.ts";
 export * from "./webhooks/parsers.ts";
 export * from "./webhooks/ingest.ts";

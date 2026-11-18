@@ -117,9 +117,9 @@ export function parseCommsConfig(env: Readonly<Record<string, string | undefined
   }
   const version = env["JARVIS_META_GRAPH_VERSION"]?.trim();
   if (version !== undefined && version !== "" && !/^v\d{2}\.\d$/.test(version)) throw new InvalidCommsConfigError("JARVIS_META_GRAPH_VERSION", "forventet vNN.N");
-  // Avhengigheter (fail-closed): leverandør-lesing og utgående samtale bruker kontoene, journalen og policyen som hører til `JARVIS_COMMS_OUTBOUND` - uten den ville de stå uten allowlist og regler.
+  // Avhengigheter (fail-closed): leverandør-lesing, utgående samtale og kontakter bruker kontoene, journalen og policyen som hører til `JARVIS_COMMS_OUTBOUND` - uten den ville de stå uten allowlist og regler.
   if (!onFlag(env, "JARVIS_COMMS_OUTBOUND")) {
-    for (const dependent of ["JARVIS_COMMS_VENDOR_READS", "JARVIS_COMMS_CALLS"] as const) {
+    for (const dependent of ["JARVIS_COMMS_VENDOR_READS", "JARVIS_COMMS_CALLS", "JARVIS_COMMS_CONTACTS"] as const) {
       if (onFlag(env, dependent)) throw new InvalidCommsConfigError(dependent, "krever JARVIS_COMMS_OUTBOUND=on (kontoer, journal og policy)");
     }
   }

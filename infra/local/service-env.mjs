@@ -148,6 +148,8 @@ export const CONNECTOR_ENV = [
   "JARVIS_GOOGLE_CLIENT_ID",
   "JARVIS_GOOGLE_CLIENT_SECRET",
   "JARVIS_GOOGLE_CLOUD_PROJECT_ID",
+  // WP-G1 (D-463, P2e): Google Contacts - EGEN refresh-token med `contacts`-scope (eierens samtykke, BLOCKED_EXTERNAL live). Tom = kontakt-handlingene feiler lukket. Kun api.
+  "JARVIS_GOOGLE_CONTACTS_TOKEN",
   "JARVIS_GOOGLE_CLOUD_REFRESH_TOKEN",
   "JARVIS_GOOGLE_MAPS_API_KEY",
   "JARVIS_GOOGLE_PLACES_API_KEY",

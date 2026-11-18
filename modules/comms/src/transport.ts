@@ -2,6 +2,10 @@ import { z } from "zod";
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, normalizeRecipient, recipientHash, recipientHint, type CommsProvider } from "./channels.ts";
+import type { ConversationGraphService } from "@jarvis/conversation-graph";
+import {
+  ContactsCreateSchema, ContactsDeleteSchema, ContactsGetSchema, ContactsListSchema, ContactsSearchSchema, ContactsSyncSchema, ContactsUpdateSchema, type ContactView, type GoogleContacts
+} from "./contacts.ts";
 import { parseCallParams, parseDeleteParams, parseEditParams, parseReactParams, parseSendParams, type FunnelContext, type OutboundFunnel, type ParseResult } from "./funnel.ts";
 import type { VendorReads } from "./reads.ts";
 import type { CommsStore } from "./store.ts";
@@ -35,13 +39,38 @@ export const ListTemplatesSchema = z.object({ channel: z.literal("whatsapp"), ac
 export const ReadMessageSchema = z.object({ channel: z.literal("sms"), account_ref: AccountRef, message_sid: z.string().regex(/^(SM|MM)[0-9a-fA-F]{32}$/) }).strict();
 
 export class CommsTransport implements ToolTransport {
-  constructor(private readonly deps: { funnel: OutboundFunnel; store: CommsStore; reads?: VendorReads }) {}
+  constructor(private readonly deps: { funnel: OutboundFunnel; store: CommsStore; reads?: VendorReads; contacts?: { api: GoogleContacts; graph: Pick<ConversationGraphService, "linkChannelIdentity"> } }) {}
 
   /** Leverandør-lesing går KUN mot en konto eieren har autorisert, og kun når kontoens leverandør faktisk er den handlingen gjelder (aldri en Telnyx-nøkkel mot Twilio-API-et). */
   private async requireAccount(ctx: FunnelContext, channel: "slack" | "discord" | "whatsapp" | "sms", accountRef: string, provider: CommsProvider): Promise<void> {
     const account = await this.deps.store.findActiveAccount(ctx.tenantId, ctx.space, channel, accountRef);
     if (account === null) throw new Error("comms_account_not_authorized");
     if (account.provider !== provider) throw new Error("comms_read_not_supported_by_provider");
+  }
+
+  private contacts(): { api: GoogleContacts; graph: Pick<ConversationGraphService, "linkChannelIdentity"> } {
+    if (this.deps.contacts === undefined) throw new Error("comms_contacts_not_enabled");
+    return this.deps.contacts;
+  }
+
+  /**
+   * Lenker en kontakt til en identitet i Conversation Graph (P2e): eksakt E.164/e-post, `match_method: contact_sync`, confidence 0.9, proveniens (kilde + Google-ressursnavn). Første identifikator oppretter/finner identiteten, de neste
+   * festes til SAMME identitet - men en identifikator som allerede tilhører en ANNEN identitet flyttes aldri (ingen automatisk sammenslåing; det er eierens handling). Returnerer antall lenkede identifikatorer.
+   */
+  private async linkContact(ctx: FunnelContext, view: ContactView): Promise<number> {
+    const { graph } = this.contacts();
+    const identifiers: Array<{ channel: "phone" | "email"; id: string }> = [...view.phones.map((id) => ({ channel: "phone" as const, id })), ...view.emails.map((id) => ({ channel: "email" as const, id }))];
+    let identityId: string | undefined;
+    let linked = 0;
+    for (const { channel, id } of identifiers) {
+      const link = await graph.linkChannelIdentity(ctx.tenantId, ctx.space, {
+        channel, channel_identifier: id, confidence: 0.9, match_method: "contact_sync", source_type: "google_contacts", external_id: view.resource_name, created_by_person_id: ctx.actor.person_id,
+        ...(identityId !== undefined ? { identity_id: identityId } : view.display_name !== null ? { display_name: view.display_name } : {})
+      });
+      identityId ??= link.identity_id;
+      linked += 1;
+    }
+    return linked;
   }
 
   private reads(): VendorReads {
@@ -98,6 +127,54 @@ export class CommsTransport implements ToolTransport {
       case "start_call": {
         const r = await funnel.execute(ctx, this.parsed(parseCallParams(parameters)), credential);
         return { external_id: r.external_id, data: r.data };
+      }
+      // Google Contacts (P2e): full kapabilitet for eieren. Lesing er ubetrodd data; skriving er klasse C/D (se tools.ts); `contacts_sync` lenker kontakter til identiteter.
+      case "contacts_list": {
+        const p = ContactsListSchema.parse(parameters);
+        return { data: (await this.contacts().api.list(credential, p.page_size ?? 50, p.page_token)) as unknown as JsonValue };
+      }
+      case "contacts_search": {
+        const p = ContactsSearchSchema.parse(parameters);
+        return { data: { contacts: await this.contacts().api.search(credential, p.query, p.page_size ?? 10) } as unknown as JsonValue };
+      }
+      case "contacts_get": {
+        const p = ContactsGetSchema.parse(parameters);
+        return { data: { contact: await this.contacts().api.get(credential, p.resource_name) } as unknown as JsonValue };
+      }
+      // Fersk lesing for sletting (preflight OG readback): `null` = finnes ikke.
+      case "contacts_check_target": {
+        const p = ContactsGetSchema.parse(parameters);
+        const view = await this.contacts().api.get(credential, p.resource_name);
+        return { data: view === null ? null : { exists: true, resource_name: view.resource_name, etag: view.etag } };
+      }
+      case "contacts_create": {
+        const view = await this.contacts().api.create(credential, ContactsCreateSchema.parse(parameters));
+        return { external_id: view.resource_name, data: { contact: view } as unknown as JsonValue };
+      }
+      case "contacts_update": {
+        const view = await this.contacts().api.update(credential, ContactsUpdateSchema.parse(parameters));
+        return { external_id: view.resource_name, data: { contact: view } as unknown as JsonValue };
+      }
+      case "contacts_delete": {
+        const p = ContactsDeleteSchema.parse(parameters);
+        await this.contacts().api.delete(credential, p.resource_name);
+        return { external_id: p.resource_name, data: { deleted: true } };
+      }
+      case "contacts_sync": {
+        const p = ContactsSyncSchema.parse(parameters);
+        const page = await this.contacts().api.list(credential, p.page_size ?? 50, p.page_token);
+        let linked = 0;
+        let withoutIdentifier = 0;
+        let failed = 0;
+        for (const view of page.contacts) {
+          if (view.phones.length === 0 && view.emails.length === 0) { withoutIdentifier += 1; continue; }
+          try {
+            linked += await this.linkContact(ctx, view);
+          } catch {
+            failed += 1; // aldri feilteksten (kan sitere identifikatoren)
+          }
+        }
+        return { data: { scanned: page.contacts.length, linked_identifiers: linked, contacts_without_identifier: withoutIdentifier, contacts_failed: failed, next_page_token: page.next_page_token } };
       }
       // Leverandør-lesing (P1c): rene lesinger, ubetrodd data, ingen journal.
       case "read_thread": {

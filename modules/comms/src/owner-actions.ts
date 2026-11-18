@@ -16,7 +16,11 @@ export const COMMS_OWNER_ACTIONS: readonly string[] = [...COMMS_OUTBOUND_ACTIONS
 /** Handlinger som finnes KUN med sitt eget flagg: `start_call` (JARVIS_COMMS_CALLS, klasse D - idempotensnøkkel + step-up som sending) og leverandør-lesing (JARVIS_COMMS_VENDOR_READS, klasse A). Ruten kjenner navnene, men en handling uten registrert verktøy avvises som ukjent. */
 export const COMMS_CALL_ACTIONS: readonly string[] = ["start_call"];
 export const COMMS_VENDOR_READ_ACTIONS: readonly string[] = ["read_thread", "list_users", "get_message", "list_templates", "read_message"];
-export const COMMS_KNOWN_ACTIONS: readonly string[] = [...COMMS_OWNER_ACTIONS, ...COMMS_CALL_ACTIONS, ...COMMS_VENDOR_READ_ACTIONS];
+/** Google Contacts (JARVIS_COMMS_CONTACTS): lesing (klasse A, uten step-up) og skriving (create/update C, delete D, sync C - step-up; create/update/delete krever idempotensnøkkel). */
+export const COMMS_CONTACT_READ_ACTIONS: readonly string[] = ["contacts_list", "contacts_search", "contacts_get"];
+export const COMMS_CONTACT_WRITE_ACTIONS: readonly string[] = ["contacts_create", "contacts_update", "contacts_delete", "contacts_sync"];
+const COMMS_KEYED_CONTACT_ACTIONS: readonly string[] = ["contacts_create", "contacts_update", "contacts_delete"];
+export const COMMS_KNOWN_ACTIONS: readonly string[] = [...COMMS_OWNER_ACTIONS, ...COMMS_CALL_ACTIONS, ...COMMS_VENDOR_READ_ACTIONS, ...COMMS_CONTACT_READ_ACTIONS, ...COMMS_CONTACT_WRITE_ACTIONS];
 
 const KEY = /^[A-Za-z0-9._:-]{8,200}$/;
 
@@ -65,8 +69,8 @@ export async function executeCommsOwnerAction(
   const outbound = COMMS_OUTBOUND_ACTIONS.includes(action) || COMMS_CALL_ACTIONS.includes(action);
   const idempotencyKey = input.idempotency_key;
   let parameters = input.parameters;
-  if (outbound) {
-    if (idempotencyKey === undefined || !KEY.test(idempotencyKey)) return { ok: false, status: "rejected", reason: "idempotency_key_required" };
+  if ((outbound || COMMS_KEYED_CONTACT_ACTIONS.includes(action)) && (idempotencyKey === undefined || !KEY.test(idempotencyKey))) return { ok: false, status: "rejected", reason: "idempotency_key_required" };
+  if (outbound && idempotencyKey !== undefined) {
     if (parameters["request_id"] !== undefined && parameters["request_id"] !== idempotencyKey) return { ok: false, status: "rejected", reason: "comms_request_id_mismatch" };
     parameters = { ...parameters, request_id: idempotencyKey };
     // Send: tørrkjør FØRST, slik at eieren får ALLE avslagskodene (ikke bare den første) og avslaget journalføres som bevis. ToolGateway kjører policyen på nytt (preflight + rett før kallet).
