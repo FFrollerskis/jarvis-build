@@ -1,9 +1,10 @@
 import type pg from "pg";
 import type { IdentityContext } from "@jarvis/contracts";
 import {
+  CAR_CRITICAL_OPS, CAR_READ_ACTION, CAR_TOOL_ID, CarTransport, UnconfiguredCarAdapter, carCriticalConfigFromEnv, carCriticalToolDefinitions,
   HOME_CRITICAL_OPS, HOME_CRITICAL_READ_ACTION, HOME_ASSISTANT_TOOL_ID, HomeAssistantCriticalTransport, PERSONAL_FLAG_NAMES, PERSONAL_SECRET_REFS, PersonalActionJournal,
   executePersonalAction, homeCriticalConfigFromEnv, homeCriticalToolDefinitions, legacyCriticalActionsToDrop, personalActionIndex, personalFlagOn,
-  type ExecutePersonalActionInput, type PersonalActionIndexEntry, type ToolDefinition, type ToolGateway
+  type CarAdapter, type ExecutePersonalActionInput, type PersonalActionIndexEntry, type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
 import type { PersonalActionDomainDeps, PersonalApiDeps } from "./personal-routes.ts";
 
@@ -29,6 +30,11 @@ export interface PersonalWiringInput {
   gateway: Pick<ToolGateway, "execute" | "get">;
   /** Leser en hemmelighet/konfig via vault-referanse (aldri fra parametre). */
   readSecret: (ref: string) => Promise<string | null>;
+  /**
+   * Bil-adapteren. Uten verdi brukes `UnconfiguredCarAdapter` (INGEN leverandør er valgt, D-64): hver bil-handling feiler lukket. En ekte adapter kobles inn HER først etter at Tobias har besluttet leverandør
+   * (og, hvis det er et aggregat-API, `CORE_DEPENDENCY_DECISION_REQUIRED` er besvart).
+   */
+  carAdapter?: CarAdapter;
 }
 
 export function createPersonalWiring(input: PersonalWiringInput): PersonalWiring {
@@ -53,6 +59,15 @@ export function createPersonalWiring(input: PersonalWiringInput): PersonalWiring
   }
 
   const executor = { pool, gateway, journal: new PersonalActionJournal(pool), index: personalActionIndex(entries) };
+  if (personalFlagOn(env, PERSONAL_FLAG_NAMES.car)) {
+    const config = carCriticalConfigFromEnv(env);
+    const adapter = input.carAdapter ?? new UnconfiguredCarAdapter();
+    tools.push(...carCriticalToolDefinitions(new CarTransport({ adapter, settleMs: config.settleMs, pollMs: config.pollMs }), config));
+    domains.set("car", { toolId: CAR_TOOL_ID, readAction: CAR_READ_ACTION });
+    entries.push(...CAR_CRITICAL_OPS.map((op): PersonalActionIndexEntry => ({ domain: "car", toolId: CAR_TOOL_ID, op })));
+    log["car"] = { targets: config.targets.size, settle_ms: config.settleMs, adapter: adapter.name, live: adapter.name === "unconfigured" ? "BLOCKED_EXTERNAL" : "configured" };
+  }
+
   const actions = domains.size > 0 ? { executor, domains, run: (identity: IdentityContext, request: ExecutePersonalActionInput) => executePersonalAction(executor, identity, request) } : undefined;
   const deps: PersonalApiDeps | undefined = actions ? { actions } : undefined;
   return {

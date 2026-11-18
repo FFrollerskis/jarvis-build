@@ -64,14 +64,16 @@ export const OWNER_ONLY_NAMESPACES: ReadonlySet<string> = new Set([
   "owner_controls", "self_modification", "docker", "gce", "cloudflare", "langfuse", "infisical", "postgres_ops", "mcp_zapier", "browser", "incidents", "governance", "situations", "consent",
   "finance", "finance_spend", "finance_stripe", "finance_vipps", "finance_neonomics", "finance_wallester", "data-erasure", "scheduler",
   // WP-D3 (UA-4 Growth, D-459): skrivehandlingene mot annonse-/analyseplattformene (egne navnerom, adskilt fra de eksisterende `googleads`/`metaads`-lese-/synk-handlingene på chat-nivåene).
-  "growth_googleads", "growth_metaads", "growth_ga4", "growth_searchconsole", "growth_gbp", "growth_linkedin", "growth_youtube", "growth_tiktok"
+  "growth_googleads", "growth_metaads", "growth_ga4", "growth_searchconsole", "growth_gbp", "growth_linkedin", "growth_youtube", "growth_tiktok",
+  // WP-G2 (D-464, UA-8): bilhandlingene (`car`) - eier-eksklusivt, aldri på en modellflate.
+  "car"
 ]);
 
 const PAID_MEDIA = new Set(["openai_images", "runway", "kling", "google_veo", "higgsfield"]);
 const SMS_LIKE = new Set(["twilio", "telnyx", "whatsapp"]);
 const METERED = new Set(["brave_search", "tavily", "exa", "google_maps", "google_places", "google_routes"]);
 const OWNER_CONFIGURED_URL = new Set(["jira", "pipedrive", "grafana", "prometheus", "n8n", "make", "finance_wallester", "home-assistant"]);
-const PRIVATE_NAMESPACES = new Set(["email", "calendar", "drive", "gmail", "microsoft_outlook", "memory", "knowledge", "dropbox", "onedrive", "notion", "slack", "discord", "telegram", "whatsapp", "twilio", "telnyx", "google_sheets", "spotify", "home-assistant"]);
+const PRIVATE_NAMESPACES = new Set(["email", "calendar", "drive", "gmail", "microsoft_outlook", "memory", "knowledge", "dropbox", "onedrive", "notion", "slack", "discord", "telegram", "whatsapp", "twilio", "telnyx", "google_sheets", "spotify", "home-assistant", "car"]);
 
 const READ_VERB = /^(read|get|list|search|query|find|fetch|lookup|describe|inspect|check|status|test|health|count|summar|show|view|browse|explain|rank|evaluate|resolve|upcoming|due|overdue|cancellable|campaign_performance|geocode|reverse_geocode|web_search|news_search|extract|screenshot|navigate)/;
 const SEND_VERB = /(^|_)(send|notify|reply|forward|publish|broadcast|invite|call_tool|run_scenario|activate_workflow|dispatch_workflow|comment_on_issue|rerun_workflow_run|cancel_workflow_run)(_|$)/;
@@ -145,7 +147,12 @@ const EFFECT_OVERRIDES: Record<string, Effect> = {
   [k("home-assistant", "critical_switch")]: "control",
   [k("home-assistant", "critical_scene")]: "control",
   [k("home-assistant", "critical_script")]: "control",
-  [k("home-assistant", "critical_climate_mode")]: "control"
+  [k("home-assistant", "critical_climate_mode")]: "control",
+  // WP-G2 (P1b): bilhandlingene (lås, lås opp, klima, lading) styrer fysisk utstyr = «control» (`unlock` ville ellers blitt «write»); verktøy-id `car` er eier-eksklusivt og står på ingen modellflate.
+  [k("car", "lock")]: "control",
+  [k("car", "unlock")]: "control",
+  [k("car", "climate_set")]: "control",
+  [k("car", "charge_set")]: "control"
 };
 
 export function inferEffect(tool_id: string, action: string): Effect {

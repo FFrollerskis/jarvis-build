@@ -68,6 +68,27 @@ describe("A: flagg AV - rutene og wiringen finnes ikke", () => {
   });
 });
 
+describe("A2: bil-flagget - verktøy og domene finnes KUN med `JARVIS_PERSONAL_CAR=on`, og uten leverandør er adapteren `unconfigured` (live = BLOCKED_EXTERNAL)", () => {
+  it("kun bil: `car.*` registreres, hjem-verktøyene og legacy-filteret er urørt, loggen sier `unconfigured`/`BLOCKED_EXTERNAL`", () => {
+    const wiring = createPersonalWiring({ env: { JARVIS_PERSONAL_CAR: "on", JARVIS_PERSONAL_CAR_TARGETS: "bil, elbil-1" }, pool: {} as never, gateway: {} as never, readSecret: async () => null });
+    expect(wiring.tools.every((t) => t.tool_id === "car")).toBe(true);
+    expect(wiring.tools.map((t) => t.action).sort()).toEqual(["charge_set", "climate_set", "lock", "read_vehicle_state", "unlock"]);
+    expect([...(wiring.deps?.actions?.domains.keys() ?? [])]).toEqual(["car"]);
+    const base = homeAssistantTools();
+    expect(wiring.filterTools(base)).toBe(base); // legacy lock_set/alarm_set røres kun av hjem-flagget
+    expect(wiring.describe()).toEqual({ msg: "personal_twin", car: { targets: 2, settle_ms: 60_000, adapter: "unconfigured", live: "BLOCKED_EXTERNAL" } });
+  });
+
+  it("begge flagg: begge domener, og en injisert adapter vises som konfigurert", () => {
+    const adapter = { name: "sandbox-x", capabilities: [], readState: async () => null, command: async () => ({ accepted: true }) };
+    const wiring = createPersonalWiring({ env: { JARVIS_PERSONAL_CAR: "on", JARVIS_PERSONAL_HOME_CRITICAL: "on" }, pool: {} as never, gateway: {} as never, readSecret: async () => null, carAdapter: adapter });
+    expect([...(wiring.deps?.actions?.domains.keys() ?? [])].sort()).toEqual(["car", "home"]);
+    expect(wiring.describe()).toMatchObject({ car: { adapter: "sandbox-x", live: "configured" }, home_critical: { legacy_lock_alarm_removed: true } });
+    expect(wiring.tools.filter((t) => t.tool_id === "car").length).toBe(5);
+    expect(wiring.tools.filter((t) => t.tool_id === "home-assistant").length).toBe(9);
+  });
+});
+
 interface Harness {
   ctx: PersonalRouteContext;
   calls: string[];

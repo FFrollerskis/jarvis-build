@@ -5,5 +5,7 @@ export * from "./flags.ts";
 export * from "./critical-ops.ts";
 export * from "./home-critical.ts";
 export * from "./home-critical-transport.ts";
+export * from "./car-adapter.ts";
+export * from "./car-critical.ts";
 export * from "./action-journal.ts";
 export * from "./action-executor.ts";

@@ -44,6 +44,8 @@ export const PERSONAL_CONFIG_NAMES = {
 export const PERSONAL_SECRET_REFS = {
   /** Alarmpanelets kode (PIN) hvis panelet krever den. Sendes kun til Home Assistant, aldri i journal/varsel/logg. */
   homeAlarmCode: "JARVIS_PERSONAL_HOME_ALARM_CODE",
+  /** Primær-credential for bil-leverandøren (vendor-nøytralt navn; en ekte adapter kan lese flere referanser selv). Uten leverandør finnes ingen verdi: handlingene feiler lukket (`credential_unavailable`). */
+  carCredential: "JARVIS_PERSONAL_CAR_CREDENTIAL",
   /** iCloud-brukernavn og app-spesifikt passord for CalDAV/CardDAV (eieren lager passordet selv, D-108). */
   appleDavUser: "JARVIS_PERSONAL_APPLE_DAV_USER",
   appleDavAppPassword: "JARVIS_PERSONAL_APPLE_DAV_APP_PASSWORD"

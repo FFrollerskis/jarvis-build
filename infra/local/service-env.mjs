@@ -399,7 +399,7 @@ export const SERVICE_ENV = {
     // app-spesifikt passord - verdiene leses via `SecretProvider`, aldri her). Uten disse linjene når en verdi i `.env` aldri containeren og flaggene ville vært stille virkningsløse (vakt: `wpg2-flags-wiring.test.ts`).
     "JARVIS_PERSONAL_HOME_CRITICAL", "JARVIS_PERSONAL_HOME_TARGETS", "JARVIS_PERSONAL_HOME_SETTLE_MS", "JARVIS_PERSONAL_CAR", "JARVIS_PERSONAL_CAR_TARGETS", "JARVIS_PERSONAL_CAR_SETTLE_MS",
     "JARVIS_PERSONAL_FAMILY", "JARVIS_PERSONAL_HEALTH_INGEST", "JARVIS_PERSONAL_APPLE_DAV", "JARVIS_PERSONAL_APPLE_DAV_ACCOUNTS", "JARVIS_PERSONAL_FINANCE_READ", "JARVIS_PERSONAL_CONTEXT",
-    "JARVIS_PERSONAL_HOME_ALARM_CODE", "JARVIS_PERSONAL_APPLE_DAV_USER", "JARVIS_PERSONAL_APPLE_DAV_APP_PASSWORD"],
+    "JARVIS_PERSONAL_HOME_ALARM_CODE", "JARVIS_PERSONAL_CAR_CREDENTIAL", "JARVIS_PERSONAL_APPLE_DAV_USER", "JARVIS_PERSONAL_APPLE_DAV_APP_PASSWORD"],
   worker: [...CORE_ENV.filter((n) => !WORKER_EXCLUDES.has(n)), ...MODEL_ENV, ...WORKER_CONNECTOR_ENV, "LANGFUSE_BASE_URL", "JARVIS_TRACE_FILE", "JARVIS_CLAUDE_BIN", "JARVIS_JOB_RUNNER", "JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY",
     // WP-C1 (D-32 / Q-45a): vertsside job-runner (JARVIS_JOB_RUNNER=host). Socket-katalogen og tokenfilen monteres inn via infra/job-runner/docker-compose.job-runner.yml
     // (valgfri override) - uten den, og med tomme verdier her, feiler hver kodejobb lukket som før.
