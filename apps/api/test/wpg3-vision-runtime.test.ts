@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import type pg from "pg";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LocalHashEmbedding } from "@jarvis/memory";
-import { LocalModelUnavailableError, MemoryTraceSink, ModelGateway } from "@jarvis/model-gateway";
+import { LocalModelUnavailableError, MemoryTraceSink, ModelGateway, assertProvidersHaveExplicitPricing, pricingFromEnv } from "@jarvis/model-gateway";
 import { ProviderError, type ModelProviderAdapter, type ModelRequest, type ModelResult } from "@jarvis/provider-adapters";
 import { guardedFetch } from "@jarvis/tool-gateway";
 import { HomeAssistantVisionSource, VisionClassifier, type VisionService } from "@jarvis/vision";
@@ -85,6 +85,12 @@ describe("visionAdapterFromEnv", () => {
     expect(adapter?.available()).toBe(true);
     expect(() => visionAdapterFromEnv(env({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_CLASSIFIER: "on" }))).toThrow("vision_config_invalid:local_url_missing");
     expect(() => visionAdapterFromEnv(env({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_CLASSIFIER: "on", JARVIS_VISION_LOCAL_URL: "https://api.openai.com" }))).toThrow("vision_config_invalid:local_url_not_local");
+  });
+
+  it("startvakten JARVIS-006 (hver registrert adapter har eksplisitt pris) kaster ikke for local_vision - ellers ville oppstarten stoppet med flagget på", () => {
+    const adapter = visionAdapterFromEnv(env({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_CLASSIFIER: "on", JARVIS_VISION_LOCAL_URL: "http://127.0.0.1:11434" }));
+    expect(adapter?.name).toBe("local_vision");
+    expect(() => assertProvidersHaveExplicitPricing(pricingFromEnv(), [adapter?.name ?? ""])).not.toThrow();
   });
 });
 
