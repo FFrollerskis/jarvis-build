@@ -18,3 +18,4 @@ export * from "./embeddings.ts";
 export * from "./last-seen.ts";
 export * from "./pipeline.ts";
 export * from "./capture.ts";
+export * from "./poller.ts";

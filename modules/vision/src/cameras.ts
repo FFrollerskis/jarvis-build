@@ -159,6 +159,17 @@ export class VisionCameraService {
     });
   }
 
+  /**
+   * KUN for bakgrunnspolleren (poller.ts): alle PÅSLÅTTE kameraer av én kildetype i ett space, på tvers av personer. Bevisst atskilt fra `listCameras` (som alltid er person-scopet): polleren
+   * behandler hvert kamera under kameraets EGEN person_id, og RLS begrenser fortsatt til tenant + space.
+   */
+  async listEnabledForPolling(tenantId: string, memorySpace: MemorySpace, sourceType: "home_assistant" | "iphone"): Promise<VisionCamera[]> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(`SELECT * FROM vision_cameras WHERE tenant_id = $1 AND source_type = $2 AND enabled = true ORDER BY person_id ASC, camera_id ASC`, [tenantId, sourceType]);
+      return rows as VisionCamera[];
+    });
+  }
+
   /** Endrer label/sone/policy/cooldown/på-av/triggere. Sone-/policyregelen sjekkes mot den RESULTERENDE kombinasjonen (ikke bare det som endres). */
   async updateCamera(tenantId: string, memorySpace: MemorySpace, personId: string, cameraId: string, input: UpdateCameraInput): Promise<VisionCamera | null> {
     const value = parse(UpdateCameraInputSchema, input);
