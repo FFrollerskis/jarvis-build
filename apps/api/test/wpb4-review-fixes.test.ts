@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type pg from "pg";
 import type { IdentityContext, JobContract } from "@jarvis/contracts";
-import { claudeBudgetNoteNo, classifyContentSensitivity, type CompleteInput, type ModelGateway, type ToolExecutor } from "@jarvis/model-gateway";
-import type { ClaimedTask, JobContext } from "@jarvis/tasks";
+import { ContextBuilder, MessageStore } from "@jarvis/core";
+import { ClaudeBudgetEnforcer, MemoryTraceSink, ModelGateway, claudeBudgetNoteNo, classifyContentSensitivity, type CompleteInput, type ToolExecutor } from "@jarvis/model-gateway";
+import type { ModelProviderAdapter, ModelRequest, ModelResult, StreamHandler } from "@jarvis/provider-adapters";
+import type { ClaimedTask, InProcessWorker, JobContext, TaskService } from "@jarvis/tasks";
 import type { MeshToolMapping } from "@jarvis/tool-gateway";
 import { RESERVED_SUBMIT_DATA_KEYS, TasksDelegateTransport, submittedContractHasReservedKey, type ChatJobs } from "../src/chat-jobs.ts";
+import { ConversationEngine } from "../src/conversation.ts";
 import { executiveHandler } from "../src/executive.ts";
 import { claudeBudgetRouteNote } from "../src/tool-turn-route.ts";
+import { BudgetPool, MID, OWNER_PERSON, SPENT, budgetConfig } from "./support/claude-budget-pool.ts";
 
 /**
  * WP-B4 (D-476), fikser etter den uavhengige reviewen - API-laget (notater, VIKTIG-attestering, historikk-stripping, kobling). Gateway-nivå ligger i modules/model-gateway/test/wpb4-review-fixes.test.ts.
@@ -177,5 +182,184 @@ describe("INFO: `stripSystemNotes` fjerner «(Claude-kreditten: ...)» KUN når 
       expect(stripSystemNotes(`Svar.${creditNote}${creditNote}`), value).toBe("Svar.");
       expect(stripSystemNotes(`Svar.${OTHER_NOTE}${creditNote}`), value).toBe("Svar.");
     }
+  });
+});
+
+/**
+ * N1 (re-review): kredittnotatet uteble for en flerrunde chat-verktøytur og for en delegert skyrute-jobb ved hard stopp. De eksisterende testene bruker en FAKE gateway og kunne ikke se det. Her er samtalemotoren og jobbhandleren
+ * ekte, gatewayen og enforceren ekte - kun leverandørene (skriptede adaptere som husker hva de fikk) og databasen (`BudgetPool`) er fakes. Perioden er 15. nov → 15. des 2026 og klokka står midt i den (se støttefilen).
+ */
+describe("N1 (re-review): kredittnotatet står i svaret også for flerrunde chat-verktøytur og delegert skyrute-jobb - ekte motor/handler + ekte gateway + ekte enforcer", () => {
+  const ANSWER = "Du har ingen avtaler i morgen.";
+  const NEUTRAL_ASK = "hva er neste punkt i kalenderen min i morgen?";
+  const CHAT_TOOL = "calendar__read_events";
+  const JOB_TOOL = "read_github_prs";
+  const LIMITS = { max_tools_per_round: 8, max_schema_tokens: 1500, max_rounds: 4, max_calls_per_round: 4, max_total_calls: 16 };
+  const usage = { input_tokens: 10, output_tokens: 5 };
+  const CREDIT_ANSWER = `\n\n(Claude-kreditten: perioden er brukt opp, så dette svaret kom fra den lokale modellen. Kreditten fornyes 15. desember.)`;
+  const CREDIT_JOB = "(Claude-kreditten: perioden er brukt opp, så jobben kom fra den lokale modellen. Kreditten fornyes 15. desember.)";
+  const RESERVE_NOTE = "(Reservemodell brukt: anthropic var ikke tilgjengelig";
+  const okExecutor = {
+    execute: async (c: { tool_call_id: string; tool_name: string }) => ({ tool_call_id: c.tool_call_id, tool_name: c.tool_name, execution_id: "e1", success: true, output: { events: [] }, at: "2026-11-30T12:00:00.000Z" })
+  } as unknown as ToolExecutor;
+  const fakePool = (): pg.Pool => ({ connect: async () => ({ query: async () => ({ rows: [], rowCount: 0 }), release: () => undefined }) }) as unknown as pg.Pool;
+  const chatIdentity: IdentityContext = { person_id: "p1", tenant_id: "t1", memory_space_id: "personal", session_id: "s1", device_id: "d1", channel: "web", auth_strength: "active" };
+  const def = (name: string) => ({ name, description: name, input_schema: { type: "object", properties: {}, additionalProperties: false } });
+
+  /** Runde 1 ber om verktøyet `tool`, alle senere runder gir ferdig svar. `requests` = alt adapteren faktisk mottok (kun leverandørene er fakes). */
+  function scripted(name: string, model: string, tool: string, available = true): ModelProviderAdapter & { requests: ModelRequest[] } {
+    const requests: ModelRequest[] = [];
+    const next = (req: ModelRequest): ModelResult => {
+      requests.push(req);
+      return requests.length === 1
+        ? ({ text: "", provider: name, model, tool_calls: [{ tool_call_id: "c1", tool_name: tool, arguments: {}, provider: name, model }], finish_reason: "tool_use", usage, latency_ms: 1 } as ModelResult)
+        : ({ text: ANSWER, provider: name, model, finish_reason: "stop", usage, latency_ms: 1 } as ModelResult);
+    };
+    return {
+      name, model, requests, available: () => available,
+      complete: async (req: ModelRequest) => next(req),
+      stream: async (req: ModelRequest, onEvent: StreamHandler) => {
+        const r = next(req);
+        if (r.text.length > 0) onEvent({ type: "text_delta", text: r.text });
+        onEvent({ type: "usage", usage: r.usage });
+        onEvent({ type: "finish", finish_reason: r.finish_reason ?? "stop" });
+        return r;
+      }
+    } as unknown as ModelProviderAdapter & { requests: ModelRequest[] };
+  }
+
+  /** `credit: false` = flagget AV (ingen enforcer). `cloudAvailable: false` = Anthropic er nede/ikke konfigurert (kreditten er ikke årsaken). */
+  function world(o: { credit: boolean; spent: number; tenant: string; tool: string; cloudAvailable?: boolean }) {
+    const pool = new BudgetPool();
+    pool.spend.set(o.tenant, o.spent);
+    const trace = new MemoryTraceSink();
+    const cloud = scripted("anthropic", "claude-sonnet-5-5", o.tool, o.cloudAvailable ?? true);
+    const local = scripted("gemma_local", "llama3.1:8b", o.tool);
+    const enforcer = o.credit ? new ClaudeBudgetEnforcer({ config: budgetConfig(), pool: pool.pg(), trace, actor_person_id: OWNER_PERSON, now: () => MID }) : undefined;
+    const gateway = new ModelGateway({ pool: pool.pg(), trace, providers: [cloud, local], ...(enforcer !== undefined ? { claudeBudget: enforcer } : {}) });
+    return { pool, cloud, local, gateway };
+  }
+
+  const engineOver = (gateway: ModelGateway): ConversationEngine =>
+    new ConversationEngine({
+      messages: new MessageStore(fakePool()), context: new ContextBuilder(fakePool()), gateway,
+      tasks: {} as unknown as TaskService, worker: {} as unknown as InProcessWorker, trace: new MemoryTraceSink(),
+      toolTurnRoute: { provider: "anthropic", model: "claude-sonnet-5-5" },
+      tools: { definitions: [def(CHAT_TOOL)], executorFor: () => okExecutor, select: () => ({ definitions: [def(CHAT_TOOL)], limits: LIMITS }) }
+    });
+
+  const JOB_TOOLS: MeshToolMapping[] = [{
+    def: { name: JOB_TOOL, description: "Les PR-er", input_schema: { type: "object", properties: {}, required: [], additionalProperties: false } }, tool_id: "github", action: "list_pull_requests"
+  } as unknown as MeshToolMapping];
+  const jobCtx: JobContext = { attempts: 1, checkpoint: null, saveCheckpoint: async () => undefined, assertNotCancelled: async () => undefined };
+  const jobTask = (tenant: string): ClaimedTask => ({
+    task_id: "task-b4-n1", tenant_id: tenant, attempts: 1, checkpoint: null,
+    contract: {
+      goal: "list PR-er", owner_person_id: "person-tobias", tenant_id: tenant, allowed_memory_spaces: ["personal"], allowed_tools: ["github"],
+      input: {
+        data: { prompt: "list åpne PR-er i repoet", purpose: "BACKGROUND", sensitivity: "PRIVATE", paid_models_allowed: false, delegated_from_chat: true, tools: true, cloud_tool_turns_allowed: true },
+        trust_level: "internal", provenance: "chat:s1"
+      }
+    } as unknown as JobContract
+  });
+  const jobHandler = (gateway: ModelGateway) => executiveHandler({ gateway, tools: { all: JOB_TOOLS, executorFor: () => okExecutor }, toolTurnRoute: { provider: "anthropic", model: "claude-sonnet-5-5" } });
+
+  const quiet = (): void => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+  };
+  afterEach(() => vi.restoreAllMocks());
+
+  describe("chatten (ConversationEngine) - to runder ved hard stopp", () => {
+    for (const streamed of [false, true]) {
+      it(`${streamed ? "strøm" : "JSON"}: runde 2 er låst lokalt uten egen beslutning, men svaret har kredittnotatet - ikke «Reservemodell brukt» - og Anthropic fikk ikke ett kall`, async () => {
+        quiet();
+        const w = world({ credit: true, spent: SPENT.exhausted, tenant: "t1", tool: CHAT_TOOL });
+        const tokens: string[] = [];
+        const result = await engineOver(w.gateway).handle(chatIdentity, NEUTRAL_ASK, streamed ? (t: string) => { tokens.push(t); } : undefined);
+        expect(w.cloud.requests).toHaveLength(0);
+        expect(w.local.requests).toHaveLength(2); // to runder, begge lokale
+        expect(result.reply).toBe(`${ANSWER}${CREDIT_ANSWER}`);
+        expect(result.reply).not.toContain("Reservemodell");
+        expect((result.reply.match(/Claude-kreditten:/g) ?? []).length).toBe(1);
+        if (streamed) expect(tokens.join("")).toContain("Claude-kreditten:");
+        expect(w.pool.audit.map((a) => a.reason)).toEqual(["exhausted_closed"]); // håndhevelsen er uendret: ÉN revisjonsrad for turen
+      });
+    }
+
+    it("tale: samme rute, men ingen merknad i det som leses opp", async () => {
+      quiet();
+      const w = world({ credit: true, spent: SPENT.exhausted, tenant: "t1", tool: CHAT_TOOL });
+      const result = await engineOver(w.gateway).handle({ ...chatIdentity, channel: "voice" }, NEUTRAL_ASK);
+      expect(result.reply).toBe(ANSWER);
+      expect(w.cloud.requests).toHaveLength(0);
+    });
+
+    it("kreditten er IKKE årsaken (Anthropic er nede, kreditten er sunn): den vanlige reservemerknaden står, aldri en kredittmerknad - merknaden ville vært usann", async () => {
+      quiet();
+      const w = world({ credit: true, spent: SPENT.on_pace, tenant: "t1", tool: CHAT_TOOL, cloudAvailable: false });
+      const result = await engineOver(w.gateway).handle(chatIdentity, NEUTRAL_ASK);
+      expect(result.reply).toContain(RESERVE_NOTE);
+      expect(result.reply).not.toContain("Claude-kreditten");
+      expect(w.local.requests).toHaveLength(2);
+    });
+
+    it("flagg AV (ingen enforcer): svaret er som før - den vanlige reservemerknaden, ingen kredittmerknad og ingen kredittspørringer", async () => {
+      quiet();
+      const w = world({ credit: false, spent: SPENT.exhausted, tenant: "t1", tool: CHAT_TOOL, cloudAvailable: false });
+      const result = await engineOver(w.gateway).handle(chatIdentity, NEUTRAL_ASK);
+      expect(result.reply).toBe(`${ANSWER}\n\n(Reservemodell brukt: anthropic var ikke tilgjengelig, så svaret kom fra den lokale modellen gemma_local.)`);
+      expect(w.pool.claudeQueries()).toHaveLength(0);
+      expect(w.pool.audit).toHaveLength(0);
+    });
+  });
+
+  describe("delegert skyrute-jobb (executiveHandler) - kreditten stengte skyen, jobben kjørte på lokal reserve", () => {
+    it("jobbteksten har kredittnotatet FORAN svaret (ruten er `local_fallback`, leverandøren lokal, Anthropic fikk ikke ett kall)", async () => {
+      quiet();
+      const w = world({ credit: true, spent: SPENT.exhausted, tenant: "tenant-personal", tool: JOB_TOOL });
+      const out = await jobHandler(w.gateway)(jobTask("tenant-personal"), jobCtx);
+      expect(w.cloud.requests).toHaveLength(0);
+      expect(w.local.requests).toHaveLength(2);
+      expect(out["route"]).toBe("local_fallback");
+      expect(out["provider"]).toBe("gemma_local");
+      expect(out["text"]).toBe(`${CREDIT_JOB}\n\n${ANSWER}`);
+      expect(w.pool.audit.map((a) => a.reason)).toEqual(["exhausted_closed"]);
+    });
+
+    it("kreditten er IKKE årsaken (Anthropic er nede, kreditten er sunn): jobbteksten har ingen kredittmerknad", async () => {
+      quiet();
+      const w = world({ credit: true, spent: SPENT.on_pace, tenant: "tenant-personal", tool: JOB_TOOL, cloudAvailable: false });
+      const out = await jobHandler(w.gateway)(jobTask("tenant-personal"), jobCtx);
+      expect(out["route"]).toBe("local_fallback");
+      expect(out["text"]).toBe(ANSWER);
+    });
+
+    it("flagg AV (ingen enforcer): jobbteksten er som før - ingen merknad, ingen revisjonsrad", async () => {
+      quiet();
+      const w = world({ credit: false, spent: SPENT.exhausted, tenant: "tenant-personal", tool: JOB_TOOL, cloudAvailable: false });
+      const out = await jobHandler(w.gateway)(jobTask("tenant-personal"), jobCtx);
+      expect(out["route"]).toBe("local_fallback");
+      expect(out["text"]).toBe(ANSWER);
+      expect(w.pool.claudeQueries()).toHaveLength(0);
+      expect(w.pool.audit).toHaveLength(0);
+    });
+
+    it("en lukking som ikke er fra gatewayen gjør ingenting: en rutefeil som bare HAR samme tekst (fake gateway) gir ingen kredittmerknad", async () => {
+      quiet();
+      const { NoEligibleProviderError } = await import("@jarvis/model-gateway");
+      const seen: string[] = [];
+      const gateway = {
+        completeWithTools: async (input: CompleteInput) => {
+          seen.push(input.providerPreference?.[0] ?? "lokal");
+          if (input.providerPreference?.[0] === "anthropic") throw new NoEligibleProviderError("provider_preference_exhausted: ingen av [anthropic] er konfigurert/kvalifisert (anthropic:budget_blocked)");
+          return { text: ANSWER, usage, provider: "gemma_local", model: "m", metadata: { tool_rounds: 1 } };
+        }
+      } as unknown as ModelGateway;
+      const out = await jobHandler(gateway)(jobTask("tenant-personal"), jobCtx);
+      expect(seen).toEqual(["anthropic", "lokal"]);
+      expect(out["route"]).toBe("local_fallback");
+      expect(out["text"]).toBe(ANSWER);
+    });
   });
 });
