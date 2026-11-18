@@ -54,7 +54,8 @@ function notificationSummary(state: JsonValue | null): string | null {
   const channel = typeof s["channel"] === "string" ? (s["channel"] as string) : "ukjent kanal";
   const purpose = typeof s["purpose"] === "string" ? (s["purpose"] as string) : "ukjent formål";
   const kind = typeof s["kind"] === "string" ? (s["kind"] as string) : "melding";
-  return `${kind} via ${channel} til ${hint} (formål: ${purpose})`;
+  const basis = typeof s["purpose_basis"] === "string" ? `, grunnlag: ${s["purpose_basis"] as string}` : "";
+  return `${kind} via ${channel} til ${hint} (formål: ${purpose}${basis})`;
 }
 
 export interface CommsToolDeps {

@@ -26,8 +26,8 @@ const twilioReq = (fields: Record<string, string>): WebhookRequest => {
 let sid = 0;
 const inboundStop = (from: string, to: string, text = "STOP") => twilioReq({ MessageSid: `SM${String(++sid).padStart(32, "0")}`, From: from, To: to, Body: text, AccountSid: "AC1234567890abcdef" });
 const must = (r: ReturnType<typeof parseSendParams>): ParsedOutbound => { if (!r.ok) throw new Error(r.code); return r.value; };
-const sendOf = (over: Record<string, unknown>): ParsedOutbound => must(parseSendParams({ request_id: chain.key("req"), channel: "sms", account_ref: "+4791000000", recipient: "+4790000000", purpose: "transactional", text: "Hei, timen din er bekreftet.", ...over }));
-const callOf = (over: Record<string, unknown>): ParsedOutbound => must(parseCallParams({ request_id: chain.key("req"), channel: "phone", account_ref: "+4791000000", recipient: "+4790000000", purpose: "transactional", text: "Hei, jeg ringer om timen.", ...over }));
+const sendOf = (over: Record<string, unknown>): ParsedOutbound => must(parseSendParams({ request_id: chain.key("req"), channel: "sms", account_ref: "+4791000000", recipient: "+4790000000", purpose: "transactional", purpose_basis: "existing_customer_relationship", text: "Hei, timen din er bekreftet.", ...over }));
+const callOf = (over: Record<string, unknown>): ParsedOutbound => must(parseCallParams({ request_id: chain.key("req"), channel: "phone", account_ref: "+4791000000", recipient: "+4790000000", purpose: "transactional", purpose_basis: "existing_customer_relationship", text: "Hei, jeg ringer om timen.", ...over }));
 const denies = async (parsed: ParsedOutbound, ctx = chain.ctx) => (await chain.funnel.evaluate(ctx, parsed)).decision.denial_codes;
 const optRows = async (hash: string) => (await chain.db.admin.query("SELECT channel, account_ref, status, source, memory_space_id FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = $2 ORDER BY created_at", [TENANT_A, hash])).rows as Array<Record<string, string>>;
 
@@ -68,10 +68,10 @@ describe("A-M3: STOP gjelder mottakeren, ikke én avsenderkonto/ett rom/én kana
     expect(await denies(sendOf({ recipient: other }))).not.toContain("recipient_opted_out"); // et annet nummer er upåvirket
     // og via den EKTE eier-kjeden: ingenting når leverandøren
     chain.telnyx.calls.length = 0;
-    const viaB = await chain.act("send", { channel: "sms", account_ref: "+4792000000", recipient: num, purpose: "transactional", text: "Hei, timen din er bekreftet." }, chain.key("ob"));
+    const viaB = await chain.act("send", { channel: "sms", account_ref: "+4792000000", recipient: num, purpose: "transactional", purpose_basis: "existing_customer_relationship", text: "Hei, timen din er bekreftet." }, chain.key("ob"));
     expect(viaB.ok).toBe(false);
     expect(chain.telnyx.calls).toEqual([]);
-    const call = await chain.act("start_call", { channel: "phone", account_ref: "+4791000000", recipient: num, purpose: "transactional", text: "Hei, jeg ringer om timen." }, chain.key("oc"));
+    const call = await chain.act("start_call", { channel: "phone", account_ref: "+4791000000", recipient: num, purpose: "transactional", purpose_basis: "existing_customer_relationship", text: "Hei, jeg ringer om timen." }, chain.key("oc"));
     expect(call.ok).toBe(false);
     expect(chain.twilio.calls.filter((c) => c.op === "call")).toEqual([]);
   });

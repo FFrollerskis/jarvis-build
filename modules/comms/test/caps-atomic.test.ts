@@ -32,7 +32,7 @@ const phone = () => `+4790${String(500000 + ++n).padStart(6, "0").slice(-6)}`;
 const ownerGate = (identity: IdentityContext): boolean => identity.person_id === OWNER && identity.tenant_id === TENANT_A;
 const act = (action: string, parameters: Record<string, JsonValue>, idem?: string) => executeCommsOwnerAction({ gateway, funnel, ownerGate }, owner, { action, parameters, ...(idem ? { idempotency_key: idem } : {}) });
 const must = (r: ReturnType<typeof parseSendParams>): ParsedOutbound => { if (!r.ok) throw new Error(r.code); return r.value; };
-const sendParsed = (over: Record<string, unknown> = {}): ParsedOutbound => must(parseSendParams({ request_id: key("req"), channel: "sms", account_ref: "+4791000000", recipient: phone(), purpose: "transactional", text: "Hei, timen din er bekreftet.", ...over }));
+const sendParsed = (over: Record<string, unknown> = {}): ParsedOutbound => must(parseSendParams({ request_id: key("req"), channel: "sms", account_ref: "+4791000000", recipient: phone(), purpose: "transactional", purpose_basis: "existing_customer_relationship", text: "Hei, timen din er bekreftet.", ...over }));
 const journal = async (where: string, values: unknown[]) => (await db.admin.query(`SELECT request_id, status, denial_codes, kind FROM comms_outbound_log WHERE tenant_id = '${TENANT_A}' AND ${where}`, values)).rows as Array<{ request_id: string; status: string; denial_codes: string[]; kind: string }>;
 
 beforeAll(async () => {
@@ -71,7 +71,7 @@ describe("rateCaps: én kilde for policyens tørrkjøring og den atomiske håndh
 describe("A-H2: tak per mottaker holder under samtidighet (ekte Promise.all)", () => {
   it("4 samtidige sendinger (ulike nøkler) til SAMME kalde mottaker (tak 1/døgn) gir NØYAKTIG ett leverandørkall; de tre andre avslås og journalføres som `denied` med takkoden", async () => {
     const recipient = phone();
-    const results = await Promise.all(Array.from({ length: 4 }, () => act("send", { channel: "sms", account_ref: "+4791000000", recipient, purpose: "transactional", text: "Hei, timen din er bekreftet." }, key("r"))));
+    const results = await Promise.all(Array.from({ length: 4 }, () => act("send", { channel: "sms", account_ref: "+4791000000", recipient, purpose: "transactional", purpose_basis: "existing_customer_relationship", text: "Hei, timen din er bekreftet." }, key("r"))));
     expect(twilio.calls.filter((c) => c.op === "send")).toHaveLength(1);
     expect(results.filter((r) => r.ok)).toHaveLength(1);
     const hash = recipientHash(TENANT_A, "sms", recipient);
@@ -101,12 +101,12 @@ describe("A-H2: tak per mottaker holder under samtidighet (ekte Promise.all)", (
 
   it("2 samtidige `start_call` til samme nummer (tak 1/døgn) gir NØYAKTIG ett anrop", async () => {
     const recipient = phone();
-    const p = { channel: "phone", account_ref: "+4791000000", recipient, purpose: "transactional", text: "Hei, jeg ringer om timen." } as Record<string, JsonValue>;
+    const p = { channel: "phone", account_ref: "+4791000000", recipient, purpose: "transactional", purpose_basis: "existing_customer_relationship", text: "Hei, jeg ringer om timen." } as Record<string, JsonValue>;
     const results = await Promise.all([act("start_call", p, key("c")), act("start_call", p, key("c"))]);
     expect(twilio.calls.filter((c) => c.op === "call")).toHaveLength(1);
     expect(results.filter((r) => r.ok)).toHaveLength(1);
-    const direct = await Promise.allSettled([funnel.execute(ctx, must(parseCallParams({ request_id: key("cd"), channel: "phone", account_ref: "+4791000000", recipient: phone(), purpose: "transactional", text: "Hei, jeg ringer." })), "fake-token-for-test"),
-      funnel.execute(ctx, must(parseCallParams({ request_id: key("cd"), channel: "phone", account_ref: "+4791000000", recipient: phone(), purpose: "transactional", text: "Hei, jeg ringer." })), "fake-token-for-test")]);
+    const direct = await Promise.allSettled([funnel.execute(ctx, must(parseCallParams({ request_id: key("cd"), channel: "phone", account_ref: "+4791000000", recipient: phone(), purpose: "transactional", purpose_basis: "existing_customer_relationship", text: "Hei, jeg ringer." })), "fake-token-for-test"),
+      funnel.execute(ctx, must(parseCallParams({ request_id: key("cd"), channel: "phone", account_ref: "+4791000000", recipient: phone(), purpose: "transactional", purpose_basis: "existing_customer_relationship", text: "Hei, jeg ringer." })), "fake-token-for-test")]);
     expect(direct.every((s) => s.status === "fulfilled")).toBe(true); // ulike numre: begge går (kontotaket er 5/t)
   });
 });
@@ -114,7 +114,7 @@ describe("A-H2: tak per mottaker holder under samtidighet (ekte Promise.all)", (
 describe("A-H2: tak per konto per time holder under samtidighet", () => {
   it("8 samtidige sendinger til ULIKE mottakere fra én konto (tak 5/t) gir NØYAKTIG 5 leverandørkall; resten journalføres som `rate_limit_account_hour`", async () => {
     now = new Date("2026-11-17T12:00:00Z"); // eget vindu: tidligere tester er > 1 t unna
-    await Promise.all(Array.from({ length: 8 }, () => act("send", { channel: "sms", account_ref: "+4792000000", recipient: phone(), purpose: "transactional", text: "Hei, timen din er bekreftet." }, key("a"))));
+    await Promise.all(Array.from({ length: 8 }, () => act("send", { channel: "sms", account_ref: "+4792000000", recipient: phone(), purpose: "transactional", purpose_basis: "existing_customer_relationship", text: "Hei, timen din er bekreftet." }, key("a"))));
     const calls = twilio.calls.filter((c) => c.op === "send" && (c.request["account_ref"] as string) === "+4792000000");
     expect(calls).toHaveLength(5);
     const rows = await journal("account_ref = '+4792000000' AND created_at >= $1", [new Date("2026-11-17T12:00:00Z")]);

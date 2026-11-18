@@ -30,7 +30,7 @@ const ctxB: FunnelContext = { tenantId: TENANT_B, space: "business", actor: { pe
 let counter = 0;
 const key = (p: string) => `${p}-${++counter}-${Math.random().toString(36).slice(2, 8)}`;
 const parsedSend = (over: Record<string, unknown>): ParsedOutbound => {
-  const r = parseSendParams({ request_id: key("req"), channel: "sms", account_ref: "+4791000000", recipient: "+4790000000", purpose: "transactional", text: "Hei, møtet er flyttet.", ...over });
+  const r = parseSendParams({ request_id: key("req"), channel: "sms", account_ref: "+4791000000", recipient: "+4790000000", purpose: "transactional", purpose_basis: "existing_customer_relationship", text: "Hei, møtet er flyttet.", ...over });
   if (!r.ok) throw new Error(`parse: ${r.code}`);
   return r.value;
 };
@@ -253,7 +253,7 @@ describe("D: kundeservicevinduet kommer fra VERIFISERTE innkommende hendelser (s
     const saved = now;
     now = new Date(now.getTime() + 25 * 3_600_000);
     await expect(funnel.send(ctxA, parsedSend({ ...text, text: "Hei igjen" }), "t")).rejects.toThrow("outside_window_use_approved_template");
-    const template = must(parseSendParams({ request_id: key("req"), channel: "whatsapp", account_ref: "109876543210", recipient: number, purpose: "transactional", template: { name: "ai_hello", language: "nb", params: ["Kari"] } }));
+    const template = must(parseSendParams({ request_id: key("req"), channel: "whatsapp", account_ref: "109876543210", recipient: number, purpose: "transactional", purpose_basis: "existing_customer_relationship", template: { name: "ai_hello", language: "nb", params: ["Kari"] } }));
     await expect(funnel.send(ctxA, template, "t")).resolves.toBeDefined();
     expect(wa.calls[1]!.request["template"]).toMatchObject({ name: "ai_hello" });
     now = saved;

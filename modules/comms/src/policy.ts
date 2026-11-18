@@ -17,6 +17,20 @@ export type OutboundKind = "message" | "edit" | "delete" | "reaction" | "call";
 export type OutboundPurpose = "transactional" | "agreed" | "marketing";
 export const OUTBOUND_PURPOSES: readonly OutboundPurpose[] = ["transactional", "agreed", "marketing"];
 
+/**
+ * A-M2 (LEDER-AVGJØRELSE): eierens ERKLÆRTE grunnlag for å ta FØRSTE kontakt med en kald mottaker (lukket liste). Det er eierens uttrykkelige bekreftelse av det loven (markedsføringsloven § 15) krever skal kunne påvises - ikke
+ * en kunstig godkjenningssperre for eieren, og Jarvis avgjør aldri selv det rettslige grunnlaget (D-122). UTKAST, krever juridisk gjennomgang (se DPIA §10).
+ * - `recipient_requested_contact`: mottakeren har selv bedt om kontakt/svar/tilbud (utenfor en kanal Jarvis har verifisert).
+ * - `existing_customer_relationship`: eksisterende kunde-/avtaleforhold, og kontaktinformasjonen er mottatt i forbindelse med det.
+ * - `order_or_agreement_followup`: oppfølging av en konkret bestilling, avtale eller henvendelse.
+ * - `consent_obtained_outside_jarvis`: eieren har et samtykke fra mottakeren som ligger utenfor Jarvis.
+ * - `personal_non_commercial`: personlig, ikke-kommersiell melding (ingen markedsføring).
+ */
+export const PURPOSE_BASES = [
+  "recipient_requested_contact", "existing_customer_relationship", "order_or_agreement_followup", "consent_obtained_outside_jarvis", "personal_non_commercial"
+] as const;
+export type PurposeBasis = (typeof PURPOSE_BASES)[number];
+
 export interface TemplateContent {
   readonly name: string;
   readonly language: string;
@@ -50,6 +64,9 @@ export interface OutboundRequest {
   readonly thread_ref?: string;
   /** Leverandørens meldings-id for `edit`/`delete`/`reaction`. */
   readonly target_message_id?: string;
+  /** A-M2: eierens erklærte grunnlag (påkrevd for første kontakt med en KALD mottaker, melding og samtale), + kort notat. Journalføres. */
+  readonly purpose_basis?: PurposeBasis;
+  readonly purpose_basis_note?: string;
 }
 
 export type ReservationRegisterStatus = "not_reserved" | "reserved" | "unverified";
@@ -80,6 +97,9 @@ export interface RecipientProof {
   readonly identity_id: string | null;
   readonly confidence: number | null;
   readonly last_inbound_age_minutes: number | null;
+  /** A-M2: eierens erklærte grunnlag/notat for denne forespørselen (journalføres i det forsterkede revisjonssporet sammen med mottakerbeviset). */
+  readonly purpose_basis?: PurposeBasis;
+  readonly purpose_basis_note?: string;
 }
 
 export interface PolicyDecision {
@@ -209,7 +229,9 @@ export function evaluateOutboundPolicy(request: OutboundRequest, state: Outbound
     method: proofMethod,
     identity_id: state.recipient_identity?.identity_id ?? null,
     confidence: state.recipient_identity?.confidence ?? null,
-    last_inbound_age_minutes: inboundAgeMin === null ? null : Math.round(inboundAgeMin)
+    last_inbound_age_minutes: inboundAgeMin === null ? null : Math.round(inboundAgeMin),
+    ...(request.purpose_basis !== undefined ? { purpose_basis: request.purpose_basis } : {}),
+    ...(request.purpose_basis_note !== undefined ? { purpose_basis_note: request.purpose_basis_note } : {})
   };
 
   // 1. kanal og konto (eierens egen allowlist)
@@ -269,6 +291,21 @@ export function evaluateOutboundPolicy(request: OutboundRequest, state: Outbound
     else add("relationship_evidence", "pass");
   } else {
     add("relationship_evidence", "not_applicable");
+  }
+
+  // 5d. A-M2 (LEDER-AVGJØRELSE): en KALD mottaker (verken skrevet til oss siste `reply_window_days` eller en løst identitet) er FØRSTE kontakt. For ALLE formål (også en AI-samtale) kreves da eierens uttrykkelige erklæring av
+  // formålsgrunnlaget (`purpose_basis`, lukket liste + kort notat), journalført i det forsterkede revisjonssporet - lovens krav om at grunnlaget kan påvises (markedsføringsloven § 15), ikke en kunstig godkjenningssperre for eieren.
+  // Manglende grunnlag feiler LUKKET (`purpose_basis_required`). Reklameord i innholdet (5b) avslår uansett hvilket grunnlag som er oppgitt, og Jarvis avgjør aldri det rettslige grunnlaget (D-122).
+  if (!isMessageLike) {
+    add("purpose_basis", "not_applicable");
+  } else {
+    const note = request.purpose_basis_note;
+    const noteInvalid = note !== undefined && (note.trim().length === 0 || note.length > 200 || !textIsSendable(note) || note.includes("\n") || containsSecret(note));
+    if (noteInvalid) deny("purpose_basis", "purpose_basis_note_invalid");
+    else if (proofMethod === "explicit_param" && request.purpose_basis === undefined) deny("purpose_basis", "purpose_basis_required");
+    else if (request.purpose_basis !== undefined && !(PURPOSE_BASES as readonly string[]).includes(request.purpose_basis)) deny("purpose_basis", "purpose_basis_invalid");
+    else if (request.purpose_basis !== undefined) add("purpose_basis", "pass", request.purpose_basis);
+    else add("purpose_basis", "not_applicable");
   }
 
   // 6. stille timer (mottakerens enhet). Unntak: mottakeren skrev til oss siste `conversational_window_minutes` (da er hen våken). Samtaler har et STRENGERE, eget vindu (under).

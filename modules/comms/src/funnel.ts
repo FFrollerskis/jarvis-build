@@ -6,7 +6,7 @@ import { isIndeterminateTransportError, isOutcomeUnknownMessage } from "@jarvis/
 import { ProviderRejectedError, type AdapterMap } from "./adapters.ts";
 import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, normalizeRecipient, optOutHash, recipientHash, recipientHint, type CommsChannel, type CommsProvider } from "./channels.ts";
 import type { CommsConfig } from "./config.ts";
-import { evaluateOutboundPolicy, rateCaps, type OutboundKind, type OutboundPolicyState, type OutboundPurpose, type OutboundRequest, type PolicyDecision, type ReservationRegisterStatus } from "./policy.ts";
+import { PURPOSE_BASES, evaluateOutboundPolicy, rateCaps, type OutboundKind, type OutboundPolicyState, type OutboundPurpose, type OutboundRequest, type PolicyDecision, type ReservationRegisterStatus } from "./policy.ts";
 import type { Actor, AuthorizedAccount, Clock, CommsStore, JournalEntryInput, JournalSource } from "./store.ts";
 
 /**
@@ -55,8 +55,12 @@ const AccountRef = z.string().min(1).max(200);
 const Recipient = z.string().min(1).max(300);
 const MessageId = z.string().min(1).max(300);
 
+/** A-M2: eierens erklærte grunnlag for første kontakt med en kald mottaker (lukket liste) + kort notat. Påkrevd av policyen for kalde mottakere; valgfritt ellers. */
+const PurposeBasisField = z.enum(PURPOSE_BASES);
+const PurposeBasisNote = z.string().min(1).max(200);
+
 export const SendParamsSchema = json({
-  request_id: RequestId, channel: Channel, account_ref: AccountRef, recipient: Recipient, purpose: Purpose,
+  request_id: RequestId, channel: Channel, account_ref: AccountRef, recipient: Recipient, purpose: Purpose, purpose_basis: PurposeBasisField.optional(), purpose_basis_note: PurposeBasisNote.optional(),
   text: z.string().min(1).max(8000).optional(),
   template: json({ name: z.string().min(1).max(512), language: z.string().min(2).max(10), params: z.array(z.string().max(200)).max(10).optional() }).optional(),
   media: json({ kind: z.enum(["image", "document", "audio", "video"]), url: z.string().min(1).max(2000), caption: z.string().max(1000).optional() }).optional(),
@@ -67,7 +71,8 @@ export const DeleteParamsSchema = json({ request_id: RequestId, channel: Channel
 export const ReactParamsSchema = json({ request_id: RequestId, channel: Channel, account_ref: AccountRef, recipient: Recipient, target_message_id: MessageId, reaction: z.string().min(1).max(64) });
 /** Utgående samtale (P3h): kun kanalen `phone`; `text` er manuset (AI-opplysningen settes FØRST av policyen). `recording` finnes bare for at en forespørsel om opptak skal AVSLÅS med kode - den ignoreres aldri stille. */
 export const CallParamsSchema = json({
-  request_id: RequestId, channel: z.literal("phone"), account_ref: AccountRef, recipient: Recipient, purpose: Purpose, text: z.string().min(1).max(2000), recording: z.boolean().optional()
+  request_id: RequestId, channel: z.literal("phone"), account_ref: AccountRef, recipient: Recipient, purpose: Purpose, purpose_basis: PurposeBasisField.optional(), purpose_basis_note: PurposeBasisNote.optional(),
+  text: z.string().min(1).max(2000), recording: z.boolean().optional()
 });
 
 export interface ParsedOutbound {
@@ -77,7 +82,10 @@ export interface ParsedOutbound {
 
 export type ParseResult = { readonly ok: true; readonly value: ParsedOutbound } | { readonly ok: false; readonly code: string };
 
-function build(kind: OutboundKind, base: { request_id: string; channel: CommsChannel; account_ref: string; recipient: string; purpose: OutboundPurpose }, content: OutboundRequest["content"], extra: { thread_ref?: string; target_message_id?: string }): ParseResult {
+function build(
+  kind: OutboundKind, base: { request_id: string; channel: CommsChannel; account_ref: string; recipient: string; purpose: OutboundPurpose; purpose_basis?: OutboundRequest["purpose_basis"]; purpose_basis_note?: string },
+  content: OutboundRequest["content"], extra: { thread_ref?: string; target_message_id?: string }
+): ParseResult {
   const recipient = normalizeRecipient(base.channel, base.recipient);
   // En ugyldig mottaker avvises HER med fast kode (policyen ville avvist den også, men journalen trenger en hash - og vi hasher aldri en ugyldig verdi).
   if (!recipient.ok) return { ok: false, code: recipient.code };
@@ -87,17 +95,22 @@ function build(kind: OutboundKind, base: { request_id: string; channel: CommsCha
       request_id: base.request_id,
       request: {
         kind, channel: base.channel, account_ref: base.account_ref, recipient: recipient.value, purpose: base.purpose, content,
+        ...(base.purpose_basis !== undefined ? { purpose_basis: base.purpose_basis } : {}), ...(base.purpose_basis_note !== undefined ? { purpose_basis_note: base.purpose_basis_note } : {}),
         ...(extra.thread_ref !== undefined ? { thread_ref: extra.thread_ref } : {}), ...(extra.target_message_id !== undefined ? { target_message_id: extra.target_message_id } : {})
       }
     }
   };
 }
 
+const basisOf = (d: { purpose_basis?: OutboundRequest["purpose_basis"] | undefined; purpose_basis_note?: string | undefined }) => ({
+  ...(d.purpose_basis !== undefined ? { purpose_basis: d.purpose_basis } : {}), ...(d.purpose_basis_note !== undefined ? { purpose_basis_note: d.purpose_basis_note } : {})
+});
+
 export function parseSendParams(raw: unknown): ParseResult {
   const p = SendParamsSchema.safeParse(raw);
   if (!p.success) return { ok: false, code: "invalid_parameters" };
   const d = p.data;
-  return build("message", { request_id: d.request_id, channel: d.channel, account_ref: d.account_ref, recipient: d.recipient, purpose: d.purpose },
+  return build("message", { request_id: d.request_id, channel: d.channel, account_ref: d.account_ref, recipient: d.recipient, purpose: d.purpose, ...basisOf(d) },
     {
       ...(d.text !== undefined ? { text: d.text } : {}),
       ...(d.template !== undefined ? { template: { name: d.template.name, language: d.template.language, params: d.template.params ?? [] } } : {}),
@@ -131,7 +144,7 @@ export function parseCallParams(raw: unknown): ParseResult {
   const p = CallParamsSchema.safeParse(raw);
   if (!p.success) return { ok: false, code: "invalid_parameters" };
   const d = p.data;
-  return build("call", { request_id: d.request_id, channel: d.channel, account_ref: d.account_ref, recipient: d.recipient, purpose: d.purpose }, { text: d.text, ...(d.recording !== undefined ? { recording: d.recording } : {}) }, {});
+  return build("call", { request_id: d.request_id, channel: d.channel, account_ref: d.account_ref, recipient: d.recipient, purpose: d.purpose, ...basisOf(d) }, { text: d.text, ...(d.recording !== undefined ? { recording: d.recording } : {}) }, {});
 }
 
 export interface Evaluation {
@@ -233,6 +246,8 @@ export class OutboundFunnel {
       allowed: ev.decision.allowed, denial_codes: [...ev.decision.denial_codes],
       rules: ev.decision.rules.map((x) => ({ rule: x.rule, outcome: x.outcome, ...(x.code !== undefined ? { code: x.code } : {}) })),
       recipient: { hint: ev.recipient_hint, proof: { method: ev.decision.recipient_proof.method, identity_linked: ev.decision.recipient_proof.identity_id !== null, last_inbound_age_minutes: ev.decision.recipient_proof.last_inbound_age_minutes } },
+      // A-M2: eierens erklærte grunnlag (kun den lukkede verdien i revisjonssporet; det frie notatet ligger i journalen, ikke i verktøy-ledgeren).
+      purpose_basis: r.purpose_basis ?? null,
       content: { sha256: ev.decision.content_sha256, length: ev.decision.content_length, ai_disclosure_applied: ev.decision.disclosure_applied },
       counters: { recipient_24h: ev.state.sends_last_24h_to_recipient, account_1h: ev.state.sends_last_hour_from_account }
     };

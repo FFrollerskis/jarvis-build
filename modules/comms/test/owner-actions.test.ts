@@ -68,7 +68,7 @@ beforeEach(() => {
   notifications.length = 0;
 });
 
-const sendParams = (over: Record<string, JsonValue> = {}): Record<string, JsonValue> => ({ channel: "sms", account_ref: "+4791000000", recipient: phone(), purpose: "transactional", text: "Hei, timen din er bekreftet.", ...over });
+const sendParams = (over: Record<string, JsonValue> = {}): Record<string, JsonValue> => ({ channel: "sms", account_ref: "+4791000000", recipient: phone(), purpose: "transactional", purpose_basis: "existing_customer_relationship", text: "Hei, timen din er bekreftet.", ...over });
 const journal = async (requestId: string) => (await db.admin.query("SELECT status, denial_codes, rule_evaluation, content_sha256, content_length, recipient_hint, request_id FROM comms_outbound_log WHERE request_id = $1 ORDER BY created_at", [requestId])).rows as
   Array<{ status: string; denial_codes: string[]; rule_evaluation: unknown; content_sha256: string; content_length: number; recipient_hint: string; request_id: string }>;
 const journalCount = async () => ((await db.admin.query("SELECT count(*)::int AS n FROM comms_outbound_log")).rows[0] as { n: number }).n;

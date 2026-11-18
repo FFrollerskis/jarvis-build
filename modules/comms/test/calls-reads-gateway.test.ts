@@ -84,7 +84,7 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
-const callParams = (over: Record<string, JsonValue> = {}): Record<string, JsonValue> => ({ channel: "phone", account_ref: TWILIO_PHONE, recipient: phone(), purpose: "transactional", text: "Hei, dette gjelder timen din i morgen.", ...over });
+const callParams = (over: Record<string, JsonValue> = {}): Record<string, JsonValue> => ({ channel: "phone", account_ref: TWILIO_PHONE, recipient: phone(), purpose: "transactional", purpose_basis: "existing_customer_relationship", text: "Hei, dette gjelder timen din i morgen.", ...over });
 const startCall = (over: Record<string, JsonValue> = {}, idem = key("call")) => executeCommsOwnerAction(deps(), owner, { action: "start_call", parameters: callParams(over), idempotency_key: idem });
 const journalOf = async (requestId: string) => (await db.admin.query("SELECT kind, status, denial_codes, content_length, provider_message_id FROM comms_outbound_log WHERE request_id = $1 ORDER BY created_at", [requestId])).rows as
   Array<{ kind: string; status: string; denial_codes: string[]; content_length: number; provider_message_id: string | null }>;
