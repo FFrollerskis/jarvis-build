@@ -35,6 +35,17 @@ const CAMERA_ENTITY = /^camera\.[a-z0-9_]{1,100}$/;
 const TRIGGER_ENTITY = /^(binary_sensor|event|alarm_control_panel)\.[a-z0-9_]{1,100}$/;
 const MAX_STATE_BYTES = 256 * 1024;
 
+/**
+ * Alle feil ut av kilden er en STABIL, fast-ordforråds kode - aldri en frie feiltekst (som kan bære verts-/adresse-/URL-detaljer fra nettverkslaget) og aldri tokenet.
+ * Kjente koder slippes gjennom; avbrudd/tidsavbrudd og alt annet i transportlaget mappes til to faste koder.
+ */
+function haErrorCode(err: unknown): string {
+  const message = (err as Error | null)?.message;
+  if (typeof message === "string" && /^(home_assistant_[a-z0-9_]{1,60}|unsafe_vendor_url:[a-z0-9_]{1,60}|vision_image_invalid:[a-z_]{1,30})$/.test(message)) return message;
+  const name = (err as Error | null)?.name;
+  return name === "AbortError" || name === "TimeoutError" ? "home_assistant_timeout" : "home_assistant_unreachable";
+}
+
 const BINARY_SENSOR_CLASSES: Readonly<Record<string, VisionEventType>> = {
   motion: "motion_detected",
   moving: "motion_detected",
@@ -67,13 +78,17 @@ export class HomeAssistantVisionSource implements VisionSource {
   private async get(path: string): Promise<Response> {
     const token = await this.options.token();
     if (!token) throw new Error("home_assistant_token_not_configured");
-    const response = await this.options.fetch(`${await this.root()}${path}`, {
-      method: "GET",
-      headers: { authorization: `Bearer ${token}`, accept: "application/json, image/jpeg, image/png, image/webp" },
-      redirect: "reject",
-      signal: AbortSignal.timeout(this.timeoutMs)
-    });
-    return response;
+    const root = await this.root();
+    try {
+      return await this.options.fetch(`${root}${path}`, {
+        method: "GET",
+        headers: { authorization: `Bearer ${token}`, accept: "application/json, image/jpeg, image/png, image/webp" },
+        redirect: "reject",
+        signal: AbortSignal.timeout(this.timeoutMs)
+      });
+    } catch (err) {
+      throw new Error(haErrorCode(err)); // aldri den rå transportfeilen (kan bære vert/adresse) videre
+    }
   }
 
   private async readState(entity: string): Promise<{ state: string; attributes: Record<string, unknown>; last_changed: string } | null> {
@@ -92,7 +107,7 @@ export class HomeAssistantVisionSource implements VisionSource {
     } catch {
       throw new Error("home_assistant_invalid_state_response");
     }
-    if (typeof parsed !== "object" || parsed === null) throw new Error("home_assistant_invalid_state_response");
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("home_assistant_invalid_state_response");
     const record = parsed as Record<string, unknown>;
     const attributes = typeof record["attributes"] === "object" && record["attributes"] !== null && !Array.isArray(record["attributes"]) ? (record["attributes"] as Record<string, unknown>) : {};
     return { state: typeof record["state"] === "string" ? record["state"] : "", attributes, last_changed: typeof record["last_changed"] === "string" ? record["last_changed"] : "" };
@@ -100,15 +115,22 @@ export class HomeAssistantVisionSource implements VisionSource {
 
   async pollEvents(cameras: readonly VisionSourceCamera[], now: Date): Promise<VisionSourceEvent[]> {
     const events: VisionSourceEvent[] = [];
+    let attempted = 0;
+    let firstFailure: string | null = null;
+    let failures = 0;
     for (const camera of cameras) {
       for (const entity of camera.trigger_entities) {
         if (!TRIGGER_ENTITY.test(entity)) continue; // ugyldig konfigurasjon: aldri interpolert i en URL
+        attempted += 1;
         let state: Awaited<ReturnType<HomeAssistantVisionSource["readState"]>>;
         try {
           state = await this.readState(entity);
         } catch (err) {
-          // Én sensor som feiler skal ikke stoppe de andre; feilkoden (aldri tokenet) logges.
-          console.error(JSON.stringify({ msg: "vision_ha_poll_failed", camera_id: camera.camera_id, entity, code: String((err as Error).message).slice(0, 60) }));
+          // Én sensor som feiler skal ikke stoppe de andre; den stabile feilkoden (aldri tokenet, aldri rå transportfeil) logges.
+          const code = haErrorCode(err);
+          failures += 1;
+          firstFailure ??= code;
+          console.error(JSON.stringify({ msg: "vision_ha_poll_failed", camera_id: camera.camera_id, entity, code }));
           continue;
         }
         if (state === null) continue;
@@ -132,6 +154,8 @@ export class HomeAssistantVisionSource implements VisionSource {
         });
       }
     }
+    // Feilet ALLE lesinger (HA nede, feil token/URL, tidsavbrudd) er det en kildefeil - pipelinen rapporterer den som `source_error` i stedet for en stille «ingen hendelser».
+    if (attempted > 0 && failures === attempted && firstFailure !== null) throw new Error(firstFailure);
     return events;
   }
 
