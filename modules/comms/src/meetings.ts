@@ -39,6 +39,8 @@ export interface ExtractedCommitment {
   readonly segment_index: number;
 }
 
+const ORDINAL_DOT = String.fromCodePoint(0xe000); // privat bruk-tegn: aldri en del av en transkripsjon etter renseren
+const ORDINAL_DATE = /\b(\d{1,2})\.(?=\s+(?:januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember)\b)/giu;
 const MONTHS: Readonly<Record<string, number>> = { januar: 1, februar: 2, mars: 3, april: 4, mai: 5, juni: 6, juli: 7, august: 8, september: 9, oktober: 10, november: 11, desember: 12 };
 
 /** Navngitte mønstre (aldri modell). Hver treff er et FORSLAG - mange vanlige setninger («jeg skal på ferie») treffer også, derfor godtar eieren hver for seg. */
@@ -69,9 +71,10 @@ export function extractCommitments(parsed: ParsedTranscript): ExtractedCommitmen
   const out: ExtractedCommitment[] = [];
   const seen = new Set<string>();
   for (const [index, segment] of parsed.segments.entries()) {
-    for (const raw of segment.text.split(/(?<=[.!?])\s+|\n+/u)) {
+    // Setningsdeling etter .!? - men IKKE etter «20.» i en norsk dato (ordenstall med punktum): punktumet beskyttes midlertidig, ellers mister «innen 20. november» datoen.
+    for (const raw of segment.text.replace(ORDINAL_DATE, `$1${ORDINAL_DOT}`).split(/(?<=[.!?])\s+|\n+/u)) {
       if (out.length >= MEETING_MAX_COMMITMENTS) return out;
-      const sentence = raw.trim();
+      const sentence = raw.replaceAll(ORDINAL_DOT, ".").trim();
       if (sentence.length < 8) continue;
       const hit = RULES.find((r) => r.pattern.test(sentence));
       if (hit === undefined) continue;
