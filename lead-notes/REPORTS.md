@@ -151,3 +151,7 @@ Se /tmp/lead/B4-rereview.md: VERDICT MERGE (M1-M3, L1-L7, INFO lukket; ingen nye
 
 ## B4 re-review (2026-11-17 ~07:35Z)
 Se /tmp/lead/B4-rereview.md: VERDICT MERGE (M1-M3, L1-L7, INFO lukket; ingen nye HIGH/MEDIUM). Nye: N1 LOW (kredittnotat uteblir ved flerrunde chat-verktøytur og delegert skyrute-jobb ved hard stopp; chat viser misvisende «Reservemodell brukt»), N2 LOW (spesialistliste -> openai ved stengt Anthropic = eierspørsmål 1), N3 (M2-restrisiko må i runbook), N4 testhull (klokke-bakover-vern, lukket runde leser ikke forbruk), N5 INFO (ingen revisjonsrad for fortsettelser over 100 prosent; tierFor prototype-oppslag), N6 (runbook pool-klient unøyaktig), N7 (exhausted: alle AUTO-kall lokalt), N8 (D-476/Q-er mangler i docs på grenen = lead konsoliderer). Liten oppfølger sendt til B4-fikser ac91168fc33728e18 (N1, N3/N6/N7/N5 runbook, N4 tester, valgfritt tierFor).
+
+
+## G1 byggerrapport (2026-11-18 ~17:30Z)
+Se /tmp/lead/G1-report.md (D-463-tekst, D-41-revisjon, status P1a-P3i, sikkerhetsflater fil:linje, 7 nye eierspørsmål, avvik). Gren claude/wp-g1-comms head 4b2dfce7 (15 commits, base integration/post-merge-test). Full suite 14462/14467 (5 kjente sandkasse-feil). To uavhengige reviewere startet 17:35Z: A (utgående/eier/klasse D/adaptere; agent a8372c30c9442837f; utfall /tmp/lead/G1-review-A.md; worktree agent-aea9aa2c106dc3965) og B (innkommende webhooks/ubetrodd/graf/møter/kontakter/docs; agent a4f56fec33fd667ed; utfall /tmp/lead/G1-review-B.md; worktree g1-rev-b).
