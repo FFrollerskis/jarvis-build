@@ -457,6 +457,74 @@ describe("D: oppkoblingen (`buildCommsRuntime`) og kildevakter", () => {
     } finally { log.mockRestore(); }
   });
 
+  describe("B-M6: retensjonssveipet er faktisk koblet (kjører ved oppstart, riktige tenants og rom, validert webhook-tenant)", () => {
+    // En registrerende falsk pool: hver transaksjon (`withMemoryTransaction`) leser tenant/rom fra `set_config` og DELETE-ene - ingen database trengs for å bevise OPPKOBLINGEN.
+    const recorder = () => {
+      const deletes: Array<{ table: string; tenant: string; spaces: string }> = [];
+      const pool = {
+        connect: async () => {
+          let current = { tenant: "", spaces: "" };
+          return {
+            query: async (sql: string, params?: unknown[]) => {
+              if (sql.startsWith("SELECT set_config")) current = { tenant: String(params?.[0]), spaces: String(params?.[1]) };
+              const m = /^DELETE FROM (comms_\w+)/.exec(sql);
+              if (m) deletes.push({ table: m[1]!, tenant: current.tenant, spaces: current.spaces });
+              return { rowCount: 0, rows: [] };
+            },
+            release: () => undefined
+          };
+        }
+      };
+      return { pool: pool as never, deletes };
+    };
+    const flush = async () => { for (let i = 0; i < 600; i += 1) await Promise.resolve(); };
+    const hookEnv = { JARVIS_COMMS_OUTBOUND: "on", JARVIS_COMMS_CHANNELS: "sms", JARVIS_COMMS_WEBHOOKS: "twilio", JARVIS_COMMS_TENANT_ID: "tenant-hook", JARVIS_COMMS_PUBLIC_BASE_URL: "https://hooks.example.com" };
+
+    it("startSweeps kjører et sveip UMIDDELBART for alle eierens tenants (inkl. webhook-tenanten) × alle fire rom, og gjentar hver 6. time", async () => {
+      vi.useFakeTimers();
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      try {
+        const { pool, deletes } = recorder();
+        const rt = buildCommsRuntime({ env: hookEnv, pool, graph, business, secrets });
+        rt.startSweeps(["tenant-owner", "tenant-hook"], "person-owner");
+        await flush();
+        const inbound = deletes.filter((d) => d.table === "comms_inbound_events");
+        expect(inbound.map((d) => `${d.tenant}|${d.spaces}`).sort()).toEqual(
+          ["tenant-hook", "tenant-owner"].flatMap((t) => ["business", "personal", "project", "shared"].map((sp) => `${t}|${sp}`)).sort()
+        );
+        expect(deletes.filter((d) => d.table === "comms_outbound_log")).toHaveLength(8);
+        const before = deletes.length;
+        await vi.advanceTimersByTimeAsync(6 * 3_600_000 - 1);
+        expect(deletes.length).toBe(before);
+        await vi.advanceTimersByTimeAsync(1);
+        await flush();
+        expect(deletes.length).toBe(2 * before);
+      } finally { log.mockRestore(); vi.useRealTimers(); }
+    });
+
+    it("en webhook-tenant som IKKE er en av eierens stopper oppstarten FØR noe planlegges; uten webhook-tenant sveipes kun eierens tenants; alt AV planlegger ingenting", async () => {
+      vi.useFakeTimers();
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      try {
+        const bad = recorder();
+        expect(() => buildCommsRuntime({ env: hookEnv, pool: bad.pool, graph, business, secrets }).startSweeps(["tenant-owner"], "person-owner")).toThrow(InvalidCommsConfigError);
+        await flush();
+        expect(bad.deletes).toEqual([]);
+        await vi.advanceTimersByTimeAsync(7 * 3_600_000);
+        expect(bad.deletes).toEqual([]); // ingenting ble planlagt
+        const ok = recorder();
+        buildCommsRuntime({ env: { JARVIS_COMMS_OUTBOUND: "on", JARVIS_COMMS_CHANNELS: "sms" }, pool: ok.pool, graph, business, secrets }).startSweeps(["tenant-owner"], "person-owner");
+        await flush();
+        expect(new Set(ok.deletes.map((d) => d.tenant))).toEqual(new Set(["tenant-owner"]));
+        const off = recorder();
+        buildCommsRuntime({ env: {}, pool: off.pool, graph, business, secrets }).startSweeps(["tenant-owner"], "person-owner");
+        await flush();
+        await vi.advanceTimersByTimeAsync(7 * 3_600_000);
+        expect(off.deletes).toEqual([]);
+      } finally { log.mockRestore(); vi.useRealTimers(); }
+    });
+  });
+
   const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
 
   it("main.ts: kun fabrikken leser konfigurasjonen; verktøyene går i den ene register-løkken; deps settes kun når fabrikken gir noe", () => {
