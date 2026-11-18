@@ -131,6 +131,14 @@ describe("C: klienten mot en falsk server - les, opprett, endre, slett med readb
     expect((await client.get("privat", "b-uid-002"))?.summary).toBe("Desember 10");
     expect(await client.get("privat", "finnes-ikke-1")).toBeNull();
     expect(server.requests.every((r) => r.url.startsWith(CAL))).toBe(true);
+    // `from`/`to` hører sammen, og `limit` klemmes til 1-200: en negativ verdi gir ikke «alt unntatt de siste», en brøk avrundes ned
+    expect(await code(client.list("privat", { from: "2026-12-01" }))).toBe("invalid_input");
+    expect(await code(client.list("privat", { to: "2026-12-02" }))).toBe("invalid_input");
+    expect(await client.list("privat")).toHaveLength(2);
+    expect(await client.list("privat", { limit: -3 })).toHaveLength(1);
+    expect(await client.list("privat", { limit: 0 })).toHaveLength(1);
+    expect(await client.list("privat", { limit: 1.9 })).toHaveLength(1);
+    expect(await client.list("privat", { limit: 5000 })).toHaveLength(2);
     server.extraXml = "<!DOCTYPE x>";
     expect(await code(client.list("privat", { from: "2026-12-01", to: "2026-12-02" }))).toBe("dav_malformed_response");
   });

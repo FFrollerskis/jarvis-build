@@ -188,7 +188,7 @@ Jarvis' kalender-/kontaktmodell forblir kanonisk, iCloud er kilde og sluk, og in
 | Eier/delegert | Kun suveren eier; ingen delegat; ingen modellflate |
 | Idempotens | Deterministisk UID + `If-None-Match: *`; `If-Match` etag; `UNKNOWN` -> les, aldri blind retry |
 | Sandbox | En EGEN test-Apple-ID (ikke eierens hovedkonto) og kun test-samlinger i `JARVIS_PERSONAL_APPLE_DAV_ACCOUNTS` (blast radius = det som er listet) |
-| `DEFERRED` | Samtaleverktøy; gjentakende arrangementer (flytting/endring av serie); deltakere/invitasjoner (iTIP); delte kalender-ACL; prinsipal-/samlingsoppdagelse (PROPFIND: eieren oppgir samlings-URL-ene selv); synk-token (CTag/sync-collection); vedlegg; Apple-konto-autorisasjon i stedet for app-passord; EventKit (native app) |
+| `DEFERRED` | Samtaleverktøy; gjentakende arrangementer (flytting/endring av serie); deltakere/invitasjoner (iTIP); delte kalender-ACL; prinsipal-/samlingsoppdagelse (PROPFIND: eieren oppgir samlings-URL-ene selv); synk-token (CTag/sync-collection); vedlegg; Apple-konto-autorisasjon i stedet for app-passord; EventKit (native app); **UID-oppslag:** `get`/`update`/`delete` antar ressursnavnet `<uid>.ics`/`<uid>.vcf` (det Jarvis selv oppretter), men en ressurs opprettet av en annen klient kan ha et annet filnavn og blir da «ikke funnet» (et UID-filter-oppslag er ikke bygget; `list` viser alle elementer, og må avklares mot en ekte server) |
 | Databehandler | iCloud er en ekstern databehandler: `docs/security/PROCESSOR_REGION_MATRIX.md` og `docs/UA8_PERSONAL_TWIN_DPIA.md` utvides FØR live bruk |
 
 ## 7. P2f Personlig økonomi-lesing (kun lesing, kun rute)

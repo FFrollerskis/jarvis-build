@@ -380,6 +380,9 @@ export class AppleDavClient {
   async list(name: unknown, query: { from?: string; to?: string; text?: string; limit?: number } = {}): Promise<DavItem[]> {
     const c = this.collection(name);
     if (query.text !== undefined) cleanText(query.text, 100, "text");
+    // `from`/`to` hører sammen (ett av dem alene ville stille blitt «alt»); `limit` klemmes til 1-200 (en negativ verdi skal aldri bli «alt unntatt de siste»).
+    if ((query.from === undefined) !== (query.to === undefined)) throw new DavError("invalid_input", "from_and_to_together");
+    const limit = query.limit === undefined || !Number.isFinite(query.limit) ? 100 : Math.max(1, Math.min(Math.trunc(query.limit), 200));
     const response = await this.send({ method: "REPORT", url: c.url, headers: { Depth: "1", "Content-Type": "application/xml; charset=utf-8" }, body: reportBody(c.kind, query) });
     if (response.status !== 207) throw new DavError("dav_rejected", String(response.status));
     const items: DavItem[] = [];
@@ -389,7 +392,7 @@ export class AppleDavClient {
       const item = itemFromResource(c.kind, entry.data, href, entry.etag);
       if (item) items.push(item);
     }
-    return items.slice(0, Math.min(query.limit ?? 100, 200));
+    return items.slice(0, limit);
   }
 
   async get(name: unknown, uid: string): Promise<DavItem | null> {
