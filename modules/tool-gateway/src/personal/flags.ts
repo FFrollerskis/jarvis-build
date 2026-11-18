@@ -16,11 +16,11 @@ export const PERSONAL_FLAG_NAMES = {
   family: "JARVIS_PERSONAL_FAMILY",
   /** P1d: enhetssignert helse-inntak (rute `/personal/health/*` registreres KUN med flagget på). */
   healthIngest: "JARVIS_PERSONAL_HEALTH_INGEST",
-  /** P2e: Apple Kalender/Påminnelser/Kontakter via CalDAV/CardDAV (iCloud). Live er `BLOCKED_EXTERNAL` (eieren lager det app-spesifikke passordet). */
+  /** RESERVERT, INGEN EFFEKT (`DEFERRED`, se `status.ts`): P2e Apple Kalender/Påminnelser/Kontakter via CalDAV/CardDAV (iCloud). Live er `BLOCKED_EXTERNAL` (eieren lager det app-spesifikke passordet). */
   appleDav: "JARVIS_PERSONAL_APPLE_DAV",
-  /** P2f: personlig økonomi - KUN lesing av private kontoer/transaksjoner via den eksisterende bank-/PSD2-connectoren. Aldri betaling. */
+  /** RESERVERT, INGEN EFFEKT (`DEFERRED`, se `status.ts`): P2f personlig økonomi - KUN lesing via den eksisterende bank-/PSD2-connectoren. Aldri betaling. */
   financeRead: "JARVIS_PERSONAL_FINANCE_READ",
-  /** P2g: kontekstmotor (rene funksjoner over kalender + lokasjon + enhet) og sesjonskontinuitet. */
+  /** RESERVERT, INGEN EFFEKT (`BUILT_UNWIRED`, se `status.ts`): P2g kontekstavledninger (rene funksjoner i `@jarvis/context`); sesjonskontinuitet er eksisterende og uendret. */
   context: "JARVIS_PERSONAL_CONTEXT"
 } as const;
 

@@ -101,7 +101,7 @@ async function auditTypes(c: Circle): Promise<Array<{ type: string; decision: st
 describe("A: rollematrisen er en ren, strengeste-standard-tabell", () => {
   it("gjest har ingenting; barn kan ikke invitere/fjerne/opprette/slette; voksen kan ikke invitere/fjerne; eier kan alt", () => {
     expect(FAMILY_ROLE_ACTIONS.guest.size).toBe(0);
-    for (const action of ["circle:invite", "circle:remove", "lists:create", "events:create", "events:cancel", "share:view_health", "delegation:grant", "delegation:act"] as const) expect(familyCan("child", action)).toBe(false);
+    for (const action of ["circle:invite", "circle:remove", "lists:create", "events:create", "events:cancel", "share:grant_health", "share:view_health", "delegation:grant", "delegation:act"] as const) expect(familyCan("child", action)).toBe(false);
     expect(familyCan("adult", "circle:invite")).toBe(false);
     expect(familyCan("adult", "circle:remove")).toBe(false);
     expect(familyCan("adult", "lists:create")).toBe(true);
@@ -348,6 +348,7 @@ describe("D: deling av lokasjon/helse - kun subjektet gir, kun seeren leser, ing
     expect(await code(svc.grantShare(act(c, c.adult), { viewer_person_id: c.child, category: "health_summary" }))).toBe("share_not_allowed");
     expect(await code(svc.grantShare(act(c, c.adult), { viewer_person_id: c.guest, category: "location" }))).toBe("share_not_allowed");
     expect(await code(svc.grantShare(act(c, c.guest), { viewer_person_id: c.adult, category: "location" }))).toBe("role_not_allowed"); // gjest kan ikke dele
+    expect(await code(svc.grantShare(act(c, c.child), { viewer_person_id: c.adult, category: "health_summary" }))).toBe("share_not_allowed"); // barn deler aldri helse (foresattes samtykke er ikke løst)
     expect(await code(svc.grantShare(act(c, c.adult), { viewer_person_id: c.adult, category: "location" }))).toBe("self_target");
     expect(await code(svc.grantShare(act(c, c.adult), { viewer_person_id: c.stranger, category: "location" }))).toBe("not_found");
     expect(await code(svc.grantShare(act(c, c.adult), { viewer_person_id: c.owner, category: "heart_rate" as never }))).toBe("invalid_input");

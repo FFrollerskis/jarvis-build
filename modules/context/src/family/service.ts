@@ -355,7 +355,9 @@ export class FamilyService {
     const ttlDays = input.ttl_days;
     if (ttlDays !== undefined && (!Number.isInteger(ttlDays) || ttlDays < 1 || ttlDays > 365)) throw new FamilyError("invalid_input", "ttl_days");
     return this.tx(actor, async (client) => {
-      await this.requireCan(client, actor, "share:grant");
+      const me = await this.requireCan(client, actor, "share:grant");
+      // Strengeste standard: et barn deler aldri helse (verken eget eller andres) uten foresattes samtykke, som ikke er løst (åpent eierspørsmål) - kun lokasjon.
+      if (input.category === "health_summary" && !familyCan(me.role, "share:grant_health")) throw new FamilyError("share_not_allowed", `${me.role}:grant:${input.category}`);
       if (input.viewer_person_id === actor.person_id) throw new FamilyError("self_target");
       const viewer = await this.activeMember(client, actor.tenant_id, input.viewer_person_id);
       if (!viewer) throw new FamilyError("not_found");

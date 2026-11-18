@@ -8,15 +8,15 @@ export type FamilyAction =
   | "circle:invite" | "circle:remove" | "circle:view_roster"
   | "lists:read" | "lists:create" | "lists:add_item" | "lists:complete"
   | "events:read" | "events:create" | "events:cancel"
-  | "share:grant" | "share:view_location" | "share:view_health"
+  | "share:grant" | "share:grant_health" | "share:view_location" | "share:view_health"
   | "delegation:grant" | "delegation:act";
 
 const OWNER: ReadonlySet<FamilyAction> = new Set<FamilyAction>([
-  "circle:invite", "circle:remove", "circle:view_roster", "lists:read", "lists:create", "lists:add_item", "lists:complete", "events:read", "events:create", "events:cancel", "share:grant", "share:view_location",
+  "circle:invite", "circle:remove", "circle:view_roster", "lists:read", "lists:create", "lists:add_item", "lists:complete", "events:read", "events:create", "events:cancel", "share:grant", "share:grant_health", "share:view_location",
   "share:view_health", "delegation:grant", "delegation:act"
 ]);
 const ADULT: ReadonlySet<FamilyAction> = new Set<FamilyAction>([
-  "circle:view_roster", "lists:read", "lists:create", "lists:add_item", "lists:complete", "events:read", "events:create", "events:cancel", "share:grant", "share:view_location", "share:view_health",
+  "circle:view_roster", "lists:read", "lists:create", "lists:add_item", "lists:complete", "events:read", "events:create", "events:cancel", "share:grant", "share:grant_health", "share:view_location", "share:view_health",
   "delegation:grant", "delegation:act"
 ]);
 const CHILD: ReadonlySet<FamilyAction> = new Set<FamilyAction>([
