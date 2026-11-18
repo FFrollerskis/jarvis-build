@@ -1,12 +1,16 @@
 import type pg from "pg";
+import { FamilyService } from "@jarvis/context";
 import type { IdentityContext } from "@jarvis/contracts";
+import { HealthService } from "@jarvis/health";
+import { LocationService } from "@jarvis/location";
 import {
   CAR_CRITICAL_OPS, CAR_READ_ACTION, CAR_TOOL_ID, CarTransport, UnconfiguredCarAdapter, carCriticalConfigFromEnv, carCriticalToolDefinitions,
   HOME_CRITICAL_OPS, HOME_CRITICAL_READ_ACTION, HOME_ASSISTANT_TOOL_ID, HomeAssistantCriticalTransport, PERSONAL_FLAG_NAMES, PERSONAL_SECRET_REFS, PersonalActionJournal,
   executePersonalAction, homeCriticalConfigFromEnv, homeCriticalToolDefinitions, legacyCriticalActionsToDrop, personalActionIndex, personalFlagOn,
   type CarAdapter, type ExecutePersonalActionInput, type PersonalActionIndexEntry, type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
-import type { PersonalActionDomainDeps, PersonalApiDeps } from "./personal-routes.ts";
+import { familySharedDataReaders, type HealthReadApi, type LocationReadApi } from "./personal-family-readers.ts";
+import type { PersonalActionDomainDeps, PersonalApiDeps, PersonalFamilyDeps } from "./personal-routes.ts";
 
 /**
  * WP-G2 (D-464, UA-8 Personal Twin): ÉN komposisjonsfunksjon for hele personlig-domenet (verktøy + rute-avhengigheter + oppstartslogg). ALT er dormant: uten `JARVIS_PERSONAL_*`-flagg returnerer den tom verktøyliste,
@@ -35,6 +39,13 @@ export interface PersonalWiringInput {
    * (og, hvis det er et aggregat-API, `CORE_DEPENDENCY_DECISION_REQUIRED` er besvart).
    */
   carAdapter?: CarAdapter;
+  /** Den suverene eierens person-id (eierkonfigurasjonen). Uten den registreres IKKE familie-rutene selv om flagget er på (fail closed: ingen kan opprette sirkelen). */
+  ownerPersonId?: string;
+  /** Lesere for delt lokasjon/helse (tester gir fakes; i drift opprettes de fra `pool`). */
+  locationReader?: LocationReadApi;
+  healthReader?: HealthReadApi;
+  /** IANA-tidssone for «skritt i dag» (standard `Europe/Oslo`). */
+  timeZone?: string;
 }
 
 export function createPersonalWiring(input: PersonalWiringInput): PersonalWiring {
@@ -58,7 +69,6 @@ export function createPersonalWiring(input: PersonalWiringInput): PersonalWiring
     log["home_critical"] = { targets: config.targets.size, settle_ms: config.settleMs, legacy_lock_alarm_removed: true };
   }
 
-  const executor = { pool, gateway, journal: new PersonalActionJournal(pool), index: personalActionIndex(entries) };
   if (personalFlagOn(env, PERSONAL_FLAG_NAMES.car)) {
     const config = carCriticalConfigFromEnv(env);
     const adapter = input.carAdapter ?? new UnconfiguredCarAdapter();
@@ -68,8 +78,23 @@ export function createPersonalWiring(input: PersonalWiringInput): PersonalWiring
     log["car"] = { targets: config.targets.size, settle_ms: config.settleMs, adapter: adapter.name, live: adapter.name === "unconfigured" ? "BLOCKED_EXTERNAL" : "configured" };
   }
 
+  // Eksekutoren bygges ETTER at alle domener har registrert sine handlinger: indeksen er en ferdig bygd Map (en handling som legges til etterpå ville vært ukjent for ruten).
+  const executor = { pool, gateway, journal: new PersonalActionJournal(pool), index: personalActionIndex(entries) };
   const actions = domains.size > 0 ? { executor, domains, run: (identity: IdentityContext, request: ExecutePersonalActionInput) => executePersonalAction(executor, identity, request) } : undefined;
-  const deps: PersonalApiDeps | undefined = actions ? { actions } : undefined;
+
+  let family: PersonalFamilyDeps | undefined;
+  if (personalFlagOn(env, PERSONAL_FLAG_NAMES.family)) {
+    if (input.ownerPersonId === undefined || input.ownerPersonId.length === 0) {
+      log["family"] = { registered: false, reason: "owner_person_id_missing" };
+    } else {
+      const timeZone = input.timeZone ?? "Europe/Oslo";
+      const readers = familySharedDataReaders({ location: input.locationReader ?? new LocationService(pool), health: input.healthReader ?? new HealthService(pool), timeZone });
+      family = { service: new FamilyService(pool, { readers }), ownerPersonId: input.ownerPersonId };
+      log["family"] = { registered: true, shared_categories: ["location", "health_summary"], time_zone: timeZone };
+    }
+  }
+
+  const deps: PersonalApiDeps | undefined = actions || family ? { ...(actions ? { actions } : {}), ...(family ? { family } : {}) } : undefined;
   return {
     tools,
     filterTools: (all) => (dropLegacyHome ? legacyCriticalActionsToDrop(all) : all),
