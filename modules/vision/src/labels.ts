@@ -36,15 +36,13 @@ export function normalizeObjectLabel(raw: unknown): string | null {
 }
 
 /**
- * Teksten som embeddes for en hendelse (kun VALIDERTE felt: hendelsestype, normalisert objektnavn, eierens egne romnavn). Aldri
- * rå modelltekst, aldri bildeinnhold. Romnavnet er eierens eget (eier-definert i vision_rooms) og normaliseres på samme måte.
+ * Teksten som embeddes for en hendelse (kun VALIDERTE felt - aldri rå modelltekst, aldri bildeinnhold). For en objektobservasjon er det KUN det normaliserte objektnavnet:
+ * hendelsestype og romnavn ligger i databasen og filtreres der, og et felles prefiks («object detected ...») ville fått ulike objekter til å ligne hverandre (spesielt for
+ * hash-embedding, som ikke har semantikk). Uten objektnavn beskrives hendelsestypen. `room_name` aksepteres for kompatibilitet men er ikke med i objektvektoren.
  */
 export function describeEventForEmbedding(parts: { event_type: string; object_label?: string | null; room_name?: string | null }): string {
-  const room = parts.room_name === undefined || parts.room_name === null ? null : normalizeObjectLabel(parts.room_name);
-  const segments = [parts.event_type.replace(/_/g, " ")];
-  if (parts.object_label) segments.push(parts.object_label);
-  if (room) segments.push(`i ${room}`);
-  return segments.join(" ");
+  if (parts.object_label) return parts.object_label;
+  return parts.event_type.replace(/_/g, " ");
 }
 
 /**

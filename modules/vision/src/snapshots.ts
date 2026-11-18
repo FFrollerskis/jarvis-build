@@ -149,7 +149,17 @@ export class VisionSnapshotService {
   async read(tenantId: string, memorySpace: MemorySpace, personId: string, snapshotId: string): Promise<{ bytes: Uint8Array; media_type: SnapshotMediaType; sha256: string } | null> {
     const row = await this.getMetadata(tenantId, memorySpace, personId, snapshotId);
     if (!row || row.state !== "stored" || row.storage_backend !== this.storage.backend) return null;
-    const bytes = await this.storage.get(row.storage_key, row.byte_length + 1);
+    let bytes: Uint8Array | null;
+    try {
+      bytes = await this.storage.get(row.storage_key, row.byte_length + 1);
+    } catch (err) {
+      // Et objekt STØRRE enn metadataene sier er et integritetsavvik (manipulert/ødelagt) - aldri servert. Andre lese-feil (I/O) kastes videre.
+      if ((err as Error).message === "storage_object_too_large") {
+        console.error(JSON.stringify({ msg: "vision_snapshot_integrity_mismatch" }));
+        return null;
+      }
+      throw err;
+    }
     if (bytes === null) return null;
     if (bytes.length !== row.byte_length || createHash("sha256").update(bytes).digest("hex") !== row.sha256) {
       console.error(JSON.stringify({ msg: "vision_snapshot_integrity_mismatch" }));

@@ -112,7 +112,7 @@ function errorCode(err: unknown): string {
     if (m) return m[1] as string;
   }
   const name = (err as Error | null)?.name;
-  return typeof name === "string" && /^[A-Za-z0-9_]{1,60}$/.test(name) ? name.toLowerCase() : "pipeline_error";
+  return typeof name === "string" && name !== "Error" && /^[A-Za-z0-9_]{1,60}$/.test(name) ? name.toLowerCase() : "pipeline_error";
 }
 
 export class VisionIngestPipeline {
@@ -249,12 +249,11 @@ export class VisionIngestPipeline {
     const objectDetections = detections.filter((d) => d.event_type === "object_detected" && d.object_label !== null);
     const vectors = new Map<string, number[]>();
     if (this.options.embeddings !== undefined && objectDetections.length > 0) {
-      const roomName = camera.room_id === null ? null : await this.roomName(ctx, camera.room_id);
       for (const detection of objectDetections) {
         try {
           vectors.set(
             detection.object_label as string,
-            await this.options.embeddings.embed(this.options.embeddings.descriptorFor({ event_type: "object_detected", object_label: detection.object_label, room_name: roomName }))
+            await this.options.embeddings.embed(this.options.embeddings.descriptorFor({ event_type: "object_detected", object_label: detection.object_label }))
           );
         } catch {
           notes.push("embedding_failed");
