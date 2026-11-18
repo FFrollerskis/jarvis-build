@@ -59,6 +59,17 @@ export class SnapshotInProgressError extends Error {
   }
 }
 
+/** Lagringskvoten for (tenant, space) er nådd: bildet lagres ikke (hendelsen skrives uten bilde). Meldingen er en ren kode (pipelinens notat blir `snapshot_quota_exceeded`). */
+export class SnapshotQuotaError extends Error {
+  constructor() {
+    super("quota_exceeded");
+    this.name = "SnapshotQuotaError";
+  }
+}
+
+/** Standard lagringstak per (tenant, space): 2 GiB. En støyende sensor eller en ondsinnet kilde kan ikke fylle eierens disk (`JARVIS_VISION_MAX_STORED_MB` setter den). */
+export const DEFAULT_MAX_STORED_SNAPSHOT_BYTES = 2 * 1024 * 1024 * 1024;
+
 /** Kort, stabil feilkode for gravsteiner (aldri meldingstekst - den kan inneholde stier). */
 export function storageErrorCode(err: unknown): string {
   const code = (err as { code?: unknown } | null)?.code;
@@ -69,11 +80,17 @@ export function storageErrorCode(err: unknown): string {
 }
 
 export class VisionSnapshotService {
+  private readonly maxStoredBytes: number;
+
   constructor(
     private readonly pool: pg.Pool,
     private readonly storage: StorageAdapter,
-    private readonly vision: VisionService
-  ) {}
+    private readonly vision: VisionService,
+    options: { maxStoredBytes?: number } = {}
+  ) {
+    this.maxStoredBytes = options.maxStoredBytes ?? DEFAULT_MAX_STORED_SNAPSHOT_BYTES;
+    if (!Number.isFinite(this.maxStoredBytes) || this.maxStoredBytes <= 0) throw new Error("vision_snapshot_quota_invalid");
+  }
 
   /** Nøkkelen bygges av Jarvis (aldri av en kilde eller modell). Tenant-id hashes: ingen tenant-/personnavn i objektstien. */
   static storageKeyFor(tenantId: string, snapshotId: string): string {
@@ -97,7 +114,12 @@ export class VisionSnapshotService {
           this.storage.backend, VisionSnapshotService.storageKeyFor(tenantId, snapshotId), input.media_type, input.byte_length, input.sha256, days, input.task_id, input.session_id ?? null
         ]
       );
-      if (rows[0]) return { row: rows[0] as VisionSnapshotRow, existing: false };
+      if (rows[0]) {
+        // Kvote (mykt tak, i samme transaksjon): summen av ALLE bilderader i (tenant, space) inkludert denne. Over taket rulles raden tilbake - ingen pending-rest, ingen fil.
+        const used = await client.query(`SELECT COALESCE(SUM(byte_length), 0)::bigint AS used FROM vision_snapshots WHERE tenant_id = $1 AND memory_space_id = $2`, [tenantId, memorySpace]);
+        if (Number((used.rows[0] as { used: string }).used) > this.maxStoredBytes) throw new SnapshotQuotaError();
+        return { row: rows[0] as VisionSnapshotRow, existing: false };
+      }
       const existing = await client.query(
         `SELECT * FROM vision_snapshots WHERE tenant_id = $1 AND memory_space_id = $2 AND person_id = $3 AND source_type = $4 AND source_instance_id = $5 AND source_event_id = $6`,
         [tenantId, memorySpace, personId, input.source_type, input.source_instance_id, input.source_event_id]

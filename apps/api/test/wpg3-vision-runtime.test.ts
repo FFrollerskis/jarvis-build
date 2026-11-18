@@ -110,7 +110,7 @@ describe("main.ts: flagg-av-identitet i selve koblingen", () => {
 describe("buildVisionRuntime", () => {
   const stubs = (envVars: Record<string, string>, over: Record<string, unknown> = {}) => ({
     pool: {} as pg.Pool, env: envVars as NodeJS.ProcessEnv, vision: {} as VisionService, gateway: { complete: async () => ({ text: "{}", provider: "local_vision", model: "m" }) },
-    memoryEmbedding: new LocalHashEmbedding(), devices: { approverFor: async () => undefined }, secrets: { get: async () => null },
+    memoryEmbedding: new LocalHashEmbedding(), devices: { approverFor: async () => undefined }, ownerTenantId: "tenant-owner", secrets: { get: async () => null },
     ownerControls: { killSwitch: { isActiveDurable: async () => false }, controls: { isFrozenDurable: async () => false, isRevokedDurable: async () => false } }, ...over
   });
 

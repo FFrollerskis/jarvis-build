@@ -38,6 +38,7 @@ Alle flagg er AV som standard og slås på KUN med eksakt verdi `on` (`true`/`1`
 | `JARVIS_VISION_MODEL_TIMEOUT_MS` | `90000` | 5000-600000. |
 | `JARVIS_VISION_STORE_SNAPSHOTS` | tom | Lagre hendelsesbilder (kun kameraer med policy `store_snapshot` i sone `home`). Krever `JARVIS_VISION_STORAGE_DIR`. |
 | `JARVIS_VISION_STORAGE_DIR` | tom | ABSOLUTT mappe i api-containeren. Eieren må montere et skrivbart volum selv (rootfs er read-only) - se §5, steg 5. |
+| `JARVIS_VISION_MAX_STORED_MB` | `2048` | Lagringstak for bilder per (tenant, space), 16-10000000 MB. Over taket lagres bildet ikke (hendelsen skrives uten bilde, notat `snapshot_quota_exceeded`); mykt tak (samtidige skrivinger kan overskride det marginalt). |
 | `JARVIS_VISION_HA_POLL` | tom | Poll Home Assistant for utløsere hos påslåtte HA-kameraer. Bruker de EKSISTERENDE `JARVIS_HA_BASE_URL`/`JARVIS_HA_TOKEN` (vault-kjeden). |
 | `JARVIS_VISION_POLL_INTERVAL_SECONDS` | `20` | 5-3600. |
 | `JARVIS_VISION_MAINTENANCE_INTERVAL_MINUTES` | `15` | Lett vedlikehold (gravsteiner, pending-bilder, utløp av opptaksforespørsler), 1-1440. |
@@ -78,7 +79,7 @@ Rekkefølge: kropp (størrelse/JSON) -> forbudte identitetsfelt (`tenant_id`, `p
 | `/vision/capture/pending` | A | grant (enhetens egen økt) | enhet = grantets `device_id`; ser kun forespørsler adressert til seg |
 | `/vision/capture/upload` | B (ingestion) | grant + enhetssignert Ed25519 over request/tenant/person/enhet/hash/lengde/type/tid | engangs (betinget forbruk), ±5 min skjevhet, hash/lengde/magic bytes, maks 5 MiB, samme pipeline; enhetens økt MÅ ha samme memory space som kameraet |
 
-Bakgrunnspolleren: kjører kun med `JARVIS_VISION_HA_POLL=on`, sjekker kill switch / frosset `home-assistant`-connector / tilbakekalt `JARVIS_HA_TOKEN` før første lesing og før hvert space (kastet feil = stanset), aldri to runder samtidig, én feil velter ikke resten.
+Bakgrunnspolleren: kjører kun med `JARVIS_VISION_HA_POLL=on`, leser KUN eierens tenant (HA-credentialen tilhører eieren; en annen tenants kamera-rader polles aldri med den), sjekker kill switch / frosset `home-assistant`-connector / tilbakekalt `JARVIS_HA_TOKEN` før første lesing og før hvert space (kastet feil = stanset), aldri to runder samtidig, én feil velter ikke resten.
 
 ## 5. D-41-revisjon per adapter (OVERRIDES: `unverified` der det ikke er verifisert mot offisiell dokumentasjon)
 
@@ -137,6 +138,6 @@ Forutsetninger: Home Assistant-instans med en kamera-entity (`camera.*`) og en b
 
 ## 9. Testbevis (sandbox; ingenting er VERIFIED mot virkeligheten)
 
-19 testfiler / 329 tester grønne i én kjøring (embedded Postgres 16 som `postgres`-bruker, 2 workers): `modules/vision` (g3-pure 14, g3-policy 11, g3-classifier 15, g3-migrations 19, g3-pipeline 27, g3-lifecycle 11, g3-capture 15, g3-ha-source 27, g3-ha-pipeline 6, g3-poller 11, g3-guards 29, + eksisterende service-rls 34 / room-scope-integrity 8), `modules/erasure` (vision-g3-erasure 2 + eksisterende vision-erasure 3), `modules/model-gateway` (wpg3-restricted-media 15), `packages/provider-adapters` (wpg3-local-vision 12), `apps/api` (wpg3-vision-runtime 57, wpg3-vision-routes 13). Byggevaktene er mutasjonsprøvd mot ekte filer (11 mutasjoner, alle felt), og redirect-herdingen av `local_vision` er mutasjonsprøvd (fjernes den, feller to tester).
+19 testfiler / 332 tester grønne i én kjøring (embedded Postgres 16 som `postgres`-bruker, 2 workers): `modules/vision` (g3-pure 14, g3-policy 11, g3-classifier 15, g3-migrations 19, g3-pipeline 27, g3-lifecycle 13, g3-capture 15, g3-ha-source 27, g3-ha-pipeline 6, g3-poller 12, g3-guards 29, + eksisterende service-rls 34 / room-scope-integrity 8), `modules/erasure` (vision-g3-erasure 2 + eksisterende vision-erasure 3), `modules/model-gateway` (wpg3-restricted-media 15), `packages/provider-adapters` (wpg3-local-vision 12), `apps/api` (wpg3-vision-runtime 57, wpg3-vision-routes 13). Byggevaktene er mutasjonsprøvd mot ekte filer (11 mutasjoner, alle felt), og redirect-herdingen av `local_vision` er mutasjonsprøvd (fjernes den, feller to tester).
 
 Kjent avgrensning: HA-kilden er testet mot en lokal falsk HA med en kontrakts-`fetch`, og mot den ENDELIGE `guardedFetch` i `apps/api`; det er ikke testet mot HA sine faktiske svar. Modellformatet er testet mot en falsk OpenAI-kompatibel server.

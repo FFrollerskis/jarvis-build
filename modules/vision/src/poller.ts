@@ -1,5 +1,5 @@
 import type pg from "pg";
-import { listAllTenantIds, listTenantMemorySpaces } from "@jarvis/core";
+import { listTenantMemorySpaces } from "@jarvis/core";
 import type { MemorySpace } from "@jarvis/contracts";
 import type { VisionCamera, VisionCameraService } from "./cameras.ts";
 import type { PollSummary, VisionIngestPipeline } from "./pipeline.ts";
@@ -8,6 +8,8 @@ import type { VisionSource } from "./source.ts";
 /**
  * WP-G3 (D-465), P1a: bakgrunnspolleren - EN runde = les utløserne til alle PÅSLÅTTE kameraer av kildens type, i alle tenantens spaces, og la pipelinen behandle dem (policy -> idempotens ->
  * ETT bilde -> lokal klassifisering -> én transaksjon).
+ *
+ * KUN de oppgitte tenantene polles (`tenantIds`): kilden (HA) og dens credential tilhører EIEREN, så en annen tenants kamera-rader polles aldri med eierens HA-token (ingen kryss-tenant-lesing via en delt credential).
  *
  * Eier-kontrollene (kill switch, frosset connector, tilbakekalt credential) er en INNSATT port (`guard`): `blocked()` gir `null` (kjør) eller en kort årsakskode. Porten sjekkes FØR første lesing OG før
  * hvert space, og en kastet feil fra den tolkes som «stanset» (fail-closed) - polleren gjør aldri noe i et system eieren har stanset. Én tenant/space som feiler velter aldri resten (samme
@@ -25,6 +27,8 @@ export interface VisionPollerDeps {
   pipeline: Pick<VisionIngestPipeline, "pollSource">;
   source: VisionSource;
   guard: VisionPollerGuard;
+  /** Tenantene kildens credential gjelder for (i drift: kun eierens tenant). Tom liste = ingenting polles. */
+  tenantIds: readonly string[];
 }
 
 export type VisionPollTickResult =
@@ -75,13 +79,7 @@ export class VisionPoller {
       let spacesPolled = 0;
       let camerasPolled = 0;
       let failedSpaces = 0;
-      let tenantIds: string[];
-      try {
-        tenantIds = await listAllTenantIds(this.deps.pool, 200);
-      } catch (err) {
-        console.error(JSON.stringify({ msg: "vision_poll_tenants_failed", code: codeOf(err) }));
-        return { status: "ok", spaces_polled: 0, cameras_polled: 0, failed_spaces: 1, summary };
-      }
+      const tenantIds = [...new Set(this.deps.tenantIds)];
       const sourceType = this.deps.source.source_type as "home_assistant" | "iphone";
       for (const tenantId of tenantIds) {
         let spaces: string[];

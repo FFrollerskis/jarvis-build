@@ -243,3 +243,38 @@ describe("kamera-fjerning, integritet og vedlikeholdssveipet", () => {
     expect((await files()).some((f) => f.includes(c.snapshot_id))).toBe(false);
   });
 });
+
+describe("lagringskvote: en støyende sensor kan ikke fylle disken", () => {
+  it("over taket per (tenant, space) lagres bildet ikke (hendelsen skrives uten bilde, notat snapshot_quota_exceeded), ingen pending-rest og ingen fil; taket gjelder summen i spacet", async () => {
+    const used = await scalar(`SELECT COALESCE(SUM(byte_length), 0)::int AS n FROM vision_snapshots WHERE tenant_id = $1 AND memory_space_id = 'home'`, [T.tenant]);
+    const limited = new VisionSnapshotService(db.app, storage, vision, { maxStoredBytes: used + 1200 }); // plass til to bilder à ~524 byte
+    const run = async (label: string): Promise<{ status: string; snapshot_id?: string | undefined; notes: string[] }> => {
+      const gateway = new ScriptedGateway();
+      gateway.text = detectionsJson([{ event_type: "object_detected", object_label: label, confidence: 0.9 }]);
+      const p = new VisionIngestPipeline({ pool: db.app, vision, classifier: new VisionClassifier({ gateway }), snapshots: limited, embeddings, inventory, enabled: true, storeSnapshots: true });
+      return p.processCaptured(ctx, camera, {
+        source_type: "home_assistant", source_event_id: `binary_sensor.x@quota-${label}`, base_event_type: "motion_detected", observed_at: new Date().toISOString(), age_ms: 10, skipCooldown: true,
+        getImage: async () => ({ bytes: makeJpeg(), declared_type: "image/jpeg" })
+      });
+    };
+    const before = (await files()).length;
+    const first = await run("kvote1");
+    const second = await run("kvote2");
+    const third = await run("kvote3");
+    expect([first.status, second.status, third.status]).toEqual(["recorded", "recorded", "recorded"]);
+    expect(first.snapshot_id).toBeDefined();
+    expect(second.snapshot_id).toBeDefined();
+    expect(third.snapshot_id).toBeUndefined();
+    expect(third.notes).toContain("snapshot_quota_exceeded");
+    expect((await files()).length - before).toBe(2);
+    expect(await scalar(`SELECT count(*)::int AS n FROM vision_snapshots WHERE source_event_id LIKE '%quota-kvote3%'`)).toBe(0);
+    expect(await scalar(`SELECT count(*)::int AS n FROM vision_event_observations WHERE source_event_id LIKE '%quota-kvote3%' AND event_type = 'object_detected'`)).toBe(1); // objektet er likevel registrert
+    // en annen tenants space teller ikke mot dette spacet (egen kvote)
+    expect(await scalar(`SELECT COALESCE(SUM(byte_length), 0)::int AS n FROM vision_snapshots WHERE tenant_id = $1`, [T2.tenant])).toBe(0);
+  });
+
+  it("ugyldig kvote avvises ved konstruksjon", () => {
+    expect(() => new VisionSnapshotService(db.app, storage, vision, { maxStoredBytes: 0 })).toThrow("vision_snapshot_quota_invalid");
+    expect(() => new VisionSnapshotService(db.app, storage, vision, { maxStoredBytes: Number.NaN })).toThrow("vision_snapshot_quota_invalid");
+  });
+});

@@ -1462,7 +1462,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   });
   // WP-G3 (D-465): UA-9-kjøretiden (pipeline, HA-poller, `/vision/*`-rutene, vedlikehold). `null` (ingenting bygget) uten JARVIS_VISION_ENABLED=on. Se vision-runtime.ts for flaggene.
   const visionRuntime = buildVisionRuntime({
-    pool, env: process.env, vision: visionService, gateway, memoryEmbedding, devices: deviceRegistry, secrets: readSecretProvider,
+    pool, env: process.env, vision: visionService, gateway, memoryEmbedding, devices: deviceRegistry, ownerTenantId: owner.tenant_id, secrets: readSecretProvider,
     ownerControls: { killSwitch, controls: ownerControls }
   });
   const deps: ApiDeps = {

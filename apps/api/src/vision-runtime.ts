@@ -21,6 +21,7 @@ import type { VisionApiDeps } from "./vision-routes.ts";
  *   JARVIS_VISION_LOCAL_URL / _MODEL   OpenAI-kompatibelt lokalt endepunkt (Ollama, llama.cpp ...) og modellnavn (standard `local-vision`).
  *   JARVIS_VISION_STORE_SNAPSHOTS lagring av hendelsesbilder (krever JARVIS_VISION_STORAGE_DIR; kun kameraer med policy `store_snapshot` i hjemmesonen lagres).
  *   JARVIS_VISION_HA_POLL         poll Home Assistant (bruker den EKSISTERENDE HA-connectorens JARVIS_HA_BASE_URL/JARVIS_HA_TOKEN fra secret-kjeden - ingen ny credential).
+ *   JARVIS_VISION_MAX_STORED_MB   lagringstak for bilder per (tenant, space) (standard 2048, 16-10000000; over taket lagres bildet ikke, hendelsen skrives uten bilde).
  *   JARVIS_VISION_POLL_INTERVAL_SECONDS (standard 20, 5-3600), JARVIS_VISION_MAINTENANCE_INTERVAL_MINUTES (standard 15, 1-1440), JARVIS_VISION_RETENTION_SWEEP_HOUR (uendret) og
  *   JARVIS_VISION_MAINTENANCE_HOUR (standard 3, daglig full vedlikeholdskjøring).
  */
@@ -118,6 +119,8 @@ export interface VisionRuntimeDeps {
   gateway: VisionModelGateway;
   memoryEmbedding: EmbeddingProvider;
   devices: CaptureDeviceRegistry;
+  /** Eierens tenant: den ENESTE tenanten HA-polleren leser for (HA-credentialen tilhører eieren). */
+  ownerTenantId: string;
   secrets: { get(name: string): Promise<string | null | undefined> };
   ownerControls: VisionOwnerControls;
   /** Test-/drift-injeksjon (standard: `guardedFetch` fra tool-gateway). */
@@ -148,7 +151,9 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
 
   const cameras = new VisionCameraService(deps.pool);
   const inventory = new VisionInventoryService(deps.pool);
-  const snapshots = flags.storeSnapshots && flags.storageDir !== undefined ? new VisionSnapshotService(deps.pool, new LocalFsStorageAdapter(flags.storageDir), deps.vision) : undefined;
+  const snapshots = flags.storeSnapshots && flags.storageDir !== undefined
+    ? new VisionSnapshotService(deps.pool, new LocalFsStorageAdapter(flags.storageDir), deps.vision, { maxStoredBytes: envInt("JARVIS_VISION_MAX_STORED_MB", 2048, { min: 16, max: 10_000_000 }) * 1024 * 1024 })
+    : undefined;
   let embeddings: VisionEmbeddingService | undefined;
   try {
     embeddings = new VisionEmbeddingService(deps.pool, deps.memoryEmbedding);
@@ -170,7 +175,7 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
       baseUrl: async () => (await deps.secrets.get("JARVIS_HA_BASE_URL")) ?? null,
       token: async () => (await deps.secrets.get("JARVIS_HA_TOKEN")) ?? null
     });
-    poller = new VisionPoller({ pool: deps.pool, cameras, pipeline, source, guard: createVisionPollerGuard(deps.ownerControls) });
+    poller = new VisionPoller({ pool: deps.pool, cameras, pipeline, source, guard: createVisionPollerGuard(deps.ownerControls), tenantIds: [deps.ownerTenantId] });
     pollerHandle = startVisionPoller(poller, envInt("JARVIS_VISION_POLL_INTERVAL_SECONDS", 20, { min: 5, max: 3600 }) * 1000);
   }
 
