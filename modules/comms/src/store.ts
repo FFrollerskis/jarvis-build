@@ -30,6 +30,17 @@ export interface Actor {
 
 export type OptOutSource = "inbound_stop_keyword" | "provider_error" | "owner_recorded" | "recipient_request";
 
+/** B-H2: avmeldingen/gjenopptaket en innkommende STOP/START fører til. Skrives i SAMME transaksjon som hendelsens dedupe-rad (se `recordInbound`). */
+export interface OptEffect {
+  readonly kind: "stop" | "start";
+  readonly channel: CommsChannel;
+  readonly account_ref: string;
+  readonly recipient_hash: string;
+  readonly recipient_hint: string;
+  /** Peker til hendelsen (DB-grense 200 tegn: bruk `evidenceRefFor`). */
+  readonly evidence_ref: string;
+}
+
 export interface OptOutRow {
   readonly opt_out_id: string;
   readonly channel: CommsChannel;
@@ -206,21 +217,26 @@ export class CommsStore {
     tenantId: string, space: MemorySpace,
     input: { channel: CommsChannel; account_ref: string; recipient_hash: string; recipient_hint: string; source: OptOutSource; evidence_ref?: string; recorded_by: string; session_id?: string; task_id?: string }
   ): Promise<{ opt_out_id: string; created: boolean }> {
-    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
-      const id = newId("optout");
-      const res = await client.query(
-        `INSERT INTO comms_recipient_opt_outs (tenant_id, opt_out_id, memory_space_id, channel, account_ref, recipient_hash, recipient_hint, source, evidence_ref, recorded_by, session_id, task_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-         ON CONFLICT (tenant_id, channel, account_ref, recipient_hash) WHERE status = 'active' DO NOTHING RETURNING opt_out_id`,
-        [tenantId, id, space, input.channel, input.account_ref, input.recipient_hash, input.recipient_hint, input.source, input.evidence_ref ?? null, input.recorded_by, input.session_id ?? null, input.task_id ?? null, this.clock()]
-      );
-      if (res.rowCount === 1) return { opt_out_id: id, created: true };
-      const existing = await client.query(
-        `SELECT opt_out_id FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND channel = $2 AND account_ref = $3 AND recipient_hash = $4 AND status = 'active'`,
-        [tenantId, input.channel, input.account_ref, input.recipient_hash]
-      );
-      return { opt_out_id: (existing.rows[0] as { opt_out_id: string }).opt_out_id, created: false };
-    });
+    return withMemoryTransaction(this.pool, tenantId, [space], (client) => this.recordOptOutIn(client, tenantId, space, input));
+  }
+
+  private async recordOptOutIn(
+    client: pg.PoolClient, tenantId: string, space: MemorySpace,
+    input: { channel: CommsChannel; account_ref: string; recipient_hash: string; recipient_hint: string; source: OptOutSource; evidence_ref?: string; recorded_by: string; session_id?: string; task_id?: string }
+  ): Promise<{ opt_out_id: string; created: boolean }> {
+    const id = newId("optout");
+    const res = await client.query(
+      `INSERT INTO comms_recipient_opt_outs (tenant_id, opt_out_id, memory_space_id, channel, account_ref, recipient_hash, recipient_hint, source, evidence_ref, recorded_by, session_id, task_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       ON CONFLICT (tenant_id, channel, account_ref, recipient_hash) WHERE status = 'active' DO NOTHING RETURNING opt_out_id`,
+      [tenantId, id, space, input.channel, input.account_ref, input.recipient_hash, input.recipient_hint, input.source, input.evidence_ref ?? null, input.recorded_by, input.session_id ?? null, input.task_id ?? null, this.clock()]
+    );
+    if (res.rowCount === 1) return { opt_out_id: id, created: true };
+    const existing = await client.query(
+      `SELECT opt_out_id FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND channel = $2 AND account_ref = $3 AND recipient_hash = $4 AND status = 'active'`,
+      [tenantId, input.channel, input.account_ref, input.recipient_hash]
+    );
+    return { opt_out_id: (existing.rows[0] as { opt_out_id: string }).opt_out_id, created: false };
   }
 
   /**
@@ -228,14 +244,16 @@ export class CommsStore {
    * utenfor kanalen (`recipient_request`) kan aldri oppheves av et tekstsvar.
    */
   async liftByStartKeyword(tenantId: string, space: MemorySpace, input: { channel: CommsChannel; account_ref: string; recipient_hash: string }): Promise<number> {
-    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
-      const res = await client.query(
-        `UPDATE comms_recipient_opt_outs SET status = 'lifted', lifted_at = $5, lifted_by = 'inbound_start_keyword'
-          WHERE tenant_id = $1 AND channel = $2 AND account_ref = $3 AND recipient_hash = $4 AND status = 'active' AND source IN ('inbound_stop_keyword', 'provider_error')`,
-        [tenantId, input.channel, input.account_ref, input.recipient_hash, this.clock()]
-      );
-      return res.rowCount ?? 0;
-    });
+    return withMemoryTransaction(this.pool, tenantId, [space], (client) => this.liftIn(client, tenantId, input));
+  }
+
+  private async liftIn(client: pg.PoolClient, tenantId: string, input: { channel: CommsChannel; account_ref: string; recipient_hash: string }): Promise<number> {
+    const res = await client.query(
+      `UPDATE comms_recipient_opt_outs SET status = 'lifted', lifted_at = $5, lifted_by = 'inbound_start_keyword'
+        WHERE tenant_id = $1 AND channel = $2 AND account_ref = $3 AND recipient_hash = $4 AND status = 'active' AND source IN ('inbound_stop_keyword', 'provider_error')`,
+      [tenantId, input.channel, input.account_ref, input.recipient_hash, this.clock()]
+    );
+    return res.rowCount ?? 0;
   }
 
   async listOptOuts(tenantId: string, space: MemorySpace, limit = 100): Promise<OptOutRow[]> {
@@ -391,8 +409,13 @@ export class CommsStore {
   }
 
   // ---------------------------------------------------------------- innkommende hendelser (kun signaturverifiserte)
-  /** `inserted: false` = samme leverandørhendelse er sett før (gjenspilling): ingenting skrives eller utføres en gang til. */
-  async recordInbound(tenantId: string, space: MemorySpace, input: InboundEventInput, retentionDays: number): Promise<{ inserted: boolean; event_id: string | null }> {
+  /**
+   * `inserted: false` = samme leverandørhendelse er sett før (gjenspilling): ingenting skrives eller utføres en gang til.
+   *
+   * FIKS B-H2: dedupe-raden og avmeldingen/gjenopptaket (`effect`) skrives i ÉN transaksjon. Før lå de i to: feilet det andre steget etter at dedupe-raden var committet, var leverandørens retry en «duplikat» og mottakerens
+   * STOP ble aldri registrert (juridisk tung, lav sannsynlighet). Nå ruller en feil i avmeldingen tilbake HELE hendelsen, og retry behandles på nytt.
+   */
+  async recordInbound(tenantId: string, space: MemorySpace, input: InboundEventInput, retentionDays: number, effect?: OptEffect): Promise<{ inserted: boolean; event_id: string | null }> {
     return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
       const id = newId("cin");
       const now = this.clock();
@@ -405,7 +428,16 @@ export class CommsStore {
         [tenantId, id, space, input.provider, input.channel, input.account_ref, input.event_key, input.kind, input.sender_hash, input.sender_hint, input.identity_id, input.thread_ref,
           input.content_excerpt, input.content_sha256, input.provider_ts, now, new Date(now.getTime() + retentionDays * 86_400_000), `webhook:${input.provider}`, input.ingest_id]
       );
-      return res.rowCount === 1 ? { inserted: true, event_id: id } : { inserted: false, event_id: null };
+      if (res.rowCount !== 1) return { inserted: false, event_id: null };
+      if (effect?.kind === "stop") {
+        await this.recordOptOutIn(client, tenantId, space, {
+          channel: effect.channel, account_ref: effect.account_ref, recipient_hash: effect.recipient_hash, recipient_hint: effect.recipient_hint, source: "inbound_stop_keyword",
+          evidence_ref: effect.evidence_ref, recorded_by: "system", task_id: input.ingest_id
+        });
+      } else if (effect?.kind === "start") {
+        await this.liftIn(client, tenantId, { channel: effect.channel, account_ref: effect.account_ref, recipient_hash: effect.recipient_hash });
+      }
+      return { inserted: true, event_id: id };
     });
   }
 
