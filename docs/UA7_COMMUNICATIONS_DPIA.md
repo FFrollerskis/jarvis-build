@@ -242,3 +242,68 @@ Dette notatet oppdateres FØR — ikke etter — hver nye tale-/transkripsjons-/
 bruk: ny STT/TTS/realtime-leverandør, møtetranskripsjon, SIP/telefoni, samtaleopptak av tredjepart,
 eller utgående AI-samtaler. Samme regel som matrisens egen: en rad som ikke er fylt ut, er ikke i
 produksjonsbruk.
+
+---
+
+## 10. UA-7 resterende deler (WP-G1, D-463) - UTKAST, krever juridisk gjennomgang
+
+> **Status: UTKAST (`DRAFT_REQUIRES_LEGAL_REVIEW`).** Alt under er DORMANT (AV som standard, bak `JARVIS_COMMS_*`-flagg) og `NOT VERIFIED`: ingen live-test er kjørt, ingen leverandørvilkår er verifisert, og ingen rettslig vurdering er gjort.
+> Dette er en teknisk redegjørelse for hva koden gjør og hva den bevisst IKKE gjør - ikke en juridisk konklusjon. **Jarvis avgjør aldri selv et rettslig grunnlag** (samme prinsipp som §0 og `modules/consent`, D-91): koden håndhever
+> registrerte erklæringer og fail-closed regler. Alle punkter merket «JURIDISK» må vurderes av en jurist før produksjonsbruk. `UA7_ACCEPTANCE_4` er UENDRET `PARTIAL`; `UA7_COMPLETE=false`.
+> Ansvarlige filer: `modules/comms/` (policy, adaptere, webhooks, kontakter, møter, sveip), migrasjon 118/119, `docs/runbooks/WPG1_COMMS.md`.
+
+### 10.1 Nye kanaler og behandlere (alle IKKE VERIFISERT)
+
+| Kanal / kilde | Leverandør (transport/adapter, D-64) | Hva som sendes/leses | Behandlerstatus |
+|---|---|---|---|
+| Slack, Discord | Slack / Discord | utgående tekst (eier-initiert), lesing av tråd/melding, signerte innkommende hendelser | databehandlervilkår/region IKKE VERIFISERT |
+| WhatsApp (Business Cloud API), Messenger, Instagram | Meta | utgående tekst/mal (24-timersvindu), innkommende signerte hendelser | IKKE VERIFISERT; app-gjennomgang kreves (BLOCKED_EXTERNAL) |
+| SMS og utgående samtale | Twilio (Telnyx kun SMS) | utgående SMS/manus, STOP-hendelser, leveringsstatus | IKKE VERIFISERT |
+| Teams | Microsoft Graph (kun delegert sending) | utgående tekst | IKKE VERIFISERT; eierens re-samtykke kreves (BLOCKED_EXTERNAL) |
+| Kontakter | Google People API | kontaktnavn/e-post/telefon/organisasjon (lesing og eierens egne endringer) | IKKE VERIFISERT; nytt OAuth-scope kreves (BLOCKED_EXTERNAL) |
+| Møtetranskripsjon | eksisterende tekstkilder (UA-2/Meet/Teams); lyd via lokal talebehandler (ikke bundet) | transkript (kun i minnet under behandling) | ekstern talebehandler er AVVIST av rutingsporten (D-122) |
+
+### 10.2 Utgående kommunikasjon (felles policy)
+
+- **Formål og grunnlag.** Formålene er `transactional` / `agreed` / `marketing`. `agreed` krever BEVIS på et forhold (verifisert innkommende tråd eller løst identitet) - aldri bare at avsenderen påstår det. `marketing` **feiler lukket** i dag:
+  samtykkeregister er ikke bygget (JARVIS-084 er bevisst ikke bygget, Q-47f) og oppslag mot Reservasjonsregisteret er ikke verifisert. JURIDISK: markedsføringsloven § 15 og Reservasjonsregisteret må vurderes før noen aktivering - teksten i loven er ikke verifisert mot offisiell kilde i denne økten.
+- **AI-opplysning.** Koden legger «Sendt av Jarvis (AI-assistent).» til hver tekstmelding (og FØRST i en samtale); en parameter kan ikke slå den av. JURIDISK: EU AI Act art. 50(1) gjelder (etter det som er søkt frem) fra 2. august 2026, men anvendelighet i EØS/Norge er ikke verifisert; opplysningsteksten er eierens (konfigurerbar), ikke en juridisk formulering.
+- **Mottakerens avmelding (STOP).** Egen tabell (`comms_recipient_opt_outs`), pseudonymisert (SHA-256 med tenant+kanal i saltet) + maskert visning. Kun mottakerens EGEN START opphever den; eieren kan bare registrere. Avmeldinger slettes IKKE av retensjonssveipet (et rettighetsvern); de slettes kun ved full tenant-/romsletting. Eksisterende samtykkekontroller er uendret.
+- **Stille timer, ratebegrensning, plattformvindu.** Standard stille timer 22-08 (Europe/Oslo), maks 3 meldinger/mottaker/døgn (1 «kald»), 30/konto/time; WhatsApp/Messenger/Instagram: fritekst kun innenfor 24 t etter mottakerens siste melding (WhatsApp: godkjente maler utenfor). Tallene er konservative VALG, ikke lovfestede normer (UVERIFISERT, JURIDISK).
+- **Pseudonymisering er ikke anonymisering:** et telefonnummer kan brute-force-hashes. Journalen (`comms_outbound_log`) lagrer hash+lengde av innholdet (aldri teksten), mottaker-pseudonym, regelutfall, mottakerbevis og leverandørens meldings-id; 400 dager (konfigurerbar 30-1825).
+
+### 10.3 Utgående AI-samtale (P3h)
+
+Kun Twilio, kun inline TwiML (`<Say>`, XML-escapet), AI-opplysning FØRST i manuset, **opptak er ikke støttet** (en forespørsel om opptak avslås med kode `call_recording_not_supported`; ingen rettslig grunnlag-mekanisme finnes). Eget tidsvindu (standard 09-20 lokal tid), maks ett anrop per nummer per døgn,
+avmelding på kanalen `phone` respekteres, markedsføring avslås. Telnyx-samtale er DEFERRED (opplysningen kan ikke garanteres som første talte innhold uten `call.answered`-flyten). Ingen ekte samtale er gjennomført; verifisering kun mot falsk transport. JURIDISK: tidsvindu, anropsgrense, samtykke/reservasjon for samtaler og
+opplysningsplikt ved bruk av syntetisk stemme må vurderes; standardene er forsiktige valg, ikke normer.
+
+### 10.4 Møtetranskripsjon (P2g)
+
+- **Rettslig grunnlag:** eieren må EKSPLISITT attestere per møte (`attest_legal_basis: true`; CHECK i databasen). Attesten er et revisjonsspor, ikke en juridisk konklusjon. JURIDISK: grunnlag for å behandle andre deltakeres tale/tekst (informasjon til deltakerne, samtykke eller berettiget interesse) må vurderes av en jurist.
+- **Minimering:** selve transkripsjonsteksten lagres ALDRI (kun innholds-hash, antall segmenter, tittel, deltakernavn og korte forpliktelses-utdrag ≤ 300 tegn). E-postadresser redigeres bort av parseren. Forpliktelser er FORSLAG funnet av navngitte, deterministiske mønstre (ingen modell, ingen profilering); de blir en åpen oppfølging først når eieren godtar dem.
+- **Deltakere:** kobles til en identitet kun ved eksakt kanal-id-treff eller eierens bekreftelse; et rent navnetreff er et forslag (ukjent forblir ukjent).
+- **Lyd:** bare tjenestemetode (ingen filsti-flate); rutingsporten `evaluateSpeechRouting` (D-122) avviser ekstern behandler uten verifiserte vilkår og helse-space mot ekstern; produksjonsadapter er IKKE bundet (DEFERRED). **Ingen møte-bot** (en slik er en ekstern kjerneavhengighet: `CORE_DEPENDENCY_DECISION_REQUIRED`).
+- **Oppbevaring:** 180 dager (`JARVIS_COMMS_MEETING_RETENTION_DAYS`, 30-1825); sveip hver 6. time; Q-20-sletting via erasure-planen (ikke koblet i produksjon, JARVIS-060).
+
+### 10.5 Kontakter og identitetslenking (P2e)
+
+Google Contacts er eierens EGEN kontaktbok; innholdet behandles som ubetrodd data (renset, minimert til navn/e-post/telefon/organisasjon, aldri adresser/notater/bilder). `contacts_sync` lenker deterministisk (eksakt E.164/e-post, `contact_sync`, confidence 0.9) og slår aldri sammen identiteter. Sletting hos Google er en klasse D-handling (preflight + readback). JURIDISK: kontaktpersonene er tredjeparter; behandlingen er eierens personlige/forretningsmessige bruk - vurder grunnlag og informasjonsplikt.
+
+### 10.6 Innkommende hendelser og oppfølging
+
+Kun signaturverifiserte webhooks (Slack, Meta, Twilio, Telnyx) lagres, som UBETRODD data (≤ 2000 tegn, kontrolltegn renset, hemmeligheter redigert), 30 dager (1-365); avmeldings-/gjenopptakshendelser beholdes 1825 dager uten tekst (en gjenspilt gammel START skal ikke oppheve en nyere STOP). Ubesvarte meldinger kan bli åpne oppfølginger (`JARVIS_COMMS_REPLY_SWEEP`) som leveres av
+V2-pushen til eierens egen Telegram - med fast tittel uten meldingstekst.
+
+### 10.7 Oppbevaring (oppsummert) og åpne juridiske punkter
+
+| Data | Oppbevaring | Slettes av |
+|---|---|---|
+| Innkommende hendelser (tekstutdrag) | 30 d (1-365) | sveip, erasure |
+| Avmeldings-/gjenopptakshendelser | 1825 d (kun pseudonym, ingen tekst) | sveip, erasure |
+| Utgående journal | 400 d (30-1825) | sveip, erasure |
+| Avmeldinger, konto-allowlist | til opphevet/tilbakekalt | kun mottakerens START / eieren; erasure |
+| Møter, deltakere, forslag | 180 d (30-1825) | sveip, eieren (D), erasure |
+
+**Åpne punkter til jurist/eier (ingen er løst av kode):** (1) markedsføringsloven § 15 / Reservasjonsregisteret og samtykkeregister; (2) AI-opplysningsplikt (EU AI Act art. 50, nasjonal gjennomføring); (3) regler for utgående AI-samtaler og opptak; (4) grunnlag og informasjon for møte-/samtale-deltakere; (5) databehandleravtaler, region og vilkår for alle leverandørene i §10.1; (6) om pseudonymiserte mottakere (SHA-256) er tilstrekkelig minimering;
+(7) oppbevaringstider; (8) Telegram-/chat-relaterte juridiske punkter (JARVIS-087) er IKKE behandlet her.
