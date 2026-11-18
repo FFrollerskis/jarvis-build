@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it, vi } from "vitest";
@@ -7,7 +8,7 @@ import {
   COMMS_KNOWN_ACTIONS, InvalidCommsConfigError, WEBHOOK_MAX_BYTES, type CommsWebhookProvider, type CommsWebhookService, type OutboundFunnel, type WebhookRequest, type WebhookResponse
 } from "@jarvis/comms";
 import { buildCommsRuntime } from "../src/comms-wiring.ts";
-import { createApiServer, type ApiDeps } from "../src/server.ts";
+import { createApiServer, normalizedRequestPath, type ApiDeps } from "../src/server.ts";
 
 /**
  * WP-G1 (D-463, P1b/P1d): HTTP-OPPFØRSELEN til kommunikasjonsrutene - uten database (tjenestene er testdobler; selve policyen/journalen/ledgeren er bevist mot ekte Postgres i `modules/comms/test`). Beviset her:
@@ -104,6 +105,47 @@ describe("A: DORMANT - uten `deps.comms` finnes ingen kommunikasjonsrute (flagg 
     const statuses: number[] = [];
     for (let i = 0; i < 8; i += 1) statuses.push((await post(base, "/webhooks/comms/slack", "{}")).status);
     expect(new Set(statuses)).toEqual(new Set([404]));
+  });
+
+  it("B-M5: den strenge grensen nøkles på NORMALISERT sti - `/./`- og `%2e`-varianter deler spann med den rene stien (de slapp før gjennom til den romslige grensen), og de treffer fortsatt ruten", async () => {
+    const { service, calls } = stubWebhookService();
+    const base = await listen({ comms: { webhooks: { service, providers: new Set<CommsWebhookProvider>(["slack"]) } }, rateLimits: { authPerIpPerMinute: 3 } });
+    // `fetch` normaliserer stien hos klienten, så rå `node:http` brukes: stien sendes NØYAKTIG som skrevet
+    const rawPost = (path: string) => new Promise<number>((resolve, reject) => {
+      const u = new URL(base);
+      const r = httpRequest({ host: u.hostname, port: u.port, path, method: "POST", headers: { "content-type": "application/json" } }, (res) => { res.resume(); res.on("end", () => resolve(res.statusCode ?? 0)); });
+      r.on("error", reject);
+      r.end("{}");
+    });
+    const variants = ["/webhooks/comms/slack", "/webhooks/comms/./slack", "/webhooks/comms/%2e/slack", "/webhooks/comms/%2E/slack", "/webhooks/comms/x/../slack", "/webhooks/comms/%2e%2e/comms/slack"];
+    const statuses: number[] = [];
+    for (const path of variants) statuses.push(await rawPost(path));
+    expect(statuses).toEqual([200, 200, 200, 429, 429, 429]); // ÉN felles grense på 3, uansett skrivemåte
+    expect(calls).toHaveLength(3); // og de tre første nådde faktisk webhook-ruten (variantene er samme rute etter normalisering)
+  });
+
+  it("B-M5: samme normalisering gjelder de eksisterende AUTH_ROUTES (ingen atferdsendring for lovlige kall: ren sti teller som før)", async () => {
+    const base = await listen({ rateLimits: { authPerIpPerMinute: 2 } });
+    const rawGet = (path: string) => new Promise<number>((resolve, reject) => {
+      const u = new URL(base);
+      httpRequest({ host: u.hostname, port: u.port, path, method: "POST", headers: { "content-type": "application/json" } }, (res) => { res.resume(); res.on("end", () => resolve(res.statusCode ?? 0)); }).on("error", reject).end("{}");
+    });
+    const first = await rawGet("/devices/challenge");
+    const second = await rawGet("/devices/./challenge");
+    const third = await rawGet("/devices/%2e/challenge");
+    expect([first, second].every((c) => c !== 429)).toBe(true);
+    expect(third).toBe(429);
+    // en annen sti påvirkes ikke
+    expect(await rawGet("/webhooks/comms/slack")).not.toBe(429);
+  });
+
+  it("normalizedRequestPath: samme stiform som rutingen (`new URL().pathname`); spørring og fragment fjernes; ugyldig input faller tilbake uten å kaste", () => {
+    expect(normalizedRequestPath("/webhooks/comms/slack?x=1")).toBe("/webhooks/comms/slack");
+    expect(normalizedRequestPath("/webhooks/comms/./slack")).toBe("/webhooks/comms/slack");
+    expect(normalizedRequestPath("/webhooks/comms/%2e/slack")).toBe("/webhooks/comms/slack");
+    expect(normalizedRequestPath("/a/b/../slack#frag")).toBe("/a/slack");
+    expect(normalizedRequestPath(undefined)).toBe("/");
+    expect(() => normalizedRequestPath("http://[::1")).not.toThrow();
   });
 
   it("med BARE utgående slått på finnes ingen webhook-rute, og med BARE webhooks finnes ingen eier-rute", async () => {
