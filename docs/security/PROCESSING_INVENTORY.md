@@ -151,6 +151,15 @@ uten at det er gjort, eller (4) en DPIA-henvisning peker på en fil som ikke fin
 - **Eksterne mottakere:** Ingen (lokalt)
 - **Tabeller:** `vision_event_observations`, `vision_retention_policies`, `vision_rooms`
 
+### Personlig tvilling: handlingsjournal for hjem og bil (WP-G2, D-464)
+
+- **Formål:** Jarvis' egen journal over kritiske fysiske handlinger i hjemmet og bilen (lås, alarm, garasjeport, ventil, bryter, scene/skript, klima-modus; bil-handlinger bak `CarAdapter`): hvem ba om hva, hvilket mål, tilstanden før og det readback viste etterpå, utfall (utført / feil sluttilstand / ukjent / avvist). Se `docs/UA8_PERSONAL_TWIN_DPIA.md` og `docs/runbooks/WPG2_PERSONAL.md`.
+- **Memory space/tenant:** home/personal (tenant-skopet med FORCE RLS og memory-space-policy; komposittnøkkel mot (person, tenant)-medlemskap)
+- **Datakategori:** Handlingshistorikk om hjem/bil: entitets-/kjøretøy-id (eierens egne), enumererte tilstandsord (låst/ulåst, åpen/lukket, armert), tidspunkt, aktør. Ingen alarmkode/PIN, ingen tokens, ingen fritekst fra utstyret (kun normalisert tilstand). Kan indirekte vise når huset/bilen er låst eller tomt: behandles som privat (aldri `public`), og er eier-kun.
+- **Retensjon:** Ingen automatisk opprydding ennå (`DEFERRED`: retensjonstid for journalen er en eierbeslutning). Sletting via memory space-/person-sletting (`modules/erasure/src/plan.ts`, registrert og testet). Journalen er en tilstandsmaskin, IKKE append-only: INSERT `requested`, én UPDATE til terminal status; terminale rader og kjernekolonner er uforanderlige (databasetrigger), DELETE kun for erasure.
+- **Eksterne mottakere:** Ingen fra tabellen. Handlingene selv går til eierens egen Home Assistant (lokalt nett) og - først når en leverandør er valgt (D-64-port) - bil-API-et; begge KUN med flagg (`JARVIS_PERSONAL_HOME_CRITICAL`/`JARVIS_PERSONAL_CAR`) og mål-liste.
+- **Tabeller:** `personal_action_journal`
+
 ### Sletting og personvern
 
 - **Formål:** Sporing av slettekrav

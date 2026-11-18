@@ -135,7 +135,17 @@ const EFFECT_OVERRIDES: Record<string, Effect> = {
   [k("business", "resolve_open_loop")]: "write",
   // D-416: delegeringsnivået - oppretter en intern, lesende bakgrunnsjobb (write, klasse B) / leser jobbstatus.
   [k("tasks", "delegate_background_task")]: "write",
-  [k("tasks", "get_task_status")]: "read"
+  [k("tasks", "get_task_status")]: "read",
+  // WP-G2 (D-464, P1a): de kritiske hjemmehandlingene (lås, alarm, cover, ventil, bryter, scene, skript, klima-modus) styrer fysisk utstyr = effekt «control» (navneinferensen ville gitt «write»). Da forbyr
+  // manifestinvariantene (`pay/control kan aldri stå på en modellflate`) strukturelt at de noen gang havner på en modellflate, uavhengig av tildelingslistene.
+  [k("home-assistant", "critical_lock")]: "control",
+  [k("home-assistant", "critical_alarm")]: "control",
+  [k("home-assistant", "critical_cover")]: "control",
+  [k("home-assistant", "critical_valve")]: "control",
+  [k("home-assistant", "critical_switch")]: "control",
+  [k("home-assistant", "critical_scene")]: "control",
+  [k("home-assistant", "critical_script")]: "control",
+  [k("home-assistant", "critical_climate_mode")]: "control"
 };
 
 export function inferEffect(tool_id: string, action: string): Effect {

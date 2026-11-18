@@ -464,6 +464,8 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   add(result, "vision_event_observations", await run(client, mode, "vision_event_observations", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "vision_rooms", await run(client, mode, "vision_rooms", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "vision_retention_policies", await run(client, mode, "vision_retention_policies", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // WP-G2 (D-464, UA-8, migrasjon 125): handlingsjournalen for kritiske hjem-/bilhandlinger. Eneste FK er sammensatt mot `person_tenants` (medlemskap) - ingen barnetabeller, rekkefølgen er likegyldig.
+  add(result, "personal_action_journal", await run(client, mode, "personal_action_journal", "tenant_id = $1 AND memory_space_id = $2", tv));
   // Rekonsiliering PR #83 mot main (D163/D164): vision-blokken over (055) og
   // situations-blokken under (056) har INGEN FK seg imellom (055 refererer
   // kun tenants/people/person_tenants/vision_rooms; 056 refererer kun
@@ -683,6 +685,8 @@ export async function planPerson(client: pg.PoolClient, mode: Mode, tenantId: st
     // `location_retention_policies`/`health_retention_policies` over).
     add(result, "vision_event_observations", await run(client, mode, "vision_event_observations", "tenant_id = $1 AND person_id = $2", ownedValues));
     add(result, "vision_rooms", await run(client, mode, "vision_rooms", "tenant_id = $1 AND person_id = $2", ownedValues));
+    // WP-G2 (D-464, UA-8): handlingsjournalen er person-eid via `actor_person_id` (RESTRICTIVE memory-space-RLS, derfor HER innenfor `forEachSpaceGroup`).
+    add(result, "personal_action_journal", await run(client, mode, "personal_action_journal", "tenant_id = $1 AND actor_person_id = $2", ownedValues));
     return result;
   });
 

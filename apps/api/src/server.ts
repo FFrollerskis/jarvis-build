@@ -28,6 +28,7 @@ import { ProductUsageError, UsageImportError, USAGE_LIMITS, USAGE_WEBHOOK_SIGNAT
 import { CONTROL_CENTER_READ_TOOLS, isControlCenterId, isExtensionControlCenterId } from "@jarvis/executive";
 import { GROWTH_EXPERIMENT_TOOL_ACTIONS, executeGrowthWrite, type GrowthWriteExecutorDeps, type GrowthWriteStatusFilter } from "@jarvis/growth";
 import type { ConversationEngine } from "./conversation.ts";
+import { handlePersonalRoute, type PersonalApiDeps } from "./personal-routes.ts";
 import { FINANCE_ACTION_ROUTE_ACTIONS, moneyActionParameters, parseFinanceActionRequest, previewFinanceAction, readReconciliationStatus } from "./finance-actions.ts";
 import { submittedContractHasReservedKey, type ChatJobs } from "./chat-jobs.ts";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
@@ -184,6 +185,11 @@ export interface ApiDeps {
    * Utførelsen går UTELUKKENDE via `ToolGateway.execute()` (policy, mål-autorisasjon, step-up, klasse D-kjeden) - rutene omgår ingenting.
    */
   growthWrites?: { executor: GrowthWriteExecutorDeps; /** Skriving/lesing/journal (`/growth/mutate|read|writes/list`) finnes KUN når minst én plattform er slått på (`JARVIS_GROWTH_WRITE_PLATFORMS`). */ writes: boolean; experiments: boolean };
+  /**
+   * WP-G2 (D-464, UA-8 Personal Twin): rutene under `/personal/*` (kritiske hjem-/bilhandlinger, familie, helse-inntak, ...). DORMANT: uten verdien svarer `/personal/*` 404, identisk med main; `main.ts` setter den KUN når
+   * minst ett `JARVIS_PERSONAL_*`-flagg er på, og hver rutefamilie finnes kun med sitt eget flagg. Se `personal-routes.ts`/`personal-wiring.ts`.
+   */
+  personal?: PersonalApiDeps;
 }
 
 export interface HealthStatus {
@@ -1883,6 +1889,19 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       return json(res, 403, { decision: decision.decision, reason: decision.reason });
     }
     return json(res, 200, { decision: "ALLOW", executed: "critical_demo_stub" });
+  }
+
+  // WP-G2 (D-464): `/personal/*` finnes KUN når `deps.personal` er satt (minst ett JARVIS_PERSONAL_*-flagg på). Eier-kun og step-up håndheves inni rutene; uten verdien er dette en vanlig 404.
+  if (deps.personal !== undefined && url.pathname.startsWith("/personal/")) {
+    const personalDeps = deps.personal;
+    const handled = await handlePersonalRoute({
+      req, res, url, deps: personalDeps,
+      authed: (allowedKeys) => authedRequest(req, res, deps, allowedKeys),
+      requireOwner: (identity, subject) => requireOwner(res, deps, identity, subject),
+      stepUpDenial, json: (status, body) => json(res, status, body), requestId: () => requestIdOf(res),
+      fieldString, fieldOptionalString, fieldRecord, fieldOptionalNumber, domainFailure: (status, code, err) => domainFailure(res, status, code, err)
+    });
+    if (handled) return;
   }
 
   if (deps.incidents) {
