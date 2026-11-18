@@ -65,6 +65,10 @@ export const SendParamsSchema = json({
 export const EditParamsSchema = json({ request_id: RequestId, channel: Channel, account_ref: AccountRef, recipient: Recipient, target_message_id: MessageId, text: z.string().min(1).max(8000) });
 export const DeleteParamsSchema = json({ request_id: RequestId, channel: Channel, account_ref: AccountRef, recipient: Recipient, target_message_id: MessageId });
 export const ReactParamsSchema = json({ request_id: RequestId, channel: Channel, account_ref: AccountRef, recipient: Recipient, target_message_id: MessageId, reaction: z.string().min(1).max(64) });
+/** Utgående samtale (P3h): kun kanalen `phone`; `text` er manuset (AI-opplysningen settes FØRST av policyen). `recording` finnes bare for at en forespørsel om opptak skal AVSLÅS med kode - den ignoreres aldri stille. */
+export const CallParamsSchema = json({
+  request_id: RequestId, channel: z.literal("phone"), account_ref: AccountRef, recipient: Recipient, purpose: Purpose, text: z.string().min(1).max(2000), recording: z.boolean().optional()
+});
 
 export interface ParsedOutbound {
   readonly request_id: string;
@@ -121,6 +125,13 @@ export function parseReactParams(raw: unknown): ParseResult {
   if (!p.success) return { ok: false, code: "invalid_parameters" };
   const d = p.data;
   return build("reaction", { request_id: d.request_id, channel: d.channel, account_ref: d.account_ref, recipient: d.recipient, purpose: "transactional" }, { reaction: d.reaction }, { target_message_id: d.target_message_id });
+}
+
+export function parseCallParams(raw: unknown): ParseResult {
+  const p = CallParamsSchema.safeParse(raw);
+  if (!p.success) return { ok: false, code: "invalid_parameters" };
+  const d = p.data;
+  return build("call", { request_id: d.request_id, channel: d.channel, account_ref: d.account_ref, recipient: d.recipient, purpose: d.purpose }, { text: d.text, ...(d.recording !== undefined ? { recording: d.recording } : {}) }, {});
 }
 
 export interface Evaluation {
@@ -266,7 +277,7 @@ export class OutboundFunnel {
     const req = parsed.request;
     const adapter = ev.account === null ? undefined : adapters[ev.account.provider];
     if (adapter === undefined) throw new Error("comms_adapter_unavailable");
-    const supported = req.kind === "message" ? true : req.kind === "edit" ? adapter.edit !== undefined : req.kind === "delete" ? adapter.delete !== undefined : adapter.react !== undefined;
+    const supported = req.kind === "message" ? true : req.kind === "edit" ? adapter.edit !== undefined : req.kind === "delete" ? adapter.delete !== undefined : req.kind === "call" ? adapter.call !== undefined : adapter.react !== undefined;
     if (!supported) throw new Error("comms_action_not_supported_by_provider");
     const begin = await store.beginAttempt(ctx.tenantId, ctx.space, this.entry(ctx, ev), ctx.actor, config.log_retention_days);
     if (begin.kind === "replay") {
@@ -285,6 +296,9 @@ export class OutboundFunnel {
         const result = await adapter.send({ ...target, text: ev.decision.final_text, template: req.content.template ?? null, media, thread_ref: req.thread_ref ?? null }, credential);
         providerMessageId = result.provider_message_id;
         threadRef = result.thread_ref;
+      } else if (req.kind === "call") {
+        // Manuset er policyens `final_text` (AI-opplysningen FØRST) - aldri den rå forespørselsteksten.
+        providerMessageId = (await adapter.call!({ ...target, script: ev.decision.final_text! }, credential)).provider_message_id;
       } else if (req.kind === "edit") {
         providerMessageId = (await adapter.edit!({ ...target, target_message_id: req.target_message_id!, text: ev.decision.final_text! }, credential)).provider_message_id;
       } else if (req.kind === "delete") {

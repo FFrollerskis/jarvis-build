@@ -36,6 +36,11 @@ export interface ChannelAdapter {
   react?(request: AdapterTarget & { target_message_id: string; reaction: string }, credential: string): Promise<void>;
   /** Fersk lesing av en melding (preflight/etterbetingelse for sletting): finnes den fortsatt? */
   messageExists?(request: AdapterTarget & { target_message_id: string }, credential: string): Promise<boolean>;
+  /**
+   * Utgående samtale (P3h). `script` er HELE det som skal sies og begynner ALLTID med AI-opplysningen (policyen setter den først). Opptak er aldri på. Kun leverandører der opplysningen kan garanteres som første talte innhold har
+   * denne metoden (Twilio med inline TwiML); en leverandør uten den feiler lukket (`comms_action_not_supported_by_provider`).
+   */
+  call?(request: AdapterTarget & { script: string }, credential: string): Promise<AdapterResult>;
 }
 
 /** Leverandøravslag (entydig: ingen bivirkning). `code` er en trygg, fast kode. */
@@ -106,6 +111,11 @@ function rejectFrom(provider: string, res: ProviderResponse, path: readonly stri
 
 const bearer = (token: string): Record<string, string> => ({ authorization: `Bearer ${token}`, "content-type": "application/json" });
 
+/** XML-escaping for TwiML (`&`, `<`, `>`, `"`, `'`): ingen tekst kan lukke `<Say>` eller legge til egne TwiML-verb. */
+export function xmlEscape(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
+
 // ------------------------------------------------------------------------------------------------ Slack
 /**
  * Slack Web API (verifisert mot Slacks metodereferanser via søk 2026-11): `chat.postMessage`/`chat.update`/`chat.delete` -> `chat:write`; `reactions.add` -> `reactions:write` (channel, name, timestamp påkrevd);
@@ -115,7 +125,7 @@ const bearer = (token: string): Record<string, string> => ({ authorization: `Bea
 export class SlackAdapter implements ChannelAdapter {
   readonly provider = "slack" as const;
 
-  private async call(method: string, token: string, body: Record<string, unknown>, mutation: boolean): Promise<Record<string, unknown>> {
+  private async api(method: string, token: string, body: Record<string, unknown>, mutation: boolean): Promise<Record<string, unknown>> {
     const res = await providerCall("slack", `https://slack.com/api/${method}`, { method: "POST", headers: bearer(token), body: JSON.stringify(body) }, mutation);
     if (res.json === null) {
       // En lest, tom 2xx-mutasjon er UKJENT; et HTTP-avslag (f.eks. 429 uten kropp) er et entydig avslag.
@@ -129,7 +139,7 @@ export class SlackAdapter implements ChannelAdapter {
   async send(request: AdapterSend, token: string): Promise<AdapterResult> {
     const body: Record<string, unknown> = { channel: request.recipient, text: request.text, unfurl_links: false, unfurl_media: false };
     if (request.thread_ref !== null) body["thread_ts"] = request.thread_ref;
-    const json = await this.call("chat.postMessage", token, body, true);
+    const json = await this.api("chat.postMessage", token, body, true);
     const ts = json["ts"];
     if (typeof ts !== "string" || ts.length === 0) throw new Error("outcome_unknown:comms_slack_no_message_id");
     const threadTs = (json["message"] as { thread_ts?: unknown } | undefined)?.thread_ts;
@@ -137,13 +147,13 @@ export class SlackAdapter implements ChannelAdapter {
   }
 
   async edit(request: AdapterTarget & { target_message_id: string; text: string }, token: string): Promise<AdapterResult> {
-    const json = await this.call("chat.update", token, { channel: request.recipient, ts: request.target_message_id, text: request.text, unfurl_links: false, unfurl_media: false }, true);
+    const json = await this.api("chat.update", token, { channel: request.recipient, ts: request.target_message_id, text: request.text, unfurl_links: false, unfurl_media: false }, true);
     return { provider_message_id: typeof json["ts"] === "string" ? (json["ts"] as string) : request.target_message_id };
   }
 
   async delete(request: AdapterTarget & { target_message_id: string }, token: string): Promise<void> {
     try {
-      await this.call("chat.delete", token, { channel: request.recipient, ts: request.target_message_id }, true);
+      await this.api("chat.delete", token, { channel: request.recipient, ts: request.target_message_id }, true);
     } catch (err) {
       // Allerede borte = etterbetingelsen («meldingen finnes ikke») er oppfylt.
       if (err instanceof ProviderRejectedError && err.code === "message_not_found") return;
@@ -155,7 +165,7 @@ export class SlackAdapter implements ChannelAdapter {
     const name = request.reaction.replace(/^:|:$/g, "");
     if (!/^[a-z0-9_+-]{1,100}$/.test(name)) throw new ProviderRejectedError("slack", "invalid_reaction_name");
     try {
-      await this.call("reactions.add", token, { channel: request.recipient, name, timestamp: request.target_message_id }, true);
+      await this.api("reactions.add", token, { channel: request.recipient, name, timestamp: request.target_message_id }, true);
     } catch (err) {
       if (err instanceof ProviderRejectedError && err.code === "already_reacted") return;
       throw err;
@@ -163,7 +173,7 @@ export class SlackAdapter implements ChannelAdapter {
   }
 
   async messageExists(request: AdapterTarget & { target_message_id: string }, token: string): Promise<boolean> {
-    const json = await this.call("conversations.history", token, { channel: request.recipient, latest: request.target_message_id, inclusive: true, limit: 1 }, false);
+    const json = await this.api("conversations.history", token, { channel: request.recipient, latest: request.target_message_id, inclusive: true, limit: 1 }, false);
     const first = (json["messages"] as Array<{ ts?: unknown }> | undefined)?.[0];
     return first?.ts === request.target_message_id;
   }
@@ -270,7 +280,28 @@ export class WhatsAppAdapter implements ChannelAdapter {
  */
 export class TwilioSmsAdapter implements ChannelAdapter {
   readonly provider = "twilio" as const;
-  constructor(private readonly accountSid: () => Promise<string | null>) {}
+  constructor(private readonly accountSid: () => Promise<string | null>, private readonly options: { callLanguage?: string } = {}) {}
+
+  /**
+   * Utgående samtale: `POST /Accounts/{sid}/Calls.json` med `To`, `From` (alltid den allowlistede kontoen) og INLINE `Twiml` (`<Say>` - ingen URL å hente, ingen opptak: parameteren `Record` sendes aldri). Manuset er XML-escapet (ingen
+   * TwiML-injeksjon) og begynner med AI-opplysningen (satt av policyen). UVERIFISERT mot Twilios dokumentasjon i denne økten: eksakt `Twiml`-parameter, `<Say language="nb-NO">`-støtte og at opptak er av som standard.
+   */
+  async call(request: AdapterTarget & { script: string }, authToken: string): Promise<AdapterResult> {
+    const sid = await this.accountSid();
+    if (!sid || !/^[A-Za-z0-9]{10,64}$/.test(sid)) throw new Error("comms_twilio_account_sid_not_configured");
+    const language = this.options.callLanguage ?? "nb-NO";
+    if (!/^[a-z]{2}-[A-Z]{2}$/.test(language)) throw new Error("comms_twilio_call_language_invalid");
+    const twiml = `<Response><Say language="${language}">${xmlEscape(request.script)}</Say></Response>`;
+    const res = await providerCall("twilio", `https://api.twilio.com/2010-04-01/Accounts/${encodePathSegment(sid, "account_sid")}/Calls.json`, {
+      method: "POST",
+      headers: { authorization: `Basic ${Buffer.from(`${sid}:${authToken}`).toString("base64")}`, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ To: request.recipient, From: request.account_ref, Twiml: twiml }).toString()
+    }, true);
+    if (res.status >= 400) return rejectFrom("twilio", res, ["code"]);
+    const id = res.json?.["sid"];
+    if (typeof id !== "string" || id.length === 0) throw new Error("outcome_unknown:comms_twilio_no_call_id");
+    return { provider_message_id: id };
+  }
 
   async send(request: AdapterSend, authToken: string): Promise<AdapterResult> {
     const sid = await this.accountSid();
@@ -302,6 +333,68 @@ export class TelnyxSmsAdapter implements ChannelAdapter {
   }
 }
 
+// ------------------------------------------------------------------------------------------------ Messenger / Instagram (Meta Send API, P2f)
+/**
+ * Messenger Platform Send API: `POST /{page_id}/messages` med `recipient: { id }` (side-scopet id), `messaging_type: "RESPONSE"` og `message: { text }` (verifisert via søk mot Metas Send API-referanse 2026-11: `pages_messaging`,
+ * side-tilgangstoken, RESPONSE kun innenfor 24-timersvinduet). Meldingskoder (`MESSAGE_TAG`), engangsvarsler og sponsede meldinger brukes ALDRI (policyen avslår tekst utenfor vinduet). Instagram med Facebook-side bruker SAMME Send API
+ * (IGSID som mottaker; `account_ref` er id-en i `/{id}/messages`-stien). UVERIFISERT: «Instagram API with Instagram Login» (annen vert/sti), Graf-versjonen, og at app-gjennomgang er innvilget (BLOCKED_EXTERNAL live).
+ */
+export class MetaMessagingAdapter implements ChannelAdapter {
+  constructor(readonly provider: "meta_messenger" | "meta_instagram", private readonly graphVersion: string) {}
+
+  private get label(): string {
+    return this.provider === "meta_messenger" ? "messenger" : "instagram";
+  }
+
+  async send(request: AdapterSend, token: string): Promise<AdapterResult> {
+    if (request.text === null || request.template !== null || request.media !== null) throw new ProviderRejectedError(this.label, "text_only_channel");
+    const res = await providerCall(this.label, `https://graph.facebook.com/${this.graphVersion}/${encodePathSegment(request.account_ref, "page_id")}/messages`, {
+      method: "POST", headers: bearer(token), body: JSON.stringify({ recipient: { id: request.recipient }, messaging_type: "RESPONSE", message: { text: request.text } })
+    }, true);
+    if (res.status >= 400) return rejectFrom(this.label, res, ["error", "code"]);
+    const id = res.json?.["message_id"];
+    if (typeof id !== "string" || id.length === 0) throw new Error(`outcome_unknown:comms_${this.label}_no_message_id`);
+    return { provider_message_id: id };
+  }
+}
+
+// ------------------------------------------------------------------------------------------------ Microsoft Teams (Graph, P2f)
+/**
+ * Microsoft Graph: `POST /chats/{chat-id}/messages` og `POST /teams/{team-id}/channels/{channel-id}/messages` med `body: { contentType: "text", content }` (ren tekst: ingen HTML, ingen omtaler). VERIFISERT via søk mot Microsofts
+ * rettighetsreferanse 2026-11: `ChatMessage.Send` og `ChannelMessage.Send` finnes KUN som DELEGERTE rettigheter (app-only kan ikke sende; `Teamwork.Migrate.All` er kun for migrering) - sending krever derfor eierens egen delegerte
+ * tilgang (refresh-token med disse scopene -> access-token via `tokenFor`) og nytt eier-samtykke (BLOCKED_EXTERNAL live). Rotert refresh-token lagres IKKE (DEFERRED). Redigering/sletting/reaksjon er ikke bygget (DEFERRED).
+ */
+export class TeamsGraphAdapter implements ChannelAdapter {
+  readonly provider = "ms_graph" as const;
+  constructor(private readonly tokenFor: (credential: string) => Promise<string> = async (credential) => credential) {}
+
+  private path(recipient: string): string {
+    if (recipient.startsWith("chat:")) return `/chats/${encodePathSegment(recipient.slice("chat:".length), "chat_id")}/messages`;
+    if (recipient.startsWith("channel:")) {
+      const [team, channel] = recipient.slice("channel:".length).split("/");
+      if (team === undefined || channel === undefined) throw new ProviderRejectedError("teams", "invalid_target");
+      return `/teams/${encodePathSegment(team, "team_id")}/channels/${encodePathSegment(channel, "channel_id")}/messages`;
+    }
+    throw new ProviderRejectedError("teams", "invalid_target");
+  }
+
+  async send(request: AdapterSend, credential: string): Promise<AdapterResult> {
+    if (request.text === null || request.template !== null || request.media !== null) throw new ProviderRejectedError("teams", "text_only_channel");
+    const path = this.path(request.recipient);
+    let token: string;
+    try {
+      token = await this.tokenFor(credential);
+    } catch {
+      throw new Error("comms_teams_token_unavailable");
+    }
+    const res = await providerCall("teams", `https://graph.microsoft.com/v1.0${path}`, { method: "POST", headers: bearer(token), body: JSON.stringify({ body: { contentType: "text", content: request.text } }) }, true);
+    if (res.status >= 400) return rejectFrom("teams", res, ["error", "code"]);
+    const id = res.json?.["id"];
+    if (typeof id !== "string" || id.length === 0) throw new Error("outcome_unknown:comms_teams_no_message_id");
+    return { provider_message_id: id };
+  }
+}
+
 /** Credential-referansene (vault-navn, ALDRI verdier) per leverandør. Samme navn som de eksisterende connectorene bruker - ingen ny credential-vei. */
 export const PROVIDER_CREDENTIAL_REFS: Readonly<Record<CommsProvider, string>> = {
   slack: "JARVIS_SLACK_BOT_TOKEN",
@@ -309,7 +402,7 @@ export const PROVIDER_CREDENTIAL_REFS: Readonly<Record<CommsProvider, string>> =
   meta_whatsapp: "JARVIS_WHATSAPP_TOKEN",
   twilio: "JARVIS_TWILIO_AUTH_TOKEN",
   telnyx: "JARVIS_TELNYX_API_KEY",
-  ms_graph: "JARVIS_OUTLOOK_TOKEN",
+  ms_graph: "JARVIS_TEAMS_REFRESH_TOKEN",
   meta_messenger: "JARVIS_META_PAGE_ACCESS_TOKEN",
   meta_instagram: "JARVIS_INSTAGRAM_ACCESS_TOKEN"
 };
@@ -322,7 +415,7 @@ export function connectorIdsForCredentialRef(ref: string): readonly string[] {
     case "JARVIS_WHATSAPP_TOKEN": return ["whatsapp"];
     case "JARVIS_TWILIO_AUTH_TOKEN": return ["twilio"];
     case "JARVIS_TELNYX_API_KEY": return ["telnyx"];
-    case "JARVIS_OUTLOOK_TOKEN": return ["microsoft_outlook"];
+    case "JARVIS_TEAMS_REFRESH_TOKEN": return ["microsoft_outlook"];
     default: return [];
   }
 }
