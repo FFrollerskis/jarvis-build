@@ -266,7 +266,7 @@ describe("C: `/comms/action` og `/comms/preview` - grant -> suveren eier -> step
     const { outbound, gatewayCalls } = stubOutbound();
     const base = await listen({ ...authDeps, comms: { outbound } });
     for (const token of ["owner-active", "owner-telegram", "owner-voice"]) {
-      for (const action of ["send", "edit_message", "delete_message", "add_reaction", "authorize_account", "revoke_account", "start_call", "contacts_create", "contacts_update", "contacts_delete", "contacts_sync",
+      for (const action of ["send", "edit_message", "delete_message", "add_reaction", "authorize_account", "revoke_account", "start_call", "contacts_create", "contacts_update", "contacts_delete", "contacts_sync", "contacts_unlink",
         "meeting_ingest_text", "meeting_decide_commitment", "meeting_confirm_participant", "meeting_delete"]) {
         const r = await post(base, "/comms/action", sendBody({ grant_token: token, action, parameters: {} }));
         expect(r.status, `${token} ${action}`).toBe(403);

@@ -4,7 +4,7 @@ import { BUSINESS_INTERNAL_CREDENTIAL_REF } from "@jarvis/business";
 import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import { PROVIDER_CREDENTIAL_REFS, connectorIdsForCredentialRef } from "./adapters.ts";
 import { isCommsChannel } from "./channels.ts";
-import { CONTACTS_CREDENTIAL_REF, ContactsCreateSchema, ContactsDeleteSchema, ContactsGetSchema, ContactsListSchema, ContactsSearchSchema, ContactsSyncSchema, ContactsUpdateSchema } from "./contacts.ts";
+import { CONTACTS_CREDENTIAL_REF, ContactsCreateSchema, ContactsDeleteSchema, ContactsGetSchema, ContactsListSchema, ContactsSearchSchema, ContactsSyncSchema, ContactsUnlinkSchema, ContactsUpdateSchema } from "./contacts.ts";
 import { CallParamsSchema, DeleteParamsSchema, EditParamsSchema, ReactParamsSchema, SendParamsSchema } from "./funnel.ts";
 import type { CommsStore } from "./store.ts";
 import { MeetingCommitmentsSchema, MeetingConfirmSchema, MeetingDecideSchema, MeetingIngestTextSchema, MeetingListSchema, MeetingRefSchema } from "./transport.ts";
@@ -211,8 +211,10 @@ export function commsToolDefinitions(deps: CommsToolDeps): ToolDefinition[] {
       contactsWrite("contacts_delete", "D", "Slett en kontakt i eierens Google Contacts: fersk lesing av målet (preflight), sletting, readback at den er borte. Ikke reverserbar via API-et", ContactsDeleteSchema,
         "Ikke reverserbar via API-et: en slettet kontakt kan bare gjenopprettes manuelt (Google Contacts papirkurv) eller opprettes på nytt med comms.contacts_create.",
         { reversible: false, preflight_action: "contacts_check_target", preflight_requires_target: true, preflight_validator: exists, postcondition_target_absent: true }),
-      contactsWrite("contacts_sync", "C", "Lenk én side kontakter til identiteter i Conversation Graph (eksakt E.164/e-post, confidence 0.9, aldri automatisk sammenslåing). Idempotent", ContactsSyncSchema,
-        "lenkene kan splittes/slås sammen av eieren i Conversation Graph (reversibel merge/split); ingen data slettes hos Google", { reversible: true, output_trust: "internal" })
+      contactsWrite("contacts_sync", "C", "Lenk én side kontakter til identiteter i Conversation Graph (eksakt E.164/e-post, confidence 0.9, aldri automatisk sammenslåing: en kontakt hvis identifikatorer peker på ulike identiteter, eller på en identitet en ANNEN kontakt har lenket seg til, hoppes over og rapporteres som konflikt). Idempotent", ContactsSyncSchema,
+        "lenkene en kontakt har satt tilbakekalles reversibelt med comms.contacts_unlink (angres med restore: true); ingen rad slettes og ingen data endres hos Google", { reversible: true, output_trust: "internal" }),
+      contactsWrite("contacts_unlink", "C", "Tilbakekall (reversibelt) identitetslenkene en Google-kontakt har satt i Conversation Graph, eller angre det med restore: true. Sletter aldri en rad eller identitet; rører ingenting hos Google", ContactsUnlinkSchema,
+        "angre med comms.contacts_unlink { resource_name, restore: true }, eller kjør comms.contacts_sync på nytt", { reversible: true, output_trust: "internal" })
     );
   }
   if (deps.vendorReads === true) {

@@ -2,9 +2,9 @@ import { z } from "zod";
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, normalizeRecipient, recipientHash, recipientHint, type CommsProvider } from "./channels.ts";
-import type { ConversationGraphService } from "@jarvis/conversation-graph";
+import { PHONE_CHANNELS, type ConversationGraphService } from "@jarvis/conversation-graph";
 import {
-  ContactsCreateSchema, ContactsDeleteSchema, ContactsGetSchema, ContactsListSchema, ContactsSearchSchema, ContactsSyncSchema, ContactsUpdateSchema, type ContactView, type GoogleContacts
+  CONTACTS_LINK_SOURCE, ContactsCreateSchema, ContactsDeleteSchema, ContactsGetSchema, ContactsListSchema, ContactsSearchSchema, ContactsSyncSchema, ContactsUnlinkSchema, ContactsUpdateSchema, type ContactView, type GoogleContacts
 } from "./contacts.ts";
 import { parseCallParams, parseDeleteParams, parseEditParams, parseReactParams, parseSendParams, type FunnelContext, type OutboundFunnel, type ParseResult } from "./funnel.ts";
 import { MEETING_TEXT_MAX_CHARS, type MeetingService } from "./meetings.ts";
@@ -50,8 +50,11 @@ export const MeetingCommitmentsSchema = z.object({ meeting_id: z.string().min(8)
 export const MeetingDecideSchema = z.object({ commitment_id: z.string().min(8).max(80), decision: z.enum(["accept", "dismiss"]), due_at: z.string().datetime().optional() }).strict();
 export const MeetingConfirmSchema = z.object({ meeting_id: z.string().min(8).max(80), participant_ref: z.string().min(1).max(80), identity_id: z.string().min(8).max(100) }).strict();
 
+/** Conversation Graph-flaten kontakt-verktøyene trenger (lenking, oppløsning og reversibel unlink/restore). */
+export type ContactsGraph = Pick<ConversationGraphService, "linkChannelIdentity" | "resolveIdentityByChannel" | "listChannelLinks" | "revokeLinksBySource" | "restoreLinksBySource">;
+
 export class CommsTransport implements ToolTransport {
-  constructor(private readonly deps: { funnel: OutboundFunnel; store: CommsStore; reads?: VendorReads; contacts?: { api: GoogleContacts; graph: Pick<ConversationGraphService, "linkChannelIdentity"> }; meetings?: MeetingService }) {}
+  constructor(private readonly deps: { funnel: OutboundFunnel; store: CommsStore; reads?: VendorReads; contacts?: { api: GoogleContacts; graph: ContactsGraph }; meetings?: MeetingService }) {}
 
   /** Leverandør-lesing går KUN mot en konto eieren har autorisert, og kun når kontoens leverandør faktisk er den handlingen gjelder (aldri en Telnyx-nøkkel mot Twilio-API-et). */
   private async requireAccount(ctx: FunnelContext, channel: "slack" | "discord" | "whatsapp" | "sms", accountRef: string, provider: CommsProvider): Promise<void> {
@@ -60,29 +63,48 @@ export class CommsTransport implements ToolTransport {
     if (account.provider !== provider) throw new Error("comms_read_not_supported_by_provider");
   }
 
-  private contacts(): { api: GoogleContacts; graph: Pick<ConversationGraphService, "linkChannelIdentity"> } {
+  private contacts(): { api: GoogleContacts; graph: ContactsGraph } {
     if (this.deps.contacts === undefined) throw new Error("comms_contacts_not_enabled");
     return this.deps.contacts;
   }
 
   /**
-   * Lenker en kontakt til en identitet i Conversation Graph (P2e): eksakt E.164/e-post, `match_method: contact_sync`, confidence 0.9, proveniens (kilde + Google-ressursnavn). Første identifikator oppretter/finner identiteten, de neste
-   * festes til SAMME identitet - men en identifikator som allerede tilhører en ANNEN identitet flyttes aldri (ingen automatisk sammenslåing; det er eierens handling). Returnerer antall lenkede identifikatorer.
+   * Lenker en kontakt til en identitet i Conversation Graph (P2e): eksakt E.164/e-post, `match_method: contact_sync`, confidence 0.9, proveniens (kilde + Google-ressursnavn).
+   *
+   * FIKS B-H1: ALLE identifikatorene oppløses FØRST (telefon mot alle telefonkanalene), og ingenting skrives før vi vet hvor de peker. Kontakten lenkes KUN når (a) alle er nye, eller (b) alle eksisterende treff peker på
+   * ÉN identitet som ingen ANNEN kontakt (annen ressursnavn i `external_id`) allerede har lenket seg til. Ellers HOPPES kontakten OVER (`conflict_with`): å feste en annen persons identifikatorer til en fremmed identitet
+   * (delt sentralbord-/fasttelefon eller delt e-post) er en stille sammenslåing av to personer, som verken kan oppdages eller angres uten reversibel unlink. Eieren løser en konflikt eksplisitt (merge/split i Conversation Graph, eller
+   * `contacts_unlink`). Returnerer antall lenkede identifikatorer.
    */
-  private async linkContact(ctx: FunnelContext, view: ContactView): Promise<number> {
+  private async linkContact(ctx: FunnelContext, view: ContactView): Promise<{ linked: number; conflict_with: string[] | null }> {
     const { graph } = this.contacts();
     const identifiers: Array<{ channel: "phone" | "email"; id: string }> = [...view.phones.map((id) => ({ channel: "phone" as const, id })), ...view.emails.map((id) => ({ channel: "email" as const, id }))];
-    let identityId: string | undefined;
+    const identityIds = new Set<string>();
+    for (const { channel, id } of identifiers) {
+      for (const c of channel === "phone" ? PHONE_CHANNELS : (["email"] as const)) {
+        const found = await graph.resolveIdentityByChannel(ctx.tenantId, ctx.space, c, id);
+        if (found !== null) identityIds.add(found.identity_id);
+      }
+    }
+    // Identifikatorene peker på ULIKE identiteter: å feste dem sammen ville slått identitetene sammen.
+    if (identityIds.size > 1) return { linked: 0, conflict_with: [] };
+    let identityId: string | undefined = [...identityIds][0];
+    if (identityId !== undefined) {
+      const owners = (await graph.listChannelLinks(ctx.tenantId, ctx.space, identityId))
+        .filter((l) => l.status === "active" && l.source_type === CONTACTS_LINK_SOURCE && l.external_id !== null && l.external_id !== view.resource_name)
+        .map((l) => l.external_id as string);
+      if (owners.length > 0) return { linked: 0, conflict_with: [...new Set(owners)] };
+    }
     let linked = 0;
     for (const { channel, id } of identifiers) {
       const link = await graph.linkChannelIdentity(ctx.tenantId, ctx.space, {
-        channel, channel_identifier: id, confidence: 0.9, match_method: "contact_sync", source_type: "google_contacts", external_id: view.resource_name, created_by_person_id: ctx.actor.person_id,
+        channel, channel_identifier: id, confidence: 0.9, match_method: "contact_sync", source_type: CONTACTS_LINK_SOURCE, external_id: view.resource_name, created_by_person_id: ctx.actor.person_id,
         ...(identityId !== undefined ? { identity_id: identityId } : view.display_name !== null ? { display_name: view.display_name } : {})
       });
       identityId ??= link.identity_id;
       linked += 1;
     }
-    return linked;
+    return { linked, conflict_with: null };
   }
 
   private meetings(): MeetingService {
@@ -205,15 +227,37 @@ export class CommsTransport implements ToolTransport {
         let linked = 0;
         let withoutIdentifier = 0;
         let failed = 0;
+        const conflicts: Array<{ resource_name: string; with: string[] }> = [];
+        let conflictCount = 0;
         for (const view of page.contacts) {
           if (view.phones.length === 0 && view.emails.length === 0) { withoutIdentifier += 1; continue; }
           try {
-            linked += await this.linkContact(ctx, view);
+            const outcome = await this.linkContact(ctx, view);
+            if (outcome.conflict_with !== null) {
+              conflictCount += 1;
+              if (conflicts.length < 20) conflicts.push({ resource_name: view.resource_name, with: outcome.conflict_with.slice(0, 5) });
+              continue;
+            }
+            linked += outcome.linked;
           } catch {
             failed += 1; // aldri feilteksten (kan sitere identifikatoren)
           }
         }
-        return { data: { scanned: page.contacts.length, linked_identifiers: linked, contacts_without_identifier: withoutIdentifier, contacts_failed: failed, next_page_token: page.next_page_token } };
+        // Konflikter rapporteres med ressursnavn (ugjennomsiktige id-er, aldri telefon/e-post): eieren løser dem eksplisitt. UTEN lagret forslag (DEFERRED): neste synk finner dem på nytt.
+        return {
+          data: { scanned: page.contacts.length, linked_identifiers: linked, contacts_without_identifier: withoutIdentifier, contacts_failed: failed, contacts_conflict: conflictCount, conflicts, next_page_token: page.next_page_token }
+        };
+      }
+      // B-H1: reversibel unlink (tilbakekall) av lenkene en kontakt har satt, og angre (`restore`). Sletter aldri en rad/identitet; rører ingenting hos Google.
+      case "contacts_unlink": {
+        const p = ContactsUnlinkSchema.parse(parameters);
+        const source = { source_type: CONTACTS_LINK_SOURCE, external_id: p.resource_name };
+        const { graph } = this.contacts();
+        if (p.restore === true) {
+          const r = await graph.restoreLinksBySource(ctx.tenantId, ctx.space, source);
+          return { external_id: p.resource_name, data: { restored: r.restored.length, skipped: r.skipped } };
+        }
+        return { external_id: p.resource_name, data: { revoked: (await graph.revokeLinksBySource(ctx.tenantId, ctx.space, source)).length } };
       }
       // Leverandør-lesing (P1c): rene lesinger, ubetrodd data, ingen journal.
       case "read_thread": {

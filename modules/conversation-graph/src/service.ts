@@ -284,6 +284,76 @@ export class ConversationGraphService {
   }
 
   /**
+   * WP-G1 fiks-runde B-H1: alle lenker (aktive OG tilbakekalte) en bestemt KILDE har satt - f.eks. `google_contacts` + én kontakts ressursnavn. Ren lesing. Brukes til å se hvilke identiteter en annen kontakt allerede har lenket
+   * seg til (en kontaktsynk festet tidligere stille en annen persons identifikatorer til samme identitet), og som grunnlag for `revokeLinksBySource`/`restoreLinksBySource`.
+   */
+  async listLinksBySource(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    source: { source_type: string; external_id: string }
+  ): Promise<ConversationChannelLink[]> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM conversation_channel_links WHERE tenant_id = $1 AND source_type = $2 AND external_id = $3 ORDER BY created_at ASC`,
+        [tenantId, source.source_type, source.external_id]
+      );
+      return rows as ConversationChannelLink[];
+    });
+  }
+
+  /**
+   * WP-G1 fiks-runde B-H1: REVERSIBEL «unlink» - tilbakekaller (`status='revoked'`, `revoked_at`) de AKTIVE lenkene en bestemt kilde har satt. Sletter ALDRI en rad og rører aldri en identitet eller en lenke fra en annen kilde;
+   * identifikatoren er da ikke lenger oppløsbar (`resolveIdentityBy*` ser kun aktive lenker). Angres med `restoreLinksBySource`. Tidligere fantes ingen vei tilbake (kun merge/split).
+   */
+  async revokeLinksBySource(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    source: { source_type: string; external_id: string }
+  ): Promise<ConversationChannelLink[]> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `UPDATE conversation_channel_links SET status = 'revoked', revoked_at = now(), updated_at = now()
+          WHERE tenant_id = $1 AND source_type = $2 AND external_id = $3 AND status = 'active' RETURNING *`,
+        [tenantId, source.source_type, source.external_id]
+      );
+      return rows as ConversationChannelLink[];
+    });
+  }
+
+  /**
+   * Angrer `revokeLinksBySource`: gjenaktiverer de tilbakekalte lenkene fra kilden - men aldri en lenke hvis identifikator nå har en annen AKTIV lenke (da ville den stille overstyrt/duplisert en annen persons lenke; den unike
+   * delvise indeksen ville uansett avvist det) eller hvis identiteten er slått sammen bort. Returnerer de gjenopprettede lenkene og hvor mange som ble hoppet over.
+   */
+  async restoreLinksBySource(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    source: { source_type: string; external_id: string }
+  ): Promise<{ restored: ConversationChannelLink[]; skipped: number }> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const revoked = await client.query(
+        `SELECT count(*)::int AS n FROM conversation_channel_links WHERE tenant_id = $1 AND source_type = $2 AND external_id = $3 AND status = 'revoked'`,
+        [tenantId, source.source_type, source.external_id]
+      );
+      const { rows } = await client.query(
+        `WITH candidates AS (
+           SELECT DISTINCT ON (l.channel, l.channel_identifier) l.link_id
+             FROM conversation_channel_links l
+             JOIN conversation_identities ci ON ci.tenant_id = l.tenant_id AND ci.identity_id = l.identity_id AND ci.status = 'active'
+            WHERE l.tenant_id = $1 AND l.source_type = $2 AND l.external_id = $3 AND l.status = 'revoked'
+              AND NOT EXISTS (SELECT 1 FROM conversation_channel_links a
+                               WHERE a.tenant_id = l.tenant_id AND a.channel = l.channel AND a.channel_identifier = l.channel_identifier AND a.status = 'active')
+            ORDER BY l.channel, l.channel_identifier, l.updated_at DESC
+         )
+         UPDATE conversation_channel_links u SET status = 'active', revoked_at = NULL, updated_at = now()
+           FROM candidates c WHERE u.tenant_id = $1 AND u.link_id = c.link_id RETURNING u.*`,
+        [tenantId, source.source_type, source.external_id]
+      );
+      const total = (revoked.rows[0] as { n: number }).n;
+      return { restored: rows as ConversationChannelLink[], skipped: Math.max(0, total - rows.length) };
+    });
+  }
+
+  /**
    * Reversibel sammenslåing: kilde-identiteten tombstones
    * (`status='merged'`), aktive kanal-lenker omdirigeres til
    * mål-identiteten, og EKSAKT hvilke lenker som ble omdirigert lagres i

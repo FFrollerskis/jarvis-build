@@ -43,6 +43,10 @@ export const ContactsCreateSchema = z.object(ContactFields).strict().refine((v) 
 export const ContactsUpdateSchema = z.object({ resource_name: resourceName, etag: z.string().regex(ETAG), ...ContactFields }).strict().refine((v) => [v.given_name, v.family_name, v.organization, v.emails, v.phones].some((x) => x !== undefined), "no_changes");
 export const ContactsDeleteSchema = z.object({ resource_name: resourceName }).strict();
 export const ContactsSyncSchema = z.object({ page_size: z.number().int().min(1).max(100).optional(), page_token: z.string().min(1).max(500).optional() }).strict();
+/** B-H1: tilbakekall identitetslenkene en kontakt har satt (standard), eller angre det (`restore: true`). Sletter aldri en rad, en identitet eller noe hos Google. */
+export const ContactsUnlinkSchema = z.object({ resource_name: resourceName, restore: z.boolean().optional() }).strict();
+/** Kilden en kontaktsynk-lenke bærer i Conversation Graph (`source_type`; `external_id` er kontaktens ressursnavn). */
+export const CONTACTS_LINK_SOURCE = "google_contacts";
 
 export interface ContactView {
   readonly resource_name: string;
