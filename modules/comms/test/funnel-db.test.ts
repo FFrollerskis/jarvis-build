@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BusinessService } from "@jarvis/business";
 import { ConversationGraphService } from "@jarvis/conversation-graph";
 import {
-  CommsStore, DEFAULT_AI_DISCLOSURE_TEXT, OutboundFunnel, ProviderRejectedError, parseCommsConfig, parseDeleteParams, parseEditParams, parseReactParams, parseSendParams, recipientHash,
+  CommsStore, DEFAULT_AI_DISCLOSURE_TEXT, OutboundFunnel, ProviderRejectedError, optOutHash, parseCommsConfig, parseDeleteParams, parseEditParams, parseReactParams, parseSendParams, recipientHash,
   type AdapterMap, type FunnelContext, type MarketingBasisPort, type ParsedOutbound
 } from "../src/index.ts";
 import { OWNER, TENANT_A, TENANT_B, scriptedAdapter, startCommsDb, type CommsDb } from "./support/harness.ts";
@@ -196,21 +196,21 @@ describe("B: utsendelse - journal før/etter, hash i stedet for tekst, AI-opplys
 describe("C: mottakerens avmelding (STOP) kan ikke omgås", () => {
   it("registrert avmelding stopper alt; eierregistrert avmelding oppheves aldri av START; stopp-ord-avmelding oppheves av START på samme avsender", async () => {
     const number = "+4790000100";
-    const hash = recipientHash(TENANT_A, "sms", number);
-    await store.recordOptOut(TENANT_A, "business", { channel: "sms", account_ref: "+4791000000", recipient_hash: hash, recipient_hint: "+47•••100", source: "inbound_stop_keyword", recorded_by: "system" });
+    const hash = optOutHash(TENANT_A, "sms", number);
+    await store.recordOptOut(TENANT_A, "business", { channel: "sms", recipient_hash: hash, recipient_hint: "+47•••100", source: "inbound_stop_keyword", recorded_by: "system" });
     await expect(funnel.send(ctxA, parsedSend({ recipient: number }), "t")).rejects.toThrow("recipient_opted_out");
     // idempotent registrering
-    const dup = await store.recordOptOut(TENANT_A, "business", { channel: "sms", account_ref: "+4791000000", recipient_hash: hash, recipient_hint: "+47•••100", source: "inbound_stop_keyword", recorded_by: "system" });
+    const dup = await store.recordOptOut(TENANT_A, "business", { channel: "sms", recipient_hash: hash, recipient_hint: "+47•••100", source: "inbound_stop_keyword", recorded_by: "system" });
     expect(dup.created).toBe(false);
-    // START fra en ANNEN avsender løfter ikke
-    expect(await store.liftByStartKeyword(TENANT_A, "business", { channel: "sms", account_ref: "+4791555555", recipient_hash: hash })).toBe(0);
-    expect(await store.liftByStartKeyword(TENANT_A, "business", { channel: "sms", account_ref: "+4791000000", recipient_hash: hash })).toBe(1);
+    // START på en ANNEN kanal enn avmeldingen kom på løfter ikke (konservativt); START på samme kanal løfter
+    expect(await store.liftByStartKeyword(TENANT_A, { channel: "whatsapp", recipient_hash: hash })).toBe(0);
+    expect(await store.liftByStartKeyword(TENANT_A, { channel: "sms", recipient_hash: hash })).toBe(1);
     await expect(funnel.send(ctxA, parsedSend({ recipient: number }), "t")).resolves.toBeDefined();
     // eierregistrert («alle avsendere») løftes ALDRI av en tekst-START
     const ownerNumber = "+4790000101";
-    const ownerHash = recipientHash(TENANT_A, "sms", ownerNumber);
-    await store.recordOptOut(TENANT_A, "business", { channel: "sms", account_ref: "*", recipient_hash: ownerHash, recipient_hint: "+47•••101", source: "owner_recorded", recorded_by: OWNER });
-    expect(await store.liftByStartKeyword(TENANT_A, "business", { channel: "sms", account_ref: "*", recipient_hash: ownerHash })).toBe(0);
+    const ownerHash = optOutHash(TENANT_A, "sms", ownerNumber);
+    await store.recordOptOut(TENANT_A, "business", { channel: "sms", recipient_hash: ownerHash, recipient_hint: "+47•••101", source: "owner_recorded", recorded_by: OWNER });
+    expect(await store.liftByStartKeyword(TENANT_A, { channel: "sms", recipient_hash: ownerHash })).toBe(0);
     await expect(funnel.send(ctxA, parsedSend({ recipient: ownerNumber }), "t")).rejects.toThrow("recipient_opted_out");
     // en opphevet avmelding kan ikke endres, og kan ikke «gjenopplives» ved å sette status tilbake
     await expect(db.admin.query("UPDATE comms_recipient_opt_outs SET status = 'active', lifted_at = NULL, lifted_by = NULL WHERE recipient_hash = $1 AND status = 'lifted'", [hash])).rejects.toThrow();
@@ -221,7 +221,7 @@ describe("C: mottakerens avmelding (STOP) kan ikke omgås", () => {
     const f = new OutboundFunnel({ store, graph, adapters: { twilio: unsub }, config, clock, marketing });
     const number = "+4790000102";
     await expect(f.send(ctxA, parsedSend({ recipient: number }), "t")).rejects.toThrow("21610");
-    expect(await store.isOptedOut(TENANT_A, "business", "sms", "+4791000000", recipientHash(TENANT_A, "sms", number))).toBe(true);
+    expect(await store.isOptedOut(TENANT_A, optOutHash(TENANT_A, "sms", number))).toBe(true);
     await expect(f.send(ctxA, parsedSend({ recipient: number }), "t")).rejects.toThrow("recipient_opted_out");
     expect(unsub.calls).toHaveLength(1);
     const rows = await store.listOptOuts(TENANT_A, "business");
@@ -230,7 +230,9 @@ describe("C: mottakerens avmelding (STOP) kan ikke omgås", () => {
 
   it("avmelding er tenant-isolert (samme nummer hos tenant B er IKKE avmeldt)", async () => {
     const number = "+4790000100";
-    expect(await store.isOptedOut(TENANT_B, "business", "sms", "+4791000000", recipientHash(TENANT_B, "sms", number))).toBe(false);
+    expect(await store.isOptedOut(TENANT_B, optOutHash(TENANT_B, "sms", number))).toBe(false);
+    // tenant-bred avmelding i A er likevel ikke synlig for B (hashen inneholder tenanten, og RLS gjelder)
+    expect(await store.isOptedOut(TENANT_B, optOutHash(TENANT_A, "sms", number))).toBe(false);
     expect(await store.listOptOuts(TENANT_B, "business")).toEqual([]);
   });
 });

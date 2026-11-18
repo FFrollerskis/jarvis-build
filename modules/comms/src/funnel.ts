@@ -4,7 +4,7 @@ import type { BusinessService } from "@jarvis/business";
 import type { ConversationGraphService } from "@jarvis/conversation-graph";
 import { isIndeterminateTransportError, isOutcomeUnknownMessage } from "@jarvis/tool-gateway";
 import { ProviderRejectedError, type AdapterMap } from "./adapters.ts";
-import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, normalizeRecipient, recipientHash, recipientHint, type CommsChannel, type CommsProvider } from "./channels.ts";
+import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, normalizeRecipient, optOutHash, recipientHash, recipientHint, type CommsChannel, type CommsProvider } from "./channels.ts";
 import type { CommsConfig } from "./config.ts";
 import { evaluateOutboundPolicy, rateCaps, type OutboundKind, type OutboundPolicyState, type OutboundPurpose, type OutboundRequest, type PolicyDecision, type ReservationRegisterStatus } from "./policy.ts";
 import type { Actor, AuthorizedAccount, Clock, CommsStore, JournalEntryInput, JournalSource } from "./store.ts";
@@ -173,7 +173,7 @@ export class OutboundFunnel {
     const provider: CommsProvider = account?.provider ?? PROVIDERS_FOR_CHANNEL[req.channel][0]!;
     const isAddressed = req.kind === "message" || req.kind === "call" || req.kind === "edit";
     const [optedOut, sends24, calls24, hourCount, lastInbound, identity, targetRow, priorConsent, reservation] = await Promise.all([
-      isAddressed ? store.isOptedOut(ctx.tenantId, ctx.space, req.channel, req.account_ref, hash) : Promise.resolve(false),
+      isAddressed ? store.isOptedOut(ctx.tenantId, optOutHash(ctx.tenantId, req.channel, req.recipient)) : Promise.resolve(false),
       req.kind === "message" ? store.countRecipient24h(ctx.tenantId, ctx.space, req.channel, hash, "message") : Promise.resolve(0),
       req.kind === "call" ? store.countRecipient24h(ctx.tenantId, ctx.space, req.channel, hash, "call") : Promise.resolve(0),
       store.countAccountHour(ctx.tenantId, ctx.space, req.channel, req.account_ref),
@@ -334,10 +334,10 @@ export class OutboundFunnel {
       const unknown = isOutcomeUnknownMessage(err instanceof Error ? err.message : "") || (!(err instanceof ProviderRejectedError) && isIndeterminateTransportError(err));
       // Vi VET ikke om sendingen gikk gjennom (ukjent) eller at den ikke gjorde det (avslag/feil før sending).
       await store.settleAttempt(ctx.tenantId, ctx.space, begin.log_id, { status: unknown ? "outcome_unknown" : "failed", after_state: { error: safeError(err) } }).catch((e) => this.deps.warn?.({ msg: "comms_journal_settle_failed", error: safeError(e) }));
-      // Twilio 21610 = mottakeren har meldt STOPP hos operatør/Twilio: registrer det hos oss også (opt-out kan aldri «glemmes» av et vellykket nytt forsøk).
+      // Twilio 21610 = mottakeren har meldt STOPP hos operatør/Twilio: registrer det hos oss også (opt-out kan aldri «glemmes» av et vellykket nytt forsøk) - tenant-bredt (A-M3).
       if (err instanceof ProviderRejectedError && err.provider === "twilio" && err.code === "21610") {
         await store.recordOptOut(ctx.tenantId, ctx.space, {
-          channel: req.channel, account_ref: req.account_ref, recipient_hash: ev.recipient_hash, recipient_hint: ev.recipient_hint, source: "provider_error", evidence_ref: "twilio:21610",
+          channel: req.channel, recipient_hash: optOutHash(ctx.tenantId, req.channel, req.recipient), recipient_hint: ev.recipient_hint, source: "provider_error", evidence_ref: "twilio:21610",
           recorded_by: "system", session_id: ctx.actor.session_id, ...(ctx.actor.task_id !== undefined ? { task_id: ctx.actor.task_id } : {})
         }).catch(() => undefined);
       }

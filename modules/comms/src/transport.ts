@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
-import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, normalizeRecipient, recipientHash, recipientHint, type CommsProvider } from "./channels.ts";
+import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, isValidAccountRef, normalizeRecipient, optOutHash, recipientHint, type CommsProvider } from "./channels.ts";
 import { PHONE_CHANNELS, type ConversationGraphService } from "@jarvis/conversation-graph";
 import {
   CONTACTS_LINK_SOURCE, ContactsCreateSchema, ContactsDeleteSchema, ContactsGetSchema, ContactsListSchema, ContactsSearchSchema, ContactsSyncSchema, ContactsUnlinkSchema, ContactsUpdateSchema, type ContactView, type GoogleContacts
@@ -27,8 +27,9 @@ const Authorize = z.object({
   display_name: z.string().min(1).max(120).optional()
 }).strict();
 const Revoke = z.object({ account_id: z.string().min(8).max(80) }).strict();
-const RecordOptOut = z.object({
-  channel: z.enum(COMMS_CHANNELS), account_ref: z.string().min(1).max(200), recipient: z.string().min(1).max(300), source: z.enum(["owner_recorded", "recipient_request"]).optional()
+/** `account_ref` er valgfri og kun et hint (A-M7): en avmelding er tenant-bred. Oppgis den, MÅ den være `*` eller en gyldig kontoreferanse for kanalen - en skrivefeil gir en tydelig feil, aldri en stille no-op. */
+export const RecordOptOutSchema = z.object({
+  channel: z.enum(COMMS_CHANNELS), account_ref: z.string().min(1).max(200).optional(), recipient: z.string().min(1).max(300), source: z.enum(["owner_recorded", "recipient_request"]).optional()
 }).strict();
 
 /** Leverandør-lesing (P1c): strenge, eksakte former - id-er valideres mot leverandørens format FØR noe kall (ingen sti-/spørringsinjeksjon). */
@@ -313,14 +314,16 @@ export class CommsTransport implements ToolTransport {
         return { data: { revoked: await store.revokeAccount(ctx.tenantId, ctx.space, p.account_id) } };
       }
       case "record_opt_out": {
-        const p = RecordOptOut.parse(parameters);
+        const p = RecordOptOutSchema.parse(parameters);
+        if (p.account_ref !== undefined && p.account_ref !== "*" && !isValidAccountRef(p.channel, p.account_ref)) throw new Error("comms_invalid_parameters:account_ref_invalid");
         const normalized = normalizeRecipient(p.channel, p.recipient);
         if (!normalized.ok) throw new Error(`comms_invalid_parameters:${normalized.code}`);
+        // Tenant-bred (A-M3): gjelder alle våre kontoer, alle rom og alle kanaler som deler identifikator (telefon = SMS + WhatsApp + samtale), uansett hvilken `account_ref` som ble oppgitt.
         const r = await store.recordOptOut(ctx.tenantId, ctx.space, {
-          channel: p.channel, account_ref: p.account_ref, recipient_hash: recipientHash(ctx.tenantId, p.channel, normalized.value), recipient_hint: recipientHint(p.channel, normalized.value),
+          channel: p.channel, recipient_hash: optOutHash(ctx.tenantId, p.channel, normalized.value), recipient_hint: recipientHint(p.channel, normalized.value),
           source: p.source ?? "owner_recorded", recorded_by: ctx.actor.person_id, session_id: ctx.actor.session_id, ...(ctx.actor.task_id !== undefined ? { task_id: ctx.actor.task_id } : {})
         });
-        return { external_id: r.opt_out_id, data: { opt_out_id: r.opt_out_id, created: r.created } };
+        return { external_id: r.opt_out_id, data: { opt_out_id: r.opt_out_id, created: r.created, scope: "tenant" } };
       }
       default:
         throw new Error(`comms_action_not_implemented:${action}`);

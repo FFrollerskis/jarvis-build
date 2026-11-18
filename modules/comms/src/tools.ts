@@ -7,7 +7,7 @@ import { isCommsChannel } from "./channels.ts";
 import { CONTACTS_CREDENTIAL_REF, ContactsCreateSchema, ContactsDeleteSchema, ContactsGetSchema, ContactsListSchema, ContactsSearchSchema, ContactsSyncSchema, ContactsUnlinkSchema, ContactsUpdateSchema } from "./contacts.ts";
 import { CallParamsSchema, DeleteParamsSchema, EditParamsSchema, ReactParamsSchema, SendParamsSchema } from "./funnel.ts";
 import type { CommsStore } from "./store.ts";
-import { MeetingCommitmentsSchema, MeetingConfirmSchema, MeetingDecideSchema, MeetingIngestTextSchema, MeetingListSchema, MeetingRefSchema } from "./transport.ts";
+import { MeetingCommitmentsSchema, MeetingConfirmSchema, MeetingDecideSchema, MeetingIngestTextSchema, MeetingListSchema, MeetingRefSchema, RecordOptOutSchema } from "./transport.ts";
 import { GetMessageSchema, ListTemplatesSchema, ListUsersSchema, ReadMessageSchema, ReadThreadSchema } from "./transport.ts";
 
 /**
@@ -144,8 +144,8 @@ export function commsToolDefinitions(deps: CommsToolDeps): ToolDefinition[] {
     },
     {
       ...common, tool_id: "comms", action: "record_opt_out",
-      description: "Registrer en mottakers avmelding (f.eks. at mottakeren ba om å slippe utenfor kanalen). Kan aldri oppheves av eieren - kun mottakerens egen START på kanalen",
-      input_schema: record({ channel: CHANNELS_ENUM, account_ref: z.string().min(1).max(200), recipient: z.string().min(1).max(300), source: z.enum(["owner_recorded", "recipient_request"]).optional() }),
+      description: "Registrer en mottakers avmelding (f.eks. at mottakeren ba om å slippe utenfor kanalen). TENANT-BRED: gjelder alle våre kontoer, alle rom og alle kanaler som deler identifikator (telefon = SMS + WhatsApp + samtale). `account_ref` er valgfri (`*` eller en gyldig kontoreferanse; en skrivefeil avvises). Kan aldri oppheves av eieren - kun mottakerens egen START på kanalen",
+      input_schema: cast(RecordOptOutSchema),
       capability_class: "B", scopes: ["comms.admin"], reversible: false, rollback_procedure: "ingen: en avmelding oppheves kun av mottakerens egen START (mottakerens rett går foran)", idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, output_trust: "internal"
     }

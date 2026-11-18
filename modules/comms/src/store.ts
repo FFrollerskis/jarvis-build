@@ -34,7 +34,7 @@ export type OptOutSource = "inbound_stop_keyword" | "provider_error" | "owner_re
 export interface OptEffect {
   readonly kind: "stop" | "start";
   readonly channel: CommsChannel;
-  readonly account_ref: string;
+  /** `optOutHash` (tenant-bredt navnerom), ikke journalens kanalspesifikke `recipientHash`. */
   readonly recipient_hash: string;
   readonly recipient_hint: string;
   /** Peker til hendelsen (DB-grense 200 tegn: bruk `evidenceRefFor`). */
@@ -141,6 +141,8 @@ const iso = (value: unknown): string => (value instanceof Date ? value.toISOStri
 const isoOrNull = (value: unknown): string | null => (value === null || value === undefined ? null : iso(value));
 const newId = (prefix: string): string => `${prefix}-${randomUUID()}`;
 const ACTIVE_STATUSES = ["requested", "sent", "outcome_unknown"];
+/** Rommene kommunikasjon kan skje i (helse/hjem/gjest er aldri mål). Mottakerens avmelding leses og skrives på tvers av ALLE disse (A-M3: tenant-bred), uavhengig av rommet avsenderen eller webhooken står i. */
+const COMMS_SPACES: readonly MemorySpace[] = ["personal", "business", "project", "shared"];
 
 export class CommsStore {
   constructor(private readonly pool: pg.Pool, private readonly clock: Clock = () => new Date()) {}
@@ -202,62 +204,65 @@ export class CommsStore {
   }
 
   // ---------------------------------------------------------------- mottakerens avmelding
-  async isOptedOut(tenantId: string, space: MemorySpace, channel: CommsChannel, accountRef: string, recipientHash: string): Promise<boolean> {
-    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
-      const res = await client.query(
-        `SELECT 1 FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND channel = $2 AND recipient_hash = $3 AND status = 'active' AND account_ref IN ($4, '*') LIMIT 1`,
-        [tenantId, channel, recipientHash, accountRef]
-      );
+  /**
+   * A-M3: mottakerens STOP gjelder TENANT-bredt: hver av våre kontoer, hvert rom og hver kanal som deler identifikator-navnerom (telefon = SMS + WhatsApp + samtale). `optHash` er `optOutHash` (navnerom, ikke kanal);
+   * avsenderkonto og rom er IKKE en del av oppslaget. (Før: kun (kanal, avsender|'*', rom) - en STOP til konto A stoppet ikke konto B, WhatsApp eller AI-ringing, og `*` gjaldt ikke på tvers av rom.)
+   */
+  async isOptedOut(tenantId: string, optHash: string): Promise<boolean> {
+    return withMemoryTransaction(this.pool, tenantId, COMMS_SPACES, async (client) => {
+      const res = await client.query(`SELECT 1 FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = $2 AND status = 'active' LIMIT 1`, [tenantId, optHash]);
       return res.rowCount === 1;
     });
   }
 
-  /** Idempotent: en allerede aktiv avmelding for (kanal, avsender, mottaker) gir `created: false`. */
+  /**
+   * Idempotent og TENANT-bred (A-M3): én aktiv avmelding per mottaker (`optOutHash`) i tenanten - `account_ref` lagres alltid som `'*'` (alle våre avsendere). En allerede aktiv avmelding (uansett kanal/rom den kom fra)
+   * gir `created: false`. Skrives i rommet kalleren står i; leses uavhengig av rom (`isOptedOut`).
+   */
   async recordOptOut(
     tenantId: string, space: MemorySpace,
-    input: { channel: CommsChannel; account_ref: string; recipient_hash: string; recipient_hint: string; source: OptOutSource; evidence_ref?: string; recorded_by: string; session_id?: string; task_id?: string }
+    input: { channel: CommsChannel; recipient_hash: string; recipient_hint: string; source: OptOutSource; evidence_ref?: string; recorded_by: string; session_id?: string; task_id?: string }
   ): Promise<{ opt_out_id: string; created: boolean }> {
-    return withMemoryTransaction(this.pool, tenantId, [space], (client) => this.recordOptOutIn(client, tenantId, space, input));
+    return withMemoryTransaction(this.pool, tenantId, COMMS_SPACES, (client) => this.recordOptOutIn(client, tenantId, space, input));
   }
 
   private async recordOptOutIn(
     client: pg.PoolClient, tenantId: string, space: MemorySpace,
-    input: { channel: CommsChannel; account_ref: string; recipient_hash: string; recipient_hint: string; source: OptOutSource; evidence_ref?: string; recorded_by: string; session_id?: string; task_id?: string }
+    input: { channel: CommsChannel; recipient_hash: string; recipient_hint: string; source: OptOutSource; evidence_ref?: string; recorded_by: string; session_id?: string; task_id?: string }
   ): Promise<{ opt_out_id: string; created: boolean }> {
+    // To samtidige STOP for samme mottaker (f.eks. SMS og WhatsApp i samme sekund) serialiseres, så vi aldri får to aktive rader.
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 7340464))", [`comms-optout|${tenantId}|${input.recipient_hash}`]);
+    const existing = await client.query(`SELECT opt_out_id FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = $2 AND status = 'active' LIMIT 1`, [tenantId, input.recipient_hash]);
+    if (existing.rowCount === 1) return { opt_out_id: (existing.rows[0] as { opt_out_id: string }).opt_out_id, created: false };
     const id = newId("optout");
-    const res = await client.query(
+    await client.query(
       `INSERT INTO comms_recipient_opt_outs (tenant_id, opt_out_id, memory_space_id, channel, account_ref, recipient_hash, recipient_hint, source, evidence_ref, recorded_by, session_id, task_id, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-       ON CONFLICT (tenant_id, channel, account_ref, recipient_hash) WHERE status = 'active' DO NOTHING RETURNING opt_out_id`,
-      [tenantId, id, space, input.channel, input.account_ref, input.recipient_hash, input.recipient_hint, input.source, input.evidence_ref ?? null, input.recorded_by, input.session_id ?? null, input.task_id ?? null, this.clock()]
+       VALUES ($1, $2, $3, $4, '*', $5, $6, $7, $8, $9, $10, $11, $12)`,
+      [tenantId, id, space, input.channel, input.recipient_hash, input.recipient_hint, input.source, input.evidence_ref ?? null, input.recorded_by, input.session_id ?? null, input.task_id ?? null, this.clock()]
     );
-    if (res.rowCount === 1) return { opt_out_id: id, created: true };
-    const existing = await client.query(
-      `SELECT opt_out_id FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND channel = $2 AND account_ref = $3 AND recipient_hash = $4 AND status = 'active'`,
-      [tenantId, input.channel, input.account_ref, input.recipient_hash]
-    );
-    return { opt_out_id: (existing.rows[0] as { opt_out_id: string }).opt_out_id, created: false };
+    return { opt_out_id: id, created: true };
   }
 
   /**
-   * KUN mottakerens egen START kan oppheve en avmelding, og kun en som kom fra et stopp-ord/leverandørfeil på NØYAKTIG denne avsenderen. En avmelding eieren har registrert (`owner_recorded`) eller mottakeren har bedt om
-   * utenfor kanalen (`recipient_request`) kan aldri oppheves av et tekstsvar.
+   * KUN mottakerens egen START kan oppheve en avmelding, og kun en som kom fra et stopp-ord/leverandørfeil og på SAMME kanal som START-en kom på (konservativt: en STOP på SMS opphever ikke en START på WhatsApp - mottakeren må
+   * svare START der den ble avmeldt). En avmelding eieren har registrert (`owner_recorded`) eller mottakeren har bedt om utenfor kanalen (`recipient_request`) kan aldri oppheves av et tekstsvar.
    */
-  async liftByStartKeyword(tenantId: string, space: MemorySpace, input: { channel: CommsChannel; account_ref: string; recipient_hash: string }): Promise<number> {
-    return withMemoryTransaction(this.pool, tenantId, [space], (client) => this.liftIn(client, tenantId, input));
+  async liftByStartKeyword(tenantId: string, input: { channel: CommsChannel; recipient_hash: string }): Promise<number> {
+    return withMemoryTransaction(this.pool, tenantId, COMMS_SPACES, (client) => this.liftIn(client, tenantId, input));
   }
 
-  private async liftIn(client: pg.PoolClient, tenantId: string, input: { channel: CommsChannel; account_ref: string; recipient_hash: string }): Promise<number> {
+  private async liftIn(client: pg.PoolClient, tenantId: string, input: { channel: CommsChannel; recipient_hash: string }): Promise<number> {
     const res = await client.query(
-      `UPDATE comms_recipient_opt_outs SET status = 'lifted', lifted_at = $5, lifted_by = 'inbound_start_keyword'
-        WHERE tenant_id = $1 AND channel = $2 AND account_ref = $3 AND recipient_hash = $4 AND status = 'active' AND source IN ('inbound_stop_keyword', 'provider_error')`,
-      [tenantId, input.channel, input.account_ref, input.recipient_hash, this.clock()]
+      `UPDATE comms_recipient_opt_outs SET status = 'lifted', lifted_at = $4, lifted_by = 'inbound_start_keyword'
+        WHERE tenant_id = $1 AND channel = $2 AND recipient_hash = $3 AND status = 'active' AND source IN ('inbound_stop_keyword', 'provider_error')`,
+      [tenantId, input.channel, input.recipient_hash, this.clock()]
     );
     return res.rowCount ?? 0;
   }
 
-  async listOptOuts(tenantId: string, space: MemorySpace, limit = 100): Promise<OptOutRow[]> {
-    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
+  /** Alle avmeldinger i tenanten (de gjelder tenant-bredt, så listen er det også - på tvers av rom). */
+  async listOptOuts(tenantId: string, _space: MemorySpace, limit = 100): Promise<OptOutRow[]> {
+    return withMemoryTransaction(this.pool, tenantId, COMMS_SPACES, async (client) => {
       const res = await client.query(`SELECT * FROM comms_recipient_opt_outs WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2`, [tenantId, Math.min(Math.max(limit, 1), 500)]);
       return (res.rows as Array<Record<string, unknown>>).map((r) => ({
         opt_out_id: r["opt_out_id"] as string, channel: r["channel"] as CommsChannel, account_ref: r["account_ref"] as string, recipient_hint: (r["recipient_hint"] as string | null) ?? null,
@@ -416,7 +421,8 @@ export class CommsStore {
    * STOP ble aldri registrert (juridisk tung, lav sannsynlighet). Nå ruller en feil i avmeldingen tilbake HELE hendelsen, og retry behandles på nytt.
    */
   async recordInbound(tenantId: string, space: MemorySpace, input: InboundEventInput, retentionDays: number, effect?: OptEffect): Promise<{ inserted: boolean; event_id: string | null }> {
-    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
+    // Alle comms-rom er synlige i transaksjonen: avmeldingen er tenant-bred (A-M3), så en eksisterende avmelding i et annet rom må sees (ingen duplikat) og START må kunne oppheve den. Hendelsen selv skrives i `space`.
+    return withMemoryTransaction(this.pool, tenantId, COMMS_SPACES, async (client) => {
       const id = newId("cin");
       const now = this.clock();
       const res = await client.query(
@@ -431,11 +437,10 @@ export class CommsStore {
       if (res.rowCount !== 1) return { inserted: false, event_id: null };
       if (effect?.kind === "stop") {
         await this.recordOptOutIn(client, tenantId, space, {
-          channel: effect.channel, account_ref: effect.account_ref, recipient_hash: effect.recipient_hash, recipient_hint: effect.recipient_hint, source: "inbound_stop_keyword",
-          evidence_ref: effect.evidence_ref, recorded_by: "system", task_id: input.ingest_id
+          channel: effect.channel, recipient_hash: effect.recipient_hash, recipient_hint: effect.recipient_hint, source: "inbound_stop_keyword", evidence_ref: effect.evidence_ref, recorded_by: "system", task_id: input.ingest_id
         });
       } else if (effect?.kind === "start") {
-        await this.liftIn(client, tenantId, { channel: effect.channel, account_ref: effect.account_ref, recipient_hash: effect.recipient_hash });
+        await this.liftIn(client, tenantId, { channel: effect.channel, recipient_hash: effect.recipient_hash });
       }
       return { inserted: true, event_id: id };
     });

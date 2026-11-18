@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ConversationGraphService } from "@jarvis/conversation-graph";
-import { CommsStore, CommsWebhookService, evidenceRefFor, parseCommsConfig, recipientHash, WEBHOOK_SECRET_REFS, type WebhookRequest } from "../src/index.ts";
+import { CommsStore, CommsWebhookService, evidenceRefFor, optOutHash, parseCommsConfig, WEBHOOK_SECRET_REFS, type WebhookRequest } from "../src/index.ts";
 import { TENANT_A, startCommsDb, type CommsDb } from "./support/harness.ts";
 
 /**
@@ -27,9 +27,9 @@ const metaReq = (body: object): WebhookRequest => {
 };
 const phone = () => `+4790${String(700000 + ++n).padStart(6, "0").slice(-6)}`;
 const digits = (e164: string) => e164.slice(1);
-const opted = (e164: string) => store.isOptedOut(TENANT_A, "business", "whatsapp", "109876543210", recipientHash(TENANT_A, "whatsapp", e164));
+const opted = (e164: string) => store.isOptedOut(TENANT_A, optOutHash(TENANT_A, "whatsapp", e164));
 const eventRows = async (key: string) => (await db.admin.query("SELECT kind, event_key FROM comms_inbound_events WHERE tenant_id = $1 AND event_key = $2", [TENANT_A, key])).rows as Array<{ kind: string; event_key: string }>;
-const optRows = async (e164: string) => (await db.admin.query("SELECT status, source, evidence_ref FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = $2", [TENANT_A, recipientHash(TENANT_A, "whatsapp", e164)])).rows as Array<{ status: string; source: string; evidence_ref: string }>;
+const optRows = async (e164: string) => (await db.admin.query("SELECT status, source, evidence_ref FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = $2", [TENANT_A, optOutHash(TENANT_A, "whatsapp", e164)])).rows as Array<{ status: string; source: string; evidence_ref: string }>;
 
 beforeAll(async () => {
   db = await startCommsDb("g1stp");

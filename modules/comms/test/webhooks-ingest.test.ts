@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BusinessService } from "@jarvis/business";
 import { ConversationGraphService } from "@jarvis/conversation-graph";
 import {
-  CommsStore, CommsWebhookService, recipientHash, twilioSignatureBase, parseCommsConfig, sanitizeInboundText, WEBHOOK_SECRET_REFS, type WebhookRequest
+  CommsStore, CommsWebhookService, optOutHash, recipientHash, twilioSignatureBase, parseCommsConfig, sanitizeInboundText, WEBHOOK_SECRET_REFS, type WebhookRequest
 } from "../src/index.ts";
 import { TENANT_A, TENANT_B, startCommsDb, type CommsDb } from "./support/harness.ts";
 
@@ -211,7 +211,7 @@ describe("C: Twilio og Telnyx (SMS)", () => {
 
 describe("D: mottakerens STOP/START (deterministisk, kun hele enkeltords meldinger)", () => {
   const sender = "+4790000600";
-  const hash = recipientHash(TENANT_A, "sms", sender);
+  const hash = optOutHash(TENANT_A, "sms", sender);
   const optOutRows = async () => (await db.admin.query("SELECT status, source, evidence_ref FROM comms_recipient_opt_outs WHERE recipient_hash = $1 ORDER BY status DESC", [hash])).rows as Array<Record<string, string>>;
 
   it("«STOP» registrerer avmelding (uten tekst i hendelsen, lang retensjon); «stop sending me this» gjør det IKKE; START opphever; gjenspilt START opphever ikke en NYERE avmelding", async () => {
@@ -219,7 +219,7 @@ describe("D: mottakerens STOP/START (deterministisk, kun hele enkeltords melding
     expect(await optOutRows()).toEqual([]);
     const stop1 = twilioMsg(sender, "STOP");
     expect((await service.handle("twilio", twilioReq(stop1))).body).toMatchObject({ events: { inserted: 1, opt_outs: 1 } });
-    expect(await store.isOptedOut(TENANT_A, "business", "sms", "+4791000000", hash)).toBe(true);
+    expect(await store.isOptedOut(TENANT_A, hash)).toBe(true);
     const [evt] = await events("event_key = $1", [`twilio:msg:${stop1.MessageSid}`]);
     expect(evt).toMatchObject({ kind: "opt_out", content_excerpt: null });
     expect(evt!["retention_until"]).toEqual(new Date((NOW + 1825 * 86_400) * 1000));
@@ -227,20 +227,20 @@ describe("D: mottakerens STOP/START (deterministisk, kun hele enkeltords melding
     expect((await service.handle("twilio", twilioReq(stop1))).body).toMatchObject({ events: { duplicates: 1, opt_outs: 0 } });
     const start = twilioMsg(sender, "START");
     expect((await service.handle("twilio", twilioReq(start))).body).toMatchObject({ events: { opt_ins: 1 } });
-    expect(await store.isOptedOut(TENANT_A, "business", "sms", "+4791000000", hash)).toBe(false);
+    expect(await store.isOptedOut(TENANT_A, hash)).toBe(false);
     // ny STOP, og så en GJENSPILLING av den gamle START-forespørselen: den er en duplikat og opphever ingenting
     await service.handle("twilio", twilioReq(twilioMsg(sender, "Stopp")));
-    expect(await store.isOptedOut(TENANT_A, "business", "sms", "+4791000000", hash)).toBe(true);
+    expect(await store.isOptedOut(TENANT_A, hash)).toBe(true);
     expect((await service.handle("twilio", twilioReq(start))).body).toMatchObject({ events: { duplicates: 1, opt_ins: 0 } });
-    expect(await store.isOptedOut(TENANT_A, "business", "sms", "+4791000000", hash)).toBe(true);
+    expect(await store.isOptedOut(TENANT_A, hash)).toBe(true);
     expect((await optOutRows()).map((r) => r["status"])).toEqual(["lifted", "active"]);
   });
 
   it("WhatsApp og Telnyx tolker også STOP; Messenger/Instagram/Slack har ingen tekst-STOP-konvensjon", async () => {
     await service.handle("meta", metaReq(waMsg("4790000601", "stop")));
-    expect(await store.isOptedOut(TENANT_A, "business", "whatsapp", "109876543210", recipientHash(TENANT_A, "whatsapp", "+4790000601"))).toBe(true);
+    expect(await store.isOptedOut(TENANT_A, optOutHash(TENANT_A, "whatsapp", "+4790000601"))).toBe(true);
     await service.handle("telnyx", telnyxReq(telnyxMsg("+4790000602", "STOPP")));
-    expect(await store.isOptedOut(TENANT_A, "business", "sms", "+4791000001", recipientHash(TENANT_A, "sms", "+4790000602"))).toBe(true);
+    expect(await store.isOptedOut(TENANT_A, optOutHash(TENANT_A, "sms", "+4790000602"))).toBe(true);
     const before = (await counts()).optOuts;
     await service.handle("meta", metaReq(pageMsg("page", "1111111111", "5550002", "STOP")));
     await service.handle("slack", slackReq(slackMsg("STOP")));
