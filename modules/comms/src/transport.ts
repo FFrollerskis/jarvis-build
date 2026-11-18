@@ -7,6 +7,7 @@ import {
   ContactsCreateSchema, ContactsDeleteSchema, ContactsGetSchema, ContactsListSchema, ContactsSearchSchema, ContactsSyncSchema, ContactsUpdateSchema, type ContactView, type GoogleContacts
 } from "./contacts.ts";
 import { parseCallParams, parseDeleteParams, parseEditParams, parseReactParams, parseSendParams, type FunnelContext, type OutboundFunnel, type ParseResult } from "./funnel.ts";
+import { MEETING_TEXT_MAX_CHARS, type MeetingService } from "./meetings.ts";
 import type { VendorReads } from "./reads.ts";
 import type { CommsStore } from "./store.ts";
 
@@ -38,8 +39,19 @@ export const GetMessageSchema = z.object({ channel: z.literal("discord"), accoun
 export const ListTemplatesSchema = z.object({ channel: z.literal("whatsapp"), account_ref: AccountRef, waba_id: z.string().regex(/^\d{5,20}$/), limit: z.number().int().min(1).max(100).optional() }).strict();
 export const ReadMessageSchema = z.object({ channel: z.literal("sms"), account_ref: AccountRef, message_sid: z.string().regex(/^(SM|MM)[0-9a-fA-F]{32}$/) }).strict();
 
+/** Møtetranskripsjon (P2g): strenge former; selve teksten behandles i minnet og lagres aldri. `attest_legal_basis` MÅ være `true` (eierens eksplisitte attest, D-122). */
+export const MeetingIngestTextSchema = z.object({
+  format: z.enum(["txt", "vtt", "srt", "json"]), text: z.string().min(1).max(MEETING_TEXT_MAX_CHARS), title: z.string().min(1).max(200).optional(),
+  attest_legal_basis: z.literal(true), legal_basis_note: z.string().min(1).max(300).optional()
+}).strict();
+export const MeetingListSchema = z.object({ limit: z.number().int().min(1).max(100).optional() }).strict();
+export const MeetingRefSchema = z.object({ meeting_id: z.string().min(8).max(80) }).strict();
+export const MeetingCommitmentsSchema = z.object({ meeting_id: z.string().min(8).max(80).optional(), status: z.enum(["proposed", "accepted", "dismissed"]).optional(), limit: z.number().int().min(1).max(200).optional() }).strict();
+export const MeetingDecideSchema = z.object({ commitment_id: z.string().min(8).max(80), decision: z.enum(["accept", "dismiss"]), due_at: z.string().datetime().optional() }).strict();
+export const MeetingConfirmSchema = z.object({ meeting_id: z.string().min(8).max(80), participant_ref: z.string().min(1).max(80), identity_id: z.string().min(8).max(100) }).strict();
+
 export class CommsTransport implements ToolTransport {
-  constructor(private readonly deps: { funnel: OutboundFunnel; store: CommsStore; reads?: VendorReads; contacts?: { api: GoogleContacts; graph: Pick<ConversationGraphService, "linkChannelIdentity"> } }) {}
+  constructor(private readonly deps: { funnel: OutboundFunnel; store: CommsStore; reads?: VendorReads; contacts?: { api: GoogleContacts; graph: Pick<ConversationGraphService, "linkChannelIdentity"> }; meetings?: MeetingService }) {}
 
   /** Leverandør-lesing går KUN mot en konto eieren har autorisert, og kun når kontoens leverandør faktisk er den handlingen gjelder (aldri en Telnyx-nøkkel mot Twilio-API-et). */
   private async requireAccount(ctx: FunnelContext, channel: "slack" | "discord" | "whatsapp" | "sms", accountRef: string, provider: CommsProvider): Promise<void> {
@@ -71,6 +83,11 @@ export class CommsTransport implements ToolTransport {
       linked += 1;
     }
     return linked;
+  }
+
+  private meetings(): MeetingService {
+    if (this.deps.meetings === undefined) throw new Error("comms_meetings_not_enabled");
+    return this.deps.meetings;
   }
 
   private reads(): VendorReads {
@@ -127,6 +144,28 @@ export class CommsTransport implements ToolTransport {
       case "start_call": {
         const r = await funnel.execute(ctx, this.parsed(parseCallParams(parameters)), credential);
         return { external_id: r.external_id, data: r.data };
+      }
+      // Møtetranskripsjon (P2g): tekst inn -> hash, deltakere, FORESLÅTTE forpliktelser. Ingen transkripsjonstekst lagres; ingen modell; eieren godtar hver forpliktelse for seg.
+      case "meeting_ingest_text": {
+        const r = await this.meetings().ingestText(ctx, MeetingIngestTextSchema.parse(parameters));
+        return { external_id: r.meeting_id, data: r as unknown as JsonValue };
+      }
+      case "meeting_list":
+        return { data: { meetings: await this.meetings().list(ctx, MeetingListSchema.parse(parameters).limit) } as unknown as JsonValue };
+      case "meeting_check_target":
+        return { data: await this.meetings().get(ctx, MeetingRefSchema.parse(parameters).meeting_id) };
+      case "meeting_commitments": {
+        const p = MeetingCommitmentsSchema.parse(parameters);
+        return { data: { commitments: await this.meetings().commitments(ctx, p) } as unknown as JsonValue };
+      }
+      case "meeting_decide_commitment":
+        return { data: (await this.meetings().decide(ctx, MeetingDecideSchema.parse(parameters))) as unknown as JsonValue };
+      case "meeting_confirm_participant":
+        return { data: (await this.meetings().confirmParticipant(ctx, MeetingConfirmSchema.parse(parameters))) as unknown as JsonValue };
+      case "meeting_delete": {
+        const p = MeetingRefSchema.parse(parameters);
+        const r = await this.meetings().deleteMeeting(ctx, p.meeting_id);
+        return { external_id: p.meeting_id, data: r };
       }
       // Google Contacts (P2e): full kapabilitet for eieren. Lesing er ubetrodd data; skriving er klasse C/D (se tools.ts); `contacts_sync` lenker kontakter til identiteter.
       case "contacts_list": {

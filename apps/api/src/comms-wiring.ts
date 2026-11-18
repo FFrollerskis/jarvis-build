@@ -2,7 +2,7 @@
 import type pg from "pg";
 import type { BusinessService } from "@jarvis/business";
 import {
-  CommsStore, CommsTransport, CommsWebhookService, DiscordAdapter, GoogleContacts, MetaMessagingAdapter, OutboundFunnel, SlackAdapter, TeamsGraphAdapter, TelnyxSmsAdapter, TwilioSmsAdapter, VendorReads, WhatsAppAdapter,
+  CommsStore, CommsTransport, CommsWebhookService, DiscordAdapter, GoogleContacts, MeetingService, MetaMessagingAdapter, OutboundFunnel, SlackAdapter, TeamsGraphAdapter, TelnyxSmsAdapter, TwilioSmsAdapter, VendorReads, WhatsAppAdapter,
   commsAnyEnabled, commsToolDefinitions, parseCommsConfig, type CommsConfig
 } from "@jarvis/comms";
 import type { ConversationGraphService } from "@jarvis/conversation-graph";
@@ -36,11 +36,13 @@ export interface CommsRuntime {
   readonly tools: ToolDefinition[];
   /** `ApiDeps.comms` for den gitte gatewayen, eller `undefined` når verken webhooks eller utgående er slått på. */
   apiDeps(gateway: ToolGateway): ApiDeps["comms"] | undefined;
+  /** Starter retensjonssveipet (kun når noe er slått på). `tenants` = eierens tenants. */
+  startRetentionSweep(tenants: readonly string[]): void;
 }
 
 export function buildCommsRuntime(input: CommsRuntimeInput): CommsRuntime {
   const config = parseCommsConfig(input.env);
-  if (!commsAnyEnabled(config)) return { config, tools: [], apiDeps: () => undefined };
+  if (!commsAnyEnabled(config)) return { config, tools: [], apiDeps: () => undefined, startRetentionSweep: () => undefined };
 
   const clock = input.clock ?? (() => new Date());
   const store = new CommsStore(input.pool, clock);
@@ -66,11 +68,13 @@ export function buildCommsRuntime(input: CommsRuntimeInput): CommsRuntime {
     : undefined;
   // Google Contacts: egen refresh-token (`JARVIS_GOOGLE_CONTACTS_TOKEN`, scope `contacts`) via den delte Google-klienten.
   const contacts = config.contacts ? { api: new GoogleContacts((refreshToken) => googleAccessToken(refreshToken.trim())), graph: input.graph } : undefined;
+  // Møtetranskripsjon: tekstkilder fra dag én; lyd krever en `AudioTranscriber` + talebehandler-erklæring som IKKE er bundet (DEFERRED) - `ingestAudio` svarer da `meeting_audio_not_configured`.
+  const meetings = config.meetings ? new MeetingService({ pool: input.pool, clock, graph: input.graph, business: input.business, retentionDays: config.meeting_retention_days, ...(input.warn ? { warn: input.warn } : {}) }) : undefined;
   const reads = config.vendor_reads ? new VendorReads({ graphVersion: config.graph_api_version, accountSid: twilioSid }) : undefined;
   const webhookService = config.webhooks.size > 0
     ? new CommsWebhookService({ store, graph: input.graph, config, secrets, clock, business: input.business, ...(input.warn ? { warn: input.warn } : {}) })
     : undefined;
-  const tools = funnel ? commsToolDefinitions({ transport: new CommsTransport({ funnel, store, ...(reads ? { reads } : {}), ...(contacts ? { contacts } : {}) }), store, vendorReads: reads !== undefined, calls: config.calls, contacts: contacts !== undefined }) : [];
+  const tools = funnel ? commsToolDefinitions({ transport: new CommsTransport({ funnel, store, ...(reads ? { reads } : {}), ...(contacts ? { contacts } : {}), ...(meetings ? { meetings } : {}) }), store, vendorReads: reads !== undefined, calls: config.calls, contacts: contacts !== undefined, meetings: meetings !== undefined }) : [];
 
   // Kun kanalnavn/leverandørnavn/flagg - aldri hemmeligheter, tenant-id eller URL-er.
   console.log(JSON.stringify({
@@ -78,8 +82,25 @@ export function buildCommsRuntime(input: CommsRuntimeInput): CommsRuntime {
     contacts: config.contacts, meetings: config.meetings, calls: config.calls, reply_sweep: config.reply_sweep, vendor_reads: config.vendor_reads
   }));
 
+  // Retensjonssveip (utløpte innkommende hendelser, journalrader og møter): hver 6. time for eierens tenants og de tillatte rommene. Feil logges, stopper aldri prosessen. Intet sveip uten at noe er slått på.
+  const startRetentionSweep = (tenants: readonly string[]): void => {
+    const run = async (): Promise<void> => {
+      for (const tenantId of tenants) {
+        for (const space of ["business", "personal", "project", "shared"] as const) {
+          try {
+            await store.purgeExpired(tenantId, space);
+            if (meetings) await meetings.purgeExpired(tenantId, space);
+          } catch (err) {
+            input.warn?.({ msg: "comms_retention_sweep_failed", error: err instanceof Error ? err.message.slice(0, 80) : "unknown" });
+          }
+        }
+      }
+    };
+    setInterval(() => void run(), 6 * 3_600_000).unref();
+  };
+
   return {
-    config, tools,
+    config, tools, startRetentionSweep,
     apiDeps: (gateway) => ({
       ...(webhookService ? { webhooks: { service: webhookService, providers: config.webhooks } } : {}),
       ...(funnel ? { outbound: { gateway, funnel } } : {})

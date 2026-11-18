@@ -1420,6 +1420,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     personality: loadPersonalityConfig
   });
   const commsApiDeps = commsRuntime.apiDeps(toolGateway);
+  commsRuntime.startRetentionSweep(ownerTenants);
   const deps: ApiDeps = {
     // D-393 (JARVIS-026): `/health` svarer 503 når databasen ikke svarer (tidligere konstant «ok»).
     readiness: makeReadiness({ database: () => pool.query("SELECT 1") }),

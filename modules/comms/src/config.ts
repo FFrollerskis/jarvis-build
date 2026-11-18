@@ -48,6 +48,8 @@ export interface CommsConfig {
   readonly media_url_hosts: ReadonlySet<string>;
   readonly inbound_retention_days: number;
   readonly log_retention_days: number;
+  /** Oppbevaring (dager) for behandlede møter og deres deltakere/forslag (`JARVIS_COMMS_MEETING_RETENTION_DAYS`, standard 180). */
+  readonly meeting_retention_days: number;
   readonly graph_api_version: string;
 }
 
@@ -119,7 +121,7 @@ export function parseCommsConfig(env: Readonly<Record<string, string | undefined
   if (version !== undefined && version !== "" && !/^v\d{2}\.\d$/.test(version)) throw new InvalidCommsConfigError("JARVIS_META_GRAPH_VERSION", "forventet vNN.N");
   // Avhengigheter (fail-closed): leverandør-lesing, utgående samtale og kontakter bruker kontoene, journalen og policyen som hører til `JARVIS_COMMS_OUTBOUND` - uten den ville de stå uten allowlist og regler.
   if (!onFlag(env, "JARVIS_COMMS_OUTBOUND")) {
-    for (const dependent of ["JARVIS_COMMS_VENDOR_READS", "JARVIS_COMMS_CALLS", "JARVIS_COMMS_CONTACTS"] as const) {
+    for (const dependent of ["JARVIS_COMMS_VENDOR_READS", "JARVIS_COMMS_CALLS", "JARVIS_COMMS_CONTACTS", "JARVIS_COMMS_MEETINGS"] as const) {
       if (onFlag(env, dependent)) throw new InvalidCommsConfigError(dependent, "krever JARVIS_COMMS_OUTBOUND=on (kontoer, journal og policy)");
     }
   }
@@ -153,6 +155,7 @@ export function parseCommsConfig(env: Readonly<Record<string, string | undefined
     media_url_hosts: hosts,
     inbound_retention_days: envInt("JARVIS_COMMS_INBOUND_RETENTION_DAYS", 30, { min: 1, max: 365 }, env),
     log_retention_days: envInt("JARVIS_COMMS_LOG_RETENTION_DAYS", 400, { min: 30, max: 1825 }, env),
+    meeting_retention_days: envInt("JARVIS_COMMS_MEETING_RETENTION_DAYS", 180, { min: 30, max: 1825 }, env),
     graph_api_version: version === undefined || version === "" ? "v25.0" : version
   });
 }

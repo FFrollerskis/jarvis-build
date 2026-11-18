@@ -19,8 +19,11 @@ export const COMMS_VENDOR_READ_ACTIONS: readonly string[] = ["read_thread", "lis
 /** Google Contacts (JARVIS_COMMS_CONTACTS): lesing (klasse A, uten step-up) og skriving (create/update C, delete D, sync C - step-up; create/update/delete krever idempotensnøkkel). */
 export const COMMS_CONTACT_READ_ACTIONS: readonly string[] = ["contacts_list", "contacts_search", "contacts_get"];
 export const COMMS_CONTACT_WRITE_ACTIONS: readonly string[] = ["contacts_create", "contacts_update", "contacts_delete", "contacts_sync"];
-const COMMS_KEYED_CONTACT_ACTIONS: readonly string[] = ["contacts_create", "contacts_update", "contacts_delete"];
-export const COMMS_KNOWN_ACTIONS: readonly string[] = [...COMMS_OWNER_ACTIONS, ...COMMS_CALL_ACTIONS, ...COMMS_VENDOR_READ_ACTIONS, ...COMMS_CONTACT_READ_ACTIONS, ...COMMS_CONTACT_WRITE_ACTIONS];
+/** Møtetranskripsjon (JARVIS_COMMS_MEETINGS): lesing uten step-up; skriving med step-up; kun `meeting_delete` (klasse D) krever idempotensnøkkel (ingest er idempotent på innholds-hash). */
+export const COMMS_MEETING_READ_ACTIONS: readonly string[] = ["meeting_list", "meeting_commitments"];
+export const COMMS_MEETING_WRITE_ACTIONS: readonly string[] = ["meeting_ingest_text", "meeting_decide_commitment", "meeting_confirm_participant", "meeting_delete"];
+const COMMS_KEYED_CONTACT_ACTIONS: readonly string[] = ["contacts_create", "contacts_update", "contacts_delete", "meeting_delete"];
+export const COMMS_KNOWN_ACTIONS: readonly string[] = [...COMMS_OWNER_ACTIONS, ...COMMS_CALL_ACTIONS, ...COMMS_VENDOR_READ_ACTIONS, ...COMMS_CONTACT_READ_ACTIONS, ...COMMS_CONTACT_WRITE_ACTIONS, ...COMMS_MEETING_READ_ACTIONS, ...COMMS_MEETING_WRITE_ACTIONS];
 
 const KEY = /^[A-Za-z0-9._:-]{8,200}$/;
 

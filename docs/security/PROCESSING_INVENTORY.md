@@ -78,6 +78,15 @@ uten at det er gjort, eller (4) en DPIA-henvisning peker på en fil som ikke fin
 - **Eksterne mottakere:** Selve utsendelsen går til leverandøren for kanalen (Slack, Discord, Meta/WhatsApp, Twilio, Telnyx, Microsoft) og videre til mottakeren - hver er en behandler/transport uten verifiserte vilkår (se «2b. Connectors» og `docs/security/PROCESSOR_REGION_MATRIX.md`). Innkommende hendelser kommer fra de samme leverandørene via signerte webhooks. Ingenting sendes til modeller fra disse tabellene
 - **Tabeller:** `comms_authorized_accounts`, `comms_inbound_events`, `comms_outbound_log`, `comms_recipient_opt_outs`
 
+### Møtetranskripsjon: møter, deltakere og foreslåtte forpliktelser (UA-7, WP-G1 P2g, migrasjon 119)
+
+- **Formål:** Gjøre eksisterende møtetranskripter (tekst fra UA-2/Meet/Teams, eller lyd via en tale-adapter) om til (a) en idempotent møteoversikt, (b) deltakere (koblet til identitet kun ved eksakt treff eller eierens bekreftelse), (c) FORESLÅTTE forpliktelser funnet av deterministiske mønstre som blir en åpen oppfølging først når eieren godtar dem. DORMANT (`JARVIS_COMMS_MEETINGS`, AV som standard), NOT VERIFIED
+- **Memory space/tenant:** business/personal/project/shared (aldri health/home/guest); tenant-skopet med FORCE RLS (tenant + RESTRICTIVE memory space), tenant-sammensatte FK-er
+- **Datakategori:** Selve transkripsjonsteksten lagres IKKE (kun innholds-hash, antall segmenter, tittel, tidspunkt). Deltakernavn (≤ 80 tegn, e-postadresser redigeres bort av parseren) og korte, rensede forpliktelses-utdrag (≤ 300 tegn) er personopplysninger om møtedeltakere. Rettslig grunnlag avgjøres ALDRI av Jarvis (D-122): eieren attesterer eksplisitt per møte (CHECK `legal_basis_attested`) - dette er et revisjonsspor, ikke en juridisk konklusjon, og krever juridisk gjennomgang (UTKAST). Lyd (kun tjenestemetode, ingen filsti-flate): rutingsporten `evaluateSpeechRouting` kreves; ekstern talebehandler er avvist inntil verifiserte databehandlervilkår og betrodd space-autoritet finnes (D-122/Q-32). Se «UA-7 resterende deler (WP-G1)» i `docs/UA7_COMMUNICATIONS_DPIA.md`
+- **Retensjon:** `JARVIS_COMMS_MEETING_RETENTION_DAYS` (standard 180, 30-1825; sveip sletter utløpte møter og deres deltakere/forpliktelser via CASCADE). En godtatt forpliktelse blir en `business_followups`-rad som følger oppfølgingens egen retensjon. Full tenant-/rom-sletting via erasure-flyten (ikke koblet i produksjon, JARVIS-060) tar alle tre tabellene
+- **Eksterne mottakere:** Ingen for tekstkilder. Lyd: ingen ekstern behandler er tillatt i dag (porten avviser); en lokal talebehandler forlater aldri maskinen. Ingenting sendes til modeller
+- **Tabeller:** `comms_meetings`, `comms_meeting_commitments`, `comms_meeting_participants`
+
 ### Produktbruk og churn (kundekonti, WP-D2)
 
 - **Formål:** Deterministisk churn-risiko på KUNDEKONTO-nivå (inaktivitet, fall i bruk, åpne supportsaker, forfalte fakturaer) som forslag/opplysning til eieren - aldri person-profilering og aldri en automatisk handling
