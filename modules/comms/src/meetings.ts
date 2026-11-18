@@ -222,6 +222,17 @@ export class MeetingService {
     });
   }
 
+  /**
+   * B-M3: MINIMAL eksistenssjekk for sletting. Preflight/readback-data til `meeting_delete` (klasse D) havner i `tool_executions.before_state` og `audit_events` (ingen retensjonssveip på audit) - de skal derfor aldri bære tittel eller
+   * deltakernavn (ubetrodd tekst fra transkriptet). Kun «finnes møtet».
+   */
+  async exists(ctx: MeetingContext, meetingId: string): Promise<boolean> {
+    return withMemoryTransaction(this.deps.pool, ctx.tenantId, [ctx.space], async (client) => {
+      const m = await client.query(`SELECT 1 FROM comms_meetings WHERE tenant_id = $1 AND meeting_id = $2`, [ctx.tenantId, meetingId]);
+      return m.rowCount === 1;
+    });
+  }
+
   async get(ctx: MeetingContext, meetingId: string): Promise<Record<string, JsonValue> | null> {
     return withMemoryTransaction(this.deps.pool, ctx.tenantId, [ctx.space], async (client) => {
       const m = await client.query(`SELECT meeting_id, source, title, started_at, segment_count, retention_until FROM comms_meetings WHERE tenant_id = $1 AND meeting_id = $2`, [ctx.tenantId, meetingId]);

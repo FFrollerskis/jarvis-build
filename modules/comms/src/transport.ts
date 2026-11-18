@@ -176,7 +176,13 @@ export class CommsTransport implements ToolTransport {
       }
       case "meeting_list":
         return { data: { meetings: await this.meetings().list(ctx, MeetingListSchema.parse(parameters).limit) } as unknown as JsonValue };
-      case "meeting_check_target":
+      // Preflight/readback for sletting (B-M3): KUN `{exists, meeting_id}` - aldri tittel/deltakere, som ellers havner i ledger og audit. `null` = finnes ikke (etterbetingelsen).
+      case "meeting_check_target": {
+        const meetingId = MeetingRefSchema.parse(parameters).meeting_id;
+        return { data: (await this.meetings().exists(ctx, meetingId)) ? { exists: true, meeting_id: meetingId } : null };
+      }
+      // Egen lesehandling for det FULLE møtet (tittel, deltakere): ubetrodd data, kun for eieren.
+      case "meeting_get":
         return { data: await this.meetings().get(ctx, MeetingRefSchema.parse(parameters).meeting_id) };
       case "meeting_commitments": {
         const p = MeetingCommitmentsSchema.parse(parameters);

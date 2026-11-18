@@ -54,8 +54,8 @@ describe("A-H1: manifest-invariantene består for HVER gyldig flaggkombinasjon (
       if (def.capability_class === "A") expect(entry.effect, `${def.action} er klasse A og må være en ren lesing`).toBe("read");
       if (def.capability_class === "D") expect(entry.idempotency, def.action).toBe("required");
     }
-    // de sju handlingene som sprengte oppstarten (A-H1) - eksplisitt låst
-    for (const action of ["meeting_list", "meeting_commitments", "meeting_check_target", "contacts_list", "contacts_search", "contacts_get", "contacts_check_target"]) {
+    // de sju handlingene som sprengte oppstarten (A-H1) + den fulle møtelesingen (B-M3) - eksplisitt låst
+    for (const action of ["meeting_list", "meeting_commitments", "meeting_get", "meeting_check_target", "contacts_list", "contacts_search", "contacts_get", "contacts_check_target"]) {
       expect(inferEffect("comms", action), action).toBe("read");
       expect(manifest.get(`comms.${action}`), action).toMatchObject({ risk: "A", effect: "read" });
     }

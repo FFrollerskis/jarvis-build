@@ -225,9 +225,34 @@ describe("D: godkjenning av forpliktelser og sletting", () => {
     expect(again.ok).toBe(false);
   });
 
+  it("B-M3: slettingens preflight/readback er MINIMAL: tittel og deltakernavn havner aldri i verktøy-ledgeren eller audit-sporet (meeting_check_target = {exists, meeting_id}); den fulle lesingen er en egen handling (meeting_get)", async () => {
+    const marker = uniq();
+    const ingest = await act("meeting_ingest_text", { format: "txt", text: transcript(marker), attest_legal_basis: true });
+    expect(ingest.ok).toBe(true);
+    if (!ingest.ok) return;
+    const meetingId = String((ingest.data as { meeting_id: string }).meeting_id);
+    // den fulle lesingen finnes fortsatt for eieren - som egen, ubetrodd lesehandling
+    const full = await act("meeting_get", { meeting_id: meetingId });
+    expect(full.ok && full.output_trust).toBe("untrusted");
+    expect(JSON.stringify(full.ok ? full.data : null)).toContain(`Ukesmøte ${marker}`);
+    expect(JSON.stringify(full.ok ? full.data : null)).toContain("Ola Nordmann");
+    const idem = `del-${uniq()}-abcdef`;
+    expect((await act("meeting_delete", { meeting_id: meetingId }, idem)).ok).toBe(true);
+    const ledger = (await db.admin.query(`SELECT before_state, after_state FROM tool_executions WHERE idempotency_key = $1`, [idem])).rows as Array<Record<string, unknown>>;
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]!["before_state"]).toEqual({ exists: true, meeting_id: meetingId });
+    const audit = (await db.admin.query(`SELECT payload::text AS payload, reason FROM audit_events WHERE tenant_id = $1 AND tool_id = 'comms' AND action = 'meeting_delete'`, [TENANT_A])).rows as Array<Record<string, unknown>>;
+    expect(audit.length).toBeGreaterThan(0);
+    for (const dump of [JSON.stringify(ledger), JSON.stringify(audit)]) {
+      expect(dump).not.toContain(`Ukesmøte ${marker}`);
+      expect(dump).not.toContain("Nordmann");
+      expect(dump).not.toContain("Hansen");
+    }
+  });
+
   it("verktøyene finnes KUN med meetings-flagget; klassene er A (lesing), C (ingest/godta/bekreft) og D (slett)", () => {
     const names = (meetings?: boolean) => commsToolDefinitions({ transport: {} as never, store: {} as never, ...(meetings !== undefined ? { meetings } : {}) }).map((d) => d.action);
-    for (const a of ["meeting_ingest_text", "meeting_list", "meeting_commitments", "meeting_check_target", "meeting_decide_commitment", "meeting_confirm_participant", "meeting_delete"]) {
+    for (const a of ["meeting_ingest_text", "meeting_list", "meeting_commitments", "meeting_get", "meeting_check_target", "meeting_decide_commitment", "meeting_confirm_participant", "meeting_delete"]) {
       expect(names(), a).not.toContain(a);
       expect(names(true), a).toContain(a);
     }

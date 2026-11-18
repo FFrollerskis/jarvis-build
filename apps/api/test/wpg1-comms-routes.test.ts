@@ -275,7 +275,7 @@ describe("C: `/comms/action` og `/comms/preview` - grant -> suveren eier -> step
     }
     expect(gatewayCalls).toEqual([]);
     // ikke-step-up-handlinger: lesing + avmelding når gatewayen også fra en svakere økt
-    const exempt = ["list_inbound", "list_outbound", "list_opt_outs", "list_accounts", "record_opt_out", "read_thread", "list_users", "get_message", "list_templates", "read_message", "contacts_list", "contacts_search", "contacts_get", "meeting_list", "meeting_commitments"];
+    const exempt = ["list_inbound", "list_outbound", "list_opt_outs", "list_accounts", "record_opt_out", "read_thread", "list_users", "get_message", "list_templates", "read_message", "contacts_list", "contacts_search", "contacts_get", "meeting_list", "meeting_commitments", "meeting_get"];
     for (const action of exempt) {
       const r = await post(base, "/comms/action", { grant_token: "owner-active", action, parameters: {} });
       expect(r.status, action).toBe(200);

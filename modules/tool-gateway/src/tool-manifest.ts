@@ -138,6 +138,7 @@ const EFFECT_OVERRIDES: Record<string, Effect> = {
   [k("comms", "contacts_get")]: "read",
   [k("comms", "contacts_check_target")]: "read",
   [k("comms", "meeting_list")]: "read",
+  [k("comms", "meeting_get")]: "read",
   [k("comms", "meeting_commitments")]: "read",
   [k("comms", "meeting_check_target")]: "read"
 };
