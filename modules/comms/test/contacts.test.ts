@@ -182,6 +182,61 @@ describe("B: skriving - create/update (klasse C) og delete (klasse D)", () => {
     expect(none.ok).toBe(false);
   });
 
+  describe("B-M1: update endrer KUN oppgitte felt og beholder resten av den ferske kontakten", () => {
+    const rich = () => ({
+      resourceName: "people/c501", etag: "etag-501", metadata: { sources: [{ type: "CONTACT", id: "501", etag: "src-501" }] },
+      names: [
+        { metadata: { primary: true }, displayName: "Ola Peder Nordmann", displayNameLastFirst: "Nordmann, Ola Peder", unstructuredName: "Ola Peder Nordmann", givenName: "Ola", middleName: "Peder", familyName: "Nordmann", honorificPrefix: "Dr" },
+        { givenName: "Olav" }
+      ],
+      emailAddresses: [{ value: "Ola@Example.com", type: "work", metadata: { primary: true } }, { value: "ikke en e-post", type: "other" }],
+      phoneNumbers: [{ value: "+47 900 00 001", type: "mobile" }, { value: "900 00 000", type: "home" }, { value: "+4790000002" }],
+      organizations: [{ name: "Gammel AS", title: "Daglig leder", department: "Salg" }, { name: "Annet AS" }]
+    });
+    const patchOf = async (params: Record<string, JsonValue>) => {
+      handler = (c) => (c.method === "GET" ? jsonRes(rich()) : jsonRes(rich()));
+      const r = await act("contacts_update", { resource_name: "people/c501", etag: "etag-501", ...params }, key("ct-bm1"));
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      const patch = calls.find((c) => c.method === "PATCH")!;
+      return { url: patch.url, body: patch.body! };
+    };
+
+    it("telefon: synlige nummer som er i den nye listen beholdes med type; et synlig nummer som ikke er der fjernes; et nummer visningen ALDRI viste (nasjonalt uten +) beholdes; nye legges til sist - og ingen andre felt sendes", async () => {
+      const { url, body } = await patchOf({ phones: ["+4790000001", "+47 900 00 003"] });
+      expect(url).toContain("updatePersonFields=phoneNumbers&");
+      expect(Object.keys(body).sort()).toEqual(["etag", "metadata", "phoneNumbers"]);
+      expect(body["phoneNumbers"]).toEqual([{ value: "+47 900 00 001", type: "mobile" }, { value: "900 00 000", type: "home" }, { value: "+4790000003" }]);
+    });
+
+    it("fornavn: kun `givenName` på første navn byttes; etternavn, mellomnavn, tittel og ekstra navn beholdes, og Googles beregnede visningsfelt sendes ikke tilbake", async () => {
+      const { url, body } = await patchOf({ given_name: "Ola Henrik" });
+      expect(url).toContain("updatePersonFields=names&");
+      expect(Object.keys(body).sort()).toEqual(["etag", "metadata", "names"]);
+      expect(body["names"]).toEqual([{ metadata: { primary: true }, givenName: "Ola Henrik", middleName: "Peder", familyName: "Nordmann", honorificPrefix: "Dr" }, { givenName: "Olav" }]);
+    });
+
+    it("organisasjon: kun navnet på første organisasjon byttes; tittel/avdeling og ekstra organisasjoner beholdes", async () => {
+      const { url, body } = await patchOf({ organization: "Ny AS" });
+      expect(url).toContain("updatePersonFields=organizations&");
+      expect(body["organizations"]).toEqual([{ name: "Ny AS", title: "Daglig leder", department: "Salg" }, { name: "Annet AS" }]);
+      expect(Object.keys(body).sort()).toEqual(["etag", "metadata", "organizations"]);
+    });
+
+    it("e-post: samme verdi i annen skrivemåte beholder originalelementet (type/metadata), e-post utenfor formatet beholdes, nye legges til; flere felt samtidig gir kun de feltene", async () => {
+      const { url, body } = await patchOf({ emails: ["ola@example.com", "ny@example.com"], family_name: "Hansen" });
+      expect(url).toContain("updatePersonFields=names,emailAddresses&");
+      expect(body["emailAddresses"]).toEqual([{ value: "Ola@Example.com", type: "work", metadata: { primary: true } }, { value: "ikke en e-post", type: "other" }, { value: "ny@example.com" }]);
+      expect((body["names"] as Array<Record<string, unknown>>)[0]).toMatchObject({ givenName: "Ola", familyName: "Hansen", middleName: "Peder" });
+      expect(body).not.toHaveProperty("phoneNumbers");
+      expect(body).not.toHaveProperty("organizations");
+    });
+
+    it("tom ønsket liste fjerner kun det som var synlig for eieren (usynlige elementer overlever)", async () => {
+      const { body } = await patchOf({ phones: [] });
+      expect(body["phoneNumbers"]).toEqual([{ value: "900 00 000", type: "home" }]);
+    });
+  });
+
   it("update aksepterer en etag med prosenttegn (Googles format) og sender den uendret videre", async () => {
     const etag = "%EgcBAgMEBQYHGgQBAgUHIgxXTUlLT1E4L0JJZz0=";
     handler = (c) => (c.method === "GET" ? jsonRes(person("43", { etag })) : jsonRes(person("43", { etag, organizations: [{ name: "Nytt AS" }] })));

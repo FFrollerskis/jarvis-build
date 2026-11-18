@@ -207,7 +207,7 @@ export function commsToolDefinitions(deps: CommsToolDeps): ToolDefinition[] {
       contactsRead("contacts_get", "Les én kontakt (ressursnavn people/c…). `contact: null` = finnes ikke. Ubetrodd data", ContactsGetSchema),
       contactsRead("contacts_check_target", "Fersk lesing av en kontakt (finnes den, hvilken etag). `null` = finnes ikke. Preflight/readback for sletting", ContactsGetSchema),
       contactsWrite("contacts_create", "C", "Opprett en kontakt i eierens Google Contacts (navn, e-post, telefon E.164, organisasjon)", ContactsCreateSchema, "slett kontakten med comms.contacts_delete (ressursnavnet står i resultatet)", { reversible: true, idempotent_external: false }),
-      contactsWrite("contacts_update", "C", "Oppdater en kontakt med etag-sjekk (lese-endre-skriv: avvikende etag avbryter uten skriving). Kun oppgitte felt endres", ContactsUpdateSchema,
+      contactsWrite("contacts_update", "C", "Oppdater en kontakt med etag-sjekk (lese-endre-skriv på den ferske kontakten: avvikende etag avbryter uten skriving). KUN oppgitte felt endres, og innen et felt beholdes det som ikke ble bedt endret (andre navnedeler, tittel/avdeling, telefon/e-post visningen ikke kan vise)", ContactsUpdateSchema,
         "oppdater kontakten tilbake med comms.contacts_update (forrige verdier er IKKE lagret her - ta vare på dem før en endring)", { reversible: false }),
       contactsWrite("contacts_delete", "D", "Slett en kontakt i eierens Google Contacts: fersk lesing av målet (preflight), sletting, readback at den er borte. Ikke reverserbar via API-et", ContactsDeleteSchema,
         "Ikke reverserbar via API-et: en slettet kontakt kan bare gjenopprettes manuelt (Google Contacts papirkurv) eller opprettes på nytt med comms.contacts_create.",

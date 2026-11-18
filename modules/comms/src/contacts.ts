@@ -85,6 +85,50 @@ function personBody(input: { given_name?: string | undefined; family_name?: stri
   return body;
 }
 
+/** Output-only felter i `Name` (Googles egen beregnede visning): sendes aldri tilbake sammen med en endret `givenName`/`familyName` (UVERIFISERT mot dokumentasjonen: «output only»-felt ignoreres i forespørselen, men vi sender dem ikke). */
+const NAME_OUTPUT_ONLY = ["displayName", "displayNameLastFirst", "unstructuredName"] as const;
+
+/**
+ * B-M1: lese-endre-skriv på den FERSKE kontakten (ikke på den lossy visningen). Kun de oppgitte feltene berøres, og innen et felt beholdes alt eieren ikke ba om å endre:
+ *  - `given_name`/`family_name`: kun disse delene av KONTAKTENS FØRSTE navn byttes (mellomnavn, titler, fonetiske felt og ekstra navn beholdes). Før erstattet `names` hele listen med `[{givenName}]`, så et enkelt fornavn-bytte slettet etternavnet.
+ *  - `organization`: kun `name` på første organisasjon byttes (tittel, avdeling m.fl. og ekstra organisasjoner beholdes).
+ *  - `emails`/`phones` (ønsket liste av gyldige verdier): elementer som visningen KAN vise og som er i den nye listen beholdes uendret (type, metadata); synlige elementer som ikke er i listen fjernes; nye legges til sist. Elementer visningen ALDRI viste
+ *    (nasjonalt nummer uten +, e-post utenfor formatet) beholdes uendret - de var aldri synlige for eieren og kan ikke fjernes ved et uhell.
+ */
+function mergedBody(fresh: Record<string, unknown>, input: { given_name?: string | undefined; family_name?: string | undefined; organization?: string | undefined; emails?: string[] | undefined; phones?: string[] | undefined }): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  if (input.given_name !== undefined || input.family_name !== undefined) {
+    const names = arr(fresh["names"]);
+    const first = { ...(rec(names[0]) ?? {}) };
+    for (const key of NAME_OUTPUT_ONLY) delete first[key];
+    if (input.given_name !== undefined) first["givenName"] = input.given_name;
+    if (input.family_name !== undefined) first["familyName"] = input.family_name;
+    body["names"] = [first, ...names.slice(1)];
+  }
+  if (input.organization !== undefined) {
+    const orgs = arr(fresh["organizations"]);
+    body["organizations"] = [{ ...(rec(orgs[0]) ?? {}), name: input.organization }, ...orgs.slice(1)];
+  }
+  if (input.emails !== undefined) body["emailAddresses"] = mergeList(arr(fresh["emailAddresses"]), input.emails, (v) => (EMAIL.test(v) ? v.toLowerCase() : null));
+  if (input.phones !== undefined) body["phoneNumbers"] = mergeList(arr(fresh["phoneNumbers"]), input.phones, (v) => normalizeE164(v, { allowBareInternationalDigits: false }));
+  return body;
+}
+
+function mergeList(existing: unknown[], desired: readonly string[], normalize: (value: string) => string | null): unknown[] {
+  const wanted = new Set(desired);
+  const present = new Set<string>();
+  const result: unknown[] = [];
+  for (const element of existing) {
+    const value = rec(element)?.["value"];
+    const n = typeof value === "string" ? normalize(value) : null;
+    if (n === null) result.push(element); // visningen viste den aldri: beholdes uendret
+    else if (wanted.has(n)) { result.push(element); present.add(n); } // beholdes med type/metadata
+    // ellers: synlig for eieren og ikke i den nye listen = fjernet
+  }
+  for (const value of desired) if (!present.has(value)) { result.push({ value }); present.add(value); }
+  return result;
+}
+
 function assertResourceName(name: string): void {
   if (!RESOURCE_NAME.test(name)) throw new Error("comms_contacts_resource_name_invalid");
 }
@@ -151,8 +195,8 @@ export class GoogleContacts {
     if (fresh.status >= 400) return reject(fresh);
     if (fresh.json?.["etag"] !== input.etag) throw new ProviderRejectedError("google_contacts", "etag_conflict");
     const fields = WRITE_FIELDS.filter((f) => (f === "names" ? input.given_name !== undefined || input.family_name !== undefined : f === "emailAddresses" ? input.emails !== undefined : f === "phoneNumbers" ? input.phones !== undefined : input.organization !== undefined));
-    // Google krever kildens etag i `metadata.sources` (verifisert) - tas fra den ferske lesingen, aldri fra eieren.
-    const body = { ...personBody(input), etag: input.etag, ...(fresh.json["metadata"] !== undefined ? { metadata: fresh.json["metadata"] } : {}) };
+    // Google krever kildens etag i `metadata.sources` (verifisert) - tas fra den ferske lesingen, aldri fra eieren. Selve feltene er flettet inn i den ferske kontakten (B-M1), ikke bygget fra en lossy visning.
+    const body = { ...mergedBody(fresh.json, input), etag: input.etag, ...(fresh.json["metadata"] !== undefined ? { metadata: fresh.json["metadata"] } : {}) };
     const res = await this.call("PATCH", `/${input.resource_name}:updateContact?updatePersonFields=${fields.join(",")}&personFields=${READ_FIELDS}`, refreshToken, body, true);
     if (res.status >= 400) return reject(res);
     const view = viewOf(res.json);
