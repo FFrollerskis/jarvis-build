@@ -6,7 +6,20 @@
  * f.eks. "image/png" - aldri gjettet, alltid satt av kalleren som vet hva
  * bytes faktisk er.
  */
-export type ContentPart = { type: "text"; text: string } | { type: "image"; media_type: string; data: string };
+export type ContentPart =
+  | { type: "text"; text: string }
+  | {
+      type: "image";
+      media_type: string;
+      data: string;
+      /**
+       * WP-G3 (D-465): `true` = BEGRENSET medie (kamerabilde fra UA-9). Et slikt bilde forlater aldri maskinen: `ModelGateway` stenger alle
+       * ikke-lokale kandidater ved UTFØRELSE, og adaptere med skybildestøtte (Anthropic, Gemma hostet) kaster hvis de likevel får et. Feltet
+       * kan bare stramme inn (en kaller som utelater det får ingen ekstra rettighet), så det er trygt at det settes av betrodd kode i
+       * `modules/vision` og aldri leses som en tillatelse noe sted. Udefinert (alle eksisterende kall) = uendret oppførsel.
+       */
+      restricted?: true;
+    };
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -18,6 +31,22 @@ export interface ChatMessage {
    * et array, sender ALDRI et rått array som streng til en leverandør-API.
    */
   content: string | ContentPart[];
+}
+
+/**
+ * WP-G3 (D-465): inneholder forespørselen en BEGRENSET bildedel (kamerabilde)? Brukes av `ModelGateway` (utførelsesvern: kun lokale
+ * kandidater) og av skyadaptere med bildestøtte (`assertNoRestrictedMedia`). Ren funksjon uten sideeffekter; ukjent form = `false`
+ * (en forespørsel uten bildedeler har ingenting å beskytte).
+ */
+export function hasRestrictedMedia(request: { messages?: ReadonlyArray<{ content: string | ContentPart[] }> }): boolean {
+  for (const message of request.messages ?? []) {
+    if (typeof message.content === "string" || !Array.isArray(message.content)) continue;
+    // Robust mot en deformert delliste (null/ikke-objekt): gatewayen har aldri kastet på slikt innhold og skal ikke begynne nå.
+    for (const part of message.content as unknown[]) {
+      if (typeof part === "object" && part !== null && (part as { type?: unknown }).type === "image" && (part as { restricted?: unknown }).restricted === true) return true;
+    }
+  }
+  return false;
 }
 
 /** Trekker ut kun tekstdelen av et meldingsinnhold - for adaptere/kode uten multimodal støtte. */
@@ -361,6 +390,15 @@ export class ProviderError extends Error {
   get retryableSameProvider(): boolean {
     return this.kind === "timeout" || this.kind === "network" || this.kind === "server" || this.kind === "invalid_response";
   }
+}
+
+/**
+ * WP-G3 (D-465): skyadaptere med EKTE bildestøtte (Anthropic, Gemma hostet) kaller denne FØRST i `complete()`/`stream()`: en `restricted`
+ * bildedel (kamerabilde) skal aldri ut av maskinen, selv om ruteren og gatewayen skulle feile. Kaster `bad_request` (aldri retry,
+ * aldri sendt) med en stabil kode - uten innhold i meldingen.
+ */
+export function assertNoRestrictedMedia(provider: string, request: { messages?: ReadonlyArray<{ content: string | ContentPart[] }> }): void {
+  if (hasRestrictedMedia(request)) throw new ProviderError(provider, "bad_request", `${provider}_restricted_media_cloud_forbidden`);
 }
 
 /**

@@ -168,14 +168,14 @@ describe("B: ugyldig verdi/event_type avvises deterministisk - INGEN rad skrevet
     await expect(service.ingestObservation(TENANT_A, "personal", PERSON_A, withSnapshot)).rejects.toThrow(VisionObservationValidationError);
   });
 
-  it("databasens EGEN CHECK avviser et rått forsøk på å sette snapshot_ref direkte, UTENOM VisionService", async () => {
+  it("WP-G3 (D-465, migrasjon 134): snapshot_ref-forbudet (CHECK ... IS NULL) er erstattet av en sammensatt FK mot vision_snapshots - en peker til et bilde som ikke finnes (eller en ekstern URL) avvises FORTSATT av databasen, UTENOM VisionService", async () => {
     await expect(
       adminPool.query(
         `INSERT INTO vision_event_observations (observation_id, tenant_id, memory_space_id, person_id, event_type, source_type, source_instance_id, source_event_id, payload_fingerprint, observed_at, snapshot_ref)
          VALUES ('vis-ob-bad-snapshot', $1, 'personal', $2, 'motion_detected', 'device', 'device-1', 'evt-bad-snapshot', 'fp-test', now(), 's3://bucket/frame.jpg')`,
         [TENANT_A, PERSON_A]
       )
-    ).rejects.toThrow(/check/i);
+    ).rejects.toThrow(/vision_event_observations_snapshot_fkey/);
   });
 });
 

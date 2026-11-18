@@ -23,6 +23,11 @@
  * brøt filens egen regel over). `local_llm` følger fortsatt SAMME grense -
  * INGEN `.stream()`-metode, derfor INGEN `streaming` her.
  *
+ * WP-G3 (D-465, 2026-11): `local_vision` er `LocalOpenAiCompatibleAdapter` konstruert med `{ vision: true }` (se `local-llm.ts`, `toOpenAiVisionContent`):
+ * adapteren sender `image_url` med base64 `data:`-URL til et lokalt OpenAI-kompatibelt endepunkt (Ollama/llama.cpp/LM Studio/vLLM med en visjonsmodell).
+ * `local_llm`/`gemma_local` har fortsatt `textOnly()` og FÅR IKKE `vision` her - flagget reflekterer wiret støtte per provider-identitet. Profilen er
+ * `dedicated_to: "vision"` (ingen vanlig ruting) og kameramedier (`restricted`) går kun til LOKALE kandidater (se `ModelGateway.executePlan`).
+ *
  * D-199-B (Q-30 lukket, 2026-09-20): `gemma_hosted` fikk en EKTE
  * `.stream()`-implementasjon (`gemma.ts`, samme SSE-mønster som `anthropic.ts`/
  * `openai.ts` via delt `sseLines()`) - `streaming` er derfor nå en SANN
@@ -67,6 +72,12 @@ export interface ModelProfile {
    * `JARVIS_CHAT_CANDIDATES`, «bruk Kimi») påvirkes ikke. Udefinert/tom = alt påstått er verifisert (alle øvrige profiler). `capabilities` er uendret: påstanden står, men AUTO bruker den ikke på tillit.
    */
   live_unverified?: ReadonlyArray<ModelCapability>;
+  /**
+   * WP-G3 (D-465): leverandøren er DEDIKERT til én capability (i dag kun `local_vision` -> `vision`) og deltar i den SCOREDE rutingen (AUTO/FAST/...) kun når kallet faktisk krever den. En lokal modell
+   * eieren har satt opp for kamerabilder skal ikke bli en stille kandidat for vanlig prat, bakgrunnsjobber eller helse-/finansturer. Eksplisitte valg (`provider`, `providerPreference`) er uendret.
+   * Udefinert (alle øvrige profiler) = ingen innsnevring.
+   */
+  dedicated_to?: ModelCapability;
 }
 
 /** Defaults matcher adapterens env-defaults; overstyres via konstruktør/konfig. */
@@ -225,6 +236,23 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
     cost_class: 1,
     quality_class: 4,
     latency_class: "medium"
+  },
+  {
+    // WP-G3 (D-465): lokal visjonsmodell for kamerabilder (UA-9). SAMME `LocalOpenAiCompatibleAdapter` som `local_llm`, registrert under en egen identitet med
+    // `{ vision: true }` - kun når `JARVIS_VISION_CLASSIFIER=on` og `JARVIS_VISION_LOCAL_URL` er satt (se apps/api/src/main.ts). `capabilities` er BEVISST kun det
+    // som er wiret og testet mot en fake server: `text` + `vision`. Ingen `structured_output`/`tool_calling`/`streaming` (uverifisert for visjonsmodeller; klassifisereren
+    // ber om JSON i prompten og parser selv, streng). `quality_class`/`context_tokens` er konservative standarder inntil en ekte modell er konfigurert og evaluert
+    // (modellen velges av eieren via `JARVIS_VISION_LOCAL_MODEL`, ikke påstått her). `locality: "local"`: kamerabilder forlater aldri maskinen.
+    provider: "local_vision",
+    model: "local-vision-model",
+    capabilities: ["text", "vision"],
+    context_tokens: 16_000,
+    locality: "local",
+    cost_class: 1,
+    quality_class: 2,
+    latency_class: "slow",
+    hosted_free_tier: false,
+    dedicated_to: "vision"
   },
   {
     provider: "ollama",

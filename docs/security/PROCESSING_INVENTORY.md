@@ -144,12 +144,12 @@ uten at det er gjort, eller (4) en DPIA-henvisning peker på en fil som ikke fin
 
 ### Syn og fysisk verden
 
-- **Formål:** Romscope og hendelser fra kamera (kun syntetiske kilder i dag)
-- **Memory space/tenant:** home (alle tabeller tenant-skopet med FORCE RLS unntatt dokumenterte globale: `scheduler_state`, `capabilities`, `evolution_change_ledger`, `self_modification_requests`, `github_rate_limit_state`, `telegram_poll_state`)
-- **Datakategori:** Bilder/hendelser fra kamera (UA9-DPIA)
-- **Retensjon:** Retensjonspolicy fail-closed; ingen produsenter koblet.
-- **Eksterne mottakere:** Ingen (lokalt)
-- **Tabeller:** `vision_event_observations`, `vision_retention_policies`, `vision_rooms`
+- **Formål:** Romscope, kameraregister med datapolicy (sone og rutingregel per kamera), strukturerte hendelser fra kamera (bevegelse, dørklokke, åpning, sikkerhetsalarm, gjenstand/person funnet), kortlevde øyeblikksbilder (ETT bilde per hendelse, aldri kontinuerlig video), objekt-/hendelsesvektorer, inventar per rom («hva står hvor nå») og «sist sett» (WP-G3, UA-9). Kilder er Home Assistant (poll av eierens sensorer og `camera_proxy`) og iPhone på forespørsel (kun serverkontrakten; appen er BLOCKED_EXTERNAL)
+- **Memory space/tenant:** home/personal (multi-space: eierens egne rom; arbeidsplass- og delte soner lagrer aldri bilder) (alle tabeller tenant-skopet med FORCE RLS unntatt dokumenterte globale: `scheduler_state`, `capabilities`, `evolution_change_ledger`, `self_modification_requests`, `github_rate_limit_state`, `telegram_poll_state`)
+- **Datakategori:** Kamerabilder og hendelser fra kamera (UA9-DPIA): BEGRENSET data (strengeste regel). Bildebytes ligger KUN i lokal lagring bak `StorageAdapter` (aldri i databasen, aldri i logg, aldri i sky); databasen har metadata (sha256, størrelse, nøkkel), strukturerte hendelser og et normalisert objektnavn. INGEN biometri (ingen ansiktsgjenkjenning, ingen identitet, ingen demografi) - låst av vakttest
+- **Retensjon:** Hendelser: eier-konfigurert vindu per (tenant, space), standard 30 dager. Øyeblikksbilder: eget, kortere vindu (standard 7 dager, aldri lengre enn hendelsene) - slettet av sveip og av erasure via gravsteiner (`vision_snapshot_tombstones`: kun lagringsnøkler, slettes først når bildeobjektet er bekreftet borte). Inventar: utløper (`expires_at`) og forfaller i confidence (halveringstid). Opptaksforespørsler: korte (maks 15 min) og ryddes. Vektorer følger hendelsen (trigger). Q-20-erasure dekker alle tabellene unntatt gravsteinene (arbeidskø uten personopplysninger)
+- **Eksterne mottakere:** Ingen. Kamerabilder sendes kun til en LOKAL visjonsmodell (`local_vision`, eierens eget nett); skyvisjon for kamerabilder er forbudt i kode (ruter, utførelseslås, adapter) og test. Home Assistant er en kilde i eierens eget nett (token via hvelv), ikke en mottaker
+- **Tabeller:** `vision_cameras`, `vision_capture_requests`, `vision_event_observations`, `vision_inventory_items`, `vision_retention_policies`, `vision_rooms`, `vision_snapshot_tombstones`, `vision_snapshots`
 
 ### Sletting og personvern
 
@@ -179,6 +179,7 @@ Sensitivitetsregelen (`isSensitivityEligible`, D-79/D-81): `SECRET_RESTRICTED` (
 |---|---|---|---|---|---|---|
 | `gemma_local` (Ollama på eierens PC) | lokal | eierens eget nett | ikke relevant | nei | ingen | I BRUK; tillatt for alle spaces inkl. health |
 | `local_llm` (OpenAI-kompatibel lokal server) | lokal | eierens eget nett | ikke relevant | nei | ingen | tilgjengelig; alle spaces |
+| `local_vision` (OpenAI-kompatibel LOKAL visjonsmodell, kun kamerabilder; WP-G3) | lokal | eierens eget nett | ikke relevant | nei | ingen | AV som standard (`JARVIS_VISION_CLASSIFIER`); tar KUN imot `restricted` kamerabilder fra UA-9; kamerabilder går aldri til sky (utførelseslås i `ModelGateway`); IKKE live-verifisert |
 | `ollama` (lokal) | lokal | eierens eget nett | ikke relevant | nei | ingen | tilgjengelig; alle spaces |
 | `scripted` (test) | lokal | - | - | - | - | kun test |
 | `anthropic` | sky | **IKKE VERIFISERT** | **IKKE VERIFISERT** | **IKKE VERIFISERT** | **IKKE VERIFISERT** | NAVNGITT, IKKE VERIFISERT; aldri `SECRET_RESTRICTED` |

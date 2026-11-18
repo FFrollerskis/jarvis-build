@@ -1,0 +1,139 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  AnthropicAdapter,
+  GemmaHostedAdapter,
+  LocalOpenAiCompatibleAdapter,
+  ProviderError,
+  assertNoRestrictedMedia,
+  hasRestrictedMedia,
+  type ChatMessage,
+  type ContentPart
+} from "../src/index.ts";
+
+/**
+ * WP-G3 (D-465), P1b: (a) den lokale adapteren sender bilder KUN når den er konstruert med `{ vision: true }` (ellers droppes de som før -
+ * `local_llm`/`gemma_local` er uendret), som `image_url` med base64 `data:`-URL og ALDRI en ekstern URL; (b) et BEGRENSET kamerabilde
+ * (`restricted: true`) kommer aldri ut av en skyadapter med bildestøtte (Anthropic, Gemma hostet) - kastet FØR noe sendes.
+ * Ingen ekte nettkall: `fetch` er en fake.
+ */
+const originalFetch = global.fetch;
+const fetchSpy = vi.fn();
+
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+}
+
+const IMAGE: ContentPart = { type: "image", media_type: "image/jpeg", data: "aGVsbG8=" };
+const RESTRICTED_IMAGE: ContentPart = { type: "image", media_type: "image/jpeg", data: "aGVsbG8=", restricted: true };
+const TEXT: ContentPart = { type: "text", text: "beskriv bildet" };
+const message = (...parts: ContentPart[]): ChatMessage => ({ role: "user", content: parts });
+
+let captured: Record<string, unknown> | undefined;
+
+beforeEach(() => {
+  captured = undefined;
+  fetchSpy.mockReset();
+  global.fetch = (async (input: string | URL, init?: RequestInit) => {
+    fetchSpy(String(input));
+    captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return jsonResponse(200, { choices: [{ message: { content: "{\"detections\":[]}" }, finish_reason: "stop" }], usage: { prompt_tokens: 3, completion_tokens: 2 } });
+  }) as unknown as typeof fetch;
+});
+afterEach(() => {
+  global.fetch = originalFetch;
+});
+
+describe("hasRestrictedMedia", () => {
+  it("er sann kun når en bildedel har restricted: true", () => {
+    expect(hasRestrictedMedia({ messages: [message(TEXT, RESTRICTED_IMAGE)] })).toBe(true);
+    expect(hasRestrictedMedia({ messages: [message(TEXT, IMAGE)] })).toBe(false);
+    expect(hasRestrictedMedia({ messages: [{ role: "user", content: "ren tekst" }] })).toBe(false);
+    expect(hasRestrictedMedia({})).toBe(false);
+  });
+
+  it("kaster aldri på en deformert delliste (null, tall, streng) - gatewayen tåler slikt innhold fra før", () => {
+    const malformed = { role: "user", content: [null, 7, "x", { type: "text", text: "a" }, RESTRICTED_IMAGE] } as unknown as ChatMessage;
+    expect(hasRestrictedMedia({ messages: [malformed] })).toBe(true);
+    const malformedNoImage = { role: "user", content: [null, 7, "x"] } as unknown as ChatMessage;
+    expect(hasRestrictedMedia({ messages: [malformedNoImage] })).toBe(false);
+  });
+
+  it("restricted står aldri på en tekstdel og en streng-melding kan ikke bære den", () => {
+    const sneaky = { role: "user", content: [{ type: "text", text: "x", restricted: true }] } as unknown as ChatMessage;
+    expect(hasRestrictedMedia({ messages: [sneaky] })).toBe(false);
+    expect(() => assertNoRestrictedMedia("anthropic", { messages: [message(RESTRICTED_IMAGE)] })).toThrow(ProviderError);
+  });
+});
+
+describe("LocalOpenAiCompatibleAdapter - vision er av som standard (uendret oppførsel)", () => {
+  it("uten { vision: true } droppes bildedelen stille og content er ren tekst (som før WP-G3)", async () => {
+    const adapter = new LocalOpenAiCompatibleAdapter("http://127.0.0.1:11434", "m", 5_000, "gemma_local");
+    await adapter.complete({ messages: [message(TEXT, IMAGE)] });
+    const sent = (captured?.["messages"] as Array<{ content: unknown }>)[0]?.content;
+    expect(sent).toBe("beskriv bildet");
+  });
+
+  it("en ren tekstmelding er byte-for-byte lik med og uten vision", async () => {
+    const plain = new LocalOpenAiCompatibleAdapter("http://127.0.0.1:11434", "m", 5_000, "local_llm");
+    await plain.complete({ messages: [{ role: "user", content: "hei" }] });
+    const a = JSON.stringify(captured);
+    const vision = new LocalOpenAiCompatibleAdapter("http://127.0.0.1:11434", "m", 5_000, "local_llm", "default", { vision: true });
+    await vision.complete({ messages: [{ role: "user", content: "hei" }] });
+    expect(JSON.stringify(captured)).toBe(a);
+  });
+});
+
+describe("LocalOpenAiCompatibleAdapter - { vision: true } (local_vision)", () => {
+  const vision = () => new LocalOpenAiCompatibleAdapter("http://127.0.0.1:11434/v1", "vl-model", 5_000, "local_vision", "default", { vision: true });
+
+  it("sender tekst + image_url med base64 data-URL (aldri en ekstern URL), til det lokale endepunktet", async () => {
+    await vision().complete({ messages: [message(TEXT, RESTRICTED_IMAGE)] });
+    const content = (captured?.["messages"] as Array<{ content: Array<Record<string, unknown>> }>)[0]?.content;
+    expect(content).toEqual([
+      { type: "text", text: "beskriv bildet" },
+      { type: "image_url", image_url: { url: "data:image/jpeg;base64,aGVsbG8=" } }
+    ]);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy.mock.calls[0]?.[0]).toBe("http://127.0.0.1:11434/v1/chat/completions");
+    expect(JSON.stringify(captured)).not.toMatch(/https?:\/\/[^"]*\.(jpe?g|png|webp)/i);
+  });
+
+  it("avviser ugyldig media type, ikke-base64 og tom bildedata som bad_request FØR noe sendes", async () => {
+    for (const bad of [
+      { type: "image", media_type: "image/svg+xml", data: "aGVsbG8=" },
+      { type: "image", media_type: "image/jpeg", data: "http://evil.example/x.jpg" },
+      { type: "image", media_type: "image/jpeg", data: "" },
+      { type: "image", media_type: "image/jpeg\"; drop", data: "aGVsbG8=" }
+    ] as ContentPart[]) {
+      await expect(vision().complete({ messages: [message(TEXT, bad)] })).rejects.toMatchObject({ kind: "bad_request" });
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("en melding uten bildedeler er identisk med standardstien (tekst slås sammen som før)", async () => {
+    await vision().complete({ messages: [message(TEXT, { type: "text", text: "mer" })] });
+    expect((captured?.["messages"] as Array<{ content: unknown }>)[0]?.content).toBe("beskriv bildet\nmer");
+  });
+});
+
+describe("skyadaptere med bildestøtte nekter BEGRENSEDE kamerabilder (forsvar i dybden)", () => {
+  it("AnthropicAdapter kaster bad_request og sender ingenting for et restricted bilde; et vanlig bilde fungerer som før", async () => {
+    const adapter = new AnthropicAdapter("fake-key-for-test", "test-model", "http://mock");
+    await expect(adapter.complete({ messages: [message(TEXT, RESTRICTED_IMAGE)] })).rejects.toMatchObject({ kind: "bad_request", provider: "anthropic" });
+    await expect(adapter.stream({ messages: [message(TEXT, RESTRICTED_IMAGE)] }, () => undefined)).rejects.toMatchObject({ kind: "bad_request" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    global.fetch = (async (_input: string | URL, init?: RequestInit) => {
+      captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return jsonResponse(200, { content: [{ type: "text", text: "OK" }], usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: "end_turn" });
+    }) as unknown as typeof fetch;
+    await adapter.complete({ messages: [message(TEXT, IMAGE)] });
+    expect(JSON.stringify(captured)).toContain('"type":"image"');
+  });
+
+  it("GemmaHostedAdapter kaster bad_request og sender ingenting for et restricted bilde", async () => {
+    const adapter = new GemmaHostedAdapter("fake-key-for-test");
+    await expect(adapter.complete({ messages: [message(TEXT, RESTRICTED_IMAGE)] })).rejects.toMatchObject({ kind: "bad_request" });
+    await expect(adapter.stream({ messages: [message(TEXT, RESTRICTED_IMAGE)] }, () => undefined)).rejects.toMatchObject({ kind: "bad_request" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});

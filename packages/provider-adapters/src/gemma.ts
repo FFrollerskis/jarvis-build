@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  assertNoRestrictedMedia,
   classifyFetchError,
   classifyHttpStatus,
   envOrDefault,
@@ -141,6 +142,8 @@ export class GemmaHostedAdapter implements ModelProviderAdapter {
 
   /** Provider-nøytral request → Gemini-API-body. Delt av `complete()`/`stream()` - IKKE duplisert. */
   private buildRequestBody(request: ModelRequest): Record<string, unknown> {
+    // WP-G3 (D-465): et BEGRENSET kamerabilde forlater aldri maskinen - kastes FØR noe sendes (kroppen bygges før `fetch`).
+    assertNoRestrictedMedia(this.name, request);
     const contents = this.toGemmaContents(request.messages, request.tool_exchanges);
     return {
       ...(request.system ? { systemInstruction: { parts: [{ text: request.system }] } } : {}),

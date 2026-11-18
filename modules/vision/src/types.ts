@@ -25,7 +25,9 @@ export const VisionEventTypeSchema = z.enum([
   "person_present",
   "motion_detected",
   "doorbell_event",
-  "security_alert"
+  "security_alert",
+  // WP-G3 (D-465, migrasjon 137): dør-/vindus-/garasjeåpning (Home Assistant åpningssensorer). Settet er fortsatt LUKKET.
+  "opening_detected"
 ]);
 export type VisionEventType = z.infer<typeof VisionEventTypeSchema>;
 
@@ -37,12 +39,15 @@ export interface VisionRetentionPolicy {
   tenant_id: string;
   memory_space_id: string;
   retention_days: number;
+  /** WP-G3 (133): eget, kortere vindu for lagrede øyeblikksbilder. `null` = standard (`DEFAULT_SNAPSHOT_RETENTION_DAYS`). Effektivt vindu er aldri lengre enn `retention_days`. */
+  snapshot_retention_days: number | null;
   actor_person_id: string | null;
   updated_at: string;
 }
 
 export const SetVisionRetentionPolicyInputSchema = z.object({
   retention_days: z.number().int().positive(),
+  snapshot_retention_days: z.number().int().positive().optional(),
   actor_person_id: z.string().min(1).optional()
 });
 export type SetVisionRetentionPolicyInput = z.infer<typeof SetVisionRetentionPolicyInputSchema>;
@@ -95,13 +100,10 @@ export type CreateVisionRoomInput = z.infer<typeof CreateVisionRoomInputSchema>;
  * transport-retry, eller en krasjet delvis batch som prøves på nytt IKKE
  * skilles fra en genuint NY hendelse (se `service.ts`).
  *
- * `snapshot_ref` (ARKITEKT-REVIEW-FIKS, PR #83, RUNDE 1, P1) - FORBUDT i
- * denne P0-sliceen (se `055_vision.sql` sin `CHECK`-kommentar for
- * begrunnelsen: ingen levetids-eid snapshot-lagringsadapter finnes ennå som
- * faktisk sletter det RETTE eksterne objektet når en observasjon purges/
- * eraseres). Feltet finnes bevisst IKKE i dette schemaet - en fremtidig
- * slice som bygger en ekte snapshot-lagring legger det til igjen SAMMEN
- * MED transaksjonell/kompenserende sletting av det refererte objektet.
+ * `snapshot_ref` (ARKITEKT-REVIEW-FIKS, PR #83, RUNDE 1, P1; WP-G3/D-465): var FORBUDT i P0-sliceen fordi ingen levetids-eid
+ * snapshot-lagring fantes. Den finnes nå (migrasjon 134: `vision_snapshots` + gravsteiner + reaper, `snapshots.ts`), men feltet står
+ * FORTSATT bevisst UTENFOR dette kilde-produserte schemaet: en kilde kan aldri peke på et bilde. Kun trusted pipelinekode setter
+ * pekeren, via `VisionWriteExtras` (se under), og den sammensatte FK-en avviser en peker til en annen persons/tenants bilde.
  */
 export const VisionObservationInputSchema = z
   .object({
@@ -128,7 +130,8 @@ export interface VisionEventObservation {
   event_type: VisionEventType;
   object_label: string | null;
   confidence: number | null;
-  snapshot_ref: null;
+  /** WP-G3 (134): peker til `vision_snapshots.snapshot_id` (ETT øyeblikksbilde fra denne hendelsen), eller `null` (ingen lagret bilde / bildet er slettet etter eget, kortere vindu). */
+  snapshot_ref: string | null;
   source_type: string;
   source_instance_id: string;
   source_event_id: string;
@@ -137,6 +140,28 @@ export interface VisionEventObservation {
   observed_at: string;
   recorded_at: string;
   retention_expires_at: string | null;
+  /** WP-G3 (133): sporing (CLAUDE.md regel 4) - satt av kildepipelinen; `null` for rader skrevet direkte via `ingestObservation()` uten extras. */
+  task_id: string | null;
+  session_id: string | null;
+  /** WP-G3 (133): hvordan det strukturerte resultatet oppsto (ingen modell, gyldig modellsvar, modell utilgjengelig, avvist svar, policy). */
+  classification_status: VisionClassificationStatus;
+  /** WP-G3 (133): `<provider>/<modell>` som produserte klassifiseringen (proveniens), ellers `null`. */
+  classifier: string | null;
+}
+
+export type VisionClassificationStatus = "not_applicable" | "classified" | "model_unavailable" | "model_rejected" | "skipped_by_policy";
+
+/**
+ * WP-G3 (133/134): felt som KUN trusted pipelinekode kan sette (aldri en kilde): en `VisionEventSource` returnerer
+ * `VisionObservationInput` (strict, uten disse feltene), og tjenesten tar imot dem i en SEPARAT parameter. `snapshot_ref` valideres
+ * av den sammensatte FK-en (tenant, space, person, snapshot) - en peker til en annen persons eller tenants bilde avvises av databasen.
+ */
+export interface VisionWriteExtras {
+  snapshot_ref?: string | null;
+  task_id?: string | null;
+  session_id?: string | null;
+  classification_status?: VisionClassificationStatus;
+  classifier?: string | null;
 }
 
 /**

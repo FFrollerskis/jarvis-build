@@ -123,6 +123,9 @@ const BASELINE_REASON: Record<string, string> = {
   memory_sources: "OPERATIONAL",
   situation_autonomy_policies: "OPERATIONAL",
   situation_notification_policies: "OPERATIONAL",
+  // WP-G3 (D-465, migrasjon 134): ARBEIDSKØ for sletting av bildeobjekter (kun lagringsnøkler - ingen person-, bilde- eller hendelsesdata). BEVISST ikke i erasure-planen: å slette en gravstein
+  // før objektet er bekreftet borte ville etterlatt et foreldreløst bilde. Raden fjernes av reaperen (modules/vision/src/snapshots.ts) først når StorageAdapter har bekreftet slettingen.
+  vision_snapshot_tombstones: "OPERATIONAL",
   tasks: "OPERATIONAL",
 };
 
