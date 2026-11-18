@@ -210,7 +210,8 @@ describe("D: godkjenning av forpliktelser og sletting", () => {
     if (!ingest.ok) return;
     const meetingId = String((ingest.data as { meeting_id: string }).meeting_id);
     expect(ingest.output_trust).toBe("untrusted");
-    const listed = await act("meeting_list", { limit: 5 });
+    // limit 100: klokken står fast, så alle møter har lik `created_at` og rekkefølgen blant likestilte er ikke definert - en liten grense ga en sporadisk feil
+    const listed = await act("meeting_list", { limit: 100 });
     expect(JSON.stringify(listed.ok ? listed.data : null)).toContain(meetingId);
     const noKey = await act("meeting_delete", { meeting_id: meetingId });
     expect(noKey).toEqual({ ok: false, status: "rejected", reason: "idempotency_key_required" });
