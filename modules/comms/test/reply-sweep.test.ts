@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BusinessService } from "@jarvis/business";
-import { CommsStore, ReplySweep, planReplyFollowUps, recipientHash, recipientHint, type JournalEntryInput, type PendingReply } from "../src/index.ts";
+import { ConversationGraphService } from "@jarvis/conversation-graph";
+import { CommsStore, REPLY_SWEEP_MAX_PER_CHANNEL, REPLY_SWEEP_MAX_PER_RUN, REPLY_SWEEP_MAX_UNKNOWN_PER_RUN, ReplySweep, planReplyFollowUps, recipientHash, recipientHint, type JournalEntryInput, type PendingReply } from "../src/index.ts";
 import { OWNER, TENANT_A, TENANT_B, startCommsDb, type CommsDb } from "./support/harness.ts";
 
 /**
@@ -10,6 +11,7 @@ import { OWNER, TENANT_A, TENANT_B, startCommsDb, type CommsDb } from "./support
 let db: CommsDb;
 let store: CommsStore;
 let business: BusinessService;
+let graph: ConversationGraphService;
 let sweep: ReplySweep;
 let now = new Date("2026-11-10T08:00:00Z");
 const clock = () => now;
@@ -21,16 +23,17 @@ beforeAll(async () => {
   db = await startCommsDb("g1rs");
   store = new CommsStore(db.app, clock);
   business = new BusinessService(db.app);
+  graph = new ConversationGraphService(db.app);
   sweep = new ReplySweep({ pool: db.app, clock, business, afterHours: 24, windowDays: 7 });
 }, 240_000);
 
 afterAll(async () => { await db?.stop(); }, 120_000);
 
-const inbound = async (tenant: string, from: string, over: { kind?: "message" | "opt_out" | "status"; text?: string; at?: Date } = {}): Promise<string> => {
+const inbound = async (tenant: string, from: string, over: { kind?: "message" | "opt_out" | "status"; text?: string; at?: Date; identity?: string | null; channel?: "sms" | "whatsapp" } = {}): Promise<string> => {
   if (over.at) now = over.at;
   const r = await store.recordInbound(tenant, "business", {
-    provider: "twilio", channel: "sms", account_ref: "+4791000000", event_key: `evt-${++n}-${Math.random().toString(36).slice(2, 8)}`, kind: over.kind ?? "message", sender_hash: recipientHash(tenant, "sms", from),
-    sender_hint: recipientHint("sms", from), identity_id: null, thread_ref: null, content_excerpt: over.text ?? "Hei, kan dere ringe meg?", content_sha256: null, provider_ts: null, ingest_id: `ingest-${n}-abcdefgh`
+    provider: over.channel === "whatsapp" ? "meta" : "twilio", channel: over.channel ?? "sms", account_ref: "+4791000000", event_key: `evt-${++n}-${Math.random().toString(36).slice(2, 8)}`, kind: over.kind ?? "message", sender_hash: recipientHash(tenant, over.channel ?? "sms", from),
+    sender_hint: recipientHint(over.channel ?? "sms", from), identity_id: over.identity ?? null, thread_ref: null, content_excerpt: over.text ?? "Hei, kan dere ringe meg?", content_sha256: null, provider_ts: null, ingest_id: `ingest-${n}-abcdefgh`
   }, 30);
   return r.event_id as string;
 };
@@ -62,10 +65,48 @@ describe("A: ren beslutning", () => {
       due_at: new Date(NOW.getTime() - 26 * 3_600_000).toISOString(), event_id: "evt-a"
     });
     expect(plans[2]?.title).toBe("Svar på melding (WhatsApp) fra ukjent avsender");
-    expect(planReplyFollowUps(Array.from({ length: 30 }, (_, i) => row(`evt-${i}`, 30 + i)), { now: NOW, afterHours: 24 })).toHaveLength(20);
     expect(planReplyFollowUps(Array.from({ length: 30 }, (_, i) => row(`evt-${i}`, 30 + i)), { now: NOW, afterHours: 24, maxPerRun: 3 })).toHaveLength(3);
     expect(planReplyFollowUps([row("evt-x", 30, { received_at: "ugyldig dato" })], { now: NOW, afterHours: 24 })).toEqual([]);
     expect(planReplyFollowUps([], { now: NOW, afterHours: 24 })).toEqual([]);
+  });
+});
+
+describe("A2: rettferdig utvelgelse (B-M2): tak per kanal og for ukjente, kjente først", () => {
+  const NOW = new Date("2026-11-10T08:00:00Z");
+  const row = (id: string, hoursAgo: number, over: Partial<PendingReply> = {}): PendingReply => ({ event_id: id, channel: "sms", account_ref: "+4791000000", sender_hint: "+47•••••123", received_at: new Date(NOW.getTime() - hoursAgo * 3_600_000).toISOString(), identity_id: "id-known", ...over });
+  const many = (prefix: string, count: number, over: Partial<PendingReply> = {}) => Array.from({ length: count }, (_, i) => row(`${prefix}-${i}`, 30 + i, over));
+
+  it("én kanal kan ikke ta hele kapasiteten (tak per kanal), og to kanaler fyller opp til taket per sveip", () => {
+    expect(planReplyFollowUps(many("sms", 30), { now: NOW, afterHours: 24 })).toHaveLength(REPLY_SWEEP_MAX_PER_CHANNEL);
+    const both = planReplyFollowUps([...many("sms", 30), ...many("wa", 30, { channel: "whatsapp" })], { now: NOW, afterHours: 24 });
+    expect(both).toHaveLength(REPLY_SWEEP_MAX_PER_RUN);
+    expect(both.filter((p) => p.title.includes("(SMS)"))).toHaveLength(REPLY_SWEEP_MAX_PER_CHANNEL);
+    expect(both.filter((p) => p.title.includes("(WhatsApp)"))).toHaveLength(REPLY_SWEEP_MAX_PER_CHANNEL);
+  });
+
+  it("kjente først: er kapasiteten knapp, tar kjente avsendere plassene foran ukjente selv om de ukjente har ventet lenger", () => {
+    const known = [...many("ks", 12, { channel: "sms" }), ...many("kw", 12, { channel: "whatsapp" })];
+    const unknown = Array.from({ length: 8 }, (_, i) => row(`u-${i}`, 100 + i, { channel: "slack", identity_id: null }));
+    const plans = planReplyFollowUps([...unknown, ...known], { now: NOW, afterHours: 24 });
+    expect(plans).toHaveLength(REPLY_SWEEP_MAX_PER_RUN);
+    expect(plans.filter((p) => p.event_id.startsWith("u-"))).toHaveLength(0); // alle 20 plasser gikk til kjente (10 per kanal)
+    expect(plans.filter((p) => !p.event_id.startsWith("u-"))).toHaveLength(20);
+  });
+
+  it("en flom fra UKJENTE avsendere tar høyst et fast antall, og kjente avsendere går alltid foran selv om de er nyere", () => {
+    const flood = many("spam", 40, { identity_id: null, channel: "whatsapp" });
+    const known = [row("known-new", 25, { channel: "sms" }), row("known-old", 60, { channel: "sms" })];
+    const plans = planReplyFollowUps([...flood, ...known], { now: NOW, afterHours: 24 });
+    const ids = plans.map((p) => p.event_id);
+    expect(ids).toContain("known-new");
+    expect(ids).toContain("known-old");
+    expect(ids.filter((i) => i.startsWith("spam-"))).toHaveLength(REPLY_SWEEP_MAX_UNKNOWN_PER_RUN);
+    expect(plans).toHaveLength(REPLY_SWEEP_MAX_UNKNOWN_PER_RUN + 2);
+    // utdata er eldst først
+    expect(plans.map((p) => p.due_at)).toEqual([...plans.map((p) => p.due_at)].sort());
+    // en rad uten identity_id-felt regnes som ukjent
+    const bare: PendingReply = { event_id: "x", channel: "sms", account_ref: "a", sender_hint: null, received_at: new Date(NOW.getTime() - 30 * 3_600_000).toISOString() };
+    expect(planReplyFollowUps(Array.from({ length: 12 }, (_, i) => ({ ...bare, event_id: `x${i}` })), { now: NOW, afterHours: 24 })).toHaveLength(REPLY_SWEEP_MAX_UNKNOWN_PER_RUN);
   });
 });
 
@@ -134,5 +175,63 @@ describe("B: sveipet mot ekte Postgres (RLS)", () => {
     expect((await followups(TENANT_B)).map((f) => f.idempotency_key)).not.toContain(`reply-pending:${idB}`);
     expect((await followups(TENANT_A)).map((f) => f.idempotency_key)).not.toContain(`reply-pending:${idB}`);
     expect((await followups(TENANT_A)).length).toBe(beforeA);
+  });
+});
+
+describe("C: rotasjon uten sult (B-M2) mot ekte Postgres", () => {
+  const knownSender = async (tenant: string): Promise<{ number: string; identity: string }> => {
+    const number = sender();
+    const link = await graph.linkChannelIdentity(tenant, "business", { channel: "sms", channel_identifier: number, confidence: 1, match_method: "exact_phone_e164" });
+    return { number, identity: link.identity_id };
+  };
+
+  it("26 ubesvarte kjente avsendere: hvert sveip tar de NESTE i køen (aldri de samme eldste igjen), også etter at eieren har lukket de forrige - til alle 26 har nøyaktig én oppfølging", async () => {
+    const t0 = hoursLater(1000);
+    const senders = [];
+    for (let i = 0; i < 26; i += 1) {
+      const s = await knownSender(TENANT_B);
+      senders.push({ ...s, id: await inbound(TENANT_B, s.number, { at: new Date(t0.getTime() + i * 60_000), identity: s.identity }) });
+    }
+    now = new Date(t0.getTime() + 48 * 3_600_000);
+    const mine = (ids: string[]) => ids.map((id) => `reply-pending:${id}`);
+    const allKeys = mine(senders.map((s) => s.id));
+    const seen = new Set<string>();
+    const runs: number[] = [];
+    for (let round = 0; round < 6; round += 1) {
+      const r = await sweep.run(TENANT_B, "business", OWNER);
+      runs.push(r.ensured);
+      const open = (await followups(TENANT_B)).filter((f) => allKeys.includes(f.idempotency_key) && f.status === "open");
+      for (const f of open) {
+        expect(seen.has(f.idempotency_key), `${f.idempotency_key} fikk oppfølging to ganger`).toBe(false);
+        seen.add(f.idempotency_key);
+        await business.completeFollowup(TENANT_B, "business", f.followup_id); // eieren lukker den (terminalt)
+      }
+    }
+    expect(runs).toEqual([REPLY_SWEEP_MAX_PER_CHANNEL, REPLY_SWEEP_MAX_PER_CHANNEL, 6, 0, 0, 0]);
+    expect(seen.size).toBe(26);
+    expect([...seen].sort()).toEqual([...allKeys].sort());
+    expect((await followups(TENANT_B)).filter((f) => allKeys.includes(f.idempotency_key))).toHaveLength(26);
+  });
+
+  it("en flom av ukjente SMS-avsendere sulter ikke de kjente: kjente får oppfølging i første sveip, ukjente kun opp til taket (resten tas i senere sveip)", async () => {
+    const t0 = hoursLater(2000);
+    const known = [];
+    for (let i = 0; i < 3; i += 1) {
+      const s = await knownSender(TENANT_A);
+      known.push(await inbound(TENANT_A, s.number, { at: new Date(t0.getTime() + 60 * 60_000 + i * 60_000), identity: s.identity, channel: "sms" })); // NYERE enn spamen
+    }
+    const spam = [];
+    for (let i = 0; i < 20; i += 1) spam.push(await inbound(TENANT_A, sender(), { at: new Date(t0.getTime() + i * 60_000), channel: "whatsapp" }));
+    now = new Date(t0.getTime() + 60 * 3_600_000);
+    const r = await sweep.run(TENANT_A, "business", OWNER);
+    expect(r.failed).toBe(0);
+    const keys = (await followups(TENANT_A)).map((f) => f.idempotency_key);
+    for (const id of known) expect(keys, id).toContain(`reply-pending:${id}`);
+    expect(spam.filter((id) => keys.includes(`reply-pending:${id}`))).toHaveLength(REPLY_SWEEP_MAX_UNKNOWN_PER_RUN);
+    // neste sveip tar de neste ukjente (de som alt har oppfølging utelates)
+    const r2 = await sweep.run(TENANT_A, "business", OWNER);
+    expect(r2.ensured).toBe(REPLY_SWEEP_MAX_UNKNOWN_PER_RUN);
+    const keys2 = (await followups(TENANT_A)).map((f) => f.idempotency_key);
+    expect(spam.filter((id) => keys2.includes(`reply-pending:${id}`))).toHaveLength(2 * REPLY_SWEEP_MAX_UNKNOWN_PER_RUN);
   });
 });
