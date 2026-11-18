@@ -130,7 +130,16 @@ const EFFECT_OVERRIDES: Record<string, Effect> = {
   [k("business", "resolve_open_loop")]: "write",
   // D-416: delegeringsnivået - oppretter en intern, lesende bakgrunnsjobb (write, klasse B) / leser jobbstatus.
   [k("tasks", "delegate_background_task")]: "write",
-  [k("tasks", "get_task_status")]: "read"
+  [k("tasks", "get_task_status")]: "read",
+  // WP-G1 (D-463, fiks-runde A-H1): comms-lesehandlinger der verbet ikke står først i navnet (`contacts_list`, `meeting_commitments`, ...) - uten overstyring tolket `inferEffect` dem som SKRIVING og
+  // `assertManifestInvariants` stoppet API-oppstarten med JARVIS_COMMS_CONTACTS/_MEETINGS=on. Alle er klasse A (ren lesing, eier-kun, ubetrodd output).
+  [k("comms", "contacts_list")]: "read",
+  [k("comms", "contacts_search")]: "read",
+  [k("comms", "contacts_get")]: "read",
+  [k("comms", "contacts_check_target")]: "read",
+  [k("comms", "meeting_list")]: "read",
+  [k("comms", "meeting_commitments")]: "read",
+  [k("comms", "meeting_check_target")]: "read"
 };
 
 export function inferEffect(tool_id: string, action: string): Effect {
