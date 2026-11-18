@@ -96,6 +96,22 @@ export function parseSlackBody(body: unknown): SlackParse {
   }], 0);
 }
 
+/**
+ * Teksten i en WhatsApp-melding: `text.body`, og (L6) også KNAPPSVAR - `button.text` (hurtigsvar-knapp på en mal) og `interactive.button_reply.title`/`list_reply.title` - slik at en «Stopp»-knapp tolkes som en avmelding i stedet for å bli
+ * ignorert (text var tidligere `null` for alt unntatt `text`). Feltnavnene er UVERIFISERT mot Metas dokumentasjon i denne økten (docs-vertene var ikke nåbare); parseren er defensiv og feil form gir `null`.
+ */
+function whatsappText(m: Record<string, unknown>): string | null {
+  switch (m["type"]) {
+    case "text": return str(obj(m["text"])?.["body"], 10_000);
+    case "button": return str(obj(m["button"])?.["text"], 1_000);
+    case "interactive": {
+      const i = obj(m["interactive"]);
+      return str(obj(i?.["button_reply"])?.["title"], 1_000) ?? str(obj(i?.["list_reply"])?.["title"], 1_000);
+    }
+    default: return null;
+  }
+}
+
 // ------------------------------------------------------------------------------------------------ Meta: WhatsApp Cloud API, Messenger, Instagram
 export function parseMetaBody(body: unknown): ParseOutcome {
   const b = obj(body);
@@ -119,7 +135,7 @@ export function parseMetaBody(body: unknown): ParseOutcome {
           if (m === null || id === null || sender === null) { ignored++; continue; }
           events.push({
             provider: "meta", channel: "whatsapp", account_ref: phoneNumberId, event_key: `wa:msg:${id}`, kind: "message", sender, reply_to: sender, thread_ref: null,
-            text: m["type"] === "text" ? str(obj(m["text"])?.["body"], 10_000) : null, provider_ts: isoFromSeconds(num(m["timestamp"]))
+            text: whatsappText(m), provider_ts: isoFromSeconds(num(m["timestamp"]))
           });
         }
         for (const sRaw of arr(value["statuses"])) {

@@ -167,6 +167,8 @@ export class CommsStore {
       const existing = await client.query(
         `SELECT * FROM comms_authorized_accounts WHERE tenant_id = $1 AND channel = $2 AND account_ref = $3 AND status = 'active'`, [tenantId, input.channel, input.account_ref]
       );
+      // Konflikten kan være en aktiv rad i et ANNET rom (RLS skjuler den): da finnes ingen rad å returnere her. Før lekket det et TypeError («Cannot read properties of undefined»); nå en fast, ryddig feilkode.
+      if (existing.rowCount === 0) throw new Error("comms_account_authorized_in_another_room");
       return { account: this.toAccount(existing.rows[0] as Record<string, unknown>), created: false };
     });
   }

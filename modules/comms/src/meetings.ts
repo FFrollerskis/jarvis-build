@@ -167,6 +167,8 @@ export class MeetingService {
       return null;
     }));
     return withMemoryTransaction(this.deps.pool, ctx.tenantId, [ctx.space], async (client) => {
+      // To samtidige kall med SAMME innhold: uten lås så begge «finnes ikke» og den andre INSERT-en feilet på UNIQUE (tenant, rom, hash) i stedet for å gi en dedupe. Låsen serialiserer dem, så den andre ser raden den første la inn.
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 7340465))", [`comms-meeting|${ctx.tenantId}|${ctx.space}|${hash}`]);
       const existing = await client.query(`SELECT meeting_id, source, title, segment_count FROM comms_meetings WHERE tenant_id = $1 AND memory_space_id = $2 AND content_sha256 = $3`, [ctx.tenantId, ctx.space, hash]);
       if (existing.rows.length === 1) {
         const row = existing.rows[0] as { meeting_id: string; source: MeetingSummary["source"]; title: string | null; segment_count: number };

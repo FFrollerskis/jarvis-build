@@ -45,6 +45,9 @@ function isOwner(deps: OwnerActionDeps, identity: IdentityContext): boolean {
   }
 }
 
+/** Rommene kommunikasjon kan skje i. En identitet i `health`/`home`/`guest` avvises HER (L2) - FØR policyen, FØR noe journalføres og FØR gatewayen: ellers skrev et avslag/en tørrkjøring rader i det isolerte helse-rommet. */
+const COMMS_ALLOWED_SPACES: readonly string[] = ["personal", "business", "project", "shared"];
+
 export type OwnerActionResult =
   | { readonly ok: true; readonly external_id?: string; readonly data: JsonValue; readonly output_trust: string; readonly deduplicated: boolean }
   | { readonly ok: false; readonly status: "denied"; readonly denial_codes: readonly string[]; readonly rules: JsonValue; readonly journal_id: string }
@@ -69,6 +72,7 @@ function funnelContext(identity: IdentityContext): FunnelContext {
 /** Tørrkjøring: hva ville policyen sagt? Ingen sending, ingen journal. Svaret bærer regelutfall og mottakerbevis - aldri meldingsteksten. */
 export async function previewCommsSend(deps: OwnerActionDeps, identity: IdentityContext, parameters: Record<string, JsonValue>): Promise<OwnerActionResult> {
   if (!isOwner(deps, identity)) return { ok: false, status: "rejected", reason: "owner_required" };
+  if (!COMMS_ALLOWED_SPACES.includes(identity.memory_space_id)) return { ok: false, status: "rejected", reason: "comms_space_not_allowed" };
   const parsed = parseSendParams({ request_id: "preview-00000000", ...parameters });
   if (!parsed.ok) return { ok: false, status: "rejected", reason: parsed.code };
   const ev = await deps.funnel.evaluate(funnelContext(identity), parsed.value);
@@ -80,6 +84,7 @@ export async function executeCommsOwnerAction(
 ): Promise<OwnerActionResult> {
   const { action } = input;
   if (!isOwner(deps, identity)) return { ok: false, status: "rejected", reason: "owner_required" };
+  if (!COMMS_ALLOWED_SPACES.includes(identity.memory_space_id)) return { ok: false, status: "rejected", reason: "comms_space_not_allowed" };
   if (!COMMS_KNOWN_ACTIONS.includes(action) || deps.gateway.get("comms", action) === undefined) return { ok: false, status: "rejected", reason: "comms_unknown_action" };
   const outbound = COMMS_OUTBOUND_ACTIONS.includes(action) || COMMS_CALL_ACTIONS.includes(action);
   const idempotencyKey = input.idempotency_key;
