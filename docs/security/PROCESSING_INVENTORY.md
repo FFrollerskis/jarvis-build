@@ -160,6 +160,15 @@ uten at det er gjort, eller (4) en DPIA-henvisning peker på en fil som ikke fin
 - **Eksterne mottakere:** Ingen fra tabellen. Handlingene selv går til eierens egen Home Assistant (lokalt nett) og - først når en leverandør er valgt (D-64-port) - bil-API-et; begge KUN med flagg (`JARVIS_PERSONAL_HOME_CRITICAL`/`JARVIS_PERSONAL_CAR`) og mål-liste.
 - **Tabeller:** `personal_action_journal`
 
+### Personlig tvilling: familiesirkel, deling og delt innhold (WP-G2, D-464)
+
+- **Formål:** Autoritetslag for «familie/delt rom»: hvem som er medlem av en familiesirkel og med hvilken rolle (eier/voksen/barn/gjest), invitasjoner (kun den inviterte kan akseptere), eksplisitte delinger av EN kategori (lokasjon eller helse-sammendrag) fra ett medlem til ett annet, tidsbegrensede «på vegne av»-delegasjoner, og sirkelens felles lister og kalender. Identitetsmodellen gir ingen per-person-tilgang innen en tenant (Q-15), så sirkelen bor i en egen tenant der kun rommet `shared` finnes; helse og lokasjon er kun synlig for personen selv, og en annen ser det bare gjennom en deling personen selv har gitt (håndhevet av databasen, ikke bare av koden). Se `docs/UA8_PERSONAL_TWIN_DPIA.md` og `docs/runbooks/WPG2_PERSONAL.md`.
+- **Memory space/tenant:** shared (kun rommet `shared`, CHECK; tenant-skopet med FORCE RLS og RESTRICTIVE memory-space-policy; komposittnøkler mot (person, tenant)-medlemskap)
+- **Datakategori:** Medlemskap og roller, invitasjoner, samtykke-poster (delinger/delegasjoner med utløp og tilbakekall), felles listetekst og kalendertitler (fritekst fra mennesker: ubetrodd data). Delingene lagrer KUN hvem som deler hva med hvem - aldri selve lokasjonen eller helseverdiene: seeren får et avledet, minimalt svar (sonenavn; skritt i dag og søvnminutter siste natt) hentet ved lesing fra personens egen datatenant. Barn er mulige medlemmer: verge-/foreldresamtykke er IKKE løst (åpent eierspørsmål).
+- **Retensjon:** Ingen automatisk opprydding (`DEFERRED`: eierbeslutning). Utløpte/tilbakekalte delinger og delegasjoner beholdes som bevis på samtykket til sirkelen/personen slettes. Sletting via memory space-/person-/tenant-sletting (`modules/erasure/src/plan.ts`, registrert og testet): sletter en person slettes også delinger, delegasjoner, felles innhold personen har opprettet eller som gjelder personen, og invitasjoner.
+- **Eksterne mottakere:** Ingen. Tabellene sendes aldri til en modell; bruken av en deling revideres (`audit_events`, uten innhold).
+- **Tabeller:** `family_delegations`, `family_events`, `family_invitations`, `family_list_items`, `family_lists`, `family_members`, `family_shares`
+
 ### Sletting og personvern
 
 - **Formål:** Sporing av slettekrav
