@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ProviderError, type ModelRequest, type ToolCallRequest, type ToolExchange } from "@jarvis/provider-adapters";
-import { ClaudeBudgetBlockedError, type CompleteInput } from "../src/index.ts";
+import { ClaudeBudgetBlockedError, NoEligibleProviderError, claudeBudgetClosureOf, type CompleteInput } from "../src/index.ts";
 import { HAIKU, REQ, SPENT, background, build, ownerTask, ownerTurn } from "./support/claude-budget-fakes.ts";
 
 /**
@@ -768,5 +768,250 @@ describe("M3: criticens kostnad ses av overlegget (billetten følger med critice
     const next = await gateway.complete(ownerTurn());
     expect(next.provider).toBe("gemma_local"); // oppbrukt (30 øre igjen, 36 brukt av criticen) - uten overlegg ville bufferen sagt «på tempo» og sluppet kallet til Anthropic
     expect(anthropic.calls).toHaveLength(1);
+  });
+});
+
+describe("N1 (re-review): kredittnotatet følger HELE turen - sluttresultatet av en verktøytur kreditten stengte bærer `claude_budget`, også når siste runde er låst lokalt uten egen beslutning", () => {
+  const CLOSED = { action: "deny", level: "exhausted", tier: "essential", reason: "exhausted_closed", constraint: "closed", window_end_ms: expect.any(Number) as unknown as number };
+  const used = (a: { calls: unknown[]; streamCalls: unknown[] }): number => a.calls.length + a.streamCalls.length;
+
+  it("chatten (`localStickiness`): runde 1 stengt og lokal, runde 2 låst lokalt (ingen billett) - sluttresultatet har likevel lukkingen fra runde 1, og runde 2 tok ingen ny beslutning", async () => {
+    const { gateway, db, anthropic, local } = build({ local: { script: toolThenAnswer("gemma_local", "gemma-local") } });
+    db.spend.set("t1", SPENT.exhausted);
+    const result = await gateway.completeWithTools(ownerTurn(), { tools: [ECHO_TOOL], executor: executor(), localStickiness: true });
+    expect(result.provider).toBe("gemma_local");
+    expect(local.calls).toHaveLength(2);
+    expect(used(anthropic)).toBe(0);
+    expect(result.metadata?.["claude_budget"]).toMatchObject(CLOSED);
+    expect(result.metadata?.["tool_rounds"]).toBe(1);
+    expect(db.audit.map((a) => a.reason)).toEqual(["exhausted_closed"]); // kun runde 1 tok en beslutning (revisjon per kall er uendret)
+    expect(db.spendReads).toBe(1);
+  });
+
+  it("strøm (`onEvent`) og tre runder: samme - metadata fra runde 1 på sluttresultatet, ingen Anthropic-kall", async () => {
+    const calls: ToolCallRequest[] = [call("gemma_local", "gemma-local", "c1"), call("gemma_local", "gemma-local", "c2")];
+    const { gateway, db, anthropic, local } = build({
+      local: { withStream: true, script: (_r, n) => (n <= 2 ? { text: "", tool_calls: [calls[n - 1]!], finish_reason: "tool_use" } : {}) }
+    });
+    db.spend.set("t1", SPENT.exhausted);
+    const events: string[] = [];
+    const result = await gateway.completeWithTools(ownerTurn(), { tools: [ECHO_TOOL], executor: executor(), localStickiness: true, maxRounds: 6, onEvent: (e) => events.push(e.type) });
+    expect(result.provider).toBe("gemma_local");
+    expect(used(local)).toBe(3);
+    expect(used(anthropic)).toBe(0);
+    expect(result.metadata?.["claude_budget"]).toMatchObject(CLOSED);
+  });
+
+  it("jobb (uten stickiness): runde 2 bærer lukkingen selv - sluttresultatet har den som før, og det er den samme begrunnelsen", async () => {
+    const { gateway, db } = build({ local: { script: toolThenAnswer("gemma_local", "gemma-local") } });
+    db.spend.set("t1", SPENT.exhausted);
+    const result = await gateway.completeWithTools(ownerTask(), { tools: [ECHO_TOOL], executor: executor() });
+    expect(result.metadata?.["claude_budget"]).toMatchObject({ ...CLOSED, tier: "important" });
+    expect(db.audit.map((a) => a.reason)).toEqual(["exhausted_closed", "exhausted_closed"]);
+  });
+
+  it("utsatt (stramt, BAKGRUNN) følger samme regel: sluttresultatet bærer `defer` med begrunnelsen fra runde 1", async () => {
+    const { gateway, db } = build({ local: { script: toolThenAnswer("gemma_local", "gemma-local") } });
+    db.spend.set("t1", SPENT.tight);
+    const result = await gateway.completeWithTools(background(), { tools: [ECHO_TOOL], executor: executor(), localStickiness: true });
+    expect(result.provider).toBe("gemma_local");
+    expect(result.metadata?.["claude_budget"]).toMatchObject({ action: "defer", constraint: "closed", reason: "tight_background_deferred", tier: "background" });
+  });
+
+  it("en ÅPEN tur får aldri en lukking påført: Anthropic betjente begge rundene, sluttresultatet bærer den åpne beslutningen (og stickiness ville ikke endret det)", async () => {
+    const { gateway, db, anthropic } = build({ anthropic: { script: toolThenAnswer("anthropic", "claude-sonnet-5-5") } });
+    db.spend.set("t1", SPENT.tight);
+    const result = await gateway.completeWithTools(ownerTurn(), { tools: [ECHO_TOOL], executor: executor(), localStickiness: true });
+    expect(result.provider).toBe("anthropic");
+    expect(used(anthropic)).toBe(2);
+    expect(result.metadata?.["claude_budget"]).toMatchObject({ constraint: "open", action: "allow" });
+    expect(result.metadata?.["claude_budget"]).not.toMatchObject({ constraint: "closed" });
+  });
+
+  it("kreditten stengte IKKE kjeden (Anthropic er ikke konfigurert): ingen `claude_budget` og ingen lesing - merknaden «Claude-kreditten» ville vært usann", async () => {
+    const { gateway, db } = build({ providers: ["gemma_local"], local: { script: toolThenAnswer("gemma_local", "gemma-local") } });
+    db.spend.set("t1", SPENT.exhausted);
+    const result = await gateway.completeWithTools(ownerTurn(), { tools: [ECHO_TOOL], executor: executor(), localStickiness: true });
+    expect(result.provider).toBe("gemma_local");
+    expect("claude_budget" in (result.metadata ?? {})).toBe(false);
+    expect(db.spendReads).toBe(0);
+  });
+
+  it("flagg AV: sluttresultatet har ingen `claude_budget`-nøkkel og ingen revisjon/lesing - uendret fra main", async () => {
+    const { gateway, db } = build({ flag: false, providers: ["gemma_local"], local: { script: toolThenAnswer("gemma_local", "gemma-local") } });
+    db.spend.set("t1", SPENT.exhausted);
+    const result = await gateway.completeWithTools(ownerTurn(), { tools: [ECHO_TOOL], executor: executor(), localStickiness: true });
+    expect(result.provider).toBe("gemma_local");
+    expect("claude_budget" in (result.metadata ?? {})).toBe(false);
+    expect(result.metadata?.["tool_rounds"]).toBe(1);
+    expect(db.spendReads).toBe(0);
+    expect(db.audit).toHaveLength(0);
+  });
+});
+
+describe("N1 (re-review): rutefeilen fra en stengt preferanseliste bærer lukkingen (`claudeBudgetClosureOf`) - kallere med lokal omkjøring (delegerte skyrute-jobber) kan si fra, uten at feilteksten endres", () => {
+  const preferExhausted = (extra: Partial<CompleteInput> = {}): CompleteInput => ownerTask({ providerPreference: ["anthropic"], ...extra });
+
+  it("hard preferanse [anthropic] ved hard stopp: den vanlige rutefeilen (`provider_preference_exhausted`, uendret tekst) - og lukkingen kan leses av feilen", async () => {
+    const { gateway, db, anthropic } = build();
+    db.spend.set("t1", SPENT.exhausted);
+    const err = await gateway.completeWithTools(preferExhausted(), { tools: [ECHO_TOOL], executor: executor() }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NoEligibleProviderError);
+    expect((err as Error).message).toContain("provider_preference_exhausted");
+    expect(claudeBudgetClosureOf(err)).toMatchObject({ action: "deny", constraint: "closed", reason: "exhausted_closed", tier: "important", window_end_ms: expect.any(Number) });
+    expect(anthropic.calls).toHaveLength(0);
+    // `complete` og `stream` gir samme feil med samme lukking
+    const viaComplete = await gateway.complete(preferExhausted()).catch((e: unknown) => e);
+    expect(claudeBudgetClosureOf(viaComplete)).toMatchObject({ action: "deny", constraint: "closed" });
+  });
+
+  it("lukkingen er en KOPI av kategoriene (aldri noe som kan åpne noe): å endre det som leses påvirker ikke en senere lesing", async () => {
+    const { gateway, db } = build();
+    db.spend.set("t1", SPENT.exhausted);
+    const err = await gateway.complete(preferExhausted()).catch((e: unknown) => e);
+    const first = claudeBudgetClosureOf(err) as Record<string, unknown>;
+    expect(first["constraint"]).toBe("closed");
+    expect(Object.keys(first).sort()).toEqual(["action", "level", "reason", "constraint", "tier", "window_end_ms"].sort());
+  });
+
+  it("uskyldige og ukjente feil har ingen lukking: Anthropic er ikke konfigurert (rutefeil uten kreditt-årsak), en egenprodusert feil med samme tekst, og alt som ikke er en feil", async () => {
+    const { gateway, db } = build({ providers: ["gemma_local"] });
+    db.spend.set("t1", SPENT.exhausted);
+    const err = await gateway.complete(preferExhausted()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NoEligibleProviderError);
+    expect(claudeBudgetClosureOf(err)).toBeUndefined();
+    const forged = new NoEligibleProviderError("provider_preference_exhausted: ingen av [anthropic] er konfigurert/kvalifisert (anthropic:budget_blocked)");
+    expect(claudeBudgetClosureOf(forged)).toBeUndefined();
+    for (const value of [undefined, null, "x", 5, true, {}, [], new Error("x")]) expect(claudeBudgetClosureOf(value)).toBeUndefined();
+  });
+
+  it("eksplisitt `provider: anthropic` ved hard stopp gir den tydelige norske feilen (uendret) uten lukking - kun preferanselisten får lukkingen (den har en lokal omkjøring hos kallerne)", async () => {
+    const { gateway, db } = build();
+    db.spend.set("t1", SPENT.exhausted);
+    const err = await gateway.complete(ownerTurn({ provider: "anthropic" })).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ClaudeBudgetBlockedError);
+    expect(claudeBudgetClosureOf(err)).toBeUndefined();
+  });
+
+  it("flagg AV: en preferanseliste som ikke kan oppfylles gir den vanlige rutefeilen uten lukking", async () => {
+    const { gateway, db } = build({ flag: false, providers: ["gemma_local"] });
+    db.spend.set("t1", SPENT.exhausted);
+    const err = await gateway.complete(preferExhausted()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NoEligibleProviderError);
+    expect(claudeBudgetClosureOf(err)).toBeUndefined();
+  });
+});
+
+describe("N4 (re-review): klokka kan gå bakover (NTP-steg, manuell justering) - verken bufferen eller den negative bufferen blir stående", () => {
+  it("bufret lesing og klokka går bakover: bufferen fra «fremtiden» brukes ikke - ny lesing, og beslutningen ser det nye forbruket (fremover innenfor levetiden gjelder bufferen som før)", async () => {
+    const { gateway, db, clock } = build();
+    db.spend.set("t1", SPENT.on_pace);
+    expect((await gateway.complete(ownerTurn())).provider).toBe("anthropic");
+    expect(db.spendReads).toBe(1);
+    clock.now += 1_000; // kontroll: fremover innenfor 3 s - bufferen gjelder
+    expect((await gateway.complete(ownerTurn())).provider).toBe("anthropic");
+    expect(db.spendReads).toBe(1);
+    db.spend.set("t1", SPENT.exhausted); // en annen prosess brukte opp kreditten
+    clock.now -= 2_000; // nå 1 s FØR lesingen startet
+    expect((await gateway.complete(ownerTurn())).provider).toBe("gemma_local");
+    expect(db.spendReads).toBe(2);
+  });
+
+  it("klokka en time tilbake: en lesing bufret «i fremtiden» blir ikke stående i en time", async () => {
+    const { gateway, db, clock } = build();
+    db.spend.set("t1", SPENT.on_pace);
+    await gateway.complete(ownerTurn());
+    db.spend.set("t1", SPENT.exhausted);
+    clock.now -= 3_600_000;
+    expect((await gateway.complete(ownerTurn())).provider).toBe("gemma_local");
+    expect(db.spendReads).toBe(2);
+  });
+
+  it("negativ buffer og klokka går bakover: lesingen prøves på nytt i stedet for å stå stengt til klokka har tatt det igjen (fremover innenfor 30 s er negativ buffer som før)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { gateway, db, clock } = build();
+    db.spendReadError = new Error("nede");
+    await gateway.complete(background());
+    expect(db.spendReads).toBe(1);
+    clock.now += 10_000; // kontroll: fremover innenfor 30 s - fortsatt negativ buffer, ingen ny lesing
+    await gateway.complete(background());
+    expect(db.spendReads).toBe(1);
+    db.spendReadError = null;
+    db.spend.set("t1", SPENT.tight);
+    clock.now -= 3_600_000; // klokka stilles en time tilbake: uten vernet ville lesingen stått stengt i over en time
+    const r = await gateway.complete(background());
+    expect(db.spendReads).toBe(2);
+    expect(r.provider).toBe("gemma_local");
+    expect(db.audit.at(-1)?.reason).toBe("tight_background_deferred"); // en vanlig beslutning fra den leste verdien, ikke fail-safe
+    vi.restoreAllMocks();
+  });
+
+  it("klokka ETT millisekund tilbake etter en feil: negativ buffer droppes også da (grensen er ikke «mer enn 30 s»)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { gateway, db, clock } = build();
+    db.spendReadError = new Error("nede");
+    await gateway.complete(background());
+    db.spendReadError = null;
+    clock.now -= 1;
+    await gateway.complete(background());
+    expect(db.spendReads).toBe(2);
+    vi.restoreAllMocks();
+  });
+});
+
+describe("N4 (re-review): en lukket runde leser ikke forbruket - runde 2+ av en tur kreditten stengte er ingen ny vurdering", () => {
+  it("uten buffer (hver beslutning ville lest): ÉN lesing for hele turen, og begge rundene har en revisjonsrad med samme begrunnelse", async () => {
+    const { gateway, db, anthropic } = build({ spendCacheTtlMs: 0, local: { script: toolThenAnswer("gemma_local", "gemma-local") } });
+    db.spend.set("t1", SPENT.exhausted);
+    const result = await gateway.completeWithTools(ownerTurn(), { tools: [ECHO_TOOL], executor: executor() });
+    expect(result.provider).toBe("gemma_local");
+    expect(anthropic.calls.length + anthropic.streamCalls.length).toBe(0);
+    expect(db.spendReads).toBe(1);
+    expect(db.audit.map((a) => a.reason)).toEqual(["exhausted_closed", "exhausted_closed"]);
+    expect(db.audit[1]?.payload["round_rule"]).toBe("earlier_round_closed");
+  });
+
+  it("kontroll: to UAVHENGIGE kall uten buffer leser hver sin gang (testen over måler altså faktisk lesinger)", async () => {
+    const { gateway, db } = build({ spendCacheTtlMs: 0 });
+    db.spend.set("t1", SPENT.exhausted);
+    await gateway.complete(ownerTurn());
+    await gateway.complete(ownerTurn());
+    expect(db.spendReads).toBe(2);
+  });
+});
+
+describe("N5 (re-review): tierFor slår kun opp EGNE nøkler - et formål som `constructor`/`__proto__` gir aldri en funksjon fra prototypen", () => {
+  const PROTOTYPE_KEYS = ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf", "isPrototypeOf", "banan", ""];
+
+  it("alle opphav × prototypenøkler gir en gyldig tier, lik den formålsløse (UNSPECIFIED) raden - uendret for vanlige ukjente strenger", async () => {
+    const { tierFor, DEFAULT_TIER_TABLE, BUDGET_ORIGINS, BUDGET_TIERS } = await import("../src/index.ts");
+    for (const origin of BUDGET_ORIGINS) {
+      for (const key of PROTOTYPE_KEYS) {
+        const tier = tierFor(DEFAULT_TIER_TABLE, origin, key);
+        expect(BUDGET_TIERS, `${origin}/${key}`).toContain(tier);
+        expect(tier, `${origin}/${key}`).toBe(tierFor(DEFAULT_TIER_TABLE, origin, undefined));
+      }
+    }
+  });
+
+  it("en tabell uten UNSPECIFIED-rad (eller et ukjent opphav) gir den laveste tieren, aldri en prototypefunksjon eller en feil", async () => {
+    const { tierFor } = await import("../src/index.ts");
+    const sparse = { owner_turn: { CHAT: "essential" }, owner_task: {}, background: {} } as never;
+    expect(tierFor(sparse, "owner_turn", "constructor")).toBe("background");
+    expect(tierFor(sparse, "owner_turn", "CHAT")).toBe("essential");
+    expect(tierFor(sparse, "owner_task", "toString")).toBe("background");
+    expect(tierFor(sparse, "constructor" as never, "CHAT")).toBe("background");
+    expect(tierFor(sparse, "__proto__" as never, undefined)).toBe("background");
+  });
+
+  it("begin() med `purpose: constructor` gir en vanlig beslutning etter UNSPECIFIED-raden (eiertur på tempo: ESSENSIELL, tillatt) - aldri en tier som er en funksjon", async () => {
+    const { enforcer } = build();
+    const { DEFAULT_PRICING } = await import("../src/index.ts");
+    const { db } = { db: undefined };
+    void db;
+    const ticket = await enforcer!.begin({ tenant_id: "t1", session_id: "s1", purpose: "constructor" as never, request: REQ, pricing: DEFAULT_PRICING, catalog: [], trace_id: "x", started: 0 });
+    expect(ticket.verdict.tier).toBe("essential");
+    expect(ticket.verdict.action).toBe("allow");
+    ticket.release();
   });
 });

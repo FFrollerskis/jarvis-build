@@ -380,6 +380,21 @@ interface FailedCallBilling {
 /** WP-B4 (L2): feilklassene der Anthropic kan ha fakturert det som var gjort (avbrutt/utløpt/brutt midt i/ugyldig svar etter generering). Andre feil (auth, kvote, dårlig forespørsel, serverfeil uten tekst) faktureres ikke. */
 const BILLABLE_FAILURE_KINDS: ReadonlySet<string> = new Set(["cancelled", "timeout", "stream_interrupted", "invalid_tool_call", "invalid_response"]);
 
+/**
+ * WP-B4 (N1): rutefeil (`provider_preference_exhausted`) som ble til FORDI Claude-kreditten stengte Anthropic for en hard preferanseliste, nøklet på selve feilobjektet. Kallere som svarer på den feilen med en lokal omkjøring
+ * uten egen kredittbeslutning (delegerte skyrute-jobber: omkjøringen er `paid_models_allowed: false`) kan da fortsatt si fra til eieren - se `claudeBudgetClosureOf`. Svakt referert og privat: ingen kaller kan legge noe inn,
+ * så en feil som bare HAR samme tekst (eller en forfalsket) ikke bærer noe. Tom uten Claude-kreditten.
+ */
+const claudeBudgetClosures = new WeakMap<object, Readonly<Record<string, string | number | boolean>>>();
+
+/**
+ * WP-B4 (N1): lukkingen (kun kategorier, samme form som `ModelResult.metadata.claude_budget`) en rutefeil ble til av, ellers `undefined` (flagget AV, en annen årsak, eller en feil gatewayen ikke har merket). Kun for å SI FRA:
+ * lukkingen åpner aldri noe og endrer ikke feilteksten - den lar en lokal omkjøring legge `claude_budget` på resultatet sitt slik at flatene viser «Claude-kreditten: ...» i stedet for å tie.
+ */
+export function claudeBudgetClosureOf(err: unknown): Readonly<Record<string, string | number | boolean>> | undefined {
+  return typeof err === "object" && err !== null ? claudeBudgetClosures.get(err) : undefined;
+}
+
 /** Gatewayens syn på én leverandør i denne prosessen (ruteren ser kun `configured`/`paused`/`budget_blocked`/`model`). */
 type RuntimeRow = { configured: boolean; available: boolean; paused: boolean; model: string; budget_blocked?: boolean };
 
@@ -661,7 +676,11 @@ export class ModelGateway {
     }
     const preferenceList = input.provider === undefined && (input.providerPreference?.length ?? 0) > 0;
     // L7: en hard preferanseliste gir rutefeilen kallerne svarer på med en ny kjøring (samtalemotorens D-354-fallback): den kjøringen er SAMME avviste kall og skal ikke telles en gang til.
-    if (preferenceList) pacing.expectRetry();
+    if (preferenceList) {
+      pacing.expectRetry();
+      // N1: feilen bærer også HVORFOR (kreditten), for omkjøringer som ikke selv tar en kredittbeslutning (jobbens lokale reserve har `paid_models_allowed: false`) - ellers ville jobben svart lokalt uten en eneste merknad.
+      claudeBudgetClosures.set(err, pacing.resultMetadata());
+    }
     return preferenceList ? err : pacing.blockedError();
   }
 
@@ -1207,6 +1226,10 @@ export class ModelGateway {
     }
     // `served_providers` settes kun når FLERE leverandører betjente turen (vanlig tur: én leverandør, metadata uendret).
     result.metadata = { ...result.metadata, tool_rounds: exchanges.length, ...(servedProviders.length > 1 ? { served_providers: servedProviders } : {}) };
+    // WP-B4 (N1): kreditten stengte Anthropic i en runde, men siste runde bærer ingen egen beslutning (en tur som har vært lokal er låst lokalt med `localStickiness`: ingen billett, ingen `claude_budget`). Da får SLUTTRESULTATET
+    // lukkingen fra runden som ble stengt - ellers sa flatene «Reservemodell brukt: anthropic var ikke tilgjengelig» (usant: Anthropic var tilgjengelig, men stengt av kreditten) eller ingenting. `closedRound` finnes kun når
+    // en av gatewayens egne runder ble stengt (aldri fra innholdet i en forespørsel) - uten Claude-kreditten er den alltid `undefined` og metadata er uendret.
+    if (closedRound !== undefined && result.metadata["claude_budget"] === undefined) result.metadata = { ...result.metadata, claude_budget: closedRound.resultMetadata() };
     return result;
   }
 

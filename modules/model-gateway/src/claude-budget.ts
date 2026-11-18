@@ -234,9 +234,15 @@ export function deriveBudgetOrigin(input: { budget_origin?: unknown; task_id?: s
   return "background";
 }
 
+/**
+ * Tieren for opphav × formål. Slår kun opp EGNE nøkler (N5): `row["constructor"]` ga før en funksjon fra `Object.prototype` i stedet for en tier. Et formål tabellen ikke har (også `constructor`/`__proto__`) gir
+ * UNSPECIFIED-raden - samme som før for vanlige ukjente strenger - og mangler den (eller opphavet), den laveste tieren (BAKGRUNN). Alle produksjonskallere validerer formålet mot `ModelPurposeSchema` uansett.
+ */
 export function tierFor(table: TierTable, origin: BudgetOrigin, purpose: ModelPurpose | string | undefined): BudgetTier {
-  const row = table[origin];
-  return row[purpose ?? UNSPECIFIED_PURPOSE] ?? row[UNSPECIFIED_PURPOSE] ?? "background";
+  const row = Object.hasOwn(table, origin) ? table[origin] : undefined;
+  if (row === undefined) return "background";
+  const own = (key: string): BudgetTier | undefined => (Object.hasOwn(row, key) ? row[key] : undefined);
+  return own(purpose ?? UNSPECIFIED_PURPOSE) ?? own(UNSPECIFIED_PURPOSE) ?? "background";
 }
 
 /** Tiertabellen som rader (for runbook/kontrollsenter): ett formål per rad, tier per opphav. */
