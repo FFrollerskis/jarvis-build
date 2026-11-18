@@ -103,6 +103,7 @@ import { OperationsService, OperationsTransport } from "@jarvis/operations";
 import { LocationService, runLocationRetentionSweepForAllTenants } from "@jarvis/location";
 import { HealthService, runHealthRetentionSweepForAllTenants } from "@jarvis/health";
 import { VisionService, runVisionRetentionSweepForAllTenants } from "@jarvis/vision";
+import { buildVisionRuntime, visionAdapterFromEnv } from "./vision-runtime.ts";
 import {
   DomainPauseRegistry, SituationEngine, SituationsTransport, assertSituationSweepHealthy, runSituationSweepForAllTenants,
   situationsToolDefinitions
@@ -324,6 +325,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // JARVIS_CLAUDE_BUDGET_* KASTER her og stopper oppstarten (buildDeps().catch → exit 1) - aldri en stille standard. Samme parsing og samme enforcer-type i worker-main.ts.
   const claudeBudgetConfig = claudeBudgetConfigFromEnv(process.env);
   const claudeBudget = claudeBudgetConfig === null ? undefined : new ClaudeBudgetEnforcer({ config: claudeBudgetConfig, pool, trace, actor_person_id: owner.owner_person_id, owner_tenant_id: owner.tenant_id });
+  // WP-G3 (D-465): `local_vision` (lokal bildeklassifisering av kamerabilder) registreres KUN når JARVIS_VISION_ENABLED=on og JARVIS_VISION_CLASSIFIER=on - ellers `null` (ingenting registreres, identisk med main).
+  // En ikke-lokal/manglende JARVIS_VISION_LOCAL_URL KASTER her og stopper oppstarten (kamerabilder forlater aldri maskinen).
+  const visionAdapter = visionAdapterFromEnv(process.env);
   const gateway = new ModelGateway({
     pool,
     trace,
@@ -363,7 +367,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       ),
       new KimiAdapter(),
       new HermesAdapter(),
-      new OllamaAdapter()
+      new OllamaAdapter(),
+      ...(visionAdapter !== null ? [visionAdapter] : [])
       // D-106 HOST-FIX (produksjonsherding, Defekt E): `ScriptedAdapter` er ALDRI
       // registrert her lenger - live host-kjøring viste at den, som en ordinær
       // "local"-profilert provider, kunne bli et LEGITIMT AUTO-rutingvalg under
@@ -1455,6 +1460,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // `buildSystemPrompt()`/`loadPersonality()`.
     personality: loadPersonalityConfig
   });
+  // WP-G3 (D-465): UA-9-kjøretiden (pipeline, HA-poller, `/vision/*`-rutene, vedlikehold). `null` (ingenting bygget) uten JARVIS_VISION_ENABLED=on. Se vision-runtime.ts for flaggene.
+  const visionRuntime = buildVisionRuntime({
+    pool, env: process.env, vision: visionService, gateway, memoryEmbedding, devices: deviceRegistry, secrets: readSecretProvider,
+    ownerControls: { killSwitch, controls: ownerControls }
+  });
   const deps: ApiDeps = {
     // D-393 (JARVIS-026): `/health` svarer 503 når databasen ikke svarer (tidligere konstant «ok»).
     readiness: makeReadiness({ database: () => pool.query("SELECT 1") }),
@@ -1501,6 +1511,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     chatJobs,
     // WP-D2 (JARVIS-044/Q-48): eier-ruten for å opprette en bedrifts-tenant er AV som standard - kun eksakt `true` åpner den (ellers 404). Ingenting provisjoneres automatisk.
     ...(process.env["JARVIS_BUSINESS_TENANT_PROVISIONING"] === "true" ? { businessTenants: { pool } } : {}),
+    // WP-G3 (D-465): `/vision/*` finnes KUN med JARVIS_VISION_ENABLED=on (ellers 404, identisk med main).
+    ...(visionRuntime !== null ? { vision: visionRuntime.api } : {}),
     // WP-D2 (UA-3 «churn/product usage»): produktbruk-webhooken er AV som standard - ruten finnes først når eieren har satt JARVIS_PRODUCT_USAGE_TENANT_ID (en bedrifts-tenant;
     // tjenesten avviser alt annet). Hemmeligheten leses ved HVERT kall via den delte kjeden (Infisical-primær, .env-fallback), slik at rotasjon gjelder umiddelbart; er den
     // borte eller kortere enn 32 tegn svarer ruten 503 (fail closed).
@@ -1879,6 +1891,17 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "vision-retention-sweep", envHour("JARVIS_VISION_RETENTION_SWEEP_HOUR", 2)
   ).start(() => runVisionRetentionSweepForAllTenants(pool, visionService).then((summary) => assertNoSweepFailures("vision-retention-sweep", summary.failed)));
+  // WP-G3 (D-465): vedlikehold av bilder/inventar/vektorer/gravsteiner/opptaksforespørsler - KUN med JARVIS_VISION_ENABLED=on (ellers ingen jobb, identisk med main). Daglig full kjøring (reboot-durable,
+  // samme mekanisme som over) + en hyppig LETT kjøring (gravsteiner, pending, utløp) slik at et slettet bilde forsvinner fra disken innen minutter.
+  if (visionRuntime !== null) {
+    new DailyScheduler(
+      pool, "vision-maintenance-sweep", envHour("JARVIS_VISION_MAINTENANCE_HOUR", 3)
+    ).start(() => visionRuntime.fullMaintenance().then((summary) => assertNoSweepFailures("vision-maintenance-sweep", summary.failed)));
+    setInterval(
+      () => void visionRuntime.lightMaintenance().catch((err: unknown) => console.error(JSON.stringify({ msg: "vision_light_maintenance_failed", error: err instanceof Error ? err.message.slice(0, 80) : "unknown" }))),
+      envInt("JARVIS_VISION_MAINTENANCE_INTERVAL_MINUTES", 15, { min: 1, max: 1440 }) * 60_000
+    ).unref();
+  }
   // D-286 (Tobias direkte i chat, "alle" - alle tre foreslåtte tilnærminger
   // til ubegrenset minnevekst): periodisk konsolidering av gamle EPISODISKE
   // samtale-minner til dagssammendrag - SAMME reboot-durable

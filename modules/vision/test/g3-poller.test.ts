@@ -19,7 +19,6 @@ let vision: VisionService;
 let pipeline: VisionIngestPipeline;
 let source: EventPerCameraSource;
 let blockedReason: string | null = null;
-let guardCalls = 0;
 let counter = 0;
 
 /** Leverer ÉN fersk hendelse per kamera polleren gir den (og et bilde ved forespørsel). */
@@ -42,7 +41,6 @@ class EventPerCameraSource implements VisionSource {
 
 const guard: VisionPollerGuard = {
   blocked: async () => {
-    guardCalls += 1;
     return blockedReason;
   }
 };
@@ -71,7 +69,6 @@ afterAll(async () => {
 
 beforeEach(async () => {
   blockedReason = null;
-  guardCalls = 0;
   source = new EventPerCameraSource();
   await db.admin.query(`DELETE FROM vision_event_observations`);
   await db.admin.query(`DELETE FROM vision_cameras`);

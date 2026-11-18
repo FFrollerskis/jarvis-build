@@ -276,7 +276,9 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: AbortSignal.timeout(request.timeoutMs ?? this.timeoutMs),
-        body: JSON.stringify(this.buildBody(request, false))
+        body: JSON.stringify(this.buildBody(request, false)),
+        // WP-G3: den dedikerte visjonsidentiteten følger ALDRI en redirect (en 307/308 ville sendt kamerabildene videre til et annet mål); øvrige identiteter er uendret.
+        ...(this.vision ? { redirect: "error" as const } : {})
       });
     } catch (err) {
       throw classifyFetchError(this.name, err);
@@ -346,7 +348,8 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-        body: JSON.stringify(this.buildBody(request, true))
+        body: JSON.stringify(this.buildBody(request, true)),
+        ...(this.vision ? { redirect: "error" as const } : {})
       });
     } catch (err) {
       if (signal?.aborted) throw new ProviderError(this.name, "cancelled", `${this.name}_cancelled`);

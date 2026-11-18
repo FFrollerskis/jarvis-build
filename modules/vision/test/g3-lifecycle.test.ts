@@ -34,7 +34,6 @@ let snapshots: VisionSnapshotService;
 let inventory: VisionInventoryService;
 let embeddings: VisionEmbeddingService;
 let camera: VisionCamera;
-let pipeline: VisionIngestPipeline;
 let ctx: IngestContext;
 let n = 0;
 
@@ -83,7 +82,6 @@ beforeAll(async () => {
   const room = (await vision.createRoom(T.tenant, "home", { person_id: T.owner, name: "Stua" })).room_id;
   camera = await cameras.registerCamera(T.tenant, "home", { person_id: T.owner, label: "Inngang", source_type: "home_assistant", source_ref: "camera.inngang", trigger_entities: ["binary_sensor.x"], room_id: room, zone_kind: "home", route_policy: "store_snapshot" });
   ctx = { tenant_id: T.tenant, memory_space: "home", person_id: T.owner, task_id: "task-life" };
-  pipeline = new VisionIngestPipeline({ pool: db.app, vision, snapshots, enabled: true, storeSnapshots: true });
 }, 240_000);
 
 afterAll(async () => {

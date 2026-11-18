@@ -35,7 +35,7 @@ export class FakeHaServer {
   private constructor(private readonly server: Server, readonly base: string) {}
 
   static async start(): Promise<FakeHaServer> {
-    let self: FakeHaServer | undefined;
+    const holder: { self?: FakeHaServer } = {};
     const server = createServer((req, res) => {
       const recorded: RecordedRequest = {
         method: req.method ?? "",
@@ -43,9 +43,9 @@ export class FakeHaServer {
         authorization: req.headers["authorization"] as string | undefined,
         accept: req.headers["accept"] as string | undefined
       };
-      self?.requests.push(recorded);
-      self?.allRequests.push(recorded);
-      const handler = self?.routes.get(req.url ?? "");
+      holder.self?.requests.push(recorded);
+      holder.self?.allRequests.push(recorded);
+      const handler = holder.self?.routes.get(req.url ?? "");
       if (handler === undefined) {
         res.writeHead(404, { "content-type": "application/json" });
         res.end(JSON.stringify({ message: "Entity not found." }));
@@ -55,8 +55,8 @@ export class FakeHaServer {
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as AddressInfo).port;
-    self = new FakeHaServer(server, `http://127.0.0.1:${port}`);
-    return self;
+    holder.self = new FakeHaServer(server, `http://127.0.0.1:${port}`);
+    return holder.self;
   }
 
   reset(): void {

@@ -114,6 +114,48 @@ describe("LocalOpenAiCompatibleAdapter - { vision: true } (local_vision)", () =>
     await vision().complete({ messages: [message(TEXT, { type: "text", text: "mer" })] });
     expect((captured?.["messages"] as Array<{ content: unknown }>)[0]?.content).toBe("beskriv bildet\nmer");
   });
+
+  it("følger ALDRI en redirect (redirect: «error») - en 307/308 ville sendt kamerabildene videre; øvrige identiteter sender ingen redirect-policy (uendret)", async () => {
+    const policies: Array<RequestInit["redirect"]> = [];
+    global.fetch = (async (_input: string | URL, init?: RequestInit) => {
+      policies.push(init?.redirect);
+      return jsonResponse(200, { choices: [{ message: { content: "{\"detections\":[]}" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
+    }) as unknown as typeof fetch;
+    await vision().complete({ messages: [message(TEXT, RESTRICTED_IMAGE)] });
+    await new LocalOpenAiCompatibleAdapter("http://127.0.0.1:11434/v1", "m", 5_000, "gemma_local").complete({ messages: [message(TEXT)] });
+    await new LocalOpenAiCompatibleAdapter("http://127.0.0.1:11434/v1", "m", 5_000).complete({ messages: [message(TEXT)] });
+    expect(policies).toEqual(["error", undefined, undefined]);
+  });
+
+  it("en server som svarer med redirect gir en klassifisert leverandørfeil og ingen oppfølgingsforespørsel (ekte HTTP mot lokal server)", async () => {
+    global.fetch = originalFetch; // ekte fetch mot to ekte lokale servere
+    const { createServer } = await import("node:http");
+    const hits: string[] = [];
+    const target = createServer((req, res) => {
+      hits.push(req.url ?? "");
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end("{}");
+    });
+    await new Promise<void>((resolve) => target.listen(0, "127.0.0.1", resolve));
+    const targetPort = (target.address() as { port: number }).port;
+    const redirector = createServer((_req, res) => {
+      res.writeHead(307, { location: `http://127.0.0.1:${targetPort}/exfil` });
+      res.end();
+    });
+    await new Promise<void>((resolve) => redirector.listen(0, "127.0.0.1", resolve));
+    const port = (redirector.address() as { port: number }).port;
+    try {
+      const adapter = new LocalOpenAiCompatibleAdapter(`http://127.0.0.1:${port}`, "vl", 5_000, "local_vision", "default", { vision: true });
+      await expect(adapter.complete({ messages: [message(TEXT, RESTRICTED_IMAGE)] })).rejects.toBeInstanceOf(ProviderError);
+      await expect(adapter.stream({ messages: [message(TEXT, RESTRICTED_IMAGE)] }, () => undefined)).rejects.toBeInstanceOf(ProviderError);
+      expect(hits).toEqual([]); // målet fikk aldri en forespørsel (heller ikke bildene)
+    } finally {
+      redirector.closeAllConnections();
+      target.closeAllConnections();
+      await new Promise<void>((resolve) => redirector.close(() => resolve()));
+      await new Promise<void>((resolve) => target.close(() => resolve()));
+    }
+  });
 });
 
 describe("skyadaptere med bildestøtte nekter BEGRENSEDE kamerabilder (forsvar i dybden)", () => {

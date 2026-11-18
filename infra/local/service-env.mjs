@@ -393,7 +393,12 @@ export const SERVICE_ENV = {
     // (tom/manglende = ingen verktøy, ingen rute). Api-only (bakgrunnsflaten er read-only). Ingen hemmeligheter - kun flagg og eksakte, ikke-hemmelige id-er; credentials er vault-referansene i CONNECTOR_ENV.
     "JARVIS_GROWTH_WRITE_PLATFORMS", "JARVIS_GROWTH_WRITE_TARGETS", "JARVIS_GROWTH_CREATIVE_URL_HOSTS", "JARVIS_GROWTH_EXPERIMENTS",
     // WP-B3 (D-475, EV-22/EV-23): tilleggssenteret Evolusjon og eierens avgjørelse om et endringsforslag (kun en registrering, ingen virkning). Begge AV som standard; kun eksakt «on», api-only, ingen hemmeligheter.
-    "JARVIS_CONTROL_CENTER_EVOLUTION", "JARVIS_CONTROL_EVOLUTION_APPROVAL"],
+    "JARVIS_CONTROL_CENTER_EVOLUTION", "JARVIS_CONTROL_EVOLUTION_APPROVAL",
+    // WP-G3 (D-465, UA-9): kamerabilder (hendelses-øyeblikksbilder), lokal klassifisering, bilde-lagring, HA-poller og iPhone-opptak. ALLE AV som standard (kun eksakt «on» slår dem på; JARVIS_VISION_ENABLED er hovedbryter),
+    // api-only (bakgrunnsflaten bruker dem ikke). Ingen hemmeligheter - kun flagg, tall, en lokal modell-URL og en lagringsmappe. HA-credentials er de EKSISTERENDE JARVIS_HA_BASE_URL/JARVIS_HA_TOKEN (vault-kjeden).
+    // JARVIS_VISION_LOCAL_URL MÅ peke til en lokal/privat adresse (kamerabilder forlater aldri maskinen) - validert ved oppstart. JARVIS_VISION_RETENTION_SWEEP_HOUR er videresendt fra før (D-153).
+    "JARVIS_VISION_ENABLED", "JARVIS_VISION_CLASSIFIER", "JARVIS_VISION_LOCAL_URL", "JARVIS_VISION_LOCAL_MODEL", "JARVIS_VISION_MODEL_TIMEOUT_MS", "JARVIS_VISION_STORE_SNAPSHOTS", "JARVIS_VISION_STORAGE_DIR",
+    "JARVIS_VISION_HA_POLL", "JARVIS_VISION_POLL_INTERVAL_SECONDS", "JARVIS_VISION_MAINTENANCE_INTERVAL_MINUTES", "JARVIS_VISION_MAINTENANCE_HOUR"],
   worker: [...CORE_ENV.filter((n) => !WORKER_EXCLUDES.has(n)), ...MODEL_ENV, ...WORKER_CONNECTOR_ENV, "LANGFUSE_BASE_URL", "JARVIS_TRACE_FILE", "JARVIS_CLAUDE_BIN", "JARVIS_JOB_RUNNER", "JARVIS_JOB_IMAGE", "JARVIS_JOB_NETWORK", "JARVIS_JOB_EGRESS_PROXY",
     // WP-C1 (D-32 / Q-45a): vertsside job-runner (JARVIS_JOB_RUNNER=host). Socket-katalogen og tokenfilen monteres inn via infra/job-runner/docker-compose.job-runner.yml
     // (valgfri override) - uten den, og med tomme verdier her, feiler hver kodejobb lukket som før.
