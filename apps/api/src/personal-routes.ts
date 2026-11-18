@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { FamilyError, type FamilyActor, type FamilyDelegationScope, type FamilyErrorCode, type FamilyService, type FamilyShareCategory, type InvitableRole } from "@jarvis/context";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
+import { HealthIntakeError, HealthRetentionPolicyRequiredError, type HealthIntakeService } from "@jarvis/health";
 import type {
   ActionDomain, ActionStatus, ExecutePersonalActionInput, ExecutePersonalActionResult, Params, PersonalActionExecutorDeps
 } from "@jarvis/tool-gateway";
@@ -30,10 +31,15 @@ export interface PersonalFamilyDeps {
   ownerPersonId: string;
 }
 
+export interface PersonalHealthDeps {
+  intake: Pick<HealthIntakeService, "ingestBatch">;
+}
+
 /** Rute-avhengigheter per familie. En familie som ikke er slått på er `undefined` (og rutene finnes ikke). */
 export interface PersonalApiDeps {
   actions?: PersonalActionsDeps;
   family?: PersonalFamilyDeps;
+  health?: PersonalHealthDeps;
 }
 
 export interface PersonalRouteContext {
@@ -72,7 +78,42 @@ export async function handlePersonalRoute(ctx: PersonalRouteContext): Promise<bo
   if (actions !== undefined && url.pathname.startsWith("/personal/actions/")) return handleActionRoute(ctx, actions);
   const family = ctx.deps.family;
   if (family !== undefined && url.pathname.startsWith("/personal/family/")) return handleFamilyRoute(ctx, family);
+  const health = ctx.deps.health;
+  if (health !== undefined && url.pathname === "/personal/health/ingest") return handleHealthIngest(ctx, health);
   return false;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Helse-inntak (P1d): `POST /personal/health/ingest`. Finnes KUN med `JARVIS_PERSONAL_HEALTH_INGEST=on`. Enhetssignert: et verifisert grant med `auth_strength: signed` fra kanalen `mobile`/`watch`, scopet til `health`-rommet;
+// dataene tilhører grantets person (aldri en kropp). Helsedata er begrenset (SECRET_RESTRICTED): ingenting herfra går til en modell, en prompt eller en logg - feil logges kun som klassenavn, aldri melding (en databasefeil kan
+// sitere rader), og svaret inneholder antall og årsakskoder per prøve, aldri verdier.
+// ---------------------------------------------------------------------------------------------------------------------
+export const HEALTH_INTAKE_CHANNELS: ReadonlySet<string> = new Set(["mobile", "watch"]);
+
+/** `undefined` = oppfylt, ellers en stabil årsakskode. Ren og deterministisk. */
+export function healthIntakeDenial(identity: Pick<IdentityContext, "auth_strength" | "channel" | "memory_space_id">): string | undefined {
+  if (identity.auth_strength !== "signed") return "signed_device_session_required";
+  if (!HEALTH_INTAKE_CHANNELS.has(identity.channel)) return "channel_not_allowed";
+  if (identity.memory_space_id !== "health") return "health_space_required";
+  return undefined;
+}
+
+const HEALTH_INTAKE_STATUS: Readonly<Record<string, number>> = { empty_batch: 400, invalid_request: 400, batch_too_large: 413 };
+
+async function handleHealthIngest(ctx: PersonalRouteContext, health: PersonalHealthDeps): Promise<boolean> {
+  const authed = await ctx.authed(["samples", "deleted_external_sample_ids"]);
+  if (!authed) return true;
+  const denial = healthIntakeDenial(authed.identity);
+  if (denial !== undefined) return ctx.json(403, { error: "health_intake_denied", reason: denial, request_id: ctx.requestId() }), true;
+  try {
+    const result = await health.intake.ingestBatch(authed.identity, { samples: authed.body["samples"], deleted_external_sample_ids: authed.body["deleted_external_sample_ids"] });
+    ctx.json(200, { source: "apple_health", ...result });
+  } catch (err) {
+    if (err instanceof HealthIntakeError) ctx.json(HEALTH_INTAKE_STATUS[err.code] ?? 400, { error: "health_intake_rejected", reason: err.code, request_id: ctx.requestId() });
+    else if (err instanceof HealthRetentionPolicyRequiredError) ctx.json(409, { error: "health_retention_policy_required", request_id: ctx.requestId() });
+    else ctx.domainFailure(500, "health_intake_failed", new Error(err instanceof Error ? err.name : "unknown")); // aldri feilmeldingen: den kan sitere helseverdier
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

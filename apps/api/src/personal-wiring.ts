@@ -1,7 +1,7 @@
 import type pg from "pg";
 import { FamilyService } from "@jarvis/context";
 import type { IdentityContext } from "@jarvis/contracts";
-import { HealthService } from "@jarvis/health";
+import { HEALTH_INTAKE_MAX_DELETES, HEALTH_INTAKE_MAX_SAMPLES, HEALTH_INTAKE_SOURCE_TYPE, HealthIntakeService, HealthService, MetricTypeSchema } from "@jarvis/health";
 import { LocationService } from "@jarvis/location";
 import {
   CAR_CRITICAL_OPS, CAR_READ_ACTION, CAR_TOOL_ID, CarTransport, UnconfiguredCarAdapter, carCriticalConfigFromEnv, carCriticalToolDefinitions,
@@ -10,7 +10,7 @@ import {
   type CarAdapter, type ExecutePersonalActionInput, type PersonalActionIndexEntry, type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
 import { familySharedDataReaders, type HealthReadApi, type LocationReadApi } from "./personal-family-readers.ts";
-import type { PersonalActionDomainDeps, PersonalApiDeps, PersonalFamilyDeps } from "./personal-routes.ts";
+import type { PersonalActionDomainDeps, PersonalApiDeps, PersonalFamilyDeps, PersonalHealthDeps } from "./personal-routes.ts";
 
 /**
  * WP-G2 (D-464, UA-8 Personal Twin): ÉN komposisjonsfunksjon for hele personlig-domenet (verktøy + rute-avhengigheter + oppstartslogg). ALT er dormant: uten `JARVIS_PERSONAL_*`-flagg returnerer den tom verktøyliste,
@@ -94,7 +94,15 @@ export function createPersonalWiring(input: PersonalWiringInput): PersonalWiring
     }
   }
 
-  const deps: PersonalApiDeps | undefined = actions || family ? { ...(actions ? { actions } : {}), ...(family ? { family } : {}) } : undefined;
+  // Helse-inntaket (P1d): KUN en rute (`POST /personal/health/ingest`), aldri et verktøy - helsedata skal ikke kunne nå en modell. Uten flagg finnes ingen rute (404).
+  let health: PersonalHealthDeps | undefined;
+  if (personalFlagOn(env, PERSONAL_FLAG_NAMES.healthIngest)) {
+    health = { intake: new HealthIntakeService(pool) };
+    log["health_ingest"] = { registered: true, source_type: HEALTH_INTAKE_SOURCE_TYPE, max_samples: HEALTH_INTAKE_MAX_SAMPLES, max_deletes: HEALTH_INTAKE_MAX_DELETES, metrics: MetricTypeSchema.options.length };
+  }
+
+  const deps: PersonalApiDeps | undefined =
+    actions || family || health ? { ...(actions ? { actions } : {}), ...(family ? { family } : {}), ...(health ? { health } : {}) } : undefined;
   return {
     tools,
     filterTools: (all) => (dropLegacyHome ? legacyCriticalActionsToDrop(all) : all),

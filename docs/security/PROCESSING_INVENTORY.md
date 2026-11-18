@@ -135,11 +135,11 @@ uten at det er gjort, eller (4) en DPIA-henvisning peker på en fil som ikke fin
 
 ### Sted, helse, kontekst og rom
 
-- **Formål:** Personlig digital tvilling (kun fake-kilder i dag)
+- **Formål:** Personlig digital tvilling (kun fake-kilder i dag). WP-G2 (D-464): bak `JARVIS_PERSONAL_HEALTH_INGEST` (AV) et enhetssignert inntak av en LUKKET liste på ti helsemetrikker fra personens egen iPhone/Watch (appen er `BLOCKED_EXTERNAL`; ingen ekte enhet har sendt noe).
 - **Memory space/tenant:** health/home/personal (alle tabeller tenant-skopet med FORCE RLS unntatt dokumenterte globale: `scheduler_state`, `capabilities`, `evolution_change_ledger`, `self_modification_requests`, `github_rate_limit_state`, `telegram_poll_state`)
-- **Datakategori:** Lokasjon og helsedata (særlige kategorier; helse alltid isolert og lokal behandling) - UA8-DPIA
-- **Retensjon:** Retensjonspolicy-tabellene er fail-closed; ingen produsenter koblet i produksjon.
-- **Eksterne mottakere:** Ingen (lokalt)
+- **Datakategori:** Lokasjon og helsedata (særlige kategorier; helse alltid isolert og lokal behandling) - UA8-DPIA. Utvidet (migrasjon 128): hvilepuls, HRV (SDNN), oksygenmetning, respirasjonsfrekvens, aktiv energi og treningsminutter i tillegg til puls, skritt, søvn og vekt. Hver prøve bærer en ekstern prøve-id (HealthKits `uuid`, en pseudonym kilde-peker som gir idempotent inntak) og kilde-pekeren `apple_health` + enhet; aldri rå leverandørnyttelast.
+- **Retensjon:** Retensjonspolicy-tabellene er fail-closed; ingen produsenter koblet i produksjon. Inntaket er fail-closed uten eier-konfigurert oppbevaringstid, tar ikke inn prøver som allerede er utløpt, og fjerner prøver appen melder slettet i HealthKit.
+- **Eksterne mottakere:** Ingen (lokalt). Helsedata er begrenset (SECRET_RESTRICTED): ingen modell, prompt, logg eller verktøy ser dem; revisjonen av et inntak har kun antall og metrikktyper. Transportveien fra telefonen til API-et er eierens egen nettvei - en tredjeparts relé ville vært en databehandler og krever at DPIA-en oppdateres FØR bruk (åpent eierspørsmål).
 - **Tabeller:** `context_observations`, `health_metric_observations`, `health_retention_policies`, `location_observations`, `location_retention_policies`, `location_zone_visits`, `location_zones`, `rooms`, `sites`
 
 ### Syn og fysisk verden
