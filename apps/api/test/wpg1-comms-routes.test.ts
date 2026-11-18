@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import {
-  COMMS_OWNER_ACTIONS, InvalidCommsConfigError, WEBHOOK_MAX_BYTES, type CommsWebhookProvider, type CommsWebhookService, type OutboundFunnel, type WebhookRequest, type WebhookResponse
+  COMMS_KNOWN_ACTIONS, InvalidCommsConfigError, WEBHOOK_MAX_BYTES, type CommsWebhookProvider, type CommsWebhookService, type OutboundFunnel, type WebhookRequest, type WebhookResponse
 } from "@jarvis/comms";
 import { buildCommsRuntime } from "../src/comms-wiring.ts";
 import { createApiServer, type ApiDeps } from "../src/server.ts";
@@ -63,7 +63,7 @@ function stubOutbound(opts: { allowed?: boolean; gatewayResult?: unknown; replay
   const gatewayCalls: GatewayCall[] = [];
   const funnelCalls: string[] = [];
   const gateway = {
-    get: (tool: string, action: string) => (tool === "comms" && COMMS_OWNER_ACTIONS.includes(action) ? { tool_id: tool, action } : undefined),
+    get: (tool: string, action: string) => (tool === "comms" && COMMS_KNOWN_ACTIONS.includes(action) ? { tool_id: tool, action } : undefined),
     execute: async (req: GatewayCall) => {
       gatewayCalls.push(req);
       return opts.gatewayResult ?? { ok: true, external_id: "msg-1", data: { sent: true }, output_trust: "internal", deduplicated: false };
@@ -266,7 +266,8 @@ describe("C: `/comms/action` og `/comms/preview` - grant -> suveren eier -> step
     const { outbound, gatewayCalls } = stubOutbound();
     const base = await listen({ ...authDeps, comms: { outbound } });
     for (const token of ["owner-active", "owner-telegram", "owner-voice"]) {
-      for (const action of ["send", "edit_message", "delete_message", "add_reaction", "authorize_account", "revoke_account"]) {
+      for (const action of ["send", "edit_message", "delete_message", "add_reaction", "authorize_account", "revoke_account", "start_call", "contacts_create", "contacts_update", "contacts_delete", "contacts_sync",
+        "meeting_ingest_text", "meeting_decide_commitment", "meeting_confirm_participant", "meeting_delete"]) {
         const r = await post(base, "/comms/action", sendBody({ grant_token: token, action, parameters: {} }));
         expect(r.status, `${token} ${action}`).toBe(403);
         expect(r.json?.["error"], `${token} ${action}`).toBe("step_up_required");
@@ -274,11 +275,12 @@ describe("C: `/comms/action` og `/comms/preview` - grant -> suveren eier -> step
     }
     expect(gatewayCalls).toEqual([]);
     // ikke-step-up-handlinger: lesing + avmelding når gatewayen også fra en svakere økt
-    for (const action of ["list_inbound", "list_outbound", "list_opt_outs", "list_accounts", "record_opt_out"]) {
+    const exempt = ["list_inbound", "list_outbound", "list_opt_outs", "list_accounts", "record_opt_out", "read_thread", "list_users", "get_message", "list_templates", "read_message", "contacts_list", "contacts_search", "contacts_get", "meeting_list", "meeting_commitments"];
+    for (const action of exempt) {
       const r = await post(base, "/comms/action", { grant_token: "owner-active", action, parameters: {} });
       expect(r.status, action).toBe(200);
     }
-    expect(gatewayCalls.map((c) => c.action)).toEqual(["list_inbound", "list_outbound", "list_opt_outs", "list_accounts", "record_opt_out"]);
+    expect(gatewayCalls.map((c) => c.action)).toEqual(exempt);
   });
 
   it("gyldig sending: gatewayen får NØYAKTIG tool `comms`/`send`, identiteten fra GRANTET, idempotensnøkkelen og request_id = nøkkelen; svaret bærer ekstern id og aldri tekst", async () => {
@@ -427,7 +429,7 @@ describe("D: oppkoblingen (`buildCommsRuntime`) og kildevakter", () => {
 
   it("comms-wiring.ts: utgående bygges KUN når flagget er på, webhook-tjenesten KUN med minst én leverandør, og alt-AV returnerer før noe konstrueres", () => {
     const wiring = read("../src/comms-wiring.ts");
-    expect(wiring).toMatch(/if \(!commsAnyEnabled\(config\)\) return \{ config, tools: \[\], apiDeps: \(\) => undefined \};/);
+    expect(wiring).toMatch(/if \(!commsAnyEnabled\(config\)\) return \{ config, tools: \[\], apiDeps: \(\) => undefined, startSweeps: \(\) => undefined \};/);
     expect(wiring.indexOf("if (!commsAnyEnabled(config))")).toBeLessThan(wiring.indexOf("new CommsStore("));
     expect(wiring).toMatch(/const funnel = config\.outbound\s*\n\s*\? new OutboundFunnel\(/);
     expect(wiring).toMatch(/const webhookService = config\.webhooks\.size > 0\s*\n\s*\? new CommsWebhookService\(/);
@@ -454,6 +456,7 @@ describe("D: oppkoblingen (`buildCommsRuntime`) og kildevakter", () => {
     // ruten har ingen egen sendevei: ingen adapter-/leverandørimport, ingen fetch
     expect(server).not.toMatch(/SlackAdapter|DiscordAdapter|WhatsAppAdapter|TwilioSmsAdapter|TelnyxSmsAdapter|guardedFetch/);
     // handlingene som ikke krever step-up er nøyaktig lesing + avmeldingsregistrering
-    expect(server).toMatch(/new Set\(\[\.\.\.COMMS_READ_ACTIONS, "record_opt_out"\]\)/);
+    const exempt = /const COMMS_STEP_UP_EXEMPT: ReadonlySet<string> = new Set\(\[([^\]]*)\]\);/.exec(server)?.[1] ?? "";
+    expect(exempt.split(",").map((x) => x.trim()).sort()).toEqual(['"record_opt_out"', "...COMMS_CONTACT_READ_ACTIONS", "...COMMS_MEETING_READ_ACTIONS", "...COMMS_READ_ACTIONS", "...COMMS_VENDOR_READ_ACTIONS"]);
   });
 });
