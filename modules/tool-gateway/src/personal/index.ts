@@ -7,6 +7,7 @@ export * from "./home-critical.ts";
 export * from "./home-critical-transport.ts";
 export * from "./car-adapter.ts";
 export * from "./car-critical.ts";
+export * from "./autonomy-bindability.ts";
 export * from "./action-journal.ts";
 export * from "./action-executor.ts";
 export * from "./apple-dav.ts";
