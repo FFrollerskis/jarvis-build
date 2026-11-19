@@ -36,7 +36,7 @@ export interface SituationSignalsWiringDeps {
     /** Kildens EGEN oppbevaring (G3): en signalsituasjon overlever aldri kameradataene. Valgfri (uten den brukes standard). */
     getRetentionPolicy?(tenantId: string, memorySpace: MemorySpace): Promise<{ retention_days: number } | null>;
   };
-  /** `value` er `unknown`: `health_metric_observations.value` er `numeric`, og node-postgres leverer det som STRENG (se `num()`). */
+  /** `value` er `unknown`: helsemodulens `value`-kolonne er `numeric`, og node-postgres leverer det som STRENG (se `num()`). (Tabellnavnet står bevisst ikke her: G2-vakten tillater det kun i helsemodulen og slettekjeden.) */
   health: {
     getRecentMetrics(tenantId: string, personId: string, metricType: HealthSignalMetric, sinceMs?: number, limit?: number): Promise<Array<{ value: unknown; observed_at: string | Date }>>;
     /** Kildens EGEN oppbevaring (G2): en signalsituasjon overlever aldri helsedataene. Valgfri (uten den brukes standard). */
@@ -72,7 +72,7 @@ const iso = (value: string | Date): string | null => {
 };
 
 /**
- * B-HIGH-2 (fiks-runde): `health_metric_observations.value` er `numeric`, og node-postgres leverer `numeric` som STRENG (ingen type-parser). `Number.isFinite("95")` er false, så ALLE rader ble droppet (tom serie, ingen signal, ingen feil).
+ * B-HIGH-2 (fiks-runde): helsemodulens `value`-kolonne er `numeric`, og node-postgres leverer `numeric` som STRENG (ingen type-parser). `Number.isFinite("95")` er false, så ALLE rader ble droppet (tom serie, ingen signal, ingen feil).
  * Tall og tallstrenger (`-?\d+(\.\d+)?`) godtas; alt annet (NaN, uendelig, tom/tekst, objekt) er ugyldig og hoppes over. Samme regel som G2s `num()` i personal-family-readers.
  */
 export function num(value: unknown): number | null {
