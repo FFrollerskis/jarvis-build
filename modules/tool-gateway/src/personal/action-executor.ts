@@ -82,15 +82,63 @@ function classify(result: { ok: true } | { ok: false; reason: string }, ledger: 
   return { status: "failed", outcome: "FAILED" };
 }
 
+/** Nøkkelen (tekst) for advisory-låsen per (tenant, domene, mål): to motstridende kommandoer mot SAMME mål serialiseres (fiks-runde review A LOW-10/11). */
+export const personalTargetLockKey = (tenantId: string, domain: string, target: string): string => `personal-action:${tenantId}:${domain}:${target}`;
+
+interface TargetLock { release(): Promise<void> }
+
+/**
+ * Prøver å ta advisory-låsen for målet (`pg_try_advisory_lock`, sesjonsnivå på en egen pool-forbindelse som holdes mens handlingen kjører). `null` = en annen handling mot SAMME mål kjører allerede (aldri to samtidige,
+ * motstridende kommandoer: `lock` og `unlock` mot samme lås ville begge nådd Home Assistant og hver «verifisert» sin egen lesing). Slippes alltid; en forbindelse som ikke kan låses opp destrueres (da faller låsen med den).
+ */
+async function acquireTargetLock(pool: pg.Pool, key: string): Promise<TargetLock | null> {
+  const client = await pool.connect();
+  try {
+    const { rows } = await client.query(`SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS acquired`, [key]);
+    if ((rows[0] as { acquired?: boolean } | undefined)?.acquired !== true) {
+      client.release();
+      return null;
+    }
+  } catch (err) {
+    client.release(true);
+    throw err;
+  }
+  return {
+    release: async () => {
+      try {
+        await client.query(`SELECT pg_advisory_unlock(hashtextextended($1, 0))`, [key]);
+        client.release();
+      } catch {
+        client.release(true);
+      }
+    }
+  };
+}
+
 export async function executePersonalAction(deps: PersonalActionExecutorDeps, identity: IdentityContext, input: ExecutePersonalActionInput): Promise<ExecutePersonalActionResult> {
   const entry = deps.index.get(`${String(input.domain)}.${String(input.action)}`);
   if (!entry) throw new Error(`personal_action_unknown_action:${String(input.action).slice(0, 60)}`);
   if (!deps.gateway.get(entry.toolId, entry.op.action)) throw new Error("personal_action_tool_not_registered");
   if (typeof input.idempotency_key !== "string" || !KEY.test(input.idempotency_key)) throw new Error("personal_action_idempotency_key_invalid");
-  const tenantId = identity.tenant_id;
-  const space = identity.memory_space_id as MemorySpace;
   const target = String(input.parameters[entry.op.targetParam] ?? "").slice(0, 200);
   if (target.length === 0) throw new Error("personal_action_target_missing");
+  const lock = await acquireTargetLock(deps.pool, personalTargetLockKey(identity.tenant_id, entry.domain, target));
+  if (lock === null) throw new Error("personal_action_target_busy");
+  try {
+    return await executeLocked(deps, identity, input, entry, target);
+  } finally {
+    await lock.release();
+  }
+}
+
+/** Hvor lenge en `requested`-rad regnes som «underveis» hos en vinner (lengste gateway-frist er ca. 2 min; samme 5 min som gatewayens avstemming av `reserved`). Eldre = krasjet vinner. */
+const IN_FLIGHT_GRACE_MS = 5 * 60_000;
+
+const storedOutcome = (row: PersonalActionRow): PersonalActionOutcome => (row.status === "applied" ? "SUCCESS" : row.status === "failed" ? "FAILED" : "UNKNOWN");
+
+async function executeLocked(deps: PersonalActionExecutorDeps, identity: IdentityContext, input: ExecutePersonalActionInput, entry: PersonalActionIndexEntry, target: string): Promise<ExecutePersonalActionResult> {
+  const tenantId = identity.tenant_id;
+  const space = identity.memory_space_id as MemorySpace;
 
   const begun = await deps.journal.begin(tenantId, space, {
     domain: entry.domain, tool_id: entry.toolId, action: entry.op.action, risk_class: "D", risk_direction: entry.op.direction(input.parameters), target_ref: target,
@@ -108,14 +156,27 @@ export async function executePersonalAction(deps: PersonalActionExecutorDeps, id
     return { action: failed, outcome: "FAILED", reason: "personal_action_idempotency_key_collision", replayed: !begun.created };
   }
 
+  // Varslingsstatus fra klasse D-kjeden (også for MISMATCH/UKJENT, der resultatet ikke bærer den): lagres i journalen slik at et varsel som feilet ETTER handlingen ikke går tapt (fiks-runde review A LOW-8).
+  let notification: { notified: boolean; error: string | null } | undefined;
   const result = await deps.gateway.execute({
     identity, tool_id: entry.toolId, action: entry.op.action, parameters: input.parameters, idempotency_key: input.idempotency_key,
-    ...(input.task_id !== undefined ? { task_id: input.task_id } : {}), ...(input.trace_id !== undefined ? { trace_id: input.trace_id } : {})
+    ...(input.task_id !== undefined ? { task_id: input.task_id } : {}), ...(input.trace_id !== undefined ? { trace_id: input.trace_id } : {}),
+    onClassDNotification: (status) => { notification = status; }
   });
   const ledger = await readLedger(deps.pool, tenantId, input.idempotency_key);
   const classified = classify(result, ledger);
   const reason = result.ok ? null : result.reason;
 
+  // En samtidig forespørsel med SAMME nøkkel (taperen): det er den som eier raden som ferdigstiller den. Er raden allerede terminal, gjelder det lagrede utfallet; er vinneren fortsatt underveis (`requested`) og svaret
+  // bare sier «pågår/ukjent», skriver taperen INGENTING (vinneren ferdigstiller) - aldri et databaseunntak og aldri en for tidlig `outcome_unknown` på en rad som snart blir `applied` (review A LOW-5).
+  if (!begun.created) {
+    const current = (await deps.journal.findByKey(tenantId, space, input.idempotency_key)) ?? begun.row;
+    if (current.status === "applied" || current.status === "failed") return { action: current, outcome: storedOutcome(current), reason: current.failure_code, replayed: true };
+    // En `requested`-rad eldre enn gracen er en krasjet vinner (ikke «underveis»): den går videre og settes `outcome_unknown` som før.
+    if (current.status === "requested" && classified.status === "outcome_unknown" && Date.now() - new Date(current.requested_at).getTime() < IN_FLIGHT_GRACE_MS) {
+      return { action: current, outcome: "UNKNOWN", reason, replayed: true };
+    }
+  }
   // En avvisning FØR utstyret nedgraderer aldri en rad som kan ha vært utført (replay-lærdommen): raden står uendret og svaret er UKJENT.
   if (!begun.created && begun.row.status === "outcome_unknown" && classified.status === "failed") {
     return { action: begun.row, outcome: "UNKNOWN", reason, replayed: true };
@@ -123,7 +184,10 @@ export async function executePersonalAction(deps: PersonalActionExecutorDeps, id
   const row = await deps.journal.complete(tenantId, space, begun.row.action_id, {
     status: classified.status, failure_code: reason === null ? null : safeCode(reason),
     ...(ledger?.before !== undefined && ledger?.before !== null ? { before_state: ledger.before } : {}), ...(ledger?.after !== undefined && ledger?.after !== null ? { after_state: ledger.after } : {}),
-    external_id: (result.ok ? result.external_id : undefined) ?? ledger?.external_id ?? null
+    external_id: (result.ok ? result.external_id : undefined) ?? ledger?.external_id ?? null,
+    ...(notification !== undefined ? { notified: notification.notified, notify_error: notification.error } : {})
   });
+  // Raden var allerede terminal (en annen forespørsel ferdigstilte den mellom vår lesing og skrivingen): det lagrede utfallet gjelder.
+  if (row.status !== classified.status && (row.status === "applied" || row.status === "failed")) return { action: row, outcome: storedOutcome(row), reason: row.failure_code, replayed: true };
   return { action: row, outcome: classified.outcome, reason, replayed: !begun.created };
 }

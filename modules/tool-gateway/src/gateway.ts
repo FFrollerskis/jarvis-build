@@ -733,6 +733,11 @@ export class ToolGateway {
     /** D-394 (JARVIS-054): korrelasjons-ID-er som følger HVER audit-rad for dette kallet. */
     task_id?: string;
     trace_id?: string;
+    /**
+     * WP-G2 (fiks-runde A-L7): kalles etter at klasse D-varslingen er FORSØKT, med `notified` og en kort, sanert feilkode. Resultatformen er uendret (også for MISMATCH/UKJENT, der varslingsstatus ellers ikke fantes
+     * på resultatet), så eksisterende kallere og tester påvirkes ikke. Kun trusted kode setter den; en feil i observatøren bryter aldri kjeden.
+     */
+    onClassDNotification?: (status: { notified: boolean; error: string | null }) => void;
   }): Promise<ToolResult> {
     const definition = this.get(request.tool_id, request.action);
     const corr = { ...(request.task_id !== undefined ? { task_id: request.task_id } : {}), ...(request.trace_id !== undefined ? { trace_id: request.trace_id } : {}) };
@@ -1354,7 +1359,7 @@ export class ToolGateway {
    * WP-F1: også ved UKJENT utfall (`unknown`), og med et redigert sammendrag (`notification_summary`) av hva handlingen gjaldt.
    */
   private async notifyClassD(
-    request: { identity: IdentityContext; tool_id: string; action: string; idempotency_key?: string; parameters?: Record<string, JsonValue> },
+    request: { identity: IdentityContext; tool_id: string; action: string; idempotency_key?: string; parameters?: Record<string, JsonValue>; onClassDNotification?: (status: { notified: boolean; error: string | null }) => void },
     definition: ToolDefinition,
     outcome: { outcome: "executed" | "unverified" | "unknown"; external_id: string | null },
     result: ToolResult,
@@ -1362,6 +1367,7 @@ export class ToolGateway {
     audit: AuditCorrelation = {}
   ): Promise<ToolResult> {
     let notified = false;
+    let notifyError: string | null = null;
     let summary: string | null = null;
     try {
       summary = definition.notification_summary?.(summaryState, request.parameters ?? {}) ?? null;
@@ -1380,6 +1386,8 @@ export class ToolGateway {
       }));
       notified = true;
     } catch (err) {
+      // Kun en FAST kode (aldri feilteksten: den kan sitere URL-er/tokens fra varsel-leverandøren).
+      notifyError = isIndeterminateTransportError(err) ? `notification_failed:${transportErrorKind(err)}` : "notification_failed";
       await withTenantTransaction(this.pool, request.identity.tenant_id, (client) =>
         writeAudit(client, request.identity, {
           ...(audit.task_id !== undefined ? { task_id: audit.task_id } : {}), ...(audit.trace_id !== undefined ? { trace_id: audit.trace_id } : {}),
@@ -1390,6 +1398,7 @@ export class ToolGateway {
       ).catch(() => undefined);
       this.setHealth("class_d_notifier", "degraded", (err as Error).message.slice(0, 60));
     }
+    try { request.onClassDNotification?.({ notified, error: notifyError }); } catch { /* en observatør kan aldri bryte kjeden */ }
     return result.ok ? { ...result, notified } : result;
   }
 
