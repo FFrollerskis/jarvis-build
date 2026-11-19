@@ -127,6 +127,25 @@ describe("én runde", () => {
     expect(((await db.admin.query(`SELECT count(*)::int AS n FROM vision_event_observations`)).rows[0] as { n: number }).n).toBe(1);
   });
 
+  it("review delta2 A LOW-E3 + B LOW-E1: hoppede inventarskrivinger summeres på tvers av spaces, personer og tenants i rundens oppsummering - og feltene mangler når intet er hoppet over", async () => {
+    await reg(T1.tenant, "home", T1.owner);
+    await reg(T1.tenant, "personal", T1.owner);
+    await reg(T2.tenant, "home", T2.owner);
+    const base = { events_seen: 1, recorded: 1, duplicates: 0, discarded: 0, cooldown: 0, failed: 0 };
+    const skipping = {
+      pollSource: async (c: { tenant_id: string; memory_space: string }) =>
+        c.tenant_id === T2.tenant ? { ...base, inventory_label_invalid: 1 } : c.memory_space === "home" ? { ...base, inventory_label_rejected: 2 } : { ...base, inventory_label_invalid: 3, inventory_label_rejected: 1 }
+    };
+    const result = await new VisionPoller({ pool: db.app, cameras, pipeline: skipping, source, guard, tenantIds: BOTH }).tick();
+    expect(result).toMatchObject({ status: "ok", summary: { events_seen: 3, recorded: 3, inventory_label_invalid: 4, inventory_label_rejected: 3 } });
+    const quiet = { pollSource: async () => base };
+    const clean = await new VisionPoller({ pool: db.app, cameras, pipeline: quiet, source, guard, tenantIds: BOTH }).tick();
+    expect((clean as { summary: unknown }).summary).toStrictEqual({ events_seen: 3, recorded: 3, duplicates: 0, discarded: 0, cooldown: 0, failed: 0 });
+    // kun ÉN av de to feltene er satt der bare den ene forekommer
+    const onlyRejected = { pollSource: async () => ({ ...base, inventory_label_rejected: 1 }) };
+    expect((await new VisionPoller({ pool: db.app, cameras, pipeline: onlyRejected, source, guard, tenantIds: BOTH }).tick() as { summary: object }).summary).toStrictEqual({ events_seen: 3, recorded: 3, duplicates: 0, discarded: 0, cooldown: 0, failed: 0, inventory_label_rejected: 3 });
+  });
+
   it("ingen kameraer = en tom, vellykket runde (kilden spørres ikke)", async () => {
     expect(await new VisionPoller({ pool: db.app, cameras, pipeline, source, guard, tenantIds: BOTH }).tick()).toMatchObject({ status: "ok", spaces_polled: 0, cameras_polled: 0 });
     expect(source.polls).toEqual([]);
@@ -175,6 +194,18 @@ describe("robusthet", () => {
     expect(result).toMatchObject({ status: "ok", cameras_polled: 1, summary: { recorded: 1 } });
     expect((result as { failed_spaces: number }).failed_spaces).toBeGreaterThanOrEqual(1);
     expect(source.polls.flat().map((c) => c.camera_id)).toEqual([good.camera_id]);
+  });
+
+  it("review delta2 A INFO-E7a: feilkoden i loggen skiller SQLSTATE (`db_`: fem tegn med minst ett siffer) fra Node-feilnummer (`os_`) - `EPERM` blir ikke lenger `db_eperm`", async () => {
+    await reg(T1.tenant, "home", T1.owner);
+    for (const [code, expected] of [["57P01", "db_57p01"], ["XX000", "db_xx000"], ["EPERM", "os_eperm"], ["EACCES", "os_eacces"]] as const) {
+      const failing = { listEnabledForPolling: async (): Promise<VisionCamera[]> => { throw Object.assign(new Error("boom"), { code }); } };
+      vi.mocked(console.error).mockClear();
+      await new VisionPoller({ pool: db.app, cameras: failing, pipeline, source, guard, tenantIds: [T1.tenant] }).tick();
+      const logged = vi.mocked(console.error).mock.calls.map((call) => JSON.parse(String(call[0])) as { msg: string; code?: string }).filter((line) => line.msg === "vision_poll_space_failed");
+      expect(logged.length, code).toBeGreaterThanOrEqual(1);
+      expect(logged[0]?.code, code).toBe(expected);
+    }
   });
 
   it("kildefeil (HA nede) blir source_error i oppsummeringen - runden kaster aldri", async () => {

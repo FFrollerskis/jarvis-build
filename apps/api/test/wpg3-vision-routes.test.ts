@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
 import { LocalHashEmbedding } from "@jarvis/memory";
 import {
@@ -245,7 +245,7 @@ describe("iPhone-opptak på forespørsel (enhetssignert engangsopplasting)", () 
     const bytes = makeJpeg();
     const done = await call("/vision/capture/upload", "phone", upload(request, bytes));
     expect(done.status, JSON.stringify(done.body)).toBe(200);
-    expect(done.body["data"]).toEqual({ request: { request_id: request.request_id, state: "fulfilled" }, outcome: { status: "recorded", reason: "ok_store_snapshot", classification_status: "classified", detection_count: 1, snapshot_stored: true } });
+    expect(done.body["data"]).toEqual({ request: { request_id: request.request_id, state: "fulfilled" }, outcome: { status: "recorded", reason: "ok_store_snapshot", classification_status: "classified", detection_count: 1, snapshot_stored: true, inventory_skipped: 0 } });
     expect(JSON.stringify(done.body)).not.toMatch(/ryggsekk|data_base64|signature/);
     expect(gateway.calls).toHaveLength(1);
     expect(gateway.calls[0]).toMatchObject({ mode: "LOCAL", sensitivity: "SECRET_RESTRICTED", paid_models_allowed: false });
@@ -261,6 +261,32 @@ describe("iPhone-opptak på forespørsel (enhetssignert engangsopplasting)", () 
     expect(seen.body["data"]).toMatchObject({ query: "ryggsekk", found: true, last: { object_label: "ryggsekk", room_name: "Gangen", has_snapshot: true, source_type: "iphone" }, inventory_present_now: true });
     const items = await call("/vision/inventory", "owner-signed", { room_id: roomId });
     expect(items.body["data"]["items"].map((i: { object_label: string }) => i.object_label)).toContain("ryggsekk");
+  });
+
+  it("review delta2 A LOW-E3 + B LOW-E1: et opptak der inventaret for en etikett hoppes over (databasen avviser den: CHECK strammet inn) melder `inventory_skipped` i svaret - kun tallet, aldri etiketten - mens hendelsen og neste objekts inventar er lagret", async () => {
+    const check = "vision_inventory_items_object_label_check";
+    const original = ((await db.admin.query(`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = $1`, [check])).rows[0] as { def: string }).def.replace(/^CHECK\s*/, "").replace(/\s+NOT VALID$/, "");
+    await db.admin.query(`ALTER TABLE vision_inventory_items DROP CONSTRAINT ${check}`);
+    // NOT VALID: den strammere regelen gjelder nye rader. Samme drift mellom JS-regelen og CHECK-en som savepointet i pipelinen beskytter mot.
+    await db.admin.query(`ALTER TABLE vision_inventory_items ADD CONSTRAINT ${check} CHECK (object_label <> 'driftet') NOT VALID`);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      gateway.text = detectionsJson([{ event_type: "object_detected", object_label: "driftet", confidence: 0.9 }, { event_type: "object_detected", object_label: "lommebok", confidence: 0.8 }]);
+      const request = (await call("/vision/capture/request", "owner-signed", { camera_id: mainCamera, idempotency_key: "idem-skip-0001", ttl_seconds: 120 })).body["data"] as { request_id: string };
+      const done = await call("/vision/capture/upload", "phone", upload(request, makeJpeg()));
+      expect(done.status, JSON.stringify(done.body)).toBe(200);
+      expect(done.body["data"]["outcome"]).toEqual({ status: "recorded", reason: "ok_store_snapshot", classification_status: "classified", detection_count: 2, snapshot_stored: true, inventory_skipped: 1 });
+      expect(JSON.stringify(done.body)).not.toMatch(/driftet|lommebok/); // kun et tall - aldri en etikett
+      const rows = (await db.admin.query(`SELECT object_label FROM vision_inventory_items WHERE person_id = $1 AND object_label IN ('driftet', 'lommebok')`, [T.owner])).rows as Array<{ object_label: string }>;
+      expect(rows.map((r) => r.object_label)).toEqual(["lommebok"]); // neste objekts inventar ble lagret, det avviste ble hoppet over
+      const stored = (await db.admin.query(`SELECT count(*)::int AS n FROM vision_event_observations WHERE person_id = $1 AND object_label = 'driftet'`, [T.owner])).rows[0] as { n: number };
+      expect(stored.n).toBe(1); // hendelsen med den avviste etiketten ER lagret
+      expect(warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("vision_inventory_skipped"))).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+      await db.admin.query(`ALTER TABLE vision_inventory_items DROP CONSTRAINT ${check}`);
+      await db.admin.query(`ALTER TABLE vision_inventory_items ADD CONSTRAINT ${check} CHECK ${original}`);
+    }
   });
 
   it("device_id kommer fra grantet: en annen enhet kan ikke laste opp en forespørsel adressert til iphone-eier (device_mismatch 403), og kroppen kan ikke bære device_id (400)", async () => {
@@ -509,6 +535,7 @@ describe("/vision/status (review B-L8): eierens helsebilde - kun lesing, kun eie
   const REPORT: VisionStatusReport = {
     poller: { enabled: true, last_tick_at: "2026-11-18T12:00:00.000Z", last_status: "ok", last_reason: null, last_source_error: "home_assistant_error_503", consecutive_failures: 3, next_delay_ms: 160_000 },
     maintenance: { light: { at: "2026-11-18T12:05:00.000Z", failed: 1, tombstones_deleted: 4, tombstones_failed: 1, tombstones_stuck: 1, temp_files_purged: 0, temp_files_truncated: false }, full: null },
+    ingest: { inventory_label_invalid: 2, inventory_label_rejected: 1, last_inventory_skip_at: "2026-11-18T12:06:00.000Z" },
     storage: { maintenance_enabled: true, writing_enabled: false },
     classifier: true,
     embeddings: false

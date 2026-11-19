@@ -42,6 +42,15 @@ export interface IngestContext {
 
 export type IngestStatus = "recorded" | "duplicate" | "discarded" | "cooldown" | "failed";
 
+/**
+ * Antall inventarskrivinger som ble HOPPET OVER for én hendelse, per årsak (review delta2 A LOW-E3 + B LOW-E1): `invalid` = etiketten har ikke inventarform (JS-forhåndssjekken, `isInventoryLabel`), `rejected` = databasen
+ * avviste en etikett JS-regelen godtok (CHECK-en er strammet inn eller JS-regelen har drevet fra SQL). Kun tall - aldri etikettinnhold. Hendelsen selv er trygt lagret i begge tilfeller; det er INVENTARET for den etiketten som mangler.
+ */
+export interface InventorySkips {
+  invalid: number;
+  rejected: number;
+}
+
 export interface IngestOutcome {
   status: IngestStatus;
   reason: VisionRouteReason | "duplicate" | "cooldown" | "camera_scope_mismatch" | "pipeline_error";
@@ -51,6 +60,16 @@ export interface IngestOutcome {
   detection_count: number;
   /** Stabile koder for ikke-fatale avvik (ingen bilde, modell utilgjengelig, embedding feilet ...) og for `failed`. */
   notes: string[];
+  /** Kun satt når minst én inventarskriving ble hoppet over i en LAGRET hendelse (review delta2 A LOW-E3 + B LOW-E1). Tellerne står også i `stats()` og, per poll-runde, i `PollSummary`. */
+  inventory_skipped?: InventorySkips;
+}
+
+/** Kumulativt siden prosessen startet (kun tall og tidspunkt, aldri innhold): det eieren ser i `/vision/status` (review delta2 A LOW-E3 + B LOW-E1). */
+export interface VisionIngestStats {
+  inventory_label_invalid: number;
+  inventory_label_rejected: number;
+  /** Tidspunkt for siste hoppede inventarskriving, eller `null` hvis ingen. */
+  last_inventory_skip_at: string | null;
 }
 
 export interface CapturedEventSpec {
@@ -95,6 +114,9 @@ export interface PollSummary {
   failed: number;
   /** Kilden feilet som helhet (f.eks. HA nede): én kort kode, ingen innhold. */
   source_error?: string;
+  /** Review delta2 A LOW-E3 + B LOW-E1: antall inventarskrivinger hoppet over i lagrede hendelser denne runden (se `InventorySkips`). Kun til stede når > 0. Kun tall, aldri innhold. */
+  inventory_label_invalid?: number;
+  inventory_label_rejected?: number;
 }
 
 class DuplicateRaceError extends Error {
@@ -138,11 +160,28 @@ export class VisionIngestPipeline {
   private readonly maxImageBytes: number;
   private readonly lastProcessed = new Map<string, number>();
   private readonly inFlight = new Set<string>();
+  private readonly inventorySkipTotals: InventorySkips = { invalid: 0, rejected: 0 };
+  private lastInventorySkipAt: string | null = null;
 
   constructor(private readonly options: VisionPipelineOptions) {
     this.now = options.now ?? (() => new Date());
     this.maxSnapshotAgeMs = options.maxSnapshotAgeMs ?? 60_000;
     this.maxImageBytes = options.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES;
+  }
+
+  /** Kumulative tellere siden prosessen startet (review delta2 A LOW-E3 + B LOW-E1). Telles først ETTER at hendelsens transaksjon er committet: en tilbakerullet hendelse teller aldri. */
+  stats(): VisionIngestStats {
+    return { inventory_label_invalid: this.inventorySkipTotals.invalid, inventory_label_rejected: this.inventorySkipTotals.rejected, last_inventory_skip_at: this.lastInventorySkipAt };
+  }
+
+  /** Teller og logger hoppede inventarskrivinger for ÉN committet hendelse: én strukturert logglinje (kode og tall, aldri etikettinnhold). */
+  private reportInventorySkips(camera: VisionCamera, skips: InventorySkips): void {
+    if (skips.invalid + skips.rejected === 0) return;
+    this.inventorySkipTotals.invalid += skips.invalid;
+    this.inventorySkipTotals.rejected += skips.rejected;
+    this.lastInventorySkipAt = this.now().toISOString();
+    // `rejected` (databasen sa nei til noe JS godtok = drift mellom regelsettene) er den alvorligste årsaken og gir koden.
+    console.warn(JSON.stringify({ msg: "vision_inventory_skipped", camera_id: camera.camera_id, code: skips.rejected > 0 ? "inventory_label_rejected" : "inventory_label_invalid", invalid: skips.invalid, rejected: skips.rejected }));
   }
 
   private outcome(partial: Partial<IngestOutcome> & Pick<IngestOutcome, "status" | "reason">): IngestOutcome {
@@ -279,6 +318,7 @@ export class VisionIngestPipeline {
     }
 
     const written: string[] = [];
+    const skips: InventorySkips = { invalid: 0, rejected: 0 };
     try {
       await withMemoryTransaction(this.options.pool, ctx.tenant_id, [ctx.memory_space], async (client) => {
         if (snapshot !== null && snapshotNeedsMark) {
@@ -316,7 +356,7 @@ export class VisionIngestPipeline {
             await this.options.embeddings.storeInTransaction(client, { observationId: result.observation.observation_id, tenantId: ctx.tenant_id, memorySpace: ctx.memory_space }, vector);
           }
           if (camera.room_id !== null && this.options.inventory !== undefined) {
-            await this.recordInventory(client, notes, this.options.inventory, {
+            await this.recordInventory(client, notes, skips, this.options.inventory, {
               tenantId: ctx.tenant_id, memorySpace: ctx.memory_space, personId: ctx.person_id, roomId: camera.room_id, objectLabel: label, confidence: detection.confidence,
               observedAt: spec.observed_at, observationId: result.observation.observation_id, sourceType: spec.source_type, sourceInstanceId: camera.camera_id,
               taskId: ctx.task_id, sessionId: ctx.session_id, retentionDays
@@ -331,6 +371,8 @@ export class VisionIngestPipeline {
       }
       throw err;
     }
+    // Committet: først nå telles og logges hoppede inventarskrivinger (en tilbakerullet hendelse har ingenting å melde).
+    this.reportInventorySkips(camera, skips);
     return this.outcome({
       status: "recorded",
       reason: decision.reason,
@@ -338,7 +380,8 @@ export class VisionIngestPipeline {
       ...(snapshot !== null && snapshotNeedsMark ? { snapshot_id: snapshot.snapshot_id } : {}),
       classification_status,
       detection_count: detections.length,
-      notes
+      notes,
+      ...(skips.invalid + skips.rejected > 0 ? { inventory_skipped: { ...skips } } : {})
     });
   }
 
@@ -349,10 +392,13 @@ export class VisionIngestPipeline {
    *   2. SAVEPOINT rundt selve skrivingen: avviser databasen etiketten likevel (CHECK-en er strammet inn i en senere migrasjon, eller JS-regelen har drevet fra SQL), rulles KUN inventarskrivingen
    *      tilbake (note `inventory_label_rejected`), og hendelsene, vektoren og bildepekeren i samme transaksjon består. Enhver ANNEN feil (FK, RLS, tilkobling ...) kastes videre og ruller hele
    *      hendelsen tilbake som før - savepointet er ikke et «svelg alt».
+   * Hoppet er SYNLIG (review delta2 A LOW-E3 + B LOW-E1): hvert hopp telles i `skips` (kun tall), og etter COMMIT går tallene til `outcome.inventory_skipped`, `PollSummary`, `stats()` (-> `/vision/status`) og
+   * én strukturert logglinje per hendelse (`vision_inventory_skipped`, kode og tall, aldri etikettinnhold). En systematisk drift mellom JS-regelen og CHECK-en skal aldri være usynlig.
    */
-  private async recordInventory(client: pg.PoolClient, notes: string[], inventory: VisionInventoryService, input: SightingInput): Promise<void> {
+  private async recordInventory(client: pg.PoolClient, notes: string[], skips: InventorySkips, inventory: VisionInventoryService, input: SightingInput): Promise<void> {
     if (!isInventoryLabel(input.objectLabel)) {
       addNote(notes, "inventory_label_invalid");
+      skips.invalid += 1;
       return;
     }
     await client.query(`SAVEPOINT ${INVENTORY_SAVEPOINT}`);
@@ -363,6 +409,7 @@ export class VisionIngestPipeline {
       await client.query(`ROLLBACK TO SAVEPOINT ${INVENTORY_SAVEPOINT}`);
       await client.query(`RELEASE SAVEPOINT ${INVENTORY_SAVEPOINT}`);
       addNote(notes, "inventory_label_rejected");
+      skips.rejected += 1;
       return;
     }
     await client.query(`RELEASE SAVEPOINT ${INVENTORY_SAVEPOINT}`);
@@ -403,6 +450,10 @@ export class VisionIngestPipeline {
         source_type: event.source_type, source_event_id: event.source_event_id, base_event_type: event.event_type, observed_at: event.observed_at, age_ms: event.age_ms,
         getImage: () => source.fetchSnapshot(sourceCamera, this.maxImageBytes)
       });
+      if (outcome.inventory_skipped !== undefined) {
+        if (outcome.inventory_skipped.invalid > 0) summary.inventory_label_invalid = (summary.inventory_label_invalid ?? 0) + outcome.inventory_skipped.invalid;
+        if (outcome.inventory_skipped.rejected > 0) summary.inventory_label_rejected = (summary.inventory_label_rejected ?? 0) + outcome.inventory_skipped.rejected;
+      }
       if (outcome.status === "recorded") summary.recorded += 1;
       else if (outcome.status === "duplicate") summary.duplicates += 1;
       else if (outcome.status === "discarded") summary.discarded += 1;

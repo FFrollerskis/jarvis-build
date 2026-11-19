@@ -336,6 +336,7 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
   const status = (): VisionStatusReport => ({
     poller: pollerHandle === null ? { enabled: false } : { enabled: true, ...pollerHandle.status(), consecutive_failures: pollerHandle.health().consecutive_failures, next_delay_ms: pollerHandle.health().next_delay_ms },
     maintenance: { light: last.light, full: last.full },
+    ingest: pipeline.stats(),
     storage: { maintenance_enabled: snapshots !== undefined, writing_enabled: flags.storeSnapshots && snapshots !== undefined },
     classifier: classifier !== undefined,
     embeddings: embeddings !== undefined

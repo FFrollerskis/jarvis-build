@@ -34,6 +34,11 @@ export interface VisionMaintenanceStatus {
 export interface VisionStatusReport {
   poller: { enabled: false } | { enabled: true; last_tick_at: string | null; last_status: string | null; last_reason: string | null; last_source_error: string | null; consecutive_failures: number; next_delay_ms: number };
   maintenance: { light: VisionMaintenanceStatus | null; full: VisionMaintenanceStatus | null };
+  /**
+   * Kumulativt siden prosessen startet (kun tall og tidspunkt): inventarskrivinger som ble hoppet over i LAGREDE hendelser (review delta2 A LOW-E3 + B LOW-E1). `invalid` = etiketten har ikke inventarform,
+   * `rejected` = databasen avviste en etikett JS-regelen godtok (drift mellom regelsettene). Hendelsene er lagret i begge tilfeller; det er inventaret for den etiketten som mangler. Aldri etikettinnhold.
+   */
+  ingest: { inventory_label_invalid: number; inventory_label_rejected: number; last_inventory_skip_at: string | null };
   storage: { maintenance_enabled: boolean; writing_enabled: boolean };
   classifier: boolean;
   embeddings: boolean;
@@ -258,7 +263,12 @@ export async function handleVisionRoute(req: IncomingMessage, pathname: string, 
           ok: true,
           data: {
             request: { request_id: result.request.request_id, state: result.request.state },
-            outcome: { status: result.outcome.status, reason: result.outcome.reason, classification_status: result.outcome.classification_status, detection_count: result.outcome.detection_count, snapshot_stored: result.outcome.snapshot_id !== undefined }
+            // `inventory_skipped`: antall inventarskrivinger hoppet over for dette opptaket (review delta2 A LOW-E3 + B LOW-E1) - kun et tall, aldri en etikett.
+            outcome: {
+              status: result.outcome.status, reason: result.outcome.reason, classification_status: result.outcome.classification_status, detection_count: result.outcome.detection_count,
+              snapshot_stored: result.outcome.snapshot_id !== undefined,
+              inventory_skipped: (result.outcome.inventory_skipped?.invalid ?? 0) + (result.outcome.inventory_skipped?.rejected ?? 0)
+            }
           }
         });
         return true;

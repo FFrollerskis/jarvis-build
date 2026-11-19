@@ -45,12 +45,17 @@ function merge(into: PollSummary, add: PollSummary): void {
   into.cooldown += add.cooldown;
   into.failed += add.failed;
   if (add.source_error !== undefined && into.source_error === undefined) into.source_error = add.source_error;
+  // Review delta2 A LOW-E3 + B LOW-E1: hoppede inventarskrivinger summeres på tvers av spaces/personer (kun til stede når > 0).
+  if (add.inventory_label_invalid !== undefined) into.inventory_label_invalid = (into.inventory_label_invalid ?? 0) + add.inventory_label_invalid;
+  if (add.inventory_label_rejected !== undefined) into.inventory_label_rejected = (into.inventory_label_rejected ?? 0) + add.inventory_label_rejected;
 }
 
 function codeOf(err: unknown): string {
   const message = (err as Error | null)?.message;
   const pgCode = (err as { code?: unknown } | null)?.code;
-  if (typeof pgCode === "string" && /^[0-9A-Z]{5}$/.test(pgCode)) return `db_${pgCode.toLowerCase()}`;
+  // SQLSTATE har 5 tegn og minst ett siffer (`42P01`, `XX000`); et Node-feilnummer (`EPERM`, `EPIPE`) har ikke siffer og er et fil-/nettverksavvik, ikke en databasefeil (samme regel som `errorCode` i pipeline.ts, review delta2 A INFO-E7a).
+  if (typeof pgCode === "string" && /^(?=[0-9A-Z]*[0-9])[0-9A-Z]{5}$/.test(pgCode)) return `db_${pgCode.toLowerCase()}`;
+  if (typeof pgCode === "string" && /^E[A-Z0-9]{2,15}$/.test(pgCode)) return `os_${pgCode.toLowerCase()}`;
   return typeof message === "string" && /^[a-z0-9_]{3,60}$/.test(message) ? message : "poller_error";
 }
 

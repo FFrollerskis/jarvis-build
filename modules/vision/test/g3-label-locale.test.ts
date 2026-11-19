@@ -1,10 +1,11 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { VisionCameraService, type VisionCamera } from "../src/cameras.ts";
 import { VisionClassifier, type ClassificationOutcome, type VisionDetection } from "../src/classifier.ts";
 import { VisionInventoryService, type SightingInput } from "../src/inventory.ts";
 import { isInventoryLabel, isStorableObjectLabel } from "../src/labels.ts";
 import { VisionIngestPipeline, type CapturedEventSpec, type IngestContext } from "../src/pipeline.ts";
 import { VisionService } from "../src/service.ts";
+import type { VisionSource } from "../src/source.ts";
 import { detectionsJson, makeJpeg, ScriptedGateway, seedTenant, startVisionDb, type VisionDb } from "./support/harness.ts";
 import {
   type AnyForm,
@@ -365,6 +366,12 @@ describe("pipelinen: en etikett som ikke kan bli inventar tar aldri basishendels
     getImage: async () => ({ bytes: makeJpeg(), declared_type: "image/jpeg" })
   });
   const pipelineWith = (classifier: VisionClassifier): VisionIngestPipeline => new VisionIngestPipeline({ pool: db.app, vision, classifier, inventory, enabled: true, storeSnapshots: false, now: () => clock });
+  /** Logglinjene om hoppede inventarskrivinger (review delta2 A LOW-E3 + B LOW-E1), som JSON. */
+  const skipLines = (warn: MockInstance<typeof console.warn>): string[] => warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("vision_inventory_skipped"));
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
   const inventoryLabels = async (): Promise<string[]> => (await inventory.list(tenant, "home", owner, { roomId: room })).map((item) => item.object_label).sort();
   const storedLabels = async (ids: string[]): Promise<Array<string | null>> =>
     ((await db.admin.query(`SELECT object_label FROM vision_event_observations WHERE observation_id = ANY($1) ORDER BY event_type, object_label NULLS FIRST`, [ids])).rows as Array<{ object_label: string | null }>).map((r) => r.object_label);
@@ -373,23 +380,31 @@ describe("pipelinen: en etikett som ikke kan bli inventar tar aldri basishendels
     const label = `a${String.fromCodePoint(0x9f4)}a`;
     const gateway = new ScriptedGateway();
     gateway.text = detectionsJson([{ event_type: "object_detected", object_label: label, confidence: 0.9 }]);
-    const out = await pipelineWith(new VisionClassifier({ gateway })).processCaptured(ctx, camera, spec());
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const pipeline = pipelineWith(new VisionClassifier({ gateway }));
+    const out = await pipeline.processCaptured(ctx, camera, spec());
     expect(out).toMatchObject({ status: "recorded", classification_status: "classified", detection_count: 1 });
     expect(out.observation_ids).toHaveLength(2);
     expect(out.notes.filter((note) => note.startsWith("inventory_"))).toEqual([]);
+    // Ingenting hoppet over: ingen `inventory_skipped`, ingen teller, ingen logglinje.
+    expect(out.inventory_skipped).toBeUndefined();
+    expect(pipeline.stats()).toEqual({ inventory_label_invalid: 0, inventory_label_rejected: 0, last_inventory_skip_at: null });
+    expect(skipLines(warn)).toEqual([]);
     expect(await storedLabels(out.observation_ids)).toEqual([null, label]);
     expect(await inventoryLabels()).toContain(label);
   });
 
   it("en etikett som er gyldig for hendelsen (mild CHECK) men IKKE har inventarform («sekk's»): basishendelsen og objekthendelsen lagres, INVENTAR hoppes over for den raden - og tjenesten kalles aldri med den", async () => {
     inventory.calls = [];
-    const out = await pipelineWith(
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const pipeline = pipelineWith(
       stubClassifier([
         { event_type: "object_detected", object_label: "sekk's", confidence: 0.9 },
         { event_type: "object_detected", object_label: "men's", confidence: 0.85 },
         { event_type: "object_detected", object_label: "kaffekopp", confidence: 0.8 }
       ])
-    ).processCaptured(ctx, camera, spec());
+    );
+    const out = await pipeline.processCaptured(ctx, camera, spec());
     expect(out).toMatchObject({ status: "recorded", detection_count: 3 });
     expect(out.observation_ids).toHaveLength(4);
     expect(out.notes).toContain("inventory_label_invalid");
@@ -399,6 +414,34 @@ describe("pipelinen: en etikett som ikke kan bli inventar tar aldri basishendels
     expect(await inventoryLabels()).toContain("kaffekopp");
     expect(await inventoryLabels()).not.toContain("sekk's");
     expect(await inventoryLabels()).not.toContain("men's");
+    // SYNLIGHET (review delta2 A LOW-E3 + B LOW-E1): hoppet står i utfallet (kun tall: to etiketter, én note), i tellerne og i ÉN logglinje med kode - aldri etikettinnhold.
+    expect(out.inventory_skipped).toEqual({ invalid: 2, rejected: 0 });
+    expect(pipeline.stats()).toEqual({ inventory_label_invalid: 2, inventory_label_rejected: 0, last_inventory_skip_at: clock.toISOString() });
+    const lines = skipLines(warn);
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0] as string)).toEqual({ msg: "vision_inventory_skipped", camera_id: camera.camera_id, code: "inventory_label_invalid", invalid: 2, rejected: 0 });
+    expect(lines[0]).not.toMatch(/sekk|men|kaffe/);
+    // Tellerne er kumulative: en ny hendelse med to hopp til gir 4 totalt og en ny logglinje.
+    const again = await pipeline.processCaptured(ctx, camera, spec());
+    expect(again.inventory_skipped).toEqual({ invalid: 2, rejected: 0 });
+    expect(pipeline.stats().inventory_label_invalid).toBe(4);
+    expect(skipLines(warn)).toHaveLength(2);
+  });
+
+  it("pollSource summerer hoppede inventarskrivinger (invalid) i PollSummary - kun tall, kun når > 0; en runde uten hopp har ingen av feltene", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const source: VisionSource = {
+      source_type: "home_assistant",
+      pollEvents: async (cams) =>
+        cams.map((c) => ({ source_type: "home_assistant", source_instance_id: c.camera_id, source_event_id: `${c.source_ref}@poll-${++seq}`, event_type: "motion_detected" as const, observed_at: clock.toISOString(), age_ms: 1_000, trigger: "binary_sensor.motion" })),
+      fetchSnapshot: async () => ({ bytes: makeJpeg(), declared_type: "image/jpeg" })
+    };
+    const skipping = await pipelineWith(stubClassifier([{ event_type: "object_detected", object_label: "sekk's", confidence: 0.9 }, { event_type: "object_detected", object_label: "men's", confidence: 0.8 }])).pollSource(ctx, source, [camera]);
+    expect(skipping).toStrictEqual({ events_seen: 1, recorded: 1, duplicates: 0, discarded: 0, cooldown: 0, failed: 0, inventory_label_invalid: 2 }); // `inventory_label_rejected` er ikke med: kun felt > 0
+    expect(JSON.stringify(skipping)).not.toMatch(/sekk|men/);
+    expect(skipLines(warn)).toHaveLength(1);
+    const clean = await pipelineWith(stubClassifier([{ event_type: "object_detected", object_label: "kaffekopp", confidence: 0.9 }])).pollSource(ctx, source, [camera]);
+    expect(clean).toStrictEqual({ events_seen: 1, recorded: 1, duplicates: 0, discarded: 0, cooldown: 0, failed: 0 });
   });
 
   it("databasen avviser en etikett JS-regelen godtok (CHECK strammet inn / driftet): KUN inventarskrivingen rulles tilbake (savepoint) - hendelsene, og neste objekts inventar, består", async () => {
@@ -407,13 +450,15 @@ describe("pipelinen: en etikett som ikke kan bli inventar tar aldri basishendels
     await db.admin.query(`ALTER TABLE vision_inventory_items DROP CONSTRAINT ${INV_CHECK}`);
     // NOT VALID: den strammere regelen gjelder nye rader, og trenger ikke å validere radene tidligere tester la inn.
     await db.admin.query(`ALTER TABLE vision_inventory_items ADD CONSTRAINT ${INV_CHECK} CHECK (object_label <> 'driftet') NOT VALID`);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     try {
-      const out = await pipelineWith(
+      const pipeline = pipelineWith(
         stubClassifier([
           { event_type: "object_detected", object_label: "driftet", confidence: 0.9 },
           { event_type: "object_detected", object_label: "sekk", confidence: 0.8 }
         ])
-      ).processCaptured(ctx, camera, spec());
+      );
+      const out = await pipeline.processCaptured(ctx, camera, spec());
       expect(out).toMatchObject({ status: "recorded", detection_count: 2 });
       expect(out.observation_ids).toHaveLength(3);
       expect(out.notes).toContain("inventory_label_rejected");
@@ -421,6 +466,13 @@ describe("pipelinen: en etikett som ikke kan bli inventar tar aldri basishendels
       expect(await storedLabels(out.observation_ids)).toEqual([null, "driftet", "sekk"]);
       expect(await inventoryLabels()).toContain("sekk");
       expect(await inventoryLabels()).not.toContain("driftet");
+      // SYNLIGHET: databasen sa nei til en etikett JS godtok (drift mellom regelsettene) - den alvorligste årsaken: tall i utfallet og tellerne, og koden i loggen. Aldri etikettinnhold.
+      expect(out.inventory_skipped).toEqual({ invalid: 0, rejected: 1 });
+      expect(pipeline.stats()).toEqual({ inventory_label_invalid: 0, inventory_label_rejected: 1, last_inventory_skip_at: clock.toISOString() });
+      const lines = skipLines(warn);
+      expect(lines).toHaveLength(1);
+      expect(JSON.parse(lines[0] as string)).toEqual({ msg: "vision_inventory_skipped", camera_id: camera.camera_id, code: "inventory_label_rejected", invalid: 0, rejected: 1 });
+      expect(lines[0]).not.toMatch(/driftet|sekk/);
     } finally {
       await db.admin.query(`ALTER TABLE vision_inventory_items DROP CONSTRAINT ${INV_CHECK}`);
       await db.admin.query(`ALTER TABLE vision_inventory_items ADD CONSTRAINT ${INV_CHECK} CHECK ${original}`);
@@ -432,18 +484,44 @@ describe("pipelinen: en etikett som ikke kan bli inventar tar aldri basishendels
   });
 
   it("savepointet er IKKE et «svelg alt»: enhver annen feil i inventarskrivingen (FK, en annen CHECK) ruller hele hendelsen tilbake som før (`failed`, ingenting lagret)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
     for (const [code, constraint] of [["23503", "vision_inventory_room_fkey"], ["23514", "vision_inventory_items_confidence_check"], ["23514", undefined]] as const) {
       const s = spec();
       inventory.failWith = Object.assign(new Error("simulert"), { code, ...(constraint !== undefined ? { constraint } : {}) });
+      const pipeline = pipelineWith(stubClassifier([{ event_type: "object_detected", object_label: "sekk", confidence: 0.9 }]));
       try {
-        const out = await pipelineWith(stubClassifier([{ event_type: "object_detected", object_label: "sekk", confidence: 0.9 }])).processCaptured(ctx, camera, s);
+        const out = await pipeline.processCaptured(ctx, camera, s);
         expect(out, `${code} ${constraint}`).toMatchObject({ status: "failed", reason: "pipeline_error", notes: [`db_${code}`] });
+        expect(out.inventory_skipped).toBeUndefined();
       } finally {
         inventory.failWith = null;
       }
       const stored = (await db.admin.query(`SELECT count(*)::int AS n FROM vision_event_observations WHERE source_event_id LIKE $1`, [`${s.source_event_id}%`])).rows[0].n as number;
       expect(stored, `ingen delvis skriving etter ${code} ${constraint}`).toBe(0);
+      // En tilbakerullet hendelse teller aldri (ingenting er lagret, så det finnes ikke noe hopp å melde).
+      expect(pipeline.stats(), `ingen telling etter ${code} ${constraint}`).toEqual({ inventory_label_invalid: 0, inventory_label_rejected: 0, last_inventory_skip_at: null });
     }
+    expect(skipLines(warn)).toEqual([]);
+  });
+
+  it("en tilbakerullet hendelse teller ALDRI hoppede etiketter: et hopp tidligere i transaksjonen som deretter ruller tilbake (feil på neste objekts inventar) gir verken teller, utfall eller logglinje", async () => {
+    inventory.calls = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const s = spec();
+    // Første objekt har ikke inventarform (hoppes over: invalid = 1 INNE i transaksjonen); andre objekt feiler med en ekte FK-feil, som ruller hele hendelsen tilbake.
+    inventory.failWith = Object.assign(new Error("simulert"), { code: "23503", constraint: "vision_inventory_room_fkey" });
+    const pipeline = pipelineWith(stubClassifier([{ event_type: "object_detected", object_label: "sekk's", confidence: 0.9 }, { event_type: "object_detected", object_label: "sekk", confidence: 0.8 }]));
+    try {
+      const out = await pipeline.processCaptured(ctx, camera, s);
+      expect(out).toMatchObject({ status: "failed", notes: ["db_23503"] });
+      expect(out.inventory_skipped).toBeUndefined();
+    } finally {
+      inventory.failWith = null;
+    }
+    expect(pipeline.stats()).toEqual({ inventory_label_invalid: 0, inventory_label_rejected: 0, last_inventory_skip_at: null });
+    expect(skipLines(warn)).toEqual([]);
   });
 
   it("uten rom på kameraet, eller uten inventar-tjeneste, skrives det aldri til inventaret (og ingen note)", async () => {
@@ -451,12 +529,17 @@ describe("pipelinen: en etikett som ikke kan bli inventar tar aldri basishendels
     const noRoom = await new VisionCameraService(db.app).registerCamera(tenant, "home", {
       person_id: owner, label: "Garasje", source_type: "home_assistant", source_ref: "camera.garasje", trigger_entities: ["binary_sensor.motion"], zone_kind: "home", route_policy: "local_only", cooldown_seconds: 30
     });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const detections: VisionDetection[] = [{ event_type: "object_detected", object_label: "sekk's", confidence: 0.9 }];
     const withoutRoom = await pipelineWith(stubClassifier(detections)).processCaptured(ctx, noRoom, spec());
     expect(withoutRoom.status).toBe("recorded");
     const withoutService = await new VisionIngestPipeline({ pool: db.app, vision, classifier: stubClassifier(detections), enabled: true, storeSnapshots: false, now: () => clock }).processCaptured(ctx, camera, spec());
     expect(withoutService.status).toBe("recorded");
-    for (const out of [withoutRoom, withoutService]) expect(out.notes.filter((note) => note.startsWith("inventory_"))).toEqual([]);
+    for (const out of [withoutRoom, withoutService]) {
+      expect(out.notes.filter((note) => note.startsWith("inventory_"))).toEqual([]);
+      expect(out.inventory_skipped).toBeUndefined(); // inventaret ble aldri forsøkt, så det finnes intet hopp å melde
+    }
     expect(inventory.calls).toEqual([]);
+    expect(skipLines(warn)).toEqual([]);
   });
 });

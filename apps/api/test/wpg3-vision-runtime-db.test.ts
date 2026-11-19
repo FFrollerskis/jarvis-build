@@ -188,7 +188,10 @@ describe("B-L8: vedlikeholdsfeil og stuck gravsteiner synes (kastes, full-kjøri
 
   it("status(): uten poller/lagring er alt av; med STORAGE_DIR (uten STORE_SNAPSHOTS) er KUN vedlikeholdet på, og med STORE_SNAPSHOTS også skrivingen - ingen stier, URL-er eller hemmeligheter i svaret", async () => {
     const off = track(buildVisionRuntime(baseDeps({ JARVIS_VISION_ENABLED: "on" })));
-    expect(off.status()).toEqual({ poller: { enabled: false }, maintenance: { light: null, full: null }, storage: { maintenance_enabled: false, writing_enabled: false }, classifier: false, embeddings: true });
+    expect(off.status()).toEqual({
+      poller: { enabled: false }, maintenance: { light: null, full: null }, ingest: { inventory_label_invalid: 0, inventory_label_rejected: 0, last_inventory_skip_at: null },
+      storage: { maintenance_enabled: false, writing_enabled: false }, classifier: false, embeddings: true
+    });
     off.stop();
     const root = await mkdtemp(join(tmpdir(), "jarvis-vision-g3rt-st-"));
     const maintenanceOnly = track(buildVisionRuntime(baseDeps({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_STORAGE_DIR: root })));
@@ -280,5 +283,46 @@ describe("review delta B LOW-D4: lett vedlikehold overlapper aldri seg selv, og 
     expect(runtime.status().maintenance.full).toMatchObject({ failed: 0, temp_files_purged: 1, temp_files_truncated: false });
     expect(await filesIn(root)).toEqual([]);
     runtime.stop();
+  });
+});
+
+describe("review delta2 A LOW-E3 + B LOW-E1: hoppede inventarskrivinger er SYNLIGE i status().ingest (kun tall og tidspunkt)", () => {
+  it("startverdi 0/null; et hopp (databasen avviser en etikett JS godtok) teller kumulativt i status().ingest og logges - aldri med etikettinnhold", async () => {
+    const gateway = new ScriptedGateway();
+    gateway.text = detectionsJson([{ event_type: "object_detected", object_label: "driftet", confidence: 0.9 }]);
+    const runtime = track(buildVisionRuntime(baseDeps({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_CLASSIFIER: "on", JARVIS_VISION_LOCAL_URL: "http://127.0.0.1:11434" }, { gateway })));
+    expect(runtime.status().ingest).toEqual({ inventory_label_invalid: 0, inventory_label_rejected: 0, last_inventory_skip_at: null });
+    const room = (await vision.createRoom(T1.tenant, "home", { person_id: T1.owner, name: "Ingest-rom" })).room_id;
+    const camera = await cameras.registerCamera(T1.tenant, "home", {
+      person_id: T1.owner, label: "Ingest", source_type: "home_assistant", source_ref: "camera.ingest_skip", trigger_entities: [], zone_kind: "home", route_policy: "local_only", room_id: room
+    });
+    const ctx = { tenant_id: T1.tenant, memory_space: "home" as const, person_id: T1.owner, task_id: "task-ingest-skip" };
+    const event = (id: number) => ({
+      source_type: "home_assistant", source_event_id: `binary_sensor.ingest@skip-${id}`, base_event_type: "motion_detected" as const, observed_at: new Date().toISOString(), age_ms: 10, skipCooldown: true,
+      getImage: async () => ({ bytes: makeJpeg(), declared_type: "image/jpeg" })
+    });
+    const check = "vision_inventory_items_object_label_check";
+    const original = ((await db.admin.query(`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = $1`, [check])).rows[0] as { def: string }).def.replace(/^CHECK\s*/, "").replace(/\s+NOT VALID$/, "");
+    await db.admin.query(`ALTER TABLE vision_inventory_items DROP CONSTRAINT ${check}`);
+    await db.admin.query(`ALTER TABLE vision_inventory_items ADD CONSTRAINT ${check} CHECK (object_label <> 'driftet') NOT VALID`);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const first = await runtime.pipeline.processCaptured(ctx, camera, event(1));
+      expect(first).toMatchObject({ status: "recorded", inventory_skipped: { invalid: 0, rejected: 1 } });
+      const afterFirst = runtime.status().ingest;
+      expect(afterFirst).toMatchObject({ inventory_label_invalid: 0, inventory_label_rejected: 1 });
+      expect(afterFirst.last_inventory_skip_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+      await runtime.pipeline.processCaptured(ctx, camera, event(2));
+      expect(runtime.status().ingest.inventory_label_rejected).toBe(2); // kumulativt
+      const lines = warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("vision_inventory_skipped"));
+      expect(lines).toHaveLength(2); // én logglinje per hendelse
+      expect(JSON.parse(lines[0] as string)).toMatchObject({ msg: "vision_inventory_skipped", code: "inventory_label_rejected", invalid: 0, rejected: 1 });
+      expect(JSON.stringify(runtime.status())).not.toContain("driftet");
+      expect(lines.join("\n")).not.toContain("driftet");
+    } finally {
+      await db.admin.query(`ALTER TABLE vision_inventory_items DROP CONSTRAINT ${check}`);
+      await db.admin.query(`ALTER TABLE vision_inventory_items ADD CONSTRAINT ${check} CHECK ${original}`);
+      runtime.stop();
+    }
   });
 });

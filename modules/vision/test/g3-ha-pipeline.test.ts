@@ -167,6 +167,34 @@ describe("poll -> pipeline", () => {
     expect(ha.requests).toEqual([]);
   });
 
+  it("review delta2 A LOW-E3 + B LOW-E1: en poll-runde der inventaret for en etikett hoppes over (databasen avviser den) melder tallet i PollSummary (kun tall, kun når > 0) - hendelsen er lagret, og vanlige runder har ingen slike felt", async () => {
+    const camera = await registerCamera("local_only");
+    motionNow(camera.trigger_entities[0] as string);
+    ha.setImage(camera.source_ref, makeJpeg());
+    gateway.text = detectionsJson([{ event_type: "object_detected", object_label: "driftet", confidence: 0.9 }, { event_type: "object_detected", object_label: "pakke", confidence: 0.8 }]);
+    // CHECK-en strammes inn (NOT VALID: gjelder nye rader) slik at databasen avviser en etikett JS-regelen godtar - samme drift savepointet beskytter mot.
+    const check = "vision_inventory_items_object_label_check";
+    const original = ((await db.admin.query(`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = $1`, [check])).rows[0] as { def: string }).def.replace(/^CHECK\s*/, "").replace(/\s+NOT VALID$/, "");
+    await db.admin.query(`ALTER TABLE vision_inventory_items DROP CONSTRAINT ${check}`);
+    await db.admin.query(`ALTER TABLE vision_inventory_items ADD CONSTRAINT ${check} CHECK (object_label <> 'driftet') NOT VALID`);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const pipeline = makePipeline();
+      const summary = await pipeline.pollSource(ctx, source, [camera]);
+      expect(summary).toStrictEqual({ events_seen: 1, recorded: 1, duplicates: 0, discarded: 0, cooldown: 0, failed: 0, inventory_label_rejected: 1 }); // `inventory_label_invalid` er ikke med: kun felt > 0
+      expect(JSON.stringify(summary)).not.toContain("driftet"); // kun tall, aldri etikettinnhold
+      expect(await count(`SELECT count(*)::int AS n FROM vision_event_observations WHERE source_instance_id = $1 AND object_label = 'driftet'`, [camera.camera_id])).toBe(1); // hendelsen ER lagret
+      expect(await count(`SELECT count(*)::int AS n FROM vision_inventory_items WHERE person_id = $1 AND object_label = 'pakke'`, [T.owner])).toBeGreaterThanOrEqual(1); // ... og neste objekts inventar også
+      expect(await count(`SELECT count(*)::int AS n FROM vision_inventory_items WHERE person_id = $1 AND object_label = 'driftet'`, [T.owner])).toBe(0);
+      expect(pipeline.stats()).toMatchObject({ inventory_label_invalid: 0, inventory_label_rejected: 1 });
+      expect(warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("vision_inventory_skipped"))).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+      await db.admin.query(`ALTER TABLE vision_inventory_items DROP CONSTRAINT ${check}`);
+      await db.admin.query(`ALTER TABLE vision_inventory_items ADD CONSTRAINT ${check} CHECK ${original}`);
+    }
+  });
+
   it("tokenet (og HA-URL-en) finnes ingensteds i vision-tabellene - heller ikke i feilkoder", async () => {
     for (const table of ["vision_cameras", "vision_event_observations", "vision_snapshots", "vision_snapshot_tombstones", "vision_inventory_items", "vision_capture_requests", "vision_retention_policies", "vision_rooms"]) {
       const rows = (await db.admin.query(`SELECT t::text AS row FROM ${table} t`)).rows as Array<{ row: string }>;
