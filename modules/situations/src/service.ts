@@ -1329,6 +1329,15 @@ export class SituationEngine {
     });
   }
 
+  /** Pauset akkurat nå (domenet eller hele motoren)? Prosess-cachen (rask) OG den varige databasen (autoritativ), samme tabell og regel som `actOn()`. */
+  private async isDomainPausedNow(tenantId: string, memorySpace: MemorySpace, domain: string): Promise<boolean> {
+    if (this.domainPauses.isPaused(domain)) return true;
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(`SELECT 1 FROM situation_domain_pauses WHERE domain = ANY($1::text[])`, [[domain, ALL_DOMAINS]]);
+      return rows.length > 0;
+    });
+  }
+
   /**
    * Bokfør leveranse for NØYAKTIG ett anker. WHERE-betinget på ankeret: har
    * en ny syklus flyttet `last_notified_at` i mellomtiden, treffer denne
@@ -1381,6 +1390,11 @@ export class SituationEngine {
     const pending = deliverable.slice(0, MAX_INFORM_DELIVERIES_PER_SWEEP);
     result.deferred = deliverable.length - pending.length;
     for (const item of pending) {
+      // WP-G4 fiks-runde (A-MEDIUM-3): pausene leses PER VARSEL (ikke bare én gang øverst i kallet): en pause satt midt i leveringen stopper de gjenstående varslene med en gang (cache + varig database, som `actOn()`).
+      if (await this.isDomainPausedNow(tenantId, memorySpace, item.situation.domain)) {
+        result.paused += 1;
+        continue;
+      }
       const key = computeInformNotifyKey(item.situation.situation_id, item.anchor, item.message);
       const evidence = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
         const { rows } = await client.query(

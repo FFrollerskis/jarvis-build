@@ -3,7 +3,8 @@ import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import type { ToolGateway } from "@jarvis/tool-gateway";
 import type { HealthObservation } from "./health-bridge.ts";
 import type { HomeObservation } from "./home-bridge.ts";
-import { emptyBatchResult, mergeBatchResults, type SituationSignalBus, type SignalBatchResult } from "./signal-bus.ts";
+import { ALL_DOMAINS } from "./domain-pause.ts";
+import { emptyBatchResult, mergeBatchResults, type PendingAssistEntry, type SituationSignalBus, type SignalBatchResult } from "./signal-bus.ts";
 import type { IncidentObservation, SignalObservation } from "./signal-bridges.ts";
 import { SignalLogService } from "./signal-log.ts";
 import { HEALTH_SIGNAL_METRICS, type HealthSignalMetric, type HomeFilter, type SignalSource } from "./signal-types.ts";
@@ -24,6 +25,10 @@ import { parseFilter } from "./signal-bridges.ts";
  *
  * Frekvens: `cadence` er «hvert N-te tikk» per kilde (standard: hjem/kamera/hendelser hvert tikk, helse hvert 15. - baselines endrer seg langsomt og lesingen aggregerer over uker). `now` og tikk-teller er injiserbare.
  * Daglig opprydding av signalloggen kjøres av løperen (høyst én gang per 24 timer per prosess og (tenant, space)).
+ *
+ * FIKS-RUNDE (A-MEDIUM-2/3): (1) DETERMINISTISK FØRST: i fase 1 evalueres og leveres alt uten ett eneste modellkall (en vannlekkasje venter aldri på en modell); modellvurderingen (valgfri) kjøres i fase 2, ETTER at alle mål er evaluert og levert,
+ * med tak per (tenant, rom) og ETT felles tidsbudsjett per tikk (`assistBudgetMs`, vegg-tid; et kall som ikke er ferdig avbrytes og regnes som `unavailable`). Et løft leveres umiddelbart etterpå. (2) PAUSE: en kilde der ALLE abonnementsdomener
+ * er pauset (eller hele motoren) LESES IKKE (helsedata leses ikke mens helse er pauset); bussen sjekker pausen per observasjon uansett (en delvis pause og en pause satt midt i et tikk er fortsatt trygt).
  */
 export interface SourceReadContext {
   tenant_id: string;
@@ -52,6 +57,8 @@ export const DEFAULT_SIGNAL_CADENCE: Readonly<Partial<Record<SignalSource, numbe
 /** Hendelsesbaserte kilder leses med dette vinduet (3 x tikk, minst 10 min): overlapp mellom tikk er trygt fordi loggen er idempotent. */
 export const MIN_VISION_LOOKBACK_MS = 10 * 60_000;
 export const MAX_ASSIST_CALLS_PER_TICK = 5;
+/** Samlet vegg-tidsbudsjett for ALLE modellvurderinger i ett tikk (fase 2). Kall som ikke er ferdige da avbrytes; deterministisk evaluering og levering er allerede ferdig. */
+export const DEFAULT_ASSIST_TICK_BUDGET_MS = 20_000;
 const DAY_MS = 86_400_000;
 
 export interface SignalRunnerDeps {
@@ -69,6 +76,8 @@ export interface SignalRunnerDeps {
   intervalMs: number;
   logRetentionDays?: number;
   cadence?: Readonly<Partial<Record<SignalSource, number>>>;
+  /** Samlet tidsbudsjett (ms, vegg-tid) for modellvurderinger per tikk (se `DEFAULT_ASSIST_TICK_BUDGET_MS`). */
+  assistBudgetMs?: number;
   now?: () => number;
 }
 
@@ -79,6 +88,8 @@ export interface SignalTickResult {
   spaces: number;
   bus: SignalBatchResult;
   sources_read: number;
+  /** Kilder som ikke ble lest fordi alle abonnementsdomenene (eller hele motoren) er pauset. */
+  sources_skipped_paused: number;
   source_failures: number;
   delivered: number;
   auto_act_attempted: number;
@@ -151,7 +162,7 @@ export class SituationSignalRunner {
   }
 
   async tick(): Promise<SignalTickResult> {
-    const result: SignalTickResult = { status: "ok", tick: 0, spaces: 0, bus: emptyBatchResult(), sources_read: 0, source_failures: 0, delivered: 0, auto_act_attempted: 0, errors: [] };
+    const result: SignalTickResult = { status: "ok", tick: 0, spaces: 0, bus: emptyBatchResult(), sources_read: 0, sources_skipped_paused: 0, source_failures: 0, delivered: 0, auto_act_attempted: 0, errors: [] };
     if (this.running) {
       result.status = "blocked";
       result.reason = "tick_in_progress";
@@ -169,6 +180,8 @@ export class SituationSignalRunner {
         return result;
       }
       const cadence = { ...DEFAULT_SIGNAL_CADENCE, ...(this.deps.cadence ?? {}) };
+      // A-MEDIUM-2: signaler som er evaluert deterministisk (fase 1) og venter på modellvurdering (fase 2), samlet per (tenant, rom).
+      const pendingAssists: Array<{ tenantId: string; space: MemorySpace; entries: PendingAssistEntry[] }> = [];
       for (const target of this.deps.targets) {
         const stop = await this.blockedReason();
         if (stop !== null) {
@@ -184,10 +197,16 @@ export class SituationSignalRunner {
           const ctx: SourceReadContext = { tenant_id: tenantId, memory_space: space, now: this.now() };
           const bySource = new Map<SignalSource, SituationSubscription[]>();
           for (const sub of subs) bySource.set(sub.source, [...(bySource.get(sub.source) ?? []), sub]);
-          const assistBudget = { remaining: MAX_ASSIST_CALLS_PER_TICK };
+          const pending: PendingAssistEntry[] = [];
+          // A-MEDIUM-3: pausene leses ÉN gang per mål (cache + varig); en kilde der ALLE abonnementsdomener er pauset (eller hele motoren) leses ikke.
+          const paused = await this.deps.bus.pausedDomains(tenantId, space);
           for (const [source, sourceSubs] of bySource) {
             const every = Math.max(1, cadence[source] ?? 1);
             if (this.tickCount % every !== 0 && this.tickCount !== 1) continue;
+            if (paused.has(ALL_DOMAINS) || sourceSubs.every((s) => paused.has(s.domain))) {
+              result.sources_skipped_paused += 1;
+              continue;
+            }
             let observations: SignalObservation[];
             try {
               const read = await this.read(source, sourceSubs, ctx);
@@ -201,8 +220,9 @@ export class SituationSignalRunner {
               console.error(JSON.stringify({ msg: "situation_signal_source_failed", tenant_id: tenantId, memory_space_id: space, source, code: codeOf(err) }));
               continue;
             }
-            mergeBatchResults(result.bus, await this.deps.bus.publishBatch(tenantId, space, observations, { task_id: `situation-signals:${source}`, session_id: "situation-signal-runner", assistBudget }));
+            mergeBatchResults(result.bus, await this.deps.bus.publishBatch(tenantId, space, observations, { task_id: `situation-signals:${source}`, session_id: "situation-signal-runner", assistPhase: "deterministic", pendingAssist: pending }));
           }
+          if (pending.length > 0) pendingAssists.push({ tenantId, space, entries: pending });
           const identity = this.deps.identityFor(tenantId, space);
           try {
             const delivery = await this.deps.engine.deliverPendingInformNotifications(tenantId, space, this.deps.gateway, identity);
@@ -223,10 +243,39 @@ export class SituationSignalRunner {
           console.error(JSON.stringify({ msg: "situation_signal_target_failed", tenant_id: tenantId, memory_space_id: space, code: codeOf(err) }));
         }
       }
+      // Fase 2 (A-MEDIUM-2): modellvurdering ETTER at alt deterministisk er evaluert og levert for alle mål.
+      if (pendingAssists.length > 0 && result.status === "ok") {
+        const stop = await this.blockedReason();
+        if (stop !== null) {
+          result.status = "blocked";
+          result.reason = stop;
+        } else {
+          await this.runAssistPhase(pendingAssists, result);
+        }
+      }
       this.last = result;
       return result;
     } finally {
       this.running = false;
+    }
+  }
+
+  /** Fase 2: tak per (tenant, rom) og ETT felles vegg-tidsbudsjett per tikk. Et løft (nytt varsel) leveres umiddelbart etterpå. Feil telles med kode og stopper aldri resten. */
+  private async runAssistPhase(work: ReadonlyArray<{ tenantId: string; space: MemorySpace; entries: PendingAssistEntry[] }>, result: SignalTickResult): Promise<void> {
+    const deadline = Date.now() + Math.max(1, this.deps.assistBudgetMs ?? DEFAULT_ASSIST_TICK_BUDGET_MS);
+    for (const { tenantId, space, entries } of work) {
+      try {
+        const out = await this.deps.bus.publishPendingAssists(tenantId, space, entries, { session_id: "situation-signal-runner", assistBudget: { remaining: MAX_ASSIST_CALLS_PER_TICK }, assistDeadlineAt: deadline });
+        mergeBatchResults(result.bus, out);
+        if (out.newly_actionable > 0) {
+          const delivery = await this.deps.engine.deliverPendingInformNotifications(tenantId, space, this.deps.gateway, this.deps.identityFor(tenantId, space));
+          result.delivered += delivery.delivered + delivery.reconciled_from_evidence;
+        }
+      } catch (err) {
+        result.source_failures += 1;
+        if (result.errors.length < 20) result.errors.push(`assist:${codeOf(err)}`);
+        console.error(JSON.stringify({ msg: "situation_signal_assist_failed", tenant_id: tenantId, memory_space_id: space, code: codeOf(err) }));
+      }
     }
   }
 

@@ -16,8 +16,10 @@ import type { Situation } from "./types.ts";
  *   1. hendelsestype (lukket sett)    -> ingen regel = ingen signal
  *   2. abonnement (eierens register)  -> ingen aktivt abonnement = forkastet (fail-closed), aldri et stille standardvalg
  *   3. bro (ren, terskler tunet innenfor harde grenser) -> under terskel/utenfor filter = ingen signal
- *   4. PAUSE (domene og hele motoren, både prosess-cache og varig database) -> pauset = ikke innlest (ikke bufret; tilstandsbaserte kilder gjenoppdages ved neste tikk, hendelsesbaserte innenfor oppslagsvinduet)
- *   5. (valgfritt) modellassistert vurdering - kun et løft `low` -> `normal`, aldri ACT (assist.ts)
+ *   4. PAUSE (domene og hele motoren, både prosess-cache og varig database) -> pauset = ikke innlest (ikke bufret; tilstandsbaserte kilder gjenoppdages ved neste tikk, hendelsesbaserte innenfor oppslagsvinduet).
+ *      Sjekkes på nytt RETT ETTER en modellvurdering (en pause satt mens modellen vurderte slipper ikke signalet gjennom), og løperen leser ikke engang kilden når alle abonnementsdomenene er pauset (`pausedDomains`).
+ *   5. (valgfritt) modellassistert vurdering - kun et løft `low` -> `normal`, aldri ACT (assist.ts). I løperen kjøres den ETTER deterministisk evaluering og levering (fase 2, `publishPendingAssists`) med tak og tidsbudsjett:
+ *      et haste-signal (lekkasje, alarm) venter aldri på en modell.
  *   6. `SituationEngine.evaluateCandidate()` - dedupe, undertrykking, stille timer og tilstandsmaskin er MOTORENS (gjenbrukt uendret)
  *   7. signallogg (idempotent på kilde + `source_ref`) - UNNTATT et signal motoren HOLDER tilbake (stille timer, B-HIGH-1): det logges IKKE (se `heldByQuietHours`), så neste tikk evaluerer det på nytt og varselet
  *      går ut når stille timer er over. Loggen betyr «ferdig behandlet», aldri «sett mens vi ikke kunne varsle».
@@ -32,7 +34,7 @@ export type IgnoredReason = "no_rule" | "no_subscription" | "no_signal" | "pause
 
 export type PublishResult =
   | { status: "ignored"; reason: IgnoredReason }
-  | { status: "evaluated"; situation: Situation; created: boolean; newly_actionable: boolean; uplifted: boolean; held: boolean }
+  | { status: "evaluated"; situation: Situation; created: boolean; newly_actionable: boolean; uplifted: boolean; held: boolean; assist_pending: boolean }
   | { status: "failed"; code: string };
 
 /**
@@ -52,7 +54,11 @@ export interface SignalBatchResult {
   /** Evaluert, men ikke logget fordi stille timer holder varselet tilbake (re-evalueres neste tikk). */
   held: number;
   failed: number;
-  assist: { assessed: number; rejected: number; unavailable: number; uplifted: number; cached: number; skipped_cap: number };
+  /**
+   * `deferred`: assist-berettigede signaler som ble evaluert deterministisk først og venter på modellvurdering etter levering (A-MEDIUM-2); `skipped_cap`: over taket per (tenant, rom) og tikk; `skipped_budget`: tidsbudsjettet var brukt opp;
+   * en vurdering som ikke ble ferdig innen budsjettet teller som `unavailable` (kode `assist_budget_exceeded`).
+   */
+  assist: { assessed: number; rejected: number; unavailable: number; uplifted: number; cached: number; skipped_cap: number; skipped_budget: number; deferred: number };
   /** Korte koder (aldri innhold) for feil per observasjon. */
   errors: string[];
 }
@@ -61,7 +67,7 @@ export const emptyBatchResult = (): SignalBatchResult => ({
   received: 0,
   ignored: { no_rule: 0, no_subscription: 0, no_signal: 0, paused: 0, duplicate: 0 },
   evaluated: 0, created: 0, newly_actionable: 0, held: 0, failed: 0,
-  assist: { assessed: 0, rejected: 0, unavailable: 0, uplifted: 0, cached: 0, skipped_cap: 0 },
+  assist: { assessed: 0, rejected: 0, unavailable: 0, uplifted: 0, cached: 0, skipped_cap: 0, skipped_budget: 0, deferred: 0 },
   errors: []
 });
 
@@ -85,7 +91,7 @@ export interface RuleThresholdSource {
 export interface SignalBusDeps {
   pool: pg.Pool;
   engine: SituationEngine;
-  domainPauses: Pick<DomainPauseRegistry, "isPaused">;
+  domainPauses: Pick<DomainPauseRegistry, "isPaused" | "pausedDomains">;
   /** Aktive abonnementer for (tenant, space). Injiseres som funksjon så bussen ikke avhenger av registerets implementasjon. */
   subscriptions: (tenantId: string, memorySpace: MemorySpace) => Promise<readonly SituationSubscription[]>;
   tuning?: RuleThresholdSource;
@@ -93,11 +99,32 @@ export interface SignalBusDeps {
   now?: () => number;
 }
 
+/** Et assist-berettiget signal som er evaluert deterministisk og venter på modellvurdering (fase 2). Bærer kun den minimerte observasjonen; alt annet utledes på nytt (broen er ren). */
+export interface PendingAssistEntry {
+  observation: SignalObservation;
+  /** Var situasjonen ny i fase 1? (loggraden skal si `created`, ikke `updated`, også når den skrives i fase 2). */
+  created: boolean;
+}
+
 export interface PublishContext {
   task_id?: string;
   session_id?: string;
   /** Maks antall modellkall i denne batchen (kostnad/tid). Resten får kun den deterministiske regelen. */
   assistBudget?: { remaining: number };
+  /**
+   * A-MEDIUM-2: HVORDAN modellassistansen kjøres.
+   *  - `inline` (standard, uendret): modellen kalles midt i publiseringen (tester, simulering).
+   *  - `deterministic` (løperens fase 1): INGEN modellkall - kun bufrede vurderinger brukes. Et assist-berettiget signal uten bufret vurdering evalueres deterministisk (og kan leveres) men LOGGES ikke; det samles i `pendingAssist`
+   *    og fullføres av `publishPendingAssists()` etter levering. Et haste-signal (`urgent`) venter dermed aldri på en modell.
+   *  - `assist` (fase 2): fullfører slike signaler, med taket `assistBudget` og tidsbudsjettet `assistDeadlineAt`.
+   */
+  assistPhase?: "inline" | "deterministic" | "assist";
+  /** Fase 1: her samler bussen signalene som venter på modellvurdering. */
+  pendingAssist?: PendingAssistEntry[];
+  /** Fase 2: absolutt vegg-tid (ms siden epoch) da modellbudsjettet er brukt opp; et kall som ikke er ferdig da avbrytes (`unavailable`/`assist_budget_exceeded`). */
+  assistDeadlineAt?: number;
+  /** Fase 2: var situasjonen ny i fase 1 (se `PendingAssistEntry.created`). */
+  createdHint?: boolean;
 }
 
 const codeOf = (err: unknown): string => {
@@ -121,6 +148,35 @@ export class SituationSignalBus {
       return found;
     });
     return rows.length > 0;
+  }
+
+  /**
+   * A-MEDIUM-3: alle pausede domener akkurat nå (prosess-cache OG varig database; `ALL_DOMAINS` = hele motoren). Løperen bruker det til å hoppe over KILDELESINGEN for pausede kilder (helsedata leses ikke mens helse er pauset);
+   * bussen sjekker pausen per observasjon uansett (`isPaused`), så en delvis pause (kilde med flere domener) er fortsatt trygg.
+   */
+  async pausedDomains(tenantId: string, memorySpace: MemorySpace): Promise<ReadonlySet<string>> {
+    const out = new Set<string>(this.deps.domainPauses.pausedDomains());
+    const rows = await withMemoryTransaction(this.deps.pool, tenantId, [memorySpace], async (client) => {
+      const { rows: found } = await client.query(`SELECT domain FROM situation_domain_pauses`);
+      return found as Array<{ domain: string }>;
+    });
+    for (const row of rows) out.add(row.domain);
+    return out;
+  }
+
+  /** Én modellvurdering innenfor det som er igjen av tidsbudsjettet (vegg-tid). Ikke ferdig i tide = `unavailable`; svaret som kommer senere forkastes (aldri brukt, aldri lagret). */
+  private async assessWithin(input: AssistInput, remainingMs: number | undefined): Promise<AssistOutcome> {
+    const assist = this.deps.assist as SignalAssist;
+    if (remainingMs === undefined) return assist.assess(input);
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<AssistOutcome>((resolve) => {
+      timer = setTimeout(() => resolve({ status: "unavailable", reason: "assist_budget_exceeded" }), Math.max(1, remainingMs));
+    });
+    try {
+      return await Promise.race([assist.assess(input), timeout]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   private async alreadyLogged(tenantId: string, memorySpace: MemorySpace, source: string, sourceRef: string): Promise<boolean> {
@@ -214,11 +270,14 @@ export class SituationSignalBus {
       if (await this.isPaused(tenantId, memorySpace, bridge.candidate.domain)) return { status: "ignored", reason: "paused" };
       if (await this.alreadyLogged(tenantId, memorySpace, bridge.source, bridge.source_ref)) return { status: "ignored", reason: "duplicate" };
 
-      // Modellassistert vurdering (valgfri): kun regler som er berettiget, og kun som et løft low -> normal (assist.ts). Hvert kall bundet til et tak per batch og til en digest (samme input = ett kall).
+      // Modellassistert vurdering (valgfri): kun regler som er berettiget, og kun som et løft low -> normal (assist.ts). Hvert kall bundet til et tak per batch, et tidsbudsjett og en digest (samme input = ett kall).
+      // A-MEDIUM-2: i løperens fase 1 (`deterministic`) kalles INGEN modell - signalet evalueres (og leveres) deterministisk først, og modellvurderingen kjøres etterpå i fase 2.
+      const phase = ctx.assistPhase ?? "inline";
       let candidate = bridge.candidate;
       let facts: SignalFacts = bridge.facts;
       let assessed: { digest: string; outcome: AssistOutcome } | null = null;
       let uplifted = false;
+      let assistPending = false;
       if (this.deps.assist && rule.assist) {
         const input: AssistInput = {
           tenant_id: tenantId, memory_space: memorySpace, rule_key: bridge.rule_key, domain: candidate.domain, priority: candidate.priority, facts: bridge.facts, detection_key: candidate.detection_key
@@ -228,15 +287,23 @@ export class SituationSignalBus {
         let outcome: AssistOutcome | null = existing === null ? null : await this.cachedAssessment(tenantId, memorySpace, existing.situation_id, digest);
         if (outcome !== null) {
           stats.assist.cached += 1;
+        } else if (phase === "deterministic") {
+          assistPending = true;
+          stats.assist.deferred += 1;
         } else if (ctx.assistBudget !== undefined && ctx.assistBudget.remaining <= 0) {
           stats.assist.skipped_cap += 1;
+        } else if (ctx.assistDeadlineAt !== undefined && ctx.assistDeadlineAt - Date.now() <= 0) {
+          stats.assist.skipped_budget += 1;
         } else {
           if (ctx.assistBudget !== undefined) ctx.assistBudget.remaining -= 1;
-          outcome = await this.deps.assist.assess(input);
+          outcome = await this.assessWithin(input, ctx.assistDeadlineAt === undefined ? undefined : ctx.assistDeadlineAt - Date.now());
           if (outcome.status === "assessed") stats.assist.assessed += 1;
           else if (outcome.status === "rejected") stats.assist.rejected += 1;
           else stats.assist.unavailable += 1;
+          // Et svar som ikke kom i tide er `unavailable`: ingenting lagres, og signalet behandles deterministisk (som før for `unavailable`).
           assessed = { digest, outcome };
+          // A-MEDIUM-3: en pause satt MENS modellen vurderte slipper aldri signalet gjennom (situasjon og logg skrives først etter denne sjekken).
+          if (await this.isPaused(tenantId, memorySpace, bridge.candidate.domain)) return { status: "ignored", reason: "paused" };
         }
         if (outcome !== null) {
           const applied = applyAssistToCandidate(candidate, outcome);
@@ -254,10 +321,12 @@ export class SituationSignalBus {
       const evaluated = await this.deps.engine.evaluateCandidate(
         tenantId, memorySpace, bridge.urgent ? { ...candidate, urgent: true } : candidate, this.now()
       );
-      const created = before === null;
+      const created = ctx.createdHint ?? before === null;
       const held = heldByQuietHours(evaluated, candidate.priority);
-      await this.persist(tenantId, memorySpace, bridge, facts, evaluated.situation, created, evaluated.newly_actionable, sub.subscription_id, ctx, assessed, held);
-      return { status: "evaluated", situation: evaluated.situation, created, newly_actionable: evaluated.newly_actionable, uplifted, held };
+      // Et signal som venter på modellvurdering (fase 1) logges først når fase 2 er ferdig (ellers ville fase 2 svart `duplicate` og aldri fått løftet). Kræsjer prosessen imellom, evalueres signalet på nytt neste tikk (idempotent).
+      await this.persist(tenantId, memorySpace, bridge, facts, evaluated.situation, created, evaluated.newly_actionable, sub.subscription_id, ctx, assessed, held || assistPending);
+      if (assistPending) ctx.pendingAssist?.push({ observation, created });
+      return { status: "evaluated", situation: evaluated.situation, created, newly_actionable: evaluated.newly_actionable, uplifted, held, assist_pending: assistPending };
     } catch (err) {
       if (err instanceof SituationDetectionKeyConflictError) return { status: "failed", code: "identity_conflict" };
       return { status: "failed", code: codeOf(err) };
@@ -291,6 +360,41 @@ export class SituationSignalBus {
         if (out.created) result.created += 1;
         if (out.newly_actionable) result.newly_actionable += 1;
         if (out.held) result.held += 1;
+      }
+    }
+    return result;
+  }
+
+  /**
+   * A-MEDIUM-2, fase 2: fullfører signalene som ble evaluert deterministisk (fase 1) og ventet på modellvurdering. Hvert signal går gjennom HELE rekkefølgen på nytt (pause, abonnement, bro, vurdering, evaluering, logg) med
+   * tak (`assistBudget`) og tidsbudsjett (`assistDeadlineAt`); et løft evalueres på nytt, og signalet logges først nå (med mindre stille timer holder det). Resultatet teller KUN det fase 2 tilfører (vurderinger, nye varsler, feil) -
+   * mottatt/evaluert/opprettet ble talt i fase 1. Kaster aldri.
+   */
+  async publishPendingAssists(tenantId: string, memorySpace: MemorySpace, entries: readonly PendingAssistEntry[], ctx: PublishContext = {}): Promise<SignalBatchResult> {
+    const result = emptyBatchResult();
+    if (entries.length === 0) return result;
+    let subs: readonly SituationSubscription[];
+    let thresholds: ReadonlyMap<string, number>;
+    try {
+      subs = await this.deps.subscriptions(tenantId, memorySpace);
+      thresholds = this.deps.tuning ? await this.deps.tuning.thresholds(tenantId, memorySpace) : new Map();
+    } catch (err) {
+      result.failed = entries.length;
+      result.errors.push(`setup:${codeOf(err)}`);
+      return result;
+    }
+    for (const entry of entries) {
+      const scratch = emptyBatchResult();
+      const out = await this.publish(
+        tenantId, memorySpace, entry.observation, subs, thresholds,
+        { ...ctx, task_id: ctx.task_id ?? `situation-signals:${entry.observation.source}`, assistPhase: "assist", createdHint: entry.created }, scratch
+      );
+      for (const key of Object.keys(result.assist) as Array<keyof SignalBatchResult["assist"]>) result.assist[key] += scratch.assist[key];
+      if (out.status === "failed") {
+        result.failed += 1;
+        if (result.errors.length < 20) result.errors.push(`${entry.observation.source}:${out.code}`);
+      } else if (out.status === "evaluated" && out.newly_actionable) {
+        result.newly_actionable += 1;
       }
     }
     return result;

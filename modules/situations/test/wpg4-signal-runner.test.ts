@@ -131,13 +131,15 @@ describe("B: signal -> situasjon -> varsel, i ett tikk, uten duplikater", () => 
     expect(actuator.calls.filter((c) => c.action === "close")).toHaveLength(1); // claimet: aldri en ny utførelse
   });
 
-  it("pause (domene) stanser innlesingen selv om leseren leverer: ingenting evalueres, og etter opphevet pause går signalet gjennom", async () => {
+  it("pause (domene) stanser innlesingen: kilden LESES ikke (fiks-runde A-MEDIUM-3; bussens per-observasjon-sjekk er dekket i wpg4-signal-bus), ingenting evalueres, og etter opphevet pause går signalet gjennom", async () => {
     await subscribeDoor();
-    const runner = makeRunner({ home: async () => [door()] });
+    let reads = 0;
+    const runner = makeRunner({ home: async () => { reads += 1; return [door()]; } });
     await db.domainPauses.pauseDurable("home", "eier stoppet", OWNER);
     const paused = await runner.tick();
-    expect(paused.bus).toMatchObject({ evaluated: 0 });
-    expect(paused.bus.ignored.paused).toBe(1);
+    expect(reads).toBe(0);
+    expect(paused.sources_skipped_paused).toBe(1);
+    expect(paused.bus).toMatchObject({ received: 0, evaluated: 0 });
     expect(paused.delivered).toBe(0);
     expect(telegram.calls).toHaveLength(0);
     await db.domainPauses.unpauseDurable("home", OWNER);
