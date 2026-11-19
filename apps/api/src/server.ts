@@ -673,6 +673,18 @@ const COMMS_ACTION_BODY_KEYS = ["grant_token", "action", "parameters", "idempote
 const COMMS_PREVIEW_BODY_KEYS = ["grant_token", "parameters"] as const;
 const COMMS_STEP_UP_EXEMPT: ReadonlySet<string> = new Set([...COMMS_READ_ACTIONS, ...COMMS_VENDOR_READ_ACTIONS, ...COMMS_CONTACT_READ_ACTIONS, ...COMMS_MEETING_READ_ACTIONS, "record_opt_out"]);
 
+/**
+ * B-M5: ÉN normalisering av forespørselsstien, brukt av BÅDE de strenge per-IP-begrenserne og rutingen (`route()` bruker `new URL(...).pathname`). Begrenseren nøklet før på den RÅ stien, så `/webhooks/comms/./slack` og
+ * `/webhooks/comms/%2e/slack` (samme rute etter URL-normalisering) aldri traff grensen (kun den romslige 600/min/IP-grensen gjaldt). Samme mønster gjaldt de eksisterende `AUTH_ROUTES`. Ugyldig URL faller tilbake til den rå stien.
+ */
+export function normalizedRequestPath(rawUrl: string | undefined): string {
+  try {
+    return new URL(rawUrl ?? "/", "http://localhost").pathname;
+  } catch {
+    return (rawUrl ?? "/").split("?")[0] ?? "/";
+  }
+}
+
 const limiterRegistry = new WeakMap<ServerResponse, RateLimiters>();
 
 function limitersFor(limits: ApiRateLimits): RateLimiters {
@@ -692,7 +704,7 @@ export function createApiServer(deps?: ApiDeps): Server {
     res.setHeader("x-request-id", requestId);
     limiterRegistry.set(res, limiters);
     const peer = clientKey(req);
-    const path = (req.url ?? "/").split("?")[0] ?? "/";
+    const path = normalizedRequestPath(req.url);
     const allowed = limiters.ip.take(peer) && (!(AUTH_ROUTES.has(path) || commsStrict.has(path)) || limiters.auth.take(`${peer}|${path}`));
     if (!allowed) {
       req.resume();

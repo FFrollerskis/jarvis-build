@@ -3,10 +3,10 @@ import type { JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { BusinessService } from "@jarvis/business";
 import { scanForSecrets } from "@jarvis/core";
 import type { ConversationGraphService } from "@jarvis/conversation-graph";
-import { recipientHash, recipientHint, sha256Hex, type CommsChannel } from "../channels.ts";
+import { optOutHash, recipientHash, recipientHint, sha256Hex, type CommsChannel } from "../channels.ts";
 import type { CommsConfig, CommsWebhookProvider } from "../config.ts";
 import { OPT_KEYWORD_CHANNELS, parseOptKeyword } from "../optout.ts";
-import type { Clock, CommsStore } from "../store.ts";
+import type { Clock, CommsStore, OptEffect } from "../store.ts";
 import { parseMetaBody, parseSlackBody, parseTelnyxBody, parseTwilioParams, type NormalizedInbound, type ParseOutcome } from "./parsers.ts";
 import { secretsEqual, verifyMetaSignature, verifySlackSignature, verifyTelnyxSignature, verifyTwilioSignature } from "./verify.ts";
 
@@ -60,6 +60,16 @@ export const WEBHOOK_MAX_BYTES = 256 * 1024;
 /** Avmeldings-/gjenopptakshendelser beholdes lenge (kun pseudonym, ingen tekst): en gjenspilt gammel START skal ikke kunne oppheve en nyere avmelding. */
 const OPT_EVENT_RETENTION_DAYS = 1825;
 const EXCERPT_MAX = 2000;
+/** DB-grensen for `evidence_ref` (migrasjon 118). Leverandørens hendelsesnøkkel kan være opptil 300 tegn (WhatsApp-meldings-id alene kan være 200). */
+const EVIDENCE_REF_MAX = 200;
+
+/**
+ * Peker fra en avmelding til hendelsen som beviste den (B-H2). Er nøkkelen for lang for kolonnen erstattes den av sin SHA-256 (`sha256:<hex>`, fortsatt sporbar mot hendelsesraden) - en avmelding kan ALDRI feile på lengden på en
+ * leverandør-id (før: WhatsApp-STOP med meldings-id på 194+ tegn ga CHECK-brudd ETTER at dedupe-raden var lagret, og avmeldingen gikk tapt for alltid).
+ */
+export function evidenceRefFor(eventKey: string): string {
+  return eventKey.length <= EVIDENCE_REF_MAX ? eventKey : `sha256:${sha256Hex(eventKey)}`;
+}
 
 /** Renser ubetrodd meldingstekst for lagring: kontrolltegn/usynlige tegn fjernes, hemmeligheter redigeres, lengden begrenses (kodepunkt-sikkert). */
 export function sanitizeInboundText(text: string | null): string | null {
@@ -193,31 +203,35 @@ export class CommsWebhookService {
     const { store, config, clock } = this.deps;
     const tenantId = config.webhook_tenant_id as string;
     const space: MemorySpace = config.webhook_memory_space;
-    // Kun kontoer eieren har autorisert: en hendelse til en ukjent konto lagres ikke (ingen unødvendige personopplysninger).
     const account = await store.findActiveAccount(tenantId, space, ev.channel, ev.account_ref);
-    if (account === null) { summary.ignored++; return; }
+    const keyword = ev.kind === "message" && ev.reply_to !== null && OPT_KEYWORD_CHANNELS.has(ev.channel) ? parseOptKeyword(ev.text) : null;
+    // Kun kontoer eieren har autorisert: en hendelse til en ukjent konto lagres ikke (ingen unødvendige personopplysninger). UNNTAK (A-M7): en STOP registreres ALLTID, også til en ikke-autorisert/tilbakekalt konto - mottakerens
+    // rett til å slippe avhenger ikke av at eieren har lagt kontoen i allowlisten (kun pseudonym + hint lagres, aldri tekst).
+    if (account === null && keyword !== "stop") { summary.ignored++; return; }
     // Ferskhet: en hendelse eldre enn dedupe-vinduet (retensjon) kan være en gjenspilling etter at dedupe-raden er slettet.
     if (ev.provider_ts !== null && clock().getTime() - Date.parse(ev.provider_ts) > config.inbound_retention_days * 86_400_000) { summary.ignored++; return; }
 
     const hash = ev.reply_to === null ? null : recipientHash(tenantId, ev.channel, ev.reply_to);
     const hint = ev.reply_to === null ? null : recipientHint(ev.channel, ev.reply_to);
-    const keyword = ev.kind === "message" && hash !== null && OPT_KEYWORD_CHANNELS.has(ev.channel) ? parseOptKeyword(ev.text) : null;
     const kind = keyword === "stop" ? "opt_out" : keyword === "start" ? "opt_in" : ev.kind;
     const excerpt = kind === "opt_out" || kind === "opt_in" ? null : sanitizeInboundText(ev.text);
     const identity = ev.kind === "message" && ev.sender !== null ? await this.resolveIdentity(tenantId, space, ev.channel, ev.sender) : null;
 
+    // B-H2: STOP/START skrives i SAMME transaksjon som dedupe-raden (en feil rulles tilbake sammen og leverandørens retry behandles på nytt - aldri en «duplikat» uten avmelding).
+    const optHash = ev.reply_to === null ? null : optOutHash(tenantId, ev.channel, ev.reply_to); // tenant-bredt navnerom (A-M3); `hash` over er den kanalspesifikke avsender-pseudonymen
+    const effect: OptEffect | undefined = optHash === null || hint === null ? undefined
+      : kind === "opt_out" ? { kind: "stop", channel: ev.channel, recipient_hash: optHash, recipient_hint: hint, evidence_ref: evidenceRefFor(ev.event_key) }
+        : kind === "opt_in" ? { kind: "start", channel: ev.channel, recipient_hash: optHash, recipient_hint: hint, evidence_ref: evidenceRefFor(ev.event_key) } : undefined;
     const rec = await store.recordInbound(tenantId, space, {
       provider: ev.provider, channel: ev.channel, account_ref: ev.account_ref, event_key: ev.event_key, kind, sender_hash: hash, sender_hint: hint, identity_id: identity?.identity_id ?? null,
       thread_ref: ev.thread_ref, content_excerpt: excerpt, content_sha256: ev.text === null ? null : sha256Hex(ev.text), provider_ts: ev.provider_ts, ingest_id: ingestId
-    }, kind === "opt_out" || kind === "opt_in" ? OPT_EVENT_RETENTION_DAYS : config.inbound_retention_days);
+    }, kind === "opt_out" || kind === "opt_in" ? OPT_EVENT_RETENTION_DAYS : config.inbound_retention_days, effect);
     if (!rec.inserted) { summary.duplicates++; return; }
     summary.inserted++;
 
-    if (kind === "opt_out" && hash !== null && hint !== null) {
-      await store.recordOptOut(tenantId, space, { channel: ev.channel, account_ref: ev.account_ref, recipient_hash: hash, recipient_hint: hint, source: "inbound_stop_keyword", evidence_ref: ev.event_key, recorded_by: "system", task_id: ingestId });
+    if (effect?.kind === "stop") {
       summary.opt_outs++;
-    } else if (kind === "opt_in" && hash !== null) {
-      await store.liftByStartKeyword(tenantId, space, { channel: ev.channel, account_ref: ev.account_ref, recipient_hash: hash });
+    } else if (effect?.kind === "start") {
       summary.opt_ins++;
     } else if (kind === "message" && identity !== null && rec.event_id !== null) {
       await this.recordTimeline(tenantId, space, ev.channel, ev.account_ref, identity.linked_business_contact_id, rec.event_id);

@@ -1,10 +1,10 @@
 import { z } from "zod";
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
-import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, normalizeRecipient, recipientHash, recipientHint, type CommsProvider } from "./channels.ts";
-import type { ConversationGraphService } from "@jarvis/conversation-graph";
+import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, isValidAccountRef, normalizeRecipient, optOutHash, recipientHint, type CommsProvider } from "./channels.ts";
+import { PHONE_CHANNELS, type ConversationGraphService } from "@jarvis/conversation-graph";
 import {
-  ContactsCreateSchema, ContactsDeleteSchema, ContactsGetSchema, ContactsListSchema, ContactsSearchSchema, ContactsSyncSchema, ContactsUpdateSchema, type ContactView, type GoogleContacts
+  CONTACTS_LINK_SOURCE, ContactsCreateSchema, ContactsDeleteSchema, ContactsGetSchema, ContactsListSchema, ContactsSearchSchema, ContactsSyncSchema, ContactsUnlinkSchema, ContactsUpdateSchema, type ContactView, type GoogleContacts
 } from "./contacts.ts";
 import { parseCallParams, parseDeleteParams, parseEditParams, parseReactParams, parseSendParams, type FunnelContext, type OutboundFunnel, type ParseResult } from "./funnel.ts";
 import { MEETING_TEXT_MAX_CHARS, type MeetingService } from "./meetings.ts";
@@ -27,8 +27,9 @@ const Authorize = z.object({
   display_name: z.string().min(1).max(120).optional()
 }).strict();
 const Revoke = z.object({ account_id: z.string().min(8).max(80) }).strict();
-const RecordOptOut = z.object({
-  channel: z.enum(COMMS_CHANNELS), account_ref: z.string().min(1).max(200), recipient: z.string().min(1).max(300), source: z.enum(["owner_recorded", "recipient_request"]).optional()
+/** `account_ref` er valgfri og kun et hint (A-M7): en avmelding er tenant-bred. Oppgis den, MÅ den være `*` eller en gyldig kontoreferanse for kanalen - en skrivefeil gir en tydelig feil, aldri en stille no-op. */
+export const RecordOptOutSchema = z.object({
+  channel: z.enum(COMMS_CHANNELS), account_ref: z.string().min(1).max(200).optional(), recipient: z.string().min(1).max(300), source: z.enum(["owner_recorded", "recipient_request"]).optional()
 }).strict();
 
 /** Leverandør-lesing (P1c): strenge, eksakte former - id-er valideres mot leverandørens format FØR noe kall (ingen sti-/spørringsinjeksjon). */
@@ -50,8 +51,11 @@ export const MeetingCommitmentsSchema = z.object({ meeting_id: z.string().min(8)
 export const MeetingDecideSchema = z.object({ commitment_id: z.string().min(8).max(80), decision: z.enum(["accept", "dismiss"]), due_at: z.string().datetime().optional() }).strict();
 export const MeetingConfirmSchema = z.object({ meeting_id: z.string().min(8).max(80), participant_ref: z.string().min(1).max(80), identity_id: z.string().min(8).max(100) }).strict();
 
+/** Conversation Graph-flaten kontakt-verktøyene trenger (lenking, oppløsning og reversibel unlink/restore). */
+export type ContactsGraph = Pick<ConversationGraphService, "linkChannelIdentity" | "resolveIdentityByChannel" | "listChannelLinks" | "revokeLinksBySource" | "restoreLinksBySource">;
+
 export class CommsTransport implements ToolTransport {
-  constructor(private readonly deps: { funnel: OutboundFunnel; store: CommsStore; reads?: VendorReads; contacts?: { api: GoogleContacts; graph: Pick<ConversationGraphService, "linkChannelIdentity"> }; meetings?: MeetingService }) {}
+  constructor(private readonly deps: { funnel: OutboundFunnel; store: CommsStore; reads?: VendorReads; contacts?: { api: GoogleContacts; graph: ContactsGraph }; meetings?: MeetingService }) {}
 
   /** Leverandør-lesing går KUN mot en konto eieren har autorisert, og kun når kontoens leverandør faktisk er den handlingen gjelder (aldri en Telnyx-nøkkel mot Twilio-API-et). */
   private async requireAccount(ctx: FunnelContext, channel: "slack" | "discord" | "whatsapp" | "sms", accountRef: string, provider: CommsProvider): Promise<void> {
@@ -60,29 +64,48 @@ export class CommsTransport implements ToolTransport {
     if (account.provider !== provider) throw new Error("comms_read_not_supported_by_provider");
   }
 
-  private contacts(): { api: GoogleContacts; graph: Pick<ConversationGraphService, "linkChannelIdentity"> } {
+  private contacts(): { api: GoogleContacts; graph: ContactsGraph } {
     if (this.deps.contacts === undefined) throw new Error("comms_contacts_not_enabled");
     return this.deps.contacts;
   }
 
   /**
-   * Lenker en kontakt til en identitet i Conversation Graph (P2e): eksakt E.164/e-post, `match_method: contact_sync`, confidence 0.9, proveniens (kilde + Google-ressursnavn). Første identifikator oppretter/finner identiteten, de neste
-   * festes til SAMME identitet - men en identifikator som allerede tilhører en ANNEN identitet flyttes aldri (ingen automatisk sammenslåing; det er eierens handling). Returnerer antall lenkede identifikatorer.
+   * Lenker en kontakt til en identitet i Conversation Graph (P2e): eksakt E.164/e-post, `match_method: contact_sync`, confidence 0.9, proveniens (kilde + Google-ressursnavn).
+   *
+   * FIKS B-H1: ALLE identifikatorene oppløses FØRST (telefon mot alle telefonkanalene), og ingenting skrives før vi vet hvor de peker. Kontakten lenkes KUN når (a) alle er nye, eller (b) alle eksisterende treff peker på
+   * ÉN identitet som ingen ANNEN kontakt (annen ressursnavn i `external_id`) allerede har lenket seg til. Ellers HOPPES kontakten OVER (`conflict_with`): å feste en annen persons identifikatorer til en fremmed identitet
+   * (delt sentralbord-/fasttelefon eller delt e-post) er en stille sammenslåing av to personer, som verken kan oppdages eller angres uten reversibel unlink. Eieren løser en konflikt eksplisitt (merge/split i Conversation Graph, eller
+   * `contacts_unlink`). Returnerer antall lenkede identifikatorer.
    */
-  private async linkContact(ctx: FunnelContext, view: ContactView): Promise<number> {
+  private async linkContact(ctx: FunnelContext, view: ContactView): Promise<{ linked: number; conflict_with: string[] | null }> {
     const { graph } = this.contacts();
     const identifiers: Array<{ channel: "phone" | "email"; id: string }> = [...view.phones.map((id) => ({ channel: "phone" as const, id })), ...view.emails.map((id) => ({ channel: "email" as const, id }))];
-    let identityId: string | undefined;
+    const identityIds = new Set<string>();
+    for (const { channel, id } of identifiers) {
+      for (const c of channel === "phone" ? PHONE_CHANNELS : (["email"] as const)) {
+        const found = await graph.resolveIdentityByChannel(ctx.tenantId, ctx.space, c, id);
+        if (found !== null) identityIds.add(found.identity_id);
+      }
+    }
+    // Identifikatorene peker på ULIKE identiteter: å feste dem sammen ville slått identitetene sammen.
+    if (identityIds.size > 1) return { linked: 0, conflict_with: [] };
+    let identityId: string | undefined = [...identityIds][0];
+    if (identityId !== undefined) {
+      const owners = (await graph.listChannelLinks(ctx.tenantId, ctx.space, identityId))
+        .filter((l) => l.status === "active" && l.source_type === CONTACTS_LINK_SOURCE && l.external_id !== null && l.external_id !== view.resource_name)
+        .map((l) => l.external_id as string);
+      if (owners.length > 0) return { linked: 0, conflict_with: [...new Set(owners)] };
+    }
     let linked = 0;
     for (const { channel, id } of identifiers) {
       const link = await graph.linkChannelIdentity(ctx.tenantId, ctx.space, {
-        channel, channel_identifier: id, confidence: 0.9, match_method: "contact_sync", source_type: "google_contacts", external_id: view.resource_name, created_by_person_id: ctx.actor.person_id,
+        channel, channel_identifier: id, confidence: 0.9, match_method: "contact_sync", source_type: CONTACTS_LINK_SOURCE, external_id: view.resource_name, created_by_person_id: ctx.actor.person_id,
         ...(identityId !== undefined ? { identity_id: identityId } : view.display_name !== null ? { display_name: view.display_name } : {})
       });
       identityId ??= link.identity_id;
       linked += 1;
     }
-    return linked;
+    return { linked, conflict_with: null };
   }
 
   private meetings(): MeetingService {
@@ -132,8 +155,9 @@ export class CommsTransport implements ToolTransport {
         return { external_id: r.external_id, data: r.data };
       }
       // `check_message_target` = fersk lesing for sletting (preflight OG readback). `data: null` = meldingen finnes ikke (etterbetingelsen for sletting).
+      // A-M6: med `text` er det preflighten for en REDIGERING (policyen for redigeringen vurderes mot den nye teksten); uten er det sletting. Begge leser målet ferskt hos leverandøren.
       case "check_message_target":
-        return { data: await funnel.checkTarget(ctx, this.parsed(parseDeleteParams(parameters)), credential) };
+        return { data: await funnel.checkTarget(ctx, this.parsed(parameters["text"] !== undefined ? parseEditParams(parameters) : parseDeleteParams(parameters)), credential) };
       case "delete_message": {
         const r = await funnel.execute(ctx, this.parsed(parseDeleteParams(parameters)), credential);
         return { external_id: r.external_id, data: r.data };
@@ -152,7 +176,13 @@ export class CommsTransport implements ToolTransport {
       }
       case "meeting_list":
         return { data: { meetings: await this.meetings().list(ctx, MeetingListSchema.parse(parameters).limit) } as unknown as JsonValue };
-      case "meeting_check_target":
+      // Preflight/readback for sletting (B-M3): KUN `{exists, meeting_id}` - aldri tittel/deltakere, som ellers havner i ledger og audit. `null` = finnes ikke (etterbetingelsen).
+      case "meeting_check_target": {
+        const meetingId = MeetingRefSchema.parse(parameters).meeting_id;
+        return { data: (await this.meetings().exists(ctx, meetingId)) ? { exists: true, meeting_id: meetingId } : null };
+      }
+      // Egen lesehandling for det FULLE møtet (tittel, deltakere): ubetrodd data, kun for eieren.
+      case "meeting_get":
         return { data: await this.meetings().get(ctx, MeetingRefSchema.parse(parameters).meeting_id) };
       case "meeting_commitments": {
         const p = MeetingCommitmentsSchema.parse(parameters);
@@ -205,15 +235,37 @@ export class CommsTransport implements ToolTransport {
         let linked = 0;
         let withoutIdentifier = 0;
         let failed = 0;
+        const conflicts: Array<{ resource_name: string; with: string[] }> = [];
+        let conflictCount = 0;
         for (const view of page.contacts) {
           if (view.phones.length === 0 && view.emails.length === 0) { withoutIdentifier += 1; continue; }
           try {
-            linked += await this.linkContact(ctx, view);
+            const outcome = await this.linkContact(ctx, view);
+            if (outcome.conflict_with !== null) {
+              conflictCount += 1;
+              if (conflicts.length < 20) conflicts.push({ resource_name: view.resource_name, with: outcome.conflict_with.slice(0, 5) });
+              continue;
+            }
+            linked += outcome.linked;
           } catch {
             failed += 1; // aldri feilteksten (kan sitere identifikatoren)
           }
         }
-        return { data: { scanned: page.contacts.length, linked_identifiers: linked, contacts_without_identifier: withoutIdentifier, contacts_failed: failed, next_page_token: page.next_page_token } };
+        // Konflikter rapporteres med ressursnavn (ugjennomsiktige id-er, aldri telefon/e-post): eieren løser dem eksplisitt. UTEN lagret forslag (DEFERRED): neste synk finner dem på nytt.
+        return {
+          data: { scanned: page.contacts.length, linked_identifiers: linked, contacts_without_identifier: withoutIdentifier, contacts_failed: failed, contacts_conflict: conflictCount, conflicts, next_page_token: page.next_page_token }
+        };
+      }
+      // B-H1: reversibel unlink (tilbakekall) av lenkene en kontakt har satt, og angre (`restore`). Sletter aldri en rad/identitet; rører ingenting hos Google.
+      case "contacts_unlink": {
+        const p = ContactsUnlinkSchema.parse(parameters);
+        const source = { source_type: CONTACTS_LINK_SOURCE, external_id: p.resource_name };
+        const { graph } = this.contacts();
+        if (p.restore === true) {
+          const r = await graph.restoreLinksBySource(ctx.tenantId, ctx.space, source);
+          return { external_id: p.resource_name, data: { restored: r.restored.length, skipped: r.skipped } };
+        }
+        return { external_id: p.resource_name, data: { revoked: (await graph.revokeLinksBySource(ctx.tenantId, ctx.space, source)).length } };
       }
       // Leverandør-lesing (P1c): rene lesinger, ubetrodd data, ingen journal.
       case "read_thread": {
@@ -269,14 +321,16 @@ export class CommsTransport implements ToolTransport {
         return { data: { revoked: await store.revokeAccount(ctx.tenantId, ctx.space, p.account_id) } };
       }
       case "record_opt_out": {
-        const p = RecordOptOut.parse(parameters);
+        const p = RecordOptOutSchema.parse(parameters);
+        if (p.account_ref !== undefined && p.account_ref !== "*" && !isValidAccountRef(p.channel, p.account_ref)) throw new Error("comms_invalid_parameters:account_ref_invalid");
         const normalized = normalizeRecipient(p.channel, p.recipient);
         if (!normalized.ok) throw new Error(`comms_invalid_parameters:${normalized.code}`);
+        // Tenant-bred (A-M3): gjelder alle våre kontoer, alle rom og alle kanaler som deler identifikator (telefon = SMS + WhatsApp + samtale), uansett hvilken `account_ref` som ble oppgitt.
         const r = await store.recordOptOut(ctx.tenantId, ctx.space, {
-          channel: p.channel, account_ref: p.account_ref, recipient_hash: recipientHash(ctx.tenantId, p.channel, normalized.value), recipient_hint: recipientHint(p.channel, normalized.value),
+          channel: p.channel, recipient_hash: optOutHash(ctx.tenantId, p.channel, normalized.value), recipient_hint: recipientHint(p.channel, normalized.value),
           source: p.source ?? "owner_recorded", recorded_by: ctx.actor.person_id, session_id: ctx.actor.session_id, ...(ctx.actor.task_id !== undefined ? { task_id: ctx.actor.task_id } : {})
         });
-        return { external_id: r.opt_out_id, data: { opt_out_id: r.opt_out_id, created: r.created } };
+        return { external_id: r.opt_out_id, data: { opt_out_id: r.opt_out_id, created: r.created, scope: "tenant" } };
       }
       default:
         throw new Error(`comms_action_not_implemented:${action}`);

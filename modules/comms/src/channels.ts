@@ -119,6 +119,22 @@ export function recipientHash(tenantId: string, channel: CommsChannel, normalize
   return createHash("sha256").update(`jarvis-comms-recipient-v1|${tenantId}|${channel}|${normalizedRecipient}`, "utf8").digest("hex");
 }
 
+/**
+ * A-M3: NAVNEROMMET en avmelding (STOP) gjelder i. Samme mottaker på tvers av kanaler deler navnerom: et telefonnummer er ÉN mottaker enten vi når det på SMS, WhatsApp eller med en AI-samtale (`tel`). Øvrige identifikatorer er
+ * plattformens egne (en Slack-id er ikke en Discord-id): navnerommet er kanalen selv. E-post har egen sendevei utenfor comms.
+ */
+export function optOutNamespace(channel: CommsChannel): string {
+  return channel === "sms" || channel === "whatsapp" || channel === "phone" ? "tel" : channel;
+}
+
+/**
+ * Pseudonym for en mottaker i opt-out-registeret (A-M3): som `recipientHash`, men over avmeldingens NAVNEROMMET i stedet for kanalen, og UTEN avsenderkonto/rom i nøkkelen - mottakerens STOP gjelder hele tenanten
+ * (alle våre kontoer, alle rom, alle kanaler som deler identifikator). Journalens/innkommende hendelsers `recipientHash` er uendret (kanalspesifikk: ratetak og kundeservicevindu er per kanal).
+ */
+export function optOutHash(tenantId: string, channel: CommsChannel, normalizedRecipient: string): string {
+  return createHash("sha256").update(`jarvis-comms-optout-v1|${tenantId}|${optOutNamespace(channel)}|${normalizedRecipient}`, "utf8").digest("hex");
+}
+
 /** Maskert visning (aldri hele nummeret/id-en i journal og lister): `+47•••••000`, `U01…ABC`. */
 export function recipientHint(channel: CommsChannel, normalizedRecipient: string): string {
   if (channel === "sms" || channel === "phone" || channel === "whatsapp") return `${normalizedRecipient.slice(0, 3)}${"•".repeat(Math.max(0, normalizedRecipient.length - 6))}${normalizedRecipient.slice(-3)}`;

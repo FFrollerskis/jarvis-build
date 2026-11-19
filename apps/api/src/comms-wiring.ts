@@ -3,7 +3,7 @@ import type pg from "pg";
 import type { BusinessService } from "@jarvis/business";
 import {
   CommsStore, CommsTransport, CommsWebhookService, DiscordAdapter, GoogleContacts, MeetingService, ReplySweep, MetaMessagingAdapter, OutboundFunnel, SlackAdapter, TeamsGraphAdapter, TelnyxSmsAdapter, TwilioSmsAdapter, VendorReads, WhatsAppAdapter,
-  commsAnyEnabled, commsToolDefinitions, parseCommsConfig, type CommsConfig
+  commsAnyEnabled, commsToolDefinitions, parseCommsConfig, retentionTenants, startRetentionSweep, type CommsConfig
 } from "@jarvis/comms";
 import type { ConversationGraphService } from "@jarvis/conversation-graph";
 import { AccessTokenCache, googleAccessToken, microsoftRefreshExchange, type ToolDefinition, type ToolGateway } from "@jarvis/tool-gateway";
@@ -36,7 +36,10 @@ export interface CommsRuntime {
   readonly tools: ToolDefinition[];
   /** `ApiDeps.comms` for den gitte gatewayen, eller `undefined` når verken webhooks eller utgående er slått på. */
   apiDeps(gateway: ToolGateway): ApiDeps["comms"] | undefined;
-  /** Starter de planlagte sveipene (kun når noe er slått på): retensjon (hver 6. time) og - kun med JARVIS_COMMS_REPLY_SWEEP=on - ubesvarte meldinger -> åpne oppfølginger (hver 30. minutt). `tenants` = eierens tenants. */
+  /**
+   * Starter de planlagte sveipene (kun når noe er slått på): retensjon (UMIDDELBART ved oppstart, deretter hver 6. time) og - kun med JARVIS_COMMS_REPLY_SWEEP=on - ubesvarte meldinger -> åpne oppfølginger (hver 30. minutt). `tenants` = eierens tenants;
+   `JARVIS_COMMS_TENANT_ID` MÅ være en av dem (ellers kastes `InvalidCommsConfigError` og oppstarten stopper: hendelser skrevet dit ville aldri blitt sveipet).
+   */
   startSweeps(tenants: readonly string[], ownerPersonId: string): void;
 }
 
@@ -82,22 +85,18 @@ export function buildCommsRuntime(input: CommsRuntimeInput): CommsRuntime {
     contacts: config.contacts, meetings: config.meetings, calls: config.calls, reply_sweep: config.reply_sweep, vendor_reads: config.vendor_reads
   }));
 
-  // Retensjonssveip (utløpte innkommende hendelser, journalrader og møter): hver 6. time for eierens tenants og de tillatte rommene. Feil logges, stopper aldri prosessen. Intet sveip uten at noe er slått på.
+  // Retensjonssveip (utløpte innkommende hendelser, journalrader og møter): ved oppstart og hver 6. time for eierens tenants (inkl. webhook-tenanten) og de tillatte rommene (`@jarvis/comms` retention.ts, B-M6). Feil logges, stopper aldri prosessen. Intet sveip uten at noe er slått på.
   const replySweep = config.reply_sweep ? new ReplySweep({ pool: input.pool, clock, business: input.business, afterHours: config.reply_after_hours, windowDays: config.reply_window_days, ...(input.warn ? { warn: input.warn } : {}) }) : undefined;
   const startSweeps = (tenants: readonly string[], ownerPersonId: string): void => {
-    const run = async (): Promise<void> => {
-      for (const tenantId of tenants) {
-        for (const space of ["business", "personal", "project", "shared"] as const) {
-          try {
-            await store.purgeExpired(tenantId, space);
-            if (meetings) await meetings.purgeExpired(tenantId, space);
-          } catch (err) {
-            input.warn?.({ msg: "comms_retention_sweep_failed", error: err instanceof Error ? err.message.slice(0, 80) : "unknown" });
-          }
-        }
-      }
-    };
-    setInterval(() => void run(), 6 * 3_600_000).unref();
+    const sweepTenants = retentionTenants(tenants, config.webhook_tenant_id); // kaster hvis webhook-tenanten ikke er en av eierens (fail closed, før noe planlegges)
+    startRetentionSweep({
+      tenants: sweepTenants,
+      purge: async (tenantId, space) => {
+        await store.purgeExpired(tenantId, space);
+        if (meetings) await meetings.purgeExpired(tenantId, space);
+      },
+      ...(input.warn ? { warn: input.warn } : {})
+    });
     // Ubesvarte meldinger -> åpne oppfølginger (V2-pushen leverer dem; dormant uten JARVIS_COMMS_REPLY_SWEEP=on). Idempotent; feil logges.
     if (replySweep) {
       const reply = async (): Promise<void> => {

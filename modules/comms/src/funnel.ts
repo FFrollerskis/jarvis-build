@@ -2,12 +2,12 @@ import { z } from "zod";
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { BusinessService } from "@jarvis/business";
 import type { ConversationGraphService } from "@jarvis/conversation-graph";
-import { isIndeterminateTransportError, isOutcomeUnknownMessage } from "@jarvis/tool-gateway";
+import { afterAcceptedMutation, isIndeterminateTransportError, isOutcomeUnknownMessage } from "@jarvis/tool-gateway";
 import { ProviderRejectedError, type AdapterMap } from "./adapters.ts";
-import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, normalizeRecipient, recipientHash, recipientHint, type CommsChannel, type CommsProvider } from "./channels.ts";
+import { COMMS_CHANNELS, PROVIDERS_FOR_CHANNEL, normalizeRecipient, optOutHash, recipientHash, recipientHint, sha256Hex, type CommsChannel, type CommsProvider } from "./channels.ts";
 import type { CommsConfig } from "./config.ts";
-import { evaluateOutboundPolicy, type OutboundKind, type OutboundPolicyState, type OutboundPurpose, type OutboundRequest, type PolicyDecision, type ReservationRegisterStatus } from "./policy.ts";
-import type { Actor, AuthorizedAccount, Clock, CommsStore, JournalEntryInput, JournalSource } from "./store.ts";
+import { PURPOSE_BASES, evaluateOutboundPolicy, rateCaps, type OutboundKind, type OutboundPolicyState, type OutboundPurpose, type OutboundRequest, type PolicyDecision, type ReservationRegisterStatus } from "./policy.ts";
+import type { Actor, AuthorizedAccount, BeginResult, Clock, CommsStore, JournalEntryInput, JournalSource } from "./store.ts";
 
 /**
  * WP-G1 (D-463, P1b/P1c): TRAKTEN alle nye sendeveier går gjennom. ÉN kodevei fra forespørsel til leverandørkall: parse (streng) -> normaliser mottaker -> last tilstand -> `evaluateOutboundPolicy` -> journal (`requested`) ->
@@ -55,8 +55,12 @@ const AccountRef = z.string().min(1).max(200);
 const Recipient = z.string().min(1).max(300);
 const MessageId = z.string().min(1).max(300);
 
+/** A-M2: eierens erklærte grunnlag for første kontakt med en kald mottaker (lukket liste) + kort notat. Påkrevd av policyen for kalde mottakere; valgfritt ellers. */
+const PurposeBasisField = z.enum(PURPOSE_BASES);
+const PurposeBasisNote = z.string().min(1).max(200);
+
 export const SendParamsSchema = json({
-  request_id: RequestId, channel: Channel, account_ref: AccountRef, recipient: Recipient, purpose: Purpose,
+  request_id: RequestId, channel: Channel, account_ref: AccountRef, recipient: Recipient, purpose: Purpose, purpose_basis: PurposeBasisField.optional(), purpose_basis_note: PurposeBasisNote.optional(),
   text: z.string().min(1).max(8000).optional(),
   template: json({ name: z.string().min(1).max(512), language: z.string().min(2).max(10), params: z.array(z.string().max(200)).max(10).optional() }).optional(),
   media: json({ kind: z.enum(["image", "document", "audio", "video"]), url: z.string().min(1).max(2000), caption: z.string().max(1000).optional() }).optional(),
@@ -64,10 +68,16 @@ export const SendParamsSchema = json({
 });
 export const EditParamsSchema = json({ request_id: RequestId, channel: Channel, account_ref: AccountRef, recipient: Recipient, target_message_id: MessageId, text: z.string().min(1).max(8000) });
 export const DeleteParamsSchema = json({ request_id: RequestId, channel: Channel, account_ref: AccountRef, recipient: Recipient, target_message_id: MessageId });
+/**
+ * A-M6: skjemaet for `check_message_target` (fersk lesing av målet). Brukes som preflight for BÅDE sletting (uten tekst) og redigering (med den nye teksten, slik at policyen for redigeringen - også reklameordene - vurderes i før-tilstanden).
+ * Før var det `DeleteParamsSchema` (strengt), som avviste `text` - preflighten for `edit_message` kastet, gatewayen svelger preflight-feil for klasse C, og redigeringens før-tilstand/lesing var DØD (null).
+ */
+export const CheckTargetSchema = DeleteParamsSchema.extend({ text: z.string().min(1).max(8000).optional() });
 export const ReactParamsSchema = json({ request_id: RequestId, channel: Channel, account_ref: AccountRef, recipient: Recipient, target_message_id: MessageId, reaction: z.string().min(1).max(64) });
 /** Utgående samtale (P3h): kun kanalen `phone`; `text` er manuset (AI-opplysningen settes FØRST av policyen). `recording` finnes bare for at en forespørsel om opptak skal AVSLÅS med kode - den ignoreres aldri stille. */
 export const CallParamsSchema = json({
-  request_id: RequestId, channel: z.literal("phone"), account_ref: AccountRef, recipient: Recipient, purpose: Purpose, text: z.string().min(1).max(2000), recording: z.boolean().optional()
+  request_id: RequestId, channel: z.literal("phone"), account_ref: AccountRef, recipient: Recipient, purpose: Purpose, purpose_basis: PurposeBasisField.optional(), purpose_basis_note: PurposeBasisNote.optional(),
+  text: z.string().min(1).max(2000), recording: z.boolean().optional()
 });
 
 export interface ParsedOutbound {
@@ -77,7 +87,10 @@ export interface ParsedOutbound {
 
 export type ParseResult = { readonly ok: true; readonly value: ParsedOutbound } | { readonly ok: false; readonly code: string };
 
-function build(kind: OutboundKind, base: { request_id: string; channel: CommsChannel; account_ref: string; recipient: string; purpose: OutboundPurpose }, content: OutboundRequest["content"], extra: { thread_ref?: string; target_message_id?: string }): ParseResult {
+function build(
+  kind: OutboundKind, base: { request_id: string; channel: CommsChannel; account_ref: string; recipient: string; purpose: OutboundPurpose; purpose_basis?: OutboundRequest["purpose_basis"]; purpose_basis_note?: string },
+  content: OutboundRequest["content"], extra: { thread_ref?: string; target_message_id?: string }
+): ParseResult {
   const recipient = normalizeRecipient(base.channel, base.recipient);
   // En ugyldig mottaker avvises HER med fast kode (policyen ville avvist den også, men journalen trenger en hash - og vi hasher aldri en ugyldig verdi).
   if (!recipient.ok) return { ok: false, code: recipient.code };
@@ -87,17 +100,22 @@ function build(kind: OutboundKind, base: { request_id: string; channel: CommsCha
       request_id: base.request_id,
       request: {
         kind, channel: base.channel, account_ref: base.account_ref, recipient: recipient.value, purpose: base.purpose, content,
+        ...(base.purpose_basis !== undefined ? { purpose_basis: base.purpose_basis } : {}), ...(base.purpose_basis_note !== undefined ? { purpose_basis_note: base.purpose_basis_note } : {}),
         ...(extra.thread_ref !== undefined ? { thread_ref: extra.thread_ref } : {}), ...(extra.target_message_id !== undefined ? { target_message_id: extra.target_message_id } : {})
       }
     }
   };
 }
 
+const basisOf = (d: { purpose_basis?: OutboundRequest["purpose_basis"] | undefined; purpose_basis_note?: string | undefined }) => ({
+  ...(d.purpose_basis !== undefined ? { purpose_basis: d.purpose_basis } : {}), ...(d.purpose_basis_note !== undefined ? { purpose_basis_note: d.purpose_basis_note } : {})
+});
+
 export function parseSendParams(raw: unknown): ParseResult {
   const p = SendParamsSchema.safeParse(raw);
   if (!p.success) return { ok: false, code: "invalid_parameters" };
   const d = p.data;
-  return build("message", { request_id: d.request_id, channel: d.channel, account_ref: d.account_ref, recipient: d.recipient, purpose: d.purpose },
+  return build("message", { request_id: d.request_id, channel: d.channel, account_ref: d.account_ref, recipient: d.recipient, purpose: d.purpose, ...basisOf(d) },
     {
       ...(d.text !== undefined ? { text: d.text } : {}),
       ...(d.template !== undefined ? { template: { name: d.template.name, language: d.template.language, params: d.template.params ?? [] } } : {}),
@@ -131,7 +149,22 @@ export function parseCallParams(raw: unknown): ParseResult {
   const p = CallParamsSchema.safeParse(raw);
   if (!p.success) return { ok: false, code: "invalid_parameters" };
   const d = p.data;
-  return build("call", { request_id: d.request_id, channel: d.channel, account_ref: d.account_ref, recipient: d.recipient, purpose: d.purpose }, { text: d.text, ...(d.recording !== undefined ? { recording: d.recording } : {}) }, {});
+  return build("call", { request_id: d.request_id, channel: d.channel, account_ref: d.account_ref, recipient: d.recipient, purpose: d.purpose, ...basisOf(d) }, { text: d.text, ...(d.recording !== undefined ? { recording: d.recording } : {}) }, {});
+}
+
+/** A-M5: er forespørsels-id-en (idempotensnøkkelen) ubrukt (`none`), en ekte gjenspilling av SAMME forespørsel (`replay`), eller gjenbrukt til en ANNEN forespørsel (`collision`)? */
+export type ReplayState = "none" | "replay" | "collision";
+
+/**
+ * Fingeravtrykk av HELE forespørselen (handling, kanal, konto, mottaker, formål, grunnlag, innhold, mål, tråd) - alt eieren kan sette bortsett fra selve id-en. Lagres i journalens `before_state` ved forsøket og sammenlignes ved
+ * gjenspilling: ledgeren (PK tenant+nøkkel) svarer ellers `ok + deduplicated` på HVA SOM HELST med samme nøkkel, selv om ingenting ble sendt/slettet (A-M5).
+ */
+export function requestFingerprint(request: OutboundRequest): string {
+  const c = request.content;
+  return sha256Hex(JSON.stringify([
+    "comms-request-v1", request.kind, request.channel, request.account_ref, request.recipient, request.purpose, request.purpose_basis ?? null, request.purpose_basis_note ?? null,
+    c.text ?? null, c.template ?? null, c.media ?? null, c.reaction ?? null, c.recording ?? null, request.thread_ref ?? null, request.target_message_id ?? null
+  ]));
 }
 
 export interface Evaluation {
@@ -173,7 +206,7 @@ export class OutboundFunnel {
     const provider: CommsProvider = account?.provider ?? PROVIDERS_FOR_CHANNEL[req.channel][0]!;
     const isAddressed = req.kind === "message" || req.kind === "call" || req.kind === "edit";
     const [optedOut, sends24, calls24, hourCount, lastInbound, identity, targetRow, priorConsent, reservation] = await Promise.all([
-      isAddressed ? store.isOptedOut(ctx.tenantId, ctx.space, req.channel, req.account_ref, hash) : Promise.resolve(false),
+      isAddressed ? store.isOptedOut(ctx.tenantId, optOutHash(ctx.tenantId, req.channel, req.recipient)) : Promise.resolve(false),
       req.kind === "message" ? store.countRecipient24h(ctx.tenantId, ctx.space, req.channel, hash, "message") : Promise.resolve(0),
       req.kind === "call" ? store.countRecipient24h(ctx.tenantId, ctx.space, req.channel, hash, "call") : Promise.resolve(0),
       store.countAccountHour(ctx.tenantId, ctx.space, req.channel, req.account_ref),
@@ -233,6 +266,8 @@ export class OutboundFunnel {
       allowed: ev.decision.allowed, denial_codes: [...ev.decision.denial_codes],
       rules: ev.decision.rules.map((x) => ({ rule: x.rule, outcome: x.outcome, ...(x.code !== undefined ? { code: x.code } : {}) })),
       recipient: { hint: ev.recipient_hint, proof: { method: ev.decision.recipient_proof.method, identity_linked: ev.decision.recipient_proof.identity_id !== null, last_inbound_age_minutes: ev.decision.recipient_proof.last_inbound_age_minutes } },
+      // A-M2: eierens erklærte grunnlag (kun den lukkede verdien i revisjonssporet; det frie notatet ligger i journalen, ikke i verktøy-ledgeren).
+      purpose_basis: r.purpose_basis ?? null,
       content: { sha256: ev.decision.content_sha256, length: ev.decision.content_length, ai_disclosure_applied: ev.decision.disclosure_applied },
       counters: { recipient_24h: ev.state.sends_last_24h_to_recipient, account_1h: ev.state.sends_last_hour_from_account }
     };
@@ -244,17 +279,28 @@ export class OutboundFunnel {
       request_id: ev.parsed.request_id, kind: r.kind, channel: r.channel, account_ref: r.account_ref, provider: ev.provider, recipient_hash: ev.recipient_hash, recipient_hint: ev.recipient_hint,
       purpose: r.purpose, rule_evaluation: ev.decision.rules, denial_codes: ev.decision.denial_codes, recipient_proof: ev.decision.recipient_proof, content_sha256: ev.decision.content_sha256,
       content_length: ev.decision.content_length, ai_disclosure_applied: ev.decision.disclosure_applied, ...(ev.target_log_id !== null ? { target_log_id: ev.target_log_id } : {}),
-      ...(r.thread_ref !== undefined ? { thread_ref: r.thread_ref } : {}), source: ctx.source
+      ...(r.thread_ref !== undefined ? { thread_ref: r.thread_ref } : {}), source: ctx.source,
+      // A-M5: fingeravtrykket av forespørselen følger forsøket (journalens `before_state`), så en gjenbrukt nøkkel til en annen forespørsel kan avvises.
+      before_state: { v: 1, request_fingerprint: requestFingerprint(r) }
     };
   }
 
   /**
-   * Har denne forespørsels-id-en allerede et (ikke-avslått) forsøk? Da er det en GJENSPILLING: eier-ruten sender den rett til gatewayen (ledgeren gir det første resultatet tilbake; journalens unike nøkkel er andre vern) i stedet for å
-   * vurdere policyen på nytt mot en tilstand det første forsøket selv har endret (ratetelleren ville ellers avslå en ellers idempotent gjenspilling). Ingenting kan sendes to ganger av dette: nytt utsendelsesforsøk går alltid gjennom preflight,
-   * policyen i transporten og `beginAttempt` (som gir `replay`).
+   * Har denne forespørsels-id-en allerede et (ikke-avslått) forsøk? Da er det en GJENSPILLING (`replay`): eier-ruten sender den rett til gatewayen (ledgeren gir det første resultatet tilbake; journalens unike nøkkel er andre vern) i stedet for
+   * å vurdere policyen på nytt mot en tilstand det første forsøket selv har endret (ratetelleren ville ellers avslå en ellers idempotent gjenspilling). Ingenting kan sendes to ganger av dette: nytt utsendelsesforsøk går alltid gjennom
+   * preflight, policyen i transporten og `beginAttempt` (som gir `replay`). Er id-en brukt til en ANNEN forespørsel (`collision`, A-M5) må kalleren AVVISE den - ledgeren ville ellers svart «ok + deduplicated» uten at noe ble gjort.
    */
-  async hasPriorAttempt(ctx: FunnelContext, requestId: string): Promise<boolean> {
-    return (await this.deps.store.findAttempt(ctx.tenantId, ctx.space, requestId)) !== null;
+  async replayState(ctx: FunnelContext, parsed: ParsedOutbound): Promise<ReplayState> {
+    const prior = await this.deps.store.findAttempt(ctx.tenantId, ctx.space, parsed.request_id);
+    if (prior === null) return "none";
+    return prior.request_fingerprint === null || prior.request_fingerprint === requestFingerprint(parsed.request) ? "replay" : "collision";
+  }
+
+  /** A-H2: taket ble nådd UNDER låsen (policyens tørrkjøring så det ikke): avslaget journalføres med regelen som faktisk slo til, så beviset og utfallet stemmer. */
+  private withCapDenial(ev: Evaluation, scope: "recipient" | "account", code: string): Evaluation {
+    const ruleName = scope === "recipient" ? "rate_limit_recipient" : "rate_limit_account";
+    const rules = ev.decision.rules.map((r) => (r.rule === ruleName ? ({ rule: ruleName, outcome: "deny", code } as const) : r));
+    return { ...ev, decision: { ...ev.decision, allowed: false, denial_codes: [...new Set([...ev.decision.denial_codes, code])], rules } };
   }
 
   /** Journalfører et avslag (bevis) uten å sende. Brukes av eier-ruten når tørrkjøringen avslår. */
@@ -266,9 +312,25 @@ export class OutboundFunnel {
     return this.execute(ctx, parsed, credential);
   }
 
+  /**
+   * Svaret på en GJENSPILLING (samme forespørsels-id som et ikke-avslått forsøk). Ingen leverandørkall skjer på denne veien: sendt = dedup, feilet = brent id, ellers ukjent/under utførelse. Brukt av BÅDE den tidlige sjekken i `execute`
+   * og `beginAttempt`s racevern. Er id-en brukt til en ANNEN forespørsel (A-M5) er det en feil, aldri «dedup».
+   */
+  private replayResult(prior: Extract<BeginResult, { kind: "replay" }>, req: OutboundRequest): ExecResult {
+    if (prior.request_fingerprint !== null && prior.request_fingerprint !== requestFingerprint(req)) throw new Error("idempotency_key_collision");
+    if (prior.status === "sent") {
+      return { external_id: prior.provider_message_id ?? "replayed", data: { log_id: prior.log_id, status: "sent", deduplicated: true, channel: req.channel, kind: req.kind } };
+    }
+    if (prior.status === "failed") throw new Error("comms_request_id_burned_use_a_new_key");
+    throw new Error("outcome_unknown:comms_request_in_flight_or_unknown");
+  }
+
   /** Utfører (send/edit/delete/reaksjon) ETTER en ny policyevaluering og med journalføring før og etter leverandørkallet. Den ENESTE veien til en adapter. */
   async execute(ctx: FunnelContext, parsed: ParsedOutbound, credential: string): Promise<ExecResult> {
     const { store, adapters, config } = this.deps;
+    // En GJENSPILLING avgjøres FØR policyen: policyen ville ellers vurdert den mot en tilstand det første forsøket selv har endret (ratetelleren teller forsøket selv) og skrevet en misvisende avslagsrad for en ellers idempotent gjenspilling.
+    const prior = await store.findAttempt(ctx.tenantId, ctx.space, parsed.request_id);
+    if (prior !== null) return this.replayResult(prior, parsed.request);
     const ev = await this.evaluate(ctx, parsed);
     if (!ev.decision.allowed) {
       await this.recordDenial(ctx, ev);
@@ -279,14 +341,14 @@ export class OutboundFunnel {
     if (adapter === undefined) throw new Error("comms_adapter_unavailable");
     const supported = req.kind === "message" ? true : req.kind === "edit" ? adapter.edit !== undefined : req.kind === "delete" ? adapter.delete !== undefined : req.kind === "call" ? adapter.call !== undefined : adapter.react !== undefined;
     if (!supported) throw new Error("comms_action_not_supported_by_provider");
-    const begin = await store.beginAttempt(ctx.tenantId, ctx.space, this.entry(ctx, ev), ctx.actor, config.log_retention_days);
-    if (begin.kind === "replay") {
-      if (begin.status === "sent") {
-        return { external_id: begin.provider_message_id ?? "replayed", data: { log_id: begin.log_id, status: "sent", deduplicated: true, channel: req.channel, kind: req.kind } };
-      }
-      if (begin.status === "failed") throw new Error("comms_request_id_burned_use_a_new_key");
-      throw new Error("outcome_unknown:comms_request_in_flight_or_unknown");
+    // A-H2: ratetakene håndheves ATOMISK i `beginAttempt` (lås + ny telling + INSERT i samme transaksjon); policyen over er kun den rådgivende tørrkjøringen.
+    const caps = rateCaps(req.kind, ev.decision.recipient_proof.method === "explicit_param", config);
+    const begin = await store.beginAttempt(ctx.tenantId, ctx.space, this.entry(ctx, ev), ctx.actor, config.log_retention_days, caps);
+    if (begin.kind === "cap_exceeded") {
+      await this.recordDenial(ctx, this.withCapDenial(ev, begin.scope, begin.code));
+      throw new Error(`comms_policy_denied:${begin.code}`);
     }
+    if (begin.kind === "replay") return this.replayResult(begin, req); // racevern: et samtidig forsøk med samme id rakk å skrive raden mellom den tidlige sjekken og her
     const target = { account_ref: req.account_ref, recipient: req.recipient };
     try {
       let providerMessageId: string;
@@ -308,10 +370,12 @@ export class OutboundFunnel {
         await adapter.react!({ ...target, target_message_id: req.target_message_id!, reaction: req.content.reaction! }, credential);
         providerMessageId = req.target_message_id!;
       }
-      await store.settleAttempt(ctx.tenantId, ctx.space, begin.log_id, {
+      // A-M4: leverandøren HAR akseptert. Feiler journalføringen nå (DB-feil), er utfallet UKJENT - aldri en vanlig `failed` (som ville invitert til en ny nøkkel og en ny sending til samme mottaker). `afterAcceptedMutation` gjør feilen om til
+      // `outcome_unknown:comms_journal_settle_failed`: ledger `unverified`, raden blir stående åpen (`requested`/`outcome_unknown` teller i takene) og eieren varsles om ukjent utfall.
+      await afterAcceptedMutation("comms_journal_settle_failed", () => store.settleAttempt(ctx.tenantId, ctx.space, begin.log_id, {
         status: "sent", provider_message_id: providerMessageId, ...(threadRef !== undefined ? { thread_ref: threadRef } : {}),
         after_state: { provider_message_id_present: true }
-      });
+      }));
       if (req.kind === "message") await this.recordTimeline(ctx, ev, begin.log_id);
       return {
         external_id: providerMessageId,
@@ -321,10 +385,10 @@ export class OutboundFunnel {
       const unknown = isOutcomeUnknownMessage(err instanceof Error ? err.message : "") || (!(err instanceof ProviderRejectedError) && isIndeterminateTransportError(err));
       // Vi VET ikke om sendingen gikk gjennom (ukjent) eller at den ikke gjorde det (avslag/feil før sending).
       await store.settleAttempt(ctx.tenantId, ctx.space, begin.log_id, { status: unknown ? "outcome_unknown" : "failed", after_state: { error: safeError(err) } }).catch((e) => this.deps.warn?.({ msg: "comms_journal_settle_failed", error: safeError(e) }));
-      // Twilio 21610 = mottakeren har meldt STOPP hos operatør/Twilio: registrer det hos oss også (opt-out kan aldri «glemmes» av et vellykket nytt forsøk).
+      // Twilio 21610 = mottakeren har meldt STOPP hos operatør/Twilio: registrer det hos oss også (opt-out kan aldri «glemmes» av et vellykket nytt forsøk) - tenant-bredt (A-M3).
       if (err instanceof ProviderRejectedError && err.provider === "twilio" && err.code === "21610") {
         await store.recordOptOut(ctx.tenantId, ctx.space, {
-          channel: req.channel, account_ref: req.account_ref, recipient_hash: ev.recipient_hash, recipient_hint: ev.recipient_hint, source: "provider_error", evidence_ref: "twilio:21610",
+          channel: req.channel, recipient_hash: optOutHash(ctx.tenantId, req.channel, req.recipient), recipient_hint: ev.recipient_hint, source: "provider_error", evidence_ref: "twilio:21610",
           recorded_by: "system", session_id: ctx.actor.session_id, ...(ctx.actor.task_id !== undefined ? { task_id: ctx.actor.task_id } : {})
         }).catch(() => undefined);
       }

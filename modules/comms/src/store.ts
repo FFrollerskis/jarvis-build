@@ -3,7 +3,7 @@ import type pg from "pg";
 import type { MemorySpace } from "@jarvis/contracts";
 import { withMemoryTransaction } from "@jarvis/memory";
 import { PROVIDERS_FOR_CHANNEL, isValidAccountRef, type CommsChannel, type CommsProvider } from "./channels.ts";
-import type { OutboundKind, OutboundPurpose, RecipientProof, RuleResult } from "./policy.ts";
+import type { OutboundKind, OutboundPurpose, RateCaps, RecipientProof, RuleResult } from "./policy.ts";
 
 /**
  * WP-G1 (D-463): databasetilgang for kommunikasjonstabellene (migrasjon 118). ALL tilgang går via `withMemoryTransaction` (tenant + memory space på transaksjonen, RLS FORCE) - ingen spørring uten tenant-kontekst.
@@ -29,6 +29,17 @@ export interface Actor {
 }
 
 export type OptOutSource = "inbound_stop_keyword" | "provider_error" | "owner_recorded" | "recipient_request";
+
+/** B-H2: avmeldingen/gjenopptaket en innkommende STOP/START fører til. Skrives i SAMME transaksjon som hendelsens dedupe-rad (se `recordInbound`). */
+export interface OptEffect {
+  readonly kind: "stop" | "start";
+  readonly channel: CommsChannel;
+  /** `optOutHash` (tenant-bredt navnerom), ikke journalens kanalspesifikke `recipientHash`. */
+  readonly recipient_hash: string;
+  readonly recipient_hint: string;
+  /** Peker til hendelsen (DB-grense 200 tegn: bruk `evidenceRefFor`). */
+  readonly evidence_ref: string;
+}
 
 export interface OptOutRow {
   readonly opt_out_id: string;
@@ -92,7 +103,9 @@ export interface JournalRow {
 
 export type BeginResult =
   | { readonly kind: "started"; readonly log_id: string }
-  | { readonly kind: "replay"; readonly log_id: string; readonly status: JournalStatus; readonly provider_message_id: string | null };
+  | { readonly kind: "replay"; readonly log_id: string; readonly status: JournalStatus; readonly provider_message_id: string | null; readonly request_fingerprint: string | null }
+  /** A-H2: taket var nådd da forsøket skulle reserveres (tellingen ble gjort UNDER lås, etter at policyen så «0 sendt»). Ingenting er skrevet; kalleren journalfører et avslag. */
+  | { readonly kind: "cap_exceeded"; readonly scope: "recipient" | "account"; readonly code: string };
 
 export interface InboundEventInput {
   readonly provider: "slack" | "meta" | "twilio" | "telnyx";
@@ -128,6 +141,8 @@ const iso = (value: unknown): string => (value instanceof Date ? value.toISOStri
 const isoOrNull = (value: unknown): string | null => (value === null || value === undefined ? null : iso(value));
 const newId = (prefix: string): string => `${prefix}-${randomUUID()}`;
 const ACTIVE_STATUSES = ["requested", "sent", "outcome_unknown"];
+/** Rommene kommunikasjon kan skje i (helse/hjem/gjest er aldri mål). Mottakerens avmelding leses og skrives på tvers av ALLE disse (A-M3: tenant-bred), uavhengig av rommet avsenderen eller webhooken står i. */
+const COMMS_SPACES: readonly MemorySpace[] = ["personal", "business", "project", "shared"];
 
 export class CommsStore {
   constructor(private readonly pool: pg.Pool, private readonly clock: Clock = () => new Date()) {}
@@ -152,6 +167,8 @@ export class CommsStore {
       const existing = await client.query(
         `SELECT * FROM comms_authorized_accounts WHERE tenant_id = $1 AND channel = $2 AND account_ref = $3 AND status = 'active'`, [tenantId, input.channel, input.account_ref]
       );
+      // Konflikten kan være en aktiv rad i et ANNET rom (RLS skjuler den): da finnes ingen rad å returnere her. Før lekket det et TypeError («Cannot read properties of undefined»); nå en fast, ryddig feilkode.
+      if (existing.rowCount === 0) throw new Error("comms_account_authorized_in_another_room");
       return { account: this.toAccount(existing.rows[0] as Record<string, unknown>), created: false };
     });
   }
@@ -189,55 +206,65 @@ export class CommsStore {
   }
 
   // ---------------------------------------------------------------- mottakerens avmelding
-  async isOptedOut(tenantId: string, space: MemorySpace, channel: CommsChannel, accountRef: string, recipientHash: string): Promise<boolean> {
-    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
-      const res = await client.query(
-        `SELECT 1 FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND channel = $2 AND recipient_hash = $3 AND status = 'active' AND account_ref IN ($4, '*') LIMIT 1`,
-        [tenantId, channel, recipientHash, accountRef]
-      );
+  /**
+   * A-M3: mottakerens STOP gjelder TENANT-bredt: hver av våre kontoer, hvert rom og hver kanal som deler identifikator-navnerom (telefon = SMS + WhatsApp + samtale). `optHash` er `optOutHash` (navnerom, ikke kanal);
+   * avsenderkonto og rom er IKKE en del av oppslaget. (Før: kun (kanal, avsender|'*', rom) - en STOP til konto A stoppet ikke konto B, WhatsApp eller AI-ringing, og `*` gjaldt ikke på tvers av rom.)
+   */
+  async isOptedOut(tenantId: string, optHash: string): Promise<boolean> {
+    return withMemoryTransaction(this.pool, tenantId, COMMS_SPACES, async (client) => {
+      const res = await client.query(`SELECT 1 FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = $2 AND status = 'active' LIMIT 1`, [tenantId, optHash]);
       return res.rowCount === 1;
     });
   }
 
-  /** Idempotent: en allerede aktiv avmelding for (kanal, avsender, mottaker) gir `created: false`. */
+  /**
+   * Idempotent og TENANT-bred (A-M3): én aktiv avmelding per mottaker (`optOutHash`) i tenanten - `account_ref` lagres alltid som `'*'` (alle våre avsendere). En allerede aktiv avmelding (uansett kanal/rom den kom fra)
+   * gir `created: false`. Skrives i rommet kalleren står i; leses uavhengig av rom (`isOptedOut`).
+   */
   async recordOptOut(
     tenantId: string, space: MemorySpace,
-    input: { channel: CommsChannel; account_ref: string; recipient_hash: string; recipient_hint: string; source: OptOutSource; evidence_ref?: string; recorded_by: string; session_id?: string; task_id?: string }
+    input: { channel: CommsChannel; recipient_hash: string; recipient_hint: string; source: OptOutSource; evidence_ref?: string; recorded_by: string; session_id?: string; task_id?: string }
   ): Promise<{ opt_out_id: string; created: boolean }> {
-    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
-      const id = newId("optout");
-      const res = await client.query(
-        `INSERT INTO comms_recipient_opt_outs (tenant_id, opt_out_id, memory_space_id, channel, account_ref, recipient_hash, recipient_hint, source, evidence_ref, recorded_by, session_id, task_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-         ON CONFLICT (tenant_id, channel, account_ref, recipient_hash) WHERE status = 'active' DO NOTHING RETURNING opt_out_id`,
-        [tenantId, id, space, input.channel, input.account_ref, input.recipient_hash, input.recipient_hint, input.source, input.evidence_ref ?? null, input.recorded_by, input.session_id ?? null, input.task_id ?? null, this.clock()]
-      );
-      if (res.rowCount === 1) return { opt_out_id: id, created: true };
-      const existing = await client.query(
-        `SELECT opt_out_id FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND channel = $2 AND account_ref = $3 AND recipient_hash = $4 AND status = 'active'`,
-        [tenantId, input.channel, input.account_ref, input.recipient_hash]
-      );
-      return { opt_out_id: (existing.rows[0] as { opt_out_id: string }).opt_out_id, created: false };
-    });
+    return withMemoryTransaction(this.pool, tenantId, COMMS_SPACES, (client) => this.recordOptOutIn(client, tenantId, space, input));
+  }
+
+  private async recordOptOutIn(
+    client: pg.PoolClient, tenantId: string, space: MemorySpace,
+    input: { channel: CommsChannel; recipient_hash: string; recipient_hint: string; source: OptOutSource; evidence_ref?: string; recorded_by: string; session_id?: string; task_id?: string }
+  ): Promise<{ opt_out_id: string; created: boolean }> {
+    // To samtidige STOP for samme mottaker (f.eks. SMS og WhatsApp i samme sekund) serialiseres, så vi aldri får to aktive rader.
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 7340464))", [`comms-optout|${tenantId}|${input.recipient_hash}`]);
+    const existing = await client.query(`SELECT opt_out_id FROM comms_recipient_opt_outs WHERE tenant_id = $1 AND recipient_hash = $2 AND status = 'active' LIMIT 1`, [tenantId, input.recipient_hash]);
+    if (existing.rowCount === 1) return { opt_out_id: (existing.rows[0] as { opt_out_id: string }).opt_out_id, created: false };
+    const id = newId("optout");
+    await client.query(
+      `INSERT INTO comms_recipient_opt_outs (tenant_id, opt_out_id, memory_space_id, channel, account_ref, recipient_hash, recipient_hint, source, evidence_ref, recorded_by, session_id, task_id, created_at)
+       VALUES ($1, $2, $3, $4, '*', $5, $6, $7, $8, $9, $10, $11, $12)`,
+      [tenantId, id, space, input.channel, input.recipient_hash, input.recipient_hint, input.source, input.evidence_ref ?? null, input.recorded_by, input.session_id ?? null, input.task_id ?? null, this.clock()]
+    );
+    return { opt_out_id: id, created: true };
   }
 
   /**
-   * KUN mottakerens egen START kan oppheve en avmelding, og kun en som kom fra et stopp-ord/leverandørfeil på NØYAKTIG denne avsenderen. En avmelding eieren har registrert (`owner_recorded`) eller mottakeren har bedt om
-   * utenfor kanalen (`recipient_request`) kan aldri oppheves av et tekstsvar.
+   * KUN mottakerens egen START kan oppheve en avmelding, og kun en som kom fra et stopp-ord/leverandørfeil og på SAMME kanal som START-en kom på (konservativt: en STOP på SMS opphever ikke en START på WhatsApp - mottakeren må
+   * svare START der den ble avmeldt). En avmelding eieren har registrert (`owner_recorded`) eller mottakeren har bedt om utenfor kanalen (`recipient_request`) kan aldri oppheves av et tekstsvar.
    */
-  async liftByStartKeyword(tenantId: string, space: MemorySpace, input: { channel: CommsChannel; account_ref: string; recipient_hash: string }): Promise<number> {
-    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
-      const res = await client.query(
-        `UPDATE comms_recipient_opt_outs SET status = 'lifted', lifted_at = $5, lifted_by = 'inbound_start_keyword'
-          WHERE tenant_id = $1 AND channel = $2 AND account_ref = $3 AND recipient_hash = $4 AND status = 'active' AND source IN ('inbound_stop_keyword', 'provider_error')`,
-        [tenantId, input.channel, input.account_ref, input.recipient_hash, this.clock()]
-      );
-      return res.rowCount ?? 0;
-    });
+  async liftByStartKeyword(tenantId: string, input: { channel: CommsChannel; recipient_hash: string }): Promise<number> {
+    return withMemoryTransaction(this.pool, tenantId, COMMS_SPACES, (client) => this.liftIn(client, tenantId, input));
   }
 
-  async listOptOuts(tenantId: string, space: MemorySpace, limit = 100): Promise<OptOutRow[]> {
-    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
+  private async liftIn(client: pg.PoolClient, tenantId: string, input: { channel: CommsChannel; recipient_hash: string }): Promise<number> {
+    const res = await client.query(
+      `UPDATE comms_recipient_opt_outs SET status = 'lifted', lifted_at = $4, lifted_by = 'inbound_start_keyword'
+        WHERE tenant_id = $1 AND channel = $2 AND recipient_hash = $3 AND status = 'active' AND source IN ('inbound_stop_keyword', 'provider_error')`,
+      [tenantId, input.channel, input.recipient_hash, this.clock()]
+    );
+    return res.rowCount ?? 0;
+  }
+
+  /** Alle avmeldinger i tenanten (de gjelder tenant-bredt, så listen er det også - på tvers av rom). */
+  async listOptOuts(tenantId: string, _space: MemorySpace, limit = 100): Promise<OptOutRow[]> {
+    return withMemoryTransaction(this.pool, tenantId, COMMS_SPACES, async (client) => {
       const res = await client.query(`SELECT * FROM comms_recipient_opt_outs WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2`, [tenantId, Math.min(Math.max(limit, 1), 500)]);
       return (res.rows as Array<Record<string, unknown>>).map((r) => ({
         opt_out_id: r["opt_out_id"] as string, channel: r["channel"] as CommsChannel, account_ref: r["account_ref"] as string, recipient_hint: (r["recipient_hint"] as string | null) ?? null,
@@ -248,13 +275,24 @@ export class CommsStore {
 
   // ---------------------------------------------------------------- utgående journal
   /**
-   * Starter et forsøk. Atomisk: `INSERT ... ON CONFLICT DO NOTHING` på (tenant, request_id) - finnes raden fra før (sendt, under utførelse, ukjent utfall eller feilet) gis `replay` og INGENTING skal sendes.
-   * Dette er journal-nivåets egen gjenspillingsvern, i tillegg til ToolGateway-ledgeren (forsvar i dybden: en annen innfallsvei til transporten kan ikke sende samme forespørsel to ganger).
+   * Starter et forsøk - ATOMISK (A-H2). I ÉN transaksjon: (1) to transaksjonsbundne rådgivende låser, alltid i samme rekkefølge (mottaker, så konto - aldri deadlock), serialiserer «tell + reserver» for samme mottaker/konto;
+   * (2) en eksisterende, ikke-avslått rad med samme `request_id` gir `replay` (ingenting sendes to ganger, og en gjenspilling telles ikke mot taket mot seg selv); (3) ratetakene telles PÅ NYTT under låsen (READ COMMITTED: alle
+   * som holdt låsen før oss har committet og er synlige) - nådd tak gir `cap_exceeded` uten skriving; (4) først da skrives `requested`-raden, som neste i køen ser. Før dette (sjekk i policyen, skriv senere uten lås) så N samtidige
+   * sendinger alle «0 sendt» og alle sendte. Låsen holdes kun gjennom denne korte DB-transaksjonen, aldri over leverandørkallet.
+   * Journal-nivåets gjenspillingsvern (`INSERT ... ON CONFLICT DO NOTHING` på (tenant, request_id)) står i tillegg til ToolGateway-ledgeren (forsvar i dybden).
    */
-  async beginAttempt(tenantId: string, space: MemorySpace, entry: JournalEntryInput, actor: Actor, retentionDays: number): Promise<BeginResult> {
+  async beginAttempt(tenantId: string, space: MemorySpace, entry: JournalEntryInput, actor: Actor, retentionDays: number, caps: RateCaps): Promise<BeginResult> {
     return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
-      const id = newId("clog");
+      if (caps.recipient !== null) await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 7340463))", [`comms-cap-recipient|${tenantId}|${entry.channel}|${entry.recipient_hash}`]);
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 7340463))", [`comms-cap-account|${tenantId}|${entry.channel}|${entry.account_ref}`]);
+      const replay = await this.priorAttemptOf(client, tenantId, entry.request_id);
+      if (replay !== null) return replay;
       const now = this.clock();
+      if (caps.recipient !== null && (await this.recipientCount(client, tenantId, entry.channel, entry.recipient_hash, caps.recipient.kind, now)) >= caps.recipient.limit) {
+        return { kind: "cap_exceeded", scope: "recipient", code: caps.recipient.code } as const;
+      }
+      if ((await this.accountCount(client, tenantId, entry.channel, entry.account_ref, now)) >= caps.account.limit) return { kind: "cap_exceeded", scope: "account", code: caps.account.code } as const;
+      const id = newId("clog");
       const retention = new Date(now.getTime() + retentionDays * 86_400_000);
       const res = await client.query(
         `INSERT INTO comms_outbound_log
@@ -267,21 +305,24 @@ export class CommsStore {
           entry.target_log_id ?? null, entry.thread_ref ?? null, entry.before_state === undefined ? null : JSON.stringify(entry.before_state), actor.person_id, actor.session_id, actor.task_id ?? null, entry.source, now, retention]
       );
       if (res.rowCount === 1) return { kind: "started", log_id: id } as const;
-      const prior = await client.query(
-        `SELECT log_id, status, provider_message_id FROM comms_outbound_log WHERE tenant_id = $1 AND request_id = $2 AND status <> 'denied'`, [tenantId, entry.request_id]
-      );
-      const row = prior.rows[0] as { log_id: string; status: JournalStatus; provider_message_id: string | null };
-      return { kind: "replay", log_id: row.log_id, status: row.status, provider_message_id: row.provider_message_id } as const;
+      const raced = await this.priorAttemptOf(client, tenantId, entry.request_id);
+      if (raced === null) throw new Error("comms_journal_insert_conflict_without_row");
+      return raced;
     });
   }
 
+  private async priorAttemptOf(client: pg.PoolClient, tenantId: string, requestId: string): Promise<Extract<BeginResult, { kind: "replay" }> | null> {
+    const prior = await client.query(
+      `SELECT log_id, status, provider_message_id, before_state->>'request_fingerprint' AS request_fingerprint FROM comms_outbound_log WHERE tenant_id = $1 AND request_id = $2 AND status <> 'denied'`, [tenantId, requestId]
+    );
+    if (prior.rowCount === 0) return null;
+    const row = prior.rows[0] as { log_id: string; status: JournalStatus; provider_message_id: string | null; request_fingerprint: string | null };
+    return { kind: "replay", log_id: row.log_id, status: row.status, provider_message_id: row.provider_message_id, request_fingerprint: row.request_fingerprint };
+  }
+
   /** Finnes det allerede et IKKE-avslått forsøk med denne forespørsels-id-en? (`null` = nei.) Eier-ruten bruker det til å la en gjenspilling gå rett til gatewayens ledger i stedet for å vurdere policyen mot en tilstand det første forsøket selv har endret. */
-  async findAttempt(tenantId: string, space: MemorySpace, requestId: string): Promise<{ log_id: string; status: JournalStatus } | null> {
-    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
-      const res = await client.query(`SELECT log_id, status FROM comms_outbound_log WHERE tenant_id = $1 AND request_id = $2 AND status <> 'denied'`, [tenantId, requestId]);
-      const row = res.rows[0] as { log_id: string; status: JournalStatus } | undefined;
-      return row ?? null;
-    });
+  async findAttempt(tenantId: string, space: MemorySpace, requestId: string): Promise<Extract<BeginResult, { kind: "replay" }> | null> {
+    return withMemoryTransaction(this.pool, tenantId, [space], (client) => this.priorAttemptOf(client, tenantId, requestId));
   }
 
   /** Bevisføring for et AVSLÅTT forsøk (policy). Brenner IKKE forespørsels-id-en (delvis unik indeks utelater `denied`). */
@@ -316,25 +357,31 @@ export class CommsStore {
   }
 
   async countRecipient24h(tenantId: string, space: MemorySpace, channel: CommsChannel, recipientHash: string, kind: "message" | "call"): Promise<number> {
-    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
-      const since = new Date(this.clock().getTime() - 24 * 3_600_000);
-      const res = await client.query(
-        `SELECT count(*)::int AS n FROM comms_outbound_log WHERE tenant_id = $1 AND channel = $2 AND recipient_hash = $3 AND kind = $4 AND status = ANY($5::text[]) AND created_at > $6`,
-        [tenantId, channel, recipientHash, kind, ACTIVE_STATUSES, since]
-      );
-      return (res.rows[0] as { n: number }).n;
-    });
+    return withMemoryTransaction(this.pool, tenantId, [space], (client) => this.recipientCount(client, tenantId, channel, recipientHash, kind, this.clock()));
   }
 
   async countAccountHour(tenantId: string, space: MemorySpace, channel: CommsChannel, accountRef: string): Promise<number> {
-    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
-      const since = new Date(this.clock().getTime() - 3_600_000);
-      const res = await client.query(
-        `SELECT count(*)::int AS n FROM comms_outbound_log WHERE tenant_id = $1 AND channel = $2 AND account_ref = $3 AND status = ANY($4::text[]) AND created_at > $5`,
-        [tenantId, channel, accountRef, ACTIVE_STATUSES, since]
-      );
-      return (res.rows[0] as { n: number }).n;
-    });
+    return withMemoryTransaction(this.pool, tenantId, [space], (client) => this.accountCount(client, tenantId, channel, accountRef, this.clock()));
+  }
+
+  /** Samme SQL for den rådgivende tellingen (policyens tørrkjøring) og den atomiske tellingen under lås i `beginAttempt`: aktive forsøk (requested/sent/outcome_unknown) siste 24 t til mottakeren, per handlingstype. */
+  private async recipientCount(client: pg.PoolClient, tenantId: string, channel: CommsChannel, recipientHash: string, kind: "message" | "call", now: Date): Promise<number> {
+    const since = new Date(now.getTime() - 24 * 3_600_000);
+    const res = await client.query(
+      `SELECT count(*)::int AS n FROM comms_outbound_log WHERE tenant_id = $1 AND channel = $2 AND recipient_hash = $3 AND kind = $4 AND status = ANY($5::text[]) AND created_at > $6`,
+      [tenantId, channel, recipientHash, kind, ACTIVE_STATUSES, since]
+    );
+    return (res.rows[0] as { n: number }).n;
+  }
+
+  /** Aktive forsøk (alle handlinger) fra kontoen siste time. */
+  private async accountCount(client: pg.PoolClient, tenantId: string, channel: CommsChannel, accountRef: string, now: Date): Promise<number> {
+    const since = new Date(now.getTime() - 3_600_000);
+    const res = await client.query(
+      `SELECT count(*)::int AS n FROM comms_outbound_log WHERE tenant_id = $1 AND channel = $2 AND account_ref = $3 AND status = ANY($4::text[]) AND created_at > $5`,
+      [tenantId, channel, accountRef, ACTIVE_STATUSES, since]
+    );
+    return (res.rows[0] as { n: number }).n;
   }
 
   /** Meldingen Jarvis selv har sendt (status `sent`) med dette leverandør-id-et fra denne kontoen - grunnlaget for «egen melding» ved redigering/sletting. */
@@ -367,9 +414,15 @@ export class CommsStore {
   }
 
   // ---------------------------------------------------------------- innkommende hendelser (kun signaturverifiserte)
-  /** `inserted: false` = samme leverandørhendelse er sett før (gjenspilling): ingenting skrives eller utføres en gang til. */
-  async recordInbound(tenantId: string, space: MemorySpace, input: InboundEventInput, retentionDays: number): Promise<{ inserted: boolean; event_id: string | null }> {
-    return withMemoryTransaction(this.pool, tenantId, [space], async (client) => {
+  /**
+   * `inserted: false` = samme leverandørhendelse er sett før (gjenspilling): ingenting skrives eller utføres en gang til.
+   *
+   * FIKS B-H2: dedupe-raden og avmeldingen/gjenopptaket (`effect`) skrives i ÉN transaksjon. Før lå de i to: feilet det andre steget etter at dedupe-raden var committet, var leverandørens retry en «duplikat» og mottakerens
+   * STOP ble aldri registrert (juridisk tung, lav sannsynlighet). Nå ruller en feil i avmeldingen tilbake HELE hendelsen, og retry behandles på nytt.
+   */
+  async recordInbound(tenantId: string, space: MemorySpace, input: InboundEventInput, retentionDays: number, effect?: OptEffect): Promise<{ inserted: boolean; event_id: string | null }> {
+    // Alle comms-rom er synlige i transaksjonen: avmeldingen er tenant-bred (A-M3), så en eksisterende avmelding i et annet rom må sees (ingen duplikat) og START må kunne oppheve den. Hendelsen selv skrives i `space`.
+    return withMemoryTransaction(this.pool, tenantId, COMMS_SPACES, async (client) => {
       const id = newId("cin");
       const now = this.clock();
       const res = await client.query(
@@ -381,7 +434,15 @@ export class CommsStore {
         [tenantId, id, space, input.provider, input.channel, input.account_ref, input.event_key, input.kind, input.sender_hash, input.sender_hint, input.identity_id, input.thread_ref,
           input.content_excerpt, input.content_sha256, input.provider_ts, now, new Date(now.getTime() + retentionDays * 86_400_000), `webhook:${input.provider}`, input.ingest_id]
       );
-      return res.rowCount === 1 ? { inserted: true, event_id: id } : { inserted: false, event_id: null };
+      if (res.rowCount !== 1) return { inserted: false, event_id: null };
+      if (effect?.kind === "stop") {
+        await this.recordOptOutIn(client, tenantId, space, {
+          channel: effect.channel, recipient_hash: effect.recipient_hash, recipient_hint: effect.recipient_hint, source: "inbound_stop_keyword", evidence_ref: effect.evidence_ref, recorded_by: "system", task_id: input.ingest_id
+        });
+      } else if (effect?.kind === "start") {
+        await this.liftIn(client, tenantId, { channel: effect.channel, recipient_hash: effect.recipient_hash });
+      }
+      return { inserted: true, event_id: id };
     });
   }
 

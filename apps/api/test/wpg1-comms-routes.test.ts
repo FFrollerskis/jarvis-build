@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it, vi } from "vitest";
@@ -7,7 +8,7 @@ import {
   COMMS_KNOWN_ACTIONS, InvalidCommsConfigError, WEBHOOK_MAX_BYTES, type CommsWebhookProvider, type CommsWebhookService, type OutboundFunnel, type WebhookRequest, type WebhookResponse
 } from "@jarvis/comms";
 import { buildCommsRuntime } from "../src/comms-wiring.ts";
-import { createApiServer, type ApiDeps } from "../src/server.ts";
+import { createApiServer, normalizedRequestPath, type ApiDeps } from "../src/server.ts";
 
 /**
  * WP-G1 (D-463, P1b/P1d): HTTP-OPPFØRSELEN til kommunikasjonsrutene - uten database (tjenestene er testdobler; selve policyen/journalen/ledgeren er bevist mot ekte Postgres i `modules/comms/test`). Beviset her:
@@ -71,7 +72,7 @@ function stubOutbound(opts: { allowed?: boolean; gatewayResult?: unknown; replay
   };
   const evaluation = (allowed: boolean) => ({ parsed: { request_id: "x" }, decision: { allowed, denial_codes: allowed ? [] : ["quiet_hours", "recipient_opted_out"], rules: [] } });
   const funnel = {
-    hasPriorAttempt: async () => { funnelCalls.push("hasPriorAttempt"); return opts.replay === true; },
+    replayState: async () => { funnelCalls.push("replayState"); return opts.replay === true ? "replay" : "none"; },
     evaluate: async () => { funnelCalls.push("evaluate"); return evaluation(opts.allowed !== false); },
     recordDenial: async () => { funnelCalls.push("recordDenial"); return "clog_denied_1"; },
     summarize: (ev: { decision: { allowed: boolean; denial_codes: string[] } }) => ({ v: 1, allowed: ev.decision.allowed, denial_codes: ev.decision.denial_codes, rules: [{ rule: "quiet_hours", outcome: "deny", code: "quiet_hours" }], content: { sha256: "0".repeat(64), length: 12 } })
@@ -104,6 +105,47 @@ describe("A: DORMANT - uten `deps.comms` finnes ingen kommunikasjonsrute (flagg 
     const statuses: number[] = [];
     for (let i = 0; i < 8; i += 1) statuses.push((await post(base, "/webhooks/comms/slack", "{}")).status);
     expect(new Set(statuses)).toEqual(new Set([404]));
+  });
+
+  it("B-M5: den strenge grensen nøkles på NORMALISERT sti - `/./`- og `%2e`-varianter deler spann med den rene stien (de slapp før gjennom til den romslige grensen), og de treffer fortsatt ruten", async () => {
+    const { service, calls } = stubWebhookService();
+    const base = await listen({ comms: { webhooks: { service, providers: new Set<CommsWebhookProvider>(["slack"]) } }, rateLimits: { authPerIpPerMinute: 3 } });
+    // `fetch` normaliserer stien hos klienten, så rå `node:http` brukes: stien sendes NØYAKTIG som skrevet
+    const rawPost = (path: string) => new Promise<number>((resolve, reject) => {
+      const u = new URL(base);
+      const r = httpRequest({ host: u.hostname, port: u.port, path, method: "POST", headers: { "content-type": "application/json" } }, (res) => { res.resume(); res.on("end", () => resolve(res.statusCode ?? 0)); });
+      r.on("error", reject);
+      r.end("{}");
+    });
+    const variants = ["/webhooks/comms/slack", "/webhooks/comms/./slack", "/webhooks/comms/%2e/slack", "/webhooks/comms/%2E/slack", "/webhooks/comms/x/../slack", "/webhooks/comms/%2e%2e/comms/slack"];
+    const statuses: number[] = [];
+    for (const path of variants) statuses.push(await rawPost(path));
+    expect(statuses).toEqual([200, 200, 200, 429, 429, 429]); // ÉN felles grense på 3, uansett skrivemåte
+    expect(calls).toHaveLength(3); // og de tre første nådde faktisk webhook-ruten (variantene er samme rute etter normalisering)
+  });
+
+  it("B-M5: samme normalisering gjelder de eksisterende AUTH_ROUTES (ingen atferdsendring for lovlige kall: ren sti teller som før)", async () => {
+    const base = await listen({ rateLimits: { authPerIpPerMinute: 2 } });
+    const rawGet = (path: string) => new Promise<number>((resolve, reject) => {
+      const u = new URL(base);
+      httpRequest({ host: u.hostname, port: u.port, path, method: "POST", headers: { "content-type": "application/json" } }, (res) => { res.resume(); res.on("end", () => resolve(res.statusCode ?? 0)); }).on("error", reject).end("{}");
+    });
+    const first = await rawGet("/devices/challenge");
+    const second = await rawGet("/devices/./challenge");
+    const third = await rawGet("/devices/%2e/challenge");
+    expect([first, second].every((c) => c !== 429)).toBe(true);
+    expect(third).toBe(429);
+    // en annen sti påvirkes ikke
+    expect(await rawGet("/webhooks/comms/slack")).not.toBe(429);
+  });
+
+  it("normalizedRequestPath: samme stiform som rutingen (`new URL().pathname`); spørring og fragment fjernes; ugyldig input faller tilbake uten å kaste", () => {
+    expect(normalizedRequestPath("/webhooks/comms/slack?x=1")).toBe("/webhooks/comms/slack");
+    expect(normalizedRequestPath("/webhooks/comms/./slack")).toBe("/webhooks/comms/slack");
+    expect(normalizedRequestPath("/webhooks/comms/%2e/slack")).toBe("/webhooks/comms/slack");
+    expect(normalizedRequestPath("/a/b/../slack#frag")).toBe("/a/slack");
+    expect(normalizedRequestPath(undefined)).toBe("/");
+    expect(() => normalizedRequestPath("http://[::1")).not.toThrow();
   });
 
   it("med BARE utgående slått på finnes ingen webhook-rute, og med BARE webhooks finnes ingen eier-rute", async () => {
@@ -266,7 +308,7 @@ describe("C: `/comms/action` og `/comms/preview` - grant -> suveren eier -> step
     const { outbound, gatewayCalls } = stubOutbound();
     const base = await listen({ ...authDeps, comms: { outbound } });
     for (const token of ["owner-active", "owner-telegram", "owner-voice"]) {
-      for (const action of ["send", "edit_message", "delete_message", "add_reaction", "authorize_account", "revoke_account", "start_call", "contacts_create", "contacts_update", "contacts_delete", "contacts_sync",
+      for (const action of ["send", "edit_message", "delete_message", "add_reaction", "authorize_account", "revoke_account", "start_call", "contacts_create", "contacts_update", "contacts_delete", "contacts_sync", "contacts_unlink",
         "meeting_ingest_text", "meeting_decide_commitment", "meeting_confirm_participant", "meeting_delete"]) {
         const r = await post(base, "/comms/action", sendBody({ grant_token: token, action, parameters: {} }));
         expect(r.status, `${token} ${action}`).toBe(403);
@@ -275,7 +317,7 @@ describe("C: `/comms/action` og `/comms/preview` - grant -> suveren eier -> step
     }
     expect(gatewayCalls).toEqual([]);
     // ikke-step-up-handlinger: lesing + avmelding når gatewayen også fra en svakere økt
-    const exempt = ["list_inbound", "list_outbound", "list_opt_outs", "list_accounts", "record_opt_out", "read_thread", "list_users", "get_message", "list_templates", "read_message", "contacts_list", "contacts_search", "contacts_get", "meeting_list", "meeting_commitments"];
+    const exempt = ["list_inbound", "list_outbound", "list_opt_outs", "list_accounts", "record_opt_out", "read_thread", "list_users", "get_message", "list_templates", "read_message", "contacts_list", "contacts_search", "contacts_get", "meeting_list", "meeting_commitments", "meeting_get"];
     for (const action of exempt) {
       const r = await post(base, "/comms/action", { grant_token: "owner-active", action, parameters: {} });
       expect(r.status, action).toBe(200);
@@ -294,7 +336,7 @@ describe("C: `/comms/action` og `/comms/preview` - grant -> suveren eier -> step
     expect(call).toMatchObject({ tool_id: "comms", action: "send", idempotency_key: "idem-route-0001" });
     expect(call?.parameters["request_id"]).toBe("idem-route-0001");
     expect(call?.identity).toMatchObject({ person_id: OWNER, tenant_id: TENANT, memory_space_id: "business", channel: "web", auth_strength: "signed" });
-    expect(funnelCalls).toEqual(["hasPriorAttempt", "evaluate"]);
+    expect(funnelCalls).toEqual(["replayState", "evaluate"]);
     expect(r.text).not.toContain("timen din");
   });
 
@@ -324,14 +366,14 @@ describe("C: `/comms/action` og `/comms/preview` - grant -> suveren eier -> step
     expect(Array.isArray(r.json?.["rules"])).toBe(true);
     expect(r.text).not.toContain("timen din");
     expect(gatewayCalls).toEqual([]);
-    expect(funnelCalls).toEqual(["hasPriorAttempt", "evaluate", "recordDenial"]);
+    expect(funnelCalls).toEqual(["replayState", "evaluate", "recordDenial"]);
   });
 
   it("gjenspilling (id-en har et tidligere forsøk) går rett til gatewayen uten ny evaluering; gatewayfeil gir 403 `tool_denied` med kort årsak", async () => {
     const replay = stubOutbound({ replay: true });
     const base = await listen({ ...authDeps, comms: { outbound: replay.outbound } });
     expect((await post(base, "/comms/action", sendBody())).status).toBe(200);
-    expect(replay.funnelCalls).toEqual(["hasPriorAttempt"]);
+    expect(replay.funnelCalls).toEqual(["replayState"]);
     expect(replay.gatewayCalls).toHaveLength(1);
     const failing = stubOutbound({ gatewayResult: { ok: false, reason: "class_d_notifier_not_ready" } });
     const base2 = await listen({ ...authDeps, comms: { outbound: failing.outbound } });
@@ -413,6 +455,74 @@ describe("D: oppkoblingen (`buildCommsRuntime`) og kildevakter", () => {
         expect(() => build(env), JSON.stringify(env)).toThrow(InvalidCommsConfigError);
       }
     } finally { log.mockRestore(); }
+  });
+
+  describe("B-M6: retensjonssveipet er faktisk koblet (kjører ved oppstart, riktige tenants og rom, validert webhook-tenant)", () => {
+    // En registrerende falsk pool: hver transaksjon (`withMemoryTransaction`) leser tenant/rom fra `set_config` og DELETE-ene - ingen database trengs for å bevise OPPKOBLINGEN.
+    const recorder = () => {
+      const deletes: Array<{ table: string; tenant: string; spaces: string }> = [];
+      const pool = {
+        connect: async () => {
+          let current = { tenant: "", spaces: "" };
+          return {
+            query: async (sql: string, params?: unknown[]) => {
+              if (sql.startsWith("SELECT set_config")) current = { tenant: String(params?.[0]), spaces: String(params?.[1]) };
+              const m = /^DELETE FROM (comms_\w+)/.exec(sql);
+              if (m) deletes.push({ table: m[1]!, tenant: current.tenant, spaces: current.spaces });
+              return { rowCount: 0, rows: [] };
+            },
+            release: () => undefined
+          };
+        }
+      };
+      return { pool: pool as never, deletes };
+    };
+    const flush = async () => { for (let i = 0; i < 600; i += 1) await Promise.resolve(); };
+    const hookEnv = { JARVIS_COMMS_OUTBOUND: "on", JARVIS_COMMS_CHANNELS: "sms", JARVIS_COMMS_WEBHOOKS: "twilio", JARVIS_COMMS_TENANT_ID: "tenant-hook", JARVIS_COMMS_PUBLIC_BASE_URL: "https://hooks.example.com" };
+
+    it("startSweeps kjører et sveip UMIDDELBART for alle eierens tenants (inkl. webhook-tenanten) × alle fire rom, og gjentar hver 6. time", async () => {
+      vi.useFakeTimers();
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      try {
+        const { pool, deletes } = recorder();
+        const rt = buildCommsRuntime({ env: hookEnv, pool, graph, business, secrets });
+        rt.startSweeps(["tenant-owner", "tenant-hook"], "person-owner");
+        await flush();
+        const inbound = deletes.filter((d) => d.table === "comms_inbound_events");
+        expect(inbound.map((d) => `${d.tenant}|${d.spaces}`).sort()).toEqual(
+          ["tenant-hook", "tenant-owner"].flatMap((t) => ["business", "personal", "project", "shared"].map((sp) => `${t}|${sp}`)).sort()
+        );
+        expect(deletes.filter((d) => d.table === "comms_outbound_log")).toHaveLength(8);
+        const before = deletes.length;
+        await vi.advanceTimersByTimeAsync(6 * 3_600_000 - 1);
+        expect(deletes.length).toBe(before);
+        await vi.advanceTimersByTimeAsync(1);
+        await flush();
+        expect(deletes.length).toBe(2 * before);
+      } finally { log.mockRestore(); vi.useRealTimers(); }
+    });
+
+    it("en webhook-tenant som IKKE er en av eierens stopper oppstarten FØR noe planlegges; uten webhook-tenant sveipes kun eierens tenants; alt AV planlegger ingenting", async () => {
+      vi.useFakeTimers();
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      try {
+        const bad = recorder();
+        expect(() => buildCommsRuntime({ env: hookEnv, pool: bad.pool, graph, business, secrets }).startSweeps(["tenant-owner"], "person-owner")).toThrow(InvalidCommsConfigError);
+        await flush();
+        expect(bad.deletes).toEqual([]);
+        await vi.advanceTimersByTimeAsync(7 * 3_600_000);
+        expect(bad.deletes).toEqual([]); // ingenting ble planlagt
+        const ok = recorder();
+        buildCommsRuntime({ env: { JARVIS_COMMS_OUTBOUND: "on", JARVIS_COMMS_CHANNELS: "sms" }, pool: ok.pool, graph, business, secrets }).startSweeps(["tenant-owner"], "person-owner");
+        await flush();
+        expect(new Set(ok.deletes.map((d) => d.tenant))).toEqual(new Set(["tenant-owner"]));
+        const off = recorder();
+        buildCommsRuntime({ env: {}, pool: off.pool, graph, business, secrets }).startSweeps(["tenant-owner"], "person-owner");
+        await flush();
+        await vi.advanceTimersByTimeAsync(7 * 3_600_000);
+        expect(off.deletes).toEqual([]);
+      } finally { log.mockRestore(); vi.useRealTimers(); }
+    });
   });
 
   const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");

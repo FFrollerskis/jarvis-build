@@ -111,6 +111,17 @@ function rejectFrom(provider: string, res: ProviderResponse, path: readonly stri
 
 const bearer = (token: string): Record<string, string> => ({ authorization: `Bearer ${token}`, "content-type": "application/json" });
 
+const DEFAULT_CALL_VOICE = "Polly.Liv";
+
+/** Er ALLE tegn gyldige i XML 1.0 (`Char`: tab, linjeskift, vognretur, U+0020-D7FF, U+E000-FFFD, U+10000-10FFFF)? U+FFFE/U+FFFF, kontrolltegn og ensomme surrogater er det ikke. */
+export function isXmlSafe(text: string): boolean {
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) as number;
+    if (!(cp === 0x9 || cp === 0xa || cp === 0xd || (cp >= 0x20 && cp <= 0xd7ff) || (cp >= 0xe000 && cp <= 0xfffd) || (cp >= 0x10000 && cp <= 0x10ffff))) return false;
+  }
+  return true;
+}
+
 /** XML-escaping for TwiML (`&`, `<`, `>`, `"`, `'`): ingen tekst kan lukke `<Say>` eller legge til egne TwiML-verb. */
 export function xmlEscape(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
@@ -258,14 +269,32 @@ export class WhatsAppAdapter implements ChannelAdapter {
         template: { name: t.name, language: { code: t.language }, ...(t.params.length > 0 ? { components: [{ type: "body", parameters: t.params.map((p) => ({ type: "text", text: p })) }] } : {}) }
       };
     } else if (request.media !== null) {
-      payload = { type: request.media.kind, [request.media.kind]: { link: request.media.url, ...(request.text !== null && request.media.kind !== "audio" ? { caption: request.text } : {}) } };
+      const media = request.media;
+      if (media.kind === "audio") {
+        // A-M1: en WhatsApp-lydmelding kan ikke ha bildetekst, så AI-opplysningen ville gått tapt (mens journalen sa `ai_disclosure_applied`). Opplysningen (og evt. tekst) sendes derfor som EGEN tekstmelding FØRST, og lyden rett etter.
+        // Feiler lyden entydig ETTER at teksten er levert, er noe levert til mottakeren: utfallet er da UKJENT (aldri `failed`, som ville late som at ingenting nådde fram).
+        if (request.text === null || request.text.length === 0) throw new Error("comms_whatsapp_audio_requires_disclosure_text");
+        await this.postWithId(request, token, { type: "text", text: { body: request.text, preview_url: false } });
+        try {
+          return { provider_message_id: await this.postWithId(request, token, { type: "audio", audio: { link: media.url } }) };
+        } catch (err) {
+          if (err instanceof ProviderRejectedError) throw new Error("outcome_unknown:comms_whatsapp_audio_not_delivered_after_disclosure");
+          throw err;
+        }
+      }
+      payload = { type: media.kind, [media.kind]: { link: media.url, ...(request.text !== null ? { caption: request.text } : {}) } };
     } else {
       payload = { type: "text", text: { body: request.text, preview_url: false } };
     }
+    return { provider_message_id: await this.postWithId(request, token, payload) };
+  }
+
+  /** Sender én melding og krever et bekreftet meldings-id (2xx uten id er UKJENT utfall). */
+  private async postWithId(request: AdapterTarget, token: string, payload: Record<string, unknown>): Promise<string> {
     const res = await this.post(request, token, payload);
     const id = (res.json?.["messages"] as Array<{ id?: unknown }> | undefined)?.[0]?.id;
     if (typeof id !== "string" || id.length === 0) throw new Error("outcome_unknown:comms_whatsapp_no_message_id");
-    return { provider_message_id: id };
+    return id;
   }
 
   async react(request: AdapterTarget & { target_message_id: string; reaction: string }, token: string): Promise<void> {
@@ -280,7 +309,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
  */
 export class TwilioSmsAdapter implements ChannelAdapter {
   readonly provider = "twilio" as const;
-  constructor(private readonly accountSid: () => Promise<string | null>, private readonly options: { callLanguage?: string } = {}) {}
+  constructor(private readonly accountSid: () => Promise<string | null>, private readonly options: { callLanguage?: string; callVoice?: string } = {}) {}
 
   /**
    * Utgående samtale: `POST /Accounts/{sid}/Calls.json` med `To`, `From` (alltid den allowlistede kontoen) og INLINE `Twiml` (`<Say>` - ingen URL å hente, ingen opptak: parameteren `Record` sendes aldri). Manuset er XML-escapet (ingen
@@ -291,7 +320,12 @@ export class TwilioSmsAdapter implements ChannelAdapter {
     if (!sid || !/^[A-Za-z0-9]{10,64}$/.test(sid)) throw new Error("comms_twilio_account_sid_not_configured");
     const language = this.options.callLanguage ?? "nb-NO";
     if (!/^[a-z]{2}-[A-Z]{2}$/.test(language)) throw new Error("comms_twilio_call_language_invalid");
-    const twiml = `<Response><Say language="${language}">${xmlEscape(request.script)}</Say></Response>`;
+    // L4: `<Say language="nb-NO">` uten `voice` bruker standardstemmen, som ikke støtter norsk (kan feile eller lese feil språk) - en eksplisitt stemme settes. `Polly.Liv` (Amazon Polly, norsk bokmål) er UVERIFISERT mot Twilios stemmeliste i denne økten.
+    const voice = this.options.callVoice ?? DEFAULT_CALL_VOICE;
+    if (!/^[A-Za-z][A-Za-z0-9._-]{0,39}$/.test(voice)) throw new Error("comms_twilio_call_voice_invalid");
+    // XML 1.0 tillater ikke alle tegn (U+FFFE/U+FFFF, kontrolltegn): manuset avvises FØR noe sendes i stedet for at Twilio avviser/avkorter TwiML-en etter at AI-opplysningen er lest opp.
+    if (!isXmlSafe(request.script)) throw new Error("comms_twiml_invalid_character");
+    const twiml = `<Response><Say voice="${voice}" language="${language}">${xmlEscape(request.script)}</Say></Response>`;
     const res = await providerCall("twilio", `https://api.twilio.com/2010-04-01/Accounts/${encodePathSegment(sid, "account_sid")}/Calls.json`, {
       method: "POST",
       headers: { authorization: `Basic ${Buffer.from(`${sid}:${authToken}`).toString("base64")}`, "content-type": "application/x-www-form-urlencoded" },

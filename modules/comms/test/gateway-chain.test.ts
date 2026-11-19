@@ -69,7 +69,7 @@ beforeEach(() => {
   controls.unfreezeConnector("comms");
 });
 
-const sendParams = (over: Record<string, unknown> = {}) => ({ request_id: key("req"), channel: "sms", account_ref: "+4791000000", recipient: "+4790001111", purpose: "transactional", text: "Hei, timen din er bekreftet.", ...over });
+const sendParams = (over: Record<string, unknown> = {}) => ({ request_id: key("req"), channel: "sms", account_ref: "+4791000000", recipient: "+4790001111", purpose: "transactional", purpose_basis: "existing_customer_relationship", text: "Hei, timen din er bekreftet.", ...over });
 const send = (over: Record<string, unknown> = {}, idem?: string, identity: IdentityContext = owner) => {
   const params = sendParams(over);
   return gateway.execute({ identity, tool_id: "comms", action: "send", parameters: params as never, idempotency_key: idem ?? (params.request_id as string) });
@@ -123,7 +123,7 @@ describe("B: utsendelse gjennom hele kjeden", () => {
     expect(log).toEqual([{ status: "sent", provider_message_id: r.ok ? r.external_id : null }]);
     expect(notifications).toHaveLength(1);
     expect(notifications[0]).toMatchObject({ tool_id: "comms", action: "send", outcome: "executed" });
-    expect(notifications[0]!.summary).toMatch(/via sms til \+47•+111 \(formål: transactional\)/);
+    expect(notifications[0]!.summary).toMatch(/via sms til \+47•+111 \(formål: transactional, grunnlag: existing_customer_relationship\)/);
     expect(JSON.stringify(notifications)).not.toContain("Konfidensiell-tekst-42");
   });
 

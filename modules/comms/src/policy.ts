@@ -17,6 +17,20 @@ export type OutboundKind = "message" | "edit" | "delete" | "reaction" | "call";
 export type OutboundPurpose = "transactional" | "agreed" | "marketing";
 export const OUTBOUND_PURPOSES: readonly OutboundPurpose[] = ["transactional", "agreed", "marketing"];
 
+/**
+ * A-M2 (LEDER-AVGJØRELSE): eierens ERKLÆRTE grunnlag for å ta FØRSTE kontakt med en kald mottaker (lukket liste). Det er eierens uttrykkelige bekreftelse av det loven (markedsføringsloven § 15) krever skal kunne påvises - ikke
+ * en kunstig godkjenningssperre for eieren, og Jarvis avgjør aldri selv det rettslige grunnlaget (D-122). UTKAST, krever juridisk gjennomgang (se DPIA §10).
+ * - `recipient_requested_contact`: mottakeren har selv bedt om kontakt/svar/tilbud (utenfor en kanal Jarvis har verifisert).
+ * - `existing_customer_relationship`: eksisterende kunde-/avtaleforhold, og kontaktinformasjonen er mottatt i forbindelse med det.
+ * - `order_or_agreement_followup`: oppfølging av en konkret bestilling, avtale eller henvendelse.
+ * - `consent_obtained_outside_jarvis`: eieren har et samtykke fra mottakeren som ligger utenfor Jarvis.
+ * - `personal_non_commercial`: personlig, ikke-kommersiell melding (ingen markedsføring).
+ */
+export const PURPOSE_BASES = [
+  "recipient_requested_contact", "existing_customer_relationship", "order_or_agreement_followup", "consent_obtained_outside_jarvis", "personal_non_commercial"
+] as const;
+export type PurposeBasis = (typeof PURPOSE_BASES)[number];
+
 export interface TemplateContent {
   readonly name: string;
   readonly language: string;
@@ -50,6 +64,9 @@ export interface OutboundRequest {
   readonly thread_ref?: string;
   /** Leverandørens meldings-id for `edit`/`delete`/`reaction`. */
   readonly target_message_id?: string;
+  /** A-M2: eierens erklærte grunnlag (påkrevd for første kontakt med en KALD mottaker, melding og samtale), + kort notat. Journalføres. */
+  readonly purpose_basis?: PurposeBasis;
+  readonly purpose_basis_note?: string;
 }
 
 export type ReservationRegisterStatus = "not_reserved" | "reserved" | "unverified";
@@ -80,6 +97,9 @@ export interface RecipientProof {
   readonly identity_id: string | null;
   readonly confidence: number | null;
   readonly last_inbound_age_minutes: number | null;
+  /** A-M2: eierens erklærte grunnlag/notat for denne forespørselen (journalføres i det forsterkede revisjonssporet sammen med mottakerbeviset). */
+  readonly purpose_basis?: PurposeBasis;
+  readonly purpose_basis_note?: string;
 }
 
 export interface PolicyDecision {
@@ -130,11 +150,16 @@ export function isQuietHour(hour: number, start: number, end: number): boolean {
   return start < end ? hour >= start && hour < end : hour >= start || hour < end;
 }
 
-/** Tekst som kan sendes: ingen kontrollbokstaver (unntatt linjeskift/tabulator), ingen usynlige formateringstegn (bidi/null-bredde), ingen ensomme surrogater, ingen Unicode-linjeseparatorer. */
+/** Unicode «noncharacters» (U+FDD0-FDEF og U+nFFFE/U+nFFFF i hvert plan): aldri gyldige i XML 1.0/TwiML og aldri meningsfylt tekst (L4). */
+function isNonCharacter(cp: number): boolean {
+  return (cp >= 0xfdd0 && cp <= 0xfdef) || (cp & 0xfffe) === 0xfffe;
+}
+
+/** Tekst som kan sendes: ingen kontrollbokstaver (unntatt linjeskift/tabulator), ingen usynlige formateringstegn (bidi/null-bredde), ingen ensomme surrogater, ingen Unicode-linjeseparatorer, ingen noncharacters. */
 export function textIsSendable(text: string): boolean {
   for (const ch of text) {
     if (ch === "\n" || ch === "\t") continue;
-    if (/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u.test(ch)) return false;
+    if (/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u.test(ch) || isNonCharacter(ch.codePointAt(0) as number)) return false;
   }
   return true;
 }
@@ -163,6 +188,32 @@ function contentCanonical(request: OutboundRequest, finalText: string | null): s
   return finalText;
 }
 
+/** Ett ratetak: grensen (antall aktive forsøk i vinduet) og avslagskoden når den nås. */
+export interface RateCap {
+  readonly limit: number;
+  readonly code: string;
+}
+
+export interface RateCaps {
+  /** Tak per mottaker per døgn for `message`/`call` (telles per handlingstype). `null` = handlingen telles ikke mot mottakeren (redigering/sletting/reaksjon). */
+  readonly recipient: (RateCap & { readonly kind: "message" | "call" }) | null;
+  /** Tak per avsenderkonto per time (alle handlinger). */
+  readonly account: RateCap;
+}
+
+/**
+ * FIKS A-H2: ÉN kilde for ratetakene. Policyen sammenligner dem mot tellerne (tørrkjøring/preflight - en rådgivende lesing), og `CommsStore.beginAttempt` HÅNDHEVER dem atomisk under lås i samme transaksjon som journal-INSERT-en
+ * (sjekk-så-skriv uten lås lot N samtidige sendinger alle se «0 sendt» og alle sende). «Kald» = mottakeren har verken skrevet til oss (siste `reply_window_days`) eller en løst identitet.
+ */
+export function rateCaps(kind: OutboundKind, cold: boolean, config: CommsConfig): RateCaps {
+  const account: RateCap = { limit: config.max_per_account_per_hour, code: "rate_limit_account_hour" };
+  if (kind === "call") return { recipient: { kind: "call", limit: config.max_calls_per_number_per_day, code: "rate_limit_calls_per_number_day" }, account };
+  if (kind === "message") {
+    return { recipient: { kind: "message", limit: cold ? config.max_cold_per_recipient_per_day : config.max_per_recipient_per_day, code: cold ? "rate_limit_cold_recipient_day" : "rate_limit_recipient_day" }, account };
+  }
+  return { recipient: null, account };
+}
+
 /** Kallerens (route/verktøy) bevisste, ikke-modellstyrte tilstand for «nå». Injiseres slik at testene er deterministiske. */
 export function evaluateOutboundPolicy(request: OutboundRequest, state: OutboundPolicyState, config: CommsConfig, now: Date): PolicyDecision {
   const rules: RuleResult[] = [];
@@ -183,7 +234,9 @@ export function evaluateOutboundPolicy(request: OutboundRequest, state: Outbound
     method: proofMethod,
     identity_id: state.recipient_identity?.identity_id ?? null,
     confidence: state.recipient_identity?.confidence ?? null,
-    last_inbound_age_minutes: inboundAgeMin === null ? null : Math.round(inboundAgeMin)
+    last_inbound_age_minutes: inboundAgeMin === null ? null : Math.round(inboundAgeMin),
+    ...(request.purpose_basis !== undefined ? { purpose_basis: request.purpose_basis } : {}),
+    ...(request.purpose_basis_note !== undefined ? { purpose_basis_note: request.purpose_basis_note } : {})
   };
 
   // 1. kanal og konto (eierens egen allowlist)
@@ -228,8 +281,8 @@ export function evaluateOutboundPolicy(request: OutboundRequest, state: Outbound
     add("purpose_marketing", "not_applicable");
   }
 
-  // 5b. ikke-markedsføring som likevel ser ut som reklame til en mottaker uten fersk samtale
-  if (isMessageLike && request.purpose !== "marketing") {
+  // 5b. ikke-markedsføring som likevel ser ut som reklame til en mottaker uten fersk samtale. A-M6: også en REDIGERING (en melding kan ellers sendes ren og redigeres til reklame etterpå).
+  if ((isMessageLike || request.kind === "edit") && request.purpose !== "marketing") {
     const textLike = text ?? content.media?.caption ?? "";
     if (proofMethod !== "inbound_thread" && textLike.length > 0 && looksLikeMarketing(textLike)) deny("content_not_marketing", "content_looks_like_marketing");
     else add("content_not_marketing", "pass");
@@ -245,6 +298,21 @@ export function evaluateOutboundPolicy(request: OutboundRequest, state: Outbound
     add("relationship_evidence", "not_applicable");
   }
 
+  // 5d. A-M2 (LEDER-AVGJØRELSE): en KALD mottaker (verken skrevet til oss siste `reply_window_days` eller en løst identitet) er FØRSTE kontakt. For ALLE formål (også en AI-samtale) kreves da eierens uttrykkelige erklæring av
+  // formålsgrunnlaget (`purpose_basis`, lukket liste + kort notat), journalført i det forsterkede revisjonssporet - lovens krav om at grunnlaget kan påvises (markedsføringsloven § 15), ikke en kunstig godkjenningssperre for eieren.
+  // Manglende grunnlag feiler LUKKET (`purpose_basis_required`). Reklameord i innholdet (5b) avslår uansett hvilket grunnlag som er oppgitt, og Jarvis avgjør aldri det rettslige grunnlaget (D-122).
+  if (!isMessageLike) {
+    add("purpose_basis", "not_applicable");
+  } else {
+    const note = request.purpose_basis_note;
+    const noteInvalid = note !== undefined && (note.trim().length === 0 || note.length > 200 || !textIsSendable(note) || note.includes("\n") || containsSecret(note));
+    if (noteInvalid) deny("purpose_basis", "purpose_basis_note_invalid");
+    else if (proofMethod === "explicit_param" && request.purpose_basis === undefined) deny("purpose_basis", "purpose_basis_required");
+    else if (request.purpose_basis !== undefined && !(PURPOSE_BASES as readonly string[]).includes(request.purpose_basis)) deny("purpose_basis", "purpose_basis_invalid");
+    else if (request.purpose_basis !== undefined) add("purpose_basis", "pass", request.purpose_basis);
+    else add("purpose_basis", "not_applicable");
+  }
+
   // 6. stille timer (mottakerens enhet). Unntak: mottakeren skrev til oss siste `conversational_window_minutes` (da er hen våken). Samtaler har et STRENGERE, eget vindu (under).
   if (isMessageLike && request.kind !== "call" && profile.quiet_hours_apply && config.quiet_hours_enabled) {
     const conversational = inboundAgeMin !== null && inboundAgeMin <= config.conversational_window_minutes;
@@ -254,18 +322,16 @@ export function evaluateOutboundPolicy(request: OutboundRequest, state: Outbound
     add("quiet_hours", "not_applicable");
   }
 
-  // 7. ratebegrensning (per mottaker per døgn - kald mottaker strengere - og per konto per time)
-  if (request.kind === "call") {
-    if (state.calls_last_24h_to_recipient >= config.max_calls_per_number_per_day) deny("rate_limit_recipient", "rate_limit_calls_per_number_day");
-    else add("rate_limit_recipient", "pass");
-  } else if (request.kind === "message") {
-    const cap = proofMethod === "explicit_param" ? config.max_cold_per_recipient_per_day : config.max_per_recipient_per_day;
-    if (state.sends_last_24h_to_recipient >= cap) deny("rate_limit_recipient", proofMethod === "explicit_param" ? "rate_limit_cold_recipient_day" : "rate_limit_recipient_day");
-    else add("rate_limit_recipient", "pass");
-  } else {
+  // 7. ratebegrensning (per mottaker per døgn - kald mottaker strengere - og per konto per time). Takene kommer fra `rateCaps` (samme kilde som den atomiske håndhevelsen i `beginAttempt`).
+  const caps = rateCaps(request.kind, proofMethod === "explicit_param", config);
+  if (caps.recipient === null) {
     add("rate_limit_recipient", "not_applicable");
+  } else {
+    const used = caps.recipient.kind === "call" ? state.calls_last_24h_to_recipient : state.sends_last_24h_to_recipient;
+    if (used >= caps.recipient.limit) deny("rate_limit_recipient", caps.recipient.code);
+    else add("rate_limit_recipient", "pass");
   }
-  if (state.sends_last_hour_from_account >= config.max_per_account_per_hour) deny("rate_limit_account", "rate_limit_account_hour");
+  if (state.sends_last_hour_from_account >= caps.account.limit) deny("rate_limit_account", caps.account.code);
   else add("rate_limit_account", "pass");
 
   // 8. plattformregler: kundeservicevindu (WhatsApp/Messenger/Instagram) - fritekst kun innenfor 24 t etter mottakerens siste melding; WhatsApp tillater godkjente maler utenfor. Meldingskoder (tagger) brukes ALDRI.
@@ -312,7 +378,9 @@ export function evaluateOutboundPolicy(request: OutboundRequest, state: Outbound
         let host: string | null = null;
         try {
           const url = new URL(media.url);
-          host = url.protocol === "https:" && url.username === "" && url.password === "" && url.port === "" && !media.url.includes("\\") ? url.hostname.toLowerCase() : null;
+          // L3: nøyaktig strengen som er validert er strengen som sendes. `new URL()` fjerner tab/linjeskift/ledende mellomrom og kollapser `../`-segmenter og store bokstaver i verten - en rå streng som ikke er identisk med den kanoniske
+          // formen (`href`) kunne dermed passert vertsallowlisten mens adapteren sendte noe annet. Ikke-kanonisk form avvises.
+          host = url.protocol === "https:" && url.username === "" && url.password === "" && url.port === "" && !media.url.includes("\\") && url.href === media.url ? url.hostname.toLowerCase() : null;
         } catch {
           host = null;
         }

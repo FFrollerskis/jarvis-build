@@ -1,6 +1,6 @@
 import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { ToolGateway } from "@jarvis/tool-gateway";
-import { parseCallParams, parseSendParams, type FunnelContext, type OutboundFunnel } from "./funnel.ts";
+import { parseCallParams, parseDeleteParams, parseEditParams, parseReactParams, parseSendParams, type FunnelContext, type OutboundFunnel, type ParseResult } from "./funnel.ts";
 
 /**
  * WP-G1 (D-463): eierens HTTP-flate for kommunikasjon (`POST /comms/action`, `POST /comms/preview`) - logikken bor HER (testbar uten HTTP), ruten i `apps/api` gjør kun autentisering (grant -> KUN eieren) og kaller hit.
@@ -18,9 +18,9 @@ export const COMMS_CALL_ACTIONS: readonly string[] = ["start_call"];
 export const COMMS_VENDOR_READ_ACTIONS: readonly string[] = ["read_thread", "list_users", "get_message", "list_templates", "read_message"];
 /** Google Contacts (JARVIS_COMMS_CONTACTS): lesing (klasse A, uten step-up) og skriving (create/update C, delete D, sync C - step-up; create/update/delete krever idempotensnøkkel). */
 export const COMMS_CONTACT_READ_ACTIONS: readonly string[] = ["contacts_list", "contacts_search", "contacts_get"];
-export const COMMS_CONTACT_WRITE_ACTIONS: readonly string[] = ["contacts_create", "contacts_update", "contacts_delete", "contacts_sync"];
+export const COMMS_CONTACT_WRITE_ACTIONS: readonly string[] = ["contacts_create", "contacts_update", "contacts_delete", "contacts_sync", "contacts_unlink"];
 /** Møtetranskripsjon (JARVIS_COMMS_MEETINGS): lesing uten step-up; skriving med step-up; kun `meeting_delete` (klasse D) krever idempotensnøkkel (ingest er idempotent på innholds-hash). */
-export const COMMS_MEETING_READ_ACTIONS: readonly string[] = ["meeting_list", "meeting_commitments"];
+export const COMMS_MEETING_READ_ACTIONS: readonly string[] = ["meeting_list", "meeting_commitments", "meeting_get"];
 export const COMMS_MEETING_WRITE_ACTIONS: readonly string[] = ["meeting_ingest_text", "meeting_decide_commitment", "meeting_confirm_participant", "meeting_delete"];
 const COMMS_KEYED_CONTACT_ACTIONS: readonly string[] = ["contacts_create", "contacts_update", "contacts_delete", "meeting_delete"];
 export const COMMS_KNOWN_ACTIONS: readonly string[] = [...COMMS_OWNER_ACTIONS, ...COMMS_CALL_ACTIONS, ...COMMS_VENDOR_READ_ACTIONS, ...COMMS_CONTACT_READ_ACTIONS, ...COMMS_CONTACT_WRITE_ACTIONS, ...COMMS_MEETING_READ_ACTIONS, ...COMMS_MEETING_WRITE_ACTIONS];
@@ -45,10 +45,25 @@ function isOwner(deps: OwnerActionDeps, identity: IdentityContext): boolean {
   }
 }
 
+/** Rommene kommunikasjon kan skje i. En identitet i `health`/`home`/`guest` avvises HER (L2) - FØR policyen, FØR noe journalføres og FØR gatewayen: ellers skrev et avslag/en tørrkjøring rader i det isolerte helse-rommet. */
+const COMMS_ALLOWED_SPACES: readonly string[] = ["personal", "business", "project", "shared"];
+
 export type OwnerActionResult =
   | { readonly ok: true; readonly external_id?: string; readonly data: JsonValue; readonly output_trust: string; readonly deduplicated: boolean }
   | { readonly ok: false; readonly status: "denied"; readonly denial_codes: readonly string[]; readonly rules: JsonValue; readonly journal_id: string }
   | { readonly ok: false; readonly status: "rejected" | "failed"; readonly reason: string };
+
+/** Parser en utgående handling med funnelens egne parsere (samme form som transporten). `undefined` = ikke en journalført utgående handling. */
+function parseOutbound(action: string, parameters: Record<string, JsonValue>): ParseResult | undefined {
+  switch (action) {
+    case "send": return parseSendParams(parameters);
+    case "start_call": return parseCallParams(parameters);
+    case "edit_message": return parseEditParams(parameters);
+    case "delete_message": return parseDeleteParams(parameters);
+    case "add_reaction": return parseReactParams(parameters);
+    default: return undefined;
+  }
+}
 
 function funnelContext(identity: IdentityContext): FunnelContext {
   return { tenantId: identity.tenant_id, space: identity.memory_space_id as MemorySpace, actor: { person_id: identity.person_id, session_id: identity.session_id }, source: "owner_route" };
@@ -57,6 +72,7 @@ function funnelContext(identity: IdentityContext): FunnelContext {
 /** Tørrkjøring: hva ville policyen sagt? Ingen sending, ingen journal. Svaret bærer regelutfall og mottakerbevis - aldri meldingsteksten. */
 export async function previewCommsSend(deps: OwnerActionDeps, identity: IdentityContext, parameters: Record<string, JsonValue>): Promise<OwnerActionResult> {
   if (!isOwner(deps, identity)) return { ok: false, status: "rejected", reason: "owner_required" };
+  if (!COMMS_ALLOWED_SPACES.includes(identity.memory_space_id)) return { ok: false, status: "rejected", reason: "comms_space_not_allowed" };
   const parsed = parseSendParams({ request_id: "preview-00000000", ...parameters });
   if (!parsed.ok) return { ok: false, status: "rejected", reason: parsed.code };
   const ev = await deps.funnel.evaluate(funnelContext(identity), parsed.value);
@@ -68,6 +84,7 @@ export async function executeCommsOwnerAction(
 ): Promise<OwnerActionResult> {
   const { action } = input;
   if (!isOwner(deps, identity)) return { ok: false, status: "rejected", reason: "owner_required" };
+  if (!COMMS_ALLOWED_SPACES.includes(identity.memory_space_id)) return { ok: false, status: "rejected", reason: "comms_space_not_allowed" };
   if (!COMMS_KNOWN_ACTIONS.includes(action) || deps.gateway.get("comms", action) === undefined) return { ok: false, status: "rejected", reason: "comms_unknown_action" };
   const outbound = COMMS_OUTBOUND_ACTIONS.includes(action) || COMMS_CALL_ACTIONS.includes(action);
   const idempotencyKey = input.idempotency_key;
@@ -76,18 +93,23 @@ export async function executeCommsOwnerAction(
   if (outbound && idempotencyKey !== undefined) {
     if (parameters["request_id"] !== undefined && parameters["request_id"] !== idempotencyKey) return { ok: false, status: "rejected", reason: "comms_request_id_mismatch" };
     parameters = { ...parameters, request_id: idempotencyKey };
+    // Idempotensnøkkelen er BUNDET til forespørselen (A-M5): ledgeren (PK tenant+nøkkel) ville ellers svart `ok + deduplicated` på en HELT ANNEN forespørsel med samme nøkkel (annen mottaker/tekst, eller `delete_message` med nøkkelen til en
+    // tidligere sending - der ingenting ble sendt/slettet). Et forsøk som ER journalført sammenlignes derfor med fingeravtrykket; avvik = `idempotency_key_collision` FØR gatewayen er nådd.
     // Send: tørrkjør FØRST, slik at eieren får ALLE avslagskodene (ikke bare den første) og avslaget journalføres som bevis. ToolGateway kjører policyen på nytt (preflight + rett før kallet).
     // UNNTAK: en GJENSPILLING (id-en har allerede et ikke-avslått forsøk) går rett til gatewayen - ledgeren gir det første resultatet tilbake. Å vurdere policyen mot en tilstand det første forsøket selv har endret
     // (f.eks. ratetelleren) ville avslått en ellers idempotent gjenspilling og skrevet en misvisende avslagsrad.
-    if (action === "send" || action === "start_call") {
-      const parsed = action === "send" ? parseSendParams(parameters) : parseCallParams(parameters);
-      if (!parsed.ok) return { ok: false, status: "rejected", reason: parsed.code };
+    const parsed = parseOutbound(action, parameters);
+    if (parsed !== undefined && !parsed.ok && (action === "send" || action === "start_call")) return { ok: false, status: "rejected", reason: parsed.code };
+    if (parsed !== undefined && parsed.ok) {
       const ctx = funnelContext(identity);
-      const replay = await deps.funnel.hasPriorAttempt(ctx, parsed.value.request_id);
-      const ev = replay ? undefined : await deps.funnel.evaluate(ctx, parsed.value);
-      if (ev !== undefined && !ev.decision.allowed) {
-        const journalId = await deps.funnel.recordDenial(ctx, ev);
-        return { ok: false, status: "denied", denial_codes: ev.decision.denial_codes, rules: deps.funnel.summarize(ev)["rules"] as JsonValue, journal_id: journalId };
+      const state = await deps.funnel.replayState(ctx, parsed.value);
+      if (state === "collision") return { ok: false, status: "rejected", reason: "idempotency_key_collision" };
+      if ((action === "send" || action === "start_call") && state === "none") {
+        const ev = await deps.funnel.evaluate(ctx, parsed.value);
+        if (!ev.decision.allowed) {
+          const journalId = await deps.funnel.recordDenial(ctx, ev);
+          return { ok: false, status: "denied", denial_codes: ev.decision.denial_codes, rules: deps.funnel.summarize(ev)["rules"] as JsonValue, journal_id: journalId };
+        }
       }
     }
   }
