@@ -13,7 +13,7 @@ import {
   type ClassDNotification, type SecretProvider
 } from "@jarvis/tool-gateway";
 import { DomainPauseRegistry } from "../src/domain-pause.ts";
-import { SituationAutonomyUnbindableError, SituationEngine } from "../src/service.ts";
+import { SituationEngine } from "../src/service.ts";
 import { FakeHomeAssistant } from "../../tool-gateway/test/support/fake-home-assistant.ts";
 
 /**
@@ -73,8 +73,10 @@ describe("A: bindingen avvises ved bind-tid (LOW-4)", () => {
     expect(targets).toHaveLength(12);
     for (const [tool_id, action] of targets) {
       const attempt = engine.setAutonomyPolicy(TENANT, "business", { domain: "infra", tool_id, action, parameters: {} }, OWNER);
-      await expect(attempt, `${tool_id}.${action}`).rejects.toBeInstanceOf(SituationAutonomyUnbindableError);
-      await expect(attempt, `${tool_id}.${action}`).rejects.toThrow(/situation_autonomy_binding_never_succeeds:.*:step_up_required/);
+      // Integrasjon med WP-G4: G4 sin fail-closed allowlist (`autonomyActionBlocker`) står FØRST i `setAutonomyPolicy()` og avviser alle fysiske/kritiske handlinger med `SituationActActionForbiddenError`;
+      // G2 sin `autonomyBindingBlocker` (`SituationAutonomyUnbindableError`, `step_up_required`) er beholdt som andre lag og er enhetstestet under. Begge feil er fail-closed og lagrer ingenting.
+      await expect(attempt, `${tool_id}.${action}`).rejects.toThrow(/situation_autonomy_(action_forbidden:physical_action_not_bindable|binding_never_succeeds:.*:step_up_required)/);
+      expect(autonomyBindingBlocker(tool_id, action), `${tool_id}.${action}`).toBe("step_up_required");
     }
     expect((await admin.query("SELECT count(*)::int AS n FROM situation_autonomy_policies WHERE tenant_id = $1", [TENANT])).rows[0]).toEqual({ n: 0 });
   });
@@ -114,12 +116,17 @@ describe("B: forsvar i dybden - auto-ACT med sveipens identitet nektes av step-u
     expect(row.act_result === "succeeded").toBe(false);
   });
 
-  it("direkte actOn() med samme identitet gir `step_up_required:signed_device_session`", async () => {
+  it("direkte actOn() med samme identitet nektes (integrasjon med WP-G4: G4 sin allowlist nekter FØR gatewayen), og gatewayens step-up gir `step_up_required:signed_device_session` når den kalles direkte", async () => {
     ha.reset();
     ha.set("lock.front_door", { state: "locked" });
     const { situation } = await engine.evaluateCandidate(TENANT, "business", { domain: "infra", detection_key: "infra:g2:auto:2", priority: "high", confidence: 0.9, reason: "autonomi-probe 2" });
-    const r = await engine.actOn(TENANT, "business", situation.situation_id, { tool_id: "home-assistant", action: "critical_lock", parameters: { entity: "lock.front_door", locked: false }, idempotency_key: "g2-auto-direct-0001" }, gateway, sweepIdentity);
-    expect(r.tool_result).toEqual({ ok: false, reason: "step_up_required:signed_device_session" });
+    // Lag 1 (WP-G4, A-HIGH-1): fysiske/kritiske handlinger nektes av actOn() FØR pause/lås/claim og FØR gatewayen.
+    await expect(engine.actOn(TENANT, "business", situation.situation_id, { tool_id: "home-assistant", action: "critical_lock", parameters: { entity: "lock.front_door", locked: false }, idempotency_key: "g2-auto-direct-0001" }, gateway, sweepIdentity))
+      .rejects.toThrow(/situation_autonomy_action_forbidden/);
+    expect(ha.requests).toHaveLength(0);
+    // Lag 2 (WP-G2, forsvar i dybden): gatewayens egen step-up nekter sveipens identitet når gatewayen kalles direkte.
+    const direct = await gateway.execute({ identity: sweepIdentity, tool_id: "home-assistant", action: "critical_lock", parameters: { entity: "lock.front_door", locked: false }, idempotency_key: "g2-auto-direct-0002" });
+    expect(direct).toEqual({ ok: false, reason: "step_up_required:signed_device_session" });
     expect(ha.requests).toHaveLength(0);
   });
 });
