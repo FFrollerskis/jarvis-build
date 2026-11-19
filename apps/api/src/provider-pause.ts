@@ -1,9 +1,10 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import type pg from "pg";
-import { DEFAULT_PROFILES, type ProviderPauseSource } from "@jarvis/model-gateway";
+import { DEFAULT_PROFILES, LOCAL_VISION_PROFILE, type ProviderPauseSource } from "@jarvis/model-gateway";
 import { OwnerControlsService, type OwnerControlsDeviceRevocationDeps } from "@jarvis/owner-controls";
 import { KillSwitch, OwnerControls } from "@jarvis/policy";
 import { CONNECTOR_REGISTRY, type ConnectorDefinition } from "@jarvis/tool-gateway";
+import { visionFlagsFromEnv } from "./vision-runtime.ts";
 
 /**
  * WP-H0 / JARVIS-087 (UA-11): eierens pause og tilbakekall av en MODELLLEVERANDØR - uten ny skrivevei og uten ny tabell.
@@ -35,9 +36,14 @@ export function providerOfFreezeTarget(target: string): string | null {
 
 /**
  * Kjente modellleverandører = modellregisteret (profilene i `DEFAULT_PROFILES`, som dekker alle adaptere) pluss leverandørene som har en nøkkel (`providerCredentialRefs`). Samme navn som `ModelGateway` ruter på.
+ * WP-G3 (review A-L3): `local_vision` er kjent KUN når adapteren registreres (`JARVIS_VISION_ENABLED=on` + `JARVIS_VISION_CLASSIFIER=on`, samme regel som `visionAdapterFromEnv`) - uten flaggene er listen identisk med main.
  */
-export function knownModelProviders(registry: readonly ConnectorDefinition[] = CONNECTOR_REGISTRY): ReadonlySet<string> {
-  return new Set<string>([...DEFAULT_PROFILES.map((p) => p.provider), ...providerCredentialRefs(registry).keys()]);
+export function knownModelProviders(registry: readonly ConnectorDefinition[] = CONNECTOR_REGISTRY, env: NodeJS.ProcessEnv = process.env): ReadonlySet<string> {
+  return new Set<string>([
+    ...DEFAULT_PROFILES.map((p) => p.provider),
+    ...(visionFlagsFromEnv(env).classifier ? [LOCAL_VISION_PROFILE.provider] : []),
+    ...providerCredentialRefs(registry).keys()
+  ]);
 }
 
 /**

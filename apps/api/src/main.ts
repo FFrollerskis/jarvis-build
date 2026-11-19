@@ -43,9 +43,11 @@ import { DeploymentService, DiagnosisService, INCIDENT_PRODUCER_NAMES, IncidentS
 import { ClaimVerificationService, KnowledgeRetriever, createKnowledgeClaimsPort } from "@jarvis/knowledge";
 import {
   AiCouncil,
+  CapabilityRegistry,
   ClaudeBudgetEnforcer,
   CouncilAutoTriggerLimiter,
   DEFAULT_PROFILES,
+  PROFILES_WITH_LOCAL_VISION,
   assertProvidersHaveExplicitPricing,
   claudeBudgetConfigFromEnv,
   pricingFromEnv,
@@ -387,7 +389,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // WP-H0 (JARVIS-087): eierens pause/tilbakekall av en modellleverandør, lest LIVE fra `owner_control_state` ved hvert kall (samme kilde i worker-main.ts) - se provider-pause.ts.
     providerPause: createProviderPauseSourceFromPool(pool),
     // WP-B4: Claude-kreditten (kun når JARVIS_CLAUDE_BUDGET_USD er satt) - beslutningen tas inne i gatewayen FØR leverandørvalg, for api OG worker (samme miljøvariabler).
-    ...(claudeBudget !== undefined ? { claudeBudget } : {})
+    ...(claudeBudget !== undefined ? { claudeBudget } : {}),
+    // WP-G3 (review A-L3): `local_vision`-PROFILEN (lokal, dedikert til vision) legges til registeret KUN når adapteren registreres - uten JARVIS_VISION_* er registeret byte-identisk med main.
+    ...(visionAdapter !== null ? { registry: new CapabilityRegistry(PROFILES_WITH_LOCAL_VISION) } : {})
   });
   // JARVIS-006: hver konstruert adapter MÅ ha eksplisitt pris - ingen stille `default_rate`.
   assertProvidersHaveExplicitPricing(pricingFromEnv(), gateway.listProviderNames());
@@ -1113,7 +1117,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
           limitations: {
             forbiddenModelToolIds: FORBIDDEN_MODEL_TOOL_IDS,
             connectors: CONNECTOR_REGISTRY.map((c) => ({ id: c.id, category: c.category, test_method: c.live_test ? "live" : "presence_only" })),
-            modelProfiles: DEFAULT_PROFILES,
+            // WP-G3 (review A-L3): begrensningsregisteret (self-model) får `local_vision` KUN når adapteren er registrert - ellers er listen identisk med main.
+            modelProfiles: visionAdapter !== null ? PROFILES_WITH_LOCAL_VISION : DEFAULT_PROFILES,
             allModelCapabilities: ["text", "reasoning", "vision", "tool_calling", "structured_output", "streaming"],
             backupStatusReadable: backupStatusSource !== undefined
           }

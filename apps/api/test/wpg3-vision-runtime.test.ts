@@ -8,11 +8,13 @@ import { fileURLToPath } from "node:url";
 import type pg from "pg";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LocalHashEmbedding } from "@jarvis/memory";
-import { LocalModelUnavailableError, MAX_MODEL_TIMEOUT_MS, MemoryTraceSink, ModelGateway, assertProvidersHaveExplicitPricing, pricingFromEnv } from "@jarvis/model-gateway";
+import { buildLimitationRegistry } from "@jarvis/executive";
+import { CapabilityRegistry, DEFAULT_PROFILES, LocalModelUnavailableError, MAX_MODEL_TIMEOUT_MS, MemoryTraceSink, ModelGateway, PROFILES_WITH_LOCAL_VISION, assertProvidersHaveExplicitPricing, pricingFromEnv } from "@jarvis/model-gateway";
 import { ProviderError, type ModelProviderAdapter, type ModelRequest, type ModelResult } from "@jarvis/provider-adapters";
 import { guardedFetch } from "@jarvis/tool-gateway";
 import { HomeAssistantVisionSource, VisionClassifier, type VisionService } from "@jarvis/vision";
 import { FakeHaServer, haTimestamp } from "../../../modules/vision/test/support/fake-ha-server.ts";
+import { freezeTargetError, knownModelProviders } from "../src/provider-pause.ts";
 import { assertLocalVisionEndpoint, assertStorageDirWritable, buildVisionRuntime, createVisionPollerGuard, visionAdapterFromEnv, visionFlagsFromEnv, visionModelTimeoutMs, VISION_MODEL_TIMEOUT_BOUNDS, VisionConfigError } from "../src/vision-runtime.ts";
 
 /**
@@ -116,6 +118,43 @@ describe("main.ts: flagg-av-identitet i selve koblingen", () => {
     expect(RUNTIME_SRC).not.toMatch(/(?<![.\w])fetch\(/);
     expect(RUNTIME_SRC).toContain('deps.secrets.get("JARVIS_HA_BASE_URL")');
     expect(RUNTIME_SRC).toContain('deps.secrets.get("JARVIS_HA_TOKEN")');
+  });
+});
+
+describe("flagg-AV-identitet for modellregisteret (review A-L3): local_vision er IKKE en del av standardlistene", () => {
+  const VISION_ON = { JARVIS_VISION_ENABLED: "on", JARVIS_VISION_CLASSIFIER: "on", JARVIS_VISION_LOCAL_URL: "http://127.0.0.1:11434" };
+  const limitationInput = (modelProfiles: ReadonlyArray<{ provider: string; capabilities: readonly string[] }>) => ({
+    forbiddenModelToolIds: [], connectors: [], modelProfiles, allModelCapabilities: ["text", "reasoning", "vision", "tool_calling", "structured_output", "streaming"], backupStatusReadable: true
+  });
+
+  it("main.ts legger profilen til gateway-registeret og begrensningsregisteret KUN når adapteren er registrert (betinget spredning), og ingen annen kobling finnes", () => {
+    expect(MAIN_SRC).toMatch(/\.\.\.\(visionAdapter !== null \? \{ registry: new CapabilityRegistry\(PROFILES_WITH_LOCAL_VISION\) \} : \{\}\)/);
+    expect(MAIN_SRC).toMatch(/modelProfiles: visionAdapter !== null \? PROFILES_WITH_LOCAL_VISION : DEFAULT_PROFILES,/);
+    expect(MAIN_SRC.match(/PROFILES_WITH_LOCAL_VISION/g)).toHaveLength(3); // import + registry + begrensningsregister
+    expect(MAIN_SRC).not.toMatch(/LOCAL_VISION_PROFILE/);
+  });
+
+  it("begrensningsregisteret (self-model, modellsynlig) er uendret med flagg AV; profilen gir kun én ny post når adapteren ER registrert", () => {
+    const off = buildLimitationRegistry(limitationInput(DEFAULT_PROFILES));
+    expect(JSON.stringify(off)).not.toContain("local_vision");
+    const on = buildLimitationRegistry(limitationInput(PROFILES_WITH_LOCAL_VISION));
+    expect(on.map((l) => l.id).filter((id) => !off.some((o) => o.id === id))).toEqual(["model_missing:local_vision"]);
+    expect(on).toHaveLength(off.length + 1);
+  });
+
+  it("knownModelProviders() (frys-/pause-målene) får local_vision kun med ENABLED+CLASSIFIER = on - samme regel som adapteren - ellers identisk med main", () => {
+    const off = knownModelProviders(undefined, {});
+    expect(off.has("local_vision")).toBe(false);
+    const envs: Array<Record<string, string>> = [
+      {}, { JARVIS_VISION_CLASSIFIER: "on", JARVIS_VISION_LOCAL_URL: "http://127.0.0.1:11434" }, { JARVIS_VISION_ENABLED: "on" }, { JARVIS_VISION_ENABLED: "true", JARVIS_VISION_CLASSIFIER: "true" }, VISION_ON
+    ];
+    for (const env of envs) {
+      const known = knownModelProviders(undefined, env as NodeJS.ProcessEnv);
+      expect(known.has("local_vision"), JSON.stringify(env)).toBe(visionAdapterFromEnv(env as NodeJS.ProcessEnv) !== null);
+      expect([...known].filter((p) => p !== "local_vision").sort()).toEqual([...off].sort());
+    }
+    expect(freezeTargetError("model:local_vision", knownModelProviders(undefined, {}))).toBe("unknown_model_provider:local_vision");
+    expect(freezeTargetError("model:local_vision", knownModelProviders(undefined, VISION_ON as NodeJS.ProcessEnv))).toBeNull();
   });
 });
 
@@ -327,6 +366,10 @@ describe("kamerabilder når ALDRI en skymodell (ekte ModelGateway + ekte local_v
     server = null;
   });
 
+  // Slik main.ts bygger gatewayen: `local_vision`-profilen legges til registeret KUN når adapteren er registrert (review A-L3); uten den brukes standardregisteret.
+  const visionGateway = (providers: ModelProviderAdapter[], withVisionProfile: boolean): ModelGateway =>
+    new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers, ...(withVisionProfile ? { registry: new CapabilityRegistry(PROFILES_WITH_LOCAL_VISION) } : {}) });
+
   const classify = (gateway: ModelGateway) =>
     new VisionClassifier({ gateway }).classify({ tenant_id: "t", task_id: "task-1", image: { bytes: JPEG, media_type: "image/jpeg" }, trigger: "motion_detected" });
 
@@ -335,7 +378,7 @@ describe("kamerabilder når ALDRI en skymodell (ekte ModelGateway + ekte local_v
     const adapter = visionAdapterFromEnv({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_CLASSIFIER: "on", JARVIS_VISION_LOCAL_URL: url } as NodeJS.ProcessEnv);
     const calls: ModelRequest[] = [];
     const clouds = ["anthropic", "openai", "gemini", "gemma_hosted", "kimi", "hermes"].map((n) => cloudSpy(n, calls));
-    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [...clouds, ...(adapter ? [adapter] : [])] });
+    const gateway = visionGateway([...clouds, ...(adapter ? [adapter] : [])], adapter !== null);
     const outcome = await classify(gateway);
     expect(outcome).toMatchObject({ status: "classified", detections: [{ event_type: "object_detected", object_label: "nøkler" }] });
     expect(calls).toHaveLength(0);
@@ -350,7 +393,7 @@ describe("kamerabilder når ALDRI en skymodell (ekte ModelGateway + ekte local_v
     const adapter = visionAdapterFromEnv({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_CLASSIFIER: "on", JARVIS_VISION_LOCAL_URL: url } as NodeJS.ProcessEnv);
     const calls: ModelRequest[] = [];
     const clouds = ["anthropic", "openai", "gemini", "gemma_hosted"].map((n) => cloudSpy(n, calls));
-    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [...clouds, ...(adapter ? [adapter] : [])] });
+    const gateway = visionGateway([...clouds, ...(adapter ? [adapter] : [])], adapter !== null);
     expect(await classify(gateway)).toMatchObject({ status: "model_unavailable" });
     expect(calls).toHaveLength(0);
   });
@@ -359,7 +402,7 @@ describe("kamerabilder når ALDRI en skymodell (ekte ModelGateway + ekte local_v
     const url = await localServer("slow");
     const env = { JARVIS_VISION_ENABLED: "on", JARVIS_VISION_CLASSIFIER: "on", JARVIS_VISION_LOCAL_URL: url, JARVIS_VISION_MODEL_TIMEOUT_MS: "5000" };
     const adapter = visionAdapterFromEnv(env as NodeJS.ProcessEnv);
-    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: adapter ? [adapter] : [] });
+    const gateway = visionGateway(adapter ? [adapter] : [], adapter !== null);
     const runtime = buildVisionRuntime(stubs(env, { gateway }));
     const started = Date.now();
     const outcome = await runtime?.classifier?.classify({ tenant_id: "t", task_id: "task-1", image: { bytes: JPEG, media_type: "image/jpeg" }, trigger: "motion_detected" });
@@ -396,7 +439,7 @@ describe("kamerabilder når ALDRI en skymodell (ekte ModelGateway + ekte local_v
     await new Promise<void>((resolve) => server?.listen(0, "127.0.0.1", resolve));
     const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     const adapter = visionAdapterFromEnv({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_CLASSIFIER: "on", JARVIS_VISION_LOCAL_URL: url } as NodeJS.ProcessEnv);
-    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: adapter ? [adapter] : [] });
+    const gateway = visionGateway(adapter ? [adapter] : [], adapter !== null);
     try {
       expect(await classify(gateway)).toMatchObject({ status: "model_unavailable" });
       expect(hits).toEqual([]);

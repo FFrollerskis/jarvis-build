@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type pg from "pg";
 import { ProviderError, type ContentPart, type ModelProviderAdapter, type ModelRequest, type ModelResult, type StreamEvent } from "@jarvis/provider-adapters";
-import { LocalModelUnavailableError, MemoryTraceSink, ModelGateway, NoEligibleProviderError, type CompleteInput } from "../src/index.ts";
+import { CapabilityRegistry, DEFAULT_PROFILES, LocalModelUnavailableError, MemoryTraceSink, ModelGateway, NoEligibleProviderError, PROFILES_WITH_LOCAL_VISION, type CompleteInput } from "../src/index.ts";
 
 /**
  * WP-G3 (D-465), P1b: «skyvisjon for kamerabilder er FORBUDT, hindret i kode og test». Et kamerabilde er en bildedel med `restricted: true`.
@@ -47,7 +47,8 @@ function fake(name: string, behaviour: "ok" | "fail" = "ok"): Fake {
 const IMAGE: ContentPart = { type: "image", media_type: "image/jpeg", data: "aGVsbG8=", restricted: true };
 const PLAIN_IMAGE: ContentPart = { type: "image", media_type: "image/jpeg", data: "aGVsbG8=" };
 const request = (image: ContentPart = IMAGE): ModelRequest => ({ messages: [{ role: "user", content: [{ type: "text", text: "klassifiser" }, image] }] });
-const make = (providers: ModelProviderAdapter[]): ModelGateway => new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers });
+// Slik main.ts bygger gatewayen når `local_vision`-adapteren ER registrert: registeret får den lokale profilen (den står bevisst ikke i DEFAULT_PROFILES, review A-L3).
+const make = (providers: ModelProviderAdapter[]): ModelGateway => new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers, registry: new CapabilityRegistry(PROFILES_WITH_LOCAL_VISION) });
 const base = (over: Partial<CompleteInput> = {}): CompleteInput => ({ tenant_id: "t", purpose: "VISION", request: request(), ...over });
 
 describe("A: kamerabilder går kun til lokal leverandør, selv uten sensitivitet/modus fra kalleren", () => {
@@ -193,5 +194,59 @@ describe("H: local_vision er dedikert til vision", () => {
     const local = fake("local_vision");
     const result = await make([local]).complete({ tenant_id: "t", purpose: "VISION", mode: "LOCAL", request: request(PLAIN_IMAGE) });
     expect(result.provider).toBe("local_vision");
+  });
+});
+
+describe("I: local_vision-profilen står UTENFOR standardregisteret (review A-L3: flagg-AV er identisk med main)", () => {
+  const MAIN_PROVIDERS = ["openai", "anthropic", "gemini", "gemma_hosted", "local_llm", "gemma_local", "kimi", "hermes", "ollama", "scripted"];
+
+  it("DEFAULT_PROFILES er nøyaktig main sin liste (ingen local_vision), og profilen legges til kun via PROFILES_WITH_LOCAL_VISION", () => {
+    expect(DEFAULT_PROFILES.map((p) => p.provider)).toEqual(MAIN_PROVIDERS);
+    expect(new CapabilityRegistry().get("local_vision")).toBeUndefined();
+    expect(PROFILES_WITH_LOCAL_VISION.map((p) => p.provider)).toEqual([...MAIN_PROVIDERS, "local_vision"]);
+    expect(new CapabilityRegistry(PROFILES_WITH_LOCAL_VISION).get("local_vision")).toMatchObject({ locality: "local", dedicated_to: "vision", capabilities: ["text", "vision"] });
+  });
+
+  it("uten profilen regnes en leverandør som heter local_vision som SKY (fail-closed): kamerabilder sendes ikke dit selv om adapteren finnes", async () => {
+    const stray = fake("local_vision");
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [stray] }); // standardregisteret, uten local_vision-profil
+    await expect(gateway.complete(base({ required_capabilities: ["vision"] }))).rejects.toBeInstanceOf(LocalModelUnavailableError);
+    expect(stray.calls).toHaveLength(0);
+  });
+});
+
+describe("J: critic arver låsen for kamerabilder (review A-L1)", () => {
+  const meta = (r: ModelResult): Record<string, unknown> => (r.metadata ?? {}) as Record<string, unknown>;
+
+  it("med arven intakt: en critic kalles aldri på en skyleverandør, og bildet sendes aldri dit", async () => {
+    const cloud = fake("anthropic");
+    const hosted = fake("gemma_hosted");
+    const local = fake("local_vision");
+    const result = await make([cloud, hosted, local]).complete(base({ required_capabilities: ["vision"], critic: true }));
+    expect(result.provider).toBe("local_vision");
+    expect(cloud.calls.length + hosted.calls.length).toBe(0);
+  });
+
+  it("med arven FJERNET (simulert: lockRestrictedMedia gjør ingenting): criticveien stenger selv - ingen skykall, feilen står i metadata og primærsvaret er uberørt", async () => {
+    const cloud = fake("anthropic");
+    const hosted = fake("gemma_hosted");
+    const local = fake("local_vision");
+    const gateway = make([cloud, hosted, local]);
+    (gateway as unknown as { lockRestrictedMedia: (input: CompleteInput) => CompleteInput }).lockRestrictedMedia = (input) => input;
+    const result = await gateway.complete(base({ providerPreference: ["local_vision"], required_capabilities: ["vision"], critic: true }));
+    expect(result.provider).toBe("local_vision");
+    expect(result.text).toBe("{\"detections\":[]}");
+    expect(cloud.calls.length + hosted.calls.length).toBe(0);
+    expect(meta(result)["critic_error"]).toBe("critic_restricted_media_nonlocal");
+    expect(meta(result)["critic"]).toBeUndefined();
+  });
+
+  it("non-vakuitet: uten restricted-del beholder criticen sin vanlige skyvei (identisk oppførsel for alle eksisterende kall)", async () => {
+    const cloud = fake("anthropic");
+    const second = fake("openai");
+    const result = await make([cloud, second]).complete({ tenant_id: "t", purpose: "CHAT", provider: "anthropic", critic: true, request: { messages: [{ role: "user", content: "hei" }] } });
+    expect(result.provider).toBe("anthropic");
+    expect(meta(result)["critic_error"]).toBeUndefined();
+    expect(second.calls).toHaveLength(1);
   });
 });

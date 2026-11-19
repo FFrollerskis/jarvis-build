@@ -1305,6 +1305,12 @@ export class ModelGateway {
         ...(input.sensitivity !== undefined ? { sensitivity: input.sensitivity } : {}),
         ...(input.paid_models_allowed !== undefined ? { paid_models_allowed: input.paid_models_allowed } : {})
       }, pool);
+      // WP-G3 (review A-L1): critic-forespørselen under er REN TEKST (tekstdelene + primærsvaret), så utførelseslåsen i `executePlan` (som leter etter `restricted`-bildedeler) slår aldri inn for criticen. Primærsvaret er derimot
+      // AVLEDET av kamerabildet (en beskrivelse av det) og skal aldri til en skyleverandør: var innkallingen BEGRENSET, må HVER critic-kandidat være lokal, ellers kastes (fanges under som `critic_error`; primærsvaret er uberørt).
+      // Dette er et eget lag under sensitivitetsarven (`lockRestrictedMedia` setter SECRET_RESTRICTED): en senere endring av den arven åpner ikke critic-veien mot sky.
+      if (hasRestrictedMedia(input.request) && criticPlan.candidates.some((c) => this.registry.profileOrGeneric(c.provider, c.model).locality !== "local")) {
+        throw new Error("critic_restricted_media_nonlocal");
+      }
       const lastUserMessage = [...input.request.messages].reverse().find((m) => m.role === "user");
       const lastUser = lastUserMessage ? textOnly(lastUserMessage.content) : "";
       // §30: critic er review-rolle - får ALDRI tools, kan aldri utføre side-effekter.
