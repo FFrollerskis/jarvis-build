@@ -24,6 +24,7 @@ import {
 import { withDomainAdvisoryLocks } from "./advisory-lock.ts";
 import { ALL_DOMAINS, type DomainPauseRegistry } from "./domain-pause.ts";
 import { NEVER_ACT_DOMAINS } from "./signal-types.ts";
+import { autonomyActionBlocker, SituationActActionForbiddenError } from "./autonomy-guard.ts";
 
 /**
  * UA-10 Proactive Situation Engine: JARVIS_CANONICAL hendelses-/situasjons-
@@ -871,6 +872,10 @@ export class SituationEngine {
       throw new SituationActScopeMismatchError(tenantId, memorySpace, identity.tenant_id, identity.memory_space_id);
     }
 
+    // WP-G4 fiks-runde (A-HIGH-1): fysiske/kritiske handlinger (lås, alarm, lys, klima, bil, `critical_*`, ukjent i de fysiske navnerommene) kan ALDRI utføres av situasjonsmotoren - FØR pause, lås, claim og ethvert gateway-kall.
+    const physical = autonomyActionBlocker(request.tool_id, request.action);
+    if (physical !== null) throw new SituationActActionForbiddenError(physical.tool_id, physical.action, physical.code);
+
     // Funn 3 (arkitekt-review runde 1, PR #85), UTVIDET i runde 2 Funn 1:
     // `situationId` er ALLTID en del av selve nøkkelen som FAKTISK sendes
     // til `ToolGateway.execute()` - STRUKTURELT umulig for to ULIKE
@@ -1475,6 +1480,9 @@ export class SituationEngine {
     const value = parsed.data;
     // WP-G4: en autonomi-binding for et informer-kun-domene (helse, kamera) avvises ved BINDING (og auto-ACT/`actOn()` nekter det uansett).
     if (NEVER_ACT_DOMAINS.has(value.domain)) throw new SituationActDomainForbiddenError(value.domain);
+    // WP-G4 fiks-runde (A-HIGH-1): en binding til en fysisk/kritisk handling (allowlist: kun kjente lese-handlinger i `home-assistant`/`car`) avvises ved BINDING med en stabil årsakskode.
+    const physicalBinding = autonomyActionBlocker(value.tool_id, value.action);
+    if (physicalBinding !== null) throw new SituationActActionForbiddenError(physicalBinding.tool_id, physicalBinding.action, physicalBinding.code);
     // WP-G4: valgfri utløpstid. Må være en gyldig tid i fremtiden, høyst 365 dager frem (aldri en bakdatert eller «evig» verdi gjennom feltet).
     let expiresAtIso: string | null = null;
     if (value.expires_at !== undefined) {
@@ -1527,6 +1535,15 @@ export class SituationEngine {
    * en retry). Feil per situasjon isoleres; en pauset situasjon / en claim
    * tatt av en annen kaller i mellomtiden telles som `skipped`.
    */
+  /** Én logglinje per (tenant, space, domene, handling) og prosess: en blokkert binding skal være synlig uten å fylle loggen hvert tikk. */
+  private readonly loggedBlockedBindings = new Set<string>();
+  private logBlockedBinding(tenantId: string, memorySpace: MemorySpace, domain: string, toolId: string, action: string): void {
+    const key = `${tenantId}|${memorySpace}|${domain}|${toolId}.${action}`;
+    if (this.loggedBlockedBindings.has(key) || this.loggedBlockedBindings.size > 500) return;
+    this.loggedBlockedBindings.add(key);
+    console.error(JSON.stringify({ msg: "situation_auto_act_blocked", tenant_id: tenantId, memory_space_id: memorySpace, domain, tool_id: toolId, action, code: "physical_action_not_bindable" }));
+  }
+
   async autoActPending(tenantId: string, memorySpace: MemorySpace, gateway: ToolGateway, identity: IdentityContext): Promise<AutoActResult> {
     if (identity.tenant_id !== tenantId || identity.memory_space_id !== memorySpace) {
       throw new SituationActScopeMismatchError(tenantId, memorySpace, identity.tenant_id, identity.memory_space_id);
@@ -1561,6 +1578,13 @@ export class SituationEngine {
         result.skipped += 1;
         continue;
       }
+      // WP-G4 fiks-runde (A-HIGH-1): en binding som finnes fra FØR regelen (eller er skrevet direkte i databasen) til en fysisk/kritisk handling utføres aldri - FØR lås, claim og gateway-kall. Synlig i loggen (én gang per binding og prosess).
+      const physical = autonomyActionBlocker(live.tool_id, live.action);
+      if (physical !== null) {
+        this.logBlockedBinding(tenantId, memorySpace, candidate.domain, live.tool_id, live.action);
+        result.skipped += 1;
+        continue;
+      }
       // Policyens parametre rendres med situasjonens IMMUTABLE identifikatorer
       // (aldri injisert som ekstra nøkler - verktøyenes strenge input-skjemaer
       // avgjør selv hvilke felt som finnes). Manglende verdi => hopp over.
@@ -1588,7 +1612,8 @@ export class SituationEngine {
           err instanceof SituationActAlreadyClaimedError ||
           err instanceof SituationActInFlightError ||
           err instanceof SituationActOperationMismatchError ||
-          err instanceof SituationActDomainForbiddenError
+          err instanceof SituationActDomainForbiddenError ||
+          err instanceof SituationActActionForbiddenError
         ) {
           result.skipped += 1;
           continue;

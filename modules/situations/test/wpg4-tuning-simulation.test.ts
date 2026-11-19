@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
 import type { ToolGateway } from "@jarvis/tool-gateway";
 import { openingDetectionKey, type HomeObservation } from "../src/home-bridge.ts";
 import { SignalLogService } from "../src/signal-log.ts";
@@ -6,12 +7,12 @@ import { SituationSignalBus } from "../src/signal-bus.ts";
 import { resolveRuleThreshold, RULES, ruleByKey } from "../src/signal-types.ts";
 import { SituationSignalsTransport, situationSignalsToolDefinitions } from "../src/signals-transport.ts";
 import {
-  ASSUMED_ACTION_MINUTES, SIMULATION_MIN_SIMILAR_RESOLVED, SimulationNotFoundError, SimulationService, simulateCounterfactual, type SimilarSituation, type SimulationInput
+  ASSUMED_ACTION_MINUTES, SIMULATION_MIN_SIMILAR_RESOLVED, SimulationNotFoundError, SimulationService, simulateCounterfactual, simulationToolInfoFrom, type SimilarSituation, type SimulationInput
 } from "../src/simulation.ts";
 import {
   decideTuning, FeedbackService, FeedbackUnauthorizedError, FeedbackValidationError, TUNING_COOLDOWN_HOURS, type FeedbackVote
 } from "../src/tuning.ts";
-import { actorOwner, identity, minutesAgo, NOW, OTHER, OWNER, startG4Db, TENANT_A, TENANT_B, type G4Db } from "./support/wpg4-db.ts";
+import { actorOwner, identity, minutesAgo, NOW, OTHER, OWNER, record, startG4Db, TENANT_A, TENANT_B, type G4Db } from "./support/wpg4-db.ts";
 
 /**
  * WP-G4 (D-466), UA-10 P2d: tilbakemeldingslæring og kontrafaktisk simulering.
@@ -174,7 +175,7 @@ describe("B: simulateCounterfactual - ren, ingen sideeffekt, eksplisitte antakel
     situation_id: id, opened_at: minutesAgo(openedMinutesAgo), resolved_at: durationMinutes === null ? null : minutesAgo(openedMinutesAgo - durationMinutes), status: durationMinutes === null ? "open" : "resolved", verdict
   });
   const unbound = { bound: false, tool_id: null, action: null, risk_class: null } as const;
-  const bound = (risk_class: "A" | "B" | "C" | "D" | null) => ({ bound: true, tool_id: "test_actuator", action: "close", risk_class });
+  const bound = (risk_class: "A" | "B" | "C" | "D" | null, step_up_required: boolean | null = false) => ({ bound: true, tool_id: "test_actuator", action: "close", risk_class, step_up_required });
   const input = (over: Partial<SimulationInput> = {}): SimulationInput => ({
     situation: situation(), rule_key: "home_assistant:door_open_too_long", similar: [], binding: unbound, nowMs: NOW, ...over
   });
@@ -205,10 +206,23 @@ describe("B: simulateCounterfactual - ren, ingen sideeffekt, eksplisitte antakel
     expect(none.scenarios[0]!.blocked_by).toEqual(["no_binding"]);
     expect(none.scenarios[0]!.requires_owner_approval).toBe(true);
 
-    const classD = simulateCounterfactual(input({ similar: four, binding: bound("D") }));
-    expect(classD.scenarios[0]!.blocked_by).toEqual(["step_up_required"]);
-    expect(classD.scenarios[0]!.requires_owner_approval).toBe(true);
-    expect(classD.caveats.join(" ")).toMatch(/klasse D/);
+    // step-up leses fra DEFINISJONEN (`step_up_required`), ikke fra klassen
+    const stepUp = simulateCounterfactual(input({ similar: four, binding: bound("D", true) }));
+    expect(stepUp.scenarios[0]!.blocked_by).toEqual(["step_up_required"]);
+    expect(stepUp.scenarios[0]!.requires_owner_approval).toBe(true);
+    expect(stepUp.caveats.join(" ")).toMatch(/step-up/);
+    const classDNoStepUp = simulateCounterfactual(input({ similar: four, binding: bound("D", false) }));
+    expect(classDNoStepUp.scenarios[0]!.blocked_by).toEqual([]);
+    expect(classDNoStepUp.scenarios[0]!.requires_owner_approval).toBe(false);
+    expect(classDNoStepUp.caveats.join(" ")).toMatch(/klasse D uten step-up/);
+    // ukjent definisjon (`null`/utelatt): ingen påstand om step-up
+    expect(simulateCounterfactual(input({ similar: four, binding: { ...bound("D"), step_up_required: null } })).scenarios[0]!.blocked_by).toEqual([]);
+    // fysisk/kritisk handling (lås, alarm, ...): aldri utført av motoren, uavhengig av klasse og step-up
+    const physical = simulateCounterfactual(input({ similar: four, binding: { bound: true, tool_id: "home-assistant", action: "lock_set", risk_class: "D", step_up_required: false } }));
+    expect(physical.scenarios[0]!.blocked_by).toEqual(["physical_action_not_bindable"]);
+    expect(physical.scenarios[0]!.requires_owner_approval).toBe(true);
+    expect(physical.caveats.join(" ")).toMatch(/fysisk\/kritisk/);
+    expect(physical.caveats.join(" ")).not.toMatch(/klasse D uten step-up/);
 
     const classB = simulateCounterfactual(input({ similar: four, binding: bound("B") }));
     expect(classB.scenarios[0]!.blocked_by).toEqual([]);
@@ -581,7 +595,7 @@ describe("D: SimulationService - leser registrerte rader, ingen skriving, riktig
     for (const id of resolved.slice(0, 3)) await vote(id, "useful");
     await vote(resolved[3]!, "noise");
     const { gateway, telegram, actuator } = db.newGateway();
-    const sim = new SimulationService(db.appPool, (toolId, action) => (gateway.get(toolId, action)?.capability_class as "A" | "B" | "C" | "D" | undefined) ?? null);
+    const sim = new SimulationService(db.appPool, simulationToolInfoFrom(gateway));
     const before = await counts();
     const report = await sim.simulate(TENANT_A, "home", main);
     expect(await counts()).toEqual(before);
@@ -599,12 +613,17 @@ describe("D: SimulationService - leser registrerte rader, ingen skriving, riktig
     expect(report.assumptions.length).toBeGreaterThan(0);
   });
 
-  it("med en aktiv binding til en klasse D-handling: `step_up_required`, godkjenning kreves, og anbefalingen er `already_bound`; en utløpt eller deaktivert binding teller ikke", async () => {
+  it("med en aktiv binding til en handling som krever step-up (definisjonen): `step_up_required`, godkjenning kreves, og anbefalingen er `already_bound`; en utløpt eller deaktivert binding teller ikke", async () => {
     const { main, resolved } = await seedHistory();
     for (const id of resolved.slice(0, 3)) await vote(id, "useful");
     const { gateway } = db.newGateway();
-    const sim = new SimulationService(db.appPool, (toolId, action) => (gateway.get(toolId, action)?.capability_class as "A" | "B" | "C" | "D" | undefined) ?? null);
-    await db.engine.setAutonomyPolicy(TENANT_A, "home", { domain: "home", tool_id: "test_actuator", action: "close", parameters: { situation_id: "{{situation_id}}" } } as never, OWNER);
+    gateway.register({
+      tool_id: "test_stepup", action: "apply", description: "test", input_schema: record({ situation_id: z.string() }), capability_class: "D", scopes: [], reversible: true, rollback_procedure: "angre via test_stepup",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_STEPUP_TOKEN", output_trust: "internal", step_up_required: true,
+      transport: { invoke: async () => ({ external_id: "x" }) }
+    });
+    const sim = new SimulationService(db.appPool, simulationToolInfoFrom(gateway));
+    await db.engine.setAutonomyPolicy(TENANT_A, "home", { domain: "home", tool_id: "test_stepup", action: "apply", parameters: { situation_id: "{{situation_id}}" } } as never, OWNER);
     const bound = await sim.simulate(TENANT_A, "home", main);
     const acted = bound.scenarios.find((s) => s.id === "acted_at_suggest")!;
     expect(acted.blocked_by).toContain("step_up_required");

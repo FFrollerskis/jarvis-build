@@ -3,7 +3,7 @@ import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import { homeAssistantStateDetailTool, type ToolDefinition, type ToolGateway, type ToolTransport } from "@jarvis/tool-gateway";
 import {
   boundedInt, DEFAULT_SIGNAL_LOG_RETENTION_DAYS, FeedbackService, ModelSignalAssist, SignalLogService, SimulationService, SituationSignalBus, SituationSignalRunner, SubscriptionRegistry,
-  SituationSignalsTransport, SituationsTransport, situationFlagsFromEnv, situationSignalsToolDefinitions, situationsToolDefinitions, SIGNAL_LOG_RETENTION_BOUNDS,
+  SituationSignalsTransport, SituationsTransport, simulationToolInfoFrom, situationFlagsFromEnv, situationSignalsToolDefinitions, situationsToolDefinitions, SIGNAL_LOG_RETENTION_BOUNDS,
   type AssistModelGateway, type DailyPoint, type DomainPauseRegistry, type HealthObservation, type HealthSignalMetric, type HomeObservation, type IncidentObservation, type SignalSourceReaders,
   type SituationEngine, type SituationFlags, type VisionObservation
 } from "@jarvis/situations";
@@ -165,7 +165,7 @@ export function createSituationSignalsWiring(deps: SituationSignalsWiringDeps): 
   const assist = flags.modelAssist ? new ModelSignalAssist({ gateway: deps.modelGateway }) : null;
   // Tilbakemeldingslæring (P2d) KUN med `JARVIS_SITUATION_FEEDBACK=on`: uten flagget finnes verken handlingene eller en terskelkilde (alle regler bruker standard). Simulering er ren lesing og følger hovedbryteren.
   const feedback = flags.feedback ? new FeedbackService(deps.pool, authority, true, now) : undefined;
-  const simulation = new SimulationService(deps.pool, (toolId, action) => (deps.gateway.get(toolId, action)?.capability_class as "A" | "B" | "C" | "D" | undefined) ?? null, now);
+  const simulation = new SimulationService(deps.pool, simulationToolInfoFrom(deps.gateway), now);
   const bus = new SituationSignalBus({ pool: deps.pool, engine: deps.engine, domainPauses: deps.domainPauses, subscriptions: (t, s) => registry.listEnabled(t, s), ...(feedback ? { tuning: feedback } : {}), assist, now });
 
   const readers: SignalSourceReaders = {

@@ -1,6 +1,7 @@
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
+import { autonomyActionBlocker } from "./autonomy-guard.ts";
 import { NEVER_ACT_DOMAINS, ruleByKey } from "./signal-types.ts";
 import type { Situation, SituationAutonomyPolicy } from "./types.ts";
 
@@ -11,7 +12,7 @@ import type { Situation, SituationAutonomyPolicy } from "./types.ts";
  * Hva som beregnes (deterministisk, med eksplisitte antakelser og forbehold):
  *  - Observert utfall: hvor lenge situasjonen varte (åpnet -> løst, eller så langt hvis den fortsatt er åpen) og hva eieren selv mente om lignende varsler (nyttig/støy).
  *  - Scenario «handlet ved forslaget»: ville motoren kunne handlet, og hva ville det kostet i godkjenning? Tid spart anslås KUN fra observerte varigheter (median for lignende LØSTE situasjoner minus tiden til forslaget
- *    minus en fast utførelsestid); finnes ikke nok observasjoner, er anslaget `null` (aldri gjettet). Handlingens risikoklasse og om eieren må godkjenne står eksplisitt (D-klasse nektes autonomt av step-up, Q-55).
+ *    minus en fast utførelsestid); finnes ikke nok observasjoner, er anslaget `null` (aldri gjettet). Handlingens risikoklasse og om eieren må godkjenne står eksplisitt (step-up leses fra verktøydefinisjonen - ikke fra klassen - og nektes autonomt, Q-55; fysiske/kritiske handlinger utføres aldri av motoren, `autonomy-guard.ts`).
  *  - Scenario «ikke handlet»: eksponeringstid så langt og forventet varighet fra lignende situasjoner.
  *  - Anbefaling: `keep_inform_only` for domener der ACT er forbudt eller når eieren oftest svarer «støy»; `already_bound` når eieren allerede har en aktiv binding for domenet; `consider_binding` KUN når det ikke finnes en binding,
  *    det finnes nok løste lignende situasjoner (minst tre) og eieren oftest svarer «nyttig»; ellers `insufficient_data`. Anbefalingen er et forslag til eieren - ingenting endres av at den gis.
@@ -36,6 +37,11 @@ export interface SimulationBinding {
   action: string | null;
   /** Risikoklassen til den bundne handlingen (A-D) hvis kjent (kalleren slår den opp i verktøyregisteret), ellers `null`. */
   risk_class: "A" | "B" | "C" | "D" | null;
+  /**
+   * Krever verktøydefinisjonen step-up (`step_up_required`)? Leses fra DEFINISJONEN, aldri utledet av klassen (fiks-runde A-HIGH-1: en klasse D uten step-up, som de gamle `lock_set`/`alarm_set`, nektes ikke av step-up).
+   * `null` = definisjonen er ikke kjent for kalleren (ingen påstand).
+   */
+  step_up_required?: boolean | null;
 }
 
 export interface SimulationInput {
@@ -47,7 +53,7 @@ export interface SimulationInput {
   nowMs: number;
 }
 
-export type SimulationBlocker = "domain_never_act" | "no_binding" | "step_up_required" | "stage_not_suggest";
+export type SimulationBlocker = "domain_never_act" | "physical_action_not_bindable" | "no_binding" | "step_up_required" | "stage_not_suggest";
 
 export interface SimulationScenario {
   id: "acted_at_suggest" | "not_acted";
@@ -100,7 +106,10 @@ export function simulateCounterfactual(input: SimulationInput): SimulationReport
   if (NEVER_ACT_DOMAINS.has(situation.domain)) blockers.push("domain_never_act");
   else {
     if (!binding.bound) blockers.push("no_binding");
-    if (binding.risk_class === "D") blockers.push("step_up_required");
+    // Fysisk/kritisk handling (lås, alarm, lys, klima, bil, `critical_*`): situasjonsmotoren utfører den aldri (delt regel i `autonomy-guard.ts`, også for en binding fra før regelen).
+    else if (autonomyActionBlocker(binding.tool_id, binding.action) !== null) blockers.push("physical_action_not_bindable");
+    // Step-up leses fra verktøydefinisjonen: en klasse D UTEN step-up nektes ikke av step-up og utføres av den autonome identiteten gjennom klasse D-kjeden.
+    if (binding.step_up_required === true) blockers.push("step_up_required");
     if (situation.stage !== "suggest" && situation.stage !== "act" && situation.stage !== "act_notify") blockers.push("stage_not_suggest");
   }
 
@@ -108,7 +117,7 @@ export function simulateCounterfactual(input: SimulationInput): SimulationReport
   const savedIfActed = medianMinutes === null || durations.length < SIMULATION_MIN_SIMILAR_RESOLVED ? null : Math.max(0, medianMinutes - ASSUMED_ACTION_MINUTES);
   const acted: SimulationScenario = {
     id: "acted_at_suggest", label: "Hadde Jarvis handlet ved forslaget (innenfor eierens binding)", estimated_minutes: savedIfActed, blocked_by: blockers,
-    requires_owner_approval: blockers.includes("no_binding") || blockers.includes("step_up_required") || blockers.includes("domain_never_act")
+    requires_owner_approval: blockers.includes("no_binding") || blockers.includes("step_up_required") || blockers.includes("domain_never_act") || blockers.includes("physical_action_not_bindable")
   };
   const notActed: SimulationScenario = {
     id: "not_acted", label: "Hadde Jarvis kun varslet (som i dag)", estimated_minutes: observedMinutes !== null && situation.status === "resolved" ? observedMinutes : medianMinutes, blocked_by: [], requires_owner_approval: false
@@ -129,13 +138,28 @@ export function simulateCounterfactual(input: SimulationInput): SimulationReport
     "Dette er en forenkling over registrerte hendelser, ikke en prediksjon: små utvalg og forskjellige årsaker gir usikre tall.",
     "Simuleringen utfører, bestiller og endrer ingenting. En faktisk handling krever eierens binding og godkjenningskjeden."
   ];
-  if (blockers.includes("step_up_required")) caveats.push("Handlingen er klasse D: en autonom sveipe-identitet har ikke signert enhetsøkt, så kjeden nekter den (step-up, Q-55) - eieren må utføre den selv.");
+  if (blockers.includes("step_up_required")) caveats.push("Handlingen krever step-up (verktøydefinisjonen): en autonom sveipe-identitet har ikke signert enhetsøkt, så kjeden nekter den (Q-55) - eieren må utføre den selv.");
+  if (blockers.includes("physical_action_not_bindable")) caveats.push("Handlingen er fysisk/kritisk (lås, alarm, lys, klima, bil): situasjonsmotoren utfører den aldri autonomt, uansett binding - eieren må bruke den kritiske kjeden selv.");
+  if (binding.bound && binding.risk_class === "D" && binding.step_up_required !== true && !blockers.includes("physical_action_not_bindable")) {
+    caveats.push("Handlingen er klasse D uten step-up: den kan utføres autonomt gjennom klasse D-kjeden (umiddelbart varsel med gjenopprettingskontekst); vurder bindingen nøye.");
+  }
   if (blockers.includes("domain_never_act")) caveats.push("Domenet (helse/kamera) kan aldri handle autonomt: Jarvis informerer og foreslår kun.");
 
   return {
     situation_id: situation.situation_id, rule_key: input.rule_key,
     evidence: { similar_count: others.length, resolved_count: durations.length, median_minutes_to_resolve: medianMinutes, useful_votes: useful, noise_votes: noise, observed_minutes: observedMinutes, resolved: situation.status === "resolved" },
     scenarios: [acted, notActed], recommendation, assumptions, caveats
+  };
+}
+
+/** Slår opp en bundet handling i verktøyregisteret: risikoklasse og `step_up_required` FRA DEFINISJONEN (aldri utledet av klassen). `null` = ukjent definisjon. */
+export type SimulationToolInfo = (toolId: string, action: string) => { risk_class: "A" | "B" | "C" | "D"; step_up_required: boolean } | null;
+
+export function simulationToolInfoFrom(gateway: { get(toolId: string, action: string): { capability_class: string; step_up_required?: boolean } | undefined }): SimulationToolInfo {
+  return (toolId, action) => {
+    const def = gateway.get(toolId, action);
+    if (def === undefined || !["A", "B", "C", "D"].includes(def.capability_class)) return null;
+    return { risk_class: def.capability_class as "A" | "B" | "C" | "D", step_up_required: def.step_up_required === true };
   };
 }
 
@@ -150,8 +174,8 @@ export class SimulationNotFoundError extends Error {
 export class SimulationService {
   constructor(
     private readonly pool: pg.Pool,
-    /** Slår opp risikoklassen til en bundet handling (`tool_id`, `action`) i verktøyregisteret (`ToolGateway.get`). `undefined` = ukjent klasse. */
-    private readonly riskClassOf: (toolId: string, action: string) => "A" | "B" | "C" | "D" | null = () => null,
+    /** Slår opp risikoklassen OG `step_up_required` til en bundet handling (`tool_id`, `action`) i verktøyregisteret (`ToolGateway.get`). `null` = ukjent definisjon (ingen påstand om klasse eller step-up). */
+    private readonly toolInfoOf: SimulationToolInfo = () => null,
     private readonly now: () => number = Date.now
   ) {}
 
@@ -186,9 +210,12 @@ export class SimulationService {
       const pol = polRows[0] as Pick<SituationAutonomyPolicy, "tool_id" | "action"> | undefined;
       return { situation, ruleKey, similar, pol };
     });
-    const binding: SimulationBinding = gathered.pol === undefined
-      ? { bound: false, tool_id: null, action: null, risk_class: null }
-      : { bound: true, tool_id: gathered.pol.tool_id, action: gathered.pol.action, risk_class: this.riskClassOf(gathered.pol.tool_id, gathered.pol.action) };
+    let binding: SimulationBinding;
+    if (gathered.pol === undefined) binding = { bound: false, tool_id: null, action: null, risk_class: null, step_up_required: null };
+    else {
+      const info = this.toolInfoOf(gathered.pol.tool_id, gathered.pol.action);
+      binding = { bound: true, tool_id: gathered.pol.tool_id, action: gathered.pol.action, risk_class: info?.risk_class ?? null, step_up_required: info === null ? null : info.step_up_required };
+    }
     return simulateCounterfactual({ situation: gathered.situation, rule_key: gathered.ruleKey, similar: gathered.similar, binding, nowMs: this.now() });
   }
 }
