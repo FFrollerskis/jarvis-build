@@ -527,6 +527,7 @@ describe("D-MEDIUM-1 (delta-review B): en beslutning som refererer en gammel sig
         expect(first.status).toBe("ok");
         expect(first.retention_failures).toBe(1);
         expect(first.errors).toEqual(["retention:signal_retention_failed:delete"]); // kort kode, aldri innhold
+        expect(r.status().last).toMatchObject({ retention_failures: 1, errors: ["retention:signal_retention_failed:delete"] }); // samme resultat er synlig i løperens status (`/situations/signals/status`)
         const lines = errors.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("situation_signal_retention_failed"));
         expect(lines).toHaveLength(1);
         expect(JSON.parse(lines[0]!)).toEqual({ msg: "situation_signal_retention_failed", tenant_id: TENANT_A, memory_space_id: "home", code: "signal_retention_failed:delete", cause: "pg_P0001" });
