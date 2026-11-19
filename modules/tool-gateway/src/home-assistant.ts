@@ -83,9 +83,32 @@ export function homeAssistantTools(transport: ToolTransport = new UnconfiguredHt
 export function homeAssistantStateDetailTool(transport: ToolTransport = new UnconfiguredHttpTransport("home-assistant")): ToolDefinition {
   return {
     tool_id: "home-assistant", action: "read_state_detail",
-    description: "Les minimert tilstand (state, last_changed, device_class) for ÉN entitet - brukt av situasjonsmotorens hjem-bro",
+    description: "Les minimert tilstand (state, last_changed, unit) for ÉN entitet - brukt av situasjonsmotorens hjem-bro",
     input_schema: record({ entity: z.string().regex(/^[a-z_]+\.[a-z0-9_]+$/) }), capability_class: "A",
     scopes: ["states:read"], reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
     rate_limit_per_minute: 240, output_trust: "untrusted", credential_ref: "JARVIS_HA_TOKEN", timeout_ms: 5_000, transport
   };
+}
+
+/** Tak for antall entiteter i ETT samlet lesekall (`read_states_detail`); samme tak som løperens utvalg. */
+export const MAX_STATES_DETAIL_ENTITIES = 50;
+
+/**
+ * WP-G4 fiks-runde (B-MEDIUM-4, A-LOW-11): ÉN samlet LESE-handling for alle abonnerte entiteter i ett tikk. Hver ToolGateway-kjøring skriver en `tool.executed`-revisjonsrad (append-only, uten retensjon): 50 entiteter x 60 s med
+ * én kjøring per entitet ga 72 000 rader/døgn. Med ett kall per tikk blir det 1 440/døgn (ved 60 s), uten å endre gatewayens delte atferd for noen annen kaller. Samme minimerte utdata per entitet som `read_state_detail`
+ * (`state`, `last_changed`, `unit`); en ukjent entitet gir `null`, og en enkeltfeil gir `{ entity_id, error }` (hele kallet feiler kun når ALLE leser feiler, så en HA som er nede er en synlig kildefeil).
+ */
+export function homeAssistantStatesDetailTool(transport: ToolTransport = new UnconfiguredHttpTransport("home-assistant")): ToolDefinition {
+  return {
+    tool_id: "home-assistant", action: "read_states_detail",
+    description: "Les minimert tilstand (state, last_changed, unit) for opptil 50 entiteter i ETT kall - brukt av situasjonsmotorens hjem-bro",
+    input_schema: record({ entities: z.array(z.string().regex(/^[a-z_]+\.[a-z0-9_]+$/)).min(1).max(MAX_STATES_DETAIL_ENTITIES) }), capability_class: "A",
+    scopes: ["states:read"], reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+    rate_limit_per_minute: 120, output_trust: "untrusted", credential_ref: "JARVIS_HA_TOKEN", timeout_ms: 20_000, transport
+  };
+}
+
+/** Begge lese-handlingene for hjem-broen (kun med `JARVIS_SITUATION_HOME=on`). Løperen bruker den samlede; den enkle beholdes som lese-handling. */
+export function homeAssistantSituationReadTools(transport: ToolTransport = new UnconfiguredHttpTransport("home-assistant")): ToolDefinition[] {
+  return [homeAssistantStateDetailTool(transport), homeAssistantStatesDetailTool(transport)];
 }

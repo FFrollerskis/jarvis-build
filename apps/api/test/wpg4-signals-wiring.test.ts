@@ -6,7 +6,7 @@ import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import { ToolGateway } from "@jarvis/tool-gateway";
 import { SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";
 import {
-  aggregateDaily, createHealthReader, createHomeReader, createIncidentReader, createSituationSignalsWiring, createVisionReader, type SituationSignalsWiringDeps
+  aggregateDaily, createHealthReader, createHomeReader, createIncidentReader, createSituationSignalsWiring, createVisionReader, wattsOf, type SituationSignalsWiringDeps
 } from "../src/situation-signals-wiring.ts";
 
 /**
@@ -79,7 +79,7 @@ describe("A: flagg AV = ingenting bygges", () => {
 
   it("HA-lesehandlingen registreres KUN med JARVIS_SITUATION_HOME; rommene følger kildene; ugyldig tallkonfigurasjon gir standard", () => {
     const home = createSituationSignalsWiring(deps({ JARVIS_SITUATION_SIGNALS: "on", JARVIS_SITUATION_HOME: "on", JARVIS_SITUATION_BUS_INTERVAL_SECONDS: "5", JARVIS_SITUATION_LOG_RETENTION_DAYS: "abc" }));
-    expect(home.tools.map((t) => `${t.tool_id}.${t.action}`)).toContain("home-assistant.read_state_detail");
+    expect(home.tools.map((t) => `${t.tool_id}.${t.action}`)).toEqual(expect.arrayContaining(["home-assistant.read_state_detail", "home-assistant.read_states_detail"]));
     expect(home.describe()).toMatchObject({ interval_seconds: 60, log_retention_days: 30, spaces: ["home"], sources: { home: true } });
     const all = createSituationSignalsWiring(deps({
       JARVIS_SITUATION_SIGNALS: "on", JARVIS_SITUATION_VISION: "on", JARVIS_SITUATION_HEALTH: "on", JARVIS_SITUATION_INCIDENTS: "on", JARVIS_SITUATION_BUS_INTERVAL_SECONDS: "120", JARVIS_SITUATION_LOG_RETENTION_DAYS: "90"
@@ -87,50 +87,62 @@ describe("A: flagg AV = ingenting bygges", () => {
     expect(all.describe()).toMatchObject({ interval_seconds: 120, log_retention_days: 90, sources: { home: false, vision: true, health: true, incidents: true } });
     expect((all.describe() as { spaces: string[] }).spaces.sort()).toEqual(["business", "health", "home"]);
     expect(all.tools.map((t) => t.action)).not.toContain("read_state_detail");
+    expect(all.tools.map((t) => t.action)).not.toContain("read_states_detail");
   });
 });
 
 describe("B: hjem-leseren - kun abonnerte entiteter via ToolGateway, effekt-teller i minnet, synlig kildefeil", () => {
   const calls: Array<{ identity: IdentityContext; tool_id: string; action: string; parameters: Record<string, unknown> }> = [];
-  const gatewayWith = (handler: (entity: string) => unknown): Pick<ToolGateway, "execute"> => ({
+  /** Gateway-stub for den SAMLEDE lese-handlingen: handleren får entitetslisten og gir hele resultatet (fiks-runde B-MEDIUM-4: ÉN kjøring per tikk). */
+  const gatewayWith = (handler: (entities: string[]) => unknown): Pick<ToolGateway, "execute"> => ({
     execute: async (req: never) => {
-      const r = req as { identity: IdentityContext; tool_id: string; action: string; parameters: { entity: string } };
+      const r = req as { identity: IdentityContext; tool_id: string; action: string; parameters: { entities: string[] } };
       calls.push({ identity: r.identity, tool_id: r.tool_id, action: r.action, parameters: r.parameters });
-      return handler(r.parameters.entity) as never;
+      return handler(r.parameters.entities) as never;
     }
   });
-  const ctx = (now = NOW) => ({ tenant_id: "t-owner", memory_space: "home" as MemorySpace, now });
+  const okStates = (states: unknown[]) => ({ ok: true, data: { states }, output_trust: "untrusted", deduplicated: false });
+  const detail = (entity: string, state = "on", extra: Record<string, unknown> = {}) => ({ entity_id: entity, state, last_changed: "2026-11-19T11:00:00.000Z", unit: null, ...extra });
+  const ctx = (now = NOW, warnings?: string[]) => ({ tenant_id: "t-owner", memory_space: "home" as MemorySpace, now, ...(warnings ? { warnings } : {}) });
 
-  it("ett kall per entitet med riktig verktøy/handling og eierens identitet i kildens rom; kun {entity} sendes", async () => {
+  it("ÉN gateway-kjøring for alle entiteter (ikke én per entitet) med riktig verktøy/handling og eierens identitet i kildens rom; kun {entities} sendes", async () => {
     calls.length = 0;
-    const read = createHomeReader({
-      gateway: gatewayWith((entity) => ({ ok: true, data: { entity_id: entity, state: "on", last_changed: "2026-11-19T11:00:00.000Z", device_class: "door" }, output_trust: "untrusted", deduplicated: false })), identityFor
-    });
+    const read = createHomeReader({ gateway: gatewayWith((entities) => okStates(entities.map((e) => detail(e)))), identityFor });
     const out = await read(ctx(), [{ entity_id: "binary_sensor.inngang", role: "door" }, { entity_id: "binary_sensor.kjeller", role: "leak" }]);
-    expect(calls.map((c) => [c.tool_id, c.action, c.parameters])).toEqual([["home-assistant", "read_state_detail", { entity: "binary_sensor.inngang" }], ["home-assistant", "read_state_detail", { entity: "binary_sensor.kjeller" }]]);
+    expect(calls.map((c) => [c.tool_id, c.action, c.parameters])).toEqual([["home-assistant", "read_states_detail", { entities: ["binary_sensor.inngang", "binary_sensor.kjeller"] }]]);
     expect(calls[0]!.identity).toMatchObject({ person_id: OWNER, tenant_id: "t-owner", memory_space_id: "home" });
     expect(out).toEqual([
       { source: "home_assistant", entity_id: "binary_sensor.inngang", role: "door", state: "on", last_changed: "2026-11-19T11:00:00.000Z" },
       { source: "home_assistant", entity_id: "binary_sensor.kjeller", role: "leak", state: "on", last_changed: "2026-11-19T11:00:00.000Z" }
     ]);
+    calls.length = 0;
+    expect(await read(ctx(), [])).toEqual([]);
+    expect(calls).toHaveLength(0); // ingen entiteter = ingen gateway-kjøring
   });
 
-  it("ukjent entitet (data:null) og misformet svar hoppes over uten feil; delvis feil er ikke en kildefeil; ALLE feil er det (`home_source_unavailable`)", async () => {
-    const partial = createHomeReader({
-      gateway: gatewayWith((e) => (e === "binary_sensor.a" ? { ok: true, data: null, output_trust: "untrusted", deduplicated: false } : e === "binary_sensor.b" ? { ok: false, reason: "x" } : { ok: true, data: { state: 5, last_changed: null }, output_trust: "untrusted", deduplicated: false })), identityFor
-    });
-    expect(await partial(ctx(), [{ entity_id: "binary_sensor.a", role: "door" }, { entity_id: "binary_sensor.c", role: "door" }])).toEqual([]);
+  it("ukjent entitet (null), enkeltfeil og misformet svar hoppes over uten feil og blir synlige ADVARSLER (aldri stille uvirksomt); hele kallet feilet eller ugyldig svar er en kildefeil (`home_source_unavailable`)", async () => {
+    const warnings: string[] = [];
     const mixed = createHomeReader({
-      gateway: gatewayWith((e) => (e === "binary_sensor.b" ? { ok: false, reason: "x" } : { ok: true, data: { state: "off", last_changed: "2026-11-19T11:00:00.000Z" }, output_trust: "untrusted", deduplicated: false })), identityFor
+      gateway: gatewayWith(() => okStates([null, { entity_id: "binary_sensor.b", error: "home_assistant_error_500" }, { entity_id: "binary_sensor.c", state: 5, last_changed: null }, detail("binary_sensor.d", "off")])), identityFor
     });
-    expect(await mixed(ctx(), [{ entity_id: "binary_sensor.a", role: "door" }, { entity_id: "binary_sensor.b", role: "door" }])).toHaveLength(1);
-    const allFail = createHomeReader({ gateway: gatewayWith(() => ({ ok: false, reason: "credential_unavailable" })), identityFor });
-    await expect(allFail(ctx(), [{ entity_id: "binary_sensor.a", role: "door" }])).rejects.toThrow("home_source_unavailable");
+    const out = await mixed(ctx(NOW, warnings), ["a", "b", "c", "d"].map((x) => ({ entity_id: `binary_sensor.${x}`, role: "door" as const })));
+    expect(out).toEqual([{ source: "home_assistant", entity_id: "binary_sensor.d", role: "door", state: "off", last_changed: "2026-11-19T11:00:00.000Z" }]);
+    expect(warnings).toEqual(["home_entities_unknown:1", "home_entities_failed:2"]);
+    // uten advarselsliste (eldre kaller) er det samme resultat, bare uten advarsler
+    expect(await mixed(ctx(), ["a", "b", "c", "d"].map((x) => ({ entity_id: `binary_sensor.${x}`, role: "door" as const })))).toHaveLength(1);
+    for (const gateway of [
+      gatewayWith(() => ({ ok: false, reason: "credential_unavailable" })),
+      gatewayWith(() => okStates([detail("binary_sensor.a")])), // feil antall svar
+      gatewayWith(() => ({ ok: true, data: null, output_trust: "untrusted", deduplicated: false })),
+      gatewayWith(() => ({ ok: true, data: { states: "ikke en liste" }, output_trust: "untrusted", deduplicated: false }))
+    ]) {
+      await expect(createHomeReader({ gateway, identityFor })(ctx(), [{ entity_id: "binary_sensor.a", role: "door" }, { entity_id: "binary_sensor.b", role: "door" }])).rejects.toThrow("home_source_unavailable");
+    }
   });
 
   it("effekt: telleren øker bare mens verdien ligger OVER eierens grense, beholder startpunktet, og nullstilles når den faller under", async () => {
     let watts = "2500";
-    const read = createHomeReader({ gateway: gatewayWith(() => ({ ok: true, data: { state: watts, last_changed: "2026-11-19T11:59:00.000Z" }, output_trust: "untrusted", deduplicated: false })), identityFor });
+    const read = createHomeReader({ gateway: gatewayWith((list) => okStates(list.map((e) => ({ entity_id: e, state: watts, last_changed: "2026-11-19T11:59:00.000Z", unit: "W" })))), identityFor });
     const entities = [{ entity_id: "sensor.ovn", role: "power" as const, limit_w: 2000 }];
     const t1 = await read(ctx(NOW), entities);
     const t2 = await read(ctx(NOW + 60_000), entities);
@@ -146,6 +158,28 @@ describe("B: hjem-leseren - kun abonnerte entiteter via ToolGateway, effekt-tell
     watts = "ikke-et-tall";
     // en ukjent verdi er IKKE normal (ingen `over_limit_ticks`): ingen løsing på gjetning, og telleren er nullstilt
     expect(await read(ctx(NOW + 240_000), entities)).toEqual([{ source: "home_assistant", entity_id: "sensor.ovn", role: "power", state: "ikke-et-tall", last_changed: "2026-11-19T11:59:00.000Z" }]);
+  });
+});
+
+describe("B2: effektenhet (B-LOW-9) - W og kW sammenlignes riktig mot eierens grense i watt, andre enheter gir ingen påstand", () => {
+  const ctx = (now = NOW) => ({ tenant_id: "t-owner", memory_space: "home" as MemorySpace, now });
+  const entities = [{ entity_id: "sensor.ovn", role: "power" as const, limit_w: 2000 }];
+  const readWith = (state: string, unit: unknown) => createHomeReader({
+    gateway: { execute: async () => ({ ok: true, data: { states: [{ entity_id: "sensor.ovn", state, last_changed: "2026-11-19T11:59:00.000Z", unit }] }, output_trust: "untrusted", deduplicated: false }) as never },
+    identityFor
+  });
+
+  it("wattsOf: W (og manglende enhet) som den er, kW x 1000, alt annet = ukjent", () => {
+    expect([wattsOf("1500", "W"), wattsOf("1500", null), wattsOf("1500", undefined), wattsOf("1.2", "kW"), wattsOf("2.5", "kW")]).toEqual([1500, 1500, 1500, 1200, 2500]);
+    for (const bad of [["1.2", "MW"], ["1.2", "A"], ["50", "%"], ["unavailable", "W"], ["", "kW"], ["1.2", 5]] as const) expect(wattsOf(bad[0], bad[1]), bad.join("|")).toBeNull();
+  });
+
+  it("en sensor i kW (1,2 kW = 1200 W) er UNDER grensen på 2000 W (normal), 2,5 kW er OVER; en ukjent enhet er verken over eller normal", async () => {
+    expect((await readWith("1.2", "kW")(ctx(), entities))[0]).toMatchObject({ over_limit_ticks: 0, limit_w: 2000 });
+    expect((await readWith("2.5", "kW")(ctx(), entities))[0]).toMatchObject({ over_limit_ticks: 1, limit_w: 2000 });
+    const unknownUnit = (await readWith("2500", "MW")(ctx(), entities))[0] as Record<string, unknown>;
+    expect(unknownUnit).toMatchObject({ role: "power", state: "2500" });
+    expect(unknownUnit["over_limit_ticks"]).toBeUndefined();
   });
 });
 

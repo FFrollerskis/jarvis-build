@@ -35,6 +35,8 @@ export interface SourceReadContext {
   tenant_id: string;
   memory_space: MemorySpace;
   now: number;
+  /** Kilden legger korte advarselskoder (aldri innhold) her - f.eks. `home_entities_unknown:2` (en skrivefeil i en entitets-id) eller `home_entities_truncated:60`. Løperen viser dem i tikkresultatet. */
+  warnings?: string[];
 }
 
 export interface SignalSourceReaders {
@@ -58,6 +60,8 @@ export const DEFAULT_SIGNAL_CADENCE: Readonly<Partial<Record<SignalSource, numbe
 /** Hendelsesbaserte kilder leses med dette vinduet (3 x tikk, minst 10 min): overlapp mellom tikk er trygt fordi loggen er idempotent. */
 export const MIN_VISION_LOOKBACK_MS = 10 * 60_000;
 export const MAX_ASSIST_CALLS_PER_TICK = 5;
+/** Maks entiteter per Home Assistant-lesing (samme tak som den samlede lese-handlingen). Flere abonnerte entiteter gir en synlig advarsel (`home_entities_truncated`). */
+export const MAX_HOME_ENTITIES = 50;
 /** Samlet vegg-tidsbudsjett for ALLE modellvurderinger i ett tikk (fase 2). Kall som ikke er ferdige da avbrytes; deterministisk evaluering og levering er allerede ferdig. */
 export const DEFAULT_ASSIST_TICK_BUDGET_MS = 20_000;
 const DAY_MS = 86_400_000;
@@ -101,6 +105,8 @@ export interface SignalTickResult {
   /** Kilder som ikke ble lest fordi alle abonnementsdomenene (eller hele motoren) er pauset. */
   sources_skipped_paused: number;
   source_failures: number;
+  /** Ikke-fatale kildeadvarsler (korte koder, maks 20): ukjent/feilende entitet, avkortet entitetsliste. En kildefeil er `errors`; en advarsel er at noe stille ikke virker. */
+  warnings: string[];
   delivered: number;
   auto_act_attempted: number;
   errors: string[];
@@ -143,7 +149,9 @@ export class SituationSignalRunner {
           const f = parseFilter("home_assistant", sub.filter) as HomeFilter | null;
           if (f !== null) for (const e of f.entities) byKey.set(`${e.entity_id}|${e.role}`, e);
         }
-        const entities = [...byKey.values()].slice(0, 50);
+        const entities = [...byKey.values()].slice(0, MAX_HOME_ENTITIES);
+        // B-LOW-6: tidligere kuttet løperen STILLE til 50 entiteter; nå en synlig advarsel (de resterende leses ikke).
+        if (byKey.size > MAX_HOME_ENTITIES) ctx.warnings?.push(`home_entities_truncated:${byKey.size}`);
         return entities.length === 0 ? [] : readers.home(ctx, entities);
       }
       case "vision": {
@@ -172,7 +180,7 @@ export class SituationSignalRunner {
   }
 
   async tick(): Promise<SignalTickResult> {
-    const result: SignalTickResult = { status: "ok", tick: 0, spaces: 0, bus: emptyBatchResult(), sources_read: 0, sources_skipped_paused: 0, source_failures: 0, delivered: 0, auto_act_attempted: 0, errors: [] };
+    const result: SignalTickResult = { status: "ok", tick: 0, spaces: 0, bus: emptyBatchResult(), sources_read: 0, sources_skipped_paused: 0, source_failures: 0, warnings: [], delivered: 0, auto_act_attempted: 0, errors: [] };
     if (this.running) {
       result.status = "blocked";
       result.reason = "tick_in_progress";
@@ -208,7 +216,14 @@ export class SituationSignalRunner {
             continue;
           }
           result.spaces += 1;
-          const ctx: SourceReadContext = { tenant_id: tenantId, memory_space: space, now: this.now() };
+          const ctx: SourceReadContext = { tenant_id: tenantId, memory_space: space, now: this.now(), warnings: [] };
+          // Kildeadvarsler (B-LOW-6): flyttes til tikkresultatet etter hver lesing (kilde-prefiks, uten duplikater, maks 20).
+          const drainWarnings = (source: string): void => {
+            for (const w of (ctx.warnings ?? []).splice(0)) {
+              const entry = `${source}:${w}`;
+              if (result.warnings.length < 20 && !result.warnings.includes(entry)) result.warnings.push(entry);
+            }
+          };
           const bySource = new Map<SignalSource, SituationSubscription[]>();
           for (const sub of subs) bySource.set(sub.source, [...(bySource.get(sub.source) ?? []), sub]);
           const pending: PendingAssistEntry[] = [];
@@ -224,11 +239,13 @@ export class SituationSignalRunner {
             let observations: SignalObservation[];
             try {
               const read = await this.read(source, sourceSubs, ctx);
+              drainWarnings(source);
               // Ingen leser for kilden (flagg av / ikke koblet): ingenting leses og ingenting telles.
               if (read === null) continue;
               observations = read;
               result.sources_read += 1;
             } catch (err) {
+              drainWarnings(source);
               result.source_failures += 1;
               if (result.errors.length < 20) result.errors.push(`${source}:${codeOf(err)}`);
               console.error(JSON.stringify({ msg: "situation_signal_source_failed", tenant_id: tenantId, memory_space_id: space, source, code: codeOf(err) }));

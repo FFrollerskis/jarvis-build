@@ -3,6 +3,7 @@ import type { HomeObservation } from "../src/home-bridge.ts";
 import type { VisionObservation } from "../src/vision-bridge.ts";
 import { SituationSignalBus } from "../src/signal-bus.ts";
 import { SignalLogService } from "../src/signal-log.ts";
+import { MAX_HOME_ENTITIES, SituationSignalRunner, type SignalSourceReaders } from "../src/signal-runner.ts";
 import { startG4Db, type G4Db, TENANT_A, OWNER, actorOwner, identity } from "./support/wpg4-db.ts";
 
 /**
@@ -135,5 +136,45 @@ describe("B-HIGH-1: stille timer holder varselet tilbake, men sluker aldri signa
     expect(night.ignored.duplicate).toBe(1);
     expect(night.held).toBe(0);
     expect(await deliver()).toEqual([]);
+  });
+});
+
+describe("B-LOW-6/B-MEDIUM-4: kildeadvarsler og ÉN HA-lesing per tikk (løperen)", () => {
+  const runnerWith = (readers: Partial<SignalSourceReaders>) => new SituationSignalRunner({
+    pool: db.appPool, bus: bus(T("2026-11-19T12:00:00.000Z")), engine: db.engine, gateway: db.newGateway().gateway, readers, subscriptions: (t, s) => db.registry.listEnabled(t, s),
+    targets: [{ tenant_id: TENANT_A, memory_space: "home" }], identityFor: (t, s) => identity(t, s), guard: { blocked: async () => null }, intervalMs: 60_000, now: () => T("2026-11-19T12:00:00.000Z")
+  });
+  const subMany = (prefix: string, n: number) => db.registry.subscribe(TENANT_A, "home", {
+    source: "home_assistant", event_type: "door_open_too_long", filter: { entities: Array.from({ length: n }, (_, i) => ({ entity_id: `binary_sensor.${prefix}${i}`, role: "door" })) }
+  }, actorOwner);
+
+  it("HA-lesingen kuttes ikke lenger STILLE til 50 entiteter: leseren får 50, og avkortingen er en synlig advarsel med det totale antallet", async () => {
+    await subMany("a", 30);
+    await subMany("b", 30);
+    let received = 0;
+    const result = await runnerWith({ home: async (_ctx, entities) => { received = entities.length; return []; } }).tick();
+    expect(MAX_HOME_ENTITIES).toBe(50);
+    expect(received).toBe(50);
+    expect(result.warnings).toEqual(["home_assistant:home_entities_truncated:60"]);
+    // under taket: ingen advarsel
+    await db.reset();
+    await subMany("c", 30);
+    expect((await runnerWith({ home: async () => [] }).tick()).warnings).toEqual([]);
+  });
+
+  it("advarsler fra leseren (ukjent/feilende entitet) havner i tikkresultatet med kilde-prefiks, uten duplikater, maks 20 - og er ikke kildefeil", async () => {
+    await subMany("a", 3);
+    const result = await runnerWith({ home: async (ctx) => { ctx.warnings?.push("home_entities_unknown:2", "home_entities_unknown:2", "home_entities_failed:1"); return []; } }).tick();
+    expect(result.warnings).toEqual(["home_assistant:home_entities_unknown:2", "home_assistant:home_entities_failed:1"]);
+    expect(result).toMatchObject({ source_failures: 0, sources_read: 1 });
+    const many = await runnerWith({ home: async (ctx) => { for (let i = 0; i < 40; i += 1) ctx.warnings?.push(`w${i}`); return []; } }).tick();
+    expect(many.warnings).toHaveLength(20);
+  });
+
+  it("en leser som kaster etter å ha lagt til advarsler beholder advarslene, og feilen telles som kildefeil", async () => {
+    await subMany("a", 2);
+    const result = await runnerWith({ home: async (ctx) => { ctx.warnings?.push("home_entities_unknown:1"); throw new Error("home_source_unavailable"); } }).tick();
+    expect(result.warnings).toEqual(["home_assistant:home_entities_unknown:1"]);
+    expect(result).toMatchObject({ source_failures: 1, errors: ["home_assistant:home_source_unavailable"] });
   });
 });

@@ -1,6 +1,6 @@
 import type pg from "pg";
 import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
-import { homeAssistantStateDetailTool, type ToolDefinition, type ToolGateway, type ToolTransport } from "@jarvis/tool-gateway";
+import { homeAssistantSituationReadTools, type ToolDefinition, type ToolGateway, type ToolTransport } from "@jarvis/tool-gateway";
 import {
   boundedInt, DEFAULT_SIGNAL_LOG_RETENTION_DAYS, FeedbackService, ModelSignalAssist, SignalLogService, SimulationService, SituationSignalBus, SituationSignalRunner, SubscriptionRegistry,
   SituationSignalsTransport, SituationsTransport, simulationToolInfoFrom, situationFlagsFromEnv, situationSignalsToolDefinitions, situationsToolDefinitions, SIGNAL_LOG_RETENTION_BOUNDS,
@@ -94,44 +94,71 @@ export function aggregateDaily(metric: HealthSignalMetric, rows: ReadonlyArray<{
   return [...days.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([day, { sum, n }]) => ({ day, value: metric === "resting_heart_rate" ? sum / n : sum, samples: n }));
 }
 
-/** Hjem: tilstander via ToolGateway (policy, kill switch, frys, credential-tilbakekall og revisjon gjelder). Effekt-sensorer sporer «på rad over eierens grense» i minnet (en omstart nullstiller telleren: varselet kommer litt senere, aldri for tidlig). */
+/**
+ * Effekt i watt ut fra HAs tilstand og måleenhet: `W` (eller manglende enhet - antatt W) som den er, `kW` x 1000; en annen enhet (`MW`, `A`, `%`, ...) er ikke sammenlignbar med eierens grense i watt (`null` = ukjent, ingen påstand).
+ * B-LOW-9: tidligere ble enheten aldri sjekket, så en sensor i kW (1,2) aldri kunne passere en grense på 2000 W.
+ */
+export function wattsOf(state: string, unit: unknown): number | null {
+  const value = state.trim() === "" ? Number.NaN : Number(state);
+  if (!Number.isFinite(value)) return null;
+  if (unit === null || unit === undefined || unit === "W") return value;
+  if (unit === "kW") return value * 1000;
+  return null;
+}
+
+/**
+ * Hjem: tilstander via ToolGateway (policy, kill switch, frys, credential-tilbakekall og revisjon gjelder). ÉN gateway-kjøring per tikk for ALLE abonnerte entiteter (`read_states_detail`, fiks-runde B-MEDIUM-4: ÉN revisjonsrad
+ * per tikk i stedet for én per entitet). Ukjent entitet (en skrivefeil i entitets-id-en) og enkeltfeil er ikke kildefeil, men synlige ADVARSLER i tikkresultatet (`home_entities_unknown`/`home_entities_failed`); feiler hele kallet er det
+ * en kildefeil (`home_source_unavailable`). Effekt-sensorer sporer «på rad over eierens grense» i minnet (en omstart nullstiller telleren: varselet kommer litt senere, aldri for tidlig).
+ */
 export function createHomeReader(deps: { gateway: Pick<ToolGateway, "execute">; identityFor: (tenantId: string, space: MemorySpace) => IdentityContext }): NonNullable<SignalSourceReaders["home"]> {
   const powerTracker = new Map<string, { since: string; ticks: number }>();
   return async (ctx, entities) => {
+    if (entities.length === 0) return [];
     const identity = deps.identityFor(ctx.tenant_id, ctx.memory_space);
+    const result = await deps.gateway.execute({ identity, tool_id: "home-assistant", action: "read_states_detail", parameters: { entities: entities.map((e) => e.entity_id) } });
+    // Hele kallet feilet (HA nede, credential utilgjengelig/tilbakekalt, connector fryst) eller svaret er ugyldig: synlig kildefeil, aldri en stille tom liste.
+    const states = result.ok ? (result.data as { states?: unknown } | null | undefined)?.states : undefined;
+    if (!Array.isArray(states) || states.length !== entities.length) throw new Error("home_source_unavailable");
     const out: HomeObservation[] = [];
-    let attempted = 0;
-    let succeeded = 0;
-    for (const entity of entities) {
-      attempted += 1;
-      const result = await deps.gateway.execute({ identity, tool_id: "home-assistant", action: "read_state_detail", parameters: { entity: entity.entity_id } });
-      if (!result.ok) continue;
-      succeeded += 1;
-      const data = result.data;
-      if (data === null || data === undefined || typeof data !== "object" || Array.isArray(data)) continue;
+    let unknown = 0;
+    let failed = 0;
+    entities.forEach((entity, i) => {
+      const data = states[i];
+      if (data === null || data === undefined) {
+        unknown += 1; // 404: entiteten finnes ikke i HA (typisk en skrivefeil i abonnementet)
+        return;
+      }
+      if (typeof data !== "object" || Array.isArray(data) || typeof (data as Record<string, unknown>)["error"] === "string") {
+        failed += 1;
+        return;
+      }
       const state = (data as Record<string, unknown>)["state"];
       const lastChanged = (data as Record<string, unknown>)["last_changed"];
-      if (typeof state !== "string" || typeof lastChanged !== "string") continue;
+      if (typeof state !== "string" || typeof lastChanged !== "string") {
+        failed += 1;
+        return;
+      }
       const base = { source: "home_assistant" as const, entity_id: entity.entity_id, role: entity.role, state, last_changed: lastChanged };
       if (entity.role === "power" && entity.limit_w !== undefined) {
-        const watts = Number(state);
+        const watts = wattsOf(state, (data as Record<string, unknown>)["unit"]);
         const key = `${ctx.tenant_id}|${entity.entity_id}`;
-        if (Number.isFinite(watts) && watts > entity.limit_w) {
+        if (watts !== null && watts > entity.limit_w) {
           const cur = powerTracker.get(key) ?? { since: new Date(ctx.now).toISOString(), ticks: 0 };
           cur.ticks += 1;
           powerTracker.set(key, cur);
           out.push({ ...base, limit_w: entity.limit_w, over_limit_ticks: cur.ticks, over_limit_since: cur.since });
         } else {
           powerTracker.delete(key);
-          // A-MEDIUM-4: under grensen er NORMAL (bussen løser åpne effektsituasjoner for entiteten); en ukjent verdi (`unavailable`) er det ikke (ingen løsing på gjetning).
-          out.push(Number.isFinite(watts) ? { ...base, limit_w: entity.limit_w, over_limit_ticks: 0, over_limit_since: new Date(ctx.now).toISOString() } : base);
+          // A-MEDIUM-4: under grensen er NORMAL (bussen løser åpne effektsituasjoner for entiteten); en ukjent verdi eller ukjent enhet (`unavailable`, `MW`) er det ikke (ingen løsing på gjetning).
+          out.push(watts !== null ? { ...base, limit_w: entity.limit_w, over_limit_ticks: 0, over_limit_since: new Date(ctx.now).toISOString() } : base);
         }
-        continue;
+        return;
       }
       out.push(base);
-    }
-    // Alle lesinger feilet (HA nede, credential utilgjengelig/tilbakekalt, connector fryst): synlig kildefeil, aldri en stille tom liste.
-    if (attempted > 0 && succeeded === 0) throw new Error("home_source_unavailable");
+    });
+    if (unknown > 0) ctx.warnings?.push(`home_entities_unknown:${unknown}`);
+    if (failed > 0) ctx.warnings?.push(`home_entities_failed:${failed}`);
     return out;
   };
 }
@@ -225,7 +252,7 @@ export function createSituationSignalsWiring(deps: SituationSignalsWiringDeps): 
   const tools: ToolDefinition[] = [
     ...autonomyWithExpiry,
     ...situationSignalsToolDefinitions(new SituationSignalsTransport({ registry, engine: deps.engine, logs, runner, simulation, ...(feedback ? { feedback } : {}) }), { feedback: flags.feedback }),
-    ...(flags.home ? [homeAssistantStateDetailTool(deps.haTransport)] : [])
+    ...(flags.home ? homeAssistantSituationReadTools(deps.haTransport) : [])
   ];
 
   return {
