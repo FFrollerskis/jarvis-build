@@ -15,6 +15,7 @@ import { guardedFetch } from "@jarvis/tool-gateway";
 import { HomeAssistantVisionSource, VisionClassifier, type VisionService } from "@jarvis/vision";
 import { FakeHaServer, haTimestamp } from "../../../modules/vision/test/support/fake-ha-server.ts";
 import { freezeTargetError, knownModelProviders } from "../src/provider-pause.ts";
+import { visionFlagsFromEnv as visionFlagsFromEnvDirect } from "../src/vision-flags.ts";
 import {
   assertLocalVisionEndpoint, assertStorageDirWritable, buildVisionRuntime, createVisionPollerGuard, isLocalAddress, verifyVisionEndpoints, visionAdapterFromEnv, visionAllowTailscale, visionFlagsFromEnv, visionModelTimeoutMs,
   VISION_MODEL_TIMEOUT_BOUNDS, VISION_UPLOADS_PER_IP_PER_MINUTE, VisionConfigError
@@ -271,6 +272,20 @@ describe("main.ts: flagg-av-identitet i selve koblingen", () => {
     expect(RUNTIME_SRC).not.toMatch(/(?<![.\w])fetch\(/);
     expect(RUNTIME_SRC).toContain('deps.secrets.get("JARVIS_HA_BASE_URL")');
     expect(RUNTIME_SRC).toContain('deps.secrets.get("JARVIS_HA_TOKEN")');
+  });
+
+  it("review delta A INFO-D9: provider-pause.ts (lastet også av worker-prosessen) importerer IKKE vision-runtime.ts - flaggene bor i vision-flags.ts, en fil uten imports - og vision-runtime.ts re-eksporterer dem uendret", () => {
+    const PAUSE_SRC = readFileSync(fileURLToPath(new URL("../src/provider-pause.ts", import.meta.url)), "utf8");
+    const FLAGS_SRC = readFileSync(fileURLToPath(new URL("../src/vision-flags.ts", import.meta.url)), "utf8");
+    const imports = (source: string): string[] => [...source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "").matchAll(/(?:^|\n)\s*(?:import|export)\b[^;]*?\bfrom\s+["']([^"']+)["']/g)].map((m) => m[1] as string);
+    expect(imports(PAUSE_SRC)).toContain("./vision-flags.ts");
+    expect(imports(PAUSE_SRC).filter((spec) => /vision-runtime|vision-routes|@jarvis\/vision/.test(spec))).toEqual([]);
+    expect(imports(FLAGS_SRC), "vision-flags.ts har ingen imports (importgrafen til workeren forblir uten visjonskode)").toEqual([]);
+    expect(RUNTIME_SRC).toContain('export { visionFlagsFromEnv, type VisionFlags } from "./vision-flags.ts";');
+    // samme funksjon fra begge veier (re-eksport, ikke en kopi)
+    expect(visionFlagsFromEnv).toBe(visionFlagsFromEnvDirect);
+    expect(visionFlagsFromEnvDirect({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_CLASSIFIER: "on" })).toMatchObject({ enabled: true, classifier: true, storeSnapshots: false });
+    expect(visionFlagsFromEnvDirect({ JARVIS_VISION_CLASSIFIER: "on" })).toMatchObject({ enabled: false, classifier: false }); // underflagg uten hovedbryter = av
   });
 });
 

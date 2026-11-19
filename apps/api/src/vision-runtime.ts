@@ -13,6 +13,7 @@ import {
   type VisionModelGateway, type VisionPollerGuard, type VisionPollerHandle, type VisionService
 } from "@jarvis/vision";
 import { RateLimiter } from "./http-guard.ts";
+import { flagOn, visionFlagsFromEnv, type VisionFlags } from "./vision-flags.ts";
 import type { VisionApiDeps, VisionMaintenanceStatus, VisionStatusReport } from "./vision-routes.ts";
 
 /**
@@ -40,31 +41,8 @@ export class VisionConfigError extends Error {
   }
 }
 
-export interface VisionFlags {
-  enabled: boolean;
-  classifier: boolean;
-  storeSnapshots: boolean;
-  haPoll: boolean;
-  localUrl: string | undefined;
-  localModel: string;
-  storageDir: string | undefined;
-}
-
-const on = (value: string | undefined): boolean => value === "on";
-
-export function visionFlagsFromEnv(env: NodeJS.ProcessEnv): VisionFlags {
-  const enabled = on(env["JARVIS_VISION_ENABLED"]);
-  return {
-    enabled,
-    // Underflagg gjelder KUN under hovedbryteren (hovedbryter av = alt av, uansett underflagg).
-    classifier: enabled && on(env["JARVIS_VISION_CLASSIFIER"]),
-    storeSnapshots: enabled && on(env["JARVIS_VISION_STORE_SNAPSHOTS"]),
-    haPoll: enabled && on(env["JARVIS_VISION_HA_POLL"]),
-    localUrl: env["JARVIS_VISION_LOCAL_URL"]?.trim() || undefined,
-    localModel: env["JARVIS_VISION_LOCAL_MODEL"]?.trim() || "local-vision",
-    storageDir: env["JARVIS_VISION_STORAGE_DIR"]?.trim() || undefined
-  };
-}
+// Flaggene bor i vision-flags.ts (en fil uten imports, slik at provider-pause.ts/workeren ikke laster hele kjøretiden - review delta A INFO-D9). Re-eksportert uendret.
+export { visionFlagsFromEnv, type VisionFlags } from "./vision-flags.ts";
 
 /** Opplastinger per klient-IP per minutt (review B-L4). */
 export const VISION_UPLOADS_PER_IP_PER_MINUTE = 20;
@@ -76,7 +54,7 @@ const LOCAL_SUFFIXES = [".local", ".lan", ".internal", ".home.arpa", ".localdoma
  * PC-en min, nådd via Tailscale» må kunne brukes - men `100.x`/`.ts.net` er ellers ikke et privat nett, og uten flagget avvises begge.
  */
 export function visionAllowTailscale(env: NodeJS.ProcessEnv): boolean {
-  return on(env["JARVIS_VISION_ALLOW_TAILSCALE"]);
+  return flagOn(env["JARVIS_VISION_ALLOW_TAILSCALE"]);
 }
 
 export interface LocalEndpointOptions {
