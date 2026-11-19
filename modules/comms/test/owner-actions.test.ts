@@ -6,7 +6,7 @@ import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, OwnerControls, 
 import { ToolGateway, type ClassDNotification, type SecretProvider } from "@jarvis/tool-gateway";
 import {
   COMMS_ADMIN_ACTIONS, COMMS_OUTBOUND_ACTIONS, COMMS_OWNER_ACTIONS, COMMS_READ_ACTIONS, CommsStore, CommsTransport, OutboundFunnel, commsToolDefinitions, executeCommsOwnerAction, parseCommsConfig,
-  previewCommsSend, type AdapterMap
+  previewCommsSend, scopedIdempotencyKey, type AdapterMap
 } from "../src/index.ts";
 import { OWNER, TENANT_A, scriptedAdapter, startCommsDb, type CommsDb } from "./support/harness.ts";
 
@@ -69,7 +69,8 @@ beforeEach(() => {
 });
 
 const sendParams = (over: Record<string, JsonValue> = {}): Record<string, JsonValue> => ({ channel: "sms", account_ref: "+4791000000", recipient: phone(), purpose: "transactional", purpose_basis: "existing_customer_relationship", text: "Hei, timen din er bekreftet.", ...over });
-const journal = async (requestId: string) => (await db.admin.query("SELECT status, denial_codes, rule_evaluation, content_sha256, content_length, recipient_hint, request_id FROM comms_outbound_log WHERE request_id = $1 ORDER BY created_at", [requestId])).rows as
+/** A-N2: journalens `request_id` er den SKOPEDE nøkkelen (handling + tenant-merke + brukerens nøkkel), ikke brukerens nøkkel alene. */
+const journal = async (userKey: string, action = "send") => (await db.admin.query("SELECT status, denial_codes, rule_evaluation, content_sha256, content_length, recipient_hint, request_id FROM comms_outbound_log WHERE request_id = $1 ORDER BY created_at", [scopedIdempotencyKey(TENANT_A, action, userKey)])).rows as
   Array<{ status: string; denial_codes: string[]; rule_evaluation: unknown; content_sha256: string; content_length: number; recipient_hint: string; request_id: string }>;
 const journalCount = async () => ((await db.admin.query("SELECT count(*)::int AS n FROM comms_outbound_log")).rows[0] as { n: number }).n;
 
@@ -122,7 +123,7 @@ describe("A: handlingslisten og forespørselens form", () => {
 });
 
 describe("B: sending - policy, journal, idempotens og gjenspilling", () => {
-  it("gyldig sending: ett adapterkall med riktig credential, journal `sent` med request_id = idempotensnøkkel, innhold kun som hash+lengde, eier-varsel uten tekst", async () => {
+  it("gyldig sending: ett adapterkall med riktig credential, journal `sent` med request_id = den skopede idempotensnøkkelen, innhold kun som hash+lengde, eier-varsel uten tekst", async () => {
     const idem = key("ok");
     const text = "Hei, timen din er bekreftet fredag.";
     const r = await executeCommsOwnerAction(deps(), owner, { action: "send", parameters: sendParams({ text }), idempotency_key: idem });
@@ -135,6 +136,8 @@ describe("B: sending - policy, journal, idempotens og gjenspilling", () => {
     const rows = await journal(idem);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.status).toBe("sent");
+    expect(rows[0]?.request_id).toBe(scopedIdempotencyKey(TENANT_A, "send", idem));
+    expect(rows[0]?.request_id).not.toBe(idem);
     expect(rows[0]?.content_length).toBeGreaterThan(text.length); // AI-opplysningen er lagt til av koden
     expect(JSON.stringify(rows)).not.toContain("timen din");
     expect(notifications.length).toBeGreaterThan(0);

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import {
-  COMMS_KNOWN_ACTIONS, InvalidCommsConfigError, WEBHOOK_MAX_BYTES, type CommsWebhookProvider, type CommsWebhookService, type OutboundFunnel, type WebhookRequest, type WebhookResponse
+  COMMS_KNOWN_ACTIONS, InvalidCommsConfigError, WEBHOOK_MAX_BYTES, scopedIdempotencyKey, type CommsWebhookProvider, type CommsWebhookService, type OutboundFunnel, type WebhookRequest, type WebhookResponse
 } from "@jarvis/comms";
 import { buildCommsRuntime } from "../src/comms-wiring.ts";
 import { createApiServer, normalizedRequestPath, type ApiDeps } from "../src/server.ts";
@@ -325,7 +325,7 @@ describe("C: `/comms/action` og `/comms/preview` - grant -> suveren eier -> step
     expect(gatewayCalls.map((c) => c.action)).toEqual(exempt);
   });
 
-  it("gyldig sending: gatewayen får NØYAKTIG tool `comms`/`send`, identiteten fra GRANTET, idempotensnøkkelen og request_id = nøkkelen; svaret bærer ekstern id og aldri tekst", async () => {
+  it("gyldig sending: gatewayen får NØYAKTIG tool `comms`/`send`, identiteten fra GRANTET, den SKOPEDE idempotensnøkkelen (A-N2) og request_id = den skopede nøkkelen; svaret bærer ekstern id og aldri tekst", async () => {
     const { outbound, gatewayCalls, funnelCalls } = stubOutbound();
     const base = await listen({ ...authDeps, comms: { outbound } });
     const r = await post(base, "/comms/action", sendBody());
@@ -333,8 +333,10 @@ describe("C: `/comms/action` og `/comms/preview` - grant -> suveren eier -> step
     expect(r.json).toMatchObject({ ok: true, external_id: "msg-1", output_trust: "internal", deduplicated: false, session_id: `s-${OWNER}` });
     expect(gatewayCalls).toHaveLength(1);
     const call = gatewayCalls[0];
-    expect(call).toMatchObject({ tool_id: "comms", action: "send", idempotency_key: "idem-route-0001" });
-    expect(call?.parameters["request_id"]).toBe("idem-route-0001");
+    const scoped = scopedIdempotencyKey(TENANT, "send", "idem-route-0001");
+    expect(scoped).not.toBe("idem-route-0001");
+    expect(call).toMatchObject({ tool_id: "comms", action: "send", idempotency_key: scoped });
+    expect(call?.parameters["request_id"]).toBe(scoped);
     expect(call?.identity).toMatchObject({ person_id: OWNER, tenant_id: TENANT, memory_space_id: "business", channel: "web", auth_strength: "signed" });
     expect(funnelCalls).toEqual(["replayState", "evaluate"]);
     expect(r.text).not.toContain("timen din");

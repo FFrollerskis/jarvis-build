@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { ToolGateway } from "@jarvis/tool-gateway";
 import { parseCallParams, parseDeleteParams, parseEditParams, parseReactParams, parseSendParams, type FunnelContext, type OutboundFunnel, type ParseResult } from "./funnel.ts";
@@ -6,8 +7,8 @@ import { parseCallParams, parseDeleteParams, parseEditParams, parseReactParams, 
  * WP-G1 (D-463): eierens HTTP-flate for kommunikasjon (`POST /comms/action`, `POST /comms/preview`) - logikken bor HER (testbar uten HTTP), ruten i `apps/api` gjør kun autentisering (grant -> KUN eieren) og kaller hit.
  * Alt går via `ToolGateway.execute()` (policy, eier-binding, klasse D-kjeden, idempotens, varsling) - ruten har ingen egen sendevei og ingen egen sjekk å omgå.
  *
- * Forespørsels-id: for send/rediger/slett/reager ER `idempotency_key` journalens `request_id` (ruten setter den; en innsendt `request_id` som avviker avvises). Dermed kan ikke ledgeren og journalen komme ut av takt, og en
- * ny nøkkel er ALLTID et nytt forsøk (en brent/feilet forespørsel kan ikke gjenbrukes).
+ * Forespørsels-id: for send/rediger/slett/reager ER den SKOPEDE idempotensnøkkelen (`scopedIdempotencyKey`) journalens `request_id` (ruten setter den; en innsendt `request_id` som avviker fra brukerens nøkkel avvises). Dermed kan
+ * ikke ledgeren og journalen komme ut av takt, og en ny nøkkel er ALLTID et nytt forsøk (en brent/feilet forespørsel kan ikke gjenbrukes).
  */
 export const COMMS_OUTBOUND_ACTIONS: readonly string[] = ["send", "edit_message", "delete_message", "add_reaction"];
 export const COMMS_ADMIN_ACTIONS: readonly string[] = ["authorize_account", "revoke_account", "record_opt_out"];
@@ -25,7 +26,19 @@ export const COMMS_MEETING_WRITE_ACTIONS: readonly string[] = ["meeting_ingest_t
 const COMMS_KEYED_CONTACT_ACTIONS: readonly string[] = ["contacts_create", "contacts_update", "contacts_delete", "meeting_delete"];
 export const COMMS_KNOWN_ACTIONS: readonly string[] = [...COMMS_OWNER_ACTIONS, ...COMMS_CALL_ACTIONS, ...COMMS_VENDOR_READ_ACTIONS, ...COMMS_CONTACT_READ_ACTIONS, ...COMMS_CONTACT_WRITE_ACTIONS, ...COMMS_MEETING_READ_ACTIONS, ...COMMS_MEETING_WRITE_ACTIONS];
 
-const KEY = /^[A-Za-z0-9._:-]{8,200}$/;
+/** Brukerens egen nøkkel. Maks 160 tegn: den skopede nøkkelen (handling + tenant-merke + nøkkel, høyst 37 tegn ekstra) må få plass i journalens `request_id` (maks 200 tegn). */
+const KEY = /^[A-Za-z0-9._:-]{8,160}$/;
+
+/**
+ * A-N2 (LEDER-AVGJØRELSE, delta-review A): ToolGateway-ledgeren slår opp på (tenant, idempotensnøkkel) ALENE - `tool_id`/`action` sammenlignes ikke (kjent JARVIS-102; den delte gatewayen endres ikke her). Samme brukervalgte nøkkel til to
+ * ULIKE handlinger ga derfor `ok + deduplicated` på den andre uten at noe ble utført: `authorize_account(K)` så `send(K)` = ingen sending, `send(K)` så `record_opt_out(K)` = ingen STOP registrert (og alt som mutates via comms: kontakter, møter).
+ * Eier-handlingslaget SKOPER derfor nøkkelen FØR den når gatewayen og journalen: `<handling>:<tenant-merke>:<nøkkel>`. Samme nøkkel + SAMME handling er fortsatt samme forespørsel (ekte gjenspilling, A-M5-fingeravtrykket gjelder uendret);
+ * samme nøkkel + ANNEN handling er uavhengige forespørsler. Tenant-merket (8 hex av SHA-256 over tenant-id-en) gjør nøkkelen entydig også utenfor de tenant-skopede tabellene (ledgerens PK og journalens unike indeks er allerede per tenant).
+ */
+export function scopedIdempotencyKey(tenantId: string, action: string, key: string): string {
+  const tenantTag = createHash("sha256").update(tenantId, "utf8").digest("hex").slice(0, 8);
+  return `${action}:${tenantTag}:${key}`;
+}
 
 export interface OwnerActionDeps {
   readonly gateway: Pick<ToolGateway, "execute" | "get">;
@@ -87,11 +100,13 @@ export async function executeCommsOwnerAction(
   if (!COMMS_ALLOWED_SPACES.includes(identity.memory_space_id)) return { ok: false, status: "rejected", reason: "comms_space_not_allowed" };
   if (!COMMS_KNOWN_ACTIONS.includes(action) || deps.gateway.get("comms", action) === undefined) return { ok: false, status: "rejected", reason: "comms_unknown_action" };
   const outbound = COMMS_OUTBOUND_ACTIONS.includes(action) || COMMS_CALL_ACTIONS.includes(action);
-  const idempotencyKey = input.idempotency_key;
+  const userKey = input.idempotency_key;
   let parameters = input.parameters;
-  if ((outbound || COMMS_KEYED_CONTACT_ACTIONS.includes(action)) && (idempotencyKey === undefined || !KEY.test(idempotencyKey))) return { ok: false, status: "rejected", reason: "idempotency_key_required" };
+  if ((outbound || COMMS_KEYED_CONTACT_ACTIONS.includes(action)) && (userKey === undefined || !KEY.test(userKey))) return { ok: false, status: "rejected", reason: "idempotency_key_required" };
+  // A-N2: gatewayen og journalen ser kun den SKOPEDE nøkkelen (handling + tenant-merke + brukerens nøkkel).
+  const idempotencyKey = userKey === undefined ? undefined : scopedIdempotencyKey(identity.tenant_id, action, userKey);
   if (outbound && idempotencyKey !== undefined) {
-    if (parameters["request_id"] !== undefined && parameters["request_id"] !== idempotencyKey) return { ok: false, status: "rejected", reason: "comms_request_id_mismatch" };
+    if (parameters["request_id"] !== undefined && parameters["request_id"] !== userKey) return { ok: false, status: "rejected", reason: "comms_request_id_mismatch" };
     parameters = { ...parameters, request_id: idempotencyKey };
     // Idempotensnøkkelen er BUNDET til forespørselen (A-M5): ledgeren (PK tenant+nøkkel) ville ellers svart `ok + deduplicated` på en HELT ANNEN forespørsel med samme nøkkel (annen mottaker/tekst, eller `delete_message` med nøkkelen til en
     // tidligere sending - der ingenting ble sendt/slettet). Et forsøk som ER journalført sammenlignes derfor med fingeravtrykket; avvik = `idempotency_key_collision` FØR gatewayen er nådd.
