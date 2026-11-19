@@ -46,7 +46,16 @@ CREATE TABLE vision_inventory_items (
   person_id           text NOT NULL,
   room_id             text NOT NULL,
   -- Normalisert (små bokstaver, NFKC, kun bokstaver/tall/mellomrom/bindestrek, maks 64 tegn): se normalizeObjectLabel() i labels.ts.
-  object_label        text NOT NULL CHECK (char_length(object_label) BETWEEN 1 AND 64),
+  -- Review A-M1: tegnklasse-regel i tillegg til lengden. Inventaret skrives kun av pipelinen, så regelen er STRENG (normalisert form): kun bokstaver/tall/mellomrom/bindestrek - ingen tegnsetting
+  -- (inkl. alle strukturtegn) eller kontrolltegn, ingen ledende/etterfølgende/doble mellomrom eller bindestreker, minst ett tegn som ikke er siffer, høyst 4 ord. Små bokstaver håndheves av
+  -- normalizeObjectLabel (ikke av databasen: lower() er locale-avhengig). Åpent ordforråd er fortsatt UBETRODD data (se labels.ts): regelen er et nett, ikke et navnefilter.
+  object_label        text NOT NULL CHECK (
+    char_length(object_label) BETWEEN 1 AND 64
+    AND translate(object_label, '-', '') !~ '[[:punct:][:cntrl:]\x01-\x1f\x7f-\x9f\xad\x34f\x61c\x115f-\x1160\x17b4-\x17b5\x180b-\x180f\x200b-\x200f\x202a-\x202e\x2060-\x206f\x3164\xfe00-\xfe0f\xfeff\xffa0\xfff0-\xfffb\xe0000-\xe0fff]'
+    AND object_label ~ '[^[:digit:][:space:][:punct:]]'
+    AND object_label !~ '(^[ -])|([ -]$)|([ -]{2})'
+    AND array_length(regexp_split_to_array(object_label, ' '), 1) <= 4
+  ),
   -- Confidence ved siste observasjon (blandet med forfalt tidligere confidence). Effektiv confidence NÅ regnes ved lesing.
   confidence          double precision NOT NULL CHECK (confidence BETWEEN 0 AND 1),
   seen_count          integer NOT NULL DEFAULT 1 CHECK (seen_count >= 1),

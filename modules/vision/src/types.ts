@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isStorableObjectLabel } from "./labels.ts";
 
 /**
  * UA-9 Vision & Physical World: provider-nøytral, JARVIS_CANONICAL
@@ -109,7 +110,8 @@ export const VisionObservationInputSchema = z
   .object({
     event_type: VisionEventTypeSchema,
     room_id: z.string().min(1).optional(),
-    object_label: z.string().min(1).optional(),
+    // WP-G3 (review A-M1): samme lagringsregel som DB-CHECK-en (lengde/tegnklasse/ordtall) - en ugyldig etikett avvises her med en lesbar feil i stedet for et rått 23514 fra databasen.
+    object_label: z.string().min(1).refine(isStorableObjectLabel, { message: "object_label_invalid" }).optional(),
     confidence: z.number().min(0).max(1).optional(),
     source_event_id: z.string().min(1),
     /** ISO 8601-tidsstempel for NÅR hendelsen faktisk skjedde (kan avvike fra `recorded_at`, som er når Jarvis mottok den). */

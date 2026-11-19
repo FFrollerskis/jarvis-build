@@ -9,8 +9,11 @@
  *     (punktum, komma, apostrof, parenteser, utropstegn) fjernes, og kun små bokstaver, tall, mellomrom og bindestrek gjenstår,
  *   - maks 64 tegn og maks 4 ord (et objekt er «nøkler», «kaffekopp», «rød sekk» - ikke en setning),
  *   - alt som ikke består blir `null` (forkastet), aldri en delvis rettet streng som ser ut som noe annet enn det modellen sa.
- * Dette er IKKE en garanti mot at en kort tekst fortsatt kan lese som en instruks for en LLM; garantien er at navnet aldri tolkes som
- * instruks i Jarvis (verktøyutdata merkes `untrusted`, og ingen kode handler på et objektnavn).
+ * HVA DETTE IKKE GJØR (ærlig, review A-M1): normaliseringen er IKKE en navne- eller instruksjonsfilter. Et ÅPENT ordforråd slipper gjennom så lenge det består av
+ * bokstaver/tall/mellomrom/bindestrek innenfor lengdegrensene: «tobias sorensen», «bearded-man», «ignore all instructions now» og «drop table users» er gyldige etiketter her.
+ * Kun generiske personord (`PERSON_WORDS` i classifier.ts: «man», «woman», «child», «face», «ansikt» ...) og strukturtegn filtreres. Etiketten er derfor UBETRODD DATA: den lagres
+ * kun etter en DB-CHECK på lengde/tegnklasse (`isStorableObjectLabel`, speilet i migrasjon 133/135), den tolkes aldri som instruks i Jarvis (ingen kode handler på et objektnavn),
+ * og den MÅ rammes inn som `untrusted` hvis den noen gang gis videre til en modell (et senere modellvendt verktøy, jf. N1). Det finnes INGEN garanti for at en etikett ikke er et navn.
  */
 const INVISIBLE = /\p{Default_Ignorable_Code_Point}|\p{Cf}|\p{Cc}/gu;
 const DISALLOWED = /[^\p{L}\p{N} -]/gu;
@@ -33,6 +36,34 @@ export function normalizeObjectLabel(raw: unknown): string | null {
   // En «etikett» som kun er tall/bindestrek er ikke et objektnavn.
   if (!/\p{L}/u.test(cleaned)) return null;
   return words.join(" ");
+}
+
+/**
+ * Lagringsregelen for et objektnavn: DB-CHECK `vision_event_observations_object_label_check` (133, mild) og `vision_inventory_items_object_label_check` (135, streng: normalisert form).
+ * 1-64 tegn, høyst 4 ord, ingen strukturtegn, kontrolltegn eller usynlige tegn, og minst ett tegn som ikke er siffer/mellomrom/tegnsetting. Alt `normalizeObjectLabel` gir består dette; regelen
+ * her er MILDERE (krever ikke små bokstaver - en P0-kilde kan levere «Nøkler») og er et nett under normaliseringen, ikke en erstatning for den. Paritet mot SQL bevises i g3-migrations.test.ts
+ * (en sveip over HELE Unicode-rommet mot selve CHECK-en i databasen), og samme regel brukes i inngangsskjemaet (types.ts). Usynlige tegn bygges av kodepunkter (ingen tegnescape i kilden).
+ * Det er IKKE et navnefilter (se avsnittet over): regelen sier kun at strengen har formen til et kort objektnavn.
+ */
+// Usynlige/formaterende tegn: soft hyphen, combining grapheme joiner, Arabic letter mark, Hangul-fyllere, Khmer-vokaler, Mongolian-velgere, null-bredde og bidi (200B-200F, 202A-202E),
+// ordforbinder/usynlige operatorer (2060-206F), variasjonsvelgere, BOM, halvbredde-fyller, tegn for interlinear annotasjon og Unicode «tag»-tegn (E0000-E0FFF: «ASCII smuggling»).
+// MÅ være identisk med tegnklassen i migrasjon 133 (sveipetesten feller enhver forskjell).
+const STORED_INVISIBLE_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x00ad, 0x00ad], [0x034f, 0x034f], [0x061c, 0x061c], [0x115f, 0x1160], [0x17b4, 0x17b5], [0x180b, 0x180f], [0x200b, 0x200f], [0x202a, 0x202e],
+  [0x2060, 0x206f], [0x3164, 0x3164], [0xfe00, 0xfe0f], [0xfeff, 0xfeff], [0xffa0, 0xffa0], [0xfff0, 0xfffb], [0xe0000, 0xe0fff]
+];
+const FORBIDDEN_STORED = new RegExp(
+  "[<>{}\\[\\]\\\\/|;:\"`=#@$%^&*~+\\p{Cc}" + STORED_INVISIBLE_RANGES.map(([from, to]) => `${String.fromCodePoint(from)}-${String.fromCodePoint(to)}`).join("") + "]",
+  "u"
+);
+const HAS_LETTERISH = /[^0-9\s\p{P}\p{S}]/u;
+
+export function isStorableObjectLabel(label: unknown): label is string {
+  if (typeof label !== "string") return false;
+  const length = [...label].length;
+  if (length < 1 || length > MAX_OBJECT_LABEL_CHARS) return false;
+  if (FORBIDDEN_STORED.test(label) || !HAS_LETTERISH.test(label)) return false;
+  return label.trim().split(/\s+/).length <= MAX_OBJECT_LABEL_WORDS;
 }
 
 /**

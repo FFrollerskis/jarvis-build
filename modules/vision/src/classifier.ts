@@ -15,10 +15,13 @@ import type { VisionEventType } from "./types.ts";
  *   - Svaret verifiseres: leverandøren som svarte må stå i `localProviders` (ellers forkastes svaret og feilen logges).
  *   - Modellutdata er UBETRODD (regel 7). Utdata parses av en STRENG parser (ukjente nøkler avviser hele svaret), event_type er et
  *     lukket delsett (`object_detected`/`person_present` - alt annet i det lukkede settet er utløser-utledet, ikke visuelt, og alt
- *     utenfor settet er «unknown» og forkastes), objektnavn normaliseres (labels.ts), personbeskrivende ord og ALLE personnavn/-identiteter
- *     avvises, og tekst i bildet/metadata er data, aldri instruks. En feil gir `model_unavailable`/`model_rejected`, aldri et kast.
+ *     utenfor settet er «unknown» og forkastes), objektnavn normaliseres (labels.ts) og generiske personord (`PERSON_WORDS`: «man», «woman», «child», «face»,
+ *     «ansikt» ...) forkastes, og tekst i bildet/metadata er data, aldri instruks. En feil gir `model_unavailable`/`model_rejected`, aldri et kast.
+ *     ÆRLIG GRENSE (review A-M1): navn og instruksjonslignende tekst filtreres IKKE. En etikett som «tobias sorensen», «bearded-man» eller «ignore all instructions now»
+ *     består normaliseringen (åpent ordforråd: bokstaver/tall/mellomrom/bindestrek, maks 4 ord/64 tegn). Etiketten er UBETRODD DATA: lagret kun etter DB-CHECK på lengde/tegnklasse,
+ *     aldri tolket som instruks i Jarvis, og må rammes inn som `untrusted` hvis den gis til en modell. Det finnes ingen garanti for at en etikett ikke er et navn.
  *   - INGEN biometri: modellen får ikke i oppdrag å identifisere noen, og et `person_present`-svar med objektnavn (et forsøk på å legge
- *     inn et navn) avvises i sin helhet.
+ *     inn et navn) avvises i sin helhet. Prompt-forbudet er en instruks til modellen, ikke en teknisk garanti mot et navn i en objektetikett (se over).
  *
  * Porten `VisionModelGateway` er strukturell (samme form som `ModelGateway.complete`), så `modules/vision` har ingen avhengighet til
  * modell-pakkene; `apps/api` gir inn den ekte `ModelGateway`.

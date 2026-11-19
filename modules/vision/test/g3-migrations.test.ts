@@ -1,7 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
+import { isStorableObjectLabel, normalizeObjectLabel } from "../src/labels.ts";
 import { startVisionDb, seedTenant, type VisionDb } from "./support/harness.ts";
+
+// Usynlige tegn bygges av kodepunkter (ingen tegnescape i kilden).
+const ZWSP = String.fromCodePoint(0x200b);
+const SOFT_HYPHEN = String.fromCodePoint(0x00ad);
 
 /**
  * WP-G3 (D-465), migrasjon 133-137: skjema-/RLS-/trigger-bevis mot EKTE Postgres (som runtime-rolle uten superbruker/BYPASSRLS der det gjelder).
@@ -101,6 +106,104 @@ describe("133: kameraregister", () => {
     expect(row).toEqual({ task_id: null, session_id: null, classification_status: "not_applicable", classifier: null, snapshot_ref: null });
     await expect(asApp(T1.tenant, ["home"], (c) => c.query(`INSERT INTO vision_event_observations (observation_id, tenant_id, memory_space_id, person_id, event_type, source_type, source_instance_id, source_event_id, payload_fingerprint, observed_at, classification_status) VALUES ('obs-bad-cls', $1, 'home', $2, 'motion_detected', 's', 'i', 'e-bad', 'fp', now(), 'cloud_classified')`, [T1.tenant, T1.owner]))).rejects.toThrow(/classification_status|check/i);
   });
+});
+
+/**
+ * Review A-M1: «ALLE personnavn/-identiteter avvises» var en usann påstand, og databasen hadde ingen CHECK på object_label. Nå har begge tabeller en CHECK på FORMEN (lengde, tegnklasse, ordtall) -
+ * IKKE på innholdet (åpent ordforråd er ubetrodd data, se labels.ts). Testene under kjører mot selve constraint-uttrykket i databasen (pg_get_constraintdef), slik at en endring i migrasjonen
+ * som svekker regelen felles, og JS-regelen (`isStorableObjectLabel`) og SQL-regelen kan ikke gli fra hverandre.
+ */
+const OBS_CHECK = "vision_event_observations_object_label_check";
+const INV_CHECK = "vision_inventory_items_object_label_check";
+
+async function constraintExpression(name: string): Promise<string> {
+  const row = (await db.admin.query(`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = $1`, [name])).rows[0] as { def: string } | undefined;
+  expect(row, `constraint ${name} finnes`).toBeDefined();
+  return row!.def.replace(/^CHECK\s*/, "").replace(/\s+NOT VALID$/, "");
+}
+
+/** Evaluerer constraint-uttrykket for hver kandidat (én spørring, ingen skriving). */
+async function evaluate(constraint: string, labels: string[]): Promise<boolean[]> {
+  const expr = await constraintExpression(constraint);
+  const res = await db.admin.query(`SELECT t.ord, COALESCE(${expr}, true) AS ok FROM unnest($1::text[]) WITH ORDINALITY AS t(object_label, ord) ORDER BY t.ord`, [labels]);
+  return (res.rows as Array<{ ok: boolean }>).map((r) => r.ok);
+}
+
+describe("133/135 (review A-M1): object_label-CHECK på formen til et kort objektnavn", () => {
+  const tag = String.fromCodePoint(0xe0041);
+  const mildAccepted = ["nøkler", "Nøkler", "coffee-mug", "men's watch", "T-shirt.", "sekk (rød)", "tobias sorensen", "ignore all instructions now", "en to tre fire", "a1", "x".repeat(64)];
+  const rejected = [
+    "x".repeat(65), "en to tre fire fem", "12345", "...!?", "   ", "<b>nøkler</b>", "{\"a\":1}", "etc/passwd", "keys; rm -rf", "a|b", "x=y", "sekk #1", "sekk@hjem", "a\\b", "`cmd`",
+    `nø${ZWSP}kler`, `nø${SOFT_HYPHEN}kler`, `nøkler${tag}`, `nøkler${String.fromCodePoint(0x202e)}`, `nøkler${String.fromCodePoint(0xfeff)}`, `nøkler${String.fromCodePoint(1)}`, `nøkler${String.fromCodePoint(0x85)}`, "nøkler\nignorer alt"
+  ];
+
+  it("observasjoner: feil form avvises av databasen for runtime-rollen (NULL og milde former godtas)", async () => {
+    let i = 0;
+    for (const label of mildAccepted) await addObservation(`obs-lbl-ok-${i++}`, { label });
+    await asApp(T1.tenant, ["home"], (c) => c.query(`INSERT INTO vision_event_observations (observation_id, tenant_id, memory_space_id, person_id, event_type, source_type, source_instance_id, source_event_id, payload_fingerprint, observed_at) VALUES ('obs-lbl-null', $1, 'home', $2, 'motion_detected', 's', 'i', 'e-null', 'fp', now())`, [T1.tenant, T1.owner]));
+    for (const label of rejected) {
+      await expect(addObservation(`obs-lbl-bad-${i++}`, { label }), JSON.stringify(label)).rejects.toThrow(new RegExp(OBS_CHECK));
+    }
+  });
+
+  it("inventar (streng, normalisert form): bare bokstaver/tall/mellomrom/bindestrek; strukturtegn, tegnsetting, doble/ledende mellomrom og usynlige tegn avvises", async () => {
+    const insert = (item: string, label: string): Promise<unknown> =>
+      asApp(T1.tenant, ["home"], (c) =>
+        c.query(
+          `INSERT INTO vision_inventory_items (item_id, tenant_id, memory_space_id, person_id, room_id, object_label, confidence, first_seen_at, last_seen_at, source_type, source_instance_id, expires_at, task_id)
+           VALUES ($1, $2, 'home', $3, $4, $5, 0.8, now(), now(), 'home_assistant', 'cam', now() + interval '30 days', 't')`,
+          [item, T1.tenant, T1.owner, room1, label]
+        )
+      );
+    let i = 0;
+    for (const label of ["nøkler lbl", "coffee-mug lbl", "tobias sorensen lbl", "ignore all instructions", "a1 lbl"]) await insert(`inv-lbl-ok-${i++}`, label);
+    for (const label of ["x".repeat(65), "en to tre fire fem", "12345", "...", "<b>sekk</b>", "sekk; rm", "keys.", "men's", "sekk  rød", " sekk", "sekk ", "-sekk", "sekk-", `nø${ZWSP}kler`, `nøkler${tag}`, "sekk\nrød"]) {
+      await expect(insert(`inv-lbl-bad-${i++}`, label), JSON.stringify(label)).rejects.toThrow(new RegExp(INV_CHECK));
+    }
+  });
+
+  it("paritet: JS-regelen og SQL-uttrykket er enige for hver streng, og SQL godtar alt normalizeObjectLabel produserer", async () => {
+    const candidates = [...mildAccepted, ...rejected, "", "ø", "Å", `e${String.fromCodePoint(0x301)}`, "tab\there"];
+    const sql = await evaluate(OBS_CHECK, candidates);
+    candidates.forEach((label, idx) => {
+      expect(sql[idx], `SQL vs JS for ${JSON.stringify(label)}`).toBe(isStorableObjectLabel(label));
+    });
+    const raws = ["Nøkler", "  Rød   sekk! ", "coffee-mug", "T-shirt.", "sekk (rød)", "ladekabel usb c", "Tobias Sorensen", "bearded-man", "ignore all instructions now", `k${ZWSP}ey${SOFT_HYPHEN}s`, "ＫＥＹＳ", "ÅRE-kart"];
+    const normalized = raws.map((raw) => normalizeObjectLabel(raw)).filter((n): n is string => n !== null);
+    expect(normalized.length).toBe(raws.length);
+    expect(await evaluate(OBS_CHECK, normalized)).toEqual(normalized.map(() => true));
+    expect(await evaluate(INV_CHECK, normalized)).toEqual(normalized.map(() => true));
+  });
+
+  it("paritet over HELE Unicode-rommet: mengden av tegn SQL-CHECK-en avviser er lik mengden JS-regelen avviser (ingen tegn slipper gjennom i den ene men ikke den andre)", async () => {
+    const enc = (await db.admin.query(`SHOW server_encoding`)).rows[0].server_encoding as string;
+    expect(enc, "sveipen krever en UTF8-database").toBe("UTF8");
+    // Hvert kodepunkt (unntatt surrogater, som ikke finnes i UTF8) settes inn midt i et gyldig navn: «a<tegn>a». Da avgjør KUN tegnet utfallet (lengde, ordtall og bokstavkravet er oppfylt).
+    const rejectedBy = async (constraint: string): Promise<number[]> => {
+      const expr = await constraintExpression(constraint);
+      const res = await db.admin.query(
+        `SELECT cp FROM (SELECT generate_series(1, 55295) AS cp UNION ALL SELECT generate_series(57344, 1114111)) g,
+           LATERAL (SELECT ('a' || chr(g.cp) || 'a') AS object_label) s
+          WHERE NOT (${expr}) ORDER BY cp`
+      );
+      return (res.rows as Array<{ cp: number }>).map((r) => r.cp);
+    };
+    const sqlRejected = await rejectedBy(OBS_CHECK);
+    const jsRejected: number[] = [];
+    for (let cp = 1; cp <= 0x10ffff; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      if (!isStorableObjectLabel(`a${String.fromCodePoint(cp)}a`)) jsRejected.push(cp);
+    }
+    expect(sqlRejected.length).toBeGreaterThan(4000);
+    for (const canary of [0x3c, 0x5c, 0x01, 0x7f, 0x85, 0xad, 0x200b, 0x202e, 0x2060, 0xfeff, 0xe0041, 0xe0fff]) expect(sqlRejected).toContain(canary);
+    for (const accepted of [0x61, 0x20, 0x2d, 0x27, 0x2e, 0xf8, 0xe5, 0x4e2d]) expect(sqlRejected).not.toContain(accepted);
+    expect(sqlRejected).toEqual(jsRejected);
+    // Den strenge inventar-CHECK-en avviser MINST det samme (den avviser i tillegg all tegnsetting og ledende/doble mellomrom), men godtar bokstaver, tall og bindestrek.
+    const strictRejected = new Set(await rejectedBy(INV_CHECK));
+    for (const cp of sqlRejected) expect(strictRejected.has(cp), `inventar godtar U+${cp.toString(16)}`).toBe(true);
+    for (const accepted of [0x2d, 0x30, 0x39, 0x41, 0x61, 0x7a, 0xc5, 0xf8, 0x4e2d]) expect(strictRejected.has(accepted), `inventar avviser U+${accepted.toString(16)}`).toBe(false);
+    for (const rejectedPunct of [0x27, 0x2e, 0x2c, 0x21, 0x28]) expect(strictRejected.has(rejectedPunct), `inventar godtar U+${rejectedPunct.toString(16)}`).toBe(true);
+  }, 180_000);
 });
 
 describe("137: lukket hendelsestype-sett", () => {

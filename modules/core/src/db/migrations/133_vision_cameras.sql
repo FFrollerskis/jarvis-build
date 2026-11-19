@@ -82,3 +82,26 @@ ALTER TABLE vision_event_observations
   ADD COLUMN classification_status text NOT NULL DEFAULT 'not_applicable'
     CHECK (classification_status IN ('not_applicable','classified','model_unavailable','model_rejected','skipped_by_policy')),
   ADD COLUMN classifier text CHECK (classifier IS NULL OR char_length(classifier) <= 120);
+
+-- Lagringsregel for objektnavn (review A-M1). Et objektnavn kommer fra en UBETRODD lokal modell (modules/vision/src/labels.ts): normaliseringen i appen er ETT choke point, så databasen får et
+-- nett under den - lengde, tegnklasse og ordtall. IKKE et navne-/instruksjonsfilter (åpent ordforråd er fortsatt ubetrodd data, se labels.ts): kun 1-64 tegn, høyst 4 ord, ingen strukturtegn
+-- (<>{}[]\/|;:"`=#@$%^&*~+), ingen kontrolltegn (U+0001-001F, U+007F-009F) eller usynlige/formaterende tegn (soft hyphen, fyllere, null-bredde, bidi, usynlige operatorer, variasjonsvelgere, BOM,
+-- tag-tegn U+E0000-E0FFF), og minst ett tegn som ikke er siffer/mellomrom/tegnsetting. Tegnklassen er skrevet med eksplisitte kodepunkt-områder (ikke [:cntrl:]), slik at den er lik i alle
+-- locales. Mild (krever ikke små bokstaver): en P0-kilde kan levere «Nøkler». Speilet i JS (`isStorableObjectLabel`, labels.ts); paritet bevist i g3-migrations.test.ts (sveip over alle kodepunkt).
+-- NOT VALID først (055-tabellen kan ha rader fra P0 som bryter regelen), og VALIDATE forsøkes straks: består alle eksisterende rader blir den fullt gyldig; ellers forblir den NOT VALID
+-- (håndheves for alle nye/endrede rader) og eieren validerer manuelt etter å ha vurdert de gamle radene.
+ALTER TABLE vision_event_observations ADD CONSTRAINT vision_event_observations_object_label_check CHECK (
+  object_label IS NULL OR (
+    char_length(object_label) BETWEEN 1 AND 64
+    AND object_label !~ '[<>{}\[\]\\/|;:"`=#@$%^&*~+\x01-\x1f\x7f-\x9f\xad\x34f\x61c\x115f-\x1160\x17b4-\x17b5\x180b-\x180f\x200b-\x200f\x202a-\x202e\x2060-\x206f\x3164\xfe00-\xfe0f\xfeff\xffa0\xfff0-\xfffb\xe0000-\xe0fff]'
+    AND object_label ~ '[^[:digit:][:space:][:punct:]]'
+    AND array_length(regexp_split_to_array(btrim(object_label), '[[:space:]]+'), 1) <= 4
+  )
+) NOT VALID;
+DO $$
+BEGIN
+  ALTER TABLE vision_event_observations VALIDATE CONSTRAINT vision_event_observations_object_label_check;
+EXCEPTION WHEN check_violation THEN
+  RAISE NOTICE 'vision_event_observations_object_label_check forblir NOT VALID: eksisterende rader bryter regelen (nye og endrede rader håndheves)';
+END
+$$;
