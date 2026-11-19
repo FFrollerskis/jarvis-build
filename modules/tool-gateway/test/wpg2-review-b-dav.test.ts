@@ -270,3 +270,19 @@ describe("G: en vCard-gruppe som blander egenskaper mister ikke de andre ved e-p
     expect(server.store.get(url)?.body).not.toContain("kari@example.com");
   });
 });
+
+/**
+ * Fiks-runde 2 (delta-review B, NY-2): `WILDCARD_DNS` ble bare testet for nip.io/sslip.io/xip.io MED en innebygd IP. De bare navnene (`localtest.me`, `lvh.me`, `vcap.me`, `traefik.me`) har INGEN IP i seg og fanges KUN av listen, så å slette et av dem
+ * fra mønsteret ga ingen rød test. Hver tjeneste testes nå for seg: bart navn og underdomene avvises, mens et navn som bare ender likt (`notlvh.me`) og et navn der tjenesten ikke er sist (`lvh.me.example.com`) godtas.
+ */
+describe("H: jokertegn-DNS uten innebygd IP avvises per tjeneste (NY-2)", () => {
+  for (const service of ["nip.io", "sslip.io", "xip.io", "traefik.me", "localtest.me", "lvh.me", "vcap.me"]) {
+    it(`${service}: bart navn og underdomener avvises (ingen IP å fange på); lignende navn godtas`, () => {
+      expect(normalizeCollectionUrl(`https://${service}/dav/`), `bart ${service}`).toBeNull();
+      expect(normalizeCollectionUrl(`https://app.${service}/dav/`), `app.${service}`).toBeNull();
+      expect(normalizeCollectionUrl(`https://a.b.${service}./dav/`), `a.b.${service}.`).toBeNull(); // sluttpunktum normaliseres bort før sjekken
+      expect(normalizeCollectionUrl(`https://not${service}/dav/`), `not${service}`).toBe(`https://not${service}/dav/`); // samme ending, annet domene
+      expect(normalizeCollectionUrl(`https://${service}.example.com/dav/`), `${service}.example.com`).toBe(`https://${service}.example.com/dav/`); // tjenesten er ikke sist
+    });
+  }
+});
