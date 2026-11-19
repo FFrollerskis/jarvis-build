@@ -20,3 +20,5 @@ export * from "./signals-transport.ts";
 export * from "./flags.ts";
 export * from "./tuning.ts";
 export * from "./simulation.ts";
+// WP-G4 (D-466) P2e: manglende rene anomali-detektorer (BUILT_UNWIRED: ingen leser mater dem ennå).
+export * from "./anomaly-detectors.ts";

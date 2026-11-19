@@ -8,7 +8,7 @@ import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts"
 import { createPool, PgApprovalStore, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
-import { ToolGateway, type SecretProvider, type ToolTransport } from "@jarvis/tool-gateway";
+import { ToolGateway, type SecretProvider, type ToolGatewayOptions, type ToolTransport } from "@jarvis/tool-gateway";
 import { DomainPauseRegistry } from "../../src/domain-pause.ts";
 import { SituationEngine } from "../../src/service.ts";
 import { SubscriptionRegistry } from "../../src/subscriptions.ts";
@@ -59,8 +59,8 @@ export interface G4Db {
   engine: SituationEngine;
   domainPauses: DomainPauseRegistry;
   registry: SubscriptionRegistry;
-  /** Ny gateway per test (telegram-/aktuator-spion registrert + `situations`-verktøyet). */
-  newGateway(): { gateway: ToolGateway; telegram: TelegramSpy; actuator: ActuatorSpy };
+  /** Ny gateway per test (telegram-/aktuator-spion registrert + `situations`-verktøyet). `options` = gatewayens harde porter (f.eks. klasse D-pipeline med varsler). */
+  newGateway(options?: ToolGatewayOptions): { gateway: ToolGateway; telegram: TelegramSpy; actuator: ActuatorSpy };
   reset(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -91,10 +91,10 @@ export async function startG4Db(label: string): Promise<G4Db> {
 
   const db: G4Db = {
     adminPool, appPool, policy, engine, domainPauses, registry,
-    newGateway() {
+    newGateway(options?: ToolGatewayOptions) {
       const telegram = new TelegramSpy();
       const actuator = new ActuatorSpy();
-      const gateway = new ToolGateway(appPool, policy, secrets);
+      const gateway = new ToolGateway(appPool, policy, secrets, undefined, undefined, options);
       gateway.register({
         tool_id: "telegram", action: "notify", description: "test", input_schema: record({ message: z.string() }), capability_class: "B", scopes: [], reversible: true,
         rollback_procedure: "send correction", idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 1000, credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: telegram
