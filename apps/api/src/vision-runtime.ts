@@ -1,4 +1,6 @@
+import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { isIP } from "node:net";
+import { join } from "node:path";
 import type pg from "pg";
 import { envInt } from "@jarvis/contracts";
 import { MAX_MODEL_TIMEOUT_MS } from "@jarvis/model-gateway";
@@ -21,7 +23,9 @@ import type { VisionApiDeps } from "./vision-routes.ts";
  *   JARVIS_VISION_CLASSIFIER      lokal visjonsmodell (krever JARVIS_VISION_LOCAL_URL, som MÅ peke til en lokal/privat adresse - se `assertLocalVisionEndpoint`).
  *   JARVIS_VISION_LOCAL_URL / _MODEL   OpenAI-kompatibelt lokalt endepunkt (Ollama, llama.cpp ...) og modellnavn (standard `local-vision`).
  *   JARVIS_VISION_MODEL_TIMEOUT_MS tidsavbrudd per modellkall (standard 90000; 5000-180000 = gatewayens harde tak, ellers kastes ved oppstart). Virker nå på selve kallet (review A-M2).
- *   JARVIS_VISION_STORE_SNAPSHOTS lagring av hendelsesbilder (krever JARVIS_VISION_STORAGE_DIR; kun kameraer med policy `store_snapshot` i hjemmesonen lagres).
+ *   JARVIS_VISION_STORE_SNAPSHOTS lagring av hendelsesbilder (krever JARVIS_VISION_STORAGE_DIR; kun kameraer med policy `store_snapshot` i hjemmesonen lagres). Flagget styrer KUN SKRIVING:
+ *                                 så snart JARVIS_VISION_STORAGE_DIR er satt kjører vedlikeholdet (retensjon, erasure, kamera-fjerning, gravsteiner) mot mappen selv om flagget er av (review B-M1).
+ *                                 Med flagget PÅ kreves en skrivbar mappe ved oppstart (ellers kastes `storage_dir_not_writable`, review B-L10).
  *   JARVIS_VISION_HA_POLL         poll Home Assistant (bruker den EKSISTERENDE HA-connectorens JARVIS_HA_BASE_URL/JARVIS_HA_TOKEN fra secret-kjeden - ingen ny credential).
  *   JARVIS_VISION_MAX_STORED_MB   lagringstak for bilder per (tenant, space) (standard 2048, 16-10000000; over taket lagres bildet ikke, hendelsen skrives uten bilde).
  *   JARVIS_VISION_POLL_INTERVAL_SECONDS (standard 20, 5-3600), JARVIS_VISION_MAINTENANCE_INTERVAL_MINUTES (standard 15, 1-1440), JARVIS_VISION_RETENTION_SWEEP_HOUR (uendret) og
@@ -154,6 +158,21 @@ export interface VisionRuntime {
   stop(): void;
 }
 
+/**
+ * Review B-L10: skrivetest ved oppstart når lagring er på. Api-containeren kjører som `USER node` med read_only rootfs, og et nytt navngitt volum er root-eid: uten denne testen feilet HVER lagring stille
+ * med EACCES (hendelsen ble skrevet uten bilde, kun en logglinje). Oppretter mappen om nødvendig, skriver og sletter én prøvefil; kaster `storage_dir_not_writable` (aldri stien eller feilteksten).
+ */
+export function assertStorageDirWritable(dir: string): void {
+  try {
+    mkdirSync(dir, { recursive: true });
+    const probe = join(dir, `.write-probe-${process.pid}-${Date.now()}`);
+    writeFileSync(probe, "ok", { flag: "wx", mode: 0o600 });
+    unlinkSync(probe);
+  } catch {
+    throw new VisionConfigError("storage_dir_not_writable");
+  }
+}
+
 /** Bygger hele kjøretiden. `null` når hovedbryteren er av (ingenting bygges). */
 export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | null {
   const flags = visionFlagsFromEnv(deps.env);
@@ -162,10 +181,13 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
   if (flags.classifier && flags.localUrl !== undefined) assertLocalVisionEndpoint(flags.localUrl);
   if (flags.storeSnapshots && flags.storageDir === undefined) throw new VisionConfigError("storage_dir_missing");
   if (flags.storageDir !== undefined && !flags.storageDir.startsWith("/")) throw new VisionConfigError("storage_dir_not_absolute");
+  if (flags.storeSnapshots && flags.storageDir !== undefined) assertStorageDirWritable(flags.storageDir);
 
   const cameras = new VisionCameraService(deps.pool);
   const inventory = new VisionInventoryService(deps.pool);
-  const snapshots = flags.storeSnapshots && flags.storageDir !== undefined
+  // Review B-M1: lagringstjenesten bygges så snart STORAGE_DIR er satt - IKKE bare når STORE_SNAPSHOTS er på. Flagget styrer kun SKRIVING (se `storeSnapshots` på pipelinen under); sletting (retensjon, erasure,
+  // kamera-fjerning, gravsteiner) MÅ fortsette selv om eieren har slått lagring av, ellers ligger bildefilene igjen for alltid mens radene er slettet.
+  const snapshots = flags.storageDir !== undefined
     ? new VisionSnapshotService(deps.pool, new LocalFsStorageAdapter(flags.storageDir), deps.vision, { maxStoredBytes: envInt("JARVIS_VISION_MAX_STORED_MB", 2048, { min: 16, max: 10_000_000 }, deps.env) * 1024 * 1024 })
     : undefined;
   let embeddings: VisionEmbeddingService | undefined;
@@ -177,7 +199,7 @@ export function buildVisionRuntime(deps: VisionRuntimeDeps): VisionRuntime | nul
   }
   // Review A-M2: tidsavbruddet fra JARVIS_VISION_MODEL_TIMEOUT_MS går inn i klassifisereren (per kall via gatewayen), ikke bare i adapterens konstruktør.
   const classifier = flags.classifier ? new VisionClassifier({ gateway: deps.gateway, timeoutMs: visionModelTimeoutMs(deps.env) }) : undefined;
-  const pipeline = new VisionIngestPipeline({ pool: deps.pool, vision: deps.vision, classifier, snapshots, embeddings, inventory, enabled: true, storeSnapshots: snapshots !== undefined });
+  const pipeline = new VisionIngestPipeline({ pool: deps.pool, vision: deps.vision, classifier, snapshots, embeddings, inventory, enabled: true, storeSnapshots: flags.storeSnapshots && snapshots !== undefined });
   const capture = new VisionCaptureService(deps.pool, cameras, pipeline, deps.devices);
   const lastSeen = new VisionLastSeenService(deps.pool, { ...(embeddings !== undefined ? { embeddings } : {}), inventory });
 

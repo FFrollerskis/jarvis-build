@@ -1,6 +1,9 @@
 import { readFileSync } from "node:fs";
+import { mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type pg from "pg";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,7 +13,7 @@ import { ProviderError, type ModelProviderAdapter, type ModelRequest, type Model
 import { guardedFetch } from "@jarvis/tool-gateway";
 import { HomeAssistantVisionSource, VisionClassifier, type VisionService } from "@jarvis/vision";
 import { FakeHaServer, haTimestamp } from "../../../modules/vision/test/support/fake-ha-server.ts";
-import { assertLocalVisionEndpoint, buildVisionRuntime, createVisionPollerGuard, visionAdapterFromEnv, visionFlagsFromEnv, visionModelTimeoutMs, VISION_MODEL_TIMEOUT_BOUNDS, VisionConfigError } from "../src/vision-runtime.ts";
+import { assertLocalVisionEndpoint, assertStorageDirWritable, buildVisionRuntime, createVisionPollerGuard, visionAdapterFromEnv, visionFlagsFromEnv, visionModelTimeoutMs, VISION_MODEL_TIMEOUT_BOUNDS, VisionConfigError } from "../src/vision-runtime.ts";
 
 /**
  * WP-G3 (D-465): api-koblingen av UA-9 - flagg (alt AV som standard), URL-vakten for den lokale visjonsmodellen, `local_vision`-adapteren, eier-kontroll-porten for polleren, HA-kilden med den ENDELIGE `guardedFetch`
@@ -102,6 +105,9 @@ describe("main.ts: flagg-av-identitet i selve koblingen", () => {
     expect(MAIN_SRC).toMatch(/if \(visionRuntime !== null\) \{\n\s*new DailyScheduler\(\n\s*pool, "vision-maintenance-sweep"/);
     // ingen annen kobling: `vision`-avhengigheten settes ikke andre steder, og ingen vision-adapter registreres ubetinget
     expect(MAIN_SRC.match(/vision: visionRuntime/g)).toHaveLength(1);
+    // review B-M2: HA-polleren får EIERENS tenant (og ingen annen kilde) - `owner.tenant_id` er den samme verdien som resten av kjernen bruker som eier
+    expect(MAIN_SRC).toMatch(/buildVisionRuntime\(\{\n\s*pool, env: process\.env, vision: visionService, gateway, memoryEmbedding, devices: deviceRegistry, ownerTenantId: owner\.tenant_id, secrets: readSecretProvider,/);
+    expect(MAIN_SRC.match(/ownerTenantId:/g)).toHaveLength(1);
     expect(MAIN_SRC).not.toMatch(/new LocalOpenAiCompatibleAdapter\([^)]*local_vision/);
   });
 
@@ -131,6 +137,22 @@ describe("buildVisionRuntime", () => {
     expect(() => buildVisionRuntime(stubs({ ...on, JARVIS_VISION_CLASSIFIER: "on", JARVIS_VISION_LOCAL_URL: "http://example.com" }))).toThrow("vision_config_invalid:local_url_not_local");
     expect(() => buildVisionRuntime(stubs({ ...on, JARVIS_VISION_STORE_SNAPSHOTS: "on" }))).toThrow("vision_config_invalid:storage_dir_missing");
     expect(() => buildVisionRuntime(stubs({ ...on, JARVIS_VISION_STORE_SNAPSHOTS: "on", JARVIS_VISION_STORAGE_DIR: "relative/dir" }))).toThrow("vision_config_invalid:storage_dir_not_absolute");
+  });
+
+  it("review B-L10: med lagring PÅ kreves en skrivbar mappe ved oppstart (storage_dir_not_writable); uten lagring (kun vedlikehold) kastes det ikke, og prøvefilen etterlates aldri", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jarvis-vision-wprobe-"));
+    const plainFile = join(dir, "not-a-dir");
+    await writeFile(plainFile, "x");
+    const blocked = join(plainFile, "vision"); // under en vanlig fil: kan aldri opprettes (ENOTDIR) - heller ikke som root
+    const on = { JARVIS_VISION_ENABLED: "on", JARVIS_VISION_STORE_SNAPSHOTS: "on" };
+    expect(() => buildVisionRuntime(stubs({ ...on, JARVIS_VISION_STORAGE_DIR: blocked }))).toThrow("vision_config_invalid:storage_dir_not_writable");
+    expect(() => assertStorageDirWritable(blocked)).toThrow("vision_config_invalid:storage_dir_not_writable");
+    // uten STORE_SNAPSHOTS (kun vedlikehold av eksisterende filer) gjøres ingen skrivetest: kjøretiden bygges
+    expect(buildVisionRuntime(stubs({ JARVIS_VISION_ENABLED: "on", JARVIS_VISION_STORAGE_DIR: blocked }))).not.toBeNull();
+    // en skrivbar mappe (undermapper opprettes) godtas og får ingen rester
+    const ok = join(dir, "vision", "images");
+    expect(buildVisionRuntime(stubs({ ...on, JARVIS_VISION_STORAGE_DIR: ok }))).not.toBeNull();
+    expect(await readdir(ok)).toEqual([]);
   });
 
   it("kun hovedbryter: rutene kan bygges, men ingen poller, ingen klassifisering og ingen bildelagring (hver del må slås på for seg)", () => {
