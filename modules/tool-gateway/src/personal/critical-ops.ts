@@ -157,9 +157,12 @@ export function cleanToken(value: unknown, max = 64): string {
   return value.replace(/\p{Cc}/gu, " ").replace(/\p{Cf}/gu, "").trim().slice(0, max);
 }
 
-/** Streng ISO-8601-parsing (tidsstempel med dato og klokkeslett); `null` ved alt annet. Brukes for scene-/skript-markørene. */
+/** Hele strengen må være et ISO-8601-tidsstempel (dato og klokkeslett, valgfri brøkdel og sone): ingen hale med tekst fra utstyret. */
+export const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2})?$/;
+
+/** Streng ISO-8601-parsing (tidsstempel med dato og klokkeslett); `null` ved alt annet (også et gyldig tidsstempel med tekst etter). Brukes for scene-/skript-markørene og bilens `observed_at`. */
 export function parseIsoInstant(value: unknown): number | null {
-  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(value)) return null;
+  if (typeof value !== "string" || !ISO_INSTANT.test(value)) return null;
   const ms = Date.parse(value);
   return Number.isFinite(ms) ? ms : null;
 }

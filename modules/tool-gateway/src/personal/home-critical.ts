@@ -48,12 +48,44 @@ const ENTITY_ID = /^(lock|alarm_control_panel|cover|valve|switch|scene|script|cl
 /** Er verdien en gyldig kritisk hjem-entitets-id (domene fra den lukkede listen + `[a-z0-9_]`)? */
 export const isHomeCriticalEntityId = (value: unknown): value is string => typeof value === "string" && ENTITY_ID.test(value);
 
+/** Standard ventetid på sluttilstand (lås, port, ventil, bryter, klima, scene, skript). */
+export const HOME_DEFAULT_SETTLE_MS = 20_000;
+/** Alarmpaneler har utgangsforsinkelse (armering viser `arming` i 30 s eller mer): egen, lengre standard. */
+export const HOME_ALARM_DEFAULT_SETTLE_MS = 90_000;
+const HOME_SETTLE_MIN_MS = 3_000;
+const HOME_SETTLE_MAX_MS = 300_000;
+
 export interface HomeCriticalConfig {
   /** Eierens EGNE entitets-id-er (eksakt match). Tom = ingen mutasjon er tillatt. */
   readonly targets: ReadonlySet<string>;
-  /** Hvor lenge transporten venter på at utstyret når en sluttilstand før utfallet regnes som UKJENT. */
+  /** Standard ventetid på at utstyret når en sluttilstand før utfallet regnes som UKJENT (gjelder domener uten egen verdi i `settleMsByDomain`). */
   readonly settleMs: number;
   readonly pollMs: number;
+  /** Ventetid per domene (alarm lengst: utgangsforsinkelse). Mangler et domene her, gjelder `settleMs`. */
+  readonly settleMsByDomain?: Readonly<Partial<Record<HomeCriticalDomain, number>>>;
+}
+
+/** Handling -> domenet den virker på (ventetid og tjenestekall følger domenet). */
+export const HOME_ACTION_DOMAIN: Readonly<Record<string, HomeCriticalDomain>> = {
+  critical_lock: "lock", critical_alarm: "alarm_control_panel", critical_cover: "cover", critical_valve: "valve", critical_switch: "switch", critical_scene: "scene", critical_script: "script", critical_climate_mode: "climate"
+};
+
+/** Parser `domene=ms`-par (komma/mellomrom): kun kjente domener og verdier innenfor [3000, 300000]; alt annet hoppes over (domenet får standarden). Aldri en stille klemming. */
+export function parseHomeSettleByDomain(raw: string | undefined | null): Partial<Record<HomeCriticalDomain, number>> {
+  const out: Partial<Record<HomeCriticalDomain, number>> = {};
+  if (!raw) return out;
+  for (const part of raw.split(/[\s,]+/).filter((p) => p.length > 0)) {
+    const [domain, value] = part.split("=");
+    if (domain === undefined || value === undefined || !(HOME_CRITICAL_DOMAINS as readonly string[]).includes(domain)) continue;
+    const ms = boundedInt(value, HOME_SETTLE_MIN_MS, HOME_SETTLE_MAX_MS, -1);
+    if (ms > 0) out[domain as HomeCriticalDomain] = ms;
+  }
+  return out;
+}
+
+/** Ventetiden for et domene: domenets egen verdi hvis konfigurasjonen har en, ellers den globale. (Alarmens lengre standard legges inn av `homeCriticalConfigFromEnv`, ikke skjult her.) */
+export function homeSettleMsFor(config: Pick<HomeCriticalConfig, "settleMs" | "settleMsByDomain">, domain: string): number {
+  return config.settleMsByDomain?.[domain as HomeCriticalDomain] ?? config.settleMs;
 }
 
 /** Parser `JARVIS_PERSONAL_HOME_TARGETS` (kommaseparert). Ugyldige oppføringer (feil domene, feil form, jokertegn) HOPPES OVER - aldri en løs autorisasjon for resten. */
@@ -68,8 +100,12 @@ export function parseHomeTargets(raw: string | undefined | null): ReadonlySet<st
 }
 
 export function homeCriticalConfigFromEnv(env: Readonly<Record<string, string | undefined>>): HomeCriticalConfig {
-  const settleMs = boundedInt(env[PERSONAL_CONFIG_NAMES.homeSettleMs], 3_000, 120_000, 20_000);
-  return { targets: parseHomeTargets(env[PERSONAL_CONFIG_NAMES.homeTargets]), settleMs, pollMs: Math.max(250, Math.min(2_000, Math.floor(settleMs / 20))) };
+  const settleMs = boundedInt(env[PERSONAL_CONFIG_NAMES.homeSettleMs], HOME_SETTLE_MIN_MS, 120_000, HOME_DEFAULT_SETTLE_MS);
+  return {
+    targets: parseHomeTargets(env[PERSONAL_CONFIG_NAMES.homeTargets]), settleMs, pollMs: Math.max(250, Math.min(2_000, Math.floor(settleMs / 20))),
+    // Alarmpaneler har utgangsforsinkelse: egen, lengre standard (aldri kortere enn den globale), som eieren kan overstyre per domene.
+    settleMsByDomain: { alarm_control_panel: Math.max(settleMs, HOME_ALARM_DEFAULT_SETTLE_MS), ...parseHomeSettleByDomain(env[PERSONAL_CONFIG_NAMES.homeSettleByDomain]) }
+  };
 }
 
 /** Fail-closed mål-autorisasjon: målet må stå EKSAKT i eierens liste (store/små bokstaver likegyldig). Årsaken røper aldri hvilke mål som finnes. */
@@ -92,6 +128,25 @@ const TRANSITIONAL: Readonly<Record<string, ReadonlySet<string>>> = {
 };
 const HVAC_MODES: readonly string[] = ["off", "heat", "cool", "heat_cool", "auto", "dry", "fan_only"];
 
+/**
+ * LUKKET liste over tilstandsord per domene (HA-dokumentasjonen). Utstyrets tilstand er ubetrodd tekst (en lås/integrasjon kan rapportere hva som helst): alt som ikke står her blir `unknown` FØR det når varsel, ledger, audit
+ * eller journal (review A, LOW-7). Scene har en tidsstempel-tilstand og håndteres for seg.
+ */
+const STATE_WORDS: Readonly<Record<string, ReadonlySet<string>>> = {
+  lock: new Set(["locked", "unlocked", "locking", "unlocking", "jammed", "open", "opening", "unavailable", "unknown"]),
+  alarm_control_panel: new Set(["disarmed", "armed_home", "armed_away", "armed_night", "armed_vacation", "armed_custom_bypass", "pending", "arming", "disarming", "triggered", "unavailable", "unknown"]),
+  cover: new Set(["open", "closed", "opening", "closing", "unavailable", "unknown"]),
+  valve: new Set(["open", "closed", "opening", "closing", "unavailable", "unknown"]),
+  switch: new Set(["on", "off", "unavailable", "unknown"]),
+  script: new Set(["on", "off", "unavailable", "unknown"]),
+  climate: new Set([...HVAC_MODES, "unavailable", "unknown"])
+};
+
+function stateWordFor(domain: string, raw: string): string {
+  if (domain === "scene") return raw === "unavailable" || raw === "unknown" || parseIsoInstant(raw) !== null ? raw : "unknown";
+  return STATE_WORDS[domain]?.has(raw) === true ? raw : "unknown";
+}
+
 export interface RawHomeEntity {
   entity_id: string;
   state: unknown;
@@ -101,7 +156,7 @@ export interface RawHomeEntity {
 export function normalizeHomeCriticalState(entity: RawHomeEntity): Params {
   const entityId = cleanToken(entity.entity_id, 120).toLowerCase();
   const domain = entityId.split(".")[0] ?? "";
-  const state = cleanToken(entity.state);
+  const state = stateWordFor(domain, cleanToken(entity.state));
   const attributes = entity.attributes ?? {};
   const out: Params = {
     entity_id: entityId, domain, state, settled: !(TRANSITIONAL[domain]?.has(state) ?? false),
@@ -285,11 +340,11 @@ export function homeServiceCall(action: string, p: Params): { domain: string; se
 export const HOME_WAIT_FOR_MATCH_ACTIONS: ReadonlySet<string> = new Set(["critical_scene", "critical_script"]);
 
 /**
- * Gatewayens frist per handling = ventetiden på sluttilstand + rom for to-tre HTTP-kall (lesing, kommando, siste lesing). Er fristen kortere enn ventetiden, blir hver treg handling «utfall ukjent» uten at noe er galt.
- * Gatewayens egen readback kommer ETTER dette kallet og har sin egen frist.
+ * Gatewayens frist per handling = ventetiden på sluttilstand FOR DOMENET (alarm lengst: utgangsforsinkelse) + rom for to-tre HTTP-kall (lesing, kommando, siste lesing). Er fristen kortere enn ventetiden, blir hver treg
+ * handling «utfall ukjent» uten at noe er galt. Gatewayens egen readback kommer ETTER dette kallet og har sin egen frist.
  */
-export function homeCriticalTimeoutMs(_op: CriticalOpSpec, config: Pick<HomeCriticalConfig, "settleMs">): number {
-  return config.settleMs + 25_000;
+export function homeCriticalTimeoutMs(op: CriticalOpSpec, config: Pick<HomeCriticalConfig, "settleMs" | "settleMsByDomain">): number {
+  return homeSettleMsFor(config, HOME_ACTION_DOMAIN[op.action] ?? "") + 25_000;
 }
 
 export function homeCriticalToolDefinitions(transport: ToolTransport, config: HomeCriticalConfig): ToolDefinition[] {

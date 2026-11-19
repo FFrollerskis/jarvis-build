@@ -29,7 +29,8 @@ const FINAL_FOR: Record<string, { transitional: string; final: string }> = {
   "switch/turn_off": { transitional: "off", final: "off" }
 };
 
-interface Pending { transitional: string; final: string; reads: number }
+/** `stale`: antall lesinger etter kommandoen som FORTSATT viser den GAMLE tilstanden (typisk MQTT/Zigbee-lås/port som venter på enhetsrapport og aldri viser en overgangstilstand), før overgangen/sluttilstanden. */
+interface Pending { transitional: string; final: string; reads: number; stale: number }
 
 export class FakeHomeAssistant {
   readonly token = "fake-ha-token-for-test";
@@ -37,6 +38,8 @@ export class FakeHomeAssistant {
   readonly requests: LoggedRequest[] = [];
   /** Antall lesinger etter en kommando som viser overgangstilstanden før sluttilstanden. */
   transitionReads = 0;
+  /** Antall lesinger etter en kommando som FORTSATT viser den gamle tilstanden (utstyr som ikke viser en overgangstilstand), før overgangen. */
+  staleReads = 0;
   nextServiceStatus: number | null = null;
   dropNextService = false;
   /** Hvis satt, krever alarmpanelet denne koden (PIN) ved arm/disarm. */
@@ -63,6 +66,7 @@ export class FakeHomeAssistant {
     this.pending.clear();
     this.requests.length = 0;
     this.transitionReads = 0;
+    this.staleReads = 0;
     this.nextServiceStatus = null;
     this.dropNextService = false;
     this.requireAlarmCode = null;
@@ -100,7 +104,9 @@ export class FakeHomeAssistant {
     const pending = this.pending.get(entityId);
     let state = entity.state;
     if (pending) {
-      if (pending.reads > 0) {
+      if (pending.stale > 0) {
+        pending.stale -= 1; // gammel tilstand (state er uendret) - kommandoen har ikke slått inn ennå
+      } else if (pending.reads > 0) {
         pending.reads -= 1;
         state = pending.transitional;
       } else {
@@ -153,14 +159,14 @@ export class FakeHomeAssistant {
     if (map) {
       if (mode === "ineffective") return this.json(res, 200, []);
       if (mode === "jam" && key.startsWith("lock/")) {
-        this.pending.set(entityId, { transitional: map.transitional, final: "jammed", reads: this.transitionReads });
+        this.pending.set(entityId, { transitional: map.transitional, final: "jammed", reads: this.transitionReads, stale: this.staleReads });
         return this.json(res, 200, []);
       }
       if (mode === "stall") {
-        this.pending.set(entityId, { transitional: map.transitional, final: map.transitional, reads: Number.MAX_SAFE_INTEGER });
+        this.pending.set(entityId, { transitional: map.transitional, final: map.transitional, reads: Number.MAX_SAFE_INTEGER, stale: this.staleReads });
         return this.json(res, 200, []);
       }
-      this.pending.set(entityId, { ...map, reads: this.transitionReads });
+      this.pending.set(entityId, { ...map, reads: this.transitionReads, stale: this.staleReads });
       return this.json(res, 200, []);
     }
     if (key === "scene/turn_on") {

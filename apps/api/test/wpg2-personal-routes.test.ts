@@ -62,9 +62,9 @@ describe("A: flagg AV - rutene og wiringen finnes ikke", () => {
     expect(wiring.deps?.actions?.domains.get("home")).toEqual({ toolId: "home-assistant", readAction: HOME_CRITICAL_READ_ACTION });
     expect([...(wiring.deps?.actions?.domains.keys() ?? [])]).toEqual(["home"]);
     expect(wiring.filterTools(homeAssistantTools()).map((d) => d.action)).toEqual(["list_states", "read_state", "light_set", "climate_set"]);
-    expect(wiring.describe()).toEqual({ msg: "personal_twin", home_critical: { targets: 0, settle_ms: 20_000, legacy_lock_alarm_removed: true } });
+    expect(wiring.describe()).toEqual({ msg: "personal_twin", home_critical: { targets: 0, settle_ms: 20_000, alarm_settle_ms: 90_000, legacy_lock_alarm_removed: true } });
     const withTargets = createPersonalWiring({ env: { JARVIS_PERSONAL_HOME_CRITICAL: "on", JARVIS_PERSONAL_HOME_TARGETS: "lock.a, cover.b ,bogus", JARVIS_PERSONAL_HOME_SETTLE_MS: "30000" }, pool: {} as never, gateway: {} as never, readSecret: async () => null });
-    expect(withTargets.describe()).toEqual({ msg: "personal_twin", home_critical: { targets: 2, settle_ms: 30_000, legacy_lock_alarm_removed: true } });
+    expect(withTargets.describe()).toEqual({ msg: "personal_twin", home_critical: { targets: 2, settle_ms: 30_000, alarm_settle_ms: 90_000, legacy_lock_alarm_removed: true } });
   });
 });
 

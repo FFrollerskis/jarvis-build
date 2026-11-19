@@ -9,7 +9,7 @@ import {
   AppleDavClient, FetchDavTransport, PERSONAL_CONFIG_NAMES, parseDavCollections,
   CAR_CRITICAL_OPS, CAR_READ_ACTION, CAR_TOOL_ID, CarTransport, UnconfiguredCarAdapter, carCriticalConfigFromEnv, carCriticalToolDefinitions,
   HOME_CRITICAL_OPS, HOME_CRITICAL_READ_ACTION, HOME_ASSISTANT_TOOL_ID, HomeAssistantCriticalTransport, PERSONAL_FLAG_NAMES, PERSONAL_SECRET_REFS, PersonalActionJournal,
-  executePersonalAction, homeCriticalConfigFromEnv, homeCriticalToolDefinitions, legacyCriticalActionsToDrop, personalActionIndex, personalFlagOn,
+  executePersonalAction, homeCriticalConfigFromEnv, homeCriticalToolDefinitions, homeSettleMsFor, legacyCriticalActionsToDrop, personalActionIndex, personalFlagOn,
   type CarAdapter, type ExecutePersonalActionInput, type PersonalActionIndexEntry, type ToolDefinition, type ToolGateway
 } from "@jarvis/tool-gateway";
 import { familySharedDataReaders, type HealthReadApi, type LocationReadApi } from "./personal-family-readers.ts";
@@ -64,14 +64,15 @@ export function createPersonalWiring(input: PersonalWiringInput): PersonalWiring
   if (personalFlagOn(env, PERSONAL_FLAG_NAMES.homeCritical)) {
     const config = homeCriticalConfigFromEnv(env);
     const transport = new HomeAssistantCriticalTransport({
-      baseUrl: () => readSecret("JARVIS_HA_BASE_URL"), alarmCode: () => readSecret(PERSONAL_SECRET_REFS.homeAlarmCode), settleMs: config.settleMs, pollMs: config.pollMs
+      baseUrl: () => readSecret("JARVIS_HA_BASE_URL"), alarmCode: () => readSecret(PERSONAL_SECRET_REFS.homeAlarmCode), settleMs: config.settleMs, pollMs: config.pollMs,
+      ...(config.settleMsByDomain ? { settleMsByDomain: config.settleMsByDomain } : {})
     });
     tools.push(...homeCriticalToolDefinitions(transport, config));
     dropLegacyHome = true;
     domains.set("home", { toolId: HOME_ASSISTANT_TOOL_ID, readAction: HOME_CRITICAL_READ_ACTION });
     entries.push(...HOME_CRITICAL_OPS.map((op): PersonalActionIndexEntry => ({ domain: "home", toolId: HOME_ASSISTANT_TOOL_ID, op })));
     // `targets: 0` er en gyldig (fail-closed) tilstand: verktøyene finnes, men hver mutasjon nektes til eieren har listet sine egne entiteter.
-    log["home_critical"] = { targets: config.targets.size, settle_ms: config.settleMs, legacy_lock_alarm_removed: true };
+    log["home_critical"] = { targets: config.targets.size, settle_ms: config.settleMs, alarm_settle_ms: homeSettleMsFor(config, "alarm_control_panel"), legacy_lock_alarm_removed: true };
   }
 
   if (personalFlagOn(env, PERSONAL_FLAG_NAMES.car)) {

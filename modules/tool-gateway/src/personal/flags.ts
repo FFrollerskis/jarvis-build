@@ -34,6 +34,8 @@ export type PersonalFlagName = (typeof PERSONAL_FLAG_NAMES)[keyof typeof PERSONA
 export const PERSONAL_CONFIG_NAMES = {
   homeTargets: "JARVIS_PERSONAL_HOME_TARGETS",
   homeSettleMs: "JARVIS_PERSONAL_HOME_SETTLE_MS",
+  /** Ventetid per domene (`alarm_control_panel=120000,cover=40000`): overstyrer standardene (alarm 90 s for utgangsforsinkelse, ellers `JARVIS_PERSONAL_HOME_SETTLE_MS`). Ugyldige oppføringer gir standarden. */
+  homeSettleByDomain: "JARVIS_PERSONAL_HOME_SETTLE_BY_DOMAIN",
   carTargets: "JARVIS_PERSONAL_CAR_TARGETS",
   carSettleMs: "JARVIS_PERSONAL_CAR_SETTLE_MS",
   /** Eierens allowlist av CalDAV/CardDAV-samlinger (`navn=https://vert/sti/`, slag fra navnet; ikke passord). Tom/ugyldig = ingenting kan nås. */
