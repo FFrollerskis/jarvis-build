@@ -260,6 +260,33 @@ describe("G: Home Assistant - ekte REST-transport bak homeAssistantTools(), romk
     expect(normalizeHomeState({ entity_id: "climate.stue", state: "heat", attributes: { temperature: 21.5 } })["temperature"]).toBe(21.5);
   });
 
+  it("WP-G3 review A-EKSISTERENDE: read_state av et camera.*-objekt fjerner kameraets access_token og bilde-URL-ene som bærer det - modellflaten får aldri et kamera-token (og navn/øvrige attributter består)", async () => {
+    const secret = "tok-camera-3f9a1c7e";
+    stubFetch(() => ({
+      json: {
+        entity_id: "camera.inngang", state: "idle",
+        attributes: { access_token: secret, entity_picture: `/api/camera_proxy/camera.inngang?token=${secret}`, entity_picture_local: "/local/inngang_snapshot.jpg", friendly_name: "Inngang", brand: "Reolink", frontend_stream_type: "hls", supported_features: 2 }
+      }
+    }));
+    const r = await transport().invoke("read_state", { site_id: "home", room_id: "stue", entity: "camera.inngang" }, "ha-token");
+    expect(r.data).toEqual({ entity_id: "camera.inngang", domain: "camera", state: "idle", attributes: { friendly_name: "Inngang", brand: "Reolink", frontend_stream_type: "hls", supported_features: 2 } });
+    expect(JSON.stringify(r)).not.toContain(secret);
+    expect(JSON.stringify(r)).not.toMatch(/token=|entity_picture|camera_proxy/);
+    // normalizeHomeState direkte: samme regel (funksjonen er den eneste trakten for HA-attributter mot modellflaten)
+    expect(normalizeHomeState({ entity_id: "camera.x", state: "idle", attributes: { access_token: secret } })["attributes"]).toEqual({});
+  });
+
+  it("WP-G3 review A-EKSISTERENDE: token-/hemmelighetsattributter og token-URL-er fjernes i ALLE domener (media_player.entity_picture), uten å røre vanlige attributter - bildet til et lys er uendret", () => {
+    const media = normalizeHomeState({ entity_id: "media_player.stue", state: "playing", attributes: { friendly_name: "Stue", volume_level: 0.4, entity_picture: "/api/media_player_proxy/media_player.stue?token=abc123&cache=1", media_title: "Token-sangen" } });
+    expect(media["attributes"]).toEqual({ friendly_name: "Stue", volume_level: 0.4, media_title: "Token-sangen" }); // ordet «token» i en vanlig tekstverdi er ikke et token
+    const odd = normalizeHomeState({ entity_id: "sensor.x", state: "1", attributes: { api_key: "k", Password: "p", authorization: "Bearer x", client_secret: "s", nested: { link: "https://x.test/a?access_token=zzz" }, list: ["https://x.test/a?signature=zzz"], unit_of_measurement: "W", max_tokens: 5 } });
+    expect(odd["attributes"]).toEqual({ unit_of_measurement: "W", max_tokens: 5 });
+    const light = normalizeHomeState({ entity_id: "light.stue_tak", state: "on", attributes: { brightness: 180, color_mode: "brightness", friendly_name: "Stue tak", supported_color_modes: ["brightness"], entity_picture: "/local/lampe.png" } });
+    expect(light).toEqual({ entity_id: "light.stue_tak", domain: "light", state: "on", on: true, attributes: { brightness: 180, color_mode: "brightness", friendly_name: "Stue tak", supported_color_modes: ["brightness"], entity_picture: "/local/lampe.png" } });
+    expect(normalizeHomeState({ entity_id: "climate.stue", state: "heat", attributes: { temperature: 21.5, current_temperature: 20 } })).toMatchObject({ temperature: 21.5, current_temperature: 20 });
+    expect(normalizeHomeState({ entity_id: "lock.inngang", state: "locked" })).toMatchObject({ locked: true, attributes: {} });
+  });
+
   it("read_state uten entity leser rommets kartlagte enheter og gir samlebilde", async () => {
     stubFetch((url) => {
       if (url.endsWith("light.stue_tak")) return { json: { entity_id: "light.stue_tak", state: "off" } };

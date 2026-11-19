@@ -39,10 +39,35 @@ export function assertEntityId(value: unknown, label: string): string {
   return value;
 }
 
+/**
+ * WP-G3 (D-465), review A-EKSISTERENDE: HA-attributter gikk UENDRET videre til `read_state`-resultatet, og dermed til modellflaten (også sky-modeller) og samtaleloggen. Et `camera.*`-objekt har normalt `access_token`
+ * (et token som gir stillbilde via `/api/camera_proxy/...?token=` UTEN det langlevde tokenet) og `entity_picture`/`entity_picture_local` (URL-er som bærer samme token i spørringen) - et kamera-token er adgangen til
+ * bildet, og kamerabilder skal aldri nå en sky-modell. Kamerabilder hentes av UA-9 (modules/vision) direkte mot HA, aldri via dette verktøyet.
+ *  - `camera`-domenet: `access_token`, `entity_picture` og `entity_picture_local` fjernes ALLTID.
+ *  - ALLE domener (samme lekkasjeklasse, én trakt - f.eks. `media_player.entity_picture` har et token i spørringen): attributter med et token-/hemmelighetsnavn (`access_token`, `token`, `api_key`, `password`,
+ *    `authorization`, `secret`) og attributter hvis verdi (tekst, eller JSON av en liste/et objekt) bærer et token som spørreparameter (`?token=`, `&access_token=`, `signature=`, `authsig=`) fjernes.
+ * Dette gjelder uavhengig av alle `JARVIS_VISION_*`-flagg (en lekkasje skal ikke være flaggstyrt). Øvrige attributter (navn, lysstyrke, temperatur ...) er uendret.
+ */
+const CAMERA_TOKEN_ATTRIBUTES = new Set(["access_token", "entity_picture", "entity_picture_local"]);
+const SECRET_ATTRIBUTE_NAME = /(^|_)(access_?token|token|secret|password|api_?key|authorization)($|_)/i;
+const TOKEN_IN_QUERY = /[?&](?:access_?token|token|authsig|signature|sig)=/i;
+
+export function stripSecretHomeAttributes(domain: string, attributes: Record<string, JsonValue>): Record<string, JsonValue> {
+  const out: Record<string, JsonValue> = {};
+  for (const [key, value] of Object.entries(attributes)) {
+    if (domain === "camera" && CAMERA_TOKEN_ATTRIBUTES.has(key)) continue;
+    if (SECRET_ATTRIBUTE_NAME.test(key)) continue;
+    const text = typeof value === "string" ? value : typeof value === "object" && value !== null ? JSON.stringify(value) : "";
+    if (text !== "" && TOKEN_IN_QUERY.test(text)) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 /** Normaliserer én HA-tilstand til det `homeAssistantTools()` sine predikater forventer. */
 export function normalizeHomeState(entity: { entity_id: string; state: string; attributes?: Record<string, unknown> }): Record<string, JsonValue> {
   const domain = entity.entity_id.split(".")[0] ?? "";
-  const attributes = (entity.attributes ?? {}) as Record<string, JsonValue>;
+  const attributes = stripSecretHomeAttributes(domain, (entity.attributes ?? {}) as Record<string, JsonValue>);
   const out: Record<string, JsonValue> = { entity_id: entity.entity_id, domain, state: entity.state, attributes };
   if (domain === "lock") out["locked"] = entity.state === "locked";
   if (domain === "alarm_control_panel") out["armed"] = entity.state !== "disarmed" && entity.state !== "unknown" && entity.state !== "unavailable";
