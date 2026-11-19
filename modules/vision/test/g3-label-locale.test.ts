@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { VisionCameraService, type VisionCamera } from "../src/cameras.ts";
 import { VisionClassifier, type ClassificationOutcome, type VisionDetection } from "../src/classifier.ts";
 import { VisionInventoryService, type SightingInput } from "../src/inventory.ts";
@@ -32,8 +32,18 @@ const jsRejected = { inventory: {} as Record<SweepForm, number[]>, observation: 
 
 const dbOf = (locale: Locale): VisionDb => clusters.get(locale) as VisionDb;
 
+let available = true;
+
 beforeAll(async () => {
-  for (const locale of LOCALES) clusters.set(locale, await startVisionDb(`g3loc-${locale === "C" ? "c" : "u8"}`, { locale }));
+  try {
+    for (const locale of LOCALES) clusters.set(locale, await startVisionDb(`g3loc-${locale === "C" ? "c" : "u8"}`, { locale }));
+  } catch (err) {
+    // Linux (CI, utviklings- og produksjonsbildet) MÅ kunne starte begge klyngene - da feiler filen høyt. Andre plattformer (f.eks. en Windows-vert) har ikke `C.UTF-8`: sveipet hoppes da over med en SYNLIG melding (aldri stille).
+    if (process.platform === "linux") throw err;
+    available = false;
+    console.warn(`g3-label-locale hoppet over på ${process.platform}: klyngene kunne ikke startes med locale C/C.UTF-8 (${String(err).slice(0, 120)})`);
+    return;
+  }
   outputs = normalizerOutputs();
   for (const form of FORMS) {
     jsRejected.inventory[form] = jsRejectedCodePoints(isInventoryLabel, form);
@@ -44,6 +54,10 @@ beforeAll(async () => {
 afterAll(async () => {
   for (const db of clusters.values()) await db.stop();
 }, 180_000);
+
+beforeEach((context) => {
+  if (!available) context.skip();
+});
 
 const diff = (a: readonly number[], b: readonly number[]): number[] => {
   const set = new Set(b);
@@ -218,6 +232,7 @@ describe("pipelinen: en etikett som ikke kan bli inventar tar aldri basishendels
   let seq = 0;
 
   beforeAll(async () => {
+    if (!available) return; // klyngene finnes ikke på denne plattformen: alle testene i filen hoppes over (se øverst)
     db = dbOf("C.UTF-8");
     const seeded = await seedTenant(db, "g3loc-t1");
     tenant = seeded.tenant;
