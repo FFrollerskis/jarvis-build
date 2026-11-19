@@ -139,3 +139,33 @@ describe("C: utstyrets tilstandsord er ubetrodd tekst (lukket liste per domene)"
     expect(normalizeHomeCriticalState({ entity_id: "scene.x", state: "unknown" }).usable).toBe(true); // en scene som aldri er aktivert er brukbar
   });
 });
+
+describe("D: scene/skript venter på at MARKØREN rykker frem - en endret tilstand alene er ikke nok (`!waitForMatch`, fiks-runde 2 review A NY-2)", () => {
+  const MARKER = "2026-11-18T09:00:00.000Z";
+
+  it("skript som flipper til `on` (kjører, ENDRET fra `off` og settlet) mens `last_triggered` ennå er den gamle: venter til markøren har rykket frem (polls = 4) - ikke en falsk UKJENT etter første lesing", async () => {
+    ha.set("script.leaving", { state: "off", attributes: { last_triggered: MARKER } });
+    ha.scriptLagReads = 3;
+    const h = make(20_000);
+    const data = await h.invoke("critical_script", { entity: "script.leaving", expected_last_triggered: MARKER });
+    expect(data).toMatchObject({ matched: true, polls: 4 });
+    expect(h.clock()).toBeGreaterThanOrEqual(3_000);
+  });
+
+  it("kontroll: uten forsinkelse er markøren fremme ved første lesing (polls = 1), og en scene som aktiveres verifiseres på samme måte", async () => {
+    ha.set("script.leaving", { state: "off", attributes: { last_triggered: MARKER } });
+    const script = await make(20_000).invoke("critical_script", { entity: "script.leaving", expected_last_triggered: MARKER });
+    expect(script).toMatchObject({ matched: true, polls: 1 });
+    ha.set("scene.good_night", { state: "2026-11-18T08:00:00.000Z" });
+    const scene = await make(20_000).invoke("critical_scene", { entity: "scene.good_night", expected_last_activated: "2026-11-18T08:00:00.000Z" });
+    expect(scene).toMatchObject({ matched: true, polls: 1 });
+  });
+
+  it("et skript som aldri får fremmet markøren (`ineffective`) venter HELE fristen og regnes som ikke bekreftet - aldri en antatt suksess", async () => {
+    ha.set("script.leaving", { state: "off", mode: "ineffective", attributes: { last_triggered: MARKER } });
+    const h = make(5_000, undefined, 1_000);
+    const data = await h.invoke("critical_script", { entity: "script.leaving", expected_last_triggered: MARKER });
+    expect(data.matched).toBe(false);
+    expect(data.polls).toBeGreaterThanOrEqual(4);
+  });
+});

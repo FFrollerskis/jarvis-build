@@ -57,6 +57,8 @@ export interface PersonalWiringInput {
    * Må være de SAMME instansene som `PolicyGateway`/`ToolGateway` bruker (LIVE `*Durable`-sjekker, delt mellom prosesser).
    */
   controls?: { killSwitch: Pick<KillSwitch, "isActiveDurable">; ownerControls: Pick<OwnerControls, "isRevokedDurable"> };
+  /** KUN tester: virtuell klokke for HA-transportens venteløkke (uten den brukes ekte tid). Gjør at «domenets ventetid brukes faktisk» kan bevises gjennom selve oppkoblingen uten å vente 90 s (fiks-runde 2, review A NY-2). */
+  homeTimers?: { now?: () => number; sleep?: (ms: number) => Promise<void> };
 }
 
 export function createPersonalWiring(input: PersonalWiringInput): PersonalWiring {
@@ -71,7 +73,8 @@ export function createPersonalWiring(input: PersonalWiringInput): PersonalWiring
     const config = homeCriticalConfigFromEnv(env);
     const transport = new HomeAssistantCriticalTransport({
       baseUrl: () => readSecret("JARVIS_HA_BASE_URL"), alarmCode: () => readSecret(PERSONAL_SECRET_REFS.homeAlarmCode), settleMs: config.settleMs, pollMs: config.pollMs,
-      ...(config.settleMsByDomain ? { settleMsByDomain: config.settleMsByDomain } : {})
+      ...(config.settleMsByDomain ? { settleMsByDomain: config.settleMsByDomain } : {}),
+      ...(input.homeTimers?.now ? { now: input.homeTimers.now } : {}), ...(input.homeTimers?.sleep ? { sleep: input.homeTimers.sleep } : {})
     });
     tools.push(...homeCriticalToolDefinitions(transport, config));
     dropLegacyHome = true;

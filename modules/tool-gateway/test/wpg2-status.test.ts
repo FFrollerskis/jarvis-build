@@ -16,6 +16,21 @@ describe("PERSONAL_CAPABILITY_STATUS", () => {
     for (const id of ids) expect(RUNBOOK, id).toContain(`\`${id}\``);
   });
 
+  it("omvendt retning (fiks-runde 2, review A NY-2): runbookens status-tabell (§0) og koden har NØYAKTIG samme id-er - en id kan verken slettes fra koden eller legges til bare i runbooken", () => {
+    const section = RUNBOOK.slice(RUNBOOK.indexOf("## 0. Status i ett blikk"), RUNBOOK.indexOf("## 1. Flagg"));
+    const runbookIds = [...section.matchAll(/^\| `([a-z0-9_]+)` \|/gm)].map((m) => m[1] as string);
+    expect(runbookIds.length).toBeGreaterThan(5);
+    expect([...runbookIds].sort()).toEqual(PERSONAL_CAPABILITY_STATUS.map((s) => s.id).sort());
+  });
+
+  it("`outcome_unknown` avstemmes ikke og er IKKE stille utelatt (CLAUDE.md regel 11): `p1a_outcome_reconcile` står som DEFERRED med et konkret neste steg - sletter noen posten, feller denne testen", () => {
+    const entry = PERSONAL_CAPABILITY_STATUS.find((s) => s.id === "p1a_outcome_reconcile");
+    expect(entry).toBeDefined();
+    expect(entry?.status).toEqual(["DEFERRED"]);
+    expect(entry?.next_step ?? "").toMatch(/reconcile/);
+    expect(RUNBOOK).toContain("`p1a_outcome_reconcile`");
+  });
+
   it("hvert JARVIS_PERSONAL_*-flagg har en status (ingen flagg uten synlig status), og alle flaggene står i runbookens flaggtabell", () => {
     const flagged = new Set(PERSONAL_CAPABILITY_STATUS.flatMap((s) => (s.flag === undefined ? [] : [s.flag])));
     for (const name of Object.values(PERSONAL_FLAG_NAMES)) {
